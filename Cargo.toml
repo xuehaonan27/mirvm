@@ -1,0 +1,11 @@
+[package]
+name = "mirvm"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+
+# 让 rust-analyzer 认识 rustc_private crates（需在 IDE 端开启 rust-analyzer.rustc.source = "discover"）
+[package.metadata.rust-analyzer]
+rustc_private = true
