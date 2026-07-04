@@ -5,6 +5,8 @@ edition = "2024"
 publish = false
 
 [dependencies]
+anyhow = "1.0.103"
+rustc-build-sysroot = "0.5.13"
 
 # 让 rust-analyzer 认识 rustc_private crates（需在 IDE 端开启 rust-analyzer.rustc.source = "discover"）
 [package.metadata.rust-analyzer]

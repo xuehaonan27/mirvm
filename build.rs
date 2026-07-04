@@ -14,6 +14,7 @@ fn main() {
     assert!(!sysroot.is_empty(), "empty sysroot");
 
     println!("cargo:rustc-env=MIRVM_DEFAULT_SYSROOT={sysroot}");
+    println!("cargo:rustc-env=MIRVM_HOST={}", env::var("TARGET").unwrap());
     println!("cargo:rustc-link-arg=-Wl,-rpath,{sysroot}/lib");
     println!("cargo:rerun-if-changed=build.rs");
 }

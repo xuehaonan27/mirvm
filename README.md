@@ -9,12 +9,16 @@
 
 ## 状态
 
-M0（工具链打通）：驱动 rustc 前端，定位 entry fn 并 dump MIR。解释器从 M1 开始。
+**M1 完成**：std 程序端到端解释执行，差分测试 5/5 与原生一致
+（递归/迭代器/Vec/String/HashMap/panic/catch_unwind）。
+脚本热启动 ~0.24s（首次运行自动构建带 MIR 的 sysroot，约几分钟，缓存于 `~/.cache/mirvm`）。
 
 ## 快速开始
 
 ```bash
-rustup toolchain install nightly --component rustc-dev rust-src llvm-tools
-cargo build
-cargo run -- run demo/fib.rs --dump-mir
+cargo build --release          # mirvm 自身务必 release（debug 慢 ~7×）
+target/release/mirvm run demo/fib.rs
+target/release/mirvm run demo/catch.rs
+./tests/diff.sh                # 差分测试：native vs mirvm 对拍
+target/release/mirvm run demo/fib.rs --dump-mir   # 只看 MIR 不执行
 ```

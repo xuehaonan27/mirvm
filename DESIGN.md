@@ -100,12 +100,10 @@
 
 ## 5. 里程碑
 
-- **M0 — 工具链打通**（今天）：rustc_private 驱动能编译源文件、定位 entry fn、打印其 MIR。
-  验收：`mirvm run demo/fib.rs --dump-mir` 输出 main 的 MIR。
-- **M1 — 最小解释器**：fast Machine on InterpCx；纯计算程序 → panic/unwind →
-  std hello world（第一批 syscall shims：write/exit/alloc 系）。
-  验收：fib、Vec/String/HashMap、panic+catch_unwind、println! 全通过；
-  与原生编译产物差分测试（stdout/exit code 一致）。
+- **M0 — 工具链打通**（✅ 2026-07-03）：rustc_private 驱动能编译源文件、定位 entry fn、打印其 MIR。
+- **M1 — 最小解释器**（✅ 2026-07-03）：fast Machine on InterpCx；std 程序端到端解释执行。
+  验收达成：差分测试 5/5（fib 递归+迭代器、String/Vec/排序/格式化、HashMap（getrandom→SipHash→TLS）、
+  panic 消息逐字符一致+退出码 101、catch_unwind+unwind 中 Drop）。实现笔记见 §5.1。
 - **M2 — 吃下真实生态**：cargo 集成（依赖用 `-Zalways-encode-mir` 构建 + 全局缓存）、
   proc-macro、文件/env/时间/随机数 shims、libffi FFI、协作式线程。
   验收：跑通用 serde_json + rand + regex 的真实脚本。
@@ -119,6 +117,43 @@
   验收：计算密集 benchmark ≈ cg_clif debug build 的 2× 以内。
 - **M6 — REPL/Notebook**（用户决策：后置）：解释器持久堆上的增量求值；跨 cell 借用成立。
 - **M7+ — 嵌入 API**（用户决策：暂不紧要）。
+
+### 5.1 M1 实现笔记（2026-07-03）
+
+**结构**：`src/interp/{machine,eval,shims,intrinsics,helpers,addrs,mono_map}.rs`，
+engine 在 lib、CLI 是薄壳（D10）。`src/sysroot.rs` 用 rustc-build-sysroot 自动构建
+缓存 sysroot（`~/.cache/mirvm/`）。
+
+**M1 已知偏差（直接调 main，不走 `start` lang item）**：
+- `std::env::args()` 为空（.init_array 全局构造器未执行；Miri 已有 GlobalCtorState 先例，M2 补）
+- 主线程名 `<unnamed>`（native 是 `main`），gettid 恒 1001；差分测试对 stderr 归一化后比较
+- 环境变量为空表（environ/getenv shim 返回空/null；M2 可选择透传宿主环境）
+- 进程退出不跑 rt cleanup（println! 行缓冲即时 flush，无感知；print! 残留缓冲会丢）
+- getrandom 为确定性 xorshift（HashMap 种子可复现；M3 提供 --real-random 开关）
+
+**踩过的坑（后来者须知）**：
+- `__rust_no_alloc_shim_is_unstable_v2`：分配前哨兵符号，不在 allocator_shim_contents 里，
+  需按 mangle_internal_symbol 单独识别为空操作（Miri 靠 cfg(miri) 的 std 绕过，我们不行）
+- panic_impl（`rust_begin_unwind`）是 core 视角的 foreign fn：需要 lookup_exported_symbol
+  机制按符号名在全部已链接 crate 找 MIR（同样服务于 __rdl_* 等）
+- Linux std 的 getrandom/statx 等走 weak linkage：extern static 的值 = 函数指针；
+  用 `ExtraFnVal = Symbol` 提供合成函数指针（Miri DynSym 同款）
+- `#[track_caller]`（panic_bounds_check 等）：caller ABI 末尾"假装"有 Location 参数但不真传，
+  callee 的 caller_location intrinsic 走栈取——call_function 必须传 with_caller_location
+- `assert_inhabited` 系 intrinsic 无 fallback body 且 core 引擎不管：fast machine 直接跳过
+- panic 穿出 main = 引擎 UB "unwinding past the topmost frame"（弹根帧前抛出，
+  after_stack_pop 拦不到）→ eval_main 里翻译成退出码 101
+
+**性能基线（release 构建的 mirvm）**：
+- 脚本热启动（sysroot 已缓存）：`demo/strings.rs` 端到端 **0.24s**（rustc 前端为主）
+- fib(27) 纯调用密集微基准（最不利场景）：解释 ≈1.6s vs native debug ≈4ms（数百倍）
+  —— InterpCx tier 的已知代价，M4 自研字节码 VM 的主要目标；日常脚本远好于此
+- mirvm 自身必须 release 构建（debug 构建慢 ~7×）
+
+**D9 漂移记录（nightly-2026-07-02）**：`MachineStopType` 精简为 Any+Display+Debug+Send；
+帧压栈走 `init_stack_frame` + `ReturnContinuation`（旧 StackPopCleanup 没了）；
+`write_mir_pretty` 重构为 `MirWriter`；`catch_with_exit_code` 返回 `ExitCode`；
+`Linkage` 移到 `rustc_hir::attrs`；throw_* 宏需要 `feature(yeet_expr)`。
 
 ## 6. 风险与对策
 
