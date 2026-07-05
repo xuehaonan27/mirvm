@@ -9,16 +9,30 @@
 
 ## 状态
 
-**M1 完成**：std 程序端到端解释执行，差分测试 5/5 与原生一致
-（递归/迭代器/Vec/String/HashMap/panic/catch_unwind）。
-脚本热启动 ~0.24s（首次运行自动构建带 MIR 的 sysroot，约几分钟，缓存于 `~/.cache/mirvm`）。
+**M2 完成**：真实生态可用——cargo 依赖图、proc-macro、frontmatter 单文件脚本、
+真实 args/env、时间/文件 shims。serde_json + rand + regex 与 native `cargo run`
+输出逐字节一致（tests/diff_cargo.sh），M1 corpus 回归 7/7（tests/diff.sh）。
+热启动：纯 std 脚本 ~0.24s，带 serde_json 的项目 ~0.26s（依赖构建一次全局缓存）。
 
 ## 快速开始
 
 ```bash
 cargo build --release          # mirvm 自身务必 release（debug 慢 ~7×）
-target/release/mirvm run demo/fib.rs
-target/release/mirvm run demo/catch.rs
-./tests/diff.sh                # 差分测试：native vs mirvm 对拍
-target/release/mirvm run demo/fib.rs --dump-mir   # 只看 MIR 不执行
+alias mirvm=$PWD/target/release/mirvm
+
+mirvm run demo/fib.rs                    # 单文件（零 cargo 快路径）
+mirvm run demo/ecosystem.rs              # 带 frontmatter 依赖的脚本（自动物化 cargo 项目）
+mirvm run path/to/project -- arg1 arg2   # cargo 项目 + 程序参数
+./tests/diff.sh && ./tests/diff_cargo.sh # 差分对拍
+```
+
+单文件脚本声明依赖（cargo script / RFC 3424 语法）：
+
+```rust
+#!/usr/bin/env mirvm
+---
+[dependencies]
+serde_json = "1"
+---
+fn main() { /* ... */ }
 ```

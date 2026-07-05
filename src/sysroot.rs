@@ -33,8 +33,14 @@ pub fn ensure_sysroot() -> anyhow::Result<PathBuf> {
 
     let src_dir = rustc_build_sysroot::rustc_sysroot_src(Command::new(&rustc))?;
 
+    // 显式钉死版本信息：builder 默认用 PATH 上的 rustc 算缓存哈希，
+    // 而 rustup 代理按 cwd 解析 toolchain——项目外运行会解析到别的版本，
+    // 造成缓存哈希乒乓、sysroot 反复重建。
+    let version = rustc_version::VersionMeta::for_command(Command::new(&rustc))?;
+
     let status = SysrootBuilder::new(&sysroot_dir, target)
         .build_mode(BuildMode::Build)
+        .rustc_version(version)
         .sysroot_config(SysrootConfig::WithStd {
             std_features: ["panic-unwind", "backtrace"].into_iter().map(Into::into).collect(),
         })

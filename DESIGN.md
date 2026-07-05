@@ -104,9 +104,14 @@
 - **M1 — 最小解释器**（✅ 2026-07-03）：fast Machine on InterpCx；std 程序端到端解释执行。
   验收达成：差分测试 5/5（fib 递归+迭代器、String/Vec/排序/格式化、HashMap（getrandom→SipHash→TLS）、
   panic 消息逐字符一致+退出码 101、catch_unwind+unwind 中 Drop）。实现笔记见 §5.1。
-- **M2 — 吃下真实生态**：cargo 集成（依赖用 `-Zalways-encode-mir` 构建 + 全局缓存）、
-  proc-macro、文件/env/时间/随机数 shims、libffi FFI、协作式线程。
-  验收：跑通用 serde_json + rand + regex 的真实脚本。
+- **M2 — 吃下真实生态**（✅ 2026-07-05，线程与 libffi 明确移入 M2.5）：
+  cargo 依赖图（wrapper/runner 拦截）、proc-macro、frontmatter 单文件脚本、
+  .init_array 全局构造器（args/env 转正）、时间/文件/pthread-TLS/malloc shims。
+  验收达成：serde_json（含 serde_derive）+ rand（dlsym→getrandom→ChaCha）+
+  regex（SIMD 标量回退）脚本与 native cargo run 输出逐字节一致；
+  cargo 项目模式含程序参数与退出码透传对拍通过。实现笔记见 §5.2。
+- **M2.5 — 生态补全**（待做）：libffi 原生 FFI（C 依赖 crate）、协作式线程、
+  异步生态评估（epoll shims）。
 - **M3 — 产品面（对齐 P0 场景）**：`mirvm run` 单文件脚本（frontmatter 依赖声明）与
   cargo 项目两种入口；常驻 daemon（前端增量状态留内存）；agent API：
   JSON 诊断、超时、内存上限、syscall 白名单沙箱。
@@ -154,6 +159,45 @@ engine 在 lib、CLI 是薄壳（D10）。`src/sysroot.rs` 用 rustc-build-sysro
 帧压栈走 `init_stack_frame` + `ReturnContinuation`（旧 StackPopCleanup 没了）；
 `write_mir_pretty` 重构为 `MirWriter`；`catch_with_exit_code` 返回 `ExitCode`；
 `Linkage` 移到 `rustc_hir::attrs`；throw_* 宏需要 `feature(yeet_expr)`。
+
+### 5.2 M2 实现笔记（2026-07-05）
+
+**cargo 集成**（`src/cargo_shim.rs`，机制移植自 cargo-miri）三阶段：
+phase_cargo（注入 RUSTC_WRAPPER=自身 + target.runner + 独立 target/mirvm + 强制 --target host）
+→ phase_wrapper（host crate 透传；target 依赖加 MIR sysroot + -Zalways-encode-mir；
+最终 bin 不编译，写 JSON"假二进制"+ stub .d）→ phase_runner（读 JSON，用 cargo
+原始参数驱动解释会话）。proc-macro 是 host crate 原生编译，前端加载即用，零额外工作。
+
+**frontmatter 脚本**：`---` 围栏内嵌 manifest（RFC 3424 语法），物化到
+~/.cache/mirvm/scripts/<路径hash>/，剥离处替换空行保持诊断行号。
+无 frontmatter 的单文件仍走零 cargo 快路径。
+
+**M2 新增 shims**：clock_gettime、open/read/close/lseek64/fstat64/stat64/fstatat64/unlink
+（fd 与 C 结构直通宿主——target==host 布局精确一致是这批 shim 廉价的原因）、
+malloc/calloc/realloc/free（System 分配器直调）、pthread_key_* 四件套（单线程平凡）、
+dlsym（已知符号给合成函数指针）、__errno_location（机器内 errno 单元，宿主调用后同步）、
+getenv（查 env 表）。weak 符号置 NULL 名单：statx、__cxa_thread_atexit_impl。
+
+**踩过的坑（M2 增补）**：
+- 裸 "rustc" 会被 rustup 按 cwd 解析——wrapper 必须无条件用 pinned toolchain 的
+  rustc（proc-macro dylib 版本锁死）；rustc-build-sysroot 同理，必须显式传
+  `.rustc_version()`，否则缓存哈希随 cwd 乒乓、sysroot 反复重建
+- std_detect 的 CPU 特性检测走 CPUID 内联汇编（InterpCx 不支持 asm）：
+  在 find_mir_or_eval_fn 按 DefPath 拦截 `std_detect::detect_features` 返回全零
+  → memchr/aho-corasick 走标量路径（Miri 靠 cfg(miri) 绕开，干净 std 只能拦）
+- statx 有双保险：weak 符号置 NULL 之外，std 还会 raw syscall(332)——回 ENOSYS
+- runner 要剥 `--error-format=json --json=...`（cargo 已退场，没人消费 artifact 通知）、
+  跳过 CARGO_MAKEFLAGS（指向已消亡的 jobserver）
+
+**性能数据（release mirvm，全缓存热启动）**：
+- serde_json 项目端到端 **0.26s**（cargo no-op + 前端 + 解释）
+- ecosystem 脚本 **42s**——大头是解释执行 `Regex::new`（DFA 构建 + Unicode 表，
+  解释器最不利负载）。这是 M4 字节码 VM / M5 JIT 的头号靶子与基准用例
+- mirvm 自身必须 release 构建（debug 慢 ~7×，regex 案例 5min+）
+
+**M1 偏差状态更新**：args/env 已转正（.init_array 构造器真实执行、宿主 env 透传、
+getenv 查表）。仍存偏差：主线程名 `<unnamed>`、退出不跑 rt cleanup 与 TLS 析构、
+getrandom 确定性（--real-random 留 M3 沙箱开关一并做）。
 
 ## 6. 风险与对策
 

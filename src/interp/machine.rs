@@ -139,6 +139,15 @@ pub struct MirvmMachine<'tcx> {
     pub no_alloc_shim_sym: Symbol,
     /// 按符号名解析已导出函数的缓存（rust_begin_unwind 等）
     pub exported_symbols_cache: FxHashMap<Symbol, Option<ty::Instance<'tcx>>>,
+    /// 环境变量名 → 值 C 串指针（getenv 查表；表本体见 eval::setup_process_memory）
+    pub env_map: FxHashMap<Vec<u8>, MPtr>,
+    /// 由解释程序打开的宿主 fd（open 系 shim 直通宿主）
+    pub host_fds: rustc_data_structures::fx::FxHashSet<i32>,
+    /// errno 单元（__errno_location shim；宿主调用后同步）
+    pub errno_cell: Option<MPtr>,
+    /// pthread TLS key（单线程：一把 key 一格值）
+    pub pthread_tls: FxHashMap<u32, rustc_middle::mir::interpret::Scalar<Prov>>,
+    pub next_pthread_key: u32,
     /// 确定性 getrandom 状态
     pub rng_state: u64,
 }
@@ -157,6 +166,11 @@ impl<'tcx> MirvmMachine<'tcx> {
                 rustc_ast::expand::allocator::NO_ALLOC_SHIM_IS_UNSTABLE,
             )),
             exported_symbols_cache: FxHashMap::default(),
+            env_map: FxHashMap::default(),
+            host_fds: rustc_data_structures::fx::FxHashSet::default(),
+            errno_cell: None,
+            pthread_tls: FxHashMap::default(),
+            next_pthread_key: 1,
             rng_state: 0x6d69_7276_6d21,
         }
     }
@@ -253,6 +267,22 @@ impl<'tcx> rustc_const_eval::interpret::Machine<'tcx> for MirvmMachine<'tcx> {
             let args = InterpCx::<'tcx, Self>::copy_fn_args(args);
             let link_name = Symbol::intern(ecx.tcx.symbol_name(instance).name);
             return super::shims::emulate_foreign_item(ecx, link_name, abi, &args, dest, ret, unwind);
+        }
+        // std_detect 的 CPU 特性检测走 CPUID 内联汇编（解释器不支持）。
+        // 拦截为"无任何特性"→ memchr/aho-corasick 等走标量路径，语义不变。
+        // （Miri 靠 cfg(miri) 的 std 绕开；我们用干净 std，只能在这拦。）
+        {
+            let def_id = instance.def_id();
+            if ecx.tcx.crate_name(def_id.krate).as_str() == "std_detect"
+                && ecx.tcx.item_name(def_id).as_str() == "detect_features"
+            {
+                ecx.write_scalar(
+                    rustc_middle::mir::interpret::Scalar::from_uint(0u128, dest.layout.size),
+                    dest,
+                )?;
+                ecx.return_to_block(ret)?;
+                return interp_ok(None);
+            }
         }
         interp_ok(Some((ecx.load_mir(instance.def, None)?, instance)))
     }
