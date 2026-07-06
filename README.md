@@ -1,11 +1,14 @@
 # mirvm
 
-一个拥有自己执行引擎的 Rust runtime（工作代号）：rustc 真前端 + 自研 MIR 解释器
-（后续：可开关的 Cranelift 热点 JIT，HotSpot `-Xint`/`-Xmixed` 风格）。
-跳过 codegen 与链接，目标是"改完即跑"的开发内循环、LLM/Agent 的 Rust 脚本执行，
-以及（后置的）真状态持久化 REPL。
+**Rust 抽象机器（Rust Abstract Machine）的一个事实标准实现，按 JVM 级系统软件构建。**
 
-架构、决策与里程碑见 [DESIGN.md](DESIGN.md)。
+用真 rustc 做前端（RAM 的加载器/验证器：宏/typeck/trait/MIR，复用不重建），
+自研执行引擎实现 RAM 的计算与并发（解释 tier → 生而并发的字节码 VM → Cranelift JIT）。
+跳过 codegen 与链接，"改完即跑"。正确性 = 忠实实现 RAM；native codegen 是 RAM 的另一实现，
+所以对拍 native 逐字节一致是同源的必然。
+
+心智模型、抽象机器规格、VM 架构、决策账本见 [DESIGN.md](DESIGN.md)。
+定位：Miri 是 RAM 的*检查*实现（宁慢勿漏 UB），mirvm 是 RAM 的*运行/标准*实现（假设合法、追求快）。
 
 ## 状态
 
