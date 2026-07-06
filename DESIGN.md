@@ -10,6 +10,8 @@
 跳过 codegen 和链接，实现"改完即跑"。
 
 对标定位："LuaJIT for Rust"。**不是** evcxr（编译器外壳）、**不是** Miri（UB 检测器）的替代品。
+长期目标（2026-07-05 用户明确）：**JVM 级的成熟 runtime**——执行引擎必须"生而并发"，
+真并行不是可推迟的实现细节，而是 M4 字节码 VM 的第一设计红线（见 §5.3 约束账本 C1）。
 
 ## 2. 目标与优先级（2026-07-03 决策）
 
@@ -110,14 +112,36 @@
   验收达成：serde_json（含 serde_derive）+ rand（dlsym→getrandom→ChaCha）+
   regex（SIMD 标量回退）脚本与 native cargo run 输出逐字节一致；
   cargo 项目模式含程序参数与退出码透传对拍通过。实现笔记见 §5.2。
-- **M2.5 — 生态补全**（待做）：libffi 原生 FFI（C 依赖 crate）、协作式线程、
-  异步生态评估（epoll shims）。
+- **M2.5 — 生态补全**（线程 ✅ 2026-07-05；FFI/corpus 进行中）：
+  - ✅ 协作式**线程语义层**（src/interp/threads.rs，按 C8 分层：语义=GuestThread/
+    ThreadManager/意图 API，策略=确定性 round-robin + 语句时间片 + 全员睡眠/死锁检测）。
+    验收：spawn+join/嵌套、mpsc 多生产者、Mutex 争用(8×500)、Condvar、scoped threads、
+    线程 panic→join Err、线程 TLS 析构、sleep/recv_timeout——差分 12/12 与 native 一致。
+  - ✅ **真实地址内存改造**（2026-07-05）：分配基址 = 宿主缓冲真实地址
+    （MirvmAllocBytes 真对齐分配）；全局分配"预分配缓冲、内容后到"破指针环；
+    函数/vtable 泄漏占位地址；TypeId 基址 0。debug 构建下每次 write 校验
+    "guest 地址直读 = 解释器视角"不变式。实现笔记见下。
+  - libffi 原生 FFI（地基已备好：guest 指针即宿主指针，可直传 native 代码）
+  - corpus 驱动补全（rayon/chrono/clap/itertools/anyhow/csv/...），异步生态评估（epoll）
+
+**真实地址内存实现笔记（2026-07-05）**：
+- `Box<[u8]>` 只保证 1 字节对齐——真实地址模式必须换自定义 AllocBytes
+  （MirvmAllocBytes：按 guest 要求对齐的宿主分配，size 0 也占 1 字节保地址唯一）
+- 全局分配的时序难题（指针环 A→B→A、"先要地址还是先要内容"）：Miri native-lib 的
+  **prepared 机制**——resolve_addr 时预分配零缓冲取地址存入 prepared 表；
+  adjust_global_allocation 材料化时取走同一块缓冲拷入 tcx 字节。地址先于内容存在。
+- 关键洞察：**解释器读 vtable 走 tcx 查询（vtable_entries），从不读其内存字节**——
+  所以函数/vtable 分配只需唯一占位地址（泄漏 1 字节），不需真实内容。
+  并行 VM 时代 vtable 按 C8 冻结进字节码，此占位策略仍然成立。
+- 死分配的宿主地址会被复用：反查表按 (addr,id) 双键防错删；基址映射永久保留
+  （悬垂指针算偏移用，报错语义与 Miri 一致）。
 - **M3 — 产品面（对齐 P0 场景）**：`mirvm run` 单文件脚本（frontmatter 依赖声明）与
   cargo 项目两种入口；常驻 daemon（前端增量状态留内存）；agent API：
   JSON 诊断、超时、内存上限、syscall 白名单沙箱。
   验收：脚本二次运行（缓存热）端到端 < 300ms；改一行重跑 < 1s（中型项目）。
 - **M4 — 性能 tier 1**：MIR → 自研紧凑字节码 VM（替换 InterpCx 热路径）、内联缓存、
   非泛型依赖函数原生直调。验收：对 InterpCx 基线 ≥ 5× 提速；差分测试全绿。
+  **前置硬关卡：并发架构 RFC + 原型 spike 通过（§5.3 C1）；VM 生而并行。**
 - **M5 — JIT tier 2**：Cranelift 热点编译，`--engine=interp|mixed|jit` 开关。
   验收：计算密集 benchmark ≈ cg_clif debug build 的 2× 以内。
 - **M6 — REPL/Notebook**（用户决策：后置）：解释器持久堆上的增量求值；跨 cell 借用成立。
@@ -196,8 +220,71 @@ getenv（查 env 表）。weak 符号置 NULL 名单：statx、__cxa_thread_atex
 - mirvm 自身必须 release 构建（debug 慢 ~7×，regex 案例 5min+）
 
 **M1 偏差状态更新**：args/env 已转正（.init_array 构造器真实执行、宿主 env 透传、
-getenv 查表）。仍存偏差：主线程名 `<unnamed>`、退出不跑 rt cleanup 与 TLS 析构、
-getrandom 确定性（--real-random 留 M3 沙箱开关一并做）。
+getenv 查表）。仍存偏差：主线程名 `<unnamed>`、退出不跑 rt cleanup 与主线程 TLS 析构
+（spawned 线程的 TLS 析构 M2.5 起已运行）、getrandom 确定性（--real-random 留 M3）。
+
+**M2.5 线程实现笔记（2026-07-05）**：
+- 阻塞 shim 的通用模式：**先写结果再阻塞**——pthread_join 直接写 0；futex_wait 推测性
+  写 0（唤醒即成立），超时路径由调度器改写为 -1+ETIMEDOUT（dest 先 force_allocation
+  固化成绝对位置，跨线程可写）。IP 已随 NeedsReturn 跳到 ret block，唤醒后直接续跑。
+- pthread key 析构：线程根帧返回后、Terminated 前，逐个压 dtor(value) 帧继续跑
+  （glibc 轮次语义简化版；不变式：pthread_tls 只存非空值）。主线程不跑（native 同）。
+- `core::hint::spin_loop` → `_mm_pause` → `llvm.x86.sse2.pause` foreign 调用：
+  shim 成"让出时间片"，语义妥帖（自旋者让路）。
+- futex 值检查的原子性由协作调度保证（step 内不可分割），无需真原子读。
+- std 的线程结果传递（Packet/Arc + 内部 catch_unwind）全部是被解释的 guest 代码，
+  panic→join Err 零额外工作，白捡。
+
+### 5.3 VM 设计约束账本（M4 开工前必读；每踩一个坑追加一条）
+
+> 目的：把踩坑经验系统性转成字节码 VM 的设计输入，防止"设计完再返工"。
+
+- **C1 生而并发（2026-07-05 用户决策，第一红线）**：M4 字节码 VM 必须以 **1:1 真并行**
+  （guest 线程 = 宿主线程）为默认执行模式设计；协作式调度保留为**确定性执行模式**
+  （`--threads=coop`，agent/复现场景），两种模式共享线程语义层、只换执行策略。
+  依据：目标是 JVM 级 runtime；现代 Rust 程序天生并发（tokio 多线程 runtime 默认、
+  rayon、**cargo test 默认并行跑测试**——dev-loop 场景绕不开）；CPython/GIL 类引擎是
+  单核时代的妥协产物，是反面教材而非参照系。
+- **C2 并发内存模型**：guest 原子操作直落宿主原子指令（与 native codegen 相同 → 并行
+  tier 的内存行为 = native 行为）；guest 分配背靠**真实宿主地址**（热路径 load/store
+  零查表；与 libffi FFI 是同一份改造，M2.5 做时即按并发就绪标准：分配注册表用
+  分片锁/无锁结构）；引擎自身状态**三分法**：每线程私有 / 发布后不可变（字节码缓存、
+  layout 表）/ 显式同步（分配注册表）。
+- **C3 Rust 的三个结构性红利**（并行 VM 比 JVM 当年容易的原因，设计时要吃满）：
+  无 GC（所有权/Drop，JVM 最难的并发 GC 问题不存在）；内存模型现成（C++20 模型，
+  无需自研 JMM）；safe 代码类型系统保证无数据竞争 → 只需保护引擎自身状态。
+- **C4 guest UB 立场（并行 tier）**：unsafe 数据竞争 = 宿主数据竞争，与 native 行为
+  一致（fast 语义"假设程序合法"立场不变）；可选 TSan 调试模式后置。
+- **C5 InterpCx tier 的定位与硬约束**：rustc interpret 基础设施根本不 Sync
+  （RefCell 遍地），该 tier **永远单宿主线程**——作为确定性 oracle 与兜底 tier 存在。
+  分层混合（VM 热路径 + InterpCx 兜底）要求两引擎共享内存模型与调用边界。
+- **C6 InterpCx tier 并发偏差（弱内存序，防遗忘）**：协作式模式下所有内存操作按单一
+  全序执行（顺序一致），**永远观察不到弱内存重排**；调度确定性 → 并发时序 bug 可能
+  不复现（反之亦然）。理论上 SC 执行是内存模型允许的合法执行之一（弱序允许而不强制
+  重排），故对合法程序仍是正确语义；作为偏差记录并在文档/诊断中向用户声明。
+  并行程序的差分测试需依赖确定性模式或输出不变式（不能逐字节比时序敏感输出）。
+- **C7 分层执行的性能基准**：regex 编译（DFA 构建 + Unicode 表）42s 案例是 1 号
+  基准；VM 设计评审时必须给出该案例的预估收益。
+- **C8 1:1 并行执行架构草图（2026-07-05，并发架构 RFC 的种子）**：
+  - 分层：**线程语义层永久**（生命周期/join/TLS/panic 传播/futex 语义/线程表），
+    协作式调度器亦永久（= 确定性模式）；两者之间以 `ThreadStrategy` 边界隔离——
+    语义层发意图（BlockOn/Wake/Spawn/Exit），策略层实现（coop 队列 vs 宿主原语）。
+    唯一临时的是"coop 是唯一策略"这个状态。M2.5 的线程差分 corpus 是永久资产
+    （VM 的 1:1 实现将在同一 corpus 上验收）。
+  - 执行模型：每 guest 线程 = 一宿主线程，各跑 VM 循环；共享 VmShared 按 C2 三分法；
+    **VM 自管栈帧**（每线程堆上 frame arena，两种策略共用，guest 深递归不炸宿主栈）。
+  - 两个真实地址红利：guest futex 地址即宿主地址 → **futex 直通 SYS_futex**
+    （Mutex/Condvar/Once/park 零调度代码）；阻塞 IO 在 1:1 下自然化（协作式的
+    mini-reactor 问题只属于 coop 模式）。
+  - 引擎状态线程安全三招：**降低时元数据冻结**（layout/偏移/vtable 烘焙进字节码，
+    运行期永不触 tcx）；**降低服务线程**（惰性单态化经 channel 发给专职编译线程，
+    HotSpot compiler-thread 同构，为 M5 后台 JIT 铺路）；分配注册表分片/无锁。
+  - 验证路径：语义层+coop（M2.5）→ 真实地址内存（并发就绪）→ M4 前 spike
+    （原型字节码 + N 宿主线程压测原子/注册表/futex，**引擎过 TSan** 为通过标准）
+    → RFC 定稿 → M4 施工，线程 corpus 双策略全绿。
+  - 开放问题：并行 fast 模式下 guest UAF = 宿主 UAF（C4 延伸，隔离区后置）；
+    main 返回时 detached 线程的退出语义（native = 直接退，写进语义层）；
+    编译线程不得执行 guest 代码（死锁面）。
 
 ## 6. 风险与对策
 

@@ -22,7 +22,7 @@ use super::{EmulateItemResult, MirvmInterpCx};
 pub fn emulate_foreign_item<'tcx>(
     ecx: &mut MirvmInterpCx<'tcx>,
     link_name: Symbol,
-    _abi: &FnAbi<'tcx, Ty<'tcx>>,
+    abi: &FnAbi<'tcx, Ty<'tcx>>,
     args: &[OpTy<'tcx, Prov>],
     dest: &PlaceTy<'tcx, Prov>,
     ret: Option<mir::BasicBlock>,
@@ -57,13 +57,18 @@ pub fn emulate_foreign_item<'tcx>(
         }
         EmulateItemResult::AlreadyJumped => {}
         EmulateItemResult::NotSupported => {
-            // 兜底：按符号名在所有已链接 crate 里找导出的 Rust 函数
+            // 兜底 1：按符号名在所有已链接 crate 里找导出的 Rust 函数
             // （rust_begin_unwind / __rdl_* 等都走这条路）
             if let Some(instance) = find_exported_symbol(ecx, link_name)? {
                 return interp_ok(Some((ecx.load_mir(instance.def, None)?, instance)));
             }
+            // 兜底 2：libffi 原生直调（C 依赖库函数）
+            if super::native::call_native(ecx, link_name, abi.c_variadic, args, dest)? {
+                ecx.return_to_block(ret)?;
+                return interp_ok(None);
+            }
             throw_machine_stop!(Termination::Unsupported(format!(
-                "mirvm: 尚未实现的 foreign 函数 `{link_name}`（M1 shim 集之外；欢迎补充 src/interp/shims.rs）"
+                "mirvm: 尚未实现的 foreign 函数 `{link_name}`（shim/导出符号/native 库都没找到；欢迎补充 src/interp/shims.rs）"
             )));
         }
     }
@@ -212,6 +217,14 @@ fn emulate_by_name<'tcx>(
             let buf = ecx.read_pointer(&args[1])?;
             let count = ecx.read_target_usize(&args[2])?;
             let bytes = ecx.read_bytes_ptr_strip_provenance(buf, Size::from_bytes(count))?.to_vec();
+            #[cfg(debug_assertions)]
+            if count > 0 {
+                // 真实地址不变式（账本 C2）：guest 指针的绝对地址就是宿主地址，
+                // 直读必须与解释器视角一致。每次 write 都在验证。
+                let host =
+                    unsafe { std::slice::from_raw_parts(buf.addr().bytes() as *const u8, bytes.len()) };
+                debug_assert_eq!(host, &bytes[..], "真实地址内存不变式被破坏");
+            }
             let written = match fd {
                 1 => {
                     let mut out = std::io::stdout().lock();
@@ -266,6 +279,8 @@ fn emulate_by_name<'tcx>(
                         dest,
                     )?;
                 }
+                // SYS_futex：std 的 Mutex/Condvar/Once/park 全押在这
+                202 => return emulate_futex(ecx, args, dest),
                 _ => throw_unsup_format!("syscall({nr}) 未实现"),
             }
         }
@@ -279,8 +294,9 @@ fn emulate_by_name<'tcx>(
             throw_machine_stop!(Termination::Abort("程序调用了 abort()".into()));
         }
         "gettid" => {
+            let tid = 1000 + ecx.machine.threads.active_id() as i32;
             ecx.write_scalar(
-                rustc_middle::mir::interpret::Scalar::from_int(1001, dest.layout.size),
+                rustc_middle::mir::interpret::Scalar::from_int(tid, dest.layout.size),
                 dest,
             )?;
         }
@@ -429,12 +445,14 @@ fn emulate_by_name<'tcx>(
             }
         }
 
-        // ===== pthread TLS key（单线程平凡实现）=====
+        // ===== pthread TLS key（值 per-thread，析构在线程退出时运行）=====
         "pthread_key_create" => {
             let key_out = ecx.read_pointer(&args[0])?;
-            // 析构器忽略：线程退出析构在 M2 不运行（记录于 DESIGN 偏差）
-            let key = ecx.machine.next_pthread_key;
-            ecx.machine.next_pthread_key += 1;
+            let dtor_ptr = ecx.read_pointer(&args[1])?;
+            let dtor = if dtor_ptr.addr().bytes() != 0 { Some(dtor_ptr) } else { None };
+            let key = ecx.machine.threads.next_pthread_key;
+            ecx.machine.threads.next_pthread_key += 1;
+            ecx.machine.threads.key_dtors.insert(key, dtor);
             let u32_layout = ecx.layout_of(ecx.tcx.types.u32)?;
             let place = ecx.ptr_to_mplace(key_out, u32_layout);
             ecx.write_scalar(rustc_middle::mir::interpret::Scalar::from_u32(key), &place)?;
@@ -442,13 +460,19 @@ fn emulate_by_name<'tcx>(
         }
         "pthread_setspecific" => {
             let key = ecx.read_scalar(&args[0])?.to_u32()?;
-            let val = ecx.read_scalar(&args[1])?;
-            ecx.machine.pthread_tls.insert(key, val);
+            let valp = ecx.read_pointer(&args[1])?;
+            if valp.addr().bytes() == 0 {
+                // 置 null = 删除（TLS 析构轮次依赖"map 里只有非空值"这一不变式）
+                ecx.machine.threads.active_mut().pthread_tls.remove(&key);
+            } else {
+                let val = ecx.read_scalar(&args[1])?;
+                ecx.machine.threads.active_mut().pthread_tls.insert(key, val);
+            }
             write_i32_ret(ecx, 0, dest)?;
         }
         "pthread_getspecific" => {
             let key = ecx.read_scalar(&args[0])?.to_u32()?;
-            match ecx.machine.pthread_tls.get(&key).copied() {
+            match ecx.machine.threads.active().pthread_tls.get(&key).copied() {
                 Some(v) => ecx.write_scalar(v, dest)?,
                 None => ecx.write_scalar(
                     rustc_middle::mir::interpret::Scalar::from_target_usize(0, ecx),
@@ -458,14 +482,91 @@ fn emulate_by_name<'tcx>(
         }
         "pthread_key_delete" => {
             let key = ecx.read_scalar(&args[0])?.to_u32()?;
-            ecx.machine.pthread_tls.remove(&key);
+            ecx.machine.threads.key_dtors.remove(&key);
+            ecx.machine.threads.active_mut().pthread_tls.remove(&key);
             write_i32_ret(ecx, 0, dest)?;
         }
         "pthread_self" => {
+            let id = ecx.machine.threads.active_id() as u64;
             ecx.write_scalar(
-                rustc_middle::mir::interpret::Scalar::from_target_usize(1, ecx),
+                rustc_middle::mir::interpret::Scalar::from_target_usize(id + 1, ecx),
                 dest,
             )?;
+        }
+
+        // ===== 线程生命周期 =====
+        "pthread_create" => {
+            let thread_out = ecx.read_pointer(&args[0])?;
+            // args[1] = attr（忽略；栈由我们管理）
+            let start = ecx.read_pointer(&args[2])?;
+            let arg = ecx.read_immediate(&args[3])?;
+            let tid = spawn_guest_thread(ecx, start, arg)?;
+            let usize_layout = ecx.layout_of(ecx.tcx.types.usize)?;
+            let place = ecx.ptr_to_mplace(thread_out, usize_layout);
+            ecx.write_scalar(
+                rustc_middle::mir::interpret::Scalar::from_target_usize(tid as u64, ecx),
+                &place,
+            )?;
+            write_i32_ret(ecx, 0, dest)?;
+        }
+        "pthread_join" => {
+            let tid = ecx.read_target_usize(&args[0])? as super::threads::ThreadId;
+            // std 传 null 作 retval_out，不支持非 null（罕见）
+            match ecx.machine.threads.get(tid).map(|t| t.state.clone()) {
+                Some(super::threads::ThreadState::Terminated) => {
+                    write_i32_ret(ecx, 0, dest)?;
+                }
+                Some(_) => {
+                    // 阻塞当前线程；先写好返回值 0（唤醒后直接可见），再让出
+                    write_i32_ret(ecx, 0, dest)?;
+                    ecx.machine
+                        .threads
+                        .block_active(super::threads::BlockReason::Join(tid));
+                }
+                None => {
+                    write_i32_ret(ecx, libc::ESRCH, dest)?;
+                }
+            }
+        }
+        "pthread_detach" => {
+            let tid = ecx.read_target_usize(&args[0])? as super::threads::ThreadId;
+            if let Some(t) = ecx.machine.threads.get_mut(tid) {
+                t.detached = true;
+            }
+            write_i32_ret(ecx, 0, dest)?;
+        }
+        "pthread_attr_init" | "pthread_attr_setstacksize" | "pthread_attr_destroy" => {
+            write_i32_ret(ecx, 0, dest)?;
+        }
+        "sched_yield" => {
+            ecx.machine.threads.yield_requested = true;
+            write_i32_ret(ecx, 0, dest)?;
+        }
+        // spin_loop 提示（core::hint::spin_loop → _mm_pause）：让出时间片
+        "llvm.x86.sse2.pause" => {
+            ecx.machine.threads.yield_requested = true;
+        }
+        // 线程命名（PR_SET_NAME）等：记录名字，其余忽略
+        "prctl" => {
+            let op = ecx.read_scalar(&args[0])?.to_i32()?;
+            if op == libc::PR_SET_NAME {
+                let name = read_c_bytes(ecx, ecx.read_pointer(&args[1])?)?;
+                ecx.machine.threads.active_mut().name =
+                    String::from_utf8_lossy(&name).into_owned();
+            }
+            write_i32_ret(ecx, 0, dest)?;
+        }
+        "nanosleep" | "clock_nanosleep" => {
+            // nanosleep(req, rem) / clock_nanosleep(clk, flags, req, rem)
+            let req_idx = if name == "nanosleep" { 0 } else { 2 };
+            let req_ptr = ecx.read_pointer(&args[req_idx])?;
+            let ts = read_timespec(ecx, req_ptr)?;
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::new(ts.0 as u64, ts.1 as u32);
+            write_i32_ret(ecx, 0, dest)?; // 醒来即成功
+            ecx.machine
+                .threads
+                .block_active(super::threads::BlockReason::Sleep { deadline });
         }
 
         // ===== C 分配器（std::alloc::System 与部分 crate 直调）=====
@@ -556,7 +657,7 @@ fn emulate_by_name<'tcx>(
             // catch 侧（catch_unwind intrinsic）会把它原样传给 catch_fn →
             // __rust_panic_cleanup 用 container-of 恢复 Box<Exception>。
             let payload = ecx.read_immediate(&args[0])?;
-            ecx.machine.unwind_payloads.push(payload);
+            ecx.machine.threads.active_mut().unwind_payloads.push(payload);
             return interp_ok(EmulateItemResult::NeedsUnwind);
         }
 
@@ -630,11 +731,11 @@ fn write_c_struct<'tcx, T: Copy>(
     ecx.write_bytes_ptr(ptr, bytes.iter().copied())
 }
 
-/// 机器内的 errno 单元（惰性分配）。
+/// 机器内的 errno 单元（per-thread，惰性分配）。
 fn errno_cell<'tcx>(
     ecx: &mut MirvmInterpCx<'tcx>,
 ) -> InterpResult<'tcx, rustc_const_eval::interpret::Pointer<super::machine::Prov>> {
-    if let Some(p) = ecx.machine.errno_cell {
+    if let Some(p) = ecx.machine.threads.active().errno_cell {
         return interp_ok(p);
     }
     let p = ecx.allocate_ptr(
@@ -643,7 +744,7 @@ fn errno_cell<'tcx>(
         MemoryKind::Machine(MirvmMemoryKind::Machine),
         AllocInit::Zero,
     )?;
-    ecx.machine.errno_cell = Some(p);
+    ecx.machine.threads.active_mut().errno_cell = Some(p);
     interp_ok(p)
 }
 
@@ -653,10 +754,170 @@ fn sync_errno<'tcx>(ecx: &mut MirvmInterpCx<'tcx>) -> InterpResult<'tcx> {
     write_errno(ecx, host_errno)
 }
 
+/// native FFI 用的公开包装。
+pub(crate) fn sync_errno_pub<'tcx>(ecx: &mut MirvmInterpCx<'tcx>) -> InterpResult<'tcx> {
+    sync_errno(ecx)
+}
+
 /// 直接写解释器侧 errno。
 fn write_errno<'tcx>(ecx: &mut MirvmInterpCx<'tcx>, v: i32) -> InterpResult<'tcx> {
     let cell = errno_cell(ecx)?;
     let i32_layout = ecx.layout_of(ecx.tcx.types.i32)?;
     let place = ecx.ptr_to_mplace(cell.into(), i32_layout);
     ecx.write_scalar(rustc_middle::mir::interpret::Scalar::from_i32(v), &place)
+}
+
+/// 读 guest 内存里的 timespec（tv_sec: i64, tv_nsec: i64）。
+fn read_timespec<'tcx>(
+    ecx: &MirvmInterpCx<'tcx>,
+    ptr: rustc_const_eval::interpret::Pointer<Option<Prov>>,
+) -> InterpResult<'tcx, (i64, i64)> {
+    let i64_layout = ecx.layout_of(ecx.tcx.types.i64)?;
+    let sec = ecx.read_scalar(&ecx.ptr_to_mplace(ptr, i64_layout))?.to_i64()?;
+    let nsec = ecx
+        .read_scalar(&ecx.ptr_to_mplace(ptr.wrapping_offset(Size::from_bytes(8), ecx), i64_layout))?
+        .to_i64()?;
+    interp_ok((sec, nsec))
+}
+
+/// 创建 guest 线程：新线程 + 临时切 active 压 start_routine(arg) 根帧（Miri 同款戏法）。
+fn spawn_guest_thread<'tcx>(
+    ecx: &mut MirvmInterpCx<'tcx>,
+    start: rustc_const_eval::interpret::Pointer<Option<Prov>>,
+    arg: rustc_const_eval::interpret::ImmTy<'tcx, Prov>,
+) -> InterpResult<'tcx, super::threads::ThreadId> {
+    use super::helpers::EcxExt as _;
+    use rustc_const_eval::interpret::ReturnContinuation;
+
+    let instance = ecx.get_ptr_fn(start)?.as_instance()?;
+    let tid = ecx.machine.threads.create_thread();
+
+    // start_routine 返回 *mut c_void：给它一个落点（join 传递用）
+    let ret_layout = ecx.layout_of(rustc_middle::ty::Ty::new_mut_ptr(
+        ecx.tcx.tcx,
+        ecx.tcx.types.u8,
+    ))?;
+    let ret_place = ecx.allocate(ret_layout, MemoryKind::Machine(MirvmMemoryKind::Machine))?;
+
+    let prev = ecx.machine.threads.set_active(tid);
+    let res = ecx.call_function(
+        instance,
+        &[arg],
+        Some(&ret_place),
+        ReturnContinuation::Stop { cleanup: true },
+    );
+    ecx.machine.threads.set_active(prev);
+    res?;
+    ecx.machine.threads.get_mut(tid).unwrap().ret_place = Some(ret_place);
+    interp_ok(tid)
+}
+
+/// futex（syscall 202）：WAIT/WAKE/WAIT_BITSET/WAKE_BITSET。
+/// 阻塞语义：先推测性写 0（被唤醒的结果），阻塞让出；超时路径由调度器改写
+/// 为 -1 + ETIMEDOUT（见 eval.rs 的 wake_due 处理）。
+fn emulate_futex<'tcx>(
+    ecx: &mut MirvmInterpCx<'tcx>,
+    args: &[OpTy<'tcx, Prov>],
+    dest: &PlaceTy<'tcx, Prov>,
+) -> InterpResult<'tcx, EmulateItemResult> {
+    use super::threads::BlockReason;
+
+    let addr = ecx.read_pointer(&args[1])?;
+    let op = ecx.read_scalar(&args[2])?.to_i32()?;
+    let base_op = op & !(libc::FUTEX_PRIVATE_FLAG | libc::FUTEX_CLOCK_REALTIME);
+
+    match base_op {
+        libc::FUTEX_WAIT | libc::FUTEX_WAIT_BITSET => {
+            let expected = ecx.read_scalar(&args[3])?.to_u32()?;
+            // 原子性由协作调度保证（step 内不可分割）：读当前值比较
+            let u32_layout = ecx.layout_of(ecx.tcx.types.u32)?;
+            let current = ecx.read_scalar(&ecx.ptr_to_mplace(addr, u32_layout))?.to_u32()?;
+            if current != expected {
+                write_errno(ecx, libc::EAGAIN)?;
+                ecx.write_scalar(
+                    rustc_middle::mir::interpret::Scalar::from_int(-1i128, dest.layout.size),
+                    dest,
+                )?;
+                return interp_ok(EmulateItemResult::NeedsReturn);
+            }
+            // 超时：WAIT 相对，WAIT_BITSET 绝对（一律按单调钟近似）
+            let timeout_ptr = ecx.read_pointer(&args[4])?;
+            let deadline = if timeout_ptr.addr().bytes() != 0 {
+                let (sec, nsec) = read_timespec(ecx, timeout_ptr)?;
+                let dur = std::time::Duration::new(sec.max(0) as u64, nsec.max(0) as u32);
+                Some(if base_op == libc::FUTEX_WAIT {
+                    std::time::Instant::now() + dur
+                } else {
+                    // 绝对单调时刻：换算为 now + (abs - now_monotonic)。
+                    // guest 的 Instant 基于我们的 clock_gettime(MONOTONIC) 直通，
+                    // 与宿主同源，可直接比对。
+                    monotonic_to_instant(sec, nsec)
+                })
+            } else {
+                None
+            };
+            // 推测性写 0（唤醒即成功）；固化 dest 供超时改写
+            let dest_m = ecx.force_allocation(dest)?;
+            ecx.write_scalar(
+                rustc_middle::mir::interpret::Scalar::from_uint(0u128, dest_m.layout.size),
+                &dest_m,
+            )?;
+            let addr_bytes = addr.addr().bytes();
+            ecx.machine.threads.active_mut().futex_wake =
+                Some(super::threads::FutexWake { dest: dest_m });
+            ecx.machine.threads.block_active(BlockReason::Futex {
+                addr: addr_bytes,
+                deadline,
+            });
+            interp_ok(EmulateItemResult::NeedsReturn)
+        }
+        libc::FUTEX_WAKE | libc::FUTEX_WAKE_BITSET => {
+            let n = ecx.read_scalar(&args[3])?.to_u32()? as usize;
+            let woken = ecx.machine.threads.futex_wake(addr.addr().bytes(), n);
+            for tid in &woken {
+                // 清掉唤醒者的超时改写钩子（结果保持推测写入的 0）
+                ecx.machine.threads.get_mut(*tid).unwrap().futex_wake = None;
+            }
+            ecx.write_scalar(
+                rustc_middle::mir::interpret::Scalar::from_int(woken.len() as i128, dest.layout.size),
+                dest,
+            )?;
+            interp_ok(EmulateItemResult::NeedsReturn)
+        }
+        _ => throw_unsup_format!("futex op {op} 未实现"),
+    }
+}
+
+/// 给指定线程写 errno（futex 超时等跨线程结果写回用）。
+pub(crate) fn set_thread_errno<'tcx>(
+    ecx: &mut MirvmInterpCx<'tcx>,
+    tid: super::threads::ThreadId,
+    v: i32,
+) -> InterpResult<'tcx> {
+    let cell = match ecx.machine.threads.get(tid).and_then(|t| t.errno_cell) {
+        Some(p) => p,
+        None => {
+            let p = ecx.allocate_ptr(
+                Size::from_bytes(4),
+                rustc_abi::Align::from_bytes(4).unwrap(),
+                MemoryKind::Machine(MirvmMemoryKind::Machine),
+                AllocInit::Zero,
+            )?;
+            ecx.machine.threads.get_mut(tid).unwrap().errno_cell = Some(p);
+            p
+        }
+    };
+    let i32_layout = ecx.layout_of(ecx.tcx.types.i32)?;
+    let place = ecx.ptr_to_mplace(cell.into(), i32_layout);
+    ecx.write_scalar(rustc_middle::mir::interpret::Scalar::from_i32(v), &place)
+}
+
+/// 把 CLOCK_MONOTONIC 的绝对 timespec 换算成宿主 Instant。
+fn monotonic_to_instant(sec: i64, nsec: i64) -> std::time::Instant {
+    let mut now_ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now_ts) };
+    let now = std::time::Duration::new(now_ts.tv_sec as u64, now_ts.tv_nsec as u32);
+    let target = std::time::Duration::new(sec.max(0) as u64, nsec.max(0) as u32);
+    let host_now = std::time::Instant::now();
+    if target > now { host_now + (target - now) } else { host_now }
 }

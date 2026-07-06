@@ -5,12 +5,15 @@
 //! 假设程序合法，只追求跑得对、跑得快。
 
 pub mod addrs;
+pub mod alloc_bytes;
 pub mod eval;
 pub mod helpers;
 pub mod intrinsics;
 pub mod machine;
 mod mono_map;
+pub mod native;
 pub mod shims;
+pub mod threads;
 
 use rustc_const_eval::interpret::InterpCx;
 

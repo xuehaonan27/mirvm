@@ -1,26 +1,26 @@
-//! 地址表：给每个 AllocId 惰性分配唯一的"物理"地址（Miri intptrcast 的简化版）。
+//! 地址表：真实宿主地址模式（账本 C2；Miri native-lib 同构）。
 //!
-//! Provenance::OFFSET_IS_ADDR = true 的世界里，Pointer.offset 存绝对地址；
-//! 这张表维护 AllocId ↔ 基址 双向映射，支撑 ptr↔int cast 与 wildcard 指针解引用。
-//! 简化：单调 bump 分配、不复用地址、全部分配视为已 expose。
+//! 每个分配的基址 = 其宿主缓冲的真实地址（MirvmAllocBytes 保证对齐与唯一性）。
+//! 本表维护 AllocId ↔ 基址双向映射：正向查询给 adjust_alloc_root_pointer/ptr_get_alloc，
+//! 反向有序表给 wildcard（int2ptr 来源）指针解引用。
+//!
+//! 全局分配的"预分配"机制：地址分配时先建零缓冲（内容后到），材料化时
+//! adjust_global_allocation 从 `prepared` 取走同一块缓冲再拷入 tcx 字节——
+//! 这保证"先要地址后要内容"和指针环（A→B→A）都能收敛。
 
-use rustc_abi::{Align, Size};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_middle::mir::interpret::AllocId;
 
-#[derive(Debug)]
-pub struct AddrTable {
-    next: u64,
-    base: FxHashMap<AllocId, u64>,
-    /// 按基址排序的 (base, id)；死分配会被移除（base 映射保留，用于报错时算偏移）。
-    by_addr: Vec<(u64, AllocId)>,
-}
+use super::alloc_bytes::MirvmAllocBytes;
 
-impl Default for AddrTable {
-    fn default() -> Self {
-        // 避开低地址（null、ZST dangling 常用小整数地址）。
-        AddrTable { next: 1 << 32, base: FxHashMap::default(), by_addr: Vec::new() }
-    }
+#[derive(Debug, Default)]
+pub struct AddrTable {
+    base: FxHashMap<AllocId, u64>,
+    /// 按基址排序的 (base, id)；死分配移除（基址映射保留供悬垂指针算偏移）。
+    /// 真实地址乱序到来，插入走二分。地址 0（TypeId 哨兵）不入此表。
+    by_addr: Vec<(u64, AllocId)>,
+    /// 已定地址、尚未材料化的全局分配缓冲。
+    pub prepared: FxHashMap<AllocId, MirvmAllocBytes>,
 }
 
 impl AddrTable {
@@ -28,19 +28,18 @@ impl AddrTable {
         self.base.get(&id).copied()
     }
 
-    /// 返回（或分配）`id` 的基址。
-    pub fn addr_for(&mut self, id: AllocId, size: Size, align: Align) -> u64 {
-        if let Some(&addr) = self.base.get(&id) {
-            return addr;
+    /// 登记分配的真实基址。
+    pub fn register(&mut self, id: AllocId, addr: u64) {
+        let old = self.base.insert(id, addr);
+        debug_assert!(old.is_none_or(|o| o == addr), "分配 {id:?} 的基址被改写");
+        if addr == 0 {
+            return; // TypeId 哨兵
         }
-        let align = align.bytes().max(1);
-        let base = self.next.next_multiple_of(align);
-        // ZST 也占 1 字节地址空间，保证函数指针等地址唯一；外加少量隔离带。
-        self.next = base + size.bytes().max(1) + 16;
-        self.base.insert(id, base);
-        debug_assert!(self.by_addr.last().is_none_or(|&(a, _)| a < base));
-        self.by_addr.push((base, id));
-        base
+        match self.by_addr.binary_search_by_key(&addr, |&(a, _)| a) {
+            Err(pos) => self.by_addr.insert(pos, (addr, id)),
+            // 同址活分配不可能（宿主分配器保证唯一）；防御性覆盖
+            Ok(pos) => self.by_addr[pos] = (addr, id),
+        }
     }
 
     /// wildcard 指针（int2ptr 来源）反查：地址落在哪个活分配内。
@@ -58,10 +57,11 @@ impl AddrTable {
         }
     }
 
-    /// 释放分配：从反查表移除（基址映射保留）。
+    /// 释放分配：从反查表移除（宿主可能复用该地址给新分配）。
     pub fn on_dealloc(&mut self, id: AllocId) {
         if let Some(&addr) = self.base.get(&id)
             && let Ok(pos) = self.by_addr.binary_search_by_key(&addr, |&(a, _)| a)
+            && self.by_addr[pos].1 == id
         {
             self.by_addr.remove(pos);
         }

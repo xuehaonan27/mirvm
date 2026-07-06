@@ -46,7 +46,7 @@ pub fn eval_main(tcx: TyCtxt<'_>, entry_def_id: DefId, config: EvalConfig) -> i3
             Some(&ret_place),
             ReturnContinuation::Stop { cleanup: true },
         )?;
-        while ecx.step()? {}
+        run_scheduler(&mut ecx)?;
         interp_ok(())
     })();
 
@@ -91,6 +91,94 @@ fn print_stacktrace<'tcx>(ecx: &Ecx<'tcx>) {
     for (i, frame) in ecx.generate_stacktrace().into_iter().enumerate().take(16) {
         eprintln!("  [{i}] {frame:?}");
     }
+}
+
+// ===== 协作式调度主循环（策略层；语义层见 threads.rs）=====
+
+fn run_scheduler<'tcx>(ecx: &mut Ecx<'tcx>) -> InterpResult<'tcx, ()> {
+    use super::threads::{MAIN_THREAD, STEPS_PER_SLICE, Schedule, ThreadState};
+
+    loop {
+        let need_switch = {
+            let t = &ecx.machine.threads;
+            t.yield_requested
+                || t.steps_in_slice >= STEPS_PER_SLICE
+                || t.active().state != ThreadState::Runnable
+        };
+        if need_switch {
+            match ecx.machine.threads.schedule() {
+                Schedule::Run => {}
+                Schedule::Done => return interp_ok(()), // main 返回 = 进程结束（native 语义）
+                Schedule::SleepUntil(at, due) => {
+                    let now = std::time::Instant::now();
+                    if at > now {
+                        std::thread::sleep(at - now);
+                    }
+                    let futex_timeouts = ecx.machine.threads.wake_due(&due);
+                    for tid in futex_timeouts {
+                        futex_timeout_result(ecx, tid)?;
+                    }
+                    continue;
+                }
+                Schedule::Deadlock => {
+                    return super::threads::deadlock_error(&ecx.machine.threads);
+                }
+            }
+        }
+        match ecx.step()? {
+            true => ecx.machine.threads.steps_in_slice += 1,
+            false => {
+                // active 线程根帧已返回
+                let tid = ecx.machine.threads.active_id();
+                if tid != MAIN_THREAD && run_one_tls_dtor(ecx)? {
+                    continue; // 压了一个 TLS 析构帧，继续跑本线程
+                }
+                ecx.machine.threads.on_thread_terminated(tid);
+                // main 退出：native 语义 = 进程结束（其余线程随之消亡）
+                if tid == MAIN_THREAD {
+                    return interp_ok(());
+                }
+            }
+        }
+    }
+}
+
+/// futex 等待超时：把推测写入的 0 改成 -1，并给该线程置 ETIMEDOUT。
+fn futex_timeout_result<'tcx>(
+    ecx: &mut Ecx<'tcx>,
+    tid: super::threads::ThreadId,
+) -> InterpResult<'tcx, ()> {
+    let Some(wake) = ecx.machine.threads.get_mut(tid).unwrap().futex_wake.take() else {
+        return interp_ok(());
+    };
+    ecx.write_scalar(
+        Scalar::from_int(-1i128, wake.dest.layout.size),
+        &wake.dest,
+    )?;
+    super::shims::set_thread_errno(ecx, tid, libc::ETIMEDOUT)?;
+    interp_ok(())
+}
+
+/// 运行一个 pthread key 析构（glibc 轮次语义的简化版）。返回是否压了新帧。
+/// 不变式：pthread_tls 里只存非空值（setspecific(null) 即删除）。
+fn run_one_tls_dtor<'tcx>(ecx: &mut Ecx<'tcx>) -> InterpResult<'tcx, bool> {
+    let candidate = {
+        let mgr = &ecx.machine.threads;
+        let th = mgr.active();
+        th.pthread_tls
+            .iter()
+            .find_map(|(k, &v)| mgr.key_dtors.get(k).copied().flatten().map(|d| (*k, v, d)))
+    };
+    let Some((key, val, dtor_ptr)) = candidate else {
+        return interp_ok(false);
+    };
+    ecx.machine.threads.active_mut().pthread_tls.remove(&key);
+    let instance = ecx.get_ptr_fn(dtor_ptr)?.as_instance()?;
+    let arg_layout =
+        ecx.layout_of(ty::Ty::new_mut_ptr(ecx.tcx.tcx, ecx.tcx.types.u8))?;
+    let arg = ImmTy::from_scalar(val, arg_layout);
+    ecx.call_function(instance, &[arg], None, ReturnContinuation::Stop { cleanup: true })?;
+    interp_ok(true)
 }
 
 // ===== 进程内存：argv / envp / extern statics =====

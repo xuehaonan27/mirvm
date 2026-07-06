@@ -8,7 +8,7 @@ use std::fmt;
 use rustc_abi::{Align, Size};
 use rustc_ast::expand::allocator::{self, SpecialAllocatorMethod};
 use rustc_const_eval::interpret::{
-    AllocBytes, AllocId, Allocation, CTFE_ALLOC_SALT, CtfeProvenance,
+    AllocBytes, AllocId, AllocKind, Allocation, CTFE_ALLOC_SALT, CtfeProvenance,
     FnArg, Frame, ImmTy, Immediate, InterpCx, InterpResult, MPlaceTy, MemoryKind, OpTy, PlaceTy,
     Pointer, Provenance as ProvenanceTrait, ReturnAction, ReturnContinuation, interp_ok,
 };
@@ -24,6 +24,7 @@ use rustc_symbol_mangling::mangle_internal_symbol;
 use rustc_target::callconv::FnAbi;
 
 use super::addrs::AddrTable;
+use super::alloc_bytes::MirvmAllocBytes;
 use super::helpers::EcxExt as _;
 use super::mono_map::MonoHashMap;
 
@@ -125,14 +126,11 @@ pub enum AllocShim {
 }
 
 pub struct MirvmMachine<'tcx> {
-    pub stack: Vec<Frame<'tcx, Prov, FrameExtra<'tcx>>>,
+    /// guest 线程运行时（语义层 + 协作调度，见 threads.rs / 账本 C8）
+    pub threads: super::threads::ThreadManager<'tcx>,
     pub addrs: RefCell<AddrTable>,
-    /// thread-local static → 其（单线程）实例
-    pub tls_statics: FxHashMap<DefId, MPtr>,
     /// extern static 符号名 → 机器提供的分配
     pub extern_statics: FxHashMap<Symbol, MPtr>,
-    /// 未被 catch 消费的 panic payload 栈
-    pub unwind_payloads: Vec<ImmTy<'tcx, Prov>>,
     /// `__rust_alloc` 等 mangled 符号 → 处理方式
     pub allocator_shims: FxHashMap<Symbol, AllocShim>,
     /// `__rust_no_alloc_shim_is_unstable_v2` 的 mangled 符号（空操作哨兵）
@@ -143,11 +141,9 @@ pub struct MirvmMachine<'tcx> {
     pub env_map: FxHashMap<Vec<u8>, MPtr>,
     /// 由解释程序打开的宿主 fd（open 系 shim 直通宿主）
     pub host_fds: rustc_data_structures::fx::FxHashSet<i32>,
-    /// errno 单元（__errno_location shim；宿主调用后同步）
-    pub errno_cell: Option<MPtr>,
-    /// pthread TLS key（单线程：一把 key 一格值）
-    pub pthread_tls: FxHashMap<u32, rustc_middle::mir::interpret::Scalar<Prov>>,
-    pub next_pthread_key: u32,
+    /// 原生 FFI：按 -l 指令 dlopen 的库句柄（惰性一次）
+    pub native_handles: Vec<usize>,
+    pub native_libs_loaded: bool,
     /// 确定性 getrandom 状态
     pub rng_state: u64,
 }
@@ -155,11 +151,9 @@ pub struct MirvmMachine<'tcx> {
 impl<'tcx> MirvmMachine<'tcx> {
     pub fn new(tcx: TyCtxt<'tcx>) -> Self {
         MirvmMachine {
-            stack: Vec::new(),
+            threads: super::threads::ThreadManager::default(),
             addrs: RefCell::new(AddrTable::default()),
-            tls_statics: FxHashMap::default(),
             extern_statics: FxHashMap::default(),
-            unwind_payloads: Vec::new(),
             allocator_shims: Self::allocator_shims(tcx),
             no_alloc_shim_sym: Symbol::intern(&mangle_internal_symbol(
                 tcx,
@@ -168,11 +162,80 @@ impl<'tcx> MirvmMachine<'tcx> {
             exported_symbols_cache: FxHashMap::default(),
             env_map: FxHashMap::default(),
             host_fds: rustc_data_structures::fx::FxHashSet::default(),
-            errno_cell: None,
-            pthread_tls: FxHashMap::default(),
-            next_pthread_key: 1,
+            native_handles: Vec::new(),
+            native_libs_loaded: false,
             rng_state: 0x6d69_7276_6d21,
         }
+    }
+
+    /// 真实地址解析（惰性；账本 C2）。地址 = 分配的宿主缓冲地址：
+    /// - 机器内分配（栈槽/堆/TLS/机器杂项）：已在内存表 → 直接取缓冲地址
+    /// - 全局（tcx）分配：预分配零缓冲取地址，内容在材料化时拷入（破指针环）
+    /// - 函数/vtable：泄漏 1 字节占位（解释器读 vtable 走 tcx 查询，不读字节）
+    /// - TypeId：基址 0（偏移即哈希片段，Miri 同款）
+    fn resolve_addr(
+        ecx: &InterpCx<'tcx, Self>,
+        alloc_id: AllocId,
+        kind: Option<MemoryKind<MirvmMemoryKind>>,
+    ) -> InterpResult<'tcx, u64> {
+        if let Some(a) = ecx.machine.addrs.borrow().base_of(alloc_id) {
+            return interp_ok(a);
+        }
+        let info = ecx.get_alloc_info(alloc_id);
+        let addr = match info.kind {
+            AllocKind::TypeId => 0,
+            AllocKind::LiveData => {
+                if kind == Some(MemoryKind::Machine(MirvmMemoryKind::Global)) {
+                    // 尚未材料化的全局：预分配缓冲（内容后到）
+                    let prepared =
+                        <MirvmAllocBytes as AllocBytes>::zeroed(info.size, info.align, ())
+                            .unwrap_or_else(|| {
+                                panic!("mirvm 内存不足：无法预分配 {:?} 字节", info.size)
+                            });
+                    let a = prepared.host_addr();
+                    ecx.machine.addrs.borrow_mut().prepared.insert(alloc_id, prepared);
+                    a
+                } else {
+                    // 机器内分配已在内存表：取真实缓冲地址
+                    ecx.get_alloc_bytes_unchecked_raw(alloc_id)? as u64
+                }
+            }
+            AllocKind::Dead => {
+                unreachable!("resolve_addr 只应在活分配上调用（{alloc_id:?} 已死）")
+            }
+            // Function / VTable（以及未来的类似 kind）：唯一占位地址
+            _ => {
+                let dummy = <MirvmAllocBytes as AllocBytes>::from_bytes(
+                    Cow::Borrowed(&[0u8][..]),
+                    Align::ONE,
+                    (),
+                );
+                let a = dummy.host_addr();
+                std::mem::forget(dummy); // 泄漏以保住地址唯一性
+                a
+            }
+        };
+        ecx.machine.addrs.borrow_mut().register(alloc_id, addr);
+        interp_ok(addr)
+    }
+
+    /// 全局分配的字节缓冲：优先取走预分配的那块（保持地址一致），拷入内容。
+    fn global_alloc_bytes(
+        ecx: &InterpCx<'tcx, Self>,
+        id: AllocId,
+        bytes: &[u8],
+        align: Align,
+    ) -> InterpResult<'tcx, MirvmAllocBytes> {
+        // 确保地址（及预分配缓冲）存在——材料化可能先于任何指针创建发生
+        Self::resolve_addr(ecx, id, Some(MemoryKind::Machine(MirvmMemoryKind::Global)))?;
+        if let Some(mut prepared) = ecx.machine.addrs.borrow_mut().prepared.remove(&id) {
+            assert_eq!(prepared.len(), bytes.len(), "预分配缓冲大小不符");
+            prepared.copy_from_slice(bytes);
+            return interp_ok(prepared);
+        }
+        // 不该到这（除非 kind 判断遗漏）；退化为新缓冲——地址与已发指针不一致，
+        // 仅影响 FFI 直传该分配的场景
+        interp_ok(<MirvmAllocBytes as AllocBytes>::from_bytes(Cow::Borrowed(bytes), align, ()))
     }
 
     /// 分配器 shim 符号表（Miri 同款：拿 codegen 会生成的 shim 内容清单）。
@@ -207,9 +270,9 @@ impl<'tcx> rustc_const_eval::interpret::Machine<'tcx> for MirvmMachine<'tcx> {
     type ExtraFnVal = Symbol;
     type FrameExtra = FrameExtra<'tcx>;
     type AllocExtra = ();
-    type Bytes = Box<[u8]>;
+    type Bytes = MirvmAllocBytes;
     type MemoryMap =
-        MonoHashMap<AllocId, (MemoryKind<MirvmMemoryKind>, Allocation<Prov, (), Box<[u8]>>)>;
+        MonoHashMap<AllocId, (MemoryKind<MirvmMemoryKind>, Allocation<Prov, (), MirvmAllocBytes>)>;
 
     const GLOBAL_KIND: Option<MirvmMemoryKind> = Some(MirvmMemoryKind::Global);
     const PANIC_ON_ALLOC_FAIL: bool = false;
@@ -415,24 +478,28 @@ impl<'tcx> rustc_const_eval::interpret::Machine<'tcx> for MirvmMachine<'tcx> {
         ecx: &mut InterpCx<'tcx, Self>,
         def_id: DefId,
     ) -> InterpResult<'tcx, Pointer<Prov>> {
-        if let Some(&ptr) = ecx.machine.tls_statics.get(&def_id) {
+        if let Some(&ptr) = ecx.machine.threads.active().tls_statics.get(&def_id) {
             return interp_ok(ptr);
         }
         if ecx.tcx.is_foreign_item(def_id) {
             throw_unsup_format!("不支持 foreign thread-local static");
         }
-        // 单线程：给每个 TLS static 一份可变实例（Miri get_or_create_thread_local_alloc 同款）
+        // 每线程一份可变实例（Miri get_or_create_thread_local_alloc 同款）
         let alloc = ecx.tcx.eval_static_initializer(def_id)?;
         let mut alloc = alloc.inner().adjust_from_tcx(
             &ecx.tcx,
             |bytes, align| {
-                interp_ok(<Box<[u8]> as AllocBytes>::from_bytes(Cow::Borrowed(bytes), align, ()))
+                interp_ok(<MirvmAllocBytes as AllocBytes>::from_bytes(
+                    Cow::Borrowed(bytes),
+                    align,
+                    (),
+                ))
             },
             |ptr| ecx.global_root_pointer(ptr),
         )?;
         alloc.mutability = rustc_hir::Mutability::Mut;
         let ptr = ecx.insert_allocation(alloc, MemoryKind::Machine(MirvmMemoryKind::Tls))?;
-        ecx.machine.tls_statics.insert(def_id, ptr);
+        ecx.machine.threads.active_mut().tls_statics.insert(def_id, ptr);
         interp_ok(ptr)
     }
 
@@ -483,28 +550,25 @@ impl<'tcx> rustc_const_eval::interpret::Machine<'tcx> for MirvmMachine<'tcx> {
     fn adjust_alloc_root_pointer(
         ecx: &InterpCx<'tcx, Self>,
         ptr: Pointer<CtfeProvenance>,
-        _kind: Option<MemoryKind<MirvmMemoryKind>>,
+        kind: Option<MemoryKind<MirvmMemoryKind>>,
     ) -> InterpResult<'tcx, Pointer<Prov>> {
         let (prov, offset) = ptr.prov_and_relative_offset();
         let alloc_id = prov.alloc_id();
-        let info = ecx.get_alloc_info(alloc_id);
-        let base = ecx.machine.addrs.borrow_mut().addr_for(alloc_id, info.size, info.align);
+        let base = Self::resolve_addr(ecx, alloc_id, kind)?;
         interp_ok(Pointer::new(
             Prov::Concrete(alloc_id),
-            Size::from_bytes(base + offset.bytes()),
+            Size::from_bytes(base.wrapping_add(offset.bytes())),
         ))
     }
 
     fn adjust_global_allocation<'b>(
         ecx: &InterpCx<'tcx, Self>,
-        _id: AllocId,
+        id: AllocId,
         alloc: &'b Allocation,
-    ) -> InterpResult<'tcx, Cow<'b, Allocation<Prov, (), Box<[u8]>>>> {
+    ) -> InterpResult<'tcx, Cow<'b, Allocation<Prov, (), MirvmAllocBytes>>> {
         let alloc = alloc.adjust_from_tcx(
             &ecx.tcx,
-            |bytes, align| {
-                interp_ok(<Box<[u8]> as AllocBytes>::from_bytes(Cow::Borrowed(bytes), align, ()))
-            },
+            |bytes, align| Self::global_alloc_bytes(ecx, id, bytes, align),
             |ptr| ecx.global_root_pointer(ptr),
         )?;
         interp_ok(Cow::Owned(alloc))
@@ -540,7 +604,7 @@ impl<'tcx> rustc_const_eval::interpret::Machine<'tcx> for MirvmMachine<'tcx> {
         ecx: &mut InterpCx<'tcx, Self>,
         frame: Frame<'tcx, Prov>,
     ) -> InterpResult<'tcx, Frame<'tcx, Prov, FrameExtra<'tcx>>> {
-        if ecx.machine.stack.len() >= 1_000_000 {
+        if ecx.machine.threads.active_stack().len() >= 1_000_000 {
             throw_exhaust!(StackFrameLimitReached);
         }
         interp_ok(frame.with_extra(FrameExtra::default()))
@@ -550,14 +614,14 @@ impl<'tcx> rustc_const_eval::interpret::Machine<'tcx> for MirvmMachine<'tcx> {
     fn stack<'a>(
         ecx: &'a InterpCx<'tcx, Self>,
     ) -> &'a [Frame<'tcx, Prov, FrameExtra<'tcx>>] {
-        &ecx.machine.stack
+        ecx.machine.threads.active_stack()
     }
 
     #[inline(always)]
     fn stack_mut<'a>(
         ecx: &'a mut InterpCx<'tcx, Self>,
     ) -> &'a mut Vec<Frame<'tcx, Prov, FrameExtra<'tcx>>> {
-        &mut ecx.machine.stack
+        ecx.machine.threads.active_stack_mut()
     }
 
     fn after_stack_pop(
@@ -571,7 +635,7 @@ impl<'tcx> rustc_const_eval::interpret::Machine<'tcx> for MirvmMachine<'tcx> {
                 rustc_middle::mir::interpret::Scalar::from_uint(1u128, catch.dest.layout.size),
                 &catch.dest,
             )?;
-            let payload = ecx.machine.unwind_payloads.pop().unwrap();
+            let payload = ecx.machine.threads.active_mut().unwind_payloads.pop().unwrap();
             let f = ecx.get_ptr_fn(catch.catch_fn)?.as_instance()?;
             ecx.call_function(
                 f,
@@ -598,7 +662,7 @@ impl<'tcx> rustc_const_eval::interpret::Machine<'tcx> for MirvmMachine<'tcx> {
     }
 
     #[inline(always)]
-    fn get_default_alloc_params(&self) -> <Box<[u8]> as AllocBytes>::AllocParams {}
+    fn get_default_alloc_params(&self) -> <MirvmAllocBytes as AllocBytes>::AllocParams {}
 }
 
 use rustc_middle::span_bug;
