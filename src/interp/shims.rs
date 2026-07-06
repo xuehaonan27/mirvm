@@ -75,6 +75,94 @@ pub fn emulate_foreign_item<'tcx>(
     interp_ok(None)
 }
 
+/// libm 数学函数（宿主 f64 直算）。返回 None = 非数学函数。
+/// 覆盖 f64 单/双参数版与 f32（`...f`）版；结果与 libm/SSE 逐位一致（host==target）。
+fn emulate_libm<'tcx>(
+    ecx: &mut MirvmInterpCx<'tcx>,
+    name: &str,
+    args: &[OpTy<'tcx, Prov>],
+    dest: &PlaceTy<'tcx, Prov>,
+) -> InterpResult<'tcx, Option<EmulateItemResult>> {
+    // f32 版：去掉尾缀 'f' 后按 f64 逻辑算，再窄化
+    let (base, is_f32) = match name.strip_suffix('f') {
+        Some(b) if is_libm_name(b) => (b, true),
+        _ => (name, false),
+    };
+    if !is_libm_name(base) {
+        return interp_ok(None);
+    }
+
+    use rustc_apfloat::Float as _;
+    let rd = |ecx: &mut MirvmInterpCx<'tcx>, i: usize| -> InterpResult<'tcx, f64> {
+        let s = ecx.read_scalar(&args[i])?;
+        interp_ok(if is_f32 {
+            f32::from_bits(s.to_f32()?.to_bits() as u32) as f64
+        } else {
+            f64::from_bits(s.to_f64()?.to_bits() as u64)
+        })
+    };
+    let a = rd(ecx, 0)?;
+    let r: f64 = match base {
+        "sqrt" => a.sqrt(),
+        "cbrt" => a.cbrt(),
+        "sin" => a.sin(),
+        "cos" => a.cos(),
+        "tan" => a.tan(),
+        "asin" => a.asin(),
+        "acos" => a.acos(),
+        "atan" => a.atan(),
+        "sinh" => a.sinh(),
+        "cosh" => a.cosh(),
+        "tanh" => a.tanh(),
+        "exp" => a.exp(),
+        "exp2" => a.exp2(),
+        "expm1" => a.exp_m1(),
+        "log" => a.ln(),
+        "log2" => a.log2(),
+        "log10" => a.log10(),
+        "log1p" => a.ln_1p(),
+        "floor" => a.floor(),
+        "ceil" => a.ceil(),
+        "round" => a.round(),
+        "trunc" => a.trunc(),
+        "fabs" => a.abs(),
+        "rint" | "nearbyint" => a.round_ties_even(),
+        // 双参数
+        "pow" => a.powf(rd(ecx, 1)?),
+        "fmod" => a % rd(ecx, 1)?,
+        "hypot" => a.hypot(rd(ecx, 1)?),
+        "atan2" => a.atan2(rd(ecx, 1)?),
+        "copysign" => a.copysign(rd(ecx, 1)?),
+        "fmin" => a.min(rd(ecx, 1)?),
+        "fmax" => a.max(rd(ecx, 1)?),
+        "fdim" => (a - rd(ecx, 1)?).max(0.0),
+        "ldexp" | "scalbn" => a * 2f64.powi(ecx.read_scalar(&args[1])?.to_i32()?),
+        _ => unreachable!(),
+    };
+    let scalar = if is_f32 {
+        rustc_middle::mir::interpret::Scalar::from_f32(rustc_apfloat::ieee::Single::from_bits(
+            (r as f32).to_bits() as u128,
+        ))
+    } else {
+        rustc_middle::mir::interpret::Scalar::from_f64(rustc_apfloat::ieee::Double::from_bits(
+            r.to_bits() as u128,
+        ))
+    };
+    ecx.write_scalar(scalar, dest)?;
+    interp_ok(Some(EmulateItemResult::NeedsReturn))
+}
+
+fn is_libm_name(n: &str) -> bool {
+    matches!(
+        n,
+        "sqrt" | "cbrt" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan"
+            | "sinh" | "cosh" | "tanh" | "exp" | "exp2" | "expm1" | "log" | "log2"
+            | "log10" | "log1p" | "floor" | "ceil" | "round" | "trunc" | "fabs"
+            | "rint" | "nearbyint" | "pow" | "fmod" | "hypot" | "atan2" | "copysign"
+            | "fmin" | "fmax" | "fdim" | "ldexp" | "scalbn"
+    )
+}
+
 /// 遍历"最终二进制会链接到"的全部 def（本地 crate + 依赖的导出符号）。
 /// 服务于按符号名找函数与 .init_array 静态量扫描（Miri iter_exported_symbols 同构）。
 pub fn for_each_linked_def<'tcx>(
@@ -210,6 +298,11 @@ fn emulate_by_name<'tcx>(
     args: &[OpTy<'tcx, Prov>],
     dest: &PlaceTy<'tcx, Prov>,
 ) -> InterpResult<'tcx, EmulateItemResult> {
+    // libm 数学函数：用宿主 f64 直算（target==host 逐位一致）。放在最前，
+    // 否则会被 compiler_builtins 的 Rust 实现（内联汇编）遮蔽。
+    if let Some(res) = emulate_libm(ecx, name, args, dest)? {
+        return interp_ok(res);
+    }
     match name {
         // ===== I/O =====
         "write" => {

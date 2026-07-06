@@ -19,11 +19,25 @@ check() {
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
-# 1) frontmatter 脚本：mirvm 物化的项目目录直接给 native cargo 用
-"$MIRVM" run demo/ecosystem.rs >"$TMP/eco.mirvm" 2>/dev/null; mc=$?
-D=$(ls -d ~/.cache/mirvm/scripts/*/ | head -1)
-(cd "$D" && "$CARGO" run -q >"$TMP/eco.native" 2>/dev/null); nc=$?
-check ecosystem "$TMP/eco.native" "$TMP/eco.mirvm" "$nc" "$mc"
+# 定位 frontmatter 脚本物化出的项目目录（按 Cargo.toml 里的 crate 名匹配）
+script_dir() {
+    local stem="$1"
+    grep -l "name = \"$stem\"" ~/.cache/mirvm/scripts/*/Cargo.toml 2>/dev/null |
+        head -1 | xargs -r dirname
+}
+
+# frontmatter 脚本：mirvm 物化的项目目录直接给 native cargo 用
+diff_script() {
+    local name="$1" src="$2" stem="$3"
+    "$MIRVM" run "$src" >"$TMP/$name.mirvm" 2>/dev/null; local mc=$?
+    local D; D=$(script_dir "$stem")
+    if [ -z "$D" ]; then echo "FAIL $name (未找到物化目录)"; fail=$((fail+1)); return; fi
+    (cd "$D" && "$CARGO" run -q >"$TMP/$name.native" 2>/dev/null); local nc=$?
+    check "$name" "$TMP/$name.native" "$TMP/$name.mirvm" "$nc" "$mc"
+}
+
+diff_script ecosystem demo/ecosystem.rs ecosystem
+diff_script ffi_zlib demo/ffi_zlib.rs ffi_zlib
 
 # 2) cargo 项目模式
 PROJ="$TMP/proj"; mkdir -p "$PROJ/src"

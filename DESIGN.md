@@ -121,8 +121,29 @@
     （MirvmAllocBytes 真对齐分配）；全局分配"预分配缓冲、内容后到"破指针环；
     函数/vtable 泄漏占位地址；TypeId 基址 0。debug 构建下每次 write 校验
     "guest 地址直读 = 解释器视角"不变式。实现笔记见下。
-  - libffi 原生 FFI（地基已备好：guest 指针即宿主指针，可直传 native 代码）
+  - ✅ **libffi 原生 FFI**（2026-07-05）：dlsym（RTLD_DEFAULT + 按 `-l` 指令 dlopen）
+    + FnAbi→ffi_type 编组 + native 写内存暴露。危险符号黑名单（pthread_/exec/fork/exit）。
+    验收：直调 libc（abs/sqrt/strlen/memcmp）+ **libz-sys 真 C 库 compress/uncompress
+    往返**与 native 逐字节一致（diff 14/14 + cargo 3/3）。实现笔记见下。
   - corpus 驱动补全（rayon/chrono/clap/itertools/anyhow/csv/...），异步生态评估（epoll）
+
+**libffi FFI 实现笔记（2026-07-05）**：
+- 真实地址内存是前提：guest 指针的绝对地址就是宿主地址，直接编组进 ffi 调用，
+  native 代码读写 guest 缓冲无需任何翻译（uncompress 写回 `deco` 即被解释器看见）。
+- 解析顺序：shims（含 libm 数学）→ 导出 Rust 符号 → native 库。前两者优先保证
+  我们的语义/性能特化不被 native 遮蔽。
+- **踩坑：compiler_builtins 遮蔽 libc**。guest 声明的 `extern "C" sqrt` 被
+  find_exported_symbol 先解析到 compiler_builtins 的 Rust sqrt（内联汇编 sqrtsd，
+  InterpCx 不支持 asm）。解法：libm 数学函数（sqrt/sin/pow/... 37 个）加 shim 用
+  宿主 f64 直算（target==host → 与 sqrtsd/libm 逐位一致），排在 find_exported_symbol
+  之前。apfloat↔host f64 经 to_bits/from_bits（Float trait）转换。
+- **踩坑：未引用的 -sys crate 链接指令被丢弃**。这是 native 侧的坑（不是 mirvm）：
+  手写 extern 而不碰 libz_sys 任何符号 → native 链接丢掉 `-l z` → 链接失败；
+  mirvm 反而成功（运行期按 cargo 的 -l z dlopen）。测试改为直接调 libz_sys 符号。
+- native 写内存：调用前对指针实参可达的可变分配做 process_native_write（标记全初始化、
+  provenance 退化 wildcard——真实地址下仍可解引用）；返回字节同理。errno 调用后同步。
+- v1 限制：仅标量/指针参数与返回（按值结构体不支持）；无变参；native 自 malloc 的
+  内存 guest 不可解引用（Miri 同款）；C→Rust 回调后置（Miri 也未完全解决）。
 
 **真实地址内存实现笔记（2026-07-05）**：
 - `Box<[u8]>` 只保证 1 字节对齐——真实地址模式必须换自定义 AllocBytes
@@ -265,6 +286,13 @@ getenv 查表）。仍存偏差：主线程名 `<unnamed>`、退出不跑 rt cle
   并行程序的差分测试需依赖确定性模式或输出不变式（不能逐字节比时序敏感输出）。
 - **C7 分层执行的性能基准**：regex 编译（DFA 构建 + Unicode 表）42s 案例是 1 号
   基准；VM 设计评审时必须给出该案例的预估收益。
+- **C9 FFI 与 native 写内存（2026-07-05，libffi 落地后追加）**：真实地址让 FFI 廉价
+  （guest 指针即宿主指针，零翻译直传）。VM tier 保持此性质：字节码的内存操作直接
+  访问真址，FFI 编组不变。native 可写 guest 内存 → 值表示（C6 关联）不能假设"只有
+  解释器写内存"；provenance 经 native 后退化 wildcard 是可接受语义（fast 立场）。
+  并行 tier 下 native 调用与 guest 线程并发访问同一分配 = guest 自身的竞争责任（C4）。
+  数学函数（libm）用宿主直算而非解释——VM tier 应保留这类"逃逸到宿主"的快捷通道
+  （intrinsic 化），因为 target==host 时逐位一致且远快于解释。
 - **C8 1:1 并行执行架构草图（2026-07-05，并发架构 RFC 的种子）**：
   - 分层：**线程语义层永久**（生命周期/join/TLS/panic 传播/futex 语义/线程表），
     协作式调度器亦永久（= 确定性模式）；两者之间以 `ThreadStrategy` 边界隔离——
