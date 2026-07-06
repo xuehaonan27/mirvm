@@ -200,7 +200,7 @@ GIL/协作串行执行下所有内存操作按单一全序（顺序一致），*
 
 **tier 0 = bootstrap，不是终点。** InterpCx 是 rustc 的解释基础设施（Miri 也建在其上），它让我们**站在正确的 RAM 语义上快速起步**；但它不 Sync（§5）、AllocId 间接寻址慢（fib(27) 微基准解释 ≈1.6s vs native debug 4ms）。M4 自研字节码 VM 才是 VM 作者要掌控的核心，届时 InterpCx 退居差分 oracle。
 
-**M4 帧栈模型：倾向 A（guest 帧在 native 栈，HotSpot/V8 式）**。详细机制对照见 [docs/frame-stack-models.md](docs/frame-stack-models.md)。理由（greenfield + JIT 硬约束）：JIT 必做且用 Cranelift（方法级），A 下解释帧与编译帧同在 native 栈 → interp↔compiled 廉价适配（i2c/c2i），B 要建拆 VM 帧 + 两栈联合 unwind；B 的看家优势（协程/挂起）因真 OS 线程 + Rust 无栈 async 对我们无关；A 天然栈溢出忠实。关键认识：JIT-VM 里解释器是**冷层**，A"解释器更难写"的代价权重大降。**当前 tier-0 是 B1（错误实现，待推倒）。** 代价：M4/M5 强耦合，帧布局+调用约定须与 Cranelift 共同设计（见 C11）。
+**M4 帧栈模型：倾向 A（guest 帧在 native 栈，HotSpot/V8 式）**。详细机制对照见 [docs/frame-stack-models.md](docs/frame-stack-models.md)；帧布局/调用约定/字节码格式的 M4 设计草图见 [docs/frame-abi-bytecode.md](docs/frame-abi-bytecode.md)。理由（greenfield + JIT 硬约束）：JIT 必做且用 Cranelift（方法级），A 下解释帧与编译帧同在 native 栈 → interp↔compiled 廉价适配（i2c/c2i），B 要建拆 VM 帧 + 两栈联合 unwind；B 的看家优势（协程/挂起）因真 OS 线程 + Rust 无栈 async 对我们无关；A 天然栈溢出忠实。关键认识：JIT-VM 里解释器是**冷层**，A"解释器更难写"的代价权重大降。**当前 tier-0 是 B1（错误实现，待推倒）。** 代价：M4/M5 强耦合，帧布局+调用约定须与 Cranelift 共同设计（见 C11）；头号硬骨头 = 混合栈 unwind（frame-abi-bytecode.md §7，M4 前置 spike）。
 
 ---
 
@@ -275,6 +275,12 @@ src/os/
 - **C9 FFI/native 写内存**（§7）：真实地址让 FFI 零编组；一个地址空间两种代码碰两个堆（native 写 Rust Heap；解释器对 Native Heap 指针回退裸宿主访问——运行时可，检查器不可）；值表示不能假设"只有解释器写内存"；libm 逃逸宿主直算通道 VM tier 要保留（intrinsic 化）。
 - **C10 边界与拦截（§7，2026-07-05 三次修正）**：拦截只在**解释代码的 foreign-call 边界**，**绝不广泛拦截 native 操作（工程灾难）**。动机——**归属+元数据**（`__rust_alloc`→托管 Rust Heap，MIR 层拦；`libc::malloc`→真 libc→Native Heap 直通）/ **真线程最小介入**（只 pthread_create 插蹦床，余皆真 libc 直通）/ **纯直通**（真资源，handler 转发真 OS）。inline asm 无调用边界，只能模拟或函数级拦。native 内部/裸指针调用看不见，记录为限制。沙箱：OS 级(seccomp)管安全，mirvm 钩子仅虚拟化。
 - **C11 帧栈模型 = A（guest 帧在 native 栈，2026-07-05 定，详见 docs/frame-stack-models.md）**：greenfield + JIT 硬约束下选 A（HotSpot/V8 式），非 B（CPython/Lua）。因 Cranelift 是方法级 JIT，A 下解释帧+编译帧同在 native 栈 → interp↔compiled 廉价适配（i2c/c2i），B 要建拆 VM 帧+两栈联合 unwind/backtrace；B 看家优势（协程/栈式挂起）因真 OS 线程+Rust async 无栈对我们无关；A 天然栈溢出忠实。**JIT-VM 里解释器是冷层 → A"解释器难写"代价权重大降，可起步简单（tree-walking），力气花 JIT 集成。** 每 guest 线程用其 OS 线程 native 栈放 guest 帧。**推论：M4/M5 强耦合——帧布局+调用约定须与 Cranelift 共同设计，先于 M4 定（并入并发 RFC/帧约定规格）。** 当前 tier-0 B1 是待推倒的错误实现。重估 B 仅当将来要栈式协程（明确不做）。
+- **C12 JIT 后端 + 字节码 + 分发（2026-07-05 定，详见 docs/frame-abi-bytecode.md §7.5）**：
+  - **JIT = Cranelift，藏在 `JITBackend` trait 后**（P7 同纪律，copy-and-patch 备选）。为 JIT 而生、≈10× 快于 LLVM 编译、质量≈debug build（正合目标）；**cg_clif 已趟通 MIR→Cranelift+Rust ABI+unwinding**，复用。耦合可控：抽不掉的只有调用约定（=Rust ABI，我们本就用）+ unwind 模型（=Rust 原生 landing-pad，逃不掉），**都非 Cranelift 特有**；不为它牺牲内存/线程/元数据模型。
+  - **unwind = 候选 A**（复用 Cranelift landing-pad + Rust personality，因 JIT 定 Cranelift）；候选 B（自研栈行走）兜底。头号 M4 前置 spike。
+  - **字节码贴近 MIR**（不下沉 CLIF）→ 解释器与 JIT 共享 MIR 级真理源、复用 cg_clif。**两级结构**：mirvmc（rustc 前端全 check → **Stable MIR/rustc_public + serde** → .mirvm 分发件，= .class/.jar 类比）；运行期"class loading"（按 target 冻结 layout C8 → 解释器寄存器字节码 + 喂 Cranelift，每平台一次缓存）。版本绑定诚实（classfile 版本号式，semver 转换）。
+  - **分发格式 = 多 target 打包（定，2026-07-05 用户确认）**：**单产物跑任意 target 对完整 Rust 理论上不可能**（cfg 编译期按 target 剪枝=字面不同的程序 + usize/可观测 layout/const-eval；Java 能因无编译期 cfg/JVM 定 layout/定长基本类型，Rust 三条全违反=语言固有）。**采纳 fat artifact**：mirvmc 对 N 个 triple 各跑前端、打包 N 段（`.mirvm` 容器 = target 索引 + 各段 Stable-MIR），运行期挑匹配段 load → 消费端零工具链、覆盖常见平台、运行期可 JIT。os:: 每平台 build 时选定，与分发格式无关。
+  - **迁移承诺**：slaved 操作数区仅 v0，**后续必换 alloca**（真内联 native 栈；Rust 里需 unsafe/crate）。
 
 ### 工程决策
 
