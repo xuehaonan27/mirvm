@@ -249,6 +249,13 @@ signal-thunk、pthread start_routine thunk 都落在这条既有路径上，且*
 
 二者都正确（边界已由 TLS 兜住），差异是纯性能/工程，**等 Spike/M4 有了真 Cranelift 管线再拿数据定**。
 
+**Spike 5 初判数据（2026-07-07，docs/spike5-cranelift-adapters.md）**：两变体都在真 Cranelift 上
+实现并全对（`enable_pinned_reg`/`get/set_pinned_reg` 开箱即用；R 的 f_boundary 按 §5 图实现：
+save→set→call fast→restore，宿主 callee-saved 语义保持，重入幂等）。fib(30) 直接调用微基准：
+**R（pinned r15）5.47ms vs P（显式参）5.90ms——R 快 ~8%**；vcode 坐实 P 的 threading 税
+（每帧 ctx 进 callee-saved + 每调用点重装）、R 内部直调零 ctx 搬运。初判 R 无一处输于 P 且
+多入口结构已实证；**终裁仍留 M4 真负载**（非代表性微基准，勿过度解读）。
+
 ---
 
 ## 6. 对比总表与先例
@@ -274,9 +281,12 @@ V8=寄存器缓存+TLS。mirvm 因为 plain-C FFI 没有走私通道，边界只
   被 §1 三条约束逼定，无备选。
 - **已定**：skeleton/Spike 阶段用 (a) 显式参——手写验证最干净，Spike 2 已用它验证适配器模型；
   Spike 3（unwind）正交，继续用 (a)。
-- **待 M4 定**：内部约定 = 显式 vmctx 参 vs pinned r15（§5.2，等真 Cranelift 管线拿数据）。
+- **待 M4 定（已有 Spike 5 初判数据）**：内部约定 = 显式 vmctx 参 vs pinned r15（§5.2）。
+  Spike 5 用真 Cranelift 两者都实现并全对，**R 快 ~8% 且多入口结构（f_boundary）已实证**；
+  终裁留 M4 真负载。
 - **开放**：attach 的生命周期语义（外来线程的执行态何时回收——JNI 要求显式 Detach，Go 用
-  m 池化；与线程退出钩子/TLS 析构交互）；f_boundary 入口与 unwind info 的交互（Spike 3 输入）。
+  m 池化；与线程退出钩子/TLS 析构交互）；f_boundary 入口与 unwind info 的交互（Spike 5 已验
+  CFI 半边：JIT 帧 eh_frame 注册后宿主 panic 正确穿过，含 R 的 pinned 入口）。
 
 关联：frame-abi-bytecode.md §10.7（开放问题挂点）、§8（thunk 重入）、concurrency-arch.md
 （每线程执行态）、corpus §2.3（signal 需 thunk——本文 §5.1 收窄其范围）、

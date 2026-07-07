@@ -257,6 +257,13 @@ unwind_edge（动态 LSDA）+ region 恢复；编译帧 = 静态 LSDA + landing 
 天然逐帧内层先，VM 侧零协调。残余：真 Cranelift LSDA 发射留 M4 复核（与 vmctx 内部约定同一检查点）；
 JIT 调用约定必须 unwind-capable（plain "C" = abort shim，恰给跨 FFI abort 兜底）。
 
+**Spike 5 收窄残余（2026-07-07，docs/spike5-cranelift-adapters.md）**：**CFI 传播已用真 Cranelift
+验证**——`create_unwind_info` → gimli .eh_frame → `__register_frame` 自注册后，guest panic 正确
+穿过真 JIT 帧（裸跑如预期 SIGABRT：cranelift-jit 不注册系统 eh_frame；其 wasmtime-unwinder 异常
+路线与宿主 unwinder 不互操作，**正式不采**）。M4 仅剩 **landing pad/LSDA**（JIT 帧内跑 drop glue
++ catch，cg_clif personality/异常表先例）。i2c/c2i/cc→cc 直调也已真 Cranelift 坐实（§3 适配器
+模型从替身升级为实证）。
+
 跨 FFI（panic 要穿 native C 帧）：**abort**，与 native 一致（两候选都如此）。
 
 ---

@@ -13,3 +13,5 @@ pub mod spike1;
 pub mod spike2;
 pub mod spike3;
 pub mod spike4;
+#[cfg(feature = "cranelift")]
+pub mod spike5;

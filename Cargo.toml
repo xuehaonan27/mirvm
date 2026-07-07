@@ -4,8 +4,28 @@ version = "0.0.1"
 edition = "2024"
 publish = false
 
+[features]
+# cranelift：真 JIT 接入（spike5 起）。tsan/ harness 不开此 feature → spike5 被排除，
+# TSan 通道不受重依赖影响（引擎核心隔离纪律的延伸）。
+default = ["cranelift"]
+cranelift = [
+    "dep:cranelift-codegen",
+    "dep:cranelift-frontend",
+    "dep:cranelift-jit",
+    "dep:cranelift-module",
+    "dep:cranelift-native",
+    "dep:gimli",
+]
+
 [dependencies]
 anyhow = "1.0.103"
+# cranelift 家族版本锁一致；gimli 与 cranelift-codegen 内部所用对齐（类型互通）
+cranelift-codegen = { version = "0.133.1", optional = true, features = ["unwind"] }
+cranelift-frontend = { version = "0.133.1", optional = true }
+cranelift-jit = { version = "0.133.1", optional = true }
+cranelift-module = { version = "0.133.1", optional = true }
+cranelift-native = { version = "0.133.1", optional = true }
+gimli = { version = "0.33", optional = true, default-features = false, features = ["write"] }
 libc = "0.2.186"
 libffi = "5"
 rustc-build-sysroot = "0.5.13"
