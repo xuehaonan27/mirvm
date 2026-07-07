@@ -52,7 +52,32 @@ pub fn call_intrinsic<'tcx>(
             ecx.return_to_block(ret)?;
             return interp_ok(None);
         }
+        // volatile 读写：协作式单线程下等同普通读写（无编译器重排、每 step 原子）。
+        // copy_op 处理任意布局（标量/标量对/聚合）。
+        "volatile_load" | "unaligned_volatile_load" => {
+            let ptr = ecx.read_pointer(&args[0])?;
+            let pointee = args[0].layout.ty.builtin_deref(true).unwrap();
+            let layout = ecx.layout_of(pointee)?;
+            let src = ecx.ptr_to_mplace(ptr, layout);
+            ecx.copy_op(&src, dest)?;
+            ecx.return_to_block(ret)?;
+            return interp_ok(None);
+        }
+        "volatile_store" | "unaligned_volatile_store" => {
+            let ptr = ecx.read_pointer(&args[0])?;
+            let dst = ecx.ptr_to_mplace(ptr, args[1].layout);
+            ecx.copy_op(&args[1], &dst)?;
+            ecx.return_to_block(ret)?;
+            return interp_ok(None);
+        }
         _ => {}
+    }
+
+    // 3.5) libm 系数学 intrinsic（powf64/sqrtf64/sinf64/...）：复用 shims 的宿主直算表。
+    //      float 数学 intrinsic 是普遍缺口（任何数值代码都碰），一次性桥接。
+    if try_math_intrinsic(ecx, name, args, dest)?.is_some() {
+        ecx.return_to_block(ret)?;
+        return interp_ok(None);
     }
 
     // 4) fallback body（rustc 给很多 intrinsic 配了参考实现）
@@ -65,6 +90,64 @@ pub fn call_intrinsic<'tcx>(
 
     let _ = unwind;
     throw_unsup_format!("mirvm: 尚未实现的 intrinsic `{name}`");
+}
+
+/// float 数学 intrinsic → 宿主直算。名带显式位宽（`powf64`/`sqrtf32`），
+/// 翻译成 libm 命名后复用 shims::emulate_libm；powi/fma 无 libm 对应，特殊处理。
+/// 返回 None = 非数学 intrinsic（调用方继续走后续路径）。
+fn try_math_intrinsic<'tcx>(
+    ecx: &mut MirvmInterpCx<'tcx>,
+    name: &str,
+    args: &[OpTy<'tcx, Prov>],
+    dest: &PlaceTy<'tcx, Prov>,
+) -> InterpResult<'tcx, Option<()>> {
+    use rustc_apfloat::Float as _;
+    let (base, is_f32) = if let Some(b) = name.strip_suffix("f64") {
+        (b, false)
+    } else if let Some(b) = name.strip_suffix("f32") {
+        (b, true)
+    } else {
+        return interp_ok(None);
+    };
+
+    let rd = |ecx: &mut MirvmInterpCx<'tcx>, i: usize| -> InterpResult<'tcx, f64> {
+        let s = ecx.read_scalar(&args[i])?;
+        interp_ok(if is_f32 {
+            f32::from_bits(s.to_f32()?.to_bits() as u32) as f64
+        } else {
+            f64::from_bits(s.to_f64()?.to_bits() as u64)
+        })
+    };
+
+    // powi（整数幂）/ fma（a*b+c）：libm 表里没有，直接算。
+    if let "powi" | "fma" | "fmuladd" = base {
+        let a = rd(ecx, 0)?;
+        let r = match base {
+            "powi" => a.powi(ecx.read_scalar(&args[1])?.to_i32()?),
+            _ => a.mul_add(rd(ecx, 1)?, rd(ecx, 2)?),
+        };
+        let scalar = if is_f32 {
+            Scalar::from_f32(rustc_apfloat::ieee::Single::from_bits((r as f32).to_bits() as u128))
+        } else {
+            Scalar::from_f64(rustc_apfloat::ieee::Double::from_bits(r.to_bits() as u128))
+        };
+        ecx.write_scalar(scalar, dest)?;
+        return interp_ok(Some(()));
+    }
+
+    // 其余翻译成 libm 名（少数别名），复用 shims 的直算表。
+    let libm = match base {
+        "minnum" => "fmin",
+        "maxnum" => "fmax",
+        "roundeven" => "rint",
+        b => b,
+    };
+    let libm_name = if is_f32 { format!("{libm}f") } else { libm.to_string() };
+    if super::shims::emulate_libm(ecx, &libm_name, args, dest)?.is_some() {
+        interp_ok(Some(()))
+    } else {
+        interp_ok(None)
+    }
 }
 
 /// catch_unwind(try_fn, data, catch_fn) -> i32（0 正常 / 1 捕获到 panic）。

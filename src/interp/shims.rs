@@ -77,7 +77,7 @@ pub fn emulate_foreign_item<'tcx>(
 
 /// libm 数学函数（宿主 f64 直算）。返回 None = 非数学函数。
 /// 覆盖 f64 单/双参数版与 f32（`...f`）版；结果与 libm/SSE 逐位一致（host==target）。
-fn emulate_libm<'tcx>(
+pub(crate) fn emulate_libm<'tcx>(
     ecx: &mut MirvmInterpCx<'tcx>,
     name: &str,
     args: &[OpTy<'tcx, Prov>],
@@ -629,6 +629,15 @@ fn emulate_by_name<'tcx>(
             write_i32_ret(ecx, 0, dest)?;
         }
         "pthread_attr_init" | "pthread_attr_setstacksize" | "pthread_attr_destroy" => {
+            write_i32_ret(ecx, 0, dest)?;
+        }
+        // 良性线程元数据（非生命周期）：存名字，VM 内部处置，不直通 native。
+        "pthread_setname_np" => {
+            let tid = ecx.read_target_usize(&args[0])? as super::threads::ThreadId;
+            let name = read_c_bytes(ecx, ecx.read_pointer(&args[1])?)?;
+            if let Some(t) = ecx.machine.threads.get_mut(tid) {
+                t.name = String::from_utf8_lossy(&name).into_owned();
+            }
             write_i32_ret(ecx, 0, dest)?;
         }
         "sched_yield" => {
