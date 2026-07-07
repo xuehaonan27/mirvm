@@ -70,6 +70,25 @@ pub fn call_intrinsic<'tcx>(
             ecx.return_to_block(ret)?;
             return interp_ok(None);
         }
+        // float→int 未检查转换：fast machine 假设在界内（越界是 UB，程序自负），
+        // 直接宿主 as 转换 + 按 dest 位宽截断。
+        "float_to_int_unchecked" => {
+            use rustc_apfloat::Float as _;
+            let s = ecx.read_scalar(&args[0])?;
+            let f = if args[0].layout.ty == ecx.tcx.types.f32 {
+                f32::from_bits(s.to_f32()?.to_bits() as u32) as f64
+            } else {
+                f64::from_bits(s.to_f64()?.to_bits() as u64)
+            };
+            let size = dest.layout.size;
+            let scalar = match dest.layout.ty.kind() {
+                ty::Uint(_) => Scalar::from_uint(f as u128, size),
+                _ => Scalar::from_int(f as i128, size),
+            };
+            ecx.write_scalar(scalar, dest)?;
+            ecx.return_to_block(ret)?;
+            return interp_ok(None);
+        }
         _ => {}
     }
 

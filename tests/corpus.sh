@@ -7,7 +7,12 @@ MIRVM=${MIRVM:-$(pwd)/target/release/mirvm}
 OUT=${OUT:-/tmp/corpus-out}
 mkdir -p "$OUT"
 
-progs=(itertools anyhow rayon chrono indexmap clap csv crossbeam tokio blake3)
+# 可传程序名跑子集：bash tests/corpus.sh tempfile walkdir ...；不传 = 全量
+progs=("$@")
+if [ ${#progs[@]} -eq 0 ]; then
+    progs=(itertools anyhow rayon chrono indexmap clap csv crossbeam tokio blake3 \
+           tempfile walkdir numbigint smallvec bytes sha2 petgraph)
+fi
 pass=0 fail=0
 
 for p in "${progs[@]}"; do
