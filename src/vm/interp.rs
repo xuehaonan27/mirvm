@@ -50,6 +50,7 @@ impl<'p> Vm<'p> {
                 let addr = self.eval(base, *ptr);
                 unsafe { self.mem.load(addr) }
             }
+            rv => unreachable!("spike1 字节码子集不含并发构造: {rv:?}"),
         }
     }
 

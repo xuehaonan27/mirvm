@@ -38,6 +38,11 @@ pub enum Rvalue {
     Alloc(Operand),
     /// dst = *(ptr as *const u64)
     Load(Operand),
+    /// dst = 原子 fetch_add(SeqCst) 的旧值（ptr, val）。
+    /// 注：真字节码中原子按 MIR 形状是 intrinsic **调用**而非 Rvalue，此为 spike 速记；
+    /// 耐久要点（Spike 4）：解释器执行 guest 原子必须发**真宿主原子指令**
+    /// （普通读写在真线程下 = 引擎自身的数据竞争）。
+    AtomicAdd(Operand, Operand),
 }
 
 /// MIR `Statement` 的骨架版。

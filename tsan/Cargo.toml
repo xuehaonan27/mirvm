@@ -1,0 +1,15 @@
+[package]
+name = "mirvm-tsan"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+# 独立 crate（显式退出任何上层 workspace）：mirvm 主二进制链接 rustc_private 动态库
+# （未插桩 + 自带分配器），不能整体上 TSan；src/vm 是纯 Rust，经 #[path] 同源复用。
+[workspace]
+
+[dependencies]
+libc = "0.2"
+
+[profile.release]
+debug = true # TSan 报告带符号

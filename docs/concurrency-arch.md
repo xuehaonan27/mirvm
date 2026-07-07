@@ -5,6 +5,12 @@
 > C11/C12（模型 A、Cranelift、贴近 MIR 的字节码、多 target 打包）。
 > 目标：定清 VM tier 如何真并行、哪些状态怎么同步、C8 三招的具体形态、spike 验收（过 TSan）。
 > 与 frame-abi-bytecode.md 配套（帧/字节码那半），本文管"并发那半"，两者需共同成立（C11）。
+>
+> **Spike 4 验收通过（2026-07-07，docs/spike4-concurrency-tsan.md）**：8 真宿主线程并行混合
+> 执行（i2c/c2i 并发）+ 跨 tier 同址原子 + 阻塞 syscall 活性（corpus §2.1 场景收束）+ 并发混合栈
+> unwind，**TSan 全量插桩零竞争警告**。状态三分以 Shared（发布后只读）/Ctx（每线程私有）落地，
+> 引擎执行路径零锁。新增引擎义务：**解释器执行 guest 原子必须发真宿主原子指令**（tier-0 的普通
+> 读写模拟在真线程下 = 引擎自身数据竞争）。TSan 通道依赖"引擎核心零 rustc_private"（tsan/ harness）。
 
 ---
 

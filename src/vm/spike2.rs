@@ -175,6 +175,7 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> Word {
             let addr = eval_operand(ctx, base, *ptr);
             mem_load(ctx, addr)
         }
+        rv => unreachable!("spike2 字节码子集不含并发构造: {rv:?}"),
     }
 }
 

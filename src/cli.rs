@@ -33,6 +33,7 @@ DEV:
     mirvm spike1      跑模型 A 骨架 spike（差分自检，见 docs/spike1-model-a-skeleton.md）
     mirvm spike2      跑 interp↔compiled 适配 spike（见 docs/spike2-interp-compiled-adapters.md）
     mirvm spike3      跑混合栈 unwind spike（见 docs/spike3-mixed-stack-unwind.md）
+    mirvm spike4      跑并发 spike（TSan 判定见 tests/spike4_tsan.sh 与 docs/spike4-concurrency-tsan.md）
 ";
 
 pub fn main() -> ExitCode {
@@ -58,6 +59,7 @@ pub fn main() -> ExitCode {
         "spike1" => crate::vm::spike1::run(),
         "spike2" => crate::vm::spike2::run(),
         "spike3" => crate::vm::spike3::run(argv),
+        "spike4" => crate::vm::spike4::run(),
         _ => {
             eprint!("{USAGE}");
             ExitCode::from(2)
