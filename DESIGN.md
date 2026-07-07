@@ -20,7 +20,7 @@
 
 ## 1. Rust 抽象机器（我们实现的东西）
 
-Rust 没有官方形式化规范，但存在一台**事实上的**抽象机器：rustc 的 MIR 操作语义 + opsem 团队的内存模型（借自 C++20）+ provenance 模型 + rustc 的 layout 算法。Miri 是它的可执行参考。mirvm 立志成为它的**权威、快速的可执行定义**。
+Rust 没有官方形式化规范，但存在一台**事实上的**抽象机器：rustc 的 MIR 操作语义 + opsem 团队的内存模型（借自 C++20）+ provenance 模型 + rustc 的 layout 算法。Miri 是它的可执行参考。mirvm 立志成为它的**权威、快速的可执行定义**。**完整语义契约见 [docs/ram-spec.md](docs/ram-spec.md)**（正确性契约、定义度四级 well-defined/unspecified/non-det/UB、RAM 边界、as-if 自由、声明的偏差、与 native/Miri 的关系）——本节是其摘要。
 
 RAM 由五部分组成：
 
@@ -281,6 +281,7 @@ src/os/
   - **字节码贴近 MIR**（不下沉 CLIF）→ 解释器与 JIT 共享 MIR 级真理源、复用 cg_clif。**两级结构**：mirvmc（rustc 前端全 check → **Stable MIR/rustc_public + serde** → .mirvm 分发件，= .class/.jar 类比）；运行期"class loading"（按 target 冻结 layout C8 → 解释器寄存器字节码 + 喂 Cranelift，每平台一次缓存）。版本绑定诚实（classfile 版本号式，semver 转换）。
   - **分发格式 = 多 target 打包（定，2026-07-05 用户确认）**：**单产物跑任意 target 对完整 Rust 理论上不可能**（cfg 编译期按 target 剪枝=字面不同的程序 + usize/可观测 layout/const-eval；Java 能因无编译期 cfg/JVM 定 layout/定长基本类型，Rust 三条全违反=语言固有）。**采纳 fat artifact**：mirvmc 对 N 个 triple 各跑前端、打包 N 段（`.mirvm` 容器 = target 索引 + 各段 Stable-MIR），运行期挑匹配段 load → 消费端零工具链、覆盖常见平台、运行期可 JIT。os:: 每平台 build 时选定，与分发格式无关。
   - **迁移承诺**：slaved 操作数区仅 v0，**后续必换 alloca**（真内联 native 栈；Rust 里需 unsafe/crate）。
+- **C13 VM 鲁棒性 / guest 打穿 VM（2026-07-05，详见 concurrency-arch.md §6）**：真实地址下 guest 与 VM 共享地址空间，故 guest **unsafe UB / FFI 缺陷 / inline asm** 能写 VM 自有内存 → 崩。**但 safe guest 代码证明上做不到（C3），只有 UB/native 缺陷能触发**。根本张力：真实地址与 Wasm 式廉价封闭不兼容、无免费午餐。**分层（用户定：砍 L2 MPK[太 arch-specific]/L4 沙箱[out of scope]，聚焦 L1+L3）**：L0 类型系统（白送，覆盖 safe 代码）；**L1 结构隔离**（VM 内存放已知地址区+guard page，且让 L3 检查退化成单次范围比较）；**L3 checked 模式**（opt-in，不可信/LLM 用）——**关键：Rust 类型系统让它比 Wasm 便宜**：safe 引用访问证明上有效不查，**只查 raw 指针解引用**（MIR 按指针类型区分，检查点极少）；检查=region check（addr∈guest 区，compare+branch predicted-taken）；**JIT 能插检查**（我们做 MIR→CLIF 降低，Cranelift 编我们给的 CLIF，机器码不脱掌控）；借 JVM（BCE 静态消除、deopt/profile；implicit-trap guard-page 对我们难因 guest 内存散=Wasm Memory64 问题）；诚实界（只查 raw 解引用漏"洗进 &T"路径，但野写几乎都走 raw 指针，性价比高；checked 是 lite→full Miri 的谱）。**Model-A 相互作用**：slaved 区让检查便宜、alloca 让检查难→checked 青睐 slaved 区。**解耦要求（用户定）：帧局部存储（slaved/alloca 轴 F）与安全模式（fast/checked 轴 S）是正交轴、实现不得耦合**，只在 `GuestMemory::contains(addr)` 谓词处相遇（fast 不调/checked 调；FrameStorage 提供，slaved=廉价范围比较/alloca=较贵）；**暂定配对 alloca+fast/slaved+checked 是默认配置非 hardwire**，任意组合可跑（同 JITBackend/os:: 纪律）。M4 定。profile checked 开销、opt-in。与 §7 OS 沙箱同源。
 
 ### 工程决策
 
@@ -303,7 +304,7 @@ src/os/
   - ✅ 真实地址内存（§4 前身）：MirvmAllocBytes 真对齐 + prepared 破指针环。
   - ✅ libffi FFI（§7）：dlsym + 编组 + native 写内存暴露；libz-sys 真 C 库往返与 native 逐字节一致（diff 14/14 + cargo 3/3）。
   - ⏳ corpus 驱动补全（rayon/chrono/clap/anyhow/csv/...），异步生态（epoll 等 = **真直通 handler**，非 emulate；async 本身编译期无栈状态机，引擎零特殊支持，见 docs/async-stackless.md）。
-- **RAM-SPEC 文档**（近期，本次奠基的延伸）：把 §1 扩成独立的抽象机器规格，作为 mirvm 的对外语义承诺（"标准实现"的书面契约）。
+- **RAM-SPEC 文档**（✅ 2026-07-05 草稿，docs/ram-spec.md）：抽象机器语义契约——正确性契约、定义度四级、RAM 边界、as-if 自由、声明的偏差、与 native/Miri 关系。mirvm"事实标准实现"的书面承诺。
 - **M3 产品面**：daemon（前端增量状态留内存）、agent API（JSON 诊断/超时/内存上限/OS 沙箱）。验收：脚本二跑 <300ms、改一行重跑 <1s。
 - **M4 字节码 VM（成为真正的 VM）**：自研生而并发字节码引擎。**前置硬关卡：RAM 规格 + 并发架构 RFC + spike 过 TSan。** 验收：≥5× InterpCx，差分双策略全绿。
 - **M5 JIT**：Cranelift 热点，`--engine` 开关。

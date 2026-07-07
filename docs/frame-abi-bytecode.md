@@ -78,6 +78,12 @@ guest 帧大小是**动态的**（取决于函数的 locals 数与类型），Ru
 > **迁移承诺（2026-07-05 用户定）：slaved 区仅是起步，后续【必须】换掉**——目标是 alloca 真内联到
 > native 栈（更纯、与编译帧更统一、更好局部性）。slaved 区是低风险的 v0，不是终态。alloca 在 Rust 里
 > 需 unsafe/crate/内联汇编（生态成熟、Rust 里粗糙），但 unwind 难点与它正交（§7），换与不换都要单独解 §7。
+>
+> **解耦要求（2026-07-05 用户定）：帧局部存储（slaved/alloca，轴 F）与安全模式（fast/checked，轴 S）是
+> 两根【正交轴】，实现上【不得耦合】。** 二者只在一个抽象处相遇：`GuestMemory::contains(addr)->bool`
+> （"是否合法 guest 内存"谓词）。fast 从不调它；checked 在 raw 解引用前调它；FrameStorage 提供它
+> （slaved 区 = 廉价范围比较；alloca = 较贵，需 per-frame/per-alloc 追踪）。**暂定配对 alloca+fast /
+> slaved+checked 只是默认配置，非 hardwire**——任意组合都能编译运行（C13）。同 JITBackend/os:: 纪律（P7）。
 
 ### 2.3 帧描述符（lowering 时算好，冻结）
 

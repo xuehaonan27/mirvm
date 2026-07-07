@@ -234,11 +234,58 @@ guest 的原子操作**由 guest 负责语义，引擎只执行硬件原子指�
 
 ---
 
-## 6. 隔离（C4）——保护实现自身
+## 6. 隔离 / VM 鲁棒性（C4/C13）——guest UB / FFI / asm 会不会打穿 VM？
 
-- guest 内存（Rust Heap arenas）与**引擎自身元数据**（BytecodeBody、缓存、注册表——普通 Rust 分配）**分池**。
-- guest 的 unsafe UB（越界/UAF/竞争）打烂的是 **Rust Heap**，**不波及引擎元数据** → 引擎不被 guest 打穿。
-- best-effort（一个野指针写任意地址仍可能命中引擎内存，= native 同样风险，C4）；可选 TSan/guard 调试模式后置。
+**威胁**：真实地址模式下 guest 与 VM 共享一个地址空间（§4），故 guest 的 **unsafe UB**（野指针/UAF/越界）、
+**FFI/C 库缺陷**、**inline asm** 能写到 **VM 自有内存**（元数据/解释器/字节码/别的线程栈）→ 崩或静默损坏。
+**但 guest 的 safe 代码【证明上】做不到**（Rust 类型系统 C3）——只有 UB 或 native 缺陷能触发，这是绝大多数
+代码的非威胁。
+
+**根本张力**：真实地址（为 FFI 零编组 + native 保真而选）与 Wasm 式廉价内存封闭**不兼容**——Wasm 每次访问
+bounds-check 到一块线性内存，而 Rust guest 用真指针=真地址。**二者得其一，无免费午餐**。
+
+**分层防御**（2026-07-05 用户定：砍 L2/L4，聚焦 L1+L3）：
+
+| 层 | 防什么 | 状态 |
+|---|---|---|
+| **L0 类型系统**（白送） | safe guest 代码碰不到 VM 内存 | ✅ 天然，覆盖绝大多数 |
+| **L1 结构隔离**（做） | VM 内存 vs guest 内存分池、放已知地址区 + guard page | ✅ 做；且让 L3 的 region check 退化成单次范围比较 |
+| **L3 checked 模式**（opt-in，不可信/LLM 用） | 每 raw 解引用前 region check → 野写在损坏前拦 | 见下 |
+| ~~L2 MPK/PKU~~ | — | ❌ 太 arch-specific（x86 专属），降级为 L3 的可选加速器 |
+| ~~L4 进程沙箱~~ | — | ❌ out of scope（用户定，不管沙箱） |
+
+**L3 checked 模式详解**（核心：Rust 类型系统让它比 Wasm 便宜得多）：
+
+- **JIT 能插检查**：**我们做 MIR/字节码→CLIF 降低，Cranelift 只编译我们给的 CLIF** → checked 模式在降低时
+  往 CLIF 插 region-check（load/store 前 compare+branch）；fast 模式不插（= native codegen）。机器码**不脱离
+  掌控**。
+- **只查 raw 解引用**：safe 引用访问（`*r`, `r:&T`）无 UB 时**证明上有效 → 不查**；**只有 raw 指针解引用
+  （unsafe）可能野 → 只查这些**（MIR 按指针类型区分）。良好代码绝大多数是安全引用 → 检查点极少。**Wasm
+  查一切，我们只查 raw 解引用**——总开销靠此压下。
+- **检查 = region check**（`addr ∈ guest 内存区`）：compare+branch、predicted-taken、只在 raw 解引用、几乎总
+  通过（仅真野指针 fail）。L1 让它成单次范围比较。
+- **借 JVM**（[implicit null check](https://shipilev.net/jvm/anatomy-quarks/25-implicit-null-checks/)、[uncommon trap](https://shipilev.net/jvm/anatomy-quarks/29-uncommon-traps/)）：静态检查消除（证明 raw 指针来自已知分配+有界偏移→删检查，BCE 同理）；deopt/投机+profile
+  驱动（M5）；implicit-trap（guard page）**对我们较难**——guest 内存散（堆 arena+native 栈+statics），非
+  有界区，正是 [Wasm Memory64](https://github.com/WebAssembly/memory64/issues/3) 的问题（64 位真指针下 guard-page 招失效），故主用显式 region check。
+- **Wasm 界**：guard-page 消除近零成本但**仅对 32 位 offset guest**；mirvm 真 64 位指针比 Memory64 还糟，
+  guard-page 用不上——但 Rust safe/unsafe 区分让检查点本就少，靠此而非 guard-page 压开销。
+- **诚实界**：只查 raw 解引用会漏"unsafe 把野地址洗进 &T 再解"（要引用级校验=Miri 全量，慢）；但野写几乎
+  都走 raw 指针，故性价比高。checked 是个谱：lite（raw 解引用，便宜，抓大多数）→ full Miri（全量，慢）。
+- **Model-A 相互作用（记）**：**slaved 操作数区**让 guest 局部在已知区、与 VM native-栈帧分开 → region check
+  便宜；**alloca**（frame-abi 承诺的后续迁移）让 guest 局部内联 native 栈、与 VM 状态交错 → region check 难。
+  → **checked 模式青睐 slaved 区**。**解耦要求（用户定）：帧局部存储（slaved/alloca，轴 F）与安全模式
+  （fast/checked，轴 S）是两根【正交轴】，实现【不得耦合】**——只在 `GuestMemory::contains(addr)->bool`
+  谓词处相遇（fast 不调 / checked 调；FrameStorage 提供，slaved=廉价范围比较、alloca=较贵需 per-alloc 追踪）。
+  **暂定配对 alloca+fast / slaved+checked 是默认配置、非 hardwire**，任意组合可编译运行。同 JITBackend/os:: 纪律。
+- **Profile**：checked 做成 **opt-in**（fast 模式无检查 ≈ native 速度；checked 供不可信/LLM）；解释器/JIT
+  加不加检查的速度 delta 是明确的 profile + 优化目标（BCE/deopt 压）。
+
+**关键不对称**：编译码只碰 guest 内存 → 检查可插进其 CLIF；解释器替 guest 执行访问 → 检查插进解释器的
+raw-deref 处理。两 tier 都能查，只是插入点不同。
+
+**按用途**：可信 dev/自己项目 = **fast 模式 + L1**（guest UB 自己 bug，= native）；不可信/LLM/agent（P0）=
+**checked 模式（L3）+ L1**。**底线**：真实地址与"Wasm 式廉价封闭"不兼容、无免费午餐，但 Rust 类型系统让
+checked 模式的开销远低于 Wasm（只查 raw 解引用）。与 §7 "OS 级沙箱管安全"同源（那防伤宿主，这防伤 VM 自身）。
 
 ---
 
