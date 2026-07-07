@@ -7,7 +7,7 @@
 
 use std::process::ExitCode;
 
-use super::bytecode::{BinOp, Block, Body, Operand, Program, Rvalue, Stmt, Terminator};
+use super::bytecode::{BinOp, Block, Body, Operand, Program, Rvalue, Stmt, Terminator, UnwindAction};
 use super::interp::Vm;
 
 // 简写构造子，让手写字节码可读。
@@ -41,12 +41,12 @@ fn build_fib() -> Program {
         // bb2 (rec): _3 = n-1; _4 = fib(_3) -> bb3
         Block {
             stmts: vec![asgn(3, bin(Sub, s(1), k(1)))],
-            term: Call { func: 0, args: vec![s(3)], dst: 4, target: 3 },
+            term: Call { func: 0, args: vec![s(3)], dst: 4, target: 3, unwind: UnwindAction::Continue },
         },
         // bb3: _5 = n-2; _6 = fib(_5) -> bb4
         Block {
             stmts: vec![asgn(5, bin(Sub, s(1), k(2)))],
-            term: Call { func: 0, args: vec![s(5)], dst: 6, target: 4 },
+            term: Call { func: 0, args: vec![s(5)], dst: 6, target: 4, unwind: UnwindAction::Continue },
         },
         // bb4: _0 = _4 + _6; return
         Block { stmts: vec![asgn(0, bin(Add, s(4), s(6)))], term: Return },

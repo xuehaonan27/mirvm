@@ -17,7 +17,7 @@
 
 use std::process::ExitCode;
 
-use super::bytecode::{BinOp, Block, Body, Operand, Program, Rvalue, Stmt, Terminator};
+use super::bytecode::{BinOp, Block, Body, Operand, Program, Rvalue, Stmt, Terminator, UnwindAction};
 use super::frame::{OperandRegion, Word};
 use super::memory::GuestMemory;
 
@@ -138,7 +138,7 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
                     .map(|(_, b)| *b)
                     .unwrap_or(*otherwise) as usize;
             }
-            Terminator::Call { func: callee, args: aops, dst, target } => {
+            Terminator::Call { func: callee, args: aops, dst, target, .. } => {
                 let av: Vec<Word> = aops.iter().map(|o| eval_operand(ctx, base, *o)).collect();
                 let r = call_guest(ctx, *callee, &av); // 再入点：不持任何借用
                 reg_write(ctx, base, *dst, r);
@@ -149,6 +149,7 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
                 reg_restore(ctx, base);
                 return r;
             }
+            t => unreachable!("spike2 字节码子集不含 unwind 构造: {t:?}"),
         }
     }
 }
@@ -234,11 +235,11 @@ fn fib_body(callee: u32) -> Body {
         Block { stmts: vec![asgn(0, Use(s(1)))], term: Return },
         Block {
             stmts: vec![asgn(3, bin(Sub, s(1), k(1)))],
-            term: Call { func: callee, args: vec![s(3)], dst: 4, target: 3 },
+            term: Call { func: callee, args: vec![s(3)], dst: 4, target: 3, unwind: UnwindAction::Continue },
         },
         Block {
             stmts: vec![asgn(5, bin(Sub, s(1), k(2)))],
-            term: Call { func: callee, args: vec![s(5)], dst: 6, target: 4 },
+            term: Call { func: callee, args: vec![s(5)], dst: 6, target: 4, unwind: UnwindAction::Continue },
         },
         Block { stmts: vec![asgn(0, bin(Add, s(4), s(6)))], term: Return },
     ];

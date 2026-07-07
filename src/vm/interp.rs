@@ -90,7 +90,7 @@ impl<'p> Vm<'p> {
                         .map(|(_, b)| *b)
                         .unwrap_or(*otherwise) as usize;
                 }
-                Terminator::Call { func: callee, args: aops, dst, target } => {
+                Terminator::Call { func: callee, args: aops, dst, target, .. } => {
                     let av: Vec<Word> = aops.iter().map(|o| self.eval(base, *o)).collect();
                     let r = self.interp_frame(*callee, &av); // ← 宿主递归 = guest 帧上 native 栈
                     self.region.write(base, *dst, r);
@@ -101,6 +101,7 @@ impl<'p> Vm<'p> {
                     self.region.restore(base);
                     return r;
                 }
+                t => unreachable!("spike1 字节码子集不含 unwind 构造: {t:?}"),
             }
         }
     }

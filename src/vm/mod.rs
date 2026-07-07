@@ -11,3 +11,4 @@ pub mod interp;
 pub mod memory;
 pub mod spike1;
 pub mod spike2;
+pub mod spike3;

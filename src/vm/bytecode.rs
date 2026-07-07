@@ -49,6 +49,15 @@ pub enum Stmt {
     Store(Operand, Operand),
 }
 
+/// MIR `UnwindAction` 的骨架版（略 Terminate/Unreachable）。
+#[derive(Clone, Copy, Debug)]
+pub enum UnwindAction {
+    /// 本帧此处无清理，unwind 直接穿过
+    Continue,
+    /// 先跑该 cleanup 块链（以 `Resume` 结束），再继续 unwind
+    Cleanup(BlockId),
+}
+
 /// MIR `Terminator` 的骨架版。
 #[derive(Clone, Debug)]
 pub enum Terminator {
@@ -64,6 +73,29 @@ pub enum Terminator {
         args: Vec<Operand>,
         dst: Slot,
         target: BlockId,
+        unwind: UnwindAction,
+    },
+    /// 释放槽中的值（spike 语义：记入 drop 日志以验证顺序；真身 = drop glue 调用）
+    Drop {
+        slot: Slot,
+        target: BlockId,
+        unwind: UnwindAction,
+    },
+    /// 发起 guest panic（≈ 调 panic 运行时的 diverging call；unwind 边覆盖本帧 live Drop）
+    Panic {
+        payload: Operand,
+        unwind: UnwindAction,
+    },
+    /// cleanup 块链尾：继续向外传播（≈ MIR UnwindResume）
+    Resume,
+    /// ≈ `catch_unwind` intrinsic 的简化形：正常 → dst/target；guest panic → catch_dst/catch_target
+    CatchCall {
+        func: FuncId,
+        args: Vec<Operand>,
+        dst: Slot,
+        catch_dst: Slot,
+        target: BlockId,
+        catch_target: BlockId,
     },
     Return,
 }

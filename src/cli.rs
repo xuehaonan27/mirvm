@@ -32,6 +32,7 @@ ENV:
 DEV:
     mirvm spike1      跑模型 A 骨架 spike（差分自检，见 docs/spike1-model-a-skeleton.md）
     mirvm spike2      跑 interp↔compiled 适配 spike（见 docs/spike2-interp-compiled-adapters.md）
+    mirvm spike3      跑混合栈 unwind spike（见 docs/spike3-mixed-stack-unwind.md）
 ";
 
 pub fn main() -> ExitCode {
@@ -56,6 +57,7 @@ pub fn main() -> ExitCode {
         "run" => run_main(argv),
         "spike1" => crate::vm::spike1::run(),
         "spike2" => crate::vm::spike2::run(),
+        "spike3" => crate::vm::spike3::run(argv),
         _ => {
             eprint!("{USAGE}");
             ExitCode::from(2)

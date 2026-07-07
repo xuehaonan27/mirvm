@@ -249,6 +249,14 @@ fn interp_frame(body: &BytecodeBody, args: Args, region: &mut OperandRegion) -> 
 混合栈上 guest 异常的传播 + Drop 顺序 + catch_unwind"。**这是 M4 前置 spike 的头号项。** 候选 B（自研
 栈行走）作为兜底保留。
 
+**Spike 3 验证通过（2026-07-07，docs/spike3-mixed-stack-unwind.md）**：宿主 panic 机制（= 同一平台
+unwinder + Rust personality，候选 A 的具象）在混合栈上传播 + Drop 顺序（内层先）+ catch_unwind +
+跨 FFI abort 全部与 native 逐位一致，含 landing pad 内再入混合执行（cleanup 链调编译 helper）。
+**候选 A 坐实，候选 B 退役为纸面兜底。** 帧 ABI unwind 维度封版雏形：解释帧 = CleanupGuard + 动态
+unwind_edge（动态 LSDA）+ region 恢复；编译帧 = 静态 LSDA + landing pad；单条 native 栈 ⇒ unwinder
+天然逐帧内层先，VM 侧零协调。残余：真 Cranelift LSDA 发射留 M4 复核（与 vmctx 内部约定同一检查点）；
+JIT 调用约定必须 unwind-capable（plain "C" = abort shim，恰给跨 FFI abort 兜底）。
+
 跨 FFI（panic 要穿 native C 帧）：**abort**，与 native 一致（两候选都如此）。
 
 ---
