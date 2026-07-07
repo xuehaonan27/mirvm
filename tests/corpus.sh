@@ -11,7 +11,8 @@ mkdir -p "$OUT"
 progs=("$@")
 if [ ${#progs[@]} -eq 0 ]; then
     progs=(itertools anyhow rayon chrono indexmap clap csv crossbeam tokio blake3 \
-           tempfile walkdir numbigint smallvec bytes sha2 petgraph)
+           tempfile walkdir numbigint smallvec bytes sha2 petgraph \
+           net_tcp net_udp)
 fi
 pass=0 fail=0
 

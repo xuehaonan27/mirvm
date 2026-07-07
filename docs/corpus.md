@@ -82,10 +82,42 @@ corpus = 一组**真实生态 crate 的最小驱动程序**，逐个在 tier-0 m
 
 补丁记录（第二批）：
 - `float_to_int_unchecked` intrinsic（`intrinsics.rs`）：fast machine 假设在界内，宿主 as 转换 + 按 dest 位宽截断。通用琐碎缺口（任何 f→int 未检查转换）。
-### 定向探针（不入自动批，`c_blocking_io` 会故意挂）
+
+### 第三批：socket 网络（2026-07-05；2 ✅ / 1 危险探针挂死）
+
+- **net_tcp**（纯 std）· loopback TCP 往返：bind/listen/connect/accept/send/recv/close · ✅（与 native 逐位一致）
+  经验：**std::net 用 libc 直接实现（不走 rustix）**→ socket syscall 全经 dlsym 直通真内核，无 asm 问题（对比 tempfile 走 rustix 撞 asm）。单线程 + **write-before-read 排序**：connect 靠内核 loopback 握手进 backlog 自完成、accept 从 backlog 立即返回、read 时数据已在接收缓冲——**每个阻塞调用都靠内核自释放，不依赖另一 guest 线程**，故协作调度下能跑。TCP ping/pong 往返正确。
+
+- **net_udp**（纯 std）· loopback UDP：socket(SOCK_DGRAM)/bind/sendto/recvfrom · ✅（与 native 逐位一致）
+  经验：send-before-recv，数据报在 recv 前已入队。同样单线程 + 内核自释放。
+
+- **net_echo_threaded**（危险探针，不入自动批）· 线程化 TCP echo server · ❌ **挂死（timeout）**
+  经验：**§2.1 的网络形态确认**，而且这是**最普遍的真实模式**——`client.read_exact` 阻塞等 server 线程 echo，但协作调度器冻结在真 `read()` syscall 里，server 线程永远跑不起来。**惯用的阻塞式线程网络服务器（accept→read→write 在独立线程）在协作 tier-0 上根本跑不了**（见 §2.1 升级）。
+
+补丁记录（第三批）：无（socket 全走 std libc 直通，无缺口）。
+
+### 第四批：进程 / 信号（2026-07-05；0 ✅ / 2 ❌，两个都是清晰的 denylist/边界处置信号）
+
+- **c_process**（纯 std）· `std::process::Command` 跑真子进程（echo / true / false）· ❌ **两层：弱符号（已补）→ §2.5 检查器残留**
+  经验：**std 选了 `posix_spawn`（不是 fork+exec）**。
+  ① 先撞**弱 extern static `pidfd_spawnp`**：std 用 `weak!` 探测新 glibc 的 pidfd 生成符号。mirvm 有弱符号机制（把可选符号置 NULL 让 std 走回退，如 statx/__cxa_thread_atexit_impl），`pidfd_spawnp` 缺在白名单——**琐碎缺口，已加进 NULL 表** → std 回退到不带 pidfd 的普通 posix_spawn。
+  ② 补后撞 **§2.5 检查器残留**：`glibc_version()` 对 `gnu_get_libc_version()` 返回的 native 字符串做 `CStr::from_ptr`→strlen，读无 AllocId 的真地址指针被 InterpCx 内存检查器判 `DanglingIntPointer(MemoryAccess)`。**与 walkdir 同一根因**（native 返回指针访问）——§2.5 是反复出现的类级阻塞。
+  处置：**子进程 = 真 OS 进程**（posix_spawn 内部 clone+exec，guest 从不直接调 fork；execs 立即发生，mirvm 副本子进程瞬间变成目标二进制，无解释器在子进程跑）。§2.5 根治后即通。
+
+- **c_signal**（libc）· 注册信号处理函数 + raise · ❌ **`signal` denylist（需 thunk，设计信号）**
+  经验：`libc::signal` 撞 denylist（native.rs 明列 signal/sigaction/raise 绝不直通）。**根因**：handler 是 guest `extern "C" fn`（解释代码、无机器地址），内核信号投递需要**真机器地址**——这是 **FFI 反方向 / thunk** 问题，和 pthread_create 的 start_routine、qsort 回调同一类（把解释态函数指针 materialize 成真 libffi closure）。tier-0 未建 thunk → 故意 denylist。**验证了 signal 上 denylist 的理由**；M4 建 thunk 后同一机制解决。
+
+进程/信号批的元结论：**denylist 的处置在此得到具体验证**——`fork`/`exec`/`clone` 挡 VM 模型破坏（std 主动避开、改用 posix_spawn=真子进程，OK），`signal` 挡 thunk-未建的 guest→内核回调。两者都不是"缺 shim"，是明确的边界纪律。
+
+### 第五批：mmap（2026-07-05；0 ✅ / 1 ❌，§2.5 第三实例）
+
+- **c_mmap**（memmap2）· file-backed + 匿名内存映射 · ❌ **§2.5 检查器残留（第三实例）**
+  经验：**mmap/munmap 直通本身成功**（`map_mut` 返回、映射建出来了）——挂在 guest **访问**映射区：`mmap[0..5].copy_from_slice(...)` → `copy_nonoverlapping` 写内核映射区，被 InterpCx 判 `DanglingIntPointer(MemoryAccess)`。mmap 区是内核在真地址给的映射、**不是 mirvm 分配（无 AllocId）**，检查器拒。mmap 是 §2.5 **最典型、最重要的实例**——"guest 合法访问、mirvm 没分配的真地址区"（分配器 / 内存映射文件 / 共享内存 / JIT 代码全靠它）。**三个不同 crate（walkdir/process/mmap）收敛 §2.5 → 它是 tier-0 第一号阻塞。**
+### 定向探针（不入自动批，会故意挂）
 
 - **c_tokio_mt.rs** · 多线程 tokio · 证伪 §2.1 初判（不死锁）。
-- **c_blocking_io.rs** · socketpair 阻塞读 · **挂死（timeout）**——隔离出 §2.1 真实危险（无超时真 syscall 等另一 guest 线程）。
+- **c_blocking_io.rs** · socketpair 阻塞读 · **挂死**——隔离出 §2.1 真实危险（无超时真 syscall 等另一 guest 线程）。
+- **c_net_echo_threaded.rs** · 线程化 TCP echo server · **挂死**——§2.1 网络形态，惯用阻塞式线程服务器模式（见 §2.1 升级）。
 
 ## 2. 逼出的设计票据
 
@@ -100,6 +132,8 @@ tokio 通过靠的是：未知外部函数（`epoll_create1`/`epoll_ctl`/`epoll_
 **真实危险（钉死）**：guest 线程在**无超时**的真阻塞 syscall 上、且其释放**依赖另一 guest 线程推进**时才死。隔离验证（`corpus/c_blocking_io.rs`）：两个 std 线程，主线程在 socketpair 上 `read_exact`（真 `read()` 直通），另一线程负责写——主线程阻塞整条真线程 → 写线程永远跑不起来 → **挂死（timeout）**。
 
 → **票据**：dlsym 直通阻塞 syscall **仅当调用能自释放**（有限超时，或等待事件来自 guest 之外的真外部 IO/真定时器）才安全；**释放依赖另一 guest 线程推进时即死**。tokio 能活是因为它精心围绕超时 + 模拟 futex park 构建，**不是模型本身健全**。这是 M4 真 1:1 线程的核心必要性（账本 C8）——每个 guest 线程是真线程，阻塞 syscall 只挡自己，别人在别的核上跑。
+
+**升级（第三批 socket 网络证实）**：这个"窄"危险条件其实是**最普遍的真实模式**。惯用的阻塞式线程网络服务器——server 线程 `accept()→read()→write()`、client 线程连接/收发——正是"guest 线程 A 阻塞在无超时真 syscall 上等 guest 线程 B"。`net_echo_threaded` 探针在 `client.read_exact` 挂死。所以协作 tier-0 **根本跑不了标准的阻塞式线程网络服务**（一大类真实程序）；能跑的只有单线程有序 IO（`net_tcp`/`net_udp`：靠内核 loopback 自释放）或 async 事件循环（tokio：模拟 futex + 超时）。危险从"边角情况"提升为"主流服务器模式"——M4 真线程对服务器类负载是刚需，不是优化。
 
 ### 2.2 内联汇编 → 直接 JIT asm 块（决策：虚拟 CPU = 真宿主 CPU）
 
@@ -134,6 +168,10 @@ asm!("add {0}, 5", inout(reg) copy _1 => _2, options(PURE | NOMEM | NOSTACK)) ->
 
 **与 P7 单一收口的张力（rustix 揭示）**：`os::` 收口假设 OS 交互都经**命名符号**（libc 函数）。但 rustix 的 linux_raw 后端用 `syscall` **指令**直接进内核，没有符号——asm-JIT 决策下它直接跑到真内核，`os::` 拦不住。后果：若 mirvm 日后想在 `os::` 边界**虚拟化/重定向** OS 资源（虚拟 FS、资源限额等），rustix 系 crate 会绕过。两条出路：OS 级 seccomp 拦（与"沙箱是 OS 的事"一致），或对 `syscall` 这个特定 asm 模式**破例**路由回 `os::`（此处 asm-JIT 的"统一处理"与 P7 收口冲突，需权衡）。记为 M4 `os::` 设计的已知张力。
 
+**denylist 各条目的处置在第四批得到具体验证**：
+- `fork`/`vfork`/`clone`/`exec*` 挡的是"复制/替换解释器进程"（一 fork 就两份 mirvm）。corpus 证实 std 的 `Command` **主动避开**它们、优先 `posix_spawn`（不在 denylist）——posix_spawn 内部 clone+exec 原子完成、guest 从不直接调 fork、子进程瞬间 exec 成目标二进制，**子进程 = 真 OS 进程**，正确处置。denylist 拦裸 fork、放行 posix_spawn 的区分是对的。
+- `signal`/`sigaction`/`raise` 挡的是 **guest→内核回调缺 thunk**：handler 是解释代码无机器地址，内核信号投递要真地址。这与 pthread_create start_routine、qsort 回调同属 **FFI 反方向 / thunk** 类（materialize 解释态函数指针成真 libffi closure）。tier-0 未建 thunk 故 denylist；M4 建 thunk 后同一机制一并解决 signal / C→Rust 回调。
+
 ### 2.4 协作调度性能（tier-0 弃子实证）
 
 rayon 用 28s：按语句时间片 round-robin 多路复用 work-stealing 池跑 10 万次并行迭代。正确性没问题，但坐实协作模型只能做对拍基底，**性能要真线程 + JIT**。非设计票据，是 tier-0 是弃子的又一实证。
@@ -144,21 +182,40 @@ walkdir 遍历目录时 `UndefinedBehavior(DanglingIntPointer{ InboundsPointerAr
 
 这不是新设计信号，是**已记决策的具体实例**：fast machine 仍带着 rustc InterpCx 的检查器 overlay，而账本 C2/C4 已定 **VM tier 甩掉 AllocId/检查器 overlay**（真地址下裸宿主访问，有没有 AllocId 都在真地址上）。是一整类——任何对 native 返回缓冲（dirent / `readdir` / 某些 libc 返回结构）做指针算术的 guest 代码都会撞。
 
-→ tier-0 层面可"待补"（让 fast machine 对 wildcard/无 AllocId 指针跳过 inbounds 检查、回退裸访问），但本质由 M4 甩掉 overlay 根治。当前记为 tier-0 残留（与"主线程名/rt cleanup/getrandom 确定性/内存未分池"同类）。
+**复现率（第四、五批新增实例）**：c_process 的 `glibc_version()` 读 `gnu_get_libc_version()` 返回的 native 字符串（`CStr::from_ptr`→strlen）、c_mmap 写内核 mmap 映射区（`copy_nonoverlapping`）都撞同一个 `DanglingIntPointer(MemoryAccess)`。**三个不同 crate（walkdir 经 readdir、process 经 glibc_version、mmap 经内核映射）收敛到同一根因**——native/内核给的真地址区（无 AllocId、不在分配表）被 InterpCx `ptr_get_alloc` 反查不到 → 判 UB。**§2.5 是 tier-0 第一号阻塞**，其中 mmap 最典型（分配器/内存映射文件/共享内存/JIT 代码都靠"访问自己没分配的真地址区"）。
+
+根因机制：`Prov::Wildcard`（int2ptr）指针靠 `by_addr` 反查表定位分配，但 native/内核内存从未进过分配表 → 查不到。**核心难点：检查器要 bounds（size），而 native 区没有已知 bounds**（mmap 多大、dirent 缓冲多长、libc 串多长，mirvm 都不知道）。所以修法只能是**对无 AllocId 指针放弃 bounds 检查、直接裸宿主 read/write 请求的字节**（fast machine 本就假设程序合法、不该查）——但这要 hook InterpCx 的内存访问路径（`get_ptr_alloc`/`Allocation` 层）在"查不到分配"时改走 `ptr::copy` 裸访问，是**结构性改动，与框架相抵**，正是 M4 clean-slate 甩掉 overlay 要根治的（retrofit 进 tier-0 = 逆着 InterpCx 打）。
+
+→ tier-0 层面记为残留（与"主线程名/rt cleanup/getrandom 确定性/内存未分池"同类）；M4 根治，且因三实例收敛，是 M4 高优先。
+
+### 2.6 fork / clone 的真实处置（denylist 不是终局，也不是围栏）
+
+进程批里 denylist 挡住了 `fork`，但用户点出关键：**你保证不了 guest 不直接写 `libc::fork()`——那怎么办？** 甚至更进一步：即便 denylist 了 `fork` 符号，还有别的路进内核。当前实测：`libc::fork` 撞 denylist、裸 `syscall(SYS_clone=56)` 撞 syscall 白名单——**此刻都被拒**，但这是**偶然**（asm 现在不支持、syscall 走白名单）。真正的逃逸口是 **asm-JIT 落地后**：rustix 用 `syscall` **指令**（asm）发 clone，JIT 直达内核、`os::` 拦不住（见 §2.2/§2.3）。所以：
+
+**(a) denylist 不是围栏，只是"命名符号路径的尽力防护 + 未建信号"。** 真正的 fork 拦截只能在 **OS 级（seccomp 过滤 clone）**——与"沙箱是 OS 的事"一致。想在 mirvm 层"禁止 fork"是拦不住的。
+
+**(b) 终局不是"禁"，是"真的支持 fork"。** 从 VM 作者视角，关键是三分：
+1. **fork + 立即 exec（99% 场景，含 posix_spawn）**：**安全**。子进程那份"坏掉的 VM"状态无所谓——exec 立刻用新程序镜像替换掉它。已通过 posix_spawn 支持；裸 `fork`+立即 `exec` 同理。
+2. **fork-alone，单线程 guest**：**可做到正确**。宿主 `fork()` 靠 COW 复制整个地址空间——**因为 mirvm 用真实地址，guest 的 Rust 堆被内核 COW 正确复制（真实地址模型再次白赚）**；子进程只有一个线程，VM 状态天然一致。只需 **atfork 修复**：把调度器重置到幸存线程、重置 VM 内部锁、重启后台线程（JIT/分配器）。
+3. **fork-alone，多线程 guest**：**本质脆弱——但 native 也一样脆**。POSIX 明文：多线程进程里 fork 与 exec 之间只准 async-signal-safe 操作（别的线程持的锁在子进程里永久锁死）。native Rust 程序这么写本就在 UB 边缘。mirvm 只需**匹配 native 的可观测行为**（差分哲学）——native 脆我们不必更强，"尽力/可能坏"是可接受的，与 native 一致。
+
+**(c) 机制**：把 fork 走 `os::`，配 `pthread_atfork` 式纪律（JVM 的 os:: 正是这么管 fork 的）——宿主 `fork()` + 子进程侧 VM 重置。真实地址模型让 **guest 数据 COW 白赚正确**，要修的只有 **VM 自有的元数据/线程**（每个多线程运行时对 fork 的同一难题，有已知的部分解）。
+
+**(d) JVM 对照**：JVM 干脆**完全不支持 fork-alone**——`Runtime.exec` 永远是 fork+exec、子进程绝不回到 JVM。mirvm 可以采同样的保守默认（只支持 fork+exec），但真实地址的 COW 优势让 mirvm 有条件对**单线程 fork** 做得比 JVM 好。
+
+结论：tier-0 denylist `fork` 是**临时**（未建 atfork/VM-重置），非终局。M4 的 `os::` 按上面三分处置；containment 交给 seccomp，不假装 denylist 是安全边界。
 
 ## 3. 通过项验证了什么（架构确认）
 
 - **async-stackless 成立**：tokio current_thread 运行时（定时器 + mpsc + spawn 任务）跑出正确结果（1530/15 msgs），无需引擎特殊支持——任务是编译器降解的无栈状态机，poll 驱动（见 async-stackless.md）。
 - **协作 + 模拟 futex 是合法 SC 执行**：rayon / crossbeam 正确跑通，说明良好同步的并发程序在 round-robin 上产出合法的顺序一致执行——这是 tier-0 作对拍基底的价值。但它把一切串行化，**验证不了真并行**（弱内存、数据竞争、真并行推进）——正是 M4 必补。
-- **真 OS 原语直通可用**：epoll/eventfd/getrandom/文件 IO 经 dlsym/shim 直达内核，无需模拟——印证"有真 OS 就直接用"。
+- **真 OS 原语直通可用**：epoll/eventfd/getrandom/文件 IO/**socket 网络** 经 dlsym/shim 直达内核，无需模拟——印证"有真 OS 就直接用"。std::net 用 libc（非 rustix），TCP/UDP loopback 往返与 native 逐位一致。
 - **unsafe/布局/别名在解释器下正确**（第二批）：smallvec 的 union 式 `MaybeUninit` 内联存储、bytes 的 Arc 原子 refcount + 零拷贝切片别名、petgraph 的 arena 索引——纯计算类 unsafe 全走通，问题只在 OS/asm 边界。
 
 ## 4. 下一批候选（去撞更多边界）
 
-已跑两批（17 crate + 2 探针）：9+3=12 通过，主要阻塞收敛到 **inline asm（§2.2 三张面孔）** 与 **检查器残留（§2.5）** 两处。下批去撞尚未覆盖的边界：
+已跑五批（22 crate + 3 探针）：14 通过。真实阻塞收敛到五处，每处都有明确 M4 处置：**inline asm（§2.2 三张面孔）→ JIT asm 块**、**协作调度 vs 阻塞 IO（§2.1，线程化服务器主流模式）→ 真线程**、**检查器 overlay 残留（§2.5，walkdir+process+mmap 三实例，tier-0 第一号阻塞）→ 甩掉 AllocId 检查器**、**guest→内核回调缺 thunk（§2.3，signal）→ M4 建 thunk**、**fork/clone 处置（§2.6）→ os:: + atfork，containment 交 seccomp**。下批候选（边际递减，多为上述类的重复实例）：
 
-- **真 socket 网络**：`std::net::TcpStream` 本机自连（注意 §2.1 危险——阻塞读若等 guest 内部推进会挂，需带超时或用非阻塞）。
-- **进程/信号**：`std::process::Command`（fork/exec 在 denylist，验证 VM 内建处置）、signal handler。
-- **mmap 类**：memmap2（`mmap`/`munmap` 直通 + guest 对映射区访问）。
 - **更多 RustCrypto**（aes/chacha20）：预期同 §2.2 cpuid，确认家族一致——低边际，可略。
 - **proc-macro 重度**（syn/quote 作为**依赖被使用**时的运行期，非展开期）：确认运行期确实不碰 proc-macro。
+- 或转向：挑一个 §2.5 实例做 tier-0 裸访问 spike，或转 M4 前骨架 spike。

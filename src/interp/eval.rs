@@ -232,7 +232,8 @@ fn setup_process_memory<'tcx>(
     let null = ImmTy::from_scalar(Scalar::from_target_usize(0, ecx), cptr);
     // statx：NULL → std 走 fstat 系回退（真实现太重）
     // __cxa_thread_atexit_impl：NULL → std 用纯 Rust 的 TLS 析构回退表
-    for name in ["statx", "__cxa_thread_atexit_impl"] {
+    // pidfd_spawnp：NULL → std 的 posix_spawn 回退到不带 pidfd 的普通路径
+    for name in ["statx", "__cxa_thread_atexit_impl", "pidfd_spawnp"] {
         alloc_extern_static(ecx, name, null.clone())?;
     }
 
