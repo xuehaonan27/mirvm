@@ -10,3 +10,4 @@ pub mod frame;
 pub mod interp;
 pub mod memory;
 pub mod spike1;
+pub mod spike2;
