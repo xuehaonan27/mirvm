@@ -28,6 +28,9 @@ OPTIONS:
 
 ENV:
     MIRVM_SYSROOT     等价于 --sysroot
+
+DEV:
+    mirvm spike1      跑模型 A 骨架 spike（差分自检，见 docs/spike1-model-a-skeleton.md）
 ";
 
 pub fn main() -> ExitCode {
@@ -50,6 +53,7 @@ pub fn main() -> ExitCode {
 
     match first.as_str() {
         "run" => run_main(argv),
+        "spike1" => crate::vm::spike1::run(),
         _ => {
             eprint!("{USAGE}");
             ExitCode::from(2)

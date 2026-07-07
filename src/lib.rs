@@ -25,3 +25,4 @@ pub mod cargo_shim;
 pub mod cli;
 pub mod interp;
 pub mod sysroot;
+pub mod vm;
