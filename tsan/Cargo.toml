@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 libc = "0.2"
+libmimalloc-sys = "0.1.49"
 
 [profile.release]
 debug = true # TSan 报告带符号

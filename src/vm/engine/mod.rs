@@ -5,6 +5,7 @@
 pub mod ctx;
 pub mod frame;
 pub mod frozen;
+pub mod heap;
 pub mod interp;
 pub mod ir;
 pub mod stats;

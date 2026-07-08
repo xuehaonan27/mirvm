@@ -158,6 +158,28 @@ pub enum FloatOp {
     Rem,
 }
 
+/// 位操作单目（ctpop/ctlz/cttz/bswap/bitreverse intrinsic 内建）
+#[derive(Clone, Copy, Debug)]
+pub enum BitUnOp {
+    Popcount,
+    Ctlz,
+    Cttz,
+    Bswap,
+    Bitreverse,
+}
+
+/// 原子 RMW（fetch_* 家族；全 SeqCst——最强序在 RAM non-det 包络内，order 细化 M4.4）
+#[derive(Clone, Copy, Debug)]
+pub enum RmwOp {
+    Xchg,
+    Add,
+    Sub,
+    And,
+    Or,
+    Xor,
+    Nand,
+}
+
 #[derive(Clone, Debug)]
 pub enum Rvalue {
     Use(Operand),
@@ -199,6 +221,12 @@ pub enum Rvalue {
     FloatToInt { from64: bool, to: Width, signed: bool, a: Operand },
     /// int → float
     IntToFloat { from: (Width, bool), to64: bool, a: Operand },
+    /// 位操作单目（按操作数宽度语义：ctlz(W8) 是 8 位前导零）
+    BitUn { op: BitUnOp, a: Operand },
+    /// 原子读（真宿主原子指令——spike4 义务；SeqCst）
+    AtomicLoad { addr: Operand, width: Width },
+    /// 指针差（ptr_offset_from[_unsigned]）：(a - b) / stride（i64 除法）
+    PtrDiff { a: Operand, b: Operand, stride: u64 },
 }
 
 #[derive(Clone, Debug)]
@@ -231,6 +259,23 @@ pub enum Stmt {
         count: u64,
         elem_size: u32,
     },
+    /// 原子写（SeqCst）
+    AtomicStore { addr: Operand, val: Operand },
+    /// 原子比较交换：dst_val = 旧值，dst_ok = 是否成功（SeqCst/SeqCst）
+    AtomicCxchg {
+        addr: Operand,
+        expected: Operand,
+        new: Operand,
+        dst_val: ScalarPlace,
+        dst_ok: ScalarPlace,
+        weak: bool,
+    },
+    /// 原子 RMW：dst = 旧值（SeqCst）
+    AtomicRmw { op: RmwOp, addr: Operand, val: Operand, dst: ScalarPlace },
+    /// 动态长度内存拷贝（copy/copy_nonoverlapping intrinsic：count × elem_size 字节）
+    MemCopy { dst: Operand, src: Operand, count: Operand, elem_size: u64, overlap: bool },
+    /// 动态长度填充（write_bytes：val 是 u8，count × elem_size 字节）
+    MemSet { dst: Operand, val: Operand, count: Operand, elem_size: u64 },
     /// 语句级 Trap 占位：执行到即诊断退出，但**块的终止子照常降低**——
     /// 保住 Call 边，使 --vm-stats 的可达分析准确（仪器盲点修复）。
     Trap(Box<str>),

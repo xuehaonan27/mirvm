@@ -371,6 +371,47 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
                 f.to_bits() as u64
             }
         }
+        Rvalue::BitUn { op, a } => {
+            use super::ir::BitUnOp as B;
+            let (v, w) = eval_operand(ctx, base, a);
+            match (op, w) {
+                (B::Popcount, _) => (v & w.mask()).count_ones() as u64,
+                (B::Ctlz, Width::W8) => (v as u8).leading_zeros() as u64,
+                (B::Ctlz, Width::W16) => (v as u16).leading_zeros() as u64,
+                (B::Ctlz, Width::W32) => (v as u32).leading_zeros() as u64,
+                (B::Ctlz, Width::W64) => v.leading_zeros() as u64,
+                (B::Cttz, Width::W8) => (v as u8).trailing_zeros() as u64,
+                (B::Cttz, Width::W16) => (v as u16).trailing_zeros() as u64,
+                (B::Cttz, Width::W32) => (v as u32).trailing_zeros() as u64,
+                (B::Cttz, Width::W64) => v.trailing_zeros() as u64,
+                (B::Bswap, Width::W8) => v & 0xff,
+                (B::Bswap, Width::W16) => (v as u16).swap_bytes() as u64,
+                (B::Bswap, Width::W32) => (v as u32).swap_bytes() as u64,
+                (B::Bswap, Width::W64) => v.swap_bytes(),
+                (B::Bitreverse, Width::W8) => (v as u8).reverse_bits() as u64,
+                (B::Bitreverse, Width::W16) => (v as u16).reverse_bits() as u64,
+                (B::Bitreverse, Width::W32) => (v as u32).reverse_bits() as u64,
+                (B::Bitreverse, Width::W64) => v.reverse_bits(),
+            }
+        }
+        Rvalue::AtomicLoad { addr, width } => {
+            use std::sync::atomic::*;
+            let (p, _) = eval_operand(ctx, base, addr);
+            // 真宿主原子指令（spike4 义务）；SeqCst 最强序
+            unsafe {
+                match width {
+                    Width::W8 => AtomicU8::from_ptr(p as *mut u8).load(Ordering::SeqCst) as u64,
+                    Width::W16 => AtomicU16::from_ptr(p as *mut u16).load(Ordering::SeqCst) as u64,
+                    Width::W32 => AtomicU32::from_ptr(p as *mut u32).load(Ordering::SeqCst) as u64,
+                    Width::W64 => AtomicU64::from_ptr(p as *mut u64).load(Ordering::SeqCst),
+                }
+            }
+        }
+        Rvalue::PtrDiff { a, b, stride } => {
+            let (av, _) = eval_operand(ctx, base, a);
+            let (bv, _) = eval_operand(ctx, base, b);
+            ((av.wrapping_sub(bv) as i64) / *stride as i64) as u64
+        }
     }
 }
 
@@ -400,6 +441,98 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             for i in 0..*count {
                 mem_write(d + i * *elem_size as u64, w, v);
             }
+        }
+        Stmt::AtomicStore { addr, val } => {
+            use std::sync::atomic::*;
+            let (p, _) = eval_operand(ctx, base, addr);
+            let (v, w) = eval_operand(ctx, base, val);
+            unsafe {
+                match w {
+                    Width::W8 => AtomicU8::from_ptr(p as *mut u8).store(v as u8, Ordering::SeqCst),
+                    Width::W16 => {
+                        AtomicU16::from_ptr(p as *mut u16).store(v as u16, Ordering::SeqCst)
+                    }
+                    Width::W32 => {
+                        AtomicU32::from_ptr(p as *mut u32).store(v as u32, Ordering::SeqCst)
+                    }
+                    Width::W64 => AtomicU64::from_ptr(p as *mut u64).store(v, Ordering::SeqCst),
+                }
+            }
+        }
+        Stmt::AtomicCxchg { addr, expected, new, dst_val, dst_ok, weak } => {
+            use std::sync::atomic::*;
+            let (p, _) = eval_operand(ctx, base, addr);
+            let (e, w) = eval_operand(ctx, base, expected);
+            let (n, _) = eval_operand(ctx, base, new);
+            macro_rules! cx {
+                ($t:ty, $at:ty) => {{
+                    let a = unsafe { <$at>::from_ptr(p as *mut $t) };
+                    let r = if *weak {
+                        a.compare_exchange_weak(e as $t, n as $t, Ordering::SeqCst, Ordering::SeqCst)
+                    } else {
+                        a.compare_exchange(e as $t, n as $t, Ordering::SeqCst, Ordering::SeqCst)
+                    };
+                    match r {
+                        Ok(old) => (old as u64, 1u64),
+                        Err(old) => (old as u64, 0u64),
+                    }
+                }};
+            }
+            let (old, ok) = match w {
+                Width::W8 => cx!(u8, AtomicU8),
+                Width::W16 => cx!(u16, AtomicU16),
+                Width::W32 => cx!(u32, AtomicU32),
+                Width::W64 => cx!(u64, AtomicU64),
+            };
+            place_write(ctx, base, dst_val, old);
+            place_write(ctx, base, dst_ok, ok);
+        }
+        Stmt::AtomicRmw { op, addr, val, dst } => {
+            use super::ir::RmwOp as R;
+            use std::sync::atomic::*;
+            let (p, _) = eval_operand(ctx, base, addr);
+            let (v, w) = eval_operand(ctx, base, val);
+            macro_rules! rmw {
+                ($t:ty, $at:ty) => {{
+                    let a = unsafe { <$at>::from_ptr(p as *mut $t) };
+                    (match op {
+                        R::Xchg => a.swap(v as $t, Ordering::SeqCst),
+                        R::Add => a.fetch_add(v as $t, Ordering::SeqCst),
+                        R::Sub => a.fetch_sub(v as $t, Ordering::SeqCst),
+                        R::And => a.fetch_and(v as $t, Ordering::SeqCst),
+                        R::Or => a.fetch_or(v as $t, Ordering::SeqCst),
+                        R::Xor => a.fetch_xor(v as $t, Ordering::SeqCst),
+                        R::Nand => a.fetch_nand(v as $t, Ordering::SeqCst),
+                    }) as u64
+                }};
+            }
+            let old = match w {
+                Width::W8 => rmw!(u8, AtomicU8),
+                Width::W16 => rmw!(u16, AtomicU16),
+                Width::W32 => rmw!(u32, AtomicU32),
+                Width::W64 => rmw!(u64, AtomicU64),
+            };
+            place_write(ctx, base, dst, old);
+        }
+        Stmt::MemCopy { dst, src, count, elem_size, overlap } => {
+            let (d, _) = eval_operand(ctx, base, dst);
+            let (s, _) = eval_operand(ctx, base, src);
+            let (c, _) = eval_operand(ctx, base, count);
+            let bytes = (c as usize).wrapping_mul(*elem_size as usize);
+            unsafe {
+                if *overlap {
+                    std::ptr::copy(s as *const u8, d as *mut u8, bytes);
+                } else {
+                    std::ptr::copy_nonoverlapping(s as *const u8, d as *mut u8, bytes);
+                }
+            }
+        }
+        Stmt::MemSet { dst, val, count, elem_size } => {
+            let (d, _) = eval_operand(ctx, base, dst);
+            let (v, _) = eval_operand(ctx, base, val);
+            let (c, _) = eval_operand(ctx, base, count);
+            let bytes = (c as usize).wrapping_mul(*elem_size as usize);
+            unsafe { std::ptr::write_bytes(d as *mut u8, v as u8, bytes) };
         }
         Stmt::Trap(reason) => engine_abort(&format!("TRAP: {reason}")),
         Stmt::Nop => {}
@@ -479,19 +612,25 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
                 }
                 blk = *target as usize;
             }
-            Terminator::CallBuiltin { builtin, ret, target, .. } => {
+            Terminator::CallBuiltin { builtin, args, ret, target, .. } => {
                 use super::ir::Builtin;
+                let a = |i: usize| eval_operand(ctx, base, &args[i]).0;
                 let r = match builtin {
                     // 分配前哨兵：空操作
                     Builtin::NoAllocShim => 0,
-                    // alloc 系：lower 已前置 Stmt::Trap（不可达）；防御性再 Trap
-                    other => engine_abort(&format!(
-                        "引擎原语 {other:?} 未实现（堆内建，M4.1 第 5 步）"
-                    )),
+                    // 托管 Rust Heap（D3：mimalloc 后端，真地址直出）
+                    Builtin::RustAlloc => super::heap::alloc(a(0), a(1)),
+                    Builtin::RustAllocZeroed => super::heap::alloc_zeroed(a(0), a(1)),
+                    Builtin::RustDealloc => {
+                        super::heap::dealloc(a(0), a(1), a(2));
+                        0
+                    }
+                    Builtin::RustRealloc => super::heap::realloc(a(0), a(1), a(2), a(3)),
                 };
                 match ret {
                     RetDest::Scalar(p) => place_write(ctx, base, p, r),
-                    _ => {}
+                    RetDest::Ignore => {}
+                    other => engine_abort(&format!("引擎原语返回形态 {other:?} 未支持")),
                 }
                 blk = *target as usize;
             }
