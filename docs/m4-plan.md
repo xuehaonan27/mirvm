@@ -33,6 +33,10 @@ src/vm/      执行相（纯 Rust，零 rustc_private）：
   给出与 native codegen 同一套可达 instance 集（正确性白拿）。加载相单线程降完 → 发布只读
   Shared → 执行相永久 tcx-free（C8）。逃逸兜底 = 惰性加载服务（显式同步格，insert-once），
   预期不触发。startup 代价后置优化（并行降低 / .mirvm 缓存属后续）。
+  **修正（2026-07-07，债务普查发现，docs/m4-debt-map.md §2-A）**：collector 是 codegen/
+  链接视角——跨 crate **非泛型**函数不重复收集（链接时用定义 crate 的机器码），而 mirvm
+  是解释视角、无"链接 libstd.so"可言 → **collector 集合作种子 + 调用点 worklist 闭包扩集**
+  （与 D5 fallback-body 补收同一机制）。扩集仍在加载相，执行相 tcx-free 不变。
 - **D2 帧局部 = 字节区 + 冻结帧布局**：每函数冻结 frame layout（每 local 的
   offset/size/align），操作数区 = 字节 arena，帧 = 切段。聚合/枚举天然落位（spike1
   "真值必须带类型/尺寸"教训的落地）。slaved v0，alloca 后置（接口窄，C13 解耦纪律）。
@@ -85,3 +89,8 @@ JIT/asm-JIT（M5，帧 ABI 已备好）、.mirvm 序列化与 mirvmc（模式 B�
   偏袒 R——寄存器压力面未测）。
 - **landing pad/LSDA**（JIT 帧内跑 drop glue）→ M5（spike5 已验 CFI 传播半边）。
 - fork/clone 的 os::+atfork 处置（corpus §2.6）→ M4 后。
+- **预降低 std 发行工件**（用户 2026-07-07 提，好主意并入 mode B）：mirvm 随发行自带
+  ".mirvm 化 sysroot" = **非泛型 std 预降成字节码 + 泛型 std 带多态 MIR**（序列化，加载时
+  按用户实例化单态降低——泛型不可能全预降）。收益：worklist 闭包大头是 std → 启动只降用户
+  crate；消费端零 rust-src/零 rustc。落位：mode B（.mirvm）工程的第一个客户，M4.5 之后/
+  M5 前后；M4 全程用 mode A（sysroot MIR + worklist）即可，不阻塞。

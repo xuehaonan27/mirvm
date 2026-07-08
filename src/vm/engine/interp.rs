@@ -201,6 +201,7 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             slot_write(ctx, base, *dst_val, v);
             slot_write(ctx, base, *dst_flag, f as u64);
         }
+        Stmt::Trap(reason) => engine_abort(&format!("TRAP: {reason}")),
         Stmt::Nop => {}
     }
 }

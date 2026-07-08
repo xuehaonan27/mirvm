@@ -124,6 +124,9 @@ pub enum Stmt {
         dst_val: Slot,
         dst_flag: Slot,
     },
+    /// 语句级 Trap 占位：执行到即诊断退出，但**块的终止子照常降低**——
+    /// 保住 Call 边，使 --vm-stats 的可达分析准确（仪器盲点修复）。
+    Trap(Box<str>),
     Nop,
 }
 

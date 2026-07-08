@@ -34,5 +34,11 @@ pub fn lower_program(tcx: TyCtxt<'_>) -> ir::Module {
         module.exports.insert(sym.into_boxed_str(), i as ir::FuncId);
         module.funcs.push(body);
     }
+    // 入口别名（--vm-stats 从程序入口做可达分析用）
+    if let Some((entry_def, _)) = tcx.entry_fn(())
+        && let Some(&id) = ids.get(&Instance::mono(tcx, entry_def))
+    {
+        module.exports.insert("@entry".into(), id);
+    }
     module
 }

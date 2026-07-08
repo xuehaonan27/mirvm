@@ -274,9 +274,25 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     },
                 )
             }
-            TK::Drop { place, target, .. } => {
+            TK::Drop { place, target, unwind, .. } => {
                 let (_, ty) = self.resolve_place(place)?;
                 if ty.needs_drop(self.tcx, self.typing_env) {
+                    // glue 执行是 M4.2；但解析 glue instance 并保留 Call 边（可达分析完整）
+                    let glue = Instance::resolve_drop_glue(self.tcx, ty);
+                    if let Some(&callee) = self.ids.get(&glue) {
+                        return Ok((
+                            vec![Stmt::Trap(
+                                format!("Drop glue 执行（ty={ty}，M4.2）").into_boxed_str(),
+                            )],
+                            Terminator::Call {
+                                callee,
+                                args: vec![],
+                                ret: None,
+                                target: target.as_u32(),
+                                unwind: self.lower_unwind(*unwind),
+                            },
+                        ));
+                    }
                     return Err(format!("Drop glue（ty={ty}，M4.2）"));
                 }
                 (vec![], Terminator::Goto(target.as_u32()))
@@ -301,23 +317,50 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     ));
                 }
                 let Some(&callee) = self.ids.get(&inst) else {
+                    // foreign（extern）单独归因：这份清单就是 os:: 注册表的种子
+                    if self.tcx.is_foreign_item(inst.def_id()) {
+                        return Err(format!(
+                            "foreign `{}`（→内建/直通路由：alloc 系 M4.1，其余 os:: M4.3）",
+                            self.tcx.item_name(inst.def_id())
+                        ));
+                    }
                     return Err(format!("调用目标未收集: {inst}"));
                 };
-                // 实参：ZST 用占位 Imm 保持位置对齐（callee 对应 param slot = None）
+                // callee 已解析：实参/返回落点失败不丢 Call 边——前置 Trap 语句 + 保留调用
+                // （执行到 Trap 即停，Call 不会真跑；BFS 可达分析保持完整）
+                let mut pre: Vec<Stmt> = Vec::new();
                 let mut ir_args = Vec::with_capacity(args.len());
                 for a in args {
-                    match self.lower_operand(&a.node)? {
-                        Some(o) => ir_args.push(o),
-                        None => ir_args.push(Operand::Imm { bits: 0, width: Width::W8 }),
+                    match self.lower_operand(&a.node) {
+                        Ok(Some(o)) => ir_args.push(o),
+                        Ok(None) => ir_args.push(Operand::Imm { bits: 0, width: Width::W8 }),
+                        Err(e) => {
+                            pre.push(Stmt::Trap(format!("调用实参: {e}").into_boxed_str()));
+                            ir_args.clear();
+                            break;
+                        }
                     }
                 }
                 // 返回落点
-                let (_, ret_ty) = self.resolve_place(destination)?;
-                let ret_layout = self.layout_of(ret_ty)?;
-                let ret = if ret_layout.is_zst() {
-                    None
+                let ret = if pre.is_empty() {
+                    match self.resolve_place(destination).and_then(|(_, ret_ty)| {
+                        let l = self.layout_of(ret_ty)?;
+                        if l.is_zst() {
+                            Ok(None)
+                        } else {
+                            self.place_slot(destination).map(Some)
+                        }
+                    }) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            pre.push(Stmt::Trap(
+                                format!("调用返回落点: {e}").into_boxed_str(),
+                            ));
+                            None
+                        }
+                    }
                 } else {
-                    Some(self.place_slot(destination).map_err(|e| format!("调用返回落点: {e}"))?)
+                    None
                 };
                 // 发散调用（target=None）→ 合成 Unreachable 落点块
                 let tgt = match target {
@@ -330,7 +373,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }
                 };
                 (
-                    vec![],
+                    pre,
                     Terminator::Call {
                         callee,
                         args: ir_args,
@@ -405,8 +448,10 @@ pub fn lower_instance<'tcx>(
         }
     };
 
-    // 参数槽：ZST=None（占位保序）；非标量参 → 整函数 Trap（防静默错值）
+    // 参数槽：ZST=None（占位保序）；非标量参 → 体照常降低 + 入口 Trap 语句
+    // （防静默错值不变，但保住整个下游调用图——可达分析准确性）
     let mut params = Vec::new();
+    let mut param_trap: Option<String> = None;
     for local in body.args_iter() {
         let info = &frame.locals[local.as_usize()];
         if info.zst {
@@ -414,7 +459,12 @@ pub fn lower_instance<'tcx>(
         } else {
             match info.scalar {
                 Some(w) => params.push(Some(Slot { off: info.off, width: w })),
-                None => return Err(format!("非标量参数（ty={}，M4.1）", info.ty)),
+                None => {
+                    params.push(None);
+                    if param_trap.is_none() {
+                        param_trap = Some(format!("非标量参数（ty={}，M4.1）", info.ty));
+                    }
+                }
             }
         }
     }
@@ -426,35 +476,33 @@ pub fn lower_instance<'tcx>(
     let mut blocks = Vec::with_capacity(mir_block_count);
     for bb_data in body.basic_blocks.iter() {
         let mut stmts = Vec::new();
-        let mut trap: Option<String> = None;
         for stmt in &bb_data.statements {
             match lower_stmt(&cx, stmt) {
                 Ok(mut s) => stmts.append(&mut s),
                 Err(reason) => {
-                    trap = Some(reason);
+                    // 语句级 Trap：执行到此即诊断退出；终止子照常降低（保 Call 边）
+                    stmts.push(Stmt::Trap(reason.into_boxed_str()));
                     break;
                 }
             }
         }
-        let term = match trap {
-            Some(reason) => Terminator::Trap(reason.into_boxed_str()),
-            None => match cx.lower_terminator(bb_data.terminator()) {
-                Ok((mut extra, t)) => {
-                    stmts.append(&mut extra);
-                    match (&t, ret_unsupported) {
-                        // 非标量返回：跑到 Return 即 Trap（防静默返回 0）
-                        (Terminator::Return, true) => {
-                            Terminator::Trap("非标量返回（M4.1）".into())
-                        }
-                        _ => t,
-                    }
+        let term = match cx.lower_terminator(bb_data.terminator()) {
+            Ok((mut extra, t)) => {
+                stmts.append(&mut extra);
+                match (&t, ret_unsupported) {
+                    // 非标量返回：跑到 Return 即 Trap（防静默返回 0）
+                    (Terminator::Return, true) => Terminator::Trap("非标量返回（M4.1）".into()),
+                    _ => t,
                 }
-                Err(reason) => Terminator::Trap(reason.into_boxed_str()),
-            },
+            }
+            Err(reason) => Terminator::Trap(reason.into_boxed_str()),
         };
         blocks.push(ir::Block { stmts, term });
     }
     blocks.append(&mut cx.extra_blocks);
+    if let Some(reason) = param_trap {
+        blocks[0].stmts.insert(0, Stmt::Trap(reason.into_boxed_str()));
+    }
 
     Ok(ir::FuncBody {
         frame_size: cx.frame.size,
