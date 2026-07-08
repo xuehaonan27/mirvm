@@ -137,6 +137,23 @@ pub enum UnwindAction {
     Cleanup(Bb),
 }
 
+/// 引擎原语（foreign 三路处置①，debt-map §2-B）：std 自己声明的 runtime extern 边界，
+/// native 下由 codegen/链接器合成 shim——引擎在同一边界接管。
+/// alloc 系的引擎实现是 M4.1 第 5 步（堆内建）；落地前 lower 前置 `Stmt::Trap` 防静默。
+#[derive(Clone, Copy, Debug)]
+pub enum Builtin {
+    /// `__rust_alloc(size, align) -> ptr`
+    RustAlloc,
+    /// `__rust_dealloc(ptr, size, align)`
+    RustDealloc,
+    /// `__rust_realloc(ptr, old_size, align, new_size) -> ptr`
+    RustRealloc,
+    /// `__rust_alloc_zeroed(size, align) -> ptr`
+    RustAllocZeroed,
+    /// `__rust_no_alloc_shim_is_unstable_v2()`：分配前哨兵，空操作
+    NoAllocShim,
+}
+
 #[derive(Clone, Debug)]
 pub enum Terminator {
     Goto(Bb),
@@ -147,6 +164,14 @@ pub enum Terminator {
     },
     Call {
         callee: FuncId,
+        args: Vec<Operand>,
+        ret: Option<Slot>,
+        target: Bb,
+        unwind: UnwindAction,
+    },
+    /// 引擎原语调用（不是 guest 函数，无 Call 边）。
+    CallBuiltin {
+        builtin: Builtin,
         args: Vec<Operand>,
         ret: Option<Slot>,
         target: Bb,

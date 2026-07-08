@@ -89,6 +89,24 @@ pub fn report(module: &Module) -> String {
         out.push_str(&format!("{n:6}  {reason}\n"));
     }
 
+    // foreign 全清单（os:: 注册表种子，M4.3 开工调研的直接输入；不截断、不进 TOP 竞争）
+    let mut fm: HashMap<&str, usize> = HashMap::new();
+    for f in &module.funcs {
+        for r in traps_of(f) {
+            if r.starts_with("foreign") {
+                *fm.entry(r).or_default() += 1;
+            }
+        }
+    }
+    if !fm.is_empty() {
+        let mut foreigns: Vec<(&str, usize)> = fm.into_iter().collect();
+        foreigns.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        out.push_str("\n== foreign 符号全清单（os:: 种子）==\n");
+        for (reason, n) in &foreigns {
+            out.push_str(&format!("{n:6}  {reason}\n"));
+        }
+    }
+
     // 裸名导出（no_mangle / @entry）：可达 Trap 分析（BFS 经 Call 边）
     out.push_str("\n== 各导出/入口的可达 Trap（BFS 经 Call 边）==\n");
     let mut exports: Vec<(&str, u32)> = module

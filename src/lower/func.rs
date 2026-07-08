@@ -3,13 +3,13 @@
 //! 纪律（M4.0 设计 §3）：**Trap-stub 全覆盖**——语句/终止子/布局遇不认识的构造，
 //! 当前块降为 `Trap(诊断)`，绝不中止整个降低。诊断串标注"哪一期欠的账"。
 
-use rustc_data_structures::fx::FxHashMap;
 use rustc_middle::mir::{self, Body};
 use rustc_middle::ty::{self, EarlyBinder, Instance, InstanceKind, Ty, TyCtxt, TypingEnv};
 
 use super::frame::{self, FrameLayout};
+use super::{Callee, Linker};
 use crate::vm::engine::ir::{
-    self, Bb, FuncId, IntBinOp, IntCc, Operand, OvfOp, Rvalue, Slot, Stmt, Terminator, Width,
+    self, Bb, IntBinOp, IntCc, Operand, OvfOp, Rvalue, Slot, Stmt, Terminator, Width,
 };
 
 /// 整函数不可降低时的占位体（被调用即 Trap，诊断给出原因）。
@@ -31,7 +31,7 @@ struct LowerCx<'tcx, 'a> {
     tcx: TyCtxt<'tcx>,
     typing_env: TypingEnv<'tcx>,
     frame: FrameLayout<'tcx>,
-    ids: &'a FxHashMap<Instance<'tcx>, FuncId>,
+    linker: &'a mut Linker<'tcx>,
     /// 追加的合成块（发散调用的落点等），最终接在 MIR 块之后
     extra_blocks: Vec<ir::Block>,
     mir_block_count: usize,
@@ -277,23 +277,22 @@ impl<'tcx> LowerCx<'tcx, '_> {
             TK::Drop { place, target, unwind, .. } => {
                 let (_, ty) = self.resolve_place(place)?;
                 if ty.needs_drop(self.tcx, self.typing_env) {
-                    // glue 执行是 M4.2；但解析 glue instance 并保留 Call 边（可达分析完整）
+                    // 正常路径 Drop = 普通 Call（F2）；glue 执行落 M4.1 第 5 步，
+                    // 此前前置 Trap 防静默 + 保 Call 边（可达分析完整）
                     let glue = Instance::resolve_drop_glue(self.tcx, ty);
-                    if let Some(&callee) = self.ids.get(&glue) {
-                        return Ok((
-                            vec![Stmt::Trap(
-                                format!("Drop glue 执行（ty={ty}，M4.2）").into_boxed_str(),
-                            )],
-                            Terminator::Call {
-                                callee,
-                                args: vec![],
-                                ret: None,
-                                target: target.as_u32(),
-                                unwind: self.lower_unwind(*unwind),
-                            },
-                        ));
-                    }
-                    return Err(format!("Drop glue（ty={ty}，M4.2）"));
+                    let callee = self.linker.func_id(glue);
+                    return Ok((
+                        vec![Stmt::Trap(
+                            format!("Drop glue 执行（ty={ty}，M4.1 第 5 步）").into_boxed_str(),
+                        )],
+                        Terminator::Call {
+                            callee,
+                            args: vec![],
+                            ret: None,
+                            target: target.as_u32(),
+                            unwind: self.lower_unwind(*unwind),
+                        },
+                    ));
                 }
                 (vec![], Terminator::Goto(target.as_u32()))
             }
@@ -310,22 +309,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     gargs,
                     term.source_info.span,
                 );
-                if let InstanceKind::Intrinsic(..) = inst.def {
-                    return Err(format!(
-                        "intrinsic `{}`（D5：fallback body 走普通降低——须收集为 Item）",
-                        self.tcx.item_name(*def_id)
-                    ));
-                }
-                let Some(&callee) = self.ids.get(&inst) else {
-                    // foreign（extern）单独归因：这份清单就是 os:: 注册表的种子
-                    if self.tcx.is_foreign_item(inst.def_id()) {
-                        return Err(format!(
-                            "foreign `{}`（→内建/直通路由：alloc 系 M4.1，其余 os:: M4.3）",
-                            self.tcx.item_name(inst.def_id())
-                        ));
-                    }
-                    return Err(format!("调用目标未收集: {inst}"));
-                };
+                // Linker 三路解析（debt-map §2-B）：普通函数/intrinsic fallback →
+                // worklist 扩集；foreign → ①引擎原语 ②链接仿真 ③Trap
+                let callee = self.linker.resolve_call(inst)?;
                 // callee 已解析：实参/返回落点失败不丢 Call 边——前置 Trap 语句 + 保留调用
                 // （执行到 Trap 即停，Call 不会真跑；BFS 可达分析保持完整）
                 let mut pre: Vec<Stmt> = Vec::new();
@@ -372,16 +358,32 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         idx
                     }
                 };
-                (
-                    pre,
-                    Terminator::Call {
-                        callee,
+                let term = match callee {
+                    Callee::Func(id) => Terminator::Call {
+                        callee: id,
                         args: ir_args,
                         ret,
                         target: tgt,
                         unwind: self.lower_unwind(*unwind),
                     },
-                )
+                    Callee::Builtin(b) => {
+                        // 引擎侧未落地的原语（alloc 系 = 第 5 步堆内建）前置 Trap 防静默
+                        if !matches!(b, ir::Builtin::NoAllocShim) {
+                            pre.push(Stmt::Trap(
+                                format!("引擎原语 {b:?}（堆内建，M4.1 第 5 步）")
+                                    .into_boxed_str(),
+                            ));
+                        }
+                        Terminator::CallBuiltin {
+                            builtin: b,
+                            args: ir_args,
+                            ret,
+                            target: tgt,
+                            unwind: self.lower_unwind(*unwind),
+                        }
+                    }
+                };
+                (pre, term)
             }
             other => return Err(format!("终止子 {other:?}（M4.1+）")),
         })
@@ -417,11 +419,11 @@ fn lower_stmt<'tcx>(
 
 /// 一个 instance 的降低。Err = 整函数 Trap（layout 失败等）；
 /// 语句级不支持 → 该块 Trap（细粒度）。
-pub fn lower_instance<'tcx>(
+pub(crate) fn lower_instance<'tcx>(
     tcx: TyCtxt<'tcx>,
     typing_env: TypingEnv<'tcx>,
     instance: Instance<'tcx>,
-    ids: &FxHashMap<Instance<'tcx>, FuncId>,
+    linker: &mut Linker<'tcx>,
 ) -> Result<ir::FuncBody, String> {
     // intrinsic 无普通 MIR（fallback-body 型由收集器按 Item 收集）
     if let InstanceKind::Intrinsic(..) = instance.def {
@@ -471,7 +473,8 @@ pub fn lower_instance<'tcx>(
 
     let name = tcx.symbol_name(instance).name.to_owned();
     let mir_block_count = body.basic_blocks.len();
-    let mut cx = LowerCx { tcx, typing_env, frame, ids, extra_blocks: Vec::new(), mir_block_count };
+    let mut cx =
+        LowerCx { tcx, typing_env, frame, linker, extra_blocks: Vec::new(), mir_block_count };
 
     let mut blocks = Vec::with_capacity(mir_block_count);
     for bb_data in body.basic_blocks.iter() {

@@ -242,6 +242,21 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> u64 {
                 }
                 blk = *target as usize;
             }
+            Terminator::CallBuiltin { builtin, ret, target, .. } => {
+                use super::ir::Builtin;
+                let r = match builtin {
+                    // 分配前哨兵：空操作
+                    Builtin::NoAllocShim => 0,
+                    // alloc 系：lower 已前置 Stmt::Trap（不可达）；防御性再 Trap
+                    other => engine_abort(&format!(
+                        "引擎原语 {other:?} 未实现（堆内建，M4.1 第 5 步）"
+                    )),
+                };
+                if let Some(rs) = ret {
+                    slot_write(ctx, base, *rs, r);
+                }
+                blk = *target as usize;
+            }
             Terminator::Assert { cond, expected, msg, target, .. } => {
                 let (c, _) = eval_operand(ctx, base, cond);
                 if (c != 0) != *expected {
