@@ -81,6 +81,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     let mut sysroot = None;
     let mut engine = "interp".to_string();
     let mut vm_call: Option<String> = None;
+    let mut vm_stats = false;
     let mut program_args: Vec<String> = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -109,6 +110,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
                 }
             }
             "--vm-call" => vm_call = Some(next("--vm-call")),
+            "--vm-stats" => vm_stats = true,
             _ if input.is_none() && !arg.starts_with('-') => input = Some(arg),
             _ => {
                 eprintln!("mirvm: 未知参数 `{arg}`\n{USAGE}");
@@ -161,7 +163,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     ];
     let mut program_argv = vec![input];
     program_argv.extend(program_args);
-    run_driver(rustc_args, program_argv, dump_mir, engine, vm_call)
+    run_driver(rustc_args, program_argv, dump_mir, engine, vm_call, vm_stats)
 }
 
 // ===== cargo runner 回调 =====
@@ -177,7 +179,7 @@ fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
         // SAFETY: 单线程阶段，尚未启动解释
         unsafe { std::env::set_var(k, v) };
     }
-    run_driver(rustc_args, program_argv, false, "interp".into(), None)
+    run_driver(rustc_args, program_argv, false, "interp".into(), None, false)
 }
 
 // ===== 共享驱动 =====
@@ -188,6 +190,7 @@ struct MirvmCallbacks {
     exit_code: Option<i32>,
     engine: String,
     vm_call: Option<String>,
+    vm_stats: bool,
 }
 
 impl Callbacks for MirvmCallbacks {
@@ -212,7 +215,8 @@ impl Callbacks for MirvmCallbacks {
             print!("{}", String::from_utf8_lossy(&buf));
         } else if self.engine == "vm" {
             // M4 新引擎：加载相（lower，tcx 关在此）→ 执行相（纯 Rust）
-            self.exit_code = Some(run_vm_engine(tcx, self.vm_call.as_deref()));
+            self.exit_code =
+                Some(run_vm_engine(tcx, self.vm_call.as_deref(), self.vm_stats));
         } else {
             let config = EvalConfig { argv: std::mem::take(&mut self.program_argv) };
             self.exit_code = Some(interp::eval::eval_main(tcx, def_id, config));
@@ -223,9 +227,13 @@ impl Callbacks for MirvmCallbacks {
 }
 
 /// `--engine=vm` 分支。M4.0：需 `--vm-call 'name(args…)'` 直接调导出函数（gate 入口）；
-/// 跑 main（std 启动链）自 M4.3 起。
-fn run_vm_engine(tcx: TyCtxt<'_>, vm_call: Option<&str>) -> i32 {
+/// 跑 main（std 启动链）自 M4.3 起。`--vm-stats` = Trap 债务统计（各期开工前的调研仪器）。
+fn run_vm_engine(tcx: TyCtxt<'_>, vm_call: Option<&str>, vm_stats: bool) -> i32 {
     let module = crate::lower::lower_program(tcx);
+    if vm_stats {
+        print!("{}", crate::vm::engine::stats::report(&module));
+        return 0;
+    }
     let Some(spec) = vm_call else {
         eprintln!("mirvm: --engine=vm 现阶段（M4.0）需要 --vm-call 'name(a,b,…)'（main 启动链 M4.3 起）");
         return 2;
@@ -275,8 +283,10 @@ fn run_driver(
     dump_mir: bool,
     engine: String,
     vm_call: Option<String>,
+    vm_stats: bool,
 ) -> ExitCode {
-    let mut callbacks = MirvmCallbacks { dump_mir, program_argv, exit_code: None, engine, vm_call };
+    let mut callbacks =
+        MirvmCallbacks { dump_mir, program_argv, exit_code: None, engine, vm_call, vm_stats };
     let compiler_code = rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&rustc_args, &mut callbacks)
     });
