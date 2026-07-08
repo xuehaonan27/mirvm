@@ -1,15 +1,16 @@
 //! M4 引擎字节码 IR（类型化；纯 Rust，零 rustc 类型——完全自包含的冻结产物）。
 //!
-//! 核心决定（M4.0 设计 §1）：**Place 在 lower 期溶解为帧内偏移**。布局全部冻结后，
-//! 局部变量身份消失，语句只在 (frame_offset, width) 之间搬运/运算——执行期零符号表查询。
-//! local 序号/名字只进诊断串。
+//! M4.1 升级（m4.1-design §3.1）：**静态槽 → place 求值**。Deref/Index 是运行期地址，
+//! 静态偏移撑不住 → 地址表达式 `PlaceExpr`（lower 编译投影链，引擎按序求值得真地址）。
+//! 帧基址是真地址（F6）⇒ 帧内/堆上/statics 统一为裸地址读写。
+//! 快路径保留：纯帧内静态偏移的标量访问仍是 `Slot`（零求值开销）。
 //!
 //! 与 spike bytecode（../bytecode.rs）分离：spikes 是冻结的验证工件，本 IR 是 M4 真身。
 
 pub type Bb = u32;
 pub type FuncId = u32;
 
-/// 标量宽度。W128/浮点 = M4.1（lower 以 Trap 占位）。
+/// 标量宽度。W128 = 两槽通道（M4.1 第 3 步）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Width {
     W8,
@@ -48,17 +49,72 @@ impl Width {
     }
 }
 
-/// 帧内标量槽：冻结偏移（Field 投影已折进 off）。
+/// 帧内标量槽（快路径）：冻结偏移（Field 投影已折进 off）。
 #[derive(Clone, Copy, Debug)]
 pub struct Slot {
     pub off: u32,
     pub width: Width,
 }
 
+// ===== place 求值（M4.1 核心）=====
+
+/// 地址表达式的基。
 #[derive(Clone, Copy, Debug)]
-pub enum Operand {
+pub enum PlaceBase {
+    /// 帧内局部：真地址 = 帧基址 + off
+    Local(u32),
+    /// 冻结区真地址（statics/常量池，M4.1 第 4 步物化）
+    Static(u64),
+}
+
+/// 地址表达式的一步（lower 已把 Field/Downcast 折叠成 Offset）。
+#[derive(Clone, Copy, Debug)]
+pub enum PlaceStep {
+    /// 当前地址处读出指针（W64），地址切换为它
+    Deref,
+    /// 常量字节偏移
+    Offset(u32),
+    /// 动态下标：地址 += 帧内 idx 槽值 × stride
+    IndexScaled { idx: Slot, stride: u64 },
+}
+
+/// 地址表达式：引擎按序求值 → 真地址 u64。
+#[derive(Clone, Debug)]
+pub struct PlaceExpr {
+    pub base: PlaceBase,
+    pub steps: Box<[PlaceStep]>,
+}
+
+/// 标量位置：读/写一个 ≤64 位标量的落点。
+#[derive(Clone, Debug)]
+pub enum ScalarPlace {
+    /// 快路径：帧内静态槽
     Slot(Slot),
+    /// 慢路径：地址表达式处的标量
+    Mem { expr: PlaceExpr, width: Width },
+}
+
+#[derive(Clone, Debug)]
+pub enum Operand {
+    /// 帧内静态槽（快路径）
+    Slot(Slot),
+    /// 地址表达式处的标量
+    Mem { expr: PlaceExpr, width: Width },
     Imm { bits: u64, width: Width },
+    /// place 的真地址本身（indirect 实参 = 传聚合的地址）
+    AddrOf(PlaceExpr),
+}
+
+impl Operand {
+    #[inline]
+    pub fn width(&self) -> Width {
+        match self {
+            Operand::Slot(s) => s.width,
+            Operand::Mem { width, .. } => *width,
+            Operand::Imm { width, .. } => *width,
+            Operand::AddrOf(_) => Width::W64,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -106,12 +162,16 @@ pub enum Rvalue {
     Neg(Operand),
     /// IntToInt：截断后按 from 的符号扩展到 to
     Cast { from: (Width, bool), to: Width, a: Operand },
+    /// 取 place 真地址（Ref/RawPtr 同一实现——真实地址模型）
+    Ref(PlaceExpr),
+    /// 指针算术：ptr + count × stride（BinOp::Offset 与 offset/arith_offset intrinsic）
+    PtrOffset { ptr: Operand, count: Operand, stride: u64 },
 }
 
 #[derive(Clone, Debug)]
 pub enum Stmt {
     Assign {
-        dst: Slot,
+        dst: ScalarPlace,
         rv: Rvalue,
     },
     /// *WithOverflow：一次写 (值槽, 溢出旗标槽)——MIR 的 (T,bool) 标量对，
@@ -121,8 +181,22 @@ pub enum Stmt {
         signed: bool,
         a: Operand,
         b: Operand,
-        dst_val: Slot,
-        dst_flag: Slot,
+        dst_val: ScalarPlace,
+        dst_flag: ScalarPlace,
+    },
+    /// 聚合搬运（memcpy 语义；pair/聚合整体拷贝的通道）
+    Copy {
+        dst: PlaceExpr,
+        src: PlaceExpr,
+        size: u32,
+    },
+    /// 重复填充：dst 起 count 个元素，每个 elem_size 字节，值来自 src 标量或 memcpy
+    /// （`[expr; N]` 的 Repeat rvalue；elem ≤8 字节走标量循环）
+    RepeatScalar {
+        dst: PlaceExpr,
+        val: Operand,
+        count: u64,
+        elem_size: u32,
     },
     /// 语句级 Trap 占位：执行到即诊断退出，但**块的终止子照常降低**——
     /// 保住 Call 边，使 --vm-stats 的可达分析准确（仪器盲点修复）。
@@ -154,6 +228,44 @@ pub enum Builtin {
     NoAllocShim,
 }
 
+/// 参数在 callee 帧内的落位（引擎调用约定 v2：实参展平为 `&[u64]` 槽序列）。
+#[derive(Clone, Copy, Debug)]
+pub enum ParamAbi {
+    /// ZST：不占实参槽
+    Zst,
+    /// 标量：1 槽
+    Scalar(Slot),
+    /// 标量对：2 槽（lo, hi 各自的帧内槽，偏移来自冻结 pair 布局）
+    Pair(Slot, Slot),
+    /// 大聚合：1 槽 = src 真地址；prologue memcpy `size` 字节到帧内 `off`
+    Indirect { off: u32, size: u32 },
+}
+
+/// 返回通道（引擎调用约定 v2）。
+#[derive(Clone, Copy, Debug)]
+pub enum RetAbi {
+    Zst,
+    /// 标量：interp_frame 返回 lo
+    Scalar(Slot),
+    /// 标量对：返回 (lo, hi)
+    Pair(Slot, Slot),
+    /// 大聚合：caller 前插隐藏首实参 = 目的真地址；callee Return 时
+    /// memcpy(隐藏指针槽, _0 槽, size)。隐藏指针槽附加在帧尾（sret_off）。
+    Indirect { ret_off: u32, size: u32, sret_off: u32 },
+}
+
+/// Call 的返回落点（caller 侧）。
+#[derive(Clone, Debug)]
+pub enum RetDest {
+    /// 忽略（ZST 或无落点）
+    Ignore,
+    Scalar(ScalarPlace),
+    /// pair 两半的落点（dst place + 冻结的两半偏移/宽度）
+    Pair(ScalarPlace, ScalarPlace),
+    /// 大聚合：caller 求好目的真地址，作为隐藏首实参传入（Call 时前插）
+    Indirect(PlaceExpr),
+}
+
 #[derive(Clone, Debug)]
 pub enum Terminator {
     Goto(Bb),
@@ -165,7 +277,7 @@ pub enum Terminator {
     Call {
         callee: FuncId,
         args: Vec<Operand>,
-        ret: Option<Slot>,
+        ret: RetDest,
         target: Bb,
         unwind: UnwindAction,
     },
@@ -173,7 +285,7 @@ pub enum Terminator {
     CallBuiltin {
         builtin: Builtin,
         args: Vec<Operand>,
-        ret: Option<Slot>,
+        ret: RetDest,
         target: Bb,
         unwind: UnwindAction,
     },
@@ -189,7 +301,7 @@ pub enum Terminator {
     Unreachable,
     /// ★ Trap-stub：未支持构造的占位（M4 增量协议的核心机制）。
     /// lowering 对收集全集是全量的——不认识的构造绝不中止，就地降为 Trap；
-    /// 只有被执行到的路径必须 trap-free。诊断串指出"哪一期欠的账"。
+    /// 只有被执行的路径必须 trap-free。诊断串指出"哪一期欠的账"。
     Trap(Box<str>),
 }
 
@@ -203,10 +315,10 @@ pub struct Block {
 pub struct FuncBody {
     pub frame_size: u32,
     pub frame_align: u32,
-    /// 返回槽（_0）；ZST 返回 = None
-    pub ret: Option<Slot>,
-    /// 参数槽（_1..=_argc 中的标量参；ZST 参已剔除但占位序保留见 lower）
-    pub params: Vec<Option<Slot>>,
+    /// 返回通道（_0）
+    pub ret: RetAbi,
+    /// 参数落位（_1..=_argc；实参槽序 = 展平序）
+    pub params: Vec<ParamAbi>,
     pub blocks: Vec<Block>,
     /// 诊断用（符号名）
     pub name: Box<str>,
