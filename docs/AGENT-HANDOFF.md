@@ -70,6 +70,11 @@ evcxr 四点不满（延迟、状态/借用限制、跑不了完整项目、编�
 （已定 = "B 目标 A 排序"，见 §7.4）。**从施工顺序第 0 步（worklist 闭包扩集 + foreign 三路
 骨架）开始**。
 
+> **更新（2026-07-08）**：**M4.1 已完成**（gate1 digest 9/9 == native + M4.1 份内债务清零；
+> 经验与遗留见 `docs/m4-log.md` M4.1 条目）。项目已迁移至 `/home/ubuntu/mirvm`（原
+> /home/xuehaonan）。**下一步 = M4.2 unwind**（panic 原语 lower 成引擎原语、CleanupGuard、
+> Drop unwind 路径、catch_unwind；gate = demo/catch.rs、panic_exit.rs；简报即行，无需过审）。
+
 **挂起检查点（勿丢，§10）**：vmctx P/R 真负载终裁挂 M5；landing pad/LSDA 挂 M5；fork/atfork
 挂 M4 后；预降低 std 发行工件挂 mode B（M4.5 后）。
 
