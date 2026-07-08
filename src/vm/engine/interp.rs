@@ -412,6 +412,25 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
             let (bv, _) = eval_operand(ctx, base, b);
             ((av.wrapping_sub(bv) as i64) / *stride as i64) as u64
         }
+        Rvalue::SimdBitmask { a, lanes, lane_bytes } => {
+            let pa = eval_place_addr(ctx, base, a);
+            let lb = *lane_bytes as u64;
+            let mut mask = 0u64;
+            for i in 0..*lanes as u64 {
+                // 小端 lane 的符号位在末字节最高位
+                let top = unsafe { *((pa + i * lb + lb - 1) as *const u8) };
+                mask |= ((top >> 7) as u64) << i;
+            }
+            mask
+        }
+        Rvalue::MemCmp { a, b, n } => {
+            let (pa, _) = eval_operand(ctx, base, a);
+            let (pb, _) = eval_operand(ctx, base, b);
+            let (len, _) = eval_operand(ctx, base, n);
+            let sa = unsafe { std::slice::from_raw_parts(pa as *const u8, len as usize) };
+            let sb = unsafe { std::slice::from_raw_parts(pb as *const u8, len as usize) };
+            (sa.cmp(sb) as i8 as i32) as u32 as u64
+        }
     }
 }
 
@@ -534,6 +553,49 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let bytes = (c as usize).wrapping_mul(*elem_size as usize);
             unsafe { std::ptr::write_bytes(d as *mut u8, v as u8, bytes) };
         }
+        Stmt::SimdBin { op, dst, a, b, lanes, lane_bytes } => {
+            use super::ir::SimdBinOp as S;
+            let pd = eval_place_addr(ctx, base, dst);
+            let pa = eval_place_addr(ctx, base, a);
+            let pb = eval_place_addr(ctx, base, b);
+            let lb = *lane_bytes as u64;
+            let lw = Width::from_bytes(lb).expect("lane 宽度");
+            for i in 0..*lanes as u64 {
+                let x = mem_read(pa + i * lb, lw);
+                let y = mem_read(pb + i * lb, lw);
+                let r = match op {
+                    S::Eq => (int_cmp(IntCc::Eq, false, x, y, lw) != 0).then_some(lw.mask()),
+                    S::Ne => (int_cmp(IntCc::Ne, false, x, y, lw) != 0).then_some(lw.mask()),
+                    S::Lt { signed } => {
+                        (int_cmp(IntCc::Lt, *signed, x, y, lw) != 0).then_some(lw.mask())
+                    }
+                    S::Le { signed } => {
+                        (int_cmp(IntCc::Le, *signed, x, y, lw) != 0).then_some(lw.mask())
+                    }
+                    S::Gt { signed } => {
+                        (int_cmp(IntCc::Gt, *signed, x, y, lw) != 0).then_some(lw.mask())
+                    }
+                    S::Ge { signed } => {
+                        (int_cmp(IntCc::Ge, *signed, x, y, lw) != 0).then_some(lw.mask())
+                    }
+                    S::And => Some(x & y),
+                    S::Or => Some(x | y),
+                    S::Xor => Some(x ^ y),
+                    S::Add => Some(x.wrapping_add(y) & lw.mask()),
+                    S::Sub => Some(x.wrapping_sub(y) & lw.mask()),
+                };
+                mem_write(pd + i * lb, lw, r.unwrap_or(0));
+            }
+        }
+        Stmt::SimdSplat { dst, val, lanes, lane_bytes } => {
+            let pd = eval_place_addr(ctx, base, dst);
+            let (v, _) = eval_operand(ctx, base, val);
+            let lb = *lane_bytes as u64;
+            let lw = Width::from_bytes(lb).expect("lane 宽度");
+            for i in 0..*lanes as u64 {
+                mem_write(pd + i * lb, lw, v);
+            }
+        }
         Stmt::Trap(reason) => engine_abort(&format!("TRAP: {reason}")),
         Stmt::Nop => {}
     }
@@ -602,6 +664,30 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
                 }
                 av.extend(aops.iter().map(|o| eval_operand(ctx, base, o).0));
                 let (lo, hi) = interp_frame(ctx, *callee, &av); // ← 宿主递归 = guest 帧上 native 栈
+                match ret {
+                    RetDest::Ignore | RetDest::Indirect(_) => {}
+                    RetDest::Scalar(p) => place_write(ctx, base, p, lo),
+                    RetDest::Pair(pl, ph) => {
+                        place_write(ctx, base, pl, lo);
+                        place_write(ctx, base, ph, hi);
+                    }
+                }
+                blk = *target as usize;
+            }
+            Terminator::CallIndirect { callee, args: aops, ret, target, .. } => {
+                let (addr, _) = eval_operand(ctx, base, callee);
+                let Some(&fid) = module.fn_addrs.get(&addr) else {
+                    engine_abort(&format!(
+                        "间接调用目标 {addr:#x} 不是已知 fn 条目（fn {}）",
+                        body.name
+                    ));
+                };
+                let mut av: Vec<u64> = Vec::with_capacity(aops.len() + 1);
+                if let RetDest::Indirect(dst) = ret {
+                    av.push(eval_place_addr(ctx, base, dst));
+                }
+                av.extend(aops.iter().map(|o| eval_operand(ctx, base, o).0));
+                let (lo, hi) = interp_frame(ctx, fid, &av);
                 match ret {
                     RetDest::Ignore | RetDest::Indirect(_) => {}
                     RetDest::Scalar(p) => place_write(ctx, base, p, lo),

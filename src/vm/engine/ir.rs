@@ -180,6 +180,24 @@ pub enum RmwOp {
     Nand,
 }
 
+/// SIMD 逐 lane 双目（M4.1 最小集：hashbrown SSE2 group 探测所需）。
+/// 比较产出 mask lane（真=全 1）；位运算逐 lane。
+#[derive(Clone, Copy, Debug)]
+pub enum SimdBinOp {
+    Eq,
+    Ne,
+    /// 有符号性来自 lane 元素类型（冻结）
+    Lt { signed: bool },
+    Le { signed: bool },
+    Gt { signed: bool },
+    Ge { signed: bool },
+    And,
+    Or,
+    Xor,
+    Add,
+    Sub,
+}
+
 #[derive(Clone, Debug)]
 pub enum Rvalue {
     Use(Operand),
@@ -227,6 +245,10 @@ pub enum Rvalue {
     AtomicLoad { addr: Operand, width: Width },
     /// 指针差（ptr_offset_from[_unsigned]）：(a - b) / stride（i64 除法）
     PtrDiff { a: Operand, b: Operand, stride: u64 },
+    /// SIMD movemask：收集各 lane 最高位 → 整数标量（simd_bitmask）
+    SimdBitmask { a: PlaceExpr, lanes: u16, lane_bytes: u8 },
+    /// 字节比较（compare_bytes intrinsic = memcmp）→ i32（-1/0/1 语义按首异字节）
+    MemCmp { a: Operand, b: Operand, n: Operand },
 }
 
 #[derive(Clone, Debug)]
@@ -276,6 +298,17 @@ pub enum Stmt {
     MemCopy { dst: Operand, src: Operand, count: Operand, elem_size: u64, overlap: bool },
     /// 动态长度填充（write_bytes：val 是 u8，count × elem_size 字节）
     MemSet { dst: Operand, val: Operand, count: Operand, elem_size: u64 },
+    /// SIMD 逐 lane 双目（dst/a/b 是向量 place；几何冻结自 layout）
+    SimdBin {
+        op: SimdBinOp,
+        dst: PlaceExpr,
+        a: PlaceExpr,
+        b: PlaceExpr,
+        lanes: u16,
+        lane_bytes: u8,
+    },
+    /// SIMD 广播（simd_splat / _mm_set1）：val 复制到每个 lane
+    SimdSplat { dst: PlaceExpr, val: Operand, lanes: u16, lane_bytes: u8 },
     /// 语句级 Trap 占位：执行到即诊断退出，但**块的终止子照常降低**——
     /// 保住 Call 边，使 --vm-stats 的可达分析准确（仪器盲点修复）。
     Trap(Box<str>),
@@ -362,6 +395,15 @@ pub enum Terminator {
     /// 引擎原语调用（不是 guest 函数，无 Call 边）。
     CallBuiltin {
         builtin: Builtin,
+        args: Vec<Operand>,
+        ret: RetDest,
+        target: Bb,
+        unwind: UnwindAction,
+    },
+    /// 间接调用（fn-ptr / dyn 虚派发）：callee 求值 = fn 条目真地址（D4），
+    /// 经 Module.fn_addrs 反查 FuncId。--vm-stats 可达分析无出边（已知盲点）。
+    CallIndirect {
+        callee: Operand,
         args: Vec<Operand>,
         ret: RetDest,
         target: Bb,

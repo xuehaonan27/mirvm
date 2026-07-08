@@ -46,3 +46,83 @@ tier-0 diff 16/16。
 聚合/枚举/投影(Index/Deref)、引用/裸指针、堆、statics（指针常量 → M4.1）；Drop glue、
 panic/unwind（M4.2）；intrinsic 内建与 fallback-body 收集路径核实（M4.1 顺带）；128 位、浮点
 （M4.1）；main 启动链（M4.3）。
+
+## M4.1 值与内存 —— **完成**（2026-07-08）
+
+**Gate 全绿**：`tests/m4_gate1.sh`——digest 九函数（vec/string/map/box/enum/slice/static/
+rawptr/float）经 `--vm-call` 全部 == 同源 native（rustc -O）直跑值（含**真 HashMap**：
+hashbrown SSE2 group 探测走引擎 SIMD 最小集，"B 目标 A 排序"决策兑现、未触发降级条件）+
+`--vm-stats` 复测九函数可达集 **M4.1 份内债务清零**（残余全部归期豁免：resume/caller_location
+=M4.2、foreign syscall/errno/sse2.pause=M4.3、ThreadLocalRef=M4.4，均在 panic/OS/TLS 分支，
+执行路径实测 trap-free）。全量回归无损：gate0 9/9、纯度门禁、diff 16/16、spike1-5、TSan 零警告。
+
+### 建了什么（按施工顺序）
+
+- **第 0 步 worklist 闭包扩集 + foreign 三路**（D1 修正落地）：`Linker`（lower/mod.rs）
+  ——ids/queue worklist（collector 集作种子、调用点扩集）+ ①引擎原语表（allocator-shim
+  mangled 符号清单→`CallBuiltin`）②链接仿真（`for_each_linked_def` 同构导出符号表，
+  strong 覆盖 weak；panic_impl/__rust_start_panic 自动解到 std/panic_unwind 实现）③未知
+  foreign Trap 带 os:: 归期。intrinsic fallback body 同机制补收（`Instance::new_raw`，
+  collector 源码同款构造）。`--vm-stats` 加 foreign 全清单段（os:: 种子，M4.3 输入）。
+- **第 1 步 mmap 定容 ByteRegion**（F6）：帧地址终身稳定，base 语义改真地址；到界=栈溢出近似。
+- **第 2 步 place 求值 + ABI v2**：`PlaceExpr{Local|Static, [Deref|Offset|IndexScaled]}`
+  快慢双路（纯帧内静态槽零开销保留）；`Copy`/`RepeatScalar` memcpy 通道；`Ref`/`PtrOffset`；
+  **调用约定 v2 一次定型**（Zst/Scalar/Pair 2 槽/Indirect+sret 槽四路，interp_frame 返回
+  (lo,hi)）——原计划第 3 步的 pair 通道被 rawptr gate 的 `as_mut_ptr(&mut [u64])` 逼提前。
+  投影链编译：Field/Downcast 折偏移（variant 状态）、Deref 追踪胖指针 meta、ConstantIndex
+  from_end 数组折叠；位拷 cast 家族 + Unsize 数组→切片；PtrMetadata；offset intrinsic 就地展开。
+- **第 3 步 枚举/浮点/Aggregate**：TagInfo 冻结（Direct=Cast 符扩、Niche=NicheDiscr——
+  rustc 不变量"niche 下 discr==variant index"使零映射表）；SetDiscriminant lower 期溶解为
+  常量写；Aggregate cg_ssa 同构（variant 布局逐字段+set_discr；RawPtr=(data,meta) 合成）；
+  FloatBin/Cmp/Neg/Cast/FloatToInt(饱和)/IntToFloat 位进位出；IntCmp3（Ordering）；
+  Transmute=字节搬运（同宽标量快路径）。
+- **第 4 步 常量池 + statics 重定位**（F5，"最复杂单块"实际很顺）：`FrozenArena`（mmap RW，
+  挂 Module 随执行相共享）；`Linker::ensure_alloc` 按需递归物化 GlobalAlloc 图——**先分后填
+  破指针环**；重定位=遍 `provenance().ptrs()` 写目标真地址+addend（addend 即 ptr 位置原存
+  字节）；Function=D4 fn 条目（16 对齐真地址+addr→FuncId 反查表）；VTable=
+  `tcx.vtable_allocation` 现成分配同机器。常量四形态（Scalar::Ptr/Slice/Indirect/ZeroSized）
+  全落。dyn unsize=vtable 物化；ReifyFnPointer=条目地址。
+- **第 5 步 堆 + Drop + intrinsic 表**：heap.rs=libmimalloc-sys 薄包装（D3）；Drop 正常路径=
+  普通 Call（glue 实参 AddrOf(place)）；intrinsic 就地展开表——原子系全套映射**真宿主原子指令**
+  （AtomicUN::from_ptr，SeqCst；spike4 义务，不留单线程假实现）、位系 ctpop/ctlz/cttz/bswap/
+  bitreverse、memcpy 系（+语句形态）、ptr_offset_from、size_of_val（sized=常量、slice/str=
+  meta 折算）、compare_bytes、exact_div、black_box/transmute/assume。
+- **第 5.5 步 SIMD 最小集**：SimdBin（逐 lane 比较/位/算术，几何冻结自 SimdVector layout）+
+  SimdSplat + SimdBitmask（movemask）——实测尾巴仅 3 个 intrinsic（simd_lt/splat/bitmask 一层
+  层浮现），远低于降级阈值 10。**顺带解锁间接调用**：`CallIndirect`（fn-ptr 与 dyn 虚派发同一
+  机制）——receiver 胖指针拆 (data,vtable)、callee=*(vtable+idx×8)（本 nightly VirtualIndex
+  不加头偏移，idx 即绝对槽号）、经 fn_addrs 反查派发；hashbrown resize_inner 的 dyn Allocator
+  回调借此通过。
+
+### 经验与教训
+
+1. **"每步一个 gate 函数变绿"的增量节奏完全兑现**：每步收尾时剩余 digest 恰好全部 Trap 在
+   下一步的分期债务上（诊断串归期分毫不差）——Trap-stub 协议 + 分期诊断标签是施工的导航仪。
+2. **ABI 是依赖图的咽喉**：设计文档把 pair 通道排第 3 步，实测 rawptr gate 第 2 步就需要
+   （as_mut_ptr 的胖指针参数）。教训：**调用约定这类横切面要一次定型**（四路 ABI 直接覆盖
+   1466 处非标量返回债务），比按 gate 逐步扩更省返工。
+3. **rustc 的不变量白拿正确性**：niche 编码下 discr==variant index 是 layout sanity check
+   保证的不变量（rustc_abi 源码注释），NicheDiscr 因此不需要 discr 映射表。**读源码注释比
+   猜语义快**。
+4. **本 nightly 新漂移**（续 M4.0 清单）：`Rvalue::Reborrow(Ty, Mutability, Place)`（用户
+   ADT reborrow=位拷）；`UnOp::PtrMetadata` 取代 Len；`ConstValue::Slice{alloc_id, meta}`
+   （直接 AllocId 非 ConstAllocation）；`std::range::RangeInclusive` 字段是 start/**last**；
+   `VirtualIndex::from_index` 不加 3（idx 已含 vtable 头）；atomic intrinsic 不带 order 后缀
+   （order 是泛型参）；`SpecialAllocatorMethod{Alloc,AllocZeroed,Dealloc,Realloc}` +
+   `mangle_internal_symbol` 拿 __rust_alloc 真符号。
+5. **两遍法的"先分后填"用按需递归表达更简**：ensure_alloc 先插 map 再填字节，指针环天然安全，
+   不需要显式全图两遍。vtable→fn 条目→worklist 的递归链一次打通。
+6. **foreign extern static 的坑**：`gettid` 等 weak 符号判空模式走 GlobalAlloc::Static 但
+   is_foreign_item——eval_static_initializer 会 panic，须先挡（真符号地址=os:: M4.3）。
+   同类：vtable_allocation 对 unsized 源类型 panic（dyn→dyn upcast 须先挡）。
+7. **性能顺带观察**：lower 端到端（386→数百 instance 扩集后）仍 ~0.13s（digest.rs，热缓存），
+   worklist 扩集未成为负担；正式性能核算挂 M4.5（硬门=不慢于 tier-0）。
+
+### 本期遗留（归期明确）
+
+- u128 算术（2 处，panic 格式化路径；memcpy 通道已通）→ M4.1+/顺带。
+- dyn→dyn upcast、Box<dyn> receiver 聚合形态、ClosureFnPointer、Subslice/from_end-on-slice
+  投影、`caller_location` → M4.2（panic 链路）或按需。
+- atomic fence=nop 的弱序复查、TLS → M4.4。
+- foreign 种子清单（syscall/__errno_location/llvm.x86.sse2.pause/write/clock_gettime/abort/
+  _Unwind_RaiseException）→ M4.3 os:: 注册表输入（--vm-stats foreign 段直接给）。

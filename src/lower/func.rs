@@ -137,6 +137,13 @@ enum LoweredOp<'tcx> {
     Bytes { place: PlaceLow<'tcx>, size: u64 },
 }
 
+/// 调用目标三形态（finish_call 共用道）。
+enum CallTarget {
+    Direct(Callee),
+    /// fn-ptr / vtable 槽：operand 求值 = D4 条目真地址
+    Indirect(Operand),
+}
+
 /// 枚举判别式的冻结编码（Direct 在 lower 期溶解为 Cast，niche 用 NicheDiscr rvalue）。
 enum TagInfo {
     /// 单 variant / 无 variant：判别式是常量
@@ -387,9 +394,11 @@ impl<'tcx> LowerCx<'tcx, '_> {
         match self.lower_operand(op)? {
             LoweredOp::Scalar(o) => Ok(o),
             LoweredOp::Zst => Err("意外的 ZST 操作数".into()),
-            LoweredOp::Pair(..) => Err(format!("非标量操作数（pair，ty={}）", self.op_ty_str(op))),
+            LoweredOp::Pair(..) => {
+                Err(format!("非标量操作数（pair，ty={}，M4.1+）", self.op_ty_str(op)))
+            }
             LoweredOp::Bytes { .. } => {
-                Err(format!("非标量操作数（聚合，ty={}）", self.op_ty_str(op)))
+                Err(format!("非标量操作数（聚合，ty={}，M4.1+）", self.op_ty_str(op)))
             }
         }
     }
@@ -960,15 +969,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             }
                         }
                     }
-                    _ => match (self.lower_operand(a)?, &dst_kind) {
-                        (LoweredOp::Scalar(o), ValKind::Scalar(dw)) if o.width() == *dw => {
-                            Ok(vec![Stmt::Assign {
-                                dst: dst_p.scalar_place(*dw),
-                                rv: Rvalue::Use(o),
-                            }])
-                        }
-                        _ => Err(format!("Transmute 常量→{to_ty}（M4.1 第 4 步常量池）")),
-                    },
+                    _ => {
+                        // 常量：lower_const_value 已物化四路（Slice/Indirect 进冻结区），
+                        // transmute = 同尺寸位重解释 → 同型搬运即可（&str→&[u8] 同构 pair）
+                        let src = self.lower_operand(a)?;
+                        self.assign_lowered(dst_p, dst_kind, src)
+                            .map_err(|e| format!("Transmute 常量: {e}"))
+                    }
                 }
             }
             CK::PointerCoercion(pc, _) => {
@@ -1212,10 +1219,21 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 (vec![], Terminator::Goto(target.as_u32()))
             }
             TK::Call { func, args, destination, target, unwind, .. } => {
-                // callee 解析：常量 FnDef → Instance
+                // callee 解析：常量 FnDef → Instance；FnPtr → 间接调用
                 let fn_ty = self.op_ty(func)?;
                 let ty::FnDef(def_id, gargs) = fn_ty.kind() else {
-                    return Err(format!("间接调用（fn ptr，ty={fn_ty}，M4.1+）"));
+                    if fn_ty.is_fn_ptr() {
+                        // fn-ptr 间接调用：值 = D4 条目真地址，引擎反查派发
+                        let callee_op = self.lower_operand_scalar(func)?;
+                        return self.finish_call(
+                            CallTarget::Indirect(callee_op),
+                            args,
+                            destination,
+                            *target,
+                            *unwind,
+                        );
+                    }
+                    return Err(format!("间接调用（ty={fn_ty}，M4.1+）"));
                 };
                 let inst = Instance::expect_resolve(
                     self.tcx,
@@ -1224,6 +1242,11 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     gargs,
                     term.source_info.span,
                 );
+                // dyn 虚派发：receiver 胖指针拆 (data, vtable)，
+                // callee = *(vtable + idx*8)，receiver 实参换 data 半
+                if let InstanceKind::Virtual(_, idx) = inst.def {
+                    return self.lower_virtual_call(idx, args, destination, *target, *unwind);
+                }
                 // 纯值 intrinsic：就地展开为 IR 语句（无调用开销；D5 内建的语句形态）
                 if let Some(res) = self.try_expand_intrinsic(&inst, args, destination, *target)? {
                     return Ok(res);
@@ -1231,79 +1254,137 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 // Linker 三路解析（debt-map §2-B）：普通函数/intrinsic fallback →
                 // worklist 扩集；foreign → ①引擎原语 ②链接仿真 ③Trap
                 let callee = self.linker.resolve_call(inst)?;
-                // 实参展平（ABI v2）：失败前置 Trap 保 Call 边
-                let mut pre: Vec<Stmt> = Vec::new();
-                let mut ir_args = Vec::new();
-                for a in args {
-                    match self.lower_operand(&a.node) {
-                        Ok(LoweredOp::Zst) => {}
-                        Ok(LoweredOp::Scalar(o)) => ir_args.push(o),
-                        Ok(LoweredOp::Pair(l, h)) => {
-                            ir_args.push(l);
-                            ir_args.push(h);
-                        }
-                        Ok(LoweredOp::Bytes { place, .. }) => {
-                            ir_args.push(Operand::AddrOf(place.expr()));
-                        }
-                        Err(e) => {
-                            pre.push(Stmt::Trap(format!("调用实参: {e}").into_boxed_str()));
-                            ir_args.clear();
-                            break;
-                        }
-                    }
-                }
-                // 返回落点（ABI v2 四路）
-                let ret = if pre.is_empty() {
-                    match self.resolve_place(destination).and_then(|dp| {
-                        let kind = self.classify(dp.ty)?;
-                        Ok(match kind {
-                            ValKind::Zst => RetDest::Ignore,
-                            ValKind::Scalar(w) => RetDest::Scalar(dp.scalar_place(w)),
-                            ValKind::Pair((ao, aw), (bo, bw)) => {
-                                RetDest::Pair(dp.half_place(ao, aw), dp.half_place(bo, bw))
-                            }
-                            ValKind::Other { .. } => RetDest::Indirect(dp.expr()),
-                        })
-                    }) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            pre.push(Stmt::Trap(format!("调用返回落点: {e}").into_boxed_str()));
-                            RetDest::Ignore
-                        }
-                    }
-                } else {
-                    RetDest::Ignore
-                };
-                // 发散调用（target=None）→ 合成 Unreachable 落点块
-                let tgt = match target {
-                    Some(b) => b.as_u32(),
-                    None => {
-                        let idx = (self.mir_block_count + self.extra_blocks.len()) as Bb;
-                        self.extra_blocks
-                            .push(ir::Block { stmts: vec![], term: Terminator::Unreachable });
-                        idx
-                    }
-                };
-                let term = match callee {
-                    Callee::Func(id) => Terminator::Call {
-                        callee: id,
-                        args: ir_args,
-                        ret,
-                        target: tgt,
-                        unwind: self.lower_unwind(*unwind),
-                    },
-                    Callee::Builtin(b) => Terminator::CallBuiltin {
-                        builtin: b,
-                        args: ir_args,
-                        ret,
-                        target: tgt,
-                        unwind: self.lower_unwind(*unwind),
-                    },
-                };
-                (pre, term)
+                return self.finish_call(
+                    CallTarget::Direct(callee),
+                    args,
+                    destination,
+                    *target,
+                    *unwind,
+                );
             }
             other => return Err(format!("终止子 {other:?}（M4.1+）")),
         })
+    }
+
+    /// dyn 虚派发（InstanceKind::Virtual）：receiver 胖指针 (data, vtable)，
+    /// callee = *(vtable + idx×8)（vtable 已按第 4 步物化，槽存 D4 fn 条目真地址），
+    /// receiver 实参换 data 半（&dyn → &Concrete 瘦化）。
+    fn lower_virtual_call(
+        &mut self,
+        idx: usize,
+        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        destination: &mir::Place<'tcx>,
+        target: Option<mir::BasicBlock>,
+        unwind: mir::UnwindAction,
+    ) -> Result<(Vec<Stmt>, Terminator), String> {
+        let recv = self.lower_operand(&args[0].node)?;
+        let LoweredOp::Pair(data, vt) = recv else {
+            return Err("dyn receiver 非胖指针（Box<dyn> 聚合形态，M4.1+）".into());
+        };
+        let callee = operand_deref_at(vt, (idx * 8) as u32)?;
+        self.finish_call_inner(
+            CallTarget::Indirect(callee),
+            Some(data),
+            args,
+            destination,
+            target,
+            unwind,
+        )
+    }
+
+    fn finish_call(
+        &mut self,
+        ct: CallTarget,
+        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        destination: &mir::Place<'tcx>,
+        target: Option<mir::BasicBlock>,
+        unwind: mir::UnwindAction,
+    ) -> Result<(Vec<Stmt>, Terminator), String> {
+        self.finish_call_inner(ct, None, args, destination, target, unwind)
+    }
+
+    /// 调用收尾共用道：实参展平（ABI v2，失败前置 Trap 保 Call 边）→ 返回落点四路
+    /// → 发散落点合成 → 按 CallTarget 发终止子。
+    fn finish_call_inner(
+        &mut self,
+        ct: CallTarget,
+        first_override: Option<Operand>,
+        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        destination: &mir::Place<'tcx>,
+        target: Option<mir::BasicBlock>,
+        unwind: mir::UnwindAction,
+    ) -> Result<(Vec<Stmt>, Terminator), String> {
+        let mut pre: Vec<Stmt> = Vec::new();
+        let mut ir_args = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            if i == 0
+                && let Some(o) = &first_override
+            {
+                ir_args.push(o.clone());
+                continue;
+            }
+            match self.lower_operand(&a.node) {
+                Ok(LoweredOp::Zst) => {}
+                Ok(LoweredOp::Scalar(o)) => ir_args.push(o),
+                Ok(LoweredOp::Pair(l, h)) => {
+                    ir_args.push(l);
+                    ir_args.push(h);
+                }
+                Ok(LoweredOp::Bytes { place, .. }) => {
+                    ir_args.push(Operand::AddrOf(place.expr()));
+                }
+                Err(e) => {
+                    pre.push(Stmt::Trap(format!("调用实参: {e}").into_boxed_str()));
+                    ir_args.clear();
+                    break;
+                }
+            }
+        }
+        // 返回落点（ABI v2 四路）
+        let ret = if pre.is_empty() {
+            match self.resolve_place(destination).and_then(|dp| {
+                let kind = self.classify(dp.ty)?;
+                Ok(match kind {
+                    ValKind::Zst => RetDest::Ignore,
+                    ValKind::Scalar(w) => RetDest::Scalar(dp.scalar_place(w)),
+                    ValKind::Pair((ao, aw), (bo, bw)) => {
+                        RetDest::Pair(dp.half_place(ao, aw), dp.half_place(bo, bw))
+                    }
+                    ValKind::Other { .. } => RetDest::Indirect(dp.expr()),
+                })
+            }) {
+                Ok(r) => r,
+                Err(e) => {
+                    pre.push(Stmt::Trap(format!("调用返回落点: {e}").into_boxed_str()));
+                    RetDest::Ignore
+                }
+            }
+        } else {
+            RetDest::Ignore
+        };
+        // 发散调用（target=None）→ 合成 Unreachable 落点块
+        let tgt = match target {
+            Some(b) => b.as_u32(),
+            None => {
+                let idx = (self.mir_block_count + self.extra_blocks.len()) as Bb;
+                self.extra_blocks
+                    .push(ir::Block { stmts: vec![], term: Terminator::Unreachable });
+                idx
+            }
+        };
+        let unwind = self.lower_unwind(unwind);
+        let term = match ct {
+            CallTarget::Direct(Callee::Func(id)) => {
+                Terminator::Call { callee: id, args: ir_args, ret, target: tgt, unwind }
+            }
+            CallTarget::Direct(Callee::Builtin(b)) => {
+                Terminator::CallBuiltin { builtin: b, args: ir_args, ret, target: tgt, unwind }
+            }
+            CallTarget::Indirect(callee) => {
+                Terminator::CallIndirect { callee, args: ir_args, ret, target: tgt, unwind }
+            }
+        };
+        Ok((pre, term))
     }
 
     /// 纯值 intrinsic 的就地展开（返回 Some = 已展开为 语句+Goto）。
@@ -1454,6 +1535,21 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 self.assign_lowered(&dst_p, dst_kind, src)?
             }
             "assume" => vec![Stmt::Nop],
+            "caller_location" => {
+                return Err("caller_location（#[track_caller] Location，panic 链路 M4.2）".into());
+            }
+            "compare_bytes" => {
+                let (dst_p, w) = self.place_scalar(destination)?;
+                vec![Stmt::Assign {
+                    dst: dst_p.scalar_place(w),
+                    rv: Rvalue::MemCmp {
+                        a: self.lower_operand_scalar(&args[0].node)?,
+                        b: self.lower_operand_scalar(&args[1].node)?,
+                        n: self.lower_operand_scalar(&args[2].node)?,
+                    },
+                }]
+            }
+            n if n.starts_with("simd_") => self.expand_simd(n, inst, args, destination)?,
             "ptr_offset_from" | "ptr_offset_from_unsigned" => {
                 let ptr_ty = self.op_ty(&args[0].node)?;
                 let pointee =
@@ -1544,6 +1640,84 @@ impl<'tcx> LowerCx<'tcx, '_> {
     }
 }
 
+impl<'tcx> LowerCx<'tcx, '_> {
+    /// SIMD 最小集（m4.1-design §4.1：hashbrown SSE2 group 探测；lane 几何冻结自
+    /// SimdVector layout，每操作 = 逐 lane 宿主循环）。未支持的 simd_* = Err（Trap 占位）。
+    fn expand_simd(
+        &mut self,
+        name: &str,
+        inst: &Instance<'tcx>,
+        args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
+        destination: &mir::Place<'tcx>,
+    ) -> Result<Vec<Stmt>, String> {
+        use ir::SimdBinOp as S;
+        // lane 几何：T = 第一个泛型参（向量类型）
+        let vec_ty = inst.args.type_at(0);
+        let layout = self.layout_of(vec_ty)?;
+        let rustc_abi::BackendRepr::SimdVector { element, count } = layout.backend_repr else {
+            return Err(format!("simd intrinsic 非向量参（{vec_ty}）"));
+        };
+        let dl = self.tcx.data_layout();
+        let lane_bytes = element.size(dl).bytes() as u8;
+        let lanes = count as u16;
+        let signed = matches!(element.primitive(), rustc_abi::Primitive::Int(_, true));
+        // 向量 operand → place 地址表达式（Bytes 通道；常量已物化进冻结区）
+        let vplace = |cx: &mut Self, op: &mir::Operand<'tcx>| -> Result<PlaceExpr, String> {
+            match cx.lower_operand(op)? {
+                LoweredOp::Bytes { place, .. } => Ok(place.expr()),
+                _ => Err("simd 实参非向量（M4.1+）".into()),
+            }
+        };
+        let bin = |cx: &mut Self, op: S| -> Result<Vec<Stmt>, String> {
+            let a = vplace(cx, &args[0].node)?;
+            let b = vplace(cx, &args[1].node)?;
+            let dst = cx.resolve_place(destination)?.expr();
+            Ok(vec![Stmt::SimdBin { op, dst, a, b, lanes, lane_bytes }])
+        };
+        match name {
+            "simd_eq" => bin(self, S::Eq),
+            "simd_ne" => bin(self, S::Ne),
+            "simd_lt" => bin(self, S::Lt { signed }),
+            "simd_le" => bin(self, S::Le { signed }),
+            "simd_gt" => bin(self, S::Gt { signed }),
+            "simd_ge" => bin(self, S::Ge { signed }),
+            "simd_and" => bin(self, S::And),
+            "simd_or" => bin(self, S::Or),
+            "simd_xor" => bin(self, S::Xor),
+            "simd_add" => bin(self, S::Add),
+            "simd_sub" => bin(self, S::Sub),
+            "simd_bitmask" => {
+                let a = vplace(self, &args[0].node)?;
+                let (dst_p, w) = self.place_scalar(destination)?;
+                Ok(vec![Stmt::Assign {
+                    dst: dst_p.scalar_place(w),
+                    rv: Rvalue::SimdBitmask { a, lanes, lane_bytes },
+                }])
+            }
+            "simd_splat" => {
+                // splat(val: E) -> T：几何从返回向量取（T 是第一个泛型参？splat 的
+                // 泛型序是 <T(向量), E>？——此处从 destination 的 layout 直接冻结，最稳）
+                let dst_p = self.resolve_place(destination)?;
+                let dst_layout = self.layout_of(dst_p.ty)?;
+                let rustc_abi::BackendRepr::SimdVector { element, count } =
+                    dst_layout.backend_repr
+                else {
+                    return Err("simd_splat 目标非向量".into());
+                };
+                let lb = element.size(dl).bytes() as u8;
+                let val = self.lower_operand_scalar(&args[0].node)?;
+                Ok(vec![Stmt::SimdSplat {
+                    dst: dst_p.expr(),
+                    val,
+                    lanes: count as u16,
+                    lane_bytes: lb,
+                }])
+            }
+            other => Err(format!("intrinsic `{other}`（SIMD，M4.1+）")),
+        }
+    }
+}
+
 fn elem_of(ty: Ty<'_>) -> Option<Ty<'_>> {
     match ty.kind() {
         ty::Array(t, _) | ty::Slice(t) => Some(*t),
@@ -1553,6 +1727,36 @@ fn elem_of(ty: Ty<'_>) -> Option<Ty<'_>> {
 
 fn u128_to_u64(v: u128) -> Result<u64, String> {
     u64::try_from(v).map_err(|_| "128 位判别式（M4.1+）".to_string())
+}
+
+/// 在 operand 的值（指针）上再间接一层：*(op + off)。vtable 槽读取用。
+fn operand_deref_at(op: Operand, off: u32) -> Result<Operand, String> {
+    let deref_steps = |mut steps: Vec<PlaceStep>| {
+        steps.push(PlaceStep::Deref);
+        if off != 0 {
+            steps.push(PlaceStep::Offset(off));
+        }
+        steps.into_boxed_slice()
+    };
+    Ok(match op {
+        Operand::Slot(s) => Operand::Mem {
+            expr: PlaceExpr { base: PlaceBase::Local(s.off), steps: deref_steps(Vec::new()) },
+            width: Width::W64,
+        },
+        Operand::Mem { expr, .. } => Operand::Mem {
+            expr: PlaceExpr { base: expr.base, steps: deref_steps(expr.steps.into_vec()) },
+            width: Width::W64,
+        },
+        // 常量 vtable 地址（常量 dyn 引用）：运行期从冻结区读槽
+        Operand::Imm { bits, .. } => Operand::Mem {
+            expr: PlaceExpr {
+                base: PlaceBase::Static(bits.wrapping_add(off as u64)),
+                steps: Box::new([]),
+            },
+            width: Width::W64,
+        },
+        Operand::AddrOf(_) => return Err("vtable operand 形态异常".into()),
+    })
 }
 
 /// `TyAndLayout::for_variant` 需要一个 LayoutCx；用 (tcx, typing_env) 现造一个。
