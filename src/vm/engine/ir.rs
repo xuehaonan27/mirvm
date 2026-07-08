@@ -362,4 +362,8 @@ pub struct Module {
     pub funcs: Vec<FuncBody>,
     /// 导出名（no_mangle 符号）→ FuncId，--vm-call 查找用
     pub exports: std::collections::HashMap<Box<str>, FuncId>,
+    /// 冻结区（statics/常量池/fn 条目；lower 物化，发布后只读——static mut 例外）
+    pub frozen: Option<super::frozen::FrozenArena>,
+    /// fn-ptr 条目真地址 → FuncId（D4 反查；间接调用派发 M4.1 第 5 步）
+    pub fn_addrs: std::collections::HashMap<u64, FuncId>,
 }

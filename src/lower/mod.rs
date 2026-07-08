@@ -15,9 +15,11 @@ pub mod func;
 use std::collections::VecDeque;
 
 use rustc_data_structures::fx::FxHashMap;
+use rustc_middle::mir::interpret::{AllocId, ConstAllocation, GlobalAlloc};
 use rustc_middle::ty::{Instance, InstanceKind, TyCtxt, TypingEnv};
 use rustc_span::Symbol;
 
+use crate::vm::engine::frozen::FrozenArena;
 use crate::vm::engine::ir;
 
 /// 调用目标的解析结果（foreign 三路处置，debt-map §2-B）。
@@ -43,6 +45,14 @@ pub(crate) struct Linker<'tcx> {
     builtins: FxHashMap<Symbol, ir::Builtin>,
     /// ②链接仿真：导出符号名 → 定义 instance（strong 覆盖 weak；惰性一次构建）
     exports: Option<FxHashMap<Symbol, Instance<'tcx>>>,
+    /// 冻结区（statics/常量池/fn 条目）——lower 期物化，结束移交 Module
+    frozen: FrozenArena,
+    /// 已物化的 alloc → 冻结区真地址（去重 + 先分后填破指针环）
+    alloc_addrs: FxHashMap<AllocId, u64>,
+    /// fn-ptr 条目：instance → 条目真地址（D4 每 instance 一个真地址身份）
+    fn_entries: FxHashMap<Instance<'tcx>, u64>,
+    /// 反查：条目真地址 → FuncId（间接调用派发用，移交 Module）
+    fn_addrs: FxHashMap<u64, ir::FuncId>,
 }
 
 impl<'tcx> Linker<'tcx> {
@@ -53,7 +63,87 @@ impl<'tcx> Linker<'tcx> {
             queue: VecDeque::new(),
             builtins: engine_builtins(tcx),
             exports: None,
+            frozen: FrozenArena::new(),
+            alloc_addrs: FxHashMap::default(),
+            fn_entries: FxHashMap::default(),
+            fn_addrs: FxHashMap::default(),
         }
+    }
+
+    /// fn-ptr 条目地址（D4）：每 instance 一个 16 对齐真地址；内容 = FuncId（调试用）。
+    /// 比较/转型语义正确；间接调用经反查表派发（M4.1 第 5 步接 CallIndirect）。
+    pub(crate) fn fn_entry_addr(&mut self, inst: Instance<'tcx>) -> u64 {
+        if let Some(&a) = self.fn_entries.get(&inst) {
+            return a;
+        }
+        let fid = self.func_id(inst);
+        let addr = self.frozen.alloc(8, 16);
+        unsafe { (addr as *mut u64).write(fid as u64) };
+        self.fn_entries.insert(inst, addr);
+        self.fn_addrs.insert(addr, fid);
+        addr
+    }
+
+    /// alloc → 冻结区真地址（按需递归物化；先分后填 ⇒ 指针环安全）。
+    pub(crate) fn ensure_alloc(&mut self, id: AllocId) -> Result<u64, String> {
+        if let Some(&a) = self.alloc_addrs.get(&id) {
+            return Ok(a);
+        }
+        match self.tcx.global_alloc(id) {
+            GlobalAlloc::Memory(alloc) => self.materialize(id, alloc),
+            GlobalAlloc::Static(def_id) => {
+                // extern static（含 weak 符号判空，如 gettid）：真符号地址 = os:: 域
+                if self.tcx.is_foreign_item(def_id) {
+                    return Err(format!(
+                        "extern static `{}`（真符号地址，os:: M4.3）",
+                        self.tcx.item_name(def_id)
+                    ));
+                }
+                // static 的字节 = 初始化器求值产物；可写（static mut/内部可变性）
+                let alloc = self
+                    .tcx
+                    .eval_static_initializer(def_id)
+                    .map_err(|e| format!("static 初始化器求值失败: {e:?}"))?;
+                self.materialize(id, alloc)
+            }
+            GlobalAlloc::Function { instance } => {
+                let addr = self.fn_entry_addr(instance);
+                self.alloc_addrs.insert(id, addr);
+                Ok(addr)
+            }
+            GlobalAlloc::VTable(ty, dyn_ty) => {
+                // 现成的 vtable 分配（F5）——递归走 Memory 路径（含 fn 条目重定位）
+                let principal = dyn_ty
+                    .principal()
+                    .map(|b| self.tcx.instantiate_bound_regions_with_erased(b));
+                let vt_id = self.tcx.vtable_allocation((ty, principal));
+                let addr = self.ensure_alloc(vt_id)?;
+                self.alloc_addrs.insert(id, addr);
+                Ok(addr)
+            }
+            GlobalAlloc::TypeId { .. } => Err("TypeId 常量（M4.1+）".into()),
+        }
+    }
+
+    /// 物化一个内存分配：分地址 → 拷字节 → 重定位（provenance 表逐项写真地址+addend）。
+    fn materialize(&mut self, id: AllocId, alloc: ConstAllocation<'tcx>) -> Result<u64, String> {
+        let a = alloc.inner();
+        let size = a.size().bytes();
+        let align = a.align.bytes();
+        let base = self.frozen.alloc(size, align);
+        self.alloc_addrs.insert(id, base); // 先分后填（环安全）
+        let bytes = a.inspect_with_uninit_and_ptr_outside_interpreter(0..size as usize);
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), base as *mut u8, size as usize) };
+        // 重定位：ptr 位置存的 8 字节 = 目标内偏移（addend）→ 换成目标真地址 + addend
+        for (off, prov) in a.provenance().ptrs().iter() {
+            let target = self.ensure_alloc(prov.alloc_id())?;
+            let at = (base + off.bytes()) as *mut u64;
+            unsafe {
+                let addend = at.read_unaligned();
+                at.write_unaligned(target.wrapping_add(addend));
+            }
+        }
+        Ok(base)
     }
 
     /// instance → FuncId；首见分配 id 并入待降低队列（worklist 扩集的入口）。
@@ -238,5 +328,8 @@ pub fn lower_program(tcx: TyCtxt<'_>) -> ir::Module {
     {
         module.exports.insert("@entry".into(), id);
     }
+    // 冻结区与 fn 条目反查表移交执行相
+    module.frozen = Some(linker.frozen);
+    module.fn_addrs = linker.fn_addrs.into_iter().collect();
     module
 }

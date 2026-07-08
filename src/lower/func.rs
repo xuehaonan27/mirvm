@@ -276,7 +276,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
     }
 
     /// 泛化操作数（四路值分类）。
-    fn lower_operand(&self, op: &mir::Operand<'tcx>) -> Result<LoweredOp<'tcx>, String> {
+    fn lower_operand(&mut self, op: &mir::Operand<'tcx>) -> Result<LoweredOp<'tcx>, String> {
         match op {
             mir::Operand::Copy(pl) | mir::Operand::Move(pl) => {
                 let p = self.resolve_place(pl)?;
@@ -295,25 +295,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 if layout.is_zst() {
                     return Ok(LoweredOp::Zst);
                 }
-                let width = frame::scalar_width(&layout)
-                    .ok_or_else(|| format!("非标量常量（ty={ty}，M4.1 第 4 步常量池）"))?;
+                let kind = frame::classify(self.tcx, &layout);
                 let val = c
                     .const_
                     .eval(self.tcx, self.typing_env, c.span)
                     .map_err(|e| format!("常量求值失败: {e:?}"))?;
-                match val {
-                    mir::ConstValue::Scalar(mir::interpret::Scalar::Int(si)) => {
-                        let bits = si.to_bits(si.size());
-                        if bits > u64::MAX as u128 {
-                            return Err("128 位常量（M4.1 第 3 步）".into());
-                        }
-                        Ok(LoweredOp::Scalar(Operand::Imm { bits: bits as u64, width }))
-                    }
-                    mir::ConstValue::Scalar(mir::interpret::Scalar::Ptr(..)) => {
-                        Err("指针常量（static/fn-ptr，M4.1 第 4 步）".into())
-                    }
-                    other => Err(format!("常量形态 {other:?}（M4.1 第 4 步）")),
-                }
+                self.lower_const_value(val, ty, kind)
             }
             // session 旗标查询（UbChecks 等）：lower 期折成 bool 立即数
             mir::Operand::RuntimeChecks(rc) => {
@@ -328,8 +315,75 @@ impl<'tcx> LowerCx<'tcx, '_> {
         }
     }
 
+    /// 常量值 → 泛化操作数（常量池/statics：物化进冻结区，重定位成真地址——F5）。
+    fn lower_const_value(
+        &mut self,
+        val: mir::ConstValue,
+        ty: Ty<'tcx>,
+        kind: ValKind,
+    ) -> Result<LoweredOp<'tcx>, String> {
+        use mir::interpret::Scalar as S;
+        Ok(match val {
+            mir::ConstValue::Scalar(S::Int(si)) => {
+                let bits = si.to_bits(si.size());
+                if bits > u64::MAX as u128 {
+                    return Err("128 位常量（M4.1+）".into());
+                }
+                let ValKind::Scalar(width) = kind else {
+                    return Err(format!("整数常量分类漂移（ty={ty}）"));
+                };
+                LoweredOp::Scalar(Operand::Imm { bits: bits as u64, width })
+            }
+            mir::ConstValue::Scalar(S::Ptr(ptr, _)) => {
+                // 指针常量（static 引用 / fn ptr / vtable）：物化目标 → 真地址立即数
+                let (prov, off) = ptr.prov_and_relative_offset();
+                let base = self.linker.ensure_alloc(prov.alloc_id())?;
+                LoweredOp::Scalar(Operand::Imm {
+                    bits: base.wrapping_add(off.bytes()),
+                    width: Width::W64,
+                })
+            }
+            mir::ConstValue::Slice { alloc_id, meta } => {
+                // &str/&[u8] 字面量：胖指针 pair =（数据真地址, meta）
+                let base = self.linker.ensure_alloc(alloc_id)?;
+                LoweredOp::Pair(
+                    Operand::Imm { bits: base, width: Width::W64 },
+                    Operand::Imm { bits: meta, width: Width::W64 },
+                )
+            }
+            mir::ConstValue::Indirect { alloc_id, offset } => {
+                // 内存常量（Layout/空表模板等）：物化后按分类经冻结区地址访问
+                let base = self.linker.ensure_alloc(alloc_id)?.wrapping_add(offset.bytes());
+                let sexpr = |o: u64| PlaceExpr {
+                    base: PlaceBase::Static(base.wrapping_add(o)),
+                    steps: Box::new([]),
+                };
+                match kind {
+                    ValKind::Zst => LoweredOp::Zst,
+                    ValKind::Scalar(w) => {
+                        LoweredOp::Scalar(Operand::Mem { expr: sexpr(0), width: w })
+                    }
+                    ValKind::Pair((ao, aw), (bo, bw)) => LoweredOp::Pair(
+                        Operand::Mem { expr: sexpr(ao as u64), width: aw },
+                        Operand::Mem { expr: sexpr(bo as u64), width: bw },
+                    ),
+                    ValKind::Other { size } => LoweredOp::Bytes {
+                        place: PlaceLow {
+                            base: PlaceBase::Static(base),
+                            steps: Vec::new(),
+                            ty,
+                            meta: None,
+                        },
+                        size,
+                    },
+                }
+            }
+            mir::ConstValue::ZeroSized => LoweredOp::Zst,
+        })
+    }
+
     /// 标量操作数（标量语境；其他分类 = 语境错误诊断）。
-    fn lower_operand_scalar(&self, op: &mir::Operand<'tcx>) -> Result<Operand, String> {
+    fn lower_operand_scalar(&mut self, op: &mir::Operand<'tcx>) -> Result<Operand, String> {
         match self.lower_operand(op)? {
             LoweredOp::Scalar(o) => Ok(o),
             LoweredOp::Zst => Err("意外的 ZST 操作数".into()),
@@ -428,7 +482,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
 
     /// 把一个 MIR operand 写到 dst place 的字节偏移 off 处（Aggregate 字段落位）。
     fn write_at(
-        &self,
+        &mut self,
         dst_p: &PlaceLow<'tcx>,
         off: u32,
         op: &mir::Operand<'tcx>,
@@ -501,7 +555,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
 
     /// Assign 语句 → ir 语句（可能多条）。
     fn lower_assign(
-        &self,
+        &mut self,
         dst: &mir::Place<'tcx>,
         rv: &mir::Rvalue<'tcx>,
     ) -> Result<Vec<Stmt>, String> {
@@ -839,7 +893,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
 
     /// Cast 家族。
     fn lower_cast(
-        &self,
+        &mut self,
         dst_p: &PlaceLow<'tcx>,
         dst_kind: ValKind,
         kind: mir::CastKind,
@@ -949,8 +1003,40 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                     },
                                 ])
                             }
-                            (_, ty::Dynamic(..)) => {
-                                Err("dyn unsize（vtable，M4.1 第 4 步）".into())
+                            (_, ty::Dynamic(dyn_preds, _)) => {
+                                // dyn unsize：pair =（data 瘦指针, 物化的 vtable 真地址）
+                                let src_layout = self.layout_of(src_pointee)?;
+                                if src_layout.is_unsized() {
+                                    // dyn→dyn upcast / unsized 源：vtable 变换（M4.1+）
+                                    return Err(format!(
+                                        "unsized→dyn（{src_pointee} → {dst_pointee}，M4.1+）"
+                                    ));
+                                }
+                                let principal = dyn_preds.principal().map(|b| {
+                                    self.tcx.instantiate_bound_regions_with_erased(b)
+                                });
+                                let vt_id =
+                                    self.tcx.vtable_allocation((src_pointee, principal));
+                                let vt_addr = self.linker.ensure_alloc(vt_id)?;
+                                let ValKind::Pair((ao, aw), (bo, bw)) = dst_kind else {
+                                    return Err("dyn Unsize 目标非 pair".into());
+                                };
+                                let LoweredOp::Scalar(data) = self.lower_operand(a)? else {
+                                    return Err("dyn Unsize 源非瘦指针（M4.1+）".into());
+                                };
+                                Ok(vec![
+                                    Stmt::Assign {
+                                        dst: dst_p.half_place(ao, aw),
+                                        rv: Rvalue::Use(data),
+                                    },
+                                    Stmt::Assign {
+                                        dst: dst_p.half_place(bo, bw),
+                                        rv: Rvalue::Use(Operand::Imm {
+                                            bits: vt_addr,
+                                            width: bw,
+                                        }),
+                                    },
+                                ])
                             }
                             _ => Err(format!(
                                 "Unsize {src_pointee} → {dst_pointee}（M4.1+）"
@@ -967,8 +1053,30 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             (_, src) => self.assign_lowered(dst_p, dst_kind, src),
                         }
                     }
-                    PC::ReifyFnPointer(..) | PC::ClosureFnPointer(..) => {
-                        Err("fn 指针物化（D4 条目表，M4.1 第 4 步）".into())
+                    PC::ReifyFnPointer(..) => {
+                        // FnDef（ZST）→ fn ptr：D4 条目表给真地址身份
+                        let a_ty = self.op_ty(a)?;
+                        let ty::FnDef(def_id, gargs) = a_ty.kind() else {
+                            return Err(format!("ReifyFnPointer 源非 FnDef（{a_ty}）"));
+                        };
+                        let inst = Instance::expect_resolve(
+                            self.tcx,
+                            self.typing_env,
+                            *def_id,
+                            gargs,
+                            rustc_span::DUMMY_SP,
+                        );
+                        let addr = self.linker.fn_entry_addr(inst);
+                        let ValKind::Scalar(w) = dst_kind else {
+                            return Err("ReifyFnPointer 目标非标量".into());
+                        };
+                        Ok(vec![Stmt::Assign {
+                            dst: dst_p.scalar_place(w),
+                            rv: Rvalue::Use(Operand::Imm { bits: addr, width: w }),
+                        }])
+                    }
+                    PC::ClosureFnPointer(..) => {
+                        Err("闭包→fn 指针物化（ClosureOnceShim，M4.1+）".into())
                     }
                 }
             }
@@ -1291,7 +1399,7 @@ fn assert_msg(msg: &mir::AssertMessage<'_>) -> String {
 
 /// 语句 → ir 语句（Ok(None) = 无操作）。
 fn lower_stmt<'tcx>(
-    cx: &LowerCx<'tcx, '_>,
+    cx: &mut LowerCx<'tcx, '_>,
     stmt: &mir::Statement<'tcx>,
 ) -> Result<Vec<Stmt>, String> {
     use mir::StatementKind as SK;
@@ -1375,7 +1483,7 @@ pub(crate) fn lower_instance<'tcx>(
     for bb_data in body.basic_blocks.iter() {
         let mut stmts = Vec::new();
         for stmt in &bb_data.statements {
-            match lower_stmt(&cx, stmt) {
+            match lower_stmt(&mut cx, stmt) {
                 Ok(mut s) => stmts.append(&mut s),
                 Err(reason) => {
                     // 语句级 Trap：执行到此即诊断退出；终止子照常降低（保 Call 边）
