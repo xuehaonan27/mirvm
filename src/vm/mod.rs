@@ -6,6 +6,7 @@
 //! 设计见 docs/frame-abi-bytecode.md、docs/spike1-model-a-skeleton.md。
 
 pub mod bytecode;
+pub mod engine;
 pub mod frame;
 pub mod interp;
 pub mod memory;

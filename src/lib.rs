@@ -4,6 +4,7 @@
 #![feature(rustc_private)]
 #![feature(yeet_expr)] // rustc_middle 的 throw_* 宏需要
 #![feature(map_try_insert)]
+#![feature(box_patterns)] // lower 匹配 MIR 的 Box 字段
 
 extern crate rustc_abi;
 extern crate rustc_apfloat;
@@ -24,5 +25,6 @@ extern crate rustc_target;
 pub mod cargo_shim;
 pub mod cli;
 pub mod interp;
+pub mod lower;
 pub mod sysroot;
 pub mod vm;

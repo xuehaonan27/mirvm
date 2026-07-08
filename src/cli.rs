@@ -24,7 +24,8 @@ OPTIONS:
     --dump-mir        打印 entry fn 的 MIR 后退出（仅单文件直通模式）
     --edition <ED>    默认 2024（仅单文件直通模式）
     --sysroot <PATH>  使用指定 sysroot（默认：自动构建带全量 MIR 的缓存 sysroot）
-    --engine <E>      执行引擎：interp（默认；JIT 见 M5）
+    --engine <E>      执行引擎：interp（默认，tier-0）| vm（M4 新引擎，施工中）
+    --vm-call <SPEC>  （--engine=vm，M4.0）直接调导出函数，如 'fib(25)'；main 启动链 M4.3 起
 
 ENV:
     MIRVM_SYSROOT     等价于 --sysroot
@@ -78,6 +79,8 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     let mut dump_mir = false;
     let mut edition = "2024".to_string();
     let mut sysroot = None;
+    let mut engine = "interp".to_string();
+    let mut vm_call: Option<String> = None;
     let mut program_args: Vec<String> = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -97,11 +100,15 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
             "--sysroot" => sysroot = Some(next("--sysroot")),
             "--engine" => {
                 let e = next("--engine");
-                if e != "interp" {
-                    eprintln!("mirvm: 引擎 `{e}` 尚未实现（当前仅 interp；JIT 见 DESIGN.md M5）");
-                    exit(2);
+                match e.as_str() {
+                    "interp" | "vm" => engine = e,
+                    _ => {
+                        eprintln!("mirvm: 引擎 `{e}` 未知（interp | vm；JIT 见 DESIGN.md M5）");
+                        exit(2);
+                    }
                 }
             }
+            "--vm-call" => vm_call = Some(next("--vm-call")),
             _ if input.is_none() && !arg.starts_with('-') => input = Some(arg),
             _ => {
                 eprintln!("mirvm: 未知参数 `{arg}`\n{USAGE}");
@@ -154,7 +161,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     ];
     let mut program_argv = vec![input];
     program_argv.extend(program_args);
-    run_driver(rustc_args, program_argv, dump_mir)
+    run_driver(rustc_args, program_argv, dump_mir, engine, vm_call)
 }
 
 // ===== cargo runner 回调 =====
@@ -170,7 +177,7 @@ fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
         // SAFETY: 单线程阶段，尚未启动解释
         unsafe { std::env::set_var(k, v) };
     }
-    run_driver(rustc_args, program_argv, false)
+    run_driver(rustc_args, program_argv, false, "interp".into(), None)
 }
 
 // ===== 共享驱动 =====
@@ -179,6 +186,8 @@ struct MirvmCallbacks {
     dump_mir: bool,
     program_argv: Vec<String>,
     exit_code: Option<i32>,
+    engine: String,
+    vm_call: Option<String>,
 }
 
 impl Callbacks for MirvmCallbacks {
@@ -201,6 +210,9 @@ impl Callbacks for MirvmCallbacks {
                 .write_mir_fn(body, &mut buf)
                 .expect("write_mir_fn failed");
             print!("{}", String::from_utf8_lossy(&buf));
+        } else if self.engine == "vm" {
+            // M4 新引擎：加载相（lower，tcx 关在此）→ 执行相（纯 Rust）
+            self.exit_code = Some(run_vm_engine(tcx, self.vm_call.as_deref()));
         } else {
             let config = EvalConfig { argv: std::mem::take(&mut self.program_argv) };
             self.exit_code = Some(interp::eval::eval_main(tcx, def_id, config));
@@ -210,8 +222,61 @@ impl Callbacks for MirvmCallbacks {
     }
 }
 
-fn run_driver(rustc_args: Vec<String>, program_argv: Vec<String>, dump_mir: bool) -> ExitCode {
-    let mut callbacks = MirvmCallbacks { dump_mir, program_argv, exit_code: None };
+/// `--engine=vm` 分支。M4.0：需 `--vm-call 'name(args…)'` 直接调导出函数（gate 入口）；
+/// 跑 main（std 启动链）自 M4.3 起。
+fn run_vm_engine(tcx: TyCtxt<'_>, vm_call: Option<&str>) -> i32 {
+    let module = crate::lower::lower_program(tcx);
+    let Some(spec) = vm_call else {
+        eprintln!("mirvm: --engine=vm 现阶段（M4.0）需要 --vm-call 'name(a,b,…)'（main 启动链 M4.3 起）");
+        return 2;
+    };
+    let (name, args) = match parse_vm_call(spec) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("mirvm: --vm-call 解析失败: {e}");
+            return 2;
+        }
+    };
+    let shared = crate::vm::engine::ctx::Shared { module };
+    match crate::vm::engine::interp::run_export(&shared, &name, &args) {
+        Ok(r) => {
+            println!("{r}");
+            0
+        }
+        Err(e) => {
+            eprintln!("mirvm: {e}");
+            1
+        }
+    }
+}
+
+/// 解析 `name(1,2,…)`（或裸 `name` = 无参）。
+fn parse_vm_call(spec: &str) -> Result<(String, Vec<u64>), String> {
+    let spec = spec.trim();
+    let Some(open) = spec.find('(') else {
+        return Ok((spec.to_string(), Vec::new()));
+    };
+    let name = spec[..open].trim().to_string();
+    let inner = spec[open + 1..].strip_suffix(')').ok_or("缺少右括号")?;
+    let mut args = Vec::new();
+    for part in inner.split(',') {
+        let p = part.trim();
+        if p.is_empty() {
+            continue;
+        }
+        args.push(p.parse::<u64>().map_err(|e| format!("参数 `{p}`: {e}"))?);
+    }
+    Ok((name, args))
+}
+
+fn run_driver(
+    rustc_args: Vec<String>,
+    program_argv: Vec<String>,
+    dump_mir: bool,
+    engine: String,
+    vm_call: Option<String>,
+) -> ExitCode {
+    let mut callbacks = MirvmCallbacks { dump_mir, program_argv, exit_code: None, engine, vm_call };
     let compiler_code = rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&rustc_args, &mut callbacks)
     });
