@@ -7,7 +7,7 @@
 //! 常量偏移、Deref/Index 留运行期步骤）+ 值分类四路（Zst/Scalar/Pair/Bytes）+
 //! 调用约定 v2（pair 2 槽、聚合 indirect/sret）。
 
-use rustc_abi::VariantIdx;
+use rustc_abi::{HasDataLayout, TagEncoding, VariantIdx, Variants};
 use rustc_middle::mir::{self, Body};
 use rustc_middle::ty::{self, EarlyBinder, Instance, InstanceKind, Ty, TyCtxt, TypingEnv};
 
@@ -135,6 +135,21 @@ enum LoweredOp<'tcx> {
     Pair(Operand, Operand),
     /// 聚合（memcpy 通道）：源 place + 尺寸
     Bytes { place: PlaceLow<'tcx>, size: u64 },
+}
+
+/// 枚举判别式的冻结编码（Direct 在 lower 期溶解为 Cast，niche 用 NicheDiscr rvalue）。
+enum TagInfo {
+    /// 单 variant / 无 variant：判别式是常量
+    Single { discr: u64 },
+    Direct { tag_off: u32, tag_w: Width, tag_signed: bool },
+    Niche {
+        tag_off: u32,
+        tag_w: Width,
+        niche_start: u64,
+        variants_start: u64,
+        variants_len: u64,
+        untagged: u64,
+    },
 }
 
 struct LowerCx<'tcx, 'a> {
@@ -337,6 +352,108 @@ impl<'tcx> LowerCx<'tcx, '_> {
         self.op_ty(op).map(|t| t.to_string()).unwrap_or_else(|_| "?".into())
     }
 
+    /// 枚举 tag 编码冻结（Discriminant 读 / SetDiscriminant 写共用）。
+    fn tag_info(&self, ty: Ty<'tcx>) -> Result<TagInfo, String> {
+        let layout = self.layout_of(ty)?;
+        Ok(match &layout.variants {
+            Variants::Empty => TagInfo::Single { discr: 0 }, // 不可及（读它 = guest UB）
+            Variants::Single { index } => {
+                let discr = ty
+                    .discriminant_for_variant(self.tcx, *index)
+                    .map(|d| d.val)
+                    .unwrap_or(index.as_u32() as u128);
+                TagInfo::Single { discr: u128_to_u64(discr)? }
+            }
+            Variants::Multiple { tag, tag_encoding, tag_field, .. } => {
+                let dl = self.tcx.data_layout();
+                let tag_off = layout.fields.offset(tag_field.as_usize()).bytes() as u32;
+                let tag_w = Width::from_bytes(tag.size(dl).bytes())
+                    .ok_or("128 位 tag（M4.1+）")?;
+                let tag_signed = matches!(tag.primitive(), rustc_abi::Primitive::Int(_, true));
+                match tag_encoding {
+                    TagEncoding::Direct => TagInfo::Direct { tag_off, tag_w, tag_signed },
+                    TagEncoding::Niche { untagged_variant, niche_variants, niche_start } => {
+                        TagInfo::Niche {
+                            tag_off,
+                            tag_w,
+                            niche_start: u128_to_u64(*niche_start & tag_w.mask() as u128)?,
+                            variants_start: niche_variants.start.as_u32() as u64,
+                            variants_len: (niche_variants.last.as_u32()
+                                - niche_variants.start.as_u32())
+                                as u64
+                                + 1,
+                            untagged: untagged_variant.as_u32() as u64,
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    /// SetDiscriminant：lower 期溶解为对 tag 槽的常量写（niche 的 untagged = 无操作）。
+    fn set_discr_stmts(
+        &self,
+        dst_p: &PlaceLow<'tcx>,
+        enum_ty: Ty<'tcx>,
+        vidx: VariantIdx,
+    ) -> Result<Vec<Stmt>, String> {
+        Ok(match self.tag_info(enum_ty)? {
+            TagInfo::Single { .. } => vec![],
+            TagInfo::Direct { tag_off, tag_w, .. } => {
+                let discr = enum_ty
+                    .discriminant_for_variant(self.tcx, vidx)
+                    .map(|d| d.val)
+                    .ok_or("Direct tag 无 discr")?;
+                let bits = (discr as u64) & tag_w.mask();
+                vec![Stmt::Assign {
+                    dst: dst_p.half_place(tag_off, tag_w),
+                    rv: Rvalue::Use(Operand::Imm { bits, width: tag_w }),
+                }]
+            }
+            TagInfo::Niche { tag_off, tag_w, niche_start, variants_start, untagged, .. } => {
+                let vi = vidx.as_u32() as u64;
+                if vi == untagged {
+                    vec![]
+                } else {
+                    let bits = vi.wrapping_sub(variants_start).wrapping_add(niche_start)
+                        & tag_w.mask();
+                    vec![Stmt::Assign {
+                        dst: dst_p.half_place(tag_off, tag_w),
+                        rv: Rvalue::Use(Operand::Imm { bits, width: tag_w }),
+                    }]
+                }
+            }
+        })
+    }
+
+    /// 把一个 MIR operand 写到 dst place 的字节偏移 off 处（Aggregate 字段落位）。
+    fn write_at(
+        &self,
+        dst_p: &PlaceLow<'tcx>,
+        off: u32,
+        op: &mir::Operand<'tcx>,
+    ) -> Result<Vec<Stmt>, String> {
+        Ok(match self.lower_operand(op)? {
+            LoweredOp::Zst => vec![],
+            LoweredOp::Scalar(o) => {
+                let w = o.width();
+                vec![Stmt::Assign { dst: dst_p.half_place(off, w), rv: Rvalue::Use(o) }]
+            }
+            LoweredOp::Pair(l, h) => {
+                let ValKind::Pair((ao, aw), (bo, bw)) = self.classify(self.op_ty(op)?)? else {
+                    return Err("pair operand 分类漂移".into());
+                };
+                vec![
+                    Stmt::Assign { dst: dst_p.half_place(off + ao, aw), rv: Rvalue::Use(l) },
+                    Stmt::Assign { dst: dst_p.half_place(off + bo, bw), rv: Rvalue::Use(h) },
+                ]
+            }
+            LoweredOp::Bytes { place, size } => {
+                vec![Stmt::Copy { dst: dst_p.expr_plus(off), src: place.expr(), size: size as u32 }]
+            }
+        })
+    }
+
     /// 把 src 泛化操作数写进 dst place（同型位搬运——Use/Transmute/位拷 cast 的共用道）。
     fn assign_lowered(
         &self,
@@ -481,13 +598,40 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }]);
                 }
                 let a_ty = self.op_ty(a)?;
+                use mir::BinOp::*;
                 if a_ty.is_floating_point() {
-                    return Err(format!("浮点算术 {binop:?}（M4.1 第 3 步）"));
+                    let is64 = match a_ty.kind() {
+                        ty::Float(ty::FloatTy::F32) => false,
+                        ty::Float(ty::FloatTy::F64) => true,
+                        _ => return Err(format!("浮点宽度 {a_ty}（f16/f128，M4.1+）")),
+                    };
+                    let ao = self.lower_operand_scalar(a)?;
+                    let bo = self.lower_operand_scalar(b)?;
+                    use ir::FloatOp as F;
+                    let fbin = |op| Rvalue::FloatBin { op, is64, a: ao.clone(), b: bo.clone() };
+                    let fcmp = |cc| Rvalue::FloatCmp { cc, is64, a: ao.clone(), b: bo.clone() };
+                    let rvalue = match binop {
+                        Add | AddUnchecked => fbin(F::Add),
+                        Sub | SubUnchecked => fbin(F::Sub),
+                        Mul | MulUnchecked => fbin(F::Mul),
+                        Div => fbin(F::Div),
+                        Rem => fbin(F::Rem),
+                        Eq => fcmp(IntCc::Eq),
+                        Ne => fcmp(IntCc::Ne),
+                        Lt => fcmp(IntCc::Lt),
+                        Le => fcmp(IntCc::Le),
+                        Gt => fcmp(IntCc::Gt),
+                        Ge => fcmp(IntCc::Ge),
+                        other => return Err(format!("浮点 BinOp {other:?}（M4.1+）")),
+                    };
+                    let ValKind::Scalar(w) = dst_kind else {
+                        return Err("浮点运算目标非标量".into());
+                    };
+                    return Ok(vec![Stmt::Assign { dst: dst_p.scalar_place(w), rv: rvalue }]);
                 }
                 let signed = frame::ty_signed(a_ty);
                 let ao = self.lower_operand_scalar(a)?;
                 let bo = self.lower_operand_scalar(b)?;
-                use mir::BinOp::*;
                 let int = |op| Rvalue::IntBin { op, signed, a: ao.clone(), b: bo.clone() };
                 let cmp = |cc| Rvalue::IntCmp { cc, signed, a: ao.clone(), b: bo.clone() };
                 let rvalue = match binop {
@@ -507,7 +651,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     Le => cmp(IntCc::Le),
                     Gt => cmp(IntCc::Gt),
                     Ge => cmp(IntCc::Ge),
-                    Cmp => return Err("三路比较 Cmp（M4.1 第 3 步）".into()),
+                    Cmp => Rvalue::IntCmp3 { signed, a: ao.clone(), b: bo.clone() },
                     other => return Err(format!("BinOp {other:?}（M4.1+）")),
                 };
                 let ValKind::Scalar(w) = dst_kind else {
@@ -548,14 +692,21 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         Ok(vec![Stmt::Assign { dst: dst_p.scalar_place(w), rv: Rvalue::NotBits(ao) }])
                     }
                     mir::UnOp::Neg => {
-                        if a_ty.is_floating_point() {
-                            return Err("浮点取负（M4.1 第 3 步）".into());
-                        }
                         let ao = self.lower_operand_scalar(a)?;
                         let ValKind::Scalar(w) = dst_kind else {
                             return Err("Neg 目标非标量".into());
                         };
-                        Ok(vec![Stmt::Assign { dst: dst_p.scalar_place(w), rv: Rvalue::Neg(ao) }])
+                        let rv = if a_ty.is_floating_point() {
+                            let is64 = match a_ty.kind() {
+                                ty::Float(ty::FloatTy::F32) => false,
+                                ty::Float(ty::FloatTy::F64) => true,
+                                _ => return Err(format!("浮点宽度 {a_ty}（M4.1+）")),
+                            };
+                            Rvalue::FloatNeg { is64, a: ao }
+                        } else {
+                            Rvalue::Neg(ao)
+                        };
+                        Ok(vec![Stmt::Assign { dst: dst_p.scalar_place(w), rv }])
                     }
                 }
             }
@@ -573,8 +724,111 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     _ => Err("Repeat 非标量元素（M4.1+）".into()),
                 }
             }
-            mir::Rvalue::Discriminant(_) => Err("Rvalue discriminant（M4.1 第 3 步）".into()),
-            mir::Rvalue::Aggregate(..) => Err("Rvalue Aggregate（M4.1 第 3 步）".into()),
+            mir::Rvalue::Discriminant(pl) => {
+                let p = self.resolve_place(pl)?;
+                let ValKind::Scalar(dw) = dst_kind else {
+                    return Err("Discriminant 目标非标量".into());
+                };
+                let rv = match self.tag_info(p.ty)? {
+                    TagInfo::Single { discr } => {
+                        Rvalue::Use(Operand::Imm { bits: discr & dw.mask(), width: dw })
+                    }
+                    TagInfo::Direct { tag_off, tag_w, tag_signed } => Rvalue::Cast {
+                        from: (tag_w, tag_signed),
+                        to: dw,
+                        a: p.half_operand(tag_off, tag_w),
+                    },
+                    TagInfo::Niche {
+                        tag_off,
+                        tag_w,
+                        niche_start,
+                        variants_start,
+                        variants_len,
+                        untagged,
+                    } => Rvalue::NicheDiscr {
+                        tag: p.half_operand(tag_off, tag_w),
+                        niche_start,
+                        variants_start,
+                        variants_len,
+                        untagged,
+                    },
+                };
+                Ok(vec![Stmt::Assign { dst: dst_p.scalar_place(dw), rv }])
+            }
+            mir::Rvalue::Aggregate(box kind, operands) => {
+                use mir::AggregateKind as AK;
+                match kind {
+                    AK::Array(elem_ty) => {
+                        let stride = self.layout_of(*elem_ty)?.size.bytes() as u32;
+                        let mut stmts = Vec::new();
+                        for (i, op) in operands.iter().enumerate() {
+                            stmts.extend(self.write_at(&dst_p, i as u32 * stride, op)?);
+                        }
+                        Ok(stmts)
+                    }
+                    AK::RawPtr(..) => {
+                        // (data, meta) → 胖指针；meta ZST → 瘦指针
+                        let mut ops = operands.iter();
+                        let (data, meta) =
+                            (ops.next().ok_or("RawPtr 缺 data")?, ops.next().ok_or("RawPtr 缺 meta")?);
+                        match dst_kind {
+                            ValKind::Scalar(w) => {
+                                let LoweredOp::Scalar(d) = self.lower_operand(data)? else {
+                                    return Err("RawPtr data 非标量".into());
+                                };
+                                Ok(vec![Stmt::Assign {
+                                    dst: dst_p.scalar_place(w),
+                                    rv: Rvalue::Use(d),
+                                }])
+                            }
+                            ValKind::Pair((ao, aw), (bo, bw)) => {
+                                let LoweredOp::Scalar(d) = self.lower_operand(data)? else {
+                                    return Err("RawPtr data 非标量".into());
+                                };
+                                let LoweredOp::Scalar(m) = self.lower_operand(meta)? else {
+                                    return Err("RawPtr meta 非标量".into());
+                                };
+                                Ok(vec![
+                                    Stmt::Assign {
+                                        dst: dst_p.half_place(ao, aw),
+                                        rv: Rvalue::Use(d),
+                                    },
+                                    Stmt::Assign {
+                                        dst: dst_p.half_place(bo, bw),
+                                        rv: Rvalue::Use(m),
+                                    },
+                                ])
+                            }
+                            _ => Err("RawPtr 目标分类异常".into()),
+                        }
+                    }
+                    AK::Adt(..) | AK::Tuple | AK::Closure(..) | AK::Coroutine(..)
+                    | AK::CoroutineClosure(..) => {
+                        // cg_ssa 同构：定 variant → 逐字段按 variant 布局落位 → 写判别式
+                        let (vidx, active_field) = match kind {
+                            AK::Adt(_, v, _, _, af) => (*v, *af),
+                            _ => (VariantIdx::ZERO, None),
+                        };
+                        let layout = self.layout_of(dst_p.ty)?;
+                        let variant_layout = if matches!(layout.variants, Variants::Single { .. } | Variants::Empty)
+                        {
+                            layout
+                        } else {
+                            layout.for_variant(&LayoutCxAt(self.tcx, self.typing_env), vidx)
+                        };
+                        let mut stmts = Vec::new();
+                        for (i, op) in operands.iter().enumerate() {
+                            let fi = active_field.map(|f| f.as_usize()).unwrap_or(i);
+                            let off = variant_layout.fields.offset(fi).bytes() as u32;
+                            stmts.extend(self.write_at(&dst_p, off, op)?);
+                        }
+                        if dst_p.ty.is_enum() {
+                            stmts.extend(self.set_discr_stmts(&dst_p, dst_p.ty, vidx)?);
+                        }
+                        Ok(stmts)
+                    }
+                }
+            }
             mir::Rvalue::ThreadLocalRef(_) => Err("ThreadLocalRef（M4.4）".into()),
             mir::Rvalue::WrapUnsafeBinder(op, _) => {
                 let src = self.lower_operand(op)?;
@@ -629,21 +883,38 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
             }
             CK::Transmute => {
-                // 位重解释：同分类同宽直通；跨分类走字节拷（src 须是 place）
-                let src = self.lower_operand(a)?;
-                match (&dst_kind, &src) {
-                    (ValKind::Scalar(dw), LoweredOp::Scalar(o)) if o.width() == *dw => {
-                        self.assign_lowered(dst_p, dst_kind, src)
+                // 位重解释 = 字节搬运。同宽标量直通（快路径）；src 是 place 时
+                // 一律按字节拷（跨分类安全）；标量常量→同宽标量。
+                match a {
+                    mir::Operand::Copy(pl) | mir::Operand::Move(pl) => {
+                        let src_p = self.resolve_place(pl)?;
+                        let src_layout = self.layout_of(src_p.ty)?;
+                        match (&dst_kind, frame::scalar_width(&src_layout)) {
+                            (ValKind::Scalar(dw), Some(sw)) if sw == *dw => {
+                                Ok(vec![Stmt::Assign {
+                                    dst: dst_p.scalar_place(*dw),
+                                    rv: Rvalue::Use(src_p.scalar_operand(sw)),
+                                }])
+                            }
+                            _ => {
+                                let size = src_layout.size.bytes();
+                                Ok(vec![Stmt::Copy {
+                                    dst: dst_p.expr(),
+                                    src: src_p.expr(),
+                                    size: size as u32,
+                                }])
+                            }
+                        }
                     }
-                    (_, LoweredOp::Bytes { .. }) | (ValKind::Other { .. }, _) => {
-                        self.assign_lowered(dst_p, dst_kind, src)
-                    }
-                    (ValKind::Pair(..), LoweredOp::Pair(..)) => {
-                        // 两半宽度未必对位（(u32,u32)↔u64 等）——但 MIR pair transmute
-                        // 通常同构；宽度不匹配的走 Err 防错值
-                        self.assign_lowered(dst_p, dst_kind, src)
-                    }
-                    _ => Err(format!("Transmute 分类不匹配（→{to_ty}，M4.1+）")),
+                    _ => match (self.lower_operand(a)?, &dst_kind) {
+                        (LoweredOp::Scalar(o), ValKind::Scalar(dw)) if o.width() == *dw => {
+                            Ok(vec![Stmt::Assign {
+                                dst: dst_p.scalar_place(*dw),
+                                rv: Rvalue::Use(o),
+                            }])
+                        }
+                        _ => Err(format!("Transmute 常量→{to_ty}（M4.1 第 4 步常量池）")),
+                    },
                 }
             }
             CK::PointerCoercion(pc, _) => {
@@ -701,8 +972,68 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }
                 }
             }
-            CK::FloatToInt | CK::FloatToFloat | CK::IntToFloat => {
-                Err(format!("浮点 cast {kind:?}（M4.1 第 3 步）"))
+            CK::FloatToInt => {
+                let a_ty = self.op_ty(a)?;
+                let from64 = match a_ty.kind() {
+                    ty::Float(ty::FloatTy::F32) => false,
+                    ty::Float(ty::FloatTy::F64) => true,
+                    _ => return Err(format!("FloatToInt 源 {a_ty}（M4.1+）")),
+                };
+                let to_layout = self.layout_of(to_ty)?;
+                let to_w = frame::scalar_width(&to_layout).ok_or("FloatToInt 目标非标量")?;
+                let ValKind::Scalar(w) = dst_kind else {
+                    return Err("FloatToInt 目标非标量".into());
+                };
+                Ok(vec![Stmt::Assign {
+                    dst: dst_p.scalar_place(w),
+                    rv: Rvalue::FloatToInt {
+                        from64,
+                        to: to_w,
+                        signed: frame::ty_signed(to_ty),
+                        a: self.lower_operand_scalar(a)?,
+                    },
+                }])
+            }
+            CK::IntToFloat => {
+                let a_ty = self.op_ty(a)?;
+                let a_layout = self.layout_of(a_ty)?;
+                let from_w = frame::scalar_width(&a_layout).ok_or("IntToFloat 源非标量（128 位，M4.1+）")?;
+                let to64 = match to_ty.kind() {
+                    ty::Float(ty::FloatTy::F32) => false,
+                    ty::Float(ty::FloatTy::F64) => true,
+                    _ => return Err(format!("IntToFloat 目标 {to_ty}（M4.1+）")),
+                };
+                let ValKind::Scalar(w) = dst_kind else {
+                    return Err("IntToFloat 目标非标量".into());
+                };
+                Ok(vec![Stmt::Assign {
+                    dst: dst_p.scalar_place(w),
+                    rv: Rvalue::IntToFloat {
+                        from: (from_w, frame::ty_signed(a_ty)),
+                        to64,
+                        a: self.lower_operand_scalar(a)?,
+                    },
+                }])
+            }
+            CK::FloatToFloat => {
+                let a_ty = self.op_ty(a)?;
+                let from64 = match a_ty.kind() {
+                    ty::Float(ty::FloatTy::F32) => false,
+                    ty::Float(ty::FloatTy::F64) => true,
+                    _ => return Err(format!("FloatToFloat 源 {a_ty}（M4.1+）")),
+                };
+                let to64 = match to_ty.kind() {
+                    ty::Float(ty::FloatTy::F32) => false,
+                    ty::Float(ty::FloatTy::F64) => true,
+                    _ => return Err(format!("FloatToFloat 目标 {to_ty}（M4.1+）")),
+                };
+                let ValKind::Scalar(w) = dst_kind else {
+                    return Err("FloatToFloat 目标非标量".into());
+                };
+                Ok(vec![Stmt::Assign {
+                    dst: dst_p.scalar_place(w),
+                    rv: Rvalue::FloatCast { from64, to64, a: self.lower_operand_scalar(a)? },
+                }])
             }
             CK::Subtype => {
                 let src = self.lower_operand(a)?;
@@ -923,6 +1254,10 @@ fn elem_of(ty: Ty<'_>) -> Option<Ty<'_>> {
     }
 }
 
+fn u128_to_u64(v: u128) -> Result<u64, String> {
+    u64::try_from(v).map_err(|_| "128 位判别式（M4.1+）".to_string())
+}
+
 /// `TyAndLayout::for_variant` 需要一个 LayoutCx；用 (tcx, typing_env) 现造一个。
 struct LayoutCxAt<'tcx>(TyCtxt<'tcx>, TypingEnv<'tcx>);
 
@@ -965,7 +1300,11 @@ fn lower_stmt<'tcx>(
         SK::StorageLive(_) | SK::StorageDead(_) | SK::Nop | SK::PlaceMention(_)
         | SK::ConstEvalCounter | SK::Coverage(_) => Ok(vec![]),
         SK::Intrinsic(box mir::NonDivergingIntrinsic::Assume(_)) => Ok(vec![]),
-        SK::SetDiscriminant { .. } => Err("SetDiscriminant（M4.1 第 3 步）".into()),
+        SK::SetDiscriminant { place, variant_index } => {
+            let p = cx.resolve_place(place)?;
+            let ty = p.ty;
+            cx.set_discr_stmts(&p, ty, *variant_index)
+        }
         other => Err(format!("语句 {other:?}（M4.1+）")),
     }
 }

@@ -148,6 +148,16 @@ pub enum OvfOp {
     Mul,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum FloatOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    /// IEEE fmod（Rust `%` 浮点语义）
+    Rem,
+}
+
 #[derive(Clone, Debug)]
 pub enum Rvalue {
     Use(Operand),
@@ -166,6 +176,29 @@ pub enum Rvalue {
     Ref(PlaceExpr),
     /// 指针算术：ptr + count × stride（BinOp::Offset 与 offset/arith_offset intrinsic）
     PtrOffset { ptr: Operand, count: Operand, stride: u64 },
+    /// 三路比较（BinOp::Cmp）→ Ordering（i8：-1/0/1）
+    IntCmp3 { signed: bool, a: Operand, b: Operand },
+    /// niche 编码判别式读（Direct 编码在 lower 期溶解为 Cast）：
+    /// rel = (tag - niche_start) 按 tag 宽 wrapping；rel < len → variants_start+rel，
+    /// 否则 untagged。niche 不变量：discr 值 == variant index（rustc layout sanity check）。
+    NicheDiscr {
+        tag: Operand,
+        niche_start: u64,
+        variants_start: u64,
+        variants_len: u64,
+        untagged: u64,
+    },
+    /// 浮点四则（位进位出：操作数是 f32/f64 的位型）
+    FloatBin { op: FloatOp, is64: bool, a: Operand, b: Operand },
+    /// 浮点比较（IEEE 语义，NaN 全 false 除 Ne）→ bool
+    FloatCmp { cc: IntCc, is64: bool, a: Operand, b: Operand },
+    FloatNeg { is64: bool, a: Operand },
+    /// f32↔f64
+    FloatCast { from64: bool, to64: bool, a: Operand },
+    /// float → int（Rust `as` 饱和语义：NaN→0、越界→边界）
+    FloatToInt { from64: bool, to: Width, signed: bool, a: Operand },
+    /// int → float
+    IntToFloat { from: (Width, bool), to64: bool, a: Operand },
 }
 
 #[derive(Clone, Debug)]

@@ -256,6 +256,121 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
             let delta = (sext(c, cw) as u64).wrapping_mul(*stride);
             p.wrapping_add(delta)
         }
+        Rvalue::IntCmp3 { signed, a, b } => {
+            let (av, w) = eval_operand(ctx, base, a);
+            let (bv, _) = eval_operand(ctx, base, b);
+            let ord = if *signed {
+                sext(av, w).cmp(&sext(bv, w))
+            } else {
+                (av & w.mask()).cmp(&(bv & w.mask()))
+            };
+            (ord as i8 as u8) as u64
+        }
+        Rvalue::NicheDiscr { tag, niche_start, variants_start, variants_len, untagged } => {
+            let (t, w) = eval_operand(ctx, base, tag);
+            let rel = t.wrapping_sub(*niche_start) & w.mask();
+            if rel < *variants_len { variants_start + rel } else { *untagged }
+        }
+        Rvalue::FloatBin { op, is64, a, b } => {
+            use super::ir::FloatOp as F;
+            let (av, _) = eval_operand(ctx, base, a);
+            let (bv, _) = eval_operand(ctx, base, b);
+            if *is64 {
+                let (x, y) = (f64::from_bits(av), f64::from_bits(bv));
+                match op {
+                    F::Add => x + y,
+                    F::Sub => x - y,
+                    F::Mul => x * y,
+                    F::Div => x / y,
+                    F::Rem => x % y,
+                }
+                .to_bits()
+            } else {
+                let (x, y) = (f32::from_bits(av as u32), f32::from_bits(bv as u32));
+                (match op {
+                    F::Add => x + y,
+                    F::Sub => x - y,
+                    F::Mul => x * y,
+                    F::Div => x / y,
+                    F::Rem => x % y,
+                })
+                .to_bits() as u64
+            }
+        }
+        Rvalue::FloatCmp { cc, is64, a, b } => {
+            let (av, _) = eval_operand(ctx, base, a);
+            let (bv, _) = eval_operand(ctx, base, b);
+            let t = if *is64 {
+                let (x, y) = (f64::from_bits(av), f64::from_bits(bv));
+                match cc {
+                    IntCc::Eq => x == y,
+                    IntCc::Ne => x != y,
+                    IntCc::Lt => x < y,
+                    IntCc::Le => x <= y,
+                    IntCc::Gt => x > y,
+                    IntCc::Ge => x >= y,
+                }
+            } else {
+                let (x, y) = (f32::from_bits(av as u32), f32::from_bits(bv as u32));
+                match cc {
+                    IntCc::Eq => x == y,
+                    IntCc::Ne => x != y,
+                    IntCc::Lt => x < y,
+                    IntCc::Le => x <= y,
+                    IntCc::Gt => x > y,
+                    IntCc::Ge => x >= y,
+                }
+            };
+            t as u64
+        }
+        Rvalue::FloatNeg { is64, a } => {
+            let (av, _) = eval_operand(ctx, base, a);
+            if *is64 {
+                (-f64::from_bits(av)).to_bits()
+            } else {
+                (-f32::from_bits(av as u32)).to_bits() as u64
+            }
+        }
+        Rvalue::FloatCast { from64, to64, a } => {
+            let (av, _) = eval_operand(ctx, base, a);
+            match (from64, to64) {
+                (true, false) => (f64::from_bits(av) as f32).to_bits() as u64,
+                (false, true) => (f32::from_bits(av as u32) as f64).to_bits(),
+                _ => av, // 同宽：位透传
+            }
+        }
+        Rvalue::FloatToInt { from64, to, signed, a } => {
+            let (av, _) = eval_operand(ctx, base, a);
+            // f32→f64 精确保值 ⇒ 统一经 f64；宿主 `as` 即 Rust 饱和语义（NaN→0、越界→边界）
+            let x = if *from64 { f64::from_bits(av) } else { f32::from_bits(av as u32) as f64 };
+            let v: u64 = if *signed {
+                match to {
+                    Width::W8 => x as i8 as u64,
+                    Width::W16 => x as i16 as u64,
+                    Width::W32 => x as i32 as u64,
+                    Width::W64 => x as i64 as u64,
+                }
+            } else {
+                match to {
+                    Width::W8 => x as u8 as u64,
+                    Width::W16 => x as u16 as u64,
+                    Width::W32 => x as u32 as u64,
+                    Width::W64 => x as u64,
+                }
+            };
+            v & to.mask()
+        }
+        Rvalue::IntToFloat { from, to64, a } => {
+            let (av, _) = eval_operand(ctx, base, a);
+            let x: f64 = if from.1 { sext(av, from.0) as f64 } else { (av & from.0.mask()) as f64 };
+            if *to64 {
+                x.to_bits()
+            } else {
+                // 经 f64 中转对 ≤32 位整数无双舍入问题；u64/i64→f32 用直转
+                let f: f32 = if from.1 { sext(av, from.0) as f32 } else { (av & from.0.mask()) as f32 };
+                f.to_bits() as u64
+            }
+        }
     }
 }
 
