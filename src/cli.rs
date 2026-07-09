@@ -2,6 +2,10 @@
 //! - `mirvm run <脚本|项目>`：用户入口
 //! - `mirvm <rustc> <args...>`（MIRVM_CARGO_SESSION 下）：cargo 的 RUSTC_WRAPPER
 //! - `mirvm runner <假二进制> <args...>`：cargo 的 target runner，真正的解释入口
+//!
+//! 引擎 = M4 字节码 VM（加载相 lower + 执行相 engine）。tier-0（rustc InterpCx）已于
+//! 2026-07-09 移除——代码在 git 历史（tag 前缀 feat: M4.3 之前），差分 oracle 一直是
+//! native 编译直跑（tests/diff_vm.sh）。
 
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, exit};
@@ -10,8 +14,7 @@ use rustc_driver::{Callbacks, Compilation};
 use rustc_interface::interface::Compiler;
 use rustc_middle::ty::TyCtxt;
 
-use crate::interp::eval::EvalConfig;
-use crate::{cargo_shim, interp};
+use crate::cargo_shim;
 
 const USAGE: &str = "\
 mirvm — a Rust runtime with its own execution engine
@@ -24,18 +27,14 @@ OPTIONS:
     --dump-mir        打印 entry fn 的 MIR 后退出（仅单文件直通模式）
     --edition <ED>    默认 2024（仅单文件直通模式）
     --sysroot <PATH>  使用指定 sysroot（默认：自动构建带全量 MIR 的缓存 sysroot）
-    --engine <E>      执行引擎：interp（默认，tier-0）| vm（M4 新引擎，施工中）
-    --vm-call <SPEC>  （--engine=vm，M4.0）直接调导出函数，如 'fib(25)'；main 启动链 M4.3 起
+    --vm-call <SPEC>  直接调导出函数（gate/调试入口），如 'fib(25)'；缺省跑 main 启动链
+    --vm-stats        打印 Trap 债务统计（每期开工前的调研仪器）后退出
 
 ENV:
     MIRVM_SYSROOT     等价于 --sysroot
 
 DEV:
-    mirvm spike1      跑模型 A 骨架 spike（差分自检，见 docs/spike1-model-a-skeleton.md）
-    mirvm spike2      跑 interp↔compiled 适配 spike（见 docs/spike2-interp-compiled-adapters.md）
-    mirvm spike3      跑混合栈 unwind spike（见 docs/spike3-mixed-stack-unwind.md）
-    mirvm spike4      跑并发 spike（TSan 判定见 tests/spike4_tsan.sh 与 docs/spike4-concurrency-tsan.md）
-    mirvm spike5      跑真 Cranelift 接入 spike（见 docs/spike5-cranelift-adapters.md）
+    mirvm spike1..5   跑已冻结的 M4 前置 spike（回归自检；见 docs/spike*.md）
 ";
 
 pub fn main() -> ExitCode {
@@ -58,12 +57,12 @@ pub fn main() -> ExitCode {
 
     match first.as_str() {
         "run" => run_main(argv),
-        "spike1" => crate::vm::spike1::run(),
-        "spike2" => crate::vm::spike2::run(),
-        "spike3" => crate::vm::spike3::run(argv),
-        "spike4" => crate::vm::spike4::run(),
+        "spike1" => crate::vm::spikes::spike1::run(),
+        "spike2" => crate::vm::spikes::spike2::run(),
+        "spike3" => crate::vm::spikes::spike3::run(argv),
+        "spike4" => crate::vm::spikes::spike4::run(),
         #[cfg(feature = "cranelift")]
-        "spike5" => crate::vm::spike5::run(argv),
+        "spike5" => crate::vm::spikes::spike5::run(argv),
         _ => {
             eprint!("{USAGE}");
             ExitCode::from(2)
@@ -79,7 +78,6 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     let mut dump_mir = false;
     let mut edition = "2024".to_string();
     let mut sysroot = None;
-    let mut engine = "interp".to_string();
     let mut vm_call: Option<String> = None;
     let mut vm_stats = false;
     let mut program_args: Vec<String> = Vec::new();
@@ -99,14 +97,12 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
             "--dump-mir" => dump_mir = true,
             "--edition" => edition = next("--edition"),
             "--sysroot" => sysroot = Some(next("--sysroot")),
+            // 兼容旧 gate 脚本：--engine vm 是唯一引擎，吞掉参数即可
             "--engine" => {
                 let e = next("--engine");
-                match e.as_str() {
-                    "interp" | "vm" => engine = e,
-                    _ => {
-                        eprintln!("mirvm: 引擎 `{e}` 未知（interp | vm；JIT 见 DESIGN.md M5）");
-                        exit(2);
-                    }
+                if e != "vm" {
+                    eprintln!("mirvm: 引擎 `{e}` 已不存在（tier-0 已移除；唯一引擎 = vm）");
+                    exit(2);
                 }
             }
             "--vm-call" => vm_call = Some(next("--vm-call")),
@@ -163,7 +159,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     ];
     let mut program_argv = vec![input];
     program_argv.extend(program_args);
-    run_driver(rustc_args, program_argv, dump_mir, engine, vm_call, vm_stats)
+    run_driver(rustc_args, program_argv, dump_mir, vm_call, vm_stats)
 }
 
 // ===== cargo runner 回调 =====
@@ -179,7 +175,7 @@ fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
         // SAFETY: 单线程阶段，尚未启动解释
         unsafe { std::env::set_var(k, v) };
     }
-    run_driver(rustc_args, program_argv, false, "interp".into(), None, false)
+    run_driver(rustc_args, program_argv, false, None, false)
 }
 
 // ===== 共享驱动 =====
@@ -188,7 +184,6 @@ struct MirvmCallbacks {
     dump_mir: bool,
     program_argv: Vec<String>,
     exit_code: Option<i32>,
-    engine: String,
     vm_call: Option<String>,
     vm_stats: bool,
 }
@@ -213,25 +208,22 @@ impl Callbacks for MirvmCallbacks {
                 .write_mir_fn(body, &mut buf)
                 .expect("write_mir_fn failed");
             print!("{}", String::from_utf8_lossy(&buf));
-        } else if self.engine == "vm" {
-            // M4 新引擎：加载相（lower，tcx 关在此）→ 执行相（纯 Rust）
+        } else {
+            // 加载相（lower，tcx 关在此）→ 执行相（纯 Rust）
             self.exit_code = Some(run_vm_engine(
                 tcx,
                 self.vm_call.as_deref(),
                 self.vm_stats,
                 std::mem::take(&mut self.program_argv),
             ));
-        } else {
-            let config = EvalConfig { argv: std::mem::take(&mut self.program_argv) };
-            self.exit_code = Some(interp::eval::eval_main(tcx, def_id, config));
         }
 
         Compilation::Stop
     }
 }
 
-/// `--engine=vm` 分支：缺省跑 main 启动链（M4.3）；`--vm-call 'name(args…)'` 直调
-/// 导出函数（gate 入口）；`--vm-stats` = Trap 债务统计（各期开工前的调研仪器）。
+/// 引擎入口：缺省跑 main 启动链；`--vm-call 'name(args…)'` 直调导出函数（gate 入口）；
+/// `--vm-stats` = Trap 债务统计（各期开工前的调研仪器）。
 fn run_vm_engine(
     tcx: TyCtxt<'_>,
     vm_call: Option<&str>,
@@ -290,12 +282,11 @@ fn run_driver(
     rustc_args: Vec<String>,
     program_argv: Vec<String>,
     dump_mir: bool,
-    engine: String,
     vm_call: Option<String>,
     vm_stats: bool,
 ) -> ExitCode {
     let mut callbacks =
-        MirvmCallbacks { dump_mir, program_argv, exit_code: None, engine, vm_call, vm_stats };
+        MirvmCallbacks { dump_mir, program_argv, exit_code: None, vm_call, vm_stats };
     let compiler_code = rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&rustc_args, &mut callbacks)
     });

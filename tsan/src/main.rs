@@ -7,7 +7,7 @@
 mod vm;
 
 fn main() -> std::process::ExitCode {
-    if vm::spike4::run_cases() {
+    if vm::spikes::spike4::run_cases() {
         println!("tsan-harness: 用例全 PASS（竞争判定看 TSan 输出）");
         std::process::ExitCode::SUCCESS
     } else {

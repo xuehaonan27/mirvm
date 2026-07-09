@@ -1,18 +1,11 @@
-//! `vm` — greenfield 模型 A 执行引擎（M4 的地基，与 tier-0 `interp`（rustc InterpCx）并列）。
+//! `vm` — 模型 A 执行相（**纯 Rust，零 rustc_private**——机械门禁 = tsan harness
+//! 以 `#[path]` 同源编译本模块，漏进 rustc 类型即编译失败）。
 //!
-//! **纯 Rust，不依赖 rustc_private**——这正是"脱离 InterpCx、自研 VM"的体现。
-//! 当前只含 Spike 1（最小模型 A 骨架：手写字节码 + slaved 操作数区 + tree-walking
-//! interp_frame + 真地址内存）。后续 spike（i2c/c2i、混合栈 unwind、并发）在此扩展。
-//! 设计见 docs/frame-abi-bytecode.md、docs/spike1-model-a-skeleton.md。
+//! - `engine/`：M4 真引擎（类型化字节码 IR / place 求值 / FrameGuard unwind /
+//!   mimalloc 堆 / 冻结区 / dlsym+libffi 直通）。
+//! - `spikes/`：M4 前置验证的**冻结工件**（模型 A 骨架、i2c/c2i、混合栈 unwind、
+//!   并发 TSan、真 Cranelift）——回归自检用（`mirvm spike1..5`），勿动勿扩展；
+//!   经验见 docs/spike{1..5}-*.md。
 
-pub mod bytecode;
 pub mod engine;
-pub mod frame;
-pub mod interp;
-pub mod memory;
-pub mod spike1;
-pub mod spike2;
-pub mod spike3;
-pub mod spike4;
-#[cfg(feature = "cranelift")]
-pub mod spike5;
+pub mod spikes;

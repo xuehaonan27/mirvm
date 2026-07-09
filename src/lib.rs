@@ -24,7 +24,6 @@ extern crate rustc_target;
 
 pub mod cargo_shim;
 pub mod cli;
-pub mod interp;
 pub mod lower;
 pub mod sysroot;
 pub mod vm;
