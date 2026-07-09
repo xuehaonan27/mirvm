@@ -77,9 +77,16 @@ evcxr 四点不满（延迟、状态/借用限制、跑不了完整项目、编�
 > **更新（2026-07-09）**：**M4.2 unwind 已完成**（gate2 九用例 == native：panic 发起/
 > 跨帧 Drop/catch/重抛/Assert→真 panic；resume 770 处债务清零；panic hook 打印与退出码
 > 101 与 native 一致；经验见 m4-log M4.2 条目——两个自递归陷阱与 track_caller ABI 三处
-> 一致性尤其值得读）。**下一步 = M4.3 os:: + FFI**（注册表三处置+denylist、args/env/
-> time/fs/math/getrandom、libffi 直通、main 启动链→全量差分；开工先跑 --vm-stats 复查
-> foreign 清单——gate2 后仅剩 6 处种子；简报即行）。
+> 一致性尤其值得读）。
+>
+> **更新（2026-07-09 晚）**：**M4.3 已完成**（`tests/diff_vm.sh` **全量差分 11/11 非线程
+> 用例 == native**——新引擎完整 main 启动链跑 fib/strings/args_env/time_fs/ptr_int/
+> hashmap/catch/panic_exit/async×2/ffi_libc；os:: 直通 = CallForeign+dlsym+libffi 通用道
+> +denylist+stub 表；128 位算术补全；经验见 m4-log M4.3 条目——weak 符号链接语义与
+> Coroutine Aggregate 顶层落位两个修复尤其值得读）。**下一步 = M4.4 真线程（收官之战，
+> 过审期——开工前设计文档给用户审！）**：pthread 1:1 直通、thunk 工厂+TLS 边界 attach、
+> guest TLS per-thread（单线程物化的 M4.4 义务标注在 lower ThreadLocalRef 处）、原子序
+> 映射、signal thunk；gate = threads_* 5 用例 + tier-0 挂死双场景 + TSan + rayon。
 
 **挂起检查点（勿丢，§10）**：vmctx P/R 真负载终裁挂 M5；landing pad/LSDA 挂 M5；fork/atfork
 挂 M4 后；预降低 std 发行工件挂 mode B（M4.5 后）。
