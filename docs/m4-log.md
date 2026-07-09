@@ -126,3 +126,78 @@ hashbrown SSE2 group 探测走引擎 SIMD 最小集，"B 目标 A 排序"决策�
 - atomic fence=nop 的弱序复查、TLS → M4.4。
 - foreign 种子清单（syscall/__errno_location/llvm.x86.sse2.pause/write/clock_gettime/abort/
   _Unwind_RaiseException）→ M4.3 os:: 注册表输入（--vm-stats foreign 段直接给）。
+
+## M4.2 unwind —— **完成**（2026-07-09）
+
+**Gate 全绿**：`tests/m4_gate2.sh`——unwind 五函数九用例（catch+Drop-in-unwind /
+跨多帧传播（内层先）/ 越界 Assert→真 panic_bounds_check→catch / panic 消息 payload
+跨 unwind 存活+downcast / 捕获后 resume_unwind 重抛）经 `--vm-call` 全部 == 同源
+native 直跑值 + `--vm-stats` 复测 **M4.1/M4.2 份内债务清零**（resume 770 处全部消化，
+可达集仅剩 foreign 6 处=M4.3）。全量回归无损：gate0/gate1、纯度门禁、diff 16/16、
+spike1-5、TSan 零警告。panic hook 打印（消息+精确 location "file:line:col"）与
+未捕获 panic 退出码 101 均与 native 一致。
+
+### 建了什么
+
+- **spike3 协议平移**（第 1 步）：`GuestPanic{exception}` 载 guest 侧
+  `_Unwind_Exception` 指针 + `resume_unwind`（无 hook 噪声）；`FrameGuard` = 解释帧
+  landing pad（**动态 LSDA**：`unwind_edge` Cell 在每个可 unwind 终止子前设置）——
+  unwind 穿帧时 Drop 跑 cleanup 链（`run_blocks` 复用主循环、`Resume` 终止子=返回让
+  宿主 unwind 续传，**零 payload 栈**）+ region 恢复统一（正常/unwind 同路）；
+  `UnwindAction::Terminate`=catch+abort；顶层 catch=退出码 101；**递归深度守卫**
+  （frame-abi §9 guest 栈溢出近似，MAX_DEPTH=8000——也是调试无限递归的仪器）。
+- **两个原语**（第 2 步）：`_Unwind_RaiseException` → `Builtin::UnwindRaise`
+  （**panic_unwind 照常解释**：Exception 结构 Box 在 guest 堆闭环、引擎只运载指针——
+  debt-map §2-B "拦 std 声明的 extern 边界"的兑现）；`catch_unwind` intrinsic →
+  `Builtin::CatchUnwind`（宿主 catch + `call_fn_addr` 派发 try/catch fn + downcast
+  区分 GuestPanic/宿主 panic——**宿主 panic 绝不吞**）。
+- **track_caller ABI**（第 3 步）：`requires_caller_location` → 帧尾 &Location 槽
+  （sret 同款附加槽）；调用点转发（本 fn track）或 `span_as_caller_location` 合成
+  （物化走既有常量机器）；**Virtual 调用也传**（vtable 侧是 VTable shim 接收）；
+  **fallback intrinsic 调用点即换 `new_raw`** 使 caller/callee ABI 一致（cg_ssa
+  `IntrinsicResult::Fallback` 同构）；`caller_location` intrinsic=读槽/合成。
+- **Assert 展开真 panic**（第 4 步）：Assert 终止子从 IR 删除，lower 展开为 cg_ssa
+  同构（SwitchInt + 合成 panic 块：Call panic lang item，BoundsCheck=[index,len,loc]、
+  其余=`msg.panic_function()`+[loc]）。
+- **内建补全**：abort intrinsic→HostAbort；assert_inhabited 系=
+  `check_validity_requirement` lower 期判定；saturating_add/sub=IntSat；
+  simd_reduce_all/any；**simd_shuffle=const 索引 lower 期读出展开为逐 lane 拷（零新
+  IR）**；Cmp128（TypeId 判等）；dyn→dyn 同 principal 位拷。
+- **os:: 最小直通**（panic 链逼出，M4.3 换正式注册表）：getenv/write/strlen/abort/
+  **syscall（可变参按实参数分派）**；weak extern static（gettid）=判空 cell 写 0
+  （guest 走 syscall fallback）；TLS `ThreadLocalRef` 单线程物化（**M4.4 义务：真线程
+  时换 per-thread——代码已醒目标注**）。
+
+### 经验与教训
+
+1. **spike3 的"单条 native 栈零协调"兑现得比预想还干净**：Resume=返回、payload 只在
+   raise/catch 两点接触、cleanup 里再 panic 穿出 Drop=宿主 double-panic abort 天然
+   正确——unwind 的全部复杂度都被"宿主 unwinder 就是我们的 unwinder"吸收了。
+2. **两个自递归陷阱**（都被深度守卫抓获）：① dyn place 的 Drop 调 `resolve_drop_glue`
+   会解析回 `drop_glue::<dyn T>` 自身——**dyn drop 必须虚派发 vtable 槽 0**（cg_ssa
+   同构；且槽可为 null=无 Drop 类型 → CallIndirect 加 null_ok）；② unsized place 的
+   Drop glue 参数是**胖指针**（缺 meta 半 = ABI 越界）——resolve_place 的 meta 跟踪
+   补上。
+3. **track_caller 是 ABI 幻影参**，三处一致性缺一不可：普通 Call（requires 判定）、
+   Virtual（也 requires——vtable 里 VTable shim 接收）、**fallback intrinsic（调用点
+   必须先换 new_raw 再判**，否则 caller 按 Intrinsic kind=false 不传、callee 按 Item
+   =true 期望收——`unchecked_funnel_shl` 用 ABI 越界教会我们 cg_ssa 的
+   `IntrinsicResult::Fallback(instance)` 为什么要返回换过的 instance）。
+4. **prologue 的实参计数校验值回票价**：ABI 不匹配从"神秘越界 panic"变成带函数名的
+   一行诊断（防静默原则的又一处落地）。
+5. **本 nightly 新漂移**（续前清单）：`Linkage::ExternalWeak`（extern block 内 item
+   的 linkage 在 **import_linkage** 字段）；`ValidityRequirement::from_intrinsic`+
+   `check_validity_requirement((req, PseudoCanonicalInput))`；`AssertKind::
+   panic_function()`；`tcx.span_as_caller_location(span)` 一步给 Location 常量。
+6. **spread_arg 在引擎自有调用约定下是 no-op**：caller MIR 传一个 tuple operand、
+   callee 的 spread local 就是一个 tuple local，两侧按 ValKind 对称展平——native
+   FnAbi 才需要按字段展开。自定义约定的又一红利。
+
+### 本期遗留（归期明确）
+
+- intrinsics::abort = SIGABRT（native=SIGILL trap）——信号级差异，差分若比信号再对齐。
+- dyn trait 上溯（principal 变换的 vtable 槽读）、InvalidEnumConstruction assert
+  （u128 实参）、128 位算术（比较已通）→ 按需。
+- foreign 残余（clock_gettime/free/`llvm.x86.sse2.pause`/`__errno_location` 等）+
+  weak cell 的 dlsym 真地址 + os:: 正式注册表（直通/内建/合成三处置）→ M4.3。
+- TLS per-thread 化 + atomic fence 弱序复查 → M4.4。
