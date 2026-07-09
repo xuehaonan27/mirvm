@@ -72,8 +72,14 @@ evcxr 四点不满（延迟、状态/借用限制、跑不了完整项目、编�
 
 > **更新（2026-07-08）**：**M4.1 已完成**（gate1 digest 9/9 == native + M4.1 份内债务清零；
 > 经验与遗留见 `docs/m4-log.md` M4.1 条目）。项目已迁移至 `/home/ubuntu/mirvm`（原
-> /home/xuehaonan）。**下一步 = M4.2 unwind**（panic 原语 lower 成引擎原语、CleanupGuard、
-> Drop unwind 路径、catch_unwind；gate = demo/catch.rs、panic_exit.rs；简报即行，无需过审）。
+> /home/xuehaonan）。
+>
+> **更新（2026-07-09）**：**M4.2 unwind 已完成**（gate2 九用例 == native：panic 发起/
+> 跨帧 Drop/catch/重抛/Assert→真 panic；resume 770 处债务清零；panic hook 打印与退出码
+> 101 与 native 一致；经验见 m4-log M4.2 条目——两个自递归陷阱与 track_caller ABI 三处
+> 一致性尤其值得读）。**下一步 = M4.3 os:: + FFI**（注册表三处置+denylist、args/env/
+> time/fs/math/getrandom、libffi 直通、main 启动链→全量差分；开工先跑 --vm-stats 复查
+> foreign 清单——gate2 后仅剩 6 处种子；简报即行）。
 
 **挂起检查点（勿丢，§10）**：vmctx P/R 真负载终裁挂 M5；landing pad/LSDA 挂 M5；fork/atfork
 挂 M4 后；预降低 std 发行工件挂 mode B（M4.5 后）。
