@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 libc = "0.2"
+libffi = "5.1.1"
 libmimalloc-sys = "0.1.49"
 
 [profile.release]

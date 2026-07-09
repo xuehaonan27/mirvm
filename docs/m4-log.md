@@ -201,3 +201,63 @@ spike1-5、TSan 零警告。panic hook 打印（消息+精确 location "file:lin
 - foreign 残余（clock_gettime/free/`llvm.x86.sse2.pause`/`__errno_location` 等）+
   weak cell 的 dlsym 真地址 + os:: 正式注册表（直通/内建/合成三处置）→ M4.3。
 - TLS per-thread 化 + atomic fence 弱序复查 → M4.4。
+
+## M4.3 os:: + FFI + main 启动链 —— **完成**（2026-07-09）
+
+**Gate 全绿**：`tests/diff_vm.sh`——**全量差分 11/11 非线程用例**（fib/strings/args_env/
+time_fs/ptr_int/hashmap/catch/panic_exit/async_hand/async_suspend/**ffi_libc**）经新引擎
+**完整 main 启动链**跑出与 native 逐字节一致的 stdout + 退出码。threads_* 5 个 = M4.4
+预期红；ecosystem/ffi_zlib 是 frontmatter/cargo 形态（引擎 cargo 接线 M4.5，diff.sh 同样
+SKIP）。全量回归无损：gate0/gate1/gate2、tier-0 diff 16/16、spike1-5、纯度门禁。
+
+### 建了什么
+
+- **os:: 直通通用道（P7 处置①）**：`CallForeign{sym, ForeignSig}` 终止子 + engine
+  `ffi.rs`（dlsym 缓存含缺席缓存 + `-l` dlopen 清单随 Module + libffi 直调，变参
+  `Cif::new_variadic` 按调用点实参冻结尾参）。真实地址零编组：参数就是 u64 位。
+  denylist（fork/exec/setjmp/pthread 生命周期类→Trap 带归期）+ stub 表（sigaction/
+  sigaltstack/atexit/dl_iterate_phdr/_Unwind_Backtrace→假成功 0——回调装载挂 M4.4
+  thunk）。tier-0 native.rs 的无 provenance 简化版。
+- **extern static = 真符号**：非 weak（environ 等数据符号）= lower 期 dlsym 真地址；
+  weak fn 符号维持判空 cell 0（真地址给出去会被 guest 当 fn ptr 调——条目反查失败；
+  M4.4 thunk 后升级）。
+- **weak 符号的链接器语义补全**：导出表记 is_weak；weak 且非 Rust 内部前缀
+  （__rust/__rdl/rust_）且宿主有强符号 → 让位直通（compiler-builtins 的 weak
+  sqrt/memcmp vs libm/libc——native 链接器行为的忠实仿真）。**Rust 内部符号绝不直通**
+  （librustc_driver 也导出它们，直通=打穿引擎堆/panic 模型）。
+- **main 启动链**（cg_ssa create_entry_fn 同构）：`EntryPlan{lang_start, main 条目地址,
+  argc, argv(冻结区 C 串表), sigpipe}`；lang_start **照常解释**（sys::init/args 存放/
+  hook/Termination 全走 guest 代码）；`--engine vm` 缺省即跑 main，退出码 = lang_start
+  返回值。argv 布进冻结区（tier-0 setup_process_memory 同构）。
+- **128 位整数补全**（f64 Display 的 ryu/grisu 逼出）：Bin128（宿主 u128 直算，读两半
+  组→算→写两半；WithOverflow 旗标 @+16 布局核验）、128 位 IntToInt 双向（zext/sext
+  拆两半、trunc 取低半）、128 位整数常量物化。ClosureFnPointer（resolve_closure
+  FnOnce，cg 同构）。标量→同尺寸小聚合 transmute。
+- **lower 的 panic 韧性**：语句/终止子级 catch_unwind——rustc API 的 panic 面（布局
+  角例）兜成 Trap 占位带 panic 消息，绝不中止整个降低（Trap-stub 协议的完备化）。
+
+### 经验与教训
+
+1. **"asm 阻塞"是误诊，真凶是链接仿真的 weak 语义缺口**：ffi_libc 的 sqrt 被解析到
+   compiler-builtins 的 **weak** sqrt（inline asm 实现）而非 libm 强符号。native 链接器
+   的 weak 让位规则也是"链接器本来会做什么"的一部分——仿真补全后 asm 根本不在路径上。
+2. **cg_ssa 的 Aggregate 只对 Adt 做 variant downcast**：Coroutine/Closure/Tuple 的
+   operands（upvars）落**顶层** fields——coroutine 的 variant fields 是暂停点 saved
+   locals，不是 upvars！错做 downcast = 空 fields 越界 panic。async 两 demo 因此解锁
+   （coroutine Aggregate + 初始 variant 判别式）。
+3. **u128 在 fmt 深处**：f64 Display（ryu/grisu）满地 u128 乘法/移位/溢出检查——
+   "浮点格式化"实为 128 位整数算术的压力测试。宿主 u128 直算 20 行搞定。
+4. **exit 直通天然正确**：guest std::process::exit → libc exit 直调 = 进程真退出，
+   mimalloc/FrozenArena 由 OS 回收，无善后。
+5. **变参 libffi 的正确姿势**：调用点实参类型已知 → 每调用点冻结完整签名 +
+   `Cif::new_variadic`（x86_64 AL 寄存器语义 libffi 负责）——不需要 tier-0 的
+   "拒绝变参"限制。
+6. **本 nightly 漂移**（续）：`FnSig::c_variadic()` 是方法非字段。
+
+### 本期遗留（归期明确）
+
+- threads_* 全量差分 + weak fn 符号真地址 + 回调 thunk（signal/TLS dtor/
+  dl_iterate_phdr 真实现）→ M4.4。
+- 引擎 cargo/frontmatter 接线（runner 用 vm 引擎；ffi_zlib/ecosystem gate）+
+  corpus 全绿盘点 + `.init_array` ctors（tier-0 有先例）→ M4.5。
+- async demo 里两处小 Trap 残留不在执行路径（Repeat 非标量元素、dyn Error 上溯）→ 按需。

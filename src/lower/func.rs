@@ -45,22 +45,21 @@ struct PlaceLow<'tcx> {
 }
 
 impl<'tcx> PlaceLow<'tcx> {
-    fn push_offset(&mut self, o: u64) {
+    fn push_offset(&mut self, o: i64) {
         // 连续常量偏移折叠（Field 链一个 Offset）
         if o == 0 {
             return;
         }
         if let Some(PlaceStep::Offset(prev)) = self.steps.last_mut() {
-            *prev += o as u32;
-        } else if self.steps.is_empty() {
-            // 纯帧内：直接折进基址偏移（保住快路径）
-            if let PlaceBase::Local(off) = &mut self.base {
-                *off += o as u32;
-            } else {
-                self.steps.push(PlaceStep::Offset(o as u32));
-            }
+            *prev += o as i32;
+        } else if self.steps.is_empty()
+            && o >= 0
+            && let PlaceBase::Local(off) = &mut self.base
+        {
+            // 纯帧内非负：直接折进基址偏移（保住快路径）
+            *off += o as u32;
         } else {
-            self.steps.push(PlaceStep::Offset(o as u32));
+            self.steps.push(PlaceStep::Offset(o as i32));
         }
     }
 
@@ -81,20 +80,12 @@ impl<'tcx> PlaceLow<'tcx> {
         let mut steps = self.steps.clone();
         if o != 0 {
             if let Some(PlaceStep::Offset(prev)) = steps.last_mut() {
-                *prev += o;
+                *prev += o as i32;
             } else {
-                steps.push(PlaceStep::Offset(o));
+                steps.push(PlaceStep::Offset(o as i32));
             }
         }
-        let mut base = self.base;
-        if steps.is_empty()
-            && o != 0
-            && let PlaceBase::Local(_) = base
-        {
-            // steps 为空时 expr_plus 已把 o 塞进 steps（上面分支），不会到这里；防御
-            base = self.base;
-        }
-        PlaceExpr { base, steps: steps.into_boxed_slice() }
+        PlaceExpr { base: self.base, steps: steps.into_boxed_slice() }
     }
 
     /// 标量位置（快路径优先）
@@ -203,7 +194,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         Some(v) => layout.for_variant(&LayoutCxAt(self.tcx, self.typing_env), v),
                         None => layout,
                     };
-                    p.push_offset(layout.fields.offset(f.as_usize()).bytes());
+                    p.push_offset(layout.fields.offset(f.as_usize()).bytes() as i64);
                     p.ty = fty;
                 }
                 mir::ProjectionElem::Downcast(_, v) => {
@@ -248,17 +239,24 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         .ok_or_else(|| format!("ConstantIndex 非序列（ty={}）", p.ty))?;
                     let stride = self.layout_of(elem_ty)?.size.bytes();
                     if from_end {
-                        // 数组长度已知可折；slice 需运行期 len
                         if let ty::Array(_, n) = p.ty.kind() {
+                            // 数组长度已知：折常量
                             let n = n
                                 .try_to_target_usize(self.tcx)
                                 .ok_or("数组长度非常量")?;
-                            p.push_offset((n - offset) * stride);
+                            p.push_offset(((n - offset) * stride) as i64);
                         } else {
-                            return Err("ConstantIndex from_end on slice（M4.1+）".into());
+                            // slice：addr += len×stride - offset×stride（len = meta 槽）
+                            let Some(Operand::Slot(ms)) = p.meta else {
+                                return Err(
+                                    "ConstantIndex from_end：meta 非帧槽（M4.3+）".into()
+                                );
+                            };
+                            p.steps.push(PlaceStep::IndexScaled { idx: ms, stride });
+                            p.push_offset(-((offset * stride) as i64));
                         }
                     } else {
-                        p.push_offset(offset * stride);
+                        p.push_offset((offset * stride) as i64);
                     }
                     p.ty = elem_ty;
                     p.meta = None;
@@ -336,13 +334,25 @@ impl<'tcx> LowerCx<'tcx, '_> {
         Ok(match val {
             mir::ConstValue::Scalar(S::Int(si)) => {
                 let bits = si.to_bits(si.size());
-                if bits > u64::MAX as u128 {
-                    return Err("128 位常量（M4.1+）".into());
+                match kind {
+                    ValKind::Scalar(width) if bits <= u64::MAX as u128 => {
+                        LoweredOp::Scalar(Operand::Imm { bits: bits as u64, width })
+                    }
+                    // 128 位整数常量：物化 16 字节进冻结区，走 memcpy 通道
+                    ValKind::Other { size: 16 } => {
+                        let p = self.linker.frozen_alloc_bytes(&bits.to_le_bytes());
+                        LoweredOp::Bytes {
+                            place: PlaceLow {
+                                base: PlaceBase::Static(p),
+                                steps: Vec::new(),
+                                ty,
+                                meta: None,
+                            },
+                            size: 16,
+                        }
+                    }
+                    _ => return Err(format!("整数常量分类漂移（ty={ty}）")),
                 }
-                let ValKind::Scalar(width) = kind else {
-                    return Err(format!("整数常量分类漂移（ty={ty}）"));
-                };
-                LoweredOp::Scalar(Operand::Imm { bits: bits as u64, width })
             }
             mir::ConstValue::Scalar(S::Ptr(ptr, _)) => {
                 // 指针常量（static 引用 / fn ptr / vtable）：物化目标 → 真地址立即数
@@ -443,6 +453,50 @@ impl<'tcx> LowerCx<'tcx, '_> {
             Some(off) => Operand::Slot(Slot { off, width: Width::W64 }), // 转发
             None => self.caller_location_imm(span)?,
         }))
+    }
+
+    /// 128 位操作数 → place 表达式（Bytes 通道；标量常量物化）。
+    fn wide_place(&mut self, op: &mir::Operand<'tcx>) -> Result<PlaceExpr, String> {
+        match self.lower_operand(op)? {
+            LoweredOp::Bytes { place, .. } => Ok(place.expr()),
+            _ => Err("128 位操作数非 place".into()),
+        }
+    }
+
+    /// 128 位双目（Bin128）：移位量右操作数可为 ≤64 标量。
+    fn lower_bin128(
+        &mut self,
+        op: IntBinOp,
+        signed: bool,
+        a: &mir::Operand<'tcx>,
+        b: &mir::Operand<'tcx>,
+        dst_p: &PlaceLow<'tcx>,
+        with_overflow: bool,
+    ) -> Result<Vec<Stmt>, String> {
+        use ir::Bin128Rhs;
+        let pa = self.wide_place(a)?;
+        let b_ty = self.op_ty(b)?;
+        let rhs = if matches!(b_ty.kind(), ty::Int(ty::IntTy::I128) | ty::Uint(ty::UintTy::U128))
+        {
+            Bin128Rhs::Wide(self.wide_place(b)?)
+        } else {
+            Bin128Rhs::Scalar(self.lower_operand_scalar(b)?)
+        };
+        if with_overflow {
+            // (u128, bool)：bool 必须在 +16（engine 写死）——布局核验
+            let l = self.layout_of(dst_p.ty)?;
+            if l.fields.offset(1).bytes() != 16 {
+                return Err("128 位溢出对布局漂移".into());
+            }
+        }
+        Ok(vec![Stmt::Bin128 {
+            op,
+            signed,
+            a: pa,
+            b: rhs,
+            dst: dst_p.expr(),
+            with_overflow,
+        }])
     }
 
     /// 枚举 tag 编码冻结（Discriminant 读 / SetDiscriminant 写共用）。
@@ -571,6 +625,15 @@ impl<'tcx> LowerCx<'tcx, '_> {
             (ValKind::Pair(..) | ValKind::Scalar(_), LoweredOp::Bytes { place, size }) => {
                 vec![Stmt::Copy { dst: dst.expr(), src: place.expr(), size: size as u32 }]
             }
+            // 标量 → 同尺寸小聚合（transmute u32→[u8;4] 等）：按宽度裸写
+            (ValKind::Other { size }, LoweredOp::Scalar(o))
+                if o.width().bytes() as u64 == size =>
+            {
+                vec![Stmt::Assign {
+                    dst: ScalarPlace::Mem { expr: dst.expr(), width: o.width() },
+                    rv: Rvalue::Use(o),
+                }]
+            }
             (ValKind::Other { size }, LoweredOp::Pair(l, h)) => {
                 // pair 值写进聚合视图的 place：按半宽写两个标量（偏移 0 / align 后）
                 // ——出现于 Transmute；两半偏移取 src 布局无从得，这里按紧凑 0/宽度对齐近似
@@ -610,6 +673,23 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 _ => None,
             };
             if let Some(op) = ovf {
+                let a_ty = self.op_ty(a)?;
+                // 128 位 WithOverflow：(u128, bool) 聚合，旗标 @+16
+                if matches!(a_ty.kind(), ty::Int(ty::IntTy::I128) | ty::Uint(ty::UintTy::U128)) {
+                    let bop = match op {
+                        OvfOp::Add => IntBinOp::Add,
+                        OvfOp::Sub => IntBinOp::Sub,
+                        OvfOp::Mul => IntBinOp::Mul,
+                    };
+                    return self.lower_bin128(
+                        bop,
+                        frame::ty_signed(a_ty),
+                        a,
+                        b,
+                        &dst_p,
+                        true,
+                    );
+                }
                 let ValKind::Pair((vo, vw), (fo, fw)) = dst_kind else {
                     return Err("溢出算术目标非 pair".into());
                 };
@@ -692,37 +772,43 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
                 let a_ty = self.op_ty(a)?;
                 use mir::BinOp::*;
-                // 128 位整数：比较走 Cmp128（16 字节 place 两半组读）；算术 M4.2+
+                // 128 位整数：比较走 Cmp128；算术/位/移位走 Bin128（宿主 u128 直算）
                 if matches!(a_ty.kind(), ty::Int(ty::IntTy::I128) | ty::Uint(ty::UintTy::U128)) {
+                    let signed = frame::ty_signed(a_ty);
                     let cc = match binop {
-                        Eq => IntCc::Eq,
-                        Ne => IntCc::Ne,
-                        Lt => IntCc::Lt,
-                        Le => IntCc::Le,
-                        Gt => IntCc::Gt,
-                        Ge => IntCc::Ge,
-                        other => return Err(format!("128 位算术 {other:?}（M4.2+）")),
+                        Eq => Some(IntCc::Eq),
+                        Ne => Some(IntCc::Ne),
+                        Lt => Some(IntCc::Lt),
+                        Le => Some(IntCc::Le),
+                        Gt => Some(IntCc::Gt),
+                        Ge => Some(IntCc::Ge),
+                        _ => None,
                     };
-                    let as_place = |cx: &mut Self, op: &mir::Operand<'tcx>| match cx
-                        .lower_operand(op)?
-                    {
-                        LoweredOp::Bytes { place, .. } => Ok(place.expr()),
-                        _ => Err("128 位比较操作数非 place".to_string()),
+                    if let Some(cc) = cc {
+                        let pa = self.wide_place(a)?;
+                        let pb = self.wide_place(b)?;
+                        let ValKind::Scalar(w) = dst_kind else {
+                            return Err("128 位比较目标非标量".into());
+                        };
+                        return Ok(vec![Stmt::Assign {
+                            dst: dst_p.scalar_place(w),
+                            rv: Rvalue::Cmp128 { cc, signed, a: pa, b: pb },
+                        }]);
+                    }
+                    let bop = match binop {
+                        Add | AddUnchecked => IntBinOp::Add,
+                        Sub | SubUnchecked => IntBinOp::Sub,
+                        Mul | MulUnchecked => IntBinOp::Mul,
+                        Div => IntBinOp::Div,
+                        Rem => IntBinOp::Rem,
+                        BitAnd => IntBinOp::BitAnd,
+                        BitOr => IntBinOp::BitOr,
+                        BitXor => IntBinOp::BitXor,
+                        Shl | ShlUnchecked => IntBinOp::Shl,
+                        Shr | ShrUnchecked => IntBinOp::Shr,
+                        other => return Err(format!("128 位 BinOp {other:?}（M4.3+）")),
                     };
-                    let pa = as_place(self, a)?;
-                    let pb = as_place(self, b)?;
-                    let ValKind::Scalar(w) = dst_kind else {
-                        return Err("128 位比较目标非标量".into());
-                    };
-                    return Ok(vec![Stmt::Assign {
-                        dst: dst_p.scalar_place(w),
-                        rv: Rvalue::Cmp128 {
-                            cc,
-                            signed: frame::ty_signed(a_ty),
-                            a: pa,
-                            b: pb,
-                        },
-                    }]);
+                    return self.lower_bin128(bop, signed, a, b, &dst_p, false);
                 }
                 if a_ty.is_floating_point() {
                     let is64 = match a_ty.kind() {
@@ -929,25 +1015,31 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }
                     AK::Adt(..) | AK::Tuple | AK::Closure(..) | AK::Coroutine(..)
                     | AK::CoroutineClosure(..) => {
-                        // cg_ssa 同构：定 variant → 逐字段按 variant 布局落位 → 写判别式
-                        let (vidx, active_field) = match kind {
-                            AK::Adt(_, v, _, _, af) => (*v, *af),
-                            _ => (VariantIdx::ZERO, None),
+                        // cg_ssa 同构：**仅 Adt 做 variant downcast**——Coroutine/Closure/
+                        // Tuple 的 operands（upvars）落顶层 fields（coroutine 的 variant
+                        // fields 是暂停点 saved locals，不是 upvars！）；随后写判别式。
+                        let (vidx, active_field, use_variant) = match kind {
+                            AK::Adt(_, v, _, _, af) => (*v, *af, true),
+                            _ => (VariantIdx::ZERO, None, false),
                         };
                         let layout = self.layout_of(dst_p.ty)?;
-                        let variant_layout = if matches!(layout.variants, Variants::Single { .. } | Variants::Empty)
-                        {
-                            layout
-                        } else {
+                        let field_layout = if use_variant
+                            && !matches!(
+                                layout.variants,
+                                Variants::Single { .. } | Variants::Empty
+                            ) {
                             layout.for_variant(&LayoutCxAt(self.tcx, self.typing_env), vidx)
+                        } else {
+                            layout
                         };
                         let mut stmts = Vec::new();
                         for (i, op) in operands.iter().enumerate() {
                             let fi = active_field.map(|f| f.as_usize()).unwrap_or(i);
-                            let off = variant_layout.fields.offset(fi).bytes() as u32;
+                            let off = field_layout.fields.offset(fi).bytes() as u32;
                             stmts.extend(self.write_at(&dst_p, off, op)?);
                         }
-                        if dst_p.ty.is_enum() {
+                        // 判别式：enum 全部要写；coroutine 初始 variant（Unresumed=0）
+                        if dst_p.ty.is_enum() || dst_p.ty.is_coroutine() {
                             stmts.extend(self.set_discr_stmts(&dst_p, dst_p.ty, vidx)?);
                         }
                         Ok(stmts)
@@ -988,9 +1080,53 @@ impl<'tcx> LowerCx<'tcx, '_> {
             CK::IntToInt => {
                 let a_ty = self.op_ty(a)?;
                 let a_layout = self.layout_of(a_ty)?;
+                let signed = frame::ty_signed(a_ty);
+                // 128 位方向：→u128/i128 = 低半 cast + 高半符号扩；u128→小 = 取低半
+                if let ValKind::Other { size: 16 } = dst_kind {
+                    let from_w = frame::scalar_width(&a_layout).ok_or("128 cast 源非标量")?;
+                    let ao = self.lower_operand_scalar(a)?;
+                    let lo = Stmt::Assign {
+                        dst: dst_p.half_place(0, Width::W64),
+                        rv: Rvalue::Cast { from: (from_w, signed), to: Width::W64, a: ao },
+                    };
+                    let hi_rv = if signed {
+                        // 算术右移 63 位复制符号
+                        Rvalue::IntBin {
+                            op: IntBinOp::Shr,
+                            signed: true,
+                            a: dst_p.half_operand(0, Width::W64),
+                            b: Operand::Imm { bits: 63, width: Width::W64 },
+                        }
+                    } else {
+                        Rvalue::Use(Operand::Imm { bits: 0, width: Width::W64 })
+                    };
+                    let hi = Stmt::Assign { dst: dst_p.half_place(8, Width::W64), rv: hi_rv };
+                    return Ok(vec![lo, hi]);
+                }
+                if a_layout.size.bytes() == 16 {
+                    // u128/i128 → ≤64：截断 = 取低半
+                    let src_p = match a {
+                        mir::Operand::Copy(pl) | mir::Operand::Move(pl) => {
+                            self.resolve_place(pl)?
+                        }
+                        _ => return Err("128 位常量 cast（M4.3+）".into()),
+                    };
+                    let ValKind::Scalar(w) = dst_kind else {
+                        return Err("IntToInt 目标非标量".into());
+                    };
+                    return Ok(vec![Stmt::Assign {
+                        dst: dst_p.scalar_place(w),
+                        rv: Rvalue::Cast {
+                            from: (Width::W64, false),
+                            to: w,
+                            a: src_p.half_operand(0, Width::W64),
+                        },
+                    }]);
+                }
                 let from_w = frame::scalar_width(&a_layout).ok_or("cast 源非标量")?;
                 let to_layout = self.layout_of(to_ty)?;
-                let to_w = frame::scalar_width(&to_layout).ok_or("cast 目标非标量（128 位，M4.1 第 3 步）")?;
+                let to_w =
+                    frame::scalar_width(&to_layout).ok_or("cast 目标非标量（M4.3+）")?;
                 let ValKind::Scalar(w) = dst_kind else {
                     return Err("IntToInt 目标非标量".into());
                 };
@@ -998,7 +1134,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 Ok(vec![Stmt::Assign {
                     dst: dst_p.scalar_place(w),
                     rv: Rvalue::Cast {
-                        from: (from_w, frame::ty_signed(a_ty)),
+                        from: (from_w, signed),
                         to: to_w,
                         a: self.lower_operand_scalar(a)?,
                     },
@@ -1169,7 +1305,25 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }])
                     }
                     PC::ClosureFnPointer(..) => {
-                        Err("闭包→fn 指针物化（ClosureOnceShim，M4.1+）".into())
+                        // 无捕获闭包 → fn ptr（cg_ssa 同构：resolve_closure FnOnce）
+                        let a_ty = self.op_ty(a)?;
+                        let ty::Closure(def_id, cargs) = a_ty.kind() else {
+                            return Err(format!("ClosureFnPointer 源非闭包（{a_ty}）"));
+                        };
+                        let inst = Instance::resolve_closure(
+                            self.tcx,
+                            *def_id,
+                            cargs,
+                            ty::ClosureKind::FnOnce,
+                        );
+                        let addr = self.linker.fn_entry_addr(inst);
+                        let ValKind::Scalar(w) = dst_kind else {
+                            return Err("ClosureFnPointer 目标非标量".into());
+                        };
+                        Ok(vec![Stmt::Assign {
+                            dst: dst_p.scalar_place(w),
+                            rv: Rvalue::Use(Operand::Imm { bits: addr, width: w }),
+                        }])
                     }
                 }
             }
@@ -1517,6 +1671,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
         target: Option<mir::BasicBlock>,
         unwind: mir::UnwindAction,
     ) -> Result<(Vec<Stmt>, Terminator), String> {
+        // 变参 foreign：尾参 FfiKind 按调用点实参冻结
+        let variadic_foreign =
+            matches!(&ct, CallTarget::Direct(Callee::Foreign { variadic: true, .. }));
+        let mut tail_kinds: Vec<ir::FfiKind> = Vec::new();
         let mut pre: Vec<Stmt> = Vec::new();
         let mut ir_args = Vec::new();
         for (i, a) in args.iter().enumerate() {
@@ -1528,7 +1686,16 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
             match self.lower_operand(&a.node) {
                 Ok(LoweredOp::Zst) => {}
-                Ok(LoweredOp::Scalar(o)) => ir_args.push(o),
+                Ok(LoweredOp::Scalar(o)) => {
+                    if variadic_foreign {
+                        let t = self.op_ty(&a.node)?;
+                        tail_kinds.push(
+                            super::ffi_kind_of(self.tcx, self.typing_env, t)
+                                .map_err(|e| format!("变参实参 {t}: {e}"))?,
+                        );
+                    }
+                    ir_args.push(o);
+                }
                 Ok(LoweredOp::Pair(l, h)) => {
                     ir_args.push(l);
                     ir_args.push(h);
@@ -1588,6 +1755,17 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
             CallTarget::Direct(Callee::Builtin(b)) => {
                 Terminator::CallBuiltin { builtin: b, args: ir_args, ret, target: tgt, unwind }
+            }
+            CallTarget::Direct(Callee::Foreign { sym, args: fixed, ret: fret, variadic }) => {
+                let sig = if variadic {
+                    let nfixed = fixed.len();
+                    let mut all = fixed;
+                    all.extend(tail_kinds.drain(nfixed.min(tail_kinds.len())..));
+                    ir::ForeignSig { args: all, ret: fret, fixed: Some(nfixed) }
+                } else {
+                    ir::ForeignSig { args: fixed, ret: fret, fixed: None }
+                };
+                Terminator::CallForeign { sym, sig, args: ir_args, ret, target: tgt, unwind }
             }
             CallTarget::Indirect(callee) => Terminator::CallIndirect {
                 callee,
@@ -2047,9 +2225,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         let mut steps = sexpr.steps.to_vec();
                         if src_off != 0 {
                             if let Some(PlaceStep::Offset(o)) = steps.last_mut() {
-                                *o += src_off;
+                                *o += src_off as i32;
                             } else {
-                                steps.push(PlaceStep::Offset(src_off));
+                                steps.push(PlaceStep::Offset(src_off as i32));
                             }
                         }
                         sexpr.steps = steps.into_boxed_slice();
@@ -2102,7 +2280,7 @@ fn operand_deref_at(op: Operand, off: u32) -> Result<Operand, String> {
     let deref_steps = |mut steps: Vec<PlaceStep>| {
         steps.push(PlaceStep::Deref);
         if off != 0 {
-            steps.push(PlaceStep::Offset(off));
+            steps.push(PlaceStep::Offset(off as i32));
         }
         steps.into_boxed_slice()
     };
@@ -2262,11 +2440,30 @@ pub(crate) fn lower_instance<'tcx>(
         mir_block_count,
     };
 
+    // rustc API 的 panic 面不可控（布局角例等）——按 Trap-stub 协议兜成占位，
+    // 绝不中止整个降低（诊断带 panic 消息，指认待修的构造）
+    fn catch_lower<T>(
+        f: impl FnOnce() -> Result<T, String> + std::panic::UnwindSafe,
+    ) -> Result<T, String> {
+        match std::panic::catch_unwind(f) {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = e
+                    .downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| e.downcast_ref::<&str>().copied())
+                    .unwrap_or("?");
+                Err(format!("lower panic: {msg}（M4.x 待修）"))
+            }
+        }
+    }
+
     let mut blocks = Vec::with_capacity(mir_block_count);
     for bb_data in body.basic_blocks.iter() {
         let mut stmts = Vec::new();
         for stmt in &bb_data.statements {
-            match lower_stmt(&mut cx, stmt) {
+            let r = catch_lower(std::panic::AssertUnwindSafe(|| lower_stmt(&mut cx, stmt)));
+            match r {
                 Ok(mut s) => stmts.append(&mut s),
                 Err(reason) => {
                     // 语句级 Trap：执行到此即诊断退出；终止子照常降低（保 Call 边）
@@ -2275,7 +2472,9 @@ pub(crate) fn lower_instance<'tcx>(
                 }
             }
         }
-        let term = match cx.lower_terminator(bb_data.terminator()) {
+        let term = match catch_lower(std::panic::AssertUnwindSafe(|| {
+            cx.lower_terminator(bb_data.terminator())
+        })) {
             Ok((mut extra, t)) => {
                 stmts.append(&mut extra);
                 t

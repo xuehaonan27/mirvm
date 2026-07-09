@@ -26,9 +26,19 @@ use crate::vm::engine::ir;
 pub(crate) enum Callee {
     /// 普通 guest 函数（含链接仿真②解出的 std 实现、intrinsic fallback body 补收）
     Func(ir::FuncId),
-    /// 引擎原语①（std runtime extern 边界：alloc 系等）
+    /// 引擎原语①（std runtime extern 边界：alloc/unwind 系 + stub）
     Builtin(ir::Builtin),
+    /// os:: 直通③（dlsym+libffi）：固定参数 FfiKind 已冻结；变参尾由调用点实参补
+    Foreign { sym: Box<str>, args: Vec<ir::FfiKind>, ret: ir::FfiKind, variadic: bool },
 }
+
+/// 危险符号（P7 denylist）：绝不直通 native——会绕开进程/线程模型。
+/// pthread 生命周期类挂 M4.4（真线程）；只读查询类（self/attr_get*）放行直通。
+const DENY_EXACT: &[&str] = &[
+    "fork", "vfork", "clone", "clone3", "setjmp", "longjmp", "sigsetjmp", "siglongjmp",
+    "pthread_create", "pthread_join", "pthread_detach", "pthread_exit", "pthread_atfork",
+];
+const DENY_PREFIX: &[&str] = &["exec", "posix_spawn"];
 
 /// 加载相"链接器"：FuncId 分配 + worklist 闭包扩集（D1 修正），外加 native 链接器
 /// 职责的仿真——**特判的不是"panic 是什么"，是"链接器本来会做什么"**（debt-map §2-B）：
@@ -43,8 +53,8 @@ pub(crate) struct Linker<'tcx> {
     queue: VecDeque<(ir::FuncId, Instance<'tcx>)>,
     /// ①引擎原语表：mangled 符号 → Builtin
     builtins: FxHashMap<Symbol, ir::Builtin>,
-    /// ②链接仿真：导出符号名 → 定义 instance（strong 覆盖 weak；惰性一次构建）
-    exports: Option<FxHashMap<Symbol, Instance<'tcx>>>,
+    /// ②链接仿真：导出符号名 → (定义 instance, is_weak)（strong 覆盖 weak；惰性构建）
+    exports: Option<FxHashMap<Symbol, (Instance<'tcx>, bool)>>,
     /// 冻结区（statics/常量池/fn 条目）——lower 期物化，结束移交 Module
     frozen: FrozenArena,
     /// 已物化的 alloc → 冻结区真地址（去重 + 先分后填破指针环）
@@ -84,6 +94,13 @@ impl<'tcx> Linker<'tcx> {
         addr
     }
 
+    /// 裸字节物化进冻结区（128 位常量等小常量的通用道）。
+    pub(crate) fn frozen_alloc_bytes(&mut self, bytes: &[u8]) -> u64 {
+        let p = self.frozen.alloc(bytes.len() as u64, 16);
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, bytes.len()) };
+        p
+    }
+
     /// alloc → 冻结区真地址（按需递归物化；先分后填 ⇒ 指针环安全）。
     pub(crate) fn ensure_alloc(&mut self, id: AllocId) -> Result<u64, String> {
         if let Some(&a) = self.alloc_addrs.get(&id) {
@@ -92,10 +109,13 @@ impl<'tcx> Linker<'tcx> {
         match self.tcx.global_alloc(id) {
             GlobalAlloc::Memory(alloc) => self.materialize(id, alloc),
             GlobalAlloc::Static(def_id) => {
-                // extern static：weak 符号判空 cell（如 gettid）——M4.2 写 0（宿主"无此
-                // 符号"，guest 走 syscall fallback 直通）；M4.3 起 dlsym 真地址。
-                // 非 weak 的 extern static（environ 等）仍归 os:: M4.3。
+                // extern static = 真符号（os:: 直通）：
+                // - weak（gettid 等 fn 符号判空模式）：判空 cell 写 0（缺席）——weak
+                //   **fn** 符号即便存在也不能给真地址（guest 拿去调用 = 跳 native 代码，
+                //   条目反查失败；M4.4 thunk 前统一走 fallback 路径）
+                // - 非 weak（environ 等数据符号）：alloc 基址 = dlsym 真地址
                 if self.tcx.is_foreign_item(def_id) {
+                    let name = self.tcx.item_name(def_id);
                     // extern block 内 item 的 linkage 在 import_linkage 字段
                     let weak = self.tcx.codegen_fn_attrs(def_id).import_linkage
                         == Some(rustc_hir::attrs::Linkage::ExternalWeak);
@@ -104,10 +124,15 @@ impl<'tcx> Linker<'tcx> {
                         self.alloc_addrs.insert(id, cell);
                         return Ok(cell);
                     }
-                    return Err(format!(
-                        "extern static `{}`（真符号地址，os:: M4.3）",
-                        self.tcx.item_name(def_id)
-                    ));
+                    let cname = std::ffi::CString::new(name.as_str())
+                        .map_err(|_| "符号名含 NUL".to_string())?;
+                    let p =
+                        unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) } as u64;
+                    if p == 0 {
+                        return Err(format!("extern static `{name}` dlsym 未命中"));
+                    }
+                    self.alloc_addrs.insert(id, p);
+                    return Ok(p);
                 }
                 // static 的字节 = 初始化器求值产物；可写（static mut/内部可变性）
                 let alloc = self
@@ -196,26 +221,72 @@ impl<'tcx> Linker<'tcx> {
         }
         if self.tcx.is_foreign_item(inst.def_id()) {
             let link_name = Symbol::intern(self.tcx.symbol_name(inst).name);
-            // ①引擎原语
+            // ①引擎原语（alloc/unwind/stub/快路径直通）
             if let Some(&b) = self.builtins.get(&link_name) {
                 return Ok(Callee::Builtin(b));
             }
             // ②链接仿真：按符号名在已链接 crate 的导出定义里找（tier-0
             // find_exported_symbol 同构；panic_impl→rust_begin_unwind、__rdl_* 走此路）
             let target = self.exported_defs().get(&link_name).copied();
-            if let Some(target) = target {
+            if let Some((target, is_weak)) = target {
+                // native 链接器语义：weak 定义让位于动态库强符号（compiler-builtins
+                // 的 weak sqrt/memcmp vs libc/libm）。Rust 内部 ABI 符号（__rust/
+                // __rdl/rust_ 前缀）除外——宿主进程（librustc_driver）也导出它们，
+                // 直通会打穿引擎的堆/panic 模型。
+                let name = link_name.as_str();
+                let rust_internal = name.starts_with("__rust")
+                    || name.starts_with("__rdl")
+                    || name.starts_with("rust_");
+                if is_weak && !rust_internal {
+                    let cname = std::ffi::CString::new(name).unwrap();
+                    let strong =
+                        unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) };
+                    if !strong.is_null() {
+                        return self.freeze_foreign_sig(inst, name);
+                    }
+                }
                 return Ok(Callee::Func(self.func_id(target)));
             }
-            // ③未知 foreign：os:: 注册表 M4.3
-            return Err(format!("foreign `{link_name}`（os:: 直通/内建路由，M4.3）"));
+            // ③os:: 直通（P7）：denylist 拒 → 其余 dlsym+libffi 按冻结签名直调
+            let name = link_name.as_str();
+            if DENY_EXACT.contains(&name) || DENY_PREFIX.iter().any(|p| name.starts_with(p)) {
+                return Err(format!("foreign `{name}`（denylist：线程 M4.4 / 进程模型不直通）"));
+            }
+            if name.starts_with("llvm.") {
+                return Err(format!("foreign `{name}`（LLVM 内部符号，按需内建）"));
+            }
+            return self.freeze_foreign_sig(inst, name);
         }
         // 普通函数：worklist 闭包扩集（跨 crate 非泛型函数不在 collector 种子集）
         Ok(Callee::Func(self.func_id(inst)))
     }
 
+    /// os:: 直通签名冻结：foreign fn sig → FfiKind 列表（tier-0 ty_to_ffitype 同构）。
+    fn freeze_foreign_sig(
+        &mut self,
+        inst: Instance<'tcx>,
+        name: &str,
+    ) -> Result<Callee, String> {
+        let sig = self
+            .tcx
+            .fn_sig(inst.def_id())
+            .instantiate(self.tcx, inst.args)
+            .skip_binder();
+        let env = TypingEnv::fully_monomorphized();
+        let mut args = Vec::with_capacity(sig.inputs().len());
+        for &t in sig.inputs() {
+            args.push(ffi_kind_of(self.tcx, env, t).map_err(|e| {
+                format!("foreign `{name}` 参数 {t}: {e}（libffi 直通仅标量/指针）")
+            })?);
+        }
+        let ret = ffi_kind_of(self.tcx, env, sig.output())
+            .map_err(|e| format!("foreign `{name}` 返回 {}: {e}", sig.output()))?;
+        Ok(Callee::Foreign { sym: name.into(), args, ret, variadic: sig.c_variadic() })
+    }
+
     /// 导出符号表（②），惰性一次构建：遍历"最终二进制会链接到"的全部非泛型导出 def
     /// （tier-0 `for_each_linked_def` 同构），符号名 → mono instance，strong 覆盖 weak。
-    fn exported_defs(&mut self) -> &FxHashMap<Symbol, Instance<'tcx>> {
+    fn exported_defs(&mut self) -> &FxHashMap<Symbol, (Instance<'tcx>, bool)> {
         let tcx = self.tcx;
         self.exports.get_or_insert_with(|| {
             use rustc_hir::def_id::LOCAL_CRATE;
@@ -277,9 +348,40 @@ impl<'tcx> Linker<'tcx> {
                     }
                 }
             }
-            map.into_iter().map(|(k, (inst, _))| (k, inst)).collect()
+            map
         })
     }
+}
+
+/// 类型 → libffi 直通类别（标量与指针；ZST=Void 仅返回位；聚合不支持）。
+pub(crate) fn ffi_kind_of<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    env: TypingEnv<'tcx>,
+    ty: rustc_middle::ty::Ty<'tcx>,
+) -> Result<ir::FfiKind, String> {
+    use rustc_abi::{BackendRepr, Float, Integer, Primitive};
+    let layout =
+        tcx.layout_of(env.as_query_input(ty)).map_err(|e| format!("layout 失败: {e}"))?;
+    if layout.is_zst() {
+        return Ok(ir::FfiKind::Void);
+    }
+    if let BackendRepr::Scalar(s) = layout.backend_repr {
+        return Ok(match s.primitive() {
+            Primitive::Int(Integer::I8, true) => ir::FfiKind::I8,
+            Primitive::Int(Integer::I16, true) => ir::FfiKind::I16,
+            Primitive::Int(Integer::I32, true) => ir::FfiKind::I32,
+            Primitive::Int(Integer::I64, true) => ir::FfiKind::I64,
+            Primitive::Int(Integer::I8, false) => ir::FfiKind::U8,
+            Primitive::Int(Integer::I16, false) => ir::FfiKind::U16,
+            Primitive::Int(Integer::I32, false) => ir::FfiKind::U32,
+            Primitive::Int(Integer::I64, false) => ir::FfiKind::U64,
+            Primitive::Float(Float::F32) => ir::FfiKind::F32,
+            Primitive::Float(Float::F64) => ir::FfiKind::F64,
+            Primitive::Pointer(_) => ir::FfiKind::Ptr,
+            other => return Err(format!("标量 {other:?} 不支持")),
+        });
+    }
+    Err("非标量（按值聚合）".into())
 }
 
 /// ①引擎原语表：codegen 会为 allocator shim 生成的符号清单（tier-0/Miri 同款来源，
@@ -311,17 +413,35 @@ fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin> {
     out.insert(Symbol::intern(&sentinel), ir::Builtin::NoAllocShim);
     // unwind 原语（M4.2）：panic_unwind 照常解释，引擎在平台 unwinder 符号层接管
     out.insert(Symbol::intern("_Unwind_RaiseException"), ir::Builtin::UnwindRaise);
-    // os:: 最小直通（panic 链需要；M4.3 换正式注册表）
+    // 快路径直通（panic 链高频；其余 foreign 走通用 dlsym+libffi 道）
     out.insert(Symbol::intern("getenv"), ir::Builtin::HostGetenv);
     out.insert(Symbol::intern("write"), ir::Builtin::HostWrite);
     out.insert(Symbol::intern("strlen"), ir::Builtin::HostStrlen);
     out.insert(Symbol::intern("abort"), ir::Builtin::HostAbort);
     out.insert(Symbol::intern("syscall"), ir::Builtin::HostSyscall);
+    // stub：假成功（回调装载类挂 M4.4 thunk——guest fn ptr 是条目地址，内核/libc
+    // 直跳会崩；单线程期不装 handler 可观测等价）
+    for s in [
+        "sigaction",
+        "sigaltstack",
+        "signal",
+        "atexit",
+        "__cxa_atexit",
+        "dl_iterate_phdr",
+        "_Unwind_Backtrace",
+        "_Unwind_GetIP",
+    ] {
+        out.insert(Symbol::intern(s), ir::Builtin::StubZero);
+    }
+    for s in ["_Unwind_DeleteException", "llvm.x86.sse2.pause"] {
+        out.insert(Symbol::intern(s), ir::Builtin::StubNop);
+    }
     out
 }
 
-/// 整程序降低：种子收集 → worklist 闭包降低 → exports 表。
-pub fn lower_program(tcx: TyCtxt<'_>) -> ir::Module {
+/// 整程序降低：种子收集 → worklist 闭包降低 → exports 表 + main 启动计划。
+/// `argv` = guest 进程实参（argv[0]=脚本路径；布进冻结区的 C 串表）。
+pub fn lower_program(tcx: TyCtxt<'_>, argv: &[String]) -> ir::Module {
     let typing_env = TypingEnv::fully_monomorphized();
     let mut linker = Linker::new(tcx);
 
@@ -329,6 +449,53 @@ pub fn lower_program(tcx: TyCtxt<'_>) -> ir::Module {
     for inst in collect::collect(tcx) {
         linker.func_id(inst);
     }
+
+    // main 启动计划（cg_ssa create_entry_fn 同构）：
+    // lang_start::<main_ret>(main fn-ptr, argc, argv, sigpipe) -> isize
+    let entry = tcx.entry_fn(()).map(|(main_def, entry_ty)| {
+        let rustc_session::config::EntryFnType::Main { sigpipe } = entry_ty;
+        let main_inst = Instance::mono(tcx, main_def);
+        let main_addr = linker.fn_entry_addr(main_inst);
+        let main_ret = tcx
+            .fn_sig(main_def)
+            .no_bound_vars()
+            .expect("main 无晚绑定区域")
+            .output()
+            .no_bound_vars()
+            .expect("main 返回无晚绑定");
+        let start_def = tcx.require_lang_item(rustc_hir::LangItem::Start, rustc_span::DUMMY_SP);
+        let start_inst = Instance::expect_resolve(
+            tcx,
+            typing_env,
+            start_def,
+            tcx.mk_args(&[main_ret.into()]),
+            rustc_span::DUMMY_SP,
+        );
+        let lang_start = linker.func_id(start_inst);
+        // argv C 串表布进冻结区（tier-0 setup_process_memory 同构）
+        let mut ptrs: Vec<u64> = Vec::with_capacity(argv.len());
+        for a in argv {
+            let bytes = a.as_bytes();
+            let p = linker.frozen.alloc(bytes.len() as u64 + 1, 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, bytes.len());
+                *((p + bytes.len() as u64) as *mut u8) = 0;
+            }
+            ptrs.push(p);
+        }
+        let table = linker.frozen.alloc((ptrs.len() as u64 + 1) * 8, 8);
+        for (i, &p) in ptrs.iter().enumerate() {
+            unsafe { *((table + i as u64 * 8) as *mut u64) = p };
+        }
+        // 尾 NULL 由清零保证
+        ir::EntryPlan {
+            lang_start,
+            main_addr,
+            argc: argv.len() as u64,
+            argv_ptr: table,
+            sigpipe,
+        }
+    });
 
     let mut module = ir::Module::default();
     let mut funcs: Vec<Option<ir::FuncBody>> = Vec::new();
@@ -351,8 +518,19 @@ pub fn lower_program(tcx: TyCtxt<'_>) -> ir::Module {
     {
         module.exports.insert("@entry".into(), id);
     }
+    // `-l` 链接指令 → dlopen 候选路径（tier-0 ensure_libs_loaded 同构）
+    let sess = tcx.sess;
+    for lib in &sess.opts.libs {
+        let name = lib.name.as_str();
+        for d in sess.opts.search_paths.iter().map(|sp| &sp.dir) {
+            module.native_libs.push(d.join(format!("lib{name}.so")).display().to_string().into());
+        }
+        module.native_libs.push(format!("lib{name}.so").into());
+        module.native_libs.push(format!("lib{name}.so.1").into());
+    }
     // 冻结区与 fn 条目反查表移交执行相
     module.frozen = Some(linker.frozen);
     module.fn_addrs = linker.fn_addrs.into_iter().collect();
+    module.entry = entry;
     module
 }

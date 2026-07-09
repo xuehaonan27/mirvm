@@ -72,8 +72,8 @@ pub enum PlaceBase {
 pub enum PlaceStep {
     /// 当前地址处读出指针（W64），地址切换为它
     Deref,
-    /// 常量字节偏移
-    Offset(u32),
+    /// 常量字节偏移（可负——slice 尾投影 `len-k` 折出负项）
+    Offset(i32),
     /// 动态下标：地址 += 帧内 idx 槽值 × stride
     IndexScaled { idx: Slot, stride: u64 },
 }
@@ -315,6 +315,16 @@ pub enum Stmt {
     },
     /// SIMD 广播（simd_splat / _mm_set1）：val 复制到每个 lane
     SimdSplat { dst: PlaceExpr, val: Operand, lanes: u16, lane_bytes: u8 },
+    /// 128 位整数双目（宿主 u128 直算：读两半组 → 算 → 写两半）；
+    /// with_overflow 时 dst 是 (u128, bool) 布局（旗标写 dst+16）
+    Bin128 {
+        op: IntBinOp,
+        signed: bool,
+        a: PlaceExpr,
+        b: Bin128Rhs,
+        dst: PlaceExpr,
+        with_overflow: bool,
+    },
     /// 语句级 Trap 占位：执行到即诊断退出，但**块的终止子照常降低**——
     /// 保住 Call 边，使 --vm-stats 的可达分析准确（仪器盲点修复）。
     Trap(Box<str>),
@@ -362,6 +372,44 @@ pub enum Builtin {
     HostAbort,
     /// `syscall(nr, ...) -> long` 可变参直通（按实参个数分派）
     HostSyscall,
+    /// stub：返回 0、无副作用（sigaction/sigaltstack/atexit/dl_iterate_phdr/
+    /// _Unwind_Backtrace 等——真实现挂 M4.4 thunk 或永不需要）
+    StubZero,
+    /// stub：空操作无返回（_Unwind_DeleteException/llvm.x86.sse2.pause 等）
+    StubNop,
+}
+
+/// libffi 直通的参数/返回类别（lower 期从 fn sig layout 冻结；os:: P7 直通处置）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfiKind {
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
+    F32,
+    F64,
+    Ptr,
+    Void,
+}
+
+/// Bin128 的右操作数：128 位 place 或 ≤64 位标量（Shl/Shr 的移位量）。
+#[derive(Clone, Debug)]
+pub enum Bin128Rhs {
+    Wide(PlaceExpr),
+    Scalar(Operand),
+}
+
+/// 冻结的 foreign 签名。变参函数按**调用点实参**冻结尾参（fixed = 固定参数个数）。
+#[derive(Clone, Debug)]
+pub struct ForeignSig {
+    pub args: Vec<FfiKind>,
+    pub ret: FfiKind,
+    /// Some(n) = 变参函数，前 n 个是固定参数（libffi prep_cif_var）
+    pub fixed: Option<usize>,
 }
 
 /// 参数在 callee 帧内的落位（引擎调用约定 v2：实参展平为 `&[u64]` 槽序列）。
@@ -425,6 +473,16 @@ pub enum Terminator {
         target: Bb,
         unwind: UnwindAction,
     },
+    /// foreign 直通（os:: P7 处置①的通用道）：dlsym + libffi 按冻结签名直调——
+    /// 真实地址模型零编组（guest 指针即宿主指针）。
+    CallForeign {
+        sym: Box<str>,
+        sig: ForeignSig,
+        args: Vec<Operand>,
+        ret: RetDest,
+        target: Bb,
+        unwind: UnwindAction,
+    },
     /// 间接调用（fn-ptr / dyn 虚派发）：callee 求值 = fn 条目真地址（D4），
     /// 经 Module.fn_addrs 反查 FuncId。--vm-stats 可达分析无出边（已知盲点）。
     /// null_ok：dyn 虚 drop 的 vtable 槽 0 可为 null（无 Drop 的类型）= 空操作。
@@ -470,6 +528,19 @@ pub struct FuncBody {
     pub name: Box<str>,
 }
 
+/// main 启动计划（cg_ssa create_entry_fn 同构）：
+/// `lang_start(main fn-ptr, argc, argv, sigpipe) -> isize`（返回值 = 进程退出码）。
+#[derive(Debug, Clone, Copy)]
+pub struct EntryPlan {
+    pub lang_start: FuncId,
+    /// 用户 main 的 D4 条目真地址（lang_start 第一实参，经 CallIndirect 派发）
+    pub main_addr: u64,
+    pub argc: u64,
+    /// argv C 串指针表的真地址（冻结区）
+    pub argv_ptr: u64,
+    pub sigpipe: u8,
+}
+
 #[derive(Debug, Default)]
 pub struct Module {
     pub funcs: Vec<FuncBody>,
@@ -479,4 +550,8 @@ pub struct Module {
     pub frozen: Option<super::frozen::FrozenArena>,
     /// fn-ptr 条目真地址 → FuncId（D4 反查；间接调用派发 M4.1 第 5 步）
     pub fn_addrs: std::collections::HashMap<u64, FuncId>,
+    /// `-l` 链接指令的共享库候选路径（foreign 直通的 dlopen 清单，加载相收集）
+    pub native_libs: Vec<Box<str>>,
+    /// main 启动链（M4.3；--vm-call 模式下为 None）
+    pub entry: Option<EntryPlan>,
 }

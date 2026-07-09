@@ -97,7 +97,7 @@ fn eval_place_addr(ctx: *mut Ctx, base: usize, expr: &PlaceExpr) -> u64 {
     for step in &expr.steps {
         match step {
             PlaceStep::Deref => addr = mem_read(addr, Width::W64),
-            PlaceStep::Offset(o) => addr = addr.wrapping_add(*o as u64),
+            PlaceStep::Offset(o) => addr = addr.wrapping_add(*o as i64 as u64),
             PlaceStep::IndexScaled { idx, stride } => {
                 let i = slot_read(ctx, base, *idx);
                 addr = addr.wrapping_add(i.wrapping_mul(*stride));
@@ -670,6 +670,73 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                 mem_write(pd + i * lb, lw, v);
             }
         }
+        Stmt::Bin128 { op, signed, a, b, dst, with_overflow } => {
+            use super::ir::Bin128Rhs;
+            let pa = eval_place_addr(ctx, base, a);
+            let x = unsafe { (pa as *const u128).read_unaligned() };
+            let y = match b {
+                Bin128Rhs::Wide(pb) => {
+                    let pb = eval_place_addr(ctx, base, pb);
+                    unsafe { (pb as *const u128).read_unaligned() }
+                }
+                Bin128Rhs::Scalar(o) => eval_operand(ctx, base, o).0 as u128,
+            };
+            let pd = eval_place_addr(ctx, base, dst);
+            let (r, ovf): (u128, bool) = if *signed {
+                let (xs, ys) = (x as i128, y as i128);
+                let (v, o) = match op {
+                    IntBinOp::Add => xs.overflowing_add(ys),
+                    IntBinOp::Sub => xs.overflowing_sub(ys),
+                    IntBinOp::Mul => xs.overflowing_mul(ys),
+                    IntBinOp::Div => {
+                        if ys == 0 {
+                            engine_abort("guest 128 位整除以零");
+                        }
+                        (xs.wrapping_div(ys), false)
+                    }
+                    IntBinOp::Rem => {
+                        if ys == 0 {
+                            engine_abort("guest 128 位取余以零");
+                        }
+                        (xs.wrapping_rem(ys), false)
+                    }
+                    IntBinOp::BitAnd => (xs & ys, false),
+                    IntBinOp::BitOr => (xs | ys, false),
+                    IntBinOp::BitXor => (xs ^ ys, false),
+                    IntBinOp::Shl => (xs.wrapping_shl(y as u32), false),
+                    IntBinOp::Shr => (xs.wrapping_shr(y as u32), false),
+                };
+                (v as u128, o)
+            } else {
+                let (v, o) = match op {
+                    IntBinOp::Add => x.overflowing_add(y),
+                    IntBinOp::Sub => x.overflowing_sub(y),
+                    IntBinOp::Mul => x.overflowing_mul(y),
+                    IntBinOp::Div => {
+                        if y == 0 {
+                            engine_abort("guest 128 位整除以零");
+                        }
+                        (x / y, false)
+                    }
+                    IntBinOp::Rem => {
+                        if y == 0 {
+                            engine_abort("guest 128 位取余以零");
+                        }
+                        (x % y, false)
+                    }
+                    IntBinOp::BitAnd => (x & y, false),
+                    IntBinOp::BitOr => (x | y, false),
+                    IntBinOp::BitXor => (x ^ y, false),
+                    IntBinOp::Shl => (x.wrapping_shl(y as u32), false),
+                    IntBinOp::Shr => (x.wrapping_shr(y as u32), false),
+                };
+                (v, o)
+            };
+            unsafe { (pd as *mut u128).write_unaligned(r) };
+            if *with_overflow {
+                unsafe { *((pd + 16) as *mut u8) = ovf as u8 };
+            }
+        }
         Stmt::Trap(reason) => engine_abort(&format!("TRAP: {reason}")),
         Stmt::Nop => {}
     }
@@ -861,6 +928,28 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 }
                 blk = *target as usize;
             }
+            Terminator::CallForeign { sym, sig, args: aops, ret, target, unwind } => {
+                let av: Vec<u64> = aops.iter().map(|o| eval_operand(ctx, base, o).0).collect();
+                edge.set(cleanup_edge(unwind));
+                let libs: &[Box<str>] = &module.native_libs;
+                let r = {
+                    let ffi = unsafe { &mut (*ctx).ffi };
+                    super::ffi::call(ffi, libs, sym, sig, &av)
+                };
+                edge.set(None);
+                let Some(r) = r else {
+                    engine_abort(&format!(
+                        "foreign `{sym}` 符号不存在（dlsym 全域未命中；fn {}）",
+                        body.name
+                    ));
+                };
+                match ret {
+                    RetDest::Ignore => {}
+                    RetDest::Scalar(p) => place_write(ctx, base, p, r),
+                    other => engine_abort(&format!("foreign 返回形态 {other:?} 未支持")),
+                }
+                blk = *target as usize;
+            }
             Terminator::CallIndirect { callee, args: aops, ret, target, unwind, null_ok } => {
                 let (addr, _) = eval_operand(ctx, base, callee);
                 if *null_ok && addr == 0 {
@@ -918,6 +1007,9 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         eprintln!("mirvm[m4-engine]: guest abort()");
                         std::process::abort()
                     }
+                    // stub：假成功/空操作（sigaction 装载类挂 M4.4 thunk）
+                    Builtin::StubZero => 0,
+                    Builtin::StubNop => 0,
                     Builtin::HostSyscall => unsafe {
                         let n = a(0) as i64;
                         (match args.len() {
@@ -986,6 +1078,30 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 engine_abort(&format!("TRAP: {reason}（fn {}）", body.name))
             }
         }
+    }
+}
+
+/// main 启动链（M4.3）：`lang_start(main fn-ptr, argc, argv, sigpipe) -> isize`
+/// （cg_ssa create_entry_fn 同构——std 的 rt::lang_start 照常解释：sys::init/
+/// args 存放/panic hook/Termination 全走 guest 代码，忠实性）。返回进程退出码。
+pub fn run_main(shared: &Shared) -> i32 {
+    let Some(entry) = shared.module.entry else {
+        eprintln!("mirvm[m4-engine]: 无 main 入口（lib crate？）");
+        return 2;
+    };
+    let mut ctx = Ctx::new(shared);
+    let ctx_ptr = &mut ctx as *mut Ctx;
+    let args =
+        [entry.main_addr, entry.argc, entry.argv_ptr, entry.sigpipe as u64];
+    match panic::catch_unwind(AssertUnwindSafe(|| {
+        interp_frame(ctx_ptr, entry.lang_start, &args).0
+    })) {
+        Ok(code) => code as i32,
+        Err(e) => match e.downcast::<GuestPanic>() {
+            // lang_start 内部已 catch guest panic；穿到这 = panic 逃逸启动链（防御）
+            Ok(_) => 101,
+            Err(host) => panic::resume_unwind(host),
+        },
     }
 }
 

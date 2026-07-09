@@ -215,8 +215,12 @@ impl Callbacks for MirvmCallbacks {
             print!("{}", String::from_utf8_lossy(&buf));
         } else if self.engine == "vm" {
             // M4 新引擎：加载相（lower，tcx 关在此）→ 执行相（纯 Rust）
-            self.exit_code =
-                Some(run_vm_engine(tcx, self.vm_call.as_deref(), self.vm_stats));
+            self.exit_code = Some(run_vm_engine(
+                tcx,
+                self.vm_call.as_deref(),
+                self.vm_stats,
+                std::mem::take(&mut self.program_argv),
+            ));
         } else {
             let config = EvalConfig { argv: std::mem::take(&mut self.program_argv) };
             self.exit_code = Some(interp::eval::eval_main(tcx, def_id, config));
@@ -226,17 +230,23 @@ impl Callbacks for MirvmCallbacks {
     }
 }
 
-/// `--engine=vm` 分支。M4.0：需 `--vm-call 'name(args…)'` 直接调导出函数（gate 入口）；
-/// 跑 main（std 启动链）自 M4.3 起。`--vm-stats` = Trap 债务统计（各期开工前的调研仪器）。
-fn run_vm_engine(tcx: TyCtxt<'_>, vm_call: Option<&str>, vm_stats: bool) -> i32 {
-    let module = crate::lower::lower_program(tcx);
+/// `--engine=vm` 分支：缺省跑 main 启动链（M4.3）；`--vm-call 'name(args…)'` 直调
+/// 导出函数（gate 入口）；`--vm-stats` = Trap 债务统计（各期开工前的调研仪器）。
+fn run_vm_engine(
+    tcx: TyCtxt<'_>,
+    vm_call: Option<&str>,
+    vm_stats: bool,
+    program_argv: Vec<String>,
+) -> i32 {
+    let module = crate::lower::lower_program(tcx, &program_argv);
     if vm_stats {
         print!("{}", crate::vm::engine::stats::report(&module));
         return 0;
     }
+    let shared = crate::vm::engine::ctx::Shared { module };
     let Some(spec) = vm_call else {
-        eprintln!("mirvm: --engine=vm 现阶段（M4.0）需要 --vm-call 'name(a,b,…)'（main 启动链 M4.3 起）");
-        return 2;
+        // main 启动链：lang_start 照常解释，退出码 = Termination 产物
+        return crate::vm::engine::interp::run_main(&shared);
     };
     let (name, args) = match parse_vm_call(spec) {
         Ok(v) => v,
@@ -245,7 +255,6 @@ fn run_vm_engine(tcx: TyCtxt<'_>, vm_call: Option<&str>, vm_stats: bool) -> i32 
             return 2;
         }
     };
-    let shared = crate::vm::engine::ctx::Shared { module };
     match crate::vm::engine::interp::run_export(&shared, &name, &args) {
         Ok(r) => {
             println!("{r}");

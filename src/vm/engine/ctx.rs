@@ -3,6 +3,7 @@
 //! 状态三分（concurrency-arch §2）在真引擎的落地；raw-ptr ctx + 字段级瞬态借用
 //! 纪律沿用 spike2/3/4（M4.2 的 CleanupGuard、M4.4 的多线程都依赖此形状）。
 
+use super::ffi::FfiState;
 use super::frame::ByteRegion;
 use super::ir::Module;
 
@@ -17,10 +18,12 @@ pub struct Ctx {
     pub region: ByteRegion,
     /// 解释帧递归深度（guest 栈溢出防护，frame-abi §9——到界诊断退出）
     pub depth: u32,
+    /// foreign 直通状态（dlsym 缓存 + dlopen 句柄）
+    pub ffi: FfiState,
 }
 
 impl Ctx {
     pub fn new(shared: &Shared) -> Self {
-        Ctx { shared, region: ByteRegion::new(), depth: 0 }
+        Ctx { shared, region: ByteRegion::new(), depth: 0, ffi: FfiState::default() }
     }
 }
