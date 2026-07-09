@@ -251,6 +251,10 @@ pub enum Rvalue {
     MemCmp { a: Operand, b: Operand, n: Operand },
     /// 128 位整数比较（TypeId 判等等；操作数是 16 字节 place）→ bool
     Cmp128 { cc: IntCc, signed: bool, a: PlaceExpr, b: PlaceExpr },
+    /// 饱和算术（saturating_add/sub intrinsic）
+    IntSat { op: OvfOp, signed: bool, a: Operand, b: Operand },
+    /// SIMD 归约（simd_reduce_all/any：mask 向量全真/任真）→ bool
+    SimdReduce { all: bool, a: PlaceExpr, lanes: u16, lane_bytes: u8 },
 }
 
 #[derive(Clone, Debug)]
@@ -431,14 +435,6 @@ pub enum Terminator {
         target: Bb,
         unwind: UnwindAction,
         null_ok: bool,
-    },
-    /// M4.0：失败 = 引擎 abort 带诊断（M4.2 变真 panic + unwind）
-    Assert {
-        cond: Operand,
-        expected: bool,
-        msg: Box<str>,
-        target: Bb,
-        unwind: UnwindAction,
     },
     Return,
     Unreachable,

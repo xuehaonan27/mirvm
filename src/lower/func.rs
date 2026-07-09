@@ -1283,15 +1283,54 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 (vec![], Terminator::Goto(real_target.as_u32()))
             }
             TK::Assert { cond, expected, msg, target, unwind } => {
+                // cg_ssa codegen_assert_terminator 同构：条件分支 + 合成 panic 块
+                //（Call panic lang item，实参 + location 尾参——panic fn 全 track_caller）
                 let c = self.lower_operand_scalar(cond)?;
+                use rustc_hir::LangItem;
+                let mut pargs: Vec<Operand> = Vec::new();
+                let lang_item = match &**msg {
+                    mir::AssertKind::BoundsCheck { len, index } => {
+                        pargs.push(self.lower_operand_scalar(index)?);
+                        pargs.push(self.lower_operand_scalar(len)?);
+                        LangItem::PanicBoundsCheck
+                    }
+                    mir::AssertKind::MisalignedPointerDereference { required, found } => {
+                        pargs.push(self.lower_operand_scalar(required)?);
+                        pargs.push(self.lower_operand_scalar(found)?);
+                        LangItem::PanicMisalignedPointerDereference
+                    }
+                    mir::AssertKind::InvalidEnumConstruction(_) => {
+                        return Err("InvalidEnumConstruction assert（u128 实参，M4.2+）".into());
+                    }
+                    other => other.panic_function(),
+                };
+                pargs.push(match self.caller_loc_off {
+                    Some(off) => Operand::Slot(Slot { off, width: Width::W64 }),
+                    None => self.caller_location_imm(term.source_info.span)?,
+                });
+                let def_id = self.tcx.require_lang_item(lang_item, term.source_info.span);
+                let callee = self.linker.func_id(Instance::mono(self.tcx, def_id));
+                // 合成：panic 块（发散 Call → Unreachable 落点）
+                let unreach = (self.mir_block_count + self.extra_blocks.len()) as Bb;
+                self.extra_blocks
+                    .push(ir::Block { stmts: vec![], term: Terminator::Unreachable });
+                let panic_blk = (self.mir_block_count + self.extra_blocks.len()) as Bb;
+                self.extra_blocks.push(ir::Block {
+                    stmts: vec![],
+                    term: Terminator::Call {
+                        callee,
+                        args: pargs,
+                        ret: RetDest::Ignore,
+                        target: unreach,
+                        unwind: self.lower_unwind(*unwind),
+                    },
+                });
                 (
                     vec![],
-                    Terminator::Assert {
-                        cond: c,
-                        expected: *expected,
-                        msg: assert_msg(msg).into_boxed_str(),
-                        target: target.as_u32(),
-                        unwind: self.lower_unwind(*unwind),
+                    Terminator::SwitchInt {
+                        discr: c,
+                        targets: vec![(*expected as u128, target.as_u32())],
+                        otherwise: panic_blk,
                     },
                 )
             }
@@ -1732,6 +1771,54 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 self.assign_lowered(&dst_p, dst_kind, src)?
             }
             "assume" => vec![Stmt::Nop],
+            "abort" => {
+                // core::intrinsics::abort：进程级中止（native=SIGILL trap，引擎=SIGABRT
+                // ——信号差异记 m4-log，差分若较信号级再对齐）
+                let tgt = (self.mir_block_count + self.extra_blocks.len()) as Bb;
+                self.extra_blocks
+                    .push(ir::Block { stmts: vec![], term: Terminator::Unreachable });
+                return Ok(Some((
+                    vec![],
+                    Terminator::CallBuiltin {
+                        builtin: ir::Builtin::HostAbort,
+                        args: vec![],
+                        ret: RetDest::Ignore,
+                        target: tgt,
+                        unwind: ir::UnwindAction::Continue,
+                    },
+                )));
+            }
+            "assert_inhabited" | "assert_zero_valid" | "assert_mem_uninitialized_valid" => {
+                // lower 期判定（collector 同构）：合法 → nop；违反 → 占位
+                //（native 展开为 panic_nounwind；此路径本就是防御性死路）
+                let req = rustc_middle::ty::layout::ValidityRequirement::from_intrinsic(name)
+                    .expect("validity intrinsic 名");
+                let t = inst.args.type_at(0);
+                let ok = self
+                    .tcx
+                    .check_validity_requirement((req, self.typing_env.as_query_input(t)))
+                    .map_err(|e| format!("validity 判定失败: {e}"))?;
+                if ok {
+                    vec![Stmt::Nop]
+                } else {
+                    vec![Stmt::Trap(
+                        format!("{name} 违反（ty={t}——native panic_nounwind）").into_boxed_str(),
+                    )]
+                }
+            }
+            "saturating_add" | "saturating_sub" => {
+                let a_ty = self.op_ty(&args[0].node)?;
+                let (dst_p, w) = self.place_scalar(destination)?;
+                vec![Stmt::Assign {
+                    dst: dst_p.scalar_place(w),
+                    rv: Rvalue::IntSat {
+                        op: if name.as_str() == "saturating_add" { OvfOp::Add } else { OvfOp::Sub },
+                        signed: frame::ty_signed(a_ty),
+                        a: self.lower_operand_scalar(&args[0].node)?,
+                        b: self.lower_operand_scalar(&args[1].node)?,
+                    },
+                }]
+            }
             "caller_location" => {
                 // Location::caller()：本函数 track_caller → 读隐藏尾实参槽；
                 // 否则按 intrinsic 调用点合成（罕见——caller 链通常 track 到底）
@@ -1910,6 +1997,71 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     rv: Rvalue::SimdBitmask { a, lanes, lane_bytes },
                 }])
             }
+            "simd_reduce_all" | "simd_reduce_any" => {
+                let a = vplace(self, &args[0].node)?;
+                let (dst_p, w) = self.place_scalar(destination)?;
+                Ok(vec![Stmt::Assign {
+                    dst: dst_p.scalar_place(w),
+                    rv: Rvalue::SimdReduce {
+                        all: name == "simd_reduce_all",
+                        a,
+                        lanes,
+                        lane_bytes,
+                    },
+                }])
+            }
+            "simd_shuffle" => {
+                // (a, b, const idx 数组) -> 重排向量：索引 lower 期已知 → 展开为逐 lane 拷
+                let mir::Operand::Constant(c) = &args[2].node else {
+                    return Err("simd_shuffle 索引非常量".into());
+                };
+                let val = c
+                    .const_
+                    .eval(self.tcx, self.typing_env, c.span)
+                    .map_err(|e| format!("shuffle 索引求值失败: {e:?}"))?;
+                let mir::ConstValue::Indirect { alloc_id, offset } = val else {
+                    return Err(format!("shuffle 索引形态 {val:?}（M4.2+）"));
+                };
+                let alloc = self.tcx.global_alloc(alloc_id).unwrap_memory();
+                let ai = alloc.inner();
+                // 索引元素是 u32（stdarch simd_shuffle! 宏产出 [u32; N]）
+                let n_out = (ai.size().bytes() - offset.bytes()) / 4;
+                let bytes = ai.inspect_with_uninit_and_ptr_outside_interpreter(
+                    offset.bytes() as usize..ai.size().bytes() as usize,
+                );
+                let pa = vplace(self, &args[0].node)?;
+                let pb = vplace(self, &args[1].node)?;
+                let dst = self.resolve_place(destination)?;
+                let lw = Width::from_bytes(lane_bytes as u64).ok_or("lane 宽度")?;
+                let mut stmts = Vec::new();
+                for i in 0..n_out as usize {
+                    let idx = u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
+                    let (src, si) = if (idx as u64) < count {
+                        (&pa, idx as u64)
+                    } else {
+                        (&pb, idx as u64 - count)
+                    };
+                    let src_off = (si * lane_bytes as u64) as u32;
+                    let mut sexpr = src.clone();
+                    let src_op = {
+                        let mut steps = sexpr.steps.to_vec();
+                        if src_off != 0 {
+                            if let Some(PlaceStep::Offset(o)) = steps.last_mut() {
+                                *o += src_off;
+                            } else {
+                                steps.push(PlaceStep::Offset(src_off));
+                            }
+                        }
+                        sexpr.steps = steps.into_boxed_slice();
+                        Operand::Mem { expr: sexpr, width: lw }
+                    };
+                    stmts.push(Stmt::Assign {
+                        dst: dst.half_place(i as u32 * lane_bytes as u32, lw),
+                        rv: Rvalue::Use(src_op),
+                    });
+                }
+                Ok(stmts)
+            }
             "simd_splat" => {
                 // splat(val: E) -> T：几何从返回向量取（T 是第一个泛型参？splat 的
                 // 泛型序是 <T(向量), E>？——此处从 destination 的 layout 直接冻结，最稳）
@@ -1991,18 +2143,6 @@ impl<'tcx> rustc_middle::ty::layout::HasTyCtxt<'tcx> for LayoutCxAt<'tcx> {
 impl<'tcx> rustc_middle::ty::layout::HasTypingEnv<'tcx> for LayoutCxAt<'tcx> {
     fn typing_env(&self) -> TypingEnv<'tcx> {
         self.1
-    }
-}
-
-fn assert_msg(msg: &mir::AssertMessage<'_>) -> String {
-    use mir::AssertKind::*;
-    match msg {
-        Overflow(op, ..) => format!("算术溢出（{op:?}）"),
-        OverflowNeg(_) => "取负溢出".into(),
-        DivisionByZero(_) => "除以零".into(),
-        RemainderByZero(_) => "取余以零".into(),
-        BoundsCheck { .. } => "下标越界".into(),
-        other => format!("{other:?}"),
     }
 }
 

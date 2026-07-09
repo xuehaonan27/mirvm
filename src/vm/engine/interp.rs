@@ -450,6 +450,44 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
             let sb = unsafe { std::slice::from_raw_parts(pb as *const u8, len as usize) };
             (sa.cmp(sb) as i8 as i32) as u32 as u64
         }
+        Rvalue::IntSat { op, signed, a, b } => {
+            let (av, w) = eval_operand(ctx, base, a);
+            let (bv, _) = eval_operand(ctx, base, b);
+            let (v, ovf) = int_ovf(*op, *signed, av, bv, w);
+            if !ovf {
+                v
+            } else if *signed {
+                // 方向：加正溢出→MAX，其余按符号推
+                let (x, y) = (sext(av, w), sext(bv, w));
+                let toward_max = match op {
+                    OvfOp::Add => y > 0,
+                    OvfOp::Sub => y < 0,
+                    OvfOp::Mul => (x > 0) == (y > 0),
+                };
+                let m = w.mask();
+                if toward_max { m >> 1 } else { (m >> 1) + 1 & m }
+            } else {
+                match op {
+                    OvfOp::Sub => 0,
+                    _ => w.mask(),
+                }
+            }
+        }
+        Rvalue::SimdReduce { all, a, lanes, lane_bytes } => {
+            let pa = eval_place_addr(ctx, base, a);
+            let lb = *lane_bytes as u64;
+            let lw = Width::from_bytes(lb).expect("lane 宽度");
+            let mut acc = *all;
+            for i in 0..*lanes as u64 {
+                let truthy = mem_read(pa + i * lb, lw) != 0;
+                if *all {
+                    acc &= truthy;
+                } else {
+                    acc |= truthy;
+                }
+            }
+            acc as u64
+        }
         Rvalue::Cmp128 { cc, signed, a, b } => {
             let pa = eval_place_addr(ctx, base, a);
             let pb = eval_place_addr(ctx, base, b);
@@ -915,14 +953,6 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                     RetDest::Scalar(p) => place_write(ctx, base, p, r),
                     RetDest::Ignore => {}
                     other => engine_abort(&format!("引擎原语返回形态 {other:?} 未支持")),
-                }
-                blk = *target as usize;
-            }
-            Terminator::Assert { cond, expected, msg, target, .. } => {
-                let (c, _) = eval_operand(ctx, base, cond);
-                if (c != 0) != *expected {
-                    // M4.0：引擎诊断退出；M4.2 起变 guest panic + unwind
-                    engine_abort(&format!("guest assert 失败: {msg}（fn {}）", body.name));
                 }
                 blk = *target as usize;
             }
