@@ -3,16 +3,35 @@
 //! 结构与 spike3 同形（Call 宿主递归=模型 A、Return 拷回、restore、raw-ptr ctx +
 //! 字段级瞬态借用）。M4.1：place 求值（地址表达式 → 真地址裸读写，帧/堆/statics 统一）
 //! + 调用约定 v2（标量 1 槽 / pair 2 槽 / 大聚合 indirect+sret）。
-//! unwind 边本期只记录（Assert 失败/除零/Trap = 引擎诊断退出；M4.2 接 CleanupGuard）。
+//!
+//! M4.2 unwind（spike3 协议平移）：**guest 异常 = 宿主 panic 载 `GuestPanic`**（同一平台
+//! unwinder + personality，候选 A）。解释帧的 landing pad = `FrameGuard`（动态 LSDA：
+//! `unwind_edge` 在每个可 unwind 终止子前设置）——unwind 穿帧时其 Drop 跑 cleanup 链
+//! （`Resume` 结束=返回让 unwind 续传，单条 native 栈零协调）+ 恢复操作数区。
+//! catch 点 downcast 区分 GuestPanic / 宿主 panic（VM bug 原样续传，绝不吞）。
 
+use std::cell::Cell;
+use std::panic::{self, AssertUnwindSafe};
 use std::process::exit;
 
 use super::ctx::{Ctx, Shared};
 use super::frame::ByteRegion;
 use super::ir::{
-    Block, FuncBody, IntBinOp, IntCc, Module, Operand, OvfOp, ParamAbi, PlaceBase, PlaceExpr,
-    PlaceStep, RetAbi, RetDest, Rvalue, ScalarPlace, Slot, Stmt, Terminator, Width,
+    Bb, Block, FuncBody, IntBinOp, IntCc, Module, Operand, OvfOp, ParamAbi, PlaceBase, PlaceExpr,
+    PlaceStep, RetAbi, RetDest, Rvalue, ScalarPlace, Slot, Stmt, Terminator, UnwindAction, Width,
 };
+
+/// guest panic 的宿主载体（spike3 协议）：exception = guest 侧 `_Unwind_Exception` 指针
+/// （panic_unwind 的 Exception 结构在 guest 堆闭环——Box::into_raw/from_raw 全在 guest
+/// 解释执行，引擎只运载指针）。
+pub struct GuestPanic {
+    pub exception: u64,
+}
+
+/// 发起 guest panic（`resume_unwind` 不触发宿主 panic hook → 无噪声）。
+pub(crate) fn raise_guest(exception: u64) -> ! {
+    panic::resume_unwind(Box::new(GuestPanic { exception }))
+}
 
 #[inline]
 fn region_reserve(ctx: *mut Ctx, size: u32, align: u32) -> usize {
@@ -431,6 +450,23 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
             let sb = unsafe { std::slice::from_raw_parts(pb as *const u8, len as usize) };
             (sa.cmp(sb) as i8 as i32) as u32 as u64
         }
+        Rvalue::Cmp128 { cc, signed, a, b } => {
+            let pa = eval_place_addr(ctx, base, a);
+            let pb = eval_place_addr(ctx, base, b);
+            let (x, y) = unsafe {
+                ((pa as *const u128).read_unaligned(), (pb as *const u128).read_unaligned())
+            };
+            let ord = if *signed { (x as i128).cmp(&(y as i128)) } else { x.cmp(&y) };
+            let t = match cc {
+                IntCc::Eq => ord.is_eq(),
+                IntCc::Ne => ord.is_ne(),
+                IntCc::Lt => ord.is_lt(),
+                IntCc::Le => ord.is_le(),
+                IntCc::Gt => ord.is_gt(),
+                IntCc::Ge => ord.is_ge(),
+            };
+            t as u64
+        }
     }
 }
 
@@ -601,11 +637,97 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
     }
 }
 
+/// 解释帧的 landing pad（spike3 CleanupGuard 的 M4 版）：unwind 穿帧时 Drop 在展开中
+/// 执行——跑 cleanup 链（若 unwind_edge 有值）→ 恢复操作数区。正常 Return 也经 guard
+/// drop 统一恢复（此时 edge 必为 None）。
+struct FrameGuard {
+    ctx: *mut Ctx,
+    func: u32,
+    base: usize,
+    /// 动态 LSDA：当前可 unwind 终止子的 cleanup 边（Call 前设置、返回后清除）
+    unwind_edge: Cell<Option<Bb>>,
+}
+
+impl Drop for FrameGuard {
+    fn drop(&mut self) {
+        if let Some(blk) = self.unwind_edge.get() {
+            run_cleanup(self.ctx, self.func, self.base, blk);
+        }
+        region_restore(self.ctx, self.base);
+        unsafe { (*self.ctx).depth -= 1 };
+    }
+}
+
+/// 块序列执行的出口。
+enum Exit {
+    Ret(u64, u64),
+    /// cleanup 链尾（Resume）：返回 guard.drop，宿主 unwind 自动继续
+    Resume,
+}
+
+/// 按 D4 fn 条目真地址派发（CallIndirect / catch_unwind 的 try/catch fn 共用）。
+fn call_fn_addr(ctx: *mut Ctx, addr: u64, args: &[u64]) -> (u64, u64) {
+    let module: &Module = unsafe { &(*(*ctx).shared).module };
+    let Some(&fid) = module.fn_addrs.get(&addr) else {
+        engine_abort(&format!("间接调用目标 {addr:#x} 不是已知 fn 条目"));
+    };
+    interp_frame(ctx, fid, args)
+}
+
+/// unwind 边 → cleanup 目标块。
+#[inline]
+fn cleanup_edge(u: &UnwindAction) -> Option<Bb> {
+    match u {
+        UnwindAction::Cleanup(b) => Some(*b),
+        _ => None,
+    }
+}
+
+/// Terminate 边界的调用包装：panic 到此即 abort（double panic / extern "C" ABI 边界）。
+#[inline]
+fn call_guarding_terminate<R>(unwind: &UnwindAction, f: impl FnOnce() -> R) -> R {
+    if let UnwindAction::Terminate = unwind {
+        match panic::catch_unwind(AssertUnwindSafe(f)) {
+            Ok(r) => r,
+            Err(_) => {
+                eprintln!("mirvm[m4-engine]: unwind 抵达 Terminate 边界（double panic/ABI）——abort");
+                std::process::abort()
+            }
+        }
+    } else {
+        f()
+    }
+}
+
+/// guard.drop 里的 cleanup 链执行（landing pad 的宿主 Rust 写法）：从 cleanup 块跑到
+/// `Resume`。链中 Call 可再入混合执行；链中再 panic：Terminate 边 abort，Continue 边
+/// 穿出 Drop = 宿主 double-panic abort（与 native 一致）。
+fn run_cleanup(ctx: *mut Ctx, func: u32, base: usize, entry: Bb) {
+    // cleanup 内无嵌套 cleanup（MIR 不变量）——独立哑 edge
+    let edge = Cell::new(None);
+    match run_blocks(ctx, func, base, &edge, entry) {
+        Exit::Resume => {} // 返回 guard，unwind 自动继续
+        Exit::Ret(..) => engine_abort("cleanup 链以 Return 结束（MIR 不变量破坏）"),
+    }
+}
+
 /// 模型 A：guest 调用 = 宿主递归（spike1/3 验证的形状）。
 /// 调用约定 v2：实参展平 `&[u64]`（pair 占 2 槽、indirect 传地址），返回 (lo, hi)。
+/// guest 递归深度上限（≈ native 栈界近似，frame-abi §9）。每解释帧背 ~1KB 宿主帧，
+/// rustc 驱动线程栈 ~16MB → 8000 帧安全余量内（M5 编译帧更浅后可调大）。
+const MAX_DEPTH: u32 = 8_000;
+
 fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
     let module: &Module = unsafe { &(*(*ctx).shared).module };
     let body: &FuncBody = &module.funcs[func as usize];
+
+    let depth = unsafe {
+        (*ctx).depth += 1;
+        (*ctx).depth
+    };
+    if depth > MAX_DEPTH {
+        engine_abort(&format!("guest 栈溢出（解释帧深度 > {MAX_DEPTH}；fn {}）", body.name));
+    }
 
     let base = region_reserve(ctx, body.frame_size, body.frame_align);
     // prologue：按 ParamAbi 消费实参槽
@@ -640,8 +762,32 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
             }
         }
     }
+    // #[track_caller]：&Location 隐藏尾实参
+    if let Some(off) = body.caller_loc_off {
+        let Some(&loc) = args.get(ai) else {
+            engine_abort(&format!(
+                "ABI 不匹配：track_caller fn `{}` 期望 location 尾实参（收到 {} 槽）",
+                body.name,
+                args.len()
+            ));
+        };
+        slot_write(ctx, base, Slot { off, width: Width::W64 }, loc);
+    }
 
-    let mut blk = 0usize;
+    // 帧守卫：unwind 穿帧 = 跑 cleanup + 恢复区；正常返回 = 恢复区（edge 已空）
+    let guard = FrameGuard { ctx, func, base, unwind_edge: Cell::new(None) };
+    match run_blocks(ctx, func, base, &guard.unwind_edge, 0) {
+        Exit::Ret(lo, hi) => (lo, hi), // guard drop → region 恢复
+        Exit::Resume => engine_abort(&format!("Resume 出现在正常执行路径（fn {}）", body.name)),
+    }
+}
+
+/// 块序列解释循环（主执行与 cleanup 链共用；spike3 的 unwind 化演进）。
+fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, entry: Bb) -> Exit {
+    let module: &Module = unsafe { &(*(*ctx).shared).module };
+    let body: &FuncBody = &module.funcs[func as usize];
+
+    let mut blk = entry as usize;
     loop {
         let block: &Block = &body.blocks[blk];
         for stmt in &block.stmts {
@@ -657,13 +803,16 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
                     .map(|(_, b)| *b)
                     .unwrap_or(*otherwise) as usize;
             }
-            Terminator::Call { callee, args: aops, ret, target, .. } => {
+            Terminator::Call { callee, args: aops, ret, target, unwind } => {
                 let mut av: Vec<u64> = Vec::with_capacity(aops.len() + 1);
                 if let RetDest::Indirect(dst) = ret {
                     av.push(eval_place_addr(ctx, base, dst));
                 }
                 av.extend(aops.iter().map(|o| eval_operand(ctx, base, o).0));
-                let (lo, hi) = interp_frame(ctx, *callee, &av); // ← 宿主递归 = guest 帧上 native 栈
+                edge.set(cleanup_edge(unwind)); // callee 若 panic，本帧从这条边清理
+                let (lo, hi) =
+                    call_guarding_terminate(unwind, || interp_frame(ctx, *callee, &av)); // ← 宿主递归
+                edge.set(None);
                 match ret {
                     RetDest::Ignore | RetDest::Indirect(_) => {}
                     RetDest::Scalar(p) => place_write(ctx, base, p, lo),
@@ -674,20 +823,21 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
                 }
                 blk = *target as usize;
             }
-            Terminator::CallIndirect { callee, args: aops, ret, target, .. } => {
+            Terminator::CallIndirect { callee, args: aops, ret, target, unwind, null_ok } => {
                 let (addr, _) = eval_operand(ctx, base, callee);
-                let Some(&fid) = module.fn_addrs.get(&addr) else {
-                    engine_abort(&format!(
-                        "间接调用目标 {addr:#x} 不是已知 fn 条目（fn {}）",
-                        body.name
-                    ));
-                };
+                if *null_ok && addr == 0 {
+                    // dyn 虚 drop 空槽：无 Drop 的类型 = 空操作
+                    blk = *target as usize;
+                    continue;
+                }
                 let mut av: Vec<u64> = Vec::with_capacity(aops.len() + 1);
                 if let RetDest::Indirect(dst) = ret {
                     av.push(eval_place_addr(ctx, base, dst));
                 }
                 av.extend(aops.iter().map(|o| eval_operand(ctx, base, o).0));
-                let (lo, hi) = interp_frame(ctx, fid, &av);
+                edge.set(cleanup_edge(unwind));
+                let (lo, hi) = call_guarding_terminate(unwind, || call_fn_addr(ctx, addr, &av));
+                edge.set(None);
                 match ret {
                     RetDest::Ignore | RetDest::Indirect(_) => {}
                     RetDest::Scalar(p) => place_write(ctx, base, p, lo),
@@ -698,9 +848,10 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
                 }
                 blk = *target as usize;
             }
-            Terminator::CallBuiltin { builtin, args, ret, target, .. } => {
+            Terminator::CallBuiltin { builtin, args, ret, target, unwind } => {
                 use super::ir::Builtin;
                 let a = |i: usize| eval_operand(ctx, base, &args[i]).0;
+                edge.set(cleanup_edge(unwind)); // RaiseException 经此发起 unwind
                 let r = match builtin {
                     // 分配前哨兵：空操作
                     Builtin::NoAllocShim => 0,
@@ -712,7 +863,54 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
                         0
                     }
                     Builtin::RustRealloc => super::heap::realloc(a(0), a(1), a(2), a(3)),
+                    // unwind 原语（spike3 的 raise）：宿主 unwinder 载 guest exception 指针
+                    Builtin::UnwindRaise => raise_guest(a(0)),
+                    // os:: 最小直通（真实地址零编组；M4.3 正式注册表）
+                    Builtin::HostGetenv => unsafe {
+                        libc::getenv(a(0) as *const libc::c_char) as u64
+                    },
+                    Builtin::HostWrite => unsafe {
+                        libc::write(a(0) as i32, a(1) as *const libc::c_void, a(2) as usize)
+                            as u64
+                    },
+                    Builtin::HostStrlen => unsafe {
+                        libc::strlen(a(0) as *const libc::c_char) as u64
+                    },
+                    Builtin::HostAbort => {
+                        eprintln!("mirvm[m4-engine]: guest abort()");
+                        std::process::abort()
+                    }
+                    Builtin::HostSyscall => unsafe {
+                        let n = a(0) as i64;
+                        (match args.len() {
+                            1 => libc::syscall(n),
+                            2 => libc::syscall(n, a(1)),
+                            3 => libc::syscall(n, a(1), a(2)),
+                            4 => libc::syscall(n, a(1), a(2), a(3)),
+                            5 => libc::syscall(n, a(1), a(2), a(3), a(4)),
+                            6 => libc::syscall(n, a(1), a(2), a(3), a(4), a(5)),
+                            _ => libc::syscall(n, a(1), a(2), a(3), a(4), a(5), a(6)),
+                        }) as u64
+                    },
+                    // rust_try：宿主 catch；guest panic → 调 catch_fn(data, exc) 返 1
+                    Builtin::CatchUnwind => {
+                        let (try_fn, data, catch_fn) = (a(0), a(1), a(2));
+                        match panic::catch_unwind(AssertUnwindSafe(|| {
+                            call_fn_addr(ctx, try_fn, &[data])
+                        })) {
+                            Ok(_) => 0,
+                            Err(e) => match e.downcast::<GuestPanic>() {
+                                Ok(gp) => {
+                                    call_fn_addr(ctx, catch_fn, &[data, gp.exception]);
+                                    1
+                                }
+                                // 宿主 panic（VM bug）不是 guest 异常：原样续传
+                                Err(host) => panic::resume_unwind(host),
+                            },
+                        }
+                    }
                 };
+                edge.set(None);
                 match ret {
                     RetDest::Scalar(p) => place_write(ctx, base, p, r),
                     RetDest::Ignore => {}
@@ -745,8 +943,13 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
                         (0, 0)
                     }
                 };
-                region_restore(ctx, base);
-                return r;
+                // region 恢复由 FrameGuard 统一（正常/unwind 两路径一致）
+                return Exit::Ret(r.0, r.1);
+            }
+            Terminator::Resume => return Exit::Resume,
+            Terminator::TerminateAbort => {
+                eprintln!("mirvm[m4-engine]: UnwindTerminate（double panic/ABI 边界）——abort");
+                std::process::abort()
             }
             Terminator::Unreachable => engine_abort(&format!("到达 Unreachable（fn {}）", body.name)),
             Terminator::Trap(reason) => {
@@ -757,6 +960,8 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
 }
 
 /// dev 入口（M4.0 gate）：按导出名调一个函数。
+/// 顶层 catch：guest panic 穿出导出函数 = 未捕获 panic → 诊断 + 退出码 101
+/// （native lang_start 语义的近似；完整启动链 M4.3）。宿主 panic（VM bug）原样续传。
 pub fn run_export(shared: &Shared, name: &str, args: &[u64]) -> Result<u64, String> {
     let Some(&id) = shared.module.exports.get(name) else {
         let mut names: Vec<&str> = shared.module.exports.keys().map(|k| &**k).collect();
@@ -765,5 +970,15 @@ pub fn run_export(shared: &Shared, name: &str, args: &[u64]) -> Result<u64, Stri
         return Err(format!("导出函数 `{name}` 不存在；可用: {names:?}"));
     };
     let mut ctx = Ctx::new(shared);
-    Ok(interp_frame(&mut ctx as *mut Ctx, id, args).0)
+    let ctx_ptr = &mut ctx as *mut Ctx;
+    match panic::catch_unwind(AssertUnwindSafe(|| interp_frame(ctx_ptr, id, args).0)) {
+        Ok(r) => Ok(r),
+        Err(e) => match e.downcast::<GuestPanic>() {
+            Ok(_) => {
+                eprintln!("mirvm[m4-engine]: guest panic 未被捕获（== native 退出码 101）");
+                exit(101)
+            }
+            Err(host) => panic::resume_unwind(host), // VM bug 绝不吞
+        },
+    }
 }

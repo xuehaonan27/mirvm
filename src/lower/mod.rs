@@ -92,8 +92,18 @@ impl<'tcx> Linker<'tcx> {
         match self.tcx.global_alloc(id) {
             GlobalAlloc::Memory(alloc) => self.materialize(id, alloc),
             GlobalAlloc::Static(def_id) => {
-                // extern static（含 weak 符号判空，如 gettid）：真符号地址 = os:: 域
+                // extern static：weak 符号判空 cell（如 gettid）——M4.2 写 0（宿主"无此
+                // 符号"，guest 走 syscall fallback 直通）；M4.3 起 dlsym 真地址。
+                // 非 weak 的 extern static（environ 等）仍归 os:: M4.3。
                 if self.tcx.is_foreign_item(def_id) {
+                    // extern block 内 item 的 linkage 在 import_linkage 字段
+                    let weak = self.tcx.codegen_fn_attrs(def_id).import_linkage
+                        == Some(rustc_hir::attrs::Linkage::ExternalWeak);
+                    if weak {
+                        let cell = self.frozen.alloc(8, 8); // 清零 cell = 符号缺席
+                        self.alloc_addrs.insert(id, cell);
+                        return Ok(cell);
+                    }
                     return Err(format!(
                         "extern static `{}`（真符号地址，os:: M4.3）",
                         self.tcx.item_name(def_id)
@@ -121,7 +131,12 @@ impl<'tcx> Linker<'tcx> {
                 self.alloc_addrs.insert(id, addr);
                 Ok(addr)
             }
-            GlobalAlloc::TypeId { .. } => Err("TypeId 常量（M4.1+）".into()),
+            GlobalAlloc::TypeId { .. } => {
+                // TypeId"分配"：基址 0——重定位 base+addend 后值 = 128 位类型哈希的
+                // 指针宽片段本身（tier-0 resolve_addr/Miri 同款）
+                self.alloc_addrs.insert(id, 0);
+                Ok(0)
+            }
         }
     }
 
@@ -294,6 +309,14 @@ fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin> {
         rustc_ast::expand::allocator::NO_ALLOC_SHIM_IS_UNSTABLE,
     );
     out.insert(Symbol::intern(&sentinel), ir::Builtin::NoAllocShim);
+    // unwind 原语（M4.2）：panic_unwind 照常解释，引擎在平台 unwinder 符号层接管
+    out.insert(Symbol::intern("_Unwind_RaiseException"), ir::Builtin::UnwindRaise);
+    // os:: 最小直通（panic 链需要；M4.3 换正式注册表）
+    out.insert(Symbol::intern("getenv"), ir::Builtin::HostGetenv);
+    out.insert(Symbol::intern("write"), ir::Builtin::HostWrite);
+    out.insert(Symbol::intern("strlen"), ir::Builtin::HostStrlen);
+    out.insert(Symbol::intern("abort"), ir::Builtin::HostAbort);
+    out.insert(Symbol::intern("syscall"), ir::Builtin::HostSyscall);
     out
 }
 

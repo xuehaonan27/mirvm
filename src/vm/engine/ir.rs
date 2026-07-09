@@ -249,6 +249,8 @@ pub enum Rvalue {
     SimdBitmask { a: PlaceExpr, lanes: u16, lane_bytes: u8 },
     /// 字节比较（compare_bytes intrinsic = memcmp）→ i32（-1/0/1 语义按首异字节）
     MemCmp { a: Operand, b: Operand, n: Operand },
+    /// 128 位整数比较（TypeId 判等等；操作数是 16 字节 place）→ bool
+    Cmp128 { cc: IntCc, signed: bool, a: PlaceExpr, b: PlaceExpr },
 }
 
 #[derive(Clone, Debug)]
@@ -315,11 +317,14 @@ pub enum Stmt {
     Nop,
 }
 
-/// unwind 处置。M4.0 只记录（全 Continue 语义）；M4.2 接 CleanupGuard（spike3 协议原位可插）。
+/// unwind 处置（M4.2 起全语义：FrameGuard 动态 LSDA，spike3 协议）。
+/// MIR 的 Unreachable 折进 Continue（unwind 到此=UB，fast 不检测）。
 #[derive(Clone, Copy, Debug)]
 pub enum UnwindAction {
     Continue,
     Cleanup(Bb),
+    /// unwind 到此即中止（double panic / extern "C" ABI 边界）
+    Terminate,
 }
 
 /// 引擎原语（foreign 三路处置①，debt-map §2-B）：std 自己声明的 runtime extern 边界，
@@ -337,6 +342,22 @@ pub enum Builtin {
     RustAllocZeroed,
     /// `__rust_no_alloc_shim_is_unstable_v2()`：分配前哨兵，空操作
     NoAllocShim,
+    /// `_Unwind_RaiseException(exc) -> !`：unwind 原语（M4.2，spike3 的 raise）——
+    /// 宿主 unwinder 载运 guest exception 指针（panic_unwind 结构在 guest 堆闭环）
+    UnwindRaise,
+    /// `catch_unwind(try_fn, data, catch_fn) -> i32` intrinsic（rust_try）：
+    /// 宿主 catch + 间接调用派发；downcast 区分 GuestPanic/宿主 panic
+    CatchUnwind,
+    /// os:: 最小直通（panic 链需要，真实地址零编组；M4.3 换正式注册表 dlsym+libffi）
+    HostGetenv,
+    /// `write(fd, buf, len) -> isize`
+    HostWrite,
+    /// `strlen(s) -> usize`
+    HostStrlen,
+    /// `abort() -> !`（libc abort 语义；core::intrinsics::abort 也汇入）
+    HostAbort,
+    /// `syscall(nr, ...) -> long` 可变参直通（按实参个数分派）
+    HostSyscall,
 }
 
 /// 参数在 callee 帧内的落位（引擎调用约定 v2：实参展平为 `&[u64]` 槽序列）。
@@ -402,12 +423,14 @@ pub enum Terminator {
     },
     /// 间接调用（fn-ptr / dyn 虚派发）：callee 求值 = fn 条目真地址（D4），
     /// 经 Module.fn_addrs 反查 FuncId。--vm-stats 可达分析无出边（已知盲点）。
+    /// null_ok：dyn 虚 drop 的 vtable 槽 0 可为 null（无 Drop 的类型）= 空操作。
     CallIndirect {
         callee: Operand,
         args: Vec<Operand>,
         ret: RetDest,
         target: Bb,
         unwind: UnwindAction,
+        null_ok: bool,
     },
     /// M4.0：失败 = 引擎 abort 带诊断（M4.2 变真 panic + unwind）
     Assert {
@@ -419,6 +442,11 @@ pub enum Terminator {
     },
     Return,
     Unreachable,
+    /// cleanup 链尾（MIR UnwindResume）：只在 guard.drop 的 cleanup 执行中出现——
+    /// 返回即让宿主 unwind 自动继续（spike3：单条 native 栈，VM 侧零协调）
+    Resume,
+    /// MIR UnwindTerminate：到达即 abort
+    TerminateAbort,
     /// ★ Trap-stub：未支持构造的占位（M4 增量协议的核心机制）。
     /// lowering 对收集全集是全量的——不认识的构造绝不中止，就地降为 Trap；
     /// 只有被执行的路径必须 trap-free。诊断串指出"哪一期欠的账"。
@@ -439,6 +467,8 @@ pub struct FuncBody {
     pub ret: RetAbi,
     /// 参数落位（_1..=_argc；实参槽序 = 展平序）
     pub params: Vec<ParamAbi>,
+    /// #[track_caller]：&Location 隐藏尾实参的帧内槽（ABI 幻影参，cg_ssa 同构）
+    pub caller_loc_off: Option<u32>,
     pub blocks: Vec<Block>,
     /// 诊断用（符号名）
     pub name: Box<str>,

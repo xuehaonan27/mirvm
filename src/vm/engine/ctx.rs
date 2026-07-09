@@ -15,10 +15,12 @@ pub struct Shared {
 pub struct Ctx {
     pub shared: *const Shared,
     pub region: ByteRegion,
+    /// 解释帧递归深度（guest 栈溢出防护，frame-abi §9——到界诊断退出）
+    pub depth: u32,
 }
 
 impl Ctx {
     pub fn new(shared: &Shared) -> Self {
-        Ctx { shared, region: ByteRegion::new() }
+        Ctx { shared, region: ByteRegion::new(), depth: 0 }
     }
 }

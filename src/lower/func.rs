@@ -25,6 +25,7 @@ pub fn trap_body(name: &str, reason: &str) -> ir::FuncBody {
         frame_align: 1,
         ret: RetAbi::Zst,
         params: Vec::new(),
+        caller_loc_off: None,
         blocks: vec![ir::Block {
             stmts: Vec::new(),
             term: Terminator::Trap(format!("整函数未降低: {reason}").into_boxed_str()),
@@ -164,6 +165,8 @@ struct LowerCx<'tcx, 'a> {
     typing_env: TypingEnv<'tcx>,
     frame: FrameLayout<'tcx>,
     linker: &'a mut Linker<'tcx>,
+    /// 本函数 #[track_caller] 时的 &Location 槽（转发/caller_location intrinsic 读取）
+    caller_loc_off: Option<u32>,
     /// 追加的合成块（发散调用的落点等），最终接在 MIR 块之后
     extra_blocks: Vec<ir::Block>,
     mir_block_count: usize,
@@ -415,6 +418,33 @@ impl<'tcx> LowerCx<'tcx, '_> {
         self.op_ty(op).map(|t| t.to_string()).unwrap_or_else(|_| "?".into())
     }
 
+    /// span → &'static Location 常量（物化进冻结区）——Assert 展开 / track_caller
+    /// 实参合成 / caller_location intrinsic 共用（cg_ssa get_caller_location 同构）。
+    fn caller_location_imm(&mut self, span: rustc_span::Span) -> Result<Operand, String> {
+        let cv = self.tcx.span_as_caller_location(span);
+        let mir::ConstValue::Scalar(mir::interpret::Scalar::Ptr(ptr, _)) = cv else {
+            return Err("caller_location 常量形态异常".into());
+        };
+        let (prov, off) = ptr.prov_and_relative_offset();
+        let base = self.linker.ensure_alloc(prov.alloc_id())?;
+        Ok(Operand::Imm { bits: base.wrapping_add(off.bytes()), width: Width::W64 })
+    }
+
+    /// 被调方 requires_caller_location 时的隐藏尾实参：本帧转发或按调用点合成。
+    fn caller_loc_arg(
+        &mut self,
+        callee: &Instance<'tcx>,
+        span: rustc_span::Span,
+    ) -> Result<Option<Operand>, String> {
+        if !callee.def.requires_caller_location(self.tcx) {
+            return Ok(None);
+        }
+        Ok(Some(match self.caller_loc_off {
+            Some(off) => Operand::Slot(Slot { off, width: Width::W64 }), // 转发
+            None => self.caller_location_imm(span)?,
+        }))
+    }
+
     /// 枚举 tag 编码冻结（Discriminant 读 / SetDiscriminant 写共用）。
     fn tag_info(&self, ty: Ty<'tcx>) -> Result<TagInfo, String> {
         let layout = self.layout_of(ty)?;
@@ -662,6 +692,38 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
                 let a_ty = self.op_ty(a)?;
                 use mir::BinOp::*;
+                // 128 位整数：比较走 Cmp128（16 字节 place 两半组读）；算术 M4.2+
+                if matches!(a_ty.kind(), ty::Int(ty::IntTy::I128) | ty::Uint(ty::UintTy::U128)) {
+                    let cc = match binop {
+                        Eq => IntCc::Eq,
+                        Ne => IntCc::Ne,
+                        Lt => IntCc::Lt,
+                        Le => IntCc::Le,
+                        Gt => IntCc::Gt,
+                        Ge => IntCc::Ge,
+                        other => return Err(format!("128 位算术 {other:?}（M4.2+）")),
+                    };
+                    let as_place = |cx: &mut Self, op: &mir::Operand<'tcx>| match cx
+                        .lower_operand(op)?
+                    {
+                        LoweredOp::Bytes { place, .. } => Ok(place.expr()),
+                        _ => Err("128 位比较操作数非 place".to_string()),
+                    };
+                    let pa = as_place(self, a)?;
+                    let pb = as_place(self, b)?;
+                    let ValKind::Scalar(w) = dst_kind else {
+                        return Err("128 位比较目标非标量".into());
+                    };
+                    return Ok(vec![Stmt::Assign {
+                        dst: dst_p.scalar_place(w),
+                        rv: Rvalue::Cmp128 {
+                            cc,
+                            signed: frame::ty_signed(a_ty),
+                            a: pa,
+                            b: pb,
+                        },
+                    }]);
+                }
                 if a_ty.is_floating_point() {
                     let is64 = match a_ty.kind() {
                         ty::Float(ty::FloatTy::F32) => false,
@@ -892,7 +954,19 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }
                 }
             }
-            mir::Rvalue::ThreadLocalRef(_) => Err("ThreadLocalRef（M4.4）".into()),
+            mir::Rvalue::ThreadLocalRef(def_id) => {
+                // ★ M4.4 义务：真线程时 TLS 必须换 per-thread 实例（此处单线程近似 =
+                // 普通 static 物化——多线程下共享一个实例是错值！gate M4.4 时替换）
+                let alloc_id = self.tcx.reserve_and_set_static_alloc(*def_id);
+                let addr = self.linker.ensure_alloc(alloc_id)?;
+                let ValKind::Scalar(w) = dst_kind else {
+                    return Err("ThreadLocalRef 目标非标量".into());
+                };
+                Ok(vec![Stmt::Assign {
+                    dst: dst_p.scalar_place(w),
+                    rv: Rvalue::Use(Operand::Imm { bits: addr, width: w }),
+                }])
+            }
             mir::Rvalue::WrapUnsafeBinder(op, _) => {
                 let src = self.lower_operand(op)?;
                 self.assign_lowered(&dst_p, dst_kind, src)
@@ -1011,10 +1085,22 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                 ])
                             }
                             (_, ty::Dynamic(dyn_preds, _)) => {
+                                // dyn→dyn 同 principal（仅剥 auto trait，如 Any+Send→Any）：
+                                // vtable 不变 = pair 位拷（cg_ssa unsized_info 同判据）
+                                if let ty::Dynamic(src_preds, _) = src_pointee.kind() {
+                                    if src_preds.principal_def_id()
+                                        == dyn_preds.principal_def_id()
+                                    {
+                                        let src = self.lower_operand(a)?;
+                                        return self.assign_lowered(dst_p, dst_kind, src);
+                                    }
+                                    return Err(format!(
+                                        "dyn 上溯 vtable 变换（{src_pointee} → {dst_pointee}，M4.2+）"
+                                    ));
+                                }
                                 // dyn unsize：pair =（data 瘦指针, 物化的 vtable 真地址）
                                 let src_layout = self.layout_of(src_pointee)?;
                                 if src_layout.is_unsized() {
-                                    // dyn→dyn upcast / unsized 源：vtable 变换（M4.1+）
                                     return Err(format!(
                                         "unsized→dyn（{src_pointee} → {dst_pointee}，M4.1+）"
                                     ));
@@ -1160,7 +1246,11 @@ impl<'tcx> LowerCx<'tcx, '_> {
     fn lower_unwind(&self, u: mir::UnwindAction) -> ir::UnwindAction {
         match u {
             mir::UnwindAction::Cleanup(bb) => ir::UnwindAction::Cleanup(bb.as_u32()),
-            _ => ir::UnwindAction::Continue,
+            mir::UnwindAction::Terminate(_) => ir::UnwindAction::Terminate,
+            // Unreachable：unwind 到此 = UB（fast 不检测）——当 Continue
+            mir::UnwindAction::Continue | mir::UnwindAction::Unreachable => {
+                ir::UnwindAction::Continue
+            }
         }
     }
 
@@ -1185,6 +1275,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
             TK::Return => (vec![], Terminator::Return),
             TK::Unreachable => (vec![], Terminator::Unreachable),
+            // cleanup 链尾：返回 guard.drop 让宿主 unwind 续传（spike3 协议）
+            TK::UnwindResume => (vec![], Terminator::Resume),
+            TK::UnwindTerminate(_) => (vec![], Terminator::TerminateAbort),
+            // 分析用假边：codegen 语义 = 直跳真目标
+            TK::FalseEdge { real_target, .. } | TK::FalseUnwind { real_target, .. } => {
+                (vec![], Terminator::Goto(real_target.as_u32()))
+            }
             TK::Assert { cond, expected, msg, target, unwind } => {
                 let c = self.lower_operand_scalar(cond)?;
                 (
@@ -1201,15 +1298,44 @@ impl<'tcx> LowerCx<'tcx, '_> {
             TK::Drop { place, target, unwind, .. } => {
                 let p = self.resolve_place(place)?;
                 if p.ty.needs_drop(self.tcx, self.typing_env) {
+                    // dyn place：虚 drop = vtable 槽 0 间接调（cg_ssa 同构；
+                    // resolve_drop_glue 会解析回自身 → 无限递归）
+                    if let ty::Dynamic(..) = p.ty.kind() {
+                        let meta = p
+                            .meta
+                            .clone()
+                            .ok_or_else(|| format!("dyn Drop 无 vtable meta（ty={}）", p.ty))?;
+                        let callee = operand_deref_at(meta, 0)?;
+                        return Ok((
+                            vec![],
+                            Terminator::CallIndirect {
+                                callee,
+                                args: vec![Operand::AddrOf(p.expr())],
+                                ret: RetDest::Ignore,
+                                target: target.as_u32(),
+                                unwind: self.lower_unwind(*unwind),
+                                null_ok: true,
+                            },
+                        ));
+                    }
                     // 正常路径 Drop = 普通 Call（F2）：drop_in_place 合成 shim，
-                    // 实参 = place 真地址（*mut T 标量）。unwind 路径 = M4.2。
+                    // 实参 = place 真地址（*mut T）；unsized place（Box<[T]> 内容等）
+                    // 的 glue 参数是胖指针 → 补 meta 半（resolve_place 的 meta 跟踪）。
                     let glue = Instance::resolve_drop_glue(self.tcx, p.ty);
                     let callee = self.linker.func_id(glue);
+                    let mut glue_args = vec![Operand::AddrOf(p.expr())];
+                    if self.layout_of(p.ty)?.is_unsized() {
+                        let meta = p
+                            .meta
+                            .clone()
+                            .ok_or_else(|| format!("unsized Drop 无 meta（ty={}）", p.ty))?;
+                        glue_args.push(meta);
+                    }
                     return Ok((
                         vec![],
                         Terminator::Call {
                             callee,
-                            args: vec![Operand::AddrOf(p.expr())],
+                            args: glue_args,
                             ret: RetDest::Ignore,
                             target: target.as_u32(),
                             unwind: self.lower_unwind(*unwind),
@@ -1227,6 +1353,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         let callee_op = self.lower_operand_scalar(func)?;
                         return self.finish_call(
                             CallTarget::Indirect(callee_op),
+                            None,
                             args,
                             destination,
                             *target,
@@ -1235,7 +1362,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }
                     return Err(format!("间接调用（ty={fn_ty}，M4.1+）"));
                 };
-                let inst = Instance::expect_resolve(
+                let mut inst = Instance::expect_resolve(
                     self.tcx,
                     self.typing_env,
                     *def_id,
@@ -1243,19 +1370,51 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     term.source_info.span,
                 );
                 // dyn 虚派发：receiver 胖指针拆 (data, vtable)，
-                // callee = *(vtable + idx*8)，receiver 实参换 data 半
+                // callee = *(vtable + idx*8)，receiver 实参换 data 半。
+                // track_caller 方法照传 location（vtable 侧是 VTable shim 接收）。
                 if let InstanceKind::Virtual(_, idx) = inst.def {
-                    return self.lower_virtual_call(idx, args, destination, *target, *unwind);
+                    let loc_arg = self.caller_loc_arg(&inst, term.source_info.span)?;
+                    return self.lower_virtual_call(
+                        idx,
+                        loc_arg,
+                        args,
+                        destination,
+                        *target,
+                        *unwind,
+                    );
                 }
                 // 纯值 intrinsic：就地展开为 IR 语句（无调用开销；D5 内建的语句形态）
-                if let Some(res) = self.try_expand_intrinsic(&inst, args, destination, *target)? {
+                if let Some(res) = self.try_expand_intrinsic(
+                    &inst,
+                    args,
+                    destination,
+                    *target,
+                    *unwind,
+                    term.source_info.span,
+                )? {
                     return Ok(res);
                 }
+                // fallback-body intrinsic：调用点即换 new_raw（Item），caller ABI 与
+                // callee 一致——track_caller attr 生效（cg_ssa IntrinsicResult::Fallback 同构）
+                if let InstanceKind::Intrinsic(idef) = inst.def {
+                    let intrinsic =
+                        self.tcx.intrinsic(idef).expect("Intrinsic 必有 IntrinsicDef");
+                    if intrinsic.must_be_overridden {
+                        return Err(format!(
+                            "intrinsic `{}` 无 fallback（引擎内建表，M4.2+）",
+                            intrinsic.name
+                        ));
+                    }
+                    inst = Instance::new_raw(idef, inst.args);
+                }
+                // #[track_caller] 的隐藏尾实参（转发或按调用点合成）
+                let loc_arg = self.caller_loc_arg(&inst, term.source_info.span)?;
                 // Linker 三路解析（debt-map §2-B）：普通函数/intrinsic fallback →
                 // worklist 扩集；foreign → ①引擎原语 ②链接仿真 ③Trap
                 let callee = self.linker.resolve_call(inst)?;
                 return self.finish_call(
                     CallTarget::Direct(callee),
+                    loc_arg,
                     args,
                     destination,
                     *target,
@@ -1272,6 +1431,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
     fn lower_virtual_call(
         &mut self,
         idx: usize,
+        loc_arg: Option<Operand>,
         args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
         destination: &mir::Place<'tcx>,
         target: Option<mir::BasicBlock>,
@@ -1284,6 +1444,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         let callee = operand_deref_at(vt, (idx * 8) as u32)?;
         self.finish_call_inner(
             CallTarget::Indirect(callee),
+            loc_arg,
             Some(data),
             args,
             destination,
@@ -1295,19 +1456,22 @@ impl<'tcx> LowerCx<'tcx, '_> {
     fn finish_call(
         &mut self,
         ct: CallTarget,
+        loc_arg: Option<Operand>,
         args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
         destination: &mir::Place<'tcx>,
         target: Option<mir::BasicBlock>,
         unwind: mir::UnwindAction,
     ) -> Result<(Vec<Stmt>, Terminator), String> {
-        self.finish_call_inner(ct, None, args, destination, target, unwind)
+        self.finish_call_inner(ct, loc_arg, None, args, destination, target, unwind)
     }
 
     /// 调用收尾共用道：实参展平（ABI v2，失败前置 Trap 保 Call 边）→ 返回落点四路
-    /// → 发散落点合成 → 按 CallTarget 发终止子。
+    /// → 发散落点合成 → 按 CallTarget 发终止子。loc_arg = track_caller 隐藏尾实参。
+    #[allow(clippy::too_many_arguments)]
     fn finish_call_inner(
         &mut self,
         ct: CallTarget,
+        loc_arg: Option<Operand>,
         first_override: Option<Operand>,
         args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
         destination: &mir::Place<'tcx>,
@@ -1339,6 +1503,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     break;
                 }
             }
+        }
+        // #[track_caller]：&Location 隐藏尾实参（cg_ssa 同构，排展平序最后）
+        if pre.is_empty()
+            && let Some(loc) = loc_arg
+        {
+            ir_args.push(loc);
         }
         // 返回落点（ABI v2 四路）
         let ret = if pre.is_empty() {
@@ -1380,9 +1550,14 @@ impl<'tcx> LowerCx<'tcx, '_> {
             CallTarget::Direct(Callee::Builtin(b)) => {
                 Terminator::CallBuiltin { builtin: b, args: ir_args, ret, target: tgt, unwind }
             }
-            CallTarget::Indirect(callee) => {
-                Terminator::CallIndirect { callee, args: ir_args, ret, target: tgt, unwind }
-            }
+            CallTarget::Indirect(callee) => Terminator::CallIndirect {
+                callee,
+                args: ir_args,
+                ret,
+                target: tgt,
+                unwind,
+                null_ok: false,
+            },
         };
         Ok((pre, term))
     }
@@ -1390,17 +1565,39 @@ impl<'tcx> LowerCx<'tcx, '_> {
     /// 纯值 intrinsic 的就地展开（返回 Some = 已展开为 语句+Goto）。
     /// 本步最小集：offset/arith_offset（ptr::add 的根，rawptr gate 必经）。
     /// 完整内建表是 M4.1 第 5 步（D5）。
+    #[allow(clippy::too_many_arguments)]
     fn try_expand_intrinsic(
         &mut self,
         inst: &Instance<'tcx>,
         args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
         destination: &mir::Place<'tcx>,
         target: Option<mir::BasicBlock>,
+        unwind: mir::UnwindAction,
+        span: rustc_span::Span,
     ) -> Result<Option<(Vec<Stmt>, Terminator)>, String> {
         let InstanceKind::Intrinsic(def_id) = inst.def else {
             return Ok(None);
         };
         let name = self.tcx.item_name(def_id);
+        // 引擎级 intrinsic（非纯值展开）：catch_unwind 走 Builtin 通道
+        if name.as_str() == "catch_unwind" {
+            let (dst_p, w) = self.place_scalar(destination)?;
+            let tgt = target.ok_or("catch_unwind 发散？")?.as_u32();
+            return Ok(Some((
+                vec![],
+                Terminator::CallBuiltin {
+                    builtin: ir::Builtin::CatchUnwind,
+                    args: vec![
+                        self.lower_operand_scalar(&args[0].node)?,
+                        self.lower_operand_scalar(&args[1].node)?,
+                        self.lower_operand_scalar(&args[2].node)?,
+                    ],
+                    ret: RetDest::Scalar(dst_p.scalar_place(w)),
+                    target: tgt,
+                    unwind: self.lower_unwind(unwind),
+                },
+            )));
+        }
         // 泛型元素尺寸（copy/write_bytes/offset 的 T）
         let elem_size = |cx: &Self| -> Result<u64, String> {
             let t = inst.args.type_at(0);
@@ -1536,7 +1733,14 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
             "assume" => vec![Stmt::Nop],
             "caller_location" => {
-                return Err("caller_location（#[track_caller] Location，panic 链路 M4.2）".into());
+                // Location::caller()：本函数 track_caller → 读隐藏尾实参槽；
+                // 否则按 intrinsic 调用点合成（罕见——caller 链通常 track 到底）
+                let (dst_p, w) = self.place_scalar(destination)?;
+                let op = match self.caller_loc_off {
+                    Some(off) => Operand::Slot(Slot { off, width: Width::W64 }),
+                    None => self.caller_location_imm(span)?,
+                };
+                vec![Stmt::Assign { dst: dst_p.scalar_place(w), rv: Rvalue::Use(op) }]
             }
             "compare_bytes" => {
                 let (dst_p, w) = self.place_scalar(destination)?;
@@ -1629,7 +1833,19 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                 }]
                             }
                         }
-                        _ => return Err(format!("{name} on dyn（vtable 读，M4.1+）")),
+                        ty::Dynamic(..) => {
+                            // vtable 布局：[drop, size, align, ...]（COMMON_VTABLE_ENTRIES）
+                            let LoweredOp::Pair(_, vt) = self.lower_operand(&args[0].node)?
+                            else {
+                                return Err(format!("{name} 实参非 dyn 胖指针").into());
+                            };
+                            let slot_off = if is_size { 8 } else { 16 };
+                            vec![Stmt::Assign {
+                                dst: dst_p.scalar_place(w),
+                                rv: Rvalue::Use(operand_deref_at(vt, slot_off)?),
+                            }]
+                        }
+                        _ => return Err(format!("{name} on unsized {t}（M4.1+）")),
                     }
                 }
             }
@@ -1880,10 +2096,31 @@ pub(crate) fn lower_instance<'tcx>(
         });
     }
 
+    // rust-call ABI 的 spread_arg（closure shim）在引擎自有调用约定下是 no-op：
+    // caller MIR 传一个 tuple operand、callee 的 spread local 就是一个 tuple local，
+    // 两侧按 ValKind 对称展平（native FnAbi 才需要按字段展开）——无需特殊处理。
+
+    // #[track_caller]：帧尾 &Location 隐藏尾实参槽（cg_ssa ABI 同构）
+    let caller_loc_off = if instance.def.requires_caller_location(tcx) {
+        let off = (frame.size + 7) & !7;
+        frame.size = off + 8;
+        frame.align = frame.align.max(8);
+        Some(off)
+    } else {
+        None
+    };
+
     let name = tcx.symbol_name(instance).name.to_owned();
     let mir_block_count = body.basic_blocks.len();
-    let mut cx =
-        LowerCx { tcx, typing_env, frame, linker, extra_blocks: Vec::new(), mir_block_count };
+    let mut cx = LowerCx {
+        tcx,
+        typing_env,
+        frame,
+        linker,
+        caller_loc_off,
+        extra_blocks: Vec::new(),
+        mir_block_count,
+    };
 
     let mut blocks = Vec::with_capacity(mir_block_count);
     for bb_data in body.basic_blocks.iter() {
@@ -1914,6 +2151,7 @@ pub(crate) fn lower_instance<'tcx>(
         frame_align: cx.frame.align,
         ret,
         params,
+        caller_loc_off,
         blocks,
         name: name.into_boxed_str(),
     })
