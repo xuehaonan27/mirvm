@@ -67,16 +67,17 @@ evcxr 四点不满（延迟、状态/借用限制、跑不了完整项目、编�
   原语 + track_caller ABI + Assert 展开真 panic。gate2 九用例 == native。
 - **M4.3 os:: + FFI + main 启动链**：CallForeign（dlsym+libffi 通用直通，变参按调用点
   冻结）+ denylist/stub 表 + extern static=dlsym + weak 让位强符号 + 128 位算术 +
-  EntryPlan（lang_start 照常解释）。**`tests/diff.sh` 全量差分 11/11 非线程用例 ==
-  native**（含 ffi_libc；cargo 形态 ffi_zlib 也过）。
+  EntryPlan（lang_start 照常解释）。
+- **M4.4 真线程（收官之战）**：thunk 工厂（fn-ptr 实参逃逸→libffi Closure 真码 + 边界
+  TLS attach）+ pthread_create/join/detach 直通 + guest TLS per-thread（TlsId/模板/
+  Ctx.tls + 真 dtor：Ctx 自管 pthread key 迟退 3 轮）+ CallIndirect.native_sig
+  （guest 调 dlsym 真码）+ rust-call ABI 真协议（tuple 字段展平）+ by-value dyn 派发 +
+  fence 补真。**gate4 11/11：threads_* 5/5 差分、挂死双场景秒级、rayon 0.9s（tier-0
+  28s）、TSan 多线程零警告；diff.sh 基线升 16/16**。
 
-**下一步 = M4.4 真线程（收官之战，过审期）**：设计文档已出（`docs/m4.4-design.md`，
-**待用户审**，含 signal A/B 裁定项）。要点：thunk 工厂（本期唯一新机制，libffi Closure
-+ 边界 TLS attach）、denylist 移除 pthread_create/join/detach、guest TLS per-thread
-（lower 的 ThreadLocalRef 单线程物化处有 M4.4 义务标注）、fence 补真。gate = threads_*
-5 用例差分 + tier-0 挂死双场景（corpus/c_blocking_io、c_net_echo_threaded）+ TSan +
-rayon。之后 M4.5 收口（cargo 接通完善——diff_cargo 的 script/project 两用例预期红在此
-恢复、corpus 盘点、性能硬门、async 收口）。
+**下一步 = M4.5 收口**：引擎 cargo/frontmatter 接线完善（diff_cargo 的 script/project
+两用例预期红在此恢复）、corpus 全绿盘点、性能硬门、`.init_array` ctors、async 收口、
+signal 真装载（M4.4 裁定 A = stub 维持，真装载在此期按需）、切默认。
 
 **挂起检查点（勿丢，§10）**：vmctx P/R 真负载终裁挂 M5；landing pad/LSDA 挂 M5；fork/atfork
 挂 M4 后；预降低 std 发行工件挂 mode B（M4.5 后）。
@@ -134,7 +135,7 @@ rayon。之后 M4.5 收口（cargo 接通完善——diff_cargo 的 script/proje
 | `docs/spike{1..5}-*.md` | 五 spike 经验教训 | 中（背景） |
 | `docs/m4-plan.md` | M4 六期计划 + 六决策 D1-D6 + 挂起项 | **最高** |
 | `docs/m4-log.md` | M4 施工日志（每期 gate + 经验 + 漂移清单） | **最高（最新状态）** |
-| `docs/m4.4-design.md` | M4.4 真线程设计（**待审**，含 signal A/B 裁定项） | **当前工作** |
+| `docs/m4.4-design.md` | M4.4 真线程设计（已完成——历史+机制文档；实况差异见 m4-log M4.4） | 中 |
 | `docs/m4.1-design.md` | M4.1 设计（已完成——历史+机制文档） | 中 |
 | `docs/m4-debt-map.md` | 全期债务普查（M4.1 开工时快照；三架构级发现仍有效） | 中 |
 
@@ -399,7 +400,8 @@ cargo build --release
 bash tests/m4_gate0.sh                                    # M4.0 gate 9/9 + 纯度门禁
 bash tests/m4_gate1.sh                                    # M4.1 digest 9/9 + 债务清零复测
 bash tests/m4_gate2.sh                                    # M4.2 unwind 9/9 + 债务清零复测
-MIRVM=$(pwd)/target/release/mirvm bash tests/diff.sh      # 全量差分（11 绿 + threads_* 预期红 M4.4）
+MIRVM=$(pwd)/target/release/mirvm bash tests/diff.sh      # 全量差分（16/16 全绿基线，含 threads）
+bash tests/m4_gate4.sh                                    # M4.4 真线程 gate（差分/双场景/rayon/TSan）
 MIRVM=$(pwd)/target/release/mirvm bash tests/diff_cargo.sh # cargo 形态（ffi_zlib 绿；script/project 预期红 M4.5）
 ./target/release/mirvm spike1  # .. spike5                # spike 冻结工件回归
 bash tests/spike4_tsan.sh                                 # TSan（引擎 Sync）
@@ -421,7 +423,8 @@ grep -rn '<符号>' $SRC/rustc_middle/src/
 M4.0-M4.3 已完成并各期 gate 全绿（经验与陷阱全在 `docs/m4-log.md`——**接手先读它的
 M4.1/M4.2/M4.3 三条**，里面有本 nightly 的 MIR/API 漂移清单与血泪修复）。用户看重：
 VM 作者视角、真实数据驱动（`--vm-stats` 是你最好的朋友）、每期 gate 全绿才 commit、
-防静默错值、不推翻既有决策而不读其论证。下一个动作明确：**M4.4 真线程，设计文档
-`docs/m4.4-design.md` 已写好待用户审（含 signal A/B 裁定项）——用户批复后按其施工
-顺序五步走**。M4.4 是过审期也是收官之战：threads_* 差分 + tier-0 时代挂死的双场景 +
-TSan + rayon 全过，M4 就只剩 M4.5 收口。
+防静默错值、不推翻既有决策而不读其论证。**M4.4 真线程已完成**（2026-07-10，gate4
+11/11：threads_* 5/5 差分、挂死双场景、rayon 0.9s、TSan 多线程零警告——先读 m4-log
+的 M4.4 条目，里面有 rust-call ABI/TSD dtor/TSan 相位的血泪）。下一个动作：**M4.5
+收口**（cargo 接线完善、corpus 盘点、性能硬门、async 收口、切默认——简报期，
+先跑 diff_cargo/corpus.sh 拿真实清单再动手）。

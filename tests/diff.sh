@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # 全量差分（唯一引擎 = M4 字节码 VM；tier-0 已移除，oracle 一直是 native）：
 # demo/*.rs 原生编译运行 vs mirvm main 启动链运行，对比 stdout + 退出码。
-# 预期红（记账）：threads_*（真线程 M4.4）；ecosystem/ffi_zlib 是 frontmatter/cargo
-# 形态（引擎 cargo 接线 M4.5），diff.sh 同样 SKIP。
+# 全绿基线 16/16（M4.4 起含 threads_*）。ecosystem/ffi_zlib 是 frontmatter/cargo
+# 形态（引擎 cargo 接线 M4.5），diff.sh 同样 SKIP（见 diff_cargo.sh）。
 set -u
 cd "$(dirname "$0")/.."
 

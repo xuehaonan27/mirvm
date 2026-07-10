@@ -293,6 +293,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 mir::ProjectionElem::OpaqueCast(t) | mir::ProjectionElem::UnwrapUnsafeBinder(t) => {
                     p.ty = t;
                 }
+                // 当前全变体已覆盖；防未来 nightly 新增投影（Trap-stub 协议）
+                #[allow(unreachable_patterns)]
                 other => return Err(format!("投影 {other:?}（M4.1+）")),
             }
         }

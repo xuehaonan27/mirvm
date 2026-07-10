@@ -261,3 +261,100 @@ SKIP）。全量回归无损：gate0/gate1/gate2、tier-0 diff 16/16、spike1-5�
 - 引擎 cargo/frontmatter 接线（runner 用 vm 引擎；ffi_zlib/ecosystem gate）+
   corpus 全绿盘点 + `.init_array` ctors（tier-0 有先例）→ M4.5。
 - async demo 里两处小 Trap 残留不在执行路径（Repeat 非标量元素、dyn Error 上溯）→ 按需。
+
+## M4.4 真线程 —— **完成**（2026-07-10）
+
+**Gate 全绿**：`tests/m4_gate4.sh` 11/11——threads_* **5/5 差分 == native**（spawn/
+channel/sync/time/panic，×3 复跑稳定）+ **tier-0 时代挂死双场景通过**（c_blocking_io
+0.8s、c_net_echo_threaded 0.7s——真阻塞 syscall 只挡自己）+ **c_rayon 0.9s**（tier-0
+28s → 秒级目标达成；work-stealing 池/par_iter/par_sort 全通）+ threads demo 可达
+trap-free + **TSan 多线程真身零警告**（8 线程共享 Shared/各自 Ctx/thunk 工厂并发，
+`engine/tsan_mt.rs`）。全量回归无损：diff.sh **16/16**（基线从 11 升 16）、gate0/1/2、
+纯度门禁、spikes 5/5、diff_cargo（ffi_zlib）。
+
+### 建了什么（对照设计 docs/m4.4-design.md）
+
+- **step 0（Shared 'static + 边界 TLS attach）**：cli Box::leak 提升；run_main/
+  run_export/thunk 一条 attach 路（commit 1772162）。
+- **D1 thunk 工厂**（`engine/thunks.rs`，本期唯一新机制）：CallForeign 的 fn-ptr 实参位
+  （裸 fn ptr + `Option<fn>`——niche 下 None=0 直传）lower 期冻结内层 ForeignSig；执行期
+  条目地址（fn_addrs 反查命中）→ `get_or_create` 物化 libffi Closure 真码（缓存键 =
+  (条目地址, 签名)，Mutex；Closure/ThunkData leak 进程级）；NULL 与已是 native 真码
+  原样直传。trampoline = 边界 TLS attach → 按签名搬参 → interp_frame → 返回值写回。
+- **D2 denylist**：移除 pthread_create/join/detach（join/detach 纯直通，tid 真
+  pthread_t——into_pthread_t 教训终局）；保留 pthread_exit/atfork/fork/exec/setjmp。
+- **FFI 反方向之二（设计外，实测逼出）**：`CallIndirect.native_sig`——extern "C" 系
+  fn-ptr 调用点冻结签名；条目反查未命中 = guest 持**运行期 dlsym 所得真码**（std
+  `min_stack_size` 的 `__pthread_get_minstack`）→ `ffi::call_addr` 按签名直调。
+- **D3 guest TLS per-thread**：`ThreadLocalRef` → 稠密 TlsId + 模板物化冻结区（复用
+  ensure_alloc，重定位白拿）；`Rvalue::TlsRef` 执行期 Ctx.tls 惰性物化（heap 分配 +
+  模板拷贝）。**真 TLS dtor（设计"收尾可选块"提前进主线，threads_panic 需要）**：
+  Ctx 从宿主 thread_local 改**自管 pthread key + 迟退 3 轮**（dtor 里 setspecific 挂回，
+  glibc 上限 4 轮）——guest 的 run_dtors（pthread_key_create dtor 实参经同一 thunk 工厂）
+  跑在 TSD 相位时 Ctx 必然还活着。宿主 thread_local 不可行：C++ TLS 析构相位**先于**
+  TSD 相位，dtor thunk 内 attach 必撞已销毁宿主 TLS。
+- **D4 fence 补真**：atomic_fence → 宿主 fence(SeqCst)、singlethreadfence →
+  compiler_fence(SeqCst)（M4.2 nop 复查义务兑现）。
+- **rust-call ABI 真协议（本期最大意外收获）**：物理约定 = tuple **按字段展平**
+  （cg_ssa/Miri 同构）。调用点 untuple 尾参（含常量 tuple：ZST 跳过 / 整体标量映射唯一
+  非 ZST 字段 / pair 按偏移认领字段 / Indirect 常量落冻结区照常投影）+ shim body 的
+  spread_arg tuple local 按字段展开为多参数。**此前单参闭包靠 (A,) 与 A 布局巧合蒙混过
+  M4.1-4.3 全部 gate**；双参闭包（spawn 链的 map_try_fold/LocalKey::set 闭包）一来就炸。
+- **by-value dyn 派发**：`Box<dyn FnOnce>::call_once` 内 `F::call_once(move (*self))`
+  ——receiver 是 unsized dyn place：data = place 真地址、callee 经 place meta 查槽
+  （cg_ssa `Ref(PlaceValue{llextra:Some})` 臂同构；槽内是 `ShimKind::VTable` shim，
+  收 `*mut Self` 瘦指针再 move 出，shim 侧 MIR 自动正确）。
+- **真线程逼出的 M4.1 遗留清偿**：Subslice 投影（数组折常量；slice 用新
+  `Operand::SubImm` 表达 len−k）、Repeat 聚合元素（写 dst[0] + `Stmt::RepeatBytes`
+  铺满）、volatile_load/store（解释器不消除内存操作 = 普通存取）、结构体尾字段 unsize
+  （`struct_lockstep_tails_for_codegen`，rayon 的 PolymorphicIter）。
+- **D6 gate 载体**：`tests/m4_gate4.sh`（差分×5 + 双场景 + rayon 20s 硬门 + vm-stats +
+  TSan）；`engine/tsan_mt.rs`（手构 Module：解释态原子自增 + thunk 并发同键同码 +
+  跨线程调 thunk 再入）。设计里"runner 加 MIRVM_ENGINE 透传"已无必要——tier-0 移除后
+  runner 本就是 vm 引擎。
+
+### 经验与教训
+
+1. **设计的"步 1 gate = threads_spawn 绿"过于乐观**：子线程一起跑就要 set_current
+   （TLS），threads_spawn 实际需要步 1+2 齐活；threads_panic 需要真 TLS dtor（设计 D3
+   "五用例不依赖 dtor"判断有误——threads_panic 就是专测线程内 TLS Drop 的）。教训：
+   **设计期用 --vm-stats 看债务表之外，还要读 gate 用例源码本身**。
+2. **rust-call 的"spread_arg 在自有调用约定下是 no-op"假设是错的**（M4.1 注释）：
+   闭包**本体**的 MIR 参数天然已拆开（env, a, b），shim body 才是 (self, tuple)+
+   spread_arg——两侧形状不同，"对称展平"不成立。单参闭包的布局巧合掩盖了三期。
+   横切面 ABI 的老教训再+1：**一次做全，别赌巧合**。
+3. **TSan 线程态在 TSD dtor 相位前已析构**：任何插桩代码（哪怕空函数的
+   __tsan_func_entry）跑在 pthread key dtor 里 = SEGV 读已亡 trace 状态。处置：
+   `cfg(sanitize = "thread")` 下 Ctx 不注册 dtor（每线程泄漏，仅测试配置）。**推论：
+   TSan 通道跑"guest 注册 TSD dtor"的场景永远不可行**——挑 TSan 用例时避开。
+4. **guest 调 native fn ptr 是双向 FFI 的另一半**：dlsym 直通给了 guest 真码地址，
+   guest 迟早会调它。thunk（guest→native 逃逸）+ native_sig（native 真码回调）配对
+   才闭环。std 里 dlsym! 宏一处就逼出（__pthread_get_minstack，GLIBC_PRIVATE）。
+5. **迟退 N 轮是控制 TSD dtor 相对顺序的标准技巧**：键序不可控，但 glibc 多轮扫描
+   （PTHREAD_DESTRUCTOR_ITERATIONS=4）+ dtor 里重新 setspecific = 把自己排到别人后面。
+6. **本 nightly 漂移**（续）：`InstanceKind` 重构为 `Item/Intrinsic/Virtual/Shim(ShimKind)`，
+   VtableShim → `ShimKind::VTable`（unsizeable self 的 vtable 槽 shim，收 `*mut Self`）；
+   `struct_lockstep_tails_for_codegen(src, dst, env)` 取 unsize 尾对。
+7. **诊断先行省时间**：prologue 实参槽数先验（带 fn 名/期望/实收）+ 间接调用未命中带
+   调用者名——两个诊断强化把三个 ABI bug 的定位从"盲猜"变"读一行"。
+
+### v1 记账（成本已核，非缺陷）
+
+- **guest TLS 实例块泄漏**（每线程每 TLS 一小块）：dtor **副作用**经 run_dtors thunk
+  正确执行（threads_panic 验证），但块本身不随线程回收——主动 free 有 UAF 风险
+  （guest dtor 轮次可晚于我们的收尾轮，错值比泄漏贵）。长驻多线程服务的累积成本挂
+  M4.5 盘点。
+- **TSan 配置下 Ctx 泄漏**（见教训 3，仅测试配置）。
+- **guest 线程栈大小语义近似**：解释帧消耗在宿主线程栈（~1KB/帧），guest 指定
+  stacksize 直通生效但"能递归多深"与 native 不同（2MB 默认栈 ≈ 2000 解释帧 <
+  MAX_DEPTH=8000——深递归小栈线程可能先撞真栈）。精确化挂 M5（编译帧更浅）。
+- **signal = 裁定 A**（推荐项，stub 维持假成功）：threads_*/双场景/rayon 均不依赖；
+  真装载挪 M4.5 前（thunk 工厂已就绪，增量 = 从 stub 表移到直通 + handler thunk）。
+  用户如裁 B 随时可改。
+
+### 本期遗留（归期明确）
+
+- 引擎 cargo/frontmatter 接线完善（diff_cargo 的 script/project 预期红恢复）+ corpus
+  全绿盘点 + 性能硬门 + `.init_array` ctors + async 收口 + signal 真装载（若需）→ M4.5。
+- weak fn 符号真地址化（thunk 就绪后可升级；现维持判空 cell）→ 按需。
+- dyn 上溯 vtable 变换 / unsized→dyn（async demo 不可达残留）→ 按需。

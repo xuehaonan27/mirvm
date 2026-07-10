@@ -66,6 +66,7 @@ static CTX_KEY: OnceLock<libc::pthread_key_t> = OnceLock::new();
 /// TSD 相位的 Ctx 收尾：迟退 3 轮（重新挂回 → glibc 追加轮次，上限 4）——guest 的
 /// pthread-key dtor（std run_dtors thunk，键序不可控）总能在存活的 Ctx 上执行；
 /// 末轮真正销毁（ByteRegion munmap 等）。
+#[cfg(not(sanitize = "thread"))]
 unsafe extern "C" fn ctx_key_dtor(p: *mut libc::c_void) {
     let ctx = p as *mut Ctx;
     unsafe {
@@ -86,8 +87,15 @@ unsafe extern "C" fn ctx_key_dtor(p: *mut libc::c_void) {
 /// 主线程的 Ctx 随进程 exit 一并回收（glibc exit 不走 TSD 相位，与 native 同）。
 pub fn attach(shared: &'static Shared) -> *mut Ctx {
     let key = *CTX_KEY.get_or_init(|| unsafe {
+        // TSan 配置：不注册 dtor——TSan 的线程态在 TSD 相位前已析构，插桩代码
+        // 不可在彼时运行（Ctx 每线程泄漏，仅测试配置；dtor 链由 threads_panic
+        // 差分在真配置验证）。
+        #[cfg(sanitize = "thread")]
+        let dtor: Option<unsafe extern "C" fn(*mut libc::c_void)> = None;
+        #[cfg(not(sanitize = "thread"))]
+        let dtor = Some(ctx_key_dtor as unsafe extern "C" fn(*mut libc::c_void));
         let mut k: libc::pthread_key_t = 0;
-        let rc = libc::pthread_key_create(&mut k, Some(ctx_key_dtor));
+        let rc = libc::pthread_key_create(&mut k, dtor);
         assert_eq!(rc, 0, "pthread_key_create 失败: {rc}");
         k
     });

@@ -5,6 +5,7 @@
 #![feature(yeet_expr)] // rustc_middle 的 throw_* 宏需要
 #![feature(map_try_insert)]
 #![feature(box_patterns)] // lower 匹配 MIR 的 Box 字段
+#![feature(cfg_sanitize)] // ctx.rs：TSan 配置下 Ctx dtor 的处置分歧
 
 extern crate rustc_abi;
 extern crate rustc_apfloat;

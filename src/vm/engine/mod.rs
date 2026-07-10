@@ -11,3 +11,4 @@ pub mod interp;
 pub mod ir;
 pub mod stats;
 pub mod thunks;
+pub mod tsan_mt;
