@@ -433,6 +433,15 @@ impl<'tcx> LowerCx<'tcx, '_> {
         })
     }
 
+    /// 帧尾划一个 8 字节暂存槽（frame.size 在 lower_instance 收尾才冻结进 FuncBody
+    /// ——caller_loc/sret 同法）。size_of_val-dyn 等多值中间量用。
+    fn scratch64(&mut self) -> Slot {
+        let off = (self.frame.size + 7) & !7;
+        self.frame.size = off + 8;
+        self.frame.align = self.frame.align.max(8);
+        Slot { off, width: Width::W64 }
+    }
+
     /// 指针操作数 → pointee 的 PlaceLow（`*ptr` 语境：volatile 存取等）。
     fn deref_place_of(&self, ptr: &Operand, ty: Ty<'tcx>) -> Result<PlaceLow<'tcx>, String> {
         Ok(match ptr {
@@ -1122,6 +1131,82 @@ impl<'tcx> LowerCx<'tcx, '_> {
         }
     }
 
+    /// Unsize 胖化的 meta 推导（类型递归，cg_ssa coerce_unsized_into/unsize_ptr 同构）：
+    /// 指针（含 Box）→ pointee 对取 meta；同 def 结构体 → 唯一类型不同的字段对递归
+    /// （Arc/Rc/Pin 等自定义 CoerceUnsized：Arc{NonNull{*const ArcInner<T>}} 一路下钻）。
+    fn unsize_meta_of(&mut self, src: Ty<'tcx>, dst: Ty<'tcx>) -> Result<Operand, String> {
+        if let (Some(sp), Some(dp)) = (src.builtin_deref(true), dst.builtin_deref(true)) {
+            return self.fresh_unsize_meta(sp, dp);
+        }
+        // pattern type（本 nightly NonNull 内部 = `*const T is !null`）：剥壳递归 base
+        if let (ty::Pat(ba, _), ty::Pat(bb, _)) = (src.kind(), dst.kind()) {
+            return self.unsize_meta_of(*ba, *bb);
+        }
+        if let (ty::Adt(da, sa), ty::Adt(db, sb)) = (src.kind(), dst.kind())
+            && da.did() == db.did()
+            && da.is_struct()
+        {
+            // cg_ssa unsize_ptr 的 Adt 臂同构：跳过 1-ZST 字段（PhantomData/Global
+            // ——类型可不同但无载荷），递归**唯一**非 ZST 字段。
+            let mut found = None;
+            for f in &da.non_enum_variant().fields {
+                // 本 nightly：FieldDef::ty 返回 Unnormalized 包装——
+                // normalize_erasing_regions 直接吃包装（单态化环境下规范化）
+                let norm = |t: rustc_middle::ty::Unnormalized<'tcx, Ty<'tcx>>| {
+                    self.tcx.normalize_erasing_regions(self.typing_env, t)
+                };
+                let (fa, fb) = (norm(f.ty(self.tcx, sa)), norm(f.ty(self.tcx, sb)));
+                if self.layout_of(fa)?.is_1zst() {
+                    continue;
+                }
+                if found.is_some() {
+                    return Err(format!("CoerceUnsized 多非 ZST 字段（{src}）"));
+                }
+                found = Some((fa, fb));
+            }
+            let Some((fa, fb)) = found else {
+                return Err(format!("CoerceUnsized 无非 ZST 字段（{src} → {dst}）"));
+            };
+            return self.unsize_meta_of(fa, fb);
+        }
+        Err(format!("Unsize 形态未知（{src} → {dst}）"))
+    }
+
+    /// pointee 对 → 新造 meta：lockstep 尾对为 Array→Slice = 长度立即数、
+    /// sized→dyn = 物化 vtable 真地址（cg_ssa unsized_info 同构）。
+    /// dyn→dyn（meta 沿用源第二半）不在此路——调用方（Unsize 臂）特例处理。
+    fn fresh_unsize_meta(
+        &mut self,
+        src_pointee: Ty<'tcx>,
+        dst_pointee: Ty<'tcx>,
+    ) -> Result<Operand, String> {
+        let (st, dt) = self.tcx.struct_lockstep_tails_for_codegen(
+            src_pointee,
+            dst_pointee,
+            self.typing_env,
+        );
+        match (st.kind(), dt.kind()) {
+            (ty::Array(_, n), ty::Slice(_)) => {
+                let n = n.try_to_target_usize(self.tcx).ok_or("数组长度非常量")?;
+                Ok(Operand::Imm { bits: n, width: Width::W64 })
+            }
+            (_, ty::Dynamic(preds, _)) if !matches!(st.kind(), ty::Dynamic(..)) => {
+                if self.layout_of(st)?.is_unsized() {
+                    return Err(format!("unsized→dyn（{st} → {dt}，M4.1+）"));
+                }
+                let principal = preds
+                    .principal()
+                    .map(|b| self.tcx.instantiate_bound_regions_with_erased(b));
+                let vt_id = self.tcx.vtable_allocation((st, principal));
+                Ok(Operand::Imm {
+                    bits: self.linker.ensure_alloc(vt_id)?,
+                    width: Width::W64,
+                })
+            }
+            _ => Err(format!("unsize 尾对 {st} → {dt}（M4.4+）")),
+        }
+    }
+
     /// Cast 家族。
     fn lower_cast(
         &mut self,
@@ -1248,139 +1333,44 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 use ty::adjustment::PointerCoercion as PC;
                 match pc {
                     PC::Unsize => {
-                        // &[T;N] → &[T]：pair = (src 瘦指针, N)；dyn unsize = vtable（第 4 步）
+                        // 胖化：data = 源瘦标量（一路 newtype 包着一个指针），
+                        // meta = 类型递归推导（unsize_meta_of）。
+                        // 特例：源已是 dyn（同 principal 仅剥 auto trait）= pair 位拷。
                         let a_ty = self.op_ty(a)?;
-                        let src_pointee =
-                            a_ty.builtin_deref(true).ok_or("Unsize 源非指针")?;
-                        let dst_pointee =
-                            to_ty.builtin_deref(true).ok_or("Unsize 目标非指针")?;
-                        match (src_pointee.kind(), dst_pointee.kind()) {
-                            (ty::Array(_, n), ty::Slice(_)) => {
-                                let n = n
-                                    .try_to_target_usize(self.tcx)
-                                    .ok_or("数组长度非常量")?;
-                                let ValKind::Pair((ao, aw), (bo, bw)) = dst_kind else {
-                                    return Err("Unsize 目标非 pair".into());
-                                };
-                                let LoweredOp::Scalar(data) = self.lower_operand(a)? else {
-                                    return Err("Unsize 源非瘦指针".into());
-                                };
-                                Ok(vec![
-                                    Stmt::Assign {
-                                        dst: dst_p.half_place(ao, aw),
-                                        rv: Rvalue::Use(data),
-                                    },
-                                    Stmt::Assign {
-                                        dst: dst_p.half_place(bo, bw),
-                                        rv: Rvalue::Use(Operand::Imm { bits: n, width: bw }),
-                                    },
-                                ])
-                            }
-                            (_, ty::Dynamic(dyn_preds, _)) => {
-                                // dyn→dyn 同 principal（仅剥 auto trait，如 Any+Send→Any）：
-                                // vtable 不变 = pair 位拷（cg_ssa unsized_info 同判据）
-                                if let ty::Dynamic(src_preds, _) = src_pointee.kind() {
-                                    if src_preds.principal_def_id()
-                                        == dyn_preds.principal_def_id()
-                                    {
-                                        let src = self.lower_operand(a)?;
-                                        return self.assign_lowered(dst_p, dst_kind, src);
-                                    }
-                                    return Err(format!(
-                                        "dyn 上溯 vtable 变换（{src_pointee} → {dst_pointee}，M4.2+）"
-                                    ));
-                                }
-                                // dyn unsize：pair =（data 瘦指针, 物化的 vtable 真地址）
-                                let src_layout = self.layout_of(src_pointee)?;
-                                if src_layout.is_unsized() {
-                                    return Err(format!(
-                                        "unsized→dyn（{src_pointee} → {dst_pointee}，M4.1+）"
-                                    ));
-                                }
-                                let principal = dyn_preds.principal().map(|b| {
-                                    self.tcx.instantiate_bound_regions_with_erased(b)
-                                });
-                                let vt_id =
-                                    self.tcx.vtable_allocation((src_pointee, principal));
-                                let vt_addr = self.linker.ensure_alloc(vt_id)?;
-                                let ValKind::Pair((ao, aw), (bo, bw)) = dst_kind else {
-                                    return Err("dyn Unsize 目标非 pair".into());
-                                };
-                                let LoweredOp::Scalar(data) = self.lower_operand(a)? else {
-                                    return Err("dyn Unsize 源非瘦指针（M4.1+）".into());
-                                };
-                                Ok(vec![
-                                    Stmt::Assign {
-                                        dst: dst_p.half_place(ao, aw),
-                                        rv: Rvalue::Use(data),
-                                    },
-                                    Stmt::Assign {
-                                        dst: dst_p.half_place(bo, bw),
-                                        rv: Rvalue::Use(Operand::Imm {
-                                            bits: vt_addr,
-                                            width: bw,
-                                        }),
-                                    },
-                                ])
-                            }
-                            (ty::Adt(def_a, _), ty::Adt(def_b, _))
-                                if def_a.did() == def_b.did() =>
+                        if let (Some(sp), Some(dp)) =
+                            (a_ty.builtin_deref(true), to_ty.builtin_deref(true))
+                            && let ty::Dynamic(src_preds, _) = sp.kind()
+                        {
+                            let ty::Dynamic(dst_preds, _) = dp.kind() else {
+                                return Err(format!("dyn 源 Unsize 到非 dyn（{dp}）"));
+                            };
+                            if src_preds.principal_def_id() == dst_preds.principal_def_id()
                             {
-                                // 结构体尾字段 unsize（自定义 CoerceUnsized：rayon 的
-                                // PolymorphicIter<[T;N]>→<[T]> 等）：data 指针不变，
-                                // meta 由 lockstep 尾字段决定（cg_ssa unsized_info 同构）
-                                let (st, dt) = self.tcx.struct_lockstep_tails_for_codegen(
-                                    src_pointee,
-                                    dst_pointee,
-                                    self.typing_env,
-                                );
-                                let meta = match (st.kind(), dt.kind()) {
-                                    (ty::Array(_, n), ty::Slice(_)) => {
-                                        let n = n
-                                            .try_to_target_usize(self.tcx)
-                                            .ok_or("数组长度非常量")?;
-                                        Operand::Imm { bits: n, width: Width::W64 }
-                                    }
-                                    (_, ty::Dynamic(preds, _))
-                                        if !matches!(st.kind(), ty::Dynamic(..)) =>
-                                    {
-                                        let principal = preds.principal().map(|b| {
-                                            self.tcx.instantiate_bound_regions_with_erased(b)
-                                        });
-                                        let vt_id =
-                                            self.tcx.vtable_allocation((st, principal));
-                                        Operand::Imm {
-                                            bits: self.linker.ensure_alloc(vt_id)?,
-                                            width: Width::W64,
-                                        }
-                                    }
-                                    _ => {
-                                        return Err(format!(
-                                            "结构体尾 unsize {st} → {dt}（M4.4+）"
-                                        ));
-                                    }
-                                };
-                                let ValKind::Pair((ao, aw), (bo, bw)) = dst_kind else {
-                                    return Err("结构体尾 Unsize 目标非 pair".into());
-                                };
-                                let LoweredOp::Scalar(data) = self.lower_operand(a)? else {
-                                    return Err("结构体尾 Unsize 源非瘦指针".into());
-                                };
-                                Ok(vec![
-                                    Stmt::Assign {
-                                        dst: dst_p.half_place(ao, aw),
-                                        rv: Rvalue::Use(data),
-                                    },
-                                    Stmt::Assign {
-                                        dst: dst_p.half_place(bo, bw),
-                                        rv: Rvalue::Use(meta),
-                                    },
-                                ])
+                                // vtable 不变（cg_ssa unsized_info 同判据）
+                                let src = self.lower_operand(a)?;
+                                return self.assign_lowered(dst_p, dst_kind, src);
                             }
-                            _ => Err(format!(
-                                "Unsize {src_pointee} → {dst_pointee}（M4.1+）"
-                            )),
+                            return Err(format!(
+                                "dyn 上溯 vtable 变换（{sp} → {dp}，M4.2+）"
+                            ));
                         }
+                        let meta = self.unsize_meta_of(a_ty, to_ty)?;
+                        let ValKind::Pair((ao, aw), (bo, bw)) = dst_kind else {
+                            return Err(format!("Unsize 目标非 pair（{to_ty}）"));
+                        };
+                        let LoweredOp::Scalar(data) = self.lower_operand(a)? else {
+                            return Err(format!("Unsize 源非瘦标量（{a_ty}，多非 ZST 字段的自定义 CoerceUnsized？）"));
+                        };
+                        Ok(vec![
+                            Stmt::Assign {
+                                dst: dst_p.half_place(ao, aw),
+                                rv: Rvalue::Use(data),
+                            },
+                            Stmt::Assign {
+                                dst: dst_p.half_place(bo, bw),
+                                rv: Rvalue::Use(meta),
+                            },
+                        ])
                     }
                     PC::MutToConstPointer | PC::UnsafeFnPointer | PC::ArrayToPointer => {
                         // 位拷（胖→瘦经 PtrToPtr，这里同类位拷）
@@ -1462,7 +1452,6 @@ impl<'tcx> LowerCx<'tcx, '_> {
             CK::IntToFloat => {
                 let a_ty = self.op_ty(a)?;
                 let a_layout = self.layout_of(a_ty)?;
-                let from_w = frame::scalar_width(&a_layout).ok_or("IntToFloat 源非标量（128 位，M4.1+）")?;
                 let to64 = match to_ty.kind() {
                     ty::Float(ty::FloatTy::F32) => false,
                     ty::Float(ty::FloatTy::F64) => true,
@@ -1470,6 +1459,15 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 };
                 let ValKind::Scalar(w) = dst_kind else {
                     return Err("IntToFloat 目标非标量".into());
+                };
+                // 128 位源（u128/i128 as f，tokio 定时器逼出）：读 16 字节宿主直转
+                let Some(from_w) = frame::scalar_width(&a_layout) else {
+                    return Ok(vec![Stmt::Wide128ToFloat {
+                        src: self.wide_place(a)?,
+                        signed: frame::ty_signed(a_ty),
+                        to64,
+                        dst: dst_p.scalar_place(w),
+                    }]);
                 };
                 Ok(vec![Stmt::Assign {
                     dst: dst_p.scalar_place(w),
@@ -2275,6 +2273,81 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     },
                 }]
             }
+            // 字节级相等（<[u8;N]>::eq 的 spec 路径，csv 逼出）：memcmp == 0
+            "raw_eq" => {
+                let t = inst.args.type_at(0);
+                let size = self.layout_of(t)?.size.bytes();
+                let (dst_p, w) = self.place_scalar(destination)?;
+                let s = self.scratch64();
+                let s32 = Slot { off: s.off, width: Width::W32 };
+                vec![
+                    Stmt::Assign {
+                        dst: ScalarPlace::Slot(s32),
+                        rv: Rvalue::MemCmp {
+                            a: self.lower_operand_scalar(&args[0].node)?,
+                            b: self.lower_operand_scalar(&args[1].node)?,
+                            n: Operand::Imm { bits: size, width: Width::W64 },
+                        },
+                    },
+                    Stmt::Assign {
+                        dst: dst_p.scalar_place(w),
+                        rv: Rvalue::IntCmp {
+                            cc: IntCc::Eq,
+                            signed: false,
+                            a: Operand::Slot(s32),
+                            b: Operand::Imm { bits: 0, width: Width::W32 },
+                        },
+                    },
+                ]
+            }
+            // 不检查的浮点→整数（fast 不检 UB：与 `as` 同一实现，numbigint 逼出）
+            "float_to_int_unchecked" => {
+                let fty = inst.args.type_at(0);
+                let from64 = match fty.kind() {
+                    ty::Float(ty::FloatTy::F32) => false,
+                    ty::Float(ty::FloatTy::F64) => true,
+                    _ => return Err(format!("float_to_int_unchecked 源 {fty}（f16/f128？）")),
+                };
+                let ity = inst.args.type_at(1);
+                let to_w = frame::scalar_width(&self.layout_of(ity)?)
+                    .ok_or("float_to_int_unchecked 目标非标量")?;
+                let (dst_p, w) = self.place_scalar(destination)?;
+                vec![Stmt::Assign {
+                    dst: dst_p.scalar_place(w),
+                    rv: Rvalue::FloatToInt {
+                        from64,
+                        to: to_w,
+                        signed: frame::ty_signed(ity),
+                        a: self.lower_operand_scalar(&args[0].node)?,
+                    },
+                }]
+            }
+            // 数学面（must_be_overridden float intrinsic）：宿主直算（合成处置，P7）
+            n if math_un_of(n).is_some() => {
+                let (op, is64) = math_un_of(n).unwrap();
+                let (dst_p, w) = self.place_scalar(destination)?;
+                vec![Stmt::Assign {
+                    dst: dst_p.scalar_place(w),
+                    rv: Rvalue::MathUn {
+                        op,
+                        is64,
+                        a: self.lower_operand_scalar(&args[0].node)?,
+                    },
+                }]
+            }
+            n if math_bin_of(n).is_some() => {
+                let (op, is64) = math_bin_of(n).unwrap();
+                let (dst_p, w) = self.place_scalar(destination)?;
+                vec![Stmt::Assign {
+                    dst: dst_p.scalar_place(w),
+                    rv: Rvalue::MathBin {
+                        op,
+                        is64,
+                        a: self.lower_operand_scalar(&args[0].node)?,
+                        b: self.lower_operand_scalar(&args[1].node)?,
+                    },
+                }]
+            }
             n if n.starts_with("simd_") => self.expand_simd(n, inst, args, destination)?,
             "ptr_offset_from" | "ptr_offset_from_unsigned" => {
                 let ptr_ty = self.op_ty(&args[0].node)?;
@@ -2366,6 +2439,131 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                 dst: dst_p.scalar_place(w),
                                 rv: Rvalue::Use(operand_deref_at(vt, slot_off)?),
                             }]
+                        }
+                        // unsized 尾字段结构体（Path/OsStr/RcInner<dyn>，M4.5）：
+                        // cg_ssa glue size_and_align_of_dst 同构——
+                        // full_align = max(sized_align, tail_align)；
+                        // full_size = align_to(sized_size + tail_size, full_align)。
+                        ty::Adt(..) | ty::Tuple(..) => {
+                            let LoweredOp::Pair(_, meta) = self.lower_operand(&args[0].node)?
+                            else {
+                                return Err(format!("{name} 实参非胖指针"));
+                            };
+                            let tail =
+                                self.tcx.struct_tail_for_codegen(t, self.typing_env);
+                            let sized_size = t_layout.size.bytes();
+                            let sized_align = t_layout.align.abi.bytes();
+                            let dst = dst_p.scalar_place(w);
+                            let assign = |rv| Stmt::Assign { dst: dst.clone(), rv };
+                            let imm = |v: u64| Operand::Imm { bits: v, width: Width::W64 };
+                            let dst_op = dst_p.scalar_operand(w);
+                            match tail.kind() {
+                                ty::Slice(..) | ty::Str => {
+                                    let (esz, eal) = match tail.kind() {
+                                        ty::Slice(e) => {
+                                            let l = self.layout_of(*e)?;
+                                            (l.size.bytes(), l.align.abi.bytes())
+                                        }
+                                        _ => (1, 1),
+                                    };
+                                    let fa = sized_align.max(eal); // 编译期常量
+                                    if !is_size {
+                                        vec![assign(Rvalue::Use(imm(fa)))]
+                                    } else {
+                                        let mut v = vec![
+                                            assign(Rvalue::IntBin {
+                                                op: IntBinOp::Mul,
+                                                signed: false,
+                                                a: meta,
+                                                b: imm(esz),
+                                            }),
+                                            assign(Rvalue::IntBin {
+                                                op: IntBinOp::Add,
+                                                signed: false,
+                                                a: dst_op.clone(),
+                                                b: imm(sized_size),
+                                            }),
+                                        ];
+                                        if fa > 1 {
+                                            v.push(assign(Rvalue::IntBin {
+                                                op: IntBinOp::Add,
+                                                signed: false,
+                                                a: dst_op.clone(),
+                                                b: imm(fa - 1),
+                                            }));
+                                            v.push(assign(Rvalue::IntBin {
+                                                op: IntBinOp::BitAnd,
+                                                signed: false,
+                                                a: dst_op.clone(),
+                                                b: imm(!(fa - 1)),
+                                            }));
+                                        }
+                                        v
+                                    }
+                                }
+                                ty::Dynamic(..) => {
+                                    // meta = vtable：tail size@+8 / align@+16（运行时读）。
+                                    // full_align = max(sized_align, tail_align)；
+                                    // full_size  = align_to(sized_size + tail_size, full_align)
+                                    //            = (s + a − 1) & !(a − 1)（cg_ssa 同式）。
+                                    let sl = |s: Slot| Operand::Slot(s);
+                                    let sp = |s: Slot| ScalarPlace::Slot(s);
+                                    let umax_align = Rvalue::UMax {
+                                        a: operand_deref_at(meta.clone(), 16)?,
+                                        b: imm(sized_align),
+                                    };
+                                    if !is_size {
+                                        vec![assign(umax_align)]
+                                    } else {
+                                        let fa = self.scratch64();
+                                        let m = self.scratch64();
+                                        vec![
+                                            Stmt::Assign { dst: sp(fa), rv: umax_align },
+                                            // dst = sized_size + tail_size
+                                            assign(Rvalue::IntBin {
+                                                op: IntBinOp::Add,
+                                                signed: false,
+                                                a: operand_deref_at(meta, 8)?,
+                                                b: imm(sized_size),
+                                            }),
+                                            // m = fa − 1
+                                            Stmt::Assign {
+                                                dst: sp(m),
+                                                rv: Rvalue::IntBin {
+                                                    op: IntBinOp::Sub,
+                                                    signed: false,
+                                                    a: sl(fa),
+                                                    b: imm(1),
+                                                },
+                                            },
+                                            // dst += m
+                                            assign(Rvalue::IntBin {
+                                                op: IntBinOp::Add,
+                                                signed: false,
+                                                a: dst_op.clone(),
+                                                b: sl(m),
+                                            }),
+                                            // m = !m
+                                            Stmt::Assign {
+                                                dst: sp(m),
+                                                rv: Rvalue::NotBits(sl(m)),
+                                            },
+                                            // dst &= m
+                                            assign(Rvalue::IntBin {
+                                                op: IntBinOp::BitAnd,
+                                                signed: false,
+                                                a: dst_op.clone(),
+                                                b: sl(m),
+                                            }),
+                                        ]
+                                    }
+                                }
+                                _ => {
+                                    return Err(format!(
+                                        "{name} 尾类型 {tail} 未支持（M4.5+）"
+                                    ));
+                                }
+                            }
                         }
                         _ => return Err(format!("{name} on unsized {t}（M4.1+）")),
                     }
@@ -2530,6 +2728,55 @@ fn elem_of(ty: Ty<'_>) -> Option<Ty<'_>> {
 
 fn u128_to_u64(v: u128) -> Result<u64, String> {
     u64::try_from(v).map_err(|_| "128 位判别式（M4.1+）".to_string())
+}
+
+/// 数学 intrinsic 名 → (op, is64)（f32/f64 后缀成对；f16/f128 不表 = Trap 可见）。
+fn math_un_of(n: &str) -> Option<(ir::MathUnOp, bool)> {
+    use ir::MathUnOp as M;
+    let (stem, is64) = n
+        .strip_suffix("f64")
+        .map(|s| (s, true))
+        .or_else(|| n.strip_suffix("f32").map(|s| (s, false)))?;
+    let stem = stem.trim_end_matches('_');
+    Some((
+        match stem {
+            "sqrt" => M::Sqrt,
+            "sin" => M::Sin,
+            "cos" => M::Cos,
+            "exp" => M::Exp,
+            "exp2" => M::Exp2,
+            "log" => M::Ln,
+            "log2" => M::Log2,
+            "log10" => M::Log10,
+            "fabs" => M::Fabs,
+            "floor" => M::Floor,
+            "ceil" => M::Ceil,
+            "trunc" => M::Trunc,
+            "round" => M::Round,
+            "round_ties_even" => M::RoundTiesEven,
+            _ => return None,
+        },
+        is64,
+    ))
+}
+
+fn math_bin_of(n: &str) -> Option<(ir::MathBinOp, bool)> {
+    use ir::MathBinOp as M;
+    let (stem, is64) = n
+        .strip_suffix("f64")
+        .map(|s| (s, true))
+        .or_else(|| n.strip_suffix("f32").map(|s| (s, false)))?;
+    Some((
+        match stem {
+            "pow" => M::Pow,
+            "powi" => M::Powi,
+            "copysign" => M::Copysign,
+            "minnum" => M::Minnum,
+            "maxnum" => M::Maxnum,
+            _ => return None,
+        },
+        is64,
+    ))
 }
 
 /// 在 operand 的值（指针）上再间接一层：*(op + off)。vtable 槽读取用。

@@ -161,6 +161,35 @@ pub enum FloatOp {
     Rem,
 }
 
+/// 数学一元（must_be_overridden float intrinsic 的合成处置：宿主 f32/f64 直算，P7）
+#[derive(Clone, Copy, Debug)]
+pub enum MathUnOp {
+    Sqrt,
+    Sin,
+    Cos,
+    Exp,
+    Exp2,
+    Ln,
+    Log2,
+    Log10,
+    Fabs,
+    Floor,
+    Ceil,
+    Trunc,
+    Round,
+    RoundTiesEven,
+}
+
+/// 数学二元（powf/powi/copysign/minnum/maxnum；powi 的 b 是 i32 位）
+#[derive(Clone, Copy, Debug)]
+pub enum MathBinOp {
+    Pow,
+    Powi,
+    Copysign,
+    Minnum,
+    Maxnum,
+}
+
 /// 位操作单目（ctpop/ctlz/cttz/bswap/bitreverse intrinsic 内建）
 #[derive(Clone, Copy, Debug)]
 pub enum BitUnOp {
@@ -236,6 +265,11 @@ pub enum Rvalue {
     },
     /// 浮点四则（位进位出：操作数是 f32/f64 的位型）
     FloatBin { op: FloatOp, is64: bool, a: Operand, b: Operand },
+    /// 数学一元/二元（宿主直算；M4.5 补 must_be_overridden float intrinsic 面）
+    MathUn { op: MathUnOp, is64: bool, a: Operand },
+    MathBin { op: MathBinOp, is64: bool, a: Operand, b: Operand },
+    /// 无符号取大（unsized 尾对齐 = max(sized_align, 运行期 vtable align)，M4.5）
+    UMax { a: Operand, b: Operand },
     /// 浮点比较（IEEE 语义，NaN 全 false 除 Ne）→ bool
     FloatCmp { cc: IntCc, is64: bool, a: Operand, b: Operand },
     FloatNeg { is64: bool, a: Operand },
@@ -331,6 +365,8 @@ pub enum Stmt {
         dst: PlaceExpr,
         with_overflow: bool,
     },
+    /// 128 位整数 → 浮点（u128/i128 as f32/f64；宿主直转，M4.5 tokio 定时器逼出）
+    Wide128ToFloat { src: PlaceExpr, signed: bool, to64: bool, dst: ScalarPlace },
     /// 语句级 Trap 占位：执行到即诊断退出，但**块的终止子照常降低**——
     /// 保住 Call 边，使 --vm-stats 的可达分析准确（仪器盲点修复）。
     Trap(Box<str>),

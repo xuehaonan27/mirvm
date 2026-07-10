@@ -343,6 +343,59 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
                 .to_bits() as u64
             }
         }
+        Rvalue::UMax { a, b } => eval_operand(ctx, base, a).0.max(eval_operand(ctx, base, b).0),
+        Rvalue::MathUn { op, is64, a } => {
+            use super::ir::MathUnOp as M;
+            let (av, _) = eval_operand(ctx, base, a);
+            macro_rules! un {
+                ($x:expr) => {{
+                    let x = $x;
+                    match op {
+                        M::Sqrt => x.sqrt(),
+                        M::Sin => x.sin(),
+                        M::Cos => x.cos(),
+                        M::Exp => x.exp(),
+                        M::Exp2 => x.exp2(),
+                        M::Ln => x.ln(),
+                        M::Log2 => x.log2(),
+                        M::Log10 => x.log10(),
+                        M::Fabs => x.abs(),
+                        M::Floor => x.floor(),
+                        M::Ceil => x.ceil(),
+                        M::Trunc => x.trunc(),
+                        M::Round => x.round(),
+                        M::RoundTiesEven => x.round_ties_even(),
+                    }
+                }};
+            }
+            if *is64 {
+                un!(f64::from_bits(av)).to_bits()
+            } else {
+                un!(f32::from_bits(av as u32)).to_bits() as u64
+            }
+        }
+        Rvalue::MathBin { op, is64, a, b } => {
+            use super::ir::MathBinOp as M;
+            let (av, _) = eval_operand(ctx, base, a);
+            let (bv, _) = eval_operand(ctx, base, b);
+            macro_rules! bin {
+                ($x:expr, $y:expr) => {{
+                    let x = $x;
+                    match op {
+                        M::Pow => x.powf($y),
+                        M::Powi => x.powi(bv as i32),
+                        M::Copysign => x.copysign($y),
+                        M::Minnum => x.min($y),
+                        M::Maxnum => x.max($y),
+                    }
+                }};
+            }
+            if *is64 {
+                bin!(f64::from_bits(av), f64::from_bits(bv)).to_bits()
+            } else {
+                bin!(f32::from_bits(av as u32), f32::from_bits(bv as u32)).to_bits() as u64
+            }
+        }
         Rvalue::FloatCmp { cc, is64, a, b } => {
             let (av, _) = eval_operand(ctx, base, a);
             let (bv, _) = eval_operand(ctx, base, b);
@@ -763,6 +816,16 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             if *with_overflow {
                 unsafe { *((pd + 16) as *mut u8) = ovf as u8 };
             }
+        }
+        Stmt::Wide128ToFloat { src, signed, to64, dst } => {
+            let p = eval_place_addr(ctx, base, src);
+            let x = unsafe { (p as *const u128).read_unaligned() };
+            let bits = if *to64 {
+                (if *signed { x as i128 as f64 } else { x as f64 }).to_bits()
+            } else {
+                (if *signed { x as i128 as f32 } else { x as f32 }).to_bits() as u64
+            };
+            place_write(ctx, base, dst, bits);
         }
         Stmt::Trap(reason) => engine_abort(&format!("TRAP: {reason}")),
         Stmt::Nop => {}
