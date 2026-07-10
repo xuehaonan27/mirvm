@@ -367,6 +367,16 @@ pub enum Stmt {
     },
     /// 128 位整数 → 浮点（u128/i128 as f32/f64；宿主直转，M4.5 tokio 定时器逼出）
     Wide128ToFloat { src: PlaceExpr, signed: bool, to64: bool, dst: ScalarPlace },
+    /// 128 位 niche 判别式读（regex_automata 的 Result<DFA,_> 大 niche，M4.5）：
+    /// rel = tag − niche_start（u128 wrapping）；rel < len → variants_start+rel，否则 untagged
+    NicheDiscr128 {
+        tag: PlaceExpr,
+        niche_start: u128,
+        variants_start: u64,
+        variants_len: u64,
+        untagged: u64,
+        dst: ScalarPlace,
+    },
     /// 语句级 Trap 占位：执行到即诊断退出，但**块的终止子照常降低**——
     /// 保住 Call 边，使 --vm-stats 的可达分析准确（仪器盲点修复）。
     Trap(Box<str>),

@@ -817,6 +817,17 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                 unsafe { *((pd + 16) as *mut u8) = ovf as u8 };
             }
         }
+        Stmt::NicheDiscr128 { tag, niche_start, variants_start, variants_len, untagged, dst } => {
+            let p = eval_place_addr(ctx, base, tag);
+            let t = unsafe { (p as *const u128).read_unaligned() };
+            let rel = t.wrapping_sub(*niche_start);
+            let v = if rel < *variants_len as u128 {
+                variants_start.wrapping_add(rel as u64)
+            } else {
+                *untagged
+            };
+            place_write(ctx, base, dst, v);
+        }
         Stmt::Wide128ToFloat { src, signed, to64, dst } => {
             let p = eval_place_addr(ctx, base, src);
             let x = unsafe { (p as *const u128).read_unaligned() };

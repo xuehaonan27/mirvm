@@ -151,6 +151,14 @@ enum TagInfo {
         variants_len: u64,
         untagged: u64,
     },
+    /// 128 位 niche（大 niche_start，regex_automata 逼出）：tag 16 字节，u128 算术
+    Niche128 {
+        tag_off: u32,
+        niche_start: u128,
+        variants_start: u64,
+        variants_len: u64,
+        untagged: u64,
+    },
 }
 
 struct LowerCx<'tcx, 'a> {
@@ -464,13 +472,18 @@ impl<'tcx> LowerCx<'tcx, '_> {
     }
 
     /// 标量操作数（标量语境；其他分类 = 语境错误诊断）。
+    #[track_caller]
     fn lower_operand_scalar(&mut self, op: &mir::Operand<'tcx>) -> Result<Operand, String> {
+        let loc = std::panic::Location::caller();
         match self.lower_operand(op)? {
             LoweredOp::Scalar(o) => Ok(o),
             LoweredOp::Zst => Err("意外的 ZST 操作数".into()),
-            LoweredOp::Pair(..) => {
-                Err(format!("非标量操作数（pair，ty={}，M4.1+）", self.op_ty_str(op)))
-            }
+            LoweredOp::Pair(..) => Err(format!(
+                "非标量操作数（pair，ty={}，@{}:{}）",
+                self.op_ty_str(op),
+                loc.file(),
+                loc.line()
+            )),
             LoweredOp::Bytes { .. } => {
                 Err(format!("非标量操作数（聚合，ty={}，M4.1+）", self.op_ty_str(op)))
             }
@@ -575,22 +588,39 @@ impl<'tcx> LowerCx<'tcx, '_> {
             Variants::Multiple { tag, tag_encoding, tag_field, .. } => {
                 let dl = self.tcx.data_layout();
                 let tag_off = layout.fields.offset(tag_field.as_usize()).bytes() as u32;
-                let tag_w = Width::from_bytes(tag.size(dl).bytes())
-                    .ok_or("128 位 tag（M4.1+）")?;
+                let tag_bytes = tag.size(dl).bytes();
+                // 128 位 tag（repr(u128) / 大 niche）：窄化读低 64 位——小端下值 ≤ u64
+                // 时正确。安全由值域检查保证（SetDiscr/SwitchInt 的编译期 discr 走
+                // u128_to_u64；Niche 的 niche_start 高位下面查）——绝不静默截断。
+                let tag_w = Width::from_bytes(tag_bytes)
+                    .or_else(|| (tag_bytes == 16).then_some(Width::W64))
+                    .ok_or_else(|| format!("tag 宽 {tag_bytes} 字节（M4.5+）"))?;
                 let tag_signed = matches!(tag.primitive(), rustc_abi::Primitive::Int(_, true));
                 match tag_encoding {
                     TagEncoding::Direct => TagInfo::Direct { tag_off, tag_w, tag_signed },
                     TagEncoding::Niche { untagged_variant, niche_variants, niche_start } => {
+                        let vstart = niche_variants.start.as_u32() as u64;
+                        let vlen = (niche_variants.last.as_u32()
+                            - niche_variants.start.as_u32()) as u64
+                            + 1;
+                        let untagged = untagged_variant.as_u32() as u64;
+                        // 128 位 niche（niche_start 用满高位）：走 u128 算术路径
+                        if tag_bytes == 16 && (*niche_start >> 64) != 0 {
+                            return Ok(TagInfo::Niche128 {
+                                tag_off,
+                                niche_start: *niche_start,
+                                variants_start: vstart,
+                                variants_len: vlen,
+                                untagged,
+                            });
+                        }
                         TagInfo::Niche {
                             tag_off,
                             tag_w,
                             niche_start: u128_to_u64(*niche_start & tag_w.mask() as u128)?,
-                            variants_start: niche_variants.start.as_u32() as u64,
-                            variants_len: (niche_variants.last.as_u32()
-                                - niche_variants.start.as_u32())
-                                as u64
-                                + 1,
-                            untagged: untagged_variant.as_u32() as u64,
+                            variants_start: vstart,
+                            variants_len: vlen,
+                            untagged,
                         }
                     }
                 }
@@ -612,6 +642,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     .discriminant_for_variant(self.tcx, vidx)
                     .map(|d| d.val)
                     .ok_or("Direct tag 无 discr")?;
+                // 128 位 tag 窄化前的值域守卫（防静默截断；tag_w ≤ W64 的判别式恒 fit）
+                if tag_w == Width::W64 && discr > u64::MAX as u128 {
+                    return Err(format!("128 位判别式 {discr} 超 64 位（M4.5+）"));
+                }
                 let bits = (discr as u64) & tag_w.mask();
                 vec![Stmt::Assign {
                     dst: dst_p.half_place(tag_off, tag_w),
@@ -629,6 +663,30 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         dst: dst_p.half_place(tag_off, tag_w),
                         rv: Rvalue::Use(Operand::Imm { bits, width: tag_w }),
                     }]
+                }
+            }
+            // 128 位 niche 写：tag_val = (vi − start + niche_start) 的 u128，落 16 字节两半
+            TagInfo::Niche128 { tag_off, niche_start, variants_start, untagged, .. } => {
+                let vi = vidx.as_u32() as u64;
+                if vi == untagged {
+                    vec![]
+                } else {
+                    let tag_val =
+                        (vi.wrapping_sub(variants_start) as u128).wrapping_add(niche_start);
+                    let w = Width::W64;
+                    vec![
+                        Stmt::Assign {
+                            dst: dst_p.half_place(tag_off, w),
+                            rv: Rvalue::Use(Operand::Imm { bits: tag_val as u64, width: w }),
+                        },
+                        Stmt::Assign {
+                            dst: dst_p.half_place(tag_off + 8, w),
+                            rv: Rvalue::Use(Operand::Imm {
+                                bits: (tag_val >> 64) as u64,
+                                width: w,
+                            }),
+                        },
+                    ]
                 }
             }
         })
@@ -833,6 +891,47 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
                 let a_ty = self.op_ty(a)?;
                 use mir::BinOp::*;
+                // 胖指针比较（*const [T]/dyn 的 Eq/Ne：两半都比——裸指针 == 语义，
+                // Arc::ptr_eq 等逼出）：eq = (data==)&(meta==)；ne = (data!=)|(meta!=)。
+                // 两半宽度取自操作数自带（data 指针 + usize/vtable meta，均 W64）。
+                if matches!(binop, Eq | Ne)
+                    && matches!(self.classify(a_ty)?, ValKind::Pair(..))
+                {
+                    let LoweredOp::Pair(al, ah) = self.lower_operand(a)? else {
+                        return Err("胖指针比较左非 pair".into());
+                    };
+                    let LoweredOp::Pair(bl, bh) = self.lower_operand(b)? else {
+                        return Err("胖指针比较右非 pair".into());
+                    };
+                    let ValKind::Scalar(w) = dst_kind else {
+                        return Err("胖指针比较目标非标量".into());
+                    };
+                    let (cc, comb) = if matches!(binop, Eq) {
+                        (IntCc::Eq, IntBinOp::BitAnd)
+                    } else {
+                        (IntCc::Ne, IntBinOp::BitOr)
+                    };
+                    let s8 = Slot { off: self.scratch64().off, width: w };
+                    return Ok(vec![
+                        Stmt::Assign {
+                            dst: ScalarPlace::Slot(s8),
+                            rv: Rvalue::IntCmp { cc, signed: false, a: al, b: bl },
+                        },
+                        Stmt::Assign {
+                            dst: dst_p.scalar_place(w),
+                            rv: Rvalue::IntCmp { cc, signed: false, a: ah, b: bh },
+                        },
+                        Stmt::Assign {
+                            dst: dst_p.scalar_place(w),
+                            rv: Rvalue::IntBin {
+                                op: comb,
+                                signed: false,
+                                a: dst_p.scalar_operand(w),
+                                b: Operand::Slot(s8),
+                            },
+                        },
+                    ]);
+                }
                 // 128 位整数：比较走 Cmp128；算术/位/移位走 Bin128（宿主 u128 直算）
                 if matches!(a_ty.kind(), ty::Int(ty::IntTy::I128) | ty::Uint(ty::UintTy::U128)) {
                     let signed = frame::ty_signed(a_ty);
@@ -1032,6 +1131,23 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         variants_len,
                         untagged,
                     },
+                    // 128 位 niche：独立 stmt（读 16 字节 tag，u128 算术）
+                    TagInfo::Niche128 {
+                        tag_off,
+                        niche_start,
+                        variants_start,
+                        variants_len,
+                        untagged,
+                    } => {
+                        return Ok(vec![Stmt::NicheDiscr128 {
+                            tag: p.expr_plus(tag_off),
+                            niche_start,
+                            variants_start,
+                            variants_len,
+                            untagged,
+                            dst: dst_p.scalar_place(dw),
+                        }]);
+                    }
                 };
                 Ok(vec![Stmt::Assign { dst: dst_p.scalar_place(dw), rv }])
             }

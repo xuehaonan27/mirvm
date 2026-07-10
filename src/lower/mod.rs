@@ -40,13 +40,15 @@ pub(crate) enum Callee {
 }
 
 /// 危险符号（P7 denylist）：绝不直通 native——会绕开进程/线程模型。
-/// M4.4 D2：pthread_create/join/detach 已移出（真线程直通，fn-ptr 实参经 thunk 工厂）；
-/// 保留 pthread_exit（glibc 强制 unwind 绕过 FrameGuard——std 不用它）与 fork/exec/setjmp 系。
+/// M4.4 D2：pthread_create/join/detach 已移出（真线程直通，fn-ptr 实参经 thunk 工厂）。
+/// M4.5 D3：posix_spawn 系移出（子体立即 exec，VM 状态从不在子进程运行——与裸 fork
+/// 带完整 VM 镜像着陆本质不同；file_actions/attr 是不透明指针，真实地址直传成立）。
+/// 保留 pthread_exit（glibc 强制 unwind 绕过 FrameGuard）与裸 fork/exec/setjmp 系。
 const DENY_EXACT: &[&str] = &[
     "fork", "vfork", "clone", "clone3", "setjmp", "longjmp", "sigsetjmp", "siglongjmp",
     "pthread_exit", "pthread_atfork",
 ];
-const DENY_PREFIX: &[&str] = &["exec", "posix_spawn"];
+const DENY_PREFIX: &[&str] = &["exec"];
 
 /// 加载相"链接器"：FuncId 分配 + worklist 闭包扩集（D1 修正），外加 native 链接器
 /// 职责的仿真——**特判的不是"panic 是什么"，是"链接器本来会做什么"**（debt-map §2-B）：
