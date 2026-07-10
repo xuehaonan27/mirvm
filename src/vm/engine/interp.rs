@@ -1084,13 +1084,12 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
 /// main 启动链（M4.3）：`lang_start(main fn-ptr, argc, argv, sigpipe) -> isize`
 /// （cg_ssa create_entry_fn 同构——std 的 rt::lang_start 照常解释：sys::init/
 /// args 存放/panic hook/Termination 全走 guest 代码，忠实性）。返回进程退出码。
-pub fn run_main(shared: &Shared) -> i32 {
+pub fn run_main(shared: &'static Shared) -> i32 {
     let Some(entry) = shared.module.entry else {
         eprintln!("mirvm[m4-engine]: 无 main 入口（lib crate？）");
         return 2;
     };
-    let mut ctx = Ctx::new(shared);
-    let ctx_ptr = &mut ctx as *mut Ctx;
+    let ctx_ptr = super::ctx::attach(shared); // 主线程与 guest 线程同一 attach 形态
     let args =
         [entry.main_addr, entry.argc, entry.argv_ptr, entry.sigpipe as u64];
     match panic::catch_unwind(AssertUnwindSafe(|| {
@@ -1108,15 +1107,14 @@ pub fn run_main(shared: &Shared) -> i32 {
 /// dev 入口（M4.0 gate）：按导出名调一个函数。
 /// 顶层 catch：guest panic 穿出导出函数 = 未捕获 panic → 诊断 + 退出码 101
 /// （native lang_start 语义的近似；完整启动链 M4.3）。宿主 panic（VM bug）原样续传。
-pub fn run_export(shared: &Shared, name: &str, args: &[u64]) -> Result<u64, String> {
+pub fn run_export(shared: &'static Shared, name: &str, args: &[u64]) -> Result<u64, String> {
     let Some(&id) = shared.module.exports.get(name) else {
         let mut names: Vec<&str> = shared.module.exports.keys().map(|k| &**k).collect();
         names.sort();
         names.retain(|n| !n.starts_with("_ZN") && !n.starts_with("_R"));
         return Err(format!("导出函数 `{name}` 不存在；可用: {names:?}"));
     };
-    let mut ctx = Ctx::new(shared);
-    let ctx_ptr = &mut ctx as *mut Ctx;
+    let ctx_ptr = super::ctx::attach(shared);
     match panic::catch_unwind(AssertUnwindSafe(|| interp_frame(ctx_ptr, id, args).0)) {
         Ok(r) => Ok(r),
         Err(e) => match e.downcast::<GuestPanic>() {

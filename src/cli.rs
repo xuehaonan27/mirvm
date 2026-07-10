@@ -235,10 +235,12 @@ fn run_vm_engine(
         print!("{}", crate::vm::engine::stats::report(&module));
         return 0;
     }
-    let shared = crate::vm::engine::ctx::Shared { module };
+    // Shared 提升进程级 &'static（M4.4：thunk/多线程要求 Ctx 可在任意线程随时引用它）
+    let shared: &'static _ =
+        Box::leak(Box::new(crate::vm::engine::ctx::Shared::new(module)));
     let Some(spec) = vm_call else {
         // main 启动链：lang_start 照常解释，退出码 = Termination 产物
-        return crate::vm::engine::interp::run_main(&shared);
+        return crate::vm::engine::interp::run_main(shared);
     };
     let (name, args) = match parse_vm_call(spec) {
         Ok(v) => v,
@@ -247,7 +249,7 @@ fn run_vm_engine(
             return 2;
         }
     };
-    match crate::vm::engine::interp::run_export(&shared, &name, &args) {
+    match crate::vm::engine::interp::run_export(shared, &name, &args) {
         Ok(r) => {
             println!("{r}");
             0
