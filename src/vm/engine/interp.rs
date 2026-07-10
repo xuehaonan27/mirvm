@@ -149,6 +149,10 @@ fn eval_operand(ctx: *mut Ctx, base: usize, op: &Operand) -> (u64, Width) {
         }
         Operand::Imm { bits, width } => (*bits, *width),
         Operand::AddrOf(expr) => (eval_place_addr(ctx, base, expr), Width::W64),
+        Operand::SubImm { base: b, sub } => {
+            let (v, w) = eval_operand(ctx, base, b);
+            (v.wrapping_sub(*sub) & w.mask(), w)
+        }
     }
 }
 
@@ -762,6 +766,28 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
         }
         Stmt::Trap(reason) => engine_abort(&format!("TRAP: {reason}")),
         Stmt::Nop => {}
+        // `[expr; N]` 聚合元素：dst[0] 为模板铺满其余
+        Stmt::RepeatBytes { first, count, elem_size } => {
+            let src = eval_place_addr(ctx, base, first);
+            for i in 1..*count {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        src as *const u8,
+                        (src + i * elem_size) as *mut u8,
+                        *elem_size as usize,
+                    );
+                }
+            }
+        }
+        // 栅栏补真（M4.4 D4）：guest 任意序 → 宿主 SeqCst（最强序在 RAM non-det 包络内）
+        Stmt::Fence { single_thread } => {
+            use std::sync::atomic::{Ordering, compiler_fence, fence};
+            if *single_thread {
+                compiler_fence(Ordering::SeqCst);
+            } else {
+                fence(Ordering::SeqCst);
+            }
+        }
     }
 }
 

@@ -103,6 +103,8 @@ pub enum Operand {
     Imm { bits: u64, width: Width },
     /// place 的真地址本身（indirect 实参 = 传聚合的地址）
     AddrOf(PlaceExpr),
+    /// 值减常量（Subslice 的 slice meta：len' = len − k；M4.4）
+    SubImm { base: Box<Operand>, sub: u64 },
 }
 
 impl Operand {
@@ -113,6 +115,7 @@ impl Operand {
             Operand::Mem { width, .. } => *width,
             Operand::Imm { width, .. } => *width,
             Operand::AddrOf(_) => Width::W64,
+            Operand::SubImm { base, .. } => base.width(),
         }
     }
 }
@@ -203,6 +206,7 @@ pub enum Rvalue {
     Use(Operand),
     /// guest TLS 实例真地址（M4.4 D3）：Ctx.tls[id] 惰性物化（heap 分配 + 模板拷贝）。
     TlsRef(TlsId),
+    // （Subslice 的 meta 走 Operand::SubImm，无独立 rvalue）
     IntBin { op: IntBinOp, signed: bool, a: Operand, b: Operand },
     /// → bool（W8）
     IntCmp { cc: IntCc, signed: bool, a: Operand, b: Operand },
@@ -331,6 +335,11 @@ pub enum Stmt {
     /// 保住 Call 边，使 --vm-stats 的可达分析准确（仪器盲点修复）。
     Trap(Box<str>),
     Nop,
+    /// 内存栅栏（M4.4 D4）：atomic_fence → 宿主 fence(SeqCst)；
+    /// single_thread（atomic_singlethreadfence）→ compiler_fence(SeqCst)
+    Fence { single_thread: bool },
+    /// `[expr; N]` 聚合元素通道（M4.4）：dst[0] 已写好，从它铺满 i∈[1,count)
+    RepeatBytes { first: PlaceExpr, count: u64, elem_size: u64 },
 }
 
 /// unwind 处置（M4.2 起全语义：FrameGuard 动态 LSDA，spike3 协议）。

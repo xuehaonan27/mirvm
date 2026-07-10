@@ -263,6 +263,33 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     p.ty = elem_ty;
                     p.meta = None;
                 }
+                mir::ProjectionElem::Subslice { from, to, from_end } => {
+                    // `rest @ ..` 型切片模式（M4.4 补，真线程把 std 内路径逼可达）
+                    let elem_ty = elem_of(p.ty)
+                        .ok_or_else(|| format!("Subslice 非序列（ty={}）", p.ty))?;
+                    let stride = self.layout_of(elem_ty)?.size.bytes();
+                    if let ty::Array(_, n) = p.ty.kind() {
+                        // 数组：折常量——[from..to] / [from..N-to]，结果仍是定长数组
+                        let n = n.try_to_target_usize(self.tcx).ok_or("数组长度非常量")?;
+                        let new_len = if from_end { n - from - to } else { to - from };
+                        p.push_offset((from * stride) as i64);
+                        p.ty = Ty::new_array(self.tcx, elem_ty, new_len);
+                        p.meta = None;
+                    } else {
+                        // slice（from_end 恒真，to 自尾计）：addr += from×stride；
+                        // len' = len − (from+to)（meta 值减常量，Operand::SubImm）
+                        if !from_end {
+                            return Err("Subslice slice 而 from_end=false（MIR 不变量）".into());
+                        }
+                        let m = p
+                            .meta
+                            .clone()
+                            .ok_or_else(|| format!("Subslice slice 无 meta（ty={}）", p.ty))?;
+                        p.push_offset((from * stride) as i64);
+                        p.meta =
+                            Some(Operand::SubImm { base: Box::new(m), sub: from + to });
+                    }
+                }
                 mir::ProjectionElem::OpaqueCast(t) | mir::ProjectionElem::UnwrapUnsafeBinder(t) => {
                     p.ty = t;
                 }
@@ -401,6 +428,27 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
             }
             mir::ConstValue::ZeroSized => LoweredOp::Zst,
+        })
+    }
+
+    /// 指针操作数 → pointee 的 PlaceLow（`*ptr` 语境：volatile 存取等）。
+    fn deref_place_of(&self, ptr: &Operand, ty: Ty<'tcx>) -> Result<PlaceLow<'tcx>, String> {
+        Ok(match ptr {
+            Operand::Slot(s) => PlaceLow {
+                base: PlaceBase::Local(s.off),
+                steps: vec![PlaceStep::Deref],
+                ty,
+                meta: None,
+            },
+            Operand::Imm { bits, .. } => {
+                PlaceLow { base: PlaceBase::Static(*bits), steps: Vec::new(), ty, meta: None }
+            }
+            Operand::Mem { expr, .. } => {
+                let mut steps: Vec<PlaceStep> = expr.steps.clone().into_vec();
+                steps.push(PlaceStep::Deref);
+                PlaceLow { base: expr.base, steps, ty, meta: None }
+            }
+            _ => return Err("指针操作数形态异常（AddrOf/SubImm 语境）".into()),
         })
     }
 
@@ -934,7 +982,15 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         Ok(vec![Stmt::RepeatScalar { dst: dst_p.expr(), val, count, elem_size }])
                     }
                     LoweredOp::Zst => Ok(vec![Stmt::Nop]),
-                    _ => Err("Repeat 非标量元素（M4.1+）".into()),
+                    // 聚合元素（pair/bytes，M4.4 rayon 逼出）：写一份进 dst[0]，
+                    // 引擎从 dst[0] 字节复制铺满其余 count-1 份
+                    _ if count == 0 => Ok(vec![Stmt::Nop]),
+                    _ => {
+                        let elem_size = self.layout_of(self.op_ty(op)?)?.size.bytes();
+                        let mut v = self.write_at(&dst_p, 0, op)?;
+                        v.push(Stmt::RepeatBytes { first: dst_p.expr(), count, elem_size });
+                        Ok(v)
+                    }
                 }
             }
             mir::Rvalue::Discriminant(pl) => {
@@ -1262,6 +1318,60 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                             bits: vt_addr,
                                             width: bw,
                                         }),
+                                    },
+                                ])
+                            }
+                            (ty::Adt(def_a, _), ty::Adt(def_b, _))
+                                if def_a.did() == def_b.did() =>
+                            {
+                                // 结构体尾字段 unsize（自定义 CoerceUnsized：rayon 的
+                                // PolymorphicIter<[T;N]>→<[T]> 等）：data 指针不变，
+                                // meta 由 lockstep 尾字段决定（cg_ssa unsized_info 同构）
+                                let (st, dt) = self.tcx.struct_lockstep_tails_for_codegen(
+                                    src_pointee,
+                                    dst_pointee,
+                                    self.typing_env,
+                                );
+                                let meta = match (st.kind(), dt.kind()) {
+                                    (ty::Array(_, n), ty::Slice(_)) => {
+                                        let n = n
+                                            .try_to_target_usize(self.tcx)
+                                            .ok_or("数组长度非常量")?;
+                                        Operand::Imm { bits: n, width: Width::W64 }
+                                    }
+                                    (_, ty::Dynamic(preds, _))
+                                        if !matches!(st.kind(), ty::Dynamic(..)) =>
+                                    {
+                                        let principal = preds.principal().map(|b| {
+                                            self.tcx.instantiate_bound_regions_with_erased(b)
+                                        });
+                                        let vt_id =
+                                            self.tcx.vtable_allocation((st, principal));
+                                        Operand::Imm {
+                                            bits: self.linker.ensure_alloc(vt_id)?,
+                                            width: Width::W64,
+                                        }
+                                    }
+                                    _ => {
+                                        return Err(format!(
+                                            "结构体尾 unsize {st} → {dt}（M4.4+）"
+                                        ));
+                                    }
+                                };
+                                let ValKind::Pair((ao, aw), (bo, bw)) = dst_kind else {
+                                    return Err("结构体尾 Unsize 目标非 pair".into());
+                                };
+                                let LoweredOp::Scalar(data) = self.lower_operand(a)? else {
+                                    return Err("结构体尾 Unsize 源非瘦指针".into());
+                                };
+                                Ok(vec![
+                                    Stmt::Assign {
+                                        dst: dst_p.half_place(ao, aw),
+                                        rv: Rvalue::Use(data),
+                                    },
+                                    Stmt::Assign {
+                                        dst: dst_p.half_place(bo, bw),
+                                        rv: Rvalue::Use(meta),
                                     },
                                 ])
                             }
@@ -2041,10 +2151,32 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     dst: dst_p.scalar_place(w),
                 }]
             }
-            // fence：单线程语义下宿主原子已全 SeqCst；M4.4 起补真 fence（此处 nop 会
-            // 在真线程期复查——spike4 义务只关乎数据原子性，fence 弱序细化挂 M4.4）
-            "atomic_fence" | "atomic_singlethreadfence" => {
-                vec![Stmt::Nop]
+            // fence 补真（M4.4 D4）：guest 任意序 → 宿主 SeqCst（RAM non-det 包络内）
+            "atomic_fence" => vec![Stmt::Fence { single_thread: false }],
+            "atomic_singlethreadfence" => vec![Stmt::Fence { single_thread: true }],
+            // volatile 存取（rayon JobRef 逼出）：解释器不消除/不重排已执行的内存
+            // 操作——volatile == 普通存取（按 T 的 ValKind 走既有赋值机器）
+            "volatile_load" | "unaligned_volatile_load" => {
+                let t = inst.args.type_at(0);
+                let ptr = self.lower_operand_scalar(&args[0].node)?;
+                let sp = self.deref_place_of(&ptr, t)?;
+                let dst_p = self.resolve_place(destination)?;
+                let dst_kind = self.classify(dst_p.ty)?;
+                let src = match self.classify(t)? {
+                    ValKind::Zst => LoweredOp::Zst,
+                    ValKind::Scalar(w) => LoweredOp::Scalar(sp.scalar_operand(w)),
+                    ValKind::Pair((ao, aw), (bo, bw)) => {
+                        LoweredOp::Pair(sp.half_operand(ao, aw), sp.half_operand(bo, bw))
+                    }
+                    ValKind::Other { size } => LoweredOp::Bytes { place: sp, size },
+                };
+                self.assign_lowered(&dst_p, dst_kind, src)?
+            }
+            "volatile_store" | "unaligned_volatile_store" => {
+                let t = inst.args.type_at(0);
+                let ptr = self.lower_operand_scalar(&args[0].node)?;
+                let sp = self.deref_place_of(&ptr, t)?;
+                self.write_at(&sp, 0, &args[1].node)?
             }
             "copy_nonoverlapping" | "copy" => {
                 // (src, dst, count)——注意顺序与 C memcpy 相反
@@ -2424,7 +2556,9 @@ fn operand_deref_at(op: Operand, off: u32) -> Result<Operand, String> {
             },
             width: Width::W64,
         },
-        Operand::AddrOf(_) => return Err("vtable operand 形态异常".into()),
+        Operand::AddrOf(_) | Operand::SubImm { .. } => {
+            return Err("vtable operand 形态异常".into());
+        }
     })
 }
 
