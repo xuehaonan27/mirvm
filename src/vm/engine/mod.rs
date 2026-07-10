@@ -10,3 +10,4 @@ pub mod heap;
 pub mod interp;
 pub mod ir;
 pub mod stats;
+pub mod thunks;

@@ -88,6 +88,28 @@ fn engine_abort(what: &str) -> ! {
     exit(70)
 }
 
+/// guest TLS 实例真地址（M4.4 D3）：首访惰性物化——heap 分配 + 冻结模板拷贝。
+/// 每线程一份（Ctx 是 thread_local）；v1 记账：线程退出不跑 dtor、实例泄漏。
+fn tls_addr(ctx: *mut Ctx, id: u32) -> u64 {
+    if let Some(&a) = unsafe { (&(*ctx).tls).get(id as usize) }
+        && a != 0
+    {
+        return a;
+    }
+    let module: &Module = unsafe { &(*(*ctx).shared).module };
+    let t = module.tls[id as usize];
+    let addr = super::heap::alloc(t.size.max(1), t.align as u64);
+    unsafe {
+        std::ptr::copy_nonoverlapping(t.template as *const u8, addr as *mut u8, t.size as usize);
+        let tls = &mut (*ctx).tls;
+        if tls.len() <= id as usize {
+            tls.resize(id as usize + 1, 0);
+        }
+        tls[id as usize] = addr;
+    }
+    addr
+}
+
 /// 地址表达式求值 → 真地址（place 求值核心；帧基址是真地址 ⇒ 全程裸地址算术）。
 fn eval_place_addr(ctx: *mut Ctx, base: usize, expr: &PlaceExpr) -> u64 {
     let mut addr = match expr.base {
@@ -240,6 +262,7 @@ fn int_ovf(op: OvfOp, signed: bool, a: u64, b: u64, w: Width) -> (u64, bool) {
 fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
     match rv {
         Rvalue::Use(op) => eval_operand(ctx, base, op).0,
+        Rvalue::TlsRef(id) => tls_addr(ctx, *id),
         Rvalue::IntBin { op, signed, a, b } => {
             let (av, w) = eval_operand(ctx, base, a);
             let (bv, _) = eval_operand(ctx, base, b);
@@ -771,10 +794,10 @@ enum Exit {
 }
 
 /// 按 D4 fn 条目真地址派发（CallIndirect / catch_unwind 的 try/catch fn 共用）。
-fn call_fn_addr(ctx: *mut Ctx, addr: u64, args: &[u64]) -> (u64, u64) {
+fn call_fn_addr(ctx: *mut Ctx, addr: u64, args: &[u64], caller: &str) -> (u64, u64) {
     let module: &Module = unsafe { &(*(*ctx).shared).module };
     let Some(&fid) = module.fn_addrs.get(&addr) else {
-        engine_abort(&format!("间接调用目标 {addr:#x} 不是已知 fn 条目"));
+        engine_abort(&format!("间接调用目标 {addr:#x} 不是已知 fn 条目（调用者 {caller}）"));
     };
     interp_frame(ctx, fid, args)
 }
@@ -822,7 +845,7 @@ fn run_cleanup(ctx: *mut Ctx, func: u32, base: usize, entry: Bb) {
 /// rustc 驱动线程栈 ~16MB → 8000 帧安全余量内（M5 编译帧更浅后可调大）。
 const MAX_DEPTH: u32 = 8_000;
 
-fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
+pub(super) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
     let module: &Module = unsafe { &(*(*ctx).shared).module };
     let body: &FuncBody = &module.funcs[func as usize];
 
@@ -835,7 +858,28 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
     }
 
     let base = region_reserve(ctx, body.frame_size, body.frame_align);
-    // prologue：按 ParamAbi 消费实参槽
+    // prologue：按 ParamAbi 消费实参槽（槽数先验——不匹配给名字与期望，勿裸越界 panic）
+    let needed: usize = matches!(body.ret, RetAbi::Indirect { .. }) as usize
+        + body
+            .params
+            .iter()
+            .map(|p| match p {
+                ParamAbi::Zst => 0,
+                ParamAbi::Scalar(_) | ParamAbi::Indirect { .. } => 1,
+                ParamAbi::Pair(..) => 2,
+            })
+            .sum::<usize>()
+        + body.caller_loc_off.is_some() as usize;
+    if args.len() < needed {
+        engine_abort(&format!(
+            "ABI 不匹配：fn `{}` 期望 {needed} 实参槽（params {:?} ret {:?} loc {:?}），收到 {}",
+            body.name,
+            body.params,
+            body.ret,
+            body.caller_loc_off,
+            args.len()
+        ));
+    }
     let mut ai = 0usize;
     // Indirect 返回：隐藏首实参 = 目的真地址，存入 sret 槽
     if let RetAbi::Indirect { sret_off, .. } = body.ret {
@@ -929,7 +973,19 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 blk = *target as usize;
             }
             Terminator::CallForeign { sym, sig, args: aops, ret, target, unwind } => {
-                let av: Vec<u64> = aops.iter().map(|o| eval_operand(ctx, base, o).0).collect();
+                let mut av: Vec<u64> =
+                    aops.iter().map(|o| eval_operand(ctx, base, o).0).collect();
+                // M4.4 D1：fn-ptr 实参位——guest fn 条目地址逃逸给 native 前物化 thunk
+                // 真码；NULL 与已是 native 真码（反查未命中，guest 转传）原样直传。
+                for (pos, inner) in &sig.thunk_args {
+                    let v = av[*pos];
+                    if v != 0
+                        && let Some(&fid) = module.fn_addrs.get(&v)
+                    {
+                        let shared: &'static Shared = unsafe { &*(*ctx).shared };
+                        av[*pos] = super::thunks::get_or_create(shared, v, fid, inner);
+                    }
+                }
                 edge.set(cleanup_edge(unwind));
                 let libs: &[Box<str>] = &module.native_libs;
                 let r = {
@@ -950,7 +1006,7 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 }
                 blk = *target as usize;
             }
-            Terminator::CallIndirect { callee, args: aops, ret, target, unwind, null_ok } => {
+            Terminator::CallIndirect { callee, args: aops, ret, target, unwind, null_ok, native_sig } => {
                 let (addr, _) = eval_operand(ctx, base, callee);
                 if *null_ok && addr == 0 {
                     // dyn 虚 drop 空槽：无 Drop 的类型 = 空操作
@@ -963,7 +1019,18 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 }
                 av.extend(aops.iter().map(|o| eval_operand(ctx, base, o).0));
                 edge.set(cleanup_edge(unwind));
-                let (lo, hi) = call_guarding_terminate(unwind, || call_fn_addr(ctx, addr, &av));
+                let (lo, hi) = if let Some(&fid) = module.fn_addrs.get(&addr) {
+                    call_guarding_terminate(unwind, || interp_frame(ctx, fid, &av))
+                } else if let Some(nsig) = native_sig {
+                    // FFI 反方向之二（M4.4）：guest 持 native 真码 fn ptr（运行期
+                    // dlsym 所得，如 __pthread_get_minstack）→ 按冻结签名直调
+                    (super::ffi::call_addr(addr as usize, nsig, &av), 0)
+                } else {
+                    engine_abort(&format!(
+                        "间接调用目标 {addr:#x} 不是已知 fn 条目（调用者 {}）",
+                        body.name
+                    ));
+                };
                 edge.set(None);
                 match ret {
                     RetDest::Ignore | RetDest::Indirect(_) => {}
@@ -1026,12 +1093,12 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                     Builtin::CatchUnwind => {
                         let (try_fn, data, catch_fn) = (a(0), a(1), a(2));
                         match panic::catch_unwind(AssertUnwindSafe(|| {
-                            call_fn_addr(ctx, try_fn, &[data])
+                            call_fn_addr(ctx, try_fn, &[data], "catch_unwind.try")
                         })) {
                             Ok(_) => 0,
                             Err(e) => match e.downcast::<GuestPanic>() {
                                 Ok(gp) => {
-                                    call_fn_addr(ctx, catch_fn, &[data, gp.exception]);
+                                    call_fn_addr(ctx, catch_fn, &[data, gp.exception], "catch_unwind.catch");
                                     1
                                 }
                                 // 宿主 panic（VM bug）不是 guest 异常：原样续传

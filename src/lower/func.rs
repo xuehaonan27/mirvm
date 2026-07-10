@@ -132,8 +132,10 @@ enum LoweredOp<'tcx> {
 /// 调用目标三形态（finish_call 共用道）。
 enum CallTarget {
     Direct(Callee),
-    /// fn-ptr / vtable 槽：operand 求值 = D4 条目真地址
-    Indirect(Operand),
+    /// fn-ptr / vtable 槽：operand 求值 = D4 条目真地址。
+    /// Option = extern "C" 系 fn-ptr 的冻结签名（M4.4 FFI 反方向之二：
+    /// 反查未命中 → native 真码 libffi 直调；虚派发/Rust ABI 恒 None）
+    Indirect(Operand, Option<ir::ForeignSig>),
 }
 
 /// 枚举判别式的冻结编码（Direct 在 lower 期溶解为 Cast，niche 用 NicheDiscr rvalue）。
@@ -1047,17 +1049,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
             }
             mir::Rvalue::ThreadLocalRef(def_id) => {
-                // ★ M4.4 义务：真线程时 TLS 必须换 per-thread 实例（此处单线程近似 =
-                // 普通 static 物化——多线程下共享一个实例是错值！gate M4.4 时替换）
-                let alloc_id = self.tcx.reserve_and_set_static_alloc(*def_id);
-                let addr = self.linker.ensure_alloc(alloc_id)?;
+                // M4.4 D3：per-thread 实例——稠密 TlsId，执行期 Ctx.tls 惰性物化
+                // （heap 分配 + 冻结模板拷贝）。v1 记账：dtor 不跑（设计 D3）。
+                let id = self.linker.tls_id(*def_id)?;
                 let ValKind::Scalar(w) = dst_kind else {
                     return Err("ThreadLocalRef 目标非标量".into());
                 };
-                Ok(vec![Stmt::Assign {
-                    dst: dst_p.scalar_place(w),
-                    rv: Rvalue::Use(Operand::Imm { bits: addr, width: w }),
-                }])
+                Ok(vec![Stmt::Assign { dst: dst_p.scalar_place(w), rv: Rvalue::TlsRef(id) }])
             }
             mir::Rvalue::WrapUnsafeBinder(op, _) => {
                 let src = self.lower_operand(op)?;
@@ -1508,6 +1506,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                 target: target.as_u32(),
                                 unwind: self.lower_unwind(*unwind),
                                 null_ok: true,
+                                native_sig: None,
                             },
                         ));
                     }
@@ -1542,11 +1541,18 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let fn_ty = self.op_ty(func)?;
                 let ty::FnDef(def_id, gargs) = fn_ty.kind() else {
                     if fn_ty.is_fn_ptr() {
-                        // fn-ptr 间接调用：值 = D4 条目真地址，引擎反查派发
+                        // fn-ptr 间接调用：值 = D4 条目真地址，引擎反查派发；
+                        // extern "C" 系另冻结 native 签名（反查未命中 = 运行期 dlsym
+                        // 所得真码 → libffi 直调，M4.4 FFI 反方向之二）
                         let callee_op = self.lower_operand_scalar(func)?;
+                        let native_sig =
+                            super::freeze_c_fnptr_sig(self.tcx, self.typing_env, fn_ty);
+                        let rust_call = fn_ty.fn_sig(self.tcx).skip_binder().abi()
+                            == rustc_abi::ExternAbi::RustCall;
                         return self.finish_call(
-                            CallTarget::Indirect(callee_op),
+                            CallTarget::Indirect(callee_op, native_sig),
                             None,
+                            rust_call,
                             args,
                             destination,
                             *target,
@@ -1567,9 +1573,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 // track_caller 方法照传 location（vtable 侧是 VTable shim 接收）。
                 if let InstanceKind::Virtual(_, idx) = inst.def {
                     let loc_arg = self.caller_loc_arg(&inst, term.source_info.span)?;
+                    let rust_call = fn_ty.fn_sig(self.tcx).skip_binder().abi()
+                        == rustc_abi::ExternAbi::RustCall;
                     return self.lower_virtual_call(
                         idx,
                         loc_arg,
+                        rust_call,
                         args,
                         destination,
                         *target,
@@ -1605,9 +1614,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 // Linker 三路解析（debt-map §2-B）：普通函数/intrinsic fallback →
                 // worklist 扩集；foreign → ①引擎原语 ②链接仿真 ③Trap
                 let callee = self.linker.resolve_call(inst)?;
+                let rust_call = fn_ty.fn_sig(self.tcx).skip_binder().abi()
+                    == rustc_abi::ExternAbi::RustCall;
                 return self.finish_call(
                     CallTarget::Direct(callee),
                     loc_arg,
+                    rust_call,
                     args,
                     destination,
                     *target,
@@ -1621,23 +1633,44 @@ impl<'tcx> LowerCx<'tcx, '_> {
     /// dyn 虚派发（InstanceKind::Virtual）：receiver 胖指针 (data, vtable)，
     /// callee = *(vtable + idx×8)（vtable 已按第 4 步物化，槽存 D4 fn 条目真地址），
     /// receiver 实参换 data 半（&dyn → &Concrete 瘦化）。
+    #[allow(clippy::too_many_arguments)]
     fn lower_virtual_call(
         &mut self,
         idx: usize,
         loc_arg: Option<Operand>,
+        rust_call: bool,
         args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
         destination: &mir::Place<'tcx>,
         target: Option<mir::BasicBlock>,
         unwind: mir::UnwindAction,
     ) -> Result<(Vec<Stmt>, Terminator), String> {
-        let recv = self.lower_operand(&args[0].node)?;
-        let LoweredOp::Pair(data, vt) = recv else {
-            return Err("dyn receiver 非胖指针（Box<dyn> 聚合形态，M4.1+）".into());
+        let (data, vt) = match self.lower_operand(&args[0].node) {
+            Ok(LoweredOp::Pair(data, vt)) => (data, vt),
+            // by-value dyn 派发（cg_ssa Ref(PlaceValue{llextra:Some(meta)}) 臂同构）：
+            // receiver 是 unsized dyn place 的 move（Box<dyn FnOnce>::call_once 内
+            // `F::call_once(move (*self))`）——data = place 真地址、callee 经 place meta
+            // 查 vtable 槽（槽内是 ShimKind::VTable shim：收 *mut Self 瘦指针再 move 出，
+            // 本 nightly instance.rs resolve_for_vtable）。与 dyn Drop 同一形状。
+            _ => {
+                let Some(pl) = args[0].node.place() else {
+                    return Err("dyn receiver 非胖指针亦非 place".into());
+                };
+                let p = self.resolve_place(&pl)?;
+                if !matches!(p.ty.kind(), ty::Dynamic(..)) {
+                    return Err(format!("dyn receiver 形态未知（ty={}）", p.ty));
+                }
+                let meta = p
+                    .meta
+                    .clone()
+                    .ok_or_else(|| format!("by-value dyn receiver 无 meta（ty={}）", p.ty))?;
+                (Operand::AddrOf(p.expr()), meta)
+            }
         };
         let callee = operand_deref_at(vt, (idx * 8) as u32)?;
         self.finish_call_inner(
-            CallTarget::Indirect(callee),
+            CallTarget::Indirect(callee, None),
             loc_arg,
+            rust_call,
             Some(data),
             args,
             destination,
@@ -1650,12 +1683,86 @@ impl<'tcx> LowerCx<'tcx, '_> {
         &mut self,
         ct: CallTarget,
         loc_arg: Option<Operand>,
+        rust_call: bool,
         args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
         destination: &mir::Place<'tcx>,
         target: Option<mir::BasicBlock>,
         unwind: mir::UnwindAction,
     ) -> Result<(Vec<Stmt>, Terminator), String> {
-        self.finish_call_inner(ct, loc_arg, None, args, destination, target, unwind)
+        self.finish_call_inner(ct, loc_arg, rust_call, None, args, destination, target, unwind)
+    }
+
+    /// rust-call ABI 尾参 tuple 的调用点拆传（cg_ssa codegen_arguments_untupled 同构）：
+    /// 物理约定 = 字段展平（闭包本体 MIR 参数天然已拆开；shim 的 spread_arg 对称展开）。
+    fn untuple_rust_call_arg(
+        &mut self,
+        op: &mir::Operand<'tcx>,
+        out: &mut Vec<Operand>,
+    ) -> Result<(), String> {
+        let ty = self.op_ty(op)?;
+        let ty::Tuple(fields) = ty.kind() else {
+            return Err(format!("rust-call 尾参非 tuple（{ty}）"));
+        };
+        let layout = self.layout_of(ty)?;
+        // 空/全 ZST tuple（含常量形态，如 `(fn项,)`）：无字段可传
+        if fields.is_empty() || layout.is_zst() {
+            return Ok(());
+        }
+        // 可字段投影的 place；常量 tuple（如 `(None,)` 提升常量）按整体分类映射字段
+        let p = if let Some(pl) = op.place() {
+            self.resolve_place(&pl)?
+        } else {
+            match self.lower_operand(op)? {
+                LoweredOp::Zst => return Ok(()),
+                // Indirect 常量已物化冻结区 → 有 place，照常字段投影
+                LoweredOp::Bytes { place, .. } => place,
+                // 整体标量 = 唯一非 ZST 字段即整体（ZST 字段两侧都跳过）
+                LoweredOp::Scalar(o) => {
+                    out.push(o);
+                    return Ok(());
+                }
+                // 整体 pair：两半按**偏移**认领到字段（tuple 字段可重排），按字段序发出
+                LoweredOp::Pair(a, b) => {
+                    let ValKind::Pair((ao, _), (bo, _)) = self.classify(ty)? else {
+                        return Err(format!("常量 tuple 分类漂移（{ty}）"));
+                    };
+                    let (mut ha, mut hb) = (Some(a), Some(b));
+                    for (i, fty) in fields.iter().enumerate() {
+                        if matches!(self.classify(fty)?, ValKind::Zst) {
+                            continue;
+                        }
+                        let off = layout.fields.offset(i).bytes() as u32;
+                        if off == ao
+                            && let Some(x) = ha.take()
+                        {
+                            out.push(x);
+                        } else if off == bo
+                            && let Some(x) = hb.take()
+                        {
+                            out.push(x);
+                        }
+                    }
+                    if ha.is_some() || hb.is_some() {
+                        return Err(format!("常量 pair tuple 字段认领失败（{ty}）"));
+                    }
+                    return Ok(());
+                }
+            }
+        };
+        for (i, fty) in fields.iter().enumerate() {
+            let off = layout.fields.offset(i).bytes() as u32;
+            match self.classify(fty)? {
+                ValKind::Zst => {}
+                ValKind::Scalar(w) => out.push(p.half_operand(off, w)),
+                ValKind::Pair((ao, aw), (bo, bw)) => {
+                    out.push(p.half_operand(off + ao, aw));
+                    out.push(p.half_operand(off + bo, bw));
+                }
+                // 聚合字段：传字段真地址（callee 侧 ParamAbi::Indirect memcpy 重组）
+                ValKind::Other { .. } => out.push(Operand::AddrOf(p.expr_plus(off))),
+            }
+        }
+        Ok(())
     }
 
     /// 调用收尾共用道：实参展平（ABI v2，失败前置 Trap 保 Call 边）→ 返回落点四路
@@ -1665,6 +1772,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         &mut self,
         ct: CallTarget,
         loc_arg: Option<Operand>,
+        rust_call: bool,
         first_override: Option<Operand>,
         args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
         destination: &mir::Place<'tcx>,
@@ -1682,6 +1790,14 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 && let Some(o) = &first_override
             {
                 ir_args.push(o.clone());
+                continue;
+            }
+            // rust-call ABI：尾参 tuple 逐字段拆传（物理约定 = 字段展平）
+            if rust_call && i == args.len() - 1 {
+                if let Err(e) = self.untuple_rust_call_arg(&a.node, &mut ir_args) {
+                    pre.push(Stmt::Trap(format!("rust-call 尾参: {e}").into_boxed_str()));
+                    ir_args.clear();
+                }
                 continue;
             }
             match self.lower_operand(&a.node) {
@@ -1756,24 +1872,31 @@ impl<'tcx> LowerCx<'tcx, '_> {
             CallTarget::Direct(Callee::Builtin(b)) => {
                 Terminator::CallBuiltin { builtin: b, args: ir_args, ret, target: tgt, unwind }
             }
-            CallTarget::Direct(Callee::Foreign { sym, args: fixed, ret: fret, variadic }) => {
+            CallTarget::Direct(Callee::Foreign {
+                sym,
+                args: fixed,
+                ret: fret,
+                variadic,
+                thunk_args,
+            }) => {
                 let sig = if variadic {
                     let nfixed = fixed.len();
                     let mut all = fixed;
                     all.extend(tail_kinds.drain(nfixed.min(tail_kinds.len())..));
-                    ir::ForeignSig { args: all, ret: fret, fixed: Some(nfixed) }
+                    ir::ForeignSig { args: all, ret: fret, fixed: Some(nfixed), thunk_args }
                 } else {
-                    ir::ForeignSig { args: fixed, ret: fret, fixed: None }
+                    ir::ForeignSig { args: fixed, ret: fret, fixed: None, thunk_args }
                 };
                 Terminator::CallForeign { sym, sig, args: ir_args, ret, target: tgt, unwind }
             }
-            CallTarget::Indirect(callee) => Terminator::CallIndirect {
+            CallTarget::Indirect(callee, native_sig) => Terminator::CallIndirect {
                 callee,
                 args: ir_args,
                 ret,
                 target: tgt,
                 unwind,
                 null_ok: false,
+                native_sig,
             },
         };
         Ok((pre, term))
@@ -2399,10 +2522,39 @@ pub(crate) fn lower_instance<'tcx>(
         }
     };
 
-    // 参数落位（_1..=_argc，ABI v2）
+    // 参数落位（_1..=_argc，ABI v2）。
+    //
+    // rust-call ABI 的物理约定 = tuple **按字段展平**（cg_ssa/Miri 同构）：闭包本体的
+    // MIR 参数天然已拆开（env, a, b），调用点把 tuple operand 逐字段拆传
+    // （untuple_rust_call_arg）；shim body（ClosureOnce/VTable）的 spread_arg 标记
+    // tuple local——此处按字段展开为多个参数（落位 = tuple local 内部偏移，prologue
+    // 写入即重组）。单参闭包曾靠 (A,) 与 A 布局巧合蒙混（M4.1-4.3），双参闭包
+    // （thread spawn 链的 map_try_fold/LocalKey::set）逼出真协议。
     let mut params = Vec::new();
     for local in body.args_iter() {
         let info = &frame.locals[local.as_usize()];
+        if body.spread_arg == Some(local) {
+            let rustc_middle::ty::TyKind::Tuple(fields) = info.ty.kind() else {
+                return Err(format!("spread_arg 非 tuple（{}）", info.ty));
+            };
+            let layout = frame::layout_of(tcx, typing_env, info.ty)?;
+            for (i, fty) in fields.iter().enumerate() {
+                let foff = info.off + layout.fields.offset(i).bytes() as u32;
+                let fl = frame::layout_of(tcx, typing_env, fty)?;
+                params.push(match frame::classify(tcx, &fl) {
+                    ValKind::Zst => ParamAbi::Zst,
+                    ValKind::Scalar(w) => ParamAbi::Scalar(Slot { off: foff, width: w }),
+                    ValKind::Pair((ao, aw), (bo, bw)) => ParamAbi::Pair(
+                        Slot { off: foff + ao, width: aw },
+                        Slot { off: foff + bo, width: bw },
+                    ),
+                    ValKind::Other { size } => {
+                        ParamAbi::Indirect { off: foff, size: size as u32 }
+                    }
+                });
+            }
+            continue;
+        }
         params.push(match info.kind {
             ValKind::Zst => ParamAbi::Zst,
             ValKind::Scalar(w) => ParamAbi::Scalar(Slot { off: info.off, width: w }),
@@ -2413,10 +2565,6 @@ pub(crate) fn lower_instance<'tcx>(
             ValKind::Other { size } => ParamAbi::Indirect { off: info.off, size: size as u32 },
         });
     }
-
-    // rust-call ABI 的 spread_arg（closure shim）在引擎自有调用约定下是 no-op：
-    // caller MIR 传一个 tuple operand、callee 的 spread local 就是一个 tuple local，
-    // 两侧按 ValKind 对称展平（native FnAbi 才需要按字段展开）——无需特殊处理。
 
     // #[track_caller]：帧尾 &Location 隐藏尾实参槽（cg_ssa ABI 同构）
     let caller_loc_off = if instance.def.requires_caller_location(tcx) {

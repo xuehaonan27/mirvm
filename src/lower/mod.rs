@@ -28,15 +28,23 @@ pub(crate) enum Callee {
     Func(ir::FuncId),
     /// 引擎原语①（std runtime extern 边界：alloc/unwind 系 + stub）
     Builtin(ir::Builtin),
-    /// os:: 直通③（dlsym+libffi）：固定参数 FfiKind 已冻结；变参尾由调用点实参补
-    Foreign { sym: Box<str>, args: Vec<ir::FfiKind>, ret: ir::FfiKind, variadic: bool },
+    /// os:: 直通③（dlsym+libffi）：固定参数 FfiKind 已冻结；变参尾由调用点实参补。
+    /// thunk_args = fn-ptr 类型的参数位 + 其内层冻结签名（M4.4 D1 thunk 工厂）
+    Foreign {
+        sym: Box<str>,
+        args: Vec<ir::FfiKind>,
+        ret: ir::FfiKind,
+        variadic: bool,
+        thunk_args: Vec<(usize, ir::ForeignSig)>,
+    },
 }
 
 /// 危险符号（P7 denylist）：绝不直通 native——会绕开进程/线程模型。
-/// pthread 生命周期类挂 M4.4（真线程）；只读查询类（self/attr_get*）放行直通。
+/// M4.4 D2：pthread_create/join/detach 已移出（真线程直通，fn-ptr 实参经 thunk 工厂）；
+/// 保留 pthread_exit（glibc 强制 unwind 绕过 FrameGuard——std 不用它）与 fork/exec/setjmp 系。
 const DENY_EXACT: &[&str] = &[
     "fork", "vfork", "clone", "clone3", "setjmp", "longjmp", "sigsetjmp", "siglongjmp",
-    "pthread_create", "pthread_join", "pthread_detach", "pthread_exit", "pthread_atfork",
+    "pthread_exit", "pthread_atfork",
 ];
 const DENY_PREFIX: &[&str] = &["exec", "posix_spawn"];
 
@@ -63,6 +71,9 @@ pub(crate) struct Linker<'tcx> {
     fn_entries: FxHashMap<Instance<'tcx>, u64>,
     /// 反查：条目真地址 → FuncId（间接调用派发用，移交 Module）
     fn_addrs: FxHashMap<u64, ir::FuncId>,
+    /// guest TLS：`#[thread_local]` static → 稠密 TlsId + 槽表（M4.4 D3，移交 Module）
+    tls_ids: FxHashMap<rustc_hir::def_id::DefId, ir::TlsId>,
+    tls_slots: Vec<ir::TlsSlot>,
 }
 
 impl<'tcx> Linker<'tcx> {
@@ -77,7 +88,31 @@ impl<'tcx> Linker<'tcx> {
             alloc_addrs: FxHashMap::default(),
             fn_entries: FxHashMap::default(),
             fn_addrs: FxHashMap::default(),
+            tls_ids: FxHashMap::default(),
+            tls_slots: Vec::new(),
         }
+    }
+
+    /// `#[thread_local]` static → 稠密 TlsId（M4.4 D3）。模板 = 初始化器求值产物
+    /// 物化进冻结区（ensure_alloc 复用，重定位白拿——运行期只作字节源，无人写）。
+    pub(crate) fn tls_id(
+        &mut self,
+        def_id: rustc_hir::def_id::DefId,
+    ) -> Result<ir::TlsId, String> {
+        if let Some(&id) = self.tls_ids.get(&def_id) {
+            return Ok(id);
+        }
+        let alloc = self
+            .tcx
+            .eval_static_initializer(def_id)
+            .map_err(|e| format!("TLS static 初始化器求值失败: {e:?}"))?;
+        let (size, align) = (alloc.inner().size().bytes(), alloc.inner().align.bytes());
+        let alloc_id = self.tcx.reserve_and_set_static_alloc(def_id);
+        let template = self.ensure_alloc(alloc_id)?;
+        let id = self.tls_slots.len() as ir::TlsId;
+        self.tls_slots.push(ir::TlsSlot { template, size, align: align as u32 });
+        self.tls_ids.insert(def_id, id);
+        Ok(id)
     }
 
     /// fn-ptr 条目地址（D4）：每 instance 一个 16 对齐真地址；内容 = FuncId（调试用）。
@@ -262,6 +297,8 @@ impl<'tcx> Linker<'tcx> {
     }
 
     /// os:: 直通签名冻结：foreign fn sig → FfiKind 列表（tier-0 ty_to_ffitype 同构）。
+    /// fn-ptr 类型的参数（pthread_create 的 thread_start 等）额外冻结**内层签名**
+    /// （M4.4 D1）：执行期该位若收到 fn 条目地址，thunk 工厂物化真机器码后再直传。
     fn freeze_foreign_sig(
         &mut self,
         inst: Instance<'tcx>,
@@ -274,14 +311,51 @@ impl<'tcx> Linker<'tcx> {
             .skip_binder();
         let env = TypingEnv::fully_monomorphized();
         let mut args = Vec::with_capacity(sig.inputs().len());
-        for &t in sig.inputs() {
+        let mut thunk_args = Vec::new();
+        for (i, &t) in sig.inputs().iter().enumerate() {
             args.push(ffi_kind_of(self.tcx, env, t).map_err(|e| {
                 format!("foreign `{name}` 参数 {t}: {e}（libffi 直通仅标量/指针）")
             })?);
+            // fn ptr 参数位：裸 fn ptr + `Option<fn>`（可空回调——pthread_key_create 的
+            // dtor 等；niche 布局下 None=0 原样直传）。内层签名不可冻结 = 整调用点
+            // Trap（防静默错值：条目地址直传给 native 是静默崩溃）。
+            let fnptr_ty = if t.is_fn_ptr() {
+                Some(t)
+            } else if let rustc_middle::ty::TyKind::Adt(def, sub) = t.kind()
+                && self.tcx.is_diagnostic_item(rustc_span::sym::Option, def.did())
+                && sub.type_at(0).is_fn_ptr()
+            {
+                Some(sub.type_at(0))
+            } else {
+                None
+            };
+            if let Some(t) = fnptr_ty {
+                let inner = t.fn_sig(self.tcx).skip_binder();
+                if inner.c_variadic() {
+                    return Err(format!("foreign `{name}` 参数 {t}: 变参回调不支持 thunk"));
+                }
+                let mut in_args = Vec::with_capacity(inner.inputs().len());
+                for &it in inner.inputs() {
+                    let k = ffi_kind_of(self.tcx, env, it).map_err(|e| {
+                        format!("foreign `{name}` 回调参数 {it}: {e}（thunk 仅标量/指针）")
+                    })?;
+                    if k == ir::FfiKind::Void {
+                        return Err(format!("foreign `{name}` 回调参数 {it}: ZST 不可作 cif 参数"));
+                    }
+                    in_args.push(k);
+                }
+                let in_ret = ffi_kind_of(self.tcx, env, inner.output()).map_err(|e| {
+                    format!("foreign `{name}` 回调返回 {}: {e}", inner.output())
+                })?;
+                thunk_args.push((
+                    i,
+                    ir::ForeignSig { args: in_args, ret: in_ret, fixed: None, thunk_args: vec![] },
+                ));
+            }
         }
         let ret = ffi_kind_of(self.tcx, env, sig.output())
             .map_err(|e| format!("foreign `{name}` 返回 {}: {e}", sig.output()))?;
-        Ok(Callee::Foreign { sym: name.into(), args, ret, variadic: sig.c_variadic() })
+        Ok(Callee::Foreign { sym: name.into(), args, ret, variadic: sig.c_variadic(), thunk_args })
     }
 
     /// 导出符号表（②），惰性一次构建：遍历"最终二进制会链接到"的全部非泛型导出 def
@@ -351,6 +425,31 @@ impl<'tcx> Linker<'tcx> {
             map
         })
     }
+}
+
+/// extern "C" 系 fn-ptr 类型 → 冻结 ForeignSig（M4.4 FFI 反方向之二：调用点带上，
+/// 执行期条目反查未命中 = guest 持 native 真码 → libffi 按此直调）。
+/// None = Rust ABI / 变参 / 参数不可类——该调用点只能派发 guest 条目（未命中即诊断）。
+pub(crate) fn freeze_c_fnptr_sig<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    env: TypingEnv<'tcx>,
+    ty: rustc_middle::ty::Ty<'tcx>,
+) -> Option<ir::ForeignSig> {
+    use rustc_abi::ExternAbi;
+    let sig = ty.fn_sig(tcx).skip_binder();
+    if !matches!(sig.abi(), ExternAbi::C { .. } | ExternAbi::System { .. }) || sig.c_variadic() {
+        return None;
+    }
+    let mut args = Vec::with_capacity(sig.inputs().len());
+    for &t in sig.inputs() {
+        let k = ffi_kind_of(tcx, env, t).ok()?;
+        if k == ir::FfiKind::Void {
+            return None; // ZST 不可作 cif 参数
+        }
+        args.push(k);
+    }
+    let ret = ffi_kind_of(tcx, env, sig.output()).ok()?;
+    Some(ir::ForeignSig { args, ret, fixed: None, thunk_args: vec![] })
 }
 
 /// 类型 → libffi 直通类别（标量与指针；ZST=Void 仅返回位；聚合不支持）。
@@ -531,6 +630,7 @@ pub fn lower_program(tcx: TyCtxt<'_>, argv: &[String]) -> ir::Module {
     // 冻结区与 fn 条目反查表移交执行相
     module.frozen = Some(linker.frozen);
     module.fn_addrs = linker.fn_addrs.into_iter().collect();
+    module.tls = linker.tls_slots;
     module.entry = entry;
     module
 }

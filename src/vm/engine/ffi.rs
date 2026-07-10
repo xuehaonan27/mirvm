@@ -58,7 +58,7 @@ impl FfiState {
     }
 }
 
-fn ffi_type(k: FfiKind) -> FfiType {
+pub(super) fn ffi_type(k: FfiKind) -> FfiType {
     match k {
         FfiKind::I8 => FfiType::i8(),
         FfiKind::I16 => FfiType::i16(),
@@ -85,7 +85,12 @@ pub fn call(
     args: &[u64],
 ) -> Option<u64> {
     let fnptr = state.resolve(sym, libs)?;
+    Some(call_addr(fnptr, sig, args))
+}
 
+/// 按真码地址直调（CallForeign 的共用尾；也是 CallIndirect 反查未命中时的
+/// native fn-ptr 通道——guest 运行期 dlsym 所得真码，M4.4 FFI 反方向之二）。
+pub fn call_addr(fnptr: usize, sig: &ForeignSig, args: &[u64]) -> u64 {
     let types: Vec<FfiType> = sig.args.iter().map(|&k| ffi_type(k)).collect();
     let cif = match sig.fixed {
         Some(nfixed) => Cif::new_variadic(types, nfixed, ffi_type(sig.ret)),
@@ -96,10 +101,10 @@ pub fn call(
     let bufs: Vec<[u8; 8]> = args.iter().map(|a| a.to_le_bytes()).collect();
     let ffi_args: Vec<Arg<'_>> = bufs.iter().map(|b| Arg::new(b)).collect();
     let mut ret = [0u8; 8];
-    // SAFETY: 符号来自 dlsym；签名按 rustc fn sig layout 冻结；guest 缓冲即宿主缓冲。
-    // fast 立场（C4）：native 调用的正确性由 guest 程序负责。
+    // SAFETY: 地址来自 dlsym / guest 持有的真码指针；签名按 rustc fn sig layout 冻结；
+    // guest 缓冲即宿主缓冲。fast 立场（C4）：native 调用的正确性由 guest 程序负责。
     unsafe {
         cif.call_return_into(CodePtr(fnptr as *mut _), &ffi_args, Ret::new(&mut ret[..]));
     }
-    Some(u64::from_le_bytes(ret))
+    u64::from_le_bytes(ret)
 }
