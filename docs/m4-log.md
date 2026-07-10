@@ -358,3 +358,80 @@ trap-free + **TSan 多线程真身零警告**（8 线程共享 Shared/各自 Ctx
   全绿盘点 + 性能硬门 + `.init_array` ctors + async 收口 + signal 真装载（若需）→ M4.5。
 - weak fn 符号真地址化（thunk 就绪后可升级；现维持判空 cell）→ 按需。
 - dyn 上溯 vtable 变换 / unsized→dyn（async demo 不可达残留）→ 按需。
+
+## M4.5 收口 + M4 关账 —— **完成**（2026-07-10）
+
+**Gate 全绿**：`tests/m4_gate5.sh` 31/31——corpus 默认集 + 探针 **20 绿 + 4 asm 预期红**
+（blake3/sha2=cpuid、tempfile=syscall、numbigint=div，corpus §2.2 三面孔归 M5）；
+diff_cargo **ffi_zlib + project 绿**（ecosystem = cpuid asm 预期红）；性能上限达标
+（加载相 413ms < 1s、rayon 866ms < 5s ≈ tier-0 28s 的 32×）；全量回归无损
+（diff 16/16、gate0-4、TSan、spikes、纯度）。计划 D2/D3/D5 用户批"按推荐"。
+
+### 建了什么（对照 docs/m4.5-plan.md 施工顺序）
+
+- **步 1 Adt 递归胖化**（cg_ssa coerce_unsized_into/unsize_ptr 同构）：`unsize_meta_of`
+  类型递归——指针对 → `fresh_unsize_meta`（Array→Slice 长度 / sized→dyn 物化 vtable）；
+  同 def 结构体 → 递归**唯一非 ZST 字段**（跳 1-ZST 的 PhantomData/Global）；pattern
+  type（本 nightly NonNull 内 `*const T is !null`）剥壳。解锁 Arc/Rc/Pin<Box>/Box<[T]>
+  等自定义 CoerceUnsized——此前仅 Box 靠 builtin_deref 特例通。旧 Unsize 三支合流。
+- **步 2 intrinsic**：raw_eq（memcmp==0）；数学面 must_be_overridden float intrinsic
+  宿主直算（MathUn 14 + MathBin 5，f32/f64 成对，P7 合成处置）；float_to_int_unchecked
+  （fast = 同 as）；size_of_val/align_of_val 的 unsized 尾字段结构体（slice/str 尾 +
+  dyn 尾 full_align=UMax、full_size=align_to）；128 位 IntToFloat（Wide128ToFloat）。
+- **步 3 128 位判别式 tag**：Direct 窄化读低 64 位 + 值域守卫；**128 位 Niche 全链**
+  （TagInfo::Niche128 + Stmt::NicheDiscr128 u128 算术 + SetDiscr 16 字节写；regex_automata
+  的 `Result<DFA, BuildError>` u128::MAX niche）；胖指针 Eq/Ne（`*const [T]`/dyn 两半
+  都比，Arc::ptr_eq）。
+- **步 4 posix_spawn 直通（D3）**：移出 denylist（子体立即 exec，VM 状态从不在子进程
+  运行）；c_process 绿，子进程 IO 对拍 native 一致。裸 fork/exec/setjmp 维持拒绝。
+- **步 5 gate5** + **步 6 关账**（本条目 + 下方总验收）。
+
+### 经验与教训
+
+1. **防静默错值第二次立功**：tokio 的 `Alignment::new_unchecked` UB 检查抓到我
+   size_of_val-dyn 分支里 `sext(bool)` 造掩码的错（`1i8` 符号扩展是 1 不是全 1，
+   `tail_align < sized_align` 时算出非 2 的幂 align）——换 `Rvalue::UMax` 重写。
+   **branchless 位技巧比一个专用 rvalue 更易错，且更难读**——UMax 一行胜过 20 行异或。
+2. **unsize 是"一路下钻到指针对"的类型递归，不是单层**：Arc<[T]> 的 CoerceUnsized
+   要穿 `Arc → NonNull → *const ArcInner<[T]>` 三层才到指针，每层跳 1-ZST 字段。
+   cg_ssa 的 unsize_ptr 就这么做——照抄结构而非猜。
+3. **128 位判别式真实存在于生态**（不是理论角例）：regex_automata 的 `Result<DFA,_>`
+   用 u128::MAX 作 niche_start。M4.5 计划里我写的"Niche 128 位若不可达不预支"逃生门
+   被实测推翻——**计划的可达性假设要被真数据检验**（我在计划里留了门，实测触发就补）。
+4. **cpuid 是 SIMD 库的统一拦路虎**：regex/blake3/sha2 都先 `std_detect` cpuid 探测
+   CPU 特性再选 SIMD 路径。这是 corpus §2.2 早已识别的 asm 三面孔之一，归 M5 JIT asm
+   块（"虚拟 CPU = 真宿主 CPU"，但走 JIT 不走模板特判——用户既定）。ecosystem 被我从
+   "128 位 tag" 一路推进到 serde 全对、regex 走到特性探测，最终仍撞这堵墙。
+5. **本 nightly 漂移**（续）：`FieldDef::ty` 返回 `Unnormalized<'tcx, Ty>` 包装
+   （normalize_erasing_regions 直接吃它）；`struct_tail_for_codegen`/
+   `struct_lockstep_tails_for_codegen(src, dst, env)`。
+
+### asm 边界（M5 归宿，透明记账）
+
+corpus/diff_cargo 剩余全红 = corpus §2.2 的 inline asm 三面孔，**无一是引擎语义缺口**：
+- **cpuid 特性检测**：blake3、sha2、ecosystem(regex)——`std_detect::detect_features`
+- **裸 syscall**：tempfile——rustix 直发 syscall 指令
+- **算术原语 div**：numbigint——128 位除法的 `div` 指令
+
+处置 = M5 JIT asm 块（"直接 JIT，非模板拦截；虚拟 CPU = 真宿主 CPU"，用户 2026-07-05
+定）。M4 纯解释器无 JIT，故记预期红——非债务，是 M5 份内的既定挂起项。
+
+## ★ M4 总验收（m4-plan §4 逐条对勾，2026-07-10）
+
+① **语义** ✅：demo 全量差分 16/16 == native（值/内存/unwind/os::/FFI/128 位/真线程）；
+   corpus 非 asm 全绿（20 项）；cargo 形态 ffi_zlib + project == native。
+② **并发** ✅：真 1:1 线程（pthread/futex/join 直通）；TSan 多线程真身零警告（引擎
+   Sync）；tier-0 挂死双场景（c_blocking_io/c_net_echo_threaded）秒级通过；rayon 32×。
+③ **架构** ✅：执行相零 tcx（纯度门禁机械把关）、零 AllocId overlay（真地址裸访问）、
+   os:: 收口（P7 三处置）、模型 A（guest 帧上 native 栈，单条 unwind）。
+④ **性能** ✅：硬门达标（加载 413ms、rayon 866ms）；加速比 rayon 32× vs tier-0 记录
+   在案；fib(32) 解释器 ~150× vs native = M5 JIT 的基线锚点（解释器档位既定取向）。
+
+**M4 完成**。挂起项移交（M5 / mode B）：
+- **M5 JIT**：Cranelift 接入（spike5 验证）；inline asm 块（cpuid/syscall/div 五用例）；
+  vmctx P vs R 真负载终裁（spike5 初判 R 快 8%）；JIT 帧内 landing pad/LSDA；
+  fib 类热循环加速（解释器 ~150× → 目标个位数×）。
+- **mode B**：预降 std 发行工件（.mirvm 分发，消费端零 rust-src）。
+- **按需**：weak fn 符号真地址化（thunk 就绪）；guest TLS 块回收（v1 泄漏记账）；
+  dyn 上溯 vtable 变换；.init_array ctors；signal 真装载（M4.4 裁 A，thunk 已就绪）；
+  线程栈大小精确化（解释帧在宿主栈，M5 编译帧更浅后）。

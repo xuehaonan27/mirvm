@@ -69,15 +69,19 @@ evcxr 四点不满（延迟、状态/借用限制、跑不了完整项目、编�
   冻结）+ denylist/stub 表 + extern static=dlsym + weak 让位强符号 + 128 位算术 +
   EntryPlan（lang_start 照常解释）。
 - **M4.4 真线程（收官之战）**：thunk 工厂（fn-ptr 实参逃逸→libffi Closure 真码 + 边界
-  TLS attach）+ pthread_create/join/detach 直通 + guest TLS per-thread（TlsId/模板/
-  Ctx.tls + 真 dtor：Ctx 自管 pthread key 迟退 3 轮）+ CallIndirect.native_sig
-  （guest 调 dlsym 真码）+ rust-call ABI 真协议（tuple 字段展平）+ by-value dyn 派发 +
-  fence 补真。**gate4 11/11：threads_* 5/5 差分、挂死双场景秒级、rayon 0.9s（tier-0
-  28s）、TSan 多线程零警告；diff.sh 基线升 16/16**。
+  TLS attach）+ pthread_create/join/detach 直通 + guest TLS per-thread（真 dtor：Ctx
+  自管 pthread key 迟退 3 轮）+ CallIndirect.native_sig + rust-call ABI 真协议（tuple
+  字段展平）+ by-value dyn 派发 + fence 补真。gate4 11/11。
+- **M4.5 收口 + M4 关账**：Adt 递归胖化（Arc/Rc/Pin<Box>）+ intrinsic（raw_eq/数学面/
+  float_to_int_unchecked/unsized size_of_val/128 位 IntToFloat）+ 128 位判别式 tag 全链
+  （regex 的 u128 niche）+ 胖指针比较 + posix_spawn 直通。**gate5 31/31：corpus 全绿−asm、
+  diff_cargo ffi_zlib+project 绿、加载 413ms、rayon 32×**。
 
-**下一步 = M4.5 收口**：引擎 cargo/frontmatter 接线完善（diff_cargo 的 script/project
-两用例预期红在此恢复）、corpus 全绿盘点、性能硬门、`.init_array` ctors、async 收口、
-signal 真装载（M4.4 裁定 A = stub 维持，真装载在此期按需）、切默认。
+**★ M4 已关账**（总验收四条对勾见 m4-log ★ 节：语义/并发/架构/性能）。**下一阶段 =
+M5 JIT**：Cranelift 接入（spike5 已验）、inline asm 块（cpuid/syscall/div 五用例 =
+corpus/diff_cargo 剩余全红，非引擎缺口）、vmctx P/R 终裁、JIT 帧 LSDA、热循环加速
+（fib 解释器 ~150× → 目标个位数×）。mode B（预降 std 工件）与按需项（weak fn 真地址/
+guest TLS 回收/signal 真装载/.init_array）见 m4-log 移交清单。
 
 **挂起检查点（勿丢，§10）**：vmctx P/R 真负载终裁挂 M5；landing pad/LSDA 挂 M5；fork/atfork
 挂 M4 后；预降低 std 发行工件挂 mode B（M4.5 后）。
@@ -402,10 +406,11 @@ bash tests/m4_gate1.sh                                    # M4.1 digest 9/9 + �
 bash tests/m4_gate2.sh                                    # M4.2 unwind 9/9 + 债务清零复测
 MIRVM=$(pwd)/target/release/mirvm bash tests/diff.sh      # 全量差分（16/16 全绿基线，含 threads）
 bash tests/m4_gate4.sh                                    # M4.4 真线程 gate（差分/双场景/rayon/TSan）
-MIRVM=$(pwd)/target/release/mirvm bash tests/diff_cargo.sh # cargo 形态（ffi_zlib 绿；script/project 预期红 M4.5）
+bash tests/m4_gate5.sh                                    # M4.5 收官 gate（corpus−asm/diff_cargo/性能/全回归）
+MIRVM=$(pwd)/target/release/mirvm bash tests/diff_cargo.sh # cargo 形态（ffi_zlib+project 绿；ecosystem cpuid asm 归 M5）
 ./target/release/mirvm spike1  # .. spike5                # spike 冻结工件回归
 bash tests/spike4_tsan.sh                                 # TSan（引擎 Sync）
-bash tests/corpus.sh                                      # corpus（生态覆盖，多为预期红）
+bash tests/corpus.sh                                      # corpus（20 绿 + 4 asm 预期红=M5）
 
 # dump MIR（调研）
 RUSTC=~/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc
@@ -420,11 +425,15 @@ grep -rn '<符号>' $SRC/rustc_middle/src/
 
 ## 12. 给接手 agent 的一句话
 
-M4.0-M4.3 已完成并各期 gate 全绿（经验与陷阱全在 `docs/m4-log.md`——**接手先读它的
-M4.1/M4.2/M4.3 三条**，里面有本 nightly 的 MIR/API 漂移清单与血泪修复）。用户看重：
-VM 作者视角、真实数据驱动（`--vm-stats` 是你最好的朋友）、每期 gate 全绿才 commit、
-防静默错值、不推翻既有决策而不读其论证。**M4.4 真线程已完成**（2026-07-10，gate4
-11/11：threads_* 5/5 差分、挂死双场景、rayon 0.9s、TSan 多线程零警告——先读 m4-log
-的 M4.4 条目，里面有 rust-call ABI/TSD dtor/TSan 相位的血泪）。下一个动作：**M4.5
-收口**（cargo 接线完善、corpus 盘点、性能硬门、async 收口、切默认——简报期，
-先跑 diff_cargo/corpus.sh 拿真实清单再动手）。
+**★ M4 全期完成并关账**（2026-07-10；总验收四条对勾在 `docs/m4-log.md` ★ 节——
+**接手先读 m4-log 各期条目**，里面有本 nightly 的 MIR/API 漂移清单与血泪修复：M4.2
+unwind 协议、M4.4 的 rust-call ABI/TSD dtor/TSan 相位、M4.5 的 unsize 递归/128 位 niche/
+防静默错值抓 UB）。用户看重：VM 作者视角、真实数据驱动（`--vm-stats` 是你最好的朋友）、
+每期 gate 全绿才 commit、防静默错值、不推翻既有决策而不读其论证。
+
+**下一阶段 = M5 JIT**（过审期，开工前出设计文档给用户审）：Cranelift 接入（spike5 已
+坐实 i2c/c2i/eh_frame 自注册）、**inline asm 块**（cpuid/syscall/div——corpus/diff_cargo
+剩余全红 5 用例，是 asm 不是引擎缺口，"直接 JIT，虚拟 CPU=真宿主 CPU"）、vmctx P vs R
+终裁、JIT 帧 LSDA、热循环加速（fib 解释器 ~150× vs native → 目标个位数×）。M4 的挂起
+移交清单（mode B / weak fn 真地址 / guest TLS 回收 / signal 真装载 / .init_array）见
+m4-log ★ 节末。开工先读 `docs/frame-abi-bytecode.md` §10 + spike5 经验。

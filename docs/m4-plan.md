@@ -5,9 +5,10 @@
 > 过程纪律：M4.0 与 M4.4 两个关键期开工前过审，其余期开工简报即行；每期完成出 gate 报告，
 > 经验记 docs/m4-log.md。
 >
-> **进度（2026-07-10）**：M4.0 ✅ M4.1 ✅ M4.2 ✅ M4.3 ✅ **M4.4 ✅**（真线程收官：
-> gate4 11/11，threads 5/5 差分、挂死双场景、rayon 0.9s、TSan；各期 gate 与经验见
-> m4-log）；tier-0 已移除（81772e4，oracle = native 直跑）。剩 M4.5 收口。
+> **进度（2026-07-10）**：M4.0-M4.5 **全部完成，M4 已关账**（总验收四条对勾见
+> m4-log ★ 节）。gate5 31/31：corpus 全绿−asm（4 项 cpuid/syscall/div 归 M5）、
+> diff_cargo ffi_zlib+project 绿、性能上限达标（加载 413ms、rayon 32×）、全量回归无损。
+> tier-0 已移除（81772e4）。**下一阶段 = M5 JIT**（Cranelift + asm 块 + 热循环加速）。
 
 ## 0. 目标与退出判据
 
