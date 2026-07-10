@@ -9,7 +9,8 @@
 
 ## 0. 立即须知（环境 / 铁律）
 
-- **工作目录**：`/home/xuehaonan/mirvm`（git 仓库，主分支 main）。
+- **工作目录**：`/home/ubuntu/mirvm`（git 仓库，主分支 main；2026-07-08 从
+  /home/xuehaonan 迁来——旧路径出现在早期文档里时按此换读）。
 - **工具链锁定**：`nightly-2026-07-02`（rustc 1.98.0-nightly）。路径
   `~/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/`。**月度 bump，别乱升**。
 - **构建**：`cargo build --release`（**必须 release**；debug 慢 ~7×）。带 cranelift feature
@@ -53,40 +54,29 @@ evcxr 四点不满（延迟、状态/借用限制、跑不了完整项目、编�
 
 ## 2. 当前状态速览（你在哪 / 下一步）
 
-**已完成**：
-- **M0-M2.5（tier-0）**：`src/interp/`，基于 rustc `InterpCx`。std 端到端、cargo 依赖、
-  线程（协作式）、真实地址内存、libffi FFI。**tier-0 是弃子**——bootstrap + 差分 oracle，
-  不是设计中心，M4 整体推翻。差分 16/16 + cargo 3/3 通过。
-- **corpus 五批收口**（`docs/corpus.md`）：22 crate + 3 探针跑真实生态，逼出五处设计票据
-  （见 §5.2）。
-- **5 个 M4 前 spike 全过**（`docs/spike{1-5}-*.md`）：模型 A 骨架 / i2c-c2i 混合栈=vmctx /
-  混合栈 unwind=候选 A / 并发 TSan 零警告=引擎 Sync / 真 Cranelift（P vs R 数据 + eh_frame
-  注册后 panic 穿 JIT 帧）。**模型 A 地基全部验证，M4 开闸。**
-- **M4.0 地基完成**（`docs/m4-log.md`）：新引擎端到端跑通真实 Rust，gate 9/9。
-- **M4.1 调研完成**（`docs/m4.1-design.md` + `docs/m4-debt-map.md`）：设计文档 + 全期债务
-  普查，含关键修正（见 §7）。
+**已完成**（各期 gate 与经验：`docs/m4-log.md`，**最新状态以它为准**）：
+- **M0-M2.5（tier-0）**：rustc `InterpCx` 上的 bootstrap + 差分先行者。**已于 2026-07-09
+  移除**（代码在 git 历史 `81772e4^`）——真 oracle 一直是 native 直跑，非线程能力已被
+  新引擎全覆盖。
+- **corpus 五批收口**（`docs/corpus.md`）+ **5 个 M4 前 spike 全过**（工件冻结在
+  `src/vm/spikes/`，回归 `mirvm spike1..5`）：模型 A 地基全部验证。
+- **M4.0 地基**：gate0 9/9（fib 端到端 + 纯度门禁）。
+- **M4.1 值与内存**：place 求值 + ABI v2 四路 + statics 两遍重定位 + mimalloc 堆 +
+  SIMD 最小集 + CallIndirect。gate1 digest 9/9 == native。
+- **M4.2 unwind**：FrameGuard 动态 LSDA（spike3 平移）+ RaiseException/catch_unwind
+  原语 + track_caller ABI + Assert 展开真 panic。gate2 九用例 == native。
+- **M4.3 os:: + FFI + main 启动链**：CallForeign（dlsym+libffi 通用直通，变参按调用点
+  冻结）+ denylist/stub 表 + extern static=dlsym + weak 让位强符号 + 128 位算术 +
+  EntryPlan（lang_start 照常解释）。**`tests/diff.sh` 全量差分 11/11 非线程用例 ==
+  native**（含 ffi_libc；cargo 形态 ffi_zlib 也过）。
 
-**下一步 = 开工 M4.1（值与内存）**。前置全齐：设计文档、债务地图、施工顺序、SIMD 决策
-（已定 = "B 目标 A 排序"，见 §7.4）。**从施工顺序第 0 步（worklist 闭包扩集 + foreign 三路
-骨架）开始**。
-
-> **更新（2026-07-08）**：**M4.1 已完成**（gate1 digest 9/9 == native + M4.1 份内债务清零；
-> 经验与遗留见 `docs/m4-log.md` M4.1 条目）。项目已迁移至 `/home/ubuntu/mirvm`（原
-> /home/xuehaonan）。
->
-> **更新（2026-07-09）**：**M4.2 unwind 已完成**（gate2 九用例 == native：panic 发起/
-> 跨帧 Drop/catch/重抛/Assert→真 panic；resume 770 处债务清零；panic hook 打印与退出码
-> 101 与 native 一致；经验见 m4-log M4.2 条目——两个自递归陷阱与 track_caller ABI 三处
-> 一致性尤其值得读）。
->
-> **更新（2026-07-09 晚）**：**M4.3 已完成**（`tests/diff_vm.sh` **全量差分 11/11 非线程
-> 用例 == native**——新引擎完整 main 启动链跑 fib/strings/args_env/time_fs/ptr_int/
-> hashmap/catch/panic_exit/async×2/ffi_libc；os:: 直通 = CallForeign+dlsym+libffi 通用道
-> +denylist+stub 表；128 位算术补全；经验见 m4-log M4.3 条目——weak 符号链接语义与
-> Coroutine Aggregate 顶层落位两个修复尤其值得读）。**下一步 = M4.4 真线程（收官之战，
-> 过审期——开工前设计文档给用户审！）**：pthread 1:1 直通、thunk 工厂+TLS 边界 attach、
-> guest TLS per-thread（单线程物化的 M4.4 义务标注在 lower ThreadLocalRef 处）、原子序
-> 映射、signal thunk；gate = threads_* 5 用例 + tier-0 挂死双场景 + TSan + rayon。
+**下一步 = M4.4 真线程（收官之战，过审期）**：设计文档已出（`docs/m4.4-design.md`，
+**待用户审**，含 signal A/B 裁定项）。要点：thunk 工厂（本期唯一新机制，libffi Closure
++ 边界 TLS attach）、denylist 移除 pthread_create/join/detach、guest TLS per-thread
+（lower 的 ThreadLocalRef 单线程物化处有 M4.4 义务标注）、fence 补真。gate = threads_*
+5 用例差分 + tier-0 挂死双场景（corpus/c_blocking_io、c_net_echo_threaded）+ TSan +
+rayon。之后 M4.5 收口（cargo 接通完善——diff_cargo 的 script/project 两用例预期红在此
+恢复、corpus 盘点、性能硬门、async 收口）。
 
 **挂起检查点（勿丢，§10）**：vmctx P/R 真负载终裁挂 M5；landing pad/LSDA 挂 M5；fork/atfork
 挂 M4 后；预降低 std 发行工件挂 mode B（M4.5 后）。
@@ -96,36 +86,37 @@ evcxr 四点不满（延迟、状态/借用限制、跑不了完整项目、编�
 ## 3. 目录与文件地图
 
 ```
-/home/xuehaonan/mirvm/
+/home/ubuntu/mirvm/
 ├── src/
 │   ├── lib.rs              # crate 根（rustc_private feature 声明 + box_patterns）
 │   ├── main.rs             # bin 薄壳 → cli::main
-│   ├── cli.rs              # 驱动：三形态(run/runner/rustc-wrapper) + --engine vm/--vm-call/--vm-stats
+│   ├── cli.rs              # 驱动：三形态(run/runner/rustc-wrapper)；--vm-call/--vm-stats
 │   ├── cargo_shim.rs       # cargo RUSTC_WRAPPER + runner
 │   ├── sysroot.rs          # 自动构建带 MIR 的 sysroot（缓存 ~/.cache/mirvm）
-│   ├── interp/             # ★ tier-0（弃子，rustc InterpCx 上的 fast machine + 协作调度）
-│   │   ├── machine.rs eval.rs shims.rs native.rs threads.rs
-│   │   ├── intrinsics.rs helpers.rs addrs.rs alloc_bytes.rs mono_map.rs mod.rs
-│   ├── lower/              # ★ M4 加载相（rustc_private 域，tcx 关在这里，永不出境）
-│   │   ├── mod.rs          #   lower_program：收集→分配 FuncId→逐 instance 降低→exports 表(+@entry)
-│   │   ├── collect.rs      #   collect_and_partition_mono_items → instance 集（种子，见 §7.1）
-│   │   ├── frame.rs        #   帧布局冻结（逐 local layout → 对齐 bump）
-│   │   └── func.rs         #   逐 instance 降低（MIR→IR）+ Trap-stub 全覆盖
-│   └── vm/                 # ★ 执行相 + spike（纯 Rust，零 rustc_private——机械纯度门禁）
-│       ├── mod.rs
-│       ├── engine/         # ★★ M4 真引擎（M4.0 起）
-│       │   ├── ir.rs       #   类型化字节码（Width/Slot/Operand/Rvalue/Stmt/Terminator/FuncBody/Module）
-│       │   ├── frame.rs    #   ByteRegion（字节 arena；M4.1 要改 mmap 定容，见 §7.3-F6）
+│   ├── lower/              # ★ 加载相（rustc_private 域，tcx 关在这里，永不出境）
+│   │   ├── mod.rs          #   Linker：worklist 扩集 + foreign 三路（原语/链接仿真/直通）
+│   │   │                   #   + alloc 物化（先分后填重定位）+ fn 条目 + lower_program 编排
+│   │   ├── collect.rs      #   mono collector 种子集
+│   │   ├── frame.rs        #   帧布局冻结 + ValKind 值分类（Zst/Scalar/Pair/Other）
+│   │   └── func.rs         #   逐 instance 降低：place 编译/ABI v2/Assert 展开/
+│   │                       #   intrinsic 展开表/thunk 判定 + Trap-stub 全覆盖
+│   └── vm/                 # ★ 执行相（纯 Rust，零 rustc_private——机械纯度门禁）
+│       ├── engine/         # ★★ M4 真引擎
+│       │   ├── ir.rs       #   类型化字节码（PlaceExpr/ScalarPlace/ABI/Builtin/ForeignSig/Module）
+│       │   ├── interp.rs   #   interp_frame + FrameGuard(unwind) + run_main/run_export
+│       │   ├── frame.rs    #   ByteRegion（mmap 定容真地址帧区）
 │       │   ├── ctx.rs      #   Shared（发布后只读）+ Ctx（每线程 vmctx）
-│       │   ├── interp.rs   #   类型化 interp_frame（标量+溢出对+Assert=诊断退出）+ run_export
-│       │   └── stats.rs    #   --vm-stats 调研仪器（Trap 债务直方图 + per-export 可达 BFS）
-│       ├── bytecode.rs frame.rs memory.rs interp.rs   # spike 用的冻结基础设施（勿动）
-│       └── spike1.rs .. spike5.rs                     # 5 个已过 spike（spike5 门控 cranelift feature）
+│       │   ├── frozen.rs   #   FrozenArena（statics/常量池/fn 条目冻结区）
+│       │   ├── heap.rs     #   托管 Rust Heap（libmimalloc-sys 薄包装）
+│       │   ├── ffi.rs      #   os:: 直通（dlsym 缓存 + libffi 直调，含变参）
+│       │   └── stats.rs    #   --vm-stats 调研仪器（债务直方图+可达 BFS+foreign 清单）
+│       └── spikes/         # M4 前置 spike 冻结工件（回归自检 mirvm spike1..5，勿扩展）
 ├── tsan/                   # ★ 独立 crate：#[path] 复用 src/vm，-Zsanitizer=thread 判定引擎 Sync
 ├── docs/                   # ★ 全部设计文档（见 §3.1）
-├── tests/                  # diff.sh(16) diff_cargo.sh(3) corpus.sh spike4_tsan.sh m4_gate0.sh
-├── demo/                   # 差分用例；demo/m4/pure.rs(M4.0 gate) demo/m4/digest.rs(M4.1 gate)
-└── corpus/                 # corpus 程序 c_*.rs
+├── tests/                  # diff.sh(全量差分) diff_cargo.sh corpus.sh spike4_tsan.sh
+│                           # m4_gate{0,1,2}.sh（各期 gate，全绿是回归底线）
+├── demo/                   # 差分用例；demo/m4/{pure,digest,unwind}.rs = gate0/1/2 函数集
+└── corpus/                 # corpus 程序 c_*.rs（含 M4.4 gate 的挂死双场景）
 ```
 
 ### 3.1 设计文档索引（务必读，本文只是导航）
@@ -142,9 +133,10 @@ evcxr 四点不满（延迟、状态/借用限制、跑不了完整项目、编�
 | `docs/corpus.md` | corpus 五批 + 五票据 | 高 |
 | `docs/spike{1..5}-*.md` | 五 spike 经验教训 | 中（背景） |
 | `docs/m4-plan.md` | M4 六期计划 + 六决策 D1-D6 + 挂起项 | **最高** |
-| `docs/m4.1-design.md` | M4.1 设计（调研+施工顺序+SIMD 决策） | **当前工作** |
-| `docs/m4-debt-map.md` | 全期 Trap 债务地图（三架构级发现） | **当前工作** |
-| `docs/m4-log.md` | M4 施工日志（每期 gate + 教训） | 追加式 |
+| `docs/m4-log.md` | M4 施工日志（每期 gate + 经验 + 漂移清单） | **最高（最新状态）** |
+| `docs/m4.4-design.md` | M4.4 真线程设计（**待审**，含 signal A/B 裁定项） | **当前工作** |
+| `docs/m4.1-design.md` | M4.1 设计（已完成——历史+机制文档） | 中 |
+| `docs/m4-debt-map.md` | 全期债务普查（M4.1 开工时快照；三架构级发现仍有效） | 中 |
 
 内存文件：`~/.claude/projects/-home-xuehaonan-mirvm/memory/mirvm-rust-runtime-project.md`
 （超长，是本文的浓缩源）+ `MEMORY.md`（索引）。
@@ -264,7 +256,7 @@ for_each_linked_def 已趟过）③os:: 直通（M4.3）。**特判的不是"pan
 
 ---
 
-## 7. M4.1（当前工作）—— 值与内存
+## 7. M4.1 —— 值与内存（**已完成 2026-07-08**；本节保留作机制导读）
 
 **读全文**：`docs/m4.1-design.md`（设计）+ `docs/m4-debt-map.md`（债务）。此处是提炼。
 
@@ -396,21 +388,22 @@ trap_body 无出边、"未收集"callee 无出边（worklist 落地后前两个�
 # 构建（必须 release）
 cargo build --release
 
-# M4 新引擎跑一个导出函数（M4.0/M4.1 gate 入口）
-./target/release/mirvm run --engine vm --vm-call 'fib(25)' demo/m4/pure.rs
+# 跑程序（唯一引擎 = M4 字节码 VM；main 启动链，与 native 差分同形）
+./target/release/mirvm run demo/fib.rs
 
-# 调研仪器：Trap 债务表（每期开工前跑）
-./target/release/mirvm run --engine vm --vm-stats demo/m4/digest.rs
+# 直调导出函数（gate/调试）与调研仪器（每期开工前跑）
+./target/release/mirvm run --vm-call 'fib(25)' demo/m4/pure.rs
+./target/release/mirvm run --vm-stats demo/m4/digest.rs
 
-# gate + 回归
-bash tests/m4_gate0.sh                                    # 新引擎 gate 9/9 + 纯度门禁
-MIRVM=$(pwd)/target/release/mirvm bash tests/diff.sh      # tier-0 16/16
-./target/release/mirvm spike1  # .. spike5                # spike 回归
+# gate + 回归（全绿是底线；--engine vm 旧写法仍兼容）
+bash tests/m4_gate0.sh                                    # M4.0 gate 9/9 + 纯度门禁
+bash tests/m4_gate1.sh                                    # M4.1 digest 9/9 + 债务清零复测
+bash tests/m4_gate2.sh                                    # M4.2 unwind 9/9 + 债务清零复测
+MIRVM=$(pwd)/target/release/mirvm bash tests/diff.sh      # 全量差分（11 绿 + threads_* 预期红 M4.4）
+MIRVM=$(pwd)/target/release/mirvm bash tests/diff_cargo.sh # cargo 形态（ffi_zlib 绿；script/project 预期红 M4.5）
+./target/release/mirvm spike1  # .. spike5                # spike 冻结工件回归
 bash tests/spike4_tsan.sh                                 # TSan（引擎 Sync）
 bash tests/corpus.sh                                      # corpus（生态覆盖，多为预期红）
-
-# tier-0 跑法（弃子，但仍是差分 oracle）
-./target/release/mirvm run demo/fib.rs
 
 # dump MIR（调研）
 RUSTC=~/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc
@@ -425,8 +418,10 @@ grep -rn '<符号>' $SRC/rustc_middle/src/
 
 ## 12. 给接手 agent 的一句话
 
-模型 A 已被 5 个 spike 验证到底，M4 是"大体量、低未知度"的工程——**风险已排完，剩下是照施工
-顺序把 Trap 一类一类消掉，每消一类跑一次 gate**。用户看重：VM 作者视角、真实数据驱动（`--vm-stats`
-是你最好的朋友）、每期设计文档过审、防静默错值、不推翻既有决策而不读其论证。下一个动作明确：
-**M4.1 施工顺序第 0 步（worklist 闭包扩集 + foreign 三路骨架）**。开工前把 `docs/m4.1-design.md`
-和 `docs/m4-debt-map.md` 读完。
+M4.0-M4.3 已完成并各期 gate 全绿（经验与陷阱全在 `docs/m4-log.md`——**接手先读它的
+M4.1/M4.2/M4.3 三条**，里面有本 nightly 的 MIR/API 漂移清单与血泪修复）。用户看重：
+VM 作者视角、真实数据驱动（`--vm-stats` 是你最好的朋友）、每期 gate 全绿才 commit、
+防静默错值、不推翻既有决策而不读其论证。下一个动作明确：**M4.4 真线程，设计文档
+`docs/m4.4-design.md` 已写好待用户审（含 signal A/B 裁定项）——用户批复后按其施工
+顺序五步走**。M4.4 是过审期也是收官之战：threads_* 差分 + tier-0 时代挂死的双场景 +
+TSan + rayon 全过，M4 就只剩 M4.5 收口。
