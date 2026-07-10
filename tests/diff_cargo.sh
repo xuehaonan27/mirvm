@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # cargo 模式差分：frontmatter 脚本 / cargo 项目，native cargo run vs mirvm 对拍。
-# 状态（2026-07-09 tier-0 移除后）：runner 走 M4 引擎——ffi_zlib PASS；
-# script/project 预期红（cargo 形态的引擎接通与残余债务 = M4.5 份内；
-# tier-0 基线 3/3 见 git 历史）。
+# 状态（2026-07-10 M4.4 后）：runner 走 M4 引擎——ffi_zlib/project PASS（project 由
+# M4.4 的 rust-call/TLS 修复顺带解锁）；ecosystem 预期红（cargo 形态残余债务 =
+# M4.5 份内；tier-0 基线 3/3 见 git 历史）。
 set -u
 cd "$(dirname "$0")/.."
 MIRVM=${MIRVM:-$(pwd)/target/debug/mirvm}
