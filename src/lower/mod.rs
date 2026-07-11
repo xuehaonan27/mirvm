@@ -8,6 +8,7 @@
 //! **Trap-stub 全覆盖**：对全集 lowering 是全量的——不认识的构造绝不中止，
 //! 就地降为 `Trap(诊断)`；只有被执行到的路径必须 trap-free（M4 增量协议）。
 
+pub mod asm;
 pub mod collect;
 pub mod frame;
 pub mod func;
@@ -76,6 +77,8 @@ pub(crate) struct Linker<'tcx> {
     /// guest TLS：`#[thread_local]` static → 稠密 TlsId + 槽表（M4.4 D3，移交 Module）
     tls_ids: FxHashMap<rustc_hir::def_id::DefId, ir::TlsId>,
     tls_slots: Vec<ir::TlsSlot>,
+    /// asm-stub wrapper 文本（M5.0）：AsmStubId → GAS 源；lower 结束批量 cc+dlopen 物化
+    asm_sites: Vec<String>,
 }
 
 impl<'tcx> Linker<'tcx> {
@@ -92,7 +95,19 @@ impl<'tcx> Linker<'tcx> {
             fn_addrs: FxHashMap::default(),
             tls_ids: FxHashMap::default(),
             tls_slots: Vec::new(),
+            asm_sites: Vec::new(),
         }
+    }
+
+    /// 预留一个 asm-stub 槽（M5.0），返回其 AsmStubId；文本随后 set_asm_stub 回填。
+    /// 分两步是因为 wrapper 名 `mirvm_asm_{id}` 要先于文本生成确定（自引用 .size 指令）。
+    fn reserve_asm_stub(&mut self) -> ir::AsmStubId {
+        let id = self.asm_sites.len() as ir::AsmStubId;
+        self.asm_sites.push(String::new());
+        id
+    }
+    fn set_asm_stub(&mut self, id: ir::AsmStubId, text: String) {
+        self.asm_sites[id as usize] = text;
     }
 
     /// `#[thread_local]` static → 稠密 TlsId（M4.4 D3）。模板 = 初始化器求值产物
@@ -629,6 +644,8 @@ pub fn lower_program(tcx: TyCtxt<'_>, argv: &[String]) -> ir::Module {
         module.native_libs.push(format!("lib{name}.so").into());
         module.native_libs.push(format!("lib{name}.so.1").into());
     }
+    // asm-stub 批量物化（M5.0）：全部 wrapper cc 汇编 + dlopen + dlsym → 真地址表
+    module.asm_stub_addrs = asm::materialize(&linker.asm_sites);
     // 冻结区与 fn 条目反查表移交执行相
     module.frozen = Some(linker.frozen);
     module.fn_addrs = linker.fn_addrs.into_iter().collect();

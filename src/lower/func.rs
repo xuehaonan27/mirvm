@@ -164,6 +164,8 @@ enum TagInfo {
 struct LowerCx<'tcx, 'a> {
     tcx: TyCtxt<'tcx>,
     typing_env: TypingEnv<'tcx>,
+    /// 本函数的 def_id（asm_target_features 查询用，M5.0 inline asm 寄存器分配）
+    def_id: rustc_hir::def_id::DefId,
     frame: FrameLayout<'tcx>,
     linker: &'a mut Linker<'tcx>,
     /// 本函数 #[track_caller] 时的 &Location 槽（转发/caller_location intrinsic 读取）
@@ -1852,8 +1854,122 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     *unwind,
                 );
             }
+            TK::InlineAsm { asm_macro, template, operands, options, targets, unwind, .. } => {
+                self.lower_inline_asm(*asm_macro, template, operands, *options, targets, *unwind)?
+            }
             other => return Err(format!("终止子 {other:?}（M4.1+）")),
         })
+    }
+
+    /// inline asm 站点降低（M5.0 asm-stub 工厂，corpus §2.2 三面孔归宿）。
+    /// 寄存器分配 + wrapper 文本经 `super::asm`（cg_clif 同构），值/落点在此配对槽偏移。
+    /// M5.0 支持面：in/out/inout × 显式寄存器/reg 类；sym/label/const/naked/may_unwind/
+    /// noreturn/非 x86_64 保留 Trap-stub（诊断留痕，三面孔用不到；按需再补）。
+    fn lower_inline_asm(
+        &mut self,
+        asm_macro: mir::InlineAsmMacro,
+        template: &[rustc_ast::ast::InlineAsmTemplatePiece],
+        operands: &[mir::InlineAsmOperand<'tcx>],
+        options: rustc_ast::ast::InlineAsmOptions,
+        targets: &[mir::BasicBlock],
+        unwind: mir::UnwindAction,
+    ) -> Result<(Vec<Stmt>, Terminator), String> {
+        use rustc_ast::ast::InlineAsmOptions as Opt;
+        use rustc_target::asm::InlineAsmArch;
+
+        if matches!(asm_macro, mir::InlineAsmMacro::NakedAsm) {
+            return Err("naked_asm!（M5.x）".into());
+        }
+        if options.contains(Opt::MAY_UNWIND) {
+            return Err("inline asm may_unwind（M5.x；三面孔无）".into());
+        }
+        if options.contains(Opt::NORETURN) {
+            return Err("inline asm noreturn（M5.x；三面孔无）".into());
+        }
+        if options.contains(Opt::ATT_SYNTAX) {
+            // 防静默错值：wrapper 强制 intel 语法，att 语法模板会被误汇编
+            return Err("inline asm att_syntax（M5.x；三面孔无）".into());
+        }
+        if !matches!(unwind, mir::UnwindAction::Unreachable | mir::UnwindAction::Continue) {
+            return Err("inline asm 带 cleanup unwind（M5.x）".into());
+        }
+        let arch = self.tcx.sess.asm_arch.ok_or("目标不支持 asm")?;
+        if !matches!(arch, InlineAsmArch::X86_64) {
+            return Err(format!("inline asm 非 x86_64（arch={arch:?}，M5.x）"));
+        }
+
+        // MIR 操作数 → wrapper 约束（super::asm；只需 reg 约束 + 角色，不需值/落点）。
+        let mut gen_ops: Vec<super::asm::AsmOperand> = Vec::with_capacity(operands.len());
+        for op in operands {
+            match op {
+                mir::InlineAsmOperand::In { reg, .. } => {
+                    gen_ops.push(super::asm::AsmOperand::In { reg: *reg });
+                }
+                mir::InlineAsmOperand::Out { reg, late, place } => {
+                    gen_ops.push(super::asm::AsmOperand::Out {
+                        reg: *reg,
+                        late: *late,
+                        has_place: place.is_some(),
+                    });
+                }
+                mir::InlineAsmOperand::InOut { reg, out_place, .. } => {
+                    gen_ops.push(super::asm::AsmOperand::InOut {
+                        reg: *reg,
+                        has_out_place: out_place.is_some(),
+                    });
+                }
+                mir::InlineAsmOperand::Const { .. } => {
+                    return Err("inline asm const 操作数（M5.x；三面孔无）".into());
+                }
+                mir::InlineAsmOperand::SymFn { .. } | mir::InlineAsmOperand::SymStatic { .. } => {
+                    return Err("inline asm sym 操作数（M5.x）".into());
+                }
+                mir::InlineAsmOperand::Label { .. } => {
+                    return Err("inline asm label（asm goto，M5.x）".into());
+                }
+            }
+        }
+
+        let stub_id = self.linker.reserve_asm_stub();
+        let name = format!("mirvm_asm_{stub_id}");
+        let g = super::asm::generate(self.tcx, self.def_id, arch, template, &gen_ops, &name);
+        self.linker.set_asm_stub(stub_id, g.text);
+
+        // 配对已降低的值/落点与 wrapper 槽偏移（同源一致——正确性地基）。
+        // 第二遍重匹配 operands[i]（借的是参数非 self，与 lower_* 的 &mut self 不冲突）。
+        let mut ins: Vec<(u32, Operand)> = Vec::new();
+        let mut outs: Vec<(u32, ScalarPlace)> = Vec::new();
+        for (i, op) in operands.iter().enumerate() {
+            match op {
+                mir::InlineAsmOperand::In { value, .. } => {
+                    let v = self.lower_operand_scalar(value)?;
+                    ins.push((g.input_slot[i].expect("In 必有输入槽"), v));
+                }
+                mir::InlineAsmOperand::Out { place: Some(place), .. } => {
+                    let (pl, w) = self.place_scalar(place)?;
+                    outs.push((g.output_slot[i].expect("Out 有 place 必有输出槽"), pl.scalar_place(w)));
+                }
+                mir::InlineAsmOperand::InOut { in_value, out_place, .. } => {
+                    let v = self.lower_operand_scalar(in_value)?;
+                    ins.push((g.input_slot[i].expect("InOut 必有输入槽"), v));
+                    if let Some(place) = out_place {
+                        let (pl, w) = self.place_scalar(place)?;
+                        outs.push((
+                            g.output_slot[i].expect("InOut 有 out_place 必有输出槽"),
+                            pl.scalar_place(w),
+                        ));
+                    }
+                }
+                // Out{place:None} = clobber-only（无落点）；Const/Sym/Label 已在上拒
+                _ => {}
+            }
+        }
+
+        let target = targets.first().map(|b| b.as_u32()).ok_or("inline asm 无 fallthrough 目标")?;
+        Ok((
+            vec![],
+            Terminator::InlineAsm { stub: stub_id, buf_size: g.buf_size, ins, outs, target },
+        ))
     }
 
     /// dyn 虚派发（InstanceKind::Virtual）：receiver 胖指针 (data, vtable)，
@@ -3080,6 +3196,7 @@ pub(crate) fn lower_instance<'tcx>(
     let mut cx = LowerCx {
         tcx,
         typing_env,
+        def_id: instance.def_id(),
         frame,
         linker,
         caller_loc_off,

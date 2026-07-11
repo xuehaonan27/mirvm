@@ -1215,6 +1215,34 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 }
                 blk = *target as usize;
             }
+            Terminator::InlineAsm { stub, buf_size, ins, outs, target } => {
+                // asm-stub（M5.0 corpus §2.2 三面孔）：栈开 buf、按 ins 装槽、call
+                // wrapper（fn(*mut u8)，rbx=buf 基址）、按 outs 取槽。三面孔无 unwind。
+                #[repr(align(16))]
+                struct AsmBuf([u8; 256]);
+                let mut buf = AsmBuf([0u8; 256]);
+                if *buf_size as usize > buf.0.len() {
+                    engine_abort(&format!(
+                        "asm 缓冲 {buf_size} 超上限 {}（fn {}）",
+                        buf.0.len(),
+                        body.name
+                    ));
+                }
+                let bufp = buf.0.as_mut_ptr();
+                for (off, op) in ins {
+                    let (v, _) = eval_operand(ctx, base, op);
+                    unsafe { std::ptr::write_unaligned(bufp.add(*off as usize) as *mut u64, v) };
+                }
+                let addr = module.asm_stub_addrs[*stub as usize];
+                let f: unsafe extern "C" fn(*mut u8) =
+                    unsafe { std::mem::transmute::<u64, unsafe extern "C" fn(*mut u8)>(addr) };
+                unsafe { f(bufp) };
+                for (off, dst) in outs {
+                    let v = unsafe { std::ptr::read_unaligned(bufp.add(*off as usize) as *const u64) };
+                    place_write(ctx, base, dst, v);
+                }
+                blk = *target as usize;
+            }
             Terminator::Return => {
                 let r = match body.ret {
                     RetAbi::Zst => (0, 0),

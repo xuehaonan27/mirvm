@@ -9,6 +9,8 @@
 
 pub type Bb = u32;
 pub type FuncId = u32;
+/// inline asm 站点 id（M5.0 asm-stub 工厂）：索引 `Module.asm_stub_addrs`。
+pub type AsmStubId = u32;
 
 /// 标量宽度。W128 = 两槽通道（M4.1 第 3 步）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -572,6 +574,19 @@ pub enum Terminator {
         null_ok: bool,
         native_sig: Option<ForeignSig>,
     },
+    /// inline asm 站点（M5.0 asm-stub 工厂，corpus §2.2 三面孔归宿）：
+    /// stub 索引 `Module.asm_stub_addrs`（加载相 cc 汇编 + dlopen 物化的 wrapper 真址，
+    /// `fn(*mut u8)` 槽缓冲 ABI）。执行 = 栈开 buf_size 缓冲、按 ins 写入槽、call 真址、
+    /// 按 outs 从槽读出落点。三面孔全 `unwind unreachable`（MAY_UNWIND 已在 lower 拒）。
+    InlineAsm {
+        stub: AsmStubId,
+        buf_size: u32,
+        /// (缓冲槽偏移, 输入值)——按操作数宽写入 8 字节槽低位
+        ins: Vec<(u32, Operand)>,
+        /// (缓冲槽偏移, 输出落点)——按落点宽从槽低位读出
+        outs: Vec<(u32, ScalarPlace)>,
+        target: Bb,
+    },
     Return,
     Unreachable,
     /// cleanup 链尾（MIR UnwindResume）：只在 guard.drop 的 cleanup 执行中出现——
@@ -632,6 +647,9 @@ pub struct Module {
     pub native_libs: Vec<Box<str>>,
     /// guest TLS 槽表（M4.4 D3：TlsId → 模板/尺寸；每线程实例在 Ctx.tls）
     pub tls: Vec<TlsSlot>,
+    /// asm-stub wrapper 真地址（M5.0）：AsmStubId → `fn(*mut u8)` 机器地址（加载相
+    /// cc 汇编 + dlopen + dlsym 物化）。执行相只读 u64 直调，纯度不破。
+    pub asm_stub_addrs: Vec<u64>,
     /// main 启动链（M4.3；--vm-call 模式下为 None）
     pub entry: Option<EntryPlan>,
 }
