@@ -168,29 +168,58 @@ Cranelift 栈槽（真地址取址照常成立，帧局部在编译帧自管—�
   fib 锚点是递归调用形态，不受影响。
 - **CLI**：`--jit off|on`（默认 on，阈值可调）。gate 全量跑两遍（on/off 差分）。
 
-### D5 调用约定与 vmctx 终裁：提案 T（零 ctx 约定，边界 TLS 自取）
+### D5 调用约定与 vmctx 终裁：分层——骨架 T（M5 落地）+ R 为兼容缓存层（触发器明确）
 
-**每编译函数两个入口**：
+> 2026-07-11 审阅修订：初稿的 T 论证部分依赖**当前实现状态**（分配走 Builtin 出线
+> 调用、TlsRef 走助手），用户指出这不是理论判断。本节按"哪些前提是架构承诺、哪些
+> 只是实现现状"重推，结论从"T vs R 二选一"修正为**分层**：T 是骨架，R 是 ABI 兼容
+> 的缓存升级层——需要 hardwire 进 M5 的部分恰好全是两案共享的。
+
+**每编译函数两个入口**（与终裁无关——T/R 两案在此完全一致）：
 - **packed 入口**（i2c 用，统一形状）：`extern "C-unwind" fn(args: *const u64,
   ret: *mut [u64;2])`——prologue 按冻结 ParamAbi 拆槽装寄存器。解释器→编译码
   一跳直达，任意元数无需 per-shape transmute。
-- **fast 入口**（cc→cc 用，native 约定）：Scalar→i64 寄存器参、Pair→双参/双返、
-  Indirect→指针参 + sret 指针，track_caller 尾参照常。编译码间调用**经函数表
-  间接**（PLT 式：表槽初值 = 该函数的 c2i 小蹦床，编译完成后原子换成 fast 入口
-  ——调用点恒定"load 表槽 + call reg"，无分支、无 patch）。
+- **fast 入口**（cc→cc 用，native 约定）：**纯 guest 签名**——Scalar→i64 寄存器参、
+  Pair→双参/双返、Indirect→指针参 + sret 指针，track_caller 尾参照常。注意
+  spike5 里 R 变体的 fast 签名 `(n)->r` 与 T 完全相同（R 的 ctx 在 r15 不在签名）；
+  只有 P（显式首参）签名不同——P 被签名错位（vmctx-passing §2 的 thunk 遍地问题）
+  + spike5 vcode 实证的 threading 税双重淘汰，本设计不再保留。编译码间调用**经
+  函数表间接**（PLT 式：表槽初值 = 该函数的 c2i 小蹦床，编译完成后原子换成 fast
+  入口——调用点恒定"load 表槽 + call reg"，无分支、无 patch）。红利（两案同享）：
+  逃逸指针热身后可直接给 fast 入口地址（vmctx-passing §5.1 的 thunk 消失路径）。
 
-**vmctx 终裁提案 = T：编译码不携带 ctx，两约定（P 显式参 / R pinned r15）都不采。**
-论据：M4 落地后，编译码需要 ctx 的点**只剩运行期助手调用**（c2i 回解释、
-CallForeign/libffi、TlsRef 物化、CatchUnwind）——这些本身就是重量级宿主调用，
-助手自己 `ctx::attach()`（pthread_getspecific，M4.4 已是唯一门）摊销为零头；
-分配器走 mimalloc 自带线程缓存（D3 既定），**没有 TLAB 热路径逼 ctx 进寄存器**。
-spike5 的 P vs R 测的是"编译码必须传 ctx"世界里哪种传法快——真引擎的形态让这个
-前提消失了。红利：fast 入口签名 = 纯 guest 签名 ⇒ **逃逸指针热身后可直接给 fast
-入口地址**（vmctx-passing §5.1 预言的 thunk 消失路径，白拿）。
-**数据护栏**（终裁承诺不空转）：M5.4 在 fib/rayon/corpus 上计量助手调用频度与
-fib 硬门（≤10×）；若 T 因 ctx 摊销失守（预判不会），回退 R（spike5 已验证全套，
-enable_pinned_reg 一个 ISA 旗标的事）。**此提案即挂起检查点"P vs R 真负载终裁"的
-结案形式**——用真负载数据裁，只是候选集多了一个更简的 T。
+**理论重推：编译码触碰每线程执行态的点，按"扛不扛得住实现演化"三分**：
+
+| 类 | 内容 | 判据性质 |
+|---|---|---|
+| ① 结构性不存在 | GC 写屏障、safepoint 轮询、搬迁式 TLAB bump、栈增长检查、线性内存基址 | **架构承诺，不随实现变**：无 GC（DESIGN 托管非搬迁）、native 栈（模型 A）、真实地址（C2）。HotSpot r15 / Go g / Wasmtime vmctx 的存在理由**逐条**落在此格——先例的"为什么"映射到 mirvm 全为空 |
+| ② 语义上就是助手形状 | FFI（dlsym+libffi）、c2i（热身期）、catch_unwind（宿主 catch）、panic 簿记 | 助手自身重量级，ctx 获取摊销为零头——**与实现无关恒成立** |
+| ③ 内联后可能变热 | 分配快路径内联（D3 的"hand-rolled TLAB 后置"项）、guest TLS 快路径内联 | **唯一随实现演化的格**（审阅问题的实体）。M5 范围内此格为空：分配走 Builtin、TlsRef 走助手，M5 编译码零站点 |
+
+对格 ③ 的理论上界（即便内联落地）：T 的成本 = 每个**使用 ctx 的激活**一次
+initial-exec TLS load（入口提升、寄存器携带全函数体；tpoff 常数 JIT 时已知——
+vmctx-passing §3.2 既有机制。attach 时同步写一个 `#[thread_local]` POD 镜像即可：
+无析构故 TSD dtor 相位仍可读，与 M4.4 相位教训兼容）。R 省掉这一条 load 的租金 =
+**全程征用 r15**（spike5 自己标注"寄存器压力面未测"的风险项）+ 每边界入口
+save/set/restore + per-arch 选寄存器。生产对照：mimalloc/tcmalloc 的快路径本身
+就是"TLS load + 免锁链表"形态跑 ~10ns 级，CoreCLR x64 不保留线程寄存器（线程
+静态量/分配上下文走内联 TLS 序列）——**"TLS load 的每线程快路径"是工业标准形态，
+不是性能妥协**；而 Rust 负载的分配密度又远低于 Java/Go（值类型为主）。
+
+**结构性事实（把"判断翻了"的代价钉死）**：T 与 R 不是岔路，是分层——fast 签名
+相同、边界 TLS attach 相同（M4.4 已落地且是被逼定的，见 vmctx-passing §1）、
+助手协议相同；全部差异收敛为 (a) `enable_pinned_reg` ISA 旗标 (b) 翻译器里
+"取 ctx"的降低方式（TLS load vs `get_pinned_reg`）(c) 边界入口是否包
+save/set/restore（spike5 已验代码形状）。**T→R 是 ABI 兼容的单开关升级，不是
+重设计**。翻译器把"取 ctx"收拢为单缝（`get_ctx()` 一处），开关就位。
+
+**终裁形式**：M5 落 T 骨架（M5 编译码格 ③ 为空，真负载测不出 T/R 差——这本身
+就是"不该预付寄存器租金"的数据）；挂起检查点**不结死，改写为带触发器的活检查点**
+（写回 vmctx-passing §7）：格 ③ 进场（分配内联 / guest TLS 内联开工）时，以**该
+负载**复测 T vs R 再裁缓存层——彼时才存在能区分两案的 workload。M5.4 照做
+fib/rayon 计量 + 助手调用频度统计，作为触发器复测时的对照基线。
+【备选：R-first——若预期分配内联很快进场、愿意先付寄存器租金与边界机件，可直接
+落 R（spike5 全套已验）；因骨架共享，两案工程差异很小。请裁】
 
 ### D6 JIT 帧 unwind：eh_frame（已验）+ LSDA/landing pad（cg_clif 同构）；准入过渡
 
@@ -230,7 +259,7 @@ cpuid 返真后，sha2/ecosystem 的内核是纯 Rust intrinsics（§1.3），�
 | **M5.1 归档装载 + SIMD 补面**（轨 A 收口) | D2 .a→.so + native_libraries 收集；D7 数据驱动补面（sha2 SHA-NI stubs、memchr/teddy 所需 lane 档） | **corpus 25 项全绿（零 asm 例外）+ diff_cargo 3/3（ecosystem 绿）**——M4 脚注删除 |
 | **M5.2 JIT 骨架**（轨 B） | D4 派发/计数/编译线程；D3 翻译器标量子集（int/float/place/call/switch/SSA 提升）；D5 两入口 + PLT 表；CFI 注册 | **fib(32) ≤ 10× native**（硬门，锚点 0.94s→≤80ms）；diff 16/16 JIT-on/off 双跑全绿；加载 ≤1s 不破 |
 | **M5.3 翻译器全覆盖 + LSDA** | 先 LSDA probe（D6）再铺：try_call/GccExceptTable/personality；IR 全构造翻译（128 位/原子/SIMD/foreign 助手/track_caller）；准入放开 | gate2 unwind 九用例 JIT-on 通过；**全量（demo/corpus/diff_cargo）JIT-on == JIT-off == native** |
-| **M5.4 终裁 + 收口** | D5 vmctx 数据护栏计量与结案；rayon/corpus JIT-on 计时记账；`tests/m5_gate6.sh`；m4-log 式 M5 条目 + handoff/memory 收笔 | gate6 全绿（下方退出判据）；vmctx 检查点结案有数据 |
+| **M5.4 终裁 + 收口** | D5 计量基线（fib/rayon + 助手频度）+ 检查点改写为带触发器活检查点（回写 vmctx-passing §7）；rayon/corpus JIT-on 计时记账；`tests/m5_gate6.sh`；m4-log 式 M5 条目 + handoff/memory 收笔 | gate6 全绿（下方退出判据）；vmctx 检查点处置有数据有触发器 |
 
 ## 5. 风险与缓解
 
@@ -261,5 +290,6 @@ M5 后另开，D3 已为它留好形状）/ signal 真装载·weak fn 真地址�
 ③ 全量差分三重一致：JIT-on == JIT-off == native（diff 16/16 + gate0-5 + corpus）；
 ④ 性能上限无回归：加载 ≤1s、rayon ≤5s（JIT-on 计时另记账）；
 ⑤ TSan 零警告（interp 通道）+ spikes 回归 + 纯度门禁；
-⑥ vmctx 挂起检查点以真负载数据结案（T 或回退 R，写入 vmctx-passing.md §7）；
+⑥ vmctx 挂起检查点处置落笔：T 骨架数据基线 + R 缓存层触发器（分配/guest-TLS
+   内联进场时以该负载复测），写入 vmctx-passing.md §7；
 ⑦ m4-log M5 条目（gate 结果+教训+遗留归期）+ handoff/memory 收笔。
