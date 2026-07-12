@@ -404,7 +404,7 @@ cargo build --release
 bash tests/m4_gate0.sh                                    # M4.0 gate 9/9 + 纯度门禁
 bash tests/m4_gate1.sh                                    # M4.1 digest 9/9 + 债务清零复测
 bash tests/m4_gate2.sh                                    # M4.2 unwind 9/9 + 债务清零复测
-MIRVM=$(pwd)/target/release/mirvm bash tests/diff.sh      # 全量差分（16/16 全绿基线，含 threads）
+MIRVM=$(pwd)/target/release/mirvm bash tests/diff.sh      # 全量差分（17/17 全绿基线，含 threads+asm_probe）
 bash tests/m4_gate4.sh                                    # M4.4 真线程 gate（差分/双场景/rayon/TSan）
 bash tests/m4_gate5.sh                                    # M4.5 收官 gate（corpus−asm/diff_cargo/性能/全回归）
 MIRVM=$(pwd)/target/release/mirvm bash tests/diff_cargo.sh # cargo 形态（ffi_zlib+project 绿；ecosystem cpuid asm 归 M5）

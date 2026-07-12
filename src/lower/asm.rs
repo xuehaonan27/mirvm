@@ -57,14 +57,17 @@ pub(crate) fn materialize(sites: &[String]) -> Vec<u64> {
     if !so.exists() {
         let s_path = dir.join(format!("{h:016x}.s"));
         std::fs::write(&s_path, &src).expect("写 asm-stub .s 失败");
-        // -shared -fPIC：wrapper 自包含（无外部符号），dlopen 后 dlsym 各站点即得真址
+        // -shared -fPIC：wrapper 自包含（无外部符号），dlopen 后 dlsym 各站点即得真址。
+        // 先写临时名再 rename 原子发布——并发 mirvm 进程同键物化时绝不 dlopen 半成品
+        let tmp = dir.join(format!("{h:016x}.so.tmp.{}", std::process::id()));
         let status = std::process::Command::new("cc")
             .args(["-shared", "-fPIC", "-nostdlib", "-o"])
-            .arg(&so)
+            .arg(&tmp)
             .arg(&s_path)
             .status()
             .expect("调用 cc 汇编 asm-stub 失败（PATH 缺 cc？）");
         assert!(status.success(), "cc 汇编 asm-stub 失败（源：{}）", s_path.display());
+        std::fs::rename(&tmp, &so).expect("asm-stub .so 原子发布失败");
     }
 
     let c_so = std::ffi::CString::new(so.as_os_str().as_encoded_bytes()).unwrap();
@@ -149,8 +152,11 @@ struct Gen<'a, 'tcx> {
 }
 
 impl<'tcx> Gen<'_, 'tcx> {
-    /// cg_clif allocate_registers 同构：显式寄存器入已分配集 → out/inout 类先分配
-    /// （约束更紧）→ in/lateout 类后分配（跳与已分配重叠者）。
+    /// cg_clif allocate_registers 的**保守变体**：显式寄存器入已分配集 → out/inout
+    /// 类先分配（约束更紧）→ in/lateout 类后分配。**与 cg_clif 的一处已知分歧**：
+    /// cg_clif 按 (in用,out用) 位分别判冲突（允许 in↔lateout 共享一个寄存器），此处
+    /// contains_key 全冲突不共享——分配结果恒为合法子集，代价是极端密集操作数时可能
+    /// 提前分配不出（panic → catch_lower → Trap 诊断，响亮不静默）。按需再对齐。
     fn allocate_registers(&mut self) {
         let sess = self.tcx.sess;
         let map = allocatable_registers(

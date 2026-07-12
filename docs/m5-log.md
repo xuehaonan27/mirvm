@@ -71,3 +71,29 @@ diff_cargo ffi_zlib+project 绿；加载相 fib 420ms（≈ M4.5 的 413ms，asm
 - **静态原生归档装载 = M5.1（D2）**：blake3 修完 xgetbv 后下一层是 `.S` 归档符号
   （build.rs 产物，dlsym 不到）——.a→.so 转换 + native_libraries 收集。
 - asm 支持面（sym/label/const/may_unwind/非 x86_64）按需再补（三面孔未触及）。
+
+### 复审（2026-07-12，应用户要求二次审查）
+
+**语义面结论：实现正确**——机器码级逐条核对（div wrapper 汇编逐指令对、掩宽链
+mem_write/ByteRegion.write 按宽截断闭环、rbx 基址不变量靠 rustc 保留 rbx + cpuid
+惯用法自保、clobber 槽按 C-ABI 覆盖集过滤正确、分配 panic → catch_lower → Trap
+响亮、stats/纯度/TSan 无涉）+ 新增 `demo/asm_probe.rs` 差分探针（三面孔+类分配+
+inout/clobber 与 native 同机逐字节一致，含 cpuid 厂商串——"虚拟 CPU=真宿主 CPU"
+使 cpuid 差分有效）。
+
+**三项发现与修复**：
+1. **F1（流程，最重）**：M5.0 提交时"全量回归"漏跑 gate4/gate5——gate4 补跑 11/11
+   绿；gate5 实测 **28/31 红**：其 asm 预期红判据（grep 'asm!'）滞后于 M5.0 推进的
+   前沿（blake3/sha2/numbigint 的诊断已变 `llvm.x86.*`），且 tempfile 转绿未上锁
+   （若工厂回归，gate5 会把红当"预期红"吞掉——安全网破洞）。修：判据滚动到新前沿
+   （INTRINSIC_RED 三项按 `llvm\.x86` 匹配、诊断变形即 FAIL；tempfile 出清单必须
+   PASS）+ asm_probe 进 diff.sh（基线 16→17，工厂永久在差分网里）。修后 gate5
+   **31/31**。**教训：预期红清单是滚动记账——每推进一层前沿，gate 判据必须同一
+   commit 同步；且"全量回归"必须真的全量（gate0-5 一个不少），列表式汇报防自欺。**
+2. **F2（并发竞态）**：materialize 的 cc 直写终名 .so——并发 mirvm 进程同键物化时
+   可 dlopen 半成品。修：临时名 + rename 原子发布。
+3. **F3（忠实性措辞）**：allocate_registers 注释自称"同构"，实为**保守变体**
+   （cg_clif 按 (in,out) 位分别判冲突允许 in↔lateout 共享寄存器；本实现全冲突不
+   共享——恒为合法子集，极端密集时提前分配不出 = 响亮 Trap 非静默错值）。修注释
+   如实标注分歧。另记：xmm 值操作数现被标量路径拒（Trap 响亮）——M5.1 sha stub
+   需扩 16 字节槽通道。
