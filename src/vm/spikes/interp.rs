@@ -18,7 +18,11 @@ pub struct Vm<'p> {
 
 impl<'p> Vm<'p> {
     pub fn new(prog: &'p Program) -> Self {
-        Vm { prog, region: OperandRegion::new(), mem: GuestMemory::new(1 << 20) }
+        Vm {
+            prog,
+            region: OperandRegion::new(),
+            mem: GuestMemory::new(1 << 20),
+        }
     }
 
     /// 从 `func` 入口跑到 `Return`，返回 slot 0。
@@ -83,7 +87,11 @@ impl<'p> Vm<'p> {
             }
             match &block.term {
                 Terminator::Goto(t) => blk = *t as usize,
-                Terminator::SwitchInt { discr, targets, otherwise } => {
+                Terminator::SwitchInt {
+                    discr,
+                    targets,
+                    otherwise,
+                } => {
                     let d = self.eval(base, *discr);
                     blk = targets
                         .iter()
@@ -91,7 +99,13 @@ impl<'p> Vm<'p> {
                         .map(|(_, b)| *b)
                         .unwrap_or(*otherwise) as usize;
                 }
-                Terminator::Call { func: callee, args: aops, dst, target, .. } => {
+                Terminator::Call {
+                    func: callee,
+                    args: aops,
+                    dst,
+                    target,
+                    ..
+                } => {
                     let av: Vec<Word> = aops.iter().map(|o| self.eval(base, *o)).collect();
                     let r = self.interp_frame(*callee, &av); // ← 宿主递归 = guest 帧上 native 栈
                     self.region.write(base, *dst, r);

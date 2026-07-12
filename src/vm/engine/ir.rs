@@ -101,12 +101,21 @@ pub enum Operand {
     /// 帧内静态槽（快路径）
     Slot(Slot),
     /// 地址表达式处的标量
-    Mem { expr: PlaceExpr, width: Width },
-    Imm { bits: u64, width: Width },
+    Mem {
+        expr: PlaceExpr,
+        width: Width,
+    },
+    Imm {
+        bits: u64,
+        width: Width,
+    },
     /// place 的真地址本身（indirect 实参 = 传聚合的地址）
     AddrOf(PlaceExpr),
     /// 值减常量（Subslice 的 slice meta：len' = len − k；M4.4）
-    SubImm { base: Box<Operand>, sub: u64 },
+    SubImm {
+        base: Box<Operand>,
+        sub: u64,
+    },
 }
 
 impl Operand {
@@ -221,15 +230,29 @@ pub enum SimdBinOp {
     Eq,
     Ne,
     /// 有符号性来自 lane 元素类型（冻结）
-    Lt { signed: bool },
-    Le { signed: bool },
-    Gt { signed: bool },
-    Ge { signed: bool },
+    Lt {
+        signed: bool,
+    },
+    Le {
+        signed: bool,
+    },
+    Gt {
+        signed: bool,
+    },
+    Ge {
+        signed: bool,
+    },
     And,
     Or,
     Xor,
     Add,
     Sub,
+    /// 左移对 signed/unsigned lane 的位级结果相同。
+    Shl,
+    /// 右移按 lane 类型选择算术/逻辑语义。
+    Shr {
+        signed: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -238,9 +261,19 @@ pub enum Rvalue {
     /// guest TLS 实例真地址（M4.4 D3）：Ctx.tls[id] 惰性物化（heap 分配 + 模板拷贝）。
     TlsRef(TlsId),
     // （Subslice 的 meta 走 Operand::SubImm，无独立 rvalue）
-    IntBin { op: IntBinOp, signed: bool, a: Operand, b: Operand },
+    IntBin {
+        op: IntBinOp,
+        signed: bool,
+        a: Operand,
+        b: Operand,
+    },
     /// → bool（W8）
-    IntCmp { cc: IntCc, signed: bool, a: Operand, b: Operand },
+    IntCmp {
+        cc: IntCc,
+        signed: bool,
+        a: Operand,
+        b: Operand,
+    },
     /// 按位取反（掩到宽度）
     NotBits(Operand),
     /// 逻辑取反（bool：xor 1）——rustc 对 bool 的 Not 语义
@@ -248,13 +281,25 @@ pub enum Rvalue {
     /// 二补数取负
     Neg(Operand),
     /// IntToInt：截断后按 from 的符号扩展到 to
-    Cast { from: (Width, bool), to: Width, a: Operand },
+    Cast {
+        from: (Width, bool),
+        to: Width,
+        a: Operand,
+    },
     /// 取 place 真地址（Ref/RawPtr 同一实现——真实地址模型）
     Ref(PlaceExpr),
     /// 指针算术：ptr + count × stride（BinOp::Offset 与 offset/arith_offset intrinsic）
-    PtrOffset { ptr: Operand, count: Operand, stride: u64 },
+    PtrOffset {
+        ptr: Operand,
+        count: Operand,
+        stride: u64,
+    },
     /// 三路比较（BinOp::Cmp）→ Ordering（i8：-1/0/1）
-    IntCmp3 { signed: bool, a: Operand, b: Operand },
+    IntCmp3 {
+        signed: bool,
+        a: Operand,
+        b: Operand,
+    },
     /// niche 编码判别式读（Direct 编码在 lower 期溶解为 Cast）：
     /// rel = (tag - niche_start) 按 tag 宽 wrapping；rel < len → variants_start+rel，
     /// 否则 untagged。niche 不变量：discr 值 == variant index（rustc layout sanity check）。
@@ -266,37 +311,108 @@ pub enum Rvalue {
         untagged: u64,
     },
     /// 浮点四则（位进位出：操作数是 f32/f64 的位型）
-    FloatBin { op: FloatOp, is64: bool, a: Operand, b: Operand },
+    FloatBin {
+        op: FloatOp,
+        is64: bool,
+        a: Operand,
+        b: Operand,
+    },
     /// 数学一元/二元（宿主直算；M4.5 补 must_be_overridden float intrinsic 面）
-    MathUn { op: MathUnOp, is64: bool, a: Operand },
-    MathBin { op: MathBinOp, is64: bool, a: Operand, b: Operand },
+    MathUn {
+        op: MathUnOp,
+        is64: bool,
+        a: Operand,
+    },
+    MathBin {
+        op: MathBinOp,
+        is64: bool,
+        a: Operand,
+        b: Operand,
+    },
     /// 无符号取大（unsized 尾对齐 = max(sized_align, 运行期 vtable align)，M4.5）
-    UMax { a: Operand, b: Operand },
+    UMax {
+        a: Operand,
+        b: Operand,
+    },
     /// 浮点比较（IEEE 语义，NaN 全 false 除 Ne）→ bool
-    FloatCmp { cc: IntCc, is64: bool, a: Operand, b: Operand },
-    FloatNeg { is64: bool, a: Operand },
+    FloatCmp {
+        cc: IntCc,
+        is64: bool,
+        a: Operand,
+        b: Operand,
+    },
+    FloatNeg {
+        is64: bool,
+        a: Operand,
+    },
     /// f32↔f64
-    FloatCast { from64: bool, to64: bool, a: Operand },
+    FloatCast {
+        from64: bool,
+        to64: bool,
+        a: Operand,
+    },
     /// float → int（Rust `as` 饱和语义：NaN→0、越界→边界）
-    FloatToInt { from64: bool, to: Width, signed: bool, a: Operand },
+    FloatToInt {
+        from64: bool,
+        to: Width,
+        signed: bool,
+        a: Operand,
+    },
     /// int → float
-    IntToFloat { from: (Width, bool), to64: bool, a: Operand },
+    IntToFloat {
+        from: (Width, bool),
+        to64: bool,
+        a: Operand,
+    },
     /// 位操作单目（按操作数宽度语义：ctlz(W8) 是 8 位前导零）
-    BitUn { op: BitUnOp, a: Operand },
+    BitUn {
+        op: BitUnOp,
+        a: Operand,
+    },
     /// 原子读（真宿主原子指令——spike4 义务；SeqCst）
-    AtomicLoad { addr: Operand, width: Width },
+    AtomicLoad {
+        addr: Operand,
+        width: Width,
+    },
     /// 指针差（ptr_offset_from[_unsigned]）：(a - b) / stride（i64 除法）
-    PtrDiff { a: Operand, b: Operand, stride: u64 },
+    PtrDiff {
+        a: Operand,
+        b: Operand,
+        stride: u64,
+    },
     /// SIMD movemask：收集各 lane 最高位 → 整数标量（simd_bitmask）
-    SimdBitmask { a: PlaceExpr, lanes: u16, lane_bytes: u8 },
+    SimdBitmask {
+        a: PlaceExpr,
+        lanes: u16,
+        lane_bytes: u8,
+    },
     /// 字节比较（compare_bytes intrinsic = memcmp）→ i32（-1/0/1 语义按首异字节）
-    MemCmp { a: Operand, b: Operand, n: Operand },
+    MemCmp {
+        a: Operand,
+        b: Operand,
+        n: Operand,
+    },
     /// 128 位整数比较（TypeId 判等等；操作数是 16 字节 place）→ bool
-    Cmp128 { cc: IntCc, signed: bool, a: PlaceExpr, b: PlaceExpr },
+    Cmp128 {
+        cc: IntCc,
+        signed: bool,
+        a: PlaceExpr,
+        b: PlaceExpr,
+    },
     /// 饱和算术（saturating_add/sub intrinsic）
-    IntSat { op: OvfOp, signed: bool, a: Operand, b: Operand },
+    IntSat {
+        op: OvfOp,
+        signed: bool,
+        a: Operand,
+        b: Operand,
+    },
     /// SIMD 归约（simd_reduce_all/any：mask 向量全真/任真）→ bool
-    SimdReduce { all: bool, a: PlaceExpr, lanes: u16, lane_bytes: u8 },
+    SimdReduce {
+        all: bool,
+        a: PlaceExpr,
+        lanes: u16,
+        lane_bytes: u8,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -330,7 +446,25 @@ pub enum Stmt {
         elem_size: u32,
     },
     /// 原子写（SeqCst）
-    AtomicStore { addr: Operand, val: Operand },
+    AtomicStore {
+        addr: Operand,
+        val: Operand,
+    },
+    /// 等宽 volatile 整体读。执行器用 alignment=1 的 opaque `MaybeUninit`
+    /// 字节载体发出单个 volatile 事件，不解释聚合值的 padding。
+    VolatileLoad {
+        addr: Operand,
+        dst: PlaceExpr,
+        size: u8,
+    },
+    /// 等宽 volatile 整体写；`src` 是位型来源 place，padding 只按原始
+    /// 字节搬运。aligned/unaligned intrinsic 在 guest 端的前置条件不同，
+    /// 但执行器共用对齐 1 的宿主载体，避免增加额外对齐要求。
+    VolatileStore {
+        addr: Operand,
+        src: PlaceExpr,
+        size: u8,
+    },
     /// 原子比较交换：dst_val = 旧值，dst_ok = 是否成功（SeqCst/SeqCst）
     AtomicCxchg {
         addr: Operand,
@@ -341,11 +475,27 @@ pub enum Stmt {
         weak: bool,
     },
     /// 原子 RMW：dst = 旧值（SeqCst）
-    AtomicRmw { op: RmwOp, addr: Operand, val: Operand, dst: ScalarPlace },
+    AtomicRmw {
+        op: RmwOp,
+        addr: Operand,
+        val: Operand,
+        dst: ScalarPlace,
+    },
     /// 动态长度内存拷贝（copy/copy_nonoverlapping intrinsic：count × elem_size 字节）
-    MemCopy { dst: Operand, src: Operand, count: Operand, elem_size: u64, overlap: bool },
+    MemCopy {
+        dst: Operand,
+        src: Operand,
+        count: Operand,
+        elem_size: u64,
+        overlap: bool,
+    },
     /// 动态长度填充（write_bytes：val 是 u8，count × elem_size 字节）
-    MemSet { dst: Operand, val: Operand, count: Operand, elem_size: u64 },
+    MemSet {
+        dst: Operand,
+        val: Operand,
+        count: Operand,
+        elem_size: u64,
+    },
     /// SIMD 逐 lane 双目（dst/a/b 是向量 place；几何冻结自 layout）
     SimdBin {
         op: SimdBinOp,
@@ -356,7 +506,12 @@ pub enum Stmt {
         lane_bytes: u8,
     },
     /// SIMD 广播（simd_splat / _mm_set1）：val 复制到每个 lane
-    SimdSplat { dst: PlaceExpr, val: Operand, lanes: u16, lane_bytes: u8 },
+    SimdSplat {
+        dst: PlaceExpr,
+        val: Operand,
+        lanes: u16,
+        lane_bytes: u8,
+    },
     /// 128 位整数双目（宿主 u128 直算：读两半组 → 算 → 写两半）；
     /// with_overflow 时 dst 是 (u128, bool) 布局（旗标写 dst+16）
     Bin128 {
@@ -368,7 +523,12 @@ pub enum Stmt {
         with_overflow: bool,
     },
     /// 128 位整数 → 浮点（u128/i128 as f32/f64；宿主直转，M4.5 tokio 定时器逼出）
-    Wide128ToFloat { src: PlaceExpr, signed: bool, to64: bool, dst: ScalarPlace },
+    Wide128ToFloat {
+        src: PlaceExpr,
+        signed: bool,
+        to64: bool,
+        dst: ScalarPlace,
+    },
     /// 128 位 niche 判别式读（regex_automata 的 Result<DFA,_> 大 niche，M4.5）：
     /// rel = tag − niche_start（u128 wrapping）；rel < len → variants_start+rel，否则 untagged
     NicheDiscr128 {
@@ -385,9 +545,15 @@ pub enum Stmt {
     Nop,
     /// 内存栅栏（M4.4 D4）：atomic_fence → 宿主 fence(SeqCst)；
     /// single_thread（atomic_singlethreadfence）→ compiler_fence(SeqCst)
-    Fence { single_thread: bool },
+    Fence {
+        single_thread: bool,
+    },
     /// `[expr; N]` 聚合元素通道（M4.4）：dst[0] 已写好，从它铺满 i∈[1,count)
-    RepeatBytes { first: PlaceExpr, count: u64, elem_size: u64 },
+    RepeatBytes {
+        first: PlaceExpr,
+        count: u64,
+        elem_size: u64,
+    },
 }
 
 /// unwind 处置（M4.2 起全语义：FrameGuard 动态 LSDA，spike3 协议）。
@@ -431,11 +597,35 @@ pub enum Builtin {
     HostAbort,
     /// `syscall(nr, ...) -> long` 可变参直通（按实参个数分派）
     HostSyscall,
-    /// stub：返回 0、无副作用（sigaction/sigaltstack/atexit/dl_iterate_phdr/
-    /// _Unwind_Backtrace 等——真实现挂 M4.4 thunk 或永不需要）
-    StubZero,
-    /// stub：空操作无返回（_Unwind_DeleteException/llvm.x86.sse2.pause 等）
-    StubNop,
+    /// `signal(signum, SIG_DFL|SIG_IGN)`：不含 guest 回调，可安全直通；其他 handler
+    /// 执行期明确失败，直到有异步信号安全的专用 thunk。
+    HostSignal,
+    /// `sigaction(signum, act, oldact)` 的受限直通：查询（act=NULL）或
+    /// act.handler=SIG_DFL/SIG_IGN；结构体中的 guest handler 仍明确失败。
+    HostSigaction,
+    /// 已知不能安全直通的宿主边界。执行到必须明确失败，绝不伪造成功。
+    /// 包括需要异步安全专用实现的边界，以及需要 guest frame/context
+    /// 翻译、不能把宿主解释器状态直接暴露给 guest 的 unwinder API。
+    Unsupported(&'static str),
+    /// `_Unwind_DeleteException`：按 Itanium ABI 调用异常对象内的 cleanup 回调。
+    UnwindDeleteException,
+    /// 不改变 guest 抽象机/RAM 状态的处理器 hint（如 `pause`、`vzeroupper`）。
+    /// 解释器不持久化宿主向量寄存器状态，因此执行期可正确忽略。
+    CpuHintNop,
+    /// `llvm.x86.addcarry.64(carry, a, b) -> (carry, result)`：
+    /// LLVM unadjusted intrinsic 的 pair 字段顺序保持原样。
+    AddCarry64,
+    /// `llvm.x86.subborrow.64(borrow, a, b) -> (borrow, result)`。
+    SubBorrow64,
+    /// `llvm.x86.xgetbv(xcr) -> u64`：读取真实宿主扩展控制寄存器。
+    Xgetbv,
+    /// 无可移植 `simd_*` 等价的 x86 向量硬件 intrinsic。参数和返回向量仍通过
+    /// frozen bytecode 的 indirect place ABI 传递；执行器助手调用真实宿主指令。
+    X86Pshufb128,
+    X86Pshufb256,
+    X86Sha256Msg1,
+    X86Sha256Msg2,
+    X86Sha256Rnds2,
 }
 
 /// libffi 直通的参数/返回类别（lower 期从 fn sig layout 冻结；os:: P7 直通处置）。
@@ -511,7 +701,11 @@ pub enum RetAbi {
     Pair(Slot, Slot),
     /// 大聚合：caller 前插隐藏首实参 = 目的真地址；callee Return 时
     /// memcpy(隐藏指针槽, _0 槽, size)。隐藏指针槽附加在帧尾（sret_off）。
-    Indirect { ret_off: u32, size: u32, sret_off: u32 },
+    Indirect {
+        ret_off: u32,
+        size: u32,
+        sret_off: u32,
+    },
 }
 
 /// Call 的返回落点（caller 侧）。
@@ -643,8 +837,11 @@ pub struct Module {
     pub frozen: Option<super::frozen::FrozenArena>,
     /// fn-ptr 条目真地址 → FuncId（D4 反查；间接调用派发 M4.1 第 5 步）
     pub fn_addrs: std::collections::HashMap<u64, FuncId>,
-    /// `-l` 链接指令的共享库候选路径（foreign 直通的 dlopen 清单，加载相收集）
+    /// `-l` 链接指令的可选共享库候选路径；不存在时继续尝试其他候选。
     pub native_libs: Vec<Box<str>>,
+    /// 已由加载相物化、执行 foreign 前必须成功 dlopen 的共享库（当前为 M5.1 Static
+    /// archive `.a → .so` 产物）。失败不可退化为普通 dlsym miss。
+    pub required_native_libs: Vec<Box<str>>,
     /// guest TLS 槽表（M4.4 D3：TlsId → 模板/尺寸；每线程实例在 Ctx.tls）
     pub tls: Vec<TlsSlot>,
     /// asm-stub wrapper 真地址（M5.0）：AsmStubId → `fn(*mut u8)` 机器地址（加载相
@@ -652,4 +849,25 @@ pub struct Module {
     pub asm_stub_addrs: Vec<u64>,
     /// main 启动链（M4.3；--vm-call 模式下为 None）
     pub entry: Option<EntryPlan>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Width;
+
+    #[test]
+    fn width_roundtrips_supported_byte_sizes_and_masks_values() {
+        for (bytes, width, mask) in [
+            (1, Width::W8, 0xff),
+            (2, Width::W16, 0xffff),
+            (4, Width::W32, 0xffff_ffff),
+            (8, Width::W64, u64::MAX),
+        ] {
+            assert_eq!(Width::from_bytes(bytes), Some(width));
+            assert_eq!(width.bytes() as u64, bytes);
+            assert_eq!(width.mask(), mask);
+        }
+        assert_eq!(Width::from_bytes(0), None);
+        assert_eq!(Width::from_bytes(16), None);
+    }
 }

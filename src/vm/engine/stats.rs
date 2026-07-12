@@ -11,7 +11,11 @@ use super::ir::{Module, Stmt, Terminator};
 
 /// 聚合键：诊断串截断（Debug 载荷会让原因逐条唯一，按前缀归类）。
 fn group_key(reason: &str) -> String {
-    let cut = reason.char_indices().nth(40).map(|(i, _)| i).unwrap_or(reason.len());
+    let cut = reason
+        .char_indices()
+        .nth(40)
+        .map(|(i, _)| i)
+        .unwrap_or(reason.len());
     reason[..cut].to_string()
 }
 
@@ -37,7 +41,7 @@ fn phase_of(reason: &str) -> &'static str {
 }
 
 /// 遍历一个函数体的全部 Trap 原因（语句级 + 终止子级）。
-fn traps_of<'m>(f: &'m super::ir::FuncBody) -> impl Iterator<Item = &'m str> {
+fn traps_of(f: &super::ir::FuncBody) -> impl Iterator<Item = &str> {
     f.blocks.iter().flat_map(|b| {
         let stmt_traps = b.stmts.iter().filter_map(|s| match s {
             Stmt::Trap(r) => Some(&**r),
@@ -77,13 +81,13 @@ pub fn report(module: &Module) -> String {
 
     out.push_str("\n== 分期债务余额（Trap 计数）==\n");
     let mut ph: Vec<(&str, usize)> = phases.into_iter().collect();
-    ph.sort_by(|a, b| b.1.cmp(&a.1));
+    ph.sort_by_key(|a| std::cmp::Reverse(a.1));
     for (p, n) in &ph {
         out.push_str(&format!("{n:6}  {p}\n"));
     }
 
     let mut hist: Vec<(String, usize)> = histogram.into_iter().collect();
-    hist.sort_by(|a, b| b.1.cmp(&a.1));
+    hist.sort_by_key(|a| std::cmp::Reverse(a.1));
     out.push_str("\n== Trap 原因 TOP25 ==\n");
     for (reason, n) in hist.iter().take(25) {
         out.push_str(&format!("{n:6}  {reason}\n"));
@@ -137,10 +141,13 @@ pub fn report(module: &Module) -> String {
             }
         }
         if reason_hist.is_empty() {
-            out.push_str(&format!("  {name}: ✅ 可达路径 trap-free（{} fn 可达）\n", seen.len()));
+            out.push_str(&format!(
+                "  {name}: ✅ 可达路径 trap-free（{} fn 可达）\n",
+                seen.len()
+            ));
         } else {
             let mut ph: Vec<(&str, usize)> = reach_phases.into_iter().collect();
-            ph.sort_by(|a, b| b.1.cmp(&a.1));
+            ph.sort_by_key(|a| std::cmp::Reverse(a.1));
             let ph_str: Vec<String> = ph.iter().map(|(p, n)| format!("{p}:{n}")).collect();
             out.push_str(&format!(
                 "  {name}: {} 类可达 Trap，{} fn 可达 | {}\n",
@@ -149,7 +156,7 @@ pub fn report(module: &Module) -> String {
                 ph_str.join(" ")
             ));
             let mut rs: Vec<(String, usize)> = reason_hist.into_iter().collect();
-            rs.sort_by(|a, b| b.1.cmp(&a.1));
+            rs.sort_by_key(|a| std::cmp::Reverse(a.1));
             for (r, n) in rs.iter().take(6) {
                 out.push_str(&format!("      {n:5}  {r}\n"));
             }

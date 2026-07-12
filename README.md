@@ -1,35 +1,52 @@
 # mirvm
 
-**Rust 抽象机器（Rust Abstract Machine）的一个事实标准实现，按 JVM 级系统软件构建。**
+mirvm 是一个以 rustc 为前端、自建执行引擎的 Rust 抽象机器运行实现。它复用 rustc 完成解析、
+宏、类型检查、trait 求解和 MIR 生成，在加载相把可达程序降低为 tcx-free typed bytecode，随后由
+自己的运行时执行；长期目标是在保持 RAM 可观察语义的前提下加入方法级 Cranelift JIT。
 
-用真 rustc 做前端（RAM 的加载器/验证器：宏/typeck/trait/MIR，复用不重建），
-自研执行引擎实现 RAM 的计算与并发（解释 tier → 生而并发的字节码 VM → Cranelift JIT）。
-跳过 codegen 与链接，"改完即跑"。正确性 = 忠实实现 RAM；native codegen 是 RAM 的另一实现，
-所以对拍 native 逐字节一致是同源的必然。
+> 项目仍处于开发阶段，不是完整 Rust 语义的成品。当前状态、已知缺口和下一步以
+> [docs/current-status.md](docs/current-status.md) 为准；文档权威与历史替代关系见
+> [docs/README.md](docs/README.md)。
 
-心智模型、抽象机器规格、VM 架构、决策账本见 [DESIGN.md](DESIGN.md)。
-定位：Miri 是 RAM 的*检查*实现（宁慢勿漏 UB），mirvm 是 RAM 的*运行/标准*实现（假设合法、追求快）。
+## 当前状态
 
-## 状态
+- **M4 完成**：自研 typed bytecode、tree-walking interpreter、tcx-free 执行相、真实地址内存、
+  unwind、libffi FFI、native→guest thunk、1:1 OS 线程与 guest TLS。
+- **M5.0 完成并复审**：有限 x86_64 inline asm 可在加载相物化为 GAS wrapper 共享库并由解释器调用。
+- **M5.1 完成**：addcarry/subborrow 已使 numbigint 转绿，
+  xgetbv 已与 native 差分，pshufb/SHA stdarch helpers 也已使 sha2 转绿；guest 静态归档
+  的受约束 Linux/ELF 装载使 blake3 转绿，SIMD 补面也已使 ecosystem 转绿。signal guest
+  handler 与 guest backtrace/frame-IP 映射仍是两个原因锁定的独立 XFAIL，不属于
+  M5.1 已完成语义。diff_cargo 3/3、六个 release tracer 脚本（七个独立子断言）、
+  23 个 Rust tests、rustfmt 与 Clippy 均通过。
+- **生产 JIT 尚未实现**：Cranelift 目前只用于冻结的 Spike 5，不在产品执行路径中。
 
-**M2 完成**：真实生态可用——cargo 依赖图、proc-macro、frontmatter 单文件脚本、
-真实 args/env、时间/文件 shims。serde_json + rand + regex 与 native `cargo run`
-输出逐字节一致（tests/diff_cargo.sh），M1 corpus 回归 7/7（tests/diff.sh）。
-热启动：纯 std 脚本 ~0.24s，带 serde_json 的项目 ~0.26s（依赖构建一次全局缓存）。
+当前开发基线是 Linux/ELF/x86_64，工具链锁定在 `nightly-2026-07-02`。根设计契约见
+[DESIGN.md](DESIGN.md)，frame/vmctx 等可逆架构决策及旧模型完整保留在
+[docs/decision-history.md](docs/decision-history.md)。
 
 ## 快速开始
 
 ```bash
-cargo build --release          # mirvm 自身务必 release（debug 慢 ~7×）
-alias mirvm=$PWD/target/release/mirvm
+cargo build --release --locked
 
-mirvm run demo/fib.rs                    # 单文件（零 cargo 快路径）
-mirvm run demo/ecosystem.rs              # 带 frontmatter 依赖的脚本（自动物化 cargo 项目）
-mirvm run path/to/project -- arg1 arg2   # cargo 项目 + 程序参数
-./tests/diff.sh && ./tests/diff_cargo.sh # 差分对拍
+# 纯单文件
+./target/release/mirvm run demo/fib.rs
+
+# 带 cargo-script frontmatter 的单文件或 Cargo 项目
+./target/release/mirvm run demo/ecosystem.rs
+./target/release/mirvm run path/to/project -- arg1 arg2
+
+# 当前基础回归；语义完整性仍以 current-status 中的诚实边界为准
+MIRVM="$PWD/target/release/mirvm" bash tests/diff.sh
+bash tests/m4_gate0.sh
+bash tests/m4_gate1.sh
+bash tests/m4_gate2.sh
+bash tests/m4_gate4.sh
+bash tests/m4_gate5.sh
 ```
 
-单文件脚本声明依赖（cargo script / RFC 3424 语法）：
+单文件可使用 cargo script / RFC 3424 风格 frontmatter 声明依赖：
 
 ```rust
 #!/usr/bin/env mirvm
@@ -39,3 +56,5 @@ serde_json = "1"
 ---
 fn main() { /* ... */ }
 ```
+
+构建和首次运行会生成较大的 nightly/rustc 与 sysroot 缓存；开发和性能测量应使用 release 版本。

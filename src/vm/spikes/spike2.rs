@@ -17,7 +17,9 @@
 
 use std::process::ExitCode;
 
-use super::bytecode::{BinOp, Block, Body, Operand, Program, Rvalue, Stmt, Terminator, UnwindAction};
+use super::bytecode::{
+    BinOp, Block, Body, Operand, Program, Rvalue, Stmt, Terminator, UnwindAction,
+};
 use super::frame::{OperandRegion, Word};
 use super::memory::GuestMemory;
 
@@ -44,7 +46,12 @@ struct Ctx {
 
 impl Ctx {
     fn new(prog: Program, kinds: Vec<FuncKind>) -> Self {
-        Ctx { prog, kinds, region: OperandRegion::new(), mem: GuestMemory::new(1 << 20) }
+        Ctx {
+            prog,
+            kinds,
+            region: OperandRegion::new(),
+            mem: GuestMemory::new(1 << 20),
+        }
     }
 }
 
@@ -130,7 +137,11 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
         }
         match &block.term {
             Terminator::Goto(t) => blk = *t as usize,
-            Terminator::SwitchInt { discr, targets, otherwise } => {
+            Terminator::SwitchInt {
+                discr,
+                targets,
+                otherwise,
+            } => {
                 let d = eval_operand(ctx, base, *discr);
                 blk = targets
                     .iter()
@@ -138,7 +149,13 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
                     .map(|(_, b)| *b)
                     .unwrap_or(*otherwise) as usize;
             }
-            Terminator::Call { func: callee, args: aops, dst, target, .. } => {
+            Terminator::Call {
+                func: callee,
+                args: aops,
+                dst,
+                target,
+                ..
+            } => {
                 let av: Vec<Word> = aops.iter().map(|o| eval_operand(ctx, base, *o)).collect();
                 let r = call_guest(ctx, *callee, &av); // 再入点：不持任何借用
                 reg_write(ctx, base, *dst, r);
@@ -164,9 +181,11 @@ fn eval_operand(ctx: *mut Ctx, base: usize, op: Operand) -> Word {
 fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> Word {
     match rv {
         Rvalue::Use(op) => eval_operand(ctx, base, *op),
-        Rvalue::Binary(op, l, r) => {
-            apply_binop(*op, eval_operand(ctx, base, *l), eval_operand(ctx, base, *r))
-        }
+        Rvalue::Binary(op, l, r) => apply_binop(
+            *op,
+            eval_operand(ctx, base, *l),
+            eval_operand(ctx, base, *r),
+        ),
         Rvalue::Alloc(size) => {
             let sz = eval_operand(ctx, base, *size);
             mem_alloc(ctx, sz)
@@ -231,28 +250,60 @@ fn fib_body(callee: u32) -> Body {
     let blocks = vec![
         Block {
             stmts: vec![asgn(2, bin(Lt, s(1), k(2)))],
-            term: SwitchInt { discr: s(2), targets: vec![(0, 2)], otherwise: 1 },
+            term: SwitchInt {
+                discr: s(2),
+                targets: vec![(0, 2)],
+                otherwise: 1,
+            },
         },
-        Block { stmts: vec![asgn(0, Use(s(1)))], term: Return },
+        Block {
+            stmts: vec![asgn(0, Use(s(1)))],
+            term: Return,
+        },
         Block {
             stmts: vec![asgn(3, bin(Sub, s(1), k(1)))],
-            term: Call { func: callee, args: vec![s(3)], dst: 4, target: 3, unwind: UnwindAction::Continue },
+            term: Call {
+                func: callee,
+                args: vec![s(3)],
+                dst: 4,
+                target: 3,
+                unwind: UnwindAction::Continue,
+            },
         },
         Block {
             stmts: vec![asgn(5, bin(Sub, s(1), k(2)))],
-            term: Call { func: callee, args: vec![s(5)], dst: 6, target: 4, unwind: UnwindAction::Continue },
+            term: Call {
+                func: callee,
+                args: vec![s(5)],
+                dst: 6,
+                target: 4,
+                unwind: UnwindAction::Continue,
+            },
         },
-        Block { stmts: vec![asgn(0, bin(Add, s(4), s(6)))], term: Return },
+        Block {
+            stmts: vec![asgn(0, bin(Add, s(4), s(6)))],
+            term: Return,
+        },
     ];
-    Body { num_slots: 7, num_args: 1, blocks }
+    Body {
+        num_slots: 7,
+        num_args: 1,
+        blocks,
+    }
 }
 
 fn build_two_fib() -> Program {
-    Program { funcs: vec![fib_body(FIB_B), fib_body(FIB_A)] }
+    Program {
+        funcs: vec![fib_body(FIB_B), fib_body(FIB_A)],
+    }
 }
 
 fn fib_ref(n: u64) -> u64 {
-    if n < 2 { n } else { fib_ref(n - 1) + fib_ref(n - 2) }
+    if n < 2 {
+        n
+    } else {
+        fib_ref(n - 1) + fib_ref(n - 2)
+    }
 }
 
 pub fn run() -> ExitCode {
@@ -260,7 +311,11 @@ pub fn run() -> ExitCode {
     // (名称, fib_a 形态, fib_b 形态) —— 4 配置覆盖四种转移
     let configs: [(&str, FuncKind, FuncKind); 4] = [
         ("interp  / interp  ", Interp, Interp), // interp→interp
-        ("compiled/ compiled", Compiled(compiled_fib_a), Compiled(compiled_fib_b)), // cc→cc
+        (
+            "compiled/ compiled",
+            Compiled(compiled_fib_a),
+            Compiled(compiled_fib_b),
+        ), // cc→cc
         ("interp  / compiled", Interp, Compiled(compiled_fib_b)), // i2c + c2i 交替（混合栈）
         ("compiled/ interp  ", Compiled(compiled_fib_a), Interp), // 镜像
     ];

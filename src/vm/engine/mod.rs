@@ -12,3 +12,5 @@ pub mod ir;
 pub mod stats;
 pub mod thunks;
 pub mod tsan_mt;
+#[cfg(target_arch = "x86_64")]
+pub mod x86;

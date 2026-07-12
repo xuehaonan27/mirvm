@@ -27,7 +27,10 @@ pub struct Shared {
 
 impl Shared {
     pub fn new(module: Module) -> Self {
-        Shared { module, thunks: super::thunks::ThunkCache::default() }
+        Shared {
+            module,
+            thunks: super::thunks::ThunkCache::default(),
+        }
     }
 }
 

@@ -1,5 +1,9 @@
 # 帧栈模型 A vs B —— 详细对照（M4 字节码 VM 帧布局的地基决策）
 
+> 文档状态：**保留的决策论证**。2026-07-05 当前选择为 Model A，M4 实现采用 tree-walking A1；
+> guest 调用活动在 native 栈，局部字节位于 slaved ByteRegion。A/B 都不会因当前选择而从文档中
+> 删除；最新状态和重开条件见 [decision-history.md](decision-history.md)。
+
 > 目的：把"guest 调用帧放在 native 栈上（模型 A）"还是"放在独立的 VM 帧栈里（模型 B）"
 > 两条路的**具体做法**讲透，供 M4 设计前研判。本文只讲机制与权衡，不下最终裁决。
 > 配套：DESIGN.md §5/§6、账本 C8。调研来源见文末。
@@ -119,7 +123,7 @@ native 栈上的一个 guest 帧布局（HotSpot 风格）：
 
 ### 2.1 变体 B1：堆帧对象 / 帧数组
 
-每个 guest 帧是独立的结构（堆分配对象，或数组里的元素）。**我们当前 tier-0（InterpCx）就是这个**：`stack: Vec<Frame>`。
+每个 guest 帧是独立的结构（堆分配对象，或数组里的元素）。**当时的 tier-0（InterpCx）就是这个**：`stack: Vec<Frame>`；该实现现已删除。
 
 ```rust
 struct Frame { locals: Vec<Val>, ip: usize, body: BodyId, ret_to: (FrameIdx, Slot) }

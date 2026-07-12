@@ -38,7 +38,10 @@ impl ByteRegion {
             )
         };
         assert!(base != libc::MAP_FAILED, "ByteRegion: mmap 失败");
-        ByteRegion { base: base as *mut u8, sp: 0 }
+        ByteRegion {
+            base: base as *mut u8,
+            sp: 0,
+        }
     }
 
     /// 为新帧切 `size` 字节（按 `align` 对齐、清零），返回**帧基址（真地址）**。

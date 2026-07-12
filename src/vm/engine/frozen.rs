@@ -31,7 +31,10 @@ impl FrozenArena {
             )
         };
         assert!(base != libc::MAP_FAILED, "FrozenArena: mmap 失败");
-        FrozenArena { base: base as *mut u8, used: 0 }
+        FrozenArena {
+            base: base as *mut u8,
+            used: 0,
+        }
     }
 
     /// bump 分配（按 align 对齐、清零），返回真地址。
@@ -40,7 +43,11 @@ impl FrozenArena {
         let aligned = (self.base as usize + self.used + align - 1) & !(align - 1);
         let start = aligned - self.base as usize;
         let end = start + size as usize;
-        assert!(end <= FROZEN_CAP, "FrozenArena: 冻结区耗尽（{} MiB）", FROZEN_CAP >> 20);
+        assert!(
+            end <= FROZEN_CAP,
+            "FrozenArena: 冻结区耗尽（{} MiB）",
+            FROZEN_CAP >> 20
+        );
         self.used = end;
         aligned as u64
     }
@@ -54,7 +61,11 @@ impl Drop for FrozenArena {
 
 impl std::fmt::Debug for FrozenArena {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "FrozenArena {{ base: {:p}, used: {} }}", self.base, self.used)
+        write!(
+            f,
+            "FrozenArena {{ base: {:p}, used: {} }}",
+            self.base, self.used
+        )
     }
 }
 

@@ -18,7 +18,9 @@ pub enum ValKind {
     /// 标量对：两半的（相对本值起始的偏移，宽度）
     Pair((u32, Width), (u32, Width)),
     /// 聚合/大标量（u128、SIMD 向量、struct…）：memcpy 通道，带尺寸
-    Other { size: u64 },
+    Other {
+        size: u64,
+    },
 }
 
 impl ValKind {
@@ -52,7 +54,8 @@ pub fn layout_of<'tcx>(
     typing_env: TypingEnv<'tcx>,
     ty: Ty<'tcx>,
 ) -> Result<rustc_middle::ty::layout::TyAndLayout<'tcx>, String> {
-    tcx.layout_of(typing_env.as_query_input(ty)).map_err(|e| format!("layout 失败: {e}"))
+    tcx.layout_of(typing_env.as_query_input(ty))
+        .map_err(|e| format!("layout 失败: {e}"))
 }
 
 /// layout → 值分类。ScalarPair 两半偏移按 codegen 同款公式
@@ -65,20 +68,27 @@ pub fn classify(tcx: TyCtxt<'_>, layout: &rustc_middle::ty::layout::TyAndLayout<
         BackendRepr::Scalar(_) => match Width::from_bytes(layout.size.bytes()) {
             Some(w) => ValKind::Scalar(w),
             // u128/i128：memcpy 通道位搬运；算术是第 3 步
-            None => ValKind::Other { size: layout.size.bytes() },
+            None => ValKind::Other {
+                size: layout.size.bytes(),
+            },
         },
         BackendRepr::ScalarPair(a, b) => {
             let dl = tcx.data_layout();
             let a_size = a.size(dl);
             let b_off = a_size.align_to(b.default_align(dl).abi);
-            let (Some(aw), Some(bw)) =
-                (Width::from_bytes(a_size.bytes()), Width::from_bytes(b.size(dl).bytes()))
-            else {
-                return ValKind::Other { size: layout.size.bytes() };
+            let (Some(aw), Some(bw)) = (
+                Width::from_bytes(a_size.bytes()),
+                Width::from_bytes(b.size(dl).bytes()),
+            ) else {
+                return ValKind::Other {
+                    size: layout.size.bytes(),
+                };
             };
             ValKind::Pair((0, aw), (b_off.bytes() as u32, bw))
         }
-        _ => ValKind::Other { size: layout.size.bytes() },
+        _ => ValKind::Other {
+            size: layout.size.bytes(),
+        },
     }
 }
 
@@ -110,8 +120,17 @@ pub fn freeze<'tcx>(
         let align = layout.align.abi.bytes() as u32;
         max_align = max_align.max(align);
         let aligned = (off + align.max(1) - 1) & !(align.max(1) - 1);
-        locals.push(LocalInfo { off: aligned, ty, size, kind: classify(tcx, &layout) });
+        locals.push(LocalInfo {
+            off: aligned,
+            ty,
+            size,
+            kind: classify(tcx, &layout),
+        });
         off = aligned + size as u32;
     }
-    Ok(FrameLayout { locals, size: off, align: max_align })
+    Ok(FrameLayout {
+        locals,
+        size: off,
+        align: max_align,
+    })
 }

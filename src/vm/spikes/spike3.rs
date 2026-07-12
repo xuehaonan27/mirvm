@@ -58,7 +58,12 @@ struct Ctx {
 
 impl Ctx {
     fn new(prog: Program, kinds: Vec<FuncKind>) -> Self {
-        Ctx { prog, kinds, region: OperandRegion::new(), drop_log: Vec::new() }
+        Ctx {
+            prog,
+            kinds,
+            region: OperandRegion::new(),
+            drop_log: Vec::new(),
+        }
     }
 }
 
@@ -139,7 +144,13 @@ fn run_cleanup_chain(ctx: *mut Ctx, func: u32, base: usize, entry: u32) {
                 log_drop(ctx, reg_read(ctx, base, *slot));
                 blk = *target as usize;
             }
-            Terminator::Call { func: callee, args: aops, dst, target, .. } => {
+            Terminator::Call {
+                func: callee,
+                args: aops,
+                dst,
+                target,
+                ..
+            } => {
                 let av: Vec<Word> = aops.iter().map(|o| eval_operand(ctx, base, *o)).collect();
                 let r = call_guest(ctx, *callee, &av);
                 reg_write(ctx, base, *dst, r);
@@ -169,7 +180,12 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
     for (i, a) in args.iter().enumerate() {
         reg_write(ctx, base, (i + 1) as u32, *a);
     }
-    let guard = CleanupGuard { ctx, func, base, unwind_edge: Cell::new(None) };
+    let guard = CleanupGuard {
+        ctx,
+        func,
+        base,
+        unwind_edge: Cell::new(None),
+    };
 
     let mut blk = 0usize;
     loop {
@@ -179,7 +195,11 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
         }
         match &block.term {
             Terminator::Goto(t) => blk = *t as usize,
-            Terminator::SwitchInt { discr, targets, otherwise } => {
+            Terminator::SwitchInt {
+                discr,
+                targets,
+                otherwise,
+            } => {
                 let d = eval_operand(ctx, base, *discr);
                 blk = targets
                     .iter()
@@ -187,7 +207,13 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
                     .map(|(_, b)| *b)
                     .unwrap_or(*otherwise) as usize;
             }
-            Terminator::Call { func: callee, args: aops, dst, target, unwind } => {
+            Terminator::Call {
+                func: callee,
+                args: aops,
+                dst,
+                target,
+                unwind,
+            } => {
                 let av: Vec<Word> = aops.iter().map(|o| eval_operand(ctx, base, *o)).collect();
                 guard.unwind_edge.set(edge(unwind)); // callee 若 panic，本帧从这条边清理
                 let r = call_guest(ctx, *callee, &av);
@@ -204,7 +230,14 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
                 guard.unwind_edge.set(edge(unwind)); // 本帧 live Drop 由自己的 guard 跑
                 raise_guest(p);
             }
-            Terminator::CatchCall { func: callee, args: aops, dst, catch_dst, target, catch_target } => {
+            Terminator::CatchCall {
+                func: callee,
+                args: aops,
+                dst,
+                catch_dst,
+                target,
+                catch_target,
+            } => {
                 let callee = *callee;
                 let av: Vec<Word> = aops.iter().map(|o| eval_operand(ctx, base, *o)).collect();
                 match panic::catch_unwind(AssertUnwindSafe(|| call_guest(ctx, callee, &av))) {
@@ -228,7 +261,9 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
                 std::mem::forget(guard); // 正常路径解除守卫（unwind 语义只属 unwind 路径）
                 return r;
             }
-            Terminator::Resume => unreachable!("Resume 只出现在 cleanup 链（由 CleanupGuard 执行）"),
+            Terminator::Resume => {
+                unreachable!("Resume 只出现在 cleanup 链（由 CleanupGuard 执行）")
+            }
         }
     }
 }
@@ -361,16 +396,42 @@ fn mid_body(d: u64, callee: u32) -> Body {
             // bb0
             Block {
                 stmts: vec![asgn(2, Rvalue::Use(k(100 + d)))],
-                term: Call { func: callee, args: vec![s(1)], dst: 3, target: 1, unwind: UnwindAction::Cleanup(3) },
+                term: Call {
+                    func: callee,
+                    args: vec![s(1)],
+                    dst: 3,
+                    target: 1,
+                    unwind: UnwindAction::Cleanup(3),
+                },
             },
             // bb1 (normal): Drop(own) -> bb2
-            Block { stmts: vec![], term: Drop { slot: 2, target: 2, unwind: UnwindAction::Continue } },
+            Block {
+                stmts: vec![],
+                term: Drop {
+                    slot: 2,
+                    target: 2,
+                    unwind: UnwindAction::Continue,
+                },
+            },
             // bb2: ret = callret + 1
-            Block { stmts: vec![asgn(0, bin(BinOp::Add, s(3), k(1)))], term: Return },
+            Block {
+                stmts: vec![asgn(0, bin(BinOp::Add, s(3), k(1)))],
+                term: Return,
+            },
             // bb3 (cleanup): Drop(own) -> bb4
-            Block { stmts: vec![], term: Drop { slot: 2, target: 4, unwind: UnwindAction::Continue } },
+            Block {
+                stmts: vec![],
+                term: Drop {
+                    slot: 2,
+                    target: 4,
+                    unwind: UnwindAction::Continue,
+                },
+            },
             // bb4: Resume
-            Block { stmts: vec![], term: Resume },
+            Block {
+                stmts: vec![],
+                term: Resume,
+            },
         ],
     }
 }
@@ -384,19 +445,51 @@ fn mid_body_cleanup_call(d: u64, callee: u32, logger: u32) -> Body {
         blocks: vec![
             Block {
                 stmts: vec![asgn(2, Rvalue::Use(k(100 + d)))],
-                term: Call { func: callee, args: vec![s(1)], dst: 3, target: 1, unwind: UnwindAction::Cleanup(3) },
+                term: Call {
+                    func: callee,
+                    args: vec![s(1)],
+                    dst: 3,
+                    target: 1,
+                    unwind: UnwindAction::Cleanup(3),
+                },
             },
-            Block { stmts: vec![], term: Drop { slot: 2, target: 2, unwind: UnwindAction::Continue } },
-            Block { stmts: vec![asgn(0, bin(BinOp::Add, s(3), k(1)))], term: Return },
+            Block {
+                stmts: vec![],
+                term: Drop {
+                    slot: 2,
+                    target: 2,
+                    unwind: UnwindAction::Continue,
+                },
+            },
+            Block {
+                stmts: vec![asgn(0, bin(BinOp::Add, s(3), k(1)))],
+                term: Return,
+            },
             // bb3 (cleanup): Drop(own) -> bb4
-            Block { stmts: vec![], term: Drop { slot: 2, target: 4, unwind: UnwindAction::Continue } },
+            Block {
+                stmts: vec![],
+                term: Drop {
+                    slot: 2,
+                    target: 4,
+                    unwind: UnwindAction::Continue,
+                },
+            },
             // bb4: cleanup 内 Call 编译 logger(9002) -> bb5
             Block {
                 stmts: vec![],
-                term: Call { func: logger, args: vec![k(9002)], dst: 4, target: 5, unwind: UnwindAction::Continue },
+                term: Call {
+                    func: logger,
+                    args: vec![k(9002)],
+                    dst: 4,
+                    target: 5,
+                    unwind: UnwindAction::Continue,
+                },
             },
             // bb5: Resume
-            Block { stmts: vec![], term: Resume },
+            Block {
+                stmts: vec![],
+                term: Resume,
+            },
         ],
     }
 }
@@ -410,10 +503,23 @@ fn bottom_body(d: u64) -> Body {
         blocks: vec![
             Block {
                 stmts: vec![asgn(2, Rvalue::Use(k(100 + d)))],
-                term: Panic { payload: k(777), unwind: UnwindAction::Cleanup(1) },
+                term: Panic {
+                    payload: k(777),
+                    unwind: UnwindAction::Cleanup(1),
+                },
             },
-            Block { stmts: vec![], term: Drop { slot: 2, target: 2, unwind: UnwindAction::Continue } },
-            Block { stmts: vec![], term: Resume },
+            Block {
+                stmts: vec![],
+                term: Drop {
+                    slot: 2,
+                    target: 2,
+                    unwind: UnwindAction::Continue,
+                },
+            },
+            Block {
+                stmts: vec![],
+                term: Resume,
+            },
         ],
     }
 }
@@ -428,20 +534,41 @@ fn top_catch_body(callee: u32) -> Body {
         blocks: vec![
             Block {
                 stmts: vec![asgn(2, Rvalue::Use(k(100)))],
-                term: CatchCall { func: callee, args: vec![s(1)], dst: 3, catch_dst: 4, target: 1, catch_target: 3 },
+                term: CatchCall {
+                    func: callee,
+                    args: vec![s(1)],
+                    dst: 3,
+                    catch_dst: 4,
+                    target: 1,
+                    catch_target: 3,
+                },
             },
             // bb1 (normal): ret=dst; Drop(own) -> bb2
             Block {
                 stmts: vec![asgn(0, Rvalue::Use(s(3)))],
-                term: Drop { slot: 2, target: 2, unwind: UnwindAction::Continue },
+                term: Drop {
+                    slot: 2,
+                    target: 2,
+                    unwind: UnwindAction::Continue,
+                },
             },
-            Block { stmts: vec![], term: Return },
+            Block {
+                stmts: vec![],
+                term: Return,
+            },
             // bb3 (caught): ret=payload; Drop(own) -> bb4
             Block {
                 stmts: vec![asgn(0, Rvalue::Use(s(4)))],
-                term: Drop { slot: 2, target: 4, unwind: UnwindAction::Continue },
+                term: Drop {
+                    slot: 2,
+                    target: 4,
+                    unwind: UnwindAction::Continue,
+                },
             },
-            Block { stmts: vec![], term: Return },
+            Block {
+                stmts: vec![],
+                term: Return,
+            },
         ],
     }
 }
@@ -455,18 +582,51 @@ fn top_plain_body(callee: u32) -> Body {
         blocks: vec![
             Block {
                 stmts: vec![asgn(2, Rvalue::Use(k(100)))],
-                term: Call { func: callee, args: vec![s(1)], dst: 3, target: 1, unwind: UnwindAction::Cleanup(3) },
+                term: Call {
+                    func: callee,
+                    args: vec![s(1)],
+                    dst: 3,
+                    target: 1,
+                    unwind: UnwindAction::Cleanup(3),
+                },
             },
-            Block { stmts: vec![], term: Drop { slot: 2, target: 2, unwind: UnwindAction::Continue } },
-            Block { stmts: vec![asgn(0, bin(BinOp::Add, s(3), k(1)))], term: Return },
-            Block { stmts: vec![], term: Drop { slot: 2, target: 4, unwind: UnwindAction::Continue } },
-            Block { stmts: vec![], term: Resume },
+            Block {
+                stmts: vec![],
+                term: Drop {
+                    slot: 2,
+                    target: 2,
+                    unwind: UnwindAction::Continue,
+                },
+            },
+            Block {
+                stmts: vec![asgn(0, bin(BinOp::Add, s(3), k(1)))],
+                term: Return,
+            },
+            Block {
+                stmts: vec![],
+                term: Drop {
+                    slot: 2,
+                    target: 4,
+                    unwind: UnwindAction::Continue,
+                },
+            },
+            Block {
+                stmts: vec![],
+                term: Resume,
+            },
         ],
     }
 }
 
 fn dummy_body() -> Body {
-    Body { num_slots: 1, num_args: 1, blocks: vec![Block { stmts: vec![], term: Terminator::Return }] }
+    Body {
+        num_slots: 1,
+        num_args: 1,
+        blocks: vec![Block {
+            stmts: vec![],
+            term: Terminator::Return,
+        }],
+    }
 }
 
 // ===== 各用例的程序 + kinds =====
@@ -511,15 +671,30 @@ fn case2_prog() -> (Program, Vec<FuncKind>) {
 /// case 3：catch 在编译帧；顶帧解释（不 catch）。
 fn case3_prog() -> (Program, Vec<FuncKind>) {
     use FuncKind::{Compiled, Interp};
-    let funcs = vec![top_plain_body(1), dummy_body(), mid_body(2, 3), dummy_body()];
-    let kinds = vec![Interp, Compiled(cc3_f1_catch), Interp, Compiled(cc3_f3_raise)];
+    let funcs = vec![
+        top_plain_body(1),
+        dummy_body(),
+        mid_body(2, 3),
+        dummy_body(),
+    ];
+    let kinds = vec![
+        Interp,
+        Compiled(cc3_f1_catch),
+        Interp,
+        Compiled(cc3_f3_raise),
+    ];
     (Program { funcs }, kinds)
 }
 
 /// case 4：链中插 plain extern "C" 帧；深处 panic → 预期 abort。
 fn case4_prog() -> (Program, Vec<FuncKind>) {
     use FuncKind::{Compiled, Interp};
-    let funcs = vec![top_plain_body(1), dummy_body(), mid_body(2, 3), dummy_body()];
+    let funcs = vec![
+        top_plain_body(1),
+        dummy_body(),
+        mid_body(2, 3),
+        dummy_body(),
+    ];
     let kinds = vec![Interp, Compiled(cc4_ffi_entry), Interp, Compiled(cc4_raise)];
     (Program { funcs }, kinds)
 }
@@ -678,11 +853,19 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
     let mut ok = true;
     {
         let (prog, kinds) = case1_prog();
-        ok &= check("case1 纯解释链 panic+Drop+catch", vm_case(prog, kinds), nref::case1());
+        ok &= check(
+            "case1 纯解释链 panic+Drop+catch",
+            vm_case(prog, kinds),
+            nref::case1(),
+        );
     }
     {
         let (prog, kinds) = case2_prog();
-        ok &= check("case2 混合栈交替（headline）+ cleanup 内 Call", vm_case(prog, kinds), nref::case2());
+        ok &= check(
+            "case2 混合栈交替（headline）+ cleanup 内 Call",
+            vm_case(prog, kinds),
+            nref::case2(),
+        );
     }
     {
         let (prog, kinds) = case3_prog();
@@ -700,7 +883,10 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
     if sig == Some(libc::SIGABRT) || sig == Some(libc::SIGILL) {
         println!("PASS case4 跨 FFI abort（子进程信号 {}）", sig.unwrap());
     } else {
-        println!("FAIL case4 跨 FFI abort: 子进程状态 {:?}（期望 SIGABRT）", out.status);
+        println!(
+            "FAIL case4 跨 FFI abort: 子进程状态 {:?}（期望 SIGABRT）",
+            out.status
+        );
         ok = false;
     }
 

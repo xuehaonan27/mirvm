@@ -1,9 +1,10 @@
 # mirvm 项目交接文档（AGENT-HANDOFF）
 
-> 目的：让新接手的 agent 能无缝继续本项目。信息力求自足——读完本文 + 引用的设计文档，
-> 即可接手当前工作（M4.1 施工）。作者：前任 agent，2026-07-07。
-> **读法**：先读 §0-§2 建立坐标，再按需深入。所有"为什么"都有出处，不要推翻既有决策而不读其
-> 论证；所有"怎么做"都要先跑 `--vm-stats` 拿真实数据，**绝不凭直觉/训练知识写 rustc API**。
+> 目的：让新接手的 agent 快速进入当前工程。本文初写于 2026-07-07，因此 §4–§10 仍保留大量
+> M4 施工现场，作为机制和决策来源，不再全部代表现状。
+> **读法**：先读 [current-status.md](current-status.md) 与 [README.md](README.md)，再读本文
+> §0–§3。所有“为什么”应追到原论证；既有选择可以被新证据推翻，但必须在
+> [decision-history.md](decision-history.md) 留下替代关系，不能静默抹除旧模型。
 
 ---
 
@@ -54,37 +55,28 @@ evcxr 四点不满（延迟、状态/借用限制、跑不了完整项目、编�
 
 ## 2. 当前状态速览（你在哪 / 下一步）
 
-**已完成**（各期 gate 与经验：`docs/m4-log.md`，**最新状态以它为准**）：
-- **M0-M2.5（tier-0）**：rustc `InterpCx` 上的 bootstrap + 差分先行者。**已于 2026-07-09
-  移除**（代码在 git 历史 `81772e4^`）——真 oracle 一直是 native 直跑，非线程能力已被
-  新引擎全覆盖。
-- **corpus 五批收口**（`docs/corpus.md`）+ **5 个 M4 前 spike 全过**（工件冻结在
-  `src/vm/spikes/`，回归 `mirvm spike1..5`）：模型 A 地基全部验证。
-- **M4.0 地基**：gate0 9/9（fib 端到端 + 纯度门禁）。
-- **M4.1 值与内存**：place 求值 + ABI v2 四路 + statics 两遍重定位 + mimalloc 堆 +
-  SIMD 最小集 + CallIndirect。gate1 digest 9/9 == native。
-- **M4.2 unwind**：FrameGuard 动态 LSDA（spike3 平移）+ RaiseException/catch_unwind
-  原语 + track_caller ABI + Assert 展开真 panic。gate2 九用例 == native。
-- **M4.3 os:: + FFI + main 启动链**：CallForeign（dlsym+libffi 通用直通，变参按调用点
-  冻结）+ denylist/stub 表 + extern static=dlsym + weak 让位强符号 + 128 位算术 +
-  EntryPlan（lang_start 照常解释）。
-- **M4.4 真线程（收官之战）**：thunk 工厂（fn-ptr 实参逃逸→libffi Closure 真码 + 边界
-  TLS attach）+ pthread_create/join/detach 直通 + guest TLS per-thread（真 dtor：Ctx
-  自管 pthread key 迟退 3 轮）+ CallIndirect.native_sig + rust-call ABI 真协议（tuple
-  字段展平）+ by-value dyn 派发 + fence 补真。gate4 11/11。
-- **M4.5 收口 + M4 关账**：Adt 递归胖化（Arc/Rc/Pin<Box>）+ intrinsic（raw_eq/数学面/
-  float_to_int_unchecked/unsized size_of_val/128 位 IntToFloat）+ 128 位判别式 tag 全链
-  （regex 的 u128 niche）+ 胖指针比较 + posix_spawn 直通。**gate5 31/31：corpus 全绿−asm、
-  diff_cargo ffi_zlib+project 绿、加载 413ms、rayon 32×**。
+**当前唯一权威汇总是 [current-status.md](current-status.md)**。简表：
 
-**★ M4 已关账**（总验收四条对勾见 m4-log ★ 节：语义/并发/架构/性能）。**下一阶段 =
-M5 JIT**：Cranelift 接入（spike5 已验）、inline asm 块（cpuid/syscall/div 五用例 =
-corpus/diff_cargo 剩余全红，非引擎缺口）、vmctx P/R 终裁、JIT 帧 LSDA、热循环加速
-（fib 解释器 ~150× → 目标个位数×）。mode B（预降 std 工件）与按需项（weak fn 真地址/
-guest TLS 回收/signal 真装载/.init_array）见 m4-log 移交清单。
+- M0–M2.5 的 InterpCx tier-0 是历史 bootstrap，2026-07-09 已删除。
+- M4.0–M4.5 已完成：typed bytecode、tcx-free tree-walking interpreter、FFI/unwind、真线程、
+  guest TLS 与 native→guest thunk。细节和当时结果见 `m4-log.md`。
+- M5.0 已完成并复审：有限 x86_64 inline asm 经 GAS wrapper → `.so` → `dlopen` 物化，
+  解释器按 `fn(*mut u8)` 缓冲 ABI 调用。实际结果见 `m5-log.md`。
+- M5.1 已完成：numbigint/xgetbv/sha2/blake3/ecosystem 均在 release 路径转绿，diff_cargo
+  3/3、六个 native-differential tracer 脚本（pshufb/SHA 分别记账）、cargo test
+  23/23、rustfmt 与 Clippy 通过；signal guest handler 和 guest backtrace/frame-IP 映射
+  是独立 XFAIL，不能借 M5.1 宣称已支持。
+- 方法级 Cranelift JIT、tiering、JIT LSDA 属于 M5.2–M5.4，生产路径中还不存在。
 
-**挂起检查点（勿丢，§10）**：vmctx P/R 真负载终裁挂 M5；landing pad/LSDA 挂 M5；fork/atfork
-挂 M4 后；预降低 std 发行工件挂 mode B（M4.5 后）。
+2026-07-12 复核发现旧 gate 存在 signal 只看退出码、diff_cargo 双方失败也可 PASS、corpus
+失败不传状态等假阳性。因此历史 “gate5 31/31” 只能按旧脚本口径阅读，不能再解释为 31 个
+语义正确断言。该审计已推动 oracle、silent stub、volatile 和 M5.1 differential probes
+全部收口；下一阶段进入 M5.2，但同一门禁纪律必须保留。
+
+最终 full release gate5（含 gate0/1/2/4、TSan 与六个 M5.1 tracer 脚本）为
+**40 PASS / 2 XFAIL / 0 SKIP / 0 FAIL**；XFAIL 是 signal guest handler 与 guest
+backtrace/frame-IP 映射；diff 17/17、diff_cargo 3/3，load 471ms、rayon 732ms。
+CI workflow 已建立，TSan 独立可见，本地 fmt/Clippy 质量门均通过。
 
 ---
 
@@ -97,10 +89,12 @@ guest TLS 回收/signal 真装载/.init_array）见 m4-log 移交清单。
 │   ├── main.rs             # bin 薄壳 → cli::main
 │   ├── cli.rs              # 驱动：三形态(run/runner/rustc-wrapper)；--vm-call/--vm-stats
 │   ├── cargo_shim.rs       # cargo RUSTC_WRAPPER + runner
+│   ├── native_archive.rs   # M5.1 Linux/ELF 受约束 Static NativeLib → 内容寻址 .so
 │   ├── sysroot.rs          # 自动构建带 MIR 的 sysroot（缓存 ~/.cache/mirvm）
 │   ├── lower/              # ★ 加载相（rustc_private 域，tcx 关在这里，永不出境）
 │   │   ├── mod.rs          #   Linker：worklist 扩集 + foreign 三路（原语/链接仿真/直通）
 │   │   │                   #   + alloc 物化（先分后填重定位）+ fn 条目 + lower_program 编排
+│   │   ├── asm.rs          #   M5.0 asm wrapper 生成、寄存器分配与 .so 物化/缓存
 │   │   ├── collect.rs      #   mono collector 种子集
 │   │   ├── frame.rs        #   帧布局冻结 + ValKind 值分类（Zst/Scalar/Pair/Other）
 │   │   └── func.rs         #   逐 instance 降低：place 编译/ABI v2/Assert 展开/
@@ -114,6 +108,8 @@ guest TLS 回收/signal 真装载/.init_array）见 m4-log 移交清单。
 │       │   ├── frozen.rs   #   FrozenArena（statics/常量池/fn 条目冻结区）
 │       │   ├── heap.rs     #   托管 Rust Heap（libmimalloc-sys 薄包装）
 │       │   ├── ffi.rs      #   os:: 直通（dlsym 缓存 + libffi 直调，含变参）
+│       │   ├── thunks.rs   #   libffi closure：native→guest 回调 + TLS attach
+│       │   ├── tsan_mt.rs  #   独立 TSan harness 复用的多线程测试入口
 │       │   └── stats.rs    #   --vm-stats 调研仪器（债务直方图+可达 BFS+foreign 清单）
 │       └── spikes/         # M4 前置 spike 冻结工件（回归自检 mirvm spike1..5，勿扩展）
 ├── tsan/                   # ★ 独立 crate：#[path] 复用 src/vm，-Zsanitizer=thread 判定引擎 Sync
@@ -124,7 +120,10 @@ guest TLS 回收/signal 真装载/.init_array）见 m4-log 移交清单。
 └── corpus/                 # corpus 程序 c_*.rs（含 M4.4 gate 的挂死双场景）
 ```
 
-### 3.1 设计文档索引（务必读，本文只是导航）
+### 3.1 设计文档索引
+
+完整状态、权威等级和替代关系已经迁到 [README.md](README.md)。下面是 2026-07-10 时的
+历史索引，仍可帮助定位 M4 机制，但其中“最高/最新”标签不再裁决当前状态。
 
 | 文档 | 内容 | 关键性 |
 |---|---|---|
@@ -150,7 +149,8 @@ guest TLS 回收/signal 真装载/.init_array）见 m4-log 移交清单。
 
 ## 4. 心智模型详解（决策的"为什么"）
 
-这些是用户反复纠正 agent 后固化的，**不要重新讨论，除非用户提**：
+这些是 M4 前后反复校正后形成的当前默认。**先读完原论证再挑战；若真实负载、实现约束或产品
+目标给出新证据，可以重新讨论，并在 decision-history 中保留旧选择与替代原因。**
 
 - **内存三分（DESIGN §4）**：VM 元数据（私有，须隔离，guest UB 不能污染实现自身）/ Rust Heap
   （RAM 存储，托管非搬迁——借 JVM arena/TLAB 骨架，按 Rust 钉地址/无 GC 改造，真实地址供 FFI）
@@ -174,10 +174,10 @@ guest TLS 回收/signal 真装载/.init_array）见 m4-log 移交清单。
   tcx-free（Rust 单态化静态 → eager 降完全部字节码）→ 引擎 Sync 无 GIL。两运行模式：mode A
   （run from source，有 tcx 关在加载相）/ mode B（run .mirvm 分发，根本无 tcx）。TLAB 直接上
   （mimalloc 结构，非纯 bump——因 Rust 有 individual free）。
-- **os:: 模块（P7）**：一切触真 OS/系统库的东西集中一个 `os::` 模块（JVM os:: 同构），三种
+- **os:: 模块（P7，尚未物理落地）**：目标是一切触真 OS/系统库的东西集中一个 `os::` 边界，三种
   处置：**直通**（epoll/read/socket/futex，绝大多数）/ **VM 内建**（__rust_alloc/thunk/
   intrinsics）/ **合成**（libm 宿主直算）。denylist（pthread_/fork/exec/setjmp/signal 等）绝
-  不直通 native。
+  不直通 native。当前并无 `src/os/`，相关逻辑仍散在 lower/interp/ffi/heap；这是一项待偿承诺。
 - **VM 鲁棒性（C13）**：真实地址下 guest UB/FFI/asm 能打穿 VM。分层防御砍到 L1（结构隔离）+
   L3（checked 模式，opt-in）。**Rust 类型系统让 checked 比 Wasm 便宜**——只查 raw 指针解引用。
   slaved/alloca（轴 F）与 fast/checked（轴 S）**解耦**，只在 `GuestMemory::contains(addr)`
@@ -228,7 +228,8 @@ guest TLS 回收/signal 真装载/.init_array）见 m4-log 移交清单。
 
 ## 6. M4 架构与六决策（`docs/m4-plan.md`）
 
-**总目标**：tier-0 能跑的一切在新引擎可观测一致 → tier-0 退役为 oracle。
+**历史总目标**：tier-0 能跑的一切在新引擎可观测一致。实际结果是 tier-0 被删除，native 成为
+当前差分 oracle，而非让 tier-0 长期退居 oracle。
 **退出判据**：全量差分绿 + 真线程 TSan 干净 + 两个 tier-0 挂死场景通过 + 性能不慢于 tier-0。
 
 **架构硬纪律**：`src/lower/`（加载相，rustc_private 域，tcx 永不出境）/ `src/vm/`（执行相，
@@ -244,13 +245,12 @@ guest TLS 回收/signal 真装载/.init_array）见 m4-log 移交清单。
 - **D4 fn-ptr = 每 instance 真地址条目表**；逃逸物化 thunk。
 - **D5 intrinsics**：有 MIR fallback body 的当普通函数降低（worklist 补收）；
   `must_be_overridden` 的做引擎内建（copy/原子/volatile/数学/discriminant/simd）。
-- **D6 M4 纯解释器无 vmctx P/R 问题**（ctx 是 Rust 参数）；**P/R 真负载终裁挂 M5 JIT**（勿丢）。
-  M4 只需边界 TLS + attach（M4.4 thunk 工厂）。
+- **D6 M4 纯解释器无 JIT vmctx 约定问题**（ctx 是 Rust 参数）；边界 TLS + attach 已由 M4.4
+  thunk 工厂落地。旧的“P/R 终裁”已被 M5 D5 替代为 **T 骨架 + R 可选缓存层**，见
+  decision-history。
 
-**六期**（每期差分 gate）：M4.0 地基（✅ fib）→ **M4.1 值与内存**（当前）→ M4.2 unwind →
-M4.3 os::+FFI → M4.4 真线程（收官之战：两 tier-0 挂死场景通过、TSan 指新引擎、rayon 28s→秒
-级，**过审期**）→ M4.5 收口切默认。**流程**：M4.0/M4.4 开工前过审，其余简报即行；每期 gate
-报告 + 经验记 m4-log.md。
+**六期均已完成**：M4.0 地基 → M4.1 值与内存 → M4.2 unwind → M4.3 FFI/main →
+M4.4 真线程 → M4.5 收口。这里保留原计划分期，实际漂移和结果看 m4-log。
 
 **panic 前端处置（用户 2026-07-07 修订，debt-map §2-B）**：panic_fmt/fmt 家族**照常经
 worklist 解释**（native 也跑这套=忠实性）；引擎接管点下移到 std 声明的 extern 边界 = **foreign
@@ -376,14 +376,17 @@ trap_body 无出边、"未收集"callee 无出边（worklist 落地后前两个�
 
 ---
 
-## 10. 挂起检查点（勿丢，写在 m4-plan.md §7）
+## 10. 当前挂起检查点
 
-1. **vmctx 内部约定 P vs R 真负载终裁** → M5 JIT 接入（spike5 初判 R 快 8%，但微基准偏袒 R）。
-2. **landing pad/LSDA**（JIT 帧内跑 drop glue）→ M5（spike5 已验 CFI 传播半边）。
-3. **fork/clone os::+atfork** → M4 后。
-4. **预降低 std 发行工件**（用户 2026-07-07 提，并入 mode B）：非泛型 std 预降字节码 + 泛型带
+1. **vmctx T/R 活检查点**：M5 先 T 骨架；分配/guest TLS 内联进 JIT 后用真实负载重测 R。
+2. **landing pad/LSDA**（JIT 帧内跑 drop glue）→ M5.3；spike5 只验证 CFI 传播半边。
+3. **Static archive 扩面检查点**：当前 M5.1 只支持受约束 Linux/ELF；非 PIC、跨 archive
+   依赖/重名、ctor/dtor、thin、export-symbols 等均响亮拒绝，扩面前须新 link plan/生命周期设计。
+4. **fork/clone os::+atfork**：仍未实现。
+5. **预降低 std 发行工件**（mode B）：非泛型 std 预降字节码 + 泛型带
    多态 MIR（泛型不可能全预降）；收益=启动只降用户 crate、消费端零 rust-src；落 M4.5 后/M5
-   前后，M4 全程 mode A 够用不阻塞。
+   前后，当前仍未实现。
+6. **生命周期/嵌入**：Shared/thunk/asm/TLS 资源回收、可恢复错误和多 Engine 语义。
 
 ---
 
@@ -391,7 +394,7 @@ trap_body 无出边、"未收集"callee 无出边（worklist 落地后前两个�
 
 ```bash
 # 构建（必须 release）
-cargo build --release
+cargo build --release --locked
 
 # 跑程序（唯一引擎 = M4 字节码 VM；main 启动链，与 native 差分同形）
 ./target/release/mirvm run demo/fib.rs
@@ -400,40 +403,39 @@ cargo build --release
 ./target/release/mirvm run --vm-call 'fib(25)' demo/m4/pure.rs
 ./target/release/mirvm run --vm-stats demo/m4/digest.rs
 
-# gate + 回归（全绿是底线；--engine vm 旧写法仍兼容）
+# gate + 回归（PASS 与原因锁定的 XFAIL 分开；--engine vm 旧写法仍兼容）
 bash tests/m4_gate0.sh                                    # M4.0 gate 9/9 + 纯度门禁
 bash tests/m4_gate1.sh                                    # M4.1 digest 9/9 + 债务清零复测
 bash tests/m4_gate2.sh                                    # M4.2 unwind 9/9 + 债务清零复测
 MIRVM=$(pwd)/target/release/mirvm bash tests/diff.sh      # 全量差分（17/17 全绿基线，含 threads+asm_probe）
 bash tests/m4_gate4.sh                                    # M4.4 真线程 gate（差分/双场景/rayon/TSan）
-bash tests/m4_gate5.sh                                    # M4.5 收官 gate（corpus−asm/diff_cargo/性能/全回归）
-MIRVM=$(pwd)/target/release/mirvm bash tests/diff_cargo.sh # cargo 形态（ffi_zlib+project 绿；ecosystem cpuid asm 归 M5）
+bash tests/m4_gate5.sh                                    # 聚合 gate；含 signal/llvm.x86 明示 XFAIL
+MIRVM=$(pwd)/target/release/mirvm bash tests/diff_cargo.sh # ecosystem/ffi_zlib/project 3/3 native 一致
+bash tests/gate_truth_regression.sh                       # 门禁自身 6 个假阳性/状态传播回归
+MIRVM=$(pwd)/target/release/mirvm bash tests/m51_addcarry.sh # addcarry/subborrow native 差分
+MIRVM=$(pwd)/target/release/mirvm bash tests/m51_xgetbv.sh   # CPUID guard 下 xgetbv native 差分
+MIRVM=$(pwd)/target/release/mirvm bash tests/m51_x86_vectors.sh # pshufb/SHA stdarch native 差分
+MIRVM=$(pwd)/target/release/mirvm bash tests/m51_simd_insert.sh # simd insert/extract native 差分
+MIRVM=$(pwd)/target/release/mirvm bash tests/m51_simd_shift.sh  # signed/unsigned shift native 差分
+MIRVM=$(pwd)/target/release/mirvm bash tests/m51_vzeroupper.sh  # CPU hint native 差分
 ./target/release/mirvm spike1  # .. spike5                # spike 冻结工件回归
 bash tests/spike4_tsan.sh                                 # TSan（引擎 Sync）
-bash tests/corpus.sh                                      # corpus（20 绿 + 4 asm 预期红=M5）
+bash tests/corpus.sh                                      # 原始 corpus runner；任何红都返回非零，预期红由 gate5 分类
 
 # dump MIR（调研）
 RUSTC=~/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc
 $RUSTC --edition 2024 -Zunpretty=mir <file>.rs
 
-# grep rustc 源码核 API（写 lower 前必做）
+# 搜 rustc 源码核 API（写 lower 前必做）
 SRC=~/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/lib/rustlib/rustc-src/rust/compiler
-grep -rn '<符号>' $SRC/rustc_middle/src/
+rg '<符号>' $SRC/rustc_middle/src/
 ```
 
 ---
 
 ## 12. 给接手 agent 的一句话
 
-**★ M4 全期完成并关账**（2026-07-10；总验收四条对勾在 `docs/m4-log.md` ★ 节——
-**接手先读 m4-log 各期条目**，里面有本 nightly 的 MIR/API 漂移清单与血泪修复：M4.2
-unwind 协议、M4.4 的 rust-call ABI/TSD dtor/TSan 相位、M4.5 的 unsize 递归/128 位 niche/
-防静默错值抓 UB）。用户看重：VM 作者视角、真实数据驱动（`--vm-stats` 是你最好的朋友）、
-每期 gate 全绿才 commit、防静默错值、不推翻既有决策而不读其论证。
-
-**下一阶段 = M5 JIT**（过审期，开工前出设计文档给用户审）：Cranelift 接入（spike5 已
-坐实 i2c/c2i/eh_frame 自注册）、**inline asm 块**（cpuid/syscall/div——corpus/diff_cargo
-剩余全红 5 用例，是 asm 不是引擎缺口，"直接 JIT，虚拟 CPU=真宿主 CPU"）、vmctx P vs R
-终裁、JIT 帧 LSDA、热循环加速（fib 解释器 ~150× vs native → 目标个位数×）。M4 的挂起
-移交清单（mode B / weak fn 真地址 / guest TLS 回收 / signal 真装载 / .init_array）见
-m4-log ★ 节末。开工先读 `docs/frame-abi-bytecode.md` §10 + spike5 经验。
+先把 [current-status.md](current-status.md) 里的可信 oracle 当作后续 M5.2 施工地基；不要把历史
+31/31、退出码相同或双方都失败当语义证明。M4、M5.0、M5.1 已交付，方法级 JIT 尚不存在。
+frame A/B、vmctx P/T/R 的旧方案都保留着：读完原论证，以真实 probe 和负载挑战
+当前选择；若改变结论，在 [decision-history.md](decision-history.md) 追加证据与迁移条件。

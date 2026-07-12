@@ -67,10 +67,12 @@ pub fn phase_cargo(project_dir: &std::path::Path, program_args: &[String]) -> ! 
     cmd.arg("--target").arg(env!("MIRVM_HOST"));
     // 所有"运行二进制"的动作转给我们
     let runner_toml = self_str.replace('\\', "\\\\").replace('\'', "\\'");
-    cmd.arg("--config")
-        .arg(format!("target.'cfg(all())'.runner=['{runner_toml}', 'runner']"));
+    cmd.arg("--config").arg(format!(
+        "target.'cfg(all())'.runner=['{runner_toml}', 'runner']"
+    ));
     // 独立 target dir，避免与用户正常构建的指纹互相踩踏
-    cmd.arg("--target-dir").arg(project_dir.join("target/mirvm"));
+    cmd.arg("--target-dir")
+        .arg(project_dir.join("target/mirvm"));
     cmd.arg("--quiet");
     if !program_args.is_empty() {
         cmd.arg("--");
@@ -93,11 +95,15 @@ pub fn phase_wrapper(mut argv: impl Iterator<Item = String>) -> ! {
     let rustc = toolchain_rustc();
     let args: Vec<String> = argv.collect();
 
-    let is_info_query = arg_flag_value(&args, "--print").is_some() || args.iter().any(|a| a == "-vV");
+    let is_info_query =
+        arg_flag_value(&args, "--print").is_some() || args.iter().any(|a| a == "-vV");
     let is_target = arg_flag_value(&args, "--target").is_some();
     // crate-type 缺省即 bin（与 cargo-miri 的判定一致）；--test 是 test harness bin
     let is_runnable = !is_info_query
-        && (arg_flag_value(&args, "--crate-type").as_deref().unwrap_or("bin") == "bin"
+        && (arg_flag_value(&args, "--crate-type")
+            .as_deref()
+            .unwrap_or("bin")
+            == "bin"
             || args.iter().any(|a| a == "--test"));
 
     if is_info_query || !is_target {
@@ -131,7 +137,11 @@ fn write_fake_outputs(rustc: &std::path::Path, args: &[String], info: &CrateRunI
     let crate_name = arg_flag_value(args, "--crate-name").unwrap_or_default();
 
     // stub dep-info：阻止 cargo 每次都认为需要重建
-    if arg_flag_value(args, "--emit").unwrap_or_default().split(',').any(|e| e == "dep-info") {
+    if arg_flag_value(args, "--emit")
+        .unwrap_or_default()
+        .split(',')
+        .any(|e| e == "dep-info")
+    {
         let extra = arg_flag_value(args, "extra-filename").unwrap_or_default();
         let d = PathBuf::from(&out_dir).join(format!("{crate_name}{extra}.d"));
         let _ = std::fs::write(d, "");
@@ -153,7 +163,10 @@ fn write_fake_outputs(rustc: &std::path::Path, args: &[String], info: &CrateRunI
         }
         cmd.arg("-");
         let output = cmd.output().expect("rustc --print file-names 失败");
-        assert!(output.status.success(), "rustc --print file-names 失败: {output:?}");
+        assert!(
+            output.status.success(),
+            "rustc --print file-names 失败: {output:?}"
+        );
         String::from_utf8(output.stdout)
             .unwrap()
             .lines()

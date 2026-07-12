@@ -236,8 +236,7 @@ fn run_vm_engine(
         return 0;
     }
     // Shared 提升进程级 &'static（M4.4：thunk/多线程要求 Ctx 可在任意线程随时引用它）
-    let shared: &'static _ =
-        Box::leak(Box::new(crate::vm::engine::ctx::Shared::new(module)));
+    let shared: &'static _ = Box::leak(Box::new(crate::vm::engine::ctx::Shared::new(module)));
     let Some(spec) = vm_call else {
         // main 启动链：lang_start 照常解释，退出码 = Termination 产物
         return crate::vm::engine::interp::run_main(shared);
@@ -287,8 +286,13 @@ fn run_driver(
     vm_call: Option<String>,
     vm_stats: bool,
 ) -> ExitCode {
-    let mut callbacks =
-        MirvmCallbacks { dump_mir, program_argv, exit_code: None, vm_call, vm_stats };
+    let mut callbacks = MirvmCallbacks {
+        dump_mir,
+        program_argv,
+        exit_code: None,
+        vm_call,
+        vm_stats,
+    };
     let compiler_code = rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&rustc_args, &mut callbacks)
     });
@@ -345,13 +349,24 @@ fn materialize_script(script: &Path, manifest: &str, body: &str) -> PathBuf {
     let abs = std::path::absolute(script).unwrap_or_else(|_| script.to_path_buf());
     let mut hasher = std::hash::DefaultHasher::new();
     abs.hash(&mut hasher);
-    let dir = crate::sysroot::cache_dir().join("scripts").join(format!("{:016x}", hasher.finish()));
+    let dir = crate::sysroot::cache_dir()
+        .join("scripts")
+        .join(format!("{:016x}", hasher.finish()));
     std::fs::create_dir_all(dir.join("src")).expect("创建脚本缓存目录失败");
 
-    let stem = script.file_stem().and_then(|s| s.to_str()).unwrap_or("script");
+    let stem = script
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("script");
     let mut name: String = stem
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if name.is_empty() || name.chars().next().unwrap().is_ascii_digit() {
         name = format!("s{name}");

@@ -11,6 +11,7 @@
 //! catch 点 downcast 区分 GuestPanic / 宿主 panic（VM bug 原样续传，绝不吞）。
 
 use std::cell::Cell;
+use std::mem::MaybeUninit;
 use std::panic::{self, AssertUnwindSafe};
 use std::process::exit;
 
@@ -82,6 +83,54 @@ fn mem_write(addr: u64, w: Width, v: u64) {
     }
 }
 
+/// 把 guest 中的一个完整值作为 opaque 位型读入。`MaybeUninit<[u8; N]>`
+/// 的对齐是 1，因此不会把 `[u8; N]` 之类低对齐 guest 类型错误地
+/// 强化为宿主整数对齐；`MaybeUninit` 同时允许聚合值含未初始化 padding。
+#[inline]
+unsafe fn volatile_load_n<const N: usize>(src: *const u8, dst: *mut u8) {
+    let value = unsafe { (src as *const MaybeUninit<[u8; N]>).read_volatile() };
+    unsafe {
+        std::ptr::copy_nonoverlapping((&value as *const MaybeUninit<[u8; N]>).cast::<u8>(), dst, N)
+    };
+}
+
+/// 先按原始字节（包括可能未初始化的 padding）搬入 opaque 载体，
+/// 再发出一个等宽 volatile store。
+#[inline]
+unsafe fn volatile_store_n<const N: usize>(dst: *mut u8, src: *const u8) {
+    let mut value = MaybeUninit::<[u8; N]>::uninit();
+    unsafe { std::ptr::copy_nonoverlapping(src, value.as_mut_ptr().cast::<u8>(), N) };
+    unsafe { (dst as *mut MaybeUninit<[u8; N]>).write_volatile(value) };
+}
+
+#[inline]
+fn mem_read_volatile(addr: u64, dst: u64, size: u8) {
+    unsafe {
+        match size {
+            1 => volatile_load_n::<1>(addr as *const u8, dst as *mut u8),
+            2 => volatile_load_n::<2>(addr as *const u8, dst as *mut u8),
+            4 => volatile_load_n::<4>(addr as *const u8, dst as *mut u8),
+            8 => volatile_load_n::<8>(addr as *const u8, dst as *mut u8),
+            16 => volatile_load_n::<16>(addr as *const u8, dst as *mut u8),
+            _ => unreachable!("lower 只产生 1/2/4/8/16-byte volatile"),
+        }
+    }
+}
+
+#[inline]
+fn mem_write_volatile(addr: u64, src: u64, size: u8) {
+    unsafe {
+        match size {
+            1 => volatile_store_n::<1>(addr as *mut u8, src as *const u8),
+            2 => volatile_store_n::<2>(addr as *mut u8, src as *const u8),
+            4 => volatile_store_n::<4>(addr as *mut u8, src as *const u8),
+            8 => volatile_store_n::<8>(addr as *mut u8, src as *const u8),
+            16 => volatile_store_n::<16>(addr as *mut u8, src as *const u8),
+            _ => unreachable!("lower 只产生 1/2/4/8/16-byte volatile"),
+        }
+    }
+}
+
 /// 引擎诊断退出（M4.0：Trap/Assert 失败/除零统一走这里；M4.2 起 Assert 变真 panic）。
 fn engine_abort(what: &str) -> ! {
     eprintln!("mirvm[m4-engine]: {what}");
@@ -91,7 +140,8 @@ fn engine_abort(what: &str) -> ! {
 /// guest TLS 实例真地址（M4.4 D3）：首访惰性物化——heap 分配 + 冻结模板拷贝。
 /// 每线程一份（Ctx 是 thread_local）；v1 记账：线程退出不跑 dtor、实例泄漏。
 fn tls_addr(ctx: *mut Ctx, id: u32) -> u64 {
-    if let Some(&a) = unsafe { (&(*ctx).tls).get(id as usize) }
+    let tls: &Vec<u64> = unsafe { &(*ctx).tls };
+    if let Some(&a) = tls.get(id as usize)
         && a != 0
     {
         return a;
@@ -220,7 +270,11 @@ fn int_bin(op: IntBinOp, signed: bool, a: u64, b: u64, w: Width) -> u64 {
 }
 
 fn int_cmp(cc: IntCc, signed: bool, a: u64, b: u64, w: Width) -> u64 {
-    let ord = if signed { sext(a, w).cmp(&sext(b, w)) } else { (a & w.mask()).cmp(&(b & w.mask())) };
+    let ord = if signed {
+        sext(a, w).cmp(&sext(b, w))
+    } else {
+        (a & w.mask()).cmp(&(b & w.mask()))
+    };
     let t = match cc {
         IntCc::Eq => ord.is_eq(),
         IntCc::Ne => ord.is_ne(),
@@ -291,7 +345,11 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
         }
         Rvalue::Cast { from, to, a } => {
             let (v, _) = eval_operand(ctx, base, a);
-            let x = if from.1 { sext(v, from.0) as u64 } else { v & from.0.mask() };
+            let x = if from.1 {
+                sext(v, from.0) as u64
+            } else {
+                v & from.0.mask()
+            };
             x & to.mask()
         }
         Rvalue::Ref(expr) => eval_place_addr(ctx, base, expr),
@@ -312,10 +370,20 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
             };
             (ord as i8 as u8) as u64
         }
-        Rvalue::NicheDiscr { tag, niche_start, variants_start, variants_len, untagged } => {
+        Rvalue::NicheDiscr {
+            tag,
+            niche_start,
+            variants_start,
+            variants_len,
+            untagged,
+        } => {
             let (t, w) = eval_operand(ctx, base, tag);
             let rel = t.wrapping_sub(*niche_start) & w.mask();
-            if rel < *variants_len { variants_start + rel } else { *untagged }
+            if rel < *variants_len {
+                variants_start + rel
+            } else {
+                *untagged
+            }
         }
         Rvalue::FloatBin { op, is64, a, b } => {
             use super::ir::FloatOp as F;
@@ -343,7 +411,9 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
                 .to_bits() as u64
             }
         }
-        Rvalue::UMax { a, b } => eval_operand(ctx, base, a).0.max(eval_operand(ctx, base, b).0),
+        Rvalue::UMax { a, b } => eval_operand(ctx, base, a)
+            .0
+            .max(eval_operand(ctx, base, b).0),
         Rvalue::MathUn { op, is64, a } => {
             use super::ir::MathUnOp as M;
             let (av, _) = eval_operand(ctx, base, a);
@@ -438,10 +508,19 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
                 _ => av, // 同宽：位透传
             }
         }
-        Rvalue::FloatToInt { from64, to, signed, a } => {
+        Rvalue::FloatToInt {
+            from64,
+            to,
+            signed,
+            a,
+        } => {
             let (av, _) = eval_operand(ctx, base, a);
             // f32→f64 精确保值 ⇒ 统一经 f64；宿主 `as` 即 Rust 饱和语义（NaN→0、越界→边界）
-            let x = if *from64 { f64::from_bits(av) } else { f32::from_bits(av as u32) as f64 };
+            let x = if *from64 {
+                f64::from_bits(av)
+            } else {
+                f32::from_bits(av as u32) as f64
+            };
             let v: u64 = if *signed {
                 match to {
                     Width::W8 => x as i8 as u64,
@@ -461,12 +540,20 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
         }
         Rvalue::IntToFloat { from, to64, a } => {
             let (av, _) = eval_operand(ctx, base, a);
-            let x: f64 = if from.1 { sext(av, from.0) as f64 } else { (av & from.0.mask()) as f64 };
+            let x: f64 = if from.1 {
+                sext(av, from.0) as f64
+            } else {
+                (av & from.0.mask()) as f64
+            };
             if *to64 {
                 x.to_bits()
             } else {
                 // 经 f64 中转对 ≤32 位整数无双舍入问题；u64/i64→f32 用直转
-                let f: f32 = if from.1 { sext(av, from.0) as f32 } else { (av & from.0.mask()) as f32 };
+                let f: f32 = if from.1 {
+                    sext(av, from.0) as f32
+                } else {
+                    (av & from.0.mask()) as f32
+                };
                 f.to_bits() as u64
             }
         }
@@ -511,7 +598,11 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
             let (bv, _) = eval_operand(ctx, base, b);
             ((av.wrapping_sub(bv) as i64) / *stride as i64) as u64
         }
-        Rvalue::SimdBitmask { a, lanes, lane_bytes } => {
+        Rvalue::SimdBitmask {
+            a,
+            lanes,
+            lane_bytes,
+        } => {
             let pa = eval_place_addr(ctx, base, a);
             let lb = *lane_bytes as u64;
             let mut mask = 0u64;
@@ -545,7 +636,11 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
                     OvfOp::Mul => (x > 0) == (y > 0),
                 };
                 let m = w.mask();
-                if toward_max { m >> 1 } else { (m >> 1) + 1 & m }
+                if toward_max {
+                    m >> 1
+                } else {
+                    ((m >> 1) + 1) & m
+                }
             } else {
                 match op {
                     OvfOp::Sub => 0,
@@ -553,7 +648,12 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
                 }
             }
         }
-        Rvalue::SimdReduce { all, a, lanes, lane_bytes } => {
+        Rvalue::SimdReduce {
+            all,
+            a,
+            lanes,
+            lane_bytes,
+        } => {
             let pa = eval_place_addr(ctx, base, a);
             let lb = *lane_bytes as u64;
             let lw = Width::from_bytes(lb).expect("lane 宽度");
@@ -572,9 +672,16 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
             let pa = eval_place_addr(ctx, base, a);
             let pb = eval_place_addr(ctx, base, b);
             let (x, y) = unsafe {
-                ((pa as *const u128).read_unaligned(), (pb as *const u128).read_unaligned())
+                (
+                    (pa as *const u128).read_unaligned(),
+                    (pb as *const u128).read_unaligned(),
+                )
             };
-            let ord = if *signed { (x as i128).cmp(&(y as i128)) } else { x.cmp(&y) };
+            let ord = if *signed {
+                (x as i128).cmp(&(y as i128))
+            } else {
+                x.cmp(&y)
+            };
             let t = match cc {
                 IntCc::Eq => ord.is_eq(),
                 IntCc::Ne => ord.is_ne(),
@@ -594,7 +701,14 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let v = eval_rvalue(ctx, base, rv);
             place_write(ctx, base, dst, v);
         }
-        Stmt::AssignOverflow { op, signed, a, b, dst_val, dst_flag } => {
+        Stmt::AssignOverflow {
+            op,
+            signed,
+            a,
+            b,
+            dst_val,
+            dst_flag,
+        } => {
             let (av, w) = eval_operand(ctx, base, a);
             let (bv, _) = eval_operand(ctx, base, b);
             let (v, f) = int_ovf(*op, *signed, av, bv, w);
@@ -607,7 +721,12 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             // memmove 语义（guest 侧重叠是 UB，但引擎自身不因此崩——防御性）
             unsafe { std::ptr::copy(s as *const u8, d as *mut u8, *size as usize) };
         }
-        Stmt::RepeatScalar { dst, val, count, elem_size } => {
+        Stmt::RepeatScalar {
+            dst,
+            val,
+            count,
+            elem_size,
+        } => {
             let d = eval_place_addr(ctx, base, dst);
             let (v, w) = eval_operand(ctx, base, val);
             debug_assert_eq!(w.bytes(), *elem_size);
@@ -632,7 +751,24 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                 }
             }
         }
-        Stmt::AtomicCxchg { addr, expected, new, dst_val, dst_ok, weak } => {
+        Stmt::VolatileLoad { addr, dst, size } => {
+            let (p, _) = eval_operand(ctx, base, addr);
+            let d = eval_place_addr(ctx, base, dst);
+            mem_read_volatile(p, d, *size);
+        }
+        Stmt::VolatileStore { addr, src, size } => {
+            let (p, _) = eval_operand(ctx, base, addr);
+            let s = eval_place_addr(ctx, base, src);
+            mem_write_volatile(p, s, *size);
+        }
+        Stmt::AtomicCxchg {
+            addr,
+            expected,
+            new,
+            dst_val,
+            dst_ok,
+            weak,
+        } => {
             use std::sync::atomic::*;
             let (p, _) = eval_operand(ctx, base, addr);
             let (e, w) = eval_operand(ctx, base, expected);
@@ -641,7 +777,12 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                 ($t:ty, $at:ty) => {{
                     let a = unsafe { <$at>::from_ptr(p as *mut $t) };
                     let r = if *weak {
-                        a.compare_exchange_weak(e as $t, n as $t, Ordering::SeqCst, Ordering::SeqCst)
+                        a.compare_exchange_weak(
+                            e as $t,
+                            n as $t,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        )
                     } else {
                         a.compare_exchange(e as $t, n as $t, Ordering::SeqCst, Ordering::SeqCst)
                     };
@@ -687,7 +828,13 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             };
             place_write(ctx, base, dst, old);
         }
-        Stmt::MemCopy { dst, src, count, elem_size, overlap } => {
+        Stmt::MemCopy {
+            dst,
+            src,
+            count,
+            elem_size,
+            overlap,
+        } => {
             let (d, _) = eval_operand(ctx, base, dst);
             let (s, _) = eval_operand(ctx, base, src);
             let (c, _) = eval_operand(ctx, base, count);
@@ -700,14 +847,26 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                 }
             }
         }
-        Stmt::MemSet { dst, val, count, elem_size } => {
+        Stmt::MemSet {
+            dst,
+            val,
+            count,
+            elem_size,
+        } => {
             let (d, _) = eval_operand(ctx, base, dst);
             let (v, _) = eval_operand(ctx, base, val);
             let (c, _) = eval_operand(ctx, base, count);
             let bytes = (c as usize).wrapping_mul(*elem_size as usize);
             unsafe { std::ptr::write_bytes(d as *mut u8, v as u8, bytes) };
         }
-        Stmt::SimdBin { op, dst, a, b, lanes, lane_bytes } => {
+        Stmt::SimdBin {
+            op,
+            dst,
+            a,
+            b,
+            lanes,
+            lane_bytes,
+        } => {
             use super::ir::SimdBinOp as S;
             let pd = eval_place_addr(ctx, base, dst);
             let pa = eval_place_addr(ctx, base, a);
@@ -737,11 +896,28 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                     S::Xor => Some(x ^ y),
                     S::Add => Some(x.wrapping_add(y) & lw.mask()),
                     S::Sub => Some(x.wrapping_sub(y) & lw.mask()),
+                    S::Shl => {
+                        if y >= u64::from(lw.bytes() * 8) {
+                            engine_abort("simd_shl shift count 超过 lane 位宽（guest UB）");
+                        }
+                        Some(int_bin(IntBinOp::Shl, false, x, y, lw))
+                    }
+                    S::Shr { signed } => {
+                        if y >= u64::from(lw.bytes() * 8) {
+                            engine_abort("simd_shr shift count 超过 lane 位宽（guest UB）");
+                        }
+                        Some(int_bin(IntBinOp::Shr, *signed, x, y, lw))
+                    }
                 };
                 mem_write(pd + i * lb, lw, r.unwrap_or(0));
             }
         }
-        Stmt::SimdSplat { dst, val, lanes, lane_bytes } => {
+        Stmt::SimdSplat {
+            dst,
+            val,
+            lanes,
+            lane_bytes,
+        } => {
             let pd = eval_place_addr(ctx, base, dst);
             let (v, _) = eval_operand(ctx, base, val);
             let lb = *lane_bytes as u64;
@@ -750,7 +926,14 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                 mem_write(pd + i * lb, lw, v);
             }
         }
-        Stmt::Bin128 { op, signed, a, b, dst, with_overflow } => {
+        Stmt::Bin128 {
+            op,
+            signed,
+            a,
+            b,
+            dst,
+            with_overflow,
+        } => {
             use super::ir::Bin128Rhs;
             let pa = eval_place_addr(ctx, base, a);
             let x = unsafe { (pa as *const u128).read_unaligned() };
@@ -817,7 +1000,14 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                 unsafe { *((pd + 16) as *mut u8) = ovf as u8 };
             }
         }
-        Stmt::NicheDiscr128 { tag, niche_start, variants_start, variants_len, untagged, dst } => {
+        Stmt::NicheDiscr128 {
+            tag,
+            niche_start,
+            variants_start,
+            variants_len,
+            untagged,
+            dst,
+        } => {
             let p = eval_place_addr(ctx, base, tag);
             let t = unsafe { (p as *const u128).read_unaligned() };
             let rel = t.wrapping_sub(*niche_start);
@@ -828,7 +1018,12 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             };
             place_write(ctx, base, dst, v);
         }
-        Stmt::Wide128ToFloat { src, signed, to64, dst } => {
+        Stmt::Wide128ToFloat {
+            src,
+            signed,
+            to64,
+            dst,
+        } => {
             let p = eval_place_addr(ctx, base, src);
             let x = unsafe { (p as *const u128).read_unaligned() };
             let bits = if *to64 {
@@ -841,7 +1036,11 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
         Stmt::Trap(reason) => engine_abort(&format!("TRAP: {reason}")),
         Stmt::Nop => {}
         // `[expr; N]` 聚合元素：dst[0] 为模板铺满其余
-        Stmt::RepeatBytes { first, count, elem_size } => {
+        Stmt::RepeatBytes {
+            first,
+            count,
+            elem_size,
+        } => {
             let src = eval_place_addr(ctx, base, first);
             for i in 1..*count {
                 unsafe {
@@ -897,7 +1096,9 @@ enum Exit {
 fn call_fn_addr(ctx: *mut Ctx, addr: u64, args: &[u64], caller: &str) -> (u64, u64) {
     let module: &Module = unsafe { &(*(*ctx).shared).module };
     let Some(&fid) = module.fn_addrs.get(&addr) else {
-        engine_abort(&format!("间接调用目标 {addr:#x} 不是已知 fn 条目（调用者 {caller}）"));
+        engine_abort(&format!(
+            "间接调用目标 {addr:#x} 不是已知 fn 条目（调用者 {caller}）"
+        ));
     };
     interp_frame(ctx, fid, args)
 }
@@ -918,7 +1119,9 @@ fn call_guarding_terminate<R>(unwind: &UnwindAction, f: impl FnOnce() -> R) -> R
         match panic::catch_unwind(AssertUnwindSafe(f)) {
             Ok(r) => r,
             Err(_) => {
-                eprintln!("mirvm[m4-engine]: unwind 抵达 Terminate 边界（double panic/ABI）——abort");
+                eprintln!(
+                    "mirvm[m4-engine]: unwind 抵达 Terminate 边界（double panic/ABI）——abort"
+                );
                 std::process::abort()
             }
         }
@@ -954,7 +1157,10 @@ pub(super) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
         (*ctx).depth
     };
     if depth > MAX_DEPTH {
-        engine_abort(&format!("guest 栈溢出（解释帧深度 > {MAX_DEPTH}；fn {}）", body.name));
+        engine_abort(&format!(
+            "guest 栈溢出（解释帧深度 > {MAX_DEPTH}；fn {}）",
+            body.name
+        ));
     }
 
     let base = region_reserve(ctx, body.frame_size, body.frame_align);
@@ -983,7 +1189,15 @@ pub(super) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
     let mut ai = 0usize;
     // Indirect 返回：隐藏首实参 = 目的真地址，存入 sret 槽
     if let RetAbi::Indirect { sret_off, .. } = body.ret {
-        slot_write(ctx, base, Slot { off: sret_off, width: Width::W64 }, args[ai]);
+        slot_write(
+            ctx,
+            base,
+            Slot {
+                off: sret_off,
+                width: Width::W64,
+            },
+            args[ai],
+        );
         ai += 1;
     }
     for p in &body.params {
@@ -1020,11 +1234,24 @@ pub(super) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
                 args.len()
             ));
         };
-        slot_write(ctx, base, Slot { off, width: Width::W64 }, loc);
+        slot_write(
+            ctx,
+            base,
+            Slot {
+                off,
+                width: Width::W64,
+            },
+            loc,
+        );
     }
 
     // 帧守卫：unwind 穿帧 = 跑 cleanup + 恢复区；正常返回 = 恢复区（edge 已空）
-    let guard = FrameGuard { ctx, func, base, unwind_edge: Cell::new(None) };
+    let guard = FrameGuard {
+        ctx,
+        func,
+        base,
+        unwind_edge: Cell::new(None),
+    };
     match run_blocks(ctx, func, base, &guard.unwind_edge, 0) {
         Exit::Ret(lo, hi) => (lo, hi), // guard drop → region 恢复
         Exit::Resume => engine_abort(&format!("Resume 出现在正常执行路径（fn {}）", body.name)),
@@ -1044,7 +1271,11 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
         }
         match &block.term {
             Terminator::Goto(t) => blk = *t as usize,
-            Terminator::SwitchInt { discr, targets, otherwise } => {
+            Terminator::SwitchInt {
+                discr,
+                targets,
+                otherwise,
+            } => {
                 let (d, _) = eval_operand(ctx, base, discr);
                 blk = targets
                     .iter()
@@ -1052,15 +1283,20 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                     .map(|(_, b)| *b)
                     .unwrap_or(*otherwise) as usize;
             }
-            Terminator::Call { callee, args: aops, ret, target, unwind } => {
+            Terminator::Call {
+                callee,
+                args: aops,
+                ret,
+                target,
+                unwind,
+            } => {
                 let mut av: Vec<u64> = Vec::with_capacity(aops.len() + 1);
                 if let RetDest::Indirect(dst) = ret {
                     av.push(eval_place_addr(ctx, base, dst));
                 }
                 av.extend(aops.iter().map(|o| eval_operand(ctx, base, o).0));
                 edge.set(cleanup_edge(unwind)); // callee 若 panic，本帧从这条边清理
-                let (lo, hi) =
-                    call_guarding_terminate(unwind, || interp_frame(ctx, *callee, &av)); // ← 宿主递归
+                let (lo, hi) = call_guarding_terminate(unwind, || interp_frame(ctx, *callee, &av)); // ← 宿主递归
                 edge.set(None);
                 match ret {
                     RetDest::Ignore | RetDest::Indirect(_) => {}
@@ -1072,9 +1308,15 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 }
                 blk = *target as usize;
             }
-            Terminator::CallForeign { sym, sig, args: aops, ret, target, unwind } => {
-                let mut av: Vec<u64> =
-                    aops.iter().map(|o| eval_operand(ctx, base, o).0).collect();
+            Terminator::CallForeign {
+                sym,
+                sig,
+                args: aops,
+                ret,
+                target,
+                unwind,
+            } => {
+                let mut av: Vec<u64> = aops.iter().map(|o| eval_operand(ctx, base, o).0).collect();
                 // M4.4 D1：fn-ptr 实参位——guest fn 条目地址逃逸给 native 前物化 thunk
                 // 真码；NULL 与已是 native 真码（反查未命中，guest 转传）原样直传。
                 for (pos, inner) in &sig.thunk_args {
@@ -1087,12 +1329,19 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                     }
                 }
                 edge.set(cleanup_edge(unwind));
-                let libs: &[Box<str>] = &module.native_libs;
+                let optional_libs: &[Box<str>] = &module.native_libs;
+                let required_libs: &[Box<str>] = &module.required_native_libs;
                 let r = {
                     let ffi = unsafe { &mut (*ctx).ffi };
-                    super::ffi::call(ffi, libs, sym, sig, &av)
+                    super::ffi::call(ffi, optional_libs, required_libs, sym, sig, &av)
                 };
                 edge.set(None);
+                let r = r.unwrap_or_else(|reason| {
+                    engine_abort(&format!(
+                        "foreign `{sym}` 的必需原生库装载失败（fn {}）: {reason}",
+                        body.name
+                    ))
+                });
                 let Some(r) = r else {
                     engine_abort(&format!(
                         "foreign `{sym}` 符号不存在（dlsym 全域未命中；fn {}）",
@@ -1106,7 +1355,15 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 }
                 blk = *target as usize;
             }
-            Terminator::CallIndirect { callee, args: aops, ret, target, unwind, null_ok, native_sig } => {
+            Terminator::CallIndirect {
+                callee,
+                args: aops,
+                ret,
+                target,
+                unwind,
+                null_ok,
+                native_sig,
+            } => {
                 let (addr, _) = eval_operand(ctx, base, callee);
                 if *null_ok && addr == 0 {
                     // dyn 虚 drop 空槽：无 Drop 的类型 = 空操作
@@ -1142,10 +1399,102 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 }
                 blk = *target as usize;
             }
-            Terminator::CallBuiltin { builtin, args, ret, target, unwind } => {
+            Terminator::CallBuiltin {
+                builtin,
+                args,
+                ret,
+                target,
+                unwind,
+            } => {
                 use super::ir::Builtin;
                 let a = |i: usize| eval_operand(ctx, base, &args[i]).0;
                 edge.set(cleanup_edge(unwind)); // RaiseException 经此发起 unwind
+                // x86 向量 intrinsic：参数是 indirect 向量地址，返回落到 sret place。
+                // helper 本身带 target_feature，guest 的正常 CPUID 派发负责可达性。
+                let vector_done = match builtin {
+                    Builtin::X86Pshufb128 => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("pshufb128 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        unsafe { super::x86::pshufb128(dst, a(0) as *const u8, a(1) as *const u8) };
+                        true
+                    }
+                    Builtin::X86Pshufb256 => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("pshufb256 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        unsafe { super::x86::pshufb256(dst, a(0) as *const u8, a(1) as *const u8) };
+                        true
+                    }
+                    Builtin::X86Sha256Msg1 | Builtin::X86Sha256Msg2 => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("sha256msg 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        unsafe {
+                            if matches!(builtin, Builtin::X86Sha256Msg1) {
+                                super::x86::sha256msg1(dst, a(0) as *const u8, a(1) as *const u8);
+                            } else {
+                                super::x86::sha256msg2(dst, a(0) as *const u8, a(1) as *const u8);
+                            }
+                        }
+                        true
+                    }
+                    Builtin::X86Sha256Rnds2 => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("sha256rnds2 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        unsafe {
+                            super::x86::sha256rnds2(
+                                dst,
+                                a(0) as *const u8,
+                                a(1) as *const u8,
+                                a(2) as *const u8,
+                            );
+                        }
+                        true
+                    }
+                    _ => false,
+                };
+                if vector_done {
+                    edge.set(None);
+                    blk = *target as usize;
+                    continue;
+                }
+                // LLVM 的 addcarry/subborrow 返回 `(flag, result)` ScalarPair，而其他
+                // 现有 builtin 都是单标量。先走 pair 专用道，保持字段顺序与冻结 ABI 一致。
+                let carry_result = match builtin {
+                    Builtin::AddCarry64 => {
+                        let carry_in = u64::from(a(0) != 0);
+                        let (partial, carry1) = a(1).overflowing_add(a(2));
+                        let (result, carry2) = partial.overflowing_add(carry_in);
+                        Some(("addcarry.64", carry1 || carry2, result))
+                    }
+                    Builtin::SubBorrow64 => {
+                        let borrow_in = u64::from(a(0) != 0);
+                        let (partial, borrow1) = a(1).overflowing_sub(a(2));
+                        let (result, borrow2) = partial.overflowing_sub(borrow_in);
+                        Some(("subborrow.64", borrow1 || borrow2, result))
+                    }
+                    _ => None,
+                };
+                if let Some((name, flag, result)) = carry_result {
+                    edge.set(None);
+                    match ret {
+                        RetDest::Pair(flag_dst, value) => {
+                            place_write(ctx, base, flag_dst, u64::from(flag));
+                            place_write(ctx, base, value, result);
+                        }
+                        other => {
+                            engine_abort(&format!("{name} 返回形态 {other:?}，期望 ScalarPair"))
+                        }
+                    }
+                    blk = *target as usize;
+                    continue;
+                }
                 let r = match builtin {
                     // 分配前哨兵：空操作
                     Builtin::NoAllocShim => 0,
@@ -1164,8 +1513,7 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         libc::getenv(a(0) as *const libc::c_char) as u64
                     },
                     Builtin::HostWrite => unsafe {
-                        libc::write(a(0) as i32, a(1) as *const libc::c_void, a(2) as usize)
-                            as u64
+                        libc::write(a(0) as i32, a(1) as *const libc::c_void, a(2) as usize) as u64
                     },
                     Builtin::HostStrlen => unsafe {
                         libc::strlen(a(0) as *const libc::c_char) as u64
@@ -1174,9 +1522,79 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         eprintln!("mirvm[m4-engine]: guest abort()");
                         std::process::abort()
                     }
-                    // stub：假成功/空操作（sigaction 装载类挂 M4.4 thunk）
-                    Builtin::StubZero => 0,
-                    Builtin::StubNop => 0,
+                    Builtin::HostSignal => {
+                        let (signum, handler) = (a(0) as libc::c_int, a(1) as libc::sighandler_t);
+                        if handler != libc::SIG_DFL && handler != libc::SIG_IGN {
+                            engine_abort("unsupported builtin `signal` with guest handler");
+                        }
+                        unsafe { libc::signal(signum, handler) as u64 }
+                    }
+                    Builtin::HostSigaction => {
+                        let (signum, act, oldact) = (a(0) as libc::c_int, a(1), a(2));
+                        if act != 0 {
+                            let handler =
+                                unsafe { (*(act as *const libc::sigaction)).sa_sigaction };
+                            if handler != libc::SIG_DFL && handler != libc::SIG_IGN {
+                                engine_abort("unsupported builtin `sigaction` with guest handler");
+                            }
+                        }
+                        unsafe {
+                            libc::sigaction(
+                                signum,
+                                act as *const libc::sigaction,
+                                oldact as *mut libc::sigaction,
+                            ) as u64
+                        }
+                    }
+                    Builtin::Unsupported(name) => {
+                        engine_abort(&format!("unsupported builtin `{name}`"))
+                    }
+                    Builtin::UnwindDeleteException => {
+                        // Itanium `_Unwind_Exception`：exception_class @0，cleanup fn @8。
+                        // guest panic 的 cleanup 是冻结 fn 条目；foreign exception 也可能
+                        // 带 native cleanup，因此按地址域选择解释调用或 native FFI。
+                        let exc = a(0);
+                        let cleanup = mem_read(exc + 8, Width::W64);
+                        if cleanup != 0 {
+                            let av = [1, exc]; // _URC_FOREIGN_EXCEPTION_CAUGHT
+                            if module.fn_addrs.contains_key(&cleanup) {
+                                call_fn_addr(ctx, cleanup, &av, "_Unwind_DeleteException");
+                            } else {
+                                let sig = super::ir::ForeignSig {
+                                    args: vec![super::ir::FfiKind::I32, super::ir::FfiKind::Ptr],
+                                    ret: super::ir::FfiKind::Void,
+                                    fixed: None,
+                                    thunk_args: vec![],
+                                };
+                                super::ffi::call_addr(cleanup as usize, &sig, &av);
+                            }
+                        }
+                        0
+                    }
+                    Builtin::CpuHintNop => 0,
+                    Builtin::AddCarry64 => unreachable!("addcarry.64 已由 pair 通道处理"),
+                    Builtin::SubBorrow64 => unreachable!("subborrow.64 已由 pair 通道处理"),
+                    Builtin::Xgetbv => {
+                        let xcr = a(0) as u32;
+                        let (eax, edx): (u32, u32);
+                        unsafe {
+                            std::arch::asm!(
+                                "xgetbv",
+                                in("ecx") xcr,
+                                out("eax") eax,
+                                out("edx") edx,
+                                options(nomem, nostack, preserves_flags),
+                            );
+                        }
+                        (u64::from(edx) << 32) | u64::from(eax)
+                    }
+                    Builtin::X86Pshufb128
+                    | Builtin::X86Pshufb256
+                    | Builtin::X86Sha256Msg1
+                    | Builtin::X86Sha256Msg2
+                    | Builtin::X86Sha256Rnds2 => {
+                        unreachable!("x86 vector builtin 已由 indirect vector 通道处理")
+                    }
                     Builtin::HostSyscall => unsafe {
                         let n = a(0) as i64;
                         (match args.len() {
@@ -1198,7 +1616,12 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                             Ok(_) => 0,
                             Err(e) => match e.downcast::<GuestPanic>() {
                                 Ok(gp) => {
-                                    call_fn_addr(ctx, catch_fn, &[data, gp.exception], "catch_unwind.catch");
+                                    call_fn_addr(
+                                        ctx,
+                                        catch_fn,
+                                        &[data, gp.exception],
+                                        "catch_unwind.catch",
+                                    );
                                     1
                                 }
                                 // 宿主 panic（VM bug）不是 guest 异常：原样续传
@@ -1215,7 +1638,13 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 }
                 blk = *target as usize;
             }
-            Terminator::InlineAsm { stub, buf_size, ins, outs, target } => {
+            Terminator::InlineAsm {
+                stub,
+                buf_size,
+                ins,
+                outs,
+                target,
+            } => {
                 // asm-stub（M5.0 corpus §2.2 三面孔）：栈开 buf、按 ins 装槽、call
                 // wrapper（fn(*mut u8)，rbx=buf 基址）、按 outs 取槽。三面孔无 unwind。
                 #[repr(align(16))]
@@ -1238,7 +1667,8 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                     unsafe { std::mem::transmute::<u64, unsafe extern "C" fn(*mut u8)>(addr) };
                 unsafe { f(bufp) };
                 for (off, dst) in outs {
-                    let v = unsafe { std::ptr::read_unaligned(bufp.add(*off as usize) as *const u64) };
+                    let v =
+                        unsafe { std::ptr::read_unaligned(bufp.add(*off as usize) as *const u64) };
                     place_write(ctx, base, dst, v);
                 }
                 blk = *target as usize;
@@ -1248,8 +1678,19 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                     RetAbi::Zst => (0, 0),
                     RetAbi::Scalar(rs) => (slot_read(ctx, base, rs), 0),
                     RetAbi::Pair(lo, hi) => (slot_read(ctx, base, lo), slot_read(ctx, base, hi)),
-                    RetAbi::Indirect { ret_off, size, sret_off } => {
-                        let dst = slot_read(ctx, base, Slot { off: sret_off, width: Width::W64 });
+                    RetAbi::Indirect {
+                        ret_off,
+                        size,
+                        sret_off,
+                    } => {
+                        let dst = slot_read(
+                            ctx,
+                            base,
+                            Slot {
+                                off: sret_off,
+                                width: Width::W64,
+                            },
+                        );
                         unsafe {
                             std::ptr::copy_nonoverlapping(
                                 (base as u64 + ret_off as u64) as *const u8,
@@ -1268,7 +1709,9 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 eprintln!("mirvm[m4-engine]: UnwindTerminate（double panic/ABI 边界）——abort");
                 std::process::abort()
             }
-            Terminator::Unreachable => engine_abort(&format!("到达 Unreachable（fn {}）", body.name)),
+            Terminator::Unreachable => {
+                engine_abort(&format!("到达 Unreachable（fn {}）", body.name))
+            }
             Terminator::Trap(reason) => {
                 engine_abort(&format!("TRAP: {reason}（fn {}）", body.name))
             }
@@ -1285,8 +1728,12 @@ pub fn run_main(shared: &'static Shared) -> i32 {
         return 2;
     };
     let ctx_ptr = super::ctx::attach(shared); // 主线程与 guest 线程同一 attach 形态
-    let args =
-        [entry.main_addr, entry.argc, entry.argv_ptr, entry.sigpipe as u64];
+    let args = [
+        entry.main_addr,
+        entry.argc,
+        entry.argv_ptr,
+        entry.sigpipe as u64,
+    ];
     match panic::catch_unwind(AssertUnwindSafe(|| {
         interp_frame(ctx_ptr, entry.lang_start, &args).0
     })) {
@@ -1319,5 +1766,105 @@ pub fn run_export(shared: &'static Shared, name: &str, args: &[u64]) -> Result<u
             }
             Err(host) => panic::resume_unwind(host), // VM bug 绝不吞
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::mem::MaybeUninit;
+
+    use super::{mem_read_volatile, mem_write_volatile};
+
+    #[test]
+    fn volatile_scalar_roundtrip_preserves_each_width() {
+        for (size, value) in [
+            (1, 0xa5),
+            (2, 0xb6a5),
+            (4, 0xd8c7_b6a5),
+            (8, 0xf0e9_d8c7_b6a5_9483),
+        ] {
+            let mut storage = [0u8; 8];
+            let mut got = 0u64;
+            mem_write_volatile(
+                storage.as_mut_ptr() as u64,
+                (&value as *const u64) as u64,
+                size,
+            );
+            mem_read_volatile(storage.as_ptr() as u64, (&mut got as *mut u64) as u64, size);
+            let mask = if size == 8 {
+                u64::MAX
+            } else {
+                (1u64 << (size * 8)) - 1
+            };
+            assert_eq!(got, value & mask);
+        }
+    }
+
+    #[test]
+    fn volatile_unaligned_roundtrip_does_not_require_host_alignment() {
+        let mut storage = [0u8; 16];
+        let addr = unsafe { storage.as_mut_ptr().add(1) } as u64;
+        let value = 0xf0e9_d8c7_b6a5_9483;
+        let mut got = 0u64;
+        mem_write_volatile(addr, (&value as *const u64) as u64, 8);
+        mem_read_volatile(addr, (&mut got as *mut u64) as u64, 8);
+        assert_eq!(got, value);
+    }
+
+    #[test]
+    fn volatile_16_byte_roundtrip_preserves_the_whole_value() {
+        let mut storage = [0u8; 16];
+        let value = [
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+            0x32, 0x10,
+        ];
+        let mut got = [0u8; 16];
+        mem_write_volatile(storage.as_mut_ptr() as u64, value.as_ptr() as u64, 16);
+        mem_read_volatile(storage.as_ptr() as u64, got.as_mut_ptr() as u64, 16);
+        assert_eq!(got, value);
+    }
+
+    #[test]
+    fn volatile_16_byte_value_may_have_alignment_one() {
+        let mut storage = [0u8; 24];
+        let base = storage.as_mut_ptr() as usize;
+        let offset = (9 - base % 8) % 8;
+        let addr = unsafe { storage.as_mut_ptr().add(offset) } as u64;
+        assert_eq!(addr % 8, 1);
+        let value = [0xa5u8; 16];
+        let mut got = [0u8; 16];
+        mem_write_volatile(addr, value.as_ptr() as u64, 16);
+        mem_read_volatile(addr, got.as_mut_ptr() as u64, 16);
+        assert_eq!(got, value);
+    }
+
+    #[test]
+    fn volatile_padded_aggregate_never_interprets_padding_as_an_integer() {
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct Padded {
+            tag: u8,
+            value: u32,
+        }
+
+        let value = Padded {
+            tag: 0xa5,
+            value: 0x1234_5678,
+        };
+        let mut storage = MaybeUninit::<Padded>::uninit();
+        let mut got = MaybeUninit::<Padded>::uninit();
+        mem_write_volatile(
+            storage.as_mut_ptr() as u64,
+            (&value as *const Padded) as u64,
+            size_of::<Padded>() as u8,
+        );
+        mem_read_volatile(
+            storage.as_ptr() as u64,
+            got.as_mut_ptr() as u64,
+            size_of::<Padded>() as u8,
+        );
+        let got = unsafe { got.assume_init() };
+        assert_eq!(got.tag, value.tag);
+        assert_eq!(got.value, value.value);
     }
 }

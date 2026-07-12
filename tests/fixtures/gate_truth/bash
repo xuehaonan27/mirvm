@@ -1,0 +1,46 @@
+#!/bin/bash
+set -u
+
+script=${1:-}
+echo "$script" >>"$GATE_CALL_LOG"
+case "$script" in
+    tests/diff_cargo.sh)
+        echo 'PASS ecosystem'
+        echo 'PASS ffi_zlib'
+        echo 'PASS project'
+        echo '== 3 passed, 0 expected-red, 0 failed =='
+        ;;
+    tests/diff.sh)
+        echo '== 17 passed, 0 failed =='
+        ;;
+    tests/m4_gate0.sh|tests/m4_gate1.sh|tests/m4_gate2.sh)
+        ;;
+    tests/m4_gate4.sh)
+        if [ -n "${SKIP_TSAN:-}" ]; then
+            echo 'SKIP TSan（SKIP_TSAN=1）'
+        else
+            echo 'PASS TSan（含 tsan_mt 多线程真身，零警告）'
+        fi
+        ;;
+    tests/m51_*.sh)
+        probe=${script#tests/m51_}
+        probe=${probe%.sh}
+        if [ "$probe" = x86_vectors ]; then
+            for feature in pshufb sha; do
+                if [ "${M51_SKIP_VECTOR_FEATURE:-}" = "$feature" ]; then
+                    echo "SKIP m51_x86_vectors/$feature: host lacks $feature"
+                else
+                    echo "PASS m51_x86_vectors/$feature"
+                fi
+            done
+        elif [ "${M51_SKIP_PROBE:-}" = "$probe" ]; then
+            echo "SKIP m51_$probe: host lacks required CPU feature"
+        else
+            echo "PASS m51_$probe"
+        fi
+        ;;
+    *)
+        echo "unexpected nested gate: $script" >&2
+        exit 99
+        ;;
+esac

@@ -18,22 +18,34 @@ use super::{interp, thunks};
 /// 手构 Module：fn0 `bump(addr)->旧值`（原子 +1）；fn1 `add3(x)->x+3`（thunk 目标）。
 /// 帧布局（两函数同形）：_0 ret @0、_1 参 @8。
 fn build_module() -> Module {
-    let ret_slot = Slot { off: 0, width: Width::W64 };
-    let arg_slot = Slot { off: 8, width: Width::W64 };
+    let ret_slot = Slot {
+        off: 0,
+        width: Width::W64,
+    };
+    let arg_slot = Slot {
+        off: 8,
+        width: Width::W64,
+    };
     let mk = |stmts: Vec<Stmt>, name: &str| FuncBody {
         frame_size: 16,
         frame_align: 8,
         ret: RetAbi::Scalar(ret_slot),
         params: vec![ParamAbi::Scalar(arg_slot)],
         caller_loc_off: None,
-        blocks: vec![Block { stmts, term: Terminator::Return }],
+        blocks: vec![Block {
+            stmts,
+            term: Terminator::Return,
+        }],
         name: name.into(),
     };
     let bump = mk(
         vec![Stmt::AtomicRmw {
             op: RmwOp::Add,
             addr: Operand::Slot(arg_slot),
-            val: Operand::Imm { bits: 1, width: Width::W64 },
+            val: Operand::Imm {
+                bits: 1,
+                width: Width::W64,
+            },
             dst: ScalarPlace::Slot(ret_slot),
         }],
         "tsan_mt::bump",
@@ -45,12 +57,18 @@ fn build_module() -> Module {
                 op: IntBinOp::Add,
                 signed: false,
                 a: Operand::Slot(arg_slot),
-                b: Operand::Imm { bits: 3, width: Width::W64 },
+                b: Operand::Imm {
+                    bits: 3,
+                    width: Width::W64,
+                },
             },
         }],
         "tsan_mt::add3",
     );
-    Module { funcs: vec![bump, add3], ..Default::default() }
+    Module {
+        funcs: vec![bump, add3],
+        ..Default::default()
+    }
 }
 
 pub fn run() -> bool {
@@ -97,7 +115,10 @@ pub fn run() -> bool {
     let total = CELL.load(Ordering::SeqCst);
     let same_thunk = codes.windows(2).all(|w| w[0] == w[1]);
     // acc(t) = Σ_{i<64}(i+t+3) = 64t + 2208
-    let accs_ok = accs.iter().enumerate().all(|(t, &a)| a == 64 * t as u64 + 2208);
+    let accs_ok = accs
+        .iter()
+        .enumerate()
+        .all(|(t, &a)| a == 64 * t as u64 + 2208);
     let ok = total == THREADS * N && same_thunk && accs_ok;
     println!(
         "tsan_mt: total={total}（期望 {}）same_thunk={same_thunk} accs_ok={accs_ok}",

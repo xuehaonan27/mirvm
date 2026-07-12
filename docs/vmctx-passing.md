@@ -1,9 +1,15 @@
 # vmctx 传递机制：编译码（与回调边界）如何够到 VM 执行态
 
-> 设计备忘（2026-07-07，Spike 2 之后）。**结论先行**：
+> 文档状态：**保留的机制比较与决策历史**。2026-07-07 原文在 Spike 2 后比较 P/T/R；
+> 2026-07-11 的最新分层结论由 [m5-design.md](m5-design.md) D5 替代旧的“P vs R 终裁”：
+> native→guest 边界仍是 TLS + lazy attach；生产 JIT 先落 T 骨架，R 只在真实 ctx 热负载出现后
+> 作为 ABI 兼容缓存层复测；P 不再是生产候选。生产 JIT 尚未实现。完整时间线与重开条件见
+> [decision-history.md](decision-history.md)。原文保留三案论证。
+>
+> 2026-07-07 时的**结论先行**：
 > - **边界机制已被逼定**：FFI 逃逸指针 / native 回调 / 信号处理器的入口，必须**按当前线程查找执行态
 >   （TLS）+ 惰性 attach**——这不是偏好，是被"信号在任意线程跑 + 执行态每线程一份"逼死的（§1.3）。
-> - **内部机制待 M4 定**：编译码之间传 ctx 用显式 vmctx 首参（Wasmtime 式）还是 pinned 寄存器
+> - **当时的开放项**：编译码之间传 ctx 用显式 vmctx 首参（Wasmtime 式）还是 pinned 寄存器
 >   （HotSpot 式），二者都可行（Cranelift 均支持），是性能/工程细节（§5.2）。
 > - **skeleton（spike2）用显式首参 (a) 是对的**——手写验证适配器最干净；但它不是 M4 终选。
 > - Spike 3（unwind）与本问题**正交**，不受影响。
@@ -236,7 +242,7 @@ native→guest 边界 : 一次 TLS 读（+ 首次 attach）
 signal-thunk、pthread start_routine thunk 都落在这条既有路径上，且**热身后**（函数被 JIT）逃逸
 指针可以直接给 f_boundary 地址、thunk 消失——与 frame-abi §8 "JIT tier thunk 消失"的既有判断吻合。
 
-### 5.2 内部约定的最后一个自由度（M4 定，非现在）
+### 5.2 内部约定的最后一个自由度（历史比较；已由 M5 D5 分层结论替代）
 
 | | 内部 = 显式 vmctx 参（Wasmtime 式） | 内部 = pinned r15（HotSpot 式） |
 |---|---|---|
@@ -275,7 +281,12 @@ V8=寄存器缓存+TLS。mirvm 因为 plain-C FFI 没有走私通道，边界只
 
 ---
 
-## 7. 决策状态
+## 7. 决策状态（2026-07-07 原状态 + 后续更新）
+
+> **2026-07-11 更新**：M5 D5 将选择改写为 T 骨架 + R 兼容缓存层。T/R 共享纯 guest fast
+> 签名与 TLS 边界；只有 `get_ctx()` 降低、pinned-reg 开关和边界 save/set/restore 不同。
+> 分配或 guest TLS 内联进入编译码后，才以该负载复测是否启用 R。以下条目保留 2026-07-07
+> 决策现场，其中“待 M4 定”已是 historical。
 
 - **已定**：边界（逃逸/回调/信号/外来线程）= TLS 按当前线程查找 + 惰性 attach（归 `os::thread`，P7）。
   被 §1 三条约束逼定，无备选。

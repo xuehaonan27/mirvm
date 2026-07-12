@@ -2,6 +2,8 @@
 
 > 承 `docs/m4-log.md`（M4 关账）。设计见 `docs/m5-design.md`（D1-D7 已批准，
 > D5=T 骨架+触发器）。每期 gate 结果 + 教训 + 遗留归期，格式同 m4-log。
+> **状态边界**：M5.0、M5.1 已完成；方法级 JIT 未进入产品路径。2026-07-12 对测试
+> oracle 的后续审计见 [current-status.md](current-status.md)，旧 gate 计数按当时脚本口径保留。
 
 ## M5.0 asm-stub 工厂（轨 A 起步）—— **完成**（2026-07-11）
 
@@ -97,3 +99,111 @@ inout/clobber 与 native 同机逐字节一致，含 cpuid 厂商串——"虚�
    共享——恒为合法子集，极端密集时提前分配不出 = 响亮 Trap 非静默错值）。修注释
    如实标注分歧。另记：xmm 值操作数现被标量路径拒（Trap 响亮）——M5.1 sha stub
    需扩 16 字节槽通道。
+
+## M5.1 llvm.x86 + 静态归档（轨 A 收口）—— **完成**（2026-07-12）
+
+### 开工前：可信 oracle 与语义基线
+
+- `diff_cargo.sh` 现在先要求 native 达到明示退出码；ecosystem 以
+  `llvm.x86.xgetbv` 精确 XFAIL，双方都失败与 XPASS 都会使 gate 失败。
+- `corpus.sh` 有失败即返回非零；gate5 分开统计 PASS/XFAIL，并真实调用 gate0、gate1、
+  gate2、gate4。`tests/gate_truth_regression.sh` 的 6 个门禁自测通过。
+- `c_signal` 增加 `assert!(handler_ran)`；引擎删除 signal/sigaction 的静默成功，guest handler
+  当前明确 Trap，SIG_DFL/SIG_IGN 才受限直通。
+- volatile 不再降为普通访问：新增独立 IR 和宿主 volatile load/store，覆盖 1/2/4/8/16 字节
+  与 unaligned；`c_volatile` 加入 gate，Rust 单元测试覆盖标量、unaligned 与 16-byte。
+- 该时点 `cargo test --locked` 为 8 passed。CI workflow 已建立；rustfmt、Clippy 当时尚未
+  清零，最终状态见下方总验收。
+
+### 切片 1：addcarry/subborrow —— 完成
+
+- `llvm.x86.addcarry.64` 与 `llvm.x86.subborrow.64` 进入显式 engine builtin 表；未登记的
+  `llvm.*` 仍响亮 Trap。
+- 解释器使用两次 `overflowing_add` / `overflowing_sub` 保留进位/借位，返回严格走冻结的
+  `RetDest::Pair(flag, value)`，不把 pair 静默压成单标量。
+- `tests/m51_addcarry.sh` 通过 stdarch 公共 API 将边界输入的 add/sub checksum 与 native
+  逐行差分；`c_numbigint` 已转绿。
+
+切片 1 结束时 xgetbv、pshufb/SHA-NI、blake3 静态归档和 ecosystem 后续前沿仍待；随后
+xgetbv 已由切片 2 完成。技术路线与退出标准继续以 `m5.1-design.md` 的复核版滚动更新。
+
+### 切片 2：xgetbv —— 完成
+
+- `llvm.x86.xgetbv` 进入 scalar builtin；解释器执行真实宿主 `xgetbv`，以 ecx 输入并合并
+  edx:eax 返回。guest 与 host 共享 CPU 特性模型，调用仍由 guest 正常 CPUID/OSXSAVE 分派保护。
+- `tests/m51_xgetbv.sh` 先检查宿主 CPUID；可用时逐字节比较 native/mirvm 的 XCR0 输出，
+  不可用时比较双方 skip 行为。在可写缓存环境实测 PASS。
+- 这次选择固定 builtin 而非加载相 asm-stub：形状固定、纯标量、无模板分配需求；未知
+  llvm.x86 仍 Trap，不形成通用按名模拟。
+
+切片 2 后的滚动复测把当时前沿钉为：blake3=静态 archive 符号、ecosystem=`simd_insert`、
+sha2=pshufb（随后由切片 3 转绿）。xgetbv 的旧诊断不再被 gate 接受。该时点 release gate5 为
+**31 PASS / 4 XFAIL / 0 FAIL**
+（第四个 XFAIL 是独立的 signal guest handler）。
+
+### 切片 3：x86 向量 stdarch helpers —— 完成
+
+- 新增 tcx-free `engine::x86`：pshufb128/256 与 SHA256 msg1/msg2/rnds2 均使用
+  `#[target_feature]` 宿主 stdarch intrinsic，known-vector 单元测试通过。
+- 这替代 M5.1 初稿的“扩通用 asm-stub 向量 ABI”解释器路线：客户面很窄，固定 helper 更小，
+  且 stdarch 处理 SHA rnds2 隐式寄存器；未来方法级 JIT 的 CLIF/asm 选择不受影响。
+- lower/interpreter 地址式宽值通道已接入；`tests/m51_x86_vectors.sh` 与 native 差分 PASS，
+  `c_sha2` 两个标准 SHA256 输出正确并转绿。本切片已从 helper 地基成为产品能力。
+
+### 切片 4：Static native archive（D2）—— 完成（受约束 Linux/ELF）
+
+- 新增 `native_archive.rs`；加载相收集 local + used crates 的 `tcx.native_libraries` Static
+  条目，按 cfg/filename/verbatim 和 native search path 找真实 `.a`，转换 `.so` 后加入
+  第一版 `Module.native_libs`。这一“可选候选”分类后来被收官语义复审推翻，
+  当前的 required 装载见下方复审记录。
+- 链接 recipe = `cc -shared -z defs --whole-archive A --no-whole-archive`，每个 archive
+  独立转换。内容缓存键包含 recipe、target、cc 身份和 archive bytes，tmp+rename 原子发布。
+- 有意拒绝：非 Linux/ELF、thin、ctor/dtor、非 PIC relocation、未闭合/跨 archive 依赖/顺序、
+  跨 archive 重名动态导出、与 RTLD_DEFAULT 既有同名符号、export-symbols；这是垂直切片，
+  不是假装通用 linker。
+- 该切片时点 `cargo test --locked native_archive::tests` 9/9，全 crate 16/16。blake3 两个 build.rs archive 成功转换，
+  `c_blake3` 与 native 三行 hash 逐字一致并转绿。
+
+切片 4 完成时只剩 ecosystem 滚动前沿（当时为 `simd_insert`）与最终 gate/日志收口；signal
+guest handler 是独立能力缺口，不应混入 M5.1 全绿宣称。
+
+### 切片 5–6：ecosystem SIMD 收口 —— 完成
+
+- lower 按编译期常量索引、lane 类型/宽度和向量界限展开 `simd_insert/extract`；动态/越界/
+  类型不匹配继续响亮 Trap，不接受隐式截断。
+- 补 `simd_shl/shr`；signed 右移保持算术语义，非法 shift count 明确终止。`CpuPause` 泛化为
+  无 RAM 状态效果的 `CpuHintNop`，覆盖 `pause` 与 `vzeroupper`。
+- `m51_simd_insert`、`m51_simd_shift`、`m51_vzeroupper` 三个 feature-gated tracer 均与 native
+  一致；加上 addcarry、xgetbv、x86_vectors，共六个 M5.1 release tracer 全部通过。
+- ecosystem debug/release 完整通过；blake3、sha2、numbigint release 客户链也全部通过。
+
+实现范围完成后，最后收口任务是删掉 diff_cargo/gate5 中已过时的 expected-red、重跑最终
+聚合 gate，并把 signal guest handler 保留为独立明确 XFAIL；下方总验收已完成这些事项。
+
+### 收官后语义复审：再次推翻“看起来已经绿”的路径
+
+- 旧 volatile 实现只按尺寸把 1/2/4/8/16-byte 值强转成宿主整数/对齐 8 聚合值。
+  复审用 `[u8; 16]` 的 alignment=1 反例稳定触发 Rust 对齐检查 abort，含 padding
+  聚合值还有读未初始化字节为整数的 UB。最终改为独立 `Stmt::VolatileLoad/Store`
+  + alignment=1 `MaybeUninit<[u8; N]>` opaque 位型搬运，并加低对齐与 padding 回归。
+- `_Unwind_Backtrace` 经通用 libffi 虽能调用，只能看到解释器/libffi 的宿主栈，
+  不是 guest frame/IP。因此 backtrace 与其余 `_Unwind_Get*/Set*` context 家族改为显式
+  `Unsupported`，`c_backtrace` 以原因锁定的 XFAIL 保证不再静默伪造。
+- archive `.so` 从“可选 dlopen 候选”分离为 `required_native_libs`，在任何 dlsym 前
+  `RTLD_NOW` 加载；失败保留 `dlerror` 并立即终止。lifecycle 检查补齐
+  `.init/.fini`、优先级 `.init_array.*` 等 section，定向 archive 测试增至 12，另有
+  2 个 FFI 加载测试。
+- gate5 现在独立统计 SKIP；TSan 在 CI 有独立可见 step，gate0 只编译纯度 harness。
+  x86_vectors 的 pshufb/SHA 子特性分别 PASS/SKIP，不再因宿主缺 SHA-NI 冒充整体 PASS。
+
+### M5.1 总验收
+
+- 四目标客户链：numbigint、sha2、blake3、ecosystem 全绿；diff_cargo 3/3，diff 17/17。
+- 六个 release native tracer 脚本全通过，x86_vectors 内 pshufb/SHA 两个子断言分别 PASS；
+  cargo test 23/23；gate-truth 10/10。
+- rustfmt、Clippy `-D warnings`、release build 全 PASS；CI workflow 已建立。
+- full release gate5（含 gate0/1/2/4、TSan）= **40 PASS / 2 XFAIL / 0 SKIP / 0 FAIL**；
+  XFAIL 是不属于 M5.1 的 signal guest handler 与 guest backtrace/frame-IP 映射。
+- 性能无回归：load 471ms、rayon 732ms。
+
+**M5.1 完成。下一阶段 = M5.2 方法级 JIT。**

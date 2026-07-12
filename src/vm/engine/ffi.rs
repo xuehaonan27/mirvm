@@ -4,11 +4,12 @@
 //! 参数就是 u64 位，按 FfiKind 截取；native 写 guest 内存 = 写真内存，天然可见。
 //! tier-0 native.rs 的无 provenance 简化版。
 //!
-//! 符号解析顺序：RTLD_DEFAULT(进程自带 libc/libm) → `-l` 指令 dlopen 的共享库。
+//! 库加载纪律：物化 archive 是必需库（RTLD_NOW，失败携 dlerror 终止）；普通 `-l`
+//! 名称是可选候选（best-effort）。全部加载后按 RTLD_DEFAULT → 各句柄解析符号。
 //! 变参函数用 Cif::new_variadic(尾参类别由调用点实参冻结，x86_64 AL 语义 libffi 负责)。
 
 use std::collections::HashMap;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 
 use libffi::middle::{Arg, Cif, CodePtr, Ret, Type as FfiType};
 
@@ -24,12 +25,19 @@ pub struct FfiState {
 
 impl FfiState {
     /// 解析符号真地址（缓存，含缺席缓存）。None = 全部搜索域都没有。
-    fn resolve(&mut self, name: &str, libs: &[Box<str>]) -> Option<usize> {
+    fn resolve(
+        &mut self,
+        name: &str,
+        optional_libs: &[Box<str>],
+        required_libs: &[Box<str>],
+    ) -> Result<Option<usize>, String> {
         if let Some(&p) = self.syms.get(name) {
-            return (p != 0).then_some(p);
+            return Ok((p != 0).then_some(p));
         }
-        self.ensure_libs(libs);
-        let cname = CString::new(name).ok()?;
+        self.ensure_libs(optional_libs, required_libs)?;
+        let Ok(cname) = CString::new(name) else {
+            return Ok(None);
+        };
         let mut p = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) } as usize;
         if p == 0 {
             for &h in &self.handles {
@@ -40,21 +48,52 @@ impl FfiState {
             }
         }
         self.syms.insert(name.into(), p);
-        (p != 0).then_some(p)
+        Ok((p != 0).then_some(p))
     }
 
-    fn ensure_libs(&mut self, libs: &[Box<str>]) {
+    fn ensure_libs(
+        &mut self,
+        optional_libs: &[Box<str>],
+        required_libs: &[Box<str>],
+    ) -> Result<(), String> {
         if self.libs_loaded {
-            return;
+            return Ok(());
         }
-        self.libs_loaded = true;
-        for cand in libs {
-            let Ok(cpath) = CString::new(&**cand) else { continue };
+
+        for cand in required_libs {
+            let cpath =
+                CString::new(&**cand).map_err(|_| format!("必需原生库路径含 NUL: `{cand}`"))?;
+            // dlerror 是线程局部的粘滞状态；先清空，再在失败后立即复制诊断。
+            unsafe { libc::dlerror() };
+            let h = unsafe { libc::dlopen(cpath.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
+            if h.is_null() {
+                let detail = dlerror_string();
+                return Err(format!("dlopen 必需原生库 `{cand}` 失败: {detail}"));
+            }
+            self.handles.push(h as usize);
+        }
+        for cand in optional_libs {
+            let Ok(cpath) = CString::new(&**cand) else {
+                continue;
+            };
             let h = unsafe { libc::dlopen(cpath.as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL) };
             if !h.is_null() {
                 self.handles.push(h as usize);
             }
         }
+        self.libs_loaded = true;
+        Ok(())
+    }
+}
+
+fn dlerror_string() -> String {
+    let error = unsafe { libc::dlerror() };
+    if error.is_null() {
+        "dlerror 未提供详情".into()
+    } else {
+        unsafe { CStr::from_ptr(error) }
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
@@ -76,16 +115,19 @@ pub(super) fn ffi_type(k: FfiKind) -> FfiType {
 }
 
 /// 直调。args = 求值好的 u64 位（指针即真地址；F32 位在低 32）。返回 u64 位。
-/// None = 符号不存在（调用方给诊断）。
+/// Ok(None) = 符号不存在（调用方给诊断）；Err = 必需库加载失败，禁止退化为 dlsym miss。
 pub fn call(
     state: &mut FfiState,
-    libs: &[Box<str>],
+    optional_libs: &[Box<str>],
+    required_libs: &[Box<str>],
     sym: &str,
     sig: &ForeignSig,
     args: &[u64],
-) -> Option<u64> {
-    let fnptr = state.resolve(sym, libs)?;
-    Some(call_addr(fnptr, sig, args))
+) -> Result<Option<u64>, String> {
+    let Some(fnptr) = state.resolve(sym, optional_libs, required_libs)? else {
+        return Ok(None);
+    };
+    Ok(Some(call_addr(fnptr, sig, args)))
 }
 
 /// 按真码地址直调（CallForeign 的共用尾；也是 CallIndirect 反查未命中时的
@@ -99,7 +141,7 @@ pub fn call_addr(fnptr: usize, sig: &ForeignSig, args: &[u64]) -> u64 {
 
     // 每参一个 8 字节小端缓冲（libffi 按类型宽度读前缀）
     let bufs: Vec<[u8; 8]> = args.iter().map(|a| a.to_le_bytes()).collect();
-    let ffi_args: Vec<Arg<'_>> = bufs.iter().map(|b| Arg::new(b)).collect();
+    let ffi_args: Vec<Arg<'_>> = bufs.iter().map(Arg::new).collect();
     let mut ret = [0u8; 8];
     // SAFETY: 地址来自 dlsym / guest 持有的真码指针；签名按 rustc fn sig layout 冻结；
     // guest 缓冲即宿主缓冲。fast 立场（C4）：native 调用的正确性由 guest 程序负责。
@@ -107,4 +149,48 @@ pub fn call_addr(fnptr: usize, sig: &ForeignSig, args: &[u64]) -> u64 {
         cif.call_return_into(CodePtr(fnptr as *mut _), &ffi_args, Ret::new(&mut ret[..]));
     }
     u64::from_le_bytes(ret)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FfiState;
+
+    fn missing_library() -> Box<str> {
+        format!(
+            "/tmp/mirvm-definitely-missing-native-library-{}.so",
+            std::process::id()
+        )
+        .into()
+    }
+
+    #[test]
+    fn missing_optional_candidate_still_allows_rtld_default_resolution() {
+        let mut state = FfiState::default();
+        let address = state
+            .resolve("malloc", &[missing_library()], &[])
+            .expect("optional dlopen failure must stay optional");
+        assert!(address.is_some(), "malloc should resolve from RTLD_DEFAULT");
+    }
+
+    #[test]
+    fn missing_required_library_fails_before_same_named_rtld_default_symbol() {
+        let missing = missing_library();
+        let mut state = FfiState::default();
+        let error = state
+            .resolve("malloc", &[], std::slice::from_ref(&missing))
+            .unwrap_err();
+
+        assert!(
+            error.contains(&*missing),
+            "required path missing from diagnostic: {error}"
+        );
+        assert!(
+            error.contains("dlopen 必需原生库"),
+            "unexpected diagnostic: {error}"
+        );
+        assert!(
+            !error.contains("dlerror 未提供详情"),
+            "dlerror detail was lost: {error}"
+        );
+    }
 }

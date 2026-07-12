@@ -46,8 +46,16 @@ pub(crate) enum Callee {
 /// 带完整 VM 镜像着陆本质不同；file_actions/attr 是不透明指针，真实地址直传成立）。
 /// 保留 pthread_exit（glibc 强制 unwind 绕过 FrameGuard）与裸 fork/exec/setjmp 系。
 const DENY_EXACT: &[&str] = &[
-    "fork", "vfork", "clone", "clone3", "setjmp", "longjmp", "sigsetjmp", "siglongjmp",
-    "pthread_exit", "pthread_atfork",
+    "fork",
+    "vfork",
+    "clone",
+    "clone3",
+    "setjmp",
+    "longjmp",
+    "sigsetjmp",
+    "siglongjmp",
+    "pthread_exit",
+    "pthread_atfork",
 ];
 const DENY_PREFIX: &[&str] = &["exec"];
 
@@ -112,10 +120,7 @@ impl<'tcx> Linker<'tcx> {
 
     /// `#[thread_local]` static → 稠密 TlsId（M4.4 D3）。模板 = 初始化器求值产物
     /// 物化进冻结区（ensure_alloc 复用，重定位白拿——运行期只作字节源，无人写）。
-    pub(crate) fn tls_id(
-        &mut self,
-        def_id: rustc_hir::def_id::DefId,
-    ) -> Result<ir::TlsId, String> {
+    pub(crate) fn tls_id(&mut self, def_id: rustc_hir::def_id::DefId) -> Result<ir::TlsId, String> {
         if let Some(&id) = self.tls_ids.get(&def_id) {
             return Ok(id);
         }
@@ -127,7 +132,11 @@ impl<'tcx> Linker<'tcx> {
         let alloc_id = self.tcx.reserve_and_set_static_alloc(def_id);
         let template = self.ensure_alloc(alloc_id)?;
         let id = self.tls_slots.len() as ir::TlsId;
-        self.tls_slots.push(ir::TlsSlot { template, size, align: align as u32 });
+        self.tls_slots.push(ir::TlsSlot {
+            template,
+            size,
+            align: align as u32,
+        });
         self.tls_ids.insert(def_id, id);
         Ok(id)
     }
@@ -178,8 +187,7 @@ impl<'tcx> Linker<'tcx> {
                     }
                     let cname = std::ffi::CString::new(name.as_str())
                         .map_err(|_| "符号名含 NUL".to_string())?;
-                    let p =
-                        unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) } as u64;
+                    let p = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) } as u64;
                     if p == 0 {
                         return Err(format!("extern static `{name}` dlsym 未命中"));
                     }
@@ -257,8 +265,10 @@ impl<'tcx> Linker<'tcx> {
         // replaced_intrinsics 跳过收集，解释视角必须自己收——构造同 collector 源码：
         // Instance::new_raw）；must_be_overridden 的等引擎内建表（M4.1 第 5 步）。
         if let InstanceKind::Intrinsic(def_id) = inst.def {
-            let intrinsic =
-                self.tcx.intrinsic(def_id).expect("InstanceKind::Intrinsic 必有 IntrinsicDef");
+            let intrinsic = self
+                .tcx
+                .intrinsic(def_id)
+                .expect("InstanceKind::Intrinsic 必有 IntrinsicDef");
             if intrinsic.must_be_overridden {
                 return Err(format!(
                     "intrinsic `{}` 无 fallback（引擎内建表，M4.1）",
@@ -291,8 +301,7 @@ impl<'tcx> Linker<'tcx> {
                     || name.starts_with("rust_");
                 if is_weak && !rust_internal {
                     let cname = std::ffi::CString::new(name).unwrap();
-                    let strong =
-                        unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) };
+                    let strong = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) };
                     if !strong.is_null() {
                         return self.freeze_foreign_sig(inst, name);
                     }
@@ -302,7 +311,9 @@ impl<'tcx> Linker<'tcx> {
             // ③os:: 直通（P7）：denylist 拒 → 其余 dlsym+libffi 按冻结签名直调
             let name = link_name.as_str();
             if DENY_EXACT.contains(&name) || DENY_PREFIX.iter().any(|p| name.starts_with(p)) {
-                return Err(format!("foreign `{name}`（denylist：线程 M4.4 / 进程模型不直通）"));
+                return Err(format!(
+                    "foreign `{name}`（denylist：线程 M4.4 / 进程模型不直通）"
+                ));
             }
             if name.starts_with("llvm.") {
                 return Err(format!("foreign `{name}`（LLVM 内部符号，按需内建）"));
@@ -316,11 +327,7 @@ impl<'tcx> Linker<'tcx> {
     /// os:: 直通签名冻结：foreign fn sig → FfiKind 列表（tier-0 ty_to_ffitype 同构）。
     /// fn-ptr 类型的参数（pthread_create 的 thread_start 等）额外冻结**内层签名**
     /// （M4.4 D1）：执行期该位若收到 fn 条目地址，thunk 工厂物化真机器码后再直传。
-    fn freeze_foreign_sig(
-        &mut self,
-        inst: Instance<'tcx>,
-        name: &str,
-    ) -> Result<Callee, String> {
+    fn freeze_foreign_sig(&mut self, inst: Instance<'tcx>, name: &str) -> Result<Callee, String> {
         let sig = self
             .tcx
             .fn_sig(inst.def_id())
@@ -339,7 +346,9 @@ impl<'tcx> Linker<'tcx> {
             let fnptr_ty = if t.is_fn_ptr() {
                 Some(t)
             } else if let rustc_middle::ty::TyKind::Adt(def, sub) = t.kind()
-                && self.tcx.is_diagnostic_item(rustc_span::sym::Option, def.did())
+                && self
+                    .tcx
+                    .is_diagnostic_item(rustc_span::sym::Option, def.did())
                 && sub.type_at(0).is_fn_ptr()
             {
                 Some(sub.type_at(0))
@@ -357,22 +366,34 @@ impl<'tcx> Linker<'tcx> {
                         format!("foreign `{name}` 回调参数 {it}: {e}（thunk 仅标量/指针）")
                     })?;
                     if k == ir::FfiKind::Void {
-                        return Err(format!("foreign `{name}` 回调参数 {it}: ZST 不可作 cif 参数"));
+                        return Err(format!(
+                            "foreign `{name}` 回调参数 {it}: ZST 不可作 cif 参数"
+                        ));
                     }
                     in_args.push(k);
                 }
-                let in_ret = ffi_kind_of(self.tcx, env, inner.output()).map_err(|e| {
-                    format!("foreign `{name}` 回调返回 {}: {e}", inner.output())
-                })?;
+                let in_ret = ffi_kind_of(self.tcx, env, inner.output())
+                    .map_err(|e| format!("foreign `{name}` 回调返回 {}: {e}", inner.output()))?;
                 thunk_args.push((
                     i,
-                    ir::ForeignSig { args: in_args, ret: in_ret, fixed: None, thunk_args: vec![] },
+                    ir::ForeignSig {
+                        args: in_args,
+                        ret: in_ret,
+                        fixed: None,
+                        thunk_args: vec![],
+                    },
                 ));
             }
         }
         let ret = ffi_kind_of(self.tcx, env, sig.output())
             .map_err(|e| format!("foreign `{name}` 返回 {}: {e}", sig.output()))?;
-        Ok(Callee::Foreign { sym: name.into(), args, ret, variadic: sig.c_variadic(), thunk_args })
+        Ok(Callee::Foreign {
+            sym: name.into(),
+            args,
+            ret,
+            variadic: sig.c_variadic(),
+            thunk_args,
+        })
     }
 
     /// 导出符号表（②），惰性一次构建：遍历"最终二进制会链接到"的全部非泛型导出 def
@@ -466,7 +487,12 @@ pub(crate) fn freeze_c_fnptr_sig<'tcx>(
         args.push(k);
     }
     let ret = ffi_kind_of(tcx, env, sig.output()).ok()?;
-    Some(ir::ForeignSig { args, ret, fixed: None, thunk_args: vec![] })
+    Some(ir::ForeignSig {
+        args,
+        ret,
+        fixed: None,
+        thunk_args: vec![],
+    })
 }
 
 /// 类型 → libffi 直通类别（标量与指针；ZST=Void 仅返回位；聚合不支持）。
@@ -476,8 +502,9 @@ pub(crate) fn ffi_kind_of<'tcx>(
     ty: rustc_middle::ty::Ty<'tcx>,
 ) -> Result<ir::FfiKind, String> {
     use rustc_abi::{BackendRepr, Float, Integer, Primitive};
-    let layout =
-        tcx.layout_of(env.as_query_input(ty)).map_err(|e| format!("layout 失败: {e}"))?;
+    let layout = tcx
+        .layout_of(env.as_query_input(ty))
+        .map_err(|e| format!("layout 失败: {e}"))?;
     if layout.is_zst() {
         return Ok(ir::FfiKind::Void);
     }
@@ -511,7 +538,9 @@ fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin> {
     let mut out = FxHashMap::default();
     if let Some(kind) = tcx.allocator_kind(()) {
         for method in rustc_codegen_ssa::base::allocator_shim_contents(tcx, kind) {
-            let Some(special) = method.special else { continue };
+            let Some(special) = method.special else {
+                continue;
+            };
             let b = match special {
                 S::Alloc => ir::Builtin::RustAlloc,
                 S::Dealloc => ir::Builtin::RustDealloc,
@@ -522,36 +551,94 @@ fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin> {
             out.insert(Symbol::intern(&sym), b);
         }
     }
-    let sentinel = mangle_internal_symbol(
-        tcx,
-        rustc_ast::expand::allocator::NO_ALLOC_SHIM_IS_UNSTABLE,
-    );
+    let sentinel =
+        mangle_internal_symbol(tcx, rustc_ast::expand::allocator::NO_ALLOC_SHIM_IS_UNSTABLE);
     out.insert(Symbol::intern(&sentinel), ir::Builtin::NoAllocShim);
     // unwind 原语（M4.2）：panic_unwind 照常解释，引擎在平台 unwinder 符号层接管
-    out.insert(Symbol::intern("_Unwind_RaiseException"), ir::Builtin::UnwindRaise);
+    out.insert(
+        Symbol::intern("_Unwind_RaiseException"),
+        ir::Builtin::UnwindRaise,
+    );
     // 快路径直通（panic 链高频；其余 foreign 走通用 dlsym+libffi 道）
     out.insert(Symbol::intern("getenv"), ir::Builtin::HostGetenv);
     out.insert(Symbol::intern("write"), ir::Builtin::HostWrite);
     out.insert(Symbol::intern("strlen"), ir::Builtin::HostStrlen);
     out.insert(Symbol::intern("abort"), ir::Builtin::HostAbort);
     out.insert(Symbol::intern("syscall"), ir::Builtin::HostSyscall);
-    // stub：假成功（回调装载类挂 M4.4 thunk——guest fn ptr 是条目地址，内核/libc
-    // 直跳会崩；单线程期不装 handler 可观测等价）
-    for s in [
-        "sigaction",
-        "sigaltstack",
-        "signal",
-        "atexit",
-        "__cxa_atexit",
-        "dl_iterate_phdr",
+    // signal/sigaction 的 handler 藏在整数/结构体中，不能由通用 FFI fn-ptr 参数
+    // thunk 化；而且 signal trampoline 必须异步信号安全，普通 libffi closure 不满足。
+    // 明确 Trap，直到有专用实现。其余旧 StubZero 项改走 dlsym+libffi；
+    // atexit/dl_iterate_phdr 的显式 fn-ptr 参数可由 M4.4 thunk 工厂处理。
+    out.insert(Symbol::intern("signal"), ir::Builtin::HostSignal);
+    out.insert(Symbol::intern("sigaction"), ir::Builtin::HostSigaction);
+    // 宿主 unwinder 从 libffi/解释器的 native stack 取回 IP，无法代表
+    // guest 的冻结函数条目。回调 thunk 只解决调用方向，不会翻译栈帧；
+    // 所以在 guest-frame/IP 映射完成前必须明确拒绝，不能返回貌似成功
+    // 的宿主 backtrace。
+    // `_Unwind_RaiseException` / `_Unwind_DeleteException` 上面有 guest 专用语义；
+    // 其余 libgcc context/stack API 若直通，看到的只会是宿主解释器帧。
+    // 整组显式 deny，避免从 GetIPInfo/CFA/LSDA 等旁路重新引入静默错值。
+    for name in [
         "_Unwind_Backtrace",
+        "_Unwind_FindEnclosingFunction",
+        "_Unwind_Find_FDE",
+        "_Unwind_ForcedUnwind",
+        "_Unwind_GetCFA",
+        "_Unwind_GetDataRelBase",
+        "_Unwind_GetGR",
         "_Unwind_GetIP",
+        "_Unwind_GetIPInfo",
+        "_Unwind_GetLanguageSpecificData",
+        "_Unwind_GetRegionStart",
+        "_Unwind_GetTextRelBase",
+        "_Unwind_Resume",
+        "_Unwind_Resume_or_Rethrow",
+        "_Unwind_SetGR",
+        "_Unwind_SetIP",
     ] {
-        out.insert(Symbol::intern(s), ir::Builtin::StubZero);
+        out.insert(Symbol::intern(name), ir::Builtin::Unsupported(name));
     }
-    for s in ["_Unwind_DeleteException", "llvm.x86.sse2.pause"] {
-        out.insert(Symbol::intern(s), ir::Builtin::StubNop);
-    }
+    out.insert(
+        Symbol::intern("_Unwind_DeleteException"),
+        ir::Builtin::UnwindDeleteException,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.sse2.pause"),
+        ir::Builtin::CpuHintNop,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.avx.vzeroupper"),
+        ir::Builtin::CpuHintNop,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.addcarry.64"),
+        ir::Builtin::AddCarry64,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.subborrow.64"),
+        ir::Builtin::SubBorrow64,
+    );
+    out.insert(Symbol::intern("llvm.x86.xgetbv"), ir::Builtin::Xgetbv);
+    out.insert(
+        Symbol::intern("llvm.x86.ssse3.pshuf.b.128"),
+        ir::Builtin::X86Pshufb128,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.avx2.pshuf.b"),
+        ir::Builtin::X86Pshufb256,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.sha256msg1"),
+        ir::Builtin::X86Sha256Msg1,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.sha256msg2"),
+        ir::Builtin::X86Sha256Msg2,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.sha256rnds2"),
+        ir::Builtin::X86Sha256Rnds2,
+    );
     out
 }
 
@@ -625,8 +712,10 @@ pub fn lower_program(tcx: TyCtxt<'_>, argv: &[String]) -> ir::Module {
         funcs[id as usize] = Some(body);
         module.exports.insert(sym.into_boxed_str(), id);
     }
-    module.funcs =
-        funcs.into_iter().map(|f| f.expect("队列耗尽时每个 FuncId 必有产出")).collect();
+    module.funcs = funcs
+        .into_iter()
+        .map(|f| f.expect("队列耗尽时每个 FuncId 必有产出"))
+        .collect();
 
     // 入口别名（--vm-stats 从程序入口做可达分析用）
     if let Some((entry_def, _)) = tcx.entry_fn(())
@@ -637,13 +726,27 @@ pub fn lower_program(tcx: TyCtxt<'_>, argv: &[String]) -> ir::Module {
     // `-l` 链接指令 → dlopen 候选路径（tier-0 ensure_libs_loaded 同构）
     let sess = tcx.sess;
     for lib in &sess.opts.libs {
+        // Static 只能走下方经过验证的必需 archive 路径；不能同时伪装成可选 `.so`
+        // 候选，否则所需 archive dlopen 失败时可能静默命中系统同名库。
+        if matches!(lib.kind, rustc_hir::attrs::NativeLibKind::Static { .. }) {
+            continue;
+        }
         let name = lib.name.as_str();
         for d in sess.opts.search_paths.iter().map(|sp| &sp.dir) {
-            module.native_libs.push(d.join(format!("lib{name}.so")).display().to_string().into());
+            module
+                .native_libs
+                .push(d.join(format!("lib{name}.so")).display().to_string().into());
         }
         module.native_libs.push(format!("lib{name}.so").into());
         module.native_libs.push(format!("lib{name}.so.1").into());
     }
+    // 上游 crate build.rs 的 Static native libraries（M5.1 D2）：从 rustc metadata +
+    // native search paths 找到真实 `.a`，受约束地转换为内容寻址 `.so`。转换失败必须
+    // 在加载相响亮终止；不能让执行相 dlsym 静默跳过后再伪装成普通符号缺失。
+    module.required_native_libs.extend(
+        crate::native_archive::materialize_static_libraries(tcx)
+            .unwrap_or_else(|reason| panic!("Static native library 装载失败: {reason}")),
+    );
     // asm-stub 批量物化（M5.0）：全部 wrapper cc 汇编 + dlopen + dlsym → 真地址表
     module.asm_stub_addrs = asm::materialize(&linker.asm_sites);
     // 冻结区与 fn 条目反查表移交执行相

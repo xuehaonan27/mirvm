@@ -62,7 +62,11 @@ struct Ctx {
 
 impl Ctx {
     fn new(shared: &Shared) -> Self {
-        Ctx { shared, region: OperandRegion::new(), drop_log: Vec::new() }
+        Ctx {
+            shared,
+            region: OperandRegion::new(),
+            drop_log: Vec::new(),
+        }
     }
 }
 
@@ -135,7 +139,13 @@ fn run_cleanup_chain(ctx: *mut Ctx, func: u32, base: usize, entry: u32) {
                 log_drop(ctx, reg_read(ctx, base, *slot));
                 blk = *target as usize;
             }
-            Terminator::Call { func: callee, args: aops, dst, target, .. } => {
+            Terminator::Call {
+                func: callee,
+                args: aops,
+                dst,
+                target,
+                ..
+            } => {
                 let av: Vec<Word> = aops.iter().map(|o| eval_operand(ctx, base, *o)).collect();
                 let r = call_guest(ctx, *callee, &av);
                 reg_write(ctx, base, *dst, r);
@@ -165,7 +175,12 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
     for (i, a) in args.iter().enumerate() {
         reg_write(ctx, base, (i + 1) as u32, *a);
     }
-    let guard = CleanupGuard { ctx, func, base, unwind_edge: std::cell::Cell::new(None) };
+    let guard = CleanupGuard {
+        ctx,
+        func,
+        base,
+        unwind_edge: std::cell::Cell::new(None),
+    };
 
     let mut blk = 0usize;
     loop {
@@ -175,7 +190,11 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
         }
         match &block.term {
             Terminator::Goto(t) => blk = *t as usize,
-            Terminator::SwitchInt { discr, targets, otherwise } => {
+            Terminator::SwitchInt {
+                discr,
+                targets,
+                otherwise,
+            } => {
                 let d = eval_operand(ctx, base, *discr);
                 blk = targets
                     .iter()
@@ -183,7 +202,13 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
                     .map(|(_, b)| *b)
                     .unwrap_or(*otherwise) as usize;
             }
-            Terminator::Call { func: callee, args: aops, dst, target, unwind } => {
+            Terminator::Call {
+                func: callee,
+                args: aops,
+                dst,
+                target,
+                unwind,
+            } => {
                 let av: Vec<Word> = aops.iter().map(|o| eval_operand(ctx, base, *o)).collect();
                 guard.unwind_edge.set(edge(unwind));
                 let r = call_guest(ctx, *callee, &av);
@@ -200,7 +225,14 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
                 guard.unwind_edge.set(edge(unwind));
                 raise_guest(p);
             }
-            Terminator::CatchCall { func: callee, args: aops, dst, catch_dst, target, catch_target } => {
+            Terminator::CatchCall {
+                func: callee,
+                args: aops,
+                dst,
+                catch_dst,
+                target,
+                catch_target,
+            } => {
                 let callee = *callee;
                 let av: Vec<Word> = aops.iter().map(|o| eval_operand(ctx, base, *o)).collect();
                 match panic::catch_unwind(AssertUnwindSafe(|| call_guest(ctx, callee, &av))) {
@@ -351,20 +383,46 @@ fn fib_body(callee: u32) -> Body {
     let blocks = vec![
         Block {
             stmts: vec![asgn(2, bin(Lt, s(1), k(2)))],
-            term: SwitchInt { discr: s(2), targets: vec![(0, 2)], otherwise: 1 },
+            term: SwitchInt {
+                discr: s(2),
+                targets: vec![(0, 2)],
+                otherwise: 1,
+            },
         },
-        Block { stmts: vec![asgn(0, Use(s(1)))], term: Return },
+        Block {
+            stmts: vec![asgn(0, Use(s(1)))],
+            term: Return,
+        },
         Block {
             stmts: vec![asgn(3, bin(Sub, s(1), k(1)))],
-            term: Call { func: callee, args: vec![s(3)], dst: 4, target: 3, unwind: UnwindAction::Continue },
+            term: Call {
+                func: callee,
+                args: vec![s(3)],
+                dst: 4,
+                target: 3,
+                unwind: UnwindAction::Continue,
+            },
         },
         Block {
             stmts: vec![asgn(5, bin(Sub, s(1), k(2)))],
-            term: Call { func: callee, args: vec![s(5)], dst: 6, target: 4, unwind: UnwindAction::Continue },
+            term: Call {
+                func: callee,
+                args: vec![s(5)],
+                dst: 6,
+                target: 4,
+                unwind: UnwindAction::Continue,
+            },
         },
-        Block { stmts: vec![asgn(0, bin(Add, s(4), s(6)))], term: Return },
+        Block {
+            stmts: vec![asgn(0, bin(Add, s(4), s(6)))],
+            term: Return,
+        },
     ];
-    Body { num_slots: 7, num_args: 1, blocks }
+    Body {
+        num_slots: 7,
+        num_args: 1,
+        blocks,
+    }
 }
 
 /// 原子计数循环：args = (cell_addr, iters)。槽：3=i 4=cond 5=旧值弃置
@@ -373,11 +431,18 @@ fn atomic_loop_body() -> Body {
     use Terminator::*;
     let blocks = vec![
         // bb0: i=0
-        Block { stmts: vec![asgn(3, Rvalue::Use(k(0)))], term: Goto(1) },
+        Block {
+            stmts: vec![asgn(3, Rvalue::Use(k(0)))],
+            term: Goto(1),
+        },
         // bb1: cond = i<iters; switch{0=>exit}
         Block {
             stmts: vec![asgn(4, bin(Lt, s(3), s(2)))],
-            term: SwitchInt { discr: s(4), targets: vec![(0, 3)], otherwise: 2 },
+            term: SwitchInt {
+                discr: s(4),
+                targets: vec![(0, 3)],
+                otherwise: 2,
+            },
         },
         // bb2: _5 = atomic_add(cell, 1); i+=1
         Block {
@@ -388,9 +453,16 @@ fn atomic_loop_body() -> Body {
             term: Goto(1),
         },
         // bb3: ret=0
-        Block { stmts: vec![asgn(0, Rvalue::Use(k(0)))], term: Return },
+        Block {
+            stmts: vec![asgn(0, Rvalue::Use(k(0)))],
+            term: Return,
+        },
     ];
-    Body { num_slots: 6, num_args: 2, blocks }
+    Body {
+        num_slots: 6,
+        num_args: 2,
+        blocks,
+    }
 }
 
 /// 转发帧：ret = callee(x)（给阻塞 IO 用例造一层解释帧）
@@ -399,11 +471,24 @@ fn wrap_body(callee: u32) -> Body {
     let blocks = vec![
         Block {
             stmts: vec![],
-            term: Call { func: callee, args: vec![s(1)], dst: 3, target: 1, unwind: UnwindAction::Continue },
+            term: Call {
+                func: callee,
+                args: vec![s(1)],
+                dst: 3,
+                target: 1,
+                unwind: UnwindAction::Continue,
+            },
         },
-        Block { stmts: vec![asgn(0, Rvalue::Use(s(3)))], term: Return },
+        Block {
+            stmts: vec![asgn(0, Rvalue::Use(s(3)))],
+            term: Return,
+        },
     ];
-    Body { num_slots: 4, num_args: 1, blocks }
+    Body {
+        num_slots: 4,
+        num_args: 1,
+        blocks,
+    }
 }
 
 /// 中间帧（unwind 用，同 spike3 形状）：own=100+d；cleanup Drop → Resume
@@ -412,14 +497,44 @@ fn mid_body(d: u64, callee: u32) -> Body {
     let blocks = vec![
         Block {
             stmts: vec![asgn(2, Rvalue::Use(k(100 + d)))],
-            term: Call { func: callee, args: vec![s(1)], dst: 3, target: 1, unwind: UnwindAction::Cleanup(3) },
+            term: Call {
+                func: callee,
+                args: vec![s(1)],
+                dst: 3,
+                target: 1,
+                unwind: UnwindAction::Cleanup(3),
+            },
         },
-        Block { stmts: vec![], term: Drop { slot: 2, target: 2, unwind: UnwindAction::Continue } },
-        Block { stmts: vec![asgn(0, bin(BinOp::Add, s(3), k(1)))], term: Return },
-        Block { stmts: vec![], term: Drop { slot: 2, target: 4, unwind: UnwindAction::Continue } },
-        Block { stmts: vec![], term: Resume },
+        Block {
+            stmts: vec![],
+            term: Drop {
+                slot: 2,
+                target: 2,
+                unwind: UnwindAction::Continue,
+            },
+        },
+        Block {
+            stmts: vec![asgn(0, bin(BinOp::Add, s(3), k(1)))],
+            term: Return,
+        },
+        Block {
+            stmts: vec![],
+            term: Drop {
+                slot: 2,
+                target: 4,
+                unwind: UnwindAction::Continue,
+            },
+        },
+        Block {
+            stmts: vec![],
+            term: Resume,
+        },
     ];
-    Body { num_slots: 6, num_args: 1, blocks }
+    Body {
+        num_slots: 6,
+        num_args: 1,
+        blocks,
+    }
 }
 
 /// 顶帧（catch，同 spike3 形状）
@@ -428,28 +543,64 @@ fn top_catch_body(callee: u32) -> Body {
     let blocks = vec![
         Block {
             stmts: vec![asgn(2, Rvalue::Use(k(100)))],
-            term: CatchCall { func: callee, args: vec![s(1)], dst: 3, catch_dst: 4, target: 1, catch_target: 3 },
+            term: CatchCall {
+                func: callee,
+                args: vec![s(1)],
+                dst: 3,
+                catch_dst: 4,
+                target: 1,
+                catch_target: 3,
+            },
         },
         Block {
             stmts: vec![asgn(0, Rvalue::Use(s(3)))],
-            term: Drop { slot: 2, target: 2, unwind: UnwindAction::Continue },
+            term: Drop {
+                slot: 2,
+                target: 2,
+                unwind: UnwindAction::Continue,
+            },
         },
-        Block { stmts: vec![], term: Return },
+        Block {
+            stmts: vec![],
+            term: Return,
+        },
         Block {
             stmts: vec![asgn(0, Rvalue::Use(s(4)))],
-            term: Drop { slot: 2, target: 4, unwind: UnwindAction::Continue },
+            term: Drop {
+                slot: 2,
+                target: 4,
+                unwind: UnwindAction::Continue,
+            },
         },
-        Block { stmts: vec![], term: Return },
+        Block {
+            stmts: vec![],
+            term: Return,
+        },
     ];
-    Body { num_slots: 6, num_args: 1, blocks }
+    Body {
+        num_slots: 6,
+        num_args: 1,
+        blocks,
+    }
 }
 
 fn dummy_body() -> Body {
-    Body { num_slots: 1, num_args: 1, blocks: vec![Block { stmts: vec![], term: Terminator::Return }] }
+    Body {
+        num_slots: 1,
+        num_args: 1,
+        blocks: vec![Block {
+            stmts: vec![],
+            term: Terminator::Return,
+        }],
+    }
 }
 
 fn fib_ref(n: u64) -> u64 {
-    if n < 2 { n } else { fib_ref(n - 1) + fib_ref(n - 2) }
+    if n < 2 {
+        n
+    } else {
+        fib_ref(n - 1) + fib_ref(n - 2)
+    }
 }
 
 // ===== 用例 =====
@@ -459,7 +610,9 @@ const N_THREADS: usize = 8;
 /// A：8 线程并行跑混合 fib（i2c/c2i 并发发生；共享只读程序 lock-free 读）
 fn case_a() -> bool {
     let shared = Shared {
-        prog: Program { funcs: vec![fib_body(1), dummy_body()] },
+        prog: Program {
+            funcs: vec![fib_body(1), dummy_body()],
+        },
         kinds: vec![FuncKind::Interp, FuncKind::Compiled(cc_fib_b)],
     };
     let want = fib_ref(22);
@@ -491,7 +644,9 @@ fn case_b() -> bool {
     unsafe { mem.store(cell, 0) };
 
     let shared = Shared {
-        prog: Program { funcs: vec![atomic_loop_body(), dummy_body()] },
+        prog: Program {
+            funcs: vec![atomic_loop_body(), dummy_body()],
+        },
         kinds: vec![FuncKind::Interp, FuncKind::Compiled(cc_atomic_loop)],
     };
     std::thread::scope(|sc| {
@@ -523,7 +678,9 @@ fn case_c() -> bool {
     let (rfd, wfd) = (fds[0] as u64, fds[1] as u64);
 
     let shared = Shared {
-        prog: Program { funcs: vec![wrap_body(2), wrap_body(3), dummy_body(), dummy_body()] },
+        prog: Program {
+            funcs: vec![wrap_body(2), wrap_body(3), dummy_body(), dummy_body()],
+        },
         kinds: vec![
             FuncKind::Interp,
             FuncKind::Interp,
@@ -563,8 +720,14 @@ fn case_c() -> bool {
 /// D：8 线程并发混合栈 unwind（per-thread panic→Drop→catch，unwind 机器每线程独立）
 fn case_d() -> bool {
     let shared = Shared {
-        prog: Program { funcs: vec![top_catch_body(1), mid_body(1, 2), dummy_body()] },
-        kinds: vec![FuncKind::Interp, FuncKind::Interp, FuncKind::Compiled(cc_d_raise)],
+        prog: Program {
+            funcs: vec![top_catch_body(1), mid_body(1, 2), dummy_body()],
+        },
+        kinds: vec![
+            FuncKind::Interp,
+            FuncKind::Interp,
+            FuncKind::Compiled(cc_d_raise),
+        ],
     };
     let expect: (Word, Vec<Word>) = (777, vec![102, 101, 100]);
     let results: Vec<(Word, Vec<Word>)> = std::thread::scope(|sc| {
@@ -582,7 +745,9 @@ fn case_d() -> bool {
     });
     let pass = results.iter().all(|r| *r == expect);
     if pass {
-        println!("PASS caseD 并发混合栈 unwind（{N_THREADS} 线程 × panic+Drop+catch，逐线程日志正确）");
+        println!(
+            "PASS caseD 并发混合栈 unwind（{N_THREADS} 线程 × panic+Drop+catch，逐线程日志正确）"
+        );
     } else {
         println!("FAIL caseD: {results:?} != {expect:?}");
     }

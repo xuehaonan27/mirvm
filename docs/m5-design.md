@@ -1,11 +1,14 @@
-# M5 设计：JIT —— asm 三面孔清零 + 方法级 Cranelift 加速（已批准，施工中）
+# M5 设计：JIT —— asm 三面孔清零 + 方法级 Cranelift 加速（已批准路线图）
 
 > 状态：**已批准（2026-07-11）**——D1-D7 全批；D5 定 **T 骨架 + 触发器活检查点**
 > （编译码零 ctx 携带 / R 为 ABI 兼容缓存层，分配·guest-TLS 内联进场时以该负载复测）。
-> 进度：**M5.0 asm-stub 工厂完成**（tempfile 转绿，三面孔清障，corpus 15→16；实况
-> 见 `docs/m5-log.md`）。四个 asm-红用例下一层收敛到 `llvm.x86.*` intrinsic = M5.1
-> 的 D7。**下一步：M5.1**（llvm.x86.* 补面 + 静态归档装载）。
-> 前置：M4 全期关账（gate5 31/31，总验收四条对勾）；spike5 真 Cranelift 全过
+> 进度：**M5.0、M5.1 已完成**（实况见 `docs/m5-log.md`）：
+> addcarry/subborrow 已使 numbigint 转绿，xgetbv 已与 native 差分，pshufb/SHA helper 已使
+> sha2 转绿，受约束 archive 装载使 blake3 转绿，SIMD 补面使 ecosystem 转绿。方法级 JIT
+> 仍未进入产品路径。2026-07-12 复核发现并修复旧 gate 对 signal 与 diff_cargo
+> 的假阳性；最终 gate 只把 signal guest handler 记为独立 XFAIL。
+> 历史前置记录：M4 当时按 gate5 31/31 关账；该数字只代表旧脚本口径，不能再解释为 31 个
+> 语义断言。Spike5 真 Cranelift 全过
 > （i2c/c2i/cc→cc 直调、P/R 两约定、eh_frame 自注册后 unwind 穿真 JIT 帧）。
 > 数据来源：本日实测（三面孔 asm 的逐字形状、宿主 CPU 特性、模块规模）+ 逐文件
 > grep 本 nightly 的 cg_clif 与 cranelift-codegen 0.133.1 真源码（绝不凭训练知识）。
@@ -247,11 +250,15 @@ fib/rayon 计量 + 助手调用频度统计，作为触发器复测时的对照�
 
 ### D7 SIMD 补面：常见 → CLIF 向量（cg_clif llvm_x86 同构）；异类 → asm-stub 兜底
 
+> **2026-07-12 M5.1 实现修订**：本节保留总设计时的 CLIF/asm 分类，适合未来 JIT；当前
+> tree-walking interpreter 的窄产品路径改用 tcx-free 宿主 stdarch target-feature helpers
+> 执行 pshufb/SHA 指令，免扩通用 asm-stub 向量 ABI。理由与重开条件见 m5.1-design D7b。
+
 cpuid 返真后，sha2/ecosystem 的内核是纯 Rust intrinsics（§1.3），两条通道处置：
-- `simd_*` 泛型与常见 `llvm.x86.*`（loadu/cmpeq/movemask/set1/pshufb/palignr 一族，
-  memchr/teddy/sha2 消息调度所需）：解释器扩既有 SIMD 最小集（SimdBin/Splat/
-  Bitmask 加 32 字节 lane 档），JIT 翻译成 CLIF 向量 op（cg_clif llvm_x86.rs
-  79 个映射为同构源）。
+- `simd_*` 泛型与可逐 lane 表达的 `llvm.x86.*`：解释器扩既有 SIMD 最小集，JIT 翻译成
+  CLIF 向量 op。2026-07-12 复核确认 pshufb 在 cg_clif 走 `pshufb_swizzle` 逐 lane，
+  而当前 nightly 的 movemask 已表现为 `simd_lt + simd_bitmask`；不能把它们统一写成 asm，
+  也不能预断言 memchr/ecosystem 必然经过某个 llvm.x86 intrinsic。
 - **异类指令**（sha256rnds2/sha256msg1/2、aesenc 等）：**直接走 D1 asm-stub**——
   cg_clif 在树先例就是这么兜的（§1.2-4），零新机制。lower 对这类 foreign 调用
   按名合成一个单指令 asm 站点即可。
@@ -262,8 +269,8 @@ cpuid 返真后，sha2/ecosystem 的内核是纯 Rust intrinsics（§1.3），�
 
 | 期 | 内容 | Gate |
 |---|---|---|
-| **M5.0 asm-stub 工厂**（轨 A） | D1 全套：lower 寄存器分配+wrapper 渲染、批量 cc+dlopen+哈希缓存、IR 终止子、解释器槽缓冲执行 | **tempfile + numbigint 绿**（syscall/div 两面孔）；cpuid 站点跑通（blake3/sha2 推进到下一层实测）；全量回归无损 |
-| **M5.1 归档装载 + SIMD 补面**（轨 A 收口) | D2 .a→.so + native_libraries 收集；D7 数据驱动补面（sha2 SHA-NI stubs、memchr/teddy 所需 lane 档） | **corpus 25 项全绿（零 asm 例外）+ diff_cargo 3/3（ecosystem 绿）**——M4 脚注删除 |
+| **M5.0 asm-stub 工厂**（轨 A） | D1 全套：lower 寄存器分配+wrapper 渲染、批量 cc+dlopen+哈希缓存、IR 终止子、解释器槽缓冲执行 | **实际**：tempfile 绿；numbigint 越过 div 后在 addcarry 处预期红；cpuid 用例推进到 `llvm.x86.*`；见 m5-log |
+| **M5.1 归档装载 + SIMD 补面**（轨 A 收口) | **完成**：numbigint/xgetbv/sha2/blake3/ecosystem、diff_cargo 3/3、六 tracer 绿 | full gate5 39 PASS / 1 signal XFAIL / 0 FAIL |
 | **M5.2 JIT 骨架**（轨 B） | D4 派发/计数/编译线程；D3 翻译器标量子集（int/float/place/call/switch/SSA 提升）；D5 两入口 + PLT 表；CFI 注册 | **fib(32) ≤ 10× native**（硬门，锚点 0.94s→≤80ms）；diff 16/16 JIT-on/off 双跑全绿；加载 ≤1s 不破 |
 | **M5.3 翻译器全覆盖 + LSDA** | 先 LSDA probe（D6）再铺：try_call/GccExceptTable/personality；IR 全构造翻译（128 位/原子/SIMD/foreign 助手/track_caller）；准入放开 | gate2 unwind 九用例 JIT-on 通过；**全量（demo/corpus/diff_cargo）JIT-on == JIT-off == native** |
 | **M5.4 终裁 + 收口** | D5 计量基线（fib/rayon + 助手频度）+ 检查点改写为带触发器活检查点（回写 vmctx-passing §7）；rayon/corpus JIT-on 计时记账；`tests/m5_gate6.sh`；m4-log 式 M5 条目 + handoff/memory 收笔 | gate6 全绿（下方退出判据）；vmctx 检查点处置有数据有触发器 |
@@ -292,7 +299,9 @@ M5 后另开，D3 已为它留好形状）/ signal 真装载·weak fn 真地址�
 
 ## 7. 退出判据（gate6 = tests/m5_gate6.sh）
 
-① corpus 25 项**全绿零例外** + diff_cargo **3/3**（asm 预期红清单从 gate 删除）；
+0. gate oracle 可信：成功必须校验可观察输出/不变式；双方失败不算 PASS；expected-red 锁定原因；
+① M5.1 负责的用例在可信 oracle 下转绿；整个 corpus 只有在 signal 等其他语义也真实实现后才可
+宣称**全绿零例外**；diff_cargo 3/3 必须是两侧均成功且输出一致；
 ② fib(32) JIT-on **≤ 10× native**（记录实测倍数入 m4-log M5 条目）;
 ③ 全量差分三重一致：JIT-on == JIT-off == native（diff 16/16 + gate0-5 + corpus）；
 ④ 性能上限无回归：加载 ≤1s、rayon ≤5s（JIT-on 计时另记账）；

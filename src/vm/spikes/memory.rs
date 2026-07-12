@@ -28,7 +28,11 @@ impl GuestMemory {
             )
         };
         assert!(base != libc::MAP_FAILED, "GuestMemory: mmap 失败");
-        GuestMemory { base: base as *mut u8, size, offset: 0 }
+        GuestMemory {
+            base: base as *mut u8,
+            size,
+            offset: 0,
+        }
     }
 
     /// bump 分配 `size` 字节（对齐到 8），返回真地址。

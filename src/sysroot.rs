@@ -42,10 +42,17 @@ pub fn ensure_sysroot() -> anyhow::Result<PathBuf> {
         .build_mode(BuildMode::Build)
         .rustc_version(version)
         .sysroot_config(SysrootConfig::WithStd {
-            std_features: ["panic-unwind", "backtrace"].into_iter().map(Into::into).collect(),
+            std_features: ["panic-unwind", "backtrace"]
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         })
         // 与发行版 std 对齐：debug-assertions 关、overflow-checks 开；外加全量 MIR
-        .rustflags(["-Zalways-encode-mir", "-Cdebug-assertions=off", "-Coverflow-checks=on"])
+        .rustflags([
+            "-Zalways-encode-mir",
+            "-Cdebug-assertions=off",
+            "-Coverflow-checks=on",
+        ])
         .cargo({
             let mut cmd = Command::new(&cargo);
             cmd.env("RUSTC", &rustc);

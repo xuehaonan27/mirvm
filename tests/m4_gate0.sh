@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # M4.0 gate：真实 rustc MIR 经 src/lower 降低、在新引擎（--engine vm）上执行，
 # 结果 == 预期常量（数学常数，native 等价自明）。
-# 末尾跑 TSan harness 构建 = 执行相纯度门禁（vm/ 漏 rustc 类型即编译失败）。
+# 末尾只构建独立 harness 作为执行相纯度门禁（vm/ 漏 rustc 类型即编译失败）。
+# 真正的 TSan 执行只归 gate4/CI 的显式 ThreadSanitizer gate，避免同一聚合中隐式重复跑。
 set -u
 cd "$(dirname "$0")/.."
 MIRVM=${MIRVM:-$(pwd)/target/release/mirvm}
+TOOLCHAIN=${TOOLCHAIN:-nightly-2026-07-02}
 SRC=demo/m4/pure.rs
 pass=0 fail=0
 
@@ -37,9 +39,16 @@ echo "---"
 echo "m4-gate0: $pass pass, $fail fail"
 [ $fail -eq 0 ] || exit 1
 
-# 执行相纯度门禁（引擎 = 纯 Rust；tsan crate 无 rustc_private 依赖）
-echo "--- 纯度门禁（tsan harness 构建）---"
-bash tests/spike4_tsan.sh >/dev/null 2>&1 && echo "纯度门禁 PASS（vm/ 零 rustc_private）" || {
+# 执行相纯度门禁（引擎 = 纯 Rust；独立 crate 无 rustc_private 依赖）。这里只编译；
+# 带 sanitizer 的执行由 gate4 唯一负责，SKIP_TSAN 因而能完整跳过聚合 gate 内的 TSan。
+echo "--- 纯度门禁（独立 harness 编译）---"
+purity_out=$(mktemp)
+trap 'rm -f "$purity_out"' EXIT
+if cargo +"$TOOLCHAIN" build --manifest-path tsan/Cargo.toml --release --locked \
+    >"$purity_out" 2>&1; then
+    echo "纯度门禁 PASS（vm/ 零 rustc_private）"
+else
     echo "纯度门禁 FAIL"
+    tail -10 "$purity_out"
     exit 1
-}
+fi

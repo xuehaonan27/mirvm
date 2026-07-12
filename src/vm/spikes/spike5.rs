@@ -62,7 +62,12 @@ struct Ctx {
 
 impl Ctx {
     fn new(prog: Program, kinds: Vec<FuncKind>) -> Self {
-        Ctx { prog, kinds, region: OperandRegion::new(), drop_log: Vec::new() }
+        Ctx {
+            prog,
+            kinds,
+            region: OperandRegion::new(),
+            drop_log: Vec::new(),
+        }
     }
 }
 
@@ -158,7 +163,12 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
     for (i, a) in args.iter().enumerate() {
         reg_write(ctx, base, (i + 1) as u32, *a);
     }
-    let guard = CleanupGuard { ctx, func, base, unwind_edge: std::cell::Cell::new(None) };
+    let guard = CleanupGuard {
+        ctx,
+        func,
+        base,
+        unwind_edge: std::cell::Cell::new(None),
+    };
 
     let mut blk = 0usize;
     loop {
@@ -168,7 +178,11 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
         }
         match &block.term {
             Terminator::Goto(t) => blk = *t as usize,
-            Terminator::SwitchInt { discr, targets, otherwise } => {
+            Terminator::SwitchInt {
+                discr,
+                targets,
+                otherwise,
+            } => {
                 let d = eval_operand(ctx, base, *discr);
                 blk = targets
                     .iter()
@@ -176,7 +190,13 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
                     .map(|(_, b)| *b)
                     .unwrap_or(*otherwise) as usize;
             }
-            Terminator::Call { func: callee, args: aops, dst, target, unwind } => {
+            Terminator::Call {
+                func: callee,
+                args: aops,
+                dst,
+                target,
+                unwind,
+            } => {
                 let av: Vec<Word> = aops.iter().map(|o| eval_operand(ctx, base, *o)).collect();
                 guard.unwind_edge.set(edge(unwind));
                 let r = call_guest(ctx, *callee, &av);
@@ -193,7 +213,14 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
                 guard.unwind_edge.set(edge(unwind));
                 raise_guest(p);
             }
-            Terminator::CatchCall { func: callee, args: aops, dst, catch_dst, target, catch_target } => {
+            Terminator::CatchCall {
+                func: callee,
+                args: aops,
+                dst,
+                catch_dst,
+                target,
+                catch_target,
+            } => {
                 let callee = *callee;
                 let av: Vec<Word> = aops.iter().map(|o| eval_operand(ctx, base, *o)).collect();
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -284,20 +311,46 @@ fn fib_body(callee: u32) -> Body {
     let blocks = vec![
         Block {
             stmts: vec![asgn(2, bin(Lt, s(1), k(2)))],
-            term: SwitchInt { discr: s(2), targets: vec![(0, 2)], otherwise: 1 },
+            term: SwitchInt {
+                discr: s(2),
+                targets: vec![(0, 2)],
+                otherwise: 1,
+            },
         },
-        Block { stmts: vec![asgn(0, Use(s(1)))], term: Return },
+        Block {
+            stmts: vec![asgn(0, Use(s(1)))],
+            term: Return,
+        },
         Block {
             stmts: vec![asgn(3, bin(Sub, s(1), k(1)))],
-            term: Call { func: callee, args: vec![s(3)], dst: 4, target: 3, unwind: UnwindAction::Continue },
+            term: Call {
+                func: callee,
+                args: vec![s(3)],
+                dst: 4,
+                target: 3,
+                unwind: UnwindAction::Continue,
+            },
         },
         Block {
             stmts: vec![asgn(5, bin(Sub, s(1), k(2)))],
-            term: Call { func: callee, args: vec![s(5)], dst: 6, target: 4, unwind: UnwindAction::Continue },
+            term: Call {
+                func: callee,
+                args: vec![s(5)],
+                dst: 6,
+                target: 4,
+                unwind: UnwindAction::Continue,
+            },
         },
-        Block { stmts: vec![asgn(0, bin(Add, s(4), s(6)))], term: Return },
+        Block {
+            stmts: vec![asgn(0, bin(Add, s(4), s(6)))],
+            term: Return,
+        },
     ];
-    Body { num_slots: 7, num_args: 1, blocks }
+    Body {
+        num_slots: 7,
+        num_args: 1,
+        blocks,
+    }
 }
 
 /// 顶帧（catch，probe 用；own=100）
@@ -306,20 +359,45 @@ fn top_catch_body(callee: u32) -> Body {
     let blocks = vec![
         Block {
             stmts: vec![asgn(2, Rvalue::Use(k(100)))],
-            term: CatchCall { func: callee, args: vec![s(1)], dst: 3, catch_dst: 4, target: 1, catch_target: 3 },
+            term: CatchCall {
+                func: callee,
+                args: vec![s(1)],
+                dst: 3,
+                catch_dst: 4,
+                target: 1,
+                catch_target: 3,
+            },
         },
         Block {
             stmts: vec![asgn(0, Rvalue::Use(s(3)))],
-            term: Drop { slot: 2, target: 2, unwind: UnwindAction::Continue },
+            term: Drop {
+                slot: 2,
+                target: 2,
+                unwind: UnwindAction::Continue,
+            },
         },
-        Block { stmts: vec![], term: Return },
+        Block {
+            stmts: vec![],
+            term: Return,
+        },
         Block {
             stmts: vec![asgn(0, Rvalue::Use(s(4)))],
-            term: Drop { slot: 2, target: 4, unwind: UnwindAction::Continue },
+            term: Drop {
+                slot: 2,
+                target: 4,
+                unwind: UnwindAction::Continue,
+            },
         },
-        Block { stmts: vec![], term: Return },
+        Block {
+            stmts: vec![],
+            term: Return,
+        },
     ];
-    Body { num_slots: 6, num_args: 1, blocks }
+    Body {
+        num_slots: 6,
+        num_args: 1,
+        blocks,
+    }
 }
 
 /// probe 底帧：own=102；Panic(777)
@@ -328,20 +406,48 @@ fn probe_bottom_body() -> Body {
     let blocks = vec![
         Block {
             stmts: vec![asgn(2, Rvalue::Use(k(102)))],
-            term: Panic { payload: k(777), unwind: UnwindAction::Cleanup(1) },
+            term: Panic {
+                payload: k(777),
+                unwind: UnwindAction::Cleanup(1),
+            },
         },
-        Block { stmts: vec![], term: Drop { slot: 2, target: 2, unwind: UnwindAction::Continue } },
-        Block { stmts: vec![], term: Resume },
+        Block {
+            stmts: vec![],
+            term: Drop {
+                slot: 2,
+                target: 2,
+                unwind: UnwindAction::Continue,
+            },
+        },
+        Block {
+            stmts: vec![],
+            term: Resume,
+        },
     ];
-    Body { num_slots: 6, num_args: 1, blocks }
+    Body {
+        num_slots: 6,
+        num_args: 1,
+        blocks,
+    }
 }
 
 fn dummy_body() -> Body {
-    Body { num_slots: 1, num_args: 1, blocks: vec![Block { stmts: vec![], term: Terminator::Return }] }
+    Body {
+        num_slots: 1,
+        num_args: 1,
+        blocks: vec![Block {
+            stmts: vec![],
+            term: Terminator::Return,
+        }],
+    }
 }
 
 fn fib_ref(n: u64) -> u64 {
-    if n < 2 { n } else { fib_ref(n - 1) + fib_ref(n - 2) }
+    if n < 2 {
+        n
+    } else {
+        fib_ref(n - 1) + fib_ref(n - 2)
+    }
 }
 
 // ===== Cranelift 装配 =====
@@ -363,7 +469,10 @@ fn make_isa(pinned: bool) -> Arc<dyn TargetIsa> {
     if pinned {
         fb.set("enable_pinned_reg", "true").unwrap();
     }
-    cranelift_native::builder().unwrap().finish(settings::Flags::new(fb)).unwrap()
+    cranelift_native::builder()
+        .unwrap()
+        .finish(settings::Flags::new(fb))
+        .unwrap()
 }
 
 /// JIT 调用目标：模块内直接（cc→cc）或经 c2i shim。
@@ -437,7 +546,11 @@ fn define_fib(
         b.append_block_params_for_function_params(entry);
         b.switch_to_block(entry);
         let params = b.block_params(entry).to_vec();
-        let (ctxv, n) = if has_ctx_param { (Some(params[0]), params[1]) } else { (None, params[0]) };
+        let (ctxv, n) = if has_ctx_param {
+            (Some(params[0]), params[1])
+        } else {
+            (None, params[0])
+        };
 
         let base_bb = b.create_block();
         let rec_bb = b.create_block();
@@ -569,22 +682,66 @@ fn build_jit(conv: Conv) -> Jitted {
     }
     sig_shim.returns.push(AbiParam::new(i64t));
 
-    let shim = module.declare_function("mirvm_call_guest", Linkage::Import, &sig_shim).unwrap();
+    let shim = module
+        .declare_function("mirvm_call_guest", Linkage::Import, &sig_shim)
+        .unwrap();
     let mut out = (Vec::new(), String::new());
 
     // guest FuncId 约定（矩阵）：0=fib_a, 1=fib_b
     let (shim_a, shim_b, direct_a, probe_mid);
     match conv {
         Conv::ExplicitCtx => {
-            let sa = module.declare_function("fib_shim_a_p", Linkage::Local, &sig_entry).unwrap();
-            let sb = module.declare_function("fib_shim_b_p", Linkage::Local, &sig_entry).unwrap();
-            let da = module.declare_function("fib_direct_a_p", Linkage::Local, &sig_entry).unwrap();
-            let db = module.declare_function("fib_direct_b_p", Linkage::Local, &sig_entry).unwrap();
-            let pm = module.declare_function("probe_mid_p", Linkage::Local, &sig_entry).unwrap();
-            define_fib(&mut module, &mut fbc, sa, &sig_entry, true, Callee::Shim { shim, partner: 1 }, &mut out);
-            define_fib(&mut module, &mut fbc, sb, &sig_entry, true, Callee::Shim { shim, partner: 0 }, &mut out);
-            define_fib(&mut module, &mut fbc, da, &sig_entry, true, Callee::Direct(db), &mut out);
-            define_fib(&mut module, &mut fbc, db, &sig_entry, true, Callee::Direct(da), &mut out);
+            let sa = module
+                .declare_function("fib_shim_a_p", Linkage::Local, &sig_entry)
+                .unwrap();
+            let sb = module
+                .declare_function("fib_shim_b_p", Linkage::Local, &sig_entry)
+                .unwrap();
+            let da = module
+                .declare_function("fib_direct_a_p", Linkage::Local, &sig_entry)
+                .unwrap();
+            let db = module
+                .declare_function("fib_direct_b_p", Linkage::Local, &sig_entry)
+                .unwrap();
+            let pm = module
+                .declare_function("probe_mid_p", Linkage::Local, &sig_entry)
+                .unwrap();
+            define_fib(
+                &mut module,
+                &mut fbc,
+                sa,
+                &sig_entry,
+                true,
+                Callee::Shim { shim, partner: 1 },
+                &mut out,
+            );
+            define_fib(
+                &mut module,
+                &mut fbc,
+                sb,
+                &sig_entry,
+                true,
+                Callee::Shim { shim, partner: 0 },
+                &mut out,
+            );
+            define_fib(
+                &mut module,
+                &mut fbc,
+                da,
+                &sig_entry,
+                true,
+                Callee::Direct(db),
+                &mut out,
+            );
+            define_fib(
+                &mut module,
+                &mut fbc,
+                db,
+                &sig_entry,
+                true,
+                Callee::Direct(da),
+                &mut out,
+            );
             define_probe_mid(&mut module, &mut fbc, pm, &sig_entry, shim, 2, &mut out);
             module.finalize_definitions().unwrap();
             shim_a = module.get_finalized_function(sa);
@@ -594,17 +751,63 @@ fn build_jit(conv: Conv) -> Jitted {
         }
         Conv::PinnedReg => {
             // fast 内部函数（无 ctx 参）+ 边界入口（f_boundary：save/set/restore pinned）
-            let fsa = module.declare_function("fast_shim_a_r", Linkage::Local, &sig_fast).unwrap();
-            let fsb = module.declare_function("fast_shim_b_r", Linkage::Local, &sig_fast).unwrap();
-            let fda = module.declare_function("fast_direct_a_r", Linkage::Local, &sig_fast).unwrap();
-            let fdb = module.declare_function("fast_direct_b_r", Linkage::Local, &sig_fast).unwrap();
-            let esa = module.declare_function("entry_shim_a_r", Linkage::Local, &sig_entry).unwrap();
-            let esb = module.declare_function("entry_shim_b_r", Linkage::Local, &sig_entry).unwrap();
-            let eda = module.declare_function("entry_direct_a_r", Linkage::Local, &sig_entry).unwrap();
-            define_fib(&mut module, &mut fbc, fsa, &sig_fast, false, Callee::Shim { shim, partner: 1 }, &mut out);
-            define_fib(&mut module, &mut fbc, fsb, &sig_fast, false, Callee::Shim { shim, partner: 0 }, &mut out);
-            define_fib(&mut module, &mut fbc, fda, &sig_fast, false, Callee::Direct(fdb), &mut out);
-            define_fib(&mut module, &mut fbc, fdb, &sig_fast, false, Callee::Direct(fda), &mut out);
+            let fsa = module
+                .declare_function("fast_shim_a_r", Linkage::Local, &sig_fast)
+                .unwrap();
+            let fsb = module
+                .declare_function("fast_shim_b_r", Linkage::Local, &sig_fast)
+                .unwrap();
+            let fda = module
+                .declare_function("fast_direct_a_r", Linkage::Local, &sig_fast)
+                .unwrap();
+            let fdb = module
+                .declare_function("fast_direct_b_r", Linkage::Local, &sig_fast)
+                .unwrap();
+            let esa = module
+                .declare_function("entry_shim_a_r", Linkage::Local, &sig_entry)
+                .unwrap();
+            let esb = module
+                .declare_function("entry_shim_b_r", Linkage::Local, &sig_entry)
+                .unwrap();
+            let eda = module
+                .declare_function("entry_direct_a_r", Linkage::Local, &sig_entry)
+                .unwrap();
+            define_fib(
+                &mut module,
+                &mut fbc,
+                fsa,
+                &sig_fast,
+                false,
+                Callee::Shim { shim, partner: 1 },
+                &mut out,
+            );
+            define_fib(
+                &mut module,
+                &mut fbc,
+                fsb,
+                &sig_fast,
+                false,
+                Callee::Shim { shim, partner: 0 },
+                &mut out,
+            );
+            define_fib(
+                &mut module,
+                &mut fbc,
+                fda,
+                &sig_fast,
+                false,
+                Callee::Direct(fdb),
+                &mut out,
+            );
+            define_fib(
+                &mut module,
+                &mut fbc,
+                fdb,
+                &sig_fast,
+                false,
+                Callee::Direct(fda),
+                &mut out,
+            );
             define_entry_r(&mut module, &mut fbc, esa, &sig_entry, fsa, &mut out);
             define_entry_r(&mut module, &mut fbc, esb, &sig_entry, fsb, &mut out);
             define_entry_r(&mut module, &mut fbc, eda, &sig_entry, fda, &mut out);
@@ -616,7 +819,15 @@ fn build_jit(conv: Conv) -> Jitted {
         }
     }
     let (unwind, vcode) = out;
-    Jitted { module, shim_a, shim_b, direct_a, probe_mid, unwind, vcode }
+    Jitted {
+        module,
+        shim_a,
+        shim_b,
+        direct_a,
+        probe_mid,
+        unwind,
+        vcode,
+    }
 }
 
 // ===== eh_frame 自注册（stretch；cg_clif JIT 模式同款）=====
@@ -671,7 +882,9 @@ fn register_eh_frames(jit: &Jitted) {
 // ===== harness =====
 
 fn run_matrix(variant: &str, name: &str, ka: FuncKind, kb: FuncKind) -> bool {
-    let prog = Program { funcs: vec![fib_body(1), fib_body(0)] };
+    let prog = Program {
+        funcs: vec![fib_body(1), fib_body(0)],
+    };
     let mut ctx = Ctx::new(prog, vec![ka, kb]);
     for n in (0..=20u64).chain([24]) {
         let got = call_guest(&mut ctx as *mut Ctx, 0, &[n]);
@@ -698,7 +911,11 @@ fn bench_one(name: &str, mut f: impl FnMut() -> u64, want: u64) {
 }
 
 fn fib_native(n: u64) -> u64 {
-    if n < 2 { n } else { fib_native(n - 1) + fib_native(n - 2) }
+    if n < 2 {
+        n
+    } else {
+        fib_native(n - 1) + fib_native(n - 2)
+    }
 }
 
 fn probe_child(register: bool) -> ExitCode {
@@ -706,12 +923,21 @@ fn probe_child(register: bool) -> ExitCode {
     if register {
         register_eh_frames(&jit);
     }
-    let prog = Program { funcs: vec![top_catch_body(1), dummy_body(), probe_bottom_body()] };
+    let prog = Program {
+        funcs: vec![top_catch_body(1), dummy_body(), probe_bottom_body()],
+    };
     let mid: CompiledFn = unsafe { mem::transmute::<*const u8, CompiledFn>(jit.probe_mid) };
-    let mut ctx = Ctx::new(prog, vec![FuncKind::Interp, FuncKind::Compiled(mid), FuncKind::Interp]);
+    let mut ctx = Ctx::new(
+        prog,
+        vec![FuncKind::Interp, FuncKind::Compiled(mid), FuncKind::Interp],
+    );
     let r = call_guest(&mut ctx as *mut Ctx, 0, &[0]);
     println!("probe result={} drops={:?}", r, ctx.drop_log);
-    if r == 777 && ctx.drop_log == vec![102, 100] { ExitCode::SUCCESS } else { ExitCode::from(3) }
+    if r == 777 && ctx.drop_log == vec![102, 100] {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(3)
+    }
 }
 
 pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
@@ -724,10 +950,16 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
     let mut ok = true;
 
     // —— 两变体 × 4 配置矩阵 ——
-    for (vname, conv) in [("P 显式ctx参", Conv::ExplicitCtx), ("R pinned-r15", Conv::PinnedReg)] {
+    for (vname, conv) in [
+        ("P 显式ctx参", Conv::ExplicitCtx),
+        ("R pinned-r15", Conv::PinnedReg),
+    ] {
         let jit = build_jit(conv);
         std::fs::write(
-            format!("/tmp/spike5-vcode-{}.txt", if conv == Conv::ExplicitCtx { "p" } else { "r" }),
+            format!(
+                "/tmp/spike5-vcode-{}.txt",
+                if conv == Conv::ExplicitCtx { "p" } else { "r" }
+            ),
             &jit.vcode,
         )
         .ok();
@@ -735,22 +967,58 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
         let fb: CompiledFn = unsafe { mem::transmute::<*const u8, CompiledFn>(jit.shim_b) };
         let fd: CompiledFn = unsafe { mem::transmute::<*const u8, CompiledFn>(jit.direct_a) };
 
-        ok &= run_matrix(vname, "interp / interp        ", FuncKind::Interp, FuncKind::Interp);
-        ok &= run_matrix(vname, "jit    / jit（直接调用）", FuncKind::Compiled(fd), FuncKind::Interp);
-        ok &= run_matrix(vname, "interp / jit           ", FuncKind::Interp, FuncKind::Compiled(fb));
-        ok &= run_matrix(vname, "jit    / interp        ", FuncKind::Compiled(fa), FuncKind::Interp);
+        ok &= run_matrix(
+            vname,
+            "interp / interp        ",
+            FuncKind::Interp,
+            FuncKind::Interp,
+        );
+        ok &= run_matrix(
+            vname,
+            "jit    / jit（直接调用）",
+            FuncKind::Compiled(fd),
+            FuncKind::Interp,
+        );
+        ok &= run_matrix(
+            vname,
+            "interp / jit           ",
+            FuncKind::Interp,
+            FuncKind::Compiled(fb),
+        );
+        ok &= run_matrix(
+            vname,
+            "jit    / interp        ",
+            FuncKind::Compiled(fa),
+            FuncKind::Interp,
+        );
 
         // —— 微基准（fib(30)，直接调用配置）——
         if ok {
             let want = fib_ref(30);
             println!("bench [{vname}] fib(30):");
-            let prog = Program { funcs: vec![fib_body(1), fib_body(0)] };
+            let prog = Program {
+                funcs: vec![fib_body(1), fib_body(0)],
+            };
             let mut ictx = Ctx::new(prog, vec![FuncKind::Interp, FuncKind::Interp]);
-            bench_one("interp（骨架 tree-walk）", || call_guest(&mut ictx as *mut Ctx, 0, &[30]), want);
-            let prog2 = Program { funcs: vec![dummy_body(), dummy_body()] };
+            bench_one(
+                "interp（骨架 tree-walk）",
+                || call_guest(&mut ictx as *mut Ctx, 0, &[30]),
+                want,
+            );
+            let prog2 = Program {
+                funcs: vec![dummy_body(), dummy_body()],
+            };
             let mut jctx = Ctx::new(prog2, vec![FuncKind::Interp, FuncKind::Interp]);
-            bench_one("jit（cc→cc 直接调用）", || fd(&mut jctx as *mut Ctx, 30), want);
-            bench_one("native rustc -O", || fib_native(std::hint::black_box(30)), want);
+            bench_one(
+                "jit（cc→cc 直接调用）",
+                || fd(&mut jctx as *mut Ctx, 30),
+                want,
+            );
+            bench_one(
+                "native rustc -O",
+                || fib_native(std::hint::black_box(30)),
+                want,
+            );
         }
         // jit.module 活到此处之后（指针使用完毕）
         drop(jit);
@@ -759,11 +1027,19 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
     // —— unwind 穿真 JIT 帧（子进程 probe）——
     let exe = std::env::current_exe().expect("current_exe");
     use std::os::unix::process::ExitStatusExt as _;
-    let bare = std::process::Command::new(&exe).args(["spike5", "--case=probe-bare"]).output().unwrap();
-    let reg = std::process::Command::new(&exe).args(["spike5", "--case=probe-reg"]).output().unwrap();
+    let bare = std::process::Command::new(&exe)
+        .args(["spike5", "--case=probe-bare"])
+        .output()
+        .unwrap();
+    let reg = std::process::Command::new(&exe)
+        .args(["spike5", "--case=probe-reg"])
+        .output()
+        .unwrap();
 
     let bare_desc = match (bare.status.code(), bare.status.signal()) {
-        (_, Some(sig)) => format!("信号 {sig}（abort，如预期：JIT 帧无 CFI，系统 unwinder 走不过）"),
+        (_, Some(sig)) => {
+            format!("信号 {sig}（abort，如预期：JIT 帧无 CFI，系统 unwinder 走不过）")
+        }
         (Some(c), _) => format!("退出码 {c}"),
         _ => "未知".into(),
     };
@@ -771,7 +1047,10 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
 
     let reg_out = String::from_utf8_lossy(&reg.stdout);
     if reg.status.success() && reg_out.contains("probe result=777 drops=[102, 100]") {
-        println!("PASS probe eh_frame 注册后: guest panic 穿真 JIT 帧传播 + catch 正确（{}）", reg_out.trim());
+        println!(
+            "PASS probe eh_frame 注册后: guest panic 穿真 JIT 帧传播 + catch 正确（{}）",
+            reg_out.trim()
+        );
     } else {
         println!(
             "FAIL probe eh_frame 注册后: status={:?} signal={:?} out={}",
@@ -783,7 +1062,9 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
     }
 
     if ok {
-        println!("--- spike5: 全 PASS（真 Cranelift：i2c/c2i/cc→cc 直接调用/P&R 两约定/unwind 穿 JIT 帧）---");
+        println!(
+            "--- spike5: 全 PASS（真 Cranelift：i2c/c2i/cc→cc 直接调用/P&R 两约定/unwind 穿 JIT 帧）---"
+        );
         ExitCode::SUCCESS
     } else {
         println!("--- spike5: 有 FAIL ---");

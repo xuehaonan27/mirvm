@@ -1,9 +1,10 @@
 # 帧布局 · 调用约定 · 字节码格式 —— M4 设计草图（模型 A）
 
-> **状态：草稿，待评审。** 依据已定决策：模型 A（guest 帧在 native 栈，C11）、Cranelift 方法级 JIT
-> （M5）、真 1:1 OS 线程（C8）、真实地址内存（§4）、无 GC、冻结元数据、解释器是冷层。
-> 目标：定出 M4 字节码 VM 的帧/ABI/字节码，且**从第一天与 M5 Cranelift 共享帧与调用约定**。
-> 硬骨头（unwind、帧局部存储）明确标为 spike，不假装已解决。
+> **状态：M4 的历史设计基线，部分已实现、部分仍是未来设计。** Model A tree-walking、slaved
+> ByteRegion、冻结元数据、真线程和 M4 unwind 已落地；方法级 Cranelift、compiled frame、
+> i2c/c2i 产品适配器、alloca 与 `.mirvm` 分发仍未实现。实际状态见
+> [current-status.md](current-status.md)，A/B 与局部存储两轴的演变见
+> [decision-history.md](decision-history.md)。下文保留原始方案，不能把未来段落当成现状。
 
 ---
 

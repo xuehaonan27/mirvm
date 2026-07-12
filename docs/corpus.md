@@ -1,5 +1,9 @@
 # corpus 驱动补全（M2.5）
 
+> 文档状态：**2026-07-05 的历史调研快照**。它保存边界发现，不是当前通过清单；M5.0 已推进
+> inline asm 前沿，signal 也曾被退出码 oracle 假判为绿。当前可信边界见
+> [current-status.md](current-status.md) 和实际测试脚本。
+
 ## 0. corpus 是什么
 
 corpus = 一组**真实生态 crate 的最小驱动程序**，逐个在 tier-0 mirvm 上跑，用来**发现真实代码对抽象机 / VM 边界提出的要求**。
@@ -24,6 +28,8 @@ corpus = 一组**真实生态 crate 的最小驱动程序**，逐个在 tier-0 m
 
 - **anyhow 1** · 错误链 / `Context` / `?` / `e.chain()` · ✅
   经验：默认**不抓 backtrace**（要 `RUST_BACKTRACE` + std backtrace 特性），所以没触及 `_Unwind_Backtrace` / 符号化路径。错误 trait object 装箱、`?` 传播、链遍历都正常。若开 backtrace 会撞新边界（待记）。
+  **后续覆写（2026-07-12）**：`c_backtrace` 已确认该边界。宿主 unwinder 不能产生
+  guest frame/IP，当前以 `_Unwind_Backtrace` 精确原因的 XFAIL 明确拒绝，而不是伪造回溯。
 
 - **chrono 0.4** · 日期算术（`NaiveDate` + `Duration`，不调 `now()`）· ✅
   经验：纯日期运算通过。刻意避开 `Utc::now()` / `Local`（会拉 `clock_gettime` 实时钟 + `localtime_r` 时区库）——用 `Naive` 保持确定性 + 纯。闰年 / ordinal / 周几全对。

@@ -2,7 +2,10 @@
 
 > 工作代号 `mirvm`（MIR Virtual Machine）。
 > 奠基 2026-07-03；2026-07-05 确立当前心智模型（抽象机器 + VM 作者视角）。
-> 本文档是项目的**心智模型与设计契约**。改动决策先改这里，再改代码。
+> 本文档是项目的**长期心智模型与设计契约**，不是阶段进度表。当前实现、已知缺口和下一步见
+> [docs/current-status.md](docs/current-status.md)；文档权威顺序见 [docs/README.md](docs/README.md)；
+> frame/vmctx 等可逆决策及旧模型见 [docs/decision-history.md](docs/decision-history.md)。
+> 本文后半保留早期 tier-0、候选目录和里程碑记录作为历史；标为目标的结构不得误写成现状。
 
 ---
 
@@ -14,7 +17,8 @@
 - 它是**运行参考实现**：Miri 是 RAM 的*检查*参考（宁慢勿漏 UB），mirvm 是 RAM 的*运行*参考（假设合法、追求快）。两者实现同一台 RAM。
 - 它按 **VM 作者的视角**设计（托管堆、执行引擎分层、OS 线程、加载/链接、JIT），**不是** Miri 的扩展。凡是遇到设计抉择，问的是"一台 JVM 类系统软件会怎么做"，而不是"Miri 怎么做"。
 
-下面几节先立**心智模型**（§1–§3 抽象机器与 VM 架构），再落**具体模型**（§4–§6 内存/线程/执行/边界），最后是**工程与历史**（§7 决策、§8 里程碑、§9 tier-0 实现日志）。
+下面几节先立**心智模型**（§1–§3 抽象机器与 VM 架构），再落**具体模型**（§4–§7
+内存/线程/执行/边界），最后是**工程与历史**（§8 决策、§9 里程碑与 tier-0 日志）。
 
 ---
 
@@ -44,7 +48,8 @@ RAM 只要求**可观测行为**一致，其余全自由。这是贯穿一切的
 
 - **tier 化**（解释 → 字节码 VM → JIT）合法——只要每 tier 保持可观测等价。
 - **托管堆的 arena/TLAB 分配器**合法——RAM 对分配只要求"互异、对齐、非空"，钱从哪来自由。
-- **两种线程实现并存**合法——协作式顺序一致执行是 RAM 允许的合法执行之一（§5）。
+- **内部执行策略可替换**——只要它仍满足 Rust 对线程身份、OS 互操作和可观察并发行为的要求；
+  早期协作式 tier-0 因无法提供真实 `pthread_t` 已被判为不适合作为产品实现（§5）。
 
 凡是"我们能不能这么优化"的问题，答案永远回到：**可观测行为变了吗？没变就自由。**
 
@@ -57,10 +62,10 @@ RAM 只要求**可观测行为**一致，其余全自由。这是贯穿一切的
 | JVM 部件 | mirvm 对应 | 说明 |
 |---|---|---|
 | 类加载 + 字节码验证 | **rustc 前端**（解析/宏/typeck/borrowck/MIR）+ **惰性单态化** | RAM 的"加载器/验证器"。这是十年工程，我们**复用**不重建。加载 = 取得某个 instance 的 MIR |
-| 字节码 | **MIR**（现在）→ **自研紧凑字节码**（M4） | RAM 计算的载体 |
+| 字节码 | **MIR → 自研 typed bytecode**（M4 已落地） | 加载相冻结 RAM 计算所需信息；执行相不再访问 tcx |
 | 托管堆（GC） | **Rust Heap**（托管，arena/TLAB，**不搬迁**，Drop 而非 GC） | RAM 存储的 realize，见 §4 |
-| 执行引擎（解释→C1→C2） | **解释 tier → 字节码 VM → Cranelift JIT** | RAM 计算的执行，见 §6 |
-| 线程（1:1 OS） | **1:1 OS 线程**（VM tier） | RAM 并发的 realize，见 §5 |
+| 执行引擎（解释→C1→C2） | **typed-bytecode 解释器（现状）→ 方法级 Cranelift JIT（计划）** | RAM 计算的执行，见 §6 |
+| 线程（1:1 OS） | **1:1 OS 线程** | M4 已落地，解释态回调通过 thunk + TLS attach 进入 VM，见 §5 |
 | JNI | **FFI**，但软边界（真实地址、零编组） | RAM 的**边界**，见 §7 |
 | intrinsics / native 方法 | **Rust intrinsics + VM 内建运行时**（分配/线程/unwind） | RAM 内建操作，VM 自己实现 |
 
@@ -81,7 +86,9 @@ RAM 只要求**可观测行为**一致，其余全自由。这是贯穿一切的
 3. **REPL/Notebook**（后置 M6）：VM 拥有持久堆，状态持久化天然成立，跨 cell 借用不再是问题。
 4. **嵌入式引擎**（后置）：engine 是 library、CLI 是薄壳，这条路从第一天就不被堵死。
 
-**执行模式**（HotSpot 风格，始终可配）：`--engine=interp`（纯解释，java -Xint）/ `mixed`（解释+热点 JIT，默认，落地后）/ `jit`（尽量全编译，-Xcomp，对比测试）。
+**现有执行模式只有 M4 typed-bytecode interpreter。** HotSpot 风格的 `interp` / `mixed` /
+`jit` 可配置产品模式属于 M5.2 以后目标；当前 CLI 仅兼容旧的 `--engine vm` 写法，不能据此宣称
+已有多 tier 产品路径。
 
 ---
 
@@ -101,16 +108,18 @@ RAM 存储在 mirvm 里 realize 为**三个隔离的部分**（管理与污染�
 
 ### AllocId 是什么：检查器的元数据 overlay，VM tier 甩掉
 
-**AllocId 不决定"字节在哪"**（永远在真地址）。它是 **Miri 每分配元数据侧表的钥匙**——init mask（字节是否已初始化）、provenance map（哪些区块是指针）、bounds/liveness。**这三样全是"检查"基础设施**，我们经 InterpCx（tier-0）继承。**fast machine（假设合法）在真实地址模式下几乎不需要**：不查 UB→不需 init mask；不做别名检查、指针即地址位→不需 provenance；不查越界/UAF→不需 bounds。
+**AllocId 不决定"字节在哪"**（永远在真地址）。它是 **Miri 每分配元数据侧表的钥匙**——init mask（字节是否已初始化）、provenance map（哪些区块是指针）、bounds/liveness。**这三样全是"检查"基础设施**，早期 InterpCx tier-0 曾继承它们；当前 M4 引擎已经没有 AllocId overlay。**fast machine（假设合法）在真实地址模式下几乎不需要**：不查 UB→不需 init mask；不做别名检查、指针即地址位→不需 provenance；不查越界/UAF→不需 bounds。
 
 两种"元数据"要分清：
 
 | | 是什么 | fast VM 需要吗 | 键 |
 |---|---|---|---|
 | **类型级** | layout/字段偏移/判别式/vtable | **必需**（解释 MIR 靠它） | 按**类型**（tcx layout / C8 冻结进字节码），VM 私有表 |
-| **每分配** | init mask / provenance / bounds | **不需要**（检查器 overlay） | 按 **AllocId**，tier-0 继承，VM tier 甩掉 |
+| **每分配** | init mask / provenance / bounds | **不需要**（检查器 overlay） | 早期 tier-0 按 **AllocId**；当前 M4 引擎已甩掉 |
 
-所以：**裸宿主访问是根本路径，AllocId 元数据是 tier-0 从 Miri 继承的 overlay。** "解释代码读 Native Heap 靠裸访问"不是特例回退——它是 **VM tier 统一模型的预览**（统一裸访问、无 per-allocation 元数据、无 AllocId 间接寻址，正好也是 fib(27) 慢的原因之一）。（当前 tier-0 实现对无 AllocId 指针报错，是 InterpCx 的检查器行为残留，待补裸回退，见 §9。）
+所以：**裸宿主访问是当前根本路径；AllocId 元数据只是已删除 tier-0 从 Miri 继承的 overlay。**
+“解释代码读 Native Heap 靠裸访问”不是特例回退，而是 M4 引擎的统一模型：无 per-allocation
+检查元数据、无 AllocId 间接寻址。
 
 分工的动机：`__rust_alloc`（热路径，每个 Box/Vec）进**托管** Rust Heap，为速度/并发/隔离；`libc::malloc`（较罕见、属 native 世界）**直通**真 libc，落 Native Heap——否则 guest `libc::malloc` 的指针交给 C `free` 会崩（Rust-Heap 指针 vs libc free 不匹配）。
 
@@ -125,7 +134,9 @@ RAM 存储在 mirvm 里 realize 为**三个隔离的部分**（管理与污染�
 
 ### 隔离保证（鲁棒性）
 
-Rust Heap 与 VM 元数据分池：guest 的 unsafe UB（越界/UAF）打烂的是 Rust Heap，波及不到实现自身（Miri 的 `IsolatedAlloc` 同一动机）。这是 §4 三分的核心收益，也是"标准实现"该有的鲁棒性。（当前 tier-0 尚未分池，见 §9 待办。）
+Rust Heap 与 VM 元数据分池是结构目标，当前 M4 的 guest heap 已由独立分配器管理；但真实地址、
+native FFI 与 inline asm 仍意味着 guest UB 可以越界破坏同进程 VM 元数据。它不是 Wasm 式安全
+隔离，checked 模式也尚未实现；诚实边界见 current-status。
 
 ---
 
@@ -164,9 +175,9 @@ fn into_pthread_t(self)-> RawPthread { self.id }          // 交出真 pthread_t
 - guest `dlopen` 取真函数指针直接 call → 走 FFI，回调若指向解释态函数亦走 thunk。✓
 - C 库内部 spawn 线程 → **永远看不见**，是真 native 线程跑 native 代码，无妨（回调 Rust 时走 thunk）。
 
-### tier 分层：真线程为本，协作式是错误的过渡
+### 真线程现状与已淘汰的 tier-0 对照
 
-| | 真线程模型（本设计） | tier-0 现状（协作式） |
+| | 当前 M4 真线程模型 | 已删除 tier-0（协作式） |
 |---|---|---|
 | pthread_create | 纯直通真 libc（thread_start = 真 thunk） | 建 GuestThread，假线程复用一条宿主线程 |
 | into_pthread_t / 交 C | 真 pthread_t，**能用** | **假值，一用就废——合法程序跑错** |
@@ -174,19 +185,22 @@ fn into_pthread_t(self)-> RawPthread { self.id }          // 交出真 pthread_t
 
 > ⚠️ 重大修正（2026-07-05，看过 std 源码后）：**协作式 ThreadManager/调度器/futex 队列是 emulation，且被 `into_pthread_t` 判为错误实现（非仅慢）**——一个合法 Rust 程序取出 pthread_t 交给 C 时，协作式没有真 pthread_t。不围绕它设计，是要推倒的。
 >
-> **tier-0 的正确过渡不是协作式，是 GIL**（真线程 + 全局解释器锁，CPython 式）：真 pthread_create + 蹦床，解释执行被锁串行化，阻塞时放锁。这样 `into_pthread_t` 在 tier-0 也成立，且结构与 VM tier 同构（去锁即并行）——协作式是**扔掉的代码**，GIL 是**踏脚石**。（GIL 作 VM tier 永久架构才是反面教材；作 tier-0 bootstrap 是对的。当前代码仍是协作式，未切 GIL——见 §9 待办。）
+> 当时曾提出 GIL-over-真线程作为 tier-0 的正确过渡，但 M4 完成后 tier-0 被直接删除，因此这条
+> 迁移路线没有实施。保留此论证是为了说明为什么不能把协作式线程重新当作产品方案。
 
-### 为什么 VM tier 才能去锁并行
+### 为什么自研引擎能真并行
 
-InterpCx 的内存 map、MonoHashMap（RefCell 遍地）不 Sync，蹦床在第二条 OS 线程重入会撞 RefCell。所以"去掉 GIL 的真并行"是 **VM tier 的地基级决策**（引擎须 Sync），见 §7 线程安全三招。
+InterpCx 的内存 map、MonoHashMap（RefCell 遍地）不 Sync；M4 通过冻结执行元数据、`Shared` 发布后
+只读、每线程 `Ctx` 与真宿主原子摆脱了这个限制。引擎自身的并发安全由 TSan gate 持续验证。
 
 ### Rust 三红利（并行 VM 比 JVM 当年容易）
 
 无 GC；内存模型现成（C++20）；safe 代码类型系统保证无数据竞争 → 只需保护**实现自身**状态。
 
-### 诚实偏差（弱内存序）
+### 历史偏差：tier-0 的弱内存序不可见
 
-GIL/协作串行执行下所有内存操作按单一全序（顺序一致），**观察不到弱内存重排**、调度确定 → 时序 bug 可能不复现。SC 是 RAM 允许的合法执行，对合法程序仍正确；声明为偏差。并行程序差分须靠输出不变式（不能逐字节比时序敏感输出）。
+已删除的 GIL/协作 tier-0 会把操作串成单一全序。当前 M4 使用真线程和宿主原子，不应再把该
+偏差写成现状；并行程序的差分仍必须使用输出不变式，不能逐字节比较时序敏感输出。
 
 ---
 
@@ -194,13 +208,19 @@ GIL/协作串行执行下所有内存操作按单一全序（顺序一致），*
 
 | tier | 是什么 | 状态 | 定位 |
 |---|---|---|---|
-| **tier 0 解释** | fast Machine on rustc `InterpCx` | ✅ 已实现 | **bootstrap + 差分 oracle**，不是设计中心。它是 RAM 的一个合法（慢）实现，让我们数周内跑真程序、并为自研 VM 提供对拍基线 |
-| **tier 1 字节码 VM** | MIR → 自研紧凑字节码，内联缓存，非泛型依赖原生直调 | M4 | **成为真正的 VM**：生而并发（§5/§7），性能答案。前置硬关卡：RAM 规格文档 + 并发架构 RFC + 原型 spike |
-| **tier 2 JIT** | Cranelift 热点编译 | M5 | ≈ cg_clif debug build 性能；`--engine` 开关 |
+| **历史 bootstrap** | fast Machine on rustc `InterpCx` | **已删除（2026-07-09）** | M0–M2.5 的探索工具；代码只在 Git 历史中，不再是 oracle 或运行模式 |
+| **typed-bytecode 解释器** | MIR → 冻结 IR → tree-walking 执行 | **M4 完成，当前唯一产品引擎** | tcx-free、真线程、FFI/unwind/thunk；语义范围与缺口见 current-status |
+| **asm stub** | GAS wrapper → `.so` → native call | **M5.0 完成** | 解释器可调用的局部机器码机件，不等于方法级 JIT |
+| **方法级 JIT** | 从冻结引擎字节码生成 Cranelift 机器码 | **M5.2+ 未实现** | 惰性 tiering、JIT unwind/LSDA 与性能目标仍是设计 |
 
-**tier 0 = bootstrap，不是终点。** InterpCx 是 rustc 的解释基础设施（Miri 也建在其上），它让我们**站在正确的 RAM 语义上快速起步**；但它不 Sync（§5）、AllocId 间接寻址慢（fib(27) 微基准解释 ≈1.6s vs native debug 4ms）。M4 自研字节码 VM 才是 VM 作者要掌控的核心，届时 InterpCx 退居差分 oracle。
+InterpCx 曾帮助项目快速探索 RAM 边界，但其不 Sync 与 AllocId overlay 不适合作为产品地基。
+M4 完成后它没有“退居 oracle”，而是被删除；当前差分 oracle 是同源 native 编译执行。
 
-**M4 帧栈模型：倾向 A（guest 帧在 native 栈，HotSpot/V8 式）**。详细机制对照见 [docs/frame-stack-models.md](docs/frame-stack-models.md)；帧布局/调用约定/字节码格式的 M4 设计草图见 [docs/frame-abi-bytecode.md](docs/frame-abi-bytecode.md)。理由（greenfield + JIT 硬约束）：JIT 必做且用 Cranelift（方法级），A 下解释帧与编译帧同在 native 栈 → interp↔compiled 廉价适配（i2c/c2i），B 要建拆 VM 帧 + 两栈联合 unwind；B 的看家优势（协程/挂起）因真 OS 线程 + Rust 无栈 async 对我们无关；A 天然栈溢出忠实。关键认识：JIT-VM 里解释器是**冷层**，A"解释器更难写"的代价权重大降。**当前 tier-0 是 B1（错误实现，待推倒）。** 代价：M4/M5 强耦合，帧布局+调用约定须与 Cranelift 共同设计（见 C11）；头号硬骨头 = 混合栈 unwind（frame-abi-bytecode.md §7，M4 前置 spike）。
+**M4 当前采用 Model A 的 tree-walking 形态**：每个 guest 调用活动对应一个宿主
+`interp_frame` 递归帧；解释态局部字节位于随递归 LIFO 推进的 mmap ByteRegion，而非直接内联
+native 栈。调用活动与局部存储是两条正交轴。完整 A/B 选择理由、旧模型价值与重开条件见
+[docs/frame-stack-models.md](docs/frame-stack-models.md)、[docs/frame-abi-bytecode.md](docs/frame-abi-bytecode.md)
+和 [docs/decision-history.md](docs/decision-history.md)。
 
 ---
 
@@ -213,8 +233,11 @@ GIL/协作串行执行下所有内存操作按单一全序（顺序一致），*
 1. **RAM 内建 / 由 handler 服务**：
    - **intrinsics**：RAM 计算的一部分，VM 原生理解（如 JVM 字节码指令）。
    - **分配器**：拦截动机是**归属 + 元数据**。`__rust_alloc`（Rust 分配器，编译器合成、无 MIR，MIR 层的 foreign-call 边界拦截）→ 落**托管 Rust Heap**（速度/并发/隔离），解释器为其建元数据以解引用。`libc::malloc`/`calloc`/`free` 等 native 分配器 → **直通真 libc、落 Native Heap**（否则 guest malloc 的指针交 C free 会崩）。解释器对 Native Heap 指针回退裸宿主访问（§4）。**"一处"= 托管 Rust Heap 的分配器入口；native 分配不进这一处，是另一条真 libc 直通路。**
-   - **unwind**：VM 拥有栈帧，panic/catch_unwind 自实现（跨平台无痛）。
-   - **线程**（§5）：**不 emulate、不 wrap pthread，用真 OS 线程**。std 已把 pthread 包好；我们唯一要做的是让解释态 `thread_start` 变成 native 可调用（materialize 成真 thunk / libffi closure）——这是 **FFI 的反方向（native→解释）**，不是包 pthread。于是 pthread_create 纯直通、Thread.id 是真 pthread_t、join/into_pthread_t/futex 全走真 libc。同一 thunk 机制**顺手解决 C→Rust 回调**（qsort/signal handler）。tier-0 因引擎不 Sync 退回 GIL-over-真线程（当前代码仍是协作 emulation，待切）。
+   - **unwind**：M4 复用宿主 panic/unwinder 并用 FrameGuard 执行 guest cleanup；“跨平台无痛”
+     仍需逐平台验证，不能从 Linux 基线外推。
+   - **线程**（§5）：**不 emulate、不 wrap pthread，用真 OS 线程**。解释态 `thread_start`
+     逃逸时物化成 libffi closure thunk，入口通过 TLS attach 当前线程的 `Ctx`。这项机件支持
+     pthread 与普通 native 回调，但**不代表 signal 注册/投递语义已经实现**。
 
 
 2. **纯直通（FFI 到系统 libc）**——真资源、不涉及解释态实体：open/read/clock/getrandom、数学函数（libm）。**用系统 libc**（`dlsym(RTLD_DEFAULT)` + 按 `-l` 指令 dlopen）；target==host 保证 ABI 逐位一致。这批现在是手写 shim（历史包袱），neat 的终态是通用直通通道——但那是 polish，不急。
@@ -242,9 +265,11 @@ zlib 这类 C 库 FFI 进去后是真机器码，其内部的 malloc/memcpy 打�
 - **P4 边界即 RAM 边界，绝不广泛拦截 native**：界内（解释代码的 foreign-call 边界）实现语义，界外（native 代码、裸函数指针 call）我们看不见也**不试图拦截——那是工程灾难**。真实地址让边界"软"而廉价（两种代码共享一个地址空间，见 §4）。
 - **P5 不 emulate，用真 OS**：能用真 OS 原语（线程/futex/文件/时钟）就直接用，只在 foreign-call 边界"搞最小的一点"（如 pthread_create 插蹦床）。emulate 一套机制（如自建线程调度）是反模式——既慢又常常对合法程序跑错（如 into_pthread_t）。VM tier 以真并行为默认；tier-0 用 GIL-over-真线程过渡，非协作 emulation。
 - **P6 Unix 优先**：unwinding/FFI 都 Unix 优先，macOS 次之，初期不支持 Windows。
-- **P7 OS 交互集中在 `os::` 层（JVM os:: 同构）**：一切触及真 OS / 系统库的东西（线程/futex/文件/时钟/内存/网络/信号/FFI 出入）**集中在一个 `os::` 模块**，是 §7 抽象机器边界的**物理归宿**。解释器/VM 核心只对 `os::` 接口说话，**绝不散调 libc**。平台差异（Linux/macOS/Windows）藏在 `os::` 背后同一接口下（`os::linux::` 等）。三种归宿（直通/内建/合成，见 C10）在此有序组织，而非散落各处。反例 = tier-0 现状（shims.rs 大 match + native.rs + threads.rs 各处散落，M4 重写时收拢）。
+- **P7 OS 交互集中在 `os::` 边界（目标，尚未物理收口）**：一切触及真 OS / 系统库的东西
+  应通过清晰边界组织。当前 M4 逻辑仍分散在 `lower/mod.rs`、`interp.rs`、`ffi.rs`、`heap.rs`，
+  并不存在下面设想的 `src/os/`；它是待偿架构承诺，不能在状态文档中写成已完成。
 
-**`os::` 模块草图**（M4 落地形态；tier-0 逐步收拢）：
+**`os::` 模块草图**（历史提案，尚未落地）：
 
 ```
 src/os/
@@ -261,20 +286,30 @@ src/os/
   linux/        — 平台特定: syscall 号、struct 布局、weak 符号
 ```
 
-### 约束账本（M4 开工前必读；每踩一坑追加）
+### 约束账本（按时间追加的历史账本）
+
+> 下列 C0–C13 保存当时的约束与理由，不保证每句仍描述当前代码。例如 C5/C6 只属于已删除
+> tier-0，C11/C12 的部分未来承诺尚未实现。当前归并结论与重开条件见 decision-history。
 
 - **C0 抽象机器脊柱**（§1）：正确性契约 + as-if 自由 + FFI=RAM 边界。一切决策的根。
-- **C1 生而并发**（§5，第一红线）：VM tier 默认 1:1 真并行；tier-0 因引擎不 Sync 用 GIL-over-真线程过渡（协作式是要扔的 emulation）。依据：JVM 级目标；现代 Rust 天生并发（tokio 多线程默认、rayon、**cargo test 默认并行**）；CPython/GIL 作永久架构是单核时代妥协、反面教材（仅作 tier-0 bootstrap 可取）。
+- **C1 生而并发**（§5，第一红线）：产品引擎默认 1:1 真并行。早期曾计划用
+  GIL-over-真线程迁移 tier-0，但 tier-0 后来直接删除。依据：现代 Rust 负载天然并发，
+  永久 GIL 不满足产品目标。
 - **C2 并发内存模型**（§4）：三分（元数据私有隔离 / Rust Heap 托管非搬迁 per-thread arena / native heap 外）；原子直落宿主指令；真实地址；引擎状态三态（每线程私有 / 发布后不可变 / 显式同步）。**内存访问 = 裸宿主 read/write（有无 AllocId 都在真地址）；AllocId 是 Miri 的每分配元数据 overlay（init/provenance/bounds），fast machine 不需要，VM tier 甩掉——省掉间接寻址（fib(27) 慢因之一）。类型级元数据（layout/offset/vtable）另说，按类型冻结进字节码（C8），永远需要。**
 - **C3 Rust 三红利**（§5）：无 GC、内存模型现成、safe 无竞争。
 - **C4 guest UB 立场**：unsafe 竞争/UAF = 宿主竞争/UAF，与 native 一致（fast 立场）；隔离区（保护实现自身）+ 可选 TSan 后置。
-- **C5 tier-0 硬约束**：InterpCx 不 Sync → 永远单宿主线程 → 协作式；作为 bootstrap + oracle 存在。
-- **C6 弱内存序偏差**（§5）：协作模式 SC 执行、无重排、调度确定 → 时序 bug 可能不复现；对合法程序仍正确，声明为偏差。
+- **C5 tier-0 硬约束（historical）**：InterpCx 不 Sync，限制了早期 bootstrap；tier-0 已删除，
+  不再作为 oracle 存在。
+- **C6 tier-0 弱内存序偏差（historical）**：协作模式 SC 执行、无重排、调度确定；当前 M4
+  真线程引擎不继承这一实现偏差。
 - **C7 性能基准**：regex 编译（DFA + Unicode 表）42s 是 1 号基准；VM 评审须给该案例预估收益。
 - **C8 真线程架构（§5，看过 std 源码后定，2026-07-05）**：**不 emulate、不 wrap pthread，用真 OS 线程**。std 已 wrap pthread（`thread_start` 是 std 的 extern C fn，`Thread.id` 是真 pthread_t）。VM 唯一要做的是 **FFI 的反方向**：解释态函数指针逃逸给 native 时 materialize 成**真 thunk（libffi closure，Miri `build_libffi_closure` 同款）**。于是 pthread_create **纯直通**（非拦截/wrap），join/into_pthread_t/as_pthread_t/futex/mutex 全走真 libc。同一 thunk 机制**解决 C→Rust 回调**（qsort/signal，之前 defer 的问题）。JIT tier 下 thread_start 是真机器码，thunk 消失。tier-0 不 Sync → GIL-over-真线程过渡（into_pthread_t 成立，结构同 VM tier，去锁即并行）；**协作式是扔掉的 emulation**。引擎线程安全三招：**降低时元数据冻结**（layout/偏移/vtable 烘焙进字节码，运行期不触 tcx）、**降低在加载相 + JIT 后台服务线程**（HotSpot compiler-thread 同构，为 M5 后台 JIT 铺路）、Rust Heap per-thread arena（**TLAB，直接上**）。**并发架构完整设计见 docs/concurrency-arch.md**：状态三分（每线程私有/发布后只读/显式同步）；唯一敌人=tcx 不 Sync——**tcx 是加载相的事、执行相永远无 tcx**（Rust 单态化静态→eager 降完全部字节码；模式 A 有 tcx 但关在单线程加载相、模式 B .mirvm 根本无 tcx；JIT 后台服务也不碰 tcx）；atomics 引擎不介入（真原子指令真地址）；spike 验收=引擎自身过 TSan（guest 竞争排除，那是 guest 责任）。开放问题：发布协议、TLAB remote-free 细节、隔离强度。
 - **C9 FFI/native 写内存**（§7）：真实地址让 FFI 零编组；一个地址空间两种代码碰两个堆（native 写 Rust Heap；解释器对 Native Heap 指针回退裸宿主访问——运行时可，检查器不可）；值表示不能假设"只有解释器写内存"；libm 逃逸宿主直算通道 VM tier 要保留（intrinsic 化）。
 - **C10 边界与拦截（§7，2026-07-05 三次修正）**：拦截只在**解释代码的 foreign-call 边界**，**绝不广泛拦截 native 操作（工程灾难）**。动机——**归属+元数据**（`__rust_alloc`→托管 Rust Heap，MIR 层拦；`libc::malloc`→真 libc→Native Heap 直通）/ **真线程最小介入**（只 pthread_create 插蹦床，余皆真 libc 直通）/ **纯直通**（真资源，handler 转发真 OS）。inline asm 无调用边界，只能模拟或函数级拦。native 内部/裸指针调用看不见，记录为限制。沙箱：OS 级(seccomp)管安全，mirvm 钩子仅虚拟化。
-- **C11 帧栈模型 = A（guest 帧在 native 栈，2026-07-05 定，详见 docs/frame-stack-models.md）**：greenfield + JIT 硬约束下选 A（HotSpot/V8 式），非 B（CPython/Lua）。因 Cranelift 是方法级 JIT，A 下解释帧+编译帧同在 native 栈 → interp↔compiled 廉价适配（i2c/c2i），B 要建拆 VM 帧+两栈联合 unwind/backtrace；B 看家优势（协程/栈式挂起）因真 OS 线程+Rust async 无栈对我们无关；A 天然栈溢出忠实。**JIT-VM 里解释器是冷层 → A"解释器难写"代价权重大降，可起步简单（tree-walking），力气花 JIT 集成。** 每 guest 线程用其 OS 线程 native 栈放 guest 帧。**推论：M4/M5 强耦合——帧布局+调用约定须与 Cranelift 共同设计，先于 M4 定（并入并发 RFC/帧约定规格）。** 当前 tier-0 B1 是待推倒的错误实现。重估 B 仅当将来要栈式协程（明确不做）。
+- **C11 帧栈模型 = A（2026-07-05 定，详见 docs/frame-stack-models.md）**：greenfield +
+  JIT 硬约束下选 A（HotSpot/V8 式），非 B（CPython/Lua）。M4 落地的是 tree-walking A1：
+  guest **调用活动**在 native 栈，局部字节在 slaved ByteRegion；不能简写成“所有 guest 帧字节
+  都内联 native 栈”。B 的完整论证与重开条件仍保留在 decision-history。
 - **C12 JIT 后端 + 字节码 + 分发（2026-07-05 定，详见 docs/frame-abi-bytecode.md §7.5）**：
   - **JIT = Cranelift，藏在 `JITBackend` trait 后**（P7 同纪律，copy-and-patch 备选）。为 JIT 而生、≈10× 快于 LLVM 编译、质量≈debug build（正合目标）；**cg_clif 已趟通 MIR→Cranelift+Rust ABI+unwinding**，复用。耦合可控：抽不掉的只有调用约定（=Rust ABI，我们本就用）+ unwind 模型（=Rust 原生 landing-pad，逃不掉），**都非 Cranelift 特有**；不为它牺牲内存/线程/元数据模型。
   - **unwind = 候选 A**（复用 Cranelift landing-pad + Rust personality，因 JIT 定 Cranelift）；候选 B（自研栈行走）兜底。头号 M4 前置 spike。
@@ -292,27 +327,34 @@ src/os/
 
 ---
 
-## 9. 里程碑与 tier-0 实现日志
+## 9. 里程碑与历史 tier-0 实现日志
 
 ### 里程碑
 
 - **M0 工具链打通**（✅ 2026-07-03）：rustc_private 驱动编译源文件、定位 entry fn、dump MIR。
 - **M1 最小 RAM 实现**（✅ 2026-07-03）：fast Machine on InterpCx，std 程序端到端。差分 5/5（fib、String/Vec、HashMap、panic+exit 101、catch_unwind+Drop）。
 - **M2 吃下真实生态**（✅ 2026-07-05）：cargo 依赖图、proc-macro、frontmatter 脚本、.init_array（args/env 转正）、时间/文件/malloc shims。serde_json+rand+regex 与 native 逐字节一致。
-- **M2.5 生态补全**（线程/真实地址/FFI ✅ 2026-07-05；corpus 进行中）：
+- **M2.5 生态补全**（历史完成，2026-07-05）：
   - ✅ 线程（tier-0 协作实现，§5）：pthread/futex/nanosleep/TLS 析构；差分 12/12。
   - ✅ 真实地址内存（§4 前身）：MirvmAllocBytes 真对齐 + prepared 破指针环。
   - ✅ libffi FFI（§7）：dlsym + 编组 + native 写内存暴露；libz-sys 真 C 库往返与 native 逐字节一致（diff 14/14 + cargo 3/3）。
-  - ⏳ corpus 驱动补全（rayon/chrono/clap/anyhow/csv/...），异步生态（epoll 等 = **真直通 handler**，非 emulate；async 本身编译期无栈状态机，引擎零特殊支持，见 docs/async-stackless.md）。
+  - corpus 调研随后成为 M4/M5 的输入；其 2026-07-05 快照见 docs/corpus.md。
 - **RAM-SPEC 文档**（✅ 2026-07-05 草稿，docs/ram-spec.md）：抽象机器语义契约——正确性契约、定义度四级、RAM 边界、as-if 自由、声明的偏差、与 native/Miri 关系。mirvm"事实标准实现"的书面承诺。
-- **M3 产品面**：daemon（前端增量状态留内存）、agent API（JSON 诊断/超时/内存上限/OS 沙箱）。验收：脚本二跑 <300ms、改一行重跑 <1s。
-- **M4 字节码 VM（成为真正的 VM）**：自研生而并发字节码引擎。**前置硬关卡：RAM 规格 + 并发架构 RFC + spike 过 TSan。** 验收：≥5× InterpCx，差分双策略全绿。
-- **M5 JIT**：Cranelift 热点，`--engine` 开关。
+- **M3 产品面**（未实现/后置）：daemon、agent API、资源治理与正式沙箱。
+- **M4 字节码 VM**（✅ 2026-07-10）：自研 typed-bytecode、tcx-free tree-walking engine、
+  FFI/unwind/真线程/TLS/thunk；tier-0 同期退役。实际结果见 docs/m4-log.md。
+- **M5.0 asm-stub 工厂**（✅ 2026-07-11，复审 2026-07-12）：有限 x86_64 inline asm
+  加载相物化；实际结果见 docs/m5-log.md。
+- **M5.1 语义轨收口**（✅ 2026-07-12）：addcarry/subborrow 已使 numbigint 转绿，
+  xgetbv 已 native 差分，pshufb/SHA helpers 已使 sha2 转绿；静态归档产品接入与 ecosystem
+  补面分别使 blake3/ecosystem 转绿；diff_cargo 3/3。signal guest handler 是独立明确 XFAIL。
+- **M5.2–M5.4 方法级 JIT**（未实现）：Cranelift 热点、tiering、LSDA 与性能收口。
 - **M6 REPL/Notebook**（后置）。**M7+ 嵌入 API**（后置）。
 
-### tier-0 实现日志（如何在 rustc 解释器上 bootstrap 出 RAM 实现）
+### tier-0 实现日志（历史：如何在 rustc 解释器上 bootstrap 出 RAM 实现）
 
-> 这些是 tier-0（InterpCx）阶段的具体实现与踩坑。M4 自研 VM 会重写执行核心，但**语义结论、边界洞察、性能数据长期有效**。
+> 这些是已删除 tier-0（InterpCx）阶段的具体实现与踩坑，只用于理解决策来源。路径和偏差均不
+> 描述当前代码；有些边界洞察被 M4 继承，有些已经被后续证据推翻。
 
 **结构**：`src/interp/{machine,eval,shims,intrinsics,helpers,addrs,alloc_bytes,threads,native,mono_map}.rs`；`src/cargo_shim.rs`（cargo 集成）；`src/sysroot.rs`（自建 MIR sysroot）。engine 在 lib，CLI 薄壳。
 
@@ -346,9 +388,12 @@ src/os/
 |---|---|
 | nightly API 漂移 | 锁定+月度 bump；rustc 交互隔离；跟 Miri 同步提交 |
 | shim 工作量（最大风险） | 按需实现；§7 边界模型减少无谓 shim（真资源走直通）；借鉴 Miri 代码 |
-| tier-0 性能天花板 | 它只是 bootstrap；M4 自研 VM 是答案，届时转 oracle |
-| FFI C→Rust 回调 | 已知坑（Miri 亦未全解）；单向调用先行，回调明确报错 |
-| 异步/tokio（epoll/io_uring/socket） | 都是**真直通真内核 fd**（非 emulate），M3 后写这批直通 handler；async 本身编译期无栈状态机、引擎零特殊支持 |
+| 测试假阳性 / 语义误报 | 绿色必须比较输出或不变式；双方都失败不得算 PASS；预期红锁定原因 |
+| silent stub | 未实现的可观察语义必须 Trap 或真实实现，不允许返回成功伪装支持 |
+| M4 解释器性能天花板 | M5.2+ 方法级 JIT；JIT-on/off/native 三方差分 |
+| FFI C→Rust 回调 | thunk + TLS attach 已有；逐类验证真实注册/生命周期，signal 不能仅凭 thunk 宣称支持 |
+| 平台耦合 | 当前只宣称 Linux/ELF/x86_64；抽取 OS 边界后再扩平台 |
+| 生命周期与嵌入 | 将进程退出、全局 TLS key 与泄漏式资源收敛成可恢复、多 Engine 生命周期 API |
 
 ## 12. 先行者参考
 

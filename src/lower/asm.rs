@@ -66,13 +66,21 @@ pub(crate) fn materialize(sites: &[String]) -> Vec<u64> {
             .arg(&s_path)
             .status()
             .expect("调用 cc 汇编 asm-stub 失败（PATH 缺 cc？）");
-        assert!(status.success(), "cc 汇编 asm-stub 失败（源：{}）", s_path.display());
+        assert!(
+            status.success(),
+            "cc 汇编 asm-stub 失败（源：{}）",
+            s_path.display()
+        );
         std::fs::rename(&tmp, &so).expect("asm-stub .so 原子发布失败");
     }
 
     let c_so = std::ffi::CString::new(so.as_os_str().as_encoded_bytes()).unwrap();
     let handle = unsafe { libc::dlopen(c_so.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
-    assert!(!handle.is_null(), "dlopen asm-stub .so 失败: {}", so.display());
+    assert!(
+        !handle.is_null(),
+        "dlopen asm-stub .so 失败: {}",
+        so.display()
+    );
 
     (0..sites.len())
         .map(|i| {
@@ -88,10 +96,19 @@ pub(crate) fn materialize(sites: &[String]) -> Vec<u64> {
 /// `late` 决定类操作数分配相位（非 late 输出先分配，与输入互斥；late 输出后分配、
 /// 可与输入共寄存器）——cg_clif allocate_registers 的语义。M5.x 补 Const/sym 操作数。
 pub(crate) enum AsmOperand {
-    In { reg: InlineAsmRegOrRegClass },
-    Out { reg: InlineAsmRegOrRegClass, late: bool, has_place: bool },
+    In {
+        reg: InlineAsmRegOrRegClass,
+    },
+    Out {
+        reg: InlineAsmRegOrRegClass,
+        late: bool,
+        has_place: bool,
+    },
     // inout 无 late 相区分（恒在相 0 分配，与 cg_clif `_late` 同——故此处不带）
-    InOut { reg: InlineAsmRegOrRegClass, has_out_place: bool },
+    InOut {
+        reg: InlineAsmRegOrRegClass,
+        has_out_place: bool,
+    },
 }
 
 /// wrapper 生成产物：文本 + 缓冲大小 + 每操作数的输入/输出槽偏移（供 func.rs 配对
@@ -133,8 +150,16 @@ pub(crate) fn generate<'tcx>(
     GeneratedAsm {
         text,
         buf_size: g.slot_size.bytes() as u32,
-        input_slot: g.slots_input.iter().map(|s| s.map(|s| s.bytes() as u32)).collect(),
-        output_slot: g.slots_output.iter().map(|s| s.map(|s| s.bytes() as u32)).collect(),
+        input_slot: g
+            .slots_input
+            .iter()
+            .map(|s| s.map(|s| s.bytes() as u32))
+            .collect(),
+        output_slot: g
+            .slots_output
+            .iter()
+            .map(|s| s.map(|s| s.bytes() as u32))
+            .collect(),
     }
 }
 
@@ -165,18 +190,29 @@ impl<'tcx> Gen<'_, 'tcx> {
             self.tcx.asm_target_features(self.enclosing_def_id),
             &sess.target,
         );
-        let mut allocated = rustc_data_structures::fx::FxHashMap::<InlineAsmReg, (bool, bool)>::default();
+        let mut allocated =
+            rustc_data_structures::fx::FxHashMap::<InlineAsmReg, (bool, bool)>::default();
         let mut regs = vec![None; self.operands.len()];
 
         // 显式寄存器入已分配集
         for (i, op) in self.operands.iter().enumerate() {
             let (reg, is_in, is_out) = match op {
-                AsmOperand::In { reg: InlineAsmRegOrRegClass::Reg(r) } => (*r, true, false),
-                AsmOperand::Out { reg: InlineAsmRegOrRegClass::Reg(r), late: true, .. } => {
-                    (*r, false, true)
+                AsmOperand::In {
+                    reg: InlineAsmRegOrRegClass::Reg(r),
+                } => (*r, true, false),
+                AsmOperand::Out {
+                    reg: InlineAsmRegOrRegClass::Reg(r),
+                    late: true,
+                    ..
+                } => (*r, false, true),
+                AsmOperand::Out {
+                    reg: InlineAsmRegOrRegClass::Reg(r),
+                    ..
                 }
-                AsmOperand::Out { reg: InlineAsmRegOrRegClass::Reg(r), .. }
-                | AsmOperand::InOut { reg: InlineAsmRegOrRegClass::Reg(r), .. } => (*r, true, true),
+                | AsmOperand::InOut {
+                    reg: InlineAsmRegOrRegClass::Reg(r),
+                    ..
+                } => (*r, true, true),
                 _ => continue,
             };
             regs[i] = Some(reg);
@@ -191,17 +227,18 @@ impl<'tcx> Gen<'_, 'tcx> {
         for phase_late in [false, true] {
             for (i, op) in self.operands.iter().enumerate() {
                 let class = match op {
-                    AsmOperand::Out { reg: InlineAsmRegOrRegClass::RegClass(c), late, .. }
-                        if *late == phase_late =>
-                    {
-                        *c
-                    }
-                    AsmOperand::InOut { reg: InlineAsmRegOrRegClass::RegClass(c), .. }
-                        if !phase_late =>
-                    {
-                        *c
-                    }
-                    AsmOperand::In { reg: InlineAsmRegOrRegClass::RegClass(c) } if phase_late => *c,
+                    AsmOperand::Out {
+                        reg: InlineAsmRegOrRegClass::RegClass(c),
+                        late,
+                        ..
+                    } if *late == phase_late => *c,
+                    AsmOperand::InOut {
+                        reg: InlineAsmRegOrRegClass::RegClass(c),
+                        ..
+                    } if !phase_late => *c,
+                    AsmOperand::In {
+                        reg: InlineAsmRegOrRegClass::RegClass(c),
+                    } if phase_late => *c,
                     _ => continue,
                 };
                 let reg = Self::alloc_reg(&map, class, &allocated);
@@ -214,7 +251,10 @@ impl<'tcx> Gen<'_, 'tcx> {
     }
 
     fn alloc_reg(
-        map: &rustc_data_structures::fx::FxHashMap<InlineAsmRegClass, rustc_data_structures::fx::FxIndexSet<InlineAsmReg>>,
+        map: &rustc_data_structures::fx::FxHashMap<
+            InlineAsmRegClass,
+            rustc_data_structures::fx::FxIndexSet<InlineAsmReg>,
+        >,
         class: InlineAsmRegClass,
         allocated: &rustc_data_structures::fx::FxHashMap<InlineAsmReg, (bool, bool)>,
     ) -> InlineAsmReg {
@@ -260,7 +300,12 @@ impl<'tcx> Gen<'_, 'tcx> {
         )
         .unwrap()
         .clobbered_regs();
-        for (i, reg) in self.registers.iter().enumerate().filter_map(|(i, r)| r.map(|r| (i, r))) {
+        for (i, reg) in self
+            .registers
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.map(|r| (i, r)))
+        {
             let mut need_save = true;
             for r in abi_clobber {
                 r.overlapping_regs(|r| {
@@ -279,7 +324,12 @@ impl<'tcx> Gen<'_, 'tcx> {
 
         // inout：输入输出共槽
         for (i, op) in self.operands.iter().enumerate() {
-            if let AsmOperand::InOut { reg, has_out_place: true, .. } = op {
+            if let AsmOperand::InOut {
+                reg,
+                has_out_place: true,
+                ..
+            } = op
+            {
                 let slot = new_slot(&mut slot_size, reg.reg_class());
                 self.slots_input[i] = Some(slot);
                 self.slots_output[i] = Some(slot);
@@ -291,7 +341,11 @@ impl<'tcx> Gen<'_, 'tcx> {
         for (i, op) in self.operands.iter().enumerate() {
             match op {
                 AsmOperand::In { reg }
-                | AsmOperand::InOut { reg, has_out_place: false, .. } => {
+                | AsmOperand::InOut {
+                    reg,
+                    has_out_place: false,
+                    ..
+                } => {
                     self.slots_input[i] = Some(new_slot(&mut slot_size, reg.reg_class()));
                 }
                 _ => {}
@@ -301,7 +355,12 @@ impl<'tcx> Gen<'_, 'tcx> {
         let slot_size_after_input = slot_size;
         slot_size = slot_size_before_input;
         for (i, op) in self.operands.iter().enumerate() {
-            if let AsmOperand::Out { reg, has_place: true, .. } = op {
+            if let AsmOperand::Out {
+                reg,
+                has_place: true,
+                ..
+            } = op
+            {
                 self.slots_output[i] = Some(new_slot(&mut slot_size, reg.reg_class()));
             }
         }
@@ -334,7 +393,11 @@ impl<'tcx> Gen<'_, 'tcx> {
         for piece in self.template {
             match piece {
                 InlineAsmTemplatePiece::String(text) => s.push_str(text),
-                InlineAsmTemplatePiece::Placeholder { operand_idx, modifier, .. } => {
+                InlineAsmTemplatePiece::Placeholder {
+                    operand_idx,
+                    modifier,
+                    ..
+                } => {
                     let reg = self.registers[*operand_idx].unwrap();
                     Self::emit_reg(&mut s, reg, *modifier);
                 }
@@ -410,8 +473,12 @@ impl<'tcx> Gen<'_, 'tcx> {
             )
         {
             let n = r.name();
-            let mov = if n.starts_with("xmm") { "movups" } else { "vmovups" };
-            write!(s, "    {mov} [rbx+0x{:x}], {n}\n", offset.bytes()).unwrap();
+            let mov = if n.starts_with("xmm") {
+                "movups"
+            } else {
+                "vmovups"
+            };
+            writeln!(s, "    {mov} [rbx+0x{:x}], {n}", offset.bytes()).unwrap();
             return;
         }
         write!(s, "    mov [rbx+0x{:x}], ", offset.bytes()).unwrap();
@@ -429,12 +496,44 @@ impl<'tcx> Gen<'_, 'tcx> {
             )
         {
             let n = r.name();
-            let mov = if n.starts_with("xmm") { "movups" } else { "vmovups" };
-            write!(s, "    {mov} {n}, [rbx+0x{:x}]\n", offset.bytes()).unwrap();
+            let mov = if n.starts_with("xmm") {
+                "movups"
+            } else {
+                "vmovups"
+            };
+            writeln!(s, "    {mov} {n}, [rbx+0x{:x}]", offset.bytes()).unwrap();
             return;
         }
         s.push_str("    mov ");
         reg.emit(s, InlineAsmArch::X86_64, None).unwrap();
-        write!(s, ", [rbx+0x{:x}]\n", offset.bytes()).unwrap();
+        writeln!(s, ", [rbx+0x{:x}]", offset.bytes()).unwrap();
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::materialize;
+
+    #[test]
+    fn materialized_stub_is_callable_and_writes_its_buffer() {
+        let site = r#"
+.globl mirvm_asm_0
+.type mirvm_asm_0,@function
+.section .text.mirvm_asm_0,"ax",@progbits
+mirvm_asm_0:
+    .intel_syntax noprefix
+    movabs rax, 0x0123456789abcdef
+    mov QWORD PTR [rdi], rax
+    ret
+    .att_syntax
+.size mirvm_asm_0, .-mirvm_asm_0
+.text
+"#
+        .to_owned();
+        let addrs = materialize(&[site]);
+        let mut value = 0u64;
+        let stub: unsafe extern "C" fn(*mut u8) = unsafe { std::mem::transmute(addrs[0]) };
+        unsafe { stub((&mut value as *mut u64).cast()) };
+        assert_eq!(value, 0x0123_4567_89ab_cdef);
     }
 }

@@ -1,21 +1,26 @@
 # M4 实施计划 —— 自研生而并发字节码 VM（模型 A）
 
+> 文档状态：**历史计划，M4 已于 2026-07-10 完成**。实际施工、计划漂移和 gate 结果以
+> [m4-log.md](m4-log.md) 为准；当前阶段见 [current-status.md](current-status.md)。
+
 > 获批：2026-07-07。前置：5 个 spike 全过（骨架 / i2c-c2i / 混合栈 unwind / 并发 TSan / 真 Cranelift），
 > corpus 五批五票据收口。**M4 是大体量、低未知度的工程**——高风险赌注已在 spike 期验证完。
 > 过程纪律：M4.0 与 M4.4 两个关键期开工前过审，其余期开工简报即行；每期完成出 gate 报告，
 > 经验记 docs/m4-log.md。
 >
 > **进度（2026-07-10）**：M4.0-M4.5 **全部完成，M4 已关账**（总验收四条对勾见
-> m4-log ★ 节）。gate5 31/31：corpus 全绿−asm（4 项 cpuid/syscall/div 归 M5）、
+> m4-log ★ 节）。当时 gate5 报 31/31（该数字的 oracle 勘误见 m4-log 顶部）：corpus 全绿−asm（4 项 cpuid/syscall/div 归 M5）、
 > diff_cargo ffi_zlib+project 绿、性能上限达标（加载 413ms、rayon 32×）、全量回归无损。
-> tier-0 已移除（81772e4）。**下一阶段 = M5 JIT**（Cranelift + asm 块 + 热循环加速）。
+> tier-0 已移除（81772e4）。后续实际又完成了 M5.0 asm-stub 与 M5.1 轨 A 收口；
+> M5.2 方法级 JIT 尚未实现。
 
 ## 0. 目标与退出判据
 
 把执行从 tier-0（rustc `InterpCx` + 协作调度，弃子）整体迁移到自研引擎：寄存器式字节码 +
 冻结元数据、模型 A 帧、真 1:1 线程无 GIL、真地址无 AllocId overlay、`os::` 收口（P7）。
 
-**M4 结束 = tier-0 能跑的一切在新引擎上可观测一致，tier-0 退役为差分 oracle。**
+**原计划**让 tier-0 退役为差分 oracle；实际 M4 完成后 tier-0 代码被删除，native 编译执行
+成为当前差分 oracle。
 
 ## 1. 架构与模块（一条硬纪律）
 

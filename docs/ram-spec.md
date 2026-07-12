@@ -1,7 +1,8 @@
 # RAM-SPEC —— Rust 抽象机器规格（mirvm 的语义契约）
 
-> **状态：草稿，待评审。** 本文定义 **mirvm 实现的那台 Rust 抽象机器（Rust Abstract Machine, RAM）**，
-> 是 mirvm 对外的**语义承诺 / 正确性契约**——"事实标准实现"从口号变成可对照的条文。
+> **状态：长期语义契约。** 本文定义 mirvm 目标实现的 Rust 抽象机器（Rust Abstract Machine,
+> RAM），但不证明当前代码已经覆盖全部条款。当前实现缺口见 [current-status.md](current-status.md)；
+> 历史 tier-0 偏差已不再是现状。
 >
 > **本文不是**：Rust 官方形式规范（不存在）；不是从零重造一套操作语义（那是 opsem 团队十年工程 + Miri 的
 > 代码）。**本文是**：把"事实 RAM"（MIR 操作语义 + opsem 团队内存模型 + provenance + rustc layout）
@@ -154,27 +155,30 @@ mirvm **假设程序合法、不检测 UB**（P3）。这不是"偏差"（偏差
 
 真实地址下，guest 的 unsafe UB（数据竞争/越界/UAF）= mirvm 进程内的宿主 UB，与 native 行为一致（C4）。
 **含义**：guest UB / FFI 缺陷 / inline asm 能打穿 VM 自有内存（共享地址空间）→ 崩。但 **safe guest 代码
-证明上做不到**（C3），只有 UB/native 缺陷能触发。防护分层（L0 类型系统 / L1 结构隔离 / L2 MPK / L3 checked
-模式 / L4 进程 containment）、无免费午餐（真实地址 vs Wasm 式封闭二选一）——详见 concurrency-arch.md §6、
-账本 C13。fast 模式信任 guest；不可信/LLM 场景用 L4 沙箱进程 + L1（可选 L3 checked）。
+证明上做不到**（C3），只有 UB/native 缺陷能触发。防护设计曾比较 L0 类型系统 / L1 结构隔离 /
+L2 MPK / L3 checked / L4 进程 containment；后续范围裁决放弃项目内的 L2/L4 产品建设，保留
+L1 + 可选 L3 作为长期方向，且当前 checked 模式尚未实现。无免费午餐（真实地址 vs Wasm 式
+封闭二选一）详见 concurrency-arch.md §6 与账本 C13。
 
 ---
 
-## 7. mirvm 声明的偏差（合法程序上与 RAM/native 的已知出入）
+## 7. 偏差登记规则与当前实现差距
 
-诚实列出。每条注明**为何**、对合法程序**是否仍是 RAM 允许的行为**。
+旧版此节列出的弱内存序、确定调度、主线程名等均属于已删除 InterpCx tier-0，不再描述 M4。
+当前采用以下规则：
 
-| 偏差 | 说明 | 是否 RAM 允许 |
-|---|---|---|
-| **弱内存序不可见**（tier-0 / GIL） | 串行执行 = 顺序一致，观察不到弱内存重排（C6） | ✅ SC 是 §2 non-det 允许的执行之一；对合法程序正确 |
-| **调度确定**（tier-0） | 并发时序 bug 可能不复现（反之亦然） | ✅ 是 non-det 集合中一个确定执行 |
-| **getrandom 确定性**（可选，tier-0） | HashMap 种子/rand 可复现 | ✅ 是 non-det 集合中一个取值；`--real-random` 可关 |
-| **主线程名 `<unnamed>`**（tier-0） | 非 `main`；panic 消息头不同 | ⚠️ 可观测差异，tier-0 残留，差分归一化；VM tier 修正 |
-| **栈溢出深度** | ≈ native（模型 A，frame-abi §9） | ✅ 深度本 unspecified；近似即可 |
-| **退出不跑 rt cleanup / print! 残留缓冲**（tier-0） | 行缓冲 flush 无感，print! 残留可能丢 | ⚠️ tier-0 残留，M2+ 修正 |
+- 落在 unspecified/non-det 合法集合内的选择可登记为“实现选择”；
+- 对 well-defined 行为尚未覆盖的项目是**实现缺口**，不能用“偏差”弱化；
+- 未实现路径必须明确 Trap，不能以成功返回值制造集合外可观察行为；
+- 当前缺口集中列在 [current-status.md](current-status.md)，随代码和回归同步更新；
+- 栈溢出具体深度仍属 unspecified，但 Model A 只承诺近似 native，不承诺逐帧相同。
 
-> 原则：偏差要么落在 §2 的 unspecified/non-det 集合内（对合法程序仍**正确**），要么是 tier-0 的**待修正残留**
-> （明确标注、VM tier 消除）。**不接受**"合法程序上产出 well-defined 行为集合之外的结果"。
+**不接受**“合法程序上产出 well-defined 行为集合之外的结果”。2026-07-12 已把 guest signal
+handler 从静默成功改为明确不支持，并为 volatile 建立独立 IR 与 alignment=1
+opaque `MaybeUninit` 字节载体，避免低对齐/padding 的宿主 UB。同理，在 guest frame/IP
+映射存在前，backtrace 与 unwinder context API 必须明确拒绝，不得返回宿主解释器栈。
+真正的 signal/backtrace 语义与未覆盖的 volatile 宽度仍属于实现缺口，而非 RAM
+允许的偏差。
 
 ---
 
@@ -185,8 +189,8 @@ mirvm **假设程序合法、不检测 UB**（P3）。这不是"偏差"（偏差
 - **Miri**：同一 RAM 的检查实现 → 可作 mirvm 的**第二 oracle**（尤其查 mirvm 自身 bug）；且 mirvm 借鉴其
   shim/intrinsic **代码**（非心智模型，P1）。
 - **rustc const-eval**：编译期同一台机器 → const 求值与运行期求值应一致（§3.3）。
-- **tier-0（InterpCx）**：建在 rustc const-eval 解释器上 → 天然是"RAM 的一个（慢）实现"，作 M4 自研 VM 的
-  **差分 oracle**。
+- **历史 tier-0（InterpCx）**：曾用于 bootstrap，2026-07-09 已删除；当前 M4 的差分 oracle 是
+  同源 native 编译执行，旧 tier-0 不再是可运行 oracle。
 
 ---
 

@@ -75,9 +75,16 @@ pub fn get_or_create(shared: &'static Shared, entry: u64, func: FuncId, sig: &Fo
     if let Some(&code) = map.get(&key) {
         return code;
     }
-    let cif = Cif::new(sig.args.iter().map(|&k| super::ffi::ffi_type(k)), super::ffi::ffi_type(sig.ret));
-    let data: &'static ThunkData =
-        Box::leak(Box::new(ThunkData { shared, func, args: sig.args.clone().into(), ret: sig.ret }));
+    let cif = Cif::new(
+        sig.args.iter().map(|&k| super::ffi::ffi_type(k)),
+        super::ffi::ffi_type(sig.ret),
+    );
+    let data: &'static ThunkData = Box::leak(Box::new(ThunkData {
+        shared,
+        func,
+        args: sig.args.clone().into(),
+        ret: sig.ret,
+    }));
     let closure = Closure::new(cif, trampoline, data);
     let code = *closure.code_ptr() as usize as u64;
     std::mem::forget(closure); // 进程级永生（可执行页不回收——guest 持有码地址）
