@@ -68,7 +68,7 @@ evcxr 四点不满（延迟、状态/借用限制、跑不了完整项目、编�
   diff_cargo 3/3、六个 native-differential tracer 脚本、cargo test 25/25、rustfmt 与 Clippy。
   signal guest handler 和 guest backtrace/frame-IP 映射是独立 XFAIL，不能借 M5.1 宣称已支持。
 - 2026-07-13 已建立并加固真实 Cargo 项目 TDD harness；当前 Rust tests 35/35、diff 20/20、
-  diff_cargo 5/5，gate-truth 最终 12/12、real-project harness 最终 63/63。ripgrep/tokei 已移入
+  diff_cargo 5/5，gate-truth 最终 12/12、real-project harness 最终 65/65。ripgrep/tokei 已移入
   Git-ignored `artifacts/real-projects/` working set，并推动 direct dyn 尾 alignment、u128
   SwitchInt、track_caller Reify shim 与宽 volatile 修复。两项目已在最终 namespace-private `/run`
   逻辑根 + RUSTC proxy harness 下 correctness PASS；ripgrep、原始 tokei JSON 与新增的稳定
@@ -77,8 +77,8 @@ evcxr 四点不满（延迟、状态/借用限制、跑不了完整项目、编�
   两侧 SHA-256 同为 `0f505890…`。单 case 的 CaseID→CheckID/BenchID→EvidenceID（含 Git/controller）、
   exact-check 发布前复验、两层 staging 恢复、pre-rename 只读封存、current symlink、consumer 身份与
   PASS/XFAIL 语义及 benchmark summary 复算、额外 sidecar 拒绝、per-name/suite-cache 锁均已实现。
-  当前 writer 使用 schema 3，validator 保留 schema-2 历史 dispatch；这些仍是 workspace evidence，
-  不是远程持续 gate。
+  当前 writer 按是否声明外部 workload tool 使用 schema 3/4，validator 保留 schema-2/3 历史
+  dispatch；这些仍是 workspace evidence，不是远程持续 gate。harness 已按根 `AGENTS.md` 冻结。
   精确 provenance 与性能数见 [real-projects.md](real-projects.md)。
 - 方法级 Cranelift JIT、tiering、JIT LSDA 属于 M5.2–M5.4，生产路径中还不存在。
 
@@ -100,10 +100,10 @@ guest 同文 stderr 也由 `cargo_warning_return` 锁住。该 hook 当前仅适
 daemon/嵌入需 guard。真实项目控制器还会在启动时拒绝会被私有 `/run` tmpfs 隐藏的
 workspace/suite/toolchain/cache 路径。CI workflow 已建立，TSan 独立可见。
 
-下一步真实项目基础设施候选是 suite inventory/集合身份，用来稳定枚举同一 revision 的多个
-workload；当前 manifest/结果仍在 Git-ignored artifacts 中，该候选**尚未实现**。CheckID 已绑定
-harness 字节，但 `MIRVM_ENCODED_RUSTFLAGS_APPEND` 在 Cargo fingerprint 后追加，变化时仍可能复用
-旧 fake binary。不要把现有三个 case 的本地 PASS 写成已具备 suite 身份或远程持续 gate。
+当前 manifest/结果仍在 Git-ignored artifacts 中；不要把十一个 case 的本地 PASS 写成远程持续
+gate。按根 `AGENTS.md`，现有 harness 已能可信判定 workload 后必须冻结；
+suite inventory、集合身份与一般性 schema 加固都不是下一步。只有当前真实产品 RED 因此无法复现或
+判定时，才允许做一项最小基础设施修改，然后立即回到产品代码。
 
 ---
 

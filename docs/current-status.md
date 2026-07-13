@@ -11,7 +11,7 @@
 | M4.0–M4.5 | **完成** | 自研 typed bytecode、tcx-free tree-walking interpreter、FFI、unwind、真线程、TLS 与回调 |
 | M5.0 | **完成并复审** | x86_64 inline-asm stub 工厂：GAS wrapper → `.so` → `dlopen`/`dlsym` |
 | M5.1 | **完成（2026-07-12）** | numbigint、xgetbv、sha2、blake3、ecosystem、diff_cargo 3/3 与六个 release tracer 全绿 |
-| 真实项目 TDD | **继续扩面（2026-07-13）** | workspace-local ripgrep/tokei 驱动四项通用语义修复；三个 workload 已完成 correctness-gated benchmark，另有五个 workload 完成 correctness 对拍 |
+| 真实项目 TDD | **继续扩面（2026-07-13）** | workspace-local ripgrep/tokei 驱动四项通用语义修复；三个 workload 已完成 correctness-gated benchmark，另有八个 workload 完成 correctness 对拍 |
 | M5.2–M5.4 | **未实现** | 方法级 Cranelift JIT、tiering、JIT unwind/LSDA 与性能收口 |
 
 目前唯一产品执行引擎是 M4 解释器。Cargo 默认的 `cranelift` feature 只编译冻结的 Spike 5；
@@ -47,7 +47,7 @@ Linux/ELF/x86_64 优先：依赖 pthread、dlopen、GNU 链接行为和 x86 asm 
 - debug/release 构建可通过；执行必须优先使用 release 版本。
 - M4 的纯函数、值/内存、unwind、FFI、真线程和 TSan gate 已有端到端覆盖。
 - `tests/diff.sh` 对当前 demo 做 native 差分，M5.0 的 asm probe 已进入回归。
-- 2026-07-13 本轮 Rust tests 最终为 **35/35 passed**：asm stub、12 个 native archive、
+- 2026-07-13 当前 Rust tests 为 **35/35 passed**：asm stub、12 个 native archive、
   2 个 FFI 必需/可选库、Width、9 个 volatile（含低对齐、padding、宽值和重叠快照）、
   direct dyn 尾动态对齐、2 个 x86 helper、6 个 Cargo shim/rustflags/wrapper 测试，
   以及 1 个 runner warning-summary 结构化过滤测试；Rust 层覆盖仍小，
@@ -134,7 +134,7 @@ Linux/ELF/x86_64 优先：依赖 pthread、dlopen、GNU 链接行为和 x86 asm 
 | 平台 | 当前仅应宣称 Linux/ELF/x86_64 开发基线 |
 | Cargo wrapper / runner | 非空 `RUSTC_WRAPPER` / `RUSTC_WORKSPACE_WRAPPER` 或有效的 `build.rustc-wrapper` / `build.rustc-workspace-wrapper` 当前都会在 MIR capture 前 fail-closed；尚无 wrapper composition。runner 在 lower 后用窄结构化 filter 去除额外 warning-count summary，但保留完整 driver 收尾，只在 compiler success 后执行 VM |
 | 真实项目隔离 | build/check unshare network，所有 guest sandbox unshare PID，但不 unshare IPC；仅适用于受信任、固定 provenance 的 source，不是对抗性安全边界。mirvm build env 与 guest runtime env 尚未彻底分离。`MIRVM_ENCODED_RUSTFLAGS_APPEND` 在 Cargo 完成 fingerprint 计算后才追加，尚未进入 Cargo fingerprint |
-| 任意 Rust / 真实项目 | 尚不支持任意 Rust；已有严格 real-project harness、两个项目的八个 correctness PASS workload，其中三个完成 benchmark，以及通用修复的最小差分回归。case 仍被 Git ignore，远程固定 case 尚未入库 |
+| 任意 Rust / 真实项目 | 尚不支持任意 Rust；已有严格 real-project harness、两个项目的十一个 correctness PASS workload，其中三个完成 benchmark，以及通用修复的最小差分回归。case 仍是 Git-ignored workspace evidence，远程固定 case 尚未入库 |
 
 架构目标不等于当前资格。尤其“RAM 运行参考实现”是长期语义契约；在上述已知缺口和有限 corpus
 仍存在时，不应把它描述成已经覆盖完整 Rust 语义的成品。
@@ -149,7 +149,7 @@ Linux/ELF/x86_64 优先：依赖 pthread、dlopen、GNU 链接行为和 x86 asm 
    context 边界明确 Trap、补真 opaque volatile IR；继续为安全转入 native FFI 的边界
    增加 differential probes。
 3. **已完成第一版**：Rust tests、rustfmt、Clippy 与 CI workflow 均已建立；最终 fmt、
-   35/35 Rust tests、Clippy、release build 与 40 PASS / 2 XFAIL 聚合 gate 均通过，后续继续扩充覆盖。
+   35/35 Rust tests、Clippy、release build 与既有 40 PASS / 2 XFAIL 聚合 gate 均通过，后续继续扩充覆盖。
 4. 保持本文、根 README、DESIGN、HANDOFF 和施工日志同步；历史模型只标注替代，不删除。
 5. **已完成**：M5.1 按真实前沿收窄并实现；signal/backtrace 两个独立
    XFAIL 没有被伪装成 M5.1 绿。

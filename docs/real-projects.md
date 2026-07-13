@@ -198,6 +198,9 @@ crash 仍可能留下完整但不可见的孤儿 object，这是安全历史而�
 | `ripgrep_mmap_binary`，`--mmap` 搜索含 NUL 的 fixture | 同一 ripgrep rev/lock | correctness **PASS**；双方 stdout 均为 58 bytes，SHA-256 均为 `3f44831849e7d64e89db7dcebf69ceb3d6769f9b30e5e4cbb32113e83b974775`；尚未 benchmark |
 | `tokei_sort_code`，compact 全 fixture 并按 code 排序 | 同一 tokei rev/lock | correctness **PASS**；双方 stdout 均为 34,084 bytes，SHA-256 均为 `2f28dd4a8dd670095f5529367ca9a5d053da5782b06159fa5b7d9e086112ebbe`；尚未 benchmark |
 | `tokei_streaming_json`，单 Rust fixture 的 streaming JSON | 同一 tokei rev/lock | correctness **PASS**；双方 stdout 均为 221 bytes，SHA-256 均为 `ff5228f0bca37cd6e88a3b7282cd8fe6377b8a772e595706e4d04c12ed8f2ed6`；尚未 benchmark |
+| `ripgrep_parallel_match`，4 线程遍历源码树并唯一命中 | 同一 ripgrep rev/lock | correctness **PASS**；双方 stdout 均为 121 bytes，SHA-256 均为 `2e0e6afc717e9444e1adddf1add963717b7cd8cd0b48631527c5ed5028fe61c5`；尚未 benchmark |
+| `ripgrep_multiline_replace`，跨行捕获并 replacement | 同一 ripgrep rev/lock | correctness **PASS**；双方 stdout 均为 `2:ripgrep@15.1.0\n`（17 bytes），SHA-256 均为 `436f74d86dd8587cfdc3ccb85f9ae8d4b8f833e0ef03e6aca402a75371b9e2c7`；尚未 benchmark |
+| `tokei_rust_files`，Rust 类型过滤、per-file 报告并按 code 排序 | 同一 tokei rev/lock | correctness **PASS**；双方 stdout 均为 3,705 bytes，SHA-256 均为 `8b08061b7b931f7a609306733022e1b9d83c334e0f29b8232e8a8e705613d27c`；尚未 benchmark |
 
 三个最终 benchmark 共同使用 release mirvm sha256
 `7b064b3f8861e39cfe07dd7df67583d73c0ec32bcd6108e12fb8e217c89da16e`。每次 bench 都重新通过
@@ -230,7 +233,6 @@ reports 会受并行收集次序影响；tokei 的 `--sort` 在 JSON early exit 
    只结构化过滤 count-summary，再执行 VM；`cargo_warning_return` 还证明 guest 同文 stderr 被保留。
 5. 最终 `diff.sh` 为 20 个 native differential cases，`diff_cargo.sh` 为 5 个；ripgrep 与
    tokei 的两个完整项目/三个 workload 均已经过本节所述最新 harness 的 correctness-gated benchmark。
-
 ### 更早的临时证据
 
 hexyl v0.17.0（rev `8eb6d4771ce1ec7af65d06bd335457783b77d557`）曾从 `/tmp` clone

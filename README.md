@@ -19,16 +19,16 @@ mirvm 是一个以 rustc 为前端、自建执行引擎的 Rust 抽象机器运�
   handler 与 guest backtrace/frame-IP 映射仍是两个原因锁定的独立 XFAIL，不属于
   M5.1 已完成语义；当期验收的 diff_cargo 3/3、25 个 Rust tests 等数字按历史施工口径保留。
 - **真实项目 TDD 本轮完成并继续扩面**：当前已有 35/35 个 Rust tests、diff 20/20、diff_cargo 5/5；
-  gate-truth 最终 12/12，real-project harness 最终 63/63，最终 full gate5 为
+  gate-truth 最终 12/12，real-project harness 最终 65/65，最终 full gate5 为
   40 PASS / 2 XFAIL / 0 SKIP / 0 FAIL，fmt、Rust tests、Clippy 与 release build 均最终通过。workspace-local ripgrep/tokei
   已推动 direct dyn 尾 alignment、u128 `SwitchInt`、`track_caller` Reify shim 与宽 volatile
   修复；Cargo runner 额外 rustc warning summary 也已用结构化诊断 filter 最小化收口，且
-  保留完整 compiler 收尾与 guest 同文 stderr。ripgrep 与 tokei 两个项目的三个 workload
-  已在最终 namespace-private `/run` 逻辑根 + RUSTC proxy harness 下 correctness PASS，
-  并用同一 release mirvm sha256 `7b064b3f…` 完成 warmup 1 / samples 3 benchmark。单 case 已使用
+  保留完整 compiler 收尾与 guest 同文 stderr。ripgrep 与 tokei 当前有十一个 workspace-local
+  workload correctness PASS，其中三个已用同一 release mirvm sha256 `7b064b3f…` 完成
+  warmup 1 / samples 3 benchmark。单 case 已使用
   Case/Check/Bench/Evidence 分层内容身份（含 Git/controller 字节）、不可变对象与原子 current view；
-  schema-3 consumer 还会重推分层身份、PASS/XFAIL 语义、exact-check provenance，并从 samples 复算
-  benchmark summary；schema-2 历史对象保留独立验证路径。suite inventory 仍未实现。
+  schema-3/4 consumer 还会重推分层身份、PASS/XFAIL 语义、exact-check provenance，并从 samples
+  复算 benchmark summary；schema-2/3 历史对象保留独立验证路径。harness 已按 `AGENTS.md` 冻结。
   它们仍是 Git-ignored workspace evidence，不能提前视作远程持续 gate。Cargo shim 对项目自定义 rustc/workspace wrapper 当前 fail-closed，不支持
   wrapper composition；聚合质量门与隔离边界见 `docs/current-status.md`。
 - **生产 JIT 尚未实现**：Cranelift 目前只用于冻结的 Spike 5，不在产品执行路径中。
