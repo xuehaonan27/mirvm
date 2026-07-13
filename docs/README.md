@@ -1,6 +1,6 @@
 # mirvm 文档导航与权威规则
 
-> 最后整理：2026-07-12。本文只管理“应该相信哪份文档”；实际阶段、验证结果和已知缺口见
+> 最后整理：2026-07-13。本文只管理“应该相信哪份文档”；实际阶段、验证结果和已知缺口见
 > [current-status.md](current-status.md)。历史方案不会因被替代而删除，决策演变集中记录在
 > [decision-history.md](decision-history.md)。
 
@@ -24,11 +24,12 @@
 新接手开发时建议按此顺序：
 
 1. [current-status.md](current-status.md)：当前阶段、真实执行链、可信测试边界、下一步。
-2. [../DESIGN.md](../DESIGN.md)：长期心智模型与仍有效的架构契约。
-3. [ram-spec.md](ram-spec.md)：RAM 语义目标。
-4. [decision-history.md](decision-history.md)：frame、vmctx 等关键决策的备选项和演变。
-5. [m4-log.md](m4-log.md) 与 [m5-log.md](m5-log.md)：已经实现了什么。
-6. [m5.1-design.md](m5.1-design.md)：已完成 M5.1 的最终设计、被替代方案和受约束能力边界。
+2. [real-projects.md](real-projects.md)：真实 Cargo 项目 oracle、benchmark 合同与当前证据。
+3. [../DESIGN.md](../DESIGN.md)：长期心智模型与仍有效的架构契约。
+4. [designs/ram-spec.md](designs/ram-spec.md)：RAM 语义目标。
+5. [decision-history.md](decision-history.md)：frame、vmctx 等关键决策的备选项和演变。
+6. [m4-log.md](m4-log.md) 与 [m5-log.md](m5-log.md)：已经实现了什么。
+7. [m5.1-design.md](m5.1-design.md)：已完成 M5.1 的最终设计、被替代方案和受约束能力边界。
 
 [AGENT-HANDOFF.md](AGENT-HANDOFF.md) 是面向接手者的操作速查；若其状态与
 `current-status.md` 冲突，以后者为准。
@@ -42,8 +43,9 @@
 |---|---|---|
 | `current-status.md` | **当前** | 唯一跨阶段状态入口；替代 README、HANDOFF 中旧的阶段快照 |
 | `decision-history.md` | **当前** | 关键决策索引；保留被替代方案和重新开启决策的触发条件 |
+| `real-projects.md` | **当前** | 真实项目 case、correctness/benchmark 合同、临时实证与限制 |
 | `DESIGN.md` | **契约** | 长期心智模型；其中明确标为历史的 tier-0/M0–M2 章节不描述现实现 |
-| `ram-spec.md` | **契约** | 语义目标；实现差距由 current-status 登记 |
+| `designs/ram-spec.md` | **契约** | 语义目标；实现差距由 current-status 登记 |
 | `m5-design.md` | **已批准** | M5 总体双轨设计；M5.0/M5.1 已实现，M5.2+ 仍属路线图 |
 | `m5-log.md` | **已完成日志** | M5.0/M5.1 实际结果；优先于 M5 设计稿原先的预期 |
 | `m5.1-design.md` | **已完成设计/施工记录** | numbigint/xgetbv/sha2/blake3/ecosystem、diff_cargo 3/3 与六 tracer 脚本已绿；signal/backtrace 独立遗留 |
@@ -51,11 +53,11 @@
 | `m4-plan.md` | **历史（已完成计划）** | M4 原计划；实际差异由 m4-log 与 m4-debt-map 替代 |
 | `m4.1-design.md`、`m4.4-design.md`、`m4.5-plan.md` | **历史（已完成设计）** | 保留当时方案；实际结果看 m4-log 对应章节 |
 | `m4-debt-map.md` | **历史快照** | collector/worklist、panic 边界等修正证据，结论已吸收进 M4 实现 |
-| `frame-stack-models.md` | **历史论证 + 当前决策依据** | 完整保留 A/B 比较；当前选择与实现差异看 decision-history |
-| `frame-abi-bytecode.md` | **历史设计基线** | M4 的 frame/ABI 设计来源；已实现部分看代码/m4-log，JIT 部分仍是未来设计 |
-| `vmctx-passing.md` | **历史论证 + 当前决策依据** | 保留显式参数/TLS/固定寄存器三案；最新分层结论看 m5-design D5 与 decision-history |
-| `concurrency-arch.md` | **历史 RFC、核心原则仍有效** | tcx-free 执行相、状态三分和真线程已落地；mode B/TLAB 等含未来内容 |
-| `async-stackless.md` | **调研** | async 状态机与 OS I/O 边界的背景；不证明 signal 已实现 |
+| `designs/frame-stack-models.md` | **历史论证 + 当前决策依据** | 完整保留 A/B 比较；当前选择与实现差异看 decision-history |
+| `designs/frame-abi-bytecode.md` | **历史设计基线** | M4 的 frame/ABI 设计来源；已实现部分看代码/m4-log，JIT 部分仍是未来设计 |
+| `designs/vmctx-passing.md` | **历史论证 + 当前决策依据** | 保留显式参数/TLS/固定寄存器三案；最新分层结论看 m5-design D5 与 decision-history |
+| `designs/concurrency-arch.md` | **历史 RFC、核心原则仍有效** | tcx-free 执行相、状态三分和真线程已落地；mode B/TLAB 等含未来内容 |
+| `designs/async-stackless.md` | **调研** | async 状态机与 OS I/O 边界的背景；不证明 signal 已实现 |
 | `corpus.md` | **历史调研快照** | 2026-07-05 的边界发现；当前 corpus 结果看 current-status 与测试脚本 |
 | `spike1-*` … `spike5-*` | **冻结证据** | 证明候选机制可行，不代表生产路径已采用全部机制 |
 | `AGENT-HANDOFF.md` | **当前速查 + 历史机制导读** | 操作入口；阶段事实仍以 current-status 为准 |
@@ -69,6 +71,7 @@
 | 2026-07-08–10 | M4.1–M4.5 设计与 m4-log | 实现逐期替代计划预期；worklist、panic、TLS dtor、spread_arg 等以日志/代码为准 |
 | 2026-07-11 | M5 总设计、M5.0 日志、vmctx D5 | M5 总路线获批；只有 M5.0 已实现；vmctx 改为 T 骨架 + R 触发式缓存层 |
 | 2026-07-12 | 全项目审计、M5.1 设计与施工 | 先发现测试假阳性并重建 oracle；随后完成 M5.1，又用最终复审修正 volatile UB、unwinder 伪回溯、required archive 装载和 SKIP 冒充 PASS；signal/backtrace 两个独立 XFAIL；本索引与状态页建立 |
+| 2026-07-13 | 真实项目 TDD 与文档重整 | 建立严格 real-project oracle/benchmark harness；本地 hexyl PASS、ripgrep/tokei 精确 XFAIL；历史设计迁入 `docs/designs/`，frame/vmctx 旧模型完整保留 |
 
 典型替代关系：`m4-plan → m4-log`、`M5 设计预期 → m5-log 实测`、
 `vmctx-passing §7 旧 P/R 开放项 → m5-design D5`、`M5.1 原退出标准 → 2026-07-12

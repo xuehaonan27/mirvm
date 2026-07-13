@@ -213,7 +213,7 @@ walkdir 遍历目录时 `UndefinedBehavior(DanglingIntPointer{ InboundsPointerAr
 
 ## 3. 通过项验证了什么（架构确认）
 
-- **async-stackless 成立**：tokio current_thread 运行时（定时器 + mpsc + spawn 任务）跑出正确结果（1530/15 msgs），无需引擎特殊支持——任务是编译器降解的无栈状态机，poll 驱动（见 async-stackless.md）。
+- **async-stackless 成立**：tokio current_thread 运行时（定时器 + mpsc + spawn 任务）跑出正确结果（1530/15 msgs），无需引擎特殊支持——任务是编译器降解的无栈状态机，poll 驱动（见 designs/async-stackless.md）。
 - **协作 + 模拟 futex 是合法 SC 执行**：rayon / crossbeam 正确跑通，说明良好同步的并发程序在 round-robin 上产出合法的顺序一致执行——这是 tier-0 作对拍基底的价值。但它把一切串行化，**验证不了真并行**（弱内存、数据竞争、真并行推进）——正是 M4 必补。
 - **真 OS 原语直通可用**：epoll/eventfd/getrandom/文件 IO/**socket 网络** 经 dlsym/shim 直达内核，无需模拟——印证"有真 OS 就直接用"。std::net 用 libc（非 rustix），TCP/UDP loopback 往返与 native 逐位一致。
 - **unsafe/布局/别名在解释器下正确**（第二批）：smallvec 的 union 式 `MaybeUninit` 内联存储、bytes 的 Arc 原子 refcount + 零拷贝切片别名、petgraph 的 arena 索引——纯计算类 unsafe 全走通，问题只在 OS/asm 边界。

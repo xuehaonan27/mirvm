@@ -48,21 +48,20 @@ fn exec(mut cmd: Command) -> ! {
     exit(status.code().unwrap_or(1));
 }
 
-/// 阶段 1：在 `project_dir` 里驱动 cargo。program_args 传给最终被解释的程序。
-pub fn phase_cargo(project_dir: &std::path::Path, program_args: &[String]) -> ! {
-    let sysroot = match crate::sysroot::ensure_sysroot() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("mirvm: 构建 sysroot 失败: {e}");
-            exit(1);
-        }
-    };
-    let self_exe = std::env::current_exe().expect("current_exe 失败");
+fn cargo_project_command(
+    project_dir: &std::path::Path,
+    program_args: &[String],
+    sysroot: &std::path::Path,
+    self_exe: &std::path::Path,
+    locked: bool,
+) -> Command {
     let self_str = self_exe.to_str().expect("mirvm 路径非 UTF-8");
-
     let mut cmd = Command::new(PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT")).join("bin/cargo"));
     cmd.current_dir(project_dir);
     cmd.arg("run");
+    if locked {
+        cmd.arg("--locked");
+    }
     // 强制 host target：让 host/target crate 可区分，且激活 target.runner
     cmd.arg("--target").arg(env!("MIRVM_HOST"));
     // 所有"运行二进制"的动作转给我们
@@ -82,7 +81,22 @@ pub fn phase_cargo(project_dir: &std::path::Path, program_args: &[String]) -> ! 
     cmd.env("RUSTC_WRAPPER", self_str);
     cmd.env_remove("RUSTC_WORKSPACE_WRAPPER");
     cmd.env("MIRVM_CARGO_SESSION", "1");
-    cmd.env("MIRVM_SYSROOT", &sysroot);
+    cmd.env("MIRVM_SYSROOT", sysroot);
+    cmd
+}
+
+/// 阶段 1：在 `project_dir` 里驱动 cargo。program_args 传给最终被解释的程序。
+pub fn phase_cargo(project_dir: &std::path::Path, program_args: &[String]) -> ! {
+    let sysroot = match crate::sysroot::ensure_sysroot() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("mirvm: 构建 sysroot 失败: {e}");
+            exit(1);
+        }
+    };
+    let self_exe = std::env::current_exe().expect("current_exe 失败");
+    let locked = std::env::var_os("MIRVM_CARGO_LOCKED").is_some();
+    let cmd = cargo_project_command(project_dir, program_args, &sysroot, &self_exe, locked);
     exec(cmd)
 }
 
@@ -227,4 +241,40 @@ pub fn parse_runner_invocation(
     prog_argv.extend(program_args);
 
     (rustc_args, prog_argv, info.env)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+    use std::path::Path;
+
+    use super::cargo_project_command;
+
+    #[test]
+    fn cargo_project_command_is_locked() {
+        let command = cargo_project_command(
+            Path::new("/tmp/project"),
+            &[],
+            Path::new("/tmp/sysroot"),
+            Path::new("/tmp/mirvm"),
+            true,
+        );
+        let args: Vec<_> = command.get_args().collect();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == [OsStr::new("run"), OsStr::new("--locked")])
+        );
+    }
+
+    #[test]
+    fn ordinary_cargo_project_command_can_create_a_lockfile() {
+        let command = cargo_project_command(
+            Path::new("/tmp/project"),
+            &[],
+            Path::new("/tmp/sysroot"),
+            Path::new("/tmp/mirvm"),
+            false,
+        );
+        assert!(command.get_args().all(|arg| arg != OsStr::new("--locked")));
+    }
 }

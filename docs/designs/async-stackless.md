@@ -2,7 +2,7 @@
 
 > 文档状态：**历史调研**。async 降为无栈状态机的结论仍有效；本文对 signal/thunk 或 OS
 > handler 的机制描述不证明这些可观察语义已在当前 M4 实现，现状见
-> [current-status.md](current-status.md)。
+> [current-status.md](../current-status.md)。
 
 > 目的：搞清 Rust async 怎么实现（无栈状态机）、mirvm 怎么跑、对帧模型 A/B 有无诉求、
 > 以及 async I/O（epoll 等）在 mirvm 上是"直通"还是"emulate"。

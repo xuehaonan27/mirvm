@@ -1,6 +1,6 @@
 //! Spike 4：并发——N 条**真宿主线程**各跑 interp_frame，引擎过 TSan（4-spike 收官）。
 //!
-//! 验证 concurrency-arch.md 的三个核心主张（RFC 验收 = 过 TSan）：
+//! 验证 docs/designs/concurrency-arch.md 的三个核心主张（RFC 验收 = 过 TSan）：
 //! 1. **引擎 Sync、无 GIL**：共享只读程序 + per-thread 执行态，VM 自有状态零数据竞争。
 //!    用例全部设计成 guest 无竞争（C4 排除 guest 竞争），故任何 TSan 报告 = 引擎 bug。
 //! 2. **阻塞 syscall 活性**（corpus §2.1 收束）：tier-0 协作调度上挂死的 socketpair
@@ -53,7 +53,7 @@ struct Shared {
     kinds: Vec<FuncKind>,
 }
 
-/// 每线程执行态（vmctx，每线程一份；vmctx-passing.md §1.2）。
+/// 每线程执行态（vmctx，每线程一份；docs/designs/vmctx-passing.md §1.2）。
 struct Ctx {
     shared: *const Shared,
     region: OperandRegion,

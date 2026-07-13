@@ -1,7 +1,7 @@
 # Spike 4：并发（真线程引擎过 TSan）—— 经验与教训
 
 > 状态：**通过**（2026-07-07）。`mirvm spike4` 4 用例全 PASS；**TSan 全量插桩下零竞争警告**
-> （concurrency-arch.md 的 RFC 验收标准）；spike1-3 + tier-0 diff 16/16 无回归。
+> （designs/concurrency-arch.md 的 RFC 验收标准）；spike1-3 + tier-0 diff 16/16 无回归。
 > **4-spike 计划就此收官：模型 A 地基（骨架 / 互操作 / unwind / 并发）全部验证，可进 M4。**
 
 ## 1. 建了什么
@@ -58,7 +58,7 @@ tier-0 把 `atomic_*` 实现为普通读写（协作单线程下合法，"原子
 
 若 `Ctx<'s> { shared: &'s Shared }`，则 `CompiledFn = extern "C-unwind" fn(*mut Ctx<'s>,…)`
 要背 HRTB 生命周期（fn 指针 + 不变的 `*mut` = 类型体操）。裸指针 `*const Shared` 一刀切断，
-且与 vmctx-passing.md 的纪律一致（编译码经裸指针够到执行态；生存期由 `thread::scope` 保证）。
+且与 designs/vmctx-passing.md 的纪律一致（编译码经裸指针够到执行态；生存期由 `thread::scope` 保证）。
 **vmctx 就是裸指针世界，越早接受越干净。**
 
 ### 3.4 TSan 工程路径：rustc_private 迫使 harness 独立

@@ -24,7 +24,7 @@
 
 ## 1. Rust 抽象机器（我们实现的东西）
 
-Rust 没有官方形式化规范，但存在一台**事实上的**抽象机器：rustc 的 MIR 操作语义 + opsem 团队的内存模型（借自 C++20）+ provenance 模型 + rustc 的 layout 算法。Miri 是它的可执行参考。mirvm 立志成为它的**权威、快速的可执行定义**。**完整语义契约见 [docs/ram-spec.md](docs/ram-spec.md)**（正确性契约、定义度四级 well-defined/unspecified/non-det/UB、RAM 边界、as-if 自由、声明的偏差、与 native/Miri 的关系）——本节是其摘要。
+Rust 没有官方形式化规范，但存在一台**事实上的**抽象机器：rustc 的 MIR 操作语义 + opsem 团队的内存模型（借自 C++20）+ provenance 模型 + rustc 的 layout 算法。Miri 是它的可执行参考。mirvm 立志成为它的**权威、快速的可执行定义**。**完整语义契约见 [docs/designs/ram-spec.md](docs/designs/ram-spec.md)**（正确性契约、定义度四级 well-defined/unspecified/non-det/UB、RAM 边界、as-if 自由、声明的偏差、与 native/Miri 的关系）——本节是其摘要。
 
 RAM 由五部分组成：
 
@@ -219,7 +219,7 @@ M4 完成后它没有“退居 oracle”，而是被删除；当前差分 oracle
 **M4 当前采用 Model A 的 tree-walking 形态**：每个 guest 调用活动对应一个宿主
 `interp_frame` 递归帧；解释态局部字节位于随递归 LIFO 推进的 mmap ByteRegion，而非直接内联
 native 栈。调用活动与局部存储是两条正交轴。完整 A/B 选择理由、旧模型价值与重开条件见
-[docs/frame-stack-models.md](docs/frame-stack-models.md)、[docs/frame-abi-bytecode.md](docs/frame-abi-bytecode.md)
+[docs/designs/frame-stack-models.md](docs/designs/frame-stack-models.md)、[docs/designs/frame-abi-bytecode.md](docs/designs/frame-abi-bytecode.md)
 和 [docs/decision-history.md](docs/decision-history.md)。
 
 ---
@@ -303,14 +303,14 @@ src/os/
 - **C6 tier-0 弱内存序偏差（historical）**：协作模式 SC 执行、无重排、调度确定；当前 M4
   真线程引擎不继承这一实现偏差。
 - **C7 性能基准**：regex 编译（DFA + Unicode 表）42s 是 1 号基准；VM 评审须给该案例预估收益。
-- **C8 真线程架构（§5，看过 std 源码后定，2026-07-05）**：**不 emulate、不 wrap pthread，用真 OS 线程**。std 已 wrap pthread（`thread_start` 是 std 的 extern C fn，`Thread.id` 是真 pthread_t）。VM 唯一要做的是 **FFI 的反方向**：解释态函数指针逃逸给 native 时 materialize 成**真 thunk（libffi closure，Miri `build_libffi_closure` 同款）**。于是 pthread_create **纯直通**（非拦截/wrap），join/into_pthread_t/as_pthread_t/futex/mutex 全走真 libc。同一 thunk 机制**解决 C→Rust 回调**（qsort/signal，之前 defer 的问题）。JIT tier 下 thread_start 是真机器码，thunk 消失。tier-0 不 Sync → GIL-over-真线程过渡（into_pthread_t 成立，结构同 VM tier，去锁即并行）；**协作式是扔掉的 emulation**。引擎线程安全三招：**降低时元数据冻结**（layout/偏移/vtable 烘焙进字节码，运行期不触 tcx）、**降低在加载相 + JIT 后台服务线程**（HotSpot compiler-thread 同构，为 M5 后台 JIT 铺路）、Rust Heap per-thread arena（**TLAB，直接上**）。**并发架构完整设计见 docs/concurrency-arch.md**：状态三分（每线程私有/发布后只读/显式同步）；唯一敌人=tcx 不 Sync——**tcx 是加载相的事、执行相永远无 tcx**（Rust 单态化静态→eager 降完全部字节码；模式 A 有 tcx 但关在单线程加载相、模式 B .mirvm 根本无 tcx；JIT 后台服务也不碰 tcx）；atomics 引擎不介入（真原子指令真地址）；spike 验收=引擎自身过 TSan（guest 竞争排除，那是 guest 责任）。开放问题：发布协议、TLAB remote-free 细节、隔离强度。
+- **C8 真线程架构（§5，看过 std 源码后定，2026-07-05）**：**不 emulate、不 wrap pthread，用真 OS 线程**。std 已 wrap pthread（`thread_start` 是 std 的 extern C fn，`Thread.id` 是真 pthread_t）。VM 唯一要做的是 **FFI 的反方向**：解释态函数指针逃逸给 native 时 materialize 成**真 thunk（libffi closure，Miri `build_libffi_closure` 同款）**。于是 pthread_create **纯直通**（非拦截/wrap），join/into_pthread_t/as_pthread_t/futex/mutex 全走真 libc。同一 thunk 机制**解决 C→Rust 回调**（qsort/signal，之前 defer 的问题）。JIT tier 下 thread_start 是真机器码，thunk 消失。tier-0 不 Sync → GIL-over-真线程过渡（into_pthread_t 成立，结构同 VM tier，去锁即并行）；**协作式是扔掉的 emulation**。引擎线程安全三招：**降低时元数据冻结**（layout/偏移/vtable 烘焙进字节码，运行期不触 tcx）、**降低在加载相 + JIT 后台服务线程**（HotSpot compiler-thread 同构，为 M5 后台 JIT 铺路）、Rust Heap per-thread arena（**TLAB，直接上**）。**并发架构完整设计见 docs/designs/concurrency-arch.md**：状态三分（每线程私有/发布后只读/显式同步）；唯一敌人=tcx 不 Sync——**tcx 是加载相的事、执行相永远无 tcx**（Rust 单态化静态→eager 降完全部字节码；模式 A 有 tcx 但关在单线程加载相、模式 B .mirvm 根本无 tcx；JIT 后台服务也不碰 tcx）；atomics 引擎不介入（真原子指令真地址）；spike 验收=引擎自身过 TSan（guest 竞争排除，那是 guest 责任）。开放问题：发布协议、TLAB remote-free 细节、隔离强度。
 - **C9 FFI/native 写内存**（§7）：真实地址让 FFI 零编组；一个地址空间两种代码碰两个堆（native 写 Rust Heap；解释器对 Native Heap 指针回退裸宿主访问——运行时可，检查器不可）；值表示不能假设"只有解释器写内存"；libm 逃逸宿主直算通道 VM tier 要保留（intrinsic 化）。
 - **C10 边界与拦截（§7，2026-07-05 三次修正）**：拦截只在**解释代码的 foreign-call 边界**，**绝不广泛拦截 native 操作（工程灾难）**。动机——**归属+元数据**（`__rust_alloc`→托管 Rust Heap，MIR 层拦；`libc::malloc`→真 libc→Native Heap 直通）/ **真线程最小介入**（只 pthread_create 插蹦床，余皆真 libc 直通）/ **纯直通**（真资源，handler 转发真 OS）。inline asm 无调用边界，只能模拟或函数级拦。native 内部/裸指针调用看不见，记录为限制。沙箱：OS 级(seccomp)管安全，mirvm 钩子仅虚拟化。
-- **C11 帧栈模型 = A（2026-07-05 定，详见 docs/frame-stack-models.md）**：greenfield +
+- **C11 帧栈模型 = A（2026-07-05 定，详见 docs/designs/frame-stack-models.md）**：greenfield +
   JIT 硬约束下选 A（HotSpot/V8 式），非 B（CPython/Lua）。M4 落地的是 tree-walking A1：
   guest **调用活动**在 native 栈，局部字节在 slaved ByteRegion；不能简写成“所有 guest 帧字节
   都内联 native 栈”。B 的完整论证与重开条件仍保留在 decision-history。
-- **C12 JIT 后端 + 字节码 + 分发（2026-07-05 定，详见 docs/frame-abi-bytecode.md §7.5）**：
+- **C12 JIT 后端 + 字节码 + 分发（2026-07-05 定，详见 docs/designs/frame-abi-bytecode.md §7.5）**：
   - **JIT = Cranelift，藏在 `JITBackend` trait 后**（P7 同纪律，copy-and-patch 备选）。为 JIT 而生、≈10× 快于 LLVM 编译、质量≈debug build（正合目标）；**cg_clif 已趟通 MIR→Cranelift+Rust ABI+unwinding**，复用。耦合可控：抽不掉的只有调用约定（=Rust ABI，我们本就用）+ unwind 模型（=Rust 原生 landing-pad，逃不掉），**都非 Cranelift 特有**；不为它牺牲内存/线程/元数据模型。
   - **unwind = 候选 A**（复用 Cranelift landing-pad + Rust personality，因 JIT 定 Cranelift）；候选 B（自研栈行走）兜底。头号 M4 前置 spike。
   - **字节码贴近 MIR**（不下沉 CLIF）→ 解释器与 JIT 共享 MIR 级真理源、复用 cg_clif。**两级结构**：mirvmc（rustc 前端全 check → **Stable MIR/rustc_public + serde** → .mirvm 分发件，= .class/.jar 类比）；运行期"class loading"（按 target 冻结 layout C8 → 解释器寄存器字节码 + 喂 Cranelift，每平台一次缓存）。版本绑定诚实（classfile 版本号式，semver 转换）。
@@ -339,7 +339,7 @@ src/os/
   - ✅ 真实地址内存（§4 前身）：MirvmAllocBytes 真对齐 + prepared 破指针环。
   - ✅ libffi FFI（§7）：dlsym + 编组 + native 写内存暴露；libz-sys 真 C 库往返与 native 逐字节一致（diff 14/14 + cargo 3/3）。
   - corpus 调研随后成为 M4/M5 的输入；其 2026-07-05 快照见 docs/corpus.md。
-- **RAM-SPEC 文档**（✅ 2026-07-05 草稿，docs/ram-spec.md）：抽象机器语义契约——正确性契约、定义度四级、RAM 边界、as-if 自由、声明的偏差、与 native/Miri 关系。mirvm"事实标准实现"的书面承诺。
+- **RAM-SPEC 文档**（✅ 2026-07-05 草稿，docs/designs/ram-spec.md）：抽象机器语义契约——正确性契约、定义度四级、RAM 边界、as-if 自由、声明的偏差、与 native/Miri 关系。mirvm"事实标准实现"的书面承诺。
 - **M3 产品面**（未实现/后置）：daemon、agent API、资源治理与正式沙箱。
 - **M4 字节码 VM**（✅ 2026-07-10）：自研 typed-bytecode、tcx-free tree-walking engine、
   FFI/unwind/真线程/TLS/thunk；tier-0 同期退役。实际结果见 docs/m4-log.md。

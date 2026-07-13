@@ -23,7 +23,7 @@ i2c（interp 拿 code ptr 直调 JIT 码）✓、c2i（JIT 码经 imported shim 
 简化"正式杀掉。**Cranelift 能发我们的调用约定**（SysV (ctx,n)->r，transmute code ptr 即
 `CompiledFn`）——spike2 的替身假设坐实。
 
-### 2.2 vmctx 内部约定 P vs R：第一份真数据（回填 vmctx-passing.md §5.2）
+### 2.2 vmctx 内部约定 P vs R：第一份真数据（回填 designs/vmctx-passing.md §5.2）
 
 | fib(30)，min of 5 | 耗时 | 相对 |
 |---|---|---|

@@ -23,11 +23,11 @@
    不是经 greenfield 比较后选出的终局。
 2. 2026-07-05 的初版比较曾给 B 的深递归和 unwind 简单性较高权重，也受“现有实现更接近 B”
    影响。后续评审明确这两点在方法级 JIT 是硬约束时不能如此计权。
-3. [frame-stack-models.md](frame-stack-models.md) 保留完整 A1/A2/B1/B2 比较。当前裁决选择 A：
+3. [designs/frame-stack-models.md](designs/frame-stack-models.md) 保留完整 A1/A2/B1/B2 比较。当前裁决选择 A：
    guest 调用活动随宿主递归进入 native 栈，解释帧和未来编译帧可在同一 unwind 链上互调。
 4. M4 实现采用 A1/tree-walking：每个 guest activation 对应一个 `interp_frame` 宿主调用；
    guest 局部字节不直接内联 native 栈，而放在随递归 LIFO 推进的 mmap ByteRegion。
-   [frame-abi-bytecode.md](frame-abi-bytecode.md) 已解释“调用活动”与“局部存储位置”是正交轴。
+   [designs/frame-abi-bytecode.md](designs/frame-abi-bytecode.md) 已解释“调用活动”与“局部存储位置”是正交轴。
 
 ### 为什么当前选 A
 
@@ -49,7 +49,7 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
 
 1. Spike 2 为验证再入和 i2c/c2i，使用显式 `*mut Ctx` 参数（旧称 P）。这是合适的实验骨架，
    但 plain-C 函数指针逃逸时会产生签名错位。
-2. [vmctx-passing.md](vmctx-passing.md) 比较 P、thread-local（T）和固定寄存器（R），得出
+2. [designs/vmctx-passing.md](designs/vmctx-passing.md) 比较 P、thread-local（T）和固定寄存器（R），得出
    native→guest 回调必须按**当前线程**查 ctx；跨线程回调与 signal 使捕获创建线程 ctx 的 thunk
    原理上不正确。因此边界 TLS + lazy attach 被确定。
 3. Spike 5 的窄 fib 微基准中 R 比 P 快约 8%，证明 R 可行，但没有覆盖真实寄存器压力，不能据此

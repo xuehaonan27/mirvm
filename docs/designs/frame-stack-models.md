@@ -2,7 +2,7 @@
 
 > 文档状态：**保留的决策论证**。2026-07-05 当前选择为 Model A，M4 实现采用 tree-walking A1；
 > guest 调用活动在 native 栈，局部字节位于 slaved ByteRegion。A/B 都不会因当前选择而从文档中
-> 删除；最新状态和重开条件见 [decision-history.md](decision-history.md)。
+> 删除；最新状态和重开条件见 [decision-history.md](../decision-history.md)。
 
 > 目的：把"guest 调用帧放在 native 栈上（模型 A）"还是"放在独立的 VM 帧栈里（模型 B）"
 > 两条路的**具体做法**讲透，供 M4 设计前研判。本文只讲机制与权衡，不下最终裁决。

@@ -2,7 +2,7 @@
 //!
 //! **模型 A 的关键**：`Call` 处**宿主递归**——guest 调用一层，`interp_frame` 递归一层，
 //! guest 帧就落在 native（宿主）调用栈上（HotSpot/V8 式），而非独立 VM 帧栈（CPython/Lua 式）。
-//! 于是深 guest 递归 = 深 native 递归 = 天然继承 native 栈溢出语义（frame-stack-models.md 的
+//! 于是深 guest 递归 = 深 native 递归 = 天然继承 native 栈溢出语义（docs/designs/frame-stack-models.md 的
 //! "栈溢出忠实"）。局部数据放 slaved 操作数区（正交于控制流所在的 native 栈）。
 
 use super::bytecode::{BinOp, Operand, Program, Rvalue, Stmt, Terminator};

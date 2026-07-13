@@ -18,7 +18,7 @@ mirvm 是一个以 rustc 为前端、自建执行引擎的 Rust 抽象机器运�
   的受约束 Linux/ELF 装载使 blake3 转绿，SIMD 补面也已使 ecosystem 转绿。signal guest
   handler 与 guest backtrace/frame-IP 映射仍是两个原因锁定的独立 XFAIL，不属于
   M5.1 已完成语义。diff_cargo 3/3、六个 release tracer 脚本（七个独立子断言）、
-  23 个 Rust tests、rustfmt 与 Clippy 均通过。
+  25 个 Rust tests、rustfmt 与 Clippy 均通过。
 - **生产 JIT 尚未实现**：Cranelift 目前只用于冻结的 Spike 5，不在产品执行路径中。
 
 当前开发基线是 Linux/ELF/x86_64，工具链锁定在 `nightly-2026-07-02`。根设计契约见
@@ -44,7 +44,13 @@ bash tests/m4_gate1.sh
 bash tests/m4_gate2.sh
 bash tests/m4_gate4.sh
 bash tests/m4_gate5.sh
+
+# 真实项目 harness 自身回归（纯本地 fixture，不访问网络）
+bash tests/real_projects_regression.sh
 ```
+
+真实 Cargo 项目的 `prepare` / `check` / `bench` case 格式、隔离边界和当前本地实证见
+[docs/real-projects.md](docs/real-projects.md)。目前不能宣称支持“任意 Rust 程序”。
 
 单文件可使用 cargo script / RFC 3424 风格 frontmatter 声明依赖：
 

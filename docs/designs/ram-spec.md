@@ -1,7 +1,7 @@
 # RAM-SPEC —— Rust 抽象机器规格（mirvm 的语义契约）
 
 > **状态：长期语义契约。** 本文定义 mirvm 目标实现的 Rust 抽象机器（Rust Abstract Machine,
-> RAM），但不证明当前代码已经覆盖全部条款。当前实现缺口见 [current-status.md](current-status.md)；
+> RAM），但不证明当前代码已经覆盖全部条款。当前实现缺口见 [current-status.md](../current-status.md)；
 > 历史 tier-0 偏差已不再是现状。
 >
 > **本文不是**：Rust 官方形式规范（不存在）；不是从零重造一套操作语义（那是 opsem 团队十年工程 + Miri 的
@@ -170,7 +170,7 @@ L1 + 可选 L3 作为长期方向，且当前 checked 模式尚未实现。无�
 - 落在 unspecified/non-det 合法集合内的选择可登记为“实现选择”；
 - 对 well-defined 行为尚未覆盖的项目是**实现缺口**，不能用“偏差”弱化；
 - 未实现路径必须明确 Trap，不能以成功返回值制造集合外可观察行为；
-- 当前缺口集中列在 [current-status.md](current-status.md)，随代码和回归同步更新；
+- 当前缺口集中列在 [current-status.md](../current-status.md)，随代码和回归同步更新；
 - 栈溢出具体深度仍属 unspecified，但 Model A 只承诺近似 native，不承诺逐帧相同。
 
 **不接受**“合法程序上产出 well-defined 行为集合之外的结果”。2026-07-12 已把 guest signal
@@ -220,7 +220,7 @@ opaque `MaybeUninit` 字节载体，避免低对齐/padding 的宿主 UB。同�
 |---|---|
 | **语义（WHAT）** | 本文 RAM-SPEC |
 | 内存实现（HOW） | DESIGN.md §4 |
-| 并发实现（HOW） | docs/concurrency-arch.md |
-| 帧/字节码/JIT（HOW） | docs/frame-abi-bytecode.md、frame-stack-models.md |
-| async（HOW） | docs/async-stackless.md |
+| 并发实现（HOW） | docs/designs/concurrency-arch.md |
+| 帧/字节码/JIT（HOW） | docs/designs/frame-abi-bytecode.md、docs/designs/frame-stack-models.md |
+| async（HOW） | docs/designs/async-stackless.md |
 | 边界/os（HOW） | DESIGN.md §7、P7 os:: |

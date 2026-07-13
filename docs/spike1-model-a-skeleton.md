@@ -61,7 +61,7 @@ skeleton 所有槽都是 `u64` word，BinOp 走无符号 wrapping。fib/sum 天�
 
 - **模型 A 地基验证通过**——可以继续往上搭。`interp.rs` 的 `Call` 分支就是 Spike 2 插 **i2c（调编译帧）/c2i（编译帧回调）** 的点，也是 Spike 3 混合栈 unwind 要穿过的点。保持 §3.1 的借用结构。
 - **字节码形状定了个雏形**：register-based + MIR 对应。真做 mirvmc 降低前，先按 §3.2 把值/槽类型化。
-- **内存模型方向确认**：真地址 + 裸访问 + 无 overlay 是对的（§2.5 白赚）。真实现把 `GuestMemory` 的 bump 换成 TLAB + mimalloc 结构（concurrency-arch.md §3.3），接口（alloc/load/store）应能大致保留。
+- **内存模型方向确认**：真地址 + 裸访问 + 无 overlay 是对的（§2.5 白赚）。真实现把 `GuestMemory` 的 bump 换成 TLAB + mimalloc 结构（designs/concurrency-arch.md §3.3），接口（alloc/load/store）应能大致保留。
 - **明确未做**（本 spike 边界，非遗漏）：类型化值、聚合/枚举/vtable、真分配器/free、alloca、JIT、unwind/Drop、线程、MIR 降低、Stable MIR。各归后续 spike / M4 正式实现。
 
 ## 5. 复现

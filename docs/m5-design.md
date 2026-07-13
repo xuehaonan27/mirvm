@@ -307,5 +307,5 @@ M5 后另开，D3 已为它留好形状）/ signal 真装载·weak fn 真地址�
 ④ 性能上限无回归：加载 ≤1s、rayon ≤5s（JIT-on 计时另记账）；
 ⑤ TSan 零警告（interp 通道）+ spikes 回归 + 纯度门禁；
 ⑥ vmctx 挂起检查点处置落笔：T 骨架数据基线 + R 缓存层触发器（分配/guest-TLS
-   内联进场时以该负载复测），写入 vmctx-passing.md §7；
+   内联进场时以该负载复测），写入 designs/vmctx-passing.md §7；
 ⑦ m4-log M5 条目（gate 结果+教训+遗留归期）+ handoff/memory 收笔。

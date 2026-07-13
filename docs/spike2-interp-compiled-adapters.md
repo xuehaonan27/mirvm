@@ -40,7 +40,7 @@ interp_frame 又要 `&mut` 操作数区。**Rust 的 `&mut` 无法表达这种�
 编译码经它够到解释器态回调。骨架的"显式 `*mut Ctx` 首参"与之同构。三条备选里——(a) 显式 ctx 首参
 （本 spike）/ (b) thread-local / (c) 保留寄存器 r15（HotSpot）——(a) 最干净且直接对应 Cranelift vmctx。
 
-> **后记（2026-07-07）**：三选的完整分析与图示见 **docs/vmctx-passing.md**，结论比上面更锐利——
+> **后记（2026-07-07）**：三选的完整分析与图示见 **docs/designs/vmctx-passing.md**，结论比上面更锐利——
 > **边界**（FFI 逃逸/回调/信号）被 plain-C 逃逸 + 每线程 ctx + 任意线程信号三条约束**逼定为
 > TLS + 惰性 attach**，(a) 只剩内部约定的候选资格（vs pinned reg，M4 定）。本 spike 用 (a)
 > 验证适配器模型仍然成立（spike 内无逃逸场景）。

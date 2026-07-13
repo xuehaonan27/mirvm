@@ -1,10 +1,10 @@
 # vmctx 传递机制：编译码（与回调边界）如何够到 VM 执行态
 
 > 文档状态：**保留的机制比较与决策历史**。2026-07-07 原文在 Spike 2 后比较 P/T/R；
-> 2026-07-11 的最新分层结论由 [m5-design.md](m5-design.md) D5 替代旧的“P vs R 终裁”：
+> 2026-07-11 的最新分层结论由 [m5-design.md](../m5-design.md) D5 替代旧的“P vs R 终裁”：
 > native→guest 边界仍是 TLS + lazy attach；生产 JIT 先落 T 骨架，R 只在真实 ctx 热负载出现后
 > 作为 ABI 兼容缓存层复测；P 不再是生产候选。生产 JIT 尚未实现。完整时间线与重开条件见
-> [decision-history.md](decision-history.md)。原文保留三案论证。
+> [decision-history.md](../decision-history.md)。原文保留三案论证。
 >
 > 2026-07-07 时的**结论先行**：
 > - **边界机制已被逼定**：FFI 逃逸指针 / native 回调 / 信号处理器的入口，必须**按当前线程查找执行态

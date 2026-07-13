@@ -3,8 +3,8 @@
 > **状态：M4 的历史设计基线，部分已实现、部分仍是未来设计。** Model A tree-walking、slaved
 > ByteRegion、冻结元数据、真线程和 M4 unwind 已落地；方法级 Cranelift、compiled frame、
 > i2c/c2i 产品适配器、alloca 与 `.mirvm` 分发仍未实现。实际状态见
-> [current-status.md](current-status.md)，A/B 与局部存储两轴的演变见
-> [decision-history.md](decision-history.md)。下文保留原始方案，不能把未来段落当成现状。
+> [current-status.md](../current-status.md)，A/B 与局部存储两轴的演变见
+> [decision-history.md](../decision-history.md)。下文保留原始方案，不能把未来段落当成现状。
 
 ---
 
@@ -349,7 +349,7 @@ Java 能是因为它无编译期 target cfg、layout 由 JVM load 时定、基�
 4. **JIT tiering 策略**（M5）：何时编译、OSR 要不要（先不做，调用边界处编译整方法）、去优化。本草图只保证"编译后可无缝接入"，不定策略。
 5. **thunk/closure 生成**：libffi closure 还是自生成小桩；与 c2i 适配器合并。
 6. **字节码验证/降低管线**：MIR→字节码 pass、冻结元数据的缓存与内容寻址（与 sysroot 缓存呼应）。
-7. **vmctx 传递机制**（→ docs/vmctx-passing.md，2026-07-07）：**边界已被逼定**——FFI 逃逸指针/回调/
+7. **vmctx 传递机制**（→ docs/designs/vmctx-passing.md，2026-07-07）：**边界已被逼定**——FFI 逃逸指针/回调/
    信号的入口必须 TLS 按当前线程查找执行态 + 惰性 attach（JNI AttachCurrentThread 同款，归 os::thread）；
    被三条约束逼死：plain-C 逃逸（签名不能带隐藏参）、ctx 每线程一份（捕获式 thunk 跨线程原理错）、
    信号在任意线程跑。**内部约定待 M4 定**：显式 vmctx 首参 vs Cranelift pinned reg（r15），配多入口

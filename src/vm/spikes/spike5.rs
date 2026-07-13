@@ -452,7 +452,7 @@ fn fib_ref(n: u64) -> u64 {
 
 // ===== Cranelift 装配 =====
 
-/// vmctx 内部约定两变体（docs/vmctx-passing.md §5.2 的实测对象）
+/// vmctx 内部约定两变体（docs/designs/vmctx-passing.md §5.2 的实测对象）
 #[derive(Clone, Copy, PartialEq)]
 enum Conv {
     /// P：显式 ctx 首参，内部调用层层传（Wasmtime 式）

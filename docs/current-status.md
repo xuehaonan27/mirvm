@@ -1,6 +1,6 @@
 # mirvm 当前开发状态
 
-> 状态日期：2026-07-12。本文是当前状态的唯一汇总入口；若与早期计划、README 或交接文档
+> 状态日期：2026-07-13。本文是当前状态的唯一汇总入口；若与早期计划、README 或交接文档
 > 冲突，以当前代码、可复现测试结果和本文为准。文档权威规则见 [README.md](README.md)。
 
 ## 1. 阶段结论
@@ -43,9 +43,10 @@ Linux/ELF/x86_64 优先：依赖 pthread、dlopen、GNU 链接行为和 x86 asm 
 - debug/release 构建可通过；执行必须优先使用 release 版本。
 - M4 的纯函数、值/内存、unwind、FFI、真线程和 TSan gate 已有端到端覆盖。
 - `tests/diff.sh` 对当前 demo 做 native 差分，M5.0 的 asm probe 已进入回归。
-- 2026-07-12 当前 `cargo test --locked --all-features` 为 **23 passed**：asm stub、
+- 2026-07-13 当前 Rust tests 为 **25 passed**：asm stub、
   12 个 native archive、2 个 FFI 必需/可选库、Width、5 个 volatile（含低对齐和
-  padding）与 2 个 x86 helper 测试；Rust 层覆盖仍小，shell gate 仍是主要安全网。
+  padding）、2 个 x86 helper，以及 harness Cargo 命令 locked/普通 CLI 可创建 lockfile 两种模式；Rust 层覆盖仍小，
+  shell gate 仍是主要安全网。
 - `tests/gate_truth_regression.sh` **10/10**，除了双方失败假绿、XFAIL 原因、
   XPASS、corpus 状态传播和 gate0/1/2，还锁住 TSan/性能/CPU 特性 SKIP 不得冒充
   PASS，x86 vector 的 pshufb/SHA 子能力必须分别记账。
@@ -56,7 +57,16 @@ Linux/ELF/x86_64 优先：依赖 pthread、dlopen、GNU 链接行为和 x86 asm 
 - 最终 full release gate5（含 gate0/1/2/4、TSan、六个 M5.1 tracer 脚本/七个子断言）为
   **40 PASS / 2 XFAIL / 0 SKIP / 0 FAIL**；XFAIL 分别是 signal guest handler 和
   guest backtrace/frame-IP 映射。
-- `diff.sh` 17/17，`diff_cargo.sh` 3/3；性能快照 load 471ms、rayon 732ms。
+- 2026-07-13 最终复跑仍为 full gate5 **40 PASS / 2 XFAIL / 0 SKIP / 0 FAIL**，
+  `diff.sh` 17/17、`diff_cargo.sh` 3/3；本次性能快照 load 397ms、rayon 820ms。
+- `tests/real_projects_regression.sh` **38/38**，覆盖严格 case schema、repo/rev/lock provenance、
+  native-first oracle、exit/stdout/stderr 精确比较、canonical XFAIL/XPASS、断网与写隔离、
+  toolchain/host target、干净 env/EOF stdin、私有 runtime cache、source mutation，以及 benchmark
+  correctness 准入、warmup/交替采样、每轮 oracle、基础设施状态和完整 summary provenance。
+- 已有本地临时 clone 的真实项目证据：hexyl correctness PASS 且 3 样本 benchmark 成功；ripgrep
+  与 tokei 分别在完整调用点诊断上精确 XFAIL。仓库尚未提交远程项目 case，因此这些结果不能称为
+  持续 gate，也不能外推为“任意 Rust”。完整合同与 revision 见
+  [real-projects.md](real-projects.md)。
 - `cargo fmt --all -- --check` 与 Clippy `-D warnings` 当前均通过。GitHub Actions workflow 已建立，
   执行 fmt、Clippy、Rust tests、gate harness、release build、独立可见的 TSan 与 runtime gates。
 - 测试脚本必须以**可观察输出或不变式**为 oracle，不能把“双方都失败”或“仅退出码相同”当成功。
@@ -84,13 +94,15 @@ Linux/ELF/x86_64 优先：依赖 pthread、dlopen、GNU 链接行为和 x86 asm 
 | 生命周期/嵌入 | `Shared`、thunk、asm handle、部分 TLS 存储按进程期保存；错误路径可退出进程；尚非稳定多 Engine API |
 | 分发与产品面 | `.mirvm` mode B、daemon、REPL、checked 模式、正式沙箱均未实现 |
 | 平台 | 当前仅应宣称 Linux/ELF/x86_64 开发基线 |
+| 任意 Rust / 真实项目 | 尚不支持任意 Rust；已有严格 real-project harness 和一个本地 PASS 项目切片，另有两个精确 XFAIL。远程固定 case 尚未入库 |
 
 架构目标不等于当前资格。尤其“RAM 运行参考实现”是长期语义契约；在上述已知缺口和有限 corpus
 仍存在时，不应把它描述成已经覆盖完整 Rust 语义的成品。
 
 ## 5. 当前开发顺序
 
-1. **已落第一版**：可信化 gate oracle、锁定预期失败原因；继续以全 gate 实跑验证脚本本身。
+1. **已完成第一版**：真实项目 TDD harness、可信 oracle、精确 XFAIL 与 correctness-gated benchmark；
+   继续把临时实证转成可维护的固定 case。
 2. **已落第一版**：移除 silent stub、让 guest signal handler 和不能翻译的 unwinder
    context 边界明确 Trap、补真 opaque volatile IR；继续为安全转入 native FFI 的边界
    增加 differential probes。
@@ -99,7 +111,9 @@ Linux/ELF/x86_64 优先：依赖 pthread、dlopen、GNU 链接行为和 x86 asm 
 4. 保持本文、根 README、DESIGN、HANDOFF 和施工日志同步；历史模型只标注替代，不删除。
 5. **已完成**：M5.1 按真实前沿收窄并实现；signal/backtrace 两个独立
    XFAIL 没有被伪装成 M5.1 绿。
-6. 下一阶段进入 M5.2 方法级 JIT；保持 JIT-on/off/native 三方 oracle 计划。
+6. 远程项目与 GitHub Issues 当前按维护要求暂停；恢复后再提交固定 manifests、来源策略与持续 gate。
+7. 产品语义施工应优先由真实项目的精确失败前沿驱动；进入 M5.2 方法级 JIT 时，保持
+   JIT-on/off/native 三方 oracle 计划。
 
 ## 6. 完成一个阶段时如何更新
 

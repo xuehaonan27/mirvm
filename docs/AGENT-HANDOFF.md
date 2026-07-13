@@ -46,7 +46,7 @@ evcxr 四点不满（延迟、状态/借用限制、跑不了完整项目、编�
   emulation 特指**过度重实现**（如 tier-0 自建的协作式线程调度器）。
 - **真实地址内存**：一个连续地址空间（宿主的），guest 指针 = 真宿主地址。这让 FFI 零编组、
   `into_pthread_t` 成立、mmap 区可访问。代价：与 Wasm 式廉价沙箱封闭不兼容（无免费午餐）。
-- **RAM 定义度四级**（`docs/ram-spec.md`）：well-defined（必须匹配 native）/ unspecified
+- **RAM 定义度四级**（`docs/designs/ram-spec.md`）：well-defined（必须匹配 native）/ unspecified
   （挑一个，不必同 native）/ non-det（任一合法执行）/ UB（无约束、不检测）。**差分对拍只拍
   well-defined 可观测输出**。mirvm **不检测 UB**（质量取向，非偏差）。
 - **不做**：borrowck、UB 检测、自研前端（复用 rustc 四堵墙）。
@@ -64,18 +64,22 @@ evcxr 四点不满（延迟、状态/借用限制、跑不了完整项目、编�
   解释器按 `fn(*mut u8)` 缓冲 ABI 调用。实际结果见 `m5-log.md`。
 - M5.1 已完成：numbigint/xgetbv/sha2/blake3/ecosystem 均在 release 路径转绿，diff_cargo
   3/3、六个 native-differential tracer 脚本（pshufb/SHA 分别记账）、cargo test
-  23/23、rustfmt 与 Clippy 通过；signal guest handler 和 guest backtrace/frame-IP 映射
+  25/25、rustfmt 与 Clippy 通过；signal guest handler 和 guest backtrace/frame-IP 映射
   是独立 XFAIL，不能借 M5.1 宣称已支持。
+- 2026-07-13 已建立真实 Cargo 项目 TDD harness，自身回归 38/38；本地 hexyl 切片 PASS，
+  ripgrep/tokei 在完整调用点诊断上精确 XFAIL。它仍不等于支持“任意 Rust”，操作与限制见
+  [real-projects.md](real-projects.md)。
 - 方法级 Cranelift JIT、tiering、JIT LSDA 属于 M5.2–M5.4，生产路径中还不存在。
 
 2026-07-12 复核发现旧 gate 存在 signal 只看退出码、diff_cargo 双方失败也可 PASS、corpus
 失败不传状态等假阳性。因此历史 “gate5 31/31” 只能按旧脚本口径阅读，不能再解释为 31 个
 语义正确断言。该审计已推动 oracle、silent stub、volatile 和 M5.1 differential probes
-全部收口；下一阶段进入 M5.2，但同一门禁纪律必须保留。
+全部收口；后续产品施工先由真实项目的精确前沿驱动，进入 M5.2 时同一门禁纪律必须保留。
 
 最终 full release gate5（含 gate0/1/2/4、TSan 与六个 M5.1 tracer 脚本）为
 **40 PASS / 2 XFAIL / 0 SKIP / 0 FAIL**；XFAIL 是 signal guest handler 与 guest
-backtrace/frame-IP 映射；diff 17/17、diff_cargo 3/3，load 471ms、rayon 732ms。
+backtrace/frame-IP 映射；2026-07-13 最终复跑仍为 diff 17/17、diff_cargo 3/3，
+load 397ms、rayon 820ms。
 CI workflow 已建立，TSan 独立可见，本地 fmt/Clippy 质量门均通过。
 
 ---
@@ -128,12 +132,12 @@ CI workflow 已建立，TSan 独立可见，本地 fmt/Clippy 质量门均通过
 | 文档 | 内容 | 关键性 |
 |---|---|---|
 | `DESIGN.md` | 主设计（RAM 脊柱 / 架构 / 内存 / 线程 / tier / 原则 P0-P7 / 账本 C0-C13） | 脊柱 |
-| `docs/ram-spec.md` | RAM 语义契约（定义度四级、差分只拍 well-defined） | 高 |
-| `docs/frame-stack-models.md` | 模型 A vs B，结论 A（JIT 集成决定性） | 高 |
-| `docs/frame-abi-bytecode.md` | M4 帧/ABI/字节码/JIT/分发 + §10 开放问题 + §11 spike 清单 | **最高** |
-| `docs/concurrency-arch.md` | 并发 RFC（状态三分、tcx 唯一敌人、TLAB、Spike4 验收） | 高 |
-| `docs/vmctx-passing.md` | vmctx 传递（边界 TLS 逼定 / 内部 P vs R 挂 M5，含图） | 高 |
-| `docs/async-stackless.md` | async=无栈状态机实证 | 中 |
+| `docs/designs/ram-spec.md` | RAM 语义契约（定义度四级、差分只拍 well-defined） | 高 |
+| `docs/designs/frame-stack-models.md` | 模型 A vs B，结论 A（JIT 集成决定性） | 高 |
+| `docs/designs/frame-abi-bytecode.md` | M4 帧/ABI/字节码/JIT/分发 + §10 开放问题 + §11 spike 清单 | **最高** |
+| `docs/designs/concurrency-arch.md` | 并发 RFC（状态三分、tcx 唯一敌人、TLAB、Spike4 验收） | 高 |
+| `docs/designs/vmctx-passing.md` | vmctx 传递（边界 TLS 逼定 / 内部 P vs R 挂 M5，含图） | 高 |
+| `docs/designs/async-stackless.md` | async=无栈状态机实证 | 中 |
 | `docs/corpus.md` | corpus 五批 + 五票据 | 高 |
 | `docs/spike{1..5}-*.md` | 五 spike 经验教训 | 中（背景） |
 | `docs/m4-plan.md` | M4 六期计划 + 六决策 D1-D6 + 挂起项 | **最高** |

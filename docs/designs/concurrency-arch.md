@@ -2,7 +2,7 @@
 
 > 文档状态：**M4 的历史架构 RFC**。tcx-free 执行相、状态三分、1:1 真线程、宿主原子和 TSan
 > gate 已落地；mode B、TLAB 细节、checked 模式及独立 `os::` 层仍含未实现内容。实际状态见
-> [current-status.md](current-status.md)，不要把本文所有未来形态当成当前目录结构。
+> [current-status.md](../current-status.md)，不要把本文所有未来形态当成当前目录结构。
 
 > **原始状态（2026-07-07）：草稿，待评审。** 依据：C1（生而并发，VM tier=N 真 OS 线程无 GIL；tier-0=GIL 过渡）、
 > C2（并发内存模型、状态三分）、C3（Rust 三红利）、C4（guest UB 立场）、C8（三招）、

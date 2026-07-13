@@ -85,7 +85,7 @@ shim），不解释 std panic_unwind 的内部。
 
 替身验证不了"**真 Cranelift** 能否为我们的帧发 LSDA/landing pad + 与 Rust personality 协作"
 ——cg_clif 已对全 Rust 趟通（风险低），留 M4 真 Cranelift 管线复核。**与 vmctx 内部约定
-（显式参 vs pinned reg，docs/vmctx-passing.md §5.2）是同一个 M4 检查点，一并做。**
+（显式参 vs pinned reg，docs/designs/vmctx-passing.md §5.2）是同一个 M4 检查点，一并做。**
 
 ## 5. 对 M4 / 后续 spike 的输入
 
@@ -94,7 +94,7 @@ shim），不解释 std panic_unwind 的内部。
 - 字节码的 unwind 形状定型进共享草图：`UnwindAction`/cleanup 块/`Resume`/catch 结构
   ≈ MIR 机械对应（佐证降低仍是机械活）。
 - **剩 Spike 4（并发）**：N 真宿主线程各跑 interp_frame、共享只读字节码、per-thread
-  region/ctx，过 TSan（= corpus §2.1 的 M4 答案；concurrency-arch.md 的引擎 Sync 主张）。
+  region/ctx，过 TSan（= corpus §2.1 的 M4 答案；designs/concurrency-arch.md 的引擎 Sync 主张）。
 - guard/edge 协议、异常对象 downcast 纪律、C-unwind 要求——全部进 M4 帧 ABI 定稿。
 
 ## 6. 复现

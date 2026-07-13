@@ -4,7 +4,7 @@
 //! 三实例都因"读无 AllocId 的真地址指针"被判 DanglingIntPointer）。M4 甩掉 overlay
 //! 后，guest 指针就是真宿主地址、裸 read/write，本文件是它的最小骨架示范。
 //!
-//! bump 分配、无 free（skeleton；真实现走 TLAB + mimalloc 结构，见 concurrency-arch.md §3.3）。
+//! bump 分配、无 free（skeleton；真实现走 TLAB + mimalloc 结构，见 docs/designs/concurrency-arch.md §3.3）。
 
 /// 一块固定大小的匿名映射；返回给 guest 的"指针"就是真宿主地址。
 pub struct GuestMemory {

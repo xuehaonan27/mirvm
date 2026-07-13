@@ -38,7 +38,7 @@ fn raise_guest(payload: Word) -> ! {
     panic::resume_unwind(Box::new(GuestPanic { payload }))
 }
 
-// ===== 执行上下文（vmctx，纪律同 spike2 / docs/vmctx-passing.md）=====
+// ===== 执行上下文（vmctx，纪律同 spike2 / docs/designs/vmctx-passing.md）=====
 
 type CompiledFn = extern "C-unwind" fn(*mut Ctx, u64) -> u64;
 
