@@ -15,7 +15,7 @@ use super::frame::{self, FrameLayout, ValKind};
 use super::{Callee, Linker};
 use crate::vm::engine::ir::{
     self, Bb, IntBinOp, IntCc, Operand, OvfOp, ParamAbi, PlaceBase, PlaceExpr, PlaceStep, RetAbi,
-    RetDest, Rvalue, ScalarPlace, Slot, Stmt, Terminator, Width,
+    RetDest, Rvalue, ScalarPlace, Slot, Stmt, SwitchDiscr, Terminator, Width,
 };
 
 /// 整函数不可降低时的占位体（被调用即 Trap，诊断给出原因）。
@@ -232,12 +232,38 @@ impl<'tcx> LowerCx<'tcx, '_> {
         for elem in place.projection {
             match elem {
                 mir::ProjectionElem::Field(f, fty) => {
+                    let parent_ty = p.ty;
                     let layout = self.layout_of(p.ty)?;
                     let layout = match variant.take() {
                         Some(v) => layout.for_variant(&LayoutCxAt(self.tcx, self.typing_env), v),
                         None => layout,
                     };
-                    p.push_offset(layout.fields.offset(f.as_usize()).bytes() as i64);
+                    let offset = layout.fields.offset(f.as_usize()).bytes();
+                    let field_layout = self.layout_of(fty)?;
+                    if field_layout.is_unsized()
+                        && offset != 0
+                        && !matches!(fty.kind(), ty::Slice(_) | ty::Str)
+                    {
+                        let ty::Dynamic(..) = fty.kind() else {
+                            return Err(format!(
+                                "嵌套 DST 字段动态对齐（parent={parent_ty}, field={fty}，M4.6+）"
+                            ));
+                        };
+                        let meta = p.meta.clone().ok_or_else(|| {
+                            format!("dyn 尾字段无 vtable meta（parent={parent_ty}, field={fty}）")
+                        })?;
+                        let packed = match parent_ty.kind() {
+                            ty::Adt(def, _) => def.repr().pack.map(|align| align.bytes()),
+                            _ => None,
+                        };
+                        p.steps.push(PlaceStep::VTableAlignOffset {
+                            meta,
+                            unaligned: offset,
+                            packed,
+                        });
+                    } else {
+                        p.push_offset(offset as i64);
+                    }
                     p.ty = fty;
                 }
                 mir::ProjectionElem::Downcast(_, v) => {
@@ -1743,18 +1769,18 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }
                     }
                     PC::ReifyFnPointer(..) => {
-                        // FnDef（ZST）→ fn ptr：D4 条目表给真地址身份
+                        // FnDef（ZST）→ fn ptr：必须走 rustc 的 fn-ptr 专用解析。
+                        // #[track_caller] 不能编码进 fn-ptr ABI；resolve_for_fn_ptr 会为它
+                        // 选择 Reify shim，由 shim 以普通 fn-ptr ABI 接参并补 caller location。
                         let a_ty = self.op_ty(a)?;
                         let ty::FnDef(def_id, gargs) = a_ty.kind() else {
                             return Err(format!("ReifyFnPointer 源非 FnDef（{a_ty}）"));
                         };
-                        let inst = Instance::expect_resolve(
-                            self.tcx,
-                            self.typing_env,
-                            *def_id,
-                            gargs,
-                            rustc_span::DUMMY_SP,
-                        );
+                        let Some(inst) =
+                            Instance::resolve_for_fn_ptr(self.tcx, self.typing_env, *def_id, gargs)
+                        else {
+                            return Err(format!("ReifyFnPointer 实例解析失败（{a_ty}）"));
+                        };
                         let addr = self.linker.fn_entry_addr(inst);
                         let ValKind::Scalar(w) = dst_kind else {
                             return Err("ReifyFnPointer 目标非标量".into());
@@ -1895,7 +1921,23 @@ impl<'tcx> LowerCx<'tcx, '_> {
         Ok(match &term.kind {
             TK::Goto { target } => (vec![], Terminator::Goto(target.as_u32())),
             TK::SwitchInt { discr, targets } => {
-                let d = self.lower_operand_scalar(discr)?;
+                let d = match self.lower_operand(discr)? {
+                    LoweredOp::Scalar(value) => SwitchDiscr::Scalar(value),
+                    LoweredOp::Bytes { place, size: 16 }
+                        if matches!(
+                            self.op_ty(discr)?.kind(),
+                            ty::Int(ty::IntTy::I128) | ty::Uint(ty::UintTy::U128)
+                        ) =>
+                    {
+                        SwitchDiscr::Wide(place.expr())
+                    }
+                    _ => {
+                        return Err(format!(
+                            "SwitchInt 判别式不是整数标量（ty={}）",
+                            self.op_ty(discr)?
+                        ));
+                    }
+                };
                 (
                     vec![],
                     Terminator::SwitchInt {
@@ -1971,7 +2013,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 (
                     vec![],
                     Terminator::SwitchInt {
-                        discr: c,
+                        discr: SwitchDiscr::Scalar(c),
                         targets: vec![(*expected as u128, target.as_u32())],
                         otherwise: panic_blk,
                     },
@@ -2738,55 +2780,45 @@ impl<'tcx> LowerCx<'tcx, '_> {
             "atomic_singlethreadfence" => vec![Stmt::Fence {
                 single_thread: true,
             }],
-            // volatile 是 RAM 可观察行为，必须一路保留到执行器。支持宽度
-            // 使用 alignment=1 的 opaque MaybeUninit 字节载体发出一个等宽事件：
-            // 既不对 `[u8; N]` 施加错误的整数对齐，也不读取聚合值的
-            // 未初始化 padding 为宿主整数。其他宽度若拆分会改变 MMIO
-            // 语义，因此仍明确 Trap。
+            // volatile 是 RAM 可观察行为，必须一路保留到执行器。值始终使用
+            // alignment=1 的 opaque MaybeUninit 字节载体：既不对 `[u8; N]`
+            // 施加错误的整数对齐，也不把聚合值的未初始化 padding 读成宿主值。
+            // rustc 对 memory-repr store 本身会发 volatile memcpy；宽值由执行器
+            // 按后端可承载的块分解，标量常用宽度仍保持一个 volatile 事件。
             "volatile_load" | "unaligned_volatile_load" => {
                 let t = inst.args.type_at(0);
-                let size = self.layout_of(t)?.size.bytes();
-                match size {
-                    0 => vec![Stmt::Nop],
-                    1 | 2 | 4 | 8 | 16 => vec![Stmt::VolatileLoad {
+                let size = u32::try_from(self.layout_of(t)?.size.bytes())
+                    .map_err(|_| format!("{name} 类型 {t} 大小超出 u32"))?;
+                if size == 0 {
+                    vec![Stmt::Nop]
+                } else {
+                    vec![Stmt::VolatileLoad {
                         addr: self.lower_operand_scalar(&args[0].node)?,
                         dst: self.resolve_place(destination)?.expr(),
-                        size: size as u8,
-                    }],
-                    _ => vec![Stmt::Trap(
-                        format!("{name} 类型 {t} 宽 {size} 字节，等宽 volatile 暂不支持")
-                            .into_boxed_str(),
-                    )],
+                        size,
+                    }]
                 }
             }
             "volatile_store" | "unaligned_volatile_store" => {
                 let t = inst.args.type_at(0);
-                let size = self.layout_of(t)?.size.bytes();
-                match size {
-                    0 => vec![Stmt::Nop],
-                    1 | 2 | 4 | 8 | 16 => {
-                        let addr = self.lower_operand_scalar(&args[0].node)?;
-                        let mut stmts = Vec::new();
-                        let src = if let Some(place) = args[1].node.place() {
-                            self.resolve_place(&place)?.expr()
-                        } else {
-                            let value = self.lower_operand(&args[1].node)?;
-                            let kind = self.classify(t)?;
-                            let scratch = self.scratch_place(t)?;
-                            stmts.extend(self.assign_lowered(&scratch, kind, value)?);
-                            scratch.expr()
-                        };
-                        stmts.push(Stmt::VolatileStore {
-                            addr,
-                            src,
-                            size: size as u8,
-                        });
-                        stmts
-                    }
-                    _ => vec![Stmt::Trap(
-                        format!("{name} 类型 {t} 宽 {size} 字节，等宽 volatile 暂不支持")
-                            .into_boxed_str(),
-                    )],
+                let size = u32::try_from(self.layout_of(t)?.size.bytes())
+                    .map_err(|_| format!("{name} 类型 {t} 大小超出 u32"))?;
+                if size == 0 {
+                    vec![Stmt::Nop]
+                } else {
+                    let addr = self.lower_operand_scalar(&args[0].node)?;
+                    let mut stmts = Vec::new();
+                    let src = if let Some(place) = args[1].node.place() {
+                        self.resolve_place(&place)?.expr()
+                    } else {
+                        let value = self.lower_operand(&args[1].node)?;
+                        let kind = self.classify(t)?;
+                        let scratch = self.scratch_place(t)?;
+                        stmts.extend(self.assign_lowered(&scratch, kind, value)?);
+                        scratch.expr()
+                    };
+                    stmts.push(Stmt::VolatileStore { addr, src, size });
+                    stmts
                 }
             }
             "copy_nonoverlapping" | "copy" => {

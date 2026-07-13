@@ -32,10 +32,21 @@ case "$target" in
                 echo 'ecosystem-ok'
                 exit 0
                 ;;
+            stderr_only)
+                echo 'ecosystem-ok'
+                echo 'unexpected mirvm diagnostic' >&2
+                exit 0
+                ;;
         esac
         ;;
     demo/ffi_zlib.rs)
         echo 'ffi-ok'
+        ;;
+    tests/fixtures/real_ripgrep_regex.rs)
+        echo 'regex-ok'
+        ;;
+    tests/fixtures/cargo_warning_return.rs)
+        echo 'warning-return-ok'
         ;;
     corpus/c_signal.rs)
         echo 'mirvm: unsupported builtin `signal`' >&2

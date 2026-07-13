@@ -43,7 +43,7 @@
 |---|---|---|
 | `current-status.md` | **当前** | 唯一跨阶段状态入口；替代 README、HANDOFF 中旧的阶段快照 |
 | `decision-history.md` | **当前** | 关键决策索引；保留被替代方案和重新开启决策的触发条件 |
-| `real-projects.md` | **当前** | 真实项目 case、correctness/benchmark 合同、临时实证与限制 |
+| `real-projects.md` | **当前** | 真实项目 case、correctness/benchmark 合同、workspace-local artifacts、证据层级与限制 |
 | `DESIGN.md` | **契约** | 长期心智模型；其中明确标为历史的 tier-0/M0–M2 章节不描述现实现 |
 | `designs/ram-spec.md` | **契约** | 语义目标；实现差距由 current-status 登记 |
 | `m5-design.md` | **已批准** | M5 总体双轨设计；M5.0/M5.1 已实现，M5.2+ 仍属路线图 |
@@ -71,11 +71,14 @@
 | 2026-07-08–10 | M4.1–M4.5 设计与 m4-log | 实现逐期替代计划预期；worklist、panic、TLS dtor、spread_arg 等以日志/代码为准 |
 | 2026-07-11 | M5 总设计、M5.0 日志、vmctx D5 | M5 总路线获批；只有 M5.0 已实现；vmctx 改为 T 骨架 + R 触发式缓存层 |
 | 2026-07-12 | 全项目审计、M5.1 设计与施工 | 先发现测试假阳性并重建 oracle；随后完成 M5.1，又用最终复审修正 volatile UB、unwinder 伪回溯、required archive 装载和 SKIP 冒充 PASS；signal/backtrace 两个独立 XFAIL；本索引与状态页建立 |
-| 2026-07-13 | 真实项目 TDD 与文档重整 | 建立严格 real-project oracle/benchmark harness；本地 hexyl PASS、ripgrep/tokei 精确 XFAIL；历史设计迁入 `docs/designs/`，frame/vmctx 旧模型完整保留 |
+| 2026-07-13 | 真实项目 TDD 与文档重整 | 建立严格 real-project oracle/benchmark harness；ripgrep/tokei 移入 Git-ignored workspace working set，并依次推动 direct dyn 尾 alignment、u128 SwitchInt、track_caller Reify shim、宽 volatile、稳定逻辑路径/rustflags 保留与 Cargo runner warning-summary 收口。最终 runner 先完成 rustc finalization，再执行 VM，仅结构化过滤 count-summary。两项目的三个 workload 已在 `/run` + RUSTC proxy harness 下 correctness PASS 并完成 3 样本 benchmark；广覆盖 tokei workload 选择稳定 compact aggregate，不用 normalizer 掩盖并行 JSON 次序。随后单 case 的 CaseID→CheckID/BenchID→EvidenceID、不可变对象、原子 current view 与并发锁落地；最终 schema-3 consumer 进一步重算 PASS/XFAIL 语义、绑定 exact-check provenance 与 benchmark statistics，发布改为两层 staging 下先封存再同父目录 rename，并保留 schema-2 历史 dispatch。suite inventory/集合身份仍开放；历史 frame/vmctx、旧 identity 与旧 volatile 模型完整保留 |
 
 典型替代关系：`m4-plan → m4-log`、`M5 设计预期 → m5-log 实测`、
 `vmctx-passing §7 旧 P/R 开放项 → m5-design D5`、`M5.1 原退出标准 → 2026-07-12
-可信 oracle 前置`。完整理由见 decision-history。
+可信 oracle 前置`、`静态 direct-dyn field offset → vtable runtime alignment`、
+`直接 track_caller item entry → Reify shim`、`宽 volatile 不得拆 → memory-repr 后端分块`、
+`runner callback 内执行/提前退出 → compiler 完整收尾后执行 VM + 结构化 summary filter`。
+完整理由和重开条件见 decision-history。
 
 ## 5. 文档维护纪律
 

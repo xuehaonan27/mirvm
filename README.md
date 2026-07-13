@@ -17,8 +17,20 @@ mirvm 是一个以 rustc 为前端、自建执行引擎的 Rust 抽象机器运�
   xgetbv 已与 native 差分，pshufb/SHA stdarch helpers 也已使 sha2 转绿；guest 静态归档
   的受约束 Linux/ELF 装载使 blake3 转绿，SIMD 补面也已使 ecosystem 转绿。signal guest
   handler 与 guest backtrace/frame-IP 映射仍是两个原因锁定的独立 XFAIL，不属于
-  M5.1 已完成语义。diff_cargo 3/3、六个 release tracer 脚本（七个独立子断言）、
-  25 个 Rust tests、rustfmt 与 Clippy 均通过。
+  M5.1 已完成语义；当期验收的 diff_cargo 3/3、25 个 Rust tests 等数字按历史施工口径保留。
+- **真实项目 TDD 本轮完成并继续扩面**：当前已有 35/35 个 Rust tests、diff 20/20、diff_cargo 5/5；
+  gate-truth 最终 12/12，real-project harness 最终 63/63，最终 full gate5 为
+  40 PASS / 2 XFAIL / 0 SKIP / 0 FAIL，fmt、Rust tests、Clippy 与 release build 均最终通过。workspace-local ripgrep/tokei
+  已推动 direct dyn 尾 alignment、u128 `SwitchInt`、`track_caller` Reify shim 与宽 volatile
+  修复；Cargo runner 额外 rustc warning summary 也已用结构化诊断 filter 最小化收口，且
+  保留完整 compiler 收尾与 guest 同文 stderr。ripgrep 与 tokei 两个项目的三个 workload
+  已在最终 namespace-private `/run` 逻辑根 + RUSTC proxy harness 下 correctness PASS，
+  并用同一 release mirvm sha256 `7b064b3f…` 完成 warmup 1 / samples 3 benchmark。单 case 已使用
+  Case/Check/Bench/Evidence 分层内容身份（含 Git/controller 字节）、不可变对象与原子 current view；
+  schema-3 consumer 还会重推分层身份、PASS/XFAIL 语义、exact-check provenance，并从 samples 复算
+  benchmark summary；schema-2 历史对象保留独立验证路径。suite inventory 仍未实现。
+  它们仍是 Git-ignored workspace evidence，不能提前视作远程持续 gate。Cargo shim 对项目自定义 rustc/workspace wrapper 当前 fail-closed，不支持
+  wrapper composition；聚合质量门与隔离边界见 `docs/current-status.md`。
 - **生产 JIT 尚未实现**：Cranelift 目前只用于冻结的 Spike 5，不在产品执行路径中。
 
 当前开发基线是 Linux/ELF/x86_64，工具链锁定在 `nightly-2026-07-02`。根设计契约见
@@ -49,8 +61,9 @@ bash tests/m4_gate5.sh
 bash tests/real_projects_regression.sh
 ```
 
-真实 Cargo 项目的 `prepare` / `check` / `bench` case 格式、隔离边界和当前本地实证见
-[docs/real-projects.md](docs/real-projects.md)。目前不能宣称支持“任意 Rust 程序”。
+真实 Cargo 项目的 `prepare` / `check` / `bench` case 格式、Git-ignored workspace artifacts、
+隔离边界和分层实证见 [docs/real-projects.md](docs/real-projects.md)。目前不能宣称支持
+“任意 Rust 程序”。远程仓库和 GitHub Issues/PRD/PR 操作当前暂停，维护者明确恢复前不要执行。
 
 单文件可使用 cargo script / RFC 3424 风格 frontmatter 声明依赖：
 

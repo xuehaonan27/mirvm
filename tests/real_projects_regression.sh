@@ -4,7 +4,61 @@ set -u
 cd "$(dirname "$0")/.."
 
 TMP=$(mktemp -d)
-trap 'test -z "${SERVER_PID:-}" || kill "$SERVER_PID" 2>/dev/null || true; rm -rf "$TMP"' EXIT
+BACKGROUND_PIDS=()
+PROCESS_TREE=()
+collect_tree() {
+    local parent=$1 child
+    PROCESS_TREE+=("$parent")
+    while read -r child; do
+        [ -n "$child" ] || continue
+        collect_tree "$child"
+    done < <(pgrep -P "$parent" 2>/dev/null || true)
+}
+forget_background() {
+    local completed=$1 pid remaining=()
+    for pid in "${BACKGROUND_PIDS[@]}"; do
+        [ "$pid" = "$completed" ] || remaining+=("$pid")
+    done
+    BACKGROUND_PIDS=("${remaining[@]}")
+}
+cleanup_regression() {
+    local pid pid_file
+    PROCESS_TREE=()
+    for pid in "${BACKGROUND_PIDS[@]}"; do
+        collect_tree "$pid"
+    done
+    for pid in "${BACKGROUND_PIDS[@]}"; do
+        kill -TERM -- "-$pid" 2>/dev/null || true
+    done
+    for pid in "${PROCESS_TREE[@]}"; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    for pid_file in "${CONTROL_FD_PIDS:-}" "${CONTROL_SUBSHELL_PIDS:-}"; do
+        [ -n "$pid_file" ] && [ -f "$pid_file" ] || continue
+        while read -r pid; do
+            kill -TERM "$pid" 2>/dev/null || true
+        done <"$pid_file"
+    done
+    sleep 0.05
+    for pid in "${BACKGROUND_PIDS[@]}"; do
+        kill -KILL -- "-$pid" 2>/dev/null || true
+    done
+    for pid in "${PROCESS_TREE[@]}"; do
+        kill -KILL "$pid" 2>/dev/null || true
+    done
+    for pid in "${BACKGROUND_PIDS[@]}"; do
+        wait "$pid" 2>/dev/null || true
+    done
+    for pid_file in "${CONTROL_FD_PIDS:-}" "${CONTROL_SUBSHELL_PIDS:-}"; do
+        [ -n "$pid_file" ] && [ -f "$pid_file" ] || continue
+        while read -r pid; do
+            kill -KILL "$pid" 2>/dev/null || true
+        done <"$pid_file"
+    done
+    chmod -R u+w "$TMP" 2>/dev/null || true
+    rm -rf "$TMP"
+}
+trap cleanup_regression EXIT
 PYTHON=${PYTHON:-$(command -v python3)}
 pass=0 fail=0
 ok() { pass=$((pass + 1)); echo "PASS $*"; }
@@ -125,6 +179,19 @@ else
     echo "$invalid_out"
 fi
 
+run_path_out=$(env PROJECT_SUITE_ROOT=/run/mirvm-project-suite \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_MIRVM" \
+    bash tests/real_projects.sh prepare "$CASE" 2>&1)
+run_path_code=$?
+if [ "$run_path_code" -eq 69 ] \
+    && echo "$run_path_out" | grep -Fq \
+        'host_path_hidden_by_run_tmpfs: project_suite_root=/run/mirvm-project-suite'; then
+    ok '/run 下的 host 路径在 namespace 覆盖前 fail-fast'
+else
+    bad "host path under /run (exit=$run_path_code)"
+    echo "$run_path_out"
+fi
+
 UNKNOWN_ROOT_CASE="$TMP/unknown-root-key.toml"
 cat >"$UNKNOWN_ROOT_CASE" <<EOF
 name = "unknown-root-key"
@@ -214,6 +281,28 @@ else
     echo "$invalid_xfail_diagnostic_out"
 fi
 
+ENCODED_RUSTFLAGS_CASE="$TMP/encoded-rustflags.toml"
+cat >"$ENCODED_RUSTFLAGS_CASE" <<EOF
+name = "encoded-rustflags"
+repo = "$UPSTREAM"
+rev = "$REV"
+lock_sha256 = "$LOCK_SHA256"
+
+[env]
+CARGO_ENCODED_RUSTFLAGS = "-Awarnings"
+EOF
+encoded_rustflags_out=$(env "${common_env[@]}" \
+    bash tests/real_projects.sh prepare "$ENCODED_RUSTFLAGS_CASE" 2>&1)
+encoded_rustflags_code=$?
+if [ "$encoded_rustflags_code" -eq 65 ] \
+    && echo "$encoded_rustflags_out" | grep -Fq \
+        'invalid_case: env.CARGO_ENCODED_RUSTFLAGS is controlled by project-suite'; then
+    ok 'case 不能绕过 harness 管理的 rustc flags'
+else
+    bad "encoded rustflags env (exit=$encoded_rustflags_code)"
+    echo "$encoded_rustflags_out"
+fi
+
 XFAIL_CASE="$TMP/xfail.toml"
 cat >"$XFAIL_CASE" <<EOF
 name = "known-red"
@@ -262,6 +351,1053 @@ cat >"$FAKE_GREEN" <<'EOF'
 printf 'same-A\n'
 EOF
 chmod +x "$FAKE_GREEN"
+
+IDENTITY_A="$TMP/identity-a.toml"
+IDENTITY_B="$TMP/identity-b.toml"
+cat >"$IDENTITY_A" <<EOF
+name = "semantic-identity"
+repo = "$UPSTREAM"
+rev = "$REV"
+lock_sha256 = "$LOCK_SHA256"
+args = ["alpha"]
+expected_exit = 0
+timeout_seconds = 30
+EOF
+cat >"$IDENTITY_B" <<EOF
+name = "semantic-identity"
+repo = "$UPSTREAM"
+rev = "$REV"
+lock_sha256 = "$LOCK_SHA256"
+args = ["beta"]
+expected_exit = 0
+timeout_seconds = 30
+EOF
+identity_env=(
+    PROJECT_SUITE_ROOT="$SUITE_ROOT"
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS"
+    MIRVM="$FAKE_GREEN"
+)
+identity_prepare=$(env "${identity_env[@]}" bash tests/real_projects.sh \
+    prepare "$IDENTITY_A" 2>&1)
+identity_prepare_code=$?
+identity_a_out=$(env "${identity_env[@]}" bash tests/real_projects.sh \
+    check "$IDENTITY_A" 2>&1)
+identity_a_code=$?
+identity_b_out=$(env "${identity_env[@]}" bash tests/real_projects.sh \
+    check "$IDENTITY_B" 2>&1)
+identity_b_code=$?
+if [ "$identity_prepare_code" -eq 0 ] \
+    && [ "$identity_a_code" -eq 0 ] && [ "$identity_b_code" -eq 0 ] \
+    && "$PYTHON" - "$ARTIFACTS/semantic-identity" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+results = sorted(root.glob("objects/check/*/*/result.json"))
+assert len(results) == 2
+documents = [json.loads(path.read_text()) for path in results]
+assert {document["schema_version"] for document in documents} == {3}
+assert {document["kind"] for document in documents} == {"check"}
+assert {document["status"] for document in documents} == {"pass"}
+assert {tuple(document["case"]["args"]) for document in documents} == {
+    ("alpha",), ("beta",),
+}
+case_ids = {document["identity"]["case_id"] for document in documents}
+check_ids = {document["identity"]["check_id"] for document in documents}
+evidence_ids = {document["identity"]["evidence_id"] for document in documents}
+assert len(case_ids) == len(check_ids) == len(evidence_ids) == 2
+for path, document in zip(results, documents):
+    assert len(document["identity"]["case_id"]) == 64
+    assert len(document["identity"]["check_id"]) == 64
+    assert len(document["identity"]["evidence_id"]) == 64
+    assert path.parent.name == document["identity"]["evidence_id"]
+    assert path.parent.parent.name == document["identity"]["check_id"]
+    assert (path.parent / "COMMITTED").read_text() == "committed\n"
+current = json.loads((root / "check" / "result.json").read_text())
+assert current["case"]["args"] == ["beta"]
+assert (root / "check").is_symlink()
+PY
+then
+    ok '同名不同语义使用独立的不可变 correctness 证据'
+else
+    bad "semantic identity (prepare=$identity_prepare_code a=$identity_a_code b=$identity_b_code)"
+    echo "$identity_prepare"
+    echo "$identity_a_out"
+    echo "$identity_b_out"
+    find "$ARTIFACTS/semantic-identity" -maxdepth 6 -print 2>/dev/null || true
+fi
+
+FAKE_GREEN_COPY="$TMP/fake-green-copy-mirvm"
+cp "$FAKE_GREEN" "$FAKE_GREEN_COPY"
+chmod +x "$FAKE_GREEN_COPY"
+identity_same_tool_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_GREEN_COPY" \
+    bash tests/real_projects.sh check "$IDENTITY_A" 2>&1)
+identity_same_tool_code=$?
+printf '# distinct tool content, identical behavior\n' >>"$FAKE_GREEN_COPY"
+identity_changed_tool_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_GREEN_COPY" \
+    bash tests/real_projects.sh check "$IDENTITY_A" 2>&1)
+identity_changed_tool_code=$?
+if [ "$identity_same_tool_code" -eq 0 ] \
+    && [ "$identity_changed_tool_code" -eq 0 ] \
+    && "$PYTHON" - "$ARTIFACTS/semantic-identity" \
+        "$FAKE_GREEN" "$FAKE_GREEN_COPY" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+original_tool = pathlib.Path(sys.argv[2])
+changed_tool = pathlib.Path(sys.argv[3])
+documents = [
+    json.loads(path.read_text())
+    for path in root.glob("objects/check/*/*/result.json")
+]
+alpha = [document for document in documents if document["case"]["args"] == ["alpha"]]
+assert len({document["identity"]["case_id"] for document in alpha}) == 1
+assert len({document["identity"]["check_id"] for document in alpha}) == 2
+by_tool_sha = {}
+for document in alpha:
+    tool = document["execution"]["tools"]["mirvm"]
+    by_tool_sha.setdefault(tool["sha256"], set()).add(document["identity"]["check_id"])
+assert set(by_tool_sha) == {
+    hashlib.sha256(original_tool.read_bytes()).hexdigest(),
+    hashlib.sha256(changed_tool.read_bytes()).hexdigest(),
+}
+assert all(len(check_ids) == 1 for check_ids in by_tool_sha.values())
+current = json.loads((root / "check" / "result.json").read_text())
+assert current["execution"]["tools"]["mirvm"]["sha256"] \
+    == hashlib.sha256(changed_tool.read_bytes()).hexdigest()
+PY
+then
+    ok '工具内容而非物理路径参与 correctness 身份'
+else
+    bad "tool identity (same=$identity_same_tool_code changed=$identity_changed_tool_code)"
+    echo "$identity_same_tool_out"
+    echo "$identity_changed_tool_out"
+    find "$ARTIFACTS/semantic-identity" -maxdepth 6 -print 2>/dev/null || true
+fi
+
+WORKLOAD_TOOL_DIR="$TMP/workload-tool-bin"
+WORKLOAD_TOOL_CARGO="$WORKLOAD_TOOL_DIR/cargo"
+WORKLOAD_TOOL="$WORKLOAD_TOOL_DIR/identity-sidecar"
+WORKLOAD_TOOL_CASE="$TMP/workload-tool-identity.toml"
+REAL_CARGO=$(command -v cargo)
+mkdir -p "$WORKLOAD_TOOL_DIR"
+cat >"$WORKLOAD_TOOL_CARGO" <<EOF
+#!/usr/bin/env bash
+exec "$REAL_CARGO" "\$@"
+EOF
+cat >"$WORKLOAD_TOOL" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$WORKLOAD_TOOL_CARGO" "$WORKLOAD_TOOL"
+cat >"$WORKLOAD_TOOL_CASE" <<EOF
+name = "workload-tool-identity"
+repo = "$UPSTREAM"
+rev = "$REV"
+lock_sha256 = "$LOCK_SHA256"
+args = ["external-tool"]
+expected_exit = 0
+timeout_seconds = 30
+workload_tools = ["identity-sidecar"]
+
+[bench]
+warmup = 0
+samples = 1
+EOF
+workload_tool_prepare_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" CARGO="$WORKLOAD_TOOL_CARGO" \
+    MIRVM="$FAKE_GREEN" bash tests/real_projects.sh \
+    prepare "$WORKLOAD_TOOL_CASE" 2>&1)
+workload_tool_prepare_code=$?
+workload_tool_a_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" CARGO="$WORKLOAD_TOOL_CARGO" \
+    MIRVM="$FAKE_GREEN" bash tests/real_projects.sh \
+    check "$WORKLOAD_TOOL_CASE" 2>&1)
+workload_tool_a_code=$?
+printf '# changed workload tool bytes\n' >>"$WORKLOAD_TOOL"
+workload_tool_b_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" CARGO="$WORKLOAD_TOOL_CARGO" \
+    MIRVM="$FAKE_GREEN" bash tests/real_projects.sh \
+    check "$WORKLOAD_TOOL_CASE" 2>&1)
+workload_tool_b_code=$?
+if [ "$workload_tool_prepare_code" -eq 0 ] \
+    && [ "$workload_tool_a_code" -eq 0 ] \
+    && [ "$workload_tool_b_code" -eq 0 ] \
+    && "$PYTHON" - "$ARTIFACTS/workload-tool-identity" "$WORKLOAD_TOOL" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+tool = pathlib.Path(sys.argv[2])
+documents = [
+    json.loads(path.read_text())
+    for path in root.glob("objects/check/*/*/result.json")
+]
+assert len(documents) == 2
+assert {document["schema_version"] for document in documents} == {4}
+assert len({document["identity"]["case_id"] for document in documents}) == 1
+assert len({document["identity"]["check_id"] for document in documents}) == 2
+tool_descriptors = [
+    document["execution"]["workload_tools"]["identity-sidecar"]
+    for document in documents
+]
+assert {descriptor["path"] for descriptor in tool_descriptors} == {
+    str(tool.resolve())
+}
+assert len({descriptor["sha256"] for descriptor in tool_descriptors}) == 2
+current = json.loads((root / "check" / "result.json").read_text())
+assert current["execution"]["workload_tools"]["identity-sidecar"] == {
+    "path": str(tool.resolve()),
+    "sha256": hashlib.sha256(tool.read_bytes()).hexdigest(),
+}
+PY
+then
+    ok 'workload external tool 内容参与 CheckID 且路径只作 provenance'
+else
+    bad "workload tool identity (prepare=$workload_tool_prepare_code a=$workload_tool_a_code b=$workload_tool_b_code)"
+    echo "$workload_tool_prepare_out"
+    echo "$workload_tool_a_out"
+    echo "$workload_tool_b_out"
+    find "$ARTIFACTS/workload-tool-identity" -maxdepth 6 -print 2>/dev/null || true
+fi
+workload_tool_bench_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" CARGO="$WORKLOAD_TOOL_CARGO" \
+    MIRVM="$FAKE_GREEN" bash tests/real_projects.sh \
+    bench "$WORKLOAD_TOOL_CASE" 2>&1)
+workload_tool_bench_code=$?
+if [ "$workload_tool_bench_code" -eq 0 ] \
+    && "$PYTHON" - "$ARTIFACTS/workload-tool-identity" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+check = json.loads((root / "check" / "result.json").read_text())
+bench = json.loads((root / "bench" / "result.json").read_text())
+summary = json.loads((root / "bench" / "summary.json").read_text())
+assert check["schema_version"] == bench["schema_version"] == 4
+assert summary["schema_version"] == 4
+assert summary["workload_tools"] == check["execution"]["workload_tools"]
+assert summary["system_path"] == check["execution"]["inputs"]["system_path"]
+assert summary["identity"]["check_id"] == check["identity"]["check_id"]
+assert summary["identity"]["check_evidence_id"] == check["identity"]["evidence_id"]
+PY
+then
+    ok 'schema-4 benchmark 复制并验证 exact-check workload tool provenance'
+else
+    bad "workload tool benchmark provenance (exit=$workload_tool_bench_code)"
+    echo "$workload_tool_bench_out"
+    find "$ARTIFACTS/workload-tool-identity" -maxdepth 7 -print 2>/dev/null || true
+fi
+
+RUNTIME_IDENTITY_CASE="$TMP/runtime-identity.toml"
+cat >"$RUNTIME_IDENTITY_CASE" <<EOF
+name = "runtime-identity"
+repo = "$UPSTREAM"
+rev = "$REV"
+lock_sha256 = "$LOCK_SHA256"
+subdir = "."
+args = ["runtime"]
+expected_exit = 0
+timeout_seconds = 30
+EOF
+PYTHON_A="$TMP/python-a"
+PYTHON_B="$TMP/python-b"
+cat >"$PYTHON_A" <<'EOF'
+#!/usr/bin/env bash
+exec /usr/bin/python3 "$@"
+EOF
+cp "$PYTHON_A" "$PYTHON_B"
+printf '# distinct controller content\n' >>"$PYTHON_B"
+chmod +x "$PYTHON_A" "$PYTHON_B"
+RUNTIME_MIRVM_CACHE="$TMP/runtime-identity-mirvm-cache"
+RUNTIME_SYSROOT_MARKER="$RUNTIME_MIRVM_CACHE/mirvm/sysroot-$HOST_TARGET/lib/rustlib/$HOST_TARGET/.rustc-build-sysroot-hash"
+mkdir -p "$(dirname "$RUNTIME_SYSROOT_MARKER")"
+printf 'runtime sysroot A\n' >"$RUNTIME_SYSROOT_MARKER"
+runtime_env=(
+    PROJECT_SUITE_ROOT="$SUITE_ROOT"
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS"
+    PROJECT_SUITE_MIRVM_CACHE="$RUNTIME_MIRVM_CACHE"
+    MIRVM="$FAKE_GREEN"
+)
+runtime_prepare_out=$(env "${runtime_env[@]}" PYTHON="$PYTHON_A" \
+    bash tests/real_projects.sh prepare "$RUNTIME_IDENTITY_CASE" 2>&1)
+runtime_prepare_code=$?
+runtime_python_a_out=$(env "${runtime_env[@]}" PYTHON="$PYTHON_A" \
+    bash tests/real_projects.sh check "$RUNTIME_IDENTITY_CASE" 2>&1)
+runtime_python_a_code=$?
+runtime_python_b_out=$(env "${runtime_env[@]}" PYTHON="$PYTHON_B" \
+    bash tests/real_projects.sh check "$RUNTIME_IDENTITY_CASE" 2>&1)
+runtime_python_b_code=$?
+printf 'runtime sysroot B\n' >"$RUNTIME_SYSROOT_MARKER"
+runtime_sysroot_b_out=$(env "${runtime_env[@]}" PYTHON="$PYTHON_B" \
+    bash tests/real_projects.sh check "$RUNTIME_IDENTITY_CASE" 2>&1)
+runtime_sysroot_b_code=$?
+if [ "$runtime_prepare_code" -eq 0 ] \
+    && [ "$runtime_python_a_code" -eq 0 ] \
+    && [ "$runtime_python_b_code" -eq 0 ] \
+    && [ "$runtime_sysroot_b_code" -eq 0 ] \
+    && "$PYTHON" - "$ARTIFACTS/runtime-identity" \
+        "$PYTHON_A" "$PYTHON_B" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+python_a = pathlib.Path(sys.argv[2])
+python_b = pathlib.Path(sys.argv[3])
+documents = [
+    json.loads(path.read_text())
+    for path in root.glob("objects/check/*/*/result.json")
+]
+assert len(documents) == 3
+assert len({document["identity"]["case_id"] for document in documents}) == 1
+assert len({document["identity"]["check_id"] for document in documents}) == 3
+python_hashes = {
+    document["execution"]["tools"]["python"]["sha256"]
+    for document in documents
+}
+assert python_hashes == {
+    hashlib.sha256(python_a.read_bytes()).hexdigest(),
+    hashlib.sha256(python_b.read_bytes()).hexdigest(),
+}
+sysroot_hashes = {
+    document["execution"]["inputs"]["mirvm_sysroot_marker"]["sha256"]
+    for document in documents
+}
+assert sysroot_hashes == {
+    hashlib.sha256(b"runtime sysroot A\n").hexdigest(),
+    hashlib.sha256(b"runtime sysroot B\n").hexdigest(),
+}
+PY
+then
+    ok 'Python controller 与 MIRVM sysroot marker 参与 correctness 身份'
+else
+    bad "runtime identity (prepare=$runtime_prepare_code python-a=$runtime_python_a_code python-b=$runtime_python_b_code sysroot-b=$runtime_sysroot_b_code)"
+    echo "$runtime_prepare_out"
+    echo "$runtime_python_a_out"
+    echo "$runtime_python_b_out"
+    echo "$runtime_sysroot_b_out"
+    find "$ARTIFACTS/runtime-identity" -maxdepth 6 -print 2>/dev/null || true
+fi
+
+mv "$RUNTIME_SYSROOT_MARKER" "$RUNTIME_SYSROOT_MARKER.saved"
+runtime_missing_marker_out=$(env "${runtime_env[@]}" PYTHON="$PYTHON_B" \
+    bash tests/real_projects.sh check "$RUNTIME_IDENTITY_CASE" 2>&1)
+runtime_missing_marker_code=$?
+mv "$RUNTIME_SYSROOT_MARKER.saved" "$RUNTIME_SYSROOT_MARKER"
+if [ "$runtime_missing_marker_code" -ne 0 ] \
+    && echo "$runtime_missing_marker_out" | grep -Fq \
+        "mirvm_sysroot_marker_unavailable: $RUNTIME_SYSROOT_MARKER" \
+    && [ ! -e "$ARTIFACTS/runtime-identity/check" ] \
+    && [ ! -L "$ARTIFACTS/runtime-identity/check" ]; then
+    ok 'MIRVM sysroot marker 缺失时 fail-closed 并撤销 current'
+else
+    bad "missing sysroot marker (exit=$runtime_missing_marker_code)"
+    echo "$runtime_missing_marker_out"
+    find "$ARTIFACTS/runtime-identity" -maxdepth 6 -print 2>/dev/null || true
+fi
+
+GIT_A="$TMP/git-a"
+GIT_B="$TMP/git-b"
+cat >"$GIT_A" <<'EOF'
+#!/usr/bin/env bash
+exec /usr/bin/git "$@"
+EOF
+cp "$GIT_A" "$GIT_B"
+printf '# distinct Git controller content\n' >>"$GIT_B"
+chmod +x "$GIT_A" "$GIT_B"
+runtime_git_a_out=$(env "${runtime_env[@]}" PYTHON="$PYTHON_B" GIT="$GIT_A" \
+    bash tests/real_projects.sh check "$RUNTIME_IDENTITY_CASE" 2>&1)
+runtime_git_a_code=$?
+runtime_git_b_out=$(env "${runtime_env[@]}" PYTHON="$PYTHON_B" GIT="$GIT_B" \
+    bash tests/real_projects.sh check "$RUNTIME_IDENTITY_CASE" 2>&1)
+runtime_git_b_code=$?
+if [ "$runtime_git_a_code" -eq 0 ] && [ "$runtime_git_b_code" -eq 0 ] \
+    && "$PYTHON" - "$ARTIFACTS/runtime-identity" "$GIT_A" "$GIT_B" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+git_paths = {str(pathlib.Path(path).resolve()) for path in sys.argv[2:]}
+documents = [
+    json.loads(path.read_text())
+    for path in root.glob("objects/check/*/*/result.json")
+]
+matching = [
+    document for document in documents
+    if document["execution"]["tools"]["git"]["path"] in git_paths
+]
+assert len(matching) == 2
+assert len({document["identity"]["check_id"] for document in matching}) == 2
+assert {
+    document["execution"]["tools"]["git"]["sha256"]
+    for document in matching
+} == {
+    hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+    for path in sys.argv[2:]
+}
+PY
+then
+    ok '受控 Git controller 内容参与 correctness 身份'
+else
+    bad "Git identity (a=$runtime_git_a_code b=$runtime_git_b_code)"
+    echo "$runtime_git_a_out"
+    echo "$runtime_git_b_out"
+    find "$ARTIFACTS/runtime-identity" -maxdepth 6 -print 2>/dev/null || true
+fi
+
+CONTROL_FD_CASE="$TMP/control-fd.toml"
+cat >"$CONTROL_FD_CASE" <<EOF
+name = "control-fd"
+repo = "$UPSTREAM"
+rev = "$REV"
+lock_sha256 = "$LOCK_SHA256"
+subdir = "."
+args = []
+expected_exit = 0
+timeout_seconds = 30
+EOF
+control_fd_prepare_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_GREEN" \
+    bash tests/real_projects.sh prepare "$CONTROL_FD_CASE" 2>&1)
+control_fd_prepare_code=$?
+CONTROL_FD_PYTHON="$TMP/control-fd-python"
+CONTROL_FD_PIDS="$TMP/control-fd.pids"
+cat >"$CONTROL_FD_PYTHON" <<'EOF'
+#!/usr/bin/env bash
+: "${CONTROL_FD_CACHE_LOCK:?}"
+: "${CONTROL_FD_EVIDENCE_LOCK:?}"
+: "${CONTROL_FD_PIDS:?}"
+leaked=0
+for descriptor in /proc/self/fd/*; do
+    target=$(readlink "$descriptor" 2>/dev/null || true)
+    if [ "$target" = "$CONTROL_FD_CACHE_LOCK" ] \
+        || [ "$target" = "$CONTROL_FD_EVIDENCE_LOCK" ]; then
+        leaked=1
+        break
+    fi
+done
+if [ "$leaked" -eq 1 ]; then
+    sleep 30 </dev/null >/dev/null 2>&1 &
+    printf '%s\n' "$!" >>"$CONTROL_FD_PIDS"
+fi
+exec /usr/bin/python3 "$@"
+EOF
+chmod +x "$CONTROL_FD_PYTHON"
+rm -f "$CONTROL_FD_PIDS"
+control_fd_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_GREEN" \
+    PYTHON="$CONTROL_FD_PYTHON" \
+    CONTROL_FD_CACHE_LOCK="$SUITE_ROOT/.cache.lock" \
+    CONTROL_FD_EVIDENCE_LOCK="$ARTIFACTS/control-fd/.lock" \
+    CONTROL_FD_PIDS="$CONTROL_FD_PIDS" \
+    bash tests/real_projects.sh check "$CONTROL_FD_CASE" 2>&1)
+control_fd_code=$?
+control_fd_retry_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_GREEN" \
+    PYTHON=/usr/bin/python3 \
+    bash tests/real_projects.sh check "$CONTROL_FD_CASE" 2>&1)
+control_fd_retry_code=$?
+control_fd_leaked=0
+if [ -f "$CONTROL_FD_PIDS" ]; then
+    control_fd_leaked=1
+    while read -r pid; do
+        kill -KILL "$pid" 2>/dev/null || true
+    done <"$CONTROL_FD_PIDS"
+    sleep 0.05
+    rm -f "$CONTROL_FD_PIDS"
+fi
+if [ "$control_fd_prepare_code" -eq 0 ] && [ "$control_fd_code" -eq 0 ] \
+    && [ "$control_fd_retry_code" -eq 0 ] \
+    && [ "$control_fd_leaked" -eq 0 ]; then
+    ok 'Python 控制进程不能把 workflow locks 泄漏给后台子进程'
+else
+    bad "Python control lock FD isolation (prepare=$control_fd_prepare_code first=$control_fd_code retry=$control_fd_retry_code leaked=$control_fd_leaked)"
+    echo "$control_fd_prepare_out"
+    echo "$control_fd_out"
+    echo "$control_fd_retry_out"
+    control_fd_recovery_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+        PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_GREEN" \
+        PYTHON=/usr/bin/python3 \
+        bash tests/real_projects.sh check "$CONTROL_FD_CASE" 2>&1)
+    echo "$control_fd_recovery_out"
+fi
+
+mkdir -p "$ARTIFACTS/control-fd/.staging/interrupted-attempt"
+printf 'orphan\n' >"$ARTIFACTS/control-fd/.staging/interrupted-attempt/payload"
+CONTROL_CHECK_OBJECT=$(readlink -f "$ARTIFACTS/control-fd/check")
+CONTROL_CHECK_PHASE=${CONTROL_CHECK_OBJECT%/*}
+CONTROL_BENCH_PHASE="$ARTIFACTS/control-fd/objects/bench/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+CONTROL_CHECK_HIDDEN_STAGE="$CONTROL_CHECK_PHASE/.staging.recovery-check"
+CONTROL_BENCH_HIDDEN_STAGE="$CONTROL_BENCH_PHASE/.staging.recovery-bench"
+CONTROL_BENCH_HISTORY="$CONTROL_BENCH_PHASE/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+CONTROL_CHECK_RESULT_SHA=$(sha256sum "$CONTROL_CHECK_OBJECT/result.json" 2>/dev/null \
+    | cut -d' ' -f1)
+phase_recovery_fixture_ready=0
+if [ -n "$CONTROL_CHECK_OBJECT" ] \
+    && [ "${#CONTROL_CHECK_RESULT_SHA}" -eq 64 ] \
+    && mkdir -p "$CONTROL_CHECK_HIDDEN_STAGE" "$CONTROL_BENCH_HIDDEN_STAGE" \
+        "$CONTROL_BENCH_HISTORY" \
+    && printf 'sealed orphan\n' >"$CONTROL_CHECK_HIDDEN_STAGE/payload" \
+    && printf 'sealed orphan\n' >"$CONTROL_BENCH_HIDDEN_STAGE/payload" \
+    && printf 'historical object\n' >"$CONTROL_BENCH_HISTORY/marker" \
+    && chmod 0444 "$CONTROL_CHECK_HIDDEN_STAGE/payload" \
+        "$CONTROL_BENCH_HIDDEN_STAGE/payload" "$CONTROL_BENCH_HISTORY/marker" \
+    && chmod 0555 "$CONTROL_CHECK_HIDDEN_STAGE" "$CONTROL_BENCH_HIDDEN_STAGE" \
+        "$CONTROL_BENCH_HISTORY" \
+    && [ "$(stat -c '%a' "$CONTROL_CHECK_HIDDEN_STAGE")" = 555 ] \
+    && [ "$(stat -c '%a' "$CONTROL_BENCH_HIDDEN_STAGE")" = 555 ] \
+    && [ "$(stat -c '%a' "$CONTROL_CHECK_HIDDEN_STAGE/payload")" = 444 ] \
+    && [ "$(stat -c '%a' "$CONTROL_BENCH_HIDDEN_STAGE/payload")" = 444 ] \
+    && [ "$(stat -c '%a' "$CONTROL_BENCH_HISTORY")" = 555 ] \
+    && [ "$(stat -c '%a' "$CONTROL_BENCH_HISTORY/marker")" = 444 ]; then
+    phase_recovery_fixture_ready=1
+fi
+ln -s invalid "$ARTIFACTS/control-fd/.check.111.tmp"
+ln -s invalid "$ARTIFACTS/control-fd/.bench.222.tmp"
+prepare_recovery_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_GREEN" \
+    bash tests/real_projects.sh prepare "$CONTROL_FD_CASE" 2>&1)
+prepare_recovery_code=$?
+if [ "$prepare_recovery_code" -eq 0 ] \
+    && [ -L "$ARTIFACTS/control-fd/check" ] \
+    && [ ! -e "$ARTIFACTS/control-fd/.staging/interrupted-attempt" ] \
+    && [ ! -e "$ARTIFACTS/control-fd/.check.111.tmp" ] \
+    && [ ! -L "$ARTIFACTS/control-fd/.check.111.tmp" ] \
+    && [ ! -e "$ARTIFACTS/control-fd/.bench.222.tmp" ] \
+    && [ ! -L "$ARTIFACTS/control-fd/.bench.222.tmp" ]; then
+    ok 'prepare 也回收 staging/临时 current 链接且不撤销 current evidence'
+else
+    bad "prepare evidence recovery (exit=$prepare_recovery_code)"
+    echo "$prepare_recovery_out"
+    find "$ARTIFACTS/control-fd" -maxdepth 3 -print 2>/dev/null || true
+fi
+if [ "$phase_recovery_fixture_ready" -eq 1 ] \
+    && [ "$prepare_recovery_code" -eq 0 ] \
+    && [ -L "$ARTIFACTS/control-fd/check" ] \
+    && [ "$(readlink -f "$ARTIFACTS/control-fd/check")" = "$CONTROL_CHECK_OBJECT" ] \
+    && [ -f "$ARTIFACTS/control-fd/check/result.json" ] \
+    && [ "$(sha256sum "$ARTIFACTS/control-fd/check/result.json" | cut -d' ' -f1)" \
+        = "$CONTROL_CHECK_RESULT_SHA" ] \
+    && [ -f "$ARTIFACTS/control-fd/check/COMMITTED" ] \
+    && grep -Fxq committed "$ARTIFACTS/control-fd/check/COMMITTED" \
+    && [ -d "$CONTROL_CHECK_PHASE" ] \
+    && [ -d "$CONTROL_BENCH_PHASE" ] \
+    && [ -f "$CONTROL_BENCH_HISTORY/marker" ] \
+    && grep -Fxq 'historical object' "$CONTROL_BENCH_HISTORY/marker" \
+    && [ ! -e "$CONTROL_CHECK_HIDDEN_STAGE" ] \
+    && [ ! -e "$CONTROL_BENCH_HIDDEN_STAGE" ]; then
+    ok 'prepare 回收 check/bench phase-ID parent 下的只读 hidden staging'
+else
+    bad "prepare phase-ID hidden staging recovery (fixture=$phase_recovery_fixture_ready exit=$prepare_recovery_code)"
+    echo "$prepare_recovery_out"
+    find "$ARTIFACTS/control-fd/objects" -name '.staging.*' -print 2>/dev/null || true
+fi
+
+CONTROL_SUBSHELL_PYTHON="$TMP/control-subshell-python"
+CONTROL_SUBSHELL_STARTED="$TMP/control-subshell.started"
+CONTROL_SUBSHELL_PIDS="$TMP/control-subshell.pids"
+cat >"$CONTROL_SUBSHELL_PYTHON" <<'EOF'
+#!/usr/bin/env bash
+: "${CONTROL_SUBSHELL_STARTED:?}"
+: "${CONTROL_SUBSHELL_PIDS:?}"
+if [ "${1:-}" = - ] && [ "$#" -gt 10 ]; then
+    printf '%s\n%s\n' "$PPID" "$$" >"$CONTROL_SUBSHELL_PIDS"
+    : >"$CONTROL_SUBSHELL_STARTED"
+    sleep 30
+fi
+exec /usr/bin/python3 "$@"
+EOF
+chmod +x "$CONTROL_SUBSHELL_PYTHON"
+rm -f "$CONTROL_SUBSHELL_STARTED" "$CONTROL_SUBSHELL_PIDS"
+setsid env PROJECT_SUITE_ROOT="$SUITE_ROOT" PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" \
+    MIRVM="$FAKE_GREEN" PYTHON="$CONTROL_SUBSHELL_PYTHON" \
+    CONTROL_SUBSHELL_STARTED="$CONTROL_SUBSHELL_STARTED" \
+    CONTROL_SUBSHELL_PIDS="$CONTROL_SUBSHELL_PIDS" \
+    bash tests/real_projects.sh check "$CONTROL_FD_CASE" \
+    >"$TMP/control-subshell.stdout" 2>"$TMP/control-subshell.stderr" &
+control_subshell_root=$!
+BACKGROUND_PIDS+=("$control_subshell_root")
+control_subshell_seen=0
+for ((i = 0; i < 250; i++)); do
+    if [ -e "$CONTROL_SUBSHELL_STARTED" ]; then
+        control_subshell_seen=1
+        break
+    fi
+    sleep 0.02
+done
+kill -KILL "$control_subshell_root" 2>/dev/null || true
+wait "$control_subshell_root" 2>/dev/null
+control_subshell_code=$?
+control_subshell_retry_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_GREEN" \
+    PYTHON=/usr/bin/python3 \
+    bash tests/real_projects.sh check "$CONTROL_FD_CASE" 2>&1)
+control_subshell_retry_code=$?
+kill -KILL -- "-$control_subshell_root" 2>/dev/null || true
+if [ -f "$CONTROL_SUBSHELL_PIDS" ]; then
+    while read -r pid; do
+        kill -KILL "$pid" 2>/dev/null || true
+    done <"$CONTROL_SUBSHELL_PIDS"
+    rm -f "$CONTROL_SUBSHELL_PIDS"
+fi
+forget_background "$control_subshell_root"
+if [ "$control_subshell_seen" -eq 1 ] \
+    && [ "$control_subshell_code" -eq 137 ] \
+    && [ "$control_subshell_retry_code" -eq 0 ]; then
+    ok 'controller command-substitution 子壳不继承 workflow locks'
+else
+    bad "controller subshell lock isolation (seen=$control_subshell_seen crash=$control_subshell_code retry=$control_subshell_retry_code)"
+    cat "$TMP/control-subshell.stdout"
+    cat "$TMP/control-subshell.stderr"
+    echo "$control_subshell_retry_out"
+fi
+
+CACHE_LOCK_A="$TMP/cache-lock-a.toml"
+CACHE_LOCK_B="$TMP/cache-lock-b.toml"
+cat >"$CACHE_LOCK_A" <<EOF
+name = "cache-lock-a"
+repo = "$UPSTREAM"
+rev = "$REV"
+lock_sha256 = "$LOCK_SHA256"
+subdir = "."
+args = []
+expected_exit = 0
+timeout_seconds = 30
+EOF
+cat >"$CACHE_LOCK_B" <<EOF
+name = "cache-lock-b"
+repo = "$UPSTREAM"
+rev = "$REV"
+lock_sha256 = "$LOCK_SHA256"
+subdir = "."
+args = []
+expected_exit = 0
+timeout_seconds = 30
+EOF
+CACHE_LOCK_BWRAP="$TMP/cache-lock-bwrap"
+CACHE_LOCK_ENTERED="$TMP/cache-lock-entered"
+CACHE_LOCK_RELEASE="$TMP/cache-lock-release"
+CACHE_LOCK_LEAK="$TMP/cache-lock-leak"
+cat >"$CACHE_LOCK_BWRAP" <<'EOF'
+#!/usr/bin/env bash
+: "${CACHE_LOCK_ENTERED:?}"
+: "${CACHE_LOCK_RELEASE:?}"
+: "${CACHE_LOCK_FILE:?}"
+: "${EVIDENCE_LOCK_FILE:?}"
+: "${CACHE_LOCK_LEAK:?}"
+for descriptor in /proc/self/fd/*; do
+    target=$(readlink "$descriptor" 2>/dev/null || true)
+    if [ "$target" = "$CACHE_LOCK_FILE" ] \
+        || [ "$target" = "$EVIDENCE_LOCK_FILE" ]; then
+        printf '%s\n' "$target" >"$CACHE_LOCK_LEAK"
+        exit 98
+    fi
+done
+printf 'entered\n' >"$CACHE_LOCK_ENTERED"
+while [ ! -e "$CACHE_LOCK_RELEASE" ]; do
+    sleep 0.02
+done
+exec /usr/bin/bwrap "$@"
+EOF
+chmod +x "$CACHE_LOCK_BWRAP"
+rm -f "$CACHE_LOCK_ENTERED" "$CACHE_LOCK_RELEASE" "$CACHE_LOCK_LEAK"
+setsid env PROJECT_SUITE_ROOT="$SUITE_ROOT" PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" \
+    MIRVM="$FAKE_GREEN" BWRAP="$CACHE_LOCK_BWRAP" \
+    CACHE_LOCK_ENTERED="$CACHE_LOCK_ENTERED" \
+    CACHE_LOCK_RELEASE="$CACHE_LOCK_RELEASE" \
+    CACHE_LOCK_FILE="$SUITE_ROOT/.cache.lock" \
+    EVIDENCE_LOCK_FILE="$ARTIFACTS/cache-lock-a/.lock" \
+    CACHE_LOCK_LEAK="$CACHE_LOCK_LEAK" \
+    bash tests/real_projects.sh prepare "$CACHE_LOCK_A" \
+    >"$TMP/cache-lock-a.stdout" 2>"$TMP/cache-lock-a.stderr" &
+cache_lock_a_pid=$!
+BACKGROUND_PIDS+=("$cache_lock_a_pid")
+cache_lock_entered=0
+for ((i = 0; i < 250; i++)); do
+    if [ -f "$CACHE_LOCK_ENTERED" ]; then
+        cache_lock_entered=1
+        break
+    fi
+    sleep 0.02
+done
+cache_lock_b_busy_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_GREEN" \
+    bash tests/real_projects.sh prepare "$CACHE_LOCK_B" 2>&1)
+cache_lock_b_busy_code=$?
+touch "$CACHE_LOCK_RELEASE"
+wait "$cache_lock_a_pid"
+cache_lock_a_code=$?
+forget_background "$cache_lock_a_pid"
+cache_lock_b_retry_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_GREEN" \
+    bash tests/real_projects.sh prepare "$CACHE_LOCK_B" 2>&1)
+cache_lock_b_retry_code=$?
+if [ "$cache_lock_entered" -eq 1 ] && [ "$cache_lock_a_code" -eq 0 ] \
+    && [ "$cache_lock_b_busy_code" -eq 75 ] \
+    && echo "$cache_lock_b_busy_out" | grep -Fxq 'cache_busy: prepare' \
+    && [ ! -e "$CACHE_LOCK_LEAK" ] \
+    && [ "$cache_lock_b_retry_code" -eq 0 ]; then
+    ok '不同名称的 prepare 以 suite-global 独占锁保护共享缓存'
+else
+    bad "global cache prepare lock (entered=$cache_lock_entered first=$cache_lock_a_code busy=$cache_lock_b_busy_code retry=$cache_lock_b_retry_code)"
+    echo "$cache_lock_b_busy_out"
+    echo "$cache_lock_b_retry_out"
+    cat "$TMP/cache-lock-a.stdout"
+    cat "$TMP/cache-lock-a.stderr"
+fi
+
+BLOCKING_MIRVM="$TMP/blocking-mirvm"
+cat >"$BLOCKING_MIRVM" <<'EOF'
+#!/usr/bin/env bash
+sleep 2
+printf 'same-A\n'
+EOF
+chmod +x "$BLOCKING_MIRVM"
+LOCK_FD_PROBE_BWRAP="$TMP/lock-fd-probe-bwrap"
+cat >"$LOCK_FD_PROBE_BWRAP" <<'EOF'
+#!/usr/bin/env bash
+: "${CACHE_LOCK_FILE:?}"
+: "${EVIDENCE_LOCK_FILE:?}"
+: "${CACHE_LOCK_LEAK:?}"
+for descriptor in /proc/self/fd/*; do
+    target=$(readlink "$descriptor" 2>/dev/null || true)
+    if [ "$target" = "$CACHE_LOCK_FILE" ] \
+        || [ "$target" = "$EVIDENCE_LOCK_FILE" ]; then
+        printf '%s\n' "$target" >"$CACHE_LOCK_LEAK"
+        exit 98
+    fi
+done
+exec /usr/bin/bwrap "$@"
+EOF
+chmod +x "$LOCK_FD_PROBE_BWRAP"
+rm -f "$CACHE_LOCK_LEAK"
+setsid env PROJECT_SUITE_ROOT="$SUITE_ROOT" PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" \
+    MIRVM="$BLOCKING_MIRVM" bash tests/real_projects.sh check "$CACHE_LOCK_A" \
+    >"$TMP/cache-shared-a.stdout" 2>"$TMP/cache-shared-a.stderr" &
+cache_shared_a_pid=$!
+BACKGROUND_PIDS+=("$cache_shared_a_pid")
+cache_shared_staging=0
+for ((i = 0; i < 250; i++)); do
+    if find "$ARTIFACTS/cache-lock-a/.staging" \
+        -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
+        cache_shared_staging=1
+        break
+    fi
+    sleep 0.02
+done
+cache_shared_b_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_GREEN" \
+    BWRAP="$LOCK_FD_PROBE_BWRAP" \
+    CACHE_LOCK_FILE="$SUITE_ROOT/.cache.lock" \
+    EVIDENCE_LOCK_FILE="$ARTIFACTS/cache-lock-b/.lock" \
+    CACHE_LOCK_LEAK="$CACHE_LOCK_LEAK" \
+    bash tests/real_projects.sh check "$CACHE_LOCK_B" 2>&1)
+cache_shared_b_code=$?
+wait "$cache_shared_a_pid"
+cache_shared_a_code=$?
+forget_background "$cache_shared_a_pid"
+if [ "$cache_shared_staging" -eq 1 ] && [ "$cache_shared_a_code" -eq 0 ] \
+    && [ "$cache_shared_b_code" -eq 0 ] && [ ! -e "$CACHE_LOCK_LEAK" ]; then
+    ok '不同名称的 check 并发持有 suite-global 共享缓存锁'
+else
+    bad "global cache shared lock (staging=$cache_shared_staging first=$cache_shared_a_code second=$cache_shared_b_code)"
+    echo "$cache_shared_b_out"
+    cat "$TMP/cache-shared-a.stdout"
+    cat "$TMP/cache-shared-a.stderr"
+fi
+setsid env PROJECT_SUITE_ROOT="$SUITE_ROOT" PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" \
+    MIRVM="$BLOCKING_MIRVM" bash tests/real_projects.sh check "$IDENTITY_A" \
+    >"$TMP/blocking-check.stdout" 2>"$TMP/blocking-check.stderr" &
+blocking_pid=$!
+BACKGROUND_PIDS+=("$blocking_pid")
+blocking_staging_seen=0
+for ((i = 0; i < 250; i++)); do
+    if find "$ARTIFACTS/semantic-identity/.staging" \
+        -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
+        blocking_staging_seen=1
+        break
+    fi
+    sleep 0.02
+done
+busy_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_GREEN" \
+    bash tests/real_projects.sh check "$IDENTITY_A" 2>&1)
+busy_code=$?
+wait "$blocking_pid"
+blocking_code=$?
+forget_background "$blocking_pid"
+if [ "$blocking_staging_seen" -eq 1 ] && [ "$blocking_code" -eq 0 ] \
+    && [ "$busy_code" -eq 75 ] \
+    && echo "$busy_out" | grep -Fxq 'evidence_busy: semantic-identity' \
+    && [ -L "$ARTIFACTS/semantic-identity/check" ] \
+    && ! find "$ARTIFACTS/semantic-identity/.staging" \
+        -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+    ok '同名 workflow 并发时 fail-fast 且不暴露 staging'
+else
+    bad "evidence lock (first=$blocking_code second=$busy_code)"
+    echo "$busy_out"
+    cat "$TMP/blocking-check.stdout"
+    cat "$TMP/blocking-check.stderr"
+    find "$ARTIFACTS/semantic-identity" -maxdepth 4 -print 2>/dev/null || true
+fi
+
+BENCH_TOCTOU_CASE="$TMP/bench-evidence-toctou.toml"
+cat >"$BENCH_TOCTOU_CASE" <<EOF
+name = "bench-evidence-toctou"
+repo = "$UPSTREAM"
+rev = "$REV"
+lock_sha256 = "$LOCK_SHA256"
+subdir = "."
+args = []
+expected_exit = 0
+timeout_seconds = 30
+
+[bench]
+warmup = 0
+samples = 1
+EOF
+bench_toctou_prepare_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_GREEN" \
+    bash tests/real_projects.sh prepare "$BENCH_TOCTOU_CASE" 2>&1)
+bench_toctou_prepare_code=$?
+BENCH_TOCTOU_BWRAP="$TMP/bench-toctou-bwrap"
+BENCH_TOCTOU_COUNT="$TMP/bench-toctou-count"
+cat >"$BENCH_TOCTOU_BWRAP" <<'EOF'
+#!/usr/bin/env bash
+: "${BENCH_TOCTOU_COUNT:?}"
+: "${BENCH_TOCTOU_EVIDENCE:?}"
+count=0
+[ ! -f "$BENCH_TOCTOU_COUNT" ] || read -r count <"$BENCH_TOCTOU_COUNT"
+count=$((count + 1))
+printf '%s\n' "$count" >"$BENCH_TOCTOU_COUNT"
+if [ "$count" -eq 3 ]; then
+    chmod u+w "$BENCH_TOCTOU_EVIDENCE/check/mirvm.stderr"
+    printf 'tampered-after-check\n' >>"$BENCH_TOCTOU_EVIDENCE/check/mirvm.stderr"
+fi
+exec /usr/bin/bwrap "$@"
+EOF
+chmod +x "$BENCH_TOCTOU_BWRAP"
+rm -f "$BENCH_TOCTOU_COUNT"
+env PROJECT_SUITE_ROOT="$SUITE_ROOT" PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" \
+    MIRVM="$FAKE_GREEN" BWRAP="$BENCH_TOCTOU_BWRAP" \
+    BENCH_TOCTOU_COUNT="$BENCH_TOCTOU_COUNT" \
+    BENCH_TOCTOU_EVIDENCE="$ARTIFACTS/bench-evidence-toctou" \
+    bash tests/real_projects.sh bench "$BENCH_TOCTOU_CASE" \
+    >"$TMP/bench-toctou.stdout" 2>"$TMP/bench-toctou.stderr"
+bench_toctou_code=$?
+if [ "$bench_toctou_prepare_code" -eq 0 ] \
+    && [ "$bench_toctou_code" -ne 0 ] \
+    && grep -Fq 'reason=check_evidence_changed' "$TMP/bench-toctou.stderr" \
+    && [ ! -e "$ARTIFACTS/bench-evidence-toctou/bench" ] \
+    && [ ! -L "$ARTIFACTS/bench-evidence-toctou/bench" ]; then
+    ok 'benchmark 发布前重新验证 exact check evidence'
+else
+    bad "benchmark check-evidence TOCTOU (prepare=$bench_toctou_prepare_code bench=$bench_toctou_code)"
+    echo "$bench_toctou_prepare_out"
+    cat "$TMP/bench-toctou.stdout"
+    cat "$TMP/bench-toctou.stderr"
+fi
+
+CRASH_BWRAP="$TMP/crash-bwrap"
+CRASH_BWRAP_ENTERED="$TMP/crash-bwrap.entered"
+CRASH_BWRAP_RELEASE="$TMP/crash-bwrap.release"
+cat >"$CRASH_BWRAP" <<'EOF'
+#!/usr/bin/env bash
+: "${CRASH_BWRAP_ENTERED:?}"
+: "${CRASH_BWRAP_RELEASE:?}"
+: >"$CRASH_BWRAP_ENTERED"
+while [ ! -e "$CRASH_BWRAP_RELEASE" ]; do
+    sleep 0.02
+done
+exec /usr/bin/bwrap "$@"
+EOF
+chmod +x "$CRASH_BWRAP"
+rm -f "$CRASH_BWRAP_ENTERED" "$CRASH_BWRAP_RELEASE"
+setsid env PROJECT_SUITE_ROOT="$SUITE_ROOT" PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" \
+    MIRVM="$FAKE_GREEN" BWRAP="$CRASH_BWRAP" \
+    CRASH_BWRAP_ENTERED="$CRASH_BWRAP_ENTERED" \
+    CRASH_BWRAP_RELEASE="$CRASH_BWRAP_RELEASE" \
+    bash tests/real_projects.sh check "$IDENTITY_B" \
+    >"$TMP/crash-check.stdout" 2>"$TMP/crash-check.stderr" &
+crash_pid=$!
+BACKGROUND_PIDS+=("$crash_pid")
+crash_runner_seen=0
+for ((i = 0; i < 250; i++)); do
+    if [ -e "$CRASH_BWRAP_ENTERED" ]; then
+        crash_runner_seen=1
+        break
+    fi
+    sleep 0.02
+done
+kill -KILL "$crash_pid" 2>/dev/null || true
+wait "$crash_pid" 2>/dev/null
+crash_code=$?
+sleep 0.1
+crash_view_absent=0
+if [ ! -e "$ARTIFACTS/semantic-identity/check" ] \
+    && [ ! -L "$ARTIFACTS/semantic-identity/check" ]; then
+    crash_view_absent=1
+fi
+recovery_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_GREEN" \
+    bash tests/real_projects.sh check "$IDENTITY_B" 2>&1)
+recovery_code=$?
+kill -KILL -- "-$crash_pid" 2>/dev/null || true
+forget_background "$crash_pid"
+if [ "$crash_runner_seen" -eq 1 ] && [ "$crash_code" -eq 137 ] \
+    && [ "$crash_view_absent" -eq 1 ] && [ "$recovery_code" -eq 0 ] \
+    && [ -L "$ARTIFACTS/semantic-identity/check" ] \
+    && ! find "$ARTIFACTS/semantic-identity/.staging" \
+        -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+    ok 'runner grouping 子壳不继承锁，崩溃后可立即回收 staging'
+else
+    bad "evidence crash recovery (runner=$crash_runner_seen crash=$crash_code view_absent=$crash_view_absent recovery=$recovery_code)"
+    echo "$recovery_out"
+    cat "$TMP/crash-check.stdout"
+    cat "$TMP/crash-check.stderr"
+    find "$ARTIFACTS/semantic-identity" -maxdepth 5 -print 2>/dev/null || true
+fi
+
+BACKGROUND_MIRVM="$TMP/background-mirvm"
+cat >"$BACKGROUND_MIRVM" <<'EOF'
+#!/usr/bin/env bash
+printf 'same-A\n'
+(
+    sleep 1
+    printf 'late-background-write\n'
+) &
+exit 0
+EOF
+chmod +x "$BACKGROUND_MIRVM"
+background_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$BACKGROUND_MIRVM" \
+    bash tests/real_projects.sh check "$IDENTITY_A" 2>&1)
+background_code=$?
+background_evidence=$(readlink -f \
+    "$ARTIFACTS/semantic-identity/check" 2>/dev/null || true)
+background_retry_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_GREEN" \
+    bash tests/real_projects.sh check "$IDENTITY_A" 2>&1)
+background_retry_code=$?
+sleep 1.2
+if [ "$background_code" -eq 0 ] && [ "$background_retry_code" -eq 0 ] \
+    && "$PYTHON" - "$background_evidence" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+document = json.loads((root / "result.json").read_text())
+for filename, expected in document["payload"].items():
+    data = (root / filename).read_bytes()
+    assert len(data) == expected["bytes"]
+    assert hashlib.sha256(data).hexdigest() == expected["sha256"]
+assert (root / "mirvm.stdout").read_text() == "same-A\n"
+PY
+then
+    ok 'workload 后代不能改写 committed evidence 或继承 workflow lock'
+else
+    bad "background descendant isolation (first=$background_code retry=$background_retry_code)"
+    echo "$background_out"
+    echo "$background_retry_out"
+    find "$background_evidence" -maxdepth 1 -type f -print \
+        -exec sh -c 'printf "%s " "$1"; wc -c <"$1"' _ {} \; 2>/dev/null || true
+fi
+
+IFS=' ' read -r corrupt_case_id corrupt_check_id corrupt_evidence_id < <(
+    "$PYTHON" - "$background_evidence/result.json" <<'PY'
+import json
+import pathlib
+import sys
+
+identity = json.loads(pathlib.Path(sys.argv[1]).read_text())["identity"]
+print(identity["case_id"], identity["check_id"], identity["evidence_id"])
+PY
+)
+chmod u+w "$background_evidence/native.stdout"
+printf 'corrupt\n' >>"$background_evidence/native.stdout"
+corrupt_out=$("$PYTHON" tests/project_suite_evidence.py verify-check \
+    "$background_evidence/result.json" "$corrupt_case_id" \
+    "$corrupt_check_id" "$corrupt_evidence_id" pass 2>&1)
+corrupt_code=$?
+if [ "$corrupt_code" -eq 69 ] \
+    && echo "$corrupt_out" | grep -Fxq \
+        'evidence_corrupt: payload.native.stdout.sha256'; then
+    ok 'evidence consumer 会重算 payload 与内容地址'
+else
+    bad "evidence validator (exit=$corrupt_code)"
+    echo "$corrupt_out"
+fi
+
+TOCTOU_BWRAP="$TMP/toctou-bwrap"
+TOCTOU_MIRVM="$TMP/toctou-mirvm"
+TOCTOU_STARTED="$TMP/toctou.started"
+TOCTOU_RELEASE="$TMP/toctou.release"
+cat >"$TOCTOU_BWRAP" <<'EOF'
+#!/usr/bin/env bash
+: >"$TOCTOU_STARTED"
+while [ ! -e "$TOCTOU_RELEASE" ]; do
+    sleep 0.02
+done
+exec /usr/bin/bwrap "$@"
+EOF
+cat >"$TOCTOU_MIRVM" <<'EOF'
+#!/usr/bin/env bash
+# tool version one
+printf 'same-A\n'
+EOF
+chmod +x "$TOCTOU_BWRAP" "$TOCTOU_MIRVM"
+setsid env PROJECT_SUITE_ROOT="$SUITE_ROOT" PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" \
+    BWRAP="$TOCTOU_BWRAP" MIRVM="$TOCTOU_MIRVM" \
+    TOCTOU_STARTED="$TOCTOU_STARTED" TOCTOU_RELEASE="$TOCTOU_RELEASE" \
+    bash tests/real_projects.sh check "$IDENTITY_A" \
+    >"$TMP/toctou.stdout" 2>"$TMP/toctou.stderr" &
+toctou_pid=$!
+BACKGROUND_PIDS+=("$toctou_pid")
+for ((i = 0; i < 250; i++)); do
+    [ -e "$TOCTOU_STARTED" ] && break
+    sleep 0.02
+done
+cat >"$TOCTOU_MIRVM" <<'EOF'
+#!/usr/bin/env bash
+# tool version two has different bytes but deliberately identical behavior
+printf 'same-A\n'
+EOF
+chmod +x "$TOCTOU_MIRVM"
+: >"$TOCTOU_RELEASE"
+wait "$toctou_pid"
+toctou_code=$?
+forget_background "$toctou_pid"
+toctou_out=$(cat "$TMP/toctou.stdout" "$TMP/toctou.stderr")
+toctou_recovery_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_GREEN" \
+    bash tests/real_projects.sh check "$IDENTITY_A" 2>&1)
+toctou_recovery_code=$?
+if [ -e "$TOCTOU_STARTED" ] && [ "$toctou_code" -ne 0 ] \
+    && echo "$toctou_out" | grep -Fq 'reason=check_identity_changed' \
+    && [ "$toctou_recovery_code" -eq 0 ]; then
+    ok '执行上下文变化时拒绝向旧 check identity 发布'
+else
+    bad "check identity TOCTOU (run=$toctou_code recovery=$toctou_recovery_code)"
+    echo "$toctou_out"
+    echo "$toctou_recovery_out"
+fi
+
 xpass_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
     PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_GREEN" \
     bash tests/real_projects.sh check "$XFAIL_CASE" 2>&1)
@@ -345,19 +1481,24 @@ env "${bench_env[@]}" bash tests/real_projects.sh bench "$BENCH_CASE" \
 green_bench_code=$?
 green_samples="$ARTIFACTS/bench-green/bench/samples.jsonl"
 green_summary="$ARTIFACTS/bench-green/bench/summary.json"
+green_result="$ARTIFACTS/bench-green/bench/result.json"
 if [ "$green_prepare_code" -eq 0 ] && [ "$green_bench_code" -eq 0 ] \
     && [ -s "$TMP/green-bench.stdout" ] \
     && cmp -s "$TMP/green-bench.stdout" "$green_summary" \
-    && "$PYTHON" - "$TMP/green-bench.stdout" "$green_samples" \
-        "$UPSTREAM" "$REV" "$LOCK_SHA256" "$HOST_TARGET" <<'PY'
+    && "$PYTHON" - "$TMP/green-bench.stdout" "$green_samples" "$green_result" \
+        "$UPSTREAM" "$REV" "$LOCK_SHA256" "$HOST_TARGET" \
+        "$ARTIFACTS/bench-green" <<'PY'
+import hashlib
 import json
 import pathlib
 import sys
 
 summary = json.loads(pathlib.Path(sys.argv[1]).read_text())
 samples = [json.loads(line) for line in pathlib.Path(sys.argv[2]).read_text().splitlines()]
-repo, revision, lock_sha256, host_target = sys.argv[3:]
-assert summary["schema_version"] == 1
+result = json.loads(pathlib.Path(sys.argv[3]).read_text())
+repo, revision, lock_sha256, host_target, artifact_root = sys.argv[4:]
+artifact_root = pathlib.Path(artifact_root)
+assert summary["schema_version"] == 3
 assert summary["case"] == "bench-green"
 assert summary["repo"] == repo
 assert summary["revision"] == revision
@@ -369,6 +1510,12 @@ assert summary["expected_exit"] == 0
 assert summary["timeout_seconds"] == 30
 assert summary["host_target"] == host_target
 assert summary["benchmark"] == {"warmup": 1, "samples": 3}
+assert set(summary["identity"]) == {
+    "case_id", "check_id", "check_evidence_id", "bench_id",
+}
+for identity in summary["identity"].values():
+    assert len(identity) == 64
+    int(identity, 16)
 assert set(summary["tools"]) == {"cargo", "rustc", "mirvm"}
 for tool in summary["tools"].values():
     assert pathlib.Path(tool["path"]).is_absolute()
@@ -386,9 +1533,27 @@ assert [sample["order"] for sample in samples] == [
     "native-first", "mirvm-first", "native-first"
 ]
 assert all(sample["native_ns"] > 0 and sample["mirvm_ns"] > 0 for sample in samples)
+bench_dir = (artifact_root / "bench").resolve()
+assert (artifact_root / "bench").is_symlink()
+assert result["schema_version"] == 3
+assert result["kind"] == "bench"
+assert result["status"] == "pass"
+assert set(result["identity"]) == {
+    "case_id", "check_id", "check_evidence_id", "bench_id", "evidence_id",
+}
+assert {key: result["identity"][key] for key in summary["identity"]} \
+    == summary["identity"]
+assert set(result["payload"]) == {"samples.jsonl", "summary.json"}
+for filename, descriptor in result["payload"].items():
+    data = (bench_dir / filename).read_bytes()
+    assert len(data) == descriptor["bytes"]
+    assert hashlib.sha256(data).hexdigest() == descriptor["sha256"]
+assert bench_dir.parent.name == result["identity"]["bench_id"]
+assert bench_dir.name == result["identity"]["evidence_id"]
+assert (bench_dir / "COMMITTED").read_text() == "committed\n"
 PY
 then
-    ok '正确性通过后输出多样本 benchmark JSON'
+    ok '正确性通过后原子发布绑定 exact check 的 benchmark evidence'
 else
     bad "green benchmark (prepare=$green_prepare_code bench=$green_bench_code)"
     echo "$green_prepare"
@@ -397,6 +1562,359 @@ else
     echo "--- bench stderr ---"
     cat "$TMP/green-bench.stderr"
     test -e "$green_samples" && cat "$green_samples"
+fi
+
+if "$PYTHON" - "$ARTIFACTS/bench-green" <<'PY'
+import pathlib
+import stat
+import sys
+
+root = pathlib.Path(sys.argv[1])
+for phase in ("check", "bench"):
+    view = root / phase
+    assert view.is_symlink()
+    evidence = view.resolve()
+    assert stat.S_IMODE(evidence.stat().st_mode) == 0o555
+    entries = list(evidence.iterdir())
+    assert entries
+    for entry in entries:
+        assert not entry.is_symlink()
+        assert entry.is_file()
+        assert stat.S_IMODE(entry.stat().st_mode) == 0o444
+PY
+then
+    ok 'published evidence 以只读 regular-file 目录封存'
+else
+    bad 'published evidence sealing'
+    find "$ARTIFACTS/bench-green" -maxdepth 6 -printf '%m %y %p\n' \
+        2>/dev/null || true
+fi
+
+read -r current_case_id current_check_id current_check_evidence_id < <(
+    "$PYTHON" - "$ARTIFACTS/bench-green/check/result.json" <<'PY'
+import json
+import pathlib
+import sys
+
+identity = json.loads(pathlib.Path(sys.argv[1]).read_text())["identity"]
+print(identity["case_id"], identity["check_id"], identity["evidence_id"])
+PY
+)
+read -r current_bench_id current_bench_evidence_id < <(
+    "$PYTHON" - "$ARTIFACTS/bench-green/bench/result.json" <<'PY'
+import json
+import pathlib
+import sys
+
+identity = json.loads(pathlib.Path(sys.argv[1]).read_text())["identity"]
+print(identity["bench_id"], identity["evidence_id"])
+PY
+)
+if "$PYTHON" tests/project_suite_evidence.py verify-check \
+    "$ARTIFACTS/bench-green/check/result.json" "$current_case_id" \
+    "$current_check_id" "$current_check_evidence_id" pass \
+    && "$PYTHON" tests/project_suite_evidence.py verify-bench \
+        "$ARTIFACTS/bench-green/bench/result.json" \
+        "$ARTIFACTS/bench-green/check/result.json" "$current_case_id" \
+        "$current_check_id" "$current_check_evidence_id" \
+        "$current_bench_id" "$current_bench_evidence_id" pass; then
+    ok 'evidence validator 接受并严格解析 current symlink view'
+else
+    bad 'current evidence view validation'
+fi
+
+read -r tampered_check_result tampered_check_evidence_id \
+    tampered_bench_result tampered_bench_evidence_id \
+    tampered_stats_result tampered_stats_evidence_id \
+    tampered_oracle_result tampered_oracle_evidence_id \
+    tampered_provenance_result tampered_provenance_evidence_id \
+    extra_sidecar_result legacy_result legacy_check_id \
+    legacy_evidence_id < <(
+    "$PYTHON" - "$ARTIFACTS/bench-green" "$TMP/identity-tamper" <<'PY'
+import hashlib
+import json
+import pathlib
+import shutil
+import sys
+
+source_root = pathlib.Path(sys.argv[1])
+tamper_root = pathlib.Path(sys.argv[2])
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+def writable_tree(path):
+    for entry in path.rglob("*"):
+        entry.chmod(0o755 if entry.is_dir() else 0o644)
+    path.chmod(0o755)
+
+check_source = (source_root / "check").resolve()
+check_document = json.loads((check_source / "result.json").read_text())
+check_id = check_document["identity"]["check_id"]
+check_stage = tamper_root / "check" / check_id / "stage"
+shutil.copytree(check_source, check_stage)
+writable_tree(check_stage)
+check_document["case"]["args"] = ["tampered-without-new-case-id"]
+check_document["identity"].pop("evidence_id")
+check_evidence_id = hashlib.sha256(
+    b"mirvm/project-suite/check-evidence/v1\0" + canonical(check_document)
+).hexdigest()
+check_document["identity"]["evidence_id"] = check_evidence_id
+(check_stage / "result.json").write_bytes(canonical(check_document) + b"\n")
+check_final = check_stage.with_name(check_evidence_id)
+check_stage.rename(check_final)
+
+oracle_document = json.loads((check_source / "result.json").read_text())
+oracle_stage = tamper_root / "check-oracle" / check_id / "stage"
+shutil.copytree(check_source, oracle_stage)
+writable_tree(oracle_stage)
+oracle_stdout_path = oracle_stage / "mirvm.stdout"
+oracle_stdout_path.write_bytes(b"semantic-mismatch\n")
+oracle_stdout = oracle_stdout_path.read_bytes()
+oracle_document["payload"]["mirvm.stdout"] = {
+    "bytes": len(oracle_stdout),
+    "sha256": hashlib.sha256(oracle_stdout).hexdigest(),
+}
+oracle_document["identity"].pop("evidence_id")
+oracle_evidence_id = hashlib.sha256(
+    b"mirvm/project-suite/check-evidence/v1\0" + canonical(oracle_document)
+).hexdigest()
+oracle_document["identity"]["evidence_id"] = oracle_evidence_id
+(oracle_stage / "result.json").write_bytes(canonical(oracle_document) + b"\n")
+oracle_final = oracle_stage.with_name(oracle_evidence_id)
+oracle_stage.rename(oracle_final)
+
+extra_final = tamper_root / "check-extra" / check_id / check_source.name
+shutil.copytree(check_source, extra_final)
+writable_tree(extra_final)
+(extra_final / "unhashed-sidecar").write_text("not part of evidence\n")
+
+legacy_document = json.loads((check_source / "result.json").read_text())
+legacy_document["schema_version"] = 2
+legacy_tools = legacy_document["execution"]["tools"]
+legacy_tools.pop("git")
+legacy_descriptor = {
+    "schema_version": 2,
+    "case_id": legacy_document["identity"]["case_id"],
+    "host_target": legacy_document["execution"]["host_target"],
+    "tools": {
+        name: descriptor["sha256"] for name, descriptor in legacy_tools.items()
+    },
+    "inputs": {
+        "mirvm_sysroot_marker": legacy_document["execution"]["inputs"]
+        ["mirvm_sysroot_marker"]["sha256"]
+    },
+}
+legacy_check_id = hashlib.sha256(
+    b"mirvm/project-suite/check/v1\0" + canonical(legacy_descriptor)
+).hexdigest()
+legacy_document["identity"]["check_id"] = legacy_check_id
+legacy_document["identity"].pop("evidence_id")
+legacy_evidence_id = hashlib.sha256(
+    b"mirvm/project-suite/check-evidence/v1\0" + canonical(legacy_document)
+).hexdigest()
+legacy_document["identity"]["evidence_id"] = legacy_evidence_id
+legacy_final = tamper_root / "legacy-check" / legacy_check_id / legacy_evidence_id
+shutil.copytree(check_source, legacy_final)
+writable_tree(legacy_final)
+(legacy_final / "result.json").write_bytes(canonical(legacy_document) + b"\n")
+
+bench_source = (source_root / "bench").resolve()
+bench_document = json.loads((bench_source / "result.json").read_text())
+bench_id = bench_document["identity"]["bench_id"]
+bench_stage = tamper_root / "bench" / bench_id / "stage"
+shutil.copytree(bench_source, bench_stage)
+writable_tree(bench_stage)
+summary_path = bench_stage / "summary.json"
+summary = json.loads(summary_path.read_text())
+summary["benchmark"]["samples"] = 99
+summary_path.write_bytes(canonical(summary) + b"\n")
+summary_bytes = summary_path.read_bytes()
+bench_document["payload"]["summary.json"] = {
+    "bytes": len(summary_bytes),
+    "sha256": hashlib.sha256(summary_bytes).hexdigest(),
+}
+bench_document["identity"].pop("evidence_id")
+bench_evidence_id = hashlib.sha256(
+    b"mirvm/project-suite/bench-evidence/v1\0" + canonical(bench_document)
+).hexdigest()
+bench_document["identity"]["evidence_id"] = bench_evidence_id
+(bench_stage / "result.json").write_bytes(canonical(bench_document) + b"\n")
+bench_final = bench_stage.with_name(bench_evidence_id)
+bench_stage.rename(bench_final)
+
+stats_document = json.loads((bench_source / "result.json").read_text())
+stats_stage = tamper_root / "bench-stats" / bench_id / "stage"
+shutil.copytree(bench_source, stats_stage)
+writable_tree(stats_stage)
+stats_summary_path = stats_stage / "summary.json"
+stats_summary = json.loads(stats_summary_path.read_text())
+stats_summary["native"]["median_ns"] += 1
+stats_summary_path.write_bytes(canonical(stats_summary) + b"\n")
+stats_summary_bytes = stats_summary_path.read_bytes()
+stats_document["payload"]["summary.json"] = {
+    "bytes": len(stats_summary_bytes),
+    "sha256": hashlib.sha256(stats_summary_bytes).hexdigest(),
+}
+stats_document["identity"].pop("evidence_id")
+stats_evidence_id = hashlib.sha256(
+    b"mirvm/project-suite/bench-evidence/v1\0" + canonical(stats_document)
+).hexdigest()
+stats_document["identity"]["evidence_id"] = stats_evidence_id
+(stats_stage / "result.json").write_bytes(canonical(stats_document) + b"\n")
+stats_final = stats_stage.with_name(stats_evidence_id)
+stats_stage.rename(stats_final)
+
+provenance_document = json.loads((bench_source / "result.json").read_text())
+provenance_stage = tamper_root / "bench-provenance" / bench_id / "stage"
+shutil.copytree(bench_source, provenance_stage)
+writable_tree(provenance_stage)
+provenance_summary_path = provenance_stage / "summary.json"
+provenance_summary = json.loads(provenance_summary_path.read_text())
+provenance_summary["host_target"] = "tampered-target"
+provenance_summary["tools"]["cargo"] = {
+    "path": "/tampered/cargo",
+    "sha256": "0" * 64,
+}
+provenance_summary_path.write_bytes(canonical(provenance_summary) + b"\n")
+provenance_summary_bytes = provenance_summary_path.read_bytes()
+provenance_document["payload"]["summary.json"] = {
+    "bytes": len(provenance_summary_bytes),
+    "sha256": hashlib.sha256(provenance_summary_bytes).hexdigest(),
+}
+provenance_document["identity"].pop("evidence_id")
+provenance_evidence_id = hashlib.sha256(
+    b"mirvm/project-suite/bench-evidence/v1\0" + canonical(provenance_document)
+).hexdigest()
+provenance_document["identity"]["evidence_id"] = provenance_evidence_id
+(provenance_stage / "result.json").write_bytes(
+    canonical(provenance_document) + b"\n"
+)
+provenance_final = provenance_stage.with_name(provenance_evidence_id)
+provenance_stage.rename(provenance_final)
+
+print(check_final / "result.json", check_evidence_id,
+      bench_final / "result.json", bench_evidence_id,
+      stats_final / "result.json", stats_evidence_id,
+      oracle_final / "result.json", oracle_evidence_id,
+      provenance_final / "result.json", provenance_evidence_id,
+      extra_final / "result.json", legacy_final / "result.json",
+      legacy_check_id, legacy_evidence_id)
+PY
+)
+tampered_check_out=$("$PYTHON" tests/project_suite_evidence.py verify-check \
+    "$tampered_check_result" "$current_case_id" "$current_check_id" \
+    "$tampered_check_evidence_id" pass 2>&1)
+tampered_check_code=$?
+tampered_bench_out=$("$PYTHON" tests/project_suite_evidence.py verify-bench \
+    "$tampered_bench_result" "$ARTIFACTS/bench-green/check/result.json" \
+    "$current_case_id" "$current_check_id" \
+    "$current_check_evidence_id" "$current_bench_id" \
+    "$tampered_bench_evidence_id" pass 2>&1)
+tampered_bench_code=$?
+tampered_stats_out=$("$PYTHON" tests/project_suite_evidence.py verify-bench \
+    "$tampered_stats_result" "$ARTIFACTS/bench-green/check/result.json" \
+    "$current_case_id" "$current_check_id" \
+    "$current_check_evidence_id" "$current_bench_id" \
+    "$tampered_stats_evidence_id" pass 2>&1)
+tampered_stats_code=$?
+tampered_oracle_out=$("$PYTHON" tests/project_suite_evidence.py verify-check \
+    "$tampered_oracle_result" "$current_case_id" "$current_check_id" \
+    "$tampered_oracle_evidence_id" pass 2>&1)
+tampered_oracle_code=$?
+tampered_provenance_out=$("$PYTHON" tests/project_suite_evidence.py verify-bench \
+    "$tampered_provenance_result" \
+    "$ARTIFACTS/bench-green/check/result.json" \
+    "$current_case_id" "$current_check_id" "$current_check_evidence_id" \
+    "$current_bench_id" "$tampered_provenance_evidence_id" pass 2>&1)
+tampered_provenance_code=$?
+extra_sidecar_out=$("$PYTHON" tests/project_suite_evidence.py verify-check \
+    "$extra_sidecar_result" "$current_case_id" "$current_check_id" \
+    "$current_check_evidence_id" pass 2>&1)
+extra_sidecar_code=$?
+legacy_out=$("$PYTHON" tests/project_suite_evidence.py verify-check \
+    "$legacy_result" "$current_case_id" "$legacy_check_id" \
+    "$legacy_evidence_id" pass 2>&1)
+legacy_code=$?
+if [ "$tampered_check_code" -eq 69 ] \
+    && echo "$tampered_check_out" | grep -Fxq \
+        'evidence_corrupt: identity.case_id' \
+    && [ "$tampered_bench_code" -eq 69 ] \
+    && echo "$tampered_bench_out" | grep -Fxq \
+        'evidence_corrupt: identity.bench_id' \
+    && [ "$tampered_stats_code" -eq 69 ] \
+    && echo "$tampered_stats_out" | grep -Fxq \
+        'evidence_corrupt: summary.native' \
+    && [ "$tampered_oracle_code" -eq 69 ] \
+    && echo "$tampered_oracle_out" | grep -Fxq \
+        'evidence_corrupt: oracle.stdout' \
+    && [ "$tampered_provenance_code" -eq 69 ] \
+    && echo "$tampered_provenance_out" | grep -Fxq \
+        'evidence_corrupt: summary.host_target' \
+    && [ "$extra_sidecar_code" -eq 69 ] \
+    && echo "$extra_sidecar_out" | grep -Fxq \
+        'evidence_corrupt: directory.entries' \
+    && [ "$legacy_code" -eq 0 ]; then
+    ok 'consumer 重推语义、拒绝 sidecar 并保留 schema-2 历史分派'
+else
+    bad "derived semantic validation (check=$tampered_check_code bench=$tampered_bench_code stats=$tampered_stats_code oracle=$tampered_oracle_code provenance=$tampered_provenance_code sidecar=$extra_sidecar_code legacy=$legacy_code)"
+    echo "$tampered_check_out"
+    echo "$tampered_bench_out"
+    echo "$tampered_stats_out"
+    echo "$tampered_oracle_out"
+    echo "$tampered_provenance_out"
+    echo "$extra_sidecar_out"
+    echo "$legacy_out"
+fi
+
+BENCH_CASE_ALT="$TMP/bench-green-alt.toml"
+cat >"$BENCH_CASE_ALT" <<EOF
+name = "bench-green"
+repo = "$UPSTREAM"
+rev = "$REV"
+lock_sha256 = "$LOCK_SHA256"
+subdir = "."
+args = []
+expected_exit = 0
+timeout_seconds = 30
+
+[bench]
+warmup = 0
+samples = 1
+EOF
+env "${bench_env[@]}" bash tests/real_projects.sh bench "$BENCH_CASE_ALT" \
+    >"$TMP/green-bench-alt.stdout" 2>"$TMP/green-bench-alt.stderr"
+green_bench_alt_code=$?
+if [ "$green_bench_alt_code" -eq 0 ] \
+    && "$PYTHON" - "$ARTIFACTS/bench-green" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+documents = [
+    json.loads(path.read_text())
+    for path in root.glob("objects/bench/*/*/summary.json")
+]
+assert len(documents) == 2
+assert len({document["identity"]["case_id"] for document in documents}) == 1
+assert len({document["identity"]["check_id"] for document in documents}) == 1
+assert len({document["identity"]["check_evidence_id"] for document in documents}) == 1
+assert len({document["identity"]["bench_id"] for document in documents}) == 2
+assert {tuple(sorted(document["benchmark"].items())) for document in documents} == {
+    (("samples", 1), ("warmup", 0)),
+    (("samples", 3), ("warmup", 1)),
+}
+current = json.loads((root / "bench" / "summary.json").read_text())
+assert current["benchmark"] == {"warmup": 0, "samples": 1}
+PY
+then
+    ok 'bench 配置只派生新 bench identity 并复用 exact check evidence'
+else
+    bad "benchmark identity layering (exit=$green_bench_alt_code)"
+    cat "$TMP/green-bench-alt.stdout"
+    cat "$TMP/green-bench-alt.stderr"
+    find "$ARTIFACTS/bench-green" -maxdepth 6 -print 2>/dev/null || true
 fi
 
 BENCH_REPO_SHA=$(printf '%s' "$UPSTREAM" | sha256sum | cut -d' ' -f1)
@@ -408,8 +1926,13 @@ stale_artifact_code=$?
 mv "$BENCH_READY.saved" "$BENCH_READY"
 if [ "$stale_artifact_code" -ne 0 ] \
     && echo "$stale_artifact_out" | grep -Fq 'case_not_prepared: bench-green' \
-    && [ ! -e "$ARTIFACTS/bench-green/check" ]; then
-    ok 'check 前置失败会清除旧 artifacts'
+    && [ ! -e "$ARTIFACTS/bench-green/check" ] \
+    && [ ! -L "$ARTIFACTS/bench-green/check" ] \
+    && [ ! -e "$ARTIFACTS/bench-green/bench" ] \
+    && [ ! -L "$ARTIFACTS/bench-green/bench" ] \
+    && find "$ARTIFACTS/bench-green/objects/bench" \
+        -name summary.json -type f -print -quit | grep -q .; then
+    ok 'check 前置失败撤销 current views 但保留不可变历史证据'
 else
     bad "stale check artifact (exit=$stale_artifact_code)"
     echo "$stale_artifact_out"
@@ -423,7 +1946,7 @@ cat >"$FAKE_SYNC_CARGO" <<'EOF'
 case "${1:-}" in
     fetch|build) exit 0 ;;
     run)
-        if [[ "$(pwd)" == *-bench.* ]]; then
+        if [ -d /run/mirvm-project-side/measure ]; then
             printf 'sync-benchmark\n'
         else
             printf 'sync-correctness\n'
@@ -434,7 +1957,7 @@ esac
 EOF
 cat >"$FAKE_SYNC_MIRVM" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$(pwd)" == *-bench.* ]]; then
+if [ -d /run/mirvm-project-side/measure ]; then
     printf 'sync-benchmark\n'
 else
     printf 'sync-correctness\n'
@@ -521,13 +2044,7 @@ printf '%s\n' "$count" >"$FAKE_BWRAP_COUNT"
 if [ "$count" -gt 4 ]; then
     exit 0
 fi
-while [ "$#" -gt 0 ]; do
-    if [ "$1" = /usr/bin/env ]; then
-        exec "$@"
-    fi
-    shift
-done
-exit 91
+exec /usr/bin/bwrap "$@"
 EOF
 chmod +x "$FAKE_STALE_BWRAP"
 rm -f "$STALE_BWRAP_COUNT"
@@ -576,7 +2093,7 @@ fi
 
 PORT_FILE="$TMP/listener.port"
 NETWORK_MARKER="$TMP/network-reached"
-"$PYTHON" - "$PORT_FILE" "$NETWORK_MARKER" <<'PY' &
+setsid "$PYTHON" - "$PORT_FILE" "$NETWORK_MARKER" <<'PY' &
 import pathlib
 import socket
 import sys
@@ -596,6 +2113,7 @@ with socket.socket() as listener:
         marker.write_text("network namespace leaked\n")
 PY
 SERVER_PID=$!
+BACKGROUND_PIDS+=("$SERVER_PID")
 for _ in $(seq 1 100); do
     [ -s "$PORT_FILE" ] && break
     sleep 0.01
@@ -652,6 +2170,7 @@ offline_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
 offline_code=$?
 kill "$SERVER_PID" 2>/dev/null || true
 wait "$SERVER_PID" 2>/dev/null || true
+forget_background "$SERVER_PID"
 SERVER_PID=
 if [ "$offline_prepare_code" -eq 0 ] && [ "$offline_code" -eq 0 ] \
     && echo "$offline_out" | grep -Fq 'PASS offline correctness' \
@@ -1270,7 +2789,7 @@ cat >"$FAKE_BENCH_MUTATE_CARGO" <<'EOF'
 case "${1:-}" in
     fetch|build) exit 0 ;;
     run)
-        if [[ "$(pwd)" == *-bench.* ]]; then
+        if [ -d /run/mirvm-project-side/measure ]; then
             printf '// benchmark mutation\n' >src/main.rs
         fi
         printf 'same-A\n'
@@ -1280,7 +2799,7 @@ esac
 EOF
 cat >"$FAKE_BENCH_MUTATE_MIRVM" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$(pwd)" == *-bench.* ]]; then
+if [ -d /run/mirvm-project-side/measure ]; then
     printf '// benchmark mutation\n' >src/main.rs
 fi
 printf 'same-A\n'
@@ -1490,6 +3009,130 @@ else
     echo "$env_out"
     test -e "$ARTIFACTS/clean-environment/check/native.stdout" \
         && cat "$ARTIFACTS/clean-environment/check/native.stdout"
+fi
+
+FAKE_PATH_CARGO="$TMP/fake-path-cargo"
+FAKE_PATH_MIRVM="$TMP/fake-path-mirvm"
+cat >"$FAKE_PATH_CARGO" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+    fetch|build) exit 0 ;;
+    run)
+        printf 'cwd=%s home=%s xdg=%s flags=%s rustflags=%s\n' \
+            "$PWD" "$HOME" "$XDG_CACHE_HOME" \
+            "${CARGO_ENCODED_RUSTFLAGS:-unset}" "${RUSTFLAGS:-unset}"
+        ;;
+    *) exit 2 ;;
+esac
+EOF
+cat >"$FAKE_PATH_MIRVM" <<'EOF'
+#!/usr/bin/env bash
+printf 'cwd=%s home=%s xdg=%s flags=%s rustflags=%s\n' \
+    "$PWD" "$HOME" "$XDG_CACHE_HOME" \
+    "${CARGO_ENCODED_RUSTFLAGS:-unset}" "${RUSTFLAGS:-unset}"
+EOF
+chmod +x "$FAKE_PATH_CARGO" "$FAKE_PATH_MIRVM"
+PATH_REMAP_CASE="$TMP/path-remap.toml"
+cat >"$PATH_REMAP_CASE" <<EOF
+name = "path-remap"
+repo = "$UPSTREAM"
+rev = "$REV"
+lock_sha256 = "$LOCK_SHA256"
+EOF
+path_remap_prepare=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" CARGO="$FAKE_PATH_CARGO" \
+    MIRVM="$FAKE_PATH_MIRVM" \
+    bash tests/real_projects.sh prepare "$PATH_REMAP_CASE" 2>&1)
+path_remap_prepare_code=$?
+path_remap_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" CARGO="$FAKE_PATH_CARGO" \
+    MIRVM="$FAKE_PATH_MIRVM" \
+    bash tests/real_projects.sh check "$PATH_REMAP_CASE" 2>&1)
+path_remap_code=$?
+if [ "$path_remap_prepare_code" -eq 0 ] && [ "$path_remap_code" -eq 0 ] \
+    && echo "$path_remap_out" | grep -Fq 'PASS path-remap correctness' \
+    && grep -Fq \
+        'cwd=/run/mirvm-project-side/source home=/run/mirvm-project-side/env/home xdg=/run/mirvm-project-side/env/xdg' \
+        "$ARTIFACTS/path-remap/check/native.stdout" \
+    && grep -Fq 'rustflags=unset' "$ARTIFACTS/path-remap/check/native.stdout"; then
+    ok '两侧 cwd/HOME/XDG/build diagnostics 使用稳定逻辑路径'
+else
+    bad "logical path remap (prepare=$path_remap_prepare_code check=$path_remap_code)"
+    echo "$path_remap_prepare"
+    echo "$path_remap_out"
+fi
+
+CONFIG_UPSTREAM="$TMP/config-rustflags-upstream"
+mkdir -p "$CONFIG_UPSTREAM/.cargo" "$CONFIG_UPSTREAM/src"
+cat >"$CONFIG_UPSTREAM/Cargo.toml" <<'EOF'
+[package]
+name = "project-suite-config-rustflags"
+version = "0.1.0"
+edition = "2024"
+EOF
+cat >"$CONFIG_UPSTREAM/Cargo.lock" <<'EOF'
+# This file is automatically @generated by Cargo.
+# It is not intended for manual editing.
+version = 4
+
+[[package]]
+name = "project-suite-config-rustflags"
+version = "0.1.0"
+EOF
+cat >"$CONFIG_UPSTREAM/.cargo/config.toml" <<'EOF'
+[build]
+rustflags = [
+    "--cfg=project_suite_config_flag",
+    "--check-cfg=cfg(project_suite_config_flag)",
+]
+EOF
+cat >"$CONFIG_UPSTREAM/src/main.rs" <<'EOF'
+#[cfg(not(project_suite_config_flag))]
+compile_error!("project .cargo/config.toml rustflags were lost");
+
+fn main() {
+    println!("config-preserved");
+}
+EOF
+git -C "$CONFIG_UPSTREAM" init -q -b main
+git -C "$CONFIG_UPSTREAM" config user.name 'mirvm test'
+git -C "$CONFIG_UPSTREAM" config user.email 'mirvm-test@example.invalid'
+git -C "$CONFIG_UPSTREAM" add Cargo.toml Cargo.lock .cargo/config.toml src/main.rs
+git -C "$CONFIG_UPSTREAM" commit -q -m config-rustflags-fixture
+CONFIG_REV=$(git -C "$CONFIG_UPSTREAM" rev-parse HEAD)
+CONFIG_LOCK_SHA256=$(sha256sum "$CONFIG_UPSTREAM/Cargo.lock" | cut -d' ' -f1)
+CONFIG_CASE="$TMP/config-rustflags.toml"
+cat >"$CONFIG_CASE" <<EOF
+name = "config-rustflags"
+repo = "$CONFIG_UPSTREAM"
+rev = "$CONFIG_REV"
+lock_sha256 = "$CONFIG_LOCK_SHA256"
+EOF
+FAKE_CONFIG_MIRVM="$TMP/fake-config-mirvm"
+cat >"$FAKE_CONFIG_MIRVM" <<'EOF'
+#!/usr/bin/env bash
+printf 'config-preserved\n'
+EOF
+chmod +x "$FAKE_CONFIG_MIRVM"
+config_prepare=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_CONFIG_MIRVM" \
+    bash tests/real_projects.sh prepare "$CONFIG_CASE" 2>&1)
+config_prepare_code=$?
+config_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
+    PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" MIRVM="$FAKE_CONFIG_MIRVM" \
+    bash tests/real_projects.sh check "$CONFIG_CASE" 2>&1)
+config_code=$?
+if [ "$config_prepare_code" -eq 0 ] && [ "$config_code" -eq 0 ] \
+    && echo "$config_out" | grep -Fq 'PASS config-rustflags correctness' \
+    && printf 'config-preserved\n' \
+        | cmp -s - "$ARTIFACTS/config-rustflags/check/native.stdout"; then
+    ok '保留项目 .cargo/config.toml rustflags'
+else
+    bad "project config rustflags (prepare=$config_prepare_code check=$config_code)"
+    echo "$config_prepare"
+    echo "$config_out"
+    test -e "$ARTIFACTS/config-rustflags/check/native.stderr" \
+        && tail -20 "$ARTIFACTS/config-rustflags/check/native.stderr"
 fi
 
 PYTHON_POISON="$TMP/python-poison"

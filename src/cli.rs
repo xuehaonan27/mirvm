@@ -10,7 +10,9 @@
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, exit};
 
+use rustc_data_structures::AtomicRef;
 use rustc_driver::{Callbacks, Compilation};
+use rustc_errors::{DiagInner, ErrorGuaranteed, Level};
 use rustc_interface::interface::Compiler;
 use rustc_middle::ty::TyCtxt;
 
@@ -159,7 +161,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     ];
     let mut program_argv = vec![input];
     program_argv.extend(program_args);
-    run_driver(rustc_args, program_argv, dump_mir, vm_call, vm_stats)
+    run_driver(rustc_args, program_argv, dump_mir, vm_call, vm_stats, false)
 }
 
 // ===== cargo runner 回调 =====
@@ -175,10 +177,73 @@ fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
         // SAFETY: 单线程阶段，尚未启动解释
         unsafe { std::env::set_var(k, v) };
     }
-    run_driver(rustc_args, program_argv, false, None, false)
+    run_driver(rustc_args, program_argv, false, None, false, true)
 }
 
 // ===== 共享驱动 =====
+
+type TrackDiagnostic =
+    fn(DiagInner, &mut dyn FnMut(DiagInner) -> Option<ErrorGuaranteed>) -> Option<ErrorGuaranteed>;
+
+static PREVIOUS_TRACK_DIAGNOSTIC: AtomicRef<TrackDiagnostic> =
+    AtomicRef::new(&(passthrough_diagnostic as TrackDiagnostic));
+
+fn passthrough_diagnostic(
+    diagnostic: DiagInner,
+    emit: &mut dyn FnMut(DiagInner) -> Option<ErrorGuaranteed>,
+) -> Option<ErrorGuaranteed> {
+    emit(diagnostic)
+}
+
+fn is_runner_warning_summary(diagnostic: &DiagInner) -> bool {
+    if diagnostic.level() != Level::ForceWarning
+        || diagnostic.code.is_some()
+        || diagnostic.lint_id.is_some()
+        || diagnostic.is_lint.is_some()
+        || diagnostic.span != rustc_errors::MultiSpan::new()
+        || !diagnostic.children.is_empty()
+        || diagnostic.suggestions.len() != 0
+        || diagnostic.messages.len() != 1
+    {
+        return false;
+    }
+
+    let Some(message) = diagnostic.messages[0].0.as_str() else {
+        return false;
+    };
+    if message == "1 warning emitted" {
+        return true;
+    }
+    message
+        .strip_suffix(" warnings emitted")
+        .and_then(|count| count.parse::<u64>().ok())
+        .is_some_and(|count| count > 1)
+}
+
+/// Preserve rustc's dependency-tracking hook while suppressing only its human warning-count
+/// summary. Real warnings were emitted before this hook is installed; late errors and delayed
+/// bugs still flow through `previous` and the original emitter during normal finalization.
+fn track_runner_finalization_diagnostic(
+    diagnostic: DiagInner,
+    emit: &mut dyn FnMut(DiagInner) -> Option<ErrorGuaranteed>,
+) -> Option<ErrorGuaranteed> {
+    let previous = &*PREVIOUS_TRACK_DIAGNOSTIC;
+    if is_runner_warning_summary(&diagnostic) {
+        previous(diagnostic, &mut |_| None)
+    } else {
+        previous(diagnostic, emit)
+    }
+}
+
+fn install_runner_finalization_filter() {
+    let current: &'static TrackDiagnostic = &rustc_errors::TRACK_DIAGNOSTIC;
+    PREVIOUS_TRACK_DIAGNOSTIC.swap(current);
+    rustc_errors::TRACK_DIAGNOSTIC.swap(&(track_runner_finalization_diagnostic as TrackDiagnostic));
+}
+
+fn restore_runner_finalization_filter() {
+    rustc_errors::TRACK_DIAGNOSTIC.swap(&PREVIOUS_TRACK_DIAGNOSTIC);
+}
 
 struct MirvmCallbacks {
     dump_mir: bool,
@@ -186,6 +251,9 @@ struct MirvmCallbacks {
     exit_code: Option<i32>,
     vm_call: Option<String>,
     vm_stats: bool,
+    module: Option<crate::vm::engine::ir::Module>,
+    suppress_runner_warning_summary: bool,
+    runner_finalization_filter_installed: bool,
 }
 
 impl Callbacks for MirvmCallbacks {
@@ -209,13 +277,12 @@ impl Callbacks for MirvmCallbacks {
                 .expect("write_mir_fn failed");
             print!("{}", String::from_utf8_lossy(&buf));
         } else {
-            // 加载相（lower，tcx 关在此）→ 执行相（纯 Rust）
-            self.exit_code = Some(run_vm_engine(
-                tcx,
-                self.vm_call.as_deref(),
-                self.vm_stats,
-                std::mem::take(&mut self.program_argv),
-            ));
+            // callback 只做加载相；执行相必须等 tcx.finish、诊断收尾和 compiler drop 全部完成。
+            self.module = Some(crate::lower::lower_program(tcx, &self.program_argv));
+            if self.suppress_runner_warning_summary {
+                install_runner_finalization_filter();
+                self.runner_finalization_filter_installed = true;
+            }
         }
 
         Compilation::Stop
@@ -225,12 +292,10 @@ impl Callbacks for MirvmCallbacks {
 /// 引擎入口：缺省跑 main 启动链；`--vm-call 'name(args…)'` 直调导出函数（gate 入口）；
 /// `--vm-stats` = Trap 债务统计（各期开工前的调研仪器）。
 fn run_vm_engine(
-    tcx: TyCtxt<'_>,
+    module: crate::vm::engine::ir::Module,
     vm_call: Option<&str>,
     vm_stats: bool,
-    program_argv: Vec<String>,
 ) -> i32 {
-    let module = crate::lower::lower_program(tcx, &program_argv);
     if vm_stats {
         print!("{}", crate::vm::engine::stats::report(&module));
         return 0;
@@ -285,6 +350,7 @@ fn run_driver(
     dump_mir: bool,
     vm_call: Option<String>,
     vm_stats: bool,
+    suppress_runner_warning_summary: bool,
 ) -> ExitCode {
     let mut callbacks = MirvmCallbacks {
         dump_mir,
@@ -292,14 +358,27 @@ fn run_driver(
         exit_code: None,
         vm_call,
         vm_stats,
+        module: None,
+        suppress_runner_warning_summary,
+        runner_finalization_filter_installed: false,
     };
     let compiler_code = rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&rustc_args, &mut callbacks)
     });
-    match callbacks.exit_code {
-        Some(code) => exit(code),
-        None => compiler_code, // 编译期出错，透传 rustc 退出码
+    if callbacks.runner_finalization_filter_installed {
+        restore_runner_finalization_filter();
     }
+    if compiler_code != ExitCode::SUCCESS {
+        return compiler_code;
+    }
+    if let Some(code) = callbacks.exit_code {
+        exit(code);
+    }
+    if let Some(module) = callbacks.module.take() {
+        let code = run_vm_engine(module, callbacks.vm_call.as_deref(), callbacks.vm_stats);
+        exit(code);
+    }
+    compiler_code
 }
 
 // ===== frontmatter（cargo script RFC 3424 语法）=====
@@ -379,4 +458,31 @@ fn materialize_script(script: &Path, manifest: &str, body: &str) -> PathBuf {
     std::fs::write(dir.join("Cargo.toml"), cargo_toml).expect("写 Cargo.toml 失败");
     std::fs::write(dir.join("src/main.rs"), body).expect("写 main.rs 失败");
     dir
+}
+
+#[cfg(test)]
+mod tests {
+    use rustc_errors::{DiagInner, Level};
+
+    use super::is_runner_warning_summary;
+
+    #[test]
+    fn runner_filter_accepts_only_rustc_warning_count_summaries() {
+        assert!(is_runner_warning_summary(&DiagInner::new(
+            Level::ForceWarning,
+            "1 warning emitted"
+        )));
+        assert!(is_runner_warning_summary(&DiagInner::new(
+            Level::ForceWarning,
+            "9 warnings emitted"
+        )));
+        assert!(!is_runner_warning_summary(&DiagInner::new(
+            Level::Warning,
+            "1 warning emitted"
+        )));
+        assert!(!is_runner_warning_summary(&DiagInner::new(
+            Level::ForceWarning,
+            "warning: 1 warning emitted"
+        )));
+    }
 }

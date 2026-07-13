@@ -12,6 +12,12 @@ case "$name" in
     ffi_zlib)
         echo 'ffi-ok'
         ;;
+    real_ripgrep_regex)
+        echo 'regex-ok'
+        ;;
+    cargo_warning_return)
+        echo 'warning-return-ok'
+        ;;
     diffproj)
         echo 'project-ok'
         exit 7

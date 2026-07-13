@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # cargo 模式差分：frontmatter 脚本 / cargo 项目，native cargo run vs mirvm 对拍。
 # native 是 oracle，必须先达到各 fixture 明示的退出码；“双方同样构建失败”不是 PASS。
-# M5.1 后 ecosystem/ffi_zlib/project 均须与 native 一致。保留可注入的 expected-red
-# 模式只用于门禁自身回归，以及未来滚动前沿时锁定原因/XPASS 行为。
+# M5.1 后 ecosystem/ffi_zlib/project 均须与 native 一致；真实项目 TDD 又加入
+# ripgrep_regex 与 warning_return。保留可注入的 expected-red 模式只用于门禁自身
+# 回归，以及未来滚动前沿时锁定原因/XPASS 行为。
 set -u
 cd "$(dirname "$0")/.."
 MIRVM=${MIRVM:-$(pwd)/target/debug/mirvm}
 CARGO=${CARGO:-$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo}
+RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
+RUSTC_APPEND_PROXY=${RUSTC_APPEND_PROXY:-$(pwd)/tests/project_suite_rustc_proxy.sh}
 SCRIPT_CACHE=${SCRIPT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/mirvm/scripts}
 pass=0 xfail=0 fail=0
 
@@ -17,15 +20,22 @@ show_diff() {
 
 check_green() {
     local name="$1" native_out="$2" mirvm_out="$3" native_code="$4" mirvm_code="$5"
-    local expected_native_code="$6"
+    local expected_native_code="$6" native_err="${7:-}" mirvm_err="${8:-}"
     if [ "$native_code" != "$expected_native_code" ]; then
         echo "FAIL $name (native baseline exit=$native_code, want=$expected_native_code)"
+        [ -z "$native_err" ] || tail -20 "$native_err"
         fail=$((fail+1))
-    elif diff -q "$native_out" "$mirvm_out" >/dev/null && [ "$native_code" = "$mirvm_code" ]; then
+    elif diff -q "$native_out" "$mirvm_out" >/dev/null \
+        && diff -q "$native_err" "$mirvm_err" >/dev/null \
+        && [ "$native_code" = "$mirvm_code" ]; then
         echo "PASS $name"; pass=$((pass+1))
     else
         echo "FAIL $name (native=$native_code mirvm=$mirvm_code)"
         show_diff "$native_out" "$mirvm_out"
+        if ! diff -q "$native_err" "$mirvm_err" >/dev/null; then
+            echo "stderr mismatch:"
+            show_diff "$native_err" "$mirvm_err"
+        fi
         fail=$((fail+1))
     fi
 }
@@ -68,14 +78,16 @@ diff_script() {
     "$MIRVM" run "$src" >"$TMP/$name.mirvm" 2>"$TMP/$name.mirvm.err"; local mc=$?
     local D; D=$(script_dir "$stem")
     if [ -z "$D" ]; then echo "FAIL $name (未找到物化目录)"; fail=$((fail+1)); return; fi
-    (cd "$D" && "$CARGO" run -q >"$TMP/$name.native" 2>"$TMP/$name.native.err"); local nc=$?
+    (cd "$D" && RUSTC="$RUSTC" "$CARGO" run -q \
+        >"$TMP/$name.native" 2>"$TMP/$name.native.err"); local nc=$?
     if [ "$mode" = xfail ]; then
         check_expected_red "$name" "$TMP/$name.native" "$TMP/$name.mirvm" \
             "$TMP/$name.mirvm.err" "$nc" "$mc" "$expected_native_code" \
             "$expected_mirvm_code" "$diagnostic"
     else
         check_green "$name" "$TMP/$name.native" "$TMP/$name.mirvm" \
-            "$nc" "$mc" "$expected_native_code"
+            "$nc" "$mc" "$expected_native_code" "$TMP/$name.native.err" \
+            "$TMP/$name.mirvm.err"
     fi
 }
 
@@ -86,9 +98,11 @@ else
     diff_script ecosystem demo/ecosystem.rs ecosystem green 0
 fi
 diff_script ffi_zlib demo/ffi_zlib.rs ffi_zlib green 0
+diff_script ripgrep_regex tests/fixtures/real_ripgrep_regex.rs real_ripgrep_regex green 0
+diff_script warning_return tests/fixtures/cargo_warning_return.rs cargo_warning_return green 0
 
 # 2) cargo 项目模式
-PROJ="$TMP/proj"; mkdir -p "$PROJ/src"
+PROJ="$TMP/proj"; mkdir -p "$PROJ/.cargo" "$PROJ/src"
 cat > "$PROJ/Cargo.toml" <<'EOF'
 [package]
 name = "diffproj"
@@ -97,7 +111,19 @@ edition = "2024"
 [dependencies]
 serde_json = "1"
 EOF
+cat > "$PROJ/.cargo/config.toml" <<'EOF'
+[build]
+rustflags = [
+    "--cfg=diff_cargo_project_config",
+    "--check-cfg=cfg(diff_cargo_project_config)",
+]
+EOF
 cat > "$PROJ/src/main.rs" <<'EOF'
+#[cfg(not(diff_cargo_project_config))]
+compile_error!("project Cargo rustflags were replaced");
+#[cfg(not(diff_cargo_harness_append))]
+compile_error!("harness-appended rustflags were lost");
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let v: serde_json::Value = serde_json::json!({"args": args.len()});
@@ -105,9 +131,22 @@ fn main() {
     std::process::exit(7);
 }
 EOF
-"$MIRVM" run "$PROJ" -- x y >"$TMP/proj.mirvm" 2>"$TMP/proj.mirvm.err"; mc=$?
-(cd "$PROJ" && "$CARGO" run -q -- x y >"$TMP/proj.native" 2>"$TMP/proj.native.err"); nc=$?
-check_green project "$TMP/proj.native" "$TMP/proj.mirvm" "$nc" "$mc" 7
+printf -v project_mirvm_flags '%s\x1f%s' \
+    '--cfg=diff_cargo_harness_append' \
+    '--check-cfg=cfg(diff_cargo_harness_append)'
+printf -v project_mirvm_flags '%s\x1f%s\x1f%s' \
+    "$project_mirvm_flags" \
+    "--remap-path-prefix=$PROJ=/mirvm-diff-project" \
+    '--remap-path-scope=diagnostics'
+MIRVM_ENCODED_RUSTFLAGS_APPEND="$project_mirvm_flags" \
+    "$MIRVM" run "$PROJ" -- x y \
+    >"$TMP/proj.mirvm" 2>"$TMP/proj.mirvm.err"; mc=$?
+(cd "$PROJ" && PROJECT_SUITE_RUSTC="$RUSTC" \
+    PROJECT_SUITE_ENCODED_RUSTFLAGS_APPEND="$project_mirvm_flags" \
+    RUSTC="$RUSTC_APPEND_PROXY" "$CARGO" run -q -- x y \
+    >"$TMP/proj.native" 2>"$TMP/proj.native.err"); nc=$?
+check_green project "$TMP/proj.native" "$TMP/proj.mirvm" "$nc" "$mc" 7 \
+    "$TMP/proj.native.err" "$TMP/proj.mirvm.err"
 
 echo "== $pass passed, $xfail expected-red, $fail failed =="
 [ $fail = 0 ]

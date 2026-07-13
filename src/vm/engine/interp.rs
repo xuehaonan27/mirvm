@@ -19,7 +19,8 @@ use super::ctx::{Ctx, Shared};
 use super::frame::ByteRegion;
 use super::ir::{
     Bb, Block, FuncBody, IntBinOp, IntCc, Module, Operand, OvfOp, ParamAbi, PlaceBase, PlaceExpr,
-    PlaceStep, RetAbi, RetDest, Rvalue, ScalarPlace, Slot, Stmt, Terminator, UnwindAction, Width,
+    PlaceStep, RetAbi, RetDest, Rvalue, ScalarPlace, Slot, Stmt, SwitchDiscr, Terminator,
+    UnwindAction, Width,
 };
 
 /// guest panic 的宿主载体（spike3 协议）：exception = guest 侧 `_Unwind_Exception` 指针
@@ -103,8 +104,73 @@ unsafe fn volatile_store_n<const N: usize>(dst: *mut u8, src: *const u8) {
     unsafe { (dst as *mut MaybeUninit<[u8; N]>).write_volatile(value) };
 }
 
+/// 宽 memory-repr volatile 值的后端分解。先/后端都只接触
+/// `MaybeUninit<[u8; N]>`，所以 padding 保持 opaque；16/8/4/2/1 的分块
+/// 对应目标最终必须完成的若干机器访问，不承诺原子性。
 #[inline]
-fn mem_read_volatile(addr: u64, dst: u64, size: u8) {
+unsafe fn volatile_load_chunks(mut src: *const u8, mut dst: *mut u8, mut size: usize) {
+    while size >= 16 {
+        unsafe { volatile_load_n::<16>(src, dst) };
+        src = src.wrapping_add(16);
+        dst = dst.wrapping_add(16);
+        size -= 16;
+    }
+    if size >= 8 {
+        unsafe { volatile_load_n::<8>(src, dst) };
+        src = src.wrapping_add(8);
+        dst = dst.wrapping_add(8);
+        size -= 8;
+    }
+    if size >= 4 {
+        unsafe { volatile_load_n::<4>(src, dst) };
+        src = src.wrapping_add(4);
+        dst = dst.wrapping_add(4);
+        size -= 4;
+    }
+    if size >= 2 {
+        unsafe { volatile_load_n::<2>(src, dst) };
+        src = src.wrapping_add(2);
+        dst = dst.wrapping_add(2);
+        size -= 2;
+    }
+    if size == 1 {
+        unsafe { volatile_load_n::<1>(src, dst) };
+    }
+}
+
+#[inline]
+unsafe fn volatile_store_chunks(mut dst: *mut u8, mut src: *const u8, mut size: usize) {
+    while size >= 16 {
+        unsafe { volatile_store_n::<16>(dst, src) };
+        dst = dst.wrapping_add(16);
+        src = src.wrapping_add(16);
+        size -= 16;
+    }
+    if size >= 8 {
+        unsafe { volatile_store_n::<8>(dst, src) };
+        dst = dst.wrapping_add(8);
+        src = src.wrapping_add(8);
+        size -= 8;
+    }
+    if size >= 4 {
+        unsafe { volatile_store_n::<4>(dst, src) };
+        dst = dst.wrapping_add(4);
+        src = src.wrapping_add(4);
+        size -= 4;
+    }
+    if size >= 2 {
+        unsafe { volatile_store_n::<2>(dst, src) };
+        dst = dst.wrapping_add(2);
+        src = src.wrapping_add(2);
+        size -= 2;
+    }
+    if size == 1 {
+        unsafe { volatile_store_n::<1>(dst, src) };
+    }
+}
+
+#[inline]
+fn mem_read_volatile(addr: u64, dst: u64, size: u32) {
     unsafe {
         match size {
             1 => volatile_load_n::<1>(addr as *const u8, dst as *mut u8),
@@ -112,13 +178,18 @@ fn mem_read_volatile(addr: u64, dst: u64, size: u8) {
             4 => volatile_load_n::<4>(addr as *const u8, dst as *mut u8),
             8 => volatile_load_n::<8>(addr as *const u8, dst as *mut u8),
             16 => volatile_load_n::<16>(addr as *const u8, dst as *mut u8),
-            _ => unreachable!("lower 只产生 1/2/4/8/16-byte volatile"),
+            _ => {
+                let size = size as usize;
+                let mut snapshot = vec![MaybeUninit::<u8>::uninit(); size];
+                volatile_load_chunks(addr as *const u8, snapshot.as_mut_ptr().cast::<u8>(), size);
+                std::ptr::copy_nonoverlapping(snapshot.as_ptr().cast::<u8>(), dst as *mut u8, size);
+            }
         }
     }
 }
 
 #[inline]
-fn mem_write_volatile(addr: u64, src: u64, size: u8) {
+fn mem_write_volatile(addr: u64, src: u64, size: u32) {
     unsafe {
         match size {
             1 => volatile_store_n::<1>(addr as *mut u8, src as *const u8),
@@ -126,7 +197,16 @@ fn mem_write_volatile(addr: u64, src: u64, size: u8) {
             4 => volatile_store_n::<4>(addr as *mut u8, src as *const u8),
             8 => volatile_store_n::<8>(addr as *mut u8, src as *const u8),
             16 => volatile_store_n::<16>(addr as *mut u8, src as *const u8),
-            _ => unreachable!("lower 只产生 1/2/4/8/16-byte volatile"),
+            _ => {
+                let size = size as usize;
+                let mut snapshot = vec![MaybeUninit::<u8>::uninit(); size];
+                std::ptr::copy_nonoverlapping(
+                    src as *const u8,
+                    snapshot.as_mut_ptr().cast::<u8>(),
+                    size,
+                );
+                volatile_store_chunks(addr as *mut u8, snapshot.as_ptr().cast::<u8>(), size);
+            }
         }
     }
 }
@@ -170,6 +250,28 @@ fn eval_place_addr(ctx: *mut Ctx, base: usize, expr: &PlaceExpr) -> u64 {
         match step {
             PlaceStep::Deref => addr = mem_read(addr, Width::W64),
             PlaceStep::Offset(o) => addr = addr.wrapping_add(*o as i64 as u64),
+            PlaceStep::VTableAlignOffset {
+                meta,
+                unaligned,
+                packed,
+            } => {
+                let (vtable, _) = eval_operand(ctx, base, meta);
+                let mut align = mem_read(vtable.wrapping_add(2 * 8), Width::W64);
+                if let Some(packed) = packed {
+                    align = align.min(*packed);
+                }
+                if align == 0 || !align.is_power_of_two() {
+                    engine_abort(&format!(
+                        "dyn vtable alignment 非 2 的幂：{align}（vtable={vtable:#x}）"
+                    ));
+                }
+                let offset = unaligned.checked_add(align - 1).unwrap_or_else(|| {
+                    engine_abort(&format!(
+                        "dyn 尾字段 offset 溢出：unaligned={unaligned} align={align}"
+                    ))
+                }) & !(align - 1);
+                addr = addr.wrapping_add(offset);
+            }
             PlaceStep::IndexScaled { idx, stride } => {
                 let i = slot_read(ctx, base, *idx);
                 addr = addr.wrapping_add(i.wrapping_mul(*stride));
@@ -1276,10 +1378,16 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 targets,
                 otherwise,
             } => {
-                let (d, _) = eval_operand(ctx, base, discr);
+                let d = match discr {
+                    SwitchDiscr::Scalar(discr) => eval_operand(ctx, base, discr).0 as u128,
+                    SwitchDiscr::Wide(discr) => {
+                        let addr = eval_place_addr(ctx, base, discr);
+                        unsafe { (addr as *const u128).read_unaligned() }
+                    }
+                };
                 blk = targets
                     .iter()
-                    .find(|(v, _)| *v == d as u128)
+                    .find(|(v, _)| *v == d)
                     .map(|(_, b)| *b)
                     .unwrap_or(*otherwise) as usize;
             }
@@ -1773,7 +1881,31 @@ pub fn run_export(shared: &'static Shared, name: &str, args: &[u64]) -> Result<u
 mod tests {
     use std::mem::MaybeUninit;
 
-    use super::{mem_read_volatile, mem_write_volatile};
+    use super::{eval_place_addr, mem_read_volatile, mem_write_volatile};
+    use crate::vm::engine::ir::{Operand, PlaceBase, PlaceExpr, PlaceStep, Width};
+
+    #[test]
+    fn dyn_tail_alignment_preserves_prefixes_larger_than_four_gibibytes() {
+        let vtable = [0u64, 0, 32];
+        let unaligned = u32::MAX as u64 + 18;
+        let expr = PlaceExpr {
+            base: PlaceBase::Static(0x1000),
+            steps: vec![PlaceStep::VTableAlignOffset {
+                meta: Operand::Imm {
+                    bits: vtable.as_ptr() as u64,
+                    width: Width::W64,
+                },
+                unaligned,
+                packed: None,
+            }]
+            .into_boxed_slice(),
+        };
+        let expected_offset = (unaligned + 31) & !31;
+        assert_eq!(
+            eval_place_addr(std::ptr::null_mut(), 0, &expr),
+            0x1000 + expected_offset
+        );
+    }
 
     #[test]
     fn volatile_scalar_roundtrip_preserves_each_width() {
@@ -1839,6 +1971,51 @@ mod tests {
     }
 
     #[test]
+    fn volatile_wide_store_preserves_every_byte() {
+        let source: Vec<u8> = (0..137)
+            .map(|index| (index as u8).wrapping_mul(17))
+            .collect();
+        let mut storage = vec![0u8; source.len() + 1];
+        mem_write_volatile(
+            unsafe { storage.as_mut_ptr().add(1) } as u64,
+            source.as_ptr() as u64,
+            source.len() as u32,
+        );
+        assert_eq!(&storage[1..], source.as_slice());
+    }
+
+    #[test]
+    fn volatile_unaligned_31_byte_roundtrip_covers_every_chunk_width() {
+        let source: Vec<u8> = (0..31)
+            .map(|index| (index as u8).wrapping_mul(29))
+            .collect();
+        let mut storage = [0u8; 33];
+        let mut got = [0u8; 31];
+        let unaligned = unsafe { storage.as_mut_ptr().add(1) };
+        mem_write_volatile(unaligned as u64, source.as_ptr() as u64, 31);
+        mem_read_volatile(unaligned as u64, got.as_mut_ptr() as u64, 31);
+        assert_eq!(got.as_slice(), source.as_slice());
+    }
+
+    #[test]
+    fn volatile_wide_load_snapshots_before_overlapping_destination() {
+        let mut storage: Vec<u8> = (0..160).map(|index| index as u8).collect();
+        let expected = storage[..137].to_vec();
+        let base = storage.as_mut_ptr();
+        mem_read_volatile(base as u64, unsafe { base.add(7) } as u64, 137);
+        assert_eq!(&storage[7..144], expected.as_slice());
+    }
+
+    #[test]
+    fn volatile_wide_store_snapshots_before_overlapping_destination() {
+        let mut storage: Vec<u8> = (0..160).map(|index| (index as u8) ^ 0xa5).collect();
+        let expected = storage[..137].to_vec();
+        let base = storage.as_mut_ptr();
+        mem_write_volatile(unsafe { base.add(7) } as u64, base as u64, 137);
+        assert_eq!(&storage[7..144], expected.as_slice());
+    }
+
+    #[test]
     fn volatile_padded_aggregate_never_interprets_padding_as_an_integer() {
         #[repr(C)]
         #[derive(Clone, Copy)]
@@ -1856,12 +2033,12 @@ mod tests {
         mem_write_volatile(
             storage.as_mut_ptr() as u64,
             (&value as *const Padded) as u64,
-            size_of::<Padded>() as u8,
+            size_of::<Padded>() as u32,
         );
         mem_read_volatile(
             storage.as_ptr() as u64,
             got.as_mut_ptr() as u64,
-            size_of::<Padded>() as u8,
+            size_of::<Padded>() as u32,
         );
         let got = unsafe { got.assume_init() };
         assert_eq!(got.tag, value.tag);

@@ -70,12 +70,19 @@ pub enum PlaceBase {
 }
 
 /// 地址表达式的一步（lower 已把 Field/Downcast 折叠成 Offset）。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum PlaceStep {
     /// 当前地址处读出指针（W64），地址切换为它
     Deref,
     /// 常量字节偏移（可负——slice 尾投影 `len-k` 折出负项）
     Offset(i32),
+    /// 含 dyn 尾字段的 DST：`unaligned` 必须按 vtable 的运行期 alignment 向上取整。
+    /// `packed` 对应外层 `repr(packed(N))` 对字段 alignment 的上限。
+    VTableAlignOffset {
+        meta: Operand,
+        unaligned: u64,
+        packed: Option<u64>,
+    },
     /// 动态下标：地址 += 帧内 idx 槽值 × stride
     IndexScaled { idx: Slot, stride: u64 },
 }
@@ -451,19 +458,21 @@ pub enum Stmt {
         val: Operand,
     },
     /// 等宽 volatile 整体读。执行器用 alignment=1 的 opaque `MaybeUninit`
-    /// 字节载体发出单个 volatile 事件，不解释聚合值的 padding。
+    /// 字节载体搬运，不解释聚合值的 padding。后端能直接表示的宽度保持为
+    /// 单个 volatile 事件；更宽的 memory-repr 值按目标可承载的块分解。
     VolatileLoad {
         addr: Operand,
         dst: PlaceExpr,
-        size: u8,
+        size: u32,
     },
-    /// 等宽 volatile 整体写；`src` 是位型来源 place，padding 只按原始
-    /// 字节搬运。aligned/unaligned intrinsic 在 guest 端的前置条件不同，
-    /// 但执行器共用对齐 1 的宿主载体，避免增加额外对齐要求。
+    /// 等宽 volatile 整体写；`src` 是位型来源 place，padding 只按原始字节
+    /// 搬运。memory-repr 值对应 rustc 的 volatile memcpy 路径。aligned/unaligned
+    /// intrinsic 在 guest 端的前置条件不同，但执行器共用对齐 1 的宿主载体，
+    /// 避免增加额外对齐要求。
     VolatileStore {
         addr: Operand,
         src: PlaceExpr,
-        size: u8,
+        size: u32,
     },
     /// 原子比较交换：dst_val = 旧值，dst_ok = 是否成功（SeqCst/SeqCst）
     AtomicCxchg {
@@ -720,11 +729,19 @@ pub enum RetDest {
     Indirect(PlaceExpr),
 }
 
+/// `SwitchInt` 判别值。普通整数沿用标量 operand；i128/u128 保持在 place 中，执行期
+/// 一次读取完整 128 位，不能先截成 u64。
+#[derive(Clone, Debug)]
+pub enum SwitchDiscr {
+    Scalar(Operand),
+    Wide(PlaceExpr),
+}
+
 #[derive(Clone, Debug)]
 pub enum Terminator {
     Goto(Bb),
     SwitchInt {
-        discr: Operand,
+        discr: SwitchDiscr,
         targets: Vec<(u128, Bb)>,
         otherwise: Bb,
     },

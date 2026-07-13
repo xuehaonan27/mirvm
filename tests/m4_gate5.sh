@@ -73,14 +73,16 @@ for p in $CORPUS_PROGS; do
     fi
 done
 
-# ---- ② diff_cargo：三个 cargo 形态均与 native 一致 ----
+# ---- ② diff_cargo：五个 cargo 形态均与 native 一致 ----
 echo "== diff_cargo =="
 if MIRVM="$MIRVM" bash tests/diff_cargo.sh >"$TMP/diff_cargo.out" 2>&1 \
     && grep -q "PASS ecosystem" "$TMP/diff_cargo.out" \
     && grep -q "PASS ffi_zlib" "$TMP/diff_cargo.out" \
+    && grep -q "PASS ripgrep_regex" "$TMP/diff_cargo.out" \
+    && grep -q "PASS warning_return" "$TMP/diff_cargo.out" \
     && grep -q "PASS project" "$TMP/diff_cargo.out" \
-    && grep -q "== 3 passed, 0 expected-red, 0 failed ==" "$TMP/diff_cargo.out"; then
-    ok "diff_cargo 3/3"
+    && grep -q "== 5 passed, 0 expected-red, 0 failed ==" "$TMP/diff_cargo.out"; then
+    ok "diff_cargo 5/5"
 else
     bad "diff_cargo"
     grep -E "PASS|XFAIL|XPASS|FAIL" "$TMP/diff_cargo.out"

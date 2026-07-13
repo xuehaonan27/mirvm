@@ -35,6 +35,26 @@ run_diff_case xfail 0 'XFAIL ecosystem (synthetic.frontier; M5.1 expected red)' 
 # 一旦功能转绿，必须推动 expected-red 清单，而不是永久吞掉成功。
 run_diff_case xpass 1 'XPASS ecosystem (remove/update expected-red frontier)' \
     synthetic.frontier
+# stdout/exit 相同但 mirvm 多出 stderr 也必须失败。
+run_diff_case stderr_only 1 'FAIL ecosystem (native=0 mirvm=0)'
+
+DIFF_STDERR_MIRVM="$TMP/diff-stderr-mirvm"
+cat >"$DIFF_STDERR_MIRVM" <<'EOF'
+#!/usr/bin/env bash
+printf 'fib(0..10) = [0, 1, 1, 2, 3, 5, 8, 13, 21, 34], sum = 88\n'
+printf 'unexpected mirvm diagnostic\n' >&2
+EOF
+chmod +x "$DIFF_STDERR_MIRVM"
+diff_stderr_out=$(ONLY=fib MIRVM="$DIFF_STDERR_MIRVM" \
+    /bin/bash tests/diff.sh 2>&1)
+diff_stderr_code=$?
+if [ "$diff_stderr_code" -ne 0 ] \
+    && echo "$diff_stderr_out" | grep -Fq 'FAIL fib: stderr 不一致'; then
+    ok 'diff.sh 拒绝 mirvm 单侧多出的 stderr'
+else
+    bad "diff.sh stderr false green (exit=$diff_stderr_code)"
+    echo "$diff_stderr_out"
+fi
 
 out=$(SCENARIO=corpus_fail MIRVM="$FIX/fake_mirvm.sh" OUT="$TMP/corpus" \
     /bin/bash tests/corpus.sh signal 2>&1)

@@ -23,6 +23,8 @@
   前必 grep 核对 API——本 nightly MIR 有漂移，见 §9）。
 - **三条铁律**：① 先调研后动手（跑 `--vm-stats`、dump MIR、grep 源码）；② 每期先出设计文档
   给用户审、完工写经验文档；③ 防静默错值——宁 Trap 带诊断，勿静默返回 0（差分才可信）。
+- **维护暂停**：远程仓库与 GitHub Issues/PRD/PR 操作当前全部暂停；不要运行 `gh`、fetch issue
+  或发布 PRD，直到维护者明确恢复。GitHub Issues 仍是未来恢复后的 tracker，此暂停不删除原选择。
 
 ---
 
@@ -62,13 +64,22 @@ evcxr 四点不满（延迟、状态/借用限制、跑不了完整项目、编�
   guest TLS 与 native→guest thunk。细节和当时结果见 `m4-log.md`。
 - M5.0 已完成并复审：有限 x86_64 inline asm 经 GAS wrapper → `.so` → `dlopen` 物化，
   解释器按 `fn(*mut u8)` 缓冲 ABI 调用。实际结果见 `m5-log.md`。
-- M5.1 已完成：numbigint/xgetbv/sha2/blake3/ecosystem 均在 release 路径转绿，diff_cargo
-  3/3、六个 native-differential tracer 脚本（pshufb/SHA 分别记账）、cargo test
-  25/25、rustfmt 与 Clippy 通过；signal guest handler 和 guest backtrace/frame-IP 映射
-  是独立 XFAIL，不能借 M5.1 宣称已支持。
-- 2026-07-13 已建立真实 Cargo 项目 TDD harness，自身回归 38/38；本地 hexyl 切片 PASS，
-  ripgrep/tokei 在完整调用点诊断上精确 XFAIL。它仍不等于支持“任意 Rust”，操作与限制见
-  [real-projects.md](real-projects.md)。
+- M5.1 已完成：numbigint/xgetbv/sha2/blake3/ecosystem 均在 release 路径转绿；当期验收为
+  diff_cargo 3/3、六个 native-differential tracer 脚本、cargo test 25/25、rustfmt 与 Clippy。
+  signal guest handler 和 guest backtrace/frame-IP 映射是独立 XFAIL，不能借 M5.1 宣称已支持。
+- 2026-07-13 已建立并加固真实 Cargo 项目 TDD harness；当前 Rust tests 35/35、diff 20/20、
+  diff_cargo 5/5，gate-truth 最终 12/12、real-project harness 最终 63/63。ripgrep/tokei 已移入
+  Git-ignored `artifacts/real-projects/` working set，并推动 direct dyn 尾 alignment、u128
+  SwitchInt、track_caller Reify shim 与宽 volatile 修复。两项目已在最终 namespace-private `/run`
+  逻辑根 + RUSTC proxy harness 下 correctness PASS；ripgrep、原始 tokei JSON 与新增的稳定
+  `tokei_languages` compact workload 均以 release mirvm sha256 `7b064b3f…` 完成 warmup 1 /
+  samples 3 benchmark。新增 workload 覆盖 `tests/data` 的 206 个 tracked fixtures，输出 205 行且
+  两侧 SHA-256 同为 `0f505890…`。单 case 的 CaseID→CheckID/BenchID→EvidenceID（含 Git/controller）、
+  exact-check 发布前复验、两层 staging 恢复、pre-rename 只读封存、current symlink、consumer 身份与
+  PASS/XFAIL 语义及 benchmark summary 复算、额外 sidecar 拒绝、per-name/suite-cache 锁均已实现。
+  当前 writer 使用 schema 3，validator 保留 schema-2 历史 dispatch；这些仍是 workspace evidence，
+  不是远程持续 gate。
+  精确 provenance 与性能数见 [real-projects.md](real-projects.md)。
 - 方法级 Cranelift JIT、tiering、JIT LSDA 属于 M5.2–M5.4，生产路径中还不存在。
 
 2026-07-12 复核发现旧 gate 存在 signal 只看退出码、diff_cargo 双方失败也可 PASS、corpus
@@ -76,11 +87,23 @@ evcxr 四点不满（延迟、状态/借用限制、跑不了完整项目、编�
 语义正确断言。该审计已推动 oracle、silent stub、volatile 和 M5.1 differential probes
 全部收口；后续产品施工先由真实项目的精确前沿驱动，进入 M5.2 时同一门禁纪律必须保留。
 
-最终 full release gate5（含 gate0/1/2/4、TSan 与六个 M5.1 tracer 脚本）为
+本轮真实项目施工前的稳定 full release gate5（含 gate0/1/2/4、TSan 与六个 M5.1 tracer 脚本）为
 **40 PASS / 2 XFAIL / 0 SKIP / 0 FAIL**；XFAIL 是 signal guest handler 与 guest
-backtrace/frame-IP 映射；2026-07-13 最终复跑仍为 diff 17/17、diff_cargo 3/3，
-load 397ms、rayon 820ms。
-CI workflow 已建立，TSan 独立可见，本地 fmt/Clippy 质量门均通过。
+backtrace/frame-IP 映射；该基线当时为 diff 17/17、diff_cargo 3/3、load 397ms、rayon 820ms。
+本轮产品补丁后的最终 full gate5 为 **40 PASS / 2 XFAIL / 0 SKIP / 0 FAIL**（最终复跑 load 443 ms、
+rayon 927 ms），fmt、35/35 Rust tests、Clippy `-D warnings` 与 release build 同轮最终通过。Cargo shim 遇非空 wrapper env
+或有效的 Cargo `build.rustc-wrapper` / `build.rustc-workspace-wrapper` 会 fail-closed，尚不支持
+wrapper composition。Cargo runner callback 只 lower tcx-free `Module`，随后用窄结构化
+`TRACK_DIAGNOSTIC` filter 去掉 native Cargo 不展示的 warning-count summary；原 hook、真实 warning
+与迟发 error 都保留。`run_compiler` 完整收尾并恢复 hook、确认 compiler success 后才执行 VM，
+guest 同文 stderr 也由 `cargo_warning_return` 锁住。该 hook 当前仅适用于单 compiler CLI；未来
+daemon/嵌入需 guard。真实项目控制器还会在启动时拒绝会被私有 `/run` tmpfs 隐藏的
+workspace/suite/toolchain/cache 路径。CI workflow 已建立，TSan 独立可见。
+
+下一步真实项目基础设施候选是 suite inventory/集合身份，用来稳定枚举同一 revision 的多个
+workload；当前 manifest/结果仍在 Git-ignored artifacts 中，该候选**尚未实现**。CheckID 已绑定
+harness 字节，但 `MIRVM_ENCODED_RUSTFLAGS_APPEND` 在 Cargo fingerprint 后追加，变化时仍可能复用
+旧 fake binary。不要把现有三个 case 的本地 PASS 写成已具备 suite 身份或远程持续 gate。
 
 ---
 
@@ -119,9 +142,10 @@ CI workflow 已建立，TSan 独立可见，本地 fmt/Clippy 质量门均通过
 ├── tsan/                   # ★ 独立 crate：#[path] 复用 src/vm，-Zsanitizer=thread 判定引擎 Sync
 ├── docs/                   # ★ 全部设计文档（见 §3.1）
 ├── tests/                  # diff.sh(全量差分) diff_cargo.sh corpus.sh spike4_tsan.sh
-│                           # m4_gate{0,1,2}.sh（各期 gate，全绿是回归底线）
+│                           # real_projects.sh + rustc proxy + m4_gate{0,1,2,5}.sh
 ├── demo/                   # 差分用例；demo/m4/{pure,digest,unwind}.rs = gate0/1/2 函数集
-└── corpus/                 # corpus 程序 c_*.rs（含 M4.4 gate 的挂死双场景）
+├── corpus/                 # corpus 程序 c_*.rs（含 M4.4 gate 的挂死双场景）
+└── artifacts/real-projects/# Git-ignored sources/cases/suite/results；本地 TDD，不是持续 gate
 ```
 
 ### 3.1 设计文档索引
@@ -411,11 +435,12 @@ cargo build --release --locked
 bash tests/m4_gate0.sh                                    # M4.0 gate 9/9 + 纯度门禁
 bash tests/m4_gate1.sh                                    # M4.1 digest 9/9 + 债务清零复测
 bash tests/m4_gate2.sh                                    # M4.2 unwind 9/9 + 债务清零复测
-MIRVM=$(pwd)/target/release/mirvm bash tests/diff.sh      # 全量差分（17/17 全绿基线，含 threads+asm_probe）
+MIRVM=$(pwd)/target/release/mirvm bash tests/diff.sh      # 全量差分（当前 20 个，含真实项目最小回归）
 bash tests/m4_gate4.sh                                    # M4.4 真线程 gate（差分/双场景/rayon/TSan）
-bash tests/m4_gate5.sh                                    # 聚合 gate；含 signal/llvm.x86 明示 XFAIL
-MIRVM=$(pwd)/target/release/mirvm bash tests/diff_cargo.sh # ecosystem/ffi_zlib/project 3/3 native 一致
-bash tests/gate_truth_regression.sh                       # 门禁自身 6 个假阳性/状态传播回归
+bash tests/m4_gate5.sh                                    # 聚合 gate；signal/backtrace 原因锁定 XFAIL
+MIRVM=$(pwd)/target/release/mirvm bash tests/diff_cargo.sh # 含 cargo_warning_return，当前 5/5
+bash tests/gate_truth_regression.sh                       # 门禁自身最终 12 个真值回归
+bash tests/real_projects_regression.sh                    # real-project harness 自身回归
 MIRVM=$(pwd)/target/release/mirvm bash tests/m51_addcarry.sh # addcarry/subborrow native 差分
 MIRVM=$(pwd)/target/release/mirvm bash tests/m51_xgetbv.sh   # CPUID guard 下 xgetbv native 差分
 MIRVM=$(pwd)/target/release/mirvm bash tests/m51_x86_vectors.sh # pshufb/SHA stdarch native 差分

@@ -7,11 +7,13 @@ case "$script" in
     tests/diff_cargo.sh)
         echo 'PASS ecosystem'
         echo 'PASS ffi_zlib'
+        echo 'PASS ripgrep_regex'
+        echo 'PASS warning_return'
         echo 'PASS project'
-        echo '== 3 passed, 0 expected-red, 0 failed =='
+        echo '== 5 passed, 0 expected-red, 0 failed =='
         ;;
     tests/diff.sh)
-        echo '== 17 passed, 0 failed =='
+        echo '== 20 passed, 0 failed =='
         ;;
     tests/m4_gate0.sh|tests/m4_gate1.sh|tests/m4_gate2.sh)
         ;;
