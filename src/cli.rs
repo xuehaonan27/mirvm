@@ -36,6 +36,7 @@ OPTIONS:
 ENV:
     MIRVM_SYSROOT     等价于 --sysroot
     MIRVM_STACK_SIZE  等价于 --stack-size（cargo 项目形态经环境传给 runner）
+    MIRVM_TIMING      =1 时向 stderr 输出相位账本（frontend/lower/engine/total）
 
 DEV:
     mirvm spike1..5   跑已冻结的 M4 前置 spike（回归自检；见 docs/spike*.md）
@@ -263,10 +264,48 @@ struct MirvmCallbacks {
     module: Option<crate::vm::engine::ir::Module>,
     suppress_runner_warning_summary: bool,
     runner_finalization_filter_installed: bool,
+    /// 相位计时（M6 片1，D9f①）：t_start = run_driver 进入时刻
+    t_start: std::time::Instant,
+    timing: PhaseTiming,
+}
+
+/// 加载相计时账本（M6 片1）。frontend = 驱动进入→analysis 完成（含依赖 metadata 加载），
+/// lower = mono 收集+降低+冻结物化。engine 段由 run_driver 在解释结束后补记。
+#[derive(Default)]
+struct PhaseTiming {
+    frontend: Option<std::time::Duration>,
+    lower: Option<std::time::Duration>,
+}
+
+/// `MIRVM_TIMING=1`（或 --vm-stats 仪器）时输出单行相位账本到 stderr。
+/// 默认关闭——stderr 参与 native 差分逐字节比对，不能引入噪声。
+fn print_phase_timing(
+    timing: &PhaseTiming,
+    engine: Option<std::time::Duration>,
+    total: std::time::Duration,
+    force: bool,
+) {
+    if !force && std::env::var_os("MIRVM_TIMING").is_none() {
+        return;
+    }
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+    let mut line = String::from("mirvm-timing:");
+    if let Some(d) = timing.frontend {
+        line.push_str(&format!(" frontend={:.1}ms", ms(d)));
+    }
+    if let Some(d) = timing.lower {
+        line.push_str(&format!(" lower={:.1}ms", ms(d)));
+    }
+    if let Some(d) = engine {
+        line.push_str(&format!(" engine={:.1}ms", ms(d)));
+    }
+    line.push_str(&format!(" total={:.1}ms", ms(total)));
+    eprintln!("{line}");
 }
 
 impl Callbacks for MirvmCallbacks {
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
+        self.timing.frontend = Some(self.t_start.elapsed());
         let Some((def_id, entry_ty)) = tcx.entry_fn(()) else {
             eprintln!("mirvm: 未找到 entry fn（需要 `fn main`）");
             self.exit_code = Some(1);
@@ -287,7 +326,9 @@ impl Callbacks for MirvmCallbacks {
             print!("{}", String::from_utf8_lossy(&buf));
         } else {
             // callback 只做加载相；执行相必须等 tcx.finish、诊断收尾和 compiler drop 全部完成。
+            let t_lower = std::time::Instant::now();
             self.module = Some(crate::lower::lower_program(tcx, &self.program_argv));
+            self.timing.lower = Some(t_lower.elapsed());
             if self.suppress_runner_warning_summary {
                 install_runner_finalization_filter();
                 self.runner_finalization_filter_installed = true;
@@ -413,6 +454,7 @@ fn run_driver(
     vm_stats: bool,
     suppress_runner_warning_summary: bool,
 ) -> ExitCode {
+    let t_start = std::time::Instant::now();
     let mut callbacks = MirvmCallbacks {
         dump_mir,
         program_argv,
@@ -422,6 +464,8 @@ fn run_driver(
         module: None,
         suppress_runner_warning_summary,
         runner_finalization_filter_installed: false,
+        t_start,
+        timing: PhaseTiming::default(),
     };
     let compiler_code = rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&rustc_args, &mut callbacks)
@@ -436,7 +480,16 @@ fn run_driver(
         exit(code);
     }
     if let Some(module) = callbacks.module.take() {
+        let t_engine = std::time::Instant::now();
         let code = run_vm_engine(module, callbacks.vm_call.as_deref(), callbacks.vm_stats);
+        // vm-stats 分支不跑 guest，engine 段无意义则不报
+        let engine = (!callbacks.vm_stats).then(|| t_engine.elapsed());
+        print_phase_timing(
+            &callbacks.timing,
+            engine,
+            t_start.elapsed(),
+            callbacks.vm_stats,
+        );
         exit(code);
     }
     compiler_code
