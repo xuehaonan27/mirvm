@@ -939,6 +939,14 @@ pub enum Builtin {
     Unsupported(&'static str),
     /// `_Unwind_DeleteException`：按 Itanium ABI 调用异常对象内的 cleanup 回调。
     UnwindDeleteException,
+    /// backtrace 影子帧（M5.2 D8e）：Ctx 影子帧栈诚实回答，IP=合成 fn token。
+    /// `_Unwind_Backtrace(trace_fn, arg)` 逐帧回调 guest trace_fn。
+    UnwindBacktrace,
+    /// `_Unwind_GetIP(ctx)` / `_Unwind_GetIPInfo(ctx, &ip_before)`：读 synth ctx 的 IP。
+    UnwindGetIp,
+    UnwindGetIpInfo,
+    /// `_Unwind_FindEnclosingFunction(ip)`：合成 IP 即函数入口，返回 ip 自身。
+    UnwindFindEnclosing,
     /// 不改变 guest 抽象机/RAM 状态的处理器 hint（如 `pause`、`vzeroupper`）。
     /// 解释器不持久化宿主向量寄存器状态，因此执行期可正确忽略。
     CpuHintNop,

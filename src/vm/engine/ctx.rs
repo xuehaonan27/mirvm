@@ -54,6 +54,10 @@ pub struct Ctx {
     pub tls: Vec<u64>,
     /// TSD 迟退轮计数（ctx_key_dtor 用，见模块注释）
     teardown_rounds: u8,
+    /// 影子帧栈（M5.2 D8e）：每个活动 interp_frame 的合成 IP（= 冻结 fn 条目地址或
+    /// 每 FuncId 唯一 token）。`_Unwind_Backtrace` 逐帧回调，`_Unwind_GetIP` 读它。
+    /// enter 时 push、FrameGuard::drop 时 pop（与 depth 同生命周期，unwind 安全）。
+    pub shadow: Vec<u64>,
 }
 
 impl Ctx {
@@ -66,6 +70,7 @@ impl Ctx {
             ffi: FfiState::default(),
             tls: Vec::new(),
             teardown_rounds: 0,
+            shadow: Vec::new(),
         }
     }
 }

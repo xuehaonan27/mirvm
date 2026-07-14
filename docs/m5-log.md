@@ -353,3 +353,23 @@ guest handler 是独立能力缺口，不应混入 M5.1 全绿宣称。
 - **验收**：`demo/asm_extras_probe.rs`（global_asm 定义符号 + naked fn + inline asm
   const + atexit LIFO）native/mirvm **逐字节一致**；`corpus/c_atexit.rs`（三回调 LIFO）
   进 corpus（28→29）；diff.sh 25→26（asm_extras_probe）。
+
+### 片 7：D8e backtrace 影子帧 —— 完成（c_backtrace XFAIL→绿，2026-07-14）
+
+- **影子帧栈**：Ctx 加 `shadow: Vec<u64>`，interp_frame enter 时 push 合成 IP
+  （`FUNC_IP_BASE=0x5f5f… + func×64`，每 FuncId 唯一/非零/不可执行 opaque token），
+  FrameGuard::drop 时 pop（与 depth 同 RAII 生命周期，unwind 安全）。
+- **四个 unwinder builtin**（原 `Unsupported`）：`_Unwind_Backtrace(trace_fn, arg)`
+  逐影子帧（栈顶→底、跳过自身）调 guest trace_fn(synth_ctx, arg)，synth_ctx 是存 IP
+  的栈缓冲；`_Unwind_GetIP`/`GetIPInfo` 读它；`_Unwind_FindEnclosingFunction(ip)` 返
+  ip 自身（合成 IP 即函数入口）；`_Unwind_GetCFA` 复用 GetIp（backtrace 用作 sp 帧
+  身份，每帧唯一即够）。其余 context/state API（CFA 除外的 SetGR/GetGR/Resume…）
+  维持响亮 `Unsupported`。
+- **诚实符号化边界**：合成 IP 在用户地址空间之上、非页对齐 → dladdr 找不到 → 符号
+  解析诚实产出 `<unknown>`（禁止伪造宿主符号）。**因此 backtrace 精确文本非
+  well-defined**（ram-spec §2），c_backtrace 的 oracle 改为**影子帧不变式**：
+  ①status=Captured ②非空 ③递归深度如实反映（`deep(30)` 比 `deep(0)` 多 ≥30 帧，
+  black_box 夹递归两侧阻 TCO）——native 与 mirvm 都满足，两侧打印同一确定行。
+- **验收**：c_backtrace 从原因锁定 XFAIL **转绿**（gate5 XFAIL 2→1）；native（去
+  frontmatter）与 mirvm 同输出 "backtrace: captured, non-empty, depth reflected
+  (+30 frames)"。后续可选：物化符号 ELF 让 dladdr 报真 guest fn 名（非本期）。

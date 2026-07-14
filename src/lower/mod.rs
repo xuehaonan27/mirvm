@@ -594,16 +594,13 @@ fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin> {
     // `_Unwind_RaiseException` / `_Unwind_DeleteException` 上面有 guest 专用语义；
     // 其余 libgcc context/stack API 若直通，看到的只会是宿主解释器帧。
     // 整组显式 deny，避免从 GetIPInfo/CFA/LSDA 等旁路重新引入静默错值。
+    // 仍拒绝的 unwinder context/state API：直通看到的只是宿主解释器帧，无 guest
+    // 语义。整组显式 deny，避免从 CFA/LSDA/SetGR 等旁路重新引入静默错值。
     for name in [
-        "_Unwind_Backtrace",
-        "_Unwind_FindEnclosingFunction",
         "_Unwind_Find_FDE",
         "_Unwind_ForcedUnwind",
-        "_Unwind_GetCFA",
         "_Unwind_GetDataRelBase",
         "_Unwind_GetGR",
-        "_Unwind_GetIP",
-        "_Unwind_GetIPInfo",
         "_Unwind_GetLanguageSpecificData",
         "_Unwind_GetRegionStart",
         "_Unwind_GetTextRelBase",
@@ -614,6 +611,23 @@ fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin> {
     ] {
         out.insert(Symbol::intern(name), ir::Builtin::Unsupported(name));
     }
+    // backtrace 影子帧（D8e）：这四个由 Ctx 影子帧栈诚实回答（IP=合成 fn token）。
+    out.insert(
+        Symbol::intern("_Unwind_Backtrace"),
+        ir::Builtin::UnwindBacktrace,
+    );
+    out.insert(Symbol::intern("_Unwind_GetIP"), ir::Builtin::UnwindGetIp);
+    out.insert(
+        Symbol::intern("_Unwind_GetIPInfo"),
+        ir::Builtin::UnwindGetIpInfo,
+    );
+    out.insert(
+        Symbol::intern("_Unwind_FindEnclosingFunction"),
+        ir::Builtin::UnwindFindEnclosing,
+    );
+    // GetCFA：backtrace 用作帧的 sp 身份（去重/相等）。合成帧无真 CFA，返回该帧
+    // synth IP 作唯一 sp 替身（每帧不同即满足身份用途）。
+    out.insert(Symbol::intern("_Unwind_GetCFA"), ir::Builtin::UnwindGetIp);
     out.insert(
         Symbol::intern("_Unwind_DeleteException"),
         ir::Builtin::UnwindDeleteException,

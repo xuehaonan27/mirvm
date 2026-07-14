@@ -1900,7 +1900,10 @@ impl Drop for FrameGuard {
             run_cleanup(self.ctx, self.func, self.base, blk);
         }
         region_restore(self.ctx, self.base);
-        unsafe { (*self.ctx).depth -= 1 };
+        unsafe {
+            (*self.ctx).depth -= 1;
+            (*self.ctx).shadow.pop(); // D8e：影子帧出栈（与 depth 同生命周期）
+        }
     }
 }
 
@@ -1912,6 +1915,36 @@ enum Exit {
 }
 
 /// 按 D4 fn 条目真地址派发（CallIndirect / catch_unwind 的 try/catch fn 共用）。
+// ===== backtrace 影子帧（D8e）=====
+/// 合成 IP 基址：高位在用户地址空间之上、非页对齐 → 绝不与真实代码/数据地址撞，
+/// dladdr 找不到（诚实 `<unknown>` 符号化，禁止伪造宿主符号）。
+const FUNC_IP_BASE: u64 = 0x5f5f_0000_0000_0000;
+fn func_synth_ip(func: u32) -> u64 {
+    FUNC_IP_BASE + (func as u64) * 64
+}
+
+/// `_Unwind_Backtrace(trace_fn, arg)`（D8e）：逐影子帧（栈顶→底）调 guest trace_fn
+/// (synth_ctx, arg)；trace_fn 返 0（_URC_NO_REASON）续，非 0 停。synth_ctx 指向一个
+/// 存 IP 的小缓冲，`_Unwind_GetIP(ctx)` 从中读。返回 _URC_END_OF_STACK(5)。
+fn unwind_backtrace(ctx: *mut Ctx, trace_fn: u64, arg: u64) -> u64 {
+    // 快照影子帧（回调再入会 push/pop，不能借活栈迭代）。跳过栈顶自身
+    //（_Unwind_Backtrace 的帧不该出现在回溯里，= native 语义）。
+    let frames: Vec<u64> = {
+        let s = unsafe { &(*ctx).shadow };
+        s.iter().rev().skip(1).copied().collect()
+    };
+    for ip in frames {
+        // synth _Unwind_Context = 单字缓冲存 IP（GetIP 读它）
+        let cell: u64 = ip;
+        let cell_ptr = &cell as *const u64 as u64;
+        let r = call_fn_addr(ctx, trace_fn, &[cell_ptr, arg], "_Unwind_Backtrace").0;
+        if r != 0 {
+            break; // _URC_FOREIGN_EXCEPTION_CAUGHT / _URC_FAILURE 等 → 停
+        }
+    }
+    5 // _URC_END_OF_STACK
+}
+
 // ===== atexit 家族（D8g）=====
 // glibc 不导出 `atexit` 供 guest dlsym；引擎自持 LIFO 注册表 + 一个 native
 // trampoline（经引擎自身链接的 libc `atexit` 挂载，非 dlsym）。进程收尾时 libc
@@ -2146,6 +2179,9 @@ pub(super) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
     }
 
     // 帧守卫：unwind 穿帧 = 跑 cleanup + 恢复区；正常返回 = 恢复区（edge 已空）
+    // 影子帧入栈（D8e）：合成 IP = FUNC_IP_BASE + func×64（每 FuncId 唯一、非零、
+    // 不可执行的 opaque token；作 backtrace 的 IP 恰好——从不解引用为代码）。
+    unsafe { (*ctx).shadow.push(func_synth_ip(func)) };
     let guard = FrameGuard {
         ctx,
         func,
@@ -2491,6 +2527,18 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         }
                         0
                     }
+                    // backtrace 影子帧（D8e）
+                    Builtin::UnwindBacktrace => unwind_backtrace(ctx, a(0), a(1)),
+                    Builtin::UnwindGetIp => mem_read(a(0), Width::W64),
+                    Builtin::UnwindGetIpInfo => {
+                        // (ctx, *ip_before_insn) → IP；*ip_before_insn=0（合成帧无此区分）
+                        if a(1) != 0 {
+                            mem_write(a(1), Width::W32, 0);
+                        }
+                        mem_read(a(0), Width::W64)
+                    }
+                    // 合成 IP 即函数入口 → 返回 ip 自身（enclosing fn start）
+                    Builtin::UnwindFindEnclosing => a(0),
                     Builtin::CpuHintNop => 0,
                     Builtin::Breakpoint => {
                         // 真 int3：未被跟踪时 = SIGTRAP 终止（native 同语义）

@@ -3,8 +3,9 @@
 # + diff_cargo + 性能上限
 # + 全量回归。
 # 前沿记账（透明）：M5.1 已清掉 blake3/sha2/numbigint/ecosystem 的滚动红；
-# signal guest handler 与 guest backtrace/frame-IP 属独立边界，仍以原因锁定的
-# XFAIL 诚实记账。
+# M5.2 D8e 用影子帧不变式（捕获/非空/深度反映）让 c_backtrace 转绿——backtrace
+# 精确文本非 well-defined，故 oracle 是不变式而非 native 逐字节。剩 signal guest
+# handler 是独立 XFAIL（D8d 待做）。
 # 用法：bash tests/m4_gate5.sh          # 全量
 #       SKIP_TSAN=1 bash tests/m4_gate5.sh
 #       SKIP_PERF=1 bash tests/m4_gate5.sh  # 共享 CI runner：跳过时序门，不跳语义门
@@ -45,14 +46,14 @@ for p in $CORPUS_PROGS; do
             red_pattern='unsupported builtin.*signal|unsupported.*signal.*builtin'
             red_label='异步 signal 尚未支持；后续里程碑'
             ;;
-        backtrace)
-            red_pattern='unsupported builtin.*_Unwind_Backtrace'
-            red_label='guest frame/IP 映射尚未支持；禁止伪造宿主回溯'
-            ;;
     esac
     if [ "$p" = numbigint ] && { [ $code -ne 0 ] \
         || [ "$stdout" != "$NUMBIGINT_ORACLE" ]; }; then
         bad "c_numbigint oracle (exit=$code stdout='$stdout')"
+    elif [ "$p" = backtrace ] && { [ $code -ne 0 ] \
+        || [ "$stdout" != 'backtrace: captured, non-empty, depth reflected (+30 frames)' ]; }; then
+        # D8e：backtrace 文本非 well-defined，oracle 是影子帧不变式（捕获/非空/深度反映）
+        bad "c_backtrace oracle (exit=$code stdout='$stdout')"
     elif [ "$p" = blake3 ] && { [ $code -ne 0 ] \
         || [ "$stdout" != "$BLAKE3_ORACLE" ]; }; then
         bad "c_blake3 oracle (exit=$code stdout='$stdout')"
