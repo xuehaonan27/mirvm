@@ -49,7 +49,8 @@
 | `m5-design.md` | **已批准** | M5 总体双轨设计；M5.0/M5.1 已实现；M5.2=非 JIT 语义补全已完成（2026-07-14）；M5.3+ JIT 仍属路线图 |
 | `m5.2-design.md` | **已完成设计/施工记录** | 非 JIT 语义补全 D8a–D8l；实施结果看 m5-log M5.2 节；施工偏离记 decision-history §6 |
 | `distribution-design.md` | **已批准（方向，未立项）** | 轨 C 分发与产品面 D9a–D9f：缓存分层、mode B=缓存可移植化、toolchain 自带、发行先 miri 式 |
-| `coldstart-research.md` | **调研完成（2026-07-14）** | 冷启动/lower 全解剖（M6 片3 前置）：std 税线性模型、执行集≪降低集、依赖 codegen 白烧实证、P1–P3 缓存盲区、杠杆 V1–V6 与施工顺序 S1–S4 待裁定；M5.3 Pending 的依据文 |
+| `coldstart-research.md` | **调研完成（2026-07-14）** | 冷启动/lower 全解剖（M6 片3 前置）：std 税线性模型、执行集≪降低集、依赖 codegen 白烧实证、P1–P3 缓存盲区、杠杆 V1–V6；施工顺序已裁定（decision-history §7.2），S1/S2 已落地（m6-log 片4/片5，账本实测修正在文内） |
+| `s4-base-image-design.md` | **待审** | S4 std 预降低底座设计简报：v0 symbol_name 稳定键、双固定基址+file COW 映射、FuncId 域位、空 main 种子、与 S3/JIT 组合边界；过审后动工 |
 | `m5-log.md` | **已完成日志** | M5.0/M5.1 实际结果；优先于 M5 设计稿原先的预期 |
 | `m5.1-design.md` | **已完成设计/施工记录** | numbigint/xgetbv/sha2/blake3/ecosystem、diff_cargo 3/3 与六 tracer 脚本已绿；signal/backtrace 独立遗留 |
 | `m4-log.md` | **已完成日志** | M4.0–M4.5 实际施工记录；M4 状态的历史权威 |
