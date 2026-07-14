@@ -2344,11 +2344,36 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         has_out_place: out_place.is_some(),
                     });
                 }
-                mir::InlineAsmOperand::Const { .. } => {
-                    return Err("inline asm const 操作数（M5.x；三面孔无）".into());
+                // const/sym（D8h）：渲染成字面文本进模板（cg_clif 同构），无寄存器
+                mir::InlineAsmOperand::Const { value } => {
+                    gen_ops.push(super::asm::AsmOperand::Inline {
+                        text: self.asm_const_text(value)?,
+                    });
                 }
-                mir::InlineAsmOperand::SymFn { .. } | mir::InlineAsmOperand::SymStatic { .. } => {
-                    return Err("inline asm sym 操作数（M5.x）".into());
+                mir::InlineAsmOperand::SymFn { value } => {
+                    let rustc_middle::ty::TyKind::FnDef(def_id, args) = value.const_.ty().kind()
+                    else {
+                        return Err("inline asm sym fn 非 FnDef".into());
+                    };
+                    let callee = Instance::expect_resolve(
+                        self.tcx,
+                        self.typing_env,
+                        *def_id,
+                        args,
+                        rustc_span::DUMMY_SP,
+                    );
+                    gen_ops.push(super::asm::AsmOperand::Inline {
+                        text: self.tcx.symbol_name(callee).name.to_owned(),
+                    });
+                }
+                mir::InlineAsmOperand::SymStatic { def_id } => {
+                    gen_ops.push(super::asm::AsmOperand::Inline {
+                        text: self
+                            .tcx
+                            .symbol_name(Instance::mono(self.tcx, *def_id))
+                            .name
+                            .to_owned(),
+                    });
                 }
                 mir::InlineAsmOperand::Label { .. } => {
                     return Err("inline asm label（asm goto，M5.x）".into());
@@ -2413,6 +2438,21 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 outs,
                 target,
             },
+        ))
+    }
+
+    /// inline asm const 操作数 → 字面文本（cg_ssa asm_const_to_str 同构）。
+    fn asm_const_text(&self, value: &mir::ConstOperand<'tcx>) -> Result<String, String> {
+        let cv = value
+            .const_
+            .eval(self.tcx, self.typing_env, value.span)
+            .map_err(|e| format!("inline asm const 求值失败: {e:?}"))?;
+        let layout = self
+            .tcx
+            .layout_of(self.typing_env.as_query_input(value.const_.ty()))
+            .map_err(|e| format!("inline asm const layout: {e:?}"))?;
+        Ok(rustc_codegen_ssa::common::asm_const_to_str(
+            self.tcx, value.span, cv, layout,
         ))
     }
 

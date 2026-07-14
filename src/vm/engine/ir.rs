@@ -918,6 +918,13 @@ pub enum Builtin {
     HostStrlen,
     /// `abort() -> !`（libc abort 语义；core::intrinsics::abort 也汇入）
     HostAbort,
+    /// `atexit(fn)`/`__cxa_atexit(fn,arg,dso)`/`on_exit(fn,arg)`：注册 guest 退出
+    /// 回调（D8g）。glibc 不导出 `atexit` 供 guest dlsym，故走 builtin：引擎自持
+    /// LIFO 注册表，首注册时经引擎自身链接的 libc `atexit` 挂一个 native trampoline，
+    /// 进程收尾按 LIFO 解释执行 guest 回调。返回 0（成功）。
+    HostAtexit,
+    HostCxaAtexit,
+    HostOnExit,
     /// `syscall(nr, ...) -> long` 可变参直通（按实参个数分派）
     HostSyscall,
     /// `signal(signum, SIG_DFL|SIG_IGN)`：不含 guest 回调，可安全直通；其他 handler

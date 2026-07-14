@@ -328,3 +328,28 @@ guest handler 是独立能力缺口，不应混入 M5.1 全绿宣称。
   1e30+1、NaN 语义、宽整数往返、to_bits 十六进制位断言）native/mirvm **逐字节一致**；
   `corpus/c_float_wide.rs`（f16 量化误差界 + f128 高精度累加画像）进 corpus（27→28）；
   diff.sh 24→25。D8c 无残留（i128↔f128 也已覆盖）。
+
+### 片 6：D8g atexit + D8h global_asm/naked/asm 操作数 —— 完成（2026-07-14）
+
+- **atexit 家族**（D8g）：`atexit`/`__cxa_atexit`/`on_exit` builtin。glibc 不导出
+  `atexit` 供 guest dlsym（探针实证），故引擎自持 LIFO 注册表 + 一个 native
+  trampoline（经引擎自身链接的 libc `atexit` 挂载，**非** dlsym）；进程收尾时 libc
+  在主线程调 trampoline，逐条 LIFO 解释执行 guest 回调（fresh Ctx attach——退出线程
+  可能非 guest 执行线程）。回调必须是已知 guest fn 条目（防非 guest 地址）。Shared
+  裸指针在 run_main/run_export attach 时存入静态，供 trampoline 找回引擎。
+- **global_asm! + naked fn**（D8h）：新 `src/lower/global_asm.rs`——收集
+  `MonoItem::GlobalAsm` + naked `MonoItem::Fn`，渲染成单个 `.s`（global_asm 用 HIR
+  模板、naked 用 MIR InlineAsm 终止子 + `.globl/.type/.size` 包装，cg_ssa
+  prefix_and_suffix 精简版）→ `cc -shared -nostartfiles` → `.so` → required_native_lib
+  （dlsym 前 RTLD_NOW 就位）。naked fn 调用点（resolve_call 检 `CodegenFnAttrFlags::
+  NAKED`）改走 foreign 直调其 mangled 符号。cg_clif global_asm.rs 同构。
+- **inline asm const/sym 操作数**（D8h）：M5.0 工厂加 `AsmOperand::Inline{text}`——
+  const/sym 在 lower 期渲染成字面文本（asm_const_to_str / symbol_name），占位符直接
+  展开该文本，寄存器分配天然跳过（cg_clif 同款"const 格式化进模板"）。
+- **诚实边界**（D8l 登记）：naked/global_asm 的 `sym` 操作数只能指向**机器码**符号
+  （另一 naked/global_asm 或动态库导出）；指向**解释执行的 guest fn** 无机器码入口，
+  .so 会留未解析符号——`nm -D -u` 审计在 lower 期响亮拒绝，指明这是 JIT 期能力
+  （从机器码 jmp 进解释器需 per-fn trampoline）。att_syntax/label/may_unwind 维持拒绝。
+- **验收**：`demo/asm_extras_probe.rs`（global_asm 定义符号 + naked fn + inline asm
+  const + atexit LIFO）native/mirvm **逐字节一致**；`corpus/c_atexit.rs`（三回调 LIFO）
+  进 corpus（28→29）；diff.sh 25→26（asm_extras_probe）。

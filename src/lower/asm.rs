@@ -33,6 +33,16 @@ use rustc_target::asm::{
 /// 内容哈希缓存 `~/.cache/mirvm/asm-stubs/<hash>.so`——热缓存零 cc 调用。dlopen 句柄
 /// 泄漏（进程生命周期常驻，代码地址随之有效）。物化在加载相（OS 交互合法域）；返回
 /// 的 u64 表移交 Module，执行相只读直调、纯度不破。空站点集 = 空表（零开销）。
+/// FNV-1a 64 位内容哈希（asm-stub 与 global-asm 缓存键共用）。
+pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 pub(crate) fn materialize(sites: &[String]) -> Vec<u64> {
     if sites.is_empty() {
         return Vec::new();
@@ -44,11 +54,7 @@ pub(crate) fn materialize(sites: &[String]) -> Vec<u64> {
     }
 
     // FNV-1a 内容哈希（稳定、跨运行可复用缓存键）
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in src.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
+    let h = fnv1a(src.as_bytes());
 
     let dir = crate::sysroot::cache_dir().join("asm-stubs");
     std::fs::create_dir_all(&dir).expect("创建 asm-stub 缓存目录失败");
@@ -108,6 +114,11 @@ pub(crate) enum AsmOperand {
     InOut {
         reg: InlineAsmRegOrRegClass,
         has_out_place: bool,
+    },
+    /// const/sym 操作数（M5.2 D8h）：无寄存器，值/符号名在 lower 期渲染成字面文本，
+    /// 占位符直接展开为该文本（cg_clif 同样把 const 格式化进模板）。寄存器分配跳过。
+    Inline {
+        text: String,
     },
 }
 
@@ -398,8 +409,13 @@ impl<'tcx> Gen<'_, 'tcx> {
                     modifier,
                     ..
                 } => {
-                    let reg = self.registers[*operand_idx].unwrap();
-                    Self::emit_reg(&mut s, reg, *modifier);
+                    // const/sym：字面文本；其余：分配到的寄存器名
+                    if let AsmOperand::Inline { text } = &self.operands[*operand_idx] {
+                        s.push_str(text);
+                    } else {
+                        let reg = self.registers[*operand_idx].unwrap();
+                        Self::emit_reg(&mut s, reg, *modifier);
+                    }
                 }
             }
         }

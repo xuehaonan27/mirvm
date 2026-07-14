@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # 全量差分（唯一引擎 = M4 字节码 VM；tier-0 已移除，oracle 一直是 native）：
 # demo/*.rs 原生编译运行 vs mirvm main 启动链运行，对比 stdout、stderr + 退出码。
-# 全绿基线 25/25（M4.4 起含 threads_*；M5.0 起含 asm_probe；真实项目 TDD
+# 全绿基线 26/26（M4.4 起含 threads_*；M5.0 起含 asm_probe；真实项目 TDD
 # 新增 track_caller_fn_ptr/u128_switch/volatile_wide；M5.2 起含 intrinsic_probe/
-# recursion_deep/simd_probe/atomic_order_probe/float_wide_probe）。
+# recursion_deep/simd_probe/atomic_order_probe/float_wide_probe/asm_extras_probe）。
 # ecosystem/ffi_zlib 是 frontmatter/cargo
 # 形态（引擎 cargo 接线 M4.5），diff.sh 同样 SKIP（见 diff_cargo.sh）。
 set -u

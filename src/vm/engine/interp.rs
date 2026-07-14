@@ -14,6 +14,7 @@ use std::cell::Cell;
 use std::mem::MaybeUninit;
 use std::panic::{self, AssertUnwindSafe};
 use std::process::exit;
+use std::sync::Mutex;
 
 use super::ctx::{Ctx, Shared};
 use super::frame::ByteRegion;
@@ -1911,6 +1912,85 @@ enum Exit {
 }
 
 /// 按 D4 fn 条目真地址派发（CallIndirect / catch_unwind 的 try/catch fn 共用）。
+// ===== atexit 家族（D8g）=====
+// glibc 不导出 `atexit` 供 guest dlsym；引擎自持 LIFO 注册表 + 一个 native
+// trampoline（经引擎自身链接的 libc `atexit` 挂载，非 dlsym）。进程收尾时 libc
+// 在主线程调 trampoline，逐条 LIFO 解释执行 guest 回调（fresh Ctx attach）。
+#[derive(Clone, Copy)]
+enum AtexitKind {
+    Plain,  // atexit：fn()
+    CxaArg, // __cxa_atexit：fn(arg)
+    OnExit, // on_exit：fn(status=0, arg)
+}
+struct AtexitEntry {
+    func: u64,
+    kind: AtexitKind,
+    arg: u64,
+}
+static ATEXIT: Mutex<Vec<AtexitEntry>> = Mutex::new(Vec::new());
+static ATEXIT_SHARED: AtomicU64Ptr = AtomicU64Ptr::new();
+
+/// 进程期 Shared 的裸指针存放（trampoline 在无 Ctx 的退出线程上找回引擎）。
+struct AtomicU64Ptr(std::sync::atomic::AtomicUsize);
+impl AtomicU64Ptr {
+    const fn new() -> Self {
+        Self(std::sync::atomic::AtomicUsize::new(0))
+    }
+    fn set(&self, p: *const Shared) {
+        self.0
+            .store(p as usize, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn get(&self) -> *const Shared {
+        self.0.load(std::sync::atomic::Ordering::SeqCst) as *const Shared
+    }
+}
+
+fn atexit_register(func: u64, kind: AtexitKind, arg: u64) -> u64 {
+    // fn 必须是已知 guest 条目（非 guest 回调不接——防静默）
+    let shared = ATEXIT_SHARED.get();
+    if shared.is_null() {
+        engine_abort("atexit 在 Shared 发布前调用（引擎不变量）");
+    }
+    let module: &Module = unsafe { &(*shared).module };
+    if !module.fn_addrs.contains_key(&func) {
+        engine_abort(&format!("atexit 回调 {func:#x} 不是已知 guest fn 条目"));
+    }
+    let mut reg = ATEXIT.lock().unwrap();
+    if reg.is_empty() {
+        // 首注册：挂 native trampoline（引擎链接的 libc atexit，非 guest dlsym）
+        unsafe { libc::atexit(run_atexit_callbacks) };
+    }
+    reg.push(AtexitEntry { func, kind, arg });
+    0
+}
+
+/// libc 在进程收尾（主线程）调用：LIFO 解释执行 guest 回调。
+extern "C" fn run_atexit_callbacks() {
+    let shared = ATEXIT_SHARED.get();
+    if shared.is_null() {
+        return;
+    }
+    // fresh Ctx（退出线程可能非 guest 执行线程；attach 幂等）
+    let ctx = super::ctx::attach(unsafe { &*shared });
+    // LIFO：后注册先执行（C 语义）
+    loop {
+        let entry = {
+            let mut reg = ATEXIT.lock().unwrap();
+            match reg.pop() {
+                Some(e) => e,
+                None => break,
+            }
+        };
+        let args: &[u64] = match entry.kind {
+            AtexitKind::Plain => &[],
+            AtexitKind::CxaArg => &[entry.arg],
+            AtexitKind::OnExit => &[0, entry.arg],
+        };
+        // guest 回调 panic 穿到 C 退出路径 = abort（与 native 一致）
+        let _ = call_fn_addr(ctx, entry.func, args, "atexit");
+    }
+}
+
 fn call_fn_addr(ctx: *mut Ctx, addr: u64, args: &[u64], caller: &str) -> (u64, u64) {
     let module: &Module = unsafe { &(*(*ctx).shared).module };
     let Some(&fid) = module.fn_addrs.get(&addr) else {
@@ -2356,6 +2436,12 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         eprintln!("mirvm[m4-engine]: guest abort()");
                         std::process::abort()
                     }
+                    // atexit 家族（D8g）：登记 guest 回调，返回 0（成功）。
+                    // __cxa_atexit(fn, arg, dso)：fn 收 arg；on_exit(fn, arg)：fn 收
+                    //（status, arg）。atexit(fn)：无参。统一存 (fn, 形态, arg)。
+                    Builtin::HostAtexit => atexit_register(a(0), AtexitKind::Plain, 0),
+                    Builtin::HostCxaAtexit => atexit_register(a(0), AtexitKind::CxaArg, a(1)),
+                    Builtin::HostOnExit => atexit_register(a(0), AtexitKind::OnExit, a(1)),
                     Builtin::HostSignal => {
                         let (signum, handler) = (a(0) as libc::c_int, a(1) as libc::sighandler_t);
                         if handler != libc::SIG_DFL && handler != libc::SIG_IGN {
@@ -2569,6 +2655,7 @@ pub fn run_main(shared: &'static Shared) -> i32 {
         return 2;
     };
     let ctx_ptr = super::ctx::attach(shared); // 主线程与 guest 线程同一 attach 形态
+    ATEXIT_SHARED.set(shared); // D8g：退出 trampoline 找回引擎
     let args = [
         entry.main_addr,
         entry.argc,

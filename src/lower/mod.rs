@@ -12,6 +12,7 @@ pub mod asm;
 pub mod collect;
 pub mod frame;
 pub mod func;
+pub mod global_asm;
 
 use std::collections::VecDeque;
 
@@ -320,6 +321,17 @@ impl<'tcx> Linker<'tcx> {
             }
             return self.freeze_foreign_sig(inst, name);
         }
+        // naked fn（D8h）：函数体是裸机器码，无常规 MIR body。物化进 global-asm
+        // `.so`（收集阶段已做），调用点按真 ABI 走 foreign 直调其 mangled 符号。
+        if self
+            .tcx
+            .codegen_fn_attrs(inst.def_id())
+            .flags
+            .contains(rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags::NAKED)
+        {
+            let name = self.tcx.symbol_name(inst).name;
+            return self.freeze_foreign_sig(inst, name);
+        }
         // 普通函数：worklist 闭包扩集（跨 crate 非泛型函数不在 collector 种子集）
         Ok(Callee::Func(self.func_id(inst)))
     }
@@ -564,6 +576,10 @@ fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin> {
     out.insert(Symbol::intern("write"), ir::Builtin::HostWrite);
     out.insert(Symbol::intern("strlen"), ir::Builtin::HostStrlen);
     out.insert(Symbol::intern("abort"), ir::Builtin::HostAbort);
+    // atexit 家族（D8g）：glibc 不导出 `atexit` 供 guest dlsym → builtin 接管。
+    out.insert(Symbol::intern("atexit"), ir::Builtin::HostAtexit);
+    out.insert(Symbol::intern("__cxa_atexit"), ir::Builtin::HostCxaAtexit);
+    out.insert(Symbol::intern("on_exit"), ir::Builtin::HostOnExit);
     out.insert(Symbol::intern("syscall"), ir::Builtin::HostSyscall);
     // signal/sigaction 的 handler 藏在整数/结构体中，不能由通用 FFI fn-ptr 参数
     // thunk 化；而且 signal trampoline 必须异步信号安全，普通 libffi closure 不满足。
@@ -747,6 +763,13 @@ pub fn lower_program(tcx: TyCtxt<'_>, argv: &[String]) -> ir::Module {
         crate::native_archive::materialize_static_libraries(tcx)
             .unwrap_or_else(|reason| panic!("Static native library 装载失败: {reason}")),
     );
+    // global_asm! + naked fn 物化（M5.2 D8h）：模块级/函数级 asm → `.so` → required lib
+    //（guest 引用的符号在任何 dlsym 前 RTLD_NOW 就位）。失败响亮终止。
+    if let Some(so) = global_asm::materialize(tcx)
+        .unwrap_or_else(|reason| panic!("global_asm/naked 物化失败: {reason}"))
+    {
+        module.required_native_libs.push(so);
+    }
     // asm-stub 批量物化（M5.0）：全部 wrapper cc 汇编 + dlopen + dlsym → 真地址表
     module.asm_stub_addrs = asm::materialize(&linker.asm_sites);
     // 冻结区与 fn 条目反查表移交执行相
