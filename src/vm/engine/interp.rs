@@ -1269,10 +1269,11 @@ fn run_cleanup(ctx: *mut Ctx, func: u32, base: usize, entry: Bb) {
 
 /// 模型 A：guest 调用 = 宿主递归（spike1/3 验证的形状）。
 /// 调用约定 v2：实参展平 `&[u64]`（pair 占 2 槽、indirect 传地址），返回 (lo, hi)。
-/// guest 递归深度上限（≈ native 栈界近似，frame-abi §9）。每解释帧背 ~1KB 宿主帧，
-/// rustc 驱动线程栈 ~16MB → 8000 帧安全余量内（M5 编译帧更浅后可调大）。
-const MAX_DEPTH: u32 = 8_000;
-
+/// guest 栈溢出防护（M5.2 D8a）= **真栈字节守卫**：以本地变量地址近似宿主 SP，
+/// 低于 Ctx 冻结的安全下界（线程栈低端 + 边距）即诊断退出——帧数不设固定上限
+///（旧 8000 帧硬编码对 native 栈界严重失真：native 8MiB 主栈可容 ~10 万浅帧）。
+/// 随线程真实栈自适应；native 语义 = SIGSEGV→"has overflowed its stack"，此处
+/// 为诊断替身（ram-spec §7：溢出深度 unspecified，只承诺近似 native）。
 pub(super) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
     let module: &Module = unsafe { &(*(*ctx).shared).module };
     let body: &FuncBody = &module.funcs[func as usize];
@@ -1281,9 +1282,10 @@ pub(super) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
         (*ctx).depth += 1;
         (*ctx).depth
     };
-    if depth > MAX_DEPTH {
+    let sp_approx = &depth as *const u32 as usize;
+    if unsafe { (*ctx).stack_floor } > sp_approx {
         engine_abort(&format!(
-            "guest 栈溢出（解释帧深度 > {MAX_DEPTH}；fn {}）",
+            "guest 栈溢出（宿主执行栈触及安全边距；解释深度 {depth}；fn {}）",
             body.name
         ));
     }
@@ -1462,10 +1464,18 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 edge.set(cleanup_edge(unwind));
                 let optional_libs: &[Box<str>] = &module.native_libs;
                 let required_libs: &[Box<str>] = &module.required_native_libs;
+                // D8a：guest 线程栈放大。解释帧宿主成本数十倍于 native 帧，按 guest
+                // attr 原样创建的线程会在远浅于 native 的深度打穿宿主栈（SIGSEGV 而非
+                // 诊断）。显式 stacksize（std::thread 恒显式）临时放大，调用后还原；
+                // guest 自供栈（setstack）不动。栈尺寸属 unspecified（ram-spec §2）。
+                let stack_restore = super::ffi::amplify_pthread_stack(sym, &av);
                 let r = {
                     let ffi = unsafe { &mut (*ctx).ffi };
                     super::ffi::call(ffi, optional_libs, required_libs, sym, sig, &av)
                 };
+                if let Some((attr, orig)) = stack_restore {
+                    unsafe { libc::pthread_attr_setstacksize(attr, orig) };
+                }
                 edge.set(None);
                 let r = r.unwrap_or_else(|reason| {
                     engine_abort(&format!(

@@ -31,9 +31,11 @@ OPTIONS:
     --sysroot <PATH>  使用指定 sysroot（默认：自动构建带全量 MIR 的缓存 sysroot）
     --vm-call <SPEC>  直接调导出函数（gate/调试入口），如 'fib(25)'；缺省跑 main 启动链
     --vm-stats        打印 Trap 债务统计（每期开工前的调研仪器）后退出
+    --stack-size <N>  guest 主执行栈虚拟保留（默认 1g；接受 k/m/g 后缀，JVM -Xss 同位）
 
 ENV:
     MIRVM_SYSROOT     等价于 --sysroot
+    MIRVM_STACK_SIZE  等价于 --stack-size（cargo 项目形态经环境传给 runner）
 
 DEV:
     mirvm spike1..5   跑已冻结的 M4 前置 spike（回归自检；见 docs/spike*.md）
@@ -109,6 +111,13 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
             }
             "--vm-call" => vm_call = Some(next("--vm-call")),
             "--vm-stats" => vm_stats = true,
+            "--stack-size" => {
+                let v = next("--stack-size");
+                parse_stack_size(&v); // 先验证再落 env（错在入口就响）
+                // 落 env 让 cargo 形态（wrapper→runner 子进程）同一旋钮生效。
+                // 此刻仍是单线程启动相（rustc 会话尚未开始）。
+                unsafe { std::env::set_var("MIRVM_STACK_SIZE", v) };
+            }
             _ if input.is_none() && !arg.starts_with('-') => input = Some(arg),
             _ => {
                 eprintln!("mirvm: 未知参数 `{arg}`\n{USAGE}");
@@ -291,6 +300,28 @@ impl Callbacks for MirvmCallbacks {
 
 /// 引擎入口：缺省跑 main 启动链；`--vm-call 'name(args…)'` 直调导出函数（gate 入口）；
 /// `--vm-stats` = Trap 债务统计（各期开工前的调研仪器）。
+/// `--stack-size` / `MIRVM_STACK_SIZE` 解析：字节数，可带 k/m/g 后缀。非法即诊断退出。
+fn parse_stack_size(s: &str) -> usize {
+    let t = s.trim();
+    let (num, mult): (&str, usize) = match t.as_bytes().last() {
+        Some(b'k' | b'K') => (&t[..t.len() - 1], 1 << 10),
+        Some(b'm' | b'M') => (&t[..t.len() - 1], 1 << 20),
+        Some(b'g' | b'G') => (&t[..t.len() - 1], 1 << 30),
+        _ => (t, 1),
+    };
+    let Ok(n) = num.trim().parse::<usize>() else {
+        eprintln!("mirvm: 无法解析栈尺寸 `{s}`（例：8m、1g、67108864）");
+        exit(2);
+    };
+    let bytes = n.saturating_mul(mult);
+    // 下限护住引擎自身序言 + 边距；上限防笔误（虚拟保留也别要 128T）
+    if !(1 << 20..=1 << 40).contains(&bytes) {
+        eprintln!("mirvm: 栈尺寸 {s} 超出 [1m, 1t] 合理区间");
+        exit(2);
+    }
+    bytes
+}
+
 fn run_vm_engine(
     module: crate::vm::engine::ir::Module,
     vm_call: Option<&str>,
@@ -304,7 +335,7 @@ fn run_vm_engine(
     let shared: &'static _ = Box::leak(Box::new(crate::vm::engine::ctx::Shared::new(module)));
     let Some(spec) = vm_call else {
         // main 启动链：lang_start 照常解释，退出码 = Termination 产物
-        return crate::vm::engine::interp::run_main(shared);
+        return on_guest_stack(move || crate::vm::engine::interp::run_main(shared));
     };
     let (name, args) = match parse_vm_call(spec) {
         Ok(v) => v,
@@ -313,7 +344,7 @@ fn run_vm_engine(
             return 2;
         }
     };
-    match crate::vm::engine::interp::run_export(shared, &name, &args) {
+    match on_guest_stack(move || crate::vm::engine::interp::run_export(shared, &name, &args)) {
         Ok(r) => {
             println!("{r}");
             0
@@ -321,6 +352,36 @@ fn run_vm_engine(
         Err(e) => {
             eprintln!("mirvm: {e}");
             1
+        }
+    }
+}
+
+/// D8a：guest 主执行迁到专用大栈线程（默认 1 GiB 虚拟保留，Linux 按需提交）。
+/// 解释帧宿主成本数十倍于 native 帧，借调用方线程的 8–16 MiB 栈只能容 ~8k 帧，
+/// 对 native 栈界严重失真。guest panic 已在 run_main/run_export 内消化；穿出
+/// join 的是宿主 panic（VM bug）——原样续传，绝不吞。
+fn on_guest_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+    let reserve = match std::env::var("MIRVM_STACK_SIZE") {
+        Ok(s) => parse_stack_size(&s),
+        Err(_) => 1 << 30,
+    };
+    let spawned = std::thread::Builder::new()
+        .name("mirvm-guest".into())
+        .stack_size(reserve)
+        .spawn(f);
+    match spawned {
+        Ok(h) => match h.join() {
+            Ok(r) => r,
+            Err(host_panic) => std::panic::resume_unwind(host_panic),
+        },
+        Err(e) => {
+            // 不静默降级到调用方小栈（栈语义会悄悄变差）——响亮退出并给旋钮。
+            // 典型触发：vm.overcommit_memory=2 的严格提交环境。
+            eprintln!(
+                "mirvm: guest 执行线程创建失败（stack 保留 {reserve} 字节）：{e}；\
+                 请用 --stack-size / MIRVM_STACK_SIZE 调小后重试"
+            );
+            exit(70)
         }
     }
 }

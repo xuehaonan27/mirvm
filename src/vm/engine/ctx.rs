@@ -38,8 +38,14 @@ impl Shared {
 pub struct Ctx {
     pub shared: *const Shared,
     pub region: ByteRegion,
-    /// 解释帧递归深度（guest 栈溢出防护，frame-abi §9——到界诊断退出）
+    /// 解释帧递归深度（诊断计数；溢出判定改用 stack_floor 真栈守卫，M5.2 D8a）
     pub depth: u32,
+    /// 宿主执行栈安全下界（M5.2 D8a）：本线程栈低端 + 安全边距。interp_frame 的
+    /// 栈指针近似值低于此 = guest 栈溢出（诊断退出而非宿主 SIGSEGV）。真栈字节
+    /// 守卫替代旧的固定帧数上限（8000）：随线程真实栈自适应（主执行线程 1 GiB、
+    /// guest 线程放大后的栈、外来 native 线程 thunk 再入均正确）。0 = 探测失败，
+    /// 不守卫（与旧世界的裸奔等价，getattr_np 在 glibc 上对含主线程的所有线程可用）。
+    pub stack_floor: usize,
     /// foreign 直通状态（dlsym 缓存 + dlopen 句柄；dlsym 幂等，每线程独立缓存无碍）
     pub ffi: FfiState,
     /// guest TLS 实例表（M4.4 D3）：TlsId → 本线程实例真地址（0 = 未物化，首访
@@ -56,10 +62,33 @@ impl Ctx {
             shared,
             region: ByteRegion::new(),
             depth: 0,
+            stack_floor: thread_stack_floor(),
             ffi: FfiState::default(),
             tls: Vec::new(),
             teardown_rounds: 0,
         }
+    }
+}
+
+/// 本线程栈安全下界：pthread_getattr_np 取 [lo, lo+size)，下界加安全边距。
+/// 边距覆盖单次 interp_frame 的宿主最坏用量 + 最深处的 FFI/unwind/诊断路径；
+/// 小栈取 1/8 防止边距吃光可用区。仅 Ctx 创建时调一次（getattr 对主线程读
+/// /proc，非热路径）。
+fn thread_stack_floor() -> usize {
+    unsafe {
+        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) != 0 {
+            return 0;
+        }
+        let mut lo: *mut libc::c_void = std::ptr::null_mut();
+        let mut size: libc::size_t = 0;
+        let rc = libc::pthread_attr_getstack(&attr, &mut lo, &mut size);
+        libc::pthread_attr_destroy(&mut attr);
+        if rc != 0 || lo.is_null() || size == 0 {
+            return 0;
+        }
+        let margin = (size / 8).clamp(256 << 10, 4 << 20);
+        lo as usize + margin
     }
 }
 

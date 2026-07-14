@@ -240,3 +240,25 @@ guest handler 是独立能力缺口，不应混入 M5.1 全绿宣称。
   8.67e-19 非零=双侧真融合；fetch_max/min 含符号边界 -128/127/255/u64::MAX；重叠 volatile；
   ptr_mask 对齐掩码）；diff.sh 基线 20→21；full gate5 = **40 PASS / 2 XFAIL / 0 FAIL**；
   cargo test 35/35、fmt、Clippy `-D warnings` 全过。
+
+### 片 2：D8a 栈深度保真 —— 完成（2026-07-14）
+
+- **真栈字节守卫替代固定帧数**：删除 `MAX_DEPTH=8_000` 硬编码（对 native 栈界严重失真
+  ——native 8MiB 主栈容 ~10 万浅帧）。Ctx 创建时经 `pthread_getattr_np` 冻结本线程
+  `stack_floor`（栈低端 + 边距，边距=clamp(size/8, 256K, 4M)）；interp_frame 以本地
+  变量地址近似 SP，低于下界即诊断退出（native 语义 SIGSEGV→"has overflowed its
+  stack"，此为诊断替身；ram-spec §7 溢出深度 unspecified）。任意线程（主执行/guest
+  线程/外来 native 线程 thunk 再入）自适应真实栈界。
+- **主执行迁专用大栈线程**：`on_guest_stack`（默认 1 GiB 虚拟保留，按需提交）承载
+  run_main/run_export；spawn 失败响亮退出不静默降级。`--stack-size`/`MIRVM_STACK_SIZE`
+  旋钮（k/m/g 后缀，JVM -Xss 同位；flag 落 env 使 cargo 形态经 runner 同径生效）。
+- **guest 线程栈放大**：`pthread_create` 显式 stacksize（std::thread 恒显式）临时放大
+  32×（≥64 MiB 虚拟），调用后还原 attr。**glibc 陷阱**（实测踩中）：未 setstack 的
+  attr 经 `pthread_attr_getstack` 返回 `NULL - stacksize`（近 u64 顶假地址）而非
+  NULL——以"x86_64 用户地址 ≤47 位"判定未设；真自供栈（地址界内）不动。
+- **操作数区同步扩容**：ByteRegion 64 MiB → 1 GiB 虚拟保留 + `MAP_NORESERVE`（RSS 仍
+  按触碰页），不再先于栈守卫成为深递归隐形上限。
+- **验收**：`demo/recursion_deep.rs`（主线程 50k/带大局部 20k/显式 2MiB 线程 8k/默认
+  线程 20k）native/mirvm 逐字节一致；`--stack-size 4m` 到界优雅诊断（深度 ~8k 帧）
+  而非 SIGSEGV，非法尺寸清晰报错；diff.sh 21→22；full gate5 = **40 PASS / 2 XFAIL /
+  0 FAIL**，加载 397ms、rayon 850ms 无回退；fmt/clippy/35 tests 全过。

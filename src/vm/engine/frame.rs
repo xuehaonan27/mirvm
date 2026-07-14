@@ -10,8 +10,10 @@
 
 use super::ir::{Slot, Width};
 
-/// 每区容量（虚拟保留 64 MiB；M4.4 起每 guest 线程一个区）。
-const REGION_CAP: usize = 64 << 20;
+/// 每区容量（M5.2 D8a：虚拟保留 1 GiB + MAP_NORESERVE，RSS 仍按触碰页——
+/// 与宿主执行栈同量级，操作数区不再先于栈守卫成为深递归的隐形上限；
+/// M4.4 起每 guest 线程一个区）。
+const REGION_CAP: usize = 1 << 30;
 
 pub struct ByteRegion {
     base: *mut u8,
@@ -32,7 +34,7 @@ impl ByteRegion {
                 std::ptr::null_mut(),
                 REGION_CAP,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
                 -1,
                 0,
             )

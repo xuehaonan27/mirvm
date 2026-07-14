@@ -114,6 +114,44 @@ pub(super) fn ffi_type(k: FfiKind) -> FfiType {
     }
 }
 
+/// guest 线程栈放大（M5.2 D8a）：pthread_create 且显式 stacksize（std::thread 恒
+/// 显式）时临时放大 attr——解释帧宿主成本数十倍于 native 帧，原尺寸会在远浅于
+/// native 的 guest 深度打穿宿主栈。返回 Some((attr, 原尺寸)) 时调用方在 create 后
+/// 还原（guest 可能复用 attr）。guest 自供栈（pthread_attr_setstack，addr 非空）
+/// 不动；attr=NULL（glibc 默认）不动——该形态只出现在 native 代码自建线程，其
+/// thunk 再入由 stack_floor 真栈守卫兜底。放大后尺寸是虚拟保留，按需提交。
+pub fn amplify_pthread_stack(sym: &str, av: &[u64]) -> Option<(*mut libc::pthread_attr_t, usize)> {
+    /// 解释帧 / native 帧的宿主成本比的保守上界（~2KB vs ~64B）
+    const AMPLIFY: usize = 32;
+    const FLOOR: usize = 64 << 20;
+    if sym != "pthread_create" || av.len() < 4 {
+        return None;
+    }
+    let attr = av[1] as *mut libc::pthread_attr_t;
+    if attr.is_null() {
+        return None;
+    }
+    unsafe {
+        let mut lo: *mut libc::c_void = std::ptr::null_mut();
+        let mut size: libc::size_t = 0;
+        if libc::pthread_attr_getstack(attr, &mut lo, &mut size) != 0 || size == 0 {
+            return None;
+        }
+        // glibc 细节：未 setstack 的 attr 内部 stackaddr=NULL，getstack 返回
+        // `NULL - stacksize`（近 u64 顶的假地址）而非 NULL。x86_64 用户地址
+        // ≤ 47 位——超界即"未设"；真用户栈地址（guest 自供栈）落在界内则不动。
+        let stack_unset = lo.is_null() || lo as usize >= 1 << 48;
+        if !stack_unset {
+            return None;
+        }
+        let want = size.saturating_mul(AMPLIFY).max(FLOOR);
+        if want <= size || libc::pthread_attr_setstacksize(attr, want) != 0 {
+            return None;
+        }
+        Some((attr, size))
+    }
+}
+
 /// 直调。args = 求值好的 u64 位（指针即真地址；F32 位在低 32）。返回 u64 位。
 /// Ok(None) = 符号不存在（调用方给诊断）；Err = 必需库加载失败，禁止退化为 dlsym miss。
 pub fn call(
