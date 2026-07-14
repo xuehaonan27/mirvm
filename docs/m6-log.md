@@ -125,3 +125,29 @@ gate0–4）。两个不可缓存类（告警、environ 类宿主地址直嵌）
   重录（化石洗不掉）；**P3** diff_cargo 无 L2 warm 复跑维度（runner 缓存路径零 gate
   覆盖，本次污染任何 gate 都抓不到）。
 - 测量探针（interp 执行集计数、store 拒因）均已回滚未提交；复原后 diff_cargo 5/5。
+
+## 片4（S1 小件包）：sysroot stamp + 三个缓存盲区修缮（2026-07-14）
+
+施工顺序裁定见 decision-history §7.2（S1→S2→S4→S3+JIT 联合设计）。本片四个语义单元
+逐 commit，每个 commit 全量 gate5 = 46 pass / 0 expected-red / 0 skip / 0 fail：
+
+- **S1a（V1）sysroot 仪式 stamp 化**：ensure_sysroot 原每跑 spawn 两个 rustc 子进程
+  （--print sysroot 15ms + -vV 13ms）+ builder 递归 stat 整棵 rust-src 判新，合计
+  ~40-55ms 且 warm 也付。stamp = (MIRVM_BUILD_ID, rustc 二进制 len+mtime_ns, builder
+  hash 文件内容)，失效轴对照 rustc-build-sysroot 0.5.13 sysroot_compute_hash 逐项
+  覆盖；任何缺失/失配/读写失败回退全仪式自愈。**warm fib 墙钟 85→55ms**（wall−total
+  只剩 ~16ms exec/dyld）；gate5 加载相性能门 443→364ms。不在防护面：同 toolchain 内
+  手改 rust-src（逃生门 = 删 stamp/sysroot 目录）。
+- **S1b（P1）runner 不回放 MIRVM_\***：录制环境回放把构建期引擎旋钮化石化进假二进制
+  （调研实证 MIRVM_NO_IR_CACHE 化石化 ⇒ L2 永久旁路无迹象）。修复 = 回放跳过 MIRVM_
+  前缀；编译语义变量（env!/CARGO_*）维持录制优先。实证：化石 JSON 项目干净环境
+  run1 入账 46ms / run2 命中 87ms。
+- **S1c（P2）假二进制 dep-info 真实化**：先试"runner 会话后回写真 .d"路线——实测
+  **证伪**（cargo 在 rustc 调用结束即把 dep-info 快照进 .fingerprint，事后补写不可见），
+  改为 wrapper 写假产物时用真 rustc 只发 --emit=dep-info（清单精确含 mod/include!/
+  env!；stderr 静默保持 native"单次告警"口径；失败退回 crate 根单行清单）。实证：
+  编辑源码 → 假二进制重录 ✓；无编辑复跑指纹稳定 ✓。
+- **S1d（P3）diff_cargo 补 L2 warm 复跑维度**：与 diff.sh M6 片2 通道对位——每 green
+  case 第二跑（应命中缓存；告警类=冷重演）stdout/stderr/退出码须与首跑逐字节一致。
+  此前 runner 缓存路径零 gate 覆盖（化石化事故任何 gate 抓不到），本维度上锁。
+  gate_truth_regression 12/12 维持。
