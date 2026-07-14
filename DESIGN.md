@@ -87,7 +87,7 @@ RAM 只要求**可观测行为**一致，其余全自由。这是贯穿一切的
 4. **嵌入式引擎**（后置）：engine 是 library、CLI 是薄壳，这条路从第一天就不被堵死。
 
 **现有执行模式只有 M4 typed-bytecode interpreter。** HotSpot 风格的 `interp` / `mixed` /
-`jit` 可配置产品模式属于 M5.2 以后目标；当前 CLI 仅兼容旧的 `--engine vm` 写法，不能据此宣称
+`jit` 可配置产品模式属于 M5.3 以后目标；当前 CLI 仅兼容旧的 `--engine vm` 写法，不能据此宣称
 已有多 tier 产品路径。
 
 ---
@@ -211,7 +211,7 @@ InterpCx 的内存 map、MonoHashMap（RefCell 遍地）不 Sync；M4 通过冻�
 | **历史 bootstrap** | fast Machine on rustc `InterpCx` | **已删除（2026-07-09）** | M0–M2.5 的探索工具；代码只在 Git 历史中，不再是 oracle 或运行模式 |
 | **typed-bytecode 解释器** | MIR → 冻结 IR → tree-walking 执行 | **M4 完成，当前唯一产品引擎** | tcx-free、真线程、FFI/unwind/thunk；语义范围与缺口见 current-status |
 | **asm stub** | GAS wrapper → `.so` → native call | **M5.0 完成** | 解释器可调用的局部机器码机件，不等于方法级 JIT |
-| **方法级 JIT** | 从冻结引擎字节码生成 Cranelift 机器码 | **M5.2+ 未实现** | 惰性 tiering、JIT unwind/LSDA 与性能目标仍是设计 |
+| **方法级 JIT** | 从冻结引擎字节码生成 Cranelift 机器码 | **M5.3+ 未实现** | 惰性 tiering、JIT unwind/LSDA 与性能目标仍是设计 |
 
 InterpCx 曾帮助项目快速探索 RAM 边界，但其不 Sync 与 AllocId overlay 不适合作为产品地基。
 M4 完成后它没有“退居 oracle”，而是被删除；当前差分 oracle 是同源 native 编译执行。
@@ -348,7 +348,7 @@ src/os/
 - **M5.1 语义轨收口**（✅ 2026-07-12）：addcarry/subborrow 已使 numbigint 转绿，
   xgetbv 已 native 差分，pshufb/SHA helpers 已使 sha2 转绿；静态归档产品接入与 ecosystem
   补面分别使 blake3/ecosystem 转绿；diff_cargo 3/3。signal guest handler 是独立明确 XFAIL。
-- **M5.2–M5.4 方法级 JIT**（未实现）：Cranelift 热点、tiering、LSDA 与性能收口。
+- **M5.3–M5.5 方法级 JIT**（未实现）：Cranelift 热点、tiering、LSDA 与性能收口。
 - **M6 REPL/Notebook**（后置）。**M7+ 嵌入 API**（后置）。
 
 ### tier-0 实现日志（历史：如何在 rustc 解释器上 bootstrap 出 RAM 实现）
@@ -390,7 +390,7 @@ src/os/
 | shim 工作量（最大风险） | 按需实现；§7 边界模型减少无谓 shim（真资源走直通）；借鉴 Miri 代码 |
 | 测试假阳性 / 语义误报 | 绿色必须比较输出或不变式；双方都失败不得算 PASS；预期红锁定原因 |
 | silent stub | 未实现的可观察语义必须 Trap 或真实实现，不允许返回成功伪装支持 |
-| M4 解释器性能天花板 | M5.2+ 方法级 JIT；JIT-on/off/native 三方差分 |
+| M4 解释器性能天花板 | M5.3+ 方法级 JIT；JIT-on/off/native 三方差分 |
 | FFI C→Rust 回调 | thunk + TLS attach 已有；逐类验证真实注册/生命周期，signal 不能仅凭 thunk 宣称支持 |
 | 平台耦合 | 当前只宣称 Linux/ELF/x86_64；抽取 OS 边界后再扩平台 |
 | 生命周期与嵌入 | 将进程退出、全局 TLS key 与泄漏式资源收敛成可恢复、多 Engine 生命周期 API |
