@@ -307,3 +307,24 @@ guest handler 是独立能力缺口，不应混入 M5.1 全绿宣称。
   错误映射会被宿主原子 API panic 当场抓住；`fence(Relaxed)` 非法性由 native 侧 panic
   实证）②Acquire/Release 消息传递不变式 ③4 线程 Relaxed 争用计数——native/mirvm
   逐字节一致；diff.sh 23→24；TSan gate 全绿（弱序错映射=真数据竞争会被抓）。
+
+### 片 5：D8c f16/f128 —— 完成（2026-07-14，零残留）
+
+- **实现路线小改（同源性论证不变）**：设计写"手写 libgcc FFI"；实测本 nightly 宿主
+  `f16`/`f128` 类型全套可用（算术含 `%`、比较、全部数学函数、`mul_add`、宽整数互转）
+  ——引擎直接骑宿主类型 + `#![feature(f16, f128)]`，rustc 把引擎自身的 f16/f128 运算
+  下降到与 native guest **同一批** compiler-builtins `__*tf*`/`__*hf*` + glibc `*f128`
+  libm 符号。同源即位同，少一层手写 FFI 与 libffi float128 形态问题（libffi 的
+  longdouble 在 x86-64 是 80 位，接不了 binary128）。
+- **f16 = 标量通道**：`is64: bool` 全面重构为 `FloatW{F16,F32,F64}`（FloatBin/FloatCmp/
+  FloatNeg/FloatCast/FloatToInt/IntToFloat/MathUn/MathBin/MathFma/Wide128ToFloat 十形态），
+  FloatCast 扩为 3×3 全组合。intrinsic 名后缀解析扩 f16/f128（`FloatSuffix` 四值）。
+- **f128 = 16 字节宽通道**（骑 u128 的 Bytes/place 基建）：`F128Bin`（四则+Rem=
+  fmodf128）、`F128Cmp`、`F128Un`（Neg+14 数学单目）、`F128MathBin`（pow/powi[标量
+  rhs]/copysign/min/max）、`F128Fma`、`F128From/ToScalar`（f16/f32/f64/≤64 整数互转，
+  `as` 饱和）、`F128From/ToWideInt`（i128/u128 互转）。BinOp/Neg/三类 cast/数学/fma/
+  fast-math 臂全部四宽路由。
+- **验收**：`demo/float_wide_probe.rs`（f16 subnormal/位模式/饱和边界、f128 精度证明
+  1e30+1、NaN 语义、宽整数往返、to_bits 十六进制位断言）native/mirvm **逐字节一致**；
+  `corpus/c_float_wide.rs`（f16 量化误差界 + f128 高精度累加画像）进 corpus（27→28）；
+  diff.sh 24→25。D8c 无残留（i128↔f128 也已覆盖）。

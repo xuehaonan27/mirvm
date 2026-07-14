@@ -1167,23 +1167,58 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     return self.lower_bin128(bop, signed, a, b, &dst_p, false);
                 }
                 if a_ty.is_floating_point() {
-                    let is64 = match a_ty.kind() {
-                        ty::Float(ty::FloatTy::F32) => false,
-                        ty::Float(ty::FloatTy::F64) => true,
-                        _ => return Err(format!("浮点宽度 {a_ty}（f16/f128，M4.1+）")),
-                    };
+                    use ir::FloatOp as F;
+                    // f128：16 字节宽通道（D8c）——place 操作数，比较产标量 bool
+                    if matches!(a_ty.kind(), ty::Float(ty::FloatTy::F128)) {
+                        let pa = self.wide_place(a)?;
+                        let pb = self.wide_place(b)?;
+                        let fop = match binop {
+                            Add | AddUnchecked => Some(F::Add),
+                            Sub | SubUnchecked => Some(F::Sub),
+                            Mul | MulUnchecked => Some(F::Mul),
+                            Div => Some(F::Div),
+                            Rem => Some(F::Rem),
+                            _ => None,
+                        };
+                        if let Some(op) = fop {
+                            return Ok(vec![Stmt::F128Bin {
+                                op,
+                                a: pa,
+                                b: pb,
+                                dst: dst_p.expr(),
+                            }]);
+                        }
+                        let cc = match binop {
+                            Eq => IntCc::Eq,
+                            Ne => IntCc::Ne,
+                            Lt => IntCc::Lt,
+                            Le => IntCc::Le,
+                            Gt => IntCc::Gt,
+                            Ge => IntCc::Ge,
+                            other => {
+                                return Err(format!("f128 BinOp {other:?}"));
+                            }
+                        };
+                        let ValKind::Scalar(w) = dst_kind else {
+                            return Err("f128 比较目标非标量".into());
+                        };
+                        return Ok(vec![Stmt::Assign {
+                            dst: dst_p.scalar_place(w),
+                            rv: Rvalue::F128Cmp { cc, a: pa, b: pb },
+                        }]);
+                    }
+                    let fw = float_w(a_ty)?;
                     let ao = self.lower_operand_scalar(a)?;
                     let bo = self.lower_operand_scalar(b)?;
-                    use ir::FloatOp as F;
                     let fbin = |op| Rvalue::FloatBin {
                         op,
-                        is64,
+                        fw,
                         a: ao.clone(),
                         b: bo.clone(),
                     };
                     let fcmp = |cc| Rvalue::FloatCmp {
                         cc,
-                        is64,
+                        fw,
                         a: ao.clone(),
                         b: bo.clone(),
                     };
@@ -1295,17 +1330,23 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }])
                     }
                     mir::UnOp::Neg => {
+                        if matches!(a_ty.kind(), ty::Float(ty::FloatTy::F128)) {
+                            let pa = self.wide_place(a)?;
+                            return Ok(vec![Stmt::F128Un {
+                                op: ir::F128UnOp::Neg,
+                                a: pa,
+                                dst: dst_p.expr(),
+                            }]);
+                        }
                         let ao = self.lower_operand_scalar(a)?;
                         let ValKind::Scalar(w) = dst_kind else {
                             return Err("Neg 目标非标量".into());
                         };
                         let rv = if a_ty.is_floating_point() {
-                            let is64 = match a_ty.kind() {
-                                ty::Float(ty::FloatTy::F32) => false,
-                                ty::Float(ty::FloatTy::F64) => true,
-                                _ => return Err(format!("浮点宽度 {a_ty}（M4.1+）")),
-                            };
-                            Rvalue::FloatNeg { is64, a: ao }
+                            Rvalue::FloatNeg {
+                                fw: float_w(a_ty)?,
+                                a: ao,
+                            }
                         } else {
                             Rvalue::Neg(ao)
                         };
@@ -1821,22 +1862,42 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
             CK::FloatToInt => {
                 let a_ty = self.op_ty(a)?;
-                let from64 = match a_ty.kind() {
-                    ty::Float(ty::FloatTy::F32) => false,
-                    ty::Float(ty::FloatTy::F64) => true,
-                    _ => return Err(format!("FloatToInt 源 {a_ty}（M4.1+）")),
-                };
                 let to_layout = self.layout_of(to_ty)?;
-                let to_w = frame::scalar_width(&to_layout).ok_or("FloatToInt 目标非标量")?;
+                let to_signed = frame::ty_signed(to_ty);
+                // f128 源（宽通道）：→ ≤64 整数 F128ToScalar；→ i128/u128 F128ToWideInt
+                if matches!(a_ty.kind(), ty::Float(ty::FloatTy::F128)) {
+                    let pa = self.wide_place(a)?;
+                    let Some(to_w) = frame::scalar_width(&to_layout) else {
+                        return Ok(vec![Stmt::F128ToWideInt {
+                            src: pa,
+                            signed: to_signed,
+                            dst: dst_p.expr(),
+                        }]);
+                    };
+                    let ValKind::Scalar(w) = dst_kind else {
+                        return Err("FloatToInt 目标非标量".into());
+                    };
+                    return Ok(vec![Stmt::F128ToScalar {
+                        src: pa,
+                        kind: ir::F128Scalar::Int { signed: to_signed },
+                        w: to_w,
+                        dst: dst_p.scalar_place(w),
+                    }]);
+                }
+                let from = float_w(a_ty)?;
+                // 标量浮点 → i128/u128：残留（D8k 128 位残余批），响亮
+                let Some(to_w) = frame::scalar_width(&to_layout) else {
+                    return Err(format!("FloatToInt 目标 {to_ty}（128 位，D8k）"));
+                };
                 let ValKind::Scalar(w) = dst_kind else {
                     return Err("FloatToInt 目标非标量".into());
                 };
                 Ok(vec![Stmt::Assign {
                     dst: dst_p.scalar_place(w),
                     rv: Rvalue::FloatToInt {
-                        from64,
+                        from,
                         to: to_w,
-                        signed: frame::ty_signed(to_ty),
+                        signed: to_signed,
                         a: self.lower_operand_scalar(a)?,
                     },
                 }])
@@ -1844,11 +1905,25 @@ impl<'tcx> LowerCx<'tcx, '_> {
             CK::IntToFloat => {
                 let a_ty = self.op_ty(a)?;
                 let a_layout = self.layout_of(a_ty)?;
-                let to64 = match to_ty.kind() {
-                    ty::Float(ty::FloatTy::F32) => false,
-                    ty::Float(ty::FloatTy::F64) => true,
-                    _ => return Err(format!("IntToFloat 目标 {to_ty}（M4.1+）")),
-                };
+                // f128 目标（宽通道）
+                if matches!(to_ty.kind(), ty::Float(ty::FloatTy::F128)) {
+                    return Ok(match frame::scalar_width(&a_layout) {
+                        Some(_) => vec![Stmt::F128FromScalar {
+                            src: self.lower_operand_scalar(a)?,
+                            kind: ir::F128Scalar::Int {
+                                signed: frame::ty_signed(a_ty),
+                            },
+                            dst: dst_p.expr(),
+                        }],
+                        // i128/u128 → f128
+                        None => vec![Stmt::F128FromWideInt {
+                            src: self.wide_place(a)?,
+                            signed: frame::ty_signed(a_ty),
+                            dst: dst_p.expr(),
+                        }],
+                    });
+                }
+                let to = float_w(to_ty)?;
                 let ValKind::Scalar(w) = dst_kind else {
                     return Err("IntToFloat 目标非标量".into());
                 };
@@ -1857,7 +1932,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     return Ok(vec![Stmt::Wide128ToFloat {
                         src: self.wide_place(a)?,
                         signed: frame::ty_signed(a_ty),
-                        to64,
+                        to,
                         dst: dst_p.scalar_place(w),
                     }]);
                 };
@@ -1865,34 +1940,55 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     dst: dst_p.scalar_place(w),
                     rv: Rvalue::IntToFloat {
                         from: (from_w, frame::ty_signed(a_ty)),
-                        to64,
+                        to,
                         a: self.lower_operand_scalar(a)?,
                     },
                 }])
             }
             CK::FloatToFloat => {
                 let a_ty = self.op_ty(a)?;
-                let from64 = match a_ty.kind() {
-                    ty::Float(ty::FloatTy::F32) => false,
-                    ty::Float(ty::FloatTy::F64) => true,
-                    _ => return Err(format!("FloatToFloat 源 {a_ty}（M4.1+）")),
-                };
-                let to64 = match to_ty.kind() {
-                    ty::Float(ty::FloatTy::F32) => false,
-                    ty::Float(ty::FloatTy::F64) => true,
-                    _ => return Err(format!("FloatToFloat 目标 {to_ty}（M4.1+）")),
-                };
-                let ValKind::Scalar(w) = dst_kind else {
-                    return Err("FloatToFloat 目标非标量".into());
-                };
-                Ok(vec![Stmt::Assign {
-                    dst: dst_p.scalar_place(w),
-                    rv: Rvalue::FloatCast {
-                        from64,
-                        to64,
-                        a: self.lower_operand_scalar(a)?,
-                    },
-                }])
+                let from128 = matches!(a_ty.kind(), ty::Float(ty::FloatTy::F128));
+                let to128 = matches!(to_ty.kind(), ty::Float(ty::FloatTy::F128));
+                match (from128, to128) {
+                    // f128 → f128（同宽位拷）
+                    (true, true) => {
+                        let pa = self.wide_place(a)?;
+                        Ok(vec![Stmt::Copy {
+                            dst: dst_p.expr(),
+                            src: pa,
+                            size: 16,
+                        }])
+                    }
+                    (true, false) => {
+                        let ValKind::Scalar(w) = dst_kind else {
+                            return Err("FloatToFloat 目标非标量".into());
+                        };
+                        Ok(vec![Stmt::F128ToScalar {
+                            src: self.wide_place(a)?,
+                            kind: ir::F128Scalar::F(float_w(to_ty)?),
+                            w,
+                            dst: dst_p.scalar_place(w),
+                        }])
+                    }
+                    (false, true) => Ok(vec![Stmt::F128FromScalar {
+                        src: self.lower_operand_scalar(a)?,
+                        kind: ir::F128Scalar::F(float_w(a_ty)?),
+                        dst: dst_p.expr(),
+                    }]),
+                    (false, false) => {
+                        let ValKind::Scalar(w) = dst_kind else {
+                            return Err("FloatToFloat 目标非标量".into());
+                        };
+                        Ok(vec![Stmt::Assign {
+                            dst: dst_p.scalar_place(w),
+                            rv: Rvalue::FloatCast {
+                                from: float_w(a_ty)?,
+                                to: float_w(to_ty)?,
+                                a: self.lower_operand_scalar(a)?,
+                            },
+                        }])
+                    }
+                }
             }
             CK::Subtype => {
                 let src = self.lower_operand(a)?;
@@ -2635,24 +2731,33 @@ impl<'tcx> LowerCx<'tcx, '_> {
     /// 本步最小集：offset/arith_offset（ptr::add 的根，rawptr gate 必经）。
     /// 完整内建表是 M4.1 第 5 步（D5）。
     #[allow(clippy::too_many_arguments)]
-    /// 浮点 intrinsic 宽度解析：后缀已定则直取；裸泛型名看第一个类型参数。
-    /// f16/f128 → Err（D8c 接入前保持响亮；接入后此处扩宽）。
-    fn resolve_float_width(
+    /// 浮点 intrinsic 宽度路由：后缀已定则直取；裸泛型名看第一个类型参数。
+    /// f16/f32/f64 走标量通道（FloatW）；f128 走 16 字节宽通道（D8c）。
+    fn resolve_float_route(
         &self,
-        suffix_w: Option<bool>,
+        suffix: Option<FloatSuffix>,
         inst: &Instance<'tcx>,
         n: &str,
-    ) -> Result<bool, String> {
-        if let Some(is64) = suffix_w {
-            return Ok(is64);
-        }
-        let t = inst.args.type_at(0);
-        match t.kind() {
-            ty::Float(ty::FloatTy::F32) => Ok(false),
-            ty::Float(ty::FloatTy::F64) => Ok(true),
-            ty::Float(_) => Err(format!("intrinsic `{n}` 浮点宽度 {t}（f16/f128，D8c）")),
-            _ => Err(format!("intrinsic `{n}` 泛型参数非浮点（{t}）")),
-        }
+    ) -> Result<FloatRoute, String> {
+        let suffix = match suffix {
+            Some(sfx) => sfx,
+            None => {
+                let t = inst.args.type_at(0);
+                match t.kind() {
+                    ty::Float(ty::FloatTy::F16) => FloatSuffix::F16,
+                    ty::Float(ty::FloatTy::F32) => FloatSuffix::F32,
+                    ty::Float(ty::FloatTy::F64) => FloatSuffix::F64,
+                    ty::Float(ty::FloatTy::F128) => FloatSuffix::F128,
+                    _ => return Err(format!("intrinsic `{n}` 泛型参数非浮点（{t}）")),
+                }
+            }
+        };
+        Ok(match suffix {
+            FloatSuffix::F16 => FloatRoute::Scalar(ir::FloatW::F16),
+            FloatSuffix::F32 => FloatRoute::Scalar(ir::FloatW::F32),
+            FloatSuffix::F64 => FloatRoute::Scalar(ir::FloatW::F64),
+            FloatSuffix::F128 => FloatRoute::Wide128,
+        })
     }
 
     /// atomic intrinsic 的 const 泛型序 → 冻结 MemOrd（cg_ssa parse_atomic_ordering
@@ -3168,68 +3273,121 @@ impl<'tcx> LowerCx<'tcx, '_> {
             // 不检查的浮点→整数（fast 不检 UB：与 `as` 同一实现，numbigint 逼出）
             "float_to_int_unchecked" => {
                 let fty = inst.args.type_at(0);
-                let from64 = match fty.kind() {
-                    ty::Float(ty::FloatTy::F32) => false,
-                    ty::Float(ty::FloatTy::F64) => true,
-                    _ => return Err(format!("float_to_int_unchecked 源 {fty}（f16/f128？）")),
-                };
                 let ity = inst.args.type_at(1);
-                let to_w = frame::scalar_width(&self.layout_of(ity)?)
-                    .ok_or("float_to_int_unchecked 目标非标量")?;
-                let (dst_p, w) = self.place_scalar(destination)?;
-                vec![Stmt::Assign {
-                    dst: dst_p.scalar_place(w),
-                    rv: Rvalue::FloatToInt {
-                        from64,
-                        to: to_w,
-                        signed: frame::ty_signed(ity),
-                        a: self.lower_operand_scalar(&args[0].node)?,
-                    },
-                }]
+                let signed = frame::ty_signed(ity);
+                // f128 源：≤64 整数经 F128ToScalar；i128/u128 经 F128ToWideInt
+                if matches!(fty.kind(), ty::Float(ty::FloatTy::F128)) {
+                    let pa = self.wide_place(&args[0].node)?;
+                    let dst = self.resolve_place(destination)?;
+                    match frame::scalar_width(&self.layout_of(ity)?) {
+                        Some(to_w) => {
+                            vec![Stmt::F128ToScalar {
+                                src: pa,
+                                kind: ir::F128Scalar::Int { signed },
+                                w: to_w,
+                                dst: dst.scalar_place(to_w),
+                            }]
+                        }
+                        None => vec![Stmt::F128ToWideInt {
+                            src: pa,
+                            signed,
+                            dst: dst.expr(),
+                        }],
+                    }
+                } else {
+                    let to_w = frame::scalar_width(&self.layout_of(ity)?)
+                        .ok_or(format!("float_to_int_unchecked 目标 {ity}（128 位，D8k）"))?;
+                    let (dst_p, w) = self.place_scalar(destination)?;
+                    vec![Stmt::Assign {
+                        dst: dst_p.scalar_place(w),
+                        rv: Rvalue::FloatToInt {
+                            from: float_w(fty)?,
+                            to: to_w,
+                            signed,
+                            a: self.lower_operand_scalar(&args[0].node)?,
+                        },
+                    }]
+                }
             }
             // 数学面（must_be_overridden float intrinsic）：宿主直算（合成处置，P7）。
             // 宽度：后缀名（sqrtf64）定死；裸泛型名（fabs<T>，本 nightly 漂移）看类型参数。
             n if math_un_of(n).is_some() => {
-                let (op, suffix_w) = math_un_of(n).unwrap();
-                let is64 = self.resolve_float_width(suffix_w, inst, n)?;
-                let (dst_p, w) = self.place_scalar(destination)?;
-                vec![Stmt::Assign {
-                    dst: dst_p.scalar_place(w),
-                    rv: Rvalue::MathUn {
-                        op,
-                        is64,
-                        a: self.lower_operand_scalar(&args[0].node)?,
-                    },
-                }]
+                let (op, sfx) = math_un_of(n).unwrap();
+                match self.resolve_float_route(sfx, inst, n)? {
+                    FloatRoute::Scalar(fw) => {
+                        let (dst_p, w) = self.place_scalar(destination)?;
+                        vec![Stmt::Assign {
+                            dst: dst_p.scalar_place(w),
+                            rv: Rvalue::MathUn {
+                                op,
+                                fw,
+                                a: self.lower_operand_scalar(&args[0].node)?,
+                            },
+                        }]
+                    }
+                    FloatRoute::Wide128 => vec![Stmt::F128Un {
+                        op: ir::F128UnOp::Math(op),
+                        a: self.wide_place(&args[0].node)?,
+                        dst: self.resolve_place(destination)?.expr(),
+                    }],
+                }
             }
             n if math_bin_of(n).is_some() => {
-                let (op, suffix_w) = math_bin_of(n).unwrap();
-                let is64 = self.resolve_float_width(suffix_w, inst, n)?;
-                let (dst_p, w) = self.place_scalar(destination)?;
-                vec![Stmt::Assign {
-                    dst: dst_p.scalar_place(w),
-                    rv: Rvalue::MathBin {
-                        op,
-                        is64,
-                        a: self.lower_operand_scalar(&args[0].node)?,
-                        b: self.lower_operand_scalar(&args[1].node)?,
-                    },
-                }]
+                let (op, sfx) = math_bin_of(n).unwrap();
+                match self.resolve_float_route(sfx, inst, n)? {
+                    FloatRoute::Scalar(fw) => {
+                        let (dst_p, w) = self.place_scalar(destination)?;
+                        vec![Stmt::Assign {
+                            dst: dst_p.scalar_place(w),
+                            rv: Rvalue::MathBin {
+                                op,
+                                fw,
+                                a: self.lower_operand_scalar(&args[0].node)?,
+                                b: self.lower_operand_scalar(&args[1].node)?,
+                            },
+                        }]
+                    }
+                    FloatRoute::Wide128 => {
+                        // powi 的 rhs 是 i32 标量，其余 f128 wide
+                        let b = if matches!(op, ir::MathBinOp::Powi) {
+                            ir::F128Rhs::Scalar(self.lower_operand_scalar(&args[1].node)?)
+                        } else {
+                            ir::F128Rhs::Wide(self.wide_place(&args[1].node)?)
+                        };
+                        vec![Stmt::F128MathBin {
+                            op,
+                            a: self.wide_place(&args[0].node)?,
+                            b,
+                            dst: self.resolve_place(destination)?.expr(),
+                        }]
+                    }
+                }
             }
-            // 融合乘加（D8i）：a*b+c 单次舍入。fmuladd 允许融合/不融合，融合在允许集合内。
-            // f16/f128 变体后缀剥不出 f32/f64 → 落到未处理 Err（D8c 接入时消除）。
-            "fmaf32" | "fmaf64" | "fmuladdf32" | "fmuladdf64" => {
+            // 融合乘加（D8i/D8c）：a*b+c 单次舍入。fmuladd 允许融合/不融合，融合恒在
+            // 允许集合内。f16 经宿主 f16::mul_add（数学上正确舍入）。
+            "fmaf16" | "fmaf32" | "fmaf64" | "fmuladdf16" | "fmuladdf32" | "fmuladdf64" => {
+                let fw = match split_float_suffix(name.as_str()).1 {
+                    Some(FloatSuffix::F16) => ir::FloatW::F16,
+                    Some(FloatSuffix::F32) => ir::FloatW::F32,
+                    _ => ir::FloatW::F64,
+                };
                 let (dst_p, w) = self.place_scalar(destination)?;
                 vec![Stmt::Assign {
                     dst: dst_p.scalar_place(w),
                     rv: Rvalue::MathFma {
-                        is64: name.as_str().ends_with("f64"),
+                        fw,
                         a: self.lower_operand_scalar(&args[0].node)?,
                         b: self.lower_operand_scalar(&args[1].node)?,
                         c: self.lower_operand_scalar(&args[2].node)?,
                     },
                 }]
             }
+            "fmaf128" | "fmuladdf128" => vec![Stmt::F128Fma {
+                a: self.wide_place(&args[0].node)?,
+                b: self.wide_place(&args[1].node)?,
+                c: self.wide_place(&args[2].node)?,
+                dst: self.resolve_place(destination)?.expr(),
+            }],
             // fast/algebraic 浮点（D8i）：fast-math 标记是"允许重结合/收缩"的自由授权，
             // 按精确 IEEE 语义执行的结果恒在允许集合内（与关掉 fast-math 的 native 同值）。
             "fadd_fast" | "fsub_fast" | "fmul_fast" | "fdiv_fast" | "frem_fast"
@@ -3243,17 +3401,26 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     "fdiv" => F::Div,
                     _ => F::Rem,
                 };
-                let is64 = self.resolve_float_width(None, inst, name.as_str())?;
-                let (dst_p, w) = self.place_scalar(destination)?;
-                vec![Stmt::Assign {
-                    dst: dst_p.scalar_place(w),
-                    rv: Rvalue::FloatBin {
+                match self.resolve_float_route(None, inst, name.as_str())? {
+                    FloatRoute::Scalar(fw) => {
+                        let (dst_p, w) = self.place_scalar(destination)?;
+                        vec![Stmt::Assign {
+                            dst: dst_p.scalar_place(w),
+                            rv: Rvalue::FloatBin {
+                                op,
+                                fw,
+                                a: self.lower_operand_scalar(&args[0].node)?,
+                                b: self.lower_operand_scalar(&args[1].node)?,
+                            },
+                        }]
+                    }
+                    FloatRoute::Wide128 => vec![Stmt::F128Bin {
                         op,
-                        is64,
-                        a: self.lower_operand_scalar(&args[0].node)?,
-                        b: self.lower_operand_scalar(&args[1].node)?,
-                    },
-                }]
+                        a: self.wide_place(&args[0].node)?,
+                        b: self.wide_place(&args[1].node)?,
+                        dst: self.resolve_place(destination)?.expr(),
+                    }],
+                }
             }
             n if n.starts_with("simd_") => self.expand_simd(n, inst, args, destination)?,
             "ptr_offset_from" | "ptr_offset_from_unsigned" => {
@@ -4099,9 +4266,9 @@ fn u128_to_u64(v: u128) -> Result<u64, String> {
 /// 裸泛型名（本 nightly `fabs<T: FloatPrimitive>` 已去后缀——M5.2 D8i 实证漂移），
 /// 由调用点按类型参数解析。**全表都做泛型兜底**：后缀剥离对 nightly 漂移脆弱，
 /// 任一名字将来去后缀化时走同一条泛型道而不是 Trap。f16/f128 由调用点按 D8c 处置。
-fn math_un_of(n: &str) -> Option<(ir::MathUnOp, Option<bool>)> {
-    let (stem, is64) = split_float_suffix(n);
-    math_un_stem(stem).map(|op| (op, is64))
+fn math_un_of(n: &str) -> Option<(ir::MathUnOp, Option<FloatSuffix>)> {
+    let (stem, sfx) = split_float_suffix(n);
+    math_un_stem(stem).map(|op| (op, sfx))
 }
 
 fn math_un_stem(stem: &str) -> Option<ir::MathUnOp> {
@@ -4125,9 +4292,9 @@ fn math_un_stem(stem: &str) -> Option<ir::MathUnOp> {
     })
 }
 
-fn math_bin_of(n: &str) -> Option<(ir::MathBinOp, Option<bool>)> {
+fn math_bin_of(n: &str) -> Option<(ir::MathBinOp, Option<FloatSuffix>)> {
     use ir::MathBinOp as M;
-    let (stem, is64) = split_float_suffix(n);
+    let (stem, sfx) = split_float_suffix(n);
     Some((
         match stem {
             "pow" => M::Pow,
@@ -4137,19 +4304,49 @@ fn math_bin_of(n: &str) -> Option<(ir::MathBinOp, Option<bool>)> {
             "maxnum" => M::Maxnum,
             _ => return None,
         },
-        is64,
+        sfx,
     ))
 }
 
-/// 剥 f32/f64 后缀；无后缀返回原名 + None（泛型 intrinsic，宽度看类型参数）。
-fn split_float_suffix(n: &str) -> (&str, Option<bool>) {
-    if let Some(s) = n.strip_suffix("f64") {
-        (s.trim_end_matches('_'), Some(true))
-    } else if let Some(s) = n.strip_suffix("f32") {
-        (s.trim_end_matches('_'), Some(false))
-    } else {
-        (n, None)
+/// 浮点 intrinsic 名后缀（sqrtf16/f32/f64/f128）。
+#[derive(Clone, Copy)]
+enum FloatSuffix {
+    F16,
+    F32,
+    F64,
+    F128,
+}
+
+/// 标量/宽通道路由。
+#[derive(Clone, Copy)]
+enum FloatRoute {
+    Scalar(ir::FloatW),
+    Wide128,
+}
+
+/// 标量浮点宽度（f128 不在此——16 字节走宽通道，调用点先分流）。
+fn float_w(t: Ty<'_>) -> Result<ir::FloatW, String> {
+    match t.kind() {
+        ty::Float(ty::FloatTy::F16) => Ok(ir::FloatW::F16),
+        ty::Float(ty::FloatTy::F32) => Ok(ir::FloatW::F32),
+        ty::Float(ty::FloatTy::F64) => Ok(ir::FloatW::F64),
+        _ => Err(format!("非标量浮点宽度 {t}")),
     }
+}
+
+/// 剥 f16/f32/f64/f128 后缀；无后缀返回原名 + None（泛型 intrinsic，宽度看类型参数）。
+fn split_float_suffix(n: &str) -> (&str, Option<FloatSuffix>) {
+    for (sfx, tag) in [
+        ("f128", FloatSuffix::F128),
+        ("f64", FloatSuffix::F64),
+        ("f32", FloatSuffix::F32),
+        ("f16", FloatSuffix::F16),
+    ] {
+        if let Some(stem) = n.strip_suffix(sfx) {
+            return (stem.trim_end_matches('_'), Some(tag));
+        }
+    }
+    (n, None)
 }
 
 /// 在 operand 的值（指针）上再间接一层：*(op + off)。vtable 槽读取用。

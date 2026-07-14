@@ -4,6 +4,8 @@
 #![feature(rustc_private)]
 #![feature(box_patterns)] // lower 匹配 MIR 的 Box 字段
 #![feature(cfg_sanitize)] // ctx.rs：TSan 配置下 Ctx dtor 的处置分歧
+#![feature(f16)] // D8c：引擎宿主直算 f16（rustc 下降到与 native 同一批转换/libm 符号）
+#![feature(f128)] // D8c：同上，f128（compiler-builtins __*tf* + glibc *f128 libm）
 
 extern crate rustc_abi;
 extern crate rustc_apfloat;

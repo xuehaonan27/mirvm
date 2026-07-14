@@ -169,6 +169,35 @@ pub enum OvfOp {
     Mul,
 }
 
+/// 标量浮点宽度（M5.2 D8c：f16 进标量通道；f128 走 128 位宽通道，不在此）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloatW {
+    F16,
+    F32,
+    F64,
+}
+
+/// f128 宽通道的标量侧类别（F128From/ToScalar）。Int 的宽度在语句 w 字段。
+#[derive(Clone, Copy, Debug)]
+pub enum F128Scalar {
+    F(FloatW),
+    Int { signed: bool },
+}
+
+/// f128 单目（Neg + 一元数学族）。
+#[derive(Clone, Copy, Debug)]
+pub enum F128UnOp {
+    Neg,
+    Math(MathUnOp),
+}
+
+/// F128MathBin 右操作数（powi 是 i32 标量）。
+#[derive(Clone, Debug)]
+pub enum F128Rhs {
+    Wide(PlaceExpr),
+    Scalar(Operand),
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum FloatOp {
     Add,
@@ -390,30 +419,30 @@ pub enum Rvalue {
         variants_len: u64,
         untagged: u64,
     },
-    /// 浮点四则（位进位出：操作数是 f32/f64 的位型）
+    /// 浮点四则（位进位出：操作数是 f16/f32/f64 的位型；f128 走 F128Bin）
     FloatBin {
         op: FloatOp,
-        is64: bool,
+        fw: FloatW,
         a: Operand,
         b: Operand,
     },
     /// 数学一元/二元（宿主直算；M4.5 补 must_be_overridden float intrinsic 面）
     MathUn {
         op: MathUnOp,
-        is64: bool,
+        fw: FloatW,
         a: Operand,
     },
     /// 融合乘加（fma/fmuladd intrinsic，M5.2 D8i）：a*b+c 单次舍入（宿主 mul_add）。
     /// fmuladd 允许融合或不融合两种结果，融合实现在允许集合内。
     MathFma {
-        is64: bool,
+        fw: FloatW,
         a: Operand,
         b: Operand,
         c: Operand,
     },
     MathBin {
         op: MathBinOp,
-        is64: bool,
+        fw: FloatW,
         a: Operand,
         b: Operand,
     },
@@ -425,23 +454,23 @@ pub enum Rvalue {
     /// 浮点比较（IEEE 语义，NaN 全 false 除 Ne）→ bool
     FloatCmp {
         cc: IntCc,
-        is64: bool,
+        fw: FloatW,
         a: Operand,
         b: Operand,
     },
     FloatNeg {
-        is64: bool,
+        fw: FloatW,
         a: Operand,
     },
-    /// f32↔f64
+    /// 标量浮点互转（f16/f32/f64；f128 参与的走 F128FromScalar/F128ToScalar）
     FloatCast {
-        from64: bool,
-        to64: bool,
+        from: FloatW,
+        to: FloatW,
         a: Operand,
     },
     /// float → int（Rust `as` 饱和语义：NaN→0、越界→边界）
     FloatToInt {
-        from64: bool,
+        from: FloatW,
         to: Width,
         signed: bool,
         a: Operand,
@@ -449,8 +478,14 @@ pub enum Rvalue {
     /// int → float
     IntToFloat {
         from: (Width, bool),
-        to64: bool,
+        to: FloatW,
         a: Operand,
+    },
+    /// f128 比较（16 字节 place 操作数）→ bool（IEEE 语义）
+    F128Cmp {
+        cc: IntCc,
+        a: PlaceExpr,
+        b: PlaceExpr,
     },
     /// 位操作单目（按操作数宽度语义：ctlz(W8) 是 8 位前导零）
     BitUn {
@@ -755,12 +790,66 @@ pub enum Stmt {
         dst: PlaceExpr,
         with_overflow: bool,
     },
-    /// 128 位整数 → 浮点（u128/i128 as f32/f64；宿主直转，M4.5 tokio 定时器逼出）
+    /// 128 位整数 → 标量浮点（u128/i128 as f16/f32/f64；宿主直转）
     Wide128ToFloat {
         src: PlaceExpr,
         signed: bool,
-        to64: bool,
+        to: FloatW,
         dst: ScalarPlace,
+    },
+    // ===== f128 宽通道（M5.2 D8c：16 字节值走 place，宿主 f128 直算——
+    // rustc 把引擎自身的 f128 运算下降到与 native guest 同一批
+    // compiler-builtins/__*tf* + glibc *f128 libm 符号，同源即位同）=====
+    /// f128 四则（含 Rem=fmodf128）
+    F128Bin {
+        op: FloatOp,
+        a: PlaceExpr,
+        b: PlaceExpr,
+        dst: PlaceExpr,
+    },
+    /// f128 数学二元（powi 的 rhs 是 i32 标量，其余 wide）
+    F128MathBin {
+        op: MathBinOp,
+        a: PlaceExpr,
+        b: F128Rhs,
+        dst: PlaceExpr,
+    },
+    /// f128 单目（取负 + 全部一元数学）
+    F128Un {
+        op: F128UnOp,
+        a: PlaceExpr,
+        dst: PlaceExpr,
+    },
+    /// f128 融合乘加（宿主 mul_add 单次舍入）
+    F128Fma {
+        a: PlaceExpr,
+        b: PlaceExpr,
+        c: PlaceExpr,
+        dst: PlaceExpr,
+    },
+    /// 标量（f16/f32/f64/整数 ≤64）→ f128
+    F128FromScalar {
+        src: Operand,
+        kind: F128Scalar,
+        dst: PlaceExpr,
+    },
+    /// f128 → 标量（float 互转 / `as` 饱和到整数）
+    F128ToScalar {
+        src: PlaceExpr,
+        kind: F128Scalar,
+        w: Width,
+        dst: ScalarPlace,
+    },
+    /// i128/u128 ↔ f128（宿主 as）
+    F128FromWideInt {
+        src: PlaceExpr,
+        signed: bool,
+        dst: PlaceExpr,
+    },
+    F128ToWideInt {
+        src: PlaceExpr,
+        signed: bool,
+        dst: PlaceExpr,
     },
     /// 128 位 niche 判别式读（regex_automata 的 Result<DFA,_> 大 niche，M4.5）：
     /// rel = tag − niche_start（u128 wrapping）；rel < len → variants_start+rel，否则 untagged

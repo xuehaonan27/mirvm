@@ -371,6 +371,14 @@ fn int_bin(op: IntBinOp, signed: bool, a: u64, b: u64, w: Width) -> u64 {
     r & m
 }
 
+/// f128 place 位读/写（16 字节非对齐安全；D8c 宽通道公共小件）。
+fn f128_read(p: u64) -> f128 {
+    f128::from_bits(unsafe { (p as *const u128).read_unaligned() })
+}
+fn f128_write(p: u64, v: f128) {
+    unsafe { (p as *mut u128).write_unaligned(v.to_bits()) }
+}
+
 /// 冻结 MemOrd → 宿主 Ordering（D8j：guest 请求什么序就执行什么序）。
 fn host_ord(o: super::ir::MemOrd) -> std::sync::atomic::Ordering {
     use std::sync::atomic::Ordering as O;
@@ -550,37 +558,34 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
                 *untagged
             }
         }
-        Rvalue::FloatBin { op, is64, a, b } => {
-            use super::ir::FloatOp as F;
+        Rvalue::FloatBin { op, fw, a, b } => {
+            use super::ir::{FloatOp as F, FloatW};
             let (av, _) = eval_operand(ctx, base, a);
             let (bv, _) = eval_operand(ctx, base, b);
-            if *is64 {
-                let (x, y) = (f64::from_bits(av), f64::from_bits(bv));
-                match op {
-                    F::Add => x + y,
-                    F::Sub => x - y,
-                    F::Mul => x * y,
-                    F::Div => x / y,
-                    F::Rem => x % y,
-                }
-                .to_bits()
-            } else {
-                let (x, y) = (f32::from_bits(av as u32), f32::from_bits(bv as u32));
-                (match op {
-                    F::Add => x + y,
-                    F::Sub => x - y,
-                    F::Mul => x * y,
-                    F::Div => x / y,
-                    F::Rem => x % y,
-                })
-                .to_bits() as u64
+            macro_rules! fb {
+                ($t:ty, $wide:expr) => {{
+                    let (x, y) = (<$t>::from_bits(av as _), <$t>::from_bits(bv as _));
+                    (match op {
+                        F::Add => x + y,
+                        F::Sub => x - y,
+                        F::Mul => x * y,
+                        F::Div => x / y,
+                        F::Rem => x % y,
+                    })
+                    .to_bits() as u64
+                }};
+            }
+            match fw {
+                FloatW::F16 => fb!(f16, false),
+                FloatW::F32 => fb!(f32, false),
+                FloatW::F64 => fb!(f64, true),
             }
         }
         Rvalue::UMax { a, b } => eval_operand(ctx, base, a)
             .0
             .max(eval_operand(ctx, base, b).0),
-        Rvalue::MathUn { op, is64, a } => {
-            use super::ir::MathUnOp as M;
+        Rvalue::MathUn { op, fw, a } => {
+            use super::ir::{FloatW, MathUnOp as M};
             let (av, _) = eval_operand(ctx, base, a);
             macro_rules! un {
                 ($x:expr) => {{
@@ -603,14 +608,16 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
                     }
                 }};
             }
-            if *is64 {
-                un!(f64::from_bits(av)).to_bits()
-            } else {
-                un!(f32::from_bits(av as u32)).to_bits() as u64
+            match fw {
+                // f16 数学：std 实现即 promote-f32 计算再回舍——与 native 对 *f16
+                // 的下降同源（sqrt 经 f32 双舍入安全有数学保证）
+                FloatW::F16 => un!(f16::from_bits(av as u16)).to_bits() as u64,
+                FloatW::F32 => un!(f32::from_bits(av as u32)).to_bits() as u64,
+                FloatW::F64 => un!(f64::from_bits(av)).to_bits(),
             }
         }
-        Rvalue::MathBin { op, is64, a, b } => {
-            use super::ir::MathBinOp as M;
+        Rvalue::MathBin { op, fw, a, b } => {
+            use super::ir::{FloatW, MathBinOp as M};
             let (av, _) = eval_operand(ctx, base, a);
             let (bv, _) = eval_operand(ctx, base, b);
             macro_rules! bin {
@@ -625,80 +632,106 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
                     }
                 }};
             }
-            if *is64 {
-                bin!(f64::from_bits(av), f64::from_bits(bv)).to_bits()
-            } else {
-                bin!(f32::from_bits(av as u32), f32::from_bits(bv as u32)).to_bits() as u64
+            match fw {
+                FloatW::F16 => {
+                    bin!(f16::from_bits(av as u16), f16::from_bits(bv as u16)).to_bits() as u64
+                }
+                FloatW::F32 => {
+                    bin!(f32::from_bits(av as u32), f32::from_bits(bv as u32)).to_bits() as u64
+                }
+                FloatW::F64 => bin!(f64::from_bits(av), f64::from_bits(bv)).to_bits(),
             }
         }
-        Rvalue::MathFma { is64, a, b, c } => {
+        Rvalue::MathFma { fw, a, b, c } => {
+            use super::ir::FloatW;
             let (av, _) = eval_operand(ctx, base, a);
             let (bv, _) = eval_operand(ctx, base, b);
             let (cv, _) = eval_operand(ctx, base, c);
-            if *is64 {
-                f64::from_bits(av)
-                    .mul_add(f64::from_bits(bv), f64::from_bits(cv))
-                    .to_bits()
-            } else {
-                f32::from_bits(av as u32)
-                    .mul_add(f32::from_bits(bv as u32), f32::from_bits(cv as u32))
-                    .to_bits() as u64
+            macro_rules! fma {
+                ($t:ty) => {
+                    <$t>::from_bits(av as _)
+                        .mul_add(<$t>::from_bits(bv as _), <$t>::from_bits(cv as _))
+                        .to_bits() as u64
+                };
+            }
+            match fw {
+                FloatW::F16 => fma!(f16),
+                FloatW::F32 => fma!(f32),
+                FloatW::F64 => fma!(f64),
             }
         }
-        Rvalue::FloatCmp { cc, is64, a, b } => {
+        Rvalue::FloatCmp { cc, fw, a, b } => {
+            use super::ir::FloatW;
             let (av, _) = eval_operand(ctx, base, a);
             let (bv, _) = eval_operand(ctx, base, b);
-            let t = if *is64 {
-                let (x, y) = (f64::from_bits(av), f64::from_bits(bv));
-                match cc {
-                    IntCc::Eq => x == y,
-                    IntCc::Ne => x != y,
-                    IntCc::Lt => x < y,
-                    IntCc::Le => x <= y,
-                    IntCc::Gt => x > y,
-                    IntCc::Ge => x >= y,
-                }
-            } else {
-                let (x, y) = (f32::from_bits(av as u32), f32::from_bits(bv as u32));
-                match cc {
-                    IntCc::Eq => x == y,
-                    IntCc::Ne => x != y,
-                    IntCc::Lt => x < y,
-                    IntCc::Le => x <= y,
-                    IntCc::Gt => x > y,
-                    IntCc::Ge => x >= y,
-                }
-            };
-            t as u64
+            macro_rules! fc {
+                ($t:ty) => {{
+                    let (x, y) = (<$t>::from_bits(av as _), <$t>::from_bits(bv as _));
+                    match cc {
+                        IntCc::Eq => x == y,
+                        IntCc::Ne => x != y,
+                        IntCc::Lt => x < y,
+                        IntCc::Le => x <= y,
+                        IntCc::Gt => x > y,
+                        IntCc::Ge => x >= y,
+                    }
+                }};
+            }
+            (match fw {
+                FloatW::F16 => fc!(f16),
+                FloatW::F32 => fc!(f32),
+                FloatW::F64 => fc!(f64),
+            }) as u64
         }
-        Rvalue::FloatNeg { is64, a } => {
+        Rvalue::F128Cmp { cc, a, b } => {
+            let (x, y) = (
+                f128_read(eval_place_addr(ctx, base, a)),
+                f128_read(eval_place_addr(ctx, base, b)),
+            );
+            (match cc {
+                IntCc::Eq => x == y,
+                IntCc::Ne => x != y,
+                IntCc::Lt => x < y,
+                IntCc::Le => x <= y,
+                IntCc::Gt => x > y,
+                IntCc::Ge => x >= y,
+            }) as u64
+        }
+        Rvalue::FloatNeg { fw, a } => {
+            use super::ir::FloatW;
             let (av, _) = eval_operand(ctx, base, a);
-            if *is64 {
-                (-f64::from_bits(av)).to_bits()
-            } else {
-                (-f32::from_bits(av as u32)).to_bits() as u64
+            match fw {
+                FloatW::F16 => (-f16::from_bits(av as u16)).to_bits() as u64,
+                FloatW::F32 => (-f32::from_bits(av as u32)).to_bits() as u64,
+                FloatW::F64 => (-f64::from_bits(av)).to_bits(),
             }
         }
-        Rvalue::FloatCast { from64, to64, a } => {
+        Rvalue::FloatCast { from, to, a } => {
+            use super::ir::FloatW as W;
             let (av, _) = eval_operand(ctx, base, a);
-            match (from64, to64) {
-                (true, false) => (f64::from_bits(av) as f32).to_bits() as u64,
-                (false, true) => (f32::from_bits(av as u32) as f64).to_bits(),
-                _ => av, // 同宽：位透传
+            // 全组合宿主 `as`（同宽位透传）
+            match (from, to) {
+                (W::F16, W::F16) | (W::F32, W::F32) | (W::F64, W::F64) => av,
+                (W::F16, W::F32) => (f16::from_bits(av as u16) as f32).to_bits() as u64,
+                (W::F16, W::F64) => (f16::from_bits(av as u16) as f64).to_bits(),
+                (W::F32, W::F16) => (f32::from_bits(av as u32) as f16).to_bits() as u64,
+                (W::F32, W::F64) => (f32::from_bits(av as u32) as f64).to_bits(),
+                (W::F64, W::F16) => (f64::from_bits(av) as f16).to_bits() as u64,
+                (W::F64, W::F32) => (f64::from_bits(av) as f32).to_bits() as u64,
             }
         }
         Rvalue::FloatToInt {
-            from64,
+            from,
             to,
             signed,
             a,
         } => {
             let (av, _) = eval_operand(ctx, base, a);
-            // f32→f64 精确保值 ⇒ 统一经 f64；宿主 `as` 即 Rust 饱和语义（NaN→0、越界→边界）
-            let x = if *from64 {
-                f64::from_bits(av)
-            } else {
-                f32::from_bits(av as u32) as f64
+            // f16/f32→f64 精确保值 ⇒ 统一经 f64；宿主 `as` 即 Rust 饱和语义（NaN→0、越界→边界）
+            let x = match from {
+                super::ir::FloatW::F16 => f16::from_bits(av as u16) as f64,
+                super::ir::FloatW::F32 => f32::from_bits(av as u32) as f64,
+                super::ir::FloatW::F64 => f64::from_bits(av),
             };
             let v: u64 = if *signed {
                 match to {
@@ -717,23 +750,24 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
             };
             v & to.mask()
         }
-        Rvalue::IntToFloat { from, to64, a } => {
+        Rvalue::IntToFloat { from, to, a } => {
+            use super::ir::FloatW;
             let (av, _) = eval_operand(ctx, base, a);
-            let x: f64 = if from.1 {
-                sext(av, from.0) as f64
-            } else {
-                (av & from.0.mask()) as f64
-            };
-            if *to64 {
-                x.to_bits()
-            } else {
-                // 经 f64 中转对 ≤32 位整数无双舍入问题；u64/i64→f32 用直转
-                let f: f32 = if from.1 {
-                    sext(av, from.0) as f32
-                } else {
-                    (av & from.0.mask()) as f32
+            // 每目标宽度都用宿主直转（`as` 正确舍入；避免中转双舍入）
+            macro_rules! i2f {
+                ($t:ty) => {
+                    (if from.1 {
+                        sext(av, from.0) as $t
+                    } else {
+                        (av & from.0.mask()) as $t
+                    })
+                    .to_bits() as u64
                 };
-                f.to_bits() as u64
+            }
+            match to {
+                FloatW::F16 => i2f!(f16),
+                FloatW::F32 => i2f!(f32),
+                FloatW::F64 => i2f!(f64),
             }
         }
         Rvalue::BitUn { op, a } => {
@@ -1674,17 +1708,144 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
         Stmt::Wide128ToFloat {
             src,
             signed,
-            to64,
+            to,
             dst,
         } => {
+            use super::ir::FloatW;
             let p = eval_place_addr(ctx, base, src);
             let x = unsafe { (p as *const u128).read_unaligned() };
-            let bits = if *to64 {
-                (if *signed { x as i128 as f64 } else { x as f64 }).to_bits()
-            } else {
-                (if *signed { x as i128 as f32 } else { x as f32 }).to_bits() as u64
+            macro_rules! w2f {
+                ($t:ty) => {
+                    (if *signed { x as i128 as $t } else { x as $t }).to_bits() as u64
+                };
+            }
+            let bits = match to {
+                FloatW::F16 => w2f!(f16),
+                FloatW::F32 => w2f!(f32),
+                FloatW::F64 => w2f!(f64),
             };
             place_write(ctx, base, dst, bits);
+        }
+        // ===== f128 宽通道（D8c）=====
+        Stmt::F128Bin { op, a, b, dst } => {
+            use super::ir::FloatOp as F;
+            let (x, y) = (
+                f128_read(eval_place_addr(ctx, base, a)),
+                f128_read(eval_place_addr(ctx, base, b)),
+            );
+            let r = match op {
+                F::Add => x + y,
+                F::Sub => x - y,
+                F::Mul => x * y,
+                F::Div => x / y,
+                F::Rem => x % y,
+            };
+            f128_write(eval_place_addr(ctx, base, dst), r);
+        }
+        Stmt::F128MathBin { op, a, b, dst } => {
+            use super::ir::{F128Rhs, MathBinOp as M};
+            let x = f128_read(eval_place_addr(ctx, base, a));
+            let r = match (op, b) {
+                (M::Powi, F128Rhs::Scalar(o)) => x.powi(eval_operand(ctx, base, o).0 as i32),
+                (M::Powi, F128Rhs::Wide(_)) => engine_abort("f128 powi rhs 形态"),
+                (op, F128Rhs::Wide(pb)) => {
+                    let y = f128_read(eval_place_addr(ctx, base, pb));
+                    match op {
+                        M::Pow => x.powf(y),
+                        M::Copysign => x.copysign(y),
+                        M::Minnum => x.min(y),
+                        M::Maxnum => x.max(y),
+                        M::Powi => unreachable!(),
+                    }
+                }
+                (_, F128Rhs::Scalar(_)) => engine_abort("f128 math rhs 形态"),
+            };
+            f128_write(eval_place_addr(ctx, base, dst), r);
+        }
+        Stmt::F128Un { op, a, dst } => {
+            use super::ir::{F128UnOp as U, MathUnOp as M};
+            let x = f128_read(eval_place_addr(ctx, base, a));
+            let r = match op {
+                U::Neg => -x,
+                U::Math(m) => match m {
+                    M::Sqrt => x.sqrt(),
+                    M::Sin => x.sin(),
+                    M::Cos => x.cos(),
+                    M::Exp => x.exp(),
+                    M::Exp2 => x.exp2(),
+                    M::Ln => x.ln(),
+                    M::Log2 => x.log2(),
+                    M::Log10 => x.log10(),
+                    M::Fabs => x.abs(),
+                    M::Floor => x.floor(),
+                    M::Ceil => x.ceil(),
+                    M::Trunc => x.trunc(),
+                    M::Round => x.round(),
+                    M::RoundTiesEven => x.round_ties_even(),
+                },
+            };
+            f128_write(eval_place_addr(ctx, base, dst), r);
+        }
+        Stmt::F128Fma { a, b, c, dst } => {
+            let x = f128_read(eval_place_addr(ctx, base, a));
+            let y = f128_read(eval_place_addr(ctx, base, b));
+            let z = f128_read(eval_place_addr(ctx, base, c));
+            f128_write(eval_place_addr(ctx, base, dst), x.mul_add(y, z));
+        }
+        Stmt::F128FromScalar { src, kind, dst } => {
+            use super::ir::{F128Scalar as K, FloatW};
+            let (v, w) = eval_operand(ctx, base, src);
+            let r: f128 = match kind {
+                K::F(FloatW::F16) => f16::from_bits(v as u16) as f128,
+                K::F(FloatW::F32) => f32::from_bits(v as u32) as f128,
+                K::F(FloatW::F64) => f64::from_bits(v) as f128,
+                K::Int { signed: true } => sext(v, w) as f128,
+                K::Int { signed: false } => (v & w.mask()) as f128,
+            };
+            f128_write(eval_place_addr(ctx, base, dst), r);
+        }
+        Stmt::F128ToScalar { src, kind, w, dst } => {
+            use super::ir::{F128Scalar as K, FloatW};
+            let x = f128_read(eval_place_addr(ctx, base, src));
+            let bits: u64 = match kind {
+                K::F(FloatW::F16) => (x as f16).to_bits() as u64,
+                K::F(FloatW::F32) => (x as f32).to_bits() as u64,
+                K::F(FloatW::F64) => (x as f64).to_bits(),
+                // `as` 饱和语义（NaN→0、越界→边界）
+                K::Int { signed: true } => match w {
+                    Width::W8 => x as i8 as u64,
+                    Width::W16 => x as i16 as u64,
+                    Width::W32 => x as i32 as u64,
+                    Width::W64 => x as i64 as u64,
+                },
+                K::Int { signed: false } => match w {
+                    Width::W8 => x as u8 as u64,
+                    Width::W16 => x as u16 as u64,
+                    Width::W32 => x as u32 as u64,
+                    Width::W64 => x as u64,
+                },
+            };
+            place_write(ctx, base, dst, bits & w.mask());
+        }
+        Stmt::F128FromWideInt { src, signed, dst } => {
+            let p = eval_place_addr(ctx, base, src);
+            let x = unsafe { (p as *const u128).read_unaligned() };
+            let r: f128 = if *signed {
+                x as i128 as f128
+            } else {
+                x as f128
+            };
+            f128_write(eval_place_addr(ctx, base, dst), r);
+        }
+        Stmt::F128ToWideInt { src, signed, dst } => {
+            let x = f128_read(eval_place_addr(ctx, base, src));
+            let bits: u128 = if *signed {
+                x as i128 as u128
+            } else {
+                x as u128
+            };
+            let pd = eval_place_addr(ctx, base, dst);
+            unsafe { (pd as *mut u128).write_unaligned(bits) };
         }
         Stmt::Trap(reason) => engine_abort(&format!("TRAP: {reason}")),
         Stmt::Nop => {}

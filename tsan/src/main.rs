@@ -3,6 +3,8 @@
 //! 判定：退出码 0 且无 "WARNING: ThreadSanitizer"（见 tests/spike4_tsan.sh）。
 #![allow(dead_code)] // spike1-3 一并编入但只跑 spike4
 #![feature(cfg_sanitize)] // engine/ctx.rs：TSan 配置下 Ctx dtor 的处置分歧
+#![feature(f16)] // engine D8c：f16/f128 宿主直算（同源复用 src/vm 必须同 feature 集）
+#![feature(f128)]
 
 #[path = "../../src/vm/mod.rs"]
 mod vm;
