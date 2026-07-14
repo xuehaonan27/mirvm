@@ -46,7 +46,9 @@
 | `real-projects.md` | **当前** | 真实项目 case、correctness/benchmark 合同、workspace-local artifacts、证据层级与限制 |
 | `DESIGN.md` | **契约** | 长期心智模型；其中明确标为历史的 tier-0/M0–M2 章节不描述现实现 |
 | `designs/ram-spec.md` | **契约** | 语义目标；实现差距由 current-status 登记 |
-| `m5-design.md` | **已批准** | M5 总体双轨设计；M5.0/M5.1 已实现；M5.2=非 JIT 语义补全施工中（m5.2-design.md）；M5.3+ JIT 仍属路线图 |
+| `m5-design.md` | **已批准** | M5 总体双轨设计；M5.0/M5.1 已实现；M5.2=非 JIT 语义补全已完成（2026-07-14）；M5.3+ JIT 仍属路线图 |
+| `m5.2-design.md` | **已完成设计/施工记录** | 非 JIT 语义补全 D8a–D8l；实施结果看 m5-log M5.2 节；施工偏离记 decision-history §6 |
+| `distribution-design.md` | **已批准（方向，未立项）** | 轨 C 分发与产品面 D9a–D9f：缓存分层、mode B=缓存可移植化、toolchain 自带、发行先 miri 式 |
 | `m5-log.md` | **已完成日志** | M5.0/M5.1 实际结果；优先于 M5 设计稿原先的预期 |
 | `m5.1-design.md` | **已完成设计/施工记录** | numbigint/xgetbv/sha2/blake3/ecosystem、diff_cargo 3/3 与六 tracer 脚本已绿；signal/backtrace 独立遗留 |
 | `m4-log.md` | **已完成日志** | M4.0–M4.5 实际施工记录；M4 状态的历史权威 |

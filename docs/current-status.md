@@ -134,7 +134,7 @@ Linux/ELF/x86_64 优先：依赖 pthread、dlopen、GNU 链接行为和 x86 asm 
 | guest 静态归档 | Linux/ELF 受约束路径已接产品：收集 rustc `Static NativeLib`、内容寻址 `.a→.so`，作为 required library 在任何 dlsym 前以 `RTLD_NOW` 加载；失败保留 `dlerror` 并立即终止。blake3 与 native 三行 hash 一致。thin、`.init/.fini`/constructor/destructor（含优先级 section）、非 PIC、跨 archive 依赖/顺序或重名导出、RTLD_DEFAULT 冲突、export-symbols 等会响亮拒绝，不是通用链接器 |
 | JIT | 只有 spike；没有生产 tiering、OSR、deopt 或 JIT LSDA |
 | 生命周期/嵌入 | `Shared`、thunk、asm handle、部分 TLS 存储按进程期保存；错误路径可退出进程；runner 诊断 filter 依赖进程全局 `TRACK_DIAGNOSTIC`，目前只在单 compiler CLI 模型下安全。daemon/嵌入/并发 compiler 需先加 guard 或替代接口；尚非稳定多 Engine API |
-| 分发与产品面 | `.mirvm` mode B、daemon、REPL、checked 模式、正式沙箱均未实现 |
+| 分发与产品面 | `.mirvm` mode B、daemon、REPL、checked 模式、正式沙箱均未实现；分发轨方向已批未立项（D9，2026-07-14，[distribution-design.md](distribution-design.md)）：先 L2 engine-IR 缓存，mode B=缓存可移植化（M5.3 后），发行先 miri 式 |
 | 平台 | 当前仅应宣称 Linux/ELF/x86_64 开发基线 |
 | Cargo wrapper / runner | 非空 `RUSTC_WRAPPER` / `RUSTC_WORKSPACE_WRAPPER` 或有效的 `build.rustc-wrapper` / `build.rustc-workspace-wrapper` 当前都会在 MIR capture 前 fail-closed；尚无 wrapper composition。runner 在 lower 后用窄结构化 filter 去除额外 warning-count summary，但保留完整 driver 收尾，只在 compiler success 后执行 VM |
 | 真实项目隔离 | build/check unshare network，所有 guest sandbox unshare PID，但不 unshare IPC；仅适用于受信任、固定 provenance 的 source，不是对抗性安全边界。mirvm build env 与 guest runtime env 尚未彻底分离。`MIRVM_ENCODED_RUSTFLAGS_APPEND` 在 Cargo 完成 fingerprint 计算后才追加，尚未进入 Cargo fingerprint |

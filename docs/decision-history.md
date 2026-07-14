@@ -306,17 +306,44 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
 - **被替代文档**：m5.2-design.md D8c 的"libgcc FFI"、D8b 的"合成 asm-stub 向量 ABI"（M5.1
   已先偏为 stdarch helper）保留原文作历史；实现事实以 m5-log.md M5.2 节 + 本节为准。
 
-## 7. 尚未兑现或需要重新验证的架构承诺
+## 7. 2026-07-14：轨 C 分发与产品面立向（D9）——先缓存后打包，发行先 miri 式
+
+- **旧状态**：mode B（`.mirvm` 分发）只有 DESIGN.md / m4-plan 尾部雏形；无缓存分层
+  账本；toolchain 耦合模型与工具链入口形态未成文。
+- **新证据**：摄入链路盘点（`src/cargo_shim.rs` 三阶段、`-Zscript` frontmatter、
+  MIR sysroot、五个内容哈希缓存**均已实现**）+ 实测账本（std-only 热跑 0.40s；
+  ecosystem 四依赖热跑 3.07s，且为**每跑必付**的加载相成本——冷启动痛点不在依赖
+  解析/编译，在叶前端+单态化+lower）。
+- **新选择**（全批，细节与风险见 [distribution-design.md](distribution-design.md)）：
+  - **D9a** 统一入口 = `mirvm` 单二进制 + 子命令；`mirvmc` 至多别名硬链。
+  - **D9b** 拒绝 StableMIR-as-format（进程内 API 非格式）；先做 **L2 post-mono
+    engine-IR 缓存**，mode B 包 = 缓存可移植化；对外格式冻结推迟 M5.3 后。
+  - **D9c** 缓存 L0–L3 分层；L2 key = mirvm build id + sysroot hash + crate 图
+    内容哈希，失配整体重建。
+  - **D9d** target 依赖构建剪 codegen（check 形态，落地对照 cargo-miri 实证）。
+  - **D9e** toolchain 模型 = **自带编译器**（运行时发现架构上不可能：nightly-only
+    rustc_private / ABI 锁死 / rmeta 跨版本不稳）；发行**先 miri 式**按 toolchain
+    出构建，成熟后 JDK 式自包含 tarball。
+  - **D9f** 施工顺序 ①相位计时 → ②L2 缓存 → ③剪 codegen → ④mode B+`mirvm pack`
+    （M5.3 后）→ ⑤发行/命名收尾；MRsDK 命名否决，kit 命名推迟到 mode B 实物。
+- **被替代**：无推翻；m4-plan ".mirvm 化 sysroot" 雏形被 D9b 细化吸收。
+- **迁移影响**：本次仅方向文档，无代码变更；里程碑编号立项时另定（候选 M6），
+  不占 M5.3–5.5。
+- **重估触发器**：M5.3 收官后重估对外格式冻结；pinned toolchain 升级时重测 cargo
+  emit 剪枝容忍度。
+
+## 8. 尚未兑现或需要重新验证的架构承诺
 
 - P7 设想独立 `src/os/` 物理层；当前 OS/FFI/builtin 逻辑仍分布在 lower、interp、ffi、heap。
 - “engine 是 library”目前只是 crate 结构；进程退出、全局 TLS key、泄漏式生命周期使其还不是稳定
   多 Engine 嵌入 API。
-- `.mirvm` mode B、fat target artifact、checked 模式、alloca 局部、方法级 JIT 均仍是设计，不是现状。
+- `.mirvm` mode B、fat target artifact、checked 模式、alloca 局部、方法级 JIT 均仍是设计，不是现状
+  （mode B 的路线 2026-07-14 已由 §7 D9 定向：先 L2 缓存，包=缓存可移植化）。
 - static `.a`→`.so` 的受约束 Linux/ELF 切片已实现；非 PIC、跨 archive 依赖/顺序或重名、
   RTLD_DEFAULT 重名、constructor、thin、export-symbols 仍是明确拒绝面。它们需要新 link plan/
   生命周期设计，不能从 blake3 外推通用。
 
-## 8. 改变决策时的记录模板
+## 9. 改变决策时的记录模板
 
 ```markdown
 ### YYYY-MM-DD：<决策名>
