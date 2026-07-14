@@ -361,6 +361,24 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
   dep-info 同构清单（source_map + file_depinfo + used_crate_source + env_depinfo）
   ——比设计更精确（env! 依赖到值、include! 文件、sysroot rlib 全覆盖）。
 
+### 7.2 2026-07-14：M5.3 Pending 与轨 C 施工顺序修订（用户裁定）
+
+- **决策**：M6 ①② 收官后不默认进入 M5.3。用户裁定：冷启动（lower 相）是一等问题，
+  先调研（[coldstart-research.md](coldstart-research.md)，commit 27f0001）再按新顺序施工：
+  **S1**（V1 sysroot 仪式 stamp 化 + 调研抓到的三个缓存盲区 P1/P2/P3 修缮）→
+  **S2**（V2 依赖 codegen 剪枝 = 原 D9f③）→ **S4**（V4 std 预降低底座，大件先设计简报
+  过审）→ 之后 **S3 懒降低与 M5.3 JIT 合并出联合分层设计，过审后才动工**。
+- **为什么**：调研实证 lower 是近常数 std 税（0.10ms/instance；执行集仅占降低集 7–29%），
+  懒降低（S3）与 JIT 首调编译是同一根"首调触发 per-fn 物化"管线，分开定型会重蹈
+  M4.1"ABI 未一次做全"的教训；其余杠杆彼此独立、可先行兑现。
+- **被替代**：D9f 施工顺序"①计时 ②L2 ③剪枝 ④mode B（M5.3 后）"中"②之后默认进
+  M5.3"的隐含节奏被替代（①② 已完成不动；③=S2 提前于任何 JIT 工作；④ 位次不变，
+  S4 底座是其 sysroot 侧特例、联动设计）。
+- **重估触发器**：S1/S2/S4 完成、S3+JIT 联合设计出稿时；若 S4 设计发现底座强依赖
+  懒降低机制，则 S4 并入联合设计（届时在此记录）。
+
+## 8. 尚未兑现或需要重新验证的架构承诺
+
 - P7 设想独立 `src/os/` 物理层；当前 OS/FFI/builtin 逻辑仍分布在 lower、interp、ffi、heap。
 - “engine 是 library”目前只是 crate 结构；进程退出、全局 TLS key、泄漏式生命周期使其还不是稳定
   多 Engine 嵌入 API。
