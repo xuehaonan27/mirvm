@@ -240,15 +240,46 @@ fn write_fake_outputs(rustc: &std::path::Path, args: &[String], info: &CrateRunI
     let out_dir = arg_flag_value(args, "--out-dir").unwrap_or_default();
     let crate_name = arg_flag_value(args, "--crate-name").unwrap_or_default();
 
-    // stub dep-info：阻止 cargo 每次都认为需要重建
+    // P2（coldstart-research §5）：dep-info 必须**真实**。旧空 stub 让 cargo 没有 bin 的
+    // 源文件清单——cargo 在 rustc 调用结束时就把 dep-info 快照进 .fingerprint（事后补写
+    // 不可见，实测），于是源码编辑永不触发假二进制重录，录制 env/参数化石永生。这里用
+    // 真 rustc 只发 dep-info 拿精确清单（含 mod/include!/env! 追踪；deps rlib 此刻已就绪，
+    // 只在 bin 指纹脏时发生）。stderr 静默：诊断由 runner 会话响亮重演，保持与 native
+    // "单次告警"同口径。失败退回 crate 根单行清单（.d 只影响重录频率；运行语义永远由
+    // runner 现读源码保证，宁可少重录不可错语义）。
     if arg_flag_value(args, "--emit")
         .unwrap_or_default()
         .split(',')
         .any(|e| e == "dep-info")
     {
-        let extra = arg_flag_value(args, "extra-filename").unwrap_or_default();
-        let d = PathBuf::from(&out_dir).join(format!("{crate_name}{extra}.d"));
-        let _ = std::fs::write(d, "");
+        let mut cmd = Command::new(rustc);
+        let mut it = args.iter().peekable();
+        while let Some(a) = it.next() {
+            if a == "--emit" {
+                it.next();
+                cmd.arg("--emit=dep-info");
+            } else if a.starts_with("--emit=") {
+                cmd.arg("--emit=dep-info");
+            } else {
+                cmd.arg(a);
+            }
+        }
+        // 与 target 依赖同一套 MIR sysroot（use std::* 的解析必需）
+        if let Ok(sysroot) = std::env::var("MIRVM_SYSROOT") {
+            cmd.arg("--sysroot").arg(sysroot);
+        }
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+        if !cmd.status().is_ok_and(|s| s.success()) {
+            let extra = arg_flag_value(args, "extra-filename").unwrap_or_default();
+            let d = PathBuf::from(&out_dir).join(format!("{crate_name}{extra}.d"));
+            let root = args
+                .iter()
+                .find(|a| !a.starts_with('-') && a.ends_with(".rs"))
+                .cloned()
+                .unwrap_or_default();
+            let _ = std::fs::write(d, format!("{crate_name}{extra}.d: {root}\n\n{root}:\n"));
+        }
     }
 
     // 让 rustc 告诉我们产物文件名（依赖 target 的后缀规则）
