@@ -1,6 +1,6 @@
 # mirvm 当前开发状态
 
-> 状态日期：2026-07-13。本文是当前状态的唯一汇总入口；若与早期计划、README 或交接文档
+> 状态日期：2026-07-14。本文是当前状态的唯一汇总入口；若与早期计划、README 或交接文档
 > 冲突，以当前代码、可复现测试结果和本文为准。文档权威规则见 [README.md](README.md)。
 
 ## 1. 阶段结论
@@ -12,7 +12,8 @@
 | M5.0 | **完成并复审** | x86_64 inline-asm stub 工厂：GAS wrapper → `.so` → `dlopen`/`dlsym` |
 | M5.1 | **完成（2026-07-12）** | numbigint、xgetbv、sha2、blake3、ecosystem、diff_cargo 3/3 与六个 release tracer 全绿 |
 | 真实项目 TDD | **继续扩面（2026-07-13）** | workspace-local ripgrep/tokei 驱动四项通用语义修复；三个 workload 已完成 correctness-gated benchmark，另有八个 workload 完成 correctness 对拍 |
-| M5.2–M5.4 | **未实现** | 方法级 Cranelift JIT、tiering、JIT unwind/LSDA 与性能收口 |
+| M5.2 | **施工中（2026-07-14 批准）** | 非 JIT 语义补全：标量/simd intrinsic 差集、栈深度、f16/f128、signal/backtrace/fork/atexit/global_asm、atomic 序贯通（[m5.2-design.md](m5.2-design.md) D8a–D8l） |
+| M5.3–M5.5 | **未实现** | 方法级 Cranelift JIT、tiering、JIT unwind/LSDA 与性能收口（原编号 M5.2–M5.4，2026-07-14 顺延） |
 
 目前唯一产品执行引擎是 M4 解释器。Cargo 默认的 `cranelift` feature 只编译冻结的 Spike 5；
 生产调用路径还没有方法级 JIT，也没有 `mixed`/`jit` 产品模式。
@@ -154,7 +155,7 @@ Linux/ELF/x86_64 优先：依赖 pthread、dlopen、GNU 链接行为和 x86 asm 
 5. **已完成**：M5.1 按真实前沿收窄并实现；signal/backtrace 两个独立
    XFAIL 没有被伪装成 M5.1 绿。
 6. 远程项目与 GitHub Issues 当前按维护要求暂停；恢复后再提交固定 manifests、来源策略与持续 gate。
-7. 产品语义施工应优先由真实项目的精确失败前沿驱动；进入 M5.2 方法级 JIT 时，保持
+7. 产品语义施工应优先由真实项目的精确失败前沿驱动；进入 M5.3 方法级 JIT 时，保持
    JIT-on/off/native 三方 oracle 计划。
 
 ## 6. 完成一个阶段时如何更新

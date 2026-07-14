@@ -265,7 +265,26 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
   系统原子可见性与耐久化步骤，不证明断电恢复，也不抵抗 owner/root 主动改写。suite inventory、
   集合身份、GC、完整 Python 动态闭包和 sysroot Merkle identity 仍按上一节的重开条件处理。
 
-## 6. 尚未兑现或需要重新验证的架构承诺
+## 6. 2026-07-14：M5.2 立项——非 JIT 语义补全插入，JIT 顺延
+
+- 旧状态：M5 双轨设计中 M5.2–M5.4 = 方法级 JIT 三期；轨 A 以 M5.1 收口视为"corpus 全绿"。
+- 候选项：直接进 JIT（M5.2 原案）vs 先补非 JIT 语义面。
+- 新证据（2026-07-13 实测，[m5.2-design.md](m5.2-design.md) §1）：主动圈定（拒绝面全量
+  清点 + rustc intrinsic 权威差集 + 14 个 native 差分探针）发现 corpus/真实项目全绿只覆盖
+  "已踩过的面"——`f64::abs()` 即 Trap（`fabs` 泛型名漂移）、递归 8000 帧上限、`std::simd`
+  55/75 缺失、`fetch_max`/`mul_add` Trap、atomic 序整体折叠 SeqCst、fork/global_asm/naked/
+  atexit/f16/f128 缺口、`#[global_allocator]` 分配计数不一致。
+- 新选择：插入 M5.2 = 非 JIT 语义补全期（D8a–D8l，用户 2026-07-14 全批）；JIT 三期顺延为
+  M5.3–M5.5。理由：JIT 的差分 oracle 是 JIT-on/off，解释器语义面越干净，JIT 期误差归因越
+  单纯；本期探针/用例直接成为 JIT 期回归网。
+- 被替代文档/章节：m5-design.md §2 双轨图与施工顺序表（编号已同步）；各文档 M5.2+ 指称
+  已全局改指新编号。
+- 迁移与兼容影响：代码内 `M4.6+`/`M5.x` 预标注释随各分片实现改指 M5.2；gate 判据随
+  XFAIL 转绿滚动（滚动记账纪律不变）。
+- 再次重估触发器：M5.2 收口时若发现新的大面（探针再撞新层），先记账再决定是否二期，
+  不无限扩期挡 JIT。
+
+## 7. 尚未兑现或需要重新验证的架构承诺
 
 - P7 设想独立 `src/os/` 物理层；当前 OS/FFI/builtin 逻辑仍分布在 lower、interp、ffi、heap。
 - “engine 是 library”目前只是 crate 结构；进程退出、全局 TLS key、泄漏式生命周期使其还不是稳定
@@ -275,7 +294,7 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
   RTLD_DEFAULT 重名、constructor、thin、export-symbols 仍是明确拒绝面。它们需要新 link plan/
   生命周期设计，不能从 blake3 外推通用。
 
-## 7. 改变决策时的记录模板
+## 8. 改变决策时的记录模板
 
 ```markdown
 ### YYYY-MM-DD：<决策名>

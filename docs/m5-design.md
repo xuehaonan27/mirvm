@@ -99,9 +99,11 @@ sha2（0.10）与 ecosystem（regex/memchr）则是纯 Rust intrinsics 路径（
 
 ```
  轨 A 语义完备性（corpus 清零）              轨 B 性能（方法级 JIT）
- ├─ M5.0 asm-stub 工厂 ◄──共享──┐          ├─ M5.2 JIT 骨架 + tiering
- ├─ M5.1 静态归档装载            │          ├─ M5.3 翻译器全覆盖 + LSDA
- │       + SIMD 补面 ───────────┘          └─ （M5.4 收口时合流计时）
+ ├─ M5.0 asm-stub 工厂 ◄──共享──┐          ├─ M5.3 JIT 骨架 + tiering
+ ├─ M5.1 静态归档装载            │          ├─ M5.4 翻译器全覆盖 + LSDA
+ │       + SIMD 补面 ───────────┘          └─ （M5.5 收口时合流计时）
+ ├─ M5.2 非 JIT 语义补全（m5.2-design.md，
+ │       2026-07-14 批准，D8a–D8l）
  └─ gate：corpus 全绿、diff_cargo 3/3       └─ gate：fib ≤10×、全量回归 JIT-on 无损
 ```
 
@@ -226,7 +228,7 @@ save/set/restore（spike5 已验代码形状）。**T→R 是 ABI 兼容的单�
 **终裁形式**：M5 落 T 骨架（M5 编译码格 ③ 为空，真负载测不出 T/R 差——这本身
 就是"不该预付寄存器租金"的数据）；挂起检查点**不结死，改写为带触发器的活检查点**
 （写回 vmctx-passing §7）：格 ③ 进场（分配内联 / guest TLS 内联开工）时，以**该
-负载**复测 T vs R 再裁缓存层——彼时才存在能区分两案的 workload。M5.4 照做
+负载**复测 T vs R 再裁缓存层——彼时才存在能区分两案的 workload。M5.5 照做
 fib/rayon 计量 + 助手调用频度统计，作为触发器复测时的对照基线。
 【备选：R-first——若预期分配内联很快进场、愿意先付寄存器租金与边界机件，可直接
 落 R（spike5 全套已验）；因骨架共享，两案工程差异很小。请裁】
@@ -242,8 +244,8 @@ fib/rayon 计量 + 助手调用频度统计，作为触发器复测时的对照�
   **guest 异常与宿主 panic 同 personality 同轨**——spike3"宿主 unwinder 就是我们的
   unwinder"在 JIT 帧的延伸，catch_unwind 仍走宿主 Builtin（编译帧调它=普通调用，
   无需 LSDA-catch，只用 cleanup 标签）。
-- **准入过渡**：M5.2 骨架期先只收**unwind-transparent 函数**（无 cleanup 边——
-  纯穿透已被 spike5 验证），fib 锚点即达；M5.3 先跑**LSDA probe**（扩展 spike5
+- **准入过渡**：M5.3 骨架期先只收**unwind-transparent 函数**（无 cleanup 边——
+  纯穿透已被 spike5 验证），fib 锚点即达；M5.4 先跑**LSDA probe**（扩展 spike5
   probe：JIT 帧内带 Drop 义务的 cleanup 在 guest panic 时执行、顺序与 native 一致）
   再铺全量。probe 不过（预判会过，先例完整）则准入限制转为 v1 记账、LSDA 挂 M5.x
   ——热点数值内核多为无 cleanup 函数，轨 B 的性能 gate 不被绑架。
@@ -271,9 +273,9 @@ cpuid 返真后，sha2/ecosystem 的内核是纯 Rust intrinsics（§1.3），�
 |---|---|---|
 | **M5.0 asm-stub 工厂**（轨 A） | D1 全套：lower 寄存器分配+wrapper 渲染、批量 cc+dlopen+哈希缓存、IR 终止子、解释器槽缓冲执行 | **实际**：tempfile 绿；numbigint 越过 div 后在 addcarry 处预期红；cpuid 用例推进到 `llvm.x86.*`；见 m5-log |
 | **M5.1 归档装载 + SIMD 补面**（轨 A 收口) | **完成**：numbigint/xgetbv/sha2/blake3/ecosystem、diff_cargo 3/3、六 tracer 绿 | full gate5 39 PASS / 1 signal XFAIL / 0 FAIL |
-| **M5.2 JIT 骨架**（轨 B） | D4 派发/计数/编译线程；D3 翻译器标量子集（int/float/place/call/switch/SSA 提升）；D5 两入口 + PLT 表；CFI 注册 | **fib(32) ≤ 10× native**（硬门，锚点 0.94s→≤80ms）；diff 16/16 JIT-on/off 双跑全绿；加载 ≤1s 不破 |
-| **M5.3 翻译器全覆盖 + LSDA** | 先 LSDA probe（D6）再铺：try_call/GccExceptTable/personality；IR 全构造翻译（128 位/原子/SIMD/foreign 助手/track_caller）；准入放开 | gate2 unwind 九用例 JIT-on 通过；**全量（demo/corpus/diff_cargo）JIT-on == JIT-off == native** |
-| **M5.4 终裁 + 收口** | D5 计量基线（fib/rayon + 助手频度）+ 检查点改写为带触发器活检查点（回写 vmctx-passing §7）；rayon/corpus JIT-on 计时记账；`tests/m5_gate6.sh`；m4-log 式 M5 条目 + handoff/memory 收笔 | gate6 全绿（下方退出判据）；vmctx 检查点处置有数据有触发器 |
+| **M5.3 JIT 骨架**（轨 B） | D4 派发/计数/编译线程；D3 翻译器标量子集（int/float/place/call/switch/SSA 提升）；D5 两入口 + PLT 表；CFI 注册 | **fib(32) ≤ 10× native**（硬门，锚点 0.94s→≤80ms）；diff 16/16 JIT-on/off 双跑全绿；加载 ≤1s 不破 |
+| **M5.4 翻译器全覆盖 + LSDA** | 先 LSDA probe（D6）再铺：try_call/GccExceptTable/personality；IR 全构造翻译（128 位/原子/SIMD/foreign 助手/track_caller）；准入放开 | gate2 unwind 九用例 JIT-on 通过；**全量（demo/corpus/diff_cargo）JIT-on == JIT-off == native** |
+| **M5.5 终裁 + 收口** | D5 计量基线（fib/rayon + 助手频度）+ 检查点改写为带触发器活检查点（回写 vmctx-passing §7）；rayon/corpus JIT-on 计时记账；`tests/m5_gate6.sh`；m4-log 式 M5 条目 + handoff/memory 收笔 | gate6 全绿（下方退出判据）；vmctx 检查点处置有数据有触发器 |
 
 ## 5. 风险与缓解
 

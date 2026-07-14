@@ -12,7 +12,7 @@
 > m4-log ★ 节）。当时 gate5 报 31/31（该数字的 oracle 勘误见 m4-log 顶部）：corpus 全绿−asm（4 项 cpuid/syscall/div 归 M5）、
 > diff_cargo ffi_zlib+project 绿、性能上限达标（加载 413ms、rayon 32×）、全量回归无损。
 > tier-0 已移除（81772e4）。后续实际又完成了 M5.0 asm-stub 与 M5.1 轨 A 收口；
-> M5.2 方法级 JIT 尚未实现。
+> M5.3 方法级 JIT 尚未实现（M5.2=非 JIT 语义补全，2026-07-14 起）。
 
 ## 0. 目标与退出判据
 

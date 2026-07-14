@@ -80,12 +80,12 @@ evcxr 四点不满（延迟、状态/借用限制、跑不了完整项目、编�
   当前 writer 按是否声明外部 workload tool 使用 schema 3/4，validator 保留 schema-2/3 历史
   dispatch；这些仍是 workspace evidence，不是远程持续 gate。harness 已按根 `AGENTS.md` 冻结。
   精确 provenance 与性能数见 [real-projects.md](real-projects.md)。
-- 方法级 Cranelift JIT、tiering、JIT LSDA 属于 M5.2–M5.4，生产路径中还不存在。
+- 方法级 Cranelift JIT、tiering、JIT LSDA 属于 M5.3–M5.5，生产路径中还不存在。
 
 2026-07-12 复核发现旧 gate 存在 signal 只看退出码、diff_cargo 双方失败也可 PASS、corpus
 失败不传状态等假阳性。因此历史 “gate5 31/31” 只能按旧脚本口径阅读，不能再解释为 31 个
 语义正确断言。该审计已推动 oracle、silent stub、volatile 和 M5.1 differential probes
-全部收口；后续产品施工先由真实项目的精确前沿驱动，进入 M5.2 时同一门禁纪律必须保留。
+全部收口；后续产品施工先由真实项目的精确前沿驱动，进入 M5.3 JIT 时同一门禁纪律必须保留。
 
 本轮真实项目施工前的稳定 full release gate5（含 gate0/1/2/4、TSan 与六个 M5.1 tracer 脚本）为
 **40 PASS / 2 XFAIL / 0 SKIP / 0 FAIL**；XFAIL 是 signal guest handler 与 guest
