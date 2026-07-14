@@ -1915,6 +1915,38 @@ enum Exit {
 }
 
 /// 按 D4 fn 条目真地址派发（CallIndirect / catch_unwind 的 try/catch fn 共用）。
+// ===== signal 异步窄化（D8d）=====
+/// guest 信号 handler → AS-trampoline 真码地址。async 信号（可安全 run-to-completion）
+/// 复用 M4.4 thunk 工厂（attach + interp_frame，签名 `(i32)->void`）；sync 故障信号
+/// （SEGV/BUS/FPE/ILL/TRAP）的 guest handler 响亮拒绝——宿主故障与 guest 故障不可分辨，
+/// 伪造恢复=静默错值。handler 必须是已知 guest fn 条目（非 guest 地址不接）。
+fn signal_thunk(ctx: *mut Ctx, signum: libc::c_int, handler: u64) -> libc::sighandler_t {
+    // 同步故障信号：guest handler 不可支持（诊断退出而非静默）
+    if matches!(
+        signum,
+        libc::SIGSEGV | libc::SIGBUS | libc::SIGFPE | libc::SIGILL | libc::SIGTRAP
+    ) {
+        engine_abort(&format!(
+            "guest handler for synchronous fault signal {signum}（SEGV/BUS/FPE/ILL/TRAP：\
+             宿主与 guest 故障不可分辨，D8l）"
+        ));
+    }
+    let shared: &'static Shared = unsafe { &*(*ctx).shared };
+    let Some(&func) = shared.module.fn_addrs.get(&handler) else {
+        engine_abort(&format!(
+            "signal handler {handler:#x} 不是已知 guest fn 条目"
+        ));
+    };
+    // 信号 handler ABI = `extern "C" fn(c_int)`；thunk 工厂造真码入口 + 边界 attach。
+    let sig = super::ir::ForeignSig {
+        args: vec![super::ir::FfiKind::I32],
+        ret: super::ir::FfiKind::Void,
+        fixed: None,
+        thunk_args: vec![],
+    };
+    super::thunks::get_or_create(shared, handler, func, &sig) as libc::sighandler_t
+}
+
 // ===== backtrace 影子帧（D8e）=====
 /// 合成 IP 基址：高位在用户地址空间之上、非页对齐 → 绝不与真实代码/数据地址撞，
 /// dladdr 找不到（诚实 `<unknown>` 符号化，禁止伪造宿主符号）。
@@ -2480,26 +2512,32 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                     Builtin::HostOnExit => atexit_register(a(0), AtexitKind::OnExit, a(1)),
                     Builtin::HostSignal => {
                         let (signum, handler) = (a(0) as libc::c_int, a(1) as libc::sighandler_t);
-                        if handler != libc::SIG_DFL && handler != libc::SIG_IGN {
-                            engine_abort("unsupported builtin `signal` with guest handler");
-                        }
-                        unsafe { libc::signal(signum, handler) as u64 }
+                        // guest handler（非 DFL/IGN）：async 信号 → 物化 AS-trampoline
+                        //（D8d）；sync 故障信号 → 响亮拒绝（宿主/guest 故障不可分辨）。
+                        let real = if handler != libc::SIG_DFL && handler != libc::SIG_IGN {
+                            signal_thunk(ctx, signum, handler as u64)
+                        } else {
+                            handler
+                        };
+                        unsafe { libc::signal(signum, real) as u64 }
                     }
                     Builtin::HostSigaction => {
                         let (signum, act, oldact) = (a(0) as libc::c_int, a(1), a(2));
-                        if act != 0 {
-                            let handler =
-                                unsafe { (*(act as *const libc::sigaction)).sa_sigaction };
-                            if handler != libc::SIG_DFL && handler != libc::SIG_IGN {
-                                engine_abort("unsupported builtin `sigaction` with guest handler");
+                        // guest handler 藏在 sigaction 结构里：thunk 后写一份改过 handler
+                        // 的副本给内核（原结构不动——guest 可能复用/读回）。
+                        let patched: Option<libc::sigaction> = (act != 0).then(|| {
+                            let mut p = *unsafe { &*(act as *const libc::sigaction) };
+                            let h = p.sa_sigaction;
+                            if h != libc::SIG_DFL && h != libc::SIG_IGN {
+                                p.sa_sigaction = signal_thunk(ctx, signum, h as u64) as usize;
                             }
-                        }
+                            p
+                        });
+                        let act_ptr = patched
+                            .as_ref()
+                            .map_or(std::ptr::null(), |p| p as *const libc::sigaction);
                         unsafe {
-                            libc::sigaction(
-                                signum,
-                                act as *const libc::sigaction,
-                                oldact as *mut libc::sigaction,
-                            ) as u64
+                            libc::sigaction(signum, act_ptr, oldact as *mut libc::sigaction) as u64
                         }
                     }
                     Builtin::Unsupported(name) => {

@@ -373,3 +373,21 @@ guest handler 是独立能力缺口，不应混入 M5.1 全绿宣称。
 - **验收**：c_backtrace 从原因锁定 XFAIL **转绿**（gate5 XFAIL 2→1）；native（去
   frontmatter）与 mirvm 同输出 "backtrace: captured, non-empty, depth reflected
   (+30 frames)"。后续可选：物化符号 ELF 让 dladdr 报真 guest fn 名（非本期）。
+
+### 片 8：D8d signal 异步窄化 —— 完成（c_signal XFAIL→绿，2026-07-14）
+
+- **AS-trampoline 复用 M4.4 thunk 工厂**：guest 信号 handler（`extern "C" fn(c_int)`）
+  形状与逃逸给 native 的 guest fn 完全同构——`signal_thunk` 用 `get_or_create`
+  （签名 `(i32)->void`）物化真码入口 + 边界 attach，把 thunk 地址交
+  libc::signal/sigaction。handler 运行到完成才返回（POSIX run-to-completion）；
+  解释帧操作数区是 per-Ctx bump LIFO，同线程同步投递（raise）下嵌套天然安全。
+- **两条注册路**：`signal()` 直接 thunk handler；`sigaction()` 读结构里的 handler、
+  thunk 后写一份改过的**副本**给内核（原结构不动，guest 可读回/复用）。SIG_DFL/IGN
+  维持直通。
+- **sync 故障信号响亮拒绝**（D8l）：SEGV/BUS/FPE/ILL/TRAP 的 guest handler
+  engine_abort——宿主故障与 guest 故障不可分辨，伪造恢复=静默错值。handler 必须是
+  已知 guest fn 条目（非 guest 地址不接）。
+- **验收**：c_signal 从 XFAIL **转绿**（**gate5 XFAIL 2→0**，两个历史缺口全清）；
+  `demo/signal_probe.rs`（signal+sigaction 两路、多信号计数、**handler 内嵌套 raise
+  另一信号**=设计标注最尖重入风险、SIG_IGN 直通）native/mirvm **逐字节一致**；
+  SIGSEGV guest handler 实测响亮拒绝。TSan gate 全绿（重入不引入数据竞争）。
