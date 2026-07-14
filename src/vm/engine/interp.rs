@@ -1727,6 +1727,50 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             };
             place_write(ctx, base, dst, bits);
         }
+        Stmt::Bit128 { op, src, dst } => {
+            use super::ir::BitUnOp as B;
+            let x = unsafe { (eval_place_addr(ctx, base, src) as *const u128).read_unaligned() };
+            let r = match op {
+                B::Bswap => x.swap_bytes(),
+                B::Bitreverse => x.reverse_bits(),
+                _ => engine_abort("Bit128 只承载 bswap/bitreverse"),
+            };
+            let pd = eval_place_addr(ctx, base, dst);
+            unsafe { (pd as *mut u128).write_unaligned(r) };
+        }
+        Stmt::Bit128Count { op, src, dst } => {
+            use super::ir::BitUnOp as B;
+            let x = unsafe { (eval_place_addr(ctx, base, src) as *const u128).read_unaligned() };
+            let r = match op {
+                B::Popcount => x.count_ones(),
+                B::Ctlz => x.leading_zeros(),
+                B::Cttz => x.trailing_zeros(),
+                _ => engine_abort("Bit128Count 只承载 ctpop/ctlz/cttz"),
+            };
+            place_write(ctx, base, dst, r as u64);
+        }
+        Stmt::FloatToWide128 {
+            src,
+            from,
+            signed,
+            dst,
+        } => {
+            use super::ir::FloatW;
+            let (v, _) = eval_operand(ctx, base, src);
+            // f16/f32→f64 精确保值 ⇒ 统一经 f64；宿主 `as` 即饱和语义（NaN→0、越界→边界）
+            let x = match from {
+                FloatW::F16 => f16::from_bits(v as u16) as f64,
+                FloatW::F32 => f32::from_bits(v as u32) as f64,
+                FloatW::F64 => f64::from_bits(v),
+            };
+            let bits: u128 = if *signed {
+                x as i128 as u128
+            } else {
+                x as u128
+            };
+            let pd = eval_place_addr(ctx, base, dst);
+            unsafe { (pd as *mut u128).write_unaligned(bits) };
+        }
         // ===== f128 宽通道（D8c）=====
         Stmt::F128Bin { op, a, b, dst } => {
             use super::ir::FloatOp as F;

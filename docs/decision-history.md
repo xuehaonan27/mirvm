@@ -283,6 +283,28 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
   XFAIL 转绿滚动（滚动记账纪律不变）。
 - 再次重估触发器：M5.2 收口时若发现新的大面（探针再撞新层），先记账再决定是否二期，
   不无限扩期挡 JIT。
+- **收口（2026-07-14 完成）**：M5.2 十片全部落地，gate5 40 PASS/2 XFAIL → **46 PASS/
+  0 XFAIL/0 FAIL**。施工中的设计偏离/意外见下方 §6.1；未做项以 D8l 响亮 Trap 登记。
+
+### 6.1 M5.2 施工中的设计偏离与意外（记录不失踪）
+
+- **D8c f16/f128：手写 libgcc FFI → 直骑宿主类型**。设计写"dlsym libgcc `__*tf3`"；实测
+  本 nightly 宿主 `f16`/`f128` 全套可用，引擎加 `#![feature(f16,f128)]` 直接用——rustc 把
+  引擎自身的 f16/f128 运算下降到与 native guest **同一批** compiler-builtins/libm 符号，
+  同源即位同，少一层手写 FFI（且 libffi longdouble 在 x86-64 是 80 位，接不了 binary128）。
+- **D8d/D8e 机制沿用而非新造**：signal 的 AS-trampoline 直接复用 M4.4 thunk 工厂（handler
+  = `extern "C" fn(c_int)` 与逃逸 guest fn 同构）；backtrace 影子帧的 IP 是合成 token
+  （非真 fn 条目地址），dladdr 诚实 miss → oracle 用不变式而非 native 逐字节。
+- **D8f fork 守卫的 TOCTOU 教训**：初版用 Ctx 计数判 guest 线程数，实测**漏放**多线程
+  fork——pthread_create 返回后新线程即存在，但其 Ctx 要 trampoline attach 才建，有窗口。
+  改用真 OS 线程数（`/proc/self/task`）对 guest-main 基线判定。
+- **D8b 顺带根治潜伏静默错值**：旧 `SimdBin` 对全部 lane 按整数位运算，float lane 的
+  add/cmp（±0.0、NaN）是**静默错值**，仅因 corpus 全整数 lane 未爆雷。引入 `LaneKind`
+  使"忘带元素类别"类型层不可表示。
+- **D8i fabs 泛型名漂移**：本 nightly `fabs` 去后缀化为泛型名，"剥后缀匹配"模式 miss →
+  `f64::abs()` 曾一调即 Trap（corpus 恰好无人调的暗洞）。全 math 表加泛型兜底。
+- **被替代文档**：m5.2-design.md D8c 的"libgcc FFI"、D8b 的"合成 asm-stub 向量 ABI"（M5.1
+  已先偏为 stdarch helper）保留原文作历史；实现事实以 m5-log.md M5.2 节 + 本节为准。
 
 ## 7. 尚未兑现或需要重新验证的架构承诺
 

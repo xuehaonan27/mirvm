@@ -408,3 +408,41 @@ guest handler 是独立能力缺口，不应混入 M5.1 全绿宣称。
   替换）native/mirvm **逐字节一致**（含 exec'd child 的 /bin/echo 输出）；实测
   fork+child-malloc 无死锁、多线程 fork 响亮拒绝、pre_exec 通过；`corpus/c_fork_exec.rs`
   （3 轮 fork+waitpid 收割，子进程解释器状态完整）进 corpus（29→30）；diff.sh 27→28。
+
+### 片 10：D8k 边角批 + 收口 —— 完成（2026-07-14）
+
+- **`#[global_allocator]` 结论 = 非缺口**：behavior 探针实证 guest 分配（Vec/Box/String）
+  全经自定义分配器路由（字节数不变式两侧成立）。初查的"3 vs 1 计数差"是**启动期
+  bookkeeping 分配次数差异 = unspecified**（ram-spec §2，程序不能依赖精确分配次数），
+  非正确性 bug。
+- **嵌套 DST 尾动态对齐修复**：旧代码对任何 unsized 非-slice/str 字段在非零偏移一律
+  要求 dyn（否则 TRAP）。实际按 **`struct_tail_for_codegen`** 分流：尾是 slice/str →
+  字段对齐静态已知（rustc offset 已对齐，直接用，含 `Outer{Packet<[u16]>}` 嵌套
+  slice 尾）；尾是 dyn → 运行期 vtable 对齐（VTableAlignOffset）。
+- **128 位残余清零**：①`f16/f32/f64 as i128/u128`（新 `FloatToWide128`，`as` 饱和）
+  ②`i128↔u128` 等宽 cast（16 字节整拷，旧"128 cast 源非标量"TRAP）③128 位 bit
+  intrinsic（`Bit128` bswap/bitreverse + `Bit128Count` ctpop/ctlz/cttz——两半合成）。
+  `float_to_int_unchecked` 宽目标同步。
+- **明确留作 D8l"登记不失踪"**（保持响亮 Trap，安全）：FFI 按值聚合（libffi 支持
+  struct 但需递归 ffi_type 构造，罕用）；`dl_iterate_phdr` 等旧 StubZero 差分探针
+  （已走 native FFI，无观测到缺陷）；Transmute pair→聚合、tag>8B 等更冷的 128 位形态。
+- **验收**：`demo/nested_dst_probe.rs`（slice 尾/dyn 尾/嵌套 slice 尾/嵌套 dyn 尾）+
+  `demo/wide_int_probe.rs`（f↔wide 双向饱和、128↔128 cast、128 位 count/rotate/swap、
+  混合链）native/mirvm **逐字节一致**；diff.sh 28→30。
+
+## M5.2 总验收（2026-07-14）
+
+- **两个历史 XFAIL 全清**：full release gate5 = **46 PASS / 0 XFAIL / 0 SKIP / 0 FAIL**
+  （M5.1 收官是 40 PASS / 2 XFAIL）。corpus 30 用例全绿（新增 portable_simd/float_wide/
+  atexit/fork_exec，signal/backtrace 转绿）。
+- diff.sh **30/30**（新增 7 个 M5.2 差分探针：intrinsic/recursion_deep/simd/atomic_order/
+  float_wide/asm_extras/signal/fork_exec/nested_dst/wide_int），diff_cargo **5/5**，
+  cargo test 35/35，fmt/Clippy `-D warnings`/TSan/纯度门全绿，加载 <500ms、rayon <1s
+  无回退。
+- **口径诚实**：backtrace 用影子帧不变式（文本非 well-defined）；signal 仅 async 信号
+  （sync 故障 handler 响亮拒绝）；fork 仅 guest 单线程；global_asm/naked 的 sym 只能
+  指机器码符号。全部 D8l 未做项保持响亮 Trap，不冒充绿。
+- **本期零新增测试 harness 机制**（遵 AGENTS.md）：只加 corpus 用例 + demo 差分探针 +
+  既有 gate 通道。
+
+**M5.2 非 JIT 语义补全完成。下一阶段 = M5.3 方法级 Cranelift JIT 骨架。**

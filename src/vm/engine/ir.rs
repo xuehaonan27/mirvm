@@ -797,6 +797,25 @@ pub enum Stmt {
         to: FloatW,
         dst: ScalarPlace,
     },
+    /// 标量浮点 → 128 位整数（f16/f32/f64 as i128/u128；`as` 饱和语义，D8k）
+    FloatToWide128 {
+        src: Operand,
+        from: FloatW,
+        signed: bool,
+        dst: PlaceExpr,
+    },
+    /// 128 位位单目，结果仍 128 位（bswap/bitreverse，D8k）
+    Bit128 {
+        op: BitUnOp,
+        src: PlaceExpr,
+        dst: PlaceExpr,
+    },
+    /// 128 位计数类位单目（ctpop/ctlz/cttz，结果 u32 标量，D8k）
+    Bit128Count {
+        op: BitUnOp,
+        src: PlaceExpr,
+        dst: ScalarPlace,
+    },
     // ===== f128 宽通道（M5.2 D8c：16 字节值走 place，宿主 f128 直算——
     // rustc 把引擎自身的 f128 运算下降到与 native guest 同一批
     // compiler-builtins/__*tf* + glibc *f128 libm 符号，同源即位同）=====

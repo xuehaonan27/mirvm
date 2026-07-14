@@ -12,11 +12,13 @@
 | M5.0 | **完成并复审** | x86_64 inline-asm stub 工厂：GAS wrapper → `.so` → `dlopen`/`dlsym` |
 | M5.1 | **完成（2026-07-12）** | numbigint、xgetbv、sha2、blake3、ecosystem、diff_cargo 3/3 与六个 release tracer 全绿 |
 | 真实项目 TDD | **继续扩面（2026-07-13）** | workspace-local ripgrep/tokei 驱动四项通用语义修复；三个 workload 已完成 correctness-gated benchmark，另有八个 workload 完成 correctness 对拍 |
-| M5.2 | **施工中（2026-07-14 批准）** | 非 JIT 语义补全：标量/simd intrinsic 差集、栈深度、f16/f128、signal/backtrace/fork/atexit/global_asm、atomic 序贯通（[m5.2-design.md](m5.2-design.md) D8a–D8l） |
+| M5.2 | **完成（2026-07-14）** | 非 JIT 语义补全（轨 A 完备）：标量/simd intrinsic 差集、真栈深度、f16/f128、atomic 序、backtrace/signal/fork/atexit/global_asm/naked、128 位残余、嵌套 DST 全清；两个历史 XFAIL 转绿（[m5.2-design.md](m5.2-design.md) D8a–D8l，施工日志见 [m5-log.md](m5-log.md)） |
 | M5.3–M5.5 | **未实现** | 方法级 Cranelift JIT、tiering、JIT unwind/LSDA 与性能收口（原编号 M5.2–M5.4，2026-07-14 顺延） |
 
 目前唯一产品执行引擎是 M4 解释器。Cargo 默认的 `cranelift` feature 只编译冻结的 Spike 5；
-生产调用路径还没有方法级 JIT，也没有 `mixed`/`jit` 产品模式。
+生产调用路径还没有方法级 JIT，也没有 `mixed`/`jit` 产品模式。M5.2 把解释器语义面补全
+（gate5 从 40 PASS/2 XFAIL 升到 **46 PASS / 0 XFAIL / 0 FAIL**），为 JIT 期交付语义面
+干净的基线。
 
 ## 2. 当前实现路径
 
@@ -120,8 +122,9 @@ Linux/ELF/x86_64 优先：依赖 pthread、dlopen、GNU 链接行为和 x86 asm 
 
 | 类别 | 当前状态 |
 |---|---|
-| signal / `sigaction` | 静默 StubZero 已移除；SIG_DFL/SIG_IGN 可受限直通，guest handler 当前明确 Trap。异步信号安全 trampoline 与真实 handler 语义仍未实现 |
-| 其他旧 StubZero 边界 | `atexit`、`dl_iterate_phdr` 改走 native FFI 后仍需逐项 differential probe。`_Unwind_Backtrace` 与 Get/Set context 家族已显式 `Unsupported`：宿主 unwinder 只能返回解释器/libffi 栈，在 guest frame/IP 映射完成前不允许伪造成功 |
+| signal / `sigaction`（M5.2 D8d） | **async 信号 guest handler 已支持**：经 AS-trampoline（复用 M4.4 thunk 工厂，`(i32)->void`）真执行，signal() 与 sigaction() 两条注册路，重入（handler 内嵌套 raise）已 native 差分。SIG_DFL/IGN 直通。**sync 故障信号（SEGV/BUS/FPE/ILL/TRAP）guest handler 仍响亮拒绝**（宿主/guest 故障不可分辨）。c_signal 转绿 |
+| backtrace（M5.2 D8e） | **guest 影子帧栈已支持**：Ctx 维护每帧合成 IP，`_Unwind_Backtrace/GetIP(Info)/FindEnclosingFunction/GetCFA` 由影子帧诚实回答。合成 IP 不经 dladdr 符号化（诚实 `<unknown>`，不伪造宿主符号）→ backtrace 文本非 well-defined，oracle 是影子帧不变式（捕获/非空/深度反映）。c_backtrace 转绿。其余 `_Unwind_Set/GetGR/Resume/CFA-外` context 家族维持 `Unsupported`。`atexit` 已 builtin 化（引擎 LIFO + libc trampoline）；`dl_iterate_phdr` 仍走 native FFI |
+| fork / exec（M5.2 D8f） | **exec 族直通**（进程替换语义正确）；**fork 仅 guest 单线程时放行**（守卫用 `/proc/self/task` 对 guest-main 基线判定，避 Ctx 计数 TOCTOU）——解锁 `Command::pre_exec`。多线程 fork、vfork/clone/setjmp 系维持响亮拒绝 |
 | volatile | 独立 volatile IR 使用 alignment=1 的 opaque `MaybeUninit` 字节载体，不把 padding 解释成宿主整数。1/2/4/8/16-byte 保持单个后端 volatile 事件；更宽 memory-repr 值先快照，再按 16/8/4/2/1-byte 块分解，不承诺原子性。该结论于 2026-07-13 推翻旧“其他宽度 Trap/不得拆”选择，演变见 decision-history |
 | direct dyn 尾字段 | sized prefix 后的 direct `dyn` 尾不能一律使用 lower 期静态 offset；当前从 vtable 读取运行期 alignment，并考虑 `repr(packed)` 上限后向上取整。slice/str 仍走静态公式，其他嵌套 DST 继续显式拒绝 |
 | 128-bit `SwitchInt` | targets 与 discriminator 现都保留完整 128 位；i128/u128 discriminator 由 `SwitchDiscr::Wide` 从 place 读取，不再截成 u64。这不等于所有 128-bit ABI 形态都已标量化 |

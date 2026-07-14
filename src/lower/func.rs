@@ -240,15 +240,17 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     };
                     let offset = layout.fields.offset(f.as_usize()).bytes();
                     let field_layout = self.layout_of(fty)?;
-                    if field_layout.is_unsized()
-                        && offset != 0
-                        && !matches!(fty.kind(), ty::Slice(_) | ty::Str)
-                    {
-                        let ty::Dynamic(..) = fty.kind() else {
-                            return Err(format!(
-                                "嵌套 DST 字段动态对齐（parent={parent_ty}, field={fty}，M4.6+）"
-                            ));
-                        };
+                    // unsized 字段在非零偏移的对齐处置（M5.2 D8k：嵌套 DST）：
+                    // - 尾是 slice/str → 字段对齐**静态已知**（元素对齐），rustc 给的
+                    //   offset 已按之对齐，直接用（含尾是 slice 的嵌套结构体，如
+                    //   Outer{Packet<[u16]>}）；
+                    // - 尾是 dyn → 字段对齐**运行期**（vtable），offset 是下界，须按
+                    //   vtable alignment 向上取整（VTableAlignOffset）。
+                    let needs_vtable_align = field_layout.is_unsized() && offset != 0 && {
+                        let tail = self.tcx.struct_tail_for_codegen(fty, self.typing_env);
+                        matches!(tail.kind(), ty::Dynamic(..))
+                    };
+                    if needs_vtable_align {
                         let meta = p.meta.clone().ok_or_else(|| {
                             format!("dyn 尾字段无 vtable meta（parent={parent_ty}, field={fty}）")
                         })?;
@@ -1640,6 +1642,14 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let signed = frame::ty_signed(a_ty);
                 // 128 位方向：→u128/i128 = 低半 cast + 高半符号扩；u128→小 = 取低半
                 if let ValKind::Other { size: 16 } = dst_kind {
+                    // 128→128（i128↔u128 等宽 int cast，D8k）：位相同，16 字节整拷
+                    if a_layout.size.bytes() == 16 {
+                        return Ok(vec![Stmt::Copy {
+                            dst: dst_p.expr(),
+                            src: self.wide_place(a)?,
+                            size: 16,
+                        }]);
+                    }
                     let from_w = frame::scalar_width(&a_layout).ok_or("128 cast 源非标量")?;
                     let ao = self.lower_operand_scalar(a)?;
                     let lo = Stmt::Assign {
@@ -1885,9 +1895,14 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }]);
                 }
                 let from = float_w(a_ty)?;
-                // 标量浮点 → i128/u128：残留（D8k 128 位残余批），响亮
+                // 标量浮点 → i128/u128（D8k）：16 字节宽目标走 FloatToWide128
                 let Some(to_w) = frame::scalar_width(&to_layout) else {
-                    return Err(format!("FloatToInt 目标 {to_ty}（128 位，D8k）"));
+                    return Ok(vec![Stmt::FloatToWide128 {
+                        src: self.lower_operand_scalar(a)?,
+                        from,
+                        signed: to_signed,
+                        dst: dst_p.expr(),
+                    }]);
                 };
                 let ValKind::Scalar(w) = dst_kind else {
                     return Err("FloatToInt 目标非标量".into());
@@ -2887,6 +2902,30 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     "bswap" => B::Bswap,
                     _ => B::Bitreverse,
                 };
+                // 128 位（D8k）：ctpop/ctlz/cttz 结果是 u32（≤128 装 u32）；bswap/
+                // bitreverse 结果仍是 128 位。走宽通道 Bit128（源 16 字节 place）。
+                let a_ty = self.op_ty(&args[0].node)?;
+                if self.layout_of(a_ty)?.size.bytes() == 16 {
+                    let src = self.wide_place(&args[0].node)?;
+                    return Ok(Some((
+                        if matches!(op, B::Bswap | B::Bitreverse) {
+                            vec![Stmt::Bit128 {
+                                op,
+                                src,
+                                dst: self.resolve_place(destination)?.expr(),
+                            }]
+                        } else {
+                            // 计数类：结果标量（u32），走 Bit128Count
+                            let (dst_p, w) = self.place_scalar(destination)?;
+                            vec![Stmt::Bit128Count {
+                                op,
+                                src,
+                                dst: dst_p.scalar_place(w),
+                            }]
+                        },
+                        Terminator::Goto(target.ok_or("bit intrinsic 发散？")?.as_u32()),
+                    )));
+                }
                 let (dst_p, w) = self.place_scalar(destination)?;
                 vec![Stmt::Assign {
                     dst: dst_p.scalar_place(w),
@@ -3334,9 +3373,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             dst: dst.expr(),
                         }],
                     }
-                } else {
-                    let to_w = frame::scalar_width(&self.layout_of(ity)?)
-                        .ok_or(format!("float_to_int_unchecked 目标 {ity}（128 位，D8k）"))?;
+                } else if let Some(to_w) = frame::scalar_width(&self.layout_of(ity)?) {
                     let (dst_p, w) = self.place_scalar(destination)?;
                     vec![Stmt::Assign {
                         dst: dst_p.scalar_place(w),
@@ -3346,6 +3383,14 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             signed,
                             a: self.lower_operand_scalar(&args[0].node)?,
                         },
+                    }]
+                } else {
+                    // 标量浮点 → i128/u128（D8k）
+                    vec![Stmt::FloatToWide128 {
+                        src: self.lower_operand_scalar(&args[0].node)?,
+                        from: float_w(fty)?,
+                        signed,
+                        dst: self.resolve_place(destination)?.expr(),
                     }]
                 }
             }
