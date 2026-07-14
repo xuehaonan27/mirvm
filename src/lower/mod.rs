@@ -46,8 +46,10 @@ pub(crate) enum Callee {
 /// M4.5 D3：posix_spawn 系移出（子体立即 exec，VM 状态从不在子进程运行——与裸 fork
 /// 带完整 VM 镜像着陆本质不同；file_actions/attr 是不透明指针，真实地址直传成立）。
 /// 保留 pthread_exit（glibc 强制 unwind 绕过 FrameGuard）与裸 fork/exec/setjmp 系。
+/// M5.2 D8f：fork 移出（→ HostFork builtin，guest 单线程时放行）；exec 移出
+/// DENY_PREFIX（进程替换语义 = VM 状态消失本就正确，foreign 直通）。vfork/clone/
+/// setjmp 系维持拒绝（帧模型级工程，D8l）。
 const DENY_EXACT: &[&str] = &[
-    "fork",
     "vfork",
     "clone",
     "clone3",
@@ -58,7 +60,7 @@ const DENY_EXACT: &[&str] = &[
     "pthread_exit",
     "pthread_atfork",
 ];
-const DENY_PREFIX: &[&str] = &["exec"];
+const DENY_PREFIX: &[&str] = &[];
 
 /// 加载相"链接器"：FuncId 分配 + worklist 闭包扩集（D1 修正），外加 native 链接器
 /// 职责的仿真——**特判的不是"panic 是什么"，是"链接器本来会做什么"**（debt-map §2-B）：
@@ -576,6 +578,8 @@ fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin> {
     out.insert(Symbol::intern("write"), ir::Builtin::HostWrite);
     out.insert(Symbol::intern("strlen"), ir::Builtin::HostStrlen);
     out.insert(Symbol::intern("abort"), ir::Builtin::HostAbort);
+    // fork（D8f）：builtin 守卫 guest 线程数后直调 libc::fork。
+    out.insert(Symbol::intern("fork"), ir::Builtin::HostFork);
     // atexit 家族（D8g）：glibc 不导出 `atexit` 供 guest dlsym → builtin 接管。
     out.insert(Symbol::intern("atexit"), ir::Builtin::HostAtexit);
     out.insert(Symbol::intern("__cxa_atexit"), ir::Builtin::HostCxaAtexit);

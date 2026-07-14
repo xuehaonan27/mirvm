@@ -918,6 +918,10 @@ pub enum Builtin {
     HostStrlen,
     /// `abort() -> !`（libc abort 语义；core::intrinsics::abort 也汇入）
     HostAbort,
+    /// `fork()`（M5.2 D8f）：guest 单线程时放行（子进程=全进程拷贝，解释器状态天然
+    /// 一致）；多 guest 线程时响亮拒绝（native 下也是雷区）。解锁 Command::pre_exec
+    /// 与单线程 daemonize。exec 族从 denylist 移出走 foreign 直通（进程替换本就正确）。
+    HostFork,
     /// `atexit(fn)`/`__cxa_atexit(fn,arg,dso)`/`on_exit(fn,arg)`：注册 guest 退出
     /// 回调（D8g）。glibc 不导出 `atexit` 供 guest dlsym，故走 builtin：引擎自持
     /// LIFO 注册表，首注册时经引擎自身链接的 libc `atexit` 挂一个 native trampoline，

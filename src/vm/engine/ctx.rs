@@ -100,6 +100,32 @@ fn thread_stack_floor() -> usize {
 /// Ctx 的 pthread key（进程唯一；dtor = ctx_key_dtor）。
 static CTX_KEY: OnceLock<libc::pthread_key_t> = OnceLock::new();
 
+/// fork 守卫基线（M5.2 D8f）：guest main 启动时的 OS 线程数（`/proc/self/task`）。
+/// 此刻 = mirvm 内部线程（main-in-join、guest-exec、分配器）+ 0 个 guest 派生线程。
+/// **用真 OS 线程数而非 Ctx 计数**：pthread_create 返回后新线程即存在，但其 Ctx
+/// 要到 trampoline attach 才建——Ctx 计数有 TOCTOU 窗口会漏计。fork 只在当前线程数
+/// == 基线（guest 未派生任何线程）时放行。
+static FORK_BASELINE_THREADS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn os_thread_count() -> usize {
+    std::fs::read_dir("/proc/self/task")
+        .map(|d| d.count())
+        .unwrap_or(0)
+}
+
+/// guest main 启动点调用（run_main/run_export）：钉住单 guest 线程的基线。
+pub fn set_fork_baseline() {
+    FORK_BASELINE_THREADS.store(os_thread_count(), std::sync::atomic::Ordering::SeqCst);
+}
+
+/// guest 是否已派生额外线程（HostFork 守卫）：当前 OS 线程数 > 基线 = 是。
+/// 基线未设（0）或读取失败时保守判"多线程"（拒绝 fork）。
+pub fn guest_spawned_threads() -> bool {
+    let base = FORK_BASELINE_THREADS.load(std::sync::atomic::Ordering::SeqCst);
+    base == 0 || os_thread_count() > base
+}
+
 /// TSD 相位的 Ctx 收尾：迟退 3 轮（重新挂回 → glibc 追加轮次，上限 4）——guest 的
 /// pthread-key dtor（std run_dtors thunk，键序不可控）总能在存活的 Ctx 上执行；
 /// 末轮真正销毁（ByteRegion munmap 等）。

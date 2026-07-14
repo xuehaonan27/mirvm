@@ -391,3 +391,20 @@ guest handler 是独立能力缺口，不应混入 M5.1 全绿宣称。
   `demo/signal_probe.rs`（signal+sigaction 两路、多信号计数、**handler 内嵌套 raise
   另一信号**=设计标注最尖重入风险、SIG_IGN 直通）native/mirvm **逐字节一致**；
   SIGSEGV guest handler 实测响亮拒绝。TSan gate 全绿（重入不引入数据竞争）。
+
+### 片 9：D8f fork/exec 窄化 —— 完成（2026-07-14）
+
+- **fork 直通 + guest 单线程守卫**：`fork` 移出 denylist → HostFork builtin。守卫用
+  **真 OS 线程数**（`/proc/self/task`）对基线判定，而非 Ctx 计数——**踩中并修正
+  TOCTOU**：pthread_create 返回后新线程即存在，但其 Ctx 要到 trampoline attach 才建，
+  Ctx 计数有窗口漏计（实测多线程 fork 被误放行）。改为 guest main 启动时钉基线
+  （`set_fork_baseline`：此刻仅 mirvm 内部线程 main-in-join/guest-exec/分配器，0 个
+  guest 派生线程），fork 时当前线程数 > 基线即拒。
+- **exec 族直通**：`exec` 移出 DENY_PREFIX → foreign 直通（进程替换语义 = VM 状态
+  消失本就正确，native 同样不跑 atexit）。解锁 `Command::pre_exec`（std do_fork 路径）。
+- **维持拒绝**（D8l）：vfork/clone/clone3/setjmp/longjmp 系（帧模型级工程）、多线程
+  fork（其他线程持锁在子进程永久锁死，native 亦 UB）。
+- **验收**：`demo/fork_exec_probe.rs`（fork+child heap 计算+退出码、fork+execvp 进程
+  替换）native/mirvm **逐字节一致**（含 exec'd child 的 /bin/echo 输出）；实测
+  fork+child-malloc 无死锁、多线程 fork 响亮拒绝、pre_exec 通过；`corpus/c_fork_exec.rs`
+  （3 轮 fork+waitpid 收割，子进程解释器状态完整）进 corpus（29→30）；diff.sh 27→28。

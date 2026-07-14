@@ -2504,6 +2504,19 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         eprintln!("mirvm[m4-engine]: guest abort()");
                         std::process::abort()
                     }
+                    // fork（D8f）：仅 guest 单线程放行（子进程=全进程拷贝，解释器状态
+                    // 天然一致；无其他 guest 线程 ⇒ 无跨线程锁死锁面）。多线程 fork
+                    // 响亮拒绝（native 下同为雷区）。exec 族走 foreign 直通，不经此。
+                    Builtin::HostFork => {
+                        if super::ctx::guest_spawned_threads() {
+                            engine_abort(
+                                "fork() 时 guest 已派生额外线程：多线程 fork 后仅 forking \
+                                 线程存活、其他线程持有的锁在子进程永久锁死（native 亦 UB）。\
+                                 仅 guest 单线程时放行（D8f/D8l）",
+                            );
+                        }
+                        unsafe { libc::fork() as u64 }
+                    }
                     // atexit 家族（D8g）：登记 guest 回调，返回 0（成功）。
                     // __cxa_atexit(fn, arg, dso)：fn 收 arg；on_exit(fn, arg)：fn 收
                     //（status, arg）。atexit(fn)：无参。统一存 (fn, 形态, arg)。
@@ -2742,6 +2755,7 @@ pub fn run_main(shared: &'static Shared) -> i32 {
     };
     let ctx_ptr = super::ctx::attach(shared); // 主线程与 guest 线程同一 attach 形态
     ATEXIT_SHARED.set(shared); // D8g：退出 trampoline 找回引擎
+    super::ctx::set_fork_baseline(); // D8f：钉住单 guest 线程的 fork 守卫基线
     let args = [
         entry.main_addr,
         entry.argc,
@@ -2771,6 +2785,7 @@ pub fn run_export(shared: &'static Shared, name: &str, args: &[u64]) -> Result<u
         return Err(format!("导出函数 `{name}` 不存在；可用: {names:?}"));
     };
     let ctx_ptr = super::ctx::attach(shared);
+    super::ctx::set_fork_baseline(); // D8f
     match panic::catch_unwind(AssertUnwindSafe(|| interp_frame(ctx_ptr, id, args).0)) {
         Ok(r) => Ok(r),
         Err(e) => match e.downcast::<GuestPanic>() {

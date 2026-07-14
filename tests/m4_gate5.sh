@@ -32,7 +32,7 @@ sha256() = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
 echo "== corpus =="
 CORPUS_PROGS=${CORPUS_PROGS:-"itertools anyhow rayon chrono indexmap clap csv crossbeam tokio blake3 \
 tempfile walkdir numbigint smallvec bytes sha2 petgraph net_tcp net_udp \
-process tokio_mt mmap blocking_io net_echo_threaded signal backtrace volatile \
+process tokio_mt mmap blocking_io net_echo_threaded signal backtrace volatile fork_exec \
 portable_simd float_wide atexit"}
 for p in $CORPUS_PROGS; do
     src="corpus/c_$p.rs"
