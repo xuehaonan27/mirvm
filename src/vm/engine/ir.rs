@@ -218,7 +218,9 @@ pub enum BitUnOp {
     Bitreverse,
 }
 
-/// 原子 RMW（fetch_* 家族；全 SeqCst——最强序在 RAM non-det 包络内，order 细化 M4.4）
+/// 原子 RMW（fetch_* 家族；全 SeqCst——最强序在 RAM non-det 包络内，order 贯通归 D8j）。
+/// fetch_max/min 的有符号性由 intrinsic 名冻结（atomic_max/min=有符号，atomic_umax/umin=无符号），
+/// 执行器据此选 AtomicI*/AtomicU*。
 #[derive(Clone, Copy, Debug)]
 pub enum RmwOp {
     Xchg,
@@ -228,6 +230,10 @@ pub enum RmwOp {
     Or,
     Xor,
     Nand,
+    Max,
+    Min,
+    UMax,
+    UMin,
 }
 
 /// SIMD 逐 lane 双目（M4.1 最小集：hashbrown SSE2 group 探测所需）。
@@ -329,6 +335,14 @@ pub enum Rvalue {
         op: MathUnOp,
         is64: bool,
         a: Operand,
+    },
+    /// 融合乘加（fma/fmuladd intrinsic，M5.2 D8i）：a*b+c 单次舍入（宿主 mul_add）。
+    /// fmuladd 允许融合或不融合两种结果，融合实现在允许集合内。
+    MathFma {
+        is64: bool,
+        a: Operand,
+        b: Operand,
+        c: Operand,
     },
     MathBin {
         op: MathBinOp,
@@ -621,6 +635,9 @@ pub enum Builtin {
     /// 不改变 guest 抽象机/RAM 状态的处理器 hint（如 `pause`、`vzeroupper`）。
     /// 解释器不持久化宿主向量寄存器状态，因此执行期可正确忽略。
     CpuHintNop,
+    /// `core::intrinsics::breakpoint()`：执行真 int3——与 native 同为 SIGTRAP
+    /// 可观测行为（未被跟踪时进程默认终止）。
+    Breakpoint,
     /// `llvm.x86.addcarry.64(carry, a, b) -> (carry, result)`：
     /// LLVM unadjusted intrinsic 的 pair 字段顺序保持原样。
     AddCarry64,

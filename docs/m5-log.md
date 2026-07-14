@@ -206,4 +206,37 @@ guest handler 是独立能力缺口，不应混入 M5.1 全绿宣称。
   XFAIL 是不属于 M5.1 的 signal guest handler 与 guest backtrace/frame-IP 映射。
 - 性能无回归：load 471ms、rayon 732ms。
 
-**M5.1 完成。下一阶段 = M5.2 方法级 JIT。**
+**M5.1 完成。下一阶段 = M5.2 非 JIT 语义补全（2026-07-14 编号重排：JIT 顺延 M5.3–M5.5）。**
+
+## M5.2 非 JIT 语义补全（轨 A 完备期）—— 施工中（2026-07-14 批准）
+
+设计与决策：[m5.2-design.md](m5.2-design.md)（D8a–D8l 全批）。缺口来源 = 拒绝面全量
+清点 + rustc intrinsic 权威差集 + 14 个 native 差分探针（"主动圈定"取代"已知用例绿"口径）。
+
+### 片 1：D8i 标量 intrinsic 差集清零 —— 完成（2026-07-14）
+
+- **fabs 泛型名漂移修复**（本片最尖：`f64::abs()` 曾一调即 Trap，corpus 恰好无人调）：
+  math_un/bin 表重构为"后缀名定宽（sqrtf64）+ 裸泛型名按类型参数定宽（fabs<T>）"，
+  **全表泛型兜底**——后缀剥离对 nightly 漂移脆弱，将来任一名字去后缀化走同一条道。
+  f16/f128 在 `resolve_float_width` 处保持响亮 Err（D8c 接入点）。
+- **atomic fetch_max/min 四变体**：`RmwOp` 增 `Max/Min/UMax/UMin`（有符号性由 intrinsic
+  名冻结进变体），执行器有符号路经同址 `AtomicI*`，位型回写零扩展。
+- **fma/fmuladd**：新 `Rvalue::MathFma`（宿主 `mul_add` 单次舍入；fmuladd 允许融合/不融合，
+  融合在允许集合内）；f16/f128 变体自然落到未处理 Err（D8c 消除）。
+- **fast/algebraic 浮点 10 个**：按精确 IEEE 语义走既有 `FloatBin`（fast-math 是自由授权，
+  精确结果恒在允许集合内）。
+- **volatile 批量访存**：`volatile_copy_memory`（重叠=memmove）/`volatile_copy_
+  nonoverlapping_memory`/`volatile_set_memory` 走 MemCopy/MemSet 通道（解释器逐条执行
+  从不省略=volatile 忠实实现；注意实参序 (dst,src) 与 copy 的 (src,dst) 相反）。
+  `nontemporal_store` 走 volatile store 通道（NT 是性能 hint，值语义=普通 store）。
+- **杂项**：`ptr_mask`（位与，真实地址下即语义）、`vtable_size/align`（vtable 槽 8/16
+  直读）、`breakpoint`（真 int3——native/mirvm 双侧实测 exit 133 SIGTRAP 同构）。
+- **nullary 保险臂**：size_of/align_of/variant_count（rustc eval_nullary 同构：Pat 剥壳、
+  Adt=变体数、其余具体类型=0）/needs_drop 在 lower 期 tcx 折常量。**type_id/type_name/
+  offset_of/field_offset 不做**：TypeId 本 nightly 是 vtable 身份结构、type_name 需字符串
+  物化，正常被 GVN 折叠（anyhow corpus 实证），残留维持响亮 Trap；重开条件=真实程序在
+  非默认 mir-opt 下撞到。
+- **验收**：新差分探针 `demo/intrinsic_probe.rs` native/mirvm 逐字节一致（fma 融合证明值
+  8.67e-19 非零=双侧真融合；fetch_max/min 含符号边界 -128/127/255/u64::MAX；重叠 volatile；
+  ptr_mask 对齐掩码）；diff.sh 基线 20→21；full gate5 = **40 PASS / 2 XFAIL / 0 FAIL**；
+  cargo test 35/35、fmt、Clippy `-D warnings` 全过。

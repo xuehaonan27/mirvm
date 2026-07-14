@@ -568,6 +568,20 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
                 bin!(f32::from_bits(av as u32), f32::from_bits(bv as u32)).to_bits() as u64
             }
         }
+        Rvalue::MathFma { is64, a, b, c } => {
+            let (av, _) = eval_operand(ctx, base, a);
+            let (bv, _) = eval_operand(ctx, base, b);
+            let (cv, _) = eval_operand(ctx, base, c);
+            if *is64 {
+                f64::from_bits(av)
+                    .mul_add(f64::from_bits(bv), f64::from_bits(cv))
+                    .to_bits()
+            } else {
+                f32::from_bits(av as u32)
+                    .mul_add(f32::from_bits(bv as u32), f32::from_bits(cv as u32))
+                    .to_bits() as u64
+            }
+        }
         Rvalue::FloatCmp { cc, is64, a, b } => {
             let (av, _) = eval_operand(ctx, base, a);
             let (bv, _) = eval_operand(ctx, base, b);
@@ -909,7 +923,7 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let (p, _) = eval_operand(ctx, base, addr);
             let (v, w) = eval_operand(ctx, base, val);
             macro_rules! rmw {
-                ($t:ty, $at:ty) => {{
+                ($t:ty, $at:ty, $it:ty, $iat:ty) => {{
                     let a = unsafe { <$at>::from_ptr(p as *mut $t) };
                     (match op {
                         R::Xchg => a.swap(v as $t, Ordering::SeqCst),
@@ -919,14 +933,23 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                         R::Or => a.fetch_or(v as $t, Ordering::SeqCst),
                         R::Xor => a.fetch_xor(v as $t, Ordering::SeqCst),
                         R::Nand => a.fetch_nand(v as $t, Ordering::SeqCst),
+                        // fetch_max/min：有符号变体经同址 AtomicI*（位型回写零扩展）
+                        R::UMax => a.fetch_max(v as $t, Ordering::SeqCst),
+                        R::UMin => a.fetch_min(v as $t, Ordering::SeqCst),
+                        R::Max => unsafe { <$iat>::from_ptr(p as *mut $it) }
+                            .fetch_max(v as $it, Ordering::SeqCst)
+                            as $t,
+                        R::Min => unsafe { <$iat>::from_ptr(p as *mut $it) }
+                            .fetch_min(v as $it, Ordering::SeqCst)
+                            as $t,
                     }) as u64
                 }};
             }
             let old = match w {
-                Width::W8 => rmw!(u8, AtomicU8),
-                Width::W16 => rmw!(u16, AtomicU16),
-                Width::W32 => rmw!(u32, AtomicU32),
-                Width::W64 => rmw!(u64, AtomicU64),
+                Width::W8 => rmw!(u8, AtomicU8, i8, AtomicI8),
+                Width::W16 => rmw!(u16, AtomicU16, i16, AtomicI16),
+                Width::W32 => rmw!(u32, AtomicU32, i32, AtomicI32),
+                Width::W64 => rmw!(u64, AtomicU64, i64, AtomicI64),
             };
             place_write(ctx, base, dst, old);
         }
@@ -1680,6 +1703,13 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         0
                     }
                     Builtin::CpuHintNop => 0,
+                    Builtin::Breakpoint => {
+                        // 真 int3：未被跟踪时 = SIGTRAP 终止（native 同语义）
+                        unsafe {
+                            std::arch::asm!("int3", options(nomem, nostack, preserves_flags))
+                        };
+                        0
+                    }
                     Builtin::AddCarry64 => unreachable!("addcarry.64 已由 pair 通道处理"),
                     Builtin::SubBorrow64 => unreachable!("subborrow.64 已由 pair 通道处理"),
                     Builtin::Xgetbv => {

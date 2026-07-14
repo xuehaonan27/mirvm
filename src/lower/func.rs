@@ -2635,6 +2635,26 @@ impl<'tcx> LowerCx<'tcx, '_> {
     /// 本步最小集：offset/arith_offset（ptr::add 的根，rawptr gate 必经）。
     /// 完整内建表是 M4.1 第 5 步（D5）。
     #[allow(clippy::too_many_arguments)]
+    /// 浮点 intrinsic 宽度解析：后缀已定则直取；裸泛型名看第一个类型参数。
+    /// f16/f128 → Err（D8c 接入前保持响亮；接入后此处扩宽）。
+    fn resolve_float_width(
+        &self,
+        suffix_w: Option<bool>,
+        inst: &Instance<'tcx>,
+        n: &str,
+    ) -> Result<bool, String> {
+        if let Some(is64) = suffix_w {
+            return Ok(is64);
+        }
+        let t = inst.args.type_at(0);
+        match t.kind() {
+            ty::Float(ty::FloatTy::F32) => Ok(false),
+            ty::Float(ty::FloatTy::F64) => Ok(true),
+            ty::Float(_) => Err(format!("intrinsic `{n}` 浮点宽度 {t}（f16/f128，D8c）")),
+            _ => Err(format!("intrinsic `{n}` 泛型参数非浮点（{t}）")),
+        }
+    }
+
     fn try_expand_intrinsic(
         &mut self,
         inst: &Instance<'tcx>,
@@ -2754,7 +2774,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }]
             }
             "atomic_xchg" | "atomic_xadd" | "atomic_xsub" | "atomic_and" | "atomic_or"
-            | "atomic_xor" | "atomic_nand" => {
+            | "atomic_xor" | "atomic_nand" | "atomic_max" | "atomic_min" | "atomic_umax"
+            | "atomic_umin" => {
                 use ir::RmwOp as R;
                 let op = match name.as_str() {
                     "atomic_xchg" => R::Xchg,
@@ -2763,6 +2784,11 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     "atomic_and" => R::And,
                     "atomic_or" => R::Or,
                     "atomic_xor" => R::Xor,
+                    // fetch_max/min（D8i）：有符号性由 intrinsic 名冻结进变体
+                    "atomic_max" => R::Max,
+                    "atomic_min" => R::Min,
+                    "atomic_umax" => R::UMax,
+                    "atomic_umin" => R::UMin,
                     _ => R::Nand,
                 };
                 let (dst_p, w) = self.place_scalar(destination)?;
@@ -2831,6 +2857,125 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     overlap: name.as_str() == "copy",
                 }]
             }
+            // volatile 批量访存（D8i）：LLVM volatile memcpy/memset 对访问宽度/次数
+            // 本就无承诺，volatile 只保证"不可省略/不可重排合并"——解释器逐条执行
+            // 从不省略，故与 copy/write_bytes 同一执行通道即为忠实实现。
+            // 注意实参顺序：这族是 (dst, src, count)，与 copy 的 (src, dst, count) 相反。
+            "volatile_copy_memory" | "volatile_copy_nonoverlapping_memory" => {
+                vec![Stmt::MemCopy {
+                    dst: self.lower_operand_scalar(&args[0].node)?,
+                    src: self.lower_operand_scalar(&args[1].node)?,
+                    count: self.lower_operand_scalar(&args[2].node)?,
+                    elem_size: elem_size(self)?,
+                    overlap: name.as_str() == "volatile_copy_memory",
+                }]
+            }
+            "volatile_set_memory" => {
+                vec![Stmt::MemSet {
+                    dst: self.lower_operand_scalar(&args[0].node)?,
+                    val: self.lower_operand_scalar(&args[1].node)?,
+                    count: self.lower_operand_scalar(&args[2].node)?,
+                    elem_size: elem_size(self)?,
+                }]
+            }
+            // 非临时 store（D8i，stdarch _mm_stream_* 汇入）：NT 是绕缓存的性能 hint，
+            // 值语义 = 普通 store；其与 fence 的弱序注意事项是 guest 的既有义务。
+            // 走 volatile store 通道（防省略的超集保证，宽值分块规则一致）。
+            "nontemporal_store" => {
+                let t = inst.args.type_at(0);
+                let size = u32::try_from(self.layout_of(t)?.size.bytes())
+                    .map_err(|_| format!("{name} 类型 {t} 大小超出 u32"))?;
+                if size == 0 {
+                    vec![Stmt::Nop]
+                } else {
+                    let addr = self.lower_operand_scalar(&args[0].node)?;
+                    let mut stmts = Vec::new();
+                    let src = if let Some(place) = args[1].node.place() {
+                        self.resolve_place(&place)?.expr()
+                    } else {
+                        let value = self.lower_operand(&args[1].node)?;
+                        let kind = self.classify(t)?;
+                        let scratch = self.scratch_place(t)?;
+                        stmts.extend(self.assign_lowered(&scratch, kind, value)?);
+                        scratch.expr()
+                    };
+                    stmts.push(Stmt::VolatileStore { addr, src, size });
+                    stmts
+                }
+            }
+            // ptr.mask(m)（D8i）：地址位与，provenance 不变（真实地址下位与即语义）。
+            "ptr_mask" => {
+                let (dst_p, w) = self.place_scalar(destination)?;
+                vec![Stmt::Assign {
+                    dst: dst_p.scalar_place(w),
+                    rv: Rvalue::IntBin {
+                        op: IntBinOp::BitAnd,
+                        signed: false,
+                        a: self.lower_operand_scalar(&args[0].node)?,
+                        b: self.lower_operand_scalar(&args[1].node)?,
+                    },
+                }]
+            }
+            // vtable 槽直读（D8i）：实参是裸 vtable 指针（DynMetadata::size_of/align_of）。
+            // 槽布局 [drop, size, align, ...] 与 size_of_val 的 dyn 臂同一来源。
+            "vtable_size" | "vtable_align" => {
+                let vt = self.lower_operand_scalar(&args[0].node)?;
+                let slot_off = if name.as_str() == "vtable_size" {
+                    8
+                } else {
+                    16
+                };
+                let (dst_p, w) = self.place_scalar(destination)?;
+                vec![Stmt::Assign {
+                    dst: dst_p.scalar_place(w),
+                    rv: Rvalue::Use(operand_deref_at(vt, slot_off)?),
+                }]
+            }
+            // nullary 类型查询保险臂（D8i）：正常被 GVN 常量折叠消解，残留时在
+            // lower 期以 tcx 折成常量（与 rustc eval_nullary_intrinsic 同构）。
+            // type_id/type_name/offset_of/field_offset 不在此列：TypeId 本 nightly 是
+            // vtable 身份结构、type_name 需字符串物化——残留仍响亮 Trap（重开条件：
+            // 真实程序在非默认 mir-opt 下撞到）。
+            "size_of" | "align_of" | "min_align_of" => {
+                let t = inst.args.type_at(0);
+                let l = self.layout_of(t)?;
+                let v = if name.as_str() == "size_of" {
+                    l.size.bytes()
+                } else {
+                    l.align.abi.bytes()
+                };
+                let (dst_p, w) = self.place_scalar(destination)?;
+                vec![Stmt::Assign {
+                    dst: dst_p.scalar_place(w),
+                    rv: Rvalue::Use(Operand::Imm { bits: v, width: w }),
+                }]
+            }
+            "variant_count" => {
+                // rustc eval_nullary_intrinsic 同构：Pat 剥到 base；Adt=变体数；
+                // 其余具体类型=0
+                let mut t = inst.args.type_at(0);
+                while let ty::Pat(base, _) = t.kind() {
+                    t = *base;
+                }
+                let v = match t.kind() {
+                    ty::Adt(adt, _) => adt.variants().len() as u64,
+                    _ => 0,
+                };
+                let (dst_p, w) = self.place_scalar(destination)?;
+                vec![Stmt::Assign {
+                    dst: dst_p.scalar_place(w),
+                    rv: Rvalue::Use(Operand::Imm { bits: v, width: w }),
+                }]
+            }
+            "needs_drop" => {
+                let t = inst.args.type_at(0);
+                let v = t.needs_drop(self.tcx, self.typing_env) as u64;
+                let (dst_p, w) = self.place_scalar(destination)?;
+                vec![Stmt::Assign {
+                    dst: dst_p.scalar_place(w),
+                    rv: Rvalue::Use(Operand::Imm { bits: v, width: w }),
+                }]
+            }
             "write_bytes" => {
                 vec![Stmt::MemSet {
                     dst: self.lower_operand_scalar(&args[0].node)?,
@@ -2859,6 +3004,20 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     vec![],
                     Terminator::CallBuiltin {
                         builtin: ir::Builtin::HostAbort,
+                        args: vec![],
+                        ret: RetDest::Ignore,
+                        target: tgt,
+                        unwind: ir::UnwindAction::Continue,
+                    },
+                )));
+            }
+            "breakpoint" => {
+                // 真 int3（D8i）：与 native 同为 SIGTRAP 可观测行为；正常续行到 target
+                let tgt = target.ok_or("breakpoint 发散？")?.as_u32();
+                return Ok(Some((
+                    vec![],
+                    Terminator::CallBuiltin {
+                        builtin: ir::Builtin::Breakpoint,
                         args: vec![],
                         ret: RetDest::Ignore,
                         target: tgt,
@@ -2986,9 +3145,11 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     },
                 }]
             }
-            // 数学面（must_be_overridden float intrinsic）：宿主直算（合成处置，P7）
+            // 数学面（must_be_overridden float intrinsic）：宿主直算（合成处置，P7）。
+            // 宽度：后缀名（sqrtf64）定死；裸泛型名（fabs<T>，本 nightly 漂移）看类型参数。
             n if math_un_of(n).is_some() => {
-                let (op, is64) = math_un_of(n).unwrap();
+                let (op, suffix_w) = math_un_of(n).unwrap();
+                let is64 = self.resolve_float_width(suffix_w, inst, n)?;
                 let (dst_p, w) = self.place_scalar(destination)?;
                 vec![Stmt::Assign {
                     dst: dst_p.scalar_place(w),
@@ -3000,11 +3161,51 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }]
             }
             n if math_bin_of(n).is_some() => {
-                let (op, is64) = math_bin_of(n).unwrap();
+                let (op, suffix_w) = math_bin_of(n).unwrap();
+                let is64 = self.resolve_float_width(suffix_w, inst, n)?;
                 let (dst_p, w) = self.place_scalar(destination)?;
                 vec![Stmt::Assign {
                     dst: dst_p.scalar_place(w),
                     rv: Rvalue::MathBin {
+                        op,
+                        is64,
+                        a: self.lower_operand_scalar(&args[0].node)?,
+                        b: self.lower_operand_scalar(&args[1].node)?,
+                    },
+                }]
+            }
+            // 融合乘加（D8i）：a*b+c 单次舍入。fmuladd 允许融合/不融合，融合在允许集合内。
+            // f16/f128 变体后缀剥不出 f32/f64 → 落到未处理 Err（D8c 接入时消除）。
+            "fmaf32" | "fmaf64" | "fmuladdf32" | "fmuladdf64" => {
+                let (dst_p, w) = self.place_scalar(destination)?;
+                vec![Stmt::Assign {
+                    dst: dst_p.scalar_place(w),
+                    rv: Rvalue::MathFma {
+                        is64: name.as_str().ends_with("f64"),
+                        a: self.lower_operand_scalar(&args[0].node)?,
+                        b: self.lower_operand_scalar(&args[1].node)?,
+                        c: self.lower_operand_scalar(&args[2].node)?,
+                    },
+                }]
+            }
+            // fast/algebraic 浮点（D8i）：fast-math 标记是"允许重结合/收缩"的自由授权，
+            // 按精确 IEEE 语义执行的结果恒在允许集合内（与关掉 fast-math 的 native 同值）。
+            "fadd_fast" | "fsub_fast" | "fmul_fast" | "fdiv_fast" | "frem_fast"
+            | "fadd_algebraic" | "fsub_algebraic" | "fmul_algebraic" | "fdiv_algebraic"
+            | "frem_algebraic" => {
+                use ir::FloatOp as F;
+                let op = match name.as_str().split('_').next().unwrap() {
+                    "fadd" => F::Add,
+                    "fsub" => F::Sub,
+                    "fmul" => F::Mul,
+                    "fdiv" => F::Div,
+                    _ => F::Rem,
+                };
+                let is64 = self.resolve_float_width(None, inst, name.as_str())?;
+                let (dst_p, w) = self.place_scalar(destination)?;
+                vec![Stmt::Assign {
+                    dst: dst_p.scalar_place(w),
+                    rv: Rvalue::FloatBin {
                         op,
                         is64,
                         a: self.lower_operand_scalar(&args[0].node)?,
@@ -3525,42 +3726,39 @@ fn u128_to_u64(v: u128) -> Result<u64, String> {
     u64::try_from(v).map_err(|_| "128 位判别式（M4.1+）".to_string())
 }
 
-/// 数学 intrinsic 名 → (op, is64)（f32/f64 后缀成对；f16/f128 不表 = Trap 可见）。
-fn math_un_of(n: &str) -> Option<(ir::MathUnOp, bool)> {
-    use ir::MathUnOp as M;
-    let (stem, is64) = n
-        .strip_suffix("f64")
-        .map(|s| (s, true))
-        .or_else(|| n.strip_suffix("f32").map(|s| (s, false)))?;
-    let stem = stem.trim_end_matches('_');
-    Some((
-        match stem {
-            "sqrt" => M::Sqrt,
-            "sin" => M::Sin,
-            "cos" => M::Cos,
-            "exp" => M::Exp,
-            "exp2" => M::Exp2,
-            "log" => M::Ln,
-            "log2" => M::Log2,
-            "log10" => M::Log10,
-            "fabs" => M::Fabs,
-            "floor" => M::Floor,
-            "ceil" => M::Ceil,
-            "trunc" => M::Trunc,
-            "round" => M::Round,
-            "round_ties_even" => M::RoundTiesEven,
-            _ => return None,
-        },
-        is64,
-    ))
+/// 数学 intrinsic 名 → (op, 宽度)。宽度 `Some(is64)` 来自 f32/f64 后缀；`None` =
+/// 裸泛型名（本 nightly `fabs<T: FloatPrimitive>` 已去后缀——M5.2 D8i 实证漂移），
+/// 由调用点按类型参数解析。**全表都做泛型兜底**：后缀剥离对 nightly 漂移脆弱，
+/// 任一名字将来去后缀化时走同一条泛型道而不是 Trap。f16/f128 由调用点按 D8c 处置。
+fn math_un_of(n: &str) -> Option<(ir::MathUnOp, Option<bool>)> {
+    let (stem, is64) = split_float_suffix(n);
+    math_un_stem(stem).map(|op| (op, is64))
 }
 
-fn math_bin_of(n: &str) -> Option<(ir::MathBinOp, bool)> {
+fn math_un_stem(stem: &str) -> Option<ir::MathUnOp> {
+    use ir::MathUnOp as M;
+    Some(match stem {
+        "sqrt" => M::Sqrt,
+        "sin" => M::Sin,
+        "cos" => M::Cos,
+        "exp" => M::Exp,
+        "exp2" => M::Exp2,
+        "log" => M::Ln,
+        "log2" => M::Log2,
+        "log10" => M::Log10,
+        "fabs" => M::Fabs,
+        "floor" => M::Floor,
+        "ceil" => M::Ceil,
+        "trunc" => M::Trunc,
+        "round" => M::Round,
+        "round_ties_even" => M::RoundTiesEven,
+        _ => return None,
+    })
+}
+
+fn math_bin_of(n: &str) -> Option<(ir::MathBinOp, Option<bool>)> {
     use ir::MathBinOp as M;
-    let (stem, is64) = n
-        .strip_suffix("f64")
-        .map(|s| (s, true))
-        .or_else(|| n.strip_suffix("f32").map(|s| (s, false)))?;
+    let (stem, is64) = split_float_suffix(n);
     Some((
         match stem {
             "pow" => M::Pow,
@@ -3572,6 +3770,17 @@ fn math_bin_of(n: &str) -> Option<(ir::MathBinOp, bool)> {
         },
         is64,
     ))
+}
+
+/// 剥 f32/f64 后缀；无后缀返回原名 + None（泛型 intrinsic，宽度看类型参数）。
+fn split_float_suffix(n: &str) -> (&str, Option<bool>) {
+    if let Some(s) = n.strip_suffix("f64") {
+        (s.trim_end_matches('_'), Some(true))
+    } else if let Some(s) = n.strip_suffix("f32") {
+        (s.trim_end_matches('_'), Some(false))
+    } else {
+        (n, None)
+    }
 }
 
 /// 在 operand 的值（指针）上再间接一层：*(op + off)。vtable 槽读取用。
