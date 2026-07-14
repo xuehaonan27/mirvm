@@ -24,12 +24,32 @@ pub fn cache_dir() -> PathBuf {
         .join("mirvm")
 }
 
-/// 确保 MIR-rich sysroot 存在，返回其路径。已缓存时开销可忽略。
+/// 确保 MIR-rich sysroot 存在，返回其路径。
+///
+/// V1 stamp 快路径（S1a，coldstart-research §6）：全仪式每跑要 spawn 两个 rustc 子进程
+/// （--print sysroot / -vV）+ 递归 stat 整棵 rust-src 树（builder 判新），实测 ~40–55ms
+/// 且 warm 也付。stamp 记 (MIRVM_BUILD_ID, rustc 二进制 len+mtime_ns, builder hash 文件
+/// 内容)，三者齐合即免仪式。失效轴对照 rustc-build-sysroot 0.5.13 sysroot_compute_hash：
+/// config/mode/rustflags/crate 版本 → BUILD_ID；rustc_version/换 toolchain → rustc 二进制
+/// stat；建成与否 → builder hash 文件（兼作存在标记）。**不在防护面**：同一 toolchain 内
+/// 手改 rust-src 源树（builder 的全树 stat 走查才抓得到）——逃生门 = 删 stamp 或 sysroot
+/// 目录，走全仪式自愈重建。stamp 读写任何失败都只回退全仪式，不引入新错误路径。
 pub fn ensure_sysroot() -> anyhow::Result<PathBuf> {
     let target = env!("MIRVM_HOST");
     let sysroot_dir = cache_dir().join(format!("sysroot-{target}"));
     let rustc = toolchain_root().join("bin/rustc");
     let cargo = toolchain_root().join("bin/cargo");
+
+    let builder_hash_file = sysroot_dir
+        .join("lib/rustlib")
+        .join(target)
+        .join(".rustc-build-sysroot-hash");
+    let stamp_path = cache_dir().join(format!("sysroot-{target}.stamp"));
+    if let Some(want) = stamp_value(&rustc, &builder_hash_file)
+        && std::fs::read_to_string(&stamp_path).is_ok_and(|have| have == want)
+    {
+        return Ok(sysroot_dir);
+    }
 
     let src_dir = rustc_build_sysroot::rustc_sysroot_src(Command::new(&rustc))?;
 
@@ -66,5 +86,81 @@ pub fn ensure_sysroot() -> anyhow::Result<PathBuf> {
     if status == SysrootStatus::SysrootBuilt {
         eprintln!("mirvm: sysroot 构建完成: {}", sysroot_dir.display());
     }
+
+    // 仪式通过后落 stamp（builder hash 文件此刻已是最新）。临时名+rename 原子发布
+    // （物化缓存同款纪律）；写失败不致命——下跑走全仪式。
+    if let Some(want) = stamp_value(&rustc, &builder_hash_file) {
+        let tmp = stamp_path.with_extension(format!("stamp.tmp-{}", std::process::id()));
+        if std::fs::write(&tmp, &want).is_ok() {
+            let _ = std::fs::rename(&tmp, &stamp_path);
+        }
+    }
     Ok(sysroot_dir)
+}
+
+/// stamp 内容；任一构件缺失（rustc 不在 / sysroot 未建成）→ None（走全仪式）。
+fn stamp_value(rustc: &Path, builder_hash_file: &Path) -> Option<String> {
+    let md = std::fs::metadata(rustc).ok()?;
+    if !md.is_file() {
+        return None;
+    }
+    let mtime_ns = md
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    let builder_hash = std::fs::read_to_string(builder_hash_file).ok()?;
+    Some(format!(
+        "v1\n{}\n{}\n{}\n{}\n",
+        env!("MIRVM_BUILD_ID"),
+        md.len(),
+        mtime_ns,
+        builder_hash.trim()
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stamp_value;
+
+    #[test]
+    fn stamp_tracks_rustc_stat_and_builder_hash() {
+        let dir = std::env::temp_dir().join(format!("mirvm-sysroot-stamp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rustc = dir.join("rustc");
+        let hash = dir.join("hash");
+
+        // 构件缺失 → None（全仪式）
+        assert_eq!(stamp_value(&rustc, &hash), None);
+        std::fs::write(&rustc, b"fake-rustc").unwrap();
+        assert_eq!(stamp_value(&rustc, &hash), None);
+
+        std::fs::write(&hash, "12345\n").unwrap();
+        let s0 = stamp_value(&rustc, &hash).expect("齐备即有值");
+
+        // builder hash 变（sysroot 重建/换代）→ stamp 变
+        std::fs::write(&hash, "67890\n").unwrap();
+        let s1 = stamp_value(&rustc, &hash).unwrap();
+        assert_ne!(s0, s1);
+        std::fs::write(&hash, "12345\n").unwrap();
+
+        // rustc 二进制内容长度变 → stamp 变
+        std::fs::write(&rustc, b"fake-rustc-v2").unwrap();
+        assert_ne!(stamp_value(&rustc, &hash).unwrap(), s0);
+
+        // 同长但 mtime 后移（原地换版本）→ stamp 变
+        std::fs::write(&rustc, b"fake-rustc").unwrap();
+        let s2 = stamp_value(&rustc, &hash).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(7);
+        std::fs::File::options()
+            .write(true)
+            .open(&rustc)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert_ne!(stamp_value(&rustc, &hash).unwrap(), s2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
