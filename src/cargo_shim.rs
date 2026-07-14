@@ -210,13 +210,20 @@ pub fn phase_wrapper(mut argv: impl Iterator<Item = String>) -> ! {
         exit(0);
     }
 
-    // target 依赖：注入 MIR sysroot（保证与解释会话同一套 std）+ 全量 MIR
+    // target 依赖：注入 MIR sysroot（保证与解释会话同一套 std）+ 全量 MIR。
+    // S2（D9d，coldstart-research §3/§4.1）：-Zno-codegen 剪掉 LLVM codegen+目标码
+    // ——runner 只消费 rmeta 里的 MIR，目标码纯白烧（实测 ecosystem 22 个 rlib 全带
+    // .rcgu.o 共 ~100MB）。metadata-only rlib 由 rustc 默认 link 路径照常产出；
+    // post-mono const-eval 错误面由 DepCallbacks 显式补齐（cli.rs）。
     let sysroot = std::env::var("MIRVM_SYSROOT").expect("wrapper 阶段缺少 MIRVM_SYSROOT");
-    let mut cmd = Command::new(&rustc);
-    cmd.args(&args);
-    cmd.arg("--sysroot").arg(sysroot);
-    cmd.arg("-Zalways-encode-mir");
-    exec(cmd)
+    let mut dep_args = Vec::with_capacity(args.len() + 5);
+    dep_args.push("mirvm-dep-rustc".to_string()); // argv[0] 占位（driver 跳过）
+    dep_args.extend(args);
+    dep_args.push("--sysroot".into());
+    dep_args.push(sysroot);
+    dep_args.push("-Zalways-encode-mir".into());
+    dep_args.push("-Zno-codegen".into());
+    crate::cli::run_dep_compiler(dep_args)
 }
 
 fn looks_like_nested_rustc_wrapper(args: &[String]) -> bool {

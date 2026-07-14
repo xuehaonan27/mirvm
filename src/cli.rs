@@ -198,6 +198,32 @@ fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
     run_driver(rustc_args, program_argv, false, None, false, true)
 }
 
+// ===== cargo wrapper：target 依赖的 in-process 编译（S2 / D9d）=====
+
+/// 依赖编译回调：分析后显式跑 mono 收集再放行。native 构建在 codegen 期做
+/// post-mono const-eval（собирает时求值 required consts），`-Zno-codegen` 跳过 codegen
+/// 会连这层构建期错误一起漏掉（依赖里死代码的 const 恐慌等，native cargo build 会红）
+/// ——cargo-miri 的 dummy backend 同款显式补齐，保住"依赖构建错误面与 native 一致"。
+struct DepCallbacks;
+
+impl Callbacks for DepCallbacks {
+    fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
+        let _ = tcx.collect_and_partition_mono_items(());
+        Compilation::Continue
+    }
+}
+
+/// target 依赖：真 rustc 语义 + `-Zno-codegen`。rustc_interface::start_codegen 对
+/// no-codegen 有树内现成空转（空 CompiledModules；rmeta 编码在 backend 之外不受影响；
+/// Linker::link 照走默认 link_binary 产出 metadata-only rlib，cargo 与下游 --extern
+/// 无感）。in-process 驱动（进程本就链着 librustc_driver）顺带省一次 rustc exec。
+pub(crate) fn run_dep_compiler(rustc_args: Vec<String>) -> ! {
+    let code = rustc_driver::catch_with_exit_code(|| {
+        rustc_driver::run_compiler(&rustc_args, &mut DepCallbacks)
+    });
+    exit(if code == ExitCode::SUCCESS { 0 } else { 1 })
+}
+
 // ===== 共享驱动 =====
 
 type TrackDiagnostic =
