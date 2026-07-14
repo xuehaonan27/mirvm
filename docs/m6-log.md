@@ -151,3 +151,24 @@ gate0–4）。两个不可缓存类（告警、environ 类宿主地址直嵌）
   case 第二跑（应命中缓存；告警类=冷重演）stdout/stderr/退出码须与首跑逐字节一致。
   此前 runner 缓存路径零 gate 覆盖（化石化事故任何 gate 抓不到），本维度上锁。
   gate_truth_regression 12/12 维持。
+
+## 片5（S2 / D9d）：依赖 codegen 剪枝（2026-07-14）
+
+**着陆形态**（三条候选路线的终选，超出调研稿预设）：不是 cargo-miri 的自制空 backend、
+也不是 --emit 手术，而是**树内现成的 `-Zno-codegen`**——rustc_interface::start_codegen
+对它有原生空转（空 CompiledModules；rmeta 编码在 backend 之外不受影响；Linker::link
+照走默认 link_binary 产出 **metadata-only rlib**，cargo 与下游 --extern 全无感）。
+wrapper 的 target 依赖分支从 exec 真 rustc 改为 **in-process 驱动**（进程本就链着
+librustc_driver，顺带省 22 次 exec）+ 追加 `-Zno-codegen`。
+
+**post-mono 错误面保真**（本片的语义风险点）：native 构建在 codegen 期做 post-mono
+const-eval，裸 -Zno-codegen 会漏掉依赖 crate 的构建期 const 错误。DepCallbacks 在
+after_analysis 显式 `collect_and_partition_mono_items`（cargo-miri dummy backend 同款）。
+探针实证：死代码 `const { assert!(…) }` 依赖，native 与 mirvm 在依赖构建期报**同一条
+E0080 同一文案**，mirvm 非零退出。
+
+**账本（诚实修正调研稿 §6 V2 的预估）**：wall ≈0（A/B 各两跑在噪声内——128 核上
+依赖 codegen 本就在关键路径外并行，调研稿 −40~60% 的预估被证伪，"调研先行再被实测
+校正"第三例）；真实收益 = **CPU −12%**（27.3→24.0 CPU 秒/全冷）、**磁盘 −60%**
+（target rlib 100→40MB，全 rlib 只剩 lib.rmeta）、少 22 次 rustc exec；低核/CI 机器
+wall 收益按 CPU 差推算。
