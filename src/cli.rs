@@ -185,6 +185,13 @@ fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
         if k == "CARGO_MAKEFLAGS" {
             continue;
         }
+        // MIRVM_* 是引擎控制面，永远取活环境（P1，coldstart-research §5）：录制回放
+        // 会把构建期旋钮化石化进假二进制——实证 MIRVM_NO_IR_CACHE 被化石化后 L2 对
+        // 该项目永久旁路且无迹象；MIRVM_TIMING 化石化则永久污染 stderr 差分。
+        // 编译语义变量（env!/CARGO_*）维持录制优先不变。
+        if k.starts_with("MIRVM_") {
+            continue;
+        }
         // SAFETY: 单线程阶段，尚未启动解释
         unsafe { std::env::set_var(k, v) };
     }
