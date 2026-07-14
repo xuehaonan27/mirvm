@@ -262,3 +262,31 @@ guest handler 是独立能力缺口，不应混入 M5.1 全绿宣称。
   线程 20k）native/mirvm 逐字节一致；`--stack-size 4m` 到界优雅诊断（深度 ~8k 帧）
   而非 SIGSEGV，非法尺寸清晰报错；diff.sh 21→22；full gate5 = **40 PASS / 2 XFAIL /
   0 FAIL**，加载 397ms、rayon 850ms 无回退；fmt/clippy/35 tests 全过。
+
+### 片 3：D8b simd 家族补全 —— 完成（2026-07-14）
+
+- **★ 顺带根治一颗潜伏静默错值雷**：旧 `SimdBin` 对全部 lane 按整数位运算——float
+  lane 的 `simd_add` 是整数加浮点位、比较是位比较（+0.0==−0.0 判不等、NaN 判自反），
+  **无任何 Trap**。当时仅因 corpus 全为整数 lane（hashbrown/memchr/sha2）未爆雷；任何
+  std::simd 浮点程序都会拿到错数。本片引入 `LaneKind{Int{signed},Float}` 贯穿全部
+  simd 语句，使"忘带元素类别"在类型层不可表示；lower 期校验浮点族/位族的 lane 类别，
+  执行器只留防御断言。
+- **覆盖 20 → 76/75+1**：算术 `mul/div/rem/neg/saturating_add/sub`（div/rem 除零响亮）、
+  `minimum/maximum_number_nsz`（宿主 min/max=minnum 在 nsz 允许集合内——首轮探针即
+  发现该名漏臂，"实现-重跑-再补"再应验）、浮点单目全套（fabs/fsqrt/ceil/floor/round×2/
+  trunc + 超越族 fsin/fcos/fexp/fexp2/flog×3 逐 lane 宿主 libm，与 native scalarize 同源）、
+  位族 `ctlz/cttz/ctpop/bswap/bitreverse`（与标量 BitUn 共用 helper）、`fma/relaxed_fma`
+  （宿主 mul_add）、`funnel_shl/shr`（u128 拼接窗口，移位越界响亮）、cast 族
+  `cast/as/cast_ptr/expose_provenance/with_exposed_provenance`（float→int 饱和=宿主 `as`；
+  指针族按整数位透传）、`select/select_bitmask`（mask 符号位判）、
+  `gather/scatter/masked_load/store`（**假 lane 绝不佯读/佯写**——哨兵探针实证）、
+  `extract_dyn/insert_dyn`（运行期索引越界响亮；insert 整体 memmove 防同址）、
+  `arith_offset`（pointee stride 逐 lane wrapping）、归约族 `reduce_{add,mul}_{ordered,
+  unordered}/and/or/xor/min/max`（顺序折叠恒在 unordered 允许集合内；float min/max=
+  minnum/maxnum 链）。`simd_geom` 统一取几何 + f16/f128 lane 拒绝（D8c 接入点）；
+  `select_bitmask` 第一泛参是标量掩码，前置特判。饱和逻辑提炼 `int_saturating`
+  与标量 IntSat 共用。
+- **验收**：`demo/simd_probe.rs`（float NaN/−0.0/inf 比较与算术、i8 饱和边界、符号
+  除法/移位、funnel、饱和 cast、gather/scatter 哨兵、masked、dyn lane、全归约）
+  native/mirvm **逐字节一致**；`corpus/c_portable_simd.rs`（点积 mul_add/字节扫描
+  bitmask/clamp/rotate/cast 真实画像）两侧一致进 corpus（26→27）；diff.sh 22→23。

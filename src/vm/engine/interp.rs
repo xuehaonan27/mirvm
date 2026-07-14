@@ -371,6 +371,57 @@ fn int_bin(op: IntBinOp, signed: bool, a: u64, b: u64, w: Width) -> u64 {
     r & m
 }
 
+/// 位单目（BitUn rvalue 与 SIMD lane 共用，D8b）。
+fn bit_un(op: super::ir::BitUnOp, v: u64, w: Width) -> u64 {
+    use super::ir::BitUnOp as B;
+    match (op, w) {
+        (B::Popcount, _) => (v & w.mask()).count_ones() as u64,
+        (B::Ctlz, Width::W8) => (v as u8).leading_zeros() as u64,
+        (B::Ctlz, Width::W16) => (v as u16).leading_zeros() as u64,
+        (B::Ctlz, Width::W32) => (v as u32).leading_zeros() as u64,
+        (B::Ctlz, Width::W64) => v.leading_zeros() as u64,
+        (B::Cttz, Width::W8) => (v as u8).trailing_zeros() as u64,
+        (B::Cttz, Width::W16) => (v as u16).trailing_zeros() as u64,
+        (B::Cttz, Width::W32) => (v as u32).trailing_zeros() as u64,
+        (B::Cttz, Width::W64) => v.trailing_zeros() as u64,
+        (B::Bswap, Width::W8) => v & 0xff,
+        (B::Bswap, Width::W16) => (v as u16).swap_bytes() as u64,
+        (B::Bswap, Width::W32) => (v as u32).swap_bytes() as u64,
+        (B::Bswap, Width::W64) => v.swap_bytes(),
+        (B::Bitreverse, Width::W8) => (v as u8).reverse_bits() as u64,
+        (B::Bitreverse, Width::W16) => (v as u16).reverse_bits() as u64,
+        (B::Bitreverse, Width::W32) => (v as u32).reverse_bits() as u64,
+        (B::Bitreverse, Width::W64) => v.reverse_bits(),
+    }
+}
+
+/// 饱和加/减/乘（IntSat rvalue 与 SIMD SatAdd/SatSub 共用，D8b）。
+fn int_saturating(op: OvfOp, signed: bool, av: u64, bv: u64, w: Width) -> u64 {
+    let (v, ovf) = int_ovf(op, signed, av, bv, w);
+    if !ovf {
+        v
+    } else if signed {
+        // 方向：加正溢出→MAX，其余按符号推
+        let (x, y) = (sext(av, w), sext(bv, w));
+        let toward_max = match op {
+            OvfOp::Add => y > 0,
+            OvfOp::Sub => y < 0,
+            OvfOp::Mul => (x > 0) == (y > 0),
+        };
+        let m = w.mask();
+        if toward_max {
+            m >> 1
+        } else {
+            ((m >> 1) + 1) & m
+        }
+    } else {
+        match op {
+            OvfOp::Sub => 0,
+            _ => w.mask(),
+        }
+    }
+}
+
 fn int_cmp(cc: IntCc, signed: bool, a: u64, b: u64, w: Width) -> u64 {
     let ord = if signed {
         sext(a, w).cmp(&sext(b, w))
@@ -674,27 +725,8 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
             }
         }
         Rvalue::BitUn { op, a } => {
-            use super::ir::BitUnOp as B;
             let (v, w) = eval_operand(ctx, base, a);
-            match (op, w) {
-                (B::Popcount, _) => (v & w.mask()).count_ones() as u64,
-                (B::Ctlz, Width::W8) => (v as u8).leading_zeros() as u64,
-                (B::Ctlz, Width::W16) => (v as u16).leading_zeros() as u64,
-                (B::Ctlz, Width::W32) => (v as u32).leading_zeros() as u64,
-                (B::Ctlz, Width::W64) => v.leading_zeros() as u64,
-                (B::Cttz, Width::W8) => (v as u8).trailing_zeros() as u64,
-                (B::Cttz, Width::W16) => (v as u16).trailing_zeros() as u64,
-                (B::Cttz, Width::W32) => (v as u32).trailing_zeros() as u64,
-                (B::Cttz, Width::W64) => v.trailing_zeros() as u64,
-                (B::Bswap, Width::W8) => v & 0xff,
-                (B::Bswap, Width::W16) => (v as u16).swap_bytes() as u64,
-                (B::Bswap, Width::W32) => (v as u32).swap_bytes() as u64,
-                (B::Bswap, Width::W64) => v.swap_bytes(),
-                (B::Bitreverse, Width::W8) => (v as u8).reverse_bits() as u64,
-                (B::Bitreverse, Width::W16) => (v as u16).reverse_bits() as u64,
-                (B::Bitreverse, Width::W32) => (v as u32).reverse_bits() as u64,
-                (B::Bitreverse, Width::W64) => v.reverse_bits(),
-            }
+            bit_un(*op, v, w)
         }
         Rvalue::AtomicLoad { addr, width } => {
             use std::sync::atomic::*;
@@ -740,29 +772,7 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
         Rvalue::IntSat { op, signed, a, b } => {
             let (av, w) = eval_operand(ctx, base, a);
             let (bv, _) = eval_operand(ctx, base, b);
-            let (v, ovf) = int_ovf(*op, *signed, av, bv, w);
-            if !ovf {
-                v
-            } else if *signed {
-                // 方向：加正溢出→MAX，其余按符号推
-                let (x, y) = (sext(av, w), sext(bv, w));
-                let toward_max = match op {
-                    OvfOp::Add => y > 0,
-                    OvfOp::Sub => y < 0,
-                    OvfOp::Mul => (x > 0) == (y > 0),
-                };
-                let m = w.mask();
-                if toward_max {
-                    m >> 1
-                } else {
-                    ((m >> 1) + 1) & m
-                }
-            } else {
-                match op {
-                    OvfOp::Sub => 0,
-                    _ => w.mask(),
-                }
-            }
+            int_saturating(*op, *signed, av, bv, w)
         }
         Rvalue::SimdReduce {
             all,
@@ -783,6 +793,66 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
                 }
             }
             acc as u64
+        }
+        Rvalue::SimdReduceArith {
+            op,
+            lane,
+            a,
+            lanes,
+            lane_bytes,
+        } => {
+            use super::ir::{LaneKind, SimdReduceOp as R};
+            let pa = eval_place_addr(ctx, base, a);
+            let lb = *lane_bytes as u64;
+            let lw = Width::from_bytes(lb).expect("lane 宽度");
+            let mut acc = mem_read(pa, lw);
+            for i in 1..*lanes as u64 {
+                let x = mem_read(pa + i * lb, lw);
+                acc = match *lane {
+                    LaneKind::Int { signed } => match op {
+                        R::Add => acc.wrapping_add(x) & lw.mask(),
+                        R::Mul => acc.wrapping_mul(x) & lw.mask(),
+                        R::And => acc & x,
+                        R::Or => acc | x,
+                        R::Xor => acc ^ x,
+                        R::Min | R::Max => {
+                            let take_x = if signed {
+                                let (a, b) = (sext(acc, lw), sext(x, lw));
+                                if matches!(op, R::Min) { b < a } else { b > a }
+                            } else if matches!(op, R::Min) {
+                                x < acc
+                            } else {
+                                x > acc
+                            };
+                            if take_x { x } else { acc }
+                        }
+                    },
+                    LaneKind::Float => {
+                        macro_rules! fr {
+                            ($t:ty) => {{
+                                let (fa, fx) = (<$t>::from_bits(acc as _), <$t>::from_bits(x as _));
+                                (match op {
+                                    R::Add => fa + fx,
+                                    R::Mul => fa * fx,
+                                    // minnum/maxnum 语义（与 LLVM reduce.fmin/fmax 一致）
+                                    R::Min => fa.min(fx),
+                                    R::Max => fa.max(fx),
+                                    R::And | R::Or | R::Xor => engine_abort(&format!(
+                                        "simd reduce {op:?} 不适用于浮点 lane"
+                                    )),
+                                })
+                                .to_bits() as u64
+                            }};
+                        }
+                        match lw {
+                            Width::W32 => fr!(f32),
+                            Width::W64 => fr!(f64),
+                            _ => engine_abort("浮点 lane 宽度非 4/8（lower 校验缺口）"),
+                        }
+                    }
+                };
+            }
+            acc
         }
         Rvalue::Cmp128 { cc, signed, a, b } => {
             let pa = eval_place_addr(ctx, base, a);
@@ -986,13 +1056,14 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
         }
         Stmt::SimdBin {
             op,
+            lane,
             dst,
             a,
             b,
             lanes,
             lane_bytes,
         } => {
-            use super::ir::SimdBinOp as S;
+            use super::ir::{LaneKind, SimdBinOp as S};
             let pd = eval_place_addr(ctx, base, dst);
             let pa = eval_place_addr(ctx, base, a);
             let pb = eval_place_addr(ctx, base, b);
@@ -1001,40 +1072,484 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             for i in 0..*lanes as u64 {
                 let x = mem_read(pa + i * lb, lw);
                 let y = mem_read(pb + i * lb, lw);
-                let r = match op {
-                    S::Eq => (int_cmp(IntCc::Eq, false, x, y, lw) != 0).then_some(lw.mask()),
-                    S::Ne => (int_cmp(IntCc::Ne, false, x, y, lw) != 0).then_some(lw.mask()),
-                    S::Lt { signed } => {
-                        (int_cmp(IntCc::Lt, *signed, x, y, lw) != 0).then_some(lw.mask())
-                    }
-                    S::Le { signed } => {
-                        (int_cmp(IntCc::Le, *signed, x, y, lw) != 0).then_some(lw.mask())
-                    }
-                    S::Gt { signed } => {
-                        (int_cmp(IntCc::Gt, *signed, x, y, lw) != 0).then_some(lw.mask())
-                    }
-                    S::Ge { signed } => {
-                        (int_cmp(IntCc::Ge, *signed, x, y, lw) != 0).then_some(lw.mask())
-                    }
-                    S::And => Some(x & y),
-                    S::Or => Some(x | y),
-                    S::Xor => Some(x ^ y),
-                    S::Add => Some(x.wrapping_add(y) & lw.mask()),
-                    S::Sub => Some(x.wrapping_sub(y) & lw.mask()),
-                    S::Shl => {
-                        if y >= u64::from(lw.bytes() * 8) {
-                            engine_abort("simd_shl shift count 超过 lane 位宽（guest UB）");
+                let r: u64 = match *lane {
+                    LaneKind::Int { signed } => {
+                        let cmp = |cc| (int_cmp(cc, signed, x, y, lw) != 0) as u64 * lw.mask();
+                        match op {
+                            S::Eq => cmp(IntCc::Eq),
+                            S::Ne => cmp(IntCc::Ne),
+                            S::Lt => cmp(IntCc::Lt),
+                            S::Le => cmp(IntCc::Le),
+                            S::Gt => cmp(IntCc::Gt),
+                            S::Ge => cmp(IntCc::Ge),
+                            S::And => x & y,
+                            S::Or => x | y,
+                            S::Xor => x ^ y,
+                            S::Add => x.wrapping_add(y) & lw.mask(),
+                            S::Sub => x.wrapping_sub(y) & lw.mask(),
+                            S::Mul => x.wrapping_mul(y) & lw.mask(),
+                            S::Div | S::Rem => {
+                                if y == 0 {
+                                    engine_abort("simd 整除以零（guest UB）");
+                                }
+                                let o = if matches!(op, S::Div) {
+                                    IntBinOp::Div
+                                } else {
+                                    IntBinOp::Rem
+                                };
+                                int_bin(o, signed, x, y, lw)
+                            }
+                            S::SatAdd => int_saturating(OvfOp::Add, signed, x, y, lw),
+                            S::SatSub => int_saturating(OvfOp::Sub, signed, x, y, lw),
+                            S::MinNum | S::MaxNum => engine_abort(&format!(
+                                "simd {op:?} 不适用于整数 lane（lower 校验缺口）"
+                            )),
+                            S::Shl | S::Shr => {
+                                if y >= u64::from(lw.bytes() * 8) {
+                                    engine_abort("simd 移位量超过 lane 位宽（guest UB）");
+                                }
+                                let o = if matches!(op, S::Shl) {
+                                    IntBinOp::Shl
+                                } else {
+                                    IntBinOp::Shr
+                                };
+                                int_bin(o, signed, x, y, lw)
+                            }
                         }
-                        Some(int_bin(IntBinOp::Shl, false, x, y, lw))
                     }
-                    S::Shr { signed } => {
-                        if y >= u64::from(lw.bytes() * 8) {
-                            engine_abort("simd_shr shift count 超过 lane 位宽（guest UB）");
+                    // 浮点 lane（D8b）：IEEE 语义直算——比较不是位比较
+                    //（+0.0==−0.0、NaN 不自反），算术不是整数加。
+                    LaneKind::Float => {
+                        macro_rules! fl {
+                            ($t:ty, $xb:expr, $yb:expr) => {{
+                                let (fx, fy) = (
+                                    <$t>::from_bits($xb as _),
+                                    <$t>::from_bits($yb as _),
+                                );
+                                let cmp = |t: bool| t as u64 * lw.mask();
+                                match op {
+                                    S::Eq => cmp(fx == fy),
+                                    S::Ne => cmp(fx != fy),
+                                    S::Lt => cmp(fx < fy),
+                                    S::Le => cmp(fx <= fy),
+                                    S::Gt => cmp(fx > fy),
+                                    S::Ge => cmp(fx >= fy),
+                                    S::Add => (fx + fy).to_bits() as u64,
+                                    S::Sub => (fx - fy).to_bits() as u64,
+                                    S::Mul => (fx * fy).to_bits() as u64,
+                                    S::Div => (fx / fy).to_bits() as u64,
+                                    S::Rem => (fx % fy).to_bits() as u64,
+                                    S::MinNum => fx.min(fy).to_bits() as u64,
+                                    S::MaxNum => fx.max(fy).to_bits() as u64,
+                                    S::And | S::Or | S::Xor | S::SatAdd | S::SatSub
+                                    | S::Shl | S::Shr => engine_abort(&format!(
+                                        "simd {op:?} 不适用于浮点 lane（lower 校验缺口）"
+                                    )),
+                                }
+                            }};
                         }
-                        Some(int_bin(IntBinOp::Shr, *signed, x, y, lw))
+                        match lw {
+                            Width::W32 => fl!(f32, x, y),
+                            Width::W64 => fl!(f64, x, y),
+                            _ => engine_abort("浮点 lane 宽度非 4/8（lower 校验缺口）"),
+                        }
                     }
                 };
-                mem_write(pd + i * lb, lw, r.unwrap_or(0));
+                mem_write(pd + i * lb, lw, r);
+            }
+        }
+        Stmt::SimdUn {
+            op,
+            lane,
+            dst,
+            a,
+            lanes,
+            lane_bytes,
+        } => {
+            use super::ir::{BitUnOp, LaneKind, SimdUnOp as U};
+            let pd = eval_place_addr(ctx, base, dst);
+            let pa = eval_place_addr(ctx, base, a);
+            let lb = *lane_bytes as u64;
+            let lw = Width::from_bytes(lb).expect("lane 宽度");
+            for i in 0..*lanes as u64 {
+                let x = mem_read(pa + i * lb, lw);
+                let r: u64 = match (*lane, op) {
+                    (LaneKind::Int { .. }, U::Neg) => x.wrapping_neg() & lw.mask(),
+                    (LaneKind::Int { .. }, U::Ctlz) => bit_un(BitUnOp::Ctlz, x, lw),
+                    (LaneKind::Int { .. }, U::Cttz) => bit_un(BitUnOp::Cttz, x, lw),
+                    (LaneKind::Int { .. }, U::Ctpop) => bit_un(BitUnOp::Popcount, x, lw),
+                    (LaneKind::Int { .. }, U::Bswap) => bit_un(BitUnOp::Bswap, x, lw),
+                    (LaneKind::Int { .. }, U::Bitreverse) => bit_un(BitUnOp::Bitreverse, x, lw),
+                    (LaneKind::Float, _) => {
+                        macro_rules! fu {
+                            ($t:ty) => {{
+                                let f = <$t>::from_bits(x as _);
+                                (match op {
+                                    U::Neg => -f,
+                                    U::Fabs => f.abs(),
+                                    U::Fsqrt => f.sqrt(),
+                                    U::Ceil => f.ceil(),
+                                    U::Floor => f.floor(),
+                                    U::Round => f.round(),
+                                    U::RoundTiesEven => f.round_ties_even(),
+                                    U::Trunc => f.trunc(),
+                                    U::Fsin => f.sin(),
+                                    U::Fcos => f.cos(),
+                                    U::Fexp => f.exp(),
+                                    U::Fexp2 => f.exp2(),
+                                    U::Flog => f.ln(),
+                                    U::Flog2 => f.log2(),
+                                    U::Flog10 => f.log10(),
+                                    U::Ctlz | U::Cttz | U::Ctpop | U::Bswap
+                                    | U::Bitreverse => engine_abort(&format!(
+                                        "simd {op:?} 不适用于浮点 lane（lower 校验缺口）"
+                                    )),
+                                })
+                                .to_bits() as u64
+                            }};
+                        }
+                        match lw {
+                            Width::W32 => fu!(f32),
+                            Width::W64 => fu!(f64),
+                            _ => engine_abort("浮点 lane 宽度非 4/8（lower 校验缺口）"),
+                        }
+                    }
+                    (LaneKind::Int { .. }, other) => engine_abort(&format!(
+                        "simd {other:?} 不适用于整数 lane（lower 校验缺口）"
+                    )),
+                };
+                mem_write(pd + i * lb, lw, r);
+            }
+        }
+        Stmt::SimdFma {
+            dst,
+            a,
+            b,
+            c,
+            lanes,
+            lane_bytes,
+        } => {
+            let pd = eval_place_addr(ctx, base, dst);
+            let pa = eval_place_addr(ctx, base, a);
+            let pb = eval_place_addr(ctx, base, b);
+            let pc = eval_place_addr(ctx, base, c);
+            let lb = *lane_bytes as u64;
+            let lw = Width::from_bytes(lb).expect("lane 宽度");
+            for i in 0..*lanes as u64 {
+                let (x, y, z) = (
+                    mem_read(pa + i * lb, lw),
+                    mem_read(pb + i * lb, lw),
+                    mem_read(pc + i * lb, lw),
+                );
+                let r = match lw {
+                    Width::W32 => f32::from_bits(x as u32)
+                        .mul_add(f32::from_bits(y as u32), f32::from_bits(z as u32))
+                        .to_bits() as u64,
+                    Width::W64 => f64::from_bits(x)
+                        .mul_add(f64::from_bits(y), f64::from_bits(z))
+                        .to_bits(),
+                    _ => engine_abort("simd_fma lane 宽度非 4/8（lower 校验缺口）"),
+                };
+                mem_write(pd + i * lb, lw, r);
+            }
+        }
+        Stmt::SimdFunnel {
+            left,
+            dst,
+            a,
+            b,
+            shift,
+            lanes,
+            lane_bytes,
+        } => {
+            let pd = eval_place_addr(ctx, base, dst);
+            let pa = eval_place_addr(ctx, base, a);
+            let pb = eval_place_addr(ctx, base, b);
+            let ps = eval_place_addr(ctx, base, shift);
+            let lb = *lane_bytes as u64;
+            let lw = Width::from_bytes(lb).expect("lane 宽度");
+            let bits = u64::from(lw.bytes() * 8);
+            for i in 0..*lanes as u64 {
+                let x = mem_read(pa + i * lb, lw) as u128;
+                let y = mem_read(pb + i * lb, lw) as u128;
+                let s = mem_read(ps + i * lb, lw);
+                if s >= bits {
+                    engine_abort("simd_funnel 移位量超过 lane 位宽（guest UB）");
+                }
+                // 拼接 [a:b]（2W 位），窗口取高/低 W 位
+                let cat = (x << bits) | y;
+                let r = if *left { cat << s >> bits } else { cat >> s };
+                mem_write(pd + i * lb, lw, r as u64 & lw.mask());
+            }
+        }
+        Stmt::SimdCast {
+            dst,
+            src,
+            lanes,
+            src_lane,
+            src_bytes,
+            dst_lane,
+            dst_bytes,
+        } => {
+            use super::ir::LaneKind as L;
+            let pd = eval_place_addr(ctx, base, dst);
+            let ps = eval_place_addr(ctx, base, src);
+            let (sb, db) = (*src_bytes as u64, *dst_bytes as u64);
+            let sw = Width::from_bytes(sb).expect("src lane 宽度");
+            let dw = Width::from_bytes(db).expect("dst lane 宽度");
+            for i in 0..*lanes as u64 {
+                let v = mem_read(ps + i * sb, sw);
+                let r: u64 = match (*src_lane, *dst_lane) {
+                    (L::Int { signed }, L::Int { .. }) => {
+                        // 窄化截断 / 加宽按源符号扩展
+                        let x = if signed { sext(v, sw) as u64 } else { v };
+                        x & dw.mask()
+                    }
+                    (L::Int { signed }, L::Float) => {
+                        let (f32b, f64b) = if signed {
+                            let x = sext(v, sw);
+                            ((x as f32).to_bits() as u64, (x as f64).to_bits())
+                        } else {
+                            ((v as f32).to_bits() as u64, (v as f64).to_bits())
+                        };
+                        match dw {
+                            Width::W32 => f32b,
+                            Width::W64 => f64b,
+                            _ => engine_abort("simd_cast 浮点 lane 宽度非 4/8"),
+                        }
+                    }
+                    (L::Float, L::Int { signed }) => {
+                        // f32→f64 精确保值 ⇒ 统一经 f64；宿主 `as` 即饱和语义
+                        //（simd_as；simd_cast 界外是 guest UB，饱和值在允许集合内）
+                        let x = match sw {
+                            Width::W32 => f32::from_bits(v as u32) as f64,
+                            Width::W64 => f64::from_bits(v),
+                            _ => engine_abort("simd_cast 浮点 lane 宽度非 4/8"),
+                        };
+                        let out = if signed {
+                            match dw {
+                                Width::W8 => x as i8 as u64,
+                                Width::W16 => x as i16 as u64,
+                                Width::W32 => x as i32 as u64,
+                                Width::W64 => x as i64 as u64,
+                            }
+                        } else {
+                            match dw {
+                                Width::W8 => x as u8 as u64,
+                                Width::W16 => x as u16 as u64,
+                                Width::W32 => x as u32 as u64,
+                                Width::W64 => x as u64,
+                            }
+                        };
+                        out & dw.mask()
+                    }
+                    (L::Float, L::Float) => match (sw, dw) {
+                        (Width::W32, Width::W64) => (f32::from_bits(v as u32) as f64).to_bits(),
+                        (Width::W64, Width::W32) => (f64::from_bits(v) as f32).to_bits() as u64,
+                        _ => v, // 同宽：位透传
+                    },
+                };
+                mem_write(pd + i * db, dw, r);
+            }
+        }
+        Stmt::SimdSelect {
+            mask,
+            mask_bytes,
+            a,
+            b,
+            dst,
+            lanes,
+            lane_bytes,
+        } => {
+            let pm = eval_place_addr(ctx, base, mask);
+            let pa = eval_place_addr(ctx, base, a);
+            let pb = eval_place_addr(ctx, base, b);
+            let pd = eval_place_addr(ctx, base, dst);
+            let (mb, lb) = (*mask_bytes as u64, *lane_bytes as u64);
+            let lw = Width::from_bytes(lb).expect("lane 宽度");
+            for i in 0..*lanes as u64 {
+                // mask lane 全 1/全 0（类型不变量）：按符号位（末字节最高位）判
+                let top = unsafe { *((pm + i * mb + mb - 1) as *const u8) };
+                let src = if top >> 7 != 0 { pa } else { pb };
+                mem_write(pd + i * lb, lw, mem_read(src + i * lb, lw));
+            }
+        }
+        Stmt::SimdSelectBitmask {
+            mask,
+            a,
+            b,
+            dst,
+            lanes,
+            lane_bytes,
+        } => {
+            let (m, _) = eval_operand(ctx, base, mask);
+            let pa = eval_place_addr(ctx, base, a);
+            let pb = eval_place_addr(ctx, base, b);
+            let pd = eval_place_addr(ctx, base, dst);
+            let lb = *lane_bytes as u64;
+            let lw = Width::from_bytes(lb).expect("lane 宽度");
+            for i in 0..*lanes as u64 {
+                let src = if m >> i & 1 != 0 { pa } else { pb };
+                mem_write(pd + i * lb, lw, mem_read(src + i * lb, lw));
+            }
+        }
+        Stmt::SimdGather {
+            passthru,
+            ptrs,
+            mask,
+            mask_bytes,
+            dst,
+            lanes,
+            lane_bytes,
+        } => {
+            let pv = eval_place_addr(ctx, base, passthru);
+            let pp = eval_place_addr(ctx, base, ptrs);
+            let pm = eval_place_addr(ctx, base, mask);
+            let pd = eval_place_addr(ctx, base, dst);
+            let (mb, lb) = (*mask_bytes as u64, *lane_bytes as u64);
+            let lw = Width::from_bytes(lb).expect("lane 宽度");
+            for i in 0..*lanes as u64 {
+                let top = unsafe { *((pm + i * mb + mb - 1) as *const u8) };
+                // 假 lane 绝不佯读（指针可能无效——这正是 mask 的语义）
+                let v = if top >> 7 != 0 {
+                    mem_read(mem_read(pp + i * 8, Width::W64), lw)
+                } else {
+                    mem_read(pv + i * lb, lw)
+                };
+                mem_write(pd + i * lb, lw, v);
+            }
+        }
+        Stmt::SimdScatter {
+            values,
+            ptrs,
+            mask,
+            mask_bytes,
+            lanes,
+            lane_bytes,
+        } => {
+            let pv = eval_place_addr(ctx, base, values);
+            let pp = eval_place_addr(ctx, base, ptrs);
+            let pm = eval_place_addr(ctx, base, mask);
+            let (mb, lb) = (*mask_bytes as u64, *lane_bytes as u64);
+            let lw = Width::from_bytes(lb).expect("lane 宽度");
+            for i in 0..*lanes as u64 {
+                let top = unsafe { *((pm + i * mb + mb - 1) as *const u8) };
+                if top >> 7 != 0 {
+                    mem_write(
+                        mem_read(pp + i * 8, Width::W64),
+                        lw,
+                        mem_read(pv + i * lb, lw),
+                    );
+                }
+            }
+        }
+        Stmt::SimdMaskedLoad {
+            mask,
+            mask_bytes,
+            base: base_op,
+            passthru,
+            dst,
+            lanes,
+            lane_bytes,
+        } => {
+            let pm = eval_place_addr(ctx, base, mask);
+            let (pbase, _) = eval_operand(ctx, base, base_op);
+            let pv = eval_place_addr(ctx, base, passthru);
+            let pd = eval_place_addr(ctx, base, dst);
+            let (mb, lb) = (*mask_bytes as u64, *lane_bytes as u64);
+            let lw = Width::from_bytes(lb).expect("lane 宽度");
+            for i in 0..*lanes as u64 {
+                let top = unsafe { *((pm + i * mb + mb - 1) as *const u8) };
+                let v = if top >> 7 != 0 {
+                    mem_read(pbase + i * lb, lw)
+                } else {
+                    mem_read(pv + i * lb, lw)
+                };
+                mem_write(pd + i * lb, lw, v);
+            }
+        }
+        Stmt::SimdMaskedStore {
+            mask,
+            mask_bytes,
+            base: base_op,
+            values,
+            lanes,
+            lane_bytes,
+        } => {
+            let pm = eval_place_addr(ctx, base, mask);
+            let (pbase, _) = eval_operand(ctx, base, base_op);
+            let pv = eval_place_addr(ctx, base, values);
+            let (mb, lb) = (*mask_bytes as u64, *lane_bytes as u64);
+            let lw = Width::from_bytes(lb).expect("lane 宽度");
+            for i in 0..*lanes as u64 {
+                let top = unsafe { *((pm + i * mb + mb - 1) as *const u8) };
+                if top >> 7 != 0 {
+                    mem_write(pbase + i * lb, lw, mem_read(pv + i * lb, lw));
+                }
+            }
+        }
+        Stmt::SimdExtractDyn {
+            src,
+            idx,
+            dst,
+            lanes,
+            lane_bytes,
+        } => {
+            let ps = eval_place_addr(ctx, base, src);
+            let (i, _) = eval_operand(ctx, base, idx);
+            if i >= u64::from(*lanes) {
+                engine_abort(&format!(
+                    "simd_extract_dyn 索引 {i} 越界（lanes={lanes}，guest UB）"
+                ));
+            }
+            let lb = *lane_bytes as u64;
+            let lw = Width::from_bytes(lb).expect("lane 宽度");
+            place_write(ctx, base, dst, mem_read(ps + i * lb, lw));
+        }
+        Stmt::SimdInsertDyn {
+            src,
+            idx,
+            val,
+            dst,
+            lanes,
+            lane_bytes,
+        } => {
+            let ps = eval_place_addr(ctx, base, src);
+            let pd = eval_place_addr(ctx, base, dst);
+            let (i, _) = eval_operand(ctx, base, idx);
+            if i >= u64::from(*lanes) {
+                engine_abort(&format!(
+                    "simd_insert_dyn 索引 {i} 越界（lanes={lanes}，guest UB）"
+                ));
+            }
+            let lb = *lane_bytes as u64;
+            let lw = Width::from_bytes(lb).expect("lane 宽度");
+            let (v, _) = eval_operand(ctx, base, val);
+            let total = u64::from(*lanes) * lb;
+            // dst 可能与 src 同址（x = insert_dyn(x,…)）：整体搬运用 memmove
+            unsafe {
+                std::ptr::copy(ps as *const u8, pd as *mut u8, total as usize);
+            }
+            mem_write(pd + i * lb, lw, v);
+        }
+        Stmt::SimdArithOffset {
+            ptrs,
+            offsets,
+            stride,
+            dst,
+            lanes,
+        } => {
+            let pp = eval_place_addr(ctx, base, ptrs);
+            let po = eval_place_addr(ctx, base, offsets);
+            let pd = eval_place_addr(ctx, base, dst);
+            for i in 0..*lanes as u64 {
+                let p = mem_read(pp + i * 8, Width::W64);
+                let off = mem_read(po + i * 8, Width::W64);
+                mem_write(
+                    pd + i * 8,
+                    Width::W64,
+                    p.wrapping_add(off.wrapping_mul(*stride)),
+                );
             }
         }
         Stmt::SimdSplat {

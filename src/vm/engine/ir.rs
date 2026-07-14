@@ -236,36 +236,90 @@ pub enum RmwOp {
     UMin,
 }
 
-/// SIMD 逐 lane 双目（M4.1 最小集：hashbrown SSE2 group 探测所需）。
-/// 比较产出 mask lane（真=全 1）；位运算逐 lane。
+/// SIMD lane 元素类别（M5.2 D8b）：所有 lane 运算按类别分派语义。
+/// 历史教训：M4.1 最小集对全部 lane 按整数位运算——float lane 的 add/cmp 是
+/// **静默错值**（+0.0/−0.0 相等性、NaN 自反性都不是位比较），当时仅因 corpus
+/// 全为整数 lane 未爆雷。本类型使"忘带类别"在类型层不可表示。
+/// 指针 lane 按 `Int{signed:false}` 处置（真实地址模型位透传）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaneKind {
+    Int {
+        signed: bool,
+    },
+    /// f32/f64（按 lane_bytes 分派；f16/f128 lane 在 lower 期拒绝，D8c）
+    Float,
+}
+
+/// SIMD 逐 lane 双目（M5.2 D8b 全家族；有符号性/浮点性收敛进 LaneKind）。
+/// 比较产出 mask lane（真=全 1）。
 #[derive(Clone, Copy, Debug)]
 pub enum SimdBinOp {
     Eq,
     Ne,
-    /// 有符号性来自 lane 元素类型（冻结）
-    Lt {
-        signed: bool,
-    },
-    Le {
-        signed: bool,
-    },
-    Gt {
-        signed: bool,
-    },
-    Ge {
-        signed: bool,
-    },
+    Lt,
+    Le,
+    Gt,
+    Ge,
     And,
     Or,
     Xor,
     Add,
     Sub,
+    Mul,
+    Div,
+    Rem,
+    /// 饱和加/减（整数 lane 专属）
+    SatAdd,
+    SatSub,
+    /// minimum/maximum_number_nsz（浮点 lane 专属）：minnum/maxnum 语义 +
+    /// "±0.0 任取"自由——宿主 `f::min/max`（=minnum/maxnum）恒在允许集合内。
+    MinNum,
+    MaxNum,
     /// 左移对 signed/unsigned lane 的位级结果相同。
     Shl,
-    /// 右移按 lane 类型选择算术/逻辑语义。
-    Shr {
-        signed: bool,
-    },
+    /// 右移按 lane 类别选择算术/逻辑语义。
+    Shr,
+}
+
+/// SIMD 逐 lane 单目（M5.2 D8b）。浮点族要求 Float lane；位族要求 Int lane
+/// （lower 期校验）。超越函数逐 lane 调宿主 libm——native 无 fast-math 时
+/// scalarize 到同一 libm，同源即位同。
+#[derive(Clone, Copy, Debug)]
+pub enum SimdUnOp {
+    Neg,
+    Fabs,
+    Fsqrt,
+    Ceil,
+    Floor,
+    Round,
+    RoundTiesEven,
+    Trunc,
+    Fsin,
+    Fcos,
+    Fexp,
+    Fexp2,
+    Flog,
+    Flog2,
+    Flog10,
+    Ctlz,
+    Cttz,
+    Ctpop,
+    Bswap,
+    Bitreverse,
+}
+
+/// SIMD 横向归约（M5.2 D8b）：ordered/unordered 均按 lane 序折叠——unordered
+/// 的"任意结合序"集合包含顺序折叠，故顺序实现恒合规。float min/max 用宿主
+/// `f{32,64}::min/max`（minnum/maxnum 语义，与 LLVM reduce.fmin/fmax 一致）。
+#[derive(Clone, Copy, Debug)]
+pub enum SimdReduceOp {
+    Add,
+    Mul,
+    Min,
+    Max,
+    And,
+    Or,
+    Xor,
 }
 
 #[derive(Clone, Debug)]
@@ -434,6 +488,15 @@ pub enum Rvalue {
         lanes: u16,
         lane_bytes: u8,
     },
+    /// SIMD 算术/位横向归约（M5.2 D8b：simd_reduce_{add,mul}_{ordered,unordered}
+    /// 与 and/or/xor/min/max）→ lane 宽标量（float 归位型）。按 lane 序折叠。
+    SimdReduceArith {
+        op: SimdReduceOp,
+        lane: LaneKind,
+        a: PlaceExpr,
+        lanes: u16,
+        lane_bytes: u8,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -522,11 +585,140 @@ pub enum Stmt {
     /// SIMD 逐 lane 双目（dst/a/b 是向量 place；几何冻结自 layout）
     SimdBin {
         op: SimdBinOp,
+        lane: LaneKind,
         dst: PlaceExpr,
         a: PlaceExpr,
         b: PlaceExpr,
         lanes: u16,
         lane_bytes: u8,
+    },
+    /// SIMD 逐 lane 单目（M5.2 D8b）
+    SimdUn {
+        op: SimdUnOp,
+        lane: LaneKind,
+        dst: PlaceExpr,
+        a: PlaceExpr,
+        lanes: u16,
+        lane_bytes: u8,
+    },
+    /// SIMD 融合乘加（simd_fma/simd_relaxed_fma；Float lane 专属，宿主 mul_add
+    /// 单次舍入——relaxed 允许融合/不融合，融合恒在允许集合内）
+    SimdFma {
+        dst: PlaceExpr,
+        a: PlaceExpr,
+        b: PlaceExpr,
+        c: PlaceExpr,
+        lanes: u16,
+        lane_bytes: u8,
+    },
+    /// SIMD 漏斗移位（simd_funnel_shl/shr；Int lane，shift 是逐 lane 向量；
+    /// shift ≥ lane 位宽 = guest UB → 响亮终止）
+    SimdFunnel {
+        left: bool,
+        dst: PlaceExpr,
+        a: PlaceExpr,
+        b: PlaceExpr,
+        shift: PlaceExpr,
+        lanes: u16,
+        lane_bytes: u8,
+    },
+    /// SIMD 逐 lane 转换（simd_cast/simd_as/指针族；lanes 两侧相同、宽度可异）。
+    /// saturate：simd_as 的 float→int 语义（Rust `as`：饱和 + NaN→0）；
+    /// simd_cast 的界外是 guest UB，实现同走饱和（UB 下任何值都在允许集合内）。
+    SimdCast {
+        dst: PlaceExpr,
+        src: PlaceExpr,
+        lanes: u16,
+        src_lane: LaneKind,
+        src_bytes: u8,
+        dst_lane: LaneKind,
+        dst_bytes: u8,
+    },
+    /// SIMD 逐 lane 选择（simd_select：mask lane 全 1 取 a、全 0 取 b——由
+    /// 类型不变量保证，按符号位判；mask 向量 lane 宽可异于数据 lane）
+    SimdSelect {
+        mask: PlaceExpr,
+        mask_bytes: u8,
+        a: PlaceExpr,
+        b: PlaceExpr,
+        dst: PlaceExpr,
+        lanes: u16,
+        lane_bytes: u8,
+    },
+    /// SIMD 位掩码选择（simd_select_bitmask：标量掩码第 i 位选 lane i）
+    SimdSelectBitmask {
+        mask: Operand,
+        a: PlaceExpr,
+        b: PlaceExpr,
+        dst: PlaceExpr,
+        lanes: u16,
+        lane_bytes: u8,
+    },
+    /// SIMD 散布地址读（simd_gather(val, ptr, mask)：mask lane 真→读 *ptr[i]，
+    /// 假→取 passthru lane；逐 lane 条件访存，假 lane **绝不佯读**——防越界）
+    SimdGather {
+        passthru: PlaceExpr,
+        ptrs: PlaceExpr,
+        mask: PlaceExpr,
+        mask_bytes: u8,
+        dst: PlaceExpr,
+        lanes: u16,
+        lane_bytes: u8,
+    },
+    /// SIMD 散布地址写（simd_scatter(val, ptr, mask)；假 lane 绝不佯写）
+    SimdScatter {
+        values: PlaceExpr,
+        ptrs: PlaceExpr,
+        mask: PlaceExpr,
+        mask_bytes: u8,
+        lanes: u16,
+        lane_bytes: u8,
+    },
+    /// SIMD 连续掩码读（simd_masked_load(mask, base, val)：base 是标量元素指针，
+    /// lane i 地址 = base + i×lane_bytes；假 lane 取 passthru，绝不佯读）
+    SimdMaskedLoad {
+        mask: PlaceExpr,
+        mask_bytes: u8,
+        base: Operand,
+        passthru: PlaceExpr,
+        dst: PlaceExpr,
+        lanes: u16,
+        lane_bytes: u8,
+    },
+    /// SIMD 连续掩码写（simd_masked_store(mask, base, val)；假 lane 绝不佯写）
+    SimdMaskedStore {
+        mask: PlaceExpr,
+        mask_bytes: u8,
+        base: Operand,
+        values: PlaceExpr,
+        lanes: u16,
+        lane_bytes: u8,
+    },
+    /// SIMD 运行期索引抽取（simd_extract_dyn；越界 = guest UB → 响亮终止）
+    SimdExtractDyn {
+        src: PlaceExpr,
+        idx: Operand,
+        dst: ScalarPlace,
+        lanes: u16,
+        lane_bytes: u8,
+    },
+    /// SIMD 运行期索引插入（simd_insert_dyn：dst = src 整体拷贝后改 idx lane）
+    SimdInsertDyn {
+        src: PlaceExpr,
+        idx: Operand,
+        val: Operand,
+        dst: PlaceExpr,
+        lanes: u16,
+        lane_bytes: u8,
+    },
+    /// SIMD 指针逐 lane 位移（simd_arith_offset：ptr[i] + offset[i]×stride，
+    /// wrapping——真实地址模型下即语义）
+    SimdArithOffset {
+        ptrs: PlaceExpr,
+        offsets: PlaceExpr,
+        stride: u64,
+        dst: PlaceExpr,
+        lanes: u16,
     },
     /// SIMD 广播（simd_splat / _mm_set1）：val 复制到每个 lane
     SimdSplat {

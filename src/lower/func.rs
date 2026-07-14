@@ -3447,8 +3447,32 @@ impl<'tcx> LowerCx<'tcx, '_> {
 }
 
 impl<'tcx> LowerCx<'tcx, '_> {
-    /// SIMD 最小集（m4.1-design §4.1：hashbrown SSE2 group 探测；lane 几何冻结自
-    /// SimdVector layout，每操作 = 逐 lane 宿主循环）。未支持的 simd_* = Err（Trap 占位）。
+    /// SIMD lane 几何 + 元素类别（M5.2 D8b）：LaneKind 使"忘带类别"不可表示——
+    /// M4.1 曾对全部 lane 按整数位运算，float lane 的 add/cmp 是静默错值（当时仅因
+    /// corpus 全为整数 lane 未爆雷）。f16/f128 lane 在此拒绝（D8c 接入点）。
+    fn simd_geom(&mut self, ty: Ty<'tcx>) -> Result<(u16, u8, ir::LaneKind, u64), String> {
+        let layout = self.layout_of(ty)?;
+        let rustc_abi::BackendRepr::SimdVector { element, count } = layout.backend_repr else {
+            return Err(format!("simd intrinsic 非向量参（{ty}）"));
+        };
+        let dl = self.tcx.data_layout();
+        let lane_bytes = element.size(dl).bytes() as u8;
+        let lane = match element.primitive() {
+            rustc_abi::Primitive::Int(_, s) => ir::LaneKind::Int { signed: s },
+            rustc_abi::Primitive::Float(f) => {
+                if !matches!(f, rustc_abi::Float::F32 | rustc_abi::Float::F64) {
+                    return Err(format!("simd 浮点 lane {f:?}（f16/f128，D8c）"));
+                }
+                ir::LaneKind::Float
+            }
+            // 指针 lane：真实地址模型下按无符号整数位处置
+            rustc_abi::Primitive::Pointer(_) => ir::LaneKind::Int { signed: false },
+        };
+        Ok((count as u16, lane_bytes, lane, layout.size.bytes()))
+    }
+
+    /// SIMD 全家族展开（M5.2 D8b；每操作 = 逐 lane 宿主循环，语义按 LaneKind 分派）。
+    /// 未支持的 simd_* = Err（Trap 占位）。
     fn expand_simd(
         &mut self,
         name: &str,
@@ -3456,17 +3480,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
         destination: &mir::Place<'tcx>,
     ) -> Result<Vec<Stmt>, String> {
-        use ir::SimdBinOp as S;
-        // lane 几何：T = 第一个泛型参（向量类型）
-        let vec_ty = inst.args.type_at(0);
-        let layout = self.layout_of(vec_ty)?;
-        let rustc_abi::BackendRepr::SimdVector { element, count } = layout.backend_repr else {
-            return Err(format!("simd intrinsic 非向量参（{vec_ty}）"));
-        };
-        let dl = self.tcx.data_layout();
-        let lane_bytes = element.size(dl).bytes() as u8;
-        let lanes = count as u16;
-        let signed = matches!(element.primitive(), rustc_abi::Primitive::Int(_, true));
+        use ir::{LaneKind, SimdBinOp as S, SimdReduceOp as R, SimdUnOp as U};
         // 向量 operand → place 地址表达式（Bytes 通道；常量已物化进冻结区）
         let vplace = |cx: &mut Self, op: &mir::Operand<'tcx>| -> Result<PlaceExpr, String> {
             match cx.lower_operand(op)? {
@@ -3474,12 +3488,33 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 _ => Err("simd 实参非向量（M4.1+）".into()),
             }
         };
+        // 异形臂前置：第一泛参不是向量（标量位掩码），几何取自数据向量
+        if name == "simd_select_bitmask" {
+            let (lanes, lane_bytes, _, _) = self.simd_geom(inst.args.type_at(1))?;
+            let mask = self.lower_operand_scalar(&args[0].node)?;
+            let a = vplace(self, &args[1].node)?;
+            let b = vplace(self, &args[2].node)?;
+            let dst = self.resolve_place(destination)?.expr();
+            return Ok(vec![Stmt::SimdSelectBitmask {
+                mask,
+                a,
+                b,
+                dst,
+                lanes,
+                lane_bytes,
+            }]);
+        }
+        // 常规几何：T = 第一个泛型参（多数臂的数据向量；select/masked 的 mask 向量）
+        let vec_ty = inst.args.type_at(0);
+        let (lanes, lane_bytes, lane, vec_size) = self.simd_geom(vec_ty)?;
+        let count = lanes as u64;
         let bin = |cx: &mut Self, op: S| -> Result<Vec<Stmt>, String> {
             let a = vplace(cx, &args[0].node)?;
             let b = vplace(cx, &args[1].node)?;
             let dst = cx.resolve_place(destination)?.expr();
             Ok(vec![Stmt::SimdBin {
                 op,
+                lane,
                 dst,
                 a,
                 b,
@@ -3487,20 +3522,312 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 lane_bytes,
             }])
         };
+        // 单目（浮点族/位族的 lane 类别在此校验——执行器只留防御断言）
+        let un = |cx: &mut Self, op: U, need: Option<LaneKind>| -> Result<Vec<Stmt>, String> {
+            if let Some(need) = need {
+                let ok = match need {
+                    LaneKind::Float => lane == LaneKind::Float,
+                    LaneKind::Int { .. } => matches!(lane, LaneKind::Int { .. }),
+                };
+                if !ok {
+                    return Err(format!("{name} 要求 {need:?} lane，实为 {lane:?}"));
+                }
+            }
+            let a = vplace(cx, &args[0].node)?;
+            let dst = cx.resolve_place(destination)?.expr();
+            Ok(vec![Stmt::SimdUn {
+                op,
+                lane,
+                dst,
+                a,
+                lanes,
+                lane_bytes,
+            }])
+        };
+        let reduce = |cx: &mut Self, op: R| -> Result<Vec<Stmt>, String> {
+            let a = vplace(cx, &args[0].node)?;
+            let (dst_p, w) = cx.place_scalar(destination)?;
+            Ok(vec![Stmt::Assign {
+                dst: dst_p.scalar_place(w),
+                rv: Rvalue::SimdReduceArith {
+                    op,
+                    lane,
+                    a,
+                    lanes,
+                    lane_bytes,
+                },
+            }])
+        };
+        const FLOAT: Option<LaneKind> = Some(LaneKind::Float);
+        const INT: Option<LaneKind> = Some(LaneKind::Int { signed: false });
         match name {
             "simd_eq" => bin(self, S::Eq),
             "simd_ne" => bin(self, S::Ne),
-            "simd_lt" => bin(self, S::Lt { signed }),
-            "simd_le" => bin(self, S::Le { signed }),
-            "simd_gt" => bin(self, S::Gt { signed }),
-            "simd_ge" => bin(self, S::Ge { signed }),
+            "simd_lt" => bin(self, S::Lt),
+            "simd_le" => bin(self, S::Le),
+            "simd_gt" => bin(self, S::Gt),
+            "simd_ge" => bin(self, S::Ge),
             "simd_and" => bin(self, S::And),
             "simd_or" => bin(self, S::Or),
             "simd_xor" => bin(self, S::Xor),
             "simd_add" => bin(self, S::Add),
             "simd_sub" => bin(self, S::Sub),
+            "simd_mul" => bin(self, S::Mul),
+            "simd_div" => bin(self, S::Div),
+            "simd_rem" => bin(self, S::Rem),
+            "simd_saturating_add" => bin(self, S::SatAdd),
+            "simd_saturating_sub" => bin(self, S::SatSub),
+            "simd_minimum_number_nsz" | "simd_maximum_number_nsz" => {
+                if lane != LaneKind::Float {
+                    return Err(format!("{name} 要求浮点 lane，实为 {lane:?}"));
+                }
+                bin(
+                    self,
+                    if name == "simd_minimum_number_nsz" {
+                        S::MinNum
+                    } else {
+                        S::MaxNum
+                    },
+                )
+            }
             "simd_shl" => bin(self, S::Shl),
-            "simd_shr" => bin(self, S::Shr { signed }),
+            "simd_shr" => bin(self, S::Shr),
+            "simd_neg" => un(self, U::Neg, None),
+            "simd_fabs" => un(self, U::Fabs, FLOAT),
+            "simd_fsqrt" => un(self, U::Fsqrt, FLOAT),
+            "simd_ceil" => un(self, U::Ceil, FLOAT),
+            "simd_floor" => un(self, U::Floor, FLOAT),
+            "simd_round" => un(self, U::Round, FLOAT),
+            "simd_round_ties_even" => un(self, U::RoundTiesEven, FLOAT),
+            "simd_trunc" => un(self, U::Trunc, FLOAT),
+            "simd_fsin" => un(self, U::Fsin, FLOAT),
+            "simd_fcos" => un(self, U::Fcos, FLOAT),
+            "simd_fexp" => un(self, U::Fexp, FLOAT),
+            "simd_fexp2" => un(self, U::Fexp2, FLOAT),
+            "simd_flog" => un(self, U::Flog, FLOAT),
+            "simd_flog2" => un(self, U::Flog2, FLOAT),
+            "simd_flog10" => un(self, U::Flog10, FLOAT),
+            "simd_ctlz" => un(self, U::Ctlz, INT),
+            "simd_cttz" => un(self, U::Cttz, INT),
+            "simd_ctpop" => un(self, U::Ctpop, INT),
+            "simd_bswap" => un(self, U::Bswap, INT),
+            "simd_bitreverse" => un(self, U::Bitreverse, INT),
+            "simd_fma" | "simd_relaxed_fma" => {
+                if lane != LaneKind::Float {
+                    return Err(format!("{name} 要求浮点 lane，实为 {lane:?}"));
+                }
+                let a = vplace(self, &args[0].node)?;
+                let b = vplace(self, &args[1].node)?;
+                let c = vplace(self, &args[2].node)?;
+                let dst = self.resolve_place(destination)?.expr();
+                Ok(vec![Stmt::SimdFma {
+                    dst,
+                    a,
+                    b,
+                    c,
+                    lanes,
+                    lane_bytes,
+                }])
+            }
+            "simd_funnel_shl" | "simd_funnel_shr" => {
+                if !matches!(lane, LaneKind::Int { .. }) {
+                    return Err(format!("{name} 要求整数 lane，实为 {lane:?}"));
+                }
+                let a = vplace(self, &args[0].node)?;
+                let b = vplace(self, &args[1].node)?;
+                let shift = vplace(self, &args[2].node)?;
+                let dst = self.resolve_place(destination)?.expr();
+                Ok(vec![Stmt::SimdFunnel {
+                    left: name == "simd_funnel_shl",
+                    dst,
+                    a,
+                    b,
+                    shift,
+                    lanes,
+                    lane_bytes,
+                }])
+            }
+            "simd_cast"
+            | "simd_as"
+            | "simd_cast_ptr"
+            | "simd_expose_provenance"
+            | "simd_with_exposed_provenance" => {
+                // <T, U>(x: T) -> U：目的几何从 destination place 取。
+                // 指针族强制整数视角（真实地址模型：provenance 即位透传）。
+                let ptr_family = name != "simd_cast" && name != "simd_as";
+                let dst_p = self.resolve_place(destination)?;
+                let (dst_lanes, dst_bytes, dst_lane, _) = self.simd_geom(dst_p.ty)?;
+                if dst_lanes != lanes {
+                    return Err(format!("{name} 两侧 lanes 不等（{lanes} vs {dst_lanes}）"));
+                }
+                let (src_lane, dst_lane) = if ptr_family {
+                    let i = LaneKind::Int { signed: false };
+                    (i, i)
+                } else {
+                    (lane, dst_lane)
+                };
+                let src = vplace(self, &args[0].node)?;
+                Ok(vec![Stmt::SimdCast {
+                    dst: dst_p.expr(),
+                    src,
+                    lanes,
+                    src_lane,
+                    src_bytes: lane_bytes,
+                    dst_lane,
+                    dst_bytes,
+                }])
+            }
+            "simd_select" => {
+                // <M, T>(mask: M, if_true: T, if_false: T)：几何主体是数据向量
+                let (d_lanes, d_bytes, _, _) = self.simd_geom(inst.args.type_at(1))?;
+                if d_lanes != lanes {
+                    return Err("simd_select mask/data lanes 不等".into());
+                }
+                let mask = vplace(self, &args[0].node)?;
+                let a = vplace(self, &args[1].node)?;
+                let b = vplace(self, &args[2].node)?;
+                let dst = self.resolve_place(destination)?.expr();
+                Ok(vec![Stmt::SimdSelect {
+                    mask,
+                    mask_bytes: lane_bytes,
+                    a,
+                    b,
+                    dst,
+                    lanes,
+                    lane_bytes: d_bytes,
+                }])
+            }
+            "simd_gather" | "simd_scatter" => {
+                // <T, U, V>(val: T, ptr: U, mask: V)：T=数据向量（gather 的 passthru /
+                // scatter 的 values），U=指针向量（lane 恒 8B），V=mask 向量
+                let (p_lanes, p_bytes, _, _) = self.simd_geom(inst.args.type_at(1))?;
+                let (m_lanes, m_bytes, _, _) = self.simd_geom(inst.args.type_at(2))?;
+                if p_lanes != lanes || m_lanes != lanes || p_bytes != 8 {
+                    return Err(format!(
+                        "{name} 几何不一致（data={lanes} ptr={p_lanes}×{p_bytes}B mask={m_lanes}）"
+                    ));
+                }
+                let val = vplace(self, &args[0].node)?;
+                let ptrs = vplace(self, &args[1].node)?;
+                let mask = vplace(self, &args[2].node)?;
+                if name == "simd_gather" {
+                    let dst = self.resolve_place(destination)?.expr();
+                    Ok(vec![Stmt::SimdGather {
+                        passthru: val,
+                        ptrs,
+                        mask,
+                        mask_bytes: m_bytes,
+                        dst,
+                        lanes,
+                        lane_bytes,
+                    }])
+                } else {
+                    Ok(vec![Stmt::SimdScatter {
+                        values: val,
+                        ptrs,
+                        mask,
+                        mask_bytes: m_bytes,
+                        lanes,
+                        lane_bytes,
+                    }])
+                }
+            }
+            "simd_masked_load" | "simd_masked_store" => {
+                // <V, U, T, ALIGN>(mask: V, ptr: U, val: T)：第一泛参是 mask 向量；
+                // ptr 是标量元素指针，lane i 地址 = ptr + i×lane。ALIGN 只影响 guest
+                // 的 UB 契约（引擎访存本就逐 lane 非对齐安全）。
+                let (d_lanes, d_bytes, _, _) = self.simd_geom(inst.args.type_at(2))?;
+                if d_lanes != lanes {
+                    return Err(format!("{name} mask/data lanes 不等"));
+                }
+                let mask = vplace(self, &args[0].node)?;
+                let base = self.lower_operand_scalar(&args[1].node)?;
+                let val = vplace(self, &args[2].node)?;
+                if name == "simd_masked_load" {
+                    let dst = self.resolve_place(destination)?.expr();
+                    Ok(vec![Stmt::SimdMaskedLoad {
+                        mask,
+                        mask_bytes: lane_bytes,
+                        base,
+                        passthru: val,
+                        dst,
+                        lanes,
+                        lane_bytes: d_bytes,
+                    }])
+                } else {
+                    Ok(vec![Stmt::SimdMaskedStore {
+                        mask,
+                        mask_bytes: lane_bytes,
+                        base,
+                        values: val,
+                        lanes,
+                        lane_bytes: d_bytes,
+                    }])
+                }
+            }
+            "simd_extract_dyn" => {
+                let src = vplace(self, &args[0].node)?;
+                let idx = self.lower_operand_scalar(&args[1].node)?;
+                let (dst_p, w) = self.place_scalar(destination)?;
+                if w.bytes() as u8 != lane_bytes {
+                    return Err(format!(
+                        "simd_extract_dyn lane 宽不匹配（vector={lane_bytes}, result={}）",
+                        w.bytes()
+                    ));
+                }
+                Ok(vec![Stmt::SimdExtractDyn {
+                    src,
+                    idx,
+                    dst: dst_p.scalar_place(w),
+                    lanes,
+                    lane_bytes,
+                }])
+            }
+            "simd_insert_dyn" => {
+                let src = vplace(self, &args[0].node)?;
+                let idx = self.lower_operand_scalar(&args[1].node)?;
+                let val = self.lower_operand_scalar(&args[2].node)?;
+                if val.width().bytes() as u8 != lane_bytes {
+                    return Err(format!(
+                        "simd_insert_dyn lane 宽不匹配（vector={lane_bytes}, value={}）",
+                        val.width().bytes()
+                    ));
+                }
+                let dst = self.resolve_place(destination)?.expr();
+                Ok(vec![Stmt::SimdInsertDyn {
+                    src,
+                    idx,
+                    val,
+                    dst,
+                    lanes,
+                    lane_bytes,
+                }])
+            }
+            "simd_arith_offset" => {
+                // <T, U>(ptr: T, offset: U)：stride = 指针 lane 的 pointee 尺寸
+                let (_, elem_ty) = vec_ty.simd_size_and_type(self.tcx);
+                let pointee = elem_ty
+                    .builtin_deref(true)
+                    .ok_or_else(|| format!("simd_arith_offset lane 非指针（{elem_ty}）"))?;
+                let stride = self.layout_of(pointee)?.size.bytes();
+                let ptrs = vplace(self, &args[0].node)?;
+                let offsets = vplace(self, &args[1].node)?;
+                let dst = self.resolve_place(destination)?.expr();
+                Ok(vec![Stmt::SimdArithOffset {
+                    ptrs,
+                    offsets,
+                    stride,
+                    dst,
+                    lanes,
+                }])
+            }
+            "simd_reduce_add_ordered" | "simd_reduce_add_unordered" => reduce(self, R::Add),
+            "simd_reduce_mul_ordered" | "simd_reduce_mul_unordered" => reduce(self, R::Mul),
+            "simd_reduce_and" => reduce(self, R::And),
+            "simd_reduce_or" => reduce(self, R::Or),
+            "simd_reduce_xor" => reduce(self, R::Xor),
+            "simd_reduce_min" => reduce(self, R::Min),
+            "simd_reduce_max" => reduce(self, R::Max),
             "simd_bitmask" => {
                 let a = vplace(self, &args[0].node)?;
                 let (dst_p, w) = self.place_scalar(destination)?;
@@ -3563,7 +3890,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     ));
                 }
                 let dst = self.resolve_place(destination)?;
-                let size = u32::try_from(layout.size.bytes())
+                let size = u32::try_from(vec_size)
                     .map_err(|_| "simd_insert 向量尺寸超过 u32".to_string())?;
                 let lane_offset = idx
                     .checked_mul(u64::from(lane_bytes))
@@ -3701,7 +4028,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 else {
                     return Err("simd_splat 目标非向量".into());
                 };
-                let lb = element.size(dl).bytes() as u8;
+                let lb = element.size(self.tcx.data_layout()).bytes() as u8;
                 let val = self.lower_operand_scalar(&args[0].node)?;
                 Ok(vec![Stmt::SimdSplat {
                     dst: dst_p.expr(),
