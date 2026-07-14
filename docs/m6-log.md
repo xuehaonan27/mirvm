@@ -101,3 +101,27 @@ gate0–4）。两个不可缓存类（告警、environ 类宿主地址直嵌）
 抓获并以"诚实不缓存"落契约——防静默错值纪律在缓存层的直接兑现。轨 C ③④⑤
 （依赖剪 codegen、mode B 打包、发行）未立项；下一阶段默认 = M5.3 方法级 JIT
 （用户拍板）。
+
+## 片3 前置调研：冷启动/lower 解剖（2026-07-14，只调研不施工）
+
+用户裁定：**M5.3 Pending**——上一节"下一阶段默认 = M5.3"作废；冷启动（lower 相）是
+当前一等问题，先调研后施工。全文（方法、数据、杠杆清单与建议顺序 S1–S4）见
+[coldstart-research.md](coldstart-research.md)。要点：
+
+- 单文件冷启动 ~430ms 墙钟：**lower ~310ms 近常数**（std 税；T_lower ≈ 0.10ms ×
+  instance 数，fib 3027 个与 ecosystem 13209 个完全线性），frontend 仅 15–37ms，
+  启动仪式 ~55ms（ensure_sysroot 每跑 spawn 两个 rustc 子进程——**warm 也在付**）。
+- perf 归因：lower 相 ~75% 耗在 rustc 机器（查询/interning 27.5% + rmeta 解码 10.5% +
+  其内存代谢 kernel 35% + malloc 10%），**我方发射代码仅 6.2%**——优化方向只能是
+  "少碰 rustc"（懒降低/预降低底座）或"并行碰"（-Zthreads）。
+- **执行集 ≪ 降低集**（临时探针实测）：fib 230/3027（7.6%）、threads_channel
+  493/3467、ecosystem 3840/13209（29%）——急切降低做了 3–13× 多余工作。
+- cargo 形态全冷 10.6s = **7.7s 依赖构建 + 2.9s runner**；target 依赖今天跑完整
+  codegen+link（`ar t` 实证 `.rcgu.o`），mirvm 只消费 rmeta MIR——D9d 剪枝标的实证。
+- **L2 账本复核有效**（ecosystem 干净环境 store 45ms / warm load 97ms，与片2 账本
+  一致）。调研顺带抓到三个缓存盲区（在案待修，见调研文 §5）：**P1** runner 把构建期
+  环境整份化石化进假二进制（MIRVM_* 引擎旋钮被回放重设——实证 MIRVM_NO_IR_CACHE
+  被化石化后 L2 永久旁路且无迹象）；**P2** 空 stub `.d` 使源码编辑永不触发假 bin
+  重录（化石洗不掉）；**P3** diff_cargo 无 L2 warm 复跑维度（runner 缓存路径零 gate
+  覆盖，本次污染任何 gate 都抓不到）。
+- 测量探针（interp 执行集计数、store 拒因）均已回滚未提交；复原后 diff_cargo 5/5。
