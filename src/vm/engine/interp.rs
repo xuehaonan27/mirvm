@@ -371,6 +371,18 @@ fn int_bin(op: IntBinOp, signed: bool, a: u64, b: u64, w: Width) -> u64 {
     r & m
 }
 
+/// 冻结 MemOrd → 宿主 Ordering（D8j：guest 请求什么序就执行什么序）。
+fn host_ord(o: super::ir::MemOrd) -> std::sync::atomic::Ordering {
+    use std::sync::atomic::Ordering as O;
+    match o {
+        super::ir::MemOrd::Relaxed => O::Relaxed,
+        super::ir::MemOrd::Acquire => O::Acquire,
+        super::ir::MemOrd::Release => O::Release,
+        super::ir::MemOrd::AcqRel => O::AcqRel,
+        super::ir::MemOrd::SeqCst => O::SeqCst,
+    }
+}
+
 /// 位单目（BitUn rvalue 与 SIMD lane 共用，D8b）。
 fn bit_un(op: super::ir::BitUnOp, v: u64, w: Width) -> u64 {
     use super::ir::BitUnOp as B;
@@ -728,16 +740,17 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
             let (v, w) = eval_operand(ctx, base, a);
             bit_un(*op, v, w)
         }
-        Rvalue::AtomicLoad { addr, width } => {
+        Rvalue::AtomicLoad { addr, width, order } => {
             use std::sync::atomic::*;
             let (p, _) = eval_operand(ctx, base, addr);
-            // 真宿主原子指令（spike4 义务）；SeqCst 最强序
+            let o = host_ord(*order);
+            // 真宿主原子指令（spike4 义务）；序按 guest 请求（D8j）
             unsafe {
                 match width {
-                    Width::W8 => AtomicU8::from_ptr(p as *mut u8).load(Ordering::SeqCst) as u64,
-                    Width::W16 => AtomicU16::from_ptr(p as *mut u16).load(Ordering::SeqCst) as u64,
-                    Width::W32 => AtomicU32::from_ptr(p as *mut u32).load(Ordering::SeqCst) as u64,
-                    Width::W64 => AtomicU64::from_ptr(p as *mut u64).load(Ordering::SeqCst),
+                    Width::W8 => AtomicU8::from_ptr(p as *mut u8).load(o) as u64,
+                    Width::W16 => AtomicU16::from_ptr(p as *mut u16).load(o) as u64,
+                    Width::W32 => AtomicU32::from_ptr(p as *mut u32).load(o) as u64,
+                    Width::W64 => AtomicU64::from_ptr(p as *mut u64).load(o),
                 }
             }
         }
@@ -920,20 +933,17 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                 mem_write(d + i * *elem_size as u64, w, v);
             }
         }
-        Stmt::AtomicStore { addr, val } => {
+        Stmt::AtomicStore { addr, val, order } => {
             use std::sync::atomic::*;
             let (p, _) = eval_operand(ctx, base, addr);
             let (v, w) = eval_operand(ctx, base, val);
+            let o = host_ord(*order);
             unsafe {
                 match w {
-                    Width::W8 => AtomicU8::from_ptr(p as *mut u8).store(v as u8, Ordering::SeqCst),
-                    Width::W16 => {
-                        AtomicU16::from_ptr(p as *mut u16).store(v as u16, Ordering::SeqCst)
-                    }
-                    Width::W32 => {
-                        AtomicU32::from_ptr(p as *mut u32).store(v as u32, Ordering::SeqCst)
-                    }
-                    Width::W64 => AtomicU64::from_ptr(p as *mut u64).store(v, Ordering::SeqCst),
+                    Width::W8 => AtomicU8::from_ptr(p as *mut u8).store(v as u8, o),
+                    Width::W16 => AtomicU16::from_ptr(p as *mut u16).store(v as u16, o),
+                    Width::W32 => AtomicU32::from_ptr(p as *mut u32).store(v as u32, o),
+                    Width::W64 => AtomicU64::from_ptr(p as *mut u64).store(v, o),
                 }
             }
         }
@@ -954,6 +964,8 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             dst_val,
             dst_ok,
             weak,
+            succ,
+            fail,
         } => {
             use std::sync::atomic::*;
             let (p, _) = eval_operand(ctx, base, addr);
@@ -962,15 +974,11 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             macro_rules! cx {
                 ($t:ty, $at:ty) => {{
                     let a = unsafe { <$at>::from_ptr(p as *mut $t) };
+                    let (so, fo) = (host_ord(*succ), host_ord(*fail));
                     let r = if *weak {
-                        a.compare_exchange_weak(
-                            e as $t,
-                            n as $t,
-                            Ordering::SeqCst,
-                            Ordering::SeqCst,
-                        )
+                        a.compare_exchange_weak(e as $t, n as $t, so, fo)
                     } else {
-                        a.compare_exchange(e as $t, n as $t, Ordering::SeqCst, Ordering::SeqCst)
+                        a.compare_exchange(e as $t, n as $t, so, fo)
                     };
                     match r {
                         Ok(old) => (old as u64, 1u64),
@@ -987,31 +995,36 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             place_write(ctx, base, dst_val, old);
             place_write(ctx, base, dst_ok, ok);
         }
-        Stmt::AtomicRmw { op, addr, val, dst } => {
+        Stmt::AtomicRmw {
+            op,
+            addr,
+            val,
+            dst,
+            order,
+        } => {
             use super::ir::RmwOp as R;
             use std::sync::atomic::*;
             let (p, _) = eval_operand(ctx, base, addr);
             let (v, w) = eval_operand(ctx, base, val);
+            let o = host_ord(*order);
             macro_rules! rmw {
                 ($t:ty, $at:ty, $it:ty, $iat:ty) => {{
                     let a = unsafe { <$at>::from_ptr(p as *mut $t) };
                     (match op {
-                        R::Xchg => a.swap(v as $t, Ordering::SeqCst),
-                        R::Add => a.fetch_add(v as $t, Ordering::SeqCst),
-                        R::Sub => a.fetch_sub(v as $t, Ordering::SeqCst),
-                        R::And => a.fetch_and(v as $t, Ordering::SeqCst),
-                        R::Or => a.fetch_or(v as $t, Ordering::SeqCst),
-                        R::Xor => a.fetch_xor(v as $t, Ordering::SeqCst),
-                        R::Nand => a.fetch_nand(v as $t, Ordering::SeqCst),
+                        R::Xchg => a.swap(v as $t, o),
+                        R::Add => a.fetch_add(v as $t, o),
+                        R::Sub => a.fetch_sub(v as $t, o),
+                        R::And => a.fetch_and(v as $t, o),
+                        R::Or => a.fetch_or(v as $t, o),
+                        R::Xor => a.fetch_xor(v as $t, o),
+                        R::Nand => a.fetch_nand(v as $t, o),
                         // fetch_max/min：有符号变体经同址 AtomicI*（位型回写零扩展）
-                        R::UMax => a.fetch_max(v as $t, Ordering::SeqCst),
-                        R::UMin => a.fetch_min(v as $t, Ordering::SeqCst),
+                        R::UMax => a.fetch_max(v as $t, o),
+                        R::UMin => a.fetch_min(v as $t, o),
                         R::Max => unsafe { <$iat>::from_ptr(p as *mut $it) }
-                            .fetch_max(v as $it, Ordering::SeqCst)
-                            as $t,
+                            .fetch_max(v as $it, o) as $t,
                         R::Min => unsafe { <$iat>::from_ptr(p as *mut $it) }
-                            .fetch_min(v as $it, Ordering::SeqCst)
-                            as $t,
+                            .fetch_min(v as $it, o) as $t,
                     }) as u64
                 }};
             }
@@ -1693,12 +1706,16 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             }
         }
         // 栅栏补真（M4.4 D4）：guest 任意序 → 宿主 SeqCst（最强序在 RAM non-det 包络内）
-        Stmt::Fence { single_thread } => {
-            use std::sync::atomic::{Ordering, compiler_fence, fence};
+        Stmt::Fence {
+            single_thread,
+            order,
+        } => {
+            use std::sync::atomic::{compiler_fence, fence};
+            let o = host_ord(*order);
             if *single_thread {
-                compiler_fence(Ordering::SeqCst);
+                compiler_fence(o);
             } else {
-                fence(Ordering::SeqCst);
+                fence(o);
             }
         }
     }

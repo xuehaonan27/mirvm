@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::ctx::{Shared, attach};
 use super::ir::{
-    Block, FfiKind, ForeignSig, FuncBody, IntBinOp, Module, Operand, ParamAbi, RetAbi, RmwOp,
-    Rvalue, ScalarPlace, Slot, Stmt, Terminator, Width,
+    Block, FfiKind, ForeignSig, FuncBody, IntBinOp, MemOrd, Module, Operand, ParamAbi, RetAbi,
+    RmwOp, Rvalue, ScalarPlace, Slot, Stmt, Terminator, Width,
 };
 use super::{interp, thunks};
 
@@ -40,6 +40,7 @@ fn build_module() -> Module {
     };
     let bump = mk(
         vec![Stmt::AtomicRmw {
+            order: MemOrd::SeqCst,
             op: RmwOp::Add,
             addr: Operand::Slot(arg_slot),
             val: Operand::Imm {

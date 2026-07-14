@@ -2655,6 +2655,28 @@ impl<'tcx> LowerCx<'tcx, '_> {
         }
     }
 
+    /// atomic intrinsic 的 const 泛型序 → 冻结 MemOrd（cg_ssa parse_atomic_ordering
+    /// 同构：valtree 分支[0] 是判别式叶；D8j）。**按位置收集全部 const 泛参**而非
+    /// 硬编码下标——本 nightly 各 atomic intrinsic 的类型参数量异构（xadd<T,U,ORD>
+    /// vs load<T,ORD>），序参数是其中唯一的 const（cxchg 两个：succ, fail）。
+    fn atomic_ord(&self, inst: &Instance<'tcx>, nth: usize) -> Result<ir::MemOrd, String> {
+        use rustc_middle::ty::AtomicOrdering as A;
+        let c = inst
+            .args
+            .iter()
+            .filter_map(|a| a.as_const())
+            .nth(nth)
+            .ok_or_else(|| format!("atomic intrinsic 缺第 {nth} 个 const 序参数"))?;
+        let discr = c.to_value().to_branch()[0].to_leaf();
+        Ok(match discr.to_atomic_ordering() {
+            A::Relaxed => ir::MemOrd::Relaxed,
+            A::Acquire => ir::MemOrd::Acquire,
+            A::Release => ir::MemOrd::Release,
+            A::AcqRel => ir::MemOrd::AcqRel,
+            A::SeqCst => ir::MemOrd::SeqCst,
+        })
+    }
+
     fn try_expand_intrinsic(
         &mut self,
         inst: &Instance<'tcx>,
@@ -2743,19 +2765,29 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }]
             }
             "atomic_load" => {
+                let order = self.atomic_ord(inst, 0)?;
+                if matches!(order, ir::MemOrd::Release | ir::MemOrd::AcqRel) {
+                    return Err(format!("atomic_load 非法序 {order:?}"));
+                }
                 let (dst_p, w) = self.place_scalar(destination)?;
                 vec![Stmt::Assign {
                     dst: dst_p.scalar_place(w),
                     rv: Rvalue::AtomicLoad {
                         addr: self.lower_operand_scalar(&args[0].node)?,
                         width: w,
+                        order,
                     },
                 }]
             }
             "atomic_store" => {
+                let order = self.atomic_ord(inst, 0)?;
+                if matches!(order, ir::MemOrd::Acquire | ir::MemOrd::AcqRel) {
+                    return Err(format!("atomic_store 非法序 {order:?}"));
+                }
                 vec![Stmt::AtomicStore {
                     addr: self.lower_operand_scalar(&args[0].node)?,
                     val: self.lower_operand_scalar(&args[1].node)?,
+                    order,
                 }]
             }
             "atomic_cxchg" | "atomic_cxchgweak" => {
@@ -2764,6 +2796,11 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let ValKind::Pair((vo, vw), (fo, fw)) = self.classify(dst_p.ty)? else {
                     return Err("cxchg 目标非 pair".into());
                 };
+                let succ = self.atomic_ord(inst, 0)?;
+                let fail = self.atomic_ord(inst, 1)?;
+                if matches!(fail, ir::MemOrd::Release | ir::MemOrd::AcqRel) {
+                    return Err(format!("cxchg 失败序非法 {fail:?}"));
+                }
                 vec![Stmt::AtomicCxchg {
                     addr: self.lower_operand_scalar(&args[0].node)?,
                     expected: self.lower_operand_scalar(&args[1].node)?,
@@ -2771,6 +2808,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     dst_val: dst_p.half_place(vo, vw),
                     dst_ok: dst_p.half_place(fo, fw),
                     weak: name.as_str() == "atomic_cxchgweak",
+                    succ,
+                    fail,
                 }]
             }
             "atomic_xchg" | "atomic_xadd" | "atomic_xsub" | "atomic_and" | "atomic_or"
@@ -2797,14 +2836,17 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     addr: self.lower_operand_scalar(&args[0].node)?,
                     val: self.lower_operand_scalar(&args[1].node)?,
                     dst: dst_p.scalar_place(w),
+                    order: self.atomic_ord(inst, 0)?,
                 }]
             }
-            // fence 补真（M4.4 D4）：guest 任意序 → 宿主 SeqCst（RAM non-det 包络内）
+            // fence（M4.4 D4 补真；D8j 序贯通）
             "atomic_fence" => vec![Stmt::Fence {
                 single_thread: false,
+                order: self.atomic_ord(inst, 0)?,
             }],
             "atomic_singlethreadfence" => vec![Stmt::Fence {
                 single_thread: true,
+                order: self.atomic_ord(inst, 0)?,
             }],
             // volatile 是 RAM 可观察行为，必须一路保留到执行器。值始终使用
             // alignment=1 的 opaque MaybeUninit 字节载体：既不对 `[u8; N]`

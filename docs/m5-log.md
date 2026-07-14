@@ -290,3 +290,20 @@ guest handler 是独立能力缺口，不应混入 M5.1 全绿宣称。
   除法/移位、funnel、饱和 cast、gather/scatter 哨兵、masked、dyn lane、全归约）
   native/mirvm **逐字节一致**；`corpus/c_portable_simd.rs`（点积 mul_add/字节扫描
   bitmask/clamp/rotate/cast 真实画像）两侧一致进 corpus（26→27）；diff.sh 22→23。
+
+### 片 4：D8j atomic 序贯通 —— 完成（2026-07-14）
+
+- IR 五形态补序：`AtomicLoad/AtomicStore + order`、`AtomicCxchg + succ/fail 双序`、
+  `AtomicRmw + order`、`Fence + order`；`MemOrd` 五值枚举，引擎 `host_ord` 1:1 映射
+  宿主 `Ordering`——Relaxed store 回到 plain mov，弱序可见性与 native 同源恢复。
+  旧"全折 SeqCst"虽合规（强化序=允许集合子集）但违 concurrency-arch 承诺。
+- lower 读 const 泛型 `ORD`（cg_ssa parse_atomic_ordering 同构：valtree 分支[0] 判别
+  叶 → to_atomic_ordering）。**漂移陷阱实测踩中**：本 nightly atomic intrinsic 类型
+  参数量异构（`atomic_xadd<T,U,ORD>` 双类型参 vs `atomic_load<T,ORD>` 单参），硬编码
+  `const_at(1)` 在 xadd 上 ICE——改为**按位置收集全部 const 泛参**（序是唯一 const，
+  cxchg 两个按序取 succ/fail），下标漂移免疫。load/store/cxchg-fail 的非法序组合
+  lower 期拒绝。
+- **验收**：`demo/atomic_order_probe.rs`——①组合矩阵（每操作×每合法序真实执行，
+  错误映射会被宿主原子 API panic 当场抓住；`fence(Relaxed)` 非法性由 native 侧 panic
+  实证）②Acquire/Release 消息传递不变式 ③4 线程 Relaxed 争用计数——native/mirvm
+  逐字节一致；diff.sh 23→24；TSan gate 全绿（弱序错映射=真数据竞争会被抓）。

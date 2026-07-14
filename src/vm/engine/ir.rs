@@ -218,7 +218,20 @@ pub enum BitUnOp {
     Bitreverse,
 }
 
-/// 原子 RMW（fetch_* 家族；全 SeqCst——最强序在 RAM non-det 包络内，order 贯通归 D8j）。
+/// C++20 内存序（M5.2 D8j：lower 从 atomic intrinsic 的 const 泛型 `ORD` 冻结）。
+/// 旧实现整体折叠 SeqCst——合规（强化序 = 允许集合子集）但违 concurrency-arch
+/// "弱内存序自然恢复"承诺，且 x86 上 Relaxed store 白吃 xchg 代价。现按 guest
+/// 请求的序映射宿主原子指令，弱序可见性行为与 native 同源恢复。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemOrd {
+    Relaxed,
+    Acquire,
+    Release,
+    AcqRel,
+    SeqCst,
+}
+
+/// 原子 RMW（fetch_* 家族；序由 MemOrd 冻结，D8j）。
 /// fetch_max/min 的有符号性由 intrinsic 名冻结（atomic_max/min=有符号，atomic_umax/umin=无符号），
 /// 执行器据此选 AtomicI*/AtomicU*。
 #[derive(Clone, Copy, Debug)]
@@ -448,6 +461,7 @@ pub enum Rvalue {
     AtomicLoad {
         addr: Operand,
         width: Width,
+        order: MemOrd,
     },
     /// 指针差（ptr_offset_from[_unsigned]）：(a - b) / stride（i64 除法）
     PtrDiff {
@@ -533,6 +547,7 @@ pub enum Stmt {
     AtomicStore {
         addr: Operand,
         val: Operand,
+        order: MemOrd,
     },
     /// 等宽 volatile 整体读。执行器用 alignment=1 的 opaque `MaybeUninit`
     /// 字节载体搬运，不解释聚合值的 padding。后端能直接表示的宽度保持为
@@ -551,7 +566,7 @@ pub enum Stmt {
         src: PlaceExpr,
         size: u32,
     },
-    /// 原子比较交换：dst_val = 旧值，dst_ok = 是否成功（SeqCst/SeqCst）
+    /// 原子比较交换：dst_val = 旧值，dst_ok = 是否成功（succ/fail 双序，D8j）
     AtomicCxchg {
         addr: Operand,
         expected: Operand,
@@ -559,13 +574,16 @@ pub enum Stmt {
         dst_val: ScalarPlace,
         dst_ok: ScalarPlace,
         weak: bool,
+        succ: MemOrd,
+        fail: MemOrd,
     },
-    /// 原子 RMW：dst = 旧值（SeqCst）
+    /// 原子 RMW：dst = 旧值
     AtomicRmw {
         op: RmwOp,
         addr: Operand,
         val: Operand,
         dst: ScalarPlace,
+        order: MemOrd,
     },
     /// 动态长度内存拷贝（copy/copy_nonoverlapping intrinsic：count × elem_size 字节）
     MemCopy {
@@ -762,6 +780,7 @@ pub enum Stmt {
     /// single_thread（atomic_singlethreadfence）→ compiler_fence(SeqCst)
     Fence {
         single_thread: bool,
+        order: MemOrd,
     },
     /// `[expr; N]` 聚合元素通道（M4.4）：dst[0] 已写好，从它铺满 i∈[1,count)
     RepeatBytes {
