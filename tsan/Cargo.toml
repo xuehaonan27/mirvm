@@ -12,6 +12,9 @@ publish = false
 libc = "0.2"
 libffi = "5.1.1"
 libmimalloc-sys = "0.1.49"
+# ir.rs 全类型带 serde derive（M6 片2 L2 缓存）；harness 经 #[path] 同源编译 src/vm，
+# 依赖面必须跟上（M5.2 f16/f128 feature 同教训）
+serde = { version = "1.0.228", features = ["derive"] }
 
 [profile.release]
 debug = true # TSan 报告带符号

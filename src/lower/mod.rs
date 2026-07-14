@@ -90,6 +90,8 @@ pub(crate) struct Linker<'tcx> {
     tls_slots: Vec<ir::TlsSlot>,
     /// asm-stub wrapper 文本（M5.0）：AsmStubId → GAS 源；lower 结束批量 cc+dlopen 物化
     asm_sites: Vec<String>,
+    /// 非 weak extern static 的宿主地址直嵌符号（M6 片2）：非空 ⇒ 模块不可缓存
+    foreign_static_syms: Vec<Box<str>>,
 }
 
 impl<'tcx> Linker<'tcx> {
@@ -107,6 +109,7 @@ impl<'tcx> Linker<'tcx> {
             tls_ids: FxHashMap::default(),
             tls_slots: Vec::new(),
             asm_sites: Vec::new(),
+            foreign_static_syms: Vec::new(),
         }
     }
 
@@ -194,6 +197,11 @@ impl<'tcx> Linker<'tcx> {
                     if p == 0 {
                         return Err(format!("extern static `{name}` dlsym 未命中"));
                     }
+                    // 宿主真地址直嵌（&environ 语义要求就是 libc 变量本体地址）——
+                    // ASLR 下跨进程无效 ⇒ 登记符号，含此类地址的模块不入 L2 缓存
+                    //（M6 片2 gate 实测：c_process 热回放上进程 libc 地址 SIGSEGV）。
+                    // 升级路径 = GOT 式 Operand 间接（IR 设计变更，M6 后续）。
+                    self.foreign_static_syms.push(name.as_str().into());
                     self.alloc_addrs.insert(id, p);
                     return Ok(p);
                 }
@@ -613,7 +621,10 @@ fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin> {
         "_Unwind_SetGR",
         "_Unwind_SetIP",
     ] {
-        out.insert(Symbol::intern(name), ir::Builtin::Unsupported(name));
+        out.insert(
+            Symbol::intern(name),
+            ir::Builtin::Unsupported(ir::StaticStr(name)),
+        );
     }
     // backtrace 影子帧（D8e）：这四个由 Ctx 影子帧栈诚实回答（IP=合成 fn token）。
     out.insert(
@@ -677,8 +688,9 @@ fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin> {
 }
 
 /// 整程序降低：种子收集 → worklist 闭包降低 → exports 表 + main 启动计划。
-/// `argv` = guest 进程实参（argv[0]=脚本路径；布进冻结区的 C 串表）。
-pub fn lower_program(tcx: TyCtxt<'_>, argv: &[String]) -> ir::Module {
+/// argv **不在此布置**（M6 片2）：它是运行期输入，由 `Module::finalize_entry_argv`
+/// 在每次运行（冷/热同路）于快照语义之后终结化。
+pub fn lower_program(tcx: TyCtxt<'_>) -> ir::Module {
     let typing_env = TypingEnv::fully_monomorphized();
     let mut linker = Linker::new(tcx);
 
@@ -709,27 +721,12 @@ pub fn lower_program(tcx: TyCtxt<'_>, argv: &[String]) -> ir::Module {
             rustc_span::DUMMY_SP,
         );
         let lang_start = linker.func_id(start_inst);
-        // argv C 串表布进冻结区（tier-0 setup_process_memory 同构）
-        let mut ptrs: Vec<u64> = Vec::with_capacity(argv.len());
-        for a in argv {
-            let bytes = a.as_bytes();
-            let p = linker.frozen.alloc(bytes.len() as u64 + 1, 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, bytes.len());
-                *((p + bytes.len() as u64) as *mut u8) = 0;
-            }
-            ptrs.push(p);
-        }
-        let table = linker.frozen.alloc((ptrs.len() as u64 + 1) * 8, 8);
-        for (i, &p) in ptrs.iter().enumerate() {
-            unsafe { *((table + i as u64 * 8) as *mut u64) = p };
-        }
-        // 尾 NULL 由清零保证
+        // argc/argv 置零占位：finalize_entry_argv 每次运行回填（运行期输入不进快照）
         ir::EntryPlan {
             lang_start,
             main_addr,
-            argc: argv.len() as u64,
-            argv_ptr: table,
+            argc: 0,
+            argv_ptr: 0,
             sigpipe,
         }
     });
@@ -788,12 +785,15 @@ pub fn lower_program(tcx: TyCtxt<'_>, argv: &[String]) -> ir::Module {
     {
         module.required_native_libs.push(so);
     }
-    // asm-stub 批量物化（M5.0）：全部 wrapper cc 汇编 + dlopen + dlsym → 真地址表
-    module.asm_stub_addrs = asm::materialize(&linker.asm_sites);
+    // asm-stub 批量物化（M5.0）：全部 wrapper cc 汇编 + dlopen + dlsym → 真地址表。
+    // 配方留在 Module（M6 片2）：L2 warm 路径以 asm_sites 幂等重物化。
+    module.asm_sites = std::mem::take(&mut linker.asm_sites);
+    module.asm_stub_addrs = asm::materialize(&module.asm_sites);
     // 冻结区与 fn 条目反查表移交执行相
     module.frozen = Some(linker.frozen);
     module.fn_addrs = linker.fn_addrs.into_iter().collect();
     module.tls = linker.tls_slots;
+    module.foreign_static_syms = linker.foreign_static_syms;
     module.entry = entry;
     module
 }

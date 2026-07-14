@@ -2598,7 +2598,7 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         }
                     }
                     Builtin::Unsupported(name) => {
-                        engine_abort(&format!("unsupported builtin `{name}`"))
+                        engine_abort(&format!("unsupported builtin `{}`", name.0))
                     }
                     Builtin::UnwindDeleteException => {
                         // Itanium `_Unwind_Exception`：exception_class @0，cleanup fn @8。

@@ -37,6 +37,7 @@ ENV:
     MIRVM_SYSROOT     等价于 --sysroot
     MIRVM_STACK_SIZE  等价于 --stack-size（cargo 项目形态经环境传给 runner）
     MIRVM_TIMING      =1 时向 stderr 输出相位账本（frontend/lower/engine/total）
+    MIRVM_NO_IR_CACHE =1 时旁路 L2 engine-IR 缓存（读写全禁；诊断/对拍用）
 
 DEV:
     mirvm spike1..5   跑已冻结的 M4 前置 spike（回归自检；见 docs/spike*.md）
@@ -251,6 +252,43 @@ fn install_runner_finalization_filter() {
     rustc_errors::TRACK_DIAGNOSTIC.swap(&(track_runner_finalization_diagnostic as TrackDiagnostic));
 }
 
+/// 会话 guest 可见告警计数（M6 片2）：**有告警的编译不入 L2 缓存**。warm 路径跳过
+/// rustc 会话，无法重演诊断——静默吞告警违反 run-from-source 语义（native 差分口径
+/// = 每次新鲜编译必发告警）。告警程序每跑冷路径重演；零告警程序才享受缓存。
+///
+/// 安装时机 = `psess_created`（Session 建成、任何解析之前）：rustc_interface 的
+/// setup_callbacks 会覆写 TRACK_DIAGNOSTIC 喂增量查询系统，psess_created 在其后触发，
+/// 此处链式保存并委派前钩（与 runner 收尾过滤器同一机制，三钩可叠）。
+static SESSION_WARNINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+static PREVIOUS_FOR_COUNTER: AtomicRef<TrackDiagnostic> =
+    AtomicRef::new(&(passthrough_diagnostic as TrackDiagnostic));
+
+fn track_counting_diagnostic(
+    diagnostic: DiagInner,
+    emit: &mut dyn FnMut(DiagInner) -> Option<ErrorGuaranteed>,
+) -> Option<ErrorGuaranteed> {
+    if matches!(
+        diagnostic.level(),
+        Level::Warning | Level::ForceWarning | Level::Error
+    ) {
+        SESSION_WARNINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    let previous = &*PREVIOUS_FOR_COUNTER;
+    previous(diagnostic, emit)
+}
+
+fn install_warning_counter() {
+    SESSION_WARNINGS.store(0, std::sync::atomic::Ordering::Relaxed);
+    let current: &'static TrackDiagnostic = &rustc_errors::TRACK_DIAGNOSTIC;
+    PREVIOUS_FOR_COUNTER.swap(current);
+    rustc_errors::TRACK_DIAGNOSTIC.swap(&(track_counting_diagnostic as TrackDiagnostic));
+}
+
+fn session_diagnostics_clean() -> bool {
+    SESSION_WARNINGS.load(std::sync::atomic::Ordering::Relaxed) == 0
+}
+
 fn restore_runner_finalization_filter() {
     rustc_errors::TRACK_DIAGNOSTIC.swap(&PREVIOUS_TRACK_DIAGNOSTIC);
 }
@@ -267,14 +305,20 @@ struct MirvmCallbacks {
     /// 相位计时（M6 片1，D9f①）：t_start = run_driver 进入时刻
     t_start: std::time::Instant,
     timing: PhaseTiming,
+    /// L2 缓存键素材（M6 片2）：与 run_compiler 所见完全一致的参数
+    rustc_args: Vec<String>,
 }
 
 /// 加载相计时账本（M6 片1）。frontend = 驱动进入→analysis 完成（含依赖 metadata 加载），
 /// lower = mono 收集+降低+冻结物化。engine 段由 run_driver 在解释结束后补记。
+/// M6 片2：cache_load = L2 命中反序列化+校验（热路径整体替代 frontend+lower）；
+/// cache_store = 冷路径洁净快照入账。
 #[derive(Default)]
 struct PhaseTiming {
     frontend: Option<std::time::Duration>,
     lower: Option<std::time::Duration>,
+    cache_load: Option<std::time::Duration>,
+    cache_store: Option<std::time::Duration>,
 }
 
 /// `MIRVM_TIMING=1`（或 --vm-stats 仪器）时输出单行相位账本到 stderr。
@@ -290,11 +334,17 @@ fn print_phase_timing(
     }
     let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
     let mut line = String::from("mirvm-timing:");
+    if let Some(d) = timing.cache_load {
+        line.push_str(&format!(" cache-load={:.1}ms", ms(d)));
+    }
     if let Some(d) = timing.frontend {
         line.push_str(&format!(" frontend={:.1}ms", ms(d)));
     }
     if let Some(d) = timing.lower {
         line.push_str(&format!(" lower={:.1}ms", ms(d)));
+    }
+    if let Some(d) = timing.cache_store {
+        line.push_str(&format!(" cache-store={:.1}ms", ms(d)));
     }
     if let Some(d) = engine {
         line.push_str(&format!(" engine={:.1}ms", ms(d)));
@@ -304,6 +354,12 @@ fn print_phase_timing(
 }
 
 impl Callbacks for MirvmCallbacks {
+    fn config(&mut self, config: &mut rustc_interface::interface::Config) {
+        // 告警计数钩（L2 入账前提）：psess_created 在 interface 覆写 TRACK_DIAGNOSTIC
+        // 之后、首次解析之前触发——全会话诊断零缺口。
+        config.psess_created = Some(Box::new(|_psess| install_warning_counter()));
+    }
+
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         self.timing.frontend = Some(self.t_start.elapsed());
         let Some((def_id, entry_ty)) = tcx.entry_fn(()) else {
@@ -327,8 +383,21 @@ impl Callbacks for MirvmCallbacks {
         } else {
             // callback 只做加载相；执行相必须等 tcx.finish、诊断收尾和 compiler drop 全部完成。
             let t_lower = std::time::Instant::now();
-            self.module = Some(crate::lower::lower_program(tcx, &self.program_argv));
+            self.module = Some(crate::lower::lower_program(tcx));
             self.timing.lower = Some(t_lower.elapsed());
+            // L2 入账：guest 运行前的洁净快照（argv 尚未终结化）。
+            // 会话有任何告警/错误即不入账——warm 路径无法重演诊断（见 SESSION_WARNINGS）。
+            let t_store = std::time::Instant::now();
+            if session_diagnostics_clean()
+                && tcx.sess.dcx().has_errors().is_none()
+                && crate::ircache::store(
+                    tcx,
+                    &self.rustc_args,
+                    self.module.as_ref().expect("刚设置"),
+                )
+            {
+                self.timing.cache_store = Some(t_store.elapsed());
+            }
             if self.suppress_runner_warning_summary {
                 install_runner_finalization_filter();
                 self.runner_finalization_filter_installed = true;
@@ -364,7 +433,8 @@ fn parse_stack_size(s: &str) -> usize {
 }
 
 fn run_vm_engine(
-    module: crate::vm::engine::ir::Module,
+    mut module: crate::vm::engine::ir::Module,
+    program_argv: &[String],
     vm_call: Option<&str>,
     vm_stats: bool,
 ) -> i32 {
@@ -372,6 +442,8 @@ fn run_vm_engine(
         print!("{}", crate::vm::engine::stats::report(&module));
         return 0;
     }
+    // argv 终结化（M6 片2）：运行期输入在快照语义之后布置，冷/热单一路径
+    module.finalize_entry_argv(program_argv);
     // Shared 提升进程级 &'static（M4.4：thunk/多线程要求 Ctx 可在任意线程随时引用它）
     let shared: &'static _ = Box::leak(Box::new(crate::vm::engine::ctx::Shared::new(module)));
     let Some(spec) = vm_call else {
@@ -455,6 +527,21 @@ fn run_driver(
     suppress_runner_warning_summary: bool,
 ) -> ExitCode {
     let t_start = std::time::Instant::now();
+    // L2 热路径（M6 片2）：命中即跳过整个 rustc 会话（前端+metadata+mono+lower）。
+    // dump-mir 需要 tcx，强制冷路径。
+    if !dump_mir && let Some(mut module) = crate::ircache::lookup(&rustc_args) {
+        let timing = PhaseTiming {
+            cache_load: Some(t_start.elapsed()),
+            ..PhaseTiming::default()
+        };
+        // asm-stub 真地址是进程级活体：以配方幂等重物化覆写陈旧地址
+        module.asm_stub_addrs = crate::lower::asm::materialize(&module.asm_sites);
+        let t_engine = std::time::Instant::now();
+        let code = run_vm_engine(module, &program_argv, vm_call.as_deref(), vm_stats);
+        let engine = (!vm_stats).then(|| t_engine.elapsed());
+        print_phase_timing(&timing, engine, t_start.elapsed(), vm_stats);
+        exit(code);
+    }
     let mut callbacks = MirvmCallbacks {
         dump_mir,
         program_argv,
@@ -466,6 +553,7 @@ fn run_driver(
         runner_finalization_filter_installed: false,
         t_start,
         timing: PhaseTiming::default(),
+        rustc_args: rustc_args.clone(),
     };
     let compiler_code = rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&rustc_args, &mut callbacks)
@@ -481,7 +569,12 @@ fn run_driver(
     }
     if let Some(module) = callbacks.module.take() {
         let t_engine = std::time::Instant::now();
-        let code = run_vm_engine(module, callbacks.vm_call.as_deref(), callbacks.vm_stats);
+        let code = run_vm_engine(
+            module,
+            &callbacks.program_argv,
+            callbacks.vm_call.as_deref(),
+            callbacks.vm_stats,
+        );
         // vm-stats 分支不跑 guest，engine 段无意义则不报
         let engine = (!callbacks.vm_stats).then(|| t_engine.elapsed());
         print_phase_timing(
@@ -569,9 +662,17 @@ fn materialize_script(script: &Path, manifest: &str, body: &str) -> PathBuf {
         "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n\
          [[bin]]\nname = \"{name}\"\npath = \"src/main.rs\"\n\n{manifest}"
     );
-    std::fs::write(dir.join("Cargo.toml"), cargo_toml).expect("写 Cargo.toml 失败");
-    std::fs::write(dir.join("src/main.rs"), body).expect("写 main.rs 失败");
+    // 幂等物化：内容未变不落盘——mtime 稳定是 L2 IR 缓存清单与 cargo 指纹共同的前提
+    write_if_changed(&dir.join("Cargo.toml"), &cargo_toml);
+    write_if_changed(&dir.join("src/main.rs"), body);
     dir
+}
+
+fn write_if_changed(path: &Path, contents: &str) {
+    if std::fs::read(path).is_ok_and(|old| old == contents.as_bytes()) {
+        return;
+    }
+    std::fs::write(path, contents).unwrap_or_else(|e| panic!("写 {} 失败: {e}", path.display()));
 }
 
 #[cfg(test)]

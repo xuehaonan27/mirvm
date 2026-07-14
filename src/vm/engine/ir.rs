@@ -13,7 +13,7 @@ pub type FuncId = u32;
 pub type AsmStubId = u32;
 
 /// 标量宽度。W128 = 两槽通道（M4.1 第 3 步）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Width {
     W8,
     W16,
@@ -52,7 +52,7 @@ impl Width {
 }
 
 /// 帧内标量槽（快路径）：冻结偏移（Field 投影已折进 off）。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Slot {
     pub off: u32,
     pub width: Width,
@@ -61,7 +61,7 @@ pub struct Slot {
 // ===== place 求值（M4.1 核心）=====
 
 /// 地址表达式的基。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PlaceBase {
     /// 帧内局部：真地址 = 帧基址 + off
     Local(u32),
@@ -70,7 +70,7 @@ pub enum PlaceBase {
 }
 
 /// 地址表达式的一步（lower 已把 Field/Downcast 折叠成 Offset）。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PlaceStep {
     /// 当前地址处读出指针（W64），地址切换为它
     Deref,
@@ -88,14 +88,14 @@ pub enum PlaceStep {
 }
 
 /// 地址表达式：引擎按序求值 → 真地址 u64。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PlaceExpr {
     pub base: PlaceBase,
     pub steps: Box<[PlaceStep]>,
 }
 
 /// 标量位置：读/写一个 ≤64 位标量的落点。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ScalarPlace {
     /// 快路径：帧内静态槽
     Slot(Slot),
@@ -103,7 +103,7 @@ pub enum ScalarPlace {
     Mem { expr: PlaceExpr, width: Width },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Operand {
     /// 帧内静态槽（快路径）
     Slot(Slot),
@@ -138,7 +138,7 @@ impl Operand {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum IntBinOp {
     Add,
     Sub,
@@ -152,7 +152,7 @@ pub enum IntBinOp {
     Shr,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum IntCc {
     Eq,
     Ne,
@@ -162,7 +162,7 @@ pub enum IntCc {
     Ge,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum OvfOp {
     Add,
     Sub,
@@ -170,7 +170,7 @@ pub enum OvfOp {
 }
 
 /// 标量浮点宽度（M5.2 D8c：f16 进标量通道；f128 走 128 位宽通道，不在此）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FloatW {
     F16,
     F32,
@@ -178,27 +178,27 @@ pub enum FloatW {
 }
 
 /// f128 宽通道的标量侧类别（F128From/ToScalar）。Int 的宽度在语句 w 字段。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum F128Scalar {
     F(FloatW),
     Int { signed: bool },
 }
 
 /// f128 单目（Neg + 一元数学族）。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum F128UnOp {
     Neg,
     Math(MathUnOp),
 }
 
 /// F128MathBin 右操作数（powi 是 i32 标量）。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum F128Rhs {
     Wide(PlaceExpr),
     Scalar(Operand),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum FloatOp {
     Add,
     Sub,
@@ -209,7 +209,7 @@ pub enum FloatOp {
 }
 
 /// 数学一元（must_be_overridden float intrinsic 的合成处置：宿主 f32/f64 直算，P7）
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum MathUnOp {
     Sqrt,
     Sin,
@@ -228,7 +228,7 @@ pub enum MathUnOp {
 }
 
 /// 数学二元（powf/powi/copysign/minnum/maxnum；powi 的 b 是 i32 位）
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum MathBinOp {
     Pow,
     Powi,
@@ -238,7 +238,7 @@ pub enum MathBinOp {
 }
 
 /// 位操作单目（ctpop/ctlz/cttz/bswap/bitreverse intrinsic 内建）
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum BitUnOp {
     Popcount,
     Ctlz,
@@ -251,7 +251,7 @@ pub enum BitUnOp {
 /// 旧实现整体折叠 SeqCst——合规（强化序 = 允许集合子集）但违 concurrency-arch
 /// "弱内存序自然恢复"承诺，且 x86 上 Relaxed store 白吃 xchg 代价。现按 guest
 /// 请求的序映射宿主原子指令，弱序可见性行为与 native 同源恢复。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MemOrd {
     Relaxed,
     Acquire,
@@ -263,7 +263,7 @@ pub enum MemOrd {
 /// 原子 RMW（fetch_* 家族；序由 MemOrd 冻结，D8j）。
 /// fetch_max/min 的有符号性由 intrinsic 名冻结（atomic_max/min=有符号，atomic_umax/umin=无符号），
 /// 执行器据此选 AtomicI*/AtomicU*。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum RmwOp {
     Xchg,
     Add,
@@ -283,7 +283,7 @@ pub enum RmwOp {
 /// **静默错值**（+0.0/−0.0 相等性、NaN 自反性都不是位比较），当时仅因 corpus
 /// 全为整数 lane 未爆雷。本类型使"忘带类别"在类型层不可表示。
 /// 指针 lane 按 `Int{signed:false}` 处置（真实地址模型位透传）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LaneKind {
     Int {
         signed: bool,
@@ -294,7 +294,7 @@ pub enum LaneKind {
 
 /// SIMD 逐 lane 双目（M5.2 D8b 全家族；有符号性/浮点性收敛进 LaneKind）。
 /// 比较产出 mask lane（真=全 1）。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum SimdBinOp {
     Eq,
     Ne,
@@ -326,7 +326,7 @@ pub enum SimdBinOp {
 /// SIMD 逐 lane 单目（M5.2 D8b）。浮点族要求 Float lane；位族要求 Int lane
 /// （lower 期校验）。超越函数逐 lane 调宿主 libm——native 无 fast-math 时
 /// scalarize 到同一 libm，同源即位同。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum SimdUnOp {
     Neg,
     Fabs,
@@ -353,7 +353,7 @@ pub enum SimdUnOp {
 /// SIMD 横向归约（M5.2 D8b）：ordered/unordered 均按 lane 序折叠——unordered
 /// 的"任意结合序"集合包含顺序折叠，故顺序实现恒合规。float min/max 用宿主
 /// `f{32,64}::min/max`（minnum/maxnum 语义，与 LLVM reduce.fmin/fmax 一致）。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum SimdReduceOp {
     Add,
     Mul,
@@ -364,7 +364,7 @@ pub enum SimdReduceOp {
     Xor,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Rvalue {
     Use(Operand),
     /// guest TLS 实例真地址（M4.4 D3）：Ctx.tls[id] 惰性物化（heap 分配 + 模板拷贝）。
@@ -548,7 +548,7 @@ pub enum Rvalue {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Stmt {
     Assign {
         dst: ScalarPlace,
@@ -900,7 +900,7 @@ pub enum Stmt {
 
 /// unwind 处置（M4.2 起全语义：FrameGuard 动态 LSDA，spike3 协议）。
 /// MIR 的 Unreachable 折进 Continue（unwind 到此=UB，fast 不检测）。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum UnwindAction {
     Continue,
     Cleanup(Bb),
@@ -908,10 +908,29 @@ pub enum UnwindAction {
     Terminate,
 }
 
+/// `&'static str` 的 Copy 载体（M6 片2）：裸 `&str` 字段会让 serde 给容器推导
+/// `'de: 'static` 借用约束；newtype + 手动 serde 隔断推导。反序列化 leak 一份——
+/// Unsupported 变体每模块有界、模块本身经 Box::leak 进程级共享（Shared::new 同风格）。
+#[derive(Clone, Copy, Debug)]
+pub struct StaticStr(pub &'static str);
+
+impl serde::Serialize for StaticStr {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for StaticStr {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s: String = serde::Deserialize::deserialize(d)?;
+        Ok(StaticStr(Box::leak(s.into_boxed_str())))
+    }
+}
+
 /// 引擎原语（foreign 三路处置①，debt-map §2-B）：std 自己声明的 runtime extern 边界，
 /// native 下由 codegen/链接器合成 shim——引擎在同一边界接管。
 /// alloc 系的引擎实现是 M4.1 第 5 步（堆内建）；落地前 lower 前置 `Stmt::Trap` 防静默。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Builtin {
     /// `__rust_alloc(size, align) -> ptr`
     RustAlloc,
@@ -959,7 +978,7 @@ pub enum Builtin {
     /// 已知不能安全直通的宿主边界。执行到必须明确失败，绝不伪造成功。
     /// 包括需要异步安全专用实现的边界，以及需要 guest frame/context
     /// 翻译、不能把宿主解释器状态直接暴露给 guest 的 unwinder API。
-    Unsupported(&'static str),
+    Unsupported(StaticStr),
     /// `_Unwind_DeleteException`：按 Itanium ABI 调用异常对象内的 cleanup 回调。
     UnwindDeleteException,
     /// backtrace 影子帧（M5.2 D8e）：Ctx 影子帧栈诚实回答，IP=合成 fn token。
@@ -993,7 +1012,7 @@ pub enum Builtin {
 }
 
 /// libffi 直通的参数/返回类别（lower 期从 fn sig layout 冻结；os:: P7 直通处置）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum FfiKind {
     I8,
     I16,
@@ -1010,7 +1029,7 @@ pub enum FfiKind {
 }
 
 /// Bin128 的右操作数：128 位 place 或 ≤64 位标量（Shl/Shr 的移位量）。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Bin128Rhs {
     Wide(PlaceExpr),
     Scalar(Operand),
@@ -1021,7 +1040,7 @@ pub type TlsId = u32;
 
 /// guest TLS 槽描述（lower 冻结）：template = 初始字节在冻结区的真地址（含重定位），
 /// 每线程首访时 heap 分配 size 字节拷模板。v1 记账：dtor 不跑（设计 D3）。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TlsSlot {
     pub template: u64,
     pub size: u64,
@@ -1030,7 +1049,7 @@ pub struct TlsSlot {
 
 /// 冻结的 foreign 签名。变参函数按**调用点实参**冻结尾参（fixed = 固定参数个数）。
 /// Eq/Hash：thunk 工厂缓存键（M4.4 D1——(fn 条目地址, 逃逸位签名) → 真码地址）。
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ForeignSig {
     pub args: Vec<FfiKind>,
     pub ret: FfiKind,
@@ -1043,7 +1062,7 @@ pub struct ForeignSig {
 }
 
 /// 参数在 callee 帧内的落位（引擎调用约定 v2：实参展平为 `&[u64]` 槽序列）。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ParamAbi {
     /// ZST：不占实参槽
     Zst,
@@ -1056,7 +1075,7 @@ pub enum ParamAbi {
 }
 
 /// 返回通道（引擎调用约定 v2）。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum RetAbi {
     Zst,
     /// 标量：interp_frame 返回 lo
@@ -1073,7 +1092,7 @@ pub enum RetAbi {
 }
 
 /// Call 的返回落点（caller 侧）。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum RetDest {
     /// 忽略（ZST 或无落点）
     Ignore,
@@ -1086,13 +1105,13 @@ pub enum RetDest {
 
 /// `SwitchInt` 判别值。普通整数沿用标量 operand；i128/u128 保持在 place 中，执行期
 /// 一次读取完整 128 位，不能先截成 u64。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum SwitchDiscr {
     Scalar(Operand),
     Wide(PlaceExpr),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Terminator {
     Goto(Bb),
     SwitchInt {
@@ -1166,13 +1185,13 @@ pub enum Terminator {
     Trap(Box<str>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
     pub term: Terminator,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FuncBody {
     pub frame_size: u32,
     pub frame_align: u32,
@@ -1189,7 +1208,7 @@ pub struct FuncBody {
 
 /// main 启动计划（cg_ssa create_entry_fn 同构）：
 /// `lang_start(main fn-ptr, argc, argv, sigpipe) -> isize`（返回值 = 进程退出码）。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct EntryPlan {
     pub lang_start: FuncId,
     /// 用户 main 的 D4 条目真地址（lang_start 第一实参，经 CallIndirect 派发）
@@ -1200,7 +1219,7 @@ pub struct EntryPlan {
     pub sigpipe: u8,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Module {
     pub funcs: Vec<FuncBody>,
     /// 导出名（no_mangle 符号）→ FuncId，--vm-call 查找用
@@ -1218,9 +1237,46 @@ pub struct Module {
     pub tls: Vec<TlsSlot>,
     /// asm-stub wrapper 真地址（M5.0）：AsmStubId → `fn(*mut u8)` 机器地址（加载相
     /// cc 汇编 + dlopen + dlsym 物化）。执行相只读 u64 直调，纯度不破。
+    /// **不进 L2 快照语义**——warm 路径以 asm_sites 幂等重物化后覆写。
     pub asm_stub_addrs: Vec<u64>,
+    /// asm-stub 物化配方（M6 片2）：wrapper GAS 全文，AsmStubId 序。warm 加载用它
+    /// 重跑 asm::materialize（内容哈希命中 .so 缓存则只 dlopen+dlsym；被清则重 cc，自愈）。
+    pub asm_sites: Vec<String>,
+    /// 非 weak extern static（environ 类）的宿主地址直嵌符号（M6 片2）：这些 dlsym
+    /// 真地址已烤进字节码 const/冻结区重定位，ASLR 下跨进程无效——**非空即不可入
+    /// L2 缓存**（ircache::store 拒绝；升级路径 = GOT 式间接）。
+    pub foreign_static_syms: Vec<Box<str>>,
     /// main 启动链（M4.3；--vm-call 模式下为 None）
     pub entry: Option<EntryPlan>,
+}
+
+impl Module {
+    /// argv C 串表终结化（tier-0 setup_process_memory 同构；M6 片2 起从 lower 迁出）。
+    /// argv 是**运行期输入**：不得进 L2 缓存快照，冷/热路径每次运行都在快照之后追加
+    /// 分配并回填 EntryPlan——单一代码路径，杜绝冷热漂移。
+    pub fn finalize_entry_argv(&mut self, argv: &[String]) {
+        let Some(entry) = self.entry.as_mut() else {
+            return;
+        };
+        let frozen = self.frozen.as_mut().expect("entry 存在则冻结区必在");
+        let mut ptrs: Vec<u64> = Vec::with_capacity(argv.len());
+        for a in argv {
+            let bytes = a.as_bytes();
+            let p = frozen.alloc(bytes.len() as u64 + 1, 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, bytes.len());
+                *((p + bytes.len() as u64) as *mut u8) = 0;
+            }
+            ptrs.push(p);
+        }
+        let table = frozen.alloc((ptrs.len() as u64 + 1) * 8, 8);
+        for (i, &p) in ptrs.iter().enumerate() {
+            unsafe { *((table + i as u64 * 8) as *mut u64) = p };
+        }
+        // 尾 NULL 由清零保证
+        entry.argc = argv.len() as u64;
+        entry.argv_ptr = table;
+    }
 }
 
 #[cfg(test)]

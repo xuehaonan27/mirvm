@@ -13,7 +13,7 @@
 | M5.1 | **完成（2026-07-12）** | numbigint、xgetbv、sha2、blake3、ecosystem、diff_cargo 3/3 与六个 release tracer 全绿 |
 | 真实项目 TDD | **继续扩面（2026-07-13）** | workspace-local ripgrep/tokei 驱动四项通用语义修复；三个 workload 已完成 correctness-gated benchmark，另有八个 workload 完成 correctness 对拍 |
 | M5.2 | **完成（2026-07-14）** | 非 JIT 语义补全（轨 A 完备）：标量/simd intrinsic 差集、真栈深度、f16/f128、atomic 序、backtrace/signal/fork/atexit/global_asm/naked、128 位残余、嵌套 DST 全清；两个历史 XFAIL 转绿（[m5.2-design.md](m5.2-design.md) D8a–D8l，施工日志见 [m5-log.md](m5-log.md)） |
-| M6 ①② | **施工中（2026-07-14 立项）** | 轨 C 分发（[distribution-design.md](distribution-design.md) D9f）：① 相位计时 + ② L2 post-mono engine-IR 缓存；③④⑤ 未立项；施工日志 [m6-log.md](m6-log.md) |
+| M6 ①② | **完成（2026-07-14）** | 轨 C 分发（[distribution-design.md](distribution-design.md) D9f）：① 相位计时（MIRVM_TIMING 账本）+ ② L2 post-mono engine-IR 缓存（冻结区固定基址整包序列化；热跑加载相 11–15×，std-only 程序 374ms→33ms；告警程序诚实不缓存）；③④⑤ 未立项；施工日志 [m6-log.md](m6-log.md) |
 | M5.3–M5.5 | **未实现** | 方法级 Cranelift JIT、tiering、JIT unwind/LSDA 与性能收口（原编号 M5.2–M5.4，2026-07-14 顺延） |
 
 目前唯一产品执行引擎是 M4 解释器。Cargo 默认的 `cranelift` feature 只编译冻结的 Spike 5；

@@ -332,7 +332,34 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
 - **重估触发器**：M5.3 收官后重估对外格式冻结；pinned toolchain 升级时重测 cargo
   emit 剪枝容忍度。
 
-## 8. 尚未兑现或需要重新验证的架构承诺
+### 7.1 M6 片1/片2 施工偏离与新发现（2026-07-14，细节见 m6-log.md）
+
+- **固定基址替代重定位重建**：设计稿 §4 写"dlopen 句柄/FnPtr/常量池指针载入时重建"；
+  实做发现冻结区绝对地址已内嵌进字节码 const 与 fn_addrs 键，逐点重建需要 lower 全程
+  记录重定位边表（侵入极大）或范围启发式改写（静默错值风险，违纪律）。改为 **JVM CDS
+  同思路的固定基址映射**（`0x6800_0000_0000` + MAP_FIXED_NOREPLACE，被占响亮回退
+  动态基址+不缓存）——地址不重建而是天然稳定；唯一真正的活体重建仅剩 asm-stub 表
+  （配方 `Module.asm_sites` 幂等重物化）与 required .so（引擎侧本就每跑 dlopen）。
+- **告警不入缓存**（设计稿未涉及的真语义边界，diff 通道当场抓获）：warm 跳过 rustc
+  会话 ⇒ 编译诊断无法重演；v1 契约 = 有告警/错误的会话不 store（告警程序每跑重演，
+  语义与 native 差分口径逐字节一致），诊断回放留作升级路径。计数钩必须经
+  `psess_created` 安装（rustc_interface::setup_callbacks 会覆写 TRACK_DIAGNOSTIC，
+  psess_created 在其后、首次解析之前——直接在 run_driver 前装会被吞，实测踩中）。
+- **environ 类宿主地址直嵌不入缓存**（gate corpus c_process 热路径 SIGSEGV 抓获）：
+  非 weak extern static 的 dlsym 宿主真地址烤进 const/冻结区，ASLR 跨进程无效且
+  固定基址救不了（那是 libc 的地址不是我们的）。v1 契约 = `Module.foreign_static_syms`
+  非空即拒 store；GOT 式 Operand 间接留作升级路径。**教训（可缓存性三判据）**：
+  快照可回放 ⇔ ① 区内地址定基稳定 ② 进程级活体有重物化配方（asm_sites）③ 无第三方
+  地址直嵌（environ 类）——新的 lower 期 dlsym/地址烤入必须同步登记不可缓存标记。
+- **argv 从 lower 迁出**：EntryPlan.argc/argv_ptr 原为 lower 期烤死——缓存下会回放
+  上次运行的 argv（错值级）。迁 `Module::finalize_entry_argv`，冷/热每跑在快照语义
+  之后终结化，单一路径。
+- **materialize_script 幂等化**：原每跑无条件重写物化文件 ⇒ mtime 漂移 ⇒ 清单必
+  失配（缓存永 miss），同时一直在扰动 cargo 指纹（此前 native/mirvm 双方"恰好都
+  重建"而互相掩盖）。write_if_changed 修复。
+- **输入清单实现升级**：设计稿 §4 只写"key 含 crate 图内容哈希"；实做采 rustc
+  dep-info 同构清单（source_map + file_depinfo + used_crate_source + env_depinfo）
+  ——比设计更精确（env! 依赖到值、include! 文件、sysroot rlib 全覆盖）。
 
 - P7 设想独立 `src/os/` 物理层；当前 OS/FFI/builtin 逻辑仍分布在 lower、interp、ffi、heap。
 - “engine 是 library”目前只是 crate 结构；进程退出、全局 TLS key、泄漏式生命周期使其还不是稳定

@@ -29,6 +29,7 @@ gimli = { version = "0.33", optional = true, default-features = false, features 
 libc = "0.2.186"
 libffi = "5"
 libmimalloc-sys = "0.1.49"
+postcard = { version = "1", default-features = false, features = ["use-std"] }
 rustc-build-sysroot = "0.5.13"
 rustc_version = "0.4.1"
 serde = { version = "1.0.228", features = ["derive"] }

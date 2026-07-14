@@ -56,6 +56,21 @@ for src in demo/*.rs; do
         fi
     fi
 
+    # L2 warm 复跑（M6 片2）：第二次运行命中 IR 缓存（首跑已入账），产出必须仍与
+    # native 三项一致——防"缓存回放旧语义/快照损伤"假绿。冷/热差异只允许出现在耗时。
+    if [ $ok = 1 ]; then
+        env -u RUST_BACKTRACE "$MIRVM" run "$src" >"$TMP/$name.mirvm2.out" 2>"$TMP/$name.mirvm2.err"
+        mirvm2_code=$?
+        sed -E "s/thread '[^']*' \([0-9]+\)/thread 'T'/" "$TMP/$name.mirvm2.err" >"$TMP/$name.mirvm2.err.n"
+        if ! diff -q "$TMP/$name.native.out" "$TMP/$name.mirvm2.out" >/dev/null; then
+            ok=0; why="L2 warm 复跑 stdout 不一致"
+        elif [ "$native_code" != "$mirvm2_code" ]; then
+            ok=0; why="L2 warm 复跑退出码 native=$native_code mirvm=$mirvm2_code"
+        elif ! diff -q "$TMP/$name.native.err.n" "$TMP/$name.mirvm2.err.n" >/dev/null; then
+            ok=0; why="L2 warm 复跑 stderr 不一致"
+        fi
+    fi
+
     if [ $ok = 1 ]; then
         echo "PASS $name"
         pass=$((pass + 1))
@@ -65,6 +80,10 @@ for src in demo/*.rs; do
         echo "--- mirvm stdout ---"; cat "$TMP/$name.mirvm.out"
         echo "--- native stderr ---"; cat "$TMP/$name.native.err"
         echo "--- mirvm stderr ---"; cat "$TMP/$name.mirvm.err"
+        if [ -f "$TMP/$name.mirvm2.out" ]; then
+            echo "--- mirvm warm stdout ---"; cat "$TMP/$name.mirvm2.out"
+            echo "--- mirvm warm stderr ---"; cat "$TMP/$name.mirvm2.err"
+        fi
         fail=$((fail + 1))
     fi
 done
