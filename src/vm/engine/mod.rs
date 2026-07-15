@@ -9,6 +9,7 @@ pub mod frozen;
 pub mod heap;
 pub mod interp;
 pub mod ir;
+pub mod jit;
 pub mod stats;
 pub mod thunks;
 pub mod tsan_mt;

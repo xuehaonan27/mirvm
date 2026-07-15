@@ -23,13 +23,18 @@ use super::ir::Module;
 pub struct Shared {
     pub module: Module,
     pub thunks: super::thunks::ThunkCache,
+    /// J1 分层基座（M5.3a）：PLT 槽 + 计数，按合并后 FuncId 空间建。
+    /// 槽的写入者是 M5.3b 编译线程（单原子交换发布），此外发布后只读纪律不变。
+    pub jit: super::jit::JitState,
 }
 
 impl Shared {
     pub fn new(module: Module) -> Self {
+        let jit = super::jit::JitState::new(module.funcs.len());
         Shared {
             module,
             thunks: super::thunks::ThunkCache::default(),
+            jit,
         }
     }
 }

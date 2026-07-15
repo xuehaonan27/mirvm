@@ -91,6 +91,8 @@ pub fn run() -> bool {
                 let ctx = attach(shared);
                 let addr = CELL.as_ptr() as u64;
                 for _ in 0..N {
+                    // M5.3a Q4 豁免：TSan harness 自用入口不经 call_guest 收拢
+                    //（TSan 通道不编 cranelift，分层派发在此无意义）
                     interp::interp_frame(ctx, 0, &[addr]);
                 }
                 // thunk 工厂并发（同键）+ 跨线程真码调用（再入 attach）

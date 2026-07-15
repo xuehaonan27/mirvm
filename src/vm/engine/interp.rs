@@ -2107,7 +2107,7 @@ fn call_fn_addr(ctx: *mut Ctx, addr: u64, args: &[u64], caller: &str) -> (u64, u
             "间接调用目标 {addr:#x} 不是已知 fn 条目（调用者 {caller}）"
         ));
     };
-    interp_frame(ctx, fid, args)
+    call_guest(ctx, fid, args)
 }
 
 /// unwind 边 → cleanup 目标块。
@@ -2147,6 +2147,26 @@ fn run_cleanup(ctx: *mut Ctx, func: u32, base: usize, entry: Bb) {
         Exit::Resume => {} // 返回 guard，unwind 自动继续
         Exit::Ret(..) => engine_abort("cleanup 链以 Return 结束（MIR 不变量破坏）"),
     }
+}
+
+/// J1 单一派发点（M5.3a，m5.3-design §2.2）：guest 函数调用的必经口，收拢六处
+/// 原 interp_frame 直调（Call/CallIndirect/CatchUnwind 回调/run_main/run_export/
+/// thunk 蹦床；tsan_mt 豁免——Q4，TSan 通道不编 cranelift，收拢无意义）。
+/// 槽非零 = 已发布编译码（M5.3b 起 i2c 直调 packed 入口）；零 = 计数 + 解释。
+/// 计数 Relaxed（丢计只影响触发时刻）；槽 Acquire 配编译线程 Release（D4 协议）。
+#[inline]
+pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
+    let jit = unsafe { &(*(*ctx).shared).jit };
+    if jit.enabled {
+        let entry = jit.slots[func as usize].load(std::sync::atomic::Ordering::Acquire);
+        if entry != 0 {
+            // M5.3a 无编译线程，无人写槽——非零 = 内存踩踏级事故，响亮死（防静默错值）
+            engine_abort("JIT 槽在 M5.3a 不可能非零");
+        }
+        jit.counters[func as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // M5.3b：过阈值（jit.threshold）投递后台编译队列
+    }
+    interp_frame(ctx, func, args)
 }
 
 /// 模型 A：guest 调用 = 宿主递归（spike1/3 验证的形状）。
@@ -2314,7 +2334,7 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 }
                 av.extend(aops.iter().map(|o| eval_operand(ctx, base, o).0));
                 edge.set(cleanup_edge(unwind)); // callee 若 panic，本帧从这条边清理
-                let (lo, hi) = call_guarding_terminate(unwind, || interp_frame(ctx, *callee, &av)); // ← 宿主递归
+                let (lo, hi) = call_guarding_terminate(unwind, || call_guest(ctx, *callee, &av)); // ← 宿主递归
                 edge.set(None);
                 match ret {
                     RetDest::Ignore | RetDest::Indirect(_) => {}
@@ -2403,7 +2423,7 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 av.extend(aops.iter().map(|o| eval_operand(ctx, base, o).0));
                 edge.set(cleanup_edge(unwind));
                 let (lo, hi) = if let Some(&fid) = module.fn_addrs.get(&addr) {
-                    call_guarding_terminate(unwind, || interp_frame(ctx, fid, &av))
+                    call_guarding_terminate(unwind, || call_guest(ctx, fid, &av))
                 } else if let Some(nsig) = native_sig {
                     // FFI 反方向之二（M4.4）：guest 持 native 真码 fn ptr（运行期
                     // dlsym 所得，如 __pthread_get_minstack）→ 按冻结签名直调
@@ -2807,7 +2827,7 @@ pub fn run_main(shared: &'static Shared) -> i32 {
         entry.sigpipe as u64,
     ];
     match panic::catch_unwind(AssertUnwindSafe(|| {
-        interp_frame(ctx_ptr, entry.lang_start, &args).0
+        call_guest(ctx_ptr, entry.lang_start, &args).0
     })) {
         Ok(code) => code as i32,
         Err(e) => match e.downcast::<GuestPanic>() {
@@ -2830,7 +2850,7 @@ pub fn run_export(shared: &'static Shared, name: &str, args: &[u64]) -> Result<u
     };
     let ctx_ptr = super::ctx::attach(shared);
     super::ctx::set_fork_baseline(); // D8f
-    match panic::catch_unwind(AssertUnwindSafe(|| interp_frame(ctx_ptr, id, args).0)) {
+    match panic::catch_unwind(AssertUnwindSafe(|| call_guest(ctx_ptr, id, args).0)) {
         Ok(r) => Ok(r),
         Err(e) => match e.downcast::<GuestPanic>() {
             Ok(_) => {

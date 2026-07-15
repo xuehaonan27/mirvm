@@ -62,7 +62,7 @@ unsafe extern "C" fn trampoline(
         };
         av.push(v);
     }
-    let (lo, _hi) = super::interp::interp_frame(ctx, data.func, &av);
+    let (lo, _hi) = super::interp::call_guest(ctx, data.func, &av);
     if data.ret != FfiKind::Void {
         *result = lo;
     }
