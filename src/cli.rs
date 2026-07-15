@@ -360,6 +360,13 @@ struct MirvmCallbacks {
     rustc_args: Vec<String>,
     /// S4/S3′ image 栈：after_analysis 验降低指纹后供 lower 并集查找；run_driver 尾部 absorb。
     stack: crate::baseimage::ImageStack,
+    /// A2 split 产物（s3b-a2-design；`MIRVM_DEPS_IMAGE=1` 且底座在场时由 lower_program 产出）；
+    /// run_driver 尾部 push 上栈再 absorb。
+    split_image: Option<crate::lower::SplitImage>,
+    /// 本会话降低指纹（after_analysis 记录；split_image 包装栈层时用）
+    session_fp: Option<(bool, bool, bool)>,
+    /// A2：本会话起手是否已装载 deps-image（已装载 ⇒ 不再 split 重建）
+    deps_image_loaded: bool,
 }
 
 /// 加载相计时账本（M6 片1）。frontend = 驱动进入→analysis 完成（含依赖 metadata 加载），
@@ -443,13 +450,29 @@ impl Callbacks for MirvmCallbacks {
                 sess.overflow_checks(),
                 sess.contract_checks(),
             );
+            self.session_fp = Some(fp);
             if !self.stack.fp_matches(fp) {
                 self.stack = crate::baseimage::ImageStack::empty();
             }
             // callback 只做加载相；执行相必须等 tcx.finish、诊断收尾和 compiler drop 全部完成。
             let t_lower = std::time::Instant::now();
-            self.module = Some(crate::lower::lower_program(tcx, &self.stack));
+            // A2 split 判定（s3b-a2-design）：启用 + 非旁路 + 本会话未装载 image +
+            // 底座在场（fp 截断后栈可能已空——无底座不 split，Q2）。
+            let want_split = crate::depsimage::enabled()
+                && !crate::depsimage::bypassed()
+                && !self.deps_image_loaded
+                && !self.stack.is_empty();
+            let (module, split_image) = crate::lower::lower_program(tcx, &self.stack, want_split);
+            self.module = Some(module);
+            self.split_image = split_image;
             self.timing.lower = Some(t_lower.elapsed());
+            // A2：split 产物先写盘再上栈——栈键链自此含 image 键，L2 delta 条目带
+            // 完整链（delta 内嵌 image 绝对量，错链入账 = 后续错配装载）。
+            if let Some(img) = self.split_image.take() {
+                let base_key = self.stack.key().expect("split 必在底座在场时").to_string();
+                let bi = crate::depsimage::store_and_wrap(&self.rustc_args, &base_key, fp, img);
+                self.stack.push(bi);
+            }
             // L2 入账：guest 运行前的洁净快照（argv 尚未终结化）。
             // 会话有任何告警/错误即不入账——warm 路径无法重演诊断（见 SESSION_WARNINGS）。
             // S4/S3′：delta 条目携带键链（装载时双验证，防错配 image 栈）。
@@ -599,11 +622,23 @@ fn run_driver(
     let t_start = std::time::Instant::now();
     // S4/S3′ image 栈：装载底座 + 依赖 image 链（失败/旁路 = 空栈，全量冷路径自愈）。
     // 降低指纹（ub/overflow/contract checks）要到会话内才能验证——after_analysis 复核。
-    let stack = if dump_mir {
+    let mut stack = if dump_mir {
         crate::baseimage::ImageStack::empty()
     } else {
         crate::baseimage::ensure()
     };
+    // A2 deps-image 装载（pre-compiler，s3b-a2-design §3）：启用 + 非旁路 + 底座在场。
+    // 命中即 push 上栈——栈键链自此含 image 键，L2 delta 条目可恢复入账。
+    let mut deps_image_loaded = false;
+    if !dump_mir
+        && crate::depsimage::enabled()
+        && !crate::depsimage::bypassed()
+        && let Some(base) = stack.base_image()
+        && let Some(bi) = crate::depsimage::try_load(&rustc_args, base)
+    {
+        deps_image_loaded = true;
+        stack.push(bi);
+    }
     let base_key = stack.key().map(str::to_owned);
     // L2 热路径（M6 片2）：命中即跳过整个 rustc 会话（前端+metadata+mono+lower）。
     // dump-mir 需要 tcx，强制冷路径。S4/S3′：delta 条目与键链双验证（ircache）。
@@ -638,6 +673,9 @@ fn run_driver(
         timing: PhaseTiming::default(),
         rustc_args: rustc_args.clone(),
         stack,
+        split_image: None,
+        session_fp: None,
+        deps_image_loaded,
     };
     let compiler_code = rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&rustc_args, &mut callbacks)
@@ -654,6 +692,7 @@ fn run_driver(
     if let Some(mut module) = callbacks.module.take() {
         // S4/S3′ 冷路径合并（store 已在 after_analysis 落盘 delta；引擎吃合并模块）。
         // 空栈（无 image）跳过——module 的 asm_stub_addrs 已在 lower 会话内物化。
+        // A2：split 产物已在 after_analysis 写盘并 push 上栈，此处统一 absorb。
         let stack = std::mem::replace(&mut callbacks.stack, crate::baseimage::ImageStack::empty());
         if !stack.is_empty() {
             crate::baseimage::absorb_stack(&mut module, stack);

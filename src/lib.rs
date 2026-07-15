@@ -27,6 +27,7 @@ extern crate rustc_target;
 pub mod baseimage;
 pub mod cargo_shim;
 pub mod cli;
+pub mod depsimage;
 pub mod ircache;
 pub mod lower;
 pub(crate) mod native_archive;

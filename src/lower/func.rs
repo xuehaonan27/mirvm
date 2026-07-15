@@ -2396,8 +2396,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
         }
 
-        let stub_id = self.linker.reserve_asm_stub();
-        let name = format!("mirvm_asm_{stub_id}");
+        let (stub_id, name) = self.linker.reserve_asm_stub();
         let g = super::asm::generate(self.tcx, self.def_id, arch, template, &gen_ops, &name);
         self.linker.set_asm_stub(stub_id, g.text);
 

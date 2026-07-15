@@ -12,6 +12,15 @@ pub type FuncId = u32;
 /// inline asm 站点 id（M5.0 asm-stub 工厂）：索引 `Module.asm_stub_addrs`。
 pub type AsmStubId = u32;
 
+/// asm-stub 物化配方的单站点（M5.0 起；A2 起符号名与位序解耦，见 Module.asm_sites）。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AsmSite {
+    /// wrapper 的 dlsym 符号名（lower 生成 GAS 文本时烤入 .globl/.type/.size）
+    pub name: Box<str>,
+    /// wrapper GAS 全文
+    pub text: String,
+}
+
 /// 标量宽度。W128 = 两槽通道（M4.1 第 3 步）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Width {
@@ -1239,9 +1248,11 @@ pub struct Module {
     /// cc 汇编 + dlopen + dlsym 物化）。执行相只读 u64 直调，纯度不破。
     /// **不进 L2 快照语义**——warm 路径以 asm_sites 幂等重物化后覆写。
     pub asm_stub_addrs: Vec<u64>,
-    /// asm-stub 物化配方（M6 片2）：wrapper GAS 全文，AsmStubId 序。warm 加载用它
-    /// 重跑 asm::materialize（内容哈希命中 .so 缓存则只 dlopen+dlsym；被清则重 cc，自愈）。
-    pub asm_sites: Vec<String>,
+    /// asm-stub 物化配方（M6 片2）：符号名 + wrapper GAS 全文，AsmStubId（= 位序）序。
+    /// warm 加载用它重跑 asm::materialize（内容哈希命中 .so 缓存则只 dlopen+dlsym；
+    /// 被清则重 cc，自愈）。**符号名与位序解耦**：A2 split 模式的最终位序收尾才知，
+    /// 用类前缀名（mirvm_asm_xi{j}/xd{k}）；非 split 路径沿用位序名 mirvm_asm_{id}。
+    pub asm_sites: Vec<AsmSite>,
     /// 非 weak extern static（environ 类）的宿主地址直嵌符号（M6 片2）：这些 dlsym
     /// 真地址已烤进字节码 const/冻结区重定位，ASLR 下跨进程无效——**非空即不可入
     /// L2 缓存**（ircache::store 拒绝；升级路径 = GOT 式间接）。

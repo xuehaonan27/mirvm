@@ -221,6 +221,11 @@ impl ImageStack {
     pub fn is_empty(&self) -> bool {
         self.images.is_empty()
     }
+
+    /// 栈底底座（A2 deps-image 装载的 below 键/fp 分层验证用；空栈 = None）
+    pub fn base_image(&self) -> Option<&BaseImage> {
+        self.images.first()
+    }
     pub fn total_fns(&self) -> usize {
         self.total_fns
     }
@@ -244,6 +249,37 @@ impl ImageStack {
     }
     pub fn key(&self) -> Option<&str> {
         self.key.as_deref()
+    }
+
+    /// 追加一层 image（A2 in-memory split 产物，s3b-a2-design）：并集查找/累积
+    /// 偏移/键链增量更新。fp 由调用方保证与栈一致（同会话构建，无需截断）。
+    pub fn push(&mut self, img: BaseImage) {
+        if self.images.is_empty() {
+            self.lowering_fp = img.lowering_fp;
+        }
+        for (k, v) in &img.fn_by_sym {
+            self.fn_by_sym.entry(k.clone()).or_insert(*v);
+        }
+        for (k, v) in &img.entry_by_sym {
+            self.entry_by_sym.entry(k.clone()).or_insert(*v);
+        }
+        for (k, v) in &img.static_by_sym {
+            self.static_by_sym.entry(k.clone()).or_insert(*v);
+        }
+        for (k, v) in &img.tls_by_sym {
+            self.tls_by_sym.entry(k.clone()).or_insert(*v);
+        }
+        self.total_fns += img.module.funcs.len();
+        self.total_tls += img.module.tls.len();
+        self.total_asm += img.module.asm_sites.len();
+        match &mut self.key {
+            Some(k) => {
+                k.push('\u{1f}');
+                k.push_str(&img.key);
+            }
+            None => self.key = Some(img.key.clone()),
+        }
+        self.images.push(img);
     }
 
     /// 会话降低指纹核对（cli after_analysis）：不匹配 ⇒ 弃整栈走全量降低。

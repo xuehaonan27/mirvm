@@ -146,6 +146,11 @@ fn cargo_project_command(
 
 /// 阶段 1：在 `project_dir` 里驱动 cargo。program_args 传给最终被解释的程序。
 pub fn phase_cargo(project_dir: &std::path::Path, program_args: &[String]) -> ! {
+    // 绝对化：relative project_dir + current_dir + join(target/mirvm) 会把 target 目录
+    // 拼成 project/project/target 的重复嵌套（A2 gate 实测）——且使同一项目的 rlib 路径
+    // 随调用形态（相对/绝对）漂移，deps-image 键失稳。
+    let project_dir =
+        &std::path::absolute(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
     if let Err(error) = reject_custom_rustc_wrappers(project_dir) {
         eprintln!("mirvm: {error}");
         exit(1);

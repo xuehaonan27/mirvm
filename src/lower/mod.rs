@@ -62,6 +62,67 @@ const DENY_EXACT: &[&str] = &[
 ];
 const DENY_PREFIX: &[&str] = &[];
 
+/// A2 split 标签位（s3b-a2-design §4.2）：image 类 id = `IMAGE_TAG | 位序`，
+/// delta 类 id = 今日路径的 untagged 值。rebase 前绝不进执行相（2^31 实例不可能）。
+/// FuncId/TlsId/AsmStubId 同构（均 u32）。
+const IMAGE_TAG: u32 = 0x8000_0000;
+
+/// A2 split 状态（s3b-a2-design §4）：双队列/双 arena/双去重表。
+/// delta 侧沿用 Linker 主字段（queue/funcs/frozen/alloc_addrs/tls_slots/asm_sites）。
+struct Split<'tcx> {
+    /// image 类实例的冻结区（样条 k=0 域，0x6A00）
+    image_frozen: FrozenArena,
+    /// image 类待降低队列（标签 id）
+    image_queue: VecDeque<(ir::FuncId, Instance<'tcx>)>,
+    /// image 类函数体（位序 j → 标签 id `IMAGE_TAG|j`）
+    image_funcs: Vec<Option<ir::FuncBody>>,
+    /// 下一个 image 类 id 序数
+    image_fn_next: ir::FuncId,
+    /// image 类 TLS 槽（标签 TlsId 同构）
+    image_tls_slots: Vec<ir::TlsSlot>,
+    /// image 类 asm 站点（符号名 mirvm_asm_xi{j}）
+    image_asm_sites: Vec<ir::AsmSite>,
+    /// image 区常量去重表（delta 区 = Linker.alloc_addrs；提升 = 双份物化，见 §4.3）
+    image_alloc_addrs: FxHashMap<AllocId, u64>,
+    /// image 区 fn 条目表（instance → 条目地址；含底座命中但在 image 区补建者——
+    /// 装载端 fn_entry_syms 索引的唯一权威，保"总量恰一份"的单一身份可复现）
+    image_fn_entries: FxHashMap<Instance<'tcx>, u64>,
+    /// 当前降低实例是否为 image 类（ensure_alloc Memory 路由 + closure 护栏用）
+    current_image: bool,
+    /// image 类实例表（rebase 后写盘自检用：逐 instance 复查无 LOCAL_CRATE 沾染）
+    image_insts: Vec<Instance<'tcx>>,
+}
+
+/// A2 split 产物（s3b-a2-design）：deps-image 模块 + 栈索引素材（BaseExports 同构）。
+/// 模块冻结区在样条 k=0 域；fn/TLS/asm 与 exports/fn_addrs 已 rebase 成绝对 id。
+pub struct SplitImage {
+    pub module: ir::Module,
+    pub fn_entry_syms: Vec<(Box<str>, u64)>,
+    pub static_syms: Vec<(Box<str>, u64)>,
+    pub tls_syms: Vec<(Box<str>, ir::TlsId)>,
+}
+
+impl SplitImage {
+    /// 包装成栈层（A2-1 内存态 absorb；A2-2 写盘后由文件装载取代）。
+    /// fp = 构建会话的降低指纹（同会话构建，与栈恒一致）。
+    pub fn into_base_image(self, fp: (bool, bool, bool)) -> crate::baseimage::BaseImage {
+        crate::baseimage::BaseImage {
+            fn_by_sym: self
+                .module
+                .exports
+                .iter()
+                .map(|(s, id)| (s.clone(), *id))
+                .collect(),
+            entry_by_sym: self.fn_entry_syms.into_iter().collect(),
+            static_by_sym: self.static_syms.into_iter().collect(),
+            tls_by_sym: self.tls_syms.into_iter().collect(),
+            lowering_fp: fp,
+            key: "a2-inmem".into(),
+            module: self.module,
+        }
+    }
+}
+
 /// 加载相"链接器"：FuncId 分配 + worklist 闭包扩集（D1 修正），外加 native 链接器
 /// 职责的仿真——**特判的不是"panic 是什么"，是"链接器本来会做什么"**（debt-map §2-B）：
 /// ① 引擎原语表（codegen allocator-shim 的同一符号清单）；
@@ -71,8 +132,10 @@ pub(crate) struct Linker<'tcx> {
     tcx: TyCtxt<'tcx>,
     /// instance → FuncId（去重集；含已降与在队的）
     ids: FxHashMap<Instance<'tcx>, ir::FuncId>,
-    /// 待降低队列（FuncId 已分配，体未产出）
+    /// 待降低队列（FuncId 已分配，体未产出）——split 模式下为 **delta 类**队列
     queue: VecDeque<(ir::FuncId, Instance<'tcx>)>,
+    /// A2 split 状态（None = 非 split 路径，行为与 S4/S3′a 完全一致）
+    split: Option<Split<'tcx>>,
     /// ①引擎原语表：mangled 符号 → Builtin
     builtins: FxHashMap<Symbol, ir::Builtin>,
     /// ②链接仿真：导出符号名 → (定义 instance, is_weak)（strong 覆盖 weak；惰性构建）
@@ -88,8 +151,9 @@ pub(crate) struct Linker<'tcx> {
     /// guest TLS：`#[thread_local]` static → 稠密 TlsId + 槽表（M4.4 D3，移交 Module）
     tls_ids: FxHashMap<rustc_hir::def_id::DefId, ir::TlsId>,
     tls_slots: Vec<ir::TlsSlot>,
-    /// asm-stub wrapper 文本（M5.0）：AsmStubId → GAS 源；lower 结束批量 cc+dlopen 物化
-    asm_sites: Vec<String>,
+    /// asm-stub wrapper 文本（M5.0）：AsmStubId → 符号名+GAS 源；lower 结束批量
+    /// cc+dlopen 物化。A2 起名字与位序解耦（split 模式最终位序收尾才知）。
+    asm_sites: Vec<ir::AsmSite>,
     /// 非 weak extern static 的宿主地址直嵌符号（M6 片2）：非空 ⇒ 模块不可缓存
     foreign_static_syms: Vec<Box<str>>,
     // ===== S4 底座（s4-base-image-design；偏移合并）=====
@@ -139,6 +203,7 @@ impl<'tcx> Linker<'tcx> {
             tls_slots: Vec::new(),
             asm_sites: Vec::new(),
             foreign_static_syms: Vec::new(),
+            split: None,
             base_fns,
             base_fn_entries,
             base_statics,
@@ -151,16 +216,62 @@ impl<'tcx> Linker<'tcx> {
         }
     }
 
-    /// 预留一个 asm-stub 槽（M5.0），返回其 AsmStubId；文本随后 set_asm_stub 回填。
-    /// 分两步是因为 wrapper 名 `mirvm_asm_{id}` 要先于文本生成确定（自引用 .size 指令）。
-    /// S4：id 从底座计数起编（wrapper 名跨域唯一白拿）。
-    fn reserve_asm_stub(&mut self) -> ir::AsmStubId {
+    /// A2 split 激活（s3b-a2-design §4）：image 冻结区落样条 k=0 域。
+    /// 域被占 = 回退动态基址（语义不变；A2-2 写盘阶段会拒序列化自愈）。
+    fn activate_split(&mut self) {
+        self.split = Some(Split {
+            image_frozen: FrozenArena::new_image(0),
+            image_queue: VecDeque::new(),
+            image_funcs: Vec::new(),
+            image_fn_next: 0,
+            image_tls_slots: Vec::new(),
+            image_asm_sites: Vec::new(),
+            image_alloc_addrs: FxHashMap::default(),
+            image_fn_entries: FxHashMap::default(),
+            current_image: false,
+            image_insts: Vec::new(),
+        });
+    }
+
+    /// 预留一个 asm-stub 槽（M5.0），返回 (AsmStubId, 符号名)；文本随后 set_asm_stub 回填。
+    /// 分两步是因为 wrapper 名要先于文本生成确定（自引用 .size 指令）。
+    /// S4：id 从底座计数起编（wrapper 名跨域唯一白拿）。A2 split 按当前类分轨：
+    /// image 类 = 标签 id + `mirvm_asm_xi{j}` 名，delta 类 = 原 id 空间 + `mirvm_asm_xd{k}`
+    /// 名（最终位序收尾才知，名字与位序解耦）；非 split 路径沿用位序名不变。
+    fn reserve_asm_stub(&mut self) -> (ir::AsmStubId, Box<str>) {
+        if let Some(s) = &mut self.split {
+            if s.current_image {
+                let j = s.image_asm_sites.len() as ir::AsmStubId;
+                let name: Box<str> = format!("mirvm_asm_xi{j}").into();
+                s.image_asm_sites.push(ir::AsmSite {
+                    name: name.clone(),
+                    text: String::new(),
+                });
+                return (IMAGE_TAG | j, name);
+            }
+            let k = self.delta_first_asm + self.asm_sites.len() as ir::AsmStubId;
+            let name: Box<str> = format!("mirvm_asm_xd{k}").into();
+            self.asm_sites.push(ir::AsmSite {
+                name: name.clone(),
+                text: String::new(),
+            });
+            return (k, name);
+        }
         let id = self.delta_first_asm + self.asm_sites.len() as ir::AsmStubId;
-        self.asm_sites.push(String::new());
-        id
+        let name: Box<str> = format!("mirvm_asm_{id}").into();
+        self.asm_sites.push(ir::AsmSite {
+            name: name.clone(),
+            text: String::new(),
+        });
+        (id, name)
     }
     fn set_asm_stub(&mut self, id: ir::AsmStubId, text: String) {
-        self.asm_sites[(id - self.delta_first_asm) as usize] = text;
+        if id & IMAGE_TAG != 0 {
+            let s = self.split.as_mut().expect("标签 stub id 仅 split 模式存在");
+            s.image_asm_sites[(id & !IMAGE_TAG) as usize].text = text;
+        } else {
+            self.asm_sites[(id - self.delta_first_asm) as usize].text = text;
+        }
     }
 
     /// `#[thread_local]` static → 稠密 TlsId（M4.4 D3）。模板 = 初始化器求值产物
@@ -185,6 +296,24 @@ impl<'tcx> Linker<'tcx> {
         let (size, align) = (alloc.inner().size().bytes(), alloc.inner().align.bytes());
         let alloc_id = self.tcx.reserve_and_set_static_alloc(def_id);
         let template = self.ensure_alloc(alloc_id)?;
+        // A2 split：TLS 身份按 def_id.krate 定域（非本地 → image 槽区，单一身份）；
+        // image 上下文遇本地 TLS = purity 向下封闭被破坏（分类器 bug），响亮拒绝。
+        if let Some(s) = &mut self.split {
+            if def_id.krate != rustc_hir::def_id::LOCAL_CRATE {
+                let j = s.image_tls_slots.len() as ir::TlsId;
+                s.image_tls_slots.push(ir::TlsSlot {
+                    template,
+                    size,
+                    align: align as u32,
+                });
+                let id = IMAGE_TAG | j;
+                self.tls_ids.insert(def_id, id);
+                return Ok(id);
+            }
+            if s.current_image {
+                panic!("A2 closure violation：image 实例引用本地 TLS static（分类器漏判）");
+            }
+        }
         let id = self.delta_first_tls + self.tls_slots.len() as ir::TlsId;
         self.tls_slots.push(ir::TlsSlot {
             template,
@@ -199,6 +328,8 @@ impl<'tcx> Linker<'tcx> {
     /// 比较/转型语义正确；间接调用经反查表派发（M4.1 第 5 步接 CallIndirect）。
     /// S4：底座函数已有条目则复用（单一地址身份；底座 vtable 与 delta 取址一致）；
     /// 底座函数无条目（构建时没被取址）则在 delta 区补一个——总量仍恰一份。
+    /// A2 split：条目按 instance 类定域（image 类 → image 区，单一地址身份不变）；
+    /// image 上下文遇 delta 类 = purity 封闭被破坏（分类器 bug），响亮拒绝。
     pub(crate) fn fn_entry_addr(&mut self, inst: Instance<'tcx>) -> u64 {
         if let Some(&a) = self.fn_entries.get(&inst) {
             return a;
@@ -210,7 +341,26 @@ impl<'tcx> Linker<'tcx> {
             self.fn_entries.insert(inst, a);
             return a;
         }
-        let addr = self.frozen.alloc(8, 16);
+        let addr = if let Some(s) = &mut self.split {
+            if fid & IMAGE_TAG != 0 || fid < self.delta_first_fn {
+                // image 类，或底座命中但底座无条目（S4 补建条目的 split 变体）：
+                // image 区——单一地址身份（delta 引用 image 域恒稳定；delta 区对
+                // image 字节码是跨运行不稳定域，绝不能去）。
+                let a = s.image_frozen.alloc(8, 16);
+                s.image_fn_entries.insert(inst, a);
+                a
+            } else {
+                if s.current_image {
+                    panic!(
+                        "A2 closure violation：image 实例引用 delta 类 fn 条目（分类器漏判）: {}",
+                        self.tcx.symbol_name(inst).name
+                    );
+                }
+                self.frozen.alloc(8, 16)
+            }
+        } else {
+            self.frozen.alloc(8, 16)
+        };
         unsafe { (addr as *mut u64).write(fid as u64) };
         self.fn_entries.insert(inst, addr);
         self.fn_addrs.insert(addr, fid);
@@ -218,19 +368,48 @@ impl<'tcx> Linker<'tcx> {
     }
 
     /// 裸字节物化进冻结区（128 位常量等小常量的通用道）。
+    /// A2 split：纯字节无指针无 locality，按当前类定域即可。
     pub(crate) fn frozen_alloc_bytes(&mut self, bytes: &[u8]) -> u64 {
-        let p = self.frozen.alloc(bytes.len() as u64, 16);
+        let arena: &mut FrozenArena = match &mut self.split {
+            Some(s) if s.current_image => &mut s.image_frozen,
+            _ => &mut self.frozen,
+        };
+        let p = arena.alloc(bytes.len() as u64, 16);
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, bytes.len()) };
         p
     }
 
     /// alloc → 冻结区真地址（按需递归物化；先分后填 ⇒ 指针环安全）。
+    /// A2 split 路由（s3b-a2-design §4.3）：
+    /// - image 上下文只接受 image 域地址（跨运行稳定域）；delta 上下文两域皆可
+    ///   （delta map 优先，image map 兜底复用——delta→image 向下稳定）。
+    /// - 身份必需通道（static/weak cell/fn 条目）按 krate/类定域并**双表登记**
+    ///   （防双份精神分裂）；Memory/vtable 身份 unspecified，按上下文定域，
+    ///   image 上下文对 delta 区已有者**提升**（双份物化，常量只读安全）。
     pub(crate) fn ensure_alloc(&mut self, id: AllocId) -> Result<u64, String> {
-        if let Some(&a) = self.alloc_addrs.get(&id) {
-            return Ok(a);
+        let ctx_image = self.split.as_ref().is_some_and(|s| s.current_image);
+        if ctx_image {
+            if let Some(&a) = self
+                .split
+                .as_ref()
+                .expect("split")
+                .image_alloc_addrs
+                .get(&id)
+            {
+                return Ok(a);
+            }
+        } else {
+            if let Some(&a) = self.alloc_addrs.get(&id) {
+                return Ok(a);
+            }
+            if let Some(s) = &self.split
+                && let Some(&a) = s.image_alloc_addrs.get(&id)
+            {
+                return Ok(a);
+            }
         }
         match self.tcx.global_alloc(id) {
-            GlobalAlloc::Memory(alloc) => self.materialize(id, alloc),
+            GlobalAlloc::Memory(alloc) => self.materialize_in(id, alloc, ctx_image),
             GlobalAlloc::Static(def_id) => {
                 // extern static = 真符号（os:: 直通）：
                 // - weak（gettid 等 fn 符号判空模式）：判空 cell 写 0（缺席）——weak
@@ -243,8 +422,15 @@ impl<'tcx> Linker<'tcx> {
                     let weak = self.tcx.codegen_fn_attrs(def_id).import_linkage
                         == Some(rustc_hir::attrs::Linkage::ExternalWeak);
                     if weak {
-                        let cell = self.frozen.alloc(8, 8); // 清零 cell = 符号缺席
-                        self.alloc_addrs.insert(id, cell);
+                        // 判空 cell：&static 地址身份必需（krate 定域 + 双表登记）
+                        let cell = if let Some(s) = &mut self.split
+                            && def_id.krate != rustc_hir::def_id::LOCAL_CRATE
+                        {
+                            s.image_frozen.alloc(8, 8)
+                        } else {
+                            self.frozen.alloc(8, 8) // 清零 cell = 符号缺席
+                        };
+                        self.record_both(id, cell);
                         return Ok(cell);
                     }
                     let cname = std::ffi::CString::new(name.as_str())
@@ -257,8 +443,9 @@ impl<'tcx> Linker<'tcx> {
                     // ASLR 下跨进程无效 ⇒ 登记符号，含此类地址的模块不入 L2 缓存
                     //（M6 片2 gate 实测：c_process 热回放上进程 libc 地址 SIGSEGV）。
                     // 升级路径 = GOT 式 Operand 间接（IR 设计变更，M6 后续）。
+                    // A2：deps-image 同规则拒（写盘自检，baseimage 三判据同构）。
                     self.foreign_static_syms.push(name.as_str().into());
-                    self.alloc_addrs.insert(id, p);
+                    self.record_both(id, p);
                     return Ok(p);
                 }
                 // S4 底座静态去重：同一 static 双份物化 = static mut/内部可变性的
@@ -266,50 +453,110 @@ impl<'tcx> Linker<'tcx> {
                 if !self.base_statics.is_empty() {
                     let sym = self.tcx.symbol_name(Instance::mono(self.tcx, def_id)).name;
                     if let Some(&addr) = self.base_statics.get(sym) {
-                        self.alloc_addrs.insert(id, addr);
+                        self.record_both(id, addr);
                         return Ok(addr);
                     }
                 }
+                // A2 split：static 身份必需（static mut/内部可变性/&static 相等性），
+                // 一律按 def_id.krate 定域（非本地 → image 区）；image 上下文遇本地
+                // static = purity 封闭被破坏（分类器 bug），响亮拒绝。
+                let to_image = if let Some(s) = &self.split {
+                    if def_id.krate == rustc_hir::def_id::LOCAL_CRATE {
+                        if s.current_image {
+                            panic!("A2 closure violation：image 实例引用本地 static（分类器漏判）");
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                } else {
+                    false
+                };
                 // static 的字节 = 初始化器求值产物；可写（static mut/内部可变性）
                 let alloc = self
                     .tcx
                     .eval_static_initializer(def_id)
                     .map_err(|e| format!("static 初始化器求值失败: {e:?}"))?;
-                let addr = self.materialize(id, alloc)?;
-                self.static_defs.push((def_id, addr)); // 底座导出素材（程序模式记了无害）
+                let addr = self.materialize_in(id, alloc, to_image)?;
+                if to_image {
+                    self.record_both(id, addr);
+                }
+                self.static_defs.push((def_id, addr)); // 底座/image 导出素材
                 Ok(addr)
             }
             GlobalAlloc::Function { instance } => {
                 let addr = self.fn_entry_addr(instance);
-                self.alloc_addrs.insert(id, addr);
+                self.record_both(id, addr);
                 Ok(addr)
             }
             GlobalAlloc::VTable(ty, dyn_ty) => {
+                // A2 split 护栏：image 上下文遇本地 Self 类型的 vtable = 封闭破坏。
+                // vtable 地址身份 unspecified（rustc 自身 per-CGU 复制）⇒ 按上下文
+                // 定域（提升双份合规），无需 krate 定域。
+                if self.split.as_ref().is_some_and(|s| s.current_image)
+                    && ty.walk().any(arg_mentions_local)
+                {
+                    panic!("A2 closure violation：image 实例引用本地类型 vtable（分类器漏判）");
+                }
                 // 现成的 vtable 分配（F5）——递归走 Memory 路径（含 fn 条目重定位）
                 let principal = dyn_ty
                     .principal()
                     .map(|b| self.tcx.instantiate_bound_regions_with_erased(b));
                 let vt_id = self.tcx.vtable_allocation((ty, principal));
                 let addr = self.ensure_alloc(vt_id)?;
-                self.alloc_addrs.insert(id, addr);
+                self.record_addr(id, addr, ctx_image);
                 Ok(addr)
             }
             GlobalAlloc::TypeId { .. } => {
                 // TypeId"分配"：基址 0——重定位 base+addend 后值 = 128 位类型哈希的
                 // 指针宽片段本身（tier-0 resolve_addr/Miri 同款）
-                self.alloc_addrs.insert(id, 0);
+                self.record_addr(id, 0, ctx_image);
                 Ok(0)
             }
         }
     }
 
+    /// 按上下文登记去重表（split；非 split 恒 delta 表）
+    fn record_addr(&mut self, id: AllocId, addr: u64, ctx_image: bool) {
+        match &mut self.split {
+            Some(s) if ctx_image => {
+                s.image_alloc_addrs.insert(id, addr);
+            }
+            _ => {
+                self.alloc_addrs.insert(id, addr);
+            }
+        }
+    }
+
+    /// 身份必需通道的双表登记（split：两上下文都能以同一地址复现 = 单一身份）
+    fn record_both(&mut self, id: AllocId, addr: u64) {
+        self.alloc_addrs.insert(id, addr);
+        if let Some(s) = &mut self.split {
+            s.image_alloc_addrs.insert(id, addr);
+        }
+    }
+
     /// 物化一个内存分配：分地址 → 拷字节 → 重定位（provenance 表逐项写真地址+addend）。
-    fn materialize(&mut self, id: AllocId, alloc: ConstAllocation<'tcx>) -> Result<u64, String> {
+    /// image=true 落 image 域并登记 image 表（split 专用）；false 落 delta 域（今日路径）。
+    fn materialize_in(
+        &mut self,
+        id: AllocId,
+        alloc: ConstAllocation<'tcx>,
+        image: bool,
+    ) -> Result<u64, String> {
         let a = alloc.inner();
         let size = a.size().bytes();
         let align = a.align.bytes();
-        let base = self.frozen.alloc(size, align);
-        self.alloc_addrs.insert(id, base); // 先分后填（环安全）
+        let base = if image {
+            let s = self.split.as_mut().expect("image 物化仅 split 模式");
+            let base = s.image_frozen.alloc(size, align);
+            s.image_alloc_addrs.insert(id, base); // 先分后填（环安全）
+            base
+        } else {
+            let base = self.frozen.alloc(size, align);
+            self.alloc_addrs.insert(id, base); // 先分后填（环安全）
+            base
+        };
         let bytes = a.inspect_with_uninit_and_ptr_outside_interpreter(0..size as usize);
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), base as *mut u8, size as usize) };
         // 重定位：ptr 位置存的 8 字节 = 目标内偏移（addend）→ 换成目标真地址 + addend
@@ -327,6 +574,8 @@ impl<'tcx> Linker<'tcx> {
     /// instance → FuncId；首见分配 id 并入待降低队列（worklist 扩集的入口）。
     /// S4：首见先查底座（v0 symbol_name 键）——命中即复用底座 id，不入队；
     /// symbol_name 只在首见且有底座时计算一次（无底座路径零额外成本）。
+    /// A2 split：非底座实例按 purity 分轨——image 类（Pure）得标签 id 入 image
+    /// 队列，delta 类（Local/Tainted）走今日 untagged 空间入 delta 队列。
     pub(crate) fn func_id(&mut self, inst: Instance<'tcx>) -> ir::FuncId {
         if let Some(&id) = self.ids.get(&inst) {
             return id;
@@ -336,6 +585,26 @@ impl<'tcx> Linker<'tcx> {
         {
             self.ids.insert(inst, bid);
             return bid;
+        }
+        if let Some(s) = &mut self.split {
+            let id = if classify_purity(inst).is_image() {
+                let j = s.image_fn_next;
+                s.image_fn_next += 1;
+                let id = IMAGE_TAG | j;
+                s.image_queue.push_back((id, inst));
+                if s.image_funcs.len() <= j as usize {
+                    s.image_funcs.resize_with(j as usize + 1, || None);
+                }
+                s.image_insts.push(inst);
+                id
+            } else {
+                let id = self.next_fn;
+                self.next_fn += 1;
+                self.queue.push_back((id, inst));
+                id
+            };
+            self.ids.insert(inst, id);
+            return id;
         }
         let id = self.next_fn;
         self.next_fn += 1;
@@ -761,6 +1030,175 @@ fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin> {
     out
 }
 
+// ===== purity 测量探针（S3′b 裁定前置调研；`MIRVM_PURITY_STATS=1` 门控）=====
+// 分类口径（与 deps-image 各方案的切分一一对应）：
+// - Local：定义性 DefId 属 LOCAL_CRATE（bin 自身代码，含本地闭包的 shim）
+// - Tainted：非本地定义，但泛型参数或 shim 携带类型提及 LOCAL_CRATE——bin 泛型在
+//   依赖里的实例化（如 `serde_json::to_string::<Task>`）；纯化聚合方案（A2）归 delta
+// - Pure：其余（bin 无关；A2 的 deps-image 候选，含 std/dep 中底座未覆盖者）
+// 计时 = 每 instance `lower_instance` 墙钟累加（含嵌套的 alloc 物化）；env 未设时
+// 零开销。
+
+#[derive(Default)]
+struct PurityStats {
+    local: (u64, u128),
+    tainted: (u64, u128),
+    pure: (u64, u128),
+    /// pure 集按 crate 分解（deps-image 内容的来源分布）
+    pure_crates: FxHashMap<Symbol, (u64, u128)>,
+    /// tainted 实例逐条（符号, ns）——打印 top 用；量小（预期数百）
+    tainted_insts: Vec<(Box<str>, u128)>,
+}
+
+enum Purity {
+    Local,
+    Tainted,
+    Pure,
+}
+
+impl Purity {
+    /// image 类 = Pure（bin 无关实例，deps-image 候选）；Local/Tainted = delta 类。
+    fn is_image(&self) -> bool {
+        matches!(self, Purity::Pure)
+    }
+}
+
+impl PurityStats {
+    fn record(&mut self, tcx: TyCtxt<'_>, inst: Instance<'_>, sym: &str, ns: u128) {
+        let (cls, extra) = match classify_purity(inst) {
+            Purity::Local => (&mut self.local, None),
+            Purity::Tainted => {
+                self.tainted_insts.push((sym.into(), ns));
+                (&mut self.tainted, None)
+            }
+            Purity::Pure => {
+                let krate = tcx.crate_name(inst.def_id().krate);
+                (&mut self.pure, Some(krate))
+            }
+        };
+        cls.0 += 1;
+        cls.1 += ns;
+        if let Some(krate) = extra {
+            let e = self.pure_crates.entry(krate).or_default();
+            e.0 += 1;
+            e.1 += ns;
+        }
+    }
+
+    fn dump(&self) {
+        fn ms(ns: u128) -> String {
+            format!("{:.1}", ns as f64 / 1e6)
+        }
+        let (l, t, p) = (self.local, self.tainted, self.pure);
+        eprintln!("[purity] local:   {} inst, {} ms", l.0, ms(l.1));
+        eprintln!("[purity] tainted: {} inst, {} ms", t.0, ms(t.1));
+        eprintln!("[purity] pure:    {} inst, {} ms", p.0, ms(p.1));
+        eprintln!(
+            "[purity] A2 每编辑重降 = local+tainted = {} inst, {} ms（总降低 {} inst, {} ms）",
+            l.0 + t.0,
+            ms(l.1 + t.1),
+            l.0 + t.0 + p.0,
+            ms(l.1 + t.1 + p.1)
+        );
+        let mut crates: Vec<_> = self.pure_crates.iter().collect();
+        crates.sort_by_key(|(_, v)| std::cmp::Reverse(v.0));
+        for (k, (n, ns)) in crates.iter().take(12) {
+            eprintln!("[purity]   pure crate {k}: {n} inst, {} ms", ms(*ns));
+        }
+        let mut t: Vec<_> = self.tainted_insts.iter().collect();
+        t.sort_by_key(|(_, ns)| std::cmp::Reverse(*ns));
+        for (sym, ns) in t.iter().take(10) {
+            eprintln!("[purity]   tainted top: {} ms  {sym}", ms(*ns));
+        }
+    }
+}
+
+/// instance 的 purity 分类（口径见 PurityStats 头注）。
+fn classify_purity(inst: Instance<'_>) -> Purity {
+    use rustc_hir::def_id::LOCAL_CRATE;
+    use rustc_middle::ty::ShimKind;
+    // 定义性 DefId：任一为本地 ⇒ 这是 bin 自己的代码（本地闭包的 ClosureOnce 等）。
+    let local_def = match inst.def {
+        InstanceKind::Item(d) | InstanceKind::Intrinsic(d) | InstanceKind::Virtual(d, _) => {
+            d.krate == LOCAL_CRATE
+        }
+        InstanceKind::Shim(shim) => match shim {
+            ShimKind::VTable(d)
+            | ShimKind::Reify(d, _)
+            | ShimKind::ThreadLocal(d)
+            | ShimKind::FnPtr(d, _)
+            | ShimKind::Clone(d, _)
+            | ShimKind::FnPtrAddr(d, _)
+            | ShimKind::AsyncDropGlueCtor(d, _)
+            | ShimKind::AsyncDropGlue(d, _)
+            | ShimKind::DropGlue(d, _)
+            | ShimKind::FutureDropPoll(d, _, _)
+            | ShimKind::ConstructCoroutineInClosure {
+                coroutine_closure_def_id: d,
+                ..
+            } => d.krate == LOCAL_CRATE,
+            ShimKind::ClosureOnce {
+                call_once, closure, ..
+            } => call_once.krate == LOCAL_CRATE || closure.krate == LOCAL_CRATE,
+        },
+    };
+    if local_def {
+        return Purity::Local;
+    }
+    // shim 额外携带的类型（不进 args 的）。
+    let shim_tys: &[rustc_middle::ty::Ty<'_>] = match inst.def {
+        InstanceKind::Shim(ShimKind::FnPtr(_, t))
+        | InstanceKind::Shim(ShimKind::Clone(_, t))
+        | InstanceKind::Shim(ShimKind::FnPtrAddr(_, t))
+        | InstanceKind::Shim(ShimKind::AsyncDropGlueCtor(_, t))
+        | InstanceKind::Shim(ShimKind::AsyncDropGlue(_, t)) => &[t],
+        InstanceKind::Shim(ShimKind::FutureDropPoll(_, t1, t2)) => &[t1, t2],
+        InstanceKind::Shim(ShimKind::DropGlue(_, Some(t))) => &[t],
+        _ => &[],
+    };
+    let tainted = inst.args.iter().any(|a| a.walk().any(arg_mentions_local))
+        || shim_tys.iter().any(|&t| t.walk().any(arg_mentions_local));
+    if tainted {
+        Purity::Tainted
+    } else {
+        Purity::Pure
+    }
+}
+
+/// 顶层提及 LOCAL_CRATE 的 def？（配合 walk() 的深遍历覆盖一切嵌套位）
+fn arg_mentions_local(arg: rustc_middle::ty::GenericArg<'_>) -> bool {
+    use rustc_hir::def_id::LOCAL_CRATE;
+    use rustc_middle::ty::TyKind;
+    let Some(t) = arg.as_type() else { return false };
+    let did = match t.kind() {
+        TyKind::Adt(def, _) => Some(def.did()),
+        &TyKind::FnDef(d, _)
+        | &TyKind::Closure(d, _)
+        | &TyKind::Coroutine(d, _)
+        | &TyKind::CoroutineClosure(d, _)
+        | &TyKind::CoroutineWitness(d, _)
+        | &TyKind::Foreign(d) => Some(d),
+        TyKind::Alias(_, at) => Some(match at.kind {
+            rustc_middle::ty::AliasTyKind::Projection { def_id }
+            | rustc_middle::ty::AliasTyKind::Inherent { def_id }
+            | rustc_middle::ty::AliasTyKind::Opaque { def_id }
+            | rustc_middle::ty::AliasTyKind::Free { def_id } => def_id,
+        }),
+        _ => None,
+    };
+    if did.is_some_and(|d| d.krate == LOCAL_CRATE) {
+        return true;
+    }
+    // walk 不下钻 trait 对象的谓词 DefId（rustc_type_ir walk.rs Dynamic 分支只推 args）
+    if let TyKind::Dynamic(preds, ..) = t.kind() {
+        return preds
+            .principal()
+            .is_some_and(|p| p.skip_binder().def_id.krate == LOCAL_CRATE)
+            || preds.auto_traits().any(|d| d.krate == LOCAL_CRATE);
+    }
+    false
+}
+
 /// 整程序降低：种子收集 → worklist 闭包降低 → exports 表 + main 启动计划。
 /// argv **不在此布置**（M6 片2）：它是运行期输入，由 `Module::finalize_entry_argv`
 /// 在每次运行（冷/热同路）于快照语义之后终结化。
@@ -773,8 +1211,16 @@ pub struct BaseExports {
 
 /// 程序会话降低：base 在场时按 symbol_name 复用底座（fn/static/TLS），
 /// 产出 delta 模块（fn/TLS/asm id 从底座计数起编；absorb 合并后运行）。
-pub fn lower_program(tcx: TyCtxt<'_>, stack: &crate::baseimage::ImageStack) -> ir::Module {
-    lower_inner(tcx, stack, FrozenArena::new(), false, false).0
+/// A2（s3b-a2-design，`MIRVM_DEPS_IMAGE=1` 且底座在场时）：split lower——bin
+/// 无关实例分轨成 deps-image（SplitImage，样条 k=0 域），delta 只含 bin 附着物。
+pub fn lower_program(
+    tcx: TyCtxt<'_>,
+    stack: &crate::baseimage::ImageStack,
+    split: bool,
+) -> (ir::Module, Option<SplitImage>) {
+    // A2 v1：split 判定（启用/旁路/本会话已装载/底座在场 Q2）由调用方（cli）给出
+    let (module, _, split_image) = lower_inner(tcx, stack, FrozenArena::new(), false, false, split);
+    (module, split_image)
 }
 
 /// 底座构建会话降低（合成空 main）：栈空、冻结区落底座域，导出 sym 索引。
@@ -782,7 +1228,14 @@ pub fn lower_program(tcx: TyCtxt<'_>, stack: &crate::baseimage::ImageStack) -> i
 /// disambiguator，不属"sysroot 面"、不与真实程序相撞。
 pub fn lower_for_base_build(tcx: TyCtxt<'_>) -> (ir::Module, BaseExports) {
     let empty = crate::baseimage::ImageStack::empty();
-    let (module, exports) = lower_inner(tcx, &empty, FrozenArena::new_base_image(), true, true);
+    let (module, exports, _) = lower_inner(
+        tcx,
+        &empty,
+        FrozenArena::new_base_image(),
+        true,
+        true,
+        false,
+    );
     (module, exports.expect("image 构建模式必有导出素材"))
 }
 
@@ -795,8 +1248,143 @@ pub fn lower_for_image_build(
     stack: &crate::baseimage::ImageStack,
     k: usize,
 ) -> (ir::Module, BaseExports) {
-    let (module, exports) = lower_inner(tcx, stack, FrozenArena::new_image(k), true, false);
+    let (module, exports, _) =
+        lower_inner(tcx, stack, FrozenArena::new_image(k), true, false, false);
     (module, exports.expect("image 构建模式必有导出素材"))
+}
+
+/// A2 rebase（s3b-a2-design §4.2）：split lower 收尾，把标签/双空间 id 统一成绝对 id。
+/// fn/TLS/asm 同构：`TAG|j` → `first + j`；untagged d（≥ first）→ `d + image_count`；
+/// 底座 id（< first）不动。触及字段 = 设计 §9 盘点的 6 处 + ids/tls_ids 两表。
+struct Rebase {
+    first_fn: u32,
+    image_fns: u32,
+    first_tls: u32,
+    image_tls: u32,
+    first_asm: u32,
+    image_asm: u32,
+}
+
+impl Rebase {
+    fn fn_id(&self, id: u32) -> u32 {
+        if id & IMAGE_TAG != 0 {
+            self.first_fn + (id & !IMAGE_TAG)
+        } else if id >= self.first_fn {
+            id + self.image_fns
+        } else {
+            id
+        }
+    }
+    fn tls_id(&self, id: u32) -> u32 {
+        if id & IMAGE_TAG != 0 {
+            self.first_tls + (id & !IMAGE_TAG)
+        } else if id >= self.first_tls {
+            id + self.image_tls
+        } else {
+            id
+        }
+    }
+    fn asm_id(&self, id: u32) -> u32 {
+        if id & IMAGE_TAG != 0 {
+            self.first_asm + (id & !IMAGE_TAG)
+        } else if id >= self.first_asm {
+            id + self.image_asm
+        } else {
+            id
+        }
+    }
+
+    /// 单函数体重映射。op 级字段只有 3 处（设计 §9 实证）：Call.callee /
+    /// InlineAsm.stub / Rvalue::TlsRef。**编译期穷尽**（or-pattern 全枚举，新变体
+    /// = 非穷尽编译错误——防"新增携带 id 的 op 被遗忘"的静默错值）。
+    fn body(&self, b: &mut ir::FuncBody) {
+        for block in &mut b.blocks {
+            for stmt in &mut block.stmts {
+                match stmt {
+                    ir::Stmt::Assign { dst: _, rv } => {
+                        if let ir::Rvalue::TlsRef(id) = rv {
+                            *id = self.tls_id(*id);
+                        }
+                    }
+                    ir::Stmt::AssignOverflow { .. }
+                    | ir::Stmt::Copy { .. }
+                    | ir::Stmt::RepeatScalar { .. }
+                    | ir::Stmt::AtomicStore { .. }
+                    | ir::Stmt::VolatileLoad { .. }
+                    | ir::Stmt::VolatileStore { .. }
+                    | ir::Stmt::AtomicCxchg { .. }
+                    | ir::Stmt::AtomicRmw { .. }
+                    | ir::Stmt::MemCopy { .. }
+                    | ir::Stmt::MemSet { .. }
+                    | ir::Stmt::SimdBin { .. }
+                    | ir::Stmt::SimdUn { .. }
+                    | ir::Stmt::SimdFma { .. }
+                    | ir::Stmt::SimdFunnel { .. }
+                    | ir::Stmt::SimdCast { .. }
+                    | ir::Stmt::SimdSelect { .. }
+                    | ir::Stmt::SimdSelectBitmask { .. }
+                    | ir::Stmt::SimdGather { .. }
+                    | ir::Stmt::SimdScatter { .. }
+                    | ir::Stmt::SimdMaskedLoad { .. }
+                    | ir::Stmt::SimdMaskedStore { .. }
+                    | ir::Stmt::SimdExtractDyn { .. }
+                    | ir::Stmt::SimdInsertDyn { .. }
+                    | ir::Stmt::SimdArithOffset { .. }
+                    | ir::Stmt::SimdSplat { .. }
+                    | ir::Stmt::Bin128 { .. }
+                    | ir::Stmt::Wide128ToFloat { .. }
+                    | ir::Stmt::FloatToWide128 { .. }
+                    | ir::Stmt::Bit128 { .. }
+                    | ir::Stmt::Bit128Count { .. }
+                    | ir::Stmt::F128Bin { .. }
+                    | ir::Stmt::F128MathBin { .. }
+                    | ir::Stmt::F128Un { .. }
+                    | ir::Stmt::F128Fma { .. }
+                    | ir::Stmt::F128FromScalar { .. }
+                    | ir::Stmt::F128ToScalar { .. }
+                    | ir::Stmt::F128FromWideInt { .. }
+                    | ir::Stmt::F128ToWideInt { .. }
+                    | ir::Stmt::NicheDiscr128 { .. }
+                    | ir::Stmt::Trap(_)
+                    | ir::Stmt::Nop
+                    | ir::Stmt::Fence { .. }
+                    | ir::Stmt::RepeatBytes { .. } => {}
+                }
+            }
+            match &mut block.term {
+                ir::Terminator::Call { callee, .. } => *callee = self.fn_id(*callee),
+                ir::Terminator::InlineAsm { stub, .. } => *stub = self.asm_id(*stub),
+                ir::Terminator::Goto(_)
+                | ir::Terminator::SwitchInt { .. }
+                | ir::Terminator::CallBuiltin { .. }
+                | ir::Terminator::CallForeign { .. }
+                | ir::Terminator::CallIndirect { .. }
+                | ir::Terminator::Return
+                | ir::Terminator::Unreachable
+                | ir::Terminator::Resume
+                | ir::Terminator::TerminateAbort
+                | ir::Terminator::Trap(_) => {}
+            }
+        }
+    }
+}
+
+/// 降低单个 instance（worklist 循环体）：trap-stub 全覆盖 + purity 探针记账。
+fn lower_one<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    typing_env: TypingEnv<'tcx>,
+    linker: &mut Linker<'tcx>,
+    purity: &mut Option<PurityStats>,
+    inst: Instance<'tcx>,
+) -> ir::FuncBody {
+    let sym = tcx.symbol_name(inst).name.to_owned();
+    let started = purity.as_ref().map(|_| std::time::Instant::now());
+    let body = func::lower_instance(tcx, typing_env, inst, linker)
+        .unwrap_or_else(|reason| func::trap_body(&sym, &reason));
+    if let (Some(p), Some(t0)) = (purity.as_mut(), started) {
+        p.record(tcx, inst, &sym, t0.elapsed().as_nanos());
+    }
+    body
 }
 
 fn lower_inner(
@@ -805,9 +1393,13 @@ fn lower_inner(
     frozen: FrozenArena,
     emit_exports: bool,
     exclude_local: bool,
-) -> (ir::Module, Option<BaseExports>) {
+    split: bool,
+) -> (ir::Module, Option<BaseExports>, Option<SplitImage>) {
     let typing_env = TypingEnv::fully_monomorphized();
     let mut linker = Linker::new(tcx, stack, frozen);
+    if split {
+        linker.activate_split();
+    }
 
     // 种子 = mono collector 集（D1：与 native codegen 同一起点，正确性白拿）
     for inst in collect::collect(tcx) {
@@ -851,16 +1443,176 @@ fn lower_inner(
     // S4：delta 模块的 funcs 向量按本地位序存放（absorb 时 base++delta 拼接后，
     // 位置 = delta_first_fn + 本地位序 = 字节码里的绝对 FuncId）
     let first = linker.delta_first_fn;
-    while let Some((id, inst)) = linker.queue.pop_front() {
-        let sym = tcx.symbol_name(inst).name.to_owned();
-        let body = func::lower_instance(tcx, typing_env, inst, &mut linker)
-            .unwrap_or_else(|reason| func::trap_body(&sym, &reason));
-        let slot = (id - first) as usize;
-        if funcs.len() <= slot {
-            funcs.resize_with(slot + 1, || None);
+    let mut purity = std::env::var_os("MIRVM_PURITY_STATS")
+        .is_some_and(|v| !v.is_empty())
+        .then(PurityStats::default);
+    if linker.split.is_some() {
+        // A2 split：不动点轮替排干双队列（image 体只发现 image 类——purity 向下
+        // 封闭；delta 体两类都发现）。current_image 决定 arena 路由（§4.3）。
+        loop {
+            let mut progressed = false;
+            while let Some((id, inst)) = linker
+                .split
+                .as_mut()
+                .expect("split")
+                .image_queue
+                .pop_front()
+            {
+                progressed = true;
+                linker.split.as_mut().expect("split").current_image = true;
+                let body = lower_one(tcx, typing_env, &mut linker, &mut purity, inst);
+                let j = (id & !IMAGE_TAG) as usize;
+                linker.split.as_mut().expect("split").image_funcs[j] = Some(body);
+                module.exports.insert(tcx.symbol_name(inst).name.into(), id);
+            }
+            while let Some((id, inst)) = linker.queue.pop_front() {
+                progressed = true;
+                linker.split.as_mut().expect("split").current_image = false;
+                let body = lower_one(tcx, typing_env, &mut linker, &mut purity, inst);
+                let slot = (id - first) as usize;
+                if funcs.len() <= slot {
+                    funcs.resize_with(slot + 1, || None);
+                }
+                funcs[slot] = Some(body);
+                module.exports.insert(tcx.symbol_name(inst).name.into(), id);
+            }
+            if !progressed {
+                break;
+            }
         }
-        funcs[slot] = Some(body);
-        module.exports.insert(sym.into_boxed_str(), id);
+    } else {
+        while let Some((id, inst)) = linker.queue.pop_front() {
+            let body = lower_one(tcx, typing_env, &mut linker, &mut purity, inst);
+            let slot = (id - first) as usize;
+            if funcs.len() <= slot {
+                funcs.resize_with(slot + 1, || None);
+            }
+            funcs[slot] = Some(body);
+            module.exports.insert(tcx.symbol_name(inst).name.into(), id);
+        }
+    }
+    if let Some(p) = &purity {
+        p.dump();
+    }
+
+    // ===== A2 split：rebase + 双模块装配 =====
+    let mut split_image = None;
+    if let Some(mut s) = linker.split.take() {
+        let image_fns = s.image_funcs.len() as u32;
+        let image_tls = s.image_tls_slots.len() as u32;
+        let image_asm = s.image_asm_sites.len() as u32;
+        let rb = Rebase {
+            first_fn: first,
+            image_fns,
+            first_tls: linker.delta_first_tls,
+            image_tls,
+            first_asm: linker.delta_first_asm,
+            image_asm,
+        };
+        // A2 自检（§5.3②）：image 实例逐条复查 purity——任何漏判都是错值级
+        for inst in &s.image_insts {
+            assert!(
+                classify_purity(*inst).is_image(),
+                "A2 自检失败：image 实例复查非 pure（分类器状态错误）"
+            );
+        }
+        // 函数体 + 两表 + entry plan 重映射
+        for b in s.image_funcs.iter_mut().flatten() {
+            rb.body(b);
+        }
+        for b in funcs.iter_mut().flatten() {
+            rb.body(b);
+        }
+        for v in module.exports.values_mut() {
+            *v = rb.fn_id(*v);
+        }
+        for v in linker.fn_addrs.values_mut() {
+            *v = rb.fn_id(*v);
+        }
+        for v in linker.ids.values_mut() {
+            *v = rb.fn_id(*v);
+        }
+        for v in linker.tls_ids.values_mut() {
+            *v = rb.tls_id(*v);
+        }
+        let mut entry = entry;
+        if let Some(e) = entry.as_mut() {
+            e.lang_start = rb.fn_id(e.lang_start);
+        }
+        let entry = entry;
+        module.entry = entry;
+
+        // exports/fn_addrs 按值域分拆（设计 §9：底座 id < first 恒留 delta 侧）
+        let image_lo = first;
+        let image_hi = first + image_fns;
+        let in_image = |id: &ir::FuncId| *id >= image_lo && *id < image_hi;
+        let image_exports: std::collections::HashMap<Box<str>, ir::FuncId> = module
+            .exports
+            .iter()
+            .filter(|(_, id)| in_image(id))
+            .map(|(s, id)| (s.clone(), *id))
+            .collect();
+        module.exports.retain(|_, id| !in_image(id));
+        let image_fn_addrs: std::collections::HashMap<u64, ir::FuncId> = linker
+            .fn_addrs
+            .iter()
+            .filter(|(_, id)| in_image(id))
+            .map(|(a, id)| (*a, *id))
+            .collect();
+        module.fn_addrs = linker
+            .fn_addrs
+            .iter()
+            .filter(|(_, id)| !in_image(id))
+            .map(|(a, id)| (*a, *id))
+            .collect();
+        let image_module = ir::Module {
+            exports: image_exports,
+            fn_addrs: image_fn_addrs,
+            funcs: s
+                .image_funcs
+                .into_iter()
+                .map(|f| f.expect("image 队列耗尽时每个 id 必有产出"))
+                .collect(),
+            tls: s.image_tls_slots,
+            asm_sites: s.image_asm_sites,
+            frozen: Some(s.image_frozen),
+            ..Default::default()
+        };
+        // image 导出素材（装载方零 tcx 依赖，BaseExports 同构）：fn 条目/static/TLS
+        // 三索引只含 image 类。fn 条目以 image 区条目表为准（含底座命中但在 image
+        // 区补建者——"总量恰一份"的单一身份在装载端可复现）。
+        let fn_entry_syms = s
+            .image_fn_entries
+            .iter()
+            .map(|(inst, &addr)| (Box::from(tcx.symbol_name(*inst).name), addr))
+            .collect();
+        let static_syms = linker
+            .static_defs
+            .iter()
+            .filter(|(def_id, _)| def_id.krate != rustc_hir::def_id::LOCAL_CRATE)
+            .map(|&(def_id, addr)| {
+                let sym = tcx.symbol_name(Instance::mono(tcx, def_id)).name;
+                (Box::from(sym), addr)
+            })
+            .collect();
+        let tls_first = rb.first_tls;
+        let tls_syms = linker
+            .tls_ids
+            .iter()
+            .filter(|(_, id)| **id >= tls_first && **id < tls_first + image_tls)
+            .map(|(&def_id, &id)| {
+                let sym = tcx.symbol_name(Instance::mono(tcx, def_id)).name;
+                (Box::from(sym), id)
+            })
+            .collect();
+        split_image = Some(SplitImage {
+            module: image_module,
+            fn_entry_syms,
+            static_syms,
+            tls_syms,
+        });
+        // delta 侧 tls_slots/asm_sites 本就只有 delta 槽（image 槽在 Split 字段里，
+        // 已随 SplitImage 移出），无需再动。
     }
     module.funcs = funcs
         .into_iter()
@@ -906,6 +1658,7 @@ fn lower_inner(
     }
     // asm-stub 批量物化（M5.0）：全部 wrapper cc 汇编 + dlopen + dlsym → 真地址表。
     // 配方留在 Module（M6 片2）：L2 warm 路径以 asm_sites 幂等重物化。
+    // A2 split：image 站点随 SplitImage 走（absorb 时合并重物化，与 L2 warm 同契约）。
     module.asm_sites = std::mem::take(&mut linker.asm_sites);
     module.asm_stub_addrs = asm::materialize(&module.asm_sites);
     // S4 底座导出素材（构建模式）：sym 索引在此一次算清，装载方零 tcx 依赖。
@@ -944,9 +1697,141 @@ fn lower_inner(
 
     // 冻结区与 fn 条目反查表移交执行相
     module.frozen = Some(linker.frozen);
-    module.fn_addrs = linker.fn_addrs.into_iter().collect();
+    if split_image.is_none() {
+        module.fn_addrs = linker.fn_addrs.into_iter().collect();
+    }
     module.tls = linker.tls_slots;
     module.foreign_static_syms = linker.foreign_static_syms;
-    module.entry = entry;
-    (module, base_exports)
+    if split_image.is_none() {
+        module.entry = entry;
+    }
+    (module, base_exports, split_image)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{IMAGE_TAG, Rebase};
+    use crate::vm::engine::ir;
+
+    /// first=100、image 5 个的 rebase 基准（fn/TLS/asm 各自独立空间同构）
+    fn rb() -> Rebase {
+        Rebase {
+            first_fn: 100,
+            image_fns: 5,
+            first_tls: 20,
+            image_tls: 3,
+            first_asm: 7,
+            image_asm: 2,
+        }
+    }
+
+    #[test]
+    fn rebase_fn_id_three_ranges() {
+        let rb = rb();
+        // 底座 id（< first）不动
+        assert_eq!(rb.fn_id(0), 0);
+        assert_eq!(rb.fn_id(99), 99);
+        // delta untagged（≥ first）统一 +image_fns
+        assert_eq!(rb.fn_id(100), 105);
+        assert_eq!(rb.fn_id(137), 142);
+        // image 标签（TAG|j）→ first + j
+        assert_eq!(rb.fn_id(IMAGE_TAG | 0), 100);
+        assert_eq!(rb.fn_id(IMAGE_TAG | 4), 104);
+        // 三空间同构：TLS/ASM 同形（各自 first/count）
+        assert_eq!(rb.tls_id(19), 19);
+        assert_eq!(rb.tls_id(20), 23);
+        assert_eq!(rb.tls_id(IMAGE_TAG | 2), 22);
+        assert_eq!(rb.asm_id(6), 6);
+        assert_eq!(rb.asm_id(7), 9);
+        assert_eq!(rb.asm_id(IMAGE_TAG | 1), 8);
+        // 标签位绝不残留进执行相
+        for id in [0, 99, 100, 137, IMAGE_TAG | 0, IMAGE_TAG | 4] {
+            assert_eq!(rb.fn_id(id) & IMAGE_TAG, 0);
+        }
+    }
+
+    /// 构造最小 body：一个 block，term 任选，返回后可加 stmt
+    fn body_with(term: ir::Terminator, stmts: Vec<ir::Stmt>) -> ir::FuncBody {
+        ir::FuncBody {
+            frame_size: 0,
+            frame_align: 1,
+            ret: ir::RetAbi::Zst,
+            params: Vec::new(),
+            caller_loc_off: None,
+            blocks: vec![ir::Block { stmts, term }],
+            name: "t".into(),
+        }
+    }
+
+    #[test]
+    fn rebase_body_remaps_only_id_carrying_ops() {
+        let rb = rb();
+        // Call.callee：三区间各自重映射
+        let mut b = body_with(
+            ir::Terminator::Call {
+                callee: IMAGE_TAG | 3,
+                args: vec![],
+                ret: ir::RetDest::Ignore,
+                target: 0,
+                unwind: ir::UnwindAction::Continue,
+            },
+            vec![ir::Stmt::Assign {
+                dst: ir::ScalarPlace::Slot(ir::Slot {
+                    off: 0,
+                    width: ir::Width::W64,
+                }),
+                rv: ir::Rvalue::TlsRef(IMAGE_TAG | 1),
+            }],
+        );
+        rb.body(&mut b);
+        let ir::Terminator::Call { callee, .. } = &b.blocks[0].term else {
+            panic!("Call 不变体");
+        };
+        assert_eq!(*callee, 103);
+        let ir::Stmt::Assign {
+            rv: ir::Rvalue::TlsRef(id),
+            ..
+        } = &b.blocks[0].stmts[0]
+        else {
+            panic!("TlsRef 不变体");
+        };
+        assert_eq!(*id, 21);
+
+        // InlineAsm.stub 重映射；CallIndirect（无 id 字段）与其他语句不动
+        let mut b2 = body_with(
+            ir::Terminator::InlineAsm {
+                stub: 8,
+                buf_size: 0,
+                ins: vec![],
+                outs: vec![],
+                target: 0,
+            },
+            vec![ir::Stmt::Nop],
+        );
+        rb.body(&mut b2);
+        let ir::Terminator::InlineAsm { stub, .. } = &b2.blocks[0].term else {
+            panic!("InlineAsm 不变体");
+        };
+        assert_eq!(*stub, 10); // untagged ≥ first_asm(7) → +image_asm(2)
+
+        // CallBuiltin / Trap / Goto 等不携带 id 的终止子保持原样
+        let mut b3 = body_with(
+            ir::Terminator::CallBuiltin {
+                builtin: ir::Builtin::HostAbort,
+                args: vec![],
+                ret: ir::RetDest::Ignore,
+                target: 0,
+                unwind: ir::UnwindAction::Continue,
+            },
+            vec![],
+        );
+        rb.body(&mut b3);
+        assert!(matches!(
+            b3.blocks[0].term,
+            ir::Terminator::CallBuiltin {
+                builtin: ir::Builtin::HostAbort,
+                ..
+            }
+        ));
+    }
 }

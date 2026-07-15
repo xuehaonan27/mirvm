@@ -27,8 +27,11 @@ use rustc_target::asm::{
     X86InlineAsmRegClass, allocatable_registers,
 };
 
+use crate::vm::engine::ir;
+
 /// asm-stub 批量物化（M5.0 步 2）：全部 wrapper 文本拼一个 .s → cc 汇编成 .so →
-/// dlopen → 逐 `mirvm_asm_{i}` dlsym → 真地址表（AsmStubId → u64）。
+/// dlopen → 逐站点**自带符号名** dlsym → 真地址表（AsmStubId = 位序 → u64）。
+/// 符号名与位序解耦（A2 split：最终位序收尾才知，名字在 lower 期已烤进文本）。
 ///
 /// 内容哈希缓存 `~/.cache/mirvm/asm-stubs/<hash>.so`——热缓存零 cc 调用。dlopen 句柄
 /// 泄漏（进程生命周期常驻，代码地址随之有效）。物化在加载相（OS 交互合法域）；返回
@@ -43,14 +46,14 @@ pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     h
 }
 
-pub(crate) fn materialize(sites: &[String]) -> Vec<u64> {
+pub(crate) fn materialize(sites: &[ir::AsmSite]) -> Vec<u64> {
     if sites.is_empty() {
         return Vec::new();
     }
     let mut src = String::new();
     src.push_str("# mirvm asm-stub 工厂产物（M5.0）——请勿手改\n");
-    for text in sites {
-        src.push_str(text);
+    for site in sites {
+        src.push_str(&site.text);
     }
 
     // FNV-1a 内容哈希（稳定、跨运行可复用缓存键）
@@ -88,11 +91,12 @@ pub(crate) fn materialize(sites: &[String]) -> Vec<u64> {
         so.display()
     );
 
-    (0..sites.len())
-        .map(|i| {
-            let name = std::ffi::CString::new(format!("mirvm_asm_{i}")).unwrap();
+    sites
+        .iter()
+        .map(|site| {
+            let name = std::ffi::CString::new(&*site.name).unwrap();
             let addr = unsafe { libc::dlsym(handle, name.as_ptr()) };
-            assert!(!addr.is_null(), "dlsym mirvm_asm_{i} 失败");
+            assert!(!addr.is_null(), "dlsym {} 失败", site.name);
             addr as u64
         })
         .collect()
@@ -529,10 +533,13 @@ impl<'tcx> Gen<'_, 'tcx> {
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::materialize;
+    use crate::vm::engine::ir;
 
     #[test]
     fn materialized_stub_is_callable_and_writes_its_buffer() {
-        let site = r#"
+        let site = ir::AsmSite {
+            name: "mirvm_asm_0".into(),
+            text: r#"
 .globl mirvm_asm_0
 .type mirvm_asm_0,@function
 .section .text.mirvm_asm_0,"ax",@progbits
@@ -545,7 +552,8 @@ mirvm_asm_0:
 .size mirvm_asm_0, .-mirvm_asm_0
 .text
 "#
-        .to_owned();
+            .to_owned(),
+        };
         let addrs = materialize(&[site]);
         let mut value = 0u64;
         let stub: unsafe extern "C" fn(*mut u8) = unsafe { std::mem::transmute(addrs[0]) };
