@@ -305,3 +305,36 @@ bin/example/test 之间）；不同项目目录即便同 lockfile，rlib 路径�
 v1 已兑现其主场景（workspace 内跨 bin 编辑-重跑共享）。
 
 **验收**：`tests/a2_deps_image.sh` 两连跑 PASS（幂等）；gate5 复跑（含新行）。
+
+## 片10（S3′b-A2 验证记录）：purity 账本跨项目普适性 + A2 冷启动实测（2026-07-15）
+
+decision-history §7.5 迁移影响项的落地：`MIRVM_PURITY_STATS=1` 探针对四个项目
+（serde-derive 类 eco、clap-derive 类 c_clap、真实项目 ripgrep 14.1.1 / tokei v13.0.0，
+后两者 /tmp 浅克隆固定 tag）实测 purity 账本。
+
+**purity 账本（local+tainted = A2 每编辑重降；pure = 可缓存份额）**：
+
+| 项目 | tainted | 每编辑重降（inst / ms） | pure 实例份额 | pure 时间份额 |
+|---|---|---|---|---|
+| eco（serde derive） | 72 / 1.9ms | 83 / 2.9 | 99.2% | 99.7% |
+| c_clap（clap derive） | 18 / 0.4ms | 26 / 0.8 | 99.5% | 99.9% |
+| ripgrep 14.1.1 | 854 / 30.5ms | 2518 / 52.7 | 89.6% | 96.7% |
+| tokei v13.0.0 | 496 / 21.7ms | 589 / 27.9 | 98.1% | 98.8% |
+
+**结论 1（裁定账本外推成立）**：四个样本（含 §7.5 触发器担心的 clap-derive 类）的
+每编辑重降全部 ≤53ms，离 >100ms 的重估线有 2× 以上余量——A2 的 purity 切分在
+serde/clap/regex 重型生态上全部成立。**clap-derive 的 tainted 集小得出乎预期**
+（18 inst）：derive 产物是 LOCAL impl + 调用运行时驱动的 builder API，而非按本地
+类型单态化的泛型机器——tainted 只覆盖 `Parser::parse_from::<Args>` 与几个
+OnceLock 初始化闭包。
+
+**结论 2（A2 冷启动实战账本）**：ripgrep（24134 inst 闭包）冷写 lower 2223ms +
+image 13.0MB 落盘；热读（image 命中）lower **507ms（4.4×）**——装载被 postcard
+解码主导（~450ms/21616 inst）。eco 为 14×（924→66ms）。**收益与闭包规模正相关，
+上界由 postcard 解码封顶**——零拷贝布局（rkyv，mode B 同题）是下一个数量级的
+唯一杠杆。frontend（ripgrep ~730-800ms）不在 A2 域。
+
+**结论 3（纯度探针的额外价值）**：`MIRVM_PURITY_STATS=1` 同时给出 per-crate
+lower 时间分布（ripgrep: core 8944 inst/422ms、tokei: core 13050 inst/667ms、
+winnow 2404/142ms、regex_syntax 720/177ms）——M5.4 翻译器全覆盖的 workload
+选型与 JIT 收益预估的直接输入。
