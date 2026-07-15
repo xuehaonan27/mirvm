@@ -2191,6 +2191,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 destination,
                 target,
                 unwind,
+                fn_span,
                 ..
             } => {
                 // callee 解析：常量 FnDef → Instance；FnPtr → 间接调用
@@ -2228,7 +2229,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 // callee = *(vtable + idx*8)，receiver 实参换 data 半。
                 // track_caller 方法照传 location（vtable 侧是 VTable shim 接收）。
                 if let InstanceKind::Virtual(_, idx) = inst.def {
-                    let loc_arg = self.caller_loc_arg(&inst, term.source_info.span)?;
+                    // #[track_caller] 的 Location 取 fn_span（被调名段）——
+                    // cg_ssa `SourceInfo { span: fn_span, ..terminator.source_info }`
+                    // 同构；用整个调用表达式 span 会让行列全偏（corpus 批3 redb 实锤）
+                    let loc_arg = self.caller_loc_arg(&inst, *fn_span)?;
                     let rust_call = fn_ty.fn_sig(self.tcx).skip_binder().abi()
                         == rustc_abi::ExternAbi::RustCall;
                     return self.lower_virtual_call(
@@ -2267,8 +2271,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }
                     inst = Instance::new_raw(idef, inst.args);
                 }
-                // #[track_caller] 的隐藏尾实参（转发或按调用点合成）
-                let loc_arg = self.caller_loc_arg(&inst, term.source_info.span)?;
+                // #[track_caller] 的隐藏尾实参（转发或按调用点合成）；span 取
+                // fn_span（被调名段，cg_ssa 同构——见上方 Virtual 分支注）
+                let loc_arg = self.caller_loc_arg(&inst, *fn_span)?;
                 // Linker 三路解析（debt-map §2-B）：普通函数/intrinsic fallback →
                 // worklist 扩集；foreign → ①引擎原语 ②链接仿真 ③Trap
                 let callee = self.linker.resolve_call(inst)?;
