@@ -9,7 +9,9 @@
 //! crate 变更 ⇒ 其反向依赖链上的直接依赖被 cargo 重编译 ⇒ 直接 rlib 盖戳变）；
 //! mtime 粒度残余风险与 ircache 同账（distribution-design §6）。**不含 bin 源与项目
 //! 身份** ⇒ bin 编辑必命中；同 lockfile + 同工具链的项目共享（S3′c）。
-//! `MIRVM_DEPS_IMAGE=1` 启用管线（A2-3 转默认）；`MIRVM_NO_DEPS_IMAGE=1` 全程旁路。
+//! **A2-3 起默认开启**；`MIRVM_NO_DEPS_IMAGE=1` 全程旁路（双态对拍用）。
+//! v1 边界：--extern 为空（无 registry 依赖的纯 std 程序）不产/不用 image——
+//! 那是 S4 底座已经覆盖的地盘。
 //!
 //! 正确性红线（与 chain 时代同一条）：image 的绝对 FuncId/地址只在"装载栈下 ==
 //! 构建栈下"（below 恒 = [底座]，键含底座键）时有效；任何校验不合 = 不装载
@@ -56,12 +58,8 @@ struct DepsFileRef<'a> {
     tls_syms: &'a [(Box<str>, ir::TlsId)],
 }
 
-/// 启用 A2 管线（A2-2 期 env 门控；A2-3 转默认后此旋钮退役为仅旁路）。
-pub fn enabled() -> bool {
-    std::env::var_os("MIRVM_DEPS_IMAGE").is_some_and(|v| !v.is_empty())
-}
-
-/// 旁路（诊断/对拍双态用；优先于 enabled）。
+/// 启用判定（A2-3 起默认开）：唯一旋钮 = 旁路 `MIRVM_NO_DEPS_IMAGE=1`（诊断/对拍
+/// 双态用）。A2-2 期的 `MIRVM_DEPS_IMAGE=1` 启用旋钮已退役（残留无害）。
 pub fn bypassed() -> bool {
     std::env::var_os("MIRVM_NO_DEPS_IMAGE").is_some_and(|v| !v.is_empty())
 }
@@ -113,8 +111,13 @@ fn stamp_externs(paths: &[String]) -> Option<Vec<(String, u64, u128)>> {
 
 /// pre-key = fnv(build_id, 底座键, 排序盖戳)。返回 (key, 盖戳清单)；
 /// 任一素材不可得 ⇒ None（调用方按"无 image"处理，全量降低自愈）。
+/// **--extern 为空 ⇒ None**（v1 边界：无依赖的纯 std 程序走 S4 底座域，
+/// 不为它们建"std 残余共享 image"——那是 S4 已经覆盖的地盘）。
 pub fn pre_key(rustc_args: &[String], base_key: &str) -> Option<(String, ExternStamps)> {
     let paths = extern_paths(rustc_args)?;
+    if paths.is_empty() {
+        return None;
+    }
     let stamps = stamp_externs(&paths)?;
     let mut key = String::from(env!("MIRVM_BUILD_ID"));
     key.push('\u{1f}');

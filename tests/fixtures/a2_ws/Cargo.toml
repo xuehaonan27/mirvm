@@ -1,0 +1,16 @@
+[package]
+name = "a2_ws"
+version = "0.0.0"
+edition = "2024"
+default-run = "a2_one"
+
+[dependencies]
+memchr = "2"
+
+[[bin]]
+name = "a2_one"
+path = "src/bin/a2_one.rs"
+
+[[bin]]
+name = "a2_two"
+path = "src/bin/a2_two.rs"

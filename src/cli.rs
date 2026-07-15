@@ -456,12 +456,10 @@ impl Callbacks for MirvmCallbacks {
             }
             // callback 只做加载相；执行相必须等 tcx.finish、诊断收尾和 compiler drop 全部完成。
             let t_lower = std::time::Instant::now();
-            // A2 split 判定（s3b-a2-design）：启用 + 非旁路 + 本会话未装载 image +
+            // A2 split 判定（s3b-a2-design）：非旁路 + 本会话未装载 image +
             // 底座在场（fp 截断后栈可能已空——无底座不 split，Q2）。
-            let want_split = crate::depsimage::enabled()
-                && !crate::depsimage::bypassed()
-                && !self.deps_image_loaded
-                && !self.stack.is_empty();
+            let want_split =
+                !crate::depsimage::bypassed() && !self.deps_image_loaded && !self.stack.is_empty();
             let (module, split_image) = crate::lower::lower_program(tcx, &self.stack, want_split);
             self.module = Some(module);
             self.split_image = split_image;
@@ -627,11 +625,10 @@ fn run_driver(
     } else {
         crate::baseimage::ensure()
     };
-    // A2 deps-image 装载（pre-compiler，s3b-a2-design §3）：启用 + 非旁路 + 底座在场。
+    // A2 deps-image 装载（pre-compiler，s3b-a2-design §3）：非旁路 + 底座在场。
     // 命中即 push 上栈——栈键链自此含 image 键，L2 delta 条目可恢复入账。
     let mut deps_image_loaded = false;
     if !dump_mir
-        && crate::depsimage::enabled()
         && !crate::depsimage::bypassed()
         && let Some(base) = stack.base_image()
         && let Some(bi) = crate::depsimage::try_load(&rustc_args, base)

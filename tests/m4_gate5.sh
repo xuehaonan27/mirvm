@@ -165,6 +165,15 @@ if MIRVM_JIT=off MIRVM_NO_IR_CACHE=1 ONLY=fib MIRVM="$MIRVM" \
 else
     bad "diff.sh JIT-off 冒烟"
 fi
+# A2 deps-image（s3b-a2-design，A2-3 默认开启）：冷写/热读 ≤300ms 锚点、编辑重跑
+# 不重建、L2 矩阵、旁路双态、S3′c 同 workspace 跨 bin 共享——单脚本全链路冒烟。
+if MIRVM="$MIRVM" bash tests/a2_deps_image.sh >"$TMP/a2.out" 2>&1 \
+    && grep -Eq "^PASS a2_deps_image$" "$TMP/a2.out"; then
+    ok "a2_deps_image（冷写/热读/编辑/S3′c）"
+else
+    bad "a2_deps_image"
+    tail -5 "$TMP/a2.out"
+fi
 for probe in addcarry xgetbv simd_insert simd_shift vzeroupper x86_vectors; do
     probe_code=0
     MIRVM="$MIRVM" bash "tests/m51_$probe.sh" >"$TMP/m51-$probe.out" 2>&1 \
