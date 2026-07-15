@@ -51,7 +51,7 @@
 | `distribution-design.md` | **已批准（方向，未立项）** | 轨 C 分发与产品面 D9a–D9f：缓存分层、mode B=缓存可移植化、toolchain 自带、发行先 miri 式 |
 | `coldstart-research.md` | **调研完成（2026-07-14）** | 冷启动/lower 全解剖（M6 片3 前置）：std 税线性模型、执行集≪降低集、依赖 codegen 白烧实证、P1–P3 缓存盲区、杠杆 V1–V6；施工顺序已裁定（decision-history §7.2），S1/S2 已落地（m6-log 片4/片5，账本实测修正在文内） |
 | `s4-base-image-design.md` | **已施工（2026-07-15，M6 片6）** | S4 std 预降低底座：v0 symbol_name 复用、双固定域、空 main 种子；施工偏离（偏移合并/COW 裁剪）见 decision-history §7.3；账本见 m6-log 片6（脚本纯冷 385→104ms） |
-| `m5.3-design.md` | **待审** | M5.3 方法级 JIT × S3 懒降低联合分层设计：J1 共享基座（call_guest/PLT/计数）、J2 终裁建议（调用时懒降低不建——顶撞 D3 与 L2 契约；改依赖成像 S3′=S4 机制推广到 registry 依赖）、J3 顺序（JIT 先）；切片 M5.3a-c + S3′a-c；开题 Q1-Q4 待裁 |
+| `m5.3-design.md` | **已批准（2026-07-15，Q1-Q4 全批）；施工中** | M5.3 方法级 JIT × S3 懒降低联合分层设计：J1 共享基座（call_guest/PLT/计数）、J2 终裁建议（调用时懒降低不建——顶撞 D3 与 L2 契约；改依赖成像 S3′=S4 机制推广到 registry 依赖）、J3 顺序（JIT 先）；切片 M5.3a-c + S3′a-c；开题 Q1-Q4 待裁 |
 | `m5-log.md` | **已完成日志** | M5.0/M5.1 实际结果；优先于 M5 设计稿原先的预期 |
 | `m5.1-design.md` | **已完成设计/施工记录** | numbigint/xgetbv/sha2/blake3/ecosystem、diff_cargo 3/3 与六 tracer 脚本已绿；signal/backtrace 独立遗留 |
 | `m4-log.md` | **已完成日志** | M4.0–M4.5 实际施工记录；M4 状态的历史权威 |
