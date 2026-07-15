@@ -521,3 +521,46 @@ CLIF 循环；RepeatBytes 逐元素 memmove 与 interp 的 copy_nonoverlapping �
 **验收**：逢调即编全量（MIRVM_JIT_THRESHOLD=1）diff.sh **30/30**（serde/regex/
 HashMap/线程等内存密集全走 JIT 帧逐字节对 native）；fib(27) 含加载 77ms；cargo test
 52/52；Clippy/fmt 干净；gate5 复跑全绿。
+
+### M5.4b 标量全集 + 128 位族 + atomics —— 完成（2026-07-15）
+
+**本片内容**（设计批次 b 全量，admit 放至对应全集）：
+- Div/Rem（零检 + signed MIN/-1 分支特判）；除零/溢出走 `mirvm_jit_div_zero` 助手
+  （kind 0-3 文案与 interp engine_abort 逐字一致——差分 oracle 的 stderr 比对要求）。
+- IntSat/BitUn/MemCmp/MemCopy/MemSet（memmove/memset）/Volatile（与 interp 共享
+  `mem_read/write_volatile` 实现，已提 pub(crate)）/原子/栅栏。
+- f32/f64 浮点 + Math 系（`mod libm_decls` extern 声明 + `libm_syms()` 运行期符号表）。
+- f16/f128/128 位整族（助手走宿主 Rust f16/f128/i128/u128 算术，与 compiler-builtins
+  同源）；Wide SwitchInt（iconcat 拼 128 位判别值）；Wide128ToFloat（__floattisf/
+  tidf 族）；NicheDiscr128 等 128 位 place 通道。
+- compile() 静默失败化：define_fast/define_packed/define_function 全链 Option——
+  任何编译失败 = 维持解释，绝不向 stderr 吐 panic（线程消息含线程 id，污染逐字节
+  差分，实测抓获）。
+
+**机制账本**：
+- **CLIF 原子恒 SeqCst**（0.133 无弱序）：对 guest 的 Relaxed/Acquire/Release 语义
+  是合规强化（Rust 内存模型允许更强实现）；弱序差分面（D8j 的 RAM non-det 包络）
+  目前只在 interp 侧，JIT 统一最强序——记账。
+- **MemCmp 签名坑**：首版误把返回写成 I64（正确签名 (I64,I64,I64)->I32），CLIF
+  verifier panic 的线程消息污染 stderr 差分被门禁抓获；签名修正 + compile() 全链
+  Option 化双修复。
+- **analyze_frame 区间模型（实锤根因修复）**：M5.4a 的 scan_place 只记 PlaceExpr
+  基址——Copy/Repeat/Volatile 等 place 通道【字节区间】内的槽被漏提升为 SSA
+  （标量写进 SSA 变量、place 通道读物理帧恒 0/旧值 = 错值级 miscompile）。regex
+  在逢调即编下 SIGSEGV@0x10 实锤：`Weak<Prefilter>::drop`（f3184）的
+  `Copy src=[96,112) size=16` 区间内的槽 104 漏落帧 → 拷出空指针进槽 88 →
+  `[0+0x10]` 解引用崩。M5.4a 门禁全绿而 b 期才爆的原因：该函数含原子 op，a 期
+  未准入（解释执行掩盖了洞），b 期准入后潜伏洞触发——**门禁绿 ≠ 洞不在，准入面
+  扩大必须复跑全量差分**。修复 = FrameMap 区间模型（设计 §3.1「触及即落帧」的
+  完整实现）：首 Deref 前的 Offset 累加定位、Deref 只落指针槽 8 字节、动态步
+  （IndexScaled/VTableAlignOffset）与逃逸（Ref/AddrOf/RetDest::Indirect）保守到
+  帧尾、Copy/Repeat/Volatile/128 位/SIMD place 按精确字节宽落帧、Indirect ABI
+  落 sret/参数指针槽。同类潜在漏项同修：CallIndirect 的 callee 操作数此前未扫描。
+- **排障旋钮去留**：MIRVM_JIT_DEBUG（编译请求/发布地址日志，含 fast@）与
+  MIRVM_SEGV_DUMP（SIGSEGV 时打印 fault RIP/CR2 + JIT 段落盘）保留作诊断；
+  临时闸 NO_VTAO/NO_128/NO_ATOMIC/SKIP 与 vcode/IR 落盘已删。
+
+**验收**（旋钮清理后复跑同绿）：逢调即编（MIRVM_JIT_THRESHOLD=1）diff.sh **30/30**
++ diff_cargo **5/5**（ecosystem 的 regex capture 组 drop 链 = 原必崩用例）
++ m51 tracers **6/6** JIT-on + gate5 **51/0/0/0**（含 fib(32) JIT 74ms ≤80ms 硬门、
+逢调即编全量、JIT-off 冒烟）+ cargo test **52/52**。

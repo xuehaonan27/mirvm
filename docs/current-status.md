@@ -21,12 +21,14 @@
 | **M5.3 JIT 骨架** | **完成（2026-07-15）** | 方法级 Cranelift JIT 三片全落地（[m5.3-design.md](m5.3-design.md) Q1-Q4 全批；m5-log M5.3 节）：J1 分层基座（call_guest 单一派发点 + PLT/计数，S4 合并 FuncId 空间）+ 翻译器标量子集（语义 = 与解释器逐位一致；调用点两路分治——热路 PLT 间接/冷路 c2i）+ CFI（spike5 管线产品化）。**fib(32)：解释 engine 922.6→19.3ms（47.8×）= 2.9× native；硬门 ≤80ms 达成（69ms 含加载）**。oracle：逢调即编（阈值=1）diff 30/30 + JIT-off 对齐 + gate5 三新行（硬门/逢调即编全量/off 冒烟），gate 总数 47→50 |
 | S3′a（image 栈重构） | **完成（2026-07-15，commit b4ed691）** | 多源查找 + 地址样条（行为等价）：单底座泛化成 image 栈（`[std 底座, dep…]`）；frozen 样条域 + is_valid_home 白名单；ImageStack 并集查找/累积偏移/键链；Linker 收 &ImageStack。无 image/单底座两态字节等价，gate5 50/0/0/0 |
 | **S3′b（依赖成像）** | **完成（2026-07-15）= A2 纯化聚合 deps-image** | chain 方案撞"线性链无法表达非线性依赖 DAG"固有难题（4/19 证伪）后，purity 探针实测 eco 账本（tainted 72 inst/1.9ms）裁定 A2（[decision-history.md §7.5](decision-history.md)）；[s3b-a2-design.md](s3b-a2-design.md) 过审后三片全落地：A2-1 split lower 机件（双队列/标签 id/双 arena 路由/编译期穷尽 rebase）、A2-2 写盘/装载/L2 键链（**eco 冷 924→热 66ms**，自愈矩阵验证）、A2-3 默认开启 + gate 双态冒烟 + S3′c 同 workspace 跨 bin 共享（gate5 50→51；[m6-log.md](m6-log.md) 片7/8/9） |
-| M5.4–M5.5 | **未实现** | 翻译器全覆盖 + LSDA（cg_clif GccExceptTable 同构）、vmctx 终裁计量与 gate6 收口（m5-design 原案不动）。S3′c 跨项目共享依 S3′b 方案而定 |
+| M5.4（翻译器全覆盖） | **a/b 完成（2026-07-15），c/d 待施** | a = 帧模型 v2 + 内存操作数；b = 标量全集 + 128 位族 + atomics（[m5-log.md](m5-log.md) M5.4a/b 节）——含 analyze_frame 区间模型实锤根因修复（place 通道字节区间内槽漏提升 = 错值级）。oracle：逢调即编 diff 30/30 + diff_cargo 5/5 + gate5 51/0/0/0（fib(32) JIT 74ms ≤80ms 硬门）。c = ABI 泛化（Pair/Indirect/track_caller）+ LSDA 产品化（probe 5/5 已过）；d = SIMD + 收口 |
+| M5.5 | **未实现** | vmctx 终裁计量与 gate6 收口（m5-design 原案不动）。S3′c 跨项目共享依 S3′b 方案而定 |
 
-目前唯一产品执行引擎是 M4 解释器。Cargo 默认的 `cranelift` feature 只编译冻结的 Spike 5；
-生产调用路径还没有方法级 JIT，也没有 `mixed`/`jit` 产品模式。M5.2 把解释器语义面补全
-（gate5 从 40 PASS/2 XFAIL 升到 **46 PASS / 0 XFAIL / 0 FAIL**），为 JIT 期交付语义面
-干净的基线。
+产品执行引擎 = M4 解释器 + 方法级 JIT（cranelift 为默认 feature；JIT 默认开启，
+`--jit off`/`MIRVM_JIT=off` 回退纯解释；tsan harness 不开 cranelift）。M5.2 把解释器
+语义面补全（gate5 从 40 PASS/2 XFAIL 升到 **46 PASS / 0 XFAIL / 0 FAIL**），为 JIT 期
+交付语义面干净的基线；M5.4a/b 把 JIT 翻译器推进到标量/内存/128 位/原子全覆盖，
+解释器继续作为差分 oracle 与未准入构造（ABI 泛化/cleanup 边/SIMD）的唯一语义源。
 
 ## 2. 当前实现路径
 
