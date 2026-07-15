@@ -15,7 +15,9 @@ if [ ${#progs[@]} -eq 0 ]; then
            net_tcp net_udp volatile \
            serde_json serde_yaml rand_det flate2 brotli argon2 p256 syn_parse hickory \
            unicode_tables wasmi boa_js tiny_skia zip_arch rust_decimal rustfft roaring \
-           bitvec compact_str nom_parse comrak_md fst_build spade_delaunay jieba_cut)
+           bitvec compact_str nom_parse comrak_md fst_build spade_delaunay jieba_cut \
+           smoltcp_tcp statrs_stats rkyv_zero qr_round fatfs_img geo_ops rhai_script \
+           redb_kv zstd_stream)
 fi
 pass=0 fail=0
 
