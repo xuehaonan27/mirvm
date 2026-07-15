@@ -302,3 +302,49 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
 - corpus.sh 默认清单同步扩编（timeout 600 容纳 jieba）。
 - 三维逐字节差分在 driver 创建时强制执行；gate 内为 exit-code + oracle 级
   （native 逐字节维的冷构建成本不进 gate）。
+
+### 批3（14 个；8 绿 / 4 FRONTIER / 2 产品 bug 实锤）
+
+- **绿**：smoltcp_tcp（纯 Rust TCP/IP 栈：loopback echo 全状态机 + 手工时钟 +
+  codec 畸形 13 条）、snow_noise（Noise_XX/NKpsk0 ChaChaPoly 全 transcript 锚定；
+  poly1305 avx2 撞 `llvm.x86.avx2.permd` 用官方 `--cfg poly1305_force_soft` 绕——
+  与 ed25519 serial env 同型先例；curve25519-dalek 默认 simd backend 全程安然）、
+  statrs_stats（0.18 分布族/检验全 bits 锚）、rkyv_zero（零拷贝 + bytecheck
+  校验路径；validator 错误文案内嵌裸地址，归类打印）、qr_round（qrcode+rqrr
+  闭环，RS 纠错 5×5 翻转仍解出）、fatfs_img（钉 =0.3.6——0.4 从未发布；
+  chrono 壁钟炸弹用 default-features=false + 固定 TimeProvider 拆）、
+  geo_ops（0.29 robust/i_overlay 谓词全 bits 一致）、rhai_script（meta 解释器：
+  闭包/宿主注册/11 种错误变体/资源上限；ahash runtime-rng 不打印哈希序集合）。
+- **FRONTIER（锁定 expected-red）**：gix_pure（git loose object 必经 zlib →
+  simd-adler32 `sse2.psad.bw`；三条 zlib 路线排查全记录）、lz4_snap（snap frame
+  层 crc32c 撞 `llvm.x86.sse42.crc32.*` 新族；lz4_flex 全线 + snap raw 绿）、
+  calamine_xlsx（rust_xlsxwriter/calamine 双 crate 经 zip entry CRC 撞
+  crc32fast ≥128B 单块 pclmulqdq，块长封死在 crate 内部不可绕）、
+  rusqlite_db（native_archive 闭包策略：libsqlite3.a 的 FTS5 引 libm `log`，
+  `-z defs` 整档链接拒——闭包检查未计 libm；exit 101，red_code 机制因此
+  从写死 70 扩为按程序可配）。
+- **产品 bug 实锤**：
+  - **track_caller fn_span**（`7dc3b31` 已修）：方法调用点 Location 取
+    整个调用表达式 span（lo=接收者）而非 rustc 的 fn_span（被调名段）——
+    redb TableAlreadyOpen 错误串行列分叉实锤（269:18 vs 269:20；链式多行
+    连行号都偏）。凡方法调用点 unwrap/expect 的 panic 头全偏。修复后
+    redb_kv 三维转绿并入 gate。
+  - **zstd 静默换库**（已修，待主线收录提交）：hidden-visibility 归档（.dynsym
+    空）符号解析 dlsym(RTLD_DEFAULT) 优先于归档 .symtab 兜底 → guest zstd 被
+    绑到宿主 libLLVM 内嵌 zstd（dfast 策略 level 3/4 输出不同，len=915 vs 918）；
+    reject_symbol_ambiguity 用 nm --dynamic 对空导出表失效。**native 链接器
+    语义：静态归档成员的定义在链接期绑定，guest 自己的库永远赢过全局
+    命名空间**——修法 = 兜底表只收 .symtab−.dynsym 的 hidden 符号并在三处
+    解析点（FfiState::resolve / fn-ptr 取址 / extern static）先于 dlsym 全域
+    查询；dynsym 可见面维持原序（物化期碰撞拒绝仍兜底）。修复后 c_zstd_stream
+    三维逐字节转绿，ffi_zlib/blake3/ring 回归无损。
+- **另发现（欠账类，未立项）**：①**thunk 盲区**——flate2 的 C-libz 后端把
+  Rust allocator fn-ptr（zalloc/zfree）嵌进 z_stream **结构体**传给 libz，
+  libz 回调时宿主跳进 guest 数据地址静默 SIGSEGV 无诊断（thunk 机制只覆盖
+  显式 fn-ptr 实参，结构体内嵌回调是盲区；LD_PRELOAD 实锤 si_addr==rip 落在
+  delta 冻结域 rw 非可执行）。②**rusqlite 的 libm 闭包缺口**（见上
+  FRONTIER——闭包检查应纳入 -lm 或白名单系统库进 DT_NEEDED）。
+
+**M5.x intrinsic 欠账队列追加**（按批3 证据）：`llvm.x86.sse42.crc32.*`
+（snap frame、任意 crc32c 用户——实现成本低，单指令语义）、
+`llvm.x86.avx2.permd`（poly1305 avx2；一行 shuffle 语义）。
