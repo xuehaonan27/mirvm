@@ -5,7 +5,8 @@
 //! tier-0 native.rs 的无 provenance 简化版。
 //!
 //! 库加载纪律：物化 archive 是必需库（RTLD_NOW，失败携 dlerror 终止）；普通 `-l`
-//! 名称是可选候选（best-effort）。全部加载后按 RTLD_DEFAULT → 各句柄解析符号。
+//! 名称是可选候选（best-effort）。解析序：归档 hidden 符号 .symtab 兜底表（链接
+//! 期绑定，恒胜全局）→ RTLD_DEFAULT → 各句柄（见 archive_fallbacks 字段注）。
 //! 变参函数用 Cif::new_variadic(尾参类别由调用点实参冻结，x86_64 AL 语义 libffi 负责)。
 
 use std::collections::HashMap;
@@ -20,9 +21,11 @@ use super::ir::{FfiKind, ForeignSig};
 pub struct FfiState {
     syms: HashMap<Box<str>, usize>,
     handles: Vec<usize>,
-    /// 必需归档库的 .symtab 兜底（装载基址, 符号→st_value）：-fvisibility=hidden
-    /// 编译的归档（ring）转换后符号不进 .dynsym，dlsym 未命中时按此求真地址
-    /// （解析序 = required_native_libs 序，与链接序同构）。
+    /// 必需归档库的 hidden 符号兜底表（装载基址, 符号→st_value）：只收不进
+    /// .dynsym 的符号（-fvisibility=hidden 归档，ring/zstd-sys 一族）。解析序
+    /// = required_native_libs 序（与链接序同构），且**先于 dlsym 全域**——静态
+    /// 归档成员链进 guest 后其定义恒胜全局命名空间（native 链接期绑定；宿主
+    /// libLLVM 内嵌 ZSTD_* 一族同名库会静默截胡，corpus c_zstd_stream 实锤）。
     archive_fallbacks: Vec<(u64, HashMap<Box<str>, u64>)>,
     libs_loaded: bool,
 }
@@ -42,20 +45,25 @@ impl FfiState {
         let Ok(cname) = CString::new(name) else {
             return Ok(None);
         };
-        let mut p = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) } as usize;
+        // ①归档 hidden 符号兜底表（先于全域）：native 链接期绑定语义——归档内
+        // 定义恒胜全局命名空间。dlsym 优先会把 guest 的 ZSTD_* 静默绑到宿主
+        // libLLVM 内嵌库（同 ABI、不同策略行，输出合法但错误的字节）。
+        let mut p = 0usize;
+        for (bias, syms) in &self.archive_fallbacks {
+            if let Some(&v) = syms.get(name) {
+                p = (bias + v) as usize;
+                break;
+            }
+        }
+        // ②dlsym 全域（真系统库；归档的 dynsym 可见符号也经 RTLD_GLOBAL 装载
+        // 在此命中——物化期 reject_symbol_ambiguity 已拒其与全局的碰撞）
+        if p == 0 {
+            p = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) } as usize;
+        }
         if p == 0 {
             for &h in &self.handles {
                 p = unsafe { libc::dlsym(h as *mut libc::c_void, cname.as_ptr()) } as usize;
                 if p != 0 {
-                    break;
-                }
-            }
-        }
-        if p == 0 {
-            // hidden 符号兜底（ring：-fvisibility=hidden 归档的 .symtab）
-            for (bias, syms) in &self.archive_fallbacks {
-                if let Some(&v) = syms.get(name) {
-                    p = (bias + v) as usize;
                     break;
                 }
             }
@@ -84,11 +92,14 @@ impl FfiState {
                 return Err(format!("dlopen 必需原生库 `{cand}` 失败: {detail}"));
             }
             self.handles.push(h as usize);
-            // .symtab 兜底表（hidden 符号；解析失败按空表——dlsym 可见面不受影响，
-            // 未命中符号由 resolve 的既有诊断兜底）
-            let bias = crate::elfsym::load_bias(h).unwrap_or(0);
-            let syms = crate::elfsym::symtab_values(cand).unwrap_or_default();
-            self.archive_fallbacks.push((bias, syms));
+            // hidden 符号 .symtab 兜底表（口径见字段注）。基址或解析失败不建表：
+            // dlsym 可见面不受影响，hidden 符号由 resolve 的既有诊断兜底——宁缺
+            // 勿滥，错基址表会把符号静默解到野地址。
+            if let Some(bias) = crate::elfsym::load_bias(h)
+                && let Ok(syms) = crate::elfsym::hidden_symtab_values(cand)
+            {
+                self.archive_fallbacks.push((bias, syms));
+            }
         }
         for cand in optional_libs {
             let Ok(cpath) = CString::new(&**cand) else {
@@ -248,5 +259,67 @@ mod tests {
             !error.contains("dlerror 未提供详情"),
             "dlerror detail was lost: {error}"
         );
+    }
+
+    /// 归档 hidden 符号先于 RTLD_DEFAULT（native 链接期绑定：归档定义恒胜全局
+    /// 同名——宿主 libLLVM 内嵌 ZSTD_* 静默截胡 corpus c_zstd_stream 的修法）。
+    /// 探针：hidden `malloc`（进程全域恒有 libc 本尊）必须解到归档内定义。
+    #[test]
+    fn hidden_archive_symbol_wins_over_rtld_default() {
+        let dir = std::env::temp_dir().join(format!("mirvm-ffi-order-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (c, o, a, so) = (
+            dir.join("p.c"),
+            dir.join("p.o"),
+            dir.join("libp.a"),
+            dir.join("libp.so"),
+        );
+        std::fs::write(
+            &c,
+            "__attribute__((visibility(\"hidden\"))) void *malloc(unsigned long size) { (void)size; return (void *)0x2aUL; }\n",
+        )
+        .unwrap();
+        use std::process::Command;
+        assert!(Command::new("cc")
+            .args(["-fPIC", "-c"])
+            .arg(&c)
+            .arg("-o")
+            .arg(&o)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("ar")
+            .args(["crs"])
+            .arg(&a)
+            .arg(&o)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("cc")
+            .args(["-shared", "-Wl,-z,defs", "-Wl,--whole-archive"])
+            .arg(&a)
+            .args(["-Wl,--no-whole-archive", "-o"])
+            .arg(&so)
+            .status()
+            .unwrap()
+            .success());
+        // 前提：hidden malloc 不进 .dynsym，进程全域只有 libc 本尊
+        let libc_malloc = unsafe { libc::dlsym(std::ptr::null_mut(), c"malloc".as_ptr()) };
+        assert!(!libc_malloc.is_null());
+        let mut state = FfiState::default();
+        let required: Box<str> = so.display().to_string().into();
+        let resolved = state
+            .resolve("malloc", &[], std::slice::from_ref(&required))
+            .expect("required lib loads")
+            .expect("malloc resolves");
+        assert_ne!(
+            resolved, libc_malloc as usize,
+            "归档 hidden malloc 必须盖过 RTLD_DEFAULT 的 libc malloc"
+        );
+        let f: unsafe extern "C" fn(u64) -> *mut std::ffi::c_void =
+            unsafe { std::mem::transmute(resolved) };
+        assert_eq!(unsafe { f(0) }, 0x2a as *mut std::ffi::c_void);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -2399,7 +2399,7 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 });
                 let Some(r) = r else {
                     engine_abort(&format!(
-                        "foreign `{sym}` 符号不存在（dlsym 全域未命中；fn {}）",
+                        "foreign `{sym}` 符号不存在（归档兜底表 / dlsym 全域均未命中；fn {}）",
                         body.name
                     ));
                 };

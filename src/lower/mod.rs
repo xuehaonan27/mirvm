@@ -160,9 +160,11 @@ pub(crate) struct Linker<'tcx> {
     /// 语义的外延）。不进 fn_addrs——执行相反查未命中正是 CallIndirect 的
     /// native_sig libffi 直调通道（M4.4 FFI 反方向之二）的触发条件。
     foreign_fn_entries: FxHashMap<Instance<'tcx>, u64>,
-    /// 必需归档库的 .symtab 兜底（装载基址, 符号→st_value）：-fvisibility=hidden
-    /// 编译的归档（ring）转换后符号不进 .dynsym；extern static/fn 取址的降低期
-    /// dlsym 未命中时按此求真地址（lower_inner 头部随 dlopen 一并构建）。
+    /// 必需归档库的 hidden 符号兜底表（装载基址, 符号→st_value）：只收不进
+    /// .dynsym 的符号（-fvisibility=hidden 归档，ring/zstd-sys 一族）；extern
+    /// static/fn 取址的降低期解析**先于 dlsym 全域**——native 链接期绑定语义
+    /// （归档内定义恒胜全局命名空间；宿主 libLLVM 内嵌 ZSTD_* 静默截胡的实锤，
+    /// 见 elfsym 模块头注）。lower_inner 头部随 dlopen 一并构建。
     archive_fallbacks: Vec<(u64, std::collections::HashMap<Box<str>, u64>)>,
     // ===== S4 底座（s4-base-image-design；偏移合并）=====
     /// sym → 底座 FuncId（命中即复用，不入队）。空表 = 无底座/底座构建模式。
@@ -385,7 +387,7 @@ impl<'tcx> Linker<'tcx> {
     /// extern fn 条目地址（fn-ptr 取址）：无 MIR 的 foreign item 不能入 worklist
     /// （instance_mir = rustc query panic）；其 fn-ptr 值语义 = native 链接器解析
     /// 出的真符号地址。解析序与 resolve_call 同构：①引擎内建 ②导出符号仿真
-    /// ③denylist/llvm/rust-internal ④dlsym 全域。
+    /// ③denylist/llvm/rust-internal ④归档 hidden 兜底表 → dlsym 全域。
     /// 烤入的是宿主真地址（ASLR 跨进程无效）⇒ 登记符号名：含此类地址的模块不入
     /// L2/image 缓存（与 extern static 同规则，ircache/depsimage/baseimage 三判据）。
     fn foreign_fn_entry_addr(&mut self, inst: Instance<'tcx>) -> Result<u64, String> {
@@ -444,18 +446,22 @@ impl<'tcx> Linker<'tcx> {
                 "foreign `{name}` 被当作值取址（Rust 内部 ABI 符号，宿主进程亦有导出，不能直取）"
             ));
         }
-        // ④dlsym 全域（静态归档/global_asm 的 `.so` 已在排干 worklist 前
-        // RTLD_GLOBAL 加载进全局域——lower_inner 头部）；未命中再查归档
-        // .symtab 兜底（hidden 符号，ring 的 -fvisibility=hidden 内核）
-        let cname = std::ffi::CString::new(name).map_err(|_| "符号名含 NUL".to_string())?;
-        let mut p = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) } as u64;
-        if p == 0 {
-            for (bias, syms) in &self.archive_fallbacks {
-                if let Some(&v) = syms.get(name) {
-                    p = bias + v;
-                    break;
-                }
+        // ④归档 hidden 符号兜底表先于 dlsym 全域（native 链接期绑定：静态归档
+        // 成员链进 guest 后其定义恒胜全局命名空间——宿主 libLLVM 内嵌 ZSTD_* 一族
+        // 会静默截胡，corpus c_zstd_stream 实锤；兜底表只收不进 .dynsym 的符号，
+        // dynsym 可见面维持 dlsym 解析，物化期 reject_symbol_ambiguity 已拒其与
+        // 全局的碰撞）。归档 `.so` 已在排干 worklist 前 RTLD_GLOBAL 加载进全局域
+        //（lower_inner 头部），dlsym 全域可达其 dynsym 可见符号。
+        let mut p = 0u64;
+        for (bias, syms) in &self.archive_fallbacks {
+            if let Some(&v) = syms.get(name) {
+                p = bias + v;
+                break;
             }
+        }
+        if p == 0 {
+            let cname = std::ffi::CString::new(name).map_err(|_| "符号名含 NUL".to_string())?;
+            p = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) } as u64;
         }
         if p == 0 {
             // weak 符号缺席 = NULL（native 未定义弱符号的取址语义）；经它间接调用
@@ -465,7 +471,9 @@ impl<'tcx> Linker<'tcx> {
             if weak {
                 return Ok(bake(self, 0, false));
             }
-            return Err(format!("extern fn `{name}` 被当作值取址，但符号 dlsym 全域未命中"));
+            return Err(format!(
+                "extern fn `{name}` 被当作值取址，但符号未命中（归档兜底表 / dlsym 全域均无）"
+            ));
         }
         Ok(bake(self, p, true))
     }
@@ -541,20 +549,24 @@ impl<'tcx> Linker<'tcx> {
                         self.record_both(id, cell);
                         return Ok(cell);
                     }
-                    let cname = std::ffi::CString::new(name)
-                        .map_err(|_| "符号名含 NUL".to_string())?;
-                    let mut p = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) } as u64;
-                    if p == 0 {
-                        // 归档 .symtab 兜底（hidden 符号，ring 的 -fvisibility=hidden 构建）
-                        for (bias, syms) in &self.archive_fallbacks {
-                            if let Some(&v) = syms.get(name) {
-                                p = bias + v;
-                                break;
-                            }
+                    // 归档 hidden 符号兜底表先于 dlsym 全域（与 fn 取址④同序——
+                    // native 链接期绑定：归档内定义恒胜全局命名空间）
+                    let mut p = 0u64;
+                    for (bias, syms) in &self.archive_fallbacks {
+                        if let Some(&v) = syms.get(name) {
+                            p = bias + v;
+                            break;
                         }
                     }
                     if p == 0 {
-                        return Err(format!("extern static `{name}` dlsym 未命中"));
+                        let cname =
+                            std::ffi::CString::new(name).map_err(|_| "符号名含 NUL".to_string())?;
+                        p = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) } as u64;
+                    }
+                    if p == 0 {
+                        return Err(format!(
+                            "extern static `{name}` 未命中（归档兜底表 / dlsym 全域均无）"
+                        ));
                     }
                     // 宿主真地址直嵌（&environ 语义要求就是 libc 变量本体地址）——
                     // ASLR 下跨进程无效 ⇒ 登记符号，含此类地址的模块不入 L2 缓存
@@ -1549,11 +1561,14 @@ fn lower_inner(
                 panic!("必需原生库 `{so}` 降低期 dlopen 失败: {detail}");
             }
             // 句柄有意不 dlclose（与运行期 FfiState 同：随进程生命周期）。
-            // .symtab 兜底表（hidden 符号；解析失败按空表——dlsym 可见面不受影响，
-            // 未命中符号由取址路径的既有诊断兜底）
-            let bias = crate::elfsym::load_bias(h).unwrap_or(0);
-            let syms = crate::elfsym::symtab_values(so).unwrap_or_default();
-            linker.archive_fallbacks.push((bias, syms));
+            // hidden 符号 .symtab 兜底表（口径同 FfiState：只收不进 .dynsym 的
+            // 符号）。基址或解析失败不建表——dlsym 可见面不受影响，hidden 符号
+            // 由取址路径的既有诊断兜底（宁缺勿滥：错基址表会静默解到野地址）。
+            if let Some(bias) = crate::elfsym::load_bias(h)
+                && let Ok(syms) = crate::elfsym::hidden_symtab_values(so)
+            {
+                linker.archive_fallbacks.push((bias, syms));
+            }
         }
         v
     };

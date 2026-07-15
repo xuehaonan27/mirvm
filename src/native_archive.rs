@@ -101,6 +101,16 @@ pub(crate) fn materialize_static_libraries(tcx: TyCtxt<'_>) -> Result<Vec<Box<st
         .collect())
 }
 
+/// 物化期歧义拒绝：归档 **.dynsym 可见**导出符号 ①不得与 RTLD_DEFAULT 既有
+/// 定义碰撞（dynsym 可见符号经 dlsym 全域解析，碰撞下无法无歧义复现 native
+/// linker 顺序，且归档内部的同名引用会按全局作用域绑到进程本尊）②不得跨归档
+/// 重名（解析依赖装载顺序）。
+///
+/// 不进 .dynsym 的 hidden 符号（.symtab 兜底表承载）刻意**不做**此检查：它们
+/// 在解析序上先于 RTLD_DEFAULT（native 链接期绑定——归档内定义恒胜全局同名，
+/// 见 elfsym 模块头注），碰撞本就解析到归档，无歧义可拒；hidden 符号也不进
+/// 全局作用域，归档内部引用天然自闭合。zstd-sys 的 `ZSTD_*` vs 宿主 libLLVM
+/// 内嵌库正是此类——拒绝会让合法 workload 不可跑。
 fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), String> {
     let mut owners = HashMap::<String, PathBuf>::new();
     for shared_object in shared_objects {
