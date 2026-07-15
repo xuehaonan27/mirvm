@@ -1702,7 +1702,7 @@ fn lower_inner(
         let entry = entry;
         module.entry = entry;
 
-        // exports/fn_addrs 按值域分拆（设计 §9：底座 id < first 恒留 delta 侧）
+        // exports 按值域分拆（设计 §9：底座 id < first 恒留 delta 侧）
         let image_lo = first;
         let image_hi = first + image_fns;
         let in_image = |id: &ir::FuncId| *id >= image_lo && *id < image_hi;
@@ -1713,16 +1713,25 @@ fn lower_inner(
             .map(|(s, id)| (s.clone(), *id))
             .collect();
         module.exports.retain(|_, id| !in_image(id));
+        // fn_addrs 按【地址域】分拆：条目物理上在 image 冻结区（image_fn_entries 的
+        // 值集 = image 类 + S4 补建的全部条目）就随 image 走。按值域分会把补建条目
+        // （底座值域 < first、条目在 image 区）留在建者 delta 侧——消费方装载该
+        // image 后，其静态里烘焙的补建地址在运行期反查表无登记（absorb_stack 只并
+        // image.fn_addrs，消费方自己的 fn_entry_addr 复用分支也不登记），间接调用
+        // abort「不是已知 fn 条目」（corpus 批1 撞出的缓存污染实锤根因；负对照
+        // edit_rand v2-v6 五连崩 0x6a0000001630/core::fmt::write）。
+        let image_entry_addrs: std::collections::HashSet<u64> =
+            s.image_fn_entries.values().copied().collect();
         let image_fn_addrs: std::collections::HashMap<u64, ir::FuncId> = linker
             .fn_addrs
             .iter()
-            .filter(|(_, id)| in_image(id))
+            .filter(|(a, _)| image_entry_addrs.contains(a))
             .map(|(a, id)| (*a, *id))
             .collect();
         module.fn_addrs = linker
             .fn_addrs
             .iter()
-            .filter(|(_, id)| !in_image(id))
+            .filter(|(a, _)| !image_entry_addrs.contains(a))
             .map(|(a, id)| (*a, *id))
             .collect();
         let image_module = ir::Module {
