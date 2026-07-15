@@ -11,14 +11,19 @@
 use std::sync::atomic::{AtomicU32, AtomicU64};
 
 pub struct JitState {
-    /// PLT 槽：FuncId → packed 入口机器地址（0 = 未编译，走解释）。
+    /// PLT 槽（interp i2c 面）：FuncId → packed 入口机器地址（0 = 未编译，走解释）。
     pub slots: Vec<AtomicU64>,
+    /// PLT 槽（编译码 cc→cc 面）：FuncId → fast 入口 / c2i 蹦床地址（0 = 尚无）。
+    /// 只有编译码的调用点读它（load + call_indirect）；interp 不消费。
+    pub slots_fast: Vec<AtomicU64>,
     /// 调用计数（Relaxed；竞态丢计无害——只影响触发时刻，不影响语义）
     pub counters: Vec<AtomicU32>,
     /// `--jit off` / `MIRVM_JIT=off` ⇒ false：纯解释，计数也不做（对拍口径）
     pub enabled: bool,
-    /// 过阈值投递编译队列（M5.3b 接线；Q3 裁定 1000）
+    /// 过阈值投递编译队列（Q3 裁定 1000）
     pub threshold: u32,
+    /// 编译请求通道（M5.3b：jit_compile::start 装填；cranelift feature 关 = 恒 None）
+    pub queue: std::sync::Mutex<Option<std::sync::mpsc::Sender<u32>>>,
 }
 
 impl JitState {
@@ -34,9 +39,11 @@ impl JitState {
             .unwrap_or(1000);
         JitState {
             slots: (0..fn_count).map(|_| AtomicU64::new(0)).collect(),
+            slots_fast: (0..fn_count).map(|_| AtomicU64::new(0)).collect(),
             counters: (0..fn_count).map(|_| AtomicU32::new(0)).collect(),
             enabled,
             threshold,
+            queue: std::sync::Mutex::new(None),
         }
     }
 }

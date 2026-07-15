@@ -2160,11 +2160,20 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
     if jit.enabled {
         let entry = jit.slots[func as usize].load(std::sync::atomic::Ordering::Acquire);
         if entry != 0 {
-            // M5.3a 无编译线程，无人写槽——非零 = 内存踩踏级事故，响亮死（防静默错值）
-            engine_abort("JIT 槽在 M5.3a 不可能非零");
+            // i2c：packed 入口（M5.3b；发布序 fast→packed，Acquire 已见全部前置写）
+            type Packed = extern "C-unwind" fn(*const u64, *mut u64);
+            let f: Packed = unsafe { std::mem::transmute(entry as usize) };
+            let mut ret = [0u64; 2];
+            f(args.as_ptr(), ret.as_mut_ptr());
+            return (ret[0], ret[1]);
         }
-        jit.counters[func as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // M5.3b：过阈值（jit.threshold）投递后台编译队列
+        let prev = jit.counters[func as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // 恰好跨阈值的那一次投递（exactly-once；后续计数继续增长但不重复投递）
+        if prev + 1 == jit.threshold
+            && let Some(q) = jit.queue.lock().unwrap().as_ref()
+        {
+            let _ = q.send(func);
+        }
     }
     interp_frame(ctx, func, args)
 }

@@ -10,6 +10,8 @@ pub mod heap;
 pub mod interp;
 pub mod ir;
 pub mod jit;
+#[cfg(feature = "cranelift")]
+pub mod jit_compile;
 pub mod stats;
 pub mod thunks;
 pub mod tsan_mt;

@@ -515,6 +515,9 @@ fn run_vm_engine(
     module.finalize_entry_argv(program_argv);
     // Shared 提升进程级 &'static（M4.4：thunk/多线程要求 Ctx 可在任意线程随时引用它）
     let shared: &'static _ = Box::leak(Box::new(crate::vm::engine::ctx::Shared::new(module)));
+    // M5.3b：编译服务（--jit off / feature 关 = 不启动，纯解释）
+    #[cfg(feature = "cranelift")]
+    crate::vm::engine::jit_compile::start(shared);
     let Some(spec) = vm_call else {
         // main 启动链：lang_start 照常解释，退出码 = Termination 产物
         return on_guest_stack(move || crate::vm::engine::interp::run_main(shared));
