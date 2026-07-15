@@ -1,6 +1,6 @@
 # mirvm 当前开发状态
 
-> 状态日期：2026-07-14。本文是当前状态的唯一汇总入口；若与早期计划、README 或交接文档
+> 状态日期：2026-07-15。本文是当前状态的唯一汇总入口；若与早期计划、README 或交接文档
 > 冲突，以当前代码、可复现测试结果和本文为准。文档权威规则见 [README.md](README.md)。
 
 ## 1. 阶段结论
@@ -20,7 +20,7 @@
 | M6 片6（S4 std 预降低底座） | **完成（2026-07-15）** | 空 main 底座（0x6800 域）+ delta（0x6900 域）偏移合并（施工偏离 §7.3：取代域位双表，解释器零改动）；v0 symbol_name 复用（fn/static/TLS 去重）；降低指纹会话内验证；L2 分层 base_key。**脚本纯冷 385→104ms（lower 9.6×）**，ecosystem runner lower 1272→988ms（std 份额）；底座构建幂等且字节确定（验收抓获 HashMap 随机序缺陷）；gate5 46→47（新增旁路冒烟）全绿（[s4-base-image-design.md](s4-base-image-design.md)，m6-log 片6） |
 | **M5.3 JIT 骨架** | **完成（2026-07-15）** | 方法级 Cranelift JIT 三片全落地（[m5.3-design.md](m5.3-design.md) Q1-Q4 全批；m5-log M5.3 节）：J1 分层基座（call_guest 单一派发点 + PLT/计数，S4 合并 FuncId 空间）+ 翻译器标量子集（语义 = 与解释器逐位一致；调用点两路分治——热路 PLT 间接/冷路 c2i）+ CFI（spike5 管线产品化）。**fib(32)：解释 engine 922.6→19.3ms（47.8×）= 2.9× native；硬门 ≤80ms 达成（69ms 含加载）**。oracle：逢调即编（阈值=1）diff 30/30 + JIT-off 对齐 + gate5 三新行（硬门/逢调即编全量/off 冒烟），gate 总数 47→50 |
 | S3′a（image 栈重构） | **完成（2026-07-15，commit b4ed691）** | 多源查找 + 地址样条（行为等价）：单底座泛化成 image 栈（`[std 底座, dep…]`）；frozen 样条域 + is_valid_home 白名单；ImageStack 并集查找/累积偏移/键链；Linker 收 &ImageStack。无 image/单底座两态字节等价，gate5 50/0/0/0 |
-| **S3′b（依赖成像）** | **暂停——设计岔路（2026-07-15）** | 依赖在自己 cargo 会话内成像、按 below_key 拼线性链。**正确性airtight但撞"线性链无法表达非线性依赖 DAG"固有难题，实测命中率 4/19（eco），不达 988→100-300ms 目标**。四条出路取舍见 **[s3b-design-fork.md](s3b-design-fork.md)**（推荐 A 单 deps-image，跨运行）；已探索 chain 代码存 `docs/parked/s3b-chain-wip.patch`；工作树已回退 S3′a 绿态。**需裁定方向后再续** |
+| **S3′b（依赖成像）** | **完成（2026-07-15）= A2 纯化聚合 deps-image** | chain 方案撞"线性链无法表达非线性依赖 DAG"固有难题（4/19 证伪）后，purity 探针实测 eco 账本（tainted 72 inst/1.9ms）裁定 A2（[decision-history.md §7.5](decision-history.md)）；[s3b-a2-design.md](s3b-a2-design.md) 过审后三片全落地：A2-1 split lower 机件（双队列/标签 id/双 arena 路由/编译期穷尽 rebase）、A2-2 写盘/装载/L2 键链（**eco 冷 924→热 66ms**，自愈矩阵验证）、A2-3 默认开启 + gate 双态冒烟 + S3′c 同 workspace 跨 bin 共享（gate5 50→51；[m6-log.md](m6-log.md) 片7/8/9） |
 | M5.4–M5.5 | **未实现** | 翻译器全覆盖 + LSDA（cg_clif GccExceptTable 同构）、vmctx 终裁计量与 gate6 收口（m5-design 原案不动）。S3′c 跨项目共享依 S3′b 方案而定 |
 
 目前唯一产品执行引擎是 M4 解释器。Cargo 默认的 `cranelift` feature 只编译冻结的 Spike 5；
@@ -170,6 +170,10 @@ Linux/ELF/x86_64 优先：依赖 pthread、dlopen、GNU 链接行为和 x86 asm 
    （2026-07-14 用户裁定）——冷启动杠杆按已批顺序施工：S1（sysroot stamp + P1/P2/P3）→
    S2（依赖剪 codegen）→ S4（std 底座，设计过审后动工）→ S3 懒降低与 M5.3 JIT 联合
    分层设计过审后动工；进入 M5.3 时保持 JIT-on/off/native 三方 oracle 计划。
+8. **S3′b 已完成（2026-07-15）**：A2 纯化聚合 deps-image 三片全落地并默认开启
+   （eco 冷 924→热 66ms；S3′c 同 workspace 跨 bin 共享；gate5 50→51）。后续 =
+   S3′c 完整形态（路径无关内容哈希键）按实需立项；tainted 集巨大项目（clap-derive
+   类）按 decision-history §7.5 重估触发器处理。
 
 ## 6. 完成一个阶段时如何更新
 

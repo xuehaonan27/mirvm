@@ -429,6 +429,46 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
   （FuncId）是**调试用**，运行期派发走 fn_addrs 反查 ⇒ relocation（C/D）不必碰冻结区字节，
   只改 Call.callee/fn_addrs 值/exports 值 3 处类型化字段。
 
+### 7.5 2026-07-15：S3′b 裁定 = A2 纯化聚合 deps-image（purity 账本证伪 A1）
+
+- **旧状态**：§7.4 暂停待裁定；s3b-design-fork 推荐方案 A（口径：非 LOCAL_CRATE 全进
+  image，"键必须含本项目依赖集实际实例化"）。
+- **候选项**：A1（fork 原推荐口径）/ A2（A 的改良：purity split）/ B chain+屏障 /
+  C reloc / D chain+reloc / E 接受低命中。
+- **新证据（探针实测）**：`MIRVM_PURITY_STATS=1`（src/lower/mod.rs，worklist 逐
+  instance 分类+计时，env 门控默认零开销）对 eco 冷会话：
+  - 底座在场（A2 真实配置）：local 11 inst/1.0ms，**tainted 72 inst/1.9ms**，pure
+    10593 inst/1042.7ms ⇒ A2 每编辑重降 = local+tainted = **83 inst/2.9ms**（总
+    10676 inst/1045.7ms，99.7% 的 lower 成本 bin 无关）。
+  - 底座旁路对照：tainted/local 不变（72/11），pure 13150 inst——tainted 与底座无关；
+    纯组间差 2557 inst 即底座覆盖量。
+  - tainted top = serde derive Visitor（Task）、`Vec<Task>`/`RawVec<Task>` 系、本地闭包
+    迭代器适配器；符号内嵌本地 crate disambiguator（`CskivyEyr2QPT_9ecosystem`）。
+  - 结论 1：tainted 仅占 0.7%，**A1 相对 A2 只多买 1.9ms**——而 A1 要付两个结构性
+    成本：① 键含"实际实例化指纹"，算它需先做单态化收集（正是要跳过的成本）；
+    ② tainted 符号内嵌本地 disambiguator，跨编辑身份稳定性是额外风险。
+  - 结论 2：purity **向下封闭**（callee substs 派生自 caller substs；依赖源码命名不了
+    bin 类型；trait 求解选中 impl 只来自类型的 crate 或 trait 的 crate）⇒ deps-image
+    不会有指向 delta 的吊引用。
+  - 验证：gate0 9/9 + 纯度门禁、Clippy `-D warnings`、fmt、diff.sh 30/30 全绿。
+- **新选择 = A2（纯化聚合 deps-image）**：deps-image = std 底座未覆盖的 bin 无关实例；
+  delta = LOCAL_CRATE + tainted；键 = std 底座键 + 各依赖 rlib 指纹 + 降低指纹（**不含
+  bin 派生数据**，会话开始即知，结构上不可能腐坏）。2 元素固定栈（S3′a ImageStack 直接
+  承载），无链/屏障/relocation/膨胀；跨项目共享（S3′c）因键无项目身份**自动复活**。
+  退化方向只有"少装"（缺实例退 delta 现降），chain 时代"错配装载=全盘错值"的红线在
+  A2 结构上不存在。
+- **被替代**：s3b-design-fork §4 方案 A 的切分口径（非 LOCAL_CRATE 全进 image）与
+  "键必须含本项目依赖集实际实例化"的结论被 A2 替代；A 家族的其余判断维持（单 image、
+  bin runner 会话内成像、放弃 per-crate 链——DAG 问题结构性地消失）。B（屏障活性/复杂度）、
+  C（每依赖带完整传递闭包 2-3× 膨胀）、D（跨依赖 relocation 分类=静默腐坏面最大）、
+  E（≈没做）在本账本下均不采纳。
+- **迁移与兼容影响**：无产品面变更；探针 `MIRVM_PURITY_STATS=1` 留 src/lower/mod.rs
+  （后续 ripgrep/tokei 施工顺手测 purity 账本用）。
+- **再次重估触发器**：① 实测出现 tainted 集巨大的项目（clap-derive 类；每编辑重降
+  >100ms 量级）→ 评估第三层"项目本地 tainted image"（那时才面对 A1 的键问题，范围限
+  tainted 集）；② 跨项目共享被证实无实需 → 简化回单项目键；③ ripgrep/tokei 的 purity
+  账本与 eco 显著不符 → 复核切分口径。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 - P7 设想独立 `src/os/` 物理层；当前 OS/FFI/builtin 逻辑仍分布在 lower、interp、ffi、heap。

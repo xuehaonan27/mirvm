@@ -208,3 +208,100 @@ postcard 解码，零拷贝布局留 mode B）。
 底座构建幂等 cmp 逐位一致；gate_truth_regression 12/12（冒烟判据用汇总式——
 fixture bash 垫片回放罐头输出，逐例 grep 不成立，当场踩中修正）；cargo test 42/42；
 终局 gate5 = **47 pass / 0 expected-red / 0 skip / 0 fail**。
+
+## 片7（S3′b-A2-1）：纯化聚合 deps-image——split lower 机件（2026-07-15，s3b-a2-design 过审后施工）
+
+**裁定背景**：S3′b chain 方案命中率 4/19 证伪（线性链 vs 非线性 DAG）→ purity 探针实测
+eco（tainted 72 inst/1.9ms，local+tainted 83 inst/2.9ms，pure 10593 inst/1042.7ms）→
+用户裁定 A2（decision-history §7.5）→ s3b-a2-design 过审（Q1=--extern 解析 / Q4=片3
+默认开 / Q5=S3′c 顺手做）。
+
+**本片内容（默认 OFF，行为等价片）**：
+- **split lower**（`MIRVM_DEPS_IMAGE=1` 且底座在场时）：mono 闭包按 purity 分轨——
+  image 类（bin 无关实例）得标签 id（`IMAGE_TAG|j`）入 image 队列/样条 k=0 域
+  （0x6A00），delta 类走今日 untagged 空间；不动点轮替排干双队列（image 体只发现
+  image 类——purity 向下封闭）；收尾一次 **rebase**（`TAG|j → first+j`，
+  untagged `d → d+image_count`），触及字段 = 设计 §9 实证盘点的 6 处
+  （Call.callee/TlsRef/InlineAsm.stub/exports/fn_addrs/entry.lang_start）+
+  ids/tls_ids 两表，op 级 **编译期穷尽 or-pattern match**（新变体 = 非穷尽编译错误）。
+- **双冻结区路由**：Memory/vtable 按当前类定域（image 上下文对 delta 区已有者提升
+  双份——身份 unspecified）；static/TLS 按 def_id.krate 定域（身份必需，双表登记防
+  精神分裂）；fn 条目按 instance 类定域（单一地址身份）；asm stub 按当前类分轨
+  （`mirvm_asm_xi{j}`/`xd{k}` 类前缀名——**asm_sites 改 (name,text) 对**与位序解耦，
+  split 最终位序收尾才知）。closure 护栏四处（fn 条目/本地 static/本地 TLS/本地
+  vtable 出现在 image 上下文 = panic，分类器漏判的响亮网）。
+- **内存态 absorb**：SplitImage 包装 BaseImage push 上栈（ImageStack::push 新增），
+  引擎吃 [base][image][delta] 合并模块；split 产出时**跳过 L2 入账**（delta id 空间
+  内嵌 image 在场前提，base-only 键会让无 image 会话错配装载——A2-2 用 image 键链
+  接通后恢复）。
+- **写盘前自检**：image 实例逐条复查 purity（分类器状态错误 = assert）。
+
+**施工意外（2 起，diff.sh split 差分抓获）**：
+1. **closure 护栏初版误伤底座命中**：`fn_entry_addr` 的 image 上下文护栏把"底座命中
+   返回底座 id（untagged 小值）"误判为 delta 类——`<u64 as LowerHex>::fmt` 在 std 底座
+   里，ptr_int 等 11 例触发。修 = 护栏只对"新鲜 delta id（untagged 且 ≥ first）"生效。
+2. **S4"底座命中无条目 → delta 区补一个"在双域世界失效**：补进 delta 区的条目被 image
+   字节码引用 = 跨运行不稳定域引用；且装载端（sym 索引）查不到 delta 区的补建条目 →
+   重复补建 = fn 指针比较精神分裂（well-defined 错值）。修 = split 模式下底座命中无
+   条目一律 **image 区补建**（单一身份；delta 引用 image 域恒稳定），并以 image 区
+   条目表为装载端索引唯一权威。**这是 S4 不变量的一次设计细化**（已在代码注释留档）。
+
+**验收**：默认 OFF 行为等价——gate5 **50 pass / 0 fail**（修复前后两轮）；env 开启
+diff.sh split 差分 **30/30**；eco split 复现探针口径（local 11 / tainted 72 / pure
+10593，输出四行与 native 一致）；cargo test **46/46**（新增 Rebase 三区间/函数体
+重映射单测）；Clippy `-D warnings`、fmt 干净。L2 warm 路径无回归（split 时跳过入账，
+非 split 路径不动）。
+
+## 片8（S3′b-A2-2）：deps-image 写盘/装载 + L2 键链（2026-07-15）
+
+**机制**：`src/depsimage.rs` 新增——pre-key = `fnv(build_id, 底座键, 排序 --extern 工件
+(size,mtime_ns) 盖戳)`（**pre-compiler 可算**，L2 热路径不断；--extern 只含直接依赖，
+传递闭包由 cargo 重建传播覆盖——任一传递 crate 变更 ⇒ 反向依赖链上的直接依赖被
+cargo 重编译 ⇒ 直接 rlib 盖戳变）。run_driver 起手 `try_load` 命中即 push 上栈（栈键链
+含 image 键，L2 delta 条目恢复入账）；未命中则 after_analysis `want_split` → split
+lower → `store_and_wrap`（原子发布 + 可缓存性判据①③同构：样条 k=0 固定域 +
+image 侧无宿主地址直嵌）→ push 后 `ircache::store`（链完整）。降低指纹分层：
+image.fp == 底座.fp（装载时）+ 底座.fp == 会话.fp（fp_matches）⇒ image.fp == 会话.fp。
+DepsFile 无字节确定性契约（与 L2 条目同规则；底座专有契约不外推，decision-history
+§7.3）。`MIRVM_NO_DEPS_IMAGE=1` 旁路（双态对拍用）。
+
+**账本（EPYC 7773X，release，eco runner）**：
+
+| 路径 | lower | 备注 |
+|---|---|---|
+| 冷写（image miss，split+写盘） | 924ms | image 6.07MB 落盘 |
+| 热读（image 命中，只降 delta） | **69.8ms**（13×） | 装载 postcard 解码 ~60ms + delta ~3ms |
+| 编辑 bin 重跑（image 命中） | **66.2ms** | 输出正确反映编辑 |
+| 未编辑复跑（L2 命中） | cache-load 74.6ms | 跳过整个 rustc 会话 |
+
+主锚点"加载相总账 ≤300ms"以 ~4× 余量达成（装载 ~60ms 是大头——10593 实例的
+postcard 解码，零拷贝布局留 mode B/rkyv 同题）。frontend ~143ms 不在本片范围。
+
+**验收**：双态（旁路 vs 启用）输出一致；diff.sh 管线开启 30/30；diff_cargo **5/5**；
+cargo test **47/47**（extern 解析单测）；Clippy `-D warnings`、fmt 干净；gate5 复跑
+（默认 OFF 无回归）。
+
+## 片9（S3′b-A2-3）：默认开启 + gate 双态冒烟 + S3′c 跨 bin 共享（2026-07-15）
+
+**内容**：管线转**默认开启**（唯一旋钮 = 旁路 `MIRVM_NO_DEPS_IMAGE=1`；A2-2 期
+`MIRVM_DEPS_IMAGE=1` 启用旋钮退役）。v1 边界：`--extern` 为空（无 registry 依赖的纯
+std 程序）不产/不用 image——那是 S4 底座已覆盖的地盘。新增 `tests/a2_deps_image.sh`
+入 gate5（总数 50→51）：冷写/热读 ≤300ms、编辑重跑不重建、L2 矩阵、旁路双态、
+S3′c 同 workspace 第二 bin 白拿（零新 image 文件 + ≤300ms）；fixture =
+`tests/fixtures/a2_ws`（memchr 2.8.3 锁定）。
+
+**施工意外（2 起，gate 施工实测抓获）**：
+1. **phase_cargo 相对路径重复嵌套**：`mirvm run <relative-dir>` 时 target 目录拼成
+   `project/project/target/mirvm`——更关键的是同一项目的 rlib 路径随调用形态
+   （相对/绝对）漂移 ⇒ deps-image 键失稳（S3′c 烟实测 bin1/bin2 键不同）。修 =
+   `phase_cargo` 入口 `std::path::absolute`（一行，键稳定性的前置）。
+2. **L2 门复跑口径**：gate 的 L2 矩阵臂需"首跑入账、次跑命中"两跑（NO_IR_CACHE 臂
+   不入账，单跑必无 cache-load）——gate 自身口径修正，非产品缺陷。
+
+**S3′c 的 v1 精确边界（诚实记账）**：键素材 = `--extern` 工件的 **(path, size, mtime)**——
+路径相关。故跨项目共享当前只在**同一 target dir 内**成立（同 workspace 的
+bin/example/test 之间）；不同项目目录即便同 lockfile，rlib 路径不同即不共享。
+路径无关键（内容哈希，~50ms/次的装载相成本）是 S3′c 完整形态的后续选项——
+v1 已兑现其主场景（workspace 内跨 bin 编辑-重跑共享）。
+
+**验收**：`tests/a2_deps_image.sh` 两连跑 PASS（幂等）；gate5 复跑（含新行）。

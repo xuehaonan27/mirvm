@@ -1,6 +1,11 @@
-# S3′b 依赖成像：设计岔路与断点（留待后续 session 裁定）
+# S3′b 依赖成像：设计岔路与裁定（A2 纯化聚合 deps-image）
 
-> 状态：**S3′b 暂停（2026-07-15）**。S3′a（多源查找 + 地址样条，行为等价重构）已落地
+> 状态：**已裁定（2026-07-15）= A2 纯化聚合 deps-image**。裁定证据与替代关系见
+> [decision-history.md §7.5](decision-history.md)；本文 §0–§7 保留岔路现场与四条出路的
+> 原始记录（其中"方案 A"为 A1 口径，已被 A2 替代其切分口径与键构成，见 §8）。
+> 下一步：A2 施工设计过审后动工。
+>
+> 历史状态：S3′b 暂停（2026-07-15）。S3′a（多源查找 + 地址样条，行为等价重构）已落地
 > 全绿（commit b4ed691）；S3′b（依赖成像）施工中撞上一个**线性链无法表达非线性依赖
 > DAG** 的固有难题，实测命中率过低（eco 4/19 依赖），不达设计目标。这是个真正的设计
 > 岔路，需裁定方向后再续。本文详解问题、已探索的 chain 方案为何不行、四条出路的取舍。
@@ -9,7 +14,26 @@
 > 前置：[m5.3-design.md](m5.3-design.md) §3.3（S3′ 设计）、[s4-base-image-design.md](s4-base-image-design.md)（底座机制）、
 > [coldstart-research.md](coldstart-research.md)（冷启动账本）。
 
-## 0. 一分钟速览
+## 8. 裁定（2026-07-15）：A2 纯化聚合 deps-image
+
+**裁定 = A2**（A 家族内部改良；用户裁定）。与 §4 方案 A（下称 A1）的差异在切分口径与键：
+
+- **切分**：deps-image 只装 **bin 无关实例**（定义在非本地 crate，且泛型参数/shim 携带
+  类型不含 LOCAL_CRATE 类型——"pure"）；bin 自身代码与 tainted 实例（bin 泛型在依赖里的
+  实例化）进 delta。purity 向下封闭 ⇒ image 无吊引用到 delta。
+- **键**：std 底座键 + 各依赖 rlib 指纹 + 降低指纹。**不含 bin 派生数据**——会话开始
+  即知，bin 编辑必命中，结构上不可能腐坏；A1 的"实际实例化指纹"（需先做单态化收集
+  才能算，正是要跳过的成本）被证伪为不值得。
+- **跨项目共享（S3′c）自动复活**：键无项目身份，同 lockfile + 同工具链的项目共享
+  同一 image（A1 曾明确放弃此项）。缺实例退 delta，优雅退化。
+- **账本（eco，`MIRVM_PURITY_STATS=1` 探针实测，探针留 src/lower/mod.rs）**：
+  tainted 72 inst/1.9ms（0.7%）；A2 每编辑重降 = local+tainted = 83 inst/2.9ms；
+  pure 10593 inst/1042.7ms 可缓存。A1 相对 A2 只多买 1.9ms。
+- **B/C/D/E 不采纳**的理由维持 §4–§6 原判（屏障活性、膨胀、relocation 风险、≈没做），
+  本账本下不再有反转理由。
+- **重估触发器**与完整证据：[decision-history.md §7.5](decision-history.md)。
+
+## 0. 一分钟速览（岔路现场，历史）
 
 - **目标**：把 ecosystem 类项目的 registry 依赖 lower（冷 runner 相 ~988ms）在依赖自己
   的构建会话里预成像，编辑 bin 重跑时只 lower delta（bin 增量），目标 988→100-300ms。

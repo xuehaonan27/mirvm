@@ -79,11 +79,14 @@ evcxr 四点不满（延迟、状态/借用限制、跑不了完整项目、编�
   cleanup 边 = M5.4 全覆盖+LSDA）。JIT-on/off/native 三重差分是第一 oracle。
 - **S3′a**（2026-07-15，commit b4ed691）多源查找+样条：单底座泛化成 image 栈（行为等价）。
 
-**⚠ 当前停靠点 = S3′b 依赖成像**：撞上"线性链无法表达非线性依赖 DAG"的固有难题，实测
-命中率 4/19（eco），不达 988→100-300ms 目标。**这是设计岔路，需裁定方向后再续，详见
-[s3b-design-fork.md](s3b-design-fork.md)**（四条出路取舍 + 推荐方案 A 单 deps-image）。
-已探索的 chain 代码存 `docs/parked/s3b-chain-wip.patch`（`git apply` 可接续）；工作树
-已回退到 S3′a 干净绿态。**接手先读 s3b-design-fork.md，别信"chain 只是没调好"**。
+**⚠ 当前断点 = S3′b 已完成（2026-07-15）= A2 纯化聚合 deps-image**：chain 方案撞
+"线性链无法表达非线性依赖 DAG"固有难题（4/19 证伪）→ purity 探针实测（eco tainted
+72 inst/1.9ms）裁定 A2（decision-history §7.5）→ [s3b-a2-design.md](s3b-a2-design.md)
+过审后三片全落地：A2-1 split lower 机件、A2-2 写盘/装载/L2 键链（**eco 冷 924→热
+66ms**）、A2-3 默认开启 + S3′c 同 workspace 跨 bin 共享（gate5 50→51）。账本与
+施工意外见 [m6-log.md](m6-log.md) 片7/8/9。**S3′c 的 v1 边界**：键路径相关——
+跨项目共享仅同 target dir 内（同 workspace 跨 bin）成立；路径无关内容哈希键是
+后续选项。chain 代码存 `docs/parked/s3b-chain-wip.patch`（已被 A2 替代，仅存档）。
 
 **其余未做**：M5.4（翻译器全覆盖 + LSDA）、M5.5（vmctx 终裁 + gate6）、S3′c（跨项目共享，
 依 S3′b 方案而定）、轨 C ④mode B `.mirvm` 包 / ⑤发行（distribution-design D9f，M5.3 后）。
@@ -441,11 +444,11 @@ trap_body 无出边、"未收集"callee 无出边（worklist 落地后前两个�
 
 ## 10. 当前挂起检查点
 
-**★ 最活跃（2026-07-15）= S3′b 依赖成像设计岔路**：见 §2 断点 + [s3b-design-fork.md](s3b-design-fork.md)。
-链方案命中率 4/19 证伪，需在四条出路间裁定（推荐 A 单 deps-image）。代码断点存
-`docs/parked/s3b-chain-wip.patch`。**这是下一个 session 最该接的活。**
+**★ S3′b 已收官（2026-07-15）= A2 纯化聚合 deps-image 默认开启**：见 §2 断点 +
+[m6-log.md](m6-log.md) 片7/8/9。gate5 51/0/0/0（含 a2_deps_image 行）。
+**下一个 session 最该接的活回到 M5.4/M5.5 与轨 C 前沿**（下列清单）。
 
-其余（多为 M5.4/M5.5 前沿，非 S3′b 那样的立即岔路）：
+其余（多为 M5.4/M5.5 前沿，非立即岔路）：
 
 1. **vmctx T/R 活检查点**：M5.3 已落 T 骨架（编译码格③为空，真负载测不出 T/R 差）；
    分配/guest TLS 内联进 JIT 后用真实负载重测 R（vmctx-passing §7）。
@@ -460,6 +463,9 @@ trap_body 无出边、"未收集"callee 无出边（worklist 落地后前两个�
    + delta 变可携带即 mode B 机内半成品；外部格式冻结守 D9b 门。
 6. **生命周期/嵌入**：Shared/thunk/asm/TLS 资源回收、可恢复错误和多 Engine 语义；
    JIT 机器码不入缓存（进程内易失，与 mode B/零拷贝字节码同题）。
+7. **S3′c 完整形态**（后续选项）：deps-image 键当前路径相关（同 target dir 内共享）；
+   路径无关内容哈希键（~50ms/次装载相成本）按实需立项。tainted 集巨大项目
+   （clap-derive 类）触发 decision-history §7.5 重估。
 
 ---
 
@@ -475,6 +481,9 @@ cargo build --release --locked
 # 直调导出函数（gate/调试）与调研仪器（每期开工前跑）
 ./target/release/mirvm run --vm-call 'fib(25)' demo/m4/pure.rs
 ./target/release/mirvm run --vm-stats demo/m4/digest.rs
+
+# purity 探针（S3′b 裁定仪器：local/tainted/pure 分类+逐 instance 计时；旁路 L2 强制真实降低）
+MIRVM_NO_IR_CACHE=1 MIRVM_PURITY_STATS=1 ./target/release/mirvm run demo/ecosystem.rs
 
 # gate + 回归（PASS 与原因锁定的 XFAIL 分开；--engine vm 旧写法仍兼容）
 bash tests/m4_gate0.sh                                    # M4.0 gate 9/9 + 纯度门禁

@@ -51,8 +51,9 @@
 | `distribution-design.md` | **已批准（方向，未立项）** | 轨 C 分发与产品面 D9a–D9f：缓存分层、mode B=缓存可移植化、toolchain 自带、发行先 miri 式 |
 | `coldstart-research.md` | **调研完成（2026-07-14）** | 冷启动/lower 全解剖（M6 片3 前置）：std 税线性模型、执行集≪降低集、依赖 codegen 白烧实证、P1–P3 缓存盲区、杠杆 V1–V6；施工顺序已裁定（decision-history §7.2），S1/S2 已落地（m6-log 片4/片5，账本实测修正在文内） |
 | `s4-base-image-design.md` | **已施工（2026-07-15，M6 片6）** | S4 std 预降低底座：v0 symbol_name 复用、双固定域、空 main 种子；施工偏离（偏移合并/COW 裁剪）见 decision-history §7.3；账本见 m6-log 片6（脚本纯冷 385→104ms） |
-| `m5.3-design.md` | **M5.3 JIT 已施工（2026-07-15）；S3′ 部分停靠** | M5.3 方法级 JIT × S3 懒降低联合分层设计：J1 共享基座、J2 终裁（懒降低不建，改依赖成像 S3′）、J3 顺序。M5.3a-c JIT 已落地；S3′a 已落地；**S3′b 停靠（见 s3b-design-fork）** |
-| `s3b-design-fork.md` | **待裁定（2026-07-15）** | S3′b 依赖成像设计岔路：chain 方案命中率 4/19 证伪（线性链 vs 非线性 DAG），四条出路（A 单 deps-image / B chain+屏障 / C reloc / D chain+reloc / E 接受低命中）取舍 + 推荐 A；下一个 session 最该接的活。代码断点 `docs/parked/s3b-chain-wip.patch` |
+| `m5.3-design.md` | **M5.3 JIT 已施工（2026-07-15）；S3′ 部分停靠** | M5.3 方法级 JIT × S3 懒降低联合分层设计：J1 共享基座、J2 终裁（懒降低不建，改依赖成像 S3′）、J3 顺序。M5.3a-c JIT 已落地；S3′a 已落地；**S3′b 已施工 = A2 纯化聚合 deps-image（s3b-a2-design，gate5 51；eco 冷 924→热 66ms）** |
+| `s3b-a2-design.md` | **已施工（2026-07-15）** | A2 纯化聚合 deps-image 施工设计：split lower（双队列/标签 id/双 arena/穷尽 rebase）、pre-key（--extern 盖戳，pre-compiler 可算）、L2 键链、S3′c 同 workspace 共享；三片全绿，账本见 m6-log 片7/8/9 |
+| `s3b-design-fork.md` | **已裁定（2026-07-15）= A2** | S3′b 依赖成像设计岔路：chain 方案命中率 4/19 证伪（线性链 vs 非线性 DAG）；§8 裁定 = A2 纯化聚合 deps-image（purity 账本：eco tainted 72 inst/1.9ms，每编辑重降 83 inst/2.9ms；证据见 decision-history §7.5）。§0–§7 保留四条出路原始记录；chain 代码存 `docs/parked/s3b-chain-wip.patch`（仅存档） |
 | `m5-log.md` | **已完成日志** | M5.0/M5.1 实际结果；优先于 M5 设计稿原先的预期 |
 | `m5.1-design.md` | **已完成设计/施工记录** | numbigint/xgetbv/sha2/blake3/ecosystem、diff_cargo 3/3 与六 tracer 脚本已绿；signal/backtrace 独立遗留 |
 | `m4-log.md` | **已完成日志** | M4.0–M4.5 实际施工记录；M4 状态的历史权威 |
