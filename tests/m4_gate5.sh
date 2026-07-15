@@ -108,6 +108,23 @@ else
     else
         bad "rayon exit=$rayon_code ${rayon_ms}ms（要求语义 oracle 且 < 5s）"
     fi
+    # M5.3 JIT 硬门（m5-design gate6 ②）：fib(32) ≤ 10× native ≈ ≤80ms 墙钟
+    #（解释锚点 0.94s；native -O 6.7ms；实测 JIT engine 段 ~19ms ≈ 2.9×）。
+    # 两跑取最小：满载 gate 环境余量仅 ~10ms，杀调度毛刺；契约不变。
+    fib_ms=999999 fib_code=1 fib_out=""
+    for _ in 1 2; do
+        t0=$(date +%s%N)
+        fib_out=$("$MIRVM" run --vm-call 'fib(32)' demo/m4/pure.rs 2>"$TMP/fib32.err")
+        fib_code=$?
+        ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+        [ $ms -lt $fib_ms ] && fib_ms=$ms
+        { [ $fib_code -eq 0 ] && [ "$fib_out" = "2178309" ]; } || break
+    done
+    if [ $fib_code -eq 0 ] && [ "$fib_out" = "2178309" ] && [ $fib_ms -lt 80 ]; then
+        ok "fib(32) JIT ${fib_ms}ms（≤80ms=10× native 硬门；解释锚点 940ms）"
+    else
+        bad "fib(32) JIT exit=$fib_code out=$fib_out ${fib_ms}ms（要求 2178309 且 <80ms）"
+    fi
 fi
 
 # ---- ④ 全量回归 ----
@@ -129,6 +146,23 @@ if MIRVM_NO_BASE_IMAGE=1 MIRVM_NO_IR_CACHE=1 ONLY=fib MIRVM="$MIRVM" \
     ok "diff.sh 底座旁路冒烟（ONLY=fib）"
 else
     bad "diff.sh 底座旁路冒烟"
+fi
+# M5.3 JIT 双跑（m5.3-design §4 oracle）：①逢调即编全量——阈值=1 使所有可准入函数
+# 走 JIT 帧（默认阈值 1000 下多数 demo 不触发编译，覆盖面不足），与 native 全量差分
+# = 翻译器误编译的第一显形处；②JIT-off 冒烟——纯解释逃生门不被 JIT 施工弄坏。
+if MIRVM_JIT_THRESHOLD=1 MIRVM="$MIRVM" bash tests/diff.sh >"$TMP/diff-jit1.out" 2>&1 \
+    && grep -Eq "== [0-9]+ passed, 0 failed ==" "$TMP/diff-jit1.out"; then
+    jit_summary=$(grep -Eo '[0-9]+ passed, 0 failed' "$TMP/diff-jit1.out" | tail -1)
+    ok "diff.sh 逢调即编（阈值=1）$jit_summary"
+else
+    bad "diff.sh 逢调即编（阈值=1）回归"
+fi
+if MIRVM_JIT=off MIRVM_NO_IR_CACHE=1 ONLY=fib MIRVM="$MIRVM" \
+    bash tests/diff.sh >"$TMP/diff-jitoff.out" 2>&1 \
+    && grep -Eq "== [0-9]+ passed, 0 failed ==" "$TMP/diff-jitoff.out"; then
+    ok "diff.sh JIT-off 冒烟（ONLY=fib）"
+else
+    bad "diff.sh JIT-off 冒烟"
 fi
 for probe in addcarry xgetbv simd_insert simd_shift vzeroupper x86_vectors; do
     probe_code=0

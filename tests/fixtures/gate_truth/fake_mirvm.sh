@@ -1,6 +1,12 @@
 #!/bin/bash
 set -u
 
+# M5.3c fib 硬门形状：run --vm-call 'fib(32)' demo/m4/pure.rs
+if [ "${2:-}" = --vm-call ] && [ "${3:-}" = 'fib(32)' ]; then
+    echo 2178309
+    exit 0
+fi
+
 if [ "${2:-}" = --engine ] && [ "${4:-}" = --vm-call ]; then
     case "${5:-}" in
         'fib(10)') echo 55 ;;

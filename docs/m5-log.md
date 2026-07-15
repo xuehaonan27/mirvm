@@ -446,3 +446,48 @@ guest handler 是独立能力缺口，不应混入 M5.1 全绿宣称。
   既有 gate 通道。
 
 **M5.2 非 JIT 语义补全完成。下一阶段 = M5.3 方法级 Cranelift JIT 骨架。**
+
+## M5.3 方法级 Cranelift JIT（2026-07-15，三片逐 commit；设计 = m5.3-design，Q1-Q4 全批）
+
+轨 B 重启。三片：**a** J1 分层基座（call_guest 单一派发点收拢六调用点 + PLT 槽/计数
+表按 S4 合并 FuncId 空间；行为等价，tsan_mt 豁免 Q4）→ **b** 翻译器标量子集 +
+编译服务 + 两入口 + CFI（并入 b：编译码一旦发布即可能被 unwind 穿越，次序安全）
+→ **c** gate 双跑接线 + fib 硬门 + 收官。
+
+**账本（EPYC 7773X）**：fib(32) 解释 engine 922.6ms → **JIT 19.3ms（47.8×）**；
+native -O 6.7ms ⇒ **JIT = 2.9× native**（spike5 直调 2.1-2.2× 的邻域，含 PLT 间接
+与 c2i 冷路）；硬门口径（--vm-call 墙钟含加载）931→69ms ≤ 80ms ✓。
+
+**机制落地与施工发现**：
+- 翻译器语义契约 = 与解释器逐位一致：值保持"I64 零扩到宽"槽不变量，int_bin/
+  int_cmp/int_ovf 按 interp 恒等式镜像（128 位提升判溢改写为 64 位恒等式：
+  无符号 w<64 精确比界、W64 回绕/umulhi、有符号异或符号式/smulhi-sshr）；帧局部
+  全提升 Cranelift SSA（v1 准入无取址 ⇒ 无帧内存）；入口统一 def 0。
+- **调用点两路分治**（施工发现，比设计更细）：准入原案"callee ABI 全标量"会被
+  溢出恐慌分支（panic 机器 = Pair ABI）把 fib 都拖出准入。落地 = 热路 PLT 间接
+  （全标量 callee：load slots_fast + call_indirect 恒定形状，c2i 蹦床→fast 升级
+  透明）+ 冷路调用点直接 c2i 打包回解释（interp 本就吃展平 av，callee 任意 ABI
+  语义一致）。热路零妥协，panic 类冷路归解释器。
+- c2i 的 ctx 恢复 = 边界 TLS attach（thunk 工厂同款幂等）；Unreachable 走诊断
+  助手保持 interp 口径（不用裸 trap 的 SIGILL）。
+- CFI：spike5 管线产品化（create_unwind_info → gimli FrameTable → 逐 FDE
+  __register_frame，libgcc 语义 + CIE 判别）；准入 unwind-transparent（只收
+  Continue 边）——panic 穿 JIT 帧已被逢调即编 diff 全量验证。
+- cranelift 0.133 漂移实录：指令收 **MemFlagsData**（MemFlags 已是打包内部型）、
+  declare_var(ty)->Variable、TrapCode::user(n)->Option。
+- 发布协议：单原子交换（先 fast 后 packed，Release/Acquire 链）；编译失败/拒绝 =
+  静默永久解释（语义面零依赖 JIT）；MIRVM_JIT_DEBUG=1 诊断口。
+
+**oracle 与 gate**（三重差分 = JIT-on == JIT-off == native）：
+- 逢调即编（MIRVM_JIT_THRESHOLD=1）diff.sh 30/30——线程/panic/signal/simd/asm
+  全家桶下所有可准入函数走 JIT 帧逐字节对 native；
+- JIT-off 对齐 30/30；gate5 新增三行（fib(32) ≤80ms 硬门 / 逢调即编全量 /
+  JIT-off 冒烟），gate 总数 47→50；truth-regression fixture 补 fib(32) 档位后
+  12/12；cargo test 43/43；tsan 构建零感知（jit.rs feature-free / jit_compile
+  cranelift 门控）。
+
+**v1 记账边界**（m5.3-design §4/§6 原案）：准入 = 标量子集 + unwind-transparent
+（Div/Rem/浮点/内存操作数/track_caller/cleanup 边 = M5.4 翻译器全覆盖 + LSDA）；
+无 OSR（长跑单循环不触发——调用边界整方法编译）；JIT 帧不压影子帧（backtrace
+深度对 JIT 帧透明——不变式 oracle 仍成立，panic 在 JIT 帧内展开时列帧少于解释
+口径，记账）；机器码不入缓存（进程内易失；L3 与 mode B/零拷贝字节码同题）。
