@@ -171,7 +171,7 @@ unsafe fn volatile_store_chunks(mut dst: *mut u8, mut src: *const u8, mut size: 
 }
 
 #[inline]
-fn mem_read_volatile(addr: u64, dst: u64, size: u32) {
+pub(crate) fn mem_read_volatile(addr: u64, dst: u64, size: u32) {
     unsafe {
         match size {
             1 => volatile_load_n::<1>(addr as *const u8, dst as *mut u8),
@@ -190,7 +190,7 @@ fn mem_read_volatile(addr: u64, dst: u64, size: u32) {
 }
 
 #[inline]
-fn mem_write_volatile(addr: u64, src: u64, size: u32) {
+pub(crate) fn mem_write_volatile(addr: u64, src: u64, size: u32) {
     unsafe {
         match size {
             1 => volatile_store_n::<1>(addr as *mut u8, src as *const u8),

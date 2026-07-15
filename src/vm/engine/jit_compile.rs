@@ -73,7 +73,16 @@ fn worker(shared: &'static Shared, rx: Receiver<u32>) {
         c.compile(func);
         if dbg {
             let ok = shared.jit.slots[func as usize].load(Ordering::Acquire) != 0;
-            eprintln!("mirvm-jit-debug: f{func} 发布={ok}");
+            if ok {
+                let addr = shared.jit.slots[func as usize].load(Ordering::Acquire);
+                let fast = shared.jit.slots_fast[func as usize].load(Ordering::Acquire);
+                eprintln!(
+                    "mirvm-jit-debug: f{func} 发布={ok} @{addr:#x} fast@{fast:#x}（{}）",
+                    shared.module.funcs[func as usize].name
+                );
+            } else {
+                eprintln!("mirvm-jit-debug: f{func} 发布={ok}");
+            }
         }
     }
 }
@@ -104,6 +113,424 @@ extern "C-unwind" fn mirvm_jit_unreachable(func: u64) -> ! {
         .unwrap_or("?");
     eprintln!("mirvm[jit]: 到达 Unreachable（fn {name}）");
     std::process::abort();
+}
+
+// ===== M5.4b 助手（与 interp 共享实现本体，不复制逻辑）=====
+
+/// 除零诊断退出（M5.4b-1）：与 interp engine_abort 的文案/退出码逐位一致。
+extern "C-unwind" fn mirvm_jit_div_zero(kind: u64) -> ! {
+    let what = match kind {
+        0 => "guest 整除以零",
+        1 => "guest 取余以零",
+        2 => "guest 128 位整除以零",
+        _ => "guest 128 位取余以零",
+    };
+    eprintln!("mirvm[m4-engine]: {what}");
+    std::process::exit(70);
+}
+
+/// volatile 读（M5.4b-1）：走 interp 的 opaque 字节载体 + 分块分解同一实现。
+extern "C-unwind" fn mirvm_volatile_load(addr: u64, dst: u64, size: u64) {
+    super::interp::mem_read_volatile(addr, dst, size as u32);
+}
+
+/// volatile 写（同上）。
+extern "C-unwind" fn mirvm_volatile_store(addr: u64, src: u64, size: u64) {
+    super::interp::mem_write_volatile(addr, src, size as u32);
+}
+
+// ===== M5.4b-3 助手（f16/f128/128 位族；interp 的宿主直算同一通道——
+// 助手用 Rust f16/f128/i128/u128 算术，rustc 降到与 interp/native 同一批
+// compiler-builtins/__*tf* 与 glibc *f128 libm 符号，同源即位同）=====
+
+fn lo_hi(lo: u64, hi: u64) -> u128 {
+    (lo as u128) | ((hi as u128) << 64)
+}
+fn hi_lo(v: u128) -> (u64, u64) {
+    (v as u64, (v >> 64) as u64)
+}
+fn f128_of(lo: u64, hi: u64) -> f128 {
+    f128::from_bits(lo_hi(lo, hi))
+}
+fn pair_of(v: f128) -> (u64, u64) {
+    hi_lo(v.to_bits())
+}
+
+/// i128/u128 overflowing_add/sub/mul（Bin128 with_overflow 的 flag；写结果对到 out）
+extern "C-unwind" fn mirvm_bin128_ovf(
+    op: u64,
+    signed: bool,
+    alo: u64,
+    ahi: u64,
+    blo: u64,
+    bhi: u64,
+    out: *mut u64,
+) -> u64 {
+    let (r, ovf) = if signed {
+        let (x, y) = (lo_hi(alo, ahi) as i128, lo_hi(blo, bhi) as i128);
+        match op {
+            0 => x.overflowing_add(y),
+            1 => x.overflowing_sub(y),
+            _ => x.overflowing_mul(y),
+        }
+    } else {
+        let (x, y) = (lo_hi(alo, ahi), lo_hi(blo, bhi));
+        match op {
+            0 => (x.overflowing_add(y).0 as i128, x.overflowing_add(y).1),
+            1 => (x.overflowing_sub(y).0 as i128, x.overflowing_sub(y).1),
+            _ => (x.overflowing_mul(y).0 as i128, x.overflowing_mul(y).1),
+        }
+    };
+    let (lo, hi) = hi_lo(r as u128);
+    unsafe {
+        *out = lo;
+        *out.add(1) = hi;
+    }
+    ovf as u64
+}
+
+/// f128 四则（op: 0=add 1=sub 2=mul 3=rem(fmodf128) 4=div）
+extern "C-unwind" fn mirvm_f128_bin(
+    op: u64,
+    alo: u64,
+    ahi: u64,
+    blo: u64,
+    bhi: u64,
+    out: *mut u64,
+) {
+    let (a, b) = (f128_of(alo, ahi), f128_of(blo, bhi));
+    let r = match op {
+        0 => a + b,
+        1 => a - b,
+        2 => a * b,
+        4 => a / b,
+        _ => a % b,
+    };
+    let (lo, hi) = pair_of(r);
+    unsafe {
+        *out = lo;
+        *out.add(1) = hi;
+    }
+}
+
+/// f128 比较（cc: 0=Eq 1=Ne 2=Lt 3=Le 4=Gt 5=Ge；IEEE 语义 NaN 全 false 除 Ne）
+extern "C-unwind" fn mirvm_f128_cmp(cc: u64, alo: u64, ahi: u64, blo: u64, bhi: u64) -> u64 {
+    let (a, b) = (f128_of(alo, ahi), f128_of(blo, bhi));
+    match cc {
+        0 => (a == b) as u64,
+        1 => (a != b) as u64,
+        2 => (a < b) as u64,
+        3 => (a <= b) as u64,
+        4 => (a > b) as u64,
+        _ => (a >= b) as u64,
+    }
+}
+
+/// f128 单目（op: 0=neg；其余为一元数学族——glibc *f128 libm 符号）
+extern "C-unwind" fn mirvm_f128_un(op: u64, alo: u64, ahi: u64, out: *mut u64) {
+    let a = f128_of(alo, ahi);
+    let r = match op {
+        0 => -a,
+        1 => a.sqrt(),
+        2 => a.sin(),
+        3 => a.cos(),
+        4 => a.exp(),
+        5 => a.exp2(),
+        6 => a.ln(),
+        7 => a.log2(),
+        8 => a.log10(),
+        9 => a.abs(),
+        10 => a.floor(),
+        11 => a.ceil(),
+        12 => a.trunc(),
+        13 => a.round(),
+        _ => a.round_ties_even(),
+    };
+    let (lo, hi) = pair_of(r);
+    unsafe {
+        *out = lo;
+        *out.add(1) = hi;
+    }
+}
+
+/// f128 数学二元（op: 0=pow 1=powi 2=copysign 3=minnum 4=maxnum 5=fma(c 在 out[2..4]）
+extern "C-unwind" fn mirvm_f128_math(
+    op: u64,
+    alo: u64,
+    ahi: u64,
+    blo: u64,
+    bhi: u64,
+    clo: u64,
+    chi: u64,
+    out: *mut u64,
+) {
+    let (a, b, c) = (f128_of(alo, ahi), f128_of(blo, bhi), f128_of(clo, chi));
+    let r = match op {
+        0 => a.powf(b),
+        1 => a.powi(b as i32),
+        2 => a.copysign(b),
+        3 => a.min(b),
+        4 => a.max(b),
+        _ => a.mul_add(b, c),
+    };
+    let (lo, hi) = pair_of(r);
+    unsafe {
+        *out = lo;
+        *out.add(1) = hi;
+    }
+}
+
+/// 标量 → f128（kind: 0=f16 1=f32 2=f64 3..7=int(8/16/32/64 位, signed=kind-3 偶=signed?）
+/// kind: 0..2 = float 互转；3/4/5/6 = i8/u8..i64/u64 选（3=i8,4=u8,5=i16,6=u16,7=i32,8=u32,9=i64,10=u64）
+extern "C-unwind" fn mirvm_f128_from_scalar(kind: u64, v: u64, out: *mut u64) {
+    let r = match kind {
+        0 => f128::from(f16::from_bits(v as u16)),
+        1 => f128::from(f32::from_bits(v as u32)),
+        2 => f128::from(f64::from_bits(v)),
+        3 => f128::from(v as i8),
+        4 => f128::from(v as u8),
+        5 => f128::from(v as i16),
+        6 => f128::from(v as u16),
+        7 => f128::from(v as i32),
+        8 => f128::from(v as u32),
+        9 => f128::from(v as i64),
+        _ => f128::from(v),
+    };
+    let (lo, hi) = pair_of(r);
+    unsafe {
+        *out = lo;
+        *out.add(1) = hi;
+    }
+}
+
+/// f128 → 标量（kind 同上；float 互转位型 / int `as` 饱和语义）
+extern "C-unwind" fn mirvm_f128_to_scalar(kind: u64, alo: u64, ahi: u64) -> u64 {
+    let a = f128_of(alo, ahi);
+    match kind {
+        0 => (a as f16).to_bits() as u64,
+        1 => (a as f32).to_bits() as u64,
+        2 => (a as f64).to_bits(),
+        3 => (a as i8) as u8 as u64,
+        4 => (a as u8) as u64,
+        5 => (a as i16) as u16 as u64,
+        6 => (a as u16) as u64,
+        7 => (a as i32) as u32 as u64,
+        8 => (a as u32) as u64,
+        9 => (a as i64) as u64,
+        _ => a as u64,
+    }
+}
+
+/// i128/u128 ↔ f128（signed: 0=unsigned, 1=signed；方向 from: int→f128 / to: f128→int 饱和）
+extern "C-unwind" fn mirvm_f128_from_wide(signed: bool, lo: u64, hi: u64, out: *mut u64) {
+    let r = if signed {
+        (lo_hi(lo, hi) as i128) as f128
+    } else {
+        lo_hi(lo, hi) as f128
+    };
+    let (l, h) = pair_of(r);
+    unsafe {
+        *out = l;
+        *out.add(1) = h;
+    }
+}
+extern "C-unwind" fn mirvm_f128_to_wide(signed: bool, alo: u64, ahi: u64, out: *mut u64) {
+    let a = f128_of(alo, ahi);
+    let v: u128 = if signed {
+        (a as i128) as u128
+    } else {
+        a as u128
+    };
+    let (l, h) = hi_lo(v);
+    unsafe {
+        *out = l;
+        *out.add(1) = h;
+    }
+}
+
+/// float → i128/u128 饱和（Wide128ToFloat 的对侧；kind: 0=f16 1=f32 2=f64）
+extern "C-unwind" fn mirvm_float_to_wide(kind: u64, v: u64, signed: bool, out: *mut u64) {
+    let r: u128 = match (kind, signed) {
+        (0, true) => (f16::from_bits(v as u16) as i128) as u128,
+        (0, false) => f16::from_bits(v as u16) as u128,
+        (1, true) => (f32::from_bits(v as u32) as i128) as u128,
+        (1, false) => f32::from_bits(v as u32) as u128,
+        (2, true) => (f64::from_bits(v) as i128) as u128,
+        _ => f64::from_bits(v) as u128,
+    };
+    let (l, h) = hi_lo(r);
+    unsafe {
+        *out = l;
+        *out.add(1) = h;
+    }
+}
+
+/// i128/u128 → f16（Wide128ToFloat 的 f16 目标；f32/f64 目标走 CLIF fcvt）
+extern "C-unwind" fn mirvm_wide_to_f16(lo: u64, hi: u64, signed: bool) -> u64 {
+    let v = if signed {
+        (lo_hi(lo, hi) as i128) as f16
+    } else {
+        lo_hi(lo, hi) as f16
+    };
+    v.to_bits() as u64
+}
+
+// ===== f16 助手（interp 的宿主直算通道）=====
+
+/// f16 四则（op 同 mirvm_f128_bin；参数/返回 = f16 位型的 u64）
+extern "C-unwind" fn mirvm_f16_bin(op: u64, a: u64, b: u64) -> u64 {
+    let (x, y) = (f16::from_bits(a as u16), f16::from_bits(b as u16));
+    let r = match op {
+        0 => x + y,
+        1 => x - y,
+        2 => x * y,
+        _ => x % y,
+    };
+    r.to_bits() as u64
+}
+extern "C-unwind" fn mirvm_f16_cmp(cc: u64, a: u64, b: u64) -> u64 {
+    let (x, y) = (f16::from_bits(a as u16), f16::from_bits(b as u16));
+    match cc {
+        0 => (x == y) as u64,
+        1 => (x != y) as u64,
+        2 => (x < y) as u64,
+        3 => (x <= y) as u64,
+        4 => (x > y) as u64,
+        _ => (x >= y) as u64,
+    }
+}
+extern "C-unwind" fn mirvm_f16_neg(a: u64) -> u64 {
+    (-f16::from_bits(a as u16)).to_bits() as u64
+}
+/// f16 互转（kind: 1=→f32 2=→f64 3=f32→ 4=f64→）
+extern "C-unwind" fn mirvm_f16_cast(kind: u64, v: u64) -> u64 {
+    match kind {
+        1 => (f16::from_bits(v as u16) as f32).to_bits() as u64,
+        2 => (f16::from_bits(v as u16) as f64).to_bits(),
+        3 => (f32::from_bits(v as u32) as f16).to_bits() as u64,
+        _ => (f64::from_bits(v) as f16).to_bits() as u64,
+    }
+}
+/// f16 ↔ int（to: 0=i8 1=u8 2=i16 3=u16 4=i32 5=u32 6=i64 7=u64；from 同码）
+extern "C-unwind" fn mirvm_f16_to_int(kind: u64, a: u64) -> u64 {
+    let x = f16::from_bits(a as u16);
+    match kind {
+        0 => (x as i8) as u8 as u64,
+        1 => (x as u8) as u64,
+        2 => (x as i16) as u16 as u64,
+        3 => (x as u16) as u64,
+        4 => (x as i32) as u32 as u64,
+        5 => (x as u32) as u64,
+        6 => (x as i64) as u64,
+        _ => x as u64,
+    }
+}
+extern "C-unwind" fn mirvm_f16_from_int(kind: u64, v: u64) -> u64 {
+    let r = match kind {
+        0 => (v as i8) as f16,
+        1 => (v as u8) as f16,
+        2 => (v as i16) as f16,
+        3 => (v as u16) as f16,
+        4 => (v as i32) as f16,
+        5 => (v as u32) as f16,
+        6 => (v as i64) as f16,
+        _ => v as f16,
+    };
+    r.to_bits() as u64
+}
+
+// M5.4b-2：powi 走 compiler-builtins（Rust 的 powi 降到同一批符号）
+unsafe extern "C" {
+    fn __powidf2(x: f64, n: i32) -> f64;
+    fn __powisf2(x: f32, n: i32) -> f32;
+}
+
+/// M5.4b-2 libm 符号表（注册进 JITBuilder；interp 的 libm 宿主直算同批符号。
+/// libc crate 已不带数学函数绑定 → 直接 extern 声明取地址（进程本就链 libm）。
+mod libm_decls {
+    #![allow(dead_code)]
+    unsafe extern "C" {
+        pub fn sqrtf();
+        pub fn sqrt();
+        pub fn sinf();
+        pub fn sin();
+        pub fn cosf();
+        pub fn cos();
+        pub fn expf();
+        pub fn exp();
+        pub fn exp2f();
+        pub fn exp2();
+        pub fn logf();
+        pub fn log();
+        pub fn log2f();
+        pub fn log2();
+        pub fn log10f();
+        pub fn log10();
+        pub fn fabsf();
+        pub fn fabs();
+        pub fn floorf();
+        pub fn floor();
+        pub fn ceilf();
+        pub fn ceil();
+        pub fn truncf();
+        pub fn trunc();
+        pub fn roundf();
+        pub fn round();
+        pub fn rintf();
+        pub fn rint();
+        pub fn powf();
+        pub fn pow();
+        pub fn copysignf();
+        pub fn copysign();
+        pub fn fminf();
+        pub fn fmin();
+        pub fn fmaxf();
+        pub fn fmax();
+        pub fn fmodf();
+        pub fn fmod();
+    }
+}
+fn libm_syms() -> Vec<(&'static str, usize)> {
+    vec![
+        ("sqrtf", libm_decls::sqrtf as *const () as usize),
+        ("sqrt", libm_decls::sqrt as *const () as usize),
+        ("sinf", libm_decls::sinf as *const () as usize),
+        ("sin", libm_decls::sin as *const () as usize),
+        ("cosf", libm_decls::cosf as *const () as usize),
+        ("cos", libm_decls::cos as *const () as usize),
+        ("expf", libm_decls::expf as *const () as usize),
+        ("exp", libm_decls::exp as *const () as usize),
+        ("exp2f", libm_decls::exp2f as *const () as usize),
+        ("exp2", libm_decls::exp2 as *const () as usize),
+        ("logf", libm_decls::logf as *const () as usize),
+        ("log", libm_decls::log as *const () as usize),
+        ("log2f", libm_decls::log2f as *const () as usize),
+        ("log2", libm_decls::log2 as *const () as usize),
+        ("log10f", libm_decls::log10f as *const () as usize),
+        ("log10", libm_decls::log10 as *const () as usize),
+        ("fabsf", libm_decls::fabsf as *const () as usize),
+        ("fabs", libm_decls::fabs as *const () as usize),
+        ("floorf", libm_decls::floorf as *const () as usize),
+        ("floor", libm_decls::floor as *const () as usize),
+        ("ceilf", libm_decls::ceilf as *const () as usize),
+        ("ceil", libm_decls::ceil as *const () as usize),
+        ("truncf", libm_decls::truncf as *const () as usize),
+        ("trunc", libm_decls::trunc as *const () as usize),
+        ("roundf", libm_decls::roundf as *const () as usize),
+        ("round", libm_decls::round as *const () as usize),
+        ("rintf", libm_decls::rintf as *const () as usize),
+        ("rint", libm_decls::rint as *const () as usize),
+        ("powf", libm_decls::powf as *const () as usize),
+        ("pow", libm_decls::pow as *const () as usize),
+        ("copysignf", libm_decls::copysignf as *const () as usize),
+        ("copysign", libm_decls::copysign as *const () as usize),
+        ("fminf", libm_decls::fminf as *const () as usize),
+        ("fmin", libm_decls::fmin as *const () as usize),
+        ("fmaxf", libm_decls::fmaxf as *const () as usize),
+        ("fmax", libm_decls::fmax as *const () as usize),
+        ("fmodf", libm_decls::fmodf as *const () as usize),
+        ("fmod", libm_decls::fmod as *const () as usize),
+    ]
 }
 
 // ===== 准入（M5.3 v1 标量子集 + M5.4a 内存操作数；拒绝 = 永久维持解释）=====
@@ -145,16 +572,32 @@ fn rvalue_ok(rv: &ir::Rvalue) -> bool {
     match rv {
         R::Use(a) | R::NotBits(a) | R::NotBool(a) | R::Neg(a) => operand_ok(a),
         R::Cast { a, .. } => operand_ok(a),
-        // Div/Rem 有除零 abort 路径（v2 与助手口径一并接），先拒
-        R::IntBin { op, a, b, .. } => {
-            !matches!(op, IntBinOp::Div | IntBinOp::Rem) && operand_ok(a) && operand_ok(b)
-        }
+        // M5.4b-1：Div/Rem 已接（零检 + signed MIN/-1 分支特判）
+        R::IntBin { a, b, .. } => operand_ok(a) && operand_ok(b),
         R::IntCmp { a, b, .. } => operand_ok(a) && operand_ok(b),
         // M5.4a 内存/地址族
         R::Ref(pe) => place_ok(pe),
         R::PtrOffset { ptr, count, .. } => operand_ok(ptr) && operand_ok(count),
         R::PtrDiff { a, b, stride } => *stride != 0 && operand_ok(a) && operand_ok(b),
         R::UMax { a, b } => operand_ok(a) && operand_ok(b),
+        // M5.4b-1 标量补面
+        R::IntSat { a, b, .. } => operand_ok(a) && operand_ok(b),
+        R::BitUn { a, .. } => operand_ok(a),
+        R::MemCmp { a, b, n } => operand_ok(a) && operand_ok(b) && operand_ok(n),
+        R::AtomicLoad { addr, .. } => operand_ok(addr),
+        // M5.4b-2 浮点（f16 也收，走助手）
+        R::FloatBin { a, b, .. } => operand_ok(a) && operand_ok(b),
+        R::FloatCmp { a, b, .. } => operand_ok(a) && operand_ok(b),
+        R::FloatNeg { a, .. } => operand_ok(a),
+        R::FloatCast { a, .. } => operand_ok(a),
+        R::FloatToInt { a, .. } => operand_ok(a),
+        R::IntToFloat { a, .. } => operand_ok(a),
+        R::MathUn { a, .. } => operand_ok(a),
+        R::MathBin { a, b, .. } => operand_ok(a) && operand_ok(b),
+        R::MathFma { a, b, c, .. } => operand_ok(a) && operand_ok(b) && operand_ok(c),
+        // M5.4b-3 f128/128 位比较（place 通道）
+        R::F128Cmp { a, b, .. } => place_ok(a) && place_ok(b),
+        R::Cmp128 { a, b, .. } => place_ok(a) && place_ok(b),
         _ => false,
     }
 }
@@ -203,6 +646,65 @@ fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
                 Stmt::Copy { dst, src, .. } => place_ok(dst) && place_ok(src),
                 Stmt::RepeatScalar { dst, val, .. } => place_ok(dst) && operand_ok(val),
                 Stmt::RepeatBytes { first, .. } => place_ok(first),
+                // M5.4b-1：MemCopy/MemSet/Volatile/原子/栅栏
+                Stmt::MemCopy {
+                    dst, src, count, ..
+                } => operand_ok(dst) && operand_ok(src) && operand_ok(count),
+                Stmt::MemSet {
+                    dst, val, count, ..
+                } => operand_ok(dst) && operand_ok(val) && operand_ok(count),
+                Stmt::VolatileLoad { addr, dst, .. } => operand_ok(addr) && place_ok(dst),
+                Stmt::VolatileStore { addr, src, .. } => operand_ok(addr) && place_ok(src),
+                Stmt::AtomicStore { addr, val, .. } => operand_ok(addr) && operand_ok(val),
+                Stmt::AtomicRmw { addr, val, dst, .. } => {
+                    operand_ok(addr) && operand_ok(val) && mem_place_ok(dst)
+                }
+                Stmt::AtomicCxchg {
+                    addr,
+                    expected,
+                    new,
+                    dst_val,
+                    dst_ok,
+                    ..
+                } => {
+                    operand_ok(addr)
+                        && operand_ok(expected)
+                        && operand_ok(new)
+                        && mem_place_ok(dst_val)
+                        && mem_place_ok(dst_ok)
+                }
+                Stmt::Fence { .. } => true,
+                // M5.4b-3：128 位整族 + f128 宽通道（全有去处——CLIF I128 或助手）
+                Stmt::Bin128 { a, b, dst, .. } => {
+                    place_ok(a)
+                        && match b {
+                            ir::Bin128Rhs::Wide(w) => place_ok(w),
+                            ir::Bin128Rhs::Scalar(o) => operand_ok(o),
+                        }
+                        && place_ok(dst)
+                }
+                Stmt::Bit128 { src, dst, .. } => place_ok(src) && place_ok(dst),
+                Stmt::Bit128Count { src, dst, .. } => place_ok(src) && mem_place_ok(dst),
+                Stmt::NicheDiscr128 { tag, dst, .. } => place_ok(tag) && mem_place_ok(dst),
+                Stmt::Wide128ToFloat { src, dst, .. } => place_ok(src) && mem_place_ok(dst),
+                Stmt::FloatToWide128 { src, dst, .. } => operand_ok(src) && place_ok(dst),
+                Stmt::F128Bin { a, b, dst, .. } => place_ok(a) && place_ok(b) && place_ok(dst),
+                Stmt::F128MathBin { a, b, dst, .. } => {
+                    place_ok(a)
+                        && match b {
+                            ir::F128Rhs::Wide(w) => place_ok(w),
+                            ir::F128Rhs::Scalar(o) => operand_ok(o),
+                        }
+                        && place_ok(dst)
+                }
+                Stmt::F128Un { a, dst, .. } => place_ok(a) && place_ok(dst),
+                Stmt::F128Fma { a, b, c, dst } => {
+                    place_ok(a) && place_ok(b) && place_ok(c) && place_ok(dst)
+                }
+                Stmt::F128FromScalar { src, dst, .. } => operand_ok(src) && place_ok(dst),
+                Stmt::F128ToScalar { src, dst, .. } => place_ok(src) && mem_place_ok(dst),
+                Stmt::F128FromWideInt { src, dst, .. } => place_ok(src) && place_ok(dst),
+                Stmt::F128ToWideInt { src, dst, .. } => place_ok(src) && place_ok(dst),
                 _ => false,
             };
             if !ok {
@@ -216,7 +718,8 @@ fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
                     // 判别值必须落在 u64（宽度 ≤64 时天然成立；防御断言）
                     operand_ok(op) && targets.iter().all(|(v, _)| *v <= u64::MAX as u128)
                 }
-                SwitchDiscr::Wide(_) => false,
+                // M5.4b-3：128 位判别通道已接
+                SwitchDiscr::Wide(pe) => place_ok(pe),
             },
             Terminator::Call {
                 callee,
@@ -253,6 +756,13 @@ struct Compiler {
     /// M5.4a：Copy/帧清零的宿主 memmove/memset 通道
     memmove: ClifFuncId,
     memset: ClifFuncId,
+    /// M5.4b-1：MemCmp（compare_bytes intrinsic）
+    memcmp: ClifFuncId,
+    /// M5.4b-1：除零诊断退出（interp engine_abort 同文案同码）
+    div_zero: ClifFuncId,
+    /// M5.4b-1：volatile 读/写（interp opaque 字节载体同一实现）
+    volatile_load: ClifFuncId,
+    volatile_store: ClifFuncId,
     /// 本批 (clif id, unwind info)——finalize 后统一注册 eh_frame
     pending_unwind: Vec<(ClifFuncId, UnwindInfo)>,
 }
@@ -270,8 +780,36 @@ impl Compiler {
         let mut jb = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         jb.symbol("mirvm_c2i", mirvm_c2i as *const u8);
         jb.symbol("mirvm_jit_unreachable", mirvm_jit_unreachable as *const u8);
+        jb.symbol("mirvm_jit_div_zero", mirvm_jit_div_zero as *const u8);
+        jb.symbol("mirvm_volatile_load", mirvm_volatile_load as *const u8);
+        jb.symbol("mirvm_volatile_store", mirvm_volatile_store as *const u8);
+        // M5.4b-3 助手注册表
+        jb.symbol("mirvm_bin128_ovf", mirvm_bin128_ovf as *const u8);
+        jb.symbol("mirvm_f128_bin", mirvm_f128_bin as *const u8);
+        jb.symbol("mirvm_f128_cmp", mirvm_f128_cmp as *const u8);
+        jb.symbol("mirvm_f128_un", mirvm_f128_un as *const u8);
+        jb.symbol("mirvm_f128_math", mirvm_f128_math as *const u8);
+        jb.symbol(
+            "mirvm_f128_from_scalar",
+            mirvm_f128_from_scalar as *const u8,
+        );
+        jb.symbol("mirvm_f128_to_scalar", mirvm_f128_to_scalar as *const u8);
+        jb.symbol("mirvm_f128_from_wide", mirvm_f128_from_wide as *const u8);
+        jb.symbol("mirvm_f128_to_wide", mirvm_f128_to_wide as *const u8);
+        jb.symbol("mirvm_float_to_wide", mirvm_float_to_wide as *const u8);
+        jb.symbol("mirvm_wide_to_f16", mirvm_wide_to_f16 as *const u8);
+        jb.symbol("mirvm_f16_bin", mirvm_f16_bin as *const u8);
+        jb.symbol("mirvm_f16_cmp", mirvm_f16_cmp as *const u8);
+        jb.symbol("mirvm_f16_neg", mirvm_f16_neg as *const u8);
+        jb.symbol("mirvm_f16_cast", mirvm_f16_cast as *const u8);
+        jb.symbol("mirvm_f16_to_int", mirvm_f16_to_int as *const u8);
+        jb.symbol("mirvm_f16_from_int", mirvm_f16_from_int as *const u8);
         jb.symbol("memmove", libc::memmove as *const u8);
         jb.symbol("memset", libc::memset as *const u8);
+        jb.symbol("memcmp", libc::memcmp as *const u8);
+        for (n, p) in libm_syms() {
+            jb.symbol(n, p as *const u8);
+        }
         let mut module = JITModule::new(jb);
 
         let mut sig_c2i = module.make_signature();
@@ -298,6 +836,25 @@ impl Compiler {
         let memset = module
             .declare_function("memset", Linkage::Import, &sig_mm)
             .unwrap();
+        // memcmp(s1, s2, n) -> c_int（i32！I64 返回声明会把 sextend.i64 喂给
+        // verifier——diff_cargo ecosystem 实测抓获）
+        let mut sig_memcmp = module.make_signature();
+        for _ in 0..3 {
+            sig_memcmp.params.push(AbiParam::new(types::I64));
+        }
+        sig_memcmp.returns.push(AbiParam::new(types::I32));
+        let memcmp = module
+            .declare_function("memcmp", Linkage::Import, &sig_memcmp)
+            .unwrap();
+        let div_zero = module
+            .declare_function("mirvm_jit_div_zero", Linkage::Import, &sig_unr)
+            .unwrap();
+        let volatile_load = module
+            .declare_function("mirvm_volatile_load", Linkage::Import, &sig_mm)
+            .unwrap();
+        let volatile_store = module
+            .declare_function("mirvm_volatile_store", Linkage::Import, &sig_mm)
+            .unwrap();
 
         Compiler {
             shared,
@@ -307,6 +864,10 @@ impl Compiler {
             unreachable,
             memmove,
             memset,
+            memcmp,
+            div_zero,
+            volatile_load,
+            volatile_store,
             pending_unwind: Vec::new(),
         }
     }
@@ -351,15 +912,23 @@ impl Compiler {
         }
         for (c, cn, cret) in callees {
             if jit.slots_fast[c as usize].load(Ordering::Acquire) == 0 {
-                let tramp = self.define_c2i_trampoline(c, cn, cret);
-                jit.slots_fast[c as usize].store(tramp as u64, Ordering::Release);
+                if let Some(tramp) = self.define_c2i_trampoline(c, cn, cret) {
+                    jit.slots_fast[c as usize].store(tramp as u64, Ordering::Release);
+                }
             }
         }
 
-        let fast_id = self.define_fast(func, body, nparams, has_ret);
-        let packed_id = self.define_packed(func, body, nparams, has_ret, fast_id);
-
-        self.module.finalize_definitions().unwrap();
+        // 静默失败纪律（m5.3-design D4 / 防静默错值：编译失败 = 维持解释，绝不向
+        // stderr 吐 panic——差分 oracle 的 stderr 逐字节比对会被线程 id 污染，实测抓获）
+        let Some(fast_id) = self.define_fast(func, body, nparams, has_ret) else {
+            return;
+        };
+        let Some(packed_id) = self.define_packed(func, body, nparams, has_ret, fast_id) else {
+            return;
+        };
+        if self.module.finalize_definitions().is_err() {
+            return;
+        }
         self.register_pending_eh_frames();
 
         let fast = self.module.get_finalized_function(fast_id) as u64;
@@ -370,7 +939,8 @@ impl Compiler {
     }
 
     /// c2i 蹦床：fast 签名，打包实参进栈上数组，调 mirvm_c2i 回解释器。
-    fn define_c2i_trampoline(&mut self, target: u32, nparams: usize, has_ret: bool) -> *const u8 {
+    /// 任何编译失败 = None（调用方跳过本槽预热，静默维持解释）。
+    fn define_c2i_trampoline(&mut self, target: u32, nparams: usize, has_ret: bool) -> Option<*const u8> {
         let sig = self.fast_sig(nparams, has_ret);
         let id = self
             .module
@@ -409,29 +979,35 @@ impl Compiler {
             b.seal_all_blocks();
             b.finalize();
         }
-        self.module.define_function(id, &mut cctx).unwrap();
+        if let Err(e) = self.module.define_function(id, &mut cctx) {
+            if std::env::var_os("MIRVM_JIT_DEBUG").is_some() {
+                eprintln!("mirvm-jit-debug: define_function 失败: {e}");
+            }
+            return None;
+        }
         if let Some(ui) = cctx
             .compiled_code()
-            .unwrap()
-            .create_unwind_info(self.module.isa())
-            .unwrap()
+            .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten())
         {
             self.pending_unwind.push((id, ui));
         }
         self.module.clear_context(&mut cctx);
-        self.module.finalize_definitions().unwrap();
+        if self.module.finalize_definitions().is_err() {
+            return None;
+        }
         self.register_pending_eh_frames();
-        self.module.get_finalized_function(id)
+        Some(self.module.get_finalized_function(id))
     }
 
     /// fast 本体：字节码块 → CLIF；槽 → SSA 变量（I64 零扩到宽不变量）。
+    /// 任何编译失败 = None（静默维持解释——绝不 panic 污染 stderr 差分）。
     fn define_fast(
         &mut self,
         func: u32,
         body: &ir::FuncBody,
         nparams: usize,
         has_ret: bool,
-    ) -> ClifFuncId {
+    ) -> Option<ClifFuncId> {
         let sig = self.fast_sig(nparams, has_ret);
         let id = self
             .module
@@ -462,22 +1038,29 @@ impl Compiler {
                 c2i: self.c2i,
                 memmove: self.memmove,
                 memset: self.memset,
+                memcmp: self.memcmp,
+                div_zero: self.div_zero,
+                volatile_load: self.volatile_load,
+                volatile_store: self.volatile_store,
             };
             tr.build(func, body, has_ret);
             b.seal_all_blocks();
             b.finalize();
         }
-        self.module.define_function(id, &mut cctx).unwrap();
+        if let Err(e) = self.module.define_function(id, &mut cctx) {
+            if std::env::var_os("MIRVM_JIT_DEBUG").is_some() {
+                eprintln!("mirvm-jit-debug: define_function 失败: {e}");
+            }
+            return None;
+        }
         if let Some(ui) = cctx
             .compiled_code()
-            .unwrap()
-            .create_unwind_info(self.module.isa())
-            .unwrap()
+            .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten())
         {
             self.pending_unwind.push((id, ui));
         }
         self.module.clear_context(&mut cctx);
-        id
+        Some(id)
     }
 
     /// packed 入口：`(args: *const u64, ret: *mut u64)`——interp i2c 一跳。
@@ -488,7 +1071,7 @@ impl Compiler {
         nparams: usize,
         has_ret: bool,
         fast: ClifFuncId,
-    ) -> ClifFuncId {
+    ) -> Option<ClifFuncId> {
         let _ = body;
         let mut sig = self.module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
@@ -527,17 +1110,20 @@ impl Compiler {
             b.seal_all_blocks();
             b.finalize();
         }
-        self.module.define_function(id, &mut cctx).unwrap();
+        if let Err(e) = self.module.define_function(id, &mut cctx) {
+            if std::env::var_os("MIRVM_JIT_DEBUG").is_some() {
+                eprintln!("mirvm-jit-debug: define_function 失败: {e}");
+            }
+            return None;
+        }
         if let Some(ui) = cctx
             .compiled_code()
-            .unwrap()
-            .create_unwind_info(self.module.isa())
-            .unwrap()
+            .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten())
         {
             self.pending_unwind.push((id, ui));
         }
         self.module.clear_context(&mut cctx);
-        id
+        Some(id)
     }
 
     /// spike5 管线：FrameTable → eh_frame 字节 → 逐 FDE __register_frame（libgcc
@@ -595,14 +1181,18 @@ struct Translator<'a, 'b> {
     module: &'a mut JITModule,
     b: &'a mut FunctionBuilder<'b>,
     vars: std::collections::HashMap<u32, Variable>,
-    /// 落帧 offset 集（analyze_frame 产出）
-    frame_offs: std::collections::HashSet<u32>,
+    /// 落帧 offset 集（analyze_frame 产出，区间模型）
+    frame_offs: FrameMap,
     /// guest 帧栈槽（frame_offs 非空时创建；frame_size 字节、frame_align 对齐）
     frame_ss: Option<StackSlot>,
     unreachable: ClifFuncId,
     c2i: ClifFuncId,
     memmove: ClifFuncId,
     memset: ClifFuncId,
+    memcmp: ClifFuncId,
+    div_zero: ClifFuncId,
+    volatile_load: ClifFuncId,
+    volatile_store: ClifFuncId,
 }
 
 impl Translator<'_, '_> {
@@ -645,7 +1235,7 @@ impl Translator<'_, '_> {
 
     /// 读槽（分派：落帧 → 栈槽 load + 零扩；SSA → use_var）
     fn read_slot(&mut self, s: Slot) -> Value {
-        if self.frame_offs.contains(&s.off) {
+        if self.frame_offs.contains(s.off) {
             let ss = self.frame_ss.expect("落帧 offset 必有帧槽");
             let v = self
                 .b
@@ -665,7 +1255,7 @@ impl Translator<'_, '_> {
     /// 写槽（分派：落帧 → 掩宽 + 窄化 + 栈槽 store；SSA → 掩宽 def_var）
     fn write_slot(&mut self, s: Slot, v: Value) {
         let masked = self.mask_val(v, s.width);
-        if self.frame_offs.contains(&s.off) {
+        if self.frame_offs.contains(s.off) {
             let ss = self.frame_ss.expect("落帧 offset 必有帧槽");
             let n = if s.width == Width::W64 {
                 masked
@@ -757,6 +1347,196 @@ impl Translator<'_, '_> {
         self.b.ins().call(fref, &[fv]);
         self.b.ins().trap(TrapCode::user(1).unwrap());
         self.b.switch_to_block(f_blk);
+    }
+
+    /// M5.4b-1 除零分支：cond 真 → 调 mirvm_jit_div_zero（interp 同文案同码退出）。
+    /// wide=false 64 位（kind 0/1），wide=true 128 位（kind 2/3）。
+    fn div_zero_if(&mut self, cond: Value, is_rem: bool, wide: bool) {
+        let t_blk = self.b.create_block();
+        let f_blk = self.b.create_block();
+        self.b.ins().brif(cond, t_blk, &[], f_blk, &[]);
+        self.b.switch_to_block(t_blk);
+        let fref = self.module.declare_func_in_func(self.div_zero, self.b.func);
+        let kind = match (wide, is_rem) {
+            (false, false) => 0,
+            (false, true) => 1,
+            (true, false) => 2,
+            (true, true) => 3,
+        };
+        let kv = self.b.ins().iconst(types::I64, kind);
+        self.b.ins().call(fref, &[kv]);
+        self.b.ins().trap(TrapCode::user(1).unwrap());
+        self.b.switch_to_block(f_blk);
+    }
+
+    /// 标量落点写（Slot → write_slot；Mem → 掩宽窄化 store）。
+    fn write_scalar_place(&mut self, sp: &ScalarPlace, v: Value) {
+        match sp {
+            ScalarPlace::Slot(s) => {
+                let s = *s;
+                self.write_slot(s, v);
+            }
+            ScalarPlace::Mem { expr, width } => {
+                let a = self.place_addr(expr);
+                let masked = self.mask_val(v, *width);
+                let n = if *width == Width::W64 {
+                    masked
+                } else {
+                    self.b.ins().ireduce(Self::narrow_ty(*width), masked)
+                };
+                self.b.ins().store(MemFlagsData::trusted(), n, a, 0);
+            }
+        }
+    }
+
+    // ===== M5.4b-2 浮点通道（值 = I64 槽里的位型，与 interp 同一表示）=====
+
+    fn float_ty(w: ir::FloatW) -> cranelift_codegen::ir::Type {
+        match w {
+            ir::FloatW::F32 => types::F32,
+            ir::FloatW::F64 => types::F64,
+            ir::FloatW::F16 => unreachable!("f16 走助手（M5.4b-3）"),
+        }
+    }
+
+    /// 槽位型 → 浮点寄存器值（bitcast；F32 先 ireduce）
+    fn as_float(&mut self, v: Value, w: ir::FloatW) -> Value {
+        match w {
+            ir::FloatW::F32 => {
+                let n = self.b.ins().ireduce(types::I32, v);
+                self.b.ins().bitcast(types::F32, MemFlagsData::trusted(), n)
+            }
+            ir::FloatW::F64 => self.b.ins().bitcast(types::F64, MemFlagsData::trusted(), v),
+            ir::FloatW::F16 => unreachable!("f16 走助手（M5.4b-3）"),
+        }
+    }
+
+    /// 浮点寄存器值 → 槽位型（bitcast 回来；F32 再 uextend）
+    fn as_bits(&mut self, v: Value, w: ir::FloatW) -> Value {
+        match w {
+            ir::FloatW::F32 => {
+                let n = self.b.ins().bitcast(types::I32, MemFlagsData::trusted(), v);
+                self.b.ins().uextend(types::I64, n)
+            }
+            ir::FloatW::F64 => self.b.ins().bitcast(types::I64, MemFlagsData::trusted(), v),
+            ir::FloatW::F16 => unreachable!("f16 走助手（M5.4b-3）"),
+        }
+    }
+
+    /// 一元/二元 libm 调用（按宽选 f32/f64 后缀符号；interp 的 libm 通道同源）
+    fn call_libm_un(&mut self, name: &str, a: Value, w: ir::FloatW) -> Value {
+        let t = Self::float_ty(w);
+        let fname = format!("{}{}", name, if t == types::F32 { "f" } else { "" });
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(t));
+        sig.returns.push(AbiParam::new(t));
+        let fid = self
+            .module
+            .declare_function(&fname, Linkage::Import, &sig)
+            .unwrap_or_else(|_| panic!("libm 符号缺失: {fname}"));
+        let fref = self.module.declare_func_in_func(fid, self.b.func);
+        let call = self.b.ins().call(fref, &[a]);
+        self.b.inst_results(call)[0]
+    }
+
+    fn call_libm_bin(&mut self, name: &str, a: Value, b: Value, w: ir::FloatW) -> Value {
+        let t = Self::float_ty(w);
+        let fname = format!("{}{}", name, if t == types::F32 { "f" } else { "" });
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(t));
+        sig.params.push(AbiParam::new(t));
+        sig.returns.push(AbiParam::new(t));
+        let fid = self
+            .module
+            .declare_function(&fname, Linkage::Import, &sig)
+            .unwrap_or_else(|_| panic!("libm 符号缺失: {fname}"));
+        let fref = self.module.declare_func_in_func(fid, self.b.func);
+        let call = self.b.ins().call(fref, &[a, b]);
+        self.b.inst_results(call)[0]
+    }
+
+    fn call_powi(&mut self, a: Value, n_i32: Value, w: ir::FloatW) -> Value {
+        let t = Self::float_ty(w);
+        let fname = if t == types::F32 {
+            "__powisf2"
+        } else {
+            "__powidf2"
+        };
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(t));
+        sig.params.push(AbiParam::new(types::I32));
+        sig.returns.push(AbiParam::new(t));
+        let fid = self
+            .module
+            .declare_function(fname, Linkage::Import, &sig)
+            .expect("compiler-builtins powi 符号缺失");
+        let fref = self.module.declare_func_in_func(fid, self.b.func);
+        let call = self.b.ins().call(fref, &[a, n_i32]);
+        self.b.inst_results(call)[0]
+    }
+
+    // ===== M5.4b-3 宽值通道（16 字节 place ↔ (lo,hi) 对/I128）=====
+
+    fn read_wide(&mut self, pe: &ir::PlaceExpr) -> (Value, Value) {
+        let a = self.place_addr(pe);
+        let lo = self.b.ins().load(types::I64, MemFlagsData::trusted(), a, 0);
+        let hi = self.b.ins().load(types::I64, MemFlagsData::trusted(), a, 8);
+        (lo, hi)
+    }
+
+    fn write_wide(&mut self, pe: &ir::PlaceExpr, lo: Value, hi: Value) {
+        let a = self.place_addr(pe);
+        self.b.ins().store(MemFlagsData::trusted(), lo, a, 0);
+        self.b.ins().store(MemFlagsData::trusted(), hi, a, 8);
+    }
+
+    fn i128_of(&mut self, lo: Value, hi: Value) -> Value {
+        self.b.ins().iconcat(lo, hi)
+    }
+
+    fn iconst128(&mut self, v: u128) -> Value {
+        let lo = self.b.ins().iconst(types::I64, v as u64 as i64);
+        let hi = self.b.ins().iconst(types::I64, (v >> 64) as u64 as i64);
+        self.b.ins().iconcat(lo, hi)
+    }
+
+    /// 16 字节 out 型助手调用：栈槽接 (lo,hi) 结果并写回 place。
+    fn call_out128(&mut self, name: &str, args: &[Value], dst: &ir::PlaceExpr) {
+        let ss =
+            self.b
+                .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 16, 4));
+        let outp = self.b.ins().stack_addr(types::I64, ss, 0);
+        let mut a: Vec<Value> = args.to_vec();
+        a.push(outp);
+        let mut sig = self.module.make_signature();
+        for _ in &a {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        let fid = self
+            .module
+            .declare_function(name, Linkage::Import, &sig)
+            .unwrap_or_else(|_| panic!("助手符号缺失: {name}"));
+        let fref = self.module.declare_func_in_func(fid, self.b.func);
+        self.b.ins().call(fref, &a);
+        let lo = self.b.ins().stack_load(types::I64, ss, 0);
+        let hi = self.b.ins().stack_load(types::I64, ss, 8);
+        self.write_wide(dst, lo, hi);
+    }
+
+    /// 单返回 u64 的助手调用。
+    fn call_helper1(&mut self, name: &str, args: &[Value]) -> Value {
+        let mut sig = self.module.make_signature();
+        for _ in args {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        sig.returns.push(AbiParam::new(types::I64));
+        let fid = self
+            .module
+            .declare_function(name, Linkage::Import, &sig)
+            .unwrap_or_else(|_| panic!("助手符号缺失: {name}"));
+        let fref = self.module.declare_func_in_func(fid, self.b.func);
+        let call = self.b.ins().call(fref, args);
+        self.b.inst_results(call)[0]
     }
 
     fn operand(&mut self, op: &Operand) -> (Value, Width) {
@@ -918,6 +1698,498 @@ impl Translator<'_, '_> {
                 let src = self.place_addr(first);
                 self.repeat_loop(src, src, *count, *elem_size, true);
             }
+            // ===== M5.4b-1 内存/原子补面 =====
+            Stmt::MemCopy {
+                dst,
+                src,
+                count,
+                elem_size,
+                overlap,
+            } => {
+                // intrinsic copy/copy_nonoverlapping：memmove 通道（overlap 为真时
+                // 与 interp 的 ptr::copy 同义；非重叠场景 memcpy 结果相同）
+                let _ = overlap;
+                let (d, _) = self.operand(dst);
+                let (s, _) = self.operand(src);
+                let (c, _) = self.operand(count);
+                let es = self.b.ins().iconst(types::I64, *elem_size as i64);
+                let n = self.b.ins().imul(c, es);
+                let fref = self.module.declare_func_in_func(self.memmove, self.b.func);
+                self.b.ins().call(fref, &[d, s, n]);
+            }
+            Stmt::MemSet {
+                dst,
+                val,
+                count,
+                elem_size,
+            } => {
+                let (d, _) = self.operand(dst);
+                let (v, _) = self.operand(val);
+                let (c, _) = self.operand(count);
+                let es = self.b.ins().iconst(types::I64, *elem_size as i64);
+                let n = self.b.ins().imul(c, es);
+                let fref = self.module.declare_func_in_func(self.memset, self.b.func);
+                self.b.ins().call(fref, &[d, v, n]);
+            }
+            Stmt::VolatileLoad { addr, dst, size } => {
+                let (p, _) = self.operand(addr);
+                let d = self.place_addr(dst);
+                let n = self.b.ins().iconst(types::I64, i64::from(*size));
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.volatile_load, self.b.func);
+                self.b.ins().call(fref, &[p, d, n]);
+            }
+            Stmt::VolatileStore { addr, src, size } => {
+                let (p, _) = self.operand(addr);
+                let s = self.place_addr(src);
+                let n = self.b.ins().iconst(types::I64, i64::from(*size));
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.volatile_store, self.b.func);
+                self.b.ins().call(fref, &[p, s, n]);
+            }
+            Stmt::AtomicStore { addr, val, order } => {
+                let (p, _) = self.operand(addr);
+                let (v, w) = self.operand(val);
+                let masked = self.mask_val(v, w);
+                let n = if w == Width::W64 {
+                    masked
+                } else {
+                    self.b.ins().ireduce(Self::narrow_ty(w), masked)
+                };
+                let _ = order; // CLIF 原子恒 SeqCst（合规强化，见 R::AtomicLoad 注）
+                self.b.ins().atomic_store(MemFlagsData::trusted(), n, p);
+            }
+            Stmt::AtomicRmw {
+                op,
+                addr,
+                val,
+                dst,
+                order,
+            } => {
+                let (p, _) = self.operand(addr);
+                let (v, w) = self.operand(val);
+                let masked = self.mask_val(v, w);
+                let n = if w == Width::W64 {
+                    masked
+                } else {
+                    self.b.ins().ireduce(Self::narrow_ty(w), masked)
+                };
+                let _ = order;
+                let old = self.b.ins().atomic_rmw(
+                    Self::narrow_ty(w),
+                    MemFlagsData::trusted(),
+                    clif_rmw_op(*op),
+                    p,
+                    n,
+                );
+                let old = if w == Width::W64 {
+                    old
+                } else {
+                    self.b.ins().uextend(types::I64, old)
+                };
+                self.write_scalar_place(dst, old);
+            }
+            Stmt::AtomicCxchg {
+                addr,
+                expected,
+                new,
+                dst_val,
+                dst_ok,
+                weak,
+                succ,
+                fail,
+            } => {
+                // CLIF atomic_cas = strong CAS（weak 用 strong 合规：weak 允许假失败
+                // 但不禁止成功）；succ/fail 序 → SeqCst（合规强化）
+                let (p, _) = self.operand(addr);
+                let (e, w) = self.operand(expected);
+                let (n, _) = self.operand(new);
+                let e_masked = self.mask_val(e, w);
+                let n_masked = self.mask_val(n, w);
+                let (e_n, n_n) = if w == Width::W64 {
+                    (e_masked, n_masked)
+                } else {
+                    (
+                        self.b.ins().ireduce(Self::narrow_ty(w), e_masked),
+                        self.b.ins().ireduce(Self::narrow_ty(w), n_masked),
+                    )
+                };
+                let _ = (weak, succ, fail);
+                let old = self
+                    .b
+                    .ins()
+                    .atomic_cas(MemFlagsData::trusted(), p, e_n, n_n);
+                let old_ext = if w == Width::W64 {
+                    old
+                } else {
+                    self.b.ins().uextend(types::I64, old)
+                };
+                // ok = (old == expected)（按宽掩后比较，与 interp 的 compare_exchange 同口径）
+                let ok8 = self.b.ins().icmp(IntCC::Equal, old_ext, e_masked);
+                let ok = self.b.ins().uextend(types::I64, ok8);
+                self.write_scalar_place(dst_val, old_ext);
+                self.write_scalar_place(dst_ok, ok);
+            }
+            Stmt::Fence {
+                single_thread,
+                order,
+                ..
+            } => {
+                if !single_thread {
+                    let _ = order;
+                    self.b.ins().fence();
+                }
+                // single_thread = compiler fence（无指令，编译屏障在 JIT 码内天然成立）
+            }
+            // ===== M5.4b-3 128 位整族 =====
+            Stmt::Bin128 {
+                op,
+                signed,
+                a,
+                b,
+                dst,
+                with_overflow,
+            } => {
+                let (alo, ahi) = self.read_wide(a);
+                let (blo, bhi) = match b {
+                    ir::Bin128Rhs::Wide(w) => self.read_wide(w),
+                    ir::Bin128Rhs::Scalar(o) => {
+                        let (v, _) = self.operand(o);
+                        let z = self.b.ins().iconst(types::I64, 0);
+                        (v, z)
+                    }
+                };
+                // with_overflow 的 Add/Sub/Mul：helper（Rust overflowing_* 精确语义）
+                if *with_overflow && matches!(op, IntBinOp::Add | IntBinOp::Sub | IntBinOp::Mul) {
+                    let op_idx = match op {
+                        IntBinOp::Add => 0,
+                        IntBinOp::Sub => 1,
+                        _ => 2,
+                    };
+                    let s = self.b.ins().iconst(types::I64, *signed as i64);
+                    let oi = self.b.ins().iconst(types::I64, op_idx);
+                    let ss = self.b.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        16,
+                        4,
+                    ));
+                    let outp = self.b.ins().stack_addr(types::I64, ss, 0);
+                    let flag =
+                        self.call_helper1("mirvm_bin128_ovf", &[oi, s, alo, ahi, blo, bhi, outp]);
+                    let lo = self.b.ins().stack_load(types::I64, ss, 0);
+                    let hi = self.b.ins().stack_load(types::I64, ss, 8);
+                    self.write_wide(dst, lo, hi);
+                    // 旗标写 dst+16（interp 同布局：(u128, bool) 旗标在 +16）
+                    let da = self.place_addr(dst);
+                    let f8 = self.b.ins().ireduce(types::I8, flag);
+                    self.b.ins().store(MemFlagsData::trusted(), f8, da, 16);
+                    return;
+                }
+                let x = self.i128_of(alo, ahi);
+                let y = self.i128_of(blo, bhi);
+                let r = match op {
+                    IntBinOp::Add => self.b.ins().iadd(x, y),
+                    IntBinOp::Sub => self.b.ins().isub(x, y),
+                    IntBinOp::Mul => self.b.ins().imul(x, y),
+                    IntBinOp::BitAnd => self.b.ins().band(x, y),
+                    IntBinOp::BitOr => self.b.ins().bor(x, y),
+                    IntBinOp::BitXor => self.b.ins().bxor(x, y),
+                    IntBinOp::Shl => self.b.ins().ishl(x, blo),
+                    IntBinOp::Shr => {
+                        if *signed {
+                            self.b.ins().sshr(x, blo)
+                        } else {
+                            self.b.ins().ushr(x, blo)
+                        }
+                    }
+                    IntBinOp::Div | IntBinOp::Rem => {
+                        let y = self.i128_of(blo, bhi);
+                        let is_rem = matches!(op, IntBinOp::Rem);
+                        let zero = self.b.ins().icmp_imm(IntCC::Equal, y, 0);
+                        self.div_zero_if(zero, is_rem, true);
+                        if *signed {
+                            let neg1 = self.b.ins().icmp_imm(IntCC::Equal, y, -1);
+                            let triv_blk = self.b.create_block();
+                            let norm_blk = self.b.create_block();
+                            let join_blk = self.b.create_block();
+                            self.b.ins().brif(neg1, triv_blk, &[], norm_blk, &[]);
+                            self.b.switch_to_block(triv_blk);
+                            let tv = if is_rem {
+                                self.b.ins().iconst(types::I64, 0)
+                            } else {
+                                x
+                            };
+                            self.b.ins().jump(join_blk, &[tv.into()]);
+                            self.b.switch_to_block(norm_blk);
+                            let nv = if is_rem {
+                                self.b.ins().srem(x, y)
+                            } else {
+                                self.b.ins().sdiv(x, y)
+                            };
+                            self.b.ins().jump(join_blk, &[nv.into()]);
+                            self.b.switch_to_block(join_blk);
+                            self.b.append_block_param(join_blk, types::I128)
+                        } else if is_rem {
+                            self.b.ins().urem(x, y)
+                        } else {
+                            self.b.ins().udiv(x, y)
+                        }
+                    }
+                };
+                let (lo, hi) = {
+                    let pair = self.b.ins().isplit(r);
+                    (pair.0, pair.1)
+                };
+                self.write_wide(dst, lo, hi);
+            }
+            Stmt::Bit128 { op, src, dst } => {
+                use ir::BitUnOp as B;
+                let (lo, hi) = self.read_wide(src);
+                let (rlo, rhi) = match op {
+                    B::Bswap => {
+                        // u128::swap_bytes = 半字互换 + 各自 bswap
+                        let a = self.b.ins().bswap(hi);
+                        let b = self.b.ins().bswap(lo);
+                        (a, b)
+                    }
+                    B::Bitreverse => {
+                        // u128::reverse_bits = 半字互换 + 各自 bitrev
+                        let a = self.b.ins().bitrev(hi);
+                        let b = self.b.ins().bitrev(lo);
+                        (a, b)
+                    }
+                    _ => unreachable!("Bit128 只 bswap/bitreverse"),
+                };
+                self.write_wide(dst, rlo, rhi);
+            }
+            Stmt::Bit128Count { op, src, dst } => {
+                use ir::BitUnOp as B;
+                let (lo, hi) = self.read_wide(src);
+                let r = match op {
+                    B::Popcount => {
+                        let a = self.b.ins().popcnt(lo);
+                        let b = self.b.ins().popcnt(hi);
+                        self.b.ins().iadd(a, b)
+                    }
+                    B::Ctlz => {
+                        let hz = self.b.ins().icmp_imm(IntCC::Equal, hi, 0);
+                        let c_lo = self.b.ins().clz(lo);
+                        let c64 = self.b.ins().iadd_imm(c_lo, 64);
+                        let c_hi = self.b.ins().clz(hi);
+                        self.b.ins().select(hz, c64, c_hi)
+                    }
+                    B::Cttz => {
+                        let lz = self.b.ins().icmp_imm(IntCC::Equal, lo, 0);
+                        let c_hi = self.b.ins().ctz(hi);
+                        let c64 = self.b.ins().iadd_imm(c_hi, 64);
+                        let c_lo = self.b.ins().ctz(lo);
+                        self.b.ins().select(lz, c64, c_lo)
+                    }
+                    _ => unreachable!("Bit128Count 只 popcount/ctlz/cttz"),
+                };
+                self.write_scalar_place(dst, r);
+            }
+            Stmt::NicheDiscr128 {
+                tag,
+                niche_start,
+                variants_start,
+                variants_len,
+                untagged,
+                dst,
+            } => {
+                // interp 恒等式：rel = tag - niche_start（u128 wrapping）；rel < len →
+                // variants_start + rel，否则 untagged
+                let (tlo, thi) = self.read_wide(tag);
+                let t = self.i128_of(tlo, thi);
+                let ns = self.iconst128(*niche_start);
+                let rel = self.b.ins().isub(t, ns);
+                let len = self.iconst128(*variants_len as u128);
+                let hit = self.b.ins().icmp(IntCC::UnsignedLessThan, rel, len);
+                let (rlo, _) = {
+                    let pair = self.b.ins().isplit(rel);
+                    (pair.0, pair.1)
+                };
+                let vs = self.b.ins().iconst(types::I64, *variants_start as i64);
+                let hit_v = self.b.ins().iadd(vs, rlo);
+                let un_v = self.b.ins().iconst(types::I64, *untagged as i64);
+                let r = self.b.ins().select(hit, hit_v, un_v);
+                self.write_scalar_place(dst, r);
+            }
+            Stmt::Wide128ToFloat {
+                src,
+                signed,
+                to,
+                dst,
+            } => {
+                // i128/u128 → f16/f32/f64：f32/f64 走 compiler-builtins float*ti* 族
+                // （Rust i128 as f32/f64 的同一批符号）；f16 走 mirvm_wide_to_f16
+                let (lo, hi) = self.read_wide(src);
+                let s = self.b.ins().iconst(types::I64, *signed as i64);
+                let f = match to {
+                    ir::FloatW::F16 => {
+                        let bits = self.call_helper1("mirvm_wide_to_f16", &[lo, hi, s]);
+                        self.mask_val(bits, Width::W16)
+                    }
+                    ir::FloatW::F32 => {
+                        let fname = if *signed {
+                            "__floattisf"
+                        } else {
+                            "__floatuntisf"
+                        };
+                        let r = self.call_helper1(fname, &[lo, hi]);
+                        let n = self.b.ins().ireduce(types::I32, r);
+                        let f32v = self.b.ins().bitcast(types::F32, MemFlagsData::trusted(), n);
+                        self.as_bits(f32v, ir::FloatW::F32)
+                    }
+                    ir::FloatW::F64 => {
+                        let fname = if *signed {
+                            "__floattidf"
+                        } else {
+                            "__floatuntidf"
+                        };
+                        let r = self.call_helper1(fname, &[lo, hi]);
+                        self.as_bits(r, ir::FloatW::F64)
+                    }
+                };
+                self.write_scalar_place(dst, f);
+            }
+            Stmt::FloatToWide128 {
+                src,
+                from,
+                signed,
+                dst,
+            } => {
+                let (v, _) = self.operand(src);
+                let bits = match from {
+                    ir::FloatW::F16 => self.mask_val(v, Width::W16),
+                    ir::FloatW::F32 => self.mask_val(v, Width::W32),
+                    ir::FloatW::F64 => v,
+                };
+                let kind = self.b.ins().iconst(
+                    types::I64,
+                    match from {
+                        ir::FloatW::F16 => 0,
+                        ir::FloatW::F32 => 1,
+                        ir::FloatW::F64 => 2,
+                    },
+                );
+                let s = self.b.ins().iconst(types::I64, *signed as i64);
+                self.call_out128("mirvm_float_to_wide", &[bits, kind, s], dst);
+            }
+            // ===== M5.4b-3 f128 宽通道（全走助手）=====
+            Stmt::F128Bin { op, a, b, dst } => {
+                let (alo, ahi) = self.read_wide(a);
+                let (blo, bhi) = self.read_wide(b);
+                let oi = self.b.ins().iconst(
+                    types::I64,
+                    match op {
+                        ir::FloatOp::Add => 0,
+                        ir::FloatOp::Sub => 1,
+                        ir::FloatOp::Mul => 2,
+                        ir::FloatOp::Rem => 3,
+                        ir::FloatOp::Div => 4,
+                    },
+                );
+                self.call_out128("mirvm_f128_bin", &[oi, alo, ahi, blo, bhi], dst);
+            }
+            Stmt::F128MathBin { op, a, b, dst } => {
+                let (alo, ahi) = self.read_wide(a);
+                let (blo, bhi) = match b {
+                    ir::F128Rhs::Wide(w) => self.read_wide(w),
+                    ir::F128Rhs::Scalar(o) => {
+                        let (v, _) = self.operand(o);
+                        let z = self.b.ins().iconst(types::I64, 0);
+                        (v, z)
+                    }
+                };
+                let oi = self.b.ins().iconst(
+                    types::I64,
+                    match op {
+                        ir::MathBinOp::Pow => 0,
+                        ir::MathBinOp::Powi => 1,
+                        ir::MathBinOp::Copysign => 2,
+                        ir::MathBinOp::Minnum => 3,
+                        ir::MathBinOp::Maxnum => 4,
+                    },
+                );
+                let z = self.b.ins().iconst(types::I64, 0);
+                self.call_out128("mirvm_f128_math", &[oi, alo, ahi, blo, bhi, z, z], dst);
+            }
+            Stmt::F128Un { op, a, dst } => {
+                let (alo, ahi) = self.read_wide(a);
+                let oi = match op {
+                    ir::F128UnOp::Neg => 0,
+                    ir::F128UnOp::Math(m) => {
+                        (match m {
+                            ir::MathUnOp::Sqrt => 1,
+                            ir::MathUnOp::Sin => 2,
+                            ir::MathUnOp::Cos => 3,
+                            ir::MathUnOp::Exp => 4,
+                            ir::MathUnOp::Exp2 => 5,
+                            ir::MathUnOp::Ln => 6,
+                            ir::MathUnOp::Log2 => 7,
+                            ir::MathUnOp::Log10 => 8,
+                            ir::MathUnOp::Fabs => 9,
+                            ir::MathUnOp::Floor => 10,
+                            ir::MathUnOp::Ceil => 11,
+                            ir::MathUnOp::Trunc => 12,
+                            ir::MathUnOp::Round => 13,
+                            ir::MathUnOp::RoundTiesEven => 14,
+                        }) as i64
+                    }
+                };
+                let oiv = self.b.ins().iconst(types::I64, oi);
+                self.call_out128("mirvm_f128_un", &[oiv, alo, ahi], dst);
+            }
+            Stmt::F128Fma { a, b, c, dst } => {
+                let (alo, ahi) = self.read_wide(a);
+                let (blo, bhi) = self.read_wide(b);
+                let (clo, chi) = self.read_wide(c);
+                let oi = self.b.ins().iconst(types::I64, 5);
+                self.call_out128("mirvm_f128_math", &[oi, alo, ahi, blo, bhi, clo, chi], dst);
+            }
+            Stmt::F128FromScalar { src, kind, dst } => {
+                let (v, _) = self.operand(src);
+                let k = self.b.ins().iconst(
+                    types::I64,
+                    match kind {
+                        ir::F128Scalar::F(ir::FloatW::F16) => 0,
+                        ir::F128Scalar::F(ir::FloatW::F32) => 1,
+                        ir::F128Scalar::F(ir::FloatW::F64) => 2,
+                        ir::F128Scalar::Int { signed: true } => 3,
+                        ir::F128Scalar::Int { signed: false } => 4,
+                    },
+                );
+                self.call_out128("mirvm_f128_from_scalar", &[k, v], dst);
+            }
+            Stmt::F128ToScalar { src, kind, w, dst } => {
+                let (alo, ahi) = self.read_wide(src);
+                let k = self.b.ins().iconst(
+                    types::I64,
+                    match kind {
+                        ir::F128Scalar::F(ir::FloatW::F16) => 0,
+                        ir::F128Scalar::F(ir::FloatW::F32) => 1,
+                        ir::F128Scalar::F(ir::FloatW::F64) => 2,
+                        ir::F128Scalar::Int { signed: true } => 3,
+                        ir::F128Scalar::Int { signed: false } => 4,
+                    },
+                );
+                let r = self.call_helper1("mirvm_f128_to_scalar", &[k, alo, ahi]);
+                let r = self.mask_val(r, *w);
+                self.write_scalar_place(dst, r);
+            }
+            Stmt::F128FromWideInt { src, signed, dst } => {
+                let (lo, hi) = self.read_wide(src);
+                let s = self.b.ins().iconst(types::I64, *signed as i64);
+                self.call_out128("mirvm_f128_from_wide", &[s, lo, hi], dst);
+            }
+            Stmt::F128ToWideInt { src, signed, dst } => {
+                let (alo, ahi) = self.read_wide(src);
+                let s = self.b.ins().iconst(types::I64, *signed as i64);
+                self.call_out128("mirvm_f128_to_wide", &[s, alo, ahi], dst);
+            }
             _ => unreachable!("admit 已排除"),
         }
     }
@@ -1048,6 +2320,421 @@ impl Translator<'_, '_> {
                 let (bv, _) = self.operand(b);
                 self.b.ins().umax(av, bv)
             }
+            // ===== M5.4b-1 标量补面 =====
+            R::IntSat { op, signed, a, b } => {
+                // interp int_saturating 镜像：int_ovf 判方向后取 clamp
+                let (av, w) = self.operand(a);
+                let (bv, _) = self.operand(b);
+                let (val, ovf) = self.int_ovf(*op, *signed, av, bv, w);
+                let ovf8 = self.b.ins().icmp_imm(IntCC::NotEqual, ovf, 0);
+                let m = w.mask() as i64;
+                let clamp = if *signed {
+                    let (x, y) = (self.sext_val(av, w), self.sext_val(bv, w));
+                    let toward_max = match op {
+                        OvfOp::Add => self.b.ins().icmp_imm(IntCC::SignedGreaterThan, y, 0),
+                        OvfOp::Sub => self.b.ins().icmp_imm(IntCC::SignedLessThan, y, 0),
+                        OvfOp::Mul => {
+                            let x0 = self.b.ins().icmp_imm(IntCC::SignedGreaterThan, x, 0);
+                            let y0 = self.b.ins().icmp_imm(IntCC::SignedGreaterThan, y, 0);
+                            self.b.ins().icmp(IntCC::Equal, x0, y0)
+                        }
+                    };
+                    let maxv = self.b.ins().iconst(types::I64, m >> 1);
+                    let minv = self
+                        .b
+                        .ins()
+                        .iconst(types::I64, (((w.mask() >> 1) + 1) & w.mask()) as i64);
+                    self.b.ins().select(toward_max, maxv, minv)
+                } else {
+                    self.b
+                        .ins()
+                        .iconst(types::I64, if matches!(op, OvfOp::Sub) { 0 } else { m })
+                };
+                let masked = self.mask_val(val, w);
+                self.b.ins().select(ovf8, clamp, masked)
+            }
+            R::BitUn { op, a } => {
+                let (v, w) = self.operand(a);
+                use ir::BitUnOp as B;
+                match op {
+                    B::Popcount | B::Ctlz | B::Cttz => {
+                        let n = if w == Width::W64 {
+                            v
+                        } else {
+                            self.b.ins().ireduce(Self::narrow_ty(w), v)
+                        };
+                        let r = match op {
+                            B::Popcount => self.b.ins().popcnt(n),
+                            B::Ctlz => self.b.ins().clz(n),
+                            B::Cttz => self.b.ins().ctz(n),
+                            _ => unreachable!(),
+                        };
+                        if w == Width::W64 {
+                            r
+                        } else {
+                            self.b.ins().uextend(types::I64, r)
+                        }
+                    }
+                    B::Bswap => {
+                        if w == Width::W8 {
+                            // interp：W8 恒等（v & 0xff）
+                            self.mask_val(v, w)
+                        } else {
+                            let n = self.b.ins().ireduce(Self::narrow_ty(w), v);
+                            let r = self.b.ins().bswap(n);
+                            self.b.ins().uextend(types::I64, r)
+                        }
+                    }
+                    B::Bitreverse => {
+                        let n = if w == Width::W64 {
+                            v
+                        } else {
+                            self.b.ins().ireduce(Self::narrow_ty(w), v)
+                        };
+                        let r = self.b.ins().bitrev(n);
+                        if w == Width::W64 {
+                            r
+                        } else {
+                            self.b.ins().uextend(types::I64, r)
+                        }
+                    }
+                }
+            }
+            R::MemCmp { a, b, n } => {
+                // 宿主 memcmp import（i32 结果符号扩展；interp 同通道）
+                let (pa, _) = self.operand(a);
+                let (pb, _) = self.operand(b);
+                let (nv, _) = self.operand(n);
+                let fref = self.module.declare_func_in_func(self.memcmp, self.b.func);
+                let call = self.b.ins().call(fref, &[pa, pb, nv]);
+                let r32 = self.b.inst_results(call)[0];
+                self.b.ins().sextend(types::I64, r32)
+            }
+            R::AtomicLoad { addr, width, order } => {
+                // CLIF 原子 = SeqCst（0.133 无弱序；合规强化——D8j 弱序恢复目前只在
+                // interp，JIT 侧统一最强序，RAM non-det 包络内，记账 m5-log）
+                let (p, _) = self.operand(addr);
+                let _ = order;
+                let v =
+                    self.b
+                        .ins()
+                        .atomic_load(Self::narrow_ty(*width), MemFlagsData::trusted(), p);
+                if *width == Width::W64 {
+                    v
+                } else {
+                    self.b.ins().uextend(types::I64, v)
+                }
+            }
+            // ===== M5.4b-2 浮点 f32/f64 + Math 系 =====
+            R::FloatBin { op, fw, a, b } => {
+                let (av, _) = self.operand(a);
+                let (bv, _) = self.operand(b);
+                if matches!(fw, ir::FloatW::F16) {
+                    // f16 走助手（interp 宿主直算通道；op 码表同 f128_bin）
+                    let oi = self.b.ins().iconst(
+                        types::I64,
+                        match op {
+                            ir::FloatOp::Add => 0,
+                            ir::FloatOp::Sub => 1,
+                            ir::FloatOp::Mul => 2,
+                            ir::FloatOp::Rem => 3,
+                            ir::FloatOp::Div => 4,
+                        },
+                    );
+                    let r = self.call_helper1("mirvm_f16_bin", &[oi, av, bv]);
+                    self.mask_val(r, Width::W16)
+                } else {
+                    let fa = self.as_float(av, *fw);
+                    let fb = self.as_float(bv, *fw);
+                    let r = match op {
+                        ir::FloatOp::Add => self.b.ins().fadd(fa, fb),
+                        ir::FloatOp::Sub => self.b.ins().fsub(fa, fb),
+                        ir::FloatOp::Mul => self.b.ins().fmul(fa, fb),
+                        ir::FloatOp::Div => self.b.ins().fdiv(fa, fb),
+                        // IEEE fmod（Rust % 浮点语义）：libm fmod 通道（interp 同源）
+                        ir::FloatOp::Rem => self.call_libm_bin("fmod", fa, fb, *fw),
+                    };
+                    self.as_bits(r, *fw)
+                }
+            }
+            R::FloatCmp { cc, fw, a, b } => {
+                // IEEE 偏序语义（NaN 全 false 除 Ne）：CLIF ordered 族 + Ne=NotEqual
+                use cranelift_codegen::ir::condcodes::FloatCC;
+                let (av, _) = self.operand(a);
+                let (bv, _) = self.operand(b);
+                if matches!(fw, ir::FloatW::F16) {
+                    let ci = self.b.ins().iconst(
+                        types::I64,
+                        match cc {
+                            IntCc::Eq => 0,
+                            IntCc::Ne => 1,
+                            IntCc::Lt => 2,
+                            IntCc::Le => 3,
+                            IntCc::Gt => 4,
+                            IntCc::Ge => 5,
+                        },
+                    );
+                    self.call_helper1("mirvm_f16_cmp", &[ci, av, bv])
+                } else {
+                    let fa = self.as_float(av, *fw);
+                    let fb = self.as_float(bv, *fw);
+                    let c = match cc {
+                        IntCc::Eq => FloatCC::Equal,
+                        IntCc::Ne => FloatCC::NotEqual,
+                        IntCc::Lt => FloatCC::LessThan,
+                        IntCc::Le => FloatCC::LessThanOrEqual,
+                        IntCc::Gt => FloatCC::GreaterThan,
+                        IntCc::Ge => FloatCC::GreaterThanOrEqual,
+                    };
+                    let b1 = self.b.ins().fcmp(c, fa, fb);
+                    self.b.ins().uextend(types::I64, b1)
+                }
+            }
+            R::FloatNeg { fw, a } => {
+                let (av, _) = self.operand(a);
+                if matches!(fw, ir::FloatW::F16) {
+                    let r = self.call_helper1("mirvm_f16_neg", &[av]);
+                    self.mask_val(r, Width::W16)
+                } else {
+                    let fa = self.as_float(av, *fw);
+                    let r = self.b.ins().fneg(fa);
+                    self.as_bits(r, *fw)
+                }
+            }
+            R::FloatCast { from, to, a } => {
+                let (av, _) = self.operand(a);
+                if matches!(from, ir::FloatW::F16) || matches!(to, ir::FloatW::F16) {
+                    // f16 参与的互转走助手（kind: 1=f16→f32 2=f16→f64 3=f32→f16 4=f64→f16）
+                    let k = self.b.ins().iconst(
+                        types::I64,
+                        match (from, to) {
+                            (ir::FloatW::F16, ir::FloatW::F32) => 1,
+                            (ir::FloatW::F16, ir::FloatW::F64) => 2,
+                            (ir::FloatW::F32, ir::FloatW::F16) => 3,
+                            (ir::FloatW::F64, ir::FloatW::F16) => 4,
+                            _ => unreachable!("f16 互转组合外无此类"),
+                        },
+                    );
+                    let r = self.call_helper1("mirvm_f16_cast", &[k, av]);
+                    let w = match to {
+                        ir::FloatW::F16 => Width::W16,
+                        ir::FloatW::F32 => Width::W32,
+                        ir::FloatW::F64 => Width::W64,
+                    };
+                    self.mask_val(r, w)
+                } else if from == to {
+                    self.mask_val(
+                        av,
+                        match to {
+                            ir::FloatW::F32 => Width::W32,
+                            ir::FloatW::F64 => Width::W64,
+                            ir::FloatW::F16 => Width::W16,
+                        },
+                    )
+                } else {
+                    let fa = self.as_float(av, *from);
+                    let r = match (from, to) {
+                        (ir::FloatW::F32, ir::FloatW::F64) => self.b.ins().fpromote(types::F64, fa),
+                        (ir::FloatW::F64, ir::FloatW::F32) => self.b.ins().fdemote(types::F32, fa),
+                        _ => unreachable!("f16 互转走助手"),
+                    };
+                    self.as_bits(r, *to)
+                }
+            }
+            R::FloatToInt {
+                from,
+                to,
+                signed,
+                a,
+            } => {
+                // Rust `as` 饱和语义（NaN→0、越界→边界）：
+                // signed W32/64 = fcvt_to_sint_sat 直达；signed W8/16 = I32 饱和后
+                // 再按目标域钳；unsigned = fcvt_to_uint_sat(I64) 后按 mask 钳（u32
+                // 域 ⊂ u64，须先钳到 u32::MAX 再掩，Rust 语义）
+                let (av, _) = self.operand(a);
+                if matches!(from, ir::FloatW::F16) {
+                    // f16 → int：助手（kind: 0=i8 1=u8 2=i16 3=u16 4=i32 5=u32 6=i64 7=u64）
+                    let k = self.b.ins().iconst(
+                        types::I64,
+                        match (to, signed) {
+                            (Width::W8, true) => 0,
+                            (Width::W8, false) => 1,
+                            (Width::W16, true) => 2,
+                            (Width::W16, false) => 3,
+                            (Width::W32, true) => 4,
+                            (Width::W32, false) => 5,
+                            (Width::W64, true) => 6,
+                            (Width::W64, false) => 7,
+                        },
+                    );
+                    let r = self.call_helper1("mirvm_f16_to_int", &[k, av]);
+                    self.mask_val(r, *to)
+                } else {
+                    let fa = self.as_float(av, *from);
+                    if *signed {
+                        let i64v = match to {
+                            Width::W64 => self.b.ins().fcvt_to_sint_sat(types::I64, fa),
+                            _ => {
+                                let v32 = self.b.ins().fcvt_to_sint_sat(types::I32, fa);
+                                self.b.ins().sextend(types::I64, v32)
+                            }
+                        };
+                        match to {
+                            Width::W64 => i64v,
+                            Width::W32 => self.mask_val(i64v, *to),
+                            _ => {
+                                // W8/16：I32 饱和值再钳到 [iN::MIN, iN::MAX]
+                                let (lo, hi) = match to {
+                                    Width::W8 => (i8::MIN as i64, i8::MAX as i64),
+                                    Width::W16 => (i16::MIN as i64, i16::MAX as i64),
+                                    _ => unreachable!(),
+                                };
+                                let hi_v = self.b.ins().iconst(types::I64, hi);
+                                let lo_v = self.b.ins().iconst(types::I64, lo);
+                                let c1 = self.b.ins().smin(i64v, hi_v);
+                                let c2 = self.b.ins().smax(c1, lo_v);
+                                self.mask_val(c2, *to)
+                            }
+                        }
+                    } else {
+                        let u64v = self.b.ins().fcvt_to_uint_sat(types::I64, fa);
+                        let m = self.b.ins().iconst(types::I64, to.mask() as i64);
+                        self.b.ins().umin(u64v, m)
+                    }
+                }
+            }
+            R::IntToFloat { from, to, a } => {
+                let (av, _) = self.operand(a);
+                if matches!(to, ir::FloatW::F16) {
+                    // int → f16：助手（kind 同 to_int 码表）
+                    let (fw, signed) = *from;
+                    let k = self.b.ins().iconst(
+                        types::I64,
+                        match (fw, signed) {
+                            (Width::W8, true) => 0,
+                            (Width::W8, false) => 1,
+                            (Width::W16, true) => 2,
+                            (Width::W16, false) => 3,
+                            (Width::W32, true) => 4,
+                            (Width::W32, false) => 5,
+                            (Width::W64, true) => 6,
+                            (Width::W64, false) => 7,
+                        },
+                    );
+                    let r = self.call_helper1("mirvm_f16_from_int", &[k, av]);
+                    self.mask_val(r, Width::W16)
+                } else {
+                    let (fw, signed) = *from;
+                    let t = Self::float_ty(*to);
+                    let x = if signed {
+                        self.sext_val(av, fw)
+                    } else {
+                        self.mask_val(av, fw)
+                    };
+                    let src = if fw == Width::W64 {
+                        x
+                    } else {
+                        self.b.ins().ireduce(types::I32, x)
+                    };
+                    let f = if signed {
+                        self.b.ins().fcvt_from_sint(t, src)
+                    } else {
+                        self.b.ins().fcvt_from_uint(t, src)
+                    };
+                    self.as_bits(f, *to)
+                }
+            }
+            R::MathUn { op, fw, a } => {
+                use ir::MathUnOp as M;
+                let (av, _) = self.operand(a);
+                let fa = self.as_float(av, *fw);
+                let r = match op {
+                    M::Sqrt => self.call_libm_un("sqrt", fa, *fw),
+                    M::Sin => self.call_libm_un("sin", fa, *fw),
+                    M::Cos => self.call_libm_un("cos", fa, *fw),
+                    M::Exp => self.call_libm_un("exp", fa, *fw),
+                    M::Exp2 => self.call_libm_un("exp2", fa, *fw),
+                    M::Ln => self.call_libm_un("log", fa, *fw),
+                    M::Log2 => self.call_libm_un("log2", fa, *fw),
+                    M::Log10 => self.call_libm_un("log10", fa, *fw),
+                    M::Fabs => self.call_libm_un("fabs", fa, *fw),
+                    M::Floor => self.call_libm_un("floor", fa, *fw),
+                    M::Ceil => self.call_libm_un("ceil", fa, *fw),
+                    M::Trunc => self.call_libm_un("trunc", fa, *fw),
+                    M::Round => self.call_libm_un("round", fa, *fw),
+                    // round_ties_even = C99 rint（与 interp/Rust 同源）
+                    M::RoundTiesEven => self.call_libm_un("rint", fa, *fw),
+                };
+                self.as_bits(r, *fw)
+            }
+            R::MathBin { op, fw, a, b } => {
+                use ir::MathBinOp as M;
+                let (av, _) = self.operand(a);
+                let (bv, _) = self.operand(b);
+                let fa = self.as_float(av, *fw);
+                let fb = self.as_float(bv, *fw);
+                let r = match op {
+                    M::Pow => self.call_libm_bin("pow", fa, fb, *fw),
+                    M::Powi => {
+                        let n32 = self.b.ins().ireduce(types::I32, bv);
+                        self.call_powi(fa, n32, *fw)
+                    }
+                    M::Copysign => self.call_libm_bin("copysign", fa, fb, *fw),
+                    M::Minnum => self.call_libm_bin("fmin", fa, fb, *fw),
+                    M::Maxnum => self.call_libm_bin("fmax", fa, fb, *fw),
+                };
+                self.as_bits(r, *fw)
+            }
+            R::MathFma { fw, a, b, c } => {
+                // fma 单次舍入（宿主 mul_add 同源；fmuladd 允许融合/不融合两结果，
+                // 融合恒在允许集合内——与 interp 取融合同侧）
+                let (av, _) = self.operand(a);
+                let (bv, _) = self.operand(b);
+                let (cv, _) = self.operand(c);
+                let fa = self.as_float(av, *fw);
+                let fb = self.as_float(bv, *fw);
+                let fc = self.as_float(cv, *fw);
+                let r = self.b.ins().fma(fa, fb, fc);
+                self.as_bits(r, *fw)
+            }
+            // ===== M5.4b-3 f128 比较（Rvalue 侧的宽通道）=====
+            R::F128Cmp { cc, a, b } => {
+                let (alo, ahi) = self.read_wide(a);
+                let (blo, bhi) = self.read_wide(b);
+                let ci = self.b.ins().iconst(
+                    types::I64,
+                    match cc {
+                        IntCc::Eq => 0,
+                        IntCc::Ne => 1,
+                        IntCc::Lt => 2,
+                        IntCc::Le => 3,
+                        IntCc::Gt => 4,
+                        IntCc::Ge => 5,
+                    },
+                );
+                self.call_helper1("mirvm_f128_cmp", &[ci, alo, ahi, blo, bhi])
+            }
+            // ===== M5.4b-3 128 位整数比较（Rvalue 侧）=====
+            R::Cmp128 { cc, signed, a, b } => {
+                let (alo, ahi) = self.read_wide(a);
+                let (blo, bhi) = self.read_wide(b);
+                let x = self.i128_of(alo, ahi);
+                let y = self.i128_of(blo, bhi);
+                let c = match (cc, signed) {
+                    (IntCc::Eq, _) => IntCC::Equal,
+                    (IntCc::Ne, _) => IntCC::NotEqual,
+                    (IntCc::Lt, true) => IntCC::SignedLessThan,
+                    (IntCc::Le, true) => IntCC::SignedLessThanOrEqual,
+                    (IntCc::Gt, true) => IntCC::SignedGreaterThan,
+                    (IntCc::Ge, true) => IntCC::SignedGreaterThanOrEqual,
+                    (IntCc::Lt, false) => IntCC::UnsignedLessThan,
+                    (IntCc::Le, false) => IntCC::UnsignedLessThanOrEqual,
+                    (IntCc::Gt, false) => IntCC::UnsignedGreaterThan,
+                    (IntCc::Ge, false) => IntCC::UnsignedGreaterThanOrEqual,
+                };
+                let b1 = self.b.ins().icmp(c, x, y);
+                self.b.ins().uextend(types::I64, b1)
+            }
             _ => unreachable!("admit 已排除"),
         }
     }
@@ -1076,7 +2763,44 @@ impl Translator<'_, '_> {
                 };
                 return self.mask_val(s, w);
             }
-            IntBinOp::Div | IntBinOp::Rem => unreachable!("admit 已排除"),
+            IntBinOp::Div | IntBinOp::Rem => {
+                // M5.4b-1：零检 → mirvm_jit_div_zero（interp 同文案同码）；
+                // signed 的 MIN/-1 用分支特判（x86 idiv #DE，CLIF sdiv 直接发 idiv）。
+                let is_rem = matches!(op, IntBinOp::Rem);
+                let zero = self.b.ins().icmp_imm(IntCC::Equal, b, 0);
+                self.div_zero_if(zero, is_rem, false);
+                if signed {
+                    let neg1 = self.b.ins().icmp_imm(IntCC::Equal, b, -1);
+                    let triv_blk = self.b.create_block();
+                    let norm_blk = self.b.create_block();
+                    let join_blk = self.b.create_block();
+                    self.b.ins().brif(neg1, triv_blk, &[], norm_blk, &[]);
+                    self.b.switch_to_block(triv_blk);
+                    let tv = if is_rem {
+                        self.b.ins().iconst(types::I64, 0)
+                    } else {
+                        a
+                    };
+                    self.b.ins().jump(join_blk, &[tv.into()]);
+                    self.b.switch_to_block(norm_blk);
+                    let nv = if is_rem {
+                        self.b.ins().srem(a, b)
+                    } else {
+                        self.b.ins().sdiv(a, b)
+                    };
+                    self.b.ins().jump(join_blk, &[nv.into()]);
+                    self.b.switch_to_block(join_blk);
+                    let r = self.b.append_block_param(join_blk, types::I64);
+                    self.mask_val(r, w)
+                } else {
+                    let r = if is_rem {
+                        self.b.ins().urem(a, b)
+                    } else {
+                        self.b.ins().udiv(a, b)
+                    };
+                    self.mask_val(r, w)
+                }
+            }
         };
         self.mask_val(r, w)
     }
@@ -1195,20 +2919,33 @@ impl Translator<'_, '_> {
                 discr,
                 targets,
                 otherwise,
-            } => {
-                let SwitchDiscr::Scalar(op) = discr else {
-                    unreachable!()
-                };
-                let (v, _) = self.operand(op);
-                // icmp+brif 链（v1；值稀疏，br_table 留优化项）
-                for (val, bb) in targets {
-                    let hit = self.b.ins().icmp_imm(IntCC::Equal, v, *val as u64 as i64);
-                    let next = self.b.create_block();
-                    self.b.ins().brif(hit, blocks[*bb as usize], &[], next, &[]);
-                    self.b.switch_to_block(next);
+            } => match discr {
+                SwitchDiscr::Scalar(op) => {
+                    let (v, _) = self.operand(op);
+                    // icmp+brif 链（v1；值稀疏，br_table 留优化项）
+                    for (val, bb) in targets {
+                        let hit = self.b.ins().icmp_imm(IntCC::Equal, v, *val as u64 as i64);
+                        let next = self.b.create_block();
+                        self.b.ins().brif(hit, blocks[*bb as usize], &[], next, &[]);
+                        self.b.switch_to_block(next);
+                    }
+                    self.b.ins().jump(blocks[*otherwise as usize], &[]);
                 }
-                self.b.ins().jump(blocks[*otherwise as usize], &[]);
-            }
+                SwitchDiscr::Wide(pe) => {
+                    // M5.4b-3：128 位判别——place 一次读全 128 位（iconcat），逐目标
+                    // I128 常量比较（D8k：targets 与 discriminator 都保完整 128 位）
+                    let (lo, hi) = self.read_wide(pe);
+                    let v = self.i128_of(lo, hi);
+                    for (val, bb) in targets {
+                        let c = self.iconst128(*val);
+                        let hit = self.b.ins().icmp(IntCC::Equal, v, c);
+                        let next = self.b.create_block();
+                        self.b.ins().brif(hit, blocks[*bb as usize], &[], next, &[]);
+                        self.b.switch_to_block(next);
+                    }
+                    self.b.ins().jump(blocks[*otherwise as usize], &[]);
+                }
+            },
             Terminator::Call {
                 callee,
                 args,
@@ -1311,46 +3048,106 @@ impl Translator<'_, '_> {
 /// offset——任何被 PlaceExpr::Local/Mem/AddrOf/Ref/Copy/Repeat/Indirect-ABI 触及者。
 /// 判据 = 宁多勿漏：误提升（地址被取的槽错放 SSA）是错值级，多落帧只是慢一点。
 /// or-pattern 全枚举 Stmt/Terminator——新增 place 通道变体 = 非穷尽编译错误。
-fn analyze_frame(body: &ir::FuncBody) -> std::collections::HashSet<u32> {
-    use std::collections::HashSet;
-    fn scan_place(out: &mut HashSet<u32>, pe: &ir::PlaceExpr) {
-        if let ir::PlaceBase::Local(off) = pe.base {
-            out.insert(off);
+/// 落帧集：区间模型（m5.4-design §3.1「触及即落帧」保守全集的完整实现）。
+/// 任何被 Ref/AddrOf/Copy/Repeat/Volatile/128 位·SIMD place 通道的【字节区间】触及的
+/// 槽一律落帧。只记基址会把区间内槽误提升为 SSA：标量写进变量、place 通道读物理帧
+/// （恒 0/旧值）= 错值级 miscompile——M5.4b regex SIGSEGV 的实锤根因正是 Copy src
+/// 区间 [96,112) 内的槽 104 漏落帧（Weak::drop 读空指针 +0x10）。
+#[derive(Default)]
+struct FrameMap {
+    ranges: Vec<(u32, u32)>,
+}
+
+impl FrameMap {
+    fn add(&mut self, a: u32, b: u32) {
+        if a < b {
+            self.ranges.push((a, b));
         }
     }
-    fn scan_op(out: &mut HashSet<u32>, op: &Operand) {
+    fn contains(&self, off: u32) -> bool {
+        self.ranges.iter().any(|&(a, b)| a <= off && off < b)
+    }
+    fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+}
+
+/// scan_place 的触及范围：Bytes = 从基址起 n 字节；Escape = 地址逃逸
+/// （Ref/AddrOf/Indirect 返回落点），本地不可知 → 保守到帧尾。
+#[derive(Clone, Copy)]
+enum Extent {
+    Bytes(u32),
+    Escape,
+}
+
+fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
+    let fsz = body.frame_size;
+    /// 帧相关段 = 首 Deref/动态步之前。Offset 累加后：
+    /// - 遇 Deref：指针槽本体 8 字节落帧即止（之后是 pointee，与帧无关）；
+    /// - 遇动态步（IndexScaled/VTableAlignOffset）：运行期地址，保守 [pos, 帧尾)；
+    /// - 步序耗尽：按 extent 落 [pos, pos+n) 或 [pos, 帧尾)。
+    fn scan_place(out: &mut FrameMap, pe: &ir::PlaceExpr, extent: Extent, fsz: u32) {
+        let ir::PlaceBase::Local(base) = pe.base else {
+            return;
+        };
+        let mut pos: i64 = base as i64;
+        for step in pe.steps.iter() {
+            match step {
+                ir::PlaceStep::Offset(k) => pos += *k as i64,
+                ir::PlaceStep::Deref => {
+                    let p = pos.clamp(0, fsz as i64) as u32;
+                    out.add(p, p.saturating_add(8).min(fsz));
+                    return;
+                }
+                ir::PlaceStep::IndexScaled { .. } | ir::PlaceStep::VTableAlignOffset { .. } => {
+                    let p = pos.clamp(0, fsz as i64) as u32;
+                    out.add(p, fsz);
+                    return;
+                }
+            }
+        }
+        let p = pos.clamp(0, fsz as i64) as u32;
+        let end = match extent {
+            Extent::Bytes(n) => p.saturating_add(n).min(fsz),
+            Extent::Escape => fsz,
+        };
+        out.add(p, end);
+    }
+    fn scan_op(out: &mut FrameMap, op: &Operand, fsz: u32) {
         match op {
-            Operand::Mem { expr, .. } | Operand::AddrOf(expr) => scan_place(out, expr),
-            Operand::SubImm { base, .. } => scan_op(out, base),
+            Operand::Mem { expr, width } => scan_place(out, expr, Extent::Bytes(width.bytes()), fsz),
+            Operand::AddrOf(expr) => scan_place(out, expr, Extent::Escape, fsz),
+            Operand::SubImm { base, .. } => scan_op(out, base, fsz),
             Operand::Slot(_) | Operand::Imm { .. } => {}
         }
     }
-    fn scan_sp(out: &mut HashSet<u32>, sp: &ScalarPlace) {
-        if let ScalarPlace::Mem { expr, .. } = sp {
-            scan_place(out, expr);
+    fn scan_sp(out: &mut FrameMap, sp: &ScalarPlace, fsz: u32) {
+        if let ScalarPlace::Mem { expr, width } = sp {
+            scan_place(out, expr, Extent::Bytes(width.bytes()), fsz);
         }
     }
-    fn scan_ret(out: &mut HashSet<u32>, r: &RetDest) {
+    fn scan_ret(out: &mut FrameMap, r: &RetDest, fsz: u32) {
         match r {
             RetDest::Ignore => {}
-            RetDest::Scalar(sp) => scan_sp(out, sp),
+            RetDest::Scalar(sp) => scan_sp(out, sp, fsz),
             RetDest::Pair(a, b) => {
-                scan_sp(out, a);
-                scan_sp(out, b);
+                scan_sp(out, a, fsz);
+                scan_sp(out, b, fsz);
             }
-            RetDest::Indirect(pe) => scan_place(out, pe),
+            // 被调方经 sret 写整个返回聚合，尺寸本地不可知 → Escape
+            RetDest::Indirect(pe) => scan_place(out, pe, Extent::Escape, fsz),
         }
     }
-    fn scan_rv(out: &mut HashSet<u32>, rv: &ir::Rvalue) {
+    fn scan_rv(out: &mut FrameMap, rv: &ir::Rvalue, fsz: u32) {
         use ir::Rvalue as R;
         match rv {
-            R::Ref(pe) => scan_place(out, pe),
+            R::Ref(pe) => scan_place(out, pe, Extent::Escape, fsz),
             R::Use(o)
             | R::NotBits(o)
             | R::NotBool(o)
             | R::Neg(o)
             | R::Cast { a: o, .. }
-            | R::BitUn { a: o, .. } => scan_op(out, o),
+            | R::BitUn { a: o, .. } => scan_op(out, o, fsz),
             R::IntBin { a, b, .. }
             | R::IntCmp { a, b, .. }
             | R::PtrDiff { a, b, .. }
@@ -1361,17 +3158,17 @@ fn analyze_frame(body: &ir::FuncBody) -> std::collections::HashSet<u32> {
             | R::FloatBin { a, b, .. }
             | R::FloatCmp { a, b, .. }
             | R::MathBin { a, b, .. } => {
-                scan_op(out, a);
-                scan_op(out, b);
+                scan_op(out, a, fsz);
+                scan_op(out, b, fsz);
             }
             R::PtrOffset { ptr, count, .. } => {
-                scan_op(out, ptr);
-                scan_op(out, count);
+                scan_op(out, ptr, fsz);
+                scan_op(out, count, fsz);
             }
             R::MathFma { a, b, c, .. } => {
-                scan_op(out, a);
-                scan_op(out, b);
-                scan_op(out, c);
+                scan_op(out, a, fsz);
+                scan_op(out, b, fsz);
+                scan_op(out, c, fsz);
             }
             R::NicheDiscr { tag, .. }
             | R::MathUn { a: tag, .. }
@@ -1379,24 +3176,46 @@ fn analyze_frame(body: &ir::FuncBody) -> std::collections::HashSet<u32> {
             | R::FloatCast { a: tag, .. }
             | R::FloatToInt { a: tag, .. }
             | R::IntToFloat { a: tag, .. }
-            | R::AtomicLoad { addr: tag, .. } => scan_op(out, tag),
+            | R::AtomicLoad { addr: tag, .. } => scan_op(out, tag, fsz),
             R::F128Cmp { a, b, .. } | R::Cmp128 { a, b, .. } => {
-                scan_place(out, a);
-                scan_place(out, b);
+                scan_place(out, a, Extent::Bytes(16), fsz);
+                scan_place(out, b, Extent::Bytes(16), fsz);
             }
-            R::SimdBitmask { a, .. } | R::SimdReduce { a, .. } | R::SimdReduceArith { a, .. } => {
-                scan_place(out, a);
+            R::SimdBitmask {
+                a,
+                lanes,
+                lane_bytes,
             }
+            | R::SimdReduce {
+                a,
+                lanes,
+                lane_bytes,
+                ..
+            }
+            | R::SimdReduceArith {
+                a,
+                lanes,
+                lane_bytes,
+                ..
+            } => scan_place(out, a, Extent::Bytes(*lanes as u32 * *lane_bytes as u32), fsz),
             R::TlsRef(_) => {}
         }
     }
-    let mut out = HashSet::new();
+    /// SIMD place 的字节宽（lanes × lane_bytes 全向量）。
+    fn simd_ext(lanes: &u16, lane_bytes: &u8) -> Extent {
+        Extent::Bytes(*lanes as u32 * *lane_bytes as u32)
+    }
+    /// Repeat 系的字节宽（count × elem_size，饱和；scan_place 内再收帧尾）。
+    fn rep_ext(count: &u64, elem_size: &u64) -> Extent {
+        Extent::Bytes(count.saturating_mul(*elem_size).min(u32::MAX as u64) as u32)
+    }
+    let mut out = FrameMap::default();
     for blk in &body.blocks {
         for st in &blk.stmts {
             match st {
                 Stmt::Assign { dst, rv } => {
-                    scan_sp(&mut out, dst);
-                    scan_rv(&mut out, rv);
+                    scan_sp(&mut out, dst, fsz);
+                    scan_rv(&mut out, rv, fsz);
                 }
                 Stmt::AssignOverflow {
                     a,
@@ -1405,31 +3224,42 @@ fn analyze_frame(body: &ir::FuncBody) -> std::collections::HashSet<u32> {
                     dst_flag,
                     ..
                 } => {
-                    scan_op(&mut out, a);
-                    scan_op(&mut out, b);
-                    scan_sp(&mut out, dst_val);
-                    scan_sp(&mut out, dst_flag);
+                    scan_op(&mut out, a, fsz);
+                    scan_op(&mut out, b, fsz);
+                    scan_sp(&mut out, dst_val, fsz);
+                    scan_sp(&mut out, dst_flag, fsz);
                 }
-                Stmt::Copy { dst, src, .. } => {
-                    scan_place(&mut out, dst);
-                    scan_place(&mut out, src);
+                // Copy/Repeat/Volatile：place 通道按【整个字节区间】落帧（m5.4-design
+                // §3.1「触及即落帧」）——只记基址 = 区间内槽误提升 = 错值级（实锤根因）
+                Stmt::Copy { dst, src, size } => {
+                    scan_place(&mut out, dst, Extent::Bytes(*size), fsz);
+                    scan_place(&mut out, src, Extent::Bytes(*size), fsz);
                 }
-                Stmt::RepeatScalar { dst, val, .. } => {
-                    scan_place(&mut out, dst);
-                    scan_op(&mut out, val);
+                Stmt::RepeatScalar {
+                    dst,
+                    val,
+                    count,
+                    elem_size,
+                } => {
+                    scan_place(&mut out, dst, rep_ext(count, &(*elem_size as u64)), fsz);
+                    scan_op(&mut out, val, fsz);
                 }
-                Stmt::RepeatBytes { first, .. } => scan_place(&mut out, first),
-                Stmt::VolatileLoad { addr, dst, .. } => {
-                    scan_op(&mut out, addr);
-                    scan_place(&mut out, dst);
+                Stmt::RepeatBytes {
+                    first,
+                    count,
+                    elem_size,
+                } => scan_place(&mut out, first, rep_ext(count, elem_size), fsz),
+                Stmt::VolatileLoad { addr, dst, size } => {
+                    scan_op(&mut out, addr, fsz);
+                    scan_place(&mut out, dst, Extent::Bytes(*size), fsz);
                 }
-                Stmt::VolatileStore { addr, src, .. } => {
-                    scan_op(&mut out, addr);
-                    scan_place(&mut out, src);
+                Stmt::VolatileStore { addr, src, size } => {
+                    scan_op(&mut out, addr, fsz);
+                    scan_place(&mut out, src, Extent::Bytes(*size), fsz);
                 }
                 Stmt::AtomicStore { addr, val, .. } => {
-                    scan_op(&mut out, addr);
-                    scan_op(&mut out, val);
+                    scan_op(&mut out, addr, fsz);
+                    scan_op(&mut out, val, fsz);
                 }
                 Stmt::AtomicCxchg {
                     addr,
@@ -1439,181 +3269,283 @@ fn analyze_frame(body: &ir::FuncBody) -> std::collections::HashSet<u32> {
                     dst_ok,
                     ..
                 } => {
-                    scan_op(&mut out, addr);
-                    scan_op(&mut out, expected);
-                    scan_op(&mut out, new);
-                    scan_sp(&mut out, dst_val);
-                    scan_sp(&mut out, dst_ok);
+                    scan_op(&mut out, addr, fsz);
+                    scan_op(&mut out, expected, fsz);
+                    scan_op(&mut out, new, fsz);
+                    scan_sp(&mut out, dst_val, fsz);
+                    scan_sp(&mut out, dst_ok, fsz);
                 }
                 Stmt::AtomicRmw { addr, val, dst, .. } => {
-                    scan_op(&mut out, addr);
-                    scan_op(&mut out, val);
-                    scan_sp(&mut out, dst);
+                    scan_op(&mut out, addr, fsz);
+                    scan_op(&mut out, val, fsz);
+                    scan_sp(&mut out, dst, fsz);
                 }
                 Stmt::MemCopy {
                     dst, src, count, ..
                 } => {
-                    scan_op(&mut out, dst);
-                    scan_op(&mut out, src);
-                    scan_op(&mut out, count);
+                    scan_op(&mut out, dst, fsz);
+                    scan_op(&mut out, src, fsz);
+                    scan_op(&mut out, count, fsz);
                 }
                 Stmt::MemSet {
                     dst, val, count, ..
                 } => {
-                    scan_op(&mut out, dst);
-                    scan_op(&mut out, val);
-                    scan_op(&mut out, count);
+                    scan_op(&mut out, dst, fsz);
+                    scan_op(&mut out, val, fsz);
+                    scan_op(&mut out, count, fsz);
                 }
-                Stmt::SimdBin { dst, a, b, .. } | Stmt::SimdSelectBitmask { dst, a, b, .. } => {
-                    scan_place(&mut out, dst);
-                    scan_place(&mut out, a);
-                    scan_place(&mut out, b);
+                Stmt::SimdBin {
+                    dst,
+                    a,
+                    b,
+                    lanes,
+                    lane_bytes,
+                    ..
                 }
-                Stmt::SimdFma { dst, a, b, c, .. } => {
-                    scan_place(&mut out, dst);
-                    scan_place(&mut out, a);
-                    scan_place(&mut out, b);
-                    scan_place(&mut out, c);
+                | Stmt::SimdSelectBitmask {
+                    dst,
+                    a,
+                    b,
+                    lanes,
+                    lane_bytes,
+                    ..
+                } => {
+                    scan_place(&mut out, dst, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, a, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, b, simd_ext(lanes, lane_bytes), fsz);
                 }
-                Stmt::SimdUn { dst, a, .. } | Stmt::SimdCast { dst, src: a, .. } => {
-                    scan_place(&mut out, dst);
-                    scan_place(&mut out, a);
+                Stmt::SimdFma {
+                    dst,
+                    a,
+                    b,
+                    c,
+                    lanes,
+                    lane_bytes,
+                    ..
+                } => {
+                    scan_place(&mut out, dst, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, a, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, b, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, c, simd_ext(lanes, lane_bytes), fsz);
                 }
-                Stmt::SimdExtractDyn { src, idx, dst, .. } => {
-                    scan_place(&mut out, src);
-                    scan_op(&mut out, idx);
-                    scan_sp(&mut out, dst);
+                Stmt::SimdUn {
+                    dst,
+                    a,
+                    lanes,
+                    lane_bytes,
+                    ..
+                } => {
+                    scan_place(&mut out, dst, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, a, simd_ext(lanes, lane_bytes), fsz);
+                }
+                Stmt::SimdCast {
+                    dst,
+                    src,
+                    lanes,
+                    src_bytes,
+                    dst_bytes,
+                    ..
+                } => {
+                    scan_place(
+                        &mut out,
+                        dst,
+                        Extent::Bytes(*lanes as u32 * *dst_bytes as u32),
+                        fsz,
+                    );
+                    scan_place(
+                        &mut out,
+                        src,
+                        Extent::Bytes(*lanes as u32 * *src_bytes as u32),
+                        fsz,
+                    );
+                }
+                Stmt::SimdExtractDyn {
+                    src,
+                    idx,
+                    dst,
+                    lanes,
+                    lane_bytes,
+                    ..
+                } => {
+                    scan_place(&mut out, src, simd_ext(lanes, lane_bytes), fsz);
+                    scan_op(&mut out, idx, fsz);
+                    scan_sp(&mut out, dst, fsz);
                 }
                 Stmt::SimdArithOffset {
-                    ptrs, offsets, dst, ..
+                    ptrs,
+                    offsets,
+                    dst,
+                    lanes,
+                    ..
                 } => {
-                    scan_place(&mut out, ptrs);
-                    scan_place(&mut out, offsets);
-                    scan_place(&mut out, dst);
+                    // 地址向量：lanes × 8 字节（指针/偏移均按机器字宽）
+                    let ext = Extent::Bytes(*lanes as u32 * 8);
+                    scan_place(&mut out, ptrs, ext, fsz);
+                    scan_place(&mut out, offsets, ext, fsz);
+                    scan_place(&mut out, dst, ext, fsz);
                 }
                 Stmt::SimdFunnel {
-                    dst, a, b, shift, ..
+                    dst,
+                    a,
+                    b,
+                    shift,
+                    lanes,
+                    lane_bytes,
+                    ..
                 } => {
-                    scan_place(&mut out, dst);
-                    scan_place(&mut out, a);
-                    scan_place(&mut out, b);
-                    scan_place(&mut out, shift);
+                    scan_place(&mut out, dst, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, a, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, b, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, shift, simd_ext(lanes, lane_bytes), fsz);
                 }
                 Stmt::SimdSelect {
-                    mask, a, b, dst, ..
+                    mask,
+                    a,
+                    b,
+                    dst,
+                    lanes,
+                    lane_bytes,
+                    ..
                 } => {
-                    scan_place(&mut out, mask);
-                    scan_place(&mut out, a);
-                    scan_place(&mut out, b);
-                    scan_place(&mut out, dst);
+                    scan_place(&mut out, mask, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, a, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, b, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, dst, simd_ext(lanes, lane_bytes), fsz);
                 }
                 Stmt::SimdGather {
                     passthru,
                     ptrs,
                     mask,
                     dst,
+                    lanes,
+                    lane_bytes,
                     ..
                 } => {
-                    scan_place(&mut out, passthru);
-                    scan_place(&mut out, ptrs);
-                    scan_place(&mut out, mask);
-                    scan_place(&mut out, dst);
+                    scan_place(&mut out, passthru, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, ptrs, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, mask, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, dst, simd_ext(lanes, lane_bytes), fsz);
                 }
                 Stmt::SimdScatter {
-                    values, ptrs, mask, ..
+                    values,
+                    ptrs,
+                    mask,
+                    lanes,
+                    lane_bytes,
+                    ..
                 } => {
-                    scan_place(&mut out, values);
-                    scan_place(&mut out, ptrs);
-                    scan_place(&mut out, mask);
+                    scan_place(&mut out, values, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, ptrs, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, mask, simd_ext(lanes, lane_bytes), fsz);
                 }
                 Stmt::SimdMaskedLoad {
                     mask,
                     base,
                     passthru,
                     dst,
+                    lanes,
+                    lane_bytes,
                     ..
                 } => {
-                    scan_place(&mut out, mask);
-                    scan_op(&mut out, base);
-                    scan_place(&mut out, passthru);
-                    scan_place(&mut out, dst);
+                    scan_place(&mut out, mask, simd_ext(lanes, lane_bytes), fsz);
+                    scan_op(&mut out, base, fsz);
+                    scan_place(&mut out, passthru, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, dst, simd_ext(lanes, lane_bytes), fsz);
                 }
                 Stmt::SimdMaskedStore {
-                    mask, base, values, ..
+                    mask,
+                    base,
+                    values,
+                    lanes,
+                    lane_bytes,
+                    ..
                 } => {
-                    scan_place(&mut out, mask);
-                    scan_op(&mut out, base);
-                    scan_place(&mut out, values);
+                    scan_place(&mut out, mask, simd_ext(lanes, lane_bytes), fsz);
+                    scan_op(&mut out, base, fsz);
+                    scan_place(&mut out, values, simd_ext(lanes, lane_bytes), fsz);
                 }
                 Stmt::SimdInsertDyn {
-                    src, idx, val, dst, ..
+                    src,
+                    idx,
+                    val,
+                    dst,
+                    lanes,
+                    lane_bytes,
+                    ..
                 } => {
-                    scan_place(&mut out, src);
-                    scan_op(&mut out, idx);
-                    scan_op(&mut out, val);
-                    scan_place(&mut out, dst);
+                    scan_place(&mut out, src, simd_ext(lanes, lane_bytes), fsz);
+                    scan_op(&mut out, idx, fsz);
+                    scan_op(&mut out, val, fsz);
+                    scan_place(&mut out, dst, simd_ext(lanes, lane_bytes), fsz);
                 }
-                Stmt::SimdSplat { dst, val, .. } => {
-                    scan_place(&mut out, dst);
-                    scan_op(&mut out, val);
+                Stmt::SimdSplat {
+                    dst,
+                    val,
+                    lanes,
+                    lane_bytes,
+                    ..
+                } => {
+                    scan_place(&mut out, dst, simd_ext(lanes, lane_bytes), fsz);
+                    scan_op(&mut out, val, fsz);
                 }
+                // 128 位族：place 通道恒 16 字节
                 Stmt::Bin128 { a, b, dst, .. } => {
-                    scan_place(&mut out, a);
+                    scan_place(&mut out, a, Extent::Bytes(16), fsz);
                     if let ir::Bin128Rhs::Wide(w) = b {
-                        scan_place(&mut out, w);
+                        scan_place(&mut out, w, Extent::Bytes(16), fsz);
                     }
-                    scan_place(&mut out, dst);
+                    scan_place(&mut out, dst, Extent::Bytes(16), fsz);
                 }
                 Stmt::Wide128ToFloat { src, dst, .. } => {
-                    scan_place(&mut out, src);
-                    scan_sp(&mut out, dst);
+                    scan_place(&mut out, src, Extent::Bytes(16), fsz);
+                    scan_sp(&mut out, dst, fsz);
                 }
                 Stmt::FloatToWide128 { src, dst, .. } => {
-                    scan_op(&mut out, src);
-                    scan_place(&mut out, dst);
+                    scan_op(&mut out, src, fsz);
+                    scan_place(&mut out, dst, Extent::Bytes(16), fsz);
                 }
                 Stmt::Bit128 { src, dst, .. } => {
-                    scan_place(&mut out, src);
-                    scan_place(&mut out, dst);
+                    scan_place(&mut out, src, Extent::Bytes(16), fsz);
+                    scan_place(&mut out, dst, Extent::Bytes(16), fsz);
                 }
                 Stmt::Bit128Count { src, dst, .. } => {
-                    scan_place(&mut out, src);
-                    scan_sp(&mut out, dst);
+                    scan_place(&mut out, src, Extent::Bytes(16), fsz);
+                    scan_sp(&mut out, dst, fsz);
                 }
                 Stmt::F128Bin { a, b, dst, .. } | Stmt::F128Fma { a, b, dst, .. } => {
-                    scan_place(&mut out, a);
-                    scan_place(&mut out, b);
-                    scan_place(&mut out, dst);
+                    scan_place(&mut out, a, Extent::Bytes(16), fsz);
+                    scan_place(&mut out, b, Extent::Bytes(16), fsz);
+                    scan_place(&mut out, dst, Extent::Bytes(16), fsz);
                 }
                 Stmt::F128MathBin { a, b, dst, .. } => {
-                    scan_place(&mut out, a);
+                    scan_place(&mut out, a, Extent::Bytes(16), fsz);
                     if let ir::F128Rhs::Wide(w) = b {
-                        scan_place(&mut out, w);
+                        scan_place(&mut out, w, Extent::Bytes(16), fsz);
                     }
                     if let ir::F128Rhs::Scalar(o) = b {
-                        scan_op(&mut out, o);
+                        scan_op(&mut out, o, fsz);
                     }
-                    scan_place(&mut out, dst);
+                    scan_place(&mut out, dst, Extent::Bytes(16), fsz);
                 }
                 Stmt::F128Un { a, dst, .. } => {
-                    scan_place(&mut out, a);
-                    scan_place(&mut out, dst);
+                    scan_place(&mut out, a, Extent::Bytes(16), fsz);
+                    scan_place(&mut out, dst, Extent::Bytes(16), fsz);
                 }
                 Stmt::F128FromScalar { src, dst, .. } => {
-                    scan_op(&mut out, src);
-                    scan_place(&mut out, dst);
+                    scan_op(&mut out, src, fsz);
+                    scan_place(&mut out, dst, Extent::Bytes(16), fsz);
                 }
                 Stmt::F128ToScalar { src, dst, .. } => {
-                    scan_place(&mut out, src);
-                    scan_sp(&mut out, dst);
+                    scan_place(&mut out, src, Extent::Bytes(16), fsz);
+                    scan_sp(&mut out, dst, fsz);
                 }
                 Stmt::F128FromWideInt { src, dst, .. } | Stmt::F128ToWideInt { src, dst, .. } => {
-                    scan_place(&mut out, src);
-                    scan_place(&mut out, dst);
+                    scan_place(&mut out, src, Extent::Bytes(16), fsz);
+                    scan_place(&mut out, dst, Extent::Bytes(16), fsz);
                 }
                 Stmt::NicheDiscr128 { tag, dst, .. } => {
-                    scan_place(&mut out, tag);
-                    scan_sp(&mut out, dst);
+                    scan_place(&mut out, tag, Extent::Bytes(16), fsz);
+                    scan_sp(&mut out, dst, fsz);
                 }
                 Stmt::Trap(_) | Stmt::Nop | Stmt::Fence { .. } => {}
             }
@@ -1621,53 +3553,77 @@ fn analyze_frame(body: &ir::FuncBody) -> std::collections::HashSet<u32> {
         match &blk.term {
             Terminator::Goto(_) | Terminator::Return | Terminator::Unreachable => {}
             Terminator::SwitchInt { discr, .. } => match discr {
-                SwitchDiscr::Scalar(o) => scan_op(&mut out, o),
-                SwitchDiscr::Wide(pe) => scan_place(&mut out, pe),
+                SwitchDiscr::Scalar(o) => scan_op(&mut out, o, fsz),
+                SwitchDiscr::Wide(pe) => scan_place(&mut out, pe, Extent::Bytes(16), fsz),
             },
             Terminator::Call { args, ret, .. }
             | Terminator::CallBuiltin { args, ret, .. }
-            | Terminator::CallForeign { args, ret, .. }
-            | Terminator::CallIndirect { args, ret, .. } => {
+            | Terminator::CallForeign { args, ret, .. } => {
                 for a in args {
-                    scan_op(&mut out, a);
+                    scan_op(&mut out, a, fsz);
                 }
-                scan_ret(&mut out, ret);
+                scan_ret(&mut out, ret, fsz);
+            }
+            // callee 操作数同扫（fn-ptr 可能经 Mem/Deref 链读帧槽——同类潜在漏项）
+            Terminator::CallIndirect {
+                callee, args, ret, ..
+            } => {
+                scan_op(&mut out, callee, fsz);
+                for a in args {
+                    scan_op(&mut out, a, fsz);
+                }
+                scan_ret(&mut out, ret, fsz);
             }
             Terminator::InlineAsm { ins, outs, .. } => {
                 for (_, o) in ins {
-                    scan_op(&mut out, o);
+                    scan_op(&mut out, o, fsz);
                 }
                 for (_, sp) in outs {
-                    scan_sp(&mut out, sp);
+                    scan_sp(&mut out, sp, fsz);
                 }
             }
             Terminator::Resume | Terminator::TerminateAbort | Terminator::Trap(_) => {}
         }
     }
-    // Indirect ABI（M5.4c 准入；保守纳入——取址性最强）
+    // Indirect ABI（M5.4c 准入；保守纳入——取址性最强）：槽本体 = sret/参数指针 8 字节
     if let RetAbi::Indirect {
         ret_off, sret_off, ..
     } = &body.ret
     {
-        out.insert(*ret_off);
-        out.insert(*sret_off);
+        out.add(*ret_off, (*ret_off).saturating_add(8).min(fsz));
+        out.add(*sret_off, (*sret_off).saturating_add(8).min(fsz));
     }
     for p in &body.params {
         if let ParamAbi::Indirect { off, .. } = p {
-            out.insert(*off);
+            out.add(*off, (*off).saturating_add(8).min(fsz));
         }
     }
     out
 }
 
+/// ir::RmwOp → CLIF AtomicRmwOp（一一对应；D8j 冻结的有符号性经 interp 选 AtomicI*/U*
+/// 同源——CLIF 的 Max/Min 同理分有/无符号两族）。
+fn clif_rmw_op(op: ir::RmwOp) -> cranelift_codegen::ir::AtomicRmwOp {
+    use cranelift_codegen::ir::AtomicRmwOp as C;
+    match op {
+        ir::RmwOp::Xchg => C::Xchg,
+        ir::RmwOp::Add => C::Add,
+        ir::RmwOp::Sub => C::Sub,
+        ir::RmwOp::And => C::And,
+        ir::RmwOp::Or => C::Or,
+        ir::RmwOp::Xor => C::Xor,
+        ir::RmwOp::Nand => C::Nand,
+        ir::RmwOp::Max => C::Smax,
+        ir::RmwOp::Min => C::Smin,
+        ir::RmwOp::UMax => C::Umax,
+        ir::RmwOp::UMin => C::Umin,
+    }
+}
+
 /// 收集 SSA 候选槽偏移（def 0 初始化用）= 全部 Slot 引用减去落帧集。
-fn collect_ssa_offs(
-    body: &ir::FuncBody,
-    frame_offs: &std::collections::HashSet<u32>,
-    out: &mut Vec<u32>,
-) {
+fn collect_ssa_offs(body: &ir::FuncBody, frame_offs: &FrameMap, out: &mut Vec<u32>) {
     let mut push = |s: &Slot| {
-        if !frame_offs.contains(&s.off) && !out.contains(&s.off) {
+        if !frame_offs.contains(s.off) && !out.contains(&s.off) {
             out.push(s.off);
         }
     };

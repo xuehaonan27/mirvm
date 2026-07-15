@@ -48,6 +48,16 @@ DEV:
 ";
 
 pub fn main() -> ExitCode {
+    // 排障旋钮（M5.4b）：SIGSEGV 时打印 fault RIP，用于 JIT 码崩点定位。
+    if std::env::var_os("MIRVM_SEGV_DUMP").is_some() {
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = segv_dump_handler as *const () as usize;
+            sa.sa_flags = libc::SA_SIGINFO;
+            libc::sigemptyset(&mut sa.sa_mask);
+            libc::sigaction(libc::SIGSEGV, &sa, std::ptr::null_mut());
+        }
+    }
     let mut argv = std::env::args();
     argv.next(); // 跳过自身
 
@@ -191,6 +201,46 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     let mut program_argv = vec![input];
     program_argv.extend(program_args);
     run_driver(rustc_args, program_argv, dump_mir, vm_call, vm_stats, false)
+}
+
+// ===== cargo runner 回调 =====
+
+/// MIRVM_SEGV_DUMP 排障旋钮的 SIGSEGV 处理器：打印 fault RIP（ucontext RIP
+/// 字段，x86_64 = gregs[REG_RIP=16]）、RIP 前 32 字节 hexdump、fault 地址与 RIP 的
+/// /proc/self/maps 归属，并把所属可执行段整段落 /tmp/mirvm-jitdump.bin（可 objdump
+/// 反汇编找崩点），然后退出。
+unsafe extern "C" fn segv_dump_handler(_sig: i32, _info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
+    unsafe {
+        let uc = ctx as *mut libc::ucontext_t;
+        let rip = (*uc).uc_mcontext.gregs[16] as usize; // RIP
+        let addr = (*uc).uc_mcontext.gregs[22] as usize; // CR2（真 fault 地址）
+        eprintln!("mirvm-segv-dump: fault addr(CR2)={addr:#x} rip={rip:#x}");
+        if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
+            for line in maps.lines() {
+                let start = usize::from_str_radix(line.split('-').next().unwrap_or("0"), 16)
+                    .unwrap_or(0);
+                let end = usize::from_str_radix(
+                    line.split_whitespace().nth(0).unwrap_or("0-0").split('-').nth(1).unwrap_or("0"),
+                    16,
+                )
+                .unwrap_or(0);
+                if addr >= start && addr < end {
+                    eprintln!("mirvm-segv-dump: fault 归属: {line}");
+                }
+                if rip >= start && rip < end {
+                    eprintln!("mirvm-segv-dump: rip 归属: {line}");
+                    if line.contains("xp") {
+                        let bytes = std::slice::from_raw_parts(start as *const u8, end - start);
+                        let _ = std::fs::write("/tmp/mirvm-jitdump.bin", bytes);
+                        eprintln!(
+                            "mirvm-segv-dump: 可执行段已落 /tmp/mirvm-jitdump.bin（基址 {start:#x}）"
+                        );
+                    }
+                }
+            }
+        }
+        std::process::exit(134);
+    }
 }
 
 // ===== cargo runner 回调 =====
