@@ -154,8 +154,16 @@ pub(crate) struct Linker<'tcx> {
     /// asm-stub wrapper 文本（M5.0）：AsmStubId → 符号名+GAS 源；lower 结束批量
     /// cc+dlopen 物化。A2 起名字与位序解耦（split 模式最终位序收尾才知）。
     asm_sites: Vec<ir::AsmSite>,
-    /// 非 weak extern static 的宿主地址直嵌符号（M6 片2）：非空 ⇒ 模块不可缓存
+    /// extern static/fn 的宿主地址直嵌符号（M6 片2）：非空 ⇒ 模块不可缓存
     foreign_static_syms: Vec<Box<str>>,
+    /// extern fn 被当作值取址（fn-ptr）的条目：instance → dlsym 真地址（D4 条目
+    /// 语义的外延）。不进 fn_addrs——执行相反查未命中正是 CallIndirect 的
+    /// native_sig libffi 直调通道（M4.4 FFI 反方向之二）的触发条件。
+    foreign_fn_entries: FxHashMap<Instance<'tcx>, u64>,
+    /// 必需归档库的 .symtab 兜底（装载基址, 符号→st_value）：-fvisibility=hidden
+    /// 编译的归档（ring）转换后符号不进 .dynsym；extern static/fn 取址的降低期
+    /// dlsym 未命中时按此求真地址（lower_inner 头部随 dlopen 一并构建）。
+    archive_fallbacks: Vec<(u64, std::collections::HashMap<Box<str>, u64>)>,
     // ===== S4 底座（s4-base-image-design；偏移合并）=====
     /// sym → 底座 FuncId（命中即复用，不入队）。空表 = 无底座/底座构建模式。
     base_fns: FxHashMap<Box<str>, ir::FuncId>,
@@ -203,6 +211,8 @@ impl<'tcx> Linker<'tcx> {
             tls_slots: Vec::new(),
             asm_sites: Vec::new(),
             foreign_static_syms: Vec::new(),
+            foreign_fn_entries: FxHashMap::default(),
+            archive_fallbacks: Vec::new(),
             split: None,
             base_fns,
             base_fn_entries,
@@ -330,16 +340,21 @@ impl<'tcx> Linker<'tcx> {
     /// 底座函数无条目（构建时没被取址）则在 delta 区补一个——总量仍恰一份。
     /// A2 split：条目按 instance 类定域（image 类 → image 区，单一地址身份不变）；
     /// image 上下文遇 delta 类 = purity 封闭被破坏（分类器 bug），响亮拒绝。
-    pub(crate) fn fn_entry_addr(&mut self, inst: Instance<'tcx>) -> u64 {
+    /// extern fn（fn 体内 extern 块声明的内核函数被当 fn-ptr 用，ring 的派发模式）：
+    /// 无 MIR 可降，走 foreign_fn_entry_addr——值 = native 链接器解析出的真符号地址。
+    pub(crate) fn fn_entry_addr(&mut self, inst: Instance<'tcx>) -> Result<u64, String> {
         if let Some(&a) = self.fn_entries.get(&inst) {
-            return a;
+            return Ok(a);
+        }
+        if self.tcx.is_foreign_item(inst.def_id()) {
+            return self.foreign_fn_entry_addr(inst);
         }
         let fid = self.func_id(inst);
         if fid < self.delta_first_fn
             && let Some(&a) = self.base_fn_entries.get(self.tcx.symbol_name(inst).name)
         {
             self.fn_entries.insert(inst, a);
-            return a;
+            return Ok(a);
         }
         let addr = if let Some(s) = &mut self.split {
             if fid & IMAGE_TAG != 0 || fid < self.delta_first_fn {
@@ -364,7 +379,95 @@ impl<'tcx> Linker<'tcx> {
         unsafe { (addr as *mut u64).write(fid as u64) };
         self.fn_entries.insert(inst, addr);
         self.fn_addrs.insert(addr, fid);
-        addr
+        Ok(addr)
+    }
+
+    /// extern fn 条目地址（fn-ptr 取址）：无 MIR 的 foreign item 不能入 worklist
+    /// （instance_mir = rustc query panic）；其 fn-ptr 值语义 = native 链接器解析
+    /// 出的真符号地址。解析序与 resolve_call 同构：①引擎内建 ②导出符号仿真
+    /// ③denylist/llvm/rust-internal ④dlsym 全域。
+    /// 烤入的是宿主真地址（ASLR 跨进程无效）⇒ 登记符号名：含此类地址的模块不入
+    /// L2/image 缓存（与 extern static 同规则，ircache/depsimage/baseimage 三判据）。
+    fn foreign_fn_entry_addr(&mut self, inst: Instance<'tcx>) -> Result<u64, String> {
+        if let Some(&a) = self.foreign_fn_entries.get(&inst) {
+            return Ok(a);
+        }
+        let name = self.tcx.symbol_name(inst).name;
+        // host_baked=false：弱符号缺席的 NULL——无宿主地址烤入，不污染可缓存性
+        let bake = |this: &mut Self, addr: u64, host_baked: bool| {
+            if host_baked {
+                this.foreign_static_syms.push(name.into());
+            }
+            this.foreign_fn_entries.insert(inst, addr);
+            addr
+        };
+        let link_name = Symbol::intern(name);
+        // ①引擎内建：纯直通快路径（语义与通用 dlsym+libffi 道逐位一致）可给真地址；
+        // 其余内建（alloc/unwind/fork/atexit/signal/backtrace 系）是引擎接管的语义，
+        // 无地址可物化——响亮 Trap（宿主进程也导出 __rust/_Unwind 系符号，直取 =
+        // 打穿引擎的堆/panic/unwind 模型）。
+        if let Some(&b) = self.builtins.get(&link_name) {
+            use ir::Builtin as B;
+            if !matches!(b, B::HostGetenv | B::HostWrite | B::HostStrlen | B::HostAbort) {
+                return Err(format!(
+                    "extern fn `{name}` 被当作值取址（fn-ptr），但它是引擎内建语义符号，无地址可物化"
+                ));
+            }
+        }
+        let rust_internal = name.starts_with("__rust")
+            || name.starts_with("__rdl")
+            || name.starts_with("rust_");
+        // ②链接仿真：符号由已链接 crate 的导出定义提供 → 值 = 该 guest 定义的
+        // 条目地址；weak 定义让位于动态库强符号（Rust 内部符号除外——见①注）。
+        let exported = self.exported_defs().get(&link_name).copied();
+        if let Some((target, is_weak)) = exported {
+            if is_weak && !rust_internal {
+                let cname = std::ffi::CString::new(name).map_err(|_| "符号名含 NUL".to_string())?;
+                let strong = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) };
+                if !strong.is_null() {
+                    return Ok(bake(self, strong as u64, true));
+                }
+            }
+            return self.fn_entry_addr(target);
+        }
+        // ③与 resolve_call 同一纪律的绝不直通清单
+        if DENY_EXACT.contains(&name) || DENY_PREFIX.iter().any(|p| name.starts_with(p)) {
+            return Err(format!(
+                "foreign `{name}` 被当作值取址（denylist：线程 M4.4 / 进程模型不直通）"
+            ));
+        }
+        if name.starts_with("llvm.") {
+            return Err(format!("foreign `{name}` 被当作值取址（LLVM 内部符号，按需内建）"));
+        }
+        if rust_internal {
+            return Err(format!(
+                "foreign `{name}` 被当作值取址（Rust 内部 ABI 符号，宿主进程亦有导出，不能直取）"
+            ));
+        }
+        // ④dlsym 全域（静态归档/global_asm 的 `.so` 已在排干 worklist 前
+        // RTLD_GLOBAL 加载进全局域——lower_inner 头部）；未命中再查归档
+        // .symtab 兜底（hidden 符号，ring 的 -fvisibility=hidden 内核）
+        let cname = std::ffi::CString::new(name).map_err(|_| "符号名含 NUL".to_string())?;
+        let mut p = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) } as u64;
+        if p == 0 {
+            for (bias, syms) in &self.archive_fallbacks {
+                if let Some(&v) = syms.get(name) {
+                    p = bias + v;
+                    break;
+                }
+            }
+        }
+        if p == 0 {
+            // weak 符号缺席 = NULL（native 未定义弱符号的取址语义）；经它间接调用
+            // 在执行相响亮终止（CallIndirect 的空指针诊断）
+            let weak = self.tcx.codegen_fn_attrs(inst.def_id()).import_linkage
+                == Some(rustc_hir::attrs::Linkage::ExternalWeak);
+            if weak {
+                return Ok(bake(self, 0, false));
+            }
+            return Err(format!("extern fn `{name}` 被当作值取址，但符号 dlsym 全域未命中"));
+        }
+        Ok(bake(self, p, true))
     }
 
     /// 裸字节物化进冻结区（128 位常量等小常量的通用道）。
@@ -417,7 +520,12 @@ impl<'tcx> Linker<'tcx> {
                 //   条目反查失败；M4.4 thunk 前统一走 fallback 路径）
                 // - 非 weak（environ 等数据符号）：alloc 基址 = dlsym 真地址
                 if self.tcx.is_foreign_item(def_id) {
-                    let name = self.tcx.item_name(def_id);
+                    // dlsym 用链接符号名（#[link_name] 前缀——ring 的 prefixed_extern
+                    // 静态量；item_name 会丢掉前缀），与 resolve_call 的 fn 路径同源
+                    let name = self
+                        .tcx
+                        .symbol_name(Instance::mono(self.tcx, def_id))
+                        .name;
                     // extern block 内 item 的 linkage 在 import_linkage 字段
                     let weak = self.tcx.codegen_fn_attrs(def_id).import_linkage
                         == Some(rustc_hir::attrs::Linkage::ExternalWeak);
@@ -433,9 +541,18 @@ impl<'tcx> Linker<'tcx> {
                         self.record_both(id, cell);
                         return Ok(cell);
                     }
-                    let cname = std::ffi::CString::new(name.as_str())
+                    let cname = std::ffi::CString::new(name)
                         .map_err(|_| "符号名含 NUL".to_string())?;
-                    let p = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) } as u64;
+                    let mut p = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) } as u64;
+                    if p == 0 {
+                        // 归档 .symtab 兜底（hidden 符号，ring 的 -fvisibility=hidden 构建）
+                        for (bias, syms) in &self.archive_fallbacks {
+                            if let Some(&v) = syms.get(name) {
+                                p = bias + v;
+                                break;
+                            }
+                        }
+                    }
                     if p == 0 {
                         return Err(format!("extern static `{name}` dlsym 未命中"));
                     }
@@ -444,7 +561,7 @@ impl<'tcx> Linker<'tcx> {
                     //（M6 片2 gate 实测：c_process 热回放上进程 libc 地址 SIGSEGV）。
                     // 升级路径 = GOT 式 Operand 间接（IR 设计变更，M6 后续）。
                     // A2：deps-image 同规则拒（写盘自检，baseimage 三判据同构）。
-                    self.foreign_static_syms.push(name.as_str().into());
+                    self.foreign_static_syms.push(name.into());
                     self.record_both(id, p);
                     return Ok(p);
                 }
@@ -485,7 +602,7 @@ impl<'tcx> Linker<'tcx> {
                 Ok(addr)
             }
             GlobalAlloc::Function { instance } => {
-                let addr = self.fn_entry_addr(instance);
+                let addr = self.fn_entry_addr(instance)?;
                 self.record_both(id, addr);
                 Ok(addr)
             }
@@ -1401,6 +1518,46 @@ fn lower_inner(
         linker.activate_split();
     }
 
+    // 静态归档 / global_asm+naked 的 `.so` 在排干 worklist 前物化并
+    // RTLD_NOW|RTLD_GLOBAL 加载：extern fn 被当作值取址（fn-ptr）时，
+    // fn_entry_addr 需在降低期 dlsym 其真符号地址（native 链接器语义的直译）。
+    // 顺序敏感：reject_symbol_ambiguity 依赖"我方尚未 dlopen"的 RTLD_DEFAULT
+    // 状态，故全模块只此一处物化（装配段复用清单，不再二次审计）；运行期
+    // FfiState::ensure_libs 的重复 dlopen 是幂等 refcount。失败响亮终止。
+    let required_native_libs: Vec<Box<str>> = {
+        let mut v = crate::native_archive::materialize_static_libraries(tcx)
+            .unwrap_or_else(|reason| panic!("Static native library 装载失败: {reason}"));
+        if let Some(so) = global_asm::materialize(tcx)
+            .unwrap_or_else(|reason| panic!("global_asm/naked 物化失败: {reason}"))
+        {
+            v.push(so);
+        }
+        for so in &v {
+            let cpath = std::ffi::CString::new(&**so).expect("原生库路径不含 NUL");
+            // dlerror 是线程局部的粘滞状态；先清空，再在失败后立即复制诊断。
+            unsafe { libc::dlerror() };
+            let h = unsafe { libc::dlopen(cpath.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
+            if h.is_null() {
+                let err = unsafe { libc::dlerror() };
+                let detail = if err.is_null() {
+                    "dlerror 未提供详情".to_string()
+                } else {
+                    unsafe { std::ffi::CStr::from_ptr(err) }
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                panic!("必需原生库 `{so}` 降低期 dlopen 失败: {detail}");
+            }
+            // 句柄有意不 dlclose（与运行期 FfiState 同：随进程生命周期）。
+            // .symtab 兜底表（hidden 符号；解析失败按空表——dlsym 可见面不受影响，
+            // 未命中符号由取址路径的既有诊断兜底）
+            let bias = crate::elfsym::load_bias(h).unwrap_or(0);
+            let syms = crate::elfsym::symtab_values(so).unwrap_or_default();
+            linker.archive_fallbacks.push((bias, syms));
+        }
+        v
+    };
+
     // 种子 = mono collector 集（D1：与 native codegen 同一起点，正确性白拿）
     for inst in collect::collect(tcx) {
         linker.func_id(inst);
@@ -1411,7 +1568,10 @@ fn lower_inner(
     let entry = tcx.entry_fn(()).map(|(main_def, entry_ty)| {
         let rustc_session::config::EntryFnType::Main { sigpipe } = entry_ty;
         let main_inst = Instance::mono(tcx, main_def);
-        let main_addr = linker.fn_entry_addr(main_inst);
+        // main 是本地 Rust fn，必非 foreign——取址路径不会失败
+        let main_addr = linker
+            .fn_entry_addr(main_inst)
+            .expect("main fn 条目地址（本地 fn，非 foreign）");
         let main_ret = tcx
             .fn_sig(main_def)
             .no_bound_vars()
@@ -1576,6 +1736,11 @@ fn lower_inner(
             tls: s.image_tls_slots,
             asm_sites: s.image_asm_sites,
             frozen: Some(s.image_frozen),
+            // 会话级单表（depsimage 判据③的语义本意）：image 上下文的 extern
+            // static/fn 取址会把宿主地址烤进 image 字节码/冻结区（purity 分类器
+            // 看不见裸地址）——非空即不写盘，防跨进程回放野指针；内存态上栈
+            // 同进程有效，由 absorb 合并回 delta 保 L2 诚实。
+            foreign_static_syms: linker.foreign_static_syms.clone(),
             ..Default::default()
         };
         // image 导出素材（装载方零 tcx 依赖，BaseExports 同构）：fn 条目/static/TLS
@@ -1642,20 +1807,11 @@ fn lower_inner(
         module.native_libs.push(format!("lib{name}.so").into());
         module.native_libs.push(format!("lib{name}.so.1").into());
     }
-    // 上游 crate build.rs 的 Static native libraries（M5.1 D2）：从 rustc metadata +
-    // native search paths 找到真实 `.a`，受约束地转换为内容寻址 `.so`。转换失败必须
-    // 在加载相响亮终止；不能让执行相 dlsym 静默跳过后再伪装成普通符号缺失。
-    module.required_native_libs.extend(
-        crate::native_archive::materialize_static_libraries(tcx)
-            .unwrap_or_else(|reason| panic!("Static native library 装载失败: {reason}")),
-    );
-    // global_asm! + naked fn 物化（M5.2 D8h）：模块级/函数级 asm → `.so` → required lib
-    //（guest 引用的符号在任何 dlsym 前 RTLD_NOW 就位）。失败响亮终止。
-    if let Some(so) = global_asm::materialize(tcx)
-        .unwrap_or_else(|reason| panic!("global_asm/naked 物化失败: {reason}"))
-    {
-        module.required_native_libs.push(so);
-    }
+    // 上游 crate build.rs 的 Static native libraries（M5.1 D2）+ global_asm/naked
+    // 物化（M5.2 D8h）：清单已在排干 worklist 前物化并 RTLD_GLOBAL 加载
+    // （fn-ptr 取址的降低期 dlsym 依赖；单点物化保 reject_symbol_ambiguity 的
+    // "尚未 dlopen" 前提），此处只移交 Module。
+    module.required_native_libs = required_native_libs;
     // asm-stub 批量物化（M5.0）：全部 wrapper cc 汇编 + dlopen + dlsym → 真地址表。
     // 配方留在 Module（M6 片2）：L2 warm 路径以 asm_sites 幂等重物化。
     // A2 split：image 站点随 SplitImage 走（absorb 时合并重物化，与 L2 warm 同契约）。

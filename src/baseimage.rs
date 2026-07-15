@@ -328,6 +328,13 @@ pub fn absorb_stack(delta: &mut ir::Module, stack: ImageStack) {
                 delta.required_native_libs.push(l);
             }
         }
+        // 宿主地址直嵌符号随 image 合并（内存态 image 可能烤了本进程地址——
+        // 磁盘 image 写盘判据③已保证为空）：并入 delta 保 L2 入账判据诚实。
+        for s in m.foreign_static_syms {
+            if !delta.foreign_static_syms.contains(&s) {
+                delta.foreign_static_syms.push(s);
+            }
+        }
         if let Some(fr) = m.frozen {
             frozens.push(fr);
         }
@@ -339,7 +346,7 @@ pub fn absorb_stack(delta: &mut ir::Module, stack: ImageStack) {
     sites.append(&mut delta.asm_sites);
     delta.asm_sites = sites;
     delta.asm_stub_addrs = crate::lower::asm::materialize(&delta.asm_sites);
-    // entry = delta 权威；foreign_static_syms：image 构建期已保证为空
+    // entry = delta 权威
     delta.image_frozens = frozens;
 }
 

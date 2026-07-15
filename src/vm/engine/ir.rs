@@ -1253,9 +1253,9 @@ pub struct Module {
     /// 被清则重 cc，自愈）。**符号名与位序解耦**：A2 split 模式的最终位序收尾才知，
     /// 用类前缀名（mirvm_asm_xi{j}/xd{k}）；非 split 路径沿用位序名 mirvm_asm_{id}。
     pub asm_sites: Vec<AsmSite>,
-    /// 非 weak extern static（environ 类）的宿主地址直嵌符号（M6 片2）：这些 dlsym
-    /// 真地址已烤进字节码 const/冻结区重定位，ASLR 下跨进程无效——**非空即不可入
-    /// L2 缓存**（ircache::store 拒绝；升级路径 = GOT 式间接）。
+    /// extern static（environ 类）/ extern fn（fn-ptr 取址）的宿主地址直嵌符号
+    /// （M6 片2）：这些 dlsym 真地址已烤进字节码 const/冻结区重定位，ASLR 下跨进程
+    /// 无效——**非空即不可入 L2 缓存**（ircache::store 拒绝；升级路径 = GOT 式间接）。
     pub foreign_static_syms: Vec<Box<str>>,
     /// main 启动链（M4.3；--vm-call 模式下为 None）
     pub entry: Option<EntryPlan>,

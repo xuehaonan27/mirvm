@@ -2425,6 +2425,11 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                     blk = *target as usize;
                     continue;
                 }
+                if addr == 0 {
+                    // extern weak 符号缺席取址 = NULL（native 同语义）；调用空
+                    // fn-ptr 在 native 是 UB/SIGSEGV——VM 响亮诊断而非宿主崩溃。
+                    engine_abort(&format!("间接调用空 fn 指针（调用者 {}）", body.name));
+                }
                 let mut av: Vec<u64> = Vec::with_capacity(aops.len() + 1);
                 if let RetDest::Indirect(dst) = ret {
                     av.push(eval_place_addr(ctx, base, dst));

@@ -8,6 +8,8 @@
 
 #[path = "../../src/vm/mod.rs"]
 mod vm;
+#[path = "../../src/elfsym.rs"]
+mod elfsym; // ffi.rs 的归档 .symtab 兜底（纯 Rust，同源复用）
 
 fn main() -> std::process::ExitCode {
     // spike4（冻结工件）+ M4 引擎多线程真身（M4.4：共享 Shared/每线程 Ctx/thunk 工厂）

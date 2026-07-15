@@ -141,8 +141,9 @@ pub fn store(
     if !module.frozen.as_ref().is_some_and(|f| f.at_fixed_base()) {
         return false;
     }
-    // 宿主地址直嵌（environ 类 extern static 的 dlsym 真地址已烤进 const/冻结区）
-    // ⇒ 跨进程回放 = 野指针（gate 实测 c_process 热路径 SIGSEGV）——诚实不缓存
+    // 宿主地址直嵌（environ 类 extern static / fn-ptr 取址的 extern fn，dlsym 真
+    // 地址已烤进 const/冻结区）⇒ 跨进程回放 = 野指针（gate 实测 c_process 热路径
+    // SIGSEGV）——诚实不缓存
     if !module.foreign_static_syms.is_empty() {
         return false;
     }

@@ -1832,7 +1832,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         else {
                             return Err(format!("ReifyFnPointer 实例解析失败（{a_ty}）"));
                         };
-                        let addr = self.linker.fn_entry_addr(inst);
+                        let addr = self.linker.fn_entry_addr(inst)?;
                         let ValKind::Scalar(w) = dst_kind else {
                             return Err("ReifyFnPointer 目标非标量".into());
                         };
@@ -1856,7 +1856,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             cargs,
                             ty::ClosureKind::FnOnce,
                         );
-                        let addr = self.linker.fn_entry_addr(inst);
+                        let addr = self.linker.fn_entry_addr(inst)?;
                         let ValKind::Scalar(w) = dst_kind else {
                             return Err("ClosureFnPointer 目标非标量".into());
                         };
@@ -4542,6 +4542,12 @@ pub(crate) fn lower_instance<'tcx>(
     // intrinsic 无普通 MIR（fallback-body 型由 Linker 以 new_raw 补收为 Item）
     if let InstanceKind::Intrinsic(..) = instance.def {
         return Err("intrinsic 实例（M4.x 内建）".into());
+    }
+    // foreign item 无 MIR（instance_mir 即 rustc query panic）：fn-ptr 取址必须走
+    // Linker::foreign_fn_entry_addr；入队到这里 = 上游登记路径漏判，Err 落 Trap
+    // 体而非拖垮整个 rustc 进程。
+    if tcx.is_foreign_item(instance.def_id()) {
+        return Err("foreign 实例无 MIR 可降（fn-ptr 取址应走 foreign_fn_entry_addr）".into());
     }
     let body_ref: &Body<'tcx> = tcx.instance_mir(instance.def);
     // 整体单态化（一次 clone + instantiate；Body: TypeFoldable）

@@ -20,6 +20,10 @@ use super::ir::{FfiKind, ForeignSig};
 pub struct FfiState {
     syms: HashMap<Box<str>, usize>,
     handles: Vec<usize>,
+    /// 必需归档库的 .symtab 兜底（装载基址, 符号→st_value）：-fvisibility=hidden
+    /// 编译的归档（ring）转换后符号不进 .dynsym，dlsym 未命中时按此求真地址
+    /// （解析序 = required_native_libs 序，与链接序同构）。
+    archive_fallbacks: Vec<(u64, HashMap<Box<str>, u64>)>,
     libs_loaded: bool,
 }
 
@@ -43,6 +47,15 @@ impl FfiState {
             for &h in &self.handles {
                 p = unsafe { libc::dlsym(h as *mut libc::c_void, cname.as_ptr()) } as usize;
                 if p != 0 {
+                    break;
+                }
+            }
+        }
+        if p == 0 {
+            // hidden 符号兜底（ring：-fvisibility=hidden 归档的 .symtab）
+            for (bias, syms) in &self.archive_fallbacks {
+                if let Some(&v) = syms.get(name) {
+                    p = (bias + v) as usize;
                     break;
                 }
             }
@@ -71,6 +84,11 @@ impl FfiState {
                 return Err(format!("dlopen 必需原生库 `{cand}` 失败: {detail}"));
             }
             self.handles.push(h as usize);
+            // .symtab 兜底表（hidden 符号；解析失败按空表——dlsym 可见面不受影响，
+            // 未命中符号由 resolve 的既有诊断兜底）
+            let bias = crate::elfsym::load_bias(h).unwrap_or(0);
+            let syms = crate::elfsym::symtab_values(cand).unwrap_or_default();
+            self.archive_fallbacks.push((bias, syms));
         }
         for cand in optional_libs {
             let Ok(cpath) = CString::new(&**cand) else {
