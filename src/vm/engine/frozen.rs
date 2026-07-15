@@ -14,15 +14,21 @@
 const FROZEN_CAP: usize = 256 << 20;
 
 /// 固定基址选址：PIE 映像/brk 随机化上界 ~0x66xx_xxxx_xxxx（mmap_rnd_bits=28），
-/// mmap 自顶向下区在 0x7fxx_xxxx_xxxx 附近——0x6800_0000_0000 落在两带之间的空洞，
+/// mmap 自顶向下区在 0x7fxx_xxxx_xxxx 附近——0x68/0x69 都落在两带之间的空洞，
 /// 与影子 IP（FUNC_IP_BASE，非规范高位、从不映射）无交集。
 /// MAP_FIXED_NOREPLACE：被占 = EEXIST，绝不覆盖既有映射。
-const FROZEN_FIXED_BASE: usize = 0x6800_0000_0000;
+///
+/// S4（s4-base-image-design §2）双域：底座（跨程序共享的 std 预降低模块）与
+/// delta（本程序模块；无底座时=全量模块）各占一域，跨域绝对地址互指两侧皆稳定。
+pub const BASE_IMAGE_FIXED_ADDR: usize = 0x6800_0000_0000;
+pub const DELTA_FIXED_ADDR: usize = 0x6900_0000_0000;
 
 pub struct FrozenArena {
     base: *mut u8,
     used: usize,
     at_fixed_base: bool,
+    /// 本区所属域的固定基址（serde 自描述用；动态回退时仍记原意向域）。
+    home: usize,
 }
 
 impl Default for FrozenArena {
@@ -45,15 +51,16 @@ impl FrozenArena {
         }
     }
 
-    pub fn new() -> Self {
-        // 先试固定基址（L2 缓存可用的前提）；被占（并发单测/罕见 ASLR 冲突）则
+    fn new_at(home: usize) -> Self {
+        // 先试本域固定基址（缓存可用的前提）；被占（并发单测/罕见 ASLR 冲突）则
         // 回退动态基址——语义不变，仅本进程产出不可序列化。
-        let fixed = Self::map(FROZEN_FIXED_BASE, libc::MAP_FIXED_NOREPLACE);
+        let fixed = Self::map(home, libc::MAP_FIXED_NOREPLACE);
         if fixed != libc::MAP_FAILED {
             return FrozenArena {
                 base: fixed as *mut u8,
                 used: 0,
                 at_fixed_base: true,
+                home,
             };
         }
         let base = Self::map(0, 0);
@@ -62,16 +69,31 @@ impl FrozenArena {
             base: base as *mut u8,
             used: 0,
             at_fixed_base: false,
+            home,
         }
     }
 
-    /// 从快照恢复（L2 warm 路径）。固定基址被占即 Err——调用方按缓存 miss 处理，
-    /// 绝不在其他基址上重放快照（快照内嵌绝对地址，错基址 = 静默错值）。
-    pub fn restore(snapshot: &[u8]) -> Result<Self, String> {
+    /// 程序模块（delta；无底座时=全量模块）的冻结区。
+    pub fn new() -> Self {
+        Self::new_at(DELTA_FIXED_ADDR)
+    }
+
+    /// 底座构建会话专用（S4）。
+    pub fn new_base_image() -> Self {
+        Self::new_at(BASE_IMAGE_FIXED_ADDR)
+    }
+
+    /// 从快照恢复到指定域（L2 warm / 底座装载）。固定基址被占即 Err——调用方按
+    /// 缓存 miss 处理，绝不在其他基址上重放快照（快照内嵌绝对地址，错基址 = 静默错值）。
+    pub fn restore(snapshot: &[u8], home: usize) -> Result<Self, String> {
         assert!(snapshot.len() <= FROZEN_CAP, "冻结区快照超容量");
-        let fixed = Self::map(FROZEN_FIXED_BASE, libc::MAP_FIXED_NOREPLACE);
+        assert!(
+            home == BASE_IMAGE_FIXED_ADDR || home == DELTA_FIXED_ADDR,
+            "冻结区恢复域非法: {home:#x}"
+        );
+        let fixed = Self::map(home, libc::MAP_FIXED_NOREPLACE);
         if fixed == libc::MAP_FAILED {
-            return Err("冻结区固定基址被占，无法恢复快照".into());
+            return Err(format!("冻结区固定基址 {home:#x} 被占，无法恢复快照"));
         }
         unsafe {
             std::ptr::copy_nonoverlapping(snapshot.as_ptr(), fixed as *mut u8, snapshot.len());
@@ -80,6 +102,7 @@ impl FrozenArena {
             base: fixed as *mut u8,
             used: snapshot.len(),
             at_fixed_base: true,
+            home,
         })
     }
 
@@ -125,22 +148,45 @@ impl std::fmt::Debug for FrozenArena {
     }
 }
 
-// L2 序列化（M6 片2）：非固定基址的区含跨进程不稳定地址——序列化必须失败
+// L2/底座序列化：非固定基址的区含跨进程不稳定地址——序列化必须失败
 // （上层按"本次不缓存"处理），绝不产出会静默错值的快照。
+// S4 起**自描述**：(home, bytes) 元组——反序列化恢复到快照自带的域，
+// 域白名单在 restore 里断言（防伪造快照把区放到任意地址）。
 impl serde::Serialize for FrozenArena {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         if !self.at_fixed_base {
             return Err(serde::ser::Error::custom("冻结区不在固定基址，不可序列化"));
         }
-        serializer.serialize_bytes(self.snapshot())
+        use serde::ser::SerializeTuple;
+        let mut t = serializer.serialize_tuple(2)?;
+        t.serialize_element(&(self.home as u64))?;
+        t.serialize_element(&serde_bytes_shim::Bytes(self.snapshot()))?;
+        t.end()
     }
 }
 
 impl<'de> serde::Deserialize<'de> for FrozenArena {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         // postcard bytes = 借用切片可用；用 &[u8] 承接避免中间拷贝
-        let bytes: &[u8] = serde::Deserialize::deserialize(deserializer)?;
-        FrozenArena::restore(bytes).map_err(serde::de::Error::custom)
+        let (home, bytes): (u64, &[u8]) = serde::Deserialize::deserialize(deserializer)?;
+        let home = usize::try_from(home).map_err(serde::de::Error::custom)?;
+        if home != BASE_IMAGE_FIXED_ADDR && home != DELTA_FIXED_ADDR {
+            return Err(serde::de::Error::custom(format!(
+                "冻结区快照域非法: {home:#x}"
+            )));
+        }
+        FrozenArena::restore(bytes, home).map_err(serde::de::Error::custom)
+    }
+}
+
+/// serialize_bytes 的元组内嵌形态：Serialize for &[u8] 走序列 u8 编码（postcard 下
+/// 逐字节 varint，体积/速度都劣化）——包一层强制 bytes 通道。
+mod serde_bytes_shim {
+    pub struct Bytes<'a>(pub &'a [u8]);
+    impl serde::Serialize for Bytes<'_> {
+        fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            s.serialize_bytes(self.0)
+        }
     }
 }
 
@@ -151,7 +197,7 @@ unsafe impl Sync for FrozenArena {}
 
 #[cfg(test)]
 mod tests {
-    use super::FrozenArena;
+    use super::{BASE_IMAGE_FIXED_ADDR, DELTA_FIXED_ADDR, FrozenArena};
 
     /// 固定基址快照/恢复往返：地址值稳定、内容逐字节保真、恢复后可继续分配。
     #[test]
@@ -177,7 +223,7 @@ mod tests {
         let snap = a.snapshot().to_vec();
         drop(a);
 
-        let b = FrozenArena::restore(&snap).expect("恢复失败");
+        let b = FrozenArena::restore(&snap, DELTA_FIXED_ADDR).expect("恢复失败");
         assert!(b.at_fixed_base());
         unsafe {
             assert_eq!((p as *const u64).read(), 0xdead_beef_cafe_f00d);
@@ -192,5 +238,39 @@ mod tests {
         let mut b = b;
         let r = b.alloc(8, 8);
         assert!(r >= q + 9, "追加分配必须落在快照之后");
+    }
+
+    /// S4 双域：底座区与 delta 区同时在场，跨域绝对指针（delta→base 方向，
+    /// 底座查找命中后的常见形态）恢复后逐位稳定。
+    #[test]
+    fn dual_domain_arenas_coexist_and_cross_references_survive_restore() {
+        let mut base = FrozenArena::new_base_image();
+        let mut delta = FrozenArena::new();
+        if !base.at_fixed_base() || !delta.at_fixed_base() {
+            eprintln!("skip: 固定基址被占");
+            return;
+        }
+        assert_eq!(
+            (base.alloc(8, 8) & !0xffff_ffff) as usize,
+            BASE_IMAGE_FIXED_ADDR
+        );
+        let b_cell = base.alloc(8, 8);
+        unsafe { (b_cell as *mut u64).write(0x42) };
+        // delta 内嵌指向底座的绝对指针（fn 条目/静态去重的形态）
+        let d_ptr = delta.alloc(8, 8);
+        unsafe { (d_ptr as *mut u64).write(b_cell) };
+
+        let base_snap = base.snapshot().to_vec();
+        let delta_snap = delta.snapshot().to_vec();
+        drop(delta);
+        drop(base);
+
+        let _base2 = FrozenArena::restore(&base_snap, BASE_IMAGE_FIXED_ADDR).expect("底座恢复");
+        let _delta2 = FrozenArena::restore(&delta_snap, DELTA_FIXED_ADDR).expect("delta 恢复");
+        unsafe {
+            let cross = (d_ptr as *const u64).read();
+            assert_eq!(cross, b_cell, "跨域指针逐位稳定");
+            assert_eq!((cross as *const u64).read(), 0x42, "经跨域指针可读底座内容");
+        }
     }
 }
