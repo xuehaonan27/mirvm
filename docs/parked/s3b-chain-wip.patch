@@ -1,0 +1,719 @@
+diff --git a/src/baseimage.rs b/src/baseimage.rs
+index 55cfa57..0f4d1ce 100644
+--- a/src/baseimage.rs
++++ b/src/baseimage.rs
+@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
+ 
+ use crate::vm::engine::ir;
+ 
+-/// 底座文件（v1 = postcard 整包）。
++/// image 文件（v1 = postcard 整包）——std 底座与依赖 image 统一格式。
+ ///
+ /// **字节确定性契约**（验收：连续两建 cmp 一致）：Module 的 exports/fn_addrs 是
+ /// std HashMap（RandomState 随机种子 ⇒ 迭代序每进程随机），不能随 module 直接落盘
+@@ -37,6 +37,13 @@ struct BaseFile {
+     sysroot_stamp: String,
+     /// (ub_checks, overflow_checks, contract_checks)——lower 唯一烤入的会话布尔
+     lowering_fp: (bool, bool, bool),
++    /// S3′：本 image 的 crate 稳定身份（stable_crate_id.as_u64；std 底座 = 0）
++    crate_id: u64,
++    /// S3′：构建时栈下键（= 下方 image 链的 key 平坦连接；std 底座/建于空 = ""）。
++    /// 装载时须精确等于当前前缀键——FuncId 偏移/跨域地址由此保证正确（错则不装退 delta）。
++    below_key: String,
++    /// S3′：本 image 冻结区固定域（底座 0x6800、依赖样条 0x6A00+k·2^34）
++    domain: u64,
+     /// exports/fn_addrs 已清空（见上），由下方排序表重建
+     module: ir::Module,
+     /// sym → FuncId（= module.exports 的排序形态）
+@@ -49,7 +56,7 @@ struct BaseFile {
+     tls_syms: Vec<(Box<str>, ir::TlsId)>,
+ }
+ 
+-/// 装载完成、待程序会话使用的底座。
++/// 装载完成、待程序会话使用的一个 image（std 底座或依赖 image）。
+ pub struct BaseImage {
+     pub module: ir::Module,
+     pub fn_by_sym: std::collections::HashMap<Box<str>, ir::FuncId>,
+@@ -57,8 +64,31 @@ pub struct BaseImage {
+     pub static_by_sym: std::collections::HashMap<Box<str>, u64>,
+     pub tls_by_sym: std::collections::HashMap<Box<str>, ir::TlsId>,
+     pub lowering_fp: (bool, bool, bool),
+-    /// 分层缓存键（ircache delta 条目引用；含降低指纹）
++    /// 本 image 的位置无关身份键（chain key join 用；std 底座含 build_id/stamp/fp，
++    /// 依赖 image 再含 crate 身份）。**不含 below_key**——位置由 below_key 字段单独校验。
+     pub key: String,
++    /// 构建时栈下键（装载校验：须等于当前前缀键）
++    pub below_key: String,
++    /// 冻结区固定域（底座 0x6800、依赖样条）
++    pub domain: usize,
++    /// 装载来源文件路径（ircache 键链记账用）
++    pub path: PathBuf,
++}
++
++/// image 身份键（位置无关；join 成 chain key）。std 底座 crate_id=0。
++fn image_key(stamp: &str, fp: (bool, bool, bool), crate_id: u64) -> String {
++    let mut k = format!(
++        "{}\u{1f}{}\u{1f}fp{}{}{}",
++        env!("MIRVM_BUILD_ID"),
++        stamp,
++        fp.0 as u8,
++        fp.1 as u8,
++        fp.2 as u8
++    );
++    if crate_id != 0 {
++        k.push_str(&format!("\u{1f}crate{crate_id:016x}"));
++    }
++    k
+ }
+ 
+ fn disabled() -> bool {
+@@ -85,31 +115,33 @@ fn load(path: &std::path::Path, want_stamp: &str) -> Option<BaseImage> {
+     if f.build_id != env!("MIRVM_BUILD_ID") || f.sysroot_stamp != want_stamp {
+         return None;
+     }
+-    // 冻结区必须真的落在底座域（防御：文件被换/域被抢都不接受）
+-    let frozen_ok = f.module.frozen.as_ref().is_some_and(|fr| {
+-        fr.at_fixed_base() && fr.home() == crate::vm::engine::frozen::BASE_IMAGE_FIXED_ADDR
+-    });
++    let domain = usize::try_from(f.domain).ok()?;
++    // 冻结区必须真的落在声明域（防御：文件被换/域被抢/伪造 domain 都不接受）
++    let frozen_ok = f
++        .module
++        .frozen
++        .as_ref()
++        .is_some_and(|fr| fr.at_fixed_base() && fr.home() == domain);
+     if !frozen_ok {
+         return None;
+     }
+     let fp = f.lowering_fp;
+-    let mut key = String::from(env!("MIRVM_BUILD_ID"));
+-    key.push('\u{1f}');
+-    key.push_str(want_stamp);
+-    key.push('\u{1f}');
+-    key.push_str(&format!("fp{}{}{}", fp.0 as u8, fp.1 as u8, fp.2 as u8));
++    let key = image_key(want_stamp, fp, f.crate_id);
+     // exports/fn_addrs 从排序表重建（字节确定性契约，见 BaseFile 文档）
+     let mut module = f.module;
+     module.exports = f.export_syms.iter().cloned().collect();
+     module.fn_addrs = f.fn_addr_pairs.iter().copied().collect();
+     Some(BaseImage {
++        module,
+         fn_by_sym: f.export_syms.into_iter().collect(),
+         entry_by_sym: f.fn_entry_syms.into_iter().collect(),
+         static_by_sym: f.static_syms.into_iter().collect(),
+         tls_by_sym: f.tls_syms.into_iter().collect(),
+         lowering_fp: fp,
+         key,
+-        module,
++        below_key: f.below_key,
++        domain,
++        path: path.to_path_buf(),
+     })
+ }
+ 
+@@ -246,6 +278,50 @@ impl ImageStack {
+         self.key.as_deref()
+     }
+ 
++    /// 键链平坦连接（空栈 = ""）。前缀一致性比较与 below_key 校验的口径。
++    pub fn chain_key(&self) -> String {
++        self.key.clone().unwrap_or_default()
++    }
++
++    /// L2 header 记账用：各 image 的 (文件路径, 身份键)。warm 据此重装同一条链。
++    pub fn chain_refs(&self) -> Vec<(String, String)> {
++        self.images
++            .iter()
++            .map(|i| (i.path.display().to_string(), i.key.clone()))
++            .collect()
++    }
++
++    /// 栈内依赖 image 数（= 下一个依赖 image 的样条域索引 k；std 底座不占样条）。
++    fn dep_count(&self) -> usize {
++        self.images
++            .iter()
++            .filter(|i| i.domain >= crate::vm::engine::frozen::IMAGE_SPLINE_BASE)
++            .count()
++    }
++
++    /// warm 路径（无 tcx）：据 L2 header 的链引用重装同一条 image 栈。逐 ref 装载并
++    /// 校验 (身份键 == 记录键) + (below_key == running 前缀键)——结构一致才接受，
++    /// 任一失配即 None（miss，冷路重建自愈）。
++    pub fn from_refs(refs: &[(String, String)], stamp: &str) -> Option<ImageStack> {
++        if disabled() {
++            return None;
++        }
++        let mut images = Vec::with_capacity(refs.len());
++        let mut prefix_key = String::new();
++        for (path, want_key) in refs {
++            let img = load(std::path::Path::new(path), stamp)?;
++            if &img.key != want_key || img.below_key != prefix_key {
++                return None;
++            }
++            if !prefix_key.is_empty() {
++                prefix_key.push('\u{1f}');
++            }
++            prefix_key.push_str(&img.key);
++            images.push(img);
++        }
++        Some(ImageStack::from_images(images))
++    }
++
+     /// 会话降低指纹核对（cli after_analysis）：不匹配 ⇒ 弃整栈走全量降低。
+     /// 栈内 fp 已一致（from_images 截断保证），故整栈判定即可。
+     pub fn fp_matches(&self, session_fp: (bool, bool, bool)) -> bool {
+@@ -253,15 +329,258 @@ impl ImageStack {
+     }
+ }
+ 
+-/// 装载 image 栈（S3′a）：底座 + 依赖 image 链。本片仅底座（S3′b 装填依赖链）。
+-pub fn ensure() -> ImageStack {
+-    let mut images = Vec::new();
+-    if let Some(b) = ensure_base() {
++fn session_fp(tcx: TyCtxt<'_>) -> (bool, bool, bool) {
++    let sess = tcx.sess;
++    (
++        sess.ub_checks(),
++        sess.overflow_checks(),
++        sess.contract_checks(),
++    )
++}
++
++fn chain_key_of(images: &[BaseImage]) -> String {
++    images
++        .iter()
++        .map(|i| i.key.as_str())
++        .collect::<Vec<_>>()
++        .join("\u{1f}")
++}
++
++fn deps_dir() -> PathBuf {
++    base_dir().join("deps")
++}
++
++/// 依赖 image 文件路径。文件名含 below_key ⇒ 同 crate 建于不同前缀 = 不同文件
++///（各自 FuncId 偏移不同，绝不混用）。
++fn dep_image_path(stamp: &str, fp: (bool, bool, bool), crate_id: u64, below_key: &str) -> PathBuf {
++    let ident = format!("{}\u{1f}below[{}]", image_key(stamp, fp, crate_id), below_key);
++    let h = crate::lower::asm::fnv1a(ident.as_bytes());
++    deps_dir().join(format!("{h:016x}.img"))
++}
++
++/// 装载 image 栈（S3′b，m5.3-design §3.3）：底座（栈底）+ 依赖 image 链，**贪心前缀
++/// 装配**。规范序 = target-dep crate 按 stable_crate_id 排序（构建/装载两侧一致）；
++/// 逐 crate 计算"建于当前前缀"的期望文件，装载并三重校验（身份键 == 期望 + below_key
++/// == 前缀键 + 域 == 样条 k），命中即扩前缀、失配即跳过（该 crate 退 delta，绝不腐坏）。
++/// 依赖 DAG 宽度决定命中率（线性链无法表达非线性 DAG，兄弟依赖可能互斥——命中率实测，
++/// 见 m6-log；正确性与命中率解耦）。
++pub fn load_chain(tcx: TyCtxt<'_>) -> ImageStack {
++    if disabled() {
++        return ImageStack::empty();
++    }
++    let fp = session_fp(tcx);
++    let Some(stamp) = crate::sysroot::current_stamp_value() else {
++        return ImageStack::empty();
++    };
++    let spline = crate::vm::engine::frozen::IMAGE_SPLINE_BASE;
++    let mut images: Vec<BaseImage> = Vec::new();
++    // 栈底 = std 底座（建于空 ⇒ below_key 空）
++    if let Some(b) = ensure_base()
++        && b.lowering_fp == fp
++        && b.below_key.is_empty()
++    {
+         images.push(b);
+     }
++    // 依赖 image：**定点装载**——反复扫描全部 crate，任何 below_key == 当前前缀键的
++    // image 都装（一个 image 一旦其构建前缀被重装齐即可装），直到一轮零新增。比规范序
++    // 单趟命中率高（不受 crate_id 序与构建拓扑序错位之限）。并行构建下兄弟依赖仍可能
++    // 互斥（线性链无法表达非线性 DAG）——正确性由 below_key 精确匹配保证，命中率实测。
++    let mut ids: Vec<u64> = tcx
++        .crates(())
++        .iter()
++        .map(|&c| tcx.stable_crate_id(c).as_u64())
++        .collect();
++    ids.sort_unstable();
++    ids.dedup();
++    let mut remaining: Vec<u64> = ids;
++    loop {
++        let prefix_key = chain_key_of(&images);
++        let k = images.iter().filter(|i| i.domain >= spline).count();
++        let domain_k = crate::vm::engine::frozen::image_addr(k);
++        let mut added = false;
++        let mut i = 0;
++        while i < remaining.len() {
++            let crate_id = remaining[i];
++            let path = dep_image_path(&stamp, fp, crate_id, &prefix_key);
++            let hit = load(&path, &stamp).filter(|img| {
++                img.key == image_key(&stamp, fp, crate_id)
++                    && img.below_key == prefix_key
++                    && img.domain == domain_k
++                    && img.lowering_fp == fp
++            });
++            if let Some(img) = hit {
++                images.push(img);
++                remaining.swap_remove(i);
++                added = true;
++                break; // 前缀已变，重算 prefix_key/k 再扫
++            }
++            i += 1;
++        }
++        if !added {
++            break;
++        }
++    }
++    if std::env::var_os("MIRVM_IMAGE_DEBUG").is_some() {
++        use std::io::Write;
++        if let Ok(mut f) = std::fs::OpenOptions::new()
++            .create(true)
++            .append(true)
++            .open(base_dir().join("image.log"))
++        {
++            let deps = images.iter().filter(|i| i.domain >= spline).count();
++            let total: usize = images.iter().map(|i| i.module.funcs.len()).sum();
++            let _ = writeln!(
++                f,
++                "load_chain: 装载 {} image（{deps} 依赖 + 底座），剩 {} 未装；共 {total} fns",
++                images.len(),
++                remaining.len()
++            );
++        }
++    }
+     ImageStack::from_images(images)
+ }
+ 
++/// 依赖 image 成像（S3′b）：在依赖自己的 cargo 会话（DepCallbacks，-Zno-codegen，
++/// tcx 合法在场、无 guest 运行 ⇒ 快照天然洁净）就地降低本 crate mono 集减栈下。
++/// 最佳努力：一切失败静默跳过（该依赖退 delta；诊断不入 stderr——那是依赖诊断流）。
++pub fn build_dep_image(tcx: TyCtxt<'_>) {
++    let dbg = |m: &str| {
++        if std::env::var_os("MIRVM_IMAGE_DEBUG").is_some() {
++            use std::io::Write;
++            if let Ok(mut f) = std::fs::OpenOptions::new()
++                .create(true)
++                .append(true)
++                .open(base_dir().join("image.log"))
++            {
++                let _ = writeln!(f, "{m}");
++            }
++        }
++    };
++    if disabled() {
++        return;
++    }
++    let crate_name = tcx.crate_name(rustc_hir::def_id::LOCAL_CRATE);
++    // 关键（S3′b 根因）：cargo 流水线的 metadata-only 趟 should_codegen()=false ⇒
++    // reachable_non_generics 空（symbol_export.rs:53）⇒ lib 自身非泛型函数不成为 mono
++    // root（Lazy 策略）⇒ 只收到 core 泛型实例（已在底座）⇒ 空 image。必须门控在
++    // should_codegen()=true 的 link 趟成像——那趟的 mono 集 = native 给 rlib codegen 的集。
++    if !tcx.sess.opts.output_types.should_codegen() {
++        dbg(&format!("dep-image: {crate_name} should_codegen=false（metadata 趟），跳过"));
++        return;
++    }
++    let Some(stamp) = crate::sysroot::current_stamp_value() else {
++        dbg("dep-image: 无 sysroot stamp");
++        return;
++    };
++    let fp = session_fp(tcx);
++    let stack = load_chain(tcx); // 本依赖的上游 image 链
++    let crate_id = tcx
++        .stable_crate_id(rustc_hir::def_id::LOCAL_CRATE)
++        .as_u64();
++    let prefix_key = stack.chain_key();
++    let path = dep_image_path(&stamp, fp, crate_id, &prefix_key);
++    if path.exists() {
++        dbg(&format!("dep-image: {crate_name} 已存在，跳过"));
++        return; // 已成像（跨运行/项目复用）
++    }
++    let k = stack.dep_count();
++    let domain = crate::vm::engine::frozen::image_addr(k);
++    dbg(&format!(
++        "dep-image: {crate_name} collect={} 个 mono item",
++        crate::lower::collect::collect(tcx).len()
++    ));
++    let (mut module, exports) = crate::lower::lower_for_image_build(tcx, &stack, k);
++    // 三判据（同底座）：冻结区落声明域 + 无宿主地址直嵌（environ 类依赖不成像退 delta）
++    let frozen_ok = module
++        .frozen
++        .as_ref()
++        .is_some_and(|fr| fr.at_fixed_base() && fr.home() == domain);
++    if !frozen_ok {
++        dbg(&format!(
++            "dep-image: {crate_name} 冻结区未落域 {domain:#x}（栈 dep={k}）"
++        ));
++        return;
++    }
++    if !module.foreign_static_syms.is_empty() {
++        dbg(&format!(
++            "dep-image: {crate_name} 宿主地址直嵌 {:?}，退 delta",
++            module.foreign_static_syms
++        ));
++        return;
++    }
++    let ok = write_image_file(
++        &path,
++        crate_id,
++        &prefix_key,
++        domain as u64,
++        fp,
++        &stamp,
++        &mut module,
++        exports,
++    );
++    dbg(&format!(
++        "dep-image: {crate_name} 成像={ok}（fns={}，栈 dep={k}，域={domain:#x}）",
++        module.funcs.len()
++    ));
++}
++
++/// image 文件序列化 + 原子发布（std 底座与依赖 image 共用）。字节确定性：
++/// exports/fn_addrs（HashMap 随机迭代序）摘排序 Vec 落盘（module 内清空），装载端重建。
++fn write_image_file(
++    out: &std::path::Path,
++    crate_id: u64,
++    below_key: &str,
++    domain: u64,
++    fp: (bool, bool, bool),
++    stamp: &str,
++    module: &mut ir::Module,
++    exports: crate::lower::BaseExports,
++) -> bool {
++    let mut export_syms: Vec<(Box<str>, ir::FuncId)> = module.exports.drain().collect();
++    export_syms.sort_unstable();
++    let mut fn_addr_pairs: Vec<(u64, ir::FuncId)> = module.fn_addrs.drain().collect();
++    fn_addr_pairs.sort_unstable();
++    let mut fn_entry_syms = exports.fn_entry_syms;
++    fn_entry_syms.sort_unstable();
++    let mut static_syms = exports.static_syms;
++    static_syms.sort_unstable();
++    let mut tls_syms = exports.tls_syms;
++    tls_syms.sort_unstable();
++    let file = BaseFile {
++        build_id: env!("MIRVM_BUILD_ID").to_string(),
++        sysroot_stamp: stamp.to_string(),
++        lowering_fp: fp,
++        crate_id,
++        below_key: below_key.to_string(),
++        domain,
++        module: std::mem::take(module),
++        export_syms,
++        fn_addr_pairs,
++        fn_entry_syms,
++        static_syms,
++        tls_syms,
++    };
++    let Ok(bytes) = postcard::to_stdvec(&file) else {
++        return false;
++    };
++    let Some(dir) = out.parent() else {
++        return false;
++    };
++    if std::fs::create_dir_all(dir).is_err() {
++        return false;
++    }
++    let tmp = dir.join(format!(
++        ".{}.tmp-{}",
++        out.file_name().unwrap_or_default().to_string_lossy(),
++        std::process::id()
++    ));
++    if std::fs::write(&tmp, &bytes).is_err() || std::fs::rename(&tmp, out).is_err() {
++        let _ = std::fs::remove_file(&tmp);
++        return false;
++    }
++    true
++}
++
+ /// 偏移合并：[栈…] ++ delta 拼单表（delta 的 fn/TLS/asm id 已从栈总量起编；
+ /// 各 image funcs 按绝对 FuncId 顺序存 ⇒ 顺次拼接位置 = 绝对 id）。合并后重物化
+ /// asm-stub（image 文件里的 stub 地址是构建进程的活体，必须以配方在本进程幂等重物化
+@@ -335,56 +654,25 @@ impl Callbacks for BaseBuildCallbacks {
+         // "@entry" 是 --vm-stats 的程序入口别名；底座作为库使用，不导出合成入口
+         module.exports.remove("@entry");
+ 
+-        let sess = tcx.sess;
+         let Some(sysroot_stamp) = crate::sysroot::current_stamp_value() else {
+             eprintln!("base-image: sysroot stamp 不可得，放弃");
+             return Compilation::Stop;
+         };
+-        // 字节确定性：HashMap（RandomState 随机迭代序）摘出为排序 Vec 落盘
+-        let mut export_syms: Vec<(Box<str>, ir::FuncId)> = module.exports.drain().collect();
+-        export_syms.sort_unstable();
+-        let mut fn_addr_pairs: Vec<(u64, ir::FuncId)> = module.fn_addrs.drain().collect();
+-        fn_addr_pairs.sort_unstable();
+-        let mut fn_entry_syms = exports.fn_entry_syms;
+-        fn_entry_syms.sort_unstable();
+-        let mut static_syms = exports.static_syms;
+-        static_syms.sort_unstable();
+-        let mut tls_syms = exports.tls_syms;
+-        tls_syms.sort_unstable();
+-        let file = BaseFile {
+-            build_id: env!("MIRVM_BUILD_ID").to_string(),
+-            sysroot_stamp,
+-            lowering_fp: (
+-                sess.ub_checks(),
+-                sess.overflow_checks(),
+-                sess.contract_checks(),
+-            ),
+-            module,
+-            export_syms,
+-            fn_addr_pairs,
+-            fn_entry_syms,
+-            static_syms,
+-            tls_syms,
+-        };
+-        let Ok(bytes) = postcard::to_stdvec(&file) else {
+-            eprintln!("base-image: 序列化失败（冻结区非定基？），放弃");
+-            return Compilation::Stop;
+-        };
+-        let Some(dir) = self.out.parent() else {
+-            return Compilation::Stop;
+-        };
+-        let _ = std::fs::create_dir_all(dir);
+-        let tmp = dir.join(format!(
+-            ".{}.tmp-{}",
+-            self.out.file_name().unwrap_or_default().to_string_lossy(),
+-            std::process::id()
+-        ));
+-        if std::fs::write(&tmp, &bytes).is_err() || std::fs::rename(&tmp, &self.out).is_err() {
+-            let _ = std::fs::remove_file(&tmp);
+-            eprintln!("base-image: 写文件失败，放弃");
+-            return Compilation::Stop;
++        // std 底座：crate_id=0、below_key=""（建于空）、域=底座固定域
++        if write_image_file(
++            &self.out,
++            0,
++            "",
++            crate::vm::engine::frozen::BASE_IMAGE_FIXED_ADDR as u64,
++            session_fp(tcx),
++            &sysroot_stamp,
++            &mut module,
++            exports,
++        ) {
++            self.ok = true;
++        } else {
++            eprintln!("base-image: 序列化/写文件失败，放弃");
+         }
+-        self.ok = true;
+         Compilation::Stop
+     }
+ }
+diff --git a/src/cli.rs b/src/cli.rs
+index 17091a5..a9a0f73 100644
+--- a/src/cli.rs
++++ b/src/cli.rs
+@@ -227,6 +227,11 @@ struct DepCallbacks;
+ impl Callbacks for DepCallbacks {
+     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
+         let _ = tcx.collect_and_partition_mono_items(());
++        // S3′b 依赖成像：本依赖 mono 集减栈下 → image 文件（跨运行/项目复用）。
++        // 最佳努力，失败静默（该依赖退 delta）；panic 兜住——绝不因成像坏掉依赖编译。
++        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            crate::baseimage::build_dep_image(tcx);
++        }));
+         Compilation::Continue
+     }
+ }
+@@ -434,25 +439,17 @@ impl Callbacks for MirvmCallbacks {
+                 .expect("write_mir_fn failed");
+             print!("{}", String::from_utf8_lossy(&buf));
+         } else {
+-            // S4/S3′ 降低指纹会话内验证：image 栈烤入构建会话的 (ub/overflow/contract)
+-            // checks，本会话不一致（cargo runner 自定义 profile 旗标等）即弃整栈走全量
+-            // 降低——错指纹复用 = image 函数带着另一套检查语义（错值级）。
+-            let sess = tcx.sess;
+-            let fp = (
+-                sess.ub_checks(),
+-                sess.overflow_checks(),
+-                sess.contract_checks(),
+-            );
+-            if !self.stack.fp_matches(fp) {
+-                self.stack = crate::baseimage::ImageStack::empty();
+-            }
++            // S3′ image 栈会话内装配（load_chain 需 tcx.crates + 会话指纹——只能在此）：
++            // std 底座 + 依赖 image 链，贪心前缀，fp 不符的 image 自动排除（错指纹复用 =
++            // 另一套检查语义，错值级）。
++            self.stack = crate::baseimage::load_chain(tcx);
+             // callback 只做加载相；执行相必须等 tcx.finish、诊断收尾和 compiler drop 全部完成。
+             let t_lower = std::time::Instant::now();
+             self.module = Some(crate::lower::lower_program(tcx, &self.stack));
+             self.timing.lower = Some(t_lower.elapsed());
+             // L2 入账：guest 运行前的洁净快照（argv 尚未终结化）。
+             // 会话有任何告警/错误即不入账——warm 路径无法重演诊断（见 SESSION_WARNINGS）。
+-            // S4/S3′：delta 条目携带键链（装载时双验证，防错配 image 栈）。
++            // S3′：delta 条目携带 image 链引用（warm 据此重装并逐 ref 校验）。
+             let t_store = std::time::Instant::now();
+             if session_diagnostics_clean()
+                 && tcx.sess.dcx().has_errors().is_none()
+@@ -460,7 +457,7 @@ impl Callbacks for MirvmCallbacks {
+                     tcx,
+                     &self.rustc_args,
+                     self.module.as_ref().expect("刚设置"),
+-                    self.stack.key(),
++                    self.stack.chain_refs(),
+                 )
+             {
+                 self.timing.cache_store = Some(t_store.elapsed());
+@@ -597,17 +594,12 @@ fn run_driver(
+     suppress_runner_warning_summary: bool,
+ ) -> ExitCode {
+     let t_start = std::time::Instant::now();
+-    // S4/S3′ image 栈：装载底座 + 依赖 image 链（失败/旁路 = 空栈，全量冷路径自愈）。
+-    // 降低指纹（ub/overflow/contract checks）要到会话内才能验证——after_analysis 复核。
+-    let stack = if dump_mir {
+-        crate::baseimage::ImageStack::empty()
+-    } else {
+-        crate::baseimage::ensure()
+-    };
+-    let base_key = stack.key().map(str::to_owned);
+-    // L2 热路径（M6 片2）：命中即跳过整个 rustc 会话（前端+metadata+mono+lower）。
+-    // dump-mir 需要 tcx，强制冷路径。S4/S3′：delta 条目与键链双验证（ircache）。
+-    if !dump_mir && let Some(mut module) = crate::ircache::lookup(&rustc_args, base_key.as_deref())
++    // L2 热路径（M6 片2 / S3′）：命中即跳过整个 rustc 会话（前端+metadata+mono+lower）。
++    // image 链从 L2 header 重装（warm 无 tcx）；dump-mir 需要 tcx，强制冷路径。
++    let stamp = crate::sysroot::current_stamp_value();
++    if !dump_mir
++        && let Some((mut module, stack)) =
++            crate::ircache::lookup(&rustc_args, stamp.as_deref())
+     {
+         let timing = PhaseTiming {
+             cache_load: Some(t_start.elapsed()),
+@@ -637,7 +629,8 @@ fn run_driver(
+         t_start,
+         timing: PhaseTiming::default(),
+         rustc_args: rustc_args.clone(),
+-        stack,
++        // S3′：栈在 after_analysis 经 load_chain(tcx) 装配（tail absorb 用）
++        stack: crate::baseimage::ImageStack::empty(),
+     };
+     let compiler_code = rustc_driver::catch_with_exit_code(|| {
+         rustc_driver::run_compiler(&rustc_args, &mut callbacks)
+diff --git a/src/ircache.rs b/src/ircache.rs
+index dcf5d84..78a0384 100644
+--- a/src/ircache.rs
++++ b/src/ircache.rs
+@@ -36,10 +36,10 @@ struct Header {
+     files: Vec<FileStamp>,
+     /// `env!`/`option_env!` 依赖：(名, 编译时值；None = 编译时未设)
+     envs: Vec<(String, Option<String>)>,
+-    /// S4 分层：delta 模块引用的底座键（None = 无底座的全量模块）。
+-    /// delta 字节码/冻结区内嵌底座绝对量（FuncId 偏移、底座地址）——
+-    /// 错配底座装载 = 全盘错值，必须精确相等。
+-    base_key: Option<String>,
++    /// S3′ 分层：delta 引用的 image 栈链——(文件路径, 身份键) 有序列表（空 = 全量
++    /// 模块，无 image）。delta 字节码/冻结区内嵌各 image 的绝对量（FuncId 偏移、跨域
++    /// 地址）——warm 据此重装同一条链并逐 ref 校验，任一失配即 miss（冷路重建自愈）。
++    image_chain: Vec<(String, String)>,
+ }
+ 
+ fn disabled() -> bool {
+@@ -76,13 +76,10 @@ fn stamp(path: &str) -> Option<FileStamp> {
+     })
+ }
+ 
+-/// 头部三重相等：build id（跨构建陈账）+ 完整 args 回比（哈希碰撞免疫）+
+-/// 底座键精确相等（S4：delta 内嵌底座绝对量——FuncId 偏移/底座地址——底座换代或
+-/// 在场性变化时错配装载 = 全盘错值；None 侧亦须精确，无底座会话不得吃底座 delta）。
+-fn header_matches(header: &Header, rustc_args: &[String], base_key: Option<&str>) -> bool {
+-    header.build_id == env!("MIRVM_BUILD_ID")
+-        && header.args == rustc_args
+-        && header.base_key.as_deref() == base_key
++/// 头部相等：build id（跨构建陈账）+ 完整 args 回比（哈希碰撞免疫）。
++/// image 链的一致性由 ImageStack::from_refs 逐 ref 校验（键 + below_key 链）。
++fn header_matches(header: &Header, rustc_args: &[String]) -> bool {
++    header.build_id == env!("MIRVM_BUILD_ID") && header.args == rustc_args
+ }
+ 
+ fn env_matches(name: &str, recorded: &Option<String>) -> bool {
+@@ -93,15 +90,19 @@ fn env_matches(name: &str, recorded: &Option<String>) -> bool {
+     }
+ }
+ 
+-/// 热路径查找。返回的 Module 已含恢复到固定基址的冻结区；asm_stub_addrs 是
+-/// 序列化时的陈旧地址，调用方**必须**以 asm_sites 重物化覆写后再执行。
+-pub fn lookup(rustc_args: &[String], base_key: Option<&str>) -> Option<ir::Module> {
++/// 热路径查找。返回 (delta 模块, 已装 image 栈)——调用方 absorb_stack 合并后运行。
++/// delta 的冻结区已恢复固定基址；asm_stub_addrs 由 absorb_stack 以配方重物化覆写。
++/// stamp = 当前 sysroot 新鲜度（image 装载校验用；None 时含 image 的条目一律 miss）。
++pub fn lookup(
++    rustc_args: &[String],
++    sysroot_stamp: Option<&str>,
++) -> Option<(ir::Module, crate::baseimage::ImageStack)> {
+     if disabled() {
+         return None;
+     }
+     let data = std::fs::read(entry_path(rustc_args)).ok()?;
+     let (header, module_bytes) = postcard::take_from_bytes::<Header>(&data).ok()?;
+-    if !header_matches(&header, rustc_args, base_key) {
++    if !header_matches(&header, rustc_args) {
+         return None;
+     }
+     if !header
+@@ -114,6 +115,12 @@ pub fn lookup(rustc_args: &[String], base_key: Option<&str>) -> Option<ir::Modul
+     if !header.envs.iter().all(|(k, v)| env_matches(k, v)) {
+         return None;
+     }
++    // image 链重装（结构一致性逐 ref 校验；任一失配即 miss，冷路重建自愈）
++    let stack = if header.image_chain.is_empty() {
++        crate::baseimage::ImageStack::empty()
++    } else {
++        crate::baseimage::ImageStack::from_refs(&header.image_chain, sysroot_stamp?)?
++    };
+     // Module 反序列化内含冻结区固定基址恢复；失败（基址被占等）→ miss
+     let module: ir::Module = postcard::from_bytes(module_bytes).ok()?;
+     // 加载相物化的 .so（native archive / global_asm）被清理 → miss 走冷路径自愈
+@@ -124,7 +131,7 @@ pub fn lookup(rustc_args: &[String], base_key: Option<&str>) -> Option<ir::Modul
+     {
+         return None;
+     }
+-    Some(module)
++    Some((module, stack))
+ }
+ 
+ /// 冷路径入账（lower 刚完成、guest 未运行的洁净态）。返回是否真正写入。
+@@ -132,7 +139,7 @@ pub fn store(
+     tcx: TyCtxt<'_>,
+     rustc_args: &[String],
+     module: &ir::Module,
+-    base_key: Option<&str>,
++    image_chain: Vec<(String, String)>,
+ ) -> bool {
+     if disabled() {
+         return false;
+@@ -193,7 +200,7 @@ pub fn store(
+         args: rustc_args.to_vec(),
+         files: stamps,
+         envs,
+-        base_key: base_key.map(str::to_owned),
++        image_chain,
+     };
+     let Ok(mut buf) = postcard::to_stdvec(&header) else {
+         return false;
+@@ -290,23 +297,18 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn base_key_must_match_exactly_including_absence() {
++    fn header_matches_build_id_and_args() {
+         let args = vec!["mirvm".to_string(), "x.rs".to_string()];
+-        let mk = |base_key: Option<&str>| super::Header {
++        let mk = || super::Header {
+             build_id: env!("MIRVM_BUILD_ID").to_string(),
+             args: args.clone(),
+             files: Vec::new(),
+             envs: Vec::new(),
+-            base_key: base_key.map(str::to_owned),
++            image_chain: Vec::new(),
+         };
+-        // 同键 ✓；换代 ✗；在场性变化（有→无 / 无→有）双向 ✗
+-        assert!(super::header_matches(&mk(Some("k1")), &args, Some("k1")));
+-        assert!(!super::header_matches(&mk(Some("k1")), &args, Some("k2")));
+-        assert!(!super::header_matches(&mk(Some("k1")), &args, None));
+-        assert!(!super::header_matches(&mk(None), &args, Some("k1")));
+-        assert!(super::header_matches(&mk(None), &args, None));
+-        // 既有轴回归：args 漂移仍拒
++        assert!(super::header_matches(&mk(), &args));
++        // args 漂移拒（image 链一致性由 ImageStack::from_refs 逐 ref 校验，gate 覆盖）
+         let other = vec!["mirvm".to_string(), "y.rs".to_string()];
+-        assert!(!super::header_matches(&mk(None), &other, None));
++        assert!(!super::header_matches(&mk(), &other));
+     }
+ }

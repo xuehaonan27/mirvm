@@ -57,7 +57,42 @@ evcxr 四点不满（延迟、状态/借用限制、跑不了完整项目、编�
 
 ## 2. 当前状态速览（你在哪 / 下一步）
 
-**当前唯一权威汇总是 [current-status.md](current-status.md)**。简表：
+**当前唯一权威汇总是 [current-status.md](current-status.md)**。
+
+### ★ 2026-07-15 断点（最新；下面的 M4/M5.1 简表是历史现场，别当现状）
+
+自 M5.1 后又落地了一大串，全绿基线现为 **gate5 = 50 pass / 0 expected-red / 0 skip / 0 fail**：
+
+- **M5.2**（2026-07-14）非 JIT 语义补全（D8a–D8l）：真栈守卫、simd 全家族+LaneKind、
+  f16/f128、atomic 序、backtrace 影子帧、signal async、fork/exec、128 位残余、嵌套 DST；
+  两历史 XFAIL（signal/backtrace）全清。见 m5-log M5.2 节。
+- **M6 冷启动轨**（2026-07-14/15，coldstart-research 调研先行）：
+  - **S1** 小件包：sysroot 仪式 stamp 化（warm fib 墙钟 85→55ms）+ 三个缓存盲区修缮
+    （runner 环境化石化 / 假 bin dep-info 真实化 / diff_cargo warm 维度）。
+  - **S2** 依赖 codegen 剪枝（D9d）：target 依赖 in-process + `-Zno-codegen`；CPU−12%/磁盘−60%。
+  - **S4** std 预降低底座（s4-base-image-design）：空 main 底座 0x6800 域 + delta 0x6900，
+    偏移合并，v0 symbol_name 复用；**脚本纯冷 385→104ms（lower 9.6×）**。
+- **M5.3 方法级 Cranelift JIT**（2026-07-15，m5.3-design，三片 a/b/c）：J1 分层基座
+  （call_guest 单一派发点 + PLT/计数）+ 翻译器标量子集（语义 = 与解释器逐位一致）+ CFI
+  （spike5 管线产品化）。**fib(32) 解释 922.6→JIT 19.3ms（47.8×）= 2.9× native**；硬门
+  ≤80ms 达成。准入 = 标量子集 + unwind-transparent（Div/Rem/浮点/内存/track_caller/
+  cleanup 边 = M5.4 全覆盖+LSDA）。JIT-on/off/native 三重差分是第一 oracle。
+- **S3′a**（2026-07-15，commit b4ed691）多源查找+样条：单底座泛化成 image 栈（行为等价）。
+
+**⚠ 当前停靠点 = S3′b 依赖成像**：撞上"线性链无法表达非线性依赖 DAG"的固有难题，实测
+命中率 4/19（eco），不达 988→100-300ms 目标。**这是设计岔路，需裁定方向后再续，详见
+[s3b-design-fork.md](s3b-design-fork.md)**（四条出路取舍 + 推荐方案 A 单 deps-image）。
+已探索的 chain 代码存 `docs/parked/s3b-chain-wip.patch`（`git apply` 可接续）；工作树
+已回退到 S3′a 干净绿态。**接手先读 s3b-design-fork.md，别信"chain 只是没调好"**。
+
+**其余未做**：M5.4（翻译器全覆盖 + LSDA）、M5.5（vmctx 终裁 + gate6）、S3′c（跨项目共享，
+依 S3′b 方案而定）、轨 C ④mode B `.mirvm` 包 / ⑤发行（distribution-design D9f，M5.3 后）。
+
+---
+
+（以下简表写于 2026-07-12/13，止于 M5.1/真实项目——**历史现场，非现状**）
+
+简表：
 
 - M0–M2.5 的 InterpCx tier-0 是历史 bootstrap，2026-07-09 已删除。
 - M4.0–M4.5 已完成：typed bytecode、tcx-free tree-walking interpreter、FFI/unwind、真线程、
@@ -406,15 +441,25 @@ trap_body 无出边、"未收集"callee 无出边（worklist 落地后前两个�
 
 ## 10. 当前挂起检查点
 
-1. **vmctx T/R 活检查点**：M5 先 T 骨架；分配/guest TLS 内联进 JIT 后用真实负载重测 R。
-2. **landing pad/LSDA**（JIT 帧内跑 drop glue）→ M5.3；spike5 只验证 CFI 传播半边。
-3. **Static archive 扩面检查点**：当前 M5.1 只支持受约束 Linux/ELF；非 PIC、跨 archive
-   依赖/重名、ctor/dtor、thin、export-symbols 等均响亮拒绝，扩面前须新 link plan/生命周期设计。
-4. **fork/clone os::+atfork**：仍未实现。
-5. **预降低 std 发行工件**（mode B）：非泛型 std 预降字节码 + 泛型带
-   多态 MIR（泛型不可能全预降）；收益=启动只降用户 crate、消费端零 rust-src；落 M4.5 后/M5
-   前后，当前仍未实现。
-6. **生命周期/嵌入**：Shared/thunk/asm/TLS 资源回收、可恢复错误和多 Engine 语义。
+**★ 最活跃（2026-07-15）= S3′b 依赖成像设计岔路**：见 §2 断点 + [s3b-design-fork.md](s3b-design-fork.md)。
+链方案命中率 4/19 证伪，需在四条出路间裁定（推荐 A 单 deps-image）。代码断点存
+`docs/parked/s3b-chain-wip.patch`。**这是下一个 session 最该接的活。**
+
+其余（多为 M5.4/M5.5 前沿，非 S3′b 那样的立即岔路）：
+
+1. **vmctx T/R 活检查点**：M5.3 已落 T 骨架（编译码格③为空，真负载测不出 T/R 差）；
+   分配/guest TLS 内联进 JIT 后用真实负载重测 R（vmctx-passing §7）。
+2. **JIT 翻译器全覆盖 + LSDA**（M5.4）：当前 M5.3 准入 = 标量子集 + unwind-transparent；
+   Div/Rem/浮点/128 位/simd/内存操作数/track_caller = 全覆盖，cleanup 边 = LSDA
+   （cg_clif GccExceptTable 同构，先 probe）。spike5 只验了 CFI 传播半边。
+3. **Static archive 扩面检查点**：M5.1 只支持受约束 Linux/ELF；非 PIC、跨 archive
+   依赖/重名、ctor/dtor、thin、export-symbols 等均响亮拒绝，扩面前须新 link plan。
+4. **fork/clone os::+atfork**：M5.2 D8f 已放行 guest 单线程 fork + exec 直通；多线程
+   fork、vfork/clone/setjmp 系仍响亮拒绝。
+5. **mode B `.mirvm` 包 / 发行**（distribution-design D9f ④⑤，M5.3 后）：S3′ 的依赖 image
+   + delta 变可携带即 mode B 机内半成品；外部格式冻结守 D9b 门。
+6. **生命周期/嵌入**：Shared/thunk/asm/TLS 资源回收、可恢复错误和多 Engine 语义；
+   JIT 机器码不入缓存（进程内易失，与 mode B/零拷贝字节码同题）。
 
 ---
 

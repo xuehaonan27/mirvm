@@ -19,7 +19,9 @@
 | M6 片5（S2 / D9d 依赖剪枝） | **完成（2026-07-14）** | target 依赖 in-process + `-Zno-codegen`（树内现成空转；metadata-only rlib 由默认 link 路径照常产出）；post-mono const-eval 错误面由显式 mono 收集补齐（探针：native/mirvm 同一条 E0080）。账本诚实修正：wall ≈0（128 核噪声内，调研预估证伪）、CPU −12%、磁盘 −60%、少 22 次 exec（m6-log 片5） |
 | M6 片6（S4 std 预降低底座） | **完成（2026-07-15）** | 空 main 底座（0x6800 域）+ delta（0x6900 域）偏移合并（施工偏离 §7.3：取代域位双表，解释器零改动）；v0 symbol_name 复用（fn/static/TLS 去重）；降低指纹会话内验证；L2 分层 base_key。**脚本纯冷 385→104ms（lower 9.6×）**，ecosystem runner lower 1272→988ms（std 份额）；底座构建幂等且字节确定（验收抓获 HashMap 随机序缺陷）；gate5 46→47（新增旁路冒烟）全绿（[s4-base-image-design.md](s4-base-image-design.md)，m6-log 片6） |
 | **M5.3 JIT 骨架** | **完成（2026-07-15）** | 方法级 Cranelift JIT 三片全落地（[m5.3-design.md](m5.3-design.md) Q1-Q4 全批；m5-log M5.3 节）：J1 分层基座（call_guest 单一派发点 + PLT/计数，S4 合并 FuncId 空间）+ 翻译器标量子集（语义 = 与解释器逐位一致；调用点两路分治——热路 PLT 间接/冷路 c2i）+ CFI（spike5 管线产品化）。**fib(32)：解释 engine 922.6→19.3ms（47.8×）= 2.9× native；硬门 ≤80ms 达成（69ms 含加载）**。oracle：逢调即编（阈值=1）diff 30/30 + JIT-off 对齐 + gate5 三新行（硬门/逢调即编全量/off 冒烟），gate 总数 47→50 |
-| M5.4–M5.5 | **未实现** | 翻译器全覆盖 + LSDA（cg_clif GccExceptTable 同构）、vmctx 终裁计量与 gate6 收口（m5-design 原案不动）。S3′ 依赖成像（m5.3-design §3.3，已批）亦未施工 |
+| S3′a（image 栈重构） | **完成（2026-07-15，commit b4ed691）** | 多源查找 + 地址样条（行为等价）：单底座泛化成 image 栈（`[std 底座, dep…]`）；frozen 样条域 + is_valid_home 白名单；ImageStack 并集查找/累积偏移/键链；Linker 收 &ImageStack。无 image/单底座两态字节等价，gate5 50/0/0/0 |
+| **S3′b（依赖成像）** | **暂停——设计岔路（2026-07-15）** | 依赖在自己 cargo 会话内成像、按 below_key 拼线性链。**正确性airtight但撞"线性链无法表达非线性依赖 DAG"固有难题，实测命中率 4/19（eco），不达 988→100-300ms 目标**。四条出路取舍见 **[s3b-design-fork.md](s3b-design-fork.md)**（推荐 A 单 deps-image，跨运行）；已探索 chain 代码存 `docs/parked/s3b-chain-wip.patch`；工作树已回退 S3′a 绿态。**需裁定方向后再续** |
+| M5.4–M5.5 | **未实现** | 翻译器全覆盖 + LSDA（cg_clif GccExceptTable 同构）、vmctx 终裁计量与 gate6 收口（m5-design 原案不动）。S3′c 跨项目共享依 S3′b 方案而定 |
 
 目前唯一产品执行引擎是 M4 解释器。Cargo 默认的 `cranelift` feature 只编译冻结的 Spike 5；
 生产调用路径还没有方法级 JIT，也没有 `mixed`/`jit` 产品模式。M5.2 把解释器语义面补全

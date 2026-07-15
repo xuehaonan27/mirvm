@@ -403,6 +403,32 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
   修 = 底座文件将两表摘出为**排序 Vec**（module 内清空，装载端重建）；L2 条目无
   确定性契约不受影响。
 
+### 7.4 2026-07-15：S3′b 依赖成像暂停——线性链证伪，待裁定方向
+
+- **决策**：S3′b（依赖成像）施工中，per-crate 链方案的装载命中率被实测证伪（eco 4/19
+  依赖，lower 988→~850ms 基本没降），暂停施工、把设计岔路写成
+  [s3b-design-fork.md](s3b-design-fork.md) 交后续 session 裁定；工作树回退 S3′a 绿态
+  （commit b4ed691），已探索代码存 `docs/parked/s3b-chain-wip.patch`。
+- **为什么证伪**：链是**线性**结构，依赖是**非线性 DAG**。cargo 并行构建下多数依赖
+  建于 `[std 底座]`（上游 image 未就绪），装载贪心拼链时装完首个 `[std]`-built 依赖后
+  前缀就移过 `[std]`，其余全部 below_key 失配 → 只能装出一条穿过 DAG 的线性链。定点
+  装载（反复扫描）已是链方案最优，仍 4/19。**这是数据结构层的固有信息损失，非实现 bug**
+  ——m5.3-design §3.3 已预警为"最尖风险"并留"实测不达标再议"，本次即触发。
+- **正确性未破**：链方案本身airtight（image 只在 below_key 精确等于前缀键时装，错配退
+  delta，绝不腐坏）；证伪的是**价值**（命中率），不是正确性。任何后续方案都必须守此红线
+  ——绝对 FuncId 偏移/跨域地址只在"装载栈下 == 构建栈下"时有效。
+- **被替代**：m5.3-design §3.3 的"per-crate 链 + 定点装载"作为 v1 主实现被替代；四条
+  出路（A 单 deps-image 跨运行 / B chain+屏障 / C reloc / D chain+reloc / E 接受低命中）
+  取舍见 s3b-design-fork，当前推荐 **A**（最简、风险最低、兑现主收益 edit-rerun 988→
+  ~150ms，代价=放弃跨项目共享 S3′c）。
+- **重估触发器**：裁定 A–E 之一时；若选 A 后确有"多项目同 lockfile 共享"的实需，再上
+  B/D 补跨项目。
+- **施工副产物（已解，记备后用）**：① 依赖成像必须门控
+  `should_codegen()`=true（cargo 流水线 metadata-only 趟 reachable_non_generics 空 ⇒
+  lib 自身函数不成 mono root ⇒ 空 image；symbol_export.rs:53）。② fn-entry cell 内容
+  （FuncId）是**调试用**，运行期派发走 fn_addrs 反查 ⇒ relocation（C/D）不必碰冻结区字节，
+  只改 Call.callee/fn_addrs 值/exports 值 3 处类型化字段。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 - P7 设想独立 `src/os/` 物理层；当前 OS/FFI/builtin 逻辑仍分布在 lower、interp、ffi、heap。
