@@ -33,14 +33,25 @@ echo "== corpus =="
 CORPUS_PROGS=${CORPUS_PROGS:-"itertools anyhow rayon chrono indexmap clap csv crossbeam tokio blake3 \
 tempfile walkdir numbigint smallvec bytes sha2 petgraph net_tcp net_udp \
 process tokio_mt mmap blocking_io net_echo_threaded signal backtrace volatile fork_exec \
-portable_simd float_wide atexit"}
+portable_simd float_wide atexit \
+serde_json serde_yaml rand_det flate2 brotli argon2 ed25519 p256 syn_parse hickory \
+unicode_tables wasmi boa_js tiny_skia zip_arch rust_decimal rustfft roaring bitvec \
+compact_str nom_parse comrak_md fst_build spade_delaunay aes_gcm png_round"}
+# jieba_cut 全绿但 mirvm 单跑 77-89s（贴 90s timeout），留 corpus.sh 手工跑批
 for p in $CORPUS_PROGS; do
     src="corpus/c_$p.rs"
     [ -f "$src" ] || continue
+    # ed25519：dalek 官方 serial backend（u128 本意；默认 simd backend 的
+    # avx512ifma vpmadd52 未内建——FRONTIER 记账，见 docs/corpus.md）
+    [ "$p" = ed25519 ] && export CARGO_CFG_CURVE25519_DALEK_BACKEND=serial
     timeout 90 "$MIRVM" run "$src" >"$TMP/corpus-$p.out" 2>"$TMP/corpus-$p.err"; code=$?
+    unset CARGO_CFG_CURVE25519_DALEK_BACKEND
     stdout=$(cat "$TMP/corpus-$p.out")
     out=$(cat "$TMP/corpus-$p.out" "$TMP/corpus-$p.err")
     red_pattern="" red_label=""
+    # M5.x intrinsic 内建欠账（corpus 批1 FRONTIER；内建后 XPASS 强制转绿）
+    [ "$p" = aes_gcm ] && { red_pattern='llvm\.x86\.aesni'; red_label="aesni/pclmul 未内建"; }
+    [ "$p" = png_round ] && { red_pattern='llvm\.x86\.avx2\.psad\.bw'; red_label="psad.bw 未内建"; }
     if [ "$p" = numbigint ] && { [ $code -ne 0 ] \
         || [ "$stdout" != "$NUMBIGINT_ORACLE" ]; }; then
         bad "c_numbigint oracle (exit=$code stdout='$stdout')"

@@ -225,3 +225,80 @@ walkdir 遍历目录时 `UndefinedBehavior(DanglingIntPointer{ InboundsPointerAr
 - **更多 RustCrypto**（aes/chacha20）：预期同 §2.2 cpuid，确认家族一致——低边际，可略。
 - **proc-macro 重度**（syn/quote 作为**依赖被使用**时的运行期，非展开期）：确认运行期确实不碰 proc-macro。
 - 或转向：挑一个 §2.5 实例做 tier-0 裸访问 spike，或转 M4 前骨架 spike。
+
+## 5. 真实项目三维差分扩编（2026-07-15；批1 13 个 + 批2 14 个）
+
+> 背景：M5.4b 收尾期一个错值级 miscompile（analyze_frame 只记基址漏区间）在合成
+> 门禁全绿下潜伏了整片 M5.4a，最终由真实项目（regex capture drop 链）炸出——
+> 用户据此裁定 corpus 从"exit-code 冒烟"升级为 **三维逐字节差分**：
+> **mirvm 默认 / native cargo run / MIRVM_JIT_THRESHOLD=1**，stdout/stderr/exit
+> 全部逐字节一致才算绿（driver 确定性纪律：定种、BTree 序、浮点 to_bits、stderr 真空）。
+> 复跑法：每个 driver 在 `corpus/c_*.rs`，三维命令见其文件头注释与 m5-log M5.4b 节。
+
+### 批1（13 个；10 绿 / 2 FRONTIER / 1 路径探针）
+
+- **绿**：serde_json（Pair 返回密集迭代器）、serde_yaml（unsafe-libyaml 纯 Rust
+  移植）、rand_det（rand 0.9 改名 API）、flate2（miniz_oxide raw deflate；
+  gz/zlib 原生 API 撞下述 FRONTIER 改手工容器等价覆盖）、brotli、argon2
+  （内存硬）、ed25519（dalek u128 域算术；用官方 serial backend 绕下述
+  avx512ifma）、p256（RFC6979 定向量锚点）、syn_parse（递归类型 + drop glue 重）、
+  hickory（DNS codec；ring 撞 bug② 后的替换项）、unicode_tables（大表四件套）。
+- **FRONTIER（锁定 expected-red）**：c_aes_gcm（`llvm.x86.aesni.*`/`pclmulqdq.*`
+  未内建，aes/ghash 运行期探测无 force-soft 退路）、c_png_round
+  （`llvm.x86.avx2.psad.bw` 未内建，simd-adler32/fdeflate 处处必经）。
+- **c_serde_json**：三维对拍机制的路径探针（materialize → script_dir → cargo run -q）。
+
+### 批2（14 个；全绿，2 个 FRONTIER 绕行记录）
+
+- wasmi（**VM-in-VM**：wat 模块调用/memory/global/宿主回调/trap 四类）；
+  boa_js（纯 Rust JS 引擎大物：45 片段全语义面；JIT 队列 5562 函数/发布 1862，
+  输出仍逐字节一致——语义零依赖 JIT 的实证）；
+  tiny_skia（标量路径 2D 光栅化 32 轮，像素 FNV hash 三路一致——浮点重场景
+  JIT 与解释器无分歧）；zip_arch（Stored+deflate；crc32fast **≥128B 单块**必撞
+  pclmulqdq，64B 分块合法绕行；实证 zip deflate 走 raw 不碰 simd-adler32）；
+  rust_decimal（96 位定点）；rustfft（标量路径全绿；默认 avx 撞
+  `llvm.x86.avx2.gather.q.pd.256` = FRONTIER，且运行期探测致两路径 1-ulp 分叉
+  对拍本无意义，钉 default-features=false）；roaring / bitvec（指针打包别名边界）/
+  compact_str（niche 24B 内联临界）；nom_parse / comrak_md（全扩展 CommonMark）/
+  fst_build（自动机）；jieba_cut（钉 =0.10.0：0.10.2 的 bytecount 依赖撞
+  `llvm.x86.sse2.psad.bw`；另避 jieba-macros 0.10.1 semver 破洞）；
+  spade_delaunay（robust 精确谓词：共圆精确零 / 1e-13 近共线 / 1ulp 扰动
+  全逐比特一致）。
+
+### 扩编撞出的两个产品 bug（均已修复）
+
+- **bug① 缓存污染**（`718dac5`）：A2 split 的 fn_addrs 按【值域】分拆，S4 补建
+  条目（底座 fn 在 deps 降低期于 image 冻结区补建 fn 条目）被留在建者 delta——
+  消费方装载同一 image 后其静态烘焙的补建地址在运行期反查表无登记 → 间接调用
+  abort「不是已知 fn 条目」（三个 driver 独立撞见；负对照 edit_rand v2-v6 五连崩
+  同址 0x6a0000001630/core::fmt::write）。**修复 = 按【地址域】分拆**；负对照
+  45 跑 5 崩 → 修复后 45 跑 0 崩。
+- **bug② ring 整 crate lower panic**（`cb09b5b`）：fn 体内 extern fn item 作
+  fn 指针实参 → 取址路径不判 `is_foreign_item` 直取 optimized_mir → rustc query
+  panic。**修复 = foreign_fn_entry_addr（native 链接器语义真符号地址）+
+  elfsym.rs（.symtab 兜底，ring 的 -fvisibility=hidden 归档符号）**。ring
+  SHA-256 三向量与 native 逐字节一致。
+
+### M5.x intrinsic 内建欠账队列（按证据密度排序）
+
+| intrinsic | 撞它的真实 crate |
+|---|---|
+| `llvm.x86.avx2.psad.bw` / `llvm.x86.sse2.psad.bw`（`_mm(256)_sad_epu8`） | png/fdeflate、simd-adler32（→flate2 gz/zlib）、jieba-rs 0.10.2 bytecount |
+| `llvm.x86.pclmulqdq.*` | crc32fast ≥128B 单块（→zip/flate2 gz）、aes-gcm 的 ghash/polyval |
+| `llvm.x86.aesni.*` | aes/aes-gcm（运行期探测无 force-soft） |
+| `llvm.x86.avx512.vpmadd52*`（IFMA） | curve25519-dalek 默认 simd backend |
+| `llvm.x86.avx2.gather.*` | rustfft 默认 avx（GoodThomas/Rader 路径） |
+
+共性机理：guest cpuid 直通宿主 → 运行期派发选中硬件路径 → 未内建 intrinsic 降
+Trap。处理口径：内建进 lower 的 llvm.x86 内建表（M5.2 的 pshufb/sha256 先例；
+属 M5.4d SIMD 或独立 M5.x 片）。内建一个解锁一片真实 crate（png/jieba-0.10.2/
+flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）。
+
+### gate 接线（2026-07-15）
+
+- gate5 corpus 段扩到 57 个程序（新增 24 绿 + aes_gcm/png_round 双 expected-red
+  ——red_pattern 锁定诊断，内建后 XPASS 强制转绿；ed25519 段内注入官方
+  serial-backend env）。jieba_cut 全绿但单跑 77-89s 贴 timeout，留 corpus.sh。
+- corpus.sh 默认清单同步扩编（timeout 600 容纳 jieba）。
+- 三维逐字节差分在 driver 创建时强制执行；gate 内为 exit-code + oracle 级
+  （native 逐字节维的冷构建成本不进 gate）。

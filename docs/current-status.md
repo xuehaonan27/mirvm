@@ -11,7 +11,7 @@
 | M4.0–M4.5 | **完成** | 自研 typed bytecode、tcx-free tree-walking interpreter、FFI、unwind、真线程、TLS 与回调 |
 | M5.0 | **完成并复审** | x86_64 inline-asm stub 工厂：GAS wrapper → `.so` → `dlopen`/`dlsym` |
 | M5.1 | **完成（2026-07-12）** | numbigint、xgetbv、sha2、blake3、ecosystem、diff_cargo 3/3 与六个 release tracer 全绿 |
-| 真实项目 TDD | **继续扩面（2026-07-13）** | workspace-local ripgrep/tokei 驱动四项通用语义修复；三个 workload 已完成 correctness-gated benchmark，另有八个 workload 完成 correctness 对拍 |
+| 真实项目 TDD | **继续扩面（2026-07-15）** | workspace-local ripgrep/tokei 驱动四项通用语义修复；corpus 升级为三维逐字节差分（mirvm 默认 / native / 逢调即编 JIT）并两批扩编 27 个真实 crate（24 绿入 gate5 corpus 段 57 程序、2 expected-red 锁定、1 手工批；[corpus.md §5](corpus.md)）：撞出并已修两个产品 bug（fn_addrs 地址域分拆 `718dac5`、extern fn-ptr foreign 通道 `cb09b5b` 解锁 ring），另钉死 M5.x intrinsic 内建欠账队列（psad.bw/pclmulqdq/aesni/avx512ifma/avx2-gather） |
 | M5.2 | **完成（2026-07-14）** | 非 JIT 语义补全（轨 A 完备）：标量/simd intrinsic 差集、真栈深度、f16/f128、atomic 序、backtrace/signal/fork/atexit/global_asm/naked、128 位残余、嵌套 DST 全清；两个历史 XFAIL 转绿（[m5.2-design.md](m5.2-design.md) D8a–D8l，施工日志见 [m5-log.md](m5-log.md)） |
 | M6 ①② | **完成（2026-07-14）** | 轨 C 分发（[distribution-design.md](distribution-design.md) D9f）：① 相位计时（MIRVM_TIMING 账本）+ ② L2 post-mono engine-IR 缓存（冻结区固定基址整包序列化；热跑加载相 11–15×，std-only 程序 374ms→33ms；告警程序诚实不缓存）；③④⑤ 未立项；施工日志 [m6-log.md](m6-log.md) |
 | M6 片3 前置调研 | **完成（2026-07-14）** | 冷启动/lower 全解剖与杠杆清单（[coldstart-research.md](coldstart-research.md)）：lower 是近常数 std 税（~0.10ms/instance；执行集仅占降低集 7–29%）、lower 相 75% 耗在 rustc 查询/解码机器、依赖构建 codegen 白烧实证、三个缓存盲区（P1 runner 环境化石化 / P2 空 stub .d / P3 diff_cargo 无 warm 维度）；**施工顺序已裁定（decision-history §7.2）：S1 小件包 → S2 依赖剪枝 → S4 底座（设计过审）→ S3 懒降低并入 M5.3 JIT 联合设计** |

@@ -338,3 +338,18 @@ image 13.0MB 落盘；热读（image 命中）lower **507ms（4.4×）**——�
 lower 时间分布（ripgrep: core 8944 inst/422ms、tokei: core 13050 inst/667ms、
 winnow 2404/142ms、regex_syntax 720/177ms）——M5.4 翻译器全覆盖的 workload
 选型与 JIT 收益预估的直接输入。
+
+## S3′b-A2 后续：fn_addrs 地址域分拆修复（2026-07-15，corpus 批1 实锤）
+
+corpus 三维差分扩编（docs/corpus.md §5）撞出 A2 期潜伏 bug：fn_addrs 按【值域】
+分拆把 S4 补建条目（底座 fn 在 deps 降低期于 image 冻结区补建 fn 条目）留在建者
+delta——消费方装载同一 image 后，其静态烘焙的补建地址在运行期反查表无登记
+（absorb_stack 只并 image.fn_addrs；消费方 fn_entry_addr 复用分支也不登记），
+间接调用 abort「不是已知 fn 条目」。三个 driver 独立撞见（rand/flate2/syn）；
+负对照实证：pre-fix edit_rand v2-v6 五连崩同址 0x6a0000001630（core::fmt::write），
+按【地址域】分拆（image_fn_entries 值集 = image 类 + 补建全部条目）后 45 跑 0 崩。
+修复 `718dac5`；旧 image 经 MIRVM_BUILD_ID（src 树哈希）自动作废重建，无需版本号。
+教训留档：**image 侧运行期反查表必须与 image 字节码自洽**——凡条目物理落在 image
+冻结区，其反查登记也必须随 image 走，按值域归 delta 是把「建者恰好也在场」误当
+恒等式。同 commit 族另修 extern fn item 作 fn 指针取址的 lower panic（`cb09b5b`，
+foreign_fn_entry_addr + elfsym .symtab 兜底，ring 整 crate 解锁）。
