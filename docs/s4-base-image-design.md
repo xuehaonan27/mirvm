@@ -1,6 +1,9 @@
 # S4 设计简报：std 预降低底座（base image）
 
-> 状态：**待审**（2026-07-14 起草；decision-history §7.2 排序中的 S4，过审后动工）。
+> 状态：**已施工（2026-07-15，M6 片6；用户 2026-07-15 批准动工）**。实施结果与账本
+> 见 m6-log 片6；两处施工偏离（§3 域位→偏移合并、§2 COW 映射按实测裁剪）记
+> decision-history §7.3——本文其余机制按写实施。验收：脚本纯冷 385→104ms
+> （目标 ≤120 达成），gate5 47/0/0/0。
 > 依据：coldstart-research §2/§6 V4——lower 是近常数 std 税（fib 3027 个 instance
 > ~300ms，其中绝大多数是程序无关的 std 闭包）；native 的答案是"安装时付清 std 税"
 > （预编译 rlib），本片是它在解释世界的对映（JVM CDS base archive 同构）。

@@ -119,6 +119,17 @@ if MIRVM="$MIRVM" bash tests/diff.sh >"$TMP/diff.out" 2>&1 \
 else
     bad "diff.sh 回归"
 fi
+# S4 底座旁路冒烟（M6 片6）：MIRVM_NO_BASE_IMAGE 逃生门必须始终可用——上面的全量
+# diff 走底座路径，这里锁"无底座全量降低"路径不被底座施工静默弄坏（单例即够：
+# 两路径共享全部降低代码，只差底座查找）。判据与主 diff 行同款汇总式
+# （truth-regression 的 bash 垫片回放罐头输出，逐例 grep 在 fixture 下不成立）。
+if MIRVM_NO_BASE_IMAGE=1 MIRVM_NO_IR_CACHE=1 ONLY=fib MIRVM="$MIRVM" \
+    bash tests/diff.sh >"$TMP/diff-nobase.out" 2>&1 \
+    && grep -Eq "== [0-9]+ passed, 0 failed ==" "$TMP/diff-nobase.out"; then
+    ok "diff.sh 底座旁路冒烟（ONLY=fib）"
+else
+    bad "diff.sh 底座旁路冒烟"
+fi
 for probe in addcarry xgetbv simd_insert simd_shift vzeroupper x86_vectors; do
     probe_code=0
     MIRVM="$MIRVM" bash "tests/m51_$probe.sh" >"$TMP/m51-$probe.out" 2>&1 \

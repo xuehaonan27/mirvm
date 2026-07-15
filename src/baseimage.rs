@@ -24,7 +24,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::vm::engine::ir;
 
-/// 底座文件（v1 = postcard 整包；6c 换分区布局 + COW 定基映射）。
+/// 底座文件（v1 = postcard 整包）。
+///
+/// **字节确定性契约**（验收：连续两建 cmp 一致）：Module 的 exports/fn_addrs 是
+/// std HashMap（RandomState 随机种子 ⇒ 迭代序每进程随机），不能随 module 直接落盘
+/// ——摘出为**排序 Vec** 字段（module 内清空），装载端重建。其余字段
+/// （funcs/tls/asm_sites/冻结区字节）由降低顺序天然确定。
 #[derive(Serialize, Deserialize)]
 struct BaseFile {
     build_id: String,
@@ -32,7 +37,12 @@ struct BaseFile {
     sysroot_stamp: String,
     /// (ub_checks, overflow_checks, contract_checks)——lower 唯一烤入的会话布尔
     lowering_fp: (bool, bool, bool),
+    /// exports/fn_addrs 已清空（见上），由下方排序表重建
     module: ir::Module,
+    /// sym → FuncId（= module.exports 的排序形态）
+    export_syms: Vec<(Box<str>, ir::FuncId)>,
+    /// fn 条目真地址 → FuncId（= module.fn_addrs 的排序形态）
+    fn_addr_pairs: Vec<(u64, ir::FuncId)>,
     /// sym → fn 条目真地址（仅被取址过的函数有条目）
     fn_entry_syms: Vec<(Box<str>, u64)>,
     static_syms: Vec<(Box<str>, u64)>,
@@ -88,19 +98,18 @@ fn load(path: &std::path::Path, want_stamp: &str) -> Option<BaseImage> {
     key.push_str(want_stamp);
     key.push('\u{1f}');
     key.push_str(&format!("fp{}{}{}", fp.0 as u8, fp.1 as u8, fp.2 as u8));
+    // exports/fn_addrs 从排序表重建（字节确定性契约，见 BaseFile 文档）
+    let mut module = f.module;
+    module.exports = f.export_syms.iter().cloned().collect();
+    module.fn_addrs = f.fn_addr_pairs.iter().copied().collect();
     Some(BaseImage {
-        fn_by_sym: f
-            .module
-            .exports
-            .iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect(),
+        fn_by_sym: f.export_syms.into_iter().collect(),
         entry_by_sym: f.fn_entry_syms.into_iter().collect(),
         static_by_sym: f.static_syms.into_iter().collect(),
         tls_by_sym: f.tls_syms.into_iter().collect(),
         lowering_fp: fp,
         key,
-        module: f.module,
+        module,
     })
 }
 
@@ -202,6 +211,17 @@ impl Callbacks for BaseBuildCallbacks {
             eprintln!("base-image: sysroot stamp 不可得，放弃");
             return Compilation::Stop;
         };
+        // 字节确定性：HashMap（RandomState 随机迭代序）摘出为排序 Vec 落盘
+        let mut export_syms: Vec<(Box<str>, ir::FuncId)> = module.exports.drain().collect();
+        export_syms.sort_unstable();
+        let mut fn_addr_pairs: Vec<(u64, ir::FuncId)> = module.fn_addrs.drain().collect();
+        fn_addr_pairs.sort_unstable();
+        let mut fn_entry_syms = exports.fn_entry_syms;
+        fn_entry_syms.sort_unstable();
+        let mut static_syms = exports.static_syms;
+        static_syms.sort_unstable();
+        let mut tls_syms = exports.tls_syms;
+        tls_syms.sort_unstable();
         let file = BaseFile {
             build_id: env!("MIRVM_BUILD_ID").to_string(),
             sysroot_stamp,
@@ -211,9 +231,11 @@ impl Callbacks for BaseBuildCallbacks {
                 sess.contract_checks(),
             ),
             module,
-            fn_entry_syms: exports.fn_entry_syms,
-            static_syms: exports.static_syms,
-            tls_syms: exports.tls_syms,
+            export_syms,
+            fn_addr_pairs,
+            fn_entry_syms,
+            static_syms,
+            tls_syms,
         };
         let Ok(bytes) = postcard::to_stdvec(&file) else {
             eprintln!("base-image: 序列化失败（冻结区非定基？），放弃");

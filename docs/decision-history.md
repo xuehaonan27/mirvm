@@ -377,6 +377,32 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
 - **重估触发器**：S1/S2/S4 完成、S3+JIT 联合设计出稿时；若 S4 设计发现底座强依赖
   懒降低机制，则 S4 并入联合设计（届时在此记录）。
 
+### 7.3 2026-07-15：S4 施工偏离——偏移合并取代 FuncId 域位（M6 片6）
+
+- **偏离**：简报（s4-base-image-design §3）设计 = FuncId 最高位分域 + 引擎双函数表。
+  施工通读引擎后改为**偏移合并**：delta 降低时 fn/TLS/asm-stub 的 id 直接从底座
+  计数起编（Linker delta_first_*），装载 absorb = base++delta 拼单表。
+  **解释器热路径零改动零新分支**——域位方案要动 run_blocks/interp_frame 两处热点
+  取址，且 asm_stub_addrs/tls/fn_addrs 等 per-module 表全要域位路由双份化。
+- **代价与抵扣**：delta 与底座实例级耦合（底座换代必须重降 delta）——本就由分层
+  缓存键管着（ircache Header.base_key 精确相等，含 None 侧；单测锁定），无新增约束。
+- **验收替换**：简报"域位编解码单测"作废，替换为 base_key 失配拒载单测 +
+  双域冻结区跨引用往返单测（片6a）。
+- **附带事实**：debug/release 二进制共享同一底座（MIRVM_BUILD_ID=源树内容哈希，
+  两 profile 同值；底座文件是 postcard 编码非内存转储，跨 profile 安全）。
+- **降低指纹的会话内验证**（简报 §5 的实现精化）：lower 烤入字节码的会话布尔仅三个
+  （ub/overflow/contract checks，func.rs RuntimeChecks 处），底座文件存构建会话
+  三元组，程序会话 after_analysis 比对，失配即弃底座走全量降低——cargo runner
+  可能带自定义 profile 旗标，装载期（会话外）无法预知。
+- **COW 定基映射按实测裁剪**（简报 §2 承诺废弃 v1）：装载相 33ms 里冻结区 memcpy
+  只占 ~0.2ms（~2MB），大头是 3000 个 FuncBody 的 postcard 解码——file-backed
+  MAP_PRIVATE 只优化前者，v1 无收益。真正的零装载 = 字节码零拷贝布局（rkyv 类），
+  与 mode B `.mirvm` 外部格式冻结同题，排 M5.3 后（重估触发器：mode B 立项时）。
+- **底座字节确定性**（验收"连续两建 cmp 一致"抓获真缺陷）：Module.exports/fn_addrs
+  是 std HashMap（RandomState 每进程随机迭代序），postcard 随序落盘 ⇒ 两建不同字节。
+  修 = 底座文件将两表摘出为**排序 Vec**（module 内清空，装载端重建）；L2 条目无
+  确定性契约不受影响。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 - P7 设想独立 `src/os/` 物理层；当前 OS/FFI/builtin 逻辑仍分布在 lower、interp、ffi、heap。

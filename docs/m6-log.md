@@ -172,3 +172,39 @@ E0080 同一文案**，mirvm 非零退出。
 校正"第三例）；真实收益 = **CPU −12%**（27.3→24.0 CPU 秒/全冷）、**磁盘 −60%**
 （target rlib 100→40MB，全 rlib 只剩 lib.rmeta）、少 22 次 rustc exec；低核/CI 机器
 wall 收益按 CPU 差推算。
+
+## 片6（S4）：std 预降低底座（2026-07-15，简报过审后施工）
+
+三个子片逐 commit 全绿（6a 双域地基 / 6b 底座主体 / 6c 收官）；两处施工偏离记
+decision-history §7.3（偏移合并取代 FuncId 域位——解释器热路径零改动；COW 定基映射
+按实测裁剪——冻结区 memcpy 仅 0.2ms 非成本大头）。
+
+**机制**：底座 = 空 main 合成会话的完整降低产物（~3000 instance，冻结区 0x6800 域，
+delta 迁 0x6900 域，跨域绝对地址互指两侧皆稳定），子进程构建（本进程 rustc 会话唯一），
+文件字节确定（验收抓获 HashMap 随机迭代序缺陷 → 排序 Vec 落盘）。delta 按 v0
+symbol_name 复用底座：函数不入队、static/TLS 地址与身份去重（双份 = static mut/
+线程局部精神分裂）、fn 条目单一地址身份；fn/TLS/asm id 从底座计数起编，absorb =
+base++delta 拼单表 + asm 配方合并重物化。降低指纹（ub/overflow/contract checks）
+会话内验证；L2 条目携 base_key 精确相等（含 None 侧）。一切失配/被占/构建失败 =
+静默弃底座走全量冷降低自愈（逃生门 MIRVM_NO_BASE_IMAGE=1，gate5 新增旁路冒烟行，
+gate 总数 46→47）。
+
+**账本（EPYC 7773X，release）**：
+
+| 负载 | S4 前纯冷 | S4 后纯冷 | lower 相 |
+|---|---|---|---|
+| fib | 385ms（wall） | **104ms** | 299→31ms（**9.6×**） |
+| args_env | 420ms | **111ms** | 311→35ms |
+| hashmap | 441ms | **150ms** | 329→70ms |
+| threads_channel | 475ms | **164ms** | 354→76ms |
+| ecosystem（runner） | — | — | 1272→**988ms**（std 份额；registry 依赖 = mode B 线） |
+
+简报验收 ≤120ms（fib 类）达成；底座构建一次性 ~450ms（键 = build_id+sysroot stamp，
+debug/release 共享）；底座文件 2.19MB；delta L2 条目从整包 2.2MB 缩至 ~0.1MB
+（store 0.9ms）。warm 路径不变仍 ~50ms wall（cache-load 33ms 大头 = FuncBody
+postcard 解码，零拷贝布局留 mode B）。
+
+**验收**：diff.sh 底座在场/旁路双态 30/30（含 warm 复跑维度）；diff_cargo 5/5；
+底座构建幂等 cmp 逐位一致；gate_truth_regression 12/12（冒烟判据用汇总式——
+fixture bash 垫片回放罐头输出，逐例 grep 不成立，当场踩中修正）；cargo test 42/42；
+终局 gate5 = **47 pass / 0 expected-red / 0 skip / 0 fail**。

@@ -17,6 +17,7 @@
 | M6 片3 前置调研 | **完成（2026-07-14）** | 冷启动/lower 全解剖与杠杆清单（[coldstart-research.md](coldstart-research.md)）：lower 是近常数 std 税（~0.10ms/instance；执行集仅占降低集 7–29%）、lower 相 75% 耗在 rustc 查询/解码机器、依赖构建 codegen 白烧实证、三个缓存盲区（P1 runner 环境化石化 / P2 空 stub .d / P3 diff_cargo 无 warm 维度）；**施工顺序已裁定（decision-history §7.2）：S1 小件包 → S2 依赖剪枝 → S4 底座（设计过审）→ S3 懒降低并入 M5.3 JIT 联合设计** |
 | M6 片4（S1 小件包） | **完成（2026-07-14）** | 四个语义单元逐 commit 全绿（m6-log 片4）：S1a sysroot 仪式 stamp 化（warm fib 墙钟 85→55ms；加载相性能门 443→364ms）；S1b runner 不回放 MIRVM_\*（P1 化石化修复）；S1c 假二进制 dep-info 真实化（P2；源码编辑触发重录，runner 回写路线实测证伪后改 wrapper 侧 --emit=dep-info）；S1d diff_cargo 补 L2 warm 复跑维度（P3；runner 缓存路径首次有 gate 覆盖） |
 | M6 片5（S2 / D9d 依赖剪枝） | **完成（2026-07-14）** | target 依赖 in-process + `-Zno-codegen`（树内现成空转；metadata-only rlib 由默认 link 路径照常产出）；post-mono const-eval 错误面由显式 mono 收集补齐（探针：native/mirvm 同一条 E0080）。账本诚实修正：wall ≈0（128 核噪声内，调研预估证伪）、CPU −12%、磁盘 −60%、少 22 次 exec（m6-log 片5） |
+| M6 片6（S4 std 预降低底座） | **完成（2026-07-15）** | 空 main 底座（0x6800 域）+ delta（0x6900 域）偏移合并（施工偏离 §7.3：取代域位双表，解释器零改动）；v0 symbol_name 复用（fn/static/TLS 去重）；降低指纹会话内验证；L2 分层 base_key。**脚本纯冷 385→104ms（lower 9.6×）**，ecosystem runner lower 1272→988ms（std 份额）；底座构建幂等且字节确定（验收抓获 HashMap 随机序缺陷）；gate5 46→47（新增旁路冒烟）全绿（[s4-base-image-design.md](s4-base-image-design.md)，m6-log 片6） |
 | M5.3–M5.5 | **未实现；M5.3 Pending（2026-07-14 用户裁定）** | 方法级 Cranelift JIT、tiering、JIT unwind/LSDA 与性能收口（原编号 M5.2–M5.4，2026-07-14 顺延）。开工前先解决 lower 冷启动（调研见 M6 片3 行）；懒降低（V3）与 JIT 首调物化是同一根管线，应联合分层设计后再动工 |
 
 目前唯一产品执行引擎是 M4 解释器。Cargo 默认的 `cranelift` feature 只编译冻结的 Spike 5；
