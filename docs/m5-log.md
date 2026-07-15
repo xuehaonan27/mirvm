@@ -491,3 +491,33 @@ native -O 6.7ms ⇒ **JIT = 2.9× native**（spike5 直调 2.1-2.2× 的邻域�
 无 OSR（长跑单循环不触发——调用边界整方法编译）；JIT 帧不压影子帧（backtrace
 深度对 JIT 帧透明——不变式 oracle 仍成立，panic 在 JIT 帧内展开时列帧少于解释
 口径，记账）；机器码不入缓存（进程内易失；L3 与 mode B/零拷贝字节码同题）。
+
+## M5.4（m5.4-design，Q1-Q5 全批）——分片施工
+
+### M5.4a 帧模型 v2 + 内存操作数 —— 完成（2026-07-15）
+
+**前置**：LSDA probe（设计 D6 先行令）全链通过 5/5——try_call（tag0=cleanup，
+`BlockArg::TryCallExn(0)` 传异常指针）→ 手工 GccExceptTable → CIE(rust_eh_personality,
+DW.ref 间接) + FDE.lsda → `__register_frame` → 宿主 resume_unwind 载荷 → cleanup pad
+在 JIT 帧内执行 → `_Unwind_Resume(exn)` 续传宿主 catch_unwind。三个实证发现（留档
+probe 模块 `jit_compile.rs::lsda_probe` 作最小回归）：① **rust 版 find_eh_action 对
+"ip 不在 call-site 表"返回 EHAction::Terminate**（libgcc __gcc_personality_v0 返回
+None）⇒ LSDA 必须全调用点覆盖（cg_clif 对无 handler 站点发 lpad=0 项的原因；只发
+handler 项时 resume 后重过调用者帧必 abort）；② **extern "C" 是 nounwind**——宿主经
+fn 指针调 JIT 码必须 `unsafe extern "C-unwind"`（否则 payload 静默越过 catch_unwind；
+spike5 CompiledFn 同为 C-unwind 旁证）；③ cg_clif 完整配方在树
+（src/debuginfo/{unwind,gcc_except_table}.rs），0.133.1 try_call/exception_table/
+TryCallExn 全部可用。
+
+**本片内容**：帧模型 v2（取址分析保守全集 Q1——任何被 PlaceExpr::Local/Mem/AddrOf/
+Ref/Copy/Repeat/Indirect-ABI 触及的 frame offset 一律落栈帧内存，or-pattern 全枚举
+Stmt/Terminator 防新变体漏网；其余槽维持 SSA 提升；帧区入口清零延续 def-0 确定化
+纪律）+ PlaceExpr 求值内联（Local/Static/Deref/Offset/IndexScaled/VTableAlignOffset——
+interp 恒等式镜像，2 幂/溢出 → trap 口径）+ 内存操作数（ScalarPlace::Mem、
+Operand::Mem/AddrOf/SubImm）+ Ref/PtrOffset/PtrDiff（stride≠0）/UMax（CLIF umax）+
+Copy（memmove 语义，interp std::ptr::copy 同源）+ RepeatScalar/RepeatBytes（逐元素
+CLIF 循环；RepeatBytes 逐元素 memmove 与 interp 的 copy_nonoverlapping 结果一致）。
+
+**验收**：逢调即编全量（MIRVM_JIT_THRESHOLD=1）diff.sh **30/30**（serde/regex/
+HashMap/线程等内存密集全走 JIT 帧逐字节对 native）；fib(27) 含加载 77ms；cargo test
+52/52；Clippy/fmt 干净；gate5 复跑全绿。
