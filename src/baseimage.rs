@@ -113,9 +113,9 @@ fn load(path: &std::path::Path, want_stamp: &str) -> Option<BaseImage> {
     })
 }
 
-/// 装载或（子进程）构建底座。一切失败 = None（全量冷降低，静默自愈；构建日志在
+/// 装载或（子进程）构建底座。失败 = None（全量冷降低，静默自愈；构建日志在
 /// base/build.log——stderr 参与 native 差分，主路径不得发声）。
-pub fn ensure() -> Option<BaseImage> {
+fn ensure_base() -> Option<BaseImage> {
     if disabled() {
         return None;
     }
@@ -141,41 +141,170 @@ pub fn ensure() -> Option<BaseImage> {
     load(&path, &stamp)
 }
 
-/// 偏移合并：base ++ delta 拼单表（delta 的 fn/TLS/asm id 已从底座计数起编）。
-/// 合并后重物化 asm-stub（底座文件里的 stub 地址是构建进程的活体，必须以配方
-/// 在本进程幂等重物化——L2 warm 同款契约）。
-pub fn absorb(delta: &mut ir::Module, base: ir::Module) {
-    let mut funcs = base.funcs;
+/// image 栈（S3′a，m5.3-design §3.3）：底座 + 依赖 image 链的有序集合（底→顶 =
+/// 拓扑序 [std 底座, dep₁, dep₂ …]）。程序会话降低时按 v0 symbol_name 查**并集**
+/// 复用，delta 的 fn/TLS/asm id 从栈总量起编，absorb 时 [栈…][delta] 拼单表。
+/// 各 image 各占一固定域（底座 0x6800、依赖样条 0x6A00+k·2^34），跨域绝对地址
+/// 互指全稳定。空栈（无底座/旁路）= 全量冷降低，行为回到 S4 前。
+pub struct ImageStack {
+    images: Vec<BaseImage>,
+    /// 并集查找（sym → 绝对 id/地址；各 image id 域不相交，union 无歧义）
+    fn_by_sym: std::collections::HashMap<Box<str>, ir::FuncId>,
+    entry_by_sym: std::collections::HashMap<Box<str>, u64>,
+    static_by_sym: std::collections::HashMap<Box<str>, u64>,
+    tls_by_sym: std::collections::HashMap<Box<str>, ir::TlsId>,
+    /// delta 起编偏移 = 栈内累积量
+    total_fns: usize,
+    total_tls: usize,
+    total_asm: usize,
+    /// 降低指纹（全栈一致；构造时按前缀截断分歧，自愈）
+    lowering_fp: (bool, bool, bool),
+    /// 分层缓存键链（各 image key 以 \x1f 连接；空栈 = None）
+    key: Option<String>,
+}
+
+impl ImageStack {
+    pub fn empty() -> Self {
+        ImageStack {
+            images: Vec::new(),
+            fn_by_sym: Default::default(),
+            entry_by_sym: Default::default(),
+            static_by_sym: Default::default(),
+            tls_by_sym: Default::default(),
+            total_fns: 0,
+            total_tls: 0,
+            total_asm: 0,
+            lowering_fp: (false, false, false),
+            key: None,
+        }
+    }
+
+    /// 有序 image 列表 → 栈。降低指纹分歧处**前缀截断**（分歧 image 及其上全部退回
+    /// delta——自愈，绝不用错指纹的 image 复用）。构建并集查找 + 累积偏移 + 键链。
+    fn from_images(mut images: Vec<BaseImage>) -> Self {
+        if images.is_empty() {
+            return Self::empty();
+        }
+        let fp = images[0].lowering_fp;
+        if let Some(cut) = images.iter().position(|i| i.lowering_fp != fp) {
+            images.truncate(cut);
+        }
+        if images.is_empty() {
+            return Self::empty();
+        }
+        let mut s = ImageStack::empty();
+        s.lowering_fp = fp;
+        let mut keys = Vec::with_capacity(images.len());
+        for img in &images {
+            keys.push(img.key.clone());
+            for (k, v) in &img.fn_by_sym {
+                s.fn_by_sym.entry(k.clone()).or_insert(*v);
+            }
+            for (k, v) in &img.entry_by_sym {
+                s.entry_by_sym.entry(k.clone()).or_insert(*v);
+            }
+            for (k, v) in &img.static_by_sym {
+                s.static_by_sym.entry(k.clone()).or_insert(*v);
+            }
+            for (k, v) in &img.tls_by_sym {
+                s.tls_by_sym.entry(k.clone()).or_insert(*v);
+            }
+            s.total_fns += img.module.funcs.len();
+            s.total_tls += img.module.tls.len();
+            s.total_asm += img.module.asm_sites.len();
+        }
+        s.key = Some(keys.join("\u{1f}"));
+        s.images = images;
+        s
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.images.is_empty()
+    }
+    pub fn total_fns(&self) -> usize {
+        self.total_fns
+    }
+    pub fn total_tls(&self) -> usize {
+        self.total_tls
+    }
+    pub fn total_asm(&self) -> usize {
+        self.total_asm
+    }
+    pub fn fn_by_sym(&self) -> &std::collections::HashMap<Box<str>, ir::FuncId> {
+        &self.fn_by_sym
+    }
+    pub fn entry_by_sym(&self) -> &std::collections::HashMap<Box<str>, u64> {
+        &self.entry_by_sym
+    }
+    pub fn static_by_sym(&self) -> &std::collections::HashMap<Box<str>, u64> {
+        &self.static_by_sym
+    }
+    pub fn tls_by_sym(&self) -> &std::collections::HashMap<Box<str>, ir::TlsId> {
+        &self.tls_by_sym
+    }
+    pub fn key(&self) -> Option<&str> {
+        self.key.as_deref()
+    }
+
+    /// 会话降低指纹核对（cli after_analysis）：不匹配 ⇒ 弃整栈走全量降低。
+    /// 栈内 fp 已一致（from_images 截断保证），故整栈判定即可。
+    pub fn fp_matches(&self, session_fp: (bool, bool, bool)) -> bool {
+        self.is_empty() || self.lowering_fp == session_fp
+    }
+}
+
+/// 装载 image 栈（S3′a）：底座 + 依赖 image 链。本片仅底座（S3′b 装填依赖链）。
+pub fn ensure() -> ImageStack {
+    let mut images = Vec::new();
+    if let Some(b) = ensure_base() {
+        images.push(b);
+    }
+    ImageStack::from_images(images)
+}
+
+/// 偏移合并：[栈…] ++ delta 拼单表（delta 的 fn/TLS/asm id 已从栈总量起编；
+/// 各 image funcs 按绝对 FuncId 顺序存 ⇒ 顺次拼接位置 = 绝对 id）。合并后重物化
+/// asm-stub（image 文件里的 stub 地址是构建进程的活体，必须以配方在本进程幂等重物化
+/// ——L2 warm 同款契约）。各 image 冻结区移交 delta.image_frozens 保活。
+pub fn absorb_stack(delta: &mut ir::Module, stack: ImageStack) {
+    let mut funcs = Vec::with_capacity(stack.total_fns);
+    let mut tls = Vec::with_capacity(stack.total_tls);
+    let mut sites = Vec::with_capacity(stack.total_asm);
+    let mut frozens = Vec::with_capacity(stack.images.len());
+    for img in stack.images {
+        let mut m = img.module;
+        funcs.append(&mut m.funcs);
+        tls.append(&mut m.tls);
+        sites.append(&mut m.asm_sites);
+        for (a, f) in m.fn_addrs {
+            delta.fn_addrs.entry(a).or_insert(f);
+        }
+        for (s, f) in m.exports {
+            delta.exports.entry(s).or_insert(f);
+        }
+        for l in m.native_libs {
+            if !delta.native_libs.contains(&l) {
+                delta.native_libs.push(l);
+            }
+        }
+        for l in m.required_native_libs {
+            if !delta.required_native_libs.contains(&l) {
+                delta.required_native_libs.push(l);
+            }
+        }
+        if let Some(fr) = m.frozen {
+            frozens.push(fr);
+        }
+    }
     funcs.append(&mut delta.funcs);
     delta.funcs = funcs;
-
-    let mut tls = base.tls;
     tls.append(&mut delta.tls);
     delta.tls = tls;
-
-    let mut sites = base.asm_sites;
     sites.append(&mut delta.asm_sites);
     delta.asm_sites = sites;
     delta.asm_stub_addrs = crate::lower::asm::materialize(&delta.asm_sites);
-
-    for (a, f) in base.fn_addrs {
-        delta.fn_addrs.entry(a).or_insert(f);
-    }
-    for (s, f) in base.exports {
-        delta.exports.entry(s).or_insert(f);
-    }
-    for l in base.native_libs {
-        if !delta.native_libs.contains(&l) {
-            delta.native_libs.push(l);
-        }
-    }
-    for l in base.required_native_libs {
-        if !delta.required_native_libs.contains(&l) {
-            delta.required_native_libs.push(l);
-        }
-    }
-    // entry = delta 权威；foreign_static_syms：底座构建期已保证为空
-    delta.base_frozen = base.frozen;
+    // entry = delta 权威；foreign_static_syms：image 构建期已保证为空
+    delta.image_frozens = frozens;
 }
 
 // ===== 构建端（`mirvm __build-base-image <path>` 子进程）=====

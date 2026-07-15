@@ -110,9 +110,10 @@ else
     fi
     # M5.3 JIT 硬门（m5-design gate6 ②）：fib(32) ≤ 10× native ≈ ≤80ms 墙钟
     #（解释锚点 0.94s；native -O 6.7ms；实测 JIT engine 段 ~19ms ≈ 2.9×）。
-    # 两跑取最小：满载 gate 环境余量仅 ~10ms，杀调度毛刺；契约不变。
+    # 三跑取最小：每 `mirvm run` 是新进程、JIT 后台线程重编译，满载 gate 下偶被
+    # 饿死一轮（回退解释 940ms）——多跑取最快杀调度毛刺，契约（≤80ms）不变。
     fib_ms=999999 fib_code=1 fib_out=""
-    for _ in 1 2; do
+    for _ in 1 2 3; do
         t0=$(date +%s%N)
         fib_out=$("$MIRVM" run --vm-call 'fib(32)' demo/m4/pure.rs 2>"$TMP/fib32.err")
         fib_code=$?

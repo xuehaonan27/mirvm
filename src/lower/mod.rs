@@ -112,34 +112,26 @@ pub(crate) struct Linker<'tcx> {
 }
 
 impl<'tcx> Linker<'tcx> {
-    fn new(tcx: TyCtxt<'tcx>, base: Option<&crate::baseimage::BaseImage>, for_base: bool) -> Self {
-        let (base_fns, base_fn_entries, base_statics, base_tls) = match base {
-            Some(b) => (
-                b.fn_by_sym.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-                b.entry_by_sym
-                    .iter()
-                    .map(|(k, v)| (k.clone(), *v))
-                    .collect(),
-                b.static_by_sym
-                    .iter()
-                    .map(|(k, v)| (k.clone(), *v))
-                    .collect(),
-                b.tls_by_sym.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-            ),
-            None => Default::default(),
-        };
-        let delta_first_fn = base.map_or(0, |b| b.module.funcs.len() as ir::FuncId);
+    /// S3′a：base-maps = image 栈的并集查找；delta 起编 = 栈累积量。frozen 由调用方
+    /// 按目标域构造（程序 delta = new()、底座 = new_base_image()、依赖 image = new_image(k)）。
+    fn new(tcx: TyCtxt<'tcx>, stack: &crate::baseimage::ImageStack, frozen: FrozenArena) -> Self {
+        fn clone_map<V: Copy>(
+            m: &std::collections::HashMap<Box<str>, V>,
+        ) -> FxHashMap<Box<str>, V> {
+            m.iter().map(|(k, v)| (k.clone(), *v)).collect()
+        }
+        let base_fns = clone_map(stack.fn_by_sym());
+        let base_fn_entries = clone_map(stack.entry_by_sym());
+        let base_statics = clone_map(stack.static_by_sym());
+        let base_tls = clone_map(stack.tls_by_sym());
+        let delta_first_fn = stack.total_fns() as ir::FuncId;
         Linker {
             tcx,
             ids: FxHashMap::default(),
             queue: VecDeque::new(),
             builtins: engine_builtins(tcx),
             exports: None,
-            frozen: if for_base {
-                FrozenArena::new_base_image()
-            } else {
-                FrozenArena::new()
-            },
+            frozen,
             alloc_addrs: FxHashMap::default(),
             fn_entries: FxHashMap::default(),
             fn_addrs: FxHashMap::default(),
@@ -152,8 +144,8 @@ impl<'tcx> Linker<'tcx> {
             base_statics,
             base_tls,
             delta_first_fn,
-            delta_first_tls: base.map_or(0, |b| b.module.tls.len() as ir::TlsId),
-            delta_first_asm: base.map_or(0, |b| b.module.asm_sites.len() as ir::AsmStubId),
+            delta_first_tls: stack.total_tls() as ir::TlsId,
+            delta_first_asm: stack.total_asm() as ir::AsmStubId,
             next_fn: delta_first_fn,
             static_defs: Vec::new(),
         }
@@ -781,23 +773,41 @@ pub struct BaseExports {
 
 /// 程序会话降低：base 在场时按 symbol_name 复用底座（fn/static/TLS），
 /// 产出 delta 模块（fn/TLS/asm id 从底座计数起编；absorb 合并后运行）。
-pub fn lower_program(tcx: TyCtxt<'_>, base: Option<&crate::baseimage::BaseImage>) -> ir::Module {
-    lower_inner(tcx, base, false).0
+pub fn lower_program(tcx: TyCtxt<'_>, stack: &crate::baseimage::ImageStack) -> ir::Module {
+    lower_inner(tcx, stack, FrozenArena::new(), false, false).0
 }
 
-/// 底座构建会话降低（合成空 main）：冻结区落底座域，额外导出 sym 索引素材。
+/// 底座构建会话降低（合成空 main）：栈空、冻结区落底座域，导出 sym 索引。
+/// 排除 LOCAL_CRATE——合成 crate 的本地项（空 main + shim）符号名带本地
+/// disambiguator，不属"sysroot 面"、不与真实程序相撞。
 pub fn lower_for_base_build(tcx: TyCtxt<'_>) -> (ir::Module, BaseExports) {
-    let (module, exports) = lower_inner(tcx, None, true);
-    (module, exports.expect("底座构建模式必有导出素材"))
+    let empty = crate::baseimage::ImageStack::empty();
+    let (module, exports) = lower_inner(tcx, &empty, FrozenArena::new_base_image(), true, true);
+    (module, exports.expect("image 构建模式必有导出素材"))
+}
+
+/// 依赖 image 构建会话降低（S3′b）：栈 = 栈下已装 image 链，冻结区落第 k 样条域，
+/// 导出 sym 索引。该 crate mono 集减栈下已有 = 本 image 内容（偏移合并同底座）。
+/// **不排除 LOCAL_CRATE**——LOCAL_CRATE 正是要成像的依赖 crate 本身，其符号名跨
+/// 程序稳定（同版本依赖 = 同符号名，这正是复用的前提）。
+pub fn lower_for_image_build(
+    tcx: TyCtxt<'_>,
+    stack: &crate::baseimage::ImageStack,
+    k: usize,
+) -> (ir::Module, BaseExports) {
+    let (module, exports) = lower_inner(tcx, stack, FrozenArena::new_image(k), true, false);
+    (module, exports.expect("image 构建模式必有导出素材"))
 }
 
 fn lower_inner(
     tcx: TyCtxt<'_>,
-    base: Option<&crate::baseimage::BaseImage>,
-    for_base: bool,
+    stack: &crate::baseimage::ImageStack,
+    frozen: FrozenArena,
+    emit_exports: bool,
+    exclude_local: bool,
 ) -> (ir::Module, Option<BaseExports>) {
     let typing_env = TypingEnv::fully_monomorphized();
-    let mut linker = Linker::new(tcx, base, for_base);
+    let mut linker = Linker::new(tcx, stack, frozen);
 
     // 种子 = mono collector 集（D1：与 native codegen 同一起点，正确性白拿）
     for inst in collect::collect(tcx) {
@@ -901,19 +911,20 @@ fn lower_inner(
     // S4 底座导出素材（构建模式）：sym 索引在此一次算清，装载方零 tcx 依赖。
     // 合成 crate 的本地项（空 main 及其 shim）不入索引——其符号名带本地
     // disambiguator 不会与真实程序相撞，但索引的语义是"sysroot 面"，如实排除。
-    let base_exports = for_base.then(|| {
+    let base_exports = emit_exports.then(|| {
         use rustc_hir::def_id::LOCAL_CRATE;
+        let keep = |krate| !exclude_local || krate != LOCAL_CRATE;
         BaseExports {
             fn_entry_syms: linker
                 .fn_entries
                 .iter()
-                .filter(|(inst, _)| inst.def_id().krate != LOCAL_CRATE)
+                .filter(|(inst, _)| keep(inst.def_id().krate))
                 .map(|(inst, &addr)| (Box::from(tcx.symbol_name(*inst).name), addr))
                 .collect(),
             static_syms: linker
                 .static_defs
                 .iter()
-                .filter(|(def_id, _)| def_id.krate != LOCAL_CRATE)
+                .filter(|(def_id, _)| keep(def_id.krate))
                 .map(|&(def_id, addr)| {
                     let sym = tcx.symbol_name(Instance::mono(tcx, def_id)).name;
                     (Box::from(sym), addr)
@@ -922,7 +933,7 @@ fn lower_inner(
             tls_syms: linker
                 .tls_ids
                 .iter()
-                .filter(|(def_id, _)| def_id.krate != LOCAL_CRATE)
+                .filter(|(def_id, _)| keep(def_id.krate))
                 .map(|(&def_id, &id)| {
                     let sym = tcx.symbol_name(Instance::mono(tcx, def_id)).name;
                     (Box::from(sym), id)

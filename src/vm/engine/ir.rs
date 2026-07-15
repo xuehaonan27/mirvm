@@ -1248,10 +1248,11 @@ pub struct Module {
     pub foreign_static_syms: Vec<Box<str>>,
     /// main 启动链（M4.3；--vm-call 模式下为 None）
     pub entry: Option<EntryPlan>,
-    /// S4 底座冻结区（absorb 时挂载，与本模块同寿命）。**不进 L2 快照**——底座
-    /// 由底座文件自有其生命周期，delta 条目只以 base_key 引用（ircache 双验证）。
+    /// S4/S3′ image 栈冻结区（absorb 时挂载底座 + 各依赖 image 的冻结区，与本模块
+    /// 同寿命——delta 字节码里嵌了跨域绝对地址，这些域必须活到 guest 结束）。
+    /// **不进 L2 快照**——image 文件各自有其生命周期，delta 条目只以键链引用（ircache 双验证）。
     #[serde(skip)]
-    pub base_frozen: Option<super::frozen::FrozenArena>,
+    pub image_frozens: Vec<super::frozen::FrozenArena>,
 }
 
 impl Module {

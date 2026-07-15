@@ -23,6 +23,30 @@ const FROZEN_CAP: usize = 256 << 20;
 pub const BASE_IMAGE_FIXED_ADDR: usize = 0x6800_0000_0000;
 pub const DELTA_FIXED_ADDR: usize = 0x6900_0000_0000;
 
+/// S3′（m5.3-design §3.3）依赖 image 域样条：每个 registry 依赖 image 占一固定域，
+/// 起点 0x6A00、步距 16 GiB（远大于 FROZEN_CAP 256 MiB；空洞供未来扩容），k 由
+/// lockfile 拓扑序分配。上界 1300 不触 mmap 自顶向下带（0x7f）。栈 = [底座][img_k…][delta]，
+/// 各域绝对地址跨域互指全稳定（可缓存性判据①对每域成立）。
+pub const IMAGE_SPLINE_BASE: usize = 0x6A00_0000_0000;
+pub const IMAGE_SPLINE_STEP: usize = 1 << 34;
+pub const IMAGE_SPLINE_COUNT: usize = 1300;
+
+/// 第 k 个依赖 image 的固定域基址。
+pub fn image_addr(k: usize) -> usize {
+    assert!(k < IMAGE_SPLINE_COUNT, "image 样条越界: k={k}");
+    IMAGE_SPLINE_BASE + k * IMAGE_SPLINE_STEP
+}
+
+/// 合法冻结域白名单：底座 / delta / 依赖 image 样条（对齐且在界内）。
+/// restore 与 serde 反序列化都过它——防伪造快照把区放到任意地址（错基址=静默错值）。
+fn is_valid_home(addr: usize) -> bool {
+    addr == BASE_IMAGE_FIXED_ADDR
+        || addr == DELTA_FIXED_ADDR
+        || (addr >= IMAGE_SPLINE_BASE
+            && (addr - IMAGE_SPLINE_BASE).is_multiple_of(IMAGE_SPLINE_STEP)
+            && (addr - IMAGE_SPLINE_BASE) / IMAGE_SPLINE_STEP < IMAGE_SPLINE_COUNT)
+}
+
 pub struct FrozenArena {
     base: *mut u8,
     used: usize,
@@ -83,14 +107,16 @@ impl FrozenArena {
         Self::new_at(BASE_IMAGE_FIXED_ADDR)
     }
 
-    /// 从快照恢复到指定域（L2 warm / 底座装载）。固定基址被占即 Err——调用方按
-    /// 缓存 miss 处理，绝不在其他基址上重放快照（快照内嵌绝对地址，错基址 = 静默错值）。
+    /// 依赖 image 构建会话专用（S3′）：落第 k 个样条域。
+    pub fn new_image(k: usize) -> Self {
+        Self::new_at(image_addr(k))
+    }
+
+    /// 从快照恢复到指定域（L2 warm / 底座 / 依赖 image 装载）。固定基址被占即 Err——
+    /// 调用方按缓存 miss 处理，绝不在其他基址上重放快照（快照内嵌绝对地址，错基址=静默错值）。
     pub fn restore(snapshot: &[u8], home: usize) -> Result<Self, String> {
         assert!(snapshot.len() <= FROZEN_CAP, "冻结区快照超容量");
-        assert!(
-            home == BASE_IMAGE_FIXED_ADDR || home == DELTA_FIXED_ADDR,
-            "冻结区恢复域非法: {home:#x}"
-        );
+        assert!(is_valid_home(home), "冻结区恢复域非法: {home:#x}");
         let fixed = Self::map(home, libc::MAP_FIXED_NOREPLACE);
         if fixed == libc::MAP_FAILED {
             return Err(format!("冻结区固定基址 {home:#x} 被占，无法恢复快照"));
@@ -175,7 +201,7 @@ impl<'de> serde::Deserialize<'de> for FrozenArena {
         // postcard bytes = 借用切片可用；用 &[u8] 承接避免中间拷贝
         let (home, bytes): (u64, &[u8]) = serde::Deserialize::deserialize(deserializer)?;
         let home = usize::try_from(home).map_err(serde::de::Error::custom)?;
-        if home != BASE_IMAGE_FIXED_ADDR && home != DELTA_FIXED_ADDR {
+        if !is_valid_home(home) {
             return Err(serde::de::Error::custom(format!(
                 "冻结区快照域非法: {home:#x}"
             )));
@@ -202,7 +228,34 @@ unsafe impl Sync for FrozenArena {}
 
 #[cfg(test)]
 mod tests {
-    use super::{BASE_IMAGE_FIXED_ADDR, DELTA_FIXED_ADDR, FrozenArena};
+    use super::{
+        BASE_IMAGE_FIXED_ADDR, DELTA_FIXED_ADDR, FrozenArena, IMAGE_SPLINE_BASE,
+        IMAGE_SPLINE_COUNT, IMAGE_SPLINE_STEP, image_addr, is_valid_home,
+    };
+
+    /// S3′ 样条域白名单：底座/delta/对齐样条合法，越界/未对齐/杂散非法。
+    #[test]
+    fn image_spline_home_validation() {
+        assert!(is_valid_home(BASE_IMAGE_FIXED_ADDR));
+        assert!(is_valid_home(DELTA_FIXED_ADDR));
+        assert!(is_valid_home(image_addr(0)));
+        assert!(is_valid_home(image_addr(1)));
+        assert!(is_valid_home(image_addr(IMAGE_SPLINE_COUNT - 1)));
+        // 未对齐（样条中点）非法
+        assert!(!is_valid_home(IMAGE_SPLINE_BASE + IMAGE_SPLINE_STEP / 2));
+        // 越界非法
+        assert!(!is_valid_home(
+            IMAGE_SPLINE_BASE + IMAGE_SPLINE_COUNT * IMAGE_SPLINE_STEP
+        ));
+        // 杂散地址非法（伪造快照防线）
+        assert!(!is_valid_home(0x1234_5678));
+        assert!(!is_valid_home(0x7f00_0000_0000));
+        // 样条不触 mmap 自顶向下带
+        assert!(image_addr(IMAGE_SPLINE_COUNT - 1) < 0x7f00_0000_0000);
+        // 各域两两不交叠（FROZEN_CAP 远小于步距）
+        assert!(image_addr(0) > DELTA_FIXED_ADDR);
+        assert!(image_addr(1) - image_addr(0) == IMAGE_SPLINE_STEP);
+    }
 
     /// 固定基址快照/恢复往返：地址值稳定、内容逐字节保真、恢复后可继续分配。
     #[test]
