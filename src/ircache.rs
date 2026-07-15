@@ -36,6 +36,10 @@ struct Header {
     files: Vec<FileStamp>,
     /// `env!`/`option_env!` 依赖：(名, 编译时值；None = 编译时未设)
     envs: Vec<(String, Option<String>)>,
+    /// S4 分层：delta 模块引用的底座键（None = 无底座的全量模块）。
+    /// delta 字节码/冻结区内嵌底座绝对量（FuncId 偏移、底座地址）——
+    /// 错配底座装载 = 全盘错值，必须精确相等。
+    base_key: Option<String>,
 }
 
 fn disabled() -> bool {
@@ -72,6 +76,15 @@ fn stamp(path: &str) -> Option<FileStamp> {
     })
 }
 
+/// 头部三重相等：build id（跨构建陈账）+ 完整 args 回比（哈希碰撞免疫）+
+/// 底座键精确相等（S4：delta 内嵌底座绝对量——FuncId 偏移/底座地址——底座换代或
+/// 在场性变化时错配装载 = 全盘错值；None 侧亦须精确，无底座会话不得吃底座 delta）。
+fn header_matches(header: &Header, rustc_args: &[String], base_key: Option<&str>) -> bool {
+    header.build_id == env!("MIRVM_BUILD_ID")
+        && header.args == rustc_args
+        && header.base_key.as_deref() == base_key
+}
+
 fn env_matches(name: &str, recorded: &Option<String>) -> bool {
     match (std::env::var(name), recorded) {
         (Ok(cur), Some(rec)) => cur == *rec,
@@ -82,14 +95,14 @@ fn env_matches(name: &str, recorded: &Option<String>) -> bool {
 
 /// 热路径查找。返回的 Module 已含恢复到固定基址的冻结区；asm_stub_addrs 是
 /// 序列化时的陈旧地址，调用方**必须**以 asm_sites 重物化覆写后再执行。
-pub fn lookup(rustc_args: &[String]) -> Option<ir::Module> {
+pub fn lookup(rustc_args: &[String], base_key: Option<&str>) -> Option<ir::Module> {
     if disabled() {
         return None;
     }
     let data = std::fs::read(entry_path(rustc_args)).ok()?;
     let (header, module_bytes) = postcard::take_from_bytes::<Header>(&data).ok()?;
-    if header.build_id != env!("MIRVM_BUILD_ID") || header.args != rustc_args {
-        return None; // 键碰撞或跨构建陈账
+    if !header_matches(&header, rustc_args, base_key) {
+        return None;
     }
     if !header
         .files
@@ -115,7 +128,12 @@ pub fn lookup(rustc_args: &[String]) -> Option<ir::Module> {
 }
 
 /// 冷路径入账（lower 刚完成、guest 未运行的洁净态）。返回是否真正写入。
-pub fn store(tcx: TyCtxt<'_>, rustc_args: &[String], module: &ir::Module) -> bool {
+pub fn store(
+    tcx: TyCtxt<'_>,
+    rustc_args: &[String],
+    module: &ir::Module,
+    base_key: Option<&str>,
+) -> bool {
     if disabled() {
         return false;
     }
@@ -175,6 +193,7 @@ pub fn store(tcx: TyCtxt<'_>, rustc_args: &[String], module: &ir::Module) -> boo
         args: rustc_args.to_vec(),
         files: stamps,
         envs,
+        base_key: base_key.map(str::to_owned),
     };
     let Ok(mut buf) = postcard::to_stdvec(&header) else {
         return false;
@@ -268,5 +287,26 @@ mod tests {
                 mtime_ns: 2
             }
         );
+    }
+
+    #[test]
+    fn base_key_must_match_exactly_including_absence() {
+        let args = vec!["mirvm".to_string(), "x.rs".to_string()];
+        let mk = |base_key: Option<&str>| super::Header {
+            build_id: env!("MIRVM_BUILD_ID").to_string(),
+            args: args.clone(),
+            files: Vec::new(),
+            envs: Vec::new(),
+            base_key: base_key.map(str::to_owned),
+        };
+        // 同键 ✓；换代 ✗；在场性变化（有→无 / 无→有）双向 ✗
+        assert!(super::header_matches(&mk(Some("k1")), &args, Some("k1")));
+        assert!(!super::header_matches(&mk(Some("k1")), &args, Some("k2")));
+        assert!(!super::header_matches(&mk(Some("k1")), &args, None));
+        assert!(!super::header_matches(&mk(None), &args, Some("k1")));
+        assert!(super::header_matches(&mk(None), &args, None));
+        // 既有轴回归：args 漂移仍拒
+        let other = vec!["mirvm".to_string(), "y.rs".to_string()];
+        assert!(!super::header_matches(&mk(None), &other, None));
     }
 }

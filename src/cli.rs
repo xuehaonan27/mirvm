@@ -38,6 +38,7 @@ ENV:
     MIRVM_STACK_SIZE  等价于 --stack-size（cargo 项目形态经环境传给 runner）
     MIRVM_TIMING      =1 时向 stderr 输出相位账本（frontend/lower/engine/total）
     MIRVM_NO_IR_CACHE =1 时旁路 L2 engine-IR 缓存（读写全禁；诊断/对拍用）
+    MIRVM_NO_BASE_IMAGE =1 时旁路 std 预降低底座（全量冷降低；诊断/对拍用）
 
 DEV:
     mirvm spike1..5   跑已冻结的 M4 前置 spike（回归自检；见 docs/spike*.md）
@@ -55,6 +56,11 @@ pub fn main() -> ExitCode {
     // cargo 会话中的两个回调形态
     if first == "runner" {
         return runner_main(argv);
+    }
+    // S4 底座构建子进程（必须先于 MIRVM_CARGO_SESSION 分流：runner 里触发的
+    // 构建子进程带着 cargo 会话环境，不能被误路由进 phase_wrapper）
+    if first == "__build-base-image" {
+        return crate::baseimage::build_main(argv);
     }
     if std::env::var_os("MIRVM_CARGO_SESSION").is_some() {
         // RUSTC_WRAPPER：first = 真 rustc 路径
@@ -340,6 +346,8 @@ struct MirvmCallbacks {
     timing: PhaseTiming,
     /// L2 缓存键素材（M6 片2）：与 run_compiler 所见完全一致的参数
     rustc_args: Vec<String>,
+    /// S4 底座：after_analysis 验降低指纹后供 lower 查找；run_driver 尾部 absorb。
+    base: Option<crate::baseimage::BaseImage>,
 }
 
 /// 加载相计时账本（M6 片1）。frontend = 驱动进入→analysis 完成（含依赖 metadata 加载），
@@ -414,12 +422,27 @@ impl Callbacks for MirvmCallbacks {
                 .expect("write_mir_fn failed");
             print!("{}", String::from_utf8_lossy(&buf));
         } else {
+            // S4 降低指纹会话内验证：底座烤入构建会话的 (ub/overflow/contract) checks，
+            // 本会话不一致（cargo runner 自定义 profile 旗标等）即弃用底座走全量降低
+            // ——错指纹复用 = 底座函数带着另一套检查语义（错值级）。
+            if let Some(b) = &self.base {
+                let sess = tcx.sess;
+                let fp = (
+                    sess.ub_checks(),
+                    sess.overflow_checks(),
+                    sess.contract_checks(),
+                );
+                if b.lowering_fp != fp {
+                    self.base = None;
+                }
+            }
             // callback 只做加载相；执行相必须等 tcx.finish、诊断收尾和 compiler drop 全部完成。
             let t_lower = std::time::Instant::now();
-            self.module = Some(crate::lower::lower_program(tcx));
+            self.module = Some(crate::lower::lower_program(tcx, self.base.as_ref()));
             self.timing.lower = Some(t_lower.elapsed());
             // L2 入账：guest 运行前的洁净快照（argv 尚未终结化）。
             // 会话有任何告警/错误即不入账——warm 路径无法重演诊断（见 SESSION_WARNINGS）。
+            // S4：delta 条目携带底座键（装载时双验证，防错配底座）。
             let t_store = std::time::Instant::now();
             if session_diagnostics_clean()
                 && tcx.sess.dcx().has_errors().is_none()
@@ -427,6 +450,7 @@ impl Callbacks for MirvmCallbacks {
                     tcx,
                     &self.rustc_args,
                     self.module.as_ref().expect("刚设置"),
+                    self.base.as_ref().map(|b| b.key.as_str()),
                 )
             {
                 self.timing.cache_store = Some(t_store.elapsed());
@@ -560,15 +584,28 @@ fn run_driver(
     suppress_runner_warning_summary: bool,
 ) -> ExitCode {
     let t_start = std::time::Instant::now();
+    // S4 底座：装载或子进程构建（失败/旁路 = None，全量冷路径自愈）。
+    // 降低指纹（ub/overflow/contract checks）要到会话内才能验证——after_analysis 复核。
+    let base = if dump_mir {
+        None
+    } else {
+        crate::baseimage::ensure()
+    };
+    let base_key = base.as_ref().map(|b| b.key.clone());
     // L2 热路径（M6 片2）：命中即跳过整个 rustc 会话（前端+metadata+mono+lower）。
-    // dump-mir 需要 tcx，强制冷路径。
-    if !dump_mir && let Some(mut module) = crate::ircache::lookup(&rustc_args) {
+    // dump-mir 需要 tcx，强制冷路径。S4：delta 条目与底座键双验证（ircache）。
+    if !dump_mir && let Some(mut module) = crate::ircache::lookup(&rustc_args, base_key.as_deref())
+    {
         let timing = PhaseTiming {
             cache_load: Some(t_start.elapsed()),
             ..PhaseTiming::default()
         };
-        // asm-stub 真地址是进程级活体：以配方幂等重物化覆写陈旧地址
-        module.asm_stub_addrs = crate::lower::asm::materialize(&module.asm_sites);
+        if let Some(b) = base {
+            crate::baseimage::absorb(&mut module, b.module); // 内含 asm 合并重物化
+        } else {
+            // asm-stub 真地址是进程级活体：以配方幂等重物化覆写陈旧地址
+            module.asm_stub_addrs = crate::lower::asm::materialize(&module.asm_sites);
+        }
         let t_engine = std::time::Instant::now();
         let code = run_vm_engine(module, &program_argv, vm_call.as_deref(), vm_stats);
         let engine = (!vm_stats).then(|| t_engine.elapsed());
@@ -587,6 +624,7 @@ fn run_driver(
         t_start,
         timing: PhaseTiming::default(),
         rustc_args: rustc_args.clone(),
+        base,
     };
     let compiler_code = rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&rustc_args, &mut callbacks)
@@ -600,7 +638,11 @@ fn run_driver(
     if let Some(code) = callbacks.exit_code {
         exit(code);
     }
-    if let Some(module) = callbacks.module.take() {
+    if let Some(mut module) = callbacks.module.take() {
+        // S4 冷路径合并（store 已在 after_analysis 落盘 delta；引擎吃合并模块）
+        if let Some(b) = callbacks.base.take() {
+            crate::baseimage::absorb(&mut module, b.module);
+        }
         let t_engine = std::time::Instant::now();
         let code = run_vm_engine(
             module,

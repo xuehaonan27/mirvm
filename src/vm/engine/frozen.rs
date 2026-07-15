@@ -111,6 +111,11 @@ impl FrozenArena {
         self.at_fixed_base
     }
 
+    /// 本区所属域的固定基址（S4：装载方核对"底座真的在底座域"）。
+    pub fn home(&self) -> usize {
+        self.home
+    }
+
     /// 快照 = used 前缀（洁净态责任在调用方：guest 运行前拍）。
     pub fn snapshot(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.base, self.used) }

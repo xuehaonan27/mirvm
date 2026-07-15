@@ -24,6 +24,7 @@ extern crate rustc_span;
 extern crate rustc_symbol_mangling;
 extern crate rustc_target;
 
+pub mod baseimage;
 pub mod cargo_shim;
 pub mod cli;
 pub mod ircache;

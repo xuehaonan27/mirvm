@@ -98,6 +98,18 @@ pub fn ensure_sysroot() -> anyhow::Result<PathBuf> {
     Ok(sysroot_dir)
 }
 
+/// 当前 toolchain/sysroot 的 stamp 值（S4 底座键复用；sysroot 未建成 ⇒ None）。
+pub(crate) fn current_stamp_value() -> Option<String> {
+    let target = env!("MIRVM_HOST");
+    let rustc = toolchain_root().join("bin/rustc");
+    let builder_hash_file = cache_dir()
+        .join(format!("sysroot-{target}"))
+        .join("lib/rustlib")
+        .join(target)
+        .join(".rustc-build-sysroot-hash");
+    stamp_value(&rustc, &builder_hash_file)
+}
+
 /// stamp 内容；任一构件缺失（rustc 不在 / sysroot 未建成）→ None（走全仪式）。
 fn stamp_value(rustc: &Path, builder_hash_file: &Path) -> Option<String> {
     let md = std::fs::metadata(rustc).ok()?;

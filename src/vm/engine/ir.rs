@@ -1248,6 +1248,10 @@ pub struct Module {
     pub foreign_static_syms: Vec<Box<str>>,
     /// main 启动链（M4.3；--vm-call 模式下为 None）
     pub entry: Option<EntryPlan>,
+    /// S4 底座冻结区（absorb 时挂载，与本模块同寿命）。**不进 L2 快照**——底座
+    /// 由底座文件自有其生命周期，delta 条目只以 base_key 引用（ircache 双验证）。
+    #[serde(skip)]
+    pub base_frozen: Option<super::frozen::FrozenArena>,
 }
 
 impl Module {

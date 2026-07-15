@@ -92,17 +92,54 @@ pub(crate) struct Linker<'tcx> {
     asm_sites: Vec<String>,
     /// 非 weak extern static 的宿主地址直嵌符号（M6 片2）：非空 ⇒ 模块不可缓存
     foreign_static_syms: Vec<Box<str>>,
+    // ===== S4 底座（s4-base-image-design；偏移合并）=====
+    /// sym → 底座 FuncId（命中即复用，不入队）。空表 = 无底座/底座构建模式。
+    base_fns: FxHashMap<Box<str>, ir::FuncId>,
+    /// sym → 底座 fn 条目真地址（仅被取址过的）
+    base_fn_entries: FxHashMap<Box<str>, u64>,
+    /// sym → 底座 static 真地址（双份物化 = static mut 精神分裂，必须去重）
+    base_statics: FxHashMap<Box<str>, u64>,
+    /// sym → 底座 TlsId（线程局部身份同理必须去重）
+    base_tls: FxHashMap<Box<str>, ir::TlsId>,
+    /// delta 的 fn/TLS/asm id 起点 = 底座各表长度（absorb 时 base++delta 拼单表）
+    delta_first_fn: ir::FuncId,
+    delta_first_tls: ir::TlsId,
+    delta_first_asm: ir::AsmStubId,
+    /// 下一个待分配 FuncId（不能再用 ids.len()：底座命中也占 ids 条目）
+    next_fn: ir::FuncId,
+    /// 底座导出素材：本会话物化的非 foreign static（DefId, 冻结区地址）
+    static_defs: Vec<(rustc_hir::def_id::DefId, u64)>,
 }
 
 impl<'tcx> Linker<'tcx> {
-    fn new(tcx: TyCtxt<'tcx>) -> Self {
+    fn new(tcx: TyCtxt<'tcx>, base: Option<&crate::baseimage::BaseImage>, for_base: bool) -> Self {
+        let (base_fns, base_fn_entries, base_statics, base_tls) = match base {
+            Some(b) => (
+                b.fn_by_sym.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+                b.entry_by_sym
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect(),
+                b.static_by_sym
+                    .iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .collect(),
+                b.tls_by_sym.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            ),
+            None => Default::default(),
+        };
+        let delta_first_fn = base.map_or(0, |b| b.module.funcs.len() as ir::FuncId);
         Linker {
             tcx,
             ids: FxHashMap::default(),
             queue: VecDeque::new(),
             builtins: engine_builtins(tcx),
             exports: None,
-            frozen: FrozenArena::new(),
+            frozen: if for_base {
+                FrozenArena::new_base_image()
+            } else {
+                FrozenArena::new()
+            },
             alloc_addrs: FxHashMap::default(),
             fn_entries: FxHashMap::default(),
             fn_addrs: FxHashMap::default(),
@@ -110,18 +147,28 @@ impl<'tcx> Linker<'tcx> {
             tls_slots: Vec::new(),
             asm_sites: Vec::new(),
             foreign_static_syms: Vec::new(),
+            base_fns,
+            base_fn_entries,
+            base_statics,
+            base_tls,
+            delta_first_fn,
+            delta_first_tls: base.map_or(0, |b| b.module.tls.len() as ir::TlsId),
+            delta_first_asm: base.map_or(0, |b| b.module.asm_sites.len() as ir::AsmStubId),
+            next_fn: delta_first_fn,
+            static_defs: Vec::new(),
         }
     }
 
     /// 预留一个 asm-stub 槽（M5.0），返回其 AsmStubId；文本随后 set_asm_stub 回填。
     /// 分两步是因为 wrapper 名 `mirvm_asm_{id}` 要先于文本生成确定（自引用 .size 指令）。
+    /// S4：id 从底座计数起编（wrapper 名跨域唯一白拿）。
     fn reserve_asm_stub(&mut self) -> ir::AsmStubId {
-        let id = self.asm_sites.len() as ir::AsmStubId;
+        let id = self.delta_first_asm + self.asm_sites.len() as ir::AsmStubId;
         self.asm_sites.push(String::new());
         id
     }
     fn set_asm_stub(&mut self, id: ir::AsmStubId, text: String) {
-        self.asm_sites[id as usize] = text;
+        self.asm_sites[(id - self.delta_first_asm) as usize] = text;
     }
 
     /// `#[thread_local]` static → 稠密 TlsId（M4.4 D3）。模板 = 初始化器求值产物
@@ -130,6 +177,15 @@ impl<'tcx> Linker<'tcx> {
         if let Some(&id) = self.tls_ids.get(&def_id) {
             return Ok(id);
         }
+        // S4 底座 TLS 去重：TlsId 是线程局部身份，双份 = 同一 #[thread_local] 在
+        // 底座函数与 delta 函数眼中是两个变量（错值级），必须复用。
+        if !self.base_tls.is_empty() {
+            let sym = self.tcx.symbol_name(Instance::mono(self.tcx, def_id)).name;
+            if let Some(&id) = self.base_tls.get(sym) {
+                self.tls_ids.insert(def_id, id);
+                return Ok(id);
+            }
+        }
         let alloc = self
             .tcx
             .eval_static_initializer(def_id)
@@ -137,7 +193,7 @@ impl<'tcx> Linker<'tcx> {
         let (size, align) = (alloc.inner().size().bytes(), alloc.inner().align.bytes());
         let alloc_id = self.tcx.reserve_and_set_static_alloc(def_id);
         let template = self.ensure_alloc(alloc_id)?;
-        let id = self.tls_slots.len() as ir::TlsId;
+        let id = self.delta_first_tls + self.tls_slots.len() as ir::TlsId;
         self.tls_slots.push(ir::TlsSlot {
             template,
             size,
@@ -149,11 +205,19 @@ impl<'tcx> Linker<'tcx> {
 
     /// fn-ptr 条目地址（D4）：每 instance 一个 16 对齐真地址；内容 = FuncId（调试用）。
     /// 比较/转型语义正确；间接调用经反查表派发（M4.1 第 5 步接 CallIndirect）。
+    /// S4：底座函数已有条目则复用（单一地址身份；底座 vtable 与 delta 取址一致）；
+    /// 底座函数无条目（构建时没被取址）则在 delta 区补一个——总量仍恰一份。
     pub(crate) fn fn_entry_addr(&mut self, inst: Instance<'tcx>) -> u64 {
         if let Some(&a) = self.fn_entries.get(&inst) {
             return a;
         }
         let fid = self.func_id(inst);
+        if fid < self.delta_first_fn
+            && let Some(&a) = self.base_fn_entries.get(self.tcx.symbol_name(inst).name)
+        {
+            self.fn_entries.insert(inst, a);
+            return a;
+        }
         let addr = self.frozen.alloc(8, 16);
         unsafe { (addr as *mut u64).write(fid as u64) };
         self.fn_entries.insert(inst, addr);
@@ -205,12 +269,23 @@ impl<'tcx> Linker<'tcx> {
                     self.alloc_addrs.insert(id, p);
                     return Ok(p);
                 }
+                // S4 底座静态去重：同一 static 双份物化 = static mut/内部可变性的
+                // 精神分裂（两处地址各自演化），命中必须复用底座地址。
+                if !self.base_statics.is_empty() {
+                    let sym = self.tcx.symbol_name(Instance::mono(self.tcx, def_id)).name;
+                    if let Some(&addr) = self.base_statics.get(sym) {
+                        self.alloc_addrs.insert(id, addr);
+                        return Ok(addr);
+                    }
+                }
                 // static 的字节 = 初始化器求值产物；可写（static mut/内部可变性）
                 let alloc = self
                     .tcx
                     .eval_static_initializer(def_id)
                     .map_err(|e| format!("static 初始化器求值失败: {e:?}"))?;
-                self.materialize(id, alloc)
+                let addr = self.materialize(id, alloc)?;
+                self.static_defs.push((def_id, addr)); // 底座导出素材（程序模式记了无害）
+                Ok(addr)
             }
             GlobalAlloc::Function { instance } => {
                 let addr = self.fn_entry_addr(instance);
@@ -258,16 +333,23 @@ impl<'tcx> Linker<'tcx> {
     }
 
     /// instance → FuncId；首见分配 id 并入待降低队列（worklist 扩集的入口）。
+    /// S4：首见先查底座（v0 symbol_name 键）——命中即复用底座 id，不入队；
+    /// symbol_name 只在首见且有底座时计算一次（无底座路径零额外成本）。
     pub(crate) fn func_id(&mut self, inst: Instance<'tcx>) -> ir::FuncId {
-        let next = self.ids.len() as ir::FuncId;
-        match self.ids.entry(inst) {
-            std::collections::hash_map::Entry::Occupied(e) => *e.get(),
-            std::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(next);
-                self.queue.push_back((next, inst));
-                next
-            }
+        if let Some(&id) = self.ids.get(&inst) {
+            return id;
         }
+        if !self.base_fns.is_empty()
+            && let Some(&bid) = self.base_fns.get(self.tcx.symbol_name(inst).name)
+        {
+            self.ids.insert(inst, bid);
+            return bid;
+        }
+        let id = self.next_fn;
+        self.next_fn += 1;
+        self.ids.insert(inst, id);
+        self.queue.push_back((id, inst));
+        id
     }
 
     /// 调用点的 callee 解析（Call 终止子用）。Err = 该块 Trap（带分期诊断）。
@@ -690,9 +772,32 @@ fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin> {
 /// 整程序降低：种子收集 → worklist 闭包降低 → exports 表 + main 启动计划。
 /// argv **不在此布置**（M6 片2）：它是运行期输入，由 `Module::finalize_entry_argv`
 /// 在每次运行（冷/热同路）于快照语义之后终结化。
-pub fn lower_program(tcx: TyCtxt<'_>) -> ir::Module {
+/// 底座导出素材（S4：底座构建会话随模块一起产出，程序会话不用）。
+pub struct BaseExports {
+    pub fn_entry_syms: Vec<(Box<str>, u64)>,
+    pub static_syms: Vec<(Box<str>, u64)>,
+    pub tls_syms: Vec<(Box<str>, ir::TlsId)>,
+}
+
+/// 程序会话降低：base 在场时按 symbol_name 复用底座（fn/static/TLS），
+/// 产出 delta 模块（fn/TLS/asm id 从底座计数起编；absorb 合并后运行）。
+pub fn lower_program(tcx: TyCtxt<'_>, base: Option<&crate::baseimage::BaseImage>) -> ir::Module {
+    lower_inner(tcx, base, false).0
+}
+
+/// 底座构建会话降低（合成空 main）：冻结区落底座域，额外导出 sym 索引素材。
+pub fn lower_for_base_build(tcx: TyCtxt<'_>) -> (ir::Module, BaseExports) {
+    let (module, exports) = lower_inner(tcx, None, true);
+    (module, exports.expect("底座构建模式必有导出素材"))
+}
+
+fn lower_inner(
+    tcx: TyCtxt<'_>,
+    base: Option<&crate::baseimage::BaseImage>,
+    for_base: bool,
+) -> (ir::Module, Option<BaseExports>) {
     let typing_env = TypingEnv::fully_monomorphized();
-    let mut linker = Linker::new(tcx);
+    let mut linker = Linker::new(tcx, base, for_base);
 
     // 种子 = mono collector 集（D1：与 native codegen 同一起点，正确性白拿）
     for inst in collect::collect(tcx) {
@@ -733,14 +838,18 @@ pub fn lower_program(tcx: TyCtxt<'_>) -> ir::Module {
 
     let mut module = ir::Module::default();
     let mut funcs: Vec<Option<ir::FuncBody>> = Vec::new();
+    // S4：delta 模块的 funcs 向量按本地位序存放（absorb 时 base++delta 拼接后，
+    // 位置 = delta_first_fn + 本地位序 = 字节码里的绝对 FuncId）
+    let first = linker.delta_first_fn;
     while let Some((id, inst)) = linker.queue.pop_front() {
         let sym = tcx.symbol_name(inst).name.to_owned();
         let body = func::lower_instance(tcx, typing_env, inst, &mut linker)
             .unwrap_or_else(|reason| func::trap_body(&sym, &reason));
-        if funcs.len() <= id as usize {
-            funcs.resize_with(id as usize + 1, || None);
+        let slot = (id - first) as usize;
+        if funcs.len() <= slot {
+            funcs.resize_with(slot + 1, || None);
         }
-        funcs[id as usize] = Some(body);
+        funcs[slot] = Some(body);
         module.exports.insert(sym.into_boxed_str(), id);
     }
     module.funcs = funcs
@@ -789,11 +898,44 @@ pub fn lower_program(tcx: TyCtxt<'_>) -> ir::Module {
     // 配方留在 Module（M6 片2）：L2 warm 路径以 asm_sites 幂等重物化。
     module.asm_sites = std::mem::take(&mut linker.asm_sites);
     module.asm_stub_addrs = asm::materialize(&module.asm_sites);
+    // S4 底座导出素材（构建模式）：sym 索引在此一次算清，装载方零 tcx 依赖。
+    // 合成 crate 的本地项（空 main 及其 shim）不入索引——其符号名带本地
+    // disambiguator 不会与真实程序相撞，但索引的语义是"sysroot 面"，如实排除。
+    let base_exports = for_base.then(|| {
+        use rustc_hir::def_id::LOCAL_CRATE;
+        BaseExports {
+            fn_entry_syms: linker
+                .fn_entries
+                .iter()
+                .filter(|(inst, _)| inst.def_id().krate != LOCAL_CRATE)
+                .map(|(inst, &addr)| (Box::from(tcx.symbol_name(*inst).name), addr))
+                .collect(),
+            static_syms: linker
+                .static_defs
+                .iter()
+                .filter(|(def_id, _)| def_id.krate != LOCAL_CRATE)
+                .map(|&(def_id, addr)| {
+                    let sym = tcx.symbol_name(Instance::mono(tcx, def_id)).name;
+                    (Box::from(sym), addr)
+                })
+                .collect(),
+            tls_syms: linker
+                .tls_ids
+                .iter()
+                .filter(|(def_id, _)| def_id.krate != LOCAL_CRATE)
+                .map(|(&def_id, &id)| {
+                    let sym = tcx.symbol_name(Instance::mono(tcx, def_id)).name;
+                    (Box::from(sym), id)
+                })
+                .collect(),
+        }
+    });
+
     // 冻结区与 fn 条目反查表移交执行相
     module.frozen = Some(linker.frozen);
     module.fn_addrs = linker.fn_addrs.into_iter().collect();
     module.tls = linker.tls_slots;
     module.foreign_static_syms = linker.foreign_static_syms;
     module.entry = entry;
-    module
+    (module, base_exports)
 }
