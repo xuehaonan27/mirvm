@@ -1354,25 +1354,37 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                         x & dw.mask()
                     }
                     (L::Int { signed }, L::Float) => {
-                        let (f32b, f64b) = if signed {
+                        let (f16b, f32b, f64b) = if signed {
                             let x = sext(v, sw);
-                            ((x as f32).to_bits() as u64, (x as f64).to_bits())
+                            (
+                                (x as f16).to_bits() as u64,
+                                (x as f32).to_bits() as u64,
+                                (x as f64).to_bits(),
+                            )
                         } else {
-                            ((v as f32).to_bits() as u64, (v as f64).to_bits())
+                            (
+                                (v as f16).to_bits() as u64,
+                                (v as f32).to_bits() as u64,
+                                (v as f64).to_bits(),
+                            )
                         };
                         match dw {
+                            Width::W16 => f16b,
                             Width::W32 => f32b,
                             Width::W64 => f64b,
-                            _ => engine_abort("simd_cast 浮点 lane 宽度非 4/8"),
+                            _ => engine_abort("simd_cast 浮点 lane 宽度非 2/4/8"),
                         }
                     }
                     (L::Float, L::Int { signed }) => {
-                        // f32→f64 精确保值 ⇒ 统一经 f64；宿主 `as` 即饱和语义
+                        // f32/f16→f64 精确保值 ⇒ 统一经 f64；宿主 `as` 即饱和语义
                         //（simd_as；simd_cast 界外是 guest UB，饱和值在允许集合内）
                         let x = match sw {
+                            Width::W16 => {
+                                f64::from(f32::from_bits(super::x86::f16_to_f32_sw(v as u16)))
+                            }
                             Width::W32 => f32::from_bits(v as u32) as f64,
                             Width::W64 => f64::from_bits(v),
-                            _ => engine_abort("simd_cast 浮点 lane 宽度非 4/8"),
+                            _ => engine_abort("simd_cast 浮点 lane 宽度非 2/4/8"),
                         };
                         let out = if signed {
                             match dw {
@@ -1394,6 +1406,26 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                     (L::Float, L::Float) => match (sw, dw) {
                         (Width::W32, Width::W64) => (f32::from_bits(v as u32) as f64).to_bits(),
                         (Width::W64, Width::W32) => (f64::from_bits(v) as f32).to_bits() as u64,
+                        // f16 lane（D8c 向量形态）：确定性软件模型——native 在
+                        // target_feature(f16c) 函数内经 VCVTPH2PS/VCVTPS2PH 执行硬件
+                        // 语义（sNaN qbit 强置等）；宿主 libcall 的 NaN 位行为随构建
+                        // 目标漂移，不可依赖（half 探针 h0x7c01 实锤）
+                        (Width::W16, Width::W32) => {
+                            u64::from(super::x86::f16_to_f32_sw(v as u16))
+                        }
+                        (Width::W16, Width::W64) => {
+                            f64::from(f32::from_bits(super::x86::f16_to_f32_sw(v as u16)))
+                                .to_bits()
+                        }
+                        (Width::W32, Width::W16) => {
+                            u64::from(super::x86::f32_to_f16_sw(
+                                v as u32,
+                                super::x86::HalfRound::Rne,
+                            ))
+                        }
+                        (Width::W64, Width::W16) => {
+                            (f64::from_bits(v) as f16).to_bits() as u64
+                        }
                         _ => v, // 同宽：位透传
                     },
                 };
@@ -2693,6 +2725,134 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         }
                         true
                     }
+                    Builtin::X86MaxPs128
+                    | Builtin::X86MinPs128
+                    | Builtin::X86MaxPs256
+                    | Builtin::X86MinPs256 => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("max/min.ps 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        let (x, y) = (a(0) as *const u8, a(1) as *const u8);
+                        unsafe {
+                            match builtin {
+                                Builtin::X86MaxPs128 => super::x86::maxmin_ps::<4, true>(dst, x, y),
+                                Builtin::X86MinPs128 => super::x86::maxmin_ps::<4, false>(dst, x, y),
+                                Builtin::X86MaxPs256 => super::x86::maxmin_ps::<8, true>(dst, x, y),
+                                _ => super::x86::maxmin_ps::<8, false>(dst, x, y),
+                            }
+                        }
+                        true
+                    }
+                    Builtin::X86CmpPs128 | Builtin::X86CmpPs256 => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("cmp.ps 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        let (x, y, imm) = (a(0) as *const u8, a(1) as *const u8, a(2));
+                        unsafe {
+                            if matches!(builtin, Builtin::X86CmpPs128) {
+                                super::x86::cmp_ps::<4>(dst, x, y, imm)
+                            } else {
+                                super::x86::cmp_ps::<8>(dst, x, y, imm)
+                            }
+                        }
+                        true
+                    }
+                    Builtin::X86RoundPs128 | Builtin::X86RoundPs256 => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("round.ps 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        let (x, imm) = (a(0) as *const u8, a(1));
+                        unsafe {
+                            if matches!(builtin, Builtin::X86RoundPs128) {
+                                super::x86::round_ps::<4>(dst, x, imm)
+                            } else {
+                                super::x86::round_ps::<8>(dst, x, imm)
+                            }
+                        }
+                        true
+                    }
+                    Builtin::X86CvtPs2dq128
+                    | Builtin::X86CvttPs2dq128
+                    | Builtin::X86CvtPs2dq256
+                    | Builtin::X86CvttPs2dq256 => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("cvt(t).ps2dq 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        let x = a(0) as *const u8;
+                        unsafe {
+                            match builtin {
+                                Builtin::X86CvtPs2dq128 => super::x86::cvt_ps2dq::<4, false>(dst, x),
+                                Builtin::X86CvttPs2dq128 => super::x86::cvt_ps2dq::<4, true>(dst, x),
+                                Builtin::X86CvtPs2dq256 => super::x86::cvt_ps2dq::<8, false>(dst, x),
+                                _ => super::x86::cvt_ps2dq::<8, true>(dst, x),
+                            }
+                        }
+                        true
+                    }
+                    Builtin::X86BlendvPs128 | Builtin::X86BlendvPs256 => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("blendv.ps 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        let (x, y, m) = (a(0) as *const u8, a(1) as *const u8, a(2) as *const u8);
+                        unsafe {
+                            if matches!(builtin, Builtin::X86BlendvPs128) {
+                                super::x86::blendv_ps::<4>(dst, x, y, m)
+                            } else {
+                                super::x86::blendv_ps::<8>(dst, x, y, m)
+                            }
+                        }
+                        true
+                    }
+                    Builtin::X86Cvtps2ph128 | Builtin::X86Cvtps2ph256 => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("vcvtps2ph 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        let (x, imm) = (a(0) as *const u8, a(1));
+                        unsafe {
+                            if matches!(builtin, Builtin::X86Cvtps2ph128) {
+                                super::x86::cvtps2ph::<4>(dst, x, imm)
+                            } else {
+                                super::x86::cvtps2ph::<8>(dst, x, imm)
+                            }
+                        }
+                        true
+                    }
+                    Builtin::X86Cvtph2ps128 | Builtin::X86Cvtph2ps256 => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("vcvtph2ps 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        let x = a(0) as *const u8;
+                        unsafe {
+                            if matches!(builtin, Builtin::X86Cvtph2ps128) {
+                                super::x86::cvtph2ps::<4>(dst, x)
+                            } else {
+                                super::x86::cvtph2ps::<8>(dst, x)
+                            }
+                        }
+                        true
+                    }
+                    Builtin::X86PsllD128 | Builtin::X86PsrlD128 => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("ps{l,r}l.d 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        let (x, c) = (a(0) as *const u8, a(1) as *const u8);
+                        unsafe {
+                            if matches!(builtin, Builtin::X86PsllD128) {
+                                super::x86::pshift32::<4, true>(dst, x, c)
+                            } else {
+                                super::x86::pshift32::<4, false>(dst, x, c)
+                            }
+                        }
+                        true
+                    }
                     _ => false,
                 };
                 if vector_done {
@@ -2906,7 +3066,27 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                     | Builtin::X86PmaddUbSw128
                     | Builtin::X86PmaddUbSw256
                     | Builtin::X86PmaddWd128
-                    | Builtin::X86PmaddWd256 => {
+                    | Builtin::X86PmaddWd256
+                    | Builtin::X86Cvtps2ph128
+                    | Builtin::X86Cvtph2ps128
+                    | Builtin::X86Cvtps2ph256
+                    | Builtin::X86Cvtph2ps256
+                    | Builtin::X86MaxPs128
+                    | Builtin::X86MinPs128
+                    | Builtin::X86MaxPs256
+                    | Builtin::X86MinPs256
+                    | Builtin::X86CmpPs128
+                    | Builtin::X86CmpPs256
+                    | Builtin::X86RoundPs128
+                    | Builtin::X86RoundPs256
+                    | Builtin::X86CvtPs2dq128
+                    | Builtin::X86CvttPs2dq128
+                    | Builtin::X86CvtPs2dq256
+                    | Builtin::X86CvttPs2dq256
+                    | Builtin::X86BlendvPs128
+                    | Builtin::X86BlendvPs256
+                    | Builtin::X86PsllD128
+                    | Builtin::X86PsrlD128 => {
                         unreachable!("x86 vector builtin 已由 indirect vector 通道处理")
                     }
                     Builtin::HostSyscall => unsafe {

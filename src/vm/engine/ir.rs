@@ -1079,6 +1079,59 @@ pub enum Builtin {
     /// 相邻 i16 对积之和放 i32（MIN×MIN+MIN×MIN 回绕为 i32::MIN，硬件定义）。
     X86PmaddWd128,
     X86PmaddWd256,
+    /// `llvm.x86.vcvtps2ph.128(a, rounding)`（`_mm_cvtps_ph`）：f32x4 → f16x4 打包
+    /// 进低 64 位、高 64 位清零。`rounding`：imm[2]=0 → imm[1:0] 舍入模式
+    /// （0=RNE/1=floor/2=ceil/3=trunc）；imm[2]=1 → MXCSR.RC（引擎恒宿默认 RNE）。
+    /// 软件模型与硬件指令逐位一致（NaN：qbit 强置 + 载荷右移 13 位截断；
+    /// 溢出/次正规/四种舍入模式见 x86.rs 对拍单测）。
+    X86Cvtps2ph128,
+    /// `llvm.x86.vcvtph2ps.128(a)`（`_mm_cvtph_ps`）：f16x8 低 64 位 → f32x4，
+    /// 精确展开（NaN：qbit 强置 + 载荷左移 13 位；次正规精确规格化）。
+    /// 注：晚近 stdarch 的 `_mm_cvtph_ps` 已 portable 化（simd_shuffle/simd_cast，
+    /// 走 f16 lane 通道而非本符号）；本符号为旧发射面/直调保留。
+    X86Cvtph2ps128,
+    /// `llvm.x86.vcvtps2ph.256(a, rounding)`（`_mm256_cvtps_ph`）：f32x8 → f16x8，
+    /// 返回 128 位。舍入语义同 .128。
+    X86Cvtps2ph256,
+    /// `llvm.x86.vcvtph2ps.256(a)`（`_mm256_cvtph_ps`）：f16x8 → f32x8，精确展开。
+    X86Cvtph2ps256,
+    /// `llvm.x86.sse.max.ps(a, b)` 与 `.min`（`_mm_max_ps`/`_mm_min_ps`）：
+    /// `a>b ? a : b` / `a<b ? a : b`——unordered → 第二源、±0 相等 → 第二源、
+    /// NaN 位透传（Rust 标量比较天然同构，对拍钉死）。
+    X86MaxPs128,
+    X86MinPs128,
+    /// `llvm.x86.avx.max.ps.256` / `.min`：f32x8 逐 lane 同 .128 语义。
+    X86MaxPs256,
+    X86MinPs256,
+    /// `llvm.x86.sse.cmp.ps(a, b, imm8)` / `llvm.x86.avx.cmp.ps.256`：
+    /// 全 32 谓词表（EQ/LT/LE/UNORD/NEQ/NLT/NLE/ORD ×Q/S + EQ_UQ/NGE/NGT/FALSE/
+    /// NEQ_OQ/GE/GT/TRUE ×Q/S——S/Q 只差异常旗标，值位相同），真 lane 成全 1。
+    X86CmpPs128,
+    X86CmpPs256,
+    /// `llvm.x86.sse41.round.ps(a, imm8)` / `llvm.x86.avx.round.ps.256`：
+    /// imm[3:0] 舍入（0=RNE/1=floor/2=ceil/3=trunc + bit2→MXCSR(=RNE) + bit3 仅
+    /// 异常旗标抑制）。NaN：载荷保留 + qbit 强置（x86.rs 显式臂——libm/roundss
+    /// 的 NaN 位行为随宿主构建目标漂移，不可依赖）。
+    X86RoundPs128,
+    X86RoundPs256,
+    /// `llvm.x86.sse2.cvtps2dq(a)`（`_mm_cvtps_epi32`）：f32→i32 按 MXCSR.RC=RNE
+    /// 取整；NaN/越界/±inf → 0x80000000（indefinite）。
+    X86CvtPs2dq128,
+    /// `llvm.x86.sse2.cvttps2dq(a)`（`_mm_cvttps_epi32`）：同上但截断取整。
+    X86CvttPs2dq128,
+    /// `llvm.x86.avx.cvt.ps2dq.256` / `.cvtt.ps2dq.256`：f32x8 版同上两符号。
+    X86CvtPs2dq256,
+    X86CvttPs2dq256,
+    /// `llvm.x86.sse41.blendvps(a, b, mask)` / `llvm.x86.avx.blendv.ps.256`：
+    /// mask lane 符号位置位取 b、清零取 a（纯位选择，无算术）。
+    X86BlendvPs128,
+    X86BlendvPs256,
+    /// `llvm.x86.sse2.psll.d(a, count)`（`_mm_sll_epi32`）：v4i32 逻辑左移；
+    /// count 为向量操作数低 64 位单一计数值，count>31 → 全零（tiny-skia
+    /// lowp u32x4 通道实锤）。count 向量高位字节硬件照样读低 64 位忽略其余。
+    X86PsllD128,
+    /// `llvm.x86.sse2.psrl.d(a, count)`（`_mm_srl_epi32`）：v4i32 逻辑右移，同律。
+    X86PsrlD128,
 }
 
 /// libffi 直通的参数/返回类别（lower 期从 fn sig layout 冻结；os:: P7 直通处置）。

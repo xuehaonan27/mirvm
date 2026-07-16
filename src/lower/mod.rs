@@ -1283,6 +1283,89 @@ fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin> {
         Symbol::intern("llvm.x86.avx2.pmadd.wd"),
         ir::Builtin::X86PmaddWd256,
     );
+    // 族⑧ F16C（half 2.x 运行期探测后的 f16c 通道）
+    out.insert(
+        Symbol::intern("llvm.x86.vcvtps2ph.128"),
+        ir::Builtin::X86Cvtps2ph128,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.vcvtph2ps.128"),
+        ir::Builtin::X86Cvtph2ps128,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.vcvtps2ph.256"),
+        ir::Builtin::X86Cvtps2ph256,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.vcvtph2ps.256"),
+        ir::Builtin::X86Cvtph2ps256,
+    );
+    // 族⑨ packed-f32（tiny-skia simd 默认路径；rcp/rsqrt 有意不注册——
+    // 硬件近似不可便携复现，保持响亮 trap，见 m9 报告）
+    out.insert(
+        Symbol::intern("llvm.x86.sse.max.ps"),
+        ir::Builtin::X86MaxPs128,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.sse.min.ps"),
+        ir::Builtin::X86MinPs128,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.avx.max.ps.256"),
+        ir::Builtin::X86MaxPs256,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.avx.min.ps.256"),
+        ir::Builtin::X86MinPs256,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.sse.cmp.ps"),
+        ir::Builtin::X86CmpPs128,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.avx.cmp.ps.256"),
+        ir::Builtin::X86CmpPs256,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.sse41.round.ps"),
+        ir::Builtin::X86RoundPs128,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.avx.round.ps.256"),
+        ir::Builtin::X86RoundPs256,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.sse2.cvtps2dq"),
+        ir::Builtin::X86CvtPs2dq128,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.sse2.cvttps2dq"),
+        ir::Builtin::X86CvttPs2dq128,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.avx.cvt.ps2dq.256"),
+        ir::Builtin::X86CvtPs2dq256,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.avx.cvtt.ps2dq.256"),
+        ir::Builtin::X86CvttPs2dq256,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.sse41.blendvps"),
+        ir::Builtin::X86BlendvPs128,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.avx.blendv.ps.256"),
+        ir::Builtin::X86BlendvPs256,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.sse2.psll.d"),
+        ir::Builtin::X86PsllD128,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.sse2.psrl.d"),
+        ir::Builtin::X86PsrlD128,
+    );
     out
 }
 

@@ -3911,8 +3911,21 @@ impl<'tcx> LowerCx<'tcx, '_> {
 impl<'tcx> LowerCx<'tcx, '_> {
     /// SIMD lane 几何 + 元素类别（M5.2 D8b）：LaneKind 使"忘带类别"不可表示——
     /// M4.1 曾对全部 lane 按整数位运算，float lane 的 add/cmp 是静默错值（当时仅因
-    /// corpus 全为整数 lane 未爆雷）。f16/f128 lane 在此拒绝（D8c 接入点）。
+    /// corpus 全为整数 lane 未爆雷）。f16/f128 lane 在此拒绝（D8c 接入点；f16 的
+    /// 放行口在 simd_geom_ext，仅 shuffle/cast 两族——位搬运与 lane 转换可精确，
+    /// 逐 lane 算术/比较/归约继续拒绝）。
     fn simd_geom(&mut self, ty: Ty<'tcx>) -> Result<(u16, u8, ir::LaneKind, u64), String> {
+        self.simd_geom_ext(ty, false)
+    }
+
+    /// simd_geom 的 f16 放行形态：allow_f16 时 Float::F16 lane 返回 Float + 2 字节。
+    /// 只有 simd_shuffle（纯位重排）与 simd_cast/simd_as（f16↔f32/f64 经宿主精确
+    /// 转换）调用放行——`_mm_cvtph_ps` 在晚近 stdarch 的 portable 展开正好是这两族。
+    fn simd_geom_ext(
+        &mut self,
+        ty: Ty<'tcx>,
+        allow_f16: bool,
+    ) -> Result<(u16, u8, ir::LaneKind, u64), String> {
         let layout = self.layout_of(ty)?;
         let rustc_abi::BackendRepr::SimdVector { element, count } = layout.backend_repr else {
             return Err(format!("simd intrinsic 非向量参（{ty}）"));
@@ -3922,7 +3935,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
         let lane = match element.primitive() {
             rustc_abi::Primitive::Int(_, s) => ir::LaneKind::Int { signed: s },
             rustc_abi::Primitive::Float(f) => {
-                if !matches!(f, rustc_abi::Float::F32 | rustc_abi::Float::F64) {
+                let ok = matches!(f, rustc_abi::Float::F32 | rustc_abi::Float::F64)
+                    || (allow_f16 && matches!(f, rustc_abi::Float::F16));
+                if !ok {
                     return Err(format!("simd 浮点 lane {f:?}（f16/f128，D8c）"));
                 }
                 ir::LaneKind::Float
@@ -3968,7 +3983,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
         }
         // 常规几何：T = 第一个泛型参（多数臂的数据向量；select/masked 的 mask 向量）
         let vec_ty = inst.args.type_at(0);
-        let (lanes, lane_bytes, lane, vec_size) = self.simd_geom(vec_ty)?;
+        // f16 lane 放行仅限 shuffle/cast 两族（位搬运/lane 转换精确；算术族继续拒）
+        let f16_ok = matches!(name, "simd_shuffle" | "simd_cast" | "simd_as");
+        let (lanes, lane_bytes, lane, vec_size) = self.simd_geom_ext(vec_ty, f16_ok)?;
         let count = lanes as u64;
         let bin = |cx: &mut Self, op: S| -> Result<Vec<Stmt>, String> {
             let a = vplace(cx, &args[0].node)?;
@@ -4118,7 +4135,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 // 指针族强制整数视角（真实地址模型：provenance 即位透传）。
                 let ptr_family = name != "simd_cast" && name != "simd_as";
                 let dst_p = self.resolve_place(destination)?;
-                let (dst_lanes, dst_bytes, dst_lane, _) = self.simd_geom(dst_p.ty)?;
+                // f16 lane 放行（D8c 向量形态：f16↔f32/f64 经宿主精确转换）
+                let (dst_lanes, dst_bytes, dst_lane, _) = self.simd_geom_ext(dst_p.ty, true)?;
                 if dst_lanes != lanes {
                     return Err(format!("{name} 两侧 lanes 不等（{lanes} vs {dst_lanes}）"));
                 }

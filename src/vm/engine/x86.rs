@@ -322,6 +322,278 @@ pub(super) unsafe fn vpmadd52<const LANES: usize, const HI: bool>(
     }
 }
 
+// ===== packed-f32 lane 软件模型（族⑨：tiny-skia simd 默认路径）=====
+// 全部可精确模型化：`if a > b { a } else { b }` 等 Rust 标量运算与硬件指令同位
+// 结果（unordered/±0/NaN 位透传皆同——unit test 逐一对拍 `_mm_*`/`_mm256_*`）。
+
+/// MAXPS/MINPS 逐 lane：`max ? a>b : a<b` 真取 a、否则取 b（unordered → 第二源
+/// b；±0 相等 → b；NaN 位透传——对拍确认与 Rust 比较同构）。
+pub(super) unsafe fn maxmin_ps<const LANES: usize, const MAX: bool>(
+    dst: *mut u8,
+    a: *const u8,
+    b: *const u8,
+) {
+    for i in 0..LANES {
+        let x = unsafe { (a as *const f32).add(i).read_unaligned() };
+        let y = unsafe { (b as *const f32).add(i).read_unaligned() };
+        let r = if MAX {
+            if x > y { x } else { y }
+        } else if x < y {
+            x
+        } else {
+            y
+        };
+        unsafe { (dst as *mut f32).add(i).write_unaligned(r) };
+    }
+}
+
+/// CMPPS/VCMPPS 全 32 谓词（S/Q 后缀只差异常旗标，值位相同 → 按值对拍一起）。
+/// imm = SDM imm8：真 lane 写 0xFFFF_FFFF，假写 0。
+pub(super) unsafe fn cmp_ps<const LANES: usize>(dst: *mut u8, a: *const u8, b: *const u8, imm: u64) {
+    for i in 0..LANES {
+        let x = unsafe { (a as *const f32).add(i).read_unaligned() };
+        let y = unsafe { (b as *const f32).add(i).read_unaligned() };
+        let un = x.is_nan() || y.is_nan();
+        let r = match imm & 0x1f {
+            0 | 16 => x == y,              // EQ_OQ / EQ_OS
+            1 | 17 => x < y,               // LT_OS / LT_OQ
+            2 | 18 => x <= y,              // LE_OS / LE_OQ
+            3 | 19 => un,                  // UNORD_Q / UNORD_S
+            4 | 20 => !(!un && x == y),    // NEQ_UQ / NEQ_US
+            5 | 21 => !(x < y),            // NLT_US / NLT_UQ
+            6 | 22 => !(x <= y),           // NLE_US / NLE_UQ
+            7 | 23 => !un,                 // ORD_Q / ORD_S
+            8 | 24 => un || x == y,        // EQ_UQ / EQ_US
+            9 | 25 => !(x >= y),           // NGE_US / NGE_UQ
+            10 | 26 => !(x > y),           // NGT_US / NGT_UQ
+            11 | 27 => false,              // FALSE_OQ / FALSE_OS
+            12 | 28 => !un && x != y,      // NEQ_OQ / NEQ_OS
+            13 | 29 => !un && x >= y,      // GE_OS / GE_OQ
+            14 | 30 => !un && x > y,       // GT_OS / GT_OQ
+            _ => true,                     // 15|31: TRUE_UQ / TRUE_US
+        };
+        let m = if r { u32::MAX } else { 0 };
+        unsafe { (dst as *mut u32).add(i).write_unaligned(m) };
+    }
+}
+
+/// ROUNDPS：imm[3:0]：bit2=0 → imm[1:0] 舍入（0=RNE/1=floor/2=ceil/3=trunc）；
+/// bit2=1 → MXCSR.RC（引擎恒宿默认 RNE）；bit3 只抑制异常旗标，与值位无关。
+/// NaN：硬件语义 = 载荷保留 + qbit 强置——显式臂实现（不显式置信性 libm/
+/// roundss 的 NaN 位行为，后者随宿主构建目标特征漂移）。
+pub(super) unsafe fn round_ps<const LANES: usize>(dst: *mut u8, a: *const u8, imm: u64) {
+    for i in 0..LANES {
+        let x = unsafe { (a as *const f32).add(i).read_unaligned() };
+        let r = if x.is_nan() {
+            f32::from_bits(x.to_bits() | 0x0040_0000)
+        } else {
+            match imm & 7 {
+                1 => x.floor(),
+                2 => x.ceil(),
+                3 => x.trunc(),
+                // 0 或 bit2=1（MXCSR，默认 RNE）
+                _ => x.round_ties_even(),
+            }
+        };
+        unsafe { (dst as *mut f32).add(i).write_unaligned(r) };
+    }
+}
+
+/// CVTPS2DQ/CVTTPS2DQ：取整（RNE 或截断）后 i32；NaN/越界（含 2^31 边界）/±inf
+/// → 0x80000000（indefinite，对拍钉死）。取整在 f32 域完成（精确）再饱和检查。
+pub(super) unsafe fn cvt_ps2dq<const LANES: usize, const TRUNC: bool>(dst: *mut u8, a: *const u8) {
+    for i in 0..LANES {
+        let x = unsafe { (a as *const f32).add(i).read_unaligned() };
+        let r = if TRUNC { x.trunc() } else { x.round_ties_even() };
+        let out = if r.is_nan() || r < -2_147_483_648.0 || r >= 2_147_483_648.0 {
+            i32::MIN
+        } else {
+            r as i32
+        };
+        unsafe { (dst as *mut i32).add(i).write_unaligned(out) };
+    }
+}
+
+/// BLENDVPS：mask lane 符号位置位取 b、清零取 a（纯位选择）。
+pub(super) unsafe fn blendv_ps<const LANES: usize>(
+    dst: *mut u8,
+    a: *const u8,
+    b: *const u8,
+    mask: *const u8,
+) {
+    for i in 0..LANES {
+        let m = unsafe { (mask as *const u32).add(i).read_unaligned() };
+        let src = if m as i32 >= 0 { a } else { b };
+        let v = unsafe { (src as *const u32).add(i).read_unaligned() };
+        unsafe { (dst as *mut u32).add(i).write_unaligned(v) };
+    }
+}
+
+/// PSLL/PSRL.d 软件模型：count = count 操作数低 64 位（高位字节忽略）；
+/// count > 31 → 全零 lane（SDM）。逻辑移位，位进出精确。
+pub(super) unsafe fn pshift32<const LANES: usize, const LEFT: bool>(
+    dst: *mut u8,
+    a: *const u8,
+    count: *const u8,
+) {
+    let c = unsafe { (count as *const u64).read_unaligned() };
+    for i in 0..LANES {
+        let x = unsafe { (a as *const u32).add(i).read_unaligned() };
+        let r = if c > 31 {
+            0
+        } else {
+            let sh = c as u32;
+            if LEFT { x << sh } else { x >> sh }
+        };
+        unsafe { (dst as *mut u32).add(i).write_unaligned(r) };
+    }
+}
+
+// ===== f16 ↔ f32 软件模型（族⑧ F16C VCVTPS2PH/VCVTPH2PS）=====
+
+/// VCVTPS2PH 舍入模式（imm[1:0]；imm[2]=1 时 = MXCSR.RC，引擎恒宿默认 RNE）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HalfRound {
+    Rne,
+    Down,
+    Up,
+    Trunc,
+}
+
+/// f32（位型）→ f16（位型），VCVTPS2PH 精确语义：次正规/溢出/四种舍入模式精确；
+/// NaN → qbit 强置 + 载荷右移 13 位截断（`7f800001→7e00` 型，对拍钉死）。
+pub(super) fn f32_to_f16_sw(bits: u32, mode: HalfRound) -> u16 {
+    let sign = ((bits >> 31) as u16) << 15;
+    let exp = ((bits >> 23) & 0xff) as i32;
+    let mant = bits & 0x007f_ffff;
+    if exp == 0xff {
+        if mant != 0 {
+            // NaN：qbit 强置 + 载荷高位截断（低 13 位丢弃——硬件不折进 bit0）
+            return sign | 0x7e00 | ((mant >> 13) as u16);
+        }
+        return sign | 0x7c00; // ±inf → ±inf
+    }
+    if exp == 0 && mant == 0 {
+        return sign; // ±0 → ±0（任何舍入模式）
+    }
+    // 数值 = mant_full × 2^(e-23)；f32 次正规 exp=0 ⇒ mant_full=mant, e=-126
+    let (mant_full, e) = if exp == 0 {
+        (mant, -126)
+    } else {
+        (mant | 0x0080_0000, exp - 127)
+    };
+    // 定向舍入折进幅值域：away = (Up && 非负) || (Down && 负)；Rne/Trunc 无关符号
+    let away = matches!(
+        (mode, sign != 0),
+        (HalfRound::Up, false) | (HalfRound::Down, true)
+    );
+    if e > 15 {
+        // 幅值 ≥ 2^16（RNE 下也必 >65520 沸点）：away/Rne → inf，否则最大正规
+        return if matches!(mode, HalfRound::Rne) || away {
+            sign | 0x7c00
+        } else {
+            sign | 0x7bff
+        };
+    }
+    if e >= -14 {
+        // 正规道：留 11 位（含隐藏位），丢 13 位
+        let keep = mant_full >> 13;
+        let dropped = mant_full & 0x1fff;
+        let inc = match mode {
+            HalfRound::Rne => dropped > 0x1000 || (dropped == 0x1000 && keep & 1 == 1),
+            HalfRound::Up | HalfRound::Down => away && dropped != 0,
+            HalfRound::Trunc => false,
+        };
+        let keep = keep + u32::from(inc);
+        // 尾数进位上推指数（含 RNE 的 65520→inf 沸点）
+        let (e16, mhi) = if keep == 0x800 { (e + 1, 0x400u32) } else { (e, keep) };
+        if e16 > 15 {
+            return if matches!(mode, HalfRound::Rne) || away {
+                sign | 0x7c00
+            } else {
+                sign | 0x7bff
+            };
+        }
+        return sign | (((e16 + 15) as u16) << 10) | ((mhi & 0x3ff) as u16);
+    }
+    // 次正规道：结果码即幅值以 2^-24 为 LSB 的整数（码 0x400 = 最小正规，无缝衔接）
+    if e < -25 {
+        // 低于半 LSB：Rne/Trunc → ±0；away → 1 个 LSB
+        return sign | u16::from(away);
+    }
+    let shift = (-e - 1) as u32; // 14..=24
+    let keep = mant_full >> shift;
+    let guard = (mant_full >> (shift - 1)) & 1;
+    let sticky = mant_full & ((1u32 << (shift - 1)) - 1);
+    let inc = match mode {
+        HalfRound::Rne => guard == 1 && (sticky != 0 || keep & 1 == 1),
+        HalfRound::Up | HalfRound::Down => away && (guard == 1 || sticky != 0),
+        HalfRound::Trunc => false,
+    };
+    sign | (keep + u32::from(inc)) as u16
+}
+
+/// f16（位型）→ f32（位型），VCVTPH2PS 精确展开：次正规精确规格化；
+/// NaN → qbit 强置 + 载荷左移 13 位（对拍钉死）。
+pub(super) fn f16_to_f32_sw(bits: u16) -> u32 {
+    let bits = u32::from(bits);
+    let sign = (bits & 0x8000) << 16;
+    let exp = (bits >> 10) & 0x1f;
+    let mant = bits & 0x03ff;
+    if exp == 0x1f {
+        if mant != 0 {
+            // NaN：qbit 强置（f32 bit22）+ 载荷左移 13 位
+            return sign | 0x7fc0_0000 | (mant << 13);
+        }
+        return sign | 0x7f80_0000; // ±inf → ±inf
+    }
+    if exp == 0 {
+        if mant == 0 {
+            return sign; // ±0 → ±0
+        }
+        // 次正规 → 正规规格化（值恒可精确表示）
+        let mut m = mant;
+        let mut e: i32 = -14;
+        while m & 0x400 == 0 {
+            m <<= 1;
+            e -= 1;
+        }
+        m &= 0x3ff;
+        return sign | (((e + 127) as u32) << 23) | (m << 13);
+    }
+    sign | (((exp as i32 - 15 + 127) as u32) << 23) | (mant << 13)
+}
+
+/// VCVTPS2PH：f32 lanes → f16 打包进输出低 LANES×2 字节，其余清零
+/// （.128：LANES=4，输出 16 字节的低 8；.256：LANES=8，输出 16 字节整体）。
+pub(super) unsafe fn cvtps2ph<const LANES: usize>(dst: *mut u8, a: *const u8, imm: u64) {
+    let mode = match imm & 7 {
+        // bit2=1（imm&4）→ MXCSR.RC，引擎恒宿默认 = RNE
+        1 => HalfRound::Down,
+        2 => HalfRound::Up,
+        3 => HalfRound::Trunc,
+        4..=7 => HalfRound::Rne,
+        _ => HalfRound::Rne,
+    };
+    for i in 0..LANES {
+        let x = unsafe { (a as *const u32).add(i).read_unaligned() };
+        let h = f32_to_f16_sw(x, mode);
+        unsafe { (dst as *mut u16).add(i).write_unaligned(h) };
+    }
+    // 输出高位清零（.128 的 v8i16 返回：高 4 lane = 0）
+    unsafe { std::ptr::write_bytes(dst.add(LANES * 2), 0, 16 - LANES * 2) };
+}
+
+/// VCVTPH2PS：f16 lanes（输入低 LANES×2 字节）→ f32 lanes（输出 LANES×4 字节）
+/// （.128：LANES=4 → 16 字节；.256：LANES=8 → 32 字节）。
+pub(super) unsafe fn cvtph2ps<const LANES: usize>(dst: *mut u8, a: *const u8) {
+    for i in 0..LANES {
+        let h = unsafe { (a as *const u16).add(i).read_unaligned() };
+        let x = f16_to_f32_sw(h);
+        unsafe { (dst as *mut u32).add(i).write_unaligned(x) };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -861,6 +1133,366 @@ mod tests {
                 )
             };
             assert_eq!(got[0], i32::MIN);
+        }
+    }
+
+    /// VCVTPS2PH 软件模型 vs 硬件 `_mm_cvtps_ph::<imm>`：全 f16 域往返 + 边界
+    /// 沸点 + LCG 随机大谱系 × imm 0..7 全舍入模式（含 MXCSR=CUR_DIRECTION 4..7）。
+    #[test]
+    fn cvtps2ph_software_matches_f16c_hardware_bitwise() {
+        if !std::is_x86_feature_detected!("f16c") {
+            return;
+        }
+        use super::{cvtph2ps, cvtps2ph, f16_to_f32_sw, f32_to_f16_sw, HalfRound};
+        use std::arch::x86_64::{_mm_cvtps_ph, _mm_set_ps1, _mm_storeu_si128};
+        let hw = |bits: u32, imm: u64| -> u16 {
+            let v = unsafe { _mm_set_ps1(f32::from_bits(bits)) };
+            let r = unsafe {
+                match imm {
+                    0 => _mm_cvtps_ph::<0>(v),
+                    1 => _mm_cvtps_ph::<1>(v),
+                    2 => _mm_cvtps_ph::<2>(v),
+                    3 => _mm_cvtps_ph::<3>(v),
+                    _ => _mm_cvtps_ph::<4>(v), // 4 = CUR_DIRECTION：默认 MXCSR = RNE
+                }
+            };
+            let mut o = [0u16; 8];
+            unsafe { _mm_storeu_si128(o.as_mut_ptr().cast(), r) };
+            o[0]
+        };
+        // 软件模型与硬件对照：imm 0..3 显式舍入、4 MXCSR(=RNE)。stdarch const 泛型
+        // 限 imm<5；imm[3]（no-exc）只影响异常旗标、不影响值位（native 探针实录）。
+        let check = |bits: u32| {
+            for (imm, mode) in [
+                (0u64, HalfRound::Rne),
+                (1, HalfRound::Down),
+                (2, HalfRound::Up),
+                (3, HalfRound::Trunc),
+                (4, HalfRound::Rne),
+            ] {
+                let expect = hw(bits, imm);
+                assert_eq!(
+                    f32_to_f16_sw(bits, mode),
+                    expect,
+                    "bits={bits:08x} imm={imm}"
+                );
+                // 高端 helper 同路（.256 宽度全 lane + .128 高 64 位清零另验）
+                let f = [f32::from_bits(bits); 8];
+                let mut o = [0u16; 8];
+                unsafe {
+                    cvtps2ph::<8>(
+                        o.as_mut_ptr().cast::<u8>(),
+                        f.as_ptr().cast::<u8>(),
+                        imm,
+                    )
+                };
+                for (i, &h) in o.iter().enumerate() {
+                    assert_eq!(h, expect, "helper bits={bits:08x} imm={imm} lane={i}");
+                }
+                let mut o4 = [0xffffu16; 8];
+                unsafe {
+                    cvtps2ph::<4>(
+                        o4.as_mut_ptr().cast::<u8>(),
+                        f.as_ptr().cast::<u8>(),
+                        imm,
+                    )
+                };
+                assert_eq!(&o4[..4], [expect; 4], "helper128 bits={bits:08x} imm={imm}");
+                assert_eq!(&o4[4..], [0u16; 4], "helper128 高 64 位清零 bits={bits:08x} imm={imm}");
+            }
+        };
+        // ① NaN/inf/±0/次正规/沸点 全列出
+        let specials: [u32; 33] = [
+            0x0000_0000, 0x8000_0000, 0x0000_0001, 0x8000_0001, 0x007f_ffff, 0x0080_0000,
+            0x3380_0000, 0x337f_ffff, 0x3380_0001, 0x33ff_ffff, 0x3400_0000, 0x3400_0001,
+            0x3400_07ff, 0x3400_0800, 0x3800_0000, 0x387f_f800, 0x387f_f000, 0x387f_efff,
+            0x3880_0000, 0x477f_e000, 0x477f_efff, 0x477f_f000, 0x477f_f800, 0x477f_ffff,
+            0x4780_0000, 0x477c_0000, 0xc77f_e000, 0x7f80_0000, 0xff80_0000,
+            0x7fc0_0000, 0x7f80_0001, 0x7f80_0002, 0x7fff_ffff,
+        ];
+        for &b in &specials {
+            check(b);
+        }
+        // ② 全 f16 位型的 f32 映像（往返域全盖）
+        for u in 0u32..=0xffff {
+            check(f16_to_f32_sw(u as u16));
+        }
+        // ③ LCG 随机 200 万（×8 imm）
+        let mut rng = 0x9e3779b97f4a7c15u64;
+        for _ in 0..2_000_000 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            check(rng as u32);
+        }
+        // ④ VCVTPH2PS：全 65536 位型软件 vs helper + 已知硬件位型（NaN qbit 强置等）
+        if std::is_x86_feature_detected!("f16c") {
+            use std::arch::x86_64::{_mm_cvtph_ps, _mm_cvtsi32_si128, _mm_storeu_ps};
+            for u in 0u32..=0xffff {
+                let sw = f16_to_f32_sw(u as u16);
+                let hw = unsafe {
+                    let r = _mm_cvtph_ps(_mm_cvtsi32_si128(u as i32));
+                    let mut o = [0f32; 4];
+                    _mm_storeu_ps(o.as_mut_ptr(), r);
+                    o[0].to_bits()
+                };
+                assert_eq!(sw, hw, "ph2ps {u:04x}");
+                // 8-lane helper（.256 同路：每 lane 同值）
+                let v = [u as u16; 8];
+                let mut o = [0u32; 8];
+                unsafe { cvtph2ps::<8>(o.as_mut_ptr().cast::<u8>(), v.as_ptr().cast::<u8>()) };
+                for (i, &x) in o.iter().enumerate() {
+                    assert_eq!(x, hw, "ph2ps helper {u:04x} lane={i}");
+                }
+            }
+        }
+    }
+
+    /// 族⑨ packed-f32 lane 软件模型 vs 硬件指令对拍（max/min/cmp/round/cvt/blendv，
+    /// 128/256 双宽；NaN 位透传、±0 同位、32 谓词全表、舍入 imm 全表）。
+    #[test]
+    fn packed_ps_lane_models_match_hardware_bitwise() {
+        use super::{blendv_ps, cmp_ps, cvt_ps2dq, maxmin_ps, round_ps};
+        // (a,b) 组合覆盖：正常序/逆序/±0/±inf/qNaN/sNaN/载荷相异
+        let bits_a: [u32; 9] = [
+            0x3f80_0000, 0xbf80_0000, 0x8000_0000, 0x0000_0000, 0x7f80_0000, 0xff80_0000,
+            0x7fc0_0000, 0x7f80_0001, 0x7fa0_0000,
+        ];
+        let bits_b: [u32; 9] = [
+            0x4000_0000, 0x3f80_0000, 0x0000_0000, 0x8000_0000, 0xff80_0000, 0x7f80_0000,
+            0x7f80_0001, 0x7fc0_0000, 0x7fc0_0000,
+        ];
+        if std::is_x86_feature_detected!("sse") {
+            use std::arch::x86_64::{
+                _mm_loadu_ps, _mm_max_ps, _mm_min_ps, _mm_storeu_ps,
+            };
+            unsafe {
+                for (&a, &b) in bits_a.iter().zip(&bits_b) {
+                    let (va, vb) = (
+                        _mm_loadu_ps([f32::from_bits(a); 4].as_ptr()),
+                        _mm_loadu_ps([f32::from_bits(b); 4].as_ptr()),
+                    );
+                    let (mut hw_max, mut hw_min) = ([0f32; 4], [0f32; 4]);
+                    _mm_storeu_ps(hw_max.as_mut_ptr(), _mm_max_ps(va, vb));
+                    _mm_storeu_ps(hw_min.as_mut_ptr(), _mm_min_ps(va, vb));
+                    let (mut sw_max, mut sw_min) = ([0f32; 4], [0f32; 4]);
+                    maxmin_ps::<4, true>(
+                        sw_max.as_mut_ptr().cast::<u8>(),
+                        [f32::from_bits(a); 4].as_ptr().cast::<u8>(),
+                        [f32::from_bits(b); 4].as_ptr().cast::<u8>(),
+                    );
+                    maxmin_ps::<4, false>(
+                        sw_min.as_mut_ptr().cast::<u8>(),
+                        [f32::from_bits(a); 4].as_ptr().cast::<u8>(),
+                        [f32::from_bits(b); 4].as_ptr().cast::<u8>(),
+                    );
+                    assert_eq!(sw_max.map(f32::to_bits), hw_max.map(f32::to_bits), "max {a:08x}/{b:08x}");
+                    assert_eq!(sw_min.map(f32::to_bits), hw_min.map(f32::to_bits), "min {a:08x}/{b:08x}");
+                }
+            }
+        }
+        // cmp.ps 128/256 全 32 谓词 × 全位型组合（含相同 NaN 输入的同位比较）
+        if std::is_x86_feature_detected!("sse") && std::is_x86_feature_detected!("avx") {
+            use std::arch::x86_64::{
+                _mm256_cmp_ps, _mm256_loadu_ps, _mm256_storeu_ps, _mm_cmp_ps, _mm_loadu_ps,
+                _mm_storeu_ps,
+            };
+            macro_rules! cmp_hw {
+                ($va:expr, $vb:expr, $va8:expr, $vb8:expr, $lane:expr, $a:expr, $b:expr, $imm:literal, $swa:expr, $swb:expr, $swa8:expr, $swb8:expr) => {{
+                    let mut o = [0f32; 4];
+                    _mm_storeu_ps(o.as_mut_ptr(), _mm_cmp_ps::<$imm>($va, $vb));
+                    let mut sw = [0u32; 4];
+                    cmp_ps::<4>(sw.as_mut_ptr().cast::<u8>(), $swa, $swb, $imm);
+                    assert_eq!(sw, o.map(f32::to_bits), "cmp128 {} {}/{:08x}/{:08x}", $imm, $lane, $a, $b);
+                    let mut o8 = [0f32; 8];
+                    _mm256_storeu_ps(o8.as_mut_ptr(), _mm256_cmp_ps::<$imm>($va8, $vb8));
+                    let mut sw8 = [0u32; 8];
+                    cmp_ps::<8>(sw8.as_mut_ptr().cast::<u8>(), $swa8, $swb8, $imm);
+                    assert_eq!(sw8, o8.map(f32::to_bits), "cmp256 {} {}/{:08x}/{:08x}", $imm, $lane, $a, $b);
+                }};
+            }
+            for (&a, &b) in bits_a.iter().zip(&bits_b) {
+                let (fa, fb) = ([f32::from_bits(a); 4], [f32::from_bits(b); 4]);
+                let (fa8, fb8) = ([f32::from_bits(a); 8], [f32::from_bits(b); 8]);
+                unsafe {
+                    let (va, vb) = (_mm_loadu_ps(fa.as_ptr()), _mm_loadu_ps(fb.as_ptr()));
+                    let (va8, vb8) = (_mm256_loadu_ps(fa8.as_ptr()), _mm256_loadu_ps(fb8.as_ptr()));
+                    let (swa, swb) = (fa.as_ptr().cast::<u8>(), fb.as_ptr().cast::<u8>());
+                    let (swa8, swb8) = (fa8.as_ptr().cast::<u8>(), fb8.as_ptr().cast::<u8>());
+                    cmp_hw!(va, vb, va8, vb8, "eq", a, b, 0, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "lt", a, b, 1, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "le", a, b, 2, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "unord", a, b, 3, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "neq_uq", a, b, 4, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "nlt", a, b, 5, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "nle", a, b, 6, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "ord", a, b, 7, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "eq_uq", a, b, 8, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "nge", a, b, 9, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "ngt", a, b, 10, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "false", a, b, 11, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "neq_oq", a, b, 12, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "ge", a, b, 13, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "gt", a, b, 14, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "true", a, b, 15, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "eq_os", a, b, 16, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "lt_oq", a, b, 17, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "le_oq", a, b, 18, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "unord_s", a, b, 19, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "neq_us", a, b, 20, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "nlt_uq", a, b, 21, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "nle_uq", a, b, 22, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "ord_s", a, b, 23, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "eq_us", a, b, 24, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "nge_uq", a, b, 25, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "ngt_uq", a, b, 26, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "false_os", a, b, 27, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "neq_os", a, b, 28, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "ge_oq", a, b, 29, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "gt_oq", a, b, 30, swa, swb, swa8, swb8);
+                    cmp_hw!(va, vb, va8, vb8, "true_us", a, b, 31, swa, swb, swa8, swb8);
+                }
+            }
+        }
+        // round.ps imm 0..=15（bit2 MXCSR / bit3 no-exc 位组合）
+        if std::is_x86_feature_detected!("sse4.1") {
+            use std::arch::x86_64::{_mm_loadu_ps, _mm_round_ps, _mm_storeu_ps};
+            let inputs: [u32; 14] = [
+                0x0000_0000, 0x8000_0000, 0x3f00_0000, 0xbf00_0000, 0x3fa0_0000, 0xbfa0_0000,
+                0x4049_0fdb, 0x7f80_0000, 0xff80_0000, 0x7fc0_0000, 0x7f80_0001, 0x3f80_0000,
+                0x50c3_2e15, 0xd0c3_2e15,
+            ];
+            macro_rules! round_hw {
+                ($v:expr, $bits:expr, $imm:literal) => {{
+                    let mut o = [0f32; 4];
+                    _mm_storeu_ps(o.as_mut_ptr(), _mm_round_ps::<$imm>($v));
+                    let mut sw = [0f32; 4];
+                    round_ps::<4>(
+                        sw.as_mut_ptr().cast::<u8>(),
+                        [f32::from_bits($bits); 4].as_ptr().cast::<u8>(),
+                        $imm,
+                    );
+                    assert_eq!(
+                        sw.map(f32::to_bits),
+                        o.map(f32::to_bits),
+                        "round imm={} {:08x}",
+                        $imm,
+                        $bits
+                    );
+                }};
+            }
+            for &b in &inputs {
+                let v = unsafe { _mm_loadu_ps([f32::from_bits(b); 4].as_ptr()) };
+                unsafe {
+                    round_hw!(v, b, 0);
+                    round_hw!(v, b, 1);
+                    round_hw!(v, b, 2);
+                    round_hw!(v, b, 3);
+                    round_hw!(v, b, 4);
+                    round_hw!(v, b, 5);
+                    round_hw!(v, b, 6);
+                    round_hw!(v, b, 7);
+                    round_hw!(v, b, 8);
+                    round_hw!(v, b, 9);
+                    round_hw!(v, b, 10);
+                    round_hw!(v, b, 11);
+                }
+            }
+        }
+        // cvt/cvtt 边界（indefinite 0x80000000 域），128/256 双宽
+        if std::is_x86_feature_detected!("sse2") && std::is_x86_feature_detected!("avx") {
+            use std::arch::x86_64::{
+                _mm256_cvtps_epi32, _mm256_cvttps_epi32, _mm256_loadu_ps, _mm256_storeu_si256,
+                _mm_cvtps_epi32, _mm_cvttps_epi32, _mm_loadu_ps, _mm_storeu_si128,
+            };
+            let inputs: [u32; 16] = [
+                0x0000_0000, 0x8000_0000, 0x3f00_0000, 0x3f40_0000, 0x3fa0_0000, 0xbfa0_0000,
+                0x4f00_0000, 0x4eff_ffff, 0xcf00_0000, 0xceff_ffff, 0x7f80_0000, 0xff80_0000,
+                0x7fc0_0000, 0x7f80_0001, 0x0e8e_fdb9, 0x60ad_78ec,
+            ];
+            unsafe {
+                for &b in &inputs {
+                    let v = _mm_loadu_ps([f32::from_bits(b); 4].as_ptr());
+                    let v8 = _mm256_loadu_ps([f32::from_bits(b); 8].as_ptr());
+                    let (mut hw, mut hw8) = ([0i32; 4], [0i32; 8]);
+                    _mm_storeu_si128(hw.as_mut_ptr().cast(), _mm_cvtps_epi32(v));
+                    _mm256_storeu_si256(hw8.as_mut_ptr().cast(), _mm256_cvtps_epi32(v8));
+                    let (mut sw, mut sw8) = ([0i32; 4], [0i32; 8]);
+                    cvt_ps2dq::<4, false>(sw.as_mut_ptr().cast::<u8>(), [f32::from_bits(b); 4].as_ptr().cast::<u8>());
+                    cvt_ps2dq::<8, false>(sw8.as_mut_ptr().cast::<u8>(), [f32::from_bits(b); 8].as_ptr().cast::<u8>());
+                    assert_eq!(sw, hw, "cvt {b:08x}");
+                    assert_eq!(sw8, hw8, "cvt256 {b:08x}");
+                    _mm_storeu_si128(hw.as_mut_ptr().cast(), _mm_cvttps_epi32(v));
+                    _mm256_storeu_si256(hw8.as_mut_ptr().cast(), _mm256_cvttps_epi32(v8));
+                    cvt_ps2dq::<4, true>(sw.as_mut_ptr().cast::<u8>(), [f32::from_bits(b); 4].as_ptr().cast::<u8>());
+                    cvt_ps2dq::<8, true>(sw8.as_mut_ptr().cast::<u8>(), [f32::from_bits(b); 8].as_ptr().cast::<u8>());
+                    assert_eq!(sw, hw, "cvtt {b:08x}");
+                    assert_eq!(sw8, hw8, "cvtt256 {b:08x}");
+                }
+            }
+        }
+        // blendv：mask 符号位纯位选择
+        if std::is_x86_feature_detected!("sse4.1") {
+            use std::arch::x86_64::{
+                _mm_blendv_ps, _mm_loadu_ps, _mm_storeu_ps,
+            };
+            let a = [1.5f32, -2.25, 0.0, f32::NAN];
+            let b = [7.0f32, -0.0, f32::INFINITY, -9.5];
+            let m = [-1.0f32, 0.0, -0.0, 1.0]; // lane0/2 → b；lane1/3 → a
+            unsafe {
+                let r = _mm_blendv_ps(_mm_loadu_ps(a.as_ptr()), _mm_loadu_ps(b.as_ptr()), _mm_loadu_ps(m.as_ptr()));
+                let mut o = [0f32; 4];
+                _mm_storeu_ps(o.as_mut_ptr(), r);
+                let mut sw = [0f32; 4];
+                blendv_ps::<4>(sw.as_mut_ptr().cast::<u8>(), a.as_ptr().cast::<u8>(), b.as_ptr().cast::<u8>(), m.as_ptr().cast::<u8>());
+                assert_eq!(sw.map(f32::to_bits), o.map(f32::to_bits));
+            }
+        }
+    }
+
+    /// PSLL/PSRL.d 软件模型 vs SSE2 硬件：count 阈值边界（31/32/33/全高字节）
+    /// 与数据位型边界（含 0x80000000 位型，确认逻辑右移不铺符号）。
+    #[test]
+    fn pshift_d_models_match_sse2_hardware() {
+        use super::pshift32;
+        if !std::is_x86_feature_detected!("sse2") {
+            return;
+        }
+        use std::arch::x86_64::{
+            _mm_cvtsi32_si128, _mm_loadu_si128, _mm_sll_epi32, _mm_srl_epi32, _mm_storeu_si128,
+        };
+        let vals = [
+            [0x0000_0001u32, 0x8000_0000, 0xffff_ffff, 0x1234_5678],
+            [0x0000_0000u32, 0x7fff_ffff, 0x8000_0001, 0x0000_0002],
+        ];
+        // count 高 64 位随意污染（硬件忽略）；边界 31/32/33
+        let counts: [[u64; 2]; 8] = [
+            [0, 0], [1, 0], [15, 0xffff_ffff_ffff_ffff], [16, 0xaa55], [31, 0],
+            [32, 0], [33, 0xdead_beef], [0xffff_ffff_ffff_ffff, 0],
+        ];
+        unsafe {
+            for v in vals {
+                let x = _mm_loadu_si128(v.as_ptr().cast());
+                for c in counts {
+                    let cv = _mm_loadu_si128(c.as_ptr().cast());
+                    let (mut hw_l, mut hw_r) = ([0u32; 4], [0u32; 4]);
+                    _mm_storeu_si128(hw_l.as_mut_ptr().cast(), _mm_sll_epi32(x, cv));
+                    _mm_storeu_si128(hw_r.as_mut_ptr().cast(), _mm_srl_epi32(x, cv));
+                    let (mut sw_l, mut sw_r) = ([0u32; 4], [0u32; 4]);
+                    pshift32::<4, true>(
+                        sw_l.as_mut_ptr().cast::<u8>(),
+                        v.as_ptr().cast::<u8>(),
+                        c.as_ptr().cast::<u8>(),
+                    );
+                    pshift32::<4, false>(
+                        sw_r.as_mut_ptr().cast::<u8>(),
+                        v.as_ptr().cast::<u8>(),
+                        c.as_ptr().cast::<u8>(),
+                    );
+                    assert_eq!(sw_l, hw_l, "psll.d {v:?} count={c:?}");
+                    assert_eq!(sw_r, hw_r, "psrl.d {v:?} count={c:?}");
+                }
+            }
         }
     }
 }
