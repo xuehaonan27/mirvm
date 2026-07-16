@@ -2517,6 +2517,154 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         }
                         true
                     }
+                    Builtin::X86PsadBw128 | Builtin::X86PsadBw256 => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("psad.bw 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        unsafe {
+                            if matches!(builtin, Builtin::X86PsadBw128) {
+                                super::x86::psad_bw128(dst, a(0) as *const u8, a(1) as *const u8);
+                            } else {
+                                super::x86::psad_bw256(dst, a(0) as *const u8, a(1) as *const u8);
+                            }
+                        }
+                        true
+                    }
+                    Builtin::X86Pclmulqdq => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("pclmulqdq 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        unsafe {
+                            super::x86::pclmulqdq(dst, a(0) as *const u8, a(1) as *const u8, a(2))
+                        };
+                        true
+                    }
+                    Builtin::X86AesEnc
+                    | Builtin::X86AesEncLast
+                    | Builtin::X86AesDec
+                    | Builtin::X86AesDecLast => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("aesni 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        let (x, k) = (a(0) as *const u8, a(1) as *const u8);
+                        unsafe {
+                            match builtin {
+                                Builtin::X86AesEnc => super::x86::aesenc(dst, x, k),
+                                Builtin::X86AesEncLast => super::x86::aesenclast(dst, x, k),
+                                Builtin::X86AesDec => super::x86::aesdec(dst, x, k),
+                                _ => super::x86::aesdeclast(dst, x, k),
+                            }
+                        }
+                        true
+                    }
+                    Builtin::X86AesImc => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("aesimc 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        unsafe { super::x86::aesimc(dst, a(0) as *const u8) };
+                        true
+                    }
+                    Builtin::X86AesKeygenAssist => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("aeskeygenassist 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        unsafe { super::x86::aeskeygenassist(dst, a(0) as *const u8, a(1)) };
+                        true
+                    }
+                    Builtin::X86Permd256 => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("permd 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        unsafe { super::x86::permd256(dst, a(0) as *const u8, a(1) as *const u8) };
+                        true
+                    }
+                    Builtin::X86PmaddUbSw128
+                    | Builtin::X86PmaddUbSw256
+                    | Builtin::X86PmaddWd128
+                    | Builtin::X86PmaddWd256 => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("pmadd 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        let (x, y) = (a(0) as *const u8, a(1) as *const u8);
+                        unsafe {
+                            match builtin {
+                                Builtin::X86PmaddUbSw128 => super::x86::pmaddubsw128(dst, x, y),
+                                Builtin::X86PmaddUbSw256 => super::x86::pmaddubsw256(dst, x, y),
+                                Builtin::X86PmaddWd128 => super::x86::pmaddwd128(dst, x, y),
+                                _ => super::x86::pmaddwd256(dst, x, y),
+                            }
+                        }
+                        true
+                    }
+                    Builtin::X86GatherQPd256 | Builtin::X86GatherDPd256 => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("gather.pd.256 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        // (src vec, base 标量指针, vindex vec, mask vec, scale imm)
+                        unsafe {
+                            if matches!(builtin, Builtin::X86GatherQPd256) {
+                                super::x86::gather_q_pd_256(
+                                    dst,
+                                    a(0) as *const u8,
+                                    a(1),
+                                    a(2) as *const u8,
+                                    a(3) as *const u8,
+                                    a(4),
+                                );
+                            } else {
+                                super::x86::gather_d_pd_256(
+                                    dst,
+                                    a(0) as *const u8,
+                                    a(1),
+                                    a(2) as *const u8,
+                                    a(3) as *const u8,
+                                    a(4),
+                                );
+                            }
+                        }
+                        true
+                    }
+                    Builtin::X86Pmadd52Lo128
+                    | Builtin::X86Pmadd52Hi128
+                    | Builtin::X86Pmadd52Lo256
+                    | Builtin::X86Pmadd52Hi256
+                    | Builtin::X86Pmadd52Lo512
+                    | Builtin::X86Pmadd52Hi512 => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("vpmadd52 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        let (x, y, z) = (a(0) as *const u8, a(1) as *const u8, a(2) as *const u8);
+                        unsafe {
+                            match builtin {
+                                Builtin::X86Pmadd52Lo128 => {
+                                    super::x86::vpmadd52::<2, false>(dst, x, y, z)
+                                }
+                                Builtin::X86Pmadd52Hi128 => {
+                                    super::x86::vpmadd52::<2, true>(dst, x, y, z)
+                                }
+                                Builtin::X86Pmadd52Lo256 => {
+                                    super::x86::vpmadd52::<4, false>(dst, x, y, z)
+                                }
+                                Builtin::X86Pmadd52Hi256 => {
+                                    super::x86::vpmadd52::<4, true>(dst, x, y, z)
+                                }
+                                Builtin::X86Pmadd52Lo512 => {
+                                    super::x86::vpmadd52::<8, false>(dst, x, y, z)
+                                }
+                                _ => super::x86::vpmadd52::<8, true>(dst, x, y, z),
+                            }
+                        }
+                        true
+                    }
                     _ => false,
                 };
                 if vector_done {
@@ -2692,11 +2840,45 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         }
                         (u64::from(edx) << 32) | u64::from(eax)
                     }
+                    Builtin::X86Crc32U8 => unsafe {
+                        u64::from(super::x86::crc32_u8(a(0) as u32, a(1) as u8))
+                    },
+                    Builtin::X86Crc32U16 => unsafe {
+                        u64::from(super::x86::crc32_u16(a(0) as u32, a(1) as u16))
+                    },
+                    Builtin::X86Crc32U32 => unsafe {
+                        u64::from(super::x86::crc32_u32(a(0) as u32, a(1) as u32))
+                    },
+                    Builtin::X86Crc32U64 => unsafe {
+                        super::x86::crc32_u64(a(0), a(1))
+                    },
                     Builtin::X86Pshufb128
                     | Builtin::X86Pshufb256
                     | Builtin::X86Sha256Msg1
                     | Builtin::X86Sha256Msg2
-                    | Builtin::X86Sha256Rnds2 => {
+                    | Builtin::X86Sha256Rnds2
+                    | Builtin::X86PsadBw128
+                    | Builtin::X86PsadBw256
+                    | Builtin::X86Pclmulqdq
+                    | Builtin::X86AesEnc
+                    | Builtin::X86AesEncLast
+                    | Builtin::X86AesDec
+                    | Builtin::X86AesDecLast
+                    | Builtin::X86AesImc
+                    | Builtin::X86AesKeygenAssist
+                    | Builtin::X86Permd256
+                    | Builtin::X86GatherQPd256
+                    | Builtin::X86GatherDPd256
+                    | Builtin::X86Pmadd52Lo128
+                    | Builtin::X86Pmadd52Hi128
+                    | Builtin::X86Pmadd52Lo256
+                    | Builtin::X86Pmadd52Hi256
+                    | Builtin::X86Pmadd52Lo512
+                    | Builtin::X86Pmadd52Hi512
+                    | Builtin::X86PmaddUbSw128
+                    | Builtin::X86PmaddUbSw256
+                    | Builtin::X86PmaddWd128
+                    | Builtin::X86PmaddWd256 => {
                         unreachable!("x86 vector builtin 已由 indirect vector 通道处理")
                     }
                     Builtin::HostSyscall => unsafe {

@@ -1018,6 +1018,59 @@ pub enum Builtin {
     X86Sha256Msg1,
     X86Sha256Msg2,
     X86Sha256Rnds2,
+    /// `llvm.x86.sse2.psad.bw(a, b)`（`_mm_sad_epu8`）：两组 8 字节绝对差和，
+    /// 分别以 u64 落 qword lane 0/1（其余位清零）。
+    X86PsadBw128,
+    /// `llvm.x86.avx2.psad.bw(a, b)`（`_mm256_sad_epu8`）：每 128 位 lane 同上，
+    /// 共 4 个 u64 结果。
+    X86PsadBw256,
+    /// `llvm.x86.pclmulqdq(a, b, imm8)`（`_mm_clmulepi64_si128`）：imm8 bit0/bit4
+    /// 各选 a/b 的 qword 做 64×64→128 无进位乘法；imm8 其余位硬件忽略。
+    X86Pclmulqdq,
+    /// `llvm.x86.aesni.aesenc(a, round_key)` 等 AES-NI 单轮系（128 位）。
+    X86AesEnc,
+    X86AesEncLast,
+    X86AesDec,
+    X86AesDecLast,
+    /// `llvm.x86.aesni.aesimc(a)`：InvMixColumns（解密轮密钥变换）。
+    X86AesImc,
+    /// `llvm.x86.aesni.aeskeygenassist(a, imm8)`：SubWord/RotWord ⊕ RCON(=imm8)。
+    X86AesKeygenAssist,
+    /// `llvm.x86.sse42.crc32.32.8/16/32` 与 `.64.64`（`_mm_crc32_u8/16/32/64`）：
+    /// CRC32C 硬件语义（反射多项式 0x82F63B78 / 64 位 0xC96C5795D7870F42，
+    /// 无首尾取反——首尾取反由包装层负责）。标量通道。
+    X86Crc32U8,
+    X86Crc32U16,
+    X86Crc32U32,
+    X86Crc32U64,
+    /// `llvm.x86.avx2.permd(a, idx)`（`_mm256_permutevar8x32_epi32`）：
+    /// 跨 lane dword 置换，dst.dword[i] = a.dword[idx.dword[i] & 7]。
+    X86Permd256,
+    /// `llvm.x86.avx2.gather.q.pd.256(src, base, vindex, mask, scale)`：
+    /// 分 lane 条件收集——mask lane 符号位置位才读 base+vindex*scale（f64），
+    /// 否则拷 src lane；mask 关闭的 lane 绝不触内存（fault suppression）。
+    X86GatherQPd256,
+    /// `llvm.x86.avx2.gather.d.pd.256`：同上，但 vindex 是 4×i32（符号扩展到
+    /// 64 位参与地址算术）。
+    X86GatherDPd256,
+    /// `llvm.x86.avx512.vpmadd52l/h.uq.128/256/512(a, b, c)`：52 位无符号乘加，
+    /// dst.qword[i] = a[i] + (b[i][51:0]×c[i][51:0]) 的 bit[51:0]（l）或
+    /// bit[103:52]（h），加法按 64 位回绕。
+    X86Pmadd52Lo128,
+    X86Pmadd52Hi128,
+    X86Pmadd52Lo256,
+    X86Pmadd52Hi256,
+    X86Pmadd52Lo512,
+    X86Pmadd52Hi512,
+    /// `llvm.x86.ssse3.pmadd.ub.sw.128` / `llvm.x86.avx2.pmadd.ub.sw`
+    /// （`_mm(256)_maddubs_epi16`）：a 无符号字节 × b 有符号字节，相邻两积之和
+    /// 饱和到 i16（simd-adler32 主力）。
+    X86PmaddUbSw128,
+    X86PmaddUbSw256,
+    /// `llvm.x86.sse2.pmadd.wd` / `llvm.x86.avx2.pmadd.wd`（`_mm(256)_madd_epi16`）：
+    /// 相邻 i16 对积之和放 i32（MIN×MIN+MIN×MIN 回绕为 i32::MIN，硬件定义）。
+    X86PmaddWd128,
+    X86PmaddWd256,
 }
 
 /// libffi 直通的参数/返回类别（lower 期从 fn sig layout 冻结；os:: P7 直通处置）。

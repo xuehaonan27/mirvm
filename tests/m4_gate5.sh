@@ -46,9 +46,6 @@ for p in $CORPUS_PROGS; do
     # ed25519：dalek 官方 serial backend（u128 本意；默认 simd backend 的
     # avx512ifma vpmadd52 未内建——FRONTIER 记账，见 docs/corpus.md）
     [ "$p" = ed25519 ] && export CARGO_CFG_CURVE25519_DALEK_BACKEND=serial
-    # snow_noise：poly1305 avx2 撞 llvm.x86.avx2.permd（未内建），官方
-    # --cfg poly1305_force_soft 绕行（整数精确算术，两后端逐比特一致）
-    [ "$p" = snow_noise ] && export RUSTFLAGS='--cfg poly1305_force_soft'
     # 重构建项的冷 timeout 放宽（gix deps 树大、rusqlite 编 C sqlite、calamine 双 crate）
     tmo=90
     case "$p" in
@@ -61,11 +58,6 @@ for p in $CORPUS_PROGS; do
     out=$(cat "$TMP/corpus-$p.out" "$TMP/corpus-$p.err")
     red_pattern="" red_label="" red_code=70
     # M5.x intrinsic 内建欠账（corpus 批1/批3 FRONTIER；内建后 XPASS 强制转绿）
-    [ "$p" = aes_gcm ] && { red_pattern='llvm\.x86\.aesni'; red_label="aesni/pclmul 未内建"; }
-    [ "$p" = png_round ] && { red_pattern='llvm\.x86\.avx2\.psad\.bw'; red_label="psad.bw 未内建"; }
-    [ "$p" = gix_pure ] && { red_pattern='llvm\.x86\.sse2\.psad\.bw'; red_label="psad.bw 未内建（git loose object zlib）"; }
-    [ "$p" = lz4_snap ] && { red_pattern='llvm\.x86\.sse42\.crc32'; red_label="sse4.2 crc32c 未内建（snap frame）"; }
-    [ "$p" = calamine_xlsx ] && { red_pattern='llvm\.x86\.pclmulqdq'; red_label="pclmulqdq 未内建（zip entry CRC）"; }
     [ "$p" = rusqlite_db ] && { red_pattern='无法安全转换为共享库'; red_label="native_archive 闭包未计 libm"; red_code=101; }
     if [ "$p" = numbigint ] && { [ $code -ne 0 ] \
         || [ "$stdout" != "$NUMBIGINT_ORACLE" ]; }; then
