@@ -61,8 +61,8 @@ for p in $CORPUS_PROGS; do
     stdout=$(cat "$TMP/corpus-$p.out")
     out=$(cat "$TMP/corpus-$p.out" "$TMP/corpus-$p.err")
     red_pattern="" red_label="" red_code=70
-    # M5.x intrinsic 内建欠账（corpus 批1/批3 FRONTIER；内建后 XPASS 强制转绿）
-    [ "$p" = rusqlite_db ] && { red_pattern='无法安全转换为共享库'; red_label="native_archive 闭包未计 libm"; red_code=101; }
+    # （历史 expected-red 已全部转绿：六条 intrinsic 红于 2b4766b 内建、rusqlite
+    # 的 libm 闭包于本轮修 native_archive LINK_SUFFIX——机制保留备将来欠账锁定）
     if [ "$p" = numbigint ] && { [ $code -ne 0 ] \
         || [ "$stdout" != "$NUMBIGINT_ORACLE" ]; }; then
         bad "c_numbigint oracle (exit=$code stdout='$stdout')"

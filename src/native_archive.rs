@@ -13,7 +13,21 @@ use rustc_target::spec::{BinaryFormat, Os};
 
 const CACHE_FORMAT_VERSION: &[u8] = b"mirvm-native-archive-v1";
 const LINK_PREFIX: &[&str] = &["-shared", "-Wl,-z,defs", "-Wl,--whole-archive"];
-const LINK_SUFFIX: &[&str] = &["-Wl,--no-whole-archive", "-o"];
+/// 闭包基准 = std 经 `#[link]` 带给 guest 最终链接的系统库集（glibc：m/dl/pthread/
+/// rt/util/gcc_s；native 语义里这些恒在场，rustc 的 C 静态归档可直接引用其符号——
+/// libsqlite3 的 FTS5 引 libm `log`、pthread 族皆此类，corpus 批3 rusqlite 实锤）。
+/// 它们落成产出 .so 的 DT_NEEDED，dlopen 时由宿主环境解析；`-z defs` 对除此之外
+/// 的未定义引用（跨归档/guest 符号）继续响亮拒绝，闭包纪律不松动。
+const LINK_SUFFIX: &[&str] = &[
+    "-Wl,--no-whole-archive",
+    "-lm",
+    "-ldl",
+    "-lpthread",
+    "-lrt",
+    "-lutil",
+    "-lgcc_s",
+    "-o",
+];
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
