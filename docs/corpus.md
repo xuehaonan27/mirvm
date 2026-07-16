@@ -359,3 +359,23 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
 **M5.x intrinsic 欠账队列追加**（按批3 证据）：`llvm.x86.sse42.crc32.*`
 （snap frame、任意 crc32c 用户——实现成本低，单指令语义）、
 `llvm.x86.avx2.permd`（poly1305 avx2；一行 shuffle 语义）。
+
+### 批4（13 个；全三维绿；新内建首战 + 大物偏门）
+
+- **新内建首战**：crc32fast（pclmulqdq 整块谱系 1B-1MB，cbf43926 对拍）、
+  chacha_poly（XChaCha20/ChaCha20-Poly1305 定向量+篡改失败例；poly1305 avx2
+  走新内建 permd 无需 env）。
+- **大数 crypto**：k256_ecdsa（secp256k1 RFC6979 定向量+ECDH）、rsa_pss（固定
+  p/q/n/d 组件重建 RsaPrivateKey 绕生成 rng；PKCS1v15 定向量+加解密往返；
+  JIT=1 维 335s = 大数 u128 JIT 压力实测）。
+- **VM-in-VM 第三弹**：revm_evm（EVM 解释器：PUSH/ADD/SSTORE/LOG 固定字节码
+  合约执行+gas/存储变更锚定）。
+- **TLS 无网络面**：rustls_cert（内嵌 PEM：解析+config 构建+verifier 正反例）。
+- **格式/几何/DS**：libflate_zlib（jieba 词典同款）、lyon_tess（贝塞尔/圆弧/
+  自交 path 镶嵌顶点 bits 谱）、midly_midi（SMF 闭环+变长量）、qoi_img
+  （QOI 逐像素）、kdl_doc（KDL 树往返）、jaq_jq（纯 Rust jq 查询族）、
+  ds_obscure（hyperloglog+succinct）。
+- **rpgp_sign 弃**：OpenPGP API 高阻（pgp 0.14 改名+密钥格式折腾，swarm 中断
+  后主线限时一击未成）；下批可以 packet 解析面（从 armored 公钥打印字段）重试。
+- 接线：gate5 102 pass/1 expected-red（rsa_pss tmo=400 记大数 JIT 压力；
+  revm/rustls 冷构建宽限）。
