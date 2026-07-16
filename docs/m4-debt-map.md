@@ -105,3 +105,27 @@ M4.1）、syscalls（os::，M4.3）。
 - **m4.1-design.md**：§1 per-gate 以本文 §4 为准；§4 SIMD 风险维持；施工顺序在
   "place 求值"前插入"worklist 扩集"。
 - 仪器（`--vm-stats` + 两轮盲点修复）为永久资产，每期开工调研标配。
+
+## 6. thunk 盲区：结构体内嵌 guest fn-ptr（corpus 批3 实锤，2026-07-16 记）
+
+**现象**：guest 把含 fn 指针的**结构体**传给 native 库，native 回调该指针时，宿主
+直接跳进 guest 数据地址执行——静默 SIGSEGV，无任何诊断。实锤：flate2 的 C-libz
+后端把 Rust allocator（zalloc/zfree，extern "C" fn 指针）嵌进 `z_stream` 结构体，
+libz 在 `deflateInit2_` 内回调；LD_PRELOAD 注入 SIGSEGV handler 实测
+`si_addr==rip==0x6a000002e0c0`（delta image 冻结域，rw 非可执行），栈顶返回
+地址落在 libz.so `deflate` 内。
+
+**根因**：mirvm 的 thunk 机制（`sig.thunk_args`，native_sig 的 fn-ptr 形参现做
+trampoline）只覆盖**显式 fn-ptr 实参**。结构体内嵌的回调从不以实参形态出现，
+lower/运行期都看不见这次指针外流——真实地址模型的代价之一：寄给 native 的指针
+就是宿主裸地址，被调用即跳崖。
+
+**为什么难**：通用解不可行（无法静态知道 native 结构体哪些字段会被当回调调）。
+可行阶梯：①**已知协议的显式签名表**（z_stream 的 zalloc/zfree、qsort 的 cmp、
+pthread_create 的 start——按 C 协议语义在 freeze_c_fnptr_sig/结构体冻结时识别
+fn-ptr 字段并物化 trampoline；覆盖 99% 真实场景，余者仍崩）；②**SIGSEGV 诊断
+兜底**（MIRVM_SEGV_DUMP 已有，生产侧若将「rip 落在 guest 冻结域（非可执行）」
+识别为跳崖并给出「疑似结构体内嵌回调」提示，把静默崩变成可读诊断——成本极低，
+值得先做）；③长期：FFI 结构体白名单制（同 ① 但入库管理）。
+关联：`x86 intrinsic 七族` 已解锁 flate2 纯 Rust 后端（zlib-rs 路线同病不触及）、
+C-libz 路线仍挂此债（corpus/c_gix_pure.rs 文件头留了三路线排查记录）。
