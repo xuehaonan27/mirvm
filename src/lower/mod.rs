@@ -1565,6 +1565,7 @@ impl Rebase {
                     | ir::Stmt::SimdArithOffset { .. }
                     | ir::Stmt::SimdSplat { .. }
                     | ir::Stmt::Bin128 { .. }
+                    | ir::Stmt::Sat128 { .. }
                     | ir::Stmt::Wide128ToFloat { .. }
                     | ir::Stmt::FloatToWide128 { .. }
                     | ir::Stmt::Bit128 { .. }

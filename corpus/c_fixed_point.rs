@@ -8,31 +8,23 @@ fixed = "1"
 // 内部走 int256 双字中间量（src/int256.rs 的 U256/I256），外加
 // wide_mul(I32F32→FixedI128) 的 64→128 位扩展乘法。
 //
-// ★ DIFF 保留现场（miscompile 候选，不绕行）：mirvm 对宽中间量除法谱系
-//   存在输入相关的错误求值——128 位 sqrt 非极值输入产 0
-//   （native `sqrt(i64f64 1e18)` bits=0x3b9aca000000000000000000，
-//   mirvm bits=0；`sqrt(u64f64 2)` native bits=0x16a09e667f3bcc908，
-//   mirvm=0；U64F64::MAX 反而两侧一致 0xffff…ffff → 非"恒 0"），
-//   i64 存储 hypot(3,4) native bits=0x500000000 vs mirvm 0
-//   （U64F64 小输入 hypot 两侧一致）。解释器与 JIT(THRESHOLD=1) 同错，
-//   指向共享 lower/语义层。§3 相应行原样保留，与 native 的逐字节 diff
-//   即首现场。
+// ★ DIFF 留痕（历史 miscompile 候选，已消解）：mirvm 曾对宽中间量除法谱系
+//   输入相关错值——128 位 sqrt 非极值输入产 0（`sqrt(i64f64 1e18)` native
+//   bits=0x3b9aca000000000000000000 vs mirvm 0；`sqrt(u64f64 2)` native
+//   bits=0x16a09e667f3bcc908 vs mirvm 0；U64F64::MAX 两侧一致）、i64 存储
+//   hypot(3,4) native 0x500000000 vs mirvm 0。解释器/JIT(THRESHOLD=1) 同错。
+//   2026-07 复核：§3 全部行与 native 逐字节一致（三维全绿），该错已随
+//   128 位族修复消解，行原样保留作回归哨兵。
 //
-// ★ TRAP 绕行记录（mirvm 引擎缺口，语义不变）：
-//   1. 定点→f64 方向整体不可行：fixed 的 to_num::<f64>()/From 全家族经
-//      helpers.rs 的 Widest::Unsigned(u128) 统一中转，落到 u128→f64 的
-//      Rvalue::Cast（≤64 位存储同样命中），执行到即
-//      `TRAP: 非标量操作数（聚合，ty=u128，M4.1+）`，crate 内无等价改道
-//      （f64::from(u128)/`as f64` 同此 cast，且 `as` 非 crate API）。
-//      绕行=§6 只保留 f64→定点方向（from_num 走 int256 软路径，无恙）：
-//      0.1 三类型截断、ties-to-even 半 LSB 谱系、双源一致性布尔、
-//      -0.0、1e19 大数；f64 bits 打印因此不出现于本 driver。
-//   2. 带符号 128 位的 Neg/Not（unary `-x`、`abs()`）同族聚合 TRAP，
-//      §2 的 128 位链避开取负/取绝对值（负值运算由 mul/div 承担）。
-//   3. u128 的 `saturating_add/sub`（core::num 内建路径）执行到即
-//      `TRAP: 非标量 place（ty=u128，M4.1）`（同型的 wrapping/overflowing
-//      add 无恙）。绕行=无符号饱和三模式谱系降级到 U32F32(u64) 呈现，
-//      u128 只保留 wrap/ovf 两模式。
+// ★ 128 位族恢复记录（2026-07 批5 三洞修好，谱系已复原）：
+//   1. 定点→f64 方向：fixed 的 to_num::<f64>()/From 全家族经 helpers.rs
+//      的 Widest::Unsigned(u128) 统一中转，直 cast 本已通，真 trap 点是
+//      float_helper 里 u128 常量的 `!`（Not on 128）——修后 §6 双方向
+//      完整谱系（0.1 三类型回转 bits、往返无损布尔、-0.0、1e19/MAX/MIN）。
+//   2. 带符号 128 位的 Neg/Not（unary `-x`、`abs()`）已修：
+//      §2 的 I64F64 链恢复 neg/abs 行。
+//   3. u128 的 `saturating_add/sub`（core::num 内建路径）已修：
+//      §5 无符号饱和谱系恢复 U64F64(u128) 呈现，与 U32F32(u64) 双侧对照。
 //   另注 crate 自身语义（非 mirvm 问题）：fixed 的 sat/wrap/ovf 除法对
 //   零除数与负输入 sqrt、NaN/±Inf 的 from_num 一律 panic，只走
 //   checked_*=None 的错误路径纳入本 driver（§4）。
@@ -49,8 +41,8 @@ fixed = "1"
 // 谱系（含 U64F64::MAX 的 128 位开方）；④checked_* 溢出路径（MAX+DELTA、
 // 除零、MIN.checked_neg、checked_from_num 超程/NaN、f64 边界 2^31）；
 // ⑤saturating/wrapping/overflowing 三模式对照（add/sub/mul/neg/div 溢出/
-// from_num 双方向）；⑥f64→定点舍入（0.1 三类型、ties-to-even 半 LSB
-// 谱系、双源一致性、±0、大数；定点→f64 方向见绕行 1）；
+// from_num 双方向）；⑥f64↔定点双方向舍入（0.1 三类型截断与回转 bits、
+// 往返无损、ties-to-even 半 LSB 谱系、双源一致性、±0、1e19/MAX/MIN 回转）；
 // ⑦wide_mul 128 位扩展乘法。
 // 确定性：定点一律打印 Display+to_bits() 锁位型；无随机/时间/地址/
 // HashMap 序；错误文本为 crate 内固定字符串；无 IO。
@@ -188,8 +180,8 @@ fn arith_chains() {
     pv!("u64f64 1/3", uthird);
     pv!("u64f64 (1/3)*3", uthird * 3);
 
-    // I64F64（带符号 128 位）：混合链（128 位 unary neg/abs 撞引擎聚合
-    // TRAP，见文件头绕行 2；取负向量由首位乘子承担）
+    // I64F64（带符号 128 位）：混合链 + unary neg/abs（128 位 Neg/Not 已修，
+    // 与 32 位链同形态呈现）
     let w = I64F64::from_num(-123.125);
     let w1 = w * I64F64::from_num(0.0078125); // ×2^-7
     pv!("i64f64 -123.125*0.0078125", w1);
@@ -199,6 +191,12 @@ fn arith_chains() {
     pv!("(..)+DELTA", w3);
     let w4 = w3 * I64F64::from_num(-0.5);
     pv!("(..)*(-0.5)", w4);
+    let w5 = -w4;
+    pv!("i64f64 neg", w5);
+    let w6 = w5.abs();
+    pv!("i64f64 abs(neg)", w6);
+    let w7 = w.abs();
+    pv!("i64f64 abs(-123.125)", w7);
 }
 
 // ③ 根号/倒数谱系（crate 无三角/幂/对数，见文件头说明）
@@ -308,21 +306,39 @@ fn modes() {
     pv!("u sat_from_num(-5)", U32F32::saturating_from_num(-5.0f64));
     pv!("u wrap_from_num(-1.5)", U32F32::wrapping_from_num(-1.5f64));
     povf!("u ovf_from_num(-1.5)", U32F32::overflowing_from_num(-1.5f64));
-    // u128 saturating_add/sub 撞引擎"非标量 place"TRAP（绕行 3）：
-    // 无符号饱和谱系用 U32F32(u64) 呈现；u128 的 wrap/ovf 两侧无恙，保留。
+    // 无符号饱和谱系：u64 存储 + u128 存储双侧呈现（u128 的
+    // saturating_add/sub 已修，与 wrap/ovf 两模式同段对照）
     pv!("u sat MAX+1", U32F32::MAX.saturating_add(U32F32::from_num(1)));
+    pv!("u sat 0-1", U32F32::ZERO.saturating_sub(U32F32::from_num(1)));
+    pv!("u64 sat MAX+1", U64F64::MAX.saturating_add(U64F64::from_num(1)));
+    pv!("u64 sat 0-1", U64F64::ZERO.saturating_sub(U64F64::from_num(1)));
     pv!("u64 wrap MAX+1", U64F64::MAX.wrapping_add(U64F64::from_num(1)));
     povf!("u64 ovf MAX+1", U64F64::MAX.overflowing_add(U64F64::from_num(1)));
 }
 
-// ⑥ 与 f64 互转舍入（f64→定点方向；定点→f64 全方向撞引擎 TRAP，绕行 1）
+// ⑥ 与 f64 互转舍入（双方向：定点→f64 经 Widest(u128) 位操作通道，已修）
 fn f64_rounding() {
     println!("== 6 f64 rounding ==");
     // f64 → 定点：0.1 的二进制截断
     let d1 = I32F32::from_num(0.1f64);
-    pv!("i32f32 from 0.1", d1); // 回转 f64 撞 128→f64 cast TRAP，见绕行 1
+    pv!("i32f32 from 0.1", d1);
     let d2 = U64F64::from_num(0.1f64);
-    pv!("u64f64 from 0.1", d2); // 回转 f64 撞 128→f64 cast TRAP，见绕行 1
+    pv!("u64f64 from 0.1", d2);
+    let d3 = I64F64::from_num(0.1f64);
+    pv!("i64f64 from 0.1", d3);
+    // 定点 → f64：三存储宽回转（bits 锚定；to_num 与 From 同族）
+    let r1: f64 = d1.to_num();
+    println!("i32f32 0.1 -> f64 bits={:#x}", r1.to_bits());
+    let r2: f64 = d2.to_num();
+    println!("u64f64 0.1 -> f64 bits={:#x}", r2.to_bits());
+    let r3: f64 = d3.to_num();
+    println!("i64f64 0.1 -> f64 bits={:#x}", r3.to_bits());
+    let r4: f64 = I32F32::from_num(2.5).to_num();
+    println!("i32f32 2.5 -> f64 bits={:#x}", r4.to_bits());
+    // 往返一致性：值域内 定点→f64→定点 逐位无损
+    println!("0.1 rt i32f32== : {}", I32F32::from_num(r1) == d1);
+    println!("0.1 rt u64f64== : {}", U64F64::from_num(r2) == d2);
+    println!("0.1 rt i64f64== : {}", I64F64::from_num(r3) == d3);
     // 半 LSB ties-to-even（I4F12，半 LSB = 2^-13）
     let half = 1.0f64 / 8192.0;
     for k in [1.0f64, 3.0, 5.0, 7.0, 9.0] {
@@ -337,10 +353,18 @@ fn f64_rounding() {
     let nz = I32F32::from_num(-0.0f64);
     pv!("i32f32 from -0.0", nz);
     println!("-0.0 bits==0 : {}", nz.to_bits() == 0);
+    let rnz: f64 = nz.to_num();
+    println!("-0.0 -> f64 bits={:#x}", rnz.to_bits());
     // NaN/±Inf：fixed 的 sat/wrap/ovf_from_num 对非有限源一律 panic
     //（"NaN"/"infinite"），唯一安全入口是 §4 已覆盖的 checked_from_num→none。
-    // 128 位 f64→定点方向（from_num 走 int256 软路径，无恙）：
+    // 128 位 f64↔定点（from_num 走 int256 软路径）：
     pv!("u64f64 from 1e19", U64F64::from_num(1e19f64));
+    let rb: f64 = U64F64::from_num(1e19f64).to_num();
+    println!("u64f64 1e19 -> f64 bits={:#x}", rb.to_bits());
+    let rmax: f64 = U64F64::MAX.to_num();
+    println!("u64f64 MAX -> f64 bits={:#x}", rmax.to_bits());
+    let rmin: f64 = I64F64::MIN.to_num();
+    println!("i64f64 MIN -> f64 bits={:#x}", rmin.to_bits());
 }
 
 // ⑦ wide_mul：64 → 128 位扩展乘法

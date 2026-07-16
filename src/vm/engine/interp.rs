@@ -1688,6 +1688,34 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                 unsafe { *((pd + 16) as *mut u8) = ovf as u8 };
             }
         }
+        Stmt::Sat128 {
+            op,
+            signed,
+            a,
+            b,
+            dst,
+        } => {
+            let pa = eval_place_addr(ctx, base, a);
+            let x = unsafe { (pa as *const u128).read_unaligned() };
+            let pb = eval_place_addr(ctx, base, b);
+            let y = unsafe { (pb as *const u128).read_unaligned() };
+            let r = if *signed {
+                let (xs, ys) = (x as i128, y as i128);
+                (match op {
+                    OvfOp::Add => xs.saturating_add(ys),
+                    OvfOp::Sub => xs.saturating_sub(ys),
+                    OvfOp::Mul => xs.saturating_mul(ys),
+                }) as u128
+            } else {
+                match op {
+                    OvfOp::Add => x.saturating_add(y),
+                    OvfOp::Sub => x.saturating_sub(y),
+                    OvfOp::Mul => x.saturating_mul(y),
+                }
+            };
+            let pd = eval_place_addr(ctx, base, dst);
+            unsafe { (pd as *mut u128).write_unaligned(r) };
+        }
         Stmt::NicheDiscr128 {
             tag,
             niche_start,

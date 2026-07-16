@@ -799,6 +799,14 @@ pub enum Stmt {
         dst: PlaceExpr,
         with_overflow: bool,
     },
+    /// 128 位饱和算术（saturating_add/sub intrinsic 的宽形态；宿主 u128/i128 直算）
+    Sat128 {
+        op: OvfOp,
+        signed: bool,
+        a: PlaceExpr,
+        b: PlaceExpr,
+        dst: PlaceExpr,
+    },
     /// 128 位整数 → 标量浮点（u128/i128 as f16/f32/f64；宿主直转）
     Wide128ToFloat {
         src: PlaceExpr,

@@ -649,6 +649,15 @@ impl<'tcx> LowerCx<'tcx, '_> {
         }
     }
 
+    /// 128 位立即数 → 冻结区 16 字节 place（Neg 的 0 / Not 的全 1 常量边）。
+    fn wide_const(&mut self, v: u128) -> PlaceExpr {
+        let base = self.linker.frozen_alloc_bytes(&v.to_le_bytes());
+        PlaceExpr {
+            base: PlaceBase::Static(base),
+            steps: Box::new([]),
+        }
+    }
+
     /// 128 位双目（Bin128）：移位量右操作数可为 ≤64 标量。
     fn lower_bin128(
         &mut self,
@@ -1158,6 +1167,51 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             },
                         }]);
                     }
+                    // 三向比较（three_way_compare → Ord::cmp）：dst(i8 Ordering) = (a>b) − (a<b)
+                    if matches!(binop, Cmp) {
+                        let pa = self.wide_place(a)?;
+                        let pb = self.wide_place(b)?;
+                        let ValKind::Scalar(w) = dst_kind else {
+                            return Err("128 位 Cmp 目标非标量".into());
+                        };
+                        let gt = Slot {
+                            width: Width::W8,
+                            ..self.scratch64()
+                        };
+                        let lt = Slot {
+                            width: Width::W8,
+                            ..self.scratch64()
+                        };
+                        return Ok(vec![
+                            Stmt::Assign {
+                                dst: ScalarPlace::Slot(gt),
+                                rv: Rvalue::Cmp128 {
+                                    cc: IntCc::Gt,
+                                    signed,
+                                    a: pa.clone(),
+                                    b: pb.clone(),
+                                },
+                            },
+                            Stmt::Assign {
+                                dst: ScalarPlace::Slot(lt),
+                                rv: Rvalue::Cmp128 {
+                                    cc: IntCc::Lt,
+                                    signed,
+                                    a: pa,
+                                    b: pb,
+                                },
+                            },
+                            Stmt::Assign {
+                                dst: dst_p.scalar_place(w),
+                                rv: Rvalue::IntBin {
+                                    op: IntBinOp::Sub,
+                                    signed: false,
+                                    a: Operand::Slot(gt),
+                                    b: Operand::Slot(lt),
+                                },
+                            },
+                        ]);
+                    }
                     let bop = match binop {
                         Add | AddUnchecked => IntBinOp::Add,
                         Sub | SubUnchecked => IntBinOp::Sub,
@@ -1327,6 +1381,21 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }])
                     }
                     mir::UnOp::Not => {
+                        // 128 位整数：x XOR 全 1（冻结区常量边，Bin128 通道）
+                        if matches!(
+                            a_ty.kind(),
+                            ty::Int(ty::IntTy::I128) | ty::Uint(ty::UintTy::U128)
+                        ) {
+                            let ones = self.wide_const(!0u128);
+                            return Ok(vec![Stmt::Bin128 {
+                                op: IntBinOp::BitXor,
+                                signed: false,
+                                a: self.wide_place(a)?,
+                                b: ir::Bin128Rhs::Wide(ones),
+                                dst: dst_p.expr(),
+                                with_overflow: false,
+                            }]);
+                        }
                         let ao = self.lower_operand_scalar(a)?;
                         let ValKind::Scalar(w) = dst_kind else {
                             return Err("Not 目标非标量".into());
@@ -1343,6 +1412,21 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                 op: ir::F128UnOp::Neg,
                                 a: pa,
                                 dst: dst_p.expr(),
+                            }]);
+                        }
+                        // 128 位整数：0 − x（冻结区零常量；补码下 signed 与否同结果）
+                        if matches!(
+                            a_ty.kind(),
+                            ty::Int(ty::IntTy::I128) | ty::Uint(ty::UintTy::U128)
+                        ) {
+                            let zero = self.wide_const(0u128);
+                            return Ok(vec![Stmt::Bin128 {
+                                op: IntBinOp::Sub,
+                                signed: false,
+                                a: zero,
+                                b: ir::Bin128Rhs::Wide(self.wide_place(a)?),
+                                dst: dst_p.expr(),
+                                with_overflow: false,
                             }]);
                         }
                         let ao = self.lower_operand_scalar(a)?;
@@ -3280,20 +3364,35 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
             "saturating_add" | "saturating_sub" => {
                 let a_ty = self.op_ty(&args[0].node)?;
-                let (dst_p, w) = self.place_scalar(destination)?;
-                vec![Stmt::Assign {
-                    dst: dst_p.scalar_place(w),
-                    rv: Rvalue::IntSat {
-                        op: if name.as_str() == "saturating_add" {
-                            OvfOp::Add
-                        } else {
-                            OvfOp::Sub
-                        },
+                let op = if name.as_str() == "saturating_add" {
+                    OvfOp::Add
+                } else {
+                    OvfOp::Sub
+                };
+                // 128 位：宽形态走 Sat128（宿主 u128/i128 直算；标量 IntSat 只到 64 位）
+                if matches!(
+                    a_ty.kind(),
+                    ty::Int(ty::IntTy::I128) | ty::Uint(ty::UintTy::U128)
+                ) {
+                    vec![Stmt::Sat128 {
+                        op,
                         signed: frame::ty_signed(a_ty),
-                        a: self.lower_operand_scalar(&args[0].node)?,
-                        b: self.lower_operand_scalar(&args[1].node)?,
-                    },
-                }]
+                        a: self.wide_place(&args[0].node)?,
+                        b: self.wide_place(&args[1].node)?,
+                        dst: self.resolve_place(destination)?.expr(),
+                    }]
+                } else {
+                    let (dst_p, w) = self.place_scalar(destination)?;
+                    vec![Stmt::Assign {
+                        dst: dst_p.scalar_place(w),
+                        rv: Rvalue::IntSat {
+                            op,
+                            signed: frame::ty_signed(a_ty),
+                            a: self.lower_operand_scalar(&args[0].node)?,
+                            b: self.lower_operand_scalar(&args[1].node)?,
+                        },
+                    }]
+                }
             }
             "caller_location" => {
                 // Location::caller()：本函数 track_caller → 读隐藏尾实参槽；

@@ -16,17 +16,13 @@ malachite = "0.4"
 // 跑小素数、Carmichael 数（561/1105/1729/41041/825265/321197185）、
 // 强伪素数（2047/1373653/25326001/3215031751）、Mersenne 素数 M61/M89/M107/M127、
 // M61^2 与大偶数——两侧引擎算同一份 math，标签逐字节对拍。
-// 已知缺口绕行（语义不变，记录诊断原文）：malachite 的 f64 互转族
+// 128 位族恢复记录（2026-07 批5 修好，谱系已复原）：malachite 的 f64 互转族
 // （Natural::approx_log → sci_mantissa_and_exponent → i128::sign）在本工具链
 // nightly-2026-07-02 下经 core 新 `three_way_compare` intrinsic 落成 MIR
-// `BinOp::Cmp(i128)`；mirvm lower 的 128 位双目仅接比较/算术（Cmp128/Bin128），
-// 三向 Cmp 未接，诊断原文（exit 70）：
-//   mirvm[m4-engine]: TRAP: 128 位 BinOp Cmp（M4.3+）
-// ——任何对 i128/u128 调 `Ord::cmp`（含 `.sign()`/sort/min/max）的 crate 代码
-// 都会撞同一条口（见 src/lower/func.rs:1167）。浮点非本任务必需面（任务要求
-// 打印 hex/计数/布尔），故本 driver 不触碰 f64 转换族；native 侧观测备查：
-//   Natural::from(10u32).pow(1000u64).approx_log().to_bits() = 0x40a1fd2b914f1517
-// 该缺口放行后，把本注释后的 ⑨ 段加回即可复测。
+// `BinOp::Cmp(i128)`；mirvm lower 曾只接比较/算术（Cmp128/Bin128），三向 Cmp
+// 漏接（TRAP「128 位 BinOp Cmp」），修复后 ⑨ 段恢复：approx_log 打印
+// hex bits 锚定（例：Natural::from(10u32).pow(1000u64).approx_log().to_bits()
+// = 0x40a1fd2b914f1517）。
 // 确定性：固定 xorshift64* 种子产生操作数；大数输出全长 hex（≤96 字符）或
 // len+head+tail+fnv1a 锚定；无浮点打印/HashMap/时间/地址/线程序；stderr 为空。
 use malachite::num::arithmetic::traits::{
@@ -330,4 +326,15 @@ fn main() {
     let (q6n, q6d) = q6.clone().into_numerator_and_denominator();
     let recook = Rational::from_naturals_ref(&q6n, &q6d) == q6;
     println!("q6 {}/{} recook={}", q6n, q6d, recook);
+
+    // ⑨ f64 互转族：approx_log（内部 sci_mantissa_and_exponent → i128::sign，
+    // nightly 下 three_way_compare 落成 BinOp::Cmp(i128)——缺口 1 修复后
+    // 本段恢复，见文件头记录）
+    let lk = Natural::from(10u32).pow(1000u64);
+    println!("approx_log 10^1000 bits={:#x}", lk.approx_log().to_bits());
+    println!("approx_log A bits={:#x}", a.approx_log().to_bits());
+    println!("approx_log B bits={:#x}", b.approx_log().to_bits());
+    println!("approx_log 2^512 bits={:#x}", p512.approx_log().to_bits());
+    println!("approx_log m127 bits={:#x}", m127.approx_log().to_bits());
+    println!("approx_log one bits={:#x}", Natural::ONE.approx_log().to_bits());
 }

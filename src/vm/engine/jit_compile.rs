@@ -3496,6 +3496,11 @@ fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
                     }
                     scan_place(&mut out, dst, Extent::Bytes(16), fsz);
                 }
+                Stmt::Sat128 { a, b, dst, .. } => {
+                    scan_place(&mut out, a, Extent::Bytes(16), fsz);
+                    scan_place(&mut out, b, Extent::Bytes(16), fsz);
+                    scan_place(&mut out, dst, Extent::Bytes(16), fsz);
+                }
                 Stmt::Wide128ToFloat { src, dst, .. } => {
                     scan_place(&mut out, src, Extent::Bytes(16), fsz);
                     scan_sp(&mut out, dst, fsz);
