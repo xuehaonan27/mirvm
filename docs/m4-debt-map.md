@@ -129,3 +129,28 @@ fn-ptr 字段并物化 trampoline；覆盖 99% 真实场景，余者仍崩）；
 值得先做）；③长期：FFI 结构体白名单制（同 ① 但入库管理）。
 关联：`x86 intrinsic 七族` 已解锁 flate2 纯 Rust 后端（zlib-rs 路线同病不触及）、
 C-libz 路线仍挂此债（corpus/c_gix_pure.rs 文件头留了三路线排查记录）。
+
+## 7. dep crate 的 global_asm 物化（corpus 批6 faer 实锤，2026-07-16 记）
+
+**现象**：依赖 crate 内的 `global_asm!`（faer 的 pulp V3 LD_ST 汇编表
+`libpulp_v0_21_*_{ld,st}_b32s_<mask>`）在 mirvm 下无机器码物化面——按值取址时
+`符号未命中（归档兜底表 / dlsym 全域均无）`（corpus/c_faer_lu.rs 头注记录全诊断；
+driver 以 default-features=false 标量内核绕行，三维已绿）。
+
+**根因（S2 的账）**：mono 收集器的 RootCollector 走 `hir::ItemId` = **本地 crate
+专属**（rustc_monomorphize/collector.rs:1550 处 `DefKind::GlobalAsm` 入队也仅在
+本地项循环内）——native 语义下依赖 crate 的 global_asm 靠**该 crate 自己的
+codegen 产物**（rlib 内的 object）经最终链接进场；mirvm 的 S2 依赖构建走
+`-Zno-codegen`（metadata-only rlib，省 codegen 白烧），object 天然不存在，
+本 crate 的 global_asm 物化机制（M5.2 D8h，mono 收集种子里只有本地项）接不到。
+
+**可行路径（未立项，按真实 workload 优先级排）**：
+①把 global_asm 收集面从本地项扩到 **used_crates 的依赖项**——每 crate 经
+`collect_and_partition_mono_items` 拿 mono 图里的 GlobalAsm（名字/模板/操作数），
+随本地 global_asm 同通道 cc 汇编 + dlopen 物化（preload 点不变），装载序 =
+crate 图序（与链接序同构）；符号解析走既有 ③ 全域 + ② 句柄新序，pulp 的
+LD_ST 表即解。随 S2 键链入 L2（物化产物按 asm_sites 同契约 warm 重物化）。
+②**判名放行**（更省）：编译期对 used_crates 探测 `DefKind::GlobalAsm` 存在性，
+仅对命中 crate 关掉 `-Zno-codegen`（让它的 rlib 带 object 走 archive 通道）——
+改装面在 cargo_shim 构建指令，不改 lower；成本 = 只对 psm/pulp 一族付 codegen。
+真 workload 触发前不接（faer 已有官方标量后门，不算阻塞）。
