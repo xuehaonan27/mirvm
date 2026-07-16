@@ -333,7 +333,10 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
   crc32fast ≥128B 单块 pclmulqdq，块长封死在 crate 内部不可绕）、
   rusqlite_db（native_archive 闭包策略：libsqlite3.a 的 FTS5 引 libm `log`，
   `-z defs` 整档链接拒——闭包检查未计 libm；exit 101，red_code 机制因此
-  从写死 70 扩为按程序可配）。
+  从写死 70 扩为按程序可配）。**已修（本轮）**：LINK_SUFFIX 纳入 std 经
+  `#[link]` 恒给 guest 最终链接的系统库集（m/dl/pthread/rt/util/gcc_s，
+  落 DT_NEEDED 由宿主解析），rusqlite_db 三维翻绿——gate5 103 pass/
+  **0 expected-red**。
 - **产品 bug 实锤**：
   - **track_caller fn_span**（`7dc3b31` 已修）：方法调用点 Location 取
     整个调用表达式 span（lo=接收者）而非 rustc 的 fn_span（被调名段）——
