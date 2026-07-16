@@ -17,7 +17,9 @@ if [ ${#progs[@]} -eq 0 ]; then
            unicode_tables wasmi boa_js tiny_skia zip_arch rust_decimal rustfft roaring \
            bitvec compact_str nom_parse comrak_md fst_build spade_delaunay jieba_cut \
            smoltcp_tcp statrs_stats rkyv_zero qr_round fatfs_img geo_ops rhai_script \
-           redb_kv zstd_stream)
+           redb_kv zstd_stream \
+           crc32fast chacha_poly k256_ecdsa libflate_zlib rustls_cert \
+           lyon_tess midly_midi jaq_jq kdl_doc ds_obscure qoi_img)
 fi
 pass=0 fail=0
 

@@ -38,7 +38,9 @@ serde_json serde_yaml rand_det flate2 brotli argon2 ed25519 p256 syn_parse hicko
 unicode_tables wasmi boa_js tiny_skia zip_arch rust_decimal rustfft roaring bitvec \
 compact_str nom_parse comrak_md fst_build spade_delaunay aes_gcm png_round \
 smoltcp_tcp snow_noise statrs_stats rkyv_zero qr_round fatfs_img geo_ops rhai_script \
-redb_kv gix_pure lz4_snap calamine_xlsx rusqlite_db"}
+redb_kv gix_pure lz4_snap calamine_xlsx rusqlite_db \
+crc32fast chacha_poly k256_ecdsa rsa_pss libflate_zlib revm_evm rustls_cert \
+lyon_tess midly_midi jaq_jq kdl_doc ds_obscure qoi_img"}
 # jieba_cut 全绿但 mirvm 单跑 77-89s（贴 90s timeout），留 corpus.sh 手工跑批
 for p in $CORPUS_PROGS; do
     src="corpus/c_$p.rs"
@@ -46,11 +48,13 @@ for p in $CORPUS_PROGS; do
     # ed25519：dalek 官方 serial backend（u128 语义压力本意，docs/corpus.md
     # 记账口径；默认 simd backend 的 avx512ifma vpmadd52 已于 2b4766b 内建）
     [ "$p" = ed25519 ] && export CARGO_CFG_CURVE25519_DALEK_BACKEND=serial
-    # 重构建项的冷 timeout 放宽（gix deps 树大、rusqlite 编 C sqlite、calamine 双 crate）
+    # 重构建项的冷 timeout 放宽（gix/revm deps 树大、rusqlite 编 C sqlite、
+    # calamine 双 crate、rustls 编 aws-lc C、rsa 大数 JIT 压力实测单跑 >90s）
     tmo=90
     case "$p" in
-        gix_pure|rusqlite_db) tmo=300 ;;
-        calamine_xlsx) tmo=180 ;;
+        gix_pure|rusqlite_db|revm_evm) tmo=300 ;;
+        calamine_xlsx|rustls_cert) tmo=180 ;;
+        rsa_pss) tmo=400 ;;
     esac
     timeout $tmo "$MIRVM" run "$src" >"$TMP/corpus-$p.out" 2>"$TMP/corpus-$p.err"; code=$?
     unset CARGO_CFG_CURVE25519_DALEK_BACKEND RUSTFLAGS
