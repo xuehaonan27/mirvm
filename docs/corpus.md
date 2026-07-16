@@ -402,14 +402,17 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
   None）→ fixed U64F64::sqrt 整数输入（lo 恒 0）静默产 0。修复 = 16 字节
   niche tag 一律 u128 全宽 wrapping 判别（cg_ssa operand.rs 同构）。同 driver
   另压出三个 128 位族 Trap 欠账（Cmp/cast/Neg/saturating，见批5 修记）。
-- **FRONTIER（锁定 expected-red）**：c_openssl_evp——rlib 元数据 -l 传播缺口
+- **FRONTIER（既定：`17665dc` 已修转绿）**：c_openssl_evp——rlib 元数据 -l 传播缺口
   两撞同源：①cargo 把 openssl-sys build.rs 的 rustc-link-lib=ssl/crypto 只写
   元数据，bin rustc 命令行无 -l/-L，mirvm 的 dlopen 候选只读 sess.opts.libs
   → 库从未进全域（driver 层显式 dlopen 合法绕行）；②绕行后 lower 期
   EVP_EncryptInit_ex 按值取址烘焙仍 miss（运行期预载够不着 lower 期 dlsym）。
-  **产品票据**：lower 应收 used_crates 的 tcx.native_libraries Dylib/RawDylib
-  项（连带 -L native 搜索径）为候选，并在排干 worklist 前 RTLD_GLOBAL 预载
-  （与 required_native_libs 同点同修 ①②）。
+  **已修**：排干 worklist 前收集全图 tcx.native_libraries 的系统动态链接类
+  （Dylib/RawDylib/Unspecified/Static{bundle:false}），soname_candidates
+  （dev 符号链+ldconfig -p 版本项）RTLD_GLOBAL 尽力预载 + 同清单移交
+  module.native_libs。cargo 的机制实证：-sys build.rs 的 cargo:rustc-link-lib
+  只进该 crate 自己的 rustc 行（-l ssl -l crypto），经 rlib 元数据由 final
+  link 全图收集——bin 的 rustc 行恒无 -l。
 - **闭包欠账新形态**：bzip2-sys——vendored BZ_NO_STDIO 的断言桩 bz_internal_error
   定义在其 Rust rlib（#[no_mangle]）里：native_archive 闭包检查覆盖不到
   「符号在 rlib」形态（记档；driver 走 0.6 纯 Rust 后端）。
