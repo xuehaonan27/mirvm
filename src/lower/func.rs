@@ -733,8 +733,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             as u64
                             + 1;
                         let untagged = untagged_variant.as_u32() as u64;
-                        // 128 位 niche（niche_start 用满高位）：走 u128 算术路径
-                        if tag_bytes == 16 && (*niche_start >> 64) != 0 {
+                        // 128 位 niche【一律】走 u128 算术路径（cg_ssa operand.rs
+                        // 读判别式：rel=tag−niche_start 全宽 wrapping 后 ule 比较）。
+                        // 不能只按 niche_start 高位判——NonZero<u128> 的
+                        // niche_start=0，截断 W64 读会把 lo=0 的合法大值
+                        // （2^64/2^66/2^127…）误判进 niche（corpus 批5
+                        // fixed_point 的 U64F64::sqrt 静默产 0 即此实锤）。
+                        if tag_bytes == 16 {
                             return Ok(TagInfo::Niche128 {
                                 tag_off,
                                 niche_start: *niche_start,
