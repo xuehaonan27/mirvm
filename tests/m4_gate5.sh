@@ -67,10 +67,7 @@ for p in $CORPUS_PROGS; do
     red_pattern="" red_label="" red_code=70
     # 历史转绿：六条 intrinsic 红于 2b4766b 内建、rusqlite libm 闭包于 2518314
     # 修 LINK_SUFFIX——机制保留备将来欠账锁定
-    # openssl_evp：rlib 元数据 -l 传播缺口（lower 的 dlopen 候选只读 CLI libs，
-    # cargo 把 rustc-link-lib 只写元数据→ssl/crypto 从未进全域；产品票据见
-    # docs/corpus.md；修好即 XPASS 强制转绿）
-    [ "$p" = openssl_evp ] && { red_pattern='符号未命中'; red_label="rlib 元数据 -l 传播缺口（预载欠账）"; }
+    # openssl_evp 已于本轮转绿（元数据 -l 预载修复）；机制保留备将来欠账锁定
     if [ "$p" = numbigint ] && { [ $code -ne 0 ] \
         || [ "$stdout" != "$NUMBIGINT_ORACLE" ]; }; then
         bad "c_numbigint oracle (exit=$code stdout='$stdout')"

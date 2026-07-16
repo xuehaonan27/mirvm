@@ -1677,6 +1677,70 @@ fn lower_inner(
         v
     };
 
+    // 元数据 Dylib 预载（corpus 批5 openssl 实锤）：cargo 把 `-sys` build.rs 的
+    // rustc-link-lib 只写 rlib 元数据（bin 的 rustc 命令行无 -l/-L；rustc 链接期
+    // 自己从元数据补）。native 语义里这些库恒进最终链接；我们的 fn-ptr 烘焙
+    // （降低期 dlsym 全域）与运行期 CallForeign 都需要它们先在全局域可见——std
+    // 自带的 m/dl/pthread/rt/util/gcc_s 亦同源（#[link] 属性落在 libstd）。
+    // Static 走上方 archive 通道；Framework/wasm 不在本切片。
+    let sess = tcx.sess;
+    let mut dylib_names: Vec<Box<str>> = Vec::new();
+    for cnum in std::iter::once(rustc_hir::def_id::LOCAL_CRATE).chain(tcx.used_crates(()).iter().copied()) {
+        if cnum != rustc_hir::def_id::LOCAL_CRATE && tcx.crate_dep_kind(cnum).macros_only() {
+            continue;
+        }
+        for lib in tcx.native_libraries(cnum) {
+            // 系统动态链接类（SONAME 预载）= Dylib/RawDylib + Unspecified（bare
+            // `-l ssl`，rustc_hir 注释：Dylib 为默认）+ Static{bundle:false}
+            // （对象不进 rlib、链接期按系统库解析——libc 的 m/dl/pthread/rt/util
+            // 即此形）。Static{bundle:None|Some(true)} 才是整档进 rlib 的真
+            // 静态归档（上方 archive 通道）；Framework/LinkArg/Wasm 不在本切片。
+            let system_dylib = matches!(
+                lib.kind,
+                rustc_hir::attrs::NativeLibKind::Dylib { .. }
+                    | rustc_hir::attrs::NativeLibKind::RawDylib { .. }
+                    | rustc_hir::attrs::NativeLibKind::Unspecified
+            ) || matches!(
+                lib.kind,
+                rustc_hir::attrs::NativeLibKind::Static {
+                    bundle: Some(false),
+                    ..
+                }
+            );
+            if !system_dylib {
+                continue;
+            }
+            if let Some(cfg) = &lib.cfg
+                && !rustc_attr_parsing::eval_config_entry(sess, cfg).as_bool()
+            {
+                continue;
+            }
+            let name: Box<str> = lib.name.as_str().into();
+            if !dylib_names.contains(&name) {
+                dylib_names.push(name);
+            }
+        }
+    }
+    for lib in &sess.opts.libs {
+        if matches!(lib.kind, rustc_hir::attrs::NativeLibKind::Static { .. }) {
+            continue;
+        }
+        let name: Box<str> = lib.name.as_str().into();
+        if !dylib_names.contains(&name) {
+            dylib_names.push(name);
+        }
+    }
+    let dylib_candidates = soname_candidates(&dylib_names);
+    // 尽力预载（缺失者留待真引用处的既有响亮诊断）；句柄随进程生命周期。
+    for cand in &dylib_candidates {
+        let Ok(cpath) = std::ffi::CString::new(&**cand) else {
+            continue;
+        };
+        unsafe { libc::dlerror() };
+        let h = unsafe { libc::dlopen(cpath.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
+        let _ = h; // 有意不 dlclose（与 required 清单同）
+    }
+
     // 种子 = mono collector 集（D1：与 native codegen 同一起点，正确性白拿）
     for inst in collect::collect(tcx) {
         linker.func_id(inst);
@@ -1918,22 +1982,22 @@ fn lower_inner(
     {
         module.exports.insert("@entry".into(), id);
     }
-    // `-l` 链接指令 → dlopen 候选路径（tier-0 ensure_libs_loaded 同构）
-    let sess = tcx.sess;
+    // dylib dlopen 候选（运行期 FfiState ensure_libs 的 optional 类）：与降低期
+    // 预载同一清单（元数据 + CLI 合并、ldconfig 扩展的版本项）——one build 口径。
+    module.native_libs = dylib_candidates.clone();
+    // CLI `-l` 额外补 search-path 限定形态（tier-0 旧契约保留；Static 只走上方
+    // 经过验证的必需 archive 路径，不能伪装成可选 `.so` 候选）。
     for lib in &sess.opts.libs {
-        // Static 只能走下方经过验证的必需 archive 路径；不能同时伪装成可选 `.so`
-        // 候选，否则所需 archive dlopen 失败时可能静默命中系统同名库。
         if matches!(lib.kind, rustc_hir::attrs::NativeLibKind::Static { .. }) {
             continue;
         }
         let name = lib.name.as_str();
         for d in sess.opts.search_paths.iter().map(|sp| &sp.dir) {
-            module
-                .native_libs
-                .push(d.join(format!("lib{name}.so")).display().to_string().into());
+            let p: Box<str> = d.join(format!("lib{name}.so")).display().to_string().into();
+            if !module.native_libs.contains(&p) {
+                module.native_libs.push(p);
+            }
         }
-        module.native_libs.push(format!("lib{name}.so").into());
-        module.native_libs.push(format!("lib{name}.so.1").into());
     }
     // 上游 crate build.rs 的 Static native libraries（M5.1 D2）+ global_asm/naked
     // 物化（M5.2 D8h）：清单已在排干 worklist 前物化并 RTLD_GLOBAL 加载
@@ -2118,4 +2182,38 @@ mod tests {
             }
         ));
     }
+}
+
+/// dylib dlopen 候选 SONAME 清单（按序去重）：dev 符号链 `lib{name}.so` →
+/// `ldconfig -p` 的版本项绝对路径（`lib{name}.so.N` 带点锚前缀，libssl.so.3 类；
+/// ldconfig 缺失/无命中则仅靠符号链）。cargo 的 rlib 元数据 -l 与 CLI -l 共用。
+fn soname_candidates(names: &[Box<str>]) -> Vec<Box<str>> {
+    let mut out: Vec<Box<str>> = Vec::new();
+    let mut push = |c: String| {
+        let c: Box<str> = c.into();
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    };
+    let ldconfig = std::process::Command::new("ldconfig")
+        .arg("-p")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+    for name in names {
+        push(format!("lib{name}.so"));
+        let prefix = format!("lib{name}.so.");
+        if let Some(db) = &ldconfig {
+            for line in db.lines() {
+                let Some((soname, path)) = line.rsplit_once(" => ") else {
+                    continue;
+                };
+                if soname.trim_start().starts_with(&prefix) {
+                    push(path.trim().to_string());
+                }
+            }
+        }
+    }
+    out
 }
