@@ -20,6 +20,12 @@ use super::ir::{FfiKind, ForeignSig};
 #[derive(Default)]
 pub struct FfiState {
     syms: HashMap<Box<str>, usize>,
+    /// 必需归档库的 dlopen 句柄（required_native_libs 序 = 链接序同构）：
+    /// 其 .dynsym 可见符号的解析 **先于 RTLD_DEFAULT**（native 链接期绑定——guest
+    /// 自己链进来的对象恒胜宿主进程同名库；psm 的 rust_psm_on_stack vs 宿主
+    /// librustc_driver 内嵌副本即此实锤，corpus c_polars_frame）。可选库句柄
+    /// 另列，全域之后再查。
+    required_handles: Vec<usize>,
     handles: Vec<usize>,
     /// 必需归档库的 hidden 符号兜底表（装载基址, 符号→st_value）：只收不进
     /// .dynsym 的符号（-fvisibility=hidden 归档，ring/zstd-sys 一族）。解析序
@@ -55,8 +61,20 @@ impl FfiState {
                 break;
             }
         }
-        // ②dlsym 全域（真系统库；归档的 dynsym 可见符号也经 RTLD_GLOBAL 装载
-        // 在此命中——物化期 reject_symbol_ambiguity 已拒其与全局的碰撞）
+        // ②必需归档句柄 dlsym（链接序）：归档 .dynsym 可见符号的 native 链接期
+        // 绑定——guest 自己的对象恒胜宿主同名库；句柄解析与装载序无关，可复现
+        // （①的 hidden 类同理；残余 = 归档【内部】跨引用碰撞符号仍走全局序，
+        // 已知记档，corpus 无此形态）。
+        if p == 0 {
+            for &h in &self.required_handles {
+                p = unsafe { libc::dlsym(h as *mut libc::c_void, cname.as_ptr()) } as usize;
+                if p != 0 {
+                    break;
+                }
+            }
+        }
+        // ③dlsym 全域（真系统库；归档的 dynsym 可见符号也经 RTLD_GLOBAL 装载
+        // 在此命中——但撞宿主同名库时 ②已先命中归档，无歧义）
         if p == 0 {
             p = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) } as usize;
         }
@@ -91,7 +109,7 @@ impl FfiState {
                 let detail = dlerror_string();
                 return Err(format!("dlopen 必需原生库 `{cand}` 失败: {detail}"));
             }
-            self.handles.push(h as usize);
+            self.required_handles.push(h as usize);
             // hidden 符号 .symtab 兜底表（口径见字段注）。基址或解析失败不建表：
             // dlsym 可见面不受影响，hidden 符号由 resolve 的既有诊断兜底——宁缺
             // 勿滥，错基址表会把符号静默解到野地址。

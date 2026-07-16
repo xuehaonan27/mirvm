@@ -2167,6 +2167,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 //（Call panic lang item，实参 + location 尾参——panic fn 全 track_caller）
                 let c = self.lower_operand_scalar(cond)?;
                 use rustc_hir::LangItem;
+                let mut pre: Vec<Stmt> = Vec::new();
                 let mut pargs: Vec<Operand> = Vec::new();
                 let lang_item = match &**msg {
                     mir::AssertKind::BoundsCheck { len, index } => {
@@ -2179,8 +2180,67 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         pargs.push(self.lower_operand_scalar(found)?);
                         LangItem::PanicMisalignedPointerDereference
                     }
-                    mir::AssertKind::InvalidEnumConstruction(_) => {
-                        return Err("InvalidEnumConstruction assert（u128 实参，M4.2+）".into());
+                    mir::AssertKind::InvalidEnumConstruction(op) => {
+                        // cg_ssa：panic_invalid_enum_construction(source: u128)
+                        // （core panicking.rs 的 lang fn 签名）——u128 实参走
+                        // Indirect ABI（传 16 字节源地址，interp.rs:2313 的
+                        // copy_nonoverlapping 通道，与 finish_call 的 Bytes
+                        // 实参 `Operand::AddrOf` 同构；polars 批6 实锤）
+                        let v = match self.lower_operand(op)? {
+                            LoweredOp::Bytes { place, .. } => Operand::AddrOf(place.expr()),
+                            LoweredOp::Scalar(o) => {
+                                // 窄 tag：按符号扩展进两个相邻 scratch 槽
+                                // （低 64=扩展值，高 64=符号广播/0），首槽地址即
+                                // 16 字节 Indirect 实参
+                                let ty = self.op_ty(op)?;
+                                let signed = frame::ty_signed(ty);
+                                let src_w = match o {
+                                    Operand::Slot(s) => s.width,
+                                    _ => Width::W64,
+                                };
+                                let lo = self.scratch64();
+                                let hi = self.scratch64();
+                                pre.push(Stmt::Assign {
+                                    dst: ScalarPlace::Slot(lo),
+                                    rv: Rvalue::Cast {
+                                        from: (src_w, signed),
+                                        to: Width::W64,
+                                        a: o,
+                                    },
+                                });
+                                pre.push(Stmt::Assign {
+                                    dst: ScalarPlace::Slot(hi),
+                                    rv: if signed {
+                                        Rvalue::IntBin {
+                                            op: IntBinOp::Shr,
+                                            signed: true,
+                                            a: Operand::Slot(lo),
+                                            b: Operand::Imm {
+                                                bits: 63,
+                                                width: Width::W64,
+                                            },
+                                        }
+                                    } else {
+                                        Rvalue::Use(Operand::Imm {
+                                            bits: 0,
+                                            width: Width::W64,
+                                        })
+                                    },
+                                });
+                                Operand::AddrOf(ir::PlaceExpr {
+                                    base: ir::PlaceBase::Local(lo.off),
+                                    steps: Box::from([]),
+                                })
+                            }
+                            LoweredOp::Zst => {
+                                return Err("InvalidEnumConstruction 实参为 Zst".into());
+                            }
+                            LoweredOp::Pair(..) => {
+                                return Err("InvalidEnumConstruction 实参为 pair（M4.2+）".into());
+                            }
+                        };
+                        pargs.push(v);
+                        LangItem::PanicInvalidEnumConstruction
                     }
                     other => other.panic_function(),
                 };
@@ -2211,7 +2271,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     },
                 });
                 (
-                    vec![],
+                    pre,
                     Terminator::SwitchInt {
                         discr: SwitchDiscr::Scalar(c),
                         targets: vec![(*expected as u128, target.as_u32())],

@@ -115,16 +115,20 @@ pub(crate) fn materialize_static_libraries(tcx: TyCtxt<'_>) -> Result<Vec<Box<st
         .collect())
 }
 
-/// 物化期歧义拒绝：归档 **.dynsym 可见**导出符号 ①不得与 RTLD_DEFAULT 既有
-/// 定义碰撞（dynsym 可见符号经 dlsym 全域解析，碰撞下无法无歧义复现 native
-/// linker 顺序，且归档内部的同名引用会按全局作用域绑到进程本尊）②不得跨归档
-/// 重名（解析依赖装载顺序）。
+/// 物化期歧义拒绝：归档 **.dynsym 可见**导出符号不得**跨归档**重名（解析依赖
+/// 装载顺序，M5.1 拒绝猜测 native linker 顺序）。
 ///
-/// 不进 .dynsym 的 hidden 符号（.symtab 兜底表承载）刻意**不做**此检查：它们
-/// 在解析序上先于 RTLD_DEFAULT（native 链接期绑定——归档内定义恒胜全局同名，
-/// 见 elfsym 模块头注），碰撞本就解析到归档，无歧义可拒；hidden 符号也不进
-/// 全局作用域，归档内部引用天然自闭合。zstd-sys 的 `ZSTD_*` vs 宿主 libLLVM
-/// 内嵌库正是此类——拒绝会让合法 workload 不可跑。
+/// 与 **RTLD_DEFAULT 既有定义**的碰撞此前同列（①），自 dynsym 归档句柄优先
+/// 解析后不再拒绝：解析序 ①hidden 兜底表 → ②归档句柄（链接序）→ ③dlsym
+/// 全域，guest 链进的对象（hidden 或 dynsym 可见）恒胜宿主进程同名库——
+/// native 链接期绑定语义（psm 的 rust_psm_on_stack vs 宿主 librustc_driver
+/// 内嵌副本，corpus 批6 c_polars_frame 实锤；zstd-sys 的 ZSTD_* vs libLLVM
+/// 内嵌库同族）。已知残余：归档**内部**对碰撞符号的跨引用仍经动态链接器
+/// 全局序（mirror 不了，corpus 无此形态——psm 四符号均为 Rust 侧调用、
+/// 内部无交叉引用）。
+///
+/// 不进 .dynsym 的 hidden 符号（.symtab 兜底表承载）刻意不做任何碰撞检查：
+/// 解析序上恒先于全域，碰撞本就解析到归档，无歧义可拒。
 fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), String> {
     let mut owners = HashMap::<String, PathBuf>::new();
     for shared_object in shared_objects {
@@ -156,20 +160,12 @@ fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), String> {
             .lines()
             .filter_map(|line| line.split_ascii_whitespace().next())
         {
-            let c_symbol = std::ffi::CString::new(symbol).map_err(|_| {
+            std::ffi::CString::new(symbol).map_err(|_| {
                 format!(
                     "归档共享库 `{}` 导出含 NUL 的非法符号名",
                     shared_object.display()
                 )
             })?;
-            let process_symbol = unsafe { libc::dlsym(std::ptr::null_mut(), c_symbol.as_ptr()) };
-            if !process_symbol.is_null() {
-                return Err(format!(
-                    "静态归档 `{}` 导出符号 `{symbol}`，但 RTLD_DEFAULT 已有同名定义；\
-                     mirvm 的 dlsym 优先级无法无歧义复现 native linker 顺序",
-                    shared_object.display()
-                ));
-            }
             if let Some(previous) = owners.insert(symbol.to_owned(), shared_object.clone()) {
                 return Err(format!(
                     "静态归档导出符号 `{symbol}` 同时来自 `{}` 与 `{}`；运行期 dlsym \
@@ -717,7 +713,10 @@ mod tests {
     }
 
     #[test]
-    fn symbol_already_in_process_is_rejected_as_dlsym_order_ambiguity() {
+    fn symbol_already_in_process_is_accepted_under_handle_first_resolution() {
+        // dynsym 归档句柄优先解析落地后的新语义：归档导出符号与进程既有定义
+        // （此处特意用 malloc，进程必有定义）碰撞不再拒绝——归档句柄恒先命中，
+        // native 链接期绑定可复现（guest 自己的对象恒胜宿主同名库）。
         let temp = TempDir::new("process-symbol");
         let archive = make_archive(
             temp.path(),
@@ -725,11 +724,6 @@ mod tests {
         );
         let shared_object = materialize_in(&archive, &temp.path().join("cache")).unwrap();
 
-        let error = reject_symbol_ambiguity(&[shared_object]).unwrap_err();
-        assert!(error.contains("malloc"), "unexpected diagnostic: {error}");
-        assert!(
-            error.contains("RTLD_DEFAULT"),
-            "unexpected diagnostic: {error}"
-        );
+        reject_symbol_ambiguity(&[shared_object]).unwrap();
     }
 }

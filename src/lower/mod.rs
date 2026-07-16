@@ -166,6 +166,12 @@ pub(crate) struct Linker<'tcx> {
     /// （归档内定义恒胜全局命名空间；宿主 libLLVM 内嵌 ZSTD_* 静默截胡的实锤，
     /// 见 elfsym 模块头注）。lower_inner 头部随 dlopen 一并构建。
     archive_fallbacks: Vec<(u64, std::collections::HashMap<Box<str>, u64>)>,
+    /// 必需归档/系统库的 dlopen 句柄（required_native_libs + dylib_candidates 序
+    /// = 链接序同构）：其 .dynsym 可见符号的降低期解析**先于 dlsym 全域**——
+    /// native 链接期绑定（guest 自己的对象恒胜宿主进程同名库；psm 的
+    /// rust_psm_on_stack vs 宿主 librustc_driver 内嵌副本实锤，corpus 批6
+    /// c_polars_frame）。句柄不随进程关闭（与运行期 FfiState 同）。
+    archive_handles: Vec<usize>,
     // ===== S4 底座（s4-base-image-design；偏移合并）=====
     /// sym → 底座 FuncId（命中即复用，不入队）。空表 = 无底座/底座构建模式。
     base_fns: FxHashMap<Box<str>, ir::FuncId>,
@@ -215,6 +221,7 @@ impl<'tcx> Linker<'tcx> {
             foreign_static_syms: Vec::new(),
             foreign_fn_entries: FxHashMap::default(),
             archive_fallbacks: Vec::new(),
+            archive_handles: Vec::new(),
             split: None,
             base_fns,
             base_fn_entries,
@@ -446,12 +453,13 @@ impl<'tcx> Linker<'tcx> {
                 "foreign `{name}` 被当作值取址（Rust 内部 ABI 符号，宿主进程亦有导出，不能直取）"
             ));
         }
-        // ④归档 hidden 符号兜底表先于 dlsym 全域（native 链接期绑定：静态归档
-        // 成员链进 guest 后其定义恒胜全局命名空间——宿主 libLLVM 内嵌 ZSTD_* 一族
-        // 会静默截胡，corpus c_zstd_stream 实锤；兜底表只收不进 .dynsym 的符号，
-        // dynsym 可见面维持 dlsym 解析，物化期 reject_symbol_ambiguity 已拒其与
-        // 全局的碰撞）。归档 `.so` 已在排干 worklist 前 RTLD_GLOBAL 加载进全局域
-        //（lower_inner 头部），dlsym 全域可达其 dynsym 可见符号。
+        // ④解析序：hidden 兜底表 → 归档句柄（链接序）→ dlsym 全域（native 链接
+        // 期绑定——guest 自己链进来的对象（hidden 或 dynsym 可见）恒胜宿主进程
+        // 同名库：libLLVM 的 ZSTD_*（c_zstd_stream）与 librustc_driver 的
+        // rust_psm_on_stack（c_polars_frame）两实锤）。归档 `.so` 已在排干
+        // worklist 前 RTLD_NOW|RTLD_GLOBAL 加载（lower_inner 头部），句柄在
+        // self.archive_handles；全域兜底真系统库。
+        let cname = std::ffi::CString::new(name).map_err(|_| "符号名含 NUL".to_string())?;
         let mut p = 0u64;
         for (bias, syms) in &self.archive_fallbacks {
             if let Some(&v) = syms.get(name) {
@@ -460,7 +468,14 @@ impl<'tcx> Linker<'tcx> {
             }
         }
         if p == 0 {
-            let cname = std::ffi::CString::new(name).map_err(|_| "符号名含 NUL".to_string())?;
+            for &h in &self.archive_handles {
+                p = unsafe { libc::dlsym(h as *mut libc::c_void, cname.as_ptr()) } as u64;
+                if p != 0 {
+                    break;
+                }
+            }
+        }
+        if p == 0 {
             p = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) } as u64;
         }
         if p == 0 {
@@ -549,8 +564,10 @@ impl<'tcx> Linker<'tcx> {
                         self.record_both(id, cell);
                         return Ok(cell);
                     }
-                    // 归档 hidden 符号兜底表先于 dlsym 全域（与 fn 取址④同序——
-                    // native 链接期绑定：归档内定义恒胜全局命名空间）
+                    // 解析序同 fn 取址④：hidden 兜底表 → 归档句柄（链接序）→
+                    // dlsym 全域（native 链接期绑定：归档内定义恒胜全局同名）
+                    let cname =
+                        std::ffi::CString::new(name).map_err(|_| "符号名含 NUL".to_string())?;
                     let mut p = 0u64;
                     for (bias, syms) in &self.archive_fallbacks {
                         if let Some(&v) = syms.get(name) {
@@ -559,8 +576,14 @@ impl<'tcx> Linker<'tcx> {
                         }
                     }
                     if p == 0 {
-                        let cname =
-                            std::ffi::CString::new(name).map_err(|_| "符号名含 NUL".to_string())?;
+                        for &h in &self.archive_handles {
+                            p = unsafe { libc::dlsym(h as *mut libc::c_void, cname.as_ptr()) } as u64;
+                            if p != 0 {
+                                break;
+                            }
+                        }
+                    }
+                    if p == 0 {
                         p = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) } as u64;
                     }
                     if p == 0 {
@@ -1666,6 +1689,9 @@ fn lower_inner(
                 panic!("必需原生库 `{so}` 降低期 dlopen 失败: {detail}");
             }
             // 句柄有意不 dlclose（与运行期 FfiState 同：随进程生命周期）。
+            // 记 required 句柄（dynsym 可见符号的链接序解析，先于全域——
+            // native 链接期绑定，psm/rustc_driver 碰撞实锤）。
+            linker.archive_handles.push(h as usize);
             // hidden 符号 .symtab 兜底表（口径同 FfiState：只收不进 .dynsym 的
             // 符号）。基址或解析失败不建表——dlsym 可见面不受影响，hidden 符号
             // 由取址路径的既有诊断兜底（宁缺勿滥：错基址表会静默解到野地址）。
