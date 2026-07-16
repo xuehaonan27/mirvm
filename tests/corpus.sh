@@ -19,7 +19,10 @@ if [ ${#progs[@]} -eq 0 ]; then
            smoltcp_tcp statrs_stats rkyv_zero qr_round fatfs_img geo_ops rhai_script \
            redb_kv zstd_stream \
            crc32fast chacha_poly k256_ecdsa libflate_zlib rustls_cert \
-           lyon_tess midly_midi jaq_jq kdl_doc ds_obscure qoi_img)
+           lyon_tess midly_midi jaq_jq kdl_doc ds_obscure qoi_img \
+           pgp_packet zopfli_deep simd_json symphonia_wav pdf_pair deunicode_slug \
+           malachite_big arkworks_ff im_persistent zxcvbn_pass barcoders_gen \
+           bzip2_pure fixed_point)
 fi
 pass=0 fail=0
 

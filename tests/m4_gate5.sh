@@ -40,7 +40,10 @@ compact_str nom_parse comrak_md fst_build spade_delaunay aes_gcm png_round \
 smoltcp_tcp snow_noise statrs_stats rkyv_zero qr_round fatfs_img geo_ops rhai_script \
 redb_kv gix_pure lz4_snap calamine_xlsx rusqlite_db \
 crc32fast chacha_poly k256_ecdsa rsa_pss libflate_zlib revm_evm rustls_cert \
-lyon_tess midly_midi jaq_jq kdl_doc ds_obscure qoi_img"}
+lyon_tess midly_midi jaq_jq kdl_doc ds_obscure qoi_img \
+pgp_packet zopfli_deep simd_json symphonia_wav pdf_pair deunicode_slug \
+malachite_big arkworks_ff im_persistent zxcvbn_pass barcoders_gen bzip2_pure \
+fixed_point openssl_evp"}
 # jieba_cut 全绿但 mirvm 单跑 77-89s（贴 90s timeout），留 corpus.sh 手工跑批
 for p in $CORPUS_PROGS; do
     src="corpus/c_$p.rs"
@@ -49,10 +52,11 @@ for p in $CORPUS_PROGS; do
     # 记账口径；默认 simd backend 的 avx512ifma vpmadd52 已于 2b4766b 内建）
     [ "$p" = ed25519 ] && export CARGO_CFG_CURVE25519_DALEK_BACKEND=serial
     # 重构建项的冷 timeout 放宽（gix/revm deps 树大、rusqlite 编 C sqlite、
-    # calamine 双 crate、rustls 编 aws-lc C、rsa 大数 JIT 压力实测单跑 >90s）
+    # calamine 双 crate、rustls 编 aws-lc C、rsa 大数 JIT 压力实测单跑 >90s、
+    # zopfli 重计算 A 维 ~200s、arkworks/ malachite 大 dep 树）
     tmo=90
     case "$p" in
-        gix_pure|rusqlite_db|revm_evm) tmo=300 ;;
+        gix_pure|rusqlite_db|revm_evm|zopfli_deep) tmo=300 ;;
         calamine_xlsx|rustls_cert) tmo=180 ;;
         rsa_pss) tmo=400 ;;
     esac
@@ -61,8 +65,12 @@ for p in $CORPUS_PROGS; do
     stdout=$(cat "$TMP/corpus-$p.out")
     out=$(cat "$TMP/corpus-$p.out" "$TMP/corpus-$p.err")
     red_pattern="" red_label="" red_code=70
-    # （历史 expected-red 已全部转绿：六条 intrinsic 红于 2b4766b 内建、rusqlite
-    # 的 libm 闭包于本轮修 native_archive LINK_SUFFIX——机制保留备将来欠账锁定）
+    # 历史转绿：六条 intrinsic 红于 2b4766b 内建、rusqlite libm 闭包于 2518314
+    # 修 LINK_SUFFIX——机制保留备将来欠账锁定
+    # openssl_evp：rlib 元数据 -l 传播缺口（lower 的 dlopen 候选只读 CLI libs，
+    # cargo 把 rustc-link-lib 只写元数据→ssl/crypto 从未进全域；产品票据见
+    # docs/corpus.md；修好即 XPASS 强制转绿）
+    [ "$p" = openssl_evp ] && { red_pattern='符号未命中'; red_label="rlib 元数据 -l 传播缺口（预载欠账）"; }
     if [ "$p" = numbigint ] && { [ $code -ne 0 ] \
         || [ "$stdout" != "$NUMBIGINT_ORACLE" ]; }; then
         bad "c_numbigint oracle (exit=$code stdout='$stdout')"
