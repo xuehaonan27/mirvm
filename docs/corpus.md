@@ -279,7 +279,18 @@ walkdir 遍历目录时 `UndefinedBehavior(DanglingIntPointer{ InboundsPointerAr
   elfsym.rs（.symtab 兜底，ring 的 -fvisibility=hidden 归档符号）**。ring
   SHA-256 三向量与 native 逐字节一致。
 
-### M5.x intrinsic 内建欠账队列（按证据密度排序）
+### M5.x intrinsic 内建欠账队列（**七族已于 2026-07-15 全清**，`2b4766b`）
+
+> 核销记录：psad.bw 家族（sse2/avx2 + fallout maddubs/madd 四兄弟）、pclmulqdq、
+> aesni（aeskeygenassist 为软件 S-box 模型）、sse42.crc32 四宽、avx2.permd、
+> avx2.gather（q.pd.256 + d.pd.256，mask fault-suppression 单测）、avx512
+> vpmadd52l/h 六宽（软件 u128 模型）——26 符号内建，六个 expected-red 全部
+> XPASS 翻绿（png_round/gix_pure/calamine_xlsx/aes_gcm/lz4_snap + snow 摘
+> RUSTFLAGS），gate5 89 pass/1 expected-red（仅剩 rusqlite 的 libm 闭包非
+> intrinsic 红）。cargo test 63/63（+9 个 helper 单测）。剩余未内建兄弟
+> （pclmulqdq.256/.512、vaes、其余 gather 形态、avx512.pmadd 系）遇 workload
+> 按同四触点法补。下表为原始欠账（留档）：
+
 
 | intrinsic | 撞它的真实 crate |
 |---|---|

@@ -43,8 +43,8 @@ redb_kv gix_pure lz4_snap calamine_xlsx rusqlite_db"}
 for p in $CORPUS_PROGS; do
     src="corpus/c_$p.rs"
     [ -f "$src" ] || continue
-    # ed25519：dalek 官方 serial backend（u128 本意；默认 simd backend 的
-    # avx512ifma vpmadd52 未内建——FRONTIER 记账，见 docs/corpus.md）
+    # ed25519：dalek 官方 serial backend（u128 语义压力本意，docs/corpus.md
+    # 记账口径；默认 simd backend 的 avx512ifma vpmadd52 已于 2b4766b 内建）
     [ "$p" = ed25519 ] && export CARGO_CFG_CURVE25519_DALEK_BACKEND=serial
     # 重构建项的冷 timeout 放宽（gix deps 树大、rusqlite 编 C sqlite、calamine 双 crate）
     tmo=90
