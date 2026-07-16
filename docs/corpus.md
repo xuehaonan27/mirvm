@@ -382,3 +382,34 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
   后主线限时一击未成）；下批可以 packet 解析面（从 armored 公钥打印字段）重试。
 - 接线：gate5 102 pass/1 expected-red（rsa_pss tmo=400 记大数 JIT 压力；
   revm/rustls 冷构建宽限）。
+
+### 批5（13 个；12 绿 / 1 DIFF 实锤（已修）/ 1 FRONTIER）
+
+- **绿**：pgp_packet（OpenPGP packet 解析面；armor 体层错误绕开 M4.2 dyn 上溯欠账）、
+  zopfli_deep（重计算 JIT 压力；尺寸按 8 分钟预算缩减链记录）、simd_json（显式
+  SIMD：pshufb 族+通用 simd 已覆盖，两维同选 avx2 实现——cpuid 派发锚定行作
+  假绿警报）、symphonia_wav（hound→symphonia PCM 逐样本+f64 sin 合成逐位一致）、
+  pdf_pair（printpdf+lopdf 闭环；壁钟头/假随机 xorshift/profile 敏感三坑记录）、
+  deunicode_slug（Inflector 0.11 怪癖锚点 fish→fishes/data→Daum）、malachite_big
+  （256/512/1024-bit 大数谱系）、arkworks_ff（BLS12-381：域塔/Fq12/pairing
+  576B 指纹）、im_persistent（10k 深共享 drop glue）、zxcvbn_pass（**上游
+  exact-tie nondeterminism 实证**：scoring.rs 对 u64::MAX 饱和并列取 HashMap
+  迭代序——native 自对拍都不稳，三维恰三进程同种子纯属侥幸，已离饱和区）、
+  barcoders_gen（9 种 1D 条码）、bzip2_pure（0.6 纯 Rust libbz2-rs-sys 后端，
+  与系统 C bzip2 逐字节一致）。
+- **DIFF 实锤（已修 fffd462）**：c_fixed_point——16 字节 niche tag 截断 W64
+  判别（NonZero<u128> niche_start=0 时 lo=0 的合法大值误判进 niche 返回
+  None）→ fixed U64F64::sqrt 整数输入（lo 恒 0）静默产 0。修复 = 16 字节
+  niche tag 一律 u128 全宽 wrapping 判别（cg_ssa operand.rs 同构）。同 driver
+  另压出三个 128 位族 Trap 欠账（Cmp/cast/Neg/saturating，见批5 修记）。
+- **FRONTIER（锁定 expected-red）**：c_openssl_evp——rlib 元数据 -l 传播缺口
+  两撞同源：①cargo 把 openssl-sys build.rs 的 rustc-link-lib=ssl/crypto 只写
+  元数据，bin rustc 命令行无 -l/-L，mirvm 的 dlopen 候选只读 sess.opts.libs
+  → 库从未进全域（driver 层显式 dlopen 合法绕行）；②绕行后 lower 期
+  EVP_EncryptInit_ex 按值取址烘焙仍 miss（运行期预载够不着 lower 期 dlsym）。
+  **产品票据**：lower 应收 used_crates 的 tcx.native_libraries Dylib/RawDylib
+  项（连带 -L native 搜索径）为候选，并在排干 worklist 前 RTLD_GLOBAL 预载
+  （与 required_native_libs 同点同修 ①②）。
+- **闭包欠账新形态**：bzip2-sys——vendored BZ_NO_STDIO 的断言桩 bz_internal_error
+  定义在其 Rust rlib（#[no_mangle]）里：native_archive 闭包检查覆盖不到
+  「符号在 rlib」形态（记档；driver 走 0.6 纯 Rust 后端）。
