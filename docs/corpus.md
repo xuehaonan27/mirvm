@@ -276,7 +276,7 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
   Vec<String> 6144B 末档；另有 shim FuncId 漏 A2 rebase 的实现自伤一记）。
   修 = kind=Global 时登记 shim 四件套，interp CallBuiltin(Rust*) 臂运行期
   统一路由——c_mimalloc 三维转绿（线程相位 53110 calls 无分歧）。
-- **FRONTIER 记档（债 [open-issues.md](open-issues.md) C1）**：c_tree_sitter——FFI **按值聚合**封送
+- **FRONTIER（**已转正（2026-07-18，C1 闭合 `见 decision-history §7.10`）**）**：c_tree_sitter——FFI **按值聚合**封送
   （TSInput/TSNode/TSPoint）系统性缺席：ffi_kind_of 只收标量的既定边界，
   转正需 Aggregate 类 + System V 拆分 + thunk 方向按值读写，按 workload
   优先级立项面；driver 头注/B 维 15 行 oracle 已固定。

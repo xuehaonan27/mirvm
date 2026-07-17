@@ -59,7 +59,7 @@
 
 | ID | 事项 | 关键内容与转正要件 | 出处 |
 |---|---|---|---|
-| C1 | **FFI 按值聚合封送**（旧 debt §9） | tree-sitter 全 parse 路径汇到按值 TSInput（内嵌 read 回调）；TSNode(32B)/TSPoint(8B) 按值传/返。`ffi_kind_of` 只收 `BackendRepr::Scalar`。转正四件套：①FfiKind Aggregate（System V INTEGER/SSE/MEMORY 三类）+ libffi struct-type；②freeze_c_fnptr_sig/CallForeign 发码放开（eightbyte 拆分 + sret/寄存器对）；③thunk 方向 marshal_args 按值读写；④验收 = c_tree_sitter 三维转绿（B 维 15 行 oracle 已固定）。估计多片工程 | corpus §5 批7，driver 头注 |
+| C1 | **FFI 按值聚合封送**（旧 debt §9；**已闭合 2026-07-18**） | 关闭：FfiAgg 冻结布局 + 出/入向全聚封送（[designs/c1-ffi-agg-design.md](designs/c1-ffi-agg-design.md)；合成矩阵探针 `demo/ffi_agg_probe.rs` 三维绿、**c_tree_sitter 原样三维转绿**、gate5 全量复绿，decision-history §7.10）。残余边界转 R17 | 本表 R17，designs/c1-ffi-agg-design.md |
 | C2 | **native-archive 闭包缺口：符号在 rlib**（旧 debt §10①） | wasmtime `libwasmtime-helpers.a` 蹦床调 `#[export_name]` Rust 符号（定义在 wasmtime 自身 rlib）；`-z defs` 单归档自闭合够不着 → 拒「无法安全转换为共享库」。第二实例 = 批5 bzip2-sys `bz_internal_error`（≥2 实锤）。修法 = 闭包判定纳入 crate 图 rlib 导出符号集；Rust 体符号 = P1 可执行条目（`4202317`）或自然解锁，**值得专题评审**。最小复现 `/tmp/mre` | corpus §5 批8 波2，最小复现、driver 头注 |
 | C3 | **inline asm `noreturn`**（旧 debt §10②） | wasmtime trap 上抛 `resume_to_exception_handler`（asm `options(noreturn)`），asm-stub 物化只覆盖 call-return 形，遇即 TRAP exit 70。转正需两类面孔（入口承诺不返的 resume/longjmp 形 + ud2/int3 终止形）。探针已证 wasmtime 主路径（cranelift 自发机器码执行/实例化/内存/表/宿主回调/rayon）全通零分歧——死于最后一步 | corpus §5 批8 波2 |
 | C4 | **dep crate global_asm 物化**（旧 debt §7） | faer pulp V3 LD_ST 汇編表：S2 `-Zno-codegen` 致 rlib 无 object，本 crate global_asm 通道（收集种子只含本地项）接不到。路径①收集面扩到 used_crates（同通道 cc+dlopen，装载序=crate 图序）；②命中 crate 关 `-Zno-codegen`（判名放行，只付一族 codegen）。当前 default-features=false 标量内核绕行 | corpus §5 批6（fb327cc 记档） |
@@ -152,6 +152,7 @@
 | R14 | **tokei 并行 JSON reports 次序不稳定** | 上游行为非 mirvm 债；用稳定 compact aggregate 绕；JSON 作 oracle 前须先解决确定排序 | real-projects.md §6 |
 | R15 | **`ClosureFnPointer` 等 track_caller 外 adjustment 未支持** | `ReifyFnPointer` 只走 rustc `resolve_for_fn_ptr`；不能由此外推 | current-status §4 |
 | R16 | **global_asm `sym` 拒绝面残余（C7 闭合后）** | ①`sym` fn 指向签名不可派生（聚合/Rust ABI/变参）的 guest fn——机器码调此类同形本即 UB，响亮拒绝；②`sym` static 指向 guest static 未接（mangled 静态名审计仍会命中），按 workload 再立 | src/lower/global_asm.rs，decision-history §7.9 |
+| R17 | **FFI 按值封送残余边界（C1 闭合后）** | union 按值（SysV union 分类另规则）、SIMD 向量按值、变参尾参位聚合、align>8 聚合、multi-variant enum 按值——五形态 freeze 响亮 Err（文案可鉴红分类）；`{i128}`/f128/long-double/_Complex 既有标量边界不动。各形态同 helper 可扩，按真实 workload 触发再立 | src/lower/mod.rs，designs/c1-ffi-agg-design.md §0 |
 
 ## G. 维护态与基建
 

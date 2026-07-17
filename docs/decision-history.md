@@ -699,6 +699,33 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
    `cargo test --locked` 67/67 + `diff.sh` 33/33（weak_extern、
    global_asm_guest_fn 入册）+ gate5 全量复绿。
 
+### 7.10 2026-07-18：C1 FFI 按值聚合封送闭合（旧 debt §9 / open-issues C1）
+
+- **实锤**：c_tree_sitter 全 parse 路径汇到按值 TSInput（内嵌 read 回调）；
+  `ts_node_*` 按值传/返 TSNode(32B)/TSPoint(8B)。`ffi_kind_of` 只收标量，lower 期
+  冻入口 Trap「非标量（按值聚合）」。
+- **设计**（[designs/c1-ffi-agg-design.md](designs/c1-ffi-agg-design.md)）：
+  `FfiKind::Agg(FfiAgg)` 冻结布局（rustc layout 声明序递归展开）+ libffi
+  `ffi_type_struct` 全聚合编组（eightbyte/sret 语义不自证）+ 全局一条约定
+  「FFI 边界两侧聚合一律按真地址交接」：出向 avalue 直指 guest 内存零拷贝、
+  返回强制 `RetDest::Indirect`（结果缓冲 memcpy 至 dst）；入向 closure avalue
+  字节地址经新 `interp::call_guest_ffi` 按 callee ParamAbi 展开（Indirect 传址
+  / Scalar·Pair 按 FfiAgg 声明序读值），返回 = Indirect sret 直传 / Pair 小档
+  `FfiAgg` 重打包。伴生效应：聚合签名 guest fn 自此入 P1 可执行条目候选
+  （TS 的 read 回调家族全体可派生、可经 P1 stub 被 native 回调）。
+- **施工修出的一只实雷**：≤16B 聚合实参经 `lower_operand` 拆成 scalar/pair
+  槽，与 kinds 槽数不齐（av 与 sig 错位 → 首跑 SIGSEGV）；修法 = foreign/
+  native_sig 按位置的 `Agg` 实参改取 place 真地址（字节连续在 guest 帧）。
+- **边界（如实响亮拒绝，open-issues R17）**：union 按值、SIMD 向量按值、
+  变参尾参位聚合、align>8 聚合、multi-variant enum 按值。
+- **验证**：合成矩阵探针 `demo/ffi_agg_probe.rs`（出向 8B/24B/32B 按值参 +
+  出向 8B/32B 聚合返回 + 入向聚合回调参数（P1 条目）+ 入向 Pair 重打包/32B
+  sret 直传，内嵌 fn-ptr 成员 TSInput 同形）三维绿；**c_tree_sitter 原样
+  三维逐字节转绿**（其 expected-red pattern「非标量（按值聚合）」XPASS 退役，
+  接线 gate5 corpus 段）；`cargo test` 67/67、`diff.sh` 35/35、gate5 全量复绿。
+- **方法注**：本单即「原理可完全闭合 → 无论工程量做彻底」的第一例大工程
+  （open-issues 闭合性总判 § 可闭合清单 C1 位）。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 - P7 设想独立 `src/os/` 物理层；当前 OS/FFI/builtin 逻辑仍分布在 lower、interp、ffi、heap。
