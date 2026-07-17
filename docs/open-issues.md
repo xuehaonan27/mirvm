@@ -65,7 +65,7 @@
 | C4 | **dep crate global_asm 物化**（旧 debt §7） | faer pulp V3 LD_ST 汇編表：S2 `-Zno-codegen` 致 rlib 无 object，本 crate global_asm 通道（收集种子只含本地项）接不到。路径①收集面扩到 used_crates（同通道 cc+dlopen，装载序=crate 图序）；②命中 crate 关 `-Zno-codegen`（判名放行，只付一族 codegen）。当前 default-features=false 标量内核绕行 | corpus §5 批6（fb327cc 记档） |
 | C5 | **dyn 上溯 vtable 变换**（M4.2 欠账） | principal 变换 / unsized→dyn 槽读未实现（同 principal 位拷已通）。pgp_packet driver 以 armor 体层绕行在役 | corpus §5 批5，history/m4-log.md |
 | C6 | **M5.x intrinsic 按需队列残余** | pclmulqdq.256/.512、vaes、其余 gather 形态、avx512.pmadd 系等：遇真实 workload 按既有四触点法补（已清先例：psad.bw/pclmulqdq/aesni/crc32/permd/gather/vpmadd52/F16C/lddqu/`2b4766b`）。AES 等未触发项保留响亮 Trap | corpus §5，history/m5.1-design.md §1 |
-| C7 | **naked/global_asm `sym` 指向解释执行 guest fn**（可能已可解锁） | 现行响亮拒绝（src/lower/global_asm.rs:254「JIT 期能力，需 per-fn trampoline」）。P1 条目可执行化（`4202317`）机制已备，按需立项做验收核对 | history/m5-log.md，m5.2-design D8h |
+| C7 | **naked/global_asm `sym` 指向解释执行 guest fn**（**主面已闭合 2026-07-18**） | 关闭：签名 FFI 可派生的 guest fn 经 P1 条目 stub 预算 + trampoline 导出符号，机器码 call 直落条目 stub 回解释器（探针 `demo/global_asm_guest_fn.rs` 三维绿，decision-history §7.9）。残余边界转 R16 | 本表 R16，history/m5-log.md |
 | C8 | **Rust 侧 ctor / `.init_array`（linkme 族）未触发** | C 原生归档侧 constructor 已由 decision-history §7.8 分治放行（DT_INIT）；裸 `.init`/`.fini` 仍拒。Rust 侧 ctor/linkme 从未进 corpus，按需立项，不预支 | history/m4.5-plan.md D6（已删，git 历史），§7.8 |
 
 ## E. 引擎与架构欠账
@@ -105,11 +105,14 @@
 | E24 | **Cargo wrapper composition fail-closed** | `拒绝` 非空 `RUSTC_WRAPPER`/`RUSTC_WORKSPACE_WRAPPER` 或有效 build.rustc-wrapper 一律拒绝，不做 wrapper 链组合；重开 = 可重开的实现选择 | current-status §4，src/cargo_shim.rs:63 |
 | E25 | **`MIRVM_ENCODED_RUSTFLAGS_APPEND` 未进 Cargo fingerprint；build/env 未分离** | `未立项` 改值可能复用旧 fake binary；mirvm build env 与 guest runtime env 尚未彻底分离 | real-projects.md §6，current-status §4 |
 | E26 | **平台仅 Linux/ELF/x86_64** | `记账` pthread/dlopen/GNU 链接/x86 asm wrapper 依赖面；unwind「跨平台无痛」未逐平台验证；macOS 次之后议 | current-status §4，DESIGN.md §11 |
-| E27 | **weak fn 真地址化缺定向验收** | `未立项` 机制已被 P2 GOT 覆盖（命中=真码址/weak 未命中=0，ffi.rs:150）；无定向差分验收用例关账（M4.5/M4-log 移交项的正式收尾） | decision-history §7.5c，history/m4-log.md |
 | E28 | **`__rust_alloc_error_handler`（kind=Global）路由未动** | `未立项` 仍走 ③ Trap（src/lower/mod.rs:1299）；首个 workload 触达时再立项（`__rust_*` 族已由 §7.7 统一路由，本条是例外残余） | decision-history §7.7 |
 | E29 | **手写 shim → 通用直通通道** | `未立项` neat 终态（polish，不急）；现行为手写 shim + dlsym 兜底 | DESIGN.md §7.2 |
 | E30 | **C7 regex 42s 基线 JIT 后未复测** | `未立项` 旧性能靶子；JIT 之后无重测记录，「评审须给预估收益」要求未兑现 | DESIGN.md C7 |
 | E31 | **A2 mtime 粒度传递依赖漏检残余风险** | `记账` 键安全论证承认 mtime 粒度残余；挂档（distribution §6 既有条目同案） | history/s3b-a2-design.md §9.4 |
+
+> E27（weak 符号真地址化缺定向验收）已于 2026-07-18 关闭并实修「weak extern
+> static 恒 0 判空 cell」缺陷——现走 GOT 启动相真解析（命中=真址/缺席=0；引擎
+> 接管符号强制缺席），探针 `demo/weak_extern.rs` 三维绿（decision-history §7.9）。
 
 ## D. 分发与产品面（方向已批：D9，2026-07-14；施工未立项）
 
@@ -148,6 +151,7 @@
 | R13 | **虚拟地址模型（含线性内存折中）否决，不作方向** | FFI 轴有原理性障碍；真实地址模型保留（P1/P2 已修，P3 冻结、P4 判非问题、P5→D13） | decision-history §7.5b |
 | R14 | **tokei 并行 JSON reports 次序不稳定** | 上游行为非 mirvm 债；用稳定 compact aggregate 绕；JSON 作 oracle 前须先解决确定排序 | real-projects.md §6 |
 | R15 | **`ClosureFnPointer` 等 track_caller 外 adjustment 未支持** | `ReifyFnPointer` 只走 rustc `resolve_for_fn_ptr`；不能由此外推 | current-status §4 |
+| R16 | **global_asm `sym` 拒绝面残余（C7 闭合后）** | ①`sym` fn 指向签名不可派生（聚合/Rust ABI/变参）的 guest fn——机器码调此类同形本即 UB，响亮拒绝；②`sym` static 指向 guest static 未接（mangled 静态名审计仍会命中），按 workload 再立 | src/lower/global_asm.rs，decision-history §7.9 |
 
 ## G. 维护态与基建
 
@@ -156,9 +160,11 @@
 | G1 | **GitHub/远程全面暂停** | issues/PRD/PR/`gh` 一切操作冻结至维护者恢复；恢复后待办：corpus manifest 入库、来源/rev/lock/许可重审、远程持续 gate、triage 恢复 | AGENTS.md |
 | G2 | **corpus/真实项目证据为 Git-ignored，非持续 gate** | harness 暂缓集：suite inventory、对象 GC/保留策略、跨主机 cache、NFS/对象存储耐久、远程 gate；CheckID 有界闭包（Cargo fingerprint/完整 sysroot Merkle 成差异源时扩展） | real-projects.md §6，decision-history §5 |
 | G3 | **jieba_cut / opencc 全绿但未接线自动 gate** | jieba 单跑 77-89s 贴 timeout 留 corpus.sh；opencc 需 /tmp/opencc-local 前缀，留 corpus.sh 手工批有 gating | corpus §5 |
-| G4 | **stale 绕行回摘待做（两处钉子可摘）** | ①exr_image 钉 half=2.2.1：`vcvtps2ph.128/256` 已内建（src/lower/mod.rs:1546/1554）；②flate2 gz/zlib 原生 API 绕行：psad.bw（sse2/avx2）+pclmulqdq 已内建。各需重跑三维验收后摘钉 | corpus §5 批1/批6，本次考古实证 |
 | G5 | **A2 后评估三触发器 + purity 账本复核未做** | ①clap-derive 类 tainted 巨集 → 项目本地 tainted image；②跨项目共享无实需 → 简化回单项目键；③ripgrep/tokei purity 账本复核 | decision-history §7.5 |
 | G6 | **zxcvbn 上游 exact-tie 非确定（登记防误判）** | scoring.rs 对 u64::MAX 饱和并列取 HashMap 迭代序，native 自对拍都不稳；已离饱和区，非 mirvm 债 | corpus §5 批5 |
+
+> G4（stale 绕行回摘两颗钉：exr half 钉、flate2 gz/zlib 原生 API）已于 2026-07-18
+> 回摘关闭并三维验收，移出本表（证据见 decision-history §7.9）。
 
 ## F. 条件触发型重开项（触发器速查）
 

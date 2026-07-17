@@ -663,6 +663,42 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
    native-archive 12/12；gate5 全绿。c_mimalloc 的 ctor 绕行 CFLAGS 保留
    （kernel：确定性无必要改）。
 
+### 7.9 2026-07-18：第 0 步收口三单（E27 / G4 / C7，按开放问题闭合性总判排单）
+
+依据 [open-issues.md](open-issues.md)「原理闭合性总判」排的第一批（全部判定
+「原理可完全闭合 → 做彻底」）：
+
+1. **E27 weak 符号真地址化（关闭，实修隐藏缺陷）**：验收探针暴露 weak extern
+   **static** 长期走 M4 遗留「判空 cell 恒 0」路径（never 进 GOT，std 全部弱探测
+   被伪装成缺席走回退；**fn 侧** P2 早已命中=真址/缺席=0）。修复 = weak static
+   改走 `foreign_slot(name, 0, true)` GOT 槽，启动相与所有 foreign 符号同一
+   重填序真解析；**引擎接管语义符号强制缺席**（非纯直通内建/DENY/
+   `__cxa_thread_atexit_impl`——std 对这些走回退，引擎接管语义不被真符号绕开，
+   与 fn 取址①同纪律）。探针 `demo/weak_extern.rs`（Option<extern fn> 类型
+   `#[linkage="extern_weak"]` static 官形：缺席=None / 命中=Some+可调）三维绿。
+   行为变化面：std 弱探测（statx/getpid 等）自本单起解析为真、走主径——gate5
+   全量复绿确认无回归。
+2. **G4 stale 绕行双钉回摘（关闭）**：`vcvtps2ph.128/256`（批内已内建，软件
+   模型与 F16C 硬件逐位单测在案）、psad.bw/pclmulqdq（七族 `2b4766b`）三项
+   intrinsic 实证在码。c_exr_image 摘 `half =2.2.1` 钉（两侧同走 F16C 通道，
+   sNaN 静默化两侧同发生）；c_flate2 手工 gz/zlib 容器退役、原生
+   ZlibEncoder/GzEncoder 回归（simd-adler32 crc32fast 硬件路径双维同选）。
+   双 driver 三维逐字节绿。
+3. **C7 global_asm/naked `sym` 指向解释态 guest fn（主面闭合）**：渲染期识别
+   「非 foreign、非 naked」的 SymFn → 预算 P1 可执行条目（`fn_entry_addr`，
+   签名可派生为前提）→ .s 头部导出同名**函数跳板**（`movabs rax, <待码址>;
+   jmp rax`；`.set` ABS 形式在 GAS Intel 模式下 `call` 不可发码，实锤后改真
+   跳板）。机器码 call → 跳板 → 条目 stub → 蹦床回解释器 = native 链接期
+   绑定同构。未定义符号审计口径随更新。探针
+   `demo/global_asm_guest_fn.rs`（global_asm 函数经 sym 调 guest fn，返回值 +
+   指针回写）三维绿。
+   **如实保留的拒绝面（open-issues R16）**：①sym 指向签名不可派生的 guest fn
+   （聚合/Rust ABI/变参）——机器码调此类同形本即 UB，响亮拒绝；②SymStatic
+   指向 guest static 未接（mangled 名审计仍会命中），按 workload 再立。
+4. **方法注**：三条均先「闭合契约」后施工；验证 = 各 driver 三维逐字节 +
+   `cargo test --locked` 67/67 + `diff.sh` 33/33（weak_extern、
+   global_asm_guest_fn 入册）+ gate5 全量复绿。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 - P7 设想独立 `src/os/` 物理层；当前 OS/FFI/builtin 逻辑仍分布在 lower、interp、ffi、heap。

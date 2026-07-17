@@ -48,7 +48,7 @@ tier-0（rustc `InterpCx` + 协作调度）上跑了五批 22 crate + 3 定向�
 - **绿**：serde_json（Pair 返回密集迭代器）、serde_yaml（unsafe-libyaml 纯 Rust
   移植）、rand_det（rand 0.9 改名 API）、flate2（miniz_oxide raw deflate；
   gz/zlib 原生 API 撞下述 FRONTIER 改手工容器等价覆盖；**psad.bw/pclmulqdq 已内建，
-  原生 API 绕行钉可回摘——[open-issues.md](open-issues.md) G4**）、brotli、argon2
+  原生 API 已于 2026-07-18 回摘回归（open-issues G4 关闭，§7.9）**）、brotli、argon2
   （内存硬）、ed25519（dalek u128 域算术；用官方 serial backend 绕下述
   avx512ifma）、p256（RFC6979 定向量锚点）、syn_parse（递归类型 + drop glue 重）、
   hickory（DNS codec；ring 撞 bug② 后的替换项）、unicode_tables（大表四件套）。
@@ -232,7 +232,7 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
 - **绿**：tokenizers_hf（BPE/Unigram 手工 vocab，fancy-regex 绕行上游 onig 破洞）、
   jiff_time（内置 tz 大表）、exr_image（OpenEXR 八档压缩 roundtrip 含 PXR24/B44
   有损面逐 channel fnv 锚；half 钉 =2.2.1 绕 F16C 运行期探测未内建 vcvtps2ph；
-  **vcvtps2ph 已内建，钉可回摘——[open-issues.md](open-issues.md) G4**）、
+  **vcvtps2ph 已内建，钉已于 2026-07-18 摘除（open-issues G4 关闭，§7.9）**）、
   nalgebra_la（LU/QR/SVD/Cholesky/eigenvalues 全 bits）、h3_hex（Uber H3 全 API）、
   faer_lu（default-features=false 标量内核；默认 std 的 pulp V3 LD_ST 需依赖
   crate 内 global_asm 物化=-Zno-codegen 边界——**[open-issues.md](open-issues.md)
