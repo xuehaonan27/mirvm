@@ -4,6 +4,7 @@
 # 全绿基线 30/30（M4.4 起含 threads_*；M5.0 起含 asm_probe；真实项目 TDD
 # 新增 track_caller_fn_ptr/u128_switch/volatile_wide；M5.2 起含 intrinsic_probe/
 # recursion_deep/simd_probe/atomic_order_probe/float_wide_probe/asm_extras_probe/signal_probe/fork_exec_probe/nested_dst_probe/wide_int_probe）。
+# P1 起含 struct_fnptr_escape（结构体内嵌 fn-ptr 逃逸负对照，31/31）。
 # ecosystem/ffi_zlib 是 frontmatter/cargo
 # 形态（引擎 cargo 接线 M4.5），diff.sh 同样 SKIP（见 diff_cargo.sh）。
 set -u
