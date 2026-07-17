@@ -48,8 +48,12 @@ crc32fast chacha_poly k256_ecdsa rsa_pss libflate_zlib revm_evm rustls_cert \
 lyon_tess midly_midi jaq_jq kdl_doc ds_obscure qoi_img \
 pgp_packet zopfli_deep simd_json symphonia_wav pdf_pair deunicode_slug \
 malachite_big arkworks_ff im_persistent zxcvbn_pass barcoders_gen bzip2_pure \
-fixed_point openssl_evp"}
+fixed_point openssl_evp \
+wat_parse jsonschema html5ever xml_rs markdown_it logos_lex chumsky_parse \
+ndarray smartcore rune koto"}
 # jieba_cut 全绿但 mirvm 单跑 77-89s（贴 90s timeout），留 corpus.sh 手工跑批
+# opencc（批7 波1）三维已绿但不进 gate5：依赖机器侧 /tmp/opencc-local
+# （OpenCC 1.1.9 自建前缀，driver 头注有重建法）——留 corpus.sh 手工批（有 gating）
 for p in $CORPUS_PROGS; do
     src="corpus/c_$p.rs"
     [ -f "$src" ] || continue

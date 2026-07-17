@@ -22,13 +22,21 @@ if [ ${#progs[@]} -eq 0 ]; then
            lyon_tess midly_midi jaq_jq kdl_doc ds_obscure qoi_img \
            pgp_packet zopfli_deep simd_json symphonia_wav pdf_pair deunicode_slug \
            malachite_big arkworks_ff im_persistent zxcvbn_pass barcoders_gen \
-           bzip2_pure fixed_point)
+           bzip2_pure fixed_point \
+           wat_parse jsonschema html5ever xml_rs markdown_it logos_lex chumsky_parse \
+           ndarray smartcore rune koto opencc)
 fi
+# opencc（批7 波1，FFI 条目）：需 /tmp/opencc-local 前缀（OpenCC 1.1.9 自建，
+# 重建法见 driver 头注）+ 三 env；前缀缺席则本批跳过，不算红
 pass=0 fail=0
 
 for p in "${progs[@]}"; do
     src="corpus/c_$p.rs"
     [ -f "$src" ] || { echo "SKIP $p (no src)"; continue; }
+    if [ "$p" = opencc ]; then
+        [ -d /tmp/opencc-local ] || { echo "SKIP $p (no /tmp/opencc-local)"; continue; }
+        export OPENCC_DIR=/tmp/opencc-local OPENCC_LIBS=opencc LD_LIBRARY_PATH=/tmp/opencc-local/lib
+    fi
     start=$(date +%s)
     timeout 600 "$MIRVM" run "$src" >"$OUT/$p.out" 2>"$OUT/$p.err"
     code=$?
