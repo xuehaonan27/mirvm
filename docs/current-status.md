@@ -25,6 +25,7 @@
 | 地址模型 P2（GOT 间接） | **完成（2026-07-17）** | §7.5b 手术单定场（真实地址模型保留）→ §7.5c 零 IR 变更 GOT 机制（槽 = 冻结区普通格 + 启动相重填；extern static/fn 值不再烤宿主地址，字节码复用 `Mem{Static(槽)}`/`SubImm` 通道，JIT/interp 零改动）→ §7.5d 拒缓存三判据全退役 + 纯 std 会话 want_split 修正（先存 A2 沉默债：L2 对纯 std 程序永 miss）。外来符号用例冷→热全通（c_process 463→30ms），gate5 117/0/0。JIT 间接调用准入记债（m4-debt-map §8） |
 | 地址模型 P1（fn 条目可执行化） | **完成（2026-07-17，commit `4202317`）** | §7.6：FFI 可派生条目值 = 可执行 stub 码址（新第三固定地址域族 0x6C00/0x6D00/0x6E00+k + libffi closure 蹦床 + 配方随模块、启动相重建封存 RX）——thunk 盲区结构性根治（debt-map §6 关闭；负对照 flate2 C-libz 结构体内嵌回调往返，三维+L2 热一致）。残余边界 = 签名不可派生条目（Rust ABI/聚合/变参）保持数据槽，无实质盲区。gate5 117/0/0 |
 | corpus 批7（激进 24 三波） | **完成（2026-07-17）** | 23/24 全绿可用（corpus.md §5 批7）；**修出两只产品 bug 当日修复**：native-archive 链接行收 crate 图动态库（`867b3de`，libgit2 红转绿）+ custom `#[global_allocator]` 运行时统一路由 `__rust_*`（§7.7，c_mimalloc 三维绿、跨堆 SIGSEGV 根治）。c_tree_sitter 按值聚合 FFI 记档（debt-map §9，待立项转正）。gate5 128→**139**；corpus 实测真实 crate 总账 123 |
+| corpus 批8（重型 10+ 三波） | **波1+波2 完成（2026-07-17）** | 波1 重 FFI/C 5/5 绿（ladder：lddqu 补面 + constructor 分治 + `\x01` 前缀剥除 + GOT 键名盲点，§7.8）；波2 VM/大物 4/5 绿（JIT analyze_frame 帧末 ZST 实锤修复 `dc6e30c`；c_wasmtime_wat 双层欠账记档 debt-map §10：符号在 rlib + asm noreturn）。gate5 139→**148** |
 | M5.5 | **未实现** | vmctx 终裁计量与 gate6 收口（m5-design 原案不动）。S3′c 跨项目共享依 S3′b 方案而定 |
 
 产品执行引擎 = M4 解释器 + 方法级 JIT（cranelift 为默认 feature；JIT 默认开启，

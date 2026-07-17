@@ -495,6 +495,24 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
 - gate5 139→**144**（aws_lc/mlua_lua/tantivy/sequoia_pgp/sqlx_sqlite 入册；
   tmo 对 aws_lc/tantivy/sequoia_pgp 放宽 300）。
 
+### 批8 波2（2026-07-17，VM/语言机/大物 5 个；4 绿 / 1 expected-red 记档；修出 1 JIT bug）
+
+- **绿**：swc_parse（oxc 姊妹压强：swc 41.x 手写递归下降 + serde JSON
+  census + 错误模型差异记录）、miden_exec（0.25.5 **execute-only**：绕开
+  umbrella 内嵌的 prover——直用 miden-assembly+processor；MASM 三程序
+  含 dyncall 摘要注入的递归逃逸形态；trace 矩阵 ≠ 证明）、polodb
+  （polodb_core 3.5.2：明确勘破上游 base update 泄漏事务语义并以打印
+  立据）、starlark_eval（0.13.0——**撞出 JIT analyze_frame 帧末 ZST 取址
+  必爆之雷**（→ `dc6e30c` 修复，C 维由红转绿）；钉 allocative=0.3.4 绕
+  上游 hashbrown semver 破洞）。
+- **expected-red 记档（债 debt-map §10）**：c_wasmtime_wat——双层欠账：
+  ① libwasmtime-helpers 蹦床调 `#[export_name]` Rust 符号（native
+  final-link 从 rlib 集符；`-z defs` 单闭包够不着——批5 bzip2-sys 同族
+  的第二实例）；② trap 上抛 inline asm `noreturn`（探针实锤主体路径：
+  cranelift 在讲解进程里发机器码并执行——模块编译/实例化/内存表宿主
+  回调/rayon 全通零分歧）。
+- gate5 144→**148**（swc_parse/miden_exec/polodb/starlark_eval 入册）。
+
 ## 6. 批7 候选清单（2026-07-17 定稿；**已全部投放，结果见 §5 批7**）
 
 ## 7. 批8 候选清单（2026-07-17 定稿，重型 10 个；工具链实勘后调整）
