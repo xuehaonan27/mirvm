@@ -108,6 +108,20 @@ M4.1）、syscalls（os::，M4.3）。
 
 ## 6. thunk 盲区：结构体内嵌 guest fn-ptr（corpus 批3 实锤，2026-07-16 记）
 
+**已根治（2026-07-17，P1 commit `4202317`）**：fn-ptr 值自 P1 起对 FFI 可派生
+（extern "C"/System·非变参·全标量类）的 guest fn 直接是**可执行码址**——
+任何姿势流给 native（结构体内嵌、全局表、返回值带出）回调都落到 libffi
+closure 蹦床进解释器，不再跳数据域。负对照实锤：flate2 C-libz 后端
+zalloc/zfree 结构体内嵌回调现完整往返（三维+L2 热一致）。机制与分域见
+decision-history §7.6。
+
+**残余边界（知情面，非本项债）**：签名不可派生（Rust ABI / 聚合按值 / 变参）
+的条目保持数据槽 + 逃逸位按需 thunk 原机制——此类 fn-ptr 被 native 调用
+本来即 UB，盲区无实质剩余；若被 native 调仍跳崖（SIGSEGV 诊断化 =
+MIRVM_SEGV_DUMP 既有旋钮 + 下记②阶梯可后补）。
+
+<details><summary>原始记录（2026-07-16）</summary>
+
 **现象**：guest 把含 fn 指针的**结构体**传给 native 库，native 回调该指针时，宿主
 直接跳进 guest 数据地址执行——静默 SIGSEGV，无任何诊断。实锤：flate2 的 C-libz
 后端把 Rust allocator（zalloc/zfree，extern "C" fn 指针）嵌进 `z_stream` 结构体，
@@ -129,6 +143,8 @@ fn-ptr 字段并物化 trampoline；覆盖 99% 真实场景，余者仍崩）；
 值得先做）；③长期：FFI 结构体白名单制（同 ① 但入库管理）。
 关联：`x86 intrinsic 七族` 已解锁 flate2 纯 Rust 后端（zlib-rs 路线同病不触及）、
 C-libz 路线仍挂此债（corpus/c_gix_pure.rs 文件头留了三路线排查记录）。
+
+</details>
 
 ## 7. dep crate 的 global_asm 物化（corpus 批6 faer 实锤，2026-07-16 记）
 

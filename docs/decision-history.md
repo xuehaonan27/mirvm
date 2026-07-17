@@ -582,13 +582,20 @@ P2-1 机制验收全绿后落地 P2-3：
    模块只序列化**配方**（FuncId + ForeignSig 有序表，像 asm_sites），
    启动相（run_vm_engine/absorb，GOT 重填的同一点）重建 closure → 填字节 →
    整域 mprotect RX（W^X）；域被占 = 响亮失败按 cache miss 处理。
-5. **逃逸物化收编**：interp 的 CallForeign thunk_args 替换环退役为恒等
-   （guest 条目值本身已是码址，原样直寄；0/已是 native 真码的直传语义不变）。
+5. **逃逸物化收编**：interp 的 CallForeign thunk_args 替换环对已是 stub
+   码址的值恒等直寄（0/已是 native 真码的直传语义不变）；数据槽条目维持
+   原按需 thunk（Rust-ABI 逃逸的唯一可行路径，保留无回归）。
 6. **消费面零改**：fn_addrs 反查键统一换成"条目值（stub 码址或数据槽址）"，
    CallIndirect/atexit/catch_unwind/backtrace/main 启动链全是反查语义。
 7. **分片**：P1-1（代码域 + 配方 + fn_entry_addr 发放 + 启动相物化 +
    反查换键 + absorb 合流）行为保持"未逃逸调用语义逐位不变"；P1-2
-   （thunk_args 退役 + flate2 C-libz 路线负对照 + debt §6 关闭落档）。
+   （负对照 + debt §6 关闭落档）。
+
+**实施确认（2026-07-17 收官，commit `4202317`）**：全项按上落地。验收：
+负对照（flate2 C-libz 后端 zalloc/zfree 结构体内嵌回调）完整往返，三维 +
+L2 热一致；gate5 117/0/0。debt §6 关闭（残余边界 = 签名不可派生条目，
+无实质盲区剩余）。**顺带实得**：每实例唯一条目值修复了 thunk 按逃逸签名
+多址的 fn-ptr 相等性小坑；`SIGSEGV 诊断化`（debt ②阶梯）降为可选后补。
 
 ## 8. 尚未兑现或需要重新验证的架构承诺
 

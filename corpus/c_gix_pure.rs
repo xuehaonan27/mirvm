@@ -28,6 +28,10 @@ gix = { version = "0.69", default-features = false, features = ["index", "blob-d
 //     只覆盖「显式 fn-ptr 实参」，结构体内嵌回调是盲区，宿主直接跳进 guest
 //     数据地址 → SIGSEGV（si_addr==rip，无诊断；已用 LD_PRELOAD 实锤：
 //     返回地址在 libz.so deflate 内）。C 路因此不可用。
+//   （2026-07-17 注：P1 条目可执行化（decision-history §7.6）后 C 路已通——
+//     extern "C" 回调的 fn-ptr 值本身即 stub 码址，内嵌逃逸直落可执行入口，
+//     负对照探针实测 zlib 往返完成。本 driver 仍走 rust_backend，仅沿用 gix
+//     默认后端，非再受盲区所限。）
 // sha1 走 gix-odb 默认的 sha1_smol（纯 Rust，无 SIMD）。crc32fast 只服务
 // pack/gzip 路径，本 driver 全程 loose object，不触达。
 use std::convert::Infallible;
