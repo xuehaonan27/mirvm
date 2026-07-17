@@ -474,10 +474,19 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 // 指针常量（static 引用 / fn ptr / vtable）：物化目标 → 真地址立即数
                 let (prov, off) = ptr.prov_and_relative_offset();
                 let base = self.linker.ensure_alloc(prov.alloc_id())?;
-                LoweredOp::Scalar(Operand::Imm {
-                    bits: base.wrapping_add(off.bytes()),
-                    width: Width::W64,
-                })
+                // P2：foreign 分配（extern static/fn 取址）→ GOT 槽读操作数
+                //（decision-history §7.5c；启动相重填槽内容，字节码不烤宿主地址）
+                if let Some(op) = self
+                    .linker
+                    .foreign_const_operand(prov.alloc_id(), base, off.bytes())
+                {
+                    LoweredOp::Scalar(op)
+                } else {
+                    LoweredOp::Scalar(Operand::Imm {
+                        bits: base.wrapping_add(off.bytes()),
+                        width: Width::W64,
+                    })
+                }
             }
             mir::ConstValue::Slice { alloc_id, meta } => {
                 // &str/&[u8] 字面量：胖指针 pair =（数据真地址, meta）
@@ -1925,12 +1934,20 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         let ValKind::Scalar(w) = dst_kind else {
                             return Err("ReifyFnPointer 目标非标量".into());
                         };
+                        // P2：extern fn 的 fn-ptr 值 = GOT 槽内容（宿主码址启动相重填）
+                        let op = match self.linker.foreign_fn_slot(inst) {
+                            Some(slot) => Operand::Mem {
+                                expr: PlaceExpr {
+                                    base: PlaceBase::Static(slot),
+                                    steps: Box::new([]),
+                                },
+                                width: Width::W64,
+                            },
+                            None => Operand::Imm { bits: addr, width: w },
+                        };
                         Ok(vec![Stmt::Assign {
                             dst: dst_p.scalar_place(w),
-                            rv: Rvalue::Use(Operand::Imm {
-                                bits: addr,
-                                width: w,
-                            }),
+                            rv: Rvalue::Use(op),
                         }])
                     }
                     PC::ClosureFnPointer(..) => {
@@ -1949,12 +1966,20 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         let ValKind::Scalar(w) = dst_kind else {
                             return Err("ClosureFnPointer 目标非标量".into());
                         };
+                        // P2：extern fn 的 fn-ptr 值 = GOT 槽内容（宿主码址启动相重填）
+                        let op = match self.linker.foreign_fn_slot(inst) {
+                            Some(slot) => Operand::Mem {
+                                expr: PlaceExpr {
+                                    base: PlaceBase::Static(slot),
+                                    steps: Box::new([]),
+                                },
+                                width: Width::W64,
+                            },
+                            None => Operand::Imm { bits: addr, width: w },
+                        };
                         Ok(vec![Stmt::Assign {
                             dst: dst_p.scalar_place(w),
-                            rv: Rvalue::Use(Operand::Imm {
-                                bits: addr,
-                                width: w,
-                            }),
+                            rv: Rvalue::Use(op),
                         }])
                     }
                 }

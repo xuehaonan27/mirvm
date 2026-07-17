@@ -335,6 +335,9 @@ pub fn absorb_stack(delta: &mut ir::Module, stack: ImageStack) {
                 delta.foreign_static_syms.push(s);
             }
         }
+        // P2 GOT 随 image 合流（decision-history §7.5c）：sym 按名去重、fixup
+        // idx 重编；image 样条域地址固定基稳定，合流后仍指向同一冻结格
+        delta.absorb_got(m.foreign_syms, m.got_fixups);
         if let Some(fr) = m.frozen {
             frozens.push(fr);
         }

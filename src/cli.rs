@@ -582,6 +582,12 @@ fn run_vm_engine(
     }
     // argv 终结化（M6 片2）：运行期输入在快照语义之后布置，冷/热单一路径
     module.finalize_entry_argv(program_argv);
+    // P2 启动相 GOT 重填（decision-history §7.5c）：foreign 符号值 = 本进程
+    // 真地址；冷路径与 lower 初填一致（幂等），热路径换掉上进程陈旧地址
+    if let Err(e) = crate::vm::engine::ffi::resolve_got_fixups(&mut module) {
+        eprintln!("mirvm: {e}");
+        exit(70);
+    }
     // Shared 提升进程级 &'static（M4.4：thunk/多线程要求 Ctx 可在任意线程随时引用它）
     let shared: &'static _ = Box::leak(Box::new(crate::vm::engine::ctx::Shared::new(module)));
     // M5.3b：编译服务（--jit off / feature 关 = 不启动，纯解释）

@@ -91,6 +91,11 @@ struct Split<'tcx> {
     current_image: bool,
     /// image 类实例表（rebase 后写盘自检用：逐 instance 复查无 LOCAL_CRATE 沾染）
     image_insts: Vec<Instance<'tcx>>,
+    /// P2 GOT（decision-history §7.5c）image 侧三表：符号表/去重/修补点（槽开在
+    /// image_frozen；收尾随 image 模块走，absorb 时按名合流进 delta 并重编 idx）
+    image_got_syms: Vec<ir::GotSym>,
+    image_got_idx: FxHashMap<Box<str>, u32>,
+    image_got_fixups: Vec<ir::GotFixup>,
 }
 
 /// A2 split 产物（s3b-a2-design）：deps-image 模块 + 栈索引素材（BaseExports 同构）。
@@ -160,6 +165,15 @@ pub(crate) struct Linker<'tcx> {
     /// 语义的外延）。不进 fn_addrs——执行相反查未命中正是 CallIndirect 的
     /// native_sig libffi 直调通道（M4.4 FFI 反方向之二）的触发条件。
     foreign_fn_entries: FxHashMap<Instance<'tcx>, u64>,
+    /// P2 GOT（decision-history §7.5c）delta 侧三表（image 侧在 Split）
+    got_syms: Vec<ir::GotSym>,
+    got_idx: FxHashMap<Box<str>, u32>,
+    got_fixups: Vec<ir::GotFixup>,
+    /// foreign 分配 → (符号名, weak)：非 weak extern static 与 extern fn 取址两类
+    ///（weak 判空单格永不写值，无此项）；重定位/常量发码经它把"烤值"转"槽位"。
+    foreign_alloc_sym: FxHashMap<AllocId, (Box<str>, bool)>,
+    /// (符号名, image 上下文) → GOT 槽真地址（槽 = 本侧冻结区普通 8 字节格）
+    foreign_slots: std::collections::HashMap<(Box<str>, bool), u64>,
     /// 必需归档库的 hidden 符号兜底表（装载基址, 符号→st_value）：只收不进
     /// .dynsym 的符号（-fvisibility=hidden 归档，ring/zstd-sys 一族）；extern
     /// static/fn 取址的降低期解析**先于 dlsym 全域**——native 链接期绑定语义
@@ -220,6 +234,11 @@ impl<'tcx> Linker<'tcx> {
             asm_sites: Vec::new(),
             foreign_static_syms: Vec::new(),
             foreign_fn_entries: FxHashMap::default(),
+            got_syms: Vec::new(),
+            got_idx: FxHashMap::default(),
+            got_fixups: Vec::new(),
+            foreign_alloc_sym: FxHashMap::default(),
+            foreign_slots: std::collections::HashMap::new(),
             archive_fallbacks: Vec::new(),
             archive_handles: Vec::new(),
             split: None,
@@ -249,6 +268,9 @@ impl<'tcx> Linker<'tcx> {
             image_fn_entries: FxHashMap::default(),
             current_image: false,
             image_insts: Vec::new(),
+            image_got_syms: Vec::new(),
+            image_got_idx: FxHashMap::default(),
+            image_got_fixups: Vec::new(),
         });
     }
 
@@ -395,18 +417,26 @@ impl<'tcx> Linker<'tcx> {
     /// （instance_mir = rustc query panic）；其 fn-ptr 值语义 = native 链接器解析
     /// 出的真符号地址。解析序与 resolve_call 同构：①引擎内建 ②导出符号仿真
     /// ③denylist/llvm/rust-internal ④归档 hidden 兜底表 → dlsym 全域。
-    /// 烤入的是宿主真地址（ASLR 跨进程无效）⇒ 登记符号名：含此类地址的模块不入
-    /// L2/image 缓存（与 extern static 同规则，ircache/depsimage/baseimage 三判据）。
+    /// 值本体仍初填宿主真码址，但消费面经 GOT 槽读（P2，decision-history §7.5c）；
+    /// 符号照记门闩清单（P2-3 判据退役前维持缓存拒绝，三判据同构）。
     fn foreign_fn_entry_addr(&mut self, inst: Instance<'tcx>) -> Result<u64, String> {
+        let name = self.tcx.symbol_name(inst).name;
+        // extern weak 缺席取址 = NULL（native 同语义）；weak 标记供 GOT 启动相
+        // 未命中时写 0 而非终止
+        let weak = self.tcx.codegen_fn_attrs(inst.def_id()).import_linkage
+            == Some(rustc_hir::attrs::Linkage::ExternalWeak);
         if let Some(&a) = self.foreign_fn_entries.get(&inst) {
+            // P2：缓存命中同样要保证【当前上下文】槽位在场（槽按 (名, 上下文) 分侧）
+            let _ = self.foreign_slot(name, a, weak);
             return Ok(a);
         }
-        let name = self.tcx.symbol_name(inst).name;
         // host_baked=false：弱符号缺席的 NULL——无宿主地址烤入，不污染可缓存性
         let bake = |this: &mut Self, addr: u64, host_baked: bool| {
             if host_baked {
                 this.foreign_static_syms.push(name.into());
             }
+            // P2 GOT：槽初填本进程解析值，启动相按名重填
+            let _ = this.foreign_slot(name, addr, weak);
             this.foreign_fn_entries.insert(inst, addr);
             addr
         };
@@ -481,8 +511,6 @@ impl<'tcx> Linker<'tcx> {
         if p == 0 {
             // weak 符号缺席 = NULL（native 未定义弱符号的取址语义）；经它间接调用
             // 在执行相响亮终止（CallIndirect 的空指针诊断）
-            let weak = self.tcx.codegen_fn_attrs(inst.def_id()).import_linkage
-                == Some(rustc_hir::attrs::Linkage::ExternalWeak);
             if weak {
                 return Ok(bake(self, 0, false));
             }
@@ -591,13 +619,14 @@ impl<'tcx> Linker<'tcx> {
                             "extern static `{name}` 未命中（归档兜底表 / dlsym 全域均无）"
                         ));
                     }
-                    // 宿主真地址直嵌（&environ 语义要求就是 libc 变量本体地址）——
-                    // ASLR 下跨进程无效 ⇒ 登记符号，含此类地址的模块不入 L2 缓存
-                    //（M6 片2 gate 实测：c_process 热回放上进程 libc 地址 SIGSEGV）。
-                    // 升级路径 = GOT 式 Operand 间接（IR 设计变更，M6 后续）。
-                    // A2：deps-image 同规则拒（写盘自检，baseimage 三判据同构）。
+                    // P2 GOT（decision-history §7.5c）：值仍初填本进程解析（冷路径
+                    // 逐位不变），另登记槽位与 foreign 分配——常量发码改槽读、冻结
+                    // 字节重定位登记修补点，启动相按名重填。门闩清单照记（P2-3
+                    // 判据退役前维持缓存拒绝；A2 deps-image 同规则）。
                     self.foreign_static_syms.push(name.into());
+                    let _ = self.foreign_slot(name, p, false);
                     self.record_both(id, p);
+                    self.foreign_alloc_sym.insert(id, (name.into(), false));
                     return Ok(p);
                 }
                 // S4 底座静态去重：同一 static 双份物化 = static mut/内部可变性的
@@ -639,6 +668,15 @@ impl<'tcx> Linker<'tcx> {
             GlobalAlloc::Function { instance } => {
                 let addr = self.fn_entry_addr(instance)?;
                 self.record_both(id, addr);
+                // P2：extern fn 取址（fn-ptr 值 = dlsym 宿主码址）登记 foreign
+                // 分配——常量发码经 foreign_const_operand 出槽读、冻结字节经
+                // materialize_in 重定位登记修补点（槽本体 bake 已开）。
+                if self.tcx.is_foreign_item(instance.def_id()) {
+                    let name = self.tcx.symbol_name(instance).name;
+                    let weak = self.tcx.codegen_fn_attrs(instance.def_id()).import_linkage
+                        == Some(rustc_hir::attrs::Linkage::ExternalWeak);
+                    self.foreign_alloc_sym.insert(id, (name.into(), weak));
+                }
                 Ok(addr)
             }
             GlobalAlloc::VTable(ty, dyn_ty) => {
@@ -688,6 +726,109 @@ impl<'tcx> Linker<'tcx> {
         }
     }
 
+    /// P2：本侧符号表 idx（名字首现才登记；image 侧在 Split 三表）
+    fn got_intern(&mut self, name: &str, weak: bool, image: bool) -> u32 {
+        let (syms, idx_map) = if image {
+            let s = self.split.as_mut().expect("image 侧 got 表必在 split");
+            (&mut s.image_got_syms, &mut s.image_got_idx)
+        } else {
+            (&mut self.got_syms, &mut self.got_idx)
+        };
+        if let Some(&i) = idx_map.get(name) {
+            return i;
+        }
+        let i = syms.len() as u32;
+        syms.push(ir::GotSym {
+            name: name.into(),
+            weak,
+        });
+        idx_map.insert(name.into(), i);
+        i
+    }
+
+    /// P2：本侧修补点登记（image 侧入 Split 表）
+    fn got_fixup_push(&mut self, image: bool, f: ir::GotFixup) {
+        if image {
+            self.split
+                .as_mut()
+                .expect("image 侧 got 表必在 split")
+                .image_got_fixups
+                .push(f);
+        } else {
+            self.got_fixups.push(f);
+        }
+    }
+
+    /// foreign 符号在当前上下文的 GOT 槽（P2，decision-history §7.5c）：槽 =
+    /// 本侧冻结区普通 8 字节格（固定基域 ⇒ 槽址可序列化，内容启动相重填）；
+    /// 无则开格、初填 init、以 addend=0 登记槽位修补点。
+    fn foreign_slot(&mut self, name: &str, init: u64, weak: bool) -> u64 {
+        let ctx_image = self.split.as_ref().is_some_and(|s| s.current_image);
+        if let Some(&a) = self.foreign_slots.get(&(name.into(), ctx_image)) {
+            return a;
+        }
+        let idx = self.got_intern(name, weak, ctx_image);
+        let addr = if ctx_image {
+            self.split
+                .as_mut()
+                .expect("image 上下文必在 split")
+                .image_frozen
+                .alloc(8, 8)
+        } else {
+            self.frozen.alloc(8, 8)
+        };
+        unsafe { *(addr as *mut u64) = init };
+        self.got_fixup_push(
+            ctx_image,
+            ir::GotFixup {
+                addr,
+                sym: idx,
+                addend: 0,
+            },
+        );
+        self.foreign_slots.insert((name.into(), ctx_image), addr);
+        addr
+    }
+
+    /// foreign 分配的常量操作数（P2）：值 = 本侧 GOT 槽内容；非零 addend 经
+    /// SubImm 精确等价改写（`(槽) − (0 − addend)` ≡ `(槽) + addend`，mod 2^64
+    /// 算术恒等）。非 foreign → None（调用方按原样发 Imm）。
+    pub(crate) fn foreign_const_operand(
+        &mut self,
+        id: AllocId,
+        init: u64,
+        addend: u64,
+    ) -> Option<ir::Operand> {
+        let (name, weak) = self.foreign_alloc_sym.get(&id)?.clone();
+        let slot = self.foreign_slot(&name, init, weak);
+        let mem = ir::Operand::Mem {
+            expr: ir::PlaceExpr {
+                base: ir::PlaceBase::Static(slot),
+                steps: Box::new([]),
+            },
+            width: ir::Width::W64,
+        };
+        Some(if addend == 0 {
+            mem
+        } else {
+            ir::Operand::SubImm {
+                base: Box::new(mem),
+                sub: 0u64.wrapping_sub(addend),
+            }
+        })
+    }
+
+    /// extern fn 条目（fn-ptr）在当前上下文的 GOT 槽址（P2）：bake 已保证本
+    /// 上下文槽在场；非 foreign → None（func.rs Reify/Closure 发码点用）。
+    pub(crate) fn foreign_fn_slot(&mut self, inst: Instance<'tcx>) -> Option<u64> {
+        if !self.tcx.is_foreign_item(inst.def_id()) {
+            return None;
+        }
+        let name = self.tcx.symbol_name(inst).name;
+        let ctx_image = self.split.as_ref().is_some_and(|s| s.current_image);
+        self.foreign_slots.get(&(name.into(), ctx_image)).copied()
+    }
+
     /// 物化一个内存分配：分地址 → 拷字节 → 重定位（provenance 表逐项写真地址+addend）。
     /// image=true 落 image 域并登记 image 表（split 专用）；false 落 delta 域（今日路径）。
     fn materialize_in(
@@ -715,9 +856,23 @@ impl<'tcx> Linker<'tcx> {
         for (off, prov) in a.provenance().ptrs().iter() {
             let target = self.ensure_alloc(prov.alloc_id())?;
             let at = (base + off.bytes()) as *mut u64;
-            unsafe {
+            let addend = unsafe {
                 let addend = at.read_unaligned();
                 at.write_unaligned(target.wrapping_add(addend));
+                addend
+            };
+            // P2：目标是 foreign 分配（非 weak extern static / extern fn 取址）⇒
+            // 本字节点登记修补点（启动相按名重填；初填 = 本进程解析，冷路径不变）
+            if let Some((name, weak)) = self.foreign_alloc_sym.get(&prov.alloc_id()).cloned() {
+                let idx = self.got_intern(&name, weak, image);
+                self.got_fixup_push(
+                    image,
+                    ir::GotFixup {
+                        addr: base + off.bytes(),
+                        sym: idx,
+                        addend,
+                    },
+                );
             }
         }
         Ok(base)
@@ -2043,6 +2198,10 @@ fn lower_inner(
             // 看不见裸地址）——非空即不写盘，防跨进程回放野指针；内存态上栈
             // 同进程有效，由 absorb 合并回 delta 保 L2 诚实。
             foreign_static_syms: linker.foreign_static_syms.clone(),
+            // P2 GOT image 侧（decision-history §7.5c）：随 image 模块走，
+            // 装载/absorb 时按名合流进 delta 并重编 idx
+            foreign_syms: s.image_got_syms,
+            got_fixups: s.image_got_fixups,
             ..Default::default()
         };
         // image 导出素材（装载方零 tcx 依赖，BaseExports 同构）：fn 条目/static/TLS
@@ -2160,6 +2319,9 @@ fn lower_inner(
     }
     module.tls = linker.tls_slots;
     module.foreign_static_syms = linker.foreign_static_syms;
+    // P2 GOT（decision-history §7.5c）delta 侧（image 侧已随 split_image 走）
+    module.foreign_syms = linker.got_syms;
+    module.got_fixups = linker.got_fixups;
     if split_image.is_none() {
         module.entry = entry;
     }

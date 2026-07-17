@@ -498,6 +498,42 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
 FFI 轴有原理性障碍（native 库留存指针的习惯与 marshal 语义冲突，i 契约 ii
 共享内存两种出路都未中 mirvm 使命）——不作方向。
 
+## 7.5c. 2026-07-17：P2 定案——GOT 槽 = 冻结区普通格 + 启动相统一重填（零 IR 变更）
+
+§7.5b 项2 的 P2-1 片调研收口。原计划设想"新 Operand 变体（ForeignSym）+
+interp/JIT 逐变体接线"，勘探后发现**根本不需要新变体**：
+
+1. **GOT 槽 = 冻结区普通 8 字节格**（按当前上下文开本侧域：delta 0x69 域 /
+   image 0x6A 域）。固定基域下槽地址本身跨进程稳定——字节码烤**槽地址**
+   不烤**槽内容**（宿主符号真地址）。
+2. **立即数通道**（func.rs `ConstValue::Scalar(Ptr)` / ReifyFnPointer /
+   ClosureFnPointer）：foreign 分配走 `Operand::Mem{PlaceBase::Static(slot), W64}`
+   ——interp eval_operand 与 JIT 编译道（`jit_compile.rs:1284` 绝对地址
+   iconst + load）**两边都现成**，零改动；非零 addend 以
+   `SubImm{base, sub: 0-addend}` 精确等价（mod 2^64 算术恒等，非 hack）。
+3. **冻结字节通道**（materialize_in 重定位）：初填仍写真值（冷路径逐位不变），
+   同时登记修补点 `{addr, sym_idx, addend}`。
+4. **槽位本体**以 addend=0 登记进同一修补表；`Module` 新增
+   `foreign_syms: Vec<{name, weak}>` + `got_fixups: Vec<{addr, sym, addend}>`，
+   随模块序列化（image 侧各表落 image 模块，随 depsimage 文件走）。
+5. **启动相统一重填**（run_vm_engine 与 finalize_entry_argv 并列，冷/热
+   单一路径）：以与运行期 foreign 调用**同一解析序**（FfiState::resolve：
+   hidden 兜底→归档句柄→RTLD_DEFAULT→可选句柄）重解析全部符号，逐修补点
+   写 `resolved + addend`。非 weak 未命中 = 响亮退出（陈旧地址是 SIGSEGV 级
+   静默错值源；唯一分歧 = 构建期可解析、运行期丢失且路径永不执行的符号，
+   接受为可诊断性收益）；weak 未命中写 0（extern weak 缺席语义）。
+6. **serde 兼容零代价**：ircache/depsimage 双头验（build_id + 精确回比）+
+   `.ok()?` 优雅 miss——旧条目全部自然失效重缓存；含宿主地址的模块原本
+   就从未被存（三判据），不存在"读旧快照拿到陈旧地址"的窗口。
+7. **分片边界**：P2-1 只建机制（行为逐位不变为验收）；拒缓存三判据
+   （`ircache.rs:147` / `baseimage.rs:371` / `depsimage.rs:206`）与 image
+   absorb 的 GOT 按名合流（sym idx 重编）留 **P2-3** 退役与验收——届时
+   c_process 类从"永不缓存"变 warm 可回放。
+
+**省掉新变体的账**：operand_ok / jit_read / scan_op / collect_ssa_offs /
+eval_operand / serde 六个消费点接线全省；冷路径性能零影响（槽读 = 一次
+内存 load，常量折叠前的 Imm 读本来就对应一条 movabs）。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 - P7 设想独立 `src/os/` 物理层；当前 OS/FFI/builtin 逻辑仍分布在 lower、interp、ffi、heap。

@@ -1342,6 +1342,23 @@ pub struct EntryPlan {
     pub sigpipe: u8,
 }
 
+/// P2 GOT 符号表项（decision-history §7.5c）：weak = 未命中写 0 不终止
+/// （extern weak 符号缺席取址 = NULL 语义）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GotSym {
+    pub name: Box<str>,
+    pub weak: bool,
+}
+
+/// P2 启动相修补点（decision-history §7.5c）：加载相写
+/// `*addr = resolve(foreign_syms[sym]) + addend`。
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct GotFixup {
+    pub addr: u64,
+    pub sym: u32,
+    pub addend: u64,
+}
+
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Module {
     pub funcs: Vec<FuncBody>,
@@ -1367,10 +1384,18 @@ pub struct Module {
     /// 被清则重 cc，自愈）。**符号名与位序解耦**：A2 split 模式的最终位序收尾才知，
     /// 用类前缀名（mirvm_asm_xi{j}/xd{k}）；非 split 路径沿用位序名 mirvm_asm_{id}。
     pub asm_sites: Vec<AsmSite>,
-    /// extern static（environ 类）/ extern fn（fn-ptr 取址）的宿主地址直嵌符号
-    /// （M6 片2）：这些 dlsym 真地址已烤进字节码 const/冻结区重定位，ASLR 下跨进程
-    /// 无效——**非空即不可入 L2 缓存**（ircache::store 拒绝；升级路径 = GOT 式间接）。
+    /// extern static（environ 类）/ extern fn（fn-ptr 取址）曾直嵌宿主地址的符号
+    /// 清单（M6 片2）：**非空即不可入 L2 缓存**（ircache::store 拒绝）。P2-1 起
+    /// 值经 GOT 槽间接（foreign_syms/got_fixups，decision-history §7.5c），本表
+    /// 残留作缓存门闩——P2-3 判据退役后删除。
     pub foreign_static_syms: Vec<Box<str>>,
+    /// P2 GOT 符号表（decision-history §7.5c）：槽 = 冻结区普通 8 字节格（本域），
+    /// 字节码/冻结字节烤槽址不烤值；启动相按名重解析后逐 fixup 点重写内容，
+    /// 模块对 ASLR 位置无关。image 侧各自的表随 image 模块走（absorb 按名合流）。
+    pub foreign_syms: Vec<GotSym>,
+    /// P2 启动相修补点：`*(addr) = resolve(foreign_syms[sym]) + addend`；addr 在
+    /// 本模块冻结域（固定基 ⇒ 跨进程稳定）。槽位本体以 addend=0 登记。
+    pub got_fixups: Vec<GotFixup>,
     /// main 启动链（M4.3；--vm-call 模式下为 None）
     pub entry: Option<EntryPlan>,
     /// S4/S3′ image 栈冻结区（absorb 时挂载底座 + 各依赖 image 的冻结区，与本模块
@@ -1406,6 +1431,30 @@ impl Module {
         // 尾 NULL 由清零保证
         entry.argc = argv.len() as u64;
         entry.argv_ptr = table;
+    }
+
+    /// GOT 合流（P2，S4/S3′ absorb）：image 侧符号表并入本模块——sym 按名去重，
+    /// fixup 的 sym 索引重编为合并后 idx；fixup addr 在 image 样条域（固定基），
+    /// 合流后仍指向同一冻结格，原样接管。
+    pub fn absorb_got(&mut self, syms: Vec<GotSym>, mut fixups: Vec<GotFixup>) {
+        if fixups.is_empty() {
+            return;
+        }
+        let mut remap: Vec<u32> = Vec::with_capacity(syms.len());
+        for s in syms {
+            let idx = match self.foreign_syms.iter().position(|e| e.name == s.name) {
+                Some(i) => i as u32,
+                None => {
+                    self.foreign_syms.push(s);
+                    (self.foreign_syms.len() - 1) as u32
+                }
+            };
+            remap.push(idx);
+        }
+        for f in &mut fixups {
+            f.sym = remap[f.sym as usize];
+        }
+        self.got_fixups.append(&mut fixups);
     }
 }
 

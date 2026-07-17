@@ -38,7 +38,7 @@ pub struct FfiState {
 
 impl FfiState {
     /// 解析符号真地址（缓存，含缺席缓存）。None = 全部搜索域都没有。
-    fn resolve(
+    pub(crate) fn resolve(
         &mut self,
         name: &str,
         optional_libs: &[Box<str>],
@@ -90,7 +90,7 @@ impl FfiState {
         Ok((p != 0).then_some(p))
     }
 
-    fn ensure_libs(
+    pub(crate) fn ensure_libs(
         &mut self,
         optional_libs: &[Box<str>],
         required_libs: &[Box<str>],
@@ -142,6 +142,37 @@ fn dlerror_string() -> String {
             .to_string_lossy()
             .into_owned()
     }
+}
+
+/// P2 启动相 GOT 重填（decision-history §7.5c）：以与运行期 foreign 调用同一
+/// 解析序重解析全部 foreign 符号，逐修补点写 `resolved + addend`。冷/热单一
+/// 路径——冷路径结果必与 lower 初填一致（幂等）；热路径（L2/image 回放）用它
+/// 把上进程陈旧宿主地址换成本进程真值。非 weak 未命中 = Err（响亮：陈旧地址
+/// 是 SIGSEGV 级静默错值源）；weak 未命中写 0（extern weak 缺席语义）。
+pub(crate) fn resolve_got_fixups(module: &mut super::ir::Module) -> Result<(), String> {
+    if module.got_fixups.is_empty() {
+        return Ok(());
+    }
+    let mut ffi = FfiState::default();
+    ffi.ensure_libs(&module.native_libs, &module.required_native_libs)?;
+    let mut resolved: Vec<u64> = Vec::with_capacity(module.foreign_syms.len());
+    for s in &module.foreign_syms {
+        match (ffi.resolve(&s.name, &module.native_libs, &module.required_native_libs)?, s.weak) {
+            (Some(p), _) => resolved.push(p as u64),
+            (None, true) => resolved.push(0),
+            (None, false) => {
+                return Err(format!(
+                    "foreign 符号 `{}` 启动相未命中（GOT 重填；归档兜底表 / dlsym 全域均无）",
+                    s.name
+                ));
+            }
+        }
+    }
+    for f in &module.got_fixups {
+        // 修补点 addr 恒指冻结域内 8 字节格（lower 登记纪律）；冻结区映射终身 RW。
+        unsafe { *(f.addr as *mut u64) = resolved[f.sym as usize].wrapping_add(f.addend) };
+    }
+    Ok(())
 }
 
 pub(super) fn ffi_type(k: FfiKind) -> FfiType {
