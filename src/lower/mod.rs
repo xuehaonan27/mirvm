@@ -2037,59 +2037,15 @@ fn lower_inner(
         v
     };
 
+    let sess = tcx.sess;
     // 元数据 Dylib 预载（corpus 批5 openssl 实锤）：cargo 把 `-sys` build.rs 的
     // rustc-link-lib 只写 rlib 元数据（bin 的 rustc 命令行无 -l/-L；rustc 链接期
     // 自己从元数据补）。native 语义里这些库恒进最终链接；我们的 fn-ptr 烘焙
     // （降低期 dlsym 全域）与运行期 CallForeign 都需要它们先在全局域可见——std
     // 自带的 m/dl/pthread/rt/util/gcc_s 亦同源（#[link] 属性落在 libstd）。
     // Static 走上方 archive 通道；Framework/wasm 不在本切片。
-    let sess = tcx.sess;
-    let mut dylib_names: Vec<Box<str>> = Vec::new();
-    for cnum in std::iter::once(rustc_hir::def_id::LOCAL_CRATE).chain(tcx.used_crates(()).iter().copied()) {
-        if cnum != rustc_hir::def_id::LOCAL_CRATE && tcx.crate_dep_kind(cnum).macros_only() {
-            continue;
-        }
-        for lib in tcx.native_libraries(cnum) {
-            // 系统动态链接类（SONAME 预载）= Dylib/RawDylib + Unspecified（bare
-            // `-l ssl`，rustc_hir 注释：Dylib 为默认）+ Static{bundle:false}
-            // （对象不进 rlib、链接期按系统库解析——libc 的 m/dl/pthread/rt/util
-            // 即此形）。Static{bundle:None|Some(true)} 才是整档进 rlib 的真
-            // 静态归档（上方 archive 通道）；Framework/LinkArg/Wasm 不在本切片。
-            let system_dylib = matches!(
-                lib.kind,
-                rustc_hir::attrs::NativeLibKind::Dylib { .. }
-                    | rustc_hir::attrs::NativeLibKind::RawDylib { .. }
-                    | rustc_hir::attrs::NativeLibKind::Unspecified
-            ) || matches!(
-                lib.kind,
-                rustc_hir::attrs::NativeLibKind::Static {
-                    bundle: Some(false),
-                    ..
-                }
-            );
-            if !system_dylib {
-                continue;
-            }
-            if let Some(cfg) = &lib.cfg
-                && !rustc_attr_parsing::eval_config_entry(sess, cfg).as_bool()
-            {
-                continue;
-            }
-            let name: Box<str> = lib.name.as_str().into();
-            if !dylib_names.contains(&name) {
-                dylib_names.push(name);
-            }
-        }
-    }
-    for lib in &sess.opts.libs {
-        if matches!(lib.kind, rustc_hir::attrs::NativeLibKind::Static { .. }) {
-            continue;
-        }
-        let name: Box<str> = lib.name.as_str().into();
-        if !dylib_names.contains(&name) {
-            dylib_names.push(name);
-        }
-    }
+    // 收集口径与 native_archive 闭包链接行共用（c_libgit2 修复，system_dylibs）。
+    let dylib_names = crate::native_archive::system_dylibs(tcx);
     let dylib_candidates = soname_candidates(&dylib_names);
     // 尽力预载（缺失者留待真引用处的既有响亮诊断）；句柄随进程生命周期。
     for cand in &dylib_candidates {

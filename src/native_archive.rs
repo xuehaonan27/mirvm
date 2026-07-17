@@ -26,13 +26,67 @@ const LINK_SUFFIX: &[&str] = &[
     "-lrt",
     "-lutil",
     "-lgcc_s",
-    "-o",
 ];
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
+/// 收集 crate 图传播的系统动态库名（corpus 批7 c_libgit2 实锤）：`-sys` crate
+/// 的 `cargo:rustc-link-lib` 只写 rlib 元数据——native 最终链接行有这些 `-l`，
+/// 而元数据驱动方（bin 命令行）没有。静态归档的 C 对象引这些库（libgit2.a 的
+/// crc32/deflate → libz-sys 的 `z`）时，闭包链接行必须同样带上——与
+/// `system_dylib_preload`（lower 的 RTLD_GLOBAL 预载）同一收集口径，双消费。
+/// Static{bundle:None|Some(true)} 是整档进 rlib 的真静态归档（archive 通道，
+/// 上方循环处理，此处跳过）；Framework/LinkArg/wasm 不在本切片。
+pub(crate) fn system_dylibs(tcx: TyCtxt<'_>) -> Vec<Box<str>> {
+    let sess = tcx.sess;
+    let mut names: Vec<Box<str>> = Vec::new();
+    for cnum in std::iter::once(LOCAL_CRATE).chain(tcx.used_crates(()).iter().copied()) {
+        if cnum != LOCAL_CRATE && tcx.crate_dep_kind(cnum).macros_only() {
+            continue;
+        }
+        for lib in tcx.native_libraries(cnum) {
+            // 系统动态链接类 = Dylib/RawDylib + Unspecified（bare `-l ssl`，Dylib
+            // 为默认）+ Static{bundle:false}（对象不进 rlib、链接期按系统库解析——
+            // libc 的 m/dl/pthread/rt/util 即此形）
+            let system_dylib = matches!(
+                lib.kind,
+                NativeLibKind::Dylib { .. } | NativeLibKind::RawDylib { .. } | NativeLibKind::Unspecified
+            ) || matches!(
+                lib.kind,
+                NativeLibKind::Static {
+                    bundle: Some(false),
+                    ..
+                }
+            );
+            if !system_dylib {
+                continue;
+            }
+            if let Some(cfg) = &lib.cfg
+                && !rustc_attr_parsing::eval_config_entry(sess, cfg).as_bool()
+            {
+                continue;
+            }
+            let name: Box<str> = lib.name.as_str().into();
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    // CLI `-l` 同口径（search path 形式由调用方另行处理）
+    for lib in &sess.opts.libs {
+        if matches!(lib.kind, NativeLibKind::Static { .. }) {
+            continue;
+        }
+        let name: Box<str> = lib.name.as_str().into();
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 #[cfg(test)]
 fn materialize_in(archive: &Path, cache_dir: &Path) -> Result<PathBuf, String> {
-    materialize_for_target_in(archive, cache_dir, env!("MIRVM_HOST"), Path::new("cc"))
+    materialize_for_target_in(archive, cache_dir, env!("MIRVM_HOST"), Path::new("cc"), &[])
 }
 
 /// 收集当前 crate graph 的 Static native libraries，并把每个独立归档转换成 `.so`。
@@ -49,6 +103,9 @@ pub(crate) fn materialize_static_libraries(tcx: TyCtxt<'_>) -> Result<Vec<Box<st
     let target = sess.opts.target_triple.tuple();
     let cache = crate::sysroot::cache_dir().join("native-archives");
     let mut shared_objects = Vec::<PathBuf>::new();
+    // crate 图系统动态库（c_libgit2 实锤：静态归档 C 对象引元数据传播的 `-l`
+    // 库符号时，闭包链接行必须同样带上；与 lower 的 RTLD_GLOBAL 预载同清单）
+    let extra_libs = system_dylibs(tcx);
 
     for cnum in std::iter::once(LOCAL_CRATE).chain(tcx.used_crates(()).iter().copied()) {
         if cnum != LOCAL_CRATE && tcx.crate_dep_kind(cnum).macros_only() {
@@ -102,7 +159,7 @@ pub(crate) fn materialize_static_libraries(tcx: TyCtxt<'_>) -> Result<Vec<Box<st
                     lib.name, searched
                 )
             })?;
-            let so = materialize_for_target_in(&archive, &cache, target, Path::new("cc"))?;
+            let so = materialize_for_target_in(&archive, &cache, target, Path::new("cc"), &extra_libs)?;
             if !shared_objects.contains(&so) {
                 shared_objects.push(so);
             }
@@ -191,6 +248,7 @@ fn materialize_for_target_in(
     cache_dir: &Path,
     target: &str,
     cc: &Path,
+    extra_libs: &[Box<str>],
 ) -> Result<PathBuf, String> {
     let bytes = std::fs::read(archive)
         .map_err(|e| format!("读取静态原生归档 `{}` 失败: {e}", archive.display()))?;
@@ -205,10 +263,14 @@ fn materialize_for_target_in(
     }
     reject_initializers(archive)?;
     let cc_identity = compiler_identity(cc)?;
+    // extra_libs（crate 图系统动态库 `-l<name>`）同时进缓存键与 cc 链接行——
+    // 名单变化必须换缓存槽，旧闭包不得误命中（c_libgit2 修复的键纪律）
+    let extra_flags: Vec<String> = extra_libs.iter().map(|n| format!("-l{n}")).collect();
     let link_flags = LINK_PREFIX
         .iter()
         .chain(LINK_SUFFIX)
         .copied()
+        .chain(extra_flags.iter().map(|s| s.as_str()))
         .collect::<Vec<_>>()
         .join("\0");
     let hash = content_hash([
@@ -231,6 +293,8 @@ fn materialize_for_target_in(
         .args(LINK_PREFIX)
         .arg(archive)
         .args(LINK_SUFFIX)
+        .args(&extra_flags)
+        .arg("-o")
         .arg(&tmp)
         .output()
         .map_err(|e| format!("启动 cc 转换 `{}` 失败: {e}", archive.display()))?;
@@ -609,6 +673,7 @@ mod tests {
             &cache,
             "x86_64-unknown-linux-gnu",
             Path::new("cc"),
+            &[],
         )
         .unwrap();
         let second = materialize_for_target_in(
@@ -616,6 +681,7 @@ mod tests {
             &cache,
             "aarch64-unknown-linux-gnu",
             Path::new("cc"),
+            &[],
         )
         .unwrap();
         assert_ne!(first, second, "target triple must participate in cache key");
@@ -664,13 +730,32 @@ mod tests {
         let cache = temp.path().join("cache");
 
         let first =
-            materialize_for_target_in(&archive, &cache, "x86_64-unknown-linux-gnu", &cc_a).unwrap();
+            materialize_for_target_in(&archive, &cache, "x86_64-unknown-linux-gnu", &cc_a, &[]).unwrap();
         let second =
-            materialize_for_target_in(&archive, &cache, "x86_64-unknown-linux-gnu", &cc_b).unwrap();
+            materialize_for_target_in(&archive, &cache, "x86_64-unknown-linux-gnu", &cc_b, &[]).unwrap();
         assert_ne!(
             first, second,
             "C compiler identity must participate in cache key"
         );
+    }
+
+    #[test]
+    fn cache_key_separates_extra_libs() {
+        let temp = TempDir::new("extra-libs-key");
+        let archive = make_archive(
+            temp.path(),
+            "unsigned long mirvm_extra_libs_probe(void) { return 29UL; }\n",
+        );
+        let cache = temp.path().join("cache");
+        let none: &[Box<str>] = &[];
+        let with_m: &[Box<str>] = &["m".into()];
+        let first =
+            materialize_for_target_in(&archive, &cache, "x86_64-unknown-linux-gnu", Path::new("cc"), none)
+                .unwrap();
+        let second =
+            materialize_for_target_in(&archive, &cache, "x86_64-unknown-linux-gnu", Path::new("cc"), with_m)
+                .unwrap();
+        assert_ne!(first, second, "extra libs 名单必须参与缓存键");
     }
 
     #[test]
@@ -694,6 +779,7 @@ mod tests {
             &cache,
             "x86_64-unknown-linux-gnu",
             Path::new("cc"),
+            &[],
         )
         .unwrap();
         let second = materialize_for_target_in(
@@ -701,6 +787,7 @@ mod tests {
             &cache,
             "x86_64-unknown-linux-gnu",
             Path::new("cc"),
+            &[],
         )
         .unwrap();
 
