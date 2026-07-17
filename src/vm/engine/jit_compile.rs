@@ -1018,12 +1018,13 @@ impl Compiler {
         {
             let mut b = FunctionBuilder::new(&mut cctx.func, &mut self.fbc);
             let frame_offs = analyze_frame(body);
-            let frame_ss = if frame_offs.is_empty() {
+            let frame_ss = if !frame_offs.needs_frame() {
                 None
             } else {
                 Some(b.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
-                    body.frame_size,
+                    // 0 字节强征档（force）以 1 字节物化；off 仍以 0 计，语义不变
+                    body.frame_size.max(1),
                     body.frame_align.trailing_zeros() as u8,
                 )))
             };
@@ -3056,6 +3057,9 @@ impl Translator<'_, '_> {
 #[derive(Default)]
 struct FrameMap {
     ranges: Vec<(u32, u32)>,
+    /// 0 字节帧的 ZST 活地址需求（fsz=0 时 `&Local(0)` 的合法 one-past/ZST 地址，
+    /// corpus c_rustpython_mini 实锤）：区间模型无法表达，强制以 1 字节尺寸物化帧。
+    force: bool,
 }
 
 impl FrameMap {
@@ -3067,8 +3071,9 @@ impl FrameMap {
     fn contains(&self, off: u32) -> bool {
         self.ranges.iter().any(|&(a, b)| a <= off && off < b)
     }
-    fn is_empty(&self) -> bool {
-        self.ranges.is_empty()
+    /// 是否需要物化帧（含 0 字节强征档）
+    fn needs_frame(&self) -> bool {
+        !self.ranges.is_empty() || self.force
     }
 }
 
@@ -3116,10 +3121,15 @@ fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
         // 丢弃——落帧集整个为空时 frame_ss 缺席，Ref 的 addr_of_local expect 炸
         // 「必落帧」。语义上该地址是合法的"帧末+1"（ZST 永不解引用），与 interp
         // 的 base+off 口径一致：补一个帧内 1 字节活口锚强制帧物化。
-        if p == end
-            && let Some(anchor) = fsz.checked_sub(1)
-        {
-            out.add(anchor, fsz);
+        // 0 字节帧形态（corpus 批9 c_rustpython_mini 实锤，f3679
+        // mem::drop::<ZST 自定义 Drop>）：fsz.checked_sub(1) 无处落锚，
+        // 记 force——define_fast 以 1 字节尺寸物化帧（地址仍 base+0）。
+        if p == end {
+            if let Some(anchor) = fsz.checked_sub(1) {
+                out.add(anchor, fsz);
+            } else {
+                out.force = true;
+            }
             return;
         }
         out.add(p, end);
