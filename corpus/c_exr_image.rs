@@ -2,15 +2,11 @@
 ---
 [dependencies]
 exr = "1.74"
-# half 2.3+ 在 std 下对 f16c 做运行期无条件 CPUID 探测（宿主直通为真）→ 触
-# 发 F16C 硬件路径撞 `llvm.x86.vcvtps2ph.128` FRONTIER（TRAP exit 70）：
-#   mirvm[m4-engine]: TRAP: foreign `llvm.x86.vcvtps2ph.128`（LLVM 内部符号，
-#   按需内建）（fn _RINv…_4core9core_arch3x864f16c12__mm_cvtps_phKl0_EC…half）
-# half 2.2.1 的同款探测挂在 use-intrinsics feature 下（exr 不启用）→ 纯软浮
-# 点 fallback，IEEE binary16 转换与硬件逐位等价；sNaN roundtrip（01 节的
-# 0xC001）两侧同走软实现位型稳定（若一侧走 F16C 硬件会被静默化——pin 后两侧
-# 均无此路径）。pin =2.2.1 同时满足 exr 的 half ^2.1.0 约束，两侧跑同一软件实现。
-half = { version = "=2.2.1" }
+# half 2.3+ 在 std 下对 f16c 做运行期无条件 CPUID 探测→ F16C 硬件路径；
+# mirvm 已内建 llvm.x86.vcvtps2ph/vcvtph2ps 全四宽（软件模型按单测
+# cvtps2ph_software_matches_f16c_hardware_bitwise 逐位对齐硬件），两侧同走
+# F16C 通道位型一致（sNaN 静默化两侧同发生），故 2026-07-18 摘 half=2.2.1 钉
+# （open-issues G4①，钉原文见 git 历史）。
 ---
 // exr 1.74.2（OpenEXR 纯 Rust 实现，无 unsafe/foreign code）三维差分。
 // 版本注记：任务书写作 `exr = "3"`，但 crates.io 上 exr 无 3.x 谱系——
