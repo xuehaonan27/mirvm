@@ -417,9 +417,34 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
   定义在其 Rust rlib（#[no_mangle]）里：native_archive 闭包检查覆盖不到
   「符号在 rlib」形态（记档；driver 走 0.6 纯 Rust 后端）。
 
-## 6. 批7+ 候选清单（2026-07-16 初记，待讨论定稿）
+## 6. 批7 候选清单（2026-07-17 定稿，激进扩编 24 个）
 
-> 仓库迁移新开发机时记录，选型讨论未定。按压力形状分组；括号 = 备注。
+> 由 §6 初记（2026-07-16，换机备忘）定稿；用户裁定"激进扩、更快暴露问题"。
+> 分波投放（每波完 → 修净 bug → 下一波）；磁盘余量 157G 已核。
+
+**波1（12，纯 Rust 轻中型）**：c_wat_parse（wat：WAT↔binary 往返+错误定位）、
+c_jsonschema（深递归/unicode）、c_html5ever（HTML 解析经典）、c_xml_rs（XML
+事件遍历）、c_markdown_it（CommonMark 全扩展）、c_logos_lex（derive 大表词法）、
+c_chumsky_parse（组合子 mini-JSON）、c_ndarray（矩阵+stats，探 matrixmultiply
+SIMD 面）、c_smartcore（纯 Rust ML 三件套）、c_rune（脚本 VM 运行+宿主值交互）、
+c_koto（脚本语言）、c_opencc（简繁大表）。
+
+**波2（10，中型/FFI/边界）**：c_parquet2_rw（parquet2 读写，避 thrift）、
+c_syntect_fancy（default-features=false+default-fancy 语法高亮，避 onig C）、
+c_phonenumber（libphonenumber 元数据）、c_tree_sitter（+rust grammar，cc C FFI）、
+c_mimalloc（**全局分配器替换边界**——guest 分配器与引擎堆模型交叉压）、
+c_libgit2（git2/libgit2 C FFI；临时仓+定签名）、c_orgmode（org-rs 偏门）、
+c_oxc_parse（oxc_parser JS/TS 大物槽）、c_rsa_4096（大位宽加测）、
+c_ed25519_default（dalek 默认 backend 直跑脱 env 钉）。
+
+**波3（加测与压）**：c_rustls_shake（rcgen 定种证书 + rustls 双手真握手）、
+c_zstd_long（zstd 长输入多线程/窗口面）。
+
+**批8 重型留档**：tract/candle（ONNX/ML 推理）、aws-lc-rs（cmake C 巨物）、
+tantivy（mmap 段管理）、sequoia-pgp、rustpython/risc0/miden-vm（VM-in-VM
+终极压测）、rocksdb（FFI+磁盘纪律）、solana 族。开工前重新核磁盘与构建预算。
+
+<details><summary>§6 初记原单（2026-07-16，已被上表吸收/裁剪）</summary>
 
 **大物优先**：tantivy（搜索引擎）、sequoia-pgp（OpenPGP 全家）、rustpython /
 miden-vm / risc0（VM-in-VM 终极压测，构建极重）、aws-lc-rs（FFI 巨物）、
@@ -448,3 +473,5 @@ rust-phonenumber（libphonenumber 移植）、libmagic-rust?、htop/bat/exa 式
 **已解锁可做加测**：rustls 握手（批4 证书面 → rcgen 定种证书后双手真握手）、
 edg 51719（dalek 默认 backend 直跑脱 env）、rsa 大位宽（4096）、zstd 长输入
 （并行压缩线程面）。
+
+</details>
