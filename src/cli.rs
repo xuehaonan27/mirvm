@@ -508,8 +508,17 @@ impl Callbacks for MirvmCallbacks {
             let t_lower = std::time::Instant::now();
             // A2 split 判定（s3b-a2-design）：非旁路 + 本会话未装载 image +
             // 底座在场（fp 截断后栈可能已空——无底座不 split，Q2）。
-            let want_split =
-                !crate::depsimage::bypassed() && !self.deps_image_loaded && !self.stack.is_empty();
+            // 无 --extern（纯 std 程序）⇒ deps pre_key 恒 None（v1 边界：std 残余
+            // 归 S4 底座地盘，不建共享 image）——此时 split 只会产写不了盘的内存
+            // image（键退化进程占位），把 L2 键链永久打断；不 split 全量入 delta，
+            // 语义不变（单 id 空间 = 经典非 split 路），L2 对纯 std 程序转活。
+            let want_split = !crate::depsimage::bypassed()
+                && !self.deps_image_loaded
+                && !self.stack.is_empty()
+                && self
+                    .stack
+                    .key()
+                    .is_some_and(|bk| crate::depsimage::pre_key(&self.rustc_args, bk).is_some());
             let (module, split_image) = crate::lower::lower_program(tcx, &self.stack, want_split);
             self.module = Some(module);
             self.split_image = split_image;

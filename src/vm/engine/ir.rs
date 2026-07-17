@@ -1384,11 +1384,6 @@ pub struct Module {
     /// 被清则重 cc，自愈）。**符号名与位序解耦**：A2 split 模式的最终位序收尾才知，
     /// 用类前缀名（mirvm_asm_xi{j}/xd{k}）；非 split 路径沿用位序名 mirvm_asm_{id}。
     pub asm_sites: Vec<AsmSite>,
-    /// extern static（environ 类）/ extern fn（fn-ptr 取址）曾直嵌宿主地址的符号
-    /// 清单（M6 片2）：**非空即不可入 L2 缓存**（ircache::store 拒绝）。P2-1 起
-    /// 值经 GOT 槽间接（foreign_syms/got_fixups，decision-history §7.5c），本表
-    /// 残留作缓存门闩——P2-3 判据退役后删除。
-    pub foreign_static_syms: Vec<Box<str>>,
     /// P2 GOT 符号表（decision-history §7.5c）：槽 = 冻结区普通 8 字节格（本域），
     /// 字节码/冻结字节烤槽址不烤值；启动相按名重解析后逐 fixup 点重写内容，
     /// 模块对 ASLR 位置无关。image 侧各自的表随 image 模块走（absorb 按名合流）。

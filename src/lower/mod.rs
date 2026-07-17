@@ -159,8 +159,6 @@ pub(crate) struct Linker<'tcx> {
     /// asm-stub wrapper 文本（M5.0）：AsmStubId → 符号名+GAS 源；lower 结束批量
     /// cc+dlopen 物化。A2 起名字与位序解耦（split 模式最终位序收尾才知）。
     asm_sites: Vec<ir::AsmSite>,
-    /// extern static/fn 的宿主地址直嵌符号（M6 片2）：非空 ⇒ 模块不可缓存
-    foreign_static_syms: Vec<Box<str>>,
     /// extern fn 被当作值取址（fn-ptr）的条目：instance → dlsym 真地址（D4 条目
     /// 语义的外延）。不进 fn_addrs——执行相反查未命中正是 CallIndirect 的
     /// native_sig libffi 直调通道（M4.4 FFI 反方向之二）的触发条件。
@@ -232,7 +230,6 @@ impl<'tcx> Linker<'tcx> {
             tls_ids: FxHashMap::default(),
             tls_slots: Vec::new(),
             asm_sites: Vec::new(),
-            foreign_static_syms: Vec::new(),
             foreign_fn_entries: FxHashMap::default(),
             got_syms: Vec::new(),
             got_idx: FxHashMap::default(),
@@ -417,8 +414,8 @@ impl<'tcx> Linker<'tcx> {
     /// （instance_mir = rustc query panic）；其 fn-ptr 值语义 = native 链接器解析
     /// 出的真符号地址。解析序与 resolve_call 同构：①引擎内建 ②导出符号仿真
     /// ③denylist/llvm/rust-internal ④归档 hidden 兜底表 → dlsym 全域。
-    /// 值本体仍初填宿主真码址，但消费面经 GOT 槽读（P2，decision-history §7.5c）；
-    /// 符号照记门闩清单（P2-3 判据退役前维持缓存拒绝，三判据同构）。
+    /// 值本体仍初填宿主真码址，但消费面经 GOT 槽读（P2，decision-history §7.5c）：
+    /// 槽随模块序列化、启动相按名重填，模块对 ASLR 位置无关。
     fn foreign_fn_entry_addr(&mut self, inst: Instance<'tcx>) -> Result<u64, String> {
         let name = self.tcx.symbol_name(inst).name;
         // extern weak 缺席取址 = NULL（native 同语义）；weak 标记供 GOT 启动相
@@ -430,11 +427,7 @@ impl<'tcx> Linker<'tcx> {
             let _ = self.foreign_slot(name, a, weak);
             return Ok(a);
         }
-        // host_baked=false：弱符号缺席的 NULL——无宿主地址烤入，不污染可缓存性
-        let bake = |this: &mut Self, addr: u64, host_baked: bool| {
-            if host_baked {
-                this.foreign_static_syms.push(name.into());
-            }
+        let bake = |this: &mut Self, addr: u64| {
             // P2 GOT：槽初填本进程解析值，启动相按名重填
             let _ = this.foreign_slot(name, addr, weak);
             this.foreign_fn_entries.insert(inst, addr);
@@ -464,7 +457,7 @@ impl<'tcx> Linker<'tcx> {
                 let cname = std::ffi::CString::new(name).map_err(|_| "符号名含 NUL".to_string())?;
                 let strong = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) };
                 if !strong.is_null() {
-                    return Ok(bake(self, strong as u64, true));
+                    return Ok(bake(self, strong as u64));
                 }
             }
             return self.fn_entry_addr(target);
@@ -512,13 +505,13 @@ impl<'tcx> Linker<'tcx> {
             // weak 符号缺席 = NULL（native 未定义弱符号的取址语义）；经它间接调用
             // 在执行相响亮终止（CallIndirect 的空指针诊断）
             if weak {
-                return Ok(bake(self, 0, false));
+                return Ok(bake(self, 0));
             }
             return Err(format!(
                 "extern fn `{name}` 被当作值取址，但符号未命中（归档兜底表 / dlsym 全域均无）"
             ));
         }
-        Ok(bake(self, p, true))
+        Ok(bake(self, p))
     }
 
     /// 裸字节物化进冻结区（128 位常量等小常量的通用道）。
@@ -621,9 +614,7 @@ impl<'tcx> Linker<'tcx> {
                     }
                     // P2 GOT（decision-history §7.5c）：值仍初填本进程解析（冷路径
                     // 逐位不变），另登记槽位与 foreign 分配——常量发码改槽读、冻结
-                    // 字节重定位登记修补点，启动相按名重填。门闩清单照记（P2-3
-                    // 判据退役前维持缓存拒绝；A2 deps-image 同规则）。
-                    self.foreign_static_syms.push(name.into());
+                    // 字节重定位登记修补点，启动相按名重填。
                     let _ = self.foreign_slot(name, p, false);
                     self.record_both(id, p);
                     self.foreign_alloc_sym.insert(id, (name.into(), false));
@@ -2193,11 +2184,6 @@ fn lower_inner(
             tls: s.image_tls_slots,
             asm_sites: s.image_asm_sites,
             frozen: Some(s.image_frozen),
-            // 会话级单表（depsimage 判据③的语义本意）：image 上下文的 extern
-            // static/fn 取址会把宿主地址烤进 image 字节码/冻结区（purity 分类器
-            // 看不见裸地址）——非空即不写盘，防跨进程回放野指针；内存态上栈
-            // 同进程有效，由 absorb 合并回 delta 保 L2 诚实。
-            foreign_static_syms: linker.foreign_static_syms.clone(),
             // P2 GOT image 侧（decision-history §7.5c）：随 image 模块走，
             // 装载/absorb 时按名合流进 delta 并重编 idx
             foreign_syms: s.image_got_syms,
@@ -2318,7 +2304,6 @@ fn lower_inner(
         module.fn_addrs = linker.fn_addrs.into_iter().collect();
     }
     module.tls = linker.tls_slots;
-    module.foreign_static_syms = linker.foreign_static_syms;
     // P2 GOT（decision-history §7.5c）delta 侧（image 侧已随 split_image 走）
     module.foreign_syms = linker.got_syms;
     module.got_fixups = linker.got_fixups;

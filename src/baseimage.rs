@@ -328,13 +328,6 @@ pub fn absorb_stack(delta: &mut ir::Module, stack: ImageStack) {
                 delta.required_native_libs.push(l);
             }
         }
-        // 宿主地址直嵌符号随 image 合并（内存态 image 可能烤了本进程地址——
-        // 磁盘 image 写盘判据③已保证为空）：并入 delta 保 L2 入账判据诚实。
-        for s in m.foreign_static_syms {
-            if !delta.foreign_static_syms.contains(&s) {
-                delta.foreign_static_syms.push(s);
-            }
-        }
         // P2 GOT 随 image 合流（decision-history §7.5c）：sym 按名去重、fixup
         // idx 重编；image 样条域地址固定基稳定，合流后仍指向同一冻结格
         delta.absorb_got(m.foreign_syms, m.got_fixups);
@@ -363,7 +356,7 @@ struct BaseBuildCallbacks {
 impl Callbacks for BaseBuildCallbacks {
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         let (mut module, exports) = crate::lower::lower_for_base_build(tcx);
-        // 可缓存性三判据（L2 store 同款；底座是跨程序共享，更不容妥协）
+        // 可缓存性判据（L2 store 同构；底座是跨程序共享，更不容妥协）
         let frozen_ok = module.frozen.as_ref().is_some_and(|fr| {
             fr.at_fixed_base() && fr.home() == crate::vm::engine::frozen::BASE_IMAGE_FIXED_ADDR
         });
@@ -371,13 +364,8 @@ impl Callbacks for BaseBuildCallbacks {
             eprintln!("base-image: 冻结区未落底座固定域，放弃");
             return Compilation::Stop;
         }
-        if !module.foreign_static_syms.is_empty() {
-            eprintln!(
-                "base-image: 空 main 闭包含宿主地址直嵌 {:?}，放弃（违可缓存性判据③）",
-                module.foreign_static_syms
-            );
-            return Compilation::Stop;
-        }
+        // foreign 符号自 P2 起经 GOT 槽间接（§7.5c：表随快照、启动相重填）——
+        // 原「直嵌宿主地址判据③」已退役，不再是写盘障碍。
         // "@entry" 是 --vm-stats 的程序入口别名；底座作为库使用，不导出合成入口
         module.exports.remove("@entry");
 

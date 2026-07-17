@@ -141,12 +141,9 @@ pub fn store(
     if !module.frozen.as_ref().is_some_and(|f| f.at_fixed_base()) {
         return false;
     }
-    // 宿主地址直嵌（environ 类 extern static / fn-ptr 取址的 extern fn，dlsym 真
-    // 地址已烤进 const/冻结区）⇒ 跨进程回放 = 野指针（gate 实测 c_process 热路径
-    // SIGSEGV）——诚实不缓存
-    if !module.foreign_static_syms.is_empty() {
-        return false;
-    }
+    // foreign 符号（environ 类 extern static / extern fn 取址）自 P2 起经 GOT 槽
+    // 间接（decision-history §7.5c）：GOT 表随快照走、启动相重填本进程真值——
+    // 不再是缓存障碍，原「宿主地址直嵌拒缓存」判据（M6 片2）已退役。
 
     // 输入清单（rustc dep-info 同构口径）
     let sess = tcx.sess;

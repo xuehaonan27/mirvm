@@ -60,6 +60,8 @@ L2 整包缓存不需要跨会话键（FuncId 全模块内自洽）；底座是�
 - **三判据复核**：底座 store 沿用 L2 契约——foreign_static_syms 非空拒绝
   （空 main 闭包预期干净：fib 今日可入账，其闭包 ⊇ 空 main 闭包）；asm_sites
   照配方每跑重物化；诊断面不适用（底座构建会话无用户代码，告警即 bug）。
+  （2026-07-17 注：foreign_static_syms 判据已随 P2 GOT 间接退役，decision-history
+  §7.5d；本条余者仍有效。）
 
 ## 5. 键与失效
 

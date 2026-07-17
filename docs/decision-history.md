@@ -534,6 +534,29 @@ interp/JIT 逐变体接线"，勘探后发现**根本不需要新变体**：
 eval_operand / serde 六个消费点接线全省；冷路径性能零影响（槽读 = 一次
 内存 load，常量折叠前的 Imm 读本来就对应一条 movabs）。
 
+## 7.5d. 2026-07-17：P2 收官（§7.5c 实现）——拒缓存判据全退役 + 纯 std 会话不 split
+
+P2-1 机制验收全绿后落地 P2-3：
+
+1. **三判据退役**（`ircache.rs` / `baseimage.rs` / `depsimage.rs`）：宿主地址
+   直嵌不再是缓存障碍；`Module.foreign_static_syms` 字段整列删除（机制证明
+   冗余后不留死账），lower 三处记账点、image 模块字段、absorb 合并环全清。
+2. **P2 目标兑现**：c_process（environ 用户）463ms 冷 → **30ms 热**
+   （cache-load 24ms）；zstd/rusqlite/openssl/gix 四个外来符号密集用例
+   冷/热输出逐字节一致，deps-image 写盘/回读全通——热回放经启动相 GOT
+   重填把上进程 ASLR 地址换成本进程真值，正是 M6 片2 c_process 热路径
+   SIGSEGV（§7.3 记账）的根治。
+3. **连带修复（先存的 A2 沉默债）**：纯 std 脚本会话（`--extern` 为空）
+   按 v1 边界 `pre_key` 恒 None，但 cli `want_split` 只看"未旁路+未装载
+   +底座在场"，照样 split → 产物写不了盘 → 键退化 `a2-unstable-{pid}` →
+   L2 键链按设计永 miss——**所有纯 std corpus 用例的 L2 从来都是死在
+   这里的**（此前被外来符号门闩挡住，从未暴露）。修法与 v1 意图一致：
+   `pre_key(...) == None ⇒ want_split = false`（残余全进 delta，键回底座；
+   语义不变，单 id 空间 = 经典非 split 路）。deps 会话行为不变
+   （rusqlite/openssl 等照常 split+写盘+热读）。
+   验证：4 例外来符号三维 + 冷/热×2 一致，`a2_deps_image` 闸 PASS，
+   gate5 117/0/0，cargo test 66/66，diff 30/30，diff_cargo 5/5。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 - P7 设想独立 `src/os/` 物理层；当前 OS/FFI/builtin 逻辑仍分布在 lower、interp、ffi、heap。
