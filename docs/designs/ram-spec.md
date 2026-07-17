@@ -177,8 +177,12 @@ L1 + 可选 L3 作为长期方向，且当前 checked 模式尚未实现。无�
 handler 从静默成功改为明确不支持，并为 volatile 建立独立 IR 与 alignment=1
 opaque `MaybeUninit` 字节载体，避免低对齐/padding 的宿主 UB。同理，在 guest frame/IP
 映射存在前，backtrace 与 unwinder context API 必须明确拒绝，不得返回宿主解释器栈。
-真正的 signal/backtrace 语义与未覆盖的 volatile 宽度仍属于实现缺口，而非 RAM
-允许的偏差。
+
+> 2026-07-18 更新：上述两条“缺口”随后均已兑现——M5.2 D8d（async signal handler 经
+> AS-trampoline 真注册真投递；同步故障信号 handler 仍响亮拒绝）、M5.2 D8e（guest 影子帧
+> backtrace）与 2026-07-13 宽 volatile 快照分块。当前残余边界（故障信号、unwinder
+> context 家族等）集中登记在 [open-issues.md](../open-issues.md) R1/R3，属于实现缺口
+> 而非 RAM 允许的偏差。
 
 ---
 

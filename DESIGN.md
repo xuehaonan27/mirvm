@@ -64,7 +64,7 @@ RAM 只要求**可观测行为**一致，其余全自由。这是贯穿一切的
 | 类加载 + 字节码验证 | **rustc 前端**（解析/宏/typeck/borrowck/MIR）+ **惰性单态化** | RAM 的"加载器/验证器"。这是十年工程，我们**复用**不重建。加载 = 取得某个 instance 的 MIR |
 | 字节码 | **MIR → 自研 typed bytecode**（M4 已落地） | 加载相冻结 RAM 计算所需信息；执行相不再访问 tcx |
 | 托管堆（GC） | **Rust Heap**（托管，arena/TLAB，**不搬迁**，Drop 而非 GC） | RAM 存储的 realize，见 §4 |
-| 执行引擎（解释→C1→C2） | **typed-bytecode 解释器（现状）→ 方法级 Cranelift JIT（计划）** | RAM 计算的执行，见 §6 |
+| 执行引擎（解释→C1→C2） | **typed-bytecode 解释器 + 方法级 Cranelift JIT（均已落地，JIT 默认开启）** | RAM 计算的执行，见 §6 |
 | 线程（1:1 OS） | **1:1 OS 线程** | M4 已落地，解释态回调通过 thunk + TLS attach 进入 VM，见 §5 |
 | JNI | **FFI**，但软边界（真实地址、零编组） | RAM 的**边界**，见 §7 |
 | intrinsics / native 方法 | **Rust intrinsics + VM 内建运行时**（分配/线程/unwind） | RAM 内建操作，VM 自己实现 |
@@ -86,9 +86,9 @@ RAM 只要求**可观测行为**一致，其余全自由。这是贯穿一切的
 3. **REPL/Notebook**（后置 M6）：VM 拥有持久堆，状态持久化天然成立，跨 cell 借用不再是问题。
 4. **嵌入式引擎**（后置）：engine 是 library、CLI 是薄壳，这条路从第一天就不被堵死。
 
-**现有执行模式只有 M4 typed-bytecode interpreter。** HotSpot 风格的 `interp` / `mixed` /
-`jit` 可配置产品模式属于 M5.3 以后目标；当前 CLI 仅兼容旧的 `--engine vm` 写法，不能据此宣称
-已有多 tier 产品路径。
+**执行引擎现状 = 解释器 + 方法级 JIT 双轨**（M5.3 骨架与 M5.4a/b 已落地，JIT 默认
+开启、可 `--jit off` 回退纯解释）；HotSpot 风格 tiering 计量终裁（vmctx T/R、gate6）
+属 M5.5，仍未实现。CLI 兼容旧的 `--engine vm` 写法。
 
 ---
 
@@ -209,9 +209,9 @@ InterpCx 的内存 map、MonoHashMap（RefCell 遍地）不 Sync；M4 通过冻�
 | tier | 是什么 | 状态 | 定位 |
 |---|---|---|---|
 | **历史 bootstrap** | fast Machine on rustc `InterpCx` | **已删除（2026-07-09）** | M0–M2.5 的探索工具；代码只在 Git 历史中，不再是 oracle 或运行模式 |
-| **typed-bytecode 解释器** | MIR → 冻结 IR → tree-walking 执行 | **M4 完成，当前唯一产品引擎** | tcx-free、真线程、FFI/unwind/thunk；语义范围与缺口见 current-status |
+| **typed-bytecode 解释器** | MIR → 冻结 IR → tree-walking 执行 | **M4 完成，差分 oracle 本体** | tcx-free、真线程、FFI/unwind/thunk；语义范围与缺口见 current-status |
 | **asm stub** | GAS wrapper → `.so` → native call | **M5.0 完成** | 解释器可调用的局部机器码机件，不等于方法级 JIT |
-| **方法级 JIT** | 从冻结引擎字节码生成 Cranelift 机器码 | **M5.3+ 未实现** | 惰性 tiering、JIT unwind/LSDA 与性能目标仍是设计 |
+| **方法级 JIT** | 从冻结引擎字节码生成 Cranelift 机器码 | **M5.3/M5.4a–b 已落地（默认开启）；M5.4c/d、M5.5 待施** | LSDA 产品化、ABI 泛化、SIMD 与计量终裁仍待施（docs/open-issues.md T1–T3） |
 
 InterpCx 曾帮助项目快速探索 RAM 边界，但其不 Sync 与 AllocId overlay 不适合作为产品地基。
 M4 完成后它没有“退居 oracle”，而是被删除；当前差分 oracle 是同源 native 编译执行。
@@ -237,7 +237,9 @@ native 栈。调用活动与局部存储是两条正交轴。完整 A/B 选择�
      仍需逐平台验证，不能从 Linux 基线外推。
    - **线程**（§5）：**不 emulate、不 wrap pthread，用真 OS 线程**。解释态 `thread_start`
      逃逸时物化成 libffi closure thunk，入口通过 TLS attach 当前线程的 `Ctx`。这项机件支持
-     pthread 与普通 native 回调，但**不代表 signal 注册/投递语义已经实现**。
+     pthread 与普通 native 回调；signal 注册/投递已由 M5.2 支持（async handler 经
+     AS-trampoline 真注册真投递），同步故障信号 handler 仍响亮拒绝
+     （docs/open-issues.md R1）。
 
 
 2. **纯直通（FFI 到系统 libc）**——真资源、不涉及解释态实体：open/read/clock/getrandom、数学函数（libm）。**用系统 libc**（`dlsym(RTLD_DEFAULT)` + 按 `-l` 指令 dlopen）；target==host 保证 ABI 逐位一致。这批现在是手写 shim（历史包袱），neat 的终态是通用直通通道——但那是 polish，不急。
@@ -342,14 +344,20 @@ src/os/
 - **RAM-SPEC 文档**（✅ 2026-07-05 草稿，docs/designs/ram-spec.md）：抽象机器语义契约——正确性契约、定义度四级、RAM 边界、as-if 自由、声明的偏差、与 native/Miri 关系。mirvm"事实标准实现"的书面承诺。
 - **M3 产品面**（未实现/后置）：daemon、agent API、资源治理与正式沙箱。
 - **M4 字节码 VM**（✅ 2026-07-10）：自研 typed-bytecode、tcx-free tree-walking engine、
-  FFI/unwind/真线程/TLS/thunk；tier-0 同期退役。实际结果见 docs/m4-log.md。
+  FFI/unwind/真线程/TLS/thunk；tier-0 同期退役。实际结果见 docs/history/m4-log.md。
 - **M5.0 asm-stub 工厂**（✅ 2026-07-11，复审 2026-07-12）：有限 x86_64 inline asm
-  加载相物化；实际结果见 docs/m5-log.md。
+  加载相物化；实际结果见 docs/history/m5-log.md。
 - **M5.1 语义轨收口**（✅ 2026-07-12）：addcarry/subborrow 已使 numbigint 转绿，
   xgetbv 已 native 差分，pshufb/SHA helpers 已使 sha2 转绿；静态归档产品接入与 ecosystem
   补面分别使 blake3/ecosystem 转绿；diff_cargo 3/3。signal guest handler 是独立明确 XFAIL。
-- **M5.3–M5.5 方法级 JIT**（未实现）：Cranelift 热点、tiering、LSDA 与性能收口。
-- **M6 REPL/Notebook**（后置）。**M7+ 嵌入 API**（后置）。
+- **M5.3 方法级 JIT 骨架**（✅ 2026-07-15）：J1 基座 + 翻译器标量子集 + CFI；
+  **M5.4a/b 翻译器**（✅ 同日）：帧模型 v2、标量全集 + 128 位族 + atomics。
+  **M5.4c/d 与 M5.5 待施**（ABI 泛化 + LSDA 产品化 / SIMD / vmctx 终裁 + gate6——
+  docs/open-issues.md T1–T3）。施工日志见 docs/history/m5-log.md。
+- **M6 冷启动/轨 C**（✅ 2026-07-14~15）：S1 小件包、S2 依赖剪 codegen、S4 std
+  预降底座、S3′b A2 纯化聚合 deps-image。编号说明：原愿景「M6 REPL/Notebook」被
+  轨 C 占用，REPL 未立项（docs/open-issues.md D11）。施工日志见 docs/history/m6-log.md。
+- **M7+ 嵌入 API / REPL/Notebook**（后置，未立项）。
 
 ### tier-0 实现日志（历史：如何在 rustc 解释器上 bootstrap 出 RAM 实现）
 
@@ -390,7 +398,7 @@ src/os/
 | shim 工作量（最大风险） | 按需实现；§7 边界模型减少无谓 shim（真资源走直通）；借鉴 Miri 代码 |
 | 测试假阳性 / 语义误报 | 绿色必须比较输出或不变式；双方都失败不得算 PASS；预期红锁定原因 |
 | silent stub | 未实现的可观察语义必须 Trap 或真实实现，不允许返回成功伪装支持 |
-| M4 解释器性能天花板 | M5.3+ 方法级 JIT；JIT-on/off/native 三方差分 |
+| M4 解释器性能天花板 | 方法级 JIT 已落地（M5.3/M5.4a–b，默认开启）；JIT-on/off/native 三方差分；M5.4c/d 与 M5.5 待施 |
 | FFI C→Rust 回调 | thunk + TLS attach 已有；逐类验证真实注册/生命周期，signal 不能仅凭 thunk 宣称支持 |
 | 平台耦合 | 当前只宣称 Linux/ELF/x86_64；抽取 OS 边界后再扩平台 |
 | 生命周期与嵌入 | 将进程退出、全局 TLS key 与泄漏式资源收敛成可恢复、多 Engine 生命周期 API |

@@ -3,7 +3,7 @@
 > 承 `docs/m4-log.md`（M4 关账）。设计见 `docs/m5-design.md`（D1-D7 已批准，
 > D5=T 骨架+触发器）。每期 gate 结果 + 教训 + 遗留归期，格式同 m4-log。
 > **状态边界**：M5.0、M5.1 已完成；方法级 JIT 未进入产品路径。2026-07-12 对测试
-> oracle 的后续审计见 [current-status.md](current-status.md)，旧 gate 计数按当时脚本口径保留。
+> oracle 的后续审计见 [current-status.md](../current-status.md)，旧 gate 计数按当时脚本口径保留。
 
 ## M5.0 asm-stub 工厂（轨 A 起步）—— **完成**（2026-07-11）
 

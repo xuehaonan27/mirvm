@@ -1,7 +1,7 @@
 # S3′b 依赖成像：设计岔路与裁定（A2 纯化聚合 deps-image）
 
 > 状态：**已裁定（2026-07-15）= A2 纯化聚合 deps-image**。裁定证据与替代关系见
-> [decision-history.md §7.5](decision-history.md)；本文 §0–§7 保留岔路现场与四条出路的
+> [decision-history.md §7.5](../decision-history.md)；本文 §0–§7 保留岔路现场与四条出路的
 > 原始记录（其中"方案 A"为 A1 口径，已被 A2 替代其切分口径与键构成，见 §8）。
 > 下一步：A2 施工设计过审后动工。
 >
@@ -31,7 +31,7 @@
   pure 10593 inst/1042.7ms 可缓存。A1 相对 A2 只多买 1.9ms。
 - **B/C/D/E 不采纳**的理由维持 §4–§6 原判（屏障活性、膨胀、relocation 风险、≈没做），
   本账本下不再有反转理由。
-- **重估触发器**与完整证据：[decision-history.md §7.5](decision-history.md)。
+- **重估触发器**与完整证据：[decision-history.md §7.5](../decision-history.md)。
 
 ## 0. 一分钟速览（岔路现场，历史）
 

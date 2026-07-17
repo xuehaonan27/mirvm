@@ -20,7 +20,7 @@ tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 //      压协作调度 + async 无栈状态机 + SC 交错确定性（c_crossbeam/c_tokio 先例的
 //      sqlx 形态）。
 //   ② C sqlite FFI 全通道：prepare/step/column_* /errmsg 等 extern fn 直落
-//      .a→.so 闭包产物；参数/返回值全标量封送（无按值聚合——debt-map §9 既定
+//      .a→.so 闭包产物；参数/返回值全标量封送（无按值聚合——open-issues C1 既定
 //      边界不涉及）。
 //   ③ pool + 显式事务状态机（begin/commit/rollback）。
 //

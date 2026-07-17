@@ -4,7 +4,7 @@
 > a2_deps_image 行）；eco 冷 924→热 66ms；S3′c 同 workspace 跨 bin 共享。施工日志与
 > 账本 [m6-log.md](m6-log.md) 片7/8/9；施工偏离与意外（closure 护栏误伤底座命中、
 > S4 补建条目的 image 域变体、phase_cargo 相对路径嵌套）记于 m6-log。
-> 裁定依据：[decision-history.md §7.5](decision-history.md)；岔路现场：
+> 裁定依据：[decision-history.md §7.5](../decision-history.md)；岔路现场：
 > [s3b-design-fork.md §8](s3b-design-fork.md)。
 >
 > 批准状态（2026-07-15，用户裁定 Q1–Q5）：Q1 = --extern 解析；Q2 = v1 要求

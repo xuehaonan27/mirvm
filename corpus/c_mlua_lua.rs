@@ -15,7 +15,7 @@ mlua = { version = "=0.10.5", default-features = false, features = ["vendored", 
 // mlua 0.10（vendored Lua 5.4）三维差分：计算主体一半在 native C（Lua VM 执行
 // chunk、table/string 库）一半在被解释/JIT 的 Rust 绑定层（值转换、回调、错误包
 // 装）。FFI 签名全标量/指针（lua_State* / c_int / double / fn-ptr），不撞
-// debt-map §9 按值聚合墙。回调形态：create_function → mlua 存 CallbackUpvalue
+// open-issues C1 按值聚合墙。回调形态：create_function → mlua 存 CallbackUpvalue
 // userdata（带 __gc，lua_close 时 native→guest 销毁回调）+ lua_pushcclosure
 // 推入 monomorphic `unsafe extern "C-unwind" fn call_callback` 显式 fn-ptr——
 // P1 可执行化（decision-history §7.6）覆盖的 thunk 面。错误面前沿（本 driver

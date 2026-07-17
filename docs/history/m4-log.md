@@ -4,7 +4,7 @@
 > **历史口径勘误（2026-07-12）**：本文保留各期当时报告，不回写历史。后续审计发现 gate5
 > 曾对 `c_signal` 只检查退出码、diff_cargo 可能把双方失败判绿、corpus 可能不传播失败状态；
 > 因此“31/31”不能解释为 31 个语义正确断言。最新可信边界见
-> [current-status.md](current-status.md)。
+> [current-status.md](../current-status.md)。
 
 ## M4.0 地基 —— **完成**（2026-07-07）
 

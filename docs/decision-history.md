@@ -54,7 +54,7 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
    原理上不正确。因此边界 TLS + lazy attach 被确定。
 3. Spike 5 的窄 fib 微基准中 R 比 P 快约 8%，证明 R 可行，但没有覆盖真实寄存器压力，不能据此
    终裁生产约定。
-4. 2026-07-11 的 [m5-design.md](m5-design.md) D5 不再做 P/R 二选一：生产 M5 先采用
+4. 2026-07-11 的 [m5-design.md](designs/m5-design.md) D5 不再做 P/R 二选一：生产 M5 先采用
    **T 骨架**——纯 guest fast 签名，需要 ctx 时做 TLS 获取；R 保留为 ABI 兼容的可选缓存层。
    旧 P 不再是生产候选。
 
@@ -269,7 +269,7 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
 
 - 旧状态：M5 双轨设计中 M5.2–M5.4 = 方法级 JIT 三期；轨 A 以 M5.1 收口视为"corpus 全绿"。
 - 候选项：直接进 JIT（M5.2 原案）vs 先补非 JIT 语义面。
-- 新证据（2026-07-13 实测，[m5.2-design.md](m5.2-design.md) §1）：主动圈定（拒绝面全量
+- 新证据（2026-07-13 实测，[m5.2-design.md](history/m5.2-design.md) §1）：主动圈定（拒绝面全量
   清点 + rustc intrinsic 权威差集 + 14 个 native 差分探针）发现 corpus/真实项目全绿只覆盖
   "已踩过的面"——`f64::abs()` 即 Trap（`fabs` 泛型名漂移）、递归 8000 帧上限、`std::simd`
   55/75 缺失、`fetch_max`/`mul_add` Trap、atomic 序整体折叠 SeqCst、fork/global_asm/naked/
@@ -314,7 +314,7 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
   MIR sysroot、五个内容哈希缓存**均已实现**）+ 实测账本（std-only 热跑 0.40s；
   ecosystem 四依赖热跑 3.07s，且为**每跑必付**的加载相成本——冷启动痛点不在依赖
   解析/编译，在叶前端+单态化+lower）。
-- **新选择**（全批，细节与风险见 [distribution-design.md](distribution-design.md)）：
+- **新选择**（全批，细节与风险见 [distribution-design.md](designs/distribution-design.md)）：
   - **D9a** 统一入口 = `mirvm` 单二进制 + 子命令；`mirvmc` 至多别名硬链。
   - **D9b** 拒绝 StableMIR-as-format（进程内 API 非格式）；先做 **L2 post-mono
     engine-IR 缓存**，mode B 包 = 缓存可移植化；对外格式冻结推迟 M5.3 后。
@@ -364,7 +364,7 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
 ### 7.2 2026-07-14：M5.3 Pending 与轨 C 施工顺序修订（用户裁定）
 
 - **决策**：M6 ①② 收官后不默认进入 M5.3。用户裁定：冷启动（lower 相）是一等问题，
-  先调研（[coldstart-research.md](coldstart-research.md)，commit 27f0001）再按新顺序施工：
+  先调研（[coldstart-research.md](history/coldstart-research.md)，commit 27f0001）再按新顺序施工：
   **S1**（V1 sysroot 仪式 stamp 化 + 调研抓到的三个缓存盲区 P1/P2/P3 修缮）→
   **S2**（V2 依赖 codegen 剪枝 = 原 D9f③）→ **S4**（V4 std 预降低底座，大件先设计简报
   过审）→ 之后 **S3 懒降低与 M5.3 JIT 合并出联合分层设计，过审后才动工**。
@@ -407,7 +407,7 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
 
 - **决策**：S3′b（依赖成像）施工中，per-crate 链方案的装载命中率被实测证伪（eco 4/19
   依赖，lower 988→~850ms 基本没降），暂停施工、把设计岔路写成
-  [s3b-design-fork.md](s3b-design-fork.md) 交后续 session 裁定；工作树回退 S3′a 绿态
+  [s3b-design-fork.md](history/s3b-design-fork.md) 交后续 session 裁定；工作树回退 S3′a 绿态
   （commit b4ed691），已探索代码存 `docs/parked/s3b-chain-wip.patch`。
 - **为什么证伪**：链是**线性**结构，依赖是**非线性 DAG**。cargo 并行构建下多数依赖
   建于 `[std 底座]`（上游 image 未就绪），装载贪心拼链时装完首个 `[std]`-built 依赖后

@@ -12,7 +12,7 @@
 # 先例）；aws-lc-sys 全符号带 `aws_lc_0_42_0_` BORINGSSL_PREFIX 前缀，与宿主
 # OpenSSL 全域命名空间零碰撞（zstd 静默换库类风险不存在——已查
 # generated-include/openssl/boringssl_prefix_symbols.h 实证）。guest 只做指针级
-# FFI 调用（无按值聚合封送，不触 debt-map §9 结构边界；无 guest 回调传入 C，
+# FFI 调用（无按值聚合封送，不触 open-issues C1 结构边界；无 guest 回调传入 C，
 # 不触 thunk 盲区）。
 aws-lc-rs = "=1.17.1"
 aws-lc-sys = { version = "=0.42.0", default-features = false }

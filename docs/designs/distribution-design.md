@@ -106,7 +106,7 @@
   **命名**：MRsDK 否决（混排难念）；"kit"命名推迟到 mode B 出实物；届时候选
   MDK / "mirvm toolkit"。
   **2026-07-14 顺序修订（用户裁定，decision-history §7.2）**：①② 完成后 M5.3 定
-  Pending，插入冷启动杠杆施工（[coldstart-research.md](coldstart-research.md)）：
+  Pending，插入冷启动杠杆施工（[coldstart-research.md](../history/coldstart-research.md)）：
   S1（sysroot 仪式 stamp + 缓存盲区 P1/P2/P3 修缮）→ S2（=③ 依赖剪 codegen）→
   S4（std 预降低底座，模式 B 的 sysroot 侧特例，先设计过审）→ S3 懒降低与 M5.3 JIT
   联合分层设计过审后动工；④⑤ 位次不变。

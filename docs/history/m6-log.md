@@ -1,6 +1,6 @@
 # M6 施工日志 —— 轨 C 分发与产品面（D9）
 
-> 设计与决策：[distribution-design.md](distribution-design.md)（D9a–D9f，方向批准 2026-07-14）。
+> 设计与决策：[distribution-design.md](../designs/distribution-design.md)（D9a–D9f，方向批准 2026-07-14）。
 > 本期立项 2026-07-14：用户指令"先做分发轨①②，M5.3 之后再说"——即 D9f 施工顺序的
 > ① 相位计时 + ② L2 post-mono engine-IR 缓存；③④⑤ 未立项。
 > 纪律同前：逐片提交、全量 gate5 绿、偏离记 decision-history、不新增 harness 机制。
