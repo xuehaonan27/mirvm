@@ -3111,6 +3111,17 @@ fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
             Extent::Bytes(n) => p.saturating_add(n).min(fsz),
             Extent::Escape => fsz,
         };
+        // 帧末 ZST 取址（corpus 批8 c_starlark_eval 实锤）：落在帧尾（p==fsz）的
+        // Escape/空 Bytes 产生退化区间 `(fsz,fsz)`，被 FrameMap::add 的 `a<b` 静默
+        // 丢弃——落帧集整个为空时 frame_ss 缺席，Ref 的 addr_of_local expect 炸
+        // 「必落帧」。语义上该地址是合法的"帧末+1"（ZST 永不解引用），与 interp
+        // 的 base+off 口径一致：补一个帧内 1 字节活口锚强制帧物化。
+        if p == end
+            && let Some(anchor) = fsz.checked_sub(1)
+        {
+            out.add(anchor, fsz);
+            return;
+        }
         out.add(p, end);
     }
     fn scan_op(out: &mut FrameMap, op: &Operand, fsz: u32) {

@@ -53,7 +53,8 @@ wat_parse jsonschema html5ever xml_rs markdown_it logos_lex chumsky_parse \
 ndarray smartcore rune koto \
 parquet2_rw syntect_fancy phonenumber orgmode oxc_parse rsa_4096 ed25519_default \
 mimalloc libgit2 rustls_shake zstd_long \
-aws_lc mlua_lua tantivy sequoia_pgp sqlx_sqlite"}
+aws_lc mlua_lua tantivy sequoia_pgp sqlx_sqlite \
+swc_parse miden_exec polodb starlark_eval"}
 # jieba_cut 全绿但 mirvm 单跑 77-89s（贴 90s timeout），留 corpus.sh 手工跑批
 # opencc（批7 波1）三维已绿但不进 gate5：依赖机器侧 /tmp/opencc-local
 # （OpenCC 1.1.9 自建前缀，driver 头注有重建法）——留 corpus.sh 手工批（有 gating）
@@ -72,8 +73,8 @@ for p in $CORPUS_PROGS; do
     # mimalloc/libgit2 的 vendored C 构建）
     tmo=90
     case "$p" in
-        gix_pure|rusqlite_db|revm_evm|zopfli_deep|mimalloc|libgit2|aws_lc|tantivy|sequoia_pgp) tmo=300 ;;
-        calamine_xlsx|rustls_cert|phonenumber|mlua_lua) tmo=180 ;;
+        gix_pure|rusqlite_db|revm_evm|zopfli_deep|mimalloc|libgit2|aws_lc|tantivy|sequoia_pgp|starlark_eval) tmo=300 ;;
+        calamine_xlsx|rustls_cert|phonenumber|mlua_lua|miden_exec) tmo=180 ;;
         rsa_pss|rsa_4096) tmo=400 ;;
     esac
     timeout $tmo "$MIRVM" run "$src" >"$TMP/corpus-$p.out" 2>"$TMP/corpus-$p.err"; code=$?

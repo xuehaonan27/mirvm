@@ -218,3 +218,39 @@ eightbyte 基因型 + 返回值 sret/寄存器对按类选择）；
 ④三维验收 = c_tree_sitter 原样转绿（B 维 15 行 oracle 已固定）。
 此前 c_revm_evm 等以指针/引用为主的 FFI 大物全不受此约束——该项由
 tree-sitter 一族（parser/LSP 工具链常见形状）供养优先级。
+
+## 10. 闭包欠账「符号在 rlib」+ inline asm `noreturn`（corpus 批8 c_wasmtime_wat 双层实锤，2026-07-17 记）
+
+**层① 符号在 rlib（native-archive 闭包缺口的第二真实实例）**：wasmtime v46
+build.rs 无条件编 `src/runtime/vm/helpers.c` → `libwasmtime-helpers.a`，
+其中 debug-builtins 蹦床调用的 `resolve_vmctx_memory_ptr_46_0_1` 等由
+Rust 侧 `#[export_name]`（versioned-export-macros）定义进 **wasmtime 自身
+rlib**——native final link 从 rlib 集符完全合法；mirvm `.a→.so` 按
+`-z defs` 单归档自闭合够不着 rlib → 响亮拒 `无法安全转换为共享库`。
+与批5 bzip2-sys 的 `bz_internal_error`（定义在 Rust rlib）同族——该类
+**已证 ≥2 真实实例**。最小复现（无 wasmtime）：`/tmp/mre`（build.rs cc
+蹦床 → extern rlib 符号 → native 绿 / mirvm 同址拒）。
+**修法方向（未立项）**：闭包判定纳入「本 crate（与 crate 图传播来的）
+rlib `#[no_mangle/export_name]` 导出符号集」——符号若在某一宿主 crate
+rlib 定义，其机器码如何就位？native 直链只在 rlib 自身是 native code 时
+成立的类（#[no_mangle] Rust fn 的码在 crate 的 .o 里）；两类子形态要分开：
+(a) Rust 体（wasmtime 这类）＝ mirvm 只能给 **P1 可执行条目**（正合既有
+条目可执行化：#[export_name] guest fn 取址经 exported_defs → 已是 stub
+码址，`resolve_vmctx_*` 本体既是如此——**该项或可由 P1 兑现后自然解锁**：
+链接行改含 stubs 值得专题评审）；(b) bzip2 的断言桩属纯 Rust 体无可执行
+面，同 (a)。
+
+**层② inline asm `noreturn`（M5.x 欠账类目）**：wasmtime 的 trap 上抛走
+`wasmtime_internal_unwinder::arch::x86_64::resume_to_exception_handler`——
+inline asm + `options(noreturn)`，asm-stub 物化当前只覆盖 call-return
+stub，遇即响亮 TRAP（`inline asm noreturn（M5.x；三面孔无）` exit 70）。
+探针（减 debug-builtins 后绕开层①）实锤：cranelift 在解释进程里**发自家
+机器码并执行**（模块编译/实例化/内存/global/table/host 回调/Store data/
+rayon 并行编译/rustix）**全通零分歧**——VM 旗舰主路径活着，死于 trap
+上抛的最后一步。**转正需要什么**：asm `noreturn` 面孔（至少两类：
+入口承诺不返的 resume longjmp 形 + `ud2`/int3 类终止形），按真实
+workload 优先级立项（wasmtime 是唯一现供养者，层①修后驱动意更强）。
+
+**接线策略（当前）**：c_wasmtime_wat 以层①形态锁 expected-red
+（red_code=101、`无法安全转换为共享库` pattern）；层①修复后 pattern
+换 `inline asm noreturn`/70、原 driver 无需改动。driver 头注全账已备。

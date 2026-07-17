@@ -27,7 +27,8 @@ if [ ${#progs[@]} -eq 0 ]; then
            ndarray smartcore rune koto opencc \
            parquet2_rw syntect_fancy phonenumber orgmode oxc_parse rsa_4096 ed25519_default \
            mimalloc libgit2 rustls_shake zstd_long \
-           aws_lc mlua_lua tantivy sequoia_pgp sqlx_sqlite)
+           aws_lc mlua_lua tantivy sequoia_pgp sqlx_sqlite \
+           swc_parse miden_exec polodb starlark_eval)
 fi
 # opencc（批7 波1，FFI 条目）：需 /tmp/opencc-local 前缀（OpenCC 1.1.9 自建，
 # 重建法见 driver 头注）+ 三 env；前缀缺席则本批跳过，不算红
