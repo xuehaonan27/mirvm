@@ -26,7 +26,8 @@ if [ ${#progs[@]} -eq 0 ]; then
            wat_parse jsonschema html5ever xml_rs markdown_it logos_lex chumsky_parse \
            ndarray smartcore rune koto opencc \
            parquet2_rw syntect_fancy phonenumber orgmode oxc_parse rsa_4096 ed25519_default \
-           mimalloc libgit2 rustls_shake zstd_long)
+           mimalloc libgit2 rustls_shake zstd_long \
+           aws_lc mlua_lua tantivy sequoia_pgp sqlx_sqlite)
 fi
 # opencc（批7 波1，FFI 条目）：需 /tmp/opencc-local 前缀（OpenCC 1.1.9 自建，
 # 重建法见 driver 头注）+ 三 env；前缀缺席则本批跳过，不算红

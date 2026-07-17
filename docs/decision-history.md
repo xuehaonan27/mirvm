@@ -627,6 +627,42 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
    `__rust_alloc_error_handler` 路由未动（OOM 冷路径，仍按既有
    ③/Trap 语义；首次 workload 触达时再立项）。
 
+## 7.8. 2026-07-17：native-archive 生命周期分治 + LLVM `\x01` 前缀剥除（corpus 批8 c_aws_lc 撞开锁系列）
+
+1. **constructor 分治解码**：originally 一切生命周期段（.init/.fini/
+   .init_array/.fini_array/.preinit_array/.ctors/.dtors）全拒（"dlopen
+   生命周期语义尚未定义"）。批8 c_aws_lc 实锤：aws-lc-sys 全量无条件带
+   `.init_array`（do_library_init→OPENSSL_cpuid_setup）与 `.fini_array`——
+   与批7 c_mimalloc 的 `mi_process_attach` 同族（当时 CFLAGS 绕行）。
+   语义判定：**动态加载器的 DT_INIT 就是在 dlopen 时执行它们**，与 native
+   进程启动期 constructor 完全同构；mirvm 从不 dlclose ⇒ fini 永不执行 =
+   native exit 由 OS 回收。定案：`.init_array`/`.fini_array`/ctors/dtors
+   （含优先级）**放行**，旧式裸注入 `.init`/`.fini` 段 **仍拒**（执行语义
+   不可靠——仓库内单测实测即 DL 期 SIGSEGV；真实 workload 不供养）。
+   配套单测：拒绝例改验收例（DT_INIT 执行置位可证）。
+2. **LLVM `\x01` verbatim 前缀剥除**：aws-lc-sys 的 BORINGSSL_PREFIX 全符号
+   经 `#[link_name = "\u{1}aws_lc_..."]` 声明——`\x01` 是 LLVM 的 verbatim
+   标记，**物化（目标文件/动态符号表）只存去前缀名**；rustc 的
+   `symbol_name` 返回带前缀原名。lower 各 dlsym 口径（resolve_call /
+   foreign_fn_entry_addr / extern static / naked）此前逐字直查必然全域未
+   命中——统一 `canonical_link_name` 剥除一次。
+3. **P2 GOT 的键名去重盲点（自伤一记，P2 竣工当晚的漏网）**：
+   `foreign_fn_slot` 与 `foreign_alloc_sym` 的键名**未**走同一个剥除——
+   带前缀家族的 fn-ptr 条目槽查找 hit=None → func.rs Reify/Closure/const
+   全部退回烤 `Imm{lower 期 dlsym 地址}`——**跨进程腐旧 fn-ptr 值常驻字节
+   码**：运行撞死面呈 ASLR 运气（Heisenberg：同 driver 同缓存，两跑一崩
+   一活），崩点 = EVP_AEAD 派发表真实函数入口。修复 = 两处键名同剥。
+   教训：带 `\x01` 的 crate 系属稀有家族（aws-lc-sys/bindgen 产物），普通
+   corpus 全不命中——P2 的五例外来符号验收全绿而本例独漏，恰说明"用例
+   形态分布"保护性。**诊断链条记录**（对照今后同类调查）：segv-trace
+   preload（siginfo+ucontext）→ 栈顶两帧锁到 libffi 调用 → CallIndirect
+   native_sig 地址对表 nm 证实目标合法 → fn-ptr 值做同 run/跨 run 分型 →
+   lower 发射口径 GOT 槽查找 hit=None 一生成。结账一次到位，中间 4 次错误
+   分支（缓存/闭包/启动相/JIT）逐一实证排除。
+4. **验证**：c_aws_lc（含 238-crate sequoia 同波）冷/热×3 逐字节一致；
+   native-archive 12/12；gate5 全绿。c_mimalloc 的 ctor 绕行 CFLAGS 保留
+   （kernel：确定性无必要改）。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 - P7 设想独立 `src/os/` 物理层；当前 OS/FFI/builtin 逻辑仍分布在 lower、interp、ffi、heap。

@@ -261,7 +261,14 @@ fn materialize_for_target_in(
     if !bytes.starts_with(b"!<arch>\n") {
         return Err(format!("`{}` 不是受支持的 Unix ar 归档", archive.display()));
     }
-    reject_initializers(archive)?;
+    // 生命周期段分治（§7.8）：.init_array/.fini_array 一族**放行**——loader 的
+    // DT_INIT_ARRAY 语义 = native 进程启动期 constructor（aws-lc do_library_init /
+    // mimalloc mi_process_attach 实锤；mirvm 从不 dlclose，fini 无观察口）；
+    // 旧式 `.init`/`.fini` 段仍**拒**——那是把裸函数体注入初始化帧的旧 gcc 技艺，
+    // 注入内容无帧纪律、跨工具链执行语义本就脆（仓库内实测 DL 期 SIGSEGV）；
+    // 真实 workload（近年 C 库一族全走 constructor-attribute）不供养该项，
+    // 宁可响亮拒给诊断，不虚标支持。
+    reject_legacy_init_sections(archive)?;
     let cc_identity = compiler_identity(cc)?;
     // extra_libs（crate 图系统动态库 `-l<name>`）同时进缓存键与 cc 链接行——
     // 名单变化必须换缓存槽，旧闭包不得误命中（c_libgit2 修复的键纪律）
@@ -348,59 +355,44 @@ fn compiler_identity(cc: &Path) -> Result<Vec<u8>, String> {
     Ok(identity)
 }
 
-fn reject_initializers(archive: &Path) -> Result<(), String> {
+fn reject_legacy_init_sections(archive: &Path) -> Result<(), String> {
     let output = Command::new("readelf")
         .args(["--section-headers", "--wide"])
         .arg(archive)
         .output()
         .map_err(|e| {
             format!(
-                "无法检查静态原生归档 `{}` 的 constructor（启动 readelf 失败）: {e}",
+                "无法检查静态原生归档 `{}` 的 legacy init 段（启动 readelf 失败）: {e}",
                 archive.display()
             )
         })?;
     if !output.status.success() {
         return Err(format!(
-            "无法检查静态原生归档 `{}` 的 constructor（readelf 失败）:\n{}{}",
+            "无法检查静态原生归档 `{}` 的 legacy init 段（readelf 失败）:\n{}{}",
             archive.display(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ));
     }
     let sections = String::from_utf8_lossy(&output.stdout);
-    let has_lifecycle_section = sections
-        .lines()
-        .filter_map(readelf_section_name)
-        .any(is_lifecycle_section);
-    if has_lifecycle_section {
+    let has_legacy = sections.lines().filter_map(readelf_section_name).any(|n| {
+        n == ".init"
+            || n == ".fini"
+            || n
+                .strip_prefix(".init.")
+                .is_some_and(|s| s.chars().next().is_some_and(|c| c.is_ascii_digit()))
+            || n
+                .strip_prefix(".fini.")
+                .is_some_and(|s| s.chars().next().is_some_and(|c| c.is_ascii_digit()))
+    });
+    if has_legacy {
         return Err(format!(
-            "拒绝带 constructor/destructor section 的静态原生归档 `{}`：\
-             dlopen 生命周期语义尚未定义",
+            "拒绝带旧式 `.init`/`.fini` 段的静态原生归档 `{}`：\
+             注入裸函数体的旧 gcc 技艺执行语义不可靠（.init_array 一族已放行）",
             archive.display()
         ));
     }
     Ok(())
-}
-
-fn is_lifecycle_section(name: &str) -> bool {
-    if matches!(name, ".init" | ".fini") {
-        return true;
-    }
-    [
-        ".preinit_array",
-        ".init_array",
-        ".fini_array",
-        ".ctors",
-        ".dtors",
-    ]
-    .iter()
-    .copied()
-    .any(|prefix| {
-        name == prefix
-            || name
-                .strip_prefix(prefix)
-                .is_some_and(|suffix| suffix.starts_with('.'))
-    })
 }
 
 fn readelf_section_name(line: &str) -> Option<&str> {
@@ -590,41 +582,40 @@ mod tests {
     }
 
     #[test]
-    fn archive_constructor_is_rejected_instead_of_running_during_dlopen() {
-        let temp = TempDir::new("constructor");
+    fn constructor_runs_at_dlopen_after_lifecycle_guard_is_lifted() {
+        // §7.8：生命周期卫士解码——dlopen 的 DT_INIT_ARRAY 语义 = native 进程启动期
+        // constructor（aws-lc do_library_init / mimalloc mi_process_attach 两实锤）；
+        // mirvm 从不 dlclose，fini 无观察口（与 native exit 由 OS 回收同）。
+        let temp = TempDir::new("constructor-accepted");
         let archive = make_archive(
             temp.path(),
-            "static void boot(void) __attribute__((constructor));\n\
-             static void boot(void) {}\n\
-             unsigned long mirvm_constructor_probe(void) { return 9UL; }\n",
+            "static unsigned long mirvm_flag;\n\
+             static void boot(void) __attribute__((constructor));\n\
+             static void boot(void) { mirvm_flag = 42UL; }\n\
+             unsigned long mirvm_constructor_probe(void) { return mirvm_flag; }\n",
         );
 
-        let error = materialize_in(&archive, &temp.path().join("cache")).unwrap_err();
-        assert!(
-            error.contains("constructor"),
-            "unexpected diagnostic: {error}"
+        let so = materialize_in(&archive, &temp.path().join("cache")).unwrap();
+        let c_so = CString::new(so.as_os_str().as_encoded_bytes()).unwrap();
+        let handle = unsafe { libc::dlopen(c_so.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+        assert!(!handle.is_null(), "dlopen {} failed", so.display());
+        let symbol = c"mirvm_constructor_probe";
+        let address = unsafe { libc::dlsym(handle, symbol.as_ptr()) };
+        assert!(!address.is_null());
+        let probe: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(address) };
+        assert_eq!(
+            unsafe { probe() },
+            42,
+            "DT_INIT_ARRAY 必须已在 dlopen 时执行（constructor 置 42）"
         );
-    }
-
-    #[test]
-    fn prioritized_constructor_section_is_also_rejected() {
-        let temp = TempDir::new("priority-constructor");
-        let archive = make_archive(
-            temp.path(),
-            "static void boot(void) __attribute__((constructor(101)));\n\
-             static void boot(void) {}\n\
-             unsigned long mirvm_priority_constructor_probe(void) { return 17UL; }\n",
-        );
-
-        let error = materialize_in(&archive, &temp.path().join("cache")).unwrap_err();
-        assert!(
-            error.contains("constructor"),
-            "unexpected diagnostic: {error}"
-        );
+        unsafe { libc::dlclose(handle) };
     }
 
     #[test]
     fn legacy_elf_init_and_fini_sections_are_rejected() {
+        // §7.8 分治：旧式 `.init`/`.fini` 段维持拒（注入裸函数体的旧 gcc 技艺，
+        // 执行语义不可靠——本仓库实测 DL 期 SIGSEGV）；`.init_array` 一族已放行
+        //（见 constructor_runs_at_dlopen_after_lifecycle_guard_is_lifted）。
         let temp = TempDir::new("legacy-init-fini");
         for section in [".init", ".fini"] {
             let dir = temp.path().join(section.trim_start_matches('.'));
@@ -639,7 +630,7 @@ mod tests {
 
             let error = materialize_in(&archive, &dir.join("cache")).unwrap_err();
             assert!(
-                error.contains("constructor/destructor"),
+                error.contains("`.init`/`.fini`"),
                 "section {section} was not rejected: {error}"
             );
         }

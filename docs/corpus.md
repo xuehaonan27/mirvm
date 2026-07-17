@@ -475,6 +475,26 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
 - gate5 128→**139**，corpus 段批7 共 +22（opencc 留手工批；tree_sitter
   未接线待按值聚合转正）。三维铁律全程零例外放行。
 
+### 批8 波1（2026-07-17，重型 FFI/C 5 个；全绿可用：4 直接绿 / aws_lc 撞出已修复锁系列）
+
+- **绿**：mlua_lua（vendored lua54：跨 thunk longjmp 存活、lua_pushcclosure
+  与 __gc 销毁回调全通道——rocksdb 因 bindgen/libclang 缺席判不可的补位）、
+  tantivy（0.26.1 mmap 全特性：同时压出 **lddqu 两符号欠账（已修 a3a8d7e）**，
+  FAST 列面原绕行 InvertedIndexRangeQuery）、sequoia_pgp（2.4.1 crypto-rust
+  238 闭包；手工拼无盐 v4 签绕上游签名注记随机器）、sqlx_sqlite（sqlx+tokio
+  异步执行器 worker 线程通道 + bundled C sqlite 8.4.6）、aws_lc（1.17.1：
+  SHA/HMAC/HKDF/GCM/Ed25519/RSA 六族定向量）。
+- **撞出并当日修复的锁系列（decision-history §7.8）**：① constructor 分治
+  （lifecycle 全拒收窄为仅拒旧式 `.init`/`.fini` 裸注入段——aws-lc 的
+  do_library_init 与 mimalloc 的 mi_process_attach 两实锤后，DT_INIT 语义
+  判与 native constructor 同构）；② `#[link_name = "\u{1}..."]` LLVM 的
+  `\x01` verbatim 前缀统一剥除（aws-lc-sys BORINGSSL_PREFIX 全符号家族）；
+  ③ P2 GOT 键名去重盲点同剥（带前缀家族的 fn-ptr 常量原掉回烤 Imm——
+  跨进程腐旧地址 Heisenberg，EVP_AEAD 入口实锤）。全部修复后 c_aws_lc
+  冷/热×3 逐字节一致。
+- gate5 139→**144**（aws_lc/mlua_lua/tantivy/sequoia_pgp/sqlx_sqlite 入册；
+  tmo 对 aws_lc/tantivy/sequoia_pgp 放宽 300）。
+
 ## 6. 批7 候选清单（2026-07-17 定稿；**已全部投放，结果见 §5 批7**）
 
 ## 7. 批8 候选清单（2026-07-17 定稿，重型 10 个；工具链实勘后调整）

@@ -512,7 +512,7 @@ impl<'tcx> Linker<'tcx> {
     /// 值本体仍初填宿主真码址，但消费面经 GOT 槽读（P2，decision-history §7.5c）：
     /// 槽随模块序列化、启动相按名重填，模块对 ASLR 位置无关。
     fn foreign_fn_entry_addr(&mut self, inst: Instance<'tcx>) -> Result<u64, String> {
-        let name = self.tcx.symbol_name(inst).name;
+        let name = canonical_link_name(self.tcx.symbol_name(inst).name);
         // extern weak 缺席取址 = NULL（native 同语义）；weak 标记供 GOT 启动相
         // 未命中时写 0 而非终止
         let weak = self.tcx.codegen_fn_attrs(inst.def_id()).import_linkage
@@ -660,11 +660,11 @@ impl<'tcx> Linker<'tcx> {
                 // - 非 weak（environ 等数据符号）：alloc 基址 = dlsym 真地址
                 if self.tcx.is_foreign_item(def_id) {
                     // dlsym 用链接符号名（#[link_name] 前缀——ring 的 prefixed_extern
-                    // 静态量；item_name 会丢掉前缀），与 resolve_call 的 fn 路径同源
-                    let name = self
-                        .tcx
-                        .symbol_name(Instance::mono(self.tcx, def_id))
-                        .name;
+                    // 静态量；item_name 会丢掉前缀）与 LLVM verbatim `\x01` 剥除
+                    // （aws-lc-sys 一族，canonical_link_name），与 resolve_call 的 fn 路径同源
+                    let name = canonical_link_name(
+                        self.tcx.symbol_name(Instance::mono(self.tcx, def_id)).name,
+                    );
                     // extern block 内 item 的 linkage 在 import_linkage 字段
                     let weak = self.tcx.codegen_fn_attrs(def_id).import_linkage
                         == Some(rustc_hir::attrs::Linkage::ExternalWeak);
@@ -758,7 +758,7 @@ impl<'tcx> Linker<'tcx> {
                 // 分配——常量发码经 foreign_const_operand 出槽读、冻结字节经
                 // materialize_in 重定位登记修补点（槽本体 bake 已开）。
                 if self.tcx.is_foreign_item(instance.def_id()) {
-                    let name = self.tcx.symbol_name(instance).name;
+                    let name = canonical_link_name(self.tcx.symbol_name(instance).name);
                     let weak = self.tcx.codegen_fn_attrs(instance.def_id()).import_linkage
                         == Some(rustc_hir::attrs::Linkage::ExternalWeak);
                     self.foreign_alloc_sym.insert(id, (name.into(), weak));
@@ -910,7 +910,7 @@ impl<'tcx> Linker<'tcx> {
         if !self.tcx.is_foreign_item(inst.def_id()) {
             return None;
         }
-        let name = self.tcx.symbol_name(inst).name;
+        let name = canonical_link_name(self.tcx.symbol_name(inst).name);
         let ctx_image = self.split.as_ref().is_some_and(|s| s.current_image);
         self.foreign_slots.get(&(name.into(), ctx_image)).copied()
     }
@@ -1029,7 +1029,7 @@ impl<'tcx> Linker<'tcx> {
             return Err("dyn 虚调用派发（M4.1+）".into());
         }
         if self.tcx.is_foreign_item(inst.def_id()) {
-            let link_name = Symbol::intern(self.tcx.symbol_name(inst).name);
+            let link_name = Symbol::intern(canonical_link_name(self.tcx.symbol_name(inst).name));
             // ①引擎原语（alloc/unwind/stub/快路径直通）
             if let Some(&b) = self.builtins.get(&link_name) {
                 return Ok(Callee::Builtin(b));
@@ -1075,7 +1075,7 @@ impl<'tcx> Linker<'tcx> {
             .flags
             .contains(rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags::NAKED)
         {
-            let name = self.tcx.symbol_name(inst).name;
+            let name = canonical_link_name(self.tcx.symbol_name(inst).name);
             return self.freeze_foreign_sig(inst, name);
         }
         // 普通函数：worklist 闭包扩集（跨 crate 非泛型函数不在 collector 种子集）
@@ -1283,6 +1283,14 @@ pub(crate) fn ffi_kind_of<'tcx>(
         });
     }
     Err("非标量（按值聚合）".into())
+}
+
+/// LLVM verbatim 前缀 `\x01`（上游 crate 经 `#[link_name = "\u{1}..."]` 给符号
+/// 加的分组标记；目标文件/动态符号表只存**去前缀**名——corpus 批8 c_aws_lc
+/// 实锤的 aws-lc-sys BORINGSSL_PREFIX 全符号家族）。dlsym 查找口径必须同剥，
+/// 否则查 `\x01aws_lc_...` 必然全域未命中。
+pub(crate) fn canonical_link_name(name: &str) -> &str {
+    name.strip_prefix('\x01').unwrap_or(name)
 }
 
 /// ①引擎原语表：codegen 会为 allocator shim 生成的符号清单（tier-0/Miri 同款来源，
