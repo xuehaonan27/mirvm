@@ -238,8 +238,17 @@ pub(super) unsafe fn pmaddwd128(dst: *mut u8, a: *const u8, b: *const u8) {
     unsafe { _mm_storeu_si128(dst.cast::<__m128i>(), result) };
 }
 
+/// LDDQU 族（`llvm.x86.sse3.ldu.dq` / `llvm.x86.avx.ldu.dq.256`；
+/// `_mm_lddqu_si128` / `_mm256_lddqu_si256`）：语义 = 普通非对齐 16/32 字节
+/// load（与 loadu 逐位同义——lddqu 的未缓存跨行微优化提示在本模型无影响）。
+/// corpus 批8 c_tantivy 实锤补建（bitpacking avx2/termdict 列值读取派发点）。
+pub(super) unsafe fn lddqu<const W: usize>(dst: *mut u8, src: *const u8) {
+    unsafe { std::ptr::copy_nonoverlapping(src, dst, W) };
+}
+
 /// AVX2 `vpmaddwd`：每 128 位 lane 独立。
 #[target_feature(enable = "avx2")]
+
 pub(super) unsafe fn pmaddwd256(dst: *mut u8, a: *const u8, b: *const u8) {
     let a = unsafe { _mm256_loadu_si256(a.cast::<__m256i>()) };
     let b = unsafe { _mm256_loadu_si256(b.cast::<__m256i>()) };
@@ -598,10 +607,30 @@ pub(super) unsafe fn cvtph2ps<const LANES: usize>(dst: *mut u8, a: *const u8) {
 mod tests {
     use super::{
         aesdec, aesdeclast, aesenc, aesenclast, aesimc, aeskeygenassist, crc32_u8, crc32_u16,
-        crc32_u32, crc32_u64, gather_d_pd_256, gather_q_pd_256, pclmulqdq, permd256,
+        crc32_u32, crc32_u64, gather_d_pd_256, gather_q_pd_256, lddqu, pclmulqdq, permd256,
         pmaddubsw128, pmaddubsw256, pmaddwd128, pmaddwd256, psad_bw128, psad_bw256, pshufb128,
         pshufb256, sha256msg1, sha256msg2, sha256rnds2, vpmadd52,
     };
+
+    #[test]
+    fn lddqu_matches_unaligned_load_contract_and_hw() {
+        let buf: [u8; 40] = std::array::from_fn(|i| (i as u8).wrapping_mul(37).wrapping_add(11));
+        // 语义 = 非对齐 16/32 字节纯 load（与 loadu 逐位同义）
+        let mut got128 = [0u8; 16];
+        unsafe { lddqu::<16>(got128.as_mut_ptr(), buf.as_ptr().add(3)) };
+        assert_eq!(got128[..], buf[3..19]);
+        if std::is_x86_feature_detected!("sse3") {
+            let hw = unsafe { core::arch::x86_64::_mm_lddqu_si128(buf.as_ptr().add(3).cast()) };
+            assert_eq!(got128, unsafe { std::mem::transmute::<_, [u8; 16]>(hw) });
+        }
+        let mut got256 = [0u8; 32];
+        unsafe { lddqu::<32>(got256.as_mut_ptr(), buf.as_ptr().add(5)) };
+        assert_eq!(got256[..], buf[5..37]);
+        if std::is_x86_feature_detected!("avx") {
+            let hw = unsafe { core::arch::x86_64::_mm256_lddqu_si256(buf.as_ptr().add(5).cast()) };
+            assert_eq!(got256, unsafe { std::mem::transmute::<_, [u8; 32]>(hw) });
+        }
+    }
 
     #[test]
     fn pshufb_matches_its_portable_lane_definition() {

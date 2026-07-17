@@ -2810,6 +2810,21 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         }
                         true
                     }
+                    Builtin::X86Lddqu128 | Builtin::X86Lddqu256 => {
+                        let RetDest::Indirect(dst) = ret else {
+                            engine_abort("lddqu 返回形态不是 indirect vector");
+                        };
+                        let dst = eval_place_addr(ctx, base, dst) as *mut u8;
+                        let src = a(0) as *const u8;
+                        unsafe {
+                            if matches!(builtin, Builtin::X86Lddqu128) {
+                                super::x86::lddqu::<16>(dst, src)
+                            } else {
+                                super::x86::lddqu::<32>(dst, src)
+                            }
+                        }
+                        true
+                    }
                     Builtin::X86Cvtps2ph128 | Builtin::X86Cvtps2ph256 => {
                         let RetDest::Indirect(dst) = ret else {
                             engine_abort("vcvtps2ph 返回形态不是 indirect vector");
@@ -3122,6 +3137,8 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                     | Builtin::X86CvttPs2dq256
                     | Builtin::X86BlendvPs128
                     | Builtin::X86BlendvPs256
+                    | Builtin::X86Lddqu128
+                    | Builtin::X86Lddqu256
                     | Builtin::X86PsllD128
                     | Builtin::X86PsrlD128 => {
                         unreachable!("x86 vector builtin 已由 indirect vector 通道处理")

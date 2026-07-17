@@ -1524,6 +1524,15 @@ fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin> {
         Symbol::intern("llvm.x86.avx2.pmadd.wd"),
         ir::Builtin::X86PmaddWd256,
     );
+    // 族⑨ LDDQU（c_tantivy bitpacking/termdict 列值读取派发点）：ldu.dq 纯 load
+    out.insert(
+        Symbol::intern("llvm.x86.sse3.ldu.dq"),
+        ir::Builtin::X86Lddqu128,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.avx.ldu.dq.256"),
+        ir::Builtin::X86Lddqu256,
+    );
     // 族⑧ F16C（half 2.x 运行期探测后的 f16c 通道）
     out.insert(
         Symbol::intern("llvm.x86.vcvtps2ph.128"),

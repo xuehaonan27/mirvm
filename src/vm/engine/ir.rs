@@ -1079,6 +1079,11 @@ pub enum Builtin {
     /// 相邻 i16 对积之和放 i32（MIN×MIN+MIN×MIN 回绕为 i32::MIN，硬件定义）。
     X86PmaddWd128,
     X86PmaddWd256,
+    /// `llvm.x86.sse3.ldu.dq(p)`（`_mm_lddqu_si128`）：非对齐 16 字节纯 load
+    ///（语义与 loadu 逐位同义；corpus 批8 c_tantivy 实锤补建）。
+    X86Lddqu128,
+    /// `llvm.x86.avx.ldu.dq.256(p)`（`_mm256_lddqu_si256`）：同形 32 字节。
+    X86Lddqu256,
     /// `llvm.x86.vcvtps2ph.128(a, rounding)`（`_mm_cvtps_ph`）：f32x4 → f16x4 打包
     /// 进低 64 位、高 64 位清零。`rounding`：imm[2]=0 → imm[1:0] 舍入模式
     /// （0=RNE/1=floor/2=ceil/3=trunc）；imm[2]=1 → MXCSR.RC（引擎恒宿默认 RNE）。
