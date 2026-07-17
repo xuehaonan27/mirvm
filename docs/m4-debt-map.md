@@ -154,3 +154,23 @@ LD_ST 表即解。随 S2 键链入 L2（物化产物按 asm_sites 同契约 warm
 仅对命中 crate 关掉 `-Zno-codegen`（让它的 rlib 带 object 走 archive 通道）——
 改装面在 cargo_shim 构建指令，不改 lower；成本 = 只对 psm/pulp 一族付 codegen。
 真 workload 触发前不接（faer 已有官方标量后门，不算阻塞）。
+
+## 8. JIT 间接调用准入（CallIndirect/CallForeign/CallBuiltin 未进编译道，2026-07-17 记）
+
+**现象**：`jit_compile.rs::admit` 的终止子白名单只放 Goto/Return/Unreachable/
+SwitchInt/Call（`Call` 还要求 unwind=Continue + 返回值 Ignore/Scalar），
+**CallIndirect、CallForeign、CallBuiltin 一律拒收**——含间接调用/FFI/内建
+调用的函数体整体退回解释道。因此 fn-ptr 调用点（vtable 派发、回调、qsort
+比较子等）永远是解释速度；MIRVM_JIT_THRESHOLD=1 三维对拍不受影响（语义
+同源），但热点间接调用将来必上性能账单。
+
+**与 P1 的关系**：P1（fn 条目可执行化，decision-history §7.5b）让 fn-ptr
+**值**变成真码地址，宿主/解释器拿到都能跳；但 JIT 编译体**内部**没有间接
+派发道，编译体遇 CallIndirect 仍然整体不被编译。P1 不解决本项，本项也不
+阻塞 P1——两者正交，P1 先把"跳崖"治掉，本项是后续的速度项。
+
+**可行路径（未立项，性能工作重启时排）**：①编译体的 CallIndirect 编译为
+"反查 fn_addrs 命中 → 经 PLT 槽快路直调编译体 / 未命中 → c2i 回解释"（与
+直接调用同套蹦床基建，反查可用缓存行内联 last-1）；②CallForeign 编译道
+（libffi 调用点 CLIF 化或预物化 stub）；③CallBuiltin 逐内建评估（HostWrite
+等直通族优先）。准入扩面时先扩 admit + 三维验收，alpha 铁律不变。

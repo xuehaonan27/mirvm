@@ -14,6 +14,11 @@ cd "$(dirname "$0")/.."
 MIRVM=${MIRVM:-$(pwd)/target/release/mirvm}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+# gix 写 reflog 需要提交者身份（corpus c_gix_pure；commit 哈希由 driver 内
+# 固定签名决定，此身份只进 reflog，不进任何可比输出）——不依赖宿主
+# ~/.gitconfig，任何机器/CI 同一口径（换机实锤：无 gitconfig 即 MissingCommitter）。
+export GIT_AUTHOR_NAME=mirvm-test GIT_AUTHOR_EMAIL=mirvm@test.local
+export GIT_COMMITTER_NAME=mirvm-test GIT_COMMITTER_EMAIL=mirvm@test.local
 pass=0 xfail=0 skip_count=0 fail=0
 ok()  { pass=$((pass + 1)); echo "PASS $*"; }
 red() { xfail=$((xfail + 1)); echo "XFAIL $*"; }
