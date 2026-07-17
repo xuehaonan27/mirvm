@@ -55,7 +55,8 @@ parquet2_rw syntect_fancy phonenumber orgmode oxc_parse rsa_4096 ed25519_default
 mimalloc libgit2 rustls_shake zstd_long \
 aws_lc mlua_lua tantivy sequoia_pgp sqlx_sqlite \
 swc_parse miden_exec polodb starlark_eval \
-zune_jpeg candle_mlp pest scraper_dom arrow_rs fontdue unicode_rs rustpython_mini"}
+zune_jpeg candle_mlp pest scraper_dom arrow_rs fontdue unicode_rs rustpython_mini \
+tree_sitter"}
 # jieba_cut 全绿但 mirvm 单跑 77-89s（贴 90s timeout），留 corpus.sh 手工跑批
 # opencc（批7 波1）三维已绿但不进 gate5：依赖机器侧 /tmp/opencc-local
 # （OpenCC 1.1.9 自建前缀，driver 头注有重建法）——留 corpus.sh 手工批（有 gating）

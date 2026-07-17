@@ -1140,7 +1140,7 @@ pub enum Builtin {
 }
 
 /// libffi 直通的参数/返回类别（lower 期从 fn sig layout 冻结；os:: P7 直通处置）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum FfiKind {
     I8,
     I16,
@@ -1154,6 +1154,34 @@ pub enum FfiKind {
     F64,
     Ptr,
     Void,
+    /// 按值聚合（C1）：字节按 rustc layout 在两侧内存以**真地址**交接——
+    /// 出向 = libffi avalue 直指 guest 内存并自行 eightbyte 注册编组；
+    /// 入向 = closure avalue 指向字节，marshal 按 callee ParamAbi 映射
+    /// （Indirect 传址 / Scalar·Pair 按 FfiAgg 声明序字段读值）。
+    Agg(FfiAgg),
+}
+
+/// C1 按值聚合的冻结布局（rustc layout 展开；声明序字段，padding 隐含于偏移）。
+/// align ≤ 8 是施工边界（结果缓冲按 8 对齐分配）。
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct FfiAgg {
+    pub size: u32,
+    pub align: u32,
+    pub fields: Vec<FfiField>,
+}
+
+/// C1 聚合字段：偏移 + 叶子（递归嵌套；ZST 成员不入列，padding 靠 size/off 保持）。
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct FfiField {
+    pub off: u32,
+    pub leaf: FfiLeaf,
+}
+
+/// C1 聚合叶子：标量或嵌套聚合（ScalarPair {ptr,len} / 内层结构同型展开）。
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum FfiLeaf {
+    Scalar(FfiKind),
+    Agg(FfiAgg),
 }
 
 /// Bin128 的右操作数：128 位 place 或 ≤64 位标量（Shl/Shr 的移位量）。

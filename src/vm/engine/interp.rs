@@ -19,9 +19,9 @@ use std::sync::Mutex;
 use super::ctx::{Ctx, Shared};
 use super::frame::ByteRegion;
 use super::ir::{
-    Bb, Block, FuncBody, IntBinOp, IntCc, Module, Operand, OvfOp, ParamAbi, PlaceBase, PlaceExpr,
-    PlaceStep, RetAbi, RetDest, Rvalue, ScalarPlace, Slot, Stmt, SwitchDiscr, Terminator,
-    UnwindAction, Width,
+    Bb, Block, FfiAgg, FfiKind, FfiLeaf, FuncBody, IntBinOp, IntCc, Module, Operand, OvfOp,
+    ParamAbi, PlaceBase, PlaceExpr, PlaceStep, RetAbi, RetDest, Rvalue, ScalarPlace, Slot, Stmt,
+    SwitchDiscr, Terminator, UnwindAction, Width,
 };
 
 /// guest panic 的宿主载体（spike3 协议）：exception = guest 侧 `_Unwind_Exception` 指针
@@ -213,7 +213,7 @@ pub(crate) fn mem_write_volatile(addr: u64, src: u64, size: u32) {
 }
 
 /// 引擎诊断退出（M4.0：Trap/Assert 失败/除零统一走这里；M4.2 起 Assert 变真 panic）。
-fn engine_abort(what: &str) -> ! {
+pub(crate) fn engine_abort(what: &str) -> ! {
     eprintln!("mirvm[m4-engine]: {what}");
     exit(70)
 }
@@ -2043,8 +2043,8 @@ fn signal_thunk(ctx: *mut Ctx, signum: libc::c_int, handler: u64) -> libc::sigha
     };
     // 信号 handler ABI = `extern "C" fn(c_int)`；thunk 工厂造真码入口 + 边界 attach。
     let sig = super::ir::ForeignSig {
-        args: vec![super::ir::FfiKind::I32],
-        ret: super::ir::FfiKind::Void,
+        args: vec![FfiKind::I32],
+        ret: FfiKind::Void,
         fixed: None,
         thunk_args: vec![],
     };
@@ -2236,6 +2236,107 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
         }
     }
     interp_frame(ctx, func, args)
+}
+
+/// C1：FnId 的返回通道（thunk 分流——Indirect sret 直传 vs 小档重打包的判定源）。
+pub(crate) fn ret_abi_of(ctx: *mut Ctx, func: u32) -> RetAbi {
+    let module: &Module = unsafe { &(*(*ctx).shared).module };
+    module.funcs[func as usize].ret
+}
+
+/// C1 FFI 入向封送：C 侧实参（marshal_args 产出——标量原样 / 聚合 = 聚合字节
+/// 真地址）按 callee ParamAbi 展开成 ABI 实参槽后 `call_guest`（thunk 工厂与
+/// P1 条目蹦床共用）。ret_addr = 按值聚合返回时 libffi 的结果缓冲地址——仅当
+/// callee RetAbi::Indirect 时作隐藏首实参槽（sret 直传）；小档由调用方对
+/// (lo,hi) 做 FfiAgg 重打包。
+pub(crate) fn call_guest_ffi(
+    ctx: *mut Ctx,
+    func: u32,
+    kinds: &[FfiKind],
+    vals: &[u64],
+    ret_addr: Option<u64>,
+) -> (u64, u64) {
+    let module: &Module = unsafe { &(*(*ctx).shared).module };
+    let body: &FuncBody = &module.funcs[func as usize];
+    let mut av: Vec<u64> = Vec::with_capacity(vals.len() + body.params.len() + 1);
+    if let RetAbi::Indirect { .. } = body.ret {
+        av.push(
+            ret_addr.expect("C1：callee 按值聚合返回（RetAbi::Indirect）但无结果地址"),
+        );
+    }
+    let mut ki = 0usize;
+    for p in &body.params {
+        match p {
+            ParamAbi::Zst => {}
+            ParamAbi::Scalar(_) => match kinds.get(ki) {
+                Some(FfiKind::Agg(agg)) => {
+                    av.push(unsafe { agg_leaf_at(*vals.get_unchecked(ki), agg, 0) });
+                    ki += 1;
+                }
+                Some(_) => {
+                    av.push(vals[ki]);
+                    ki += 1;
+                }
+                None => {
+                    engine_abort(&format!("C1 封送缺参（callee fn {} params {:?}）", body.name, body.params))
+                }
+            },
+            ParamAbi::Pair(_, _) => match kinds.get(ki) {
+                Some(FfiKind::Agg(agg)) => {
+                    av.push(unsafe { agg_leaf_at(*vals.get_unchecked(ki), agg, 0) });
+                    av.push(unsafe { agg_leaf_at(*vals.get_unchecked(ki), agg, 1) });
+                    ki += 1;
+                }
+                _ => engine_abort(&format!(
+                    "C1 封送错配：callee `Pair` 参数遇到非标量 C 参（fn {} params {:?} kinds {:?}）",
+                    body.name, body.params, kinds
+                )),
+            },
+            ParamAbi::Indirect { .. } => match kinds.get(ki) {
+                Some(FfiKind::Agg(_)) => {
+                    av.push(vals[ki]);
+                    ki += 1;
+                }
+                _ => engine_abort(&format!(
+                    "C1 封送错配：callee 按址参数遇到非标量 C 参（fn {} params {:?} kinds {:?}）",
+                    body.name, body.params, kinds
+                )),
+            },
+        }
+    }
+    if ki != vals.len() {
+        engine_abort(&format!(
+            "C1 封送槽数错配：callee fn {} 消费 {ki}，marshal 供 {}",
+            body.name,
+            vals.len()
+        ));
+    }
+    call_guest(ctx, func, &av)
+}
+
+/// 读聚合声明序第 idx 个字段的值（Scalar 叶按宽度读；顶层嵌套叶与 Pair/Scalar
+/// 参数形态结构性互斥——同 rustc layout 推导，出现即引擎不变量破坏）。
+unsafe fn agg_leaf_at(addr: u64, agg: &FfiAgg, idx: usize) -> u64 {
+    let Some(f) = agg.fields.get(idx) else {
+        engine_abort("C1 封送：Pair 参数遇单字段聚合");
+    };
+    let FfiLeaf::Scalar(k) = &f.leaf else {
+        engine_abort("C1 封送：顶层嵌套叶遇 Pair 参数");
+    };
+    let p = addr.wrapping_add(f.off as u64) as *const u8;
+    unsafe {
+        match k {
+            FfiKind::I8 | FfiKind::U8 => p.read() as u64,
+            FfiKind::I16 | FfiKind::U16 => (p as *const u16).read_unaligned() as u64,
+            FfiKind::I32 | FfiKind::U32 | FfiKind::F32 => {
+                (p as *const u32).read_unaligned() as u64
+            }
+            FfiKind::I64 | FfiKind::U64 | FfiKind::F64 | FfiKind::Ptr => {
+                (p as *const u64).read_unaligned()
+            }
+            FfiKind::Void | FfiKind::Agg(_) => engine_abort("C1 封送：非法叶类"),
+        }
+    }
 }
 
 /// 模型 A：guest 调用 = 宿主递归（spike1/3 验证的形状）。
@@ -2440,6 +2541,13 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 edge.set(cleanup_edge(unwind));
                 let optional_libs: &[Box<str>] = &module.native_libs;
                 let required_libs: &[Box<str>] = &module.required_native_libs;
+                // C1：按值聚合返回 = Indirect 落点（调用点强制），ffi 层 memcpy 至
+                // 目的真地址；标量返回照旧走 u64 通道
+                let ret_dst = if let RetDest::Indirect(dst) = ret {
+                    Some(eval_place_addr(ctx, base, dst))
+                } else {
+                    None
+                };
                 // D8a：guest 线程栈放大。解释帧宿主成本数十倍于 native 帧，按 guest
                 // attr 原样创建的线程会在远浅于 native 的深度打穿宿主栈（SIGSEGV 而非
                 // 诊断）。显式 stacksize（std::thread 恒显式）临时放大，调用后还原；
@@ -2447,7 +2555,7 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 let stack_restore = super::ffi::amplify_pthread_stack(sym, &av);
                 let r = {
                     let ffi = unsafe { &mut (*ctx).ffi };
-                    super::ffi::call(ffi, optional_libs, required_libs, sym, sig, &av)
+                    super::ffi::call(ffi, optional_libs, required_libs, sym, sig, &av, ret_dst)
                 };
                 if let Some((attr, orig)) = stack_restore {
                     unsafe { libc::pthread_attr_setstacksize(attr, orig) };
@@ -2468,6 +2576,8 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 match ret {
                     RetDest::Ignore => {}
                     RetDest::Scalar(p) => place_write(ctx, base, p, r),
+                    // C1：按值聚合字节已由 ffi 层 memcpy 至 dst
+                    RetDest::Indirect(_) => {}
                     other => engine_abort(&format!("foreign 返回形态 {other:?} 未支持")),
                 }
                 blk = *target as usize;
@@ -2502,8 +2612,18 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                     call_guarding_terminate(unwind, || call_guest(ctx, fid, &av))
                 } else if let Some(nsig) = native_sig {
                     // FFI 反方向之二（M4.4）：guest 持 native 真码 fn ptr（运行期
-                    // dlsym 所得，如 __pthread_get_minstack）→ 按冻结签名直调
-                    (super::ffi::call_addr(addr as usize, nsig, &av), 0)
+                    // dlsym 所得，如 __pthread_get_minstack）→ 按冻结签名直调。
+                    // C1：native_sig 聚合返回时首槽即目的地址（调用点已按
+                    // RetDest::Indirect 压栈；libffi sret 不占参数位，剔除后直调）
+                    let (ret_dst, arg_slice) = if matches!(nsig.ret, FfiKind::Agg(_)) {
+                        (av.first().copied(), &av[1..])
+                    } else {
+                        (None, &av[..])
+                    };
+                    (
+                        super::ffi::call_addr(addr as usize, nsig, arg_slice, ret_dst),
+                        0,
+                    )
                 } else {
                     engine_abort(&format!(
                         "间接调用目标 {addr:#x} 不是已知 fn 条目（调用者 {}）",
@@ -3034,12 +3154,12 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                                 call_fn_addr(ctx, cleanup, &av, "_Unwind_DeleteException");
                             } else {
                                 let sig = super::ir::ForeignSig {
-                                    args: vec![super::ir::FfiKind::I32, super::ir::FfiKind::Ptr],
-                                    ret: super::ir::FfiKind::Void,
+                                    args: vec![FfiKind::I32, FfiKind::Ptr],
+                                    ret: FfiKind::Void,
                                     fixed: None,
                                     thunk_args: vec![],
                                 };
-                                super::ffi::call_addr(cleanup as usize, &sig, &av);
+                                super::ffi::call_addr(cleanup as usize, &sig, &av, None);
                             }
                         }
                         0

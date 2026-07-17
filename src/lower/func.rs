@@ -2808,7 +2808,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         target: Option<mir::BasicBlock>,
         unwind: mir::UnwindAction,
     ) -> Result<(Vec<Stmt>, Terminator), String> {
-        // 变参 foreign：尾参 FfiKind 按调用点实参冻结
+        // 变参 foreign：尾参 FfiKind 按调用点实参冻结（尾参位聚合 = C1 边界，响亮拒绝）
         let variadic_foreign = matches!(
             &ct,
             CallTarget::Direct(Callee::Foreign { variadic: true, .. })
@@ -2816,6 +2816,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
         let mut tail_kinds: Vec<ir::FfiKind> = Vec::new();
         let mut pre: Vec<Stmt> = Vec::new();
         let mut ir_args = Vec::new();
+        // C1：foreign/native_sig 按位置查 FfiKind——聚合参数不按标量/pair 拆槽，
+        // 改取 place 真地址（libffi avalue 直指连续字节）
+        let ffi_arg_kinds: Option<&[ir::FfiKind]> = match &ct {
+            CallTarget::Direct(Callee::Foreign { args: fixed, .. }) => Some(fixed),
+            CallTarget::Indirect(_, Some(sig)) => Some(&sig.args),
+            _ => None,
+        };
         for (i, a) in args.iter().enumerate() {
             if i == 0
                 && let Some(o) = &first_override
@@ -2831,24 +2838,51 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
                 continue;
             }
+            let agg_pos = matches!(
+                ffi_arg_kinds.and_then(|ks| ks.get(i)),
+                Some(ir::FfiKind::Agg(_))
+            );
             match self.lower_operand(&a.node) {
                 Ok(LoweredOp::Zst) => {}
-                Ok(LoweredOp::Scalar(o)) => {
+                Ok(LoweredOp::Scalar(o)) if !agg_pos => {
                     if variadic_foreign {
                         let t = self.op_ty(&a.node)?;
-                        tail_kinds.push(
-                            super::ffi_kind_of(self.tcx, self.typing_env, t)
-                                .map_err(|e| format!("变参实参 {t}: {e}"))?,
-                        );
+                        let k = super::ffi_kind_of(self.tcx, self.typing_env, t)
+                            .map_err(|e| format!("变参实参 {t}: {e}"))?;
+                        if matches!(k, ir::FfiKind::Agg(_)) {
+                            return Err(format!("变参尾参按值聚合（{t}，C1 边界）"));
+                        }
+                        tail_kinds.push(k);
                     }
                     ir_args.push(o);
                 }
-                Ok(LoweredOp::Pair(l, h)) => {
+                Ok(LoweredOp::Pair(l, h)) if !agg_pos => {
                     ir_args.push(l);
                     ir_args.push(h);
                 }
                 Ok(LoweredOp::Bytes { place, .. }) => {
                     ir_args.push(Operand::AddrOf(place.expr()));
+                }
+                Ok(LoweredOp::Scalar(_) | LoweredOp::Pair(..)) => {
+                    // C1 按值聚合实参（≤16B 经 lower_operand 拆成 scalar/pair 槽）：
+                    // 该 MIR 实参是个 place（move/copy），整个值在 guest 帧连续内存——
+                    // 直接取 place 真地址交给 libffi avalue
+                    let Some(pl) = a.node.place() else {
+                        pre.push(Stmt::Trap(
+                            "C1 按值聚合实参非 place（常量展开未接）".to_string().into_boxed_str(),
+                        ));
+                        ir_args.clear();
+                        break;
+                    };
+                    let dp = match self.resolve_place(&pl) {
+                        Ok(dp) => dp,
+                        Err(e) => {
+                            pre.push(Stmt::Trap(format!("C1 实参落点: {e}").into_boxed_str()));
+                            ir_args.clear();
+                            break;
+                        }
+                    };
+                    ir_args.push(Operand::AddrOf(dp.expr()));
                 }
                 Err(e) => {
                     pre.push(Stmt::Trap(format!("调用实参: {e}").into_boxed_str()));
@@ -2863,7 +2897,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         {
             ir_args.push(loc);
         }
-        // 返回落点（ABI v2 四路）
+            // 返回落点（ABI v2 四路）
         let ret = if pre.is_empty() {
             match self.resolve_place(destination).and_then(|dp| {
                 let kind = self.classify(dp.ty)?;
@@ -2884,6 +2918,32 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
         } else {
             RetDest::Ignore
+        };
+        // C1：foreign/native_sig 的按值聚合返回强制 Indirect 落点（libffi 依结构
+        // 类型把结构体字节写进结果缓冲，interp 层 memcpy 至 dst）——≤16B pair 档
+        // 与 >16B sret 档统一此路
+        let ret = if matches!(
+            &ct,
+            CallTarget::Direct(Callee::Foreign {
+                ret: ir::FfiKind::Agg(_),
+                ..
+            }) | CallTarget::Indirect(
+                _,
+                Some(ir::ForeignSig {
+                    ret: ir::FfiKind::Agg(_),
+                    ..
+                })
+            )
+        ) {
+            match self.resolve_place(destination) {
+                Ok(dp) => RetDest::Indirect(dp.expr()),
+                Err(e) => {
+                    pre.push(Stmt::Trap(format!("C1 返回落点: {e}").into_boxed_str()));
+                    RetDest::Ignore
+                }
+            }
+        } else {
+            ret
         };
         // 发散调用（target=None）→ 合成 Unreachable 落点块
         let tgt = match target {

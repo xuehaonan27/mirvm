@@ -5,8 +5,8 @@
 # 新增 track_caller_fn_ptr/u128_switch/volatile_wide；M5.2 起含 intrinsic_probe/
 # recursion_deep/simd_probe/atomic_order_probe/float_wide_probe/asm_extras_probe/signal_probe/fork_exec_probe/nested_dst_probe/wide_int_probe）。
 # P1 起含 struct_fnptr_escape（结构体内嵌 fn-ptr 逃逸负对照，31/31）。
-# 第 0 步起含 weak_extern/global_asm_guest_fn；批9 起含 zst_drop（JIT 0 字节帧
-# ZST 取址 force 档回归，34/34）。
+# 第 0 步起含 weak_extern/global_asm_guest_fn；批9 起含 zst_drop；C1 起含
+# ffi_agg_probe（按值聚合 FfiAgg 合成矩阵 35/35）。
 # ecosystem/ffi_zlib 是 frontmatter/cargo
 # 形态（引擎 cargo 接线 M4.5），diff.sh 同样 SKIP（见 diff_cargo.sh）。
 set -u

@@ -35,12 +35,15 @@ struct ThunkData {
 
 /// 按声明宽度搬实参（trampoline/entry_trampoline 共用；closure 实参槽只保证
 /// 声明宽度有效；引擎值 = 宽度掩码位，LE）。
+/// C1：聚合参数 = closure avalue 恒指向聚合字节（各档同形）→ 传**字节真地址**，
+/// callee 侧 ParamAbi 展开由 interp::call_guest_ffi 按 FfiAgg 映射。
 unsafe fn marshal_args(kinds: &[FfiKind], args: *const *const c_void) -> Vec<u64> {
     let mut av: Vec<u64> = Vec::with_capacity(kinds.len());
-    for (i, &k) in kinds.iter().enumerate() {
+    for (i, k) in kinds.iter().enumerate() {
         let p = unsafe { *args.add(i) } as *const u8;
         let v = unsafe {
             match k {
+                FfiKind::Agg(_) => p as u64,
                 FfiKind::I8 | FfiKind::U8 => p.read() as u64,
                 FfiKind::I16 | FfiKind::U16 => (p as *const u16).read_unaligned() as u64,
                 FfiKind::I32 | FfiKind::U32 | FfiKind::F32 => {
@@ -57,9 +60,46 @@ unsafe fn marshal_args(kinds: &[FfiKind], args: *const *const c_void) -> Vec<u64
     av
 }
 
+/// C1：按值聚合返回（ret = Agg，callee RetAbi **非** Indirect 的小档）重打包——
+/// (lo,hi) 按 FfiAgg 声明序字段写回结构体字节（先整面清零保 padding，字段位再覆
+/// 写；与 libffi rvalue 的 SysV 字节像逐位一致）。顶层嵌套叶与 Pair/Scalar 返回
+/// 通道结构性互斥（同 rustc layout 推导——出现即引擎不变量破坏）。
+unsafe fn repack_ret(result: *mut u8, agg: &super::ir::FfiAgg, lo: u64, hi: u64) {
+    unsafe { std::ptr::write_bytes(result, 0, agg.size as usize) };
+    for (i, f) in agg.fields.iter().enumerate() {
+        let (v, leaf) = match i {
+            0 => (lo, &f.leaf),
+            1 => (hi, &f.leaf),
+            _ => super::interp::engine_abort("C1 重打包：>2 顶层字段遇 Pair/Scalar 返回通道"),
+        };
+        let super::ir::FfiLeaf::Scalar(k) = leaf else {
+            super::interp::engine_abort("C1 重打包：顶层嵌套叶遇 Pair/Scalar 返回通道");
+        };
+        let dst = unsafe { result.add(f.off as usize) };
+        unsafe {
+            match k {
+                FfiKind::I8 | FfiKind::U8 => dst.write(v as u8),
+                FfiKind::I16 | FfiKind::U16 => (dst as *mut u16).write_unaligned(v as u16),
+                FfiKind::I32 | FfiKind::U32 | FfiKind::F32 => {
+                    (dst as *mut u32).write_unaligned(v as u32)
+                }
+                FfiKind::I64 | FfiKind::U64 | FfiKind::F64 | FfiKind::Ptr => {
+                    (dst as *mut u64).write_unaligned(v)
+                }
+                FfiKind::Void | FfiKind::Agg(_) => {
+                    super::interp::engine_abort("C1 重打包：非法叶类")
+                }
+            }
+        }
+    }
+}
+
 /// trampoline（libffi Closure 回调，任意线程可入）：attach → 按签名搬实参 → 解释
-/// → 返回值写回。返回缓冲恒 8 字节（整数升位到 ffi_arg / F32 位在低 32，LE）。
-/// guest panic 穿出此边界 = extern "C" nounwind abort（与 native 一致，设计 §4 风险表）。
+/// → 返回值写回。返回缓冲恒对齐（整数升位到 ffi_arg / F32 位在低 32，LE）。
+/// C1：ret = Agg 时分流——callee RetAbi::Indirect → result 经 call_guest_ffi 作
+/// 隐藏首实参（sret 直传，callee memcpy 至该址）；其余 → (lo,hi) 后 repack_ret
+/// 重打包为结构体字节。guest panic 穿出此边界 = extern "C" nounwind abort
+///（与 native 一致，设计 §4 风险表）。
 unsafe extern "C" fn trampoline(
     _cif: &ffi_cif,
     result: &mut u64,
@@ -67,10 +107,29 @@ unsafe extern "C" fn trampoline(
     data: &ThunkData,
 ) {
     let ctx = super::ctx::attach(data.shared);
-    let av = marshal_args(&data.args, args);
-    let (lo, _hi) = super::interp::call_guest(ctx, data.func, &av);
-    if data.ret != FfiKind::Void {
-        *result = lo;
+    let av = unsafe { marshal_args(&data.args, args) };
+    match &data.ret {
+        FfiKind::Agg(agg) => {
+            let (lo, hi) = super::interp::call_guest_ffi(
+                ctx,
+                data.func,
+                &data.args,
+                &av,
+                Some(result as *mut u64 as u64),
+            );
+            if !matches!(
+                super::interp::ret_abi_of(ctx, data.func),
+                super::ir::RetAbi::Indirect { .. }
+            ) {
+                unsafe { repack_ret(result as *mut u64 as *mut u8, agg, lo, hi) };
+            }
+        }
+        _ => {
+            let (lo, _hi) = super::interp::call_guest_ffi(ctx, data.func, &data.args, &av, None);
+            if data.ret != FfiKind::Void {
+                *result = lo;
+            }
+        }
     }
 }
 
@@ -82,14 +141,14 @@ pub fn get_or_create(shared: &'static Shared, entry: u64, func: FuncId, sig: &Fo
         return code;
     }
     let cif = Cif::new(
-        sig.args.iter().map(|&k| super::ffi::ffi_type(k)),
-        super::ffi::ffi_type(sig.ret),
+        sig.args.iter().map(super::ffi::ffi_type),
+        super::ffi::ffi_type(&sig.ret),
     );
     let data: &'static ThunkData = Box::leak(Box::new(ThunkData {
         shared,
         func,
         args: sig.args.clone().into(),
-        ret: sig.ret,
+        ret: sig.ret.clone(),
     }));
     let closure = Closure::new(cif, trampoline, data);
     let code = *closure.code_ptr() as usize as u64;
@@ -120,7 +179,7 @@ struct EntryThunkData {
 }
 
 /// 条目 stub 的统一蹦床：attach → 搬参 → 解释 → 写回（trampoline 同款边界
-/// 纪律；panic 穿出 = abort）。
+/// 纪律；panic 穿出 = abort）。C1：ret = Agg 的分流与重打包同 trampoline。
 unsafe extern "C" fn entry_trampoline(
     _cif: &ffi_cif,
     result: &mut u64,
@@ -130,10 +189,29 @@ unsafe extern "C" fn entry_trampoline(
     let shared = ENTRY_SHARED.load(Ordering::SeqCst) as *const Shared;
     assert!(!shared.is_null(), "条目 stub 在 Shared 发布前被调（引擎不变量）");
     let ctx = super::ctx::attach(unsafe { &*shared });
-    let av = marshal_args(&data.args, args);
-    let (lo, _hi) = super::interp::call_guest(ctx, data.func, &av);
-    if data.ret != FfiKind::Void {
-        *result = lo;
+    let av = unsafe { marshal_args(&data.args, args) };
+    match &data.ret {
+        FfiKind::Agg(agg) => {
+            let (lo, hi) = super::interp::call_guest_ffi(
+                ctx,
+                data.func,
+                &data.args,
+                &av,
+                Some(result as *mut u64 as u64),
+            );
+            if !matches!(
+                super::interp::ret_abi_of(ctx, data.func),
+                super::ir::RetAbi::Indirect { .. }
+            ) {
+                unsafe { repack_ret(result as *mut u64 as *mut u8, agg, lo, hi) };
+            }
+        }
+        _ => {
+            let (lo, _hi) = super::interp::call_guest_ffi(ctx, data.func, &data.args, &av, None);
+            if data.ret != FfiKind::Void {
+                *result = lo;
+            }
+        }
     }
 }
 
@@ -146,13 +224,13 @@ fn materialize_domain(
 ) -> Result<(), String> {
     for site in sites {
         let cif = Cif::new(
-            site.sig.args.iter().map(|&k| super::ffi::ffi_type(k)),
-            super::ffi::ffi_type(site.sig.ret),
+            site.sig.args.iter().map(super::ffi::ffi_type),
+            super::ffi::ffi_type(&site.sig.ret),
         );
         let data: &'static EntryThunkData = Box::leak(Box::new(EntryThunkData {
             func: site.func,
             args: site.sig.args.clone().into(),
-            ret: site.sig.ret,
+            ret: site.sig.ret.clone(),
         }));
         let closure = Closure::new(cif, entry_trampoline, data);
         let code = *closure.code_ptr() as usize as u64;

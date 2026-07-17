@@ -175,7 +175,7 @@ pub(crate) fn resolve_got_fixups(module: &mut super::ir::Module) -> Result<(), S
     Ok(())
 }
 
-pub(super) fn ffi_type(k: FfiKind) -> FfiType {
+pub(super) fn ffi_type(k: &FfiKind) -> FfiType {
     match k {
         FfiKind::I8 => FfiType::i8(),
         FfiKind::I16 => FfiType::i16(),
@@ -189,7 +189,21 @@ pub(super) fn ffi_type(k: FfiKind) -> FfiType {
         FfiKind::F64 => FfiType::f64(),
         FfiKind::Ptr => FfiType::pointer(),
         FfiKind::Void => FfiType::void(),
+        FfiKind::Agg(agg) => ffi_type_agg(agg),
     }
+}
+
+/// C1：冻结聚合 → libffi 结构类型（递归嵌套；size/align 由 libffi 依字段自洽计算）。
+fn ffi_type_agg(agg: &super::ir::FfiAgg) -> FfiType {
+    let fields: Vec<FfiType> = agg
+        .fields
+        .iter()
+        .map(|f| match &f.leaf {
+            super::ir::FfiLeaf::Scalar(k) => ffi_type(k),
+            super::ir::FfiLeaf::Agg(inner) => ffi_type_agg(inner),
+        })
+        .collect();
+    FfiType::structure(fields)
 }
 
 /// guest 线程栈放大（M5.2 D8a）：pthread_create 且显式 stacksize（std::thread 恒
@@ -239,25 +253,54 @@ pub fn call(
     sym: &str,
     sig: &ForeignSig,
     args: &[u64],
+    ret_dst: Option<u64>,
 ) -> Result<Option<u64>, String> {
     let Some(fnptr) = state.resolve(sym, optional_libs, required_libs)? else {
         return Ok(None);
     };
-    Ok(Some(call_addr(fnptr, sig, args)))
+    Ok(Some(call_addr(fnptr, sig, args, ret_dst)))
 }
 
 /// 按真码地址直调（CallForeign 的共用尾；也是 CallIndirect 反查未命中时的
 /// native fn-ptr 通道——guest 运行期 dlsym 所得真码，M4.4 FFI 反方向之二）。
-pub fn call_addr(fnptr: usize, sig: &ForeignSig, args: &[u64]) -> u64 {
-    let types: Vec<FfiType> = sig.args.iter().map(|&k| ffi_type(k)).collect();
+pub fn call_addr(fnptr: usize, sig: &ForeignSig, args: &[u64], ret_dst: Option<u64>) -> u64 {
+    let types: Vec<FfiType> = sig.args.iter().map(ffi_type).collect();
     let cif = match sig.fixed {
-        Some(nfixed) => Cif::new_variadic(types, nfixed, ffi_type(sig.ret)),
-        None => Cif::new(types, ffi_type(sig.ret)),
+        Some(nfixed) => Cif::new_variadic(types, nfixed, ffi_type(&sig.ret)),
+        None => Cif::new(types, ffi_type(&sig.ret)),
     };
 
-    // 每参一个 8 字节小端缓冲（libffi 按类型宽度读前缀）
+    // 标量每参一个 8 字节小端缓冲（libffi 按类型宽度读前缀）；
+    // C1 聚合参数 avalue 直指 eval 出的聚合字节真地址（零拷贝）。
     let bufs: Vec<[u8; 8]> = args.iter().map(|a| a.to_le_bytes()).collect();
-    let ffi_args: Vec<Arg<'_>> = bufs.iter().map(Arg::new).collect();
+    let ffi_args: Vec<Arg<'_>> = args
+        .iter()
+        .zip(sig.args.iter())
+        .zip(bufs.iter())
+        .map(|((&v, k), buf)| match k {
+            FfiKind::Agg(agg) => {
+                Arg::new(unsafe { std::slice::from_raw_parts(v as *const u8, agg.size as usize) })
+            }
+            _ => Arg::new(buf),
+        })
+        .collect();
+
+    if let FfiKind::Agg(agg) = &sig.ret {
+        // C1 按值聚合返回：结果缓冲按 8 对齐桶分配（align>8 已在 freeze 边界拒），
+        // 调用后 memcpy size 字节至调用方目的地址（寄存器对档与 sret 档都由 libffi
+        // 依结构类型内建解释 rtype——语义不自证）。
+        let dst = ret_dst.expect("按值聚合返回的调用方目的地址（引擎不变量）");
+        let mut rbuf: Vec<u64> = vec![0; ((agg.size as usize) + 7) / 8];
+        unsafe {
+            cif.call_return_into(CodePtr(fnptr as *mut _), &ffi_args, Ret::new(&mut rbuf[..]));
+            std::ptr::copy_nonoverlapping(
+                rbuf.as_ptr() as *const u8,
+                dst as *mut u8,
+                agg.size as usize,
+            );
+        }
+        return 0;
+    }
     let mut ret = [0u8; 8];
     // SAFETY: 地址来自 dlsym / guest 持有的真码指针；签名按 rustc fn sig layout 冻结；
     // guest 缓冲即宿主缓冲。fast 立场（C4）：native 调用的正确性由 guest 程序负责。
