@@ -198,12 +198,12 @@ pub fn store_and_wrap(
 ) -> crate::baseimage::BaseImage {
     let mut bi = image.into_base_image(fp);
     // 可缓存性判据：冻结区必须在样条 k=0 固定域（快照内嵌绝对地址跨进程稳定
-    // 的前提）。foreign 符号自 P2 起经 GOT 槽间接（decision-history §7.5c）：
-    // image 侧 GOT 表随文件走、装载后经启动相重填本进程真值——不再是写盘
-    // 障碍，原「直嵌宿主地址判据③」已退役。
+    // 的前提）；条目 stub 代码域同规则（P1：fn-ptr 值域 = stub 码址）。foreign
+    // 符号自 P2 起经 GOT 槽间接（decision-history §7.5c）：image 侧 GOT 表随
+    // 文件走、装载后经启动相重填本进程真值——不再是写盘障碍。
     let cacheable = bi.module.frozen.as_ref().is_some_and(|fr| {
         fr.at_fixed_base() && fr.home() == crate::vm::engine::frozen::image_addr(0)
-    });
+    }) && (bi.module.entry_stub_sites.is_empty() || bi.module.entry_stubs.at_fixed_base());
     let keyed = pre_key(rustc_args, base_key);
     if let (true, Some((key, stamps))) = (cacheable, keyed) {
         let mut fn_entry_syms = bi

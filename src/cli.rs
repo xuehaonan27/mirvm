@@ -597,8 +597,16 @@ fn run_vm_engine(
         eprintln!("mirvm: {e}");
         exit(70);
     }
+    // P1 条目可执行化（decision-history §7.6）：配方 → closure → stub 字节 →
+    // 整域 RX（与上两道并列的全相工序；域被占 = 装载失败）
+    if let Err(e) = crate::vm::engine::thunks::materialize_all_entry_stubs(&mut module) {
+        eprintln!("mirvm: {e}");
+        exit(70);
+    }
     // Shared 提升进程级 &'static（M4.4：thunk/多线程要求 Ctx 可在任意线程随时引用它）
     let shared: &'static _ = Box::leak(Box::new(crate::vm::engine::ctx::Shared::new(module)));
+    // P1 蹦床寻引擎发布点（条目 stub 可在任意 native 线程被调）
+    crate::vm::engine::thunks::publish_shared(shared);
     // M5.3b：编译服务（--jit off / feature 关 = 不启动，纯解释）
     #[cfg(feature = "cranelift")]
     crate::vm::engine::jit_compile::start(shared);

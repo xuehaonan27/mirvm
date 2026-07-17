@@ -557,6 +557,39 @@ P2-1 机制验收全绿后落地 P2-3：
    验证：4 例外来符号三维 + 冷/热×2 一致，`a2_deps_image` 闸 PASS，
    gate5 117/0/0，cargo test 66/66，diff 30/30，diff_cargo 5/5。
 
+## 7.6. 2026-07-17：P1 定案——fn 条目可执行化 = 固定基代码域 stub + libffi Closure 复用
+
+§7.5b 项1 的 P1-0 调研收口（debt-map §6 thunk 盲区的结构性根治）：
+
+1. **病因回顾**：fn-ptr 值 = 冻结区数据槽（内装 FuncId）——解释器反查派发没问题，
+   但一旦以**非显式实参**姿势流给 native（结构体内嵌，flate2 C-libz 的
+   zalloc/zfree 实锤），native 回调即跳进不可执行数据地址静默 SIGSEGV。
+   thunk 机制只覆盖"FFI 声明里显式写出来的 fn-ptr 形参位"，逃逸面天然覆盖不全。
+2. **定案**：`freeze_c_fnptr_sig`（extern "C"/System·非变参·全标量类已有）可从
+   Instance 的 MIR fn 类型派生 cif 的条目，取址时直接物化**可执行入口**；
+   不可派生（Rust ABI / 聚合按值 / 变参）保持数据槽——此类 fn-ptr 被 native
+   调用本来就是 UB，无盲区内损失。
+3. **形态（复用最大化）**：
+   - 每实例一条 16B 手写 stub（`movabs rax, <closure 码址>; jmp rax`）落在
+     **新第三地址域族**（固定基代码样条域：delta 0x6C00 / 底座 0x6D00 /
+     image 0x6E00+k，与冻结区三域同构），**stub 地址即 fn-ptr 值**；
+   - stub 背后的 marshaling 直接用 **thunks.rs 现成 libffi Closure**
+     （attach→搬参→call_guest 全现成），不新写 ABI 汇编；
+   - 每实例唯一条目值——顺带修复 thunk 按逃逸签名多址的 fn-ptr 相等性小坑。
+4. **稳定性纪律（与 asm_sites/GOT 同契约）**：stub 偏移 = 降低期分配位序
+   （确定性纪律与 FuncId/asm_sites 相同）；域域由 **instance 类**定（image 类
+   恒 image 域——跨运行稳定域；delta 类恒 delta），单一地址身份不破；
+   模块只序列化**配方**（FuncId + ForeignSig 有序表，像 asm_sites），
+   启动相（run_vm_engine/absorb，GOT 重填的同一点）重建 closure → 填字节 →
+   整域 mprotect RX（W^X）；域被占 = 响亮失败按 cache miss 处理。
+5. **逃逸物化收编**：interp 的 CallForeign thunk_args 替换环退役为恒等
+   （guest 条目值本身已是码址，原样直寄；0/已是 native 真码的直传语义不变）。
+6. **消费面零改**：fn_addrs 反查键统一换成"条目值（stub 码址或数据槽址）"，
+   CallIndirect/atexit/catch_unwind/backtrace/main 启动链全是反查语义。
+7. **分片**：P1-1（代码域 + 配方 + fn_entry_addr 发放 + 启动相物化 +
+   反查换键 + absorb 合流）行为保持"未逃逸调用语义逐位不变"；P1-2
+   （thunk_args 退役 + flate2 C-libz 路线负对照 + debt §6 关闭落档）。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 - P7 设想独立 `src/os/` 物理层；当前 OS/FFI/builtin 逻辑仍分布在 lower、interp、ffi、heap。

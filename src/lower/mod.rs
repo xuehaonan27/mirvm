@@ -96,6 +96,10 @@ struct Split<'tcx> {
     image_got_syms: Vec<ir::GotSym>,
     image_got_idx: FxHashMap<Box<str>, u32>,
     image_got_fixups: Vec<ir::GotFixup>,
+    /// P1（§7.6）image 侧 stub 代码区与配方表（image 类实例的可执行条目恒在
+    /// image 域——跨运行稳定域，与 fn 条目同域纪律；收尾随 image 模块走）
+    image_code_arena: crate::vm::engine::codearena::StubArena,
+    image_stub_sites: Vec<ir::EntryStubSite>,
 }
 
 /// A2 split 产物（s3b-a2-design）：deps-image 模块 + 栈索引素材（BaseExports 同构）。
@@ -172,6 +176,14 @@ pub(crate) struct Linker<'tcx> {
     foreign_alloc_sym: FxHashMap<AllocId, (Box<str>, bool)>,
     /// (符号名, image 上下文) → GOT 槽真地址（槽 = 本侧冻结区普通 8 字节格）
     foreign_slots: std::collections::HashMap<(Box<str>, bool), u64>,
+    /// P1 条目可执行化（decision-history §7.6）本域 stub 代码区与配方表（image
+    /// 侧在 Split）：instance → stub idx（域由实例类定，与 fn 条目同纪律）
+    code_arena: crate::vm::engine::codearena::StubArena,
+    entry_stub_sites: Vec<ir::EntryStubSite>,
+    entry_stub_ids: FxHashMap<Instance<'tcx>, u32>,
+    /// FFI 可派生性缓存（freeze_c_fnptr_sig；None = 保持数据槽条目——Rust ABI /
+    /// 聚合按值 / 变参无 native 合法调用面，无盲区内损失）
+    entry_sig_cache: FxHashMap<Instance<'tcx>, Option<ir::ForeignSig>>,
     /// 必需归档库的 hidden 符号兜底表（装载基址, 符号→st_value）：只收不进
     /// .dynsym 的符号（-fvisibility=hidden 归档，ring/zstd-sys 一族）；extern
     /// static/fn 取址的降低期解析**先于 dlsym 全域**——native 链接期绑定语义
@@ -206,7 +218,13 @@ pub(crate) struct Linker<'tcx> {
 impl<'tcx> Linker<'tcx> {
     /// S3′a：base-maps = image 栈的并集查找；delta 起编 = 栈累积量。frozen 由调用方
     /// 按目标域构造（程序 delta = new()、底座 = new_base_image()、依赖 image = new_image(k)）。
-    fn new(tcx: TyCtxt<'tcx>, stack: &crate::baseimage::ImageStack, frozen: FrozenArena) -> Self {
+    /// code_arena = P1 本域 stub 代码区（§7.6，与 frozen 同 k 域，lower_inner 统一推导）。
+    fn new(
+        tcx: TyCtxt<'tcx>,
+        stack: &crate::baseimage::ImageStack,
+        frozen: FrozenArena,
+        code_arena: crate::vm::engine::codearena::StubArena,
+    ) -> Self {
         fn clone_map<V: Copy>(
             m: &std::collections::HashMap<Box<str>, V>,
         ) -> FxHashMap<Box<str>, V> {
@@ -236,6 +254,10 @@ impl<'tcx> Linker<'tcx> {
             got_fixups: Vec::new(),
             foreign_alloc_sym: FxHashMap::default(),
             foreign_slots: std::collections::HashMap::new(),
+            code_arena,
+            entry_stub_sites: Vec::new(),
+            entry_stub_ids: FxHashMap::default(),
+            entry_sig_cache: FxHashMap::default(),
             archive_fallbacks: Vec::new(),
             archive_handles: Vec::new(),
             split: None,
@@ -268,6 +290,8 @@ impl<'tcx> Linker<'tcx> {
             image_got_syms: Vec::new(),
             image_got_idx: FxHashMap::default(),
             image_got_fixups: Vec::new(),
+            image_code_arena: crate::vm::engine::codearena::StubArena::new_image(0),
+            image_stub_sites: Vec::new(),
         });
     }
 
@@ -362,8 +386,11 @@ impl<'tcx> Linker<'tcx> {
         Ok(id)
     }
 
-    /// fn-ptr 条目地址（D4）：每 instance 一个 16 对齐真地址；内容 = FuncId（调试用）。
+    /// fn-ptr 条目地址（D4）：每 instance 一个真地址身份。
     /// 比较/转型语义正确；间接调用经反查表派发（M4.1 第 5 步接 CallIndirect）。
+    /// P1（decision-history §7.6）：FFI 可派生条目**可执行化**——值 = 本域 stub
+    /// 码址（任何姿势流给 native 都落可执行入口，thunk 盲区结构性消失）；其余
+    /// 保持数据槽（内装 FuncId，调试用；Rust ABI/聚合/变参无 native 合法调用面）。
     /// S4：底座函数已有条目则复用（单一地址身份；底座 vtable 与 delta 取址一致）；
     /// 底座函数无条目（构建时没被取址）则在 delta 区补一个——总量仍恰一份。
     /// A2 split：条目按 instance 类定域（image 类 → image 区，单一地址身份不变）；
@@ -383,6 +410,13 @@ impl<'tcx> Linker<'tcx> {
         {
             self.fn_entries.insert(inst, a);
             return Ok(a);
+        }
+        // P1：FFI 可派生 ⇒ 可执行条目（值 = 本域 stub 码址）
+        if let Some(sig) = self.entry_ffi_sig(inst) {
+            let addr = self.alloc_entry_stub(inst, fid, sig);
+            self.fn_entries.insert(inst, addr);
+            self.fn_addrs.insert(addr, fid);
+            return Ok(addr);
         }
         let addr = if let Some(s) = &mut self.split {
             if fid & IMAGE_TAG != 0 || fid < self.delta_first_fn {
@@ -408,6 +442,67 @@ impl<'tcx> Linker<'tcx> {
         self.fn_entries.insert(inst, addr);
         self.fn_addrs.insert(addr, fid);
         Ok(addr)
+    }
+
+    /// P1：instance 的冻结 cif 签名（FnDef 且 freeze_c_fnptr_sig 可派生）；
+    /// 结果缓存（含 None——不可派生者恒走数据槽，无重复试探成本）。
+    fn entry_ffi_sig(&mut self, inst: Instance<'tcx>) -> Option<ir::ForeignSig> {
+        if let Some(sig) = self.entry_sig_cache.get(&inst) {
+            return sig.clone();
+        }
+        let env = TypingEnv::fully_monomorphized();
+        let ty = inst.ty(self.tcx, env);
+        let sig = if matches!(ty.kind(), rustc_middle::ty::FnDef(..)) {
+            freeze_c_fnptr_sig(self.tcx, env, ty)
+        } else {
+            None
+        };
+        self.entry_sig_cache.insert(inst, sig.clone());
+        sig
+    }
+
+    /// P1 可执行条目发放（§7.6）：值 = 本域 stub 码址（域由实例类定——image 类
+    /// 恒 image 域，跨运行稳定；配方位序 = stub 偏移，启动相按同序物化复现）。
+    fn alloc_entry_stub(
+        &mut self,
+        inst: Instance<'tcx>,
+        fid: ir::FuncId,
+        sig: ir::ForeignSig,
+    ) -> u64 {
+        let image_side =
+            self.split.is_some() && (fid & IMAGE_TAG != 0 || fid < self.delta_first_fn);
+        if let Some(&i) = self.entry_stub_ids.get(&inst) {
+            return if image_side {
+                self.split
+                    .as_ref()
+                    .expect("split")
+                    .image_code_arena
+                    .addr_of(i as u64)
+            } else {
+                self.code_arena.addr_of(i as u64)
+            };
+        }
+        if image_side {
+            let s = self.split.as_mut().expect("split");
+            let i = s.image_stub_sites.len() as u32;
+            s.image_stub_sites.push(ir::EntryStubSite { func: fid, sig });
+            let addr = s.image_code_arena.addr_of(i as u64);
+            s.image_fn_entries.insert(inst, addr);
+            self.entry_stub_ids.insert(inst, i);
+            addr
+        } else {
+            if self.split.as_ref().is_some_and(|s| s.current_image) {
+                panic!(
+                    "A2 closure violation：image 实例引用 delta 类 fn 条目（分类器漏判）: {}",
+                    self.tcx.symbol_name(inst).name
+                );
+            }
+            let i = self.entry_stub_sites.len() as u32;
+            self.entry_stub_sites.push(ir::EntryStubSite { func: fid, sig });
+            let addr = self.code_arena.addr_of(i as u64);
+            self.entry_stub_ids.insert(inst, i);
+            addr
+        }
     }
 
     /// extern fn 条目地址（fn-ptr 取址）：无 MIR 的 foreign item 不能入 worklist
@@ -1882,7 +1977,16 @@ fn lower_inner(
     split: bool,
 ) -> (ir::Module, Option<BaseExports>, Option<SplitImage>) {
     let typing_env = TypingEnv::fully_monomorphized();
-    let mut linker = Linker::new(tcx, stack, frozen);
+    // P1（§7.6）：本域 stub 代码区与冻结区同 k 域（frozen.home() 记意向域，
+    // 动态回退下推导仍一致；各自的固定基/回退独立判定，缓存门槛两用其判）
+    let code_home = crate::vm::engine::codearena::code_home_for_frozen(frozen.home())
+        .expect("P1：冻结域非法，stub 代码域不可推");
+    let mut linker = Linker::new(
+        tcx,
+        stack,
+        frozen,
+        crate::vm::engine::codearena::StubArena::new_at(code_home),
+    );
     if split {
         linker.activate_split();
     }
@@ -2128,6 +2232,13 @@ fn lower_inner(
         for v in linker.fn_addrs.values_mut() {
             *v = rb.fn_id(*v);
         }
+        // P1 配方表的 FuncId 同规则重映射（s.image_stub_sites 在下方装配前）
+        for site in linker.entry_stub_sites.iter_mut() {
+            site.func = rb.fn_id(site.func);
+        }
+        for site in s.image_stub_sites.iter_mut() {
+            site.func = rb.fn_id(site.func);
+        }
         for v in linker.ids.values_mut() {
             *v = rb.fn_id(*v);
         }
@@ -2188,6 +2299,9 @@ fn lower_inner(
             // 装载/absorb 时按名合流进 delta 并重编 idx
             foreign_syms: s.image_got_syms,
             got_fixups: s.image_got_fixups,
+            // P1 image 侧（§7.6）：配方随 image 文件，代码域句柄运行期随域重建
+            entry_stub_sites: s.image_stub_sites,
+            entry_stubs: s.image_code_arena,
             ..Default::default()
         };
         // image 导出素材（装载方零 tcx 依赖，BaseExports 同构）：fn 条目/static/TLS
@@ -2307,6 +2421,9 @@ fn lower_inner(
     // P2 GOT（decision-history §7.5c）delta 侧（image 侧已随 split_image 走）
     module.foreign_syms = linker.got_syms;
     module.got_fixups = linker.got_fixups;
+    // P1（§7.6）本域配方与代码域句柄（image 侧已随 split_image 走）
+    module.entry_stub_sites = linker.entry_stub_sites;
+    module.entry_stubs = linker.code_arena;
     if split_image.is_none() {
         module.entry = entry;
     }

@@ -2426,9 +2426,11 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 let mut av: Vec<u64> = aops.iter().map(|o| eval_operand(ctx, base, o).0).collect();
                 // M4.4 D1：fn-ptr 实参位——guest fn 条目地址逃逸给 native 前物化 thunk
                 // 真码；NULL 与已是 native 真码（反查未命中，guest 转传）原样直传。
+                // P1（§7.6）：FFI 可派生条目值本身已是 stub 码址——跳过二次物化。
                 for (pos, inner) in &sig.thunk_args {
                     let v = av[*pos];
                     if v != 0
+                        && !super::codearena::is_stub_addr(v)
                         && let Some(&fid) = module.fn_addrs.get(&v)
                     {
                         let shared: &'static Shared = unsafe { &*(*ctx).shared };

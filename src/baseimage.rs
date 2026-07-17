@@ -331,6 +331,19 @@ pub fn absorb_stack(delta: &mut ir::Module, stack: ImageStack) {
         // P2 GOT 随 image 合流（decision-history §7.5c）：sym 按名去重、fixup
         // idx 重编；image 样条域地址固定基稳定，合流后仍指向同一冻结格
         delta.absorb_got(m.foreign_syms, m.got_fixups);
+        // P1 条目 stub 随 image 合流（§7.6）：配方与代码域按挂载，启动相按域重建
+        if !m.entry_stub_sites.is_empty() || m.entry_stubs.is_mapped() {
+            let home = m
+                .frozen
+                .as_ref()
+                .and_then(|f| crate::vm::engine::codearena::code_home_for_frozen(f.home()))
+                .expect("P1：image 冻结域非法，stub 代码域不可推");
+            delta.image_entry_stubs.push((
+                home,
+                std::mem::take(&mut m.entry_stub_sites),
+                std::mem::take(&mut m.entry_stubs),
+            ));
+        }
         if let Some(fr) = m.frozen {
             frozens.push(fr);
         }
@@ -366,6 +379,11 @@ impl Callbacks for BaseBuildCallbacks {
         }
         // foreign 符号自 P2 起经 GOT 槽间接（§7.5c：表随快照、启动相重填）——
         // 原「直嵌宿主地址判据③」已退役，不再是写盘障碍。
+        // P1：stub 代码域不在固定基址 ⇒ fn-ptr 值域跨进程不稳定，拒写（同规则）
+        if !module.entry_stub_sites.is_empty() && !module.entry_stubs.at_fixed_base() {
+            eprintln!("base-image: stub 代码域未落固定域，放弃");
+            return Compilation::Stop;
+        }
         // "@entry" 是 --vm-stats 的程序入口别名；底座作为库使用，不导出合成入口
         module.exports.remove("@entry");
 

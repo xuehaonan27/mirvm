@@ -1359,6 +1359,15 @@ pub struct GotFixup {
     pub addend: u64,
 }
 
+/// P1 条目可执行化配方（decision-history §7.6）：本域 stub 位序 = 表位序，
+/// 每条 =（被取址的 FFI 可派生 guest fn, 其冻结 cif 签名）；启动相经 libffi
+/// Closure 物化成 stub 字节（代码域固定基，偏移稳定 ⇒ fn-ptr 值可烤/可序列化）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EntryStubSite {
+    pub func: FuncId,
+    pub sig: ForeignSig,
+}
+
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Module {
     pub funcs: Vec<FuncBody>,
@@ -1391,6 +1400,17 @@ pub struct Module {
     /// P2 启动相修补点：`*(addr) = resolve(foreign_syms[sym]) + addend`；addr 在
     /// 本模块冻结域（固定基 ⇒ 跨进程稳定）。槽位本体以 addend=0 登记。
     pub got_fixups: Vec<GotFixup>,
+    /// P1 条目可执行化配方（decision-history §7.6）：本域被取址的 FFI 可派生
+    /// guest fn 有序表（位序 = stub 偏移 ×16）；启动相重建 stub 字节后封存 RX。
+    pub entry_stub_sites: Vec<EntryStubSite>,
+    /// 本域运行期 stub 代码域句柄（不进快照：字节按配方每进程重建——
+    /// asm_stub_addrs 同契约）；冷路径自 lower 带来，warm 启动相重映射。
+    #[serde(skip)]
+    pub entry_stubs: super::codearena::StubArena,
+    /// absorb 挂载的 image/底座条目 stub（配方随 image 文件走；合流后按各自
+    /// 代码域重建）：(代码域基址, 配方, 运行期句柄)。
+    #[serde(skip)]
+    pub image_entry_stubs: Vec<(usize, Vec<EntryStubSite>, super::codearena::StubArena)>,
     /// main 启动链（M4.3；--vm-call 模式下为 None）
     pub entry: Option<EntryPlan>,
     /// S4/S3′ image 栈冻结区（absorb 时挂载底座 + 各依赖 image 的冻结区，与本模块

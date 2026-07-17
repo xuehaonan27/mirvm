@@ -141,6 +141,10 @@ pub fn store(
     if !module.frozen.as_ref().is_some_and(|f| f.at_fixed_base()) {
         return false;
     }
+    // P1 条目 stub 域不在固定基址 ⇒ fn-ptr 值域跨进程不稳定，不缓存（同规则）
+    if !module.entry_stub_sites.is_empty() && !module.entry_stubs.at_fixed_base() {
+        return false;
+    }
     // foreign 符号（environ 类 extern static / extern fn 取址）自 P2 起经 GOT 槽
     // 间接（decision-history §7.5c）：GOT 表随快照走、启动相重填本进程真值——
     // 不再是缓存障碍，原「宿主地址直嵌拒缓存」判据（M6 片2）已退役。
