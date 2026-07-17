@@ -1368,6 +1368,21 @@ pub struct EntryStubSite {
     pub sig: ForeignSig,
 }
 
+/// 自定义 `#[global_allocator]` 的 `__rust_*` shim 四件套 FuncId（corpus 批7
+/// c_mimalloc 实锤修）：rustc_ast::expand::global_allocator 为含该属性的 crate
+/// 生成的四只本地转发 fn（体 = 调用户 GlobalAlloc 各法）。
+/// 分配语义是**程序级**的：base/deps image 按 Default 会话烘焙的
+/// `CallBuiltin(Rust*)` 臂与 delta/image 的 guest shim 必须路由到**同一台**
+/// 分配器——否则跨堆 free（mimalloc 元数据 SIGSEGV）。运行期 interp 以此字段
+/// 统一上提路由，与字节码烘在哪台会话无关。
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct AllocShims {
+    pub alloc: FuncId,
+    pub dealloc: FuncId,
+    pub realloc: FuncId,
+    pub alloc_zeroed: FuncId,
+}
+
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Module {
     pub funcs: Vec<FuncBody>,
@@ -1411,6 +1426,9 @@ pub struct Module {
     /// 代码域重建）：(代码域基址, 配方, 运行期句柄)。
     #[serde(skip)]
     pub image_entry_stubs: Vec<(usize, Vec<EntryStubSite>, super::codearena::StubArena)>,
+    /// 自定义 #[global_allocator] 的 __rust_* shim（AllocShims 字段注）：
+    /// kind=Global 时 delta 侧登记，运行期 interp CallBuiltin(Rust*) 臂统一路由。
+    pub custom_alloc_shims: Option<AllocShims>,
     /// main 启动链（M4.3；--vm-call 模式下为 None）
     pub entry: Option<EntryPlan>,
     /// S4/S3′ image 栈冻结区（absorb 时挂载底座 + 各依赖 image 的冻结区，与本模块

@@ -2062,6 +2062,51 @@ fn lower_inner(
         linker.func_id(inst);
     }
 
+    // 自定义 #[global_allocator] 的 __rust_* shim（corpus 批7 c_mimalloc 实锤修）：
+    // kind=Global 时 HIR 展开器已在本地 crate 生成 __rust_{alloc,dealloc,realloc,
+    // alloc_zeroed} 四只转发 fn（rustc_allocator 等 flag 标记，body = 调用户
+    // GlobalAlloc）——登记 FuncId 供运行期 interp CallBuiltin(Rust*) 臂统一路由
+    // （分配是程序级语义：base/deps image 按 Default 会话烘的臂与用户分配器
+    // 不得并存，跨堆 free = mimalloc 元数据 SIGSEGV）。
+    let mut custom_alloc_shims: Option<ir::AllocShims> = if let Some(kind) = tcx.allocator_kind(())
+        && matches!(kind, rustc_ast::expand::allocator::AllocatorKind::Global)
+    {
+        use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags as F;
+        let mut found: [Option<ir::FuncId>; 4] = [None; 4];
+        for def_id in tcx.hir_crate_items(()).definitions() {
+            if tcx.def_kind(def_id) != rustc_hir::def::DefKind::Fn
+                || !tcx.def_kind(def_id).has_codegen_attrs()
+            {
+                continue;
+            }
+            let flags = tcx.codegen_fn_attrs(def_id).flags;
+            for (f, i) in [
+                (F::ALLOCATOR, 0),
+                (F::DEALLOCATOR, 1),
+                (F::REALLOCATOR, 2),
+                (F::ALLOCATOR_ZEROED, 3),
+            ] {
+                if flags.contains(f) {
+                    found[i] = Some(linker.func_id(Instance::mono(tcx, def_id.to_def_id())));
+                }
+            }
+        }
+        match found {
+            [Some(alloc), Some(dealloc), Some(realloc), Some(alloc_zeroed)] => {
+                Some(ir::AllocShims {
+                    alloc,
+                    dealloc,
+                    realloc,
+                    alloc_zeroed,
+                })
+            }
+            // 四件不齐 = 生成面不完整（不应发生；None 落引擎堆既有纪律）
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     // main 启动计划（cg_ssa create_entry_fn 同构）：
     // lang_start::<main_ret>(main fn-ptr, argc, argv, sigpipe) -> isize
     let entry = tcx.entry_fn(()).map(|(main_def, entry_ty)| {
@@ -2194,6 +2239,14 @@ fn lower_inner(
         }
         for site in s.image_stub_sites.iter_mut() {
             site.func = rb.fn_id(site.func);
+        }
+        // 自定义分配器 shim 的 FuncId 同规则重映射（c_mimalloc ABI 错调根因：
+        // 漏映射则运行期路由到移位前的野 FuncId，call_guest 打错函数体）
+        if let Some(shims) = custom_alloc_shims.as_mut() {
+            shims.alloc = rb.fn_id(shims.alloc);
+            shims.dealloc = rb.fn_id(shims.dealloc);
+            shims.realloc = rb.fn_id(shims.realloc);
+            shims.alloc_zeroed = rb.fn_id(shims.alloc_zeroed);
         }
         for v in linker.ids.values_mut() {
             *v = rb.fn_id(*v);
@@ -2380,6 +2433,9 @@ fn lower_inner(
     // P1（§7.6）本域配方与代码域句柄（image 侧已随 split_image 走）
     module.entry_stub_sites = linker.entry_stub_sites;
     module.entry_stubs = linker.code_arena;
+    // 自定义分配器 shim（程序级语义，delta 权威：shim 恒 LOCAL_CRATE——split
+    // 与否同此一处，base/deps image 按 Default 烘的臂在运行期经它路由）
+    module.custom_alloc_shims = custom_alloc_shims;
     if split_image.is_none() {
         module.entry = entry;
     }

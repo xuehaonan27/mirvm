@@ -2896,14 +2896,49 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 let r = match builtin {
                     // 分配前哨兵：空操作
                     Builtin::NoAllocShim => 0,
-                    // 托管 Rust Heap（D3：mimalloc 后端，真地址直出）
-                    Builtin::RustAlloc => super::heap::alloc(a(0), a(1)),
-                    Builtin::RustAllocZeroed => super::heap::alloc_zeroed(a(0), a(1)),
+                    // 托管 Rust Heap（D3：mimalloc 后端，真地址直出）。
+                    // 自定义 #[global_allocator]（corpus 批7 c_mimalloc 实锤修）：
+                    // 分配是**程序级**语义——本模块登记 shim 时，任何镜像来源的
+                    // builtin 臂（含 base 按 Default 会话烘的）一律经 guest shim
+                    // 走用户分配器，否则跨堆 free = mimalloc 元数据 SIGSEGV。
+                    Builtin::RustAlloc => match module.custom_alloc_shims {
+                        Some(s) => {
+                            let (lo, _) = call_guarding_terminate(unwind, || {
+                                call_guest(ctx, s.alloc, &[a(0), a(1)])
+                            });
+                            lo
+                        }
+                        None => super::heap::alloc(a(0), a(1)),
+                    },
+                    Builtin::RustAllocZeroed => match module.custom_alloc_shims {
+                        Some(s) => {
+                            let (lo, _) = call_guarding_terminate(unwind, || {
+                                call_guest(ctx, s.alloc_zeroed, &[a(0), a(1)])
+                            });
+                            lo
+                        }
+                        None => super::heap::alloc_zeroed(a(0), a(1)),
+                    },
+                    Builtin::RustRealloc => match module.custom_alloc_shims {
+                        Some(s) => {
+                            let (lo, _) = call_guarding_terminate(unwind, || {
+                                call_guest(ctx, s.realloc, &[a(0), a(1), a(2), a(3)])
+                            });
+                            lo
+                        }
+                        None => super::heap::realloc(a(0), a(1), a(2), a(3)),
+                    },
                     Builtin::RustDealloc => {
-                        super::heap::dealloc(a(0), a(1), a(2));
+                        match module.custom_alloc_shims {
+                            Some(s) => {
+                                let _ = call_guarding_terminate(unwind, || {
+                                    call_guest(ctx, s.dealloc, &[a(0), a(1), a(2)])
+                                });
+                            }
+                            None => super::heap::dealloc(a(0), a(1), a(2)),
+                        }
                         0
                     }
-                    Builtin::RustRealloc => super::heap::realloc(a(0), a(1), a(2), a(3)),
                     // unwind 原语（spike3 的 raise）：宿主 unwinder 载 guest exception 指针
                     Builtin::UnwindRaise => raise_guest(a(0)),
                     // os:: 最小直通（真实地址零编组；M4.3 正式注册表）
