@@ -416,3 +416,35 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
 - **闭包欠账新形态**：bzip2-sys——vendored BZ_NO_STDIO 的断言桩 bz_internal_error
   定义在其 Rust rlib（#[no_mangle]）里：native_archive 闭包检查覆盖不到
   「符号在 rlib」形态（记档；driver 走 0.6 纯 Rust 后端）。
+
+## 6. 批7+ 候选清单（2026-07-16 初记，待讨论定稿）
+
+> 仓库迁移新开发机时记录，选型讨论未定。按压力形状分组；括号 = 备注。
+
+**大物优先**：tantivy（搜索引擎）、sequoia-pgp（OpenPGP 全家）、rustpython /
+miden-vm / risc0（VM-in-VM 终极压测，构建极重）、aws-lc-rs（FFI 巨物）、
+polars 全家福已通（批6）→ arrow-rs/datafusion 可接棒。
+
+**VM/语言机**：EVM 生态延展（ethers/alloy 待体量评估）、boa 已有 → oxc/swc
+（JS 解析器大物）、typst（typesetting；文本/字体的确定性要先设计——内嵌
+字体策略）、wast2wasm/wat、rune/koto（脚本语言）。
+
+**数值/科学**：ndarray/ndarray-stats、smartcore/linfa（ML 纯 Rust）、tract
+（ONNX 推理）、candle-cpu、faer 已通（批6）、parquet2/arrow2、calamine 已有
+→ rust_xlsxwriter 读侧补。
+
+**FFI/系统**：aws-lc-rs、mimalloc-rust（替换分配器边界）、libgit2、rocksdb
+（FFI 重，磁盘清理纪律）、kerberos?、dbus?、usb?（多半报 FAIL 记缺）。
+
+**文本/格式**：jsonschema、html5ever、kuchiki/scraper（DOM）、xml-rs 全家、
+syntect（语法高亮大表）、unicode-rs 全家补充、chumsky、logos、pest、
+markdown-it、org-rs（org-mode 偏门）、tree-sitter 单语言包（FFI C）。
+
+**偏门打野**：ugrep/stringsext（真二进制）、trans（词典）、opencc-rust、
+rust-phonenumber（libphonenumber 移植）、libmagic-rust?、htop/bat/exa 式
+二进制（输出要可截 TTY 化）、qemu 类块设备读（fuser?）、solana/web3 族
+（超大，缓）、wasi 生态（本 VM 内再跑 wasm 部件的嵌套艺术）。
+
+**已解锁可做加测**：rustls 握手（批4 证书面 → rcgen 定种证书后双手真握手）、
+edg 51719（dalek 默认 backend 直跑脱 env）、rsa 大位宽（4096）、zstd 长输入
+（并行压缩线程面）。
