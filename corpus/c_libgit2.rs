@@ -38,8 +38,17 @@ libgit2-sys = "=0.18.5"
 // 绝对路径/env 入输出；B 维 native 实测 stdout 58 行全确定（重跑 commit id
 // 锚定同值）、stderr 真空、exit 0。
 //
-// ★ FRONTIER（2026-07-17 锁定 expected-red；A 维 lower 期响亮失败，B 维
-//   native 三维对照 oracle 全绿——纯引擎缺口，driver 层无合法绕行）：
+// ★ 已修复（2026-07-17，commit 867b3de；原 FRONTIER 全文折叠备查）：
+//   闭包链接行缺 crate 图动态库（libz-sys 的 `z`）——native_archive.rs 新增
+//   system_dylibs(tcx) 统一收集并与 lower 预载共用名单，cc 链接行追加
+//   `-l<name>`（-lgcc_s 后 -o 前）且入缓存键。修复后断言成立：本 driver
+//   零改动三维转绿（以下 B oracle 输出即现输出，commit id 锚定未漂移）。
+//   另注：刻意未注册任何 Rust→C 回调（TreeWalk 回调 API 不用，用
+//   tree.iter() 等价替代——纯保守选择，非盲区所需；P1 后结构体内嵌回调
+//   本身已可执行化）。
+//
+// <details><summary>原 FRONTIER 记录（expected-red 定档文本，机制已修）</summary>
+//
 //   trap 原文（mirvm run，exit 101，rustc thread panic）：
 //     src/lower/mod.rs:2002: Static native library 装载失败: 静态原生归档
 //     `…/build/libgit2-sys-*/out/build/libgit2.a` 无法安全转换为共享库
@@ -47,30 +56,22 @@ libgit2-sys = "=0.18.5"
 //     /usr/bin/ld: … indexer.c:361: undefined reference to `crc32'
 //     … filebuf.c/zstream.c: undefined reference to `deflate'/`inflate' 族
 //   根因（机制级实锤）：native_archive.rs 的闭包链接行 = LINK_PREFIX
-//   （-shared -z,defs --whole-archive）+ 归档 + LINK_SUFFIX（行 21 写死
-//   -lm -ldl -lpthread -lrt -lutil -lgcc_s）。libz-sys 0.18.x stock-zlib
-//   动态模式只经 rlib 元数据传播 `cargo:rustc-link-lib=z`（脚本 target 的
-//   build output 实证，无 libz.a 产出）→ 批5 修复（lower/mod.rs:2040-2102）
-//   收集 crate 图动态元数据库做 RTLD_GLOBAL 预载 + 移交 module.native_libs，
-//   但闭包链接是**独立 cc 子进程**且行序上发生在预载之前（2001 < 2093）——
-//   预载够不着；独立 ld 的 -z defs 必须命令行自带 -lz。缺的不是 glibc 家族
-//   而是 crate 图传播的动态元数据库，LINK_SUFFIX 硬编码清单覆盖不到。
-//   与批3 rusqlite（libsqlite3.a 引 libm `log`）同族新形态——那次修的是
-//   std/#link 恒给清单，这次要的是批5 收集的 dylib_names 移交闭包链接行
-//   （-l<name> → 产 DT_NEEDED 由宿主解析；缓存键 link_flags 需同纳名单）。
-//   证据链：①手动重放同链接行（无 -lz）复现 17 处 undefined reference
-//   （crc32/deflate*/inflate*）；②同命令追加 -lz → LINK_OK 且产
-//   DT_NEEDED libz.so.1；③最小复现 /tmp/mirvm_probe_libgit2sys_only.rs
-//   （依赖仅 libgit2-sys = "=0.18.5"、单 FFI 调用、无 git2 绑定层）同址
-//   同文案复现——与 git2 Rust 层无关。
-//   绕行排查（均不可）：静态 libz（LIBZ_SYS_STATIC=1 或 zlib-ng-compat
-//   feature）→ zlib 变独立静态归档，闭包逐归档独立 -z defs 闭合，跨归档
-//   引用同病；build 期 env 不可记入三维纪律；LIBGIT2_SYS_USE_PKG_CONFIG
-//   → 宿主无 libgit2.pc，且偏离任务指定的「内置静态构建」面。
-//   修复后断言：本 driver 无需改动即应三维全绿（B 维输出即 oracle）。
-//   另注：刻意未注册任何 Rust→C 回调（绕开批3 记档的「结构体内嵌 fn-ptr
-//   回调」thunk 盲区；TreeWalk 回调 API 不用，用 tree.iter() 等价替代）。
+//   （-shared -z,defs --whole-archive）+ 归档 + LINK_SUFFIX（写死
+//   -lm -ldl -lpthread -lrt -lutil -lgcc_s）。libz-sys stock-zlib 动态模式
+//   只经 rlib 元数据传播 `cargo:rustc-link-lib=z`（无 libz.a 产出）→ 批5
+//   修复收集 crate 图动态元数据库做 RTLD_GLOBAL 预载，但闭包链接是**独立
+//   cc 子进程**且行序上发生在预载之前——预载够不着；独立 ld 的 -z defs
+//   必须命令行自带 -lz。缺的不是 glibc 家族而是 crate 图传播的动态元数据
+//   库，LINK_SUFFIX 硬编码清单覆盖不到。
+//   与批3 rusqlite（libsqlite3.a 引 libm `log`）同族新形态。
+//   证据链：①手动重放同链接行（无 -lz）复现 17 处 undefined reference；
+//   ②同命令追加 -lz → LINK_OK 且产 DT_NEEDED libz.so.1；③最小复现
+//   libgit2-sys 单依赖即炸——与 git2 Rust 层无关。
+//   绕行排查（均不可）：静态 libz → zlib 变独立静态归档，闭包逐归档独立
+//   -z defs 闭合，跨归档引用同病；build 期 env 不可记入三维纪律；
+//   LIBGIT2_SYS_USE_PKG_CONFIG → 宿主无 libgit2.pc。
 //
+// </details>
 // 三维复跑：
 //   A: target/release/mirvm run corpus/c_libgit2.rs
 //   B: cd "$(grep -l 'name = "c_libgit2"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname)" && \

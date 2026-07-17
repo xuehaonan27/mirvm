@@ -190,3 +190,31 @@ SwitchInt/Call（`Call` 还要求 unwind=Continue + 返回值 Ignore/Scalar）�
 直接调用同套蹦床基建，反查可用缓存行内联 last-1）；②CallForeign 编译道
 （libffi 调用点 CLIF 化或预物化 stub）；③CallBuiltin 逐内建评估（HostWrite
 等直通族优先）。准入扩面时先扩 admit + 三维验收，alpha 铁律不变。
+
+## 9. FFI 按值聚合封送（corpus 批7 c_tree_sitter 实锤，2026-07-17 记）
+
+**现象**：tree-sitter 0.24 的**全部** parse 路径都汇到
+`ts_parser_parse(_, _, TSInput)`——TSInput 是 24B 按值结构体（内嵌 guest
+`read` 回调，其签名又自带按值 TSPoint 返回）；`ts_node_*`/`ts_query_*` 面
+清一色按值传/返 TSNode(32B)/TSPoint(8B)。mirvm 的 `ffi_kind_of` 只接
+`BackendRepr::Scalar`（标量/指针），按值聚合在 lower 期把调用点冻成入口
+Trap：`foreign \`ts_parser_parse\` 参数 TSInput: 非标量（按值聚合）`，
+exit 70。driver 绑定层内**无任何合法绕行**（解析从不走 parse_string 变体），
+故 c_tree_sitter 锁定 expected-red（native-archive 通道本身已验绿：.a→.so
+闭包、LanguageFn fn-ptr、标量 FFI 五连全过，driver 头注有完整账目）。
+
+**根因**：ForeignSig/FfiKind 类型表面只覆盖标量——不是"没接过"的偶然，
+是封送语义的系统性缺席：§7.3 引擎原语表/运行期 libffi 调用本来就是标量
+闭界设计，M4.4/M5.0 各期都把它当边界明写。P1 条目可执行化后回调方向的
+"结构体内嵌"已根治，但**封送宽度**（按值聚合进出双方向）是另一条轴。
+
+**转正需要什么（未立项，按真实 workload 优先级，估计为多片工程）**：
+①FfiKind 增 Aggregate 类（宽度/对齐/类别——System V 的 INTEGER/SSE/MEMORY
+三分），libffi struct-type 构造（libffi 原生支持按值聚合，免费编组可用）；
+②freeze_c_fnptr_sig/CallForeign 发码放开（marshaling 双向：传参拆分
+eightbyte 基因型 + 返回值 sret/寄存器对按类选择）；
+③thunk 方向（P1 entry-trampoline 的 marshal_args）对按值参/按值返回的
+读写（TSInput.read 返回 TSPoint 8B 是 signature 自带的最小形状）；
+④三维验收 = c_tree_sitter 原样转绿（B 维 15 行 oracle 已固定）。
+此前 c_revm_evm 等以指针/引用为主的 FFI 大物全不受此约束——该项由
+tree-sitter 一族（parser/LSP 工具链常见形状）供养优先级。

@@ -63,51 +63,30 @@ mimalloc = { version = "=0.1.52", features = ["extended"] }
 //      target/release/mirvm run corpus/c_mimalloc.rs
 // gate 接线需走既有 env 注入通道给本 driver 加该 CFLAGS（默认值即拒载，非漏配）。
 //
-// 【EXPECTED-RED（2026-07-17 定档）｜引擎疑似 bug——custom #[global_allocator]
-//  下 `__rust_*` 分配族派发不一致，alloc/free 配对契约撕裂】
-// 实测战果（本 driver 即两个独立实例的首个规模化复现体）：
-//   A 维：vec/btree 两相位 stdout 与 native 逐字节一致（窗口内分配计数 316/1355
-//         calls 全对）后，死于 phase_string（Vec<String> 增长段）。`mirvm run` 走
-//         cargo 包装 → exit 1 无 stderr；runner 直跑 → SIGSEGV（139）。
-//   C 维（JIT=1）：同一死点同形态 —— 与 JIT 无关，引擎共享层根因。
-//   B 维 native：exit 0、stderr 真空、两跑输出逐字节一致（oracle 正常）。
+// 【已修复（2026-07-17）｜custom #[global_allocator] 下 `__rust_*` 分配族
+//  跨堆撕裂 → 运行期统一路由 shim】
+// 修复前本 driver 死于 phase_string（A/C 同点上 SIGSEGV/错崩，B 维 oracle
+// 全绿）。两层根因与修法（decision-history §7.7）：
+//  ①分配系 builtin 的决定按【lower 会话】做出：base/deps image 在 Default
+//    会话把 __rust_* 烘成 CallBuiltin(Rust*)→引擎堆，而 delta/image 的同
+//    程序分配走 AST 展开器的 guest shim→用户分配器 ⇒ 两堆互穿 free。
+//    修：lower 在 kind=Global 时登记 HIR 展开器生成的四只 shim FuncId
+//    （Module.custom_alloc_shims），interp 的 CallBuiltin(Rust*) 臂在运行
+//    期统一路由到 shim（分配是程序级语义，与字节码的烘焙会话无关）。
+//  ②首次路由实现漏了 rebase：shim 的 FuncId 在 A2 split 收尾未随
+//    exports/fn_addrs/sites 同规则映射，运行期 call_guest 打到移位后的
+//    野 id，报"ABI 不匹配"错调 insert_entry/from_iter——补 rb.fn_id 后正。
+// 保留两枚最小复现备回归（彼时怒态）：/tmp/ga_p_only.rs（System 包装 +
+// println 即崩，退出段跨界 free）、/tmp/ga_vecstr.rs（注册表对账报
+// CROSS-FREE 6144B）。
 //
-// 实例①【退出段跨界 free（方向：guest 指针 → 引擎内建）】最小复现
-// （无第三方 crate；以下各探针 2026-07-17 在 /tmp 实测，内容见头注末）：
-//     /tmp/ga_p_only.rs —— System 薄包装 global_allocator + `println!("hello")`
-// 空 main 不崩、Vec push+drop 不崩、format! 不崩、仅 println! 即崩；显式
-// process::exit(0) 亦崩；MIRVM_NO_IR_CACHE=1 与 MIRVM_DEPS_IMAGE=0 同崩。
-// 取证链：LD_PRELOAD SA_SIGINFO 探针 si_addr=0x4000/0x8000，崩点符号化 =
-// engine::heap::dealloc(heap.rs:23) → 引擎自身 mimalloc 的 mi_free →
-// mi_validate_ptr_page(free.c:175) 读野地址 —— 即 IR 里 CallBuiltin(RustDealloc)
-// （interp.rs:2904 臂）在退出段被派发，free 掉的 1024B stdout LineWriter 缓冲却
-// 是此前经 guest 分配器发出的（guest 侧日志只见 A(1024) 无对应 F；native 同位
-// 序列同号）。D8k 曾证窗口内 Vec/Box/String 路由全对——退出口经 stdout 之后
-// 的释放路径不在其覆盖内。
+// <details><summary>原始 EXPECTED-RED 全记录（2026-07-17 定档文本）</summary>
 //
-// 实例②【执行中段跨界 free（方向：引擎堆指针 → guest 释放路）】最小复现：
-//     /tmp/ga_vecstr.rs —— System 薄包装 + 指针注册表对账；
-//     main：`for i in 0..256 { v.push(format!("k{i:05}={}", …)) }` 后 drop
-// 输出：先正常打印 "built 256"，随即注册表报
-//     CROSS-FREE: unknown ptr=0x7f31bc090000 sz=6144 al=8 n=257
-// 并 SIGSEGV。6144B = Vec<String> 满 256 件的缓冲；注册表证其【从未经 guest
-// 分配器发出】（其旧档 96..3072B 各级均对账在场）→ 末档 realloc(6144) 那次
-// `__rust_realloc` 没走 guest shim；LD_PRELOAD glibc 钩子全程【无】该笔 6144
-// 的 malloc/realloc 事件 → 它出自引擎 mimalloc（引擎不注册钩子）；而其 drop
-// 的 dealloc 却走 guest 路由 → guest 释放器拿到引擎堆指针 → 野元数据读崩。
-//
-// 两实例彼此镜像，同一几何：custom allocator 存在时，`__rust_alloc/dealloc/
-// realloc` 的【引擎内建 vs guest shim（exported `__rustc::__rust_*`）vs 宿主
-// dlsym】三类派发点在同一次运行里混用，分配/释放穿越不同实例 → 崩。
-// LD_PRELOAD 干涉测试显示崩点随机游走（btree 相位、string 相位、启动期均曾）
-// —— 典型的配对撕裂+野写后随机致死形态。嫌疑落点（交引擎侧定位，umpire
-// 不修引擎）：resolve_call 的 ①/②/③ 支路对 `__rust_*` 系符号的归一，
-// engine_builtins 对 Global kind 的注册范围（注释称不注册，IR 却现 RustDealloc
-// builtin 臂），以及 A2 分裂下 deps-base/bin-delta 两个 lower 会话对 allocator
-// shim 符号的可见性差。
-//
-// —— 实例①最小复现（/tmp/ga_p_only.rs，System 薄包装，全量）：
-//     #!/usr/bin/env mirvm
+// A 维：vec/btree 两相位 stdout 与 native 逐字节一致（窗口内分配计数
+// 316/1355 calls 全对）后，死于 phase_string（Vec<String> 增长段）。
+// C 维（JIT=1）：同一死点同形态 —— 与 JIT 无关，引擎共享层根因。
+// B 维 native：exit 0、stderr 真空、两跑输出逐字节一致（oracle 正常）。
+// 实例①最小复现（/tmp/ga_p_only.rs，System 薄包装，全量）：
 //     use std::alloc::{GlobalAlloc, Layout, System};
 //     struct A;
 //     unsafe impl GlobalAlloc for A {
@@ -117,19 +96,18 @@ mimalloc = { version = "=0.1.52", features = ["extended"] }
 //     #[global_allocator]
 //     static G: A = A;
 //     fn main() { println!("hello"); }        // → stdout 正常，退出段 SIGSEGV(139)
+// 取证链：LD_PRELOAD SA_SIGINFO si_addr=0x4000/0x8000，崩点符号化 =
+// engine::heap::dealloc(heap.rs:23) → mimalloc mi_validate_ptr_page 读野；
+// 1024B stdout 缓冲此前经 guest 分配器发出。
+// 实例②最小复现核心（/tmp/ga_vecstr.rs；静态指针注册表对账）：
+//     for i in 0..256 { v.push(format!(...)) } 后 drop →
+//     CROSS-FREE: unknown ptr=0x7f31bc090000 sz=6144 al=8 n=257 + SIGSEGV；
+// 6144B 末档缓冲从未经 guest 发出 → 出自引擎 mimalloc；drop 却走 guest 路由。
+// 嫌疑落点（umpire 记录）：resolve_call ①/②/③ 支路对 `__rust_*` 的归一、
+// engine_builtins 对 Global kind 的注册范围、A2 双 lower 会话对 allocator
+// shim 符号的可见性差。—— 两怀疑均被修法证实（①为根因、②为实现自伤）。
 //
-// —— 实例②最小复现核心（/tmp/ga_vecstr.rs；在①的分配器上加静态指针注册表：
-//   alloc/realloc 登记、dealloc/realloc 对账，未登记指针 → stderr 打 CROSS-FREE
-//   并 exit(43)）：
-//     fn main() {
-//         let mut parts: Vec<String> = Vec::new();
-//         for i in 0..256u64 {
-//             parts.push(format!("k{i:05}={}", i.wrapping_mul(2654435761) % 1000003));
-//         }
-//         println!("built {}", parts.len()); // 正常打印
-//         drop(parts);                        // → CROSS-FREE ptr 0x..090000 sz=6144 + SIGSEGV
-//     }
-//   （reg_add/reg_del = 开放寻址线性探测表，容量 1<<16；完整版存于 /tmp。）
+// </details>
 use mimalloc::MiMalloc;
 use std::alloc::{GlobalAlloc, Layout};
 use std::collections::BTreeMap;

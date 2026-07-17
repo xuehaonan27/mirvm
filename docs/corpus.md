@@ -417,7 +417,65 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
   定义在其 Rust rlib（#[no_mangle]）里：native_archive 闭包检查覆盖不到
   「符号在 rlib」形态（记档；driver 走 0.6 纯 Rust 后端）。
 
-## 6. 批7 候选清单（2026-07-17 定稿，激进扩编 24 个）
+### 批6（14 个；13 绿 / 1 实锤→fb0b204 修；2026-07-16；`3062184`）
+
+- **绿**：tokenizers_hf（BPE/Unigram 手工 vocab，fancy-regex 绕行上游 onig 破洞）、
+  jiff_time（内置 tz 大表）、exr_image（OpenEXR 八档压缩 roundtrip 含 PXR24/B44
+  有损面逐 channel fnv 锚；half 钉 =2.2.1 绕 F16C 运行期探测未内建 vcvtps2ph）、
+  nalgebra_la（LU/QR/SVD/Cholesky/eigenvalues 全 bits）、h3_hex（Uber H3 全 API）、
+  faer_lu（default-features=false 标量内核；默认 std 的 pulp V3 LD_ST 需依赖
+  crate 内 global_asm 物化=-Zno-codegen 边界——**债务图 §7 票记（fb327cc）**）、
+  stemmers_multi、whatlang_detect、gluesql_db（17 类型/join/聚合/错误路径；
+  钉 bigdecimal =0.4.5 绕上游破洞）、plotters_chart（SVG 全文+bitmap FNV）、
+  fastfloat_ryu（2.2250738585072011e-308 等经典边界 bits）、comfy_table_render。
+- **实锤（已修 fb0b204）**：c_polars_frame——guest 侧 psm（stacker）dynsym 导出
+  `rust_psm_on_stack` 与宿主 librustc_driver 内嵌 psm 撞车，被
+  reject_symbol_ambiguity 按设计拒（此前 hidden 类已由 056b212 修；本次 = dynsym
+  可见碰撞的 native 链接期绑定语义决议）：修 = **dynsym 归档句柄优先于
+  RTLD_DEFAULT 解析**（guest 链进的对象恒胜宿主同名库）+ InvalidEnumConstruction
+  assert(u128)。修复即三维转绿入册。
+
+### 批7（24 个三波激进扩编；23 全绿可用 / 1 FRONTIER 记档；修出 2 只产品 bug；2026-07-17）
+
+- **波1（12，纯 Rust 轻中型；全绿）**：wat_parse（wat/wast/wasmprinter 三件套
+  往返）、jsonschema（default-features=false 避 aws-lc-sys 198 闭包）、
+  html5ever（0.29.2 yank 实锤改 0.29.1）、xml_rs、markdown_it（syntect 裁、
+  linkify+全插件）、logos_lex、chumsky_parse（psm 分段栈无撞）、ndarray
+  （matrixmultiply x86 微内核位级闭合，风险面核销）、smartcore、rune
+  （0.13.4 宿主回调；JIT 8830/2415 过队仍一致）、koto（0.15.3 拷贝捕获
+  语义锚）、opencc（**FFI 条目非纯 Rust**——原清单分类误差；机器侧
+  /tmp/opencc-local 前缀，三维带 env 全绿，留 corpus.sh 手工批有 gating）。
+- **波2（10，中型/FFI/边界；7 绿 + 3 红分诊）**——绿：parquet2_rw（thrift 系
+  本就零依赖实锤）、syntect_fancy（默认语法集无 TOML→YAML 同角色替代）、
+  phonenumber（2.2MB 元数据 postcard 热面）、orgmode（organic 0.1.16；
+  org-rs 未发布）、oxc_parse（0.140.0 大物槽 62 闭包温跑 1s）、rsa_4096
+  （固定 PEM+v1.5 确定性签名）、ed25519_default（**不设 env 默认 simd
+  backend 直跑通过——批1 serial 绕行核销**）。
+- **修出两只产品 bug（均当日修复入册）**：
+  ① **native-archive 链接行缺 crate 图动态库**（`867b3de`）——`-sys` 的
+  cargo:rustc-link-lib 只写 rlib 元数据，libgit2.a 的 CRC32/deflate 等 17 处
+  undefined（libz-sys.stock-zlib 动态模式）。修 = system_dylibs(tcx) 统一收集
+  （与 lower RTLD_GLOBAL 预载同名单）+ `-l<name>` 入链接行与缓存键——c_libgit2
+  红转绿。
+  ② **custom #[global_allocator] 致 `__rust_*` 跨堆撕裂**（decision-history
+  §7.7）——分配按 lower 会话路由（base/deps image 烘 CallBuiltin→引擎堆，
+  delta/image 走 AST 展开器 guest shim→用户分配器），两堆互穿 free =
+  mimalloc 元数据 SIGSEGV（c_mimalloc 两镜像实例实锤：退出段 stdout 缓冲、
+  Vec<String> 6144B 末档；另有 shim FuncId 漏 A2 rebase 的实现自伤一记）。
+  修 = kind=Global 时登记 shim 四件套，interp CallBuiltin(Rust*) 臂运行期
+  统一路由——c_mimalloc 三维转绿（线程相位 53110 calls 无分歧）。
+- **FRONTIER 记档（债 debt-map §9）**：c_tree_sitter——FFI **按值聚合**封送
+  （TSInput/TSNode/TSPoint）系统性缺席：ffi_kind_of 只收标量的既定边界，
+  转正需 Aggregate 类 + System V 拆分 + thunk 方向按值读写，按 workload
+  优先级立项面；driver 头注/B 维 15 行 oracle 已固定。
+- **波3（加测；全绿）**：rustls_shake（rcgen 定种子 Ed25519 自签 +
+  rustls 0.23 ring TLS1.3 双手真握手，证书 DER FNV 硬锚）、zstd_long
+  （zstdmt 真线程面，16MiB 混合数据 L1/9/19+MT 各档指纹，ZSTDMT 行跨
+  进程稳定）。
+- gate5 128→**139**，corpus 段批7 共 +22（opencc 留手工批；tree_sitter
+  未接线待按值聚合转正）。三维铁律全程零例外放行。
+
+## 6. 批7 候选清单（2026-07-17 定稿，激进扩编 24 个；**已全部投放，结果见 §5 批7**）
 
 > 由 §6 初记（2026-07-16，换机备忘）定稿；用户裁定"激进扩、更快暴露问题"。
 > 分波投放（每波完 → 修净 bug → 下一波）；磁盘余量 157G 已核。

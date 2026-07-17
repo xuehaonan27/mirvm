@@ -51,7 +51,8 @@ malachite_big arkworks_ff im_persistent zxcvbn_pass barcoders_gen bzip2_pure \
 fixed_point openssl_evp \
 wat_parse jsonschema html5ever xml_rs markdown_it logos_lex chumsky_parse \
 ndarray smartcore rune koto \
-parquet2_rw syntect_fancy phonenumber orgmode oxc_parse rsa_4096 ed25519_default"}
+parquet2_rw syntect_fancy phonenumber orgmode oxc_parse rsa_4096 ed25519_default \
+mimalloc libgit2 rustls_shake zstd_long"}
 # jieba_cut 全绿但 mirvm 单跑 77-89s（贴 90s timeout），留 corpus.sh 手工跑批
 # opencc（批7 波1）三维已绿但不进 gate5：依赖机器侧 /tmp/opencc-local
 # （OpenCC 1.1.9 自建前缀，driver 头注有重建法）——留 corpus.sh 手工批（有 gating）
@@ -61,17 +62,21 @@ for p in $CORPUS_PROGS; do
     # ed25519：dalek 官方 serial backend（u128 语义压力本意，docs/corpus.md
     # 记账口径；默认 simd backend 的 avx512ifma vpmadd52 已于 2b4766b 内建）
     [ "$p" = ed25519 ] && export CARGO_CFG_CURVE25519_DALEK_BACKEND=serial
+    # mimalloc：libmimalloc.a 的 prim.c constructor 触发 native_archive 卫士，
+    # CFLAGS 注入 -DMI_PRIM_HAS_PROCESS_ATTACH 绕行（corpus/c_mimalloc.rs 头注①）
+    [ "$p" = mimalloc ] && export CFLAGS="-DMI_PRIM_HAS_PROCESS_ATTACH"
     # 重构建项的冷 timeout 放宽（gix/revm deps 树大、rusqlite 编 C sqlite、
     # calamine 双 crate、rustls 编 aws-lc C、rsa 大数 JIT 压力实测单跑 >90s、
-    # zopfli 重计算 A 维 ~200s、arkworks/ malachite 大 dep 树）
+    # zopfli 重计算 A 维 ~200s、arkworks/ malachite 大 dep 树、
+    # mimalloc/libgit2 的 vendored C 构建）
     tmo=90
     case "$p" in
-        gix_pure|rusqlite_db|revm_evm|zopfli_deep) tmo=300 ;;
+        gix_pure|rusqlite_db|revm_evm|zopfli_deep|mimalloc|libgit2) tmo=300 ;;
         calamine_xlsx|rustls_cert|phonenumber) tmo=180 ;;
         rsa_pss|rsa_4096) tmo=400 ;;
     esac
     timeout $tmo "$MIRVM" run "$src" >"$TMP/corpus-$p.out" 2>"$TMP/corpus-$p.err"; code=$?
-    unset CARGO_CFG_CURVE25519_DALEK_BACKEND RUSTFLAGS
+    unset CARGO_CFG_CURVE25519_DALEK_BACKEND RUSTFLAGS CFLAGS
     stdout=$(cat "$TMP/corpus-$p.out")
     out=$(cat "$TMP/corpus-$p.out" "$TMP/corpus-$p.err")
     red_pattern="" red_label="" red_code=70

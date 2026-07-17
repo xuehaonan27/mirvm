@@ -597,6 +597,36 @@ L2 热一致；gate5 117/0/0。debt §6 关闭（残余边界 = 签名不可派�
 无实质盲区剩余）。**顺带实得**：每实例唯一条目值修复了 thunk 按逃逸签名
 多址的 fn-ptr 相等性小坑；`SIGSEGV 诊断化`（debt ②阶梯）降为可选后补。
 
+## 7.7. 2026-07-17：custom #[global_allocator] 致 __rust_* 跨堆撕裂 → 运行期统一路由
+
+corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的产品 bug，
+两个实锤实例（退出段 stdout 缓冲、Vec<String> 末档 6144B 缓冲跨堆 free，
+*mimalloc 元数据 SIGSEGV*）：
+
+1. **根因**：分配系 builtin 的路由是**按 lower 会话**决定的——
+   `engine_builtins` 只在 `allocator_kind == Default` 时注册
+   RustAlloc/Dealloc/Realloc/AllocZeroed（引擎堆接管）；但分配语义是
+   **程序级**的：驱动会话 kind=Global 时，base/deps image（早前的 Default
+   会话烘的 `CallBuiltin(Rust*)`）与 delta/image 的 HIR 展开器生成
+   `__rust_*` guest shim（→ 用户 GlobalAlloc/FFI mimalloc）**两台分配器并存**，
+   互穿 free = mimalloc `mi_validate_ptr_page` 野读。
+2. **修法**：lower 在 kind=Global 时按 `CodegenFnAttrFlags::{ALLOCATOR,
+   DEALLOCATOR, REALLOCATOR, ALLOCATOR_ZEROED}` 找到 AST 展开器生成的
+   四只本地转发 fn，登记 `Module.custom_alloc_shims: Option<AllocShims>`
+   （FuncId 四件套，随模块序列化）；interp 的 `CallBuiltin(Rust*)` 臂
+   **在运行期**统一路由到 shim（NULL 时保持引擎堆）——字节码烘在哪个
+   会话不再重要。分配由此与 JIT/GOT/stub 的其它"程序级量"同格。
+3. **实现自伤一记顺手**：shim 的首个实现漏了 A2 rebase（FuncId 未随
+   image_fns 移位），运行期 call_guest 打到野 id 报"ABI 不匹配"错调
+   insert_entry/from_iter——补 `rb.fn_id` 同表后正。教训：FuncId 消费
+   面任何一个都要过 rebase 清单（exports/fn_addrs/ids/sites/shim 五处，
+   设计文档盘点口径自此为"五处"）。
+4. **验证**：两最小复现（ga_p_only/ga_vecstr）转绿；c_mimalloc 三维
+   逐字节一致（D8k 窗口对账四相位 live_delta=0；线程相位 53110 calls
+   无分歧）；gate5 139/0/0。**边界**：kind=Global 的
+   `__rust_alloc_error_handler` 路由未动（OOM 冷路径，仍按既有
+   ③/Trap 语义；首次 workload 触达时再立项）。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 - P7 设想独立 `src/os/` 物理层；当前 OS/FFI/builtin 逻辑仍分布在 lower、interp、ffi、heap。
