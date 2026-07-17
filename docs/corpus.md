@@ -325,6 +325,39 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
   回调/rayon 全通零分歧）。
 - gate5 144→**148**（swc_parse/miden_exec/polodb/starlark_eval 入册）。
 
+### 批9（8 个偏门小中型；8/8 全绿；修出 1 JIT bug；2026-07-18）
+
+- **绿**：zune_jpeg（zune-jpeg 0.4.21 解码 + image/jpeg-encoder 0.7 编码矩阵：
+  baseline 4:2:2×2、progressive 4:2:0 RI=99/4:4:4、sequential RI=5 真实重启；
+  **zune-jpeg 0.4.21 progressive+重启触发的上游破洞**以 RI=99 绕行并洞面如实
+  打印记档，0.5.15 同款正常；observed 上游解码线 0.4↔0.5 在 4:2:0 帧差 48
+  像素的语义数据点非红）、candle_mlp（candle-core 0.9.2 mini MLP 硬编码
+  weights；CPU matmul 无条件走 gemm→pulp 标量面，faer LD_ST 类 global_asm
+  风险面实证不存在——复红定因参照在头注）、pest（2.8.7 双 grammar：JSON 子集
+  递归 + 计算器；先序遍历节点序/求值/三错误位置 line:col+expected 锚定）、
+  scraper_dom（scraper 0.27：多档选择器命中序/text 串联/attrs/classes 排序
+  语义/outer-html FNV/三选择器错误路径）、arrow_rs（arrow 59.1 大物：五类型
+  RecordBatch（含 List\<i32\>/Struct/null 三面）+ filter/take/sort_to_indices/
+  sum-min-max 内核 + IPC stream 写读闭环 batch_eq=true）、fontdue（0.9.3 +
+  `/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf` 绝对路径双维同文件：
+  392 glyph metrics/bitmap FNV；CJK miss 探测如实打印；simd feature 关走官方
+  simd_core 标量后备——tiny-skia 同族官方后端开关先例）、unicode_rs
+  （unicode-segmentation 1.13.3 + normalization 0.1.25，Unicode 17 表：
+  grapheme 16 串/word 双遍 9 串/sentence 6 串/四形式 13 串/流式等价三面/
+  未分配码点专测）、rustpython_mini（rustpython-vm 0.5.0 嵌入式裸解释器五
+  程序；**install_signal_handlers=False 官方开关**绕 R1 故障信号面（_signal
+  模块 genesis 期对 SIGBUS 重装撞 guest std stack_overflow handler），头注
+  全链；构建 230 包 1m08s 冷，预算内）。
+- **修出 1 个 JIT bug（当日修复 `68829ad`）**：analyze_frame **0 字节帧
+  ZST 取址**——mem::drop::<ZST 自定义 Drop> 的 glue 实参 = `AddrOf(Local(0))`，
+  fsz=0 处批8 `dc6e30c` 帧末锚 `checked_sub(1)` 无处落、frame_ss 缺席 →
+  「取址 offset 必落帧」断言爆（C 维 stderr 污染，语义由解释兜底未受损）。
+  修复 = FrameMap 增 force 档 + define_fast 以 1 字节尺寸物化 0 字节帧
+  （批8 starlark 帧末 ZST 同族第三形态）；demo/zst_drop.rs 回归入册，
+  c_rustpython_mini 三维复绿。
+- gate5 148→**156**（8 driver 全绿入册；arrow_rs/rustpython_mini tmo=300、
+  candle_mlp tmo=180）。
+
 ## 6. 批7/批8 候选清单（已全部投放，2026-07-17）
 
 批7（24 个三波激进扩编）与批8（重型 10 个）候选已全部投放，过程与结果见 §5 对应批次。
@@ -337,17 +370,16 @@ z3/ONNXRuntime、solana 族（构建预算超批量级）、typst 直接版（�
 
 ## 7. 后续候选池（未投放）
 
-**批9/波3 优选候补**：zune-jpeg（纯 Rust JPEG 往返）、candle-core mini MLP（CPU
-forward bits）、pest 语法族、typst（字体确定性先做独立设计评估，可能独立成片）。
+批9（§5）8 个已全部投放并全绿收口。池内尚余：
 
-**池**（批7/8 初记原单留存，按主题）：
-
-- VM/语言机：rustpython、risc0、miden prover 面、EVM 生态延展（ethers/alloy 待体量
-  评估）、wasi 生态（本 VM 内再跑 wasm 部件的嵌套）。
-- 数据/格式：arrow-rs/datafusion（polars 已通可接棒）、rust_xlsxwriter 读侧、
-  kuchiki/scraper DOM、unicode-rs 补充、trans（词典）、libmagic-rust。
-- 真二进制：ugrep/stringsext、htop/bat/exa 式二进制（输出需可截 TTY 化）。
+- **typst**：字体确定性要先做独立设计评估（fontdue 已把字体读盘/光栅基础面
+  压绿，typst 自身的字体策略仍需独立成片）。
+- **rustpython 完整形态**：mini 嵌入式已绿；stdlib 满装载/shell 模块面（
+  `_signal` 已实测的 R1 面绕行链在 c_rustpython_mini 头注）按实需再压。
+- VM/语言机余量：risc0（重）、miden prover 面、EVM ethers/alloy（待体量评估）、
+  wasi 生态（本 VM 内再跑 wasm 部件的嵌套）。
+- 数据/格式：datafusion（arrow 已通，SQL 引擎大物）、rust_xlsxwriter 读侧、
+  kuchiki（scraper 已压 DOM 同族）、trans/libmagic-rust。
+- 真二进制：ugrep/stringsext、htop/bat/exa 式（输出需可截 TTY 化）。
 - 系统 FFI：kerberos/dbus/usb（多半预期 FAIL 记缺）、qemu 类块设备读。
 - 已解锁可回测：rustls 握手更多形态、polars 全家福延伸、ed25519/rsa 族加测。
-
-投放纪律照旧：每波完 → 修净 bug → 下一波；开工前核磁盘与构建预算。
