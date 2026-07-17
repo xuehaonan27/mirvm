@@ -475,7 +475,34 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
 - gate5 128→**139**，corpus 段批7 共 +22（opencc 留手工批；tree_sitter
   未接线待按值聚合转正）。三维铁律全程零例外放行。
 
-## 6. 批7 候选清单（2026-07-17 定稿，激进扩编 24 个；**已全部投放，结果见 §5 批7**）
+## 6. 批7 候选清单（2026-07-17 定稿；**已全部投放，结果见 §5 批7**）
+
+## 7. 批8 候选清单（2026-07-17 定稿，重型 10 个；工具链实勘后调整）
+
+> 工具链实勘：cmake/g++/perl/make 在场；**nasm/clang/go 缺席**。
+> 三波投放（每波完→修净→下一波）；磁盘余量 148G。
+
+**波1（5，重 FFI/C）**：c_aws_lc（aws-lc-rs——ring 巨物直系，cmake 大头：
+SHA/AES-GCM/HKDF 向量）、c_mlua_lua（mlua vendored lua54——rocksdb 候补：
+librocksdb-sys 的 bindgen 需 libclang（缺席）判不可，mlua 静态 C 补重 FFI
++VM 双重压力；Lua chunks + Rust 回调）、c_tantivy（真搜索引擎：小 schema
++手工文档，term/range/phrase 查询命中序）、c_sequoia_pgp（OpenPGP 大头：
+固定 cert 解析 + 固定私钥 detached 签）、c_sqlx_sqlite（sqlx+tokio 异步
+执行器面，C sqlite 已绿家族上的 DDL/事务/聚合）。
+
+**波2（5，VM/语言机/大物）**：c_swc_parse（swc_ecma_*——oxc 姊妹实现新
+压力）、c_starlark_eval（Bazel 语言 VM 三段求值）、c_miden_exec
+（miden-vm **execute only 不证明**：汇编 fib/fold 程序栈输出）、
+c_wasmtime_wat（**VM-in-VM 旗舰**：wasmtime+cranelift，fib/fact WAT 实例
+调用）、c_polodb（polodb-lite 嵌入纯 Rust DB+WAL 持久化闭环）。
+
+**波3 候补（视 1/2 收敛）**：zune-jpeg 全格式（纯 Rust JPEG roundtrip）、
+candle-core mini MLP（CPU forward bits）、pest 语法族、typst（字体确定性
+要先做设计评估——可能是独立性设计片，不享有共享批）。
+
+**已判不可（记档）**：rocksdb（bindgen 需 libclang）、ravif/av1（nasm）、
+z3/ONNXRuntime/typst-字体（机器侧缺失/需独立设计）、solana 族（构建预算
+超本批量级）。
 
 > 由 §6 初记（2026-07-16，换机备忘）定稿；用户裁定"激进扩、更快暴露问题"。
 > 分波投放（每波完 → 修净 bug → 下一波）；磁盘余量 157G 已核。
