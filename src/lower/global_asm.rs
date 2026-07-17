@@ -15,8 +15,17 @@ use rustc_middle::ty::{Instance, TyCtxt, TypingEnv};
 
 /// 收集 + 渲染 + 汇编。返回 `.so` 路径（供 required_native_libs），无 asm 时 None。
 /// 失败 = Err（加载相响亮终止，不静默）。
-pub(crate) fn materialize(tcx: TyCtxt<'_>) -> Result<Option<Box<str>>, String> {
+///
+/// `sym` 指向解释态 guest fn（C7，2026-07-18）：经 linker 预算 P1 可执行条目地址，
+/// 在 .s 头部发射 `.globl <名> + .set <名>, <址>`（ABS 符号）——机器码 call/jmp
+/// 直接落到启动相物化的条目 stub，蹦床回解释器（native 链接期绑定同构）。签名不可
+/// 派生（聚合/Rust ABI/变参）者响亮拒绝：机器码调此类 fn 本即 UB（残余边界）。
+pub(crate) fn materialize<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    linker: &mut super::Linker<'tcx>,
+) -> Result<Option<Box<str>>, String> {
     let mut asm = String::new();
+    let mut abs_defs: Vec<(Box<str>, u64)> = Vec::new();
     let parts = tcx.collect_and_partition_mono_items(());
     // 稳定序（跨 CGU）；重复 def 去一次
     let mut seen = std::collections::HashSet::new();
@@ -25,12 +34,12 @@ pub(crate) fn materialize(tcx: TyCtxt<'_>) -> Result<Option<Box<str>>, String> {
             match *item {
                 MonoItem::GlobalAsm(item_id) => {
                     if seen.insert(format!("ga:{item_id:?}")) {
-                        render_global_asm(tcx, item_id, &mut asm)?;
+                        render_global_asm(tcx, linker, item_id, &mut asm, &mut abs_defs)?;
                     }
                 }
                 MonoItem::Fn(inst) => {
                     if is_naked(tcx, inst) && seen.insert(format!("naked:{:?}", inst.def_id())) {
-                        render_naked(tcx, inst, &mut asm)?;
+                        render_naked(tcx, linker, inst, &mut asm, &mut abs_defs)?;
                     }
                 }
                 MonoItem::Static(_) => {}
@@ -40,7 +49,51 @@ pub(crate) fn materialize(tcx: TyCtxt<'_>) -> Result<Option<Box<str>>, String> {
     if asm.trim().is_empty() {
         return Ok(None);
     }
+    // 可执行跳板统一前置（Intel 语法，站点指令无关）：guest fn 符号 = 全局函数，
+    // 体 = `movabs rax, stub码址; jmp rax`——机器码 call 进跳板即达 P1 条目 stub、
+    // 蹦床回解释器。`.set` ABS 形式在 Intel 模式下 `call` 不可发码（GAS 实锤），
+    // 故用真跳板体（同 .so 内相对调用，链接期自洽）。
+    let mut head = String::from(".intel_syntax noprefix\n");
+    let mut dedup = std::collections::HashSet::new();
+    for (name, addr) in abs_defs {
+        if dedup.insert(name.clone()) {
+            let _ = writeln!(head, ".globl {name}");
+            let _ = writeln!(head, ".type {name},@function");
+            let _ = writeln!(head, "{name}:");
+            let _ = writeln!(head, "    movabs rax, {addr:#x}");
+            let _ = writeln!(head, "    jmp rax");
+            let _ = writeln!(head, ".size {name}, . - {name}");
+        }
+    }
+    let asm = format!("{head}{asm}");
     Ok(Some(assemble(&asm)?))
+}
+
+/// `sym` 指向解释态 guest fn（非 foreign、非 naked）时经 linker 预算 P1 条目 stub
+/// 并登记 ABS 定义；不可派生签名响亮拒绝。符号名仍照常回写占位——`.set` 行使
+/// 引用解析到 stub 码址。
+fn absorb_guest_symfn<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    linker: &mut super::Linker<'tcx>,
+    inst: Instance<'tcx>,
+    abs_defs: &mut Vec<(Box<str>, u64)>,
+) -> Result<(), String> {
+    if tcx.is_foreign_item(inst.def_id()) || is_naked(tcx, inst) {
+        return Ok(());
+    }
+    if linker.entry_ffi_sig(inst).is_none() {
+        return Err(format!(
+            "global_asm/naked 的 sym 指向签名不可派生的 guest fn `{}`（聚合/Rust \
+             ABI/变参）：机器码经 fn-ptr 调此类 fn 无 thunk ABI 可言（native 下同 \
+             形本即 UB）——C7 残余边界，如实响亮拒绝",
+            tcx.symbol_name(inst).name
+        ));
+    }
+    let addr = linker
+        .fn_entry_addr(inst)
+        .map_err(|e| format!("global_asm sym guest fn 条目预算失败: {e}"))?;
+    abs_defs.push((tcx.symbol_name(inst).name.into(), addr));
+    Ok(())
 }
 
 fn is_naked(tcx: TyCtxt<'_>, inst: Instance<'_>) -> bool {
@@ -69,10 +122,12 @@ fn ensure_x86(tcx: TyCtxt<'_>) -> Result<(), String> {
     }
 }
 
-fn render_global_asm(
-    tcx: TyCtxt<'_>,
+fn render_global_asm<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    linker: &mut super::Linker<'tcx>,
     item_id: rustc_hir::ItemId,
     out: &mut String,
+    abs_defs: &mut Vec<(Box<str>, u64)>,
 ) -> Result<(), String> {
     use rustc_ast::InlineAsmOptions;
     use rustc_hir::{InlineAsmOperand, ItemKind};
@@ -116,6 +171,7 @@ fn render_global_asm(
                             args,
                             rustc_span::DUMMY_SP,
                         );
+                        absorb_guest_symfn(tcx, linker, inst, abs_defs)?;
                         out.push_str(tcx.symbol_name(inst).name);
                     }
                     InlineAsmOperand::SymStatic { path: _, def_id } => {
@@ -132,8 +188,10 @@ fn render_global_asm(
 
 fn render_naked<'tcx>(
     tcx: TyCtxt<'tcx>,
+    linker: &mut super::Linker<'tcx>,
     inst: Instance<'tcx>,
     out: &mut String,
+    abs_defs: &mut Vec<(Box<str>, u64)>,
 ) -> Result<(), String> {
     use rustc_ast::InlineAsmOptions;
     use rustc_middle::mir::{InlineAsmOperand, START_BLOCK, TerminatorKind};
@@ -193,6 +251,7 @@ fn render_naked<'tcx>(
                         args,
                         rustc_span::DUMMY_SP,
                     );
+                    absorb_guest_symfn(tcx, linker, callee, abs_defs)?;
                     out.push_str(tcx.symbol_name(callee).name);
                 }
                 InlineAsmOperand::SymStatic { def_id } => {
@@ -248,10 +307,10 @@ fn assemble(asm: &str) -> Result<Box<str>, String> {
     if !status.success() {
         return Err(format!("cc 汇编 global-asm 失败（status={status}）"));
     }
-    // 未定义符号审计（D8h 边界）：global_asm/naked 里 `sym` 引用的符号必须自身是
-    // 机器码（另一 naked/global_asm 符号或动态库导出）；引用**解释执行的 guest
-    // fn** 无机器码入口——.so 会留下未解析符号，dlopen 时才炸且诊断误导。此处提前
-    // 响亮拒绝，指明这是 JIT 期能力（从机器码 jmp 进解释器需 per-fn trampoline）。
+    // 未定义符号审计：global_asm/naked 里 `sym` 引用的符号必须自身是机器码
+    // （另一 naked/global_asm 符号、动态库导出，或经 C7 ABS 定义挂到 P1 条目
+    // stub 的 guest fn）。裸引用未定义 guest 符号会留下 dlopen 时才炸且诊断
+    // 误导的未解析项——此处提前响亮拒绝。
     let undef = undefined_nonlib_symbols(&tmp);
     if let Some(sym) = undef {
         let _ = std::fs::remove_file(&tmp);

@@ -172,7 +172,8 @@ pub(crate) struct Linker<'tcx> {
     got_idx: FxHashMap<Box<str>, u32>,
     got_fixups: Vec<ir::GotFixup>,
     /// foreign 分配 → (符号名, weak)：非 weak extern static 与 extern fn 取址两类
-    ///（weak 判空单格永不写值，无此项）；重定位/常量发码经它把"烤值"转"槽位"。
+    ///（weak extern static 走 foreign_slot 直道不登记本表——E27，2026-07-18）；
+    /// 重定位/常量发码经它把"烤值"转"槽位"。
     foreign_alloc_sym: FxHashMap<AllocId, (Box<str>, bool)>,
     /// (符号名, image 上下文) → GOT 槽真地址（槽 = 本侧冻结区普通 8 字节格）
     foreign_slots: std::collections::HashMap<(Box<str>, bool), u64>,
@@ -669,13 +670,39 @@ impl<'tcx> Linker<'tcx> {
                     let weak = self.tcx.codegen_fn_attrs(def_id).import_linkage
                         == Some(rustc_hir::attrs::Linkage::ExternalWeak);
                     if weak {
-                        // 判空 cell：&static 地址身份必需（krate 定域 + 双表登记）
-                        let cell = if let Some(s) = &mut self.split
-                            && def_id.krate != rustc_hir::def_id::LOCAL_CRATE
-                        {
-                            s.image_frozen.alloc(8, 8)
+                        // native extern weak 语义（P2 GOT 启动相重填）：命中 = 真
+                        // 符号地址、缺席 = 0。例外 = 引擎接管语义的符号强制缺席
+                        // （M4 判空 cell 纪律延续）：非纯直通内建 / denylist /
+                        // 引擎模型符号（TLS-dtor 一族）——std 对它们走回退路径，
+                        // 引擎接管不被真符号绕开（E27 闭合契约，2026-07-18）。
+                        const FORCE_ABSENT_WEAK: &[&str] = &["__cxa_thread_atexit_impl"];
+                        let engine_owned = self
+                            .builtins
+                            .get(&Symbol::intern(name))
+                            .is_some_and(|b| {
+                                !matches!(
+                                    b,
+                                    ir::Builtin::HostGetenv
+                                        | ir::Builtin::HostWrite
+                                        | ir::Builtin::HostStrlen
+                                        | ir::Builtin::HostAbort
+                                )
+                            })
+                            || DENY_EXACT.contains(&name)
+                            || DENY_PREFIX.iter().any(|p| name.starts_with(p))
+                            || FORCE_ABSENT_WEAK.contains(&name);
+                        let cell = if engine_owned {
+                            // 判空 cell = 符号缺席（krate 定域 + 双表登记同前）
+                            if let Some(s) = &mut self.split
+                                && def_id.krate != rustc_hir::def_id::LOCAL_CRATE
+                            {
+                                s.image_frozen.alloc(8, 8)
+                            } else {
+                                self.frozen.alloc(8, 8)
+                            }
                         } else {
-                            self.frozen.alloc(8, 8) // 清零 cell = 符号缺席
+                            // GOT 槽（初填 0；启动相按名重填命中值或 0）
+                            self.foreign_slot(name, 0, true)
                         };
                         self.record_both(id, cell);
                         return Ok(cell);
@@ -2017,7 +2044,7 @@ fn lower_inner(
     let required_native_libs: Vec<Box<str>> = {
         let mut v = crate::native_archive::materialize_static_libraries(tcx)
             .unwrap_or_else(|reason| panic!("Static native library 装载失败: {reason}"));
-        if let Some(so) = global_asm::materialize(tcx)
+        if let Some(so) = global_asm::materialize(tcx, &mut linker)
             .unwrap_or_else(|reason| panic!("global_asm/naked 物化失败: {reason}"))
         {
             v.push(so);
