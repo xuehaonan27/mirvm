@@ -180,6 +180,13 @@ pub(crate) fn materialize_static_libraries<'tcx>(
 /// 物化期歧义拒绝：归档 **.dynsym 可见**导出符号不得**跨归档**重名（解析依赖
 /// 装载顺序，M5.1 拒绝猜测 native linker 顺序）。
 ///
+/// weak 语义修正（2026-07-18，corpus 批10 c_risc0_run 实锤）：重名符号按
+/// native 链接语义分治——**全部 weak 定义放行**（weak/COMDAT 首件胜出，装载序
+/// = crate 图序与 native 链接序同构；risc0 三个 -sys crate 各导 C++ sized-delete
+/// `_ZdlPvS_` COMDAT 即此族）；**恰一个 strong 定义放行**（strong 胜 weak，
+/// native 同款静默决议）；**≥2 个 strong 定义维持拒**（native 下本就 link error，
+/// 我们同样响亮拒）。
+///
 /// 与 **RTLD_DEFAULT 既有定义**的碰撞此前同列（①），自 dynsym 归档句柄优先
 /// 解析后不再拒绝：解析序 ①hidden 兜底表 → ②归档句柄（链接序）→ ③dlsym
 /// 全域，guest 链进的对象（hidden 或 dynsym 可见）恒胜宿主进程同名库——
@@ -192,7 +199,7 @@ pub(crate) fn materialize_static_libraries<'tcx>(
 /// 不进 .dynsym 的 hidden 符号（.symtab 兜底表承载）刻意不做任何碰撞检查：
 /// 解析序上恒先于全域，碰撞本就解析到归档，无歧义可拒。
 fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), String> {
-    let mut owners = HashMap::<String, PathBuf>::new();
+    let mut owners = HashMap::<String, (PathBuf, bool)>::new();
     for shared_object in shared_objects {
         let output = Command::new("nm")
             .args(["--dynamic", "--defined-only", "--format=posix"])
@@ -218,23 +225,42 @@ fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), String> {
                 shared_object.display()
             )
         })?;
-        for symbol in symbols
-            .lines()
-            .filter_map(|line| line.split_ascii_whitespace().next())
-        {
+        for line in symbols.lines() {
+            let mut it = line.split_ascii_whitespace();
+            let Some(symbol) = it.next() else { continue };
+            // posix 格式第二字段 = 类型字母（W/w = weak 函数、V/v = weak 对象、
+            // u = GNU unique（COMDAT 意图的内联变量/局部 static 一族，native
+            // 静态链接合并、glibc 动态链接恒 RTLD_LOCAL——跨归档同名无歧义）；
+            // 余者按 strong 计）
+            let weak = it.next().is_some_and(|t| t.starts_with(['W', 'w', 'V', 'v', 'u']));
             std::ffi::CString::new(symbol).map_err(|_| {
                 format!(
                     "归档共享库 `{}` 导出含 NUL 的非法符号名",
                     shared_object.display()
                 )
             })?;
-            if let Some(previous) = owners.insert(symbol.to_owned(), shared_object.clone()) {
-                return Err(format!(
-                    "静态归档导出符号 `{symbol}` 同时来自 `{}` 与 `{}`；运行期 dlsym \
-                     解析将依赖装载顺序，M5.1 拒绝猜测 native linker 顺序",
-                    previous.display(),
-                    shared_object.display()
-                ));
+            match owners.entry(symbol.to_owned()) {
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert((shared_object.clone(), weak));
+                }
+                std::collections::hash_map::Entry::Occupied(mut e) => {
+                    let (prev_path, prev_weak) = e.get().clone();
+                    let strongs = usize::from(!prev_weak) + usize::from(!weak);
+                    if strongs >= 2 {
+                        return Err(format!(
+                            "静态归档导出符号 `{symbol}` 同时来自 `{}` 与 `{}`（双 strong \
+                             定义）；运行期 dlsym 解析将依赖装载顺序，M5.1 拒绝猜测 \
+                             native linker 顺序",
+                            prev_path.display(),
+                            shared_object.display()
+                        ));
+                    }
+                    // 全 weak（首件胜出）或恰一 strong（strong 胜 weak）：native
+                    // 链接语义同款静默决议——strong 定义入主表
+                    if prev_weak && !weak {
+                        e.insert((shared_object.clone(), weak));
+                    }
+                }
             }
         }
     }
@@ -938,6 +964,61 @@ mod tests {
             "unexpected diagnostic: {error}"
         );
         assert!(error.contains("顺序"), "unexpected diagnostic: {error}");
+    }
+
+    /// weak/COMDAT 语义（c_risc0_run 实锤）：跨归档同名符号——全 weak 放行
+    ///（首件胜出）；恰一 strong + weak 放行（strong 胜出）；双 strong 维持拒。
+    #[test]
+    fn duplicate_weak_symbols_follow_native_link_semantics() {
+        let temp = TempDir::new("duplicate-weak");
+        let (d1, d2, d3) = (
+            temp.path().join("d1"),
+            temp.path().join("d2"),
+            temp.path().join("d3"),
+        );
+        for d in [&d1, &d2, &d3] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let weak_a = make_archive(
+            &d1,
+            "__attribute__((weak)) unsigned long mirvm_dup_weak(void) { return 1UL; }\n",
+        );
+        let weak_b = make_archive(
+            &d2,
+            "__attribute__((weak)) unsigned long mirvm_dup_weak(void) { return 2UL; }\n",
+        );
+        let strong_c = make_archive(
+            &d3,
+            "unsigned long mirvm_dup_weak(void) { return 3UL; }\n",
+        );
+        let cache = temp.path().join("cache");
+        let mat = |a: &PathBuf| {
+            materialize_for_target_in(
+                a,
+                &cache,
+                "x86_64-unknown-linux-gnu",
+                Path::new("cc"),
+                &[],
+                None,
+            )
+            .unwrap()
+        };
+        let (sa, sb, sc) = (mat(&weak_a), mat(&weak_b), mat(&strong_c));
+        // 全 weak：放行（native 首件胜出同构）
+        reject_symbol_ambiguity(&[sa.clone(), sb.clone()])
+            .expect("全 weak 同名必须放行");
+        // strong + weak：放行（native strong 胜出同款决议）
+        reject_symbol_ambiguity(&[sa.clone(), sc.clone()])
+            .expect("strong+weak 必须放行");
+        // 双 strong：维持拒（native 下本就 link error）
+        let strong_d_dir = temp.path().join("d4");
+        std::fs::create_dir_all(&strong_d_dir).unwrap();
+        let strong_d = make_archive(
+            &strong_d_dir,
+            "unsigned long mirvm_dup_weak(void) { return 4UL; }\n",
+        );
+        let sd = mat(&strong_d);
+        reject_symbol_ambiguity(&[sc, sd]).unwrap_err();
     }
 
     #[test]
