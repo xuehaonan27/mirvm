@@ -3602,10 +3602,20 @@ fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
             }
             Terminator::InlineAsm { ins, outs, .. } => {
                 for (_, o) in ins {
-                    scan_op(&mut out, o, fsz);
+                    match o {
+                        ir::AsmIoVal::Scalar(o) => scan_op(&mut out, o, fsz),
+                        ir::AsmIoVal::VecBytes(pe, size) => {
+                            scan_place(&mut out, pe, Extent::Bytes(*size), fsz)
+                        }
+                    }
                 }
-                for (_, sp) in outs {
-                    scan_sp(&mut out, sp, fsz);
+                for (_, d) in outs {
+                    match d {
+                        ir::AsmIoDst::Scalar(sp) => scan_sp(&mut out, sp, fsz),
+                        ir::AsmIoDst::VecBytes(pe, size) => {
+                            scan_place(&mut out, pe, Extent::Bytes(*size), fsz)
+                        }
+                    }
                 }
             }
             Terminator::Resume | Terminator::TerminateAbort | Terminator::Trap(_) => {}

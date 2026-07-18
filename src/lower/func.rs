@@ -2595,35 +2595,65 @@ impl<'tcx> LowerCx<'tcx, '_> {
 
         // 配对已降低的值/落点与 wrapper 槽偏移（同源一致——正确性地基）。
         // 第二遍重匹配 operands[i]（借的是参数非 self，与 lower_* 的 &mut self 不冲突）。
-        let mut ins: Vec<(u32, Operand)> = Vec::new();
-        let mut outs: Vec<(u32, ScalarPlace)> = Vec::new();
+        // 值通道双形态（批10，c_typst_pdf 供养）：layout ≤8B 走 8B 标量槽（今路径）；
+        // >8B（__m128i/__m256/__m512 向量）走向量字节通道（place 真地址拷全宽）。
+        let mut ins: Vec<(u32, ir::AsmIoVal)> = Vec::new();
+        let mut outs: Vec<(u32, ir::AsmIoDst)> = Vec::new();
         for (i, op) in operands.iter().enumerate() {
+            let val_of = |this: &mut Self, value: &mir::Operand<'tcx>| -> Result<ir::AsmIoVal, String> {
+                let ty = this.op_ty(value)?;
+                let layout = frame::layout_of(this.tcx, this.typing_env, ty)?;
+                let size = layout.layout.size().bytes() as u32;
+                if size <= 8 {
+                    Ok(ir::AsmIoVal::Scalar(this.lower_operand_scalar(value)?))
+                } else if let Some(pl) = value.place() {
+                    let dp = this.resolve_place(&pl)?;
+                    Ok(ir::AsmIoVal::VecBytes(dp.expr(), size))
+                } else {
+                    match this.lower_operand(value)? {
+                        LoweredOp::Bytes { place, .. } => {
+                            Ok(ir::AsmIoVal::VecBytes(place.expr(), size))
+                        }
+                        _ => Err(format!(
+                            "asm 向量输入非 place（ty={ty}，批10 xmm 通道）"
+                        )),
+                    }
+                }
+            };
+            let dst_of = |this: &mut Self, place: &mir::Place<'tcx>| -> Result<ir::AsmIoDst, String> {
+                let dp = this.resolve_place(place)?;
+                let layout = frame::layout_of(this.tcx, this.typing_env, dp.ty)?;
+                let size = layout.layout.size().bytes() as u32;
+                if size <= 8 {
+                    let (pl, w) = this.place_scalar(place)?;
+                    Ok(ir::AsmIoDst::Scalar(pl.scalar_place(w)))
+                } else {
+                    Ok(ir::AsmIoDst::VecBytes(dp.expr(), size))
+                }
+            };
             match op {
                 mir::InlineAsmOperand::In { value, .. } => {
-                    let v = self.lower_operand_scalar(value)?;
+                    let v = val_of(self, value)?;
                     ins.push((g.input_slot[i].expect("In 必有输入槽"), v));
                 }
                 mir::InlineAsmOperand::Out {
                     place: Some(place), ..
                 } => {
-                    let (pl, w) = self.place_scalar(place)?;
-                    outs.push((
-                        g.output_slot[i].expect("Out 有 place 必有输出槽"),
-                        pl.scalar_place(w),
-                    ));
+                    let d = dst_of(self, place)?;
+                    outs.push((g.output_slot[i].expect("Out 有 place 必有输出槽"), d));
                 }
                 mir::InlineAsmOperand::InOut {
                     in_value,
                     out_place,
                     ..
                 } => {
-                    let v = self.lower_operand_scalar(in_value)?;
+                    let v = val_of(self, in_value)?;
                     ins.push((g.input_slot[i].expect("InOut 必有输入槽"), v));
                     if let Some(place) = out_place {
-                        let (pl, w) = self.place_scalar(place)?;
+                        let d = dst_of(self, place)?;
                         outs.push((
                             g.output_slot[i].expect("InOut 有 out_place 必有输出槽"),
-                            pl.scalar_place(w),
+                            d,
                         ));
                     }
                 }

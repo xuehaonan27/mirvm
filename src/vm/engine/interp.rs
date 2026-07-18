@@ -19,9 +19,9 @@ use std::sync::Mutex;
 use super::ctx::{Ctx, Shared};
 use super::frame::ByteRegion;
 use super::ir::{
-    Bb, Block, FfiAgg, FfiKind, FfiLeaf, FuncBody, IntBinOp, IntCc, Module, Operand, OvfOp,
-    ParamAbi, PlaceBase, PlaceExpr, PlaceStep, RetAbi, RetDest, Rvalue, ScalarPlace, Slot, Stmt,
-    SwitchDiscr, Terminator, UnwindAction, Width,
+    AsmIoDst, AsmIoVal, Bb, Block, FfiAgg, FfiKind, FfiLeaf, FuncBody, IntBinOp, IntCc, Module,
+    Operand, OvfOp, ParamAbi, PlaceBase, PlaceExpr, PlaceStep, RetAbi, RetDest, Rvalue,
+    ScalarPlace, Slot, Stmt, SwitchDiscr, Terminator, UnwindAction, Width,
 };
 
 /// guest panic 的宿主载体（spike3 协议）：exception = guest 侧 `_Unwind_Exception` 指针
@@ -3327,17 +3327,49 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                 }
                 let bufp = buf.0.as_mut_ptr();
                 for (off, op) in ins {
-                    let (v, _) = eval_operand(ctx, base, op);
-                    unsafe { std::ptr::write_unaligned(bufp.add(*off as usize) as *mut u64, v) };
+                    match op {
+                        AsmIoVal::Scalar(o) => {
+                            let (v, _) = eval_operand(ctx, base, o);
+                            unsafe {
+                                std::ptr::write_unaligned(bufp.add(*off as usize) as *mut u64, v)
+                            };
+                        }
+                        // 批10：向量字节通道（xmm/ymm/zmm 16/32/64B 全宽拷贝）
+                        AsmIoVal::VecBytes(pe, size) => {
+                            let src = eval_place_addr(ctx, base, pe);
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(
+                                    src as *const u8,
+                                    bufp.add(*off as usize),
+                                    *size as usize,
+                                )
+                            };
+                        }
+                    }
                 }
                 let addr = module.asm_stub_addrs[*stub as usize];
                 let f: unsafe extern "C" fn(*mut u8) =
                     unsafe { std::mem::transmute::<u64, unsafe extern "C" fn(*mut u8)>(addr) };
                 unsafe { f(bufp) };
                 for (off, dst) in outs {
-                    let v =
-                        unsafe { std::ptr::read_unaligned(bufp.add(*off as usize) as *const u64) };
-                    place_write(ctx, base, dst, v);
+                    match dst {
+                        AsmIoDst::Scalar(sp) => {
+                            let v = unsafe {
+                                std::ptr::read_unaligned(bufp.add(*off as usize) as *const u64)
+                            };
+                            place_write(ctx, base, sp, v);
+                        }
+                        AsmIoDst::VecBytes(pe, size) => {
+                            let dst_addr = eval_place_addr(ctx, base, pe);
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(
+                                    bufp.add(*off as usize) as *const u8,
+                                    dst_addr as *mut u8,
+                                    *size as usize,
+                                )
+                            };
+                        }
+                    }
                 }
                 blk = *target as usize;
             }

@@ -60,6 +60,22 @@ impl Width {
     }
 }
 
+/// InlineAsm 输入值通道（批10 xmm/向量槽 16B 通道扩展，c_typst_pdf 供养）：
+/// 标量 = 8B 值按宽写低位；VecBytes = 向量字节通道（place 真地址 + 全宽 size，
+/// xmm/ymm/zmm = 16/32/64 字节，与 wrapper `movups/vmovups` 槽同源）。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub enum AsmIoVal {
+    Scalar(Operand),
+    VecBytes(PlaceExpr, u32),
+}
+
+/// InlineAsm 输出落点通道（同 AsmIoVal 双形态）。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub enum AsmIoDst {
+    Scalar(ScalarPlace),
+    VecBytes(PlaceExpr, u32),
+}
+
 /// 帧内标量槽（快路径）：冻结偏移（Field 投影已折进 off）。
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Slot {
@@ -1322,10 +1338,10 @@ pub enum Terminator {
     InlineAsm {
         stub: AsmStubId,
         buf_size: u32,
-        /// (缓冲槽偏移, 输入值)——按操作数宽写入 8 字节槽低位
-        ins: Vec<(u32, Operand)>,
-        /// (缓冲槽偏移, 输出落点)——按落点宽从槽低位读出
-        outs: Vec<(u32, ScalarPlace)>,
+        /// (缓冲槽偏移, 输入值通道)——标量写 8B 槽低位；向量字节通道拷全宽
+        ins: Vec<(u32, AsmIoVal)>,
+        /// (缓冲槽偏移, 输出落点通道)——标量读 8B 槽低位；向量字节通道拷全宽
+        outs: Vec<(u32, AsmIoDst)>,
         target: Bb,
     },
     Return,
