@@ -1687,6 +1687,90 @@ impl<'tcx> LowerCx<'tcx, '_> {
         Err(format!("Unsize 形态未知（{src} → {dst}）"))
     }
 
+    /// C5 dyn 尾对统一递归判据（批10，datafusion/typst 双供养）：
+    /// 每级四路——① builtin_deref 直达双 Dynamic（Ref/RawPtr/Box/DerefPure）；
+    /// ② struct_lockstep 直达双 Dynamic（嵌套尾对）；③ Pat 壳（NonNull =
+    /// `*const T is !null`）剥壳递归；④ Adt 同构结构体唯一非 ZST 字段递归
+    /// （Arc → NonNull → `*const ArcInner` → data 的 Arc-wrapped dyn 全链）。
+    /// 命中 = 双 Dynamic 的（source tail, target tail）。
+    fn dyn_unsize_tails(
+        &mut self,
+        src: Ty<'tcx>,
+        dst: Ty<'tcx>,
+    ) -> Option<(Ty<'tcx>, Ty<'tcx>)> {
+        let both_dyn = |x: Ty<'tcx>, y: Ty<'tcx>| {
+            matches!(x.kind(), ty::Dynamic(..)) && matches!(y.kind(), ty::Dynamic(..))
+        };
+        if let (Some(sp), Some(dp)) = (src.builtin_deref(true), dst.builtin_deref(true)) {
+            if both_dyn(sp, dp) {
+                return Some((sp, dp));
+            }
+            // 解引用落点再判（`*const ArcInner` → ArcInner → struct_lockstep →
+            // data 的 Arc-wrapped dyn 链；ArcInner 是 Adt，继续走 Adt 臂）
+            let (lst, ldt) =
+                self.tcx
+                    .struct_lockstep_tails_for_codegen(sp, dp, self.typing_env);
+            if both_dyn(lst, ldt) {
+                return Some((lst, ldt));
+            }
+            if let Some(r) = self.dyn_unsize_tails(sp, dp) {
+                return Some(r);
+            }
+        }
+        let (st, dt) =
+            self.tcx
+                .struct_lockstep_tails_for_codegen(src, dst, self.typing_env);
+        if both_dyn(st, dt) {
+            return Some((st, dt));
+        }
+        if let (ty::Pat(ba, _), ty::Pat(bb, _)) = (src.kind(), dst.kind())
+            && let Some(r) = self.dyn_unsize_tails(*ba, *bb)
+        {
+            return Some(r);
+        }
+        if let (ty::Adt(da, sa), ty::Adt(db, sb)) = (src.kind(), dst.kind())
+            && da.did() == db.did()
+            && da.is_struct()
+        {
+            let tcx = self.tcx;
+            let env = self.typing_env;
+            let norm = move |t: rustc_middle::ty::Unnormalized<'tcx, Ty<'tcx>>| {
+                tcx.normalize_erasing_regions(env, t)
+            };
+            // ① 唯一非 ZST 字段递归（包装下钻：Arc → NonNull<ArcInner>）
+            let mut found = None;
+            let mut multi = false;
+            for f in &da.non_enum_variant().fields {
+                let (fa, fb) = (norm(f.ty(self.tcx, sa)), norm(f.ty(self.tcx, sb)));
+                if self.layout_of(fa).ok()?.is_1zst() {
+                    continue;
+                }
+                if found.is_some() {
+                    multi = true;
+                    break;
+                }
+                found = Some((fa, fb));
+            }
+            if !multi
+                && let Some((fa, fb)) = found
+                && let Some(r) = self.dyn_unsize_tails(fa, fb)
+            {
+                return Some(r);
+            }
+            // ② tail_opt 尾字段递归（ArcInner → data 的 dyn 尾对路径——
+            // 多非 ZST 结构（strong/weak/data）唯一可下钻向）
+            if let Some(f) = da.non_enum_variant().tail_opt()
+                && let Some(r) = self.dyn_unsize_tails(
+                    norm(f.ty(self.tcx, sa)),
+                    norm(f.ty(self.tcx, sb)),
+                )
+            {
+                return Some(r);
+            }
+        }
+        None
+    }
+
     /// pointee 对 → 新造 meta：lockstep 尾对为 Array→Slice = 长度立即数、
     /// sized→dyn = 物化 vtable 真地址（cg_ssa unsized_info 同构）。
     /// dyn→dyn（meta 沿用源第二半）不在此路——调用方（Unsize 臂）特例处理。
@@ -1871,21 +1955,99 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     PC::Unsize => {
                         // 胖化：data = 源瘦标量（一路 newtype 包着一个指针），
                         // meta = 类型递归推导（unsize_meta_of）。
-                        // 特例：源已是 dyn（同 principal 仅剥 auto trait）= pair 位拷。
+                        // dyn 尾对（统一递归判据，dyn_unsize_tails——
+                        // builtin_deref 直达 / lockstep 直达 / Pat 壳 / Adt 唯一非
+                        // ZST 字段递归，Arc→NonNull→*const ArcInner→data 全链覆盖）：
+                        // 同 principal = pair 位拷（auto trait 差）；上溯 = C5 chase。
                         let a_ty = self.op_ty(a)?;
-                        if let (Some(sp), Some(dp)) =
-                            (a_ty.builtin_deref(true), to_ty.builtin_deref(true))
-                            && let ty::Dynamic(src_preds, _) = sp.kind()
-                        {
-                            let ty::Dynamic(dst_preds, _) = dp.kind() else {
-                                return Err(format!("dyn 源 Unsize 到非 dyn（{dp}）"));
+                        let dyn_tails: Option<(Ty<'tcx>, Ty<'tcx>)> =
+                            self.dyn_unsize_tails(a_ty, to_ty);
+                        if let Some((dsp, ddp)) = dyn_tails {
+                            let (ty::Dynamic(src_preds, _), ty::Dynamic(dst_preds, _)) =
+                                (dsp.kind(), ddp.kind())
+                            else {
+                                unreachable!("dyn_tails 已筛")
                             };
                             if src_preds.principal_def_id() == dst_preds.principal_def_id() {
                                 // vtable 不变（cg_ssa unsized_info 同判据）
                                 let src = self.lower_operand(a)?;
                                 return self.assign_lowered(dst_p, dst_kind, src);
                             }
-                            return Err(format!("dyn 上溯 vtable 变换（{sp} → {dp}，M4.2+）"));
+                            // C5 dyn 上溯（trait upcasting，批10 datafusion/typst
+                            // 双供养；cg_ssa base.rs unsized_info 同构）：目标
+                            // vtable = *(源 vtable + supertrait_vtable_slot×8)；
+                            // None = auto trait 差（vtable 不变，pair 位拷）
+                            let Some(slot_idx) = self.tcx.supertrait_vtable_slot((dsp, ddp))
+                            else {
+                                let src = self.lower_operand(a)?;
+                                return self.assign_lowered(dst_p, dst_kind, src);
+                            };
+                            let byte_off = (slot_idx as u64 * 8) as i32;
+                            let ValKind::Pair((ao, aw), (bo, bw)) = dst_kind else {
+                                return Err(format!("dyn 上溯目标非 pair（{to_ty}）"));
+                            };
+                            let ValKind::Pair((sao, saw), (sbo, _)) =
+                                self.classify(a_ty)?
+                            else {
+                                return Err(format!(
+                                    "dyn 上溯源非 pair（{a_ty}；嵌套尾对包装未接）"
+                                ));
+                            };
+                            // 源 meta 半 chase：<源 meta 半地址> → Deref → +byte_off
+                            // → Mem 读 8B = 目标 vtable 指针
+                            let chase_of = |base: ir::PlaceBase,
+                                            steps: &mut Vec<ir::PlaceStep>|
+                             -> ir::Operand {
+                                steps.push(ir::PlaceStep::Deref);
+                                steps.push(ir::PlaceStep::Offset(byte_off));
+                                ir::Operand::Mem {
+                                    expr: ir::PlaceExpr {
+                                        base,
+                                        steps: steps.clone().into_boxed_slice(),
+                                    },
+                                    width: ir::Width::W64,
+                                }
+                            };
+                            if let Some(pl) = a.place() {
+                                let sp_pl = self.resolve_place(&pl)?;
+                                let meta_expr = sp_pl.expr_plus(sbo);
+                                let mut steps = meta_expr.steps.into_vec();
+                                let new_meta = chase_of(meta_expr.base, &mut steps);
+                                return Ok(vec![
+                                    Stmt::Assign {
+                                        dst: dst_p.half_place(ao, aw),
+                                        rv: Rvalue::Use(sp_pl.half_operand(sao, saw)),
+                                    },
+                                    Stmt::Assign {
+                                        dst: dst_p.half_place(bo, bw),
+                                        rv: Rvalue::Use(new_meta),
+                                    },
+                                ]);
+                            }
+                            // 非常量位（lower_operand 的 Slot meta 半）同型 chase
+                            let LoweredOp::Pair(l, h) = self.lower_operand(a)? else {
+                                return Err(format!(
+                                    "dyn 上溯源非胖指针（{a_ty}；常量胖指针上溯未接）"
+                                ));
+                            };
+                            let ir::Operand::Slot(meta_slot) = h else {
+                                return Err(format!(
+                                    "dyn 上溯源 meta 非槽（{a_ty}；非常量形态未接）"
+                                ));
+                            };
+                            let mut steps = vec![];
+                            let new_meta =
+                                chase_of(ir::PlaceBase::Local(meta_slot.off), &mut steps);
+                            return Ok(vec![
+                                Stmt::Assign {
+                                    dst: dst_p.half_place(ao, aw),
+                                    rv: Rvalue::Use(l),
+                                },
+                                Stmt::Assign {
+                                    dst: dst_p.half_place(bo, bw),
+                                    rv: Rvalue::Use(new_meta),
+                                },
+                            ]);
                         }
                         let meta = self.unsize_meta_of(a_ty, to_ty)?;
                         let ValKind::Pair((ao, aw), (bo, bw)) = dst_kind else {

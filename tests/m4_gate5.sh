@@ -56,7 +56,8 @@ mimalloc libgit2 rustls_shake zstd_long \
 aws_lc mlua_lua tantivy sequoia_pgp sqlx_sqlite \
 swc_parse miden_exec polodb starlark_eval \
 zune_jpeg candle_mlp pest scraper_dom arrow_rs fontdue unicode_rs rustpython_mini \
-tree_sitter bzip2_csys wasmtime_wat"}
+tree_sitter bzip2_csys wasmtime_wat \
+risc0_run typst_pdf datafusion_sql"}
 # jieba_cut 全绿但 mirvm 单跑 77-89s（贴 90s timeout），留 corpus.sh 手工跑批
 # opencc（批7 波1）三维已绿但不进 gate5：依赖机器侧 /tmp/opencc-local
 # （OpenCC 1.1.9 自建前缀，driver 头注有重建法）——留 corpus.sh 手工批（有 gating）
@@ -72,12 +73,12 @@ for p in $CORPUS_PROGS; do
     # 重构建项的冷 timeout 放宽（gix/revm deps 树大、rusqlite 编 C sqlite、
     # calamine 双 crate、rustls 编 aws-lc C、rsa 大数 JIT 压力实测单跑 >90s、
     # zopfli 重计算 A 维 ~200s、arkworks/ malachite 大 dep 树、
-    # mimalloc/libgit2 的 vendored C 构建）
+    # mimalloc/libgit2 的 vendored C 构建、risc0/typst/datafusion 大 deps 树）
     tmo=90
     case "$p" in
-        gix_pure|rusqlite_db|revm_evm|zopfli_deep|mimalloc|libgit2|aws_lc|tantivy|sequoia_pgp|starlark_eval|arrow_rs|rustpython_mini|wasmtime_wat) tmo=300 ;;
+        gix_pure|rusqlite_db|revm_evm|zopfli_deep|mimalloc|libgit2|aws_lc|tantivy|sequoia_pgp|starlark_eval|arrow_rs|rustpython_mini|wasmtime_wat|risc0_run|typst_pdf) tmo=300 ;;
         calamine_xlsx|rustls_cert|phonenumber|mlua_lua|miden_exec|candle_mlp) tmo=180 ;;
-        rsa_pss|rsa_4096) tmo=400 ;;
+        rsa_pss|rsa_4096|datafusion_sql) tmo=400 ;;
     esac
     timeout $tmo "$MIRVM" run "$src" >"$TMP/corpus-$p.out" 2>"$TMP/corpus-$p.err"; code=$?
     unset CARGO_CFG_CURVE25519_DALEK_BACKEND RUSTFLAGS CFLAGS
