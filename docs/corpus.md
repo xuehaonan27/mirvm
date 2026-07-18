@@ -386,6 +386,41 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
   两形入 diff.sh。
 - gate5 159→**162**（risc0_run/typst_pdf tmo=300、datafusion_sql tmo=400）。
 
+### 批10 波2（2026-07-18，中轻 5；4 直接绿 / 1 RED-bug 当日修复转绿；修出 1 JIT 误编译）
+
+- **绿**：ethers_evm（alloy 系 consensus 2.2.0/primitives 1.6.1/sol-types
+  1.6.1 全 `=` 钉：ABI 编解矩阵（嵌套 tuple+tuple 数组/packed/截断错型负
+  路径/transfer 选择子）、RLP 双型交易签名（RFC6979 定签 + recover==地址
+  回环 + EIP-155/type-2 全 hex 锚）、主网 genesis 头 RLP+hash_slow 公开
+  哈希外部锚；零 C/FFI/零汇编，96 包编译图）、polars_lazy（0.44.2 与批6
+  同版同基座：优化器计划文本开/关对照 + 三 pushdown、表达式电池 ×4 帧、
+  group_by 含 skew/kurtosis、over 窗口、inner/semi/anti join、CSE 共享
+  with_columns 基座 self-join（caches=2——elim_cmn_subplans 只对恒等子
+  计划去重，经 5 组 native 对照实验锁定形态）、sort+limit、错误路径；
+  351 crate 闭包）、xlsxwriter_rw（rust_xlsxwriter 0.96.0 写 + calamine
+  0.36.0+picture 读闭环：七表内存（类型矩阵/公式四型缓存+数组公式
+  `_xlfn.IFS` 转义/Grid+autofilter+冻结/命名表/隐藏表/媒体+Url 转义+富
+  文本/Empty 边界）+ workbook 级属性；读侧全格 dump 逐格对拍 41 项期望
+  零 mismatch；压出 calamine 0.26→0.36 上游语义变更三条，native/mirvm
+  同文实证非分叉）、ugrep_bin（ugrep 7.8.2 源码自建 /tmp/ugrep-local，
+  sha256 双钉：9 case 子进程面（模式/计数/上下文组分隔/递归/大小写/反选/
+  无命中 exit 1/词匹配）；`-J1` 官方可复现开关 + `--sort=name` 钉输出序
+  （30 跑 md5 单一实证）；照 opencc 先例留 corpus.sh 手工批有 gating）。
+- **RED-bug→当日修复（resvg_svg）**：usvg 0.47 全文本面升级（fontdb 17
+  内嵌字体/塑形/bidi/deco/fallback；resvg 本体 simd 默认特性照批6 退路
+  直挂 usvg+tiny-skia 0.12 标量）。A/B 维 141 行逐字节绿，C 维 JIT=1 撞
+  tiny-skia hairline_aa `slope` 断言（exit 101，381/473 两站漂移、编译序
+  敏感）→ 实锤 **JIT signed 窄宽 Div/Rem 漏 sext**：槽不变量「I64 零扩
+  到宽」下负操作数被当大正数除（`fdot16::fast_div` 负差遭殃）；
+  `int_bin` 修 = signed Div/Rem 先 sext 双操作数（同文件 Shr/IntCmp 已有
+  同款步骤的孤点补漏）、MIN/-1 特判 `a`→`ineg(x)`
+  （`wrapping_div(x,-1) = -x`）、Bin128 signed 同族并修（含 rem 零常量
+  I64→I128 型别错）。探针 demo/signed_div_probe.rs（热循环锤
+  i8/i16/i32/i64 负值除余 + fast_div 同形 + W64 b=−1 支）入 diff.sh
+  37→38；修复后 MRE/全 driver C 维与解释器逐字节。
+- gate5 163→**167**（ethers_evm tmo=90 默认；polars_lazy/xlsxwriter_rw/
+  resvg_svg tmo=180；ugrep_bin 依赖 /tmp/ugrep-local 留 corpus.sh 手工批）。
+
 ## 6. 批7/批8 候选清单（已全部投放，2026-07-17）
 
 批7（24 个三波激进扩编）与批8（重型 10 个）候选已全部投放，过程与结果见 §5 对应批次。
@@ -398,7 +433,10 @@ z3/ONNXRuntime、solana 族（构建预算超批量级）、typst 直接版（�
 
 ## 7. 后续候选池（未投放）
 
-**批10 定稿（2026-07-18，9 个两波；磁盘 115G 余量已核）**：
+**批10（9 个两波）已全部投放收口（2026-07-18；波1/波2 账见 §5）**，原定稿
+条目保留备查：
+
+<details><summary>批10 定稿原文（2026-07-18，9 个两波；磁盘 115G 余量已核）</summary>
 
 **波1（重/大物 4）**：
 
@@ -424,7 +462,9 @@ z3/ONNXRuntime、solana 族（构建预算超批量级）、typst 直接版（�
 - **c_ugrep_bin**：ugrep 真二进制——driver 生成定值 fixture 目录文本，
   子进程跑 ugrep 做模式/计数/上下文（输出非 TTY 纯文本确定）。
 
-缓（记档）：stringsext（ugrep 同族边际低）、wasi 深嵌套（形态未清）、
+</details>
+
+池内尚余（缓，记档）：stringsext（ugrep 同族边际低）、wasi 深嵌套（形态未清）、
 kerberos/dbus/usb（环境依赖非语义面）、qemu 类、risc0 证明面（先行 execute）、
 typst 字体独立设计片（如 c_typst_pdf 撞字体不确定性再升级）、rustls 更多
 握手形态、polars 其余延伸、zune-jpeg 0.5 线（0.4.21 破洞面复测）、
