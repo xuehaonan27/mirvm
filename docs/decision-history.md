@@ -778,6 +778,49 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
 - 全程证据链：[parked/c3-resume-spike.md](parked/c3-resume-spike.md)。
 - gate5 → **159 pass / 0 expected-red**，cargo test 68/68，diff.sh 36/36。
 
+### 7.13 2026-07-18：C5 dyn 上溯 vtable 变换闭合（批10 波1 三修收官）
+
+- **对象**：open-issues C5（M4.2 欠账）——`Arc<dyn Source> →
+  Arc<dyn Any+Send+Sync>` 类 principal 变换的 dyn 上溯（trait upcasting）。
+  批10 波1 由 c_datafusion_sql 撞红、c_typst_pdf 同修供养。
+- **目标语义**（cg_ssa base.rs `unsized_info` 同构，rustc-src 实证）：dyn→dyn
+  upcast 时 `tcx.supertrait_vtable_slot((src_dyn, dst_dyn)) → Option<usize>`，
+  目标 vtable = `*(源 vtable + slot×8)`；None = auto trait 差 → vtable 不变
+  pair 位拷；同 principal = pair 位拷。
+- **导航 = `dyn_unsize_tails` 统一递归判据**（src/lower/func.rs），每级四路：
+  ① builtin_deref 直达双 Dynamic（Ref/RawPtr/Box/DerefPure）；
+  ② **解引用落点再判**——`*const ArcInner<T>` 落点非 Dynamic 时对落点再跑
+  struct_lockstep 取尾对（→ data 字段双 Dynamic）。本片是收官关键：此前
+  ping-pong 根因 = 只判 builtin_deref 直达、未在落点再判（Arc → NonNull →
+  Pat → `*const ArcInner` → ArcInner → data 的 fresh 内部 lockstep 由
+  `struct_lockstep_tails_for_codegen` 实锤，arc_up MIR 实证
+  `PointerCoercion::Unsize` 直出）；
+  ③ Pat 壳剥除（本 nightly NonNull = `pattern_type!(*const T is !null)`，
+  base = `*const T`）；
+  ④ Adt 同构结构体唯一非 ZST 字段递归（cg_ssa unsize_ptr Adt 臂同构）。
+- **chase 物化**（PC::Unsize 臂）：源胖指针对 data 半位拷 + meta 半
+  `PlaceExpr{steps:[Deref, Offset(slot×8)]}` + `Operand::Mem{W64}` 读目标
+  vtable；Arc/&/Box 胖布局（data, meta）一致。place 形（resolve_place +
+  half_operand）与非常量 Slot meta 半两形均接；常量胖指针上溯如实报错未接
+  （未遇真实 workload）。
+- **伴生两修（批10 波1 红三同修，各配 driver 转正）**：
+  ① **weak/COMDAT 跨归档碰撞**（c_risc0_run）：`reject_symbol_ambiguity`
+  纳入 nm posix 类型字母——W/w/V/v/u 全放行（首件胜出，native link 语义）、
+  恰一 strong 放行、双 strong 仍拒；含 GNU unique（`u`，`_ZGVZ*` 族）与
+  weak object（`V`）。单测 `duplicate_weak_symbols_follow_native_link_semantics`。
+  ② **asm-stub xmm 16B 槽**（c_typst_pdf 过 `__m128i`）：`AsmIoVal`/`AsmIoDst`
+  = Scalar + VecBytes(PlaceExpr, u32)，`Terminator::InlineAsm` ins/outs 改型；
+  lower 按 layout>8B 走向量字节通道；interp 与 jit `analyze_frame` 同步。
+- **验证**：合成探针 `demo/dyn_upcast_probe.rs`（Arc 包装链上溯 + & 直达上溯
+  两形，入 diff.sh 36→37）；**c_datafusion_sql 三维 95 行逐字节**（Q1–Q7 +
+  plan；A==B==C）；**c_typst_pdf** PDF `fnv=a07292af73881d72` 锚点无回归
+  （A==C）；**c_risc0_run** journal `fnv=fbb47fc52544af18` 三维绿。
+  gate5 → **162 pass / 0 expected-red**，cargo test 69/69，diff.sh 37/37。
+- **教训落档**：diff.sh 默认 `target/debug/mirvm`——`cargo test` 不重建 bin
+  目标（无 Rust 集成测试），debug 陈旧二进制致 5 假 fail（五只新探针恰好
+  全踩在缺失特性上）；复跑须 `MIRVM=target/release/mirvm` 或先 cargo build。
+  gate5 内部默认 release 不受影响。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 - P7 设想独立 `src/os/` 物理层；当前 OS/FFI/builtin 逻辑仍分布在 lower、interp、ffi、heap。

@@ -362,6 +362,30 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
 - gate5 148→**156**（8 driver 全绿入册；arrow_rs/rustpython_mini tmo=300、
   candle_mlp tmo=180）。
 
+### 批10 波1（2026-07-18，重/大物 4；1 直接绿 / 3 红→当日同修转正全绿）
+
+- **直接绿**：c_miden_prove（miden prover 面：定值 MASM 出证明 + verify 布尔，
+  批8 execute 的接棒；gate 接线随批10 波2 总收口）。
+- **红三同修（当日修复转正，三维逐字节）**：
+  ① c_risc0_run（risc0 zkVM execute-only，journal fnv=fbb47fc52544af18）——
+  撞**跨归档 weak/COMDAT 碰撞**：`reject_symbol_ambiguity` 原判重名即拒，
+  修 = 纳入 nm posix 类型字母（W/w/V/v/u 首件胜出全放行、恰一 strong 放行、
+  双 strong 仍拒；GNU unique `_ZGVZ*` 族与 weak object `V` 在覆盖），
+  单测 `duplicate_weak_symbols_follow_native_link_semantics`。
+  ② c_typst_pdf（typst 编译 3 页 PDF，bytes=24770 fnv=a07292af73881d72）——
+  撞 **asm-stub 缺 xmm 16B 槽**（`__m128i` 按值过 asm ins/outs）：修 =
+  `AsmIoVal`/`AsmIoDst`（Scalar + VecBytes(PlaceExpr,u32)），
+  Terminator::InlineAsm ins/outs 改型，lower/interp/jit analyze_frame 四面
+  同步。同 driver 又撞 C5（③）双供养。
+  ③ c_datafusion_sql（datafusion SessionContext 内存表 + SQL 七查询 +
+  plan，95 行逐字节）——撞 **C5 dyn 上溯 vtable 变换**（open-issues C5，
+  M4.2 欠账转正闭合，decision-history §7.13）：`Arc<dyn Source> →
+  Arc<dyn Any+Send+Sync>` 类 principal 变换走 `dyn_unsize_tails` 统一递归
+  判据（含解引用落点 lockstep 再判——Arc→NonNull→Pat→*const ArcInner→data
+  全链）+ `supertrait_vtable_slot` chase；合成探针 demo/dyn_upcast_probe.rs
+  两形入 diff.sh。
+- gate5 159→**162**（risc0_run/typst_pdf tmo=300、datafusion_sql tmo=400）。
+
 ## 6. 批7/批8 候选清单（已全部投放，2026-07-17）
 
 批7（24 个三波激进扩编）与批8（重型 10 个）候选已全部投放，过程与结果见 §5 对应批次。
@@ -374,16 +398,35 @@ z3/ONNXRuntime、solana 族（构建预算超批量级）、typst 直接版（�
 
 ## 7. 后续候选池（未投放）
 
-批9（§5）8 个已全部投放并全绿收口。池内尚余：
+**批10 定稿（2026-07-18，9 个两波；磁盘 115G 余量已核）**：
 
-- **typst**：字体确定性要先做独立设计评估（fontdue 已把字体读盘/光栅基础面
-  压绿，typst 自身的字体策略仍需独立成片）。
-- **rustpython 完整形态**：mini 嵌入式已绿；stdlib 满装载/shell 模块面（
-  `_signal` 已实测的 R1 面绕行链在 c_rustpython_mini 头注）按实需再压。
-- VM/语言机余量：risc0（重）、miden prover 面、EVM ethers/alloy（待体量评估）、
-  wasi 生态（本 VM 内再跑 wasm 部件的嵌套）。
-- 数据/格式：datafusion（arrow 已通，SQL 引擎大物）、rust_xlsxwriter 读侧、
-  kuchiki（scraper 已压 DOM 同族）、trans/libmagic-rust。
-- 真二进制：ugrep/stringsext、htop/bat/exa 式（输出需可截 TTY 化）。
-- 系统 FFI：kerberos/dbus/usb（多半预期 FAIL 记缺）、qemu 类块设备读。
-- 已解锁可回测：rustls 握手更多形态、polars 全家福延伸、ed25519/rsa 族加测。
+**波1（重/大物 4）**：
+
+- **c_datafusion_sql**：datafusion SQL 引擎大物——SessionContext 内存表 +
+  SQL（select/聚合/join/窗口/子查询），结果位级锚定（arrow 已通的接棒）。
+- **c_risc0_run**：risc0 zkVM **execute-only**（guest 程序执行器面，不证明；
+  miden_exec 同型先例）。预算铁律：构建爆则判不可并给依赖尺寸证据。
+- **c_typst_pdf**：typst 编译小段文档为 PDF（typst-assets 内嵌字体，不依赖
+  系统字体；输出字节 FNV）。预算铁律同上。
+- **c_miden_prove**：miden prover 面——miden-prover 对定值 MASM 出证明 +
+  verify 布尔（批8 execute 已通的证明侧接棒）。预算铁律同上。
+
+**波2（中轻 5）**：
+
+- **c_ethers_evm**：ethers-core/alloy 无网面——ABI encode/decode 矩阵、
+  交易 RLP 签名（k256 已通）、区块头解析与哈希指纹。
+- **c_polars_lazy**：polars lazy frame——查询优化器/表达式/lazy plan 执行
+  （批6 eager 已通的计划侧接棒），内存帧无 IO。
+- **c_xlsxwriter_rw**：rust_xlsxwriter 写 + calamine 读闭环——内存写
+  xlsx（多 sheet/格式/公式），calamine 读回逐格对拍。
+- **c_resvg_svg**：resvg/usvg 完整 SVG 渲染——路径/渐变/文本（内嵌
+  fontdb 定值字体）光栅像素 FNV（tiny-skia/fontdue 的上层接棒）。
+- **c_ugrep_bin**：ugrep 真二进制——driver 生成定值 fixture 目录文本，
+  子进程跑 ugrep 做模式/计数/上下文（输出非 TTY 纯文本确定）。
+
+缓（记档）：stringsext（ugrep 同族边际低）、wasi 深嵌套（形态未清）、
+kerberos/dbus/usb（环境依赖非语义面）、qemu 类、risc0 证明面（先行 execute）、
+typst 字体独立设计片（如 c_typst_pdf 撞字体不确定性再升级）、rustls 更多
+握手形态、polars 其余延伸、zune-jpeg 0.5 线（0.4.21 破洞面复测）、
+datafusion 更大面（以 c_datafusion_sql 结果定）、rustpython 完整形态（mini
+已绿；stdlib 满装载按实需）。
