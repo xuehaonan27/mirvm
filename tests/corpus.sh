@@ -31,10 +31,13 @@ if [ ${#progs[@]} -eq 0 ]; then
            swc_parse miden_exec polodb starlark_eval \
            zune_jpeg candle_mlp pest scraper_dom arrow_rs fontdue unicode_rs rustpython_mini \
            tree_sitter bzip2_csys wasmtime_wat \
-           risc0_run typst_pdf datafusion_sql miden_prove)
+           risc0_run typst_pdf datafusion_sql miden_prove \
+           ethers_evm polars_lazy xlsxwriter_rw resvg_svg ugrep_bin)
 fi
 # opencc（批7 波1，FFI 条目）：需 /tmp/opencc-local 前缀（OpenCC 1.1.9 自建，
 # 重建法见 driver 头注）+ 三 env；前缀缺席则本批跳过，不算红
+# ugrep_bin（批10 波2，真二进制条目）：需 /tmp/ugrep-local 前缀（ugrep 7.8.2
+# 源码自建，重建法与 sha256 钉见 driver 头注）；前缀缺席同样跳过不算红
 pass=0 fail=0
 
 for p in "${progs[@]}"; do
@@ -43,6 +46,9 @@ for p in "${progs[@]}"; do
     if [ "$p" = opencc ]; then
         [ -d /tmp/opencc-local ] || { echo "SKIP $p (no /tmp/opencc-local)"; continue; }
         export OPENCC_DIR=/tmp/opencc-local OPENCC_LIBS=opencc LD_LIBRARY_PATH=/tmp/opencc-local/lib
+    fi
+    if [ "$p" = ugrep_bin ]; then
+        [ -x /tmp/ugrep-local/bin/ugrep ] || { echo "SKIP $p (no /tmp/ugrep-local)"; continue; }
     fi
     start=$(date +%s)
     timeout 600 "$MIRVM" run "$src" >"$OUT/$p.out" 2>"$OUT/$p.err"

@@ -57,10 +57,13 @@ aws_lc mlua_lua tantivy sequoia_pgp sqlx_sqlite \
 swc_parse miden_exec polodb starlark_eval \
 zune_jpeg candle_mlp pest scraper_dom arrow_rs fontdue unicode_rs rustpython_mini \
 tree_sitter bzip2_csys wasmtime_wat \
-risc0_run typst_pdf datafusion_sql miden_prove"}
+risc0_run typst_pdf datafusion_sql miden_prove \
+ethers_evm polars_lazy xlsxwriter_rw resvg_svg"}
 # jieba_cut 全绿但 mirvm 单跑 77-89s（贴 90s timeout），留 corpus.sh 手工跑批
 # opencc（批7 波1）三维已绿但不进 gate5：依赖机器侧 /tmp/opencc-local
 # （OpenCC 1.1.9 自建前缀，driver 头注有重建法）——留 corpus.sh 手工批（有 gating）
+# ugrep_bin（批10 波2）同型：依赖 /tmp/ugrep-local（ugrep 7.8.2 源码自建，
+# driver 头注有 sha256 钉与重建法）——留 corpus.sh 手工批（有 gating）
 for p in $CORPUS_PROGS; do
     src="corpus/c_$p.rs"
     [ -f "$src" ] || continue
@@ -77,7 +80,7 @@ for p in $CORPUS_PROGS; do
     tmo=90
     case "$p" in
         gix_pure|rusqlite_db|revm_evm|zopfli_deep|mimalloc|libgit2|aws_lc|tantivy|sequoia_pgp|starlark_eval|arrow_rs|rustpython_mini|wasmtime_wat|risc0_run|typst_pdf) tmo=300 ;;
-        calamine_xlsx|rustls_cert|phonenumber|mlua_lua|miden_exec|candle_mlp) tmo=180 ;;
+        calamine_xlsx|rustls_cert|phonenumber|mlua_lua|miden_exec|candle_mlp|polars_lazy|xlsxwriter_rw|resvg_svg) tmo=180 ;;
         rsa_pss|rsa_4096|datafusion_sql|miden_prove) tmo=400 ;;
     esac
     timeout $tmo "$MIRVM" run "$src" >"$TMP/corpus-$p.out" 2>"$TMP/corpus-$p.err"; code=$?

@@ -1,40 +1,143 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# 钉 0.44.0 配对 0.11.4。绕行记录（语义不变）：resvg 0.44 的 API 与本文件
-# 用法兼容（render(tree, transform, &mut PixmapMut)，anti_alias 由
-# ShapeRendering 决定），但它依赖 `tiny-skia = "0.11.4"` 且带默认特性
-# （simd 开），其 f32x4/f32x8 光栅管线在本 nightly core_arch 下走外链 LLVM
-# 内部符号（`_mm_max_ps` → `llvm.x86.sse.max.ps`、cvt/round/rcp 同族），
-# mirvm 未内建 → `TRAP: foreign llvm.x86.sse.max.ps` 进程退出（探针复核）。
-# cargo features 向下不可减——resvg 对 tiny-skia 的 dep 边带默认特性，下游
-# 关不掉。按任务书退路改 usvg+tiny-skia 直连：tiny-skia scalar
-# （default-features=false，c_tiny_skia 路线三维已绿）。渲染语义由下方
-# mini 渲染器对齐 resvg 0.44 的 src/{render,path,clip,geom}.rs（shapes/
-# 渐变/groups/opacity/clip/blend 子集逐行移植；filters/masks/images/
-# patterns 不实现，本文档集不含）。
-usvg = { version = "=0.44.0", default-features = false }
-# usvg 全关 text/system-fonts/memmap-fonts → 无字体/塑形栈；其必需依赖
-# flate2（miniz_oxide 纯 Rust 后端）顺带覆盖 .svgz gzip 解压路径。
-tiny-skia = { version = "=0.11.4", default-features = false, features = ["std"] }
+# 钉 =0.47.0（2026-07-18 cargo search 实勘 crates.io max stable；resvg/usvg/
+# tiny-skia 同仓 linebender/resvg 0.47 release train）。default-features=false
+# + features=["text"]：text 拉 fontdb 0.23.0 / rustybuzz 0.20.1 / ttf-parser
+# 0.25.1(gvar-alloc) / unicode-bidi / unicode-script / unicode-vo；
+# system-fonts 与 memmap-fonts 保持关 → 不扫系统字体目录、不 mmap 字体文件。
+usvg = { version = "=0.47.0", default-features = false, features = ["text"] }
+# tiny-skia 标量后端（与 usvg 的 tiny-skia-path 0.12.0 依赖边同源配对）。
+# 绕行记录（语义不变，批6 同型退路的 0.47 复核）：resvg 0.47 依赖
+# `tiny-skia = "0.12.0"` 且 dep 边带默认特性（simd 开），其 f32x4/f32x8
+# 光栅管线在本 nightly core_arch 下走外链 LLVM 内部符号（`_mm_max_ps` →
+# `llvm.x86.sse.max.ps` 同族），mirvm 未内建 → TRAP（批6 头注探针实证 0.44
+# 同构；resvg-0.47.0/Cargo.toml 的 tiny-skia dep 边复核仍无
+# default-features=false）。cargo features 向下不可减——resvg 对 tiny-skia
+# 的 dep 边下游关不掉。按批6 同款退路改 usvg+tiny-skia 直连：tiny-skia
+# scalar（c_tiny_skia 路线三维已绿）。渲染语义由下方 mini 渲染器对齐
+# resvg 0.47 的 src/{render,path,clip,geom}.rs 逐行移植（含 render.rs 的
+# Node::Text(text) => render_group(text.flattened()) 分派——usvg 解析期已
+# 完成塑形/布局/字形轮廓化，flattened 即普通 group/path 树）；
+# filters/masks/images/patterns 不实现，本文档集不含。
+tiny-skia = { version = "=0.12.0", default-features = false, features = ["std"] }
+# fontdb 定值字源：17 个 include_bytes! 内嵌字体（Libertinus Serif×6 /
+# NewCM Math×3 / NewCM10×4 / DejaVu Sans Mono×4），不触系统字体——
+# c_typst_pdf（批10 波1）同款字体源先例。
+typst-assets = { version = "=0.15.1", features = ["fonts"] }
 ---
-// resvg/usvg 0.44 shapes-only SVG 渲染差分（无 text 节点 → 无需字体）。
-// 九类内嵌固定文档：prim（linear+radial 渐变 userSpaceOnUse/三停点/stop-opacity/
-// reflect spread、rounded rect、evenodd 自交贝塞尔、dash 描边奇数段、transform
-// 组、opacity 组、clipPath 组、mix-blend-mode 组、visibility=hidden、fill=none）、
-// vb50（viewBox 0.5 倍缩放、polygon、objectBoundingBox 渐变）、par 系四文档
-// （竖幅 viewBox × xMidYMid meet/slice/none/xMinYMax）、novh（无 width/height
-// 仅 viewBox：usvg 100% → viewBox 尺寸解析分支）、crisp-attr（元素级
-// shape-rendering=crispEdges/optimizeSpeed）、use-style（use x/y/opacity、
-// style 属性展示样式、polyline）、gzsvg（gzip 字节 from_data 解压渲染）。
-// 每文档三处配置渲染 160x120：默认（GeometricPrecision=AA 开）/ 无 AA
-// （Options::shape_rendering=CrispEdges）/ to_string 重解析 roundtrip
-// （渲染 FNV 须与默认相等）。打印整像素 FNV-1a + 固定坐标抽样像素 RGBA。
-// 树 API 探针：size 位型、children 数、node_by_id 的 abs_transform/bounding
-// box 位级、缺失 id。错误路径六条：坏 XML / width=0（InvalidSize）/ 空属性
-// <svg/>（100%x100% 默认尺寸、合法空渲染）/ 坏 gzip / 非 UTF-8 / 非 svg 根。
-// 确定性：全固定常量；浮点一律 to_bits；无随机/时间/地址/HashMap 迭代；
-// 成功路径 stderr 为空。
+// c_resvg_svg —— resvg/usvg 0.47 完整 SVG 渲染三维差分（批10 波2，规格
+// docs/corpus.md §7）：路径/渐变/文本（内嵌 fontdb 定值字体）光栅像素
+// FNV，tiny-skia/fontdue 已通的上层接棒。批6 shapes-only 同名 driver 升级：
+// 依赖线 0.44→0.47，新增文本塑形/布局/装饰/textPath/bidi/回退面。
+//
+// 【状态：expected-red（C 维引擎红）】A（mirvm 默认）/ B（native）两维全绿
+// 且 stdout 141 行逐字节一致、stderr 真空（0 字节）、exit 全 0——driver
+// 本体确定性经 A==B 逐字节验证无虞；C（MIRVM_JIT_THRESHOLD=1）在
+// text-style 文档 def 渲染处 panic（exit 101），诊断链如下。
+//
+// 红因（JIT 误编译，供养侧判定）：JIT 生成代码在 hairline 描边渲染路径上
+// 产出与解释器/native 分叉的值，使 tiny-skia 定点斜率越界触发断言：
+//   tiny-skia-0.12.0/src/scan/hairline_aa.rs:473:13
+//   assertion failed: slope <= fdot16::ONE && slope >= -fdot16::ONE
+// （381 行 "mostly horizontal" 分支为对称同族断言，算子序相反；最小复现
+// 热跑站点漂移至 381，全量 driver 冷热两跑均稳定 473）。
+// 判定证据链：
+//   1) 解释器输出与 native 逐位一致——含同一 hairline 描边文本的像素
+//      FNV 相同（A==B 141 行逐字节），故输入数据与算法无分叉；
+//   2) fast_div 为纯整数运算（left_shift(a,16)/b），断言越界的唯一可能
+//      是 f32→fdot6 定点转换链的输入值在 JIT 下分叉（|slope|≤1 由分支
+//      条件 |dx|≥|dy|/|dy|>|dx| 数学保证，native dev profile 断言开与
+//      解释器均不触发）；
+//   3) 踩雷与否随被 JIT 编译的函数集合/序漂移：最小化中 t6（首行三
+//      tspan）中而 t7（t6+一行无关文本）不中；同字形同坐标的单 glyph
+//      'o' 渲染不中——提示编译序敏感的末位 ulp/聚合值差异在定点转换
+//      边界被放大为 ±1 fdot6。
+//   触发链：text-style 首行 Libertinus Serif Bold 24px、stroke-width=0.6
+//   （hairline stroker → hairline AA 填充）、串 "GradItaBo" 第 9 glyph
+//   'o'（x≈108.688）处。最小复现 /tmp/repro_resvg_svg.rs（8 轮 23 变体
+//   二分；其 native/解释器 fnv=417be013020ecd27 一致，JIT=1 exit=101）。
+//   red_code=101（Rust panic 退出码）
+//   red_pattern=「panicked at .*tiny-skia-0.12.0/src/scan/hairline_aa.rs:」
+//   +「assertion failed: slope」（站点号 381/473 随 JIT 缓存态漂移，同族）
+// C 维现场：stdout 止于 "doc text-style size ..." 行（def 渲染 panic，
+// 95 行），两跑 stdout 逐字节稳定，stderr 4 行 panic 文，exit=101。
+//
+// 版本钉（相容组合证据）：见 frontmatter 行内注。三直挂依赖全 = 钉死；
+// usvg 0.47.0 自身锁定 fontdb "0.23.0"/rustybuzz "0.20.1"/ttf-parser
+// "0.25.1"/tiny-skia-path "0.12.0"/kurbo "0.13.0" 等传递约束，与直挂
+// tiny-skia 0.12.0（path 0.12.0）同源无跨线错配；rustybuzz 的 wasmi
+// （wasm-shaper）为可选依赖且默认关。
+//
+// 确定性说明：
+//   * 字体字节：typst_assets::fonts() 17 个定值资产，逐文件 len+FNV-1a
+//     锚定；装载序=数组序（fontdb faces 为 Vec 插入序，face 转储逐行锚）。
+//   * 塑形/布局：rustybuzz 0.20.1（default features=["std"]）对固定字体
+//     字节+固定字符串为纯函数；unicode-bidi 重排、ttf-parser/kurbo 轮廓
+//     均为位确定计算；无 OS 随机/壁钟/时区/网络。
+//   * 回退链：text-fallback 文档求不存在的族 → usvg 固定回退（Options
+//     默认 font_family="Times New Roman" 不在库 → fontdb 通用回退），库
+//     定值故结果定值；nofonts 文档空 fontdb → 文本元素整颗丢弃
+//     （found=false/children 锚定）。
+//   * 两处原生实测即确定的事实锚（三维跑同一代码，值本体即锚，不要求
+//     语义"正确"）：① text-deco 的 roundtrip eq=false——usvg 0.47 writer
+//     不保 text-decoration（装饰信息在 to_string 丢失，重解析渲染不同）；
+//     ② text-basic/style/transform/bidi/deco/fallback 六文档 def fnv ==
+//     crisp fnv——字形 AA 由 text-rendering 决定（Options.shape_rendering
+//     不影响 glyph 路径），且底色 rect 全像素对齐（AA 不变量）；text-path
+//     因含形状描边 def!=crisp，与形状面九文档同证 crisp 配置真实生效。
+//   * 渲染：tiny-skia 标量后端逐位 IEEE；每文档整图 FNV-1a + 8 固定坐标
+//     抽样像素 RGBA hex；浮点打印一律 to_bits；探针全走 Vec/切片，无
+//     HashMap 迭代序出口。
+//   * usvg/tiny-skia/rustybuzz 经 log crate 打警告，无 subscriber →
+//     stderr 真空。
+//
+// 覆盖清单：
+//   形状面（批6 继承，0.47 移植）：prim（linear+radial 渐变
+//   userSpaceOnUse/三停点/stop-opacity/reflect spread、rounded rect、
+//   evenodd 自交贝塞尔、dash 描边奇数段、transform 组、opacity 组、
+//   clipPath 组、mix-blend-mode 组、visibility=hidden、fill=none）、
+//   vb50（viewBox 0.5 倍缩放、polygon、objectBoundingBox 渐变）、par×4
+//   （竖幅 viewBox × xMidYMid meet/slice/none/xMinYMax）、novh（无
+//   width/height 仅 viewBox）、crisp-attr（元素级 shape-rendering=
+//   crispEdges/optimizeSpeed）、use-style（use x/y/opacity、style 展示
+//   属性、polyline）、empty-svg（100% 默认尺寸）、gzsvg（gzip from_data）。
+//   文本面（波2 新增，全内嵌字体）：text-basic（start/middle/end 三
+//   anchor、kerning 串 "AV To Kern"、text-rendering=optimizeSpeed、
+//   衬线/等宽两族）、text-style（tspan 渐变 fill/italic/bold+stroke、
+//   letter/word-spacing、textLength spacingAndGlyphs）、text-transform
+//   （dx/dy/rotate 逐字数组、组 rotate、small-caps、baseline-shift
+//   super/sub）、text-path（textPath 曲线排布 startOffset）、text-bidi
+//   （direction=rtl 希伯来混排重排、writing-mode=tb 竖排含缺字 CJK
+//   探测）、text-deco（underline/overline/line-through 装饰路径）、
+//   text-fallback（缺字族回退链）、nofonts（空 fontdb 文本元素丢弃锚）。
+//   探针：字体文件字节锚 ×17、fontdb faces 全量转储、树 API 位级（p1
+//   path 与 tp1 text 的 bbox/abs_transform bits、chunks/spans/layouted
+//   字形 id+文本+font id、flattened 子节点数、tree.fontdb 面数）、错误
+//   路径六条（坏 XML / width=0 / 空属性 / 坏 gzip / 非 UTF-8 / 非 svg 根）。
+//   每文档三配置渲染 160x120：默认（AA 开）/ 无 AA（Options::
+//   shape_rendering=CrispEdges）/ to_string 重解析 roundtrip（渲染 FNV
+//   与默认比对，eq 值本体即锚）。
+//
+// 复红定因参照（三维复跑）：
+//   A: target/release/mirvm run corpus/c_resvg_svg.rs
+//   B: d=$(grep -l 'name = "c_resvg_svg"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname) && cd "$d" && cargo +nightly-2026-07-02 run -q
+//   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_resvg_svg.rs
+// 三维实测（2026-07-18，同机）：
+//   A（mirvm 默认）：exit 0，stdout 141 行，stderr 0 字节，real ~36s
+//     （deps 共享缓存热跑）。
+//   B（cargo +nightly-2026-07-02 run -q，script dir 内）：exit 0，
+//     stdout 141 行，stderr 0 字节，real ~8.5s。
+//   A==B 逐字节一致。锚点摘抄：faces len=17；prim def fnv=
+//     7412fbca454bcd60；text-basic def fnv=ce49adf0e33fcbc0；probe tp1
+//     layouted spans=3 glyphs=11（g0 id=40 'G' font=LibertinusSerif-
+//     Regular）；text-deco rt eq=false（usvg writer 丢 text-decoration
+//     的确定性事实锚）；nofonts found=false children=1。
+//   C（MIRVM_JIT_THRESHOLD=1）：exit 101（JIT 误编译 panic，见上红因），
+//     stdout 95 行止于 text-style def，两跑逐字节稳定，real ~13s。
+//   依赖闭包 49 crate（usvg 0.47.0 / rustybuzz 0.20.1 / fontdb 0.23.0 /
+//   ttf-parser 0.25.1 / unicode-* / kurbo 0.13.0 / tiny-skia 0.12.0 标量 /
+//   typst-assets 0.15.1 等；script dir Cargo.lock 实数）。
 use tiny_skia::{
     BlendMode, Color, FilterQuality, IntRect, Mask, MaskType, Paint, Pixmap, PixmapMut,
     PixmapPaint, Shader, SpreadMode, Transform,
@@ -53,7 +156,17 @@ fn fnv1a(b: &[u8]) -> u64 {
     h
 }
 
-// ===== mini 渲染器：resvg 0.44 shapes/渐变/groups/clip 子集移植 =====
+/// 定值 Options：空 fontdb + typst-assets 内嵌 17 字体（装载序=数组序）。
+/// 每次解析新建（Options 不可 Clone），同一固定输入 → 同一 DB 状态。
+fn make_opt() -> usvg::Options<'static> {
+    let mut opt = usvg::Options::default();
+    for f in typst_assets::fonts() {
+        opt.fontdb_mut().load_font_data(f.to_vec());
+    }
+    opt
+}
+
+// ===== mini 渲染器：resvg 0.47 shapes/text 子集移植 =====
 
 /// resvg geom::fit_to_rect 原样。
 fn fit_to_rect(r: IntRect, bounds: IntRect) -> Option<IntRect> {
@@ -91,35 +204,36 @@ fn render_nodes(parent: &usvg::Group, ts: Transform, pm: &mut PixmapMut) {
     }
 }
 
+/// resvg 0.47 render::render_node（Image 臂跳过：本文档集不含 raster）。
 fn render_node(node: &Node, ts: Transform, pm: &mut PixmapMut) {
     match node {
-        Node::Group(group) => render_group(group, ts, pm),
+        Node::Group(group) => {
+            render_group(group, ts, pm);
+        }
         Node::Path(path) => render_path(path, ts, pm),
-        Node::Image(_) | Node::Text(_) => {} // 本文档集不含 raster/text
+        Node::Text(text) => {
+            render_group(text.flattened(), ts, pm);
+        }
+        Node::Image(_) => {}
     }
 }
 
-/// resvg 0.44 render::render_group 的 shapes 子集（filters/mask 恒空分支）。
-fn render_group(group: &usvg::Group, ts: Transform, pm: &mut PixmapMut) {
+/// resvg 0.47 render::render_group 的 filters/mask 恒空分支。
+fn render_group(group: &usvg::Group, ts: Transform, pm: &mut PixmapMut) -> Option<()> {
     let ts = ts.pre_concat(group.transform());
     if !group.should_isolate() {
         render_nodes(group, ts, pm);
-        return;
+        return Some(());
     }
-    let Some(bbox) = group.layer_bounding_box().transform(ts) else {
-        return;
-    };
-    // filters 恒空 → 简单外扩 2px 分支 + fit_to_rect（同 resvg）
-    let Some(ibbox) = IntRect::from_xywh(
-        bbox.x().floor() as i32 - 2,
-        bbox.y().floor() as i32 - 2,
-        bbox.width().ceil() as u32 + 4,
-        bbox.height().ceil() as u32 + 4,
-    )
-    .and_then(|r| fit_to_rect(r, max_bbox()))
-    else {
-        return;
-    };
+    let bbox = group.layer_bounding_box().transform(ts)?;
+    // filters 恒空 → 外扩 2px 分支 + fit_to_rect（同 resvg）
+    let ibbox = IntRect::from_xywh(
+        (bbox.x().floor() as i32).checked_sub(2)?,
+        (bbox.y().floor() as i32).checked_sub(2)?,
+        (bbox.width().ceil() as u32).checked_add(4)?,
+        (bbox.height().ceil() as u32).checked_add(4)?,
+    )?;
+    let ibbox = fit_to_rect(ibbox, max_bbox())?;
     let shift_ts = {
         let mut dx = bbox.x();
         let mut dy = bbox.y();
@@ -128,10 +242,9 @@ fn render_group(group: &usvg::Group, ts: Transform, pm: &mut PixmapMut) {
         Transform::from_translate(-dx, -dy)
     };
     let ts = shift_ts.pre_concat(ts);
-    let Some(mut sub) = Pixmap::new(ibbox.width(), ibbox.height()) else {
-        return;
-    };
+    let mut sub = Pixmap::new(ibbox.width(), ibbox.height())?;
     render_nodes(group, ts, &mut sub.as_mut());
+    // filters 恒空 → 无 filter 应用；mask 恒 None → 跳过
     if let Some(clip_path) = group.clip_path() {
         clip_apply(clip_path, ts, &mut sub);
     }
@@ -148,9 +261,10 @@ fn render_group(group: &usvg::Group, ts: Transform, pm: &mut PixmapMut) {
         Transform::identity(),
         None,
     );
+    Some(())
 }
 
-/// resvg 0.44 render::convert_blend_mode 原样（16 arm 全映射）。
+/// resvg 0.47 render::convert_blend_mode 原样（16 arm 全映射）。
 fn convert_blend_mode(mode: usvg::BlendMode) -> BlendMode {
     match mode {
         usvg::BlendMode::Normal => BlendMode::SourceOver,
@@ -172,7 +286,7 @@ fn convert_blend_mode(mode: usvg::BlendMode) -> BlendMode {
     }
 }
 
-/// resvg 0.44 path::render 的 paint_order 分派。
+/// resvg 0.47 path::render 的 paint_order 分派。
 fn render_path(path: &usvg::Path, ts: Transform, pm: &mut PixmapMut) {
     if !path.is_visible() {
         return;
@@ -186,7 +300,7 @@ fn render_path(path: &usvg::Path, ts: Transform, pm: &mut PixmapMut) {
     }
 }
 
-/// resvg 0.44 path::fill_path 的 shapes 子集（pattern arm 简化为跳过）。
+/// resvg 0.47 path::fill_path 的 shapes 子集（pattern arm 简化为跳过）。
 fn fill_path(path: &usvg::Path, mode: BlendMode, ts: Transform, pm: &mut PixmapMut) -> Option<()> {
     let fill = path.fill()?;
     // 水平/垂直线不可填充（同 resvg 提前返回）
@@ -216,7 +330,7 @@ fn fill_path(path: &usvg::Path, mode: BlendMode, ts: Transform, pm: &mut PixmapM
     Some(())
 }
 
-/// resvg 0.44 path::stroke_path 的 shapes 子集。
+/// resvg 0.47 path::stroke_path 的 shapes 子集。
 fn stroke_path(path: &usvg::Path, ts: Transform, pm: &mut PixmapMut) -> Option<()> {
     let stroke = path.stroke()?;
     let mut paint = Paint::default();
@@ -238,7 +352,7 @@ fn stroke_path(path: &usvg::Path, ts: Transform, pm: &mut PixmapMut) -> Option<(
     Some(())
 }
 
-/// resvg 0.44 的 convert_linear_gradient / convert_radial_gradient。
+/// resvg 0.47 的 convert_linear_gradient / convert_radial_gradient。
 fn convert_linear_gradient(lg: &usvg::LinearGradient, opacity: usvg::Opacity) -> Option<Shader<'_>> {
     let (mode, stops) = convert_base_gradient(lg, opacity);
     tiny_skia::LinearGradient::new(
@@ -254,6 +368,7 @@ fn convert_radial_gradient(rg: &usvg::RadialGradient, opacity: usvg::Opacity) ->
     let (mode, stops) = convert_base_gradient(rg, opacity);
     tiny_skia::RadialGradient::new(
         (rg.fx(), rg.fy()).into(),
+        rg.fr().get(),
         (rg.cx(), rg.cy()).into(),
         rg.r().get(),
         stops,
@@ -262,7 +377,7 @@ fn convert_radial_gradient(rg: &usvg::RadialGradient, opacity: usvg::Opacity) ->
     )
 }
 
-/// resvg 0.44 convert_base_gradient：stops 透明度 = stop.opacity × fill/stroke opacity。
+/// resvg 0.47 convert_base_gradient：stops 透明度 = stop.opacity × fill/stroke opacity。
 fn convert_base_gradient(
     gradient: &usvg::BaseGradient,
     opacity: usvg::Opacity,
@@ -288,11 +403,16 @@ fn convert_base_gradient(
     (mode, stops)
 }
 
-/// resvg 0.44 clip::apply 原样（Clear 画子形状 → 反相 → apply_mask）。
+/// resvg 0.47 clip::apply 原样（Clear 画子形状 → 反相 → apply_mask）。
 fn clip_apply(clip: &usvg::ClipPath, ts: Transform, pm: &mut Pixmap) {
     let mut clip_pm = Pixmap::new(pm.width(), pm.height()).unwrap();
     clip_pm.fill(Color::BLACK);
-    clip_draw_children(clip.root(), ts.pre_concat(clip.transform()), &mut clip_pm.as_mut());
+    clip_draw_children(
+        clip.root(),
+        BlendMode::Clear,
+        ts.pre_concat(clip.transform()),
+        &mut clip_pm.as_mut(),
+    );
     if let Some(nested) = clip.clip_path() {
         clip_apply(nested, ts, pm);
     }
@@ -301,24 +421,50 @@ fn clip_apply(clip: &usvg::ClipPath, ts: Transform, pm: &mut Pixmap) {
     pm.apply_mask(&mask);
 }
 
-/// resvg 0.44 clip 的 draw_children（Path / 无 clip 的 Group 两臂）。
-fn clip_draw_children(parent: &usvg::Group, ts: Transform, pm: &mut PixmapMut) {
+/// resvg 0.47 clip::draw_children 原样（Path / Text flattened / Group 三臂）。
+fn clip_draw_children(parent: &usvg::Group, mode: BlendMode, ts: Transform, pm: &mut PixmapMut) {
     for child in parent.children() {
         match child {
             Node::Path(path) => {
                 if path.is_visible() {
-                    fill_path(path, BlendMode::Clear, ts, pm);
+                    fill_path(path, mode, ts, pm);
                 }
             }
-            Node::Group(group) => {
-                clip_draw_children(group, ts.pre_concat(group.transform()), pm);
+            Node::Text(text) => {
+                clip_draw_children(text.flattened(), mode, ts, pm);
             }
-            Node::Image(_) | Node::Text(_) => {}
+            Node::Group(group) => {
+                let ts = ts.pre_concat(group.transform());
+                if let Some(clip) = group.clip_path() {
+                    clip_group(group, clip, ts, pm);
+                } else {
+                    clip_draw_children(group, mode, ts, pm);
+                }
+            }
+            _ => {}
         }
     }
 }
 
-// ===== 文档集（shapes-only，无 text/image/filter/mask/pattern）=====
+/// resvg 0.47 clip::clip_group 原样（SourceOver 画组 → 裁剪 → Xor 合成）。
+fn clip_group(children: &usvg::Group, clip: &usvg::ClipPath, ts: Transform, pm: &mut PixmapMut) -> Option<()> {
+    let mut clip_pm = Pixmap::new(pm.width(), pm.height())?;
+    clip_draw_children(children, BlendMode::SourceOver, ts, &mut clip_pm.as_mut());
+    clip_apply(clip, ts, &mut clip_pm);
+    let mut paint = PixmapPaint::default();
+    paint.blend_mode = BlendMode::Xor;
+    pm.draw_pixmap(
+        0,
+        0,
+        clip_pm.as_ref(),
+        &paint,
+        Transform::identity(),
+        None,
+    );
+    Some(())
+}
+
+// ===== 文档集 A：shapes（批6 继承）=====
 
 const PRIM: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120">
   <defs>
@@ -408,6 +554,63 @@ const USE_STYLE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" 
 
 const EMPTY_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg"/>"##;
 
+// ===== 文档集 B：text（波2 新增，内嵌字体族：Libertinus Serif / DejaVu Sans Mono）=====
+
+const TEXT_BASIC: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120">
+  <rect x="0" y="0" width="160" height="120" fill="#14181e"/>
+  <text id="tb1" x="8" y="34" font-family="'Libertinus Serif'" font-size="22" fill="#f0e0c8">AV To Kern 012</text>
+  <text x="152" y="60" text-anchor="end" font-family="'DejaVu Sans Mono'" font-size="13" fill="#60c8ff" text-rendering="optimizeSpeed">mono-end 42</text>
+  <text x="80" y="92" text-anchor="middle" font-family="'Libertinus Serif'" font-size="15" fill="#ffb060">middle anchor</text>
+</svg>"##;
+
+const TEXT_STYLE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120">
+  <defs>
+    <linearGradient id="lgt" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffe040"/>
+      <stop offset="1" stop-color="#e04090" stop-opacity="0.7"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="160" height="120" fill="#181420"/>
+  <text id="tp1" x="10" y="38" font-family="'Libertinus Serif'" font-size="24"><tspan fill="url(#lgt)">Grad</tspan><tspan font-style="italic" fill="#60d0ff">Ita</tspan><tspan font-weight="bold" fill="#ff8050" stroke="#401008" stroke-width="0.6">Bold</tspan></text>
+  <text x="10" y="68" font-family="'Libertinus Serif'" font-size="14" letter-spacing="2.5" word-spacing="7" fill="#a0e0a0">spaced out run</text>
+  <text x="10" y="98" font-family="'DejaVu Sans Mono'" font-size="13" textLength="132" lengthAdjust="spacingAndGlyphs" fill="#d0d060">textLength fit 9</text>
+</svg>"##;
+
+const TEXT_TRANSFORM: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120">
+  <rect x="0" y="0" width="160" height="120" fill="#101820"/>
+  <g transform="rotate(-7 80 60)">
+    <text x="18" y="48" font-family="'Libertinus Serif'" font-size="19" fill="#80c0f0" dx="0 2 -1 3 0" dy="0 -5 4 -3 0" rotate="0 9 -7 5 0">Wave9</text>
+  </g>
+  <text x="18" y="76" font-family="'Libertinus Serif'" font-size="15" font-variant="small-caps" fill="#f0a0a0">Small Caps abc</text>
+  <text x="18" y="104" font-family="'Libertinus Serif'" font-size="14" fill="#c0c0e0">Base<tspan baseline-shift="super" font-size="9">sup7</tspan><tspan baseline-shift="sub" font-size="9">sub2</tspan></text>
+</svg>"##;
+
+const TEXT_PATH: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120">
+  <defs><path id="curve" d="M12 92 C44 38 116 38 150 88" fill="none"/></defs>
+  <rect x="0" y="0" width="160" height="120" fill="#141214"/>
+  <path d="M12 92 C44 38 116 38 150 88" fill="none" stroke="#383038" stroke-width="1"/>
+  <text font-family="'Libertinus Serif'" font-size="13" fill="#ffe080"><textPath href="#curve" startOffset="10">text on a curved path</textPath></text>
+</svg>"##;
+
+const TEXT_BIDI: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120">
+  <rect x="0" y="0" width="160" height="120" fill="#101418"/>
+  <text x="10" y="40" font-family="'Libertinus Serif'" font-size="16" fill="#a0f0d0">abc <tspan direction="rtl">עברית</tspan> 123</text>
+  <text x="146" y="8" writing-mode="tb" font-family="'DejaVu Sans Mono'" font-size="12" fill="#f0b0e0">Vert 縦7</text>
+</svg>"##;
+
+const TEXT_DECO: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120">
+  <rect x="0" y="0" width="160" height="120" fill="#161219"/>
+  <text x="14" y="42" font-family="'Libertinus Serif'" font-size="17" fill="#90d0f0" text-decoration="underline">underlined</text>
+  <text x="14" y="76" font-family="'Libertinus Serif'" font-size="17" fill="#f0c090" text-decoration="overline line-through">over+through</text>
+  <text x="14" y="104" font-family="'DejaVu Sans Mono'" font-size="12" fill="#b0e0b0" text-decoration="underline line-through">mono deco</text>
+</svg>"##;
+
+const TEXT_FALLBACK: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120">
+  <rect x="0" y="0" width="160" height="120" fill="#12161c"/>
+  <text x="10" y="46" font-family="'NoSuch Family'" font-size="18" fill="#e0d0a0">fallback run 5</text>
+  <text x="10" y="84" font-family="'NoSuch Family', 'DejaVu Sans Mono'" font-size="14" fill="#a0c0e0">second listed 3</text>
+</svg>"##;
+
 /// gzip(deflate, mtime=0) 预压缩的小 SVG：from_data 的 gunzip 路径。
 const GZ_SVG: &[u8] = &[
     31, 139, 8, 0, 0, 0, 0, 0, 2, 3, 77, 141, 193, 14, 194, 32, 16, 68, 127, 101, 179, 158, 133,
@@ -433,7 +636,7 @@ const SAMPLES: [(u32, u32); 8] = [
 
 /// 解析 → 两配置渲染 → to_string roundtrip 渲染对比 → 抽样像素。
 fn run_doc(name: &str, svg: &str) {
-    let opt = usvg::Options::default();
+    let opt = make_opt();
     let tree = match usvg::Tree::from_str(svg, &opt) {
         Ok(t) => t,
         Err(e) => {
@@ -457,7 +660,7 @@ fn run_doc(name: &str, svg: &str) {
     println!("doc {name} def   fnv={fnv_def:016x}");
 
     // 无 AA 配置：Options::shape_rendering = CrispEdges（resvg 同款 AA 决策来源）
-    let mut opt2 = usvg::Options::default();
+    let mut opt2 = make_opt();
     opt2.shape_rendering = usvg::ShapeRendering::CrispEdges;
     let tree2 = match usvg::Tree::from_str(svg, &opt2) {
         Ok(t) => t,
@@ -470,9 +673,9 @@ fn run_doc(name: &str, svg: &str) {
     render_tree(&tree2, ts, &mut pm2.as_mut());
     println!("doc {name} crisp fnv={:016x}", fnv1a(pm2.data()));
 
-    // to_string → 重解析 → 重渲染，语义 FNV 须与默认一致
+    // to_string → 重解析 → 重渲染，渲染 FNV 与默认比对（eq 值本体即锚）
     let s = tree.to_string(&usvg::WriteOptions::default());
-    let eq = match usvg::Tree::from_str(&s, &opt) {
+    let eq = match usvg::Tree::from_str(&s, &make_opt()) {
         Ok(t3) => {
             let mut pm3 = Pixmap::new(W, H).unwrap();
             render_tree(&t3, ts, &mut pm3.as_mut());
@@ -505,11 +708,105 @@ fn print_samples(name: &str, pm: &Pixmap) {
     println!("{line}");
 }
 
+/// text 节点的树 API 位级探针：chunks/spans/layouted 字形/flattened/bbox bits。
+fn probe_text(id: &str, svg: &str) {
+    let opt = make_opt();
+    let tree = usvg::Tree::from_str(svg, &opt).unwrap();
+    let Some(Node::Text(t)) = tree.node_by_id(id) else {
+        println!("probe {id} missing");
+        return;
+    };
+    let bb = t.bounding_box();
+    let at = t.abs_transform();
+    println!(
+        "probe {id} chunks={} treedb={} bbox x={:08x} y={:08x} w={:08x} h={:08x}",
+        t.chunks().len(),
+        tree.fontdb().len(),
+        bb.x().to_bits(),
+        bb.y().to_bits(),
+        bb.width().to_bits(),
+        bb.height().to_bits()
+    );
+    println!(
+        "probe {id} at sx={:08x} sy={:08x} tx={:08x} ty={:08x}",
+        at.sx.to_bits(),
+        at.sy.to_bits(),
+        at.tx.to_bits(),
+        at.ty.to_bits()
+    );
+    for (ci, ch) in t.chunks().iter().enumerate() {
+        println!(
+            "probe {id} chunk{ci} anchor={:?} spans={} text={:?}",
+            ch.anchor(),
+            ch.spans().len(),
+            ch.text()
+        );
+        if let Some(sp) = ch.spans().first() {
+            println!(
+                "probe {id} span{ci} fam={:?} w={} style={:?} fs={:08x} ls={:08x} ws={:08x} tl={:?}",
+                sp.font().families(),
+                sp.font().weight(),
+                sp.font().style(),
+                sp.font_size().get().to_bits(),
+                sp.letter_spacing().to_bits(),
+                sp.word_spacing().to_bits(),
+                sp.text_length().map(|v| v.to_bits())
+            );
+        }
+    }
+    let spans = t.layouted();
+    let glyphs: usize = spans.iter().map(|s| s.positioned_glyphs.len()).sum();
+    println!(
+        "probe {id} layouted spans={} glyphs={} flat={}",
+        spans.len(),
+        glyphs,
+        t.flattened().children().len()
+    );
+    for (gi, g) in spans
+        .iter()
+        .flat_map(|s| s.positioned_glyphs.iter())
+        .take(4)
+        .enumerate()
+    {
+        println!(
+            "probe {id} g{gi} id={} text={:?} font={:?}",
+            g.id.0, g.text, g.font
+        );
+    }
+}
+
 fn main() {
+    // ---- ① 字体字节锚：内嵌资产（装载序 = 数组序）----
+    let mut total = 0usize;
+    let mut count = 0usize;
+    for (i, f) in typst_assets::fonts().enumerate() {
+        println!("font[{i:02}] len={} fnv={:016x}", f.len(), fnv1a(f));
+        total += f.len();
+        count += 1;
+    }
+    println!("font total files={count} bytes={total}");
+
+    // ---- ② fontdb 面：faces 全量转储（Vec 插入序）----
+    let opt0 = make_opt();
+    println!("faces len={}", opt0.fontdb.len());
+    for (i, face) in opt0.fontdb.faces().enumerate() {
+        println!(
+            "face[{i:02}] id={:?} fam={:?} ps={:?} style={:?} weight={:?} stretch={:?} mono={}",
+            face.id,
+            face.families,
+            face.post_script_name,
+            face.style,
+            face.weight,
+            face.stretch,
+            face.monospaced
+        );
+    }
+
+    // ---- ③ 形状面（批6 继承）----
     run_doc("prim", PRIM);
 
     // prim 的树 API 位级探针：id 查找 / abs_transform / abs_bounding_box
-    let opt = usvg::Options::default();
+    let opt = make_opt();
     let tree = usvg::Tree::from_str(PRIM, &opt).unwrap();
     let p1 = tree.node_by_id("p1").unwrap();
     let bb = p1.abs_bounding_box();
@@ -545,7 +842,46 @@ fn main() {
     run_doc("use-style", USE_STYLE);
     run_doc("empty-svg", EMPTY_SVG);
 
-    // gzip 字节路径：合法 .svgz
+    // ---- ④ 文本面（内嵌 fontdb 定值字体）----
+    run_doc("text-basic", TEXT_BASIC);
+    run_doc("text-style", TEXT_STYLE);
+    probe_text("tp1", TEXT_STYLE);
+    run_doc("text-transform", TEXT_TRANSFORM);
+    run_doc("text-path", TEXT_PATH);
+    run_doc("text-bidi", TEXT_BIDI);
+    run_doc("text-deco", TEXT_DECO);
+    run_doc("text-fallback", TEXT_FALLBACK);
+
+    // 空 fontdb：无字体可解析 → 文本零字形（仅底色矩形渲染）
+    let optnf = usvg::Options::default();
+    let tnf = usvg::Tree::from_str(TEXT_BASIC, &optnf).unwrap();
+    let size_nf = tnf.size();
+    let mut pmnf = Pixmap::new(W, H).unwrap();
+    let ts_nf = Transform::from_scale(W as f32 / size_nf.width(), H as f32 / size_nf.height());
+    render_tree(&tnf, ts_nf, &mut pmnf.as_mut());
+    // 空 fontdb：无字体可解析 → 文本元素整颗丢弃（found=false 锚），仅底色渲染
+    let optnf = usvg::Options::default();
+    let tnf = usvg::Tree::from_str(TEXT_BASIC, &optnf).unwrap();
+    let size_nf = tnf.size();
+    let mut pmnf = Pixmap::new(W, H).unwrap();
+    let ts_nf = Transform::from_scale(W as f32 / size_nf.width(), H as f32 / size_nf.height());
+    render_tree(&tnf, ts_nf, &mut pmnf.as_mut());
+    let (found_nf, glyphs_nf) = match tnf.node_by_id("tb1") {
+        Some(Node::Text(t)) => (
+            true,
+            t.layouted().iter().map(|s| s.positioned_glyphs.len()).sum(),
+        ),
+        _ => (false, 0),
+    };
+    println!(
+        "doc nofonts found={} glyphs={} children={} def fnv={:016x}",
+        found_nf,
+        glyphs_nf,
+        tnf.root().children().len(),
+        fnv1a(pmnf.data())
+    );
+
+    // ---- ⑤ gzip 字节路径：合法 .svgz ----
     match usvg::Tree::from_data(GZ_SVG, &opt) {
         Ok(t) => {
             let mut pm = Pixmap::new(W, H).unwrap();
@@ -562,7 +898,7 @@ fn main() {
         Err(e) => println!("gzsvg parse-err {e:?}"),
     }
 
-    // 错误路径六条（全部确定性 Debug 文本）
+    // ---- ⑥ 错误路径六条（全部确定性 Debug 文本）----
     let bad_xml = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10"><rect x="1"/</svg>"##;
     let zero_w = r##"<svg xmlns="http://www.w3.org/2000/svg" width="0" height="10"/>"##;
     let no_attrs = EMPTY_SVG; // 无 width/height/viewBox：100% × default_size → 合法空树
