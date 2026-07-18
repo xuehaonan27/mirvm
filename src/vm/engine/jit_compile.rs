@@ -1918,9 +1918,10 @@ impl Translator<'_, '_> {
                             self.b.ins().brif(neg1, triv_blk, &[], norm_blk, &[]);
                             self.b.switch_to_block(triv_blk);
                             let tv = if is_rem {
-                                self.b.ins().iconst(types::I64, 0)
+                                self.b.ins().iconst(types::I128, 0)
                             } else {
-                                x
+                                // wrapping_div(x, -1) = -x（MIN 回绕，ineg 同形）
+                                self.b.ins().ineg(x)
                             };
                             self.b.ins().jump(join_blk, &[tv.into()]);
                             self.b.switch_to_block(norm_blk);
@@ -2771,7 +2772,11 @@ impl Translator<'_, '_> {
                 let zero = self.b.ins().icmp_imm(IntCC::Equal, b, 0);
                 self.div_zero_if(zero, is_rem, false);
                 if signed {
-                    let neg1 = self.b.ins().icmp_imm(IntCC::Equal, b, -1);
+                    // 槽不变量为零扩到宽：signed 语义先 sext 到 64 位（interp
+                    // int_bin: sext 后 wrapping_div/rem；否则负值被当大正数除）。
+                    let x = self.sext_val(a, w);
+                    let y = self.sext_val(b, w);
+                    let neg1 = self.b.ins().icmp_imm(IntCC::Equal, y, -1);
                     let triv_blk = self.b.create_block();
                     let norm_blk = self.b.create_block();
                     let join_blk = self.b.create_block();
@@ -2780,14 +2785,15 @@ impl Translator<'_, '_> {
                     let tv = if is_rem {
                         self.b.ins().iconst(types::I64, 0)
                     } else {
-                        a
+                        // wrapping_div(x, -1) = -x（MIN 回绕，ineg 同形）
+                        self.b.ins().ineg(x)
                     };
                     self.b.ins().jump(join_blk, &[tv.into()]);
                     self.b.switch_to_block(norm_blk);
                     let nv = if is_rem {
-                        self.b.ins().srem(a, b)
+                        self.b.ins().srem(x, y)
                     } else {
-                        self.b.ins().sdiv(a, b)
+                        self.b.ins().sdiv(x, y)
                     };
                     self.b.ins().jump(join_blk, &[nv.into()]);
                     self.b.switch_to_block(join_blk);
