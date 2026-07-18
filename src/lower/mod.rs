@@ -447,7 +447,8 @@ impl<'tcx> Linker<'tcx> {
 
     /// P1：instance 的冻结 cif 签名（FnDef 且 freeze_c_fnptr_sig 可派生）；
     /// 结果缓存（含 None——不可派生者恒走数据槽，无重复试探成本）。
-    fn entry_ffi_sig(&mut self, inst: Instance<'tcx>) -> Option<ir::ForeignSig> {
+    /// native_archive C2 救援链判定「rlib fn 可物化条目」同此判据。
+    pub(crate) fn entry_ffi_sig(&mut self, inst: Instance<'tcx>) -> Option<ir::ForeignSig> {
         if let Some(sig) = self.entry_sig_cache.get(&inst) {
             return sig.clone();
         }
@@ -1183,7 +1184,11 @@ impl<'tcx> Linker<'tcx> {
 
     /// 导出符号表（②），惰性一次构建：遍历"最终二进制会链接到"的全部非泛型导出 def
     /// （tier-0 `for_each_linked_def` 同构），符号名 → mono instance，strong 覆盖 weak。
-    fn exported_defs(&mut self) -> &FxHashMap<Symbol, (Instance<'tcx>, bool)> {
+    /// guest 导出符号（`#[no_mangle]`/`#[export_name]`/`#[used]` 非泛型）→
+    /// （定义 Instance, is_weak）：② 链接仿真的权威表（与 native final link
+    /// 的 `exported_non_generic_symbols` 集符集同源）；C2 native-archive
+    /// 「符号在 rlib」闭包判定同表（名称 → 可物化 P1 条目）。
+    pub(crate) fn exported_defs(&mut self) -> &FxHashMap<Symbol, (Instance<'tcx>, bool)> {
         let tcx = self.tcx;
         self.exports.get_or_insert_with(|| {
             use rustc_hir::def_id::LOCAL_CRATE;
@@ -2153,7 +2158,7 @@ fn lower_inner(
     // 状态，故全模块只此一处物化（装配段复用清单，不再二次审计）；运行期
     // FfiState::ensure_libs 的重复 dlopen 是幂等 refcount。失败响亮终止。
     let required_native_libs: Vec<Box<str>> = {
-        let mut v = crate::native_archive::materialize_static_libraries(tcx)
+        let mut v = crate::native_archive::materialize_static_libraries(tcx, &mut linker)
             .unwrap_or_else(|reason| panic!("Static native library 装载失败: {reason}"));
         if let Some(so) = global_asm::materialize(tcx, &mut linker)
             .unwrap_or_else(|reason| panic!("global_asm/naked 物化失败: {reason}"))

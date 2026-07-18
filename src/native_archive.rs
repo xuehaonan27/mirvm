@@ -86,14 +86,19 @@ pub(crate) fn system_dylibs(tcx: TyCtxt<'_>) -> Vec<Box<str>> {
 
 #[cfg(test)]
 fn materialize_in(archive: &Path, cache_dir: &Path) -> Result<PathBuf, String> {
-    materialize_for_target_in(archive, cache_dir, env!("MIRVM_HOST"), Path::new("cc"), &[])
+    materialize_for_target_in(archive, cache_dir, env!("MIRVM_HOST"), Path::new("cc"), &[], None)
 }
 
 /// 收集当前 crate graph 的 Static native libraries，并把每个独立归档转换成 `.so`。
 ///
 /// 只实现 Linux/ELF 的受约束垂直切片。每个 archive 独立以 `-z defs` 链接，因此跨归档
 /// 依赖、依赖顺序和非 PIC relocation 都会响亮失败；不会猜测一个通用 native link plan。
-pub(crate) fn materialize_static_libraries(tcx: TyCtxt<'_>) -> Result<Vec<Box<str>>, String> {
+/// C2：转换失败进入「符号在 rlib」救援链（undefined ∩ crate 图 rlib 导出 fn ⇒
+/// P1 条目隐藏跳板注入重链；`linker = None` 的单测直接走原错误路径）。
+pub(crate) fn materialize_static_libraries<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    linker: &mut crate::lower::Linker<'tcx>,
+) -> Result<Vec<Box<str>>, String> {
     let sess = tcx.sess;
     let search_dirs: Vec<_> = sess
         .target_filesearch()
@@ -159,7 +164,7 @@ pub(crate) fn materialize_static_libraries(tcx: TyCtxt<'_>) -> Result<Vec<Box<st
                     lib.name, searched
                 )
             })?;
-            let so = materialize_for_target_in(&archive, &cache, target, Path::new("cc"), &extra_libs)?;
+            let so = materialize_for_target_in(&archive, &cache, target, Path::new("cc"), &extra_libs, Some(linker))?;
             if !shared_objects.contains(&so) {
                 shared_objects.push(so);
             }
@@ -249,6 +254,7 @@ fn materialize_for_target_in(
     target: &str,
     cc: &Path,
     extra_libs: &[Box<str>],
+    linker: Option<&mut crate::lower::Linker<'_>>,
 ) -> Result<PathBuf, String> {
     let bytes = std::fs::read(archive)
         .map_err(|e| format!("读取静态原生归档 `{}` 失败: {e}", archive.display()))?;
@@ -307,6 +313,24 @@ fn materialize_for_target_in(
         .map_err(|e| format!("启动 cc 转换 `{}` 失败: {e}", archive.display()))?;
     if !output.status.success() {
         let _ = std::fs::remove_file(&tmp);
+        // C2：「符号在 rlib」救援链（designs/c2-rlib-symbols-design.md §2）——
+        // undefined ∩ crate 图 rlib 导出 fn ⇒ P1 条目隐藏跳板注入重链；
+        // 救不了（无交集/不可派生/重链仍败）走原错误路径，诊断逐字节同前
+        if let Some(linker) = linker
+            && let Some(so) = rescue_with_rlib_symbols(
+                archive,
+                cache_dir,
+                target,
+                cc,
+                &extra_flags,
+                &bytes,
+                &cc_identity,
+                &link_flags,
+                linker,
+            )?
+        {
+            return Ok(so);
+        }
         return Err(format!(
             "静态原生归档 `{}` 无法安全转换为共享库（要求 ELF PIC、依赖在本归档内闭合）:\n{}{}",
             archive.display(),
@@ -319,6 +343,128 @@ fn materialize_for_target_in(
         format!("原子发布原生归档缓存 `{}` 失败: {e}", so.display())
     })?;
     Ok(so)
+}
+
+/// C2「符号在 rlib」救援链（designs/c2-rlib-symbols-design.md §2）：
+/// 首链失败后，静态枚举归档 SHN_UNDEF 符号 ∩ crate 图 rlib 导出 fn 集
+/// （`Linker::exported_defs`，与 native final link 集符集同源）——交集内 fn
+/// 预算 P1 可执行条目、发射 `.hidden` 跳板、并入重链。返回 None = 救不了
+/// （无交集 / 签名不可派生 / 重链仍败），调用方走原错误路径；
+/// Err = 物化期诊断（枚举/跳板组装失败——同 `-z defs` 一族的响亮拒绝纪律）。
+#[allow(clippy::too_many_arguments)]
+fn rescue_with_rlib_symbols(
+    archive: &Path,
+    cache_dir: &Path,
+    target: &str,
+    cc: &Path,
+    extra_flags: &[String],
+    archive_bytes: &[u8],
+    cc_identity: &[u8],
+    link_flags: &str,
+    linker: &mut crate::lower::Linker<'_>,
+) -> Result<Option<PathBuf>, String> {
+    use rustc_span::Symbol;
+    let undefs = crate::elfsym::archive_undefined_symbols(&archive.display().to_string())?;
+    if undefs.is_empty() {
+        return Ok(None);
+    }
+    // 与 rlib 导出集求交（键名统一 canonical_link_name 剥 \x01 前缀家族）
+    let mut hit: Vec<(Box<str>, rustc_middle::ty::Instance<'_>)> = Vec::new();
+    {
+        let exports = linker.exported_defs();
+        for name in &undefs {
+            let canon = crate::lower::canonical_link_name(name);
+            if let Some(&(inst, _is_weak)) = exports.get(&Symbol::intern(canon)) {
+                hit.push((canon.into(), inst));
+            }
+        }
+    }
+    if std::env::var_os("MIRVM_C2_DEBUG").is_some() {
+        eprintln!("c2-debug: undefs={undefs:?} hit={}", hit.len());
+    }
+    if hit.is_empty() {
+        return Ok(None);
+    }
+    // 预算 P1 条目（签名可派生为前提；不可派生 = 无 thunk ABI，交还原错误路径）
+    let mut pairs: Vec<(Box<str>, u64)> = Vec::with_capacity(hit.len());
+    for (name, inst) in hit {
+        if linker.entry_ffi_sig(inst).is_none() {
+            return Ok(None);
+        }
+        let addr = linker
+            .fn_entry_addr(inst)
+            .map_err(|e| format!("rlib 符号 `{name}` 的 P1 条目预算失败: {e}"))?;
+        pairs.push((name, addr));
+    }
+    pairs.sort();
+    // 隐藏跳板 .s（C7 同款形制；只在 .so 内部绑定，不污染进程全局命名空间）
+    let mut asm = String::from(".intel_syntax noprefix\n");
+    for (name, addr) in &pairs {
+        use std::fmt::Write as _;
+        let _ = writeln!(asm, ".globl {name}");
+        let _ = writeln!(asm, ".hidden {name}");
+        let _ = writeln!(asm, ".type {name},@function");
+        let _ = writeln!(asm, "{name}:");
+        let _ = writeln!(asm, "    movabs rax, {addr:#x}");
+        let _ = writeln!(asm, "    jmp rax");
+    }
+    // 缓存键 = 首链键域 + inject 对（模块专属；P1 码址跨进程稳定，同模块恒命中）
+    let mut inject_key: Vec<u8> = Vec::new();
+    for (name, addr) in &pairs {
+        inject_key.extend_from_slice(name.as_bytes());
+        inject_key.push(0);
+        inject_key.extend_from_slice(&addr.to_le_bytes());
+    }
+    let hash = content_hash([
+        CACHE_FORMAT_VERSION,
+        b"rlib-inject",
+        link_flags.as_bytes(),
+        target.as_bytes(),
+        cc_identity,
+        archive_bytes,
+        &inject_key,
+    ]);
+    let so = cache_dir.join(format!("{hash}.so"));
+    if so.exists() {
+        return Ok(Some(so));
+    }
+    // 组装跳板对象（与 native_archive 转换同款 cc 通道）
+    let s_path = cache_dir.join(format!("{hash}.s"));
+    std::fs::write(&s_path, &asm)
+        .map_err(|e| format!("写 rlib 跳板汇编 `{s_path:?}` 失败: {e}"))?;
+    let o_path = cache_dir.join(format!("{hash}.tramp.o"));
+    let st = Command::new(cc)
+        .arg("-c")
+        .arg("-o")
+        .arg(&o_path)
+        .arg(&s_path)
+        .status()
+        .map_err(|e| format!("启动 cc 组装 rlib 跳板失败（PATH 缺 cc？）: {e}"))?;
+    if !st.success() {
+        return Err(format!("cc 组装 rlib 跳板失败（status={st}）"));
+    }
+    // 重链：跳板对象置于归档后（定义符号供归档内未解析引用绑定）
+    let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let tmp = cache_dir.join(format!("{hash}.so.tmp.{}.{serial}", std::process::id()));
+    let output = Command::new(cc)
+        .args(LINK_PREFIX)
+        .arg(archive)
+        .arg(&o_path)
+        .args(LINK_SUFFIX)
+        .args(extra_flags)
+        .arg("-o")
+        .arg(&tmp)
+        .output()
+        .map_err(|e| format!("启动 cc 重链 `{}` 失败: {e}", archive.display()))?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&tmp);
+        return Ok(None);
+    }
+    std::fs::rename(&tmp, &so).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("原子发布原生归档缓存 `{}` 失败: {e}", so.display())
+    })?;
+    Ok(Some(so))
 }
 
 fn compiler_identity(cc: &Path) -> Result<Vec<u8>, String> {
@@ -665,6 +811,7 @@ mod tests {
             "x86_64-unknown-linux-gnu",
             Path::new("cc"),
             &[],
+            None,
         )
         .unwrap();
         let second = materialize_for_target_in(
@@ -673,6 +820,7 @@ mod tests {
             "aarch64-unknown-linux-gnu",
             Path::new("cc"),
             &[],
+            None,
         )
         .unwrap();
         assert_ne!(first, second, "target triple must participate in cache key");
@@ -721,9 +869,9 @@ mod tests {
         let cache = temp.path().join("cache");
 
         let first =
-            materialize_for_target_in(&archive, &cache, "x86_64-unknown-linux-gnu", &cc_a, &[]).unwrap();
+            materialize_for_target_in(&archive, &cache, "x86_64-unknown-linux-gnu", &cc_a, &[], None).unwrap();
         let second =
-            materialize_for_target_in(&archive, &cache, "x86_64-unknown-linux-gnu", &cc_b, &[]).unwrap();
+            materialize_for_target_in(&archive, &cache, "x86_64-unknown-linux-gnu", &cc_b, &[], None).unwrap();
         assert_ne!(
             first, second,
             "C compiler identity must participate in cache key"
@@ -741,10 +889,10 @@ mod tests {
         let none: &[Box<str>] = &[];
         let with_m: &[Box<str>] = &["m".into()];
         let first =
-            materialize_for_target_in(&archive, &cache, "x86_64-unknown-linux-gnu", Path::new("cc"), none)
+            materialize_for_target_in(&archive, &cache, "x86_64-unknown-linux-gnu", Path::new("cc"), none, None)
                 .unwrap();
         let second =
-            materialize_for_target_in(&archive, &cache, "x86_64-unknown-linux-gnu", Path::new("cc"), with_m)
+            materialize_for_target_in(&archive, &cache, "x86_64-unknown-linux-gnu", Path::new("cc"), with_m, None)
                 .unwrap();
         assert_ne!(first, second, "extra libs 名单必须参与缓存键");
     }
@@ -771,6 +919,7 @@ mod tests {
             "x86_64-unknown-linux-gnu",
             Path::new("cc"),
             &[],
+            None,
         )
         .unwrap();
         let second = materialize_for_target_in(
@@ -779,6 +928,7 @@ mod tests {
             "x86_64-unknown-linux-gnu",
             Path::new("cc"),
             &[],
+            None,
         )
         .unwrap();
 

@@ -56,7 +56,7 @@ mimalloc libgit2 rustls_shake zstd_long \
 aws_lc mlua_lua tantivy sequoia_pgp sqlx_sqlite \
 swc_parse miden_exec polodb starlark_eval \
 zune_jpeg candle_mlp pest scraper_dom arrow_rs fontdue unicode_rs rustpython_mini \
-tree_sitter"}
+tree_sitter bzip2_csys wasmtime_wat"}
 # jieba_cut 全绿但 mirvm 单跑 77-89s（贴 90s timeout），留 corpus.sh 手工跑批
 # opencc（批7 波1）三维已绿但不进 gate5：依赖机器侧 /tmp/opencc-local
 # （OpenCC 1.1.9 自建前缀，driver 头注有重建法）——留 corpus.sh 手工批（有 gating）
@@ -75,7 +75,7 @@ for p in $CORPUS_PROGS; do
     # mimalloc/libgit2 的 vendored C 构建）
     tmo=90
     case "$p" in
-        gix_pure|rusqlite_db|revm_evm|zopfli_deep|mimalloc|libgit2|aws_lc|tantivy|sequoia_pgp|starlark_eval|arrow_rs|rustpython_mini) tmo=300 ;;
+        gix_pure|rusqlite_db|revm_evm|zopfli_deep|mimalloc|libgit2|aws_lc|tantivy|sequoia_pgp|starlark_eval|arrow_rs|rustpython_mini|wasmtime_wat) tmo=300 ;;
         calamine_xlsx|rustls_cert|phonenumber|mlua_lua|miden_exec|candle_mlp) tmo=180 ;;
         rsa_pss|rsa_4096) tmo=400 ;;
     esac
@@ -84,6 +84,12 @@ for p in $CORPUS_PROGS; do
     stdout=$(cat "$TMP/corpus-$p.out")
     out=$(cat "$TMP/corpus-$p.out" "$TMP/corpus-$p.err")
     red_pattern="" red_label="" red_code=70
+    # c_wasmtime_wat：层② inline asm noreturn（层①「符号在 rlib」已于 C2 闭合
+    # ——rescue 注入后同一 driver 由 101 换面 70；C3 落地后 XPASS 强制转绿）
+    [ "$p" = wasmtime_wat ] && {
+        red_pattern='inline asm noreturn（M5.x'
+        red_label='层② inline asm noreturn（C2 层① rlib 符号闭包已闭合）'
+    }
     # 历史转绿：六条 intrinsic 红于 2b4766b 内建、rusqlite libm 闭包于 2518314
     # 修 LINK_SUFFIX——机制保留备将来欠账锁定
     # openssl_evp 已于本轮转绿（元数据 -l 预载修复）；机制保留备将来欠账锁定
