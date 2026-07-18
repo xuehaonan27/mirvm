@@ -45,17 +45,19 @@ RTLD_LAZY 违反引擎必需库纪律且 P1 stub 不在进程动态符号表，�
 `src/native_archive.rs::materialize_for_target_in` 失败救援链（只动失败路径，
 **首链成功的全部归档行为零变化**）：
 
-1. 首链照旧（`cc -z defs --whole-archive …`）。失败时解析 stderr 的
-   `undefined reference to `<NAME>'` 行（GNU ld 实测格式；lld 用
-   `undefined symbol: <NAME>` 一并覆盖）。
-2. 全部 NAME 经 `canonical_link_name` 剥前缀后查 `exported_defs()`：
+1. 首链照旧（`cc -z defs --whole-archive …`）。失败时进入 rlib 注入评估——
+   **不解析任何工具文本输出**（ad-hoc 审查后修订，见 §5）：用仓库既有的
+   `src/elfsym.rs` ELF64 符号表解析器扩一个 ar 成员遍历，二进制级枚举归档
+   全部成员的 `SHN_UNDEF` 全局/弱符号（跳过 LOCAL 与 ar 符号表成员）。
+2. 枚举结果经 `canonical_link_name` 剥前缀后与 `exported_defs()` 求交：
    - 命中且是 Fn ⇒ `linker.fn_entry_addr(inst)` 预算 → (name, stub_addr)；
    - 命中 Static ⇒ Err「数据符号在 rlib（C2 边界，按需另立）」；
-   - 未命中 ⇒ 走原错误路径（响亮拒，文案同今）。
+   - 交集为空 ⇒ 直接走原错误路径（响亮拒，文案同今）。
 3. 发射跳板 `.s`（C7 global_asm 同款，**`.hidden <name>`**——只在 .so 内部
    绑定，不污染进程全局命名空间；native 下 rlib 定义本就是链接期静态绑定）：
    `.globl <name>; .hidden <name>; .type <name>,@function; <name>: movabs rax, <addr>; jmp rax`。
-4. cc 编译跳板对象并入重链（`archive.a tramp.o -l…`）→ .so。
+4. cc 编译跳板对象并入**重链**（`archive.a tramp.o -l…`）。重链仍失败
+   （交集外还有未解符号）⇒ 原错误路径（与今日逐字节同款诊断）。
 5. 缓存键：注入路径把**排序后的 (name,addr) 对**并入 `content_hash` 部件
    （首链成功路径键不动，行为兼容）；.so 是模块专属件——P1 码址跨进程稳定，
    同模块重复运行恒命中，不同模块天然异键。
@@ -78,8 +80,9 @@ RTLD_LAZY 违反引擎必需库纪律且 P1 stub 不在进程动态符号表，�
 
 ## 4. 风险与边界（评审诚实面）
 
-- ld stderr 解析 = 我们自家 cc 调用的固定 flag 面（GNU ld 实测；lld 一并匹配）。
-  解析不到的形态（跨归档重名等）按未命中走原错误路径，不放宽闭包纪律。
+- 闭包判定集 = ar 成员 `SHN_UNDEF` ∩ crate 图 rlib 导出集——二进制级静态
+  枚举（`src/elfsym.rs` 同源解析器，无工具文本依赖）。交集外的未解符号
+  （跨归档重名、第三方库缺件）重链仍失败 ⇒ 原错误路径，不放宽闭包纪律。
 - `-z defs` 纪律不松动：注入只是把「rlib 导出 fn」纳入闭包判定，未命中
   NAME 仍响亮拒。
 - 跳板 `.hidden` 避免 RTLD_GLOBAL 全局插桩（评审中识别并采纳）。
@@ -89,3 +92,19 @@ RTLD_LAZY 违反引擎必需库纪律且 P1 stub 不在进程动态符号表，�
   重建兜底（trampoline 只存码址，条目本体启动相复现）。
 - 未立项：rlib **数据**符号（static 被 C 引用，ABS `.set` 语义对数据引用
   需另证）——响亮拒，按需另立。
+
+## 5. ad-hoc 自查记录（2026-07-18，用户点名复核）
+
+初版 §2-1 计划「解析 ld stderr 的 `undefined reference to` 行」——复核判定
+为 ad-hoc 件：依赖 ld 诊断文本格式（GNU ld/lld 两系），脆弱且无格式契约。
+**修订为**：`src/elfsym.rs` 同源 ELF64 解析器 + ar 成员遍历，二进制级静态
+枚举 `SHN_UNDEF` 符号（无任何工具文本解析；elfsym 自 M5.1 起即归档装载的
+二进制面同源件）。方案其余面自查结论：**非 ad-hoc**——
+①闭包集「rlib 导出 fn」= rustc `exported_non_generic_symbols`
+（native final link 的集符集本机权威，非按实例白名单）；
+②跳板 = P1 可执行条目的链接期物化（native 静态绑定语义对偶，非 wasmtime
+特例；hidden 可见性还是评审期对全局插桩的通用防护）；
+③失败触发的两段链 = 兼容性刻意选择（首链成功归档的 cc 行逐字节不变、
+缓存键不动），非绕过式设计；
+④`movabs+jmp` 跳板形 = C7 已验收的同族手法（GAS Intel `call ABS` 实锤后
+的统一形制）。
