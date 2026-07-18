@@ -6,7 +6,8 @@
 # recursion_deep/simd_probe/atomic_order_probe/float_wide_probe/asm_extras_probe/signal_probe/fork_exec_probe/nested_dst_probe/wide_int_probe）。
 # P1 起含 struct_fnptr_escape（结构体内嵌 fn-ptr 逃逸负对照，31/31）。
 # 第 0 步起含 weak_extern/global_asm_guest_fn；批9 起含 zst_drop；C1 起含
-# ffi_agg_probe（按值聚合 FfiAgg 合成矩阵 35/35）。
+# ffi_agg_probe（按值聚合 FfiAgg 合成矩阵 35/35）；C3 起含 noreturn_ud2
+#（asm noreturn 终止形，exit=132 双侧同，36/36）。
 # ecosystem/ffi_zlib 是 frontmatter/cargo
 # 形态（引擎 cargo 接线 M4.5），diff.sh 同样 SKIP（见 diff_cargo.sh）。
 set -u

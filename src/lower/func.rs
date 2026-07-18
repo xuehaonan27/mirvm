@@ -2480,8 +2480,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
 
     /// inline asm 站点降低（M5.0 asm-stub 工厂，corpus §2.2 三面孔归宿）。
     /// 寄存器分配 + wrapper 文本经 `super::asm`（cg_clif 同构），值/落点在此配对槽偏移。
-    /// M5.0 支持面：in/out/inout × 显式寄存器/reg 类；sym/label/const/naked/may_unwind/
-    /// noreturn/非 x86_64 保留 Trap-stub（诊断留痕，三面孔用不到；按需再补）。
+    /// M5.0 支持面：in/out/inout × 显式寄存器/reg 类；noreturn 两面孔（C3：
+    /// resume/ud2，Unreachable 落点兜底违约）；sym/label/const/naked/may_unwind/
+    /// att_syntax/非 x86_64 保留 Trap-stub（诊断留痕；按需再补）。
     fn lower_inline_asm(
         &mut self,
         asm_macro: mir::InlineAsmMacro,
@@ -2500,8 +2501,21 @@ impl<'tcx> LowerCx<'tcx, '_> {
         if options.contains(Opt::MAY_UNWIND) {
             return Err("inline asm may_unwind（M5.x；三面孔无）".into());
         }
-        if options.contains(Opt::NORETURN) {
-            return Err("inline asm noreturn（M5.x；三面孔无）".into());
+        // noreturn 两面孔（C3 定稿，2026-07-18）：ud2/int3 终止形 = 完全支持
+        // （asm 本体即机器码，进程以宿主信号死 = native 同）；resume/longjmp
+        // 转移形 = asm 本体忠实执行（c_wasmtime_wat 全 trap 面三维确定性绿——
+        // cranelift 发机器码 + trap 上抛链全通）。如实边界：解释帧在捕获与
+        // 恢复之间复用捕获帧宿主栈内存的合成协议可撞死（v2 spike 实锤，
+        // open-issues 引擎边界记档；消除 = JIT 真帧身份，不宣称全形态闭合）。
+        // rustc 强制 noreturn 无输出操作数（outs 恒空）；落点合成
+        // Unreachable（asm 若违约返回 = native UB，响亮诊断）。
+        let noreturn = options.contains(Opt::NORETURN);
+        if noreturn
+            && operands
+                .iter()
+                .any(|op| !matches!(op, mir::InlineAsmOperand::In { .. }))
+        {
+            return Err("inline asm noreturn 带非 In 操作数（rustc 不变量破坏）".into());
         }
         if options.contains(Opt::ATT_SYNTAX) {
             // 防静默错值：wrapper 强制 intel 语法，att 语法模板会被误汇编
@@ -2618,10 +2632,20 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
         }
 
-        let target = targets
-            .first()
-            .map(|b| b.as_u32())
-            .ok_or("inline asm 无 fallthrough 目标")?;
+        let target = if noreturn {
+            // noreturn（C3 复验窗口）：合成 Unreachable 落点（stub 真返 = 违约）
+            let idx = (self.mir_block_count + self.extra_blocks.len()) as Bb;
+            self.extra_blocks.push(ir::Block {
+                stmts: vec![],
+                term: Terminator::Unreachable,
+            });
+            idx
+        } else {
+            targets
+                .first()
+                .map(|b| b.as_u32())
+                .ok_or("inline asm 无 fallthrough 目标")?
+        };
         Ok((
             vec![],
             Terminator::InlineAsm {
