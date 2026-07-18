@@ -225,7 +225,9 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
   link 全图收集——bin 的 rustc 行恒无 -l。
 - **闭包欠账新形态**：bzip2-sys——vendored BZ_NO_STDIO 的断言桩 bz_internal_error
   定义在其 Rust rlib（#[no_mangle]）里：native_archive 闭包检查覆盖不到
-  「符号在 rlib」形态（记档；driver 走 0.6 纯 Rust 后端）。
+  「符号在 rlib」形态（记档；driver 走 0.6 纯 Rust 后端）。**已闭合
+  （2026-07-18，C2 救援链，decision-history §7.11）**——c_bzip2_csys（同
+  vendored C 后端）三维转绿入 gate。
 
 ### 批6（14 个；13 绿 / 1 实锤→fb0b204 修；2026-07-16；`3062184`）
 
@@ -322,7 +324,9 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
   final-link 从 rlib 集符；`-z defs` 单闭包够不着——批5 bzip2-sys 同族
   的第二实例）；② trap 上抛 inline asm `noreturn`（探针实锤主体路径：
   cranelift 在讲解进程里发机器码并执行——模块编译/实例化/内存表宿主
-  回调/rayon 全通零分歧）。
+  回调/rayon 全通零分歧）。**双层均已闭合（2026-07-18）**：层① C2 救援链
+  （§7.11）、层② noreturn 两面孔物化（§7.12，含一次自我反转）——
+  **driver 由 expected-red 转绿**（全 trap 面三维确定性绿）。
 - gate5 144→**148**（swc_parse/miden_exec/polodb/starlark_eval 入册）。
 
 ### 批9（8 个偏门小中型；8/8 全绿；修出 1 JIT bug；2026-07-18）

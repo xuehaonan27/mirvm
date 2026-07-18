@@ -60,8 +60,8 @@
 | ID | 事项 | 关键内容与转正要件 | 出处 |
 |---|---|---|---|
 | C1 | **FFI 按值聚合封送**（旧 debt §9；**已闭合 2026-07-18**） | 关闭：FfiAgg 冻结布局 + 出/入向全聚封送（[designs/c1-ffi-agg-design.md](designs/c1-ffi-agg-design.md)；合成矩阵探针 `demo/ffi_agg_probe.rs` 三维绿、**c_tree_sitter 原样三维转绿**、gate5 全量复绿，decision-history §7.10）。残余边界转 R17 | 本表 R17，designs/c1-ffi-agg-design.md |
-| C2 | **native-archive 闭包缺口：符号在 rlib**（旧 debt §10①；**评审定案 2026-07-18，待施工**） | 评审结论 = 原理可完全闭合，路线 = 链接期注入 rlib 导出 fn 的 P1 stub 隐藏跳板（失败救援链：elfsym 静态枚举 `SHN_UNDEF` ∩ exported_defs → fn_entry_addr 预算 → `.hidden` trampoline → 重链；首链成功路径零变化；ad-hoc 自查修订在案 §5）。方案与验收矩阵（MRE 转正/bzip2 C 后端复绿/c_wasmtime_wat 换面）见 [designs/c2-rlib-symbols-design.md](designs/c2-rlib-symbols-design.md)；数据符号如实拒绝另立 | designs/c2-rlib-symbols-design.md |
-| C3 | **inline asm `noreturn`**（旧 debt §10②） | wasmtime trap 上抛 `resume_to_exception_handler`（asm `options(noreturn)`），asm-stub 物化只覆盖 call-return 形，遇即 TRAP exit 70。转正需两类面孔（入口承诺不返的 resume/longjmp 形 + ud2/int3 终止形）。探针已证 wasmtime 主路径（cranelift 自发机器码执行/实例化/内存/表/宿主回调/rayon）全通零分歧——死于最后一步 | corpus §5 批8 波2 |
+| C2 | **native-archive 闭包缺口：符号在 rlib**（旧 debt §10①；**已闭合 2026-07-18**） | 关闭：失败救援链落地（elfsym 静态枚举 `SHN_UNDEF` ∩ exported_defs → `fn_entry_addr` 预算 → `.hidden` P1 跳板重链；[designs/c2-rlib-symbols-design.md](designs/c2-rlib-symbols-design.md)）。验收：MRE 转绿、c_bzip2_csys（bzip2 vendored C 后端）三维绿、**c_wasmtime_wat 换面**（层①消除，锁层② asm noreturn/70 = C3 入口）、gate5 全量复绿。数据符号维持如实拒绝另立 | decision-history §7.11，designs/c2-rlib-symbols-design.md |
+| C3 | **inline asm `noreturn`**（旧 debt §10②；**已闭合 2026-07-18**） | 关闭：两面孔物化（outs 恒空 + Unreachable 落点兜底）；ud2 终止形三维绿；**resume/longjmp 转移形 = c_wasmtime_wat 全 trap 面三维确定性绿**（冷缓存+三次重复+三维逐字节——VM-in-VM 旗舰转绿入 gate）。如实边界转 E32 | decision-history §7.12，[parked/c3-resume-spike.md](parked/c3-resume-spike.md) |
 | C4 | **dep crate global_asm 物化**（旧 debt §7） | faer pulp V3 LD_ST 汇編表：S2 `-Zno-codegen` 致 rlib 无 object，本 crate global_asm 通道（收集种子只含本地项）接不到。路径①收集面扩到 used_crates（同通道 cc+dlopen，装载序=crate 图序）；②命中 crate 关 `-Zno-codegen`（判名放行，只付一族 codegen）。当前 default-features=false 标量内核绕行 | corpus §5 批6（fb327cc 记档） |
 | C5 | **dyn 上溯 vtable 变换**（M4.2 欠账） | principal 变换 / unsized→dyn 槽读未实现（同 principal 位拷已通）。pgp_packet driver 以 armor 体层绕行在役 | corpus §5 批5，history/m4-log.md |
 | C6 | **M5.x intrinsic 按需队列残余** | pclmulqdq.256/.512、vaes、其余 gather 形态、avx512.pmadd 系等：遇真实 workload 按既有四触点法补（已清先例：psad.bw/pclmulqdq/aesni/crc32/permd/gather/vpmadd52/F16C/lddqu/`2b4766b`）。AES 等未触发项保留响亮 Trap | corpus §5，history/m5.1-design.md §1 |
@@ -109,6 +109,7 @@
 | E29 | **手写 shim → 通用直通通道** | `未立项` neat 终态（polish，不急）；现行为手写 shim + dlsym 兜底 | DESIGN.md §7.2 |
 | E30 | **C7 regex 42s 基线 JIT 后未复测** | `未立项` 旧性能靶子；JIT 之后无重测记录，「评审须给预估收益」要求未兑现 | DESIGN.md C7 |
 | E31 | **A2 mtime 粒度传递依赖漏检残余风险** | `记账` 键安全论证承认 mtime 粒度残余；挂档（distribution §6 既有条目同案） | history/s3b-a2-design.md §9.4 |
+| E32 | **inline-asm setjmp/longjmp 的捕获帧内存复用 hazard（C3 定稿边界）** | `记账` asm-stub 模型下 setjmp 捕获点在 stub 包装帧；解释帧在捕获与恢复之间复用该宿主栈内存的合成协议可撞死（v2 spike 实锤，落点 `Channel::send` 内部）。真实 workload（wasmtime 全 trap 面）不发生该形态、三维确定性绿。消除 = JIT 真帧身份（compiled guest fn = native 帧语义）；不宣称全形态闭合 | [parked/c3-resume-spike.md](parked/c3-resume-spike.md) |
 
 > E27（weak 符号真地址化缺定向验收）已于 2026-07-18 关闭并实修「weak extern
 > static 恒 0 判空 cell」缺陷——现走 GOT 启动相真解析（命中=真址/缺席=0；引擎

@@ -726,6 +726,58 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
 - **方法注**：本单即「原理可完全闭合 → 无论工程量做彻底」的第一例大工程
   （open-issues 闭合性总判 § 可闭合清单 C1 位）。
 
+### 7.11 2026-07-18：C2 native-archive 闭包「符号在 rlib」闭合（旧 debt §10①）
+
+- **实锤两族**：wasmtime `libwasmtime-helpers.a` 蹦床调 `resolve_vmctx_*`
+  （`#[export_name]`，定义在自身 rlib）；bzip2-sys vendored BZ_NO_STDIO 断言桩
+  `bz_internal_error`（`#[no_mangle]`，定义在 Rust rlib）。`-z defs` 单归档
+  自闭合够不着 → 拒「无法安全转换为共享库」。
+- **路线**（[designs/c2-rlib-symbols-design.md](designs/c2-rlib-symbols-design.md)）：
+  首链失败救援链——`src/elfsym.rs` 二进制级静态枚举归档全部成员的
+  `SHN_UNDEF` 全局/弱符号（**无工具文本解析**；ad-hoc 自查 §5 修订：初版
+  ld stderr 解析作废）∩ `exported_defs()`（rustc `exported_non_generic_symbols`，
+  native final link 集符集本机权威）⇒ `fn_entry_addr` 预算 P1 可执行条目 ⇒
+  `.hidden` 跳板（`movabs+jmp`，C7 同形制，防 RTLD_GLOBAL 插桩）并入重链。
+  首链成功路径 cc 行与缓存键逐字节不变；注入路径键含排序 (name,addr) 对。
+- **施工实雷一只（单测反咬）**：GNU ar 对 >15 字符成员名用**字符串表引用
+  `/N`**（如 `/0`），初版「名字以 `/` 开头即元数据」把真对象成员整个误判
+  跳过——真实归档 undefs 恒空；修订元数据判定为精确名单（`/`、`//`、
+  `__.SYMDEF`、`/SYM64/`），`/#1/len` BSD 内嵌名另剥。教训：单测只覆盖
+  短名 ar，真实世界 ar 是长名——测试矩阵教训同「用例形态分布」一条。
+- **验收**：MRE（`/tmp/mre`）转绿（`mre ok`）；`c_bzip2_csys`（bzip2 0.4.4
+  vendored C 后端 write/read/mem 全矩阵 + 损档错误路径）三维逐字节绿；
+  **c_wasmtime_wat 换面**：层①消失，锁层② `inline asm noreturn`/70
+  （= C3 入口，gate5 expected-red 接线，C3 落地 XPASS 强制转绿）。
+  断言桩运行期路径（BZ_PANIC can't-happen 族）如实不覆盖（native 同）。
+- **边界（如实拒绝另立）**：rlib 数据符号（static 被 C 引用）。
+- gate5 157 → **158 pass + 1 expected-red**，cargo test 68/68（elfsym ar
+  枚举单测），diff.sh 35/35。
+
+### 7.12 2026-07-18：C3 inline asm `noreturn` 两面孔（含一次自我反转）
+
+- **对象**：c_wasmtime_wat 层② `resume_to_exception_handler`（asm
+  `options(noreturn)`；asm-stub 工厂只覆盖 call-return 形，遇即 TRAP 70）。
+- **合成 spike 先判「不可开」**：手工 setjmp/resume 协议（CallThreadState
+  同构）——v1 独立 setjmp 帧已死（双维同错，协议自伤教训：setjmp 必须
+  内联在存活帧）；v2 内联后 native 绿、mirvm SIGSEGV，MIRVM_SEGV_DUMP
+  实锤落点 = `Channel::send` 内部（asm-stub 捕获帧已死且宿主栈区被后续
+  解释帧复用，epilogue 弹出复用期栈写 → 跳入 send 中段）。
+- **真实 workload 复验反转**：c_wasmtime_wat 冷缓存完整支持后**全 trap
+  面三维确定性绿**（三次重复 + mirvm/native/JIT=1 逐字节）——wasmtime 的
+  trap 链（closure → trampoline stub → cranelift 真码 wasm → 信号 handler
+  → resume stub）整条在存活链内推进，捕获帧在恢复时仍有效，与合成协议的
+  复用形态不同。asm 本体 = 真机器码忠实执行，transfer 本体成立。
+- **终判**：noreturn 两面孔物化保留（outs 恒空 + 落点合成 Unreachable）。
+  ① ud2/终止形 = 完全可闭合（`demo/noreturn_ud2.rs` 三维绿入 diff.sh，
+  exit=132 双侧）；② resume/longjmp 转移形 = 真实 workload 三维绿支持
+  物化；**如实边界（不宣称全形态闭合，转 open-issues E32）**：解释帧在
+  捕获与恢复之间复用捕获帧宿主栈内存的合成协议可撞死（v2 实锤），消除
+  = JIT 真帧身份。
+- **验证**：c_wasmtime_wat 由 expected-red **转绿入 gate**（VM-in-VM 旗舰
+  全程：cranelift 编译/实例化/表/global/宿主回调/rayon/trap 上抛全通）。
+- 全程证据链：[parked/c3-resume-spike.md](parked/c3-resume-spike.md)。
+- gate5 → **159 pass / 0 expected-red**，cargo test 68/68，diff.sh 36/36。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 - P7 设想独立 `src/os/` 物理层；当前 OS/FFI/builtin 逻辑仍分布在 lower、interp、ffi、heap。
