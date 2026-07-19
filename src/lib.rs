@@ -34,5 +34,6 @@ pub mod ircache;
 pub mod lower;
 pub(crate) mod native_archive;
 pub(crate) mod os;
+pub(crate) mod arch;
 pub mod sysroot;
 pub mod vm;

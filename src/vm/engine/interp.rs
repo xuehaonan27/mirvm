@@ -1380,7 +1380,7 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                         //（simd_as；simd_cast 界外是 guest UB，饱和值在允许集合内）
                         let x = match sw {
                             Width::W16 => {
-                                f64::from(f32::from_bits(super::x86::f16_to_f32_sw(v as u16)))
+                                f64::from(f32::from_bits(crate::arch::x86_64::f16_to_f32_sw(v as u16)))
                             }
                             Width::W32 => f32::from_bits(v as u32) as f64,
                             Width::W64 => f64::from_bits(v),
@@ -1411,16 +1411,16 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                         // 语义（sNaN qbit 强置等）；宿主 libcall 的 NaN 位行为随构建
                         // 目标漂移，不可依赖（half 探针 h0x7c01 实锤）
                         (Width::W16, Width::W32) => {
-                            u64::from(super::x86::f16_to_f32_sw(v as u16))
+                            u64::from(crate::arch::x86_64::f16_to_f32_sw(v as u16))
                         }
                         (Width::W16, Width::W64) => {
-                            f64::from(f32::from_bits(super::x86::f16_to_f32_sw(v as u16)))
+                            f64::from(f32::from_bits(crate::arch::x86_64::f16_to_f32_sw(v as u16)))
                                 .to_bits()
                         }
                         (Width::W32, Width::W16) => {
-                            u64::from(super::x86::f32_to_f16_sw(
+                            u64::from(crate::arch::x86_64::f32_to_f16_sw(
                                 v as u32,
-                                super::x86::HalfRound::Rne,
+                                crate::arch::x86_64::HalfRound::Rne,
                             ))
                         }
                         (Width::W64, Width::W16) => {
@@ -2663,7 +2663,7 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                             engine_abort("pshufb128 返回形态不是 indirect vector");
                         };
                         let dst = eval_place_addr(ctx, base, dst) as *mut u8;
-                        unsafe { super::x86::pshufb128(dst, a(0) as *const u8, a(1) as *const u8) };
+                        unsafe { crate::arch::x86_64::pshufb128(dst, a(0) as *const u8, a(1) as *const u8) };
                         true
                     }
                     Builtin::X86Pshufb256 => {
@@ -2671,7 +2671,7 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                             engine_abort("pshufb256 返回形态不是 indirect vector");
                         };
                         let dst = eval_place_addr(ctx, base, dst) as *mut u8;
-                        unsafe { super::x86::pshufb256(dst, a(0) as *const u8, a(1) as *const u8) };
+                        unsafe { crate::arch::x86_64::pshufb256(dst, a(0) as *const u8, a(1) as *const u8) };
                         true
                     }
                     Builtin::X86Sha256Msg1 | Builtin::X86Sha256Msg2 => {
@@ -2681,9 +2681,9 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         let dst = eval_place_addr(ctx, base, dst) as *mut u8;
                         unsafe {
                             if matches!(builtin, Builtin::X86Sha256Msg1) {
-                                super::x86::sha256msg1(dst, a(0) as *const u8, a(1) as *const u8);
+                                crate::arch::x86_64::sha256msg1(dst, a(0) as *const u8, a(1) as *const u8);
                             } else {
-                                super::x86::sha256msg2(dst, a(0) as *const u8, a(1) as *const u8);
+                                crate::arch::x86_64::sha256msg2(dst, a(0) as *const u8, a(1) as *const u8);
                             }
                         }
                         true
@@ -2694,7 +2694,7 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         };
                         let dst = eval_place_addr(ctx, base, dst) as *mut u8;
                         unsafe {
-                            super::x86::sha256rnds2(
+                            crate::arch::x86_64::sha256rnds2(
                                 dst,
                                 a(0) as *const u8,
                                 a(1) as *const u8,
@@ -2710,9 +2710,9 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         let dst = eval_place_addr(ctx, base, dst) as *mut u8;
                         unsafe {
                             if matches!(builtin, Builtin::X86PsadBw128) {
-                                super::x86::psad_bw128(dst, a(0) as *const u8, a(1) as *const u8);
+                                crate::arch::x86_64::psad_bw128(dst, a(0) as *const u8, a(1) as *const u8);
                             } else {
-                                super::x86::psad_bw256(dst, a(0) as *const u8, a(1) as *const u8);
+                                crate::arch::x86_64::psad_bw256(dst, a(0) as *const u8, a(1) as *const u8);
                             }
                         }
                         true
@@ -2723,7 +2723,7 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         };
                         let dst = eval_place_addr(ctx, base, dst) as *mut u8;
                         unsafe {
-                            super::x86::pclmulqdq(dst, a(0) as *const u8, a(1) as *const u8, a(2))
+                            crate::arch::x86_64::pclmulqdq(dst, a(0) as *const u8, a(1) as *const u8, a(2))
                         };
                         true
                     }
@@ -2738,10 +2738,10 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         let (x, k) = (a(0) as *const u8, a(1) as *const u8);
                         unsafe {
                             match builtin {
-                                Builtin::X86AesEnc => super::x86::aesenc(dst, x, k),
-                                Builtin::X86AesEncLast => super::x86::aesenclast(dst, x, k),
-                                Builtin::X86AesDec => super::x86::aesdec(dst, x, k),
-                                _ => super::x86::aesdeclast(dst, x, k),
+                                Builtin::X86AesEnc => crate::arch::x86_64::aesenc(dst, x, k),
+                                Builtin::X86AesEncLast => crate::arch::x86_64::aesenclast(dst, x, k),
+                                Builtin::X86AesDec => crate::arch::x86_64::aesdec(dst, x, k),
+                                _ => crate::arch::x86_64::aesdeclast(dst, x, k),
                             }
                         }
                         true
@@ -2751,7 +2751,7 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                             engine_abort("aesimc 返回形态不是 indirect vector");
                         };
                         let dst = eval_place_addr(ctx, base, dst) as *mut u8;
-                        unsafe { super::x86::aesimc(dst, a(0) as *const u8) };
+                        unsafe { crate::arch::x86_64::aesimc(dst, a(0) as *const u8) };
                         true
                     }
                     Builtin::X86AesKeygenAssist => {
@@ -2759,7 +2759,7 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                             engine_abort("aeskeygenassist 返回形态不是 indirect vector");
                         };
                         let dst = eval_place_addr(ctx, base, dst) as *mut u8;
-                        unsafe { super::x86::aeskeygenassist(dst, a(0) as *const u8, a(1)) };
+                        unsafe { crate::arch::x86_64::aeskeygenassist(dst, a(0) as *const u8, a(1)) };
                         true
                     }
                     Builtin::X86Permd256 => {
@@ -2767,7 +2767,7 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                             engine_abort("permd 返回形态不是 indirect vector");
                         };
                         let dst = eval_place_addr(ctx, base, dst) as *mut u8;
-                        unsafe { super::x86::permd256(dst, a(0) as *const u8, a(1) as *const u8) };
+                        unsafe { crate::arch::x86_64::permd256(dst, a(0) as *const u8, a(1) as *const u8) };
                         true
                     }
                     Builtin::X86PmaddUbSw128
@@ -2781,10 +2781,10 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         let (x, y) = (a(0) as *const u8, a(1) as *const u8);
                         unsafe {
                             match builtin {
-                                Builtin::X86PmaddUbSw128 => super::x86::pmaddubsw128(dst, x, y),
-                                Builtin::X86PmaddUbSw256 => super::x86::pmaddubsw256(dst, x, y),
-                                Builtin::X86PmaddWd128 => super::x86::pmaddwd128(dst, x, y),
-                                _ => super::x86::pmaddwd256(dst, x, y),
+                                Builtin::X86PmaddUbSw128 => crate::arch::x86_64::pmaddubsw128(dst, x, y),
+                                Builtin::X86PmaddUbSw256 => crate::arch::x86_64::pmaddubsw256(dst, x, y),
+                                Builtin::X86PmaddWd128 => crate::arch::x86_64::pmaddwd128(dst, x, y),
+                                _ => crate::arch::x86_64::pmaddwd256(dst, x, y),
                             }
                         }
                         true
@@ -2797,7 +2797,7 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         // (src vec, base 标量指针, vindex vec, mask vec, scale imm)
                         unsafe {
                             if matches!(builtin, Builtin::X86GatherQPd256) {
-                                super::x86::gather_q_pd_256(
+                                crate::arch::x86_64::gather_q_pd_256(
                                     dst,
                                     a(0) as *const u8,
                                     a(1),
@@ -2806,7 +2806,7 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                                     a(4),
                                 );
                             } else {
-                                super::x86::gather_d_pd_256(
+                                crate::arch::x86_64::gather_d_pd_256(
                                     dst,
                                     a(0) as *const u8,
                                     a(1),
@@ -2832,21 +2832,21 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         unsafe {
                             match builtin {
                                 Builtin::X86Pmadd52Lo128 => {
-                                    super::x86::vpmadd52::<2, false>(dst, x, y, z)
+                                    crate::arch::x86_64::vpmadd52::<2, false>(dst, x, y, z)
                                 }
                                 Builtin::X86Pmadd52Hi128 => {
-                                    super::x86::vpmadd52::<2, true>(dst, x, y, z)
+                                    crate::arch::x86_64::vpmadd52::<2, true>(dst, x, y, z)
                                 }
                                 Builtin::X86Pmadd52Lo256 => {
-                                    super::x86::vpmadd52::<4, false>(dst, x, y, z)
+                                    crate::arch::x86_64::vpmadd52::<4, false>(dst, x, y, z)
                                 }
                                 Builtin::X86Pmadd52Hi256 => {
-                                    super::x86::vpmadd52::<4, true>(dst, x, y, z)
+                                    crate::arch::x86_64::vpmadd52::<4, true>(dst, x, y, z)
                                 }
                                 Builtin::X86Pmadd52Lo512 => {
-                                    super::x86::vpmadd52::<8, false>(dst, x, y, z)
+                                    crate::arch::x86_64::vpmadd52::<8, false>(dst, x, y, z)
                                 }
-                                _ => super::x86::vpmadd52::<8, true>(dst, x, y, z),
+                                _ => crate::arch::x86_64::vpmadd52::<8, true>(dst, x, y, z),
                             }
                         }
                         true
@@ -2862,10 +2862,10 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         let (x, y) = (a(0) as *const u8, a(1) as *const u8);
                         unsafe {
                             match builtin {
-                                Builtin::X86MaxPs128 => super::x86::maxmin_ps::<4, true>(dst, x, y),
-                                Builtin::X86MinPs128 => super::x86::maxmin_ps::<4, false>(dst, x, y),
-                                Builtin::X86MaxPs256 => super::x86::maxmin_ps::<8, true>(dst, x, y),
-                                _ => super::x86::maxmin_ps::<8, false>(dst, x, y),
+                                Builtin::X86MaxPs128 => crate::arch::x86_64::maxmin_ps::<4, true>(dst, x, y),
+                                Builtin::X86MinPs128 => crate::arch::x86_64::maxmin_ps::<4, false>(dst, x, y),
+                                Builtin::X86MaxPs256 => crate::arch::x86_64::maxmin_ps::<8, true>(dst, x, y),
+                                _ => crate::arch::x86_64::maxmin_ps::<8, false>(dst, x, y),
                             }
                         }
                         true
@@ -2878,9 +2878,9 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         let (x, y, imm) = (a(0) as *const u8, a(1) as *const u8, a(2));
                         unsafe {
                             if matches!(builtin, Builtin::X86CmpPs128) {
-                                super::x86::cmp_ps::<4>(dst, x, y, imm)
+                                crate::arch::x86_64::cmp_ps::<4>(dst, x, y, imm)
                             } else {
-                                super::x86::cmp_ps::<8>(dst, x, y, imm)
+                                crate::arch::x86_64::cmp_ps::<8>(dst, x, y, imm)
                             }
                         }
                         true
@@ -2893,9 +2893,9 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         let (x, imm) = (a(0) as *const u8, a(1));
                         unsafe {
                             if matches!(builtin, Builtin::X86RoundPs128) {
-                                super::x86::round_ps::<4>(dst, x, imm)
+                                crate::arch::x86_64::round_ps::<4>(dst, x, imm)
                             } else {
-                                super::x86::round_ps::<8>(dst, x, imm)
+                                crate::arch::x86_64::round_ps::<8>(dst, x, imm)
                             }
                         }
                         true
@@ -2911,10 +2911,10 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         let x = a(0) as *const u8;
                         unsafe {
                             match builtin {
-                                Builtin::X86CvtPs2dq128 => super::x86::cvt_ps2dq::<4, false>(dst, x),
-                                Builtin::X86CvttPs2dq128 => super::x86::cvt_ps2dq::<4, true>(dst, x),
-                                Builtin::X86CvtPs2dq256 => super::x86::cvt_ps2dq::<8, false>(dst, x),
-                                _ => super::x86::cvt_ps2dq::<8, true>(dst, x),
+                                Builtin::X86CvtPs2dq128 => crate::arch::x86_64::cvt_ps2dq::<4, false>(dst, x),
+                                Builtin::X86CvttPs2dq128 => crate::arch::x86_64::cvt_ps2dq::<4, true>(dst, x),
+                                Builtin::X86CvtPs2dq256 => crate::arch::x86_64::cvt_ps2dq::<8, false>(dst, x),
+                                _ => crate::arch::x86_64::cvt_ps2dq::<8, true>(dst, x),
                             }
                         }
                         true
@@ -2927,9 +2927,9 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         let (x, y, m) = (a(0) as *const u8, a(1) as *const u8, a(2) as *const u8);
                         unsafe {
                             if matches!(builtin, Builtin::X86BlendvPs128) {
-                                super::x86::blendv_ps::<4>(dst, x, y, m)
+                                crate::arch::x86_64::blendv_ps::<4>(dst, x, y, m)
                             } else {
-                                super::x86::blendv_ps::<8>(dst, x, y, m)
+                                crate::arch::x86_64::blendv_ps::<8>(dst, x, y, m)
                             }
                         }
                         true
@@ -2942,9 +2942,9 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         let src = a(0) as *const u8;
                         unsafe {
                             if matches!(builtin, Builtin::X86Lddqu128) {
-                                super::x86::lddqu::<16>(dst, src)
+                                crate::arch::x86_64::lddqu::<16>(dst, src)
                             } else {
-                                super::x86::lddqu::<32>(dst, src)
+                                crate::arch::x86_64::lddqu::<32>(dst, src)
                             }
                         }
                         true
@@ -2957,9 +2957,9 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         let (x, imm) = (a(0) as *const u8, a(1));
                         unsafe {
                             if matches!(builtin, Builtin::X86Cvtps2ph128) {
-                                super::x86::cvtps2ph::<4>(dst, x, imm)
+                                crate::arch::x86_64::cvtps2ph::<4>(dst, x, imm)
                             } else {
-                                super::x86::cvtps2ph::<8>(dst, x, imm)
+                                crate::arch::x86_64::cvtps2ph::<8>(dst, x, imm)
                             }
                         }
                         true
@@ -2972,9 +2972,9 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         let x = a(0) as *const u8;
                         unsafe {
                             if matches!(builtin, Builtin::X86Cvtph2ps128) {
-                                super::x86::cvtph2ps::<4>(dst, x)
+                                crate::arch::x86_64::cvtph2ps::<4>(dst, x)
                             } else {
-                                super::x86::cvtph2ps::<8>(dst, x)
+                                crate::arch::x86_64::cvtph2ps::<8>(dst, x)
                             }
                         }
                         true
@@ -2987,9 +2987,9 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                         let (x, c) = (a(0) as *const u8, a(1) as *const u8);
                         unsafe {
                             if matches!(builtin, Builtin::X86PsllD128) {
-                                super::x86::pshift32::<4, true>(dst, x, c)
+                                crate::arch::x86_64::pshift32::<4, true>(dst, x, c)
                             } else {
-                                super::x86::pshift32::<4, false>(dst, x, c)
+                                crate::arch::x86_64::pshift32::<4, false>(dst, x, c)
                             }
                         }
                         true
@@ -3176,38 +3176,23 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                     Builtin::CpuHintNop => 0,
                     Builtin::Breakpoint => {
                         // 真 int3：未被跟踪时 = SIGTRAP 终止（native 同语义）
-                        unsafe {
-                            std::arch::asm!("int3", options(nomem, nostack, preserves_flags))
-                        };
+                        crate::arch::x86_64::asmstub::int3();
                         0
                     }
                     Builtin::AddCarry64 => unreachable!("addcarry.64 已由 pair 通道处理"),
                     Builtin::SubBorrow64 => unreachable!("subborrow.64 已由 pair 通道处理"),
-                    Builtin::Xgetbv => {
-                        let xcr = a(0) as u32;
-                        let (eax, edx): (u32, u32);
-                        unsafe {
-                            std::arch::asm!(
-                                "xgetbv",
-                                in("ecx") xcr,
-                                out("eax") eax,
-                                out("edx") edx,
-                                options(nomem, nostack, preserves_flags),
-                            );
-                        }
-                        (u64::from(edx) << 32) | u64::from(eax)
-                    }
+                    Builtin::Xgetbv => crate::arch::x86_64::asmstub::xgetbv(a(0) as u32),
                     Builtin::X86Crc32U8 => unsafe {
-                        u64::from(super::x86::crc32_u8(a(0) as u32, a(1) as u8))
+                        u64::from(crate::arch::x86_64::crc32_u8(a(0) as u32, a(1) as u8))
                     },
                     Builtin::X86Crc32U16 => unsafe {
-                        u64::from(super::x86::crc32_u16(a(0) as u32, a(1) as u16))
+                        u64::from(crate::arch::x86_64::crc32_u16(a(0) as u32, a(1) as u16))
                     },
                     Builtin::X86Crc32U32 => unsafe {
-                        u64::from(super::x86::crc32_u32(a(0) as u32, a(1) as u32))
+                        u64::from(crate::arch::x86_64::crc32_u32(a(0) as u32, a(1) as u32))
                     },
                     Builtin::X86Crc32U64 => unsafe {
-                        super::x86::crc32_u64(a(0), a(1))
+                        crate::arch::x86_64::crc32_u64(a(0), a(1))
                     },
                     Builtin::X86Pshufb128
                     | Builtin::X86Pshufb256

@@ -36,17 +36,6 @@ pub fn is_stub_addr(v: u64) -> bool {
     false
 }
 
-/// stub 字节：`movabs rax, target; jmp rax`（48 B8 <imm64> FF E0），12B 实长。
-fn emit_stub_bytes(target: u64) -> [u8; 12] {
-    let mut b = [0u8; 12];
-    b[0] = 0x48;
-    b[1] = 0xb8;
-    b[2..10].copy_from_slice(&target.to_le_bytes());
-    b[10] = 0xff;
-    b[11] = 0xe0;
-    b
-}
-
 /// 单地址域的 stub 区（本模块域一份；image 域随 absorb 另挂）。
 pub struct StubArena {
     base: *mut u8,
@@ -142,7 +131,7 @@ impl StubArena {
 
     /// 启动相填字节：`movabs rax, target; jmp rax`。addr 必须出自本区 alloc_stub。
     pub fn write_stub(&self, addr: u64, target: u64) {
-        let bytes = emit_stub_bytes(target);
+        let bytes = crate::arch::x86_64::asmstub::emit_stub_bytes(target);
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), addr as *mut u8, bytes.len())
         };

@@ -8,6 +8,8 @@
 
 #[path = "../../src/os/mod.rs"]
 mod os; // P7 os 层（engine 触点经 crate::os:: 原语；同源复用门禁随之扩展）
+#[path = "../../src/arch/mod.rs"]
+mod arch; // arch 层（interp 的 x86 触点经 crate::arch::；同上纪律）
 #[path = "../../src/vm/mod.rs"]
 mod vm;
 #[path = "../../src/elfsym.rs"]
