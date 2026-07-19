@@ -28,9 +28,11 @@
 ### 1.2 cargo 三阶段（`src/cargo_shim.rs`，机制移植自 cargo-miri）
 
 - **phase_cargo**：驱动真 `cargo run`，注入 `RUSTC_WRAPPER=mirvm` +
-  `target.runner=["mirvm","runner"]` + 独立 `target/mirvm`；强制 `--target <host>`
-  作为 host/target crate 区分开关。依赖解析/下载/失败即停 = cargo 原生行为
-  （`Cargo.lock`、`~/.cargo` registry 缓存全部白嫖）。
+  `target.runner=["mirvm","runner"]` + 统一 `$MIRVM_HOME/target/mirvm`
+  （D14 近期片，2026-07-18 由每项目独立 target dir 改共享，decision-history
+  §7.15）；强制 `--target <host>` 作为 host/target crate 区分开关。
+  依赖解析/下载/失败即停 = cargo 原生行为（`Cargo.lock`、`~/.cargo`
+  registry 缓存全部白嫖）。
 - **phase_wrapper**：host crate（build.rs、proc-macro）→ 真 rustc 正常编译**真执行**；
   target 依赖 → 真 rustc + MIR sysroot + `-Zalways-encode-mir`（产出带全量 MIR 的
   rlib）；最终 bin → **不编译**，写 JSON 假二进制 + stub `.d` 防重建。
@@ -56,7 +58,7 @@
 | 位置 | 内容 | 键 |
 |---|---|---|
 | `~/.cargo` | registry/git 源码（跨项目） | cargo 原生 |
-| `<project>/target/mirvm` | 依赖 MIR-rlib + 指纹（每项目） | cargo 指纹 |
+| `~/.mirvm/target/{mirvm,native}` | 依赖 rlib/MIR-rlib + 指纹（**全机共享**，D14 近期片 §7.15） | cargo 指纹 |
 | `~/.mirvm/sysroot-<target>` | MIR-rich std | 内容哈希（rustc-build-sysroot） |
 | `~/.mirvm/native-archives` | `.a`→`.so` 产物 | 内容哈希 |
 | `~/.mirvm/asm-stubs`、`global-asm` | asm 工厂 `.so` | 内容哈希 |
@@ -120,7 +122,7 @@
 | 层 | 内容 | 状态 |
 |---|---|---|
 | L0 | registry/git 源码（`~/.cargo`，跨项目） | ✅ cargo 白嫖 |
-| L1 | 依赖 MIR-rlib + 指纹（`target/mirvm`，每项目） | ✅ 已有；跨项目共享登记不做（低优先） |
+| L1 | 依赖 rlib/MIR-rlib + 指纹（`~/.mirvm/target/{mirvm,native}`，全机共享） | ✅ 已有；**跨项目共享已落地（D14 近期片，decision-history §7.15）** |
 | L1.5 | sysroot / native `.so` / asm-stubs / 脚本物化 | ✅ 已有（内容哈希） |
 | **L2** | **post-mono engine-IR 整包缓存** | ❌ **最高价值缺口**：把每跑必付 ~3s 压成"反序列化+跑" |
 | L3 | JIT code cache | ❌ M5.3–5.5 定型（CFI/PLT/重定位）前禁做 |

@@ -864,6 +864,33 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
 - 旧根 `~/.cache/mirvm` 无迁移无兼容读（全组件自愈），文档提示可手删。
   自动 LRU/容量上限不立项（手动 purge 够当前节奏；open-issues E17② 更新）。
 
+### 7.15 2026-07-18：统一依赖存储近期片——共享 cargo target dir（D14）
+
+- **裁定回顾**（用户 2026-07-18）：cache 应机器级统一维护——多脚本/多项目
+  共引 X@V 时其编译产物只存一份（去重单位 = 版本×features×依赖闭包×
+  cfg/flags×toolchain 的完整编译键，cargo fingerprint 天然即此键的内容
+  寻址）。并发模型 = 发布一次后续只读命中、无大锁常驻；清理粒度粗可接受；
+  终态原生 store 登记 D14 与 mode B 合并评审。
+- **实施**：`cargo_project_command --target-dir` 由 per-project
+  `target/mirvm` 改 `$MIRVM_HOME/target/mirvm`（`MIRVM_TARGET_DIR` 可改址）。
+  **产物定位零改动**——runner 协议本由 cargo 把假二进制路径传给 runner，
+  从不扫 target dir。共享化唯一新增碰撞面 = 无指纹的 `debug/<binname>`
+  （同 stem 不同路径脚本），解 = `[[bin]] name` 带路径哈希短缀（package
+  名保持 stem，onboarding grep recipe 不动）。B 维同族：materialize_script
+  增写 `.cargo/config.toml`（target-dir = `$MIRVM_HOME/target/native`），
+  shim 显式旗覆盖不受影响、native cargo run 吃文件配置进共享。
+- **附带收益**：deps image 的 extern 路径指向共享目录 → 依赖闭包相同的
+  脚本/项目 deps image 天然共享（a2_deps_image S3′c 手工驱动侧同址
+  --target-dir 跟迁，测试语义不变）。real_projects 诊断 remap 补共享路径。
+- **实测**（purge 后两树）：ethers 21.5s → 二跑 0.66s（fingerprint 新鲜）；
+  ethers(96 包)+xlsx(35 包)并集 525M（旧模式 ethers 单树 mirvm-side 即
+  424M）；script dir 缩至 KB 级（manifest+lock+src+config）。
+- **验证**：cargo test 73/73、diff.sh 38/38、diff_cargo 5/5、
+  a2_deps_image PASS、gate5 **167/0/0**。
+- **配套**：cachectl 族谱加 target 族 + `purge --target` 旗；USAGE 补
+  MIRVM_HOME/MIRVM_TARGET_DIR；cachectl du 硬链接重复计数（cosmetic，
+  记此不修）。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 - P7 设想独立 `src/os/` 物理层；当前 OS/FFI/builtin 逻辑仍分布在 lower、interp、ffi、heap。
