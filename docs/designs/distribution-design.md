@@ -11,7 +11,7 @@
 | 设想 | 现状（2026-07-14 亲核） |
 |---|---|
 | raw cargo 项目直接 `mirvm run` | ✅ 已实现（`src/cargo_shim.rs` 三阶段，cargo-miri 机制移植） |
-| Rust 脚本带依赖单文件分发 | ✅ 已实现（cargo `-Zscript` 同款 `---` frontmatter，物化到 `~/.cache/mirvm/scripts/<hash>` 走同一 cargo 通道） |
+| Rust 脚本带依赖单文件分发 | ✅ 已实现（cargo `-Zscript` 同款 `---` frontmatter，物化到 `~/.mirvm/scripts/<hash>` 走同一 cargo 通道） |
 | 统一入口 vs 独立 mirvmc | ✅ 事实定型：`mirvm` 单二进制三形态（run / RUSTC_WRAPPER / runner，busybox 式）；D9a 确认此方向 |
 | mirvmc 预降打包分发 | ❌ 未动 = DESIGN.md **mode B**；D9b 定路线：先 L2 缓存，包 = 缓存可移植化 |
 | 本地缓存 | 部分：五个内容哈希缓存 + 每项目 `target/mirvm` 已有；**缺 L2 单态 engine-IR 缓存（最高价值）** |
@@ -44,7 +44,7 @@
 ### 1.3 sysroot 与 toolchain 锁定
 
 - `src/sysroot.rs`：rustc-build-sysroot（Miri 同款）从 rust-src 以
-  `-Zalways-encode-mir` 重建 std，缓存于 `~/.cache/mirvm/sysroot-<target>`，
+  `-Zalways-encode-mir` 重建 std，缓存于 `~/.mirvm/sysroot-<target>`，
   内容哈希判新。
 - `build.rs`：构建期烘焙 `MIRVM_DEFAULT_SYSROOT` + rpath 指向该 sysroot 的
   `librustc_driver.so` ⇒ **mirvm 二进制与构建它的 nightly toolchain ABI 锁死**。
@@ -57,10 +57,14 @@
 |---|---|---|
 | `~/.cargo` | registry/git 源码（跨项目） | cargo 原生 |
 | `<project>/target/mirvm` | 依赖 MIR-rlib + 指纹（每项目） | cargo 指纹 |
-| `~/.cache/mirvm/sysroot-<target>` | MIR-rich std | 内容哈希（rustc-build-sysroot） |
-| `~/.cache/mirvm/native-archives` | `.a`→`.so` 产物 | 内容哈希 |
-| `~/.cache/mirvm/asm-stubs`、`global-asm` | asm 工厂 `.so` | 内容哈希 |
-| `~/.cache/mirvm/scripts` | frontmatter 脚本物化项目 | 路径+内容哈希 |
+| `~/.mirvm/sysroot-<target>` | MIR-rich std | 内容哈希（rustc-build-sysroot） |
+| `~/.mirvm/native-archives` | `.a`→`.so` 产物 | 内容哈希 |
+| `~/.mirvm/asm-stubs`、`global-asm` | asm 工厂 `.so` | 内容哈希 |
+| `~/.mirvm/scripts` | frontmatter 脚本物化项目 | 路径+内容哈希 |
+
+> 2026-07-18（decision-history §7.14）：缓存根由 `~/.cache/mirvm` 迁 `$HOME/.mirvm`
+> （`MIRVM_HOME` 可改址），并补管理面 `mirvm cache status|purge`（陈代 GC/整族/
+> scripts/全清多档）；deps/base/ir 陈代由 build_id 首字段 peek 判定。
 
 ## 2. 数字地基（2026-07-14 实测，EPYC 7773X，release，热缓存）
 

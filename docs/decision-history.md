@@ -821,6 +821,46 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   全踩在缺失特性上）；复跑须 `MIRVM=target/release/mirvm` 或先 cargo build。
   gate5 内部默认 release 不受影响。
 
+### 7.14 2026-07-18：缓存重审——根迁 `$HOME/.mirvm` + `mirvm cache` 管理命令
+
+- **缘起**：`~/.cache/mirvm` 快速胀大（批10 期间十几 GB）。实证解剖
+  （空根跑 ethers_evm 单 driver 两维）后用户裁定：① 内容不是随手可弃的
+  cache，是 mirvm 统一管理的本地仓库，迁 `$HOME/.mirvm`（`MIRVM_HOME`
+  可整体改址，不再读 XDG_CACHE_HOME）；② 补管理命令；③ 重审必要性。
+- **增长机理（实证）**：主项 = 每个 frontmatter 程序养两套完整 cargo
+  target——mirvm shim 一套（ethers 96 包 424M：host 侧 proc-macro/build
+  script 全量 314M + target 依赖 metadata-only rlib 81M）+ B 维 native
+  对拍一套（+313M）；重型树（polars 351 crate/datafusion/typst/swc/
+  wasmtime/rustpython）每套 1.5–4G，corpus 170+ driver 全跑即几十至上百
+  GB。次项 = `MIRVM_BUILD_ID`（src 树内容哈希）每次 src 改动令
+  base/deps/ir 全体换代且旧代无人删。
+- **必要性审计（全组件判定）**：sysroot（229M 一次性）= MIR-rich std 唯一
+  来源，必要；`scripts/<hash>/target/mirvm` = 不打包世界的本地依赖库
+  （deps image 盖戳源与真相源），必要——`.mirvmar` 落地后打包形态可豁免；
+  `scripts/<hash>/target/debug` = 仅 B 维 native 对拍需要，非引擎必需；
+  deps/base/ir = 性能加速器（lower 9.6×、热加载 11–15×），必要但陈代无
+  GC 是真浪费；native-archives/global-asm/asm-stubs = 运行期 dlopen 对象，
+  内容键控去重稳定，必要。**结论：无一体可裁，缺的是管理面。**
+- **管理面落地**：`mirvm cache status`（各族体量 + 陈代体量）与
+  `mirvm cache purge`（默认 = 清陈代，保守面；`--deps/--base/--ir`
+  整族；`--scripts` 最大件；`--all [--sysroot]`；`--dry-run` 全局旗）。
+  陈代判定：三族文件首字段均 build_id（postcard varint + UTF-8），只读
+  头 32 字节 peek——**禁用整包解码**（ir::Module 反序列化触发冻结区定基
+  mmap，purge 工具不可承受其副作用）；条目扩展名（ir=bin、deps/base=img）
+  过滤，`build.log` 等构建副产不碰不报（首版实测咬出此洞）。
+- **与 `.mirvmar` 愿景的关系**：`$HOME/.mirvm` 同时是未来 mirvmar 相关
+  本地解析的自然家；本片只备好根目录形态，不动 mirvmar 本体。
+- **跟迁面**：tests/diff_cargo.sh（SCRIPT_CACHE）、a2_deps_image.sh、
+  real_projects.sh（XDG 隔离位全部换 MIRVM_HOME 指向同名目录，prepare/
+  marker/fake-mirvm 回归面零改动——新变量与旧布局同路径）。
+- **验证**：cargo test 73/73（cachectl 四测：peek 往返/分类/清陈代留当代
+  +dry-run/--all 与 --sysroot 并集）；手动矩阵（空根、MIRVM_HOME 覆盖、
+  陈代 fixture、扩展名过滤、purge --all/sysroot）；新根冷启动自愈
+  （sysroot 重建 + fib 全链）；diff.sh 38/38；diff_cargo 5/5；gate5
+  **167/0/0**。
+- 旧根 `~/.cache/mirvm` 无迁移无兼容读（全组件自愈），文档提示可手删。
+  自动 LRU/容量上限不立项（手动 purge 够当前节奏；open-issues E17② 更新）。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 - P7 设想独立 `src/os/` 物理层；当前 OS/FFI/builtin 逻辑仍分布在 lower、interp、ffi、heap。

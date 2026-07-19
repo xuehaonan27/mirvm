@@ -90,7 +90,7 @@
 | E14 | **hand-rolled TLAB 未立项** | `绕行` v1 = mimalloc crate 后端；chunk/大小类/remote-free 队列细节无；与 E6/T3 关联 | history/spike1，designs/concurrency-arch.md §9 |
 | E15 | **`--vm-stats` fn-ptr 无出边盲点** | `绕行` 仪器债：fn-ptr 间接调用无出边 → 债务读法永远「至少欠这些」；继续靠增量发现 | src/vm/engine/stats.rs 头注 |
 | E16 | **io_uring 直通未实证** | `未立项` tokio-uring 可选路径全库仅 designs/async-stackless.md §5.2 提及，无 corpus 对拍 | designs/async-stackless.md |
-| E17 | **L2 缓存两处** | `未立项` ①有告警/错误的会话拒入账、诊断回放未做（告警程序永不享缓存，session 门在 src/cli.rs:534）；②条目无逐出无 GC（手动清 `~/.cache/mirvm/ir`） | history/m6-log.md 片2/8 |
+| E17 | **L2 缓存两处** | `未立项` ①有告警/错误的会话拒入账、诊断回放未做（告警程序永不享缓存，session 门在 src/cli.rs:534）；②条目无逐出——**手动 GC 面已由 `mirvm cache purge`（默认清陈代）补上（§7.14）**，自动 LRU/容量上限不立项 | history/m6-log.md 片2/8 |
 | E18 | **Cranelift 自有内联（0.133.1 inline.rs）备用杠杆** | `拒绝` 默认不开，记为收口期备用杠杆 | designs/m5-design.md |
 | E19 | **rustix 裸 syscall vs os:: 收口的张力** | `记账` linux_raw 无符号可拦：mirvm 层虚拟化 OS 资源会被绕过，只有 seccomp 能兜（运行本身已通：M5.1 tempfile 全绿） | corpus §2.3，§5 |
 | E20 | **字节码验证 pass 未建** | `未立项` loader 鲁棒性开放问题；内容寻址缓存已由 S3′b A2 兑现，独立验证 pass 无实锤驱动 | history/frame-abi-bytecode.md §10.6 |

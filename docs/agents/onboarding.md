@@ -41,7 +41,7 @@ M=$PWD/target/release/mirvm
 # A: mirvm 默认维
 $M run corpus/c_X.rs
 # B: native 维
-D=$(grep -l 'name = "c_X"' ~/.cache/mirvm/scripts/*/Cargo.toml | head -1 | xargs -r dirname)
+D=$(grep -l 'name = "c_X"' ~/.mirvm/scripts/*/Cargo.toml | head -1 | xargs -r dirname)
 CARGO=$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo
 (cd $D && RUSTC=$(dirname $CARGO)/rustc $CARGO run -q)
 # C: 逢调即编 JIT 维

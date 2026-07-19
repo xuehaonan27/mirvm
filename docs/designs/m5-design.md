@@ -126,7 +126,7 @@ sha2（0.10）与 ecosystem（regex/memchr）则是纯 Rust intrinsics 路径（
   outs: Vec<(off, 落点)>, buf_size, target }`。
 - **物化**（加载相末尾，一次批量）：全部 wrapper 拼一个 .s → `cc -shared` 汇编成
   .so → dlopen → 逐 wrapper dlsym 回填真地址。**按内容哈希缓存**
-  `~/.cache/mirvm/asm-stubs/<hash>.so`（与 sysroot 缓存同族）——热路径零 cc 调用，
+  `~/.mirvm/asm-stubs/<hash>.so`（与 sysroot 缓存同族）——热路径零 cc 调用，
   冷路径一次 ~50-100ms，在加载 ≤1s 硬门内。
 - **引擎侧**（纯 Rust 不变）：执行 = 栈上开 buf_size 缓冲、按 ins 写入、call 真地址、
   按 outs 读出。JIT 帧里同一 stub 直接 native call（cg_clif call_inline_asm 同构）。
