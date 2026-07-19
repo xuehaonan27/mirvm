@@ -64,6 +64,10 @@ for p in "${progs[@]}"; do
         echo "FAIL  $p  (${dur}s, exit=$code)  ::  $first_err"
         fail=$((fail + 1))
     fi
+    # 磁盘纪律（与 m4_gate5.sh 同款，2026-07-19）：每驱动单跑，deps/ir
+    # image 跑完即无复读者，逐驱动清；base 底座与共享 target 不清。
+    # MIRVM_GATE_KEEP_CACHE=1 旁路（调试用）。
+    [ -z "${MIRVM_GATE_KEEP_CACHE:-}" ] && "$MIRVM" cache purge --deps --ir >/dev/null 2>&1 || true
 done
 
 echo "---"

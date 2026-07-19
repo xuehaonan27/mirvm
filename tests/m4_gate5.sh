@@ -121,6 +121,11 @@ for p in $CORPUS_PROGS; do
     else
         bad "c_$p (exit=$code): $(echo "$out" | tail -1 | head -c 100)"
     fi
+    # 磁盘纪律（2026-07-19，本机 98% 用率实锤）：corpus loop 每驱动单跑，
+    # 其 deps/ir image 跑完即无复读者——逐驱动清（实测 ~10 驱动即积 1.6G）。
+    # base 底座跨驱动共享不清；共享 target 是去重红利本体不清。
+    # MIRVM_GATE_KEEP_CACHE=1 旁路（调试用）。
+    [ -z "${MIRVM_GATE_KEEP_CACHE:-}" ] && "$MIRVM" cache purge --deps --ir >/dev/null 2>&1 || true
 done
 
 # ---- ② diff_cargo：五个 cargo 形态均与 native 一致 ----
