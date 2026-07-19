@@ -97,7 +97,7 @@ fn materialize_in(archive: &Path, cache_dir: &Path) -> Result<PathBuf, String> {
 /// P1 条目隐藏跳板注入重链；`linker = None` 的单测直接走原错误路径）。
 pub(crate) fn materialize_static_libraries<'tcx>(
     tcx: TyCtxt<'tcx>,
-    linker: &mut crate::lower::Linker<'tcx>,
+    linker: &mut crate::lower::linker::Linker<'tcx>,
 ) -> Result<Vec<Box<str>>, String> {
     let sess = tcx.sess;
     let search_dirs: Vec<_> = sess
@@ -280,7 +280,7 @@ fn materialize_for_target_in(
     target: &str,
     cc: &Path,
     extra_libs: &[Box<str>],
-    linker: Option<&mut crate::lower::Linker<'_>>,
+    linker: Option<&mut crate::lower::linker::Linker<'_>>,
 ) -> Result<PathBuf, String> {
     let bytes = std::fs::read(archive)
         .map_err(|e| format!("读取静态原生归档 `{}` 失败: {e}", archive.display()))?;
@@ -387,7 +387,7 @@ fn rescue_with_rlib_symbols(
     archive_bytes: &[u8],
     cc_identity: &[u8],
     link_flags: &str,
-    linker: &mut crate::lower::Linker<'_>,
+    linker: &mut crate::lower::linker::Linker<'_>,
 ) -> Result<Option<PathBuf>, String> {
     use rustc_span::Symbol;
     let undefs = crate::elfsym::archive_undefined_symbols(&archive.display().to_string())?;
@@ -399,7 +399,7 @@ fn rescue_with_rlib_symbols(
     {
         let exports = linker.exported_defs();
         for name in &undefs {
-            let canon = crate::lower::canonical_link_name(name);
+            let canon = crate::lower::ffi_sig::canonical_link_name(name);
             if let Some(&(inst, _is_weak)) = exports.get(&Symbol::intern(canon)) {
                 hit.push((canon.into(), inst));
             }
