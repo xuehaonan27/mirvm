@@ -27,7 +27,8 @@ USAGE:
     mirvm cache status                                   # 本地仓库各组件体量 + 陈代体量
     mirvm cache purge [--dry-run]                        # 默认 = 清陈代（deps/base/ir 非本 build 代）
     mirvm cache purge --deps|--base|--ir                 # 对应族全清（所有代）
-    mirvm cache purge --scripts                          # scripts/ 全清（最大件：依赖构建缓存）
+    mirvm cache purge --scripts                          # scripts/ 全清（物化项目清单）
+    mirvm cache purge --target                           # 统一 target dir 全清（共享依赖存储，最大件）
     mirvm cache purge --all [--sysroot]                  # 除 sysroot 外全清；加旗连 sysroot（完全冷启动）
 
 OPTIONS:
@@ -40,6 +41,8 @@ OPTIONS:
     --jit <on|off>    方法级 JIT 分层（默认 on；M5.3a 期 = 计数基座，尚无编译）
 
 ENV:
+    MIRVM_HOME        本地仓库根（默认 $HOME/.mirvm；sysroot/scripts/target/各缓存族所在）
+    MIRVM_TARGET_DIR  mirvm 构建统一 target dir 改址（默认 $MIRVM_HOME/target/mirvm）
     MIRVM_SYSROOT     等价于 --sysroot
     MIRVM_STACK_SIZE  等价于 --stack-size（cargo 项目形态经环境传给 runner）
     MIRVM_JIT         等价于 --jit（off/0 = 纯解释对拍口径）
@@ -116,6 +119,7 @@ fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
             "--base" => plan.base = true,
             "--ir" => plan.ir = true,
             "--scripts" => plan.scripts = true,
+            "--target" => plan.target = true,
             "--all" => plan.all = true,
             "--sysroot" => plan.sysroot = true,
             _ => {
@@ -131,7 +135,7 @@ fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
         }
         Some("purge") => {
             // 无旗默认 = 清陈代（保守面）；任何目标旗在场则按旗走
-            if !(plan.deps || plan.base || plan.ir || plan.scripts || plan.all) {
+            if !(plan.deps || plan.base || plan.ir || plan.scripts || plan.target || plan.all) {
                 plan.stale = true;
             }
             print!("{}", crate::cachectl::purge(&root, plan));
@@ -881,10 +885,10 @@ fn materialize_script(script: &Path, manifest: &str, body: &str) -> PathBuf {
     let abs = std::path::absolute(script).unwrap_or_else(|_| script.to_path_buf());
     let mut hasher = std::hash::DefaultHasher::new();
     abs.hash(&mut hasher);
-    let dir = crate::sysroot::cache_dir()
-        .join("scripts")
-        .join(format!("{:016x}", hasher.finish()));
+    let hash = format!("{:016x}", hasher.finish());
+    let dir = crate::sysroot::cache_dir().join("scripts").join(&hash);
     std::fs::create_dir_all(dir.join("src")).expect("创建脚本缓存目录失败");
+    std::fs::create_dir_all(dir.join(".cargo")).expect("创建脚本 .cargo 目录失败");
 
     let stem = script
         .file_stem()
@@ -904,13 +908,25 @@ fn materialize_script(script: &Path, manifest: &str, body: &str) -> PathBuf {
         name = format!("s{name}");
     }
 
+    // bin 名带路径哈希短缀：共享 target dir（D14）下最终二进制落在无指纹的
+    // debug/<binname>——同 stem 不同路径的脚本（/tmp 草变体等）不互相覆盖；
+    // package 名保持 stem（onboarding 的 grep recipe 按名找 script dir）。
+    let bin_name = format!("{name}-{}", &hash[..8]);
     let cargo_toml = format!(
         "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n\
-         [[bin]]\nname = \"{name}\"\npath = \"src/main.rs\"\n\n{manifest}"
+         [[bin]]\nname = \"{bin_name}\"\npath = \"src/main.rs\"\n\n{manifest}"
     );
     // 幂等物化：内容未变不落盘——mtime 稳定是 L2 IR 缓存清单与 cargo 指纹共同的前提
     write_if_changed(&dir.join("Cargo.toml"), &cargo_toml);
     write_if_changed(&dir.join("src/main.rs"), body);
+    // B 维 native 对拍构建同样进统一存储（D14）：shim 构建走显式 --target-dir
+    // 覆盖本键，native cargo run 吃文件配置——两族分目录（sysroot/rustflags
+    // 不同，fingerprint 本也互斥，分目录只为 purge 语义清晰）。
+    let native_target = crate::sysroot::cache_dir().join("target/native");
+    write_if_changed(
+        &dir.join(".cargo/config.toml"),
+        &format!("[build]\ntarget-dir = \"{}\"\n", native_target.display()),
+    );
     dir
 }
 

@@ -16,6 +16,9 @@ WS=tests/fixtures/a2_ws
 HOST=$(rustc -vV | sed -n 's/^host: //p')
 DEPS=${MIRVM_HOME:-$HOME/.mirvm}/deps
 SYSROOT=${MIRVM_HOME:-$HOME/.mirvm}/sysroot-$HOST
+# 统一依赖存储（D14）：mirvm run（步骤 1-5）经 cargo_project_command 落在共享
+# target dir，本脚本手工驱动的 bin2 必须同址，否则 extern 盖戳不同、image 不共享
+TARGET_MIRVM=${MIRVM_TARGET_DIR:-${MIRVM_HOME:-$HOME/.mirvm}/target/mirvm}
 CHANNEL=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
 CARGO=$HOME/.rustup/toolchains/$CHANNEL-$HOST/bin/cargo
 MIRVM_ABS=$(cd "$(dirname "$MIRVM")" && pwd)/$(basename "$MIRVM")
@@ -87,7 +90,7 @@ imgs_before_s3c=$(ls "$DEPS" | wc -l)
         MIRVM_TIMING=1 MIRVM_NO_IR_CACHE=1 \
         "$CARGO" run --target "$HOST" \
         --config "target.'cfg(all())'.runner=['$MIRVM_ABS','runner']" \
-        --target-dir target/mirvm --quiet --bin a2_two \
+        --target-dir "$TARGET_MIRVM" --quiet --bin a2_two \
         >"$TMP/s3c.out" 2>"$TMP/s3c.timing"
 ) || fail "S3′c bin2 运行退出非零"
 grep -q 'a2_two: found box at 13' "$TMP/s3c.out" || fail "S3′c 输出错: $(cat "$TMP/s3c.out")"

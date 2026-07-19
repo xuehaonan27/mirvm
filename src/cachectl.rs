@@ -23,6 +23,8 @@ pub struct Purge {
     pub base: bool,
     pub ir: bool,
     pub scripts: bool,
+    /// 统一 target dir（D14 共享依赖存储；最大件之一）
+    pub target: bool,
     /// 除 sysroot 外全清（三族所有代 + scripts + 三个 .so 族）
     pub all: bool,
     /// 连 sysroot 也清（完全冷启动；仅随 --all 语义叠加）
@@ -42,6 +44,7 @@ fn families() -> Vec<Family> {
     [
         (format!("sysroot-{host}"), ""),
         ("scripts".into(), ""),
+        ("target".into(), ""),
         ("deps".into(), "img"),
         ("base".into(), "img"),
         ("ir".into(), "bin"),
@@ -286,6 +289,9 @@ pub fn purge(root: &Path, plan: Purge) -> String {
             }
         } else if name == "scripts" && whole(name, plan.scripts) {
             freed += rm_dir(&dir, "scripts 全清", dry, &mut out);
+            acted += 1;
+        } else if name == "target" && whole(name, plan.target) {
+            freed += rm_dir(&dir, "统一 target 全清", dry, &mut out);
             acted += 1;
         } else if name.starts_with("sysroot-") && plan.all && plan.sysroot {
             freed += rm_dir(&dir, "sysroot 全清（完全冷启动）", dry, &mut out);

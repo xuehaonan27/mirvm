@@ -1305,11 +1305,12 @@ isolated_env() {
     else
         logical_cwd=$PWD
     fi
-    printf -v encoded_rustflags '%s\x1f%s\x1f%s\x1f%s\x1f%s' \
+    printf -v encoded_rustflags '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' \
         "--remap-path-prefix=$logical_root=/mirvm-project" \
         "--remap-path-prefix=$logical_env_root/target=/mirvm-project/target" \
         "--remap-path-prefix=$logical_root/source/target/mirvm=/mirvm-project/target" \
         "--remap-path-prefix=$logical_root/source/./target/mirvm=/mirvm-project/target" \
+        "--remap-path-prefix=$logical_env_root/xdg/mirvm/target/mirvm=/mirvm-project/target" \
         '--remap-path-scope=diagnostics'
     mkdir -p "$root/home" "$root/tmp" "$root/xdg" "$root/target"
     if [ -z "$BWRAP" ]; then

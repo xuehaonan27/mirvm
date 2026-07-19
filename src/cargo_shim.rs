@@ -120,9 +120,15 @@ fn cargo_project_command(
     cmd.arg("--config").arg(format!(
         "target.'cfg(all())'.runner=['{runner_toml}', 'runner']"
     ));
-    // 独立 target dir，避免与用户正常构建的指纹互相踩踏
-    cmd.arg("--target-dir")
-        .arg(project_dir.join("target/mirvm"));
+    // 统一依赖存储（D14 近期片，2026-07-18 裁定）：所有脚本/项目的 mirvm 构建
+    // 共享同一 target dir——cargo fingerprint 即编译键（版本×features×依赖闭包
+    // ×flags×toolchain）内容寻址，同一 crate 编译单元全机唯一一份；最终产物
+    // 定位由 runner 协议供给（cargo 把假二进制路径传给 runner），不扫目录。
+    // MIRVM_TARGET_DIR 可整体改址（隔离/测试用；默认 $MIRVM_HOME/target/mirvm）。
+    let target_dir = std::env::var_os("MIRVM_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| crate::sysroot::cache_dir().join("target/mirvm"));
+    cmd.arg("--target-dir").arg(target_dir);
     cmd.arg("--quiet");
     if !program_args.is_empty() {
         cmd.arg("--");
