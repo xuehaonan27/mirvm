@@ -936,6 +936,29 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   （依赖 image 构建侧未接线，勿再提删除）；gate/corpus 逐驱动清
   deps/ir 缓存（本机 98% 磁盘用率实锤，`e1445b9`）。
 
+### 7.17 2026-07-19：R1 重构定稿——同步故障信号 = 崩溃期语义，非 handler 支持
+
+- **用户裁定**：同步故障信号（SEGV/BUS/FPE/ILL/TRAP）本就是进程崩溃信号，
+  mirvm 不应追求执行 guest handler 代码，而应「适当插入清理的东西」——
+  落定为**崩溃诊断化**（T4 泛化并入总案）。
+- **实证钉清（两个反转）**：① sigread 三维对拍（native/mirvm 均装
+  SA_SIGINFO|SA_ONSTACK handler，mirvm 侧是**宿主 std 启动时装的那只**）
+  ——guest std 的 `stack_overflow::init` 条件安装（仅 SIG_DFL 才装）
+  读回宿主 handler 非 DFL → **静默跳过**，corpus 全绿从未触发 R1 拒绝；
+  ② 深递归实测 `thread 'mirvm-guest' has overflowed its stack` + SIGABRT
+  ——宿主 std handler 代打，与 native stack overflow 同死亡形态。
+  **崩溃期退出语义已忠实**（真故障 = 同信号死亡），native 信号死亡同样
+  无 atexit/析构——「清理」在 native 语义里本不存在。
+- **三边界定稿**：已忠实 = 退出信号与死亡形态（无需动）；可闭合 =
+  崩溃诊断化（故障落点归属判定：guest 冻结域/代码域/帧区 → guest 化
+  崩溃行 → 同信号终止；T4 并入）；永不可闭合 = guest handler 代码执行
+  （宿主/guest 故障不可分辨；解释器深度不可重入、信号帧内跑解释态代码
+  原理性非 async-signal-safe；handler 返回 = 无限再故障）。
+- **同场钉清**：E19 syscall 三形态与 chokepoint（FFI/变参可虚拟化，
+  硬编码 inline-asm syscall 唯 seccomp 可兜）；E11 栈深度逐字节一致
+  = UNSPECIFIED 不追求（用户确认）；R8 asm goto 证据级记档（Cranelift
+  对一切 inline asm 均 fatal 的 issue 素材 + 自研 JIT 设计注脚）。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 - ~~P7 设想独立 `src/os/` 物理层~~（**2026-07-18/19 已兑现**：`src/os/` + `src/arch/` 双 leaf 建成，E21 闭合，见 §7.16）。

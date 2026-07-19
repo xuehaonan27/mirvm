@@ -36,15 +36,20 @@
 
 **原理不可闭合（如实标注，不掺水，勿重提）**：
 
-- **R1 同步故障信号 handler**：真实地址模型下宿主/guest 故障不可分辨；唯一闭合
-  路（虚拟地址/线性内存/全 CPU 仿真）已裁决否决（decision-history §7.5b）。
-- **E19 rustix 裸 syscall 拦截**：无符号可拦，VM 层原理不可闭合；唯一闭合 =
-  OS 层 seccomp（H 节已定型）。
-- **E11 中「栈深度与 native 逐字节一致」**：解释器栈膨胀属 as-if 允许域（栈深度
-  UNSPECIFIED）；可闭合的只是诊断与 `--stack-size` 配置语义。
+- **R1 同步故障信号 handler 的【guest 代码执行】**：三硬因——宿主/guest 故障不可
+  分辨；解释器深度不可重入（信号帧内跑解释态代码 = 任意断点重入引擎，非
+  async-signal-safe 是原理性）；handler 返回 = 重执故障指令 = 无限再故障。
+  **崩溃期退出语义已忠实**（真故障 = 同信号死亡，stack overflow = 同 SIGABRT，
+  宿主 std handler 代打）；**可闭合面 = 崩溃诊断化**（T4 泛化：故障落点归属
+  判定 + guest 化崩溃行 + 以同信号终止，2026-07-19 用户裁定重构方向）。
+- **E19 rustix 裸 syscall 拦截**：硬编码 inline-asm syscall 无符号边界可拦，
+  VM 层原理不可闭合；唯一闭合 = OS 层 seccomp（H 节已定型）。FFI 与
+  `libc::syscall` 变参两形态均有 chokepoint，虚拟化可闭合（三形态分析见 E19 条）。
+- **E11 中「栈深度与 native 逐字节一致」**：UNSPECIFIED 域（2026-07-19 用户确认
+  不追求）；可闭合的只是诊断与 `--stack-size` 配置语义。
 - **R8 的 asm `goto`/label**：转出 stub 需把宿主函数整体 native 编译，超出
-  Cranelift 栈（同 cg_clif fatal 边界）；唯一理论出路（单函数 AOT 逃逸舱）
-  未证实，不预支。
+  Cranelift 栈（cg_clif 对一切 inline asm 均 fatal）；唯一理论出路（单函数
+  AOT 逃逸舱）未证实，不预支。自研 JIT 设计注脚与 Cranelift issue 素材见 R8 条。
 
 ## T. 已立项待施（蓝图在手）
 
@@ -53,7 +58,7 @@
 | T1 | **M5.4c：JIT ABI 泛化 + LSDA 产品化** | Pair/Indirect/track_caller 调约泛化；CallIndirect/Builtin/Foreign/TlsRef/InlineAsm 助手；try_call/Resume/Terminate；双 CIE + 全覆 LSDA（cleanup 边 JIT 帧内着陆）+ 准入放开。锚点 = gate2 unwind 九用例 JIT-on。LSDA probe 5/5 已过。兼收割 spike3/spike5 挂起检查点与 frame-abi §10.3 聚合调约残余 | [designs/m5.4-design.md](designs/m5.4-design.md)，current-status §1 |
 | T2 | **M5.4d：JIT SIMD + 收口** | CLIF 向量族 + x86 helpers 助手 + 全量三重差分扩展 + 账本/文档收口 | designs/m5.4-design.md |
 | T3 | **M5.5：vmctx 终裁计量 + gate6 收口** | T 骨架已落生产；R 缓存层复测触发器 = 分配/guest TLS 内联进编译码（见 E6）。挂载点：CallIndirect 内联缓存、LSDA 存储改 JIT data object、检查点回写 vmctx-passing、tests/m5_gate6.sh | [designs/m5-design.md](designs/m5-design.md) §3 D5/§7，m5.4-design |
-| T4 | **P1 残余：SIGSEGV 诊断化兜底（可选后补）** | rip 落在 guest 冻结域（非可执行）时识别为「疑似结构体内嵌回调」提示，把静默跳崖变可读诊断；`MIRVM_SEGV_DUMP` 既有旋钮之上的产品侧提示 | decision-history §7.6（debt §6 阶梯②），2026-07-17 |
+| T4 | **P1 残余：SIGSEGV 诊断化兜底（可选后补；2026-07-19 起并入 R1 崩溃诊断化总案）** | rip 落在 guest 冻结域（非可执行）时识别为「疑似结构体内嵌回调」提示，把静默跳崖变可读诊断；`MIRVM_SEGV_DUMP` 既有旋钮之上的产品侧提示。**2026-07-19 R1 重构后升格**：作为「崩溃诊断化」总案的组成（故障落点归属判定 + guest 化崩溃行 + 同信号终止），见 R1 条 | decision-history §7.6（debt §6 阶梯②），2026-07-17 |
 
 ## C. corpus 实锤产品欠账（实锤驱动，未立项）
 
@@ -84,7 +89,7 @@
 | E8 | **backtrace 真符号化 + 合成 IP 近似** | `绕行` 合成 IP 不经 dladdr（诚实 `<unknown>`，不伪造宿主符号）；真符号化（物化符号 ELF 给 dladdr）可选未立项 | current-status §4，decision-history §6.1 |
 | E9 | **`dl_iterate_phdr` 差分探针欠账** | `绕行` 走 native FFI「无观测到缺陷」，探针补课未做 | current-status §4，history/m5.2-design.md |
 | E10 | **guest TLS 实例块回收** | `记账` 每线程每 TLS 一小块泄漏（dtor 副作用已正确）；M4.4 起挂账「按需」，至今未立项 | history/m4-log.md:439 |
-| E11 | **guest 线程栈大小精确化 + 编译帧 SIGSEGV 优雅化** | `未立项` guest 栈大小语义近似；JIT 编译帧撞 guard page = 裸 SIGSEGV（与 native 差一条报错消息）。同根：栈守卫精确化 | history/m4.4-design.md，m5-design #11 |
+| E11 | **guest 线程栈大小精确化 + 编译帧 SIGSEGV 优雅化** | `未立项` guest 栈大小语义近似（**栈深度与 native 逐字节一致 = UNSPECIFIED 域，2026-07-19 用户确认不追求**；可闭合的只是诊断与 `--stack-size` 配置语义）；JIT 编译帧撞 guard page = 裸 SIGSEGV（与 native 差一条报错消息）。同根：栈守卫精确化 | history/m4.4-design.md，m5-design #11 |
 | E12 | **alloca 迁移承诺（换掉 slaved 操作数区）** | `未立项` frame-abi §2.2「slaved 仅是起步，后续必换 alloca（真内联 native 栈）」；与 checked 模式正交轴纪律在案 | history/frame-abi-bytecode.md，DESIGN.md C12 |
 | E13 | **guest 异常独立 exception class/personality 无裁决** | `未立项` 是否独立于宿主 panic + 自有 personality——spike3 §4.1 是全库唯一登记处，从未裁决（现共用宿主 panic + downcast） | history/spike3-mixed-stack-unwind.md |
 | E14 | **hand-rolled TLAB 未立项** | `绕行` v1 = mimalloc crate 后端；chunk/大小类/remote-free 队列细节无；与 E6/T3 关联 | history/spike1，designs/concurrency-arch.md §9 |
@@ -92,7 +97,7 @@
 | E16 | **io_uring 直通未实证** | `未立项` tokio-uring 可选路径全库仅 designs/async-stackless.md §5.2 提及，无 corpus 对拍 | designs/async-stackless.md |
 | E17 | **L2 缓存两处** | `未立项` ①有告警/错误的会话拒入账、诊断回放未做（告警程序永不享缓存，session 门函数在 src/cli.rs:395、计数器在 :368）；②条目无逐出——**手动 GC 面已由 `mirvm cache purge`（默认清陈代）补上（§7.14）**，自动 LRU/容量上限不立项 | history/m6-log.md 片2/8 |
 | E18 | **Cranelift 自有内联（0.133.1 inline.rs）备用杠杆** | `拒绝` 默认不开，记为收口期备用杠杆 | designs/m5-design.md |
-| E19 | **rustix 裸 syscall vs os:: 收口的张力** | `记账` linux_raw 无符号可拦：mirvm 层虚拟化 OS 资源会被绕过，只有 seccomp 能兜（运行本身已通：M5.1 tempfile 全绿） | corpus §2.3，§5 |
+| E19 | **rustix 裸 syscall vs os:: 收口的张力** | `记账` linux_raw 无符号可拦：mirvm 层虚拟化 OS 资源会被绕过，只有 seccomp 能兜（运行本身已通：M5.1 tempfile 全绿）。**syscall 三形态与 chokepoint（2026-07-19 钉清）**：① FFI libc 包装（write/read 等）= 真 libc 内做 syscall，天然忠实，chokepoint = CallForeign 边界；② `libc::syscall(...)` 变参 = 符号内建 `Builtin::HostSyscall` → `os::process::syscall` 直通，chokepoint 已内建；③ 硬编码 inline-asm syscall（rustix `syscall!` 宏）= asm-stub 真码直落、**无任何符号边界**——VM 层原理不可闭合，唯一闭合 = OS 层 seccomp。虚拟化能对 ①② 闭合，对 ③ 不可 | corpus §2.3，§5 |
 | E20 | **字节码验证 pass 未建** | `未立项` loader 鲁棒性开放问题；内容寻址缓存已由 S3′b A2 兑现，独立验证 pass 无实锤驱动 | history/frame-abi-bytecode.md §10.6 |
 
 ### E.2 架构与边界
@@ -138,14 +143,14 @@
 
 | ID | 边界 | 重开条件 | 出处 |
 |---|---|---|---|
-| R1 | **同步故障信号（SEGV/BUS/FPE/ILL/TRAP）guest handler 拒绝** | 宿主/guest 故障可分辨的机制出现（伪造恢复=静默错值） | current-status §4（M5.2 D8l） |
+| R1 | **同步故障信号（SEGV/BUS/FPE/ILL/TRAP）guest handler 拒绝**（2026-07-19 重构定稿） | **拒绝的是「guest handler 代码的执行」**（三硬因：宿主/guest 故障不可分辨；解释器深度不可重入、信号帧内跑解释态代码原理性非 async-signal-safe；handler 返回 = 重执故障指令 = 无限再故障）。**崩溃期退出语义已忠实**：guest 真故障 = 与 native 同信号死亡（真实地址模型直落），stack overflow = 与 native 同 SIGABRT（宿主 std handler 代打，实证：`thread 'mirvm-guest' has overflowed its stack`）；guest std 的 `stack_overflow::init` 条件安装（仅 SIG_DFL 才装）读回宿主 std 已装 handler → 静默跳过，从未触发拒绝（sigread 三维实证）。**可闭合面 = 崩溃诊断化**（故障落点归属判定：guest 冻结域/代码域/帧区 → guest 化崩溃行 → 同信号终止；T4 泛化 + `MIRVM_SEGV_DUMP` 产品化） | current-status §4（M5.2 D8l），2026-07-19 用户裁定 |
 | R2 | **vfork/clone/clone3/setjmp/longjmp 系、pthread_exit、pthread_atfork、多线程 fork 拒绝** | fork-alone 单线程已放行（D8f `/proc/self/task` 守卫）；其余 = 帧模型级工程/非局部控制流穿解释帧 | current-status §4，src/lower/mod.rs:48-62 |
 | R3 | **unwinder context/state 家族 11 个 Unsupported**（`_Unwind_Set/GetGR/SetIP/Resume/ForcedUnwind/LSDA…`） | guest frame/IP/LSDA 翻译层 + 差分探针（Backtrace/GetIP/FindEnclosingFunction/GetCFA 已由影子帧兑现） | src/lower/mod.rs:1355 |
 | R4 | **一般嵌套 DST / 其他 metadata 形态拒绝** | 冻结一份通用 DST layout expression 的评估（slice/str 静态公式与 direct dyn 尾 vtable 运行期对齐已支持） | current-status §4，decision-history §5 |
 | R5 | **冷面 128 位形态 Trap**（`Transmute pair→聚合`、tag 宽>8B `InvalidEnumConstruction`） | 未被真实 workload 撞出；撞到再补 | history/m5-log.md 片10 |
 | R6 | **static archive 拒绝面残余** | 非 PIC/thin/跨 archive 依赖与顺序/重名导出/RTLD_DEFAULT 碰撞/export-symbols/非 Linux-ELF/裸 `.init`/`.fini`；`.init_array` 族已放行（§7.8），RTLD_DEFAULT 同名碰撞已改归档优先（fb0b204）。多 archive link plan 与 modifier 等价语义未立项——放宽前必须先立 | src/native_archive.rs，history/m5.1-design.md D2 |
 | R7 | **弱内存序特殊化不做** | 映射宿主原子即在 RAM non-det 包络内；真实 workload 再评估 | DESIGN.md，history/m4-plan（git 历史） |
-| R8 | **asm 拒绝面** | `att_syntax`/`sym`/`label`(asm goto)/`may_unwind`/非 x86_64；asm-stub xmm/向量值操作数未扩槽（被 stdarch helper 路线绕行，无 workload 触发）。`noreturn` 已升级实锤债 → C3 | history/m5-log.md，src/lower/func.rs:2500 |
+| R8 | **asm 拒绝面** | `att_syntax`/`sym`/`label`(asm goto)/`may_unwind`/非 x86_64；asm-stub xmm/向量值操作数未扩槽（被 stdarch helper 路线绕行，无 workload 触发）。`noreturn` 已升级实锤债 → C3。**asm goto/label 证据级记档（2026-07-19 用户裁定）**：①原理 = goto 的控制流转出 asm 块到函数内任意 label，不是 call 边界；asm-stub 形态 = 独立 native 子程序（call-return/noreturn 两面孔），无可表示形状；要接 = 宿主整个函数 native 编译 + 跨边界控制流（guest BB 图与 native 码交织）= 单函数 AOT 逃逸舱，未证实。②**Cranelift 对一切 inline asm 均不支持**（cg_clif 对 inline asm 整体 fatal）——提 issue 的前置是 inline asm 支持先存在，goto 是其上形态问题（issue 素材留此）。③自研 JIT 注脚：换自研 JIT 时 asm goto 可降格为普通 BB 间分支 + 内联 native 序列 | history/m5-log.md，src/lower/func/asm.rs |
 | R9 | **`type_id`/`type_name`/`offset_of`/`field_offset` Trap** | 真实程序撞到再补 | history/m5-log.md |
 | R10 | **`va_arg`/`carryless_mul`/`autodiff`/`rustc_peek`/SVE 5 个** | 前两个无真实用例保留 Trap；后三个无生态意义（实验/调试/ARM） | history/m5.2-design.md D8l |
 | R11 | **`intrinsics::abort` SIGABRT vs native SIGILL 差异** | 授权差异绕行；差分若开始比信号再对齐 | history/m4-log.md |
