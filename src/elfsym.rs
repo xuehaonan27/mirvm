@@ -16,36 +16,10 @@
 //! 只用于 mirvm 自己物化的归档 `.so`（required_native_libs）：格式由
 //! native_archive 的受约束链接产出（ELF64 LE x86_64，非 strip）；系统库
 //! 一律有正常 .dynsym，不走此道。
+//!
+//! dlopen 句柄 → 装载基址（dlinfo）在 `os::dll::load_bias`（P7 os 层）。
 
 use std::collections::HashMap;
-
-/// glibc `struct link_map` 的首字段（ABI 恒久稳定；libc crate 未导出该类型）。
-/// 只需 l_addr——ELF 文件内地址与内存地址的差值（装载基址）。
-#[repr(C)]
-struct LinkMap {
-    l_addr: usize,
-    l_name: *const std::ffi::c_char,
-    l_ld: *mut std::ffi::c_void,
-    l_next: *mut LinkMap,
-    l_prev: *mut LinkMap,
-}
-
-/// dlopen 句柄的装载基址。None = dlinfo 失败（句柄非法——刚 dlopen 的句柄不应发生）。
-pub fn load_bias(handle: *mut std::ffi::c_void) -> Option<u64> {
-    let mut lm: *mut LinkMap = std::ptr::null_mut();
-    let r = unsafe {
-        libc::dlinfo(
-            handle,
-            libc::RTLD_DI_LINKMAP,
-            &mut lm as *mut *mut LinkMap as *mut libc::c_void,
-        )
-    };
-    if r == 0 && !lm.is_null() {
-        Some(unsafe { (*lm).l_addr } as u64)
-    } else {
-        None
-    }
-}
 
 const SHT_DYNSYM: u32 = 11;
 const SHT_SYMTAB: u32 = 2;
@@ -305,7 +279,7 @@ fn elf_undefined_symbols(bytes: &[u8]) -> Result<Vec<Box<str>>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{archive_undefined_symbols, hidden_symtab_values, load_bias, symtab_values};
+    use super::{archive_undefined_symbols, hidden_symtab_values, symtab_values};
     use std::ffi::CString;
     use std::process::Command;
 
@@ -423,17 +397,18 @@ mod tests {
             .unwrap()
             .success());
         let c_so = CString::new(so.as_os_str().as_encoded_bytes()).unwrap();
-        let handle = unsafe { libc::dlopen(c_so.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
-        assert!(!handle.is_null());
+        let handle = crate::os::dll::open_with_flags(
+            &c_so,
+            crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL,
+        )
+        .expect("dlopen hidden/visible probe .so");
         // hidden 符号 dlsym 未命中；visible 符号命中
-        let hidden = c"mirvm_hidden_probe";
-        assert!(unsafe { libc::dlsym(handle, hidden.as_ptr()) }.is_null());
-        let visible = c"mirvm_visible_probe";
-        let pvis = unsafe { libc::dlsym(handle, visible.as_ptr()) };
-        assert!(!pvis.is_null());
+        assert_eq!(crate::os::dll::sym(handle, c"mirvm_hidden_probe"), 0);
+        let pvis = crate::os::dll::sym(handle, c"mirvm_visible_probe");
+        assert!(pvis != 0);
         // .symtab 兜底：hidden 符号可解，且调用结果正确
         let syms = symtab_values(so.to_str().unwrap()).unwrap();
-        let bias = load_bias(handle).expect("load_bias");
+        let bias = crate::os::dll::load_bias(handle).expect("load_bias") as u64;
         let hidden_addr = *syms.get("mirvm_hidden_probe").expect("symtab 含 hidden 符号") + bias;
         let f: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(hidden_addr as usize) };
         assert_eq!(unsafe { f() }, 0x2a);
@@ -452,7 +427,7 @@ mod tests {
             !hidden_only.contains_key("mirvm_visible_probe"),
             "dynsym 可见符号不进兜底表"
         );
-        unsafe { libc::dlclose(handle) };
+        unsafe { crate::os::dll::close(handle) };
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

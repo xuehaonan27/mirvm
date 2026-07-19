@@ -552,8 +552,8 @@ impl<'tcx> Linker<'tcx> {
         if let Some((target, is_weak)) = exported {
             if is_weak && !rust_internal {
                 let cname = std::ffi::CString::new(name).map_err(|_| "符号名含 NUL".to_string())?;
-                let strong = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) };
-                if !strong.is_null() {
+                let strong = crate::os::dll::sym(0, &cname);
+                if strong != 0 {
                     return Ok(bake(self, strong as u64));
                 }
             }
@@ -589,14 +589,14 @@ impl<'tcx> Linker<'tcx> {
         }
         if p == 0 {
             for &h in &self.archive_handles {
-                p = unsafe { libc::dlsym(h as *mut libc::c_void, cname.as_ptr()) } as u64;
+                p = crate::os::dll::sym(h, &cname) as u64;
                 if p != 0 {
                     break;
                 }
             }
         }
         if p == 0 {
-            p = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) } as u64;
+            p = crate::os::dll::sym(0, &cname) as u64;
         }
         if p == 0 {
             // weak 符号缺席 = NULL（native 未定义弱符号的取址语义）；经它间接调用
@@ -721,14 +721,14 @@ impl<'tcx> Linker<'tcx> {
                     }
                     if p == 0 {
                         for &h in &self.archive_handles {
-                            p = unsafe { libc::dlsym(h as *mut libc::c_void, cname.as_ptr()) } as u64;
+                            p = crate::os::dll::sym(h, &cname) as u64;
                             if p != 0 {
                                 break;
                             }
                         }
                     }
                     if p == 0 {
-                        p = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) } as u64;
+                        p = crate::os::dll::sym(0, &cname) as u64;
                     }
                     if p == 0 {
                         return Err(format!(
@@ -1076,8 +1076,8 @@ impl<'tcx> Linker<'tcx> {
                     || name.starts_with("rust_");
                 if is_weak && !rust_internal {
                     let cname = std::ffi::CString::new(name).unwrap();
-                    let strong = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) };
-                    if !strong.is_null() {
+                    let strong = crate::os::dll::sym(0, &cname);
+                    if strong != 0 {
                         return self.freeze_foreign_sig(inst, name);
                     }
                 }
@@ -1473,7 +1473,7 @@ fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin> {
     out.insert(Symbol::intern("write"), ir::Builtin::HostWrite);
     out.insert(Symbol::intern("strlen"), ir::Builtin::HostStrlen);
     out.insert(Symbol::intern("abort"), ir::Builtin::HostAbort);
-    // fork（D8f）：builtin 守卫 guest 线程数后直调 libc::fork。
+    // fork（D8f）：builtin 守卫 guest 线程数后经 os::process::fork 直通（P7 os 层）。
     out.insert(Symbol::intern("fork"), ir::Builtin::HostFork);
     // atexit 家族（D8g）：glibc 不导出 `atexit` 供 guest dlsym → builtin 接管。
     out.insert(Symbol::intern("atexit"), ir::Builtin::HostAtexit);
@@ -2139,7 +2139,7 @@ fn lower_inner(
     let typing_env = TypingEnv::fully_monomorphized();
     // P1（§7.6）：本域 stub 代码区与冻结区同 k 域（frozen.home() 记意向域，
     // 动态回退下推导仍一致；各自的固定基/回退独立判定，缓存门槛两用其判）
-    let code_home = crate::vm::engine::codearena::code_home_for_frozen(frozen.home())
+    let code_home = crate::vm::engine::addrlayout::code_home_for_frozen(frozen.home())
         .expect("P1：冻结域非法，stub 代码域不可推");
     let mut linker = Linker::new(
         tcx,
@@ -2167,31 +2167,19 @@ fn lower_inner(
         }
         for so in &v {
             let cpath = std::ffi::CString::new(&**so).expect("原生库路径不含 NUL");
-            // dlerror 是线程局部的粘滞状态；先清空，再在失败后立即复制诊断。
-            unsafe { libc::dlerror() };
-            let h = unsafe { libc::dlopen(cpath.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
-            if h.is_null() {
-                let err = unsafe { libc::dlerror() };
-                let detail = if err.is_null() {
-                    "dlerror 未提供详情".to_string()
-                } else {
-                    unsafe { std::ffi::CStr::from_ptr(err) }
-                        .to_string_lossy()
-                        .into_owned()
-                };
-                panic!("必需原生库 `{so}` 降低期 dlopen 失败: {detail}");
-            }
+            let h = crate::os::dll::open(&cpath, crate::os::dll::Mode::Now)
+                .unwrap_or_else(|detail| panic!("必需原生库 `{so}` 降低期 dlopen 失败: {detail}"));
             // 句柄有意不 dlclose（与运行期 FfiState 同：随进程生命周期）。
             // 记 required 句柄（dynsym 可见符号的链接序解析，先于全域——
             // native 链接期绑定，psm/rustc_driver 碰撞实锤）。
-            linker.archive_handles.push(h as usize);
+            linker.archive_handles.push(h);
             // hidden 符号 .symtab 兜底表（口径同 FfiState：只收不进 .dynsym 的
             // 符号）。基址或解析失败不建表——dlsym 可见面不受影响，hidden 符号
             // 由取址路径的既有诊断兜底（宁缺勿滥：错基址表会静默解到野地址）。
-            if let Some(bias) = crate::elfsym::load_bias(h)
+            if let Some(bias) = crate::os::dll::load_bias(h)
                 && let Ok(syms) = crate::elfsym::hidden_symtab_values(so)
             {
-                linker.archive_fallbacks.push((bias, syms));
+                linker.archive_fallbacks.push((bias as u64, syms));
             }
         }
         v
@@ -2212,9 +2200,7 @@ fn lower_inner(
         let Ok(cpath) = std::ffi::CString::new(&**cand) else {
             continue;
         };
-        unsafe { libc::dlerror() };
-        let h = unsafe { libc::dlopen(cpath.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
-        let _ = h; // 有意不 dlclose（与 required 清单同）
+        let _ = crate::os::dll::open(&cpath, crate::os::dll::Mode::Now);
     }
 
     // 种子 = mono collector 集（D1：与 native codegen 同一起点，正确性白拿）

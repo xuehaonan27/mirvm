@@ -29,21 +29,9 @@ impl Default for ByteRegion {
 
 impl ByteRegion {
     pub fn new() -> Self {
-        let base = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                REGION_CAP,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
-                -1,
-                0,
-            )
-        };
-        assert!(base != libc::MAP_FAILED, "ByteRegion: mmap 失败");
-        ByteRegion {
-            base: base as *mut u8,
-            sp: 0,
-        }
+        let base = crate::os::mem::map_anon(REGION_CAP, crate::os::mem::Prot::RW, true);
+        assert!(!base.is_null(), "ByteRegion: mmap 失败");
+        ByteRegion { base, sp: 0 }
     }
 
     /// 为新帧切 `size` 字节（按 `align` 对齐、清零），返回**帧基址（真地址）**。
@@ -103,6 +91,6 @@ impl ByteRegion {
 
 impl Drop for ByteRegion {
     fn drop(&mut self) {
-        unsafe { libc::munmap(self.base as *mut libc::c_void, REGION_CAP) };
+        unsafe { crate::os::mem::unmap(self.base, REGION_CAP) };
     }
 }

@@ -804,9 +804,9 @@ impl Compiler {
         jb.symbol("mirvm_f16_cast", mirvm_f16_cast as *const u8);
         jb.symbol("mirvm_f16_to_int", mirvm_f16_to_int as *const u8);
         jb.symbol("mirvm_f16_from_int", mirvm_f16_from_int as *const u8);
-        jb.symbol("memmove", libc::memmove as *const u8);
-        jb.symbol("memset", libc::memset as *const u8);
-        jb.symbol("memcmp", libc::memcmp as *const u8);
+        jb.symbol("memmove", crate::os::process::memmove_addr());
+        jb.symbol("memset", crate::os::process::memset_addr());
+        jb.symbol("memcmp", crate::os::process::memcmp_addr());
         for (n, p) in libm_syms() {
             jb.symbol(n, p as *const u8);
         }

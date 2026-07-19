@@ -723,22 +723,17 @@ mod tests {
 
         let so = materialize_in(&archive, &temp.path().join("cache")).unwrap();
         let c_so = CString::new(so.as_os_str().as_encoded_bytes()).unwrap();
-        let handle = unsafe { libc::dlopen(c_so.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
-        assert!(
-            !handle.is_null(),
-            "dlopen {} failed: {}",
-            so.display(),
-            unsafe { CStr::from_ptr(libc::dlerror()) }.to_string_lossy()
-        );
-        let symbol = c"mirvm_archive_probe";
-        let address = unsafe { libc::dlsym(handle, symbol.as_ptr()) };
-        assert!(
-            !address.is_null(),
-            "whole-archive did not export tracer symbol"
-        );
-        let probe: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(address) };
+        let handle = crate::os::dll::open_with_flags(
+            &c_so,
+            crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL,
+        )
+        .unwrap_or_else(|e| panic!("dlopen {} failed: {}", so.display(), e));
+        let address = crate::os::dll::sym(handle, c"mirvm_archive_probe");
+        assert!(address != 0, "whole-archive did not export tracer symbol");
+        let probe: unsafe extern "C" fn() -> u64 =
+            unsafe { std::mem::transmute(address as *const u8) };
         assert_eq!(unsafe { probe() }, 0x51a);
-        unsafe { libc::dlclose(handle) };
+        unsafe { crate::os::dll::close(handle) };
     }
 
     #[test]
@@ -769,18 +764,21 @@ mod tests {
 
         let so = materialize_in(&archive, &temp.path().join("cache")).unwrap();
         let c_so = CString::new(so.as_os_str().as_encoded_bytes()).unwrap();
-        let handle = unsafe { libc::dlopen(c_so.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
-        assert!(!handle.is_null(), "dlopen {} failed", so.display());
-        let symbol = c"mirvm_constructor_probe";
-        let address = unsafe { libc::dlsym(handle, symbol.as_ptr()) };
-        assert!(!address.is_null());
-        let probe: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(address) };
+        let handle = crate::os::dll::open_with_flags(
+            &c_so,
+            crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL,
+        )
+        .unwrap_or_else(|_| panic!("dlopen {} failed", so.display()));
+        let address = crate::os::dll::sym(handle, c"mirvm_constructor_probe");
+        assert!(address != 0);
+        let probe: unsafe extern "C" fn() -> u64 =
+            unsafe { std::mem::transmute(address as *const u8) };
         assert_eq!(
             unsafe { probe() },
             42,
             "DT_INIT_ARRAY 必须已在 dlopen 时执行（constructor 置 42）"
         );
-        unsafe { libc::dlclose(handle) };
+        unsafe { crate::os::dll::close(handle) };
     }
 
     #[test]

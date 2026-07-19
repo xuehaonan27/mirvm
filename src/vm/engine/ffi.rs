@@ -10,7 +10,7 @@
 //! 变参函数用 Cif::new_variadic(尾参类别由调用点实参冻结，x86_64 AL 语义 libffi 负责)。
 
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 
 use libffi::middle::{Arg, Cif, CodePtr, Ret, Type as FfiType};
 
@@ -67,7 +67,7 @@ impl FfiState {
         // 已知记档，corpus 无此形态）。
         if p == 0 {
             for &h in &self.required_handles {
-                p = unsafe { libc::dlsym(h as *mut libc::c_void, cname.as_ptr()) } as usize;
+                p = crate::os::dll::sym(h, &cname);
                 if p != 0 {
                     break;
                 }
@@ -76,11 +76,11 @@ impl FfiState {
         // ③dlsym 全域（真系统库；归档的 dynsym 可见符号也经 RTLD_GLOBAL 装载
         // 在此命中——但撞宿主同名库时 ②已先命中归档，无歧义）
         if p == 0 {
-            p = unsafe { libc::dlsym(std::ptr::null_mut(), cname.as_ptr()) } as usize;
+            p = crate::os::dll::sym(0, &cname);
         }
         if p == 0 {
             for &h in &self.handles {
-                p = unsafe { libc::dlsym(h as *mut libc::c_void, cname.as_ptr()) } as usize;
+                p = crate::os::dll::sym(h, &cname);
                 if p != 0 {
                     break;
                 }
@@ -102,45 +102,28 @@ impl FfiState {
         for cand in required_libs {
             let cpath =
                 CString::new(&**cand).map_err(|_| format!("必需原生库路径含 NUL: `{cand}`"))?;
-            // dlerror 是线程局部的粘滞状态；先清空，再在失败后立即复制诊断。
-            unsafe { libc::dlerror() };
-            let h = unsafe { libc::dlopen(cpath.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
-            if h.is_null() {
-                let detail = dlerror_string();
-                return Err(format!("dlopen 必需原生库 `{cand}` 失败: {detail}"));
-            }
-            self.required_handles.push(h as usize);
+            let h = crate::os::dll::open(&cpath, crate::os::dll::Mode::Now)
+                .map_err(|detail| format!("dlopen 必需原生库 `{cand}` 失败: {detail}"))?;
+            self.required_handles.push(h);
             // hidden 符号 .symtab 兜底表（口径见字段注）。基址或解析失败不建表：
             // dlsym 可见面不受影响，hidden 符号由 resolve 的既有诊断兜底——宁缺
             // 勿滥，错基址表会把符号静默解到野地址。
-            if let Some(bias) = crate::elfsym::load_bias(h)
+            if let Some(bias) = crate::os::dll::load_bias(h)
                 && let Ok(syms) = crate::elfsym::hidden_symtab_values(cand)
             {
-                self.archive_fallbacks.push((bias, syms));
+                self.archive_fallbacks.push((bias as u64, syms));
             }
         }
         for cand in optional_libs {
             let Ok(cpath) = CString::new(&**cand) else {
                 continue;
             };
-            let h = unsafe { libc::dlopen(cpath.as_ptr(), libc::RTLD_LAZY | libc::RTLD_GLOBAL) };
-            if !h.is_null() {
-                self.handles.push(h as usize);
+            if let Ok(h) = crate::os::dll::open(&cpath, crate::os::dll::Mode::Lazy) {
+                self.handles.push(h);
             }
         }
         self.libs_loaded = true;
         Ok(())
-    }
-}
-
-fn dlerror_string() -> String {
-    let error = unsafe { libc::dlerror() };
-    if error.is_null() {
-        "dlerror 未提供详情".into()
-    } else {
-        unsafe { CStr::from_ptr(error) }
-            .to_string_lossy()
-            .into_owned()
     }
 }
 
@@ -212,36 +195,28 @@ fn ffi_type_agg(agg: &super::ir::FfiAgg) -> FfiType {
 /// 还原（guest 可能复用 attr）。guest 自供栈（pthread_attr_setstack，addr 非空）
 /// 不动；attr=NULL（glibc 默认）不动——该形态只出现在 native 代码自建线程，其
 /// thunk 再入由 stack_floor 真栈守卫兜底。放大后尺寸是虚拟保留，按需提交。
-pub fn amplify_pthread_stack(sym: &str, av: &[u64]) -> Option<(*mut libc::pthread_attr_t, usize)> {
+pub fn amplify_pthread_stack(sym: &str, av: &[u64]) -> Option<(*mut std::ffi::c_void, usize)> {
     /// 解释帧 / native 帧的宿主成本比的保守上界（~2KB vs ~64B）
     const AMPLIFY: usize = 32;
     const FLOOR: usize = 64 << 20;
     if sym != "pthread_create" || av.len() < 4 {
         return None;
     }
-    let attr = av[1] as *mut libc::pthread_attr_t;
+    let attr = av[1] as *mut std::ffi::c_void;
     if attr.is_null() {
         return None;
     }
-    unsafe {
-        let mut lo: *mut libc::c_void = std::ptr::null_mut();
-        let mut size: libc::size_t = 0;
-        if libc::pthread_attr_getstack(attr, &mut lo, &mut size) != 0 || size == 0 {
-            return None;
-        }
-        // glibc 细节：未 setstack 的 attr 内部 stackaddr=NULL，getstack 返回
-        // `NULL - stacksize`（近 u64 顶的假地址）而非 NULL。x86_64 用户地址
-        // ≤ 47 位——超界即"未设"；真用户栈地址（guest 自供栈）落在界内则不动。
-        let stack_unset = lo.is_null() || lo as usize >= 1 << 48;
-        if !stack_unset {
-            return None;
-        }
-        let want = size.saturating_mul(AMPLIFY).max(FLOOR);
-        if want <= size || libc::pthread_attr_setstacksize(attr, want) != 0 {
-            return None;
-        }
-        Some((attr, size))
+    let (lo, size) = crate::os::thread::attr_stack_bounds(attr)?;
+    // 未设 stacksize 的 attr（glibc 假地址形态判定在 os::thread）不动；
+    // guest 自供栈（setstack，addr 落在用户地址界内）不动。
+    if !crate::os::thread::stack_addr_is_unset(lo) {
+        return None;
     }
+    let want = size.saturating_mul(AMPLIFY).max(FLOOR);
+    if want <= size || !crate::os::thread::attr_set_stack_size(attr, want) {
+        return None;
+    }
+    Some((attr, size))
 }
 
 /// 直调。args = 求值好的 u64 位（指针即真地址；F32 位在低 32）。返回 u64 位。
@@ -397,8 +372,8 @@ mod tests {
             .unwrap()
             .success());
         // 前提：hidden malloc 不进 .dynsym，进程全域只有 libc 本尊
-        let libc_malloc = unsafe { libc::dlsym(std::ptr::null_mut(), c"malloc".as_ptr()) };
-        assert!(!libc_malloc.is_null());
+        let libc_malloc = crate::os::dll::sym(0, c"malloc");
+        assert!(libc_malloc != 0);
         let mut state = FfiState::default();
         let required: Box<str> = so.display().to_string().into();
         let resolved = state
@@ -406,7 +381,7 @@ mod tests {
             .expect("required lib loads")
             .expect("malloc resolves");
         assert_ne!(
-            resolved, libc_malloc as usize,
+            resolved, libc_malloc,
             "归档 hidden malloc 必须盖过 RTLD_DEFAULT 的 libc malloc"
         );
         let f: unsafe extern "C" fn(u64) -> *mut std::ffi::c_void =

@@ -13,39 +13,11 @@
 /// 冻结区容量（虚拟保留；触碰才占物理页）。
 const FROZEN_CAP: usize = 256 << 20;
 
-/// 固定基址选址：PIE 映像/brk 随机化上界 ~0x66xx_xxxx_xxxx（mmap_rnd_bits=28），
-/// mmap 自顶向下区在 0x7fxx_xxxx_xxxx 附近——0x68/0x69 都落在两带之间的空洞，
-/// 与影子 IP（FUNC_IP_BASE，非规范高位、从不映射）无交集。
-/// MAP_FIXED_NOREPLACE：被占 = EEXIST，绝不覆盖既有映射。
-///
-/// S4（s4-base-image-design §2）双域：底座（跨程序共享的 std 预降低模块）与
-/// delta（本程序模块；无底座时=全量模块）各占一域，跨域绝对地址互指两侧皆稳定。
-pub const BASE_IMAGE_FIXED_ADDR: usize = 0x6800_0000_0000;
-pub const DELTA_FIXED_ADDR: usize = 0x6900_0000_0000;
-
-/// S3′（m5.3-design §3.3）依赖 image 域样条：每个 registry 依赖 image 占一固定域，
-/// 起点 0x6A00、步距 16 GiB（远大于 FROZEN_CAP 256 MiB；空洞供未来扩容），k 由
-/// lockfile 拓扑序分配。上界 1300 不触 mmap 自顶向下带（0x7f）。栈 = [底座][img_k…][delta]，
-/// 各域绝对地址跨域互指全稳定（可缓存性判据①对每域成立）。
-pub const IMAGE_SPLINE_BASE: usize = 0x6A00_0000_0000;
-pub const IMAGE_SPLINE_STEP: usize = 1 << 34;
-pub const IMAGE_SPLINE_COUNT: usize = 1300;
-
-/// 第 k 个依赖 image 的固定域基址。
-pub fn image_addr(k: usize) -> usize {
-    assert!(k < IMAGE_SPLINE_COUNT, "image 样条越界: k={k}");
-    IMAGE_SPLINE_BASE + k * IMAGE_SPLINE_STEP
-}
-
-/// 合法冻结域白名单：底座 / delta / 依赖 image 样条（对齐且在界内）。
-/// restore 与 serde 反序列化都过它——防伪造快照把区放到任意地址（错基址=静默错值）。
-fn is_valid_home(addr: usize) -> bool {
-    addr == BASE_IMAGE_FIXED_ADDR
-        || addr == DELTA_FIXED_ADDR
-        || (addr >= IMAGE_SPLINE_BASE
-            && (addr - IMAGE_SPLINE_BASE).is_multiple_of(IMAGE_SPLINE_STEP)
-            && (addr - IMAGE_SPLINE_BASE) / IMAGE_SPLINE_STEP < IMAGE_SPLINE_COUNT)
-}
+/// 固定基址数值与白名单判据统归 `super::addrlayout`（共享常量层）；
+/// 选址论证与域模型见其模块头。
+use super::addrlayout::{
+    BASE_IMAGE_FIXED_ADDR, DELTA_FIXED_ADDR, image_addr, is_valid_home,
+};
 
 pub struct FrozenArena {
     base: *mut u8,
@@ -62,35 +34,22 @@ impl Default for FrozenArena {
 }
 
 impl FrozenArena {
-    fn map(addr: usize, flags_extra: libc::c_int) -> *mut libc::c_void {
-        unsafe {
-            libc::mmap(
-                addr as *mut libc::c_void,
-                FROZEN_CAP,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | flags_extra,
-                -1,
-                0,
-            )
-        }
-    }
-
     fn new_at(home: usize) -> Self {
         // 先试本域固定基址（缓存可用的前提）；被占（并发单测/罕见 ASLR 冲突）则
         // 回退动态基址——语义不变，仅本进程产出不可序列化。
-        let fixed = Self::map(home, libc::MAP_FIXED_NOREPLACE);
-        if fixed != libc::MAP_FAILED {
+        if let Some(p) = crate::os::mem::map_fixed_preferred(home, FROZEN_CAP, crate::os::mem::Prot::RW)
+        {
             return FrozenArena {
-                base: fixed as *mut u8,
+                base: p,
                 used: 0,
                 at_fixed_base: true,
                 home,
             };
         }
-        let base = Self::map(0, 0);
-        assert!(base != libc::MAP_FAILED, "FrozenArena: mmap 失败");
+        let base = crate::os::mem::map_anon(FROZEN_CAP, crate::os::mem::Prot::RW, false);
+        assert!(!base.is_null(), "FrozenArena: mmap 失败");
         FrozenArena {
-            base: base as *mut u8,
+            base,
             used: 0,
             at_fixed_base: false,
             home,
@@ -117,15 +76,15 @@ impl FrozenArena {
     pub fn restore(snapshot: &[u8], home: usize) -> Result<Self, String> {
         assert!(snapshot.len() <= FROZEN_CAP, "冻结区快照超容量");
         assert!(is_valid_home(home), "冻结区恢复域非法: {home:#x}");
-        let fixed = Self::map(home, libc::MAP_FIXED_NOREPLACE);
-        if fixed == libc::MAP_FAILED {
+        let Some(p) = crate::os::mem::map_fixed_preferred(home, FROZEN_CAP, crate::os::mem::Prot::RW)
+        else {
             return Err(format!("冻结区固定基址 {home:#x} 被占，无法恢复快照"));
-        }
+        };
         unsafe {
-            std::ptr::copy_nonoverlapping(snapshot.as_ptr(), fixed as *mut u8, snapshot.len());
+            std::ptr::copy_nonoverlapping(snapshot.as_ptr(), p, snapshot.len());
         }
         Ok(FrozenArena {
-            base: fixed as *mut u8,
+            base: p,
             used: snapshot.len(),
             at_fixed_base: true,
             home,
@@ -165,7 +124,7 @@ impl FrozenArena {
 
 impl Drop for FrozenArena {
     fn drop(&mut self) {
-        unsafe { libc::munmap(self.base as *mut libc::c_void, FROZEN_CAP) };
+        unsafe { crate::os::mem::unmap(self.base, FROZEN_CAP) };
     }
 }
 
@@ -228,10 +187,11 @@ unsafe impl Sync for FrozenArena {}
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        BASE_IMAGE_FIXED_ADDR, DELTA_FIXED_ADDR, FrozenArena, IMAGE_SPLINE_BASE,
-        IMAGE_SPLINE_COUNT, IMAGE_SPLINE_STEP, image_addr, is_valid_home,
+    use super::super::addrlayout::{
+        BASE_IMAGE_FIXED_ADDR, DELTA_FIXED_ADDR, IMAGE_SPLINE_BASE, IMAGE_SPLINE_COUNT,
+        IMAGE_SPLINE_STEP, image_addr, is_valid_home,
     };
+    use super::FrozenArena;
 
     /// S3′ 样条域白名单：底座/delta/对齐样条合法，越界/未对齐/杂散非法。
     #[test]

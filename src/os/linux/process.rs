@@ -1,0 +1,63 @@
+//! os::process — Linux 进程原语：getenv/write/strlen/fork/atexit/syscall 直通。
+//!
+//! 归并 interp.rs 的 Host* builtin 触点。原语不裁决：单线程 fork 守卫、
+//! abort 文案、atexit 注册表与 LIFO 回调执行留引擎；本层只做诚实的 libc
+//! 调用。未列举 syscall 族唯一通道 = `syscall` 变参单点（C10 直通纪律：
+//! 不为每个 syscall 建壳）。地址值按 u64 出入（leaf 类型纪律）。
+
+/// getenv(3)：name_addr = guest 侧 NUL 结尾字符串真地址；返回真地址或 0。
+pub fn getenv(name_addr: u64) -> u64 {
+    unsafe { libc::getenv(name_addr as *const libc::c_char) as u64 }
+}
+
+/// write(2)：返回已写字节数或 -1（errno 语义留给调用方）。
+pub fn write_fd(fd: i32, buf_addr: u64, len: usize) -> i64 {
+    unsafe { libc::write(fd, buf_addr as *const libc::c_void, len) as i64 }
+}
+
+/// strlen(3)（guest 侧 NUL 结尾字符串真地址）。
+pub fn c_strlen(s_addr: u64) -> u64 {
+    unsafe { libc::strlen(s_addr as *const libc::c_char) as u64 }
+}
+
+/// fork(2)：父进程返回子 pid，子进程返回 0，失败 -1。
+/// 守卫（单线程放行）在引擎侧；exec 族走 foreign 直通，不经此。
+pub fn fork() -> i64 {
+    unsafe { libc::fork() as i64 }
+}
+
+/// atexit(3)：挂 native trampoline（引擎链接的 libc atexit，非 guest dlsym）。
+pub fn atexit_native(cb: extern "C" fn()) -> i32 {
+    unsafe { libc::atexit(cb) }
+}
+
+/// JIT 编译码 libcall 符号地址（cranelift `jb.symbol` 注册用——编译码直接
+/// call 真 libc 函数，地址解析属 OS 符号面）。
+pub fn memmove_addr() -> *const u8 {
+    libc::memmove as *const u8
+}
+/// 同上（memset）。
+pub fn memset_addr() -> *const u8 {
+    libc::memset as *const u8
+}
+/// 同上（memcmp）。
+pub fn memcmp_addr() -> *const u8 {
+    libc::memcmp as *const u8
+}
+
+/// syscall(2) 变参直通：全未列举 syscall 族的唯一通道。args 取前 6 参
+/// （x86_64 寄存器上限），超出忽略——与归并前 HostSyscall 臂的界一致。
+pub fn syscall(n: i64, args: &[u64]) -> i64 {
+    let a = |i: usize| args.get(i).copied().unwrap_or(0);
+    unsafe {
+        match args.len() {
+            0 => libc::syscall(n),
+            1 => libc::syscall(n, a(0)),
+            2 => libc::syscall(n, a(0), a(1)),
+            3 => libc::syscall(n, a(0), a(1), a(2)),
+            4 => libc::syscall(n, a(0), a(1), a(2), a(3)),
+            5 => libc::syscall(n, a(0), a(1), a(2), a(3), a(4)),
+            _ => libc::syscall(n, a(0), a(1), a(2), a(3), a(4), a(5)),
+        }
+    }
+}

@@ -13,47 +13,11 @@ pub const STUB_STRIDE: u64 = 16;
 /// 代码域容量（虚拟保留；条目 stub 每实例一条，64 MiB >> 任何真实负载）
 const CODE_CAP: usize = 64 << 20;
 
-/// 第三固定地址域族（代码）：delta 0x6C00 / 底座 0x6D00 / image 样条 0x6E00+k。
-/// 与冻结区 0x68/0x69/0x6A00 三域同构、互不相交；上界不触 mmap 自顶向下带。
-pub const DELTA_CODE_ADDR: usize = 0x6C00_0000_0000;
-pub const BASE_CODE_ADDR: usize = 0x6D00_0000_0000;
-pub const IMAGE_CODE_SPLINE: usize = 0x6E00_0000_0000;
-pub const IMAGE_CODE_STEP: usize = 1 << 34;
-pub const IMAGE_CODE_COUNT: usize = 1300;
-
-/// 第 k 个依赖 image 的代码域基址。
-pub fn image_code_addr(k: usize) -> usize {
-    assert!(k < IMAGE_CODE_COUNT, "image 代码样条越界: k={k}");
-    IMAGE_CODE_SPLINE + k * IMAGE_CODE_STEP
-}
-
-/// 冻结域基址 → 本模块的代码域基址（同一 k 的不变量：delta↔delta、底座↔底座、
-/// image_spline(k)↔image_code(k)）。非冻结白名单基址 ⇒ None（引擎不变量违规）。
-pub fn code_home_for_frozen(home: usize) -> Option<usize> {
-    use super::frozen::{
-        BASE_IMAGE_FIXED_ADDR, DELTA_FIXED_ADDR, IMAGE_SPLINE_BASE, IMAGE_SPLINE_STEP,
-    };
-    match home {
-        DELTA_FIXED_ADDR => Some(DELTA_CODE_ADDR),
-        BASE_IMAGE_FIXED_ADDR => Some(BASE_CODE_ADDR),
-        h if h >= IMAGE_SPLINE_BASE
-            && (h - IMAGE_SPLINE_BASE).is_multiple_of(IMAGE_SPLINE_STEP)
-            && (h - IMAGE_SPLINE_BASE) / IMAGE_SPLINE_STEP < super::frozen::IMAGE_SPLINE_COUNT =>
-        {
-            Some(image_code_addr((h - IMAGE_SPLINE_BASE) / IMAGE_SPLINE_STEP))
-        }
-        _ => None,
-    }
-}
-
-/// 合法代码域白名单（serde 配方回放与装载防御双验证；伪造快照防线）。
-pub fn is_valid_code_home(addr: usize) -> bool {
-    addr == DELTA_CODE_ADDR
-        || addr == BASE_CODE_ADDR
-        || (addr >= IMAGE_CODE_SPLINE
-            && (addr - IMAGE_CODE_SPLINE).is_multiple_of(IMAGE_CODE_STEP)
-            && (addr - IMAGE_CODE_SPLINE) / IMAGE_CODE_STEP < IMAGE_CODE_COUNT)
-}
+/// 代码域基址数值、样条参数与白名单判据统归 `super::addrlayout`（共享常量层）。
+use super::addrlayout::{
+    BASE_CODE_ADDR, DELTA_CODE_ADDR, IMAGE_CODE_COUNT, IMAGE_CODE_SPLINE, IMAGE_CODE_STEP,
+    image_code_addr, is_valid_code_home,
+};
 
 /// 值是否落在任一 stub 代码域带（P1：FFI 可派生条目的 fn-ptr 值——本身已是
 /// 可执行码址；逃逸物化点据此跳过二次包装，decision-history §7.6 项5）
@@ -104,36 +68,23 @@ impl Default for StubArena {
 }
 
 impl StubArena {
-    fn map(addr: usize, flags_extra: libc::c_int) -> *mut libc::c_void {
-        unsafe {
-            libc::mmap(
-                addr as *mut libc::c_void,
-                CODE_CAP,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | flags_extra,
-                -1,
-                0,
-            )
-        }
-    }
-
     /// 固定基物化（lower 冷路径与启动相重建共用选址纪律）：
     /// 先试本域固定基址（可缓存前提）；被占回退动态基址——语义不变，
     /// 仅本进程产出不可序列化（FrozenArena 同款）。
     pub fn new_at(home: usize) -> Self {
-        let fixed = Self::map(home, libc::MAP_FIXED_NOREPLACE);
-        if fixed != libc::MAP_FAILED {
+        if let Some(p) = crate::os::mem::map_fixed_preferred(home, CODE_CAP, crate::os::mem::Prot::RW)
+        {
             return StubArena {
-                base: fixed as *mut u8,
+                base: p,
                 used: 0,
                 at_fixed_base: true,
                 home,
             };
         }
-        let base = Self::map(0, 0);
-        assert!(base != libc::MAP_FAILED, "StubArena: mmap 失败");
+        let base = crate::os::mem::map_anon(CODE_CAP, crate::os::mem::Prot::RW, false);
+        assert!(!base.is_null(), "StubArena: mmap 失败");
         StubArena {
-            base: base as *mut u8,
+            base,
             used: 0,
             at_fixed_base: false,
             home,
@@ -147,12 +98,12 @@ impl StubArena {
             is_valid_code_home(home),
             "StubArena 恢复域非法: {home:#x}"
         );
-        let fixed = Self::map(home, libc::MAP_FIXED_NOREPLACE);
-        if fixed == libc::MAP_FAILED {
+        let Some(p) = crate::os::mem::map_fixed_preferred(home, CODE_CAP, crate::os::mem::Prot::RW)
+        else {
             return Err(format!("stub 代码域固定基址 {home:#x} 被占"));
-        }
+        };
         Ok(StubArena {
-            base: fixed as *mut u8,
+            base: p,
             used: 0,
             at_fixed_base: true,
             home,
@@ -202,14 +153,8 @@ impl StubArena {
         if self.base.is_null() || self.used == 0 {
             return;
         }
-        let rc = unsafe {
-            libc::mprotect(
-                self.base as *mut libc::c_void,
-                CODE_CAP,
-                libc::PROT_READ | libc::PROT_EXEC,
-            )
-        };
-        assert!(rc == 0, "StubArena: mprotect RX 失败 rc={rc}");
+        crate::os::mem::protect(self.base, CODE_CAP, crate::os::mem::Prot::RX)
+            .expect("StubArena: mprotect RX 失败");
     }
 
     pub fn at_fixed_base(&self) -> bool {
@@ -230,7 +175,7 @@ impl StubArena {
 impl Drop for StubArena {
     fn drop(&mut self) {
         if !self.base.is_null() {
-            unsafe { libc::munmap(self.base as *mut libc::c_void, CODE_CAP) };
+            unsafe { crate::os::mem::unmap(self.base, CODE_CAP) };
         }
     }
 }

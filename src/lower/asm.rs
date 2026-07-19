@@ -84,19 +84,15 @@ pub(crate) fn materialize(sites: &[ir::AsmSite]) -> Vec<u64> {
     }
 
     let c_so = std::ffi::CString::new(so.as_os_str().as_encoded_bytes()).unwrap();
-    let handle = unsafe { libc::dlopen(c_so.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
-    assert!(
-        !handle.is_null(),
-        "dlopen asm-stub .so 失败: {}",
-        so.display()
-    );
+    let handle = crate::os::dll::open_with_flags(&c_so, crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL)
+        .unwrap_or_else(|_| panic!("dlopen asm-stub .so 失败: {}", so.display()));
 
     sites
         .iter()
         .map(|site| {
             let name = std::ffi::CString::new(&*site.name).unwrap();
-            let addr = unsafe { libc::dlsym(handle, name.as_ptr()) };
-            assert!(!addr.is_null(), "dlsym {} 失败", site.name);
+            let addr = crate::os::dll::sym(handle, &name);
+            assert!(addr != 0, "dlsym {} 失败", site.name);
             addr as u64
         })
         .collect()

@@ -33,5 +33,6 @@ pub(crate) mod elfsym;
 pub mod ircache;
 pub mod lower;
 pub(crate) mod native_archive;
+pub(crate) mod os;
 pub mod sysroot;
 pub mod vm;

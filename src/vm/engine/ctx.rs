@@ -80,30 +80,23 @@ impl Ctx {
     }
 }
 
-/// 本线程栈安全下界：pthread_getattr_np 取 [lo, lo+size)，下界加安全边距。
+/// 本线程栈安全下界：os::thread 取 [lo, lo+size)，下界加安全边距。
 /// 边距覆盖单次 interp_frame 的宿主最坏用量 + 最深处的 FFI/unwind/诊断路径；
 /// 小栈取 1/8 防止边距吃光可用区。仅 Ctx 创建时调一次（getattr 对主线程读
 /// /proc，非热路径）。
 fn thread_stack_floor() -> usize {
-    unsafe {
-        let mut attr: libc::pthread_attr_t = std::mem::zeroed();
-        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) != 0 {
-            return 0;
-        }
-        let mut lo: *mut libc::c_void = std::ptr::null_mut();
-        let mut size: libc::size_t = 0;
-        let rc = libc::pthread_attr_getstack(&attr, &mut lo, &mut size);
-        libc::pthread_attr_destroy(&mut attr);
-        if rc != 0 || lo.is_null() || size == 0 {
-            return 0;
-        }
-        let margin = (size / 8).clamp(256 << 10, 4 << 20);
-        lo as usize + margin
+    let Some((lo, size)) = crate::os::thread::current_stack_bounds() else {
+        return 0;
+    };
+    if lo == 0 {
+        return 0;
     }
+    let margin = (size / 8).clamp(256 << 10, 4 << 20);
+    lo + margin
 }
 
 /// Ctx 的 pthread key（进程唯一；dtor = ctx_key_dtor）。
-static CTX_KEY: OnceLock<libc::pthread_key_t> = OnceLock::new();
+static CTX_KEY: OnceLock<crate::os::thread::TlsKey> = OnceLock::new();
 
 /// fork 守卫基线（M5.2 D8f）：guest main 启动时的 OS 线程数（`/proc/self/task`）。
 /// 此刻 = mirvm 内部线程（main-in-join、guest-exec、分配器）+ 0 个 guest 派生线程。
@@ -113,34 +106,31 @@ static CTX_KEY: OnceLock<libc::pthread_key_t> = OnceLock::new();
 static FORK_BASELINE_THREADS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-fn os_thread_count() -> usize {
-    std::fs::read_dir("/proc/self/task")
-        .map(|d| d.count())
-        .unwrap_or(0)
-}
-
 /// guest main 启动点调用（run_main/run_export）：钉住单 guest 线程的基线。
 pub fn set_fork_baseline() {
-    FORK_BASELINE_THREADS.store(os_thread_count(), std::sync::atomic::Ordering::SeqCst);
+    FORK_BASELINE_THREADS.store(
+        crate::os::thread::os_thread_count(),
+        std::sync::atomic::Ordering::SeqCst,
+    );
 }
 
 /// guest 是否已派生额外线程（HostFork 守卫）：当前 OS 线程数 > 基线 = 是。
 /// 基线未设（0）或读取失败时保守判"多线程"（拒绝 fork）。
 pub fn guest_spawned_threads() -> bool {
     let base = FORK_BASELINE_THREADS.load(std::sync::atomic::Ordering::SeqCst);
-    base == 0 || os_thread_count() > base
+    base == 0 || crate::os::thread::os_thread_count() > base
 }
 
 /// TSD 相位的 Ctx 收尾：迟退 3 轮（重新挂回 → glibc 追加轮次，上限 4）——guest 的
 /// pthread-key dtor（std run_dtors thunk，键序不可控）总能在存活的 Ctx 上执行；
 /// 末轮真正销毁（ByteRegion munmap 等）。
 #[cfg(not(sanitize = "thread"))]
-unsafe extern "C" fn ctx_key_dtor(p: *mut libc::c_void) {
+unsafe extern "C" fn ctx_key_dtor(p: *mut std::ffi::c_void) {
     let ctx = p as *mut Ctx;
     unsafe {
         if (*ctx).teardown_rounds < 3 {
             (*ctx).teardown_rounds += 1;
-            libc::pthread_setspecific(*CTX_KEY.get().unwrap(), p);
+            crate::os::thread::tls_set(*CTX_KEY.get().unwrap(), p);
             return;
         }
         drop(Box::from_raw(ctx));
@@ -154,26 +144,23 @@ unsafe extern "C" fn ctx_key_dtor(p: *mut libc::c_void) {
 /// 返回裸指针（Box 钉地址，raw-ptr vmctx 在 native 栈间传递——借用纪律 §9）。
 /// 主线程的 Ctx 随进程 exit 一并回收（glibc exit 不走 TSD 相位，与 native 同）。
 pub fn attach(shared: &'static Shared) -> *mut Ctx {
-    let key = *CTX_KEY.get_or_init(|| unsafe {
+    let key = *CTX_KEY.get_or_init(|| {
         // TSan 配置：不注册 dtor——TSan 的线程态在 TSD 相位前已析构，插桩代码
         // 不可在彼时运行（Ctx 每线程泄漏，仅测试配置；dtor 链由 threads_panic
         // 差分在真配置验证）。
         #[cfg(sanitize = "thread")]
-        let dtor: Option<unsafe extern "C" fn(*mut libc::c_void)> = None;
+        let dtor: Option<unsafe extern "C" fn(*mut std::ffi::c_void)> = None;
         #[cfg(not(sanitize = "thread"))]
-        let dtor = Some(ctx_key_dtor as unsafe extern "C" fn(*mut libc::c_void));
-        let mut k: libc::pthread_key_t = 0;
-        let rc = libc::pthread_key_create(&mut k, dtor);
-        assert_eq!(rc, 0, "pthread_key_create 失败: {rc}");
-        k
+        let dtor = Some(ctx_key_dtor as unsafe extern "C" fn(*mut std::ffi::c_void));
+        crate::os::thread::tls_key_create(dtor)
     });
     unsafe {
-        let p = libc::pthread_getspecific(key);
+        let p = crate::os::thread::tls_get(key);
         if !p.is_null() {
             return p as *mut Ctx;
         }
         let ctx = Box::into_raw(Box::new(Ctx::new(shared)));
-        libc::pthread_setspecific(key, ctx as *mut libc::c_void);
+        crate::os::thread::tls_set(key, ctx as *mut std::ffi::c_void);
         ctx
     }
 }

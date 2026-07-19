@@ -2024,11 +2024,15 @@ enum Exit {
 /// 复用 M4.4 thunk 工厂（attach + interp_frame，签名 `(i32)->void`）；sync 故障信号
 /// （SEGV/BUS/FPE/ILL/TRAP）的 guest handler 响亮拒绝——宿主故障与 guest 故障不可分辨，
 /// 伪造恢复=静默错值。handler 必须是已知 guest fn 条目（非 guest 地址不接）。
-fn signal_thunk(ctx: *mut Ctx, signum: libc::c_int, handler: u64) -> libc::sighandler_t {
+fn signal_thunk(ctx: *mut Ctx, signum: i32, handler: u64) -> usize {
     // 同步故障信号：guest handler 不可支持（诊断退出而非静默）
     if matches!(
         signum,
-        libc::SIGSEGV | libc::SIGBUS | libc::SIGFPE | libc::SIGILL | libc::SIGTRAP
+        crate::os::signal::SIGSEGV
+            | crate::os::signal::SIGBUS
+            | crate::os::signal::SIGFPE
+            | crate::os::signal::SIGILL
+            | crate::os::signal::SIGTRAP
     ) {
         engine_abort(&format!(
             "guest handler for synchronous fault signal {signum}（SEGV/BUS/FPE/ILL/TRAP：\
@@ -2048,7 +2052,7 @@ fn signal_thunk(ctx: *mut Ctx, signum: libc::c_int, handler: u64) -> libc::sigha
         fixed: None,
         thunk_args: vec![],
     };
-    super::thunks::get_or_create(shared, handler, func, &sig) as libc::sighandler_t
+    super::thunks::get_or_create(shared, handler, func, &sig) as usize
 }
 
 // ===== backtrace 影子帧（D8e）=====
@@ -2127,7 +2131,7 @@ fn atexit_register(func: u64, kind: AtexitKind, arg: u64) -> u64 {
     let mut reg = ATEXIT.lock().unwrap();
     if reg.is_empty() {
         // 首注册：挂 native trampoline（引擎链接的 libc atexit，非 guest dlsym）
-        unsafe { libc::atexit(run_atexit_callbacks) };
+        crate::os::process::atexit_native(run_atexit_callbacks);
     }
     reg.push(AtexitEntry { func, kind, arg });
     0
@@ -2558,7 +2562,7 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                     super::ffi::call(ffi, optional_libs, required_libs, sym, sig, &av, ret_dst)
                 };
                 if let Some((attr, orig)) = stack_restore {
-                    unsafe { libc::pthread_attr_setstacksize(attr, orig) };
+                    crate::os::thread::attr_set_stack_size(attr, orig);
                 }
                 edge.set(None);
                 let r = r.unwrap_or_else(|reason| {
@@ -3077,15 +3081,11 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                     // unwind 原语（spike3 的 raise）：宿主 unwinder 载 guest exception 指针
                     Builtin::UnwindRaise => raise_guest(a(0)),
                     // os:: 最小直通（真实地址零编组；M4.3 正式注册表）
-                    Builtin::HostGetenv => unsafe {
-                        libc::getenv(a(0) as *const libc::c_char) as u64
-                    },
-                    Builtin::HostWrite => unsafe {
-                        libc::write(a(0) as i32, a(1) as *const libc::c_void, a(2) as usize) as u64
-                    },
-                    Builtin::HostStrlen => unsafe {
-                        libc::strlen(a(0) as *const libc::c_char) as u64
-                    },
+                    Builtin::HostGetenv => crate::os::process::getenv(a(0)),
+                    Builtin::HostWrite => {
+                        crate::os::process::write_fd(a(0) as i32, a(1), a(2) as usize) as u64
+                    }
+                    Builtin::HostStrlen => crate::os::process::c_strlen(a(0)),
                     Builtin::HostAbort => {
                         eprintln!("mirvm[m4-engine]: guest abort()");
                         std::process::abort()
@@ -3101,7 +3101,7 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                                  仅 guest 单线程时放行（D8f/D8l）",
                             );
                         }
-                        unsafe { libc::fork() as u64 }
+                        crate::os::process::fork() as u64
                     }
                     // atexit 家族（D8g）：登记 guest 回调，返回 0（成功）。
                     // __cxa_atexit(fn, arg, dso)：fn 收 arg；on_exit(fn, arg)：fn 收
@@ -3110,34 +3110,31 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                     Builtin::HostCxaAtexit => atexit_register(a(0), AtexitKind::CxaArg, a(1)),
                     Builtin::HostOnExit => atexit_register(a(0), AtexitKind::OnExit, a(1)),
                     Builtin::HostSignal => {
-                        let (signum, handler) = (a(0) as libc::c_int, a(1) as libc::sighandler_t);
+                        let (signum, handler) = (a(0) as i32, a(1) as usize);
                         // guest handler（非 DFL/IGN）：async 信号 → 物化 AS-trampoline
                         //（D8d）；sync 故障信号 → 响亮拒绝（宿主/guest 故障不可分辨）。
-                        let real = if handler != libc::SIG_DFL && handler != libc::SIG_IGN {
+                        let real = if handler != crate::os::signal::SIG_DFL
+                            && handler != crate::os::signal::SIG_IGN
+                        {
                             signal_thunk(ctx, signum, handler as u64)
                         } else {
                             handler
                         };
-                        unsafe { libc::signal(signum, real) as u64 }
+                        crate::os::signal::signal(signum, real) as u64
                     }
                     Builtin::HostSigaction => {
-                        let (signum, act, oldact) = (a(0) as libc::c_int, a(1), a(2));
+                        let (signum, act, oldact) = (a(0) as i32, a(1), a(2));
                         // guest handler 藏在 sigaction 结构里：thunk 后写一份改过 handler
                         // 的副本给内核（原结构不动——guest 可能复用/读回）。
-                        let patched: Option<libc::sigaction> = (act != 0).then(|| {
-                            let mut p = *unsafe { &*(act as *const libc::sigaction) };
-                            let h = p.sa_sigaction;
-                            if h != libc::SIG_DFL && h != libc::SIG_IGN {
-                                p.sa_sigaction = signal_thunk(ctx, signum, h as u64) as usize;
+                        let mut patched = unsafe { crate::os::signal::Sigaction::copy_from(act) };
+                        if let Some(p) = patched.as_mut() {
+                            let h = p.handler();
+                            if h != crate::os::signal::SIG_DFL && h != crate::os::signal::SIG_IGN
+                            {
+                                p.set_handler(signal_thunk(ctx, signum, h as u64));
                             }
-                            p
-                        });
-                        let act_ptr = patched
-                            .as_ref()
-                            .map_or(std::ptr::null(), |p| p as *const libc::sigaction);
-                        unsafe {
-                            libc::sigaction(signum, act_ptr, oldact as *mut libc::sigaction) as u64
                         }
+                        crate::os::signal::sigaction(signum, patched.as_ref(), oldact) as u64
                     }
                     Builtin::Unsupported(name) => {
                         engine_abort(&format!("unsupported builtin `{}`", name.0))
@@ -3263,18 +3260,10 @@ fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, en
                     | Builtin::X86PsrlD128 => {
                         unreachable!("x86 vector builtin 已由 indirect vector 通道处理")
                     }
-                    Builtin::HostSyscall => unsafe {
-                        let n = a(0) as i64;
-                        (match args.len() {
-                            1 => libc::syscall(n),
-                            2 => libc::syscall(n, a(1)),
-                            3 => libc::syscall(n, a(1), a(2)),
-                            4 => libc::syscall(n, a(1), a(2), a(3)),
-                            5 => libc::syscall(n, a(1), a(2), a(3), a(4)),
-                            6 => libc::syscall(n, a(1), a(2), a(3), a(4), a(5)),
-                            _ => libc::syscall(n, a(1), a(2), a(3), a(4), a(5), a(6)),
-                        }) as u64
-                    },
+                    Builtin::HostSyscall => {
+                        let av: Vec<u64> = (1..args.len()).map(&a).collect();
+                        crate::os::process::syscall(a(0) as i64, &av) as u64
+                    }
                     // rust_try：宿主 catch；guest panic → 调 catch_fn(data, exc) 返 1
                     Builtin::CatchUnwind => {
                         let (try_fn, data, catch_fn) = (a(0), a(1), a(2));

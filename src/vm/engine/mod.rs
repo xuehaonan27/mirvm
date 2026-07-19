@@ -2,6 +2,7 @@
 //! 纯 Rust、零 rustc_private——tsan harness 同源编译 = 执行相纯度的机械门禁。
 //! 加载相（MIR→本 IR 的降低）在 src/lower/（rustc_private 域），产物经 `ir::Module` 交接。
 
+pub mod addrlayout;
 pub mod ctx;
 pub mod codearena;
 pub mod ffi;
