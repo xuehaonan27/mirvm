@@ -1,3 +1,7 @@
+//! Purity 测量探针（自 lower/mod.rs M8 整搬）：PurityStats/Purity/
+//! classify_purity/arg_mentions_local——A2 split 的 instance 分类器与
+//! --vm-stats 账本（MIRVM_PURITY_STATS=1 门控）。
+
 use super::*;
 
 #[derive(Default)]

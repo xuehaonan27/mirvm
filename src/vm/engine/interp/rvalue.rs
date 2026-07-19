@@ -1,3 +1,7 @@
+//! eval_rvalue（自 interp.rs I7 整搬）：30+ rvalue 臂——int/float/f128/
+//! math/atomic load/simd reduce/Cmp128 等。调用方 = stmt.rs 的 Assign 臂；
+//! 语义镜像对象 = jit/translate 的 rvalue 大 match（逐位一致契约）。
+
 use super::*;
 
 pub(super) fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {

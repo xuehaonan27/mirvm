@@ -251,7 +251,7 @@ pub fn materialize_all_entry_stubs(module: &mut super::ir::Module) -> Result<(),
         let home = module
             .frozen
             .as_ref()
-            .and_then(|f| super::codearena::code_home_for_frozen(f.home()))
+            .and_then(|f| super::addrlayout::code_home_for_frozen(f.home()))
             .ok_or("P1：本域代码基址不可推（冻结域非法）")?;
         module.entry_stubs = super::codearena::StubArena::map_fixed(home)?;
     }

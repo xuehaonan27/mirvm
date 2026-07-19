@@ -1,3 +1,7 @@
+//! 调用一族（自 func.rs F12 整搬）：lower_virtual_call/finish_call/
+//! untuple_rust_call_arg/finish_call_inner——Callee 三形态派发、FFI 聚合、
+//! sret、track_caller。唯一入口 = term.rs 的 Call 臂。
+
 use super::*;
 
 impl<'tcx> LowerCx<'tcx, '_> {

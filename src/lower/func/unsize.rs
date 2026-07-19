@@ -1,3 +1,7 @@
+//! unsize 一族（自 func.rs F8 整搬）：unsize_meta_of/dyn_unsize_tails/
+//! fresh_unsize_meta 三函数闭环——胖化 meta 推导与 dyn 上溯 vtable 变换
+//! （C5，cg_ssa unsized_info 同构）。唯一入口 = cast.rs 的 CoerceUnsized 臂。
+
 use super::*;
 
     /// Unsize 胖化的 meta 推导（类型递归，cg_ssa coerce_unsized_into/unsize_ptr 同构）：

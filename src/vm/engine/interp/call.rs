@@ -1,3 +1,8 @@
+//! 调用与 FFI 入向（自 interp.rs I13 整搬）：call_fn_addr/cleanup_edge/
+//! call_guarding_terminate/run_cleanup + ret_abi_of/call_guest_ffi/
+//! interp_frame（模型 A 宿主递归，真栈字节守卫）。call_guest（发布协议
+//! 读侧锚点）留在 mod.rs——与 jit/compiler worker 写侧注释不可分离。
+
 use super::*;
 use super::{runblocks::run_blocks, services::func_synth_ip};
 

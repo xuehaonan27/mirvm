@@ -1,3 +1,7 @@
+//! Translator（自 jit_compile.rs J8+J10 整搬）：槽 SSA（I64 零扩到宽
+//! 不变量）+ place 求值 + stmt/rvalue/term 三个大 match + 调用助手族 +
+//! clif_rmw_op/collect_ssa_offs。语义 = 与 interp 逐位一致（恒等式镜像）。
+
 use super::*;
 use super::frame::FrameMap;
 use super::admit::callee_abi;

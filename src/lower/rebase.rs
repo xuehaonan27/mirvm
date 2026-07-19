@@ -1,3 +1,7 @@
+//! Rebase（自 lower/mod.rs M10 整搬）：A2 id 重映射（编译期穷尽枚举——
+//! fn/TLS/asm 同构 TAG|j → first+j、untagged d → d+image_count、底座 id
+//! 不动），absorb 时装配 image 模块进 delta 命名空间。
+
 use super::*;
 
 /// fn/TLS/asm 同构：`TAG|j` → `first + j`；untagged d（≥ first）→ `d + image_count`；

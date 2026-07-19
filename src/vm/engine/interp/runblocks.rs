@@ -1,3 +1,8 @@
+//! run_blocks 主执行循环（自 interp.rs I14 整搬）：块序列解释（主执行与
+//! cleanup 链共用）——Goto/SwitchInt/Call/CallForeign/CallIndirect/
+//! CallBuiltin（665 行臂整体随迁）/InlineAsm/Return/Resume/Terminate。
+//! edge: Cell<Option<Bb>> 协议与 mod.rs 的 FrameGuard 同侧未拆。
+
 use super::*;
 use super::{stmt::exec_stmt, call::{cleanup_edge, call_guarding_terminate, call_fn_addr}, services::{signal_thunk, unwind_backtrace, atexit_register, AtexitKind}};
 

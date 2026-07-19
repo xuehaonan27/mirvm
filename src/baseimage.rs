@@ -87,7 +87,7 @@ fn load(path: &std::path::Path, want_stamp: &str) -> Option<BaseImage> {
     }
     // 冻结区必须真的落在底座域（防御：文件被换/域被抢都不接受）
     let frozen_ok = f.module.frozen.as_ref().is_some_and(|fr| {
-        fr.at_fixed_base() && fr.home() == crate::vm::engine::frozen::BASE_IMAGE_FIXED_ADDR
+        fr.at_fixed_base() && fr.home() == crate::vm::engine::addrlayout::BASE_IMAGE_FIXED_ADDR
     });
     if !frozen_ok {
         return None;
@@ -336,7 +336,7 @@ pub fn absorb_stack(delta: &mut ir::Module, stack: ImageStack) {
             let home = m
                 .frozen
                 .as_ref()
-                .and_then(|f| crate::vm::engine::codearena::code_home_for_frozen(f.home()))
+                .and_then(|f| crate::vm::engine::addrlayout::code_home_for_frozen(f.home()))
                 .expect("P1：image 冻结域非法，stub 代码域不可推");
             delta.image_entry_stubs.push((
                 home,
@@ -371,7 +371,7 @@ impl Callbacks for BaseBuildCallbacks {
         let (mut module, exports) = crate::lower::lower_for_base_build(tcx);
         // 可缓存性判据（L2 store 同构；底座是跨程序共享，更不容妥协）
         let frozen_ok = module.frozen.as_ref().is_some_and(|fr| {
-            fr.at_fixed_base() && fr.home() == crate::vm::engine::frozen::BASE_IMAGE_FIXED_ADDR
+            fr.at_fixed_base() && fr.home() == crate::vm::engine::addrlayout::BASE_IMAGE_FIXED_ADDR
         });
         if !frozen_ok {
             eprintln!("base-image: 冻结区未落底座固定域，放弃");

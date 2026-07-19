@@ -1,3 +1,7 @@
+//! mirvm_* 运行期助手（自 jit_compile.rs J3-J5 整搬）：c2i 万能壳/
+//! unreachable/div_zero/volatile + 128/f128/f16 宿主直算 21 件 + libm
+//! 符号表。JIT 码经 import symbol 调回引擎；注册点 = compiler.rs。
+
 use super::*;
 use super::compiler::SHARED;
 

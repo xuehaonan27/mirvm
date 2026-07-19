@@ -1,3 +1,7 @@
+//! 冻结区物化（自 lower/mod.rs M5 alloc 带整搬）：ensure_alloc（常量/
+//! static/vtable/函数字节 → FrozenArena 定域）+ frozen_alloc_bytes +
+//! record_addr/record_both（A2 split 双侧记账）。impl Linker 子块。
+
 use super::*;
 use crate::lower::purity::arg_mentions_local;
 

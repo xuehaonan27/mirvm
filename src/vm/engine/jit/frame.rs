@@ -1,3 +1,7 @@
+//! FrameMap/analyze_frame（自 jit_compile.rs J9 整搬）：取址分析保守
+//! 全集区间模型——任何被 place 通道【字节区间】触及的 frame offset 一律
+//! 落栈帧内存（误提升 = 错值级，多落帧只是慢）。scan_* 五函数随族。
+
 use super::*;
 
 /// M5.4a 取址分析（保守全集，m5.4-design §3.1/Q1）：收集必须落栈帧内存的 frame

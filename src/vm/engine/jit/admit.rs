@@ -1,3 +1,7 @@
+//! JIT 准入族（自 jit_compile.rs J6 整搬）：scalar_slot/operand_ok/
+//! place_ok/mem_place_ok/rvalue_ok/callee_abi/admit——纯只读判定，
+//! 拒绝 = 永留解释（不残次编译）。调用方 = compiler.rs 的 worker/compile。
+
 use super::*;
 
 pub(super) fn scalar_slot(p: &ScalarPlace) -> Option<Slot> {

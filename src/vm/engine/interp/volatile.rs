@@ -1,3 +1,7 @@
+//! volatile 族（自 interp.rs I3 整搬）：opaque 字节载体 + 分块分解的
+//! mem_read_volatile/mem_write_volatile（MaybeUninit<[u8;N]> 对齐纪律）。
+//! jit helpers 复用同一实现（pub(crate) 再出口在 mod.rs）。
+
 use super::*;
 
 /// 把 guest 中的一个完整值作为 opaque 位型读入。`MaybeUninit<[u8; N]>`

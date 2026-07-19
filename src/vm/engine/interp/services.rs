@@ -1,3 +1,8 @@
+//! 运行期服务三族（自 interp.rs I10-I12 整搬）：signal_thunk（D8d async
+//! 信号 AS-trampoline）/ backtrace 影子帧（D8e 合成 IP，诚实 <unknown>）/
+//! atexit 家族（D8g 注册表 + LIFO 回调执行）。AtomicU64Ptr/ATEXIT 私有
+//! 静态随族走；pub(super) 面供 runblocks/mod.rs。
+
 use super::*;
 use super::call::call_fn_addr;
 

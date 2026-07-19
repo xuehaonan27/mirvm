@@ -1,3 +1,7 @@
+//! P1 fn 条目 + FFI 签名（自 lower/mod.rs M5 entries 带整搬）：fn_entry_addr
+//! （FFI 可派生条目可执行化 = 本域 stub 码址）/entry_ffi_sig/alloc_entry_stub/
+//! foreign_fn_entry_addr。impl Linker 子块；字段在 mod.rs 的 Linker 结构。
+
 use super::*;
 
 impl<'tcx> Linker<'tcx> {

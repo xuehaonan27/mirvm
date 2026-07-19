@@ -1,3 +1,8 @@
+//! intrinsic 就地展开（自 func.rs F13+F14+F16 整搬）：try_expand_intrinsic
+//! ~60 名分派（atomic/volatile/copy/ct*/math/fma/fast-float/ptr/size_of/
+//! saturating/caller_location/compare_bytes 族）+ float 路由/atomic_ord +
+//! F16 自由小件（elem_of/float_w/LayoutCxAt 等，pub(super) 供全树）。
+
 use super::*;
 
 impl<'tcx> LowerCx<'tcx, '_> {

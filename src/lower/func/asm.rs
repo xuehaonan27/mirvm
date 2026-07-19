@@ -1,3 +1,7 @@
+//! inline asm 站点降低（自 func.rs F11 整搬）：MIR 操作数 ↔ asm-stub
+//! wrapper 槽偏移配对；寄存器分配与 GAS 生成委托 crate::lower::asm
+//! （cg_clif 同构）。唯一入口 = term.rs 的 InlineAsm 臂。
+
 use super::*;
 
 impl<'tcx> LowerCx<'tcx, '_> {

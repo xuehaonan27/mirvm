@@ -1,3 +1,7 @@
+//! FFI 签名推导自由函数（自 lower/mod.rs M6 整搬）：freeze_c_fnptr_sig/
+//! ffi_kind_of/scalar_ffi_kind/ffi_agg_of/push_agg_field/canonical_link_name
+//! （extern "C" 系 fn-ptr 类型 → 冻结 ForeignSig；不可派生 = None 的判据面）。
+
 use super::*;
 
 /// extern "C" 系 fn-ptr 类型 → 冻结 ForeignSig（M4.4 FFI 反方向之二：调用点带上，

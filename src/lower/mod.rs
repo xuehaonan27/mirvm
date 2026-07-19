@@ -190,6 +190,10 @@ pub fn lower_for_base_build(tcx: TyCtxt<'_>) -> (ir::Module, BaseExports) {
 /// 导出 sym 索引。该 crate mono 集减栈下已有 = 本 image 内容（偏移合并同底座）。
 /// **不排除 LOCAL_CRATE**——LOCAL_CRATE 正是要成像的依赖 crate 本身，其符号名跨
 /// 程序稳定（同版本依赖 = 同符号名，这正是复用的前提）。
+///
+/// 预留口（2026-07-19 用户裁定保留）：全仓当前零调用方——依赖 image 的构建侧
+/// 尚未接线（S3′b 只兑现了装载侧 A2 聚合）。未来依赖 image 构建线重启时启用；
+/// 勿因「无调用方」再提删除。
 pub fn lower_for_image_build(
     tcx: TyCtxt<'_>,
     stack: &crate::baseimage::ImageStack,

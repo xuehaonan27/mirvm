@@ -1,3 +1,7 @@
+//! cast 家族（自 func.rs F9 整搬）：lower_cast 全族——IntToInt/PtrToPtr/
+//! PointerCoercion(Unsize/DynStar)/IntToFloat/FloatCast/Transmute 等。
+//! 唯一入口 = mod.rs lower_assign 的 Cast 臂；unsize 导航在 unsize.rs。
+
 use super::*;
 
 impl<'tcx> LowerCx<'tcx, '_> {

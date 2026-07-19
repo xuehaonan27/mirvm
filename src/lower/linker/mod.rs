@@ -1,3 +1,8 @@
+//! Linker（自 lower/mod.rs M4-M5 整搬）：降低期链接器——FuncId 去重集与
+//! 待降低队列、冻结区物化、P1 fn 条目、P2 GOT/foreign 槽、FFI 签名、A2
+//! split 状态。结构与新构造在 mod.rs；impl 子块按 recon 字段分组带 =
+//! entries(P1 条目+FFI 签名)/alloc(冻结区物化)/got(GOT·foreign 槽)/calls(调用解析)。
+
 mod alloc;
 mod calls;
 mod entries;

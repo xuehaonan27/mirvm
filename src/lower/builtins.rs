@@ -1,3 +1,7 @@
+//! engine_builtins 内建符号大表（自 lower/mod.rs M7 整搬）：unwind/
+//! atexit/signal/backtrace/x86 全族注册（llvm.x86.* → ir::Builtin 映射
+//! 数据——rustc 类型耦合，记档留 lower 域，不进 arch/）。
+
 use super::*;
 
 /// 符号是 mangled 的——`mangle_internal_symbol`）。Special = 默认分配器（引擎接管）；

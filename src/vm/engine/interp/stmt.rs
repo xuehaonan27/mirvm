@@ -1,3 +1,7 @@
+//! exec_stmt（自 interp.rs I8 整搬）：40+ Stmt 臂——原子族/memcpy-set/
+//! SIMD（544 行）/128 位·f128（306 行）/Fence/RepeatBytes。调用方 =
+//! runblocks 主循环；SIMD/128 子带的臂级再拆记档（战役 §7.16 不做）。
+
 use super::*;
 use super::{rvalue::eval_rvalue, volatile::{mem_read_volatile, mem_write_volatile}};
 

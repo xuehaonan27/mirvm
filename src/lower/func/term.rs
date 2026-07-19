@@ -1,3 +1,7 @@
+//! terminator 与 unwind 降低（自 func.rs F10 整搬）：lower_terminator 全族
+//! （Goto/SwitchInt/Assert→panic 块合成/Call→call.rs/InlineAsm→asm.rs）
+//! + lower_unwind。唯一入口 = mod.rs lower_instance。
+
 use super::*;
 
 impl<'tcx> LowerCx<'tcx, '_> {

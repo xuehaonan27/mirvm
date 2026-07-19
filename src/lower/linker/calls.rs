@@ -1,3 +1,7 @@
+//! 调用解析（自 lower/mod.rs M5 calls 带整搬）：func_id（去重+入队）/
+//! resolve_call（Callee 三形态）/freeze_foreign_sig/exported_defs（C2
+//! 救援链的 rlib 符号集供给）。impl Linker 子块。
+
 use super::*;
 
 impl<'tcx> Linker<'tcx> {

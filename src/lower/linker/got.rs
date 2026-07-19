@@ -1,3 +1,7 @@
+//! GOT/foreign 槽（自 lower/mod.rs M5 got 带整搬）：got_intern/
+//! got_fixup_push/foreign_slot/foreign_const_operand/foreign_fn_slot/
+//! materialize_in（P2 启动相统一重填的素材生产）。impl Linker 子块。
+
 use super::*;
 
 impl<'tcx> Linker<'tcx> {

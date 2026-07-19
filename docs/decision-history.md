@@ -891,9 +891,54 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   MIRVM_HOME/MIRVM_TARGET_DIR；cachectl du 硬链接重复计数（cosmetic，
   记此不修）。
 
+### 7.16 2026-07-18/19：结构重构战役——os/arch 双 leaf + 巨型文件治理（E21 闭合）
+
+- **缘起与北极星**：用户判代码库渐成屎山，裁定对标 OpenJDK JVM 分层
+  （share/vm 可携核心 + os/ OS 族 + cpu/ 架构族），兑现 DESIGN.md P7 与
+  open-issues E21。战前两路 explore 全图侦察（OS/arch 触点分布 + 八大
+  文件职责解剖与拆缝判定），铁律 = **纯搬移、零行为变化；每片 green
+  后才许进下一片**（验证纪律后段放宽为：cargo test + diff 双态 +
+  点测，gate5 战役收尾一轮——用户裁时裁盘）。
+- **片1 os/ 层**（`0215d4d`）：`src/os/mod.rs`（边界契约 = leaf/原语不
+  裁决/直通优先 + 非 linux compile_error!）+ `linux/{mem,thread,signal,
+  dll,process}`——mmap/TLS/信号/dlopen/fork/syscall 全部触点归并，
+  **非 os 域 `libc::` grep 机械清零**；guest 语义裁决（fork 守卫、信号
+  白名单、sigaction 改拷贝、栈放大策略）全留引擎业务侧。配套 =
+  `vm/engine/addrlayout.rs`（固定基址三方共享常量层）+ tsan 同源门禁
+  扩 `#[path]`。
+- **片2 arch/ 层**（`190e51d`）：`src/arch/mod.rs`（同款契约 + 非 x86_64
+  compile_error!）+ `x86_64/{intrinsics,asmstub}`——x86.rs 硬件执行体
+  整搬（920 行硬件交叉验证测试随迁）、stub 字节工厂与 int3/xgetbv
+  归位；`is_x86_feature_detected`/`core::arch`/`asm!` 非 arch 域清零。
+- **片3-6 巨型文件治理**（`40b107b`/`3318900`/`a22420d`/`ab77de5`）：
+  func.rs(5226)→`lower/func/` 八件（LowerCx 与工具带留 mod.rs，cast/
+  unsize/term/asm/call/intrinsic/simd 单入口簇成子文件 impl 块）；
+  interp.rs(3642)→`engine/interp/` 七件（地基与异常展开 edge 协议、
+  call_guest 发布协议读侧锚点留 mod.rs；volatile/rvalue/stmt/services/
+  call/runblocks 整函数切割，**无一处臂级手术**）；
+  jit_compile.rs(4302)→`engine/jit/` 七件（与原 jit.rs J1 状态基座
+  合并：state feature-free + compiler/admit/helpers/translate/frame/
+  lsda_probe 门内）；
+  lower/mod.rs(2765)→`lower/linker/` 五件（Linker 结构 + entries/
+  alloc/got/calls 字段分组带）+ builtins/ffi_sig/purity/rebase 四自由
+  模块——**lower/mod ⇄ native_archive 文件级环解**（依赖变 lower/mod →
+  native_archive → lower::{linker,ffi_sig} 单向无环）。
+- **质量定义（DoD 可验口径）**：每模块 `//!` 契约头（25 个拆分文件
+  补写）；可见性最小化（树内 pub(super)、跨树 pub(crate)、字段分组
+  精准放宽）；`cargo build --release --locked` 零警告；cargo test
+  74/74；diff.sh 38/38（含 JIT=1 双态）；diff_cargo 5/5；tsan 同源
+  编译过；gate5 **167/0/0**（战役收尾一轮）。
+- **记档接受面**：lower/asm.rs 寄存器分配与 llvm.x86 名表 = rustc 类型
+  耦合，留 lower 域（arch/ 禁 engine/rustc 类型的 leaf 纪律不硬搬）；
+  interp SIMD/128 子带与 CallBuiltin 臂的臂级再拆不做（整函数切割已够，
+  手术风险不值）；spikes 冻结原型与 ir.rs 全仓契约不动。
+- **伴生两件**：`lower_for_image_build` 零调用方——用户裁定标注预留
+  （依赖 image 构建侧未接线，勿再提删除）；gate/corpus 逐驱动清
+  deps/ir 缓存（本机 98% 磁盘用率实锤，`e1445b9`）。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
-- P7 设想独立 `src/os/` 物理层；当前 OS/FFI/builtin 逻辑仍分布在 lower、interp、ffi、heap。
+- ~~P7 设想独立 `src/os/` 物理层~~（**2026-07-18/19 已兑现**：`src/os/` + `src/arch/` 双 leaf 建成，E21 闭合，见 §7.16）。
 - “engine 是 library”目前只是 crate 结构；进程退出、全局 TLS key、泄漏式生命周期使其还不是稳定
   多 Engine 嵌入 API。
 - `.mirvm` mode B、fat target artifact、checked 模式、alloca 局部、方法级 JIT 均仍是设计，不是现状

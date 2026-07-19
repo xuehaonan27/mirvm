@@ -1,3 +1,7 @@
+//! SIMD intrinsic 一族（自 func.rs F15 独立 impl 块整搬）：expand_simd
+//! ~40 个 simd_* 臂 + lane 几何/元素类别（LaneKind 使「忘带类别」不可表示）。
+//! 唯一入口 = intrinsic.rs 的 simd_* 分派。
+
 use super::*;
 
 impl<'tcx> LowerCx<'tcx, '_> {
