@@ -267,26 +267,28 @@ zlib 这类 C 库 FFI 进去后是真机器码，其内部的 malloc/memcpy 打�
 - **P4 边界即 RAM 边界，绝不广泛拦截 native**：界内（解释代码的 foreign-call 边界）实现语义，界外（native 代码、裸函数指针 call）我们看不见也**不试图拦截——那是工程灾难**。真实地址让边界"软"而廉价（两种代码共享一个地址空间，见 §4）。
 - **P5 不 emulate，用真 OS**：能用真 OS 原语（线程/futex/文件/时钟）就直接用，只在 foreign-call 边界"搞最小的一点"（如 pthread_create 插蹦床）。emulate 一套机制（如自建线程调度）是反模式——既慢又常常对合法程序跑错（如 into_pthread_t）。VM tier 以真并行为默认；tier-0 用 GIL-over-真线程过渡，非协作 emulation。
 - **P6 Unix 优先**：unwinding/FFI 都 Unix 优先，macOS 次之，初期不支持 Windows。
-- **P7 OS 交互集中在 `os::` 边界（目标，尚未物理收口）**：一切触及真 OS / 系统库的东西
-  应通过清晰边界组织。当前 M4 逻辑仍分散在 `lower/mod.rs`、`interp.rs`、`ffi.rs`、`heap.rs`，
-  并不存在下面设想的 `src/os/`；它是待偿架构承诺，不能在状态文档中写成已完成。
-
-**`os::` 模块草图**（历史提案，尚未落地）：
+- **P7 OS 交互集中在 `os::` 边界（2026-07-18 已物理收口）**：一切触及真 OS /
+  系统库的东西都经 `src/os/` 原语层——**非 os 域的 `libc::` 触点已机械清零**
+  （grep 门禁，仅剩注释；spikes 冻结原型不在门禁内）。草图中的多数文件
+  （fs/time/net/rand/math/ffi）从未成为独立触点——全 syscall 族经
+  `os::process::syscall` 变参单点直通、FFI 在 `vm/engine/ffi.rs`（业务）调
+  `os::dll`（原语）——故落地形态比草图小，按实收口如下：
 
 ```
 src/os/
-  mod.rs        — os 抽象接口（trait）+ 三归宿分派；VM 核心只依赖这里
-  thread.rs     — create_thread(蹦床)/join/detach/futex/tls（真线程，C8）
-  mem.rs        — Rust Heap 分配器(arena/TLAB) / native heap(libc malloc 直通) / mmap
-  fs.rs         — open/read/write/close/stat（真 fd 直通）
-  time.rs       — clock_gettime/nanosleep（直通）
-  net.rs        — socket/epoll/eventfd/timerfd（真内核 fd 直通，async I/O）
-  rand.rs       — getrandom（直通）
-  process.rs    — exit/abort/env/args
-  math.rs       — libm（宿主直算，合成）
-  ffi.rs        — 出向: libffi call-out；入向: thunk/closure(native→解释, C8)
-  linux/        — 平台特定: syscall 号、struct 布局、weak 符号
+  mod.rs        — 边界契约（leaf/原语不裁决/直通优先）+ 平台选定
+                  （非 linux compile_error!，与 global_asm x86_64 硬门同前提）
+  linux/
+    mem.rs      — mmap/mprotect/munmap + 偏好固定基址（frozen/codearena/frame 归并）
+    thread.rs   — pthread TLS 族 + 栈界探测 + attr 栈尺寸 + /proc 线程计数
+    signal.rs   — signal/sigaction 直通 + sigaction 副本改 handler + SEGV dump
+    dll.rs      — dlopen/dlsym/dlerror/dlinfo 装载基址（+ 测试档 open_with_flags/close）
+    process.rs  — getenv/write/strlen/fork/atexit/syscall 变参单点 + JIT libcall 地址族
 ```
+
+  guest 语义裁决（fork 守卫、信号白名单、sigaction 改拷贝文案）仍在引擎业务侧，
+  os:: 只供原语——OpenJDK `os::` 同款纪律。固定基址数值另提升为
+  `vm/engine/addrlayout.rs` 共享常量层（frozen/codearena/ir 白名单三方共享）。
 
 ### 约束账本（按时间追加的历史账本）
 

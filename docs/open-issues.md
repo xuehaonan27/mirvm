@@ -99,7 +99,7 @@
 
 | ID | 事项 | 状态与内容 | 出处 |
 |---|---|---|---|
-| E21 | **`src/os/` P7 物理层未建** | `未立项` os:: 模块草图（thread/mem/fs/time/net/rand/process/math/ffi/linux/）从未落地；逻辑散布 lower/interp/ffi/heap。待偿架构承诺，不得写成已完成 | DESIGN.md P7，decision-history §8 |
+| E21 | **`src/os/` P7 物理层**（**主面已闭合 2026-07-18**） | 关闭：`src/os/` 建成（mod 契约 + linux/{mem,thread,signal,dll,process}，leaf 零 engine/rustc 依赖、原语不裁决）；engine/lower/cli 全部 libc 触点归并，**非 os 域 `libc::` grep 机械清零**（spikes 冻结原型不在门禁内）；固定基址数值提升 `vm/engine/addrlayout.rs` 三方共享。DESIGN.md P7 段已终态化。残余 = 巨文件治理（func/interp/jit/lower-mod）与 `arch/` 层（x86.rs 一族），属同一战役后续分片 | DESIGN.md P7，decision-history §7.16（战役落档随总收口） |
 | E22 | **多 Engine 嵌入 API / 生命周期收敛** | `未立项` Shared/thunk/asm handle/部分 TLS 进程期泄漏；错误径可退进程；runner `TRACK_DIAGNOSTIC` 进程全局单槽（daemon/嵌入/并发 compiler 前必须带所有权 guard）；dlopen 嵌入 TLS model 退化同题（vmctx §3.2） | current-status §4，decision-history §8 |
 | E23 | **checked 模式（L3）未建；L1 guard page 未建** | `未立项` region-check 设计储备在 designs/concurrency-arch.md §6；L1 目前只有固定地址域分池，无 PROT_NONE guard；正式沙箱归 OS 层（P3 VM 层已永久冻结 → H 节） | DESIGN.md C13，decision-history §7.5b |
 | E24 | **Cargo wrapper composition fail-closed** | `拒绝` 非空 `RUSTC_WRAPPER`/`RUSTC_WORKSPACE_WRAPPER` 或有效 build.rustc-wrapper 一律拒绝，不做 wrapper 链组合；重开 = 可重开的实现选择 | current-status §4，src/cargo_shim.rs:63 |
