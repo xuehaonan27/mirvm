@@ -849,7 +849,10 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   mmap，purge 工具不可承受其副作用）；条目扩展名（ir=bin、deps/base=img）
   过滤，`build.log` 等构建副产不碰不报（首版实测咬出此洞）。
 - **与 `.mirvmar` 愿景的关系**：`$HOME/.mirvm` 同时是未来 mirvmar 相关
-  本地解析的自然家；本片只备好根目录形态，不动 mirvmar 本体。
+  本地解析的自然家；本片只备好根目录形态，不动 mirvmar 本体。**统一依赖
+  cache 方向已裁定（用户 2026-07-18）**：近期 = 共享 cargo target dir
+  （cargo fingerprint 即编译键内容寻址）；终态 = mirvm 原生内容寻址 store
+  （登记 open-issues D14，与 mode B/D1 合并评审立项）。
 - **跟迁面**：tests/diff_cargo.sh（SCRIPT_CACHE）、a2_deps_image.sh、
   real_projects.sh（XDG 隔离位全部换 MIRVM_HOME 指向同名目录，prepare/
   marker/fake-mirvm 回归面零改动——新变量与旧布局同路径）。
