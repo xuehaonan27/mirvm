@@ -14,14 +14,17 @@ fn toolchain_root() -> &'static Path {
     Path::new(env!("MIRVM_DEFAULT_SYSROOT"))
 }
 
+/// mirvm 本地仓库根（2026-07-18 由 `$XDG_CACHE_HOME/mirvm` 迁址，decision-history
+/// §7.14）：内容不是随手可弃的 cache——scripts/<hash> 是不打包世界的本地依赖库、
+/// sysroot 是 MIR-rich std 唯一来源、deps/base/ir 是降低加速器、*.{so} 是运行期
+/// dlopen 对象——与未来 `.mirvmar` 预分发制品同族，统一放 `$HOME/.mirvm` 管理。
+/// `MIRVM_HOME` 环境变量可整体改址（测试/隔离用）。全组件自愈，可整根手删。
 pub fn cache_dir() -> PathBuf {
-    std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").expect("HOME 未设置");
-            PathBuf::from(home).join(".cache")
-        })
-        .join("mirvm")
+    if let Some(d) = std::env::var_os("MIRVM_HOME") {
+        return PathBuf::from(d);
+    }
+    let home = std::env::var_os("HOME").expect("HOME 未设置");
+    PathBuf::from(home).join(".mirvm")
 }
 
 /// 确保 MIR-rich sysroot 存在，返回其路径。

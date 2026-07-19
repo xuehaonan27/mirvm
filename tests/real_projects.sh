@@ -18,7 +18,7 @@ case "$MODE" in
 esac
 [ -f "$CASE_FILE" ] || { echo "case_not_found: $CASE_FILE" >&2; exit 66; }
 
-PROJECT_SUITE_ROOT=${PROJECT_SUITE_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/mirvm/project-suite}
+PROJECT_SUITE_ROOT=${PROJECT_SUITE_ROOT:-${MIRVM_HOME:-$HOME/.mirvm}/project-suite}
 PROJECT_SUITE_ARTIFACTS=${PROJECT_SUITE_ARTIFACTS:-target/project-suite}
 PROJECT_SUITE_MIRVM_CACHE=${PROJECT_SUITE_MIRVM_CACHE:-$PROJECT_SUITE_ROOT/mirvm-xdg}
 MIRVM=${MIRVM:-$(pwd)/target/release/mirvm}
@@ -207,7 +207,7 @@ try:
     reserved_env = {
         "CARGO", "CARGO_ENCODED_RUSTFLAGS", "CARGO_HOME", "CARGO_NET_OFFLINE",
         "CARGO_TARGET_DIR",
-        "HOME", "LD_PRELOAD", "MIRVM", "PATH", "RUSTC", "RUSTDOC",
+        "HOME", "LD_PRELOAD", "MIRVM", "MIRVM_HOME", "PATH", "RUSTC", "RUSTDOC",
         "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTFLAGS",
         "RUSTUP_HOME", "TMPDIR", "XDG_CACHE_HOME",
         "XDG_CONFIG_HOME", "XDG_DATA_HOME",
@@ -1129,7 +1129,7 @@ ensure_mirvm_cache() {
     printf 'fn main() {}\n' >"$probe"
     mkdir -p "$PROJECT_SUITE_MIRVM_CACHE" "$tmp/home" "$tmp/tmp"
     if ! env -i HOME="$tmp/home" TMPDIR="$tmp/tmp" \
-        XDG_CACHE_HOME="$PROJECT_SUITE_MIRVM_CACHE" CARGO_HOME="$CARGO_CACHE" \
+        XDG_CACHE_HOME="$PROJECT_SUITE_MIRVM_CACHE" MIRVM_HOME="$PROJECT_SUITE_MIRVM_CACHE/mirvm" CARGO_HOME="$CARGO_CACHE" \
         PATH="$SYSTEM_PATH" LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC TERM=dumb \
         RUSTC="$RUSTC" RUSTDOC="$RUSTDOC" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
         "$MIRVM" run "$probe" \
@@ -1184,7 +1184,7 @@ prepare_fetch_env() {
         --bind "$CARGO_CACHE" "$CARGO_CACHE" \
         --dev /dev --proc /proc --chdir "$PWD" \
         /usr/bin/env -i HOME="$root/home" TMPDIR="$root/tmp" \
-            XDG_CACHE_HOME="$root/xdg" CARGO_HOME="$CARGO_CACHE" \
+            XDG_CACHE_HOME="$root/xdg" MIRVM_HOME="$root/xdg/mirvm" CARGO_HOME="$CARGO_CACHE" \
             PATH="$SYSTEM_PATH" LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC TERM=dumb \
             RUSTC="$RUSTC" RUSTDOC="$RUSTDOC" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
             "$@" {EVIDENCE_LOCK_FD}>&- {CACHE_LOCK_FD}>&-
@@ -1202,7 +1202,7 @@ prepare_build_env() {
         --ro-bind "$CARGO_CACHE" "$CARGO_CACHE" \
         --dev /dev --proc /proc --chdir "$PWD" \
         /usr/bin/env -i HOME="$root/home" TMPDIR="$root/tmp" \
-            XDG_CACHE_HOME="$root/xdg" CARGO_HOME="$CARGO_CACHE" \
+            XDG_CACHE_HOME="$root/xdg" MIRVM_HOME="$root/xdg/mirvm" CARGO_HOME="$CARGO_CACHE" \
             CARGO_NET_OFFLINE=true PATH="$SYSTEM_PATH" \
             LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC TERM=dumb \
             RUSTC="$RUSTC" RUSTDOC="$RUSTDOC" RUSTUP_HOME="$HOST_RUSTUP_HOME" \
@@ -1322,7 +1322,7 @@ isolated_env() {
         --bind "$side_root" "$logical_root" \
         --dev /dev --proc /proc --chdir "$logical_cwd" \
         /usr/bin/env -i HOME="$logical_env_root/home" TMPDIR="$logical_env_root/tmp" \
-            XDG_CACHE_HOME="$logical_env_root/xdg" \
+            XDG_CACHE_HOME="$logical_env_root/xdg" MIRVM_HOME="$logical_env_root/xdg/mirvm" \
             CARGO_HOME="$CARGO_CACHE" CARGO_TARGET_DIR="$logical_env_root/target" \
             CARGO_NET_OFFLINE=true PATH="$SYSTEM_PATH" \
             LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC TERM=dumb \

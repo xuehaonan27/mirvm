@@ -14,8 +14,8 @@ cd "$(dirname "$0")/.."
 MIRVM=${MIRVM:-target/release/mirvm}
 WS=tests/fixtures/a2_ws
 HOST=$(rustc -vV | sed -n 's/^host: //p')
-DEPS=$HOME/.cache/mirvm/deps
-SYSROOT=$HOME/.cache/mirvm/sysroot-$HOST
+DEPS=${MIRVM_HOME:-$HOME/.mirvm}/deps
+SYSROOT=${MIRVM_HOME:-$HOME/.mirvm}/sysroot-$HOST
 CHANNEL=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
 CARGO=$HOME/.rustup/toolchains/$CHANNEL-$HOST/bin/cargo
 MIRVM_ABS=$(cd "$(dirname "$MIRVM")" && pwd)/$(basename "$MIRVM")

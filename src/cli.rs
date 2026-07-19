@@ -24,6 +24,11 @@ mirvm — a Rust runtime with its own execution engine
 USAGE:
     mirvm run <file.rs>  [OPTIONS] [-- <program args>]   # 单文件（可带 frontmatter 依赖）
     mirvm run <dir | Cargo.toml> [-- <program args>]     # cargo 项目（依赖自动构建为 MIR rlib）
+    mirvm cache status                                   # 本地仓库各组件体量 + 陈代体量
+    mirvm cache purge [--dry-run]                        # 默认 = 清陈代（deps/base/ir 非本 build 代）
+    mirvm cache purge --deps|--base|--ir                 # 对应族全清（所有代）
+    mirvm cache purge --scripts                          # scripts/ 全清（最大件：依赖构建缓存）
+    mirvm cache purge --all [--sysroot]                  # 除 sysroot 外全清；加旗连 sysroot（完全冷启动）
 
 OPTIONS:
     --dump-mir        打印 entry fn 的 MIR 后退出（仅单文件直通模式）
@@ -82,6 +87,7 @@ pub fn main() -> ExitCode {
 
     match first.as_str() {
         "run" => run_main(argv),
+        "cache" => cache_main(argv),
         "spike1" => crate::vm::spikes::spike1::run(),
         "spike2" => crate::vm::spikes::spike2::run(),
         "spike3" => crate::vm::spikes::spike3::run(argv),
@@ -96,6 +102,47 @@ pub fn main() -> ExitCode {
 }
 
 // ===== 用户入口 =====
+
+/// `mirvm cache status|purge …`：本地仓库（$HOME/.mirvm，MIRVM_HOME 可改址）管理。
+fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
+    let root = crate::sysroot::cache_dir();
+    let mut plan = crate::cachectl::Purge::default();
+    let mut sub = None;
+    for a in args {
+        match a.as_str() {
+            "status" | "purge" if sub.is_none() => sub = Some(a),
+            "--dry-run" => plan.dry_run = true,
+            "--deps" => plan.deps = true,
+            "--base" => plan.base = true,
+            "--ir" => plan.ir = true,
+            "--scripts" => plan.scripts = true,
+            "--all" => plan.all = true,
+            "--sysroot" => plan.sysroot = true,
+            _ => {
+                eprintln!("mirvm cache: 未知参数 `{a}`\n{USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    match sub.as_deref() {
+        Some("status") => {
+            print!("{}", crate::cachectl::status(&root));
+            ExitCode::SUCCESS
+        }
+        Some("purge") => {
+            // 无旗默认 = 清陈代（保守面）；任何目标旗在场则按旗走
+            if !(plan.deps || plan.base || plan.ir || plan.scripts || plan.all) {
+                plan.stale = true;
+            }
+            print!("{}", crate::cachectl::purge(&root, plan));
+            ExitCode::SUCCESS
+        }
+        _ => {
+            eprint!("{USAGE}");
+            ExitCode::from(2)
+        }
+    }
+}
 
 fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     let mut args = args.peekable();

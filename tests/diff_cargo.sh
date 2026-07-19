@@ -10,7 +10,7 @@ MIRVM=${MIRVM:-$(pwd)/target/debug/mirvm}
 CARGO=${CARGO:-$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo}
 RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
 RUSTC_APPEND_PROXY=${RUSTC_APPEND_PROXY:-$(pwd)/tests/project_suite_rustc_proxy.sh}
-SCRIPT_CACHE=${SCRIPT_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/mirvm/scripts}
+SCRIPT_CACHE=${SCRIPT_CACHE:-${MIRVM_HOME:-$HOME/.mirvm}/scripts}
 pass=0 xfail=0 fail=0
 
 show_diff() {
