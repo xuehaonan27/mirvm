@@ -23,6 +23,8 @@ pub(super) struct Translator<'a, 'b> {
     pub(super) div_zero: ClifFuncId,
     pub(super) volatile_load: ClifFuncId,
     pub(super) volatile_store: ClifFuncId,
+    pub(super) call_indirect: ClifFuncId,
+    pub(super) tls_ref: ClifFuncId,
 }
 
 impl Translator<'_, '_> {
@@ -1602,6 +1604,14 @@ impl Translator<'_, '_> {
                 let b1 = self.b.ins().icmp(c, x, y);
                 self.b.ins().uextend(types::I64, b1)
             }
+            R::TlsRef(id) => {
+                // T1-b：mirvm_tls_ref 助手（interp::tls_addr 同本体——每线程
+                // 实例块惰性物化）
+                let fref = self.module.declare_func_in_func(self.tls_ref, self.b.func);
+                let i = self.b.ins().iconst(types::I64, i64::from(*id));
+                let call = self.b.ins().call(fref, &[i]);
+                self.b.inst_results(call)[0]
+            }
             _ => unreachable!("admit 已排除"),
         }
     }
@@ -1949,6 +1959,128 @@ impl Translator<'_, '_> {
                         self.b.ins().return_(&[]);
                     }
                 }
+            }
+            Terminator::CallIndirect {
+                callee,
+                args,
+                ret,
+                target,
+                null_ok,
+                native_sig,
+                ..
+            } => {
+                // T1-b：mirvm_call_indirect 助手（interp CallIndirect 臂同派发：
+                // fn_addrs 反查 → call_guest；未命中 + native_sig → ffi::call_addr）
+                let (addr, _) = self.operand(callee);
+                // 展平 av（RetDest::Indirect 前插目的地址 + 逐实参，interp 同序）
+                let mut av: Vec<Value> = Vec::with_capacity(args.len() + 1);
+                if let RetDest::Indirect(dst) = ret {
+                    let a = self.place_addr(dst);
+                    av.push(a);
+                }
+                for a in args {
+                    av.push(self.operand(a).0);
+                }
+                let args_ss = self.b.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    (av.len().max(1) * 8) as u32,
+                    3,
+                ));
+                for (i, v) in av.iter().enumerate() {
+                    self.b.ins().stack_store(*v, args_ss, (i * 8) as i32);
+                }
+                let ret_ss = self.b.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    16,
+                    3,
+                ));
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.call_indirect, self.b.func);
+                let ap = self.b.ins().stack_addr(types::I64, args_ss, 0);
+                let nv = self.b.ins().iconst(types::I64, av.len() as i64);
+                let rp = self.b.ins().stack_addr(types::I64, ret_ss, 0);
+                let nok = self.b.ins().iconst(types::I64, i64::from(*null_ok));
+                let nsig = self.b.ins().iconst(
+                    types::I64,
+                    native_sig
+                        .as_ref()
+                        .map_or(0, |s| s as *const ir::ForeignSig as i64),
+                );
+                let fv = self.b.ins().iconst(types::I64, func as i64);
+                self.b.ins().call(fref, &[addr, ap, nv, rp, nok, nsig, fv]);
+                // 写回（interp 同形：Ignore/Indirect 不写，Scalar=lo，Pair=(lo,hi)）
+                match ret {
+                    RetDest::Ignore | RetDest::Indirect(_) => {}
+                    RetDest::Scalar(ScalarPlace::Slot(s)) => {
+                        let lo = self.b.ins().stack_load(types::I64, ret_ss, 0);
+                        self.def_slot(*s, lo);
+                    }
+                    RetDest::Pair(ScalarPlace::Slot(pl), ScalarPlace::Slot(ph)) => {
+                        let lo = self.b.ins().stack_load(types::I64, ret_ss, 0);
+                        let hi = self.b.ins().stack_load(types::I64, ret_ss, 8);
+                        self.def_slot(*pl, lo);
+                        self.def_slot(*ph, hi);
+                    }
+                    _ => unreachable!("admit 已筛 ret 形态"),
+                }
+                self.b.ins().jump(blocks[*target as usize], &[]);
+            }
+            Terminator::InlineAsm {
+                stub,
+                buf_size,
+                ins,
+                outs,
+                target,
+            } => {
+                // T1-b：asm-stub 真地址直调（interp InlineAsm 臂同槽 ABI：
+                // 栈缓冲、ins 标量 8B 槽低位/VecBytes 全宽拷、call fn(*mut u8)、
+                // outs 读回）
+                let buf = self.b.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    (*buf_size).max(1),
+                    4,
+                ));
+                let base = self.b.ins().stack_addr(types::I64, buf, 0);
+                for (off, v) in ins {
+                    match v {
+                        ir::AsmIoVal::Scalar(o) => {
+                            let (x, _) = self.operand(o);
+                            self.b.ins().stack_store(x, buf, *off as i32);
+                        }
+                        ir::AsmIoVal::VecBytes(pe, size) => {
+                            let src = self.place_addr(pe);
+                            let dst = self.b.ins().stack_addr(types::I64, buf, *off as i32);
+                            let n = self.b.ins().iconst(types::I64, i64::from(*size));
+                            let fref = self.module.declare_func_in_func(self.memmove, self.b.func);
+                            self.b.ins().call(fref, &[dst, src, n]);
+                        }
+                    }
+                }
+                let stub_addr = self.b.ins().iconst(
+                    types::I64,
+                    self.shared.module.asm_stub_addrs[*stub as usize] as i64,
+                );
+                let mut s = self.module.make_signature();
+                s.params.push(AbiParam::new(types::I64));
+                let sigref = self.b.import_signature(s);
+                self.b.ins().call_indirect(sigref, stub_addr, &[base]);
+                for (off, d) in outs {
+                    match d {
+                        ir::AsmIoDst::Scalar(sp) => {
+                            let v = self.b.ins().stack_load(types::I64, buf, *off as i32);
+                            self.write_scalar_place(sp, v);
+                        }
+                        ir::AsmIoDst::VecBytes(pe, size) => {
+                            let dst = self.place_addr(pe);
+                            let src = self.b.ins().stack_addr(types::I64, buf, *off as i32);
+                            let n = self.b.ins().iconst(types::I64, i64::from(*size));
+                            let fref = self.module.declare_func_in_func(self.memmove, self.b.func);
+                            self.b.ins().call(fref, &[dst, src, n]);
+                        }
+                    }
+                }
+                self.b.ins().jump(blocks[*target as usize], &[]);
             }
             Terminator::Unreachable => {
                 let fref = self

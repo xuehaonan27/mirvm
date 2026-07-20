@@ -16,6 +16,65 @@ pub(super) extern "C-unwind" fn mirvm_c2i(func: u64, args: *const u64, n: u64, r
     }
 }
 
+/// T1-b CallIndirect 助手（m5.4-design §3.2；interp runblocks CallIndirect 臂
+/// 同一派发：fn_addrs 反查 → call_guest 本体；未命中 + native_sig →
+/// ffi::call_addr 本体；空槽 null_ok 空操作 / 空指针与未知目标的诊断同 interp）。
+pub(super) extern "C-unwind" fn mirvm_call_indirect(
+    addr: u64,
+    args: *const u64,
+    n: u64,
+    ret: *mut u64,
+    null_ok: u64,
+    native_sig: u64,
+    caller: u64,
+) {
+    let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
+    let ctx = crate::vm::engine::ctx::attach(shared);
+    let module = &shared.module;
+    if null_ok != 0 && addr == 0 {
+        return; // dyn 虚 drop 空槽：空操作（interp 同）
+    }
+    let caller_name = &module.funcs[caller as usize].name;
+    if addr == 0 {
+        crate::vm::engine::interp::engine_abort(&format!(
+            "间接调用空 fn 指针（调用者 {caller_name}）"
+        ));
+    }
+    let av = unsafe { std::slice::from_raw_parts(args, n as usize) };
+    let (lo, hi) = if let Some(&fid) = module.fn_addrs.get(&addr) {
+        crate::vm::engine::interp::call_guest(ctx, fid, av)
+    } else if native_sig != 0 {
+        // guest 持 native 真码 fn ptr（运行期 dlsym 所得）→ 按冻结签名直调；
+        // Agg 返回时首槽即目的地址（libffi sret 不占参数位，剔除后直调）——interp 同
+        let nsig = unsafe { &*(native_sig as *const crate::vm::engine::ir::ForeignSig) };
+        let (ret_dst, arg_slice) = if matches!(nsig.ret, crate::vm::engine::ir::FfiKind::Agg(_))
+        {
+            (av.first().copied(), &av[1..])
+        } else {
+            (None, av)
+        };
+        (
+            crate::vm::engine::ffi::call_addr(addr as usize, nsig, arg_slice, ret_dst),
+            0,
+        )
+    } else {
+        crate::vm::engine::interp::engine_abort(&format!(
+            "间接调用目标 {addr:#x} 不是已知 fn 条目（调用者 {caller_name}）"
+        ));
+    };
+    unsafe {
+        *ret = lo;
+        *ret.add(1) = hi;
+    }
+}
+
+/// T1-b TlsRef 助手（同本体 interp::tls_addr 的惰性物化——每线程实例块）。
+pub(super) extern "C-unwind" fn mirvm_tls_ref(id: u64) -> u64 {
+    let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
+    let ctx = crate::vm::engine::ctx::attach(shared);
+    crate::vm::engine::interp::tls_addr(ctx, id as u32)
+}
+
 /// Unreachable 终止子的诊断口径与解释器一致（不用裸 trap 的 SIGILL）。
 pub(super) extern "C-unwind" fn mirvm_jit_unreachable(func: u64) -> ! {
     let shared = unsafe { &*SHARED.load(Ordering::Acquire) };

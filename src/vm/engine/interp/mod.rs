@@ -105,7 +105,7 @@ pub(crate) fn engine_abort(what: &str) -> ! {
 
 /// guest TLS 实例真地址（M4.4 D3）：首访惰性物化——heap 分配 + 冻结模板拷贝。
 /// 每线程一份（Ctx 是 thread_local）；v1 记账：线程退出不跑 dtor、实例泄漏。
-pub(super) fn tls_addr(ctx: *mut Ctx, id: u32) -> u64 {
+pub(crate) fn tls_addr(ctx: *mut Ctx, id: u32) -> u64 {
     let tls: &Vec<u64> = unsafe { &(*ctx).tls };
     if let Some(&a) = tls.get(id as usize)
         && a != 0

@@ -94,6 +94,9 @@ struct Compiler {
     /// M5.4b-1：volatile 读/写（interp opaque 字节载体同一实现）
     volatile_load: ClifFuncId,
     volatile_store: ClifFuncId,
+    /// T1-b：CallIndirect/TlsRef 助手（helpers.rs 同本体）
+    call_indirect: ClifFuncId,
+    tls_ref: ClifFuncId,
     /// 本批 (clif id, unwind info)——finalize 后统一注册 eh_frame
     pending_unwind: Vec<(ClifFuncId, UnwindInfo)>,
 }
@@ -114,6 +117,8 @@ impl Compiler {
         jb.symbol("mirvm_jit_div_zero", mirvm_jit_div_zero as *const u8);
         jb.symbol("mirvm_volatile_load", mirvm_volatile_load as *const u8);
         jb.symbol("mirvm_volatile_store", mirvm_volatile_store as *const u8);
+        jb.symbol("mirvm_call_indirect", mirvm_call_indirect as *const u8);
+        jb.symbol("mirvm_tls_ref", mirvm_tls_ref as *const u8);
         // M5.4b-3 助手注册表
         jb.symbol("mirvm_bin128_ovf", mirvm_bin128_ovf as *const u8);
         jb.symbol("mirvm_f128_bin", mirvm_f128_bin as *const u8);
@@ -186,6 +191,20 @@ impl Compiler {
         let volatile_store = module
             .declare_function("mirvm_volatile_store", Linkage::Import, &sig_mm)
             .unwrap();
+        // T1-b 调用助手（helpers.rs 本体 = interp 派发/惰性物化同构）
+        let mut sig_ci = module.make_signature();
+        for _ in 0..7 {
+            sig_ci.params.push(AbiParam::new(types::I64));
+        }
+        let call_indirect = module
+            .declare_function("mirvm_call_indirect", Linkage::Import, &sig_ci)
+            .unwrap();
+        let mut sig_tls = module.make_signature();
+        sig_tls.params.push(AbiParam::new(types::I64));
+        sig_tls.returns.push(AbiParam::new(types::I64));
+        let tls_ref = module
+            .declare_function("mirvm_tls_ref", Linkage::Import, &sig_tls)
+            .unwrap();
 
         Compiler {
             shared,
@@ -199,6 +218,8 @@ impl Compiler {
             div_zero,
             volatile_load,
             volatile_store,
+            call_indirect,
+            tls_ref,
             pending_unwind: Vec::new(),
         }
     }
@@ -388,6 +409,8 @@ impl Compiler {
                 div_zero: self.div_zero,
                 volatile_load: self.volatile_load,
                 volatile_store: self.volatile_store,
+                call_indirect: self.call_indirect,
+                tls_ref: self.tls_ref,
             };
             tr.build(func, body);
             b.seal_all_blocks();

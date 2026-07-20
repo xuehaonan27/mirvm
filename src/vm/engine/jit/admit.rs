@@ -67,6 +67,8 @@ pub(super) fn rvalue_ok(rv: &ir::Rvalue) -> bool {
         // M5.4b-3 f128/128 位比较（place 通道）
         R::F128Cmp { a, b, .. } => place_ok(a) && place_ok(b),
         R::Cmp128 { a, b, .. } => place_ok(a) && place_ok(b),
+        // T1-b：guest TLS 取址（mirvm_tls_ref 助手同本体）
+        R::TlsRef(_) => true,
         _ => false,
     }
 }
@@ -233,6 +235,30 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
                     )
                     && shared.module.funcs.get(*callee as usize).is_some()
             }
+            // T1-b：CallIndirect（mirvm_call_indirect 助手，interp 臂同派发）——
+            // unwind-transparent 只收 Continue（CFI 穿透，LSDA 归 T1-c）；
+            // callee 与全部实参可求值；ret 落点同 interp 全形态
+            Terminator::CallIndirect {
+                callee,
+                args,
+                ret,
+                unwind,
+                ..
+            } => {
+                matches!(unwind, UnwindAction::Continue)
+                    && operand_ok(callee)
+                    && args.iter().all(operand_ok)
+                    && matches!(
+                        ret,
+                        RetDest::Ignore
+                            | RetDest::Scalar(ScalarPlace::Slot(_))
+                            | RetDest::Pair(ScalarPlace::Slot(_), ScalarPlace::Slot(_))
+                            | RetDest::Indirect(_)
+                    )
+            }
+            // T1-b：InlineAsm（asm-stub 真地址直调，槽 ABI 同 interp；ins/outs
+            // 的 VecBytes place 帧分析已全量扫描——admit 即放行）
+            Terminator::InlineAsm { .. } => true,
             _ => false,
         };
         if !ok {
