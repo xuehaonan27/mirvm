@@ -982,6 +982,14 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   空钩子；有了它，三形态+⑤常态无旁路。
 - **覆盖边界（如实）**：`sysenter`/`int $0x80` 与 `.byte 0x0f,0x05` 对抗
   书写不接（无真实形态，重开需实锤 crate）。
+- **T5 施工实录（2026-07-21，`d0470fc`）**：一次实锤反转——初版
+  `call [rip+slot]` 被 ld 拒（全局符号 PC32 重定位不可用于 shared
+  object），改 **GOT 两级间接**（`mov r11,[rip+slot@GOTPCREL]; call
+  [r11]`：GOT 项装载期填 → 命名 .data 槽 dlopen 后重填；r11 恰为
+  syscall 契约可坏寄存器）；trampoline 增补 xmm0-15+mxcsr 无条件保全
+  （TRACE 打印会碰向量态，诚实纪律）；global_asm! 在本 toolchain 为
+  Intel 语法（AT&T 初版被拒实锤）。验收全绿：76/76、探针三维一致 +
+  TRACE 双拦截实证、diff.sh 39、rustix 系零回归。
 
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
