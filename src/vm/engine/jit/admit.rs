@@ -259,6 +259,24 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
             // T1-b：InlineAsm（asm-stub 真地址直调，槽 ABI 同 interp；ins/outs
             // 的 VecBytes place 帧分析已全量扫描——admit 即放行）
             Terminator::InlineAsm { .. } => true,
+            // T1-b：CallForeign（mirvm_call_foreign 助手，interp 臂同构）——
+            // unwind-transparent 只收 Continue；实参可求值；ret 形态同 interp
+            // 支持面（Pair 返回 interp 亦 engine_abort——留解释即保持同诊断）
+            Terminator::CallForeign {
+                args,
+                ret,
+                unwind,
+                ..
+            } => {
+                matches!(unwind, UnwindAction::Continue)
+                    && args.iter().all(operand_ok)
+                    && matches!(
+                        ret,
+                        RetDest::Ignore
+                            | RetDest::Scalar(ScalarPlace::Slot(_))
+                            | RetDest::Indirect(_)
+                    )
+            }
             _ => false,
         };
         if !ok {

@@ -25,6 +25,7 @@ pub(super) struct Translator<'a, 'b> {
     pub(super) volatile_store: ClifFuncId,
     pub(super) call_indirect: ClifFuncId,
     pub(super) tls_ref: ClifFuncId,
+    pub(super) call_foreign: ClifFuncId,
 }
 
 impl Translator<'_, '_> {
@@ -2079,6 +2080,65 @@ impl Translator<'_, '_> {
                             self.b.ins().call(fref, &[dst, src, n]);
                         }
                     }
+                }
+                self.b.ins().jump(blocks[*target as usize], &[]);
+            }
+            Terminator::CallForeign {
+                sym,
+                sig,
+                args,
+                ret,
+                target,
+                ..
+            } => {
+                // T1-b：mirvm_call_foreign 助手（interp CallForeign 臂同构——
+                // thunk_args 物化/C1 Indirect 落点/pthread 栈放大还原/ffi::call 本体）
+                let mut av: Vec<Value> = Vec::with_capacity(args.len());
+                for a in args {
+                    av.push(self.operand(a).0);
+                }
+                // C1：按值聚合返回 = Indirect 落点（ffi 层 memcpy 至目的真地址）
+                let ret_dst = if let RetDest::Indirect(dst) = ret {
+                    self.place_addr(dst)
+                } else {
+                    self.b.ins().iconst(types::I64, 0)
+                };
+                let args_ss = self.b.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    (av.len().max(1) * 8) as u32,
+                    3,
+                ));
+                for (i, v) in av.iter().enumerate() {
+                    self.b.ins().stack_store(*v, args_ss, (i * 8) as i32);
+                }
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.call_foreign, self.b.func);
+                let sp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, sym.as_ptr() as i64);
+                let sl = self.b.ins().iconst(types::I64, sym.len() as i64);
+                let sg = self.b.ins().iconst(
+                    types::I64,
+                    sig as *const ir::ForeignSig as i64,
+                );
+                let ap = self.b.ins().stack_addr(types::I64, args_ss, 0);
+                let nv = self.b.ins().iconst(types::I64, av.len() as i64);
+                let fv = self.b.ins().iconst(types::I64, func as i64);
+                let call = self
+                    .b
+                    .ins()
+                    .call(fref, &[sp, sl, sg, ap, nv, ret_dst, fv]);
+                let r = self.b.inst_results(call)[0];
+                match ret {
+                    RetDest::Ignore => {}
+                    RetDest::Scalar(p) => {
+                        self.write_scalar_place(p, r);
+                    }
+                    // C1：按值聚合字节已由 ffi 层 memcpy 至 dst
+                    RetDest::Indirect(_) => {}
+                    _ => unreachable!("admit 已筛 foreign 返回形态"),
                 }
                 self.b.ins().jump(blocks[*target as usize], &[]);
             }

@@ -75,6 +75,70 @@ pub(super) extern "C-unwind" fn mirvm_tls_ref(id: u64) -> u64 {
     crate::vm::engine::interp::tls_addr(ctx, id as u32)
 }
 
+/// T1-b CallForeign 助手（m5.4-design §3.2；interp CallForeign 臂同构——
+/// thunk_args 物化 / C1 Indirect 落点 / pthread 栈放大还原 / ffi::call 本体，
+/// 诊断文案同 interp）。
+pub(super) extern "C-unwind" fn mirvm_call_foreign(
+    sym_ptr: *const u8,
+    sym_len: u64,
+    sig: u64,
+    args: *const u64,
+    n: u64,
+    ret_dst: u64,
+    caller: u64,
+) -> u64 {
+    let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
+    let ctx = crate::vm::engine::ctx::attach(shared);
+    let module = &shared.module;
+    let sym = unsafe {
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(sym_ptr, sym_len as usize))
+    };
+    let sig = unsafe { &*(sig as *const crate::vm::engine::ir::ForeignSig) };
+    let mut av: Vec<u64> = unsafe { std::slice::from_raw_parts(args, n as usize) }.to_vec();
+    // M4.4 D1：fn-ptr 实参位——guest fn 条目地址逃逸给 native 前物化 thunk 真码；
+    // NULL 与已是 native 真码（反查未命中，guest 转传）原样直传；P1 可派生条目值
+    // 本身已是 stub 码址——跳过二次物化（interp 同判据）
+    for (pos, inner) in &sig.thunk_args {
+        let v = av[*pos];
+        if v != 0
+            && !crate::vm::engine::codearena::is_stub_addr(v)
+            && let Some(&fid) = module.fn_addrs.get(&v)
+        {
+            av[*pos] = crate::vm::engine::thunks::get_or_create(shared, v, fid, inner);
+        }
+    }
+    let ret_dst = (ret_dst != 0).then_some(ret_dst);
+    // D8a：guest 线程栈放大（显式 stacksize 临时放大、调用后还原；自供栈不动）
+    let stack_restore = crate::vm::engine::ffi::amplify_pthread_stack(sym, &av);
+    let r = {
+        let ffi = unsafe { &mut (*ctx).ffi };
+        crate::vm::engine::ffi::call(
+            ffi,
+            &module.native_libs,
+            &module.required_native_libs,
+            sym,
+            sig,
+            &av,
+            ret_dst,
+        )
+    };
+    if let Some((attr, orig)) = stack_restore {
+        crate::os::thread::attr_set_stack_size(attr, orig);
+    }
+    let caller_name = &module.funcs[caller as usize].name;
+    let r = r.unwrap_or_else(|reason| {
+        crate::vm::engine::interp::engine_abort(&format!(
+            "foreign `{sym}` 的必需原生库装载失败（fn {caller_name}）: {reason}"
+        ))
+    });
+    let Some(r) = r else {
+        crate::vm::engine::interp::engine_abort(&format!(
+            "foreign `{sym}` 符号不存在（归档兜底表 / dlsym 全域均未命中；fn {caller_name}）"
+        ));
+    };
+    r
+}
+
 /// Unreachable 终止子的诊断口径与解释器一致（不用裸 trap 的 SIGILL）。
 pub(super) extern "C-unwind" fn mirvm_jit_unreachable(func: u64) -> ! {
     let shared = unsafe { &*SHARED.load(Ordering::Acquire) };

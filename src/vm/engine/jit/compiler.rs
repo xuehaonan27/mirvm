@@ -97,6 +97,7 @@ struct Compiler {
     /// T1-b：CallIndirect/TlsRef 助手（helpers.rs 同本体）
     call_indirect: ClifFuncId,
     tls_ref: ClifFuncId,
+    call_foreign: ClifFuncId,
     /// 本批 (clif id, unwind info)——finalize 后统一注册 eh_frame
     pending_unwind: Vec<(ClifFuncId, UnwindInfo)>,
 }
@@ -119,6 +120,7 @@ impl Compiler {
         jb.symbol("mirvm_volatile_store", mirvm_volatile_store as *const u8);
         jb.symbol("mirvm_call_indirect", mirvm_call_indirect as *const u8);
         jb.symbol("mirvm_tls_ref", mirvm_tls_ref as *const u8);
+        jb.symbol("mirvm_call_foreign", mirvm_call_foreign as *const u8);
         // M5.4b-3 助手注册表
         jb.symbol("mirvm_bin128_ovf", mirvm_bin128_ovf as *const u8);
         jb.symbol("mirvm_f128_bin", mirvm_f128_bin as *const u8);
@@ -205,6 +207,14 @@ impl Compiler {
         let tls_ref = module
             .declare_function("mirvm_tls_ref", Linkage::Import, &sig_tls)
             .unwrap();
+        let mut sig_cf = module.make_signature();
+        for _ in 0..6 {
+            sig_cf.params.push(AbiParam::new(types::I64));
+        }
+        sig_cf.returns.push(AbiParam::new(types::I64));
+        let call_foreign = module
+            .declare_function("mirvm_call_foreign", Linkage::Import, &sig_cf)
+            .unwrap();
 
         Compiler {
             shared,
@@ -220,6 +230,7 @@ impl Compiler {
             volatile_store,
             call_indirect,
             tls_ref,
+            call_foreign,
             pending_unwind: Vec::new(),
         }
     }
@@ -411,6 +422,7 @@ impl Compiler {
                 volatile_store: self.volatile_store,
                 call_indirect: self.call_indirect,
                 tls_ref: self.tls_ref,
+                call_foreign: self.call_foreign,
             };
             tr.build(func, body);
             b.seal_all_blocks();
