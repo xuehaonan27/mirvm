@@ -288,6 +288,11 @@ fn undefined_nonlib_symbols(so: &std::path::Path) -> Option<String> {
 /// naked fn 混入模块级 asm，可能引用 guest 符号 → 不能 `-nostdlib`；用 `-nostartfiles`
 /// 保留动态链接器解析（naked 内 sym 操作数指向的 guest fn 由 RTLD_GLOBAL 兜底）。
 fn assemble(asm: &str) -> Result<Box<str>, String> {
+    // T5：与 asm-stub 同通道——global_asm/naked 内裸 `syscall` 指令 → 间接槽
+    // 调用（改写发生在内容哈希前，缓存键与最终字节一致；槽随 .so 物化，
+    // 装载 required_native_libs 时由 lower_inner 统一重填）
+    let mut asm = asm.to_string();
+    crate::lower::asm::rewrite_syscall_text(&mut asm);
     let hash = crate::lower::asm::fnv1a(asm.as_bytes());
     let dir = crate::sysroot::cache_dir().join("global-asm");
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建 global-asm 缓存目录失败: {e}"))?;

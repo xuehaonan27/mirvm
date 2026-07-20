@@ -268,6 +268,9 @@ fn lower_inner(
             // 记 required 句柄（dynsym 可见符号的链接序解析，先于全域——
             // native 链接期绑定，psm/rustc_driver 碰撞实锤）。
             linker.archive_handles.push(h);
+            // T5：global_asm 物化的 .so 若含 syscall 间接槽则当场重填
+            // （系统库无此符号，静默跳过）
+            crate::lower::asm::refill_syscall_slot(h);
             // hidden 符号 .symtab 兜底表（口径同 FfiState：只收不进 .dynsym 的
             // 符号）。基址或解析失败不建表——dlsym 可见面不受影响，hidden 符号
             // 由取址路径的既有诊断兜底（宁缺勿滥：错基址表会静默解到野地址）。

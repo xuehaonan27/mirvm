@@ -46,6 +46,71 @@ pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     h
 }
 
+// ===== T5 syscall 拦截（decision-history §7.18，E19③④）=====
+//
+// guest inline-asm 与 global_asm 内的裸 `syscall` 指令：mirvm 本就持有全部 GAS
+// 文本（生成点在手，无需扫二进制）。文本改写 `syscall` → 经间接槽的
+// `call QWORD PTR [rip+mirvm_syscall_slot]`；槽随 .so 物化、dlopen 后重填为
+// arch::x86_64::asmstub 的 trampoline 真地址（P2 启动相重填同款纪律）；
+// trampoline 保 syscall 全契约（整数/flags/xmm/mxcsr）后落
+// os::process::mirvm_syscall_dispatch（v1 直通 + TRACE）。
+// 覆盖边界（如实，无真实形态）：`sysenter`/`int $0x80`、`.byte 0x0f,0x05` 对抗
+// 书写、行内多语句/标签前缀花式——不接；重开需实锤 crate。
+
+/// 间接槽定义（命中即随 .s 附带一次；`%rip` 相对寻址，.so 自洽无需外部符号）。
+const SYSCALL_SLOT_DEF: &str =
+    ".data\n.globl mirvm_syscall_slot\n.p2align 3\nmirvm_syscall_slot: .quad 0\n.text\n";
+
+/// `syscall` 指令的替换体（RIP 相对间接调用；asm-stub 全区为 `.intel_syntax
+/// noprefix` 包裹——必须用 Intel 形式，AT&T 的 `*(%rip)` 会被 GAS 拒）。
+/// 两级间接（PIC 纪律）：GOT 项（动态链接器装载期填）→ 命名 .data 槽
+/// （mirvm dlopen 后重填 trampoline 真址）；r11 恰为 syscall 契约的可坏
+/// 寄存器，作跳板不违约。
+const SYSCALL_CALL: &str = "    mov r11, QWORD PTR [rip+mirvm_syscall_slot@GOTPCREL]\n    call [r11]\n";
+
+/// 行级助记符匹配：前导空白已剥；`syscall` 后只容许行尾/空白/注释（# 或 ;）。
+/// 多语句同行与标签前缀形态不接（覆盖边界，见上）。
+fn is_syscall_insn_line(trimmed: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix("syscall") else {
+        return false;
+    };
+    let mut cs = rest.chars();
+    match cs.next() {
+        None => true,
+        Some(c) => c.is_whitespace() || c == '#' || c == ';',
+    }
+}
+
+/// 改写 src 中全部 `syscall` 指令行为间接槽调用。返回是否有改写（决定是否
+/// 附带槽定义与 dlopen 后重填）。
+pub(crate) fn rewrite_syscall_text(src: &mut String) -> bool {
+    let mut hit = false;
+    let mut out = String::with_capacity(src.len() + 64);
+    for line in src.split_inclusive('\n') {
+        if is_syscall_insn_line(line.trim_start()) {
+            out.push_str(SYSCALL_CALL);
+            hit = true;
+        } else {
+            out.push_str(line);
+        }
+    }
+    *src = out;
+    if hit {
+        src.push_str(SYSCALL_SLOT_DEF);
+    }
+    hit
+}
+
+/// dlopen 后重填 syscall 间接槽（在场才填——系统库无此符号，静默跳过）。
+pub(crate) fn refill_syscall_slot(handle: usize) {
+    let slot = crate::os::dll::sym(handle, c"mirvm_syscall_slot");
+    if slot != 0 {
+        unsafe {
+            *(slot as *mut u64) = crate::arch::x86_64::asmstub::syscall_trampoline_addr();
+        }
+    }
+}
+
 pub(crate) fn materialize(sites: &[ir::AsmSite]) -> Vec<u64> {
     if sites.is_empty() {
         return Vec::new();
@@ -55,6 +120,9 @@ pub(crate) fn materialize(sites: &[ir::AsmSite]) -> Vec<u64> {
     for site in sites {
         src.push_str(&site.text);
     }
+    // T5：裸 `syscall` 指令 → 间接槽调用（改写发生在内容哈希前，缓存键与
+    // 最终字节一致）
+    rewrite_syscall_text(&mut src);
 
     // FNV-1a 内容哈希（稳定、跨运行可复用缓存键）
     let h = fnv1a(src.as_bytes());
@@ -86,6 +154,7 @@ pub(crate) fn materialize(sites: &[ir::AsmSite]) -> Vec<u64> {
     let c_so = std::ffi::CString::new(so.as_os_str().as_encoded_bytes()).unwrap();
     let handle = crate::os::dll::open_with_flags(&c_so, crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL)
         .unwrap_or_else(|_| panic!("dlopen asm-stub .so 失败: {}", so.display()));
+    refill_syscall_slot(handle);
 
     sites
         .iter()
@@ -555,5 +624,54 @@ mirvm_asm_0:
         let stub: unsafe extern "C" fn(*mut u8) = unsafe { std::mem::transmute(addrs[0]) };
         unsafe { stub((&mut value as *mut u64).cast()) };
         assert_eq!(value, 0x0123_4567_89ab_cdef);
+    }
+
+    #[test]
+    fn rewrite_syscall_text_hits_only_mnemonic_lines() {
+        let mut src = "mov rax, 1\n    syscall\nsyscallx\n.byte 0x0f,0x05\n  syscall # c\nnop\n"
+            .to_string();
+        assert!(super::rewrite_syscall_text(&mut src));
+        assert_eq!(src.matches("mirvm_syscall_slot@GOTPCREL").count(), 2);
+        assert_eq!(src.matches("call [r11]").count(), 2);
+        assert!(src.contains("syscallx"));
+        assert!(src.contains(".byte 0x0f,0x05"));
+        assert!(src.contains("mirvm_syscall_slot: .quad 0"));
+        let mut plain = "mov rax, 1\nsysenter\nint $0x80\n".to_string();
+        assert!(!super::rewrite_syscall_text(&mut plain));
+        assert!(!plain.contains("mirvm_syscall_slot"));
+    }
+
+    #[test]
+    fn rewritten_syscall_stub_passthrough_and_register_discipline() {
+        // SYS_getpid 裸 syscall：直通应得真 pid（非 0）；rbx 约定不被 syscall
+        // 破坏，trampoline 必须同纪律保全
+        let site = ir::AsmSite {
+            name: "mirvm_asm_sc".into(),
+            text: r#"
+.globl mirvm_asm_sc
+.type mirvm_asm_sc,@function
+.section .text.mirvm_asm_sc,"ax",@progbits
+mirvm_asm_sc:
+    .intel_syntax noprefix
+    mov rbx, 0x0123456789abcdef
+    mov rax, 39
+    syscall
+    mov rcx, rbx
+    mov QWORD PTR [rdi], rax
+    mov QWORD PTR [rdi+8], rcx
+    ret
+    .att_syntax
+.size mirvm_asm_sc, .-mirvm_asm_sc
+.text
+"#
+            .to_owned(),
+        };
+        let addrs = materialize(&[site]);
+        let mut pair = [0u64; 2];
+        let stub: unsafe extern "C" fn(*mut u8) = unsafe { std::mem::transmute(addrs[0]) };
+        unsafe { stub((&mut pair as *mut u64).cast()) };
+        assert_ne!(pair[0], 0, "SYS_getpid 直通应得真 pid");
+        assert_eq!(pair[0] as i32, unsafe { libc::getpid() });
+        assert_eq!(pair[1], 0x0123_4567_89ab_cdef, "rbx 未按 syscall 纪律保全");
     }
 }

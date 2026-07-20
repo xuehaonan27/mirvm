@@ -45,6 +45,26 @@ pub fn memcmp_addr() -> *const u8 {
     libc::memcmp as *const u8
 }
 
+/// T5 asm-stub syscall 拦截 dispatch（decision-history §7.18）：asm-stub 内
+/// `syscall` 指令被改写为经间接槽调 `mirvm_syscall_trampoline`（arch::
+/// x86_64::asmstub，整数/flags/xmm/mxcsr 已按真 syscall 纪律保全），落此。
+/// v1 = 直通 + `MIRVM_SYSCALL_TRACE` 旋钮；**D10 虚拟化语义的钩子挂载点**——
+/// 统一 fd 空间/假 FS/计费进来时在本函数分诊，调用方零改动。
+///
+/// # Safety
+/// 仅由 trampoline 以 syscall 契约调起：args 指向 6 个 u64（a1..a6）。
+#[unsafe(no_mangle)]
+pub extern "C" fn mirvm_syscall_dispatch(nr: i64, args: *const u64) -> i64 {
+    let args: &[u64] = unsafe { std::slice::from_raw_parts(args, 6) };
+    if std::env::var_os("MIRVM_SYSCALL_TRACE").is_some() {
+        eprintln!(
+            "mirvm-syscall: nr={nr} a1={:#x} a2={:#x} a3={:#x} a4={:#x} a5={:#x} a6={:#x}",
+            args[0], args[1], args[2], args[3], args[4], args[5]
+        );
+    }
+    syscall(nr, args)
+}
+
 /// syscall(2) 变参直通：全未列举 syscall 族的唯一通道。args 取前 6 参
 /// （x86_64 寄存器上限），超出忽略——与归并前 HostSyscall 臂的界一致。
 pub fn syscall(n: i64, args: &[u64]) -> i64 {
