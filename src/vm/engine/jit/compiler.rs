@@ -229,8 +229,10 @@ impl Compiler {
         let tls_ref = module
             .declare_function("mirvm_tls_ref", Linkage::Import, &sig_tls)
             .unwrap();
+        // mirvm_call_foreign 八参：sp/sl/sg/ap/nv/ret_dst/fv + terminate 旗
+        //（T1-c 加旗时漏改本签名，verifier 拒收致含 CallForeign 函数静默留解释）
         let mut sig_cf = module.make_signature();
-        for _ in 0..7 {
+        for _ in 0..8 {
             sig_cf.params.push(AbiParam::new(types::I64));
         }
         sig_cf.returns.push(AbiParam::new(types::I64));

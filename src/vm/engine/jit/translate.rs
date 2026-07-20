@@ -262,9 +262,9 @@ impl Translator<'_, '_> {
         match w {
             ir::FloatW::F32 => {
                 let n = self.b.ins().ireduce(types::I32, v);
-                self.b.ins().bitcast(types::F32, MemFlagsData::trusted(), n)
+                self.b.ins().bitcast(types::F32, MemFlagsData::new(), n)
             }
-            ir::FloatW::F64 => self.b.ins().bitcast(types::F64, MemFlagsData::trusted(), v),
+            ir::FloatW::F64 => self.b.ins().bitcast(types::F64, MemFlagsData::new(), v),
             ir::FloatW::F16 => unreachable!("f16 走助手（M5.4b-3）"),
         }
     }
@@ -273,10 +273,10 @@ impl Translator<'_, '_> {
     fn as_bits(&mut self, v: Value, w: ir::FloatW) -> Value {
         match w {
             ir::FloatW::F32 => {
-                let n = self.b.ins().bitcast(types::I32, MemFlagsData::trusted(), v);
+                let n = self.b.ins().bitcast(types::I32, MemFlagsData::new(), v);
                 self.b.ins().uextend(types::I64, n)
             }
-            ir::FloatW::F64 => self.b.ins().bitcast(types::I64, MemFlagsData::trusted(), v),
+            ir::FloatW::F64 => self.b.ins().bitcast(types::I64, MemFlagsData::new(), v),
             ir::FloatW::F16 => unreachable!("f16 走助手（M5.4b-3）"),
         }
     }
@@ -946,7 +946,7 @@ impl Translator<'_, '_> {
                         };
                         let r = self.call_helper1(fname, &[lo, hi]);
                         let n = self.b.ins().ireduce(types::I32, r);
-                        let f32v = self.b.ins().bitcast(types::F32, MemFlagsData::trusted(), n);
+                        let f32v = self.b.ins().bitcast(types::F32, MemFlagsData::new(), n);
                         self.as_bits(f32v, ir::FloatW::F32)
                     }
                     ir::FloatW::F64 => {
@@ -2590,8 +2590,9 @@ impl Translator<'_, '_> {
                 }
                 if let UnwindAction::Cleanup(bb) = unwind {
                     // T1-c：try_call（ok 块写回后先进 target；pad 跳 IR cleanup）
+                    //（签名八参同 mirvm_call_foreign 实传：七槽 + terminate 旗）
                     let mut sig0 = self.module.make_signature();
-                    for _ in 0..7 {
+                    for _ in 0..8 {
                         sig0.params.push(AbiParam::new(types::I64));
                     }
                     sig0.returns.push(AbiParam::new(types::I64));
