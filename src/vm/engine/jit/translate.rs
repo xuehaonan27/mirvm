@@ -36,6 +36,9 @@ pub(super) struct Translator<'a, 'b> {
     pub(super) unwind_resume: ClifFuncId,
     /// T1-d：Trap 占位助手（语句级/终止子同口）
     pub(super) trap: ClifFuncId,
+    /// T1-d：SIMD/宽 stmt 与 SIMD rvalue 三件的统一助手（interp simd_exec 共享本体）
+    pub(super) simd_stmt: ClifFuncId,
+    pub(super) simd_rv: ClifFuncId,
     pub(super) exception_var: Option<Variable>,
     pub(super) has_try_call: bool,
 }
@@ -1093,6 +1096,194 @@ impl Translator<'_, '_> {
                 let s = self.b.ins().iconst(types::I64, *signed as i64);
                 self.call_out128("mirvm_f128_to_wide", &[s, alo, ahi], dst);
             }
+            // ===== T1-d SIMD 15 件 + Sat128（mirvm_simd_stmt 助手，interp
+            // simd_exec 共享本体；参数序 (stmt, a, b, c, dst, v0, v1)，缺位补 0）=====
+            Stmt::SimdBin { dst, a, b, .. } => {
+                let pd = self.place_addr(dst);
+                let pa = self.place_addr(a);
+                let pb = self.place_addr(b);
+                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let z = self.b.ins().iconst(types::I64, 0);
+                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                self.b.ins().call(fref, &[sp, pa, pb, z, pd, z, z]);
+            }
+            Stmt::SimdUn { dst, a, .. } => {
+                let pd = self.place_addr(dst);
+                let pa = self.place_addr(a);
+                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let z = self.b.ins().iconst(types::I64, 0);
+                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                self.b.ins().call(fref, &[sp, pa, z, z, pd, z, z]);
+            }
+            Stmt::SimdFma { dst, a, b, c, .. } => {
+                let pd = self.place_addr(dst);
+                let pa = self.place_addr(a);
+                let pb = self.place_addr(b);
+                let pc = self.place_addr(c);
+                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let z = self.b.ins().iconst(types::I64, 0);
+                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                self.b.ins().call(fref, &[sp, pa, pb, pc, pd, z, z]);
+            }
+            Stmt::SimdFunnel {
+                dst, a, b, shift, ..
+            } => {
+                let pd = self.place_addr(dst);
+                let pa = self.place_addr(a);
+                let pb = self.place_addr(b);
+                let ps = self.place_addr(shift);
+                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let z = self.b.ins().iconst(types::I64, 0);
+                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                self.b.ins().call(fref, &[sp, pa, pb, ps, pd, z, z]);
+            }
+            Stmt::SimdCast { dst, src, .. } => {
+                let pd = self.place_addr(dst);
+                let ps = self.place_addr(src);
+                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let z = self.b.ins().iconst(types::I64, 0);
+                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                self.b.ins().call(fref, &[sp, ps, z, z, pd, z, z]);
+            }
+            Stmt::SimdSelect {
+                mask, a, b, dst, ..
+            } => {
+                let pm = self.place_addr(mask);
+                let pa = self.place_addr(a);
+                let pb = self.place_addr(b);
+                let pd = self.place_addr(dst);
+                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let z = self.b.ins().iconst(types::I64, 0);
+                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                self.b.ins().call(fref, &[sp, pm, pa, pb, pd, z, z]);
+            }
+            Stmt::SimdSelectBitmask {
+                mask, a, b, dst, ..
+            } => {
+                let (m, _) = self.operand(mask);
+                let pa = self.place_addr(a);
+                let pb = self.place_addr(b);
+                let pd = self.place_addr(dst);
+                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let z = self.b.ins().iconst(types::I64, 0);
+                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                self.b.ins().call(fref, &[sp, pa, pb, z, pd, m, z]);
+            }
+            Stmt::SimdGather {
+                passthru,
+                ptrs,
+                mask,
+                dst,
+                ..
+            } => {
+                let pv = self.place_addr(passthru);
+                let pp = self.place_addr(ptrs);
+                let pm = self.place_addr(mask);
+                let pd = self.place_addr(dst);
+                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let z = self.b.ins().iconst(types::I64, 0);
+                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                self.b.ins().call(fref, &[sp, pv, pp, pm, pd, z, z]);
+            }
+            Stmt::SimdScatter {
+                values,
+                ptrs,
+                mask,
+                ..
+            } => {
+                let pv = self.place_addr(values);
+                let pp = self.place_addr(ptrs);
+                let pm = self.place_addr(mask);
+                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let z = self.b.ins().iconst(types::I64, 0);
+                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                self.b.ins().call(fref, &[sp, pv, pp, pm, z, z, z]);
+            }
+            Stmt::SimdMaskedLoad {
+                mask,
+                base,
+                passthru,
+                dst,
+                ..
+            } => {
+                let pm = self.place_addr(mask);
+                let (pbase, _) = self.operand(base);
+                let pv = self.place_addr(passthru);
+                let pd = self.place_addr(dst);
+                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let z = self.b.ins().iconst(types::I64, 0);
+                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                self.b.ins().call(fref, &[sp, pm, pv, z, pd, pbase, z]);
+            }
+            Stmt::SimdMaskedStore {
+                mask,
+                base,
+                values,
+                ..
+            } => {
+                let pm = self.place_addr(mask);
+                let (pbase, _) = self.operand(base);
+                let pv = self.place_addr(values);
+                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let z = self.b.ins().iconst(types::I64, 0);
+                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                self.b.ins().call(fref, &[sp, pm, pv, z, z, pbase, z]);
+            }
+            Stmt::SimdExtractDyn {
+                src, idx, dst, ..
+            } => {
+                let ps = self.place_addr(src);
+                let (i, _) = self.operand(idx);
+                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let z = self.b.ins().iconst(types::I64, 0);
+                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                let call = self.b.ins().call(fref, &[sp, ps, z, z, z, i, z]);
+                let r = self.b.inst_results(call)[0];
+                self.write_scalar_place(dst, r);
+            }
+            Stmt::SimdInsertDyn {
+                src, idx, val, dst, ..
+            } => {
+                let ps = self.place_addr(src);
+                let pd = self.place_addr(dst);
+                let (i, _) = self.operand(idx);
+                let (v, _) = self.operand(val);
+                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let z = self.b.ins().iconst(types::I64, 0);
+                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                self.b.ins().call(fref, &[sp, ps, z, z, pd, i, v]);
+            }
+            Stmt::SimdArithOffset {
+                ptrs,
+                offsets,
+                dst,
+                ..
+            } => {
+                let pp = self.place_addr(ptrs);
+                let po = self.place_addr(offsets);
+                let pd = self.place_addr(dst);
+                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let z = self.b.ins().iconst(types::I64, 0);
+                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                self.b.ins().call(fref, &[sp, pp, po, z, pd, z, z]);
+            }
+            Stmt::SimdSplat { dst, val, .. } => {
+                let pd = self.place_addr(dst);
+                let (v, _) = self.operand(val);
+                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let z = self.b.ins().iconst(types::I64, 0);
+                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                self.b.ins().call(fref, &[sp, z, z, z, pd, v, z]);
+            }
+            Stmt::Sat128 { a, b, dst, .. } => {
+                let pa = self.place_addr(a);
+                let pb = self.place_addr(b);
+                let pd = self.place_addr(dst);
+                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let z = self.b.ins().iconst(types::I64, 0);
+                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                self.b.ins().call(fref, &[sp, pa, pb, z, pd, z, z]);
+            }
             // T1-d：Trap/Nop（语句级 Trap = mirvm_jit_trap stmt 形，interp
             // engine_abort 同文案同 exit(70)；call 后补 trap 保底——助手不返回）
             Stmt::Trap(reason) => {
@@ -1104,7 +1295,6 @@ impl Translator<'_, '_> {
                 self.b.ins().trap(TrapCode::user(1).unwrap());
             }
             Stmt::Nop => {}
-            _ => unreachable!("admit 已排除"),
         }
     }
 
@@ -1703,7 +1893,35 @@ impl Translator<'_, '_> {
                 let call = self.b.ins().call(fref, &[i]);
                 self.b.inst_results(call)[0]
             }
-            _ => unreachable!("admit 已排除"),
+            // ===== T1-d SIMD rvalue 三件（mirvm_simd_rv 助手，interp simd_exec
+            // 共享本体；rv 真地址 + 向量 place 地址两参）=====
+            R::SimdBitmask { a, .. } => {
+                // lanes 位掩码（≤64 位 u64 无需 mask——interp 本体同口径）
+                let pa = self.place_addr(a);
+                let rp = self.b.ins().iconst(types::I64, rv as *const ir::Rvalue as i64);
+                let fref = self.module.declare_func_in_func(self.simd_rv, self.b.func);
+                let call = self.b.ins().call(fref, &[rp, pa]);
+                self.b.inst_results(call)[0]
+            }
+            R::SimdReduce { a, .. } => {
+                // bool 0/1（interp 本体 acc as u64 同口径）
+                let pa = self.place_addr(a);
+                let rp = self.b.ins().iconst(types::I64, rv as *const ir::Rvalue as i64);
+                let fref = self.module.declare_func_in_func(self.simd_rv, self.b.func);
+                let call = self.b.ins().call(fref, &[rp, pa]);
+                self.b.inst_results(call)[0]
+            }
+            R::SimdReduceArith {
+                a, lane_bytes, ..
+            } => {
+                // lane 宽标量位型（interp 本体各 op 已按 lw 掩回，此处同宽掩齐）
+                let pa = self.place_addr(a);
+                let rp = self.b.ins().iconst(types::I64, rv as *const ir::Rvalue as i64);
+                let fref = self.module.declare_func_in_func(self.simd_rv, self.b.func);
+                let call = self.b.ins().call(fref, &[rp, pa]);
+                let r = self.b.inst_results(call)[0];
+                self.mask_val(r, Width::from_bytes(u64::from(*lane_bytes)).expect("lane 宽度"))
+            }
         }
     }
 
@@ -2680,6 +2898,22 @@ pub(super) fn collect_ssa_offs(body: &ir::FuncBody, frame_offs: &FrameMap, out: 
                     if let ScalarPlace::Slot(s) = dst_flag {
                         push(s);
                     }
+                }
+                // T1-d：SIMD 族的标量 Operand 槽（向量 place 走帧，不在此列）
+                Stmt::SimdSplat { val, .. } => op(val, &mut push),
+                Stmt::SimdExtractDyn { idx, dst, .. } => {
+                    op(idx, &mut push);
+                    if let ScalarPlace::Slot(s) = dst {
+                        push(s);
+                    }
+                }
+                Stmt::SimdInsertDyn { idx, val, .. } => {
+                    op(idx, &mut push);
+                    op(val, &mut push);
+                }
+                Stmt::SimdSelectBitmask { mask, .. } => op(mask, &mut push),
+                Stmt::SimdMaskedLoad { base, .. } | Stmt::SimdMaskedStore { base, .. } => {
+                    op(base, &mut push)
                 }
                 _ => {}
             }

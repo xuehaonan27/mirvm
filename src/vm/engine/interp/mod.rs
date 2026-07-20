@@ -90,6 +90,7 @@ mod call;
 mod runblocks;
 mod rvalue;
 mod services;
+pub(crate) mod simd_exec;
 mod stmt;
 mod volatile;
 

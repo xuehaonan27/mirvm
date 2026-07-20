@@ -72,7 +72,11 @@ pub(super) fn rvalue_ok(rv: &ir::Rvalue) -> bool {
         R::Cmp128 { a, b, .. } => place_ok(a) && place_ok(b),
         // T1-b：guest TLS 取址（mirvm_tls_ref 助手同本体）
         R::TlsRef(_) => true,
-        _ => false,
+        // T1-d：SIMD rvalue 三件（mirvm_simd_rv 助手，interp 共享本体；
+        // lane 非法形态不拒——运行期走本体同文案 abort，与 interp 行为一致）
+        R::SimdBitmask { a, .. } => place_ok(a),
+        R::SimdReduce { a, .. } => place_ok(a),
+        R::SimdReduceArith { a, .. } => place_ok(a),
     }
 }
 
@@ -200,9 +204,80 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
                 Stmt::F128ToScalar { src, dst, .. } => place_ok(src) && mem_place_ok(dst),
                 Stmt::F128FromWideInt { src, dst, .. } => place_ok(src) && place_ok(dst),
                 Stmt::F128ToWideInt { src, dst, .. } => place_ok(src) && place_ok(dst),
+                // T1-d：SIMD 15 件 + Sat128（mirvm_simd_stmt 助手，interp
+                // simd_exec 共享本体）——place 字段 place_ok、Operand 字段
+                // operand_ok、SimdExtractDyn 的 dst 是 ScalarPlace 用 mem_place_ok
+                Stmt::SimdBin { dst, a, b, .. } => {
+                    place_ok(dst) && place_ok(a) && place_ok(b)
+                }
+                Stmt::SimdUn { dst, a, .. } => place_ok(dst) && place_ok(a),
+                Stmt::SimdFma { dst, a, b, c, .. } => {
+                    place_ok(dst) && place_ok(a) && place_ok(b) && place_ok(c)
+                }
+                Stmt::SimdFunnel {
+                    dst, a, b, shift, ..
+                } => place_ok(dst) && place_ok(a) && place_ok(b) && place_ok(shift),
+                Stmt::SimdCast { dst, src, .. } => place_ok(dst) && place_ok(src),
+                Stmt::SimdSelect {
+                    mask, a, b, dst, ..
+                } => place_ok(mask) && place_ok(a) && place_ok(b) && place_ok(dst),
+                Stmt::SimdSelectBitmask {
+                    mask, a, b, dst, ..
+                } => operand_ok(mask) && place_ok(a) && place_ok(b) && place_ok(dst),
+                Stmt::SimdGather {
+                    passthru,
+                    ptrs,
+                    mask,
+                    dst,
+                    ..
+                } => {
+                    place_ok(passthru) && place_ok(ptrs) && place_ok(mask) && place_ok(dst)
+                }
+                Stmt::SimdScatter {
+                    values,
+                    ptrs,
+                    mask,
+                    ..
+                } => place_ok(values) && place_ok(ptrs) && place_ok(mask),
+                Stmt::SimdMaskedLoad {
+                    mask,
+                    base,
+                    passthru,
+                    dst,
+                    ..
+                } => {
+                    place_ok(mask) && operand_ok(base) && place_ok(passthru) && place_ok(dst)
+                }
+                Stmt::SimdMaskedStore {
+                    mask,
+                    base,
+                    values,
+                    ..
+                } => place_ok(mask) && operand_ok(base) && place_ok(values),
+                Stmt::SimdExtractDyn {
+                    src, idx, dst, ..
+                } => place_ok(src) && operand_ok(idx) && mem_place_ok(dst),
+                Stmt::SimdInsertDyn {
+                    src,
+                    idx,
+                    val,
+                    dst,
+                    ..
+                } => {
+                    place_ok(src) && operand_ok(idx) && operand_ok(val) && place_ok(dst)
+                }
+                Stmt::SimdArithOffset {
+                    ptrs,
+                    offsets,
+                    dst,
+                    ..
+                } => place_ok(ptrs) && place_ok(offsets) && place_ok(dst),
+                Stmt::SimdSplat { dst, val, .. } => place_ok(dst) && operand_ok(val),
+                Stmt::Sat128 { a, b, dst, .. } => {
+                    place_ok(a) && place_ok(b) && place_ok(dst)
+                }
                 // T1-d：Trap 占位（mirvm_jit_trap 助手同 interp 文案）/ Nop
                 Stmt::Trap(_) | Stmt::Nop => true,
-                _ => false,
             };
             if !ok {
                 return false;

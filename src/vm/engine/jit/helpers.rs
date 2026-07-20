@@ -752,3 +752,222 @@ pub(super) fn libm_syms() -> Vec<(&'static str, usize)> {
 
 // ===== 准入（M5.3 v1 标量子集 + M5.4a 内存操作数；拒绝 = 永久维持解释）=====
 
+// ===== T1-d SIMD/宽值统一助手（interp simd_exec 共享本体，零漂移）=====
+
+/// T1-d：SIMD/宽 stmt 统一助手——薄壳重匹配后调 interp 共享本体（零漂移）。
+/// 参数序 (stmt, a, b, c, dst, v0, v1)；无用槽位传 0；返回仅 SimdExtractDyn 用。
+pub(super) extern "C-unwind" fn mirvm_simd_stmt(
+    stmt: u64,
+    a: u64,
+    b: u64,
+    c: u64,
+    dst: u64,
+    v0: u64,
+    v1: u64,
+) -> u64 {
+    use crate::vm::engine::interp::simd_exec as x;
+    let st = unsafe { &*(stmt as *const ir::Stmt) };
+    match st {
+        ir::Stmt::SimdBin {
+            op,
+            lane,
+            lanes,
+            lane_bytes,
+            ..
+        } => x::simd_bin_body(
+            dst as *mut u8,
+            a as *const u8,
+            b as *const u8,
+            *op,
+            *lane,
+            *lanes,
+            *lane_bytes,
+        ),
+        ir::Stmt::SimdUn {
+            op,
+            lane,
+            lanes,
+            lane_bytes,
+            ..
+        } => x::simd_un_body(
+            dst as *mut u8,
+            a as *const u8,
+            *op,
+            *lane,
+            *lanes,
+            *lane_bytes,
+        ),
+        ir::Stmt::SimdFma {
+            lanes, lane_bytes, ..
+        } => x::simd_fma_body(
+            dst as *mut u8,
+            a as *const u8,
+            b as *const u8,
+            c as *const u8,
+            *lanes,
+            *lane_bytes,
+        ),
+        ir::Stmt::SimdFunnel {
+            left,
+            lanes,
+            lane_bytes,
+            ..
+        } => x::simd_funnel_body(
+            dst as *mut u8,
+            a as *const u8,
+            b as *const u8,
+            c as *const u8,
+            *left,
+            *lanes,
+            *lane_bytes,
+        ),
+        ir::Stmt::SimdCast {
+            lanes,
+            src_lane,
+            src_bytes,
+            dst_lane,
+            dst_bytes,
+            ..
+        } => x::simd_cast_body(
+            dst as *mut u8,
+            a as *const u8,
+            *lanes,
+            *src_lane,
+            *src_bytes,
+            *dst_lane,
+            *dst_bytes,
+        ),
+        ir::Stmt::SimdSelect {
+            mask_bytes,
+            lanes,
+            lane_bytes,
+            ..
+        } => x::simd_select_body(
+            dst as *mut u8,
+            a as *const u8,
+            *mask_bytes,
+            b as *const u8,
+            c as *const u8,
+            *lanes,
+            *lane_bytes,
+        ),
+        ir::Stmt::SimdSelectBitmask {
+            lanes, lane_bytes, ..
+        } => x::simd_select_bitmask_body(
+            dst as *mut u8,
+            v0,
+            a as *const u8,
+            b as *const u8,
+            *lanes,
+            *lane_bytes,
+        ),
+        ir::Stmt::SimdGather {
+            mask_bytes,
+            lanes,
+            lane_bytes,
+            ..
+        } => x::simd_gather_body(
+            dst as *mut u8,
+            a as *const u8,
+            b as *const u8,
+            c as *const u8,
+            *mask_bytes,
+            *lanes,
+            *lane_bytes,
+        ),
+        ir::Stmt::SimdScatter {
+            mask_bytes,
+            lanes,
+            lane_bytes,
+            ..
+        } => x::simd_scatter_body(
+            a as *const u8,
+            b as *const u8,
+            c as *const u8,
+            *mask_bytes,
+            *lanes,
+            *lane_bytes,
+        ),
+        ir::Stmt::SimdMaskedLoad {
+            mask_bytes,
+            lanes,
+            lane_bytes,
+            ..
+        } => x::simd_masked_load_body(
+            dst as *mut u8,
+            a as *const u8,
+            *mask_bytes,
+            v0,
+            b as *const u8,
+            *lanes,
+            *lane_bytes,
+        ),
+        ir::Stmt::SimdMaskedStore {
+            mask_bytes,
+            lanes,
+            lane_bytes,
+            ..
+        } => x::simd_masked_store_body(
+            a as *const u8,
+            *mask_bytes,
+            v0,
+            b as *const u8,
+            *lanes,
+            *lane_bytes,
+        ),
+        ir::Stmt::SimdExtractDyn {
+            lanes, lane_bytes, ..
+        } => return x::simd_extract_dyn_body(a as *const u8, v0, *lanes, *lane_bytes),
+        ir::Stmt::SimdInsertDyn {
+            lanes, lane_bytes, ..
+        } => x::simd_insert_dyn_body(
+            dst as *mut u8,
+            a as *const u8,
+            v0,
+            v1,
+            *lanes,
+            *lane_bytes,
+        ),
+        ir::Stmt::SimdArithOffset { stride, lanes, .. } => x::simd_arith_offset_body(
+            dst as *mut u8,
+            a as *const u8,
+            b as *const u8,
+            *stride,
+            *lanes,
+        ),
+        ir::Stmt::SimdSplat {
+            lanes, lane_bytes, ..
+        } => x::simd_splat_body(dst as *mut u8, v0, *lanes, *lane_bytes),
+        ir::Stmt::Sat128 { op, signed, .. } => {
+            x::sat128_body(a as *const u8, b as *const u8, dst as *mut u8, *op, *signed)
+        }
+        _ => unreachable!("admit 已排定"),
+    }
+    0
+}
+
+/// T1-d：SIMD rvalue 三件统一助手（Bitmask/Reduce/ReduceArith），pa = 向量 place 地址。
+pub(super) extern "C-unwind" fn mirvm_simd_rv(rv: u64, pa: u64) -> u64 {
+    use crate::vm::engine::interp::simd_exec as x;
+    let r = unsafe { &*(rv as *const ir::Rvalue) };
+    match r {
+        ir::Rvalue::SimdBitmask {
+            lanes, lane_bytes, ..
+        } => x::simd_bitmask_body(pa as *const u8, *lanes, *lane_bytes),
+        ir::Rvalue::SimdReduce {
+            all,
+            lanes,
+            lane_bytes,
+            ..
+        } => x::simd_reduce_body(pa as *const u8, *all, *lanes, *lane_bytes),
+        ir::Rvalue::SimdReduceArith {
+            op,
+            lane,
+            lanes,
+            lane_bytes,
+            ..
+        } => x::simd_reduce_arith_body(pa as *const u8, *op, *lane, *lanes, *lane_bytes),
+        _ => unreachable!("admit 已排定"),
+    }
+}
+

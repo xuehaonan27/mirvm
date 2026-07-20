@@ -313,14 +313,7 @@ pub(super) fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
             lane_bytes,
         } => {
             let pa = eval_place_addr(ctx, base, a);
-            let lb = *lane_bytes as u64;
-            let mut mask = 0u64;
-            for i in 0..*lanes as u64 {
-                // 小端 lane 的符号位在末字节最高位
-                let top = unsafe { *((pa + i * lb + lb - 1) as *const u8) };
-                mask |= ((top >> 7) as u64) << i;
-            }
-            mask
+            simd_exec::simd_bitmask_body(pa as *const u8, *lanes, *lane_bytes)
         }
         Rvalue::MemCmp { a, b, n } => {
             let (pa, _) = eval_operand(ctx, base, a);
@@ -342,18 +335,7 @@ pub(super) fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
             lane_bytes,
         } => {
             let pa = eval_place_addr(ctx, base, a);
-            let lb = *lane_bytes as u64;
-            let lw = Width::from_bytes(lb).expect("lane 宽度");
-            let mut acc = *all;
-            for i in 0..*lanes as u64 {
-                let truthy = mem_read(pa + i * lb, lw) != 0;
-                if *all {
-                    acc &= truthy;
-                } else {
-                    acc |= truthy;
-                }
-            }
-            acc as u64
+            simd_exec::simd_reduce_body(pa as *const u8, *all, *lanes, *lane_bytes)
         }
         Rvalue::SimdReduceArith {
             op,
@@ -362,58 +344,8 @@ pub(super) fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
             lanes,
             lane_bytes,
         } => {
-            use crate::vm::engine::ir::{LaneKind, SimdReduceOp as R};
             let pa = eval_place_addr(ctx, base, a);
-            let lb = *lane_bytes as u64;
-            let lw = Width::from_bytes(lb).expect("lane 宽度");
-            let mut acc = mem_read(pa, lw);
-            for i in 1..*lanes as u64 {
-                let x = mem_read(pa + i * lb, lw);
-                acc = match *lane {
-                    LaneKind::Int { signed } => match op {
-                        R::Add => acc.wrapping_add(x) & lw.mask(),
-                        R::Mul => acc.wrapping_mul(x) & lw.mask(),
-                        R::And => acc & x,
-                        R::Or => acc | x,
-                        R::Xor => acc ^ x,
-                        R::Min | R::Max => {
-                            let take_x = if signed {
-                                let (a, b) = (sext(acc, lw), sext(x, lw));
-                                if matches!(op, R::Min) { b < a } else { b > a }
-                            } else if matches!(op, R::Min) {
-                                x < acc
-                            } else {
-                                x > acc
-                            };
-                            if take_x { x } else { acc }
-                        }
-                    },
-                    LaneKind::Float => {
-                        macro_rules! fr {
-                            ($t:ty) => {{
-                                let (fa, fx) = (<$t>::from_bits(acc as _), <$t>::from_bits(x as _));
-                                (match op {
-                                    R::Add => fa + fx,
-                                    R::Mul => fa * fx,
-                                    // minnum/maxnum 语义（与 LLVM reduce.fmin/fmax 一致）
-                                    R::Min => fa.min(fx),
-                                    R::Max => fa.max(fx),
-                                    R::And | R::Or | R::Xor => engine_abort(&format!(
-                                        "simd reduce {op:?} 不适用于浮点 lane"
-                                    )),
-                                })
-                                .to_bits() as u64
-                            }};
-                        }
-                        match lw {
-                            Width::W32 => fr!(f32),
-                            Width::W64 => fr!(f64),
-                            _ => engine_abort("浮点 lane 宽度非 4/8（lower 校验缺口）"),
-                        }
-                    }
-                };
-            }
-            acc
+            simd_exec::simd_reduce_arith_body(pa as *const u8, *op, *lane, *lanes, *lane_bytes)
         }
         Rvalue::Cmp128 { cc, signed, a, b } => {
             let pa = eval_place_addr(ctx, base, a);

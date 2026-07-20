@@ -109,6 +109,9 @@ struct Compiler {
     unwind_resume: ClifFuncId,
     /// T1-d：Trap 占位助手（interp engine_abort 同文案同退出码）
     trap: ClifFuncId,
+    /// T1-d：SIMD/宽 stmt 与 SIMD rvalue 三件的统一助手（interp simd_exec 共享本体）
+    simd_stmt: ClifFuncId,
+    simd_rv: ClifFuncId,
     /// 本批 (clif id, unwind info, try_call 函数的 LSDA 字节)——finalize 后统一注册
     pending_unwind: Vec<(ClifFuncId, UnwindInfo, Option<Vec<u8>>)>,
 }
@@ -134,6 +137,8 @@ impl Compiler {
         jb.symbol("mirvm_call_terminate", mirvm_call_terminate as *const u8);
         jb.symbol("_Unwind_Resume", _Unwind_Resume as *const u8);
         jb.symbol("mirvm_jit_trap", mirvm_jit_trap as *const u8);
+        jb.symbol("mirvm_simd_stmt", mirvm_simd_stmt as *const u8);
+        jb.symbol("mirvm_simd_rv", mirvm_simd_rv as *const u8);
         jb.symbol("mirvm_tls_ref", mirvm_tls_ref as *const u8);
         jb.symbol("mirvm_call_foreign", mirvm_call_foreign as *const u8);
         jb.symbol("mirvm_call_builtin", mirvm_call_builtin as *const u8);
@@ -275,6 +280,24 @@ impl Compiler {
         let trap = module
             .declare_function("mirvm_jit_trap", Linkage::Import, &sig_tr)
             .unwrap();
+        // T1-d：SIMD/宽 stmt 统一助手（7 参 1 返）与 SIMD rvalue 三件助手
+        // （2 参 1 返）——薄壳重匹配后调 interp simd_exec 共享本体
+        let mut sig_ss = module.make_signature();
+        for _ in 0..7 {
+            sig_ss.params.push(AbiParam::new(types::I64));
+        }
+        sig_ss.returns.push(AbiParam::new(types::I64));
+        let simd_stmt = module
+            .declare_function("mirvm_simd_stmt", Linkage::Import, &sig_ss)
+            .unwrap();
+        let mut sig_sr = module.make_signature();
+        for _ in 0..2 {
+            sig_sr.params.push(AbiParam::new(types::I64));
+        }
+        sig_sr.returns.push(AbiParam::new(types::I64));
+        let simd_rv = module
+            .declare_function("mirvm_simd_rv", Linkage::Import, &sig_sr)
+            .unwrap();
 
         Compiler {
             shared,
@@ -297,6 +320,8 @@ impl Compiler {
             call_terminate,
             unwind_resume,
             trap,
+            simd_stmt,
+            simd_rv,
             pending_unwind: Vec::new(),
         }
     }
@@ -498,6 +523,8 @@ impl Compiler {
                 call_terminate: self.call_terminate,
                 unwind_resume: self.unwind_resume,
                 trap: self.trap,
+                simd_stmt: self.simd_stmt,
+                simd_rv: self.simd_rv,
                 exception_var: None,
                 has_try_call: false,
             };
