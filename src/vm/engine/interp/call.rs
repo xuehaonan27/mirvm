@@ -4,7 +4,11 @@
 //! 读侧锚点）留在 mod.rs——与 jit/compiler worker 写侧注释不可分离。
 
 use super::*;
-use super::{runblocks::run_blocks, services::func_synth_ip};
+use super::{
+    runblocks::run_blocks,
+    services::{AtexitKind, atexit_register, func_synth_ip, signal_thunk, unwind_backtrace},
+};
+use crate::vm::engine::ir;
 
 pub(super) fn call_fn_addr(ctx: *mut Ctx, addr: u64, args: &[u64], caller: &str) -> (u64, u64) {
     let module: &Module = unsafe { &(*(*ctx).shared).module };
@@ -282,3 +286,636 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
     }
 }
 
+
+/// T1-b（m5.4-design §3.2）：CallBuiltin 语义体（自 runblocks.rs 的 630 行臂
+/// 机械提取，零行为变化）——interp 薄臂与 JIT mirvm_call_builtin/mirvm_alloc
+/// 助手共享同一实现本体（蓝图铁律：helper 不复制逻辑）。av = 调用点已展平
+/// 实参（builtin 无 sret 前插）；ret_dst = RetDest::Indirect 的目的真地址
+/// （调用点已求值，x86 向量 lane 的 sret 落点）。返回 (lo, hi)：主标量
+/// lane = (r, 0)；addcarry/subborrow pair lane = (flag, result)；x86 向量
+/// lane 的 sret 字节已在本体内落盘、返 (0, 0)。ret 形态写回由调用点统一
+/// （Ignore/Indirect 不写、Scalar=lo、Pair=(lo,hi)——lower 只发匹配形态，
+/// 原臂内的形态诊断随统一写回退役）。edge 协议随体保留。
+pub(crate) fn exec_builtin(
+    ctx: *mut Ctx,
+    body: &ir::FuncBody,
+    edge: &Cell<Option<Bb>>,
+    builtin: &ir::Builtin,
+    av: &[u64],
+    ret_dst: Option<u64>,
+    unwind: &ir::UnwindAction,
+) -> (u64, u64) {
+    use crate::vm::engine::ir::Builtin;
+    let _ = body; // 签名预留（两调用点诊断对称）；臂内不经 body（module 自 ctx 取）
+    let module: &Module = unsafe { &(*(*ctx).shared).module };
+    let a = |i: usize| av[i];
+    edge.set(cleanup_edge(unwind)); // RaiseException 经此发起 unwind
+    // x86 向量 intrinsic：参数是 indirect 向量地址，返回落到 sret place。
+    // helper 本身带 target_feature，guest 的正常 CPUID 派发负责可达性。
+    let vector_done = match builtin {
+        Builtin::X86Pshufb128 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("pshufb128 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            unsafe { crate::arch::x86_64::pshufb128(dst, a(0) as *const u8, a(1) as *const u8) };
+            true
+        }
+        Builtin::X86Pshufb256 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("pshufb256 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            unsafe { crate::arch::x86_64::pshufb256(dst, a(0) as *const u8, a(1) as *const u8) };
+            true
+        }
+        Builtin::X86Sha256Msg1 | Builtin::X86Sha256Msg2 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("sha256msg 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            unsafe {
+                if matches!(builtin, Builtin::X86Sha256Msg1) {
+                    crate::arch::x86_64::sha256msg1(dst, a(0) as *const u8, a(1) as *const u8);
+                } else {
+                    crate::arch::x86_64::sha256msg2(dst, a(0) as *const u8, a(1) as *const u8);
+                }
+            }
+            true
+        }
+        Builtin::X86Sha256Rnds2 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("sha256rnds2 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            unsafe {
+                crate::arch::x86_64::sha256rnds2(
+                    dst,
+                    a(0) as *const u8,
+                    a(1) as *const u8,
+                    a(2) as *const u8,
+                );
+            }
+            true
+        }
+        Builtin::X86PsadBw128 | Builtin::X86PsadBw256 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("psad.bw 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            unsafe {
+                if matches!(builtin, Builtin::X86PsadBw128) {
+                    crate::arch::x86_64::psad_bw128(dst, a(0) as *const u8, a(1) as *const u8);
+                } else {
+                    crate::arch::x86_64::psad_bw256(dst, a(0) as *const u8, a(1) as *const u8);
+                }
+            }
+            true
+        }
+        Builtin::X86Pclmulqdq => {
+            let Some(dst) = ret_dst else {
+                engine_abort("pclmulqdq 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            unsafe {
+                crate::arch::x86_64::pclmulqdq(dst, a(0) as *const u8, a(1) as *const u8, a(2))
+            };
+            true
+        }
+        Builtin::X86AesEnc
+        | Builtin::X86AesEncLast
+        | Builtin::X86AesDec
+        | Builtin::X86AesDecLast => {
+            let Some(dst) = ret_dst else {
+                engine_abort("aesni 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            let (x, k) = (a(0) as *const u8, a(1) as *const u8);
+            unsafe {
+                match builtin {
+                    Builtin::X86AesEnc => crate::arch::x86_64::aesenc(dst, x, k),
+                    Builtin::X86AesEncLast => crate::arch::x86_64::aesenclast(dst, x, k),
+                    Builtin::X86AesDec => crate::arch::x86_64::aesdec(dst, x, k),
+                    _ => crate::arch::x86_64::aesdeclast(dst, x, k),
+                }
+            }
+            true
+        }
+        Builtin::X86AesImc => {
+            let Some(dst) = ret_dst else {
+                engine_abort("aesimc 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            unsafe { crate::arch::x86_64::aesimc(dst, a(0) as *const u8) };
+            true
+        }
+        Builtin::X86AesKeygenAssist => {
+            let Some(dst) = ret_dst else {
+                engine_abort("aeskeygenassist 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            unsafe { crate::arch::x86_64::aeskeygenassist(dst, a(0) as *const u8, a(1)) };
+            true
+        }
+        Builtin::X86Permd256 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("permd 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            unsafe { crate::arch::x86_64::permd256(dst, a(0) as *const u8, a(1) as *const u8) };
+            true
+        }
+        Builtin::X86PmaddUbSw128
+        | Builtin::X86PmaddUbSw256
+        | Builtin::X86PmaddWd128
+        | Builtin::X86PmaddWd256 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("pmadd 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            let (x, y) = (a(0) as *const u8, a(1) as *const u8);
+            unsafe {
+                match builtin {
+                    Builtin::X86PmaddUbSw128 => crate::arch::x86_64::pmaddubsw128(dst, x, y),
+                    Builtin::X86PmaddUbSw256 => crate::arch::x86_64::pmaddubsw256(dst, x, y),
+                    Builtin::X86PmaddWd128 => crate::arch::x86_64::pmaddwd128(dst, x, y),
+                    _ => crate::arch::x86_64::pmaddwd256(dst, x, y),
+                }
+            }
+            true
+        }
+        Builtin::X86GatherQPd256 | Builtin::X86GatherDPd256 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("gather.pd.256 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            // (src vec, base 标量指针, vindex vec, mask vec, scale imm)
+            unsafe {
+                if matches!(builtin, Builtin::X86GatherQPd256) {
+                    crate::arch::x86_64::gather_q_pd_256(
+                        dst,
+                        a(0) as *const u8,
+                        a(1),
+                        a(2) as *const u8,
+                        a(3) as *const u8,
+                        a(4),
+                    );
+                } else {
+                    crate::arch::x86_64::gather_d_pd_256(
+                        dst,
+                        a(0) as *const u8,
+                        a(1),
+                        a(2) as *const u8,
+                        a(3) as *const u8,
+                        a(4),
+                    );
+                }
+            }
+            true
+        }
+        Builtin::X86Pmadd52Lo128
+        | Builtin::X86Pmadd52Hi128
+        | Builtin::X86Pmadd52Lo256
+        | Builtin::X86Pmadd52Hi256
+        | Builtin::X86Pmadd52Lo512
+        | Builtin::X86Pmadd52Hi512 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("vpmadd52 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            let (x, y, z) = (a(0) as *const u8, a(1) as *const u8, a(2) as *const u8);
+            unsafe {
+                match builtin {
+                    Builtin::X86Pmadd52Lo128 => {
+                        crate::arch::x86_64::vpmadd52::<2, false>(dst, x, y, z)
+                    }
+                    Builtin::X86Pmadd52Hi128 => {
+                        crate::arch::x86_64::vpmadd52::<2, true>(dst, x, y, z)
+                    }
+                    Builtin::X86Pmadd52Lo256 => {
+                        crate::arch::x86_64::vpmadd52::<4, false>(dst, x, y, z)
+                    }
+                    Builtin::X86Pmadd52Hi256 => {
+                        crate::arch::x86_64::vpmadd52::<4, true>(dst, x, y, z)
+                    }
+                    Builtin::X86Pmadd52Lo512 => {
+                        crate::arch::x86_64::vpmadd52::<8, false>(dst, x, y, z)
+                    }
+                    _ => crate::arch::x86_64::vpmadd52::<8, true>(dst, x, y, z),
+                }
+            }
+            true
+        }
+        Builtin::X86MaxPs128
+        | Builtin::X86MinPs128
+        | Builtin::X86MaxPs256
+        | Builtin::X86MinPs256 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("max/min.ps 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            let (x, y) = (a(0) as *const u8, a(1) as *const u8);
+            unsafe {
+                match builtin {
+                    Builtin::X86MaxPs128 => crate::arch::x86_64::maxmin_ps::<4, true>(dst, x, y),
+                    Builtin::X86MinPs128 => crate::arch::x86_64::maxmin_ps::<4, false>(dst, x, y),
+                    Builtin::X86MaxPs256 => crate::arch::x86_64::maxmin_ps::<8, true>(dst, x, y),
+                    _ => crate::arch::x86_64::maxmin_ps::<8, false>(dst, x, y),
+                }
+            }
+            true
+        }
+        Builtin::X86CmpPs128 | Builtin::X86CmpPs256 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("cmp.ps 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            let (x, y, imm) = (a(0) as *const u8, a(1) as *const u8, a(2));
+            unsafe {
+                if matches!(builtin, Builtin::X86CmpPs128) {
+                    crate::arch::x86_64::cmp_ps::<4>(dst, x, y, imm)
+                } else {
+                    crate::arch::x86_64::cmp_ps::<8>(dst, x, y, imm)
+                }
+            }
+            true
+        }
+        Builtin::X86RoundPs128 | Builtin::X86RoundPs256 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("round.ps 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            let (x, imm) = (a(0) as *const u8, a(1));
+            unsafe {
+                if matches!(builtin, Builtin::X86RoundPs128) {
+                    crate::arch::x86_64::round_ps::<4>(dst, x, imm)
+                } else {
+                    crate::arch::x86_64::round_ps::<8>(dst, x, imm)
+                }
+            }
+            true
+        }
+        Builtin::X86CvtPs2dq128
+        | Builtin::X86CvttPs2dq128
+        | Builtin::X86CvtPs2dq256
+        | Builtin::X86CvttPs2dq256 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("cvt(t).ps2dq 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            let x = a(0) as *const u8;
+            unsafe {
+                match builtin {
+                    Builtin::X86CvtPs2dq128 => crate::arch::x86_64::cvt_ps2dq::<4, false>(dst, x),
+                    Builtin::X86CvttPs2dq128 => crate::arch::x86_64::cvt_ps2dq::<4, true>(dst, x),
+                    Builtin::X86CvtPs2dq256 => crate::arch::x86_64::cvt_ps2dq::<8, false>(dst, x),
+                    _ => crate::arch::x86_64::cvt_ps2dq::<8, true>(dst, x),
+                }
+            }
+            true
+        }
+        Builtin::X86BlendvPs128 | Builtin::X86BlendvPs256 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("blendv.ps 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            let (x, y, m) = (a(0) as *const u8, a(1) as *const u8, a(2) as *const u8);
+            unsafe {
+                if matches!(builtin, Builtin::X86BlendvPs128) {
+                    crate::arch::x86_64::blendv_ps::<4>(dst, x, y, m)
+                } else {
+                    crate::arch::x86_64::blendv_ps::<8>(dst, x, y, m)
+                }
+            }
+            true
+        }
+        Builtin::X86Lddqu128 | Builtin::X86Lddqu256 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("lddqu 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            let src = a(0) as *const u8;
+            unsafe {
+                if matches!(builtin, Builtin::X86Lddqu128) {
+                    crate::arch::x86_64::lddqu::<16>(dst, src)
+                } else {
+                    crate::arch::x86_64::lddqu::<32>(dst, src)
+                }
+            }
+            true
+        }
+        Builtin::X86Cvtps2ph128 | Builtin::X86Cvtps2ph256 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("vcvtps2ph 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            let (x, imm) = (a(0) as *const u8, a(1));
+            unsafe {
+                if matches!(builtin, Builtin::X86Cvtps2ph128) {
+                    crate::arch::x86_64::cvtps2ph::<4>(dst, x, imm)
+                } else {
+                    crate::arch::x86_64::cvtps2ph::<8>(dst, x, imm)
+                }
+            }
+            true
+        }
+        Builtin::X86Cvtph2ps128 | Builtin::X86Cvtph2ps256 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("vcvtph2ps 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            let x = a(0) as *const u8;
+            unsafe {
+                if matches!(builtin, Builtin::X86Cvtph2ps128) {
+                    crate::arch::x86_64::cvtph2ps::<4>(dst, x)
+                } else {
+                    crate::arch::x86_64::cvtph2ps::<8>(dst, x)
+                }
+            }
+            true
+        }
+        Builtin::X86PsllD128 | Builtin::X86PsrlD128 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("ps{l,r}l.d 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            let (x, c) = (a(0) as *const u8, a(1) as *const u8);
+            unsafe {
+                if matches!(builtin, Builtin::X86PsllD128) {
+                    crate::arch::x86_64::pshift32::<4, true>(dst, x, c)
+                } else {
+                    crate::arch::x86_64::pshift32::<4, false>(dst, x, c)
+                }
+            }
+            true
+        }
+        _ => false,
+    };
+    if vector_done {
+        edge.set(None);
+        return (0, 0);
+    }
+    // LLVM 的 addcarry/subborrow 返回 `(flag, result)` ScalarPair，而其他
+    // 现有 builtin 都是单标量。pair 专用道返回 (flag, result) = (lo, hi)，
+    // 保持字段顺序与冻结 ABI 一致；Pair 落点写回由调用点统一。
+    let carry_result = match builtin {
+        Builtin::AddCarry64 => {
+            let carry_in = u64::from(a(0) != 0);
+            let (partial, carry1) = a(1).overflowing_add(a(2));
+            let (result, carry2) = partial.overflowing_add(carry_in);
+            Some((carry1 || carry2, result))
+        }
+        Builtin::SubBorrow64 => {
+            let borrow_in = u64::from(a(0) != 0);
+            let (partial, borrow1) = a(1).overflowing_sub(a(2));
+            let (result, borrow2) = partial.overflowing_sub(borrow_in);
+            Some((borrow1 || borrow2, result))
+        }
+        _ => None,
+    };
+    if let Some((flag, result)) = carry_result {
+        edge.set(None);
+        return (u64::from(flag), result);
+    }
+    let r = match builtin {
+        // 分配前哨兵：空操作
+        Builtin::NoAllocShim => 0,
+        // 托管 Rust Heap（D3：mimalloc 后端，真地址直出）。
+        // 自定义 #[global_allocator]（corpus 批7 c_mimalloc 实锤修）：
+        // 分配是**程序级**语义——本模块登记 shim 时，任何镜像来源的
+        // builtin 臂（含 base 按 Default 会话烘的）一律经 guest shim
+        // 走用户分配器，否则跨堆 free = mimalloc 元数据 SIGSEGV。
+        Builtin::RustAlloc => match module.custom_alloc_shims {
+            Some(s) => {
+                let (lo, _) = call_guarding_terminate(unwind, || {
+                    call_guest(ctx, s.alloc, &[a(0), a(1)])
+                });
+                lo
+            }
+            None => crate::vm::engine::heap::alloc(a(0), a(1)),
+        },
+        Builtin::RustAllocZeroed => match module.custom_alloc_shims {
+            Some(s) => {
+                let (lo, _) = call_guarding_terminate(unwind, || {
+                    call_guest(ctx, s.alloc_zeroed, &[a(0), a(1)])
+                });
+                lo
+            }
+            None => crate::vm::engine::heap::alloc_zeroed(a(0), a(1)),
+        },
+        Builtin::RustRealloc => match module.custom_alloc_shims {
+            Some(s) => {
+                let (lo, _) = call_guarding_terminate(unwind, || {
+                    call_guest(ctx, s.realloc, &[a(0), a(1), a(2), a(3)])
+                });
+                lo
+            }
+            None => crate::vm::engine::heap::realloc(a(0), a(1), a(2), a(3)),
+        },
+        Builtin::RustDealloc => {
+            match module.custom_alloc_shims {
+                Some(s) => {
+                    let _ = call_guarding_terminate(unwind, || {
+                        call_guest(ctx, s.dealloc, &[a(0), a(1), a(2)])
+                    });
+                }
+                None => crate::vm::engine::heap::dealloc(a(0), a(1), a(2)),
+            }
+            0
+        }
+        // unwind 原语（spike3 的 raise）：宿主 unwinder 载 guest exception 指针
+        Builtin::UnwindRaise => raise_guest(a(0)),
+        // os:: 最小直通（真实地址零编组；M4.3 正式注册表）
+        Builtin::HostGetenv => crate::os::process::getenv(a(0)),
+        Builtin::HostWrite => {
+            crate::os::process::write_fd(a(0) as i32, a(1), a(2) as usize) as u64
+        }
+        Builtin::HostStrlen => crate::os::process::c_strlen(a(0)),
+        Builtin::HostAbort => {
+            eprintln!("mirvm[m4-engine]: guest abort()");
+            std::process::abort()
+        }
+        // fork（D8f）：仅 guest 单线程放行（子进程=全进程拷贝，解释器状态
+        // 天然一致；无其他 guest 线程 ⇒ 无跨线程锁死锁面）。多线程 fork
+        // 响亮拒绝（native 下同为雷区）。exec 族走 foreign 直通，不经此。
+        Builtin::HostFork => {
+            if crate::vm::engine::ctx::guest_spawned_threads() {
+                engine_abort(
+                    "fork() 时 guest 已派生额外线程：多线程 fork 后仅 forking \
+                     线程存活、其他线程持有的锁在子进程永久锁死（native 亦 UB）。\
+                     仅 guest 单线程时放行（D8f/D8l）",
+                );
+            }
+            crate::os::process::fork() as u64
+        }
+        // atexit 家族（D8g）：登记 guest 回调，返回 0（成功）。
+        // __cxa_atexit(fn, arg, dso)：fn 收 arg；on_exit(fn, arg)：fn 收
+        //（status, arg）。atexit(fn)：无参。统一存 (fn, 形态, arg)。
+        Builtin::HostAtexit => atexit_register(a(0), AtexitKind::Plain, 0),
+        Builtin::HostCxaAtexit => atexit_register(a(0), AtexitKind::CxaArg, a(1)),
+        Builtin::HostOnExit => atexit_register(a(0), AtexitKind::OnExit, a(1)),
+        Builtin::HostSignal => {
+            let (signum, handler) = (a(0) as i32, a(1) as usize);
+            // guest handler（非 DFL/IGN）：async 信号 → 物化 AS-trampoline
+            //（D8d）；sync 故障信号 → 响亮拒绝（宿主/guest 故障不可分辨）。
+            let real = if handler != crate::os::signal::SIG_DFL
+                && handler != crate::os::signal::SIG_IGN
+            {
+                signal_thunk(ctx, signum, handler as u64)
+            } else {
+                handler
+            };
+            crate::os::signal::signal(signum, real) as u64
+        }
+        Builtin::HostSigaction => {
+            let (signum, act, oldact) = (a(0) as i32, a(1), a(2));
+            // guest handler 藏在 sigaction 结构里：thunk 后写一份改过 handler
+            // 的副本给内核（原结构不动——guest 可能复用/读回）。
+            let mut patched = unsafe { crate::os::signal::Sigaction::copy_from(act) };
+            if let Some(p) = patched.as_mut() {
+                let h = p.handler();
+                if h != crate::os::signal::SIG_DFL && h != crate::os::signal::SIG_IGN
+                {
+                    p.set_handler(signal_thunk(ctx, signum, h as u64));
+                }
+            }
+            crate::os::signal::sigaction(signum, patched.as_ref(), oldact) as u64
+        }
+        Builtin::Unsupported(name) => {
+            engine_abort(&format!("unsupported builtin `{}`", name.0))
+        }
+        Builtin::UnwindDeleteException => {
+            // Itanium `_Unwind_Exception`：exception_class @0，cleanup fn @8。
+            // guest panic 的 cleanup 是冻结 fn 条目；foreign exception 也可能
+            // 带 native cleanup，因此按地址域选择解释调用或 native FFI。
+            let exc = a(0);
+            let cleanup = mem_read(exc + 8, Width::W64);
+            if cleanup != 0 {
+                let cav = [1, exc]; // _URC_FOREIGN_EXCEPTION_CAUGHT
+                if module.fn_addrs.contains_key(&cleanup) {
+                    call_fn_addr(ctx, cleanup, &cav, "_Unwind_DeleteException");
+                } else {
+                    let sig = crate::vm::engine::ir::ForeignSig {
+                        args: vec![FfiKind::I32, FfiKind::Ptr],
+                        ret: FfiKind::Void,
+                        fixed: None,
+                        thunk_args: vec![],
+                    };
+                    crate::vm::engine::ffi::call_addr(cleanup as usize, &sig, &cav, None);
+                }
+            }
+            0
+        }
+        // backtrace 影子帧（D8e）
+        Builtin::UnwindBacktrace => unwind_backtrace(ctx, a(0), a(1)),
+        Builtin::UnwindGetIp => mem_read(a(0), Width::W64),
+        Builtin::UnwindGetIpInfo => {
+            // (ctx, *ip_before_insn) → IP；*ip_before_insn=0（合成帧无此区分）
+            if a(1) != 0 {
+                mem_write(a(1), Width::W32, 0);
+            }
+            mem_read(a(0), Width::W64)
+        }
+        // 合成 IP 即函数入口 → 返回 ip 自身（enclosing fn start）
+        Builtin::UnwindFindEnclosing => a(0),
+        Builtin::CpuHintNop => 0,
+        Builtin::Breakpoint => {
+            // 真 int3：未被跟踪时 = SIGTRAP 终止（native 同语义）
+            crate::arch::x86_64::asmstub::int3();
+            0
+        }
+        Builtin::AddCarry64 => unreachable!("addcarry.64 已由 pair 通道处理"),
+        Builtin::SubBorrow64 => unreachable!("subborrow.64 已由 pair 通道处理"),
+        Builtin::Xgetbv => crate::arch::x86_64::asmstub::xgetbv(a(0) as u32),
+        Builtin::X86Crc32U8 => unsafe {
+            u64::from(crate::arch::x86_64::crc32_u8(a(0) as u32, a(1) as u8))
+        },
+        Builtin::X86Crc32U16 => unsafe {
+            u64::from(crate::arch::x86_64::crc32_u16(a(0) as u32, a(1) as u16))
+        },
+        Builtin::X86Crc32U32 => unsafe {
+            u64::from(crate::arch::x86_64::crc32_u32(a(0) as u32, a(1) as u32))
+        },
+        Builtin::X86Crc32U64 => unsafe {
+            crate::arch::x86_64::crc32_u64(a(0), a(1))
+        },
+        Builtin::X86Pshufb128
+        | Builtin::X86Pshufb256
+        | Builtin::X86Sha256Msg1
+        | Builtin::X86Sha256Msg2
+        | Builtin::X86Sha256Rnds2
+        | Builtin::X86PsadBw128
+        | Builtin::X86PsadBw256
+        | Builtin::X86Pclmulqdq
+        | Builtin::X86AesEnc
+        | Builtin::X86AesEncLast
+        | Builtin::X86AesDec
+        | Builtin::X86AesDecLast
+        | Builtin::X86AesImc
+        | Builtin::X86AesKeygenAssist
+        | Builtin::X86Permd256
+        | Builtin::X86GatherQPd256
+        | Builtin::X86GatherDPd256
+        | Builtin::X86Pmadd52Lo128
+        | Builtin::X86Pmadd52Hi128
+        | Builtin::X86Pmadd52Lo256
+        | Builtin::X86Pmadd52Hi256
+        | Builtin::X86Pmadd52Lo512
+        | Builtin::X86Pmadd52Hi512
+        | Builtin::X86PmaddUbSw128
+        | Builtin::X86PmaddUbSw256
+        | Builtin::X86PmaddWd128
+        | Builtin::X86PmaddWd256
+        | Builtin::X86Cvtps2ph128
+        | Builtin::X86Cvtph2ps128
+        | Builtin::X86Cvtps2ph256
+        | Builtin::X86Cvtph2ps256
+        | Builtin::X86MaxPs128
+        | Builtin::X86MinPs128
+        | Builtin::X86MaxPs256
+        | Builtin::X86MinPs256
+        | Builtin::X86CmpPs128
+        | Builtin::X86CmpPs256
+        | Builtin::X86RoundPs128
+        | Builtin::X86RoundPs256
+        | Builtin::X86CvtPs2dq128
+        | Builtin::X86CvttPs2dq128
+        | Builtin::X86CvtPs2dq256
+        | Builtin::X86CvttPs2dq256
+        | Builtin::X86BlendvPs128
+        | Builtin::X86BlendvPs256
+        | Builtin::X86Lddqu128
+        | Builtin::X86Lddqu256
+        | Builtin::X86PsllD128
+        | Builtin::X86PsrlD128 => {
+            unreachable!("x86 vector builtin 已由 indirect vector 通道处理")
+        }
+        Builtin::HostSyscall => {
+            crate::os::process::syscall(a(0) as i64, &av[1..]) as u64
+        }
+        // rust_try：宿主 catch；guest panic → 调 catch_fn(data, exc) 返 1
+        Builtin::CatchUnwind => {
+            let (try_fn, data, catch_fn) = (a(0), a(1), a(2));
+            match panic::catch_unwind(AssertUnwindSafe(|| {
+                call_fn_addr(ctx, try_fn, &[data], "catch_unwind.try")
+            })) {
+                Ok(_) => 0,
+                Err(e) => match e.downcast::<GuestPanic>() {
+                    Ok(gp) => {
+                        call_fn_addr(
+                            ctx,
+                            catch_fn,
+                            &[data, gp.exception],
+                            "catch_unwind.catch",
+                        );
+                        1
+                    }
+                    // 宿主 panic（VM bug）不是 guest 异常：原样续传
+                    Err(host) => panic::resume_unwind(host),
+                },
+            }
+        }
+    };
+    edge.set(None);
+    (r, 0)
+}

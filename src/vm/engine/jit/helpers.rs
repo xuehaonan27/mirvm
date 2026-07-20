@@ -4,6 +4,7 @@
 
 use super::*;
 use super::compiler::SHARED;
+use std::cell::Cell;
 
 pub(super) extern "C-unwind" fn mirvm_c2i(func: u64, args: *const u64, n: u64, ret: *mut u64) {
     let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
@@ -137,6 +138,68 @@ pub(super) extern "C-unwind" fn mirvm_call_foreign(
         ));
     };
     r
+}
+
+/// T1-b CallBuiltin 助手（m5.4-design §3.2；interp::exec_builtin 同一实现
+/// 本体——x86 向量 sret/pair/主标量三 lane 与诊断全在本体内）。JIT 帧无
+/// edge 语义（T1-c 前穿透；unwind=Continue 时 edge 无读——哑 Cell 占位）。
+pub(super) extern "C-unwind" fn mirvm_call_builtin(
+    builtin: u64, // *const ir::Builtin
+    args: *const u64,
+    n: u64,
+    ret_dst: u64,
+    caller: u64,
+    ret: *mut u64,
+) {
+    let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
+    let ctx = crate::vm::engine::ctx::attach(shared);
+    let av = unsafe { std::slice::from_raw_parts(args, n as usize) };
+    let (lo, hi) = crate::vm::engine::interp::exec_builtin(
+        ctx,
+        &shared.module.funcs[caller as usize],
+        &Cell::new(None),
+        unsafe { &*(builtin as *const ir::Builtin) },
+        av,
+        (ret_dst != 0).then_some(ret_dst),
+        &ir::UnwindAction::Continue,
+    );
+    unsafe {
+        *ret = lo;
+        *ret.add(1) = hi;
+    }
+}
+
+/// T1-b 分配系快路（m5.4-design §3.2：分配系 → 引擎堆同一入口）：tag 分派
+/// 四件到 exec_builtin 同一本体（自定义 #[global_allocator] shim 路由含在
+/// 本体内，不另写分配语义）。tag: 0=RustAlloc 1=RustAllocZeroed 2=RustRealloc
+/// 3=RustDealloc；实参定长四槽（realloc 用满，其余缺位补 0 不消费）。
+pub(super) extern "C-unwind" fn mirvm_alloc(
+    tag: u64,
+    a0: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    caller: u64,
+) -> u64 {
+    let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
+    let ctx = crate::vm::engine::ctx::attach(shared);
+    let builtin = match tag {
+        0 => ir::Builtin::RustAlloc,
+        1 => ir::Builtin::RustAllocZeroed,
+        2 => ir::Builtin::RustRealloc,
+        _ => ir::Builtin::RustDealloc,
+    };
+    let av = [a0, a1, a2, a3];
+    let (lo, _) = crate::vm::engine::interp::exec_builtin(
+        ctx,
+        &shared.module.funcs[caller as usize],
+        &Cell::new(None),
+        &builtin,
+        &av,
+        None,
+        &ir::UnwindAction::Continue,
+    );
+    lo
 }
 
 /// Unreachable 终止子的诊断口径与解释器一致（不用裸 trap 的 SIGILL）。

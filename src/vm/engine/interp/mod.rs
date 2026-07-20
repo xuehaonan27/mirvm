@@ -94,7 +94,7 @@ mod stmt;
 mod volatile;
 
 pub(crate) use volatile::{mem_read_volatile, mem_write_volatile};
-pub(crate) use call::{call_guest_ffi, interp_frame, ret_abi_of};
+pub(crate) use call::{call_guest_ffi, exec_builtin, interp_frame, ret_abi_of};
 use call::run_cleanup;
 use services::ATEXIT_SHARED;
 

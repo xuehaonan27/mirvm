@@ -277,6 +277,25 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
                             | RetDest::Indirect(_)
                     )
             }
+            // T1-b：CallBuiltin（mirvm_call_builtin/mirvm_alloc 助手，interp
+            // exec_builtin 同一本体）——unwind-transparent 只收 Continue（CFI
+            // 穿透，LSDA 归 T1-c）；实参可求值；ret 落点同 interp 全形态
+            Terminator::CallBuiltin {
+                args,
+                ret,
+                unwind,
+                ..
+            } => {
+                matches!(unwind, UnwindAction::Continue)
+                    && args.iter().all(operand_ok)
+                    && matches!(
+                        ret,
+                        RetDest::Ignore
+                            | RetDest::Scalar(ScalarPlace::Slot(_))
+                            | RetDest::Pair(ScalarPlace::Slot(_), ScalarPlace::Slot(_))
+                            | RetDest::Indirect(_)
+                    )
+            }
             _ => false,
         };
         if !ok {

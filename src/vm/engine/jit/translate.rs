@@ -26,6 +26,8 @@ pub(super) struct Translator<'a, 'b> {
     pub(super) call_indirect: ClifFuncId,
     pub(super) tls_ref: ClifFuncId,
     pub(super) call_foreign: ClifFuncId,
+    pub(super) call_builtin: ClifFuncId,
+    pub(super) alloc: ClifFuncId,
 }
 
 impl Translator<'_, '_> {
@@ -2141,6 +2143,107 @@ impl Translator<'_, '_> {
                     _ => unreachable!("admit 已筛 foreign 返回形态"),
                 }
                 self.b.ins().jump(blocks[*target as usize], &[]);
+            }
+            Terminator::CallBuiltin {
+                builtin,
+                args,
+                ret,
+                target,
+                ..
+            } => {
+                // T1-b：分配系四件走 mirvm_alloc 快路（引擎堆同一入口，tag
+                // 分派）；其余走 mirvm_call_builtin（exec_builtin 同一本体）
+                let alloc_tag = match builtin {
+                    ir::Builtin::RustAlloc => Some(0i64),
+                    ir::Builtin::RustAllocZeroed => Some(1),
+                    ir::Builtin::RustRealloc => Some(2),
+                    ir::Builtin::RustDealloc => Some(3),
+                    _ => None,
+                };
+                if let Some(tag) = alloc_tag
+                    && matches!(
+                        ret,
+                        RetDest::Ignore | RetDest::Scalar(ScalarPlace::Slot(_))
+                    )
+                {
+                    // 实参定长四槽（realloc 用满；alloc/dealloc 缺位补 0，助手
+                    // 按 tag 消费——exec_builtin 本体内 a(i) 只取所需）
+                    let mut av: Vec<Value> = Vec::with_capacity(4);
+                    for i in 0..4 {
+                        av.push(match args.get(i) {
+                            Some(o) => self.operand(o).0,
+                            None => self.b.ins().iconst(types::I64, 0),
+                        });
+                    }
+                    let fref = self.module.declare_func_in_func(self.alloc, self.b.func);
+                    let tv = self.b.ins().iconst(types::I64, tag);
+                    let fv = self.b.ins().iconst(types::I64, func as i64);
+                    let call = self
+                        .b
+                        .ins()
+                        .call(fref, &[tv, av[0], av[1], av[2], av[3], fv]);
+                    let r = self.b.inst_results(call)[0];
+                    match ret {
+                        RetDest::Ignore => {}
+                        RetDest::Scalar(ScalarPlace::Slot(s)) => self.def_slot(*s, r),
+                        _ => unreachable!("本支已筛 ret 形态"),
+                    }
+                    self.b.ins().jump(blocks[*target as usize], &[]);
+                } else {
+                    // 展平 av（无 sret 前插——builtin 的 Indirect 落点独立求值，
+                    // interp 薄臂同序）；ret_dst = Indirect 目的真地址否则 0
+                    let mut av: Vec<Value> = Vec::with_capacity(args.len());
+                    for a in args {
+                        av.push(self.operand(a).0);
+                    }
+                    let ret_dst = if let RetDest::Indirect(dst) = ret {
+                        self.place_addr(dst)
+                    } else {
+                        self.b.ins().iconst(types::I64, 0)
+                    };
+                    let args_ss = self.b.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        (av.len().max(1) * 8) as u32,
+                        3,
+                    ));
+                    for (i, v) in av.iter().enumerate() {
+                        self.b.ins().stack_store(*v, args_ss, (i * 8) as i32);
+                    }
+                    let ret_ss = self.b.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        16,
+                        3,
+                    ));
+                    let fref = self
+                        .module
+                        .declare_func_in_func(self.call_builtin, self.b.func);
+                    let bp = self
+                        .b
+                        .ins()
+                        .iconst(types::I64, builtin as *const ir::Builtin as i64);
+                    let ap = self.b.ins().stack_addr(types::I64, args_ss, 0);
+                    let nv = self.b.ins().iconst(types::I64, av.len() as i64);
+                    let rp = self.b.ins().stack_addr(types::I64, ret_ss, 0);
+                    let fv = self.b.ins().iconst(types::I64, func as i64);
+                    self.b.ins().call(fref, &[bp, ap, nv, ret_dst, fv, rp]);
+                    // 写回（interp 薄臂同形：Ignore/Indirect 不写，Scalar=lo，
+                    // Pair=(lo,hi)）
+                    match ret {
+                        RetDest::Ignore | RetDest::Indirect(_) => {}
+                        RetDest::Scalar(ScalarPlace::Slot(s)) => {
+                            let lo = self.b.ins().stack_load(types::I64, ret_ss, 0);
+                            self.def_slot(*s, lo);
+                        }
+                        RetDest::Pair(ScalarPlace::Slot(pl), ScalarPlace::Slot(ph)) => {
+                            let lo = self.b.ins().stack_load(types::I64, ret_ss, 0);
+                            let hi = self.b.ins().stack_load(types::I64, ret_ss, 8);
+                            self.def_slot(*pl, lo);
+                            self.def_slot(*ph, hi);
+                        }
+                        _ => unreachable!("admit 已筛 ret 形态"),
+                    }
+                    self.b.ins().jump(blocks[*target as usize], &[]);
+                }
             }
             Terminator::Unreachable => {
                 let fref = self

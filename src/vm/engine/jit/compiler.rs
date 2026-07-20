@@ -98,6 +98,9 @@ struct Compiler {
     call_indirect: ClifFuncId,
     tls_ref: ClifFuncId,
     call_foreign: ClifFuncId,
+    /// T1-b：CallBuiltin/分配系快路助手（helpers.rs 同 exec_builtin 本体）
+    call_builtin: ClifFuncId,
+    alloc: ClifFuncId,
     /// 本批 (clif id, unwind info)——finalize 后统一注册 eh_frame
     pending_unwind: Vec<(ClifFuncId, UnwindInfo)>,
 }
@@ -121,6 +124,8 @@ impl Compiler {
         jb.symbol("mirvm_call_indirect", mirvm_call_indirect as *const u8);
         jb.symbol("mirvm_tls_ref", mirvm_tls_ref as *const u8);
         jb.symbol("mirvm_call_foreign", mirvm_call_foreign as *const u8);
+        jb.symbol("mirvm_call_builtin", mirvm_call_builtin as *const u8);
+        jb.symbol("mirvm_alloc", mirvm_alloc as *const u8);
         // M5.4b-3 助手注册表
         jb.symbol("mirvm_bin128_ovf", mirvm_bin128_ovf as *const u8);
         jb.symbol("mirvm_f128_bin", mirvm_f128_bin as *const u8);
@@ -215,6 +220,18 @@ impl Compiler {
         let call_foreign = module
             .declare_function("mirvm_call_foreign", Linkage::Import, &sig_cf)
             .unwrap();
+        // T1-b CallBuiltin 助手（builtin 指针 + av 数组 + n + ret_dst + caller +
+        // (lo,hi) 写出指针）；分配系快路同六参但直返 u64
+        let mut sig_cb = module.make_signature();
+        for _ in 0..6 {
+            sig_cb.params.push(AbiParam::new(types::I64));
+        }
+        let call_builtin = module
+            .declare_function("mirvm_call_builtin", Linkage::Import, &sig_cb)
+            .unwrap();
+        let alloc = module
+            .declare_function("mirvm_alloc", Linkage::Import, &sig_cf)
+            .unwrap();
 
         Compiler {
             shared,
@@ -231,6 +248,8 @@ impl Compiler {
             call_indirect,
             tls_ref,
             call_foreign,
+            call_builtin,
+            alloc,
             pending_unwind: Vec::new(),
         }
     }
@@ -423,6 +442,8 @@ impl Compiler {
                 call_indirect: self.call_indirect,
                 tls_ref: self.tls_ref,
                 call_foreign: self.call_foreign,
+                call_builtin: self.call_builtin,
+                alloc: self.alloc,
             };
             tr.build(func, body);
             b.seal_all_blocks();
