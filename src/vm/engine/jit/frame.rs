@@ -481,13 +481,22 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
                     scan_place(&mut out, dst, simd_ext(lanes, lane_bytes), fsz);
                     scan_op(&mut out, val, fsz);
                 }
-                // 128 位族：place 通道恒 16 字节
-                Stmt::Bin128 { a, b, dst, .. } => {
+                // 128 位族：place 通道恒 16 字节；with_overflow 的 dst 是
+                // (u128, bool) 布局——旗标写 dst+16，足迹 17 字节（欠覆盖会让
+                // 旗标槽 SSA 提升，JIT 写物理帧而读侧取 SSA 零值 = 假阴性）
+                Stmt::Bin128 {
+                    a,
+                    b,
+                    dst,
+                    with_overflow,
+                    ..
+                } => {
                     scan_place(&mut out, a, Extent::Bytes(16), fsz);
                     if let ir::Bin128Rhs::Wide(w) = b {
                         scan_place(&mut out, w, Extent::Bytes(16), fsz);
                     }
-                    scan_place(&mut out, dst, Extent::Bytes(16), fsz);
+                    let dext = Extent::Bytes(if *with_overflow { 17 } else { 16 });
+                    scan_place(&mut out, dst, dext, fsz);
                 }
                 Stmt::Sat128 { a, b, dst, .. } => {
                     scan_place(&mut out, a, Extent::Bytes(16), fsz);
