@@ -71,24 +71,45 @@ pub(super) fn rvalue_ok(rv: &ir::Rvalue) -> bool {
     }
 }
 
-/// callee 的 ABI 必须全标量（蹦床/fast 签名的成立前提）。返回 (实参槽数, 有无返回值)。
-pub(super) fn callee_abi(body: &ir::FuncBody) -> Option<(usize, bool)> {
-    if body.caller_loc_off.is_some() {
-        return None; // track_caller 幻影尾参 v2
-    }
-    let mut n = 0usize;
+/// callee 的 fast 签名形态（T1-a，镜像 interp ABI v2 展平序——frame-abi §10-3
+/// 已被引擎冻结，JIT 只是实现同一展平，不引入第二种聚合约定）。
+///
+/// 展平序（与 interp prologue/Call 臂严格同序）：
+/// `[sret 前插首参?] [params 展平: Scalar=1 / Pair=2 / Indirect{off,size}=1 /
+/// Zst=0] [track_caller 幻影尾参 +1]`；返回 I64 数 = Zst/Indirect=0、Scalar=1、
+/// Pair=2（RetAbi::Indirect 经 sret memcpy，无 I64 返回）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CalleeAbi {
+    /// fast 签名 I64 实参数（含 sret 前插与幻影尾参）
+    pub nparams: usize,
+    /// fast 签名 I64 返回数（0/1/2）
+    pub nrets: usize,
+    /// RetAbi::Indirect：首参 = 目的真地址（packed 壳随之直传）
+    pub sret: bool,
+}
+
+/// callee ABI 计算（T1-a 起全形态可接；Option 形态暂存，T1-d 准入放开后复审）。
+pub(super) fn callee_abi(body: &ir::FuncBody) -> Option<CalleeAbi> {
+    let mut nparams = usize::from(matches!(body.ret, RetAbi::Indirect { .. }));
     for p in &body.params {
-        match p {
-            ParamAbi::Scalar(_) => n += 1,
-            ParamAbi::Zst => {}
-            _ => return None,
-        }
+        nparams += match p {
+            ParamAbi::Zst => 0,
+            ParamAbi::Scalar(_) => 1,
+            ParamAbi::Pair(_, _) => 2,
+            ParamAbi::Indirect { .. } => 1,
+        };
     }
-    match body.ret {
-        RetAbi::Scalar(_) => Some((n, true)),
-        RetAbi::Zst => Some((n, false)),
-        _ => None,
-    }
+    nparams += usize::from(body.caller_loc_off.is_some());
+    let nrets = match body.ret {
+        RetAbi::Zst | RetAbi::Indirect { .. } => 0,
+        RetAbi::Scalar(_) => 1,
+        RetAbi::Pair(_, _) => 2,
+    };
+    Some(CalleeAbi {
+        nparams,
+        nrets,
+        sret: matches!(body.ret, RetAbi::Indirect { .. }),
+    })
 }
 
 pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
@@ -198,11 +219,18 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
                 ..
             } => {
                 // unwind-transparent：只收 Continue（穿透）；cleanup/terminate 边 v2（LSDA 期）。
-                // callee ABI 不设限：全标量 ABI 走 PLT 快路，否则调用点直接 c2i 回解释
-                // （interp 本就吃展平 av，任意 ABI 语义一致——panic 类冷路径的归宿）。
+                // callee ABI 不设限：PLT 快路按 CalleeAbi 形态匹配（T1-a），
+                // 否则调用点直接 c2i 回解释（interp 本就吃展平 av，任意 ABI 语义一致）。
+                // 调用点 ret 落点同 interp 全形态（Ignore/Scalar/Pair/Indirect 前插）。
                 matches!(unwind, UnwindAction::Continue)
                     && args.iter().all(operand_ok)
-                    && matches!(ret, RetDest::Ignore | RetDest::Scalar(ScalarPlace::Slot(_)))
+                    && matches!(
+                        ret,
+                        RetDest::Ignore
+                            | RetDest::Scalar(ScalarPlace::Slot(_))
+                            | RetDest::Pair(ScalarPlace::Slot(_), ScalarPlace::Slot(_))
+                            | RetDest::Indirect(_)
+                    )
                     && shared.module.funcs.get(*callee as usize).is_some()
             }
             _ => false,

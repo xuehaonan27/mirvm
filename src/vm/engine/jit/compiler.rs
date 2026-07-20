@@ -24,7 +24,7 @@
 
 use super::*;
 use super::helpers::*;
-use super::admit::{admit, callee_abi};
+use super::admit::{CalleeAbi, admit, callee_abi};
 use super::frame::analyze_frame;
 use super::translate::Translator;
 
@@ -203,12 +203,12 @@ impl Compiler {
         }
     }
 
-    fn fast_sig(&mut self, nparams: usize, has_ret: bool) -> Signature {
+    fn fast_sig(&mut self, abi: CalleeAbi) -> Signature {
         let mut sig = self.module.make_signature();
-        for _ in 0..nparams {
+        for _ in 0..abi.nparams {
             sig.params.push(AbiParam::new(types::I64));
         }
-        if has_ret {
+        for _ in 0..abi.nrets {
             sig.returns.push(AbiParam::new(types::I64));
         }
         sig
@@ -226,24 +226,30 @@ impl Compiler {
         if !admit(self.shared, body) {
             return;
         }
-        let (nparams, has_ret) = callee_abi(body).expect("admit 已验");
+        let abi = callee_abi(body).expect("admit 已验");
 
         // PLT 快路 callee 的槽预热：未编译者发 c2i 蹦床（fast 形状，调用点形状恒定）。
-        // 非全标量 ABI / 实参数不合的 callee 不在此列——其调用点直接 c2i（cold path）。
-        let mut callees: Vec<(u32, usize, bool)> = Vec::new();
+        // 形态不合的 callee 不在此列——其调用点直接 c2i（cold path）。
+        let mut callees: Vec<(u32, CalleeAbi)> = Vec::new();
         for blk in &body.blocks {
-            if let Terminator::Call { callee, args, .. } = &blk.term
+            if let Terminator::Call {
+                callee,
+                args,
+                ret,
+                ..
+            } = &blk.term
                 && *callee != func
-                && !callees.iter().any(|(c, _, _)| c == callee)
-                && let Some((cn, cret)) = callee_abi(&self.shared.module.funcs[*callee as usize])
-                && cn == args.len()
+                && !callees.iter().any(|(c, _)| c == callee)
+                && let Some(cabi) = callee_abi(&self.shared.module.funcs[*callee as usize])
+                && cabi.nparams
+                    == args.len() + usize::from(matches!(ret, RetDest::Indirect(_)))
             {
-                callees.push((*callee, cn, cret));
+                callees.push((*callee, cabi));
             }
         }
-        for (c, cn, cret) in callees {
+        for (c, cabi) in callees {
             if jit.slots_fast[c as usize].load(Ordering::Acquire) == 0 {
-                if let Some(tramp) = self.define_c2i_trampoline(c, cn, cret) {
+                if let Some(tramp) = self.define_c2i_trampoline(c, cabi) {
                     jit.slots_fast[c as usize].store(tramp as u64, Ordering::Release);
                 }
             }
@@ -251,10 +257,10 @@ impl Compiler {
 
         // 静默失败纪律（m5.3-design D4 / 防静默错值：编译失败 = 维持解释，绝不向
         // stderr 吐 panic——差分 oracle 的 stderr 逐字节比对会被线程 id 污染，实测抓获）
-        let Some(fast_id) = self.define_fast(func, body, nparams, has_ret) else {
+        let Some(fast_id) = self.define_fast(func, body, abi) else {
             return;
         };
-        let Some(packed_id) = self.define_packed(func, body, nparams, has_ret, fast_id) else {
+        let Some(packed_id) = self.define_packed(func, body, abi, fast_id) else {
             return;
         };
         if self.module.finalize_definitions().is_err() {
@@ -271,8 +277,8 @@ impl Compiler {
 
     /// c2i 蹦床：fast 签名，打包实参进栈上数组，调 mirvm_c2i 回解释器。
     /// 任何编译失败 = None（调用方跳过本槽预热，静默维持解释）。
-    fn define_c2i_trampoline(&mut self, target: u32, nparams: usize, has_ret: bool) -> Option<*const u8> {
-        let sig = self.fast_sig(nparams, has_ret);
+    fn define_c2i_trampoline(&mut self, target: u32, abi: CalleeAbi) -> Option<*const u8> {
+        let sig = self.fast_sig(abi);
         let id = self
             .module
             .declare_function(&format!("t{target}"), Linkage::Local, &sig)
@@ -287,7 +293,7 @@ impl Compiler {
             let params = b.block_params(entry).to_vec();
             let args_ss = b.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
-                (nparams.max(1) * 8) as u32,
+                (abi.nparams.max(1) * 8) as u32,
                 3,
             ));
             for (i, p) in params.iter().enumerate() {
@@ -298,14 +304,23 @@ impl Compiler {
             let fref = self.module.declare_func_in_func(self.c2i, b.func);
             let fv = b.ins().iconst(types::I64, target as i64);
             let ap = b.ins().stack_addr(types::I64, args_ss, 0);
-            let nv = b.ins().iconst(types::I64, nparams as i64);
+            let nv = b.ins().iconst(types::I64, abi.nparams as i64);
             let rp = b.ins().stack_addr(types::I64, ret_ss, 0);
             b.ins().call(fref, &[fv, ap, nv, rp]);
-            if has_ret {
-                let lo = b.ins().stack_load(types::I64, ret_ss, 0);
-                b.ins().return_(&[lo]);
-            } else {
-                b.ins().return_(&[]);
+            // mirvm_c2i 恒写 (lo,hi) 两槽（helpers.rs:8-17），按形态取回
+            match abi.nrets {
+                0 => {
+                    b.ins().return_(&[]);
+                }
+                1 => {
+                    let lo = b.ins().stack_load(types::I64, ret_ss, 0);
+                    b.ins().return_(&[lo]);
+                }
+                _ => {
+                    let lo = b.ins().stack_load(types::I64, ret_ss, 0);
+                    let hi = b.ins().stack_load(types::I64, ret_ss, 8);
+                    b.ins().return_(&[lo, hi]);
+                }
             }
             b.seal_all_blocks();
             b.finalize();
@@ -336,10 +351,9 @@ impl Compiler {
         &mut self,
         func: u32,
         body: &ir::FuncBody,
-        nparams: usize,
-        has_ret: bool,
+        abi: CalleeAbi,
     ) -> Option<ClifFuncId> {
-        let sig = self.fast_sig(nparams, has_ret);
+        let sig = self.fast_sig(abi);
         let id = self
             .module
             .declare_function(&format!("f{func}"), Linkage::Local, &sig)
@@ -375,7 +389,7 @@ impl Compiler {
                 volatile_load: self.volatile_load,
                 volatile_store: self.volatile_store,
             };
-            tr.build(func, body, has_ret);
+            tr.build(func, body);
             b.seal_all_blocks();
             b.finalize();
         }
@@ -400,8 +414,7 @@ impl Compiler {
         &mut self,
         func: u32,
         body: &ir::FuncBody,
-        nparams: usize,
-        has_ret: bool,
+        abi: CalleeAbi,
         fast: ClifFuncId,
     ) -> Option<ClifFuncId> {
         let _ = body;
@@ -421,8 +434,8 @@ impl Compiler {
             b.switch_to_block(entry);
             let ps = b.block_params(entry).to_vec();
             let (argp, retp) = (ps[0], ps[1]);
-            let mut args: Vec<Value> = Vec::with_capacity(nparams);
-            for i in 0..nparams {
+            let mut args: Vec<Value> = Vec::with_capacity(abi.nparams);
+            for i in 0..abi.nparams {
                 args.push(
                     b.ins()
                         .load(types::I64, MemFlagsData::trusted(), argp, (i * 8) as i32),
@@ -430,14 +443,19 @@ impl Compiler {
             }
             let fref = self.module.declare_func_in_func(fast, b.func);
             let call = b.ins().call(fref, &args);
-            let lo = if has_ret {
+            // (lo,hi) 两槽恒写（T1-a 补 hi 现役语义洞）：sret/nrets=0 形态写零
+            let r0 = if abi.nrets >= 1 {
                 b.inst_results(call)[0]
             } else {
                 b.ins().iconst(types::I64, 0)
             };
-            let zero = b.ins().iconst(types::I64, 0);
-            b.ins().store(MemFlagsData::trusted(), lo, retp, 0);
-            b.ins().store(MemFlagsData::trusted(), zero, retp, 8);
+            let r1 = if abi.nrets >= 2 {
+                b.inst_results(call)[1]
+            } else {
+                b.ins().iconst(types::I64, 0)
+            };
+            b.ins().store(MemFlagsData::trusted(), r0, retp, 0);
+            b.ins().store(MemFlagsData::trusted(), r1, retp, 8);
             b.ins().return_(&[]);
             b.seal_all_blocks();
             b.finalize();

@@ -407,7 +407,7 @@ impl Translator<'_, '_> {
         self.write_slot(s, v);
     }
 
-    pub(super) fn build(&mut self, func: u32, body: &ir::FuncBody, has_ret: bool) {
+    pub(super) fn build(&mut self, func: u32, body: &ir::FuncBody) {
         let entry = self.b.create_block();
         self.b.append_block_params_for_function_params(entry);
         let blocks: Vec<_> = (0..body.blocks.len())
@@ -431,14 +431,50 @@ impl Translator<'_, '_> {
             let n = self.b.ins().iconst(types::I64, i64::from(body.frame_size));
             self.b.ins().call(fref, &[dst, c0, n]);
         }
-        // 参数落槽（packed/interp 侧按同一展平序）
+        // 参数落槽（T1-a：interp ABI v2 展平序全形态——sret 前插 / Scalar /
+        // Pair / Indirect(memmove) / track_caller 幻影尾参，packed/interp 同序）
         let params = self.b.block_params(entry).to_vec();
         let mut pi = 0usize;
+        if let RetAbi::Indirect { sret_off, .. } = body.ret {
+            self.def_slot(
+                Slot {
+                    off: sret_off,
+                    width: Width::W64,
+                },
+                params[pi],
+            );
+            pi += 1;
+        }
         for p in &body.params {
-            if let ParamAbi::Scalar(s) = p {
-                self.def_slot(*s, params[pi]);
-                pi += 1;
+            match p {
+                ParamAbi::Zst => {}
+                ParamAbi::Scalar(s) => {
+                    self.def_slot(*s, params[pi]);
+                    pi += 1;
+                }
+                ParamAbi::Pair(lo, hi) => {
+                    self.def_slot(*lo, params[pi]);
+                    self.def_slot(*hi, params[pi + 1]);
+                    pi += 2;
+                }
+                ParamAbi::Indirect { off, size } => {
+                    // 帧内 off 必落帧（analyze_frame 的 ABI 展平面已强制）
+                    let dst = self.addr_of_local(*off);
+                    let fref = self.module.declare_func_in_func(self.memmove, self.b.func);
+                    let n = self.b.ins().iconst(types::I64, i64::from(*size));
+                    self.b.ins().call(fref, &[dst, params[pi], n]);
+                    pi += 1;
+                }
             }
+        }
+        if let Some(off) = body.caller_loc_off {
+            self.def_slot(
+                Slot {
+                    off,
+                    width: Width::W64,
+                },
+                params[pi],
+            );
         }
         self.b.ins().jump(blocks[0], &[]);
 
@@ -447,7 +483,7 @@ impl Translator<'_, '_> {
             for st in &blk.stmts {
                 self.stmt(st);
             }
-            self.term(func, body, &blk.term, &blocks, has_ret);
+            self.term(func, body, &blk.term, &blocks);
         }
     }
 
@@ -1745,7 +1781,6 @@ impl Translator<'_, '_> {
         body: &ir::FuncBody,
         t: &Terminator,
         blocks: &[cranelift_codegen::ir::Block],
-        has_ret: bool,
     ) {
         match t {
             Terminator::Goto(bb) => {
@@ -1789,13 +1824,19 @@ impl Translator<'_, '_> {
                 target,
                 ..
             } => {
-                let mut av: Vec<Value> = Vec::with_capacity(args.len());
+                // 展平 av（interp Call 臂同序：RetDest::Indirect 前插目的真地址 +
+                // 逐实参；lower 已把 Pair 实参展开为两槽、幻影尾参附加在末）
+                let mut av: Vec<Value> = Vec::with_capacity(args.len() + 1);
+                if let RetDest::Indirect(dst) = ret {
+                    let a = self.place_addr(dst);
+                    av.push(a);
+                }
                 for a in args {
                     av.push(self.operand(a).0);
                 }
                 let cb = &self.shared.module.funcs[*callee as usize];
-                let plt = callee_abi(cb).filter(|(cn, _)| *cn == av.len());
-                if let Some((_, cret)) = plt {
+                let plt = callee_abi(cb).filter(|cabi| cabi.nparams == av.len());
+                if let Some(cabi) = plt {
                     // 热路：PLT 内存间接——load slots_fast[callee] + call_indirect
                     //（恒定形状；蹦床→fast 的升级对调用点透明）
                     let slot_addr = &self.shared.jit.slots_fast[*callee as usize]
@@ -1811,20 +1852,30 @@ impl Translator<'_, '_> {
                         for _ in 0..av.len() {
                             s.params.push(AbiParam::new(types::I64));
                         }
-                        if cret {
+                        for _ in 0..cabi.nrets {
                             s.returns.push(AbiParam::new(types::I64));
                         }
                         s
                     };
                     let sigref = self.b.import_signature(sig);
                     let call = self.b.ins().call_indirect(sigref, fp, &av);
-                    if let RetDest::Scalar(ScalarPlace::Slot(s)) = ret {
-                        let lo = if cret {
-                            self.b.inst_results(call)[0]
-                        } else {
-                            self.b.ins().iconst(types::I64, 0)
-                        };
-                        self.def_slot(*s, lo);
+                    match ret {
+                        RetDest::Ignore | RetDest::Indirect(_) => {}
+                        RetDest::Scalar(ScalarPlace::Slot(s)) => {
+                            let lo = if cabi.nrets >= 1 {
+                                self.b.inst_results(call)[0]
+                            } else {
+                                self.b.ins().iconst(types::I64, 0)
+                            };
+                            self.def_slot(*s, lo);
+                        }
+                        RetDest::Pair(ScalarPlace::Slot(pl), ScalarPlace::Slot(ph)) => {
+                            let lo = self.b.inst_results(call)[0];
+                            let hi = self.b.inst_results(call)[1];
+                            self.def_slot(*pl, lo);
+                            self.def_slot(*ph, hi);
+                        }
+                        _ => unreachable!("admit 已筛 ret 形态"),
                     }
                 } else {
                     // 冷路：调用点直接 c2i（打包展平实参回解释器——interp 本就吃
@@ -1848,23 +1899,55 @@ impl Translator<'_, '_> {
                     let nv = self.b.ins().iconst(types::I64, av.len() as i64);
                     let rp = self.b.ins().stack_addr(types::I64, ret_ss, 0);
                     self.b.ins().call(fref, &[fv, ap, nv, rp]);
-                    if let RetDest::Scalar(ScalarPlace::Slot(s)) = ret {
-                        let lo = self.b.ins().stack_load(types::I64, ret_ss, 0);
-                        self.def_slot(*s, lo);
+                    // mirvm_c2i 恒写 (lo,hi) 两槽，按落点形态取回
+                    match ret {
+                        RetDest::Ignore | RetDest::Indirect(_) => {}
+                        RetDest::Scalar(ScalarPlace::Slot(s)) => {
+                            let lo = self.b.ins().stack_load(types::I64, ret_ss, 0);
+                            self.def_slot(*s, lo);
+                        }
+                        RetDest::Pair(ScalarPlace::Slot(pl), ScalarPlace::Slot(ph)) => {
+                            let lo = self.b.ins().stack_load(types::I64, ret_ss, 0);
+                            let hi = self.b.ins().stack_load(types::I64, ret_ss, 8);
+                            self.def_slot(*pl, lo);
+                            self.def_slot(*ph, hi);
+                        }
+                        _ => unreachable!("admit 已筛 ret 形态"),
                     }
                 }
                 self.b.ins().jump(blocks[*target as usize], &[]);
             }
             Terminator::Return => {
-                if has_ret {
-                    let RetAbi::Scalar(s) = body.ret else {
-                        unreachable!()
-                    };
-                    let var = self.var(s.off);
-                    let v = self.b.use_var(var);
-                    self.b.ins().return_(&[v]);
-                } else {
-                    self.b.ins().return_(&[]);
+                match body.ret {
+                    RetAbi::Zst => {
+                        self.b.ins().return_(&[]);
+                    }
+                    RetAbi::Scalar(s) => {
+                        let v = self.read_slot(s);
+                        self.b.ins().return_(&[v]);
+                    }
+                    RetAbi::Pair(lo_s, hi_s) => {
+                        let lo = self.read_slot(lo_s);
+                        let hi = self.read_slot(hi_s);
+                        self.b.ins().return_(&[lo, hi]);
+                    }
+                    RetAbi::Indirect {
+                        ret_off,
+                        size,
+                        sret_off,
+                    } => {
+                        // interp Return 同语义：从 sret 槽读目的地址，
+                        // memcpy(_0 → dst, size)，(lo,hi) 返回 (0,0)
+                        let dst = self.read_slot(Slot {
+                            off: sret_off,
+                            width: Width::W64,
+                        });
+                        let src = self.addr_of_local(ret_off);
+                        let fref = self.module.declare_func_in_func(self.memmove, self.b.func);
+                        let n = self.b.ins().iconst(types::I64, i64::from(size));
+                        self.b.ins().call(fref, &[dst, src, n]);
+                        self.b.ins().return_(&[]);
+                    }
                 }
             }
             Terminator::Unreachable => {
@@ -1912,9 +1995,18 @@ pub(super) fn collect_ssa_offs(body: &ir::FuncBody, frame_offs: &FrameMap, out: 
     if let RetAbi::Scalar(s) = &body.ret {
         push(s);
     }
+    if let RetAbi::Pair(lo, hi) = &body.ret {
+        push(lo);
+        push(hi);
+    }
     for p in &body.params {
-        if let ParamAbi::Scalar(s) = p {
-            push(s);
+        match p {
+            ParamAbi::Scalar(s) => push(s),
+            ParamAbi::Pair(lo, hi) => {
+                push(lo);
+                push(hi);
+            }
+            _ => {}
         }
     }
     for blk in &body.blocks {

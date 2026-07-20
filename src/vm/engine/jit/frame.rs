@@ -190,6 +190,17 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
         Extent::Bytes(count.saturating_mul(*elem_size).min(u32::MAX as u64) as u32)
     }
     let mut out = FrameMap::default();
+    // T1-a：ABI v2 展平带来的帧责任——Indirect 参数字节区间（prologue memmove
+    // 目的地）与 RetAbi::Indirect 的 ret_off 区间（Return 的 memmove 源）
+    // 必落帧（帧模型 v2「触及即落帧」的 ABI 展平面）。
+    for p in &body.params {
+        if let ParamAbi::Indirect { off, size } = p {
+            out.add(*off, off.saturating_add(*size).min(fsz));
+        }
+    }
+    if let RetAbi::Indirect { ret_off, size, .. } = &body.ret {
+        out.add(*ret_off, ret_off.saturating_add(*size).min(fsz));
+    }
     for blk in &body.blocks {
         for st in &blk.stmts {
             match st {
