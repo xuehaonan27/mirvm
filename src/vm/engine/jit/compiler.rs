@@ -107,6 +107,8 @@ struct Compiler {
     terminate_abort: ClifFuncId,
     call_terminate: ClifFuncId,
     unwind_resume: ClifFuncId,
+    /// T1-d：Trap 占位助手（interp engine_abort 同文案同退出码）
+    trap: ClifFuncId,
     /// 本批 (clif id, unwind info, try_call 函数的 LSDA 字节)——finalize 后统一注册
     pending_unwind: Vec<(ClifFuncId, UnwindInfo, Option<Vec<u8>>)>,
 }
@@ -131,6 +133,7 @@ impl Compiler {
         jb.symbol("mirvm_jit_terminate_abort", mirvm_jit_terminate_abort as *const u8);
         jb.symbol("mirvm_call_terminate", mirvm_call_terminate as *const u8);
         jb.symbol("_Unwind_Resume", _Unwind_Resume as *const u8);
+        jb.symbol("mirvm_jit_trap", mirvm_jit_trap as *const u8);
         jb.symbol("mirvm_tls_ref", mirvm_tls_ref as *const u8);
         jb.symbol("mirvm_call_foreign", mirvm_call_foreign as *const u8);
         jb.symbol("mirvm_call_builtin", mirvm_call_builtin as *const u8);
@@ -264,6 +267,14 @@ impl Compiler {
         let unwind_resume = module
             .declare_function("_Unwind_Resume", Linkage::Import, &sig_ur)
             .unwrap();
+        // T1-d：Trap 助手（reason 指针/长度 + func（u64::MAX = stmt 形））
+        let mut sig_tr = module.make_signature();
+        for _ in 0..3 {
+            sig_tr.params.push(AbiParam::new(types::I64));
+        }
+        let trap = module
+            .declare_function("mirvm_jit_trap", Linkage::Import, &sig_tr)
+            .unwrap();
 
         Compiler {
             shared,
@@ -285,6 +296,7 @@ impl Compiler {
             terminate_abort,
             call_terminate,
             unwind_resume,
+            trap,
             pending_unwind: Vec::new(),
         }
     }
@@ -485,6 +497,7 @@ impl Compiler {
                 terminate_abort: self.terminate_abort,
                 call_terminate: self.call_terminate,
                 unwind_resume: self.unwind_resume,
+                trap: self.trap,
                 exception_var: None,
                 has_try_call: false,
             };

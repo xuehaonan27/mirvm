@@ -306,6 +306,32 @@ pub(super) extern "C-unwind" fn mirvm_jit_unreachable(func: u64) -> ! {
     std::process::abort();
 }
 
+/// Trap 占位（T1-d：语句级/终止子同口）——诊断与退出码逐字节对齐 interp
+/// engine_abort：stmt 形 `TRAP: {reason}`；终止子形 `TRAP: {reason}（fn name）`
+/// （func == u64::MAX 为 stmt 形标记）。exit(70)，不是 abort（TerminateAbort
+/// 才是 134，两通道勿混）。
+pub(super) extern "C-unwind" fn mirvm_jit_trap(reason_ptr: u64, reason_len: u64, func: u64) -> ! {
+    let reason = unsafe {
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+            reason_ptr as *const u8,
+            reason_len as usize,
+        ))
+    };
+    if func == u64::MAX {
+        eprintln!("mirvm[m4-engine]: TRAP: {reason}");
+    } else {
+        let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
+        let name = shared
+            .module
+            .funcs
+            .get(func as usize)
+            .map(|f| &*f.name)
+            .unwrap_or("?");
+        eprintln!("mirvm[m4-engine]: TRAP: {reason}（fn {name}）");
+    }
+    std::process::exit(70);
+}
+
 // ===== M5.4b 助手（与 interp 共享实现本体，不复制逻辑）=====
 
 /// 除零诊断退出（M5.4b-1）：与 interp engine_abort 的文案/退出码逐位一致。

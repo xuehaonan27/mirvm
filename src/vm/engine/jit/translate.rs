@@ -34,6 +34,8 @@ pub(super) struct Translator<'a, 'b> {
     pub(super) terminate_abort: ClifFuncId,
     pub(super) call_terminate: ClifFuncId,
     pub(super) unwind_resume: ClifFuncId,
+    /// T1-d：Trap 占位助手（语句级/终止子同口）
+    pub(super) trap: ClifFuncId,
     pub(super) exception_var: Option<Variable>,
     pub(super) has_try_call: bool,
 }
@@ -1091,6 +1093,17 @@ impl Translator<'_, '_> {
                 let s = self.b.ins().iconst(types::I64, *signed as i64);
                 self.call_out128("mirvm_f128_to_wide", &[s, alo, ahi], dst);
             }
+            // T1-d：Trap/Nop（语句级 Trap = mirvm_jit_trap stmt 形，interp
+            // engine_abort 同文案同 exit(70)；call 后补 trap 保底——助手不返回）
+            Stmt::Trap(reason) => {
+                let fref = self.module.declare_func_in_func(self.trap, self.b.func);
+                let p = self.b.ins().iconst(types::I64, reason.as_ptr() as i64);
+                let n = self.b.ins().iconst(types::I64, reason.len() as i64);
+                let f = self.b.ins().iconst(types::I64, -1);
+                self.b.ins().call(fref, &[p, n, f]);
+                self.b.ins().trap(TrapCode::user(1).unwrap());
+            }
+            Stmt::Nop => {}
             _ => unreachable!("admit 已排除"),
         }
     }
@@ -1173,6 +1186,52 @@ impl Translator<'_, '_> {
                 };
                 let b1 = self.b.ins().icmp(c, x, y);
                 self.b.ins().uextend(types::I64, b1)
+            }
+            R::IntCmp3 { signed, a, b } => {
+                // interp rvalue IntCmp3 镜像：三路比较 → Ordering i8 位型
+                //（-1 = 0xFF；dst W8 截断同值）
+                let (av, w) = self.operand(a);
+                let (bv, _) = self.operand(b);
+                let (x, y) = if *signed {
+                    (self.sext_val(av, w), self.sext_val(bv, w))
+                } else {
+                    (av, bv)
+                };
+                let ltc = if *signed {
+                    IntCC::SignedLessThan
+                } else {
+                    IntCC::UnsignedLessThan
+                };
+                let lt = self.b.ins().icmp(ltc, x, y);
+                let eq = self.b.ins().icmp(IntCC::Equal, x, y);
+                let neg1 = self.b.ins().iconst(types::I64, 0xFF);
+                let one = self.b.ins().iconst(types::I64, 1);
+                let zero = self.b.ins().iconst(types::I64, 0);
+                let ge = self.b.ins().select(eq, zero, one);
+                self.b.ins().select(lt, neg1, ge)
+            }
+            R::NicheDiscr {
+                tag,
+                niche_start,
+                variants_start,
+                variants_len,
+                untagged,
+            } => {
+                // interp rvalue NicheDiscr 镜像：rel = (tag - niche_start) 按 tag
+                // 宽 wrapping；rel < len → variants_start+rel，否则 untagged
+                let (tv, w) = self.operand(tag);
+                let ns = self.b.ins().iconst(types::I64, *niche_start as i64);
+                let rel = self.b.ins().isub(tv, ns);
+                let rel = self.mask_val(rel, w);
+                let hit = self.b.ins().icmp_imm(
+                    IntCC::UnsignedLessThan,
+                    rel,
+                    *variants_len as i64,
+                );
+                let vs = self.b.ins().iconst(types::I64, *variants_start as i64);
+                let tagged = self.b.ins().iadd(vs, rel);
+                let un = self.b.ins().iconst(types::I64, *untagged as i64);
+                self.b.ins().select(hit, tagged, un)
             }
             R::NotBits(a) => {
                 let (v, w) = self.operand(a);
@@ -2515,7 +2574,16 @@ impl Translator<'_, '_> {
                 self.b.ins().call(fref, &[fv]);
                 self.b.ins().trap(TrapCode::user(1).unwrap());
             }
-            _ => unreachable!("admit 已排除"),
+            // T1-d：Trap-stub 终止子（mirvm_jit_trap 终止子形带 fn 名，interp
+            // runblocks 臂同文案同 exit(70)）
+            Terminator::Trap(reason) => {
+                let fref = self.module.declare_func_in_func(self.trap, self.b.func);
+                let p = self.b.ins().iconst(types::I64, reason.as_ptr() as i64);
+                let n = self.b.ins().iconst(types::I64, reason.len() as i64);
+                let fv = self.b.ins().iconst(types::I64, func as i64);
+                self.b.ins().call(fref, &[p, n, fv]);
+                self.b.ins().trap(TrapCode::user(1).unwrap());
+            }
         }
     }
 }
@@ -2583,11 +2651,13 @@ pub(super) fn collect_ssa_offs(body: &ir::FuncBody, frame_offs: &FrameMap, out: 
                         | R::BitUn { a, .. } => op(a, &mut push),
                         R::IntBin { a, b, .. }
                         | R::IntCmp { a, b, .. }
+                        | R::IntCmp3 { a, b, .. }
                         | R::PtrDiff { a, b, .. }
                         | R::UMax { a, b } => {
                             op(a, &mut push);
                             op(b, &mut push);
                         }
+                        R::NicheDiscr { tag, .. } => op(tag, &mut push),
                         R::PtrOffset { ptr, count, .. } => {
                             op(ptr, &mut push);
                             op(count, &mut push);

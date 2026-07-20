@@ -391,14 +391,15 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
                 }
                 Stmt::SimdSelect {
                     mask,
+                    mask_bytes,
                     a,
                     b,
                     dst,
                     lanes,
                     lane_bytes,
-                    ..
                 } => {
-                    scan_place(&mut out, mask, simd_ext(lanes, lane_bytes), fsz);
+                    // mask lane 宽 = mask_bytes（可与数据 lane 异宽，interp 同口径）
+                    scan_place(&mut out, mask, simd_ext(lanes, mask_bytes), fsz);
                     scan_place(&mut out, a, simd_ext(lanes, lane_bytes), fsz);
                     scan_place(&mut out, b, simd_ext(lanes, lane_bytes), fsz);
                     scan_place(&mut out, dst, simd_ext(lanes, lane_bytes), fsz);
@@ -407,51 +408,52 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
                     passthru,
                     ptrs,
                     mask,
+                    mask_bytes,
                     dst,
                     lanes,
                     lane_bytes,
-                    ..
                 } => {
                     scan_place(&mut out, passthru, simd_ext(lanes, lane_bytes), fsz);
-                    scan_place(&mut out, ptrs, simd_ext(lanes, lane_bytes), fsz);
-                    scan_place(&mut out, mask, simd_ext(lanes, lane_bytes), fsz);
+                    // 指针 lane 恒 8 字节（interp 同口径），与数据 lane 宽无关
+                    scan_place(&mut out, ptrs, Extent::Bytes(*lanes as u32 * 8), fsz);
+                    scan_place(&mut out, mask, simd_ext(lanes, mask_bytes), fsz);
                     scan_place(&mut out, dst, simd_ext(lanes, lane_bytes), fsz);
                 }
                 Stmt::SimdScatter {
                     values,
                     ptrs,
                     mask,
+                    mask_bytes,
                     lanes,
                     lane_bytes,
-                    ..
                 } => {
                     scan_place(&mut out, values, simd_ext(lanes, lane_bytes), fsz);
-                    scan_place(&mut out, ptrs, simd_ext(lanes, lane_bytes), fsz);
-                    scan_place(&mut out, mask, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, ptrs, Extent::Bytes(*lanes as u32 * 8), fsz);
+                    scan_place(&mut out, mask, simd_ext(lanes, mask_bytes), fsz);
                 }
                 Stmt::SimdMaskedLoad {
                     mask,
+                    mask_bytes,
                     base,
                     passthru,
                     dst,
                     lanes,
                     lane_bytes,
-                    ..
                 } => {
-                    scan_place(&mut out, mask, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, mask, simd_ext(lanes, mask_bytes), fsz);
                     scan_op(&mut out, base, fsz);
                     scan_place(&mut out, passthru, simd_ext(lanes, lane_bytes), fsz);
                     scan_place(&mut out, dst, simd_ext(lanes, lane_bytes), fsz);
                 }
                 Stmt::SimdMaskedStore {
                     mask,
+                    mask_bytes,
                     base,
                     values,
                     lanes,
                     lane_bytes,
-                    ..
                 } => {
-                    scan_place(&mut out, mask, simd_ext(lanes, lane_bytes), fsz);
+                    scan_place(&mut out, mask, simd_ext(lanes, mask_bytes), fsz);
                     scan_op(&mut out, base, fsz);
                     scan_place(&mut out, values, simd_ext(lanes, lane_bytes), fsz);
                 }

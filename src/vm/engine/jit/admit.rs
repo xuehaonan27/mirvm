@@ -49,6 +49,9 @@ pub(super) fn rvalue_ok(rv: &ir::Rvalue) -> bool {
         R::PtrOffset { ptr, count, .. } => operand_ok(ptr) && operand_ok(count),
         R::PtrDiff { a, b, stride } => *stride != 0 && operand_ok(a) && operand_ok(b),
         R::UMax { a, b } => operand_ok(a) && operand_ok(b),
+        // T1-d：三路比较 / niche 判别（CLIF 内联，interp 恒等式镜像）
+        R::IntCmp3 { a, b, .. } => operand_ok(a) && operand_ok(b),
+        R::NicheDiscr { tag, .. } => operand_ok(tag),
         // M5.4b-1 标量补面
         R::IntSat { a, b, .. } => operand_ok(a) && operand_ok(b),
         R::BitUn { a, .. } => operand_ok(a),
@@ -197,6 +200,8 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
                 Stmt::F128ToScalar { src, dst, .. } => place_ok(src) && mem_place_ok(dst),
                 Stmt::F128FromWideInt { src, dst, .. } => place_ok(src) && place_ok(dst),
                 Stmt::F128ToWideInt { src, dst, .. } => place_ok(src) && place_ok(dst),
+                // T1-d：Trap 占位（mirvm_jit_trap 助手同 interp 文案）/ Nop
+                Stmt::Trap(_) | Stmt::Nop => true,
                 _ => false,
             };
             if !ok {
@@ -307,7 +312,8 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
             // T1-c：Resume（exception_slot → _Unwind_Resume 续传）与
             // TerminateAbort（mirvm_jit_terminate_abort 助手）
             Terminator::Resume | Terminator::TerminateAbort => true,
-            _ => false,
+            // T1-d：Trap-stub（mirvm_jit_trap 助手，interp 同文案同 exit(70)）
+            Terminator::Trap(_) => true,
         };
         if !ok {
             return false;
