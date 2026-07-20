@@ -26,10 +26,10 @@ fn big_sum(b: Big) -> u64 {
 #[inline(never)]
 fn make_big(seed: u64) -> Big {
     let mut a = [0u64; 8];
-    // 下标循环（iter_mut/enumerate 的 Option niche 判别是 admit 的既有
-    // rvalue_ok 盲区，T1-d 准入放开的活，与本探针无关）
-    for i in 0..8 {
-        a[i] = seed + i as u64;
+    // iter_mut/enumerate 的 Option niche 判别（NicheDiscr）——T1-d 准入
+    // 放开前是 rvalue_ok 盲区（曾绕行为下标循环），现作在位回归
+    for (i, x) in a.iter_mut().enumerate() {
+        *x = seed + i as u64;
     }
     Big { a }
 }

@@ -24,7 +24,7 @@
 | **M5.3 JIT 骨架** | **完成（2026-07-15）** | 方法级 Cranelift JIT 三片全落地（[m5.3-design.md](history/m5.3-design.md) Q1-Q4 全批；m5-log M5.3 节）：J1 分层基座（call_guest 单一派发点 + PLT/计数，S4 合并 FuncId 空间）+ 翻译器标量子集（语义 = 与解释器逐位一致；调用点两路分治——热路 PLT 间接/冷路 c2i）+ CFI（spike5 管线产品化）。**fib(32)：解释 engine 922.6→19.3ms（47.8×）= 2.9× native；硬门 ≤80ms 达成（69ms 含加载）**。oracle：逢调即编（阈值=1）diff 30/30 + JIT-off 对齐 + gate5 三新行（硬门/逢调即编全量/off 冒烟），gate 总数 47→50 |
 | S3′a（image 栈重构） | **完成（2026-07-15，commit b4ed691）** | 多源查找 + 地址样条（行为等价）：单底座泛化成 image 栈（`[std 底座, dep…]`）；frozen 样条域 + is_valid_home 白名单；ImageStack 并集查找/累积偏移/键链；Linker 收 &ImageStack。无 image/单底座两态字节等价，gate5 50/0/0/0 |
 | **S3′b（依赖成像）** | **完成（2026-07-15）= A2 纯化聚合 deps-image** | chain 方案撞"线性链无法表达非线性依赖 DAG"固有难题（4/19 证伪）后，purity 探针实测 eco 账本（tainted 72 inst/1.9ms）裁定 A2（[decision-history.md §7.5](decision-history.md)）；[s3b-a2-design.md](history/s3b-a2-design.md) 过审后三片全落地：A2-1 split lower 机件（双队列/标签 id/双 arena 路由/编译期穷尽 rebase）、A2-2 写盘/装载/L2 键链（**eco 冷 924→热 66ms**，自愈矩阵验证）、A2-3 默认开启 + gate 双态冒烟 + S3′c 同 workspace 跨 bin 共享（gate5 50→51；[m6-log.md](history/m6-log.md) 片7/8/9） |
-| M5.4（翻译器全覆盖） | **a/b 完成（2026-07-15），c/d 待施** | a = 帧模型 v2 + 内存操作数；b = 标量全集 + 128 位族 + atomics（[m5-log.md](history/m5-log.md) M5.4a/b 节）——含 analyze_frame 区间模型实锤根因修复（place 通道字节区间内槽漏提升 = 错值级）。oracle：逢调即编 diff 30/30 + diff_cargo 5/5 + gate5 51/0/0/0（fib(32) JIT 74ms ≤80ms 硬门）。c = ABI 泛化（Pair/Indirect/track_caller）+ LSDA 产品化（probe 5/5 已过）；d = SIMD + 收口 |
+| M5.4（翻译器全覆盖） | **a/b/c/d 全完成（2026-07-19 收口）** | a = 帧模型 v2 + 内存操作数；b = 标量全集 + 128 位族 + atomics（[m5-log.md](history/m5-log.md) M5.4a/b 节）；**c = ABI 泛化（CalleeAbi 全形态）+ 五调用助手 + unwind 产品化（try_call/Resume/Terminate + 双 CIE 全覆 LSDA，`83e168d`）；d = 准入放开——stmt/rvalue/terminator 三表穷尽**（SIMD 15 族 + Sat128 + rvalue 三件经统一助手调 interp 共享本体零漂移，`5252a89`/`5a1bcbe`）。伴生修出既有 bug 四件（call_foreign 签名、bitcast 旗、Bin128 旗标槽 SSA 误提升、frame mask/ptr 区间欠覆盖）。oracle：gate2 9/9、cargo test 76、diff 双态 45/45、diff_cargo 5/5、gate5 复绿（decision-history §7.19，T1/E1 闭合） |
 | 地址模型 P2（GOT 间接） | **完成（2026-07-17）** | §7.5b 手术单定场（真实地址模型保留）→ §7.5c 零 IR 变更 GOT 机制（槽 = 冻结区普通格 + 启动相重填；extern static/fn 值不再烤宿主地址，字节码复用 `Mem{Static(槽)}`/`SubImm` 通道，JIT/interp 零改动）→ §7.5d 拒缓存三判据全退役 + 纯 std 会话 want_split 修正（先存 A2 沉默债：L2 对纯 std 程序永 miss）。外来符号用例冷→热全通（c_process 463→30ms），gate5 117/0/0。JIT 间接调用准入记债（[open-issues.md E1](open-issues.md)） |
 | 地址模型 P1（fn 条目可执行化） | **完成（2026-07-17，commit `4202317`）** | §7.6：FFI 可派生条目值 = 可执行 stub 码址（新第三固定地址域族 0x6C00/0x6D00/0x6E00+k + libffi closure 蹦床 + 配方随模块、启动相重建封存 RX）——thunk 盲区结构性根治（旧 debt §6 关闭，对照见 [open-issues.md](open-issues.md)；负对照 flate2 C-libz 结构体内嵌回调往返，三维+L2 热一致）。残余边界 = 签名不可派生条目（Rust ABI/聚合/变参）保持数据槽，无实质盲区；SIGSEGV 诊断化可选后补（open-issues T4）。gate5 117/0/0 |
 | corpus 批7（激进 24 三波） | **完成（2026-07-17）** | 23/24 全绿可用（corpus.md §5 批7）；**修出两只产品 bug 当日修复**：native-archive 链接行收 crate 图动态库（`867b3de`，libgit2 红转绿）+ custom `#[global_allocator]` 运行时统一路由 `__rust_*`（§7.7，c_mimalloc 三维绿、跨堆 SIGSEGV 根治）。c_tree_sitter 按值聚合 FFI 记档（open-issues C1，**2026-07-18 C1 闭合后转正入 gate**）。gate5 128→**139**；corpus 实测真实 crate 总账 123 |
@@ -160,7 +160,7 @@ Linux/ELF/x86_64 优先：依赖 pthread、dlopen、GNU 链接行为和 x86 asm 
 | M5.1 收口 | 六个 release native-differential tracer 脚本通过，x86_vectors 内 pshufb/SHA 分别记账；numbigint、xgetbv、sha2、blake3、ecosystem 全部转绿。M5.1 旧前沿 expected-red 已删除，diff_cargo 3/3；signal/backtrace 仍是独立 XFAIL |
 | x86 向量 helper | pshufb128/256 与 SHA256 msg1/msg2/rnds2 已通过 tcx-free stdarch target-feature helpers 接入；m51_x86_vectors native 差分与 c_sha2 两个标准 SHA256 输出通过 |
 | guest 静态归档 | Linux/ELF 受约束路径已接产品：收集 rustc `Static NativeLib`、内容寻址 `.a→.so`，作为 required library 在任何 dlsym 前以 `RTLD_NOW` 加载；失败保留 `dlerror` 并立即终止。constructor/destructor 已分治（§7.8：`.init_array/.fini_array/ctors/dtors` 段经 DT_INIT 与 native 同构放行；裸 `.init/.fini` 仍拒）；RTLD_DEFAULT 同名碰撞已改归档句柄优先（`fb0b204`，native 链接期绑定语义）。其余拒绝面仍在：非 PIC、thin、跨 archive 依赖/顺序/重名导出、export-symbols——多 archive link plan 未立项（[open-issues.md R6](open-issues.md)），不是通用链接器 |
-| JIT | **生产已落地**：方法级 Cranelift JIT = M5.3 骨架 + M5.4a/b（标量/内存/128 位/原子全覆盖），默认开启（`--jit off`/`MIRVM_JIT=off` 回退纯解释）。未实现：JIT LSDA 产品化与 ABI 泛化（M5.4c，open-issues T1）、SIMD（T2）、OSR/deopt/生产 tiering 终裁（E2）、间接调用准入（E1）、JIT 码常驻（E5） |
+| JIT | **生产已落地**：方法级 Cranelift JIT = M5.3 骨架 + M5.4a–d（标量/内存/128 位/原子/ABI 全形态/五调用助手/unwind 产品化双 CIE 全覆 LSDA/三表准入穷尽），默认开启（`--jit off`/`MIRVM_JIT=off` 回退纯解释）。未实现：OSR/deopt/生产 tiering 终裁（E2）、JIT 码常驻（E5）、优化项池（E7：SIMD CLIF 向量内联/PLT try_call 快路/内联缓存等）、vmctx 终裁计量（T3） |
 | 生命周期/嵌入 | `Shared`、thunk、asm handle、部分 TLS 存储按进程期保存；错误路径可退出进程；runner 诊断 filter 依赖进程全局 `TRACK_DIAGNOSTIC`，目前只在单 compiler CLI 模型下安全。daemon/嵌入/并发 compiler 需先加 guard 或替代接口；尚非稳定多 Engine API |
 | 分发与产品面 | `.mirvm` mode B、daemon、REPL、checked 模式、正式沙箱均未实现；分发轨方向已批未立项（D9，2026-07-14，[distribution-design.md](designs/distribution-design.md)）：先 L2 engine-IR 缓存，mode B=缓存可移植化（M5.3 后），发行先 miri 式 |
 | 平台 | 当前仅应宣称 Linux/ELF/x86_64 开发基线 |
@@ -176,8 +176,9 @@ Linux/ELF/x86_64 优先：依赖 pthread、dlopen、GNU 链接行为和 x86 asm 
 1. **corpus 扩编继续**：三维逐字节差分铁律不动摇（mirvm 默认 / native / 逢调即编，
    全部逐字节一致才算绿）；新候选见 [corpus.md §7](corpus.md)；撞出的实锤债务登记到
    [open-issues.md](open-issues.md) 再按优先级转正。
-2. **债务转正优先级**（以 open-issues.md 为准）：T1/T2（M5.4c/d）蓝图在手；
-   C1 按值聚合 FFI、C2/C3（wasmtime 双层）、C4（dep global_asm）按真实 workload 排序。
+2. **债务转正优先级**（以 open-issues.md 为准）：T1/T2 已闭合（2026-07-19，§7.19）；
+   下一个蓝图在手项 = T3（M5.5 vmctx 终裁计量 + gate6 收口）；
+   C4（dep global_asm）按真实 workload 排序。
 3. **基建预算纪律**（根 AGENTS.md）：harness 只在当前产品 RED 无法复现/判定正确时
    做最小修改；不为未来加固。
 4. **文档纪律**：完成阶段 = 代码 + 可复现 gate + 施工记录 + 本文更新四件套；

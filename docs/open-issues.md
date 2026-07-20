@@ -55,8 +55,8 @@
 
 | ID | 事项 | 关键内容 | 出处 |
 |---|---|---|---|
-| T1 | **M5.4c：JIT ABI 泛化 + LSDA 产品化** | Pair/Indirect/track_caller 调约泛化；CallIndirect/Builtin/Foreign/TlsRef/InlineAsm 助手；try_call/Resume/Terminate；双 CIE + 全覆 LSDA（cleanup 边 JIT 帧内着陆）+ 准入放开。锚点 = gate2 unwind 九用例 JIT-on。LSDA probe 5/5 已过。兼收割 spike3/spike5 挂起检查点与 frame-abi §10.3 聚合调约残余 | [designs/m5.4-design.md](designs/m5.4-design.md)，current-status §1 |
-| T2 | **M5.4d：JIT SIMD + 收口** | CLIF 向量族 + x86 helpers 助手 + 全量三重差分扩展 + 账本/文档收口 | designs/m5.4-design.md |
+| T1 | **M5.4c：JIT ABI 泛化 + LSDA 产品化**（**已闭合 2026-07-19**） | 关闭（`7d21ad6`/`4ffbb35`/`7102d2b`/`6a444b1`/`83e168d`/`5252a89`/`5a1bcbe`）：CalleeAbi 全形态（Pair/Indirect/track_caller）；五调用助手（CallIndirect/InlineAsm/TlsRef/CallForeign/CallBuiltin）；unwind 产品化（try_call/Resume/Terminate 三向全开 + 双 CIE + 全覆 LSDA——cleanup 边 JIT 帧内着陆实证，f156 序坑：cleanup 链尾经正常边落 resume，exception_var 入口预声明）；准入放开 = **stmt/rvalue/terminator 三表穷尽**（SIMD 15 族 + Sat128 + rvalue 三件经 mirvm_simd_stmt/simd_rv 助手调 interp 共享本体，零漂移）。兼修鉴出既有 bug 三件：call_foreign 导入签名 7 参漏改、寄存器 bitcast trusted 旗、Bin128 with_overflow 旗标槽 SSA 误提升（`10390cb`/`aca8eb6`）。锚点全绿：gate2 9/9、cargo test 76、diff 双态 45/45、diff_cargo 5/5、gate5 复绿（§7.19） | decision-history §7.19，[designs/m5.4-design.md](designs/m5.4-design.md) |
+| T2 | **M5.4d：JIT SIMD + 收口**（**语义面已随 T1-d 闭合 2026-07-19**） | SIMD 15 族 + Sat128 + rvalue 三件已全部可发布（全助手形，interp 共享本体零漂移，`5a1bcbe`）——T2 原案的"CLIF 向量族内联"降为 E7 性能优化项；x86 helpers 特定形（m51 tracers 已全绿）维持按需。残余 = 账本入 m5/m6-log + 性能面复测（挂 T3 触发器） | designs/m5.4-design.md，decision-history §7.19 |
 | T3 | **M5.5：vmctx 终裁计量 + gate6 收口** | T 骨架已落生产；R 缓存层复测触发器 = 分配/guest TLS 内联进编译码（见 E6）。挂载点：CallIndirect 内联缓存、LSDA 存储改 JIT data object、检查点回写 vmctx-passing、tests/m5_gate6.sh | [designs/m5-design.md](designs/m5-design.md) §3 D5/§7，m5.4-design |
 | T4 | **P1 残余：SIGSEGV 诊断化兜底（可选后补；2026-07-19 起并入 R1 崩溃诊断化总案）** | rip 落在 guest 冻结域（非可执行）时识别为「疑似结构体内嵌回调」提示，把静默跳崖变可读诊断；`MIRVM_SEGV_DUMP` 既有旋钮之上的产品侧提示。**2026-07-19 R1 重构后升格**：作为「崩溃诊断化」总案的组成（故障落点归属判定 + guest 化崩溃行 + 同信号终止），见 R1 条 | decision-history §7.6（debt §6 阶梯②），2026-07-17 |
 | T5 | **asm-stub syscall 拦截使能片**（2026-07-19 用户排期；**已闭合 2026-07-21**） | 关闭（`d0470fc`）：生成点即拦截点——`rewrite_syscall_text` 行级助记符 → `mov r11,[rip+slot@GOTPCREL]; call [r11]` 两级间接（PIC 纪律实锤：全局槽 PC32 重定位被 ld 拒，改 GOT 两级）→ `mirvm_syscall_trampoline` 保 syscall 全契约（6 参槽兼 args 数组、pushfq/popfq、xmm0-15+mxcsr 全保、栈对齐经核算）→ `mirvm_syscall_dispatch` v1 直通 + TRACE。验收：单测 2 件（文本命中面 + stub 全链 SYS_getpid 直通与 rbx 纪律）76/76、探针 `demo/asm_syscall_probe.rs` 三维一致 + TRACE 实证 nr=1/39 双拦截、diff.sh 38→39、c_tempfile（rustix 系）零回归。虚拟化语义挂载点 = dispatch 分诊（D10 本体另立）。覆盖边界维持记档（sysenter/int 0x80/.byte 对抗书写不接） | decision-history §7.18，docs/open-issues.md E19 |
@@ -80,13 +80,13 @@
 
 | ID | 事项 | 状态与内容 | 出处 |
 |---|---|---|---|
-| E1 | **JIT 间接调用准入**（旧 debt §8） | `未立项` `admit()` 白名单不收 CallIndirect/CallForeign/CallBuiltin → vtable 派发/回调/qsort 比较子恒解释速度。路径：①编译体 CallIndirect = fn_addrs 反查命中 PLT 快路/未命中 c2i；②CallForeign CLIF 化或预物化 stub；③HostWrite 直通族优先。性能工作重启时排，alpha 铁律不变 | 2026-07-17，src/lower/jit_compile.rs |
+| E1 | **JIT 间接调用准入**（旧 debt §8；**已闭合 2026-07-19**） | 关闭（随 T1 战役）：CallIndirect/CallForeign/CallBuiltin/TlsRef/InlineAsm 五调用助手全落（`4ffbb35`/`7102d2b`/`6a444b1`），unwind 三向同开（`83e168d`）；vtable 派发/回调/FFI 调用点全部可发布。残余优化（CallIndirect 内联缓存、PLT try_call_indirect 快路）转 E7 | decision-history §7.19，src/vm/engine/jit/ |
 | E2 | **无 OSR/deopt/生产 tiering/后台 JIT 服务线程** | `记账` 长跑单循环 main 永不触发 JIT（无调用边界、无 OSR）记账接受 | history/frame-abi-bytecode.md §10.4，m5-log |
 | E3 | **JIT 帧不压影子帧** | `记账` panic 在 JIT 帧内展开时列帧少于解释口径 | history/m5-log.md M5.3 |
 | E4 | **CLIF 原子统一 SeqCst** | `记账` Cranelift 0.133 无弱序；JIT 侧全部最强序（合规强化，无分歧） | history/m5-log.md |
 | E5 | **JIT 机器码随模块常驻** | `记账` cranelift-jit 不支持逐函数释放，进程生命周期记账 | designs/m5-design.md |
 | E6 | **分配快路径/guest TLS 快路径内联未做** | `未立项` m5-design D5 格③空（分配走 Builtin、TlsRef 走助手）；手卷 TLAB 同题；是 T3 R 复测的触发前提 | designs/m5-design.md §3 |
-| E7 | **JIT 优化项池** | `未立项` SwitchInt 用 br_table 替代 icmp+brif 链；取址逃逸精化（Q1 残余优化触发器）；CallIndirect 内联缓存（挂 T3）；LSDA 存储升 JIT data object（挂 T3） | designs/m5.4-design.md |
+| E7 | **JIT 优化项池** | `未立项` SwitchInt 用 br_table 替代 icmp+brif 链；取址逃逸精化（Q1 残余优化触发器）；CallIndirect 内联缓存（挂 T3）；LSDA 存储升 JIT data object（挂 T3）；**2026-07-19 增**：SIMD 净映射家族 CLIF 向量内联（Q4 原案——T1-d 以全助手先行锚定正确性，提升纯属性能）；CallIndirect/Call 的 PLT try_call_indirect 快路（T1-c v1 统一 c2i-try_call 的预留项） | designs/m5.4-design.md |
 | E8 | **backtrace 真符号化 + 合成 IP 近似** | `绕行` 合成 IP 不经 dladdr（诚实 `<unknown>`，不伪造宿主符号）；真符号化（物化符号 ELF 给 dladdr）可选未立项 | current-status §4，decision-history §6.1 |
 | E9 | **`dl_iterate_phdr` 差分探针欠账** | `绕行` 走 native FFI「无观测到缺陷」，探针补课未做 | current-status §4，history/m5.2-design.md |
 | E10 | **guest TLS 实例块回收** | `记账` 每线程每 TLS 一小块泄漏（dtor 副作用已正确）；M4.4 起挂账「按需」，至今未立项 | history/m4-log.md:439 |
@@ -115,7 +115,7 @@
 | E29 | **手写 shim → 通用直通通道** | `未立项` neat 终态（polish，不急）；现行为手写 shim + dlsym 兜底 | DESIGN.md §7.2 |
 | E30 | **C7 regex 42s 基线 JIT 后未复测** | `未立项` 旧性能靶子；JIT 之后无重测记录，「评审须给预估收益」要求未兑现 | DESIGN.md C7 |
 | E31 | **A2 mtime 粒度传递依赖漏检残余风险** | `记账` 键安全论证承认 mtime 粒度残余；挂档（distribution §6 既有条目同案） | history/s3b-a2-design.md §9.4 |
-| E32 | **inline-asm setjmp/longjmp 的捕获帧内存复用 hazard（C3 定稿边界）** | `记账` asm-stub 模型下 setjmp 捕获点在 stub 包装帧；解释帧在捕获与恢复之间复用该宿主栈内存的合成协议可撞死（v2 spike 实锤，落点 `Channel::send` 内部）。真实 workload（wasmtime 全 trap 面）不发生该形态、三维确定性绿。消除 = JIT 真帧身份（compiled guest fn = native 帧语义）；不宣称全形态闭合 | [parked/c3-resume-spike.md](parked/c3-resume-spike.md) |
+| E32 | **inline-asm setjmp/longjmp 的捕获帧内存复用 hazard（C3 定稿边界）** | `记账` asm-stub 模型下 setjmp 捕获点在 stub 包装帧；解释帧在捕获与恢复之间复用该宿主栈内存的合成协议可撞死（v2 spike 实锤，落点 `Channel::send` 内部）。真实 workload（wasmtime 全 trap 面）不发生该形态、三维确定性绿。消除 = JIT 真帧身份（compiled guest fn = native 帧语义）；不宣称全形态闭合。**进展 2026-07-19（T1）**：JIT 帧已是真 native 帧（含真 unwinder 穿透/着陆，双 CIE + 全覆 LSDA）——setjmp/longjmp 所在函数一旦发布即脱出 hazard 面；interp 帧路径维持原记账 | [parked/c3-resume-spike.md](parked/c3-resume-spike.md)，decision-history §7.19 |
 
 > E27（weak 符号真地址化缺定向验收）已于 2026-07-18 关闭并实修「weak extern
 > static 恒 0 判空 cell」缺陷——现走 GOT 启动相真解析（命中=真址/缺席=0；引擎
@@ -146,7 +146,7 @@
 |---|---|---|---|
 | R1 | **同步故障信号（SEGV/BUS/FPE/ILL/TRAP）guest handler 拒绝**（2026-07-19 重构定稿） | **拒绝的是「guest handler 代码的执行」**（三硬因：宿主/guest 故障不可分辨；解释器深度不可重入、信号帧内跑解释态代码原理性非 async-signal-safe；handler 返回 = 重执故障指令 = 无限再故障）。**崩溃期退出语义已忠实**：guest 真故障 = 与 native 同信号死亡（真实地址模型直落），stack overflow = 与 native 同 SIGABRT（宿主 std handler 代打，实证：`thread 'mirvm-guest' has overflowed its stack`）；guest std 的 `stack_overflow::init` 条件安装（仅 SIG_DFL 才装）读回宿主 std 已装 handler → 静默跳过，从未触发拒绝（sigread 三维实证）。**可闭合面 = 崩溃诊断化**（故障落点归属判定：guest 冻结域/代码域/帧区 → guest 化崩溃行 → 同信号终止；T4 泛化 + `MIRVM_SEGV_DUMP` 产品化） | current-status §4（M5.2 D8l），2026-07-19 用户裁定 |
 | R2 | **vfork/clone/clone3/setjmp/longjmp 系、pthread_exit、pthread_atfork、多线程 fork 拒绝** | fork-alone 单线程已放行（D8f `/proc/self/task` 守卫）；其余 = 帧模型级工程/非局部控制流穿解释帧 | current-status §4，src/lower/mod.rs:48-62 |
-| R3 | **unwinder context/state 家族 11 个 Unsupported**（`_Unwind_Set/GetGR/SetIP/Resume/ForcedUnwind/LSDA…`） | guest frame/IP/LSDA 翻译层 + 差分探针（Backtrace/GetIP/FindEnclosingFunction/GetCFA 已由影子帧兑现） | src/lower/mod.rs:1355 |
+| R3 | **unwinder context/state 家族 11 个 Unsupported**（`_Unwind_Set/GetGR/SetIP/Resume/ForcedUnwind/LSDA…`） | **进展 2026-07-19（T1）**：`_Unwind_Resume` 已由 JIT Resume 臂直调（cg_clif 同构：try_call pad 的 TryCallExn(0) → 续传宿主 unwinder）——该符号从 Unsupported 面移除；其余 10 个（Set/GetGR/SetIP/ForcedUnwind/LSDA 读侧…）维持原判。guest frame/IP/LSDA 翻译层 + 差分探针（Backtrace/GetIP/FindEnclosingFunction/GetCFA 已由影子帧兑现） | decision-history §7.19，src/vm/engine/jit/translate.rs |
 | R4 | **一般嵌套 DST / 其他 metadata 形态拒绝** | 冻结一份通用 DST layout expression 的评估（slice/str 静态公式与 direct dyn 尾 vtable 运行期对齐已支持） | current-status §4，decision-history §5 |
 | R5 | **冷面 128 位形态 Trap**（`Transmute pair→聚合`、tag 宽>8B `InvalidEnumConstruction`） | 未被真实 workload 撞出；撞到再补 | history/m5-log.md 片10 |
 | R6 | **static archive 拒绝面残余** | 非 PIC/thin/跨 archive 依赖与顺序/重名导出/RTLD_DEFAULT 碰撞/export-symbols/非 Linux-ELF/裸 `.init`/`.fini`；`.init_array` 族已放行（§7.8），RTLD_DEFAULT 同名碰撞已改归档优先（fb0b204）。多 archive link plan 与 modifier 等价语义未立项——放宽前必须先立 | src/native_archive.rs，history/m5.1-design.md D2 |

@@ -991,6 +991,63 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   Intel 语法（AT&T 初版被拒实锤）。验收全绿：76/76、探针三维一致 +
   TRACE 双拦截实证、diff.sh 39、rustix 系零回归。
 
+### 7.19 2026-07-19：T1 战役收口——M5.4c/d 全落地（T1/E1 闭合）
+
+- **战役地图**（m5.4-design §3.2-3.4，四片各 commit 全绿）：
+  - T1-a ABI 泛化（`7d21ad6`）：CalleeAbi 全形态（sret 前插 / Scalar /
+    Pair(lo,hi) / Indirect + track_caller 幻影尾参），镜像 interp ABI v2
+    展平序（frame-abi §10-3 冻结面，JIT 只实现同一展平）。
+  - T1-b 五调用助手（`4ffbb35`/`7102d2b`/`6a444b1`）：CallIndirect /
+    InlineAsm / TlsRef / CallForeign / CallBuiltin——630 行 interp
+    CallBuiltin 臂提取 `exec_builtin` 共享本体，「助手调 interp 本体、
+    不复制逻辑」自此成为 JIT 助手族定式。
+  - T1-c unwind 产品化（`83e168d`）：四调用臂三向全开（Cleanup =
+    try_call + `emit_cleanup` 公共 pad 发射器；Continue = PLT/c2i 纯
+    穿透；Terminate = 边界助手）+ Resume = `exception_var` →
+    `_Unwind_Resume`（cg_clif 同构）+ TerminateAbort 助手；双 CIE
+    （plain + personality CIE，DW.ref 间接 `rust_eh_personality`）+
+    全覆 LSDA（无 handler 站点发 lpad=0 项——rust personality 对无
+    call-site 项的 ip 返回 Terminate，probe 实证准则）。
+  - T1-d 准入放开（`5252a89`/`5a1bcbe`）：admit 三表（stmt / rvalue /
+    terminator）从「白名单 + catch-all 拒」改为**映射表穷尽**——SIMD
+    15 族 + Sat128 + rvalue 三件经 `mirvm_simd_stmt` / `mirvm_simd_rv`
+    统一助手调 interp `simd_exec` 共享本体（19 个本体函数整搬，
+    abort 文案逐字保留）；IntCmp3 / NicheDiscr CLIF 内联；Trap/Nop
+    产品化（`mirvm_jit_trap` 与 interp `engine_abort` 同文案同
+    exit(70)，区别于 TerminateAbort 的 134 通道）。
+- **f156 序坑（T1-c 唯一设计外实锤）**：`std::panicking::panic_handler`
+  闭包的 bb 序里 Resume 先于其 pad——cleanup 链尾经链内**正常边**落
+  resume（「cleanup 块只能由 unwind 边进入」只对链头成立），懒声明的
+  exception_var 在 use 点未定义。修 = 入口预声明 + def 0 兜底，pad 的
+  def 经支配关系覆盖真用点。
+- **鉴出并修既有 bug 四件**（逢调即编 + 热循环探针显形，均非 admit
+  漏臂）：
+  ① call_foreign 导入签名 7 参 vs 实传 8 参（T1-c 加 terminate 旗漏
+     改 `sig_cf` 与 Cleanup 支内联签名）→ 含 CallForeign 函数全静默
+     留解释（`10390cb`）；
+  ② 寄存器 bitcast 喂 `MemFlagsData::trusted()` 被 cranelift 0.133
+     verifier 拒 → 凡含标量 f32/f64 rvalue 的函数 define 全失败
+     （`10390cb`）；
+  ③ Bin128 with_overflow 旗标槽 SSA 误提升（frame.rs dst 恒扫 16B，
+     (u128,bool) 旗标在 +16 → 读侧取 SSA 零值 = 假阴性 →
+     saturating_mul 给包绕值，`aca8eb6`）；
+  ④ frame.rs mask/ptr 落帧区间欠覆盖（mask 按 mask_bytes、
+     gather/scatter 指针 lane 恒 8B，`5252a89`）。
+  ③④同族：frame 区间模型「interp 足迹 > 标记区间」是系统性盲区，
+  鉴出路径 = 逢调即编全量 + 真实函数热循环探针（sat128_probe 入库
+  锚定）。
+- **设计偏离一处（如实）**：Q4 原案「SIMD 净映射家族 CLIF 内联 + 其余
+  助手」未取——T1-d 一律全助手先行（语义权威唯一、零漂移优先），
+  CLIF 向量内联降为 E7 纯性能项；T2 语义面随之闭合。
+- **锚点全绿**：gate2 unwind 九用例 9/9、cargo test 76、diff 双态
+  45/45（新增 jit_unwind_probe / sat128_probe）、diff_cargo 5/5、
+  m51 simd_insert/simd_shift/x86_vectors 全过、gate5 **167/0/0/0**
+  （fib(32) JIT **54ms** ≤80ms 硬门维持，较 M5.4a/b 的 74ms 还收）。
+- **连带闭合/进展**：T1、E1（间接调用准入）闭合；R3 的
+  `_Unwind_Resume` 移出 Unsupported 面；E32 记进展（JIT 帧 = 真
+  native 帧含真 unwinder 穿透/着陆，setjmp/longjmp 所在函数一旦发布
+  即脱出 hazard 面；interp 帧路径维持原记账）。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 - ~~P7 设想独立 `src/os/` 物理层~~（**2026-07-18/19 已兑现**：`src/os/` + `src/arch/` 双 leaf 建成，E21 闭合，见 §7.16）。
