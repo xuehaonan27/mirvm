@@ -59,6 +59,7 @@
 | T2 | **M5.4d：JIT SIMD + 收口** | CLIF 向量族 + x86 helpers 助手 + 全量三重差分扩展 + 账本/文档收口 | designs/m5.4-design.md |
 | T3 | **M5.5：vmctx 终裁计量 + gate6 收口** | T 骨架已落生产；R 缓存层复测触发器 = 分配/guest TLS 内联进编译码（见 E6）。挂载点：CallIndirect 内联缓存、LSDA 存储改 JIT data object、检查点回写 vmctx-passing、tests/m5_gate6.sh | [designs/m5-design.md](designs/m5-design.md) §3 D5/§7，m5.4-design |
 | T4 | **P1 残余：SIGSEGV 诊断化兜底（可选后补；2026-07-19 起并入 R1 崩溃诊断化总案）** | rip 落在 guest 冻结域（非可执行）时识别为「疑似结构体内嵌回调」提示，把静默跳崖变可读诊断；`MIRVM_SEGV_DUMP` 既有旋钮之上的产品侧提示。**2026-07-19 R1 重构后升格**：作为「崩溃诊断化」总案的组成（故障落点归属判定 + guest 化崩溃行 + 同信号终止），见 R1 条 | decision-history §7.6（debt §6 阶梯②），2026-07-17 |
+| T5 | **asm-stub syscall 拦截使能片（2026-07-19 用户排期；E19③④ 闭合）** | asm-stub/global_asm 文本生成点检测 `syscall` 助记符 → 改写 `call *mirvm_syscall_slot(%rip)`（间接槽随 .so 物化、dlopen 后重填）→ trampoline 保 syscall 全契约（整数/flags/xmm/mxcsr 保全）→ `mirvm_syscall_dispatch` v1 直通 + TRACE 旋钮。闭合契约：合成探针（inline-asm 裸 `syscall` write）三维绿 + TRACE 实证拦截 + rustix 系 corpus（tempfile 等）零回归。覆盖边界（如实）：`sysenter`/`int $0x80` 与 `.byte 0x0f,0x05` 对抗书写不接（无真实形态）；虚拟化语义（统一 fd 空间/假 FS）属 D10 本体，本片只备钩子 | decision-history §7.18，docs/open-issues.md E19 |
 
 ## C. corpus 实锤产品欠账（实锤驱动，未立项）
 
@@ -97,7 +98,7 @@
 | E16 | **io_uring 直通未实证** | `未立项` tokio-uring 可选路径全库仅 designs/async-stackless.md §5.2 提及，无 corpus 对拍 | designs/async-stackless.md |
 | E17 | **L2 缓存两处** | `未立项` ①有告警/错误的会话拒入账、诊断回放未做（告警程序永不享缓存，session 门函数在 src/cli.rs:395、计数器在 :368）；②条目无逐出——**手动 GC 面已由 `mirvm cache purge`（默认清陈代）补上（§7.14）**，自动 LRU/容量上限不立项 | history/m6-log.md 片2/8 |
 | E18 | **Cranelift 自有内联（0.133.1 inline.rs）备用杠杆** | `拒绝` 默认不开，记为收口期备用杠杆 | designs/m5-design.md |
-| E19 | **rustix 裸 syscall vs os:: 收口的张力** | `记账` linux_raw 无符号可拦：mirvm 层虚拟化 OS 资源会被绕过，只有 seccomp 能兜（运行本身已通：M5.1 tempfile 全绿）。**syscall 三形态与 chokepoint（2026-07-19 钉清）**：① FFI libc 包装（write/read 等）= 真 libc 内做 syscall，天然忠实，chokepoint = CallForeign 边界；② `libc::syscall(...)` 变参 = 符号内建 `Builtin::HostSyscall` → `os::process::syscall` 直通，chokepoint 已内建；③ 硬编码 inline-asm syscall（rustix `syscall!` 宏）= asm-stub 真码直落、**无任何符号边界**——VM 层原理不可闭合，唯一闭合 = OS 层 seccomp。虚拟化能对 ①② 闭合，对 ③ 不可 | corpus §2.3，§5 |
+| E19 | **rustix 裸 syscall vs os:: 收口的张力** | `记账`（2026-07-19 全通道定稿，**已大幅降级**）：**「mirvm 拦截一切 syscall」在真实生态成立**——① FFI libc 包装：builtin 注册表即现成挂载点（HostWrite/HostGetenv/HostFork/HostSignal/HostSyscall 全已在产拦截）；② `libc::syscall(...)` 变参：`Builtin::HostSyscall` 单点已内建；③ guest inline-asm 裸 syscall（rustix linux_raw）与 ④ global_asm/naked 内 syscall：**生成点在 mirvm 手里**（asm-stub/global_asm 工厂拼 GAS 文本），文本改写 + 间接槽 + trampoline 纪律可闭合——**使能片已排期 = T5**；⑤ vendored C 库：常态（C 调 libc 包装）经 native_archive 链接序插桩可闭合，罕见叉（C 内联汇编自写 `syscall` 指令）cc 产物不透明；⑥ JIT 与①③同入口；⑦ 对抗式自修改/`.byte 0x0f,0x05` 书写无真实形态。**唯一如实残余 = ⑤罕见叉与⑦，只有 OS 层 seccomp 能兜**（维持原判） | corpus §2.3，§5；decision-history §7.18 |
 | E20 | **字节码验证 pass 未建** | `未立项` loader 鲁棒性开放问题；内容寻址缓存已由 S3′b A2 兑现，独立验证 pass 无实锤驱动 | history/frame-abi-bytecode.md §10.6 |
 
 ### E.2 架构与边界

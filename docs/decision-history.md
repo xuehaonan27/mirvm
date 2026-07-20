@@ -959,6 +959,30 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   = UNSPECIFIED 不追求（用户确认）；R8 asm goto 证据级记档（Cranelift
   对一切 inline asm 均 fatal 的 issue 素材 + 自研 JIT 设计注脚）。
 
+### 7.18 2026-07-19：syscall 全通道拦截定稿与使能片排期（E19 降级 + T5 立项）
+
+- **用户问**：mirvm 自扫代码找 syscall 指令、用 GOT 类方法替换为 wrapper，
+  是否可行？**答：可行且更强——不需要扫二进制**：guest 全部 inline-asm /
+  global_asm 的 GAS 文本都由 mirvm 自己的 asm-stub 工厂拼出（生成点在手），
+  文本改写即可；JIT 与解释共用同一批 stub 入口，拦截点天然唯一且全覆盖。
+- **全通道定稿**（「拦截一切 syscall」真实生态成立）：① FFI libc 包装 =
+  builtin 注册表现成挂载点（HostWrite/HostGetenv/HostFork/HostSignal/
+  HostSyscall 在产拦截中）；② `libc::syscall` 变参 = HostSyscall 单点已内建；
+  ③ inline-asm 裸 syscall（rustix linux_raw）与 ④ global_asm/naked 内 =
+  **T5 使能片（本日排期）**：文本检测 `syscall` 助记符 → `call
+  *mirvm_syscall_slot(%rip)` 改写（间接槽随 .so 物化 + dlopen 后重填，
+  P2 同款启动相哲学）→ trampoline 保 syscall 全契约（整数寄存器/flags/
+  xmm/mxcsr 全保——真 syscall 不动向量态，wrapper 必须同纪律）→
+  `mirvm_syscall_dispatch` v1 直通 + TRACE 旋钮；⑤ vendored C：常态经
+  native_archive 链接序插桩可闭合，罕见叉（C 内联汇编裸 `syscall`）不透明；
+  ⑥ JIT 与①③同入口；⑦ 对抗式自修改无真实形态。**唯一如实残余 = ⑤罕见叉
+  与⑦，只有 seccomp 能兜**（原判不掺水）。
+- **边界纪律**：本片只备**钩子**（直通即零行为变化 + TRACE 实证）；虚拟化
+  语义（统一 fd 空间/假 FS/路径重定向/计费）属 D10 本体——没有它，拦截是
+  空钩子；有了它，三形态+⑤常态无旁路。
+- **覆盖边界（如实）**：`sysenter`/`int $0x80` 与 `.byte 0x0f,0x05` 对抗
+  书写不接（无真实形态，重开需实锤 crate）。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 - ~~P7 设想独立 `src/os/` 物理层~~（**2026-07-18/19 已兑现**：`src/os/` + `src/arch/` 双 leaf 建成，E21 闭合，见 §7.16）。
