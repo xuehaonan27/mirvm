@@ -17,9 +17,47 @@ pub(super) extern "C-unwind" fn mirvm_c2i(func: u64, args: *const u64, n: u64, r
     }
 }
 
+/// T1-c TerminateAbort 助手（interp runblocks TerminateAbort 臂同文案同码：
+/// UnwindTerminate（double panic/ABI 边界）→ abort）。
+pub(super) extern "C-unwind" fn mirvm_jit_terminate_abort() -> ! {
+    eprintln!("mirvm[m4-engine]: UnwindTerminate（double panic/ABI 边界）——abort");
+    std::process::abort()
+}
+
+/// T1-c Terminate 边界的直接调用助手（interp call_guarding_terminate 同语义：
+/// 外包宿主 catch_unwind，panic 抵达 = 同文案 eprintln + abort；c2i 形包装
+/// （callee, args, n, ret）——Terminate 边的 Call 不走 PLT，经此回本体）。
+pub(super) extern "C-unwind" fn mirvm_call_terminate(
+    callee: u64,
+    args: *const u64,
+    n: u64,
+    ret: *mut u64,
+) {
+    let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
+    let ctx = crate::vm::engine::ctx::attach(shared);
+    let f = || {
+        let a = unsafe { std::slice::from_raw_parts(args, n as usize) };
+        crate::vm::engine::interp::call_guest(ctx, callee as u32, a)
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok((lo, hi)) => unsafe {
+            *ret = lo;
+            *ret.add(1) = hi;
+        },
+        Err(_) => {
+            eprintln!(
+                "mirvm[m4-engine]: unwind 抵达 Terminate 边界（double panic/ABI）——abort"
+            );
+            std::process::abort()
+        }
+    }
+}
+
 /// T1-b CallIndirect 助手（m5.4-design §3.2；interp runblocks CallIndirect 臂
 /// 同一派发：fn_addrs 反查 → call_guest 本体；未命中 + native_sig →
 /// ffi::call_addr 本体；空槽 null_ok 空操作 / 空指针与未知目标的诊断同 interp）。
+/// terminate 旗（T1-c）：置位时本体外包宿主 catch_unwind，panic 抵达 =
+/// call_guarding_terminate 同文案 + abort。
 pub(super) extern "C-unwind" fn mirvm_call_indirect(
     addr: u64,
     args: *const u64,
@@ -28,7 +66,24 @@ pub(super) extern "C-unwind" fn mirvm_call_indirect(
     null_ok: u64,
     native_sig: u64,
     caller: u64,
+    terminate: u64,
 ) {
+    if terminate != 0 {
+        // T1-c：Terminate 边界 = call_guarding_terminate 同语义（外包宿主
+        // catch_unwind，panic 抵达 = 同文案 eprintln + abort）
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mirvm_call_indirect(addr, args, n, ret, null_ok, native_sig, caller, 0)
+        })) {
+            Ok(()) => {}
+            Err(_) => {
+                eprintln!(
+                    "mirvm[m4-engine]: unwind 抵达 Terminate 边界（double panic/ABI）——abort"
+                );
+                std::process::abort()
+            }
+        }
+        return;
+    }
     let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
     let ctx = crate::vm::engine::ctx::attach(shared);
     let module = &shared.module;
@@ -87,7 +142,22 @@ pub(super) extern "C-unwind" fn mirvm_call_foreign(
     n: u64,
     ret_dst: u64,
     caller: u64,
+    terminate: u64,
 ) -> u64 {
+    if terminate != 0 {
+        // T1-c：Terminate 边界 = call_guarding_terminate 同语义
+        return match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mirvm_call_foreign(sym_ptr, sym_len, sig, args, n, ret_dst, caller, 0)
+        })) {
+            Ok(r) => r,
+            Err(_) => {
+                eprintln!(
+                    "mirvm[m4-engine]: unwind 抵达 Terminate 边界（double panic/ABI）——abort"
+                );
+                std::process::abort()
+            }
+        };
+    }
     let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
     let ctx = crate::vm::engine::ctx::attach(shared);
     let module = &shared.module;
@@ -150,7 +220,23 @@ pub(super) extern "C-unwind" fn mirvm_call_builtin(
     ret_dst: u64,
     caller: u64,
     ret: *mut u64,
+    terminate: u64,
 ) {
+    if terminate != 0 {
+        // T1-c：Terminate 边界 = call_guarding_terminate 同语义
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mirvm_call_builtin(builtin, args, n, ret_dst, caller, ret, 0)
+        })) {
+            Ok(()) => {}
+            Err(_) => {
+                eprintln!(
+                    "mirvm[m4-engine]: unwind 抵达 Terminate 边界（double panic/ABI）——abort"
+                );
+                std::process::abort()
+            }
+        }
+        return;
+    }
     let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
     let ctx = crate::vm::engine::ctx::attach(shared);
     let av = unsafe { std::slice::from_raw_parts(args, n as usize) };
@@ -200,6 +286,11 @@ pub(super) extern "C-unwind" fn mirvm_alloc(
         &ir::UnwindAction::Continue,
     );
     lo
+}
+
+// T1-c Resume 终止子的宿主 unwinder 续传口（cg_clif Resume 同构）。
+unsafe extern "C" {
+    pub fn _Unwind_Resume(ex: *mut u8) -> !;
 }
 
 /// Unreachable 终止子的诊断口径与解释器一致（不用裸 trap 的 SIGILL）。

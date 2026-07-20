@@ -220,12 +220,15 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
                 unwind,
                 ..
             } => {
-                // unwind-transparent：只收 Continue（穿透）；cleanup/terminate 边 v2（LSDA 期）。
-                // callee ABI 不设限：PLT 快路按 CalleeAbi 形态匹配（T1-a），
-                // 否则调用点直接 c2i 回解释（interp 本就吃展平 av，任意 ABI 语义一致）。
+                // T1-c：unwind 三向全开——Continue（PLT/c2i，CFI 纯穿透）、
+                // Cleanup（try_call + pad 跳 cleanup 块）、Terminate
+                // （mirvm_call_terminate 助手）。callee ABI 不设限：PLT 快路按
+                // CalleeAbi 形态匹配（T1-a），否则调用点直接 c2i 回解释。
                 // 调用点 ret 落点同 interp 全形态（Ignore/Scalar/Pair/Indirect 前插）。
-                matches!(unwind, UnwindAction::Continue)
-                    && args.iter().all(operand_ok)
+                matches!(
+                    unwind,
+                    UnwindAction::Continue | UnwindAction::Cleanup(_) | UnwindAction::Terminate
+                ) && args.iter().all(operand_ok)
                     && matches!(
                         ret,
                         RetDest::Ignore
@@ -236,8 +239,7 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
                     && shared.module.funcs.get(*callee as usize).is_some()
             }
             // T1-b：CallIndirect（mirvm_call_indirect 助手，interp 臂同派发）——
-            // unwind-transparent 只收 Continue（CFI 穿透，LSDA 归 T1-c）；
-            // callee 与全部实参可求值；ret 落点同 interp 全形态
+            // unwind 三向全开（同 Call）；callee 与全部实参可求值；ret 全形态
             Terminator::CallIndirect {
                 callee,
                 args,
@@ -245,8 +247,10 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
                 unwind,
                 ..
             } => {
-                matches!(unwind, UnwindAction::Continue)
-                    && operand_ok(callee)
+                matches!(
+                    unwind,
+                    UnwindAction::Continue | UnwindAction::Cleanup(_) | UnwindAction::Terminate
+                ) && operand_ok(callee)
                     && args.iter().all(operand_ok)
                     && matches!(
                         ret,
@@ -260,16 +264,18 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
             // 的 VecBytes place 帧分析已全量扫描——admit 即放行）
             Terminator::InlineAsm { .. } => true,
             // T1-b：CallForeign（mirvm_call_foreign 助手，interp 臂同构）——
-            // unwind-transparent 只收 Continue；实参可求值；ret 形态同 interp
-            // 支持面（Pair 返回 interp 亦 engine_abort——留解释即保持同诊断）
+            // unwind 三向全开（同 Call）；实参可求值；ret 形态同 interp 支持面
+            // （Pair 返回 interp 亦 engine_abort——留解释即保持同诊断）
             Terminator::CallForeign {
                 args,
                 ret,
                 unwind,
                 ..
             } => {
-                matches!(unwind, UnwindAction::Continue)
-                    && args.iter().all(operand_ok)
+                matches!(
+                    unwind,
+                    UnwindAction::Continue | UnwindAction::Cleanup(_) | UnwindAction::Terminate
+                ) && args.iter().all(operand_ok)
                     && matches!(
                         ret,
                         RetDest::Ignore
@@ -278,16 +284,18 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
                     )
             }
             // T1-b：CallBuiltin（mirvm_call_builtin/mirvm_alloc 助手，interp
-            // exec_builtin 同一本体）——unwind-transparent 只收 Continue（CFI
-            // 穿透，LSDA 归 T1-c）；实参可求值；ret 落点同 interp 全形态
+            // exec_builtin 同一本体）——unwind 三向全开（同 Call）；实参可求值；
+            // ret 落点同 interp 全形态
             Terminator::CallBuiltin {
                 args,
                 ret,
                 unwind,
                 ..
             } => {
-                matches!(unwind, UnwindAction::Continue)
-                    && args.iter().all(operand_ok)
+                matches!(
+                    unwind,
+                    UnwindAction::Continue | UnwindAction::Cleanup(_) | UnwindAction::Terminate
+                ) && args.iter().all(operand_ok)
                     && matches!(
                         ret,
                         RetDest::Ignore
@@ -296,6 +304,9 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
                             | RetDest::Indirect(_)
                     )
             }
+            // T1-c：Resume（exception_slot → _Unwind_Resume 续传）与
+            // TerminateAbort（mirvm_jit_terminate_abort 助手）
+            Terminator::Resume | Terminator::TerminateAbort => true,
             _ => false,
         };
         if !ok {

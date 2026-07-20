@@ -24,6 +24,7 @@
 
 use super::*;
 use super::helpers::*;
+use super::helpers::_Unwind_Resume;
 use super::admit::{CalleeAbi, admit, callee_abi};
 use super::frame::analyze_frame;
 use super::translate::Translator;
@@ -101,8 +102,13 @@ struct Compiler {
     /// T1-b：CallBuiltin/分配系快路助手（helpers.rs 同 exec_builtin 本体）
     call_builtin: ClifFuncId,
     alloc: ClifFuncId,
-    /// 本批 (clif id, unwind info)——finalize 后统一注册 eh_frame
-    pending_unwind: Vec<(ClifFuncId, UnwindInfo)>,
+    /// T1-c unwind 产品化：TerminateAbort 纯助手 / Terminate 边界直接调用 /
+    /// _Unwind_Resume 导入
+    terminate_abort: ClifFuncId,
+    call_terminate: ClifFuncId,
+    unwind_resume: ClifFuncId,
+    /// 本批 (clif id, unwind info, try_call 函数的 LSDA 字节)——finalize 后统一注册
+    pending_unwind: Vec<(ClifFuncId, UnwindInfo, Option<Vec<u8>>)>,
 }
 
 impl Compiler {
@@ -122,6 +128,9 @@ impl Compiler {
         jb.symbol("mirvm_volatile_load", mirvm_volatile_load as *const u8);
         jb.symbol("mirvm_volatile_store", mirvm_volatile_store as *const u8);
         jb.symbol("mirvm_call_indirect", mirvm_call_indirect as *const u8);
+        jb.symbol("mirvm_jit_terminate_abort", mirvm_jit_terminate_abort as *const u8);
+        jb.symbol("mirvm_call_terminate", mirvm_call_terminate as *const u8);
+        jb.symbol("_Unwind_Resume", _Unwind_Resume as *const u8);
         jb.symbol("mirvm_tls_ref", mirvm_tls_ref as *const u8);
         jb.symbol("mirvm_call_foreign", mirvm_call_foreign as *const u8);
         jb.symbol("mirvm_call_builtin", mirvm_call_builtin as *const u8);
@@ -200,7 +209,7 @@ impl Compiler {
             .unwrap();
         // T1-b 调用助手（helpers.rs 本体 = interp 派发/惰性物化同构）
         let mut sig_ci = module.make_signature();
-        for _ in 0..7 {
+        for _ in 0..8 {
             sig_ci.params.push(AbiParam::new(types::I64));
         }
         let call_indirect = module
@@ -213,7 +222,7 @@ impl Compiler {
             .declare_function("mirvm_tls_ref", Linkage::Import, &sig_tls)
             .unwrap();
         let mut sig_cf = module.make_signature();
-        for _ in 0..6 {
+        for _ in 0..7 {
             sig_cf.params.push(AbiParam::new(types::I64));
         }
         sig_cf.returns.push(AbiParam::new(types::I64));
@@ -221,16 +230,39 @@ impl Compiler {
             .declare_function("mirvm_call_foreign", Linkage::Import, &sig_cf)
             .unwrap();
         // T1-b CallBuiltin 助手（builtin 指针 + av 数组 + n + ret_dst + caller +
-        // (lo,hi) 写出指针）；分配系快路同六参但直返 u64
+        // (lo,hi) 写出指针 + terminate 旗（T1-c））；分配系快路六参直返 u64
         let mut sig_cb = module.make_signature();
-        for _ in 0..6 {
+        for _ in 0..7 {
             sig_cb.params.push(AbiParam::new(types::I64));
         }
         let call_builtin = module
             .declare_function("mirvm_call_builtin", Linkage::Import, &sig_cb)
             .unwrap();
+        let mut sig_alloc = module.make_signature();
+        for _ in 0..6 {
+            sig_alloc.params.push(AbiParam::new(types::I64));
+        }
+        sig_alloc.returns.push(AbiParam::new(types::I64));
         let alloc = module
-            .declare_function("mirvm_alloc", Linkage::Import, &sig_cf)
+            .declare_function("mirvm_alloc", Linkage::Import, &sig_alloc)
+            .unwrap();
+        // T1-c unwind 产品化：TerminateAbort 纯助手 / Terminate 边界直接调用 /
+        // _Unwind_Resume（Resume 终止子经 exception_slot 直调）
+        let sig_ta = module.make_signature();
+        let terminate_abort = module
+            .declare_function("mirvm_jit_terminate_abort", Linkage::Import, &sig_ta)
+            .unwrap();
+        let mut sig_ct = module.make_signature();
+        for _ in 0..4 {
+            sig_ct.params.push(AbiParam::new(types::I64));
+        }
+        let call_terminate = module
+            .declare_function("mirvm_call_terminate", Linkage::Import, &sig_ct)
+            .unwrap();
+        let mut sig_ur = module.make_signature();
+        sig_ur.params.push(AbiParam::new(types::I64));
+        let unwind_resume = module
+            .declare_function("_Unwind_Resume", Linkage::Import, &sig_ur)
             .unwrap();
 
         Compiler {
@@ -250,6 +282,9 @@ impl Compiler {
             call_foreign,
             call_builtin,
             alloc,
+            terminate_abort,
+            call_terminate,
+            unwind_resume,
             pending_unwind: Vec::new(),
         }
     }
@@ -386,7 +421,7 @@ impl Compiler {
             .compiled_code()
             .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten())
         {
-            self.pending_unwind.push((id, ui));
+            self.pending_unwind.push((id, ui, None));
         }
         self.module.clear_context(&mut cctx);
         if self.module.finalize_definitions().is_err() {
@@ -411,6 +446,9 @@ impl Compiler {
             .unwrap();
         let mut cctx = self.module.make_context();
         cctx.func.signature = sig;
+        // T1-c：has_try_call 由 Translator 在 build 期间置位（块外读以生成 LSDA）
+        #[allow(unused_assignments)]
+        let mut has_try_call = false;
         {
             let mut b = FunctionBuilder::new(&mut cctx.func, &mut self.fbc);
             let frame_offs = analyze_frame(body);
@@ -444,8 +482,14 @@ impl Compiler {
                 call_foreign: self.call_foreign,
                 call_builtin: self.call_builtin,
                 alloc: self.alloc,
+                terminate_abort: self.terminate_abort,
+                call_terminate: self.call_terminate,
+                unwind_resume: self.unwind_resume,
+                exception_var: None,
+                has_try_call: false,
             };
             tr.build(func, body);
+            has_try_call = tr.has_try_call;
             b.seal_all_blocks();
             b.finalize();
         }
@@ -459,7 +503,14 @@ impl Compiler {
             .compiled_code()
             .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten())
         {
-            self.pending_unwind.push((id, ui));
+            // T1-c：有 try_call 的函数收集全调用点并生成 LSDA（全覆盖准则：
+            // 无 handler 站点同样发 lpad=0 项，rust personality 无项 = Terminate）
+            let lsda = if has_try_call {
+                Some(build_lsda(&collect_call_sites(&cctx)))
+            } else {
+                None
+            };
+            self.pending_unwind.push((id, ui, lsda));
         }
         self.module.clear_context(&mut cctx);
         Some(id)
@@ -526,7 +577,7 @@ impl Compiler {
             .compiled_code()
             .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten())
         {
-            self.pending_unwind.push((id, ui));
+            self.pending_unwind.push((id, ui, None));
         }
         self.module.clear_context(&mut cctx);
         Some(id)
@@ -542,15 +593,37 @@ impl Compiler {
         use gimli::write::{Address, EhFrame, EndianVec, FrameTable};
         unsafe extern "C" {
             fn __register_frame(fde: *const u8);
+            fn rust_eh_personality();
         }
+        // T1-c 双 CIE：无 try_call 的函数走 plain CIE（今日管线不变）；有者走
+        // personality CIE = DW.ref 间接 rust_eh_personality（lsda_encoding=absptr；
+        // absptr 直嵌已被 lsda_probe 证伪）+ fde.lsda 挂接。
+        PERS_REF.store(rust_eh_personality as *const u8 as u64, Ordering::SeqCst);
         let isa = self.module.isa();
         let mut table = FrameTable::default();
-        let cie = isa.create_systemv_cie().expect("systemv cie");
-        let cie_id = table.add_cie(cie);
-        for (id, ui) in self.pending_unwind.drain(..) {
+        let cie_plain = table.add_cie(isa.create_systemv_cie().expect("systemv cie"));
+        let mut cie_pers = isa.create_systemv_cie().expect("systemv cie");
+        cie_pers.lsda_encoding = Some(gimli::DW_EH_PE_absptr);
+        cie_pers.personality = Some((
+            gimli::DwEhPe(gimli::DW_EH_PE_indirect.0 | gimli::DW_EH_PE_absptr.0),
+            Address::Constant(&PERS_REF as *const std::sync::atomic::AtomicU64 as u64),
+        ));
+        let cie_pers_id = table.add_cie(cie_pers);
+        for (id, ui, lsda) in self.pending_unwind.drain(..) {
             if let UnwindInfo::SystemV(info) = ui {
                 let addr = self.module.get_finalized_function(id) as u64;
-                table.add_fde(cie_id, info.to_fde(Address::Constant(addr)));
+                match lsda {
+                    Some(bytes) => {
+                        let lsda_addr = bytes.as_ptr() as u64;
+                        std::mem::forget(bytes); // FDE.lsda 终身有效（leaked Vec v2）
+                        let mut fde = info.to_fde(Address::Constant(addr));
+                        fde.lsda = Some(Address::Constant(lsda_addr));
+                        table.add_fde(cie_pers_id, fde);
+                    }
+                    None => {
+                        table.add_fde(cie_plain, info.to_fde(Address::Constant(addr)));
+                    }
+                }
             }
         }
         let mut eh = EhFrame(EndianVec::new(RunTimeEndian::Little));
@@ -575,6 +648,68 @@ impl Compiler {
             }
         }
     }
+}
+
+/// personality CIE 的 DW.ref 间接单元（单格全表共享；T1-c，lsda_probe 同款形态）。
+static PERS_REF: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+// ===== LSDA 生成（lsda_probe 配方的产品化，版式逐行照抄勿创新）=====
+
+/// 手工 GccExceptTable（cleanup-only，无 type_info；cg_clif 版式 + **全覆盖**）：
+/// - 无 handler 的调用点：(ret_addr-1, len=1, lpad=0, action=0) —— 命中即
+///   EHAction::None（rust find_eh_action 的 cs_lpad==0 分支）
+/// - cleanup handler 调用点：(ret_addr-1, len=1, pad, action=0)
+/// **rust 版 find_eh_action 对"ip 不在表中"返回 EHAction::Terminate（= _URC_FATAL），
+/// 与 libgcc 的 __gcc_personality_v0（no-entry = None）不同——call-site 表必须覆盖
+/// 函数内全部调用点**（cg_clif 对无 handler 站点同样发 lpad=0 项的原因）。
+/// 项按 buffer.call_sites() 序（= 指令序，满足 rust 解析器的有序表假设）。
+fn build_lsda(call_sites: &[(u64, Option<u64>)]) -> Vec<u8> {
+    fn uleb(out: &mut Vec<u8>, mut v: u64) {
+        loop {
+            let mut b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v != 0 {
+                b |= 0x80;
+            }
+            out.push(b);
+            if v == 0 {
+                break;
+            }
+        }
+    }
+    let mut out = vec![0xff, 0xff, 0x01]; // lpStart=omit, ttype=omit, csEncoding=uleb128
+    let mut body = Vec::new();
+    for &(ret_addr, pad) in call_sites {
+        uleb(&mut body, ret_addr - 1);
+        uleb(&mut body, 1);
+        uleb(&mut body, pad.unwrap_or(0));
+        uleb(&mut body, 0); // action=0
+    }
+    uleb(&mut out, body.len() as u64);
+    out.extend_from_slice(&body);
+    while !out.len().is_multiple_of(4) {
+        out.push(0);
+    }
+    out
+}
+
+/// 定义后取全调用点（cg_clif add_function 同数据源同口径：无 handler → None
+/// （lpad=0 项）；cleanup tag → Some(landing pad 地址)）。
+fn collect_call_sites(cctx: &cranelift_codegen::Context) -> Vec<(u64, Option<u64>)> {
+    let cc = cctx.compiled_code().expect("call_sites 须在 define 后收集");
+    let mut cs = Vec::new();
+    for site in cc.buffer.call_sites() {
+        if site.exception_handlers.is_empty() {
+            cs.push((u64::from(site.ret_addr), None));
+        }
+        for h in site.exception_handlers {
+            if let cranelift_codegen::FinalizedMachExceptionHandler::Tag(tag, lp) = h {
+                assert_eq!(tag.as_u32(), 0, "本管线只发 cleanup tag");
+                cs.push((u64::from(site.ret_addr), Some(u64::from(*lp))));
+            }
+        }
+    }
+    cs
 }
 
 // ===== 函数体翻译 =====
