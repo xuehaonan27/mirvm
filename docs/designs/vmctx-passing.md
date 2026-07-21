@@ -283,6 +283,46 @@ V8=寄存器缓存+TLS。mirvm 因为 plain-C FFI 没有走私通道，边界只
 
 ## 7. 决策状态（2026-07-07 原状态 + 后续更新）
 
+> **2026-07-19 更新（T3/M5.5 终裁落笔）**：T 骨架的生产实证与复测触发器定稿。
+>
+> **T 骨架生产实证**（T1 战役全链落地后）：准入三表（stmt/rvalue/terminator）
+> 穷尽的今天，编译码触碰每线程执行态的站点**仍为零**——格①（GC/safepoint/
+> TLAB bump/栈检查/线性内存）是架构承诺结构性不存在；格②（FFI/c2i/catch/
+> panic 簿记）语义上就是助手形状，ctx 获取（SHARED + TLS attach，M4.4 被逼定
+> 的边界机制原样）摊销在助手重量级内；格③（分配/TLS 内联）未进场，编译码
+> 零站点。fast 签名 = 纯 guest 签名（CalleeAbi 全形态，T1-a），`get_ctx()`
+> 单缝 = SHARED 静态 + 边界 TLS attach——没有为任何假想负载预付寄存器租金。
+>
+> **计量基线**（`MIRVM_JIT_STATS=1` 助手频度统计，12 桶原子计数 + atexit
+> dump，片1 `05021d2`；计时为 JIT-on 墙钟）：
+> - fib(32)：61–80ms（≤80ms 硬门）；**全空桶**——数值内核零 ctx 站点直证。
+> - rayon（corpus 条目）：冷 506ms / 热 189ms；`tls_ref=1392、c2i=225467、
+>   alloc=0`——真实并行负载格③仍为零（分配未进编译码）。
+> - unwind_probe（30000 迭代 panic 密径）：`alloc=118529、tls_ref=268212、
+>   c2i=3.59M、call_terminate=2.97M`——格② 密度的极端形态；这些调用本身
+>   就是助手，T/R 之差不作用于它们。
+> - corpus per-crate 分布：见 decision-history §7.20（T3 片2 全量跑批）。
+>
+> **复测触发器（双闸，用户 2026-07-19 裁定并列；先到先裁）**：
+> 1. **E6 进场**——分配快路径内联 / guest TLS 快路径内联进编译码立项时，
+>    以该负载复测 T vs R（对照基线 = 本节数据 + spike5 §5.2 的 ~8%）。
+> 2. **多 Engine 嵌入立项**——SHARED 是进程级单例，daemon/mode B/库化的
+>    多实例场景它是真 blocker；彼时 vmctx（显式参或 TLS 镜像）非做不可，
+>    与性能无关，直接重开终裁。
+>
+> **T→R 升级路径**（ABI 兼容单开关，spike5 已验形状）：(a) `enable_pinned_reg`
+> ISA 旗；(b) `get_ctx()` 降低 TLS load → `get_pinned_reg`；(c) 边界入口
+> save/set/restore。翻转粒度 = 整个 JIT 代码缓存按新制度重编——免费：代码
+> 缓存进程内易失，mode B 分发字节码非机器码，无跨进程兼容面。诚实条款：
+> 分层 ≠ 同进程逐函数混用（T 码体内 r15 是普通 callee-saved 临时、R 码
+> 假设 r15≡ctx，跨制度调用需包装）。
+>
+> **挂载点评审**（T3 裁定，均不动）：CallIndirect 内联缓存、LSDA 存储升
+> JIT data object——当前无负载区分其价值，保留 E7 优化项池，随触发器复测
+> 时一并重估。
+>
+> 以下 2026-07-11 更新与原决策现场保留备查。
+
 > **2026-07-11 更新**：M5 D5 将选择改写为 T 骨架 + R 兼容缓存层。T/R 共享纯 guest fast
 > 签名与 TLS 边界；只有 `get_ctx()` 降低、pinned-reg 开关和边界 save/set/restore 不同。
 > 分配或 guest TLS 内联进入编译码后，才以该负载复测是否启用 R。以下条目保留 2026-07-07
