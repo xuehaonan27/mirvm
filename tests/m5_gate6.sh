@@ -23,7 +23,7 @@ else
 fi
 
 # ⑥ vmctx-passing §7 活检查点：T3 落笔 + 双触发器（E6 / 多 Engine）在位
-if grep -q "2026-07-19 更新（T3" docs/designs/vmctx-passing.md \
+if grep -q "2026-07-21 更新（T3" docs/designs/vmctx-passing.md \
     && grep -q "多 Engine 嵌入立项" docs/designs/vmctx-passing.md \
     && grep -q "E6 进场" docs/designs/vmctx-passing.md; then
     ok "vmctx-passing §7 活检查点（T 基线 + 双触发器）"

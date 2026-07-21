@@ -8,19 +8,22 @@ mirvm 是一个以 rustc 为前端、自建执行引擎的 Rust 抽象机器运�
 > [docs/current-status.md](docs/current-status.md) 为准；文档权威与历史替代关系见
 > [docs/README.md](docs/README.md)。
 
-## 当前状态（2026-07-18 快照）
+## 当前状态（2026-07-21 快照）
 
 - **M4 完成**：自研 typed bytecode、tree-walking interpreter、tcx-free 执行相、真实地址内存、
   unwind、libffi FFI、native→guest thunk、1:1 OS 线程与 guest TLS。
-- **M5 语义轨完成，生产 JIT 已落地**：asm-stub 工厂、llvm.x86 intrinsic 补面、非 JIT
-  语义补全（M5.2，signal/backtrace 两历史 XFAIL 转绿）；方法级 Cranelift JIT =
-  M5.3 骨架 + M5.4a/b（默认开启，`--jit off` 回退），M5.4c/d 与 M5.5 待施。
+- **M5 全收（M5.0–M5.5）**：asm-stub 工厂、llvm.x86 intrinsic 补面、M5.2 语义补全
+  （signal/backtrace 两历史 XFAIL 转绿）；方法级 Cranelift JIT = M5.3 骨架 + M5.4a–d
+  全覆盖（ABI 全形态、五调用助手、unwind 产品化双 CIE 全覆 LSDA、stmt/rvalue/terminator
+  准入三表穷尽）+ M5.5 vmctx 终裁（T 骨架生产定稿）——JIT 默认开启（`--jit off` 回退），
+  `tests/m5_gate6.sh` 收口全绿。
 - **M6 冷启动完成**：S1 小件包、S2 依赖剪 codegen、S4 std 预降底座（脚本纯冷 385→104ms）、
   S3′b A2 纯化聚合 deps-image（eco 冷 924→热 66ms）。
 - **地址模型 P1/P2 完成**（2026-07-17）：GOT 间接消除宿主地址烘焙 + extern fn 条目
   可执行化，thunk 盲区结构性根治。
-- **corpus 三维差分 ~133 个真实 crate driver**（批1–8，mirvm/native/逢调即编三维逐字节）；
-  gate5 **148 PASS / 0 XFAIL / 0 FAIL**，cargo test 67/67，diff.sh 31/31，diff_cargo 5/5。
+- **corpus 三维差分批1–10 全量 129 个真实 crate driver 绿**（mirvm/native/逢调即编三维
+  逐字节）；gate5 **167 PASS / 0 XFAIL / 0 FAIL**，m5_gate6 4/4，cargo test 76/76，
+  diff.sh 45/45，diff_cargo 5/5。
 
 已知缺口、响亮拒绝边界与全部未解决债务集中登记在
 [docs/open-issues.md](docs/open-issues.md)；目前不能宣称支持"任意 Rust 程序"。

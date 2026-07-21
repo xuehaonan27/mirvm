@@ -2,7 +2,8 @@
 
 > 本文只回答两个问题：**哪份文档管什么**、**冲突时信谁**。
 > 最后重整：2026-07-18（文档目录大精简：历史文档归档 `history/`、四个过时文档删除、
-> 新增 [open-issues.md](open-issues.md) 债务登记册与 [agents/onboarding.md](agents/onboarding.md)）。
+> 新增 [open-issues.md](open-issues.md) 债务登记册与 [agents/onboarding.md](agents/onboarding.md)）；
+> 最后同步：2026-07-21（M5 全收对齐——README/DESIGN/m5 系设计档头部与 T1–T3 闭合日期订正）。
 
 ## 1. 权威顺序（冲突时从高到低取信）
 
@@ -43,7 +44,7 @@
 | `current-status.md` | 跨阶段事实唯一入口（阶段表 / 执行路径 / 已验证边界 / 缺口表 / 开发顺序） |
 | `open-issues.md` | 未解决债务登记册：T 待施 / C corpus 实锤 / E 引擎架构 / D 分发 / R 拒绝边界 / G 维护态 + 触发器速查 + 定型否决 |
 | `decision-history.md` | append-only 决策索引（ADR-lite）；推翻旧决策在此追加，不删旧节 |
-| `corpus.md` | 真实 crate 三维差分扩编台账（§5，批1–8）+ 候选池（§7）；§0–§4 为 tier-0 时代票据归档 |
+| `corpus.md` | 真实 crate 三维差分扩编台账（§5，批1–10）+ 候选池（§7）；§0–§4 为 tier-0 时代票据归档 |
 | `real-projects.md` | `tests/real_projects*.sh` 严格 harness 的合同说明（四层身份/schema-3/4/隔离边界） |
 
 ### docs/agents/（agent 操作规约）
@@ -65,8 +66,8 @@
 | `frame-abi-bytecode.md` | M4 帧/ABI 设计基线；alloca 迁移承诺（open-issues E12）在此 |
 | `vmctx-passing.md` | vmctx P/T/R 三案论证；R 复测要回来读 |
 | `async-stackless.md` | async 无栈状态机调研（C11 证据） |
-| `m5-design.md` | M5 总案：D5 T/R 分层终裁、§7 gate6 判据——M5.5 原案之本 |
-| `m5.4-design.md` | M5.4c/d 施工蓝图（ABI 泛化 + LSDA 版式参数 + SIMD 覆盖矩阵） |
+| `m5-design.md` | M5 总案（M5.0–M5.5 全完成）：D5 T/R 分层终裁、§7 gate6 判据——M5.5 原案之本 |
+| `m5.4-design.md` | M5.4a–d 施工蓝图（ABI 泛化 + LSDA 版式参数 + SIMD 覆盖矩阵；片 a–d 全落地） |
 | `distribution-design.md` | 轨 C 分发 D9a–D9f 全文；未立项 ④⑤ 的唯一设计规范 |
 
 ### docs/history/（只读归档）

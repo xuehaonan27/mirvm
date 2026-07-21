@@ -86,9 +86,10 @@ RAM 只要求**可观测行为**一致，其余全自由。这是贯穿一切的
 3. **REPL/Notebook**（后置 M6）：VM 拥有持久堆，状态持久化天然成立，跨 cell 借用不再是问题。
 4. **嵌入式引擎**（后置）：engine 是 library、CLI 是薄壳，这条路从第一天就不被堵死。
 
-**执行引擎现状 = 解释器 + 方法级 JIT 双轨**（M5.3 骨架与 M5.4a/b 已落地，JIT 默认
-开启、可 `--jit off` 回退纯解释）；HotSpot 风格 tiering 计量终裁（vmctx T/R、gate6）
-属 M5.5，仍未实现。CLI 兼容旧的 `--engine vm` 写法。
+**执行引擎现状 = 解释器 + 方法级 JIT 双轨**（M5 全收：M5.3 骨架 + M5.4a–d 翻译器
+全覆盖 + M5.5 vmctx 终裁计量与 gate6 收口均已落地，JIT 默认开启、可 `--jit off`
+回退纯解释）；vmctx T 骨架生产定稿，R 复测挂双触发器（E6 进场 / 多 Engine 立项，
+见 docs/designs/vmctx-passing.md §7）。CLI 兼容旧的 `--engine vm` 写法。
 
 ---
 
@@ -211,7 +212,7 @@ InterpCx 的内存 map、MonoHashMap（RefCell 遍地）不 Sync；M4 通过冻�
 | **历史 bootstrap** | fast Machine on rustc `InterpCx` | **已删除（2026-07-09）** | M0–M2.5 的探索工具；代码只在 Git 历史中，不再是 oracle 或运行模式 |
 | **typed-bytecode 解释器** | MIR → 冻结 IR → tree-walking 执行 | **M4 完成，差分 oracle 本体** | tcx-free、真线程、FFI/unwind/thunk；语义范围与缺口见 current-status |
 | **asm stub** | GAS wrapper → `.so` → native call | **M5.0 完成** | 解释器可调用的局部机器码机件，不等于方法级 JIT |
-| **方法级 JIT** | 从冻结引擎字节码生成 Cranelift 机器码 | **M5.3/M5.4a–b 已落地（默认开启）；M5.4c/d、M5.5 待施** | LSDA 产品化、ABI 泛化、SIMD 与计量终裁仍待施（docs/open-issues.md T1–T3） |
+| **方法级 JIT** | 从冻结引擎字节码生成 Cranelift 机器码 | **M5.3/M5.4a–d/M5.5 全落地（默认开启）** | ABI 全形态、unwind 产品化、准入三表穷尽、vmctx T 骨架定稿（docs/open-issues.md T1–T3 已闭合） |
 
 InterpCx 曾帮助项目快速探索 RAM 边界，但其不 Sync 与 AllocId overlay 不适合作为产品地基。
 M4 完成后它没有“退居 oracle”，而是被删除；当前差分 oracle 是同源 native 编译执行。
@@ -354,8 +355,11 @@ src/os/
   补面分别使 blake3/ecosystem 转绿；diff_cargo 3/3。signal guest handler 是独立明确 XFAIL。
 - **M5.3 方法级 JIT 骨架**（✅ 2026-07-15）：J1 基座 + 翻译器标量子集 + CFI；
   **M5.4a/b 翻译器**（✅ 同日）：帧模型 v2、标量全集 + 128 位族 + atomics。
-  **M5.4c/d 与 M5.5 待施**（ABI 泛化 + LSDA 产品化 / SIMD / vmctx 终裁 + gate6——
-  docs/open-issues.md T1–T3）。施工日志见 docs/history/m5-log.md。
+  **M5.4c/d**（✅ 2026-07-21）：ABI 泛化全形态 + 五调用助手 + unwind 产品化
+  （双 CIE 全覆 LSDA）+ 准入三表穷尽（SIMD 族经 interp 共享本体助手）。
+  **M5.5**（✅ 2026-07-21）：vmctx 终裁（T 骨架生产定稿 + 复测双触发器）+
+  m5_gate6 收口全绿——M5 战役全收（docs/decision-history.md §7.19/§7.20）。
+  施工日志见 docs/history/m5-log.md。
 - **M6 冷启动/轨 C**（✅ 2026-07-14~15）：S1 小件包、S2 依赖剪 codegen、S4 std
   预降底座、S3′b A2 纯化聚合 deps-image。编号说明：原愿景「M6 REPL/Notebook」被
   轨 C 占用，REPL 未立项（docs/open-issues.md D11）。施工日志见 docs/history/m6-log.md。
@@ -400,7 +404,7 @@ src/os/
 | shim 工作量（最大风险） | 按需实现；§7 边界模型减少无谓 shim（真资源走直通）；借鉴 Miri 代码 |
 | 测试假阳性 / 语义误报 | 绿色必须比较输出或不变式；双方都失败不得算 PASS；预期红锁定原因 |
 | silent stub | 未实现的可观察语义必须 Trap 或真实实现，不允许返回成功伪装支持 |
-| M4 解释器性能天花板 | 方法级 JIT 已落地（M5.3/M5.4a–b，默认开启）；JIT-on/off/native 三方差分；M5.4c/d 与 M5.5 待施 |
+| M4 解释器性能天花板 | 方法级 JIT 已落地（M5.3/M5.4a–d/M5.5，默认开启）；JIT-on/off/native 三方差分；fib(32) JIT 54–80ms ≤80ms 硬门 |
 | FFI C→Rust 回调 | thunk + TLS attach 已有；逐类验证真实注册/生命周期，signal 不能仅凭 thunk 宣称支持 |
 | 平台耦合 | 当前只宣称 Linux/ELF/x86_64；抽取 OS 边界后再扩平台 |
 | 生命周期与嵌入 | 将进程退出、全局 TLS key 与泄漏式资源收敛成可恢复、多 Engine 生命周期 API |

@@ -1,11 +1,15 @@
 # M5 设计：JIT —— asm 三面孔清零 + 方法级 Cranelift 加速（已批准路线图）
 
-> 状态：**已批准（2026-07-11）**——D1-D7 全批；D5 定 **T 骨架 + 触发器活检查点**
-> （编译码零 ctx 携带 / R 为 ABI 兼容缓存层，分配·guest-TLS 内联进场时以该负载复测）。
-> 进度：**M5.0、M5.1 已完成**（实况见 `docs/m5-log.md`）：
-> addcarry/subborrow 已使 numbigint 转绿，xgetbv 已与 native 差分，pshufb/SHA helper 已使
-> sha2 转绿，受约束 archive 装载使 blake3 转绿，SIMD 补面使 ecosystem 转绿。方法级 JIT
-> 仍未进入产品路径。2026-07-12 复核发现并修复旧 gate 对 signal 与 diff_cargo
+> 状态：**全战役完成（M5.0–M5.5，2026-07-21 收口）**——D1-D7 全批；D5 定 **T 骨架 +
+> 触发器活检查点**（T 骨架生产定稿，复测双触发器 = E6 进场 / 多 Engine 嵌入立项，
+> 见 [vmctx-passing.md §7](vmctx-passing.md) 与 decision-history §7.20）。
+> 进度：**M5.0–M5.5 全部完成**：M5.0 asm-stub 工厂、M5.1 归档装载 + SIMD 补面、
+> M5.2 语义补全（signal/backtrace）、M5.3 JIT 骨架、M5.4a–d 翻译器全覆盖（§7.19）、
+> M5.5 vmctx 终裁计量 + gate6 收口（§7.20）。施工日志见 `docs/history/m5-log.md`。
+> 以下为 2026-07-11 批准时的设计原文（历史快照，施工偏差与终裁落笔见上述两处）：
+> ~~进度：M5.0、M5.1 已完成~~：addcarry/subborrow 已使 numbigint 转绿，xgetbv 已与
+> native 差分，pshufb/SHA helper 已使 sha2 转绿，受约束 archive 装载使 blake3 转绿，
+> SIMD 补面使 ecosystem 转绿。2026-07-12 复核发现并修复旧 gate 对 signal 与 diff_cargo
 > 的假阳性；最终 gate 只把 signal guest handler 记为独立 XFAIL。
 > 历史前置记录：M4 当时按 gate5 31/31 关账；该数字只代表旧脚本口径，不能再解释为 31 个
 > 语义断言。Spike5 真 Cranelift 全过
