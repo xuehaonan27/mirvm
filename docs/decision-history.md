@@ -1048,6 +1048,37 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   native 帧含真 unwinder 穿透/着陆，setjmp/longjmp 所在函数一旦发布
   即脱出 hazard 面；interp 帧路径维持原记账）。
 
+### 7.20 2026-07-19：M5.5 收口——vmctx 终裁落笔（T3 闭合，M5 战役全收）
+
+- **范围裁定**（用户 2026-07-19）：按 m5-design 原案收口（计量 + 落笔 +
+  gate6），不融合 E6（分配/TLS 内联是另一个战役，应由 corpus 性能数据
+  驱动立项）；**复测触发器并列双闸**：E6 进场 或 多 Engine 嵌入立项
+  （SHARED-static 是多实例真 blocker，与性能无关），先到先裁。
+- **交付**：
+  - 片1 `05021d2`：`MIRVM_JIT_STATS=1` 助手频度统计（12 桶原子计数 +
+    atexit 单行 dump，关闭时零观测成本）。ctx 触碰桶 = alloc/tls_ref/
+    c2i/call_indirect/call_foreign/call_builtin/call_terminate；纯计算
+    桶（simd_stmt/simd_rv/bin128_ovf/volatile×2）不取 ctx，仅作密度参照。
+  - 片2 计量跑批：fib(32) 61–80ms（**全空桶**——数值内核零 ctx 站点
+    直证）；rayon 冷 506ms / 热 189ms（tls_ref=1392、alloc=0）；
+    **corpus 全量 129/0 约 6.3min**：110 crate 有非零桶、19 全空；
+    格③ 候选总量 = alloc 7.82M（59 crate）+ tls_ref 0.38M（17 crate）；
+    c2i 586.6M 与 call_terminate 229.98M 属格② 固有形状（解释兜底
+    边界 / ABI 边界守卫），不作用 T/R 之差。
+  - 片3 `aae9aec`：vmctx-passing §7 落笔（T 骨架生产实证 + 基线 +
+    双触发器 + T→R 单开关路径与诚实条款 + 挂载点评审两项不动留 E7）
+    + tests/m5_gate6.sh（判据①-⑤复用 gate5 全量，增量 = ⑥ §7 核查
+    + stats 冒烟 + ⑦ 本条核查）。
+- **终裁结论（与 2026-07-11 分层判断互证）**：**T 骨架 = 生产定稿**。
+  准入三表穷尽的今天，编译码 ctx 站点仍为零——格① 架构承诺结构性
+  不存在、格② 助手形状与实现无关、格③ 未进场；没有为假想负载预付
+  寄存器租金。R 保持 ABI 兼容缓存层身份，挂双闸触发器（见
+  vmctx-passing §7）。
+- **锚点**：cargo test 76、diff 双态 45/45、corpus 129/0、gate6 全绿
+  （gate5 167/0/0/0 + 增量三查）。M5 战役（M5.0–M5.5）自此全收口；
+  下一战役候选 = E6（性能轴，触发复测闸①）或 corpus 扩编/C4（功能
+  轴），排序听用户。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 - ~~P7 设想独立 `src/os/` 物理层~~（**2026-07-18/19 已兑现**：`src/os/` + `src/arch/` 双 leaf 建成，E21 闭合，见 §7.16）。
