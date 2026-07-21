@@ -5,8 +5,83 @@
 use super::*;
 use super::compiler::SHARED;
 use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, AtomicU64};
+
+// ===== T3（M5.5 D5）助手频度统计：vmctx 终裁复测的格③对照基线 =====
+// MIRVM_JIT_STATS=1 时每个助手入口一次 fetch_add(Relaxed)，进程退出经
+// libc atexit 单行 dump。频度回答的是「分配/TLS 内联后编译码每激活 ctx
+// 站点密度」的实测上界——T vs R 复测时的输入数据。关闭时仅一次 relaxed
+// load，零观测成本。
+pub(super) static STAT_ON: AtomicBool = AtomicBool::new(false);
+static STAT: [AtomicU64; 12] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+const STAT_NAMES: [&str; 12] = [
+    "alloc",
+    "tls_ref",
+    "c2i",
+    "call_indirect",
+    "call_foreign",
+    "call_builtin",
+    "simd_stmt",
+    "simd_rv",
+    "volatile_load",
+    "volatile_store",
+    "call_terminate",
+    "bin128_ovf",
+];
+const S_ALLOC: usize = 0;
+const S_TLS: usize = 1;
+const S_C2I: usize = 2;
+const S_INDIR: usize = 3;
+const S_FOREIGN: usize = 4;
+const S_BUILTIN: usize = 5;
+const S_SIMD_STMT: usize = 6;
+const S_SIMD_RV: usize = 7;
+const S_VLOAD: usize = 8;
+const S_VSTORE: usize = 9;
+const S_CTERM: usize = 10;
+const S_BIN128: usize = 11;
+
+#[inline(always)]
+fn stat(i: usize) {
+    if STAT_ON.load(Ordering::Relaxed) {
+        STAT[i].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+extern "C" fn stat_dump() {
+    let mut line = String::from("mirvm-jit-stats:");
+    for (i, n) in STAT_NAMES.iter().enumerate() {
+        let v = STAT[i].load(Ordering::Relaxed);
+        if v != 0 {
+            line.push_str(&format!(" {n}={v}"));
+        }
+    }
+    eprintln!("{line}");
+}
+
+/// Compiler::new 调用一次：按 env 开启频度统计并注册退出 dump。
+pub(super) fn stat_init() {
+    if std::env::var_os("MIRVM_JIT_STATS").is_some() {
+        STAT_ON.store(true, Ordering::Relaxed);
+        crate::os::process::atexit_native(stat_dump);
+    }
+}
 
 pub(super) extern "C-unwind" fn mirvm_c2i(func: u64, args: *const u64, n: u64, ret: *mut u64) {
+    stat(S_C2I);
     let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
     let ctx = crate::vm::engine::ctx::attach(shared);
     let a = unsafe { std::slice::from_raw_parts(args, n as usize) };
@@ -33,6 +108,7 @@ pub(super) extern "C-unwind" fn mirvm_call_terminate(
     n: u64,
     ret: *mut u64,
 ) {
+    stat(S_CTERM);
     let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
     let ctx = crate::vm::engine::ctx::attach(shared);
     let f = || {
@@ -68,6 +144,7 @@ pub(super) extern "C-unwind" fn mirvm_call_indirect(
     caller: u64,
     terminate: u64,
 ) {
+    stat(S_INDIR);
     if terminate != 0 {
         // T1-c：Terminate 边界 = call_guarding_terminate 同语义（外包宿主
         // catch_unwind，panic 抵达 = 同文案 eprintln + abort）
@@ -126,6 +203,7 @@ pub(super) extern "C-unwind" fn mirvm_call_indirect(
 
 /// T1-b TlsRef 助手（同本体 interp::tls_addr 的惰性物化——每线程实例块）。
 pub(super) extern "C-unwind" fn mirvm_tls_ref(id: u64) -> u64 {
+    stat(S_TLS);
     let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
     let ctx = crate::vm::engine::ctx::attach(shared);
     crate::vm::engine::interp::tls_addr(ctx, id as u32)
@@ -144,6 +222,7 @@ pub(super) extern "C-unwind" fn mirvm_call_foreign(
     caller: u64,
     terminate: u64,
 ) -> u64 {
+    stat(S_FOREIGN);
     if terminate != 0 {
         // T1-c：Terminate 边界 = call_guarding_terminate 同语义
         return match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -222,6 +301,7 @@ pub(super) extern "C-unwind" fn mirvm_call_builtin(
     ret: *mut u64,
     terminate: u64,
 ) {
+    stat(S_BUILTIN);
     if terminate != 0 {
         // T1-c：Terminate 边界 = call_guarding_terminate 同语义
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -267,6 +347,7 @@ pub(super) extern "C-unwind" fn mirvm_alloc(
     a3: u64,
     caller: u64,
 ) -> u64 {
+    stat(S_ALLOC);
     let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
     let ctx = crate::vm::engine::ctx::attach(shared);
     let builtin = match tag {
@@ -348,11 +429,13 @@ pub(super) extern "C-unwind" fn mirvm_jit_div_zero(kind: u64) -> ! {
 
 /// volatile 读（M5.4b-1）：走 interp 的 opaque 字节载体 + 分块分解同一实现。
 pub(super) extern "C-unwind" fn mirvm_volatile_load(addr: u64, dst: u64, size: u64) {
+    stat(S_VLOAD);
     crate::vm::engine::interp::mem_read_volatile(addr, dst, size as u32);
 }
 
 /// volatile 写（同上）。
 pub(super) extern "C-unwind" fn mirvm_volatile_store(addr: u64, src: u64, size: u64) {
+    stat(S_VSTORE);
     crate::vm::engine::interp::mem_write_volatile(addr, src, size as u32);
 }
 
@@ -383,6 +466,7 @@ pub(super) extern "C-unwind" fn mirvm_bin128_ovf(
     bhi: u64,
     out: *mut u64,
 ) -> u64 {
+    stat(S_BIN128);
     let (r, ovf) = if signed {
         let (x, y) = (lo_hi(alo, ahi) as i128, lo_hi(blo, bhi) as i128);
         match op {
@@ -765,6 +849,7 @@ pub(super) extern "C-unwind" fn mirvm_simd_stmt(
     v0: u64,
     v1: u64,
 ) -> u64 {
+    stat(S_SIMD_STMT);
     use crate::vm::engine::interp::simd_exec as x;
     let st = unsafe { &*(stmt as *const ir::Stmt) };
     match st {
@@ -948,6 +1033,7 @@ pub(super) extern "C-unwind" fn mirvm_simd_stmt(
 
 /// T1-d：SIMD rvalue 三件统一助手（Bitmask/Reduce/ReduceArith），pa = 向量 place 地址。
 pub(super) extern "C-unwind" fn mirvm_simd_rv(rv: u64, pa: u64) -> u64 {
+    stat(S_SIMD_RV);
     use crate::vm::engine::interp::simd_exec as x;
     let r = unsafe { &*(rv as *const ir::Rvalue) };
     match r {

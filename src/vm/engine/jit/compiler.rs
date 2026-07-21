@@ -118,6 +118,8 @@ struct Compiler {
 
 impl Compiler {
     fn new(shared: &'static Shared) -> Self {
+        // T3（M5.5）：MIRVM_JIT_STATS=1 时开启助手频度统计（进程级一次）
+        stat_init();
         let mut fb = settings::builder();
         fb.set("opt_level", "speed").unwrap();
         fb.set("unwind_info", "true").unwrap();
