@@ -490,6 +490,41 @@ pub(super) extern "C-unwind" fn mirvm_bin128_ovf(
     ovf as u64
 }
 
+/// Bin128 的 Div/Rem（cranelift ISLE 不支持 I128 除法——MIRVM_JIT_SYNC
+/// 实证：udiv.i128 "should be implemented in ISLE"，此前静默留解释）。
+/// 宿主 wrapping 系同 interp；零除 = div_zero 128 位文案（kind 2/3）。
+pub(super) extern "C-unwind" fn mirvm_bin128_divrem(
+    is_rem: u64,
+    signed: bool,
+    alo: u64,
+    ahi: u64,
+    blo: u64,
+    bhi: u64,
+    out: *mut u64,
+) {
+    let (a, b) = (lo_hi(alo, ahi), lo_hi(blo, bhi));
+    if b == 0 {
+        mirvm_jit_div_zero(2 + is_rem);
+    }
+    let r: u128 = if signed {
+        let (x, y) = (a as i128, b as i128);
+        (if is_rem != 0 {
+            x.wrapping_rem(y)
+        } else {
+            x.wrapping_div(y)
+        }) as u128
+    } else if is_rem != 0 {
+        a.wrapping_rem(b)
+    } else {
+        a.wrapping_div(b)
+    };
+    let (lo, hi) = hi_lo(r);
+    unsafe {
+        *out = lo;
+        *out.add(1) = hi;
+    }
+}
+
 /// f128 四则（op: 0=add 1=sub 2=mul 3=rem(fmodf128) 4=div）
 pub(super) extern "C-unwind" fn mirvm_f128_bin(
     op: u64,
@@ -727,6 +762,51 @@ pub(super) extern "C-unwind" fn mirvm_f16_cmp(cc: u64, a: u64, b: u64) -> u64 {
 }
 pub(super) extern "C-unwind" fn mirvm_f16_neg(a: u64) -> u64 {
     (-f16::from_bits(a as u16)).to_bits() as u64
+}
+
+/// f16 数学一元（op 序同 interp MathUn 宏；宿主 f16 方法同一批 = 零漂移。
+/// strict 模式实证发现：MathUn/MathBin/MathFma 臂原无 F16 护栏，
+/// as_float(F16) 编译线程 panic = 可准入函数静默留解释的另一隐形坑）
+pub(super) extern "C-unwind" fn mirvm_f16_math_un(op: u64, a: u64) -> u64 {
+    let x = f16::from_bits(a as u16);
+    let r = match op {
+        0 => x.sqrt(),
+        1 => x.sin(),
+        2 => x.cos(),
+        3 => x.exp(),
+        4 => x.exp2(),
+        5 => x.ln(),
+        6 => x.log2(),
+        7 => x.log10(),
+        8 => x.abs(),
+        9 => x.floor(),
+        10 => x.ceil(),
+        11 => x.trunc(),
+        12 => x.round(),
+        _ => x.round_ties_even(),
+    };
+    r.to_bits() as u64
+}
+
+/// f16 数学二元（op: 0=pow 1=powi(b = 原始 i32 位，勿过 from_bits)
+/// 2=copysign 3=minnum 4=maxnum；interp MathBin f16 同形）
+pub(super) extern "C-unwind" fn mirvm_f16_math_bin(op: u64, a: u64, b: u64) -> u64 {
+    let (x, y) = (f16::from_bits(a as u16), f16::from_bits(b as u16));
+    let r = match op {
+        0 => x.powf(y),
+        1 => x.powi(b as i32),
+        2 => x.copysign(y),
+        3 => x.min(y),
+        _ => x.max(y),
+    };
+    r.to_bits() as u64
+}
+
+/// f16 融合乘加（宿主 mul_add 单次舍入，interp MathFma f16 同形）
+pub(super) extern "C-unwind" fn mirvm_f16_fma(a: u64, b: u64, c: u64) -> u64 {
+    f16::from_bits(a as u16)
+        .mul_add(f16::from_bits(b as u16), f16::from_bits(c as u16))
+        .to_bits() as u64
 }
 /// f16 互转（kind: 1=→f32 2=→f64 3=f32→ 4=f64→）
 pub(super) extern "C-unwind" fn mirvm_f16_cast(kind: u64, v: u64) -> u64 {

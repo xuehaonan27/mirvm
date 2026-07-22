@@ -203,15 +203,16 @@ if MIRVM_NO_BASE_IMAGE=1 MIRVM_NO_IR_CACHE=1 ONLY=fib MIRVM="$MIRVM" \
 else
     bad "diff.sh 底座旁路冒烟"
 fi
-# M5.3 JIT 双跑（m5.3-design §4 oracle）：①逢调即编全量——阈值=1 使所有可准入函数
-# 走 JIT 帧（默认阈值 1000 下多数 demo 不触发编译，覆盖面不足），与 native 全量差分
-# = 翻译器误编译的第一显形处；②JIT-off 冒烟——纯解释逃生门不被 JIT 施工弄坏。
-if MIRVM_JIT_THRESHOLD=1 MIRVM="$MIRVM" bash tests/diff.sh >"$TMP/diff-jit1.out" 2>&1 \
+# M5.3 JIT 双跑（m5.3-design §4 oracle）：①逢调即编全量——阈值=1 + MIRVM_JIT_SYNC
+#（audit F-05 起升级为同步发布：可准入函数首调即同步编译并真跑机器码，编译
+# 失败响亮 RED；裸阈值=1 只证明「请求过编译」，不证明执行）。与 native 全量
+# 差分 = 翻译器误编译的第一显形处；②JIT-off 冒烟——纯解释逃生门不被施工弄坏。
+if MIRVM_JIT_SYNC=1 MIRVM_JIT_THRESHOLD=1 MIRVM="$MIRVM" bash tests/diff.sh >"$TMP/diff-jit1.out" 2>&1 \
     && grep -Eq "== [0-9]+ passed, 0 failed ==" "$TMP/diff-jit1.out"; then
     jit_summary=$(grep -Eo '[0-9]+ passed, 0 failed' "$TMP/diff-jit1.out" | tail -1)
-    ok "diff.sh 逢调即编（阈值=1）$jit_summary"
+    ok "diff.sh 逢调即编（阈值=1+SYNC 同步发布）$jit_summary"
 else
-    bad "diff.sh 逢调即编（阈值=1）回归"
+    bad "diff.sh 逢调即编（阈值=1+SYNC）回归"
 fi
 if MIRVM_JIT=off MIRVM_NO_IR_CACHE=1 ONLY=fib MIRVM="$MIRVM" \
     bash tests/diff.sh >"$TMP/diff-jitoff.out" 2>&1 \

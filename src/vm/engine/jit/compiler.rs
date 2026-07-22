@@ -59,7 +59,8 @@ fn worker(shared: &'static Shared, rx: Receiver<u32>) {
         }
         c.compile(func);
         if dbg {
-            let ok = shared.jit.slots[func as usize].load(Ordering::Acquire) != 0;
+            let s = shared.jit.slots[func as usize].load(Ordering::Acquire);
+            let ok = s != 0 && s != FAIL_SENTINEL;
             if ok {
                 let addr = shared.jit.slots[func as usize].load(Ordering::Acquire);
                 let fast = shared.jit.slots_fast[func as usize].load(Ordering::Acquire);
@@ -147,6 +148,7 @@ impl Compiler {
         jb.symbol("mirvm_alloc", mirvm_alloc as *const u8);
         // M5.4b-3 助手注册表
         jb.symbol("mirvm_bin128_ovf", mirvm_bin128_ovf as *const u8);
+        jb.symbol("mirvm_bin128_divrem", mirvm_bin128_divrem as *const u8);
         jb.symbol("mirvm_f128_bin", mirvm_f128_bin as *const u8);
         jb.symbol("mirvm_f128_cmp", mirvm_f128_cmp as *const u8);
         jb.symbol("mirvm_f128_un", mirvm_f128_un as *const u8);
@@ -168,6 +170,9 @@ impl Compiler {
         jb.symbol("mirvm_f16_cast", mirvm_f16_cast as *const u8);
         jb.symbol("mirvm_f16_to_int", mirvm_f16_to_int as *const u8);
         jb.symbol("mirvm_f16_from_int", mirvm_f16_from_int as *const u8);
+        jb.symbol("mirvm_f16_math_un", mirvm_f16_math_un as *const u8);
+        jb.symbol("mirvm_f16_math_bin", mirvm_f16_math_bin as *const u8);
+        jb.symbol("mirvm_f16_fma", mirvm_f16_fma as *const u8);
         jb.symbol("memmove", crate::os::process::memmove_addr());
         jb.symbol("memset", crate::os::process::memset_addr());
         jb.symbol("memcmp", crate::os::process::memcmp_addr());
@@ -353,6 +358,13 @@ impl Compiler {
             return;
         };
         if !admit(self.shared, body) {
+            // strict 记录：不准入集合（设计上的留解释，非失败；MIRVM_JIT_DEBUG 门）
+            if jit.sync && std::env::var_os("MIRVM_JIT_DEBUG").is_some() {
+                eprintln!(
+                    "mirvm-jit-strict: f{func} 不准入（{}）",
+                    self.shared.module.funcs[func as usize].name
+                );
+            }
             return;
         }
         let abi = callee_abi(body).expect("admit 已验");
@@ -385,14 +397,18 @@ impl Compiler {
         }
 
         // 静默失败纪律（m5.3-design D4 / 防静默错值：编译失败 = 维持解释，绝不向
-        // stderr 吐 panic——差分 oracle 的 stderr 逐字节比对会被线程 id 污染，实测抓获）
+        // stderr 吐 panic——差分 oracle 的 stderr 逐字节比对会被线程 id 污染，实测抓获）；
+        // MIRVM_JIT_SYNC 验证模式例外：可准入失败 = FAIL 哨兵响亮记（audit F-05）
         let Some(fast_id) = self.define_fast(func, body, abi) else {
+            self.strict_fail(func);
             return;
         };
         let Some(packed_id) = self.define_packed(func, body, abi, fast_id) else {
+            self.strict_fail(func);
             return;
         };
         if self.module.finalize_definitions().is_err() {
+            self.strict_fail(func);
             return;
         }
         self.register_pending_eh_frames();
@@ -402,6 +418,20 @@ impl Compiler {
         // 发布序：先 fast（自递归/他人调我）后 packed（interp 才可能进入编译码）
         jit.slots_fast[func as usize].store(fast, Ordering::Release);
         jit.slots[func as usize].store(packed, Ordering::Release);
+    }
+
+    /// strict 验证模式（MIRVM_JIT_SYNC，audit F-05）：可准入函数编译失败 =
+    /// 响亮记 FAIL 哨兵（SYNC 等待方据此 abort）。非 strict 模式绝不调用
+    /// 本路径——静默维持解释纪律不变。
+    fn strict_fail(&self, func: u32) {
+        let jit = &self.shared.jit;
+        if jit.sync {
+            eprintln!(
+                "mirvm-jit-strict: f{func}（{}）可准入但编译失败",
+                self.shared.module.funcs[func as usize].name
+            );
+            jit.slots[func as usize].store(FAIL_SENTINEL, Ordering::Release);
+        }
     }
 
     /// c2i 蹦床：fast 签名，打包实参进栈上数组，调 mirvm_c2i 回解释器。
@@ -456,7 +486,7 @@ impl Compiler {
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
             if std::env::var_os("MIRVM_JIT_DEBUG").is_some() {
-                eprintln!("mirvm-jit-debug: define_function 失败: {e}");
+                eprintln!("mirvm-jit-debug: define_function 失败: {e:#?}");
             }
             return None;
         }
@@ -541,7 +571,10 @@ impl Compiler {
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
             if std::env::var_os("MIRVM_JIT_DEBUG").is_some() {
-                eprintln!("mirvm-jit-debug: define_function 失败: {e}");
+                eprintln!("mirvm-jit-debug: define_function 失败: {e:#?}");
+            }
+            if std::env::var_os("MIRVM_JIT_DEBUG_DUMP").is_some() {
+                eprintln!("mirvm-jit-debug: 失败函数 CLIF 转储 f{func}:\n{}", cctx.func.display());
             }
             return None;
         }
@@ -615,7 +648,7 @@ impl Compiler {
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
             if std::env::var_os("MIRVM_JIT_DEBUG").is_some() {
-                eprintln!("mirvm-jit-debug: define_function 失败: {e}");
+                eprintln!("mirvm-jit-debug: define_function 失败: {e:#?}");
             }
             return None;
         }

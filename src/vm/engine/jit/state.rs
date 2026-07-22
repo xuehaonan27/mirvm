@@ -10,6 +10,11 @@
 
 use std::sync::atomic::{AtomicU32, AtomicU64};
 
+/// strict 失败哨兵（MIRVM_JIT_SYNC 验证模式）：可准入函数编译失败时
+/// worker 写入 slots——SYNC 等待方据此响亮 abort（区别于 0 = 未编译/
+/// 维持解释的正常值域；非 strict 模式绝不写入）。
+pub const FAIL_SENTINEL: u64 = u64::MAX;
+
 pub struct JitState {
     /// PLT 槽（interp i2c 面）：FuncId → packed 入口机器地址（0 = 未编译，走解释）。
     pub slots: Vec<AtomicU64>,
@@ -22,6 +27,10 @@ pub struct JitState {
     pub enabled: bool,
     /// 过阈值投递编译队列（Q3 裁定 1000）
     pub threshold: u32,
+    /// `MIRVM_JIT_SYNC=1` 验证模式（audit F-05）：投递后等待发布/失败哨兵
+    /// ——threshold=1 的语义从「首调请求编译」升为「首调同步编译发布」，
+    /// 可准入函数的编译失败从静默留解释升为响亮 abort（gate 显形）
+    pub sync: bool,
     /// 编译请求通道（M5.3b：jit_compile::start 装填；cranelift feature 关 = 恒 None）
     pub queue: std::sync::Mutex<Option<std::sync::mpsc::Sender<u32>>>,
 }
@@ -43,6 +52,7 @@ impl JitState {
             counters: (0..fn_count).map(|_| AtomicU32::new(0)).collect(),
             enabled,
             threshold,
+            sync: std::env::var_os("MIRVM_JIT_SYNC").is_some(),
             queue: std::sync::Mutex::new(None),
         }
     }

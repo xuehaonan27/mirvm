@@ -746,7 +746,18 @@ pub(crate) fn exec_builtin(
                      仅 guest 单线程时放行（D8f/D8l）",
                 );
             }
-            crate::os::process::fork() as u64
+            let pid = crate::os::process::fork();
+            if pid == 0 {
+                // 子进程：编译线程不随 fork 存活。SYNC 验证模式
+                //（MIRVM_JIT_SYNC）的发布等待依赖活的编译服务——重启
+                //（继承的已发布码页/槽表/eh_frames 仍有效；队列与 worker
+                // 换新。非 sync 子进程维持解释兜底语义不变）
+                #[cfg(feature = "cranelift")]
+                if unsafe { &*(*ctx).shared }.jit.sync {
+                    crate::vm::engine::jit::start(unsafe { &*(*ctx).shared });
+                }
+            }
+            pid as u64
         }
         // atexit 家族（D8g）：登记 guest 回调，返回 0（成功）。
         // __cxa_atexit(fn, arg, dso)：fn 收 arg；on_exit(fn, arg)：fn 收

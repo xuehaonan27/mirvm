@@ -414,14 +414,29 @@ enum Exit {
 pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
     let jit = unsafe { &(*(*ctx).shared).jit };
     if jit.enabled {
-        let entry = jit.slots[func as usize].load(std::sync::atomic::Ordering::Acquire);
-        if entry != 0 {
+        let call_compiled = |entry: u64| -> (u64, u64) {
             // i2c：packed 入口（M5.3b；发布序 fast→packed，Acquire 已见全部前置写）
             type Packed = extern "C-unwind" fn(*const u64, *mut u64);
             let f: Packed = unsafe { std::mem::transmute(entry as usize) };
             let mut ret = [0u64; 2];
             f(args.as_ptr(), ret.as_mut_ptr());
-            return (ret[0], ret[1]);
+            (ret[0], ret[1])
+        };
+        // strict 失败哨兵（MIRVM_JIT_SYNC）：可准入编译失败在任何后续调用点
+        // 都响亮 abort——哨兵只在 sync 模式由 worker 写入（非 sync 永不出现）
+        let fail_abort = |ctx: *mut Ctx| -> ! {
+            let shared = unsafe { &*(*ctx).shared };
+            engine_abort(&format!(
+                "JIT strict：f{func}（{}）可准入但编译失败",
+                shared.module.funcs[func as usize].name
+            ))
+        };
+        let mut entry = jit.slots[func as usize].load(std::sync::atomic::Ordering::Acquire);
+        if entry == crate::vm::engine::jit::FAIL_SENTINEL && jit.sync {
+            fail_abort(ctx);
+        }
+        if entry != 0 && entry != crate::vm::engine::jit::FAIL_SENTINEL {
+            return call_compiled(entry);
         }
         let prev = jit.counters[func as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // 恰好跨阈值的那一次投递（exactly-once；后续计数继续增长但不重复投递）
@@ -429,6 +444,26 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
             && let Some(q) = jit.queue.lock().unwrap().as_ref()
         {
             let _ = q.send(func);
+        }
+        // SYNC 验证模式（audit F-05）：已投递（本次或更早）→ 等待发布/
+        // 失败哨兵。threshold=1 的语义由此从「首调请求编译」升为「首调
+        // 同步编译发布」——逢调即编的差分从此证明编译码真被执行
+        if jit.sync && prev + 1 >= jit.threshold {
+            let mut spins = 0u32;
+            loop {
+                entry = jit.slots[func as usize].load(std::sync::atomic::Ordering::Acquire);
+                if entry == crate::vm::engine::jit::FAIL_SENTINEL {
+                    fail_abort(ctx);
+                }
+                if entry != 0 {
+                    return call_compiled(entry);
+                }
+                spins += 1;
+                if spins >= 1 << 28 {
+                    engine_abort("JIT strict 发布超时（编译线程死亡或队列断裂）");
+                }
+                std::thread::yield_now();
+            }
         }
     }
     interp_frame(ctx, func, args)

@@ -522,7 +522,7 @@ impl Translator<'_, '_> {
             for st in &blk.stmts {
                 self.stmt(st);
             }
-            self.term(func, body, &blk.term, &blocks, bi);
+            self.term(func, body, &blk.term, &blocks);
         }
     }
 
@@ -810,38 +810,20 @@ impl Translator<'_, '_> {
                         }
                     }
                     IntBinOp::Div | IntBinOp::Rem => {
-                        let y = self.i128_of(blo, bhi);
-                        let is_rem = matches!(op, IntBinOp::Rem);
-                        let zero = self.b.ins().icmp_imm(IntCC::Equal, y, 0);
-                        self.div_zero_if(zero, is_rem, true);
-                        if *signed {
-                            let neg1 = self.b.ins().icmp_imm(IntCC::Equal, y, -1);
-                            let triv_blk = self.b.create_block();
-                            let norm_blk = self.b.create_block();
-                            let join_blk = self.b.create_block();
-                            self.b.ins().brif(neg1, triv_blk, &[], norm_blk, &[]);
-                            self.b.switch_to_block(triv_blk);
-                            let tv = if is_rem {
-                                self.b.ins().iconst(types::I128, 0)
-                            } else {
-                                // wrapping_div(x, -1) = -x（MIN 回绕，ineg 同形）
-                                self.b.ins().ineg(x)
-                            };
-                            self.b.ins().jump(join_blk, &[tv.into()]);
-                            self.b.switch_to_block(norm_blk);
-                            let nv = if is_rem {
-                                self.b.ins().srem(x, y)
-                            } else {
-                                self.b.ins().sdiv(x, y)
-                            };
-                            self.b.ins().jump(join_blk, &[nv.into()]);
-                            self.b.switch_to_block(join_blk);
-                            self.b.append_block_param(join_blk, types::I128)
-                        } else if is_rem {
-                            self.b.ins().urem(x, y)
-                        } else {
-                            self.b.ins().udiv(x, y)
-                        }
+                        // cranelift ISLE 不支持 I128 除法（MIRVM_JIT_SYNC 实证：
+                        // udiv.i128 unimplemented）→ mirvm_bin128_divrem 助手
+                        //（宿主 wrapping 系 + 零除 div_zero 同文案，interp 同形）
+                        let ir_ = self.b.ins().iconst(
+                            types::I64,
+                            i64::from(matches!(op, IntBinOp::Rem)),
+                        );
+                        let s = self.b.ins().iconst(types::I64, *signed as i64);
+                        self.call_out128(
+                            "mirvm_bin128_divrem",
+                            &[ir_, s, alo, ahi, blo, bhi],
+                            dst,
+                        );
+                        return;
                     }
                 };
                 let (lo, hi) = {
@@ -1787,43 +1769,85 @@ impl Translator<'_, '_> {
             R::MathUn { op, fw, a } => {
                 use crate::vm::engine::ir::MathUnOp as M;
                 let (av, _) = self.operand(a);
-                let fa = self.as_float(av, *fw);
-                let r = match op {
-                    M::Sqrt => self.call_libm_un("sqrt", fa, *fw),
-                    M::Sin => self.call_libm_un("sin", fa, *fw),
-                    M::Cos => self.call_libm_un("cos", fa, *fw),
-                    M::Exp => self.call_libm_un("exp", fa, *fw),
-                    M::Exp2 => self.call_libm_un("exp2", fa, *fw),
-                    M::Ln => self.call_libm_un("log", fa, *fw),
-                    M::Log2 => self.call_libm_un("log2", fa, *fw),
-                    M::Log10 => self.call_libm_un("log10", fa, *fw),
-                    M::Fabs => self.call_libm_un("fabs", fa, *fw),
-                    M::Floor => self.call_libm_un("floor", fa, *fw),
-                    M::Ceil => self.call_libm_un("ceil", fa, *fw),
-                    M::Trunc => self.call_libm_un("trunc", fa, *fw),
-                    M::Round => self.call_libm_un("round", fa, *fw),
-                    // round_ties_even = C99 rint（与 interp/Rust 同源）
-                    M::RoundTiesEven => self.call_libm_un("rint", fa, *fw),
-                };
-                self.as_bits(r, *fw)
+                if matches!(fw, ir::FloatW::F16) {
+                    // f16 数学走助手（interp 宿主 f16 方法同一批；strict 模式
+                    // 实证补上的护栏——as_float(F16) 是 unreachable panic）
+                    let oi = self.b.ins().iconst(
+                        types::I64,
+                        match op {
+                            M::Sqrt => 0,
+                            M::Sin => 1,
+                            M::Cos => 2,
+                            M::Exp => 3,
+                            M::Exp2 => 4,
+                            M::Ln => 5,
+                            M::Log2 => 6,
+                            M::Log10 => 7,
+                            M::Fabs => 8,
+                            M::Floor => 9,
+                            M::Ceil => 10,
+                            M::Trunc => 11,
+                            M::Round => 12,
+                            M::RoundTiesEven => 13,
+                        },
+                    );
+                    let r = self.call_helper1("mirvm_f16_math_un", &[oi, av]);
+                    self.mask_val(r, Width::W16)
+                } else {
+                    let fa = self.as_float(av, *fw);
+                    let r = match op {
+                        M::Sqrt => self.call_libm_un("sqrt", fa, *fw),
+                        M::Sin => self.call_libm_un("sin", fa, *fw),
+                        M::Cos => self.call_libm_un("cos", fa, *fw),
+                        M::Exp => self.call_libm_un("exp", fa, *fw),
+                        M::Exp2 => self.call_libm_un("exp2", fa, *fw),
+                        M::Ln => self.call_libm_un("log", fa, *fw),
+                        M::Log2 => self.call_libm_un("log2", fa, *fw),
+                        M::Log10 => self.call_libm_un("log10", fa, *fw),
+                        M::Fabs => self.call_libm_un("fabs", fa, *fw),
+                        M::Floor => self.call_libm_un("floor", fa, *fw),
+                        M::Ceil => self.call_libm_un("ceil", fa, *fw),
+                        M::Trunc => self.call_libm_un("trunc", fa, *fw),
+                        M::Round => self.call_libm_un("round", fa, *fw),
+                        // round_ties_even = C99 rint（与 interp/Rust 同源）
+                        M::RoundTiesEven => self.call_libm_un("rint", fa, *fw),
+                    };
+                    self.as_bits(r, *fw)
+                }
             }
             R::MathBin { op, fw, a, b } => {
                 use crate::vm::engine::ir::MathBinOp as M;
                 let (av, _) = self.operand(a);
                 let (bv, _) = self.operand(b);
-                let fa = self.as_float(av, *fw);
-                let fb = self.as_float(bv, *fw);
-                let r = match op {
-                    M::Pow => self.call_libm_bin("pow", fa, fb, *fw),
-                    M::Powi => {
-                        let n32 = self.b.ins().ireduce(types::I32, bv);
-                        self.call_powi(fa, n32, *fw)
-                    }
-                    M::Copysign => self.call_libm_bin("copysign", fa, fb, *fw),
-                    M::Minnum => self.call_libm_bin("fmin", fa, fb, *fw),
-                    M::Maxnum => self.call_libm_bin("fmax", fa, fb, *fw),
-                };
-                self.as_bits(r, *fw)
+                if matches!(fw, ir::FloatW::F16) {
+                    // f16 数学二元走助手（powi 的 b 传原始 i32 位）
+                    let oi = self.b.ins().iconst(
+                        types::I64,
+                        match op {
+                            M::Pow => 0,
+                            M::Powi => 1,
+                            M::Copysign => 2,
+                            M::Minnum => 3,
+                            M::Maxnum => 4,
+                        },
+                    );
+                    let r = self.call_helper1("mirvm_f16_math_bin", &[oi, av, bv]);
+                    self.mask_val(r, Width::W16)
+                } else {
+                    let fa = self.as_float(av, *fw);
+                    let fb = self.as_float(bv, *fw);
+                    let r = match op {
+                        M::Pow => self.call_libm_bin("pow", fa, fb, *fw),
+                        M::Powi => {
+                            let n32 = self.b.ins().ireduce(types::I32, bv);
+                            self.call_powi(fa, n32, *fw)
+                        }
+                        M::Copysign => self.call_libm_bin("copysign", fa, fb, *fw),
+                        M::Minnum => self.call_libm_bin("fmin", fa, fb, *fw),
+                        M::Maxnum => self.call_libm_bin("fmax", fa, fb, *fw),
+                    };
+                    self.as_bits(r, *fw)
+                }
             }
             R::MathFma { fw, a, b, c } => {
                 // fma 单次舍入（宿主 mul_add 同源；fmuladd 允许融合/不融合两结果，
@@ -1831,11 +1855,16 @@ impl Translator<'_, '_> {
                 let (av, _) = self.operand(a);
                 let (bv, _) = self.operand(b);
                 let (cv, _) = self.operand(c);
-                let fa = self.as_float(av, *fw);
-                let fb = self.as_float(bv, *fw);
-                let fc = self.as_float(cv, *fw);
-                let r = self.b.ins().fma(fa, fb, fc);
-                self.as_bits(r, *fw)
+                if matches!(fw, ir::FloatW::F16) {
+                    let r = self.call_helper1("mirvm_f16_fma", &[av, bv, cv]);
+                    self.mask_val(r, Width::W16)
+                } else {
+                    let fa = self.as_float(av, *fw);
+                    let fb = self.as_float(bv, *fw);
+                    let fc = self.as_float(cv, *fw);
+                    let r = self.b.ins().fma(fa, fb, fc);
+                    self.as_bits(r, *fw)
+                }
             }
             // ===== M5.4b-3 f128 比较（Rvalue 侧的宽通道）=====
             R::F128Cmp { cc, a, b } => {
@@ -2087,19 +2116,25 @@ impl Translator<'_, '_> {
     /// T1-c：try_call 的异常表发射器——异常表 tag0 → pad 块（TryCallExn(0)
     /// 块参 = 异常指针落点，def exception_var 后跳 IR cleanup 块）；normal
     /// 指向新建 ok 块（调用方在其上做 ret 写回再跳 IR target）。
-    /// 返回 (异常表, ok 块)；调用方在本 IR 块位发 try_call 后 switch 到 ok 块。
+    /// 返回 (异常表, ok 块)；调用方在当前延续块发 try_call 后 switch 到 ok 块。
+    ///（try_call 必须发在进入时的**当前块**而非 blocks[bi]——同一 IR 块内
+    /// 前置 stmt 可能已把延续移进辅助块（div_zero_if/repeat_loop 等），
+    /// 回 blocks[bi] 会在 brif 后追加指令 = verifier 拒收，strict 实证）
     fn emit_cleanup(
         &mut self,
         target: ir::Bb,
         cleanup: ir::Bb,
         sig: cranelift_codegen::ir::Signature,
         blocks: &[cranelift_codegen::ir::Block],
-        bi: usize,
     ) -> (cranelift_codegen::ir::ExceptionTable, cranelift_codegen::ir::Block) {
         use cranelift_codegen::ir::{
             BlockArg, BlockCall, ExceptionTableData, ExceptionTableItem, ExceptionTag,
         };
         self.has_try_call = true;
+        let cur = self
+            .b
+            .current_block()
+            .expect("emit_cleanup 调用点必有当前块");
         let pad = self.b.create_block();
         self.b.append_block_param(pad, types::I64);
         let ok = self.b.create_block();
@@ -2123,7 +2158,7 @@ impl Translator<'_, '_> {
         let ev = self.exception_var();
         self.b.def_var(ev, exn);
         self.b.ins().jump(blocks[cleanup as usize], &[]);
-        self.b.switch_to_block(blocks[bi]);
+        self.b.switch_to_block(cur);
         let _ = target;
         (et, ok)
     }
@@ -2151,7 +2186,6 @@ impl Translator<'_, '_> {
         body: &ir::FuncBody,
         t: &Terminator,
         blocks: &[cranelift_codegen::ir::Block],
-        bi: usize,
     ) {
         match t {
             Terminator::Goto(bb) => {
@@ -2243,7 +2277,7 @@ impl Translator<'_, '_> {
                         for _ in 0..4 {
                             sig0.params.push(AbiParam::new(types::I64));
                         }
-                        let (et, ok) = self.emit_cleanup(*target, *bb, sig0, blocks, bi);
+                        let (et, ok) = self.emit_cleanup(*target, *bb, sig0, blocks);
                         let fref = self.module.declare_func_in_func(self.c2i, self.b.func);
                         let fv = self.b.ins().iconst(types::I64, *callee as i64);
                         let ap = self.b.ins().stack_addr(types::I64, args_ss, 0);
@@ -2439,7 +2473,7 @@ impl Translator<'_, '_> {
                     for _ in 0..8 {
                         sig0.params.push(AbiParam::new(types::I64));
                     }
-                    let (et, ok) = self.emit_cleanup(*target, *bb, sig0, blocks, bi);
+                    let (et, ok) = self.emit_cleanup(*target, *bb, sig0, blocks);
                     let z = self.b.ins().iconst(types::I64, 0);
                     self.b
                         .ins()
@@ -2586,7 +2620,7 @@ impl Translator<'_, '_> {
                         sig0.params.push(AbiParam::new(types::I64));
                     }
                     sig0.returns.push(AbiParam::new(types::I64));
-                    let (et, ok) = self.emit_cleanup(*target, *bb, sig0, blocks, bi);
+                    let (et, ok) = self.emit_cleanup(*target, *bb, sig0, blocks);
                     let z = self.b.ins().iconst(types::I64, 0);
                     let call =
                         self.b
@@ -2664,7 +2698,7 @@ impl Translator<'_, '_> {
                     for _ in 0..7 {
                         sig0.params.push(AbiParam::new(types::I64));
                     }
-                    let (et, ok) = self.emit_cleanup(*target, *bb, sig0, blocks, bi);
+                    let (et, ok) = self.emit_cleanup(*target, *bb, sig0, blocks);
                     let z = self.b.ins().iconst(types::I64, 0);
                     self.b
                         .ins()
