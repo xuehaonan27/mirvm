@@ -1,7 +1,8 @@
 # 并发架构 RFC —— M4 生而并发引擎（历史 RFC）
 
-> 文档状态：**M4 的历史架构 RFC**。tcx-free 执行相、状态三分、1:1 真线程、宿主原子和 TSan
-> gate 已落地；mode B、TLAB 细节、checked 模式及独立 `os::` 层仍含未实现内容。实际状态见
+> 文档状态：**M4 的历史架构 RFC**。tcx-free 执行相、状态三分、1:1 真线程、宿主原子、TSan
+> gate 与独立 `os::` 层（2026-07-18/19 E21 闭合）已落地；mode B、hand-rolled TLAB
+> （v1 = mimalloc crate 后端，E14）与 checked 模式（E23）仍未实现。实际状态见
 > [current-status.md](../current-status.md)，不要把本文所有未来形态当成当前目录结构。
 
 > **原始状态（2026-07-07）：草稿，待评审。** 依据：C1（生而并发，VM tier=N 真 OS 线程无 GIL；tier-0=GIL 过渡）、
@@ -10,7 +11,7 @@
 > 目标：定清 VM tier 如何真并行、哪些状态怎么同步、C8 三招的具体形态、spike 验收（过 TSan）。
 > 与 frame-abi-bytecode.md 配套（帧/字节码那半），本文管"并发那半"，两者需共同成立（C11）。
 >
-> **Spike 4 验收通过（2026-07-07，docs/spike4-concurrency-tsan.md）**：8 真宿主线程并行混合
+> **Spike 4 验收通过（2026-07-07，history/spike4-concurrency-tsan.md）**：8 真宿主线程并行混合
 > 执行（i2c/c2i 并发）+ 跨 tier 同址原子 + 阻塞 syscall 活性（corpus §2.1 场景收束）+ 并发混合栈
 > unwind，**TSan 全量插桩零竞争警告**。状态三分以 Shared（发布后只读）/Ctx（每线程私有）落地，
 > 引擎执行路径零锁。新增引擎义务：**解释器执行 guest 原子必须发真宿主原子指令**（tier-0 的普通

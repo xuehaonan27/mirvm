@@ -1,8 +1,9 @@
 # 帧布局 · 调用约定 · 字节码格式 —— M4 设计草图（模型 A）
 
-> **状态：M4 的历史设计基线，部分已实现、部分仍是未来设计。** Model A tree-walking、slaved
-> ByteRegion、冻结元数据、真线程和 M4 unwind 已落地；方法级 Cranelift、compiled frame、
-> i2c/c2i 产品适配器、alloca 与 `.mirvm` 分发仍未实现。实际状态见
+> **状态：M4 的历史设计基线，主体已实现；alloca 与 `.mirvm` 分发仍是未来设计。**
+> Model A tree-walking、slaved ByteRegion、冻结元数据、真线程和 M4 unwind 已落地；
+> 方法级 Cranelift 与 i2c/c2i 产品适配器已由 M5.3–M5.5 兑现（compiled frame 的
+> `alloca` 迁移与 `.mirvm` mode B 分发未立项，open-issues E12/D9）。实际状态见
 > [current-status.md](../current-status.md)，A/B 与局部存储两轴的演变见
 > [decision-history.md](../decision-history.md)。下文保留原始方案，不能把未来段落当成现状。
 
@@ -250,7 +251,7 @@ fn interp_frame(body: &BytecodeBody, args: Args, region: &mut OperandRegion) -> 
 混合栈上 guest 异常的传播 + Drop 顺序 + catch_unwind"。**这是 M4 前置 spike 的头号项。** 候选 B（自研
 栈行走）作为兜底保留。
 
-**Spike 3 验证通过（2026-07-07，docs/spike3-mixed-stack-unwind.md）**：宿主 panic 机制（= 同一平台
+**Spike 3 验证通过（2026-07-07，history/spike3-mixed-stack-unwind.md）**：宿主 panic 机制（= 同一平台
 unwinder + Rust personality，候选 A 的具象）在混合栈上传播 + Drop 顺序（内层先）+ catch_unwind +
 跨 FFI abort 全部与 native 逐位一致，含 landing pad 内再入混合执行（cleanup 链调编译 helper）。
 **候选 A 坐实，候选 B 退役为纸面兜底。** 帧 ABI unwind 维度封版雏形：解释帧 = CleanupGuard + 动态
@@ -258,7 +259,7 @@ unwind_edge（动态 LSDA）+ region 恢复；编译帧 = 静态 LSDA + landing 
 天然逐帧内层先，VM 侧零协调。残余：真 Cranelift LSDA 发射留 M4 复核（与 vmctx 内部约定同一检查点）；
 JIT 调用约定必须 unwind-capable（plain "C" = abort shim，恰给跨 FFI abort 兜底）。
 
-**Spike 5 收窄残余（2026-07-07，docs/spike5-cranelift-adapters.md）**：**CFI 传播已用真 Cranelift
+**Spike 5 收窄残余（2026-07-07，history/spike5-cranelift-adapters.md）**：**CFI 传播已用真 Cranelift
 验证**——`create_unwind_info` → gimli .eh_frame → `__register_frame` 自注册后，guest panic 正确
 穿过真 JIT 帧（裸跑如预期 SIGABRT：cranelift-jit 不注册系统 eh_frame；其 wasmtime-unwinder 异常
 路线与宿主 unwinder 不互操作，**正式不采**）。M4 仅剩 **landing pad/LSDA**（JIT 帧内跑 drop glue

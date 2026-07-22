@@ -1,8 +1,10 @@
 # mirvm 当前开发状态
 
-> 状态日期：2026-07-18（事实截至 2026-07-17 HEAD `2f9efef`；本文于 2026-07-18 文档大
-> 精简时刷新索引）。本文是当前状态的唯一汇总入口；若与早期计划、README 或交接文档
-> 冲突，以当前代码、可复现测试结果和本文为准。文档权威规则见 [README.md](README.md)。
+> 状态日期：2026-07-22（事实截至 HEAD `51cff03`+波3/波4 收尾；2026-07-22 外部审核
+> （[history/development-status-audit-2026-07-22.md](history/development-status-audit-2026-07-22.md)）
+> 驱动的稳定化战役已四波落地，decision-history §7.21）。本文是当前状态的唯一汇总入口；
+> 若与早期计划、README 或交接文档冲突，以当前代码、可复现测试结果和本文为准。文档权威
+> 规则见 [README.md](README.md)。
 > **未解决债务/开放问题/拒绝边界的唯一登记入口 = [open-issues.md](open-issues.md)**，
 > 本文 §4 只保留最有代表性的边界快照。
 
@@ -41,13 +43,15 @@
 | 缓存重审与根迁 | **完成（2026-07-18）** | 缓存胀大实证解剖（主项 = 每 frontmatter 程序两套 cargo target，shim 一套 + B 维 native 一套；次项 = build_id 换代无 GC）后裁定（decision-history §7.14）：根迁 `$HOME/.mirvm`（`MIRVM_HOME` 改址，不再读 XDG）；必要性审计结论 = 全组件必要、缺管理面——补 `mirvm cache status|purge`（默认清陈代，build_id 首字段 varint peek 判代，条目扩展名过滤免咬构建副产）。tests 三脚本跟迁。cargo test 73/73，gate5 167/0/0 |
 | 统一依赖存储近期片（D14） | **完成（2026-07-18）** | 用户裁定 cache 机器级统一（decision-history §7.15）：mirvm 构建 `--target-dir` 由 per-project 改 `$MIRVM_HOME/target/mirvm` 共享（cargo fingerprint 即编译键内容寻址；`MIRVM_TARGET_DIR` 改址）；产物定位零改动（runner 协议供路径）；`[[bin]]` 名带哈希短缀消 `debug/<binname>` 碰撞；B 维经物化 `.cargo/config.toml` 进 `target/native`。附带收益 = deps image 跨脚本/项目共享。实测 ethers 二跑 0.66s、两树并集 525M、script dir 缩至 KB 级；`purge --target` 配套。终态原生 store 登记 [open-issues.md D14](open-issues.md) 与 mode B 合并评审。cargo test 73/73，gate5 167/0/0 |
 | **结构重构战役（E21 闭合）** | **完成（2026-07-18/19，六片全绿）** | 对标 OpenJDK 分层（decision-history §7.16，用户裁定纯搬移零行为变化）：`src/os/`（mod 契约 + linux/{mem,thread,signal,dll,process}）与 `src/arch/`（x86_64/{intrinsics,asmstub}）双 leaf 建成，**非 os 域 `libc::` 与非 arch 域 x86 触点 grep 机械清零**；`vm/engine/addrlayout.rs` 固定基址三方共享。巨型文件治理：func.rs→lower/func/ 八件、interp.rs→engine/interp/ 七件、jit_compile.rs→engine/jit/ 七件（并 J1 基座）、lower/mod.rs→linker 五件 + builtins/ffi_sig/purity/rebase 四件，lower/mod ⇄ native_archive 文件级环解。25 个拆分文件补 `//!` 契约头；build 零警告、cargo test 74/74、diff 双态 38/38、diff_cargo 5/5、tsan 过、gate5 167/0/0。记档接受面：lower/asm.rs 与 llvm.x86 名表 rustc 耦合留 lower 域；臂级再拆不做 |
-| M5.5 | **未实现** | vmctx 终裁计量与 gate6 收口（[designs/m5-design.md](designs/m5-design.md) 原案不动）。S3′b 已定（A2 纯化聚合）；S3′c 完整形态按实需立项（open-issues D6） |
+| M5.5 | **完成（2026-07-21）** | vmctx 终裁计量 + gate6 收口（decision-history §7.20）：T 骨架生产定稿 + 复测双触发器（E6/多 Engine）；`tests/m5_gate6.sh` 落位，CI 接线（2026-07-22）。M5 战役（M5.0–M5.5）全收 |
 
 产品执行引擎 = M4 解释器 + 方法级 JIT（cranelift 为默认 feature；JIT 默认开启，
 `--jit off`/`MIRVM_JIT=off` 回退纯解释；tsan harness 不开 cranelift）。M5.2 把解释器
-语义面补全（gate5 从 40 PASS/2 XFAIL 升到 **46 PASS / 0 XFAIL / 0 FAIL**），为 JIT 期
-交付语义面干净的基线；M5.4a/b 把 JIT 翻译器推进到标量/内存/128 位/原子全覆盖，
-解释器继续作为差分 oracle 与未准入构造（ABI 泛化/cleanup 边/SIMD）的唯一语义源。
+语义面补全，为 JIT 期交付语义面干净的基线；M5.4a–d 把 JIT 翻译器推进到
+**stmt/rvalue/terminator 三表穷尽**（ABI 全形态、unwind 产品化双 CIE 全覆 LSDA、
+SIMD 族经 interp 共享本体助手），解释器继续作为差分 oracle 与回退语义源；
+2026-07-22 稳定化战役（§7.21）补齐验证强度——`MIRVM_JIT_SYNC` 同步发布 +
+可准入编译失败响亮 RED，threshold=1 差分自此证明编译码真被执行。
 
 ## 2. 当前实现路径
 
@@ -71,11 +75,23 @@
       inline asm：调用已物化的 fn(*mut u8) stub
 ```
 
-代码热点集中在 `src/lower/func.rs` 与 `src/vm/engine/interp.rs`。实现目前实质上是
-Linux/ELF/x86_64 优先：依赖 pthread、dlopen、GNU 链接行为和 x86 asm wrapper。
+代码热点集中在 `src/lower/func/`（调用/调用约定降低）、`src/vm/engine/interp/`
+（解释器主循环）与 `src/vm/engine/jit/translate.rs`（JIT 翻译器，E34 记治理）。
+实现目前实质上是 Linux/ELF/x86_64 优先：依赖 pthread、dlopen、GNU 链接行为和
+x86 asm wrapper。
 
 ## 3. 已验证边界
 
+- **当前验证矩阵（2026-07-22 实跑）**：`cargo fmt --all -- --check` 绿、
+  Clippy `-D warnings` 零诊断、`cargo test --locked` **76/76**、
+  `tests/diff.sh` **45/45**（默认与阈值=1 双态）、**+MIRVM_JIT_SYNC 同步发布
+  45/45**（可准入函数首调同步编译并真跑机器码，编译失败 RED——audit F-05 起
+  threshold=1 的证明力升级）、`tests/diff_cargo.sh` 5/5、
+  `tests/gate_truth_regression.sh` 12/12、`tests/m4_gate5.sh` **167/0/0/0**
+  （fib(32) JIT 54ms ≤80ms）、`tests/m5_gate6.sh` 4/4、
+  `tests/corpus.sh` 全量 **129/0**、TSan 零警告。
+  CI（`.github/workflows/ci.yml`）同构命令全绿（GitHub 侧操作暂停，本地同构为准）。
+  **以下为各阶段 dated 历史记录**（保留备查，非本轮复跑）：
 - debug/release 构建可通过；执行必须优先使用 release 版本。
 - M4 的纯函数、值/内存、unwind、FFI、真线程和 TSan gate 已有端到端覆盖。
 - `tests/diff.sh` 对当前 demo 做 native 差分，M5.0 的 asm probe 已进入回归。
@@ -158,10 +174,10 @@ Linux/ELF/x86_64 优先：依赖 pthread、dlopen、GNU 链接行为和 x86 asm 
 | direct dyn 尾字段 | sized prefix 后的 direct `dyn` 尾不能一律使用 lower 期静态 offset；当前从 vtable 读取运行期 alignment，并考虑 `repr(packed)` 上限后向上取整。slice/str 仍走静态公式，其他嵌套 DST 继续显式拒绝 |
 | 128-bit `SwitchInt` | targets 与 discriminator 现都保留完整 128 位；i128/u128 discriminator 由 `SwitchDiscr::Wide` 从 place 读取，不再截成 u64。这不等于所有 128-bit ABI 形态都已标量化 |
 | `track_caller` fn pointer | `ReifyFnPointer` 使用 rustc `resolve_for_fn_ptr`；需要 caller location 时由 Reify shim 以普通 fn-pointer ABI 接参并补 Location。ClosureFnPointer 等其他 adjustment 尚不能由此外推 |
-| M5.1 收口 | 六个 release native-differential tracer 脚本通过，x86_vectors 内 pshufb/SHA 分别记账；numbigint、xgetbv、sha2、blake3、ecosystem 全部转绿。M5.1 旧前沿 expected-red 已删除，diff_cargo 3/3；signal/backtrace 仍是独立 XFAIL |
+| M5.1 收口 | 六个 release native-differential tracer 脚本通过，x86_vectors 内 pshufb/SHA 分别记账；numbigint、xgetbv、sha2、blake3、ecosystem 全部转绿。M5.1 旧前沿 expected-red 已删除，diff_cargo 3/3；signal/backtrace 两个历史 XFAIL 已由 M5.2 转绿（见本表前两行） |
 | x86 向量 helper | pshufb128/256 与 SHA256 msg1/msg2/rnds2 已通过 tcx-free stdarch target-feature helpers 接入；m51_x86_vectors native 差分与 c_sha2 两个标准 SHA256 输出通过 |
 | guest 静态归档 | Linux/ELF 受约束路径已接产品：收集 rustc `Static NativeLib`、内容寻址 `.a→.so`，作为 required library 在任何 dlsym 前以 `RTLD_NOW` 加载；失败保留 `dlerror` 并立即终止。constructor/destructor 已分治（§7.8：`.init_array/.fini_array/ctors/dtors` 段经 DT_INIT 与 native 同构放行；裸 `.init/.fini` 仍拒）；RTLD_DEFAULT 同名碰撞已改归档句柄优先（`fb0b204`，native 链接期绑定语义）。其余拒绝面仍在：非 PIC、thin、跨 archive 依赖/顺序/重名导出、export-symbols——多 archive link plan 未立项（[open-issues.md R6](open-issues.md)），不是通用链接器 |
-| JIT | **生产已落地**：方法级 Cranelift JIT = M5.3 骨架 + M5.4a–d（标量/内存/128 位/原子/ABI 全形态/五调用助手/unwind 产品化双 CIE 全覆 LSDA/三表准入穷尽），默认开启（`--jit off`/`MIRVM_JIT=off` 回退纯解释）。未实现：OSR/deopt/生产 tiering 终裁（E2）、JIT 码常驻（E5）、优化项池（E7：SIMD CLIF 向量内联/PLT try_call 快路/内联缓存等）、vmctx 终裁计量（T3） |
+| JIT | **生产已落地**：方法级 Cranelift JIT = M5.3 骨架 + M5.4a–d（标量/内存/128 位/原子/ABI 全形态/五调用助手/unwind 产品化双 CIE 全覆 LSDA/三表准入穷尽）+ M5.5 vmctx 终裁（T 骨架定稿），默认开启（`--jit off`/`MIRVM_JIT=off` 回退纯解释）。验证强度（2026-07-22 起）：`MIRVM_JIT_SYNC` 同步发布 + 可准入失败 RED。未实现：OSR/deopt/生产 tiering（E2）、JIT 码常驻（E5）、优化项池（E7：SIMD CLIF 向量内联/PLT try_call 快路/内联缓存等） |
 | 生命周期/嵌入 | `Shared`、thunk、asm handle、部分 TLS 存储按进程期保存；错误路径可退出进程；runner 诊断 filter 依赖进程全局 `TRACK_DIAGNOSTIC`，目前只在单 compiler CLI 模型下安全。daemon/嵌入/并发 compiler 需先加 guard 或替代接口；尚非稳定多 Engine API |
 | 分发与产品面 | `.mirvm` mode B、daemon、REPL、checked 模式、正式沙箱均未实现；分发轨方向已批未立项（D9，2026-07-14，[distribution-design.md](designs/distribution-design.md)）：先 L2 engine-IR 缓存，mode B=缓存可移植化（M5.3 后），发行先 miri 式 |
 | 平台 | 当前仅应宣称 Linux/ELF/x86_64 开发基线 |

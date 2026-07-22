@@ -38,7 +38,7 @@ OPTIONS:
     --vm-call <SPEC>  直接调导出函数（gate/调试入口），如 'fib(25)'；缺省跑 main 启动链
     --vm-stats        打印 Trap 债务统计（每期开工前的调研仪器）后退出
     --stack-size <N>  guest 主执行栈虚拟保留（默认 1g；接受 k/m/g 后缀，JVM -Xss 同位）
-    --jit <on|off>    方法级 JIT 分层（默认 on；M5.3a 期 = 计数基座，尚无编译）
+    --jit <on|off>    方法级 JIT（M5.3–M5.5 全收，默认 on；off = 纯解释对拍口径）
 
 ENV:
     MIRVM_HOME        本地仓库根（默认 $HOME/.mirvm；sysroot/scripts/target/各缓存族所在）
@@ -47,12 +47,15 @@ ENV:
     MIRVM_STACK_SIZE  等价于 --stack-size（cargo 项目形态经环境传给 runner）
     MIRVM_JIT         等价于 --jit（off/0 = 纯解释对拍口径）
     MIRVM_JIT_THRESHOLD 编译触发阈值（默认 1000；诊断用）
+    MIRVM_JIT_SYNC    =1 时 JIT 验证模式：投递后等待发布/失败，可准入编译失败响亮
+                      终止（gate 用；证明 threshold=1 差分真跑机器码）
+    MIRVM_JIT_STATS   =1 时进程退出经 atexit 打 JIT 助手频度统计（诊断用）
     MIRVM_TIMING      =1 时向 stderr 输出相位账本（frontend/lower/engine/total）
     MIRVM_NO_IR_CACHE =1 时旁路 L2 engine-IR 缓存（读写全禁；诊断/对拍用）
     MIRVM_NO_BASE_IMAGE =1 时旁路 std 预降低底座（全量冷降低；诊断/对拍用）
 
 DEV:
-    mirvm spike1..5   跑已冻结的 M4 前置 spike（回归自检；见 docs/spike*.md）
+    mirvm spike1..5   跑已冻结的 M4 前置 spike（回归自检；见 docs/history/spike*.md）
 ";
 
 pub fn main() -> ExitCode {

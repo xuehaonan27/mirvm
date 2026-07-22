@@ -65,11 +65,17 @@
 | `concurrency-arch.md` | 并发架构原则（状态三分、真线程）；checked 模式设计储备 |
 | `frame-stack-models.md` | 帧模型 A/B 论证（选 A 的唯一完整证据链） |
 | `frame-abi-bytecode.md` | M4 帧/ABI 设计基线；alloca 迁移承诺（open-issues E12）在此 |
-| `vmctx-passing.md` | vmctx P/T/R 三案论证；R 复测要回来读 |
+| `vmctx-passing.md` | vmctx P/T/R 三案论证 + §7 终裁（T 定稿 + 双触发器）；R 复测要回来读 |
 | `async-stackless.md` | async 无栈状态机调研（C11 证据） |
 | `m5-design.md` | M5 总案（M5.0–M5.5 全完成）：D5 T/R 分层终裁、§7 gate6 判据——M5.5 原案之本 |
 | `m5.4-design.md` | M5.4a–d 施工蓝图（ABI 泛化 + LSDA 版式参数 + SIMD 覆盖矩阵；片 a–d 全落地） |
+| `c1-ffi-agg-design.md` | C1 FFI 按值聚合封送设计（FfiAgg 冻结 + libffi struct 编组；R17 边界之母） |
+| `c2-rlib-symbols-design.md` | C2 native-archive「符号在 rlib」救援链设计（elfsym 枚举 + P1 跳板重链） |
 | `distribution-design.md` | 轨 C 分发 D9a–D9f 全文；未立项 ④⑤ 的唯一设计规范 |
+
+> designs/ 与 history/ 的分界不是「未完成/已完成」：designs/ 保存**仍具规范性或
+> 重开时必须遵守的契约**（已完成战役的现行规范也在此），history/ 保存非规范性的
+> 施工证据、被替代方案与当时记录。
 
 ### docs/history/（只读归档）
 
@@ -82,8 +88,10 @@ agents/onboarding.md。
 
 ### docs/parked/
 
-`s3b-chain-wip.patch`：chain 成像方案的已探索代码存档（跨项目硬需求时的备选 B，
-重开条件见 history/s3b-design-fork.md §6）。
+| 文档 | 定位 |
+|---|---|
+| `s3b-chain-wip.patch` | chain 成像方案的已探索代码存档（跨项目硬需求时的备选 B，重开条件见 history/s3b-design-fork.md §6） |
+| `c3-resume-spike.md` | C3 inline-asm resume/longjmp 转移形的冻结 spike 证据（E32 hazard 的实锤现场） |
 
 ## 4. 维护纪律
 
@@ -95,3 +103,9 @@ agents/onboarding.md。
 - 绿色必须核可观察输出或不变式；预期红必须锁定失败原因。
 - 路线图不写入现状段；当前代码没有的目录、CLI 模式和 API 必须标「计划」。
 - history/ 内文档只读，不再更新（勘误除外，且保持「当时记录」原样）。
+- **阶段关账清单**（D-08，2026-07-22 起——只核关键词的复扫曾被外审证伪）：
+  关闭任何阶段前，沿权威链交叉核对——① README（首段/快照/快速开始）；
+  ② CLI `--help`；③ current-status 的头注/阶段表/边界表/开发顺序四块互洽；
+  ④ open-issues 只含未解决项（闭合行已移出）；⑤ decision-history 当前摘要
+  （§6/§8 等汇总位）与新条目不冲突；⑥ 被引设计档头部状态行；⑦ 纯文本
+  路径锚（file:line 与 docs/ 相对路径）现场重验。

@@ -63,7 +63,7 @@ RAM 只要求**可观测行为**一致，其余全自由。这是贯穿一切的
 |---|---|---|
 | 类加载 + 字节码验证 | **rustc 前端**（解析/宏/typeck/borrowck/MIR）+ **惰性单态化** | RAM 的"加载器/验证器"。这是十年工程，我们**复用**不重建。加载 = 取得某个 instance 的 MIR |
 | 字节码 | **MIR → 自研 typed bytecode**（M4 已落地） | 加载相冻结 RAM 计算所需信息；执行相不再访问 tcx |
-| 托管堆（GC） | **Rust Heap**（托管，arena/TLAB，**不搬迁**，Drop 而非 GC） | RAM 存储的 realize，见 §4 |
+| 托管堆（GC） | **Rust Heap**（托管，**不搬迁**，Drop 而非 GC；现实现 = mimalloc crate 后端，hand-rolled arena/TLAB 后置 E14） | RAM 存储的 realize，见 §4 |
 | 执行引擎（解释→C1→C2） | **typed-bytecode 解释器 + 方法级 Cranelift JIT（均已落地，JIT 默认开启）** | RAM 计算的执行，见 §6 |
 | 线程（1:1 OS） | **1:1 OS 线程** | M4 已落地，解释态回调通过 thunk + TLS attach 进入 VM，见 §5 |
 | JNI | **FFI**，但软边界（真实地址、零编组） | RAM 的**边界**，见 §7 |
@@ -83,7 +83,7 @@ RAM 只要求**可观测行为**一致，其余全自由。这是贯穿一切的
 
 1. **LLM/Agent 脚本执行**：单文件快启动；沙箱与资源限制；rustc 自带的结构化 JSON 诊断（免费）。语法对齐 cargo script frontmatter（RFC 3424）。
 2. **项目开发内循环加速**：`mirvm run .` 跑完整 cargo 项目，改一行亚秒重跑（省 codegen+链接；依赖 MIR 一次构建全局缓存）。
-3. **REPL/Notebook**（后置 M6）：VM 拥有持久堆，状态持久化天然成立，跨 cell 借用不再是问题。
+3. **REPL/Notebook**（后置，未立项——原「M6」编号已被轨 C 冷启动占用，见 docs/open-issues.md D11）：VM 拥有持久堆，状态持久化天然成立，跨 cell 借用不再是问题。
 4. **嵌入式引擎**（后置）：engine 是 library、CLI 是薄壳，这条路从第一天就不被堵死。
 
 **执行引擎现状 = 解释器 + 方法级 JIT 双轨**（M5 全收：M5.3 骨架 + M5.4a–d 翻译器
@@ -100,7 +100,7 @@ RAM 存储在 mirvm 里 realize 为**三个隔离的部分**（管理与污染�
 | 部分 | 是什么 | 归属 | 关键性质 |
 |---|---|---|---|
 | **VM 元数据** | provenance 表、MIR/字节码缓存、线程表、layout 表 | **不属于 RAM**，实现私有 | 必须与下面隔离——guest UB（RAM 之外）绝不能污染实现自身 |
-| **Rust Heap** | Rust 分配（`__rust_alloc`：Box/Vec/被解释代码的 Rust 分配） | RAM 存储 | VM 向 libc 要的大块连续内存，自管（arena/TLAB，快路径无锁），**托管但不搬迁**（地址钉死，回收靠 Drop 非 GC） |
+| **Rust Heap** | Rust 分配（`__rust_alloc`：Box/Vec/被解释代码的 Rust 分配） | RAM 存储 | 大块连续内存，**托管但不搬迁**（地址钉死，回收靠 Drop 非 GC；现实现 = mimalloc crate 后端，arena/TLAB 自管形态后置 E14） |
 | **Native Heap** | native 分配（`libc::malloc` 直调、C 库内部分配） | RAM 之外 | 直通真 libc malloc；VM 不追踪其元数据 |
 
 ### 一个地址空间，两种代码都能碰两个堆
@@ -326,7 +326,7 @@ src/os/
 ### 工程决策
 
 - **nightly 锁定 + 定期 bump**：rustc_private API 随 nightly 漂移；`rust-toolchain.toml` 锁日期版本（当前 nightly-2026-07-02 / rustc 1.98.0-nightly），每月 bump；rustc 交互隔离在少数模块。关注 Miri 同步提交作迁移指南。
-- **依赖以 `-Zalways-encode-mir` 构建**：rlib 携全部函数 MIR；内容寻址全局缓存（~/.cache/mirvm）。
+- **依赖以 `-Zalways-encode-mir` 构建**：rlib 携全部函数 MIR；内容寻址全局缓存（`$HOME/.mirvm`，`MIRVM_HOME` 改址）。
 - **engine 是 library，CLI 是薄壳**：为嵌入与测试留路。
 - **借鉴 Miri 代码**（MIT/Apache-2.0，保留 attribution）：shim 结构、intrinsic 清单、native-lib 机制是最佳代码参考——但**仅代码，不是心智模型**（P1）。
 

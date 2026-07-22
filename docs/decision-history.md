@@ -1079,7 +1079,73 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   下一战役候选 = E6（性能轴，触发复测闸①）或 corpus 扩编/C4（功能
   轴），排序听用户。
 
+### 7.21 2026-07-22：外部审核驱动的稳定化战役——「M5 全收」重新定性
+
+- **起因**：[history/development-status-audit-2026-07-22.md](history/development-status-audit-2026-07-22.md)
+  （GPT 外审，证据分级 A 实跑/B 源码确定/C 静态盘点/D 历史）裁定：M5 功能施工
+  基本完成，但**正确性验收与稳定化未完成**——CI 三连 RED、默认 JIT 存在宽浮点
+  静默错值、threshold=1 差分证明不了机器码执行、FFI 聚合/变参静默 ABI 错调、
+  文档权威链失守。用户裁定冻结功能扩面，四波稳定化全做。本节是该战役的
+  canonical 承接（审核 §13 迁移清单的落点）。
+- **「M5 全收」重新定性（取代 §7.19/§7.20 的措辞强度）**：§7.19/§7.20 的
+  「全收/全落地」在审核证据下不成立，应读作**功能施工完成**——翻译器三表
+  穷尽、unwind 产品化、vmctx 终裁落笔均属实，但当时缺少「可准入函数编译
+  失败即 RED + 证明编译码真被执行」的验证强度，四处静默错码与三处验证
+  盲区因此在全绿账面下隐身。恢复「全收」措辞的验收条件 = 审核 §12 七条，
+  本次终验按此执行（结果见本条末）。
+- **波1 错码清零**（全部源码确定级真 bug，默认 JIT 开启下静默错值）：
+  - F-02 f16 Div 按 % 算（`44ed11e`）；F-03 f128 powi 把 i32 指数当 f128
+    位读（同）；F-04a FloatToWide128 kind/v 实参互换（同）；F-04b
+    i128/u128→f32/f64 按 I64/RAX 读 XMM0 返回（同，改宿主 `as` 助手）。
+    热探针实证四路径所在函数自身发布后 digest 与 native 逐字节一致。
+  - F-06 聚合布局冻结全丢（`4164ea6`：`validate_agg_natural`，packed/
+    align(N) 从静默错调改 freeze 响亮拒绝）；F-07 变参固定聚合切尾
+    （同：tail_kinds 位置占位 + call_addr 等长不变量）。
+  - F-08 GOT weak/strong 首现定强弱（`142fe67`：三处合并 = 任一 strong
+    即 strong）；F-09 C-unwind 静默压 nounwind C（同：两冻结表面精确
+    拒绝；出向 libffi 边界记 R18）。
+- **波2 验证方式**（`51cff03`，本战役枢纽）：`MIRVM_JIT_SYNC=1`——
+  call_guest 投递后等待发布/失败哨兵，threshold=1 从「首调请求编译」
+  升为「首调同步编译发布」；可准入编译失败 = FAIL 哨兵响亮 abort；
+  fork 子进程重启编译服务。**模式上岗首日显形三件潜伏**：f16 数学
+  MathUn/Bin/Fma 无护栏（panic 杀编译线程）、Bin128 Div/Rem 走 ISLE
+  未实现的 I128 除法、emit_cleanup 把 try_call 发回 blocks[bi]（延续
+  块前移时 verifier 拒收）——与审核四件同根同因：静默回退吞掉一切。
+  阴性对照（种入 F-02 → SYNC 差分抓获）证明模式有效。gate5 逢调即编
+  行自此 = 阈值=1+SYNC。
+- **波3 仓库健康**：fmt 一次清（`d489402`，50 文件）；clippy 32 诊断
+  清零（`0044694`，cmp_ps 谓词 4 条按语义 allow）；gate-truth fake
+  runner 补 a2 嵌套（`efad1bf`，12/12）；gate6 默认 release + CI 接
+  gate6（同）。
+- **波4 文档真值**：open-issues 移出 11 个闭合条目（T1–T3/T5/C1–C3/
+  C5/C7/E1/E21，本规则早立未守）+ T4 归并 R1；新登记 R17 第六形态/
+  R18/E33/E34/G7；current-status 精修；本 §7.21 收束旧「当前摘要」；
+  README/CLI/设计档头部对齐；docs/README 索引补齐 + D-08 关账清单。
+- **旧摘要收束**（append-only 纪律，以下为本文更早期的「当前」断言，
+  自此以本条为准）：§6 前后 vmctx 章头的「生产 JIT 尚未实现」、当前
+  选择表的「唯一产品引擎是解释器」、§8 清单的「方法级 JIT 是设计不是
+  现状」——M5.3–M5.5 已兑现（§7.19/§7.20 + 本条）；§8 同清单的
+  constructor 拒绝面已由 §7.8 分治放行、RTLD_DEFAULT 重名已由 `fb0b204`
+  归档句柄优先处置——维持其余条目原样（mode B/checked/alloca/自研 JIT
+  仍属设计）。
+- **终验（审核 §12 七条，2026-07-22 实跑，结果随本 commit 入账）**：
+  ①CI 同构 fmt/clippy/单测/gate-truth/release/TSan/runtime gate 全绿；
+  ②F-02～F-04 修复并有 compiled-entry 回归锁定；③strict 模式上岗
+  （不准入记录 + 可准入失败 RED）；④F-06/F-07 修复 + packed 负例
+  响亮拒绝；⑤weak/strong 与 C-unwind 定型有测试；⑥文档权威链交叉
+  核对无冲突；⑦代表 workload（45 demo 双态 + SYNC + ffi/变参/宽浮点
+  探针族）可复现逐字节一致。**「M5 全收」措辞自此恢复**，含义 = 功能
+  施工完成 + 本验收矩阵持续绿。
+- **排序裁定（用户 2026-07-22）**：稳定化先于一切扩面；其后回
+  corpus/C4 功能轴，E6 性能轴待固定 workload 收益证据（审核 §11 P2
+  同判——无 wall-time 主因证据不启 E6，与 §7.20 双闸触发器一致）。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
+
+> **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT
+> （M5.3–M5.5 已落地，§7.19/§7.20/§7.21）、constructor 分治放行（§7.8）、
+> RTLD_DEFAULT 重名归档句柄优先（`fb0b204`）——维持原文备查，当前结论
+> 以 §7.21 与各专项条目为准。
 
 - ~~P7 设想独立 `src/os/` 物理层~~（**2026-07-18/19 已兑现**：`src/os/` + `src/arch/` 双 leaf 建成，E21 闭合，见 §7.16）。
 - “engine 是 library”目前只是 crate 结构；进程退出、全局 TLS key、泄漏式生命周期使其还不是稳定

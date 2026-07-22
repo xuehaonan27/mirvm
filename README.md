@@ -2,7 +2,8 @@
 
 mirvm 是一个以 rustc 为前端、自建执行引擎的 Rust 抽象机器运行实现。它复用 rustc 完成解析、
 宏、类型检查、trait 求解和 MIR 生成，在加载相把可达程序降低为 tcx-free typed bytecode，随后由
-自己的运行时执行；长期目标是在保持 RAM 可观察语义的前提下加入方法级 Cranelift JIT。
+自己的运行时执行；执行引擎 = tree-walking 解释器 + 方法级 Cranelift JIT（M5.0–M5.5 全收，
+JIT 默认开启）。
 
 > 项目仍处于开发阶段，不是完整 Rust 语义的成品。当前状态、已知缺口和下一步以
 > [docs/current-status.md](docs/current-status.md) 为准；文档权威与历史替代关系见
@@ -21,9 +22,11 @@ mirvm 是一个以 rustc 为前端、自建执行引擎的 Rust 抽象机器运�
   S3′b A2 纯化聚合 deps-image（eco 冷 924→热 66ms）。
 - **地址模型 P1/P2 完成**（2026-07-17）：GOT 间接消除宿主地址烘焙 + extern fn 条目
   可执行化，thunk 盲区结构性根治。
-- **corpus 三维差分批1–10 全量 129 个真实 crate driver 绿**（mirvm/native/逢调即编三维
-  逐字节）；gate5 **167 PASS / 0 XFAIL / 0 FAIL**，m5_gate6 4/4，cargo test 76/76，
-  diff.sh 45/45，diff_cargo 5/5。
+- **corpus 批1–10 全量 129 个真实 crate driver**（创建时完成 mirvm/native/逢调即编
+  三维逐字节验收；持续门 = 默认 mirvm 单跑 exit-code/oracle 级，提升项见
+  [open-issues.md G7](docs/open-issues.md)）；gate5 **167 PASS / 0 XFAIL / 0 FAIL**，
+  m5_gate6 4/4，cargo test 76/76，diff.sh 45/45（默认 + 阈值=1 双态 + MIRVM_JIT_SYNC
+  同步发布），diff_cargo 5/5。
 
 已知缺口、响亮拒绝边界与全部未解决债务集中登记在
 [docs/open-issues.md](docs/open-issues.md)；目前不能宣称支持"任意 Rust 程序"。
@@ -50,6 +53,7 @@ bash tests/m4_gate1.sh
 bash tests/m4_gate2.sh
 bash tests/m4_gate4.sh
 bash tests/m4_gate5.sh
+bash tests/m5_gate6.sh   # M5 收口门（内含 m4_gate5 全量）
 
 # 真实项目 harness 自身回归（纯本地 fixture，不访问网络）
 bash tests/real_projects_regression.sh
