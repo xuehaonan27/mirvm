@@ -688,6 +688,40 @@ fn lower_inner(
     (module, base_exports, split_image)
 }
 
+/// dylib dlopen 候选 SONAME 清单（按序去重）：dev 符号链 `lib{name}.so` →
+/// `ldconfig -p` 的版本项绝对路径（`lib{name}.so.N` 带点锚前缀，libssl.so.3 类；
+/// ldconfig 缺失/无命中则仅靠符号链）。cargo 的 rlib 元数据 -l 与 CLI -l 共用。
+fn soname_candidates(names: &[Box<str>]) -> Vec<Box<str>> {
+    let mut out: Vec<Box<str>> = Vec::new();
+    let mut push = |c: String| {
+        let c: Box<str> = c.into();
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    };
+    let ldconfig = std::process::Command::new("ldconfig")
+        .arg("-p")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+    for name in names {
+        push(format!("lib{name}.so"));
+        let prefix = format!("lib{name}.so.");
+        if let Some(db) = &ldconfig {
+            for line in db.lines() {
+                let Some((soname, path)) = line.rsplit_once(" => ") else {
+                    continue;
+                };
+                if soname.trim_start().starts_with(&prefix) {
+                    push(path.trim().to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::{IMAGE_TAG, Rebase};
@@ -715,7 +749,7 @@ mod tests {
         assert_eq!(rb.fn_id(100), 105);
         assert_eq!(rb.fn_id(137), 142);
         // image 标签（TAG|j）→ first + j
-        assert_eq!(rb.fn_id(IMAGE_TAG | 0), 100);
+        assert_eq!(rb.fn_id(IMAGE_TAG), 100);
         assert_eq!(rb.fn_id(IMAGE_TAG | 4), 104);
         // 三空间同构：TLS/ASM 同形（各自 first/count）
         assert_eq!(rb.tls_id(19), 19);
@@ -725,7 +759,7 @@ mod tests {
         assert_eq!(rb.asm_id(7), 9);
         assert_eq!(rb.asm_id(IMAGE_TAG | 1), 8);
         // 标签位绝不残留进执行相
-        for id in [0, 99, 100, 137, IMAGE_TAG | 0, IMAGE_TAG | 4] {
+        for id in [0, 99, 100, 137, IMAGE_TAG, IMAGE_TAG | 4] {
             assert_eq!(rb.fn_id(id) & IMAGE_TAG, 0);
         }
     }
@@ -814,38 +848,4 @@ mod tests {
             }
         ));
     }
-}
-
-/// dylib dlopen 候选 SONAME 清单（按序去重）：dev 符号链 `lib{name}.so` →
-/// `ldconfig -p` 的版本项绝对路径（`lib{name}.so.N` 带点锚前缀，libssl.so.3 类；
-/// ldconfig 缺失/无命中则仅靠符号链）。cargo 的 rlib 元数据 -l 与 CLI -l 共用。
-fn soname_candidates(names: &[Box<str>]) -> Vec<Box<str>> {
-    let mut out: Vec<Box<str>> = Vec::new();
-    let mut push = |c: String| {
-        let c: Box<str> = c.into();
-        if !out.contains(&c) {
-            out.push(c);
-        }
-    };
-    let ldconfig = std::process::Command::new("ldconfig")
-        .arg("-p")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
-    for name in names {
-        push(format!("lib{name}.so"));
-        let prefix = format!("lib{name}.so.");
-        if let Some(db) = &ldconfig {
-            for line in db.lines() {
-                let Some((soname, path)) = line.rsplit_once(" => ") else {
-                    continue;
-                };
-                if soname.trim_start().starts_with(&prefix) {
-                    push(path.trim().to_string());
-                }
-            }
-        }
-    }
-    out
 }

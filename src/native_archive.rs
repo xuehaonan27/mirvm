@@ -610,7 +610,7 @@ fn content_hash<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::{CStr, CString};
+    use std::ffi::CString;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;

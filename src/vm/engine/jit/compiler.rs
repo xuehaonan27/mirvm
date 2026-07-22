@@ -79,7 +79,6 @@ fn worker(shared: &'static Shared, rx: Receiver<u32>) {
 
 /// c2i 万能壳：编译码调未编译 guest 函数（经蹦床打包）→ 回解释器。
 /// ctx 恢复 = 边界 TLS attach（thunk 工厂同款，幂等）。
-
 struct Compiler {
     shared: &'static Shared,
     module: JITModule,
@@ -388,10 +387,10 @@ impl Compiler {
             }
         }
         for (c, cabi) in callees {
-            if jit.slots_fast[c as usize].load(Ordering::Acquire) == 0 {
-                if let Some(tramp) = self.define_c2i_trampoline(c, cabi) {
-                    jit.slots_fast[c as usize].store(tramp as u64, Ordering::Release);
-                }
+            if jit.slots_fast[c as usize].load(Ordering::Acquire) == 0
+                && let Some(tramp) = self.define_c2i_trampoline(c, cabi)
+            {
+                jit.slots_fast[c as usize].store(tramp as u64, Ordering::Release);
             }
         }
 
@@ -740,10 +739,10 @@ static PERS_REF: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::ne
 /// - 无 handler 的调用点：(ret_addr-1, len=1, lpad=0, action=0) —— 命中即
 ///   EHAction::None（rust find_eh_action 的 cs_lpad==0 分支）
 /// - cleanup handler 调用点：(ret_addr-1, len=1, pad, action=0)
-/// **rust 版 find_eh_action 对"ip 不在表中"返回 EHAction::Terminate（= _URC_FATAL），
-/// 与 libgcc 的 __gcc_personality_v0（no-entry = None）不同——call-site 表必须覆盖
-/// 函数内全部调用点**（cg_clif 对无 handler 站点同样发 lpad=0 项的原因）。
-/// 项按 buffer.call_sites() 序（= 指令序，满足 rust 解析器的有序表假设）。
+///   **rust 版 find_eh_action 对"ip 不在表中"返回 EHAction::Terminate（= _URC_FATAL），
+///   与 libgcc 的 __gcc_personality_v0（no-entry = None）不同——call-site 表必须覆盖
+///   函数内全部调用点**（cg_clif 对无 handler 站点同样发 lpad=0 项的原因）。
+///   项按 buffer.call_sites() 序（= 指令序，满足 rust 解析器的有序表假设）。
 fn build_lsda(call_sites: &[(u64, Option<u64>)]) -> Vec<u8> {
     fn uleb(out: &mut Vec<u8>, mut v: u64) {
         loop {

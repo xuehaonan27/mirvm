@@ -248,7 +248,6 @@ pub(crate) unsafe fn lddqu<const W: usize>(dst: *mut u8, src: *const u8) {
 
 /// AVX2 `vpmaddwd`：每 128 位 lane 独立。
 #[target_feature(enable = "avx2")]
-
 pub(crate) unsafe fn pmaddwd256(dst: *mut u8, a: *const u8, b: *const u8) {
     let a = unsafe { _mm256_loadu_si256(a.cast::<__m256i>()) };
     let b = unsafe { _mm256_loadu_si256(b.cast::<__m256i>()) };
@@ -360,6 +359,9 @@ pub(crate) unsafe fn maxmin_ps<const LANES: usize, const MAX: bool>(
 
 /// CMPPS/VCMPPS 全 32 谓词（S/Q 后缀只差异常旗标，值位相同 → 按值对拍一起）。
 /// imm = SDM imm8：真 lane 写 0xFFFF_FFFF，假写 0。
+// 否定比较即 NLT/NLE/NGE/NGT 谓词语义本体：NaN 无序时这些谓词为真，恰靠
+// `!(x < y)` 这类否定比较表达；改写为 partial_cmp 会改变 NaN 行为，保留原式。
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 pub(crate) unsafe fn cmp_ps<const LANES: usize>(
     dst: *mut u8,
     a: *const u8,

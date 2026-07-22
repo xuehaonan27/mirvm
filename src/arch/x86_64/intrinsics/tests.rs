@@ -17,14 +17,18 @@ fn lddqu_matches_unaligned_load_contract_and_hw() {
     assert_eq!(got128[..], buf[3..19]);
     if std::is_x86_feature_detected!("sse3") {
         let hw = unsafe { core::arch::x86_64::_mm_lddqu_si128(buf.as_ptr().add(3).cast()) };
-        assert_eq!(got128, unsafe { std::mem::transmute::<_, [u8; 16]>(hw) });
+        assert_eq!(got128, unsafe {
+            std::mem::transmute::<std::arch::x86_64::__m128i, [u8; 16]>(hw)
+        });
     }
     let mut got256 = [0u8; 32];
     unsafe { lddqu::<32>(got256.as_mut_ptr(), buf.as_ptr().add(5)) };
     assert_eq!(got256[..], buf[5..37]);
     if std::is_x86_feature_detected!("avx") {
         let hw = unsafe { core::arch::x86_64::_mm256_lddqu_si256(buf.as_ptr().add(5).cast()) };
-        assert_eq!(got256, unsafe { std::mem::transmute::<_, [u8; 32]>(hw) });
+        assert_eq!(got256, unsafe {
+            std::mem::transmute::<std::arch::x86_64::__m256i, [u8; 32]>(hw)
+        });
     }
 }
 
@@ -117,8 +121,8 @@ fn psad_matches_stdarch_known_vectors() {
         let b = [4u8; 32];
         let mut got = [0u8; 32];
         unsafe { psad_bw256(got.as_mut_ptr(), a.as_ptr(), b.as_ptr()) };
-        for lane in got.chunks_exact(8) {
-            assert_eq!(u64::from_le_bytes(lane.try_into().unwrap()), 16);
+        for lane in got.as_chunks::<8>().0 {
+            assert_eq!(u64::from_le_bytes(*lane), 16);
         }
     }
 }
@@ -1023,9 +1027,7 @@ fn pshift_d_models_match_sse2_hardware() {
     if !std::is_x86_feature_detected!("sse2") {
         return;
     }
-    use std::arch::x86_64::{
-        _mm_cvtsi32_si128, _mm_loadu_si128, _mm_sll_epi32, _mm_srl_epi32, _mm_storeu_si128,
-    };
+    use std::arch::x86_64::{_mm_loadu_si128, _mm_sll_epi32, _mm_srl_epi32, _mm_storeu_si128};
     let vals = [
         [0x0000_0001u32, 0x8000_0000, 0xffff_ffff, 0x1234_5678],
         [0x0000_0000u32, 0x7fff_ffff, 0x8000_0001, 0x0000_0002],

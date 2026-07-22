@@ -277,7 +277,7 @@ pub fn call_addr(fnptr: usize, sig: &ForeignSig, args: &[u64], ret_dst: Option<u
         // 调用后 memcpy size 字节至调用方目的地址（寄存器对档与 sret 档都由 libffi
         // 依结构类型内建解释 rtype——语义不自证）。
         let dst = ret_dst.expect("按值聚合返回的调用方目的地址（引擎不变量）");
-        let mut rbuf: Vec<u64> = vec![0; ((agg.size as usize) + 7) / 8];
+        let mut rbuf: Vec<u64> = vec![0; (agg.size as usize).div_ceil(8)];
         unsafe {
             cif.call_return_into(CodePtr(fnptr as *mut _), &ffi_args, Ret::new(&mut rbuf[..]));
             std::ptr::copy_nonoverlapping(

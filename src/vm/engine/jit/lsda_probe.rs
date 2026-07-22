@@ -6,7 +6,6 @@
 //! absptr) + FDE.lsda → `__register_frame` → 宿主 panic 载荷（resume_unwind）→
 //! cleanup pad 执行 → `_Unwind_Resume(exn)` 续传至宿主 catch_unwind。
 
-use super::*;
 use cranelift_codegen::ir::{
     AbiParam, BlockArg, BlockCall, ExceptionTableData, ExceptionTableItem, ExceptionTag,
     InstBuilder, Signature, types,
@@ -31,9 +30,6 @@ extern "C-unwind" fn probe_raise() {
 extern "C-unwind" fn probe_mark(x: u64) {
     PAD_MARK.store(x, Ordering::SeqCst);
 }
-extern "C-unwind" fn probe_unwind_resume(ex: *mut u8) -> ! {
-    unsafe { _Unwind_Resume(ex) }
-}
 unsafe extern "C" {
     fn _Unwind_Resume(ex: *mut u8) -> !;
     fn rust_eh_personality();
@@ -43,10 +39,10 @@ unsafe extern "C" {
 /// - 无 handler 的调用点：(ret_addr-1, len=1, lpad=0, action=0) —— 命中即
 ///   EHAction::None（rust find_eh_action 的 cs_lpad==0 分支）
 /// - cleanup handler 调用点：(ret_addr-1, len=1, pad, action=0)
-/// **rust 版 find_eh_action 对"ip 不在表中"返回 EHAction::Terminate（= _URC_FATAL），
-/// 与 libgcc 的 __gcc_personality_v0（no-entry = None）不同——call-site 表必须覆盖
-/// 函数内全部调用点**（cg_clif 对无 handler 站点同样发 lpad=0 项的原因）。
-/// 项按 buffer.call_sites() 序（= 指令序，满足 rust 解析器的有序表假设）。
+///   **rust 版 find_eh_action 对"ip 不在表中"返回 EHAction::Terminate（= _URC_FATAL），
+///   与 libgcc 的 __gcc_personality_v0（no-entry = None）不同——call-site 表必须覆盖
+///   函数内全部调用点**（cg_clif 对无 handler 站点同样发 lpad=0 项的原因）。
+///   项按 buffer.call_sites() 序（= 指令序，满足 rust 解析器的有序表假设）。
 fn build_lsda(call_sites: &[(u64, Option<u64>)]) -> Vec<u8> {
     fn uleb(out: &mut Vec<u8>, mut v: u64) {
         loop {

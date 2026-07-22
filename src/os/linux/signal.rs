@@ -84,7 +84,7 @@ unsafe extern "C" fn segv_dump_handler(
                     usize::from_str_radix(line.split('-').next().unwrap_or("0"), 16).unwrap_or(0);
                 let end = usize::from_str_radix(
                     line.split_whitespace()
-                        .nth(0)
+                        .next()
                         .unwrap_or("0-0")
                         .split('-')
                         .nth(1)

@@ -23,10 +23,10 @@ use super::addrlayout::{
 /// 可执行码址；逃逸物化点据此跳过二次包装，decision-history §7.6 项5）
 pub fn is_stub_addr(v: u64) -> bool {
     let a = v as usize;
-    if a >= DELTA_CODE_ADDR && a < DELTA_CODE_ADDR + CODE_CAP {
+    if (DELTA_CODE_ADDR..DELTA_CODE_ADDR + CODE_CAP).contains(&a) {
         return true;
     }
-    if a >= BASE_CODE_ADDR && a < BASE_CODE_ADDR + CODE_CAP {
+    if (BASE_CODE_ADDR..BASE_CODE_ADDR + CODE_CAP).contains(&a) {
         return true;
     }
     if a >= IMAGE_CODE_SPLINE {

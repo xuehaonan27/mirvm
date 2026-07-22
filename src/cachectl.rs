@@ -112,10 +112,7 @@ fn varint(b: &[u8]) -> Option<(u128, usize)> {
             u64::from_le_bytes(rest.get(..8)?.try_into().ok()?) as u128,
             9,
         ),
-        254 => (
-            u128::from_le_bytes(rest.get(..16)?.try_into().ok()?) as u128,
-            17,
-        ),
+        254 => (u128::from_le_bytes(rest.get(..16)?.try_into().ok()?), 17),
         255 => return None,
     })
 }
@@ -262,10 +259,7 @@ pub fn purge(root: &Path, plan: Purge) -> String {
             p.display(),
             human(sz)
         );
-        if !dry && std::fs::remove_file(p).is_ok() {
-            *freed += sz;
-            *acted += 1;
-        } else if dry {
+        if (!dry && std::fs::remove_file(p).is_ok()) || dry {
             *freed += sz;
             *acted += 1;
         }
