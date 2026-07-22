@@ -1,9 +1,12 @@
-# docs/history/ — 施工日志与已完成历史文档
+# docs/history/ — 施工日志、历史文档与审查快照
 
-> 2026-07-18 文档重整时从 `docs/` 顶层迁入。**本目录内文档一律只读**：它们是
+> 本目录于 2026-07-18 文档重整时建立，原有历史文档从 `docs/` 顶层迁入。**本目录内文档
+> 一律只读**：它们是
 > 「当时实际交付了什么/为什么这么设计」的一手记录，事实权威让位给
 > [`../current-status.md`](../current-status.md)，论证的过程价值不被取代。
-> 未解决的开放项已全部上收至 [`../open-issues.md`](../open-issues.md)。
+> 既有施工/设计档中的未解决开放项已上收至
+> [`../open-issues.md`](../open-issues.md)。审查快照若发现新的候选债务，以报告末尾的
+> 候选迁移清单为线索；写入 canonical 文档前不得把它视为已正式登记或据此排期。
 
 ## 施工日志（事实层）
 
@@ -31,6 +34,12 @@
 | 文档 | 内容 |
 |---|---|
 | `coldstart-research.md` | M6 前置调研：30-demo 相位账本、perf 归因桶、rustc-src file:line 先例解剖；V5 并行 lower / V6 零拷贝两个未立项杠杆（→ open-issues D7/D3） |
+
+## 审查快照
+
+| 文档 | 内容 |
+|---|---|
+| [development-status-audit-2026-07-22.md](development-status-audit-2026-07-22.md) | HEAD `cda7421` 的一次性开发状况审查：实跑矩阵、JIT/FFI 正确性发现、证据盲区、文档权威失真、成熟度和稳定化顺序；非当前状态或开放债务权威 |
 
 ## spike（冻结证据）
 

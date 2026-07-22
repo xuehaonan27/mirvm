@@ -4,11 +4,15 @@
 
 use super::*;
 
-    /// Unsize 胖化的 meta 推导（类型递归，cg_ssa coerce_unsized_into/unsize_ptr 同构）：
-    /// 指针（含 Box）→ pointee 对取 meta；同 def 结构体 → 唯一类型不同的字段对递归
-    /// （Arc/Rc/Pin 等自定义 CoerceUnsized：Arc{NonNull{*const ArcInner<T>}} 一路下钻）。
+/// Unsize 胖化的 meta 推导（类型递归，cg_ssa coerce_unsized_into/unsize_ptr 同构）：
+/// 指针（含 Box）→ pointee 对取 meta；同 def 结构体 → 唯一类型不同的字段对递归
+/// （Arc/Rc/Pin 等自定义 CoerceUnsized：Arc{NonNull{*const ArcInner<T>}} 一路下钻）。
 impl<'tcx> LowerCx<'tcx, '_> {
-    pub(super) fn unsize_meta_of(&mut self, src: Ty<'tcx>, dst: Ty<'tcx>) -> Result<Operand, String> {
+    pub(super) fn unsize_meta_of(
+        &mut self,
+        src: Ty<'tcx>,
+        dst: Ty<'tcx>,
+    ) -> Result<Operand, String> {
         if let (Some(sp), Some(dp)) = (src.builtin_deref(true), dst.builtin_deref(true)) {
             return self.fresh_unsize_meta(sp, dp);
         }
@@ -66,9 +70,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
             // 解引用落点再判（`*const ArcInner` → ArcInner → struct_lockstep →
             // data 的 Arc-wrapped dyn 链；ArcInner 是 Adt，继续走 Adt 臂）
-            let (lst, ldt) =
-                self.tcx
-                    .struct_lockstep_tails_for_codegen(sp, dp, self.typing_env);
+            let (lst, ldt) = self
+                .tcx
+                .struct_lockstep_tails_for_codegen(sp, dp, self.typing_env);
             if both_dyn(lst, ldt) {
                 return Some((lst, ldt));
             }
@@ -76,9 +80,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 return Some(r);
             }
         }
-        let (st, dt) =
-            self.tcx
-                .struct_lockstep_tails_for_codegen(src, dst, self.typing_env);
+        let (st, dt) = self
+            .tcx
+            .struct_lockstep_tails_for_codegen(src, dst, self.typing_env);
         if both_dyn(st, dt) {
             return Some((st, dt));
         }
@@ -119,10 +123,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
             // ② tail_opt 尾字段递归（ArcInner → data 的 dyn 尾对路径——
             // 多非 ZST 结构（strong/weak/data）唯一可下钻向）
             if let Some(f) = da.non_enum_variant().tail_opt()
-                && let Some(r) = self.dyn_unsize_tails(
-                    norm(f.ty(self.tcx, sa)),
-                    norm(f.ty(self.tcx, sb)),
-                )
+                && let Some(r) =
+                    self.dyn_unsize_tails(norm(f.ty(self.tcx, sa)), norm(f.ty(self.tcx, sb)))
             {
                 return Some(r);
             }
@@ -165,5 +167,4 @@ impl<'tcx> LowerCx<'tcx, '_> {
             _ => Err(format!("unsize 尾对 {st} → {dt}（M4.4+）")),
         }
     }
-
 }

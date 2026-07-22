@@ -85,7 +85,6 @@ pub(super) fn mem_write(addr: u64, w: Width, v: u64) {
     }
 }
 
-
 mod call;
 mod runblocks;
 mod rvalue;
@@ -94,10 +93,10 @@ pub(crate) mod simd_exec;
 mod stmt;
 mod volatile;
 
-pub(crate) use volatile::{mem_read_volatile, mem_write_volatile};
-pub(crate) use call::{call_guest_ffi, exec_builtin, interp_frame, ret_abi_of};
 use call::run_cleanup;
+pub(crate) use call::{call_guest_ffi, exec_builtin, interp_frame, ret_abi_of};
 use services::ATEXIT_SHARED;
+pub(crate) use volatile::{mem_read_volatile, mem_write_volatile};
 
 pub(crate) fn engine_abort(what: &str) -> ! {
     eprintln!("mirvm[m4-engine]: {what}");

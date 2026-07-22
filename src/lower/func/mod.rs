@@ -486,9 +486,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let base = self.linker.ensure_alloc(prov.alloc_id())?;
                 // P2：foreign 分配（extern static/fn 取址）→ GOT 槽读操作数
                 //（decision-history §7.5c；启动相重填槽内容，字节码不烤宿主地址）
-                if let Some(op) = self
-                    .linker
-                    .foreign_const_operand(prov.alloc_id(), base, off.bytes())
+                if let Some(op) =
+                    self.linker
+                        .foreign_const_operand(prov.alloc_id(), base, off.bytes())
                 {
                     LoweredOp::Scalar(op)
                 } else {

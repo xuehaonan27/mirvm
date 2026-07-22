@@ -5,7 +5,6 @@
 use super::*;
 
 impl<'tcx> Linker<'tcx> {
-
     /// instance → FuncId；首见分配 id 并入待降低队列（worklist 扩集的入口）。
     /// S4：首见先查底座（v0 symbol_name 键）——命中即复用底座 id，不入队；
     /// symbol_name 只在首见且有底座时计算一次（无底座路径零额外成本）。
@@ -127,7 +126,11 @@ impl<'tcx> Linker<'tcx> {
     /// os:: 直通签名冻结：foreign fn sig → FfiKind 列表（tier-0 ty_to_ffitype 同构）。
     /// fn-ptr 类型的参数（pthread_create 的 thread_start 等）额外冻结**内层签名**
     /// （M4.4 D1）：执行期该位若收到 fn 条目地址，thunk 工厂物化真机器码后再直传。
-    pub(super) fn freeze_foreign_sig(&mut self, inst: Instance<'tcx>, name: &str) -> Result<Callee, String> {
+    pub(super) fn freeze_foreign_sig(
+        &mut self,
+        inst: Instance<'tcx>,
+        name: &str,
+    ) -> Result<Callee, String> {
         let sig = self
             .tcx
             .fn_sig(inst.def_id())

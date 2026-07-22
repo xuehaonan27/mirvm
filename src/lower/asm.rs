@@ -66,7 +66,8 @@ const SYSCALL_SLOT_DEF: &str =
 /// 两级间接（PIC 纪律）：GOT 项（动态链接器装载期填）→ 命名 .data 槽
 /// （mirvm dlopen 后重填 trampoline 真址）；r11 恰为 syscall 契约的可坏
 /// 寄存器，作跳板不违约。
-const SYSCALL_CALL: &str = "    mov r11, QWORD PTR [rip+mirvm_syscall_slot@GOTPCREL]\n    call [r11]\n";
+const SYSCALL_CALL: &str =
+    "    mov r11, QWORD PTR [rip+mirvm_syscall_slot@GOTPCREL]\n    call [r11]\n";
 
 /// 行级助记符匹配：前导空白已剥；`syscall` 后只容许行尾/空白/注释（# 或 ;）。
 /// 多语句同行与标签前缀形态不接（覆盖边界，见上）。
@@ -152,8 +153,11 @@ pub(crate) fn materialize(sites: &[ir::AsmSite]) -> Vec<u64> {
     }
 
     let c_so = std::ffi::CString::new(so.as_os_str().as_encoded_bytes()).unwrap();
-    let handle = crate::os::dll::open_with_flags(&c_so, crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL)
-        .unwrap_or_else(|_| panic!("dlopen asm-stub .so 失败: {}", so.display()));
+    let handle = crate::os::dll::open_with_flags(
+        &c_so,
+        crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL,
+    )
+    .unwrap_or_else(|_| panic!("dlopen asm-stub .so 失败: {}", so.display()));
     refill_syscall_slot(handle);
 
     sites
@@ -628,8 +632,8 @@ mirvm_asm_0:
 
     #[test]
     fn rewrite_syscall_text_hits_only_mnemonic_lines() {
-        let mut src = "mov rax, 1\n    syscall\nsyscallx\n.byte 0x0f,0x05\n  syscall # c\nnop\n"
-            .to_string();
+        let mut src =
+            "mov rax, 1\n    syscall\nsyscallx\n.byte 0x0f,0x05\n  syscall # c\nnop\n".to_string();
         assert!(super::rewrite_syscall_text(&mut src));
         assert_eq!(src.matches("mirvm_syscall_slot@GOTPCREL").count(), 2);
         assert_eq!(src.matches("call [r11]").count(), 2);

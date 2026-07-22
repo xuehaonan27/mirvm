@@ -15,9 +15,7 @@ const FROZEN_CAP: usize = 256 << 20;
 
 /// 固定基址数值与白名单判据统归 `super::addrlayout`（共享常量层）；
 /// 选址论证与域模型见其模块头。
-use super::addrlayout::{
-    BASE_IMAGE_FIXED_ADDR, DELTA_FIXED_ADDR, image_addr, is_valid_home,
-};
+use super::addrlayout::{BASE_IMAGE_FIXED_ADDR, DELTA_FIXED_ADDR, image_addr, is_valid_home};
 
 pub struct FrozenArena {
     base: *mut u8,
@@ -37,7 +35,8 @@ impl FrozenArena {
     fn new_at(home: usize) -> Self {
         // 先试本域固定基址（缓存可用的前提）；被占（并发单测/罕见 ASLR 冲突）则
         // 回退动态基址——语义不变，仅本进程产出不可序列化。
-        if let Some(p) = crate::os::mem::map_fixed_preferred(home, FROZEN_CAP, crate::os::mem::Prot::RW)
+        if let Some(p) =
+            crate::os::mem::map_fixed_preferred(home, FROZEN_CAP, crate::os::mem::Prot::RW)
         {
             return FrozenArena {
                 base: p,
@@ -76,7 +75,8 @@ impl FrozenArena {
     pub fn restore(snapshot: &[u8], home: usize) -> Result<Self, String> {
         assert!(snapshot.len() <= FROZEN_CAP, "冻结区快照超容量");
         assert!(is_valid_home(home), "冻结区恢复域非法: {home:#x}");
-        let Some(p) = crate::os::mem::map_fixed_preferred(home, FROZEN_CAP, crate::os::mem::Prot::RW)
+        let Some(p) =
+            crate::os::mem::map_fixed_preferred(home, FROZEN_CAP, crate::os::mem::Prot::RW)
         else {
             return Err(format!("冻结区固定基址 {home:#x} 被占，无法恢复快照"));
         };

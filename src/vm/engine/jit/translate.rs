@@ -2,9 +2,9 @@
 //! 不变量）+ place 求值 + stmt/rvalue/term 三个大 match + 调用助手族 +
 //! clif_rmw_op/collect_ssa_offs。语义 = 与 interp 逐位一致（恒等式镜像）。
 
-use super::*;
-use super::frame::FrameMap;
 use super::admit::callee_abi;
+use super::frame::FrameMap;
+use super::*;
 
 pub(super) struct Translator<'a, 'b> {
     pub(super) shared: &'static Shared,
@@ -813,16 +813,12 @@ impl Translator<'_, '_> {
                         // cranelift ISLE 不支持 I128 除法（MIRVM_JIT_SYNC 实证：
                         // udiv.i128 unimplemented）→ mirvm_bin128_divrem 助手
                         //（宿主 wrapping 系 + 零除 div_zero 同文案，interp 同形）
-                        let ir_ = self.b.ins().iconst(
-                            types::I64,
-                            i64::from(matches!(op, IntBinOp::Rem)),
-                        );
+                        let ir_ = self
+                            .b
+                            .ins()
+                            .iconst(types::I64, i64::from(matches!(op, IntBinOp::Rem)));
                         let s = self.b.ins().iconst(types::I64, *signed as i64);
-                        self.call_out128(
-                            "mirvm_bin128_divrem",
-                            &[ir_, s, alo, ahi, blo, bhi],
-                            dst,
-                        );
+                        self.call_out128("mirvm_bin128_divrem", &[ir_, s, alo, ahi, blo, bhi], dst);
                         return;
                     }
                 };
@@ -1074,17 +1070,27 @@ impl Translator<'_, '_> {
                 let pd = self.place_addr(dst);
                 let pa = self.place_addr(a);
                 let pb = self.place_addr(b);
-                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, st as *const ir::Stmt as i64);
                 let z = self.b.ins().iconst(types::I64, 0);
-                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.simd_stmt, self.b.func);
                 self.b.ins().call(fref, &[sp, pa, pb, z, pd, z, z]);
             }
             Stmt::SimdUn { dst, a, .. } => {
                 let pd = self.place_addr(dst);
                 let pa = self.place_addr(a);
-                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, st as *const ir::Stmt as i64);
                 let z = self.b.ins().iconst(types::I64, 0);
-                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.simd_stmt, self.b.func);
                 self.b.ins().call(fref, &[sp, pa, z, z, pd, z, z]);
             }
             Stmt::SimdFma { dst, a, b, c, .. } => {
@@ -1092,9 +1098,14 @@ impl Translator<'_, '_> {
                 let pa = self.place_addr(a);
                 let pb = self.place_addr(b);
                 let pc = self.place_addr(c);
-                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, st as *const ir::Stmt as i64);
                 let z = self.b.ins().iconst(types::I64, 0);
-                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.simd_stmt, self.b.func);
                 self.b.ins().call(fref, &[sp, pa, pb, pc, pd, z, z]);
             }
             Stmt::SimdFunnel {
@@ -1104,17 +1115,27 @@ impl Translator<'_, '_> {
                 let pa = self.place_addr(a);
                 let pb = self.place_addr(b);
                 let ps = self.place_addr(shift);
-                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, st as *const ir::Stmt as i64);
                 let z = self.b.ins().iconst(types::I64, 0);
-                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.simd_stmt, self.b.func);
                 self.b.ins().call(fref, &[sp, pa, pb, ps, pd, z, z]);
             }
             Stmt::SimdCast { dst, src, .. } => {
                 let pd = self.place_addr(dst);
                 let ps = self.place_addr(src);
-                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, st as *const ir::Stmt as i64);
                 let z = self.b.ins().iconst(types::I64, 0);
-                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.simd_stmt, self.b.func);
                 self.b.ins().call(fref, &[sp, ps, z, z, pd, z, z]);
             }
             Stmt::SimdSelect {
@@ -1124,9 +1145,14 @@ impl Translator<'_, '_> {
                 let pa = self.place_addr(a);
                 let pb = self.place_addr(b);
                 let pd = self.place_addr(dst);
-                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, st as *const ir::Stmt as i64);
                 let z = self.b.ins().iconst(types::I64, 0);
-                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.simd_stmt, self.b.func);
                 self.b.ins().call(fref, &[sp, pm, pa, pb, pd, z, z]);
             }
             Stmt::SimdSelectBitmask {
@@ -1136,9 +1162,14 @@ impl Translator<'_, '_> {
                 let pa = self.place_addr(a);
                 let pb = self.place_addr(b);
                 let pd = self.place_addr(dst);
-                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, st as *const ir::Stmt as i64);
                 let z = self.b.ins().iconst(types::I64, 0);
-                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.simd_stmt, self.b.func);
                 self.b.ins().call(fref, &[sp, pa, pb, z, pd, m, z]);
             }
             Stmt::SimdGather {
@@ -1152,23 +1183,30 @@ impl Translator<'_, '_> {
                 let pp = self.place_addr(ptrs);
                 let pm = self.place_addr(mask);
                 let pd = self.place_addr(dst);
-                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, st as *const ir::Stmt as i64);
                 let z = self.b.ins().iconst(types::I64, 0);
-                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.simd_stmt, self.b.func);
                 self.b.ins().call(fref, &[sp, pv, pp, pm, pd, z, z]);
             }
             Stmt::SimdScatter {
-                values,
-                ptrs,
-                mask,
-                ..
+                values, ptrs, mask, ..
             } => {
                 let pv = self.place_addr(values);
                 let pp = self.place_addr(ptrs);
                 let pm = self.place_addr(mask);
-                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, st as *const ir::Stmt as i64);
                 let z = self.b.ins().iconst(types::I64, 0);
-                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.simd_stmt, self.b.func);
                 self.b.ins().call(fref, &[sp, pv, pp, pm, z, z, z]);
             }
             Stmt::SimdMaskedLoad {
@@ -1182,33 +1220,43 @@ impl Translator<'_, '_> {
                 let (pbase, _) = self.operand(base);
                 let pv = self.place_addr(passthru);
                 let pd = self.place_addr(dst);
-                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, st as *const ir::Stmt as i64);
                 let z = self.b.ins().iconst(types::I64, 0);
-                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.simd_stmt, self.b.func);
                 self.b.ins().call(fref, &[sp, pm, pv, z, pd, pbase, z]);
             }
             Stmt::SimdMaskedStore {
-                mask,
-                base,
-                values,
-                ..
+                mask, base, values, ..
             } => {
                 let pm = self.place_addr(mask);
                 let (pbase, _) = self.operand(base);
                 let pv = self.place_addr(values);
-                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, st as *const ir::Stmt as i64);
                 let z = self.b.ins().iconst(types::I64, 0);
-                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.simd_stmt, self.b.func);
                 self.b.ins().call(fref, &[sp, pm, pv, z, z, pbase, z]);
             }
-            Stmt::SimdExtractDyn {
-                src, idx, dst, ..
-            } => {
+            Stmt::SimdExtractDyn { src, idx, dst, .. } => {
                 let ps = self.place_addr(src);
                 let (i, _) = self.operand(idx);
-                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, st as *const ir::Stmt as i64);
                 let z = self.b.ins().iconst(types::I64, 0);
-                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.simd_stmt, self.b.func);
                 let call = self.b.ins().call(fref, &[sp, ps, z, z, z, i, z]);
                 let r = self.b.inst_results(call)[0];
                 self.write_scalar_place(dst, r);
@@ -1220,40 +1268,57 @@ impl Translator<'_, '_> {
                 let pd = self.place_addr(dst);
                 let (i, _) = self.operand(idx);
                 let (v, _) = self.operand(val);
-                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, st as *const ir::Stmt as i64);
                 let z = self.b.ins().iconst(types::I64, 0);
-                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.simd_stmt, self.b.func);
                 self.b.ins().call(fref, &[sp, ps, z, z, pd, i, v]);
             }
             Stmt::SimdArithOffset {
-                ptrs,
-                offsets,
-                dst,
-                ..
+                ptrs, offsets, dst, ..
             } => {
                 let pp = self.place_addr(ptrs);
                 let po = self.place_addr(offsets);
                 let pd = self.place_addr(dst);
-                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, st as *const ir::Stmt as i64);
                 let z = self.b.ins().iconst(types::I64, 0);
-                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.simd_stmt, self.b.func);
                 self.b.ins().call(fref, &[sp, pp, po, z, pd, z, z]);
             }
             Stmt::SimdSplat { dst, val, .. } => {
                 let pd = self.place_addr(dst);
                 let (v, _) = self.operand(val);
-                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, st as *const ir::Stmt as i64);
                 let z = self.b.ins().iconst(types::I64, 0);
-                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.simd_stmt, self.b.func);
                 self.b.ins().call(fref, &[sp, z, z, z, pd, v, z]);
             }
             Stmt::Sat128 { a, b, dst, .. } => {
                 let pa = self.place_addr(a);
                 let pb = self.place_addr(b);
                 let pd = self.place_addr(dst);
-                let sp = self.b.ins().iconst(types::I64, st as *const ir::Stmt as i64);
+                let sp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, st as *const ir::Stmt as i64);
                 let z = self.b.ins().iconst(types::I64, 0);
-                let fref = self.module.declare_func_in_func(self.simd_stmt, self.b.func);
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.simd_stmt, self.b.func);
                 self.b.ins().call(fref, &[sp, pa, pb, z, pd, z, z]);
             }
             // T1-d：Trap/Nop（语句级 Trap = mirvm_jit_trap stmt 形，interp
@@ -1385,11 +1450,10 @@ impl Translator<'_, '_> {
                 let ns = self.b.ins().iconst(types::I64, *niche_start as i64);
                 let rel = self.b.ins().isub(tv, ns);
                 let rel = self.mask_val(rel, w);
-                let hit = self.b.ins().icmp_imm(
-                    IntCC::UnsignedLessThan,
-                    rel,
-                    *variants_len as i64,
-                );
+                let hit = self
+                    .b
+                    .ins()
+                    .icmp_imm(IntCC::UnsignedLessThan, rel, *variants_len as i64);
                 let vs = self.b.ins().iconst(types::I64, *variants_start as i64);
                 let tagged = self.b.ins().iadd(vs, rel);
                 let un = self.b.ins().iconst(types::I64, *untagged as i64);
@@ -1917,7 +1981,10 @@ impl Translator<'_, '_> {
             R::SimdBitmask { a, .. } => {
                 // lanes 位掩码（≤64 位 u64 无需 mask——interp 本体同口径）
                 let pa = self.place_addr(a);
-                let rp = self.b.ins().iconst(types::I64, rv as *const ir::Rvalue as i64);
+                let rp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, rv as *const ir::Rvalue as i64);
                 let fref = self.module.declare_func_in_func(self.simd_rv, self.b.func);
                 let call = self.b.ins().call(fref, &[rp, pa]);
                 self.b.inst_results(call)[0]
@@ -1925,21 +1992,28 @@ impl Translator<'_, '_> {
             R::SimdReduce { a, .. } => {
                 // bool 0/1（interp 本体 acc as u64 同口径）
                 let pa = self.place_addr(a);
-                let rp = self.b.ins().iconst(types::I64, rv as *const ir::Rvalue as i64);
+                let rp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, rv as *const ir::Rvalue as i64);
                 let fref = self.module.declare_func_in_func(self.simd_rv, self.b.func);
                 let call = self.b.ins().call(fref, &[rp, pa]);
                 self.b.inst_results(call)[0]
             }
-            R::SimdReduceArith {
-                a, lane_bytes, ..
-            } => {
+            R::SimdReduceArith { a, lane_bytes, .. } => {
                 // lane 宽标量位型（interp 本体各 op 已按 lw 掩回，此处同宽掩齐）
                 let pa = self.place_addr(a);
-                let rp = self.b.ins().iconst(types::I64, rv as *const ir::Rvalue as i64);
+                let rp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, rv as *const ir::Rvalue as i64);
                 let fref = self.module.declare_func_in_func(self.simd_rv, self.b.func);
                 let call = self.b.ins().call(fref, &[rp, pa]);
                 let r = self.b.inst_results(call)[0];
-                self.mask_val(r, Width::from_bytes(u64::from(*lane_bytes)).expect("lane 宽度"))
+                self.mask_val(
+                    r,
+                    Width::from_bytes(u64::from(*lane_bytes)).expect("lane 宽度"),
+                )
             }
         }
     }
@@ -2126,7 +2200,10 @@ impl Translator<'_, '_> {
         cleanup: ir::Bb,
         sig: cranelift_codegen::ir::Signature,
         blocks: &[cranelift_codegen::ir::Block],
-    ) -> (cranelift_codegen::ir::ExceptionTable, cranelift_codegen::ir::Block) {
+    ) -> (
+        cranelift_codegen::ir::ExceptionTable,
+        cranelift_codegen::ir::Block,
+    ) {
         use cranelift_codegen::ir::{
             BlockArg, BlockCall, ExceptionTableData, ExceptionTableItem, ExceptionTag,
         };
@@ -2139,20 +2216,21 @@ impl Translator<'_, '_> {
         self.b.append_block_param(pad, types::I64);
         let ok = self.b.create_block();
         let normal = BlockCall::new(ok, [], &mut self.b.func.dfg.value_lists);
-        let pad_call = self
+        let pad_call = self.b.func.dfg.block_call(pad, &[BlockArg::TryCallExn(0)]);
+        let sigref = self.b.func.import_signature(sig);
+        let et = self
             .b
             .func
             .dfg
-            .block_call(pad, &[BlockArg::TryCallExn(0)]);
-        let sigref = self.b.func.import_signature(sig);
-        let et = self.b.func.dfg.exception_tables.push(ExceptionTableData::new(
-            sigref,
-            normal,
-            [ExceptionTableItem::Tag(
-                ExceptionTag::with_number(0).unwrap(),
-                pad_call,
-            )],
-        ));
+            .exception_tables
+            .push(ExceptionTableData::new(
+                sigref,
+                normal,
+                [ExceptionTableItem::Tag(
+                    ExceptionTag::with_number(0).unwrap(),
+                    pad_call,
+                )],
+            ));
         self.b.switch_to_block(pad);
         let exn = self.b.block_params(pad)[0];
         let ev = self.exception_var();
@@ -2586,15 +2664,12 @@ impl Translator<'_, '_> {
                 let fref = self
                     .module
                     .declare_func_in_func(self.call_foreign, self.b.func);
-                let sp = self
+                let sp = self.b.ins().iconst(types::I64, sym.as_ptr() as i64);
+                let sl = self.b.ins().iconst(types::I64, sym.len() as i64);
+                let sg = self
                     .b
                     .ins()
-                    .iconst(types::I64, sym.as_ptr() as i64);
-                let sl = self.b.ins().iconst(types::I64, sym.len() as i64);
-                let sg = self.b.ins().iconst(
-                    types::I64,
-                    sig as *const ir::ForeignSig as i64,
-                );
+                    .iconst(types::I64, sig as *const ir::ForeignSig as i64);
                 let ap = self.b.ins().stack_addr(types::I64, args_ss, 0);
                 let nv = self.b.ins().iconst(types::I64, av.len() as i64);
                 let fv = self.b.ins().iconst(types::I64, func as i64);
@@ -2710,10 +2785,7 @@ impl Translator<'_, '_> {
                     self.b.ins().jump(blocks[*target as usize], &[]);
                 } else if matches!(unwind, UnwindAction::Continue)
                     && let Some(tag) = alloc_tag
-                    && matches!(
-                        ret,
-                        RetDest::Ignore | RetDest::Scalar(ScalarPlace::Slot(_))
-                    )
+                    && matches!(ret, RetDest::Ignore | RetDest::Scalar(ScalarPlace::Slot(_)))
                 {
                     // 实参定长四槽（realloc 用满；alloc/dealloc 缺位补 0，助手
                     // 按 tag 消费——exec_builtin 本体内 a(i) 只取所需）
@@ -2960,4 +3032,3 @@ pub(super) fn collect_ssa_offs(body: &ir::FuncBody, frame_offs: &FrameMap, out: 
         }
     }
 }
-

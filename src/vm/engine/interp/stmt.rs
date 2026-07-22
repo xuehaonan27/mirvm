@@ -3,7 +3,10 @@
 //! Fence/RepeatBytes。调用方 = runblocks 主循环。
 
 use super::*;
-use super::{rvalue::eval_rvalue, volatile::{mem_read_volatile, mem_write_volatile}};
+use super::{
+    rvalue::eval_rvalue,
+    volatile::{mem_read_volatile, mem_write_volatile},
+};
 
 pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
     match stmt {
@@ -559,7 +562,13 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let pa = eval_place_addr(ctx, base, a);
             let pb = eval_place_addr(ctx, base, b);
             let pd = eval_place_addr(ctx, base, dst);
-            simd_exec::sat128_body(pa as *const u8, pb as *const u8, pd as *mut u8, *op, *signed);
+            simd_exec::sat128_body(
+                pa as *const u8,
+                pb as *const u8,
+                pd as *mut u8,
+                *op,
+                *signed,
+            );
         }
         Stmt::NicheDiscr128 {
             tag,

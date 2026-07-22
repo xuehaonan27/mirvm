@@ -3,8 +3,8 @@
 //! atexit 家族（D8g 注册表 + LIFO 回调执行）。AtomicU64Ptr/ATEXIT 私有
 //! 静态随族走；pub(super) 面供 runblocks/mod.rs。
 
-use super::*;
 use super::call::call_fn_addr;
+use super::*;
 
 pub(super) fn signal_thunk(ctx: *mut Ctx, signum: i32, handler: u64) -> usize {
     // 同步故障信号：guest handler 不可支持（诊断退出而非静默）
@@ -91,11 +91,11 @@ impl AtomicU64Ptr {
     const fn new() -> Self {
         Self(std::sync::atomic::AtomicUsize::new(0))
     }
-pub(super) fn set(&self, p: *const Shared) {
+    pub(super) fn set(&self, p: *const Shared) {
         self.0
             .store(p as usize, std::sync::atomic::Ordering::SeqCst);
     }
-pub(super) fn get(&self) -> *const Shared {
+    pub(super) fn get(&self) -> *const Shared {
         self.0.load(std::sync::atomic::Ordering::SeqCst) as *const Shared
     }
 }
@@ -145,4 +145,3 @@ extern "C" fn run_atexit_callbacks() {
         let _ = call_fn_addr(ctx, entry.func, args, "atexit");
     }
 }
-

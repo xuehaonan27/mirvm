@@ -24,6 +24,7 @@ extern crate rustc_span;
 extern crate rustc_symbol_mangling;
 extern crate rustc_target;
 
+pub(crate) mod arch;
 pub mod baseimage;
 pub mod cachectl;
 pub mod cargo_shim;
@@ -34,6 +35,5 @@ pub mod ircache;
 pub mod lower;
 pub(crate) mod native_archive;
 pub(crate) mod os;
-pub(crate) mod arch;
 pub mod sysroot;
 pub mod vm;

@@ -114,13 +114,22 @@ fn ffi_agg_of<'tcx>(
                 scalar_ffi_kind(b.primitive()).map_err(|p| format!("标量 {p:?} 不支持"))?,
             ),
         });
-        let agg = ir::FfiAgg { size, align, fields };
+        let agg = ir::FfiAgg {
+            size,
+            align,
+            fields,
+        };
         validate_agg_natural(&agg)?;
         return Ok(agg);
     }
     match layout.backend_repr {
         BackendRepr::Memory { .. } => {}
-        _ => return Err(format!("按值聚合布局形态 {:?} 不支持（C1 边界；SIMD 另轴）", layout.backend_repr)),
+        _ => {
+            return Err(format!(
+                "按值聚合布局形态 {:?} 不支持（C1 边界；SIMD 另轴）",
+                layout.backend_repr
+            ));
+        }
     }
     if layout.ty.is_union() {
         return Err("按值聚合 union（C1 边界；SysV union 分类另规则）".into());
@@ -133,9 +142,7 @@ fn ffi_agg_of<'tcx>(
     };
     match layout.ty.kind() {
         rustc_middle::ty::TyKind::Array(elem_ty, n) => {
-            let n = n
-                .try_to_target_usize(tcx)
-                .ok_or("按值聚合数组长度不求值")?;
+            let n = n.try_to_target_usize(tcx).ok_or("按值聚合数组长度不求值")?;
             let elem_layout = layout_of_ty(*elem_ty)?;
             let stride = elem_layout.layout.size().bytes() as u32;
             for i in 0..n {
@@ -159,12 +166,21 @@ fn ffi_agg_of<'tcx>(
             let var = def.variant(rustc_abi::VariantIdx::ZERO);
             for (i, f) in var.fields.iter().enumerate() {
                 let off = layout.layout.fields.offset(i).bytes() as u32;
-                push_agg_field(tcx, &mut fields, off, layout_of_ty(tcx.normalize_erasing_regions(env, f.ty(tcx, args)))?)?;
+                push_agg_field(
+                    tcx,
+                    &mut fields,
+                    off,
+                    layout_of_ty(tcx.normalize_erasing_regions(env, f.ty(tcx, args)))?,
+                )?;
             }
         }
         other => return Err(format!("按值聚合类型形态 {other:?} 不支持")),
     }
-    let agg = ir::FfiAgg { size, align, fields };
+    let agg = ir::FfiAgg {
+        size,
+        align,
+        fields,
+    };
     validate_agg_natural(&agg)?;
     Ok(agg)
 }
@@ -180,7 +196,9 @@ fn push_agg_field<'tcx>(
         return Ok(());
     }
     let leaf = if let rustc_abi::BackendRepr::Scalar(s) = fl.backend_repr {
-        ir::FfiLeaf::Scalar(scalar_ffi_kind(s.primitive()).map_err(|p| format!("标量 {p:?} 不支持"))?)
+        ir::FfiLeaf::Scalar(
+            scalar_ffi_kind(s.primitive()).map_err(|p| format!("标量 {p:?} 不支持"))?,
+        )
     } else {
         ir::FfiLeaf::Agg(ffi_agg_of(tcx, fl)?)
     };
@@ -208,10 +226,7 @@ fn validate_agg_natural(agg: &ir::FfiAgg) -> Result<(), String> {
                     ir::FfiKind::I8 | ir::FfiKind::U8 => 1,
                     ir::FfiKind::I16 | ir::FfiKind::U16 => 2,
                     ir::FfiKind::I32 | ir::FfiKind::U32 | ir::FfiKind::F32 => 4,
-                    ir::FfiKind::I64
-                    | ir::FfiKind::U64
-                    | ir::FfiKind::F64
-                    | ir::FfiKind::Ptr => 8,
+                    ir::FfiKind::I64 | ir::FfiKind::U64 | ir::FfiKind::F64 | ir::FfiKind::Ptr => 8,
                     ir::FfiKind::Void | ir::FfiKind::Agg(_) => return None,
                 };
                 Some((n, n))
@@ -235,10 +250,8 @@ fn validate_agg_natural(agg: &ir::FfiAgg) -> Result<(), String> {
     }
     if natural_layout(agg) != Some((agg.size, agg.align)) {
         return Err(
-            "按值聚合非自然布局（packed/align(N)——libffi 类型系统不可表达，F-06 边界）"
-                .into(),
+            "按值聚合非自然布局（packed/align(N)——libffi 类型系统不可表达，F-06 边界）".into(),
         );
     }
     Ok(())
 }
-

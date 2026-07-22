@@ -6,7 +6,6 @@ use super::*;
 use crate::lower::purity::arg_mentions_local;
 
 impl<'tcx> Linker<'tcx> {
-
     /// 裸字节物化进冻结区（128 位常量等小常量的通用道）。
     /// A2 split：纯字节无指针无 locality，按当前类定域即可。
     pub(crate) fn frozen_alloc_bytes(&mut self, bytes: &[u8]) -> u64 {
@@ -73,10 +72,8 @@ impl<'tcx> Linker<'tcx> {
                         // 引擎模型符号（TLS-dtor 一族）——std 对它们走回退路径，
                         // 引擎接管不被真符号绕开（E27 闭合契约，2026-07-18）。
                         const FORCE_ABSENT_WEAK: &[&str] = &["__cxa_thread_atexit_impl"];
-                        let engine_owned = self
-                            .builtins
-                            .get(&Symbol::intern(name))
-                            .is_some_and(|b| {
+                        let engine_owned =
+                            self.builtins.get(&Symbol::intern(name)).is_some_and(|b| {
                                 !matches!(
                                     b,
                                     ir::Builtin::HostGetenv
@@ -84,10 +81,9 @@ impl<'tcx> Linker<'tcx> {
                                         | ir::Builtin::HostStrlen
                                         | ir::Builtin::HostAbort
                                 )
-                            })
-                            || DENY_EXACT.contains(&name)
-                            || DENY_PREFIX.iter().any(|p| name.starts_with(p))
-                            || FORCE_ABSENT_WEAK.contains(&name);
+                            }) || DENY_EXACT.contains(&name)
+                                || DENY_PREFIX.iter().any(|p| name.starts_with(p))
+                                || FORCE_ABSENT_WEAK.contains(&name);
                         let cell = if engine_owned {
                             // 判空 cell = 符号缺席（krate 定域 + 双表登记同前）
                             if let Some(s) = &mut self.split

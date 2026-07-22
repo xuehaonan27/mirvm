@@ -24,19 +24,27 @@ mod compiler;
 mod frame;
 #[cfg(feature = "cranelift")]
 mod helpers;
+#[cfg(all(
+    test,
+    feature = "cranelift",
+    target_arch = "x86_64",
+    target_os = "linux"
+))]
+mod lsda_probe;
 #[cfg(feature = "cranelift")]
 mod translate;
-#[cfg(all(test, feature = "cranelift", target_arch = "x86_64", target_os = "linux"))]
-mod lsda_probe;
 
 #[cfg(feature = "cranelift")]
 pub(crate) use compiler::start;
 
 // 编译管线的共享 imports（feature 门内；子模块经 `use super::*` 继承）。
 #[cfg(feature = "cranelift")]
-use std::sync::atomic::Ordering;
+use crate::vm::engine::ctx::Shared;
 #[cfg(feature = "cranelift")]
-use std::sync::mpsc::{Receiver, Sender};
+use crate::vm::engine::ir::{
+    self, IntBinOp, IntCc, Operand, OvfOp, ParamAbi, RetAbi, RetDest, ScalarPlace, Slot, Stmt,
+    SwitchDiscr, Terminator, UnwindAction, Width,
+};
 #[cfg(feature = "cranelift")]
 use cranelift_codegen::ir::condcodes::IntCC;
 #[cfg(feature = "cranelift")]
@@ -55,9 +63,6 @@ use cranelift_jit::{JITBuilder, JITModule};
 #[cfg(feature = "cranelift")]
 use cranelift_module::{FuncId as ClifFuncId, Linkage, Module as ClifModule};
 #[cfg(feature = "cranelift")]
-use crate::vm::engine::ctx::Shared;
+use std::sync::atomic::Ordering;
 #[cfg(feature = "cranelift")]
-use crate::vm::engine::ir::{
-    self, IntBinOp, IntCc, Operand, OvfOp, ParamAbi, RetAbi, RetDest, ScalarPlace, Slot, Stmt,
-    SwitchDiscr, Terminator, UnwindAction, Width,
-};
+use std::sync::mpsc::{Receiver, Sender};

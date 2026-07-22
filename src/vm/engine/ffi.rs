@@ -140,7 +140,10 @@ pub(crate) fn resolve_got_fixups(module: &mut super::ir::Module) -> Result<(), S
     ffi.ensure_libs(&module.native_libs, &module.required_native_libs)?;
     let mut resolved: Vec<u64> = Vec::with_capacity(module.foreign_syms.len());
     for s in &module.foreign_syms {
-        match (ffi.resolve(&s.name, &module.native_libs, &module.required_native_libs)?, s.weak) {
+        match (
+            ffi.resolve(&s.name, &module.native_libs, &module.required_native_libs)?,
+            s.weak,
+        ) {
             (Some(p), _) => resolved.push(p as u64),
             (None, true) => resolved.push(0),
             (None, false) => {
@@ -357,29 +360,35 @@ mod tests {
         )
         .unwrap();
         use std::process::Command;
-        assert!(Command::new("cc")
-            .args(["-fPIC", "-c"])
-            .arg(&c)
-            .arg("-o")
-            .arg(&o)
-            .status()
-            .unwrap()
-            .success());
-        assert!(Command::new("ar")
-            .args(["crs"])
-            .arg(&a)
-            .arg(&o)
-            .status()
-            .unwrap()
-            .success());
-        assert!(Command::new("cc")
-            .args(["-shared", "-Wl,-z,defs", "-Wl,--whole-archive"])
-            .arg(&a)
-            .args(["-Wl,--no-whole-archive", "-o"])
-            .arg(&so)
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            Command::new("cc")
+                .args(["-fPIC", "-c"])
+                .arg(&c)
+                .arg("-o")
+                .arg(&o)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("ar")
+                .args(["crs"])
+                .arg(&a)
+                .arg(&o)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("cc")
+                .args(["-shared", "-Wl,-z,defs", "-Wl,--whole-archive"])
+                .arg(&a)
+                .args(["-Wl,--no-whole-archive", "-o"])
+                .arg(&so)
+                .status()
+                .unwrap()
+                .success()
+        );
         // 前提：hidden malloc 不进 .dynsym，进程全域只有 libc 本尊
         let libc_malloc = crate::os::dll::sym(0, c"malloc");
         assert!(libc_malloc != 0);

@@ -207,9 +207,7 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
                 // T1-d：SIMD 15 件 + Sat128（mirvm_simd_stmt 助手，interp
                 // simd_exec 共享本体）——place 字段 place_ok、Operand 字段
                 // operand_ok、SimdExtractDyn 的 dst 是 ScalarPlace 用 mem_place_ok
-                Stmt::SimdBin { dst, a, b, .. } => {
-                    place_ok(dst) && place_ok(a) && place_ok(b)
-                }
+                Stmt::SimdBin { dst, a, b, .. } => place_ok(dst) && place_ok(a) && place_ok(b),
                 Stmt::SimdUn { dst, a, .. } => place_ok(dst) && place_ok(a),
                 Stmt::SimdFma { dst, a, b, c, .. } => {
                     place_ok(dst) && place_ok(a) && place_ok(b) && place_ok(c)
@@ -230,14 +228,9 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
                     mask,
                     dst,
                     ..
-                } => {
-                    place_ok(passthru) && place_ok(ptrs) && place_ok(mask) && place_ok(dst)
-                }
+                } => place_ok(passthru) && place_ok(ptrs) && place_ok(mask) && place_ok(dst),
                 Stmt::SimdScatter {
-                    values,
-                    ptrs,
-                    mask,
-                    ..
+                    values, ptrs, mask, ..
                 } => place_ok(values) && place_ok(ptrs) && place_ok(mask),
                 Stmt::SimdMaskedLoad {
                     mask,
@@ -245,37 +238,21 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
                     passthru,
                     dst,
                     ..
-                } => {
-                    place_ok(mask) && operand_ok(base) && place_ok(passthru) && place_ok(dst)
-                }
+                } => place_ok(mask) && operand_ok(base) && place_ok(passthru) && place_ok(dst),
                 Stmt::SimdMaskedStore {
-                    mask,
-                    base,
-                    values,
-                    ..
+                    mask, base, values, ..
                 } => place_ok(mask) && operand_ok(base) && place_ok(values),
-                Stmt::SimdExtractDyn {
-                    src, idx, dst, ..
-                } => place_ok(src) && operand_ok(idx) && mem_place_ok(dst),
-                Stmt::SimdInsertDyn {
-                    src,
-                    idx,
-                    val,
-                    dst,
-                    ..
-                } => {
-                    place_ok(src) && operand_ok(idx) && operand_ok(val) && place_ok(dst)
+                Stmt::SimdExtractDyn { src, idx, dst, .. } => {
+                    place_ok(src) && operand_ok(idx) && mem_place_ok(dst)
                 }
+                Stmt::SimdInsertDyn {
+                    src, idx, val, dst, ..
+                } => place_ok(src) && operand_ok(idx) && operand_ok(val) && place_ok(dst),
                 Stmt::SimdArithOffset {
-                    ptrs,
-                    offsets,
-                    dst,
-                    ..
+                    ptrs, offsets, dst, ..
                 } => place_ok(ptrs) && place_ok(offsets) && place_ok(dst),
                 Stmt::SimdSplat { dst, val, .. } => place_ok(dst) && operand_ok(val),
-                Stmt::Sat128 { a, b, dst, .. } => {
-                    place_ok(a) && place_ok(b) && place_ok(dst)
-                }
+                Stmt::Sat128 { a, b, dst, .. } => place_ok(a) && place_ok(b) && place_ok(dst),
                 // T1-d：Trap 占位（mirvm_jit_trap 助手同 interp 文案）/ Nop
                 Stmt::Trap(_) | Stmt::Nop => true,
             };
@@ -347,10 +324,7 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
             // unwind 三向全开（同 Call）；实参可求值；ret 形态同 interp 支持面
             // （Pair 返回 interp 亦 engine_abort——留解释即保持同诊断）
             Terminator::CallForeign {
-                args,
-                ret,
-                unwind,
-                ..
+                args, ret, unwind, ..
             } => {
                 matches!(
                     unwind,
@@ -367,10 +341,7 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
             // exec_builtin 同一本体）——unwind 三向全开（同 Call）；实参可求值；
             // ret 落点同 interp 全形态
             Terminator::CallBuiltin {
-                args,
-                ret,
-                unwind,
-                ..
+                args, ret, unwind, ..
             } => {
                 matches!(
                     unwind,
@@ -398,4 +369,3 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
 }
 
 // ===== 编译器 =====
-

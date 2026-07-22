@@ -63,7 +63,9 @@ fn du(path: &Path) -> (u64, u64) {
     let mut files = 0u64;
     let mut stack = vec![path.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -98,10 +100,22 @@ fn varint(b: &[u8]) -> Option<(u128, usize)> {
     let (&tag, rest) = b.split_first()?;
     Some(match tag {
         0..=250 => (tag as u128, 1),
-        251 => (u16::from_le_bytes(rest.get(..2)?.try_into().ok()?) as u128, 3),
-        252 => (u32::from_le_bytes(rest.get(..4)?.try_into().ok()?) as u128, 5),
-        253 => (u64::from_le_bytes(rest.get(..8)?.try_into().ok()?) as u128, 9),
-        254 => (u128::from_le_bytes(rest.get(..16)?.try_into().ok()?) as u128, 17),
+        251 => (
+            u16::from_le_bytes(rest.get(..2)?.try_into().ok()?) as u128,
+            3,
+        ),
+        252 => (
+            u32::from_le_bytes(rest.get(..4)?.try_into().ok()?) as u128,
+            5,
+        ),
+        253 => (
+            u64::from_le_bytes(rest.get(..8)?.try_into().ok()?) as u128,
+            9,
+        ),
+        254 => (
+            u128::from_le_bytes(rest.get(..16)?.try_into().ok()?) as u128,
+            17,
+        ),
         255 => return None,
     })
 }
@@ -207,11 +221,7 @@ pub fn status(root: &Path) -> String {
         } else {
             let (bytes, files) = du(&dir);
             total += bytes;
-            out += &format!(
-                "  {:<36} {:>9}  ({files} 件)\n",
-                fam.name,
-                human(bytes)
-            );
+            out += &format!("  {:<36} {:>9}  ({files} 件)\n", fam.name, human(bytes));
         }
     }
     // 非族属杂项（如 tests 的 project-suite）
@@ -231,7 +241,10 @@ pub fn status(root: &Path) -> String {
     }
     out += &format!("  {:<36} {:>9}\n", "合计", human(total));
     if total_stale > 0 {
-        out += &format!("陈代+垃圾可清：{}（`mirvm cache purge`）\n", human(total_stale));
+        out += &format!(
+            "陈代+垃圾可清：{}（`mirvm cache purge`）\n",
+            human(total_stale)
+        );
     }
     out
 }
@@ -243,7 +256,12 @@ pub fn purge(root: &Path, plan: Purge) -> String {
     let dry = plan.dry_run;
     let rm_file = |p: &Path, why: &str, freed: &mut u64, acted: &mut u64, out: &mut String| {
         let sz = p.metadata().map(|m| m.len()).unwrap_or(0);
-        *out += &format!("  {} {}（{}，{why}）\n", if dry { "将删" } else { "已删" }, p.display(), human(sz));
+        *out += &format!(
+            "  {} {}（{}，{why}）\n",
+            if dry { "将删" } else { "已删" },
+            p.display(),
+            human(sz)
+        );
         if !dry && std::fs::remove_file(p).is_ok() {
             *freed += sz;
             *acted += 1;
@@ -273,10 +291,12 @@ pub fn purge(root: &Path, plan: Purge) -> String {
         let dir = root.join(name);
         if !fam.entry_ext.is_empty() {
             let (cur, stale, garb) = split_generational(&dir, fam.entry_ext);
-            if whole(name, matches!(name, "deps" if plan.deps)
-                || matches!(name, "base" if plan.base)
-                || matches!(name, "ir" if plan.ir))
-            {
+            if whole(
+                name,
+                matches!(name, "deps" if plan.deps)
+                    || matches!(name, "base" if plan.base)
+                    || matches!(name, "ir" if plan.ir),
+            ) {
                 freed += rm_dir(&dir, "整族全清", dry, &mut out);
                 acted += 1;
                 continue;
@@ -383,13 +403,23 @@ mod tests {
         // dry-run：只报不动
         let report = purge(
             &root,
-            Purge { stale: true, dry_run: true, ..Default::default() },
+            Purge {
+                stale: true,
+                dry_run: true,
+                ..Default::default()
+            },
         );
         assert!(report.contains("将删"));
         assert!(!report.contains("build.log"));
         assert!(old.exists() && cur.exists());
         // 真清：陈代走、当代留、副产不动
-        let report = purge(&root, Purge { stale: true, ..Default::default() });
+        let report = purge(
+            &root,
+            Purge {
+                stale: true,
+                ..Default::default()
+            },
+        );
         assert!(report.contains("已删"));
         assert!(!old.exists() && cur.exists() && log.exists());
         let _ = std::fs::remove_dir_all(&root);
@@ -403,11 +433,24 @@ mod tests {
         std::fs::write(sysroot.join("lib/x.rlib"), b"x").unwrap();
         fake_entry(&root.join("ir"), "a.bin", "0000000000000000");
         std::fs::create_dir_all(root.join("scripts/h/target")).unwrap();
-        purge(&root, Purge { all: true, ..Default::default() });
+        purge(
+            &root,
+            Purge {
+                all: true,
+                ..Default::default()
+            },
+        );
         assert!(sysroot.exists());
         assert!(!root.join("scripts").exists());
         assert!(!root.join("ir").exists());
-        purge(&root, Purge { all: true, sysroot: true, ..Default::default() });
+        purge(
+            &root,
+            Purge {
+                all: true,
+                sysroot: true,
+                ..Default::default()
+            },
+        );
         assert!(!sysroot.exists());
         let _ = std::fs::remove_dir_all(&root);
     }

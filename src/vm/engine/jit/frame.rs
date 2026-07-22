@@ -95,7 +95,9 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
     }
     fn scan_op(out: &mut FrameMap, op: &Operand, fsz: u32) {
         match op {
-            Operand::Mem { expr, width } => scan_place(out, expr, Extent::Bytes(width.bytes()), fsz),
+            Operand::Mem { expr, width } => {
+                scan_place(out, expr, Extent::Bytes(width.bytes()), fsz)
+            }
             Operand::AddrOf(expr) => scan_place(out, expr, Extent::Escape, fsz),
             Operand::SubImm { base, .. } => scan_op(out, base, fsz),
             Operand::Slot(_) | Operand::Imm { .. } => {}
@@ -177,7 +179,12 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
                 lanes,
                 lane_bytes,
                 ..
-            } => scan_place(out, a, Extent::Bytes(*lanes as u32 * *lane_bytes as u32), fsz),
+            } => scan_place(
+                out,
+                a,
+                Extent::Bytes(*lanes as u32 * *lane_bytes as u32),
+                fsz,
+            ),
             R::TlsRef(_) => {}
         }
     }

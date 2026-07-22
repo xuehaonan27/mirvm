@@ -203,7 +203,8 @@ pub fn store_and_wrap(
     // 文件走、装载后经启动相重填本进程真值——不再是写盘障碍。
     let cacheable = bi.module.frozen.as_ref().is_some_and(|fr| {
         fr.at_fixed_base() && fr.home() == crate::vm::engine::addrlayout::image_addr(0)
-    }) && (bi.module.entry_stub_sites.is_empty() || bi.module.entry_stubs.at_fixed_base());
+    }) && (bi.module.entry_stub_sites.is_empty()
+        || bi.module.entry_stubs.at_fixed_base());
     let keyed = pre_key(rustc_args, base_key);
     if let (true, Some((key, stamps))) = (cacheable, keyed) {
         let mut fn_entry_syms = bi

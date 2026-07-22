@@ -2,8 +2,8 @@
 //! unreachable/div_zero/volatile + 128/f128/f16 宿主直算 21 件 + libm
 //! 符号表。JIT 码经 import symbol 调回引擎；注册点 = compiler.rs。
 
-use super::*;
 use super::compiler::SHARED;
+use super::*;
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
@@ -121,9 +121,7 @@ pub(super) extern "C-unwind" fn mirvm_call_terminate(
             *ret.add(1) = hi;
         },
         Err(_) => {
-            eprintln!(
-                "mirvm[m4-engine]: unwind 抵达 Terminate 边界（double panic/ABI）——abort"
-            );
+            eprintln!("mirvm[m4-engine]: unwind 抵达 Terminate 边界（double panic/ABI）——abort");
             std::process::abort()
         }
     }
@@ -180,8 +178,7 @@ pub(super) extern "C-unwind" fn mirvm_call_indirect(
         // guest 持 native 真码 fn ptr（运行期 dlsym 所得）→ 按冻结签名直调；
         // Agg 返回时首槽即目的地址（libffi sret 不占参数位，剔除后直调）——interp 同
         let nsig = unsafe { &*(native_sig as *const crate::vm::engine::ir::ForeignSig) };
-        let (ret_dst, arg_slice) = if matches!(nsig.ret, crate::vm::engine::ir::FfiKind::Agg(_))
-        {
+        let (ret_dst, arg_slice) = if matches!(nsig.ret, crate::vm::engine::ir::FfiKind::Agg(_)) {
             (av.first().copied(), &av[1..])
         } else {
             (None, av)
@@ -550,7 +547,13 @@ pub(super) extern "C-unwind" fn mirvm_f128_bin(
 }
 
 /// f128 比较（cc: 0=Eq 1=Ne 2=Lt 3=Le 4=Gt 5=Ge；IEEE 语义 NaN 全 false 除 Ne）
-pub(super) extern "C-unwind" fn mirvm_f128_cmp(cc: u64, alo: u64, ahi: u64, blo: u64, bhi: u64) -> u64 {
+pub(super) extern "C-unwind" fn mirvm_f128_cmp(
+    cc: u64,
+    alo: u64,
+    ahi: u64,
+    blo: u64,
+    bhi: u64,
+) -> u64 {
     let (a, b) = (f128_of(alo, ahi), f128_of(blo, bhi));
     match cc {
         0 => (a == b) as u64,
@@ -660,7 +663,12 @@ pub(super) extern "C-unwind" fn mirvm_f128_to_scalar(kind: u64, alo: u64, ahi: u
 }
 
 /// i128/u128 ↔ f128（signed: 0=unsigned, 1=signed；方向 from: int→f128 / to: f128→int 饱和）
-pub(super) extern "C-unwind" fn mirvm_f128_from_wide(signed: bool, lo: u64, hi: u64, out: *mut u64) {
+pub(super) extern "C-unwind" fn mirvm_f128_from_wide(
+    signed: bool,
+    lo: u64,
+    hi: u64,
+    out: *mut u64,
+) {
     let r = if signed {
         (lo_hi(lo, hi) as i128) as f128
     } else {
@@ -672,7 +680,12 @@ pub(super) extern "C-unwind" fn mirvm_f128_from_wide(signed: bool, lo: u64, hi: 
         *out.add(1) = h;
     }
 }
-pub(super) extern "C-unwind" fn mirvm_f128_to_wide(signed: bool, alo: u64, ahi: u64, out: *mut u64) {
+pub(super) extern "C-unwind" fn mirvm_f128_to_wide(
+    signed: bool,
+    alo: u64,
+    ahi: u64,
+    out: *mut u64,
+) {
     let a = f128_of(alo, ahi);
     let v: u128 = if signed {
         (a as i128) as u128
@@ -687,7 +700,12 @@ pub(super) extern "C-unwind" fn mirvm_f128_to_wide(signed: bool, alo: u64, ahi: 
 }
 
 /// float → i128/u128 饱和（Wide128ToFloat 的对侧；kind: 0=f16 1=f32 2=f64）
-pub(super) extern "C-unwind" fn mirvm_float_to_wide(kind: u64, v: u64, signed: bool, out: *mut u64) {
+pub(super) extern "C-unwind" fn mirvm_float_to_wide(
+    kind: u64,
+    v: u64,
+    signed: bool,
+    out: *mut u64,
+) {
     let r: u128 = match (kind, signed) {
         (0, true) => (f16::from_bits(v as u16) as i128) as u128,
         (0, false) => f16::from_bits(v as u16) as u128,
@@ -1110,14 +1128,7 @@ pub(super) extern "C-unwind" fn mirvm_simd_stmt(
         } => return x::simd_extract_dyn_body(a as *const u8, v0, *lanes, *lane_bytes),
         ir::Stmt::SimdInsertDyn {
             lanes, lane_bytes, ..
-        } => x::simd_insert_dyn_body(
-            dst as *mut u8,
-            a as *const u8,
-            v0,
-            v1,
-            *lanes,
-            *lane_bytes,
-        ),
+        } => x::simd_insert_dyn_body(dst as *mut u8, a as *const u8, v0, v1, *lanes, *lane_bytes),
         ir::Stmt::SimdArithOffset { stride, lanes, .. } => x::simd_arith_offset_body(
             dst as *mut u8,
             a as *const u8,
@@ -1161,4 +1172,3 @@ pub(super) extern "C-unwind" fn mirvm_simd_rv(rv: u64, pa: u64) -> u64 {
         _ => unreachable!("admit 已排定"),
     }
 }
-

@@ -187,7 +187,10 @@ unsafe extern "C" fn entry_trampoline(
     data: &EntryThunkData,
 ) {
     let shared = ENTRY_SHARED.load(Ordering::SeqCst) as *const Shared;
-    assert!(!shared.is_null(), "条目 stub 在 Shared 发布前被调（引擎不变量）");
+    assert!(
+        !shared.is_null(),
+        "条目 stub 在 Shared 发布前被调（引擎不变量）"
+    );
     let ctx = super::ctx::attach(unsafe { &*shared });
     let av = unsafe { marshal_args(&data.args, args) };
     match &data.ret {

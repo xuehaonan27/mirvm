@@ -5,9 +5,18 @@
 //! edge: Cell<Option<Bb>> 协议与 mod.rs 的 FrameGuard 同侧未拆。
 
 use super::*;
-use super::{stmt::exec_stmt, call::{cleanup_edge, call_guarding_terminate, exec_builtin}};
+use super::{
+    call::{call_guarding_terminate, cleanup_edge, exec_builtin},
+    stmt::exec_stmt,
+};
 
-pub(super) fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Option<Bb>>, entry: Bb) -> Exit {
+pub(super) fn run_blocks(
+    ctx: *mut Ctx,
+    func: u32,
+    base: usize,
+    edge: &Cell<Option<Bb>>,
+    entry: Bb,
+) -> Exit {
     let module: &Module = unsafe { &(*(*ctx).shared).module };
     let body: &FuncBody = &module.funcs[func as usize];
 
@@ -101,7 +110,15 @@ pub(super) fn run_blocks(ctx: *mut Ctx, func: u32, base: usize, edge: &Cell<Opti
                 let stack_restore = crate::vm::engine::ffi::amplify_pthread_stack(sym, &av);
                 let r = {
                     let ffi = unsafe { &mut (*ctx).ffi };
-                    crate::vm::engine::ffi::call(ffi, optional_libs, required_libs, sym, sig, &av, ret_dst)
+                    crate::vm::engine::ffi::call(
+                        ffi,
+                        optional_libs,
+                        required_libs,
+                        sym,
+                        sig,
+                        &av,
+                        ret_dst,
+                    )
                 };
                 if let Some((attr, orig)) = stack_restore {
                     crate::os::thread::attr_set_stack_size(attr, orig);

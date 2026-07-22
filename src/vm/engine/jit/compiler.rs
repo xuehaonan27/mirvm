@@ -22,12 +22,12 @@
 //!
 //! 单 worker 线程持 JITModule（代码内存进程生命周期，cranelift-jit 无逐函数释放）。
 
-use super::*;
-use super::helpers::*;
-use super::helpers::_Unwind_Resume;
 use super::admit::{CalleeAbi, admit, callee_abi};
 use super::frame::analyze_frame;
+use super::helpers::_Unwind_Resume;
+use super::helpers::*;
 use super::translate::Translator;
+use super::*;
 
 /// c2i 壳的引擎定位（单引擎进程模型，与 TRACK_DIAGNOSTIC 全局钩同一假设面）。
 pub(super) static SHARED: std::sync::atomic::AtomicPtr<Shared> =
@@ -136,7 +136,10 @@ impl Compiler {
         jb.symbol("mirvm_volatile_load", mirvm_volatile_load as *const u8);
         jb.symbol("mirvm_volatile_store", mirvm_volatile_store as *const u8);
         jb.symbol("mirvm_call_indirect", mirvm_call_indirect as *const u8);
-        jb.symbol("mirvm_jit_terminate_abort", mirvm_jit_terminate_abort as *const u8);
+        jb.symbol(
+            "mirvm_jit_terminate_abort",
+            mirvm_jit_terminate_abort as *const u8,
+        );
         jb.symbol("mirvm_call_terminate", mirvm_call_terminate as *const u8);
         jb.symbol("_Unwind_Resume", _Unwind_Resume as *const u8);
         jb.symbol("mirvm_jit_trap", mirvm_jit_trap as *const u8);
@@ -374,16 +377,12 @@ impl Compiler {
         let mut callees: Vec<(u32, CalleeAbi)> = Vec::new();
         for blk in &body.blocks {
             if let Terminator::Call {
-                callee,
-                args,
-                ret,
-                ..
+                callee, args, ret, ..
             } = &blk.term
                 && *callee != func
                 && !callees.iter().any(|(c, _)| c == callee)
                 && let Some(cabi) = callee_abi(&self.shared.module.funcs[*callee as usize])
-                && cabi.nparams
-                    == args.len() + usize::from(matches!(ret, RetDest::Indirect(_)))
+                && cabi.nparams == args.len() + usize::from(matches!(ret, RetDest::Indirect(_)))
             {
                 callees.push((*callee, cabi));
             }
@@ -574,7 +573,10 @@ impl Compiler {
                 eprintln!("mirvm-jit-debug: define_function 失败: {e:#?}");
             }
             if std::env::var_os("MIRVM_JIT_DEBUG_DUMP").is_some() {
-                eprintln!("mirvm-jit-debug: 失败函数 CLIF 转储 f{func}:\n{}", cctx.func.display());
+                eprintln!(
+                    "mirvm-jit-debug: 失败函数 CLIF 转储 f{func}:\n{}",
+                    cctx.func.display()
+                );
             }
             return None;
         }

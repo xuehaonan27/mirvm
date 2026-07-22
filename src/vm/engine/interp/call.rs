@@ -86,9 +86,7 @@ pub(crate) fn call_guest_ffi(
     let body: &FuncBody = &module.funcs[func as usize];
     let mut av: Vec<u64> = Vec::with_capacity(vals.len() + body.params.len() + 1);
     if let RetAbi::Indirect { .. } = body.ret {
-        av.push(
-            ret_addr.expect("C1：callee 按值聚合返回（RetAbi::Indirect）但无结果地址"),
-        );
+        av.push(ret_addr.expect("C1：callee 按值聚合返回（RetAbi::Indirect）但无结果地址"));
     }
     let mut ki = 0usize;
     for p in &body.params {
@@ -103,9 +101,10 @@ pub(crate) fn call_guest_ffi(
                     av.push(vals[ki]);
                     ki += 1;
                 }
-                None => {
-                    engine_abort(&format!("C1 封送缺参（callee fn {} params {:?}）", body.name, body.params))
-                }
+                None => engine_abort(&format!(
+                    "C1 封送缺参（callee fn {} params {:?}）",
+                    body.name, body.params
+                )),
             },
             ParamAbi::Pair(_, _) => match kinds.get(ki) {
                 Some(FfiKind::Agg(agg)) => {
@@ -154,9 +153,7 @@ pub(super) unsafe fn agg_leaf_at(addr: u64, agg: &FfiAgg, idx: usize) -> u64 {
         match k {
             FfiKind::I8 | FfiKind::U8 => p.read() as u64,
             FfiKind::I16 | FfiKind::U16 => (p as *const u16).read_unaligned() as u64,
-            FfiKind::I32 | FfiKind::U32 | FfiKind::F32 => {
-                (p as *const u32).read_unaligned() as u64
-            }
+            FfiKind::I32 | FfiKind::U32 | FfiKind::F32 => (p as *const u32).read_unaligned() as u64,
             FfiKind::I64 | FfiKind::U64 | FfiKind::F64 | FfiKind::Ptr => {
                 (p as *const u64).read_unaligned()
             }
@@ -285,7 +282,6 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
         Exit::Resume => engine_abort(&format!("Resume 出现在正常执行路径（fn {}）", body.name)),
     }
 }
-
 
 /// T1-b（m5.4-design §3.2）：CallBuiltin 语义体（自 runblocks.rs 的 630 行臂
 /// 机械提取，零行为变化）——interp 薄臂与 JIT mirvm_call_builtin/mirvm_alloc
@@ -687,9 +683,8 @@ pub(crate) fn exec_builtin(
         // 走用户分配器，否则跨堆 free = mimalloc 元数据 SIGSEGV。
         Builtin::RustAlloc => match module.custom_alloc_shims {
             Some(s) => {
-                let (lo, _) = call_guarding_terminate(unwind, || {
-                    call_guest(ctx, s.alloc, &[a(0), a(1)])
-                });
+                let (lo, _) =
+                    call_guarding_terminate(unwind, || call_guest(ctx, s.alloc, &[a(0), a(1)]));
                 lo
             }
             None => crate::vm::engine::heap::alloc(a(0), a(1)),
@@ -727,9 +722,7 @@ pub(crate) fn exec_builtin(
         Builtin::UnwindRaise => raise_guest(a(0)),
         // os:: 最小直通（真实地址零编组；M4.3 正式注册表）
         Builtin::HostGetenv => crate::os::process::getenv(a(0)),
-        Builtin::HostWrite => {
-            crate::os::process::write_fd(a(0) as i32, a(1), a(2) as usize) as u64
-        }
+        Builtin::HostWrite => crate::os::process::write_fd(a(0) as i32, a(1), a(2) as usize) as u64,
         Builtin::HostStrlen => crate::os::process::c_strlen(a(0)),
         Builtin::HostAbort => {
             eprintln!("mirvm[m4-engine]: guest abort()");
@@ -769,13 +762,12 @@ pub(crate) fn exec_builtin(
             let (signum, handler) = (a(0) as i32, a(1) as usize);
             // guest handler（非 DFL/IGN）：async 信号 → 物化 AS-trampoline
             //（D8d）；sync 故障信号 → 响亮拒绝（宿主/guest 故障不可分辨）。
-            let real = if handler != crate::os::signal::SIG_DFL
-                && handler != crate::os::signal::SIG_IGN
-            {
-                signal_thunk(ctx, signum, handler as u64)
-            } else {
-                handler
-            };
+            let real =
+                if handler != crate::os::signal::SIG_DFL && handler != crate::os::signal::SIG_IGN {
+                    signal_thunk(ctx, signum, handler as u64)
+                } else {
+                    handler
+                };
             crate::os::signal::signal(signum, real) as u64
         }
         Builtin::HostSigaction => {
@@ -785,16 +777,13 @@ pub(crate) fn exec_builtin(
             let mut patched = unsafe { crate::os::signal::Sigaction::copy_from(act) };
             if let Some(p) = patched.as_mut() {
                 let h = p.handler();
-                if h != crate::os::signal::SIG_DFL && h != crate::os::signal::SIG_IGN
-                {
+                if h != crate::os::signal::SIG_DFL && h != crate::os::signal::SIG_IGN {
                     p.set_handler(signal_thunk(ctx, signum, h as u64));
                 }
             }
             crate::os::signal::sigaction(signum, patched.as_ref(), oldact) as u64
         }
-        Builtin::Unsupported(name) => {
-            engine_abort(&format!("unsupported builtin `{}`", name.0))
-        }
+        Builtin::Unsupported(name) => engine_abort(&format!("unsupported builtin `{}`", name.0)),
         Builtin::UnwindDeleteException => {
             // Itanium `_Unwind_Exception`：exception_class @0，cleanup fn @8。
             // guest panic 的 cleanup 是冻结 fn 条目；foreign exception 也可能
@@ -847,9 +836,7 @@ pub(crate) fn exec_builtin(
         Builtin::X86Crc32U32 => unsafe {
             u64::from(crate::arch::x86_64::crc32_u32(a(0) as u32, a(1) as u32))
         },
-        Builtin::X86Crc32U64 => unsafe {
-            crate::arch::x86_64::crc32_u64(a(0), a(1))
-        },
+        Builtin::X86Crc32U64 => unsafe { crate::arch::x86_64::crc32_u64(a(0), a(1)) },
         Builtin::X86Pshufb128
         | Builtin::X86Pshufb256
         | Builtin::X86Sha256Msg1
@@ -901,9 +888,7 @@ pub(crate) fn exec_builtin(
         | Builtin::X86PsrlD128 => {
             unreachable!("x86 vector builtin 已由 indirect vector 通道处理")
         }
-        Builtin::HostSyscall => {
-            crate::os::process::syscall(a(0) as i64, &av[1..]) as u64
-        }
+        Builtin::HostSyscall => crate::os::process::syscall(a(0) as i64, &av[1..]) as u64,
         // rust_try：宿主 catch；guest panic → 调 catch_fn(data, exc) 返 1
         Builtin::CatchUnwind => {
             let (try_fn, data, catch_fn) = (a(0), a(1), a(2));
@@ -913,12 +898,7 @@ pub(crate) fn exec_builtin(
                 Ok(_) => 0,
                 Err(e) => match e.downcast::<GuestPanic>() {
                     Ok(gp) => {
-                        call_fn_addr(
-                            ctx,
-                            catch_fn,
-                            &[data, gp.exception],
-                            "catch_unwind.catch",
-                        );
+                        call_fn_addr(ctx, catch_fn, &[data, gp.exception], "catch_unwind.catch");
                         1
                     }
                     // 宿主 panic（VM bug）不是 guest 异常：原样续传

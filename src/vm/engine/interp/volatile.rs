@@ -130,4 +130,3 @@ pub(crate) fn mem_write_volatile(addr: u64, src: u64, size: u32) {
         }
     }
 }
-

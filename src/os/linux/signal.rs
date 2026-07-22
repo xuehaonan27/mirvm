@@ -80,11 +80,10 @@ unsafe extern "C" fn segv_dump_handler(
         eprintln!("mirvm-segv-dump: fault addr(CR2)={addr:#x} rip={rip:#x}");
         if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
             for line in maps.lines() {
-                let start = usize::from_str_radix(line.split('-').next().unwrap_or("0"), 16)
-                    .unwrap_or(0);
+                let start =
+                    usize::from_str_radix(line.split('-').next().unwrap_or("0"), 16).unwrap_or(0);
                 let end = usize::from_str_radix(
-                    line
-                        .split_whitespace()
+                    line.split_whitespace()
                         .nth(0)
                         .unwrap_or("0-0")
                         .split('-')

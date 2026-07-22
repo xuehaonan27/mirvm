@@ -174,8 +174,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             // 双供养；cg_ssa base.rs unsized_info 同构）：目标
                             // vtable = *(源 vtable + supertrait_vtable_slot×8)；
                             // None = auto trait 差（vtable 不变，pair 位拷）
-                            let Some(slot_idx) = self.tcx.supertrait_vtable_slot((dsp, ddp))
-                            else {
+                            let Some(slot_idx) = self.tcx.supertrait_vtable_slot((dsp, ddp)) else {
                                 let src = self.lower_operand(a)?;
                                 return self.assign_lowered(dst_p, dst_kind, src);
                             };
@@ -183,9 +182,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             let ValKind::Pair((ao, aw), (bo, bw)) = dst_kind else {
                                 return Err(format!("dyn 上溯目标非 pair（{to_ty}）"));
                             };
-                            let ValKind::Pair((sao, saw), (sbo, _)) =
-                                self.classify(a_ty)?
-                            else {
+                            let ValKind::Pair((sao, saw), (sbo, _)) = self.classify(a_ty)? else {
                                 return Err(format!(
                                     "dyn 上溯源非 pair（{a_ty}；嵌套尾对包装未接）"
                                 ));
@@ -302,7 +299,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                 },
                                 width: Width::W64,
                             },
-                            None => Operand::Imm { bits: addr, width: w },
+                            None => Operand::Imm {
+                                bits: addr,
+                                width: w,
+                            },
                         };
                         Ok(vec![Stmt::Assign {
                             dst: dst_p.scalar_place(w),
@@ -334,7 +334,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                 },
                                 width: Width::W64,
                             },
-                            None => Operand::Imm { bits: addr, width: w },
+                            None => Operand::Imm {
+                                bits: addr,
+                                width: w,
+                            },
                         };
                         Ok(vec![Stmt::Assign {
                             dst: dst_p.scalar_place(w),

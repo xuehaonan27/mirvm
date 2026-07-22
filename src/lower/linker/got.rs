@@ -5,7 +5,6 @@
 use super::*;
 
 impl<'tcx> Linker<'tcx> {
-
     /// P2：本侧符号表 idx（名字首现才登记；image 侧在 Split 三表）
     pub(super) fn got_intern(&mut self, name: &str, weak: bool, image: bool) -> u32 {
         let (syms, idx_map) = if image {

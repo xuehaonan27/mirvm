@@ -137,7 +137,6 @@ impl SplitImage {
 /// ① 引擎原语表（codegen allocator-shim 的同一符号清单）；
 /// ② 导出符号解析（weak lang item：core 的 extern `panic_impl` → std 的 `rust_begin_unwind`）；
 /// ③ 未知 foreign 暂 Trap（os:: 注册表 M4.3）。
-
 pub(crate) mod linker;
 use linker::Linker;
 mod builtins;
@@ -145,8 +144,8 @@ pub(crate) mod ffi_sig;
 mod purity;
 mod rebase;
 use builtins::engine_builtins;
-use purity::{PurityStats, classify_purity};
 pub(crate) use ffi_sig::{canonical_link_name, ffi_kind_of, freeze_c_fnptr_sig};
+use purity::{PurityStats, classify_purity};
 use rebase::Rebase;
 
 /// 底座导出素材（S4：底座构建会话随模块一起产出，程序会话不用）。
@@ -336,14 +335,17 @@ fn lower_inner(
             }
         }
         match found {
-            [Some(alloc), Some(dealloc), Some(realloc), Some(alloc_zeroed)] => {
-                Some(ir::AllocShims {
-                    alloc,
-                    dealloc,
-                    realloc,
-                    alloc_zeroed,
-                })
-            }
+            [
+                Some(alloc),
+                Some(dealloc),
+                Some(realloc),
+                Some(alloc_zeroed),
+            ] => Some(ir::AllocShims {
+                alloc,
+                dealloc,
+                realloc,
+                alloc_zeroed,
+            }),
             // 四件不齐 = 生成面不完整（不应发生；None 落引擎堆既有纪律）
             _ => None,
         }

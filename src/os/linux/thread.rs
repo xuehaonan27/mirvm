@@ -58,7 +58,9 @@ pub fn current_stack_bounds() -> Option<(usize, usize)> {
 pub fn attr_stack_bounds(attr: *mut c_void) -> Option<(usize, usize)> {
     let mut lo: *mut libc::c_void = std::ptr::null_mut();
     let mut size: libc::size_t = 0;
-    let rc = unsafe { libc::pthread_attr_getstack(attr as *mut libc::pthread_attr_t, &mut lo, &mut size) };
+    let rc = unsafe {
+        libc::pthread_attr_getstack(attr as *mut libc::pthread_attr_t, &mut lo, &mut size)
+    };
     if rc != 0 || size == 0 {
         return None;
     }

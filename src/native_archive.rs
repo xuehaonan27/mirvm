@@ -49,7 +49,9 @@ pub(crate) fn system_dylibs(tcx: TyCtxt<'_>) -> Vec<Box<str>> {
             // libc 的 m/dl/pthread/rt/util 即此形）
             let system_dylib = matches!(
                 lib.kind,
-                NativeLibKind::Dylib { .. } | NativeLibKind::RawDylib { .. } | NativeLibKind::Unspecified
+                NativeLibKind::Dylib { .. }
+                    | NativeLibKind::RawDylib { .. }
+                    | NativeLibKind::Unspecified
             ) || matches!(
                 lib.kind,
                 NativeLibKind::Static {
@@ -86,7 +88,14 @@ pub(crate) fn system_dylibs(tcx: TyCtxt<'_>) -> Vec<Box<str>> {
 
 #[cfg(test)]
 fn materialize_in(archive: &Path, cache_dir: &Path) -> Result<PathBuf, String> {
-    materialize_for_target_in(archive, cache_dir, env!("MIRVM_HOST"), Path::new("cc"), &[], None)
+    materialize_for_target_in(
+        archive,
+        cache_dir,
+        env!("MIRVM_HOST"),
+        Path::new("cc"),
+        &[],
+        None,
+    )
 }
 
 /// 收集当前 crate graph 的 Static native libraries，并把每个独立归档转换成 `.so`。
@@ -164,7 +173,14 @@ pub(crate) fn materialize_static_libraries<'tcx>(
                     lib.name, searched
                 )
             })?;
-            let so = materialize_for_target_in(&archive, &cache, target, Path::new("cc"), &extra_libs, Some(linker))?;
+            let so = materialize_for_target_in(
+                &archive,
+                &cache,
+                target,
+                Path::new("cc"),
+                &extra_libs,
+                Some(linker),
+            )?;
             if !shared_objects.contains(&so) {
                 shared_objects.push(so);
             }
@@ -232,7 +248,9 @@ fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), String> {
             // u = GNU unique（COMDAT 意图的内联变量/局部 static 一族，native
             // 静态链接合并、glibc 动态链接恒 RTLD_LOCAL——跨归档同名无歧义）；
             // 余者按 strong 计）
-            let weak = it.next().is_some_and(|t| t.starts_with(['W', 'w', 'V', 'v', 'u']));
+            let weak = it
+                .next()
+                .is_some_and(|t| t.starts_with(['W', 'w', 'V', 'v', 'u']));
             std::ffi::CString::new(symbol).map_err(|_| {
                 format!(
                     "归档共享库 `{}` 导出含 NUL 的非法符号名",
@@ -550,11 +568,9 @@ fn reject_legacy_init_sections(archive: &Path) -> Result<(), String> {
     let has_legacy = sections.lines().filter_map(readelf_section_name).any(|n| {
         n == ".init"
             || n == ".fini"
-            || n
-                .strip_prefix(".init.")
+            || n.strip_prefix(".init.")
                 .is_some_and(|s| s.chars().next().is_some_and(|c| c.is_ascii_digit()))
-            || n
-                .strip_prefix(".fini.")
+            || n.strip_prefix(".fini.")
                 .is_some_and(|s| s.chars().next().is_some_and(|c| c.is_ascii_digit()))
     });
     if has_legacy {
@@ -892,10 +908,24 @@ mod tests {
         let cc_b = make_cc_wrapper(temp.path(), "cc-b", "mirvm test cc B");
         let cache = temp.path().join("cache");
 
-        let first =
-            materialize_for_target_in(&archive, &cache, "x86_64-unknown-linux-gnu", &cc_a, &[], None).unwrap();
-        let second =
-            materialize_for_target_in(&archive, &cache, "x86_64-unknown-linux-gnu", &cc_b, &[], None).unwrap();
+        let first = materialize_for_target_in(
+            &archive,
+            &cache,
+            "x86_64-unknown-linux-gnu",
+            &cc_a,
+            &[],
+            None,
+        )
+        .unwrap();
+        let second = materialize_for_target_in(
+            &archive,
+            &cache,
+            "x86_64-unknown-linux-gnu",
+            &cc_b,
+            &[],
+            None,
+        )
+        .unwrap();
         assert_ne!(
             first, second,
             "C compiler identity must participate in cache key"
@@ -912,12 +942,24 @@ mod tests {
         let cache = temp.path().join("cache");
         let none: &[Box<str>] = &[];
         let with_m: &[Box<str>] = &["m".into()];
-        let first =
-            materialize_for_target_in(&archive, &cache, "x86_64-unknown-linux-gnu", Path::new("cc"), none, None)
-                .unwrap();
-        let second =
-            materialize_for_target_in(&archive, &cache, "x86_64-unknown-linux-gnu", Path::new("cc"), with_m, None)
-                .unwrap();
+        let first = materialize_for_target_in(
+            &archive,
+            &cache,
+            "x86_64-unknown-linux-gnu",
+            Path::new("cc"),
+            none,
+            None,
+        )
+        .unwrap();
+        let second = materialize_for_target_in(
+            &archive,
+            &cache,
+            "x86_64-unknown-linux-gnu",
+            Path::new("cc"),
+            with_m,
+            None,
+        )
+        .unwrap();
         assert_ne!(first, second, "extra libs 名单必须参与缓存键");
     }
 
@@ -985,10 +1027,7 @@ mod tests {
             &d2,
             "__attribute__((weak)) unsigned long mirvm_dup_weak(void) { return 2UL; }\n",
         );
-        let strong_c = make_archive(
-            &d3,
-            "unsigned long mirvm_dup_weak(void) { return 3UL; }\n",
-        );
+        let strong_c = make_archive(&d3, "unsigned long mirvm_dup_weak(void) { return 3UL; }\n");
         let cache = temp.path().join("cache");
         let mat = |a: &PathBuf| {
             materialize_for_target_in(
@@ -1003,11 +1042,9 @@ mod tests {
         };
         let (sa, sb, sc) = (mat(&weak_a), mat(&weak_b), mat(&strong_c));
         // 全 weak：放行（native 首件胜出同构）
-        reject_symbol_ambiguity(&[sa.clone(), sb.clone()])
-            .expect("全 weak 同名必须放行");
+        reject_symbol_ambiguity(&[sa.clone(), sb.clone()]).expect("全 weak 同名必须放行");
         // strong + weak：放行（native strong 胜出同款决议）
-        reject_symbol_ambiguity(&[sa.clone(), sc.clone()])
-            .expect("strong+weak 必须放行");
+        reject_symbol_ambiguity(&[sa.clone(), sc.clone()]).expect("strong+weak 必须放行");
         // 双 strong：维持拒（native 下本就 link error）
         let strong_d_dir = temp.path().join("d4");
         std::fs::create_dir_all(&strong_d_dir).unwrap();

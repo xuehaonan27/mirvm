@@ -93,8 +93,14 @@ mod tests {
         assert!(is_valid_home(image_addr(0)));
         assert!(is_valid_home(image_addr(IMAGE_SPLINE_COUNT - 1)));
         assert!(!is_valid_home(image_addr(IMAGE_SPLINE_COUNT - 1) + 0x1000));
-        assert_eq!(code_home_for_frozen(DELTA_FIXED_ADDR), Some(DELTA_CODE_ADDR));
-        assert_eq!(code_home_for_frozen(BASE_IMAGE_FIXED_ADDR), Some(BASE_CODE_ADDR));
+        assert_eq!(
+            code_home_for_frozen(DELTA_FIXED_ADDR),
+            Some(DELTA_CODE_ADDR)
+        );
+        assert_eq!(
+            code_home_for_frozen(BASE_IMAGE_FIXED_ADDR),
+            Some(BASE_CODE_ADDR)
+        );
         assert_eq!(
             code_home_for_frozen(image_addr(7)),
             Some(image_code_addr(7))

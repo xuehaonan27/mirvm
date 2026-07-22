@@ -61,9 +61,7 @@ pub fn error_string() -> String {
     if e.is_null() {
         "dlerror 未提供详情".into()
     } else {
-        unsafe { CStr::from_ptr(e) }
-            .to_string_lossy()
-            .into_owned()
+        unsafe { CStr::from_ptr(e) }.to_string_lossy().into_owned()
     }
 }
 

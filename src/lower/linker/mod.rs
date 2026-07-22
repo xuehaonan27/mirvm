@@ -259,5 +259,4 @@ impl<'tcx> Linker<'tcx> {
         self.tls_ids.insert(def_id, id);
         Ok(id)
     }
-
 }

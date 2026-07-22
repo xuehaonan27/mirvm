@@ -242,7 +242,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }
                     let Some(pl) = a.node.place() else {
                         pre.push(Stmt::Trap(
-                            "C1 按值聚合实参非 place（常量展开未接）".to_string().into_boxed_str(),
+                            "C1 按值聚合实参非 place（常量展开未接）"
+                                .to_string()
+                                .into_boxed_str(),
                         ));
                         ir_args.clear();
                         break;
@@ -270,7 +272,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         {
             ir_args.push(loc);
         }
-            // 返回落点（ABI v2 四路）
+        // 返回落点（ABI v2 四路）
         let ret = if pre.is_empty() {
             match self.resolve_place(destination).and_then(|dp| {
                 let kind = self.classify(dp.ty)?;

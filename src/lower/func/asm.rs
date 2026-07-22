@@ -127,37 +127,37 @@ impl<'tcx> LowerCx<'tcx, '_> {
         let mut ins: Vec<(u32, ir::AsmIoVal)> = Vec::new();
         let mut outs: Vec<(u32, ir::AsmIoDst)> = Vec::new();
         for (i, op) in operands.iter().enumerate() {
-            let val_of = |this: &mut Self, value: &mir::Operand<'tcx>| -> Result<ir::AsmIoVal, String> {
-                let ty = this.op_ty(value)?;
-                let layout = frame::layout_of(this.tcx, this.typing_env, ty)?;
-                let size = layout.layout.size().bytes() as u32;
-                if size <= 8 {
-                    Ok(ir::AsmIoVal::Scalar(this.lower_operand_scalar(value)?))
-                } else if let Some(pl) = value.place() {
-                    let dp = this.resolve_place(&pl)?;
-                    Ok(ir::AsmIoVal::VecBytes(dp.expr(), size))
-                } else {
-                    match this.lower_operand(value)? {
-                        LoweredOp::Bytes { place, .. } => {
-                            Ok(ir::AsmIoVal::VecBytes(place.expr(), size))
+            let val_of =
+                |this: &mut Self, value: &mir::Operand<'tcx>| -> Result<ir::AsmIoVal, String> {
+                    let ty = this.op_ty(value)?;
+                    let layout = frame::layout_of(this.tcx, this.typing_env, ty)?;
+                    let size = layout.layout.size().bytes() as u32;
+                    if size <= 8 {
+                        Ok(ir::AsmIoVal::Scalar(this.lower_operand_scalar(value)?))
+                    } else if let Some(pl) = value.place() {
+                        let dp = this.resolve_place(&pl)?;
+                        Ok(ir::AsmIoVal::VecBytes(dp.expr(), size))
+                    } else {
+                        match this.lower_operand(value)? {
+                            LoweredOp::Bytes { place, .. } => {
+                                Ok(ir::AsmIoVal::VecBytes(place.expr(), size))
+                            }
+                            _ => Err(format!("asm 向量输入非 place（ty={ty}，批10 xmm 通道）")),
                         }
-                        _ => Err(format!(
-                            "asm 向量输入非 place（ty={ty}，批10 xmm 通道）"
-                        )),
                     }
-                }
-            };
-            let dst_of = |this: &mut Self, place: &mir::Place<'tcx>| -> Result<ir::AsmIoDst, String> {
-                let dp = this.resolve_place(place)?;
-                let layout = frame::layout_of(this.tcx, this.typing_env, dp.ty)?;
-                let size = layout.layout.size().bytes() as u32;
-                if size <= 8 {
-                    let (pl, w) = this.place_scalar(place)?;
-                    Ok(ir::AsmIoDst::Scalar(pl.scalar_place(w)))
-                } else {
-                    Ok(ir::AsmIoDst::VecBytes(dp.expr(), size))
-                }
-            };
+                };
+            let dst_of =
+                |this: &mut Self, place: &mir::Place<'tcx>| -> Result<ir::AsmIoDst, String> {
+                    let dp = this.resolve_place(place)?;
+                    let layout = frame::layout_of(this.tcx, this.typing_env, dp.ty)?;
+                    let size = layout.layout.size().bytes() as u32;
+                    if size <= 8 {
+                        let (pl, w) = this.place_scalar(place)?;
+                        Ok(ir::AsmIoDst::Scalar(pl.scalar_place(w)))
+                    } else {
+                        Ok(ir::AsmIoDst::VecBytes(dp.expr(), size))
+                    }
+                };
             match op {
                 mir::InlineAsmOperand::In { value, .. } => {
                     let v = val_of(self, value)?;
@@ -178,10 +178,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     ins.push((g.input_slot[i].expect("InOut 必有输入槽"), v));
                     if let Some(place) = out_place {
                         let d = dst_of(self, place)?;
-                        outs.push((
-                            g.output_slot[i].expect("InOut 有 out_place 必有输出槽"),
-                            d,
-                        ));
+                        outs.push((g.output_slot[i].expect("InOut 有 out_place 必有输出槽"), d));
                     }
                 }
                 // Out{place:None} = clobber-only（无落点）；Const/Sym/Label 已在上拒

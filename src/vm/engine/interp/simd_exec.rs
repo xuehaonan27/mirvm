@@ -53,9 +53,9 @@ pub(crate) fn simd_bin_body(
                     }
                     S::SatAdd => int_saturating(OvfOp::Add, signed, x, y, lw),
                     S::SatSub => int_saturating(OvfOp::Sub, signed, x, y, lw),
-                    S::MinNum | S::MaxNum => engine_abort(&format!(
-                        "simd {op:?} 不适用于整数 lane（lower 校验缺口）"
-                    )),
+                    S::MinNum | S::MaxNum => {
+                        engine_abort(&format!("simd {op:?} 不适用于整数 lane（lower 校验缺口）"))
+                    }
                     S::Shl | S::Shr => {
                         if y >= u64::from(lw.bytes() * 8) {
                             engine_abort("simd 移位量超过 lane 位宽（guest UB）");
@@ -74,10 +74,7 @@ pub(crate) fn simd_bin_body(
             LaneKind::Float => {
                 macro_rules! fl {
                     ($t:ty, $xb:expr, $yb:expr) => {{
-                        let (fx, fy) = (
-                            <$t>::from_bits($xb as _),
-                            <$t>::from_bits($yb as _),
-                        );
+                        let (fx, fy) = (<$t>::from_bits($xb as _), <$t>::from_bits($yb as _));
                         let cmp = |t: bool| t as u64 * lw.mask();
                         match op {
                             S::Eq => cmp(fx == fy),
@@ -93,10 +90,11 @@ pub(crate) fn simd_bin_body(
                             S::Rem => (fx % fy).to_bits() as u64,
                             S::MinNum => fx.min(fy).to_bits() as u64,
                             S::MaxNum => fx.max(fy).to_bits() as u64,
-                            S::And | S::Or | S::Xor | S::SatAdd | S::SatSub
-                            | S::Shl | S::Shr => engine_abort(&format!(
-                                "simd {op:?} 不适用于浮点 lane（lower 校验缺口）"
-                            )),
+                            S::And | S::Or | S::Xor | S::SatAdd | S::SatSub | S::Shl | S::Shr => {
+                                engine_abort(&format!(
+                                    "simd {op:?} 不适用于浮点 lane（lower 校验缺口）"
+                                ))
+                            }
                         }
                     }};
                 }
@@ -153,10 +151,11 @@ pub(crate) fn simd_un_body(
                             U::Flog => f.ln(),
                             U::Flog2 => f.log2(),
                             U::Flog10 => f.log10(),
-                            U::Ctlz | U::Cttz | U::Ctpop | U::Bswap
-                            | U::Bitreverse => engine_abort(&format!(
-                                "simd {op:?} 不适用于浮点 lane（lower 校验缺口）"
-                            )),
+                            U::Ctlz | U::Cttz | U::Ctpop | U::Bswap | U::Bitreverse => {
+                                engine_abort(&format!(
+                                    "simd {op:?} 不适用于浮点 lane（lower 校验缺口）"
+                                ))
+                            }
                         })
                         .to_bits() as u64
                     }};
@@ -314,22 +313,16 @@ pub(crate) fn simd_cast_body(
                 // target_feature(f16c) 函数内经 VCVTPH2PS/VCVTPS2PH 执行硬件
                 // 语义（sNaN qbit 强置等）；宿主 libcall 的 NaN 位行为随构建
                 // 目标漂移，不可依赖（half 探针 h0x7c01 实锤）
-                (Width::W16, Width::W32) => {
-                    u64::from(crate::arch::x86_64::f16_to_f32_sw(v as u16))
-                }
+                (Width::W16, Width::W32) => u64::from(crate::arch::x86_64::f16_to_f32_sw(v as u16)),
                 (Width::W16, Width::W64) => {
                     f64::from(f32::from_bits(crate::arch::x86_64::f16_to_f32_sw(v as u16)))
                         .to_bits()
                 }
-                (Width::W32, Width::W16) => {
-                    u64::from(crate::arch::x86_64::f32_to_f16_sw(
-                        v as u32,
-                        crate::arch::x86_64::HalfRound::Rne,
-                    ))
-                }
-                (Width::W64, Width::W16) => {
-                    (f64::from_bits(v) as f16).to_bits() as u64
-                }
+                (Width::W32, Width::W16) => u64::from(crate::arch::x86_64::f32_to_f16_sw(
+                    v as u32,
+                    crate::arch::x86_64::HalfRound::Rne,
+                )),
+                (Width::W64, Width::W16) => (f64::from_bits(v) as f16).to_bits() as u64,
                 _ => v, // 同宽：位透传
             },
         };
@@ -640,9 +633,9 @@ pub(crate) fn simd_reduce_arith_body(
                             // minnum/maxnum 语义（与 LLVM reduce.fmin/fmax 一致）
                             R::Min => fa.min(fx),
                             R::Max => fa.max(fx),
-                            R::And | R::Or | R::Xor => engine_abort(&format!(
-                                "simd reduce {op:?} 不适用于浮点 lane"
-                            )),
+                            R::And | R::Or | R::Xor => {
+                                engine_abort(&format!("simd reduce {op:?} 不适用于浮点 lane"))
+                            }
                         })
                         .to_bits() as u64
                     }};

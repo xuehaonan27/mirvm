@@ -104,7 +104,8 @@ impl<'tcx> Linker<'tcx> {
         if image_side {
             let s = self.split.as_mut().expect("split");
             let i = s.image_stub_sites.len() as u32;
-            s.image_stub_sites.push(ir::EntryStubSite { func: fid, sig });
+            s.image_stub_sites
+                .push(ir::EntryStubSite { func: fid, sig });
             let addr = s.image_code_arena.addr_of(i as u64);
             s.image_fn_entries.insert(inst, addr);
             self.entry_stub_ids.insert(inst, i);
@@ -117,7 +118,8 @@ impl<'tcx> Linker<'tcx> {
                 );
             }
             let i = self.entry_stub_sites.len() as u32;
-            self.entry_stub_sites.push(ir::EntryStubSite { func: fid, sig });
+            self.entry_stub_sites
+                .push(ir::EntryStubSite { func: fid, sig });
             let addr = self.code_arena.addr_of(i as u64);
             self.entry_stub_ids.insert(inst, i);
             addr
@@ -154,15 +156,17 @@ impl<'tcx> Linker<'tcx> {
         // 打穿引擎的堆/panic/unwind 模型）。
         if let Some(&b) = self.builtins.get(&link_name) {
             use ir::Builtin as B;
-            if !matches!(b, B::HostGetenv | B::HostWrite | B::HostStrlen | B::HostAbort) {
+            if !matches!(
+                b,
+                B::HostGetenv | B::HostWrite | B::HostStrlen | B::HostAbort
+            ) {
                 return Err(format!(
                     "extern fn `{name}` 被当作值取址（fn-ptr），但它是引擎内建语义符号，无地址可物化"
                 ));
             }
         }
-        let rust_internal = name.starts_with("__rust")
-            || name.starts_with("__rdl")
-            || name.starts_with("rust_");
+        let rust_internal =
+            name.starts_with("__rust") || name.starts_with("__rdl") || name.starts_with("rust_");
         // ②链接仿真：符号由已链接 crate 的导出定义提供 → 值 = 该 guest 定义的
         // 条目地址；weak 定义让位于动态库强符号（Rust 内部符号除外——见①注）。
         let exported = self.exported_defs().get(&link_name).copied();
@@ -183,7 +187,9 @@ impl<'tcx> Linker<'tcx> {
             ));
         }
         if name.starts_with("llvm.") {
-            return Err(format!("foreign `{name}` 被当作值取址（LLVM 内部符号，按需内建）"));
+            return Err(format!(
+                "foreign `{name}` 被当作值取址（LLVM 内部符号，按需内建）"
+            ));
         }
         if rust_internal {
             return Err(format!(

@@ -3,7 +3,8 @@
 > 本文只回答两个问题：**哪份文档管什么**、**冲突时信谁**。
 > 最后重整：2026-07-18（文档目录大精简：历史文档归档 `history/`、四个过时文档删除、
 > 新增 [open-issues.md](open-issues.md) 债务登记册与 [agents/onboarding.md](agents/onboarding.md)）；
-> 最后同步：2026-07-21（M5 全收对齐——README/DESIGN/m5 系设计档头部与 T1–T3 闭合日期订正）。
+> 最后同步：2026-07-22（新增 HEAD `cda7421` 的一次性开发状况审查快照索引；不改变
+> current-status/open-issues/decision-history 的既有权威顺序）。
 
 ## 1. 权威顺序（冲突时从高到低取信）
 
@@ -73,7 +74,8 @@
 ### docs/history/（只读归档）
 
 施工日志（m4/m5/m6-log）+ 已完成设计（m4.1/m4.4/m5.1/m5.2/m5.3/s3b×2/s4）+
-调研档案（coldstart-research）+ spike1–5 冻结证据。索引与内容定位见
+调研档案（coldstart-research）+ spike1–5 冻结证据 + 带日期的一次性审查快照。索引与
+内容定位见
 [history/README.md](history/README.md)。已删除文档（m4-debt-map、m4-plan、m4.5-plan、
 AGENT-HANDOFF）须查 git 历史；其债务与速查精华已分别迁入 open-issues.md 与
 agents/onboarding.md。

@@ -47,16 +47,22 @@ pub fn hidden_symtab_values(so_path: &str) -> Result<HashMap<Box<str>, u64>, Str
 /// 解析指定符号表节（SHT_SYMTAB / SHT_DYNSYM，条目格式相同）：
 /// 已定义符号名 → st_value（文件虚拟地址，相对装载基址）。
 fn symbol_table_values(so_path: &str, want_sht: u32) -> Result<HashMap<Box<str>, u64>, String> {
-    let bytes = std::fs::read(so_path)
-        .map_err(|e| format!("读取归档共享库 `{so_path}` 失败: {e}"))?;
+    let bytes =
+        std::fs::read(so_path).map_err(|e| format!("读取归档共享库 `{so_path}` 失败: {e}"))?;
     let u16_at = |off: usize| -> Option<u16> {
-        Some(u16::from_le_bytes(bytes.get(off..off + 2)?.try_into().ok()?))
+        Some(u16::from_le_bytes(
+            bytes.get(off..off + 2)?.try_into().ok()?,
+        ))
     };
     let u32_at = |off: usize| -> Option<u32> {
-        Some(u32::from_le_bytes(bytes.get(off..off + 4)?.try_into().ok()?))
+        Some(u32::from_le_bytes(
+            bytes.get(off..off + 4)?.try_into().ok()?,
+        ))
     };
     let u64_at = |off: usize| -> Option<u64> {
-        Some(u64::from_le_bytes(bytes.get(off..off + 8)?.try_into().ok()?))
+        Some(u64::from_le_bytes(
+            bytes.get(off..off + 8)?.try_into().ok()?,
+        ))
     };
     let bad = || format!("归档共享库 `{so_path}` 不是预期的 ELF64 LE（或已损坏）");
     if bytes.len() < 64 || bytes[0..4] != [0x7f, b'E', b'L', b'F'] {
@@ -202,16 +208,23 @@ fn archive_undefined_symbols_in(bytes: &[u8]) -> Result<Vec<Box<str>>, String> {
 /// symbol_table_values 同款结构走法，只是取 shndx==0 且不过滤）。
 fn elf_undefined_symbols(bytes: &[u8]) -> Result<Vec<Box<str>>, String> {
     let u16_at = |off: usize| -> Option<u16> {
-        Some(u16::from_le_bytes(bytes.get(off..off + 2)?.try_into().ok()?))
+        Some(u16::from_le_bytes(
+            bytes.get(off..off + 2)?.try_into().ok()?,
+        ))
     };
     let u32_at = |off: usize| -> Option<u32> {
-        Some(u32::from_le_bytes(bytes.get(off..off + 4)?.try_into().ok()?))
+        Some(u32::from_le_bytes(
+            bytes.get(off..off + 4)?.try_into().ok()?,
+        ))
     };
     let u64_at = |off: usize| -> Option<u64> {
-        Some(u64::from_le_bytes(bytes.get(off..off + 8)?.try_into().ok()?))
+        Some(u64::from_le_bytes(
+            bytes.get(off..off + 8)?.try_into().ok()?,
+        ))
     };
     let bad = || "不是预期的 ELF64 LE（或已损坏）".to_string();
-    if bytes.len() < 64 || bytes[0..4] != [0x7f, b'E', b'L', b'F'] || bytes[4] != 2 || bytes[5] != 1 {
+    if bytes.len() < 64 || bytes[0..4] != [0x7f, b'E', b'L', b'F'] || bytes[4] != 2 || bytes[5] != 1
+    {
         return Err(bad());
     }
     let shoff = u64_at(0x28).ok_or_else(bad)? as usize;
@@ -287,10 +300,7 @@ mod tests {
     /// ar 元数据成员时只报 GLOBAL/WEAK 未定义）。
     #[test]
     fn archive_undefined_symbols_reports_global_and_weak_undef_only() {
-        let dir = std::env::temp_dir().join(format!(
-            "mirvm-elfsym-arundef-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("mirvm-elfsym-arundef-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let (c1, o1, c2, o2, a) = (
@@ -316,26 +326,36 @@ mod tests {
         // b.o：全定义无未定义
         std::fs::write(&c2, "int other(void) { return 2; }\n").unwrap();
         for (c, o) in [(&c1, &o1), (&c2, &o2)] {
-            assert!(Command::new("cc")
-                .args(["-fPIC", "-c"])
-                .arg(c)
-                .arg("-o")
-                .arg(o)
+            assert!(
+                Command::new("cc")
+                    .args(["-fPIC", "-c"])
+                    .arg(c)
+                    .arg("-o")
+                    .arg(o)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        assert!(
+            Command::new("ar")
+                .args(["crs"])
+                .arg(&a)
+                .arg(&o1)
+                .arg(&o2)
                 .status()
                 .unwrap()
-                .success());
-        }
-        assert!(Command::new("ar")
-            .args(["crs"])
-            .arg(&a)
-            .arg(&o1)
-            .arg(&o2)
-            .status()
-            .unwrap()
-            .success());
+                .success()
+        );
         let undef = archive_undefined_symbols(a.to_str().unwrap()).unwrap();
-        assert!(undef.iter().any(|s| &**s == "rlib_side_def"), "GLOBAL 未定义漏报: {undef:?}");
-        assert!(undef.iter().any(|s| &**s == "weak_missing"), "WEAK 未定义漏报: {undef:?}");
+        assert!(
+            undef.iter().any(|s| &**s == "rlib_side_def"),
+            "GLOBAL 未定义漏报: {undef:?}"
+        );
+        assert!(
+            undef.iter().any(|s| &**s == "weak_missing"),
+            "WEAK 未定义漏报: {undef:?}"
+        );
         assert!(
             !undef.iter().any(|s| &**s == "defined_here"),
             "已定义符号误报: {undef:?}"
@@ -355,10 +375,7 @@ mod tests {
     /// 符号不进 .dynsym，但 .symtab 兜底必须能解析出与 dlsym 直取一致的地址。
     #[test]
     fn hidden_symbols_resolve_via_symtab_with_same_address_as_dlsym() {
-        let dir = std::env::temp_dir().join(format!(
-            "mirvm-elfsym-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("mirvm-elfsym-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let (c, o, a, so) = (
@@ -373,29 +390,35 @@ mod tests {
              unsigned long mirvm_visible_probe(void) { return mirvm_hidden_probe(); }\n",
         )
         .unwrap();
-        assert!(Command::new("cc")
-            .args(["-fPIC", "-c", ])
-            .arg(&c)
-            .arg("-o")
-            .arg(&o)
-            .status()
-            .unwrap()
-            .success());
-        assert!(Command::new("ar")
-            .args(["crs"])
-            .arg(&a)
-            .arg(&o)
-            .status()
-            .unwrap()
-            .success());
-        assert!(Command::new("cc")
-            .args(["-shared", "-Wl,-z,defs", "-Wl,--whole-archive"])
-            .arg(&a)
-            .args(["-Wl,--no-whole-archive", "-o"])
-            .arg(&so)
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            Command::new("cc")
+                .args(["-fPIC", "-c",])
+                .arg(&c)
+                .arg("-o")
+                .arg(&o)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("ar")
+                .args(["crs"])
+                .arg(&a)
+                .arg(&o)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("cc")
+                .args(["-shared", "-Wl,-z,defs", "-Wl,--whole-archive"])
+                .arg(&a)
+                .args(["-Wl,--no-whole-archive", "-o"])
+                .arg(&so)
+                .status()
+                .unwrap()
+                .success()
+        );
         let c_so = CString::new(so.as_os_str().as_encoded_bytes()).unwrap();
         let handle = crate::os::dll::open_with_flags(
             &c_so,
@@ -409,11 +432,17 @@ mod tests {
         // .symtab 兜底：hidden 符号可解，且调用结果正确
         let syms = symtab_values(so.to_str().unwrap()).unwrap();
         let bias = crate::os::dll::load_bias(handle).expect("load_bias") as u64;
-        let hidden_addr = *syms.get("mirvm_hidden_probe").expect("symtab 含 hidden 符号") + bias;
+        let hidden_addr = *syms
+            .get("mirvm_hidden_probe")
+            .expect("symtab 含 hidden 符号")
+            + bias;
         let f: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(hidden_addr as usize) };
         assert_eq!(unsafe { f() }, 0x2a);
         // visible 符号两条路径地址必须一致
-        let vis_via_symtab = *syms.get("mirvm_visible_probe").expect("symtab 含 visible 符号") + bias;
+        let vis_via_symtab = *syms
+            .get("mirvm_visible_probe")
+            .expect("symtab 含 visible 符号")
+            + bias;
         assert_eq!(vis_via_symtab, pvis as u64);
         // hidden 兜底表 = .symtab − .dynsym：hidden 在表（归档优先的承载），
         // visible 出局（维持 dlsym 全域解析，与 reject_symbol_ambiguity 配套）

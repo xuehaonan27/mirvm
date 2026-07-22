@@ -10,7 +10,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
     /// corpus 全为整数 lane 未爆雷）。f16/f128 lane 在此拒绝（D8c 接入点；f16 的
     /// 放行口在 simd_geom_ext，仅 shuffle/cast 两族——位搬运与 lane 转换可精确，
     /// 逐 lane 算术/比较/归约继续拒绝）。
-    pub(super) fn simd_geom(&mut self, ty: Ty<'tcx>) -> Result<(u16, u8, ir::LaneKind, u64), String> {
+    pub(super) fn simd_geom(
+        &mut self,
+        ty: Ty<'tcx>,
+    ) -> Result<(u16, u8, ir::LaneKind, u64), String> {
         self.simd_geom_ext(ty, false)
     }
 

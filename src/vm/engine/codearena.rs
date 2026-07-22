@@ -61,7 +61,8 @@ impl StubArena {
     /// 先试本域固定基址（可缓存前提）；被占回退动态基址——语义不变，
     /// 仅本进程产出不可序列化（FrozenArena 同款）。
     pub fn new_at(home: usize) -> Self {
-        if let Some(p) = crate::os::mem::map_fixed_preferred(home, CODE_CAP, crate::os::mem::Prot::RW)
+        if let Some(p) =
+            crate::os::mem::map_fixed_preferred(home, CODE_CAP, crate::os::mem::Prot::RW)
         {
             return StubArena {
                 base: p,
@@ -83,10 +84,7 @@ impl StubArena {
     /// 严格装载（warm/image 回放）：固定基被占即 Err——调用方按 cache miss
     /// 处理（字节码烤了此域 stub 地址，错基址重放 = 跳崖）。
     pub fn map_fixed(home: usize) -> Result<Self, String> {
-        assert!(
-            is_valid_code_home(home),
-            "StubArena 恢复域非法: {home:#x}"
-        );
+        assert!(is_valid_code_home(home), "StubArena 恢复域非法: {home:#x}");
         let Some(p) = crate::os::mem::map_fixed_preferred(home, CODE_CAP, crate::os::mem::Prot::RW)
         else {
             return Err(format!("stub 代码域固定基址 {home:#x} 被占"));
@@ -132,9 +130,7 @@ impl StubArena {
     /// 启动相填字节：`movabs rax, target; jmp rax`。addr 必须出自本区 alloc_stub。
     pub fn write_stub(&self, addr: u64, target: u64) {
         let bytes = crate::arch::x86_64::asmstub::emit_stub_bytes(target);
-        unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), addr as *mut u8, bytes.len())
-        };
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), addr as *mut u8, bytes.len()) };
     }
 
     /// 填完封存：整域 RX（W^X）。map 时用过的写权限到此为止。

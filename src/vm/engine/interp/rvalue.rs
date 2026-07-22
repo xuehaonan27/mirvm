@@ -373,4 +373,3 @@ pub(super) fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
         }
     }
 }
-

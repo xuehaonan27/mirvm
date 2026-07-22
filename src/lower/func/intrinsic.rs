@@ -37,7 +37,11 @@ impl<'tcx> LowerCx<'tcx, '_> {
     /// 同构：valtree 分支[0] 是判别式叶；D8j）。**按位置收集全部 const 泛参**而非
     /// 硬编码下标——本 nightly 各 atomic intrinsic 的类型参数量异构（xadd<T,U,ORD>
     /// vs load<T,ORD>），序参数是其中唯一的 const（cxchg 两个：succ, fail）。
-    pub(super) fn atomic_ord(&self, inst: &Instance<'tcx>, nth: usize) -> Result<ir::MemOrd, String> {
+    pub(super) fn atomic_ord(
+        &self,
+        inst: &Instance<'tcx>,
+        nth: usize,
+    ) -> Result<ir::MemOrd, String> {
         use rustc_middle::ty::AtomicOrdering as A;
         let c = inst
             .args
