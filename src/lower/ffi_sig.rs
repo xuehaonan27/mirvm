@@ -107,7 +107,9 @@ fn ffi_agg_of<'tcx>(
                 scalar_ffi_kind(b.primitive()).map_err(|p| format!("标量 {p:?} 不支持"))?,
             ),
         });
-        return Ok(ir::FfiAgg { size, align, fields });
+        let agg = ir::FfiAgg { size, align, fields };
+        validate_agg_natural(&agg)?;
+        return Ok(agg);
     }
     match layout.backend_repr {
         BackendRepr::Memory { .. } => {}
@@ -155,7 +157,9 @@ fn ffi_agg_of<'tcx>(
         }
         other => return Err(format!("按值聚合类型形态 {other:?} 不支持")),
     }
-    Ok(ir::FfiAgg { size, align, fields })
+    let agg = ir::FfiAgg { size, align, fields };
+    validate_agg_natural(&agg)?;
+    Ok(agg)
 }
 
 /// 收一个字段叶（Scalar → 叶；ScalarPair/Memory → 递归嵌套；ZST 跳过不占列）。
@@ -183,5 +187,51 @@ fn push_agg_field<'tcx>(
 /// 否则查 `\x01aws_lc_...` 必然全域未命中。
 pub(crate) fn canonical_link_name(name: &str) -> &str {
     name.strip_prefix('\x01').unwrap_or(name)
+}
+
+/// F-06：libffi 自然布局可表达性校验——ffi.rs 构造 structure 只喂字段类型，
+/// 冻结的 off/size/align 不被消费；packed/align(N) 等非自然形态下 libffi
+/// 算出的布局 ≠ 真实布局 = 静默 ABI 错调。实现全 padding 表达之前，冻结期
+/// 对不可表达形态响亮拒绝（递归逐字段比对偏移 + 尾 padding 对齐复核）。
+fn validate_agg_natural(agg: &ir::FfiAgg) -> Result<(), String> {
+    fn leaf_layout(l: &ir::FfiLeaf) -> Option<(u32, u32)> {
+        match l {
+            ir::FfiLeaf::Scalar(k) => {
+                let n = match k {
+                    ir::FfiKind::I8 | ir::FfiKind::U8 => 1,
+                    ir::FfiKind::I16 | ir::FfiKind::U16 => 2,
+                    ir::FfiKind::I32 | ir::FfiKind::U32 | ir::FfiKind::F32 => 4,
+                    ir::FfiKind::I64
+                    | ir::FfiKind::U64
+                    | ir::FfiKind::F64
+                    | ir::FfiKind::Ptr => 8,
+                    ir::FfiKind::Void | ir::FfiKind::Agg(_) => return None,
+                };
+                Some((n, n))
+            }
+            ir::FfiLeaf::Agg(inner) => natural_layout(inner),
+        }
+    }
+    fn natural_layout(agg: &ir::FfiAgg) -> Option<(u32, u32)> {
+        let mut off = 0u32;
+        let mut mal = 1u32;
+        for f in &agg.fields {
+            let (fsz, fal) = leaf_layout(&f.leaf)?;
+            let at = off.next_multiple_of(fal);
+            if at != f.off {
+                return None;
+            }
+            off = at + fsz;
+            mal = mal.max(fal);
+        }
+        Some((off.next_multiple_of(mal), mal))
+    }
+    if natural_layout(agg) != Some((agg.size, agg.align)) {
+        return Err(
+            "按值聚合非自然布局（packed/align(N)——libffi 类型系统不可表达，F-06 边界）"
+                .into(),
+        );
+    }
+    Ok(())
 }
 

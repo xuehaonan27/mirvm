@@ -217,12 +217,29 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     ir_args.push(h);
                 }
                 Ok(LoweredOp::Bytes { place, .. }) => {
+                    // F-07：变参固定聚合也须占位 tail_kinds——末端按 nfixed
+                    // 位置对齐 drain，缺位会把真实尾参类型错切
+                    if variadic_foreign {
+                        let k = ffi_arg_kinds
+                            .and_then(|ks| ks.get(i))
+                            .expect("聚合实参位必有 FfiKind")
+                            .clone();
+                        tail_kinds.push(k);
+                    }
                     ir_args.push(Operand::AddrOf(place.expr()));
                 }
                 Ok(LoweredOp::Scalar(_) | LoweredOp::Pair(..)) => {
                     // C1 按值聚合实参（≤16B 经 lower_operand 拆成 scalar/pair 槽）：
                     // 该 MIR 实参是个 place（move/copy），整个值在 guest 帧连续内存——
                     // 直接取 place 真地址交给 libffi avalue
+                    if variadic_foreign {
+                        // F-07：同上的 tail_kinds 位置占位
+                        let k = ffi_arg_kinds
+                            .and_then(|ks| ks.get(i))
+                            .expect("聚合实参位必有 FfiKind")
+                            .clone();
+                        tail_kinds.push(k);
+                    }
                     let Some(pl) = a.node.place() else {
                         pre.push(Stmt::Trap(
                             "C1 按值聚合实参非 place（常量展开未接）".to_string().into_boxed_str(),

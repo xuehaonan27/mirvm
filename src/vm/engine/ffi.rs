@@ -239,6 +239,15 @@ pub fn call(
 /// 按真码地址直调（CallForeign 的共用尾；也是 CallIndirect 反查未命中时的
 /// native fn-ptr 通道——guest 运行期 dlsym 所得真码，M4.4 FFI 反方向之二）。
 pub fn call_addr(fnptr: usize, sig: &ForeignSig, args: &[u64], ret_dst: Option<u64>) -> u64 {
+    // F-07：实参/签名等长不变量——zip 静默截断曾吞掉变参真实尾参的类型
+    if args.len() != sig.args.len() {
+        eprintln!(
+            "mirvm[m4-engine]: FFI 实参与签名不等长（实参 {} / 签名 {}；签名漂移或变参冻结缺口）",
+            args.len(),
+            sig.args.len()
+        );
+        std::process::exit(70);
+    }
     let types: Vec<FfiType> = sig.args.iter().map(ffi_type).collect();
     let cif = match sig.fixed {
         Some(nfixed) => Cif::new_variadic(types, nfixed, ffi_type(&sig.ret)),
