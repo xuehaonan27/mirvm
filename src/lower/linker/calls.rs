@@ -160,6 +160,18 @@ impl<'tcx> Linker<'tcx> {
                 if inner.c_variadic() {
                     return Err(format!("foreign `{name}` 参数 {t}: 变参回调不支持 thunk"));
                 }
+                // F-09：C-unwind 回调响亮拒绝——thunk 是 nounwind extern "C"
+                // trampoline，guest callback 向 native 逃逸 unwind = 边界
+                // abort 静默错义；可 unwind trampoline 生成之前精确拒绝
+                if matches!(
+                    inner.abi(),
+                    rustc_abi::ExternAbi::C { unwind: true }
+                        | rustc_abi::ExternAbi::System { unwind: true }
+                ) {
+                    return Err(format!(
+                        "foreign `{name}` 参数 {t}: C-unwind 回调不支持（F-09 边界；thunk 为 nounwind trampoline）"
+                    ));
+                }
                 let mut in_args = Vec::with_capacity(inner.inputs().len());
                 for &it in inner.inputs() {
                     let k = ffi_kind_of(self.tcx, env, it).map_err(|e| {

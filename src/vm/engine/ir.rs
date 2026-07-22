@@ -1525,7 +1525,13 @@ impl Module {
         let mut remap: Vec<u32> = Vec::with_capacity(syms.len());
         for s in syms {
             let idx = match self.foreign_syms.iter().position(|e| e.name == s.name) {
-                Some(i) => i as u32,
+                Some(i) => {
+                    // F-08：合流同样做 weak/strong 合并（任一 strong 即 strong）
+                    if !s.weak {
+                        self.foreign_syms[i].weak = false;
+                    }
+                    i as u32
+                }
                 None => {
                     self.foreign_syms.push(s);
                     (self.foreign_syms.len() - 1) as u32

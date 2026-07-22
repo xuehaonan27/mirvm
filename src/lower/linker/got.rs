@@ -15,6 +15,12 @@ impl<'tcx> Linker<'tcx> {
             (&mut self.got_syms, &mut self.got_idx)
         };
         if let Some(&i) = idx_map.get(name) {
+            // F-08：weak/strong 合并——任一引用为 strong，合并项即 strong
+            // （首现定强弱曾致 weak 先 strong 后时，缺符号被按 weak 写 NULL
+            // 而非按 native 语义链接/装载失败）
+            if !weak {
+                syms[i as usize].weak = false;
+            }
             return i;
         }
         let i = syms.len() as u32;
@@ -44,10 +50,12 @@ impl<'tcx> Linker<'tcx> {
     /// 无则开格、初填 init、以 addend=0 登记槽位修补点。
     pub(super) fn foreign_slot(&mut self, name: &str, init: u64, weak: bool) -> u64 {
         let ctx_image = self.split.as_ref().is_some_and(|s| s.current_image);
+        // F-08：合并语义先于缓存命中——后续 strong 引用即使命中既有槽
+        // 也必须升级合并项的 weak 标记
+        let idx = self.got_intern(name, weak, ctx_image);
         if let Some(&a) = self.foreign_slots.get(&(name.into(), ctx_image)) {
             return a;
         }
-        let idx = self.got_intern(name, weak, ctx_image);
         let addr = if ctx_image {
             self.split
                 .as_mut()

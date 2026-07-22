@@ -14,7 +14,14 @@ pub(crate) fn freeze_c_fnptr_sig<'tcx>(
 ) -> Option<ir::ForeignSig> {
     use rustc_abi::ExternAbi;
     let sig = ty.fn_sig(tcx).skip_binder();
-    if !matches!(sig.abi(), ExternAbi::C { .. } | ExternAbi::System { .. }) || sig.c_variadic() {
+    // F-09：C-unwind 响亮拒绝——ForeignSig 不存 unwind 属性，回调 trampoline
+    // 是 nounwind extern "C"，guest callback 向 native 逃逸 unwind = 边界
+    // abort 静默错义；生成可 unwind trampoline 之前先精确拒绝
+    if !matches!(
+        sig.abi(),
+        ExternAbi::C { unwind: false } | ExternAbi::System { unwind: false }
+    ) || sig.c_variadic()
+    {
         return None;
     }
     let mut args = Vec::with_capacity(sig.inputs().len());
