@@ -929,8 +929,9 @@ impl Translator<'_, '_> {
                 to,
                 dst,
             } => {
-                // i128/u128 → f16/f32/f64：f32/f64 走 compiler-builtins float*ti* 族
-                // （Rust i128 as f32/f64 的同一批符号）；f16 走 mirvm_wide_to_f16
+                // i128/u128 → f16/f32/f64：全走宿主 `as` 直算助手（最近舍入，
+                // 与 compiler-builtins __float*ti* 同语义；F-04b 实锤：直调
+                // compiler-builtins 按 I64/RAX 读 XMM0 返回 = 读垃圾）
                 let (lo, hi) = self.read_wide(src);
                 let s = self.b.ins().iconst(types::I64, *signed as i64);
                 let f = match to {
@@ -939,24 +940,12 @@ impl Translator<'_, '_> {
                         self.mask_val(bits, Width::W16)
                     }
                     ir::FloatW::F32 => {
-                        let fname = if *signed {
-                            "__floattisf"
-                        } else {
-                            "__floatuntisf"
-                        };
-                        let r = self.call_helper1(fname, &[lo, hi]);
-                        let n = self.b.ins().ireduce(types::I32, r);
-                        let f32v = self.b.ins().bitcast(types::F32, MemFlagsData::new(), n);
-                        self.as_bits(f32v, ir::FloatW::F32)
+                        let bits = self.call_helper1("mirvm_wide_to_f32", &[lo, hi, s]);
+                        self.mask_val(bits, Width::W32)
                     }
                     ir::FloatW::F64 => {
-                        let fname = if *signed {
-                            "__floattidf"
-                        } else {
-                            "__floatuntidf"
-                        };
-                        let r = self.call_helper1(fname, &[lo, hi]);
-                        self.as_bits(r, ir::FloatW::F64)
+                        // f64 位型 = 槽不变量本身，零转换
+                        self.call_helper1("mirvm_wide_to_f64", &[lo, hi, s])
                     }
                 };
                 self.write_scalar_place(dst, f);
@@ -982,7 +971,8 @@ impl Translator<'_, '_> {
                     },
                 );
                 let s = self.b.ins().iconst(types::I64, *signed as i64);
-                self.call_out128("mirvm_float_to_wide", &[bits, kind, s], dst);
+                // F-04a 实锤：helper 签名 (kind, v, signed, out)——kind 在前
+                self.call_out128("mirvm_float_to_wide", &[kind, bits, s], dst);
             }
             // ===== M5.4b-3 f128 宽通道（全走助手）=====
             Stmt::F128Bin { op, a, b, dst } => {

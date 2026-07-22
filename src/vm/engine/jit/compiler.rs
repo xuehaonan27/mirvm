@@ -160,6 +160,8 @@ impl Compiler {
         jb.symbol("mirvm_f128_to_wide", mirvm_f128_to_wide as *const u8);
         jb.symbol("mirvm_float_to_wide", mirvm_float_to_wide as *const u8);
         jb.symbol("mirvm_wide_to_f16", mirvm_wide_to_f16 as *const u8);
+        jb.symbol("mirvm_wide_to_f32", mirvm_wide_to_f32 as *const u8);
+        jb.symbol("mirvm_wide_to_f64", mirvm_wide_to_f64 as *const u8);
         jb.symbol("mirvm_f16_bin", mirvm_f16_bin as *const u8);
         jb.symbol("mirvm_f16_cmp", mirvm_f16_cmp as *const u8);
         jb.symbol("mirvm_f16_neg", mirvm_f16_neg as *const u8);

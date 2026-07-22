@@ -568,7 +568,9 @@ pub(super) extern "C-unwind" fn mirvm_f128_math(
     let (a, b, c) = (f128_of(alo, ahi), f128_of(blo, bhi), f128_of(clo, chi));
     let r = match op {
         0 => a.powf(b),
-        1 => a.powi(b as i32),
+        // F-03 实锤：powi 的 rhs 是 i32 标量（F128Rhs::Scalar 契约，interp
+        // stmt.rs 同臂直读标量）——blo 是原始整数位，绝不能过 f128_of
+        1 => a.powi(blo as i32),
         2 => a.copysign(b),
         3 => a.min(b),
         4 => a.max(b),
@@ -666,7 +668,7 @@ pub(super) extern "C-unwind" fn mirvm_float_to_wide(kind: u64, v: u64, signed: b
     }
 }
 
-/// i128/u128 → f16（Wide128ToFloat 的 f16 目标；f32/f64 目标走 CLIF fcvt）
+/// i128/u128 → f16（Wide128ToFloat 的 f16 目标）
 pub(super) extern "C-unwind" fn mirvm_wide_to_f16(lo: u64, hi: u64, signed: bool) -> u64 {
     let v = if signed {
         (lo_hi(lo, hi) as i128) as f16
@@ -676,16 +678,39 @@ pub(super) extern "C-unwind" fn mirvm_wide_to_f16(lo: u64, hi: u64, signed: bool
     v.to_bits() as u64
 }
 
+/// i128/u128 → f32/f64（F-04b 实锤：原直调 compiler-builtins __float*ti*
+/// 经 call_helper1 按 I64/RAX 读返回，真实符号走 XMM0 = 读垃圾；改宿主
+/// `as` 直算（最近舍入，与 __float*ti* 同语义），位型 u64 返回零 ABI 歧义）
+pub(super) extern "C-unwind" fn mirvm_wide_to_f32(lo: u64, hi: u64, signed: bool) -> u64 {
+    let v = if signed {
+        (lo_hi(lo, hi) as i128) as f32
+    } else {
+        lo_hi(lo, hi) as f32
+    };
+    v.to_bits() as u64
+}
+
+pub(super) extern "C-unwind" fn mirvm_wide_to_f64(lo: u64, hi: u64, signed: bool) -> u64 {
+    let v = if signed {
+        (lo_hi(lo, hi) as i128) as f64
+    } else {
+        lo_hi(lo, hi) as f64
+    };
+    v.to_bits()
+}
+
 // ===== f16 助手（interp 的宿主直算通道）=====
 
-/// f16 四则（op 同 mirvm_f128_bin；参数/返回 = f16 位型的 u64）
+/// f16 四则（op 同 mirvm_f128_bin：0=add 1=sub 2=mul 3=rem 4=div；参数/返回
+/// = f16 位型的 u64。F-02 实锤：Div(4) 曾落入通配臂按 % 算 = 静默错值）
 pub(super) extern "C-unwind" fn mirvm_f16_bin(op: u64, a: u64, b: u64) -> u64 {
     let (x, y) = (f16::from_bits(a as u16), f16::from_bits(b as u16));
     let r = match op {
         0 => x + y,
         1 => x - y,
         2 => x * y,
-        _ => x % y,
+        3 => x % y,
+        _ => x / y,
     };
     r.to_bits() as u64
 }
