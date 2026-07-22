@@ -33,6 +33,7 @@ pub(super) fn signal_thunk(ctx: *mut Ctx, signum: i32, handler: u64) -> usize {
         ret: FfiKind::Void,
         fixed: None,
         thunk_args: vec![],
+        unwind: false,
     };
     crate::vm::engine::thunks::get_or_create(shared, handler, func, &sig) as usize
 }

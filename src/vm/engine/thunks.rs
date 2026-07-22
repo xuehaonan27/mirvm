@@ -99,7 +99,10 @@ unsafe fn repack_ret(result: *mut u8, agg: &super::ir::FfiAgg, lo: u64, hi: u64)
 /// C1：ret = Agg 时分流——callee RetAbi::Indirect → result 经 call_guest_ffi 作
 /// 隐藏首实参（sret 直传，callee memcpy 至该址）；其余 → (lo,hi) 后 repack_ret
 /// 重打包为结构体字节。guest panic 穿出此边界 = extern "C" nounwind abort
-///（与 native 一致，设计 §4 风险表）。
+///（与 native 一致，设计 §4 风险表）。C-unwind 回调（ForeignSig.unwind 保全）
+/// 同走本蹦床——callback 内 panic 仍 abort 于边界：libffi 闭包代码无 unwind
+/// info，宿主 unwinder 原理性不可穿（R18 记档；longjmp 形不经 unwinder，
+/// 机器层不受 ABI 属性影响，可用——c_mlua_lua 实锤）。
 unsafe extern "C" fn trampoline(
     _cif: &ffi_cif,
     result: &mut u64,

@@ -1231,6 +1231,11 @@ pub struct ForeignSig {
     /// 执行期：该位实参 = fn 条目地址（fn_addrs 反查命中）→ 换 thunk 真码；
     /// NULL 或已是 native 真码 → 原样直传。内层签名的 thunk_args 恒空（不嵌套）。
     pub thunk_args: Vec<(usize, ForeignSig)>,
+    /// F-09：ABI 的 unwind 属性保全（C/C-unwind 不再静默压 C——接受是
+    /// 「读过的」，不是「没看见」）。callback 形（thunk/P1 条目/CallIndirect
+    /// native_sig）消费；出向 CallForeign 未建模（R18②），置 false。
+    #[serde(default)]
+    pub unwind: bool,
 }
 
 /// 参数在 callee 帧内的落位（引擎调用约定 v2：实参展平为 `&[u64]` 槽序列）。

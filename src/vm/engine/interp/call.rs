@@ -800,6 +800,7 @@ pub(crate) fn exec_builtin(
                         ret: FfiKind::Void,
                         fixed: None,
                         thunk_args: vec![],
+                        unwind: false,
                     };
                     crate::vm::engine::ffi::call_addr(cleanup as usize, &sig, &cav, None);
                 }

@@ -14,16 +14,17 @@ pub(crate) fn freeze_c_fnptr_sig<'tcx>(
 ) -> Option<ir::ForeignSig> {
     use rustc_abi::ExternAbi;
     let sig = ty.fn_sig(tcx).skip_binder();
-    // F-09：C-unwind 响亮拒绝——ForeignSig 不存 unwind 属性，回调 trampoline
-    // 是 nounwind extern "C"，guest callback 向 native 逃逸 unwind = 边界
-    // abort 静默错义；生成可 unwind trampoline 之前先精确拒绝
-    if !matches!(
-        sig.abi(),
-        ExternAbi::C { unwind: false } | ExternAbi::System { unwind: false }
-    ) || sig.c_variadic()
-    {
+    // F-09（2026-07-22 实锤反转）：C/C-unwind 均收——unwind 属性保全进
+    // ForeignSig.unwind（接受是「读过的」，不是「没看见」）。callback 形
+    // panic 仍 abort 于 nounwind trampoline 边界（libffi 闭包无 unwind
+    // info 原理阻塞，R18 记档）；longjmp 形机器层不受 ABI 属性影响。
+    if !matches!(sig.abi(), ExternAbi::C { .. } | ExternAbi::System { .. }) || sig.c_variadic() {
         return None;
     }
+    let unwind = matches!(
+        sig.abi(),
+        ExternAbi::C { unwind: true } | ExternAbi::System { unwind: true }
+    );
     let mut args = Vec::with_capacity(sig.inputs().len());
     for &t in sig.inputs() {
         let k = ffi_kind_of(tcx, env, t).ok()?;
@@ -38,6 +39,7 @@ pub(crate) fn freeze_c_fnptr_sig<'tcx>(
         ret,
         fixed: None,
         thunk_args: vec![],
+        unwind,
     })
 }
 

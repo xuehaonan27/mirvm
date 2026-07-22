@@ -160,7 +160,7 @@
 | R15 | **`ClosureFnPointer` 等 track_caller 外 adjustment 未支持** | `ReifyFnPointer` 只走 rustc `resolve_for_fn_ptr`；不能由此外推 | current-status §4 |
 | R16 | **global_asm `sym` 拒绝面残余（C7 闭合后）** | ①`sym` fn 指向签名不可派生（聚合/Rust ABI/变参）的 guest fn——机器码调此类同形本即 UB，响亮拒绝；②`sym` static 指向 guest static 未接（mangled 静态名审计仍会命中），按 workload 再立 | src/lower/global_asm.rs，decision-history §7.9 |
 | R17 | **FFI 按值封送残余边界（C1 闭合后）** | union 按值（SysV union 分类另规则）、SIMD 向量按值、变参尾参位聚合、align>8 聚合、multi-variant enum 按值——五形态 freeze 响亮 Err（文案可鉴红分类）；`{i128}`/f128/long-double/_Complex 既有标量边界不动。**2026-07-22 增第六形态**：packed/align(N) 非自然布局聚合（audit F-06——libffi 类型系统只能表达自然布局，冻结校验 `validate_agg_natural` 已把此类从静默错调改为 freeze 响亮拒绝；完整 padding 表达按真实 workload 触发再立）。各形态同 helper 可扩 | src/lower/ffi_sig.rs，designs/c1-ffi-agg-design.md §0 |
-| R18 | **C-unwind 边界残余（F-09 冻结拒绝后）** | ① callback 形：fn-ptr/回调的 `C-unwind` 签名冻结期响亮拒绝（thunk 为 nounwind trampoline；完整支持 = ForeignSig 存 unwind 属性 + 可 unwind trampoline 生成，按真实 workload 触发再立）；② 出向形：foreign 直调的 `C-unwind` 未建模——libffi 边界天然不可传播异常，逃逸 unwind 在 libffi 层终止（与 native 传播语义有差），维持接受调用但语义差记档 | src/lower/ffi_sig.rs，src/lower/linker/calls.rs |
+| R18 | **C-unwind 边界残余（F-09 → 属性保全接受）** | ① callback 形：`C-unwind` 签名**接受并保全 unwind 属性**（`ForeignSig.unwind`，2026-07-22 c_mlua_lua 实锤反转——冻结拒绝会把真实 workload 打红；接受是「读过的」非「没看见」）。**残余边界 = callback 内 panic 仍 abort 于 nounwind trampoline**（libffi 闭包代码无 unwind info，宿主 unwinder 原理性不可穿；真 propagation 需 per-sig CFI stub 新机制，按实锤再立）。longjmp 形不经 unwinder、机器层不受 ABI 属性影响，可用（mlua lua_Alloc 实锤）；② 出向形：foreign 直调的 `C-unwind` 未建模（libffi 边界天然不可传播异常，语义差记档） | src/lower/ffi_sig.rs，src/lower/linker/calls.rs，src/vm/engine/thunks.rs |
 
 ## G. 维护态与基建
 

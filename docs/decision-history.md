@@ -1102,8 +1102,13 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
     align(N) 从静默错调改 freeze 响亮拒绝）；F-07 变参固定聚合切尾
     （同：tail_kinds 位置占位 + call_addr 等长不变量）。
   - F-08 GOT weak/strong 首现定强弱（`142fe67`：三处合并 = 任一 strong
-    即 strong）；F-09 C-unwind 静默压 nounwind C（同：两冻结表面精确
-    拒绝；出向 libffi 边界记 R18）。
+    即 strong）；F-09 C-unwind 静默压 nounwind C（初判两冻结表面精确
+    拒绝；**当日下午实锤反转**——c_mlua_lua 的 lua_Alloc 是真实
+    C-unwind 回调，冻结拒绝把既有绿项打红；改为接受并保全属性
+    （`ForeignSig.unwind`），残余边界记 R18（callback 内 panic 仍
+    abort 于 nounwind trampoline——libffi 闭包无 unwind info 原理
+    阻塞；longjmp 形可用）。教训：冻结拒绝的适用面必须先过 corpus
+    全量再定型。
 - **波2 验证方式**（`51cff03`，本战役枢纽）：`MIRVM_JIT_SYNC=1`——
   call_guest 投递后等待发布/失败哨兵，threshold=1 从「首调请求编译」
   升为「首调同步编译发布」；可准入编译失败 = FAIL 哨兵响亮 abort；

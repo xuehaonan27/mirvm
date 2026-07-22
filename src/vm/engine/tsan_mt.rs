@@ -82,6 +82,7 @@ pub fn run() -> bool {
         ret: FfiKind::U64,
         fixed: None,
         thunk_args: vec![],
+        unwind: false,
     };
 
     let handles: Vec<_> = (0..THREADS)

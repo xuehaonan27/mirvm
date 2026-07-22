@@ -364,6 +364,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         ret: fret,
                         fixed: Some(nfixed),
                         thunk_args,
+                        // 出向 unwind 未建模（R18②；libffi 边界天然不可传播）
+                        unwind: false,
                     }
                 } else {
                     ir::ForeignSig {
@@ -371,6 +373,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         ret: fret,
                         fixed: None,
                         thunk_args,
+                        unwind: false,
                     }
                 };
                 Terminator::CallForeign {
