@@ -17,6 +17,9 @@ case "$script" in
         ;;
     tests/m4_gate0.sh|tests/m4_gate1.sh|tests/m4_gate2.sh)
         ;;
+    tests/a2_deps_image.sh)
+        echo 'PASS a2_deps_image'
+        ;;
     tests/m4_gate4.sh)
         if [ -n "${SKIP_TSAN:-}" ]; then
             echo 'SKIP TSan（SKIP_TSAN=1）'

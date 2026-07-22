@@ -7,7 +7,7 @@
 #  增量 = ⑥ vmctx 检查点落笔核查 + JIT 助手频度统计冒烟 + ⑦ M5 收口条目核查。
 set -u
 cd "$(dirname "$0")/.."
-MIRVM=${MIRVM:-target/debug/mirvm}
+MIRVM=${MIRVM:-target/release/mirvm}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 pass=0 fail=0
