@@ -125,7 +125,7 @@
 
 | ID | 事项 | 内容 | 出处 |
 |---|---|---|---|
-| D1 | **mode B `.mirvm` 包 + `mirvm pack`（D9f④；**片②已落地 2026-07-23**） | 片②（`254692c`，decision-history §7.24）：包格式 v0（META/STAMPS/MODULE/NATIVELIBS/RELOC 五节 + BASE/MC 预留，全链 refuse-loud）+ `mirvm pack`（cargo 两形态 + 纯单文件，强制全量冷路径单模块自包含）+ `mirvm run x.mirvm`（零新执行路径）——五负载 pack+run 逐字节一致。**格式声明不定死**（用户裁定，冻结归 D4 评审）。**片③ 待施**：MC 机器码节 + 进程内装载（自产码去 cc/ELF；装载契约已定于 designs/modeb-mirvmar-design.md §5）。余量：fat artifact 多 target、字节码版本化（C12） | decision-history §7.24，[designs/modeb-mirvmar-design.md](designs/modeb-mirvmar-design.md) |
+| D1 | **mode B `.mirvm` 包 + `mirvm pack`（D9f④；**三片全落 2026-07-23**） | 片②（`254692c`）：包格式 v0 五节 + pack/run（零新执行路径，五负载逐字节一致）；**片③（`1697c82`，decision-history §7.25）**：MC 机器码节 + 进程内 ELF 装载器（自解析/自重定位/eh_frame/符号表入解析链①′位，系统链接器零依赖）——**真自包含酸试通过**（rm -rf global-asm 缓存后 faer 包仍逐字节跑通，自产码零 cc/ELF/.so/缓存依赖；剩 dlopen 者唯 FFI 真外国库）。**格式声明不定死**（用户裁定，冻结归 D4 评审）。余量：fat artifact 多 target、字节码版本化（C12）、MC 预消化 blob 形态（D4 评审候选） | decision-history §7.24/§7.25，[designs/modeb-mirvmar-design.md](designs/modeb-mirvmar-design.md) |
 | D2 | **发行形态与命名（D9f⑤）** | 先 miri 式后 JDK 式自包含 tarball（成熟后）；kit 命名候选 MDK/mirvm toolkit（MRsDK 已否决） | designs/distribution-design.md |
 | D3 | **零拷贝装载（rkyv 类）** | postcard 解码封顶（eco ~60ms / ripgrep ~450ms）；mmap+逐函数惰性解码是下一数量级唯一杠杆；与 mode B 同题 | history/coldstart-research.md V6，m6-log 片8 |
 | D4 | **对外格式冻结重估** | M5.3 收官触发器（2026-07-15）已响，被有意再推迟到 mode B 立项 | decision-history §7 |

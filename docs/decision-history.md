@@ -1275,6 +1275,35 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   不读缓存/rustc/cargo 痕迹」；自产机器码的 cc/ELF 依赖消除属片③
   （MC 节 + 进程内装载）。
 
+### 7.25 2026-07-23：mode B 片③落地——MC 机器码节 + 进程内装载（自产码去 cc/ELF）
+
+- **实现（`1697c82`）**：
+  - `vm/engine/mcload.rs`：进程内 ELF64 装载器——自解析 PT_LOAD 映射
+    （BSS 清零、按 flags 分段 mprotect）、自重定位（RELATIVE/64/PC32/
+    GLOB_DAT/JUMP_SLOT；内部符号自 .symtab、外部符号 RTLD_DEFAULT、
+    弱缺席 0）、eh_frame 逐 FDE `__register_frame`、符号表注册进解析链
+    ①′位（`ffi.rs` FfiState::resolve，先于归档句柄）。**对系统链接器零
+    依赖**（无 ld.so/ld.so.cache 概念，kernel mmap/mprotect + 自解析）。
+    边界一律响亮拒绝：非 ET_DYN x86_64、PT_INTERP、TLS/COPY 重定位、
+    非弱未定义外部符号、IFUNC——不属自产 global_asm 族。
+  - pack 期：global_asm 族字节入 MC 节（NATIVELIBS 退化索引 + fnv 互证；
+    `MIRVM_PACK_NO_MC=1` 退化纯文件引用）。load 期：MC 逐条自装载 +
+    注册，并从 required_native_libs 剔除（不再 dlopen）；无 MC 的包
+    （片②/NO_MC）维持文件引用全兼容。
+  - 实锤一误：符号表先存 base+value、resolve 又加 bias = 双重加基址
+    → SIGSEGV（faer LD_ST 首调即崩）；改存 vaddr 统一 bias+value
+    （与 archive_fallbacks 同形）后三维一致。
+- **真自包含酸试（本片的核心验收）**：`rm -rf ~/.mirvm/global-asm` 后
+  faer 包**仍逐字节跑通**——pulp LD_ST 544 例程全走包内字节；自此
+  运行期对自产机器码 **零 cc/ELF/.so/缓存依赖**，唯一剩 dlopen 的 =
+  FFI 真外国库（glibc 类与静态归档）——§7.22 用户划的线完全兑现。
+- **验收**：faer/wasmtime/eco MC pack/run 逐字节一致；cargo test 76、
+  diff 双态 45/45、diff_cargo 5/5、gate5 复绿。
+- **如实边界**：装载器只覆盖自产 global_asm/dep_asm 族（重定位面实测
+  几乎全零、零星 JUMP_SLOT/GLOB_DAT）；静态归档（vendored C）与系统库
+  维持 dlopen（「FFI 真外国库」类）；格式演进候选 = MC 预消化 blob
+  （去 ELF 解析形态，随 D4 冻结评审）。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT
