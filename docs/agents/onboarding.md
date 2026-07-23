@@ -48,7 +48,10 @@ CARGO=$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/c
 MIRVM_JIT_THRESHOLD=1 $M run corpus/c_X.rs
 ```
 
-stdout/stderr/exit 三维全部逐字节一致才算绿。主 gate：`bash tests/m4_gate5.sh`。
+stdout/stderr/exit 三维全部逐字节一致才算绿。主 gate：`bash tests/gate.sh`
+（corpus 全防线；日常节奏：`bash tests/run.sh fast` 逢提交、`bash tests/run.sh smoke`
+批次级）。corpus 条目唯一真源 = `tests/corpus.manifest`（tier/mode/timeout/env 全在此），
+新增 driver 必须先登记。
 
 ## 工作流纪律（撞过的坑）
 

@@ -116,6 +116,7 @@
 | E33 | **unsafe trust-boundary 优先审计**（audit M-03，2026-07-22 登记） | `未立项` ~475 个 unsafe block、显式 SAFETY 注释仅 5 处——真实地址模型/FFI/ELF/asm-stub/unwind 决定大量 unsafe 不可避免；正确策略非机械补注释，而是优先审计 FFI、全局 Shared、ELF 解析、固定地址映射、thunk、unwind 五个信任边界，为每个实际不变量补最小证明或测试；ASan/fuzz 类保证无实锤前不立项 | history/development-status-audit-2026-07-22.md §9 |
 | E34 | **JIT 翻译器大 match 治理**（audit M-04 关联，2026-07-22 登记） | `记账` jit/translate.rs 2,939 行单文件三 match 是维护热点；分族拆文件的收益/扰动比未评，结构重构战役（E21）模式可复用，下次大改前评估 | src/vm/engine/jit/translate.rs |
 | E35 | **编译 worker FIFO 排空竞态**（2026-07-22 登记） | `记账` 短命程序退出时编译队列可能未排空——已投递函数永不发布（语义零影响：解释兜底正确；仅 JIT_DEBUG 口径观察与短程序性能非确定）。处置方向 = 退出前 drain 或记账接受，无实锤驱动前不动 | src/vm/engine/interp/mod.rs:414 |
+| E36 | **cargo 项目模式 guest cwd=项目目录，与 cargo run 语义分叉**（2026-07-23 测试管线整顿实锤） | `未立项` `mirvm run <项目目录>` 时 guest cwd=项目目录；而 `cargo run`（含 `--manifest-path`）从不 chdir——程序 cwd=调用者 cwd，读 cwd 相对路径的程序两语义分叉（argv 探针实锤：mirvm 侧 cwd=/tmp/argproj，argv/文件解析随之为项目相对）。corpus/projects 对拍以 {ROOT} 绝对化夹具路径绕行（harness 层合法）；产品侧是否对齐 cargo 语义（cwd=调用者 cwd）待裁定——frontmatter 物化项目同涉（其 guest cwd 现=物化目录） | tests/corpus.manifest {ROOT} 注，decision-history §7.26 |
 
 > E27（weak 符号真地址化缺定向验收）已于 2026-07-18 关闭并实修「weak extern
 > static 恒 0 判空 cell」缺陷——现走 GOT 启动相真解析（命中=真址/缺席=0；引擎

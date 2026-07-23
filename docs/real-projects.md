@@ -1,5 +1,11 @@
 # 真实 Cargo 项目 correctness 与 benchmark
 
+> **停放声明（2026-07-23）**：本文描述的 `tests/real_projects*.sh` harness 已整体
+> 挪入 `tests/parked/` 休眠——仓内零 case（case 与源码镜像在 git-ignored
+> `artifacts/real-projects/` 且本机已不存在）、不进 CI、其"真项目对拍"职责已由
+> 更轻的 `corpus/projects/<名>/`（tests/corpus.manifest `mode=diff`）接替。
+> 休眠原因与复活条件见 `tests/parked/README.md`。以下为历史合同存档，仅供参考。
+
 > 状态日期：2026-07-13。本文描述 `tests/real_projects.sh` 当前已经实现的合同。
 > 它是测试基础设施说明，不扩大 [current-status.md](current-status.md) 中的产品语义承诺。
 

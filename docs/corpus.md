@@ -3,18 +3,23 @@
 > 本文是 corpus（真实生态 crate 最小驱动）的总台账。
 > **§0–§4 = tier-0 时代（M2.5，2026-07-05）调研票据归档**——五张设计票据已全部兑现，
 > 逐 crate 过程细节见 git 历史（2026-07-18 文档精简时压缩为一屏）；
-> **§5 = 三维逐字节差分时代的当前活台账**（批1–10，tests/corpus.sh 全量 129 绿）；
+> **§5 = 三维逐字节差分时代的当前活台账**（批1–11；条目唯一真源 =
+> `tests/corpus.manifest`，164 脚本驱动 + 2 vendored 真 cargo 项目）；
 > **§6–§7 = 已投放清单与后续候选池**。
 > 当前可信边界见 [current-status.md](current-status.md)；撞出的未解决债务全部登记在
 > [open-issues.md](open-issues.md)。
 
 ## 0. corpus 是什么
 
-corpus = 一组**真实生态 crate 的最小驱动程序**，用来发现真实代码对抽象机 / VM 边界
-提出的要求。跑法：`bash tests/corpus.sh`（全量）或 `bash tests/corpus.sh <name>...`
-（子集）；release 二进制，driver 在 `corpus/c_*.rs`，stdout/stderr 落
+corpus = 一组**真实生态 crate 的最小驱动程序**（`corpus/c_*.rs`）外加
+**vendored 真 cargo 项目**（`corpus/projects/<名>/`，批11 起），用来发现真实
+代码对抽象机 / VM 边界提出的要求。**条目唯一真源 = `tests/corpus.manifest`**
+（tier/timeout/mode/env/needs 全在此；新增 driver 必须先登记）。跑法：
+`bash tests/corpus.sh`（全量三层）、`bash tests/corpus.sh --tier smoke`（按层）、
+`bash tests/corpus.sh <name>...`（按名子集）；release 二进制，stdout/stderr 落
 `/tmp/corpus-out/<name>.{out,err}`。三维差分纪律与验收食谱见 §5 头注与
-[agents/onboarding.md](agents/onboarding.md)。
+[agents/onboarding.md](agents/onboarding.md)；gate 内判绿三口径
+（exit / oracle / diff）见 manifest 头注。
 
 ## 1–4. tier-0 时代票据（M2.5 归档，2026-07-05）
 
@@ -421,6 +426,35 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
   37→38；修复后 MRE/全 driver C 维与解释器逐字节。
 - gate5 163→**167**（ethers_evm tmo=90 默认；polars_lazy/xlsxwriter_rw/
   resvg_svg tmo=180；ugrep_bin 依赖 /tmp/ugrep-local 留 corpus.sh 手工批）。
+
+### 批11（2026-07-23，测试管线整顿：manifest 唯一真源 + 孤儿接线 + 真 cargo 项目形态）
+
+- **双名单漂移实锤（整顿的直接动机）**：旧 gate5 与 corpus.sh 各内联一份
+  corpus 名单且已分叉——**13 个批6 条目（comfy_table_render/exr_image/faer_lu/
+  fastfloat_ryu/gluesql_db/h3_hex/jiff_time/nalgebra_la/plotters_chart/
+  polars_frame/stemmers_multi/tokenizers_hf/whatlang_detect）两边都没接线**
+  （创建时三维验收过却从不进任何 gate），zstd_stream 只在 corpus.sh 侧。
+  治理 = `tests/corpus.manifest` 唯一真源（tier/timeout/mode/env/needs/xfail
+  六列，gate 与跑批共读），164 脚本驱动全接线：137 full + 24 smoke + 3 manual。
+- **判绿三口径**（gate 内）：`exit`（退出码，创建时三维验收的既定口径）/
+  `oracle:<名>`（stdout 逐字节等于 tests/fixtures/oracles/<名>.txt，原内联
+  六 oracle 抽离）/ `diff`（真项目三维对拍，下条）。manual 层 = jieba_cut
+  （单跑 77-89s 贴 timeout）、opencc/ugrep_bin（依赖 /tmp 机侧前缀，
+  needs 缺席记 SKIP）。
+- **真 cargo 项目形态（hexyl 0.17.0 + tokei 14.0.0 vendor 进
+  `corpus/projects/`，.crate 全量解包 + sha256 钉，见其 README）**：
+  `mode=diff` = mirvm run 与 native cargo run 三维逐字节对拍。
+  实锤两个机制点：① **cargo 会回放缓存告警**（warm 构建 stderr 仍含依赖
+  告警，对拍被噪音炸）→ 两侧同帽 `--cap-lints allow`（manifest env 列，
+  `%20` 编码空格），stderr 只承载程序自身输出；② **mirvm 项目模式
+  guest cwd=项目目录**（cargo run 从不 chdir，二者语义分叉）→ 夹具路径
+  经 `{ROOT}` 占位绝对化（lib.sh::parse_args），产品侧对齐与否记
+  [open-issues.md E36](open-issues.md) 待裁定。L2 warm 复跑判定 = warm
+  三维 == native 三维 + warm stdout == cold stdout（冷跑 stderr 含构建
+  告警属构建事件，仅断言 exit 0）。
+- **附带收编**：旧 real_projects 重型 harness（ripgrep/tokei 工作集，
+  71K+118K+32K，仓内零 case、不进 CI）挪 tests/parked/ 休眠——
+  「真项目对拍」职责由本形态以更轻基建接替。
 
 ## 6. 批7/批8 候选清单（已全部投放，2026-07-17）
 

@@ -51,20 +51,15 @@ cargo build --release --locked
 ./target/release/mirvm run app.mirvm
 
 # 当前基础回归；语义完整性仍以 current-status 中的诚实边界为准
-MIRVM="$PWD/target/release/mirvm" bash tests/diff.sh
-bash tests/m4_gate0.sh
-bash tests/m4_gate1.sh
-bash tests/m4_gate2.sh
-bash tests/m4_gate4.sh
-bash tests/m4_gate5.sh
-bash tests/m5_gate6.sh   # M5 收口门（内含 m4_gate5 全量）
-
-# 真实项目 harness 自身回归（纯本地 fixture，不访问网络）
-bash tests/real_projects_regression.sh
+bash tests/run.sh fast     # 逢提交级：fmt/clippy/test + diff 双态 + diff_cargo + gate_truth
+bash tests/run.sh smoke    # 批次级：fast + corpus smoke 层 + probes + runtime_gates
+bash tests/gate.sh         # 战役收尾全量（corpus 全防线 + perf + a2 + 上述全部）
+bash tests/corpus.sh --tier smoke   # corpus 手工跑批（tests/corpus.manifest 唯一真源）
 ```
 
-真实 Cargo 项目的 `prepare` / `check` / `bench` case 格式、Git-ignored workspace artifacts、
-隔离边界和分层实证见 [docs/real-projects.md](docs/real-projects.md)。目前不能宣称支持
+真实 Cargo 项目的对拍走 `corpus/projects/`（vendor 真项目 + manifest `mode=diff` 三维
+逐字节，provenance 钉见其 README）；旧重型 harness 合同存档在
+[docs/real-projects.md](docs/real-projects.md)（已停放）。目前不能宣称支持
 “任意 Rust 程序”。远程仓库和 GitHub Issues/PRD/PR 操作当前暂停，维护者明确恢复前不要执行。
 
 单文件可使用 cargo script / RFC 3424 风格 frontmatter 声明依赖：

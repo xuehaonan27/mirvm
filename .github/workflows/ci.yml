@@ -50,8 +50,10 @@ jobs:
       - name: Runtime differential gates
         env:
           SKIP_PERF: "1"
-          # TSan has its own visible step above; gate5 must report this as SKIP.
+          # TSan has its own visible step above; gate must report this as SKIP.
           SKIP_TSAN: "1"
-        # m5_gate6 内含 m4_gate5 全量 + M5.5 收口三查（§7 落笔/JIT stats/§7.20），
-        # 默认 target/release（audit V-03 修正：性能/执行口径一律 release）
-        run: bash tests/m5_gate6.sh
+          # CI runner 磁盘有限：统一 target dir 超 12G 自动清（tests/lib.sh 预算闸）。
+          MIRVM_TARGET_BUDGET_GB: "12"
+        # gate.sh = corpus 全防线（manifest）+ diff 四态 + diff_cargo + perf
+        # + a2 + probes + runtime_gates + JIT stats；默认 target/release
+        run: bash tests/gate.sh

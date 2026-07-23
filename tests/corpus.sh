@@ -1,75 +1,79 @@
 #!/usr/bin/env bash
-# corpus 跑批：逐个 mirvm run，记录 exit code / 耗时 / 首个错误。
-# 用途是"发现真实 crate 对抽象机/VM 边界的要求"，不是给 tier-0 刷通过率。
+# tests/corpus.sh —— corpus 手工跑批（tests/corpus.manifest 唯一真源驱动）。
+# 用途是"发现真实 crate 对抽象机/VM 边界的要求"，不是刷通过率；
+# 判绿口径 = 退出码冒烟（严格判绿——oracle/diff/xfail——归 tests/gate.sh）。
+#
+# 用法：
+#   bash tests/corpus.sh                  # 全量（smoke+full+manual 三层）
+#   bash tests/corpus.sh --tier smoke     # 只跑某层（smoke|full|manual|all）
+#   bash tests/corpus.sh tempfile walkdir # 按名跑子集（须在 manifest 登记）
+# 环境：MIRVM（默认 target/release/mirvm）、OUT（默认 /tmp/corpus-out）、
+#   MIRVM_GATE_KEEP_CACHE=1（逐驱动清 cache 的调试旁路）、
+#   MIRVM_DISK_MIN_GB / MIRVM_TARGET_BUDGET_GB（磁盘护栏，见 tests/lib.sh）。
 set -u
 cd "$(dirname "$0")/.."
 MIRVM=${MIRVM:-$(pwd)/target/release/mirvm}
 OUT=${OUT:-/tmp/corpus-out}
 mkdir -p "$OUT"
+. tests/lib.sh
+CORPUS_TIMINGS_FILE=$(mktemp)
+export CORPUS_TIMINGS_FILE
+trap 'rm -f "$CORPUS_TIMINGS_FILE"' EXIT
 
-# 可传程序名跑子集：bash tests/corpus.sh tempfile walkdir ...；不传 = 全量
-progs=("$@")
-if [ ${#progs[@]} -eq 0 ]; then
-    progs=(itertools anyhow rayon chrono indexmap clap csv crossbeam tokio blake3 \
-           tempfile walkdir numbigint smallvec bytes sha2 petgraph \
-           net_tcp net_udp volatile \
-           serde_json serde_yaml rand_det flate2 brotli argon2 p256 syn_parse hickory \
-           unicode_tables wasmi boa_js tiny_skia zip_arch rust_decimal rustfft roaring \
-           bitvec compact_str nom_parse comrak_md fst_build spade_delaunay jieba_cut \
-           smoltcp_tcp statrs_stats rkyv_zero qr_round fatfs_img geo_ops rhai_script \
-           redb_kv zstd_stream \
-           crc32fast chacha_poly k256_ecdsa libflate_zlib rustls_cert \
-           lyon_tess midly_midi jaq_jq kdl_doc ds_obscure qoi_img \
-           pgp_packet zopfli_deep simd_json symphonia_wav pdf_pair deunicode_slug \
-           malachite_big arkworks_ff im_persistent zxcvbn_pass barcoders_gen \
-           bzip2_pure fixed_point \
-           wat_parse jsonschema html5ever xml_rs markdown_it logos_lex chumsky_parse \
-           ndarray smartcore rune koto opencc \
-           parquet2_rw syntect_fancy phonenumber orgmode oxc_parse rsa_4096 ed25519_default \
-           mimalloc libgit2 rustls_shake zstd_long \
-           aws_lc mlua_lua tantivy sequoia_pgp sqlx_sqlite \
-           swc_parse miden_exec polodb starlark_eval \
-           zune_jpeg candle_mlp pest scraper_dom arrow_rs fontdue unicode_rs rustpython_mini \
-           tree_sitter bzip2_csys wasmtime_wat \
-           risc0_run typst_pdf datafusion_sql miden_prove \
-           ethers_evm polars_lazy xlsxwriter_rw resvg_svg ugrep_bin)
+tier=all
+names=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --tier) tier=$2; shift 2 ;;
+        --tier=*) tier=${1#--tier=}; shift ;;
+        *) names+=("$1"); shift ;;
+    esac
+done
+case "$tier" in smoke|full|manual|all) ;; *)
+    echo "corpus.sh: 非法 tier '$tier'（smoke|full|manual|all）" >&2; exit 64 ;; esac
+
+if [ ${#names[@]} -gt 0 ]; then
+    rows=$(
+        for n in "${names[@]}"; do
+            manifest_lookup "$n" || { echo "corpus.sh: $n 未在 tests/corpus.manifest 登记" >&2; exit 2; }
+        done
+    ) || exit 2
+else
+    rows=$(manifest_rows "$tier") || exit 2
 fi
-# opencc（批7 波1，FFI 条目）：需 /tmp/opencc-local 前缀（OpenCC 1.1.9 自建，
-# 重建法见 driver 头注）+ 三 env；前缀缺席则本批跳过，不算红
-# ugrep_bin（批10 波2，真二进制条目）：需 /tmp/ugrep-local 前缀（ugrep 7.8.2
-# 源码自建，重建法与 sha256 钉见 driver 头注）；前缀缺席同样跳过不算红
-pass=0 fail=0
 
-for p in "${progs[@]}"; do
-    src="corpus/c_$p.rs"
-    [ -f "$src" ] || { echo "SKIP $p (no src)"; continue; }
-    if [ "$p" = opencc ]; then
-        [ -d /tmp/opencc-local ] || { echo "SKIP $p (no /tmp/opencc-local)"; continue; }
-        export OPENCC_DIR=/tmp/opencc-local OPENCC_LIBS=opencc LD_LIBRARY_PATH=/tmp/opencc-local/lib
-    fi
-    if [ "$p" = ugrep_bin ]; then
-        [ -x /tmp/ugrep-local/bin/ugrep ] || { echo "SKIP $p (no /tmp/ugrep-local)"; continue; }
-    fi
-    start=$(date +%s)
-    timeout 600 "$MIRVM" run "$src" >"$OUT/$p.out" 2>"$OUT/$p.err"
-    code=$?
-    end=$(date +%s)
-    dur=$((end - start))
-    if [ "$code" -eq 0 ]; then
-        echo "PASS  $p  (${dur}s)"
+cache_snapshot "corpus 起跑前"
+while IFS='|' read -r name _tier tmo mode envv needs args _xfail; do
+    [ -n "$name" ] || continue
+    argv=()
+    [ -n "$args" ] && parse_args "$args" argv
+    code=0
+    corpus_run "$OUT" "$name" "$tmo" "$envv" "$needs" ${argv[@]+"${argv[@]}"} || code=$?
+    dur=$(awk -v n="$name" '$2==n{s=$1} END{print s+0}' "$CORPUS_TIMINGS_FILE")
+    if [ "$code" -eq 77 ]; then
+        echo "SKIP  $name（needs 缺席：$needs）"
+        skip_count=$((skip_count + 1))
+    elif [ "$code" -eq 2 ]; then
+        echo "FAIL  $name（manifest 有登记但无 driver 文件）"
+        fail=$((fail + 1))
+    elif [ "$code" -eq 0 ]; then
+        echo "PASS  $name  (${dur}s)"
         pass=$((pass + 1))
     else
-        first_err=$(grep -m1 -iE 'error|panic|unsupported|unimplemented|not (yet )?(implemented|supported)|no (shim|intrinsic)|abort' "$OUT/$p.err" | head -c 200)
-        [ -z "$first_err" ] && first_err=$(tail -1 "$OUT/$p.err" | head -c 200)
-        echo "FAIL  $p  (${dur}s, exit=$code)  ::  $first_err"
+        first_err=$(grep -m1 -iE 'error|panic|unsupported|unimplemented|not (yet )?(implemented|supported)|no (shim|intrinsic)|abort' "$OUT/$name.err" | head -c 200)
+        [ -z "$first_err" ] && first_err=$(tail -1 "$OUT/$name.err" | head -c 200)
+        echo "FAIL  $name  (${dur}s, exit=$code)  ::  $first_err"
         fail=$((fail + 1))
     fi
-    # 磁盘纪律（与 m4_gate5.sh 同款，2026-07-19）：每驱动单跑，deps/ir
-    # image 跑完即无复读者，逐驱动清；base 底座与共享 target 不清。
-    # MIRVM_GATE_KEEP_CACHE=1 旁路（调试用）。
-    [ -z "${MIRVM_GATE_KEEP_CACHE:-}" ] && "$MIRVM" cache purge --deps --ir >/dev/null 2>&1 || true
-done
+done <<< "$rows"
 
 echo "---"
-echo "corpus: $pass pass, $fail fail"
+if [ "$skip_count" -gt 0 ]; then
+    echo "corpus: $pass pass, $skip_count skip, $fail fail"
+else
+    echo "corpus: $pass pass, $fail fail"
+fi
+print_slowest 10
+target_budget_check
+cache_snapshot "corpus 收尾后"
 [ "$fail" -eq 0 ]

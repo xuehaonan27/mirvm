@@ -46,7 +46,7 @@
 | `open-issues.md` | 未解决债务登记册：T 待施 / C corpus 实锤 / E 引擎架构 / D 分发 / R 拒绝边界 / G 维护态 + 触发器速查 + 定型否决 |
 | `decision-history.md` | append-only 决策索引（ADR-lite）；推翻旧决策在此追加，不删旧节 |
 | `corpus.md` | 真实 crate 三维差分扩编台账（§5，批1–10）+ 候选池（§7）；§0–§4 为 tier-0 时代票据归档 |
-| `real-projects.md` | `tests/real_projects*.sh` 严格 harness 的合同说明（四层身份/schema-3/4/隔离边界） |
+| `real-projects.md` | `tests/real_projects*.sh` 重型 harness 的合同说明——**已停放**（tests/parked/，原因与复活条件见其 README）；现行真项目对拍 = `corpus/projects/` + manifest `mode=diff` |
 
 ### docs/agents/（agent 操作规约）
 
