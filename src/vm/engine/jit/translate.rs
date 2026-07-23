@@ -2196,7 +2196,6 @@ impl Translator<'_, '_> {
     /// 回 blocks[bi] 会在 brif 后追加指令 = verifier 拒收，strict 实证）
     fn emit_cleanup(
         &mut self,
-        target: ir::Bb,
         cleanup: ir::Bb,
         sig: cranelift_codegen::ir::Signature,
         blocks: &[cranelift_codegen::ir::Block],
@@ -2237,7 +2236,6 @@ impl Translator<'_, '_> {
         self.b.def_var(ev, exn);
         self.b.ins().jump(blocks[cleanup as usize], &[]);
         self.b.switch_to_block(cur);
-        let _ = target;
         (et, ok)
     }
 
@@ -2355,7 +2353,7 @@ impl Translator<'_, '_> {
                         for _ in 0..4 {
                             sig0.params.push(AbiParam::new(types::I64));
                         }
-                        let (et, ok) = self.emit_cleanup(*target, *bb, sig0, blocks);
+                        let (et, ok) = self.emit_cleanup(*bb, sig0, blocks);
                         let fref = self.module.declare_func_in_func(self.c2i, self.b.func);
                         let fv = self.b.ins().iconst(types::I64, *callee as i64);
                         let ap = self.b.ins().stack_addr(types::I64, args_ss, 0);
@@ -2551,7 +2549,7 @@ impl Translator<'_, '_> {
                     for _ in 0..8 {
                         sig0.params.push(AbiParam::new(types::I64));
                     }
-                    let (et, ok) = self.emit_cleanup(*target, *bb, sig0, blocks);
+                    let (et, ok) = self.emit_cleanup(*bb, sig0, blocks);
                     let z = self.b.ins().iconst(types::I64, 0);
                     self.b
                         .ins()
@@ -2695,7 +2693,7 @@ impl Translator<'_, '_> {
                         sig0.params.push(AbiParam::new(types::I64));
                     }
                     sig0.returns.push(AbiParam::new(types::I64));
-                    let (et, ok) = self.emit_cleanup(*target, *bb, sig0, blocks);
+                    let (et, ok) = self.emit_cleanup(*bb, sig0, blocks);
                     let z = self.b.ins().iconst(types::I64, 0);
                     let call =
                         self.b
@@ -2773,7 +2771,7 @@ impl Translator<'_, '_> {
                     for _ in 0..7 {
                         sig0.params.push(AbiParam::new(types::I64));
                     }
-                    let (et, ok) = self.emit_cleanup(*target, *bb, sig0, blocks);
+                    let (et, ok) = self.emit_cleanup(*bb, sig0, blocks);
                     let z = self.b.ins().iconst(types::I64, 0);
                     self.b
                         .ins()

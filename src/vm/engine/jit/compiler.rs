@@ -518,8 +518,7 @@ impl Compiler {
         let mut cctx = self.module.make_context();
         cctx.func.signature = sig;
         // T1-c：has_try_call 由 Translator 在 build 期间置位（块外读以生成 LSDA）
-        #[allow(unused_assignments)]
-        let mut has_try_call = false;
+        let has_try_call;
         {
             let mut b = FunctionBuilder::new(&mut cctx.func, &mut self.fbc);
             let frame_offs = analyze_frame(body);

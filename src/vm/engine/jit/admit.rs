@@ -97,7 +97,8 @@ pub(super) struct CalleeAbi {
     pub sret: bool,
 }
 
-/// callee ABI 计算（T1-a 起全形态可接；Option 形态暂存，T1-d 准入放开后复审）。
+/// callee ABI 计算（T1-a 起全形态可接——admit 三表穷尽后任何 FuncBody 均可
+/// 派生，恒为 Some；Option 形态留作调用点惯用（.expect/.filter 顺读），不再复审。
 pub(super) fn callee_abi(body: &ir::FuncBody) -> Option<CalleeAbi> {
     let mut nparams = usize::from(matches!(body.ret, RetAbi::Indirect { .. }));
     for p in &body.params {

@@ -115,6 +115,7 @@
 | E32 | **inline-asm setjmp/longjmp 的捕获帧内存复用 hazard（C3 定稿边界）** | `记账` asm-stub 模型下 setjmp 捕获点在 stub 包装帧；解释帧在捕获与恢复之间复用该宿主栈内存的合成协议可撞死（v2 spike 实锤，落点 `Channel::send` 内部）。真实 workload（wasmtime 全 trap 面）不发生该形态、三维确定性绿。消除 = JIT 真帧身份（compiled guest fn = native 帧语义）；不宣称全形态闭合。**进展 2026-07-21（T1）**：JIT 帧已是真 native 帧（含真 unwinder 穿透/着陆，双 CIE + 全覆 LSDA）——setjmp/longjmp 所在函数一旦发布即脱出 hazard 面；interp 帧路径维持原记账 | [parked/c3-resume-spike.md](parked/c3-resume-spike.md)，decision-history §7.19 |
 | E33 | **unsafe trust-boundary 优先审计**（audit M-03，2026-07-22 登记） | `未立项` ~475 个 unsafe block、显式 SAFETY 注释仅 5 处——真实地址模型/FFI/ELF/asm-stub/unwind 决定大量 unsafe 不可避免；正确策略非机械补注释，而是优先审计 FFI、全局 Shared、ELF 解析、固定地址映射、thunk、unwind 五个信任边界，为每个实际不变量补最小证明或测试；ASan/fuzz 类保证无实锤前不立项 | history/development-status-audit-2026-07-22.md §9 |
 | E34 | **JIT 翻译器大 match 治理**（audit M-04 关联，2026-07-22 登记） | `记账` jit/translate.rs 2,939 行单文件三 match 是维护热点；分族拆文件的收益/扰动比未评，结构重构战役（E21）模式可复用，下次大改前评估 | src/vm/engine/jit/translate.rs |
+| E35 | **编译 worker FIFO 排空竞态**（2026-07-22 登记） | `记账` 短命程序退出时编译队列可能未排空——已投递函数永不发布（语义零影响：解释兜底正确；仅 JIT_DEBUG 口径观察与短程序性能非确定）。处置方向 = 退出前 drain 或记账接受，无实锤驱动前不动 | src/vm/engine/interp/mod.rs:414 |
 
 > E27（weak 符号真地址化缺定向验收）已于 2026-07-18 关闭并实修「weak extern
 > static 恒 0 判空 cell」缺陷——现走 GOT 启动相真解析（命中=真址/缺席=0；引擎
@@ -161,6 +162,7 @@
 | R16 | **global_asm `sym` 拒绝面残余（C7 闭合后）** | ①`sym` fn 指向签名不可派生（聚合/Rust ABI/变参）的 guest fn——机器码调此类同形本即 UB，响亮拒绝；②`sym` static 指向 guest static 未接（mangled 静态名审计仍会命中），按 workload 再立 | src/lower/global_asm.rs，decision-history §7.9 |
 | R17 | **FFI 按值封送残余边界（C1 闭合后）** | union 按值（SysV union 分类另规则）、SIMD 向量按值、变参尾参位聚合、align>8 聚合、multi-variant enum 按值——五形态 freeze 响亮 Err（文案可鉴红分类）；`{i128}`/f128/long-double/_Complex 既有标量边界不动。**2026-07-22 增第六形态**：packed/align(N) 非自然布局聚合（audit F-06——libffi 类型系统只能表达自然布局，冻结校验 `validate_agg_natural` 已把此类从静默错调改为 freeze 响亮拒绝；完整 padding 表达按真实 workload 触发再立）。各形态同 helper 可扩 | src/lower/ffi_sig.rs，designs/c1-ffi-agg-design.md §0 |
 | R18 | **C-unwind 边界残余（F-09 → 属性保全接受）** | ① callback 形：`C-unwind` 签名**接受并保全 unwind 属性**（`ForeignSig.unwind`，2026-07-22 c_mlua_lua 实锤反转——冻结拒绝会把真实 workload 打红；接受是「读过的」非「没看见」）。**残余边界 = callback 内 panic 仍 abort 于 nounwind trampoline**（libffi 闭包代码无 unwind info，宿主 unwinder 原理性不可穿；真 propagation 需 per-sig CFI stub 新机制，按实锤再立）。longjmp 形不经 unwinder、机器层不受 ABI 属性影响，可用（mlua lua_Alloc 实锤）；② 出向形：foreign 直调的 `C-unwind` 未建模（libffi 边界天然不可传播异常，语义差记档） | src/lower/ffi_sig.rs，src/lower/linker/calls.rs，src/vm/engine/thunks.rs |
+| R19 | **`#![no_main]` / `#[start]` 入口形态拒绝**（2026-07-22 登记） | 入口类型非 `EntryFnType::Main` 一律响亮拒绝（exit 1 + 诊断，src/cli.rs:489）；嵌入式/bootloader 式入口形态无 corpus 实锤，重开需真实 workload | src/cli.rs |
 
 ## G. 维护态与基建
 

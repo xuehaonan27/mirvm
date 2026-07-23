@@ -482,7 +482,9 @@ pub(crate) fn simd_extract_dyn_body(ps: *const u8, idx: u64, lanes: u16, lb: u8)
 }
 
 /// SimdInsertDyn 本体（interp stmt.rs SimdInsertDyn 臂整搬；v = 已求值的
-/// 插入标量）。
+/// 插入标量）。求值序注记：薄壳（interp/JIT 两侧同一本体）必然先求 val
+/// 再进本体做越界检查——原 interp 臂先检后求；仅当 idx 越界且 val 求值
+/// 本身 abort 时诊断先后不同（双重 UB 死角，两侧均 exit(70)）。
 pub(crate) fn simd_insert_dyn_body(
     pd: *mut u8,
     ps: *const u8,

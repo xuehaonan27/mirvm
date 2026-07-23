@@ -371,7 +371,9 @@ unsafe extern "C" {
     pub fn _Unwind_Resume(ex: *mut u8) -> !;
 }
 
-/// Unreachable 终止子的诊断口径与解释器一致（不用裸 trap 的 SIGILL）。
+/// Unreachable 终止子的诊断与解释器逐字节同口径（`mirvm[m4-engine]` 前缀 +
+/// exit(70)，不用裸 trap 的 SIGILL，也不用 abort 的 134——134 是
+/// TerminateAbort 的专用通道，两通道勿混）。
 pub(super) extern "C-unwind" fn mirvm_jit_unreachable(func: u64) -> ! {
     let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
     let name = shared
@@ -380,8 +382,8 @@ pub(super) extern "C-unwind" fn mirvm_jit_unreachable(func: u64) -> ! {
         .get(func as usize)
         .map(|f| &*f.name)
         .unwrap_or("?");
-    eprintln!("mirvm[jit]: 到达 Unreachable（fn {name}）");
-    std::process::abort();
+    eprintln!("mirvm[m4-engine]: 到达 Unreachable（fn {name}）");
+    std::process::exit(70);
 }
 
 /// Trap 占位（T1-d：语句级/终止子同口）——诊断与退出码逐字节对齐 interp

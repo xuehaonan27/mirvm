@@ -50,12 +50,17 @@ ENV:
     MIRVM_JIT_SYNC    =1 时 JIT 验证模式：投递后等待发布/失败，可准入编译失败响亮
                       终止（gate 用；证明 threshold=1 差分真跑机器码）
     MIRVM_JIT_STATS   =1 时进程退出经 atexit 打 JIT 助手频度统计（诊断用）
+    MIRVM_CARGO_LOCKED 置位时 frontmatter/脚本项目按 --locked 构建（依赖锁定；
+                      未置位 = clean 环境可重解析，见 open-issues G7）
     MIRVM_TIMING      =1 时向 stderr 输出相位账本（frontend/lower/engine/total）
     MIRVM_NO_IR_CACHE =1 时旁路 L2 engine-IR 缓存（读写全禁；诊断/对拍用）
     MIRVM_NO_BASE_IMAGE =1 时旁路 std 预降低底座（全量冷降低；诊断/对拍用）
 
 DEV:
     mirvm spike1..5   跑已冻结的 M4 前置 spike（回归自检；见 docs/history/spike*.md）
+    MIRVM_JIT_DEBUG   =1 时 JIT 编译线程打 收到/发布 流水（刻意的诊断旋钮）
+    MIRVM_JIT_DEBUG_DUMP =1 时转储编译失败函数的 CLIF（叠加 MIRVM_JIT_DEBUG）
+    MIRVM_SEGV_DUMP   =1 时 SIGSEGV 打印 fault RIP（JIT 码崩点定位）
 ";
 
 pub fn main() -> ExitCode {
