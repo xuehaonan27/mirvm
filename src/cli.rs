@@ -23,6 +23,8 @@ mirvm — a Rust runtime with its own execution engine
 
 USAGE:
     mirvm run <file.rs>  [OPTIONS] [-- <program args>]   # 单文件（可带 frontmatter 依赖）
+    mirvm run <x.mirvm>  [OPTIONS] [-- <program args>]   # 跑 .mirvm 包（mode B 片②）
+    mirvm pack <target>  [-o out.mirvm]                  # cargo 项目 / 脚本 / 单文件 → .mirvm 包
     mirvm run <dir | Cargo.toml> [-- <program args>]     # cargo 项目（依赖自动构建为 MIR rlib）
     mirvm cache status                                   # 本地仓库各组件体量 + 陈代体量
     mirvm cache purge [--dry-run]                        # 默认 = 清陈代（deps/base/ir 非本 build 代）
@@ -92,6 +94,7 @@ pub fn main() -> ExitCode {
 
     match first.as_str() {
         "run" => run_main(argv),
+        "pack" => pack_main(argv),
         "cache" => cache_main(argv),
         "spike1" => crate::vm::spikes::spike1::run(),
         "spike2" => crate::vm::spikes::spike2::run(),
@@ -107,6 +110,104 @@ pub fn main() -> ExitCode {
 }
 
 // ===== 用户入口 =====
+
+/// `mirvm pack <target> [-o out.mirvm]`（mode B 片②，designs/modeb-mirvmar-design.md）：
+/// cargo 项目（目录/Cargo.toml）、frontmatter 脚本、纯单文件 → .mirvm 包。
+/// cargo 两形态经 MIRVM_PACK 环境传入 runner；强制全量冷路径保包自包含
+/// （MIRVM_NO_BASE_IMAGE/MIRVM_NO_DEPS_IMAGE 同进 env）。
+fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
+    let mut input = None;
+    let mut out: Option<std::path::PathBuf> = None;
+    let mut it = argv.peekable();
+    while let Some(arg) = it.next() {
+        if arg == "-o" || arg == "--output" {
+            let Some(v) = it.next() else {
+                eprintln!("mirvm: pack -o 缺输出路径");
+                exit(2);
+            };
+            out = Some(std::path::PathBuf::from(v));
+        } else if input.is_none() && !arg.starts_with('-') {
+            input = Some(arg);
+        } else {
+            eprintln!("mirvm: pack 未知参数 `{arg}`");
+            exit(2);
+        }
+    }
+    let Some(input) = input else {
+        eprintln!("mirvm: pack 缺目标（项目目录 / Cargo.toml / script.rs）");
+        exit(2);
+    };
+    let input_path = PathBuf::from(&input);
+    let default_out = || -> std::path::PathBuf {
+        let stem = if input_path.is_dir() {
+            input_path
+                .canonicalize()
+                .ok()
+                .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "package".into())
+        } else {
+            input_path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "package".into())
+        };
+        std::path::PathBuf::from(format!("{stem}.mirvm"))
+    };
+    let out = out.unwrap_or_else(default_out);
+    let out_abs = std::path::absolute(&out).unwrap_or(out);
+
+    // cargo 两形态（目录/Cargo.toml、frontmatter 脚本）：env 传入 runner
+    let is_cargo_dir = input_path.is_dir()
+        || input_path.file_name().is_some_and(|f| f == "Cargo.toml");
+    if is_cargo_dir {
+        let dir = if input_path.is_dir() {
+            input_path.as_path()
+        } else {
+            input_path.parent().unwrap_or(Path::new("."))
+        };
+        // SAFETY: 单线程启动相
+        unsafe {
+            std::env::set_var("MIRVM_PACK", &out_abs);
+            std::env::set_var("MIRVM_NO_BASE_IMAGE", "1");
+            std::env::set_var("MIRVM_NO_DEPS_IMAGE", "1");
+        }
+        cargo_shim::phase_cargo(dir, &[]);
+    }
+    let src = std::fs::read_to_string(&input_path).unwrap_or_else(|e| {
+        eprintln!("mirvm: 读取 {input} 失败: {e}");
+        exit(1);
+    });
+    if let Some((manifest, body)) = parse_frontmatter(&src) {
+        let dir = materialize_script(&input_path, &manifest, &body);
+        unsafe {
+            std::env::set_var("MIRVM_PACK", &out_abs);
+            std::env::set_var("MIRVM_NO_BASE_IMAGE", "1");
+            std::env::set_var("MIRVM_NO_DEPS_IMAGE", "1");
+        }
+        cargo_shim::phase_cargo(&dir, &[]);
+    }
+
+    // 纯单文件：直接 pack_driver（与 run 的形态 3 同参）
+    let sysroot = std::env::var("MIRVM_SYSROOT").unwrap_or_else(|_| {
+        match crate::sysroot::ensure_sysroot() {
+            Ok(p) => p.display().to_string(),
+            Err(e) => {
+                eprintln!("mirvm: 构建 sysroot 失败: {e}");
+                exit(1);
+            }
+        }
+    });
+    let rustc_args = vec![
+        "mirvm".to_string(),
+        input.clone(),
+        "--edition=2024".to_string(),
+        "--crate-type=bin".to_string(),
+        "--sysroot".to_string(),
+        sysroot,
+    ];
+    let program_argv = vec![input];
+    pack_driver(rustc_args, program_argv, out_abs)
+}
 
 /// `mirvm cache status|purge …`：本地仓库（$HOME/.mirvm，MIRVM_HOME 可改址）管理。
 fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
@@ -222,6 +323,24 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         cargo_shim::phase_cargo(input_path.parent().unwrap_or(Path::new(".")), &program_args);
     }
 
+    // mode B 片②：.mirvm 包嗅探（先于文本读取——包是二进制）
+    if crate::pack::is_package(&input_path) {
+        let module = match crate::pack::load_package(&input_path) {
+            Ok(p) => p.module,
+            Err(reason) => {
+                eprintln!("mirvm: 装载 {} 失败: {reason}", input_path.display());
+                exit(70);
+            }
+        };
+        // warm 后半段与 run_driver 热路径同形（空 image 栈：asm 配方幂等重物化）
+        let mut module = module;
+        module.asm_stub_addrs = crate::lower::asm::materialize(&module.asm_sites);
+        let mut program_argv = vec![input];
+        program_argv.extend(program_args);
+        let code = run_vm_engine(module, &program_argv, vm_call.as_deref(), vm_stats);
+        exit(code);
+    }
+
     let src = std::fs::read_to_string(&input_path).unwrap_or_else(|e| {
         eprintln!("mirvm: 读取 {input} 失败: {e}");
         exit(1);
@@ -276,7 +395,54 @@ fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
         // SAFETY: 单线程阶段，尚未启动解释
         unsafe { std::env::set_var(k, v) };
     }
+    // mode B 片②：pack 会话（mirvm pack 经 phase_cargo 以 MIRVM_PACK 传入
+    // 输出路径）——强制全量冷路径保包自包含（空 image 栈 + 旁路 L2/deps-image
+    // 由 mirvm pack 以 MIRVM_NO_BASE_IMAGE/MIRVM_NO_DEPS_IMAGE 同进 env）
+    if let Ok(out) = std::env::var("MIRVM_PACK") {
+        return pack_driver(rustc_args, program_argv, std::path::PathBuf::from(out));
+    }
     run_driver(rustc_args, program_argv, false, None, false, true)
+}
+
+/// mode B 片②：pack 驱动——run_driver 冷半的同构（空 image 栈、无 L2 查询），
+/// 岔口在 callbacks.pack_out：after_analysis 末尾落 .mirvm 包代替执行。
+fn pack_driver(
+    rustc_args: Vec<String>,
+    program_argv: Vec<String>,
+    out: std::path::PathBuf,
+) -> ExitCode {
+    let t_start = std::time::Instant::now();
+    let mut callbacks = MirvmCallbacks {
+        dump_mir: false,
+        program_argv,
+        exit_code: None,
+        vm_call: None,
+        vm_stats: false,
+        module: None,
+        suppress_runner_warning_summary: true,
+        runner_finalization_filter_installed: false,
+        t_start,
+        timing: PhaseTiming::default(),
+        rustc_args: rustc_args.clone(),
+        stack: crate::baseimage::ImageStack::empty(),
+        split_image: None,
+        session_fp: None,
+        deps_image_loaded: false,
+        pack_out: Some(out),
+    };
+    let compiler_code = rustc_driver::catch_with_exit_code(|| {
+        rustc_driver::run_compiler(&rustc_args, &mut callbacks)
+    });
+    if callbacks.runner_finalization_filter_installed {
+        restore_runner_finalization_filter();
+    }
+    if compiler_code != ExitCode::SUCCESS {
+        return compiler_code;
+    }
+    if let Some(code) = callbacks.exit_code {
+        return ExitCode::from(code as u8);
+    }
+    ExitCode::SUCCESS
 }
 
 // ===== cargo wrapper：target 依赖的 in-process 编译（S2 / D9d）=====
@@ -476,6 +642,9 @@ struct MirvmCallbacks {
     session_fp: Option<(bool, bool, bool)>,
     /// A2：本会话起手是否已装载 deps-image（已装载 ⇒ 不再 split 重建）
     deps_image_loaded: bool,
+    /// mode B 片②：pack 输出路径（Some ⇒ after_analysis 末尾落 .mirvm 包
+    /// 代替执行；None = 常规 run 语义）
+    pack_out: Option<std::path::PathBuf>,
 }
 
 /// 加载相计时账本（M6 片1）。frontend = 驱动进入→analysis 完成（含依赖 metadata 加载），
@@ -582,6 +751,24 @@ impl Callbacks for MirvmCallbacks {
             self.module = Some(module);
             self.split_image = split_image;
             self.timing.lower = Some(t_lower.elapsed());
+            // mode B 片②：pack 岔口——落 .mirvm 包代替执行（与 L2 store 同一
+            // 洁净快照时机；失败 = 响亮终止，不静默退化）
+            if let Some(out) = &self.pack_out {
+                match crate::pack::write_package(
+                    tcx,
+                    &self.rustc_args,
+                    self.module.as_ref().expect("刚设置"),
+                    out,
+                ) {
+                    Ok(()) => {
+                        eprintln!("mirvm: 包已写出 {}", out.display());
+                    }
+                    Err(reason) => {
+                        eprintln!("mirvm: 打包失败: {reason}");
+                        self.exit_code = Some(1);
+                    }
+                }
+            }
             // A2：split 产物先写盘再上栈——栈键链自此含 image 键，L2 delta 条目带
             // 完整链（delta 内嵌 image 绝对量，错链入账 = 后续错配装载）。
             if let Some(img) = self.split_image.take() {
@@ -805,6 +992,7 @@ fn run_driver(
         split_image: None,
         session_fp: None,
         deps_image_loaded,
+        pack_out: None,
     };
     let compiler_code = rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&rustc_args, &mut callbacks)

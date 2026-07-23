@@ -23,10 +23,10 @@ use serde::{Deserialize, Serialize};
 use crate::vm::engine::ir;
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
-struct FileStamp {
-    path: String,
-    size: u64,
-    mtime_ns: u128,
+pub(crate) struct FileStamp {
+    pub path: String,
+    pub size: u64,
+    pub mtime_ns: u128,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -93,6 +93,96 @@ fn env_matches(name: &str, recorded: &Option<String>) -> bool {
     }
 }
 
+/// 输入清单收集（rustc dep-info 同构口径；mode B 包与 L2 共用）：
+/// 本地源文件（source_map 非 imported）+ `include!` 追踪文件 + 全部上游 crate
+/// 工件（used_crate_source：含 sysroot std rlib）+ `env!` 依赖。任一文件无法
+/// 盖戳（消失/非常规）= None（宁不缓存/打包）。
+pub(crate) fn collect_input_stamps(
+    tcx: TyCtxt<'_>,
+) -> Option<(Vec<FileStamp>, Vec<(String, Option<String>)>)> {
+    let sess = tcx.sess;
+    let mut files: Vec<String> = sess
+        .source_map()
+        .files()
+        .iter()
+        .filter(|f| !f.is_imported())
+        .filter_map(|f| match &f.name {
+            rustc_span::FileName::Real(real) => real.local_path().map(|p| p.display().to_string()),
+            _ => None,
+        })
+        .collect();
+    files.extend(
+        sess.file_depinfo
+            .borrow()
+            .iter()
+            .map(|sym| sym.as_str().to_string()),
+    );
+    for &cnum in tcx.crates(()) {
+        files.extend(
+            tcx.used_crate_source(cnum)
+                .paths()
+                .map(|p| p.display().to_string()),
+        );
+    }
+    files.sort();
+    files.dedup();
+    // 绝对化（mode B 实证：cargo 会话给本地 crate 的是相对路径（src/main.rs），
+    // 包可在任意 cwd 装载；canonicalize 失败时保持原路径由 stamp 复核兜底）
+    let files: Vec<String> = files
+        .iter()
+        .map(|p| {
+            std::fs::canonicalize(p)
+                .map(|c| c.display().to_string())
+                .unwrap_or_else(|_| p.clone())
+        })
+        .collect();
+    let stamps = files
+        .iter()
+        .map(|p| stamp(p))
+        .collect::<Option<Vec<FileStamp>>>()?;
+    let envs: Vec<(String, Option<String>)> = sess
+        .env_depinfo
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), v.map(|s| s.as_str().to_string())))
+        .collect();
+    Some((stamps, envs))
+}
+
+/// 盖戳逐项与本地文件当前态复核（mode B 包装载校验与 L2 lookup 共用）
+pub(crate) fn stamps_current(files: &[FileStamp]) -> bool {
+    files.iter().all(|f| stamp(&f.path).as_ref() == Some(f))
+}
+
+/// env 依赖逐项与当前环境复核（同上共用）
+pub(crate) fn envs_current(envs: &[(String, Option<String>)]) -> bool {
+    envs.iter().all(|(k, v)| env_matches(k, v))
+}
+
+/// 首个失配盖戳（诊断用；全配 = None）
+pub(crate) fn stamps_first_mismatch(files: &[FileStamp]) -> Option<FileStamp> {
+    files
+        .iter()
+        .find(|f| stamp(&f.path).as_ref() != Some(*f))
+        .map(|f| {
+            stamp(&f.path).map_or_else(
+                || FileStamp {
+                    path: format!("{}（当前无法盖戳）", f.path),
+                    size: f.size,
+                    mtime_ns: f.mtime_ns,
+                },
+                |cur| FileStamp {
+                    path: format!(
+                        "{}（记录 size={} mtime_ns={}，当前 size={} mtime_ns={}）",
+                        f.path, f.size, f.mtime_ns, cur.size, cur.mtime_ns
+                    ),
+                    size: 0,
+                    mtime_ns: 0,
+                },
+            )
+        })
+}
+
 /// 热路径查找。返回的 Module 已含恢复到固定基址的冻结区；asm_stub_addrs 是
 /// 序列化时的陈旧地址，调用方**必须**以 asm_sites 重物化覆写后再执行。
 pub fn lookup(rustc_args: &[String], base_key: Option<&str>) -> Option<ir::Module> {
@@ -104,14 +194,10 @@ pub fn lookup(rustc_args: &[String], base_key: Option<&str>) -> Option<ir::Modul
     if !header_matches(&header, rustc_args, base_key) {
         return None;
     }
-    if !header
-        .files
-        .iter()
-        .all(|f| stamp(&f.path).as_ref() == Some(f))
-    {
+    if !stamps_current(&header.files) {
         return None;
     }
-    if !header.envs.iter().all(|(k, v)| env_matches(k, v)) {
+    if !envs_current(&header.envs) {
         return None;
     }
     // Module 反序列化内含冻结区固定基址恢复；失败（基址被占等）→ miss
@@ -149,46 +235,10 @@ pub fn store(
     // 间接（decision-history §7.5c）：GOT 表随快照走、启动相重填本进程真值——
     // 不再是缓存障碍，原「宿主地址直嵌拒缓存」判据（M6 片2）已退役。
 
-    // 输入清单（rustc dep-info 同构口径）
-    let sess = tcx.sess;
-    let mut files: Vec<String> = sess
-        .source_map()
-        .files()
-        .iter()
-        .filter(|f| !f.is_imported())
-        .filter_map(|f| match &f.name {
-            rustc_span::FileName::Real(real) => real.local_path().map(|p| p.display().to_string()),
-            _ => None,
-        })
-        .collect();
-    files.extend(
-        sess.file_depinfo
-            .borrow()
-            .iter()
-            .map(|sym| sym.as_str().to_string()),
-    );
-    for &cnum in tcx.crates(()) {
-        files.extend(
-            tcx.used_crate_source(cnum)
-                .paths()
-                .map(|p| p.display().to_string()),
-        );
-    }
-    files.sort();
-    files.dedup();
-    let Some(stamps) = files
-        .iter()
-        .map(|p| stamp(p))
-        .collect::<Option<Vec<FileStamp>>>()
-    else {
+    // 输入清单（rustc dep-info 同构口径，与 mode B 包共用收集器）
+    let Some((stamps, envs)) = collect_input_stamps(tcx) else {
         return false; // 有输入文件无法盖戳（消失/非常规）——宁不缓存
     };
-    let envs: Vec<(String, Option<String>)> = sess
-        .env_depinfo
-        .borrow()
-        .iter()
-        .map(|(k, v)| (k.as_str().to_string(), v.map(|s| s.as_str().to_string())))
-        .collect();
 
     let header = Header {
         build_id: env!("MIRVM_BUILD_ID").to_string(),
