@@ -237,9 +237,9 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
   有损面逐 channel fnv 锚；half 钉 =2.2.1 绕 F16C 运行期探测未内建 vcvtps2ph；
   **vcvtps2ph 已内建，钉已于 2026-07-18 摘除（open-issues G4 关闭，§7.9）**）、
   nalgebra_la（LU/QR/SVD/Cholesky/eigenvalues 全 bits）、h3_hex（Uber H3 全 API）、
-  faer_lu（default-features=false 标量内核；默认 std 的 pulp V3 LD_ST 需依赖
-  crate 内 global_asm 物化=-Zno-codegen 边界——**[open-issues.md](open-issues.md)
-  C4 票记（fb327cc）**）、
+  faer_lu（**2026-07-23 起复原默认特性**：pulp V3 LD_ST 544 例程真走汇编路径，
+  C4 闭合（decision-history §7.23——dep 编译期 global_asm 抽取 + bin 同通道装载，
+  native/默认/SYNC 三维逐字节一致；曾 default-features=false 绕行））、
   stemmers_multi、whatlang_detect、gluesql_db（17 类型/join/聚合/错误路径；
   钉 bigdecimal =0.4.5 绕上游破洞）、plotters_chart（SVG 全文+bitmap FNV）、
   fastfloat_ryu（2.2250738585072011e-308 等经典边界 bits）、comfy_table_render。

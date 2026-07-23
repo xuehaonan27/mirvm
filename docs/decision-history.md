@@ -1194,6 +1194,43 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   whole-archive 抽 rlib（Rust CGU 闭包必炸）；auto-detect（元数据里
   extern 声明与 global_asm 定义不可区分，实证不可能）。
 
+### 7.23 2026-07-22/23：C4 闭合施工实录（dep global_asm 编译期抽取 + 两个伴生实锤）
+
+- **施工（`176ae20`，decision-history §7.22 定稿方向的一次落地）**：
+  dep 编译回调在 mono 收集时顺带把本 crate 的 global_asm/naked 从
+  HIR 渲染成 `.s` 文本，落 **rlib 旁挂清单**（`lib*.mirasm.s`）；bin
+  加载相按 crate 图序发现清单，经既有 assemble 通道（内容寻址 cc +
+  T5 syscall 改写 + 未定义符号审计）物化挂进 required_native_libs
+  装载链。**清单存文本而非 .so**——缓存自愈免费（purge 后 bin 侧重编，
+  dep 无需重编）。渲染器 sym fn 臂参数化：bin 侧 = C7 P1 条目预算原路，
+  dep 侧片① = foreign/naked 早退、其余响亮拒绝（C7 跨 crate 条目预算
+  属片②，见 open-issues R16）。
+- **验收**：`corpus/c_faer_lu.rs` 复原 `faer = "0.21"` 默认特性——
+  pulp V3 检测命中，`static LD_ST[544]` 的 544 个 extern fn 取址经
+  dep 清单 .so 全解析，**native / mirvm 默认 / mirvm SYNC(阈值=1 同步
+  发布) 三维逐字节一致**；cargo test 76、diff 双态 45/45、corpus
+  faer_lu/tree_sitter/mimalloc/mlua_lua/rayon 5/5、gate5 复绿。
+- **伴生实锤①（C6 按需队列）**：faer V3 内核触发 llvm.x86 cmp.pd
+  (128/256)、max/min.pd(128/256)、max/min.sd 六件缺失，按四触点法补齐，
+  谓词表与 maxmin 语义（NaN/±0/双源选择）经原生 intrinsic 探针逐位验证。
+- **伴生实锤②（JIT 帧对齐潜伏错值，SYNC 显形后同役修复）**：cranelift
+  x86_64 栈基只保证 16 对齐（源码实证：compute_frame_layout 一律
+  16-align、prologue 无动态重排），frame_align > 16 的 JIT 帧按调用链
+  奇偶错位——nano-gemm 的 `__m256d` 局部撞 `mem::zeroed` 的 32 字节
+  precondition（write_bytes 对齐检查）。此前此类帧「编译成功且按运气
+  对齐」，是**默认值域级潜伏错值**。修 = 槽内补 (align−16) 字节余量 +
+  入口代码级 `(addr+align−1)&−align` 抬基（frame_addr 第三态），不依赖
+  cranelift 任何保证。教训同 F-05：验证强度（SYNC 同步发布）把「按运气
+  正确」变成「必然显形」。
+- **NaN 符号处置（用户 2026-07-22 裁定）**：faer 奇异矩阵 inverse 的
+  8 个 NaN 符号位属**实现定义域**——IEEE 允许自选；同一 native 下
+  O0==mirvm==7ff8、O3==fff8（LLVM 优化级改符号）；rustc const-eval 一律
+  +nan。不追 LLVM 相位签：driver dump 对 f64 NaN 掩符号位（payload 与
+  inf/-inf 区分保留，有穷值全位照旧）——这也方便开发者暴露自己的问题。
+- **遗留边界（如实）**：dep global_asm 的 `sym` 指向 dep 自身 guest fn
+  的操作数片①响亮拒绝（C7 跨 crate 条目预算，见 open-issues R16，遇
+  真实 workload 再立）；C4 片② = mode B 机器码节（与 D1 同设计）。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT
