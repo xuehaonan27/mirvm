@@ -62,7 +62,7 @@
 
 | ID | 事项 | 关键内容与转正要件 | 出处 |
 |---|---|---|---|
-| C4 | **dep crate global_asm 物化**（旧 debt §7） | faer pulp V3 LD_ST 汇編表：S2 `-Zno-codegen` 致 rlib 无 object，本 crate global_asm 通道（收集种子只含本地项）接不到。路径①收集面扩到 used_crates（同通道 cc+dlopen，装载序=crate 图序）；②命中 crate 关 `-Zno-codegen`（判名放行，只付一族 codegen）。当前 default-features=false 标量内核绕行 | corpus §5 批6（fb327cc 记档） |
+| C4 | **dep crate global_asm 物化**（旧 debt §7；**方向已定 2026-07-22**） | faer pulp V3 LD_ST 汇编表。**定稿方向（decision-history §7.22）**：mirvm 就是每个 dep crate 的编译器（shim 进程内 rustc_driver）——**dep 编译期从 HIR 抽取 global_asm 并物化**（mono 收集对本次编译的 crate 恒成立；模板文本在编译期手里，无需从 rmeta/rlib 抠）。两片：①抽取 + 现有 asm-stub .so 通道装载（解 faer，验收 = c_faer_lu 复原默认特性三维绿）；②机器码节纳入 mode B 包格式（与 D1 同设计，运行期去 ELF/cc）。**已否**（纪律 1 不绕行）：env 名单、救援链、读 OUT_DIR、whole-archive、auto-detect（实证均不通或不净） | decision-history §7.22，corpus §5 批6 |
 | C6 | **M5.x intrinsic 按需队列残余** | pclmulqdq.256/.512、vaes、其余 gather 形态、avx512.pmadd 系等：遇真实 workload 按既有四触点法补（已清先例：psad.bw/pclmulqdq/aesni/crc32/permd/gather/vpmadd52/F16C/lddqu/`2b4766b`）。AES 等未触发项保留响亮 Trap | corpus §5，history/m5.1-design.md §1 |
 | C8 | **Rust 侧 ctor / `.init_array`（linkme 族）未触发** | C 原生归档侧 constructor 已由 decision-history §7.8 分治放行（DT_INIT）；裸 `.init`/`.fini` 仍拒。Rust 侧 ctor/linkme 从未进 corpus，按需立项，不预支 | history/m4.5-plan.md D6（已删，git 历史），§7.8 |
 
@@ -125,7 +125,7 @@
 
 | ID | 事项 | 内容 | 出处 |
 |---|---|---|---|
-| D1 | **mode B `.mirvm` 包 + `mirvm pack`（D9f④）** | 缓存可移植化为路线；内含 fat artifact 多 target、字节码版本化（C12）、S3′ 产物可携带化 | [designs/distribution-design.md](designs/distribution-design.md) |
+| D1 | **mode B `.mirvm` 包 + `mirvm pack`（D9f④；2026-07-22 起为当前战役）** | 缓存可移植化为路线；内含 fat artifact 多 target、字节码版本化（C12）、S3′ 产物可携带化。**2026-07-22 增设计输入（§7.22）**：包格式纳入**机器码节**——asm stub/global_asm/thunk 的预物化形态（第三类内容物的干净归宿：打包期物化入包，运行期进程内装载，去 ELF/cc；与 dep global_asm 抽取（C4 片①）同一数据源 | [designs/distribution-design.md](designs/distribution-design.md)，decision-history §7.22 |
 | D2 | **发行形态与命名（D9f⑤）** | 先 miri 式后 JDK 式自包含 tarball（成熟后）；kit 命名候选 MDK/mirvm toolkit（MRsDK 已否决） | designs/distribution-design.md |
 | D3 | **零拷贝装载（rkyv 类）** | postcard 解码封顶（eco ~60ms / ripgrep ~450ms）；mmap+逐函数惰性解码是下一数量级唯一杠杆；与 mode B 同题 | history/coldstart-research.md V6，m6-log 片8 |
 | D4 | **对外格式冻结重估** | M5.3 收官触发器（2026-07-15）已响，被有意再推迟到 mode B 立项 | decision-history §7 |
@@ -139,6 +139,7 @@
 | D12 | **`-Cincremental` 脚本路径** | 非当前杠杆；触发式重启（「大用户 crate 编辑-重跑」形态）；`finalize_session_directory` 坑在案 | history/coldstart-research.md §4 |
 | D13 | **地址模型 P5 增量（扩域/回收）** | 维持现固定基址样条工程；增量能力记 M7+ | decision-history §7.5b |
 | D14 | **原生内容寻址依赖存储（统一依赖 cache 终态；用户 2026-07-18 裁定方向）** | 去重单位 = 完整编译键（crate 版本 × features × 依赖闭包 × cfg/flags × toolchain）：多脚本/多项目共引 X@V 时其构建产物机器级唯一。**近期片已落地（§7.15：共享 cargo target dir，fingerprint 即原生内容寻址；实测 ethers 二跑 0.66s、两树并集 525M）**；**终态 = mirvm 原生 store（`~/.mirvm/store/<编译键哈希>/`，自管 build plan + extern 注入），与 .mirvmar 本地解析/mode B 同设计——用户裁定原生为更好方向，立项时与 D1 合并评审**。并发模型已裁定：发布一次后续只读命中、无大锁常驻；清理粒度粗可接受 | 2026-07-18 缓存讨论，decision-history §7.14/§7.15 |
+| D15 | **砍掉 cargo（自有依赖解析 + 编译调度；用户 2026-07-22 纳入日程）** | `未立项` 目标：dep 闭包的构建不再经 cargo——自有 manifest/feature 解析、build.rs/proc-macro 调度、per-crate rustc_driver 管线（shim 已有其半）。动机 = 运行期去工具链化 + 调度自主权 + 制度性消除「吃 cargo 产物就得绕」的处境（§7.22）。**分期预判**：① cargo 兼容层现状维持；② 简单子集（无 build.rs/proc-macro 的 crate 图）自管；③ 全 cargo 语义按实需扩。与 D14 终态 store、D1 mode B 同设计族，立项时合并评审 | decision-history §7.22 |
 
 ## R. 响亮拒绝边界（现行定型；重开需实锤驱动）
 
