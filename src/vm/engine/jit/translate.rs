@@ -15,6 +15,9 @@ pub(super) struct Translator<'a, 'b> {
     pub(super) frame_offs: FrameMap,
     /// guest 帧栈槽（frame_offs 非空时创建；frame_size 字节、frame_align 对齐）
     pub(super) frame_ss: Option<StackSlot>,
+    /// frame_align > 16 时的代码级对齐基址变量（槽基只保 16，(addr+align-1)
+    /// &-align 抬到 frame_align；frame_addr 三分支的第三态）
+    pub(super) frame_base_var: Option<Variable>,
     pub(super) unreachable: ClifFuncId,
     pub(super) c2i: ClifFuncId,
     pub(super) memmove: ClifFuncId,
@@ -91,14 +94,35 @@ impl Translator<'_, '_> {
         }
     }
 
-    /// 读槽（分派：落帧 → 栈槽 load + 零扩；SSA → use_var）
+    /// 帧内 offset 的真地址（三分支：frame_base_var（>16 对齐兜底）→
+    /// base+off；否则栈槽 stack_addr）
+    fn frame_addr(&mut self, off: u32) -> Value {
+        if let Some(v) = self.frame_base_var {
+            let base = self.b.use_var(v);
+            self.b.ins().iadd_imm(base, i64::from(off))
+        } else {
+            let ss = self
+                .frame_ss
+                .expect("取址 offset 必落帧（analyze_frame 全集）");
+            self.b.ins().stack_addr(types::I64, ss, off as i32)
+        }
+    }
+
+    /// 读槽（分派：落帧 → 帧内存 load + 零扩；SSA → use_var）
     fn read_slot(&mut self, s: Slot) -> Value {
         if self.frame_offs.contains(s.off) {
-            let ss = self.frame_ss.expect("落帧 offset 必有帧槽");
-            let v = self
-                .b
-                .ins()
-                .stack_load(Self::narrow_ty(s.width), ss, s.off as i32);
+            let v = if let Some(fbv) = self.frame_base_var {
+                let base = self.b.use_var(fbv);
+                let a = self.b.ins().iadd_imm(base, i64::from(s.off));
+                self.b
+                    .ins()
+                    .load(Self::narrow_ty(s.width), MemFlagsData::trusted(), a, 0)
+            } else {
+                let ss = self.frame_ss.expect("落帧 offset 必有帧槽");
+                self.b
+                    .ins()
+                    .stack_load(Self::narrow_ty(s.width), ss, s.off as i32)
+            };
             if s.width == Width::W64 {
                 v
             } else {
@@ -110,17 +134,23 @@ impl Translator<'_, '_> {
         }
     }
 
-    /// 写槽（分派：落帧 → 掩宽 + 窄化 + 栈槽 store；SSA → 掩宽 def_var）
+    /// 写槽（分派：落帧 → 掩宽 + 窄化 + 帧内存 store；SSA → 掩宽 def_var）
     fn write_slot(&mut self, s: Slot, v: Value) {
         let masked = self.mask_val(v, s.width);
         if self.frame_offs.contains(s.off) {
-            let ss = self.frame_ss.expect("落帧 offset 必有帧槽");
             let n = if s.width == Width::W64 {
                 masked
             } else {
                 self.b.ins().ireduce(Self::narrow_ty(s.width), masked)
             };
-            self.b.ins().stack_store(n, ss, s.off as i32);
+            if let Some(fbv) = self.frame_base_var {
+                let base = self.b.use_var(fbv);
+                let a = self.b.ins().iadd_imm(base, i64::from(s.off));
+                self.b.ins().store(MemFlagsData::trusted(), n, a, 0);
+            } else {
+                let ss = self.frame_ss.expect("落帧 offset 必有帧槽");
+                self.b.ins().stack_store(n, ss, s.off as i32);
+            }
         } else {
             let var = self.var(s.off);
             self.b.def_var(var, masked);
@@ -129,10 +159,7 @@ impl Translator<'_, '_> {
 
     /// 取帧内 offset 的真地址（取址分析已保证其落帧）
     fn addr_of_local(&mut self, off: u32) -> Value {
-        let ss = self
-            .frame_ss
-            .expect("取址 offset 必落帧（analyze_frame 全集）");
-        self.b.ins().stack_addr(types::I64, ss, off as i32)
+        self.frame_addr(off)
     }
 
     /// PlaceExpr 求值（interp::eval_place_addr 逐位镜像；Deref/Offset 为 wrapping 语义）
@@ -453,8 +480,23 @@ impl Translator<'_, '_> {
             self.b.def_var(var, zero);
         }
         if let Some(ss) = self.frame_ss {
+            // frame_align > 16：cranelift x86_64 栈基只保证 16 对齐（无动态
+            // 重排），槽内已补 (align-16) 字节余量（compiler.rs）——此处代码级
+            // 对齐兜底：frame_base = (addr + align-1) & -align，之后帧内寻址
+            // 全走 frame_addr 的第三态（read_slot/write_slot/addr_of_local）
+            if body.frame_align > 16 {
+                let addr = self.b.ins().stack_addr(types::I64, ss, 0);
+                let padded = self
+                    .b
+                    .ins()
+                    .iadd_imm(addr, i64::from(body.frame_align) - 1);
+                let base = self.b.ins().band_imm(padded, -i64::from(body.frame_align));
+                let v = self.b.declare_var(types::I64);
+                self.b.def_var(v, base);
+                self.frame_base_var = Some(v);
+            }
             let fref = self.module.declare_func_in_func(self.memset, self.b.func);
-            let dst = self.b.ins().stack_addr(types::I64, ss, 0);
+            let dst = self.frame_addr(0);
             let c0 = self.b.ins().iconst(types::I64, 0);
             let n = self.b.ins().iconst(types::I64, i64::from(body.frame_size));
             self.b.ins().call(fref, &[dst, c0, n]);

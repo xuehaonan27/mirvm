@@ -254,6 +254,36 @@ fn lower_inner(
     let required_native_libs: Vec<Box<str>> = {
         let mut v = crate::native_archive::materialize_static_libraries(tcx, &mut linker)
             .unwrap_or_else(|reason| panic!("Static native library 装载失败: {reason}"));
+        // C4（decision-history §7.22）：dep crate 的 global_asm 清单（dep 编译期
+        // 自 HIR 抽取的 `.mirasm.s` 文本，rlib 旁挂）——按 crate 图序经同一
+        // assemble 通道物化装载；pulp LD_ST 表类符号经此进全局域
+        for cnum in tcx.used_crates(()) {
+            if tcx.crate_dep_kind(*cnum).macros_only() {
+                continue;
+            }
+            for p in tcx.used_crate_source(*cnum).paths() {
+                let Some(stem) = p.to_str().and_then(|s| s.strip_suffix(".rlib")) else {
+                    continue;
+                };
+                let manifest = std::path::PathBuf::from(format!("{stem}.mirasm.s"));
+                if !manifest.is_file() {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&manifest).unwrap_or_else(|e| {
+                    panic!(
+                        "dep global_asm 清单 `{}` 读取失败: {e}",
+                        manifest.display()
+                    )
+                });
+                let so = global_asm::assemble(&text).unwrap_or_else(|reason| {
+                    panic!(
+                        "dep global_asm 清单 `{}` 物化失败: {reason}",
+                        manifest.display()
+                    )
+                });
+                v.push(so);
+            }
+        }
         if let Some(so) = global_asm::materialize(tcx, &mut linker)
             .unwrap_or_else(|reason| panic!("global_asm/naked 物化失败: {reason}"))
         {

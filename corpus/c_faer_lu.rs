@@ -1,23 +1,20 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-faer = { version = "0.21", default-features = false }
+faer = "0.21"
 ---
 // faer 0.21 线性代数差分（pulp SIMD 运行时分发探测）。固定字面量/闭包矩阵，
 // 无随机源；set_global_parallelism(Par::Seq) 锁单线程使并行归约序不泄露线程数。
 //
-// 特性抉择（FRONTIER 绕行，实测三维全绿前提）：
-//   默认特性（std/rayon/…）开启 pulp/std → pulp V3(AVX2) 运行期检测命中
-//   → 任何 lu/qr/det 因子化的 mask_between 路径读 static LD_ST[544]（pulp
-//   build.rs 生成的 global_asm 例程 `libpulp_v0_21_5_{ld,st}_b32s_<mask>`，
-//   该表取全部 544 个 extern fn 地址）→ 依赖 crate global_asm 符号不在 bin
-//   mono 流、rlib 因 -Zno-codegen 无本机对象，mirvm 响亮 TRAP：
-//     TRAP: extern fn `libpulp_v0_21_5_ld_b32s_0000000000000000` 被当作值取址，
-//           但符号未命中（归档兜底表 / dlsym 全域均无）
-//   default-features=false 时 pulp 无 std 检测面 → V3::try_new()=false（native
-//   与 mirvm 两侧同此逻辑，档位一致）→ 落到标量内核，不触 LD_ST。该绕行语义
-//   上同时关掉 rayon/npy/rand/sparse-linalg——本驱动均不使用，API 面（linalg
-//   求解器族）完整保留。
+// 特性史（C4 闭合后订正）：
+//   曾以 default-features=false 绕行——默认特性开 pulp/std → V3 运行期检测
+//   命中 → mask_between 读 static LD_ST[544]（pulp build.rs 生成的 global_asm
+//   例程 `libpulp_v0_21_5_{ld,st}_b32s_<mask>`）→ dep crate global_asm 符号
+//   无处可解析，mirvm 曾 TRAP。C4（decision-history §7.22）后：mirvm 在 dep
+//   编译期从 HIR 抽取 global_asm 落清单（`.mirasm.s`），bin 加载相同通道
+//   物化装载——默认特性恢复，pulp 真走 LD_ST 汇编路径。
+//   注：旧注释称 default-features=false 时 pulp 无 std 检测面（0.21.5 实测
+//   形态）；新版 pulp（0.22+）no-std 亦自带 cpuid 检测，勿以此推断未来。
 //
 // 覆盖：Mat 构造（mat! 宏 / from_fn 闭包 / identity）/ partial_piv_lu
 // （L、U、P/inv 置换、solve、inverse、reconstruct）/ full_piv_lu（P、Q 双置换）/
@@ -40,7 +37,16 @@ fn dump(tag: &str, m: faer::MatRef<'_, f64>) {
     let mut h = 0xcbf29ce484222325u64;
     for i in 0..m.nrows() {
         for j in 0..m.ncols() {
-            let bits = m[(i, j)].to_bits();
+            let v = m[(i, j)];
+            let mut bits = v.to_bits();
+            // NaN 符号位掩零：NaN 经 NaN 运算传播时符号属实现定义域（IEEE
+            // 允许自选；实证：同一 faer 奇异 inverse，native O0=7ff8 与
+            // mirvm 一致、native O3=fff8；rustc const-eval 亦一律 +nan）。
+            // 掩零后三态逐字节一致；payload 与 inf/-inf 区分保留，有穷值
+            // 全位照旧——oracle 不替 LLVM 相位签背书（2026-07-22 用户裁定）。
+            if v.is_nan() {
+                bits &= 0x7fff_ffff_ffff_ffff;
+            }
             println!("{tag}[{i},{j}]={bits:016x}");
             fnv_mix(&mut h, &bits.to_le_bytes());
         }

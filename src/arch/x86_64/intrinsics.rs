@@ -357,6 +357,27 @@ pub(crate) unsafe fn maxmin_ps<const LANES: usize, const MAX: bool>(
     }
 }
 
+/// MAXPD/MINPD 逐 lane：与 maxmin_ps 同语义（unordered → b；±0 相等 → b；
+/// NaN 位透传），f64 lane 版（faer 默认特性 V3 内核实锤，C6 按需队列）
+pub(crate) unsafe fn maxmin_pd<const LANES: usize, const MAX: bool>(
+    dst: *mut u8,
+    a: *const u8,
+    b: *const u8,
+) {
+    for i in 0..LANES {
+        let x = unsafe { (a as *const f64).add(i).read_unaligned() };
+        let y = unsafe { (b as *const f64).add(i).read_unaligned() };
+        let r = if MAX {
+            if x > y { x } else { y }
+        } else if x < y {
+            x
+        } else {
+            y
+        };
+        unsafe { (dst as *mut f64).add(i).write_unaligned(r) };
+    }
+}
+
 /// CMPPS/VCMPPS 全 32 谓词（S/Q 后缀只差异常旗标，值位相同 → 按值对拍一起）。
 /// imm = SDM imm8：真 lane 写 0xFFFF_FFFF，假写 0。
 // 否定比较即 NLT/NLE/NGE/NGT 谓词语义本体：NaN 无序时这些谓词为真，恰靠
@@ -392,6 +413,42 @@ pub(crate) unsafe fn cmp_ps<const LANES: usize>(
         };
         let m = if r { u32::MAX } else { 0 };
         unsafe { (dst as *mut u32).add(i).write_unaligned(m) };
+    }
+}
+
+/// CMPPD：与 cmp_ps 同一张 IEEE 谓词表（imm&0x1f），f64 lane + 64 位掩码。
+///（faer 默认特性 V3 内核实锤缺它，C6 按需队列）
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
+pub(crate) unsafe fn cmp_pd<const LANES: usize>(
+    dst: *mut u8,
+    a: *const u8,
+    b: *const u8,
+    imm: u64,
+) {
+    for i in 0..LANES {
+        let x = unsafe { (a as *const f64).add(i).read_unaligned() };
+        let y = unsafe { (b as *const f64).add(i).read_unaligned() };
+        let un = x.is_nan() || y.is_nan();
+        let r = match imm & 0x1f {
+            0 | 16 => x == y,           // EQ_OQ / EQ_OS
+            1 | 17 => x < y,            // LT_OS / LT_OQ
+            2 | 18 => x <= y,           // LE_OS / LE_OQ
+            3 | 19 => un,               // UNORD_Q / UNORD_S
+            4 | 20 => !(!un && x == y), // NEQ_UQ / NEQ_US
+            5 | 21 => !(x < y),         // NLT_US / NLT_UQ
+            6 | 22 => !(x <= y),        // NLE_US / NLE_UQ
+            7 | 23 => !un,              // ORD_Q / ORD_S
+            8 | 24 => un || x == y,     // EQ_UQ / EQ_US
+            9 | 25 => !(x >= y),        // NGE_US / NGE_UQ
+            10 | 26 => !(x > y),        // NGT_US / NGT_UQ
+            11 | 27 => false,           // FALSE_OQ / FALSE_OS
+            12 | 28 => !un && x != y,   // NEQ_OQ / NEQ_OS
+            13 | 29 => !un && x >= y,   // GE_OS / GE_OQ
+            14 | 30 => !un && x > y,    // GT_OS / GT_OQ
+            _ => true,                  // 15|31: TRUE_UQ / TRUE_US
+        };
+        let m = if r { u64::MAX } else { 0 };
+        unsafe { (dst as *mut u64).add(i).write_unaligned(m) };
     }
 }
 

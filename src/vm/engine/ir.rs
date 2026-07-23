@@ -1129,6 +1129,19 @@ pub enum Builtin {
     /// NEQ_OQ/GE/GT/TRUE ×Q/S——S/Q 只差异常旗标，值位相同），真 lane 成全 1。
     X86CmpPs128,
     X86CmpPs256,
+    /// `llvm.x86.sse2.cmp.pd` / `llvm.x86.avx.cmp.pd.256`（同 cmp.ps 谓词表，
+    /// f64 lane + 64 位掩码；faer 默认特性 V3 内核实锤，C6 按需队列）
+    X86CmpPd128,
+    X86CmpPd256,
+    /// `llvm.x86.sse2.max.pd` / `min.pd` / `llvm.x86.avx.max.pd.256` / `min.pd.256`
+    ///（maxmin_ps 同语义 f64 lane；faer V3 实锤，C6 按需队列）
+    X86MaxPd128,
+    X86MinPd128,
+    X86MaxPd256,
+    X86MinPd256,
+    /// `llvm.x86.sse2.max.sd` / `min.sd`（标量 f64 max/min；faer V3 实锤）
+    X86MaxSd,
+    X86MinSd,
     /// `llvm.x86.sse41.round.ps(a, imm8)` / `llvm.x86.avx.round.ps.256`：
     /// imm[3:0] 舍入（0=RNE/1=floor/2=ceil/3=trunc + bit2→MXCSR(=RNE) + bit3 仅
     /// 异常旗标抑制）。NaN：载荷保留 + qbit 强置（x86.rs 显式臂——libm/roundss

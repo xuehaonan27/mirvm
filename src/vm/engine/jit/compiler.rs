@@ -527,8 +527,16 @@ impl Compiler {
             } else {
                 Some(b.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
-                    // 0 字节强征档（force）以 1 字节物化；off 仍以 0 计，语义不变
-                    body.frame_size.max(1),
+                    // 0 字节强征档（force）以 1 字节物化；off 仍以 0 计，语义不变。
+                    // frame_align > 16：cranelift x86_64 栈基只保证 16 对齐（无
+                    // 动态重排机制），槽内补 (align-16) 字节余量，入口由翻译器
+                    // 用 (addr+align-1)&-align 代码级对齐兜底（nano-gemm 的
+                    // __m256d 局部经 mem::zeroed 的 32 字节 precondition 实证）
+                    if body.frame_align > 16 {
+                        body.frame_size + (body.frame_align - 16)
+                    } else {
+                        body.frame_size.max(1)
+                    },
                     body.frame_align.trailing_zeros() as u8,
                 )))
             };
@@ -560,6 +568,7 @@ impl Compiler {
                 simd_rv: self.simd_rv,
                 exception_var: None,
                 has_try_call: false,
+                frame_base_var: None,
             };
             tr.build(func, body);
             has_try_call = tr.has_try_call;

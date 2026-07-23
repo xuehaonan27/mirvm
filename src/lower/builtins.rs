@@ -295,6 +295,38 @@ pub(super) fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin>
         ir::Builtin::X86CmpPs256,
     );
     out.insert(
+        Symbol::intern("llvm.x86.sse2.cmp.pd"),
+        ir::Builtin::X86CmpPd128,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.avx.cmp.pd.256"),
+        ir::Builtin::X86CmpPd256,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.sse2.max.pd"),
+        ir::Builtin::X86MaxPd128,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.sse2.min.pd"),
+        ir::Builtin::X86MinPd128,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.avx.max.pd.256"),
+        ir::Builtin::X86MaxPd256,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.avx.min.pd.256"),
+        ir::Builtin::X86MinPd256,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.sse2.max.sd"),
+        ir::Builtin::X86MaxSd,
+    );
+    out.insert(
+        Symbol::intern("llvm.x86.sse2.min.sd"),
+        ir::Builtin::X86MinSd,
+    );
+    out.insert(
         Symbol::intern("llvm.x86.sse41.round.ps"),
         ir::Builtin::X86RoundPs128,
     );

@@ -285,11 +285,35 @@ fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
 /// post-mono const-eval（собирает时求值 required consts），`-Zno-codegen` 跳过 codegen
 /// 会连这层构建期错误一起漏掉（依赖里死代码的 const 恐慌等，native cargo build 会红）
 /// ——cargo-miri 的 dummy backend 同款显式补齐，保住"依赖构建错误面与 native 一致"。
-struct DepCallbacks;
+///
+/// C4（decision-history §7.22）：同一次 mono 收集顺带抽取 dep crate 的
+/// global_asm/naked 文本落 rlib 旁挂清单（`<rlib 主名>.mirasm.s`）——mirvm
+/// 就是 dep crate 的编译器（after_analysis 的 HIR 在手），无需从 rmeta/rlib
+/// 抠模板；汇编动作留 bin 加载相同一 assemble 通道（缓存自愈随之免费）。
+/// 无 asm 的 crate（99%）纯 mono 扫描，边际零成本。
+struct DepCallbacks {
+    /// `<out-dir>`（rlib 所在目录）
+    out_dir: String,
+    /// rlib 主名 = `lib<crate_name><extra-filename>`（extra-filename 含前导 `-`）
+    rlib_stem: String,
+}
 
 impl Callbacks for DepCallbacks {
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         let _ = tcx.collect_and_partition_mono_items(());
+        match crate::lower::global_asm::materialize_dep_text(tcx) {
+            Ok(Some(text)) => {
+                let path = format!("{}/{}.mirasm.s", self.out_dir, self.rlib_stem);
+                // 原子发布（全仓同款纪律）
+                let tmp = format!("{path}.tmp{}", std::process::id());
+                std::fs::write(&tmp, text)
+                    .unwrap_or_else(|e| panic!("dep global_asm 清单写入失败: {e}"));
+                std::fs::rename(&tmp, &path)
+                    .unwrap_or_else(|e| panic!("dep global_asm 清单发布失败: {e}"));
+            }
+            Ok(None) => {}
+            Err(reason) => panic!("dep global_asm 抽取失败: {reason}"),
+        }
         Compilation::Continue
     }
 }
@@ -299,8 +323,27 @@ impl Callbacks for DepCallbacks {
 /// Linker::link 照走默认 link_binary 产出 metadata-only rlib，cargo 与下游 --extern
 /// 无感）。in-process 驱动（进程本就链着 librustc_driver）顺带省一次 rustc exec。
 pub(crate) fn run_dep_compiler(rustc_args: Vec<String>) -> ! {
+    let find = |flag: &str| -> Option<String> {
+        rustc_args
+            .iter()
+            .position(|a| a == flag)
+            .and_then(|i| rustc_args.get(i + 1).cloned())
+    };
+    let out_dir = find("--out-dir").expect("dep 编译参数缺 --out-dir");
+    let crate_name = find("--crate-name").expect("dep 编译参数缺 --crate-name");
+    let extra = rustc_args
+        .windows(2)
+        .find_map(|w| {
+            (w[0] == "-C" && w[1].starts_with("extra-filename="))
+                .then(|| w[1].trim_start_matches("extra-filename=").to_owned())
+        })
+        .unwrap_or_default();
+    let mut callbacks = DepCallbacks {
+        out_dir,
+        rlib_stem: format!("lib{crate_name}{extra}"),
+    };
     let code = rustc_driver::catch_with_exit_code(|| {
-        rustc_driver::run_compiler(&rustc_args, &mut DepCallbacks)
+        rustc_driver::run_compiler(&rustc_args, &mut callbacks)
     });
     exit(if code == ExitCode::SUCCESS { 0 } else { 1 })
 }

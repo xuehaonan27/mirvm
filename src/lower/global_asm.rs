@@ -29,17 +29,22 @@ pub(crate) fn materialize<'tcx>(
     let parts = tcx.collect_and_partition_mono_items(());
     // 稳定序（跨 CGU）；重复 def 去一次
     let mut seen = std::collections::HashSet::new();
+    let absorb = &mut |tcx: TyCtxt<'tcx>,
+                       inst: Instance<'tcx>,
+                       defs: &mut Vec<(Box<str>, u64)>| {
+        absorb_guest_symfn(tcx, linker, inst, defs)
+    };
     for cgu in parts.codegen_units {
         for item in cgu.items().keys() {
             match *item {
                 MonoItem::GlobalAsm(item_id) => {
                     if seen.insert(format!("ga:{item_id:?}")) {
-                        render_global_asm(tcx, linker, item_id, &mut asm, &mut abs_defs)?;
+                        render_global_asm(tcx, absorb, item_id, &mut asm, &mut abs_defs)?;
                     }
                 }
                 MonoItem::Fn(inst) => {
                     if is_naked(tcx, inst) && seen.insert(format!("naked:{:?}", inst.def_id())) {
-                        render_naked(tcx, linker, inst, &mut asm, &mut abs_defs)?;
+                        render_naked(tcx, absorb, inst, &mut asm, &mut abs_defs)?;
                     }
                 }
                 MonoItem::Static(_) => {}
@@ -112,6 +117,65 @@ fn syntax_prefix(att: bool) -> &'static str {
     }
 }
 
+// ===== C4：dep crate global_asm 的编译期抽取（decision-history §7.22）=====
+
+/// dep 侧的 sym fn 处理：与 absorb_guest_symfn 同一早退规则（foreign/naked
+/// 无需跳板），其余响亮拒绝——C7 跨 crate 条目预算（trampoline 须在 bin
+/// 链接上下文做）是 C4 片②活，pulp 等真实形态零操作数。
+fn dep_absorb_symfn<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    inst: Instance<'tcx>,
+    _abs_defs: &mut Vec<(Box<str>, u64)>,
+) -> Result<(), String> {
+    if tcx.is_foreign_item(inst.def_id()) || is_naked(tcx, inst) {
+        return Ok(());
+    }
+    Err(format!(
+        "dep crate global_asm/naked 的 sym 指向 guest fn `{}`（聚合预算属 bin \
+         链接上下文，C4 片②活）：如实响亮拒绝",
+        tcx.symbol_name(inst).name
+    ))
+}
+
+/// dep 编译期抽取：mono 收集（对本次编译的 crate 恒成立——mirvm 就是 dep
+/// crate 的编译器）→ 渲染全部 global_asm/naked 站点为 `.s` 文本。返回
+/// None = 本 crate 无 asm（99% 情形，纯 mono 扫描边际零成本）。
+/// 文本由调用方落盘为 rlib 旁挂清单（`<rlib 主名>.mirasm.s`）；汇编动作
+/// 留给 bin 加载相的同一 assemble 通道（缓存自愈随之免费）。
+pub(crate) fn materialize_dep_text(tcx: TyCtxt<'_>) -> Result<Option<String>, String> {
+    let mut asm = String::new();
+    let mut abs_defs: Vec<(Box<str>, u64)> = Vec::new();
+    let parts = tcx.collect_and_partition_mono_items(());
+    let mut seen = std::collections::HashSet::new();
+    for cgu in parts.codegen_units {
+        for item in cgu.items().keys() {
+            match *item {
+                MonoItem::GlobalAsm(item_id) => {
+                    if seen.insert(format!("ga:{item_id:?}")) {
+                        render_global_asm(
+                            tcx,
+                            &mut dep_absorb_symfn,
+                            item_id,
+                            &mut asm,
+                            &mut abs_defs,
+                        )?;
+                    }
+                }
+                MonoItem::Fn(inst) => {
+                    if is_naked(tcx, inst) && seen.insert(format!("naked:{:?}", inst.def_id())) {
+                        render_naked(tcx, &mut dep_absorb_symfn, inst, &mut asm, &mut abs_defs)?;
+                    }
+                }
+                MonoItem::Static(_) => {}
+            }
+        }
+    }
+    if asm.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(format!(".intel_syntax noprefix\n{asm}")))
+}
+
 fn ensure_x86(tcx: TyCtxt<'_>) -> Result<(), String> {
     use rustc_target::asm::InlineAsmArch;
     match tcx.sess.asm_arch {
@@ -122,9 +186,15 @@ fn ensure_x86(tcx: TyCtxt<'_>) -> Result<(), String> {
     }
 }
 
+/// `sym fn` 操作数的处理器（C4 参数化）：bin 侧 = absorb_guest_symfn
+///（P1 条目预算 + ABS 跳板）；dep 侧 = dep_absorb_symfn（跨 crate 预算未接，
+/// 响亮拒绝）。两渲染器只在这一臂耦合 Linker。
+type SymFnAbsorb<'tcx, 'c> =
+    dyn FnMut(TyCtxt<'tcx>, Instance<'tcx>, &mut Vec<(Box<str>, u64)>) -> Result<(), String> + 'c;
+
 fn render_global_asm<'tcx>(
     tcx: TyCtxt<'tcx>,
-    linker: &mut super::Linker<'tcx>,
+    absorb: &mut SymFnAbsorb<'tcx, '_>,
     item_id: rustc_hir::ItemId,
     out: &mut String,
     abs_defs: &mut Vec<(Box<str>, u64)>,
@@ -171,7 +241,7 @@ fn render_global_asm<'tcx>(
                             args,
                             rustc_span::DUMMY_SP,
                         );
-                        absorb_guest_symfn(tcx, linker, inst, abs_defs)?;
+                        absorb(tcx, inst, abs_defs)?;
                         out.push_str(tcx.symbol_name(inst).name);
                     }
                     InlineAsmOperand::SymStatic { path: _, def_id } => {
@@ -188,7 +258,7 @@ fn render_global_asm<'tcx>(
 
 fn render_naked<'tcx>(
     tcx: TyCtxt<'tcx>,
-    linker: &mut super::Linker<'tcx>,
+    absorb: &mut SymFnAbsorb<'tcx, '_>,
     inst: Instance<'tcx>,
     out: &mut String,
     abs_defs: &mut Vec<(Box<str>, u64)>,
@@ -251,7 +321,7 @@ fn render_naked<'tcx>(
                         args,
                         rustc_span::DUMMY_SP,
                     );
-                    absorb_guest_symfn(tcx, linker, callee, abs_defs)?;
+                    absorb(tcx, callee, abs_defs)?;
                     out.push_str(tcx.symbol_name(callee).name);
                 }
                 InlineAsmOperand::SymStatic { def_id } => {
@@ -287,7 +357,8 @@ fn undefined_nonlib_symbols(so: &std::path::Path) -> Option<String> {
 /// `.s` → `.so`（内容寻址缓存，与 asm-stub 工厂同款临时名+rename 原子发布）。
 /// naked fn 混入模块级 asm，可能引用 guest 符号 → 不能 `-nostdlib`；用 `-nostartfiles`
 /// 保留动态链接器解析（naked 内 sym 操作数指向的 guest fn 由 RTLD_GLOBAL 兜底）。
-fn assemble(asm: &str) -> Result<Box<str>, String> {
+/// C4：升为 pub(crate)——dep 清单文本经 bin 加载相同一通道物化。
+pub(crate) fn assemble(asm: &str) -> Result<Box<str>, String> {
     // T5：与 asm-stub 同通道——global_asm/naked 内裸 `syscall` 指令 → 间接槽
     // 调用（改写发生在内容哈希前，缓存键与最终字节一致；槽随 .so 物化，
     // 装载 required_native_libs 时由 lower_inner 统一重填）

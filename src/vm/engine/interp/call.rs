@@ -521,6 +521,40 @@ pub(crate) fn exec_builtin(
             }
             true
         }
+        Builtin::X86MaxSd | Builtin::X86MinSd => {
+            let Some(dst) = ret_dst else {
+                engine_abort("max/min.sd 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            let (x, y) = (a(0) as *const u8, a(1) as *const u8);
+            unsafe {
+                if matches!(builtin, Builtin::X86MaxSd) {
+                    crate::arch::x86_64::maxmin_pd::<1, true>(dst, x, y)
+                } else {
+                    crate::arch::x86_64::maxmin_pd::<1, false>(dst, x, y)
+                }
+            }
+            true
+        }
+        Builtin::X86MaxPd128
+        | Builtin::X86MinPd128
+        | Builtin::X86MaxPd256
+        | Builtin::X86MinPd256 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("max/min.pd 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            let (x, y) = (a(0) as *const u8, a(1) as *const u8);
+            unsafe {
+                match builtin {
+                    Builtin::X86MaxPd128 => crate::arch::x86_64::maxmin_pd::<2, true>(dst, x, y),
+                    Builtin::X86MinPd128 => crate::arch::x86_64::maxmin_pd::<2, false>(dst, x, y),
+                    Builtin::X86MaxPd256 => crate::arch::x86_64::maxmin_pd::<4, true>(dst, x, y),
+                    _ => crate::arch::x86_64::maxmin_pd::<4, false>(dst, x, y),
+                }
+            }
+            true
+        }
         Builtin::X86CmpPs128 | Builtin::X86CmpPs256 => {
             let Some(dst) = ret_dst else {
                 engine_abort("cmp.ps 返回形态不是 indirect vector");
@@ -532,6 +566,21 @@ pub(crate) fn exec_builtin(
                     crate::arch::x86_64::cmp_ps::<4>(dst, x, y, imm)
                 } else {
                     crate::arch::x86_64::cmp_ps::<8>(dst, x, y, imm)
+                }
+            }
+            true
+        }
+        Builtin::X86CmpPd128 | Builtin::X86CmpPd256 => {
+            let Some(dst) = ret_dst else {
+                engine_abort("cmp.pd 返回形态不是 indirect vector");
+            };
+            let dst = dst as *mut u8;
+            let (x, y, imm) = (a(0) as *const u8, a(1) as *const u8, a(2));
+            unsafe {
+                if matches!(builtin, Builtin::X86CmpPd128) {
+                    crate::arch::x86_64::cmp_pd::<2>(dst, x, y, imm)
+                } else {
+                    crate::arch::x86_64::cmp_pd::<4>(dst, x, y, imm)
                 }
             }
             true
@@ -875,6 +924,14 @@ pub(crate) fn exec_builtin(
         | Builtin::X86MinPs256
         | Builtin::X86CmpPs128
         | Builtin::X86CmpPs256
+        | Builtin::X86CmpPd128
+        | Builtin::X86CmpPd256
+        | Builtin::X86MaxPd128
+        | Builtin::X86MinPd128
+        | Builtin::X86MaxPd256
+        | Builtin::X86MinPd256
+        | Builtin::X86MaxSd
+        | Builtin::X86MinSd
         | Builtin::X86RoundPs128
         | Builtin::X86RoundPs256
         | Builtin::X86CvtPs2dq128
