@@ -125,7 +125,7 @@
 
 | ID | 事项 | 内容 | 出处 |
 |---|---|---|---|
-| D1 | **mode B `.mirvm` 包 + `mirvm pack`（D9f④；2026-07-22 起为当前战役）** | 缓存可移植化为路线；内含 fat artifact 多 target、字节码版本化（C12）、S3′ 产物可携带化。**2026-07-22 增设计输入（§7.22）**：包格式纳入**机器码节**——asm stub/global_asm/thunk 的预物化形态（第三类内容物的干净归宿：打包期物化入包，运行期进程内装载，去 ELF/cc；与 dep global_asm 抽取（C4 片①）同一数据源 | [designs/distribution-design.md](designs/distribution-design.md)，decision-history §7.22 |
+| D1 | **mode B `.mirvm` 包 + `mirvm pack`（D9f④；**片②已落地 2026-07-23**） | 片②（`254692c`，decision-history §7.24）：包格式 v0（META/STAMPS/MODULE/NATIVELIBS/RELOC 五节 + BASE/MC 预留，全链 refuse-loud）+ `mirvm pack`（cargo 两形态 + 纯单文件，强制全量冷路径单模块自包含）+ `mirvm run x.mirvm`（零新执行路径）——五负载 pack+run 逐字节一致。**格式声明不定死**（用户裁定，冻结归 D4 评审）。**片③ 待施**：MC 机器码节 + 进程内装载（自产码去 cc/ELF；装载契约已定于 designs/modeb-mirvmar-design.md §5）。余量：fat artifact 多 target、字节码版本化（C12） | decision-history §7.24，[designs/modeb-mirvmar-design.md](designs/modeb-mirvmar-design.md) |
 | D2 | **发行形态与命名（D9f⑤）** | 先 miri 式后 JDK 式自包含 tarball（成熟后）；kit 命名候选 MDK/mirvm toolkit（MRsDK 已否决） | designs/distribution-design.md |
 | D3 | **零拷贝装载（rkyv 类）** | postcard 解码封顶（eco ~60ms / ripgrep ~450ms）；mmap+逐函数惰性解码是下一数量级唯一杠杆；与 mode B 同题 | history/coldstart-research.md V6，m6-log 片8 |
 | D4 | **对外格式冻结重估** | M5.3 收官触发器（2026-07-15）已响，被有意再推迟到 mode B 立项 | decision-history §7 |

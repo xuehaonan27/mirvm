@@ -46,6 +46,10 @@ cargo build --release --locked
 ./target/release/mirvm run demo/ecosystem.rs
 ./target/release/mirvm run path/to/project -- arg1 arg2
 
+# 打成 .mirvm 包并运行（mode B 片②；格式当前不定死，随开发可变动）
+./target/release/mirvm pack path/to/project -o app.mirvm
+./target/release/mirvm run app.mirvm
+
 # 当前基础回归；语义完整性仍以 current-status 中的诚实边界为准
 MIRVM="$PWD/target/release/mirvm" bash tests/diff.sh
 bash tests/m4_gate0.sh

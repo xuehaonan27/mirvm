@@ -29,6 +29,7 @@
 | M5.4（翻译器全覆盖） | **a/b/c/d 全完成（2026-07-21 收口）** | a = 帧模型 v2 + 内存操作数；b = 标量全集 + 128 位族 + atomics（[m5-log.md](history/m5-log.md) M5.4a/b 节）；**c = ABI 泛化（CalleeAbi 全形态）+ 五调用助手 + unwind 产品化（try_call/Resume/Terminate + 双 CIE 全覆 LSDA，`83e168d`）；d = 准入放开——stmt/rvalue/terminator 三表穷尽**（SIMD 15 族 + Sat128 + rvalue 三件经统一助手调 interp 共享本体零漂移，`5252a89`/`5a1bcbe`）。伴生修出既有 bug 四件（call_foreign 签名、bitcast 旗、Bin128 旗标槽 SSA 误提升、frame mask/ptr 区间欠覆盖）。oracle：gate2 9/9、cargo test 76、diff 双态 45/45、diff_cargo 5/5、gate5 复绿（decision-history §7.19，T1/E1 闭合） |
 | M5.5（vmctx 终裁 + gate6 收口） | **完成（2026-07-21）= M5 战役全收** | 按原案收口（用户裁定不融合 E6）：`MIRVM_JIT_STATS=1` 十二桶助手频度统计（`05021d2`）+ 计量基线（fib 全空桶；rayon alloc=0；corpus 129/0 格③ 候选 alloc 7.82M/tls_ref 0.38M）+ vmctx-passing §7 落笔（**T 骨架生产定稿**——三表穷尽下编译码 ctx 站点仍零；**复测双触发器：E6 进场 或 多 Engine 嵌入立项**，先到先裁；T→R 单开关路径在案）+ `tests/m5_gate6.sh` 全绿（`aae9aec`）。T3 闭合（decision-history §7.20） |
 | C4（dep crate global_asm 物化） | **片①完成（2026-07-23）** | 定稿方向一次落地（decision-history §7.22/§7.23，`176ae20`）：dep 编译期自 HIR 抽取 global_asm/naked 落 rlib 旁挂文本清单，bin 加载相按 crate 图序经 assemble 通道物化装载——不绕行（无 env 名单/无救援链）。验收：c_faer_lu 复原 faer 默认特性，native/默认/SYNC 三维逐字节一致。伴生：JIT 帧 >16 对齐潜伏错值修复（cranelift 栈基 16 上限 + 槽内余量代码级抬基）、C6 补面六件。片② = mode B 机器码节（D1），dep `sym` 指向 guest fn 残余转 R16 |
+| mode B 片②（`.mirvm` 包 + pack/run） | **完成（2026-07-23）** | 包格式 v0（五节 + BASE/MC 预留，全链 refuse-loud，`254692c`，decision-history §7.24）：`mirvm pack`（cargo 两形态 + 纯单文件，强制全量冷路径单模块自包含）+ `mirvm run x.mirvm`（magic 嗅探 + 装载全复用 warm 语义，零新执行路径）。五负载（fib/eco/jsonschema/faer/wasmtime 84MB）pack+run 逐字节一致；格式声明不定死（冻结归 D4）。片③ = MC 机器码节 + 进程内装载（自产码去 cc/ELF） |
 | 地址模型 P2（GOT 间接） | **完成（2026-07-17）** | §7.5b 手术单定场（真实地址模型保留）→ §7.5c 零 IR 变更 GOT 机制（槽 = 冻结区普通格 + 启动相重填；extern static/fn 值不再烤宿主地址，字节码复用 `Mem{Static(槽)}`/`SubImm` 通道，JIT/interp 零改动）→ §7.5d 拒缓存三判据全退役 + 纯 std 会话 want_split 修正（先存 A2 沉默债：L2 对纯 std 程序永 miss）。外来符号用例冷→热全通（c_process 463→30ms），gate5 117/0/0。JIT 间接调用准入记债（[open-issues.md E1](open-issues.md)） |
 | 地址模型 P1（fn 条目可执行化） | **完成（2026-07-17，commit `4202317`）** | §7.6：FFI 可派生条目值 = 可执行 stub 码址（新第三固定地址域族 0x6C00/0x6D00/0x6E00+k + libffi closure 蹦床 + 配方随模块、启动相重建封存 RX）——thunk 盲区结构性根治（旧 debt §6 关闭，对照见 [open-issues.md](open-issues.md)；负对照 flate2 C-libz 结构体内嵌回调往返，三维+L2 热一致）。残余边界 = 签名不可派生条目（Rust ABI/聚合/变参）保持数据槽，无实质盲区；SIGSEGV 诊断化可选后补（open-issues T4）。gate5 117/0/0 |
 | corpus 批7（激进 24 三波） | **完成（2026-07-17）** | 23/24 全绿可用（corpus.md §5 批7）；**修出两只产品 bug 当日修复**：native-archive 链接行收 crate 图动态库（`867b3de`，libgit2 红转绿）+ custom `#[global_allocator]` 运行时统一路由 `__rust_*`（§7.7，c_mimalloc 三维绿、跨堆 SIGSEGV 根治）。c_tree_sitter 按值聚合 FFI 记档（open-issues C1，**2026-07-18 C1 闭合后转正入 gate**）。gate5 128→**139**；corpus 实测真实 crate 总账 123 |
@@ -194,11 +195,10 @@ x86 asm wrapper。
 1. **corpus 扩编继续**：三维逐字节差分铁律不动摇（mirvm 默认 / native / 逢调即编，
    全部逐字节一致才算绿）；新候选见 [corpus.md §7](corpus.md)；撞出的实锤债务登记到
    [open-issues.md](open-issues.md) 再按优先级转正。
-2. **当前战役**：稳定化已收口（§7.21）；**C4 片①已闭合（§7.23，
-   2026-07-23）**。**当前战役 = mode B（D1）**：方向已定（§7.22——打包期
-   产字节码+机器码节，运行期读自有包 + FFI 真外国库）；C4 片①（dep 编译期
-   抽取 global_asm）已为其打通数据源。下一片 = 片② `.mirvm` 包格式 v0 +
-   pack/run。**砍 cargo（D15）已纳入日程**，之后要做。E6 性能轴继续待固定
+2. **当前战役**：mode B 片②已落地（§7.24，2026-07-23——`.mirvm` 包
+   格式 v0 + pack/run）。**下一片 = 片③：MC 机器码节 + 进程内装载**
+   （自产码去 cc/ELF，装载契约已定）；C4 片①（dep 编译期抽取）已打通
+   数据源。**砍 cargo（D15）已纳入日程**，之后要做。E6 性能轴继续待固定
    workload 收益证据。
 3. **基建预算纪律**（根 AGENTS.md）：harness 只在当前产品 RED 无法复现/判定正确时
    做最小修改；不为未来加固。

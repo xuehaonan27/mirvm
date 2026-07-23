@@ -1241,6 +1241,40 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
      global_asm 文本是 LLVM 语义域，馈 GAS 前剥除（引号态跟踪，串内不剥）。
   修正后 gate5 **167/0/0/0** 复绿。
 
+### 7.24 2026-07-23：mode B 片②落地——`.mirvm` 包格式 v0 + pack/run
+
+- **设计**：[modeb-mirvmar-design](designs/modeb-mirvmar-design.md)（用户
+  补裁定：**格式当前不定死**——随片③/D15/C12 可变动，fmt_ver 仅同代
+  区分，对外冻结归 D4 独立评审）。
+- **实现（`254692c`）**：
+  - 容器 = magic + fmt_ver + build_id + 节表（META/STAMPS/MODULE/
+    NATIVELIBS/RELOC；BASE/MC 预留）+ fnv1a-128 节哈希与全文哈希；
+    校验全链 refuse-loud（绝不静默重建——包是分发物不是缓存），
+    `MIRVM_PACK_NOSTAMP=1` 旁路输入戳（无源环境分发用）。
+  - `mirvm pack`：cargo 两形态经 MIRVM_PACK 环境传入 runner 的
+    pack_driver（空 image 栈 + `MIRVM_NO_BASE_IMAGE`/`MIRVM_NO_DEPS_IMAGE`
+    强制全量冷路径——单模块自包含，不付 BASE 节形态），纯单文件直驱；
+    `callbacks.pack_out` 在 after_analysis 末尾落包（与 L2 store 同一
+    洁净快照时机）。
+  - `mirvm run x.mirvm`：magic 嗅探先于文本读取 → load_package →
+    asm_sites 幂等重物化 → run_vm_engine——**零新执行路径**（全复用
+    warm 后半段机件）。
+- **施工实证（含两处自伤修正）**：
+  ① 节表项宽度按 20 字节写、实为 36 字节——首包全哈希不符，按实宽修正；
+  ② 盖戳相对路径（cargo 会话给本地 crate `src/main.rs`）在异 cwd 装载
+     失配——收集器改绝对化（L2/包共用 `collect_input_stamps`）;
+  ③ **git checkout 误伤**：探针命令误带 `git checkout .` 清掉全部未提交
+     改动（pack.rs 未跟踪幸免）——教训：探针命令与仓库操作严格分行，
+     大改动先 commit 再跑探针。
+- **验收**：fib/eco(serde)/jsonschema(目录形态)/faer(dep global_asm)/
+  wasmtime(84MB) 五负载 pack+run 与直接 run **逐字节一致**；拒绝探针
+  （字节篡改→全文哈希、源变→盖戳并指名失配文件、库缺→NATIVELIBS）
+  均响亮；cargo test 76、diff 双态 45/45、diff_cargo 5/5、gate5 复绿。
+- **包的真实含义（用户原话校准）**：打包期 rustc 产字节码，运行期
+  mirvm 只读自有包 + FFI 真外国库——本片兑现了「除 glibc 类外运行期
+  不读缓存/rustc/cargo 痕迹」；自产机器码的 cc/ELF 依赖消除属片③
+  （MC 节 + 进程内装载）。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT
