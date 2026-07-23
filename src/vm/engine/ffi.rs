@@ -61,6 +61,11 @@ impl FfiState {
                 break;
             }
         }
+        // ①′MC 镜像（mode B 片③：包内自装载的自产 global_asm/dep_asm 族；
+        // 与②同一语义位——guest 自产对象恒胜宿主同名库）
+        if p == 0 && let Some(addr) = super::mcload::resolve(name) {
+            p = addr;
+        }
         // ②必需归档句柄 dlsym（链接序）：归档 .dynsym 可见符号的 native 链接期
         // 绑定——guest 自己的对象恒胜宿主同名库；句柄解析与装载序无关，可复现
         // （①的 hidden 类同理；残余 = 归档【内部】跨引用碰撞符号仍走全局序，

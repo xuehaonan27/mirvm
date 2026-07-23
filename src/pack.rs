@@ -27,7 +27,6 @@ const TAG_BASE: u32 = 3;
 const TAG_MODULE: u32 = 4;
 const TAG_NATIVELIBS: u32 = 5;
 const TAG_RELOC: u32 = 6;
-#[allow(dead_code)] // 片③ 机器码节预留
 const TAG_MC: u32 = 7;
 
 /// fnv1a-128（双程异种子；v0 校验强度与 L2 同族，格式演进时随评）。
@@ -55,6 +54,14 @@ struct NativeLibEntry {
     /// 0=static_archive 1=global_asm（bin/dep 同族，cache/global-asm 域）
     role: u8,
     fnv: u128,
+}
+
+/// MC 节条目（片③）：自产 global_asm/dep_asm 族 `.so` 原始字节——装载时
+/// 进程内自装载（mcload），不经 dlopen；与 NATIVELIBS 按 fnv 互证。
+#[derive(Serialize, Deserialize)]
+struct McEntry {
+    fnv: u128,
+    bytes: Vec<u8>,
 }
 
 /// RELOC 节：固定基要求 + 入口符号（entry 语义锚在 Module.entry，本字段供人读）。
@@ -95,28 +102,40 @@ pub(crate) fn write_package(
         requires_fixed_base: true,
         entry: "main".into(),
     };
-    // NATIVELIBS：逐一 fnv128 现场计算；role 判别（global-asm 域 = 自产汇编族）
+    // NATIVELIBS：逐一 fnv128 现场计算；role 判别（global-asm 域 = 自产汇编族）。
+    // 片③：global_asm 族字节同时入 MC 节（进程内自装载；MIRVM_PACK_NO_MC=1
+    // 时退化为纯文件引用——运行期仍依赖缓存与 dlopen）
     let ga_dir = crate::sysroot::cache_dir().join("global-asm");
     let ga_prefix = ga_dir.display().to_string();
+    let no_mc = std::env::var_os("MIRVM_PACK_NO_MC").is_some();
     let mut libs = Vec::new();
+    let mut mc_entries = Vec::new();
     for p in &module.required_native_libs {
         let data = std::fs::read(&**p).map_err(|e| format!("自产库 `{p}` 读取失败: {e}"))?;
+        let fnv = hash128(&data);
+        let role = u8::from(p.starts_with(&ga_prefix));
+        if role == 1 && !no_mc {
+            mc_entries.push(McEntry { fnv, bytes: data });
+        }
         libs.push(NativeLibEntry {
             path: p.to_string(),
-            role: u8::from(p.starts_with(&ga_prefix)),
-            fnv: hash128(&data),
+            role,
+            fnv,
         });
     }
     let module_bytes =
         postcard_bytes(&module).map_err(|e| format!("module 序列化失败: {e}"))?;
 
-    let sections: Vec<(u32, Vec<u8>)> = vec![
+    let mut sections: Vec<(u32, Vec<u8>)> = vec![
         (TAG_META, postcard_bytes(&meta)?),
         (TAG_STAMPS, postcard_bytes(&stamps)?),
         (TAG_MODULE, module_bytes),
         (TAG_NATIVELIBS, postcard_bytes(&libs)?),
         (TAG_RELOC, postcard_bytes(&reloc)?),
     ];
+    if !mc_entries.is_empty() {
+        sections.push((TAG_MC, postcard_bytes(&mc_entries)?));
+    }
 
     let mut buf = Vec::new();
     buf.extend_from_slice(MAGIC);
@@ -249,7 +268,26 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
     }
     let libs: Vec<NativeLibEntry> = postcard::from_bytes(section(TAG_NATIVELIBS)?)
         .map_err(|e| format!("NATIVELIBS 节解析失败: {e}"))?;
+    // 片③：MC 节（可缺省——片② 包与 MIRVM_PACK_NO_MC 包 = 纯文件引用模式）
+    let mc_entries: Vec<McEntry> = if metas.iter().any(|(t, _, _, _)| *t == TAG_MC) {
+        postcard::from_bytes(section(TAG_MC)?).map_err(|e| format!("MC 节解析失败: {e}"))?
+    } else {
+        Vec::new()
+    };
+    let mut covered: Vec<String> = Vec::new();
+    for mc in &mc_entries {
+        let Some(l) = libs.iter().find(|l| l.role == 1 && l.fnv == mc.fnv) else {
+            return Err("包 MC 节含 NATIVELIBS 无互证条目（不符或多余）".into());
+        };
+        let img = crate::vm::engine::mcload::load(&mc.bytes)
+            .map_err(|e| format!("MC 镜像装载失败（{}）: {e}", l.path))?;
+        crate::vm::engine::mcload::register(img);
+        covered.push(l.path.clone());
+    }
     for l in &libs {
+        if covered.contains(&l.path) {
+            continue; // MC 已自装载——文件引用校验豁免（purge 缓存酸试过关）
+        }
         let data = std::fs::read(&l.path)
             .map_err(|e| format!("自产库 `{}` 缺失（{e}）——重打或恢复该缓存产物", l.path))?;
         if hash128(&data) != l.fnv {
@@ -258,10 +296,14 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
     }
     let reloc: Reloc = postcard::from_bytes(section(TAG_RELOC)?)
         .map_err(|e| format!("RELOC 节解析失败: {e}"))?;
-    let module: crate::vm::engine::ir::Module = postcard::from_bytes(section(TAG_MODULE)?)
+    let mut module: crate::vm::engine::ir::Module = postcard::from_bytes(section(TAG_MODULE)?)
         .map_err(|e| format!("MODULE 节解析失败（冻结区固定基恢复未成立？）: {e}"))?;
     if reloc.requires_fixed_base && !module.frozen.as_ref().is_some_and(|f| f.at_fixed_base()) {
         return Err("包要求固定基址但当前进程不可用（被占/ASLR 冲突）——重试或空闲后跑".into());
     }
+    // 片③：MC 已自装载的自产族不再走 dlopen（运行期对它们零 ELF 依赖）
+    module
+        .required_native_libs
+        .retain(|p| !covered.iter().any(|c| c.as_str() == &**p));
     Ok(LoadedPackage { module })
 }
