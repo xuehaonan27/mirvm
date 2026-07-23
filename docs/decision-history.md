@@ -1230,6 +1230,16 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
 - **遗留边界（如实）**：dep global_asm 的 `sym` 指向 dep 自身 guest fn
   的操作数片①响亮拒绝（C7 跨 crate 条目预算，见 open-issues R16，遇
   真实 workload 再立）；C4 片② = mode B 机器码节（与 D1 同设计）。
+- **gate5 首轮抓获两枚边界并同役修正（`444ca31`）**：
+  ① sym 指向 guest fn 的 dep 清单**拒收改跳过**（三态 DepAsmText）——
+     wasmtime `fiber_start` 实锤：fiber 面不被 c_wasmtime_wat 触达，「因
+     可能不用而拖垮整个 dep 构建」是把惰性失败错误提前；跳过清单 = C4 前
+     状态（符号维持未解析，被使用时按既有 TRAP 响亮），真渲染失败仍 panic；
+  ② assemble 通道**剥 `//` 行注释**——GAS/LIVE 语义差实锤：rustc 的目标
+     汇编器 LLVM MC 把 `//` 当行注释，GNU as 把 `//` 当除法运算符
+     （wasmtime fiber 大量 `//` 注释令 cc 报 invalid use of register）；
+     global_asm 文本是 LLVM 语义域，馈 GAS 前剥除（引号态跟踪，串内不剥）。
+  修正后 gate5 **167/0/0/0** 复绿。
 
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
