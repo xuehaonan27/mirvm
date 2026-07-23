@@ -29,9 +29,7 @@ pub(crate) fn materialize<'tcx>(
     let parts = tcx.collect_and_partition_mono_items(());
     // 稳定序（跨 CGU）；重复 def 去一次
     let mut seen = std::collections::HashSet::new();
-    let absorb = &mut |tcx: TyCtxt<'tcx>,
-                       inst: Instance<'tcx>,
-                       defs: &mut Vec<(Box<str>, u64)>| {
+    let absorb = &mut |tcx: TyCtxt<'tcx>, inst: Instance<'tcx>, defs: &mut Vec<(Box<str>, u64)>| {
         absorb_guest_symfn(tcx, linker, inst, defs)
     };
     for cgu in parts.codegen_units {
@@ -176,7 +174,7 @@ pub(crate) fn materialize_dep_text(tcx: TyCtxt<'_>) -> Result<DepAsmText, String
                         ) {
                             Ok(()) => {}
                             Err(e) if e.starts_with(DEP_SYM_GUEST) => {
-                                return Ok(DepAsmText::UnsupportedSym)
+                                return Ok(DepAsmText::UnsupportedSym);
                             }
                             Err(e) => return Err(e),
                         }
@@ -184,11 +182,16 @@ pub(crate) fn materialize_dep_text(tcx: TyCtxt<'_>) -> Result<DepAsmText, String
                 }
                 MonoItem::Fn(inst) => {
                     if is_naked(tcx, inst) && seen.insert(format!("naked:{:?}", inst.def_id())) {
-                        match render_naked(tcx, &mut dep_absorb_symfn, inst, &mut asm, &mut abs_defs)
-                        {
+                        match render_naked(
+                            tcx,
+                            &mut dep_absorb_symfn,
+                            inst,
+                            &mut asm,
+                            &mut abs_defs,
+                        ) {
                             Ok(()) => {}
                             Err(e) if e.starts_with(DEP_SYM_GUEST) => {
-                                return Ok(DepAsmText::UnsupportedSym)
+                                return Ok(DepAsmText::UnsupportedSym);
                             }
                             Err(e) => return Err(e),
                         }

@@ -486,10 +486,7 @@ impl Translator<'_, '_> {
             // 全走 frame_addr 的第三态（read_slot/write_slot/addr_of_local）
             if body.frame_align > 16 {
                 let addr = self.b.ins().stack_addr(types::I64, ss, 0);
-                let padded = self
-                    .b
-                    .ins()
-                    .iadd_imm(addr, i64::from(body.frame_align) - 1);
+                let padded = self.b.ins().iadd_imm(addr, i64::from(body.frame_align) - 1);
                 let base = self.b.ins().band_imm(padded, -i64::from(body.frame_align));
                 let v = self.b.declare_var(types::I64);
                 self.b.def_var(v, base);

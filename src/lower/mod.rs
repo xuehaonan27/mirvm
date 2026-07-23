@@ -270,10 +270,7 @@ fn lower_inner(
                     continue;
                 }
                 let text = std::fs::read_to_string(&manifest).unwrap_or_else(|e| {
-                    panic!(
-                        "dep global_asm 清单 `{}` 读取失败: {e}",
-                        manifest.display()
-                    )
+                    panic!("dep global_asm 清单 `{}` 读取失败: {e}", manifest.display())
                 });
                 let so = global_asm::assemble(&text).unwrap_or_else(|reason| {
                     panic!(

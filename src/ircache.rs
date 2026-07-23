@@ -93,13 +93,14 @@ fn env_matches(name: &str, recorded: &Option<String>) -> bool {
     }
 }
 
+/// 盖戳收集结果：(文件戳清单, `env!` 依赖清单)。
+pub(crate) type InputStamps = (Vec<FileStamp>, Vec<(String, Option<String>)>);
+
 /// 输入清单收集（rustc dep-info 同构口径；mode B 包与 L2 共用）：
 /// 本地源文件（source_map 非 imported）+ `include!` 追踪文件 + 全部上游 crate
 /// 工件（used_crate_source：含 sysroot std rlib）+ `env!` 依赖。任一文件无法
 /// 盖戳（消失/非常规）= None（宁不缓存/打包）。
-pub(crate) fn collect_input_stamps(
-    tcx: TyCtxt<'_>,
-) -> Option<(Vec<FileStamp>, Vec<(String, Option<String>)>)> {
+pub(crate) fn collect_input_stamps(tcx: TyCtxt<'_>) -> Option<InputStamps> {
     let sess = tcx.sess;
     let mut files: Vec<String> = sess
         .source_map()

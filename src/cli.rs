@@ -157,8 +157,8 @@ fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
     let out_abs = std::path::absolute(&out).unwrap_or(out);
 
     // cargo 两形态（目录/Cargo.toml、frontmatter 脚本）：env 传入 runner
-    let is_cargo_dir = input_path.is_dir()
-        || input_path.file_name().is_some_and(|f| f == "Cargo.toml");
+    let is_cargo_dir =
+        input_path.is_dir() || input_path.file_name().is_some_and(|f| f == "Cargo.toml");
     if is_cargo_dir {
         let dir = if input_path.is_dir() {
             input_path.as_path()
@@ -188,15 +188,14 @@ fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
     }
 
     // 纯单文件：直接 pack_driver（与 run 的形态 3 同参）
-    let sysroot = std::env::var("MIRVM_SYSROOT").unwrap_or_else(|_| {
-        match crate::sysroot::ensure_sysroot() {
+    let sysroot =
+        std::env::var("MIRVM_SYSROOT").unwrap_or_else(|_| match crate::sysroot::ensure_sysroot() {
             Ok(p) => p.display().to_string(),
             Err(e) => {
                 eprintln!("mirvm: 构建 sysroot 失败: {e}");
                 exit(1);
             }
-        }
-    });
+        });
     let rustc_args = vec![
         "mirvm".to_string(),
         input.clone(),

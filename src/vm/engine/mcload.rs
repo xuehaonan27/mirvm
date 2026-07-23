@@ -20,10 +20,12 @@ pub struct McImage {
     pub symbols: HashMap<Box<str>, u64>,
 }
 
+/// MC 注册表条目：(镜像基址, 符号表)。
+type McEntry = (u64, HashMap<Box<str>, u64>);
+
 /// 进程级 MC 符号注册表（(基址, 符号表) 序 = 装载序，与 required_native_libs
 /// 链接序同构）。resolve 的 ① 位在其上按序查。
-static MC_REGISTRY: std::sync::RwLock<Vec<(u64, HashMap<Box<str>, u64>)>> =
-    std::sync::RwLock::new(Vec::new());
+static MC_REGISTRY: std::sync::RwLock<Vec<McEntry>> = std::sync::RwLock::new(Vec::new());
 
 /// 注册镜像（装载序追加；永不移除——与 dlopen 句柄同生命周期纪律）。
 pub fn register(img: McImage) {
@@ -163,7 +165,11 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
     for (i, (off, vaddr, filesz, memsz)) in loads.iter().enumerate() {
         let dst = base + (vaddr - lo);
         unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr().add(*off as usize), dst as *mut u8, *filesz);
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr().add(*off as usize),
+                dst as *mut u8,
+                *filesz,
+            );
             if memsz > filesz {
                 std::ptr::write_bytes((dst + filesz) as *mut u8, 0, memsz - filesz);
             }
@@ -201,10 +207,10 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
             d += 16;
             match tag {
                 0 => break,
-                7 => rela = Some(val),  // DT_RELA
-                8 => relasz = val,      // DT_RELASZ
+                7 => rela = Some(val),    // DT_RELA
+                8 => relasz = val,        // DT_RELASZ
                 23 => jmprel = Some(val), // DT_JMPREL
-                2 => pltrelsz = val,    // DT_PLTRELSZ
+                2 => pltrelsz = val,      // DT_PLTRELSZ
                 _ => {}
             }
         }
@@ -217,13 +223,16 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
     for i in 0..shnum {
         let s = shdr(i).ok_or_else(bad)?;
         match (s.ty, sec_name(&s)) {
-            (2, _) => symtab = Some(s),                 // SHT_SYMTAB
-            (3, ".strtab") => strtab = Some(s),         // SHT_STRTAB
+            (2, _) => symtab = Some(s),         // SHT_SYMTAB
+            (3, ".strtab") => strtab = Some(s), // SHT_STRTAB
             (_, ".eh_frame") => eh_frame = Some(s),
             _ => {}
         }
     }
-    let (sym_s, str_s) = (symtab.ok_or("MC 镜像缺 .symtab")?, strtab.ok_or("MC 镜像缺 .strtab")?);
+    let (sym_s, str_s) = (
+        symtab.ok_or("MC 镜像缺 .symtab")?,
+        strtab.ok_or("MC 镜像缺 .strtab")?,
+    );
     let str_at = |off: u32| -> Result<String, String> {
         let start = (str_s.off + u64::from(off)) as usize;
         let limit = (str_s.off + str_s.size) as usize;
@@ -285,19 +294,28 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
             if (info2 >> 4) == 2 {
                 return Ok(0); // WEAK 缺席 = 0
             }
-            Err(format!("MC 重定位符号 `{name}` 未命中（RTLD_DEFAULT 均无）"))
+            Err(format!(
+                "MC 重定位符号 `{name}` 未命中（RTLD_DEFAULT 均无）"
+            ))
         };
         match ty {
             0 => Ok(()), // NONE
             8 => {
                 // RELATIVE：*(place) = base + addend
-                unsafe { std::ptr::write_unaligned(place as *mut u64, (base as u64).wrapping_add(addend as u64)) };
+                unsafe {
+                    std::ptr::write_unaligned(
+                        place as *mut u64,
+                        (base as u64).wrapping_add(addend as u64),
+                    )
+                };
                 Ok(())
             }
             1 => {
                 // 64：*(place) = sym + addend
                 let s = sym_addr(sym_idx)?;
-                unsafe { std::ptr::write_unaligned(place as *mut u64, s.wrapping_add(addend as u64)) };
+                unsafe {
+                    std::ptr::write_unaligned(place as *mut u64, s.wrapping_add(addend as u64))
+                };
                 Ok(())
             }
             2 => {
@@ -313,7 +331,7 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
                 unsafe { std::ptr::write_unaligned(place as *mut u64, s) };
                 Ok(())
             }
-            16 | 17 | 18 => Err("MC 镜像含 TLS 重定位（DTPMOD/DTPOFF 未接）".into()),
+            16..=18 => Err("MC 镜像含 TLS 重定位（DTPMOD/DTPOFF 未接）".into()),
             5 => Err("MC 镜像含 COPY 重定位（不接）".into()),
             other => Err(format!("MC 镜像含未支持重定位类型 {other}")),
         }
@@ -360,7 +378,8 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
             if len == 0 {
                 break;
             }
-            let cie_ptr = u32::from_le_bytes(unsafe { std::ptr::read((cur + 4) as *const [u8; 4]) });
+            let cie_ptr =
+                u32::from_le_bytes(unsafe { std::ptr::read((cur + 4) as *const [u8; 4]) });
             if cie_ptr != 0 {
                 unsafe { __register_frame(cur as *const u8) };
             }
@@ -368,5 +387,9 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
         }
     }
 
-    Ok(McImage { base, size, symbols })
+    Ok(McImage {
+        base,
+        size,
+        symbols,
+    })
 }

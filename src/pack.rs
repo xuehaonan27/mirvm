@@ -32,7 +32,14 @@ const TAG_MC: u32 = 7;
 /// fnv1a-128（双程异种子；v0 校验强度与 L2 同族，格式演进时随评）。
 fn hash128(data: &[u8]) -> u128 {
     let a = crate::lower::asm::fnv1a(data);
-    let b = crate::lower::asm::fnv1a(b"\x01mirvmar".iter().chain(data.iter()).copied().collect::<Vec<u8>>().as_slice());
+    let b = crate::lower::asm::fnv1a(
+        b"\x01mirvmar"
+            .iter()
+            .chain(data.iter())
+            .copied()
+            .collect::<Vec<u8>>()
+            .as_slice(),
+    );
     ((a as u128) << 64) | b as u128
 }
 
@@ -123,8 +130,7 @@ pub(crate) fn write_package(
             fnv,
         });
     }
-    let module_bytes =
-        postcard_bytes(&module).map_err(|e| format!("module 序列化失败: {e}"))?;
+    let module_bytes = postcard_bytes(&module).map_err(|e| format!("module 序列化失败: {e}"))?;
 
     let mut sections: Vec<(u32, Vec<u8>)> = vec![
         (TAG_META, postcard_bytes(&meta)?),
@@ -249,8 +255,8 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
         }
         Ok(data)
     };
-    let meta: Meta = postcard::from_bytes(section(TAG_META)?)
-        .map_err(|e| format!("META 节解析失败: {e}"))?;
+    let meta: Meta =
+        postcard::from_bytes(section(TAG_META)?).map_err(|e| format!("META 节解析失败: {e}"))?;
     if !crate::ircache::envs_current(&meta.envs) {
         return Err("包 env 依赖与当前环境不符（编译时 env! 值已变——以当前环境重打）".into());
     }
@@ -294,8 +300,8 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
             return Err(format!("自产库 `{}` 内容哈希不符（已变——重打）", l.path));
         }
     }
-    let reloc: Reloc = postcard::from_bytes(section(TAG_RELOC)?)
-        .map_err(|e| format!("RELOC 节解析失败: {e}"))?;
+    let reloc: Reloc =
+        postcard::from_bytes(section(TAG_RELOC)?).map_err(|e| format!("RELOC 节解析失败: {e}"))?;
     let mut module: crate::vm::engine::ir::Module = postcard::from_bytes(section(TAG_MODULE)?)
         .map_err(|e| format!("MODULE 节解析失败（冻结区固定基恢复未成立？）: {e}"))?;
     if reloc.requires_fixed_base && !module.frozen.as_ref().is_some_and(|f| f.at_fixed_base()) {
