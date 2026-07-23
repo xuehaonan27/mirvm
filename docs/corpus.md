@@ -452,6 +452,13 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
   [open-issues.md E36](open-issues.md) 待裁定。L2 warm 复跑判定 = warm
   三维 == native 三维 + warm stdout == cold stdout（冷跑 stderr 含构建
   告警属构建事件，仅断言 exit 0）。
+- **接线即立功（jiff_time）**：全量 gate 首跑 178/179 绿，唯一红 = c_jiff_time——
+  孤儿期间上游漂移：jiff 0.2.33/0.2.34（2026-07-19 发布，验收后三天）起依赖
+  当日新建的 jiff-core 0.1.0，其 `from_nanosecond` 越界路径先触 `new_unchecked`
+  的 debug_assert（driver 的越界→Err 断言被上游 panic 顶穿；release 构建静默
+  构造越界值更糟）。**native 同文 panic（非 mirvm 分叉）**——按上游破洞先例
+  钉 `=0.2.32`（jiff-core 换血前最后一版）并在 driver 头注记恢复条件，
+  钉后三维逐字节复绿。此例正是"孤儿条目不接线就会悄悄烂掉"的实证。
 - **附带收编**：旧 real_projects 重型 harness（ripgrep/tokei 工作集，
   71K+118K+32K，仓内零 case、不进 CI）挪 tests/parked/ 休眠——
   「真项目对拍」职责由本形态以更轻基建接替。

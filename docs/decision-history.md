@@ -1304,6 +1304,65 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   维持 dlopen（「FFI 真外国库」类）；格式演进候选 = MC 预消化 blob
   （去 ELF 解析形态，随 D4 冻结评审）。
 
+### 7.26 2026-07-23：测试管线整顿——manifest 唯一真源 + 分层套件 + 真项目对拍 + 三维计量
+
+- **动机（用户四条）**：① tests/ 22 脚本平铺、里程碑代号命名（m4_/m5_/m51_）
+  不成套件；② corpus 名单两处内联且已漂移——实锤：gate5 内联 147 /
+  corpus.sh 内联 129，**13 个批6 条目两边都没接线**（创建时三维验收过却
+  从不进任何 gate），zstd_stream 只在一侧；③ gate5 全量太慢、cache 无
+  计量无预算（~/.mirvm/target 实测 17G）；④ corpus 全是单文件脚本，
+  缺真 cargo 项目形态。
+- **裁定（四连）**：代号名照方案退役改名；真项目 **vendor 进仓**；
+  real_projects 重型 harness（71K+118K+32K，仓内零 case、不进 CI）挪
+  `tests/parked/`；smoke 层 ~24 个跨类目代表（每类目≥1 + 历史功勋条目
+  优先——修出过产品 bug 的先入）。
+- **落地（结构批）**：
+  - `tests/corpus.manifest` **唯一真源**：name/tier(smoke|full|manual)/
+    timeout/mode(exit|oracle:<名>|diff)/env/needs/xfail 六列，
+    `lib.sh::manifest_rows` 解析（非法字段/非法枚举响亮报错）；
+    164 脚本驱动全接线（137 full + 24 smoke + 3 manual）；
+    内联六 oracle 抽 `fixtures/oracles/`。
+  - 改名归位：m4_gate0/1/2/4 → `runtime_gates.sh`（pure/digest/unwind/
+    threads 四段可单段）；m51_* → `probes.sh`（输出行形状不变，gate_truth
+    锁语义不锁文件名）；m4_gate5+m5_gate6 → `gate.sh`（并入 JIT stats
+    冒烟；gate6 两条文档 grep 时点检查化石退役——落档纪律由评审承担，
+    不由门 grep）；`spike4_tsan.sh`/`a2_deps_image.sh`/`diff.sh`/
+    `diff_cargo.sh`/`gate_truth_regression.sh` 叶位不动；
+    `project_suite_rustc_proxy.sh` → `fixtures/rustc_proxy.sh`
+    （仍是 diff_cargo 活动依赖）。
+  - `tests/run.sh` 统一入口：**fast**（逢提交：fmt/clippy/test + diff 双态
+    + diff_cargo + gate_truth）/ **smoke**（fast + corpus smoke 层 +
+    probes + runtime_gates）/ **gate**（收尾级）/ corpus / perf。
+  - `tests/lib.sh`：记账/计时/manifest 解析/`corpus_run` 执行器
+    （env `;` 分隔 + `%20` 空格解码、needs SKIP、逐驱动清 deps/ir、
+    计时榜）+ **磁盘护栏**（disk_guard 见底两级升级清理仍不足响亮
+    exit 3；target 预算闸 MIRVM_TARGET_BUDGET_GB 默认 24G 超即
+    purge --target 并报告；cache_snapshot 跑前跑后 du）。
+  - `tests/perf.sh`：三硬门（load<1s / rayon<5s / fib32≤80ms 三跑取最小）
+    + 资源计量；SKIP_PERF 只跳时序门（gate_truth 锁 SKIP 不冒充 PASS）。
+  - CI 改跑 `gate.sh`（+ MIRVM_TARGET_BUDGET_GB=12）。
+- **片④ 真 cargo 项目对拍**：hexyl 0.17.0 + tokei 14.0.0 vendor 进
+  `corpus/projects/`（.crate 全量解包 + sha256 钉 + 许可证随包；
+  provenance 与升级纪律见其 README）。manifest `mode=diff` 判绿 =
+  **mirvm warm 三维 == native 三维 + warm stdout == cold stdout**。
+  两个机制实锤：
+  ① **cargo 会回放缓存告警**（warm 构建 stderr 仍含依赖告警，对拍被
+  噪音炸）→ 两侧同帽 `--cap-lints allow`（stderr 只承载程序自身输出；
+  manifest env 列 `%20` 编码空格）；
+  ② **mirvm 项目模式 guest cwd=项目目录**（cargo run 从不 chdir，
+  argv 探针实锤）→ 夹具路径 `{ROOT}` 占位绝对化（lib.sh::parse_args）
+  绕行于 harness 层；产品侧是否对齐 cargo 语义（cwd=调用者 cwd）
+  待裁定 → [open-issues.md E36](open-issues.md)。
+- **附带实修/自抓**：mode B 三片遗留 fmt/clippy 破窗（`22d89de`，
+  run.sh fast 首跑即抓）；新脚本自抓虫两例均被排练抓出——probes.sh
+  shift 后误用 `$1`（无 vm-call 探针 unbound）、gate.sh 汇总 `xfail`
+  计数器被 manifest 字段撞名（read 覆盖）。
+- **验收**：gate_truth 12/12、`run.sh fast` 7/7、gate.sh 排练
+  （hexyl+tokei 三维对拍）17/0/1/0、**gate.sh 全量 179/0/0/0**——唯一红
+  c_jiff_time 实锤上游 jiff-core 0.1.0 debug_assert 破洞（native 同文
+  panic 非分叉，孤儿条目接线即立功），钉 `=0.2.32` 复绿
+  （84fa00b 结构批 + jiff 钉版 + 本档）。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT

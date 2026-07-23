@@ -22,11 +22,12 @@ JIT 默认开启）。
   S3′b A2 纯化聚合 deps-image（eco 冷 924→热 66ms）。
 - **地址模型 P1/P2 完成**（2026-07-17）：GOT 间接消除宿主地址烘焙 + extern fn 条目
   可执行化，thunk 盲区结构性根治。
-- **corpus 批1–10 全量 129 个真实 crate driver**（创建时完成 mirvm/native/逢调即编
-  三维逐字节验收；持续门 = 默认 mirvm 单跑 exit-code/oracle 级，提升项见
-  [open-issues.md G7](docs/open-issues.md)）；gate5 **167 PASS / 0 XFAIL / 0 FAIL**，
-  m5_gate6 4/4，cargo test 76/76，diff.sh 45/45（默认 + 阈值=1 双态 + MIRVM_JIT_SYNC
-  同步发布），diff_cargo 5/5。
+- **corpus 全量 164 个真实 crate driver + 2 个 vendored 真 cargo 项目（hexyl/tokei）**：
+  创建时完成 mirvm/native/逢调即编三维逐字节验收；持续门 =
+  `tests/corpus.manifest` 唯一真源（exit/oracle/diff 三口径，2026-07-23 管线整顿，
+  提升项见 [open-issues.md G7](docs/open-issues.md)）；`tests/gate.sh`
+  **179 PASS / 0 XFAIL / 0 FAIL**，`tests/run.sh fast` 7/7，cargo test 76/76，
+  diff.sh 45/45（默认 + 阈值=1 双态 + MIRVM_JIT_SYNC 同步发布），diff_cargo 5/5。
 
 已知缺口、响亮拒绝边界与全部未解决债务集中登记在
 [docs/open-issues.md](docs/open-issues.md)；目前不能宣称支持"任意 Rust 程序"。

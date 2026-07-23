@@ -5,7 +5,14 @@
 # 以字节表形式编进二进制（IANA 大表，运行期 TZif 解析），不读宿主机
 # /usr/share/zoneinfo（tz-system off）——两侧吃的是同一份确定性大表，
 # 也顺带排除宿主机 tzdata 版本漂移。std 保留（TimeZone::get 需要 alloc+std）。
-jiff = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
+# 钉 =0.2.32（2026-07-23 实锤上游破洞）：jiff 0.2.33/0.2.34（07-19 发布）起
+# 依赖当日新建的 jiff-core 0.1.0——其 from_nanosecond 越界路径先触
+# new_unchecked 的 debug_assert（Timestamp::MAX.as_nanosecond()+1 实锤：
+# debug 构建 panic、release 构建静默构造越界值），driver 的越界→Err 断言
+# 被上游 panic 顶穿。0.2.32 = 换依赖前最后一版；native/mirvm 同文复现，
+# 非分叉。恢复条件 = jiff-core 修该断言后升钉（GitHub 操作暂停，上游
+# 报告暂缓）。
+jiff = { version = "=0.2.32", default-features = false, features = ["std", "tzdb-bundle-always"] }
 ---
 // jiff 0.2（BurntSushi datetime，内置 IANA tz 数据库）差分。
 // 覆盖：① 固定 Unix 时间戳集（epoch/负值/两个闰秒边界前后/N.Y. 两次 DST
