@@ -302,7 +302,7 @@ impl Callbacks for DepCallbacks {
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         let _ = tcx.collect_and_partition_mono_items(());
         match crate::lower::global_asm::materialize_dep_text(tcx) {
-            Ok(Some(text)) => {
+            Ok(crate::lower::global_asm::DepAsmText::Text(text)) => {
                 let path = format!("{}/{}.mirasm.s", self.out_dir, self.rlib_stem);
                 // 原子发布（全仓同款纪律）
                 let tmp = format!("{path}.tmp{}", std::process::id());
@@ -311,7 +311,10 @@ impl Callbacks for DepCallbacks {
                 std::fs::rename(&tmp, &path)
                     .unwrap_or_else(|e| panic!("dep global_asm 清单发布失败: {e}"));
             }
-            Ok(None) => {}
+            // UnsupportedSym：跳过清单（C4 片①语义边界，见 global_asm.rs
+            // DepAsmText 文档——不因「可能不用」拖垮整个 dep 构建）
+            Ok(crate::lower::global_asm::DepAsmText::UnsupportedSym)
+            | Ok(crate::lower::global_asm::DepAsmText::None) => {}
             Err(reason) => panic!("dep global_asm 抽取失败: {reason}"),
         }
         Compilation::Continue

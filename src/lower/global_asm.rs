@@ -119,6 +119,10 @@ fn syntax_prefix(att: bool) -> &'static str {
 
 // ===== C4：dep crate global_asm 的编译期抽取（decision-history §7.22）=====
 
+/// dep 侧 sym 拒绝的统一前缀（materialize_dep_text 据此区分「跳过清单」
+/// 与「真失败」两态；勿改文案而不同步分支判据）。
+const DEP_SYM_GUEST: &str = "dep global_asm/naked 的 sym 指向 guest fn";
+
 /// dep 侧的 sym fn 处理：与 absorb_guest_symfn 同一早退规则（foreign/naked
 /// 无需跳板），其余响亮拒绝——C7 跨 crate 条目预算（trampoline 须在 bin
 /// 链接上下文做）是 C4 片②活，pulp 等真实形态零操作数。
@@ -131,18 +135,29 @@ fn dep_absorb_symfn<'tcx>(
         return Ok(());
     }
     Err(format!(
-        "dep crate global_asm/naked 的 sym 指向 guest fn `{}`（聚合预算属 bin \
-         链接上下文，C4 片②活）：如实响亮拒绝",
+        "{DEP_SYM_GUEST} `{}`（聚合预算属 bin 链接上下文，C4 片②活）",
         tcx.symbol_name(inst).name
     ))
 }
 
+/// dep 清单三态（C4 片①语义边界）：
+/// - Text：抽取成功，落清单装载；
+/// - None：本 crate 无 asm（99%）；
+/// - UnsupportedSym：含 sym 指向 dep 自身 guest fn 的站点（C7 跨 crate 条目
+///   预算属片②）——**跳过清单**（= C4 前状态：符号维持未解析，被使用时按
+///   既有 TRAP 响亮），绝不因「可能不用」而拖垮整个 dep 构建
+///   （wasmtime fiber_start 实锤：fiber 面不被 c_wasmtime_wat 触达）。
+pub(crate) enum DepAsmText {
+    Text(String),
+    None,
+    UnsupportedSym,
+}
+
 /// dep 编译期抽取：mono 收集（对本次编译的 crate 恒成立——mirvm 就是 dep
-/// crate 的编译器）→ 渲染全部 global_asm/naked 站点为 `.s` 文本。返回
-/// None = 本 crate 无 asm（99% 情形，纯 mono 扫描边际零成本）。
+/// crate 的编译器）→ 渲染全部 global_asm/naked 站点为 `.s` 文本。
 /// 文本由调用方落盘为 rlib 旁挂清单（`<rlib 主名>.mirasm.s`）；汇编动作
 /// 留给 bin 加载相的同一 assemble 通道（缓存自愈随之免费）。
-pub(crate) fn materialize_dep_text(tcx: TyCtxt<'_>) -> Result<Option<String>, String> {
+pub(crate) fn materialize_dep_text(tcx: TyCtxt<'_>) -> Result<DepAsmText, String> {
     let mut asm = String::new();
     let mut abs_defs: Vec<(Box<str>, u64)> = Vec::new();
     let parts = tcx.collect_and_partition_mono_items(());
@@ -152,18 +167,31 @@ pub(crate) fn materialize_dep_text(tcx: TyCtxt<'_>) -> Result<Option<String>, St
             match *item {
                 MonoItem::GlobalAsm(item_id) => {
                     if seen.insert(format!("ga:{item_id:?}")) {
-                        render_global_asm(
+                        match render_global_asm(
                             tcx,
                             &mut dep_absorb_symfn,
                             item_id,
                             &mut asm,
                             &mut abs_defs,
-                        )?;
+                        ) {
+                            Ok(()) => {}
+                            Err(e) if e.starts_with(DEP_SYM_GUEST) => {
+                                return Ok(DepAsmText::UnsupportedSym)
+                            }
+                            Err(e) => return Err(e),
+                        }
                     }
                 }
                 MonoItem::Fn(inst) => {
                     if is_naked(tcx, inst) && seen.insert(format!("naked:{:?}", inst.def_id())) {
-                        render_naked(tcx, &mut dep_absorb_symfn, inst, &mut asm, &mut abs_defs)?;
+                        match render_naked(tcx, &mut dep_absorb_symfn, inst, &mut asm, &mut abs_defs)
+                        {
+                            Ok(()) => {}
+                            Err(e) if e.starts_with(DEP_SYM_GUEST) => {
+                                return Ok(DepAsmText::UnsupportedSym)
+                            }
+                            Err(e) => return Err(e),
+                        }
                     }
                 }
                 MonoItem::Static(_) => {}
@@ -171,9 +199,9 @@ pub(crate) fn materialize_dep_text(tcx: TyCtxt<'_>) -> Result<Option<String>, St
         }
     }
     if asm.trim().is_empty() {
-        return Ok(None);
+        return Ok(DepAsmText::None);
     }
-    Ok(Some(format!(".intel_syntax noprefix\n{asm}")))
+    Ok(DepAsmText::Text(format!(".intel_syntax noprefix\n{asm}")))
 }
 
 fn ensure_x86(tcx: TyCtxt<'_>) -> Result<(), String> {
@@ -354,6 +382,40 @@ fn undefined_nonlib_symbols(so: &std::path::Path) -> Option<String> {
     None
 }
 
+/// 剥 `//` 行注释（GAS/LIVE 语义差实锤：rustc 的目标汇编器 LLVM MC 把 `//`
+/// 当行注释起始，GNU as 把 `//` 当除法运算符——global_asm 文本是 LLVM 语义
+/// 域（wasmtime fiber 大量 `//` 注释实锤 cc 报 Error），馈 GAS 前必须剥除。
+/// 引号态跟踪：`"`/`'` 字符串内的 `//` 不剥。
+fn strip_slash_comments(asm: &mut String) {
+    let mut out = String::with_capacity(asm.len());
+    for line in asm.lines() {
+        let mut in_str: Option<u8> = None;
+        let mut cut = line.len();
+        let b = line.as_bytes();
+        let mut i = 0;
+        while i + 1 < b.len() {
+            match b[i] {
+                q @ (b'"' | b'\'') => {
+                    if in_str == Some(q) {
+                        in_str = None;
+                    } else if in_str.is_none() {
+                        in_str = Some(q);
+                    }
+                }
+                b'/' if b[i + 1] == b'/' && in_str.is_none() => {
+                    cut = i;
+                    break;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        out.push_str(&line[..cut]);
+        out.push('\n');
+    }
+    *asm = out;
+}
+
 /// `.s` → `.so`（内容寻址缓存，与 asm-stub 工厂同款临时名+rename 原子发布）。
 /// naked fn 混入模块级 asm，可能引用 guest 符号 → 不能 `-nostdlib`；用 `-nostartfiles`
 /// 保留动态链接器解析（naked 内 sym 操作数指向的 guest fn 由 RTLD_GLOBAL 兜底）。
@@ -363,6 +425,7 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, String> {
     // 调用（改写发生在内容哈希前，缓存键与最终字节一致；槽随 .so 物化，
     // 装载 required_native_libs 时由 lower_inner 统一重填）
     let mut asm = asm.to_string();
+    strip_slash_comments(&mut asm);
     crate::lower::asm::rewrite_syscall_text(&mut asm);
     let hash = crate::lower::asm::fnv1a(asm.as_bytes());
     let dir = crate::sysroot::cache_dir().join("global-asm");
