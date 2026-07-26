@@ -491,7 +491,7 @@ fn req_to_ranges(req: &VersionReq) -> pubgrub::Ranges<Version> {
                     (None, Some(_)) => unreachable!("invalid version requirement"),
                 },
                 Op::Caret => match (major, minor, patch) {
-                    (major, Some(m), Some(_)) if major > 0 => R::higher_than(lo)
+                    (major, Some(_), Some(_)) if major > 0 => R::higher_than(lo)
                         .intersection(&R::strictly_lower_than(hi(major + 1, Some(0), Some(0)))),
                     (0, Some(m), Some(_)) if m > 0 => R::higher_than(lo)
                         .intersection(&R::strictly_lower_than(hi(0, Some(m + 1), Some(0)))),
