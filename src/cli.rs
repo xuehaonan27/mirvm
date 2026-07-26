@@ -96,6 +96,7 @@ pub fn main() -> ExitCode {
         "run" => run_main(argv),
         "pack" => pack_main(argv),
         "cache" => cache_main(argv),
+        "deps" => deps_main(argv),
         "spike1" => crate::vm::spikes::spike1::run(),
         "spike2" => crate::vm::spikes::spike2::run(),
         "spike3" => crate::vm::spikes::spike3::run(argv),
@@ -247,6 +248,107 @@ fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
             eprint!("{USAGE}");
             ExitCode::from(2)
         }
+    }
+}
+
+/// `mirvm deps audit <目标...>`（D15 P1 审计工具）：目标 = 项目目录（含
+/// Cargo.toml）或 frontmatter 脚本；逐目标 resolve 并与对照 lock 对账，
+/// 任一目标解析失败或对账失配即非零退出。
+fn deps_main(args: impl Iterator<Item = String>) -> ExitCode {
+    let mut sub = None;
+    let mut targets: Vec<String> = Vec::new();
+    for a in args {
+        match a.as_str() {
+            "audit" if sub.is_none() => sub = Some(a),
+            _ if sub.is_some() => targets.push(a),
+            _ => {
+                eprintln!(
+                    "mirvm deps: 未知参数 `{a}`（用法: mirvm deps audit <项目目录|脚本.rs>...）"
+                );
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if sub.is_none() || targets.is_empty() {
+        eprintln!("用法: mirvm deps audit <项目目录|脚本.rs>...");
+        return ExitCode::from(2);
+    }
+    let mut failures = 0usize;
+    for t in &targets {
+        let path = std::path::Path::new(t);
+        let result = if path.is_dir() || path.file_name().is_some_and(|f| f == "Cargo.toml") {
+            let dir = if path.is_dir() {
+                path.to_path_buf()
+            } else {
+                path.parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .to_path_buf()
+            };
+            crate::cargoless::audit::audit_project(&dir)
+        } else {
+            crate::cargoless::audit::audit_script(path)
+        };
+        match result {
+            Ok(report) => {
+                let head = format!(
+                    "{}（{} 模式，{} 单元，{} 包版本）",
+                    report.name,
+                    report.mode,
+                    report.units,
+                    report.plan.version_map.len()
+                );
+                // 判负条件：项目 = 对账等值；脚本 = cargo 验收链
+                let mut fail: Option<String> = None;
+                if report.mode == "lock"
+                    && let Some((lock_desc, mismatches)) = &report.lock_check
+                    && !mismatches.is_empty()
+                {
+                    fail = Some(format!("对账失配 {} 条 vs {lock_desc}", mismatches.len()));
+                    for m in mismatches.iter().take(5) {
+                        println!("     {m}");
+                    }
+                }
+                if let Some(acc) = &report.acceptance
+                    && let Err(diag) = acc
+                {
+                    fail = Some(diag.clone());
+                }
+                match fail {
+                    Some(why) => {
+                        println!("FAIL {head}：{why}");
+                        failures += 1;
+                    }
+                    None => {
+                        print!("OK   {head}");
+                        if let Some((lock_desc, mismatches)) = &report.lock_check {
+                            if mismatches.is_empty() {
+                                print!("；对账 == {lock_desc}");
+                            } else if report.mode == "fresh" {
+                                print!(
+                                    "；历史对照 {} 条时间漂移（信息级，非判负）",
+                                    mismatches.len()
+                                );
+                            }
+                        }
+                        if report.acceptance.is_some() {
+                            print!("；cargo --locked --offline 接受");
+                        }
+                        println!();
+                    }
+                }
+            }
+            Err(e) => {
+                println!("FAIL {t}: {e}");
+                failures += 1;
+            }
+        }
+    }
+    println!("---");
+    println!("deps audit: {} 目标，{} 失败", targets.len(), failures);
+    if failures == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
 }
 
@@ -1036,6 +1138,11 @@ fn run_driver(
 // ===== frontmatter（cargo script RFC 3424 语法）=====
 
 /// 解析 `---` 围栏的内嵌 manifest。返回 (manifest, 替换为空行保持行号的正文)。
+/// cargoless::audit 的脚本入口（D15 P1）——本体保持私有。
+pub(crate) fn parse_frontmatter_pub(src: &str) -> Option<(String, String)> {
+    parse_frontmatter(src)
+}
+
 fn parse_frontmatter(src: &str) -> Option<(String, String)> {
     let mut lines = src.lines().enumerate().peekable();
     // 跳过 shebang

@@ -42,7 +42,8 @@ pub enum DepKind {
     Build,
 }
 
-/// 一条依赖声明（已经平台过滤）。
+/// 一条依赖声明（平台 cfg 表达式随行，不在解析期过滤——版本求解是
+/// 全平台并集（cargo lock 语义），过滤只在 host 构建图装配期发生）。
 #[derive(Clone, Debug)]
 pub struct DepDecl {
     /// manifest 里的键名（feature 引用、--extern 命名用它，除非 rename）。
@@ -54,6 +55,8 @@ pub struct DepDecl {
     pub optional: bool,
     pub default_features: bool,
     pub kind: DepKind,
+    /// 来自 `target.'cfg(...)'` 表时的 cfg 表达式（普通表 = None）。
+    pub platform_cfg: Option<String>,
 }
 
 impl DepDecl {
@@ -282,19 +285,35 @@ impl PackageManifest {
         }
 
         let mut deps = Vec::new();
-        parse_dep_table(&raw.dependencies, DepKind::Normal, root, &mut deps)?;
-        parse_dep_table(&raw.build_dependencies, DepKind::Build, root, &mut deps)?;
+        parse_dep_table(&raw.dependencies, DepKind::Normal, root, None, &mut deps)?;
+        parse_dep_table(
+            &raw.build_dependencies,
+            DepKind::Build,
+            root,
+            None,
+            &mut deps,
+        )?;
         if raw.dev_dependencies.is_some() {
             // 事先明说的不做面：见到即忽略（不拒绝——cargo 项目常带，但我们永不消费）
         }
-        // target.'cfg()'.dependencies：平台求值后并入
+        // target.'cfg()'.dependencies：表达式随行进模型（全平台并集语义，不过滤）
         for (cfg_expr, tdeps) in raw.target.iter().flatten() {
-            let hit = eval_cfg(cfg_expr).map_err(|e| format!("target.{cfg_expr}: {e}"))?;
-            if !hit {
-                continue;
-            }
-            parse_dep_table(&tdeps.dependencies, DepKind::Normal, root, &mut deps)?;
-            parse_dep_table(&tdeps.build_dependencies, DepKind::Build, root, &mut deps)?;
+            // 表达式合法性在此校验（拼写错误要响亮；语义求值在使用期）
+            validate_cfg_expr(cfg_expr).map_err(|e| format!("target.{cfg_expr}: {e}"))?;
+            parse_dep_table(
+                &tdeps.dependencies,
+                DepKind::Normal,
+                root,
+                Some(cfg_expr.clone()),
+                &mut deps,
+            )?;
+            parse_dep_table(
+                &tdeps.build_dependencies,
+                DepKind::Build,
+                root,
+                Some(cfg_expr.clone()),
+                &mut deps,
+            )?;
         }
 
         let features = raw
@@ -383,6 +402,7 @@ fn parse_dep_table(
     table: &Option<BTreeMap<String, toml::Value>>,
     kind: DepKind,
     root: &Path,
+    platform_cfg: Option<String>,
     out: &mut Vec<DepDecl>,
 ) -> Result<(), MErr> {
     for (key, val) in table.iter().flatten() {
@@ -450,6 +470,7 @@ fn parse_dep_table(
             optional,
             default_features,
             kind,
+            platform_cfg: platform_cfg.clone(),
         });
     }
     Ok(())
@@ -474,47 +495,120 @@ pub(crate) fn parse_feature_value(v: &str) -> Result<FeatureValue, MErr> {
     Ok(FeatureValue::Simple(v.to_string()))
 }
 
-// ---------- cfg 平台求值 ----------
+// ---------- cfg 表达式（解析 / 校验 / host 求值） ----------
 
-/// 求值 `cfg(...)` 表达式（目标平台原子 + any/all/not；feature/target_feature 响亮拒绝）。
-pub fn eval_cfg(expr: &str) -> Result<bool, MErr> {
+/// cfg 表达式 AST。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CfgExpr {
+    /// (key, value)；裸原子（unix/windows）的 value = 空串。
+    Atom(String, String),
+    Any(Vec<CfgExpr>),
+    All(Vec<CfgExpr>),
+    Not(Box<CfgExpr>),
+}
+
+/// 解析 `cfg(...)` 为 AST（`cfg(...)` 外壳或裸表达式均可）。
+pub fn parse_cfg(expr: &str) -> Result<CfgExpr, MErr> {
     let e = expr.trim();
     let inner = e
         .strip_prefix("cfg(")
         .and_then(|s| s.strip_suffix(')'))
-        .ok_or_else(|| format!("cfg 表达式形态非法: {expr}"))?;
-    eval_cfg_inner(inner.trim())
+        .unwrap_or(e);
+    parse_cfg_inner(inner.trim())
 }
 
-fn eval_cfg_inner(s: &str) -> Result<bool, MErr> {
-    fn eval_list(s: &str, rest: &str) -> Result<Vec<bool>, MErr> {
-        let rest = rest
-            .strip_suffix(')')
-            .ok_or_else(|| format!("cfg 表达式括号不配对: {s}"))?;
-        split_top_level(rest)?
-            .iter()
-            .map(|p| eval_cfg_inner(p.trim()))
-            .collect()
-    }
-    if let Some(rest) = s.strip_prefix("any(") {
-        return Ok(eval_list(s, rest)?.iter().any(|x| *x));
-    }
-    if let Some(rest) = s.strip_prefix("all(") {
-        return Ok(eval_list(s, rest)?.iter().all(|x| *x));
-    }
-    if let Some(rest) = s.strip_prefix("not(") {
-        let vals = eval_list(s, rest)?;
-        if vals.len() != 1 {
-            return Err(format!("cfg not() 只收一个参数: {s}"));
+fn parse_cfg_inner(s: &str) -> Result<CfgExpr, MErr> {
+    for (op, make) in [
+        ("any(", CfgExpr::Any as fn(Vec<CfgExpr>) -> CfgExpr),
+        ("all(", CfgExpr::All),
+        ("not(", |v| {
+            debug_assert!(v.len() == 1);
+            CfgExpr::Not(Box::new(v.into_iter().next().unwrap()))
+        }),
+    ] {
+        if let Some(rest) = s.strip_prefix(op) {
+            let rest = rest
+                .strip_suffix(')')
+                .ok_or_else(|| format!("cfg 表达式括号不配对: {s}"))?;
+            let parts = split_top_level(rest)?;
+            let exprs = parts
+                .iter()
+                .map(|p| parse_cfg_inner(p.trim()))
+                .collect::<Result<Vec<_>, _>>()?;
+            if op == "not(" && exprs.len() != 1 {
+                return Err(format!("cfg not() 只收一个参数: {s}"));
+            }
+            return Ok(make(exprs));
         }
-        return Ok(!vals[0]);
     }
     let (key, val) = match s.split_once('=') {
-        Some((k, v)) => (k.trim(), v.trim().trim_matches('"').to_string()),
-        // 裸原子：cfg(unix) / cfg(windows) 形（val 空串语义）
-        None => (s.trim(), String::new()),
+        Some((k, v)) => (k.trim().to_string(), v.trim().trim_matches('"').to_string()),
+        None => (s.trim().to_string(), String::new()),
     };
-    cfg_atom(key, &val)
+    if key.is_empty() {
+        return Err(format!("cfg 原子形态非法: {s}"));
+    }
+    Ok(CfgExpr::Atom(key, val))
+}
+
+/// 解析期校验（拼写错误响亮；`cfg(feature=..)` 在 target 依赖表属 cargo
+/// 禁用面，响亮拒绝记名）。
+fn validate_cfg_expr(expr: &str) -> Result<(), MErr> {
+    fn walk(e: &CfgExpr) -> Result<(), MErr> {
+        match e {
+            CfgExpr::Atom(k, _) if k == "feature" => Err(unsupported(
+                "cfg(feature=..) 于 target 依赖表（cargo 禁用面）",
+            )),
+            CfgExpr::Atom(_, _) => Ok(()),
+            CfgExpr::Any(vs) | CfgExpr::All(vs) => vs.iter().try_for_each(walk),
+            CfgExpr::Not(e) => walk(e),
+        }
+    }
+    walk(&parse_cfg(expr)?)
+}
+
+/// host 平台原子集 = `rustc --print cfg --target <host>` 原样行集（cargo
+/// 平台匹配同源：未知/自定义键（rustix_use_libc 等）天然求 false；
+/// target_feature 由 rustc 列表精确覆盖）。进程内 OnceLock 缓存。
+static HOST_CFG_ATOMS: std::sync::OnceLock<std::collections::BTreeSet<String>> =
+    std::sync::OnceLock::new();
+
+fn host_cfg_atoms() -> &'static std::collections::BTreeSet<String> {
+    HOST_CFG_ATOMS.get_or_init(|| {
+        let rustc = std::path::PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT")).join("bin/rustc");
+        let out = std::process::Command::new(rustc)
+            .args(["--print", "cfg", "--target", env!("MIRVM_HOST")])
+            .output()
+            .expect("rustc --print cfg 失败");
+        let text = String::from_utf8(out.stdout).expect("rustc --print cfg 非 UTF-8");
+        text.lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
+    })
+}
+
+/// host 求值（host 构建图装配期用；版本求解期不得调用——那是全平台并集）。
+pub fn eval_cfg(expr: &str) -> Result<bool, MErr> {
+    let ast = parse_cfg(expr)?;
+    let atoms = host_cfg_atoms();
+    Ok(eval_ast(&ast, atoms))
+}
+
+fn eval_ast(e: &CfgExpr, atoms: &std::collections::BTreeSet<String>) -> bool {
+    match e {
+        CfgExpr::Atom(key, val) => {
+            let needle = if val.is_empty() {
+                key.clone()
+            } else {
+                format!("{key}=\"{val}\"")
+            };
+            atoms.contains(&needle)
+        }
+        CfgExpr::Any(vs) => vs.iter().any(|e| eval_ast(e, atoms)),
+        CfgExpr::All(vs) => vs.iter().all(|e| eval_ast(e, atoms)),
+        CfgExpr::Not(e) => !eval_ast(e, atoms),
+    }
 }
 
 fn split_top_level(s: &str) -> Result<Vec<String>, MErr> {
@@ -548,58 +642,6 @@ fn split_top_level(s: &str) -> Result<Vec<String>, MErr> {
         out.push(cur.trim().to_string());
     }
     Ok(out)
-}
-
-/// 目标平台原子（mirvm target 恒 = host triple，env!("MIRVM_HOST")）。
-fn cfg_atom(key: &str, val: &str) -> Result<bool, MErr> {
-    let host = env!("MIRVM_HOST");
-    let parts: Vec<&str> = host.split('-').collect();
-    let (arch, vendor, os, env_abi) = (
-        parts.first().copied().unwrap_or(""),
-        parts.get(1).copied().unwrap_or(""),
-        parts.get(2).copied().unwrap_or(""),
-        parts.get(3).copied().unwrap_or(""),
-    );
-    let hit = match key {
-        "target_os" => os == val,
-        "target_arch" => arch == val,
-        "target_vendor" => vendor == val,
-        "target_env" => env_abi == val,
-        "target_abi" => {
-            // gnu 系 target_abi 为空串；musl 才是 "musl"
-            let abi = if env_abi == "gnu" { "" } else { env_abi };
-            abi == val
-        }
-        "target_family" => {
-            let fam = match os {
-                "linux" | "android" | "freebsd" | "netbsd" | "openbsd" | "darwin" => "unix",
-                "windows" => "windows",
-                _ => "unknown",
-            };
-            fam == val
-        }
-        "target_pointer_width" => {
-            let w = if arch.starts_with("x86_64") || arch.starts_with("aarch64") {
-                "64"
-            } else {
-                "32"
-            };
-            w == val
-        }
-        "target_endian" => "little" == val,
-        "unix" => {
-            let is_unix = matches!(
-                os,
-                "linux" | "android" | "freebsd" | "netbsd" | "openbsd" | "darwin"
-            );
-            is_unix == val.is_empty()
-        }
-        "windows" => (os == "windows") == val.is_empty(),
-        "feature" => return Err(unsupported("cfg(feature=..) 平台求值面外（cargo 同语）")),
-        "target_feature" => return Err(unsupported("cfg(target_feature=..)（P5）")),
-        _ => return Err(unsupported(format!("cfg 键 {key}"))),
-    };
-    Ok(hit)
 }
 
 // ---------- target 发现 ----------
@@ -818,12 +860,22 @@ cc = "1"
         assert!(eval_cfg("cfg(all(unix, target_arch=\"x86_64\"))").unwrap());
         assert!(eval_cfg("cfg(target_pointer_width=\"64\")").unwrap());
         assert!(eval_cfg("cfg(target_endian=\"little\")").unwrap());
-        let err = eval_cfg("cfg(target_feature=\"avx2\")").unwrap_err();
-        assert!(err.contains("P5"), "{err}");
+        // 自定义键（rustix 型）与未知键天然 false（rustc --print cfg 同源）
+        assert!(!eval_cfg("cfg(rustix_use_libc)").unwrap());
+        assert!(!eval_cfg("cfg(some_custom_key)").unwrap());
+        // target_feature 由 rustc 列表精确覆盖（x86_64 基线 = sse/sse2 真、avx2 假）
+        assert!(eval_cfg("cfg(target_feature=\"sse2\")").unwrap());
+        assert!(!eval_cfg("cfg(target_feature=\"avx512f\")").unwrap());
+        // 复杂嵌套（rustix 形态微缩版）
+        assert!(eval_cfg(
+            "cfg(all(not(rustix_use_libc), target_os=\"linux\", any(target_arch=\"x86_64\", target_arch=\"aarch64\")))"
+        )
+        .unwrap());
     }
 
     #[test]
-    fn target_specific_dep_tables_merge_when_platform_matches() {
+    fn target_specific_dep_tables_carry_cfg_expr_unfiltered() {
+        // 全平台并集语义：解析期不过滤，cfg 表达式随行（cargo lock 同语）
         let m = PackageManifest::parse(
             "[package]\nname=\"d\"\nversion=\"0.1.0\"\n\
              [target.'cfg(unix)'.dependencies]\nnix = \"0.29\"\n\
@@ -831,8 +883,15 @@ cc = "1"
             Path::new("/tmp/x"),
         )
         .unwrap();
-        assert!(m.deps.iter().any(|d| d.key == "nix"));
-        assert!(!m.deps.iter().any(|d| d.key == "winapi"));
+        let nix = m.deps.iter().find(|d| d.key == "nix").unwrap();
+        let winapi = m.deps.iter().find(|d| d.key == "winapi").unwrap();
+        assert_eq!(nix.platform_cfg.as_deref(), Some("cfg(unix)"));
+        assert_eq!(winapi.platform_cfg.as_deref(), Some("cfg(windows)"));
+        // 普通表无标记
+        assert!(nix.platform_cfg.is_some());
+        // host 求值在使用期：unix 真、windows 假
+        assert!(eval_cfg(nix.platform_cfg.as_ref().unwrap()).unwrap());
+        assert!(!eval_cfg(winapi.platform_cfg.as_ref().unwrap()).unwrap());
     }
 
     #[test]

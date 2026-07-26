@@ -126,16 +126,18 @@ impl Lockfile {
                 out.push_str(&format!("checksum = \"{sum}\"\n"));
             }
             if !p.dependencies.is_empty() {
-                let mut deps: Vec<String> = p
+                // cargo canonical：每行带尾逗号（含末行）——--locked 对非
+                // canonical lock 一律判"需重写"而拒（c_serde_json 实锤）
+                let mut lines: Vec<String> = p
                     .dependencies
                     .iter()
                     .map(|(n, v)| match v {
-                        Some(v) => format!("\"{n} {v}\""),
-                        None => format!("\"{n}\""),
+                        Some(v) => format!(" \"{n} {v}\","),
+                        None => format!(" \"{n}\","),
                     })
                     .collect();
-                deps.sort();
-                out.push_str(&format!("dependencies = [\n {}\n]\n", deps.join(",\n ")));
+                lines.sort();
+                out.push_str(&format!("dependencies = [\n{}\n]\n", lines.join("\n")));
             }
         }
         out

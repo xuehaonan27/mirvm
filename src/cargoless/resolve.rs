@@ -130,20 +130,27 @@ pub fn resolve(root: &PackageManifest, src: &mut impl PkgSource) -> Result<Resol
         }
     }
 
-    // 版本求解
-    let (version_map, out_lock) = match &input_lock {
+    // 版本求解 + feature 统一
+    let (version_map, out_lock, nodes) = match &input_lock {
         Some(lf) => {
             let vm = versions_from_lock(root, &path_manifests, lf)?;
-            (vm, lf.clone())
+            let (nodes, _) = unify_features(root, &path_manifests, &vm, src)?;
+            (vm, lf.clone(), nodes)
         }
         None => {
-            let (vm, lf) = solve_fresh(root, &path_manifests, src)?;
-            (vm, lf)
+            // 迭代不动点：optional 依赖只在被 feature 激活时进版本求解
+            // （cargo lock 证据：未激活 optional 不入锁）；激活集单调扩张 ⇒ 收敛。
+            let mut activated: BTreeSet<String> = BTreeSet::new();
+            loop {
+                let (vm, lf) = solve_fresh(root, &path_manifests, src, &activated)?;
+                let (nodes, new_activated) = unify_features(root, &path_manifests, &vm, src)?;
+                if new_activated == activated {
+                    break (vm, lf, nodes);
+                }
+                activated = new_activated;
+            }
         }
     };
-
-    // feature 统一
-    let nodes = unify_features(root, &path_manifests, &version_map, src)?;
 
     // 编译单元装配
     let units = assemble_units(root, &path_manifests, &version_map, &nodes, src)?;
@@ -185,13 +192,10 @@ fn versions_from_lock(
                 root.name, root.version
             )
         })?;
-    let mut visited: BTreeMap<String, Version> = BTreeMap::new();
+    let mut visited: BTreeSet<(String, Version)> = BTreeSet::new();
     let mut stack: Vec<&LockedPkg> = vec![root_locked];
     while let Some(pkg) = stack.pop() {
         for (depname, depver) in &pkg.dependencies {
-            if visited.contains_key(depname) {
-                continue;
-            }
             let candidates = lf.find(depname);
             let child = match (depver, candidates.len()) {
                 (Some(v), _) => candidates.iter().find(|p| p.version == *v).copied(),
@@ -206,18 +210,21 @@ fn versions_from_lock(
             let Some(child) = child else {
                 return Err(format!("lock 图断链：{depname} {depver:?} 找不到包行"));
             };
-            visited.insert(depname.clone(), child.version.clone());
-            stack.push(child);
+            // 同名多版本并存合法——visited 键必须含版本，否则后者被静默吃掉
+            if visited.insert((depname.clone(), child.version.clone())) {
+                stack.push(child);
+            }
         }
     }
     // path 包（可能不在 lock 的可达集里——lock 含它们但没 source；BFS 已覆盖）
     for (name, m) in path_manifests {
-        visited
-            .entry(name.clone())
-            .or_insert_with(|| m.version.clone());
+        visited.insert((name.clone(), m.version.clone()));
     }
     for (name, v) in visited {
-        map.entry(name).or_default().push(v);
+        let vs = map.entry(name).or_default();
+        if !vs.contains(&v) {
+            vs.push(v);
+        }
     }
     // 完整性校验：manifest 的每个 registry req 必须被 locked 版本满足（lock 过期防线）
     let check = |m: &PackageManifest| -> Result<(), String> {
@@ -269,6 +276,9 @@ struct CratesIo<'a, S: PkgSource> {
     manifests: &'a BTreeMap<String, PackageManifest>,
     root: &'a PackageManifest,
     allow_pre: std::cell::RefCell<BTreeSet<String>>,
+    /// 本轮激活的 optional 依赖包名集（迭代不动点输入；未激活 optional
+    /// 不进版本求解——cargo lock 语义）。
+    activated: &'a BTreeSet<String>,
 }
 
 fn req_has_pre(req: &VersionReq) -> bool {
@@ -361,18 +371,15 @@ impl<'a, S: PkgSource> pubgrub::DependencyProvider for CratesIo<'a, S> {
                     if d.kind.as_deref() == Some("dev") {
                         continue; // dev 边不求（事先明说）
                     }
-                    if let Some(target) = &d.target {
-                        let hit = super::manifest::eval_cfg(target).map_err(io_err)?;
-                        if !hit {
-                            continue;
-                        }
+                    let pkg_name = d.package.clone().unwrap_or_else(|| d.name.clone());
+                    // optional 未激活不求（激活集驱动；迭代不动点收敛）
+                    // 注意：平台 cfg 在此不求值——版本求解是全平台并集（lock 语义）
+                    if d.optional && !self.activated.contains(&pkg_name) {
+                        continue;
                     }
                     if req_has_pre(&d.req) {
-                        self.allow_pre
-                            .borrow_mut()
-                            .insert(d.package.clone().unwrap_or_else(|| d.name.clone()));
+                        self.allow_pre.borrow_mut().insert(pkg_name.clone());
                     }
-                    let pkg_name = d.package.clone().unwrap_or_else(|| d.name.clone());
                     out.push((
                         Pkg::Registry(pkg_name),
                         pubgrub::Ranges::from_req(d.req.clone()),
@@ -390,6 +397,10 @@ fn dep_decls_to_constraints<'a, S: PkgSource>(
     provider: &CratesIo<'a, S>,
 ) -> Result<(), std::io::Error> {
     for d in decls {
+        // optional 未激活不求（version 求解期；平台 cfg 在此同样不求值——并集语义）
+        if d.optional && !provider.activated.contains(&d.package) {
+            continue;
+        }
         match &d.source {
             DepSource::Registry(req) => {
                 if req_has_pre(req) {
@@ -416,12 +427,14 @@ fn solve_fresh(
     root: &PackageManifest,
     path_manifests: &BTreeMap<String, PackageManifest>,
     src: &mut impl PkgSource,
+    activated: &BTreeSet<String>,
 ) -> Result<(BTreeMap<String, Vec<Version>>, Lockfile), String> {
     let provider = CratesIo {
         src: std::cell::RefCell::new(src),
         manifests: path_manifests,
         root,
         allow_pre: std::cell::RefCell::new(BTreeSet::new()),
+        activated,
     };
     let selected = pubgrub::resolve(&provider, Pkg::Root, root.version.clone()).map_err(|e| {
         format!(
@@ -491,28 +504,45 @@ fn solve_fresh(
     }
     // lock 依赖行补齐（canonical 形态要求；审计反证时 cargo 需要）
     let mut guard = provider.src.borrow_mut();
-    fill_lock_dependency_lines(&mut lock, root, path_manifests, &version_map, &mut **guard)?;
+    fill_lock_dependency_lines(
+        &mut lock,
+        root,
+        path_manifests,
+        &version_map,
+        &mut **guard,
+        activated,
+    )?;
     Ok((version_map, lock))
 }
 
-/// 给生成的 lock 补 dependencies 行（name + 重名消歧 version）。
+/// 给生成的 lock 补 dependencies 行（name + 重名消歧 version）；
+/// optional 未激活不入（cargo lock 语义）。
 fn fill_lock_dependency_lines(
     lock: &mut Lockfile,
     root: &PackageManifest,
     path_manifests: &BTreeMap<String, PackageManifest>,
     version_map: &BTreeMap<String, Vec<Version>>,
     provider: &mut impl PkgSource,
+    activated: &BTreeSet<String>,
 ) -> Result<(), String> {
     // (pkg name, its dep keys → package names)
     let mut edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
     edges.insert(
         root.name.clone(),
-        root.deps.iter().map(|d| d.package.clone()).collect(),
+        root.deps
+            .iter()
+            .filter(|d| !d.optional || activated.contains(&d.package))
+            .map(|d| d.package.clone())
+            .collect(),
     );
     for (name, m) in path_manifests {
         edges.insert(
             name.clone(),
-            m.deps.iter().map(|d| d.package.clone()).collect(),
+            m.deps
+                .iter()
+                .filter(|d| !d.optional || activated.contains(&d.package))
+                .map(|d| d.package.clone())
+                .collect(),
         );
     }
     let registry_names: Vec<String> = version_map
@@ -532,6 +562,10 @@ fn fill_lock_dependency_lines(
             iv.deps
                 .iter()
                 .filter(|d| d.kind.as_deref() != Some("dev"))
+                .filter(|d| {
+                    let pkg = d.package.clone().unwrap_or_else(|| d.name.clone());
+                    !d.optional || activated.contains(&pkg)
+                })
                 .map(|d| d.package.clone().unwrap_or_else(|| d.name.clone()))
                 .collect(),
         );
@@ -569,6 +603,8 @@ struct FeatNode {
 }
 
 /// 一条参与 feature 传播的依赖边。
+/// platform_cfg：平台 cfg 表达式——**解析/统一期不求值（全平台并集），
+/// 只在装配构建图（assemble_units）时按 host 求值**（cargo lock ∪ 构建图 分裂语义）。
 #[derive(Clone, Debug)]
 struct FeatDep {
     key: String,
@@ -578,6 +614,7 @@ struct FeatDep {
     default_features: bool,
     features: Vec<String>,
     registry: bool,
+    platform_cfg: Option<String>,
 }
 
 type FeatTable = BTreeMap<String, Vec<FeatureValue>>;
@@ -624,11 +661,7 @@ fn ensure_registry_node(
         if d.kind.as_deref() == Some("dev") {
             continue;
         }
-        if let Some(target) = &d.target
-            && !super::manifest::eval_cfg(target)?
-        {
-            continue;
-        }
+        // 平台 cfg 在此不求值（并集语义；target 表达式随行，装配期求值）
         deps.push(FeatDep {
             key: d.name.clone(),
             package: d.package.clone().unwrap_or_else(|| d.name.clone()),
@@ -641,18 +674,25 @@ fn ensure_registry_node(
             default_features: d.default_features,
             features: d.features.clone(),
             registry: true,
+            platform_cfg: d.target.clone(),
         });
     }
     register_node(tables, nodes, name, class, table, deps);
+    if std::env::var_os("MIRVM_DEBUG_UNIFY").is_some() {
+        eprintln!("DBG-UNIFY register {name} {class:?} v{version}");
+    }
     Ok(())
 }
+
+/// feature 统一产物：(节点表, 激活的 optional 依赖包名集)。
+type Unified = (BTreeMap<(String, UnitClass), FeatNode>, BTreeSet<String>);
 
 fn unify_features(
     root: &PackageManifest,
     path_manifests: &BTreeMap<String, PackageManifest>,
     version_map: &BTreeMap<String, Vec<Version>>,
     src: &mut impl PkgSource,
-) -> Result<BTreeMap<(String, UnitClass), FeatNode>, String> {
+) -> Result<Unified, String> {
     let mut tables: NodeTables = BTreeMap::new();
     let mut nodes: BTreeMap<(String, UnitClass), FeatNode> = BTreeMap::new();
 
@@ -662,7 +702,7 @@ fn unify_features(
         &root.name,
         UnitClass::Normal,
         root.features.clone(),
-        decls_to_featdeps(&root.deps),
+        decls_to_featdeps(&root.deps)?,
     );
     // 根 default feature 启用（cargo run 语义）
     if root.features.contains_key("default") {
@@ -673,7 +713,7 @@ fn unify_features(
             .insert("default".to_string());
     }
     for (name, m) in path_manifests {
-        let deps = decls_to_featdeps(&m.deps);
+        let deps = decls_to_featdeps(&m.deps)?;
         for class in [UnitClass::Normal, UnitClass::Build] {
             register_node(
                 &mut tables,
@@ -707,6 +747,16 @@ fn unify_features(
                 changed = true;
             }
             // 边传播
+            if std::env::var_os("MIRVM_DEBUG_UNIFY").is_some() {
+                eprintln!(
+                    "DBG-UNIFY expand {} {:?} features={:?} activated={:?} deps={:?}",
+                    key.0,
+                    key.1,
+                    features,
+                    activated,
+                    deps.iter().map(|d| d.key.clone()).collect::<Vec<_>>()
+                );
+            }
             for dep in &deps {
                 if dep.optional && !activated.contains(&dep.key) {
                     continue;
@@ -714,11 +764,17 @@ fn unify_features(
                 let child_key = (dep.package.clone(), dep.class);
                 // registry 子节点按需注册
                 if dep.registry && !tables.contains_key(&child_key) {
-                    let version = version_map
-                        .get(&dep.package)
-                        .and_then(|vs| vs.first())
-                        .ok_or_else(|| format!("{} 引用的 {} 无已解版本", key.0, dep.package))?
-                        .clone();
+                    let version = match version_map.get(&dep.package).and_then(|vs| vs.first()) {
+                        Some(v) => v.clone(),
+                        None => {
+                            // optional 本轮新激活、下轮求解才进版本图——本轮跳过
+                            // （激活已记账进 activated_pkgs，迭代不动点会补）
+                            if dep.optional {
+                                continue;
+                            }
+                            return Err(format!("{} 引用的 {} 无已解版本", key.0, dep.package));
+                        }
+                    };
                     ensure_registry_node(
                         &mut tables,
                         &mut nodes,
@@ -727,6 +783,9 @@ fn unify_features(
                         dep.class,
                         &version,
                     )?;
+                    // 新注册节点本身也是变化——否则 adds 为空时提前收敛，
+                    // 其子图永远不展开（syn/quote 实锤）
+                    changed = true;
                 }
                 let mut adds: BTreeSet<String> = dep.features.iter().cloned().collect();
                 if dep.default_features {
@@ -753,14 +812,26 @@ fn unify_features(
             }
         }
         if !changed {
-            return Ok(nodes);
+            // 收敛后：激活的 optional 依赖包名全集（迭代不动点输入）
+            let mut activated_pkgs: BTreeSet<String> = BTreeSet::new();
+            for (key, node) in &nodes {
+                let Some((_, deps)) = tables.get(key) else {
+                    continue;
+                };
+                for d in deps {
+                    if d.optional && node.activated.contains(&d.key) {
+                        activated_pkgs.insert(d.package.clone());
+                    }
+                }
+            }
+            return Ok((nodes, activated_pkgs));
         }
     }
     Err("feature 统一 64 轮未收敛（图异常）".to_string())
 }
 
-fn decls_to_featdeps(decls: &[super::manifest::DepDecl]) -> Vec<FeatDep> {
-    decls
+fn decls_to_featdeps(decls: &[super::manifest::DepDecl]) -> Result<Vec<FeatDep>, String> {
+    Ok(decls
         .iter()
         .map(|d| FeatDep {
             key: d.key.clone(),
@@ -773,8 +844,9 @@ fn decls_to_featdeps(decls: &[super::manifest::DepDecl]) -> Vec<FeatDep> {
             default_features: d.default_features,
             features: d.features.clone(),
             registry: matches!(d.source, DepSource::Registry(_)),
+            platform_cfg: d.platform_cfg.clone(),
         })
-        .collect()
+        .collect())
 }
 
 /// 包内 feature 展开（含隐式/显式激活与强弱边规则）。
@@ -899,6 +971,54 @@ fn read_registry_minimal(
     Ok((name, proc_macro, links, has_build))
 }
 
+/// 节点的依赖边再取（path 用 manifest，registry 用 index 重拉；platform_cfg 随行）。
+fn node_featdeps(
+    name: &str,
+    version_map: &BTreeMap<String, Vec<Version>>,
+    path_manifests: &BTreeMap<String, PackageManifest>,
+    src: &mut impl PkgSource,
+) -> Result<Vec<FeatDep>, String> {
+    if let Some(m) = path_manifests.get(name) {
+        return decls_to_featdeps(&m.deps);
+    }
+    let version = version_map
+        .get(name)
+        .and_then(|vs| vs.first())
+        .ok_or_else(|| format!("{name} 无已解版本"))?;
+    let vs = src.index_entry(name)?;
+    let iv = vs
+        .iter()
+        .find(|v| v.version == *version)
+        .ok_or_else(|| format!("{name} {version} 不在 index"))?;
+    Ok(iv
+        .deps
+        .iter()
+        .filter(|d| d.kind.as_deref() != Some("dev"))
+        .map(|d| FeatDep {
+            key: d.name.clone(),
+            package: d.package.clone().unwrap_or_else(|| d.name.clone()),
+            class: if d.kind.as_deref() == Some("build") {
+                UnitClass::Build
+            } else {
+                UnitClass::Normal
+            },
+            optional: d.optional,
+            default_features: d.default_features,
+            features: d.features.clone(),
+            registry: true,
+            platform_cfg: d.target.clone(),
+        })
+        .collect())
+}
+
+/// 该边是否进 host 构建图（platform_cfg 按 host 求值）。
+fn host_edge(dep: &FeatDep) -> Result<bool, String> {
+    match &dep.platform_cfg {
+        None => Ok(true),
+        Some(expr) => super::manifest::eval_cfg(expr),
+    }
+}
+
 fn assemble_units(
     root: &PackageManifest,
     path_manifests: &BTreeMap<String, PackageManifest>,
@@ -906,11 +1026,43 @@ fn assemble_units(
     nodes: &BTreeMap<(String, UnitClass), FeatNode>,
     src: &mut impl PkgSource,
 ) -> Result<Vec<Unit>, String> {
+    // 可构建集：从根出发沿 host cfg 为真的边可达（cargo 构建图过滤——
+    // 版本/lock 是全平台并集，构建图按 host 求值；serde facade 系那种
+    // cfg(any()) 永假边引的子图只进 lock 不进构建图）。
+    let mut buildable: BTreeSet<(String, UnitClass)> = BTreeSet::new();
+    let mut queue: VecDeque<(String, UnitClass)> = VecDeque::new();
+    buildable.insert((root.name.clone(), UnitClass::Normal));
+    queue.push_back((root.name.clone(), UnitClass::Normal));
+    while let Some(key) = queue.pop_front() {
+        let (name, _class) = key.clone();
+        let deps = if name == root.name {
+            decls_to_featdeps(&root.deps)?
+        } else {
+            node_featdeps(&name, version_map, path_manifests, src)?
+        };
+        let activated = nodes
+            .get(&key)
+            .map(|n| n.activated.clone())
+            .unwrap_or_default();
+        for dep in deps {
+            if dep.optional && !activated.contains(&dep.key) {
+                continue;
+            }
+            if !host_edge(&dep)? {
+                continue;
+            }
+            let child = (dep.package.clone(), dep.class);
+            if buildable.insert(child.clone()) {
+                queue.push_back(child);
+            }
+        }
+    }
+
     let mut units: Vec<Unit> = Vec::new();
     let mut index: BTreeMap<(String, UnitClass), usize> = BTreeMap::new();
     for ((name, class), node) in nodes {
-        if name == &root.name {
-            continue; // 根本身不是 dep 单元
+        if name == &root.name || !buildable.contains(&(name.clone(), *class)) {
+            continue; // 根本身不是 dep 单元；不可构建子图只进 lock
         }
         if let Some(m) = path_manifests.get(name) {
             let lib_name = m
@@ -962,8 +1114,7 @@ fn assemble_units(
             deps: vec![],
         });
     }
-    // 依赖边填充（与节点表同规则再算一遍 decls）
-    // 收集每个节点的激活态
+    // 依赖边填充（可构建节点 × host 为真边 × optional 激活门）
     let mut edge_rows: Vec<(usize, UnitDep)> = Vec::new();
     for ((name, class), node) in nodes {
         if name == &root.name {
@@ -972,50 +1123,16 @@ fn assemble_units(
         let Some(&from_idx) = index.get(&(name.clone(), *class)) else {
             continue;
         };
-        // 该节点的依赖声明（path 用 manifest，registry 用 index 重拉）
-        let deps: Vec<FeatDep> = if let Some(m) = path_manifests.get(name) {
-            decls_to_featdeps(&m.deps)
-        } else {
-            let version = &units[from_idx].version;
-            let vs = src.index_entry(name)?;
-            let iv = vs
-                .iter()
-                .find(|v| v.version == *version)
-                .ok_or_else(|| format!("{name} {version} 不在 index"))?;
-            iv.deps
-                .iter()
-                .filter(|d| d.kind.as_deref() != Some("dev"))
-                .filter(|d| {
-                    d.target
-                        .as_ref()
-                        .is_none_or(|t| super::manifest::eval_cfg(t).unwrap_or(false))
-                })
-                .map(|d| FeatDep {
-                    key: d.name.clone(),
-                    package: d.package.clone().unwrap_or_else(|| d.name.clone()),
-                    class: if d.kind.as_deref() == Some("build") {
-                        UnitClass::Build
-                    } else {
-                        UnitClass::Normal
-                    },
-                    optional: d.optional,
-                    default_features: d.default_features,
-                    features: d.features.clone(),
-                    registry: true,
-                })
-                .collect()
-        };
+        let deps = node_featdeps(name, version_map, path_manifests, src)?;
         for d in deps {
             if d.optional && !node.activated.contains(&d.key) {
                 continue;
             }
-            if d.class != *class {
-                // resolver v2：节点的依赖按自己类别走（normal 节点的 normal 边、
-                // build 节点的 build 边？——否：边类别由边自身 kind 决定）
+            if !host_edge(&d)? {
+                continue;
             }
             let Some(&to_idx) = index.get(&(d.package.clone(), d.class)) else {
-                // 子节点缺席（optional 未激活或平台过滤）→ 边不存在
-                continue;
+                continue; // 子节点不可构建（永假边子图）→ 边不存在
             };
             edge_rows.push((
                 from_idx,
@@ -1333,6 +1450,75 @@ mod tests {
             .get("sib", &Version::parse("0.2.0").unwrap())
             .unwrap();
         assert!(sib_lock.source.is_none());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn syn_features2_shape_activates_optional_quote_into_lock_lines() {
+        // 复刻 syn 3.0.3 的真实 index 形状（features2 的 dep:quote）
+        // + serde_derive 的 dep 形状：quote 必须进 syn 的 lock 依赖行
+        let d = tmpdir("synshape");
+        let root = root_project(
+            &d,
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n[dependencies]\nsd = \"1\"\n",
+        );
+        let mut src = FakeSource::new(d.join("srcstore"));
+        let mut sd = iv("sd", "1.0.0");
+        let mut sd_syn = idep("syn", "^3");
+        sd_syn.default_features = false;
+        sd_syn.features = vec![
+            "clone-impls".into(),
+            "derive".into(),
+            "parsing".into(),
+            "printing".into(),
+            "proc-macro".into(),
+        ];
+        sd.deps.push(sd_syn);
+        sd.deps.push(idep("quote", "^1"));
+        src.add("sd", vec![sd]);
+        let mut syn = iv("syn", "3.0.3");
+        syn.features.insert("derive".into(), vec![]);
+        syn.features.insert("parsing".into(), vec![]);
+        syn.features.insert("clone-impls".into(), vec![]);
+        syn.features.insert(
+            "default".into(),
+            vec![
+                "derive".into(),
+                "parsing".into(),
+                "printing".into(),
+                "clone-impls".into(),
+                "proc-macro".into(),
+            ],
+        );
+        syn.features
+            .insert("printing".into(), vec!["dep:quote".into()]);
+        syn.features.insert(
+            "proc-macro".into(),
+            vec!["proc-macro2/proc-macro".into(), "quote?/proc-macro".into()],
+        );
+        let mut syn_quote = idep("quote", "^1.0.35");
+        syn_quote.optional = true;
+        syn_quote.default_features = false;
+        syn.deps.push(syn_quote);
+        syn.deps.push(idep("proc-macro2", "^1"));
+        src.add("syn", vec![syn]);
+        src.add("quote", vec![iv("quote", "1.0.47")]);
+        src.add("proc-macro2", vec![iv("proc-macro2", "1.0.107")]);
+
+        let plan = resolve(&root, &mut src).unwrap();
+        let syn_lock = plan
+            .lock
+            .get("syn", &Version::parse("3.0.3").unwrap())
+            .unwrap();
+        let line: Vec<String> = syn_lock
+            .dependencies
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect();
+        assert!(
+            line.contains(&"quote".to_string()),
+            "syn 依赖行缺 quote: {line:?}"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 }
