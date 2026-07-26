@@ -12,6 +12,12 @@
 # WAL = 内建 journal：db 路径旁落 <name>.db.journal，默认满 1000B 与主库 merge；
 # unix 文件锁走 libc flock(LOCK_EX|LOCK_NB)，重开走 journal recovery。
 polodb_core = "=3.5.2"
+# 上游语义破洞实锤（2026-07-27）：polodb_core 3.5.2 请求 uuid 的
+# "getrandom" feature——该 feature 在 uuid 1.14+ 被移除（1.13 起改名
+# rng-getrandom），max 解到 1.24.0 即"feature 不存在"（cargo 自家 fresh
+# 解析同撞，非 mirvm 分叉）。钉 uuid = 1.6.1（driver 验收时代的历史 lock
+# 同版，getrandom feature 在场）。
+uuid = "=1.6.1"
 ---
 // polodb_core 3.5.2 嵌入式文档库差分（批8 波2：VM/语言机——polodb 自带查询
 // 字节码 VM，btree 页存 + journal WAL + 乐观会话事务，VM-in-VM 压力面）。

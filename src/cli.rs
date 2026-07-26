@@ -290,6 +290,10 @@ fn deps_main(args: impl Iterator<Item = String>) -> ExitCode {
         };
         match result {
             Ok(report) => {
+                if report.mode == "skip" {
+                    println!("SKIP {}（needs 缺席，与 gate 同口径不算失败）", report.name);
+                    continue;
+                }
                 let head = format!(
                     "{}（{} 模式，{} 单元，{} 包版本）",
                     report.name,

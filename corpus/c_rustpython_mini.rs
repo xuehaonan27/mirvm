@@ -2,6 +2,12 @@
 ---
 [dependencies]
 rustpython-vm = "=0.5.0"
+# 上游 ABI 破洞实锤（2026-07-27）：libc 0.2.189 起 Linux 的 POSIX_SPAWN_SETSID
+# 类型从 c_int 变窄成 i16（？），rustpython-vm 0.5.0 的 posix.rs 调
+# PosixSpawnFlags::from_bits_retain（i32 形参）即 E0308 编不过（cargo 自家
+# fresh 解析同样选 0.2.189 同样炸——非 mirvm 分叉）。钉 =0.2.186
+# （driver 验收时代的历史 lock 同版，编过实证）。
+libc = "=0.2.186"
 ---
 // c_rustpython_mini — rustpython-vm 大物试探：嵌入式裸解释器（without_stdlib）
 // 执行 5 个定值 Python 程序，结果经 globals 中的 RESULT 回收为 str 后由宿主打印。

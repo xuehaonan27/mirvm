@@ -1,13 +1,15 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# pest 2.8.7 + pest_derive 2.8.7 + pest_generator 2.8.7（同 train 三钉）。
-# 上游漂移实锤（2026-07-27）：pest_derive 2.8.7 对 pest_generator 用 ^2.8.7，
-# pest_generator 2.8.8 又要求 pest ^2.8.8——pest 钉 2.8.7 即撞（cargo 自家
-# fresh 解析同撞，非 mirvm 分叉）。钉 pest_generator = 2.8.7 对齐 train。
+# pest 2.8.7 + pest_derive 2.8.7 + pest_generator 2.8.7 + pest_meta 2.8.7
+# （同 train 四钉）。上游漂移实锤（2026-07-27）：pest_derive 2.8.7 对
+# pest_generator 用 ^2.8.7、pest_generator 对 pest_meta 用 ^2.8.7，2.8.8
+# 系列又要求 pest ^2.8.8——pest 钉 2.8.7 即逐级撞（cargo 自家 fresh 解析
+# 同撞，非 mirvm 分叉）。四钉对齐 train。
 pest = "=2.8.7"
 pest_derive = "=2.8.7"
 pest_generator = "=2.8.7"
+pest_meta = "=2.8.7"
 ---
 // pest 2.8.7 PEG 解析器三维差分（批9：c_pest）。
 //

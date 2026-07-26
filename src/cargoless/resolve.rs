@@ -1149,7 +1149,9 @@ fn edge_version<'a>(
             return Some(hit);
         }
     }
-    // lock：扫描命中——子版本（消歧器串）落在 req 区间内即配
+    // lock：扫描命中——子版本（消歧器串）落在 req 区间内即配；
+    // 名字按 依赖键 或 真包名 双路匹配（rename/下划线键实锤：
+    // rustix libc_errno → libc-errno、grep-searcher memmap → memmap2）
     let range = dep
         .req
         .as_deref()
@@ -1161,7 +1163,7 @@ fn edge_version<'a>(
         .find(|((pn, pv, k, _dis, c), (_, dv))| {
             pn == &parent.0
                 && pv == &parent.1
-                && k == &dep.key
+                && (k == &dep.key || k == &dep.package)
                 && (*c == dep.class || *c == other)
                 && range.as_ref().is_none_or(|r| r.contains(dv))
         })

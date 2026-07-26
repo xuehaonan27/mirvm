@@ -54,17 +54,37 @@ pub fn audit_project(dir: &Path) -> Result<AuditReport, String> {
 /// frontmatter 脚本审计（fresh 求解；验收 = 生成的 lock 被 cargo
 /// `--locked --offline` 原样接受——先 `cargo fetch --locked`（在线补取）
 /// 再 `--offline` 构建；历史物化 lock 的失配只作信息备注（时间漂移非分叉）。
+/// 与 tests/corpus.manifest 联动：条目带 needs= 且路径缺席时记 SKIP
+/// （与 gate 同口径，不算失败）。
 pub fn audit_script(file: &Path) -> Result<AuditReport, String> {
     let text = std::fs::read_to_string(file)
         .map_err(|e| format!("读取脚本 {} 失败: {e}", file.display()))?;
+    let stem_owned;
+    let stem = match file.file_stem().and_then(|s| s.to_str()) {
+        Some(s) => {
+            stem_owned = s.to_string();
+            stem_owned.as_str()
+        }
+        None => return Err(format!("{} 文件名非法", file.display())),
+    };
+    // needs=/env= 联动（tests/corpus.manifest 唯一真源）
+    let (needs, manifest_env) = manifest_fields(stem);
+    if let Some(needs) = needs
+        && !std::path::Path::new(&needs).exists()
+    {
+        return Ok(AuditReport {
+            name: stem.to_string(),
+            mode: "skip",
+            units: 0,
+            plan: empty_plan(file),
+            lock_check: None,
+            acceptance: None,
+        });
+    }
     let Some((manifest_text, body)) = crate::cli::parse_frontmatter_pub(&text) else {
         // 无 frontmatter = 零依赖单文件——平凡通过（diff.sh 族，不属 cargo 形态）
         return Ok(AuditReport {
-            name: file
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("?")
-                .to_string(),
+            name: stem.to_string(),
             mode: "fresh",
             units: 0,
             plan: empty_plan(file),
@@ -72,10 +92,6 @@ pub fn audit_script(file: &Path) -> Result<AuditReport, String> {
             acceptance: None,
         });
     };
-    let stem = file
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| format!("{} 文件名非法", file.display()))?;
     let manifest = PackageManifest::from_frontmatter(stem, &manifest_text, file)?;
     let mut registry = Registry::open()?;
     let plan = resolve(&manifest, &mut registry)?;
@@ -92,7 +108,13 @@ pub fn audit_script(file: &Path) -> Result<AuditReport, String> {
         .transpose()?;
 
     // 验收：生成的 lock 被 cargo --locked --offline 原样接受
-    let acceptance = cargo_accepts_lock(&manifest, &manifest_text, &body, &plan.lock)?;
+    let acceptance = cargo_accepts_lock(
+        &manifest,
+        &manifest_text,
+        &body,
+        &plan.lock,
+        manifest_env.as_deref(),
+    )?;
 
     Ok(AuditReport {
         name: plan.root_name.clone(),
@@ -111,6 +133,7 @@ fn cargo_accepts_lock(
     manifest_text: &str,
     body: &str,
     lock: &Lockfile,
+    manifest_env: Option<&str>,
 ) -> Result<Result<(), String>, String> {
     let dir = std::env::temp_dir().join(format!(
         "mirvm-deps-audit-{}-{}",
@@ -133,13 +156,21 @@ fn cargo_accepts_lock(
     let rustc = toolchain_root.join("bin/rustc");
     let target = crate::sysroot::cache_dir().join("target/native");
     let run = |extra: &[&str]| {
-        std::process::Command::new(&cargo)
-            .current_dir(&dir)
+        let mut cmd = std::process::Command::new(&cargo);
+        cmd.current_dir(&dir)
             .args(extra)
             .arg("--quiet")
             .env("RUSTC", &rustc)
-            .env("CARGO_TARGET_DIR", &target)
-            .output()
+            .env("CARGO_TARGET_DIR", &target);
+        // manifest env= 列（K=V;K=V，%20 解码空格；opencc 类机侧前缀依赖）
+        if let Some(envs) = manifest_env {
+            for pair in envs.split(';') {
+                if let Some((k, v)) = pair.split_once('=') {
+                    cmd.env(k, v.replace("%20", " "));
+                }
+            }
+        }
+        cmd.output()
     };
     // ① fetch --locked（在线补取；lock 完整性 + 可得性验证）
     let fetch = run(&["fetch", "--locked"]).map_err(|e| format!("cargo fetch 执行失败: {e}"))?;
@@ -200,6 +231,37 @@ fn empty_plan(file: &Path) -> ResolvePlan {
         version_map: Default::default(),
         lock: Default::default(),
     }
+}
+
+/// tests/corpus.manifest 里该条目的 needs= 路径与 env= 串（无登记 = (None, None)）。
+/// 脚本文件是 c_<name>.rs 而 manifest 行名是 <name>——双键查询。
+fn manifest_fields(stem: &str) -> (Option<String>, Option<String>) {
+    let Ok(text) = std::fs::read_to_string("tests/corpus.manifest") else {
+        return (None, None);
+    };
+    let bare = stem.strip_prefix("c_").unwrap_or(stem);
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let row = it.next().unwrap_or("");
+        if row != stem && row != bare {
+            continue;
+        }
+        let mut needs = None;
+        let mut envs = None;
+        for field in it {
+            if let Some(p) = field.strip_prefix("needs=") {
+                needs = Some(p.to_string());
+            } else if let Some(e) = field.strip_prefix("env=") {
+                envs = Some(e.to_string());
+            }
+        }
+        return (needs, envs);
+    }
+    (None, None)
 }
 
 /// 对账：lock 非根包集合 vs 自解 version_map（互含性）。
