@@ -28,6 +28,7 @@ pub(crate) mod arch;
 pub mod baseimage;
 pub mod cachectl;
 pub mod cargo_shim;
+pub(crate) mod cargoless;
 pub mod cli;
 pub mod depsimage;
 pub(crate) mod elfsym;

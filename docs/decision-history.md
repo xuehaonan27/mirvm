@@ -1363,6 +1363,31 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   panic 非分叉，孤儿条目接线即立功），钉 `=0.2.32` 复绿
   （84fa00b 结构批 + jiff 钉版 + 本档）。
 
+### 7.27 2026-07-23：D15（砍 cargo）立项与四决策点裁定
+
+- **调研（三探针 + 主文件通读）**：cargo 今日职责全清单定案
+  （manifest/版本/registry/feature/build.rs/proc-macro/rustc 参数/指纹/
+  runner 协议九项，证据见 [designs/d15-cargoless-design.md](designs/d15-cargoless-design.md)
+  §2 表）；mirvm 已有其半（`run_dep_compiler`/`MirvmCallbacks`/ircache/
+  D14 store）；**build.rs 普遍性实锤**（共享 target 内 151 个 crate 有
+  build.rs 输出——连 anyhow 都有），故 build.rs 全生命周期是核心硬骨头、
+  不可后置；proc-macro 机制直白（host/target 二分）；profile 语义叉钉死
+  （debug-assertions/overflow-checks 进 MIR 语义，jiff 判例）。
+- **四决策点裁定**：① HTTP/解包 = **纯 Rust crate**（ureq+flate2+tar，
+  自包含优先）；② registry store = **自有 ~/.mirvm/registry + 读穿
+  ~/.cargo/registry**（只读不污染）；③ lock 缺席求解 = **pubgrub crate**
+  （0.4，原理闭合）；④ 分期轴 = **P1→P5**（地基→机制全→迁移→退场→
+  按实需）。
+- **闭合契约**（每期可观察判据，设计 §5）：P1 解析库 + 审计工具
+  （lock 在场自解 == lock 逐条对账；lock 缺席自解落 lock 后 cargo
+  --locked --offline 反证接受）；P2 corpus smoke 24 零 cargo 跑通
+  （self vs cargo 双路径逐字节 + 原三维判绿）；P3 DEPS=self 全量
+  gate 179/0/0/0 同构绿；P4 sysroot 自管 + 默认翻转 + cargo 显式
+  compat 双轨（非救援）；P5 复杂语义按实需（事先明说的不闭合面）。
+- **附带红利**：假二进制与 runner 协议随新路径退役，E36（项目模式
+  guest cwd=项目目录 vs cargo run 语义分叉）在新路径顺带闭合
+  （guest cwd=调用者 cwd）。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT

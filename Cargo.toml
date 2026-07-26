@@ -34,6 +34,13 @@ rustc-build-sysroot = "0.5.13"
 rustc_version = "0.4.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+# D15（砍 cargo，src/cargoless/）：自有依赖解析与编译调度
+toml = { version = "1.1", features = ["serde"] }
+semver = { version = "1.0.28", features = ["serde"] }
+pubgrub = "0.4"
+ureq = "3.3"
+flate2 = "1.1"
+tar = "0.4"
 
 # 让 rust-analyzer 认识 rustc_private crates（需在 IDE 端开启 rust-analyzer.rustc.source = "discover"）
 [package.metadata.rust-analyzer]
