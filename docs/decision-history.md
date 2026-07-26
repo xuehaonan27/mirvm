@@ -1388,6 +1388,57 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   guest cwd=项目目录 vs cargo run 语义分叉）在新路径顺带闭合
   （guest cwd=调用者 cwd）。
 
+### 7.28 2026-07-27：D15 P1 收口——cargo 解析语义全实证与 cargoless 解析库落地
+
+- **落地（`aaba3ff`/`8944229`/`f827ec6`/`d2590b5`/`29f0f39`/`61596b3`/
+  `4b8b450`/`9ef2019` + 修边）**：`src/cargoless/` 五件——manifest
+  （Cargo.toml 模型 + cfg 平台求值 + frontmatter 伪包）、lockfile（v1–v4
+  读写 + canonical v4 序列化）、registry（自有 index/cache/src 三层 store
+  + 读穿 cargo 缓存只读 + sparse index + .crate sha256 自实现校验 + tar.gz
+  解包防护）、resolve（双模式求解 + feature 统一 + 单元装配）、audit
+  （`mirvm deps audit`：项目等值对账 + 脚本 cargo `--locked --offline`
+  验收链 + corpus.manifest needs/env 联动）。
+- **cargo 解析语义实证清单**（全部对拍实锤，设计档 §8 同步落笔）：
+  - **resolve 图 ∪ build 图分裂**：Cargo.lock 是全平台并集（cfg(any())
+    照进、windows-sys 在 Linux 入锁），build 图按 host `rustc --print cfg`
+    过滤；`unify_features(include_weak)` 双态承载。
+  - **lazy-bucket 多版本 fork**：pubgrub 单版本模型装不下 cargo 的
+    同名多版本并存（hashbrown 0.14/0.15、ark 全家 0.3/0.4/0.5/0.6 同图）；
+    包 id 加 bucket 维度（边到达能并入既有 bucket 则并、否则开新），
+    pubgrub 按 bucket 独立回退；可达集过滤清回退孤儿 bucket。
+  - **optional 门按（父包, 父版本, 依赖键）**：全局包名/版本盲门两连炸
+    （zerovec 的 yoke → litemap 的 yoke ^0.8；ark-ff 0.6 的 derive →
+    ark-serialize-derive 全系四版）。
+  - **?/ 弱引用级联**（resolve 图语义）：被启用 feature 的 ?/ 弱形引用
+    把被引用包收进解析图与 lock 依赖行，特征照常下发、可与强激活级联
+    （rust_decimal std → borsh?/std → bytes?/std；yoke alloc → serde?/alloc；
+    tracing-core default → valuable?/std）；build 图仅强激活。
+  - **pre 精确规则**：pre 版仅当 major/minor/patch 全同且带 pre 的
+    comparator 点名（ark-ff-asm 0.5.0-alpha.0 误选修复）。
+  - **exact 钉兼容 build**：`=M.m.p` = [M.m.p, M.m.(p+1))——semver crate
+    的 Ord 比 build 元数据（Eq 不比），singleton 会误杀带 build 的候选
+    （libgit2-sys 0.18.5+1.9.4 实锤）。
+  - **req_to_ranges Less 臂**：`<3` 一度错成 `<4.0.0`（brotli
+    alloc-no-stdlib 2.0.4 被 3.0.0 顶包）。
+  - **lock canonical 硬判据**：依赖行每行尾逗号（cargo `--locked` 对非
+    canonical 一律判"需重写"拒收）。
+  - **同名多 req 条目**：按 (父, 依赖键, req串) 分立（ruint 四个
+    ark-ff 系列各带 hint）；lock 行 hint 消歧。
+  - **rename/下划线键**：lock 依赖行写真包名，index 键可能是下划线键
+    （rustix libc_errno→libc-errno、grep-searcher memmap→memmap2）——
+    边查找双路匹配。
+- **上游破洞实锤六枚**（均验证 cargo 自家 fresh 解析同撞，非 mirvm
+  分叉；钉版对齐 driver 验收时代，头注记恢复条件）：jiff-core 0.1.0
+  debug_assert（批11 已钉）、datafusion 54.1.0 internal API（钉 54.0.0
+  全家 28 枚）、pest_generator/meta 2.8.8（train 四钉 2.8.7）、uuid
+  getrandom feature 移除（钉 1.6.1）、libc POSIX_SPAWN_SETSID 变窄
+  （钉 0.2.186）、（wincode git 源 = P5 合法响亮拒绝，非破洞）。
+- **验收**：29 单测绿 + corpus 全量 audit 166 目标（两项目等值对账、
+  其余 cargo 验收链）。
+- **如实边界（记账）**：rust-version-aware 版本偏好未实现（cargo 1.84+
+  fallback 语义，与 D14 store 合并评审时补）；git 源/alt registry/
+  workspace 多包图/source replacement 归 P5 响亮拒绝。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT

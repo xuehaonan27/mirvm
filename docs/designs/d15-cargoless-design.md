@@ -1,5 +1,51 @@
 # D15 设计：砍掉 cargo——自有依赖解析与编译调度
 
+## 8. P1 施工实录：求解语义定稿（2026-07-27）
+
+P1 的闭合过程把 cargo 的解析语义逐条实证出来（每条都有对拍实锤，
+证据链在 decision-history §7.28）。定稿规则如下，即 `resolve.rs` 的
+当前实现口径：
+
+1. **resolve 图 vs build 图分裂**：Cargo.lock 的解析图是全平台并集
+   （`cfg(any())` 永假边照进；windows-sys 在 Linux 机入锁），build 图按
+   host `rustc --print cfg` 求值过滤。版本求解、feature 激活、lock 依赖行
+   用 resolve 图；编译单元（units）用 build 图（`unify_features` 的
+   `include_weak` 双态）。
+2. **多版本 fork（lazy-bucket）**：同名 crate 允许 semver 不兼容的多版本
+   并存（hashbrown 0.14/0.15、syn 1/2/3 同图）。包 id = (name, bucket)：
+   dep 边到达时与既有 bucket 的累积区间有共同候选（index 有版本同满足）
+   即并入，否则开新 bucket；pubgrub 按 bucket 独立回退。可达集过滤清掉
+   pubgrub 回退留下的孤儿 bucket。
+3. **optional 依赖的门**：进版本求解与 lock 依赖行当且仅当
+   ① 被（父包, 依赖键）激活（强形：dep:/隐式/x/y 三形态），或
+   ② 被**已启用 feature 以 ?/ 弱形引用**——引用即入图（resolve 图语义），
+   特征照常下发（可与强激活级联：rust_decimal std → borsh?/std →
+   borsh std → bytes?/std → bytes 入锁）。build 图仅 ①。
+   **门按（父包, 依赖键）判定**——全局包名门会把 A 包激活的同名依赖
+   误植到 B 包（zerovec 的 yoke → litemap 的 yoke ^0.8 实锤）。
+4. **feature 统一**：resolver v2 的 normal/build 边分列（同 crate 两类
+   feature 集不同 = 两个编译单元）；feature 引用必须指向 feature 或
+   optional 依赖，否则响亮报错；边到达的 feature 旗标若无表项可展开，
+   其本身若是非隐藏 optional 依赖键即激活该依赖（收尾清扫规则）。
+5. **pre 精确规则**：pre 版仅当被该包某 req 中 major/minor/patch 全同
+   且带 pre 的 comparator 点名时才可选（req_to_ranges 自写保留下界 pre；
+   ark-ff-asm 0.5.0-alpha.0 误选实锤）。
+6. **yanked**：lock 在照吃（cargo 同）；fresh 求解跳过（no-solution 响亮）。
+7. **lock 形态**：canonical v4——依赖行每行尾逗号（cargo `--locked` 对
+   非 canonical lock 一律判"需重写"而拒）；同名多版本时依赖行写
+   `name version` 消歧 hint。
+8. **已明说的 P1 边界（记账，不冒充闭合）**：
+   - **rust-version-aware 版本偏好未实现**（cargo 1.84+ 默认
+     `resolver.incompatible-rust-versions=fallback`：新版要求更高 rustc
+     时 cargo 回退选旧兼容版）。影响面 = 与 cargo 的选择可能不同但
+     lock 自洽可构建；钉版 nightly  bleeding-edge 下几乎不触发。
+     与 D14 store 合并评审时补。
+   - req 遇本仓钉版未知的 semver 新 op 时退回 `Ranges::from_req`
+     （pre 会丢，代码内响亮记账）。
+   - git 源 / alt registry / workspace 多包图 / source replacement
+     （P5，响亮拒绝记名）。
+
+
 > 状态：2026-07-23 调研定稿，待用户裁定分期与四个决策点。
 > 立项记录：[open-issues.md D15](../open-issues.md)；动机源头：decision-history §7.22
 > （C4 两轮绕行被否——"吃 cargo 产物就得绕"的处境要制度性消除）。

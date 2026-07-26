@@ -342,8 +342,14 @@ fn deps_main(args: impl Iterator<Item = String>) -> ExitCode {
                 }
             }
             Err(e) => {
-                println!("FAIL {t}: {e}");
-                failures += 1;
+                // P5 范畴的响亮拒绝（git 源/alt registry/workspace 多包图等）
+                // 是事先明说的边界，不算解析失败
+                if e.contains("P5") {
+                    println!("P5   {t}: {e}");
+                } else {
+                    println!("FAIL {t}: {e}");
+                    failures += 1;
+                }
             }
         }
     }
