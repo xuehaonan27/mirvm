@@ -2,6 +2,41 @@
 ---
 [dependencies]
 datafusion = { version = "=54.0.0", default-features = false, features = ["sql"] }
+# 上游 semver 破洞（2026-07-27 实锤）：datafusion 54.0.0 对 internal crates
+# 全用 ^54.0.0，physical-plan 54.1.0 把 RecursiveQueryExec::try_new 从 4 参
+# 改成 5 参，54.0.0 的 lib 直接编不过（E0061；cargo 自家 fresh 解析同样
+# 选 54.1.0 同样炸——非 mirvm 分叉）。internal 家族又互以 ^54.x 串联
+# （catalog 54.1.0 → physical-plan ^54.1.0），单钉一个就撞下一个——
+# 全家 28 个 internal 一律钉 =54.0.0（driver 验收时代的自洽家族）。
+datafusion-catalog = "=54.0.0"
+datafusion-catalog-listing = "=54.0.0"
+datafusion-common = "=54.0.0"
+datafusion-common-runtime = "=54.0.0"
+datafusion-datasource = "=54.0.0"
+datafusion-datasource-arrow = "=54.0.0"
+datafusion-datasource-csv = "=54.0.0"
+datafusion-datasource-json = "=54.0.0"
+datafusion-doc = "=54.0.0"
+datafusion-execution = "=54.0.0"
+datafusion-expr = "=54.0.0"
+datafusion-expr-common = "=54.0.0"
+datafusion-functions = "=54.0.0"
+datafusion-functions-aggregate = "=54.0.0"
+datafusion-functions-aggregate-common = "=54.0.0"
+datafusion-functions-nested = "=54.0.0"
+datafusion-functions-table = "=54.0.0"
+datafusion-functions-window = "=54.0.0"
+datafusion-functions-window-common = "=54.0.0"
+datafusion-macros = "=54.0.0"
+datafusion-optimizer = "=54.0.0"
+datafusion-physical-expr = "=54.0.0"
+datafusion-physical-expr-adapter = "=54.0.0"
+datafusion-physical-expr-common = "=54.0.0"
+datafusion-physical-optimizer = "=54.0.0"
+datafusion-physical-plan = "=54.0.0"
+datafusion-pruning = "=54.0.0"
+datafusion-session = "=54.0.0"
+datafusion-sql = "=54.0.0"
 tokio = { version = "1", default-features = false, features = ["rt"] }
 ---
 // c_datafusion_sql —— Apache DataFusion 现行稳定大物：SessionContext + 内存
