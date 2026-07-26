@@ -959,7 +959,8 @@ fn fill_lock_dependency_lines(
     };
     // (pkg name, version) → [(dep package, hint)]（同名多 req 条目各带
     // 自身 hint 分立——ruint 四个 ark-ff 系列实锤；hint 经 req 精确查边分派）
-    let mut edges: BTreeMap<(String, Version), Vec<(String, Option<Version>)>> = BTreeMap::new();
+    type EdgeLines = BTreeMap<(String, Version), Vec<(String, Option<Version>)>>;
+    let mut edges: EdgeLines = BTreeMap::new();
     let hint_of = |parent: &NodeKey,
                    key: &str,
                    pkg_name: &str,
