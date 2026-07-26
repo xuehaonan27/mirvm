@@ -682,12 +682,7 @@ fn req_to_ranges(req: &VersionReq) -> pubgrub::Ranges<Version> {
                     (None, Some(_)) => unreachable!("invalid version requirement"),
                 },
                 Op::GreaterEq => R::higher_than(lo),
-                Op::Less => match (minor, patch) {
-                    (None, None) => R::strictly_lower_than(hi(major + 1, Some(0), Some(0))),
-                    (Some(m), None) => R::strictly_lower_than(hi(major, Some(m + 1), Some(0))),
-                    (Some(_), Some(_)) => R::strictly_lower_than(lo),
-                    (None, Some(_)) => unreachable!("invalid version requirement"),
-                },
+                Op::Less => R::strictly_lower_than(lo),
                 Op::LessEq => match (minor, patch) {
                     (None, None) => R::strictly_lower_than(hi(major + 1, Some(0), Some(0))),
                     (Some(m), None) => R::strictly_lower_than(hi(major, Some(m + 1), Some(0))),
@@ -2097,4 +2092,19 @@ mod tests {
         );
         std::fs::remove_dir_all(&d).unwrap();
     }
+
+    #[test]
+    fn req_to_ranges_less_bound_is_exact() {
+        // ">=2.0.4, <3" = [2.0.4, 3.0.0)——Less 臂曾错给 <4.0.0（brotli 实锤）
+        let req = VersionReq::parse(">=2.0.4, <3").unwrap();
+        let r = req_to_ranges(&req);
+        assert!(r.contains(&Version::parse("2.0.4").unwrap()));
+        assert!(r.contains(&Version::parse("2.9.9").unwrap()));
+        assert!(!r.contains(&Version::parse("3.0.0").unwrap()));
+        let req2 = VersionReq::parse("<3.2").unwrap();
+        let r2 = req_to_ranges(&req2);
+        assert!(r2.contains(&Version::parse("3.1.9").unwrap()));
+        assert!(!r2.contains(&Version::parse("3.2.0").unwrap()));
+    }
+
 }
