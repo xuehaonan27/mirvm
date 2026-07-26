@@ -532,6 +532,7 @@ dependencies = [
  "tar",
  "toml",
  "ureq",
+ "version-ranges",
 ]
 
 [[package]]
@@ -977,6 +978,7 @@ version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31e9bd4e9c9ff6a2a9b5969462ba26216af3e010df0377dad8320ab515262ef8"
 dependencies = [
+ "semver",
  "smallvec",
 ]
 

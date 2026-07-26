@@ -38,6 +38,9 @@ serde_json = "1.0.150"
 toml = { version = "1.1", features = ["serde"] }
 semver = { version = "1.0.28", features = ["serde"] }
 pubgrub = "0.4"
+# version-ranges 的 semver 模块（Ranges::from_req）默认不编，显式开 feature
+# （与 pubgrub 的传递依赖做 feature 统一）
+version-ranges = { version = "0.1.3", features = ["semver"] }
 ureq = "3.3"
 flate2 = "1.1"
 tar = "0.4"

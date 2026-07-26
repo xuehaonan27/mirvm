@@ -70,6 +70,8 @@ pub enum FeatureValue {
     Simple(String),
     /// `"dep:foo"`：显式激活可选依赖（不建同名 feature）。
     DepActivation(String),
+    /// `"foo/bar"`：强激活——激活 foo 并开其 bar。
+    StrongDep { dep: String, feature: String },
     /// `"foo?/bar"`：若 foo 被激活则开其 bar（弱激活，不激活 foo 本身）。
     WeakDep { dep: String, feature: String },
 }
@@ -120,6 +122,8 @@ pub struct PackageManifest {
     pub profile: ProfileFlags,
     /// 有 build script（build 键 / links 键 / 根下 build.rs 实存）。
     pub has_build_script: bool,
+    /// `[package] links`（-sys 链接键；native 库名推导与 build.rs 调度用）。
+    pub links: Option<String>,
     pub default_run: Option<String>,
 }
 
@@ -325,6 +329,7 @@ impl PackageManifest {
             features,
             profile,
             has_build_script,
+            links: pkg.links,
             default_run: pkg.default_run,
         })
     }
@@ -450,7 +455,7 @@ fn parse_dep_table(
     Ok(())
 }
 
-fn parse_feature_value(v: &str) -> Result<FeatureValue, MErr> {
+pub(crate) fn parse_feature_value(v: &str) -> Result<FeatureValue, MErr> {
     if let Some(dep) = v.strip_prefix("dep:") {
         return Ok(FeatureValue::DepActivation(dep.to_string()));
     }
@@ -461,8 +466,7 @@ fn parse_feature_value(v: &str) -> Result<FeatureValue, MErr> {
         });
     }
     if let Some((dep, feat)) = v.split_once('/') {
-        // "foo/bar" 旧强形态（cargo 现仍支持：激活 foo 并开其 bar）
-        return Ok(FeatureValue::WeakDep {
+        return Ok(FeatureValue::StrongDep {
             dep: dep.to_string(),
             feature: feat.to_string(),
         });
@@ -797,7 +801,7 @@ cc = "1"
         );
         assert_eq!(
             vals[3],
-            FeatureValue::WeakDep {
+            FeatureValue::StrongDep {
                 dep: "old".into(),
                 feature: "strong".into()
             }
