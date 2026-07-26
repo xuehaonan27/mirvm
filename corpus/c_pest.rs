@@ -1,12 +1,13 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# pest 2.8.7 + pest_derive 2.8.7（crates.io 2026-07-17 API 查实最新稳定线，
-# 双钉精确版本；两者同 train 配套）。default features：std + memchr 无
-# 额外可选依赖。运行期 = proc-macro（pest_generator 经 syn/quote 编译期
-# 展开 PEG）+ 纯 Rust 字符串游标扫描，logos/clap derive 先例在，预期直通。
+# pest 2.8.7 + pest_derive 2.8.7 + pest_generator 2.8.7（同 train 三钉）。
+# 上游漂移实锤（2026-07-27）：pest_derive 2.8.7 对 pest_generator 用 ^2.8.7，
+# pest_generator 2.8.8 又要求 pest ^2.8.8——pest 钉 2.8.7 即撞（cargo 自家
+# fresh 解析同撞，非 mirvm 分叉）。钉 pest_generator = 2.8.7 对齐 train。
 pest = "=2.8.7"
 pest_derive = "=2.8.7"
+pest_generator = "=2.8.7"
 ---
 // pest 2.8.7 PEG 解析器三维差分（批9：c_pest）。
 //

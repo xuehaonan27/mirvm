@@ -143,7 +143,7 @@ pub fn resolve(root: &PackageManifest, src: &mut impl PkgSource) -> Result<Resol
             // 迭代不动点：optional 依赖只在被（父包, 依赖键）激活或弱引用时
             // 进版本求解（cargo 语义——全局包名门会把 zerovec 的 yoke 误植到
             // litemap）；激活集单调扩张 ⇒ 收敛。
-            let mut activated: BTreeSet<(String, String)> = BTreeSet::new();
+            let mut activated: BTreeSet<(String, Version, String)> = BTreeSet::new();
             loop {
                 if std::env::var_os("MIRVM_DEBUG_UNIFY").is_some() {
                     eprintln!("DBG-SOLVE pass activated={activated:?}");
@@ -235,13 +235,14 @@ fn versions_from_lock(
                 return Err(format!("lock 图断链：{depname} {depver:?} 找不到包行"));
             };
             // 边版本记录：lock 依赖行不带 kind 信息——Normal/Build 双键登记，
-            // 消费侧按自身类别查（edge_version 助手先精确后回退）
+            // 消歧器 = 子版本串（同名多 req 条目各 hint 分立，ruint 实锤）
             for class in [UnitClass::Normal, UnitClass::Build] {
                 edges.insert(
                     (
                         pkg.name.clone(),
                         pkg.version.clone(),
                         depname.clone(),
+                        child.version.to_string(),
                         class,
                     ),
                     (depname.clone(), child.version.clone()),
@@ -316,13 +317,15 @@ impl std::fmt::Display for Pkg {
 
 // pubgrub::Package 由 blanket impl（Clone+Eq+Hash+Debug+Display）自动满足。
 
-/// 求解后每条 dep 边指向的版本：((父 lock 名, 父版本), 依赖键, 类别) → (包, 版本)。
-pub type EdgeVersions = BTreeMap<(String, Version, String, UnitClass), (String, Version)>;
+/// 求解后每条 dep 边指向的版本：((父 lock 名, 父版本), 依赖键, 消歧器, 类别)
+/// → (包, 版本)。消歧器：fresh 模式 = req 串（同名多 req 条目必须分立，
+/// ruint 四个 ark-ff 系列实锤）；lock 模式 = 子版本串（dep 行 hint）。
+pub type EdgeVersions = BTreeMap<(String, Version, String, String, UnitClass), (String, Version)>;
 
 type RawDep = (String, String, VersionReq, UnitClass, bool); // (依赖键, 包名, req, 类别, 是否 registry)
 
 /// (parent, dep key, class) → (pkg, bucket) 的边分派记录类型。
-type EdgeAssign = BTreeMap<(String, Version, String, UnitClass), (String, u32)>;
+type EdgeAssign = BTreeMap<(String, Version, String, String, UnitClass), (String, u32)>;
 /// get_dependencies 幂等 memo 值类型。
 type DepsRc = std::rc::Rc<Vec<(Pkg, pubgrub::Ranges<Version>)>>;
 
@@ -339,7 +342,7 @@ struct CratesIo<'a, S: PkgSource> {
     allow_pre: std::cell::RefCell<BTreeMap<String, PreComparators>>,
     /// 本轮按（父包名, 依赖键）激活的 optional 依赖集（迭代不动点输入；
     /// 全局包名集合会把 zerovec 的 yoke 误植到 litemap——boa 实锤）。
-    activated: &'a BTreeSet<(String, String)>,
+    activated: &'a BTreeSet<(String, Version, String)>,
     /// name → 下一个 bucket 号（0 起）。
     buckets: std::cell::RefCell<BTreeMap<String, u32>>,
     /// (name, bucket) → 截至目前的累积约束（合并判断用）。
@@ -427,7 +430,14 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
         match package {
             Pkg::Root => {
                 for d in &self.root.deps {
-                    collect_decl(&self.root.name, d, self.activated, self, &mut raw)?;
+                    collect_decl(
+                        &self.root.name,
+                        &self.root.version,
+                        d,
+                        self.activated,
+                        self,
+                        &mut raw,
+                    )?;
                 }
             }
             Pkg::Local(name) => {
@@ -436,7 +446,7 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
                     .get(name)
                     .ok_or_else(|| io_err(format!("path 包 {name} 的 manifest 未收编")))?;
                 for d in &m.deps {
-                    collect_decl(name, d, self.activated, self, &mut raw)?;
+                    collect_decl(name, &m.version, d, self.activated, self, &mut raw)?;
                 }
             }
             Pkg::Registry(name, _) => {
@@ -450,7 +460,13 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
                     }
                     let pkg_name = d.package.clone().unwrap_or_else(|| d.name.clone());
                     // optional 未激活不求（按（父包名, 依赖键）门控；平台 cfg 不求值——并集语义）
-                    if d.optional && !self.activated.contains(&(name.to_string(), d.name.clone())) {
+                    if d.optional
+                        && !self.activated.contains(&(
+                            name.to_string(),
+                            version.clone(),
+                            d.name.clone(),
+                        ))
+                    {
                         continue;
                     }
                     if req_has_pre(&d.req) {
@@ -484,14 +500,26 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
                 let range = req_to_ranges(&req);
                 let bucket = self.assign_bucket(&pkg_name, &range)?;
                 self.edge_assign.borrow_mut().insert(
-                    (parent_name.clone(), version.clone(), key, class),
+                    (
+                        parent_name.clone(),
+                        version.clone(),
+                        key,
+                        req.to_string(),
+                        class,
+                    ),
                     (pkg_name.clone(), bucket),
                 );
                 out.push((Pkg::Registry(pkg_name, bucket), range));
             } else {
                 // path 依赖：bucket 0 同式登记（bucket_versions 由 solve 输出端补）
                 self.edge_assign.borrow_mut().insert(
-                    (parent_name.clone(), version.clone(), key, class),
+                    (
+                        parent_name.clone(),
+                        version.clone(),
+                        key,
+                        req.to_string(),
+                        class,
+                    ),
                     (pkg_name.clone(), 0),
                 );
                 out.push((Pkg::Local(pkg_name), pubgrub::Ranges::full()));
@@ -508,13 +536,20 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
 /// 单条 manifest 依赖进 raw（root 与 path 包共用；registry/path 以末位标记区分）。
 fn collect_decl<'a, S: PkgSource>(
     parent_name: &str,
+    parent_version: &Version,
     d: &super::manifest::DepDecl,
-    activated: &BTreeSet<(String, String)>,
+    activated: &BTreeSet<(String, Version, String)>,
     provider: &CratesIo<'a, S>,
     raw: &mut Vec<RawDep>,
 ) -> Result<(), std::io::Error> {
     // optional 未激活不求（按（父包名, 依赖键）门控；平台 cfg 同样不求值——并集语义）
-    if d.optional && !activated.contains(&(parent_name.to_string(), d.key.clone())) {
+    if d.optional
+        && !activated.contains(&(
+            parent_name.to_string(),
+            parent_version.clone(),
+            d.key.clone(),
+        ))
+    {
         return Ok(());
     }
     match &d.source {
@@ -664,7 +699,16 @@ fn req_to_ranges(req: &VersionReq) -> pubgrub::Ranges<Version> {
                 .intersection(&R::strictly_lower_than(hi(major + 1, Some(0), Some(0)))),
             (Some(m), None) => R::higher_than(hi(major, Some(m), Some(0)))
                 .intersection(&R::strictly_lower_than(hi(major, Some(m + 1), Some(0)))),
-            (Some(_), Some(_)) => R::singleton(lo),
+            (Some(m), Some(p)) => {
+                // "=M.m.p" = [M.m.p, M.m.(p+1))：build 元数据任意（libgit2-sys
+                // 0.18.5+1.9.4 实锤——singleton 按 semver crate Ord 会比 build，
+                // 空 build 的钉子把带 build 的候选全顶出去）
+                R::higher_than(lo).intersection(&R::strictly_lower_than(hi(
+                    major,
+                    Some(m),
+                    Some(p + 1),
+                )))
+            }
             (None, Some(_)) => unreachable!("invalid version requirement"),
         }
     }
@@ -742,7 +786,7 @@ fn solve_fresh(
     root: &PackageManifest,
     path_manifests: &BTreeMap<String, PackageManifest>,
     src: &mut impl PkgSource,
-    activated: &BTreeSet<(String, String)>,
+    activated: &BTreeSet<(String, Version, String)>,
 ) -> Result<Solved, String> {
     let provider = CratesIo {
         src: std::cell::RefCell::new(src),
@@ -784,7 +828,7 @@ fn solve_fresh(
     // bucket；孤儿不进 version_map/lock/edge_versions。
     let edge_assign = provider.edge_assign.borrow();
     if std::env::var_os("MIRVM_DEBUG_UNIFY").is_some() {
-        for ((pn, pver, key, class), (pkg, bucket)) in edge_assign.iter() {
+        for ((pn, pver, key, _dis, class), (pkg, bucket)) in edge_assign.iter() {
             if pkg.starts_with("yoke") {
                 eprintln!("DBG-ASSIGN ({pn}@{pver}, {key}, {class:?}) -> {pkg}#{bucket}");
             }
@@ -798,7 +842,7 @@ fn solve_fresh(
         if !visited.insert(pv.clone()) {
             continue;
         }
-        for ((pn, pver, _key, _class), (pkg, bucket)) in edge_assign.iter() {
+        for ((pn, pver, _key, _dis, _class), (pkg, bucket)) in edge_assign.iter() {
             if pn == &pv.0 && pver == &pv.1 {
                 let child = (pkg.clone(), *bucket);
                 if reachable.insert(child.clone())
@@ -858,10 +902,10 @@ fn solve_fresh(
         vs.sort();
         vs.dedup();
     }
-    // 边分派解析为具体版本（(父名, 父版本, 依赖键, 类别) → (包, 版本)）；
+    // 边分派解析为具体版本（(父名, 父版本, 依赖键, 消歧器, 类别) → (包, 版本)）；
     // 只收可达父 + 可达子的边（其余 = 回退剪枝副产，arkworks/boa 实锤）。
     let mut edge_versions: EdgeVersions = BTreeMap::new();
-    for ((pname, pver, key, class), (pkg, bucket)) in edge_assign.iter() {
+    for ((pname, pver, key, dis, class), (pkg, bucket)) in edge_assign.iter() {
         if !visited.contains(&(pname.clone(), pver.clone())) {
             continue;
         }
@@ -872,7 +916,13 @@ fn solve_fresh(
             continue;
         }
         edge_versions.insert(
-            (pname.clone(), pver.clone(), key.clone(), *class),
+            (
+                pname.clone(),
+                pver.clone(),
+                key.clone(),
+                dis.clone(),
+                *class,
+            ),
             (pkg.clone(), v.clone()),
         );
     }
@@ -907,8 +957,35 @@ fn fill_lock_dependency_lines(
             })
             .collect()
     };
-    // (pkg name, version) → dep package names（多版本父各自一行，互不撞键）
-    let mut edges: BTreeMap<(String, Version), Vec<String>> = BTreeMap::new();
+    // (pkg name, version) → [(dep package, hint)]（同名多 req 条目各带
+    // 自身 hint 分立——ruint 四个 ark-ff 系列实锤；hint 经 req 精确查边分派）
+    let mut edges: BTreeMap<(String, Version), Vec<(String, Option<Version>)>> = BTreeMap::new();
+    let hint_of = |parent: &NodeKey,
+                   key: &str,
+                   pkg_name: &str,
+                   req: Option<&VersionReq>,
+                   class: UnitClass|
+     -> Option<Version> {
+        if !version_map
+            .get(pkg_name)
+            .map(|vs| vs.len() > 1)
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        let dep = FeatDep {
+            key: key.to_string(),
+            package: pkg_name.to_string(),
+            class,
+            optional: false,
+            default_features: false,
+            features: vec![],
+            registry: true,
+            platform_cfg: None,
+            req: req.map(|r| r.to_string()),
+        };
+        edge_version(edge_versions, parent, &dep).map(|(_, v)| v.clone())
+    };
     edges.insert(
         (root.name.clone(), root.version.clone()),
         root.deps
@@ -916,7 +993,21 @@ fn fill_lock_dependency_lines(
             .filter(|d| {
                 !d.optional || activated_keys(&root.name, &root.version).contains(&d.key.as_str())
             })
-            .map(|d| d.package.clone())
+            .map(|d| {
+                let class = match d.kind {
+                    DepKind::Normal => UnitClass::Normal,
+                    DepKind::Build => UnitClass::Build,
+                };
+                let req = match &d.source {
+                    DepSource::Registry(r) => Some(r),
+                    DepSource::Path(_) => None,
+                };
+                let parent = (root.name.clone(), root.version.clone(), class);
+                (
+                    d.package.clone(),
+                    hint_of(&parent, &d.key, &d.package, req, class),
+                )
+            })
             .collect(),
     );
     for (name, m) in path_manifests {
@@ -927,7 +1018,21 @@ fn fill_lock_dependency_lines(
                 .filter(|d| {
                     !d.optional || activated_keys(name, &m.version).contains(&d.key.as_str())
                 })
-                .map(|d| d.package.clone())
+                .map(|d| {
+                    let class = match d.kind {
+                        DepKind::Normal => UnitClass::Normal,
+                        DepKind::Build => UnitClass::Build,
+                    };
+                    let req = match &d.source {
+                        DepSource::Registry(r) => Some(r),
+                        DepSource::Path(_) => None,
+                    };
+                    let parent = (name.clone(), m.version.clone(), class);
+                    (
+                        d.package.clone(),
+                        hint_of(&parent, &d.key, &d.package, req, class),
+                    )
+                })
                 .collect(),
         );
     }
@@ -949,7 +1054,19 @@ fn fill_lock_dependency_lines(
                     .filter(|d| {
                         !d.optional || activated_keys(name, version).contains(&d.name.as_str())
                     })
-                    .map(|d| d.package.clone().unwrap_or_else(|| d.name.clone()))
+                    .map(|d| {
+                        let pkg_name = d.package.clone().unwrap_or_else(|| d.name.clone());
+                        let class = if d.kind.as_deref() == Some("build") {
+                            UnitClass::Build
+                        } else {
+                            UnitClass::Normal
+                        };
+                        let parent = (name.clone(), version.clone(), class);
+                        (
+                            pkg_name.clone(),
+                            hint_of(&parent, &d.name, &pkg_name, Some(&d.req), class),
+                        )
+                    })
                     .collect(),
             );
         }
@@ -958,29 +1075,7 @@ fn fill_lock_dependency_lines(
         let mut lines: Vec<(String, Option<Version>)> = edges
             .get(&(pkg.name.clone(), pkg.version.clone()))
             .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|dep| {
-                // 消歧 hint：该名多版本时按边分派写精确版本（dep = package 名；
-                // 边键是 dep KEY（rename 时不同），按 (父, 值包名) 扫描命中）
-                let multi = version_map
-                    .get(&dep)
-                    .map(|vs| vs.len() > 1)
-                    .unwrap_or(false);
-                let hint = if multi {
-                    edge_versions
-                        .iter()
-                        .find(|((pn, pv, _k, _c), (dp, _))| {
-                            pn == &pkg.name && pv == &pkg.version && dp == &dep
-                        })
-                        .map(|(_, (_, v))| v.clone())
-                        .or_else(|| version_map.get(&dep).and_then(|vs| vs.first()).cloned())
-                } else {
-                    None
-                };
-                (dep, hint)
-            })
-            .collect();
+            .unwrap_or_default();
         lines.sort();
         lines.dedup();
         pkg.dependencies = lines;
@@ -1012,6 +1107,8 @@ struct FeatDep {
     features: Vec<String>,
     registry: bool,
     platform_cfg: Option<String>,
+    /// req 串（同名多 req 条目的边消歧器；path 依赖为 None）
+    req: Option<String>,
 }
 
 type FeatTable = BTreeMap<String, Vec<FeatureValue>>;
@@ -1024,27 +1121,50 @@ type NodeTables = BTreeMap<NodeKey, (FeatTable, Vec<FeatDep>)>;
 fn edge_version<'a>(
     ev: &'a EdgeVersions,
     parent: &NodeKey,
-    dep_key: &str,
-    class: UnitClass,
+    dep: &FeatDep,
 ) -> Option<&'a (String, Version)> {
-    let other = match class {
+    let other = match dep.class {
         UnitClass::Normal => UnitClass::Build,
         UnitClass::Build => UnitClass::Normal,
     };
-    ev.get(&(
-        parent.0.clone(),
-        parent.1.clone(),
-        dep_key.to_string(),
-        class,
-    ))
-    .or_else(|| {
-        ev.get(&(
+    // fresh：req 串精确键（同名多 req 条目按串分立）
+    if let Some(req) = &dep.req {
+        if let Some(hit) = ev.get(&(
             parent.0.clone(),
             parent.1.clone(),
-            dep_key.to_string(),
+            dep.key.clone(),
+            req.clone(),
+            dep.class,
+        )) {
+            return Some(hit);
+        }
+        if let Some(hit) = ev.get(&(
+            parent.0.clone(),
+            parent.1.clone(),
+            dep.key.clone(),
+            req.clone(),
             other,
-        ))
-    })
+        )) {
+            return Some(hit);
+        }
+    }
+    // lock：扫描命中——子版本（消歧器串）落在 req 区间内即配
+    let range = dep
+        .req
+        .as_deref()
+        .unwrap_or("*")
+        .parse::<VersionReq>()
+        .ok()
+        .map(|r| req_to_ranges(&r));
+    ev.iter()
+        .find(|((pn, pv, k, _dis, c), (_, dv))| {
+            pn == &parent.0
+                && pv == &parent.1
+                && k == &dep.key
+                && (*c == dep.class || *c == other)
+                && range.as_ref().is_none_or(|r| r.contains(dv))
+        })
+        .map(|(_, v)| v)
 }
 
 fn register_node(
@@ -1101,6 +1221,7 @@ fn ensure_registry_node(
             features: d.features.clone(),
             registry: true,
             platform_cfg: d.target.clone(),
+            req: Some(d.req.to_string()),
         });
     }
     register_node(
@@ -1117,7 +1238,10 @@ fn ensure_registry_node(
 }
 
 /// feature 统一产物：(节点表, 按（父包名, 依赖键）激活的 optional 依赖集)。
-type Unified = (BTreeMap<NodeKey, FeatNode>, BTreeSet<(String, String)>);
+type Unified = (
+    BTreeMap<NodeKey, FeatNode>,
+    BTreeSet<(String, Version, String)>,
+);
 
 fn unify_features(
     root: &PackageManifest,
@@ -1167,7 +1291,12 @@ fn unify_features(
             };
             let node = nodes.get(&key).cloned().unwrap_or_default();
             let (features, activated, edge_adds, weak_refs) = expand_node(&table, &deps, &node)?;
-            if features != node.features || activated != node.activated {
+            // 三路产物任一变化都要落表——weak_refs 漏插会静悄悄地丢
+            // ?/ 弱引用（tracing-core 的 valuable?/std 实锤）
+            if features != node.features
+                || activated != node.activated
+                || weak_refs != node.weak_refs
+            {
                 nodes.insert(
                     key.clone(),
                     FeatNode {
@@ -1198,8 +1327,7 @@ fn unify_features(
                     continue;
                 }
                 // 子节点身份：边分派记录（多版本并存时按 (父,键,类) 精确到版本）
-                let Some((child_name, child_version)) =
-                    edge_version(edge_versions, &key, &dep.key, dep.class)
+                let Some((child_name, child_version)) = edge_version(edge_versions, &key, dep)
                 else {
                     // optional 本轮新激活、下轮求解才进边分派——本轮跳过
                     // （激活已记账进 activated_pkgs，迭代不动点会补）
@@ -1253,13 +1381,13 @@ fn unify_features(
         if !changed {
             // 收敛后：按（父包名, 依赖键）激活的 optional 依赖集 ∪ 弱形引用集
             // （迭代不动点输入；弱形引用同样进求解与 lock 行——cargo 语义）
-            let mut activated_parents: BTreeSet<(String, String)> = BTreeSet::new();
+            let mut activated_parents: BTreeSet<(String, Version, String)> = BTreeSet::new();
             for (key, node) in &nodes {
                 for dep_key in &node.activated {
-                    activated_parents.insert((key.0.clone(), dep_key.clone()));
+                    activated_parents.insert((key.0.clone(), key.1.clone(), dep_key.clone()));
                 }
                 for dep_key in &node.weak_refs {
-                    activated_parents.insert((key.0.clone(), dep_key.clone()));
+                    activated_parents.insert((key.0.clone(), key.1.clone(), dep_key.clone()));
                 }
             }
             return Ok((nodes, activated_parents));
@@ -1283,6 +1411,10 @@ fn decls_to_featdeps(decls: &[super::manifest::DepDecl]) -> Result<Vec<FeatDep>,
             features: d.features.clone(),
             registry: matches!(d.source, DepSource::Registry(_)),
             platform_cfg: d.platform_cfg.clone(),
+            req: match &d.source {
+                DepSource::Registry(req) => Some(req.to_string()),
+                DepSource::Path(_) => None,
+            },
         })
         .collect())
 }
@@ -1457,6 +1589,7 @@ fn node_featdeps(
             features: d.features.clone(),
             registry: true,
             platform_cfg: d.target.clone(),
+            req: Some(d.req.to_string()),
         })
         .collect())
 }
@@ -1501,9 +1634,7 @@ fn assemble_units(
             if !host_edge(&dep)? {
                 continue;
             }
-            let Some((child_name, child_version)) =
-                edge_version(edge_versions, &key, &dep.key, dep.class)
-            else {
+            let Some((child_name, child_version)) = edge_version(edge_versions, &key, &dep) else {
                 if dep.optional {
                     continue;
                 }
@@ -1588,9 +1719,7 @@ fn assemble_units(
             if !host_edge(&d)? {
                 continue;
             }
-            let Some((child_name, child_version)) =
-                edge_version(edge_versions, &key, &d.key, d.class)
-            else {
+            let Some((child_name, child_version)) = edge_version(edge_versions, &key, &d) else {
                 if d.optional {
                     continue;
                 }
@@ -2107,4 +2236,14 @@ mod tests {
         assert!(!r2.contains(&Version::parse("3.2.0").unwrap()));
     }
 
+    #[test]
+    fn exact_pin_matches_build_metadata_variants() {
+        // "=0.18.5" 必须匹配 0.18.5+1.9.4（build 任意；semver crate 的 Ord
+        // 会比 build，singleton 会误杀——libgit2-sys 实锤）
+        let req = VersionReq::parse("=0.18.5").unwrap();
+        let r = req_to_ranges(&req);
+        assert!(r.contains(&Version::parse("0.18.5").unwrap()));
+        assert!(r.contains(&Version::parse("0.18.5+1.9.4").unwrap()));
+        assert!(!r.contains(&Version::parse("0.18.6").unwrap()));
+    }
 }

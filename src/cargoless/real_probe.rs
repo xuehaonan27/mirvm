@@ -1,31 +1,25 @@
 #[test]
-fn real_gluesql_probe() {
+fn real_libgit2_probe() {
     use crate::cargoless::manifest::PackageManifest;
     use crate::cargoless::registry::Registry;
     use crate::cargoless::resolve::resolve;
-    let text = std::fs::read_to_string("corpus/c_gluesql_db.rs").unwrap();
+    let text = std::fs::read_to_string("corpus/c_libgit2.rs").unwrap();
     let (fm, _) = crate::cli::parse_frontmatter_pub(&text).unwrap();
     let m = PackageManifest::from_frontmatter(
-        "c_gluesql_db",
+        "c_libgit2",
         &fm,
-        std::path::Path::new("corpus/c_gluesql_db.rs"),
+        std::path::Path::new("corpus/c_libgit2.rs"),
     )
     .unwrap();
     let mut reg = Registry::open().unwrap();
-    let plan = resolve(&m, &mut reg).unwrap();
-    for u in &plan.units {
-        if matches!(
-            u.package.as_str(),
-            "rkyv" | "hashbrown" | "ahash" | "indexmap" | "rkyv_derive" | "rust_decimal" | "serde"
-        ) {
+    match resolve(&m, &mut reg) {
+        Ok(plan) => {
             eprintln!(
-                "PROBE unit {}@{} {:?} features={:?} deps={:?}",
-                u.package,
-                u.version,
-                u.class,
-                u.features,
-                u.deps.iter().map(|d| d.key.clone()).collect::<Vec<_>>()
+                "PROBE libgit2-sys: {:?}",
+                plan.version_map.get("libgit2-sys")
             );
+            eprintln!("PROBE git2: {:?}", plan.version_map.get("git2"));
         }
+        Err(e) => eprintln!("PROBE ERR: {e}"),
     }
 }
