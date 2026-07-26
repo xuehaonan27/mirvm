@@ -57,8 +57,21 @@ pub fn audit_project(dir: &Path) -> Result<AuditReport, String> {
 pub fn audit_script(file: &Path) -> Result<AuditReport, String> {
     let text = std::fs::read_to_string(file)
         .map_err(|e| format!("读取脚本 {} 失败: {e}", file.display()))?;
-    let (manifest_text, body) = crate::cli::parse_frontmatter_pub(&text)
-        .ok_or_else(|| format!("{} 无 frontmatter（非 cargo 形态脚本）", file.display()))?;
+    let Some((manifest_text, body)) = crate::cli::parse_frontmatter_pub(&text) else {
+        // 无 frontmatter = 零依赖单文件——平凡通过（diff.sh 族，不属 cargo 形态）
+        return Ok(AuditReport {
+            name: file
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+                .to_string(),
+            mode: "fresh",
+            units: 0,
+            plan: empty_plan(file),
+            lock_check: None,
+            acceptance: None,
+        });
+    };
     let stem = file
         .file_stem()
         .and_then(|s| s.to_str())
@@ -170,6 +183,23 @@ fn script_cache_dir(script: &Path) -> PathBuf {
     crate::sysroot::cache_dir()
         .join("scripts")
         .join(format!("{:016x}", hasher.finish()))
+}
+
+/// 零依赖脚本的平凡 plan（无 frontmatter 形态）。
+fn empty_plan(file: &Path) -> ResolvePlan {
+    ResolvePlan {
+        root_name: file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string(),
+        root_version: Version::new(0, 0, 0),
+        root_dir: file.parent().unwrap_or(Path::new(".")).to_path_buf(),
+        root_features: Default::default(),
+        units: vec![],
+        version_map: Default::default(),
+        lock: Default::default(),
+    }
 }
 
 /// 对账：lock 非根包集合 vs 自解 version_map（互含性）。

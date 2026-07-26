@@ -142,9 +142,20 @@ pub fn resolve(root: &PackageManifest, src: &mut impl PkgSource) -> Result<Resol
             // （cargo lock 证据：未激活 optional 不入锁）；激活集单调扩张 ⇒ 收敛。
             let mut activated: BTreeSet<String> = BTreeSet::new();
             loop {
+                if std::env::var_os("MIRVM_DEBUG_UNIFY").is_some() {
+                    eprintln!("DBG-SOLVE pass activated={activated:?}");
+                }
                 let (vm, lf) = solve_fresh(root, &path_manifests, src, &activated)?;
                 let (nodes, new_activated) = unify_features(root, &path_manifests, &vm, src)?;
+                if std::env::var_os("MIRVM_DEBUG_UNIFY").is_some() {
+                    eprintln!("DBG-SOLVE pass end new_activated={new_activated:?}");
+                }
                 if new_activated == activated {
+                    // 收敛后才补 lock 依赖行：optional 门按（父包, 依赖键）
+                    // 判定（全局集合会把 cipher 的 zeroize 误植到
+                    // generic-array——chacha 实锤）
+                    let mut lf = lf;
+                    fill_lock_dependency_lines(&mut lf, root, &path_manifests, &vm, &nodes, src)?;
                     break (vm, lf, nodes);
                 }
                 activated = new_activated;
@@ -380,10 +391,7 @@ impl<'a, S: PkgSource> pubgrub::DependencyProvider for CratesIo<'a, S> {
                     if req_has_pre(&d.req) {
                         self.allow_pre.borrow_mut().insert(pkg_name.clone());
                     }
-                    out.push((
-                        Pkg::Registry(pkg_name),
-                        pubgrub::Ranges::from_req(d.req.clone()),
-                    ));
+                    out.push((Pkg::Registry(pkg_name), req_to_ranges(&d.req)));
                 }
             }
         }
@@ -406,10 +414,7 @@ fn dep_decls_to_constraints<'a, S: PkgSource>(
                 if req_has_pre(req) {
                     provider.allow_pre.borrow_mut().insert(d.package.clone());
                 }
-                out.push((
-                    Pkg::Registry(d.package.clone()),
-                    pubgrub::Ranges::from_req(req.clone()),
-                ));
+                out.push((Pkg::Registry(d.package.clone()), req_to_ranges(req)));
             }
             DepSource::Path(_) => {
                 out.push((Pkg::Local(d.package.clone()), pubgrub::Ranges::full()));
@@ -421,6 +426,103 @@ fn dep_decls_to_constraints<'a, S: PkgSource>(
 
 fn io_err(e: impl Into<String>) -> std::io::Error {
     std::io::Error::other(e.into())
+}
+
+/// req → Ranges 转换（镜像 version_ranges::semver 算法，但**保留下界 pre**：
+/// `^0.6.0-rc.8` = [0.6.0-rc.8, 0.7.0)——from_req 丢 pre 得 [0.6.0, 0.7.0)，
+/// semver 序 0.6.0-rc.x < 0.6.0 ⇒ rc 族全被误杀（argon2 实锤）；
+/// 上界永不带 pre；pre comparator 之外的 comparator 与 from_req 等价）。
+fn req_to_ranges(req: &VersionReq) -> pubgrub::Ranges<Version> {
+    use semver::Op;
+    type R = pubgrub::Ranges<Version>;
+    fn lo(c: &semver::Comparator) -> Version {
+        Version {
+            major: c.major,
+            minor: c.minor.unwrap_or(0),
+            patch: c.patch.unwrap_or(0),
+            pre: c.pre.clone(),
+            build: semver::BuildMetadata::EMPTY,
+        }
+    }
+    fn hi(major: u64, minor: Option<u64>, patch: Option<u64>) -> Version {
+        Version::new(major, minor.unwrap_or(0), patch.unwrap_or(0))
+    }
+    fn exact(major: u64, minor: Option<u64>, patch: Option<u64>, lo: Version) -> R {
+        match (minor, patch) {
+            (None, None) => R::higher_than(hi(major, Some(0), Some(0)))
+                .intersection(&R::strictly_lower_than(hi(major + 1, Some(0), Some(0)))),
+            (Some(m), None) => R::higher_than(hi(major, Some(m), Some(0)))
+                .intersection(&R::strictly_lower_than(hi(major, Some(m + 1), Some(0)))),
+            (Some(_), Some(_)) => R::singleton(lo),
+            (None, Some(_)) => unreachable!("invalid version requirement"),
+        }
+    }
+    let mut acc = R::full();
+    for c in &req.comparators {
+        let (major, minor, patch) = (c.major, c.minor, c.patch);
+        let lo = lo(c);
+        let r =
+            match c.op {
+                Op::Exact => exact(major, minor, patch, lo),
+                Op::Greater => match (minor, patch) {
+                    (None, None) => R::higher_than(hi(major + 1, Some(0), Some(0))),
+                    (Some(m), None) => R::higher_than(hi(major, Some(m + 1), Some(0))),
+                    (Some(_), Some(_)) => R::strictly_higher_than(lo),
+                    (None, Some(_)) => unreachable!("invalid version requirement"),
+                },
+                Op::GreaterEq => R::higher_than(lo),
+                Op::Less => match (minor, patch) {
+                    (None, None) => R::strictly_lower_than(hi(major + 1, Some(0), Some(0))),
+                    (Some(m), None) => R::strictly_lower_than(hi(major, Some(m + 1), Some(0))),
+                    (Some(_), Some(_)) => R::strictly_lower_than(lo),
+                    (None, Some(_)) => unreachable!("invalid version requirement"),
+                },
+                Op::LessEq => match (minor, patch) {
+                    (None, None) => R::strictly_lower_than(hi(major + 1, Some(0), Some(0))),
+                    (Some(m), None) => R::strictly_lower_than(hi(major, Some(m + 1), Some(0))),
+                    (Some(_), Some(_)) => R::lower_than(lo),
+                    (None, Some(_)) => unreachable!("invalid version requirement"),
+                },
+                Op::Tilde => match (minor, patch) {
+                    (None, None) => exact(major, None, None, lo),
+                    (Some(_), None) => exact(major, minor, None, lo),
+                    (Some(m), Some(_)) => R::higher_than(lo)
+                        .intersection(&R::strictly_lower_than(hi(major, Some(m + 1), Some(0)))),
+                    (None, Some(_)) => unreachable!("invalid version requirement"),
+                },
+                Op::Caret => match (major, minor, patch) {
+                    (major, Some(m), Some(_)) if major > 0 => R::higher_than(lo)
+                        .intersection(&R::strictly_lower_than(hi(major + 1, Some(0), Some(0)))),
+                    (0, Some(m), Some(_)) if m > 0 => R::higher_than(lo)
+                        .intersection(&R::strictly_lower_than(hi(0, Some(m + 1), Some(0)))),
+                    (0, Some(0), Some(_)) => exact(0, Some(0), patch, lo),
+                    (major, Some(m), None) if major > 0 || m > 0 => {
+                        R::higher_than(hi(major, Some(m), Some(0))).intersection(&{
+                            if major > 0 {
+                                R::strictly_lower_than(hi(major + 1, Some(0), Some(0)))
+                            } else {
+                                R::strictly_lower_than(hi(0, Some(m + 1), Some(0)))
+                            }
+                        })
+                    }
+                    (0, Some(0), None) => exact(0, Some(0), None, lo),
+                    (major, None, None) => exact(major, None, None, lo),
+                    _ => unreachable!("invalid version requirement"),
+                },
+                Op::Wildcard => match minor {
+                    Some(m) => R::higher_than(hi(major, Some(m), Some(0)))
+                        .intersection(&R::strictly_lower_than(hi(major, Some(m + 1), Some(0)))),
+                    None => R::higher_than(hi(major, Some(0), Some(0)))
+                        .intersection(&R::strictly_lower_than(hi(major + 1, Some(0), Some(0)))),
+                },
+                _ => {
+                    // semver 新 op（本仓钉版未知）——退回 from_req（pre 会丢，响亮记账）
+                    return pubgrub::Ranges::from_req(req.clone());
+                }
+            };
+        acc = acc.intersection(&r);
+    }
+    acc
 }
 
 fn solve_fresh(
@@ -502,16 +604,8 @@ fn solve_fresh(
             }
         }
     }
-    // lock 依赖行补齐（canonical 形态要求；审计反证时 cargo 需要）
-    let mut guard = provider.src.borrow_mut();
-    fill_lock_dependency_lines(
-        &mut lock,
-        root,
-        path_manifests,
-        &version_map,
-        &mut **guard,
-        activated,
-    )?;
+    // lock 依赖行在 feature 统一收敛后补齐（见 resolve() 迭代循环——
+    // optional 门按（父包, 依赖键）判定，需要统一产物）
     Ok((version_map, lock))
 }
 
@@ -522,16 +616,25 @@ fn fill_lock_dependency_lines(
     root: &PackageManifest,
     path_manifests: &BTreeMap<String, PackageManifest>,
     version_map: &BTreeMap<String, Vec<Version>>,
-    provider: &mut impl PkgSource,
-    activated: &BTreeSet<String>,
+    nodes: &BTreeMap<(String, UnitClass), FeatNode>,
+    src: &mut impl PkgSource,
 ) -> Result<(), String> {
+    // optional 门按（父包, 依赖键）判定：全局集合会把 A 包激活的同名依赖
+    // 误植到 B 包的依赖行（cipher/zeroize vs generic-array 实锤）
+    let activated_keys = |name: &str| -> BTreeSet<&str> {
+        [UnitClass::Normal, UnitClass::Build]
+            .iter()
+            .filter_map(|c| nodes.get(&(name.to_string(), *c)))
+            .flat_map(|n| n.activated.iter().map(|k| k.as_str()))
+            .collect()
+    };
     // (pkg name, its dep keys → package names)
     let mut edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
     edges.insert(
         root.name.clone(),
         root.deps
             .iter()
-            .filter(|d| !d.optional || activated.contains(&d.package))
+            .filter(|d| !d.optional || activated_keys(&root.name).contains(&d.key.as_str()))
             .map(|d| d.package.clone())
             .collect(),
     );
@@ -540,7 +643,7 @@ fn fill_lock_dependency_lines(
             name.clone(),
             m.deps
                 .iter()
-                .filter(|d| !d.optional || activated.contains(&d.package))
+                .filter(|d| !d.optional || activated_keys(name).contains(&d.key.as_str()))
                 .map(|d| d.package.clone())
                 .collect(),
         );
@@ -552,7 +655,7 @@ fn fill_lock_dependency_lines(
         .collect();
     for name in registry_names {
         let version = version_map[&name][0].clone();
-        let vs = provider.index_entry(&name)?;
+        let vs = src.index_entry(&name)?;
         let iv = vs
             .iter()
             .find(|v| v.version == version)
@@ -562,10 +665,7 @@ fn fill_lock_dependency_lines(
             iv.deps
                 .iter()
                 .filter(|d| d.kind.as_deref() != Some("dev"))
-                .filter(|d| {
-                    let pkg = d.package.clone().unwrap_or_else(|| d.name.clone());
-                    !d.optional || activated.contains(&pkg)
-                })
+                .filter(|d| !d.optional || activated_keys(&name).contains(&d.name.as_str()))
                 .map(|d| d.package.clone().unwrap_or_else(|| d.name.clone()))
                 .collect(),
         );
@@ -931,10 +1031,18 @@ fn expand_node(
             }
         }
         if !changed {
-            return Ok((features, activated, edge_adds));
+            break;
         }
     }
-    Err("feature 展开 64 轮未收敛（表异常）".to_string())
+    // 收尾清扫：feature 旗标从边/表任意来源到达后，若它本身不是表键而是
+    // 非隐藏的 optional 依赖键，即激活该依赖（rand_core 的 getrandom 实锤——
+    // 旗标经边到达且无表项可展开，缺这条规则时激活丢失）
+    for f in features.iter() {
+        if !table.contains_key(f) && optional_keys.contains(f) && !hidden.contains(f) {
+            activated.insert(f.clone());
+        }
+    }
+    Ok((features, activated, edge_adds))
 }
 
 // ---------- 单元装配 ----------
@@ -1450,6 +1558,29 @@ mod tests {
             .get("sib", &Version::parse("0.2.0").unwrap())
             .unwrap();
         assert!(sib_lock.source.is_none());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn prerelease_req_allows_pre_candidates() {
+        // req 带 pre comparator ⇒ 该包的 pre 版进候选（cargo 近似规则；
+        // argon2 = "0.6.0-rc.8" 实锤——rc 族全被 pre 过滤器误杀过）
+        let d = tmpdir("pre");
+        let root = root_project(
+            &d,
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n[dependencies]\nargon2 = \"0.6.0-rc.8\"\n",
+        );
+        let mut src = FakeSource::new(d.join("srcstore"));
+        src.add(
+            "argon2",
+            vec![
+                iv("argon2", "0.5.3"),
+                iv("argon2", "0.6.0-rc.7"),
+                iv("argon2", "0.6.0-rc.8"),
+            ],
+        );
+        let plan = resolve(&root, &mut src).unwrap();
+        assert_eq!(plan.version_map["argon2"][0].to_string(), "0.6.0-rc.8");
         std::fs::remove_dir_all(&d).unwrap();
     }
 
