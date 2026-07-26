@@ -8,4 +8,5 @@
 //!   + 审计工具；不接 run 路径。
 //! - P2+：schedule/buildrs/proc_macro/driver（机制全 → 迁移 → 退场）。
 
+pub mod lockfile;
 pub mod manifest;
