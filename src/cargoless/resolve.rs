@@ -326,6 +326,9 @@ type EdgeAssign = BTreeMap<(String, Version, String, UnitClass), (String, u32)>;
 /// get_dependencies 幂等 memo 值类型。
 type DepsRc = std::rc::Rc<Vec<(Pkg, pubgrub::Ranges<Version>)>>;
 
+/// pre comparator 记录类型（(major, minor, patch) 三元组列表）。
+type PreComparators = Vec<(u64, Option<u64>, Option<u64>)>;
+
 struct CratesIo<'a, S: PkgSource> {
     src: std::cell::RefCell<&'a mut S>,
     manifests: &'a BTreeMap<String, PackageManifest>,
@@ -333,7 +336,7 @@ struct CratesIo<'a, S: PkgSource> {
     /// pre comparator 记录（cargo 精确规则：pre 版仅当被该包某 req 中
     /// major/minor/patch 全同且带 pre 的 comparator 点名时才可选——
     /// ark-ff-asm 0.5.0-alpha.0 误选实锤）。值 = (major, minor, patch)。
-    allow_pre: std::cell::RefCell<BTreeMap<String, Vec<(u64, Option<u64>, Option<u64>)>>>,
+    allow_pre: std::cell::RefCell<BTreeMap<String, PreComparators>>,
     /// 本轮按（父包名, 依赖键）激活的 optional 依赖集（迭代不动点输入；
     /// 全局包名集合会把 zerovec 的 yoke 误植到 litemap——boa 实锤）。
     activated: &'a BTreeSet<(String, String)>,
