@@ -1,0 +1,7 @@
+[package]
+name = "cless_pm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+my_derive = { path = "my_derive" }

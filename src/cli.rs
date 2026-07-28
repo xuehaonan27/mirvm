@@ -54,8 +54,9 @@ ENV:
     MIRVM_JIT_STATS   =1 时进程退出经 atexit 打 JIT 助手频度统计（诊断用）
     MIRVM_CARGO_LOCKED 置位时 frontmatter/脚本项目按 --locked 构建（依赖锁定；
                       未置位 = clean 环境可重解析，见 open-issues G7）
-    MIRVM_DEPS        =self 时项目/脚本走零 cargo 自有调度（D15 P2 切①：限无
-                      build.rs/proc-macro 子集）；缺省/=cargo 走 cargo 三阶段
+    MIRVM_DEPS        =self 时项目/脚本走零 cargo 自有调度（D15 P2 切②：限无
+                      build.rs 子集；proc-macro 经真 rustc host 编译）；
+                      缺省/=cargo 走 cargo 三阶段
     MIRVM_TIMING      =1 时向 stderr 输出相位账本（frontend/lower/engine/total）
     MIRVM_NO_IR_CACHE =1 时旁路 L2 engine-IR 缓存（读写全禁；诊断/对拍用）
     MIRVM_NO_BASE_IMAGE =1 时旁路 std 预降低底座（全量冷降低；诊断/对拍用）

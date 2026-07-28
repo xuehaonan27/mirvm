@@ -1,26 +1,29 @@
-//! `cargoless/driver.rs` —— `mirvm run` 的零 cargo 新路径（D15 P2 切①，
+//! `cargoless/driver.rs` —— `mirvm run` 的零 cargo 新路径（D15 P2 切①/②，
 //! 设计档 §3.6/§5 P2），替代 cargo_shim::phase_cargo 的三阶段（cargo run +
 //! RUSTC_WRAPPER + runner 协议）：
 //!
 //! ```text
-//! resolve（P1 求解器）→ 子集闸 → 逐 dep 起 `__cless-dep` 子进程编译
-//! （cli::run_dep_compiler：in-process rustc_driver + global_asm 抽取）
+//! resolve（P1 求解器）→ 子集闸 → 逐 unit 按双侧编译集调度：
+//!   host 集（proc-macro 闭包）→ spawn 真 rustc 真 codegen（.so/.rlib）
+//!   target 集 → 起 `__cless-dep` 子进程（cli::run_dep_compiler：
+//!   in-process rustc_driver + global_asm 抽取）
 //! → bin 走既有 MirvmCallbacks 会话（cli::run_driver，after_analysis 停）
 //! ```
 //!
-//! 切① 子集 = **无 build.rs、无 proc-macro** 的项目/脚本；子集外构造响亮
-//! 拒绝点名（切② = proc-macro，切③ = build.rs），绝不静默回退 cargo
-//! （P2 闭合契约，设计档 §5）。
+//! 切② 子集 = **无 build.rs** 的项目/脚本；proc-macro 及其 host 闭包已接
+//! （真 rustc host 编译，target 侧 --extern 指 host-deps 的 .so）。子集外
+//! 构造响亮拒绝点名（切③ = build.rs），绝不静默回退 cargo（P2 闭合契约，
+//! 设计档 §5）。
 //!
-//! 留给后续切片的接缝：子集闸（buildrs/proc_macro 切片在此放行并接管对应
-//! unit 的调度）；strip_build_units（build.rs 切片恢复 Build 类 unit 消费）。
+//! 留给后续切片的接缝：子集闸（buildrs 切片在此放行并接管 build.rs 调度）；
+//! strip_build_units（build.rs 切片恢复 Build 类 unit 消费）。
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use super::manifest::PackageManifest;
 use super::registry::Registry;
-use super::resolve::{ResolvePlan, UnitClass, resolve};
+use super::resolve::{ResolvePlan, Unit, UnitClass, resolve};
 use super::schedule::{self, Layout};
 
 /// `mirvm run <目录|Cargo.toml>`（MIRVM_DEPS=self）。
@@ -98,21 +101,16 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
         }
     };
 
-    // 2. 子集闸（切① = 无 build.rs、无 proc-macro；P2 契约：子集外响亮拒绝
-    // 点名构造与机制，不静默回退 cargo）。根与每个 unit 都查——Build 类 unit
-    // 也查（宁响不漏：其父若真无 build.rs，cargo 本不编译它，这里多拒的是
-    // 「声明了 build-deps 却没有 build.rs」的病理包，误拒面可接受）。
+    // 2. 子集闸（切② = 无 build.rs；P2 契约：子集外响亮拒绝点名构造与机制，
+    // 不静默回退 cargo）。根与每个 unit 都查——Build 类 unit 也查（宁响不漏：
+    // 其父若真无 build.rs，cargo 本不编译它，这里多拒的是「声明了 build-deps
+    // 却没有 build.rs」的病理包，误拒面可接受）。proc-macro 闭包同样过此闸：
+    // 闭包内撞 build.rs（真实 serde_derive 的 proc-macro2 实锤）照旧响亮点名
+    // ——设计如此，build.rs 调度归切③。
     for u in &plan.units {
         if u.has_build_script {
             eprintln!(
-                "mirvm: D15 P2 切① 未接 build.rs：{} {}（等切③；可暂用 MIRVM_DEPS=cargo）",
-                u.package, u.version
-            );
-            std::process::exit(1);
-        }
-        if u.proc_macro {
-            eprintln!(
-                "mirvm: D15 P2 切① 未接 proc-macro：{} {}（等切②；可暂用 MIRVM_DEPS=cargo）",
+                "mirvm: D15 P2 切② 未接 build.rs：{} {}（等切③；可暂用 MIRVM_DEPS=cargo）",
                 u.package, u.version
             );
             std::process::exit(1);
@@ -120,7 +118,7 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
     }
     if manifest.has_build_script {
         eprintln!(
-            "mirvm: D15 P2 切① 未接 build.rs：根包 {} {}（等切③；可暂用 MIRVM_DEPS=cargo）",
+            "mirvm: D15 P2 切② 未接 build.rs：根包 {} {}（等切③；可暂用 MIRVM_DEPS=cargo）",
             manifest.name, manifest.version
         );
         std::process::exit(1);
@@ -142,11 +140,15 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
         },
     };
 
-    // 4. 指纹 + 拓扑序，逐 dep 编译（串行 v1；并行调度归后续切片）
+    // 4. 指纹 + 拓扑序，逐 unit 按双侧编译集调度（串行 v1；并行调度归后续
+    // 切片）：host 集 spawn 真 rustc 真 codegen，target 集照旧 __cless-dep；
+    // 同一 unit 两侧都在就两发（双用 lib，产物分目录互不影响）。
     let layout = Layout::new();
-    if let Err(e) = std::fs::create_dir_all(&layout.deps) {
-        eprintln!("mirvm: 创建 {} 失败: {e}", layout.deps.display());
-        std::process::exit(1);
+    for d in [&layout.deps, &layout.host_deps] {
+        if let Err(e) = std::fs::create_dir_all(d) {
+            eprintln!("mirvm: 创建 {} 失败: {e}", d.display());
+            std::process::exit(1);
+        }
     }
     // sysroot stamp 进指纹（sysroot 换代 ⇒ 全量重编）；ensure 之后必有值，
     // 缺值回退字面量不致命（后果只是 fp 粗一档，不引入新错误路径）
@@ -166,40 +168,61 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
             std::process::exit(1);
         }
     };
+    let host_set = schedule::host_closure(&plan);
+    let target_set = schedule::target_units(&plan);
     let self_exe = std::env::current_exe().expect("current_exe 失败");
     for ix in order {
         let u = &plan.units[ix];
         let stem = format!("lib{}-{}", u.lib_name, fps[ix]);
-        if layout.deps.join(format!("{stem}.rmeta")).is_file()
-            && layout.deps.join(format!("{stem}.rlib")).is_file()
-        {
-            continue; // 指纹命中：内容寻址，同名产物即同内容，跳过
-        }
-        let args = schedule::dep_rustc_args(&plan, ix, &manifest.profile, &fps, &sysroot, &layout);
-        let mut cmd = std::process::Command::new(&self_exe);
-        cmd.arg("__cless-dep").args(&args[1..]);
-        // cargo 编译期 env 契约（源码 env! 可读）：CARGO_PKG_* 全集 +
-        // crate/manifest 三员（cargo 对每次 rustc 调用都设）
-        cmd.envs(u.pkg_env.iter());
-        cmd.env("CARGO_CRATE_NAME", &u.lib_name);
-        cmd.env("CARGO_MANIFEST_DIR", &u.source_dir);
-        cmd.env(
-            "CARGO_MANIFEST_PATH",
-            u.source_dir.join("Cargo.toml").display().to_string(),
-        );
-        let status = match cmd.status() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!(
-                    "mirvm: dep 编译子进程启动失败（{} {}）: {e}",
-                    u.package, u.version
-                );
-                std::process::exit(1);
+        // host 侧：proc-macro 本体产 dylib；闭包普通单元产 host rlib
+        if host_set.contains(&ix) {
+            let hit = if u.proc_macro {
+                layout
+                    .host_deps
+                    .join(format!("{stem}{}", std::env::consts::DLL_SUFFIX))
+                    .is_file()
+            } else {
+                layout.host_deps.join(format!("{stem}.rmeta")).is_file()
+                    && layout.host_deps.join(format!("{stem}.rlib")).is_file()
+            };
+            if !hit {
+                let (args, what) = if u.proc_macro {
+                    (
+                        schedule::proc_macro_rustc_args(
+                            &plan,
+                            ix,
+                            &manifest.profile,
+                            &fps,
+                            &layout,
+                        ),
+                        "proc-macro",
+                    )
+                } else {
+                    (
+                        schedule::host_rustc_args(&plan, ix, &manifest.profile, &fps, &layout),
+                        "host dep",
+                    )
+                };
+                let mut cmd = std::process::Command::new(&args[0]);
+                cmd.args(&args[1..]);
+                apply_unit_env(&mut cmd, u);
+                run_compile(&mut cmd, u, what);
             }
-        };
-        if !status.success() {
-            eprintln!("mirvm: dep 编译失败：{} {}", u.package, u.version);
-            std::process::exit(1);
+        }
+        // target 侧：照旧 __cless-dep（-Zno-codegen rlib）
+        if target_set.contains(&ix) {
+            if layout.deps.join(format!("{stem}.rmeta")).is_file()
+                && layout.deps.join(format!("{stem}.rlib")).is_file()
+            {
+                // 指纹命中：内容寻址，同名产物即同内容，跳过
+            } else {
+                let args =
+                    schedule::dep_rustc_args(&plan, ix, &manifest.profile, &fps, &sysroot, &layout);
+                let mut cmd = std::process::Command::new(&self_exe);
+                cmd.arg("__cless-dep").args(&args[1..]);
+                apply_unit_env(&mut cmd, u);
+                run_compile(&mut cmd, u, "dep");
+            }
         }
     }
 
@@ -230,6 +253,36 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
     program_argv.extend(program_args.iter().cloned());
     // 全程不 chdir：guest cwd = 调用者 cwd，与 cargo run 语义一致（E36 闭合）
     crate::cli::run_driver(args, program_argv, false, None, false, true)
+}
+
+/// cargo 编译期 env 契约（源码 env! 可读）：CARGO_PKG_* 全集 + crate/manifest
+/// 三员（cargo 对每次 rustc 调用都设；host 真 rustc 与 __cless-dep 两侧同款）。
+fn apply_unit_env(cmd: &mut std::process::Command, u: &Unit) {
+    cmd.envs(u.pkg_env.iter());
+    cmd.env("CARGO_CRATE_NAME", &u.lib_name);
+    cmd.env("CARGO_MANIFEST_DIR", &u.source_dir);
+    cmd.env(
+        "CARGO_MANIFEST_PATH",
+        u.source_dir.join("Cargo.toml").display().to_string(),
+    );
+}
+
+/// 编译子进程同步跑到底；启动/编译失败响亮点名构造（what = 产物类别）后退出。
+fn run_compile(cmd: &mut std::process::Command, u: &Unit, what: &str) {
+    let status = match cmd.status() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "mirvm: {what} 编译子进程启动失败（{} {}）: {e}",
+                u.package, u.version
+            );
+            std::process::exit(1);
+        }
+    };
+    if !status.success() {
+        eprintln!("mirvm: {what} 编译失败：{} {}", u.package, u.version);
+        std::process::exit(1);
+    }
 }
 
 /// 丢弃 Build 类 unit 并重映射所有边下标（drive 子集闸之后调用，理由见闸注释；

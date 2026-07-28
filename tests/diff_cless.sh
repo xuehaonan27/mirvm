@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# D15 P2 切① 对拍：MIRVM_DEPS=self（零 cargo 驱动骨架）vs MIRVM_DEPS=cargo
-# （三阶段旧路径），stdout/stderr/exit 逐字节一致。
+# D15 P2 对拍：MIRVM_DEPS=self（零 cargo 驱动）vs MIRVM_DEPS=cargo
+# （三阶段旧路径），stdout/stderr/exit 逐字节一致。三条：frontmatter 脚本
+# （切① fresh 求解）、registry 项目（切① 带锁）、path proc-macro 项目
+# （切②：proc-macro 真 rustc host 编译）。
 # 零 cargo 进程实证：self 腿以「PATH 只含 mirvm 的临时目录」+ MIRVM_OFFLINE=1
 # 跑——cargo 不在 PATH，自路径若偷起 cargo 立刻现形（itoa/memchr/cfg-if 本机
 # registry 已有，读穿离线够）。正式 self 腿前的预热跑（正常 PATH、在线）只为
@@ -70,6 +72,10 @@ diff_cless cless_script tests/fixtures/cless_script.rs 4
 # 2) cargo 项目夹具（带锁；先拷一份防污染仓；cargo 腿 --locked；guest 退出码 3）
 cp -r tests/fixtures/cless_proj "$TMP/proj"
 diff_cless cless_proj "$TMP/proj" 3 MIRVM_CARGO_LOCKED=1
+
+# 3) path proc-macro 项目夹具（切②；带锁；cargo 腿 --locked；guest 退出码 5）
+cp -r tests/fixtures/cless_pm "$TMP/pm"
+diff_cless cless_pm "$TMP/pm" 5 MIRVM_CARGO_LOCKED=1
 
 echo "== $pass passed, $fail failed =="
 [ $fail = 0 ]

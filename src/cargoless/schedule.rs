@@ -1,12 +1,14 @@
 //! `cargoless/schedule.rs` —— 拓扑排序 + 指纹 + 每 crate rustc 参数计算
-//! （D15 P2 切①，设计档 §3.6）。
+//! （D15 P2 切①/②，设计档 §3.6）。
 //!
-//! 产物布局：`cache_dir()/target/cargoless/<MIRVM_HOST>/debug/deps`——与 cargo
-//! 路径的 `target/mirvm` 双轨并存（P2→P4 迁移期两条路径互不踩产物）。
-//! 产物命名 `lib<lib_name>-<fp>.{rmeta,rlib}`：fp 是本文件的自定方案（cargo 的
+//! 产物布局：`cache_dir()/target/cargoless/<MIRVM_HOST>/debug/{deps,host-deps}`
+//! ——target 产物（deps）与 host 产物（host-deps：proc-macro 闭包，真 rustc
+//! 真 codegen）分目录，同名 fp 不撞；与 cargo 路径的 `target/mirvm` 双轨并存
+//! （P2→P4 迁移期两条路径互不踩产物）。
+//! 产物命名 `lib<lib_name>-<fp>.{rmeta,rlib,so}`：fp 是本文件的自定方案（cargo 的
 //! -C metadata 算法不稳定不追，设计档 §3.6——cargo 已退场，内部一致即可）。
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use super::manifest::{PackageManifest, ProfileFlags};
@@ -14,17 +16,21 @@ use super::resolve::{ResolvePlan, Unit};
 
 /// 产物布局（见文件头）。
 pub struct Layout {
+    /// target 产物目录（__cless-dep，-Zno-codegen rlib）。
     pub deps: PathBuf,
+    /// host 产物目录（proc-macro 及其依赖闭包，真 rustc 真 codegen）。
+    pub host_deps: PathBuf,
 }
 
 impl Layout {
     pub fn new() -> Self {
+        let base = crate::sysroot::cache_dir()
+            .join("target/cargoless")
+            .join(env!("MIRVM_HOST"))
+            .join("debug");
         Self {
-            deps: crate::sysroot::cache_dir()
-                .join("target/cargoless")
-                .join(env!("MIRVM_HOST"))
-                .join("debug")
-                .join("deps"),
+            deps: base.join("deps"),
+            host_deps: base.join("host-deps"),
         }
     }
 }
@@ -55,6 +61,44 @@ pub fn topo_order(plan: &ResolvePlan) -> Result<Vec<usize>, String> {
         return Err("内部不一致：编译单元依赖图有环（cargo 解析图本应为 DAG）".into());
     }
     Ok(order)
+}
+
+/// host 闭包（切②）：从每个 proc-macro unit 沿 dep 边 BFS 的可达集（含
+/// proc-macro 自身）。Build 类 unit 已被 strip_build_units 剥掉，闭包内全是
+/// Normal 边。闭包单元用真 rustc 真 codegen 编成 host 产物。
+pub fn host_closure(plan: &ResolvePlan) -> BTreeSet<usize> {
+    let mut set = BTreeSet::new();
+    let mut stack: Vec<usize> = plan
+        .units
+        .iter()
+        .enumerate()
+        .filter(|(_, u)| u.proc_macro)
+        .map(|(i, _)| i)
+        .collect();
+    while let Some(i) = stack.pop() {
+        if set.insert(i) {
+            stack.extend(plan.units[i].deps.iter().map(|d| d.unit));
+        }
+    }
+    set
+}
+
+/// target 编译集（切②）：从根边出发 BFS；proc-macro unit 对 target 是叶子
+/// ——不进集、也不钻入其内部（它的依赖是 host 依赖，不是根的 target 依赖；
+/// cargo 也不为 proc-macro crate 产 target rlib）。与 host 闭包可相交：
+/// 同一 unit 同时被 bin 与 proc-macro 用时两侧都编，双份产物分目录互不影响。
+pub fn target_units(plan: &ResolvePlan) -> BTreeSet<usize> {
+    let mut set = BTreeSet::new();
+    let mut stack: Vec<usize> = plan.root_deps.iter().map(|d| d.unit).collect();
+    while let Some(i) = stack.pop() {
+        if plan.units[i].proc_macro {
+            continue;
+        }
+        if set.insert(i) {
+            stack.extend(plan.units[i].deps.iter().map(|d| d.unit));
+        }
+    }
+    set
 }
 
 /// 每 unit 的内容指纹（按 topo 序算——dep 的 fp 先于依赖者产出）。
@@ -176,6 +220,33 @@ fn push_profile_flags(a: &mut Vec<String>, p: &ProfileFlags) {
     }
 }
 
+/// 真 rustc 绝对路径：编译期烘焙的默认 sysroot 自带（manifest.rs
+/// host_cfg_atoms 同款取法）。host 侧编译只信它——PATH 上的 rustc 可能是
+/// 别的工具链；proc-macro dylib 与解释会话的编译器版本必须严格一致
+/// （cargo_shim.rs wrapper 段同款纪律）。
+fn real_rustc() -> String {
+    PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT"))
+        .join("bin/rustc")
+        .display()
+        .to_string()
+}
+
+/// 一条 dep 边的 --extern 目标路径分派：dep 是 proc-macro → host-deps 的
+/// dylib（消费方编译期 dlopen 展开宏）；否则指本侧目录的 ext 产物。
+fn extern_path(layout: &Layout, dir: &Path, du: &Unit, fp: &str, ext: &str) -> String {
+    if du.proc_macro {
+        format!(
+            "{}/lib{}-{}{}",
+            layout.host_deps.display(),
+            du.lib_name,
+            fp,
+            std::env::consts::DLL_SUFFIX
+        )
+    } else {
+        format!("{}/lib{}-{}.{}", dir.display(), du.lib_name, fp, ext)
+    }
+}
+
 /// 一个 dep unit 的 rustc 参数（driver 起 `__cless-dep` 子进程喂
 /// cli::run_dep_compiler；形态对齐 cargo 对 target 依赖的调用 +
 /// cargo_shim.rs wrapper 段的 MIR sysroot/-Z 注入）。
@@ -226,12 +297,12 @@ pub fn dep_rustc_args(
     a.push(format!("dependency={deps}"));
     for d in &u.deps {
         let du = &plan.units[d.unit];
+        // proc-macro 边指 host-deps 的 dylib；普通边照旧 target .rmeta
         a.push("--extern".into());
         a.push(format!(
-            "{}={deps}/lib{}-{}.rmeta",
+            "{}={}",
             d.key.replace('-', "_"),
-            du.lib_name,
-            fps[d.unit]
+            extern_path(layout, &layout.deps, du, &fps[d.unit], "rmeta")
         ));
     }
     a.push("--sysroot".into());
@@ -281,19 +352,136 @@ pub fn bin_rustc_args(
     push_profile_flags(&mut a, &manifest.profile);
     for d in &plan.root_deps {
         let du = &plan.units[d.unit];
-        // bin 侧 --extern 用 .rlib（对齐 cargo 的最终 crate 调用形态）
+        // bin 侧 --extern 用 .rlib（对齐 cargo 的最终 crate 调用形态）；
+        // proc-macro 根边指 host-deps 的 dylib
         a.push("--extern".into());
         a.push(format!(
-            "{}={deps}/lib{}-{}.rlib",
+            "{}={}",
             d.key.replace('-', "_"),
-            du.lib_name,
-            fps[d.unit]
+            extern_path(layout, &layout.deps, du, &fps[d.unit], "rlib")
         ));
     }
     a.push("-L".into());
     a.push(format!("dependency={deps}"));
     a.push("--sysroot".into());
     a.push(sysroot.display().to_string());
+    a
+}
+
+/// host 闭包普通单元的真 rustc 参数（切②，proc-macro2 实锤形态）：
+/// `--crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no`
+/// （**无 debuginfo、无 prefer-dynamic**）真 codegen 产 host rlib；
+/// dep 边指 host-deps 的 .rmeta（proc-macro 边指 .so）。
+/// **不带 --sysroot**（真 rustc 用自家 sysroot）、不带任何 -Z。
+/// argv0 = 真 rustc 绝对路径（driver 直接 spawn，不经 __cless-dep）。
+pub fn host_rustc_args(
+    plan: &ResolvePlan,
+    unit_ix: usize,
+    profile: &ProfileFlags,
+    fps: &[String],
+    layout: &Layout,
+) -> Vec<String> {
+    let u = &plan.units[unit_ix];
+    let fp = &fps[unit_ix];
+    let host = layout.host_deps.display();
+    let mut a: Vec<String> = vec![real_rustc()];
+    a.push("--crate-name".into());
+    a.push(u.lib_name.clone());
+    a.push(format!("--edition={}", u.edition));
+    a.push(u.lib_path.display().to_string());
+    a.push("--crate-type=lib".into());
+    a.push("--emit=dep-info,metadata,link".into());
+    a.push("-C".into());
+    a.push("embed-bitcode=no".into());
+    for f in &u.features {
+        a.push("--cfg".into());
+        a.push(format!("feature=\"{f}\""));
+    }
+    if u.from_registry {
+        // registry 代码不归用户改，lint 全哑（cargo 同）；path 依赖照常告警
+        a.push("--cap-lints".into());
+        a.push("allow".into());
+    }
+    a.push("--check-cfg".into());
+    a.push("cfg(docsrs,test)".into());
+    push_profile_flags(&mut a, profile);
+    a.push("-C".into());
+    a.push(format!("metadata={fp}"));
+    a.push("-C".into());
+    a.push(format!("extra-filename=-{fp}"));
+    a.push("--out-dir".into());
+    a.push(host.to_string());
+    a.push("-L".into());
+    a.push(format!("dependency={host}"));
+    for d in &u.deps {
+        let du = &plan.units[d.unit];
+        a.push("--extern".into());
+        a.push(format!(
+            "{}={}",
+            d.key.replace('-', "_"),
+            extern_path(layout, &layout.host_deps, du, &fps[d.unit], "rmeta")
+        ));
+    }
+    a
+}
+
+/// proc-macro crate 本体的真 rustc 参数（切②，serde_derive 实锤五钉）：
+/// `--crate-type proc-macro --emit=dep-info,link -C prefer-dynamic
+/// -C embed-bitcode=no`（**无 debuginfo**）+ 末尾裸 `--extern proc_macro`
+/// （编译器内建桥 crate）；dep 边指 host-deps 的 .rlib（**真链接**进 dylib）。
+/// 不带 --sysroot/-Z；argv0 = 真 rustc 绝对路径。
+pub fn proc_macro_rustc_args(
+    plan: &ResolvePlan,
+    unit_ix: usize,
+    profile: &ProfileFlags,
+    fps: &[String],
+    layout: &Layout,
+) -> Vec<String> {
+    let u = &plan.units[unit_ix];
+    let fp = &fps[unit_ix];
+    let host = layout.host_deps.display();
+    let mut a: Vec<String> = vec![real_rustc()];
+    a.push("--crate-name".into());
+    a.push(u.lib_name.clone());
+    a.push(format!("--edition={}", u.edition));
+    a.push(u.lib_path.display().to_string());
+    a.push("--crate-type=proc-macro".into());
+    a.push("--emit=dep-info,link".into());
+    a.push("-C".into());
+    a.push("prefer-dynamic".into());
+    a.push("-C".into());
+    a.push("embed-bitcode=no".into());
+    for f in &u.features {
+        a.push("--cfg".into());
+        a.push(format!("feature=\"{f}\""));
+    }
+    if u.from_registry {
+        a.push("--cap-lints".into());
+        a.push("allow".into());
+    }
+    a.push("--check-cfg".into());
+    a.push("cfg(docsrs,test)".into());
+    push_profile_flags(&mut a, profile);
+    a.push("-C".into());
+    a.push(format!("metadata={fp}"));
+    a.push("-C".into());
+    a.push(format!("extra-filename=-{fp}"));
+    a.push("--out-dir".into());
+    a.push(host.to_string());
+    a.push("-L".into());
+    a.push(format!("dependency={host}"));
+    for d in &u.deps {
+        let du = &plan.units[d.unit];
+        a.push("--extern".into());
+        a.push(format!(
+            "{}={}",
+            d.key.replace('-', "_"),
+            extern_path(layout, &layout.host_deps, du, &fps[d.unit], "rlib")
+        ));
+    }
+    // 末尾裸 --extern proc_macro：编译器内建桥，从真 rustc 自家 sysroot 解析
+    a.push("--extern".into());
+    a.push("proc_macro".into());
     a
 }
 
@@ -391,6 +579,7 @@ mod tests {
     fn layout() -> Layout {
         Layout {
             deps: PathBuf::from("/tmp/cless/deps"),
+            host_deps: PathBuf::from("/tmp/cless/host-deps"),
         }
     }
 
@@ -535,5 +724,183 @@ mod tests {
             !a.windows(2)
                 .any(|w| w[0] == "-C" && w[1].starts_with("metadata="))
         );
+    }
+
+    /// proc-macro 场景（serde 家族形状）：shared 双用（bin 与 my_derive 都
+    /// 用）、pm_helper 仅 host、my_derive = proc-macro、uses_pm 是带
+    /// proc-macro 边的普通 target dep。
+    fn pm_plan() -> ResolvePlan {
+        let shared = unit("shared", "1.0.0", true, &[], vec![]);
+        let dep = |key: &str, unit: usize| UnitDep {
+            key: key.into(),
+            unit,
+            class: UnitClass::Normal,
+        };
+        let pm_helper = unit("pm-helper", "1.0.0", true, &[], vec![dep("shared", 0)]);
+        let mut my_derive = unit(
+            "my-derive",
+            "1.0.0",
+            true,
+            &[],
+            vec![dep("pm_helper", 1), dep("shared", 0)],
+        );
+        my_derive.proc_macro = true;
+        let uses_pm = unit(
+            "uses-pm",
+            "1.0.0",
+            true,
+            &[],
+            vec![dep("my_derive", 2), dep("shared", 0)],
+        );
+        plan_with(
+            vec![shared, pm_helper, my_derive, uses_pm],
+            vec![dep("uses_pm", 3), dep("shared", 0), dep("my_derive", 2)],
+        )
+    }
+
+    #[test]
+    fn host_target_partition() {
+        let plan = pm_plan();
+        let host = host_closure(&plan);
+        let target = target_units(&plan);
+        assert_eq!(host, BTreeSet::from([0, 1, 2]), "proc-macro 闭包全进 host");
+        assert_eq!(
+            target,
+            BTreeSet::from([0, 3]),
+            "proc-macro 本体与其独有依赖（pm_helper）不进 target 集"
+        );
+        assert!(
+            host.contains(&0) && target.contains(&0),
+            "双用 unit（shared）两侧都在"
+        );
+    }
+
+    #[test]
+    fn proc_macro_args_five_pins() {
+        let plan = pm_plan();
+        let fps = fingerprints(&plan, &ProfileFlags::default(), "s").unwrap();
+        let lo = layout();
+        let a = proc_macro_rustc_args(&plan, 2, &ProfileFlags::default(), &fps, &lo);
+        assert!(a[0].ends_with("bin/rustc"), "argv0 = 真 rustc: {}", a[0]);
+        assert!(a.iter().any(|x| x == "--crate-type=proc-macro"));
+        assert!(a.iter().any(|x| x == "--emit=dep-info,link"));
+        assert!(
+            a.windows(2)
+                .any(|w| w[0] == "-C" && w[1] == "prefer-dynamic")
+        );
+        assert!(
+            a.windows(2)
+                .any(|w| w[0] == "-C" && w[1] == "embed-bitcode=no")
+        );
+        // 无 debuginfo、无 --sysroot、无 -Z
+        assert!(
+            !a.windows(2)
+                .any(|w| w[0] == "-C" && w[1].starts_with("debuginfo"))
+        );
+        assert!(!a.iter().any(|x| x == "--sysroot"));
+        assert!(!a.iter().any(|x| x.starts_with("-Z")));
+        // 末尾裸 --extern proc_macro（最后一钉）
+        assert_eq!(a.last().unwrap(), "proc_macro");
+        assert_eq!(a[a.len() - 2], "--extern");
+        // dep 边指 host-deps 的 .rlib（真链接）
+        let ext = format!(
+            "pm_helper=/tmp/cless/host-deps/libpm_helper-{}.rlib",
+            fps[1]
+        );
+        assert!(
+            a.windows(2).any(|w| w[0] == "--extern" && w[1] == ext),
+            "缺 --extern: {a:?}"
+        );
+        // --out-dir 指 host-deps；registry 单元 cap-lints
+        assert!(
+            a.windows(2)
+                .any(|w| w[0] == "--out-dir" && w[1] == "/tmp/cless/host-deps")
+        );
+        assert!(
+            a.windows(2)
+                .any(|w| w[0] == "--cap-lints" && w[1] == "allow")
+        );
+    }
+
+    #[test]
+    fn host_rlib_args_shape() {
+        let plan = pm_plan();
+        let fps = fingerprints(&plan, &ProfileFlags::default(), "s").unwrap();
+        let lo = layout();
+        let a = host_rustc_args(&plan, 1, &ProfileFlags::default(), &fps, &lo);
+        assert!(a[0].ends_with("bin/rustc"), "argv0 = 真 rustc: {}", a[0]);
+        assert!(a.iter().any(|x| x == "--crate-type=lib"));
+        assert!(a.iter().any(|x| x == "--emit=dep-info,metadata,link"));
+        assert!(
+            a.windows(2)
+                .any(|w| w[0] == "-C" && w[1] == "embed-bitcode=no")
+        );
+        // 无 prefer-dynamic、无 debuginfo、无 --sysroot、无 -Z
+        assert!(!a.iter().any(|x| x == "prefer-dynamic"));
+        assert!(
+            !a.windows(2)
+                .any(|w| w[0] == "-C" && w[1].starts_with("debuginfo"))
+        );
+        assert!(!a.iter().any(|x| x == "--sysroot"));
+        assert!(!a.iter().any(|x| x.starts_with("-Z")));
+        // dep 边指 host-deps 的 .rmeta
+        let ext = format!("shared=/tmp/cless/host-deps/libshared-{}.rmeta", fps[0]);
+        assert!(
+            a.windows(2).any(|w| w[0] == "--extern" && w[1] == ext),
+            "缺 --extern: {a:?}"
+        );
+        assert!(
+            a.windows(2)
+                .any(|w| w[0] == "--out-dir" && w[1] == "/tmp/cless/host-deps")
+        );
+    }
+
+    #[test]
+    fn target_and_bin_proc_macro_edges_point_to_dylib() {
+        let plan = pm_plan();
+        let fps = fingerprints(&plan, &ProfileFlags::default(), "s").unwrap();
+        let lo = layout();
+        let so = format!(
+            "my_derive=/tmp/cless/host-deps/libmy_derive-{}{}",
+            fps[2],
+            std::env::consts::DLL_SUFFIX
+        );
+        // target dep 的 proc-macro 边 → host-deps 的 dylib；普通边照旧 .rmeta
+        let a = dep_rustc_args(
+            &plan,
+            3,
+            &ProfileFlags::default(),
+            &fps,
+            Path::new("/sys"),
+            &lo,
+        );
+        assert!(
+            a.windows(2).any(|w| w[0] == "--extern" && w[1] == so),
+            "dep 缺 .so --extern: {a:?}"
+        );
+        let ext = format!("shared=/tmp/cless/deps/libshared-{}.rmeta", fps[0]);
+        assert!(a.windows(2).any(|w| w[0] == "--extern" && w[1] == ext));
+        // bin 的 proc-macro 根边 → dylib；普通根边照旧 .rlib
+        let manifest = PackageManifest::parse(
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [dependencies]\nuses-pm = \"1\"\n",
+            Path::new("/tmp/demo"),
+        )
+        .unwrap();
+        let a = bin_rustc_args(
+            &manifest,
+            &plan,
+            &fps,
+            Path::new("/sys"),
+            &lo,
+            "demo",
+            Path::new("/tmp/demo/src/main.rs"),
+        );
+        assert!(
+            a.windows(2).any(|w| w[0] == "--extern" && w[1] == so),
+            "bin 缺 .so --extern: {a:?}"
+        );
+        let ext = format!("uses_pm=/tmp/cless/deps/libuses_pm-{}.rlib", fps[3]);
+        assert!(a.windows(2).any(|w| w[0] == "--extern" && w[1] == ext));
     }
 }
