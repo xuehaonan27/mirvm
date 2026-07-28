@@ -1439,6 +1439,69 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   fallback 语义，与 D14 store 合并评审时补）；git 源/alt registry/
   workspace 多包图/source replacement 归 P5 响亮拒绝。
 
+### 7.29 2026-07-27：D15 P2 收口——编译调度全生命周期零 cargo 化，smoke 24 双轨逐字节闭合
+
+- **落地（`f74233c`/`9d2eda6`/`d0b9d1a` + 切④修复）**：`src/cargoless/`
+  新增 schedule（拓扑 + 内容指纹 + 每 crate rustc 参数）、driver
+  （`MIRVM_DEPS=self` 的 `mirvm run` 新路径，替代 cargo_shim 三阶段；
+  假二进制与 runner 协议在新路径整体退役，E36 以构造闭合——guest
+  cwd = 调用者 cwd）、buildrs（build.rs 全生命周期）；proc-macro
+  host 编译并入 schedule/driver。验收轴：`tests/corpus_deps_pair.sh`
+  （每条目 cargo 腿 vs self 腿 stdout/stderr/exit 逐字节）+
+  `tests/diff_cless.sh` 六夹具（self 腿 PATH 只含 mirvm +
+  `MIRVM_OFFLINE=1`，实证零 cargo 进程）。
+- **cargo 编译调度语义实证清单**（全部探针实锤）：
+  - **host/target 二分**：proc-macro 闭包 ∪ build-deps 闭包真 rustc
+    真 codegen；target 侧照旧 `-Zno-codegen` metadata-only rlib；同
+    unit 双用（bin 与 proc-macro 共引）双侧各编，产物分目录
+    （deps / host-deps）。
+  - **proc-macro 五钉**（serde_derive 实锤）：`--crate-type proc-macro`、
+    `-C prefer-dynamic`、`--emit=dep-info,link`、末尾裸
+    `--extern proc_macro`、消费方 `--extern` 指 `.so`；host rlib
+    （proc-macro2 实锤）无 prefer-dynamic 无 debuginfo、dep 边指
+    `.rmeta`。
+  - **build.rs 生命周期**：编译形态（`--crate-name build_script_build`、
+    `--crate-type bin`、`--emit=dep-info,link`）+ 执行 env 全集
+    （CARGO_CFG_* 按 `rustc --print cfg` 原子通用映射 +
+    **CARGO_FEATURE_\<NAME\>=1 逐启用 feature** + CARGO_PKG_* +
+    OUT_DIR/HOST/TARGET/PROFILE 等）+ cwd=包根 + stderr 仅失败回吐。
+  - **指令传播规则**（probe_link 实证，cargo 1.98）：`-l` 只进本包；
+    `-L` 进本包 + 传递依赖者；rustc-cfg/check-cfg/rustc-env/link-arg
+    只进本包；metadata 只给**直接依赖者**的 build script
+    （`DEP_<LINKS>_<K>`）；cargo **不**自动注入 `DEP_*_ROOT`（-sys
+    自发 metadata=root 惯例）、**不**对 rustc-cfg 自动补 check-cfg；
+    legacy `cargo:` 未知键按 metadata；warning 只 path 包显示。
+  - **links 互斥**（cargo 同）与 `build = false` 语义（切①，cfg-if
+    实锤：键在场 ≠ 有 build.rs）。
+  - **指纹 v1 粗粒度**：内容寻址 fp 含**排序后各 dep fp**（传递传播
+    = depsimage pre-key 不变量）；build.rs 每次重跑（rerun-if 精细化
+    归 P3），build script 二进制按 fp 缓存。
+- **对拍暴露的修复四枚**：
+  - StrongDep 强形 `x/y` 激活可选依赖须视同指定其同名隐式 feature
+    （k256 `ecdsa-core/signing` ⇒ `#[cfg(feature = "ecdsa-core")]` 实锤；
+    cargo「视同指定 foo feature」语义）。
+  - build.rs env 缺 `CARGO_FEATURE_<NAME>=1`（cranelift-codegen 按
+    `CARGO_FEATURE_PULLEY` 决定生成 pulley_inst_gen.rs 实锤）。
+  - 隐式 feature 裸名引用激活可选依赖时同名 cfg 旗必补（切③，serde
+    facade `#[cfg(feature = "serde_derive")]` 实锤）+ facade 再导出
+    proc-macro 时 rustc 按 hash 找 `.so` 需 `-L host-deps`（E0463）。
+  - **cargo 腿既有 bug**：phase_wrapper 劫持 ad-hoc 探测编译（rustix
+    1.1.4 build.rs 读 RUSTC_WRAPPER 后 spawn `$WRAPPER $RUSTC
+    --emit=metadata -o <f> -` 探 nightly 特性）→ run_dep_compiler 缺
+    `--out-dir` panic 与探针 stdin writeln 竞态成 EPIPE（负载高炸、
+    空载假否，两态皆错）；修 = 无 `--out-dir` 或 stdin 源一律透传
+    真 rustc（探针语义 = 这套工具链认不认 X，只能真 rustc 回答）。
+- **P2 闭合验收**：`corpus_deps_pair --tier smoke` **24/24** 双腿
+  stdout/stderr/exit 逐字节一致；diff_cless 6/6；cargo test 127；
+  run.sh fast 8/8。P2 整期按设计档 §5 闭合。
+- **边界记账（不冒充闭合）**：RUSTFLAGS / CARGO_ENCODED_RUSTFLAGS 未接
+  （hexyl/tokei 类 full 层归 P3）；`.cargo/config.toml` rustflags 子集
+  未接（P3）；编译调度串行 v1（并行归 P3）；build script 的
+  check-cfg feature 值表填启用集（registry cap-lints 兜底；path 包
+  build.rs 用未启用 feature 的 cfg 比 cargo 多一条 unexpected_cfgs
+  lint）；v1 粗指纹固有限度（build.rs 输出随环境漂移而源未变时 rlib
+  可能陈旧——与 cargo rerun-if-env 同类问题，P3 rerun-if 闭合）。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT
