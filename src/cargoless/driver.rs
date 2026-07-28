@@ -3,20 +3,24 @@
 //! RUSTC_WRAPPER + runner 协议）：
 //!
 //! ```text
-//! resolve（P1 求解器）→ links 互斥校验 → 逐 unit 按 topo 序调度：
+//! resolve（P1 求解器）→ links 互斥校验 → unit 级 Kahn 就绪队列并行调度
+//! （P3 切⑤c：N 个 worker，MIRVM_CLESS_JOBS 覆盖，缺省 available_parallelism；
+//! =1 与旧串行 topo 序逐位一致——对拍调试锚。unit 的全部依赖完成即就绪，
+//! unit 内部阶段保持串行）：
 //!   build.rs 全生命周期（切③ + P3 切⑤b 精细增量）：host 真编译 build script
 //!     （fp 命中跳过）→ rerun 判定（buildrs::should_rerun，cargo 同语义——
 //!     存档在 build/<pkg>-<fp>/{output.txt,rerun.txt}，跳过则从 output.txt
 //!     重解析回放 BuildOutput，warning 门控同款）→ 以 cargo 兼容 env 执行 →
-//!     指令解析 → BuildOutput 入表（本 unit 记入 re_ran，links 传递判定用）
+//!     指令解析 → BuildOutput 回传主线程入完成表（本 unit 记入 re_ran，
+//!     links 传递判定用）
 //!   host 集（proc-macro 闭包 ∪ build-deps 闭包）→ spawn 真 rustc 真 codegen
 //!   target 集 → 起 `__cless-dep` 子进程（cli::run_dep_compiler：
 //!   in-process rustc_driver + global_asm 抽取）
 //!   （双侧编译都吃本 unit BuildOutput 修正：cfg/check-cfg/link 旗进 argv，
 //!   OUT_DIR/rustc-env 进子进程 env——proc-macro2 的 build.rs cfg 进其 host
 //!   编译，serde_derive 类全链解锁的关键）
-//! → 根包 build.rs 同生命周期 → bin 走既有 MirvmCallbacks 会话
-//!   （OUT_DIR/rustc-env/cfg 修正同样进 bin 会话）
+//! → 全 unit 汇合后回主线程：根包 build.rs 同生命周期 → bin 走既有
+//!   MirvmCallbacks 会话（OUT_DIR/rustc-env/cfg 修正同样进 bin 会话）
 //! ```
 //!
 //! 传播规则（-l 只进本包、-L 进传递依赖者、metadata 只给直接依赖者的
@@ -128,8 +132,10 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
         },
     };
 
-    // 4. 指纹 + 拓扑序，逐 unit 按双侧编译集 + build.rs 生命周期调度（串行
-    // v1；并行调度归后续切片）
+    // 4. 指纹 + 依赖图，unit 级 Kahn 就绪队列并行调度（D15 P3 切⑤c）：
+    // unit 的全部依赖「完成」（build.rs 生命周期 + host/target 编译按集合
+    // 归属全结束）即就绪；N 个 worker 各把领到的 unit 的完整流水线
+    // （build.rs 判定/执行 → 编译）跑完，完成表只在主线程汇集。
     let layout = Layout::new();
     for d in [&layout.deps, &layout.host_deps, &layout.build_root] {
         if let Err(e) = std::fs::create_dir_all(d) {
@@ -158,123 +164,74 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
             std::process::exit(1);
         }
     };
-    let order = match schedule::topo_order(&plan) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("mirvm: {e}");
-            std::process::exit(1);
-        }
-    };
     let host_set = schedule::host_closure(&plan);
     let target_set = schedule::target_units(&plan);
     let build_set = schedule::build_closure(&plan, manifest.has_build_script);
     let self_exe = std::env::current_exe().expect("current_exe 失败");
+    let jobs = cless_jobs();
+    let (dependents, mut indeg) = schedule::dep_graph(&plan);
+    // worker 共享的只读上下文（thread::scope 借用，调度期全程不可变——完成
+    // 表不跨线程，无锁必要）。线程安全核对（切⑤c 设计钉）：
+    // - driver 进程内**没有** rustc 会话——编译全在 __cless-dep/真 rustc
+    //   子进程，worker 间无编译器全局状态；
+    // - env 写入全在 Command 实例上（per-child，线程安全）；worker 内禁止
+    //   std::env::set_var（全 crate 核对：set_var 只在 bin 阶段 = 汇合后
+    //   主线程；build script 的 env 全走 Command.envs）。std::env::var
+    //   读取（rerun 门 env_get、build_script_env 的 CARGO_HOME 等）与
+    //   set_var 不并发，安全；
+    // - 目录创建 create_dir_all 幂等；产物内容寻址（fp 盖戳），不同 unit
+    //   不同 stem 无两名冲突；同 fp 重复 unit（同包同版本同 feature 的
+    //   Normal/Build 双 unit——fp 不含 class 会撞名）由 FpLocks 把整个
+    //   流水线互斥：后到者开工时产物已齐、rerun 门读存档跳过，与串行
+    //   「先行者跑、后到者全跳过」逐字节同效；
+    // - MIRVM_DEBUG_BLDRS 观测行与子进程诊断在 jobs>1 时允许交错（debug
+    //   旋钮；对拍轴 = jobs=1 与串行同序 + 默认 N 的 corpus 判官——
+    //   program 输出在汇合后的 bin 会话，天然串行）。
+    let ctx = SharedCtx {
+        plan: &plan,
+        profile: &manifest.profile,
+        fps: &fps,
+        layout: &layout,
+        sysroot: &sysroot,
+        rustflags: &rustflags,
+        self_exe: &self_exe,
+        host_set: &host_set,
+        target_set: &target_set,
+        build_set: &build_set,
+        fp_locks: FpLocks::default(),
+    };
+    let tables = if plan.units.is_empty() {
+        UnitTables::default()
+    } else {
+        match schedule::run_scheduler(
+            UnitTables::default(),
+            &dependents,
+            &mut indeg,
+            jobs.min(plan.units.len()),
+            |t: &UnitTables, ix| build_work_msg(&ctx, t, ix),
+            |msg| run_unit_pipeline(msg, &ctx),
+            |t, ix, done| {
+                if let Some(bo) = done.bo {
+                    t.outputs.insert(ix, bo);
+                }
+                if done.ran {
+                    t.re_ran.insert(ix);
+                }
+            },
+        ) {
+            Ok(t) => t,
+            // 第一枚编译错误（worker 回传原文）——与串行同形响亮点名后退出
+            Err(e) => {
+                eprintln!("mirvm: {e}");
+                std::process::exit(1);
+            }
+        }
+    };
     // unit 下标 → 已执行的 BuildOutput（本 unit 编译修正 + 依赖者 -L 汇集 +
-    // 直接依赖者 build script 的 DEP_* 三处消费）
-    let mut outputs: BTreeMap<usize, BuildOutput> = BTreeMap::new();
-    // 本次会话真正重跑了 build.rs 的 unit（切⑤b 条件 4 links 传递：直接依赖
-    // 中带 links 的包在 re_ran ⇒ 本包也重跑，DEP_* 输入可能变）
-    let mut re_ran: BTreeSet<usize> = BTreeSet::new();
-    for ix in order {
-        let u = &plan.units[ix];
-        let stem = format!("lib{}-{}", u.lib_name, fps[ix]);
-        // 4a. build.rs 生命周期：参与构建图的 unit 才跑（孤儿 build-dep——
-        // 父包没 build.rs 的那种——cargo 本不编译，跑它的 build.rs 是越权
-        // 执行）。topo 序保证其 build-deps（及其 build.rs）都已完成。
-        if u.has_build_script
-            && (host_set.contains(&ix) || target_set.contains(&ix) || build_set.contains(&ix))
-        {
-            let (bo, ran) = run_build_lifecycle(
-                u,
-                ix,
-                &plan,
-                &manifest.profile,
-                &fps,
-                &outputs,
-                &layout,
-                &re_ran,
-            );
-            if ran {
-                re_ran.insert(ix);
-            }
-            outputs.insert(ix, bo);
-        }
-        let bo = outputs.get(&ix);
-        // 4b. host 侧：proc-macro 本体产 dylib；闭包普通单元（含 build-deps
-        // 闭包）产 host rlib
-        if host_set.contains(&ix) || build_set.contains(&ix) {
-            let hit = if u.proc_macro {
-                layout
-                    .host_deps
-                    .join(format!("{stem}{}", std::env::consts::DLL_SUFFIX))
-                    .is_file()
-            } else {
-                layout.host_deps.join(format!("{stem}.rmeta")).is_file()
-                    && layout.host_deps.join(format!("{stem}.rlib")).is_file()
-            };
-            if !hit {
-                let searches = buildrs::aggregate_link_searches(&plan, &u.deps, &outputs);
-                let (args, what) = if u.proc_macro {
-                    (
-                        schedule::proc_macro_rustc_args(
-                            &plan,
-                            ix,
-                            &manifest.profile,
-                            &fps,
-                            &layout,
-                            bo,
-                            &searches,
-                        ),
-                        "proc-macro",
-                    )
-                } else {
-                    (
-                        schedule::host_rustc_args(
-                            &plan,
-                            ix,
-                            &manifest.profile,
-                            &fps,
-                            &layout,
-                            bo,
-                            &searches,
-                        ),
-                        "host dep",
-                    )
-                };
-                let mut cmd = std::process::Command::new(&args[0]);
-                cmd.args(&args[1..]);
-                apply_unit_env(&mut cmd, u);
-                apply_build_env(&mut cmd, &layout, u, &fps[ix], bo);
-                run_compile(&mut cmd, u, what);
-            }
-        }
-        // 4c. target 侧：照旧 __cless-dep（-Zno-codegen rlib）
-        if target_set.contains(&ix) {
-            if layout.deps.join(format!("{stem}.rmeta")).is_file()
-                && layout.deps.join(format!("{stem}.rlib")).is_file()
-            {
-                // 指纹命中：内容寻址，同名产物即同内容，跳过
-            } else {
-                let searches = buildrs::aggregate_link_searches(&plan, &u.deps, &outputs);
-                let args = schedule::dep_rustc_args(
-                    &plan,
-                    ix,
-                    &manifest.profile,
-                    &fps,
-                    &sysroot,
-                    &layout,
-                    bo,
-                    &searches,
-                    &rustflags,
-                );
-                let mut cmd = std::process::Command::new(&self_exe);
-                cmd.arg("__cless-dep").args(&args[1..]);
-                apply_unit_env(&mut cmd, u);
-                apply_build_env(&mut cmd, &layout, u, &fps[ix], bo);
-                run_compile(&mut cmd, u, "dep");
-            }
-        }
-    }
+    // 直接依赖者 build script 的 DEP_* 三处消费）；re_ran = 本次会话真正
+    // 重跑了 build.rs 的 unit（切⑤b 条件 4 links 传递：直接依赖中带 links
+    // 的包在 re_ran ⇒ 本包也重跑，DEP_* 输入可能变）
+    let UnitTables { outputs, re_ran } = tables;
 
     // 5. 根包 build.rs 同生命周期（根不是 unit：边表取 plan.root_deps，
     // fp 单算；OUT_DIR/rustc-env/cfg 修正进 bin 会话）
@@ -438,62 +395,270 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
     crate::cli::run_driver(args, program_argv, false, None, false, true)
 }
 
+/// 并发度（切⑤c）：MIRVM_CLESS_JOBS 覆盖，缺省 available_parallelism
+/// （拿不到回退 1）。**=1 时派发序与旧串行 topo 序逐位一致——对拍调试锚，
+/// 钉**。非法值（非正整数）响亮拒绝退出。
+fn cless_jobs() -> usize {
+    match std::env::var("MIRVM_CLESS_JOBS") {
+        Ok(raw) => match raw.parse::<usize>() {
+            Ok(n) if n >= 1 => n,
+            _ => {
+                eprintln!("mirvm: MIRVM_CLESS_JOBS={raw} 无效（应为正整数）");
+                std::process::exit(1);
+            }
+        },
+        Err(_) => std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1),
+    }
+}
+
+/// worker 共享的只读上下文（thread::scope 借用；调度期全程不可变——完成表
+/// 不跨线程，无锁必要）。线程安全核对明细见 drive() 第 4 段头注。
+struct SharedCtx<'a> {
+    plan: &'a ResolvePlan,
+    profile: &'a super::manifest::ProfileFlags,
+    fps: &'a [String],
+    layout: &'a Layout,
+    sysroot: &'a Path,
+    rustflags: &'a [String],
+    self_exe: &'a Path,
+    host_set: &'a BTreeSet<usize>,
+    target_set: &'a BTreeSet<usize>,
+    build_set: &'a BTreeSet<usize>,
+    /// 同 fp 重复 unit 的流水线互斥锁表（drive() 头注第三条）。
+    fp_locks: FpLocks,
+}
+
+/// fp → 互斥锁的懒建表：同包同版本同 feature 的 Normal/Build 双 unit 的
+/// fp 相同（fp 不含 class）会撞产物名/build 目录——整个流水线按 fp 互斥，
+/// 后到者开工时产物已齐、rerun 门读存档跳过，与串行「先行者跑、后到者
+/// 全跳过」同效。锁表本体只在取锁瞬间持有；唯一 fp 的锁零竞争。
+#[derive(Default)]
+struct FpLocks(std::sync::Mutex<BTreeMap<String, std::sync::Arc<std::sync::Mutex<()>>>>);
+
+impl FpLocks {
+    fn lock_for(&self, fp: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+        self.0
+            .lock()
+            .expect("fp 锁表中毒（内部错误）")
+            .entry(fp.to_string())
+            .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    }
+}
+
+/// 完成表（只归主线程所有：worker 开工所需的依赖侧输入——DEP_* env、
+/// 传递 -L 汇集、links 重跑名单——由主线程在**派发时**从此表算好随
+/// WorkMsg 带走；此刻全部依赖必已完成，取值与串行版在 unit 开头算的
+/// 逐位相等）。
+#[derive(Default)]
+struct UnitTables {
+    /// unit 下标 → 已执行的 BuildOutput。
+    outputs: BTreeMap<usize, BuildOutput>,
+    /// 本次会话真正重跑了 build.rs 的 unit。
+    re_ran: BTreeSet<usize>,
+}
+
+/// 一个 unit 的开工令（主线程派发时算好全部依赖侧输入，见 UnitTables 注；
+/// fp 命中的 unit 也照算——纯计算无输出，换来 worker 零访问完成表）。
+struct WorkMsg {
+    ix: usize,
+    /// 跑 build.rs 生命周期（has_build_script ∧ 在任一编译集；孤儿
+    /// build-dep 不跑——父包没 build.rs 的那种 cargo 本不编译，跑它的
+    /// build.rs 是越权执行）
+    run_build: bool,
+    /// 直接依赖的 DEP_* env（dep_metadata_env 同口径；run_build=false 时空）
+    dep_env: BTreeMap<String, String>,
+    /// 直接依赖中带 links 且本会话已重跑的包名（rerun 门条件 4）
+    dep_links_reran: Vec<String>,
+    /// 传递 -L 汇集（aggregate_link_searches 同口径；不在任何编译集时空）
+    searches: Vec<String>,
+}
+
+/// 一个 unit 的完成回执（worker → 主线程）。
+struct PerUnitDone {
+    /// build.rs 产物（没跑 build.rs 的 unit 为 None）
+    bo: Option<BuildOutput>,
+    /// 本次是否真重跑了 build.rs
+    ran: bool,
+}
+
+/// 派发令构造（主线程）：集合归属判定 + 依赖侧输入计算。
+fn build_work_msg(ctx: &SharedCtx, t: &UnitTables, ix: usize) -> WorkMsg {
+    let u = &ctx.plan.units[ix];
+    let in_host = ctx.host_set.contains(&ix) || ctx.build_set.contains(&ix);
+    let in_target = ctx.target_set.contains(&ix);
+    let run_build = u.has_build_script && (in_host || in_target);
+    let (dep_env, dep_links_reran) = if run_build {
+        (
+            buildrs::dep_metadata_env(ctx.plan, &u.deps, &t.outputs),
+            // 条件 4 links 传递：直接依赖中带 links 且本次重跑了的包
+            // （DEP_* 只给直接依赖者——传递再远一层由各层自己判定覆盖）
+            u.deps
+                .iter()
+                .filter(|d| t.re_ran.contains(&d.unit) && ctx.plan.units[d.unit].links.is_some())
+                .map(|d| ctx.plan.units[d.unit].package.clone())
+                .collect(),
+        )
+    } else {
+        (BTreeMap::new(), Vec::new())
+    };
+    let searches = if in_host || in_target {
+        buildrs::aggregate_link_searches(ctx.plan, &u.deps, &t.outputs)
+    } else {
+        Vec::new()
+    };
+    WorkMsg {
+        ix,
+        run_build,
+        dep_env,
+        dep_links_reran,
+        searches,
+    }
+}
+
+/// 一个 unit 的完整流水线（worker 线程）：fp 锁互斥（同 fp 重复 unit）→
+/// build.rs 生命周期 → host 侧编译 → target 侧编译；命中的阶段照旧跳过
+/// （**锁内**查盘——同 fp 先行者的产物必须可见才算命中）。失败回传错误
+/// 原文（「mirvm: 」前缀由主线程汇合后补，与串行文案逐字节同形）。
+fn run_unit_pipeline(msg: WorkMsg, ctx: &SharedCtx) -> Result<PerUnitDone, String> {
+    let ix = msg.ix;
+    let u = &ctx.plan.units[ix];
+    let fp = &ctx.fps[ix];
+    // 同 fp 重复 unit 互斥（锁中毒只可能来自先行 worker 恐慌——内部错误已
+    // 在收尾，取内层继续，不叠加失败）
+    let fp_mutex = ctx.fp_locks.lock_for(fp);
+    let _fp_guard = fp_mutex.lock().unwrap_or_else(|e| e.into_inner());
+    let stem = format!("lib{}-{}", u.lib_name, fp);
+    let mut done = PerUnitDone {
+        bo: None,
+        ran: false,
+    };
+    // build.rs 生命周期（就绪判定保证其 build-deps 及其 build.rs 都已完成）
+    if msg.run_build {
+        let (bo, ran) = run_build_lifecycle(u, ix, ctx, msg.dep_env, msg.dep_links_reran)?;
+        done.ran = ran;
+        done.bo = Some(bo);
+    }
+    let bo = done.bo.as_ref();
+    // host 侧：proc-macro 本体产 dylib；闭包普通单元（含 build-deps 闭包）产 host rlib
+    if ctx.host_set.contains(&ix) || ctx.build_set.contains(&ix) {
+        let hit = if u.proc_macro {
+            ctx.layout
+                .host_deps
+                .join(format!("{stem}{}", std::env::consts::DLL_SUFFIX))
+                .is_file()
+        } else {
+            ctx.layout.host_deps.join(format!("{stem}.rmeta")).is_file()
+                && ctx.layout.host_deps.join(format!("{stem}.rlib")).is_file()
+        };
+        if !hit {
+            let (args, what) = if u.proc_macro {
+                (
+                    schedule::proc_macro_rustc_args(
+                        ctx.plan,
+                        ix,
+                        ctx.profile,
+                        ctx.fps,
+                        ctx.layout,
+                        bo,
+                        &msg.searches,
+                    ),
+                    "proc-macro",
+                )
+            } else {
+                (
+                    schedule::host_rustc_args(
+                        ctx.plan,
+                        ix,
+                        ctx.profile,
+                        ctx.fps,
+                        ctx.layout,
+                        bo,
+                        &msg.searches,
+                    ),
+                    "host dep",
+                )
+            };
+            let mut cmd = std::process::Command::new(&args[0]);
+            cmd.args(&args[1..]);
+            apply_unit_env(&mut cmd, u);
+            apply_build_env(&mut cmd, ctx.layout, u, fp, bo);
+            run_compile(&mut cmd, u, what)?;
+        }
+    }
+    // target 侧：照旧 __cless-dep（-Zno-codegen rlib）
+    if ctx.target_set.contains(&ix) {
+        // 指纹命中：内容寻址，同名产物即同内容，跳过
+        let hit = ctx.layout.deps.join(format!("{stem}.rmeta")).is_file()
+            && ctx.layout.deps.join(format!("{stem}.rlib")).is_file();
+        if !hit {
+            let args = schedule::dep_rustc_args(
+                ctx.plan,
+                ix,
+                ctx.profile,
+                ctx.fps,
+                ctx.sysroot,
+                ctx.layout,
+                bo,
+                &msg.searches,
+                ctx.rustflags,
+            );
+            let mut cmd = std::process::Command::new(ctx.self_exe);
+            cmd.arg("__cless-dep").args(&args[1..]);
+            apply_unit_env(&mut cmd, u);
+            apply_build_env(&mut cmd, ctx.layout, u, fp, bo);
+            run_compile(&mut cmd, u, "dep")?;
+        }
+    }
+    Ok(done)
+}
+
 /// 一个 unit 的 build.rs 全生命周期：build script 编译（fp 命中跳过）→
 /// rerun 判定（切⑤b：buildrs::should_rerun，cargo 同语义）——跳过则读
 /// output.txt 重解析回放 BuildOutput，跑则以 cargo 兼容 env 执行并写存档
-/// （执行成功后——失败本函数已响亮退出，无半存档）→ (BuildOutput, 是否真跑)。
-/// 任何一步失败响亮报错点名 crate 后退出。
-// 平铺参数 = 生命周期各槽一一对应（schedule.rs 参数函数同款先例）
-#[allow(clippy::too_many_arguments)]
+/// （执行成功后——失败本函数已回传错误，无半存档）→ (BuildOutput, 是否真跑)。
+/// `dep_env`/`dep_links_reran` 由主线程派发时算好捎来（WorkMsg 注）。
+/// 任何一步失败回传错误原文（主线程汇合后响亮点名）。
 fn run_build_lifecycle(
     u: &Unit,
     ix: usize,
-    plan: &ResolvePlan,
-    profile: &super::manifest::ProfileFlags,
-    fps: &[String],
-    outputs: &BTreeMap<usize, BuildOutput>,
-    layout: &Layout,
-    re_ran: &BTreeSet<usize>,
-) -> (BuildOutput, bool) {
-    let fp = &fps[ix];
-    let bdir = layout.build_dir(&u.package, fp);
+    ctx: &SharedCtx,
+    dep_env: BTreeMap<String, String>,
+    dep_links_reran: Vec<String>,
+) -> Result<(BuildOutput, bool), String> {
+    let fp = &ctx.fps[ix];
+    let bdir = ctx.layout.build_dir(&u.package, fp);
     if let Err(e) = std::fs::create_dir_all(bdir.join("out")) {
-        eprintln!(
-            "mirvm: 创建 build 目录 {} 失败（{} {}）: {e}",
+        return Err(format!(
+            "创建 build 目录 {} 失败（{} {}）: {e}",
             bdir.display(),
             u.package,
             u.version
-        );
-        std::process::exit(1);
+        ));
     }
     let bexe = bdir.join(format!("build_script_build-{fp}"));
     if !bexe.is_file() {
-        let args = schedule::build_script_rustc_args(plan, ix, profile, fps, layout);
+        let args =
+            schedule::build_script_rustc_args(ctx.plan, ix, ctx.profile, ctx.fps, ctx.layout);
         let mut cmd = std::process::Command::new(&args[0]);
         cmd.args(&args[1..]);
         apply_unit_env(&mut cmd, u);
         // 被编译的 crate 是 build script 本体（cargo 同：CARGO_CRATE_NAME
         // 跟着被编译 crate 走，不是所属包 lib 名）
         cmd.env("CARGO_CRATE_NAME", "build_script_build");
-        run_compile(&mut cmd, u, "build script");
+        run_compile(&mut cmd, u, "build script")?;
     }
     let env = buildrs::build_script_env(&buildrs::ExecCtx {
         pkg_env: &u.pkg_env,
         source_dir: &u.source_dir,
         features: &u.features,
-        profile,
+        profile: ctx.profile,
         out_dir: &bdir.join("out"),
-        dep_env: buildrs::dep_metadata_env(plan, &u.deps, outputs),
-        ld_dirs: &[layout.host_deps.clone(), layout.deps.clone()],
+        dep_env,
+        ld_dirs: &[ctx.layout.host_deps.clone(), ctx.layout.deps.clone()],
     });
-    // 条件 4 links 传递：直接依赖中带 links 且本次重跑了的包（DEP_* 只给
-    // 直接依赖者——传递再远一层的重跑由各层自己的判定覆盖）
-    let dep_links_reran: Vec<String> = u
-        .deps
-        .iter()
-        .filter(|d| re_ran.contains(&d.unit) && plan.units[d.unit].links.is_some())
-        .map(|d| plan.units[d.unit].package.clone())
-        .collect();
     rerun_gate(
         &u.package,
         &u.version.to_string(),
@@ -572,7 +737,8 @@ fn run_build_lifecycle_root(
         .filter(|d| re_ran.contains(&d.unit) && plan.units[d.unit].links.is_some())
         .map(|d| plan.units[d.unit].package.clone())
         .collect();
-    rerun_gate(
+    // 根阶段在汇合后主线程跑——错误照旧响亮退出（文案与 worker 回传同形）
+    match rerun_gate(
         &manifest.name,
         &manifest.version.to_string(),
         false,
@@ -581,14 +747,22 @@ fn run_build_lifecycle_root(
         &bexe,
         &env,
         &dep_links_reran,
-    )
+    ) {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("mirvm: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// rerun 门（切⑤b）：判定（buildrs::should_rerun）→ 跳过则读存档
 /// output.txt 重解析回放（指令流零序列化失真，warning 按同门控从缓存
 /// 回放——cargo 同）；跑则执行 + 写 output.txt/rerun.txt 两份存档。
-/// MIRVM_DEBUG_BLDRS=1 时向 stderr 打 `bldrs run|skip <pkg> <原因>` 观测行。
-/// 返回 (BuildOutput, 本次是否真跑)。
+/// MIRVM_DEBUG_BLDRS=1 时向 stderr 打 `bldrs run|skip <pkg> <原因>` 观测行
+/// （切⑤c：jobs>1 时各 worker 的观测行允许交错——debug 旋钮，非对拍面）。
+/// 返回 (BuildOutput, 本次是否真跑)；失败回传错误原文（调用方补「mirvm: 」
+/// 前缀响亮退出——主线程的根路径就地补，worker 路径汇合后补）。
 // 平铺参数先例同 run_build_lifecycle
 #[allow(clippy::too_many_arguments)]
 fn rerun_gate(
@@ -600,7 +774,7 @@ fn rerun_gate(
     bexe: &Path,
     env: &BTreeMap<String, String>,
     dep_links_reran: &[String],
-) -> (BuildOutput, bool) {
+) -> Result<(BuildOutput, bool), String> {
     let env_get = |k: &str| std::env::var(k).ok();
     let (rerun, why) = buildrs::should_rerun(
         bdir,
@@ -619,14 +793,14 @@ fn rerun_gate(
             && let Ok(bo) = buildrs::parse_instructions(&stdout)
         {
             show_warnings(pkg, ver, from_registry, &bo);
-            return (bo, false);
+            return Ok((bo, false));
         }
     }
-    let (bo, stdout) = exec_and_parse(pkg, ver, from_registry, bexe, pkg_root, env);
+    let (bo, stdout) = exec_and_parse(pkg, ver, from_registry, bexe, pkg_root, env)?;
     // 存档写失败不致命——下次 no-record 重跑自愈（磁盘层故障前序编译写已
     // 先炸）；静默，不惊扰对拍 stderr
     let _ = buildrs::write_record(bdir, &stdout, &bo, from_registry, pkg, pkg_root, &env_get);
-    (bo, true)
+    Ok((bo, true))
 }
 
 /// build script warning 回吐门控（cargo 同格式同口径：`warning: <pkg>@<ver>:
@@ -641,6 +815,7 @@ fn show_warnings(pkg: &str, ver: &str, from_registry: bool, bo: &BuildOutput) {
 
 /// 执行 + 指令解析 + warning 回吐，返回 (BuildOutput, 原始 stdout)
 /// （原始 stdout 供调用方写 output.txt 存档——回放靠重解析，零序列化失真）。
+/// 失败回传错误原文（调用方补「mirvm: 」前缀响亮退出）。
 fn exec_and_parse(
     pkg: &str,
     ver: &str,
@@ -648,23 +823,13 @@ fn exec_and_parse(
     bexe: &Path,
     cwd: &Path,
     env: &BTreeMap<String, String>,
-) -> (BuildOutput, String) {
-    let stdout = match buildrs::run_build_script(bexe, cwd, env) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("mirvm: build script 执行失败（{pkg} {ver}）: {e}");
-            std::process::exit(1);
-        }
-    };
-    let bo = match buildrs::parse_instructions(&stdout) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("mirvm: build script 指令解析失败（{pkg} {ver}）: {e}");
-            std::process::exit(1);
-        }
-    };
+) -> Result<(BuildOutput, String), String> {
+    let stdout = buildrs::run_build_script(bexe, cwd, env)
+        .map_err(|e| format!("build script 执行失败（{pkg} {ver}）: {e}"))?;
+    let bo = buildrs::parse_instructions(&stdout)
+        .map_err(|e| format!("build script 指令解析失败（{pkg} {ver}）: {e}"))?;
     show_warnings(pkg, ver, from_registry, &bo);
-    (bo, stdout)
+    Ok((bo, stdout))
 }
 
 /// cargo 编译期 env 契约（源码 env! 可读）：CARGO_PKG_* 全集 + crate/manifest
@@ -696,20 +861,17 @@ fn apply_build_env(
     }
 }
 
-/// 编译子进程同步跑到底；启动/编译失败响亮点名构造（what = 产物类别）后退出。
-fn run_compile(cmd: &mut std::process::Command, u: &Unit, what: &str) {
-    let status = match cmd.status() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!(
-                "mirvm: {what} 编译子进程启动失败（{} {}）: {e}",
-                u.package, u.version
-            );
-            std::process::exit(1);
-        }
-    };
+/// 编译子进程同步跑到底；启动/编译失败回传错误原文（what = 产物类别，
+/// 点名 crate——主线程汇合后补「mirvm: 」前缀响亮退出，与串行文案同形）。
+fn run_compile(cmd: &mut std::process::Command, u: &Unit, what: &str) -> Result<(), String> {
+    let status = cmd.status().map_err(|e| {
+        format!(
+            "{what} 编译子进程启动失败（{} {}）: {e}",
+            u.package, u.version
+        )
+    })?;
     if !status.success() {
-        eprintln!("mirvm: {what} 编译失败：{} {}", u.package, u.version);
-        std::process::exit(1);
+        return Err(format!("{what} 编译失败：{} {}", u.package, u.version));
     }
+    Ok(())
 }

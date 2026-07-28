@@ -11,6 +11,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, mpsc};
 
 use super::buildrs::BuildOutput;
 use super::manifest::{PackageManifest, ProfileFlags};
@@ -45,8 +46,11 @@ impl Layout {
     }
 }
 
-/// Kahn 拓扑序：依赖先于依赖者。返回 units 下标序。
-pub fn topo_order(plan: &ResolvePlan) -> Result<Vec<usize>, String> {
+/// 依赖图结构：正向 indegree + 反向边表（dep → 依赖者；依赖者按下标升序
+/// 入列——构造循环按 unit 下标 0..n 逐边推入）。topo_order 与并行调度
+/// （run_scheduler，D15 P3 切⑤c）共用同一构造纪律：同 unit 的多条边
+/// （不同 key/class）两侧都重复计，递减次数才配平。
+pub fn dep_graph(plan: &ResolvePlan) -> (Vec<Vec<usize>>, Vec<usize>) {
     let n = plan.units.len();
     let mut indeg = vec![0usize; n];
     let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n]; // 反向边：dep → 依赖者
@@ -56,6 +60,13 @@ pub fn topo_order(plan: &ResolvePlan) -> Result<Vec<usize>, String> {
             dependents[d.unit].push(i);
         }
     }
+    (dependents, indeg)
+}
+
+/// Kahn 拓扑序：依赖先于依赖者。返回 units 下标序。
+pub fn topo_order(plan: &ResolvePlan) -> Result<Vec<usize>, String> {
+    let n = plan.units.len();
+    let (dependents, mut indeg) = dep_graph(plan);
     let mut queue: VecDeque<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
     let mut order = Vec::with_capacity(n);
     while let Some(i) = queue.pop_front() {
@@ -71,6 +82,143 @@ pub fn topo_order(plan: &ResolvePlan) -> Result<Vec<usize>, String> {
         return Err("内部不一致：编译单元依赖图有环（cargo 解析图本应为 DAG）".into());
     }
     Ok(order)
+}
+
+/// Kahn 就绪队列并行调度器（D15 P3 切⑤c）：unit 的全部依赖「完成」即
+/// 就绪；主线程跑调度循环（独占 indegree/就绪队列/完成表 state），`jobs`
+/// 个 worker 线程从通道领 `(下标, M)` 跑 `work`，经通道回传
+/// `(下标, Result<T, String>)`；主线程收完成 → `on_done` 吸收 → 依赖者
+/// indegree 递减 → 新就绪入队。失败：记**第一枚**错误（按完成到达先后，
+/// 非 topo 位次）、停发新活、等在飞 worker 全部汇合后返回 Err。
+///
+/// - `build_msg(&state, ix) -> M` 与 `on_done(&mut state, ix, T)` 只在主
+///   线程跑——完成表（state）不跨线程，零锁；worker 开工所需的依赖侧
+///   输入由主线程在**派发时**算好捎进 M（此刻全部依赖必已完成，取值与
+///   串行版在 unit 开头算的相等）。
+/// - `work` 在 worker 线程跑，须 `Sync`（多 worker 共享同一份闭包与其
+///   捕获的只读上下文）。worker 恐慌经 catch_unwind 转成普通失败回传—
+///   —否则主线程会把恐慌中的 unit 记在 in_flight 里干等（恐慌 hook 照
+///   常向 stderr 打 panic 原文；与旧串行「恐慌即崩」文案有别，但那是
+///   内部错误路径，非对拍面）。
+/// - jobs=1 时派发序与 topo_order 逐位一致（同 dep_graph 构造纪律 +
+///   单在飞 ⇒ 完成序 = 派发序 = Kahn FIFO）——对拍调试锚，钉。
+///
+/// 成功返回 `Ok(state)`（完成表物归原主）；`Err` = 第一枚错误原文。
+/// `indeg` 就地递减消耗（dep_graph 的产物，调用方不再复用）。
+pub fn run_scheduler<S, M, T>(
+    state: S,
+    dependents: &[Vec<usize>],
+    indeg: &mut [usize],
+    jobs: usize,
+    build_msg: impl Fn(&S, usize) -> M,
+    work: impl Fn(M) -> Result<T, String> + Sync,
+    mut on_done: impl FnMut(&mut S, usize, T),
+) -> Result<S, String>
+where
+    M: Send,
+    T: Send,
+{
+    let n = dependents.len();
+    let mut state = state;
+    let jobs = jobs.max(1);
+    // 就绪队列播种与 topo_order 同纪律：下标升序扫 indeg==0
+    let mut ready: VecDeque<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
+    let (work_tx, work_rx) = mpsc::channel::<(usize, M)>();
+    let (done_tx, done_rx) = mpsc::channel::<(usize, Result<T, String>)>();
+    // std 的 mpsc 是单消费者：worker 组共享一把锁轮询领活（锁内仅一次
+    // recv；竞争开销相对一次 rustc 编译可忽略）
+    let work_rx = Arc::new(Mutex::new(work_rx));
+    let first_error = std::thread::scope(|s| {
+        for _ in 0..jobs {
+            let rx = Arc::clone(&work_rx);
+            let tx = done_tx.clone();
+            let work = &work;
+            s.spawn(move || {
+                loop {
+                    let next = {
+                        let g = match rx.lock() {
+                            Ok(g) => g,
+                            Err(_) => break, // 锁中毒（同行恐慌）= 收工
+                        };
+                        g.recv()
+                    };
+                    let (ix, m) = match next {
+                        Ok(x) => x,
+                        Err(_) => break, // 主端挂线 = 收工
+                    };
+                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(m)))
+                        .unwrap_or_else(|_| {
+                            Err(format!("unit {ix} 的编译 worker 恐慌（内部错误）"))
+                        });
+                    if tx.send((ix, r)).is_err() {
+                        break; // 主端已走（按计数收满才走，理论不到）——防御
+                    }
+                }
+            });
+        }
+        let mut first_error: Option<String> = None;
+        let mut workers_dead = false; // 完成侧断流 = worker 全灭（锁中毒）
+        let mut in_flight = 0usize;
+        let mut finished = 0usize;
+        while finished < n {
+            // 先发活：就绪非空、在飞未满、无失败（失败即停发新活）
+            while first_error.is_none() && in_flight < jobs {
+                match ready.pop_front() {
+                    Some(ix) => {
+                        if work_tx.send((ix, build_msg(&state, ix))).is_err() {
+                            workers_dead = true;
+                            break;
+                        }
+                        in_flight += 1;
+                    }
+                    None => break,
+                }
+            }
+            if in_flight == 0 {
+                break;
+            }
+            let (ix, res) = match done_rx.recv() {
+                Ok(x) => x,
+                Err(_) => {
+                    workers_dead = true;
+                    break;
+                }
+            };
+            in_flight -= 1;
+            finished += 1;
+            match res {
+                Ok(t) => {
+                    on_done(&mut state, ix, t);
+                    for &j in &dependents[ix] {
+                        indeg[j] -= 1;
+                        if indeg[j] == 0 {
+                            ready.push_back(j);
+                        }
+                    }
+                }
+                Err(e) => {
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
+                }
+            }
+        }
+        drop(work_tx); // 挂线：空闲 worker 收工（scope 尾自动汇合）
+        if first_error.is_none() && finished < n {
+            first_error = Some(if workers_dead {
+                "编译 worker 线程异常终止（内部错误）".to_string()
+            } else {
+                // 活发不出也收不齐 = 依赖图有环（正常路径到不了：
+                // fingerprints 内的 topo_order 会先炸）——兜底响亮
+                "内部不一致：编译单元依赖图有环（cargo 解析图本应为 DAG）".to_string()
+            });
+        }
+        first_error
+    });
+    match first_error {
+        None => Ok(state),
+        Some(e) => Err(e),
+    }
 }
 
 /// host 闭包（切②）：从每个 proc-macro unit 沿 dep 边 BFS 的可达集（含
@@ -1058,6 +1206,124 @@ mod tests {
         assert!(pos(0) < pos(1), "a 必须先于 b: {order:?}");
         assert!(pos(0) < pos(2), "a 必须先于 c: {order:?}");
         assert_eq!(order.len(), 3);
+    }
+
+    // ---- 切⑤c：run_scheduler（Kahn 就绪队列并行调度核）----
+    // 测试与 plan 解耦：直写「每 unit 的 dep 下标表」，按 dep_graph 同纪律
+    // （下标升序逐边推入，重复边重复计）展开成 (dependents, indeg)。
+
+    fn graph_from_deps(deps: &[&[usize]]) -> (Vec<Vec<usize>>, Vec<usize>) {
+        let n = deps.len();
+        let mut indeg = vec![0usize; n];
+        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (i, ds) in deps.iter().enumerate() {
+            for &d in *ds {
+                indeg[i] += 1;
+                dependents[d].push(i);
+            }
+        }
+        (dependents, indeg)
+    }
+
+    /// 菱形 + 独立点 + 重复边，jobs=4：任何 unit 不会在其依赖前开工
+    /// （worker 内核对，违例成 Err 浮出水面），且全 unit 完成入 state。
+    #[test]
+    fn scheduler_never_starts_before_deps_and_finishes_all() {
+        let deps: &[&[usize]] = &[&[], &[0], &[0], &[1, 2], &[], &[0, 0]];
+        let n = deps.len();
+        let (dependents, mut indeg) = graph_from_deps(deps);
+        let done_flags = std::sync::Mutex::new(vec![false; n]);
+        let r = run_scheduler(
+            Vec::<usize>::new(),
+            &dependents,
+            &mut indeg,
+            4,
+            |_s, ix| ix,
+            |ix| {
+                {
+                    let d = done_flags.lock().unwrap();
+                    for &dep in deps[ix] {
+                        if !d[dep] {
+                            return Err(format!("unit {ix} 开工时依赖 {dep} 未完成"));
+                        }
+                    }
+                }
+                done_flags.lock().unwrap()[ix] = true;
+                Ok(ix)
+            },
+            |s, ix, _| s.push(ix),
+        );
+        let mut got = r.unwrap();
+        got.sort_unstable();
+        assert_eq!(got, (0..n).collect::<Vec<_>>(), "全 unit 完成: {got:?}");
+    }
+
+    /// jobs=1 的派发序必须与 Kahn FIFO（topo_order 同纪律）逐位一致——
+    /// 对拍调试锚（注释钉在 run_scheduler 头注）。
+    #[test]
+    fn scheduler_jobs1_matches_kahn_fifo_order() {
+        // a←b, a←c；{b,c}←d；e 独立。手工 Kahn FIFO：播种 [0,4] → 0 完成
+        // 放 1,2 → 4 → 1 → 2（放 3）→ 3
+        let deps: &[&[usize]] = &[&[], &[0], &[0], &[1, 2], &[]];
+        let (dependents, mut indeg) = graph_from_deps(deps);
+        let done = run_scheduler(
+            Vec::<usize>::new(),
+            &dependents,
+            &mut indeg,
+            1,
+            |_s, ix| ix,
+            Ok,
+            |s, ix, _| s.push(ix),
+        )
+        .unwrap();
+        assert_eq!(done, vec![0, 4, 1, 2, 3]);
+    }
+
+    /// 失败语义（jobs=1 链 0→1→2，1/2 皆炸）：第一枚错误保留，失败后
+    /// 停发新活（2 从不开工）。
+    #[test]
+    fn scheduler_first_error_wins_and_dispatch_stops() {
+        let deps: &[&[usize]] = &[&[], &[0], &[1]];
+        let (dependents, mut indeg) = graph_from_deps(deps);
+        let started = std::sync::Mutex::new(Vec::new());
+        let r = run_scheduler(
+            Vec::<usize>::new(),
+            &dependents,
+            &mut indeg,
+            1,
+            |_s, ix| ix,
+            |ix| {
+                started.lock().unwrap().push(ix);
+                if ix >= 1 {
+                    Err(format!("boom-{ix}"))
+                } else {
+                    Ok(ix)
+                }
+            },
+            |s, ix, _| s.push(ix),
+        );
+        assert_eq!(r.unwrap_err(), "boom-1", "第一枚错误保留");
+        assert_eq!(*started.lock().unwrap(), vec![0, 1], "失败后停发新活");
+    }
+
+    /// 依赖图有环：无活可发也收不齐 → 响亮报错（与 topo_order 同文案）。
+    #[test]
+    fn scheduler_reports_cycle_loudly() {
+        let deps: &[&[usize]] = &[&[1], &[0]]; // 0↔1 环
+        let (dependents, mut indeg) = graph_from_deps(deps);
+        let r = run_scheduler(
+            Vec::<usize>::new(),
+            &dependents,
+            &mut indeg,
+            2,
+            |_s, ix| ix,
+            Ok,
+            |s, ix, _| s.push(ix),
+        );
+        assert_eq!(
+            r.unwrap_err(),
+            "内部不一致：编译单元依赖图有环（cargo 解析图本应为 DAG）"
+        );
     }
 
     #[test]
