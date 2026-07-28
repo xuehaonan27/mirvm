@@ -135,19 +135,19 @@ fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
     while let Some(arg) = it.next() {
         if arg == "-o" || arg == "--output" {
             let Some(v) = it.next() else {
-                eprintln!("mirvm: pack -o 缺输出路径");
+                eprintln!("mirvm: `pack -o` needs argument");
                 exit(2);
             };
             out = Some(std::path::PathBuf::from(v));
         } else if input.is_none() && !arg.starts_with('-') {
             input = Some(arg);
         } else {
-            eprintln!("mirvm: pack 未知参数 `{arg}`");
+            eprintln!("mirvm: pack unknown argument `{arg}`");
             exit(2);
         }
     }
     let Some(input) = input else {
-        eprintln!("mirvm: pack 缺目标（项目目录 / Cargo.toml / script.rs）");
+        eprintln!("mirvm: `pack` needs target (cargo project directory / Cargo.toml / script)");
         exit(2);
     };
     let input_path = PathBuf::from(&input);
@@ -187,7 +187,7 @@ fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
         cargo_shim::phase_cargo(dir, &[]);
     }
     let src = std::fs::read_to_string(&input_path).unwrap_or_else(|e| {
-        eprintln!("mirvm: 读取 {input} 失败: {e}");
+        eprintln!("mirvm: fail to read {input}: {e}");
         exit(1);
     });
     if let Some((manifest, body)) = parse_frontmatter(&src) {
@@ -205,7 +205,7 @@ fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
         std::env::var("MIRVM_SYSROOT").unwrap_or_else(|_| match crate::sysroot::ensure_sysroot() {
             Ok(p) => p.display().to_string(),
             Err(e) => {
-                eprintln!("mirvm: 构建 sysroot 失败: {e}");
+                eprintln!("mirvm: fail to build sysroot: {e}");
                 exit(1);
             }
         });
@@ -238,7 +238,7 @@ fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
             "--all" => plan.all = true,
             "--sysroot" => plan.sysroot = true,
             _ => {
-                eprintln!("mirvm cache: 未知参数 `{a}`\n{USAGE}");
+                eprintln!("mirvm cache: unknown argument `{a}`\n{USAGE}");
                 return ExitCode::from(2);
             }
         }
@@ -275,14 +275,14 @@ fn deps_main(args: impl Iterator<Item = String>) -> ExitCode {
             _ if sub.is_some() => targets.push(a),
             _ => {
                 eprintln!(
-                    "mirvm deps: 未知参数 `{a}`（用法: mirvm deps audit <项目目录|脚本.rs>...）"
+                    "mirvm deps: unknown argument `{a}`\nusage: mirvm deps audit <project dir|script.rs>..."
                 );
                 return ExitCode::from(2);
             }
         }
     }
     if sub.is_none() || targets.is_empty() {
-        eprintln!("用法: mirvm deps audit <项目目录|脚本.rs>...");
+        eprintln!("usage: mirvm deps audit <project dir|script.rs>...");
         return ExitCode::from(2);
     }
     let mut failures = 0usize;
@@ -387,7 +387,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     while let Some(arg) = args.next() {
         let mut next = |name: &str| {
             args.next().unwrap_or_else(|| {
-                eprintln!("mirvm: {name} 需要参数");
+                eprintln!("mirvm: {name} needs argument(s)");
                 exit(2);
             })
         };
@@ -419,7 +419,8 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
             "--jit" => {
                 let v = next("--jit");
                 if v != "on" && v != "off" {
-                    eprintln!("mirvm: --jit 只接受 on|off（收到 `{v}`）");
+                    // TODO: tiered JIT?
+                    eprintln!("mirvm: --jit only accepts on|off (got `{v}`)");
                     exit(2);
                 }
                 // 同 --stack-size：落 env 使 cargo 形态经 runner 生效
@@ -427,7 +428,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
             }
             _ if input.is_none() && !arg.starts_with('-') => input = Some(arg),
             _ => {
-                eprintln!("mirvm: 未知参数 `{arg}`\n{USAGE}");
+                eprintln!("mirvm: unknown argument `{arg}`\n{USAGE}");
                 exit(2);
             }
         }
@@ -445,7 +446,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         Err(_) | Ok("cargo") => false,
         Ok("self") => true,
         Ok(other) => {
-            eprintln!("mirvm: MIRVM_DEPS 只接受 `cargo` 或 `self`（收到 `{other}`）");
+            eprintln!("mirvm: MIRVM_DEPS only accepts `cargo` or `self` (got `{other}`)");
             exit(2);
         }
     };
@@ -470,7 +471,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         let module = match crate::pack::load_package(&input_path) {
             Ok(p) => p.module,
             Err(reason) => {
-                eprintln!("mirvm: 装载 {} 失败: {reason}", input_path.display());
+                eprintln!("mirvm: fail to load {}: {reason}", input_path.display());
                 exit(70);
             }
         };
@@ -484,7 +485,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     }
 
     let src = std::fs::read_to_string(&input_path).unwrap_or_else(|e| {
-        eprintln!("mirvm: 读取 {input} 失败: {e}");
+        eprintln!("mirvm: fail to read {input}: {e}");
         exit(1);
     });
 
@@ -503,7 +504,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         .unwrap_or_else(|| match crate::sysroot::ensure_sysroot() {
             Ok(p) => p.display().to_string(),
             Err(e) => {
-                eprintln!("mirvm: 构建 sysroot 失败: {e}");
+                eprintln!("mirvm: fail to build sysroot: {e}");
                 exit(1);
             }
         });
@@ -618,15 +619,15 @@ impl Callbacks for DepCallbacks {
                 // 原子发布（全仓同款纪律）
                 let tmp = format!("{path}.tmp{}", std::process::id());
                 std::fs::write(&tmp, text)
-                    .unwrap_or_else(|e| panic!("dep global_asm 清单写入失败: {e}"));
+                    .unwrap_or_else(|e| panic!("fail to write dep global_asm list: {e}"));
                 std::fs::rename(&tmp, &path)
-                    .unwrap_or_else(|e| panic!("dep global_asm 清单发布失败: {e}"));
+                    .unwrap_or_else(|e| panic!("fail to release dep global_asm list: {e}"));
             }
             // UnsupportedSym：跳过清单（C4 片①语义边界，见 global_asm.rs
             // DepAsmText 文档——不因「可能不用」拖垮整个 dep 构建）
             Ok(crate::lower::global_asm::DepAsmText::UnsupportedSym)
             | Ok(crate::lower::global_asm::DepAsmText::None) => {}
-            Err(reason) => panic!("dep global_asm 抽取失败: {reason}"),
+            Err(reason) => panic!("fail to extract dep global_asm: {reason}"),
         }
         Compilation::Continue
     }
@@ -643,8 +644,9 @@ pub(crate) fn run_dep_compiler(rustc_args: Vec<String>) -> ! {
             .position(|a| a == flag)
             .and_then(|i| rustc_args.get(i + 1).cloned())
     };
-    let out_dir = find("--out-dir").expect("dep 编译参数缺 --out-dir");
-    let crate_name = find("--crate-name").expect("dep 编译参数缺 --crate-name");
+    let out_dir = find("--out-dir").expect("dep compile arguments should have `--out-dir`");
+    let crate_name =
+        find("--crate-name").expect("dep compile arguments should have `--crate-name`");
     let extra = rustc_args
         .windows(2)
         .find_map(|w| {
@@ -1018,7 +1020,7 @@ fn run_vm_engine(
     let (name, args) = match parse_vm_call(spec) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("mirvm: --vm-call 解析失败: {e}");
+            eprintln!("mirvm: fail to resolve `--vm-call`: {e}");
             return 2;
         }
     };

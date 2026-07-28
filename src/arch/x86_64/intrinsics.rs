@@ -7,6 +7,8 @@
 
 //! after the guest's normal CPUID dispatch selected it.
 
+//! TODO: AVX / AVX-512 support
+
 use std::arch::x86_64::{
     __m128i, __m256i, _mm_aesdec_si128, _mm_aesdeclast_si128, _mm_aesenc_si128,
     _mm_aesenclast_si128, _mm_aesimc_si128, _mm_clmulepi64_si128, _mm_crc32_u8, _mm_crc32_u16,

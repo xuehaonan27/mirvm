@@ -192,7 +192,7 @@ fn size_of(paths: &[PathBuf]) -> u64 {
 /// `mirvm cache status` 全文。
 pub fn status(root: &Path) -> String {
     let mut out = format!(
-        "mirvm 本地仓库 {}（build {}）\n",
+        "mirvm local cache {} (build {})\n",
         root.display(),
         env!("MIRVM_BUILD_ID")
     );
@@ -209,7 +209,7 @@ pub fn status(root: &Path) -> String {
             total_stale += ss + gs;
             let n = cur.len() + stale.len() + garb.len();
             out += &format!(
-                "  {:<36} {:>9}  ({n} 件；陈代 {}，垃圾 {})\n",
+                "  {:<36} {:>9}  ({n} items; stale {}, garbage {})\n",
                 fam.name,
                 human(sum),
                 human(ss),
@@ -218,7 +218,7 @@ pub fn status(root: &Path) -> String {
         } else {
             let (bytes, files) = du(&dir);
             total += bytes;
-            out += &format!("  {:<36} {:>9}  ({files} 件)\n", fam.name, human(bytes));
+            out += &format!("  {:<36} {:>9}  ({files} items)\n", fam.name, human(bytes));
         }
     }
     // 非族属杂项（如 tests 的 project-suite）
@@ -232,14 +232,14 @@ pub fn status(root: &Path) -> String {
             if !known.iter().any(|k| k == &name) && !name.ends_with(".stamp") {
                 let (bytes, files) = du(&p);
                 total += bytes;
-                out += &format!("  {:<36} {:>9}  ({files} 件)\n", name, human(bytes));
+                out += &format!("  {:<36} {:>9}  ({files} items)\n", name, human(bytes));
             }
         }
     }
-    out += &format!("  {:<36} {:>9}\n", "合计", human(total));
+    out += &format!("  {:<36} {:>9}\n", "total", human(total));
     if total_stale > 0 {
         out += &format!(
-            "陈代+垃圾可清：{}（`mirvm cache purge`）\n",
+            "stale and garbage could be cleared: {} (`mirvm cache purge`)\n",
             human(total_stale)
         );
     }
@@ -254,8 +254,8 @@ pub fn purge(root: &Path, plan: Purge) -> String {
     let rm_file = |p: &Path, why: &str, freed: &mut u64, acted: &mut u64, out: &mut String| {
         let sz = p.metadata().map(|m| m.len()).unwrap_or(0);
         *out += &format!(
-            "  {} {}（{}，{why}）\n",
-            if dry { "将删" } else { "已删" },
+            "  {} {} ({}, {why})\n",
+            if dry { "to be deleted" } else { "deleted" },
             p.display(),
             human(sz)
         );
@@ -267,8 +267,8 @@ pub fn purge(root: &Path, plan: Purge) -> String {
     let rm_dir = |d: &Path, label: &str, dry: bool, out: &mut String| -> u64 {
         let (bytes, _) = du(d);
         *out += &format!(
-            "  {} {}（{}，{label}）\n",
-            if dry { "将清" } else { "已清" },
+            "  {} {} ({}, {label})\n",
+            if dry { "to be deleted" } else { "deleted" },
             d.display(),
             human(bytes)
         );
@@ -291,27 +291,32 @@ pub fn purge(root: &Path, plan: Purge) -> String {
                     || matches!(name, "base" if plan.base)
                     || matches!(name, "ir" if plan.ir),
             ) {
-                freed += rm_dir(&dir, "整族全清", dry, &mut out);
+                freed += rm_dir(&dir, "all cleared", dry, &mut out);
                 acted += 1;
                 continue;
             }
             if plan.stale || plan.all {
                 for p in stale.iter().chain(&garb) {
-                    rm_file(p, "陈代/垃圾", &mut freed, &mut acted, &mut out);
+                    rm_file(p, "stale/garbage", &mut freed, &mut acted, &mut out);
                 }
                 let _ = cur;
             }
         } else if name == "scripts" && whole(name, plan.scripts) {
-            freed += rm_dir(&dir, "scripts 全清", dry, &mut out);
+            freed += rm_dir(&dir, "scripts caches all cleared", dry, &mut out);
             acted += 1;
         } else if name == "target" && whole(name, plan.target) {
-            freed += rm_dir(&dir, "统一 target 全清", dry, &mut out);
+            freed += rm_dir(&dir, "target cache all cleared", dry, &mut out);
             acted += 1;
         } else if name.starts_with("sysroot-") && plan.all && plan.sysroot {
-            freed += rm_dir(&dir, "sysroot 全清（完全冷启动）", dry, &mut out);
+            freed += rm_dir(
+                &dir,
+                "sysroot all cleared (next run will be cold start)",
+                dry,
+                &mut out,
+            );
             acted += 1;
         } else if plan.all && matches!(name, "native-archives" | "global-asm" | "asm-stubs") {
-            freed += rm_dir(&dir, ".so 族全清", dry, &mut out);
+            freed += rm_dir(&dir, ".so all cleared", dry, &mut out);
             acted += 1;
         }
     }
@@ -325,11 +330,11 @@ pub fn purge(root: &Path, plan: Purge) -> String {
         }
     }
     if acted == 0 {
-        out += "  无可清项\n";
+        out += "  nothing to be cleared\n";
     }
     out += &format!(
-        "{}释放 {}\n",
-        if dry { "（dry-run）预计" } else { "" },
+        "{}release {}\n",
+        if dry { "(dry-run) estimated" } else { "" },
         human(freed)
     );
     out
@@ -403,7 +408,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(report.contains("将删"));
+        assert!(report.contains("to be deleted"));
         assert!(!report.contains("build.log"));
         assert!(old.exists() && cur.exists());
         // 真清：陈代走、当代留、副产不动
@@ -414,7 +419,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(report.contains("已删"));
+        assert!(report.contains("deleted") && !report.contains("to be deleted"));
         assert!(!old.exists() && cur.exists() && log.exists());
         let _ = std::fs::remove_dir_all(&root);
     }

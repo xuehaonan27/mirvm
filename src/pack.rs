@@ -79,7 +79,7 @@ struct Reloc {
 }
 
 fn postcard_bytes<T: Serialize>(v: &T) -> Result<Vec<u8>, String> {
-    postcard::to_stdvec(v).map_err(|e| format!("包节序列化失败: {e}"))
+    postcard::to_stdvec(v).map_err(|e| format!("fail to format package: {e}"))
 }
 
 /// 打包入账（lower 刚完成、guest 未运行的洁净快照——与 L2 store 同一时机）。
@@ -130,7 +130,8 @@ pub(crate) fn write_package(
             fnv,
         });
     }
-    let module_bytes = postcard_bytes(&module).map_err(|e| format!("module 序列化失败: {e}"))?;
+    let module_bytes =
+        postcard_bytes(&module).map_err(|e| format!("fail to serialize module: {e}"))?;
 
     let mut sections: Vec<(u32, Vec<u8>)> = vec![
         (TAG_META, postcard_bytes(&meta)?),
@@ -169,14 +170,14 @@ pub(crate) fn write_package(
 
     // 原子发布（全仓同款：临时名写全再 rename）
     let dir = out.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir).map_err(|e| format!("包目录创建失败: {e}"))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("fail to create package directory: {e}"))?;
     let tmp = dir.join(format!(
         ".{}.tmp-{}",
         out.file_name().unwrap_or_default().to_string_lossy(),
         std::process::id()
     ));
-    std::fs::write(&tmp, &buf).map_err(|e| format!("包写入失败: {e}"))?;
-    std::fs::rename(&tmp, out).map_err(|e| format!("包发布失败: {e}"))?;
+    std::fs::write(&tmp, &buf).map_err(|e| format!("fail to write package: {e}"))?;
+    std::fs::rename(&tmp, out).map_err(|e| format!("fail to release package: {e}"))?;
     Ok(())
 }
 
@@ -200,15 +201,15 @@ pub(crate) fn is_package(path: &Path) -> bool {
 /// 装载 + 全校验（refuse-loud）。`MIRVM_PACK_NOSTAMP=1` 旁路输入戳
 /// （分发到无源环境时使用；本机默认仍校验）。
 pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
-    let raw = std::fs::read(path).map_err(|e| format!("包读取失败: {e}"))?;
+    let raw = std::fs::read(path).map_err(|e| format!("fail to read package: {e}"))?;
     if raw.len() < 8 + 4 * 3 + 16 || &raw[..8] != MAGIC {
-        return Err("非 .mirvm 包（magic 不符）".into());
+        return Err("not .mirvm package (mismatched magic header)".into());
     }
     let (body, whole) = raw.split_at(raw.len() - 16);
     let mut got = [0u8; 16];
     got.copy_from_slice(whole);
     if u128::from_le_bytes(got) != hash128(body) {
-        return Err("包全文件哈希不符（损坏或截断）".into());
+        return Err("package content hash mismatched (broken or truncated)".into());
     }
     let mut cur = 8usize;
     let u32_at = |cur: &mut usize, raw: &[u8]| -> u32 {
@@ -221,15 +222,21 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
         *cur += 8;
         v
     };
-    if u32_at(&mut cur, body) != FMT_VER {
-        return Err("包格式版本不符——以同代 mirvm 重打或换对应构建".into());
+    let package_ver = u32_at(&mut cur, body);
+    if package_ver != FMT_VER {
+        return Err(format!(
+            "wrong package format version (package={}, mirvm={})",
+            package_ver, FMT_VER
+        )
+        .into());
     }
     let bid_len = u32_at(&mut cur, body) as usize;
     let bid = std::str::from_utf8(&body[cur..cur + bid_len])
-        .map_err(|e| format!("包 build_id 非 UTF-8: {e}"))?;
+        .map_err(|e| format!("invalid package build_id: {e}"))?;
     cur += bid_len;
     if bid != env!("MIRVM_BUILD_ID") {
-        return Err("包 build_id 与当前 mirvm 不符（格式 v0 不跨构建；以当前 mirvm 重打）".into());
+        // TODO: 格式 v0 不跨构建；以当前 mirvm 重打，未来版本 MIRVM 可能支持前向兼容
+        return Err("package build_id mismatch with current mirvm".into());
     }
     let cnt = u32_at(&mut cur, body) as usize;
     let mut metas: Vec<(u32, u64, u64, u128)> = Vec::with_capacity(cnt);
@@ -245,18 +252,20 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
         let (_, off, len, h) = metas
             .iter()
             .find(|(t, _, _, _)| *t == tag)
-            .ok_or_else(|| format!("包缺必需节 tag={tag}"))?;
+            .ok_or_else(|| format!("package must have section with tag={tag}"))?;
         let (o, l) = (*off as usize, *len as usize);
         let data = body
             .get(o..o + l)
-            .ok_or_else(|| format!("包节 tag={tag} 越界"))?;
+            .ok_or_else(|| format!("package section with tag={tag} crossed its boundary"))?;
         if hash128(data) != *h {
-            return Err(format!("包节 tag={tag} 哈希不符"));
+            return Err(format!(
+                "package section with tag={tag} has wrong hash value"
+            ));
         }
         Ok(data)
     };
-    let meta: Meta =
-        postcard::from_bytes(section(TAG_META)?).map_err(|e| format!("META 节解析失败: {e}"))?;
+    let meta: Meta = postcard::from_bytes(section(TAG_META)?)
+        .map_err(|e| format!("fail to resolve META section: {e}"))?;
     if !crate::ircache::envs_current(&meta.envs) {
         return Err("包 env 依赖与当前环境不符（编译时 env! 值已变——以当前环境重打）".into());
     }
@@ -276,7 +285,7 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
         .map_err(|e| format!("NATIVELIBS 节解析失败: {e}"))?;
     // 片③：MC 节（可缺省——片② 包与 MIRVM_PACK_NO_MC 包 = 纯文件引用模式）
     let mc_entries: Vec<McEntry> = if metas.iter().any(|(t, _, _, _)| *t == TAG_MC) {
-        postcard::from_bytes(section(TAG_MC)?).map_err(|e| format!("MC 节解析失败: {e}"))?
+        postcard::from_bytes(section(TAG_MC)?).map_err(|e| format!("fail to resolve MC section: {e}"))?
     } else {
         Vec::new()
     };
@@ -286,7 +295,7 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
             return Err("包 MC 节含 NATIVELIBS 无互证条目（不符或多余）".into());
         };
         let img = crate::vm::engine::mcload::load(&mc.bytes)
-            .map_err(|e| format!("MC 镜像装载失败（{}）: {e}", l.path))?;
+            .map_err(|e| format!("fail to load MC image ({}): {e}", l.path))?;
         crate::vm::engine::mcload::register(img);
         covered.push(l.path.clone());
     }

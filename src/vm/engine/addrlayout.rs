@@ -87,7 +87,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 域界与白名单() {
+    fn areas_and_whitelist() {
         assert!(is_valid_home(BASE_IMAGE_FIXED_ADDR));
         assert!(is_valid_home(DELTA_FIXED_ADDR));
         assert!(is_valid_home(image_addr(0)));
