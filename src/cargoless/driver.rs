@@ -1,29 +1,34 @@
-//! `cargoless/driver.rs` —— `mirvm run` 的零 cargo 新路径（D15 P2 切①/②，
+//! `cargoless/driver.rs` —— `mirvm run` 的零 cargo 新路径（D15 P2 切①/②/③，
 //! 设计档 §3.6/§5 P2），替代 cargo_shim::phase_cargo 的三阶段（cargo run +
 //! RUSTC_WRAPPER + runner 协议）：
 //!
 //! ```text
-//! resolve（P1 求解器）→ 子集闸 → 逐 unit 按双侧编译集调度：
-//!   host 集（proc-macro 闭包）→ spawn 真 rustc 真 codegen（.so/.rlib）
+//! resolve（P1 求解器）→ links 互斥校验 → 逐 unit 按 topo 序调度：
+//!   build.rs 全生命周期（切③）：host 真编译 build script（fp 命中跳过）
+//!     → 以 cargo 兼容 env 执行（v1 粗指纹**每次都重跑**，rerun-if 精细化归
+//!     P3，设计档 §5 P2 行）→ 指令解析 → BuildOutput 入表
+//!   host 集（proc-macro 闭包 ∪ build-deps 闭包）→ spawn 真 rustc 真 codegen
 //!   target 集 → 起 `__cless-dep` 子进程（cli::run_dep_compiler：
 //!   in-process rustc_driver + global_asm 抽取）
-//! → bin 走既有 MirvmCallbacks 会话（cli::run_driver，after_analysis 停）
+//!   （双侧编译都吃本 unit BuildOutput 修正：cfg/check-cfg/link 旗进 argv，
+//!   OUT_DIR/rustc-env 进子进程 env——proc-macro2 的 build.rs cfg 进其 host
+//!   编译，serde_derive 类全链解锁的关键）
+//! → 根包 build.rs 同生命周期 → bin 走既有 MirvmCallbacks 会话
+//!   （OUT_DIR/rustc-env/cfg 修正同样进 bin 会话）
 //! ```
 //!
-//! 切② 子集 = **无 build.rs** 的项目/脚本；proc-macro 及其 host 闭包已接
-//! （真 rustc host 编译，target 侧 --extern 指 host-deps 的 .so）。子集外
-//! 构造响亮拒绝点名（切③ = build.rs），绝不静默回退 cargo（P2 闭合契约，
-//! 设计档 §5）。
-//!
-//! 留给后续切片的接缝：子集闸（buildrs 切片在此放行并接管 build.rs 调度）；
-//! strip_build_units（build.rs 切片恢复 Build 类 unit 消费）。
+//! 传播规则（-l 只进本包、-L 进传递依赖者、metadata 只给直接依赖者的
+//! build script、无自动 DEP_*_ROOT、无自动 check-cfg 补钉）全是切③ 实证
+//! 结论，明细在 buildrs.rs 文件头。
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use super::buildrs::{self, BuildOutput};
 use super::manifest::PackageManifest;
 use super::registry::Registry;
-use super::resolve::{ResolvePlan, Unit, UnitClass, resolve};
+use super::resolve::{ResolvePlan, Unit, resolve};
 use super::schedule::{self, Layout};
 
 /// `mirvm run <目录|Cargo.toml>`（MIRVM_DEPS=self）。
@@ -101,32 +106,13 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
         }
     };
 
-    // 2. 子集闸（切② = 无 build.rs；P2 契约：子集外响亮拒绝点名构造与机制，
-    // 不静默回退 cargo）。根与每个 unit 都查——Build 类 unit 也查（宁响不漏：
-    // 其父若真无 build.rs，cargo 本不编译它，这里多拒的是「声明了 build-deps
-    // 却没有 build.rs」的病理包，误拒面可接受）。proc-macro 闭包同样过此闸：
-    // 闭包内撞 build.rs（真实 serde_derive 的 proc-macro2 实锤）照旧响亮点名
-    // ——设计如此，build.rs 调度归切③。
-    for u in &plan.units {
-        if u.has_build_script {
-            eprintln!(
-                "mirvm: D15 P2 切② 未接 build.rs：{} {}（等切③；可暂用 MIRVM_DEPS=cargo）",
-                u.package, u.version
-            );
-            std::process::exit(1);
-        }
-    }
-    if manifest.has_build_script {
-        eprintln!(
-            "mirvm: D15 P2 切② 未接 build.rs：根包 {} {}（等切③；可暂用 MIRVM_DEPS=cargo）",
-            manifest.name, manifest.version
-        );
+    // 2. links 互斥（cargo 同：同一 links 值至多一个包；根包也参查）
+    if let Err(e) =
+        buildrs::check_links_unique(Some((&manifest.name, manifest.links.as_deref())), &plan)
+    {
+        eprintln!("mirvm: {e}");
         std::process::exit(1);
     }
-
-    // 闸过后丢弃全部 Build 类 unit：Build 边的唯一消费者是 build.rs，已被闸掉
-    // （cargo 同语义——无 build script 的包其 build-deps 本不编译）
-    let plan = strip_build_units(plan);
 
     // 3. sysroot：MIRVM_SYSROOT 环境优先，否则自产（与 cli.rs run 路径同口径）
     let sysroot = match std::env::var_os("MIRVM_SYSROOT") {
@@ -140,11 +126,10 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
         },
     };
 
-    // 4. 指纹 + 拓扑序，逐 unit 按双侧编译集调度（串行 v1；并行调度归后续
-    // 切片）：host 集 spawn 真 rustc 真 codegen，target 集照旧 __cless-dep；
-    // 同一 unit 两侧都在就两发（双用 lib，产物分目录互不影响）。
+    // 4. 指纹 + 拓扑序，逐 unit 按双侧编译集 + build.rs 生命周期调度（串行
+    // v1；并行调度归后续切片）
     let layout = Layout::new();
-    for d in [&layout.deps, &layout.host_deps] {
+    for d in [&layout.deps, &layout.host_deps, &layout.build_root] {
         if let Err(e) = std::fs::create_dir_all(d) {
             eprintln!("mirvm: 创建 {} 失败: {e}", d.display());
             std::process::exit(1);
@@ -170,12 +155,27 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
     };
     let host_set = schedule::host_closure(&plan);
     let target_set = schedule::target_units(&plan);
+    let build_set = schedule::build_closure(&plan, manifest.has_build_script);
     let self_exe = std::env::current_exe().expect("current_exe 失败");
+    // unit 下标 → 已执行的 BuildOutput（本 unit 编译修正 + 依赖者 -L 汇集 +
+    // 直接依赖者 build script 的 DEP_* 三处消费）
+    let mut outputs: BTreeMap<usize, BuildOutput> = BTreeMap::new();
     for ix in order {
         let u = &plan.units[ix];
         let stem = format!("lib{}-{}", u.lib_name, fps[ix]);
-        // host 侧：proc-macro 本体产 dylib；闭包普通单元产 host rlib
-        if host_set.contains(&ix) {
+        // 4a. build.rs 生命周期：参与构建图的 unit 才跑（孤儿 build-dep——
+        // 父包没 build.rs 的那种——cargo 本不编译，跑它的 build.rs 是越权
+        // 执行）。topo 序保证其 build-deps（及其 build.rs）都已完成。
+        if u.has_build_script
+            && (host_set.contains(&ix) || target_set.contains(&ix) || build_set.contains(&ix))
+        {
+            let bo = run_build_lifecycle(u, ix, &plan, &manifest.profile, &fps, &outputs, &layout);
+            outputs.insert(ix, bo);
+        }
+        let bo = outputs.get(&ix);
+        // 4b. host 侧：proc-macro 本体产 dylib；闭包普通单元（含 build-deps
+        // 闭包）产 host rlib
+        if host_set.contains(&ix) || build_set.contains(&ix) {
             let hit = if u.proc_macro {
                 layout
                     .host_deps
@@ -186,6 +186,7 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
                     && layout.host_deps.join(format!("{stem}.rlib")).is_file()
             };
             if !hit {
+                let searches = buildrs::aggregate_link_searches(&plan, &u.deps, &outputs);
                 let (args, what) = if u.proc_macro {
                     (
                         schedule::proc_macro_rustc_args(
@@ -194,39 +195,78 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
                             &manifest.profile,
                             &fps,
                             &layout,
+                            bo,
+                            &searches,
                         ),
                         "proc-macro",
                     )
                 } else {
                     (
-                        schedule::host_rustc_args(&plan, ix, &manifest.profile, &fps, &layout),
+                        schedule::host_rustc_args(
+                            &plan,
+                            ix,
+                            &manifest.profile,
+                            &fps,
+                            &layout,
+                            bo,
+                            &searches,
+                        ),
                         "host dep",
                     )
                 };
                 let mut cmd = std::process::Command::new(&args[0]);
                 cmd.args(&args[1..]);
                 apply_unit_env(&mut cmd, u);
+                apply_build_env(&mut cmd, &layout, u, &fps[ix], bo);
                 run_compile(&mut cmd, u, what);
             }
         }
-        // target 侧：照旧 __cless-dep（-Zno-codegen rlib）
+        // 4c. target 侧：照旧 __cless-dep（-Zno-codegen rlib）
         if target_set.contains(&ix) {
             if layout.deps.join(format!("{stem}.rmeta")).is_file()
                 && layout.deps.join(format!("{stem}.rlib")).is_file()
             {
                 // 指纹命中：内容寻址，同名产物即同内容，跳过
             } else {
-                let args =
-                    schedule::dep_rustc_args(&plan, ix, &manifest.profile, &fps, &sysroot, &layout);
+                let searches = buildrs::aggregate_link_searches(&plan, &u.deps, &outputs);
+                let args = schedule::dep_rustc_args(
+                    &plan,
+                    ix,
+                    &manifest.profile,
+                    &fps,
+                    &sysroot,
+                    &layout,
+                    bo,
+                    &searches,
+                );
                 let mut cmd = std::process::Command::new(&self_exe);
                 cmd.arg("__cless-dep").args(&args[1..]);
                 apply_unit_env(&mut cmd, u);
+                apply_build_env(&mut cmd, &layout, u, &fps[ix], bo);
                 run_compile(&mut cmd, u, "dep");
             }
         }
     }
 
-    // 5+6. bin：根 crate 走既有 MirvmCallbacks 会话（after_analysis 停，零产物）
+    // 5. 根包 build.rs 同生命周期（根不是 unit：边表取 plan.root_deps，
+    // fp 单算；OUT_DIR/rustc-env/cfg 修正进 bin 会话）
+    let mut root_fp: Option<String> = None;
+    let mut root_bo: Option<BuildOutput> = None;
+    if manifest.has_build_script {
+        let fp = match schedule::root_fingerprint(manifest, &plan, &fps, &manifest.profile, &stamp)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("mirvm: 根包指纹计算失败: {e}");
+                std::process::exit(1);
+            }
+        };
+        let bo = run_build_lifecycle_root(manifest, &plan, &fps, &layout, &fp, &outputs);
+        root_fp = Some(fp);
+        root_bo = Some(bo);
+    }
+
+    // 6. bin：根 crate 走既有 MirvmCallbacks 会话（after_analysis 停，零产物）
     let (bin_name, bin_path) = match manifest.runnable_bin() {
         Ok(b) => b,
         Err(e) => {
@@ -244,15 +284,187 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
         std::env::set_var("CARGO_BIN_NAME", bin_name);
         std::env::set_var("CARGO_MANIFEST_DIR", &manifest.root);
         std::env::set_var("CARGO_MANIFEST_PATH", manifest.root.join("Cargo.toml"));
+        if let (Some(bo), Some(fp)) = (&root_bo, &root_fp) {
+            // 根 build.rs 的 rustc-env + OUT_DIR 进 bin 会话（env! 可读，cargo 同）
+            std::env::set_var("OUT_DIR", layout.build_dir(&manifest.name, fp).join("out"));
+            for (k, v) in &bo.envs {
+                std::env::set_var(k, v);
+            }
+        }
     }
-    let args =
-        schedule::bin_rustc_args(manifest, &plan, &fps, &sysroot, &layout, bin_name, bin_path);
+    let root_searches = buildrs::aggregate_link_searches(&plan, &plan.root_deps, &outputs);
+    let args = schedule::bin_rustc_args(
+        manifest,
+        &plan,
+        &fps,
+        &sysroot,
+        &layout,
+        bin_name,
+        bin_path,
+        root_bo.as_ref(),
+        &root_searches,
+    );
     // argv0 = 合成产物路径（cargo run 的 argv0 语义 = 最终二进制路径；本会话
     // 零产物，用 deps/<bin> 占位——guest 只见 argv 字符串，不读文件）
     let mut program_argv = vec![layout.deps.join(bin_name).display().to_string()];
     program_argv.extend(program_args.iter().cloned());
     // 全程不 chdir：guest cwd = 调用者 cwd，与 cargo run 语义一致（E36 闭合）
     crate::cli::run_driver(args, program_argv, false, None, false, true)
+}
+
+/// 一个 unit 的 build.rs 全生命周期：build script 编译（fp 命中跳过）→
+/// 以 cargo 兼容 env 执行（v1 粗指纹**每次都重跑**，rerun-if 精细化归 P3，
+/// 设计档 §5 P2 行）→ 指令解析 → BuildOutput。任何一步失败响亮报错点名
+/// crate 后退出。
+fn run_build_lifecycle(
+    u: &Unit,
+    ix: usize,
+    plan: &ResolvePlan,
+    profile: &super::manifest::ProfileFlags,
+    fps: &[String],
+    outputs: &BTreeMap<usize, BuildOutput>,
+    layout: &Layout,
+) -> BuildOutput {
+    let fp = &fps[ix];
+    let bdir = layout.build_dir(&u.package, fp);
+    if let Err(e) = std::fs::create_dir_all(bdir.join("out")) {
+        eprintln!(
+            "mirvm: 创建 build 目录 {} 失败（{} {}）: {e}",
+            bdir.display(),
+            u.package,
+            u.version
+        );
+        std::process::exit(1);
+    }
+    let bexe = bdir.join(format!("build_script_build-{fp}"));
+    if !bexe.is_file() {
+        let args = schedule::build_script_rustc_args(plan, ix, profile, fps, layout);
+        let mut cmd = std::process::Command::new(&args[0]);
+        cmd.args(&args[1..]);
+        apply_unit_env(&mut cmd, u);
+        // 被编译的 crate 是 build script 本体（cargo 同：CARGO_CRATE_NAME
+        // 跟着被编译 crate 走，不是所属包 lib 名）
+        cmd.env("CARGO_CRATE_NAME", "build_script_build");
+        run_compile(&mut cmd, u, "build script");
+    }
+    let env = buildrs::build_script_env(&buildrs::ExecCtx {
+        pkg_env: &u.pkg_env,
+        source_dir: &u.source_dir,
+        features: &u.features,
+        profile,
+        out_dir: &bdir.join("out"),
+        dep_env: buildrs::dep_metadata_env(plan, &u.deps, outputs),
+        ld_dirs: &[layout.host_deps.clone(), layout.deps.clone()],
+    });
+    exec_and_parse(
+        &u.package,
+        &u.version.to_string(),
+        u.from_registry,
+        &bexe,
+        &u.source_dir,
+        &env,
+    )
+}
+
+/// 根包 build.rs 生命周期（根不是 unit：pkg_env/features/profile 由
+/// manifest/plan 直供；根是本地 path 包，warning 照常显示）。
+fn run_build_lifecycle_root(
+    manifest: &PackageManifest,
+    plan: &ResolvePlan,
+    fps: &[String],
+    layout: &Layout,
+    root_fp: &str,
+    outputs: &BTreeMap<usize, BuildOutput>,
+) -> BuildOutput {
+    let bdir = layout.build_dir(&manifest.name, root_fp);
+    if let Err(e) = std::fs::create_dir_all(bdir.join("out")) {
+        eprintln!(
+            "mirvm: 创建 build 目录 {} 失败（根包 {}）: {e}",
+            bdir.display(),
+            manifest.name
+        );
+        std::process::exit(1);
+    }
+    let bexe = bdir.join(format!("build_script_build-{root_fp}"));
+    if !bexe.is_file() {
+        let args = schedule::root_build_script_rustc_args(manifest, plan, fps, layout, root_fp);
+        let mut cmd = std::process::Command::new(&args[0]);
+        cmd.args(&args[1..]);
+        // 根包编译期 env（CARGO_PKG_* 全集 + manifest 两员，cargo 同）
+        cmd.envs(manifest.pkg_env.iter());
+        cmd.env("CARGO_CRATE_NAME", "build_script_build");
+        cmd.env("CARGO_MANIFEST_DIR", &manifest.root);
+        cmd.env(
+            "CARGO_MANIFEST_PATH",
+            manifest.root.join("Cargo.toml").display().to_string(),
+        );
+        let status = match cmd.status() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "mirvm: build script 编译子进程启动失败（根包 {} {}）: {e}",
+                    manifest.name, manifest.version
+                );
+                std::process::exit(1);
+            }
+        };
+        if !status.success() {
+            eprintln!(
+                "mirvm: build script 编译失败：根包 {} {}",
+                manifest.name, manifest.version
+            );
+            std::process::exit(1);
+        }
+    }
+    let env = buildrs::build_script_env(&buildrs::ExecCtx {
+        pkg_env: &manifest.pkg_env,
+        source_dir: &manifest.root,
+        features: &plan.root_features,
+        profile: &manifest.profile,
+        out_dir: &bdir.join("out"),
+        dep_env: buildrs::dep_metadata_env(plan, &plan.root_deps, outputs),
+        ld_dirs: &[layout.host_deps.clone(), layout.deps.clone()],
+    });
+    exec_and_parse(
+        &manifest.name,
+        &manifest.version.to_string(),
+        false,
+        &bexe,
+        &manifest.root,
+        &env,
+    )
+}
+
+/// 执行 + 指令解析 + warning 回吐（cargo 同格式同口径：`warning: <pkg>@<ver>:
+/// <msg>`；registry 包的 build.rs warning 默认吞，path 包显示）。
+fn exec_and_parse(
+    pkg: &str,
+    ver: &str,
+    from_registry: bool,
+    bexe: &Path,
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+) -> BuildOutput {
+    let stdout = match buildrs::run_build_script(bexe, cwd, env) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("mirvm: build script 执行失败（{pkg} {ver}）: {e}");
+            std::process::exit(1);
+        }
+    };
+    let bo = match buildrs::parse_instructions(&stdout) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("mirvm: build script 指令解析失败（{pkg} {ver}）: {e}");
+            std::process::exit(1);
+        }
+    };
+    if !from_registry {
+        for w in &bo.warnings {
+            eprintln!("warning: {pkg}@{ver}: {w}");
+        }
+    }
+    bo
 }
 
 /// cargo 编译期 env 契约（源码 env! 可读）：CARGO_PKG_* 全集 + crate/manifest
@@ -265,6 +477,23 @@ fn apply_unit_env(cmd: &mut std::process::Command, u: &Unit) {
         "CARGO_MANIFEST_PATH",
         u.source_dir.join("Cargo.toml").display().to_string(),
     );
+}
+
+/// 本 unit build script 的编译期 env 注入：OUT_DIR + rustc-env（cargo 对
+/// 有 build script 的包编译时设；env! 可读）。
+fn apply_build_env(
+    cmd: &mut std::process::Command,
+    layout: &Layout,
+    u: &Unit,
+    fp: &str,
+    bo: Option<&BuildOutput>,
+) {
+    if let Some(bo) = bo {
+        cmd.env("OUT_DIR", layout.build_dir(&u.package, fp).join("out"));
+        for (k, v) in &bo.envs {
+            cmd.env(k, v);
+        }
+    }
 }
 
 /// 编译子进程同步跑到底；启动/编译失败响亮点名构造（what = 产物类别）后退出。
@@ -283,36 +512,4 @@ fn run_compile(cmd: &mut std::process::Command, u: &Unit, what: &str) {
         eprintln!("mirvm: {what} 编译失败：{} {}", u.package, u.version);
         std::process::exit(1);
     }
-}
-
-/// 丢弃 Build 类 unit 并重映射所有边下标（drive 子集闸之后调用，理由见闸注释；
-/// build.rs 切片恢复 Build 类 unit 的调度时删除本函数）。
-fn strip_build_units(mut plan: ResolvePlan) -> ResolvePlan {
-    let mut remap: Vec<Option<usize>> = vec![None; plan.units.len()];
-    let mut units = Vec::with_capacity(plan.units.len());
-    for (old, u) in plan.units.into_iter().enumerate() {
-        if u.class == UnitClass::Build {
-            continue;
-        }
-        remap[old] = Some(units.len());
-        units.push(u);
-    }
-    for u in &mut units {
-        u.deps.retain_mut(|d| match remap[d.unit] {
-            Some(n) => {
-                d.unit = n;
-                true
-            }
-            None => false,
-        });
-    }
-    plan.root_deps.retain_mut(|d| match remap[d.unit] {
-        Some(n) => {
-            d.unit = n;
-            true
-        }
-        None => false,
-    });
-    plan.units = units;
-    plan
 }

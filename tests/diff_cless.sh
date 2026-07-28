@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # D15 P2 对拍：MIRVM_DEPS=self（零 cargo 驱动）vs MIRVM_DEPS=cargo
-# （三阶段旧路径），stdout/stderr/exit 逐字节一致。三条：frontmatter 脚本
+# （三阶段旧路径），stdout/stderr/exit 逐字节一致。六条：frontmatter 脚本
 # （切① fresh 求解）、registry 项目（切① 带锁）、path proc-macro 项目
-# （切②：proc-macro 真 rustc host 编译）。
+# （切②：proc-macro 真 rustc host 编译）、registry build.rs 脚本（切③：
+# libc 的 build.rs 全链）、path build.rs 项目（切③：OUT_DIR/rustc-cfg/
+# rustc-env/DEP_* 传播）、serde derive 脚本（切②+③ 全链：proc-macro2 与
+# serde_core 的 build.rs + host/target 双侧 + facade 再导出 proc-macro）。
 # 零 cargo 进程实证：self 腿以「PATH 只含 mirvm 的临时目录」+ MIRVM_OFFLINE=1
 # 跑——cargo 不在 PATH，自路径若偷起 cargo 立刻现形（itoa/memchr/cfg-if 本机
 # registry 已有，读穿离线够）。正式 self 腿前的预热跑（正常 PATH、在线）只为
@@ -76,6 +79,18 @@ diff_cless cless_proj "$TMP/proj" 3 MIRVM_CARGO_LOCKED=1
 # 3) path proc-macro 项目夹具（切②；带锁；cargo 腿 --locked；guest 退出码 5）
 cp -r tests/fixtures/cless_pm "$TMP/pm"
 diff_cless cless_pm "$TMP/pm" 5 MIRVM_CARGO_LOCKED=1
+
+# 4) registry build.rs 脚本夹具（切③：libc 的 build.rs 全链；guest 退出码 6）
+diff_cless cless_libc tests/fixtures/cless_libc.rs 6
+
+# 5) path build.rs 项目夹具（切③：OUT_DIR/rustc-cfg/rustc-env/DEP_* 传播；
+#    带锁；cargo 腿 --locked；guest 退出码 7）
+cp -r tests/fixtures/cless_br "$TMP/br"
+diff_cless cless_br "$TMP/br" 7 MIRVM_CARGO_LOCKED=1
+
+# 6) serde derive 全链脚本夹具（切②+③：proc-macro2/serde_core 的 build.rs +
+#    host/target 双侧 + facade 再导出 proc-macro；guest 退出码 8）
+diff_cless cless_serde tests/fixtures/cless_serde.rs 8
 
 echo "== $pass passed, $fail failed =="
 [ $fail = 0 ]

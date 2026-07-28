@@ -125,6 +125,9 @@ pub struct PackageManifest {
     pub profile: ProfileFlags,
     /// 有 build script（build 键 / links 键 / 根下 build.rs 实存）。
     pub has_build_script: bool,
+    /// `[package] build = "custom.rs"` 的自定义 build script 路径；
+    /// None = 缺省 <root>/build.rs（切③ build.rs 调度用）。
+    pub build_script_path: Option<PathBuf>,
     /// `[package] links`（-sys 链接键；native 库名推导与 build.rs 调度用）。
     pub links: Option<String>,
     pub default_run: Option<String>,
@@ -388,6 +391,10 @@ impl PackageManifest {
                 Some(_) => true,
                 None => root.join("build.rs").is_file(),
             };
+        let build_script_path = match &pkg.build {
+            Some(toml::Value::String(p)) => Some(root.join(p)),
+            _ => None,
+        };
 
         Ok(Self {
             name,
@@ -399,6 +406,7 @@ impl PackageManifest {
             features,
             profile,
             has_build_script,
+            build_script_path,
             links: pkg.links,
             default_run: pkg.default_run,
             pkg_env,
@@ -688,7 +696,8 @@ fn validate_cfg_expr(expr: &str) -> Result<(), MErr> {
 static HOST_CFG_ATOMS: std::sync::OnceLock<std::collections::BTreeSet<String>> =
     std::sync::OnceLock::new();
 
-fn host_cfg_atoms() -> &'static std::collections::BTreeSet<String> {
+/// 暴露给 buildrs.rs 的 CARGO_CFG_* 映射（切③）。
+pub(crate) fn host_cfg_atoms() -> &'static std::collections::BTreeSet<String> {
     HOST_CFG_ATOMS.get_or_init(|| {
         let rustc = std::path::PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT")).join("bin/rustc");
         let out = std::process::Command::new(rustc)

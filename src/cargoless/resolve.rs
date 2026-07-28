@@ -69,8 +69,8 @@ pub struct UnitDep {
     /// --extern 命名键（rename key）。
     pub key: String,
     pub unit: usize,
-    /// 边类（normal/build）；切③（build.rs 调度）按边类分列消费，切① 不读。
-    #[allow(dead_code)]
+    /// 边类（normal/build）；切③ 起按边类分列消费（extern 过滤、build
+    /// 闭包、build script --extern）。
     pub class: UnitClass,
 }
 
@@ -83,12 +83,17 @@ pub struct Unit {
     pub version: Version,
     pub source_dir: PathBuf,
     pub from_registry: bool,
+    /// 本 unit 的类别（resolver v2 normal/build 分列的节点键成分；边类过滤
+    /// 走 UnitDep.class，本字段是审计/模型面留存）。
+    #[allow(dead_code)]
     pub class: UnitClass,
     pub features: BTreeSet<String>,
     pub proc_macro: bool,
     pub has_build_script: bool,
-    /// -sys 链接键；切③（build.rs/-sys 调度）消费，切① 只透传。
-    #[allow(dead_code)]
+    /// `[package] build = "custom.rs"` 的自定义 build script 路径；
+    /// None = 缺省 <source_dir>/build.rs（切③ build.rs 调度用）。
+    pub build_script_path: Option<PathBuf>,
+    /// -sys 链接键（切③：DEP_* 传播键与 links 互斥校验消费）。
     pub links: Option<String>,
     pub deps: Vec<UnitDep>,
     /// package.edition（registry 包缺省 "2015"）——dep rustc 参数用。
@@ -1493,6 +1498,13 @@ fn expand_node(
                             if activated.insert(g.clone()) {
                                 changed = true;
                             }
+                            // 隐式 feature 被引用 = 同名 feature 旗同时启用
+                            // （cargo 同——serde facade 的
+                            // #[cfg(feature = "serde_derive")] 实锤；dep:
+                            // 显式形只激活依赖、不加同名旗）
+                            if features.insert(g.clone()) {
+                                changed = true;
+                            }
                         } else {
                             // cargo 同语义：feature 引用必须指向另一 feature 或可选依赖
                             return Err(format!(
@@ -1554,6 +1566,7 @@ struct RegistryMinimal {
     proc_macro: bool,
     links: Option<String>,
     has_build: bool,
+    build_script_path: Option<PathBuf>,
     edition: String,
     lib_path: PathBuf,
     pkg_env: BTreeMap<String, String>,
@@ -1596,6 +1609,10 @@ fn read_registry_minimal(
             Some(_) => true,
             None => dir.join("build.rs").is_file(),
         };
+    let build_script_path = match pkg_table.and_then(|p| p.get("build")) {
+        Some(toml::Value::String(s)) => Some(dir.join(s)),
+        _ => None,
+    };
     let edition = pkg_table
         .and_then(|p| p.get("edition"))
         .and_then(|e| e.as_str())
@@ -1651,6 +1668,7 @@ fn read_registry_minimal(
         proc_macro,
         links,
         has_build,
+        build_script_path,
         edition,
         lib_path,
         pkg_env,
@@ -1783,6 +1801,7 @@ fn assemble_units(
                 features: node.features.clone(),
                 proc_macro,
                 has_build_script: m.has_build_script,
+                build_script_path: m.build_script_path.clone(),
                 links: m.links.clone(),
                 deps: vec![],
                 edition: m.edition.clone(),
@@ -1804,6 +1823,7 @@ fn assemble_units(
             features: node.features.clone(),
             proc_macro: rm.proc_macro,
             has_build_script: rm.has_build,
+            build_script_path: rm.build_script_path,
             links: rm.links,
             deps: vec![],
             edition: rm.edition,
@@ -2157,6 +2177,40 @@ mod tests {
         assert!(s_build.features.contains("b"));
         // 弱激活未触发：opt2 无单元
         assert!(!plan.units.iter().any(|u| u.package == "opt2"));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn implicit_optional_feature_also_sets_cfg_flag() {
+        // serde facade 形状：feature derive = ["se_derive"]（裸名引用可选
+        // 依赖，无 dep: 形）——激活依赖的同时**同名 feature 旗启用**
+        // （cargo 同：serde 的 #[cfg(feature = "serde_derive")] 实锤）。
+        // 对照：dep: 显式形只激活依赖，不加同名旗。
+        let d = tmpdir("implicitfeat");
+        let root = root_project(
+            &d,
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nse = { version = \"1\", features = [\"derive\"] }\n",
+        );
+        let mut src = FakeSource::new(d.join("srcstore"));
+        let mut se = iv("se", "1.0.0");
+        se.features
+            .insert("derive".into(), vec!["se_derive".into()]);
+        let mut se_derive = idep("se_derive", "1");
+        se_derive.optional = true;
+        se.deps.push(se_derive);
+        src.add("se", vec![se]);
+        src.add("se_derive", vec![iv("se_derive", "1.0.0")]);
+
+        let plan = resolve(&root, &mut src).unwrap();
+        let se_unit = plan.units.iter().find(|u| u.package == "se").unwrap();
+        assert!(se_unit.features.contains("derive"));
+        assert!(
+            se_unit.features.contains("se_derive"),
+            "隐式 feature 旗必须进 cfg 集: {:?}",
+            se_unit.features
+        );
+        assert!(plan.units.iter().any(|u| u.package == "se_derive"));
         std::fs::remove_dir_all(&d).unwrap();
     }
 
