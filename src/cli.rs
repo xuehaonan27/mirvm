@@ -54,10 +54,13 @@ ENV:
     MIRVM_JIT_STATS   =1 时进程退出经 atexit 打 JIT 助手频度统计（诊断用）
     MIRVM_CARGO_LOCKED 置位时 frontmatter/脚本项目按 --locked 构建（依赖锁定；
                       未置位 = clean 环境可重解析，见 open-issues G7）
-    MIRVM_DEPS        =self 时项目/脚本走零 cargo 自有调度（D15 P2 切③：
-                      proc-macro 真 rustc host 编译 + build.rs 全生命周期已接；
-                      剩余拒绝面 = P1 的 P5 边界：git 源/alt registry/
-                      workspace 多包图等）；缺省/=cargo 走 cargo 三阶段
+    MIRVM_DEPS        =self 时项目/脚本走零 cargo 自有调度（D15 cargoless
+                      driver：依赖解析/编译调度/build.rs/proc-macro/rustflags/
+                      rerun-if 增量/并行调度全生命周期，P3 已收；剩余拒绝面 =
+                      P5 边界：git 源/alt registry/workspace 多包图等，响亮
+                      拒绝点名）；缺省/=cargo 走 cargo 三阶段（默认翻转归 P4）
+    MIRVM_CLESS_JOBS  =N 时 cargoless 编译调度并发度（缺省 = 核数；=1 退化为
+                      拓扑序串行，对拍调试用）
     MIRVM_TIMING      =1 时向 stderr 输出相位账本（frontend/lower/engine/total）
     MIRVM_NO_IR_CACHE =1 时旁路 L2 engine-IR 缓存（读写全禁；诊断/对拍用）
     MIRVM_NO_BASE_IMAGE =1 时旁路 std 预降低底座（全量冷降低；诊断/对拍用）
@@ -91,7 +94,7 @@ pub fn main() -> ExitCode {
     if first == "__build-base-image" {
         return crate::baseimage::build_main(argv);
     }
-    // D15 P2 切①：cargoless dep 编译子进程（cargoless::driver 的调度落点；
+    // D15：cargoless dep 编译子进程（cargoless::driver 的调度落点；
     // 同样必须先于 MIRVM_CARGO_SESSION 分流）
     if first == "__cless-dep" {
         return run_cless_dep(argv.collect());
@@ -435,9 +438,9 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     };
     let input_path = PathBuf::from(&input);
 
-    // D15 P2 切①：MIRVM_DEPS=self 走零 cargo 新路径（cargoless::driver）；
-    // 缺省/=cargo 走 cargo 三阶段旧路径；其他值响亮报错——双轨并存期的
-    // 显式开关（默认翻转归 P4，设计档 §5）
+    // D15（设计档 §5，P3 已收）：MIRVM_DEPS=self 走零 cargo 自有调度
+    // （cargoless::driver）；缺省/=cargo 走 cargo 三阶段旧路径；其他值响亮
+    // 报错——双轨并存期的显式开关（默认翻转归 P4）
     let deps_self = match std::env::var("MIRVM_DEPS").as_deref() {
         Err(_) | Ok("cargo") => false,
         Ok("self") => true,
@@ -659,7 +662,7 @@ pub(crate) fn run_dep_compiler(rustc_args: Vec<String>) -> ! {
     exit(if code == ExitCode::SUCCESS { 0 } else { 1 })
 }
 
-/// D15 P2 切①：cargoless dep 编译子进程入口——补回 argv0 后喂 run_dep_compiler
+/// D15：cargoless dep 编译子进程入口——补回 argv0 后喂 run_dep_compiler
 /// （参数由 cargoless::schedule::dep_rustc_args 计算，cargoless::driver 调度；
 /// 与 cargo_shim wrapper 段共用同一 DepCallbacks/global_asm 抽取通道）。
 fn run_cless_dep(rest: Vec<String>) -> ExitCode {
