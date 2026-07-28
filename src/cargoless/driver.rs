@@ -4,9 +4,11 @@
 //!
 //! ```text
 //! resolve（P1 求解器）→ links 互斥校验 → 逐 unit 按 topo 序调度：
-//!   build.rs 全生命周期（切③）：host 真编译 build script（fp 命中跳过）
-//!     → 以 cargo 兼容 env 执行（v1 粗指纹**每次都重跑**，rerun-if 精细化归
-//!     P3，设计档 §5 P2 行）→ 指令解析 → BuildOutput 入表
+//!   build.rs 全生命周期（切③ + P3 切⑤b 精细增量）：host 真编译 build script
+//!     （fp 命中跳过）→ rerun 判定（buildrs::should_rerun，cargo 同语义——
+//!     存档在 build/<pkg>-<fp>/{output.txt,rerun.txt}，跳过则从 output.txt
+//!     重解析回放 BuildOutput，warning 门控同款）→ 以 cargo 兼容 env 执行 →
+//!     指令解析 → BuildOutput 入表（本 unit 记入 re_ran，links 传递判定用）
 //!   host 集（proc-macro 闭包 ∪ build-deps 闭包）→ spawn 真 rustc 真 codegen
 //!   target 集 → 起 `__cless-dep` 子进程（cli::run_dep_compiler：
 //!   in-process rustc_driver + global_asm 抽取）
@@ -21,7 +23,7 @@
 //! build script、无自动 DEP_*_ROOT、无自动 check-cfg 补钉）全是切③ 实证
 //! 结论，明细在 buildrs.rs 文件头。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -170,6 +172,9 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
     // unit 下标 → 已执行的 BuildOutput（本 unit 编译修正 + 依赖者 -L 汇集 +
     // 直接依赖者 build script 的 DEP_* 三处消费）
     let mut outputs: BTreeMap<usize, BuildOutput> = BTreeMap::new();
+    // 本次会话真正重跑了 build.rs 的 unit（切⑤b 条件 4 links 传递：直接依赖
+    // 中带 links 的包在 re_ran ⇒ 本包也重跑，DEP_* 输入可能变）
+    let mut re_ran: BTreeSet<usize> = BTreeSet::new();
     for ix in order {
         let u = &plan.units[ix];
         let stem = format!("lib{}-{}", u.lib_name, fps[ix]);
@@ -179,7 +184,19 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
         if u.has_build_script
             && (host_set.contains(&ix) || target_set.contains(&ix) || build_set.contains(&ix))
         {
-            let bo = run_build_lifecycle(u, ix, &plan, &manifest.profile, &fps, &outputs, &layout);
+            let (bo, ran) = run_build_lifecycle(
+                u,
+                ix,
+                &plan,
+                &manifest.profile,
+                &fps,
+                &outputs,
+                &layout,
+                &re_ran,
+            );
+            if ran {
+                re_ran.insert(ix);
+            }
             outputs.insert(ix, bo);
         }
         let bo = outputs.get(&ix);
@@ -294,7 +311,9 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
     }
     if manifest.has_build_script {
         let fp = root_fp.clone().expect("上一步已算");
-        let bo = run_build_lifecycle_root(manifest, &plan, &fps, &layout, &fp, &outputs);
+        // 根的 ran 无人消费（根无下游，links 传不到它头上），只走观测行
+        let (bo, _ran) =
+            run_build_lifecycle_root(manifest, &plan, &fps, &layout, &fp, &outputs, &re_ran);
         root_bo = Some(bo);
     }
 
@@ -420,9 +439,12 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
 }
 
 /// 一个 unit 的 build.rs 全生命周期：build script 编译（fp 命中跳过）→
-/// 以 cargo 兼容 env 执行（v1 粗指纹**每次都重跑**，rerun-if 精细化归 P3，
-/// 设计档 §5 P2 行）→ 指令解析 → BuildOutput。任何一步失败响亮报错点名
-/// crate 后退出。
+/// rerun 判定（切⑤b：buildrs::should_rerun，cargo 同语义）——跳过则读
+/// output.txt 重解析回放 BuildOutput，跑则以 cargo 兼容 env 执行并写存档
+/// （执行成功后——失败本函数已响亮退出，无半存档）→ (BuildOutput, 是否真跑)。
+/// 任何一步失败响亮报错点名 crate 后退出。
+// 平铺参数 = 生命周期各槽一一对应（schedule.rs 参数函数同款先例）
+#[allow(clippy::too_many_arguments)]
 fn run_build_lifecycle(
     u: &Unit,
     ix: usize,
@@ -431,7 +453,8 @@ fn run_build_lifecycle(
     fps: &[String],
     outputs: &BTreeMap<usize, BuildOutput>,
     layout: &Layout,
-) -> BuildOutput {
+    re_ran: &BTreeSet<usize>,
+) -> (BuildOutput, bool) {
     let fp = &fps[ix];
     let bdir = layout.build_dir(&u.package, fp);
     if let Err(e) = std::fs::create_dir_all(bdir.join("out")) {
@@ -463,13 +486,23 @@ fn run_build_lifecycle(
         dep_env: buildrs::dep_metadata_env(plan, &u.deps, outputs),
         ld_dirs: &[layout.host_deps.clone(), layout.deps.clone()],
     });
-    exec_and_parse(
+    // 条件 4 links 传递：直接依赖中带 links 且本次重跑了的包（DEP_* 只给
+    // 直接依赖者——传递再远一层的重跑由各层自己的判定覆盖）
+    let dep_links_reran: Vec<String> = u
+        .deps
+        .iter()
+        .filter(|d| re_ran.contains(&d.unit) && plan.units[d.unit].links.is_some())
+        .map(|d| plan.units[d.unit].package.clone())
+        .collect();
+    rerun_gate(
         &u.package,
         &u.version.to_string(),
         u.from_registry,
-        &bexe,
         &u.source_dir,
+        &bdir,
+        &bexe,
         &env,
+        &dep_links_reran,
     )
 }
 
@@ -482,7 +515,8 @@ fn run_build_lifecycle_root(
     layout: &Layout,
     root_fp: &str,
     outputs: &BTreeMap<usize, BuildOutput>,
-) -> BuildOutput {
+    re_ran: &BTreeSet<usize>,
+) -> (BuildOutput, bool) {
     let bdir = layout.build_dir(&manifest.name, root_fp);
     if let Err(e) = std::fs::create_dir_all(bdir.join("out")) {
         eprintln!(
@@ -532,18 +566,81 @@ fn run_build_lifecycle_root(
         dep_env: buildrs::dep_metadata_env(plan, &plan.root_deps, outputs),
         ld_dirs: &[layout.host_deps.clone(), layout.deps.clone()],
     });
-    exec_and_parse(
+    let dep_links_reran: Vec<String> = plan
+        .root_deps
+        .iter()
+        .filter(|d| re_ran.contains(&d.unit) && plan.units[d.unit].links.is_some())
+        .map(|d| plan.units[d.unit].package.clone())
+        .collect();
+    rerun_gate(
         &manifest.name,
         &manifest.version.to_string(),
         false,
-        &bexe,
         &manifest.root,
+        &bdir,
+        &bexe,
         &env,
+        &dep_links_reran,
     )
 }
 
-/// 执行 + 指令解析 + warning 回吐（cargo 同格式同口径：`warning: <pkg>@<ver>:
-/// <msg>`；registry 包的 build.rs warning 默认吞，path 包显示）。
+/// rerun 门（切⑤b）：判定（buildrs::should_rerun）→ 跳过则读存档
+/// output.txt 重解析回放（指令流零序列化失真，warning 按同门控从缓存
+/// 回放——cargo 同）；跑则执行 + 写 output.txt/rerun.txt 两份存档。
+/// MIRVM_DEBUG_BLDRS=1 时向 stderr 打 `bldrs run|skip <pkg> <原因>` 观测行。
+/// 返回 (BuildOutput, 本次是否真跑)。
+// 平铺参数先例同 run_build_lifecycle
+#[allow(clippy::too_many_arguments)]
+fn rerun_gate(
+    pkg: &str,
+    ver: &str,
+    from_registry: bool,
+    pkg_root: &Path,
+    bdir: &Path,
+    bexe: &Path,
+    env: &BTreeMap<String, String>,
+    dep_links_reran: &[String],
+) -> (BuildOutput, bool) {
+    let env_get = |k: &str| std::env::var(k).ok();
+    let (rerun, why) = buildrs::should_rerun(
+        bdir,
+        from_registry,
+        pkg,
+        pkg_root,
+        dep_links_reran,
+        &env_get,
+    );
+    if std::env::var_os("MIRVM_DEBUG_BLDRS").is_some() {
+        eprintln!("bldrs {} {pkg} {why}", if rerun { "run" } else { "skip" });
+    }
+    if !rerun {
+        // 跳过执行：output.txt 重解析即 BuildOutput（回放失败按损坏自愈落跑）
+        if let Ok(stdout) = std::fs::read_to_string(bdir.join("output.txt"))
+            && let Ok(bo) = buildrs::parse_instructions(&stdout)
+        {
+            show_warnings(pkg, ver, from_registry, &bo);
+            return (bo, false);
+        }
+    }
+    let (bo, stdout) = exec_and_parse(pkg, ver, from_registry, bexe, pkg_root, env);
+    // 存档写失败不致命——下次 no-record 重跑自愈（磁盘层故障前序编译写已
+    // 先炸）；静默，不惊扰对拍 stderr
+    let _ = buildrs::write_record(bdir, &stdout, &bo, from_registry, pkg, pkg_root, &env_get);
+    (bo, true)
+}
+
+/// build script warning 回吐门控（cargo 同格式同口径：`warning: <pkg>@<ver>:
+/// <msg>`；registry 包默认吞，path 包显示；执行与存档回放两路同款）。
+fn show_warnings(pkg: &str, ver: &str, from_registry: bool, bo: &BuildOutput) {
+    if !from_registry {
+        for w in &bo.warnings {
+            eprintln!("warning: {pkg}@{ver}: {w}");
+        }
+    }
+}
+
+/// 执行 + 指令解析 + warning 回吐，返回 (BuildOutput, 原始 stdout)
+/// （原始 stdout 供调用方写 output.txt 存档——回放靠重解析，零序列化失真）。
 fn exec_and_parse(
     pkg: &str,
     ver: &str,
@@ -551,7 +648,7 @@ fn exec_and_parse(
     bexe: &Path,
     cwd: &Path,
     env: &BTreeMap<String, String>,
-) -> BuildOutput {
+) -> (BuildOutput, String) {
     let stdout = match buildrs::run_build_script(bexe, cwd, env) {
         Ok(s) => s,
         Err(e) => {
@@ -566,12 +663,8 @@ fn exec_and_parse(
             std::process::exit(1);
         }
     };
-    if !from_registry {
-        for w in &bo.warnings {
-            eprintln!("warning: {pkg}@{ver}: {w}");
-        }
-    }
-    bo
+    show_warnings(pkg, ver, from_registry, &bo);
+    (bo, stdout)
 }
 
 /// cargo 编译期 env 契约（源码 env! 可读）：CARGO_PKG_* 全集 + crate/manifest

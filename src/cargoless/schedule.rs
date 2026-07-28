@@ -229,7 +229,9 @@ fn source_stamp(u: &Unit) -> Result<String, String> {
     source_stamp_dir(u.from_registry, &u.source_dir, &u.package)
 }
 
-fn source_stamp_dir(
+/// pub(super)：buildrs.rs 的 build.rs 重跑判定（D15 P3 切⑤b）default 面
+/// 树快照复用同一折叠——存档快照与指纹盖戳同口径，漂移同源。
+pub(super) fn source_stamp_dir(
     from_registry: bool,
     source_dir: &Path,
     package: &str,
