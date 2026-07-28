@@ -48,8 +48,9 @@ P1 的闭合过程把 cargo 的解析语义逐条实证出来（每条都有对�
 
 > 状态：2026-07-23 调研定稿（四决策点当日裁定）；**P1 已收口（2026-07-27，
 > §8 求解语义定稿，decision-history §7.28）；P2 已收口（2026-07-27，
-> corpus smoke 24 双腿逐字节 24/24，decision-history §7.29）**；P3（rerun-if
-> 精细增量 + full 层迁移 + 双轨 gate）待施。
+> corpus smoke 24 双腿逐字节 24/24，decision-history §7.29）；P3 已收口
+> （2026-07-28，corpus full 138 pass 1 p5 0 fail + gate DEPS=self 双轨绿，
+> decision-history §7.30）**；P4（sysroot 自管 + 默认翻转）待施。
 > 立项记录：[open-issues.md D15](../open-issues.md)；动机源头：decision-history §7.22
 > （C4 两轮绕行被否——"吃 cargo 产物就得绕"的处境要制度性消除）。
 > 本文遵循"闭合契约"纪律：每期写明闭合到哪条可观察边界；原理上不能闭合的

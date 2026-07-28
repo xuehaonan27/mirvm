@@ -1502,6 +1502,54 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   lint）；v1 粗指纹固有限度（build.rs 输出随环境漂移而源未变时 rlib
   可能陈旧——与 cargo rerun-if-env 同类问题，P3 rerun-if 闭合）。
 
+### 7.30 2026-07-28：D15 P3 收口——迁移全量 corpus 与双轨 gate
+
+- **落地（`de33733`/`6f4094f`/`a43698f`/`239677f` + 收官修复）**：
+  - **切⑤a rustflags 子集**（新 `rustflags.rs`）：
+    CARGO_ENCODED_RUSTFLAGS / RUSTFLAGS / config 三键，优先级与发现
+    规则按 cargo；落点实证（13 条 rustc 行逐类核对）——有 --target
+    时 rustflags 只落 target 单元（host 侧签名级不吃）；进全 unit
+    指纹。伴生修两枚 full 层基线缺口：`proc_macro` 下划线归一化
+    拼写双收（tokei 的 derive_arbitrary 实锤）、根包 [lib]+[[bin]]
+    双 target 的根 lib 编译接线（hexyl 实锤）。
+  - **切⑤b build.rs rerun-if 精细增量**：cargo 同语义重跑判定
+    （默认面 registry 源不可变永不重跑 / path 树快照、
+    rerun-if-changed 按 (len,mtime_ns)、env-changed 按值、links
+    直接依赖传递、存档缺席损坏自愈）；存档 = build/<pkg>-<fp>/
+    {output.txt, rerun.txt}，跳过执行则原始 stdout 重解析回放
+    （零序列化失真，warning 同门控回放）；MIRVM_DEBUG_BLDRS=1
+    观测行。提速实锤：libgit2 第二腿 20s→0s。
+  - **切⑤c 编译调度并行化**：`schedule::run_scheduler`——Kahn
+    就绪队列 + std-only worker 池；完成表只归主线程、派发时算好
+    依赖侧输入捎进 WorkMsg（零锁）；jobs=1 与 Kahn FIFO 逐位一致
+    的对拍锚；FpLocks 互斥同 fp 的 Normal/Build 双 unit（并行才
+    暴露的既有雷）。冷跑提速 wasmtime_wat 152s→79s（1.9×）。
+  - **切⑤d full 层迁移**：137 条目双腿对拍 120/19 起，分诊修复
+    四枚——**extern 命名无 rename 时按 dep 包 lib target 名**
+    （tendril→new_debug_unreachable 等 9 条目）；**StrongDep 强形
+    在有同名显式 feature 定义时被 dep: 遮蔽也置旗**（zerotrie
+    litemap 探针实证三态：dep: 永不置、x/y 有显式定义置、无定义
+    未遮蔽走隐式旗）；**build script env 补 CARGO_MANIFEST_LINKS**
+    （ring 0.17.14 build.rs unwrap 实锤）；**bin 会话
+    --remap-path-prefix + 脚本正文物化改 <cache>/src/main.rs**
+    （file!()/panic Location 路径形态与 cargo 逐字节）。
+- **P5 单列制度化**：对拍轴遇「归 P5」响亮拒绝且 cargo 腿通过时
+  单列 p5 计数（mirvm deps audit 同款先例；miden_prove 的 wincode
+  git 源归列）——设计档 §5 明说的不闭合面不冒充闭合。
+- **双轨 gate**：`tests/diff_cargo.sh` 恒钉 MIRVM_DEPS=cargo
+  （cargo compat 轨不缺席）；`MIRVM_DEPS=self bash tests/gate.sh`
+  = corpus ① 全量走零 cargo 自有调度的 DEPS 轴验收。
+- **P3 闭合验收**：`corpus_deps_pair --tier full` **138 pass,
+  1 p5, 0 fail**；cargo test 153；run.sh fast 9/9；
+  `MIRVM_DEPS=self SKIP_TSAN=1 bash tests/gate.sh` **177 pass,
+  1 p5, 1 fail**——corpus ① 含 P5 单列（miden_prove 的 wincode git
+  源归 p5 列）；hexyl/tokei native 基线修复 = gate.sh 显式钉 RUSTC
+  （rustup 代理按每次调用 cwd 解析：registry 依赖编译 cwd 在仓外落
+  rustup default stable，混合工具链 E0514 实锤）；唯一 fail =
+  runtime_gates 纯度门禁（harness 编译 mirvm-tsan，被工作树内并行
+  的 mirvm_log 重构卡住——与 D15 无关，重构收尾后回启复验）。
+  P4（sysroot 自管 + 默认翻转）待施。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT
