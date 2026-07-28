@@ -211,6 +211,19 @@ pub fn phase_wrapper(mut argv: impl Iterator<Item = String>) -> ! {
         exec(cmd);
     }
 
+    // cargo 驱动之外的临时探测编译：build.rs 读 RUSTC_WRAPPER 后 spawn
+    // `$WRAPPER $RUSTC --crate-type=rlib --emit=metadata -o <f> -` 探测工具链
+    // 特性（rustix 1.1.4 实锤）。判据：无 --out-dir（cargo 的 dep 编译恒带）
+    // 或 stdin 源 `-`（cargo 恒为文件路径）。原样 exec 真 rustc——探针问的
+    // 是「这套工具链认不认 X」，只能由真 rustc 回答；劫持进 dep 通道则
+    // run_dep_compiler 缺 --out-dir 即 panic，与探针 writeln 竞态成 EPIPE
+    // （负载高时 build.rs 炸，空载时探针假否——两态都错）。
+    if arg_flag_value(&args, "--out-dir").is_none() || args.iter().any(|a| a == "-") {
+        let mut cmd = Command::new(&rustc);
+        cmd.args(&args);
+        exec(cmd);
+    }
+
     if is_runnable {
         // 最终 bin：不编译，写 JSON 假二进制 + stub .d
         let info = CrateRunInfo {

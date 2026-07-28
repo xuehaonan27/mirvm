@@ -211,6 +211,12 @@ pub fn build_script_env(ctx: &ExecCtx) -> BTreeMap<String, String> {
     let mut env = ctx.pkg_env.clone();
     env.extend(cargo_cfg_env(ctx.features, ctx.profile));
     env.extend(ctx.dep_env.iter().map(|(k, v)| (k.clone(), v.clone())));
+    // CARGO_FEATURE_<NAME>=1 逐启用 feature（cargo 同；build.rs 探测 feature
+    // 的正典通道——cranelift-codegen 按 CARGO_FEATURE_PULLEY 决定生成
+    // pulley_inst_gen.rs 实锤，缺了它 OUT_DIR 产物缺文件、include! 炸）
+    for f in ctx.features {
+        env.insert(format!("CARGO_FEATURE_{}", envify(f)), "1".to_string());
+    }
     let sysroot = PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT"));
     let mut put = |k: &str, v: String| {
         env.insert(k.to_string(), v);
@@ -437,6 +443,30 @@ mod tests {
         assert_eq!(envify("my-links.x"), "MY_LINKS_X");
         assert_eq!(envify("sysd"), "SYSD");
         assert_eq!(envify("foo_bar"), "FOO_BAR");
+    }
+
+    #[test]
+    fn build_script_env_marks_each_enabled_feature() {
+        // cranelift-codegen 按 CARGO_FEATURE_PULLEY 决定生成 pulley_inst_gen.rs
+        // 实锤——逐启用 feature 的 CARGO_FEATURE_<NAME>=1 必须在场
+        // （缺了它 OUT_DIR 产物缺文件、include! 炸，corpus smoke 分诊实锤）。
+        let pkg_env = BTreeMap::new();
+        let features: BTreeSet<String> = ["pulley", "std"].iter().map(|s| s.to_string()).collect();
+        let env = build_script_env(&ExecCtx {
+            pkg_env: &pkg_env,
+            source_dir: Path::new("/tmp/x"),
+            features: &features,
+            profile: &ProfileFlags::default(),
+            out_dir: Path::new("/tmp/x/out"),
+            dep_env: BTreeMap::new(),
+            ld_dirs: &[],
+        });
+        assert_eq!(
+            env.get("CARGO_FEATURE_PULLEY").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(env.get("CARGO_FEATURE_STD").map(String::as_str), Some("1"));
+        assert!(!env.contains_key("CARGO_FEATURE_NOPE"));
     }
 
     #[test]

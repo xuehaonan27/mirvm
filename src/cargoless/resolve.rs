@@ -1521,6 +1521,16 @@ fn expand_node(
                         if activated.insert(dep.clone()) {
                             changed = true;
                         }
+                        // 强形 x/y 激活可选依赖 = 视同指定其同名隐式 feature
+                        // （cargo 同——k256 的 ecdsa-core/signing ⇒
+                        // #[cfg(feature = "ecdsa-core")] 模块实锤；
+                        // dep: 遮蔽（hidden）时隐式 feature 不存在，不补）
+                        if optional_keys.contains(dep)
+                            && !hidden.contains(dep)
+                            && features.insert(dep.clone())
+                        {
+                            changed = true;
+                        }
                         edge_adds
                             .entry(dep.clone())
                             .or_default()
@@ -2211,6 +2221,46 @@ mod tests {
             se_unit.features
         );
         assert!(plan.units.iter().any(|u| u.package == "se_derive"));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn strong_dep_feature_also_sets_implicit_cfg_flag() {
+        // k256 形状：feature ecdsa = ["ecdsa-core/signing"]（强形引用可选
+        // 依赖）——激活依赖并下发 signing 的同时，同名隐式 feature 旗
+        // ecdsa-core 启用（cargo 同：k256 的
+        // #[cfg(feature = "ecdsa-core")] pub mod ecdsa 实锤；缺旗 =
+        // E0433 cannot find ecdsa in k256，corpus smoke 分诊实锤）。
+        let d = tmpdir("strongimplicit");
+        let root = root_project(
+            &d,
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nk2 = { version = \"1\", features = [\"ecdsa\"] }\n",
+        );
+        let mut src = FakeSource::new(d.join("srcstore"));
+        let mut k2 = iv("k2", "1.0.0");
+        k2.features
+            .insert("ecdsa".into(), vec!["ecdsa-core/signing".into()]);
+        let mut ec = idep("ecdsa-core", "1");
+        ec.optional = true;
+        k2.deps.push(ec);
+        src.add("k2", vec![k2]);
+        src.add("ecdsa-core", vec![iv("ecdsa-core", "1.0.0")]);
+
+        let plan = resolve(&root, &mut src).unwrap();
+        let k2_unit = plan.units.iter().find(|u| u.package == "k2").unwrap();
+        assert!(k2_unit.features.contains("ecdsa"));
+        assert!(
+            k2_unit.features.contains("ecdsa-core"),
+            "强形激活的可选依赖其隐式 feature 旗必须进 cfg 集: {:?}",
+            k2_unit.features
+        );
+        let ec_unit = plan
+            .units
+            .iter()
+            .find(|u| u.package == "ecdsa-core")
+            .unwrap();
+        assert!(ec_unit.features.contains("signing"), "x/y 的 y 照常下发");
         std::fs::remove_dir_all(&d).unwrap();
     }
 
