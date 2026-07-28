@@ -194,7 +194,9 @@ struct RawWorkspacePackage {
 struct RawLib {
     name: Option<String>,
     path: Option<String>,
-    #[serde(rename = "proc-macro")]
+    // 两种拼写都收：连字符是 cargo 文档形态（用户手写），下划线是新版
+    // cargo 归一化产物形态（derive_arbitrary 1.3.2 实锤；cargo 双侧受理）
+    #[serde(rename = "proc-macro", alias = "proc_macro")]
     proc_macro: Option<bool>,
 }
 
@@ -1044,6 +1046,33 @@ cc = "1"
         )
         .unwrap();
         assert_eq!(m2.runnable_bin().unwrap().0, "extra");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn lib_proc_macro_accepts_both_spellings() {
+        // 两种拼写都收（resolve.rs registry 最小读取同款纪律：连字符 =
+        // cargo 文档形态，下划线 = 新版归一化产物形态）
+        let d = tmpdir("libpm");
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("src/lib.rs"), "").unwrap();
+        for key in ["proc-macro", "proc_macro"] {
+            let m = PackageManifest::parse(
+                &format!("[package]\nname=\"d\"\nversion=\"0.1.0\"\n[lib]\n{key} = true\n"),
+                &d,
+            )
+            .unwrap();
+            let pm = m.targets.iter().any(|t| {
+                matches!(
+                    t,
+                    Target::Lib {
+                        proc_macro: true,
+                        ..
+                    }
+                )
+            });
+            assert!(pm, "拼写 {key} 必须识别");
+        }
         std::fs::remove_dir_all(&d).unwrap();
     }
 

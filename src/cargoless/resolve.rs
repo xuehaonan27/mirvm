@@ -1601,6 +1601,7 @@ fn read_registry_minimal(
         .unwrap_or_else(|| package.replace('-', "_"));
     let proc_macro = lib
         .and_then(|l| l.get("proc-macro"))
+        .or_else(|| lib.and_then(|l| l.get("proc_macro"))) // 新归一化下划线形态（derive_arbitrary 实锤）
         .and_then(|p| p.as_bool())
         .unwrap_or(false);
     let lib_path = dir.join(
@@ -2493,5 +2494,35 @@ mod tests {
         assert!(r.contains(&Version::parse("0.18.5").unwrap()));
         assert!(r.contains(&Version::parse("0.18.5+1.9.4").unwrap()));
         assert!(!r.contains(&Version::parse("0.18.6").unwrap()));
+    }
+
+    #[test]
+    fn registry_minimal_accepts_both_proc_macro_spellings() {
+        // crates.io 归一化产物两种拼写并存：连字符（serde_derive 1.0.228，
+        // 老归一化）与下划线（derive_arbitrary 1.3.2，新归一化）——cargo
+        // 双侧受理，漏一种 = proc-macro 误当 target dep 编（tokei 实锤）
+        let d = tmpdir("proc-macro-spelling");
+        for (key, want) in [("proc-macro", true), ("proc_macro", true)] {
+            let dir = d.join(key);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("Cargo.toml"),
+                format!("[package]\nname = \"pm\"\nversion = \"1.0.0\"\n[lib]\n{key} = true\n"),
+            )
+            .unwrap();
+            let rm = read_registry_minimal(&dir, "pm", &Version::parse("1.0.0").unwrap()).unwrap();
+            assert_eq!(rm.proc_macro, want, "拼写 {key} 必须识别");
+        }
+        // 缺席 = false（普通 lib）
+        let dir = d.join("absent");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"pm\"\nversion = \"1.0.0\"\n[lib]\n",
+        )
+        .unwrap();
+        let rm = read_registry_minimal(&dir, "pm", &Version::parse("1.0.0").unwrap()).unwrap();
+        assert!(!rm.proc_macro);
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

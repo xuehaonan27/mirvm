@@ -162,15 +162,18 @@ pub fn target_units(plan: &ResolvePlan) -> BTreeSet<usize> {
 
 /// 每 unit 的内容指纹（按 topo 序算——dep 的 fp 先于依赖者产出）。
 /// fp(unit) = fnv1a(BUILD_ID, package, version, edition, 排序后 features,
-/// profile 三员, sysroot_stamp, 源 stamp, **排序后各 dep 的 fp**)。
+/// profile 三员, sysroot_stamp, rustflags 逐条, 源 stamp, **排序后各 dep 的 fp**)。
 /// 最后这枚必须含：depsimage pre-key 的「传递闭包变更 ⇒ 直接依赖产物盖戳变」
 /// 不变量靠它传播——传递 dep 的 fp 变 ⇒ 直接 dep 的 fp 变 ⇒ 其产物文件名变
 /// ⇒ bin 的 --extern 盖戳变（depsimage.rs 头注同款语义；钉死，勿删）。
 /// 无 dep 源变化但 lock 版本集变化时，版本字段已覆盖。
+/// rustflags（D15 P3 切⑤a）逐条按序进全部 unit fp：host 侧不吃 rustflags
+/// 但跟随失效无害（v1 从简，边界记档）；顺序有语义（后旗压前旗）不排序。
 pub fn fingerprints(
     plan: &ResolvePlan,
     profile: &ProfileFlags,
     sysroot_stamp: &str,
+    rustflags: &[String],
 ) -> Result<Vec<String>, String> {
     let order = topo_order(plan)?;
     let mut fps: Vec<Option<String>> = vec![None; plan.units.len()];
@@ -206,6 +209,9 @@ pub fn fingerprints(
         });
         put(&profile.opt_level.to_string());
         put(sysroot_stamp);
+        for f in rustflags {
+            put(f); // 按序：rustflags 顺序有语义（后旗压前旗）
+        }
         put(&src_stamp);
         for d in &dep_fps {
             put(d);
@@ -272,16 +278,19 @@ fn source_stamp_dir(
     Ok(rows.join("\u{1e}"))
 }
 
-/// 根包指纹（切③：根 build script 编译缓存键 + build 目录名）。根不是
-/// unit 不在 fingerprints() 里，同配方单独算：BUILD_ID、包名/版本/edition、
-/// 排序后 root features、profile 三员、sysroot_stamp、根源 stamp、排序后
-/// 全部根边 dep 的 fp（Build 边在——build script 的 --extern 盖戳随它们变）。
+/// 根包指纹（切③：根 build script 编译缓存键 + build 目录名；切⑤a 起兼作
+/// 根 lib target 的产物名盖戳）。根不是 unit 不在 fingerprints() 里，同配方
+/// 单独算：BUILD_ID、包名/版本/edition、排序后 root features、profile 三员、
+/// sysroot_stamp、rustflags 逐条（根 lib 是 target 单元吃 rustflags，fp 必
+/// 含；根 build script 编译不吃、跟随失效无害）、根源 stamp、排序后全部根
+/// 边 dep 的 fp（Build 边在——build script 的 --extern 盖戳随它们变）。
 pub fn root_fingerprint(
     manifest: &PackageManifest,
     plan: &ResolvePlan,
     fps: &[String],
     profile: &ProfileFlags,
     sysroot_stamp: &str,
+    rustflags: &[String],
 ) -> Result<String, String> {
     let src_stamp = source_stamp_dir(false, &manifest.root, &manifest.name)?;
     let mut key = String::from(env!("MIRVM_BUILD_ID"));
@@ -307,6 +316,9 @@ pub fn root_fingerprint(
     });
     put(&profile.opt_level.to_string());
     put(sysroot_stamp);
+    for f in rustflags {
+        put(f); // 按序（unit fp 同款纪律）
+    }
     put(&src_stamp);
     let mut dep_fps: Vec<&str> = plan
         .root_deps
@@ -400,6 +412,9 @@ fn append_build_output(a: &mut Vec<String>, bo: Option<&BuildOutput>, searches: 
 /// argv0 = "mirvm-cless-rustc"（driver 起子进程时剥掉补真名）。
 /// extern 只吃 **Normal 类边**（Build 边不是代码依赖——切③ 修正面）；
 /// `bo` = 本 unit 的 build script 产物，`searches` = 传递 -L 汇集。
+/// `rustflags`（D15 P3 切⑤a）追加在参数串**末尾**（-Z 旗之后）：rustc
+/// 后旗压前旗，用户旗覆盖先行旗——实证见 rustflags.rs 头注（有 --target
+/// 时 rustflags 只落 target 单元；host 侧参数函数签名不含 rustflags）。
 // 平铺参数 = 编译配方各槽一一对应（manifest.rs pkg_env_map 同款先例）；
 // 包成 struct 反而失去与 argv 段的目视对应
 #[allow(clippy::too_many_arguments)]
@@ -412,6 +427,7 @@ pub fn dep_rustc_args(
     layout: &Layout,
     bo: Option<&BuildOutput>,
     searches: &[String],
+    rustflags: &[String],
 ) -> Vec<String> {
     let u = &plan.units[unit_ix];
     let fp = &fps[unit_ix];
@@ -472,6 +488,9 @@ pub fn dep_rustc_args(
     a.push(sysroot.display().to_string());
     a.push("-Zalways-encode-mir".into());
     a.push("-Zno-codegen".into());
+    // rustflags 末尾追加：后旗压前旗（--cap-lints allow 须压住 path 依赖的
+    // 内置 lint 行为）
+    a.extend(rustflags.iter().cloned());
     a
 }
 
@@ -480,6 +499,12 @@ pub fn dep_rustc_args(
 /// （与 cargo 路径 runner 段的 bin 会话同形态）。
 /// extern 只吃 Normal 类根边；`bo` = 根 build script 产物（cfg/check-cfg/
 /// link 旗进会话），`searches` = 传递 -L 汇集。
+/// `rustflags`（D15 P3 切⑤a）追加在参数串**末尾**（--sysroot 之后）：
+/// 后旗压前旗（bin 是 path 包无内置 --cap-lints，RUSTFLAGS 的 --cap-lints
+/// allow 在此压住 lint 告警——hexyl/tokei 对拍场景）。
+/// `root_lib` = Some((lib_name, lib_fp)) 时补根包 lib target 的 --extern
+/// （[lib]+[[bin]] 双 target 时 bin 隐式依赖同名 lib——hexyl 实锤，cargo
+/// 实证行里根 lib 与其余 --extern 混排指 .rlib；root_lib_rustc_args 的产物）。
 // 平铺参数先例同 dep_rustc_args
 #[allow(clippy::too_many_arguments)]
 pub fn bin_rustc_args(
@@ -492,6 +517,8 @@ pub fn bin_rustc_args(
     bin_path: &Path,
     bo: Option<&BuildOutput>,
     searches: &[String],
+    rustflags: &[String],
+    root_lib: Option<(&str, &str)>,
 ) -> Vec<String> {
     let deps = layout.deps.display();
     let mut a: Vec<String> = vec!["mirvm".into()];
@@ -533,6 +560,16 @@ pub fn bin_rustc_args(
             extern_path(layout, &layout.deps, du, &fps[d.unit], "rlib")
         ));
     }
+    // 根包 lib target 的 --extern（同包隐式依赖，hexyl 实锤）：指
+    // root_lib_rustc_args 产出的 .rlib，与其余 --extern 同段混排
+    if let Some((lib_name, lib_fp)) = root_lib {
+        a.push("--extern".into());
+        a.push(format!(
+            "{}={deps}/lib{}-{lib_fp}.rlib",
+            lib_name.replace('-', "_"),
+            lib_name.replace('-', "_")
+        ));
+    }
     a.push("-L".into());
     a.push(format!("dependency={deps}"));
     // host-deps 也进 -L（facade 再导出 proc-macro 的 .so 查找——serde →
@@ -542,6 +579,97 @@ pub fn bin_rustc_args(
     append_build_output(&mut a, bo, searches);
     a.push("--sysroot".into());
     a.push(sysroot.display().to_string());
+    // rustflags 末尾追加：后旗压前旗（dep_rustc_args 同款纪律）
+    a.extend(rustflags.iter().cloned());
+    a
+}
+
+/// 根包 lib target 的 rustc 参数（D15 P3 切⑤a full 层迁移面，hexyl 实锤：
+/// 根包 [lib]+[[bin]] 双 target 时 bin 隐式依赖同名 lib，cargo 先把根 lib
+/// 编成 target rlib 再让 bin --extern 它——cargo 实证行：根 lib =
+/// `--crate-type lib --emit=dep-info,metadata,link` + --extern 指 dep 的
+/// .rmeta，无 --cap-lints（path 包照常告警））。形态 = dep_rustc_args
+/// 作用于根 lib（__cless-dep 通道，-Zno-codegen rlib 进 layout.deps），
+/// 差异：源/edition/features 取自 manifest/plan（根不是 unit）；check-cfg
+/// feature 值表 = 声明全集 + 隐式 optional（bin 同款）；--extern 吃
+/// root_deps 的 Normal 类边；rustflags 末尾追加（根 lib 是 target 单元，
+/// 吃 RUSTFLAGS——cargo --target 语义）。`fp` = root_fingerprint（产物名
+/// lib<lib_name>-<fp>.{rmeta,rlib}）。
+// 平铺参数先例同 dep_rustc_args
+#[allow(clippy::too_many_arguments)]
+pub fn root_lib_rustc_args(
+    manifest: &PackageManifest,
+    plan: &ResolvePlan,
+    fps: &[String],
+    sysroot: &Path,
+    layout: &Layout,
+    lib_name: &str,
+    lib_path: &Path,
+    bo: Option<&BuildOutput>,
+    searches: &[String],
+    rustflags: &[String],
+    fp: &str,
+) -> Vec<String> {
+    let deps = layout.deps.display();
+    let mut a: Vec<String> = vec!["mirvm-cless-rustc".into()];
+    a.push("--crate-name".into());
+    a.push(lib_name.replace('-', "_"));
+    a.push(format!("--edition={}", manifest.edition));
+    a.push(lib_path.display().to_string());
+    a.push("--crate-type=lib".into());
+    a.push("--emit=dep-info,metadata,link".into());
+    a.push("-C".into());
+    a.push("embed-bitcode=no".into());
+    a.push("-C".into());
+    a.push("debuginfo=2".into());
+    for f in &plan.root_features {
+        a.push("--cfg".into());
+        a.push(format!("feature=\"{f}\""));
+    }
+    // path 包无 --cap-lints（cargo 同：照常告警）
+    a.push("--check-cfg".into());
+    a.push("cfg(docsrs,test)".into());
+    let values = manifest.check_cfg_feature_values();
+    let vals = values
+        .iter()
+        .map(|v| format!("\"{v}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    a.push("--check-cfg".into());
+    a.push(format!("cfg(feature, values({vals}))"));
+    push_profile_flags(&mut a, &manifest.profile);
+    a.push("-C".into());
+    a.push(format!("metadata={fp}"));
+    // extra-filename 窗口纪律同 dep_rustc_args（run_dep_compiler 窗口抠取）
+    a.push("-C".into());
+    a.push(format!("extra-filename=-{fp}"));
+    a.push("--out-dir".into());
+    a.push(deps.to_string());
+    a.push("-L".into());
+    a.push(format!("dependency={deps}"));
+    // host-deps 进 -L（facade 再导出 proc-macro 的 .so 查找——dep 同款注释）
+    a.push("-L".into());
+    a.push(format!("dependency={}", layout.host_deps.display()));
+    for d in &plan.root_deps {
+        if d.class != UnitClass::Normal {
+            continue; // Build 边不是代码依赖（切③ 修正面）
+        }
+        let du = &plan.units[d.unit];
+        // proc-macro 边指 host-deps 的 dylib；普通边照旧 target .rmeta
+        a.push("--extern".into());
+        a.push(format!(
+            "{}={}",
+            d.key.replace('-', "_"),
+            extern_path(layout, &layout.deps, du, &fps[d.unit], "rmeta")
+        ));
+    }
+    append_build_output(&mut a, bo, searches);
+    a.push("--sysroot".into());
+    a.push(sysroot.display().to_string());
+    a.push("-Zalways-encode-mir".into());
+    a.push("-Zno-codegen".into());
+    // rustflags 末尾追加：后旗压前旗（dep_rustc_args 同款纪律）
+    a.extend(rustflags.iter().cloned());
     a
 }
 
@@ -933,31 +1061,31 @@ mod tests {
     #[test]
     fn fingerprint_propagates_transitive_dep_change() {
         let plan = diamond_plan();
-        let fps0 = fingerprints(&plan, &ProfileFlags::default(), "stamp0").unwrap();
+        let fps0 = fingerprints(&plan, &ProfileFlags::default(), "stamp0", &[]).unwrap();
         // b 自身字段一字不动，只改其传递 dep a 的 feature 集 ⇒ b 的 fp 必须变
         // （depsimage pre-key「传递闭包变更 ⇒ 直接依赖产物盖戳变」不变量）
         let mut plan2 = diamond_plan();
         plan2.units[0].features.insert("alloc".to_string());
-        let fps1 = fingerprints(&plan2, &ProfileFlags::default(), "stamp0").unwrap();
+        let fps1 = fingerprints(&plan2, &ProfileFlags::default(), "stamp0", &[]).unwrap();
         assert_ne!(fps0[0], fps1[0], "a 自身 fp 应变");
         assert_ne!(fps0[1], fps1[1], "a 变 ⇒ b 的 fp 必须变（传递传播）");
         assert_ne!(fps0[2], fps1[2], "a 变 ⇒ c 的 fp 必须变（传递传播）");
         // sysroot_stamp 与 profile 也进 fp
-        let fps2 = fingerprints(&plan, &ProfileFlags::default(), "stamp1").unwrap();
+        let fps2 = fingerprints(&plan, &ProfileFlags::default(), "stamp1", &[]).unwrap();
         assert_ne!(fps0[0], fps2[0], "sysroot_stamp 进 fp");
         let relaxed = ProfileFlags {
             debug_assertions: false,
             overflow_checks: false,
             opt_level: 2,
         };
-        let fps3 = fingerprints(&plan, &relaxed, "stamp0").unwrap();
+        let fps3 = fingerprints(&plan, &relaxed, "stamp0", &[]).unwrap();
         assert_ne!(fps0[0], fps3[0], "profile 三员进 fp");
     }
 
     #[test]
     fn dep_args_carry_key_flags_and_window_shaped_extra_filename() {
         let plan = diamond_plan();
-        let fps = fingerprints(&plan, &ProfileFlags::default(), "s").unwrap();
+        let fps = fingerprints(&plan, &ProfileFlags::default(), "s", &[]).unwrap();
         let lo = layout();
         let a = dep_rustc_args(
             &plan,
@@ -967,6 +1095,7 @@ mod tests {
             Path::new("/sys"),
             &lo,
             None,
+            &[],
             &[],
         );
         assert_eq!(a[0], "mirvm-cless-rustc");
@@ -1018,7 +1147,7 @@ mod tests {
     fn bin_args_use_rlib_and_skip_z_flags() {
         let mut plan = diamond_plan();
         plan.root_features.insert("std".to_string());
-        let fps = fingerprints(&plan, &ProfileFlags::default(), "s").unwrap();
+        let fps = fingerprints(&plan, &ProfileFlags::default(), "s", &[]).unwrap();
         let lo = layout();
         let manifest = PackageManifest::parse(
             "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
@@ -1036,6 +1165,8 @@ mod tests {
             Path::new("/tmp/demo/src/main.rs"),
             None,
             &[],
+            &[],
+            None,
         );
         assert_eq!(a[0], "mirvm");
         assert!(
@@ -1119,7 +1250,7 @@ mod tests {
     #[test]
     fn proc_macro_args_five_pins() {
         let plan = pm_plan();
-        let fps = fingerprints(&plan, &ProfileFlags::default(), "s").unwrap();
+        let fps = fingerprints(&plan, &ProfileFlags::default(), "s", &[]).unwrap();
         let lo = layout();
         let a = proc_macro_rustc_args(&plan, 2, &ProfileFlags::default(), &fps, &lo, None, &[]);
         assert!(a[0].ends_with("bin/rustc"), "argv0 = 真 rustc: {}", a[0]);
@@ -1166,7 +1297,7 @@ mod tests {
     #[test]
     fn host_rlib_args_shape() {
         let plan = pm_plan();
-        let fps = fingerprints(&plan, &ProfileFlags::default(), "s").unwrap();
+        let fps = fingerprints(&plan, &ProfileFlags::default(), "s", &[]).unwrap();
         let lo = layout();
         let a = host_rustc_args(&plan, 1, &ProfileFlags::default(), &fps, &lo, None, &[]);
         assert!(a[0].ends_with("bin/rustc"), "argv0 = 真 rustc: {}", a[0]);
@@ -1199,7 +1330,7 @@ mod tests {
     #[test]
     fn target_and_bin_proc_macro_edges_point_to_dylib() {
         let plan = pm_plan();
-        let fps = fingerprints(&plan, &ProfileFlags::default(), "s").unwrap();
+        let fps = fingerprints(&plan, &ProfileFlags::default(), "s", &[]).unwrap();
         let lo = layout();
         let so = format!(
             "my_derive=/tmp/cless/host-deps/libmy_derive-{}{}",
@@ -1215,6 +1346,7 @@ mod tests {
             Path::new("/sys"),
             &lo,
             None,
+            &[],
             &[],
         );
         assert!(
@@ -1240,6 +1372,8 @@ mod tests {
             Path::new("/tmp/demo/src/main.rs"),
             None,
             &[],
+            &[],
+            None,
         );
         assert!(
             a.windows(2).any(|w| w[0] == "--extern" && w[1] == so),
@@ -1301,7 +1435,7 @@ mod tests {
     #[test]
     fn build_edges_stay_out_of_code_compiles_but_feed_build_script() {
         let plan = buildrs_plan();
-        let fps = fingerprints(&plan, &ProfileFlags::default(), "s").unwrap();
+        let fps = fingerprints(&plan, &ProfileFlags::default(), "s", &[]).unwrap();
         let lo = layout();
         // b 的 target 编译：--extern 不吃 Build 边（bdep 不出现）
         let a = dep_rustc_args(
@@ -1312,6 +1446,7 @@ mod tests {
             Path::new("/sys"),
             &lo,
             None,
+            &[],
             &[],
         );
         assert!(
@@ -1371,6 +1506,8 @@ mod tests {
             Path::new("/tmp/demo/src/main.rs"),
             None,
             &[],
+            &[],
+            None,
         );
         assert!(
             !a.windows(2)
@@ -1382,7 +1519,7 @@ mod tests {
     #[test]
     fn build_output_flags_land_on_own_compile_only() {
         let plan = buildrs_plan();
-        let fps = fingerprints(&plan, &ProfileFlags::default(), "s").unwrap();
+        let fps = fingerprints(&plan, &ProfileFlags::default(), "s", &[]).unwrap();
         let lo = layout();
         let bo = BuildOutput {
             cfgs: vec!["bdep_feat".into()],
@@ -1402,6 +1539,7 @@ mod tests {
             &lo,
             Some(&bo),
             &searches,
+            &[],
         );
         // 本包 bo：-L 自身 + -l + link-arg + --cfg + --check-cfg + 汇集 -L
         assert!(
@@ -1435,11 +1573,199 @@ mod tests {
             &lo,
             None,
             &[],
+            &[],
         );
         assert!(!a0.iter().any(|x| x == "static=probehelper"));
         assert!(
             !a0.windows(2)
                 .any(|w| w[0] == "--cfg" && w[1] == "bdep_feat")
+        );
+    }
+
+    /// rustflags（D15 P3 切⑤a）：逐条按序进全部 unit fp；target 侧参数
+    /// 末尾追加（dep 在 -Z 旗之后、bin 在 --sysroot 之后）。host 侧三个
+    /// 参数函数签名不含 rustflags——不吃旗由编译期保证，无需断言。
+    #[test]
+    fn rustflags_enter_fingerprint_and_target_args_tail() {
+        let plan = diamond_plan();
+        let rf = vec!["--cap-lints".to_string(), "allow".to_string()];
+        let fps0 = fingerprints(&plan, &ProfileFlags::default(), "s", &[]).unwrap();
+        let fps1 = fingerprints(&plan, &ProfileFlags::default(), "s", &rf).unwrap();
+        assert_ne!(fps0[0], fps1[0], "rustflags 进 unit fp");
+        assert_ne!(fps0[1], fps1[1], "rustflags 进 unit fp（传递侧同样变）");
+        // 顺序有语义：旗序不同 fp 不同（后旗压前旗，不是集合）
+        let rf_rev = vec!["allow".to_string(), "--cap-lints".to_string()];
+        let fps2 = fingerprints(&plan, &ProfileFlags::default(), "s", &rf_rev).unwrap();
+        assert_ne!(fps1[0], fps2[0], "rustflags 按序进 fp（不排序）");
+        // dep：rustflags 在 -Z 旗之后（参数串末尾）
+        let lo = layout();
+        let a = dep_rustc_args(
+            &plan,
+            1,
+            &ProfileFlags::default(),
+            &fps1,
+            Path::new("/sys"),
+            &lo,
+            None,
+            &[],
+            &rf,
+        );
+        let zpos = a.iter().rposition(|x| x.starts_with("-Z")).unwrap();
+        // registry 单元内置已有一枚 --cap-lints（与 RUSTFLAGS 并存，实证 serde
+        // 行同款两枚形态）——rustflags 段的断言必须取**最后一枚**
+        let rfpos = a.iter().rposition(|x| x == "--cap-lints").unwrap();
+        assert!(rfpos > zpos, "rustflags 必须在 -Z 旗之后: {a:?}");
+        assert_eq!(&a[a.len() - 2..], &["--cap-lints", "allow"], "末尾追加");
+        // bin：rustflags 在 --sysroot 之后（参数串末尾）
+        let manifest = PackageManifest::parse(
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [dependencies]\nb = \"1\"\n",
+            Path::new("/tmp/demo"),
+        )
+        .unwrap();
+        let a = bin_rustc_args(
+            &manifest,
+            &plan,
+            &fps1,
+            Path::new("/sys"),
+            &lo,
+            "demo",
+            Path::new("/tmp/demo/src/main.rs"),
+            None,
+            &[],
+            &rf,
+            None,
+        );
+        let syspos = a.iter().rposition(|x| x == "--sysroot").unwrap();
+        let rfpos = a.iter().rposition(|x| x == "--cap-lints").unwrap();
+        assert!(rfpos > syspos, "rustflags 必须在 --sysroot 之后: {a:?}");
+        assert_eq!(&a[a.len() - 2..], &["--cap-lints", "allow"], "末尾追加");
+        // 空 rustflags：参数串与此前形态一字不差（无旗路径零漂移）
+        let a_empty = bin_rustc_args(
+            &manifest,
+            &plan,
+            &fps0,
+            Path::new("/sys"),
+            &lo,
+            "demo",
+            Path::new("/tmp/demo/src/main.rs"),
+            None,
+            &[],
+            &[],
+            None,
+        );
+        assert!(a_empty.ends_with(&["--sysroot".into(), "/sys".into()]));
+    }
+
+    /// 根包 lib target（切⑤a full 层迁移面，hexyl 实锤）：root_lib 参数
+    /// 形态 = dep 参数作用于根（__cless-dep/-Z/-C metadata 窗口/.rmeta
+    /// --extern），差异钉 = 无 --cap-lints（path 包）、feature 值表 check-cfg
+    /// 在场、rustflags 末尾追加；root_fingerprint 随 rustflags 变；bin 会话
+    /// 补根 lib --extern 指 .rlib。
+    #[test]
+    fn root_lib_args_shape_and_bin_extern() {
+        let plan = diamond_plan();
+        let rf = vec!["--cap-lints".to_string(), "allow".to_string()];
+        let fps = fingerprints(&plan, &ProfileFlags::default(), "s", &rf).unwrap();
+        let lo = layout();
+        // root_fingerprint 对根源目录盖戳（source_stamp_dir）——目录必须实存
+        let root = std::env::temp_dir().join(format!(
+            "mirvm-cargoless-schedule-test-rootlib-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "").unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main(){}").unwrap();
+        let manifest = PackageManifest::parse(
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [lib]\nname = \"demo\"\npath = \"src/lib.rs\"\n\
+             [dependencies]\nb = \"1\"\n",
+            &root,
+        )
+        .unwrap();
+        let rfp0 =
+            root_fingerprint(&manifest, &plan, &fps, &ProfileFlags::default(), "s", &[]).unwrap();
+        let rfp1 =
+            root_fingerprint(&manifest, &plan, &fps, &ProfileFlags::default(), "s", &rf).unwrap();
+        assert_ne!(rfp0, rfp1, "rustflags 进 root_fingerprint");
+        let a = root_lib_rustc_args(
+            &manifest,
+            &plan,
+            &fps,
+            Path::new("/sys"),
+            &lo,
+            "demo",
+            &root.join("src/lib.rs"),
+            None,
+            &[],
+            &rf,
+            &rfp1,
+        );
+        assert_eq!(a[0], "mirvm-cless-rustc");
+        assert!(
+            a.windows(2)
+                .any(|w| w[0] == "--crate-name" && w[1] == "demo")
+        );
+        let want_src = root.join("src/lib.rs").display().to_string();
+        assert!(a.iter().any(|x| x == &want_src));
+        assert!(a.iter().any(|x| x == "--crate-type=lib"));
+        assert!(a.iter().any(|x| x == "-Zno-codegen"));
+        // extra-filename 窗口（run_dep_compiler 抠取形态）
+        let want = format!("extra-filename=-{rfp1}");
+        assert!(a.windows(2).any(|w| w[0] == "-C" && w[1] == want));
+        // feature 值表 check-cfg 在场（bin 同款全集口径）；path 包无 --cap-lints
+        // 内置——唯一一枚 --cap-lints 是末尾的 rustflags
+        assert!(
+            a.windows(2)
+                .any(|w| w[0] == "--check-cfg" && w[1].starts_with("cfg(feature, values(")),
+            "缺 feature 值表 check-cfg: {a:?}"
+        );
+        assert_eq!(
+            &a[a.len() - 2..],
+            &["--cap-lints", "allow"],
+            "rustflags 末尾"
+        );
+        // --extern 吃 root_deps Normal 边指 .rmeta
+        let ext = format!("b=/tmp/cless/deps/libb-{}.rmeta", fps[1]);
+        assert!(a.windows(2).any(|w| w[0] == "--extern" && w[1] == ext));
+        // bin 会话补根 lib --extern（指 .rlib，与根边混排同段）
+        let a = bin_rustc_args(
+            &manifest,
+            &plan,
+            &fps,
+            Path::new("/sys"),
+            &lo,
+            "demo",
+            Path::new("/tmp/demo/src/main.rs"),
+            None,
+            &[],
+            &rf,
+            Some(("demo", &rfp1)),
+        );
+        let want_ext = format!("demo=/tmp/cless/deps/libdemo-{rfp1}.rlib");
+        assert!(
+            a.windows(2).any(|w| w[0] == "--extern" && w[1] == want_ext),
+            "bin 缺根 lib --extern: {a:?}"
+        );
+        // 无根 lib 时 extern 缺席（老路径零漂移）
+        let a0 = bin_rustc_args(
+            &manifest,
+            &plan,
+            &fps,
+            Path::new("/sys"),
+            &lo,
+            "demo",
+            Path::new("/tmp/demo/src/main.rs"),
+            None,
+            &[],
+            &rf,
+            None,
+        );
+        assert!(
+            !a0.windows(2)
+                .any(|w| w[0] == "--extern" && w[1].starts_with("demo=")),
+            "无根 lib 时不得有根 lib --extern: {a0:?}"
         );
     }
 }

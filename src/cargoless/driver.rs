@@ -139,7 +139,17 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
     // 缺值回退字面量不致命（后果只是 fp 粗一档，不引入新错误路径）
     let stamp = crate::sysroot::current_stamp_value()
         .unwrap_or_else(|| "sysroot-stamp-unknown".to_string());
-    let fps = match schedule::fingerprints(&plan, &manifest.profile, &stamp) {
+    // rustflags（D15 P3 切⑤a）解析一次穿线到底：只进 target 侧参数
+    // （dep/bin 末尾追加），指纹全 unit 统一吃（host 侧跟随失效无害，
+    // v1 从简；解析/优先级/边界见 rustflags.rs 头注）
+    let rustflags = match super::rustflags::from_env_and_disk(&manifest.root) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("mirvm: rustflags 解析失败: {e}");
+            std::process::exit(1);
+        }
+    };
+    let fps = match schedule::fingerprints(&plan, &manifest.profile, &stamp, &rustflags) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("mirvm: 依赖指纹计算失败: {e}");
@@ -238,6 +248,7 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
                     &layout,
                     bo,
                     &searches,
+                    &rustflags,
                 );
                 let mut cmd = std::process::Command::new(&self_exe);
                 cmd.arg("__cless-dep").args(&args[1..]);
@@ -250,20 +261,108 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
 
     // 5. 根包 build.rs 同生命周期（根不是 unit：边表取 plan.root_deps，
     // fp 单算；OUT_DIR/rustc-env/cfg 修正进 bin 会话）
+    // 根 lib target（切⑤a full 层迁移面，hexyl 实锤）：[lib]+[[bin]] 双
+    // target 时 bin 隐式依赖同名 lib——cargo 先把根 lib 编成 target rlib
+    // 再让 bin --extern 它。fp 与根 build.rs 共用 root_fingerprint（同包
+    // 同配方），故 fp 计算条件 = has_build_script || 有 lib target。
+    let root_lib = manifest.targets.iter().find_map(|t| match t {
+        super::manifest::Target::Lib {
+            name,
+            path,
+            proc_macro,
+        } => Some((name.clone(), path.clone(), *proc_macro)),
+        _ => None,
+    });
     let mut root_fp: Option<String> = None;
     let mut root_bo: Option<BuildOutput> = None;
-    if manifest.has_build_script {
-        let fp = match schedule::root_fingerprint(manifest, &plan, &fps, &manifest.profile, &stamp)
-        {
+    if manifest.has_build_script || root_lib.is_some() {
+        let fp = match schedule::root_fingerprint(
+            manifest,
+            &plan,
+            &fps,
+            &manifest.profile,
+            &stamp,
+            &rustflags,
+        ) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("mirvm: 根包指纹计算失败: {e}");
                 std::process::exit(1);
             }
         };
-        let bo = run_build_lifecycle_root(manifest, &plan, &fps, &layout, &fp, &outputs);
         root_fp = Some(fp);
+    }
+    if manifest.has_build_script {
+        let fp = root_fp.clone().expect("上一步已算");
+        let bo = run_build_lifecycle_root(manifest, &plan, &fps, &layout, &fp, &outputs);
         root_bo = Some(bo);
+    }
+
+    // 5b. 根 lib target 编译（__cless-dep 通道，fp 命中跳过；根 build.rs
+    // 的 bo 修正与 OUT_DIR/rustc-env 同款注入——必须在根 build.rs 之后）
+    if let Some((lib_name, lib_path, lib_pm)) = &root_lib {
+        if *lib_pm {
+            // proc-macro 根 lib + bin 组合（cargo 编 dylib 再 --extern）v1
+            // 未接——响亮拒绝记档，不静默错编
+            eprintln!(
+                "mirvm: 根包 {} 是 proc-macro lib 且带 bin，组合未接（P5 边界）",
+                manifest.name
+            );
+            std::process::exit(1);
+        }
+        let fp = root_fp.as_ref().expect("root_lib 在场必已算 fp");
+        let stem = format!("lib{}-{}", lib_name.replace('-', "_"), fp);
+        let hit = layout.deps.join(format!("{stem}.rmeta")).is_file()
+            && layout.deps.join(format!("{stem}.rlib")).is_file();
+        if !hit {
+            let searches = buildrs::aggregate_link_searches(&plan, &plan.root_deps, &outputs);
+            let args = schedule::root_lib_rustc_args(
+                manifest,
+                &plan,
+                &fps,
+                &sysroot,
+                &layout,
+                lib_name,
+                lib_path,
+                root_bo.as_ref(),
+                &searches,
+                &rustflags,
+                fp,
+            );
+            let mut cmd = std::process::Command::new(&self_exe);
+            cmd.arg("__cless-dep").args(&args[1..]);
+            // 根包编译期 env（CARGO_PKG_* 全集 + manifest 两员，cargo 同）
+            cmd.envs(manifest.pkg_env.iter());
+            cmd.env("CARGO_CRATE_NAME", lib_name.replace('-', "_"));
+            cmd.env("CARGO_MANIFEST_DIR", &manifest.root);
+            cmd.env(
+                "CARGO_MANIFEST_PATH",
+                manifest.root.join("Cargo.toml").display().to_string(),
+            );
+            if let Some(bo) = &root_bo {
+                cmd.env("OUT_DIR", layout.build_dir(&manifest.name, fp).join("out"));
+                for (k, v) in &bo.envs {
+                    cmd.env(k, v);
+                }
+            }
+            let status = match cmd.status() {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "mirvm: lib 编译子进程启动失败（根包 {} {}）: {e}",
+                        manifest.name, manifest.version
+                    );
+                    std::process::exit(1);
+                }
+            };
+            if !status.success() {
+                eprintln!(
+                    "mirvm: lib 编译失败：根包 {} {}",
+                    manifest.name, manifest.version
+                );
+                std::process::exit(1);
+            }
+        }
     }
 
     // 6. bin：根 crate 走既有 MirvmCallbacks 会话（after_analysis 停，零产物）
@@ -293,6 +392,12 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
         }
     }
     let root_searches = buildrs::aggregate_link_searches(&plan, &plan.root_deps, &outputs);
+    let root_lib_ref = root_lib.as_ref().map(|(n, _, _)| {
+        (
+            n.as_str(),
+            root_fp.as_deref().expect("root_lib 在场必已算 fp"),
+        )
+    });
     let args = schedule::bin_rustc_args(
         manifest,
         &plan,
@@ -303,6 +408,8 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
         bin_path,
         root_bo.as_ref(),
         &root_searches,
+        &rustflags,
+        root_lib_ref,
     );
     // argv0 = 合成产物路径（cargo run 的 argv0 语义 = 最终二进制路径；本会话
     // 零产物，用 deps/<bin> 占位——guest 只见 argv 字符串，不读文件）
