@@ -57,17 +57,23 @@ unsafe extern "C" {
     fn mirvm_syscall_trampoline();
 }
 
-/// T5 trampoline 真地址（asm-stub/global-asm 间接槽重填用）。
+/// Get trampoline address, which would be filled into asm-stub/global-asm
 pub fn syscall_trampoline_addr() -> u64 {
     mirvm_syscall_trampoline as *const () as u64
 }
 
+// TODO:
+// 1. movdqu only save lower 128 bits, AVX/AVX-512 will crash (e.g. taget-cpu=native)
+// 2. using xsave/xsavec to save?
+// 3. common VM/sandbox would use such structure to hook syscall as well, mirvm might
+// integrate with VM/sandbox.
 std::arch::global_asm!(
-    ".globl mirvm_syscall_trampoline",
-    ".p2align 4",
-    "mirvm_syscall_trampoline:",
-    "pushfq",
-    "sub rsp, 272",
+    ".globl mirvm_syscall_trampoline", // global symbol
+    ".p2align 4",                      // align to 16 bytes
+    "mirvm_syscall_trampoline:",       // declare entry
+    "pushfq",                          // save RFLAGS (including DF, CF/ZF/SF)
+    "sub rsp, 272",                    // save all SSE state to stack, 16 * xmm + 16 = = 272
+    // `mirvm_syscall_dispatch` does not guarantee anything
     "movdqu [rsp], xmm0",
     "movdqu [rsp+16], xmm1",
     "movdqu [rsp+32], xmm2",
@@ -84,16 +90,21 @@ std::arch::global_asm!(
     "movdqu [rsp+208], xmm13",
     "movdqu [rsp+224], xmm14",
     "movdqu [rsp+240], xmm15",
-    "stmxcsr [rsp+256]",
+    "stmxcsr [rsp+256]", // SSE control/status register
+    // Here: still 16 bytes aligned.
+    // rax: holding syscall number, do not need saving.
+    // rcx, r11: to be destroyed by syscall according to ISA.
+    // rbx, rbp, r12-r15: callee-saved registers.
     "push r9",
     "push r8",
     "push r10",
     "push rdx",
     "push rsi",
     "push rdi",
-    "mov rdi, rax",
-    "mov rsi, rsp",
+    "mov rdi, rax", // syscall number
+    "mov rsi, rsp", // syscall arguments
     "call mirvm_syscall_dispatch",
+    // rax should not be touched since it's holding return value.
     "pop rdi",
     "pop rsi",
     "pop rdx",

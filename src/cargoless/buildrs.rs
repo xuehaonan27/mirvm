@@ -215,6 +215,10 @@ pub struct ExecCtx<'a> {
     pub out_dir: &'a Path,
     /// 直接依赖的 DEP_* env（dep_metadata_env 产出）。
     pub dep_env: BTreeMap<String, String>,
+    /// 本包 manifest `links` 值（CARGO_MANIFEST_LINKS；无 links 键则不设——
+    /// ring 0.17.14 build.rs `env::var("CARGO_MANIFEST_LINKS").unwrap()` 实锤，
+    /// cargo 文档：the manifest links value）。
+    pub links: Option<&'a str>,
     /// LD_LIBRARY_PATH 组成目（host_deps + deps；proc-macro build-dep 的
     /// .so 运行期 dlopen 要能找到）。
     pub ld_dirs: &'a [PathBuf],
@@ -243,6 +247,9 @@ pub fn build_script_env(ctx: &ExecCtx) -> BTreeMap<String, String> {
         "CARGO_MANIFEST_PATH",
         ctx.source_dir.join("Cargo.toml").display().to_string(),
     );
+    if let Some(links) = ctx.links {
+        put("CARGO_MANIFEST_LINKS", links.to_string());
+    }
     put("HOST", env!("MIRVM_HOST").to_string());
     put("TARGET", env!("MIRVM_HOST").to_string());
     // mirvm 只有 dev profile 一档（ProfileFlags::default 语义钉）
@@ -732,6 +739,7 @@ mod tests {
             profile: &ProfileFlags::default(),
             out_dir: Path::new("/tmp/x/out"),
             dep_env: BTreeMap::new(),
+            links: None,
             ld_dirs: &[],
         });
         assert_eq!(
@@ -740,6 +748,33 @@ mod tests {
         );
         assert_eq!(env.get("CARGO_FEATURE_STD").map(String::as_str), Some("1"));
         assert!(!env.contains_key("CARGO_FEATURE_NOPE"));
+    }
+
+    #[test]
+    fn build_script_env_sets_manifest_links_only_with_links() {
+        // ring 0.17.14 build.rs `env::var("CARGO_MANIFEST_LINKS").unwrap()`
+        // 实锤：有 links 键时必须设，无 links 键时不设（cargo 文档同款）。
+        let pkg_env = BTreeMap::new();
+        let features = BTreeSet::new();
+        let mk = |links: Option<&str>| {
+            build_script_env(&ExecCtx {
+                pkg_env: &pkg_env,
+                source_dir: Path::new("/tmp/x"),
+                features: &features,
+                profile: &ProfileFlags::default(),
+                out_dir: Path::new("/tmp/x/out"),
+                dep_env: BTreeMap::new(),
+                links,
+                ld_dirs: &[],
+            })
+        };
+        assert_eq!(
+            mk(Some("ring_core_0_17_14"))
+                .get("CARGO_MANIFEST_LINKS")
+                .map(String::as_str),
+            Some("ring_core_0_17_14")
+        );
+        assert!(!mk(None).contains_key("CARGO_MANIFEST_LINKS"));
     }
 
     #[test]

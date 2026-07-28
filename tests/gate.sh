@@ -13,7 +13,10 @@
 #   ⑧ JIT 助手频度统计冒烟（原 m5_gate6 增量；MIRVM_JIT_STATS dump 在 + c2i 桶非零）
 #   （m5_gate6 的两条文档 grep 时点检查已化石退役——落档纪律由评审承担，不由门 grep）
 #
-# 用法：bash tests/gate.sh                 # 全量
+# 用法：bash tests/gate.sh                 # 全量（cargo compat 轨：corpus ① 走 cargo 三阶段）
+#       MIRVM_DEPS=self bash tests/gate.sh # D15 P3 双轨轴：corpus ① 全量走零 cargo
+#                                          #   自有调度（② diff_cargo 恒为 cargo compat 轨，
+#                                          #   不受本开关影响——cargo 腿覆盖不缺席）
 #       SKIP_TSAN=1 bash tests/gate.sh     # 跳过 TSan（CI 已单列 spike4 时用）
 #       SKIP_PERF=1 bash tests/gate.sh     # 跳过时序硬门，语义门照常
 #       CORPUS_PROGS="a b c" bash tests/gate.sh  # 只跑指定 corpus 条目（gate_truth/调试用）

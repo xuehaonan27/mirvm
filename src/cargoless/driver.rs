@@ -70,11 +70,16 @@ pub fn run_script(file: &Path, program_args: &[String]) -> ExitCode {
         .and_then(|s| s.to_str())
         .unwrap_or("script");
     let cache = super::audit::script_cache_dir(file);
-    if let Err(e) = std::fs::create_dir_all(&cache) {
-        eprintln!("mirvm: 创建脚本缓存目录 {} 失败: {e}", cache.display());
+    let src_dir = cache.join("src");
+    if let Err(e) = std::fs::create_dir_all(&src_dir) {
+        eprintln!("mirvm: 创建脚本缓存目录 {} 失败: {e}", src_dir.display());
         std::process::exit(1);
     }
-    let main_rs = cache.join("main.rs");
+    // 布局与 cargo 腿物化项目同形（cli.rs materialize_script：正文在
+    // <cache>/src/main.rs）——file!()/panic Location remap 后与 cargo 腿的
+    // "src/main.rs" 逐字节同（redb_kv/gix_pure 实锤）；root 仍 = <cache>
+    // （CARGO_MANIFEST_DIR 与 cargo 腿一致）。
+    let main_rs = src_dir.join("main.rs");
     // write-if-changed：内容相同不重写——mtime 稳定是 cargo 指纹/L2 的共同前提
     // （cli.rs materialize_script 同款纪律）
     if std::fs::read(&main_rs)
@@ -85,13 +90,14 @@ pub fn run_script(file: &Path, program_args: &[String]) -> ExitCode {
         eprintln!("mirvm: 写入 {} 失败: {e}", main_rs.display());
         std::process::exit(1);
     }
-    let manifest = match PackageManifest::from_frontmatter(stem, &manifest_text, &main_rs) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("mirvm: 解析 {} 的 frontmatter 失败: {e}", file.display());
-            std::process::exit(1);
-        }
-    };
+    let manifest =
+        match PackageManifest::from_frontmatter_at(stem, &manifest_text, &cache, &main_rs) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("mirvm: 解析 {} 的 frontmatter 失败: {e}", file.display());
+                std::process::exit(1);
+            }
+        };
     drive(&manifest, program_args)
 }
 
@@ -657,6 +663,7 @@ fn run_build_lifecycle(
         profile: ctx.profile,
         out_dir: &bdir.join("out"),
         dep_env,
+        links: u.links.as_deref(),
         ld_dirs: &[ctx.layout.host_deps.clone(), ctx.layout.deps.clone()],
     });
     rerun_gate(
@@ -729,6 +736,7 @@ fn run_build_lifecycle_root(
         profile: &manifest.profile,
         out_dir: &bdir.join("out"),
         dep_env: buildrs::dep_metadata_env(plan, &plan.root_deps, outputs),
+        links: manifest.links.as_deref(),
         ld_dirs: &[layout.host_deps.clone(), layout.deps.clone()],
     });
     let dep_links_reran: Vec<String> = plan

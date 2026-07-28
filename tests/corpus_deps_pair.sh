@@ -39,9 +39,14 @@ fi
 
 OUT_C=$(mktemp -d /tmp/corpair-cargo-XXXXXX)
 OUT_S=$(mktemp -d /tmp/corpair-self-XXXXXX)
-trap 'rm -rf "$OUT_C" "$OUT_S" "$CORPUS_TIMINGS_FILE"' EXIT
+# KEEP_OUT=1：保留两腿输出现场（分诊用）；缺省退出即清。
+if [ "${KEEP_OUT:-0}" = 1 ]; then
+    trap 'rm -f "$CORPUS_TIMINGS_FILE"; echo "corpair 现场保留: $OUT_C $OUT_S" >&2' EXIT
+else
+    trap 'rm -rf "$OUT_C" "$OUT_S" "$CORPUS_TIMINGS_FILE"' EXIT
+fi
 
-pass=0 fail=0 skip_count=0
+pass=0 fail=0 skip_count=0 p5_count=0
 while IFS='|' read -r name _tier tmo mode envv needs args _xfail; do
     [ -n "$name" ] || continue
     argv=()
@@ -58,13 +63,24 @@ while IFS='|' read -r name _tier tmo mode envv needs args _xfail; do
         continue
     fi
     ok=1 why=""
+    # stderr 对比前规范化 panic 头的线程名/TID（diff.sh 同款先例：TID 随
+    # 进程漂移天然不可逐字节；只规范化本来就不稳定的部分，其余差异照红）。
+    sed -E "s/thread '[^']*' \([0-9]+\)/thread 'T'/" "$OUT_C/$name.err" >"$OUT_C/$name.err.n"
+    sed -E "s/thread '[^']*' \([0-9]+\)/thread 'T'/" "$OUT_S/$name.err" >"$OUT_S/$name.err.n"
     if [ "$cc" != "$sc" ]; then ok=0; why="退出码 cargo=$cc self=$sc"
     elif ! diff -q "$OUT_C/$name.out" "$OUT_S/$name.out" >/dev/null; then ok=0; why="stdout 不一致"
-    elif ! diff -q "$OUT_C/$name.err" "$OUT_S/$name.err" >/dev/null; then ok=0; why="stderr 不一致"
+    elif ! diff -q "$OUT_C/$name.err.n" "$OUT_S/$name.err.n" >/dev/null; then ok=0; why="stderr 不一致"
     fi
     if [ "$ok" = 1 ]; then
         echo "PASS  $name"
         pass=$((pass + 1))
+    elif [ "$cc" -eq 0 ] && [ "$sc" -ne 0 ] \
+        && grep -q "归 P5" "$OUT_S/$name.err" 2>/dev/null; then
+        # P5 边界单列：self 腿撞事先明说的 P5 拒绝面（git 源/alt registry/
+        # workspace 多包图等），cargo 腿通过 —— 照 cli.rs deps_main 先例，
+        # 计独立 p5 列，不算 fail。
+        echo "P5    $name（self 腿 P5 边界拒绝）"
+        p5_count=$((p5_count + 1))
     else
         echo "FAIL  $name: $why"
         echo "--- cargo stderr 尾部 ---"; tail -5 "$OUT_C/$name.err" 2>/dev/null
@@ -74,10 +90,9 @@ while IFS='|' read -r name _tier tmo mode envv needs args _xfail; do
 done <<< "$rows"
 
 echo "---"
-if [ "$skip_count" -gt 0 ]; then
-    echo "deps_pair: $pass pass, $skip_count skip, $fail fail"
-else
-    echo "deps_pair: $pass pass, $fail fail"
-fi
+summary="deps_pair: $pass pass"
+[ "$skip_count" -gt 0 ] && summary="$summary, $skip_count skip"
+[ "$p5_count" -gt 0 ] && summary="$summary, $p5_count p5"
+echo "$summary, $fail fail"
 target_budget_check
 [ "$fail" -eq 0 ]

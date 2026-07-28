@@ -422,13 +422,27 @@ impl PackageManifest {
         manifest_text: &str,
         body_path: &Path,
     ) -> Result<Self, MErr> {
+        let root = body_path.parent().unwrap_or(Path::new("."));
+        Self::from_frontmatter_at(stem, manifest_text, root, body_path)
+    }
+
+    /// from_frontmatter 的 root 显式版（D15 P3 切⑤d）：脚本缓存布局与
+    /// cargo 腿物化项目同形（cli.rs materialize_script：Cargo.toml 在
+    /// <cache>、正文在 <cache>/src/main.rs）——root=<cache> 保证
+    /// CARGO_MANIFEST_DIR 与 cargo 腿一致，bin 路径 = <cache>/src/main.rs
+    /// 保证 remap 后 file!() = "src/main.rs"（redb_kv/gix_pure 实锤）。
+    pub fn from_frontmatter_at(
+        stem: &str,
+        manifest_text: &str,
+        root: &Path,
+        body_path: &Path,
+    ) -> Result<Self, MErr> {
         let pseudo = format!(
             "[package]\nname = \"{stem}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\
              [[bin]]\nname = \"{stem}\"\npath = \"{}\"\n{manifest_text}",
             body_path.display()
         );
-        let tmp_root = body_path.parent().unwrap_or(Path::new("."));
-        Self::parse(&pseudo, tmp_root)
+        Self::parse(&pseudo, root)
     }
 
     /// 选定要跑的 bin（cargo run 语义子集）：default-run > 唯一 bin > 多 bin 响亮拒绝。
@@ -1132,6 +1146,27 @@ cc = "1"
         assert_eq!(m.edition, "2024");
         assert_eq!(m.deps.len(), 1);
         assert_eq!(m.runnable_bin().unwrap().0, "c_demo");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn frontmatter_at_decouples_root_and_body_path() {
+        // cargo 腿物化布局同形（切⑤d redb_kv/gix_pure 实锤）：root=<cache>
+        // （CARGO_MANIFEST_DIR 口径）而正文在 <cache>/src/main.rs
+        // （remap 后 file!() = "src/main.rs"）。
+        let d = tmpdir("frontmatterat");
+        let body = d.join("src/main.rs");
+        std::fs::create_dir_all(body.parent().unwrap()).unwrap();
+        std::fs::write(&body, "fn main(){}").unwrap();
+        let m = PackageManifest::from_frontmatter_at(
+            "c_demo",
+            "[dependencies]\nserde_json = \"1\"\n",
+            &d,
+            &body,
+        )
+        .unwrap();
+        assert_eq!(m.root, d);
+        assert_eq!(m.runnable_bin().unwrap().1, body.as_path());
         std::fs::remove_dir_all(&d).unwrap();
     }
 

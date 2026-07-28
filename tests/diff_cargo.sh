@@ -11,6 +11,10 @@ CARGO=${CARGO:-$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-
 RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
 RUSTC_APPEND_PROXY=${RUSTC_APPEND_PROXY:-$(pwd)/tests/fixtures/rustc_proxy.sh}
 SCRIPT_CACHE=${SCRIPT_CACHE:-${MIRVM_HOME:-$HOME/.mirvm}/scripts}
+# 本套件是「cargo 模式差分」专轨（D15 P3 双轨纪律）：恒走 cargo 三阶段
+# compat 路径——即便外层（如 gate DEPS=self 全量轮）置了 MIRVM_DEPS=self，
+# 也不能让本轨静默翻成 self 路径（那等于 cargo 腿零覆盖）。
+export MIRVM_DEPS=cargo
 pass=0 xfail=0 fail=0
 
 show_diff() {

@@ -66,7 +66,8 @@ pub enum UnitClass {
 /// 一条已解依赖边（指向 units 下标）。
 #[derive(Clone, Debug)]
 pub struct UnitDep {
-    /// --extern 命名键（rename key）。
+    /// --extern 命名键：有 rename（`package = "..."`）用 rename key，否则用
+    /// dep 包的 lib target 名（extern_key 的 cargo 语义出处见该函数注释）。
     pub key: String,
     pub unit: usize,
     /// 边类（normal/build）；切③ 起按边类分列消费（extern 过滤、build
@@ -1521,12 +1522,20 @@ fn expand_node(
                         if activated.insert(dep.clone()) {
                             changed = true;
                         }
-                        // 强形 x/y 激活可选依赖 = 视同指定其同名隐式 feature
-                        // （cargo 同——k256 的 ecdsa-core/signing ⇒
-                        // #[cfg(feature = "ecdsa-core")] 模块实锤；
-                        // dep: 遮蔽（hidden）时隐式 feature 不存在，不补）
+                        // 强形 x/y 激活可选依赖 = 同名 feature 旗同时启用：
+                        // - x 有显式 feature 定义（table 键在场）→ 启用该显式
+                        //   feature，哪怕 x 已被 dep: 遮蔽——遮蔽只杀隐式
+                        //   feature，杀不了显式定义（zerotrie 0.2.4 实锤：
+                        //   serde = [dep:litemap, litemap/serde, …] 且
+                        //   litemap = [dep:litemap, alloc] 显式在场 ⇒ cargo
+                        //   实证 cfg feature="litemap" 置位，serde.rs 调的
+                        //   try_from_serde_litemap 所在
+                        //   #[cfg(feature = "litemap")] impl 块随之进场）；
+                        // - 无显式定义且未被 dep: 遮蔽 → 视同指定其同名隐式
+                        //   feature（cargo 同——k256 的 ecdsa-core/signing ⇒
+                        //   #[cfg(feature = "ecdsa-core")] 模块实锤）。
                         if optional_keys.contains(dep)
-                            && !hidden.contains(dep)
+                            && (table.contains_key(dep) || !hidden.contains(dep))
                             && features.insert(dep.clone())
                         {
                             changed = true;
@@ -1731,6 +1740,20 @@ fn host_edge(dep: &FeatDep) -> Result<bool, String> {
     }
 }
 
+/// --extern 命名键（cargo 语义）：有 rename（toml `package = "..."` / index
+/// `package` 键 ⇒ key ≠ package）用 rename key；无 rename 用 dep 包的
+/// **lib target 名**——lib 名 ≠ 包名时 extern 名跟 lib 名走
+/// （tendril → new_debug_unreachable（[lib] name = "debug_unreachable"）实锤：
+/// cargo -v 实证行拼 `--extern debug_unreachable=…/libdebug_unreachable-….rmeta`；
+/// new_debug_unreachable 整包存在意义即"lib 名叫 debug_unreachable 的再发布"）。
+fn extern_key(d: &FeatDep, child: &Unit) -> String {
+    if d.key != d.package {
+        d.key.clone()
+    } else {
+        child.lib_name.clone()
+    }
+}
+
 fn assemble_units(
     root: &PackageManifest,
     path_manifests: &BTreeMap<String, PackageManifest>,
@@ -1876,7 +1899,7 @@ fn assemble_units(
             edge_rows.push((
                 from_idx,
                 UnitDep {
-                    key: d.key.clone(),
+                    key: extern_key(&d, &units[to_idx]),
                     unit: to_idx,
                     class: d.class,
                 },
@@ -1914,7 +1937,7 @@ fn assemble_units(
                 continue; // 子节点不可构建（永假边子图）→ 边不存在
             };
             root_deps.push(UnitDep {
-                key: d.key.clone(),
+                key: extern_key(&d, &units[to_idx]),
                 unit: to_idx,
                 class: d.class,
             });
@@ -1934,6 +1957,9 @@ mod tests {
     struct FakeSource {
         root: PathBuf,
         index: BTreeMap<String, Vec<IndexVersion>>,
+        /// 包名 → 显式 `[lib] name`（lib 名 ≠ 包名的 extern 命名场景罐头，
+        /// new_debug_unreachable 实锤形态）。
+        lib_names: BTreeMap<String, String>,
     }
 
     impl FakeSource {
@@ -1942,6 +1968,7 @@ mod tests {
             Self {
                 root,
                 index: BTreeMap::new(),
+                lib_names: BTreeMap::new(),
             }
         }
         fn add(&mut self, name: &str, versions: Vec<IndexVersion>) {
@@ -1961,9 +1988,13 @@ mod tests {
         ) -> Result<PathBuf, String> {
             let dir = self.root.join(format!("{name}-{version}"));
             std::fs::create_dir_all(&dir).unwrap();
+            let lib_section = match self.lib_names.get(name) {
+                Some(ln) => format!("\n[lib]\nname = \"{ln}\"\n"),
+                None => String::new(),
+            };
             std::fs::write(
                 dir.join("Cargo.toml"),
-                format!("[package]\nname = \"{name}\"\nversion = \"{version}\"\n"),
+                format!("[package]\nname = \"{name}\"\nversion = \"{version}\"\n{lib_section}"),
             )
             .unwrap();
             Ok(dir)
@@ -2056,6 +2087,44 @@ mod tests {
         assert!(a_unit.features.contains("default"));
         assert!(a_unit.features.contains("std"));
         assert!(!a_unit.from_registry || a_unit.source_dir.ends_with("a-1.2.0"));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn extern_key_prefers_rename_then_lib_name() {
+        // cargo 语义（tendril 0.5.1 → new_debug_unreachable 1.0.6 实锤）：
+        // --extern 名 = rename key（有 rename 时），否则 dep 包的 [lib] name。
+        let d = tmpdir("externkey");
+        let root = root_project(
+            &d,
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nndu = \"1.0\"\n\
+             renamed = { version = \"1.0\", package = \"real-pkg\" }\n",
+        );
+        let mut src = FakeSource::new(d.join("srcstore"));
+        src.lib_names
+            .insert("ndu".into(), "debug_unreachable".into());
+        src.add("ndu", vec![iv("ndu", "1.0.6")]);
+        src.add("real-pkg", vec![iv("real-pkg", "1.0.0")]);
+
+        let plan = resolve(&root, &mut src).unwrap();
+        let ndu_ix = plan.units.iter().position(|u| u.package == "ndu").unwrap();
+        let rp_ix = plan
+            .units
+            .iter()
+            .position(|u| u.package == "real-pkg")
+            .unwrap();
+        let key_of = |ix: usize| {
+            plan.root_deps
+                .iter()
+                .find(|e| e.unit == ix)
+                .map(|e| e.key.clone())
+                .unwrap()
+        };
+        // 无 rename：extern 名跟 lib 名走，不是包名
+        assert_eq!(key_of(ndu_ix), "debug_unreachable");
+        // 有 rename：rename key 优先
+        assert_eq!(key_of(rp_ix), "renamed");
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -2262,6 +2331,65 @@ mod tests {
             .find(|u| u.package == "ecdsa-core")
             .unwrap();
         assert!(ec_unit.features.contains("signing"), "x/y 的 y 照常下发");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn strong_dep_enables_same_named_explicit_feature_even_when_dep_hidden() {
+        // zerotrie 0.2.4 形状：optional 依赖 litemap 被 dep: 遮蔽（隐式
+        // feature 不生成），但同名显式 feature litemap = [dep:litemap, alloc]
+        // 在场；serde = [dep:serde_core, dep:litemap, alloc, litemap/serde]。
+        // cargo 实证（zerotrie features=["serde"]）：cfg 集含 litemap——强形
+        // litemap/serde 把同名**显式** feature 一并启用（dep: 遮蔽只杀隐式
+        // feature）；缺旗 = E0599 try_from_serde_litemap 不在
+        // #[cfg(feature = "litemap")] impl 块里（typst_pdf 分诊实锤）。
+        let d = tmpdir("strongexplicit");
+        let root = root_project(
+            &d,
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nzt = { version = \"1\", features = [\"serde\"] }\n",
+        );
+        let mut src = FakeSource::new(d.join("srcstore"));
+        let mut zt = iv("zt", "1.0.0");
+        zt.features.insert("alloc".into(), vec![]);
+        zt.features
+            .insert("litemap".into(), vec!["dep:litemap".into(), "alloc".into()]);
+        zt.features.insert(
+            "serde".into(),
+            vec![
+                "dep:serde_core".into(),
+                "dep:litemap".into(),
+                "alloc".into(),
+                "litemap/serde".into(),
+            ],
+        );
+        let mut lm = idep("litemap", "1");
+        lm.optional = true;
+        zt.deps.push(lm);
+        let mut sc = idep("serde_core", "1");
+        sc.optional = true;
+        zt.deps.push(sc);
+        src.add("zt", vec![zt]);
+        src.add("litemap", vec![iv("litemap", "1.0.0")]);
+        src.add("serde_core", vec![iv("serde_core", "1.0.0")]);
+
+        let plan = resolve(&root, &mut src).unwrap();
+        let zt_unit = plan.units.iter().find(|u| u.package == "zt").unwrap();
+        assert!(zt_unit.features.contains("serde"));
+        assert!(
+            zt_unit.features.contains("litemap"),
+            "强形 x/y 必须启用同名显式 feature（dep: 遮蔽只杀隐式）: {:?}",
+            zt_unit.features
+        );
+        assert!(
+            zt_unit.features.contains("alloc"),
+            "显式 litemap feature 展开带 alloc: {:?}",
+            zt_unit.features
+        );
+        assert!(
+            plan.units.iter().any(|u| u.package == "litemap"),
+            "litemap 依赖本体被激活进 units"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 

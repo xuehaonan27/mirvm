@@ -677,6 +677,14 @@ pub fn bin_rustc_args(
     a.push(bin_name.replace('-', "_"));
     a.push(format!("--edition={}", manifest.edition));
     a.push("--crate-type=bin".into());
+    // file!()/panic Location/诊断路径 parity（redb_kv 的 Location Display 与
+    // gix_pure 的 panic 位置实锤）：cargo 以 cwd=包根 + 相对路径 src/main.rs
+    // 调 rustc，本地包路径在一切输出里都是相对形；我们传绝对路径，用 remap
+    // 把包根前缀重写为空——rustc book：remap 影响 all output including
+    // compiler diagnostics（真 rustc 实证：绝对输入 + remap 的 file!() 与
+    // 相对输入逐字节同）。registry/path 依赖路径仍绝对（cargo 同），只盖
+    // 根包目录。
+    a.push(format!("--remap-path-prefix={}/=", manifest.root.display()));
     a.push("-C".into());
     a.push("embed-bitcode=no".into());
     a.push("-C".into());
@@ -2015,6 +2023,13 @@ mod tests {
         assert!(
             a.windows(2).any(|w| w[0] == "--extern" && w[1] == want_ext),
             "bin 缺根 lib --extern: {a:?}"
+        );
+        // 根包目录 remap 在场（file!()/panic Location 相对形 = cargo 的
+        // cwd=包根相对调用语义，redb_kv/gix_pure 实锤）
+        let want_remap = format!("--remap-path-prefix={}/=", root.display());
+        assert!(
+            a.iter().any(|x| x == &want_remap),
+            "bin 缺根包目录 remap: {a:?}"
         );
         // 无根 lib 时 extern 缺席（老路径零漂移）
         let a0 = bin_rustc_args(

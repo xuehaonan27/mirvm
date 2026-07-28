@@ -5,6 +5,8 @@
 //! 调用。未列举 syscall 族唯一通道 = `syscall` 变参单点（C10 直通纪律：
 //! 不为每个 syscall 建壳）。地址值按 u64 出入（leaf 类型纪律）。
 
+use crate::mirvm_log;
+
 /// getenv(3)：name_addr = guest 侧 NUL 结尾字符串真地址；返回真地址或 0。
 pub fn getenv(name_addr: u64) -> u64 {
     unsafe { libc::getenv(name_addr as *const libc::c_char) as u64 }
@@ -57,9 +59,15 @@ pub fn memcmp_addr() -> *const u8 {
 pub extern "C" fn mirvm_syscall_dispatch(nr: i64, args: *const u64) -> i64 {
     let args: &[u64] = unsafe { std::slice::from_raw_parts(args, 6) };
     if std::env::var_os("MIRVM_SYSCALL_TRACE").is_some() {
-        eprintln!(
+        mirvm_log!(
+            stderr,
             "mirvm-syscall: nr={nr} a1={:#x} a2={:#x} a3={:#x} a4={:#x} a5={:#x} a6={:#x}",
-            args[0], args[1], args[2], args[3], args[4], args[5]
+            args[0],
+            args[1],
+            args[2],
+            args[3],
+            args[4],
+            args[5]
         );
     }
     syscall(nr, args)
