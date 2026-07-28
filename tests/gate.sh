@@ -78,8 +78,13 @@ while IFS='|' read -r name _tier tmo mode envv needs args xfail_spec; do
             # 两侧 cwd 统一 = 项目目录（mirvm 项目模式 guest cwd 语义 = cd proj &&
             # cargo run）；夹具路径经 {ROOT} 绝对化，与 cwd 无关。--cap-lints
             # 让上游告警静默（stderr 三维对拍只承载程序自身输出，不含编译噪音）。
+            # RUSTC 必须显式钉：rustup 代理按【每次调用的 cwd】解析——registry
+            # 依赖的编译 cwd 在仓外（~/.cargo/registry），会落到 rustup
+            # default（stable）造成仓内 nightly/仓外 stable 混合工具链
+            # （E0514 实锤，换新机 default 漂移后冷重建必现）。
             (cd "$proj" && CARGO_TARGET_DIR="${MIRVM_HOME:-$HOME/.mirvm}/target/native" \
                 RUSTFLAGS="--cap-lints allow" \
+                RUSTC="$RUSTC" \
                 timeout "$tmo" "$CARGO" run -q --locked -- ${argv[@]+"${argv[@]}"} \
                 >"$TMP/$name.native.out" 2>"$TMP/$name.native.err") || ncode=$?
             if [ "$ncode" -ne 0 ]; then
@@ -116,7 +121,14 @@ while IFS='|' read -r name _tier tmo mode envv needs args xfail_spec; do
             bad "c_$name（预期 xfail $xfail_code/'$xfail_pat'，实 exit=$code）: $(tail -1 "$TMP/$name.err" | head -c 100)"
         fi
     elif [ "$code" -ne 0 ]; then
-        bad "c_$name (exit=$code): $(tail -1 "$TMP/$name.err" | head -c 100)"
+        # D15 P5 边界单列（corpus_deps_pair / deps audit 同款纪律）：self 轨
+        # 遇「归 P5」响亮拒绝是设计好的不闭合面（git 源/alt registry 等，
+        # 设计档 §5 P5）——单列 p5 不算失败，不冒充闭合
+        if [ "${MIRVM_DEPS:-}" = "self" ] && grep -q '归 P5' "$TMP/$name.err"; then
+            p5 "c_$name（P5 边界响亮拒绝在案）"
+        else
+            bad "c_$name (exit=$code): $(tail -1 "$TMP/$name.err" | head -c 100)"
+        fi
     elif [[ "$mode" == oracle:* ]]; then
         oname=${mode#oracle:}
         oracle=$(cat "tests/fixtures/oracles/$oname.txt")
@@ -291,5 +303,9 @@ cache_snapshot "gate 收尾后"
 print_slowest 10
 print_section_report
 echo "---"
-echo "gate: $pass pass, $xfail expected-red, $skip_count skip, $fail fail"
+if [ "$p5" -gt 0 ]; then
+    echo "gate: $pass pass, $xfail expected-red, $skip_count skip, $p5 p5, $fail fail"
+else
+    echo "gate: $pass pass, $xfail expected-red, $skip_count skip, $fail fail"
+fi
 [ $fail -eq 0 ]

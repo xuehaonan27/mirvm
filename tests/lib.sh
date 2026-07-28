@@ -11,11 +11,12 @@
 # 汇总尾行统一以 "$skip_count skip, $fail fail" 收尾（gate_truth 锁此形状）。
 
 # ---- ① 记账 ----
-pass=0 fail=0 skip_count=0 xfail=0
+pass=0 fail=0 skip_count=0 xfail=0 p5=0
 ok()   { pass=$((pass + 1)); echo "PASS $*"; }
 bad()  { fail=$((fail + 1)); echo "FAIL $*"; }
 skip() { skip_count=$((skip_count + 1)); echo "SKIP $*"; }
 red()  { xfail=$((xfail + 1)); echo "XFAIL $*"; }
+p5()   { p5=$((p5 + 1)); echo "P5 $*"; }
 
 # ---- ② 计时 ----
 now_ms() { date +%s%N; }

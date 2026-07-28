@@ -12,6 +12,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 MIRVM=${MIRVM:-target/release/mirvm}
+# 本 gate 恒走 cargo compat 轨（D15 P3 双轨纪律）：S3′c 跨 bin 共享的
+# deps-image 键 = fnv(底座键, --extern 产物盖戳)——内容寻址按轨分立，
+# self 轨（target/cargoless）与 cargo 轨（target/mirvm）产物名/盖戳不同，
+# 跨轨共享原理上不可能；且步骤 6 本就手工驱动裸 cargo（self 路径尚无
+# --bin 多 bin 选择，P4 记档）。self 轨的 deps-image 行为由 gate 的
+# corpus 段（DEPS=self 全量跑）隐含覆盖。
+export MIRVM_DEPS=cargo
 WS=tests/fixtures/a2_ws
 HOST=$(rustc -vV | sed -n 's/^host: //p')
 DEPS=${MIRVM_HOME:-$HOME/.mirvm}/deps
