@@ -1,0 +1,8 @@
+[package]
+name = "cless_proj"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+itoa = "1"
+cfg-if = "1"

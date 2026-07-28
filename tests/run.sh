@@ -2,7 +2,7 @@
 # tests/run.sh —— 测试套件统一入口（2026-07-23 测试管线整顿）。
 #
 # 档位（由小到大）：
-#   fast    逢提交级：cargo fmt/clippy/test + diff.sh 双态 + diff_cargo + gate_truth
+#   fast    逢提交级：cargo fmt/clippy/test + diff.sh 双态 + diff_cargo + diff_cless + gate_truth
 #   smoke   战役批次级：fast + corpus smoke 层（tests/corpus.manifest）+ probes + runtime_gates
 #   gate    战役收尾级：静态/单元/gate_truth + tests/gate.sh 全量（其内部已含
 #           corpus 全防线 + diff 四态 + diff_cargo + perf + a2 + probes + runtime_gates）
@@ -44,10 +44,11 @@ run_quality() {  # 静态检查与单元测试层
     run_step "cargo test" cargo test --locked --all-features
 }
 
-run_diff_family() {  # 差分家族（diff.sh 双态 + cargo 形态 + 门禁自回归）
+run_diff_family() {  # 差分家族（diff.sh 双态 + cargo 形态 + cargoless 对拍 + 门禁自回归）
     run_step "diff.sh" bash tests/diff.sh
     run_step "diff.sh(JIT=1+SYNC)" env MIRVM_JIT_SYNC=1 MIRVM_JIT_THRESHOLD=1 bash tests/diff.sh
     run_step "diff_cargo" bash tests/diff_cargo.sh
+    run_step "diff_cless" bash tests/diff_cless.sh
     run_step "gate_truth" bash tests/gate_truth_regression.sh
 }
 

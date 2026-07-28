@@ -23,7 +23,7 @@
 // P1 逐切接入中：resolve/registry/audit 后续切片接入后摘除本 allow（设计档 §5）。
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// 依赖来源。
@@ -128,6 +128,8 @@ pub struct PackageManifest {
     /// `[package] links`（-sys 链接键；native 库名推导与 build.rs 调度用）。
     pub links: Option<String>,
     pub default_run: Option<String>,
+    /// CARGO_PKG_* 编译期 env 全集（缺键 = 空串，cargo 同契约；pkg_env_map 计算）。
+    pub pkg_env: BTreeMap<String, String>,
 }
 
 // ---------- serde 原料（宽松，未知键忽略，已知不支持的键后置校验）----------
@@ -158,6 +160,17 @@ struct RawPackage {
     build: Option<toml::Value>,
     #[serde(rename = "default-run")]
     default_run: Option<String>,
+    // 以下均为 CARGO_PKG_* env 原料（pkg_env_map 消费；缺键 = 空串，cargo 同）
+    authors: Option<Vec<String>>,
+    description: Option<String>,
+    homepage: Option<String>,
+    repository: Option<String>,
+    license: Option<String>,
+    #[serde(rename = "license-file")]
+    license_file: Option<toml::Value>,
+    readme: Option<toml::Value>,
+    #[serde(rename = "rust-version")]
+    rust_version: Option<toml::Value>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -170,6 +183,8 @@ struct RawWorkspace {
 struct RawWorkspacePackage {
     version: Option<String>,
     edition: Option<String>,
+    #[serde(rename = "rust-version")]
+    rust_version: Option<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -266,6 +281,36 @@ impl PackageManifest {
             Some(_) => return Err("package.edition 形态不支持".into()),
             None => "2015".to_string(),
         };
+        // CARGO_PKG_* env 全集（cargo 契约：编译期 env! 可读；缺键 = 空串）。
+        // readme = true 归约为 "README.md"（cargo 同）；license-file 只收字符串形。
+        let rust_version = match pkg.rust_version {
+            Some(toml::Value::String(v)) => Some(v),
+            Some(toml::Value::Table(t)) if t.get("workspace").is_some() => {
+                ws_pkg.and_then(|w| w.rust_version.clone())
+            }
+            _ => None,
+        };
+        let readme = match &pkg.readme {
+            Some(toml::Value::String(s)) => Some(s.clone()),
+            Some(toml::Value::Boolean(true)) => Some("README.md".to_string()),
+            _ => None,
+        };
+        let license_file = match &pkg.license_file {
+            Some(toml::Value::String(s)) => Some(s.clone()),
+            _ => None,
+        };
+        let pkg_env = pkg_env_map(
+            &name,
+            &version,
+            pkg.authors.as_deref(),
+            pkg.description.as_deref(),
+            pkg.homepage.as_deref(),
+            pkg.repository.as_deref(),
+            pkg.license.as_deref(),
+            license_file.as_deref(),
+            readme.as_deref(),
+            rust_version.as_deref(),
+        );
         if raw
             .workspace
             .as_ref()
@@ -335,8 +380,14 @@ impl PackageManifest {
         let autobins = pkg.autobins.unwrap_or(true);
         let targets = discover_targets(raw.lib.as_ref(), raw.bin.as_ref(), autobins, &name, root)?;
         let profile = profile_from(raw.profile);
-        let has_build_script =
-            pkg.build.is_some() || pkg.links.is_some() || root.join("build.rs").is_file();
+        // cargo 语义：`build = false` 是显式关闭 build script（cfg-if 实锤——
+        // 键在场 ≠ 有 build.rs）；字符串形 = 自定义路径；缺省 = 根下 build.rs 实存。
+        let has_build_script = pkg.links.is_some()
+            || match &pkg.build {
+                Some(toml::Value::Boolean(false)) => false,
+                Some(_) => true,
+                None => root.join("build.rs").is_file(),
+            };
 
         Ok(Self {
             name,
@@ -350,6 +401,7 @@ impl PackageManifest {
             has_build_script,
             links: pkg.links,
             default_run: pkg.default_run,
+            pkg_env,
         })
     }
 
@@ -394,6 +446,69 @@ impl PackageManifest {
             ))),
         }
     }
+
+    /// `--check-cfg cfg(feature, values(...))` 的合法值表（cargo bin 侧同口径）：
+    /// [features] 表键 ∪ 隐式 optional 依赖键（optional dep 键未被任何 feature
+    /// 值里的 `dep:key` 点名时，存在同名隐式 feature——与 resolve.rs expand_node
+    /// 的 hidden 规则同一条）。
+    pub fn check_cfg_feature_values(&self) -> BTreeSet<String> {
+        let mut out: BTreeSet<String> = self.features.keys().cloned().collect();
+        let hidden: BTreeSet<String> = self
+            .features
+            .values()
+            .flatten()
+            .filter_map(|v| match v {
+                FeatureValue::DepActivation(d) => Some(d.clone()),
+                _ => None,
+            })
+            .collect();
+        for d in &self.deps {
+            if d.optional && !hidden.contains(&d.key) {
+                out.insert(d.key.clone());
+            }
+        }
+        out
+    }
+}
+
+/// CARGO_PKG_* env 全集（cargo 编译期 env 契约，env!/option_env! 可读）。
+/// 缺键 = 空串（cargo 就是设空串）；VERSION_MAJOR/MINOR/PATCH/PRE 由 semver 拆开
+/// （PRE = pre 段字符串，无 pre = 空）；AUTHORS 数组以 ":" 连。
+/// manifest.rs（根/path 包）与 resolve.rs（registry 包最小读取）两边同调这一份。
+// 平铺参数 = cargo 的平铺 env 键集一一对应（D15 切① 简报钉死的签名）；
+// 包成 struct 反而失去与 manifest 键的目视对应
+#[allow(clippy::too_many_arguments)]
+pub fn pkg_env_map(
+    name: &str,
+    version: &semver::Version,
+    authors: Option<&[String]>,
+    description: Option<&str>,
+    homepage: Option<&str>,
+    repository: Option<&str>,
+    license: Option<&str>,
+    license_file: Option<&str>,
+    readme: Option<&str>,
+    rust_version: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut m = BTreeMap::new();
+    let mut put = |k: &str, v: &str| {
+        m.insert(k.to_string(), v.to_string());
+    };
+    put("CARGO_PKG_NAME", name);
+    put("CARGO_PKG_VERSION", &version.to_string());
+    put("CARGO_PKG_VERSION_MAJOR", &version.major.to_string());
+    put("CARGO_PKG_VERSION_MINOR", &version.minor.to_string());
+    put("CARGO_PKG_VERSION_PATCH", &version.patch.to_string());
+    put("CARGO_PKG_VERSION_PRE", version.pre.as_str());
+    put("CARGO_PKG_AUTHORS", &authors.unwrap_or(&[]).join(":"));
+    put("CARGO_PKG_DESCRIPTION", description.unwrap_or(""));
+    put("CARGO_PKG_HOMEPAGE", homepage.unwrap_or(""));
+    put("CARGO_PKG_LICENSE", license.unwrap_or(""));
+    put("CARGO_PKG_LICENSE_FILE", license_file.unwrap_or(""));
+    put("CARGO_PKG_README", readme.unwrap_or(""));
+    put("CARGO_PKG_REPOSITORY", repository.unwrap_or(""));
+    put("CARGO_PKG_RUST_VERSION", rust_version.unwrap_or(""));
+    m
 }
 
 // ---------- 依赖表 ----------
@@ -942,6 +1057,29 @@ cc = "1"
     }
 
     #[test]
+    fn build_eq_false_disables_build_script_detection() {
+        // cargo 语义：`build = false` 显式关闭（cfg-if 实锤——键在场 ≠ 有 build.rs）；
+        // 即便根下躺着 build.rs 也不算（cargo 同）
+        let d = tmpdir("buildfalse");
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("src/main.rs"), "fn main(){}").unwrap();
+        std::fs::write(d.join("build.rs"), "fn main(){}").unwrap();
+        let m = PackageManifest::parse(
+            "[package]\nname = \"d\"\nversion = \"0.1.0\"\nbuild = false\n",
+            &d,
+        )
+        .unwrap();
+        assert!(!m.has_build_script);
+        let m = PackageManifest::parse(
+            "[package]\nname = \"d\"\nversion = \"0.1.0\"\nbuild = \"custom.rs\"\n",
+            &d,
+        )
+        .unwrap();
+        assert!(m.has_build_script);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
     fn frontmatter_pseudo_package_parses() {
         let d = tmpdir("frontmatter");
         let body = d.join("main.rs");
@@ -957,5 +1095,81 @@ cc = "1"
         assert_eq!(m.deps.len(), 1);
         assert_eq!(m.runnable_bin().unwrap().0, "c_demo");
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn pkg_env_splits_version_and_blanks_missing_keys() {
+        let m = PackageManifest::parse(
+            r#"
+[package]
+name = "demo"
+version = "1.2.3-rc.1"
+edition = "2021"
+authors = ["Alice <a@x>", "Bob"]
+description = "演示包"
+readme = true
+license = "MIT"
+"#,
+            Path::new("/tmp/x"),
+        )
+        .unwrap();
+        let e = &m.pkg_env;
+        assert_eq!(e["CARGO_PKG_NAME"], "demo");
+        assert_eq!(e["CARGO_PKG_VERSION"], "1.2.3-rc.1");
+        assert_eq!(e["CARGO_PKG_VERSION_MAJOR"], "1");
+        assert_eq!(e["CARGO_PKG_VERSION_MINOR"], "2");
+        assert_eq!(e["CARGO_PKG_VERSION_PATCH"], "3");
+        assert_eq!(e["CARGO_PKG_VERSION_PRE"], "rc.1");
+        assert_eq!(e["CARGO_PKG_AUTHORS"], "Alice <a@x>:Bob");
+        assert_eq!(e["CARGO_PKG_DESCRIPTION"], "演示包");
+        assert_eq!(e["CARGO_PKG_README"], "README.md");
+        assert_eq!(e["CARGO_PKG_LICENSE"], "MIT");
+        // 缺键 = 空串（cargo 同契约），但键必须在场
+        for k in [
+            "CARGO_PKG_HOMEPAGE",
+            "CARGO_PKG_REPOSITORY",
+            "CARGO_PKG_LICENSE_FILE",
+            "CARGO_PKG_RUST_VERSION",
+        ] {
+            assert_eq!(e.get(k).map(String::as_str), Some(""), "{k} 应为空串");
+        }
+        // 无 pre 段的版本 PRE = 空串
+        let e2 = pkg_env_map(
+            "d",
+            &semver::Version::new(0, 1, 0),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(e2["CARGO_PKG_VERSION_PRE"], "");
+        assert_eq!(e2["CARGO_PKG_AUTHORS"], "");
+    }
+
+    #[test]
+    fn check_cfg_values_include_implicit_optional_and_exclude_dep_shadowed() {
+        let m = PackageManifest::parse(
+            "[package]\nname = \"d\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nserde = { version = \"1\", optional = true }\n\
+             itertools = { version = \"0.14\", optional = true }\n\
+             plain = \"1\"\n\
+             [features]\ndefault = [\"dep:serde\"]\nextra = []\n",
+            Path::new("/tmp/x"),
+        )
+        .unwrap();
+        let vals = m.check_cfg_feature_values();
+        // [features] 表键在场
+        assert!(vals.contains("default"));
+        assert!(vals.contains("extra"));
+        // 未被 dep: 点名的 optional 依赖 → 同名隐式 feature
+        assert!(vals.contains("itertools"));
+        // 被 dep:serde 遮蔽 → 无同名隐式 feature
+        assert!(!vals.contains("serde"));
+        // 非 optional 依赖永不进值表
+        assert!(!vals.contains("plain"));
     }
 }

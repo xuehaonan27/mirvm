@@ -15,8 +15,8 @@
 //! lib 名/proc-macro/links/build.rs 实存从解包源的**最小 manifest 读取**拿
 //! （不跑全量子集解析——registry crate manifest 形态不设防）。
 
-// P1 逐切接入中：schedule/audit 后续切片接入后摘除本 allow（设计档 §5）。
-#![allow(dead_code)]
+// P1 逐切接入中：P2 切① 已接上 schedule/driver（设计档 §5）；个别字段的消费
+// 归后续切片（就地 #[allow(dead_code)] 点名），不再整文件豁免。
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -69,6 +69,8 @@ pub struct UnitDep {
     /// --extern 命名键（rename key）。
     pub key: String,
     pub unit: usize,
+    /// 边类（normal/build）；切③（build.rs 调度）按边类分列消费，切① 不读。
+    #[allow(dead_code)]
     pub class: UnitClass,
 }
 
@@ -85,8 +87,16 @@ pub struct Unit {
     pub features: BTreeSet<String>,
     pub proc_macro: bool,
     pub has_build_script: bool,
+    /// -sys 链接键；切③（build.rs/-sys 调度）消费，切① 只透传。
+    #[allow(dead_code)]
     pub links: Option<String>,
     pub deps: Vec<UnitDep>,
+    /// package.edition（registry 包缺省 "2015"）——dep rustc 参数用。
+    pub edition: String,
+    /// lib 根文件绝对路径（[lib] path 或缺省 src/lib.rs）——dep rustc 参数用。
+    pub lib_path: PathBuf,
+    /// CARGO_PKG_* env 全集（manifest::pkg_env_map 计算；dep 编译子进程 env）。
+    pub pkg_env: BTreeMap<String, String>,
 }
 
 /// 解析结果。
@@ -94,9 +104,14 @@ pub struct Unit {
 pub struct ResolvePlan {
     pub root_name: String,
     pub root_version: Version,
+    /// 审计面字段（P1 对账工具留存；P2 driver 从 manifest 直取根目录）。
+    #[allow(dead_code)]
     pub root_dir: PathBuf,
     pub root_features: BTreeSet<String>,
     pub units: Vec<Unit>,
+    /// 根（bin）的 --extern 边表：根本身不是 unit，但 bin 会话需要同一套
+    /// 依赖边（与 units 填边同一套门，assemble_units 产出）。
+    pub root_deps: Vec<UnitDep>,
     /// name → 已解版本集（审计面：与 Cargo.lock 对账用）。
     pub version_map: BTreeMap<String, Vec<Version>>,
     /// fresh 模式 = 生成的 canonical lock；lock 模式 = 输入 lock 回显。
@@ -175,8 +190,9 @@ pub fn resolve(root: &PackageManifest, src: &mut impl PkgSource) -> Result<Resol
         }
     };
 
-    // 编译单元装配（构建图节点：仅强边激活面）
-    let units = assemble_units(root, &path_manifests, &edge_versions, &build_nodes, src)?;
+    // 编译单元装配（构建图节点：仅强边激活面）+ 根的 --extern 边表
+    let (units, root_deps) =
+        assemble_units(root, &path_manifests, &edge_versions, &build_nodes, src)?;
 
     Ok(ResolvePlan {
         root_name: root.name.clone(),
@@ -187,6 +203,7 @@ pub fn resolve(root: &PackageManifest, src: &mut impl PkgSource) -> Result<Resol
             .map(|n| n.features.clone())
             .unwrap_or_default(),
         units,
+        root_deps,
         version_map,
         lock: out_lock,
     })
@@ -1528,17 +1545,31 @@ fn expand_node(
 
 // ---------- 单元装配 ----------
 
-/// registry 包的最小 manifest 读取（lib 名/proc-macro/links/build.rs；
-/// 不跑全量子集解析——registry crate 的 manifest 形态不设防）。
+/// registry 包的最小 manifest 读取（lib 名/path/proc-macro/links/build.rs 实存/
+/// edition/CARGO_PKG_* 原料；不跑全量子集解析——registry crate 的 manifest
+/// 形态不设防；.crate 内的 Cargo.toml 是 cargo 归一化产物，edition 等继承键
+/// 已是具体值）。
+struct RegistryMinimal {
+    lib_name: String,
+    proc_macro: bool,
+    links: Option<String>,
+    has_build: bool,
+    edition: String,
+    lib_path: PathBuf,
+    pkg_env: BTreeMap<String, String>,
+}
+
 fn read_registry_minimal(
     dir: &Path,
     package: &str,
-) -> Result<(String, bool, Option<String>, bool), String> {
+    version: &Version,
+) -> Result<RegistryMinimal, String> {
     let file = dir.join("Cargo.toml");
     let text =
         std::fs::read_to_string(&file).map_err(|e| format!("读取 {} 失败: {e}", file.display()))?;
     let v: toml::Value =
         toml::from_str(&text).map_err(|e| format!("{} 解析失败: {e}", file.display()))?;
+    let pkg_table = v.get("package");
     let lib = v.get("lib");
     let name = lib
         .and_then(|l| l.get("name"))
@@ -1549,15 +1580,81 @@ fn read_registry_minimal(
         .and_then(|l| l.get("proc-macro"))
         .and_then(|p| p.as_bool())
         .unwrap_or(false);
-    let links = v
-        .get("package")
+    let lib_path = dir.join(
+        lib.and_then(|l| l.get("path"))
+            .and_then(|p| p.as_str())
+            .unwrap_or("src/lib.rs"),
+    );
+    let links = pkg_table
         .and_then(|p| p.get("links"))
         .and_then(|l| l.as_str())
         .map(str::to_string);
-    let has_build = dir.join("build.rs").is_file()
-        || v.get("package").and_then(|p| p.get("build")).is_some()
-        || links.is_some();
-    Ok((name, proc_macro, links, has_build))
+    // cargo 语义：`build = false` 是显式关闭（cfg-if 实锤——键在场 ≠ 有 build.rs）
+    let has_build = links.is_some()
+        || match pkg_table.and_then(|p| p.get("build")) {
+            Some(toml::Value::Boolean(false)) => false,
+            Some(_) => true,
+            None => dir.join("build.rs").is_file(),
+        };
+    let edition = pkg_table
+        .and_then(|p| p.get("edition"))
+        .and_then(|e| e.as_str())
+        .unwrap_or("2015")
+        .to_string();
+    // CARGO_PKG_* 原料（与 manifest.rs 根/path 包同一 pkg_env_map 计算）
+    let str_field = |k: &str| {
+        pkg_table
+            .and_then(|p| p.get(k))
+            .and_then(|x| x.as_str())
+            .map(str::to_string)
+    };
+    let authors: Vec<String> = pkg_table
+        .and_then(|p| p.get("authors"))
+        .and_then(|a| a.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let readme = match pkg_table.and_then(|p| p.get("readme")) {
+        Some(toml::Value::String(s)) => Some(s.clone()),
+        Some(toml::Value::Boolean(true)) => Some("README.md".to_string()),
+        _ => None,
+    };
+    let (description, homepage, repository, license, license_file, rust_version) = (
+        str_field("description"),
+        str_field("homepage"),
+        str_field("repository"),
+        str_field("license"),
+        str_field("license-file"),
+        str_field("rust-version"),
+    );
+    let pkg_env = super::manifest::pkg_env_map(
+        package,
+        version,
+        if authors.is_empty() {
+            None
+        } else {
+            Some(authors.as_slice())
+        },
+        description.as_deref(),
+        homepage.as_deref(),
+        repository.as_deref(),
+        license.as_deref(),
+        license_file.as_deref(),
+        readme.as_deref(),
+        rust_version.as_deref(),
+    );
+    Ok(RegistryMinimal {
+        lib_name: name,
+        proc_macro,
+        links,
+        has_build,
+        edition,
+        lib_path,
+        pkg_env,
+    })
 }
 
 /// 节点的依赖边再取（path 用 manifest，registry 用 index 按精确版本重拉）。
@@ -1611,7 +1708,7 @@ fn assemble_units(
     edge_versions: &EdgeVersions,
     nodes: &BTreeMap<NodeKey, FeatNode>,
     src: &mut impl PkgSource,
-) -> Result<Vec<Unit>, String> {
+) -> Result<(Vec<Unit>, Vec<UnitDep>), String> {
     // 可构建集：从根出发沿 host cfg 为真的边可达（cargo 构建图过滤——
     // 版本/lock 是全平台并集，构建图按 host 求值；serde facade 系那种
     // cfg(any()) 永假边引的子图只进 lock 不进构建图）。
@@ -1660,14 +1757,18 @@ fn assemble_units(
             continue; // 根本身不是 dep 单元；不可构建子图只进 lock
         }
         if let Some(m) = path_manifests.get(name) {
-            let lib_name = m
+            let (lib_name, lib_path) = m
                 .targets
                 .iter()
                 .find_map(|t| match t {
-                    super::manifest::Target::Lib { name, .. } => Some(name.clone()),
+                    super::manifest::Target::Lib { name, path, .. } => {
+                        Some((name.clone(), path.clone()))
+                    }
                     _ => None,
                 })
-                .unwrap_or_else(|| name.replace('-', "_"));
+                // 无 lib 目标的 path 依赖是病理包（cargo 同拒）——回退缺省路径，
+                // dep 编译期 rustc 报文件不存在（响亮，不静默吞）
+                .unwrap_or_else(|| (name.replace('-', "_"), m.root.join("src/lib.rs")));
             let proc_macro = m.targets.iter().any(
                 |t| matches!(t, super::manifest::Target::Lib { proc_macro, .. } if *proc_macro),
             );
@@ -1684,24 +1785,30 @@ fn assemble_units(
                 has_build_script: m.has_build_script,
                 links: m.links.clone(),
                 deps: vec![],
+                edition: m.edition.clone(),
+                lib_path,
+                pkg_env: m.pkg_env.clone(),
             });
             continue;
         }
         let dir = src.ensure_source(name, version, None)?;
-        let (lib_name, proc_macro, links, has_build) = read_registry_minimal(&dir, name)?;
+        let rm = read_registry_minimal(&dir, name, version)?;
         index.insert((name.clone(), version.clone(), *class), units.len());
         units.push(Unit {
             package: name.clone(),
-            lib_name,
+            lib_name: rm.lib_name,
             version: version.clone(),
             source_dir: dir,
             from_registry: true,
             class: *class,
             features: node.features.clone(),
-            proc_macro,
-            has_build_script: has_build,
-            links,
+            proc_macro: rm.proc_macro,
+            has_build_script: rm.has_build,
+            links: rm.links,
             deps: vec![],
+            edition: rm.edition,
+            lib_path: rm.lib_path,
+            pkg_env: rm.pkg_env,
         });
     }
     // 依赖边填充（可构建节点 × host 为真边 × optional 激活门）
@@ -1748,7 +1855,41 @@ fn assemble_units(
     for (from, edge) in edge_rows {
         units[from].deps.push(edge);
     }
-    Ok(units)
+    // 根的 --extern 边表：根本身不是 unit（见上「根本身不是 dep 单元」注释），
+    // 但 bin 会话的 --extern 闭包要与 units 填边同一套门（optional 激活门 +
+    // host 平台求值 + 边分派版本）；只补边表，根不进 units。
+    let mut root_deps: Vec<UnitDep> = Vec::new();
+    {
+        let root_node = nodes.get(&root_key).cloned().unwrap_or_default();
+        for d in decls_to_featdeps(&root.deps)? {
+            if d.optional && !root_node.activated.contains(&d.key) {
+                continue;
+            }
+            if !host_edge(&d)? {
+                continue;
+            }
+            let Some((child_name, child_version)) = edge_version(edge_versions, &root_key, &d)
+            else {
+                if d.optional {
+                    continue;
+                }
+                return Err(format!(
+                    "{}@{} 的依赖 {} 无边分派记录（内部不一致）",
+                    root_key.0, root_key.1, d.key
+                ));
+            };
+            let Some(&to_idx) = index.get(&(child_name.clone(), child_version.clone(), d.class))
+            else {
+                continue; // 子节点不可构建（永假边子图）→ 边不存在
+            };
+            root_deps.push(UnitDep {
+                key: d.key.clone(),
+                unit: to_idx,
+                class: d.class,
+            });
+        }
+    }
+    Ok((units, root_deps))
 }
 
 // ---------- 测试（离线；FakeSource 罐头 index + tempdir 源） ----------

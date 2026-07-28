@@ -206,7 +206,8 @@ fn cargo_accepts_lock(
 }
 
 /// materialize_script 同口径：DefaultHasher(脚本绝对路径) → scripts/<16hex>。
-fn script_cache_dir(script: &Path) -> PathBuf {
+/// P2 切①：cargoless::driver 的脚本物化目录同用此键。
+pub(crate) fn script_cache_dir(script: &Path) -> PathBuf {
     use std::hash::{Hash, Hasher};
     let abs = std::path::absolute(script).unwrap_or_else(|_| script.to_path_buf());
     let mut hasher = std::hash::DefaultHasher::new();
@@ -228,6 +229,7 @@ fn empty_plan(file: &Path) -> ResolvePlan {
         root_dir: file.parent().unwrap_or(Path::new(".")).to_path_buf(),
         root_features: Default::default(),
         units: vec![],
+        root_deps: vec![],
         version_map: Default::default(),
         lock: Default::default(),
     }

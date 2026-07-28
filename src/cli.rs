@@ -54,6 +54,8 @@ ENV:
     MIRVM_JIT_STATS   =1 时进程退出经 atexit 打 JIT 助手频度统计（诊断用）
     MIRVM_CARGO_LOCKED 置位时 frontmatter/脚本项目按 --locked 构建（依赖锁定；
                       未置位 = clean 环境可重解析，见 open-issues G7）
+    MIRVM_DEPS        =self 时项目/脚本走零 cargo 自有调度（D15 P2 切①：限无
+                      build.rs/proc-macro 子集）；缺省/=cargo 走 cargo 三阶段
     MIRVM_TIMING      =1 时向 stderr 输出相位账本（frontend/lower/engine/total）
     MIRVM_NO_IR_CACHE =1 时旁路 L2 engine-IR 缓存（读写全禁；诊断/对拍用）
     MIRVM_NO_BASE_IMAGE =1 时旁路 std 预降低底座（全量冷降低；诊断/对拍用）
@@ -86,6 +88,11 @@ pub fn main() -> ExitCode {
     // 构建子进程带着 cargo 会话环境，不能被误路由进 phase_wrapper）
     if first == "__build-base-image" {
         return crate::baseimage::build_main(argv);
+    }
+    // D15 P2 切①：cargoless dep 编译子进程（cargoless::driver 的调度落点；
+    // 同样必须先于 MIRVM_CARGO_SESSION 分流）
+    if first == "__cless-dep" {
+        return run_cless_dep(argv.collect());
     }
     if std::env::var_os("MIRVM_CARGO_SESSION").is_some() {
         // RUSTC_WRAPPER：first = 真 rustc 路径
@@ -426,12 +433,31 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     };
     let input_path = PathBuf::from(&input);
 
+    // D15 P2 切①：MIRVM_DEPS=self 走零 cargo 新路径（cargoless::driver）；
+    // 缺省/=cargo 走 cargo 三阶段旧路径；其他值响亮报错——双轨并存期的
+    // 显式开关（默认翻转归 P4，设计档 §5）
+    let deps_self = match std::env::var("MIRVM_DEPS").as_deref() {
+        Err(_) | Ok("cargo") => false,
+        Ok("self") => true,
+        Ok(other) => {
+            eprintln!("mirvm: MIRVM_DEPS 只接受 `cargo` 或 `self`（收到 `{other}`）");
+            exit(2);
+        }
+    };
+
     // 形态 1：cargo 项目（目录或 Cargo.toml）
     if input_path.is_dir() {
+        if deps_self {
+            return crate::cargoless::driver::run_project(&input_path, &program_args);
+        }
         cargo_shim::phase_cargo(&input_path, &program_args);
     }
     if input_path.file_name().is_some_and(|f| f == "Cargo.toml") {
-        cargo_shim::phase_cargo(input_path.parent().unwrap_or(Path::new(".")), &program_args);
+        let dir = input_path.parent().unwrap_or(Path::new("."));
+        if deps_self {
+            return crate::cargoless::driver::run_project(dir, &program_args);
+        }
+        cargo_shim::phase_cargo(dir, &program_args);
     }
 
     // mode B 片②：.mirvm 包嗅探（先于文本读取——包是二进制）
@@ -459,6 +485,9 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
 
     // 形态 2：带 frontmatter 依赖声明的单文件脚本 → 物化成 cargo 项目
     if let Some((manifest, body)) = parse_frontmatter(&src) {
+        if deps_self {
+            return crate::cargoless::driver::run_script(&input_path, &program_args);
+        }
         let dir = materialize_script(&input_path, &manifest, &body);
         cargo_shim::phase_cargo(&dir, &program_args);
     }
@@ -626,6 +655,16 @@ pub(crate) fn run_dep_compiler(rustc_args: Vec<String>) -> ! {
         rustc_driver::run_compiler(&rustc_args, &mut callbacks)
     });
     exit(if code == ExitCode::SUCCESS { 0 } else { 1 })
+}
+
+/// D15 P2 切①：cargoless dep 编译子进程入口——补回 argv0 后喂 run_dep_compiler
+/// （参数由 cargoless::schedule::dep_rustc_args 计算，cargoless::driver 调度；
+/// 与 cargo_shim wrapper 段共用同一 DepCallbacks/global_asm 抽取通道）。
+fn run_cless_dep(rest: Vec<String>) -> ExitCode {
+    let mut args = Vec::with_capacity(rest.len() + 1);
+    args.push("mirvm-cless-rustc".to_string());
+    args.extend(rest);
+    run_dep_compiler(args)
 }
 
 // ===== 共享驱动 =====
@@ -1039,7 +1078,7 @@ fn parse_vm_call(spec: &str) -> Result<(String, Vec<u64>), String> {
     Ok((name, args))
 }
 
-fn run_driver(
+pub(crate) fn run_driver(
     rustc_args: Vec<String>,
     program_argv: Vec<String>,
     dump_mir: bool,
