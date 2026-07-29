@@ -102,6 +102,7 @@ fn exec(mut cmd: Command) -> ! {
 fn cargo_project_command(
     project_dir: &std::path::Path,
     program_args: &[String],
+    bin_sel: Option<&str>,
     sysroot: &std::path::Path,
     self_exe: &std::path::Path,
     locked: bool,
@@ -112,6 +113,10 @@ fn cargo_project_command(
     cmd.arg("run");
     if locked {
         cmd.arg("--locked");
+    }
+    // D15 P4 切⑥b：cargo run --bin 语义直通
+    if let Some(b) = bin_sel {
+        cmd.arg("--bin").arg(b);
     }
     // 强制 host target：让 host/target crate 可区分，且激活 target.runner
     cmd.arg("--target").arg(env!("MIRVM_HOST"));
@@ -151,7 +156,11 @@ fn cargo_project_command(
 }
 
 /// 阶段 1：在 `project_dir` 里驱动 cargo。program_args 传给最终被解释的程序。
-pub fn phase_cargo(project_dir: &std::path::Path, program_args: &[String]) -> ! {
+pub fn phase_cargo(
+    project_dir: &std::path::Path,
+    program_args: &[String],
+    bin_sel: Option<&str>,
+) -> ! {
     // 绝对化：relative project_dir + current_dir + join(target/mirvm) 会把 target 目录
     // 拼成 project/project/target 的重复嵌套（A2 gate 实测）——且使同一项目的 rlib 路径
     // 随调用形态（相对/绝对）漂移，deps-image 键失稳。
@@ -170,7 +179,14 @@ pub fn phase_cargo(project_dir: &std::path::Path, program_args: &[String]) -> ! 
     };
     let self_exe = std::env::current_exe().expect("current_exe 失败");
     let locked = std::env::var_os("MIRVM_CARGO_LOCKED").is_some();
-    let cmd = cargo_project_command(project_dir, program_args, &sysroot, &self_exe, locked);
+    let cmd = cargo_project_command(
+        project_dir,
+        program_args,
+        bin_sel,
+        &sysroot,
+        &self_exe,
+        locked,
+    );
     exec(cmd)
 }
 
@@ -430,6 +446,7 @@ mod tests {
         let command = cargo_project_command(
             Path::new("/tmp/project"),
             &[],
+            None,
             Path::new("/tmp/sysroot"),
             Path::new("/tmp/mirvm"),
             true,
@@ -446,6 +463,7 @@ mod tests {
         let command = cargo_project_command(
             Path::new("/tmp/project"),
             &[],
+            None,
             Path::new("/tmp/sysroot"),
             Path::new("/tmp/mirvm"),
             false,
@@ -458,6 +476,7 @@ mod tests {
         let command = cargo_project_command(
             Path::new("/tmp/project"),
             &[],
+            None,
             Path::new("/tmp/sysroot"),
             Path::new("/tmp/mirvm"),
             true,

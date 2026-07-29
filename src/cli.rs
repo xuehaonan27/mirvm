@@ -184,7 +184,7 @@ fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
             std::env::set_var("MIRVM_NO_BASE_IMAGE", "1");
             std::env::set_var("MIRVM_NO_DEPS_IMAGE", "1");
         }
-        cargo_shim::phase_cargo(dir, &[]);
+        cargo_shim::phase_cargo(dir, &[], None);
     }
     let src = std::fs::read_to_string(&input_path).unwrap_or_else(|e| {
         eprintln!("mirvm: fail to read {input}: {e}");
@@ -197,7 +197,7 @@ fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
             std::env::set_var("MIRVM_NO_BASE_IMAGE", "1");
             std::env::set_var("MIRVM_NO_DEPS_IMAGE", "1");
         }
-        cargo_shim::phase_cargo(&dir, &[]);
+        cargo_shim::phase_cargo(&dir, &[], None);
     }
 
     // 纯单文件：直接 pack_driver（与 run 的形态 3 同参）
@@ -382,6 +382,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     let mut sysroot = None;
     let mut vm_call: Option<String> = None;
     let mut vm_stats = false;
+    let mut bin_sel: Option<String> = None;
     let mut program_args: Vec<String> = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -409,6 +410,8 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
             }
             "--vm-call" => vm_call = Some(next("--vm-call")),
             "--vm-stats" => vm_stats = true,
+            // D15 P4 切⑥b：cargo run --bin 语义（项目形态；脚本/单文件无此概念）
+            "--bin" => bin_sel = Some(next("--bin")),
             "--stack-size" => {
                 let v = next("--stack-size");
                 parse_stack_size(&v); // 先验证再落 env（错在入口就响）
@@ -454,16 +457,25 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     // 形态 1：cargo 项目（目录或 Cargo.toml）
     if input_path.is_dir() {
         if deps_self {
-            return crate::cargoless::driver::run_project(&input_path, &program_args);
+            return crate::cargoless::driver::run_project(
+                &input_path,
+                &program_args,
+                bin_sel.as_deref(),
+            );
         }
-        cargo_shim::phase_cargo(&input_path, &program_args);
+        cargo_shim::phase_cargo(&input_path, &program_args, bin_sel.as_deref());
     }
     if input_path.file_name().is_some_and(|f| f == "Cargo.toml") {
         let dir = input_path.parent().unwrap_or(Path::new("."));
         if deps_self {
-            return crate::cargoless::driver::run_project(dir, &program_args);
+            return crate::cargoless::driver::run_project(dir, &program_args, bin_sel.as_deref());
         }
-        cargo_shim::phase_cargo(dir, &program_args);
+        cargo_shim::phase_cargo(dir, &program_args, bin_sel.as_deref());
+    }
+    if let Some(b) = &bin_sel {
+        // 脚本/单文件/包形态无 --bin 概念（cargo script 同）——响亮拒绝不静默吞
+        eprintln!("mirvm: --bin {b} 只适用于 cargo 项目形态（目录/Cargo.toml）");
+        exit(2);
     }
 
     // mode B 片②：.mirvm 包嗅探（先于文本读取——包是二进制）
@@ -495,7 +507,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
             return crate::cargoless::driver::run_script(&input_path, &program_args);
         }
         let dir = materialize_script(&input_path, &manifest, &body);
-        cargo_shim::phase_cargo(&dir, &program_args);
+        cargo_shim::phase_cargo(&dir, &program_args, None);
     }
 
     // 形态 3：纯单文件，零 cargo 快路径（M1 同款）

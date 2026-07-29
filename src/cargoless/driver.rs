@@ -37,8 +37,9 @@ use super::registry::Registry;
 use super::resolve::{ResolvePlan, Unit, resolve};
 use super::schedule::{self, Layout};
 
-/// `mirvm run <目录|Cargo.toml>`（MIRVM_DEPS=self）。
-pub fn run_project(dir: &Path, program_args: &[String]) -> ExitCode {
+/// `mirvm run <目录|Cargo.toml> [--bin <名>]`（MIRVM_DEPS=self）。
+/// bin_sel = --bin 选定的 bin 名（D15 P4 切⑥b，cargo run --bin 语义）。
+pub fn run_project(dir: &Path, program_args: &[String], bin_sel: Option<&str>) -> ExitCode {
     let manifest = match PackageManifest::read_dir(dir) {
         Ok(m) => m,
         Err(e) => {
@@ -46,7 +47,7 @@ pub fn run_project(dir: &Path, program_args: &[String]) -> ExitCode {
             std::process::exit(1);
         }
     };
-    drive(&manifest, program_args)
+    drive(&manifest, program_args, bin_sel)
 }
 
 /// `mirvm run <frontmatter 脚本>`（MIRVM_DEPS=self）：正文物化到脚本缓存目录
@@ -98,10 +99,10 @@ pub fn run_script(file: &Path, program_args: &[String]) -> ExitCode {
                 std::process::exit(1);
             }
         };
-    drive(&manifest, program_args)
+    drive(&manifest, program_args, None)
 }
 
-fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
+fn drive(manifest: &PackageManifest, program_args: &[String], bin_sel: Option<&str>) -> ExitCode {
     // 1. P1 求解器：lock 在按 lock（闭合），lock 缺席 pubgrub fresh 解
     let mut registry = match Registry::open() {
         Ok(r) => r,
@@ -288,7 +289,7 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
     }
 
     // 6. bin：根 crate 走既有 MirvmCallbacks 会话（after_analysis 停，零产物）
-    let (bin_name, bin_path) = match manifest.runnable_bin() {
+    let (bin_name, bin_path) = match manifest.runnable_bin_opt(bin_sel) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("mirvm: {e}");

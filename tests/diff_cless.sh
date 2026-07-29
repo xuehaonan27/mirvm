@@ -92,5 +92,23 @@ diff_cless cless_br "$TMP/br" 7 MIRVM_CARGO_LOCKED=1
 #    host/target 双侧 + facade 再导出 proc-macro；guest 退出码 8）
 diff_cless cless_serde tests/fixtures/cless_serde.rs 8
 
+# 7) --bin 多目标选择（D15 P4 切⑥b：a2_ws 双 bin + default-run；cargo run
+#    --bin 语义双腿逐字节）——diff_cless() 不支持额外 mirvm 旗，专列
+cp -r tests/fixtures/a2_ws "$TMP/a2ws"
+for leg in cargo self; do
+    if [ "$leg" = cargo ]; then
+        env -u RUST_BACKTRACE MIRVM_DEPS=cargo MIRVM_CARGO_LOCKED=1 \
+            "$MIRVM" run "$TMP/a2ws" --bin a2_two \
+            >"$TMP/binsel.$leg.out" 2>"$TMP/binsel.$leg.err"
+        eval "${leg}_code=$?"
+    else
+        env -u RUST_BACKTRACE PATH="$TMP/bin" MIRVM_OFFLINE=1 MIRVM_DEPS=self \
+            "$MIRVM" run "$TMP/a2ws" --bin a2_two \
+            >"$TMP/binsel.$leg.out" 2>"$TMP/binsel.$leg.err"
+        eval "${leg}_code=$?"
+    fi
+done
+check_pair binsel "$cargo_code" "$self_code"
+
 echo "== $pass passed, $fail failed =="
 [ $fail = 0 ]

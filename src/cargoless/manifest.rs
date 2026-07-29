@@ -447,6 +447,13 @@ impl PackageManifest {
 
     /// 选定要跑的 bin（cargo run 语义子集）：default-run > 唯一 bin > 多 bin 响亮拒绝。
     pub fn runnable_bin(&self) -> Result<(&str, &Path), MErr> {
+        self.runnable_bin_opt(None)
+    }
+
+    /// 带 `--bin` 选择的 bin 选定（D15 P4 切⑥b，cargo run --bin 语义）：
+    /// Some(name) = 按名精确选（不在 [[bin]] 中 = 响亮报错并列出可选名单，
+    /// cargo 同文案）；None = 走 runnable_bin 的 default-run > 唯一 > 拒绝链。
+    pub fn runnable_bin_opt(&self, sel: Option<&str>) -> Result<(&str, &Path), MErr> {
         let bins: Vec<_> = self
             .targets
             .iter()
@@ -455,6 +462,15 @@ impl PackageManifest {
                 _ => None,
             })
             .collect();
+        if let Some(want) = sel {
+            if let Some(b) = bins.iter().find(|(n, _)| *n == want) {
+                return Ok(*b);
+            }
+            return Err(format!(
+                "没有名为 `{want}` 的 bin 目标（可用：{}）",
+                bins.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+            ));
+        }
         if let Some(dr) = &self.default_run {
             if let Some(b) = bins.iter().find(|(n, _)| *n == dr) {
                 return Ok(*b);
@@ -464,10 +480,10 @@ impl PackageManifest {
         match bins.len() {
             0 => Err(format!("包 {} 没有 bin 目标", self.name)),
             1 => Ok(bins[0]),
-            _ => Err(unsupported(format!(
-                "多 bin 目标（{}）——P5 范畴，请用 default-run 钉选",
+            _ => Err(format!(
+                "多 bin 目标（{}）——请用 --bin 选定或 default-run 钉选",
                 bins.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
-            ))),
+            )),
         }
     }
 
@@ -1052,14 +1068,20 @@ cc = "1"
             .collect();
         assert!(m.targets.iter().any(|t| matches!(t, Target::Lib { .. })));
         assert_eq!(bins, ["d", "extra"]);
-        // 多 bin 时 runnable_bin 响亮拒绝；default-run 钉选可解
-        assert!(m.runnable_bin().unwrap_err().contains("P5"));
+        // 多 bin 时 runnable_bin 响亮拒绝（可选 --bin 或 default-run 解；
+        // 切⑥b 起不再是 P5 文案）；default-run 钉选可解
+        let err = m.runnable_bin().unwrap_err();
+        assert!(err.contains("--bin"), "{err}");
         let m2 = PackageManifest::parse(
             "[package]\nname=\"d\"\nversion=\"0.1.0\"\ndefault-run=\"extra\"\n",
             &d,
         )
         .unwrap();
         assert_eq!(m2.runnable_bin().unwrap().0, "extra");
+        // 切⑥b：--bin 按名选定；不在名单 = 响亮报错并列出可选
+        assert_eq!(m.runnable_bin_opt(Some("extra")).unwrap().0, "extra");
+        let err = m.runnable_bin_opt(Some("nope")).unwrap_err();
+        assert!(err.contains("nope") && err.contains("extra"), "{err}");
         std::fs::remove_dir_all(&d).unwrap();
     }
 
