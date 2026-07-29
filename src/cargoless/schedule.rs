@@ -40,6 +40,17 @@ impl Layout {
         }
     }
 
+    /// 显式布局（D15 P4 切⑥a，sysroot 自管）：deps 指 sysroot lib 平铺目，
+    /// host 产物与 build script 族指独立 staging（不进 sysroot lib——
+    /// host 二进制与 host rlib 不是 target 产物）。
+    pub fn at(deps: PathBuf, host_deps: PathBuf, build_root: PathBuf) -> Self {
+        Self {
+            deps,
+            host_deps,
+            build_root,
+        }
+    }
+
     /// 一个包的 build script 工作目录（编译产物与 OUT_DIR 都在其下）。
     pub fn build_dir(&self, pkg: &str, fp: &str) -> PathBuf {
         self.build_root.join(format!("{pkg}-{fp}"))

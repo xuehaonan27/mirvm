@@ -28,6 +28,7 @@ pub mod registry;
 pub mod resolve;
 pub mod rustflags;
 pub mod schedule;
+pub mod vendor;
 
 #[cfg(test)]
 mod real_probe;

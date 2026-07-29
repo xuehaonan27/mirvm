@@ -1,17 +1,43 @@
 //! 构建并缓存"携带全量 MIR"的 sysroot（DESIGN.md D5）。
 //!
 //! 发行版 std 的 rlib 只给泛型/#[inline] 函数编码 MIR，解释非泛型 std 函数
-//! 必须用 `-Zalways-encode-mir` 从 rust-src 重建 std（Miri sysroot 同款做法，
-//! 通过 rustc-build-sysroot crate 完成，内部按内容 hash 缓存判新）。
+//! 必须用 `-Zalways-encode-mir` 从 rust-src 重建 std。D15 P4 切⑥a 起由
+//! **cargoless 自有调度**直接构建（此前是 rustc-build-sysroot crate 驱动
+//! cargo——std 的 backtrace 闭包按 crates.io 解析，.d 引用
+//! `~/.cargo/registry`，且全程要 cargo 进程；本切片砍掉，零 cargo 进程、
+//! 零 crates.io/零 ~/.cargo 依赖）：
+//!
+//! - 伪根包：`cache_dir()/sysroot-build/root/` 物化的合成 manifest（path 边
+//!   指 `library/{std,test,proc_macro}`，std 带 panic-unwind+backtrace
+//!   feature——与旧构建的 std_features 对齐）+ library/Cargo.lock 增广本
+//!   （原文 + 伪根包行），resolve 走 lock 模式全钉版；
+//! - 供给面 = `VendorDir`（`library/vendor/` + `[patch.crates-io]` 四件
+//!   override——rustc-std-workspace 三件套与 windows-sys 指回 library/）；
+//! - 编译 = driver::compile_plan 同一流水线（Layout::at 指 sysroot lib 平铺
+//!   目 + 独立 staging 收 host 产物；--sysroot 传 **toolchain**——产出物
+//!   不能当自己的编译输入）；flags 对齐旧构建：debug-assertions 关、
+//!   overflow-checks 开、-Zalways-encode-mir（dep_rustc_args 自带）、
+//!   -Zforce-unstable-if-unmarked（rustflags 通道，只落 target 单元）。
+//!   dep 产物照旧 -Zno-codegen metadata-only——mirvm 只消费 MIR，对象码
+//!   纯白烧（旧 sysroot 带对象码是 cargo 历史形态，非需求）。
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use rustc_build_sysroot::{BuildMode, SysrootBuilder, SysrootConfig, SysrootStatus};
+use crate::cargoless::driver::compile_plan;
+use crate::cargoless::manifest::{PackageManifest, ProfileFlags};
+use crate::cargoless::schedule::Layout;
+use crate::cargoless::vendor::VendorDir;
+use crate::cargoless::{buildrs, resolve};
 
-/// 编译期烘焙的 toolchain sysroot（见 build.rs），rustc/cargo 从这里取。
+/// 编译期烘焙的 toolchain sysroot（见 build.rs），rustc 从这里取。
 fn toolchain_root() -> &'static Path {
     Path::new(env!("MIRVM_DEFAULT_SYSROOT"))
+}
+
+/// rust-src 的 library/ 树（std 系 workspace crate 与 vendor/ 的家乡）。
+fn library_dir() -> PathBuf {
+    toolchain_root().join("lib/rustlib/src/rust/library")
 }
 
 /// mirvm 本地仓库根（2026-07-18 由 `$XDG_CACHE_HOME/mirvm` 迁址，decision-history
@@ -27,95 +53,72 @@ pub fn cache_dir() -> PathBuf {
     PathBuf::from(home).join(".mirvm")
 }
 
+/// stamp 文件（内容键）在 sysroot 内的位置。
+fn stamp_file(sysroot_dir: &Path) -> PathBuf {
+    sysroot_dir
+        .join("lib/rustlib")
+        .join(env!("MIRVM_HOST"))
+        .join(".mirvm-sysroot-hash")
+}
+
 /// 确保 MIR-rich sysroot 存在，返回其路径。
 ///
-/// V1 stamp 快路径（S1a，coldstart-research §6）：全仪式每跑要 spawn 两个 rustc 子进程
-/// （--print sysroot / -vV）+ 递归 stat 整棵 rust-src 树（builder 判新），实测 ~40–55ms
-/// 且 warm 也付。stamp 记 (MIRVM_BUILD_ID, rustc 二进制 len+mtime_ns, builder hash 文件
-/// 内容)，三者齐合即免仪式。失效轴对照 rustc-build-sysroot 0.5.13 sysroot_compute_hash：
-/// config/mode/rustflags/crate 版本 → BUILD_ID；rustc_version/换 toolchain → rustc 二进制
-/// stat；建成与否 → builder hash 文件（兼作存在标记）。**不在防护面**：同一 toolchain 内
-/// 手改 rust-src 源树（builder 的全树 stat 走查才抓得到）——逃生门 = 删 stamp 或 sysroot
-/// 目录，走全仪式自愈重建。stamp 读写任何失败都只回退全仪式，不引入新错误路径。
+/// 快路径 = 重算内容键与 stamp 文件比对；任一不符（或 stamp 缺席）走重建。
+/// 重建全量在 staging + tmp 目录进行，原子 rename 发布——旧 sysroot 全程
+/// 可用到被换下的最后一刻（中间崩溃：tmp/旧目残留，下跑 stamp 缺席自愈）。
 pub fn ensure_sysroot() -> anyhow::Result<PathBuf> {
     let target = env!("MIRVM_HOST");
     let sysroot_dir = cache_dir().join(format!("sysroot-{target}"));
-    let rustc = toolchain_root().join("bin/rustc");
-    let cargo = toolchain_root().join("bin/cargo");
-
-    let builder_hash_file = sysroot_dir
-        .join("lib/rustlib")
-        .join(target)
-        .join(".rustc-build-sysroot-hash");
-    let stamp_path = cache_dir().join(format!("sysroot-{target}.stamp"));
-    if let Some(want) = stamp_value(&rustc, &builder_hash_file)
-        && std::fs::read_to_string(&stamp_path).is_ok_and(|have| have == want)
+    if let Some(want) = stamp_value()
+        && std::fs::read_to_string(stamp_file(&sysroot_dir)).is_ok_and(|have| have == want)
     {
         return Ok(sysroot_dir);
     }
-
-    let src_dir = rustc_build_sysroot::rustc_sysroot_src(Command::new(&rustc))?;
-
-    // 显式钉死版本信息：builder 默认用 PATH 上的 rustc 算缓存哈希，
-    // 而 rustup 代理按 cwd 解析 toolchain——项目外运行会解析到别的版本，
-    // 造成缓存哈希乒乓、sysroot 反复重建。
-    let version = rustc_version::VersionMeta::for_command(Command::new(&rustc))?;
-
-    let status = SysrootBuilder::new(&sysroot_dir, target)
-        .build_mode(BuildMode::Build)
-        .rustc_version(version)
-        .sysroot_config(SysrootConfig::WithStd {
-            std_features: ["panic-unwind", "backtrace"]
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-        })
-        // 与发行版 std 对齐：debug-assertions 关、overflow-checks 开；外加全量 MIR
-        .rustflags([
-            "-Zalways-encode-mir",
-            "-Cdebug-assertions=off",
-            "-Coverflow-checks=on",
-        ])
-        .cargo({
-            let mut cmd = Command::new(&cargo);
-            cmd.env("RUSTC", &rustc);
-            cmd
-        })
-        .when_build_required(|| {
-            eprintln!("mirvm: 正在构建带全量 MIR 的 sysroot（一次性，需几分钟）...");
-        })
-        .build_from_source(&src_dir)?;
-
-    if status == SysrootStatus::SysrootBuilt {
-        eprintln!("mirvm: sysroot 构建完成: {}", sysroot_dir.display());
-    }
-
-    // 仪式通过后落 stamp（builder hash 文件此刻已是最新）。临时名+rename 原子发布
-    // （物化缓存同款纪律）；写失败不致命——下跑走全仪式。
-    if let Some(want) = stamp_value(&rustc, &builder_hash_file) {
-        let tmp = stamp_path.with_extension(format!("stamp.tmp-{}", std::process::id()));
-        if std::fs::write(&tmp, &want).is_ok() {
-            let _ = std::fs::rename(&tmp, &stamp_path);
-        }
-    }
+    build_sysroot(&sysroot_dir)?;
     Ok(sysroot_dir)
 }
 
-/// 当前 toolchain/sysroot 的 stamp 值（S4 底座键复用；sysroot 未建成 ⇒ None）。
+/// 当前已建 sysroot 的 stamp 值（S4 底座键复用；sysroot 未建成 ⇒ None）。
 pub(crate) fn current_stamp_value() -> Option<String> {
     let target = env!("MIRVM_HOST");
-    let rustc = toolchain_root().join("bin/rustc");
-    let builder_hash_file = cache_dir()
-        .join(format!("sysroot-{target}"))
-        .join("lib/rustlib")
-        .join(target)
-        .join(".rustc-build-sysroot-hash");
-    stamp_value(&rustc, &builder_hash_file)
+    std::fs::read_to_string(stamp_file(&cache_dir().join(format!("sysroot-{target}")))).ok()
 }
 
-/// stamp 内容；任一构件缺失（rustc 不在 / sysroot 未建成）→ None（走全仪式）。
-fn stamp_value(rustc: &Path, builder_hash_file: &Path) -> Option<String> {
-    let md = std::fs::metadata(rustc).ok()?;
+/// 内容键（换代判据）：rustc 二进制 stat + library/ 顶层哨兵 + 构建配方
+/// 序列化。toolchain 换（rustc stat + 哨兵双抓——rustup 换装会动顶层目录
+/// mtime）、构建配方变（序列化段），都抓得到。
+/// **不含 MIRVM_BUILD_ID**：mirvm 换版不重建 sysroot——旧设计亦然
+/// （rustc-build-sysroot 的 builder hash 不含 BUILD_ID，stamp 里的
+/// BUILD_ID 只强制「仪式」（一次 no-op 新鲜度核对），不强制重建）。
+/// cargo 轨 dep 缓存的指纹看不见 sysroot 内容，BUILD_ID 级重建会把
+/// 旧 rmeta 混进新 sysroot（E0463 实证）；mirvm 侧的失效面由各自键
+/// 里的 BUILD_ID 成分兜（cargoless fp/baseimage key 均自带）。
+/// **不做全树 stat**：2348 文件的递归盖戳实测 ~20ms/跑，fib(32) JIT
+/// 硬门（<80ms）直接被打红（103ms 实锤）——每跑一次的快路径付不起。
+/// 防护面与旧 V1 stamp 对齐：toolchain 内手改 rust-src 叶子文件不在
+/// 防护面，逃生门 = 删 stamp 或 sysroot 目录，下跑自愈重建。
+/// rust-src 缺席（哨兵失败）⇒ None ⇒ 走重建，重建处在 rust-src 检查响亮。
+fn stamp_value() -> Option<String> {
+    let mut key = rustc_stat()?;
+    key.push('\n');
+    key.push_str(&library_sentinel().ok()?);
+    key.push('\n');
+    // 配方序列化：与 build_sysroot 实际使用的 profile/rustflags 同源
+    let p = sysroot_profile();
+    key.push_str(&format!(
+        "da{} oc{} opt{}\n",
+        p.debug_assertions as u8, p.overflow_checks as u8, p.opt_level
+    ));
+    for f in sysroot_rustflags() {
+        key.push_str(&f);
+        key.push('\n');
+    }
+    Some(key)
+}
+
+/// rustc 二进制 stat 串（len + mtime_ns；缺席 ⇒ None）。
+fn rustc_stat() -> Option<String> {
+    let md = std::fs::metadata(toolchain_root().join("bin/rustc")).ok()?;
     if !md.is_file() {
         return None;
     }
@@ -125,57 +128,298 @@ fn stamp_value(rustc: &Path, builder_hash_file: &Path) -> Option<String> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_nanos();
-    let builder_hash = std::fs::read_to_string(builder_hash_file).ok()?;
-    Some(format!(
-        "v1\n{}\n{}\n{}\n{}\n",
-        env!("MIRVM_BUILD_ID"),
-        md.len(),
-        mtime_ns,
-        builder_hash.trim()
-    ))
+    Some(format!("{}\n{}", md.len(), mtime_ns))
+}
+
+/// sysroot 构建配方（对齐发行版 std，decision-history 同款钉：
+/// debug-assertions 关、overflow-checks 开；全量 MIR 由 dep_rustc_args
+/// 自带 -Zalways-encode-mir，不在此列）。
+fn sysroot_profile() -> ProfileFlags {
+    ProfileFlags {
+        debug_assertions: false,
+        overflow_checks: true,
+        opt_level: 0,
+    }
+}
+
+/// sysroot 构建的 rustflags（走切⑤a 通道，实证只落 target 单元——build.rs
+/// 编译不吃，与 cargo 行为一致）。std 系 crate 的 unstable 特性按
+///「未标记也放行」处理（rustbuild/cargo -Zbuild-std 同枚旗）。
+fn sysroot_rustflags() -> Vec<String> {
+    vec!["-Zforce-unstable-if-unmarked".to_string()]
+}
+
+/// library/ 顶层哨兵：library/ 本体与各一级条目（子目录/文件）的
+/// (名字, len, mtime_ns) 排序折叠（~40 次 stat，亚毫秒级）。换代语义：
+/// rustup 装/换 rust-src 会替换顶层条目（目录 mtime 动）；同版重装 =
+/// 同内容 = 本不需重建，哨兵不变正合意。叶子文件手改抓不到（见
+/// stamp_value 头注的防护面说明与逃生门）。
+fn library_sentinel() -> Result<String, String> {
+    let root = library_dir();
+    let mut rows: Vec<String> = Vec::new();
+    let mut put = |p: &Path, name: String| -> Result<(), String> {
+        let md = std::fs::metadata(p)
+            .map_err(|e| format!("rust-src 哨兵 stat 失败 {}: {e}", p.display()))?;
+        let mtime_ns = md
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        rows.push(format!("{name}:{}:{}", md.len(), mtime_ns));
+        Ok(())
+    };
+    put(&root, ".".to_string())?;
+    let rd = std::fs::read_dir(&root)
+        .map_err(|e| format!("rust-src library 目录读取失败 {}: {e}", root.display()))?;
+    for ent in rd {
+        let ent = ent.map_err(|e| format!("rust-src library 条目读取失败: {e}"))?;
+        put(&ent.path(), ent.file_name().to_string_lossy().into_owned())?;
+    }
+    rows.sort();
+    Ok(rows.join("\u{1e}"))
+}
+
+/// fp 的 sysroot 成分（schedule::fingerprints 第三料）：编译用 toolchain
+/// 的盖戳（BUILD_ID + rustc 二进制 len+mtime_ns）。toolchain 换 ⇒ fp 变 ⇒
+/// staging 的 host 侧缓存（跨重建复用）正确失效。
+fn toolchain_stamp() -> String {
+    match rustc_stat() {
+        Some(stat) => format!("{}\n{}", env!("MIRVM_BUILD_ID"), stat),
+        // 拿不到不致命：fp 粗一档（BUILD_ID 仍在），不引入新错误路径
+        None => format!("{}\nrustc-stat-missing", env!("MIRVM_BUILD_ID")),
+    }
+}
+
+/// [patch.crates-io] 四件（library/Cargo.toml 实锤）：registry 名、本地身。
+fn workspace_overrides(library: &Path) -> BTreeMap<String, PathBuf> {
+    [
+        "rustc-std-workspace-core",
+        "rustc-std-workspace-alloc",
+        "rustc-std-workspace-std",
+        "windows-sys",
+    ]
+    .iter()
+    .map(|n| (n.to_string(), library.join(n)))
+    .collect()
+}
+
+/// 伪根物化（write-if-changed——mtime 稳定是 fp/增量前提，driver.rs 同款纪律）：
+/// - Cargo.toml：path 边指 library/{std,test,proc_macro}，std 带
+///   panic-unwind+backtrace（与旧构建 std_features 对齐）。proc_macro 必须
+///   在——它是 proc-macro crate 的桥，标准 sysroot 必有（旧构建同）；它不在
+///   std+test 依赖闭包里，单列。
+/// - Cargo.lock：library/Cargo.lock 原文 + 伪根包行——resolve 的 lock 模式
+///   从根行出发走图，全图版本钉死（root=library/ 的话伪根不在 lock 会响亮，
+///   且 toolchain 目录不可写——故伪根物化在自家 staging）。
+fn materialize_pseudo_root(library: &Path, root_dir: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(root_dir)?;
+    let toml = format!(
+        "[package]\nname = \"mirvm-mir-sysroot\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
+         \n[dependencies]\n\
+         std = {{ path = '{}', features = [\"panic-unwind\", \"backtrace\"] }}\n\
+         test = {{ path = '{}' }}\n\
+         proc_macro = {{ path = '{}' }}\n",
+        library.join("std").display(),
+        library.join("test").display(),
+        library.join("proc_macro").display(),
+    );
+    write_if_changed(&root_dir.join("Cargo.toml"), toml.as_bytes())?;
+    let lock_src = std::fs::read_to_string(library.join("Cargo.lock"))
+        .map_err(|e| anyhow::anyhow!("读取 {} 失败: {e}", library.join("Cargo.lock").display()))?;
+    let lock = format!(
+        "{lock_src}\n[[package]]\nname = \"mirvm-mir-sysroot\"\nversion = \"0.0.0\"\n\
+         dependencies = [\n \"proc_macro\",\n \"std\",\n \"test\",\n]\n"
+    );
+    write_if_changed(&root_dir.join("Cargo.lock"), lock.as_bytes())?;
+    Ok(())
+}
+
+/// 内容相同不重写（mtime 稳定是指纹/增量前提）。
+fn write_if_changed(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    if std::fs::read(path).ok().is_none_or(|old| old != bytes) {
+        std::fs::write(path, bytes)?;
+    }
+    Ok(())
+}
+
+/// 全量重建：伪根 → resolve（VendorDir 供给）→ compile_plan（toolchain 做
+/// 编译底座）→ stamp 落 tmp → 原子 rename 发布。
+fn build_sysroot(sysroot_dir: &Path) -> anyhow::Result<()> {
+    let target = env!("MIRVM_HOST");
+    let library = library_dir();
+    if !library.join("std/Cargo.toml").is_file() {
+        anyhow::bail!(
+            "rust-src 不在（{} 缺 std/Cargo.toml）——MIR sysroot 从 rust-src 构建，\
+             toolchain 需带 rust-src component",
+            library.display()
+        );
+    }
+    eprintln!("mirvm: 正在构建带全量 MIR 的 sysroot（一次性，需几分钟）...");
+
+    // staging（持久，跨重建复用 host 产物/build script 缓存）与伪根
+    let staging = cache_dir().join("sysroot-build");
+    let root_dir = staging.join("root");
+    materialize_pseudo_root(&library, &root_dir)?;
+    let manifest = PackageManifest::read_dir(&root_dir)
+        .map_err(|e| anyhow::anyhow!("伪根 manifest 解析失败: {e}"))?;
+    let mut src = VendorDir::new(vec![library.join("vendor")], workspace_overrides(&library));
+    let plan = resolve::resolve(&manifest, &mut src)
+        .map_err(|e| anyhow::anyhow!("sysroot 依赖解析失败: {e}"))?;
+    buildrs::check_links_unique(Some((&manifest.name, manifest.links.as_deref())), &plan)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // 产物落 tmp 目（同盘，rename 才原子），发布前旧 sysroot 全程可用
+    let dir_name = format!("sysroot-{target}");
+    let tmp = sysroot_dir.with_file_name(format!("{dir_name}.tmp-{}", std::process::id()));
+    if tmp.exists() {
+        // 上次构建崩溃残留（tmp 从不发布，删之无损）
+        std::fs::remove_dir_all(&tmp)?;
+    }
+    let layout = Layout::at(
+        tmp.join("lib/rustlib").join(target).join("lib"),
+        staging.join("host-deps"),
+        staging.join("build"),
+    );
+    compile_plan(
+        &plan,
+        &layout,
+        &sysroot_profile(),
+        &sysroot_rustflags(),
+        toolchain_root(),
+        &toolchain_stamp(),
+        manifest.has_build_script,
+    )
+    .map_err(|e| anyhow::anyhow!("sysroot 编译失败: {e}"))?;
+
+    // stamp 落 tmp 内（随 rename 一起发布；内容键此刻重算——与快路径同源）
+    let want = stamp_value()
+        .ok_or_else(|| anyhow::anyhow!("sysroot 构建后 stamp 计算失败（rust-src 树读取异常）"))?;
+    let stamp_in_tmp = stamp_file(&tmp);
+    std::fs::write(&stamp_in_tmp, &want)?;
+
+    // 原子发布：旧目 rename 让位（rename(2) 不能盖非空目录），tmp 就位，
+    // 再清旧目。让位到就位之间旧目缺席——窗口两枚 rename 之间，微秒级；
+    // 崩溃则 stamp 缺席，下跑自愈重建。
+    let old = sysroot_dir.with_file_name(format!("{dir_name}.old-{}", std::process::id()));
+    if old.exists() {
+        std::fs::remove_dir_all(&old)?;
+    }
+    if sysroot_dir.exists() {
+        std::fs::rename(sysroot_dir, &old)?;
+    }
+    std::fs::rename(&tmp, sysroot_dir)?;
+    if old.exists() {
+        let _ = std::fs::remove_dir_all(&old);
+    }
+    // cargo 轨 dep 缓存连坐 purge：sysroot 内容已换代，而 cargo 的指纹
+    // 看不见它（--sysroot 路径同串）——留着旧 rmeta 会被 cargo 当新鲜，
+    // 混进新 sysroot 报 E0463/E0460（实证）。cargoless 轨与各 image
+    // 的键自带 stamp/BUILD_ID 成分，自愈无需动。purge 失败按 FS 故障
+    // 同处理（响亮——留着必然后续编译炸，不如现在点名）。
+    let cargo_deps = cache_dir().join("target/mirvm");
+    if cargo_deps.exists() {
+        std::fs::remove_dir_all(&cargo_deps).map_err(|e| {
+            anyhow::anyhow!(
+                "sysroot 换代后 purge cargo 轨 dep 缓存 {} 失败（手工删除即可）: {e}",
+                cargo_deps.display()
+            )
+        })?;
+    }
+    // V1 旧 stamp（rustc-build-sysroot 时代）扫墓——新 stamp 在 sysroot 内，
+    // 旧文件无人再读
+    let _ = std::fs::remove_file(cache_dir().join(format!("sysroot-{target}.stamp")));
+    eprintln!("mirvm: sysroot 构建完成: {}", sysroot_dir.display());
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::stamp_value;
+    use super::*;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("mirvm-sysroot-test-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
 
     #[test]
-    fn stamp_tracks_rustc_stat_and_builder_hash() {
-        let dir = std::env::temp_dir().join(format!("mirvm-sysroot-stamp-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let rustc = dir.join("rustc");
-        let hash = dir.join("hash");
+    fn stamp_file_lives_inside_sysroot_lib() {
+        let f = stamp_file(Path::new("/x/sysroot-x86_64-unknown-linux-gnu"));
+        assert_eq!(
+            f,
+            Path::new(
+                "/x/sysroot-x86_64-unknown-linux-gnu/lib/rustlib/\
+                 x86_64-unknown-linux-gnu/.mirvm-sysroot-hash"
+            )
+        );
+    }
 
-        // 构件缺失 → None（全仪式）
-        assert_eq!(stamp_value(&rustc, &hash), None);
-        std::fs::write(&rustc, b"fake-rustc").unwrap();
-        assert_eq!(stamp_value(&rustc, &hash), None);
+    #[test]
+    fn pseudo_root_reparses_and_lock_gains_root_row() {
+        let tmp = tmpdir("pseudo-root");
+        let library = tmp.join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        std::fs::write(
+            library.join("Cargo.lock"),
+            "# This file is automatically @generated by Cargo.\n\
+             # It is not intended for manual editing.\nversion = 4\n\n\
+             [[package]]\nname = \"std\"\nversion = \"0.0.0\"\n\n\
+             [[package]]\nname = \"test\"\nversion = \"0.0.0\"\n\
+             dependencies = [\n \"std\",\n]\n",
+        )
+        .unwrap();
+        let root = tmp.join("root");
+        materialize_pseudo_root(&library, &root).unwrap();
 
-        std::fs::write(&hash, "12345\n").unwrap();
-        let s0 = stamp_value(&rustc, &hash).expect("齐备即有值");
+        // 伪 manifest 可解析：三 path 边，std 带两 feature
+        let m = PackageManifest::read_dir(&root).unwrap();
+        assert_eq!(m.name, "mirvm-mir-sysroot");
+        assert_eq!(m.deps.len(), 3);
+        let std_dep = m.deps.iter().find(|d| d.package == "std").unwrap();
+        assert_eq!(std_dep.features, vec!["panic-unwind", "backtrace"]);
+        assert!(m.deps.iter().any(|d| d.package == "proc_macro"));
 
-        // builder hash 变（sysroot 重建/换代）→ stamp 变
-        std::fs::write(&hash, "67890\n").unwrap();
-        let s1 = stamp_value(&rustc, &hash).unwrap();
-        assert_ne!(s0, s1);
-        std::fs::write(&hash, "12345\n").unwrap();
+        // 增广 lock 可解析：原行保留 + 伪根行（lock 模式从根行走图的前提）
+        let lf = crate::cargoless::lockfile::Lockfile::read(&root.join("Cargo.lock")).unwrap();
+        let root_pkg = lf
+            .packages
+            .iter()
+            .find(|p| p.name == "mirvm-mir-sysroot")
+            .expect("伪根包行必须在");
+        assert_eq!(root_pkg.version.to_string(), "0.0.0");
+        assert_eq!(root_pkg.dependencies.len(), 3);
+        assert_eq!(lf.find("std").len(), 1);
+        assert_eq!(lf.find("test").len(), 1);
 
-        // rustc 二进制内容长度变 → stamp 变
-        std::fs::write(&rustc, b"fake-rustc-v2").unwrap();
-        assert_ne!(stamp_value(&rustc, &hash).unwrap(), s0);
-
-        // 同长但 mtime 后移（原地换版本）→ stamp 变
-        std::fs::write(&rustc, b"fake-rustc").unwrap();
-        let s2 = stamp_value(&rustc, &hash).unwrap();
-        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(7);
-        std::fs::File::options()
-            .write(true)
-            .open(&rustc)
+        // write-if-changed：二跑内容同 → mtime 不动
+        let first = std::fs::metadata(root.join("Cargo.toml"))
             .unwrap()
-            .set_modified(later)
+            .modified()
             .unwrap();
-        assert_ne!(stamp_value(&rustc, &hash).unwrap(), s2);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        materialize_pseudo_root(&library, &root).unwrap();
+        let second = std::fs::metadata(root.join("Cargo.toml"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(first, second);
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn stamp_value_tracks_recipe_and_tree() {
+        // 本仓 toolchain 带 rust-src（开发前置），stamp 必有值且含配方行
+        let v = stamp_value().expect("rust-src 在场必有 stamp");
+        // 内容键不含 MIRVM_BUILD_ID（mirvm 换版不重建 sysroot——换代轴 =
+        // rustc/rust-src/配方；见 stamp_value 头注）
+        assert!(!v.starts_with(env!("MIRVM_BUILD_ID")));
+        assert!(v.contains("da0 oc1 opt0"));
+        assert!(v.contains("-Zforce-unstable-if-unmarked"));
+        // 同源同树 ⇒ 确定性
+        assert_eq!(stamp_value().unwrap(), v);
     }
 }

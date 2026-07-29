@@ -1,5 +1,9 @@
 # mirvm
 
+mirvm 目标：
+1. 提升 Rust 项目开发效率和进度，快速迭代，减少浪费在等待编译和测试的时间。
+2. 一个方便快捷的 cargo script 脚本执行器。
+
 mirvm 是一个以 rustc 为前端、自建执行引擎的 Rust 抽象机器运行实现。它复用 rustc 完成解析、
 宏、类型检查、trait 求解和 MIR 生成，在加载相把可达程序降低为 tcx-free typed bytecode，随后由
 自己的运行时执行；执行引擎 = tree-walking 解释器 + 方法级 Cranelift JIT（M5.0–M5.5 全收，

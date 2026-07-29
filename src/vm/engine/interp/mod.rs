@@ -426,10 +426,11 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
         let fail_abort = |ctx: *mut Ctx| -> ! {
             let shared = unsafe { &*(*ctx).shared };
             engine_abort(&format!(
-                "JIT strict：f{func}（{}）可准入但编译失败",
+                "JIT strict: f{func}({}) meets compilation threshold but failed to be compiled",
                 shared.module.funcs[func as usize].name
             ))
         };
+        // If there's compiled code, then call it
         let mut entry = jit.slots[func as usize].load(std::sync::atomic::Ordering::Acquire);
         if entry == crate::vm::engine::jit::FAIL_SENTINEL && jit.sync {
             fail_abort(ctx);
@@ -437,8 +438,12 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
         if entry != 0 && entry != crate::vm::engine::jit::FAIL_SENTINEL {
             return call_compiled(entry);
         }
+
+        // If function not compiled yet, collect statistics, may send compilation request
+        // and interpret it for now.
         let prev = jit.counters[func as usize].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // 恰好跨阈值的那一次投递（exactly-once；后续计数继续增长但不重复投递）
+        // Meets compilation threshold and only send compilation request exactly once.
+        // Counter keeps growing later but compilation request would not be send multiple times.
         if prev + 1 == jit.threshold
             && let Some(q) = jit.queue.lock().unwrap().as_ref()
         {
@@ -459,7 +464,9 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
                 }
                 spins += 1;
                 if spins >= 1 << 28 {
-                    engine_abort("JIT strict 发布超时（编译线程死亡或队列断裂）");
+                    engine_abort(
+                        "JIT strict release timeout (compiler thread dead or queue broken)",
+                    );
                 }
                 std::thread::yield_now();
             }
@@ -471,7 +478,7 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
 /// C1：FnId 的返回通道（thunk 分流——Indirect sret 直传 vs 小档重打包的判定源）。
 pub fn run_main(shared: &'static Shared) -> i32 {
     let Some(entry) = shared.module.entry else {
-        eprintln!("mirvm[m4-engine]: 无 main 入口（lib crate？）");
+        eprintln!("mirvm[m4-engine]: no `main` entry (lib crate?)");
         return 2;
     };
     let ctx_ptr = super::ctx::attach(shared); // 主线程与 guest 线程同一 attach 形态
@@ -503,7 +510,9 @@ pub fn run_export(shared: &'static Shared, name: &str, args: &[u64]) -> Result<u
         let mut names: Vec<&str> = shared.module.exports.keys().map(|k| &**k).collect();
         names.sort();
         names.retain(|n| !n.starts_with("_ZN") && !n.starts_with("_R"));
-        return Err(format!("导出函数 `{name}` 不存在；可用: {names:?}"));
+        return Err(format!(
+            "export `{name}` doesn't exist, available: {names:?}"
+        ));
     };
     let ctx_ptr = super::ctx::attach(shared);
     super::ctx::set_fork_baseline(); // D8f
@@ -511,7 +520,7 @@ pub fn run_export(shared: &'static Shared, name: &str, args: &[u64]) -> Result<u
         Ok(r) => Ok(r),
         Err(e) => match e.downcast::<GuestPanic>() {
             Ok(_) => {
-                eprintln!("mirvm[m4-engine]: guest panic 未被捕获（== native 退出码 101）");
+                eprintln!("mirvm[m4-engine]: guest panic not caught (report native exit code 101)");
                 exit(101)
             }
             Err(host) => panic::resume_unwind(host), // VM bug 绝不吞

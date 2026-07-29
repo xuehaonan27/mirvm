@@ -15,6 +15,9 @@ use std::sync::atomic::{AtomicU32, AtomicU64};
 /// 维持解释的正常值域；非 strict 模式绝不写入）。
 pub const FAIL_SENTINEL: u64 = u64::MAX;
 
+/// TODO: multiple guest threads may access to this structure, optimize
+/// access to this structure, e.g. take care of cache locality, or should
+/// it be made volatile.
 pub struct JitState {
     /// PLT 槽（interp i2c 面）：FuncId → packed 入口机器地址（0 = 未编译，走解释）。
     pub slots: Vec<AtomicU64>,

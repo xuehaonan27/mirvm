@@ -53,7 +53,7 @@ fn worker(shared: &'static Shared, rx: Receiver<u32>) {
     while let Ok(func) = rx.recv() {
         if dbg {
             eprintln!(
-                "mirvm-jit-debug: 收到 f{func}（{}）",
+                "mirvm-jit-debug: received compilation request for f{func} ({})",
                 shared.module.funcs[func as usize].name
             );
         }
@@ -65,11 +65,11 @@ fn worker(shared: &'static Shared, rx: Receiver<u32>) {
                 let addr = shared.jit.slots[func as usize].load(Ordering::Acquire);
                 let fast = shared.jit.slots_fast[func as usize].load(Ordering::Acquire);
                 eprintln!(
-                    "mirvm-jit-debug: f{func} 发布={ok} @{addr:#x} fast@{fast:#x}（{}）",
+                    "mirvm-jit-debug: f{func} release={ok} @{addr:#x} fast@{fast:#x}({})",
                     shared.module.funcs[func as usize].name
                 );
             } else {
-                eprintln!("mirvm-jit-debug: f{func} 发布={ok}");
+                eprintln!("mirvm-jit-debug: f{func} release={ok}");
             }
         }
     }
@@ -397,6 +397,7 @@ impl Compiler {
         // 静默失败纪律（m5.3-design D4 / 防静默错值：编译失败 = 维持解释，绝不向
         // stderr 吐 panic——差分 oracle 的 stderr 逐字节比对会被线程 id 污染，实测抓获）；
         // MIRVM_JIT_SYNC 验证模式例外：可准入失败 = FAIL 哨兵响亮记（audit F-05）
+        // TODO: 加入 log 系统之后应该向 log 系统输出错误
         let Some(fast_id) = self.define_fast(func, body, abi) else {
             self.strict_fail(func);
             return;
@@ -425,7 +426,7 @@ impl Compiler {
         let jit = &self.shared.jit;
         if jit.sync {
             eprintln!(
-                "mirvm-jit-strict: f{func}（{}）可准入但编译失败",
+                "mirvm-jit-strict: f{func} ({}) meets compilation threshold but failed to be compiled",
                 self.shared.module.funcs[func as usize].name
             );
             jit.slots[func as usize].store(FAIL_SENTINEL, Ordering::Release);
@@ -484,7 +485,7 @@ impl Compiler {
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
             if std::env::var_os("MIRVM_JIT_DEBUG").is_some() {
-                eprintln!("mirvm-jit-debug: define_function 失败: {e:#?}");
+                eprintln!("mirvm-jit-debug: define_function failed: {e:#?}");
             }
             return None;
         }
@@ -657,7 +658,7 @@ impl Compiler {
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
             if std::env::var_os("MIRVM_JIT_DEBUG").is_some() {
-                eprintln!("mirvm-jit-debug: define_function 失败: {e:#?}");
+                eprintln!("mirvm-jit-debug: define_function failed: {e:#?}");
             }
             return None;
         }

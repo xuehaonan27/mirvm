@@ -138,17 +138,10 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
         },
     };
 
-    // 4. 指纹 + 依赖图，unit 级 Kahn 就绪队列并行调度（D15 P3 切⑤c）：
-    // unit 的全部依赖「完成」（build.rs 生命周期 + host/target 编译按集合
-    // 归属全结束）即就绪；N 个 worker 各把领到的 unit 的完整流水线
-    // （build.rs 判定/执行 → 编译）跑完，完成表只在主线程汇集。
+    // 4. 指纹 + 编译段（compile_plan 抽取件，D15 P4 切⑥a——drive 与
+    // sysroot 自管构建共用同一流水线；本段的 stamp/sysroot/rustflags 三
+    // 输入在 drive 侧的来源注释见下行各段）
     let layout = Layout::new();
-    for d in [&layout.deps, &layout.host_deps, &layout.build_root] {
-        if let Err(e) = std::fs::create_dir_all(d) {
-            eprintln!("mirvm: 创建 {} 失败: {e}", d.display());
-            std::process::exit(1);
-        }
-    }
     // sysroot stamp 进指纹（sysroot 换代 ⇒ 全量重编）；ensure 之后必有值，
     // 缺值回退字面量不致命（后果只是 fp 粗一档，不引入新错误路径）
     let stamp = crate::sysroot::current_stamp_value()
@@ -163,81 +156,28 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
             std::process::exit(1);
         }
     };
-    let fps = match schedule::fingerprints(&plan, &manifest.profile, &stamp, &rustflags) {
-        Ok(f) => f,
+    let compiled = match compile_plan(
+        &plan,
+        &layout,
+        &manifest.profile,
+        &rustflags,
+        &sysroot,
+        &stamp,
+        manifest.has_build_script,
+    ) {
+        Ok(t) => t,
+        // 第一枚编译错误（worker 回传原文）——与串行同形响亮点名后退出
         Err(e) => {
-            eprintln!("mirvm: 依赖指纹计算失败: {e}");
+            eprintln!("mirvm: {e}");
             std::process::exit(1);
         }
     };
-    let host_set = schedule::host_closure(&plan);
-    let target_set = schedule::target_units(&plan);
-    let build_set = schedule::build_closure(&plan, manifest.has_build_script);
+    let UnitTables { outputs, re_ran } = compiled.tables;
+    let fps = compiled.fps;
+
+    // 5b 起根 lib/bin 会话还需自家 exe（__cless-dep 通道）；unit 编译段的
+    // self_exe 在 compile_plan 内部，这里单取
     let self_exe = std::env::current_exe().expect("current_exe 失败");
-    let jobs = cless_jobs();
-    let (dependents, mut indeg) = schedule::dep_graph(&plan);
-    // worker 共享的只读上下文（thread::scope 借用，调度期全程不可变——完成
-    // 表不跨线程，无锁必要）。线程安全核对（切⑤c 设计钉）：
-    // - driver 进程内**没有** rustc 会话——编译全在 __cless-dep/真 rustc
-    //   子进程，worker 间无编译器全局状态；
-    // - env 写入全在 Command 实例上（per-child，线程安全）；worker 内禁止
-    //   std::env::set_var（全 crate 核对：set_var 只在 bin 阶段 = 汇合后
-    //   主线程；build script 的 env 全走 Command.envs）。std::env::var
-    //   读取（rerun 门 env_get、build_script_env 的 CARGO_HOME 等）与
-    //   set_var 不并发，安全；
-    // - 目录创建 create_dir_all 幂等；产物内容寻址（fp 盖戳），不同 unit
-    //   不同 stem 无两名冲突；同 fp 重复 unit（同包同版本同 feature 的
-    //   Normal/Build 双 unit——fp 不含 class 会撞名）由 FpLocks 把整个
-    //   流水线互斥：后到者开工时产物已齐、rerun 门读存档跳过，与串行
-    //   「先行者跑、后到者全跳过」逐字节同效；
-    // - MIRVM_DEBUG_BLDRS 观测行与子进程诊断在 jobs>1 时允许交错（debug
-    //   旋钮；对拍轴 = jobs=1 与串行同序 + 默认 N 的 corpus 判官——
-    //   program 输出在汇合后的 bin 会话，天然串行）。
-    let ctx = SharedCtx {
-        plan: &plan,
-        profile: &manifest.profile,
-        fps: &fps,
-        layout: &layout,
-        sysroot: &sysroot,
-        rustflags: &rustflags,
-        self_exe: &self_exe,
-        host_set: &host_set,
-        target_set: &target_set,
-        build_set: &build_set,
-        fp_locks: FpLocks::default(),
-    };
-    let tables = if plan.units.is_empty() {
-        UnitTables::default()
-    } else {
-        match schedule::run_scheduler(
-            UnitTables::default(),
-            &dependents,
-            &mut indeg,
-            jobs.min(plan.units.len()),
-            |t: &UnitTables, ix| build_work_msg(&ctx, t, ix),
-            |msg| run_unit_pipeline(msg, &ctx),
-            |t, ix, done| {
-                if let Some(bo) = done.bo {
-                    t.outputs.insert(ix, bo);
-                }
-                if done.ran {
-                    t.re_ran.insert(ix);
-                }
-            },
-        ) {
-            Ok(t) => t,
-            // 第一枚编译错误（worker 回传原文）——与串行同形响亮点名后退出
-            Err(e) => {
-                eprintln!("mirvm: {e}");
-                std::process::exit(1);
-            }
-        }
-    };
-    // unit 下标 → 已执行的 BuildOutput（本 unit 编译修正 + 依赖者 -L 汇集 +
-    // 直接依赖者 build script 的 DEP_* 三处消费）；re_ran = 本次会话真正
-    // 重跑了 build.rs 的 unit（切⑤b 条件 4 links 传递：直接依赖中带 links
-    // 的包在 re_ran ⇒ 本包也重跑，DEP_* 输入可能变）
-    let UnitTables { outputs, re_ran } = tables;
 
     // 5. 根包 build.rs 同生命周期（根不是 unit：边表取 plan.root_deps，
     // fp 单算；OUT_DIR/rustc-env/cfg 修正进 bin 会话）
@@ -401,6 +341,103 @@ fn drive(manifest: &PackageManifest, program_args: &[String]) -> ExitCode {
     crate::cli::run_driver(args, program_argv, false, None, false, true)
 }
 
+/// compile_plan 的返回件：完成表 + unit 指纹表（drive 的根包阶段还要拿
+/// fps 算根指纹——root_fingerprint 的 dep fp 成分；sysroot 构建不消费）。
+pub struct CompiledPlan {
+    pub tables: UnitTables,
+    pub fps: Vec<String>,
+}
+
+/// unit 编译段（drive 原第 4 段，D15 P4 切⑥a 抽成共用件）：指纹 +
+/// host/target/build 集合 + unit 级 Kahn 就绪队列并行调度（run_scheduler）
+/// 跑完全部 unit 流水线。drive 与 sysroot 自管构建共用：
+///
+/// - drive 传 MIR sysroot 与其 stamp（本跑编译的消费底座）；
+/// - sysroot 构建传 **toolchain sysroot** 与其盖戳——产出物不能当自己的
+///   编译输入（编译 std 的 --sysroot 只能是发行版工具链，鸡生蛋）。
+///
+/// 失败 = 第一枚编译错误原文（调用方补「mirvm: 」前缀响亮退出，
+/// 与抽取前逐字节同形）。
+#[allow(clippy::too_many_arguments)]
+pub fn compile_plan(
+    plan: &ResolvePlan,
+    layout: &Layout,
+    profile: &super::manifest::ProfileFlags,
+    rustflags: &[String],
+    sysroot: &Path,
+    stamp: &str,
+    root_has_build_script: bool,
+) -> Result<CompiledPlan, String> {
+    // unit 级 Kahn 就绪队列并行调度（D15 P3 切⑤c）：unit 的全部依赖
+    // 「完成」（build.rs 生命周期 + host/target 编译按集合归属全结束）
+    // 即就绪；N 个 worker 各把领到的 unit 的完整流水线（build.rs 判定/
+    // 执行 → 编译）跑完，完成表只在主线程汇集。
+    for d in [&layout.deps, &layout.host_deps, &layout.build_root] {
+        std::fs::create_dir_all(d).map_err(|e| format!("创建 {} 失败: {e}", d.display()))?;
+    }
+    let fps = schedule::fingerprints(plan, profile, stamp, rustflags)
+        .map_err(|e| format!("依赖指纹计算失败: {e}"))?;
+    let host_set = schedule::host_closure(plan);
+    let target_set = schedule::target_units(plan);
+    let build_set = schedule::build_closure(plan, root_has_build_script);
+    let self_exe = std::env::current_exe().expect("current_exe 失败");
+    let jobs = cless_jobs();
+    let (dependents, mut indeg) = schedule::dep_graph(plan);
+    // worker 共享的只读上下文（thread::scope 借用，调度期全程不可变——完成
+    // 表不跨线程，无锁必要）。线程安全核对（切⑤c 设计钉）：
+    // - driver 进程内**没有** rustc 会话——编译全在 __cless-dep/真 rustc
+    //   子进程，worker 间无编译器全局状态；
+    // - env 写入全在 Command 实例上（per-child，线程安全）；worker 内禁止
+    //   std::env::set_var（全 crate 核对：set_var 只在 bin 阶段 = 汇合后
+    //   主线程；build script 的 env 全走 Command.envs）。std::env::var
+    //   读取（rerun 门 env_get、build_script_env 的 CARGO_HOME 等）与
+    //   set_var 不并发，安全；
+    // - 目录创建 create_dir_all 幂等；产物内容寻址（fp 盖戳），不同 unit
+    //   不同 stem 无两名冲突；同 fp 重复 unit（同包同版本同 feature 的
+    //   Normal/Build 双 unit——fp 不含 class 会撞名）由 FpLocks 把整个
+    //   流水线互斥：后到者开工时产物已齐、rerun 门读存档跳过，与串行
+    //   「先行者跑、后到者全跳过」逐字节同效；
+    // - MIRVM_DEBUG_BLDRS 观测行与子进程诊断在 jobs>1 时允许交错（debug
+    //   旋钮；对拍轴 = jobs=1 与串行同序 + 默认 N 的 corpus 判官——
+    //   program 输出在汇合后的 bin 会话，天然串行）。
+    let ctx = SharedCtx {
+        plan,
+        profile,
+        fps: &fps,
+        layout,
+        sysroot,
+        rustflags,
+        self_exe: &self_exe,
+        host_set: &host_set,
+        target_set: &target_set,
+        build_set: &build_set,
+        fp_locks: FpLocks::default(),
+    };
+    if plan.units.is_empty() {
+        return Ok(CompiledPlan {
+            tables: UnitTables::default(),
+            fps,
+        });
+    }
+    let tables = schedule::run_scheduler(
+        UnitTables::default(),
+        &dependents,
+        &mut indeg,
+        jobs.min(plan.units.len()),
+        |t: &UnitTables, ix| build_work_msg(&ctx, t, ix),
+        |msg| run_unit_pipeline(msg, &ctx),
+        |t, ix, done| {
+            if let Some(bo) = done.bo {
+                t.outputs.insert(ix, bo);
+            }
+            if done.ran {
+                t.re_ran.insert(ix);
+            }
+        },
+    )?;
+    Ok(CompiledPlan { tables, fps })
+}
+
 /// 并发度（切⑤c）：MIRVM_CLESS_JOBS 覆盖，缺省 available_parallelism
 /// （拿不到回退 1）。**=1 时派发序与旧串行 topo 序逐位一致——对拍调试锚，
 /// 钉**。非法值（非正整数）响亮拒绝退出。
@@ -457,13 +494,16 @@ impl FpLocks {
 /// 完成表（只归主线程所有：worker 开工所需的依赖侧输入——DEP_* env、
 /// 传递 -L 汇集、links 重跑名单——由主线程在**派发时**从此表算好随
 /// WorkMsg 带走；此刻全部依赖必已完成，取值与串行版在 unit 开头算的
-/// 逐位相等）。
+/// 逐位相等）。compile_plan 的返回件（D15 P4 切⑥a 起 pub——drive 的
+/// 根包阶段消费；sysroot 构建取 Ok 即罢不读字段）。
 #[derive(Default)]
-struct UnitTables {
-    /// unit 下标 → 已执行的 BuildOutput。
-    outputs: BTreeMap<usize, BuildOutput>,
-    /// 本次会话真正重跑了 build.rs 的 unit。
-    re_ran: BTreeSet<usize>,
+pub struct UnitTables {
+    /// unit 下标 → 已执行的 BuildOutput（本 unit 编译修正 + 依赖者 -L
+    /// 汇集 + 直接依赖者 build script 的 DEP_* 三处消费）。
+    pub outputs: BTreeMap<usize, BuildOutput>,
+    /// 本次会话真正重跑了 build.rs 的 unit（切⑤b 条件 4 links 传递：
+    /// 直接依赖中带 links 的包在 re_ran ⇒ 依赖者也重跑，DEP_* 输入可能变）。
+    pub re_ran: BTreeSet<usize>,
 }
 
 /// 一个 unit 的开工令（主线程派发时算好全部依赖侧输入，见 UnitTables 注；

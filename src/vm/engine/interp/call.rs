@@ -200,7 +200,7 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
         + body.caller_loc_off.is_some() as usize;
     if args.len() < needed {
         engine_abort(&format!(
-            "ABI 不匹配：fn `{}` 期望 {needed} 实参槽（params {:?} ret {:?} loc {:?}），收到 {}",
+            "ABI mismatch: fn `{}` expects {needed} arguments (params {:?} ret {:?} loc {:?}) but receives {}",
             body.name,
             body.params,
             body.ret,
@@ -251,7 +251,7 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
     if let Some(off) = body.caller_loc_off {
         let Some(&loc) = args.get(ai) else {
             engine_abort(&format!(
-                "ABI 不匹配：track_caller fn `{}` 期望 location 尾实参（收到 {} 槽）",
+                "ABI mismatch: track_caller fn `{}` expects location 尾实参（收到 {} 槽）",
                 body.name,
                 args.len()
             ));
