@@ -54,11 +54,12 @@ ENV:
     MIRVM_JIT_STATS   =1 时进程退出经 atexit 打 JIT 助手频度统计（诊断用）
     MIRVM_CARGO_LOCKED 置位时 frontmatter/脚本项目按 --locked 构建（依赖锁定；
                       未置位 = clean 环境可重解析，见 open-issues G7）
-    MIRVM_DEPS        =self 时项目/脚本走零 cargo 自有调度（D15 cargoless
-                      driver：依赖解析/编译调度/build.rs/proc-macro/rustflags/
-                      rerun-if 增量/并行调度全生命周期，P3 已收；剩余拒绝面 =
-                      P5 边界：git 源/alt registry/workspace 多包图等，响亮
-                      拒绝点名）；缺省/=cargo 走 cargo 三阶段（默认翻转归 P4）
+    MIRVM_DEPS        =cargo 时项目/脚本走 cargo 三阶段 compat 轨（双轨各自
+                      完整，删除条件另行评审）；**缺省/=self 走零 cargo 自有
+                      调度**（D15 cargoless driver，P4 默认翻转：依赖解析/编译
+                      调度/build.rs/proc-macro/rustflags/rerun-if 增量/并行调度
+                      全生命周期；剩余拒绝面 = P5 边界：git 源/alt registry/
+                      workspace 多包图等，响亮拒绝点名）
     MIRVM_CLESS_JOBS  =N 时 cargoless 编译调度并发度（缺省 = 核数；=1 退化为
                       拓扑序串行，对拍调试用）
     MIRVM_TIMING      =1 时向 stderr 输出相位账本（frontend/lower/engine/total）
@@ -442,12 +443,12 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     };
     let input_path = PathBuf::from(&input);
 
-    // D15（设计档 §5，P3 已收）：MIRVM_DEPS=self 走零 cargo 自有调度
-    // （cargoless::driver）；缺省/=cargo 走 cargo 三阶段旧路径；其他值响亮
-    // 报错——双轨并存期的显式开关（默认翻转归 P4）
+    // D15 P4 默认翻转：缺省 = self 零 cargo 自有调度（cargoless::driver）；
+    // =cargo 显式走 cargo 三阶段 compat 轨（双轨各自完整，删除条件另行评审，
+    // 设计档 §5 P4）；其他值响亮报错
     let deps_self = match std::env::var("MIRVM_DEPS").as_deref() {
-        Err(_) | Ok("cargo") => false,
-        Ok("self") => true,
+        Err(_) | Ok("self") => true,
+        Ok("cargo") => false,
         Ok(other) => {
             eprintln!("mirvm: MIRVM_DEPS only accepts `cargo` or `self` (got `{other}`)");
             exit(2);

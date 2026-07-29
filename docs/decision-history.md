@@ -1550,6 +1550,44 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   的 mirvm_log 重构卡住——与 D15 无关，重构收尾后回启复验）。
   P4（sysroot 自管 + 默认翻转）待施。
 
+### 7.31 2026-07-29：D15 P4 收口——sysroot 自管与默认翻转，cargo 退场为 compat
+
+- **切⑥a sysroot 自管（`5c2e9bf`）**：MIR sysroot 构建从
+  rustc-build-sysroot 驱动 cargo 换成 cargoless 自有调度——
+  `cargoless/vendor.rs`（VendorDir 通用 vendored-dir PkgSource：
+  `vendor/<name>-<ver>` 扫描合成 + overrides 精确映射，未来 P5
+  source replacement 复用）+ 伪根（std/test/proc_macro 三 path 边，
+  std 带 panic-unwind/backtrace）+ `library/Cargo.lock` 增广 lock
+  模式 + compile_plan 复用（driver 纯抽取，行为零变）+ tmp 目录原子
+  发布 + cargo 轨 dep 缓存换代连坐 purge（防 E0463 混代）+ 内容键
+  不含 BUILD_ID（防重编乒乓）+ 顶层哨兵盖戳（保 fib 硬门）。
+  **意外 crates.io 依赖根除**：sysroot .d 引用 `~/.cargo` 数 = 0
+  （全指 rust-src library/ + vendor/）。冷建 **27.2s**（旧 cargo 构建
+  数分钟；metadata-only 无对象码——双轨 gate 全消费面实证无炸），
+  25 crate 集与旧构建对齐（custom_local_sysroot/sysroot 两枚伪壳
+  消失属预期），PATH strip 零 cargo 实证。
+- **切⑥b `--bin` 多目标选择（`271425b`）**：cargo run --bin 语义
+  （按名精确选，错名响亮列可选名单；多 bin 无 default-run 的拒绝
+  去 P5 化——--bin 已可解）；compat 轨 --bin 直通 cargo run；
+  脚本/单文件/包形态响亮拒绝（cargo script 同无此概念）。
+- **切⑥c 默认翻转**：`MIRVM_DEPS` 缺省 = self（零 cargo 自有调度），
+  `=cargo` 显式 compat。USAGE/gate 头注同步。
+- **compat 评审（设计档 §5 P4 定案）**：compat 不是救援是双轨——
+  两条路径各自完整（cargo 三阶段 vs cargoless driver），gate 双轨
+  保留（默认 gate = self 轨 corpus ① + diff_cargo 恒 cargo 轨冒烟；
+  `MIRVM_DEPS=cargo bash tests/gate.sh` = compat 全量）。**删除条件
+  另行评审**：compat 的剩余独占价值 = ①cargo 行为差异的对照 oracle
+  （P5 语义扩展期的对拍基准）②`mirvm pack`（mode B 打包仍走 runner
+  协议，翻 self 属后续评审）③`mirvm deps audit` 的验收链（设计上就
+  是 cargo 对拍工具）。任一条存续期间 compat 不删；删除评审在 P5
+  边界按需扩张完成后重启。
+- **P4 闭合验收**：sysroot 冷建 27.2s 零 cargo（PATH strip 实证）；
+  翻转后 `mirvm run` 默认路径全程零 cargo（脚本/项目手测）；
+  run.sh fast 与 corpus smoke（默认 self 轨）全绿；
+  `--bin` 三行为实证（diff_cless 7/7 含 binsel 双腿）。
+  **D15 战役至此主体收官**：P5 边界（git 源/alt registry/workspace
+  多包图/source replacement）按实需逐项立项。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT

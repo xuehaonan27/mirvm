@@ -15,9 +15,12 @@
 //!   buildrs rerun-if 精细增量（registry 源不可变一次跑）、
 //!   `schedule::run_scheduler`（Kahn 就绪队列并行调度）；full 层迁移与
 //!   双轨 gate 验收闭合（corpus_deps_pair full 138 pass 1 p5 0 fail）。
-//! - P4（待施）：sysroot 自管 + MIRVM_DEPS 默认翻 self + compat 评审 +
-//!   `--bin`/`--package` 多目标选择。剩余拒绝面 = P5 边界（git 源/
-//!   alt registry/workspace 多包图/source replacement，响亮拒绝点名）。
+//! - P4（已收）：`vendor`（vendored-dir PkgSource，sysroot 自管与未来的
+//!   source replacement 共用）+ sysroot 构建换 cargoless 调度（零 cargo
+//!   零 crates.io）+ `--bin` 多目标选择 + **MIRVM_DEPS 默认翻 self**
+//!   （=cargo 显式 compat，双轨各自完整）。剩余拒绝面 = P5 边界（git 源/
+//!   alt registry/workspace 多包图/source replacement，响亮拒绝点名，
+//!   按实需逐项立项）。
 
 pub mod audit;
 pub mod buildrs;
