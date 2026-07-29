@@ -1588,6 +1588,65 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   **D15 战役至此主体收官**：P5 边界（git 源/alt registry/workspace
   多包图/source replacement）按实需逐项立项。
 
+### 7.32 2026-07-29：冷启动/test/env-GC 方向裁定——懒降低维持否决、GC 取标记-清扫、日志收回自造
+
+- **背景**：用户提出四组方向——①冷启动性能（dev 循环：改一点 →
+  快速跑）：entry 先跑 + 按预测访问顺序并发 lower + guest 卡住时
+  抢占 lower 线程保存断点改降 on-demand 单元 + cache 写盘等重 IO
+  交专门 service 线程（兼任 log 落盘）；②cargo test / cargo login
+  支持；③包获取与运行分离 + uv 式环境 + cache 引用计数清理；
+  ④日志系统（[designs/mirvm_high_performance_log.md](designs/mirvm_high_performance_log.md)，
+  v1 施工在外）。逐条对照在案否决/杠杆后裁定如下。
+- **模式 A 懒降低维持否决（用户裁定，不复活 V3）**：「entry 先跑、
+  其余后台按需 lower」即 2026-07-15 J2 否决的懒降低 V3；dev 循环
+  不构成重启触发器——deps 字节码已由 S3′b image 缓存，编辑只重
+  lower 根 crate，lower 不是 dev 循环瓶颈。「按需/并发」改钉进 D3：
+  模式 B 包布局改 mmap 直读 + 逐函数惰性解码（无 tcx，合法），
+  入口段先映射先跑、后台线程按预测序（上次运行真实触发顺序落
+  cache）预取、demand 单插队队首——三件套在 D3 形态全部成立；
+  预测错只慢不错，正确性不依赖预测，明写。**「抢占保存断点」判
+  不可行且不需要**：Cranelift 无中断续跑接口；函数是编译的天然
+  最小单元，demand 插队的等待上界 = 一个在跑函数编译完成，数学上
+  等价于抢占延迟有界，无需断点机制。另记架构事实防再提抢占模型：
+  guest 永不卡住等编译——解释器是零等待地板，JIT 是后台计数触发
+  的升级层，未发布走解释。
+- **dev 循环真瓶颈排序（裁定按此排兵）**：①**JIT 码每进程重烧 =
+  最大单根杠杆** → D5/L3（禁令条件「M5.3–M5.5 定型前禁做」已随
+  M5.5 收官消失；D1 片③ MC 机器码节 + 进程内 ELF 装载器已证 JIT
+  产物可序列化再装载）；②字节码 postcard 整包解码 → D3 零拷贝；
+  ③rustc 前端重跑（改一行也要重取 MIR）→ D12 -Cincremental
+  （触发器「大用户 crate 编辑-重跑」在案）。
+- **冷启动战役（D16）立项**：profile 先行——MIRVM_TIMING 相位账本
+  现成 + dev 循环基准场景（corpus/projects 改一行重跑计时）+ 日志
+  设计 §7 三组基准顺带实测（该文档数字全系量级估算非实测，其 §6
+  自述）。后台服务线程 = cache write-behind + log 落盘**合一**
+  （单线程多优先级队列，防每种杂活各起一线程）。线程池不拍固定
+  配比：guest 优先、编译（JIT/解码/预取同池）吃剩余核；优先级
+  三级 demand > 预测序 > 闲时回填；具体比例是 profile 后的调参
+  产物，不是设计产物。
+- **mirvm test（D17）立项**：cfg(test) 重编本包 + libtest（sysroot
+  伪根本含 std/test/proc_macro，test crate 本地原料在）+ test 目标
+  调度 + harness argv 透传；**doctest 明说不做**（rustdoc 是另一个
+  前端，闭合成本单独评估）。cargo login = 只读复用
+  ~/.cargo/credentials.toml，并入 P5 alt registry 子项备案，不单独
+  立项；publish/login 不做进 mirvm（发布侧非运行侧）。
+- **env/GC（D18）**：uv 式环境 = 全局 store（D14 已有）+ 环境
+  （lock 物化的引用集，`~/.mirvm/envs/` 登记为根）。**GC 裁定
+  登记根 + 标记-清扫（用户裁定，否决裸引用计数）**：落盘计数崩溃
+  半截即永久不一致，是「大部分时候没问题」的脏设计；sweep = env
+  创建登记为根、purge 环境 = 摘根、从根集合可达性扫描回收不可达
+  ——崩溃安全、无计数一致性、语义一句话说清。缺包行为：默认自动
+  拉取（日志明示在拉什么），--offline/--locked 下响亮报错 + 提示
+  fetch 指令。
+- **D4 排序裁定**：对外格式冻结评审排在 D3 零拷贝布局评审之后，
+  否则冻结后必为布局改版。
+- **日志系统归属（用户裁定）**：收回自造，不再视同他人领地；v1
+  有问题即推翻重写。v1 在施已知两处红：stdout 臂误用不存在的
+  `std::io::println`；tsan crate 根缺 `mirvm_log` 宏（纯度门禁
+  SKIP_TSAN=1 绕行中，修复后摘钉复验并回改 §7.30/§7.31 记档）。
+  v2（ring + 消费者线程 + feature 闸门）归 D16 后台服务线程同
+  设计。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT
