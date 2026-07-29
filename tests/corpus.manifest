@@ -1,9 +1,14 @@
 # corpus.manifest —— corpus 唯一真源（tests/lib.sh::manifest_rows 解析）。
 # 列：name  tier(smoke|full|manual)  timeout秒  mode(exit|oracle:<名>|diff)
 #        [env=K=V;K=V] [needs=<路径>] [args=a;b;c] [xfail=<code>:<grep 模式>]
+#        [group=<组>[,<组>...]]
 #
 # tier：smoke = 日常快层（run.sh smoke）；full = gate 全量防线；
 #        manual = 只手工跑批（贴 timeout 或依赖机侧前缀，needs 缺席记 SKIP）。
+# group：分组过滤键（corpus.sh / corpus_deps_pair.sh 的 --group；可叠加 --tier
+#        取交集）。heavy = 实测墙钟最长的重负载子集（gate 最慢榜定编，~16 条）；
+#        无 group= 的条目属隐含 light 组。日常节奏：fast → smoke → 按需
+#        --group heavy，全量只在战役收尾（run.sh gate）。
 # mode：exit = 退出码判绿（driver 创建时已三维对拍，gate 内不再付 native 冷构建）；
 #       oracle:<名> = stdout 须逐字节等于 tests/fixtures/oracles/<名>.txt；
 #       diff = native cargo run 三维对拍（corpus/projects/<名>/ 真项目专用）：
@@ -57,7 +62,7 @@ p256                   full   90   exit
 syn_parse              smoke  90   exit            
 hickory                full   90   exit            
 unicode_tables         full   90   exit            
-wasmi                  smoke  90   exit            
+wasmi                  smoke  90   exit             group=heavy
 boa_js                 full   90   exit            
 tiny_skia              smoke  90   exit            
 zip_arch               full   90   exit            
@@ -121,7 +126,7 @@ logos_lex              full   90   exit
 chumsky_parse          full   90   exit            
 ndarray                full   90   exit            
 smartcore              full   90   exit            
-rune                   full   90   exit            
+rune                   full   90   exit             group=heavy
 koto                   full   90   exit            
 parquet2_rw            full   90   exit            
 syntect_fancy          full   90   exit            
@@ -131,7 +136,7 @@ oxc_parse              full   90   exit
 rsa_4096               full   400  exit            
 ed25519_default        full   90   exit            
 mimalloc               smoke  300  exit             env=CFLAGS=-DMI_PRIM_HAS_PROCESS_ATTACH
-libgit2                smoke  300  exit            
+libgit2                smoke  300  exit             group=heavy
 rustls_shake           full   90   exit            
 zstd_long              full   90   exit            
 aws_lc                 full   300  exit            
@@ -139,10 +144,10 @@ mlua_lua               smoke  180  exit
 tantivy                full   300  exit            
 sequoia_pgp            full   300  exit            
 sqlx_sqlite            full   90   exit            
-swc_parse              full   90   exit            
+swc_parse              full   90   exit             group=heavy
 miden_exec             full   180  exit            
 polodb                 full   90   exit            
-starlark_eval          full   300  exit            
+starlark_eval          full   300  exit             group=heavy
 zune_jpeg              full   90   exit            
 candle_mlp             full   180  exit            
 pest                   full   90   exit            
@@ -150,32 +155,32 @@ scraper_dom            full   90   exit
 arrow_rs               full   300  exit            
 fontdue                full   90   exit            
 unicode_rs             full   90   exit            
-rustpython_mini        full   300  exit            
+rustpython_mini        full   300  exit             group=heavy
 tree_sitter            smoke  90   exit            
 bzip2_csys             full   90   exit            
-wasmtime_wat           smoke  300  exit            
-risc0_run              full   300  exit            
-typst_pdf              full   300  exit            
-datafusion_sql         full   400  exit            
-miden_prove            full   400  exit            
-ethers_evm             full   90   exit            
-polars_lazy            full   180  exit            
+wasmtime_wat           smoke  300  exit             group=heavy
+risc0_run              full   300  exit             group=heavy
+typst_pdf              full   300  exit             group=heavy
+datafusion_sql         full   400  exit             group=heavy
+miden_prove            full   400  exit             group=heavy
+ethers_evm             full   90   exit             group=heavy
+polars_lazy            full   180  exit             group=heavy
 xlsxwriter_rw          full   180  exit            
 resvg_svg              full   180  exit            
 #
 # ---- 批6 起收编但旧名单漏接线的条目（2026-07-23 整顿实锤漂移）----
 comfy_table_render     full   90   exit            
 exr_image              full   180  exit            
-faer_lu                full   180  exit            
+faer_lu                full   180  exit             group=heavy
 fastfloat_ryu          full   90   exit            
 gluesql_db             full   180  exit            
 h3_hex                 full   90   exit            
 jiff_time              full   90   exit            
 nalgebra_la            full   90   exit            
 plotters_chart         full   90   exit            
-polars_frame           full   300  exit            
+polars_frame           full   300  exit             group=heavy
 stemmers_multi         full   90   exit            
-tokenizers_hf          full   180  exit            
+tokenizers_hf          full   180  exit             group=heavy
 whatlang_detect        full   90   exit            
 #
 # ---- 手工批条目（旧 corpus.sh 独有）----

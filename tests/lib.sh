@@ -38,8 +38,10 @@ print_section_report() {
 # 行格式（# 起注释，空白分隔）：
 #   name  tier(smoke|full|manual)  timeout秒  mode(exit|oracle:<名>|diff)
 #         [env=K=V;K=V] [needs=<路径>] [args=a;b;c] [xfail=<code>:<grep 模式>]
+#         [group=<组>[,<组>...]]（分组键，如 group=heavy；无 group= 的条目属
+#         隐含 light 组——corpus.sh/corpus_deps_pair.sh 的 --group 按它过滤）
 # 输出（管道分隔，域内无 |）：
-#   name|tier|tmo|mode|env|needs|args|xfail
+#   name|tier|tmo|mode|env|needs|args|xfail|groups
 # 用法：manifest_rows <tiers 逗号|all>            —— 按层过滤
 # 非法字段/非法枚举值 → stderr 报错并以非零退出（登记错误必须响亮）。
 manifest_rows() {
@@ -57,21 +59,32 @@ manifest_rows() {
             if (tmo !~ /^[0-9]+$/) {
                 printf "manifest: %s 非法 timeout %s\n", name, tmo > "/dev/stderr"; bad=1; next
             }
-            envv=""; needs=""; args=""; xfail=""
+            envv=""; needs=""; args=""; xfail=""; groups=""
             for (i = 5; i <= NF; i++) {
                 if ($i ~ /^env=/)       envv  = substr($i, 5)
                 else if ($i ~ /^needs=/) needs = substr($i, 7)
                 else if ($i ~ /^args=/)  args  = substr($i, 6)
                 else if ($i ~ /^xfail=/) xfail = substr($i, 7)
+                else if ($i ~ /^group=/) groups = substr($i, 7)
                 else {
                     printf "manifest: %s 未知字段 %s\n", name, $i > "/dev/stderr"; bad=1
                 }
             }
             if (tiers != "all" && index("," tiers ",", "," tier ",") == 0) next
-            printf "%s|%s|%s|%s|%s|%s|%s|%s\n", name, tier, tmo, mode, envv, needs, args, xfail
+            printf "%s|%s|%s|%s|%s|%s|%s|%s|%s\n", name, tier, tmo, mode, envv, needs, args, xfail, groups
         }
         END { exit bad }
     ' "$(dirname "${BASH_SOURCE[0]}")/corpus.manifest"
+}
+
+# manifest_group_rows <group> [tiers 逗号|all] —— 按组过滤（组键在输出第 9 列；
+# 无 group= 的条目只在 group=light 时命中）
+manifest_group_rows() {
+    local group="$1" tiers="${2:-all}"
+    manifest_rows "$tiers" | awk -F'|' -v g="$group" '
+        { inlist = ("," $9 ",") ~ ("," g ","); if (g == "light") inlist = ($9 == "") || inlist
+          if (inlist) print }
+    '
 }
 
 # manifest_lookup <name> —— 单条查询（手工跑批按名过滤用）；查无此行 → 非零

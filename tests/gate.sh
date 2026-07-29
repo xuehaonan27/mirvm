@@ -53,7 +53,7 @@ if [ -n "${CORPUS_PROGS:-}" ]; then
 else
     corpus_rows=$(manifest_rows "smoke,full") || exit 2
 fi
-while IFS='|' read -r name _tier tmo mode envv needs args xfail_spec; do
+while IFS='|' read -r name _tier tmo mode envv needs args xfail_spec _groups; do
     [ -n "$name" ] || continue
     argv=()
     [ -n "$args" ] && parse_args "$args" argv

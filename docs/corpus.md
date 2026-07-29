@@ -16,6 +16,8 @@ corpus = 一组**真实生态 crate 的最小驱动程序**（`corpus/c_*.rs`）
 代码对抽象机 / VM 边界提出的要求。**条目唯一真源 = `tests/corpus.manifest`**
 （tier/timeout/mode/env/needs 全在此；新增 driver 必须先登记）。跑法：
 `bash tests/corpus.sh`（全量三层）、`bash tests/corpus.sh --tier smoke`（按层）、
+`bash tests/corpus.sh --group heavy`（按组——heavy = 实测最慢 ~16 条重负载，
+无 group= 键的属 light；可与 --tier 叠加取交集）、
 `bash tests/corpus.sh <name>...`（按名子集）；release 二进制，stdout/stderr 落
 `/tmp/corpus-out/<name>.{out,err}`。三维差分纪律与验收食谱见 §5 头注与
 [agents/onboarding.md](agents/onboarding.md)；gate 内判绿三口径

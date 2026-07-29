@@ -3,7 +3,9 @@
 # 两腿（MIRVM_DEPS=cargo 三阶段旧路径 vs MIRVM_DEPS=self 零 cargo 自有调度），
 # stdout/stderr/exit 逐字节一致才判 PASS。
 #
-# 用法：bash tests/corpus_deps_pair.sh [--tier smoke|full|all] [name ...]
+# 用法：bash tests/corpus_deps_pair.sh [--tier smoke|full|all] [--group 组] [name ...]
+#   --group heavy 只跑 manifest group=heavy 的条目（light = 无 group= 键条目）；
+#   --tier 与 --group 可叠加（交集）；按名跑忽略组过滤
 # 环境同 corpus.sh（MIRVM / MIRVM_DISK_MIN_GB / MIRVM_TARGET_BUDGET_GB 等）。
 # 磁盘纪律：两腿各跑一遍 = 两遍开销；cache 清理口径与 corpus_run 相同
 # （deps/ir 每跑清，cargoless/cargo 两 target store 保留复用）。
@@ -16,11 +18,14 @@ CORPUS_TIMINGS_FILE=$(mktemp); export CORPUS_TIMINGS_FILE
 trap 'rm -f "$CORPUS_TIMINGS_FILE"' EXIT
 
 tier=smoke
+group=""
 names=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --tier) tier=$2; shift 2 ;;
         --tier=*) tier=${1#--tier=}; shift ;;
+        --group) group=$2; shift 2 ;;
+        --group=*) group=${1#--group=}; shift ;;
         *) names+=("$1"); shift ;;
     esac
 done
@@ -33,6 +38,9 @@ if [ ${#names[@]} -gt 0 ]; then
             manifest_lookup "$n" || { echo "corpus_deps_pair: $n 未登记" >&2; exit 2; }
         done
     ) || exit 2
+elif [ -n "$group" ]; then
+    rows=$(manifest_group_rows "$group" "$tier") || exit 2
+    [ -n "$rows" ] || { echo "corpus_deps_pair: 组 '$group'（tier=$tier）无条目" >&2; exit 64; }
 else
     rows=$(manifest_rows "$tier") || exit 2
 fi
@@ -47,7 +55,7 @@ else
 fi
 
 pass=0 fail=0 skip_count=0 p5_count=0
-while IFS='|' read -r name _tier tmo mode envv needs args _xfail; do
+while IFS='|' read -r name _tier tmo mode envv needs args _xfail _groups; do
     [ -n "$name" ] || continue
     argv=()
     [ -n "$args" ] && parse_args "$args" argv

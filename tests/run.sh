@@ -7,7 +7,8 @@
 #   smoke   战役批次级：fast + corpus smoke 层（tests/corpus.manifest）+ probes + runtime_gates
 #   gate    战役收尾级：静态/单元/gate_truth + tests/gate.sh 全量（其内部已含
 #           corpus 全防线 + diff 四态 + diff_cargo + perf + a2 + probes + runtime_gates）
-#   corpus  手工跑批：bash tests/run.sh corpus [--tier T|名字...]（转 tests/corpus.sh）
+#   corpus  手工跑批：bash tests/run.sh corpus [--tier T|--group G|名字...]（转 tests/corpus.sh；
+#           --group heavy = 实测最慢 ~16 条重负载子集，无 group= 键属 light）
 #   perf    性能与资源计量（tests/perf.sh）
 #
 # 环境：MIRVM（默认 target/release/mirvm，fast/smoke/gate 统一导出）；

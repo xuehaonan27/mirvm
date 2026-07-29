@@ -6,7 +6,9 @@
 # 用法：
 #   bash tests/corpus.sh                  # 全量（smoke+full+manual 三层）
 #   bash tests/corpus.sh --tier smoke     # 只跑某层（smoke|full|manual|all）
+#   bash tests/corpus.sh --group heavy    # 只跑某组（manifest group= 键；light = 无键条目）
 #   bash tests/corpus.sh tempfile walkdir # 按名跑子集（须在 manifest 登记）
+#   --tier 与 --group 可叠加（交集）；按名跑忽略组过滤
 # 环境：MIRVM（默认 target/release/mirvm）、OUT（默认 /tmp/corpus-out）、
 #   MIRVM_GATE_KEEP_CACHE=1（逐驱动清 cache 的调试旁路）、
 #   MIRVM_DISK_MIN_GB / MIRVM_TARGET_BUDGET_GB（磁盘护栏，见 tests/lib.sh）。
@@ -21,11 +23,14 @@ export CORPUS_TIMINGS_FILE
 trap 'rm -f "$CORPUS_TIMINGS_FILE"' EXIT
 
 tier=all
+group=""
 names=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --tier) tier=$2; shift 2 ;;
         --tier=*) tier=${1#--tier=}; shift ;;
+        --group) group=$2; shift 2 ;;
+        --group=*) group=${1#--group=}; shift ;;
         *) names+=("$1"); shift ;;
     esac
 done
@@ -38,12 +43,15 @@ if [ ${#names[@]} -gt 0 ]; then
             manifest_lookup "$n" || { echo "corpus.sh: $n 未在 tests/corpus.manifest 登记" >&2; exit 2; }
         done
     ) || exit 2
+elif [ -n "$group" ]; then
+    rows=$(manifest_group_rows "$group" "$tier") || exit 2
+    [ -n "$rows" ] || { echo "corpus.sh: 组 '$group'（tier=$tier）无条目" >&2; exit 64; }
 else
     rows=$(manifest_rows "$tier") || exit 2
 fi
 
 cache_snapshot "corpus 起跑前"
-while IFS='|' read -r name _tier tmo mode envv needs args _xfail; do
+while IFS='|' read -r name _tier tmo mode envv needs args _xfail _groups; do
     [ -n "$name" ] || continue
     argv=()
     [ -n "$args" ] && parse_args "$args" argv
