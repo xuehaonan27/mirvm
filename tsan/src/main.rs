@@ -6,6 +6,8 @@
 #![feature(f16)] // engine D8c：f16/f128 宿主直算（同源复用 src/vm 必须同 feature 集）
 #![feature(f128)]
 
+#[path = "../../src/utils/logs.rs"]
+mod logs; // os::process 的 mirvm_log! 同源依赖
 #[path = "../../src/os/mod.rs"]
 mod os; // P7 os 层（engine 触点经 crate::os:: 原语；同源复用门禁随之扩展）
 #[path = "../../src/arch/mod.rs"]

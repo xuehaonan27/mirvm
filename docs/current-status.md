@@ -1,8 +1,9 @@
 # mirvm 当前开发状态
 
-> 状态日期：2026-07-22（事实截至 HEAD `51cff03`+波3/波4 收尾；2026-07-22 外部审核
-> （[history/development-status-audit-2026-07-22.md](history/development-status-audit-2026-07-22.md)）
-> 驱动的稳定化战役已四波落地，decision-history §7.21）。本文是当前状态的唯一汇总入口；
+> 状态日期：2026-08-07（2026-07-22 外部审核
+> [history/development-status-audit-2026-07-22.md](history/development-status-audit-2026-07-22.md)
+> 之后的 D15 P1-P4 与本轮稳定化均已纳入，见 decision-history §7.21-§7.33）。
+> 本文是当前状态的唯一汇总入口；
 > 若与早期计划、README 或交接文档冲突，以当前代码、可复现测试结果和本文为准。文档权威
 > 规则见 [README.md](README.md)。
 > **未解决债务/开放问题/拒绝边界的唯一登记入口 = [open-issues.md](open-issues.md)**，
@@ -29,7 +30,8 @@
 | M5.4（翻译器全覆盖） | **a/b/c/d 全完成（2026-07-21 收口）** | a = 帧模型 v2 + 内存操作数；b = 标量全集 + 128 位族 + atomics（[m5-log.md](history/m5-log.md) M5.4a/b 节）；**c = ABI 泛化（CalleeAbi 全形态）+ 五调用助手 + unwind 产品化（try_call/Resume/Terminate + 双 CIE 全覆 LSDA，`83e168d`）；d = 准入放开——stmt/rvalue/terminator 三表穷尽**（SIMD 15 族 + Sat128 + rvalue 三件经统一助手调 interp 共享本体零漂移，`5252a89`/`5a1bcbe`）。伴生修出既有 bug 四件（call_foreign 签名、bitcast 旗、Bin128 旗标槽 SSA 误提升、frame mask/ptr 区间欠覆盖）。oracle：gate2 9/9、cargo test 76、diff 双态 45/45、diff_cargo 5/5、gate5 复绿（decision-history §7.19，T1/E1 闭合） |
 | M5.5（vmctx 终裁 + gate6 收口） | **完成（2026-07-21）= M5 战役全收** | 按原案收口（用户裁定不融合 E6）：`MIRVM_JIT_STATS=1` 十二桶助手频度统计（`05021d2`）+ 计量基线（fib 全空桶；rayon alloc=0；corpus 129/0 格③ 候选 alloc 7.82M/tls_ref 0.38M）+ vmctx-passing §7 落笔（**T 骨架生产定稿**——三表穷尽下编译码 ctx 站点仍零；**复测双触发器：E6 进场 或 多 Engine 嵌入立项**，先到先裁；T→R 单开关路径在案）+ `tests/m5_gate6.sh` 全绿（`aae9aec`）。T3 闭合（decision-history §7.20） |
 | C4（dep crate global_asm 物化） | **片①完成（2026-07-23）** | 定稿方向一次落地（decision-history §7.22/§7.23，`176ae20`）：dep 编译期自 HIR 抽取 global_asm/naked 落 rlib 旁挂文本清单，bin 加载相按 crate 图序经 assemble 通道物化装载——不绕行（无 env 名单/无救援链）。验收：c_faer_lu 复原 faer 默认特性，native/默认/SYNC 三维逐字节一致。伴生：JIT 帧 >16 对齐潜伏错值修复（cranelift 栈基 16 上限 + 槽内余量代码级抬基）、C6 补面六件。片② = mode B 机器码节（D1），dep `sym` 指向 guest fn 残余转 R16 |
-| mode B（`.mirvm` 包 + pack/run + MC 机器码节） | **片②③完成（2026-07-23）** | 片②（`254692c`，§7.24）：包格式 v0 五节 + `mirvm pack`（强制全量冷路径单模块自包含）+ `mirvm run x.mirvm`（零新执行路径），五负载逐字节一致。**片③（`1697c82`，§7.25）：MC 机器码节 + 进程内 ELF 装载器**（自解析/自重定位/eh_frame/符号表，系统链接器零依赖）——**真自包含酸试通过**（删 global-asm 缓存后 faer 包仍逐字节跑通）；运行期对自产码零 cc/ELF/.so/缓存依赖，dlopen 仅剩 FFI 真外国库。格式声明不定死（冻结归 D4）；余量 = fat artifact、C12、MC 预消化形态 |
+| mode B（`.mirvm` 包 + pack/run + MC 机器码节） | **已实现；2026-08-07 自包含纠偏** | v1 的 MC 只覆盖 global_asm，static archive 物化 `.so` 仍依赖原缓存路径，且源码戳/env 默认门控，不是真单文件分发。**格式 v2 已修正**：所有自产库字节进入 NATIVELIBS；MC 缺省时也会在新机器按内容哈希自动物化；STAMPS/env 只作来源记录。解析器对长度、数量、offset、重叠、重复 tag 与每节 hash 全做 checked 校验。关闭 MC、移走原缓存、换全新 MIRVM_HOME 的真实包仍逐字节运行。格式仍不定死（D3 后再做 D4 冻结） |
+| **2026-08-07 现状复核与稳定化** | **完成** | 修复 JIT 多帧 unwind：同一 FrameTable 的完整 `.eh_frame` 一次注册，旧逐 FDE 做法在两层 JIT 栈会使 panic 无法启动；五个 unwind probe 与两个产品差分用例复绿。TSan 独立 crate 补入日志宏同源依赖并实跑零竞争。`threads_sync` 在 SYNC+阈值1+热缓存下连续 100 次通过，未复现独立崩溃，未做猜测性修补。另定位 pinned LLVM 22 的 release 清理链误编译，固定 `debug=2` 参与代码生成并在链接后剥离调试段；成品仍约 14.4 MiB，默认与 SYNC+阈值1 差分均 45/45。产品能力缺口与建议顺序见 [product-capabilities-plan.md](designs/product-capabilities-plan.md) |
 | **测试管线整顿（2026-07-23，decision-history §7.26）** | **完成** | `tests/corpus.manifest` **唯一真源**（tier/timeout/mode/env/needs/xfail 六列；164 脚本驱动全接线 = 137 full + 24 smoke + 3 manual——**双名单漂移实锤：13 个批6 条目两边都没接线**）+ `tests/run.sh` 分层入口（fast 逢提交 / smoke 批次级 / gate 收尾级）+ 时间/空间/cache 三维计量与磁盘护栏（lib.sh disk_guard + target 预算闸）+ 代号名退役（m4_/m5_/m51_ → gate.sh/runtime_gates.sh/probes.sh/perf.sh）+ real_projects 重型 harness 挪 tests/parked/。**corpus/projects/ 真 cargo 项目形态**：hexyl 0.17.0 + tokei 14.0.0 vendor（.crate 全量解包 + sha256 钉），manifest `mode=diff` = mirvm warm 三维 == native 三维 + warm stdout == cold stdout；两机制实锤（cargo 回放缓存告警 → 双侧 `--cap-lints allow` 同帽；mirvm 项目模式 guest cwd=项目目录 → `{ROOT}` 占位绕行，产品侧对齐待裁定 = [open-issues.md E36](open-issues.md)）。验收：gate_truth 12/12、run.sh fast 7/7、gate.sh 排练 17/0/1/0、**gate.sh 全量 179/0/0/0**（jiff_time 钉版后复绿，corpus.md 批11） |
 | **D15 P1（砍 cargo 之解析地基，2026-07-27，decision-history §7.27/§7.28）** | **完成** | `src/cargoless/` 五件：manifest（Cargo.toml 模型 + cfg 平台求值 + frontmatter 伪包）/ lockfile（v1–v4 读写 + canonical v4）/ registry（自有 store + 读穿 cargo 缓存只读 + sparse index + .crate sha256 自实现校验 + 解包防护）/ resolve（lock/pubgrub 双模式 + feature 统一 + 单元装配）/ audit（`mirvm deps audit`：项目等值对账 + 脚本 cargo `--locked --offline` 验收链 + manifest needs/env 联动）。**cargo 解析语义全实证定稿**（resolve 图全平台并集 ∪ build 图 host 过滤、lazy-bucket 多版本 fork（hashbrown 0.14/0.15 类）、optional 门按（父包,父版本,依赖键）、?/ 弱引用级联（rust_decimal→borsh→bytes 实锤）、pre 精确规则、exact 钉兼容 build 元数据、lock canonical 尾逗号、同名多 req 条目分立、rename 双路匹配）；上游破洞六枚钉版（均验证 cargo 自家 fresh 同撞）。29 单测绿 + corpus 全量 audit 166 目标绿（wincode git 源 = P5 合法响亮拒绝）。P2/P3 已收（见下行）；rust-version-aware 偏好记边界 |
 | **D15 P2（砍 cargo 之编译调度，2026-07-27，decision-history §7.29）** | **完成** | cargoless 新增 schedule/buildrs/driver：`MIRVM_DEPS=self` 的 `mirvm run` 全程零 cargo——自排拓扑、自算每 crate rustc 参数（内容指纹含传递传播不变量）、proc-macro 闭包 ∪ build-deps 闭包真 rustc host 真 codegen（proc-macro 五钉/host rlib 形态全探针实锤）、build.rs 编译→执行→指令传播全生命周期（`-l` 只进本包、`-L` 传递、metadata 只给直接依赖者、无自动 DEP_*_ROOT、无自动 check-cfg 补钉——全按 probe_link 实证）。**闭合验收：corpus smoke 24 双腿（cargo vs self）stdout/stderr/exit 逐字节 24/24**；diff_cless 六夹具（PATH 只含 mirvm + 离线实证零 cargo 进程）。对拍暴露四枚修复当日落地（含 cargo 腿既有 bug：phase_wrapper 劫持 rustix 1.1.4 RUSTC_WRAPPER 探针竞态 EPIPE）。E36 状态精确化：self 路径以构造闭合（guest cwd = 调用者 cwd），compat 路径行为照旧（归 P4，见 open-issues E36）。P3 已收（见下行） |
@@ -89,19 +91,21 @@ x86 asm wrapper。
 
 ## 3. 已验证边界
 
-- **当前验证矩阵（2026-07-23 实跑）**：`cargo fmt --all -- --check` 绿、
-  Clippy `-D warnings` 零诊断、`cargo test --locked` **76/76**、
+- **当前验证矩阵（2026-08-07 实跑）**：`cargo fmt --all -- --check` 绿、
+  Clippy `-D warnings` 零诊断、`cargo test --locked` **164/164**、
   `tests/diff.sh` **45/45**（默认与阈值=1 双态）、**+MIRVM_JIT_SYNC 同步发布
   45/45**（可准入函数首调同步编译并真跑机器码，编译失败 RED——audit F-05 起
   threshold=1 的证明力升级）、`tests/diff_cargo.sh` 5/5、
-  `tests/gate_truth_regression.sh` 12/12、`tests/run.sh fast` 7/7、
+  `tests/gate_truth_regression.sh` 12/12、`tests/run.sh fast` 9/9、
   `tests/gate.sh` **179/0/0/0**（corpus 全防线 163 条目 = 161 脚本（smoke+full
   两层）+ hexyl/tokei 项目三维对拍；fib(32) JIT 62ms ≤80ms 硬门在列）、
   TSan 零警告。测试管线 2026-07-23 整顿（decision-history §7.26）：套件入口
   `tests/run.sh fast|smoke|gate`，corpus 唯一真源 `tests/corpus.manifest`。
   CI（`.github/workflows/ci.yml`）同构命令全绿（GitHub 侧操作暂停，本地同构为准）。
   **以下为各阶段 dated 历史记录**（保留备查，非本轮复跑）：
-- debug/release 构建可通过；执行必须优先使用 release 版本。
+- debug/release 构建可通过；执行必须优先使用 release 版本。当前 pinned LLVM 22 下，
+  release 必须保留 Cargo.toml 的 `debug=2` + `strip="debuginfo"` 组合，原因和移除条件见
+  decision-history §7.33。
 - M4 的纯函数、值/内存、unwind、FFI、真线程和 TSan gate 已有端到端覆盖。
 - `tests/diff.sh` 对当前 demo 做 native 差分，M5.0 的 asm probe 已进入回归。
 - 2026-07-13 当前 Rust tests 为 **35/35 passed**：asm stub、12 个 native archive、
@@ -188,7 +192,7 @@ x86 asm wrapper。
 | guest 静态归档 | Linux/ELF 受约束路径已接产品：收集 rustc `Static NativeLib`、内容寻址 `.a→.so`，作为 required library 在任何 dlsym 前以 `RTLD_NOW` 加载；失败保留 `dlerror` 并立即终止。constructor/destructor 已分治（§7.8：`.init_array/.fini_array/ctors/dtors` 段经 DT_INIT 与 native 同构放行；裸 `.init/.fini` 仍拒）；RTLD_DEFAULT 同名碰撞已改归档句柄优先（`fb0b204`，native 链接期绑定语义）。其余拒绝面仍在：非 PIC、thin、跨 archive 依赖/顺序/重名导出、export-symbols——多 archive link plan 未立项（[open-issues.md R6](open-issues.md)），不是通用链接器 |
 | JIT | **生产已落地**：方法级 Cranelift JIT = M5.3 骨架 + M5.4a–d（标量/内存/128 位/原子/ABI 全形态/五调用助手/unwind 产品化双 CIE 全覆 LSDA/三表准入穷尽）+ M5.5 vmctx 终裁（T 骨架定稿），默认开启（`--jit off`/`MIRVM_JIT=off` 回退纯解释）。验证强度（2026-07-22 起）：`MIRVM_JIT_SYNC` 同步发布 + 可准入失败 RED。未实现：OSR/deopt/生产 tiering（E2）、JIT 码常驻（E5）、优化项池（E7：SIMD CLIF 向量内联/PLT try_call 快路/内联缓存等） |
 | 生命周期/嵌入 | `Shared`、thunk、asm handle、部分 TLS 存储按进程期保存；错误路径可退出进程；runner 诊断 filter 依赖进程全局 `TRACK_DIAGNOSTIC`，目前只在单 compiler CLI 模型下安全。daemon/嵌入/并发 compiler 需先加 guard 或替代接口；尚非稳定多 Engine API |
-| 分发与产品面 | `.mirvm` mode B、daemon、REPL、checked 模式、正式沙箱均未实现；分发轨方向已批未立项（D9，2026-07-14，[distribution-design.md](designs/distribution-design.md)）：先 L2 engine-IR 缓存，mode B=缓存可移植化（M5.3 后），发行先 miri 式 |
+| 分发与产品面 | `.mirvm` mode B 已实现到不稳定格式 v2，包运行不依赖源码或预存自产库缓存；跨 build_id/target 兼容、fat artifact 与格式冻结仍未做。daemon、REPL、稳定嵌入 API、checked 模式、资源治理和正式沙箱均未实现，当前只运行受信任代码。合并计划见 [product-capabilities-plan.md](designs/product-capabilities-plan.md) |
 | 平台 | 当前仅应宣称 Linux/ELF/x86_64 开发基线 |
 | Cargo wrapper / runner | 非空 `RUSTC_WRAPPER` / `RUSTC_WORKSPACE_WRAPPER` 或有效的 `build.rustc-wrapper` / `build.rustc-workspace-wrapper` 当前都会在 MIR capture 前 fail-closed；尚无 wrapper composition。runner 在 lower 后用窄结构化 filter 去除额外 warning-count summary，但保留完整 driver 收尾，只在 compiler success 后执行 VM |
 | 真实项目隔离 | build/check unshare network，所有 guest sandbox unshare PID，但不 unshare IPC；仅适用于受信任、固定 provenance 的 source，不是对抗性安全边界。mirvm build env 与 guest runtime env 尚未彻底分离。`MIRVM_ENCODED_RUSTFLAGS_APPEND` 在 Cargo 完成 fingerprint 计算后才追加，尚未进入 Cargo fingerprint |
@@ -199,15 +203,13 @@ x86 asm wrapper。
 
 ## 5. 当前开发顺序
 
-1. **corpus 扩编继续**：三维逐字节差分铁律不动摇（mirvm 默认 / native / 逢调即编，
-   全部逐字节一致才算绿）；新候选见 [corpus.md §7](corpus.md)；撞出的实锤债务登记到
-   [open-issues.md](open-issues.md) 再按优先级转正。
-2. **当前战役**：D15 全期收口（P1–P4，§7.27–§7.31）——零 cargo 已从机制
-   变成默认形态。**下一战役候选（2026-07-29 用户裁定，decision-history
-   §7.32）**：**D16 冷启动战役**（profile 先行 → D5 JIT 码持久化 /
-   D3 零拷贝按需装载 / 后台服务线程）、**D17 mirvm test**、
-   **D18 env/GC（登记根 + 标记-清扫）**；D4 格式冻结排在 D3 布局评审后；
-   compat 删除评审与 P5 按需扩张在案。
+1. **产品能力顺序**（2026-08-07 汇总）：`mirvm test` → 依赖 P5（workspace/Git/
+   alt registry/source replacement）→ OS 级沙箱与资源治理 → 稳定嵌入 API/daemon →
+   D3 零拷贝后冻结包格式 → 跨平台。每阶段闭合边界和验收见
+   [product-capabilities-plan.md](designs/product-capabilities-plan.md)。
+2. **性能与 corpus 持续线**：D16 仍按 profile → JIT 码持久化 → 零拷贝按需装载 →
+   后台服务线程推进；三维逐字节差分铁律不动摇。性能工作可以穿插，但不能替代上述
+   产品完成条件；新 workload 撞出的实锤债务继续登记到 [open-issues.md](open-issues.md)。
 3. **基建预算纪律**（根 AGENTS.md）：harness 只在当前产品 RED 无法复现/判定正确时
    做最小修改；不为未来加固。
 4. **文档纪律**：完成阶段 = 代码 + 可复现 gate + 施工记录 + 本文更新四件套；

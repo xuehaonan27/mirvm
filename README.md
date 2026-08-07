@@ -13,7 +13,7 @@ JIT 默认开启）。
 > [docs/current-status.md](docs/current-status.md) 为准；文档权威与历史替代关系见
 > [docs/README.md](docs/README.md)。
 
-## 当前状态（2026-07-21 快照）
+## 当前状态（2026-08-07 快照）
 
 - **M4 完成**：自研 typed bytecode、tree-walking interpreter、tcx-free 执行相、真实地址内存、
   unwind、libffi FFI、native→guest thunk、1:1 OS 线程与 guest TLS。
@@ -21,23 +21,29 @@ JIT 默认开启）。
   （signal/backtrace 两历史 XFAIL 转绿）；方法级 Cranelift JIT = M5.3 骨架 + M5.4a–d
   全覆盖（ABI 全形态、五调用助手、unwind 产品化双 CIE 全覆 LSDA、stmt/rvalue/terminator
   准入三表穷尽）+ M5.5 vmctx 终裁（T 骨架生产定稿）——JIT 默认开启（`--jit off` 回退），
-  `tests/m5_gate6.sh` 收口全绿。
+  多帧 unwind 于 2026-08-07 复核并修正为完整 `.eh_frame` 一次注册。
 - **M6 冷启动完成**：S1 小件包、S2 依赖剪 codegen、S4 std 预降底座（脚本纯冷 385→104ms）、
   S3′b A2 纯化聚合 deps-image（eco 冷 924→热 66ms）。
 - **地址模型 P1/P2 完成**（2026-07-17）：GOT 间接消除宿主地址烘焙 + extern fn 条目
   可执行化，thunk 盲区结构性根治。
-- **corpus 全量 164 个真实 crate driver + 2 个 vendored 真 cargo 项目（hexyl/tokei）**：
+- **corpus manifest 当前 166 项（139 full + 24 smoke + 3 manual）**，含 vendored
+  真 cargo 项目（hexyl/tokei）：
   创建时完成 mirvm/native/逢调即编三维逐字节验收；持续门 =
   `tests/corpus.manifest` 唯一真源（exit/oracle/diff 三口径，2026-07-23 管线整顿，
   提升项见 [open-issues.md G7](docs/open-issues.md)）；`tests/gate.sh`
-  **179 PASS / 0 XFAIL / 0 FAIL**，`tests/run.sh fast` 7/7，cargo test 76/76，
-  diff.sh 45/45（默认 + 阈值=1 双态 + MIRVM_JIT_SYNC 同步发布），diff_cargo 5/5。
+  2026-07-23 历史全 gate 为 **179 PASS / 0 XFAIL / 0 FAIL**；当前现场复验数字见
+  [current-status.md §3](docs/current-status.md)。
+- **`.mirvm` 格式 v2**：包内携带所有自产动态库字节；运行不要求源码、原编译环境或
+  预存缓存。格式尚未冻结，跨 build/target 兼容仍未承诺。
 
 已知缺口、响亮拒绝边界与全部未解决债务集中登记在
 [docs/open-issues.md](docs/open-issues.md)；目前不能宣称支持"任意 Rust 程序"。
 当前开发基线是 Linux/ELF/x86_64，工具链锁定在 `nightly-2026-07-02`。根设计契约见
 [DESIGN.md](DESIGN.md)，frame/vmctx 等可逆架构决策及旧模型完整保留在
 [docs/decision-history.md](docs/decision-history.md)。
+`mirvm test`、复杂依赖来源、正式沙箱/资源治理、稳定嵌入 API/daemon、格式冻结与
+跨平台尚未完成，建议施工顺序见
+[产品能力补全计划](docs/designs/product-capabilities-plan.md)。
 
 ## 快速开始
 
@@ -51,7 +57,7 @@ cargo build --release --locked
 ./target/release/mirvm run demo/ecosystem.rs
 ./target/release/mirvm run path/to/project -- arg1 arg2
 
-# 打成 .mirvm 包并运行（mode B 片②；格式当前不定死，随开发可变动）
+# 打成自包含 .mirvm 包并运行（格式 v2 当前不定死，随开发可变动）
 ./target/release/mirvm pack path/to/project -o app.mirvm
 ./target/release/mirvm run app.mirvm
 

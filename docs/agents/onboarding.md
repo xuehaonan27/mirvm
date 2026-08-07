@@ -13,8 +13,9 @@
   rustc-src 在 `~/.rustup/toolchains/nightly-2026-07-02-*/lib/rustlib/rustc-src/rust/compiler`。
   月度 bump 由人发起，bump 前先在 m4-log/m5-log 查同类漂移先例。
 - 构建：`cargo build --release --locked`（**锁文件铁律**）；执行与性能一律 release。
-- Cranelift 0.133.1：`__register_frame` 逐 FDE 语义（非整段）；原子无弱序（JIT 统一
-  SeqCst，记账在案）。
+- Cranelift 0.133.1：同一 `FrameTable` 生成的 `.eh_frame` 含共享 CIE，必须把完整、
+  零结尾的节一次交给 `__register_frame`；逐 FDE 注册会在多层 JIT unwind 时失败。
+  Cranelift 原子无弱序（JIT 统一 SeqCst，记账在案）。
 - MIR API 逐期漂移实录：`../history/m4-log.md` 与 `../history/m5-log.md` 是唯一档案。
 
 ## 三条铁律

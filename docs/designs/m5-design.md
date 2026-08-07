@@ -62,9 +62,10 @@ M5 = **两条独立的轨**在一个共享机件（asm-stub 工厂）上交汇�
    `rust_eh_personality`；且有 **`register_jit`**（JIT 模式带 LSDA 注册，
    `debuginfo/unwind.rs`）。M5 的 unwind 工作 = 把 spike5 的 CFI-only 注册管线扩展
    一层 LSDA+personality，同构源完整在树。
-   ——一处**不照抄**：cg_clif 的 register_jit 在 Linux 上整段 `__register_frame`
-   （libunwind 语义假设）；spike5 实测本机是 libgcc 逐 FDE 语义。**沿用 spike5 的
-   逐 FDE + CIE 判别注册，不抄 cg_clif 这行。**
+   注册单位已由 2026-08-07 的两层 JIT 回归纠正：同一 `FrameTable` 的多个 FDE
+   共享 CIE，必须像 cg_clif 一样把完整、零结尾的 `.eh_frame` 一次交给
+   `__register_frame`。旧 spike5 的逐 FDE 结论只覆盖了单帧，跨两层时会使宿主
+   unwinder 无法启动 panic。
 4. **异类 SIMD 指令 cg_clif 也用 asm wrapper 兜底**：`llvm.x86.sha256rnds2`、
    `llvm.x86.aesni.aesenc` 等 Cranelift 无对应 IR 的指令，cg_clif 直接构造
    `InlineAsmTemplatePiece::String("sha256rnds2 xmm1, xmm2")` 走同一 wrapper 机制
@@ -239,8 +240,8 @@ fib/rayon 计量 + 助手调用频度统计，作为触发器复测时的对照�
 
 ### D6 JIT 帧 unwind：eh_frame（已验）+ LSDA/landing pad（cg_clif 同构）；准入过渡
 
-- **CFI 半边**：spike5 管线原样产品化（create_unwind_info → gimli FrameTable →
-  逐 FDE `__register_frame`，CIE 判别字段）。
+- **CFI 半边**：create_unwind_info → gimli FrameTable → 完整、零结尾的
+  `.eh_frame` 一次 `__register_frame`；CIE 与全部 FDE 字节保留到进程结束。
 - **LSDA 半边**（新）：带 cleanup 边的调用发 `try_call`+异常表（cg_clif
   abi/mod.rs 同构）；cleanup 块内 Drop 照常降调用、`Resume` → libcall
   `_Unwind_Resume`；每函数 GccExceptTable（cg_clif 写出器同构移植）挂 FDE.lsda，

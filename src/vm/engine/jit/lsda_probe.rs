@@ -203,28 +203,7 @@ fn cfi_single_frame() {
     }
     let mut eh = EhFrame(EndianVec::new(RunTimeEndian::Little));
     table.write_eh_frame(&mut eh).unwrap();
-    let mut bytes = eh.0.into_vec();
-    bytes.extend_from_slice(&[0, 0, 0, 0]);
-    let buf: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-    unsafe extern "C" {
-        fn __register_frame(fde: *const u8);
-    }
-    unsafe {
-        let start = buf.as_ptr();
-        let end = start.add(buf.len());
-        let mut cur = start;
-        while cur < end {
-            let len = u32::from_le_bytes(std::ptr::read(cur as *const [u8; 4])) as usize;
-            if len == 0 {
-                break;
-            }
-            let cie_ptr = u32::from_le_bytes(std::ptr::read(cur.add(4) as *const [u8; 4]));
-            if cie_ptr != 0 {
-                __register_frame(cur);
-            }
-            cur = cur.add(len + 4);
-        }
-    }
+    super::register_eh_frame_section(eh.0.into_vec());
     let caller_fn: unsafe extern "C-unwind" fn() = unsafe { std::mem::transmute(caller_addr) };
     let result = std::panic::catch_unwind(|| unsafe { caller_fn() });
     let payload = result
@@ -311,28 +290,7 @@ fn cfi_only_passthrough() {
     }
     let mut eh = EhFrame(EndianVec::new(RunTimeEndian::Little));
     table.write_eh_frame(&mut eh).unwrap();
-    let mut bytes = eh.0.into_vec();
-    bytes.extend_from_slice(&[0, 0, 0, 0]);
-    let buf: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-    unsafe extern "C" {
-        fn __register_frame(fde: *const u8);
-    }
-    unsafe {
-        let start = buf.as_ptr();
-        let end = start.add(buf.len());
-        let mut cur = start;
-        while cur < end {
-            let len = u32::from_le_bytes(std::ptr::read(cur as *const [u8; 4])) as usize;
-            if len == 0 {
-                break;
-            }
-            let cie_ptr = u32::from_le_bytes(std::ptr::read(cur.add(4) as *const [u8; 4]));
-            if cie_ptr != 0 {
-                __register_frame(cur);
-            }
-            cur = cur.add(len + 4);
-        }
-    }
+    super::register_eh_frame_section(eh.0.into_vec());
 
     let caller_fn: unsafe extern "C-unwind" fn() = unsafe { std::mem::transmute(caller_addr) };
     let result = std::panic::catch_unwind(|| unsafe { caller_fn() });
@@ -502,31 +460,10 @@ fn lsda_cleanup_pad_executes_and_resume_continues() {
         panic!("caller 无 SystemV UnwindInfo");
     }
 
-    // spike5 同款注册：FrameTable → eh_frame 字节 + 终止零长 + 逐 FDE __register_frame
+    // spike5 同款注册：FrameTable → 完整、零结尾的 eh_frame 段一次注册。
     let mut eh = EhFrame(EndianVec::new(RunTimeEndian::Little));
     table.write_eh_frame(&mut eh).unwrap();
-    let mut bytes = eh.0.into_vec();
-    bytes.extend_from_slice(&[0, 0, 0, 0]);
-    let buf: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-    unsafe extern "C" {
-        fn __register_frame(fde: *const u8);
-    }
-    unsafe {
-        let start = buf.as_ptr();
-        let end = start.add(buf.len());
-        let mut cur = start;
-        while cur < end {
-            let len = u32::from_le_bytes(std::ptr::read(cur as *const [u8; 4])) as usize;
-            if len == 0 {
-                break;
-            }
-            let cie_ptr = u32::from_le_bytes(std::ptr::read(cur.add(4) as *const [u8; 4]));
-            if cie_ptr != 0 {
-                __register_frame(cur);
-            }
-            cur = cur.add(len + 4);
-        }
-    }
+    super::register_eh_frame_section(eh.0.into_vec());
 
     // 全链点火：宿主 catch_unwind 应收到 42；pad 应已走（mark=1，而非 2）
     let caller_fn: unsafe extern "C-unwind" fn() = unsafe { std::mem::transmute(caller_addr) };

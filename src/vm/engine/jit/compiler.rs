@@ -17,8 +17,8 @@
 //! 线程必见其 callee 蹦床/入口（happens-before 链）。
 //!
 //! unwind（D6 v1 = CFI-only）：spike5 管线——create_unwind_info → gimli FrameTable
-//! → 逐 FDE `__register_frame`（libgcc 语义 + CIE 判别字段）。准入已排除 cleanup 边
-//! （unwind-transparent：panic 只穿透，不着陆）。
+//! → 整段 `.eh_frame` 一次注册。准入已排除 cleanup 边（unwind-transparent：panic
+//! 只穿透，不着陆）。
 //!
 //! 单 worker 线程持 JITModule（代码内存进程生命周期，cranelift-jit 无逐函数释放）。
 
@@ -672,8 +672,8 @@ impl Compiler {
         Some(id)
     }
 
-    /// spike5 管线：FrameTable → eh_frame 字节 → 逐 FDE __register_frame（libgcc
-    /// 语义；CIE 判别 = 长度域后 4 字节为 0）。字节 leak（FDE 注册要求终身有效）。
+    /// spike5 管线：FrameTable → eh_frame 字节 → 整段注册。字节由注册入口保留到
+    /// 进程结束，因为 unwinder 后续仍会读取其中共享的 CIE 和各函数的 FDE。
     fn register_pending_eh_frames(&mut self) {
         if self.pending_unwind.is_empty() {
             return;
@@ -681,7 +681,6 @@ impl Compiler {
         use gimli::RunTimeEndian;
         use gimli::write::{Address, EhFrame, EndianVec, FrameTable};
         unsafe extern "C" {
-            fn __register_frame(fde: *const u8);
             fn rust_eh_personality();
         }
         // T1-c 双 CIE：无 try_call 的函数走 plain CIE（今日管线不变）；有者走
@@ -717,25 +716,7 @@ impl Compiler {
         }
         let mut eh = EhFrame(EndianVec::new(RunTimeEndian::Little));
         table.write_eh_frame(&mut eh).unwrap();
-        let mut bytes = eh.0.into_vec();
-        bytes.extend_from_slice(&[0, 0, 0, 0]);
-        let buf: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-        unsafe {
-            let start = buf.as_ptr();
-            let end = start.add(buf.len());
-            let mut cur = start;
-            while cur < end {
-                let len = u32::from_le_bytes(std::ptr::read(cur as *const [u8; 4])) as usize;
-                if len == 0 {
-                    break;
-                }
-                let cie_ptr = u32::from_le_bytes(std::ptr::read(cur.add(4) as *const [u8; 4]));
-                if cie_ptr != 0 {
-                    __register_frame(cur);
-                }
-                cur = cur.add(len + 4);
-            }
-        }
+        super::register_eh_frame_section(eh.0.into_vec());
     }
 }
 

@@ -37,6 +37,22 @@ mod translate;
 #[cfg(feature = "cranelift")]
 pub(crate) use compiler::start;
 
+/// Register one complete `.eh_frame` section with the process unwinder.
+///
+/// The CIE records at the start of the section are shared by its FDE records, so
+/// the registration unit must be the complete, zero-terminated section. The
+/// unwinder retains the bytes for the process lifetime.
+#[cfg(feature = "cranelift")]
+pub(crate) fn register_eh_frame_section(mut bytes: Vec<u8>) {
+    unsafe extern "C" {
+        fn __register_frame(begin: *const u8);
+    }
+
+    bytes.extend_from_slice(&[0, 0, 0, 0]);
+    let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+    unsafe { __register_frame(bytes.as_ptr()) };
+}
+
 // 编译管线的共享 imports（feature 门内；子模块经 `use super::*` 继承）。
 #[cfg(feature = "cranelift")]
 use crate::vm::engine::ctx::Shared;

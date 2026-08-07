@@ -832,11 +832,6 @@ fn build_jit(conv: Conv) -> Jitted {
 
 // ===== eh_frame 自注册（stretch；cg_clif JIT 模式同款）=====
 
-unsafe extern "C" {
-    // libgcc/libunwind 的运行期 CFI 注册入口（Rust 二进制默认链 libgcc_s）
-    fn __register_frame(fde: *const u8);
-}
-
 /// 把各 JIT 函数的 SystemV unwind info 拼成 .eh_frame 并注册给系统 unwinder，
 /// 让宿主 Rust panic 的传播能走过 JIT 帧（CFI-only，无 personality/landing pad）。
 fn register_eh_frames(jit: &Jitted) {
@@ -855,28 +850,7 @@ fn register_eh_frames(jit: &Jitted) {
     }
     let mut eh = EhFrame(EndianVec::new(RunTimeEndian::Little));
     table.write_eh_frame(&mut eh).unwrap();
-    let mut bytes = eh.0.into_vec();
-    bytes.extend_from_slice(&[0, 0, 0, 0]); // 终止子
-    let buf: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-
-    // libgcc 的 __register_frame 语义 = 注册单个 FDE：逐条走 .eh_frame，跳过 CIE
-    unsafe {
-        let start = buf.as_ptr();
-        let end = start.add(buf.len());
-        let mut cur = start;
-        while cur < end {
-            let len = u32::from_le_bytes(std::ptr::read(cur as *const [u8; 4])) as usize;
-            if len == 0 {
-                break; // 终止子
-            }
-            // CIE 判别：长度域后 4 字节（CIE id）为 0 → CIE，否则 FDE
-            let cie_ptr = u32::from_le_bytes(std::ptr::read(cur.add(4) as *const [u8; 4]));
-            if cie_ptr != 0 {
-                __register_frame(cur);
-            }
-            cur = cur.add(len + 4);
-        }
-    }
+    crate::vm::engine::jit::register_eh_frame_section(eh.0.into_vec());
 }
 
 // ===== harness =====

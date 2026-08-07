@@ -50,3 +50,10 @@ phf = "0.14.0"
 # 让 rust-analyzer 认识 rustc_private crates（需在 IDE 端开启 rust-analyzer.rustc.source = "discover"）
 [package.metadata.rust-analyzer]
 rustc_private = true
+
+# nightly-2026-07-02 / LLVM 22 在无完整 DWARF 的 release 构建中会误编译
+# 解释器递归 panic 的清理链；tests/run.sh fast 的 catch/panic 用例可稳定复现。
+# 让 DWARF 参与代码生成后再剥离，既保留正确的 unwind 控制流，也不放大交付物。
+[profile.release]
+debug = 2
+strip = "debuginfo"

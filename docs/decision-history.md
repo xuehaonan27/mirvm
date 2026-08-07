@@ -1647,6 +1647,53 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   v2（ring + 消费者线程 + feature 闸门）归 D16 后台服务线程同
   设计。
 
+### 7.33 2026-08-07：现状复核纠偏——JIT 展开整段注册、包格式 v2 真自包含、产品能力排单
+
+- **JIT 旧选择被推翻**：产品编译器、spike5 和活跃设计一直把同一
+  `FrameTable` 写出的 `.eh_frame` 拆成 FDE，逐条调用 `__register_frame`。
+  单 JIT 帧测试能通过，掩盖了多个 FDE 共享 CIE 的事实。稳定复现是
+  `cfi_only_passthrough` 的两层 JIT 调用：宿主报
+  `failed to initiate panic, error 5`；产品侧 `jit_builtin_probe` 与
+  `jit_unwind_probe` 同样 abort。把完整、零结尾的 `.eh_frame` 一次注册后，
+  `_Unwind_Find_FDE` 能命中两函数，五个 unwind probe 和两个产品差分用例全绿。
+  新规则集中在 `jit::register_eh_frame_section`，compiler/probe/spike 共用；历史
+  spike 文档保留当时记录，active 的 m5-design/onboarding 已更正。
+- **TSan 红的性质与修复**：独立 tsan crate 经 `#[path]` 同源复用 `src/os`，但日志
+  改造后没有把 `mirvm_log!` 定义带入 crate 根，导致编译失败而非数据竞争。只补
+  `src/utils/logs.rs` 的同源模块依赖；原 `tests/spike4_tsan.sh` 随后四个 spike case
+  与 engine 多线程真身全部通过，零 TSan warning。
+- **`threads_sync` 处置**：审查首轮曾在 L2 warm 复跑观察到一次 exit 139；JIT 修复后，
+  默认差分通过，并在 `MIRVM_JIT_SYNC=1`、阈值 1、热缓存、SEGV 诊断开启下连续
+  100 次通过。没有独立复现和故障地址，因此不做猜测性产品改动；最终全量差分继续
+  作为判据。
+- **release unwind 伴生红与构建约束**：打包器 v2 增量本身不参与 `catch` 执行，却
+  改变了主 crate 的代码布局，使 pinned nightly-2026-07-02 / LLVM 22 在无完整 DWARF
+  的 release 构建里生成断裂的解释器递归清理链：即使 `MIRVM_JIT=off`，libgcc 也会在
+  `_Unwind_Resume` 第二阶段 abort。HEAD 对照通过、仅换入 pack/ircache 即稳定复现；
+  禁内联捕获点/`interp_frame`/`run_blocks`、拆参数 `Vec` 所有权、强制 unwind table、
+  codegen-units=1 和 opt-level 1/2 均无效，均已撤回。完整 DWARF 参与代码生成可消除
+  误编译，链接后剥离调试段仍通过且成品约 14.4 MiB，因此 release profile 固定
+  `debug=2` + `strip="debuginfo"`。移除触发器 = 升级工具链后先用 debug=0 A/B 复跑
+  `catch`、默认 45/45 和 SYNC+阈值1 45/45；未过之前不得为了缩短构建时间摘掉。
+- **`.mirvm` 旧自包含断言被推翻**：v1 只将 role=global_asm 的 `.so` 放入 MC；
+  role=static_archive 仍只保存绝对路径+哈希，运行时读取原缓存。默认 STAMPS/env
+  门控还要求分发机器保留源码和编译环境，`MIRVM_PACK_NOSTAMP` 把负担转给用户，
+  与“单文件分发”目标矛盾。
+- **新选择 = 格式 v2**：NATIVELIBS 每项携带原始 bytes；MC 命中者进程内装载，
+  其余从包内按哈希自动物化到当前 MIRVM_HOME 后 dlopen。旧 path 只作 MODULE 顺序
+  互证和诊断。STAMPS/envs 保留来源信息但不参与运行许可。关闭 MC 打包、移走原
+  global-asm 缓存并换全新 MIRVM_HOME 后，真实包输出仍为 `chain=29 slot=41`，
+  且新目录自动生成两个内容寻址 `.so`。v1 包由 fmt_ver 精确拒绝；格式本来未冻结，
+  不提供迁移兼容，D4 仍必须排在 D3 零拷贝布局之后。
+- **坏包边界**：容器解析改为 checked cursor；节数量先受剩余节表约束再尝试分配，
+  offset+len 检查溢出，禁止节越界/重叠/重复 tag，并校验所有节（含未知节）哈希。
+  七个单测覆盖正常写读、截断 build_id、巨大 count、溢出 range、重叠、重复 tag、
+  节 hash 和不读旧路径的 native blob 物化。
+- **产品能力记账**：仍明确缺失 `mirvm test`、P5 复杂依赖来源、正式沙箱与资源治理、
+  稳定多 Engine/daemon API、稳定可移植包格式和跨平台支持。建议顺序与每阶段验收已写入
+  [designs/product-capabilities-plan.md](designs/product-capabilities-plan.md)；这只是规划，
+  不把未施工项写成现状。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT
@@ -1657,8 +1704,8 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
 - ~~P7 设想独立 `src/os/` 物理层~~（**2026-07-18/19 已兑现**：`src/os/` + `src/arch/` 双 leaf 建成，E21 闭合，见 §7.16）。
 - “engine 是 library”目前只是 crate 结构；进程退出、全局 TLS key、泄漏式生命周期使其还不是稳定
   多 Engine 嵌入 API。
-- `.mirvm` mode B、fat target artifact、checked 模式、alloca 局部、方法级 JIT 均仍是设计，不是现状
-  （mode B 的路线 2026-07-14 已由 §7 D9 定向：先 L2 缓存，包=缓存可移植化）。
+- `.mirvm` mode B 与方法级 JIT 已实现；当前包格式 v2 仍未冻结且精确绑定 build_id/target。
+  fat target artifact、checked 模式与 alloca 局部仍只是设计，不是现状。
 - static `.a`→`.so` 的受约束 Linux/ELF 切片已实现；非 PIC、跨 archive 依赖/顺序或重名、
   RTLD_DEFAULT 重名、constructor、thin、export-symbols 仍是明确拒绝面。它们需要新 link plan/
   生命周期设计，不能从 blake3 外推通用。

@@ -1,6 +1,6 @@
 # mirvm 未解决债务与开放问题登记册
 
-> 覆盖 mirvm 自始（M0 tier-0 时代）至 2026-07-17（corpus 批8 收官，HEAD `2f9efef`）的
+> 覆盖 mirvm 自始（M0 tier-0 时代）至 2026-08-07 当前复核的
 > **全部**记录在案且至今未解决的债务、开放问题、响亮拒绝边界与暂缓项。
 > 本文是未解决事项的**唯一登记入口**；已根治/已完成项一律不收录（查
 > [current-status.md](current-status.md) 与 [decision-history.md](decision-history.md)）。
@@ -62,7 +62,6 @@
 
 | ID | 事项 | 关键内容与转正要件 | 出处 |
 |---|---|---|---|
-| C4 | **dep crate global_asm 物化**（旧 debt §7；**片①已闭合 2026-07-23**） | 关闭（`176ae20`，decision-history §7.23）：dep 编译期自 HIR 抽取 global_asm/naked 落 rlib 旁挂文本清单（`.mirasm.s`），bin 加载相按 crate 图序经 assemble 通道物化装载——mirvm 就是每个 dep crate 的编译器，模板文本在编译期手里（不绕行、无名单、无救援）。验收：c_faer_lu 复原 faer 默认特性，native/默认/SYNC 三维逐字节一致；伴生修复 JIT 帧 >16 对齐潜伏错值（cranelift 栈基 16 对齐上限，槽内余量 + 代码级抬基）；伴生 C6 补面六件。**残余**：dep 的 `sym` 指向 dep 自身 guest fn 响亮拒绝（转 R16）；**片②** = mode B 机器码节（open-issues D1） | decision-history §7.23，本表 R16/D1 |
 | C6 | **M5.x intrinsic 按需队列残余** | pclmulqdq.256/.512、vaes、其余 gather 形态、avx512.pmadd 系等：遇真实 workload 按既有四触点法补（已清先例：psad.bw/pclmulqdq/aesni/crc32/permd/gather/vpmadd52/F16C/lddqu/`2b4766b`）。AES 等未触发项保留响亮 Trap | corpus §5，history/m5.1-design.md §1 |
 | C8 | **Rust 侧 ctor / `.init_array`（linkme 族）未触发** | C 原生归档侧 constructor 已由 decision-history §7.8 分治放行（DT_INIT）；裸 `.init`/`.fini` 仍拒。Rust 侧 ctor/linkme 从未进 corpus，按需立项，不预支 | history/m4.5-plan.md D6（已删，git 历史），§7.8 |
 
@@ -98,7 +97,7 @@
 | E18 | **Cranelift 自有内联（0.133.1 inline.rs）备用杠杆** | `拒绝` 默认不开，记为收口期备用杠杆 | designs/m5-design.md |
 | E19 | **rustix 裸 syscall vs os:: 收口的张力** | `记账`（2026-07-21 定稿，**③④ 已由 T5 闭合**）：**「mirvm 拦截一切 syscall」在真实生态成立**——① FFI libc 包装：builtin 注册表即现成挂载点（HostWrite/HostGetenv/HostFork/HostSignal/HostSyscall 在产拦截）；② `libc::syscall(...)` 变参：`Builtin::HostSyscall` 单点内建；③ guest inline-asm 裸 syscall（rustix linux_raw）与 ④ global_asm/naked 内：**已拦截**（T5 `d0470fc`：asm-stub 文本生成点改写 → GOT 两级间接槽 → trampoline 全契约 → dispatch v1 直通 + TRACE；探针三维一致 + rustix 系零回归）；⑤ vendored C 库：常态（C 调 libc 包装）经 native_archive 链接序插桩可闭合，罕见叉（C 内联汇编自写 `syscall` 指令）cc 产物不透明；⑥ JIT 与①③同入口；⑦ 对抗式自修改/`.byte 0x0f,0x05` 书写无真实形态。**唯一如实残余 = ⑤罕见叉与⑦，只有 OS 层 seccomp 能兜**（维持原判）；虚拟化语义（统一 fd 空间/假 FS/计费）属 D10 本体，钩子已备 | corpus §2.3，§5；decision-history §7.18 |
 | E20 | **字节码验证 pass 未建** | `未立项` loader 鲁棒性开放问题；内容寻址缓存已由 S3′b A2 兑现，独立验证 pass 无实锤驱动 | designs/frame-abi-bytecode.md §10.6 |
-| E37 | **日志系统归属与 v2（[designs/mirvm_high_performance_log.md](designs/mirvm_high_performance_log.md)）** | `未立项` **2026-07-29 用户裁定收回自造，不再视同他人领地，v1 有问题即推翻重写**。v1（路径 A/B 同步版）在施已知两处红：stdout 臂误用不存在的 `std::io::println`；tsan crate 根缺 `mirvm_log` 宏 → 纯度门禁 SKIP_TSAN=1 绕行中（修复后摘钉复验并回改 §7.30/§7.31 记档）。v2（ring + 消费者线程 + feature 闸门）归 D16 后台服务线程同设计；文档数字全系量级估算（其 §6 自述），§7 基准随 D16 profile 实测 | decision-history §7.32 |
+| E37 | **日志系统 v2（[designs/mirvm_high_performance_log.md](designs/mirvm_high_performance_log.md)）** | `未立项` v1 同步路径继续在役；2026-08-07 已把 `mirvm_log!` 同源接入 TSan crate，原纯度门禁编译红消失并实跑零竞争通过。v2（ring + 消费者线程 + feature 闸门）仍归 D16 后台服务线程同设计；文档数字全系量级估算（其 §6 自述），§7 基准随 D16 profile 实测 | decision-history §7.32/§7.33 |
 
 ### E.2 架构与边界
 
@@ -123,15 +122,17 @@
 > static 恒 0 判空 cell」缺陷——现走 GOT 启动相真解析（命中=真址/缺席=0；引擎
 > 接管符号强制缺席），探针 `demo/weak_extern.rs` 三维绿（decision-history §7.9）。
 
-## D. 分发与产品面（方向已批：D9，2026-07-14；施工未立项）
+## D. 分发与产品面
+
+明确缺失能力的合并施工顺序与逐阶段验收口径见
+[产品能力补全计划](designs/product-capabilities-plan.md)。本表仍是各项债务状态的唯一真源。
 
 | ID | 事项 | 内容 | 出处 |
 |---|---|---|---|
-| D1 | **mode B `.mirvm` 包 + `mirvm pack`（D9f④；**三片全落 2026-07-23**） | 片②（`254692c`）：包格式 v0 五节 + pack/run（零新执行路径，五负载逐字节一致）；**片③（`1697c82`，decision-history §7.25）**：MC 机器码节 + 进程内 ELF 装载器（自解析/自重定位/eh_frame/符号表入解析链①′位，系统链接器零依赖）——**真自包含酸试通过**（rm -rf global-asm 缓存后 faer 包仍逐字节跑通，自产码零 cc/ELF/.so/缓存依赖；剩 dlopen 者唯 FFI 真外国库）。**格式声明不定死**（用户裁定，冻结归 D4 评审）。余量：fat artifact 多 target、字节码版本化（C12）、MC 预消化 blob 形态（D4 评审候选） | decision-history §7.24/§7.25，[designs/modeb-mirvmar-design.md](designs/modeb-mirvmar-design.md) |
 | D2 | **发行形态与命名（D9f⑤）** | 先 miri 式后 JDK 式自包含 tarball（成熟后）；kit 命名候选 MDK/mirvm toolkit（MRsDK 已否决） | designs/distribution-design.md |
 | D3 | **零拷贝装载（rkyv 类）→ D16 主杠杆** | postcard 解码封顶（eco ~60ms / ripgrep ~450ms）；mmap+逐函数惰性解码是下一数量级唯一杠杆；与 mode B 同题。**2026-07-29 升格（§7.32）**：包布局 mmap 直读 + 逐函数惰性解码 + 预测序预取（上次运行真实触发顺序落 cache，预测错只慢不错）+ demand 插队队首（等待上界 = 一个在跑函数编译完成；无抢占断点机制——Cranelift 无中断续跑接口）——「entry 先跑、后台并发、按需插队」在模式 B 成立（无 tcx）；模式 A 懒降低维持 J2 否决不复活 | history/coldstart-research.md V6，m6-log 片8，decision-history §7.32 |
 | D4 | **对外格式冻结重估** | M5.3 收官触发器（2026-07-15）已响，被有意再推迟到 mode B 立项；**2026-07-29 排序裁定（§7.32）：排在 D3 零拷贝布局评审之后**，否则冻结后必为布局改版 | decision-history §7，§7.32 |
-| D5 | **L3 JIT 机器码缓存** | 禁令条件「M5.3–M5.5 定型前禁做」已随 M5.5 收官（2026-07-21）消失；**2026-07-29 判为 dev 循环最大单根杠杆**（热函数每进程重烧 = 纯白烧），D1 片③ MC 机器码节 + 进程内 ELF 装载器已证 JIT 产物可序列化再装载；归 D16 候选 | designs/distribution-design.md，history/m5.3-design.md，decision-history §7.32 |
+| D5 | **L3 JIT 机器码缓存** | 禁令条件「M5.3–M5.5 定型前禁做」已随 M5.5 收官（2026-07-21）消失；**2026-07-29 判为 dev 循环最大单根杠杆**（热函数每进程重烧 = 纯白烧），既有 MC 机器码节 + 进程内 ELF 装载器已证 JIT 产物可序列化再装载；归 D16 候选 | designs/distribution-design.md，history/m5.3-design.md，decision-history §7.32 |
 | D6 | **S3′c 完整形态（跨项目共享）** | 路径无关内容哈希键（~50ms/次）+ tainted 层/多层 image 合并；按实需立项（已兑现的只是同 workspace 跨 bin 冒烟） | current-status §5.8，history/s3b-a2-design.md §3.4 |
 | D7 | **frontend 相成本无杠杆认领；V5 `-Zthreads` 并行 lower 未立项** | eco ~143ms / ripgrep ~730-800ms 在账无人认领；V5（tcx DynSync+worklist rayon 化）在 V3 不建后无人重启 | history/coldstart-research.md，m6-log 片8/10 |
 | D8 | **8 个 correctness case 未 benchmark** | ripgrep_gzip/parallel_nomatch/mmap_binary/parallel_match/multiline_replace、tokei_sort_code/streaming_json/rust_files | real-projects.md §5 |
@@ -140,7 +141,7 @@
 | D11 | **REPL/Notebook + 嵌入 API（M7+）** | 原愿景 M6 编号已被轨 C 冷启动占用；REPL = 持久堆天然成立，未立项 | DESIGN.md §3/§9 |
 | D12 | **`-Cincremental` 脚本路径** | 非当前杠杆；触发式重启（「大用户 crate 编辑-重跑」形态）；`finalize_session_directory` 坑在案 | history/coldstart-research.md §4 |
 | D13 | **地址模型 P5 增量（扩域/回收）** | 维持现固定基址样条工程；增量能力记 M7+ | decision-history §7.5b |
-| D14 | **原生内容寻址依赖存储（统一依赖 cache 终态；用户 2026-07-18 裁定方向）** | 去重单位 = 完整编译键（crate 版本 × features × 依赖闭包 × cfg/flags × toolchain）：多脚本/多项目共引 X@V 时其构建产物机器级唯一。**近期片已落地（§7.15：共享 cargo target dir，fingerprint 即原生内容寻址；实测 ethers 二跑 0.66s、两树并集 525M）**；**终态 = mirvm 原生 store（`~/.mirvm/store/<编译键哈希>/`，自管 build plan + extern 注入），与 .mirvmar 本地解析/mode B 同设计——用户裁定原生为更好方向，立项时与 D1 合并评审**。并发模型已裁定：发布一次后续只读命中、无大锁常驻；清理粒度粗可接受 | 2026-07-18 缓存讨论，decision-history §7.14/§7.15 |
+| D14 | **原生内容寻址依赖存储（统一依赖 cache 终态；用户 2026-07-18 裁定方向）** | 去重单位 = 完整编译键（crate 版本 × features × 依赖闭包 × cfg/flags × toolchain）：多脚本/多项目共引 X@V 时其构建产物机器级唯一。**近期片已落地（§7.15：共享 cargo target dir，fingerprint 即编译键内容寻址；实测 ethers 二跑 0.66s、两树并集 525M）**；**终态 = mirvm 原生 store（`~/.mirvm/store/<编译键哈希>/`，自管 build plan + extern 注入），与 `.mirvm` 本地解析同设计；P5 依赖来源和 env/GC 开工时合并评审**。并发模型已裁定：发布一次后续只读命中、无大锁常驻；清理粒度粗可接受 | 2026-07-18 缓存讨论，decision-history §7.14/§7.15 |
 | D15 | **砍掉 cargo（自有依赖解析 + 编译调度；用户 2026-07-22 纳入日程）** | **P1 完成（2026-07-27，decision-history §7.28）**：`src/cargoless/` 解析地基——manifest/lockfile/registry/resolve/audit 五件 + `mirvm deps audit`；cargo 解析语义全实证定稿（resolve ∪ build 双图、lazy-bucket 多版本、optional 门按（父包,父版本,依赖键）、?/ 弱引用级联、pre 精确规则、exact 兼容 build、lock canonical、同名多 req 分立、rename 双路）。**P2 完成（2026-07-27，decision-history §7.29）**：schedule/buildrs/driver 落地——`MIRVM_DEPS=self` 零 cargo 驱动（拓扑 + 内容指纹含传递传播不变量 + 每 crate rustc 参数；proc-macro 闭包与 build-deps 闭包真 rustc host 编译；build.rs 编译/执行/指令传播全生命周期，传播规则全按 probe_link 实证）；**corpus smoke 24 双腿逐字节 24/24 闭合**；对拍暴露四枚修复（StrongDep 隐式 feature 旗、CARGO_FEATURE_*、serde facade 隐式旗 + facade .so -L、phase_wrapper 劫持 rustix 探针竞态 EPIPE——最后一枚是 cargo 腿既有 bug）。**P3 完成（2026-07-28，decision-history §7.30）**：rustflags 子集（env/config 三键，target 侧落点实证）、rerun-if 精细增量（registry build.rs 一次跑，libgit2 第二腿 20s→0s）、编译调度并行化（wasmtime_wat 152s→79s）、full 层迁移（extern 按 lib target 名、StrongDep 显式旗、CARGO_MANIFEST_LINKS、remap-path-prefix 四枚修复）——**corpus_deps_pair --tier full 138 pass 1 p5 0 fail，gate DEPS=self 双轨绿**。**P4 完成（2026-07-29，decision-history §7.31）**：sysroot 自管（cargoless 调度 + VendorDir，冷建 27.2s 零 cargo 零 crates.io）、--bin 多目标选择、**MIRVM_DEPS 默认翻 self**（=cargo 显式 compat，双轨各自完整；删除条件另行评审——compat 剩余独占价值三条在案：对拍 oracle/mirvm pack runner 协议/deps audit 验收链）。**P5 复杂语义按实需**（git 源/alt registry/workspace 多包图/source replacement，响亮拒绝在案、对拍轴单列 p5；VendorDir 为 source replacement 备好供给面）。边界记账：rust-version-aware 版本偏好未实现（与 D14 store 合并评审时补）；build script check-cfg 值表用启用集（registry cap-lints 兜底，path 包多一条 unexpected_cfgs 的可能）；HOST_RUSTFLAGS 不实现；config 多文件合并不做；`mirvm pack` 翻 self 待评审 | decision-history §7.22/§7.27/§7.28/§7.29/§7.30/§7.31，[designs/d15-cargoless-design.md](designs/d15-cargoless-design.md) |
 | D16 | **冷启动战役（用户 2026-07-29 立项）** | profile 先行：MIRVM_TIMING 相位账本现成 + dev 循环基准场景（corpus/projects 改一行重跑计时）+ 日志设计 §7 三组基准（关闭 ≤2ns / 路径 A ≤1.5µs / 入队 ≤200ns）顺带实测。候选杠杆按裁定序：①**D5/L3 JIT 码持久化（dev 循环最大单根杠杆，禁令条件已灭）**；②D3 零拷贝 + 按需三件套（mmap 直读/逐函数惰性解码/预测序预取 + demand 插队）；③后台服务线程（cache write-behind + log 落盘合一，单线程多优先级队列）；④D12 -Cincremental（触发器制）。线程原则：guest 优先、编译（JIT/解码/预取同池）吃剩余核；优先级三级 demand > 预测序 > 闲时回填；不拍固定配比（调参产物非设计产物）。模式 A 懒降低维持否决不复活；guest 永不卡住等编译（解释器零等待地板）为架构事实 | decision-history §7.32 |
 | D17 | **mirvm test（用户 2026-07-29 立项）** | cfg(test) 重编本包 + libtest（sysroot 伪根本含 std/test/proc_macro，test crate 本地原料在）+ test 目标调度 + harness argv 透传（过滤器/--nocapture 等）；**doctest 明说不做**（rustdoc 是另一个前端，闭合成本单独评估）。cargo login = 只读复用 ~/.cargo/credentials.toml，并入 P5 alt registry 子项备案；publish/login 不做进 mirvm（发布侧非运行侧） | decision-history §7.32 |
@@ -165,7 +166,7 @@
 | R13 | **虚拟地址模型（含线性内存折中）否决，不作方向** | FFI 轴有原理性障碍；真实地址模型保留（P1/P2 已修，P3 冻结、P4 判非问题、P5→D13） | decision-history §7.5b |
 | R14 | **tokei 并行 JSON reports 次序不稳定** | 上游行为非 mirvm 债；用稳定 compact aggregate 绕；JSON 作 oracle 前须先解决确定排序 | real-projects.md §6 |
 | R15 | **`ClosureFnPointer` 等 track_caller 外 adjustment 未支持** | `ReifyFnPointer` 只走 rustc `resolve_for_fn_ptr`；不能由此外推 | current-status §4 |
-| R16 | **global_asm `sym` 拒绝面残余（C7 闭合后）** | ①`sym` fn 指向签名不可派生（聚合/Rust ABI/变参）的 guest fn——机器码调此类同形本即 UB，响亮拒绝；②`sym` static 指向 guest static 未接（mangled 静态名审计仍会命中），按 workload 再立；**③ 2026-07-23 增（C4 片①）**：**dep crate** 的 global_asm/naked 中 `sym` 指向 dep 自身 guest fn——C7 条目预算须在 bin 链接上下文做（C4 片②活），当前响亮拒绝；pulp 等真实形态零操作数，未遇阻塞 | src/lower/global_asm.rs，decision-history §7.9/§7.23 |
+| R16 | **global_asm `sym` 拒绝面残余（C7 闭合后）** | ①`sym` fn 指向签名不可派生（聚合/Rust ABI/变参）的 guest fn——机器码调此类同形本即 UB，响亮拒绝；②`sym` static 指向 guest static 未接（mangled 静态名审计仍会命中），按 workload 再立；③ **dep crate** 的 global_asm/naked 中 `sym` 指向 dep 自身 guest fn——条目预算须在 bin 链接上下文做，当前仍响亮拒绝；pulp 等真实形态零操作数，未遇阻塞 | src/lower/global_asm.rs，decision-history §7.9/§7.23 |
 | R17 | **FFI 按值封送残余边界（C1 闭合后）** | union 按值（SysV union 分类另规则）、SIMD 向量按值、变参尾参位聚合、align>8 聚合、multi-variant enum 按值——五形态 freeze 响亮 Err（文案可鉴红分类）；`{i128}`/f128/long-double/_Complex 既有标量边界不动。**2026-07-22 增第六形态**：packed/align(N) 非自然布局聚合（audit F-06——libffi 类型系统只能表达自然布局，冻结校验 `validate_agg_natural` 已把此类从静默错调改为 freeze 响亮拒绝；完整 padding 表达按真实 workload 触发再立）。各形态同 helper 可扩 | src/lower/ffi_sig.rs，designs/c1-ffi-agg-design.md §0 |
 | R18 | **C-unwind 边界残余（F-09 → 属性保全接受）** | ① callback 形：`C-unwind` 签名**接受并保全 unwind 属性**（`ForeignSig.unwind`，2026-07-22 c_mlua_lua 实锤反转——冻结拒绝会把真实 workload 打红；接受是「读过的」非「没看见」）。**残余边界 = callback 内 panic 仍 abort 于 nounwind trampoline**（libffi 闭包代码无 unwind info，宿主 unwinder 原理性不可穿；真 propagation 需 per-sig CFI stub 新机制，按实锤再立）。longjmp 形不经 unwinder、机器层不受 ABI 属性影响，可用（mlua lua_Alloc 实锤）；② 出向形：foreign 直调的 `C-unwind` 未建模（libffi 边界天然不可传播异常，语义差记档） | src/lower/ffi_sig.rs，src/lower/linker/calls.rs，src/vm/engine/thunks.rs |
 | R19 | **`#![no_main]` / `#[start]` 入口形态拒绝**（2026-07-22 登记） | 入口类型非 `EntryFnType::Main` 一律响亮拒绝（exit 1 + 诊断，src/cli.rs:489）；嵌入式/bootloader 式入口形态无 corpus 实锤，重开需真实 workload | src/cli.rs |
@@ -225,7 +226,7 @@
 |---|---|---|
 | §0–§5 M4 Trap 普查（2026-07-07 快照） | 精髓在 [history/m4.1-design.md](history/m4.1-design.md) F1–F7 与 [history/m4-log.md](history/m4-log.md)；普查方法与 §2 三发现已被施工兑现 | 历史 |
 | §6 thunk 盲区（结构体内嵌 fn-ptr） | 已根治（P1 条目可执行化 `4202317`，decision-history §7.6）；残余阶梯 → T4 | **已关闭** |
-| §7 dep crate global_asm | → C4 | 开放 |
+| §7 dep crate global_asm | C4 已于 §7.23 闭合；残余 → R16 | 已关闭主项 |
 | §8 JIT 间接调用准入 | → E1 | 开放 |
 | §9 FFI 按值聚合封送 | → C1 | 开放 |
 | §10 ① 符号在 rlib ② asm noreturn | → C2 / C3 | 开放 |

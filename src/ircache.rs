@@ -160,30 +160,6 @@ pub(crate) fn envs_current(envs: &[(String, Option<String>)]) -> bool {
     envs.iter().all(|(k, v)| env_matches(k, v))
 }
 
-/// 首个失配盖戳（诊断用；全配 = None）
-pub(crate) fn stamps_first_mismatch(files: &[FileStamp]) -> Option<FileStamp> {
-    files
-        .iter()
-        .find(|f| stamp(&f.path).as_ref() != Some(*f))
-        .map(|f| {
-            stamp(&f.path).map_or_else(
-                || FileStamp {
-                    path: format!("{}（当前无法盖戳）", f.path),
-                    size: f.size,
-                    mtime_ns: f.mtime_ns,
-                },
-                |cur| FileStamp {
-                    path: format!(
-                        "{}（记录 size={} mtime_ns={}，当前 size={} mtime_ns={}）",
-                        f.path, f.size, f.mtime_ns, cur.size, cur.mtime_ns
-                    ),
-                    size: 0,
-                    mtime_ns: 0,
-                },
-            )
-        })
-}
-
 /// 热路径查找。返回的 Module 已含恢复到固定基址的冻结区；asm_stub_addrs 是
 /// 序列化时的陈旧地址，调用方**必须**以 asm_sites 重物化覆写后再执行。
 pub fn lookup(rustc_args: &[String], base_key: Option<&str>) -> Option<ir::Module> {
