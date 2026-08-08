@@ -26,6 +26,7 @@ USAGE:
     mirvm run <x.mirvm>  [OPTIONS] [-- <program args>]   # 跑 .mirvm 包（mode B 片②）
     mirvm pack <target>  [-o out.mirvm]                  # cargo 项目 / 脚本 / 单文件 → .mirvm 包
     mirvm run <dir | Cargo.toml> [-- <program args>]     # cargo 项目（依赖自动构建为 MIR rlib）
+    mirvm test [dir | Cargo.toml] [OPTIONS] [TESTNAME] [-- <libtest args>]
     mirvm cache status                                   # 本地仓库各组件体量 + 陈代体量
     mirvm cache purge [--dry-run]                        # 默认 = 清陈代（deps/base/ir 非本 build 代）
     mirvm cache purge --deps|--base|--ir                 # 对应族全清（所有代）
@@ -79,8 +80,15 @@ pub fn main() -> ExitCode {
         crate::os::signal::install_segv_dump();
     }
     let mut argv = std::env::args();
-    argv.next(); // 跳过自身
+    let argv0 = argv.next().unwrap_or_default();
 
+    // `CARGO_BIN_EXE_*` 的 self 启动器是指向 mirvm 的符号链接，旁边带根 bin
+    // 配方。必须在普通命令分派前识别，否则会把 guest 参数误当成 mirvm 命令。
+    if let Some(recipe) = crate::cargoless::driver::root_launcher_recipe(Path::new(&argv0)) {
+        return crate::cargoless::driver::run_root_recipe(
+            std::iter::once(recipe.display().to_string()).chain(argv),
+        );
+    }
     let Some(first) = argv.next() else {
         eprint!("{USAGE}");
         return ExitCode::from(2);
@@ -100,6 +108,9 @@ pub fn main() -> ExitCode {
     if first == "__cless-dep" {
         return run_cless_dep(argv.collect());
     }
+    if first == "__cless-run-root" {
+        return crate::cargoless::driver::run_root_recipe(argv);
+    }
     if std::env::var_os("MIRVM_CARGO_SESSION").is_some() {
         // RUSTC_WRAPPER：first = 真 rustc 路径
         cargo_shim::phase_wrapper(std::iter::once(first).chain(argv));
@@ -107,6 +118,7 @@ pub fn main() -> ExitCode {
 
     match first.as_str() {
         "run" => run_main(argv),
+        "test" => test_main(argv),
         "pack" => pack_main(argv),
         "cache" => cache_main(argv),
         "deps" => deps_main(argv),
@@ -118,6 +130,47 @@ pub fn main() -> ExitCode {
         "spike5" => crate::vm::spikes::spike5::run(argv),
         _ => {
             eprint!("{USAGE}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// `mirvm test [项目] [Cargo 选择参数/TESTNAME] [-- libtest 参数]`。
+/// 项目参数只在第一槽识别；缺省当前目录。Cargo 兼容轨保留原参数逐字解释，
+/// self 轨在 cargoless::driver 内按同一合同解析。
+fn test_main(argv: impl Iterator<Item = String>) -> ExitCode {
+    let mut before = Vec::new();
+    let mut harness_args = Vec::new();
+    let mut after_dash = false;
+    for arg in argv {
+        if after_dash {
+            harness_args.push(arg);
+        } else if arg == "--" {
+            after_dash = true;
+        } else {
+            before.push(arg);
+        }
+    }
+
+    let project = before
+        .first()
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir() || p.file_name().is_some_and(|f| f == "Cargo.toml"));
+    if project.is_some() {
+        before.remove(0);
+    }
+    let project = project.unwrap_or_else(|| PathBuf::from("."));
+    let dir = if project.is_dir() {
+        project
+    } else {
+        project.parent().unwrap_or(Path::new(".")).to_path_buf()
+    };
+
+    match std::env::var("MIRVM_DEPS").as_deref() {
+        Ok("cargo") => cargo_shim::phase_cargo_test(&dir, &before, &harness_args),
+        Err(_) | Ok("self") => crate::cargoless::driver::test_project(&dir, &before, &harness_args),
+        Ok(other) => {
+            eprintln!("mirvm: MIRVM_DEPS only accepts `cargo` or `self` (got `{other}`)");
             ExitCode::from(2)
         }
     }

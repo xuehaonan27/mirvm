@@ -3,7 +3,7 @@
 #
 # 档位（由小到大）：
 #   fast    逢提交级：cargo fmt/clippy/test + diff.sh 双态 + diff_cargo + diff_cless
-#           + bldrs_rerun + gate_truth
+#           + cargoless_test_contract + bldrs_rerun + gate_truth
 #   smoke   战役批次级：fast + corpus smoke 层（tests/corpus.manifest）+ probes + runtime_gates
 #   gate    战役收尾级：静态/单元/gate_truth + tests/gate.sh 全量（其内部已含
 #           corpus 全防线 + diff 四态 + diff_cargo + perf + a2 + probes + runtime_gates）
@@ -51,6 +51,7 @@ run_diff_family() {  # 差分家族（diff.sh 双态 + cargo 形态 + cargoless 
     run_step "diff.sh(JIT=1+SYNC)" env MIRVM_JIT_SYNC=1 MIRVM_JIT_THRESHOLD=1 bash tests/diff.sh
     run_step "diff_cargo" bash tests/diff_cargo.sh
     run_step "diff_cless" bash tests/diff_cless.sh
+    run_step "cargoless_test_contract" bash tests/cargoless_test_contract.sh
     run_step "bldrs_rerun" bash tests/bldrs_rerun.sh
     run_step "gate_truth" bash tests/gate_truth_regression.sh
 }

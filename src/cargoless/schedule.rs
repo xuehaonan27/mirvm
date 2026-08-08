@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 
 use super::buildrs::BuildOutput;
-use super::manifest::{PackageManifest, ProfileFlags};
+use super::manifest::{DepKind, PackageManifest, ProfileFlags};
 use super::resolve::{ResolvePlan, Unit, UnitClass};
 
 /// 产物布局（见文件头）。
@@ -501,7 +501,7 @@ fn push_profile_flags(a: &mut Vec<String>, p: &ProfileFlags) {
     a.push(format!("debug-assertions={}", yn(p.debug_assertions)));
     a.push("-C".into());
     a.push(format!("overflow-checks={}", yn(p.overflow_checks)));
-    if p.opt_level != 0 {
+    if !p.opt_level.is_zero() {
         a.push("-C".into());
         a.push(format!("opt-level={}", p.opt_level));
     }
@@ -615,6 +615,14 @@ pub fn dep_rustc_args(
     }
     a.push("--check-cfg".into());
     a.push("cfg(docsrs,test)".into());
+    let vals = u
+        .declared_features
+        .iter()
+        .map(|v| format!("\"{v}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    a.push("--check-cfg".into());
+    a.push(format!("cfg(feature, values({vals}))"));
     push_profile_flags(&mut a, profile);
     a.push("-C".into());
     a.push(format!("metadata={fp}"));
@@ -632,7 +640,7 @@ pub fn dep_rustc_args(
     a.push("-L".into());
     a.push(format!("dependency={}", layout.host_deps.display()));
     for d in &u.deps {
-        if d.class != UnitClass::Normal {
+        if d.kind != DepKind::Normal {
             continue; // Build 边不是代码依赖（切③ 修正面）
         }
         let du = &plan.units[d.unit];
@@ -716,7 +724,7 @@ pub fn bin_rustc_args(
     a.push(format!("cfg(feature, values({vals}))"));
     push_profile_flags(&mut a, &manifest.profile);
     for d in &plan.root_deps {
-        if d.class != UnitClass::Normal {
+        if d.kind != DepKind::Normal {
             continue; // Build 边不是代码依赖（切③ 修正面）
         }
         let du = &plan.units[d.unit];
@@ -751,6 +759,119 @@ pub fn bin_rustc_args(
     // rustflags 末尾追加：后旗压前旗（dep_rustc_args 同款纪律）
     a.extend(rustflags.iter().cloned());
     a
+}
+
+/// 根包测试目标参数。先复用普通 bin 的 Cargo 对齐公共段，再只改两处：
+/// - libtest harness 目标用 `--test`，不再显式 `--crate-type=bin`；
+/// - 测试上下文额外看见根 Dev 边。普通根 lib 仍由 root_lib_rustc_args
+///   编译且只消费 Normal 边，正好对应 Cargo 的“双编根 lib”。
+#[allow(clippy::too_many_arguments)]
+pub fn test_target_rustc_args(
+    manifest: &PackageManifest,
+    plan: &ResolvePlan,
+    fps: &[String],
+    sysroot: &Path,
+    layout: &Layout,
+    target_name: &str,
+    target_path: &Path,
+    harness: bool,
+    bo: Option<&BuildOutput>,
+    searches: &[String],
+    rustflags: &[String],
+    root_lib: Option<(&str, &str)>,
+) -> Vec<String> {
+    let mut args = bin_rustc_args(
+        manifest,
+        plan,
+        fps,
+        sysroot,
+        layout,
+        target_name,
+        target_path,
+        bo,
+        searches,
+        rustflags,
+        root_lib,
+    );
+    if harness {
+        if let Some(i) = args.iter().position(|a| a == "--crate-type=bin") {
+            args.remove(i);
+        }
+        args.push("--test".into());
+    } else {
+        // Cargo 的 harness=false 测试仍设置 cfg(test)，但保留用户 main。
+        args.push("--cfg".into());
+        args.push("test".into());
+    }
+    append_root_dev_externs(&mut args, plan, fps, layout);
+    args
+}
+
+fn append_root_dev_externs(
+    args: &mut Vec<String>,
+    plan: &ResolvePlan,
+    fps: &[String],
+    layout: &Layout,
+) {
+    for d in &plan.root_deps {
+        if d.kind != DepKind::Dev {
+            continue;
+        }
+        let unit = &plan.units[d.unit];
+        args.push("--extern".into());
+        args.push(format!(
+            "{}={}",
+            d.key.replace('-', "_"),
+            extern_path(layout, &layout.deps, unit, &fps[d.unit], "rlib")
+        ));
+    }
+}
+
+/// `cargo test` 默认会编译 examples，并在有 integration test 时编译普通 bins，
+/// 但不会执行它们。这里沿用同一参数主体，以 metadata-only rustc 会话完成
+/// 解析、类型检查和 mono 收集；`include_dev` 对应 example=true、普通 bin=false。
+#[allow(clippy::too_many_arguments)]
+pub fn check_root_target_rustc_args(
+    manifest: &PackageManifest,
+    plan: &ResolvePlan,
+    fps: &[String],
+    sysroot: &Path,
+    layout: &Layout,
+    target_name: &str,
+    target_path: &Path,
+    include_dev: bool,
+    bo: Option<&BuildOutput>,
+    searches: &[String],
+    rustflags: &[String],
+    root_lib: Option<(&str, &str)>,
+    fp: &str,
+) -> Vec<String> {
+    let mut args = bin_rustc_args(
+        manifest,
+        plan,
+        fps,
+        sysroot,
+        layout,
+        target_name,
+        target_path,
+        bo,
+        searches,
+        rustflags,
+        root_lib,
+    );
+    if include_dev {
+        append_root_dev_externs(&mut args, plan, fps, layout);
+    }
+    args.push("--emit=dep-info,metadata".into());
+    args.push("-C".into());
+    args.push(format!("metadata={fp}"));
+    args.push("-C".into());
+    args.push(format!("extra-filename=-{fp}"));
+    args.push("--out-dir".into());
+    args.push(layout.deps.display().to_string());
+    args.push("-Zalways-encode-mir".into());
+    args.push("-Zno-codegen".into());
+    args
 }
 
 /// 根包 lib target 的 rustc 参数（D15 P3 切⑤a full 层迁移面，hexyl 实锤：
@@ -820,8 +941,8 @@ pub fn root_lib_rustc_args(
     a.push("-L".into());
     a.push(format!("dependency={}", layout.host_deps.display()));
     for d in &plan.root_deps {
-        if d.class != UnitClass::Normal {
-            continue; // Build 边不是代码依赖（切③ 修正面）
+        if d.kind != DepKind::Normal {
+            continue; // 根普通 lib 不消费 Build/Dev 边
         }
         let du = &plan.units[d.unit];
         // proc-macro 边指 host-deps 的 dylib；普通边照旧 target .rmeta
@@ -881,6 +1002,14 @@ pub fn host_rustc_args(
     }
     a.push("--check-cfg".into());
     a.push("cfg(docsrs,test)".into());
+    let vals = u
+        .declared_features
+        .iter()
+        .map(|v| format!("\"{v}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    a.push("--check-cfg".into());
+    a.push(format!("cfg(feature, values({vals}))"));
     push_profile_flags(&mut a, profile);
     a.push("-C".into());
     a.push(format!("metadata={fp}"));
@@ -945,6 +1074,14 @@ pub fn proc_macro_rustc_args(
     }
     a.push("--check-cfg".into());
     a.push("cfg(docsrs,test)".into());
+    let vals = u
+        .declared_features
+        .iter()
+        .map(|v| format!("\"{v}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    a.push("--check-cfg".into());
+    a.push(format!("cfg(feature, values({vals}))"));
     push_profile_flags(&mut a, profile);
     a.push("-C".into());
     a.push(format!("metadata={fp}"));
@@ -1021,7 +1158,7 @@ pub fn build_script_rustc_args(
     a.push("--check-cfg".into());
     a.push("cfg(docsrs,test)".into());
     let vals = u
-        .features
+        .declared_features
         .iter()
         .map(|v| format!("\"{v}\""))
         .collect::<Vec<_>>()
@@ -1038,7 +1175,7 @@ pub fn build_script_rustc_args(
     a.push("-L".into());
     a.push(format!("dependency={host}"));
     for d in &u.deps {
-        if d.class != UnitClass::Build {
+        if d.kind != DepKind::Build {
             continue; // build script 只吃 Build 类边（build-deps）
         }
         let du = &plan.units[d.unit];
@@ -1121,6 +1258,7 @@ pub fn root_build_script_rustc_args(
 mod tests {
     use super::*;
     use crate::cargoless::lockfile::Lockfile;
+    use crate::cargoless::manifest::DepKind;
     use crate::cargoless::resolve::{UnitClass, UnitDep};
     use semver::Version;
     use std::collections::{BTreeMap, BTreeSet};
@@ -1140,6 +1278,10 @@ mod tests {
             from_registry,
             class: UnitClass::Normal,
             features: features
+                .iter()
+                .map(|f| f.to_string())
+                .collect::<BTreeSet<_>>(),
+            declared_features: features
                 .iter()
                 .map(|f| f.to_string())
                 .collect::<BTreeSet<_>>(),
@@ -1179,6 +1321,7 @@ mod tests {
                 key: "a".into(),
                 unit: 0,
                 class: UnitClass::Normal,
+                kind: DepKind::Normal,
             }],
         );
         let c = unit(
@@ -1190,6 +1333,7 @@ mod tests {
                 key: "a".into(),
                 unit: 0,
                 class: UnitClass::Normal,
+                kind: DepKind::Normal,
             }],
         );
         plan_with(
@@ -1199,11 +1343,13 @@ mod tests {
                     key: "b".into(),
                     unit: 1,
                     class: UnitClass::Normal,
+                    kind: DepKind::Normal,
                 },
                 UnitDep {
                     key: "c".into(),
                     unit: 2,
                     class: UnitClass::Normal,
+                    kind: DepKind::Normal,
                 },
             ],
         )
@@ -1363,7 +1509,7 @@ mod tests {
         let relaxed = ProfileFlags {
             debug_assertions: false,
             overflow_checks: false,
-            opt_level: 2,
+            opt_level: crate::cargoless::manifest::OptLevel::O2,
         };
         let fps3 = fingerprints(&plan, &relaxed, "stamp0", &[]).unwrap();
         assert_ne!(fps0[0], fps3[0], "profile 三员进 fp");
@@ -1485,6 +1631,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_args_use_libtest_and_add_only_dev_externs_to_test_unit() {
+        let normal = unit("normal", "1.0.0", true, &[], vec![]);
+        let dev = unit("devonly", "1.0.0", true, &[], vec![]);
+        let mut plan = plan_with(
+            vec![normal, dev],
+            vec![
+                UnitDep {
+                    key: "normal".into(),
+                    unit: 0,
+                    class: UnitClass::Normal,
+                    kind: DepKind::Normal,
+                },
+                UnitDep {
+                    key: "devonly".into(),
+                    unit: 1,
+                    class: UnitClass::Normal,
+                    kind: DepKind::Dev,
+                },
+            ],
+        );
+        plan.root_features.insert("root-feature".into());
+        let fps = fingerprints(&plan, &ProfileFlags::default(), "s", &[]).unwrap();
+        let manifest = PackageManifest::parse(
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [features]\nroot-feature = []\n\
+             [dependencies]\nnormal = \"1\"\n\
+             [dev-dependencies]\ndevonly = \"1\"\n",
+            Path::new("/tmp/demo"),
+        )
+        .unwrap();
+        let lo = layout();
+        let args = test_target_rustc_args(
+            &manifest,
+            &plan,
+            &fps,
+            Path::new("/sys"),
+            &lo,
+            "demo",
+            Path::new("/tmp/demo/src/lib.rs"),
+            true,
+            None,
+            &[],
+            &[],
+            None,
+        );
+        assert!(args.iter().any(|arg| arg == "--test"));
+        assert!(!args.iter().any(|arg| arg == "--crate-type=bin"));
+        assert!(args.windows(2).any(|w| {
+            w[0] == "--extern"
+                && w[1] == format!("normal=/tmp/cless/deps/libnormal-{}.rlib", fps[0])
+        }));
+        assert!(args.windows(2).any(|w| {
+            w[0] == "--extern"
+                && w[1] == format!("devonly=/tmp/cless/deps/libdevonly-{}.rlib", fps[1])
+        }));
+
+        let normal_lib = root_lib_rustc_args(
+            &manifest,
+            &plan,
+            &fps,
+            Path::new("/sys"),
+            &lo,
+            "demo",
+            Path::new("/tmp/demo/src/lib.rs"),
+            None,
+            &[],
+            &[],
+            "rootfp",
+        );
+        assert!(!normal_lib.iter().any(|arg| arg.contains("devonly=")));
+    }
+
     /// proc-macro 场景（serde 家族形状）：shared 双用（bin 与 my_derive 都
     /// 用）、pm_helper 仅 host、my_derive = proc-macro、uses_pm 是带
     /// proc-macro 边的普通 target dep。
@@ -1494,6 +1713,7 @@ mod tests {
             key: key.into(),
             unit,
             class: UnitClass::Normal,
+            kind: DepKind::Normal,
         };
         let pm_helper = unit("pm-helper", "1.0.0", true, &[], vec![dep("shared", 0)]);
         let mut my_derive = unit(
@@ -1677,11 +1897,13 @@ mod tests {
             key: key.into(),
             unit,
             class: UnitClass::Build,
+            kind: DepKind::Build,
         };
         let ndep = |key: &str, unit: usize| UnitDep {
             key: key.into(),
             unit,
             class: UnitClass::Normal,
+            kind: DepKind::Normal,
         };
         let mut cc0 = unit("cc0", "1.0.0", true, &[], vec![]);
         cc0.class = UnitClass::Build;

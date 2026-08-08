@@ -73,6 +73,7 @@ pub struct UnitDep {
     /// 边类（normal/build）；切③ 起按边类分列消费（extern 过滤、build
     /// 闭包、build script --extern）。
     pub class: UnitClass,
+    pub kind: DepKind,
 }
 
 /// 一个编译单元（包 × 类别 × feature 集）。
@@ -89,6 +90,9 @@ pub struct Unit {
     #[allow(dead_code)]
     pub class: UnitClass,
     pub features: BTreeSet<String>,
+    /// Cargo 传给 rustc `--check-cfg cfg(feature, values(...))` 的声明全集；
+    /// 与上面的本次启用集合是两件事。
+    pub declared_features: BTreeSet<String>,
     pub proc_macro: bool,
     pub has_build_script: bool,
     /// `[package] build = "custom.rs"` 的自定义 build script 路径；
@@ -124,9 +128,31 @@ pub struct ResolvePlan {
     pub lock: Lockfile,
 }
 
+/// 根包当前用途只改变 dev 依赖是否进入构建图；版本求解和 Cargo.lock 始终
+/// 看见根 dev 依赖，与 Cargo 在 `cargo build` 时也会锁定 dev 依赖的行为一致。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResolvePurpose {
+    Run,
+    Test,
+}
+
+impl ResolvePurpose {
+    fn includes_dev(self) -> bool {
+        self == Self::Test
+    }
+}
+
 // ---------- 主入口 ----------
 
 pub fn resolve(root: &PackageManifest, src: &mut impl PkgSource) -> Result<ResolvePlan, String> {
+    resolve_for(root, src, ResolvePurpose::Run)
+}
+
+pub fn resolve_for(
+    root: &PackageManifest,
+    src: &mut impl PkgSource,
+    purpose: ResolvePurpose,
+) -> Result<ResolvePlan, String> {
     let lock_path = root.root.join("Cargo.lock");
     let input_lock = if lock_path.is_file() {
         Some(Lockfile::read(&lock_path)?)
@@ -136,28 +162,38 @@ pub fn resolve(root: &PackageManifest, src: &mut impl PkgSource) -> Result<Resol
 
     // path 依赖 BFS（path 包及其传递 path 依赖的 manifest 全集）
     let mut path_manifests: BTreeMap<String, PackageManifest> = BTreeMap::new();
-    let mut queue: VecDeque<PackageManifest> = VecDeque::new();
-    queue.push_back(clone_root_shallow(root));
-    while let Some(m) = queue.pop_front() {
-        for d in &m.deps {
+    let mut queue: VecDeque<(PackageManifest, bool)> = VecDeque::new();
+    queue.push_back((clone_root_shallow(root), true));
+    while let Some((m, is_root)) = queue.pop_front() {
+        for d in m.deps.iter().filter(|d| is_root || d.kind != DepKind::Dev) {
             if let DepSource::Path(p) = &d.source
                 && !path_manifests.contains_key(&d.package)
             {
                 let pm = PackageManifest::read_dir(p)
                     .map_err(|e| format!("path 依赖 {}（{}）: {e}", d.package, p.display()))?;
                 path_manifests.insert(d.package.clone(), pm);
-                queue.push_back(clone_root_shallow(path_manifests.get(&d.package).unwrap()));
+                queue.push_back((
+                    clone_root_shallow(path_manifests.get(&d.package).unwrap()),
+                    false,
+                ));
             }
         }
     }
 
     // 版本求解 + feature 统一（两遍：resolve 图 = 强 ∪ 弱引用（lock/求解门），
     // 构建图 = 仅强边（units 的 feature 与可构建性，与 cargo build 图一致））
-    let (version_map, out_lock, nodes, build_nodes, edge_versions) = match &input_lock {
+    let (version_map, out_lock, _lock_nodes, build_nodes, edge_versions) = match &input_lock {
         Some(lf) => {
             let (vm, ev) = versions_from_lock(root, &path_manifests, lf)?;
-            let (nodes, _) = unify_features(root, &path_manifests, &ev, src, true)?;
-            let (build_nodes, _) = unify_features(root, &path_manifests, &ev, src, false)?;
+            let (nodes, _) = unify_features(root, &path_manifests, &ev, src, true, true)?;
+            let (build_nodes, _) = unify_features(
+                root,
+                &path_manifests,
+                &ev,
+                src,
+                false,
+                purpose.includes_dev(),
+            )?;
             (vm, lf.clone(), nodes, build_nodes, ev)
         }
         None => {
@@ -170,7 +206,8 @@ pub fn resolve(root: &PackageManifest, src: &mut impl PkgSource) -> Result<Resol
                     eprintln!("DBG-SOLVE pass activated={activated:?}");
                 }
                 let (vm, lf, ev) = solve_fresh(root, &path_manifests, src, &activated)?;
-                let (nodes, new_activated) = unify_features(root, &path_manifests, &ev, src, true)?;
+                let (nodes, new_activated) =
+                    unify_features(root, &path_manifests, &ev, src, true, true)?;
                 if std::env::var_os("MIRVM_DEBUG_UNIFY").is_some() {
                     eprintln!("DBG-SOLVE pass end new_activated={new_activated:?}");
                 }
@@ -188,7 +225,14 @@ pub fn resolve(root: &PackageManifest, src: &mut impl PkgSource) -> Result<Resol
                         &nodes,
                         src,
                     )?;
-                    let (build_nodes, _) = unify_features(root, &path_manifests, &ev, src, false)?;
+                    let (build_nodes, _) = unify_features(
+                        root,
+                        &path_manifests,
+                        &ev,
+                        src,
+                        false,
+                        purpose.includes_dev(),
+                    )?;
                     break (vm, lf, nodes, build_nodes, ev);
                 }
                 activated = new_activated;
@@ -197,14 +241,20 @@ pub fn resolve(root: &PackageManifest, src: &mut impl PkgSource) -> Result<Resol
     };
 
     // 编译单元装配（构建图节点：仅强边激活面）+ 根的 --extern 边表
-    let (units, root_deps) =
-        assemble_units(root, &path_manifests, &edge_versions, &build_nodes, src)?;
+    let (units, root_deps) = assemble_units(
+        root,
+        &path_manifests,
+        &edge_versions,
+        &build_nodes,
+        src,
+        purpose.includes_dev(),
+    )?;
 
     Ok(ResolvePlan {
         root_name: root.name.clone(),
         root_version: root.version.clone(),
         root_dir: root.root.clone(),
-        root_features: nodes
+        root_features: build_nodes
             .get(&(root.name.clone(), root.version.clone(), UnitClass::Normal))
             .map(|n| n.features.clone())
             .unwrap_or_default(),
@@ -288,8 +338,12 @@ fn versions_from_lock(
         }
     }
     // 完整性校验：manifest 的每个 registry req 必须被 locked 版本满足（lock 过期防线）
-    let check = |m: &PackageManifest| -> Result<(), String> {
-        for d in &m.deps {
+    let check = |m: &PackageManifest, include_dev: bool| -> Result<(), String> {
+        for d in m
+            .deps
+            .iter()
+            .filter(|d| include_dev || d.kind != DepKind::Dev)
+        {
             if let DepSource::Registry(req) = &d.source {
                 let satisfied = map
                     .get(&d.package)
@@ -304,9 +358,9 @@ fn versions_from_lock(
         }
         Ok(())
     };
-    check(root)?;
+    check(root, true)?;
     for m in path_manifests.values() {
-        check(m)?;
+        check(m, false)?;
     }
     Ok((map, edges))
 }
@@ -349,6 +403,13 @@ type RawDep = (String, String, VersionReq, UnitClass, bool); // (依赖键, 包�
 
 /// (parent, dep key, class) → (pkg, bucket) 的边分派记录类型。
 type EdgeAssign = BTreeMap<(String, Version, String, String, UnitClass), (String, u32)>;
+
+fn dep_unit_class(kind: DepKind) -> UnitClass {
+    match kind {
+        DepKind::Normal | DepKind::Dev => UnitClass::Normal,
+        DepKind::Build => UnitClass::Build,
+    }
+}
 /// get_dependencies 幂等 memo 值类型。
 type DepsRc = std::rc::Rc<Vec<(Pkg, pubgrub::Ranges<Version>)>>;
 
@@ -468,7 +529,7 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
                     .manifests
                     .get(name)
                     .ok_or_else(|| io_err(format!("path 包 {name} 的 manifest 未收编")))?;
-                for d in &m.deps {
+                for d in m.deps.iter().filter(|d| d.kind != DepKind::Dev) {
                     collect_decl(name, &m.version, d, self.activated, self, &mut raw)?;
                 }
             }
@@ -593,10 +654,7 @@ fn collect_decl<'a, S: PkgSource>(
                 d.key.clone(),
                 d.package.clone(),
                 req.clone(),
-                match d.kind {
-                    DepKind::Normal => UnitClass::Normal,
-                    DepKind::Build => UnitClass::Build,
-                },
+                dep_unit_class(d.kind),
                 true,
             ));
         }
@@ -605,10 +663,7 @@ fn collect_decl<'a, S: PkgSource>(
                 d.key.clone(),
                 d.package.clone(),
                 VersionReq::STAR,
-                match d.kind {
-                    DepKind::Normal => UnitClass::Normal,
-                    DepKind::Build => UnitClass::Build,
-                },
+                dep_unit_class(d.kind),
                 false,
             ));
         }
@@ -1001,6 +1056,10 @@ fn fill_lock_dependency_lines(
             key: key.to_string(),
             package: pkg_name.to_string(),
             class,
+            kind: match class {
+                UnitClass::Normal => DepKind::Normal,
+                UnitClass::Build => DepKind::Build,
+            },
             optional: false,
             default_features: false,
             features: vec![],
@@ -1018,10 +1077,7 @@ fn fill_lock_dependency_lines(
                 !d.optional || activated_keys(&root.name, &root.version).contains(&d.key.as_str())
             })
             .map(|d| {
-                let class = match d.kind {
-                    DepKind::Normal => UnitClass::Normal,
-                    DepKind::Build => UnitClass::Build,
-                };
+                let class = dep_unit_class(d.kind);
                 let req = match &d.source {
                     DepSource::Registry(r) => Some(r),
                     DepSource::Path(_) => None,
@@ -1039,14 +1095,12 @@ fn fill_lock_dependency_lines(
             (name.clone(), m.version.clone()),
             m.deps
                 .iter()
+                .filter(|d| d.kind != DepKind::Dev)
                 .filter(|d| {
                     !d.optional || activated_keys(name, &m.version).contains(&d.key.as_str())
                 })
                 .map(|d| {
-                    let class = match d.kind {
-                        DepKind::Normal => UnitClass::Normal,
-                        DepKind::Build => UnitClass::Build,
-                    };
+                    let class = dep_unit_class(d.kind);
                     let req = match &d.source {
                         DepSource::Registry(r) => Some(r),
                         DepSource::Path(_) => None,
@@ -1126,6 +1180,7 @@ struct FeatDep {
     key: String,
     package: String,
     class: UnitClass,
+    kind: DepKind,
     optional: bool,
     default_features: bool,
     features: Vec<String>,
@@ -1242,6 +1297,11 @@ fn ensure_registry_node(
             } else {
                 UnitClass::Normal
             },
+            kind: if d.kind.as_deref() == Some("build") {
+                DepKind::Build
+            } else {
+                DepKind::Normal
+            },
             optional: d.optional,
             default_features: d.default_features,
             features: d.features.clone(),
@@ -1275,6 +1335,7 @@ fn unify_features(
     edge_versions: &EdgeVersions,
     src: &mut impl PkgSource,
     include_weak: bool,
+    include_root_dev: bool,
 ) -> Result<Unified, String> {
     let mut tables: NodeTables = BTreeMap::new();
     let mut nodes: BTreeMap<NodeKey, FeatNode> = BTreeMap::new();
@@ -1284,7 +1345,7 @@ fn unify_features(
         &mut nodes,
         (root.name.clone(), root.version.clone(), UnitClass::Normal),
         root.features.clone(),
-        decls_to_featdeps(&root.deps)?,
+        root_featdeps(&root.deps, include_root_dev)?,
     );
     // 根 default feature 启用（cargo run 语义）
     if root.features.contains_key("default") {
@@ -1423,15 +1484,25 @@ fn unify_features(
 }
 
 fn decls_to_featdeps(decls: &[super::manifest::DepDecl]) -> Result<Vec<FeatDep>, String> {
+    featdeps(decls, false)
+}
+
+fn root_featdeps(
+    decls: &[super::manifest::DepDecl],
+    include_dev: bool,
+) -> Result<Vec<FeatDep>, String> {
+    featdeps(decls, include_dev)
+}
+
+fn featdeps(decls: &[super::manifest::DepDecl], include_dev: bool) -> Result<Vec<FeatDep>, String> {
     Ok(decls
         .iter()
+        .filter(|d| d.kind != DepKind::Dev || include_dev)
         .map(|d| FeatDep {
             key: d.key.clone(),
             package: d.package.clone(),
-            class: match d.kind {
-                DepKind::Normal => UnitClass::Normal,
-                DepKind::Build => UnitClass::Build,
-            },
+            class: dep_unit_class(d.kind),
+            kind: d.kind,
             optional: d.optional,
             default_features: d.default_features,
             features: d.features.clone(),
@@ -1589,6 +1660,7 @@ struct RegistryMinimal {
     edition: String,
     lib_path: PathBuf,
     pkg_env: BTreeMap<String, String>,
+    declared_features: BTreeSet<String>,
 }
 
 fn read_registry_minimal(
@@ -1683,6 +1755,11 @@ fn read_registry_minimal(
         readme.as_deref(),
         rust_version.as_deref(),
     );
+    let declared_features = v
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .map(|features| features.keys().cloned().collect())
+        .unwrap_or_default();
     Ok(RegistryMinimal {
         lib_name: name,
         proc_macro,
@@ -1692,6 +1769,7 @@ fn read_registry_minimal(
         edition,
         lib_path,
         pkg_env,
+        declared_features,
     })
 }
 
@@ -1721,6 +1799,11 @@ fn node_featdeps(
                 UnitClass::Build
             } else {
                 UnitClass::Normal
+            },
+            kind: if d.kind.as_deref() == Some("build") {
+                DepKind::Build
+            } else {
+                DepKind::Normal
             },
             optional: d.optional,
             default_features: d.default_features,
@@ -1760,6 +1843,7 @@ fn assemble_units(
     edge_versions: &EdgeVersions,
     nodes: &BTreeMap<NodeKey, FeatNode>,
     src: &mut impl PkgSource,
+    include_root_dev: bool,
 ) -> Result<(Vec<Unit>, Vec<UnitDep>), String> {
     // 可构建集：从根出发沿 host cfg 为真的边可达（cargo 构建图过滤——
     // 版本/lock 是全平台并集，构建图按 host 求值；serde facade 系那种
@@ -1771,7 +1855,7 @@ fn assemble_units(
     queue.push_back(root_key.clone());
     while let Some(key) = queue.pop_front() {
         let deps = if key.0 == root.name && key.1 == root.version {
-            decls_to_featdeps(&root.deps)?
+            root_featdeps(&root.deps, include_root_dev)?
         } else {
             node_featdeps(&key.0, &key.1, path_manifests, src)?
         };
@@ -1812,18 +1896,12 @@ fn assemble_units(
             let (lib_name, lib_path) = m
                 .targets
                 .iter()
-                .find_map(|t| match t {
-                    super::manifest::Target::Lib { name, path, .. } => {
-                        Some((name.clone(), path.clone()))
-                    }
-                    _ => None,
-                })
+                .find(|t| t.is_lib())
+                .map(|t| (t.name.clone(), t.path.clone()))
                 // 无 lib 目标的 path 依赖是病理包（cargo 同拒）——回退缺省路径，
                 // dep 编译期 rustc 报文件不存在（响亮，不静默吞）
                 .unwrap_or_else(|| (name.replace('-', "_"), m.root.join("src/lib.rs")));
-            let proc_macro = m.targets.iter().any(
-                |t| matches!(t, super::manifest::Target::Lib { proc_macro, .. } if *proc_macro),
-            );
+            let proc_macro = m.targets.iter().any(|t| t.is_lib() && t.proc_macro);
             index.insert((name.clone(), version.clone(), *class), units.len());
             units.push(Unit {
                 package: name.clone(),
@@ -1833,6 +1911,7 @@ fn assemble_units(
                 from_registry: false,
                 class: *class,
                 features: node.features.clone(),
+                declared_features: m.check_cfg_feature_values(),
                 proc_macro,
                 has_build_script: m.has_build_script,
                 build_script_path: m.build_script_path.clone(),
@@ -1855,6 +1934,7 @@ fn assemble_units(
             from_registry: true,
             class: *class,
             features: node.features.clone(),
+            declared_features: rm.declared_features,
             proc_macro: rm.proc_macro,
             has_build_script: rm.has_build,
             build_script_path: rm.build_script_path,
@@ -1902,6 +1982,7 @@ fn assemble_units(
                     key: extern_key(&d, &units[to_idx]),
                     unit: to_idx,
                     class: d.class,
+                    kind: d.kind,
                 },
             ));
         }
@@ -1915,7 +1996,7 @@ fn assemble_units(
     let mut root_deps: Vec<UnitDep> = Vec::new();
     {
         let root_node = nodes.get(&root_key).cloned().unwrap_or_default();
-        for d in decls_to_featdeps(&root.deps)? {
+        for d in root_featdeps(&root.deps, include_root_dev)? {
             if d.optional && !root_node.activated.contains(&d.key) {
                 continue;
             }
@@ -1940,6 +2021,7 @@ fn assemble_units(
                 key: extern_key(&d, &units[to_idx]),
                 unit: to_idx,
                 class: d.class,
+                kind: d.kind,
             });
         }
     }
@@ -2087,6 +2169,38 @@ mod tests {
         assert!(a_unit.features.contains("default"));
         assert!(a_unit.features.contains("std"));
         assert!(!a_unit.from_registry || a_unit.source_dir.ends_with("a-1.2.0"));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn run_locks_but_does_not_build_root_dev_dependencies() {
+        let d = tmpdir("root-dev-purpose");
+        let root = root_project(
+            &d,
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nnormal = \"1\"\n\
+             [dev-dependencies]\ndevonly = \"1\"\n",
+        );
+        let mut src = FakeSource::new(d.join("srcstore"));
+        src.add("normal", vec![iv("normal", "1.0.0")]);
+        src.add("devonly", vec![iv("devonly", "1.0.0")]);
+
+        let run = resolve_for(&root, &mut src, ResolvePurpose::Run).unwrap();
+        assert!(run.version_map.contains_key("devonly"));
+        assert!(!run.units.iter().any(|unit| unit.package == "devonly"));
+        assert!(!run.root_deps.iter().any(|dep| dep.kind == DepKind::Dev));
+
+        let test = resolve_for(&root, &mut src, ResolvePurpose::Test).unwrap();
+        let dev_ix = test
+            .units
+            .iter()
+            .position(|unit| unit.package == "devonly")
+            .unwrap();
+        assert!(
+            test.root_deps
+                .iter()
+                .any(|dep| dep.unit == dev_ix && dep.kind == DepKind::Dev)
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 

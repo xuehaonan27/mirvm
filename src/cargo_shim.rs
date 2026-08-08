@@ -7,12 +7,12 @@
 //! 2. `phase_wrapper`：cargo 的每次 rustc 调用都经过这里。
 //!    - 信息查询/host crate → 透传真 rustc
 //!    - target 依赖 → 真 rustc + `--sysroot <MIR sysroot>` + `-Zalways-encode-mir`
-//!    - 最终可运行 bin → 不编译：把完整 rustc 参数 + 环境写成 JSON"假二进制"
-//!      （外加 stub .d 防 cargo 重建）
-//! 3. `phase_runner`：cargo "运行"假二进制时回到我们手里——读 JSON，
+//!    - 最终可运行 bin → 不编译：写可执行启动器，完整 rustc 参数 + 环境放在
+//!      旁置 JSON（外加真实 .d 防 cargo 重建）
+//! 3. `phase_runner`：cargo "运行"启动器时回到我们手里——读旁置 JSON，
 //!    用 cargo 的原始参数驱动解释器。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 
 use serde::{Deserialize, Serialize};
@@ -101,8 +101,8 @@ fn exec(mut cmd: Command) -> ! {
 
 fn cargo_project_command(
     project_dir: &std::path::Path,
+    action: CargoAction<'_>,
     program_args: &[String],
-    bin_sel: Option<&str>,
     sysroot: &std::path::Path,
     self_exe: &std::path::Path,
     locked: bool,
@@ -110,14 +110,11 @@ fn cargo_project_command(
     let self_str = self_exe.to_str().expect("mirvm 路径非 UTF-8");
     let mut cmd = Command::new(toolchain_cargo());
     cmd.current_dir(project_dir);
-    cmd.arg("run");
+    cmd.arg(action.subcommand());
     if locked {
         cmd.arg("--locked");
     }
-    // D15 P4 切⑥b：cargo run --bin 语义直通
-    if let Some(b) = bin_sel {
-        cmd.arg("--bin").arg(b);
-    }
+    action.append_args(&mut cmd);
     // 强制 host target：让 host/target crate 可区分，且激活 target.runner
     cmd.arg("--target").arg(env!("MIRVM_HOST"));
     // 所有"运行二进制"的动作转给我们
@@ -134,7 +131,9 @@ fn cargo_project_command(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| crate::sysroot::cache_dir().join("target/mirvm"));
     cmd.arg("--target-dir").arg(target_dir);
-    cmd.arg("--quiet");
+    if matches!(action, CargoAction::Run { .. }) {
+        cmd.arg("--quiet");
+    }
     if !program_args.is_empty() {
         cmd.arg("--");
         cmd.args(program_args);
@@ -153,6 +152,35 @@ fn cargo_project_command(
     cmd.env("MIRVM_CARGO_SESSION", "1");
     cmd.env("MIRVM_SYSROOT", sysroot);
     cmd
+}
+
+/// Cargo 兼容轨的用户动作。两种动作共用同一 wrapper/runner 协议；区别只在
+/// Cargo 负责选择一个 run bin，还是选择并串行启动若干 test harness。
+#[derive(Clone, Copy)]
+enum CargoAction<'a> {
+    Run { bin_sel: Option<&'a str> },
+    Test { cargo_args: &'a [String] },
+}
+
+impl CargoAction<'_> {
+    fn subcommand(self) -> &'static str {
+        match self {
+            Self::Run { .. } => "run",
+            Self::Test { .. } => "test",
+        }
+    }
+
+    fn append_args(self, cmd: &mut Command) {
+        match self {
+            Self::Run { bin_sel: Some(bin) } => {
+                cmd.arg("--bin").arg(bin);
+            }
+            Self::Run { bin_sel: None } => {}
+            Self::Test { cargo_args } => {
+                cmd.args(cargo_args);
+            }
+        }
+    }
 }
 
 /// 阶段 1：在 `project_dir` 里驱动 cargo。program_args 传给最终被解释的程序。
@@ -181,8 +209,41 @@ pub fn phase_cargo(
     let locked = std::env::var_os("MIRVM_CARGO_LOCKED").is_some();
     let cmd = cargo_project_command(
         project_dir,
+        CargoAction::Run { bin_sel },
         program_args,
-        bin_sel,
+        &sysroot,
+        &self_exe,
+        locked,
+    );
+    exec(cmd)
+}
+
+/// `mirvm test` 的 Cargo 兼容轨。`cargo_args` 是 `--lib/--test/.../TESTNAME`
+/// 等 Cargo 自己解释的选择参数；`harness_args` 是 `--` 后逐字透给 libtest 的参数。
+pub fn phase_cargo_test(
+    project_dir: &std::path::Path,
+    cargo_args: &[String],
+    harness_args: &[String],
+) -> ! {
+    let project_dir =
+        &std::path::absolute(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
+    if let Err(error) = reject_custom_rustc_wrappers(project_dir) {
+        eprintln!("mirvm: {error}");
+        exit(1);
+    }
+    let sysroot = match crate::sysroot::ensure_sysroot() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("mirvm: 构建 sysroot 失败: {e}");
+            exit(1);
+        }
+    };
+    let self_exe = std::env::current_exe().expect("current_exe 失败");
+    let locked = std::env::var_os("MIRVM_CARGO_LOCKED").is_some();
+    let cmd = cargo_project_command(
+        project_dir,
+        CargoAction::Test { cargo_args },
+        harness_args,
         &sysroot,
         &self_exe,
         locked,
@@ -241,7 +302,7 @@ pub fn phase_wrapper(mut argv: impl Iterator<Item = String>) -> ! {
     }
 
     if is_runnable {
-        // 最终 bin：不编译，写 JSON 假二进制 + stub .d
+        // 最终 bin：不编译，写可执行启动器 + JSON 配方 + 真实 .d
         let info = CrateRunInfo {
             args: args.clone(),
             env: std::env::vars().collect(),
@@ -359,11 +420,63 @@ fn write_fake_outputs(rustc: &std::path::Path, args: &[String], info: &CrateRunI
 
     let json = serde_json::to_string(info).unwrap();
     for f in out_files {
+        let info_path = fake_info_path(&f);
+        std::fs::write(&info_path, &json).unwrap_or_else(|e| {
+            eprintln!("mirvm: 写假二进制配方 {} 失败: {e}", info_path.display());
+            exit(1);
+        });
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let self_exe = std::env::current_exe().expect("current_exe 失败");
+            let quote =
+                |value: &Path| format!("'{}'", value.display().to_string().replace('\'', "'\\''"));
+            let script = format!(
+                "#!/bin/sh\n# MIRVM_RUN_INFO {}\nexec {} runner {} \"$@\"\n",
+                serde_json::to_string(&info_path.display().to_string()).unwrap(),
+                quote(&self_exe),
+                quote(&f)
+            );
+            std::fs::write(&f, script).unwrap_or_else(|e| {
+                eprintln!("mirvm: 写假二进制启动器 {} 失败: {e}", f.display());
+                exit(1);
+            });
+            let mut permissions = std::fs::metadata(&f).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&f, permissions).unwrap_or_else(|e| {
+                eprintln!("mirvm: 设置假二进制权限 {} 失败: {e}", f.display());
+                exit(1);
+            });
+        }
+        #[cfg(not(unix))]
         std::fs::write(&f, &json).unwrap_or_else(|e| {
             eprintln!("mirvm: 写假二进制 {} 失败: {e}", f.display());
             exit(1);
         });
     }
+}
+
+fn fake_info_path(fake_bin: &Path) -> PathBuf {
+    let mut path = fake_bin.as_os_str().to_os_string();
+    path.push(".mirvm-run.json");
+    PathBuf::from(path)
+}
+
+fn read_fake_info(fake_bin: &Path) -> std::io::Result<String> {
+    let info_path = fake_info_path(fake_bin);
+    if info_path.is_file() {
+        return std::fs::read_to_string(info_path);
+    }
+    let launcher = std::fs::read_to_string(fake_bin)?;
+    let Some(encoded) = launcher
+        .lines()
+        .find_map(|line| line.strip_prefix("# MIRVM_RUN_INFO "))
+    else {
+        // 兼容更新前直接把 JSON 写在 artifact 本体里的缓存。
+        return Ok(launcher);
+    };
+    let path: String = serde_json::from_str(encoded).map_err(std::io::Error::other)?;
+    std::fs::read_to_string(path)
 }
 
 /// 阶段 3：runner。argv = [<假二进制路径>, <程序参数...>]。
@@ -377,7 +490,7 @@ pub fn parse_runner_invocation(
     });
     let program_args: Vec<String> = argv.collect();
 
-    let data = std::fs::read_to_string(&fake_bin).unwrap_or_else(|e| {
+    let data = read_fake_info(Path::new(&fake_bin)).unwrap_or_else(|e| {
         eprintln!("mirvm runner: 读取 {fake_bin} 失败: {e}");
         exit(1);
     });
@@ -417,8 +530,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        append_encoded_rustflags, cargo_project_command, configured_cargo_wrapper,
-        looks_like_nested_rustc_wrapper, reject_custom_rustc_wrappers,
+        CargoAction, append_encoded_rustflags, cargo_project_command, configured_cargo_wrapper,
+        looks_like_nested_rustc_wrapper, read_fake_info, reject_custom_rustc_wrappers,
     };
 
     #[test]
@@ -445,8 +558,8 @@ mod tests {
     fn cargo_project_command_is_locked() {
         let command = cargo_project_command(
             Path::new("/tmp/project"),
+            CargoAction::Run { bin_sel: None },
             &[],
-            None,
             Path::new("/tmp/sysroot"),
             Path::new("/tmp/mirvm"),
             true,
@@ -462,8 +575,8 @@ mod tests {
     fn ordinary_cargo_project_command_can_create_a_lockfile() {
         let command = cargo_project_command(
             Path::new("/tmp/project"),
+            CargoAction::Run { bin_sel: None },
             &[],
-            None,
             Path::new("/tmp/sysroot"),
             Path::new("/tmp/mirvm"),
             false,
@@ -475,8 +588,8 @@ mod tests {
     fn cargo_project_command_removes_ambient_wrapper_overrides() {
         let command = cargo_project_command(
             Path::new("/tmp/project"),
+            CargoAction::Run { bin_sel: None },
             &[],
-            None,
             Path::new("/tmp/sysroot"),
             Path::new("/tmp/mirvm"),
             true,
@@ -494,6 +607,63 @@ mod tests {
                     .any(|(candidate, value)| candidate == OsStr::new(key) && value.is_none())
             );
         }
+    }
+
+    #[test]
+    fn cargo_test_command_keeps_selection_and_harness_arguments_separate() {
+        let cargo_args = vec!["--lib".to_string(), "needle".to_string()];
+        let harness_args = vec!["--nocapture".to_string(), "--test-threads=1".to_string()];
+        let command = cargo_project_command(
+            Path::new("/tmp/project"),
+            CargoAction::Test {
+                cargo_args: &cargo_args,
+            },
+            &harness_args,
+            Path::new("/tmp/sysroot"),
+            Path::new("/tmp/mirvm"),
+            true,
+        );
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args[0], OsStr::new("test"));
+        assert!(!args.iter().any(|arg| *arg == OsStr::new("--quiet")));
+        assert!(
+            args.windows(2)
+                .any(|p| p == [OsStr::new("test"), OsStr::new("--locked")])
+        );
+        assert!(args.windows(3).any(|p| {
+            p == [
+                OsStr::new("--lib"),
+                OsStr::new("needle"),
+                OsStr::new("--target"),
+            ]
+        }));
+        assert!(args.windows(3).any(|p| {
+            p == [
+                OsStr::new("--"),
+                OsStr::new("--nocapture"),
+                OsStr::new("--test-threads=1"),
+            ]
+        }));
+    }
+
+    #[test]
+    fn copied_launcher_still_finds_original_run_info() {
+        let root =
+            std::env::temp_dir().join(format!("mirvm-cargo-launcher-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let info = root.join("original.mirvm-run.json");
+        let copied = root.join("copied-bin");
+        std::fs::write(&info, r#"{"args":[],"env":[]}"#).unwrap();
+        std::fs::write(
+            &copied,
+            format!(
+                "#!/bin/sh\n# MIRVM_RUN_INFO {}\n",
+                serde_json::to_string(&info.display().to_string()).unwrap()
+            ),
+        )
+        .unwrap();
+        assert_eq!(read_fake_info(&copied).unwrap(), r#"{"args":[],"env":[]}"#);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

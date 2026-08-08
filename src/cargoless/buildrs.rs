@@ -252,16 +252,12 @@ pub fn build_script_env(ctx: &ExecCtx) -> BTreeMap<String, String> {
     }
     put("HOST", env!("MIRVM_HOST").to_string());
     put("TARGET", env!("MIRVM_HOST").to_string());
-    // mirvm 只有 dev profile 一档（ProfileFlags::default 语义钉）
+    // Cargo 的内建 dev/test profile 都把 PROFILE 暴露成 debug；具体差异由
+    // OPT_LEVEL/DEBUG 等变量表达。
     put("PROFILE", "debug".into());
-    put(
-        "DEBUG",
-        if ctx.profile.opt_level == 0 {
-            "true".into()
-        } else {
-            "false".into()
-        },
-    );
+    // Cargo 的 DEBUG 表示 profile 是否生成 debuginfo，不表示优化等级。本驱动
+    // 当前所有支持 profile 都固定 debuginfo=2，所以 O1/O2 也必须是 true。
+    put("DEBUG", "true".into());
     put("OPT_LEVEL", ctx.profile.opt_level.to_string());
     put(
         "NUM_JOBS",
@@ -814,7 +810,7 @@ mod tests {
         let rel = ProfileFlags {
             debug_assertions: false,
             overflow_checks: false,
-            opt_level: 2,
+            opt_level: crate::cargoless::manifest::OptLevel::O2,
         };
         let env2 = cargo_cfg_env(&BTreeSet::new(), &rel);
         assert!(!env2.contains_key("CARGO_CFG_DEBUG_ASSERTIONS"));

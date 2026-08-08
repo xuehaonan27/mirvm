@@ -32,9 +32,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use super::buildrs::{self, BuildOutput};
-use super::manifest::PackageManifest;
+use super::manifest::{PackageManifest, Target, TargetKind};
 use super::registry::Registry;
-use super::resolve::{ResolvePlan, Unit, resolve};
+use super::resolve::{ResolvePlan, ResolvePurpose, Unit, resolve, resolve_for};
 use super::schedule::{self, Layout};
 
 /// `mirvm run <目录|Cargo.toml> [--bin <名>]`（MIRVM_DEPS=self）。
@@ -48,6 +48,832 @@ pub fn run_project(dir: &Path, program_args: &[String], bin_sel: Option<&str>) -
         }
     };
     drive(&manifest, program_args, bin_sel)
+}
+
+/// 一个根测试目标的独立执行配方。Cargo 每个测试 artifact 各起一进程；self
+/// 路径也把 rustc 参数和编译期环境封进配方，再由 `__cless-run-root` 子进程执行。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RootRunRecipe {
+    rustc_args: Vec<String>,
+    env: Vec<(String, String)>,
+    cwd: PathBuf,
+    argv0: String,
+}
+
+/// `mirvm test` 的单包 self 路径。
+pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) -> ExitCode {
+    let request = match TestRequest::parse(cargo_args) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("mirvm test: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut manifest = match PackageManifest::read_dir(dir) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("mirvm: 读取项目 {} 失败: {e}", dir.display());
+            return ExitCode::from(1);
+        }
+    };
+    manifest.profile = manifest.test_profile;
+    if request.locked && !manifest.root.join("Cargo.lock").is_file() {
+        eprintln!("mirvm test: --locked 要求现有 Cargo.lock");
+        return ExitCode::from(1);
+    }
+    if request.offline {
+        // SAFETY: CLI 启动相，尚未启动 worker/rustc/guest 线程。
+        unsafe { std::env::set_var("MIRVM_OFFLINE", "1") };
+    }
+
+    let mut registry = match Registry::open() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("mirvm: registry 打开失败: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let plan = match resolve_for(&manifest, &mut registry, ResolvePurpose::Test) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("mirvm: 依赖解析失败: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(e) =
+        buildrs::check_links_unique(Some((&manifest.name, manifest.links.as_deref())), &plan)
+    {
+        eprintln!("mirvm: {e}");
+        return ExitCode::from(1);
+    }
+    let selected = match request.select(&manifest, &plan.root_features) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("mirvm test: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let sysroot = match std::env::var_os("MIRVM_SYSROOT") {
+        Some(p) => PathBuf::from(p),
+        None => match crate::sysroot::ensure_sysroot() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("mirvm: 构建 sysroot 失败: {e}");
+                return ExitCode::from(1);
+            }
+        },
+    };
+    let layout = Layout::new();
+    let stamp = crate::sysroot::current_stamp_value()
+        .unwrap_or_else(|| "sysroot-stamp-unknown".to_string());
+    let rustflags = match super::rustflags::from_env_and_disk(&manifest.root) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("mirvm: rustflags 解析失败: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let compiled = match compile_plan(
+        &plan,
+        &layout,
+        &manifest.profile,
+        &rustflags,
+        &sysroot,
+        &stamp,
+        manifest.has_build_script,
+        request.quiet,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("mirvm: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let UnitTables { outputs, re_ran } = compiled.tables;
+    let fps = compiled.fps;
+    let self_exe = std::env::current_exe().expect("current_exe 失败");
+    let root_lib = manifest
+        .targets
+        .iter()
+        .find(|t| t.is_lib())
+        .map(|t| (t.name.clone(), t.path.clone(), t.proc_macro));
+    if root_lib.as_ref().is_some_and(|(_, _, pm)| *pm) {
+        eprintln!("mirvm test: 根 proc-macro 包测试尚未支持");
+        return ExitCode::from(1);
+    }
+
+    let root_fp = match schedule::root_fingerprint(
+        &manifest,
+        &plan,
+        &fps,
+        &manifest.profile,
+        &stamp,
+        &rustflags,
+    ) {
+        Ok(fp) => fp,
+        Err(e) => {
+            eprintln!("mirvm: 根包指纹计算失败: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let root_bo = manifest.has_build_script.then(|| {
+        run_build_lifecycle_root(
+            &manifest,
+            &plan,
+            &fps,
+            &layout,
+            &root_fp,
+            &outputs,
+            &re_ran,
+            request.quiet,
+        )
+        .0
+    });
+
+    let root_searches = buildrs::aggregate_link_searches(&plan, &plan.root_deps, &outputs);
+    let needs_root_lib = selected.iter().any(|s| {
+        matches!(
+            s.target.kind,
+            TargetKind::Bin | TargetKind::Test | TargetKind::Example
+        )
+    });
+    if needs_root_lib
+        && let Some((name, path, _)) = &root_lib
+        && let Err(code) = compile_root_lib(
+            &manifest,
+            &plan,
+            &fps,
+            &sysroot,
+            &layout,
+            name,
+            path,
+            root_bo.as_ref(),
+            &root_searches,
+            &rustflags,
+            &root_fp,
+            &outputs,
+            &self_exe,
+        )
+    {
+        return code;
+    }
+    let root_lib_ref = root_lib
+        .as_ref()
+        .map(|(n, _, _)| (n.as_str(), root_fp.as_str()));
+
+    let mut bin_launchers = BTreeMap::new();
+    if selected
+        .iter()
+        .any(|item| item.target.kind == TargetKind::Test)
+    {
+        for target in manifest.targets.iter().filter(|target| target.is_bin()) {
+            if !target
+                .required_features
+                .iter()
+                .all(|feature| plan.root_features.contains(feature))
+            {
+                continue;
+            }
+            let target_fp = target_fingerprint(&root_fp, target);
+            let args = schedule::bin_rustc_args(
+                &manifest,
+                &plan,
+                &fps,
+                &sysroot,
+                &layout,
+                &target.name,
+                &target.path,
+                root_bo.as_ref(),
+                &root_searches,
+                &rustflags,
+                root_lib_ref,
+            );
+            let env = root_target_env(
+                &manifest,
+                target,
+                root_bo.as_ref(),
+                &layout,
+                &root_fp,
+                &BTreeMap::new(),
+            );
+            match write_bin_launcher(
+                &self_exe, &layout, &manifest, &root_fp, target, args, env, &target_fp,
+            ) {
+                Ok(path) => {
+                    bin_launchers.insert(target.name.clone(), path);
+                }
+                Err(e) => {
+                    eprintln!("mirvm test: {e}");
+                    return ExitCode::from(1);
+                }
+            }
+        }
+    }
+
+    let mut recipes = Vec::new();
+    for item in &selected {
+        let target_fp = target_fingerprint(&root_fp, item.target);
+        let args = if item.run {
+            schedule::test_target_rustc_args(
+                &manifest,
+                &plan,
+                &fps,
+                &sysroot,
+                &layout,
+                &item.target.name,
+                &item.target.path,
+                item.target.harness,
+                root_bo.as_ref(),
+                &root_searches,
+                &rustflags,
+                (!item.target.is_lib()).then_some(root_lib_ref).flatten(),
+            )
+        } else {
+            schedule::check_root_target_rustc_args(
+                &manifest,
+                &plan,
+                &fps,
+                &sysroot,
+                &layout,
+                &item.target.name,
+                &item.target.path,
+                item.include_dev,
+                root_bo.as_ref(),
+                &root_searches,
+                &rustflags,
+                root_lib_ref,
+                &target_fp,
+            )
+        };
+        let env = root_target_env(
+            &manifest,
+            item.target,
+            root_bo.as_ref(),
+            &layout,
+            &root_fp,
+            &bin_launchers,
+        );
+        if item.run {
+            let recipe_path = write_root_recipe(
+                &layout,
+                &manifest,
+                &root_fp,
+                item.target,
+                args.clone(),
+                env.clone(),
+                &target_fp,
+            );
+            recipes.push((item.target.name.clone(), recipe_path, args, target_fp, env));
+        } else if !run_root_check(&self_exe, &manifest.root, &args, &env, false) {
+            return ExitCode::from(1);
+        }
+    }
+
+    // Cargo 先编完全部 test artifacts 再开始执行。预检静默告警，真实执行
+    // 会通过 runner 会话发一次；若预检失败，再用真实会话重放诊断。
+    for (_, recipe, args, fp, env) in &recipes {
+        let check = check_args(args, &layout, fp);
+        if !run_root_check(&self_exe, &manifest.root, &check, env, !request.no_run) {
+            if !request.no_run {
+                let _ = run_recipe_child(&self_exe, &manifest.root, &sysroot, recipe, &[]);
+            }
+            return ExitCode::from(1);
+        }
+    }
+    if request.no_run {
+        return ExitCode::SUCCESS;
+    }
+
+    let mut test_args = Vec::new();
+    if request.quiet {
+        test_args.push("--quiet".into());
+    }
+    if let Some(filter) = &request.filter {
+        test_args.push(filter.clone());
+    }
+    test_args.extend(harness_args.iter().cloned());
+    let mut failed = false;
+    for (_, recipe, _, _, _) in &recipes {
+        let code = run_recipe_child(&self_exe, &manifest.root, &sysroot, recipe, &test_args);
+        if code != 0 {
+            failed = true;
+            if !request.no_fail_fast {
+                break;
+            }
+        }
+    }
+    if failed {
+        ExitCode::from(101)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+#[derive(Default)]
+struct TestRequest {
+    lib: bool,
+    bins: bool,
+    bin_names: BTreeSet<String>,
+    tests: bool,
+    test_names: BTreeSet<String>,
+    examples: bool,
+    example_names: BTreeSet<String>,
+    no_run: bool,
+    no_fail_fast: bool,
+    locked: bool,
+    offline: bool,
+    quiet: bool,
+    filter: Option<String>,
+}
+
+struct SelectedTarget<'a> {
+    target: &'a Target,
+    run: bool,
+    include_dev: bool,
+}
+
+impl TestRequest {
+    fn parse(args: &[String]) -> Result<Self, String> {
+        let mut out = Self::default();
+        let mut i = 0;
+        while i < args.len() {
+            let arg = &args[i];
+            let take_value = |i: &mut usize, name: &str| -> Result<String, String> {
+                *i += 1;
+                args.get(*i)
+                    .cloned()
+                    .ok_or_else(|| format!("{name} 需要目标名"))
+            };
+            match arg.as_str() {
+                "--lib" => out.lib = true,
+                "--bins" => out.bins = true,
+                "--tests" => out.tests = true,
+                "--examples" => out.examples = true,
+                "--bin" => {
+                    let value = take_value(&mut i, "--bin")?;
+                    out.bin_names.insert(value);
+                }
+                "--test" => {
+                    let value = take_value(&mut i, "--test")?;
+                    out.test_names.insert(value);
+                }
+                "--example" => {
+                    let value = take_value(&mut i, "--example")?;
+                    out.example_names.insert(value);
+                }
+                "--no-run" => out.no_run = true,
+                "--no-fail-fast" => out.no_fail_fast = true,
+                "--locked" => out.locked = true,
+                "--offline" => out.offline = true,
+                "-q" | "--quiet" => out.quiet = true,
+                "--workspace" | "--all" | "--exclude" | "-p" | "--package" => {
+                    return Err(format!("{arg} 依赖 workspace 多包图（D15 P5，尚未支持）"));
+                }
+                "--doc" => return Err("doctest 需要 rustdoc 前端，D17 明确不支持".into()),
+                "--benches" | "--bench" | "--all-targets" => {
+                    return Err(format!("{arg} 包含 bench 目标，当前明确不支持"));
+                }
+                "--features" | "-F" | "--all-features" | "--no-default-features" => {
+                    return Err(format!("{arg} 的根 feature 选择尚未接入，不能静默忽略"));
+                }
+                _ if arg.starts_with("--bin=") => {
+                    out.bin_names.insert(arg[6..].to_string());
+                }
+                _ if arg.starts_with("--test=") => {
+                    out.test_names.insert(arg[7..].to_string());
+                }
+                _ if arg.starts_with("--example=") => {
+                    out.example_names.insert(arg[10..].to_string());
+                }
+                _ if arg.starts_with('-') => {
+                    return Err(format!("不支持的 Cargo test 参数 `{arg}`，不会静默吞掉"));
+                }
+                _ => {
+                    if out.filter.replace(arg.clone()).is_some() {
+                        return Err("Cargo test 只接受一个 TESTNAME 过滤串".into());
+                    }
+                }
+            }
+            i += 1;
+        }
+        Ok(out)
+    }
+
+    fn has_explicit_selection(&self) -> bool {
+        self.lib
+            || self.bins
+            || self.tests
+            || self.examples
+            || !self.bin_names.is_empty()
+            || !self.test_names.is_empty()
+            || !self.example_names.is_empty()
+    }
+
+    fn select<'a>(
+        &self,
+        manifest: &'a PackageManifest,
+        root_features: &BTreeSet<String>,
+    ) -> Result<Vec<SelectedTarget<'a>>, String> {
+        let explicit = self.has_explicit_selection();
+        let mut selected = Vec::new();
+        for target in &manifest.targets {
+            let named = match target.kind {
+                TargetKind::Bin => self.bin_names.contains(&target.name),
+                TargetKind::Test => self.test_names.contains(&target.name),
+                TargetKind::Example => self.example_names.contains(&target.name),
+                TargetKind::Lib => false,
+            };
+            let requested = if explicit {
+                match target.kind {
+                    TargetKind::Lib => self.lib || self.tests,
+                    TargetKind::Bin => self.bins || self.tests || named,
+                    TargetKind::Test => self.tests || named,
+                    TargetKind::Example => self.examples || named,
+                }
+            } else {
+                match target.kind {
+                    TargetKind::Lib | TargetKind::Bin | TargetKind::Test => target.test,
+                    TargetKind::Example => true, // 默认至少编译；test=true 才运行
+                }
+            };
+            if !requested {
+                continue;
+            }
+            let features_ready = target
+                .required_features
+                .iter()
+                .all(|f| root_features.contains(f));
+            if !features_ready {
+                if explicit && named {
+                    return Err(format!(
+                        "目标 `{}` 需要未启用 features: {}",
+                        target.name,
+                        target.required_features.join(", ")
+                    ));
+                }
+                continue;
+            }
+            let run = target.kind != TargetKind::Example || explicit || target.test;
+            selected.push(SelectedTarget {
+                target,
+                run,
+                include_dev: target.kind == TargetKind::Example,
+            });
+        }
+        for (kind, names) in [
+            (TargetKind::Bin, &self.bin_names),
+            (TargetKind::Test, &self.test_names),
+            (TargetKind::Example, &self.example_names),
+        ] {
+            for name in names {
+                if !manifest
+                    .targets
+                    .iter()
+                    .any(|t| t.kind == kind && &t.name == name)
+                {
+                    return Err(format!("没有名为 `{name}` 的 {kind:?} 目标"));
+                }
+            }
+        }
+        if selected.is_empty() {
+            return Err("没有可测试目标".into());
+        }
+
+        // 选中 integration test 时，Cargo 还编译所有可用普通 bin，为
+        // CARGO_BIN_EXE_* 提供进程入口；bin unit-test 与普通 bin 是两单元。
+        let has_integration = selected.iter().any(|s| s.target.kind == TargetKind::Test);
+        if has_integration {
+            for target in manifest.targets.iter().filter(|t| t.is_bin()) {
+                if target
+                    .required_features
+                    .iter()
+                    .all(|f| root_features.contains(f))
+                {
+                    selected.push(SelectedTarget {
+                        target,
+                        run: false,
+                        include_dev: false,
+                    });
+                }
+            }
+        }
+        Ok(selected)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_root_lib(
+    manifest: &PackageManifest,
+    plan: &ResolvePlan,
+    fps: &[String],
+    sysroot: &Path,
+    layout: &Layout,
+    lib_name: &str,
+    lib_path: &Path,
+    bo: Option<&BuildOutput>,
+    searches: &[String],
+    rustflags: &[String],
+    fp: &str,
+    _outputs: &BTreeMap<usize, BuildOutput>,
+    self_exe: &Path,
+) -> Result<(), ExitCode> {
+    let stem = format!("lib{}-{fp}", lib_name.replace('-', "_"));
+    if layout.deps.join(format!("{stem}.rmeta")).is_file()
+        && layout.deps.join(format!("{stem}.rlib")).is_file()
+    {
+        return Ok(());
+    }
+    let args = schedule::root_lib_rustc_args(
+        manifest, plan, fps, sysroot, layout, lib_name, lib_path, bo, searches, rustflags, fp,
+    );
+    let mut cmd = std::process::Command::new(self_exe);
+    cmd.arg("__cless-dep").args(&args[1..]);
+    cmd.envs(manifest.pkg_env.iter());
+    cmd.env("CARGO_CRATE_NAME", lib_name.replace('-', "_"));
+    cmd.env("CARGO_MANIFEST_DIR", &manifest.root);
+    cmd.env("CARGO_MANIFEST_PATH", manifest.root.join("Cargo.toml"));
+    if let Some(bo) = bo {
+        cmd.env("OUT_DIR", layout.build_dir(&manifest.name, fp).join("out"));
+        cmd.envs(bo.envs.iter().map(|(key, value)| (key, value)));
+    }
+    match cmd.status() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(_) => {
+            eprintln!(
+                "mirvm: lib 编译失败：根包 {} {}",
+                manifest.name, manifest.version
+            );
+            Err(ExitCode::from(1))
+        }
+        Err(e) => {
+            eprintln!("mirvm: lib 编译子进程启动失败：{e}");
+            Err(ExitCode::from(1))
+        }
+    }
+}
+
+fn target_fingerprint(root_fp: &str, target: &Target) -> String {
+    let key = format!(
+        "{root_fp}\x1f{:?}\x1f{}\x1f{}\x1f{}",
+        target.kind,
+        target.name,
+        target.path.display(),
+        target.harness as u8
+    );
+    format!("{:016x}", crate::lower::asm::fnv1a(key.as_bytes()))
+}
+
+fn root_target_env(
+    manifest: &PackageManifest,
+    target: &Target,
+    bo: Option<&BuildOutput>,
+    layout: &Layout,
+    root_fp: &str,
+    bin_launchers: &BTreeMap<String, PathBuf>,
+) -> Vec<(String, String)> {
+    let mut env: BTreeMap<String, String> = manifest.pkg_env.clone();
+    env.insert("CARGO_CRATE_NAME".into(), target.name.replace('-', "_"));
+    env.insert(
+        "CARGO_MANIFEST_DIR".into(),
+        manifest.root.display().to_string(),
+    );
+    env.insert(
+        "CARGO_MANIFEST_PATH".into(),
+        manifest.root.join("Cargo.toml").display().to_string(),
+    );
+    env.insert("CARGO_PRIMARY_PACKAGE".into(), "1".into());
+    if matches!(target.kind, TargetKind::Bin | TargetKind::Example) {
+        env.insert("CARGO_BIN_NAME".into(), target.name.clone());
+    }
+    if target.kind == TargetKind::Test {
+        let tmp = layout.deps.parent().unwrap_or(&layout.deps).join("tmp");
+        let _ = std::fs::create_dir_all(&tmp);
+        env.insert("CARGO_TARGET_TMPDIR".into(), tmp.display().to_string());
+        for (name, path) in bin_launchers {
+            env.insert(format!("CARGO_BIN_EXE_{name}"), path.display().to_string());
+        }
+    }
+    if let Some(bo) = bo {
+        env.insert(
+            "OUT_DIR".into(),
+            layout
+                .build_dir(&manifest.name, root_fp)
+                .join("out")
+                .display()
+                .to_string(),
+        );
+        env.extend(bo.envs.iter().map(|(k, v)| (k.clone(), v.clone())));
+    }
+    env.into_iter().collect()
+}
+
+fn write_root_recipe(
+    layout: &Layout,
+    manifest: &PackageManifest,
+    root_fp: &str,
+    target: &Target,
+    rustc_args: Vec<String>,
+    env: Vec<(String, String)>,
+    target_fp: &str,
+) -> PathBuf {
+    let dir = layout
+        .build_dir(&manifest.name, root_fp)
+        .join("test-recipes");
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| {
+        eprintln!("mirvm: 创建测试配方目录 {} 失败: {e}", dir.display());
+        std::process::exit(1);
+    });
+    let kind = format!("{:?}", target.kind).to_ascii_lowercase();
+    let safe_name: String = target
+        .name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let path = dir.join(format!("{kind}-{safe_name}-{target_fp}.json"));
+    let recipe = RootRunRecipe {
+        rustc_args,
+        env,
+        cwd: manifest.root.clone(),
+        argv0: layout
+            .deps
+            .join(format!("{safe_name}-{target_fp}"))
+            .display()
+            .to_string(),
+    };
+    let bytes = serde_json::to_vec(&recipe).expect("测试配方序列化失败");
+    if std::fs::read(&path).ok().as_deref() != Some(bytes.as_slice()) {
+        std::fs::write(&path, bytes).unwrap_or_else(|e| {
+            eprintln!("mirvm: 写测试配方 {} 失败: {e}", path.display());
+            std::process::exit(1);
+        });
+    }
+    path
+}
+
+fn launcher_recipe_path(launcher: &Path) -> PathBuf {
+    let mut path = launcher.as_os_str().to_os_string();
+    path.push(".mirvm-recipe.json");
+    PathBuf::from(path)
+}
+
+/// CLI 启动最早期用 argv[0] 识别 `CARGO_BIN_EXE_*` 启动器。
+pub fn root_launcher_recipe(argv0: &Path) -> Option<PathBuf> {
+    let recipe = launcher_recipe_path(argv0);
+    recipe.is_file().then_some(recipe)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_bin_launcher(
+    self_exe: &Path,
+    layout: &Layout,
+    manifest: &PackageManifest,
+    root_fp: &str,
+    target: &Target,
+    rustc_args: Vec<String>,
+    env: Vec<(String, String)>,
+    target_fp: &str,
+) -> Result<PathBuf, String> {
+    let dir = layout
+        .build_dir(&manifest.name, root_fp)
+        .join("bin-launchers");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("创建 bin 启动器目录 {} 失败: {e}", dir.display()))?;
+    let safe_name: String = target
+        .name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let launcher = dir.join(format!("{safe_name}-{target_fp}"));
+    let recipe_path = launcher_recipe_path(&launcher);
+    let recipe = RootRunRecipe {
+        rustc_args,
+        env,
+        cwd: manifest.root.clone(),
+        argv0: launcher.display().to_string(),
+    };
+    let bytes = serde_json::to_vec(&recipe).map_err(|e| format!("bin 配方序列化失败: {e}"))?;
+    if std::fs::read(&recipe_path).ok().as_deref() != Some(bytes.as_slice()) {
+        std::fs::write(&recipe_path, bytes)
+            .map_err(|e| format!("写 bin 配方 {} 失败: {e}", recipe_path.display()))?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let correct = std::fs::read_link(&launcher)
+            .ok()
+            .is_some_and(|target| target == self_exe);
+        if !correct {
+            match std::fs::remove_file(&launcher) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("替换 bin 启动器 {} 失败: {e}", launcher.display())),
+            }
+            symlink(self_exe, &launcher)
+                .map_err(|e| format!("创建 bin 启动器 {} 失败: {e}", launcher.display()))?;
+        }
+        Ok(launcher)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = self_exe;
+        Err("CARGO_BIN_EXE 启动器当前只支持 Unix 主机".into())
+    }
+}
+
+fn check_args(args: &[String], layout: &Layout, fp: &str) -> Vec<String> {
+    let mut out = args.to_vec();
+    out.push("--emit=dep-info,metadata".into());
+    out.push("-C".into());
+    out.push(format!("metadata={fp}"));
+    out.push("-C".into());
+    out.push(format!("extra-filename=-{fp}"));
+    out.push("--out-dir".into());
+    out.push(layout.deps.display().to_string());
+    out.push("-Zalways-encode-mir".into());
+    out.push("-Zno-codegen".into());
+    out
+}
+
+fn run_root_check(
+    self_exe: &Path,
+    cwd: &Path,
+    args: &[String],
+    env: &[(String, String)],
+    quiet: bool,
+) -> bool {
+    let mut cmd = std::process::Command::new(self_exe);
+    cmd.arg("__cless-dep")
+        .args(&args[1..])
+        .current_dir(cwd)
+        .envs(env.iter().cloned());
+    if quiet {
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+    }
+    cmd.status().is_ok_and(|s| s.success())
+}
+
+fn run_recipe_child(
+    self_exe: &Path,
+    cwd: &Path,
+    sysroot: &Path,
+    recipe: &Path,
+    args: &[String],
+) -> i32 {
+    let mut cmd = std::process::Command::new(self_exe);
+    cmd.arg("__cless-run-root")
+        .arg(recipe)
+        .args(args)
+        .current_dir(cwd)
+        .env("MIRVM_SYSROOT", sysroot);
+    cmd.status().ok().and_then(|s| s.code()).unwrap_or(1)
+}
+
+/// `__cless-run-root <recipe> [program args]` 子进程入口。
+pub fn run_root_recipe(mut argv: impl Iterator<Item = String>) -> ExitCode {
+    let Some(path) = argv.next() else {
+        eprintln!("mirvm: __cless-run-root 缺配方路径");
+        return ExitCode::from(2);
+    };
+    let data = match std::fs::read(&path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("mirvm: 读取测试配方 {path} 失败: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let recipe: RootRunRecipe = match serde_json::from_slice(&data) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("mirvm: 测试配方 {path} 损坏: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(e) = std::env::set_current_dir(&recipe.cwd) {
+        eprintln!("mirvm: 测试工作目录 {} 不可进入: {e}", recipe.cwd.display());
+        return ExitCode::from(1);
+    }
+    for (key, value) in recipe.env {
+        // SAFETY: 独立子进程启动相，rustc/guest 线程尚未创建。
+        unsafe { std::env::set_var(key, value) };
+    }
+    let mut program_argv = vec![recipe.argv0];
+    program_argv.extend(argv);
+    crate::cli::run_driver(recipe.rustc_args, program_argv, false, None, false, true)
 }
 
 /// `mirvm run <frontmatter 脚本>`（MIRVM_DEPS=self）：正文物化到脚本缓存目录
@@ -165,6 +991,7 @@ fn drive(manifest: &PackageManifest, program_args: &[String], bin_sel: Option<&s
         &sysroot,
         &stamp,
         manifest.has_build_script,
+        false,
     ) {
         Ok(t) => t,
         // 第一枚编译错误（worker 回传原文）——与串行同形响亮点名后退出
@@ -186,14 +1013,11 @@ fn drive(manifest: &PackageManifest, program_args: &[String], bin_sel: Option<&s
     // target 时 bin 隐式依赖同名 lib——cargo 先把根 lib 编成 target rlib
     // 再让 bin --extern 它。fp 与根 build.rs 共用 root_fingerprint（同包
     // 同配方），故 fp 计算条件 = has_build_script || 有 lib target。
-    let root_lib = manifest.targets.iter().find_map(|t| match t {
-        super::manifest::Target::Lib {
-            name,
-            path,
-            proc_macro,
-        } => Some((name.clone(), path.clone(), *proc_macro)),
-        _ => None,
-    });
+    let root_lib = manifest
+        .targets
+        .iter()
+        .find(|t| t.is_lib())
+        .map(|t| (t.name.clone(), t.path.clone(), t.proc_macro));
     let mut root_fp: Option<String> = None;
     let mut root_bo: Option<BuildOutput> = None;
     if manifest.has_build_script || root_lib.is_some() {
@@ -216,8 +1040,9 @@ fn drive(manifest: &PackageManifest, program_args: &[String], bin_sel: Option<&s
     if manifest.has_build_script {
         let fp = root_fp.clone().expect("上一步已算");
         // 根的 ran 无人消费（根无下游，links 传不到它头上），只走观测行
-        let (bo, _ran) =
-            run_build_lifecycle_root(manifest, &plan, &fps, &layout, &fp, &outputs, &re_ran);
+        let (bo, _ran) = run_build_lifecycle_root(
+            manifest, &plan, &fps, &layout, &fp, &outputs, &re_ran, false,
+        );
         root_bo = Some(bo);
     }
 
@@ -368,6 +1193,7 @@ pub fn compile_plan(
     sysroot: &Path,
     stamp: &str,
     root_has_build_script: bool,
+    quiet_build_warnings: bool,
 ) -> Result<CompiledPlan, String> {
     // unit 级 Kahn 就绪队列并行调度（D15 P3 切⑤c）：unit 的全部依赖
     // 「完成」（build.rs 生命周期 + host/target 编译按集合归属全结束）
@@ -412,6 +1238,7 @@ pub fn compile_plan(
         host_set: &host_set,
         target_set: &target_set,
         build_set: &build_set,
+        quiet_build_warnings,
         fp_locks: FpLocks::default(),
     };
     if plan.units.is_empty() {
@@ -470,6 +1297,7 @@ struct SharedCtx<'a> {
     host_set: &'a BTreeSet<usize>,
     target_set: &'a BTreeSet<usize>,
     build_set: &'a BTreeSet<usize>,
+    quiet_build_warnings: bool,
     /// 同 fp 重复 unit 的流水线互斥锁表（drive() 头注第三条）。
     fp_locks: FpLocks,
 }
@@ -716,11 +1544,13 @@ fn run_build_lifecycle(
         &bexe,
         &env,
         &dep_links_reran,
+        ctx.quiet_build_warnings,
     )
 }
 
 /// 根包 build.rs 生命周期（根不是 unit：pkg_env/features/profile 由
 /// manifest/plan 直供；根是本地 path 包，warning 照常显示）。
+#[allow(clippy::too_many_arguments)]
 fn run_build_lifecycle_root(
     manifest: &PackageManifest,
     plan: &ResolvePlan,
@@ -729,6 +1559,7 @@ fn run_build_lifecycle_root(
     root_fp: &str,
     outputs: &BTreeMap<usize, BuildOutput>,
     re_ran: &BTreeSet<usize>,
+    quiet_build_warnings: bool,
 ) -> (BuildOutput, bool) {
     let bdir = layout.build_dir(&manifest.name, root_fp);
     if let Err(e) = std::fs::create_dir_all(bdir.join("out")) {
@@ -796,6 +1627,7 @@ fn run_build_lifecycle_root(
         &bexe,
         &env,
         &dep_links_reran,
+        quiet_build_warnings,
     ) {
         Ok(x) => x,
         Err(e) => {
@@ -823,6 +1655,7 @@ fn rerun_gate(
     bexe: &Path,
     env: &BTreeMap<String, String>,
     dep_links_reran: &[String],
+    quiet_build_warnings: bool,
 ) -> Result<(BuildOutput, bool), String> {
     let env_get = |k: &str| std::env::var(k).ok();
     let (rerun, why) = buildrs::should_rerun(
@@ -841,11 +1674,19 @@ fn rerun_gate(
         if let Ok(stdout) = std::fs::read_to_string(bdir.join("output.txt"))
             && let Ok(bo) = buildrs::parse_instructions(&stdout)
         {
-            show_warnings(pkg, ver, from_registry, &bo);
+            show_warnings(pkg, ver, from_registry, &bo, quiet_build_warnings);
             return Ok((bo, false));
         }
     }
-    let (bo, stdout) = exec_and_parse(pkg, ver, from_registry, bexe, pkg_root, env)?;
+    let (bo, stdout) = exec_and_parse(
+        pkg,
+        ver,
+        from_registry,
+        bexe,
+        pkg_root,
+        env,
+        quiet_build_warnings,
+    )?;
     // 存档写失败不致命——下次 no-record 重跑自愈（磁盘层故障前序编译写已
     // 先炸）；静默，不惊扰对拍 stderr
     let _ = buildrs::write_record(bdir, &stdout, &bo, from_registry, pkg, pkg_root, &env_get);
@@ -854,8 +1695,8 @@ fn rerun_gate(
 
 /// build script warning 回吐门控（cargo 同格式同口径：`warning: <pkg>@<ver>:
 /// <msg>`；registry 包默认吞，path 包显示；执行与存档回放两路同款）。
-fn show_warnings(pkg: &str, ver: &str, from_registry: bool, bo: &BuildOutput) {
-    if !from_registry {
+fn show_warnings(pkg: &str, ver: &str, from_registry: bool, bo: &BuildOutput, quiet: bool) {
+    if !from_registry && !quiet {
         for w in &bo.warnings {
             eprintln!("warning: {pkg}@{ver}: {w}");
         }
@@ -872,12 +1713,13 @@ fn exec_and_parse(
     bexe: &Path,
     cwd: &Path,
     env: &BTreeMap<String, String>,
+    quiet_build_warnings: bool,
 ) -> Result<(BuildOutput, String), String> {
     let stdout = buildrs::run_build_script(bexe, cwd, env)
         .map_err(|e| format!("build script 执行失败（{pkg} {ver}）: {e}"))?;
     let bo = buildrs::parse_instructions(&stdout)
         .map_err(|e| format!("build script 指令解析失败（{pkg} {ver}）: {e}"))?;
-    show_warnings(pkg, ver, from_registry, &bo);
+    show_warnings(pkg, ver, from_registry, &bo, quiet_build_warnings);
     Ok((bo, stdout))
 }
 

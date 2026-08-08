@@ -2,8 +2,8 @@
 //!
 //! 子集边界（超出即响亮拒绝并记名，不静默吞掉）：
 //! - `[package]`（name/version/edition/autobins/default-run/links）
-//! - `[lib]` / `[[bin]]` / 自动发现（src/lib.rs、src/main.rs、src/bin/*.rs）
-//! - `[dependencies]` / `[build-dependencies]`：version req、features、
+//! - `[lib]` / `[[bin]]` / `[[test]]` / `[[example]]` 与 Cargo 自动发现
+//! - `[dependencies]` / `[build-dependencies]` / `[dev-dependencies]`：version req、features、
 //!   optional、default-features、path；**git / 私有 registry（registry=/git/
 //!   branch/tag/rev 键）P5 范畴，响亮拒绝**
 //! - `[features]` 三形态：`"foo"`（特性或隐式可选依赖）、`"dep:foo"`（显式
@@ -18,7 +18,7 @@
 //! - `[workspace]`：单包或"包 + workspace 根"两形态；workspace.package 的
 //!   version/edition 继承（向上找根）；**多包成员图与 virtual manifest 归 P5，
 //!   响亮拒绝**
-//! - 整体不做：dev-dependencies（mirvm 永不跑 test，设计档 §3.5 事先明说）。
+//! - doctest/bench 仍不做；测试目标由 `mirvm test` 消费。
 
 // P1 逐切接入中：resolve/registry/audit 后续切片接入后摘除本 allow（设计档 §5）。
 #![allow(dead_code)]
@@ -40,6 +40,8 @@ pub enum DepSource {
 pub enum DepKind {
     Normal,
     Build,
+    /// 只在根包作为测试对象时进入构建图；不传播 path/registry 依赖自己的 dev 边。
+    Dev,
 }
 
 /// 一条依赖声明（平台 cfg 表达式随行，不在解析期过滤——版本求解是
@@ -79,18 +81,38 @@ pub enum FeatureValue {
     WeakDep { dep: String, feature: String },
 }
 
-/// 编译目标。
+/// Cargo 目标种类。build script 仍由 package.build/links 单独建模。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TargetKind {
+    Lib,
+    Bin,
+    Test,
+    Example,
+}
+
+/// 一个可编译目标及其影响测试选择/编译方式的 manifest 属性。
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Target {
-    Lib {
-        name: String,
-        path: PathBuf,
-        proc_macro: bool,
-    },
-    Bin {
-        name: String,
-        path: PathBuf,
-    },
+pub struct Target {
+    pub kind: TargetKind,
+    pub name: String,
+    pub path: PathBuf,
+    pub proc_macro: bool,
+    /// Cargo 默认 `test` 选择是否包含本目标。
+    pub test: bool,
+    /// true = rustc `--test` 注入 libtest；false = 保留目标自己的 main。
+    pub harness: bool,
+    pub doctest: bool,
+    pub required_features: Vec<String>,
+}
+
+impl Target {
+    pub fn is_lib(&self) -> bool {
+        self.kind == TargetKind::Lib
+    }
+
+    pub fn is_bin(&self) -> bool {
+        self.kind == TargetKind::Bin
+    }
 }
 
 /// profile 语义旗（只取影响 MIR 语义的 + 照传的 opt-level）。
@@ -98,7 +120,36 @@ pub enum Target {
 pub struct ProfileFlags {
     pub debug_assertions: bool,
     pub overflow_checks: bool,
-    pub opt_level: u8,
+    pub opt_level: OptLevel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptLevel {
+    O0,
+    O1,
+    O2,
+    O3,
+    Os,
+    Oz,
+}
+
+impl OptLevel {
+    pub fn is_zero(self) -> bool {
+        self == Self::O0
+    }
+}
+
+impl std::fmt::Display for OptLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::O0 => "0",
+            Self::O1 => "1",
+            Self::O2 => "2",
+            Self::O3 => "3",
+            Self::Os => "s",
+            Self::Oz => "z",
+        })
+    }
 }
 
 impl Default for ProfileFlags {
@@ -107,7 +158,7 @@ impl Default for ProfileFlags {
         Self {
             debug_assertions: true,
             overflow_checks: true,
-            opt_level: 0,
+            opt_level: OptLevel::O0,
         }
     }
 }
@@ -123,6 +174,7 @@ pub struct PackageManifest {
     pub deps: Vec<DepDecl>,
     pub features: BTreeMap<String, Vec<FeatureValue>>,
     pub profile: ProfileFlags,
+    pub test_profile: ProfileFlags,
     /// 有 build script（build 键 / links 键 / 根下 build.rs 实存）。
     pub has_build_script: bool,
     /// `[package] build = "custom.rs"` 的自定义 build script 路径；
@@ -143,6 +195,8 @@ struct RawManifest {
     workspace: Option<RawWorkspace>,
     lib: Option<RawLib>,
     bin: Option<Vec<RawBin>>,
+    test: Option<Vec<RawTarget>>,
+    example: Option<Vec<RawTarget>>,
     dependencies: Option<BTreeMap<String, toml::Value>>,
     #[serde(rename = "build-dependencies")]
     build_dependencies: Option<BTreeMap<String, toml::Value>>,
@@ -159,6 +213,8 @@ struct RawPackage {
     version: Option<toml::Value>,
     edition: Option<toml::Value>,
     autobins: Option<bool>,
+    autoexamples: Option<bool>,
+    autotests: Option<bool>,
     links: Option<String>,
     build: Option<toml::Value>,
     #[serde(rename = "default-run")]
@@ -198,17 +254,37 @@ struct RawLib {
     // cargo 归一化产物形态（derive_arbitrary 1.3.2 实锤；cargo 双侧受理）
     #[serde(rename = "proc-macro", alias = "proc_macro")]
     proc_macro: Option<bool>,
+    test: Option<bool>,
+    harness: Option<bool>,
+    doctest: Option<bool>,
+    #[serde(rename = "required-features")]
+    required_features: Option<Vec<String>>,
 }
 
 #[derive(serde::Deserialize, Default)]
 struct RawBin {
     name: Option<String>,
     path: Option<String>,
+    test: Option<bool>,
+    harness: Option<bool>,
+    #[serde(rename = "required-features")]
+    required_features: Option<Vec<String>>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct RawTarget {
+    name: Option<String>,
+    path: Option<String>,
+    test: Option<bool>,
+    harness: Option<bool>,
+    #[serde(rename = "required-features")]
+    required_features: Option<Vec<String>>,
 }
 
 #[derive(serde::Deserialize, Default)]
 struct RawProfiles {
     dev: Option<RawProfile>,
+    test: Option<RawProfile>,
     release: Option<RawProfile>,
 }
 
@@ -227,6 +303,8 @@ struct RawTargetDeps {
     dependencies: Option<BTreeMap<String, toml::Value>>,
     #[serde(rename = "build-dependencies")]
     build_dependencies: Option<BTreeMap<String, toml::Value>>,
+    #[serde(rename = "dev-dependencies")]
+    dev_dependencies: Option<BTreeMap<String, toml::Value>>,
 }
 
 // ---------- 错误 ----------
@@ -343,9 +421,7 @@ impl PackageManifest {
             None,
             &mut deps,
         )?;
-        if raw.dev_dependencies.is_some() {
-            // 事先明说的不做面：见到即忽略（不拒绝——cargo 项目常带，但我们永不消费）
-        }
+        parse_dep_table(&raw.dev_dependencies, DepKind::Dev, root, None, &mut deps)?;
         // target.'cfg()'.dependencies：表达式随行进模型（全平台并集语义，不过滤）
         for (cfg_expr, tdeps) in raw.target.iter().flatten() {
             // 表达式合法性在此校验（拼写错误要响亮；语义求值在使用期）
@@ -360,6 +436,13 @@ impl PackageManifest {
             parse_dep_table(
                 &tdeps.build_dependencies,
                 DepKind::Build,
+                root,
+                Some(cfg_expr.clone()),
+                &mut deps,
+            )?;
+            parse_dep_table(
+                &tdeps.dev_dependencies,
+                DepKind::Dev,
                 root,
                 Some(cfg_expr.clone()),
                 &mut deps,
@@ -383,8 +466,20 @@ impl PackageManifest {
             .unwrap_or_default();
 
         let autobins = pkg.autobins.unwrap_or(true);
-        let targets = discover_targets(raw.lib.as_ref(), raw.bin.as_ref(), autobins, &name, root)?;
-        let profile = profile_from(raw.profile);
+        let autoexamples = pkg.autoexamples.unwrap_or(true);
+        let autotests = pkg.autotests.unwrap_or(true);
+        let targets = discover_targets(
+            raw.lib.as_ref(),
+            raw.bin.as_ref(),
+            raw.test.as_ref(),
+            raw.example.as_ref(),
+            autobins,
+            autotests,
+            autoexamples,
+            &name,
+            root,
+        )?;
+        let (profile, test_profile) = profiles_from(raw.profile)?;
         // cargo 语义：`build = false` 是显式关闭 build script（cfg-if 实锤——
         // 键在场 ≠ 有 build.rs）；字符串形 = 自定义路径；缺省 = 根下 build.rs 实存。
         let has_build_script = pkg.links.is_some()
@@ -407,6 +502,7 @@ impl PackageManifest {
             deps,
             features,
             profile,
+            test_profile,
             has_build_script,
             build_script_path,
             links: pkg.links,
@@ -457,10 +553,8 @@ impl PackageManifest {
         let bins: Vec<_> = self
             .targets
             .iter()
-            .filter_map(|t| match t {
-                Target::Bin { name, path } => Some((name.as_str(), path.as_path())),
-                _ => None,
-            })
+            .filter(|t| t.is_bin())
+            .map(|t| (t.name.as_str(), t.path.as_path()))
             .collect();
         if let Some(want) = sel {
             if let Some(b) = bins.iter().find(|(n, _)| *n == want) {
@@ -802,10 +896,15 @@ fn split_top_level(s: &str) -> Result<Vec<String>, MErr> {
 
 // ---------- target 发现 ----------
 
+#[allow(clippy::too_many_arguments)]
 fn discover_targets(
     lib: Option<&RawLib>,
     bin: Option<&Vec<RawBin>>,
+    tests: Option<&Vec<RawTarget>>,
+    examples: Option<&Vec<RawTarget>>,
     autobins: bool,
+    autotests: bool,
+    autoexamples: bool,
     pkg_name: &str,
     root: &Path,
 ) -> Result<Vec<Target>, MErr> {
@@ -824,10 +923,17 @@ fn discover_targets(
             .and_then(|l| l.name.clone())
             .unwrap_or_else(|| pkg_name.replace('-', "_"));
         let proc_macro = lib.and_then(|l| l.proc_macro).unwrap_or(false);
-        out.push(Target::Lib {
+        out.push(Target {
+            kind: TargetKind::Lib,
             name,
             path,
             proc_macro,
+            test: lib.and_then(|l| l.test).unwrap_or(true),
+            harness: lib.and_then(|l| l.harness).unwrap_or(true),
+            doctest: lib.and_then(|l| l.doctest).unwrap_or(true),
+            required_features: lib
+                .and_then(|l| l.required_features.clone())
+                .unwrap_or_default(),
         });
     }
     // bin：显式 [[bin]] 优先；否则自动发现
@@ -848,19 +954,32 @@ fn discover_targets(
                     let cand = root.join("src/main.rs");
                     (name == pkg_name && cand.is_file()).then_some(cand)
                 })?;
-            Some(Target::Bin { name, path })
+            Some(Target {
+                kind: TargetKind::Bin,
+                name,
+                path,
+                proc_macro: false,
+                test: b.test.unwrap_or(true),
+                harness: b.harness.unwrap_or(true),
+                doctest: false,
+                required_features: b.required_features.clone().unwrap_or_default(),
+            })
         })
         .collect();
     if !explicit.is_empty() {
         out.extend(explicit);
-        return Ok(out);
-    }
-    if autobins {
+    } else if autobins {
         let main = root.join("src/main.rs");
         if main.is_file() {
-            out.push(Target::Bin {
+            out.push(Target {
+                kind: TargetKind::Bin,
                 name: pkg_name.to_string(),
                 path: main,
+                proc_macro: false,
+                test: true,
+                harness: true,
+                doctest: false,
+                required_features: Vec::new(),
             });
         }
         let bin_dir = root.join("src/bin");
@@ -869,43 +988,170 @@ fn discover_targets(
                 .flatten()
                 .filter_map(|e| {
                     let p = e.path();
-                    if p.extension().is_some_and(|x| x == "rs") {
-                        p.file_stem().map(|s| s.to_string_lossy().into_owned())
+                    let (name, path) = if p.extension().is_some_and(|x| x == "rs") {
+                        (p.file_stem()?.to_string_lossy().into_owned(), p.clone())
+                    } else if p.is_dir() && p.join("main.rs").is_file() {
+                        (
+                            p.file_name()?.to_string_lossy().into_owned(),
+                            p.join("main.rs"),
+                        )
                     } else {
-                        None
-                    }
-                    .map(|name| Target::Bin {
+                        return None;
+                    };
+                    Some(Target {
+                        kind: TargetKind::Bin,
                         name,
-                        path: p.clone(),
+                        path,
+                        proc_macro: false,
+                        test: true,
+                        harness: true,
+                        doctest: false,
+                        required_features: Vec::new(),
                     })
                 })
                 .collect();
-            extra.sort_by(|a, b| match (a, b) {
-                (Target::Bin { name: an, .. }, Target::Bin { name: bn, .. }) => an.cmp(bn),
-                _ => std::cmp::Ordering::Equal,
-            });
+            extra.sort_by(|a, b| a.name.cmp(&b.name));
             out.extend(extra);
         }
     }
+
+    out.extend(discover_file_targets(
+        tests,
+        autotests,
+        TargetKind::Test,
+        &root.join("tests"),
+    ));
+    out.extend(discover_file_targets(
+        examples,
+        autoexamples,
+        TargetKind::Example,
+        &root.join("examples"),
+    ));
     Ok(out)
+}
+
+/// Cargo 的 tests/examples 自动发现：`dir/name.rs` 与 `dir/name/main.rs` 各是一目标；
+/// 子目录里的其他 `.rs` 是模块，不应被误当成独立目标。显式表在场时只取显式表。
+fn discover_file_targets(
+    explicit: Option<&Vec<RawTarget>>,
+    auto: bool,
+    kind: TargetKind,
+    dir: &Path,
+) -> Vec<Target> {
+    if let Some(rows) = explicit.filter(|rows| !rows.is_empty()) {
+        return rows
+            .iter()
+            .filter_map(|row| {
+                let path = row
+                    .path
+                    .as_ref()
+                    .and_then(|p| dir.parent().map(|root| root.join(p)))
+                    .or_else(|| {
+                        let name = row.name.as_ref()?;
+                        let flat = dir.join(format!("{name}.rs"));
+                        flat.is_file().then_some(flat).or_else(|| {
+                            let main = dir.join(name).join("main.rs");
+                            main.is_file().then_some(main)
+                        })
+                    })?;
+                let name = row.name.clone().or_else(|| {
+                    path.parent()
+                        .filter(|parent| parent.parent() == Some(dir))
+                        .and_then(Path::file_name)
+                        .or_else(|| path.file_stem())
+                        .map(|n| n.to_string_lossy().into_owned())
+                })?;
+                Some(Target {
+                    kind,
+                    name,
+                    path,
+                    proc_macro: false,
+                    test: row.test.unwrap_or(kind != TargetKind::Example),
+                    harness: row.harness.unwrap_or(true),
+                    doctest: false,
+                    required_features: row.required_features.clone().unwrap_or_default(),
+                })
+            })
+            .collect();
+    }
+    if !auto {
+        return Vec::new();
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<_> = rd
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let (name, path) = if path.extension().is_some_and(|x| x == "rs") {
+                (path.file_stem()?.to_string_lossy().into_owned(), path)
+            } else if path.is_dir() && path.join("main.rs").is_file() {
+                (
+                    path.file_name()?.to_string_lossy().into_owned(),
+                    path.join("main.rs"),
+                )
+            } else {
+                return None;
+            };
+            Some(Target {
+                kind,
+                name,
+                path,
+                proc_macro: false,
+                test: kind != TargetKind::Example,
+                harness: true,
+                doctest: false,
+                required_features: Vec::new(),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }
 
 // ---------- profile ----------
 
-fn profile_from(raw: Option<RawProfiles>) -> ProfileFlags {
-    let mut pf = ProfileFlags::default();
-    if let Some(dev) = raw.and_then(|p| p.dev) {
-        if let Some(v) = dev.debug_assertions {
-            pf.debug_assertions = v;
-        }
-        if let Some(v) = dev.overflow_checks {
-            pf.overflow_checks = v;
-        }
-        if let Some(toml::Value::Integer(v)) = dev.opt_level {
-            pf.opt_level = v as u8;
-        }
+fn profiles_from(raw: Option<RawProfiles>) -> Result<(ProfileFlags, ProfileFlags), MErr> {
+    let Some(raw) = raw else {
+        let dev = ProfileFlags::default();
+        return Ok((dev, dev));
+    };
+    let dev = apply_profile(ProfileFlags::default(), raw.dev, "dev")?;
+    let test = apply_profile(dev, raw.test, "test")?;
+    Ok((dev, test))
+}
+
+fn apply_profile(
+    mut profile: ProfileFlags,
+    raw: Option<RawProfile>,
+    name: &str,
+) -> Result<ProfileFlags, MErr> {
+    let Some(raw) = raw else {
+        return Ok(profile);
+    };
+    if let Some(v) = raw.debug_assertions {
+        profile.debug_assertions = v;
     }
-    pf
+    if let Some(v) = raw.overflow_checks {
+        profile.overflow_checks = v;
+    }
+    if let Some(value) = raw.opt_level {
+        profile.opt_level = match value {
+            toml::Value::Integer(0) => OptLevel::O0,
+            toml::Value::Integer(1) => OptLevel::O1,
+            toml::Value::Integer(2) => OptLevel::O2,
+            toml::Value::Integer(3) => OptLevel::O3,
+            toml::Value::String(v) if v == "s" => OptLevel::Os,
+            toml::Value::String(v) if v == "z" => OptLevel::Oz,
+            other => {
+                return Err(format!(
+                    "profile.{name}.opt-level 非 Cargo 支持值（只接受 0/1/2/3/\"s\"/\"z\"）：{other}"
+                ));
+            }
+        };
+    }
+    Ok(profile)
 }
 
 #[cfg(test)]
@@ -1061,12 +1307,10 @@ cc = "1"
         let bins: Vec<_> = m
             .targets
             .iter()
-            .filter_map(|t| match t {
-                Target::Bin { name, .. } => Some(name.as_str()),
-                _ => None,
-            })
+            .filter(|t| t.is_bin())
+            .map(|t| t.name.as_str())
             .collect();
-        assert!(m.targets.iter().any(|t| matches!(t, Target::Lib { .. })));
+        assert!(m.targets.iter().any(Target::is_lib));
         assert_eq!(bins, ["d", "extra"]);
         // 多 bin 时 runnable_bin 响亮拒绝（可选 --bin 或 default-run 解；
         // 切⑥b 起不再是 P5 文案）；default-run 钉选可解
@@ -1098,18 +1342,55 @@ cc = "1"
                 &d,
             )
             .unwrap();
-            let pm = m.targets.iter().any(|t| {
-                matches!(
-                    t,
-                    Target::Lib {
-                        proc_macro: true,
-                        ..
-                    }
-                )
-            });
+            let pm = m.targets.iter().any(|t| t.is_lib() && t.proc_macro);
             assert!(pm, "拼写 {key} 必须识别");
         }
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn parses_dev_dependencies_test_profile_and_test_targets() {
+        let d = tmpdir("test-targets");
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::create_dir_all(d.join("tests/nested")).unwrap();
+        std::fs::create_dir_all(d.join("examples")).unwrap();
+        std::fs::write(d.join("src/lib.rs"), "").unwrap();
+        std::fs::write(d.join("tests/api.rs"), "").unwrap();
+        std::fs::write(d.join("tests/nested/main.rs"), "").unwrap();
+        std::fs::write(d.join("tests/nested/helper.rs"), "").unwrap();
+        std::fs::write(d.join("examples/demo.rs"), "fn main(){}").unwrap();
+        let m = PackageManifest::parse(
+            "[package]\nname=\"d\"\nversion=\"0.1.0\"\n\
+             [dev-dependencies]\nhelper=\"1\"\n\
+             [profile.dev]\nopt-level=1\n\
+             [profile.test]\nopt-level=\"z\"\ndebug-assertions=false\n",
+            &d,
+        )
+        .unwrap();
+        assert_eq!(
+            m.deps.iter().find(|d| d.key == "helper").unwrap().kind,
+            DepKind::Dev
+        );
+        assert_eq!(m.profile.opt_level, OptLevel::O1);
+        assert_eq!(m.test_profile.opt_level, OptLevel::Oz);
+        assert!(!m.test_profile.debug_assertions);
+        let targets: Vec<_> = m
+            .targets
+            .iter()
+            .map(|t| (t.kind, t.name.as_str()))
+            .collect();
+        assert!(targets.contains(&(TargetKind::Test, "api")));
+        assert!(targets.contains(&(TargetKind::Test, "nested")));
+        assert!(targets.contains(&(TargetKind::Example, "demo")));
+        assert!(
+            !m.targets
+                .iter()
+                .find(|target| target.kind == TargetKind::Example && target.name == "demo")
+                .unwrap()
+                .test
+        );
+        assert!(!targets.contains(&(TargetKind::Test, "helper")));
+        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]

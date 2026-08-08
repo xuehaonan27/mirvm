@@ -1,0 +1,30 @@
+[package]
+name = "cless_test_contract"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[dev-dependencies]
+test-helper = { path = "test-helper", features = ["contract"] }
+
+[profile.test]
+opt-level = 1
+debug-assertions = false
+overflow-checks = false
+
+[[bin]]
+name = "cless_test_contract"
+path = "src/main.rs"
+
+[[test]]
+name = "api"
+path = "tests/api.rs"
+
+[[test]]
+name = "custom"
+path = "tests/custom.rs"
+harness = false
+
+[[example]]
+name = "compile_only"
+path = "examples/compile_only.rs"

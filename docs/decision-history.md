@@ -1694,6 +1694,22 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   [designs/product-capabilities-plan.md](designs/product-capabilities-plan.md)；这只是规划，
   不把未施工项写成现状。
 
+### 7.34 2026-08-08：`mirvm test` 单包主链与 Cargo 合同
+
+- **权威选择**：锁定 toolchain 的 Cargo 实际行为是 cargoless 的外部权威；不冻结
+  自造 Cargo 快照，也不跟随未审核的 Cargo 主线。升级 toolchain 时先审 `-vv`
+  rustc 行，再同步实现和合同。
+- **实现选择**：测试解析复用 D15 manifest/resolve/schedule，根 Dev 依赖只加入测试
+  单元；每个 artifact 用独立 mirvm 子进程执行。integration test 的
+  `CARGO_BIN_EXE_*` 是配方启动器，执行的仍是 VM bin，不生成本机目标程序。
+- **compat 修正**：Cargo wrapper 原先写不可执行 JSON 占位，Cargo runner 能读，
+  integration test 直接启动则 EACCES。现改为可执行脚本加旁置 JSON；Cargo runner 与
+  直接执行共用同一记录。
+- **验收选择**：固定夹具做 Cargo native / compat / self 三腿结果比较，再以 Cargo
+  `-vv` 锁目标形状；self 腿用 PATH 哨兵和 execve 审计抓相对/绝对 cargo 调用，热复跑
+  以 build script 计数判定。合同当前 20/20。workspace/package 不做命令层特判，等待 D15 P5 正确多包图；
+  doctest 继续归 rustdoc 专项。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT

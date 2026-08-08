@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::cargoless::driver::compile_plan;
-use crate::cargoless::manifest::{PackageManifest, ProfileFlags};
+use crate::cargoless::manifest::{OptLevel, PackageManifest, ProfileFlags};
 use crate::cargoless::schedule::Layout;
 use crate::cargoless::vendor::VendorDir;
 use crate::cargoless::{buildrs, resolve};
@@ -138,7 +138,7 @@ fn sysroot_profile() -> ProfileFlags {
     ProfileFlags {
         debug_assertions: false,
         overflow_checks: true,
-        opt_level: 0,
+        opt_level: OptLevel::O0,
     }
 }
 
@@ -289,6 +289,7 @@ fn build_sysroot(sysroot_dir: &Path) -> anyhow::Result<()> {
         toolchain_root(),
         &toolchain_stamp(),
         manifest.has_build_script,
+        false,
     )
     .map_err(|e| anyhow::anyhow!("sysroot 编译失败: {e}"))?;
 

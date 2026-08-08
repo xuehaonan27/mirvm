@@ -64,6 +64,7 @@ impl VendorDir {
                 kind: match d.kind {
                     DepKind::Normal => None,
                     DepKind::Build => Some("build".to_string()),
+                    DepKind::Dev => Some("dev".to_string()),
                 },
                 package: (d.package != d.key).then(|| d.package.clone()),
             });
