@@ -35,17 +35,18 @@ JIT 默认开启）。
   [current-status.md §3](docs/current-status.md)。
 - **`.mirvm` 格式 v2**：包内携带所有自产动态库字节；运行不要求源码、原编译环境或
   预存缓存。格式尚未冻结，跨 build/target 兼容仍未承诺。
-- **`mirvm test` 单包主链**：默认 self 路径无需 Cargo，支持 lib/bin/integration/
-  example、自定义 harness、开发依赖、test profile、常用选择与 libtest 参数；固定
-  Cargo/compat/self 三轨合同 20/20。workspace/package 选择仍等待多包依赖图。
+- **`mirvm test` 主链与常见工作区**：默认 self 路径无需 Cargo，支持 lib/bin/
+  integration/example、自定义 harness、开发依赖、test profile、常用选择与 libtest
+  参数；resolver 2 工作区支持成员/default-members/exclude、继承、`--workspace`、`-p`
+  和特性选择。固定 Cargo/compat/self 的单包合同 20/20、工作区合同 27/27。
 
 已知缺口、响亮拒绝边界与全部未解决债务集中登记在
 [docs/open-issues.md](docs/open-issues.md)；目前不能宣称支持"任意 Rust 程序"。
 当前开发基线是 Linux/ELF/x86_64，工具链锁定在 `nightly-2026-07-02`。根设计契约见
 [DESIGN.md](DESIGN.md)，frame/vmctx 等可逆架构决策及旧模型完整保留在
 [docs/decision-history.md](docs/decision-history.md)。
-`mirvm test` 的 workspace/package 扩展、复杂依赖来源、正式沙箱/资源治理、稳定嵌入 API/daemon、格式冻结与
-跨平台尚未完成，建议施工顺序见
+复杂依赖来源、正式沙箱/资源治理、稳定嵌入 API/daemon、格式冻结与跨平台尚未完成，
+建议施工顺序见
 [产品能力补全计划](docs/designs/product-capabilities-plan.md)。
 
 ## 快速开始
@@ -60,15 +61,16 @@ cargo build --release --locked
 ./target/release/mirvm run demo/ecosystem.rs
 ./target/release/mirvm run path/to/project -- arg1 arg2
 
-# 单包测试；-- 后参数逐字传给 libtest
+# 单包或 resolver 2 工作区测试；-- 后参数逐字传给 libtest
 ./target/release/mirvm test path/to/project -- --nocapture
+./target/release/mirvm test path/to/workspace --workspace --all-features
 
 # 打成自包含 .mirvm 包并运行（格式 v2 当前不定死，随开发可变动）
 ./target/release/mirvm pack path/to/project -o app.mirvm
 ./target/release/mirvm run app.mirvm
 
 # 当前基础回归；语义完整性仍以 current-status 中的诚实边界为准
-bash tests/run.sh fast     # 逢提交级：静态检查 + 差分 + cargoless test 合同 + gate_truth
+bash tests/run.sh fast     # 逢提交级：静态检查 + 差分 + 单包/工作区 test 合同 + gate_truth
 bash tests/run.sh smoke    # 批次级：fast + corpus smoke 层 + probes + runtime_gates
 bash tests/gate.sh         # 战役收尾全量（corpus 全防线 + perf + a2 + 上述全部）
 bash tests/corpus.sh --tier smoke   # corpus 手工跑批（tests/corpus.manifest 唯一真源）

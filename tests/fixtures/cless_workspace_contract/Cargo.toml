@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["app", "bridge", "shared", "tool"]
+exclude = ["test-helper", "feature-helper", "implicit-helper"]
+default-members = ["app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Workspace Author"]
+
+[workspace.dependencies]
+shared = { path = "shared", default-features = false, features = ["base"] }
+test-helper = { path = "test-helper" }
+feature-helper = { path = "feature-helper" }
+implicit-helper = { path = "implicit-helper" }
+
+[profile.test]
+opt-level = 1
+debug-assertions = false
+overflow-checks = false

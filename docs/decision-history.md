@@ -1710,6 +1710,37 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   以 build script 计数判定。合同当前 20/20。workspace/package 不做命令层特判，等待 D15 P5 正确多包图；
   doctest 继续归 rustdoc 专项。
 
+### 7.35 2026-08-08：`mirvm test` resolver 2 工作区合同
+
+- **闭合范围**：固定 Cargo 1.98 nightly 是唯一行为权威。支持 virtual/root-package
+  workspace、`members`/`exclude`/`default-members` 与 `*` glob、工作区内 path
+  依赖自动入成员、workspace.package/dependencies/root profile 继承、根统一 lock、
+  默认/当前成员、`--workspace`/`--all`、`-p`/`--package`、`--exclude` 和 feature
+  选择。实现入口是 `workspace.rs`，先把成员清单物化成完整包模型，再交给既有
+  manifest/resolve/schedule；不是为命令行另造包名单。
+- **多根特性选择**：同一次命令先分别求出各根图，再按（包、版本、normal/build
+  类别）把 feature 结果反灌到所有根，单调迭代到不再变化后才编译。这样 app 直接
+  依赖 shared、tool 经 bridge 间接依赖 shared 时仍只得到 Cargo 的统一 feature 集；
+  build 类不与 normal 类误合并。所有选中包先完成准备，再开始执行，保持 Cargo 的
+  编译失败与 fail-fast 边界。
+- **锁文件选择**：所有成员只读写 workspace 根 `Cargo.lock`。无锁时按 Cargo 的最大
+  解析图规则，以全成员全部 feature 可达依赖做一次 PubGrub 求解并生成 canonical v4；
+  实际编译图仍只启用用户选择。结果再由 pinned Cargo `--locked --offline` 反向验收；
+  `--locked` 缺锁直接失败。路径先 canonicalize，
+  防止 `tool/../bridge` 把同一个成员登记两次。
+- **兼容层修正**：Cargo wrapper 在 workspace cwd 下记录的相对 `.rs` 输入会被 runner
+  从成员目录重复拼接。runner 现在把真实输入绝对化，同时注入 remap 保留 Cargo 的
+  workspace 相对诊断与 `file!()` 结果。
+- **严格边界**：edition 2024 隐含 resolver 3，不得误当 resolver 2；resolver 1/3、
+  `**`/`[]`/`?` 成员 glob、复杂 package ID spec/同名成员、嵌套 workspace、
+  workspace lints、`[patch]`/`[replace]` 均响亮拒绝。缺失成员/
+  default-member 报错，从 excluded 包启动则按独立包处理，不能误跑默认成员。
+- **验收**：新增 `tests/cargoless_workspace_contract.sh`，Cargo native / compat / self
+  三腿覆盖 12 组选择与 feature 场景、两种失败策略、零 Cargo execve、fresh lock、
+  build.rs 编译键和 `-vv` 结构，共 **27/27**。既有单包合同 **20/20**、
+  `diff_cless` **7/7**，Rust 测试 **176/176**；隔离 Cargo home 与全新 target 的 release
+  `tests/run.sh fast` **11/11**。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT

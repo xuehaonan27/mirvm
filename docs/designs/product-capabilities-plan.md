@@ -1,6 +1,6 @@
 # 产品能力补全计划
 
-> 状态：**P1 单包主链已完成（2026-08-08），workspace/package 部分等待 P2 多包图**。
+> 状态：**P1 主链与 resolver 2 常见 workspace 已完成（2026-08-08）**。
 > 本文把当前明确缺失的产品
 > 能力合并成一条可执行路线；现状仍以 [current-status.md](../current-status.md) 为准，
 > 单项债务仍以 [open-issues.md](../open-issues.md) 为唯一登记入口。
@@ -17,15 +17,16 @@
 
 ### P1：`mirvm test`，补齐开发主循环
 
-**进展（2026-08-08）**：单包范围已完成，并由
-[cargoless 合同](mirvm-test-cargoless-contract.md) 约束；workspace 根与指定 package
-转入下一阶段，避免在没有正确多包解析图时做命令层特判。
+**进展（2026-08-08）**：单包与 resolver 2 常见 workspace 范围已完成，并由
+[cargoless 合同](mirvm-test-cargoless-contract.md) 约束；成员发现、继承、统一 lock、
+package 选择和特性统一均在依赖机制内实现，没有命令层特判。
 
 **用户结果**：项目可以直接运行单元测试，不必退回 cargo 才能完成“改代码、跑测试”。
 
 - 解析 lib/bin/test target，按 `cfg(test)` 重编本包；复用现有 `test` sysroot crate。
 - 接入 libtest harness，透传过滤器、`--nocapture`、`--ignored`、线程数和退出码。
-- 覆盖 workspace 根包和指定 package；doctest 明确留待 rustdoc 前端专项。
+- 覆盖 workspace 根、默认/当前成员、指定 package 和 workspace 特性；doctest 明确留待
+  rustdoc 前端专项。
 - 验收：至少一个 lib、bin、integration test、失败测试和 panic 测试与
   `cargo test` 的可观察结果一致；默认依赖驱动全程不启动 cargo。
 
@@ -33,10 +34,11 @@
 
 ### P2：依赖语义 P5，消除常见项目拒绝
 
-**用户结果**：常见 workspace、Git 依赖、替代 registry 和 source replacement 可以
-直接解析、锁定、离线复跑，不要求用户改写项目。
+**用户结果**：Git 依赖、替代 registry 和 source replacement 可以直接解析、锁定、
+离线复跑，不要求用户改写项目；resolver 3 与 rust-version-aware 选择也能正确工作。
 
-- 先做 workspace 多包图和 package 选择，因为 `mirvm test` 与真实项目最先需要它。
+- resolver 2 常见 workspace 多包图和精确包名选择已随 P1 完成；resolver 1/3、较复杂
+  glob/package ID spec、嵌套 workspace 和 workspace lints 仍保持响亮拒绝，不冒充 Cargo 全语义。
 - Git 源以提交哈希入锁和内容存储；网络获取与离线消费分开，禁止浮动 HEAD 偷换内容。
 - 替代 registry 复用 Cargo 凭据的只读面；实现 index/source replacement 的来源映射。
 - 补 rust-version-aware 版本选择，并让 `mirvm pack` 改走自有依赖驱动。
@@ -101,7 +103,7 @@
 
 ## 3. 里程碑关系
 
-- P1 与 P2 可以连续施工，P1 先以当前已支持依赖范围落地，P2 再扩项目覆盖。
+- P1 已完成；P2 从 Git/替代来源、resolver 3 与 rust-version-aware 选择继续扩项目覆盖。
 - P3 是任何“不受信任代码执行”产品声明的硬前置。
 - P4 是 daemon、agent API 和 REPL 的硬前置。
 - P5 必须遵守“D3 先于 D4”；P6 的 fat artifact 依赖 P5 的 target 索引。

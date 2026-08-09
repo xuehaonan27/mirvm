@@ -32,10 +32,15 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use super::buildrs::{self, BuildOutput};
-use super::manifest::{PackageManifest, Target, TargetKind};
+use super::lockfile::Lockfile;
+use super::manifest::{DepKind, DepSource, PackageManifest, Target, TargetKind};
 use super::registry::Registry;
-use super::resolve::{ResolvePlan, ResolvePurpose, Unit, resolve, resolve_for};
+use super::resolve::{
+    FeatureOverrides, ResolvePlan, ResolvePurpose, Unit, UnitClass, resolve, resolve_for_known,
+    resolve_for_known_with_features,
+};
 use super::schedule::{self, Layout};
+use super::workspace::WorkspaceManifest;
 
 /// `mirvm run <目录|Cargo.toml> [--bin <名>]`（MIRVM_DEPS=self）。
 /// bin_sel = --bin 选定的 bin 名（D15 P4 切⑥b，cargo run --bin 语义）。
@@ -60,7 +65,8 @@ struct RootRunRecipe {
     argv0: String,
 }
 
-/// `mirvm test` 的单包 self 路径。
+/// `mirvm test` 的 self 路径。workspace 先归约为完整成员清单，再统一多包
+/// feature 与编译键；所有选中包准备完成后才开始执行测试。
 pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) -> ExitCode {
     let request = match TestRequest::parse(cargo_args) {
         Ok(r) => r,
@@ -69,48 +75,182 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
             return ExitCode::from(2);
         }
     };
-    let mut manifest = match PackageManifest::read_dir(dir) {
-        Ok(m) => m,
+    let workspace = match WorkspaceManifest::read(dir) {
+        Ok(workspace) => workspace,
         Err(e) => {
             eprintln!("mirvm: 读取项目 {} 失败: {e}", dir.display());
             return ExitCode::from(1);
         }
     };
-    manifest.profile = manifest.test_profile;
-    if request.locked && !manifest.root.join("Cargo.lock").is_file() {
-        eprintln!("mirvm test: --locked 要求现有 Cargo.lock");
-        return ExitCode::from(1);
-    }
     if request.offline {
         // SAFETY: CLI 启动相，尚未启动 worker/rustc/guest 线程。
         unsafe { std::env::set_var("MIRVM_OFFLINE", "1") };
     }
-
-    let mut registry = match Registry::open() {
-        Ok(r) => r,
+    if request.locked && !workspace.root.join("Cargo.lock").is_file() {
+        eprintln!("mirvm test: --locked 要求 workspace 根已有 Cargo.lock");
+        return ExitCode::from(1);
+    }
+    let mut manifests = match request.select_packages(&workspace) {
+        Ok(manifests) => manifests,
         Err(e) => {
-            eprintln!("mirvm: registry 打开失败: {e}");
+            eprintln!("mirvm test: {e}");
             return ExitCode::from(1);
         }
     };
-    let plan = match resolve_for(&manifest, &mut registry, ResolvePurpose::Test) {
-        Ok(p) => p,
+    if let Err(e) = request.restrict_named_targets(&mut manifests) {
+        eprintln!("mirvm test: {e}");
+        return ExitCode::from(1);
+    }
+    if let Err(e) = request.apply_features(&mut manifests) {
+        eprintln!("mirvm test: {e}");
+        return ExitCode::from(1);
+    }
+    sort_packages_dependency_first(&mut manifests);
+    let mut known = workspace.members.clone();
+    for selected in &manifests {
+        if let Some(member) = known.iter_mut().find(|member| member.root == selected.root) {
+            *member = selected.clone();
+        }
+    }
+    if workspace.members.len() > 1 && !workspace.root.join("Cargo.lock").is_file() {
+        let mut lock_workspace = workspace.clone();
+        lock_workspace.members = known.clone();
+        if let Err(e) = generate_workspace_lock(&lock_workspace) {
+            eprintln!("mirvm test: 生成 workspace Cargo.lock 失败: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    let plans = match resolve_workspace_plans(&manifests, &known) {
+        Ok(plans) => plans,
         Err(e) => {
             eprintln!("mirvm: 依赖解析失败: {e}");
             return ExitCode::from(1);
         }
     };
+    let mut prepared = Vec::new();
+    for (manifest, plan) in manifests.into_iter().zip(plans) {
+        match prepare_test_package(manifest, plan, &request) {
+            Ok(package) => prepared.push(package),
+            Err(code) => return code,
+        }
+    }
+    if request.no_run {
+        return ExitCode::SUCCESS;
+    }
+    let mut test_args = Vec::new();
+    if request.quiet {
+        test_args.push("--quiet".into());
+    }
+    if let Some(filter) = &request.filter {
+        test_args.push(filter.clone());
+    }
+    test_args.extend(harness_args.iter().cloned());
+    let mut failed = false;
+    'packages: for package in prepared {
+        for recipe in package.recipes {
+            let code = run_recipe_child(
+                &package.self_exe,
+                &package.root,
+                &package.sysroot,
+                &recipe,
+                &test_args,
+            );
+            if code != 0 {
+                failed = true;
+                if !request.no_fail_fast {
+                    break 'packages;
+                }
+            }
+        }
+    }
+    if failed {
+        ExitCode::from(101)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+struct PreparedTests {
+    self_exe: PathBuf,
+    root: PathBuf,
+    sysroot: PathBuf,
+    recipes: Vec<PathBuf>,
+}
+
+/// Cargo resolver v2 会把同一次 workspace 命令中到达同一包、同一版本、同一
+/// normal/build 类别的 feature 求并集。各根先独立求图，再把结果反灌，直到所有
+/// 根得到同一个并集；中间结果不编译，因此不会把未收敛图发布到缓存。
+fn resolve_workspace_plans(
+    manifests: &[PackageManifest],
+    known_members: &[PackageManifest],
+) -> Result<Vec<ResolvePlan>, String> {
+    let mut registry = Registry::open()?;
+    if manifests.len() == 1 {
+        return resolve_for_known(
+            &manifests[0],
+            &mut registry,
+            ResolvePurpose::Test,
+            known_members,
+        )
+        .map(|plan| vec![plan]);
+    }
+
+    let mut features = FeatureOverrides::new();
+    for _ in 0..64 {
+        let mut plans = Vec::with_capacity(manifests.len());
+        let mut next = features.clone();
+        for manifest in manifests {
+            let plan = resolve_for_known_with_features(
+                manifest,
+                &mut registry,
+                ResolvePurpose::Test,
+                known_members,
+                &features,
+            )?;
+            next.entry((
+                plan.root_name.clone(),
+                plan.root_version.clone(),
+                UnitClass::Normal,
+            ))
+            .or_default()
+            .extend(plan.root_features.iter().cloned());
+            for unit in &plan.units {
+                next.entry((unit.package.clone(), unit.version.clone(), unit.class))
+                    .or_default()
+                    .extend(unit.features.iter().cloned());
+            }
+            plans.push(plan);
+        }
+        if next == features {
+            return Ok(plans);
+        }
+        features = next;
+    }
+    Err("workspace feature 统一 64 轮未收敛（图异常）".into())
+}
+
+fn prepare_test_package(
+    mut manifest: PackageManifest,
+    plan: ResolvePlan,
+    request: &TestRequest,
+) -> Result<PreparedTests, ExitCode> {
+    manifest.profile = manifest.test_profile;
+    if request.locked && !manifest.lock_root.join("Cargo.lock").is_file() {
+        eprintln!("mirvm test: --locked 要求现有 Cargo.lock");
+        return Err(ExitCode::from(1));
+    }
+
     if let Err(e) =
         buildrs::check_links_unique(Some((&manifest.name, manifest.links.as_deref())), &plan)
     {
         eprintln!("mirvm: {e}");
-        return ExitCode::from(1);
+        return Err(ExitCode::from(1));
     }
     let selected = match request.select(&manifest, &plan.root_features) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("mirvm test: {e}");
-            return ExitCode::from(1);
+            return Err(ExitCode::from(1));
         }
     };
 
@@ -120,7 +260,7 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
             Ok(p) => p,
             Err(e) => {
                 eprintln!("mirvm: 构建 sysroot 失败: {e}");
-                return ExitCode::from(1);
+                return Err(ExitCode::from(1));
             }
         },
     };
@@ -131,7 +271,7 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
         Ok(f) => f,
         Err(e) => {
             eprintln!("mirvm: rustflags 解析失败: {e}");
-            return ExitCode::from(1);
+            return Err(ExitCode::from(1));
         }
     };
     let compiled = match compile_plan(
@@ -147,7 +287,7 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
         Ok(c) => c,
         Err(e) => {
             eprintln!("mirvm: {e}");
-            return ExitCode::from(1);
+            return Err(ExitCode::from(1));
         }
     };
     let UnitTables { outputs, re_ran } = compiled.tables;
@@ -160,7 +300,7 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
         .map(|t| (t.name.clone(), t.path.clone(), t.proc_macro));
     if root_lib.as_ref().is_some_and(|(_, _, pm)| *pm) {
         eprintln!("mirvm test: 根 proc-macro 包测试尚未支持");
-        return ExitCode::from(1);
+        return Err(ExitCode::from(1));
     }
 
     let root_fp = match schedule::root_fingerprint(
@@ -174,7 +314,7 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
         Ok(fp) => fp,
         Err(e) => {
             eprintln!("mirvm: 根包指纹计算失败: {e}");
-            return ExitCode::from(1);
+            return Err(ExitCode::from(1));
         }
     };
     let root_bo = manifest.has_build_script.then(|| {
@@ -216,7 +356,7 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
             &self_exe,
         )
     {
-        return code;
+        return Err(code);
     }
     let root_lib_ref = root_lib
         .as_ref()
@@ -265,7 +405,7 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
                 }
                 Err(e) => {
                     eprintln!("mirvm test: {e}");
-                    return ExitCode::from(1);
+                    return Err(ExitCode::from(1));
                 }
             }
         }
@@ -326,7 +466,7 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
             );
             recipes.push((item.target.name.clone(), recipe_path, args, target_fp, env));
         } else if !run_root_check(&self_exe, &manifest.root, &args, &env, false) {
-            return ExitCode::from(1);
+            return Err(ExitCode::from(1));
         }
     }
 
@@ -338,39 +478,21 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
             if !request.no_run {
                 let _ = run_recipe_child(&self_exe, &manifest.root, &sysroot, recipe, &[]);
             }
-            return ExitCode::from(1);
+            return Err(ExitCode::from(1));
         }
     }
-    if request.no_run {
-        return ExitCode::SUCCESS;
-    }
-
-    let mut test_args = Vec::new();
-    if request.quiet {
-        test_args.push("--quiet".into());
-    }
-    if let Some(filter) = &request.filter {
-        test_args.push(filter.clone());
-    }
-    test_args.extend(harness_args.iter().cloned());
-    let mut failed = false;
-    for (_, recipe, _, _, _) in &recipes {
-        let code = run_recipe_child(&self_exe, &manifest.root, &sysroot, recipe, &test_args);
-        if code != 0 {
-            failed = true;
-            if !request.no_fail_fast {
-                break;
-            }
-        }
-    }
-    if failed {
-        ExitCode::from(101)
-    } else {
-        ExitCode::SUCCESS
-    }
+    Ok(PreparedTests {
+        self_exe,
+        root: manifest.root,
+        sysroot,
+        recipes: recipes
+            .into_iter()
+            .map(|(_, recipe, _, _, _)| recipe)
+            .collect(),
+    })
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct TestRequest {
     lib: bool,
     bins: bool,
@@ -385,6 +507,12 @@ struct TestRequest {
     offline: bool,
     quiet: bool,
     filter: Option<String>,
+    workspace: bool,
+    packages: BTreeSet<String>,
+    excludes: BTreeSet<String>,
+    features: BTreeSet<String>,
+    all_features: bool,
+    no_default_features: bool,
 }
 
 struct SelectedTarget<'a> {
@@ -427,16 +555,25 @@ impl TestRequest {
                 "--locked" => out.locked = true,
                 "--offline" => out.offline = true,
                 "-q" | "--quiet" => out.quiet = true,
-                "--workspace" | "--all" | "--exclude" | "-p" | "--package" => {
-                    return Err(format!("{arg} 依赖 workspace 多包图（D15 P5，尚未支持）"));
+                "--workspace" | "--all" => out.workspace = true,
+                "-p" | "--package" => {
+                    let value = take_value(&mut i, arg)?;
+                    out.packages.insert(value);
+                }
+                "--exclude" => {
+                    let value = take_value(&mut i, "--exclude")?;
+                    out.excludes.insert(value);
                 }
                 "--doc" => return Err("doctest 需要 rustdoc 前端，D17 明确不支持".into()),
                 "--benches" | "--bench" | "--all-targets" => {
                     return Err(format!("{arg} 包含 bench 目标，当前明确不支持"));
                 }
-                "--features" | "-F" | "--all-features" | "--no-default-features" => {
-                    return Err(format!("{arg} 的根 feature 选择尚未接入，不能静默忽略"));
+                "--features" | "-F" => {
+                    let value = take_value(&mut i, arg)?;
+                    add_feature_values(&mut out.features, &value);
                 }
+                "--all-features" => out.all_features = true,
+                "--no-default-features" => out.no_default_features = true,
                 _ if arg.starts_with("--bin=") => {
                     out.bin_names.insert(arg[6..].to_string());
                 }
@@ -445,6 +582,15 @@ impl TestRequest {
                 }
                 _ if arg.starts_with("--example=") => {
                     out.example_names.insert(arg[10..].to_string());
+                }
+                _ if arg.starts_with("--package=") => {
+                    out.packages.insert(arg[10..].to_string());
+                }
+                _ if arg.starts_with("--exclude=") => {
+                    out.excludes.insert(arg[10..].to_string());
+                }
+                _ if arg.starts_with("--features=") => {
+                    add_feature_values(&mut out.features, &arg[11..]);
                 }
                 _ if arg.starts_with('-') => {
                     return Err(format!("不支持的 Cargo test 参数 `{arg}`，不会静默吞掉"));
@@ -458,6 +604,156 @@ impl TestRequest {
             i += 1;
         }
         Ok(out)
+    }
+
+    fn select_packages(
+        &self,
+        workspace: &WorkspaceManifest,
+    ) -> Result<Vec<PackageManifest>, String> {
+        if self.workspace && !self.packages.is_empty() {
+            return Err("--workspace 与 --package 不能同时使用".into());
+        }
+        if !self.workspace && !self.excludes.is_empty() {
+            return Err("--exclude 只能与 --workspace 一起使用".into());
+        }
+        let mut roots = BTreeSet::new();
+        if self.workspace {
+            roots.extend(workspace.members.iter().map(|member| member.root.clone()));
+        } else if !self.packages.is_empty() {
+            for name in &self.packages {
+                let member = workspace.member_by_name(name).ok_or_else(|| {
+                    format!(
+                        "workspace 中没有包 `{name}`（可用：{}）",
+                        workspace
+                            .members
+                            .iter()
+                            .map(|member| member.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })?;
+                roots.insert(member.root.clone());
+            }
+        } else if let Some(current) = &workspace.current_member {
+            roots.insert(current.clone());
+        } else {
+            roots.extend(workspace.default_members.iter().cloned());
+        }
+        for name in &self.excludes {
+            let member = workspace
+                .member_by_name(name)
+                .ok_or_else(|| format!("--exclude 指定的包 `{name}` 不在 workspace"))?;
+            roots.remove(&member.root);
+        }
+        let selected: Vec<_> = workspace
+            .members
+            .iter()
+            .filter(|member| roots.contains(&member.root))
+            .cloned()
+            .collect();
+        if selected.is_empty() {
+            return Err("package 选择结果为空".into());
+        }
+        Ok(selected)
+    }
+
+    fn apply_features(&self, manifests: &mut [PackageManifest]) -> Result<(), String> {
+        for manifest in manifests.iter_mut() {
+            manifest.default_features_enabled = !self.no_default_features;
+            if self.all_features {
+                manifest
+                    .requested_features
+                    .extend(manifest.check_cfg_feature_values());
+            }
+        }
+        for spec in &self.features {
+            let (package, feature) = match spec.split_once('/') {
+                Some((package, feature)) => (Some(package), feature),
+                None => (None, spec.as_str()),
+            };
+            if let Some(package) = package {
+                if let Some(manifest) = manifests
+                    .iter_mut()
+                    .find(|manifest| manifest.name == package)
+                {
+                    if !manifest.check_cfg_feature_values().contains(feature) {
+                        return Err(format!("包 `{}` 没有 feature `{feature}`", manifest.name));
+                    }
+                    manifest.requested_features.insert(feature.to_string());
+                    continue;
+                }
+                let mut found = false;
+                for manifest in manifests.iter_mut() {
+                    if let Some(dep_key) = manifest
+                        .deps
+                        .iter()
+                        .find(|dep| dep.key == package || dep.package == package)
+                        .map(|dep| dep.key.clone())
+                    {
+                        manifest
+                            .dependency_features
+                            .entry(dep_key)
+                            .or_default()
+                            .insert(feature.to_string());
+                        found = true;
+                    }
+                }
+                if !found {
+                    return Err(format!(
+                        "feature `{spec}` 既不指向选中包，也不指向其直接依赖"
+                    ));
+                }
+                continue;
+            }
+            let mut found = false;
+            for manifest in manifests.iter_mut() {
+                if manifest.check_cfg_feature_values().contains(feature) {
+                    manifest.requested_features.insert(feature.to_string());
+                    found = true;
+                }
+            }
+            if !found {
+                return Err(format!("选中的包均没有 feature `{feature}`"));
+            }
+        }
+        Ok(())
+    }
+
+    fn restrict_named_targets(&self, manifests: &mut Vec<PackageManifest>) -> Result<(), String> {
+        for (kind, names) in [
+            (TargetKind::Bin, &self.bin_names),
+            (TargetKind::Test, &self.test_names),
+            (TargetKind::Example, &self.example_names),
+        ] {
+            for name in names {
+                if !manifests
+                    .iter()
+                    .flat_map(|manifest| &manifest.targets)
+                    .any(|target| target.kind == kind && &target.name == name)
+                {
+                    return Err(format!("没有名为 `{name}` 的 {kind:?} 目标"));
+                }
+            }
+        }
+        let broad = self.lib || self.bins || self.tests || self.examples;
+        if !broad
+            && (!self.bin_names.is_empty()
+                || !self.test_names.is_empty()
+                || !self.example_names.is_empty())
+        {
+            manifests.retain(|manifest| {
+                manifest.targets.iter().any(|target| match target.kind {
+                    TargetKind::Bin => self.bin_names.contains(&target.name),
+                    TargetKind::Test => self.test_names.contains(&target.name),
+                    TargetKind::Example => self.example_names.contains(&target.name),
+                    TargetKind::Lib => false,
+                })
+            });
+        }
+        if manifests.is_empty() {
+            return Err("目标选择结果为空".into());
+        }
+        Ok(())
     }
 
     fn has_explicit_selection(&self) -> bool {
@@ -521,21 +817,6 @@ impl TestRequest {
                 include_dev: target.kind == TargetKind::Example,
             });
         }
-        for (kind, names) in [
-            (TargetKind::Bin, &self.bin_names),
-            (TargetKind::Test, &self.test_names),
-            (TargetKind::Example, &self.example_names),
-        ] {
-            for name in names {
-                if !manifest
-                    .targets
-                    .iter()
-                    .any(|t| t.kind == kind && &t.name == name)
-                {
-                    return Err(format!("没有名为 `{name}` 的 {kind:?} 目标"));
-                }
-            }
-        }
         if selected.is_empty() {
             return Err("没有可测试目标".into());
         }
@@ -560,6 +841,150 @@ impl TestRequest {
         }
         Ok(selected)
     }
+}
+
+fn add_feature_values(out: &mut BTreeSet<String>, value: &str) {
+    out.extend(
+        value
+            .split(|ch: char| ch == ',' || ch.is_ascii_whitespace())
+            .filter(|part| !part.is_empty())
+            .map(str::to_string),
+    );
+}
+
+/// 无锁 workspace 的一次性全成员求解。Cargo 的 workspace lock 覆盖所有成员的
+/// 全部 feature 可达依赖，与本次实际编译选择分开；合成根只负责形成这张最大解析图。
+/// 落盘前删除它，并把成员的非可选 Dev 边补回各自 lock 行。
+fn generate_workspace_lock(workspace: &WorkspaceManifest) -> Result<(), String> {
+    let mut synthetic = workspace
+        .members
+        .first()
+        .cloned()
+        .ok_or_else(|| "workspace 没有成员".to_string())?;
+    synthetic.name = format!("__mirvm_workspace_root_{:x}", std::process::id());
+    synthetic.version = semver::Version::new(0, 0, 0);
+    synthetic.root = workspace.root.clone();
+    synthetic.lock_root = workspace.root.clone();
+    synthetic.targets.clear();
+    synthetic.features.clear();
+    synthetic.requested_features.clear();
+    synthetic.dependency_features.clear();
+    synthetic.has_build_script = false;
+    synthetic.build_script_path = None;
+    synthetic.links = None;
+    synthetic.deps = workspace
+        .members
+        .iter()
+        .map(|member| super::manifest::DepDecl {
+            key: member.name.clone(),
+            package: member.name.clone(),
+            source: DepSource::Path(member.root.clone()),
+            features: member.check_cfg_feature_values().into_iter().collect(),
+            optional: false,
+            default_features: true,
+            kind: DepKind::Normal,
+            platform_cfg: None,
+        })
+        .collect();
+    // 非可选 Dev 包也必须进入版本选择；成员 lock 行在下方补依赖引用。
+    for (member_ix, member) in workspace.members.iter().enumerate() {
+        for dep in member
+            .deps
+            .iter()
+            .filter(|dep| dep.kind == DepKind::Dev && !dep.optional)
+        {
+            let mut dep = dep.clone();
+            dep.key = format!("__mirvm_dev_{member_ix}_{}", dep.key);
+            dep.kind = DepKind::Normal;
+            synthetic.deps.push(dep);
+        }
+    }
+
+    let mut registry = Registry::open()?;
+    let mut plan = resolve_for_known(
+        &synthetic,
+        &mut registry,
+        ResolvePurpose::Run,
+        &workspace.members,
+    )?;
+    plan.lock.packages.retain(|package| {
+        !(package.name == synthetic.name && package.version == synthetic.version)
+    });
+    for member in &workspace.members {
+        let Some(row) = plan
+            .lock
+            .packages
+            .iter_mut()
+            .find(|package| package.name == member.name && package.version == member.version)
+        else {
+            return Err(format!("求解结果缺 workspace 成员 {}", member.name));
+        };
+        for dep in member
+            .deps
+            .iter()
+            .filter(|dep| dep.kind == DepKind::Dev && !dep.optional)
+        {
+            let version = match &dep.source {
+                DepSource::Path(path) => workspace
+                    .members
+                    .iter()
+                    .find(|candidate| candidate.root == *path)
+                    .map(|candidate| candidate.version.clone())
+                    .or_else(|| PackageManifest::read_dir(path).ok().map(|m| m.version)),
+                DepSource::Registry(req) => plan
+                    .version_map
+                    .get(&dep.package)
+                    .and_then(|versions| versions.iter().find(|version| req.matches(version)))
+                    .cloned(),
+            }
+            .ok_or_else(|| format!("Dev 依赖 {} 没有已解版本", dep.package))?;
+            let ambiguous = plan
+                .version_map
+                .get(&dep.package)
+                .is_some_and(|versions| versions.len() > 1);
+            row.dependencies
+                .push((dep.package.clone(), ambiguous.then_some(version)));
+        }
+        row.dependencies.sort();
+        row.dependencies.dedup();
+    }
+    write_lock_atomic(&workspace.root.join("Cargo.lock"), &plan.lock)
+}
+
+fn write_lock_atomic(path: &Path, lock: &Lockfile) -> Result<(), String> {
+    let tmp = path.with_extension(format!("lock.mirvm-{}", std::process::id()));
+    std::fs::write(&tmp, lock.serialize())
+        .map_err(|e| format!("写 {} 失败: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("发布 {} 失败: {e}", path.display()))
+}
+
+fn sort_packages_dependency_first(manifests: &mut Vec<PackageManifest>) {
+    let mut remaining: BTreeMap<String, PackageManifest> = manifests
+        .drain(..)
+        .map(|manifest| (manifest.name.clone(), manifest))
+        .collect();
+    let selected_names: BTreeSet<String> = remaining.keys().cloned().collect();
+    let mut ordered = Vec::new();
+    while !remaining.is_empty() {
+        let ready = remaining
+            .iter()
+            .find(|(_, manifest)| {
+                manifest.deps.iter().all(|dep| {
+                    !selected_names.contains(&dep.package)
+                        || ordered
+                            .iter()
+                            .any(|done: &PackageManifest| done.name == dep.package)
+                })
+            })
+            .map(|(name, _)| name.clone());
+        let Some(name) = ready else {
+            // Cargo 会在后续依赖解析响亮报告环；这里保持确定顺序，不伪造诊断。
+            ordered.extend(remaining.into_values());
+            break;
+        };
+        ordered.push(remaining.remove(&name).unwrap());
+    }
+    *manifests = ordered;
 }
 
 #[allow(clippy::too_many_arguments)]

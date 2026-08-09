@@ -15,12 +15,11 @@
 //!   target_pointer_width/target_endian）+ any/all/not 组合；
 //!   `cfg(feature=..)` 不属于平台求值（cargo 同）；`cfg(target_feature=..)`
 //!   响亮拒绝（归 P5）
-//! - `[workspace]`：单包或"包 + workspace 根"两形态；workspace.package 的
-//!   version/edition 继承（向上找根）；**多包成员图与 virtual manifest 归 P5，
-//!   响亮拒绝**
+//! - `[workspace]`：`workspace.rs` 先发现 resolver=2 多包图并物化
+//!   workspace.package/workspace.dependencies/root profile；本文件只解析物化后的包
 //! - doctest/bench 仍不做；测试目标由 `mirvm test` 消费。
 
-// P1 逐切接入中：resolve/registry/audit 后续切片接入后摘除本 allow（设计档 §5）。
+// 模型中仍有只被部分命令消费的字段，暂按模块边界保留。
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -170,9 +169,16 @@ pub struct PackageManifest {
     pub version: semver::Version,
     pub edition: String,
     pub root: PathBuf,
+    /// Cargo.lock 所属目录。单包等于 root；workspace 成员指向 workspace 根。
+    pub lock_root: PathBuf,
     pub targets: Vec<Target>,
     pub deps: Vec<DepDecl>,
     pub features: BTreeMap<String, Vec<FeatureValue>>,
+    /// CLI 对这个测试根显式请求的 feature；依赖边的 feature 仍由 resolver 传播。
+    pub requested_features: BTreeSet<String>,
+    /// CLI 的 `dependency/feature` 请求；向依赖边传播，不是根包 cfg feature。
+    pub dependency_features: BTreeMap<String, BTreeSet<String>>,
+    pub default_features_enabled: bool,
     pub profile: ProfileFlags,
     pub test_profile: ProfileFlags,
     /// 有 build script（build 键 / links 键 / 根下 build.rs 实存）。
@@ -193,6 +199,9 @@ pub struct PackageManifest {
 struct RawManifest {
     package: Option<RawPackage>,
     workspace: Option<RawWorkspace>,
+    patch: Option<toml::Value>,
+    replace: Option<toml::Value>,
+    lints: Option<toml::Value>,
     lib: Option<RawLib>,
     bin: Option<Vec<RawBin>>,
     test: Option<Vec<RawTarget>>,
@@ -335,6 +344,14 @@ impl PackageManifest {
     pub fn parse(text: &str, root: &Path) -> Result<Self, MErr> {
         let raw: RawManifest =
             toml::from_str(text).map_err(|e| format!("Cargo.toml 解析失败: {e}"))?;
+        if raw.patch.is_some() || raw.replace.is_some() {
+            return Err(unsupported("[patch]/[replace] source replacement"));
+        }
+        if raw.lints.is_some() {
+            return Err(unsupported(
+                "[lints]（会改变 rustc 行为，当前不能静默忽略）",
+            ));
+        }
         if raw.package.is_none() && raw.workspace.is_some() {
             return Err(unsupported("virtual manifest（[workspace] 无 [package]）"));
         }
@@ -498,9 +515,13 @@ impl PackageManifest {
             version,
             edition,
             root: root.to_path_buf(),
+            lock_root: root.to_path_buf(),
             targets,
             deps,
             features,
+            requested_features: BTreeSet::new(),
+            dependency_features: BTreeMap::new(),
+            default_features_enabled: true,
             profile,
             test_profile,
             has_build_script,
@@ -936,7 +957,7 @@ fn discover_targets(
                 .unwrap_or_default(),
         });
     }
-    // bin：显式 [[bin]] 优先；否则自动发现
+    // bin：显式条目覆盖同名自动目标；autobins=true 时其他目标仍自动发现。
     let explicit: Vec<Target> = bin
         .into_iter()
         .flatten()
@@ -966,11 +987,11 @@ fn discover_targets(
             })
         })
         .collect();
-    if !explicit.is_empty() {
-        out.extend(explicit);
-    } else if autobins {
+    let explicit_bin_names: BTreeSet<String> = explicit.iter().map(|t| t.name.clone()).collect();
+    out.extend(explicit);
+    if autobins {
         let main = root.join("src/main.rs");
-        if main.is_file() {
+        if main.is_file() && !explicit_bin_names.contains(pkg_name) {
             out.push(Target {
                 kind: TargetKind::Bin,
                 name: pkg_name.to_string(),
@@ -1010,6 +1031,7 @@ fn discover_targets(
                     })
                 })
                 .collect();
+            extra.retain(|target| !explicit_bin_names.contains(&target.name));
             extra.sort_by(|a, b| a.name.cmp(&b.name));
             out.extend(extra);
         }
@@ -1031,56 +1053,56 @@ fn discover_targets(
 }
 
 /// Cargo 的 tests/examples 自动发现：`dir/name.rs` 与 `dir/name/main.rs` 各是一目标；
-/// 子目录里的其他 `.rs` 是模块，不应被误当成独立目标。显式表在场时只取显式表。
+/// 子目录里的其他 `.rs` 是模块，不应被误当成独立目标。显式条目只覆盖同名自动目标。
 fn discover_file_targets(
     explicit: Option<&Vec<RawTarget>>,
     auto: bool,
     kind: TargetKind,
     dir: &Path,
 ) -> Vec<Target> {
-    if let Some(rows) = explicit.filter(|rows| !rows.is_empty()) {
-        return rows
-            .iter()
-            .filter_map(|row| {
-                let path = row
-                    .path
-                    .as_ref()
-                    .and_then(|p| dir.parent().map(|root| root.join(p)))
-                    .or_else(|| {
-                        let name = row.name.as_ref()?;
-                        let flat = dir.join(format!("{name}.rs"));
-                        flat.is_file().then_some(flat).or_else(|| {
-                            let main = dir.join(name).join("main.rs");
-                            main.is_file().then_some(main)
-                        })
-                    })?;
-                let name = row.name.clone().or_else(|| {
-                    path.parent()
-                        .filter(|parent| parent.parent() == Some(dir))
-                        .and_then(Path::file_name)
-                        .or_else(|| path.file_stem())
-                        .map(|n| n.to_string_lossy().into_owned())
+    let mut out: Vec<Target> = explicit
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let path = row
+                .path
+                .as_ref()
+                .and_then(|p| dir.parent().map(|root| root.join(p)))
+                .or_else(|| {
+                    let name = row.name.as_ref()?;
+                    let flat = dir.join(format!("{name}.rs"));
+                    flat.is_file().then_some(flat).or_else(|| {
+                        let main = dir.join(name).join("main.rs");
+                        main.is_file().then_some(main)
+                    })
                 })?;
-                Some(Target {
-                    kind,
-                    name,
-                    path,
-                    proc_macro: false,
-                    test: row.test.unwrap_or(kind != TargetKind::Example),
-                    harness: row.harness.unwrap_or(true),
-                    doctest: false,
-                    required_features: row.required_features.clone().unwrap_or_default(),
-                })
+            let name = row.name.clone().or_else(|| {
+                path.parent()
+                    .filter(|parent| parent.parent() == Some(dir))
+                    .and_then(Path::file_name)
+                    .or_else(|| path.file_stem())
+                    .map(|n| n.to_string_lossy().into_owned())
+            })?;
+            Some(Target {
+                kind,
+                name,
+                path,
+                proc_macro: false,
+                test: row.test.unwrap_or(kind != TargetKind::Example),
+                harness: row.harness.unwrap_or(true),
+                doctest: false,
+                required_features: row.required_features.clone().unwrap_or_default(),
             })
-            .collect();
-    }
+        })
+        .collect();
     if !auto {
-        return Vec::new();
+        return out;
     }
+    let explicit_names: BTreeSet<String> = out.iter().map(|target| target.name.clone()).collect();
     let Ok(rd) = std::fs::read_dir(dir) else {
-        return Vec::new();
+        return out;
     };
-    let mut out: Vec<_> = rd
+    let mut automatic: Vec<_> = rd
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
@@ -1106,7 +1128,9 @@ fn discover_file_targets(
             })
         })
         .collect();
-    out.sort_by(|a, b| a.name.cmp(&b.name));
+    automatic.retain(|target| !explicit_names.contains(&target.name));
+    automatic.sort_by(|a, b| a.name.cmp(&b.name));
+    out.extend(automatic);
     out
 }
 
@@ -1223,6 +1247,20 @@ cc = "1"
         )
         .unwrap_err();
         assert!(err.contains("P5"), "{err}");
+
+        let err = PackageManifest::parse(
+            "[package]\nname='d'\nversion='0.1.0'\n[patch.crates-io]\nfoo = { path = '../foo' }\n",
+            Path::new("/tmp/x"),
+        )
+        .unwrap_err();
+        assert!(err.contains("[patch]/[replace]"), "{err}");
+
+        let err = PackageManifest::parse(
+            "[package]\nname='d'\nversion='0.1.0'\n[lints.rust]\nunsafe_code='forbid'\n",
+            Path::new("/tmp/x"),
+        )
+        .unwrap_err();
+        assert!(err.contains("[lints]"), "{err}");
     }
 
     #[test]
@@ -1356,6 +1394,7 @@ cc = "1"
         std::fs::create_dir_all(d.join("examples")).unwrap();
         std::fs::write(d.join("src/lib.rs"), "").unwrap();
         std::fs::write(d.join("tests/api.rs"), "").unwrap();
+        std::fs::write(d.join("tests/required.rs"), "").unwrap();
         std::fs::write(d.join("tests/nested/main.rs"), "").unwrap();
         std::fs::write(d.join("tests/nested/helper.rs"), "").unwrap();
         std::fs::write(d.join("examples/demo.rs"), "fn main(){}").unwrap();
@@ -1363,7 +1402,8 @@ cc = "1"
             "[package]\nname=\"d\"\nversion=\"0.1.0\"\n\
              [dev-dependencies]\nhelper=\"1\"\n\
              [profile.dev]\nopt-level=1\n\
-             [profile.test]\nopt-level=\"z\"\ndebug-assertions=false\n",
+             [profile.test]\nopt-level=\"z\"\ndebug-assertions=false\n\
+             [[test]]\nname=\"required\"\npath=\"tests/required.rs\"\n",
             &d,
         )
         .unwrap();
@@ -1381,6 +1421,7 @@ cc = "1"
             .collect();
         assert!(targets.contains(&(TargetKind::Test, "api")));
         assert!(targets.contains(&(TargetKind::Test, "nested")));
+        assert!(targets.contains(&(TargetKind::Test, "required")));
         assert!(targets.contains(&(TargetKind::Example, "demo")));
         assert!(
             !m.targets

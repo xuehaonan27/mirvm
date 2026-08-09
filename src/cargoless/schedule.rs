@@ -699,11 +699,14 @@ pub fn bin_rustc_args(
     // file!()/panic Location/诊断路径 parity（redb_kv 的 Location Display 与
     // gix_pure 的 panic 位置实锤）：cargo 以 cwd=包根 + 相对路径 src/main.rs
     // 调 rustc，本地包路径在一切输出里都是相对形；我们传绝对路径，用 remap
-    // 把包根前缀重写为空——rustc book：remap 影响 all output including
+    // 把 Cargo 编译根（workspace 根；单包时等于包根）前缀重写为空——rustc book：remap 影响 all output including
     // compiler diagnostics（真 rustc 实证：绝对输入 + remap 的 file!() 与
     // 相对输入逐字节同）。registry/path 依赖路径仍绝对（cargo 同），只盖
     // 根包目录。
-    a.push(format!("--remap-path-prefix={}/=", manifest.root.display()));
+    a.push(format!(
+        "--remap-path-prefix={}/=",
+        manifest.lock_root.display()
+    ));
     a.push("-C".into());
     a.push("embed-bitcode=no".into());
     a.push("-C".into());

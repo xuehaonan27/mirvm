@@ -303,8 +303,9 @@ pub fn phase_wrapper(mut argv: impl Iterator<Item = String>) -> ! {
 
     if is_runnable {
         // 最终 bin：不编译，写可执行启动器 + JSON 配方 + 真实 .d
+        let recorded_args = runner_args_with_stable_paths(&args);
         let info = CrateRunInfo {
-            args: args.clone(),
+            args: recorded_args,
             env: std::env::vars().collect(),
         };
         write_fake_outputs(&rustc, &args, &info);
@@ -325,6 +326,29 @@ pub fn phase_wrapper(mut argv: impl Iterator<Item = String>) -> ! {
     dep_args.push("-Zalways-encode-mir".into());
     dep_args.push("-Zno-codegen".into());
     crate::cli::run_dep_compiler(dep_args)
+}
+
+/// Cargo workspace 中 rustc 从 workspace 根接收 `member/src/lib.rs`，runner
+/// 却从成员目录启动。把 crate 根绝对化，并重映射回原相对拼写：编译不受 runner
+/// cwd 影响，诊断/file!() 仍与 Cargo 原调用一致。
+fn runner_args_with_stable_paths(args: &[String]) -> Vec<String> {
+    let Ok(cwd) = std::env::current_dir() else {
+        return args.to_vec();
+    };
+    let mut out = args.to_vec();
+    let mut changed = false;
+    for arg in &mut out {
+        let path = Path::new(arg);
+        if !arg.starts_with('-') && arg.ends_with(".rs") && path.is_relative() {
+            *arg = cwd.join(path).display().to_string();
+            changed = true;
+            break;
+        }
+    }
+    if changed {
+        out.push(format!("--remap-path-prefix={}/=", cwd.display()));
+    }
+    out
 }
 
 fn looks_like_nested_rustc_wrapper(args: &[String]) -> bool {
@@ -532,6 +556,7 @@ mod tests {
     use super::{
         CargoAction, append_encoded_rustflags, cargo_project_command, configured_cargo_wrapper,
         looks_like_nested_rustc_wrapper, read_fake_info, reject_custom_rustc_wrappers,
+        runner_args_with_stable_paths,
     };
 
     #[test]
@@ -664,6 +689,22 @@ mod tests {
         .unwrap();
         assert_eq!(read_fake_info(&copied).unwrap(), r#"{"args":[],"env":[]}"#);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn workspace_runner_absolutizes_source_and_remaps_diagnostics() {
+        let cwd = std::env::current_dir().unwrap();
+        let args = runner_args_with_stable_paths(&[
+            "--crate-name".into(),
+            "demo".into(),
+            "member/src/lib.rs".into(),
+            "--test".into(),
+        ]);
+        assert!(args.contains(&cwd.join("member/src/lib.rs").display().to_string()));
+        assert!(
+            args.contains(&format!("--remap-path-prefix={}/=", cwd.display())),
+            "absolute compiler input must still report Cargo's workspace-relative path"
+        );
     }
 
     #[test]

@@ -128,6 +128,10 @@ pub struct ResolvePlan {
     pub lock: Lockfile,
 }
 
+/// 同一次 workspace 命令中，从其他根传播来的 resolver v2 feature 并集。
+/// 键包含版本与 normal/build 类别，避免把 Cargo 明确分开的编译单元揉在一起。
+pub type FeatureOverrides = BTreeMap<(String, Version, UnitClass), BTreeSet<String>>;
+
 /// 根包当前用途只改变 dev 依赖是否进入构建图；版本求解和 Cargo.lock 始终
 /// 看见根 dev 依赖，与 Cargo 在 `cargo build` 时也会锁定 dev 依赖的行为一致。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,7 +157,28 @@ pub fn resolve_for(
     src: &mut impl PkgSource,
     purpose: ResolvePurpose,
 ) -> Result<ResolvePlan, String> {
-    let lock_path = root.root.join("Cargo.lock");
+    resolve_for_known(root, src, purpose, &[])
+}
+
+/// Workspace 版入口：`known_paths` 是已经完成 workspace 继承物化的成员清单。
+/// path 边命中成员目录时必须复用它，不能重新读取仍含 `workspace = true` 的原文。
+pub fn resolve_for_known(
+    root: &PackageManifest,
+    src: &mut impl PkgSource,
+    purpose: ResolvePurpose,
+    known_paths: &[PackageManifest],
+) -> Result<ResolvePlan, String> {
+    resolve_for_known_with_features(root, src, purpose, known_paths, &FeatureOverrides::new())
+}
+
+pub fn resolve_for_known_with_features(
+    root: &PackageManifest,
+    src: &mut impl PkgSource,
+    purpose: ResolvePurpose,
+    known_paths: &[PackageManifest],
+    workspace_features: &FeatureOverrides,
+) -> Result<ResolvePlan, String> {
+    let lock_path = root.lock_root.join("Cargo.lock");
     let input_lock = if lock_path.is_file() {
         Some(Lockfile::read(&lock_path)?)
     } else {
@@ -169,8 +194,18 @@ pub fn resolve_for(
             if let DepSource::Path(p) = &d.source
                 && !path_manifests.contains_key(&d.package)
             {
-                let pm = PackageManifest::read_dir(p)
-                    .map_err(|e| format!("path 依赖 {}（{}）: {e}", d.package, p.display()))?;
+                let absolute = std::fs::canonicalize(p)
+                    .or_else(|_| std::path::absolute(p))
+                    .unwrap_or_else(|_| p.clone());
+                let pm = known_paths
+                    .iter()
+                    .find(|known| known.root == absolute)
+                    .cloned()
+                    .map(Ok)
+                    .unwrap_or_else(|| PackageManifest::read_dir(&absolute))
+                    .map_err(|e| {
+                        format!("path 依赖 {}（{}）: {e}", d.package, absolute.display())
+                    })?;
                 path_manifests.insert(d.package.clone(), pm);
                 queue.push_back((
                     clone_root_shallow(path_manifests.get(&d.package).unwrap()),
@@ -185,7 +220,15 @@ pub fn resolve_for(
     let (version_map, out_lock, _lock_nodes, build_nodes, edge_versions) = match &input_lock {
         Some(lf) => {
             let (vm, ev) = versions_from_lock(root, &path_manifests, lf)?;
-            let (nodes, _) = unify_features(root, &path_manifests, &ev, src, true, true)?;
+            let (nodes, _) = unify_features(
+                root,
+                &path_manifests,
+                &ev,
+                src,
+                true,
+                true,
+                workspace_features,
+            )?;
             let (build_nodes, _) = unify_features(
                 root,
                 &path_manifests,
@@ -193,6 +236,7 @@ pub fn resolve_for(
                 src,
                 false,
                 purpose.includes_dev(),
+                workspace_features,
             )?;
             (vm, lf.clone(), nodes, build_nodes, ev)
         }
@@ -206,8 +250,15 @@ pub fn resolve_for(
                     eprintln!("DBG-SOLVE pass activated={activated:?}");
                 }
                 let (vm, lf, ev) = solve_fresh(root, &path_manifests, src, &activated)?;
-                let (nodes, new_activated) =
-                    unify_features(root, &path_manifests, &ev, src, true, true)?;
+                let (nodes, new_activated) = unify_features(
+                    root,
+                    &path_manifests,
+                    &ev,
+                    src,
+                    true,
+                    true,
+                    workspace_features,
+                )?;
                 if std::env::var_os("MIRVM_DEBUG_UNIFY").is_some() {
                     eprintln!("DBG-SOLVE pass end new_activated={new_activated:?}");
                 }
@@ -232,6 +283,7 @@ pub fn resolve_for(
                         src,
                         false,
                         purpose.includes_dev(),
+                        workspace_features,
                     )?;
                     break (vm, lf, nodes, build_nodes, ev);
                 }
@@ -1336,6 +1388,7 @@ fn unify_features(
     src: &mut impl PkgSource,
     include_weak: bool,
     include_root_dev: bool,
+    workspace_features: &FeatureOverrides,
 ) -> Result<Unified, String> {
     let mut tables: NodeTables = BTreeMap::new();
     let mut nodes: BTreeMap<NodeKey, FeatNode> = BTreeMap::new();
@@ -1347,14 +1400,19 @@ fn unify_features(
         root.features.clone(),
         root_featdeps(&root.deps, include_root_dev)?,
     );
-    // 根 default feature 启用（cargo run 语义）
-    if root.features.contains_key("default") {
-        nodes
-            .get_mut(&(root.name.clone(), root.version.clone(), UnitClass::Normal))
-            .unwrap()
-            .features
-            .insert("default".to_string());
+    // 根 feature 来自 CLI 选择；未指定 --no-default-features 时才启用 default。
+    let root_node = nodes
+        .get_mut(&(root.name.clone(), root.version.clone(), UnitClass::Normal))
+        .unwrap();
+    if root.default_features_enabled && root.features.contains_key("default") {
+        root_node.features.insert("default".to_string());
     }
+    root_node
+        .features
+        .extend(root.requested_features.iter().cloned());
+    root_node
+        .activated
+        .extend(root.dependency_features.keys().cloned());
     for (name, m) in path_manifests {
         let deps = decls_to_featdeps(&m.deps)?;
         for class in [UnitClass::Normal, UnitClass::Build] {
@@ -1365,6 +1423,18 @@ fn unify_features(
                 m.features.clone(),
                 deps.clone(),
             );
+            if class == UnitClass::Normal {
+                nodes
+                    .get_mut(&(name.clone(), m.version.clone(), class))
+                    .unwrap()
+                    .activated
+                    .extend(m.dependency_features.keys().cloned());
+            }
+        }
+    }
+    for (key, features) in workspace_features {
+        if let Some(node) = nodes.get_mut(key) {
+            node.features.extend(features.iter().cloned());
         }
     }
 
@@ -1377,7 +1447,27 @@ fn unify_features(
                 continue;
             };
             let node = nodes.get(&key).cloned().unwrap_or_default();
-            let (features, activated, edge_adds, weak_refs) = expand_node(&table, &deps, &node)?;
+            let (features, activated, mut edge_adds, weak_refs) =
+                expand_node(&table, &deps, &node)?;
+            let cli_dependency_features =
+                if key.0 == root.name && key.1 == root.version && key.2 == UnitClass::Normal {
+                    Some(&root.dependency_features)
+                } else if key.2 == UnitClass::Normal {
+                    path_manifests
+                        .get(&key.0)
+                        .filter(|manifest| manifest.version == key.1)
+                        .map(|manifest| &manifest.dependency_features)
+                } else {
+                    None
+                };
+            if let Some(cli_dependency_features) = cli_dependency_features {
+                for (dep, requested) in cli_dependency_features {
+                    edge_adds
+                        .entry(dep.clone())
+                        .or_default()
+                        .extend(requested.iter().cloned());
+                }
+            }
             // 三路产物任一变化都要落表——weak_refs 漏插会静悄悄地丢
             // ?/ 弱引用（tracing-core 的 valuable?/std 实锤）
             if features != node.features
@@ -1440,6 +1530,14 @@ fn unify_features(
                     // 新注册节点本身也是变化——否则 adds 为空时提前收敛，
                     // 其子图永远不展开（syn/quote 实锤）
                     changed = true;
+                }
+                if let Some(seed) = workspace_features.get(&child_key) {
+                    let child = nodes.entry(child_key.clone()).or_default();
+                    let before = child.features.len();
+                    child.features.extend(seed.iter().cloned());
+                    if child.features.len() != before {
+                        changed = true;
+                    }
                 }
                 let mut adds: BTreeSet<String> = dep.features.iter().cloned().collect();
                 if dep.default_features {
@@ -1547,6 +1645,23 @@ fn expand_node(
         .filter(|d| d.optional)
         .map(|d| d.key.clone())
         .collect();
+
+    if let Some(feature) = node
+        .features
+        .iter()
+        .find(|feature| !table.contains_key(*feature) && !optional_keys.contains(*feature))
+    {
+        return Err(format!("请求了不存在的 feature `{feature}`"));
+    }
+    if let Some(feature) = node.features.iter().find(|feature| {
+        !table.contains_key(*feature)
+            && optional_keys.contains(*feature)
+            && hidden.contains(*feature)
+    }) {
+        return Err(format!(
+            "feature `{feature}` 已被 dep:{feature} 隐藏，不能作为隐式 feature 启用"
+        ));
+    }
 
     let mut features = node.features.clone();
     let mut activated = node.activated.clone();
@@ -2173,6 +2288,40 @@ mod tests {
     }
 
     #[test]
+    fn cli_dependency_feature_reaches_dep_without_becoming_root_cfg() {
+        let d = tmpdir("cli-dependency-feature");
+        let mut root = root_project(
+            &d,
+            "[package]\nname=\"demo\"\nversion=\"0.1.0\"\n[dependencies]\na=\"1\"\n",
+        );
+        root.dependency_features
+            .entry("a".into())
+            .or_default()
+            .insert("extra".into());
+        std::fs::write(
+            d.join("Cargo.lock"),
+            "version=4\n[[package]]\nname=\"demo\"\nversion=\"0.1.0\"\ndependencies=[\"a\"]\n\
+             [[package]]\nname=\"a\"\nversion=\"1.0.0\"\nsource=\"registry+https://github.com/rust-lang/crates.io-index\"\n",
+        )
+        .unwrap();
+        let mut a = iv("a", "1.0.0");
+        a.features.insert("extra".into(), vec![]);
+        let mut src = FakeSource::new(d.join("srcstore"));
+        src.add("a", vec![a]);
+        let plan = resolve(&root, &mut src).unwrap();
+        assert!(
+            plan.units
+                .iter()
+                .find(|unit| unit.package == "a")
+                .unwrap()
+                .features
+                .contains("extra")
+        );
+        assert!(!plan.root_features.contains("extra"));
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
     fn run_locks_but_does_not_build_root_dev_dependencies() {
         let d = tmpdir("root-dev-purpose");
         let root = root_project(
@@ -2346,7 +2495,9 @@ mod tests {
         opt2.optional = true;
         w.deps.push(opt2);
         src.add("w", vec![w]);
-        src.add("opt2", vec![iv("opt2", "1.0.0")]);
+        let mut opt2 = iv("opt2", "1.0.0");
+        opt2.features.insert("inner".into(), vec![]);
+        src.add("opt2", vec![opt2]);
 
         let plan = resolve(&root, &mut src).unwrap();
         let m_unit = plan.units.iter().find(|u| u.package == "m").unwrap();
@@ -2429,7 +2580,9 @@ mod tests {
         ec.optional = true;
         k2.deps.push(ec);
         src.add("k2", vec![k2]);
-        src.add("ecdsa-core", vec![iv("ecdsa-core", "1.0.0")]);
+        let mut ecdsa_core = iv("ecdsa-core", "1.0.0");
+        ecdsa_core.features.insert("signing".into(), vec![]);
+        src.add("ecdsa-core", vec![ecdsa_core]);
 
         let plan = resolve(&root, &mut src).unwrap();
         let k2_unit = plan.units.iter().find(|u| u.package == "k2").unwrap();
@@ -2484,7 +2637,9 @@ mod tests {
         sc.optional = true;
         zt.deps.push(sc);
         src.add("zt", vec![zt]);
-        src.add("litemap", vec![iv("litemap", "1.0.0")]);
+        let mut litemap = iv("litemap", "1.0.0");
+        litemap.features.insert("serde".into(), vec![]);
+        src.add("litemap", vec![litemap]);
         src.add("serde_core", vec![iv("serde_core", "1.0.0")]);
 
         let plan = resolve(&root, &mut src).unwrap();
@@ -2693,8 +2848,12 @@ mod tests {
         syn.deps.push(syn_quote);
         syn.deps.push(idep("proc-macro2", "^1"));
         src.add("syn", vec![syn]);
-        src.add("quote", vec![iv("quote", "1.0.47")]);
-        src.add("proc-macro2", vec![iv("proc-macro2", "1.0.107")]);
+        let mut quote = iv("quote", "1.0.47");
+        quote.features.insert("proc-macro".into(), vec![]);
+        src.add("quote", vec![quote]);
+        let mut proc_macro2 = iv("proc-macro2", "1.0.107");
+        proc_macro2.features.insert("proc-macro".into(), vec![]);
+        src.add("proc-macro2", vec![proc_macro2]);
 
         let plan = resolve(&root, &mut src).unwrap();
         let syn_lock = plan

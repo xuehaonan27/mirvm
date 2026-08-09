@@ -1,8 +1,9 @@
 # mirvm 当前开发状态
 
-> 状态日期：2026-08-07（2026-07-22 外部审核
+> 状态日期：2026-08-08（2026-07-22 外部审核
 > [history/development-status-audit-2026-07-22.md](history/development-status-audit-2026-07-22.md)
-> 之后的 D15 P1-P4 与本轮稳定化均已纳入，见 decision-history §7.21-§7.33）。
+> 之后的 D15 P1-P4、稳定化与 `mirvm test` 工作区合同均已纳入，见
+> decision-history §7.21-§7.35）。
 > 本文是当前状态的唯一汇总入口；
 > 若与早期计划、README 或交接文档冲突，以当前代码、可复现测试结果和本文为准。文档权威
 > 规则见 [README.md](README.md)。
@@ -36,8 +37,8 @@
 | **D15 P1（砍 cargo 之解析地基，2026-07-27，decision-history §7.27/§7.28）** | **完成** | `src/cargoless/` 五件：manifest（Cargo.toml 模型 + cfg 平台求值 + frontmatter 伪包）/ lockfile（v1–v4 读写 + canonical v4）/ registry（自有 store + 读穿 cargo 缓存只读 + sparse index + .crate sha256 自实现校验 + 解包防护）/ resolve（lock/pubgrub 双模式 + feature 统一 + 单元装配）/ audit（`mirvm deps audit`：项目等值对账 + 脚本 cargo `--locked --offline` 验收链 + manifest needs/env 联动）。**cargo 解析语义全实证定稿**（resolve 图全平台并集 ∪ build 图 host 过滤、lazy-bucket 多版本 fork（hashbrown 0.14/0.15 类）、optional 门按（父包,父版本,依赖键）、?/ 弱引用级联（rust_decimal→borsh→bytes 实锤）、pre 精确规则、exact 钉兼容 build 元数据、lock canonical 尾逗号、同名多 req 条目分立、rename 双路匹配）；上游破洞六枚钉版（均验证 cargo 自家 fresh 同撞）。29 单测绿 + corpus 全量 audit 166 目标绿（wincode git 源 = P5 合法响亮拒绝）。P2/P3 已收（见下行）；rust-version-aware 偏好记边界 |
 | **D15 P2（砍 cargo 之编译调度，2026-07-27，decision-history §7.29）** | **完成** | cargoless 新增 schedule/buildrs/driver：`MIRVM_DEPS=self` 的 `mirvm run` 全程零 cargo——自排拓扑、自算每 crate rustc 参数（内容指纹含传递传播不变量）、proc-macro 闭包 ∪ build-deps 闭包真 rustc host 真 codegen（proc-macro 五钉/host rlib 形态全探针实锤）、build.rs 编译→执行→指令传播全生命周期（`-l` 只进本包、`-L` 传递、metadata 只给直接依赖者、无自动 DEP_*_ROOT、无自动 check-cfg 补钉——全按 probe_link 实证）。**闭合验收：corpus smoke 24 双腿（cargo vs self）stdout/stderr/exit 逐字节 24/24**；diff_cless 六夹具（PATH 只含 mirvm + 离线实证零 cargo 进程）。对拍暴露四枚修复当日落地（含 cargo 腿既有 bug：phase_wrapper 劫持 rustix 1.1.4 RUSTC_WRAPPER 探针竞态 EPIPE）。E36 状态精确化：self 路径以构造闭合（guest cwd = 调用者 cwd），compat 路径行为照旧（归 P4，见 open-issues E36）。P3 已收（见下行） |
 | **D15 P3（迁移全量 corpus 与双轨 gate，2026-07-28，decision-history §7.30）** | **完成** | 四切落地：① **rustflags 子集**（新 `rustflags.rs`：CARGO_ENCODED_RUSTFLAGS > RUSTFLAGS > config 三键，优先级/发现按 cargo；实证 13 条 rustc 行逐类核对定稿——rustflags 只落 target 单元，host 侧签名级不吃；进全 unit 指纹；伴生修 proc_macro 下划线双拼写、根包 [lib]+[[bin]] 根 lib 编译两枚缺口）。② **build.rs rerun-if 精细增量**（cargo 同语义重跑判定：默认面 registry 源不可变永不重跑 / path 树快照、rerun-if-changed 按 (len,mtime_ns)、env-changed 按值、links 直接依赖传递、存档缺席损坏自愈；存档 = build/<pkg>-<fp>/{output.txt,rerun.txt}，跳过执行则原始 stdout 重解析回放零失真，warning 同门控回放；libgit2 第二腿 20s→0s、tree_sitter 8s→0s）。③ **编译调度并行化**（`run_scheduler` Kahn 就绪队列 + std-only worker 池；完成表只归主线程、派发时捎依赖侧输入进 WorkMsg 零锁；jobs=1 与 Kahn FIFO 逐位一致的对拍锚；FpLocks 互斥同 fp 的 Normal/Build 双 unit；冷跑 wasmtime_wat 152s→79s、libgit2 19s→11s）。④ **full 层迁移**（137 条目双腿对拍 120/19 起 → 分诊修复四枚：extern 命名无 rename 时按 dep 包 lib target 名（new_debug_unreachable 实锤）、StrongDep 强形在有同名显式 feature 定义时被 dep: 遮蔽也置旗（zerotrie litemap 三态定稿）、build script env 补 CARGO_MANIFEST_LINKS（ring 实锤）、bin 会话 --remap-path-prefix + 脚本正文物化 src/main.rs（file!() 路径形态逐字节））。**P5 单列制度化**（对拍轴与 gate 的 corpus 段遇「归 P5」响亮拒绝单列 p5 不计失败；miden_prove 归列）；**双轨接线**（diff_cargo 恒钉 cargo 轨、gate DEPS 轴、a2 恒钉 cargo 轨——跨轨 image 共享原理性不可能、native 基线显式钉 RUSTC 防 rustup 代理按 cwd 解析的混合工具链）。**闭合验收：corpus_deps_pair --tier full 138 pass 1 p5 0 fail；cargo test 153；run.sh fast 9/9；gate DEPS=self（SKIP_TSAN=1）177 pass 1 p5 1 fail**（唯一 fail = 纯度门禁 mirvm-tsan 被工作树内并行重构卡住，与 D15 无关如实记）。P4（sysroot 自管 + MIRVM_DEPS 默认翻 self + `--bin`/`--package` 多目标选择 + compat 评审）待施 |
-| **D15 P4（sysroot 自管与默认翻转，2026-07-29，decision-history §7.31）** | **完成** | ① **sysroot 自管**（`5c2e9bf`）：MIR sysroot 构建换 cargoless 调度——新 `vendor.rs`（VendorDir 通用 vendored-dir PkgSource，未来 P5 source replacement 复用）+ 伪根（std/test/proc_macro）+ library/Cargo.lock 增广 lock 模式 + compile_plan 纯抽取复用 + tmp 原子发布 + cargo 轨 dep 缓存换代连坐 purge + 顶层哨兵盖戳；**意外 crates.io 依赖根除**（.d 引用 ~/.cargo 数 = 0）；冷建 27.2s（metadata-only 无对象码，双轨 gate 全消费面实证无炸）25 crate 集对齐、PATH strip 零 cargo 实证。② **--bin 多目标选择**（`271425b`）：cargo run --bin 语义，错名响亮列名单；compat 轨直通。③ **默认翻转**：`MIRVM_DEPS` 缺省 = self，=cargo 显式 compat（双轨各自完整；compat 删除条件另行评审——剩余独占价值：对拍 oracle / mirvm pack runner 协议 / deps audit 验收链，任一条存续即不删）。**D15 战役主体收官**：零 cargo 从机制变成默认形态；P5 边界（git 源/alt registry/workspace 多包图/source replacement）按实需逐项立项 |
-| **D17 `mirvm test` 单包主链（2026-08-08）** | **完成；多包能力待 D15 P5** | Cargo compat 与默认 self 双轨均已接入。self 解析 lib/bin/test/example，按 test profile 重编，区分 Normal/Dev 边，支持 libtest 与 harness=false、过滤/ignored/nocapture/线程参数、目标选择、no-run/no-fail-fast/quiet/locked/offline、每 artifact 独立子进程、失败码 101、CARGO_TARGET_TMPDIR 和可执行 CARGO_BIN_EXE。compat 的假产物改成可执行启动器，修复集成测试直接启动 bin 的权限失败。固定 Cargo/compat/self 合同 **20/20**，覆盖失败传播、panic、热 build.rs 一次执行，并由 PATH 哨兵 + execve 审计证明 self 零 Cargo；规范与 Cargo 升级规程见 [mirvm-test-cargoless-contract.md](designs/mirvm-test-cargoless-contract.md)。workspace/-p 等待正确多包图；doctest 明确不在本阶段 |
+| **D15 P4（sysroot 自管与默认翻转，2026-07-29，decision-history §7.31）** | **完成** | ① **sysroot 自管**（`5c2e9bf`）：MIR sysroot 构建换 cargoless 调度——新 `vendor.rs`（VendorDir 通用 vendored-dir PkgSource，未来 P5 source replacement 复用）+ 伪根（std/test/proc_macro）+ library/Cargo.lock 增广 lock 模式 + compile_plan 纯抽取复用 + tmp 原子发布 + cargo 轨 dep 缓存换代连坐 purge + 顶层哨兵盖戳；**意外 crates.io 依赖根除**（.d 引用 ~/.cargo 数 = 0）；冷建 27.2s（metadata-only 无对象码，双轨 gate 全消费面实证无炸）25 crate 集对齐、PATH strip 零 cargo 实证。② **--bin 多目标选择**（`271425b`）：cargo run --bin 语义，错名响亮列名单；compat 轨直通。③ **默认翻转**：`MIRVM_DEPS` 缺省 = self，=cargo 显式 compat（双轨各自完整；compat 删除条件另行评审——剩余独占价值：对拍 oracle / mirvm pack runner 协议 / deps audit 验收链，任一条存续即不删）。**当时边界**含 workspace 多包图；resolver 2 常见形态已在 2026-08-08 的 §7.35 补齐，剩余 P5 是 git/alt registry/source replacement/resolver 1、3 |
+| **D17 `mirvm test` 主链与 resolver 2 workspace（2026-08-08）** | **当前合同完成** | Cargo compat 与默认 self 双轨均已接入。单包支持 lib/bin/test/example、Normal/Dev 边、libtest 与 harness=false、目标和 harness 参数、独立进程、失败码 101、CARGO_TARGET_TMPDIR/CARGO_BIN_EXE。工作区新增 virtual/root manifest、成员/default-members/exclude 与 path 自动成员、workspace.package/dependencies/profile 继承、根统一 lock、`--workspace`/`-p`/`--exclude`、默认/指定/依赖 feature 统一，并先编完全部选中包再执行。固定 Cargo/compat/self 的单包合同 **20/20**、工作区合同 **27/27**；PATH 哨兵 + execve 审计证明 self 零 Cargo，无锁结果由 pinned Cargo `--locked --offline` 复核。规范见 [mirvm-test-cargoless-contract.md](designs/mirvm-test-cargoless-contract.md)。resolver 1/3、复杂 glob/package spec、嵌套 workspace 与 workspace lints 保持响亮拒绝；doctest 与 bench 不在当前合同 |
 | 地址模型 P2（GOT 间接） | **完成（2026-07-17）** | §7.5b 手术单定场（真实地址模型保留）→ §7.5c 零 IR 变更 GOT 机制（槽 = 冻结区普通格 + 启动相重填；extern static/fn 值不再烤宿主地址，字节码复用 `Mem{Static(槽)}`/`SubImm` 通道，JIT/interp 零改动）→ §7.5d 拒缓存三判据全退役 + 纯 std 会话 want_split 修正（先存 A2 沉默债：L2 对纯 std 程序永 miss）。外来符号用例冷→热全通（c_process 463→30ms），gate5 117/0/0。JIT 间接调用准入记债（[open-issues.md E1](open-issues.md)） |
 | 地址模型 P1（fn 条目可执行化） | **完成（2026-07-17，commit `4202317`）** | §7.6：FFI 可派生条目值 = 可执行 stub 码址（新第三固定地址域族 0x6C00/0x6D00/0x6E00+k + libffi closure 蹦床 + 配方随模块、启动相重建封存 RX）——thunk 盲区结构性根治（旧 debt §6 关闭，对照见 [open-issues.md](open-issues.md)；负对照 flate2 C-libz 结构体内嵌回调往返，三维+L2 热一致）。残余边界 = 签名不可派生条目（Rust ABI/聚合/变参）保持数据槽，无实质盲区；SIGSEGV 诊断化可选后补（open-issues T4）。gate5 117/0/0 |
 | corpus 批7（激进 24 三波） | **完成（2026-07-17）** | 23/24 全绿可用（corpus.md §5 批7）；**修出两只产品 bug 当日修复**：native-archive 链接行收 crate 图动态库（`867b3de`，libgit2 红转绿）+ custom `#[global_allocator]` 运行时统一路由 `__rust_*`（§7.7，c_mimalloc 三维绿、跨堆 SIGSEGV 根治）。c_tree_sitter 按值聚合 FFI 记档（open-issues C1，**2026-07-18 C1 闭合后转正入 gate**）。gate5 128→**139**；corpus 实测真实 crate 总账 123 |
@@ -93,8 +94,11 @@ x86 asm wrapper。
 ## 3. 已验证边界
 
 - **当前增量验证（2026-08-08 实跑）**：`cargo fmt --all -- --check` 绿、Clippy
-  `-D warnings` 零诊断、`cargo test --locked --all-features` **169/169**、
-  `tests/cargoless_test_contract.sh` **20/20**、`tests/diff_cless.sh` **7/7**。
+  `-D warnings` 零诊断、`cargo test --locked --all-features` **176/176**、
+  `tests/cargoless_test_contract.sh` **20/20**、工作区合同 **27/27**、
+  `tests/diff_cless.sh` **7/7**。发布版 `tests/run.sh fast` 在隔离且可写的 Cargo
+  home/全新 target 中 **11/11**；其中默认与 SYNC JIT 差分、Cargo 兼容差分、两套
+  cargoless test 合同、build.rs 重跑与门禁自检全部通过。
   **上一轮全矩阵（2026-08-07 实跑）**：
   `tests/diff.sh` **45/45**（默认与阈值=1 双态）、**+MIRVM_JIT_SYNC 同步发布
   45/45**（可准入函数首调同步编译并真跑机器码，编译失败 RED——audit F-05 起
@@ -206,9 +210,9 @@ x86 asm wrapper。
 
 ## 5. 当前开发顺序
 
-1. **产品能力顺序**（2026-08-07 汇总）：`mirvm test` → 依赖 P5（workspace/Git/
-   alt registry/source replacement）→ OS 级沙箱与资源治理 → 稳定嵌入 API/daemon →
-   D3 零拷贝后冻结包格式 → 跨平台。每阶段闭合边界和验收见
+1. **产品能力顺序**（2026-08-08 汇总）：`mirvm test` 的当前单包/workspace 合同已完成；
+   下一步是依赖 P5（Git/alt registry/source replacement/resolver 3）→ OS 级沙箱与
+   资源治理 → 稳定嵌入 API/daemon → D3 零拷贝后冻结包格式 → 跨平台。每阶段闭合边界和验收见
    [product-capabilities-plan.md](designs/product-capabilities-plan.md)。
 2. **性能与 corpus 持续线**：D16 仍按 profile → JIT 码持久化 → 零拷贝按需装载 →
    后台服务线程推进；三维逐字节差分铁律不动摇。性能工作可以穿插，但不能替代上述

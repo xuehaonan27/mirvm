@@ -1,0 +1,27 @@
+[package]
+name = "workspace-app"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+shared = { workspace = true, features = ["app-side"] }
+feature-helper = { workspace = true, optional = true }
+implicit-helper = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+test-helper.workspace = true
+
+[features]
+default = ["default-on"]
+default-on = []
+extra = ["shared/extra", "dep:feature-helper"]
+
+[[bin]]
+name = "workspace-app"
+path = "src/main.rs"
+
+[[test]]
+name = "required"
+path = "tests/required.rs"
+required-features = ["extra"]

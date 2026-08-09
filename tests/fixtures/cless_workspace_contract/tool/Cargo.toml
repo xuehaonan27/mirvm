@@ -1,0 +1,7 @@
+[package]
+name = "workspace-tool"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+workspace-bridge = { path = "../bridge" }

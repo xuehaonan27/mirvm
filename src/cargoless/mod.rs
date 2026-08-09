@@ -18,9 +18,9 @@
 //! - P4（已收）：`vendor`（vendored-dir PkgSource，sysroot 自管与未来的
 //!   source replacement 共用）+ sysroot 构建换 cargoless 调度（零 cargo
 //!   零 crates.io）+ `--bin` 多目标选择 + **MIRVM_DEPS 默认翻 self**
-//!   （=cargo 显式 compat，双轨各自完整）。剩余拒绝面 = P5 边界（git 源/
-//!   alt registry/workspace 多包图/source replacement，响亮拒绝点名，
-//!   按实需逐项立项）。
+//!   （=cargo 显式 compat，双轨各自完整）。`workspace` + `mirvm test` 已接
+//!   resolver=2 常见多包形态；剩余拒绝面 = P5 边界（git 源/alt registry/
+//!   source replacement/resolver 1、3，响亮拒绝点名，按实需逐项立项）。
 
 pub mod audit;
 pub mod buildrs;
@@ -32,6 +32,7 @@ pub mod resolve;
 pub mod rustflags;
 pub mod schedule;
 pub mod vendor;
+pub mod workspace;
 
 #[cfg(test)]
 mod real_probe;

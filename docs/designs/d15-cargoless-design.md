@@ -42,8 +42,9 @@ P1 的闭合过程把 cargo 的解析语义逐条实证出来（每条都有对�
      与 D14 store 合并评审时补。
    - req 遇本仓钉版未知的 semver 新 op 时退回 `Ranges::from_req`
      （pre 会丢，代码内响亮记账）。
-   - git 源 / alt registry / workspace 多包图 / source replacement
-     （P5，响亮拒绝记名）。
+   - git 源 / alt registry / source replacement、resolver 1/3 与
+     rust-version-aware 选择（P5，响亮拒绝记名）；resolver 2 常见 workspace
+     已于 2026-08-08 随 `mirvm test` 合同补齐，见 decision-history §7.35。
 
 
 > 状态：2026-07-23 调研定稿（四决策点当日裁定）；**P1 已收口（2026-07-27，
@@ -51,9 +52,9 @@ P1 的闭合过程把 cargo 的解析语义逐条实证出来（每条都有对�
 > corpus smoke 24 双腿逐字节 24/24，decision-history §7.29）；P3 已收口
 > （2026-07-28，corpus full 138 pass 1 p5 0 fail + gate DEPS=self 双轨绿，
 > decision-history §7.30）；P4 已收口（2026-07-29，sysroot 自管 + 默认
-> 翻转 self + compat 双轨定案，decision-history §7.31）**；P5 复杂语义
-> 按实需逐项立项（git 源/alt registry/workspace 多包图/source
-> replacement，响亮拒绝在案）。
+> 翻转 self + compat 双轨定案，decision-history §7.31）**；resolver 2
+> 常见 workspace 已于 2026-08-08 补齐（§7.35）。P5 剩余复杂语义按实需逐项
+> 立项（git 源/alt registry/source replacement/resolver 1、3，响亮拒绝在案）。
 > 立项记录：[open-issues.md D15](../open-issues.md)；动机源头：decision-history §7.22
 > （C4 两轮绕行被否——"吃 cargo 产物就得绕"的处境要制度性消除）。
 > 本文遵循"闭合契约"纪律：每期写明闭合到哪条可观察边界；原理上不能闭合的
@@ -195,10 +196,10 @@ HTTP/tar 见决策点 ①。
   全程零 cargo；compat 路径 gate 冒烟保留。
 - 验收：purge --sysroot 后冷建全绿；gate 双轨绿。
 
-### P5 复杂语义按实需（不设闭合承诺的边界）
+### P5 复杂语义按实需（resolver 2 workspace 已完成）
 
-- workspace 多包继承全形态、[patch]/[replace]、git deps、alt registry、
-  source replacement——**按 corpus 扩编实需逐项立项**；本期不承诺
+- resolver 1/3、复杂成员 glob/嵌套 workspace/workspace lints、[patch]/[replace]、git deps、
+  alt registry、source replacement——**按 corpus 扩编实需逐项立项**；不承诺
   "cargo 全语义"（事先明说的不闭合面；遇到即响亮拒绝并登记，按实需扩）。
 
 ## 6. 风险与诚实边界

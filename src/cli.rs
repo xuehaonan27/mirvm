@@ -59,8 +59,9 @@ ENV:
                       完整，删除条件另行评审）；**缺省/=self 走零 cargo 自有
                       调度**（D15 cargoless driver，P4 默认翻转：依赖解析/编译
                       调度/build.rs/proc-macro/rustflags/rerun-if 增量/并行调度
-                      全生命周期；剩余拒绝面 = P5 边界：git 源/alt registry/
-                      workspace 多包图等，响亮拒绝点名）
+                      全生命周期；mirvm test 已支持 resolver=2 常见 workspace；
+                      剩余拒绝面 = P5 边界：git 源/alt registry/source
+                      replacement/resolver 1、3 等，响亮拒绝点名）
     MIRVM_CLESS_JOBS  =N 时 cargoless 编译调度并发度（缺省 = 核数；=1 退化为
                       拓扑序串行，对拍调试用）
     MIRVM_TIMING      =1 时向 stderr 输出相位账本（frontend/lower/engine/total）
@@ -408,7 +409,7 @@ fn deps_main(args: impl Iterator<Item = String>) -> ExitCode {
                 }
             }
             Err(e) => {
-                // P5 范畴的响亮拒绝（git 源/alt registry/workspace 多包图等）
+                // P5 范畴的响亮拒绝（git 源/alt registry/source replacement 等）
                 // 是事先明说的边界，不算解析失败
                 if e.contains("P5") {
                     println!("P5   {t}: {e}");
