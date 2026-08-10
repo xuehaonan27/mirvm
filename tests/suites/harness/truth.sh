@@ -139,6 +139,7 @@ if run_fake_gate "$TMP/gate.out" SKIP_TSAN=1; then
         tests/suites/differential/programs.sh tests/suites/differential/cargo.sh \
         tests/suites/differential/cargoless.sh tests/suites/contracts/cargoless_test.sh \
         tests/suites/contracts/cargoless_workspace.sh tests/suites/contracts/cargoless_git.sh \
+        tests/suites/contracts/cargoless_sources.sh tests/suites/contracts/pack.sh \
         tests/suites/contracts/build_script_rerun.sh tests/suites/contracts/deps_image.sh \
         tests/suites/corpus/contract.sh tests/suites/runtime/x86_features.sh \
         tests/suites/runtime/semantics.sh tests/suites/runtime/jit_stats.sh \

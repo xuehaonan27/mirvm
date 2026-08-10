@@ -58,7 +58,21 @@ pub fn run_project(
         }
     };
     manifest.ignore_rust_version = ignore_rust_version;
-    drive(&manifest, program_args, bin_sel)
+    drive(&manifest, program_args, bin_sel, None)
+}
+
+/// `mirvm pack <目录|Cargo.toml>` 的默认 self 路径。依赖、build.rs、
+/// proc-macro 和根包编译与 `run_project` 完全共用，只在最终 rustc 会话把
+/// “执行”换成写出自包含包。
+pub fn pack_project(dir: &Path, out: &Path) -> ExitCode {
+    let manifest = match PackageManifest::read_dir(dir) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            eprintln!("mirvm: 读取项目 {} 失败: {error}", dir.display());
+            std::process::exit(1);
+        }
+    };
+    drive(&manifest, &[], None, Some(out))
 }
 
 /// 一个根测试目标的独立执行配方。Cargo 每个测试 artifact 各起一进程；self
@@ -195,7 +209,11 @@ fn resolve_workspace_plans(
     manifests: &[PackageManifest],
     known_members: &[PackageManifest],
 ) -> Result<Vec<ResolvePlan>, String> {
-    let mut registry = Registry::open()?;
+    let project = manifests
+        .first()
+        .map(|manifest| manifest.lock_root.as_path())
+        .unwrap_or(Path::new("."));
+    let mut registry = Registry::open_for(project)?;
     if manifests.len() == 1 {
         return resolve_for_known(
             &manifests[0],
@@ -913,7 +931,7 @@ fn generate_workspace_lock(workspace: &WorkspaceManifest) -> Result<(), String> 
         }
     }
 
-    let mut registry = Registry::open()?;
+    let mut registry = Registry::open_for(&workspace.root)?;
     let mut plan = resolve_for_known(
         &synthetic,
         &mut registry,
@@ -944,7 +962,7 @@ fn generate_workspace_lock(workspace: &WorkspaceManifest) -> Result<(), String> 
                     .find(|candidate| candidate.root == *path)
                     .map(|candidate| candidate.version.clone())
                     .or_else(|| PackageManifest::read_dir(path).ok().map(|m| m.version)),
-                DepSource::Registry(req) => plan
+                DepSource::Registry(req, _) => plan
                     .version_map
                     .get(&dep.package)
                     .and_then(|versions| versions.iter().find(|version| req.matches(version)))
@@ -1329,6 +1347,18 @@ pub fn run_root_recipe(mut argv: impl Iterator<Item = String>) -> ExitCode {
 /// `mirvm run <frontmatter 脚本>`（MIRVM_DEPS=self）：正文物化到脚本缓存目录
 /// （audit::script_cache_dir 同口径键），伪包 manifest 走同一 drive。
 pub fn run_script(file: &Path, program_args: &[String], ignore_rust_version: bool) -> ExitCode {
+    let mut manifest = script_manifest(file);
+    manifest.ignore_rust_version = ignore_rust_version;
+    drive(&manifest, program_args, None, None)
+}
+
+/// `mirvm pack <frontmatter 脚本>` 的默认 self 路径。
+pub fn pack_script(file: &Path, out: &Path) -> ExitCode {
+    let manifest = script_manifest(file);
+    drive(&manifest, &[], None, Some(out))
+}
+
+fn script_manifest(file: &Path) -> PackageManifest {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
         Err(e) => {
@@ -1367,21 +1397,23 @@ pub fn run_script(file: &Path, program_args: &[String], ignore_rust_version: boo
         eprintln!("mirvm: 写入 {} 失败: {e}", main_rs.display());
         std::process::exit(1);
     }
-    let mut manifest =
-        match PackageManifest::from_frontmatter_at(stem, &manifest_text, &cache, &main_rs) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("mirvm: 解析 {} 的 frontmatter 失败: {e}", file.display());
-                std::process::exit(1);
-            }
-        };
-    manifest.ignore_rust_version = ignore_rust_version;
-    drive(&manifest, program_args, None)
+    match PackageManifest::from_frontmatter_at(stem, &manifest_text, &cache, &main_rs) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("mirvm: 解析 {} 的 frontmatter 失败: {e}", file.display());
+            std::process::exit(1);
+        }
+    }
 }
 
-fn drive(manifest: &PackageManifest, program_args: &[String], bin_sel: Option<&str>) -> ExitCode {
+fn drive(
+    manifest: &PackageManifest,
+    program_args: &[String],
+    bin_sel: Option<&str>,
+    pack_out: Option<&Path>,
+) -> ExitCode {
     // 1. P1 求解器：lock 在按 lock（闭合），lock 缺席 pubgrub fresh 解
-    let mut registry = match Registry::open() {
+    let mut registry = match Registry::open_for(&manifest.lock_root) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("mirvm: registry 打开失败: {e}");
@@ -1622,7 +1654,11 @@ fn drive(manifest: &PackageManifest, program_args: &[String], bin_sel: Option<&s
     let mut program_argv = vec![layout.deps.join(bin_name).display().to_string()];
     program_argv.extend(program_args.iter().cloned());
     // 全程不 chdir：guest cwd = 调用者 cwd，与 cargo run 语义一致（E36 闭合）
-    crate::cli::run_driver(args, program_argv, false, None, false, true)
+    if let Some(out) = pack_out {
+        crate::cli::pack_driver(args, program_argv, out.to_path_buf())
+    } else {
+        crate::cli::run_driver(args, program_argv, false, None, false, true)
+    }
 }
 
 /// compile_plan 的返回件：完成表 + unit 指纹表（drive 的根包阶段还要拿

@@ -19,12 +19,14 @@
 //!   source replacement 共用）+ sysroot 构建换 cargoless 调度（零 cargo
 //!   零 crates.io）+ `--bin` 多目标选择 + **MIRVM_DEPS 默认翻 self**
 //!   （=cargo 显式 compat，双轨各自完整）。`workspace` + `mirvm test` 已接
-//!   resolver=2/3 常见多包形态与 rust-version-aware 选择；剩余拒绝面 =
-//!   P5 边界（alt registry/source replacement/resolver 1，响亮拒绝
-//!   点名，按实需逐项立项）。
+//!   resolver=2/3 常见多包形态与 rust-version-aware 选择。后续来源批次已
+//!   接入 Cargo config 依赖子集、替代 registry、registry/local/directory
+//!   source replacement、patch/replace；`pack` 缺省复用同一自有调度并保留
+//!   `MIRVM_DEPS=cargo` 回退。resolver 1 等未实现边界继续响亮拒绝。
 
 pub mod audit;
 pub mod buildrs;
+pub mod config;
 pub mod driver;
 pub mod git;
 pub mod lockfile;

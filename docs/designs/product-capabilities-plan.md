@@ -1,7 +1,8 @@
 # 产品能力补全计划
 
-> 状态：**P1 主链已完成；P2 第一批 resolver 3 / rust-version 与第二批 Git
-> 依赖已完成（2026-08-10）**。
+> 状态：**P1 主链已完成；P2 的 resolver 3 / rust-version、Git 依赖、替代
+> registry/Cargo 配置、source replacement/patch/replace 与 pack self 五批均已完成
+> （2026-08-10），P2 总验收待做**。
 > 本文把当前明确缺失的产品
 > 能力合并成一条可执行路线；现状仍以 [current-status.md](../current-status.md) 为准，
 > 单项债务仍以 [open-issues.md](../open-issues.md) 为唯一登记入口。
@@ -84,26 +85,44 @@ package 选择和特性统一均在依赖机制内实现，没有命令层特判
      构建指纹包含完整 Git 来源；同名同版本的两个 commit 在解析图、编译缓存和 lock
      依赖行中保持分立。`cargoless_git_contract` **9/9**，self 单/双 commit lock 均被
      固定 Cargo `--locked` 接受，execve 审计证明 self 不启动 Cargo。
-3. **替代 registry 与 Cargo 配置合并**
+3. **替代 registry 与 Cargo 配置合并（已完成，2026-08-10）**
    - 为依赖获取实现项目祖先目录和 `CARGO_HOME` 的 `.cargo/config.toml` 合并，覆盖
      `[registries]`、稀疏/Git index、认证读取；不借机实现无关 Cargo 配置键。
    - 来源身份包含 registry，保证不同 registry 的同名同版本包不碰撞；继续执行
      checksum、locked、offline 和篡改拒绝。
    - 完成条件：公共/私有替代 registry 的首次获取与离线复跑对齐 Cargo，配置缺失、
      认证失败和来源冲突均响亮报错。
-4. **source replacement、`[patch]` 与 `[replace]`**
+   - 完成结果：实现 `$CARGO_HOME` 到项目祖先目录的配置层叠、`include`、环境覆盖、
+     extensionless `config` 优先，以及依赖来源所需的 registries/registry/source/
+     credential-provider 子集。替代 sparse registry 支持 token、`cargo:token`、
+     `cargo:token-from-stdout` 与 Cargo credential protocol v1；registry 身份进入解析图、
+     lock 和本地 store。固定 Cargo 1.98 nightly 与 self 的认证 sparse 真实合同已覆盖
+     fresh、逐字节同 lock、Cargo `--locked` 接受、离线热缓存与 execve 零 Cargo。
+4. **source replacement、`[patch]` 与 `[replace]`（已完成，2026-08-10）**
    - source replacement 按来源映射链工作，覆盖 registry 镜像、local registry 和
      directory vendor，并拒绝替换环。
    - `[patch]` 的 path/Git/registry 包必须作为版本候选参与求解，不能在求解后替换
      源码；旧式 `[replace]` 按精确 package ID 处理。
    - 完成条件：直接/传递依赖、多版本、未使用 patch、替换链及 lock 来源均与 Cargo
      一致。
-5. **`mirvm pack` 翻到 self 依赖驱动**
+   - 完成结果：registry 镜像、local registry、Cargo vendor directory 三类替换共用
+     来源映射链，替换环响亮拒绝；directory 每文件 checksum 篡改会被拒绝。registry
+     目标上的 path/Git/registry `[patch]` 在求解候选阶段生效，未选版本写入
+     `[[patch.unused]]`；`[replace]` 保留 Cargo 的原 package 行与 `replace` 指针。
+     标准来源合同 **30/30**，所有 self fresh lock 与固定 Cargo 逐字节相同并被其
+     `--locked --offline` 接受。Git source replacement 和以 Git URL 为目标的 patch
+     尚未纳入本批合同，继续作为明确边界。
+5. **`mirvm pack` 翻到 self 依赖驱动（已完成，2026-08-10）**
    - `run`、`test`、`pack` 共用同一依赖图、build.rs、proc-macro、native library 和
      lock 规则；PATH 哨兵与进程审计证明默认路径不启动 Cargo。
    - Cargo compat 长期保留：用户可显式回退，也是 Cargo 行为对拍和差异定位的裁判；
      cargoless 继续作为默认路径。两条路径都必须保持完整，不能把 compat 降成无人维护的
      临时救援开关。
+   - 完成结果：项目和 frontmatter 脚本缺省复用 cargoless 的解析、build.rs、
+     proc-macro、native library 与最终 rustc 会话；`MIRVM_DEPS=cargo` 仍走原 Cargo
+     runner。pack 合同 **6/6**：默认路径生成包、execve 零 Cargo、全新
+     `MIRVM_HOME` 自包含运行、显式 Cargo 回退真实启动固定 Cargo 且其包同样可独立
+     运行，非法模式值响亮拒绝。
 6. **依赖阶段总验收**
    - 清零现有 corpus 中标作 D15 P5 的项目；每种来源都覆盖版本图、feature、fresh/
      locked/offline、篡改拒绝和双版本共存。
@@ -170,7 +189,7 @@ lints/复杂 package ID 与成员 glob、旧项目需要的 resolver 1。doctest
 
 ## 3. 里程碑关系
 
-- P1 与 P2 第一批已完成；P2 从 Git 来源继续扩项目覆盖。
+- P1 与 P2 五个施工批次已完成；P2 还需跑总 corpus 验收并据实清理剩余 P5 分类。
 - P3 是任何“不受信任代码执行”产品声明的硬前置。
 - P4 是 daemon、agent API 和 REPL 的硬前置。
 - P5 必须遵守“D3 先于 D4”；P6 的 fat artifact 依赖 P5 的 target 索引。
@@ -182,7 +201,7 @@ lints/复杂 package ID 与成员 glob、旧项目需要的 resolver 1。doctest
 
 当前唯一产品主队列是：
 
-`Git → registry/config → replacement/patch → pack self → P2 总验收`
+`P2 总验收 → D17 余项复评 → OS 级沙箱与资源治理`
 
 随后依次进入 OS 沙箱、稳定嵌入 API、D3 零拷贝后包格式冻结、跨平台。D16 性能线必须
 先 profile；只有实测命中才可穿插 JIT 机器码持久化，不能打断上述产品闭合。

@@ -156,6 +156,8 @@ run_fast_obligations() {
     run_suite contracts.cargoless-test contracts.cargoless-test
     run_suite contracts.cargoless-workspace contracts.cargoless-workspace
     run_suite contracts.cargoless-git contracts.cargoless-git
+    run_suite contracts.cargoless-sources contracts.cargoless-sources
+    run_suite contracts.pack contracts.pack
     run_suite contracts.build-script-rerun contracts.build-script-rerun
     run_suite harness.truth harness.truth
 }
@@ -186,6 +188,8 @@ run_profile() {
             run_suite contracts.cargoless-test contracts.cargoless-test
             run_suite contracts.cargoless-workspace contracts.cargoless-workspace
             run_suite contracts.cargoless-git contracts.cargoless-git
+            run_suite contracts.cargoless-sources contracts.cargoless-sources
+            run_suite contracts.pack contracts.pack
             run_suite contracts.build-script-rerun contracts.build-script-rerun
             run_suite contracts.deps-image contracts.deps-image
             run_suite corpus.contract corpus.contract

@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 //! Cargo 配置中只与当前依赖求解批次有关的一项：
 //! `resolver.incompatible-rust-versions`。
 //!
@@ -9,22 +11,6 @@
 use std::path::{Path, PathBuf};
 
 use super::manifest::{IncompatibleRustVersions, ResolverVersion};
-
-pub fn incompatible_rust_versions(
-    resolver: ResolverVersion,
-) -> Result<IncompatibleRustVersions, String> {
-    let current = std::env::current_dir().map_err(|error| format!("读取当前目录失败: {error}"))?;
-    resolve(
-        |key| std::env::var(key).ok(),
-        &current,
-        match std::env::var_os("CARGO_HOME") {
-            Some(path) => Some(PathBuf::from(path)),
-            None => std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")),
-        }
-        .as_deref(),
-        resolver,
-    )
-}
 
 fn default_policy(resolver: ResolverVersion) -> IncompatibleRustVersions {
     match resolver {

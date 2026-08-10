@@ -1,4 +1,4 @@
-//! `cargoless/registry.rs` —— crates.io registry 访问层（D15 P1，设计档 §3.4）。
+//! `cargoless/registry.rs` —— Cargo registry 与 source replacement 访问层。
 //!
 //! 自有 store 布局（根 = `~/.mirvm/registry`，`MIRVM_REGISTRY_DIR` 改址）：
 //! ```text
@@ -14,23 +14,24 @@
 //! （index.crates.io / static.crates.io，ureq 纯 Rust 栈）。
 //! `MIRVM_OFFLINE=1`：禁 HTTP，全靠本地缓存，缺席响亮报错。
 //!
-//! P1 子集：仅 crates.io 主 registry；alt registry 归 P5 响亮拒绝。
+//! 支持 crates.io、替代 sparse/Git registry，以及 registry/local-registry/
+//! directory 三类 source replacement；逻辑锁来源与实际取包后端分开保存。
 //! yanked 语义：lock 在允许（cargo 同）；新解跳过 yanked（resolve.rs 消费此约定）。
 
-// P1 逐切接入中：resolve/audit 后续切片接入后摘除本 allow（设计档 §5）。
-#![allow(dead_code)]
-
-use std::io::Read;
+use std::collections::BTreeMap;
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use semver::{Version, VersionReq};
 
+use super::config::{CargoConfig, RegistryConfig, SourceConfig, cargo_home};
 use super::git::GitStore;
-use super::manifest::{GitSpec, PackageManifest, parse_rust_version};
+use super::manifest::{GitSpec, PackageManifest, RegistryReference, parse_rust_version};
+use super::vendor::VendorDir;
 
-const INDEX_URL: &str = "https://index.crates.io/";
-const DL_URL: &str = "https://static.crates.io/crates/";
+const CRATES_IO_LOCK_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
 /// sparse index 里一个版本的元数据（JSON 行一格）。
 #[derive(Clone, Debug)]
@@ -41,6 +42,8 @@ pub struct IndexVersion {
     pub yanked: bool,
     pub deps: Vec<IndexDep>,
     pub features: std::collections::BTreeMap<String, Vec<String>>,
+    #[allow(dead_code)]
+    // Cargo index fidelity; build validation reads the verified manifest value.
     pub links: Option<String>,
     pub rust_version: Option<Version>,
 }
@@ -62,15 +65,34 @@ pub struct IndexDep {
     pub kind: Option<String>,
     /// `package = "real"` 改名时的真实名。
     pub package: Option<String>,
+    /// `null` 表示与父包同 registry；非空是另一个 registry 的 index URL。
+    pub registry: Option<String>,
 }
 
 type RErr = String;
 
-fn unsupported(what: impl Into<String>) -> RErr {
-    format!(
-        "registry 子集外构造（D15 P5 范畴，响亮拒绝）：{}",
-        what.into()
-    )
+#[derive(Clone, Debug)]
+enum Backend {
+    Sparse { base: String },
+    GitIndex { url: String, checkout: PathBuf },
+    LocalRegistry { path: PathBuf },
+    Directory { path: PathBuf },
+}
+
+#[derive(Clone, Debug)]
+struct Endpoint {
+    index_url: String,
+    name: Option<String>,
+    token: Option<String>,
+    credential_provider: Option<String>,
+    backend: Backend,
+    download: Option<DownloadConfig>,
+}
+
+#[derive(Clone, Debug)]
+struct DownloadConfig {
+    template: String,
+    auth_required: bool,
 }
 
 pub struct Registry {
@@ -78,21 +100,40 @@ pub struct Registry {
     offline: bool,
     agent: ureq::Agent,
     git: GitStore,
+    config: CargoConfig,
+    endpoints: std::cell::RefCell<BTreeMap<String, Endpoint>>,
     /// 单次命令内 index 条目不变；版本求解和 feature 收敛会反复查询同一
     /// 包，缓存解析结果，避免每轮重新读取并解析整行 JSON。
-    index_cache: std::cell::RefCell<std::collections::BTreeMap<String, IndexEntry>>,
+    index_cache: std::cell::RefCell<BTreeMap<String, IndexEntry>>,
 }
 
 impl Registry {
     /// 打开自有 store（目录按需创建；offline 取自 MIRVM_OFFLINE）。
+    #[cfg(test)]
     pub fn open() -> Result<Self, RErr> {
-        Self::open_at(
+        let current = std::env::current_dir().map_err(|error| error.to_string())?;
+        Self::open_for_at(
             crate::sysroot::cache_dir().join("registry"),
             std::env::var_os("MIRVM_OFFLINE").is_some(),
+            &current,
         )
     }
 
+    pub fn open_for(project: &Path) -> Result<Self, RErr> {
+        Self::open_for_at(
+            crate::sysroot::cache_dir().join("registry"),
+            std::env::var_os("MIRVM_OFFLINE").is_some(),
+            project,
+        )
+    }
+
+    #[cfg(test)]
     pub fn open_at(root: PathBuf, offline: bool) -> Result<Self, RErr> {
+        let current = std::env::current_dir().map_err(|error| error.to_string())?;
+        Self::open_for_at(root, offline, &current)
+    }
+
+    pub fn open_for_at(root: PathBuf, offline: bool, project: &Path) -> Result<Self, RErr> {
         for sub in ["index", "cache", "src"] {
             std::fs::create_dir_all(root.join(sub))
                 .map_err(|e| format!("registry store 创建失败 {}: {e}", root.display()))?;
@@ -102,10 +143,12 @@ impl Registry {
             .build();
         Ok(Self {
             git: GitStore::open(root.join("git"), offline)?,
+            config: CargoConfig::load_at(project, cargo_home().as_deref())?,
             root,
             offline,
             agent: config.into(),
-            index_cache: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            endpoints: std::cell::RefCell::new(BTreeMap::new()),
+            index_cache: std::cell::RefCell::new(BTreeMap::new()),
         })
     }
 
@@ -135,50 +178,200 @@ impl Registry {
         Ok(path)
     }
 
-    fn index_file(&self, name: &str) -> Result<PathBuf, RErr> {
+    fn index_file(&self, source: &str, name: &str) -> Result<PathBuf, RErr> {
         Ok(self
             .root
-            .join("index/crates.io")
+            .join("index")
+            .join(source_key(source))
             .join(Self::sparse_path(name)?))
     }
 
-    /// 读 index 条目（缓存命中直接用；否则 HTTP 拉取并落缓存）。
-    pub fn index_entry(&self, name: &str) -> Result<IndexEntry, RErr> {
-        if let Some(entry) = self.index_cache.borrow().get(name) {
-            return Ok(entry.clone());
+    pub fn registry_source(&self, reference: &RegistryReference) -> Result<String, RErr> {
+        let (logical, name, registry) = match reference {
+            RegistryReference::CratesIo => (
+                CRATES_IO_LOCK_SOURCE.to_string(),
+                "crates-io".to_string(),
+                self.config.crates_io()?,
+            ),
+            RegistryReference::Named(name) => {
+                let registry = self.config.registry(name)?;
+                (lock_source(&registry.index), name.clone(), registry)
+            }
+            RegistryReference::Index(index) => {
+                let name = self.config.registry_name_for_index(index)?;
+                let registry = match &name {
+                    Some(name) => self.config.registry(name)?,
+                    None => RegistryConfig {
+                        index: index.clone(),
+                        token: None,
+                        credential_provider: None,
+                    },
+                };
+                (
+                    lock_source(index),
+                    name.unwrap_or_else(|| source_key(index)),
+                    registry,
+                )
+            }
+        };
+        if !self.endpoints.borrow().contains_key(&logical) {
+            let endpoint = self.resolve_endpoint(&name, registry)?;
+            self.endpoints
+                .borrow_mut()
+                .insert(logical.clone(), endpoint);
         }
-        let file = self.index_file(name)?;
-        let text = if file.is_file() {
-            std::fs::read_to_string(&file)
-                .map_err(|e| format!("index 缓存读取失败 {}: {e}", file.display()))?
+        Ok(logical)
+    }
+
+    fn endpoint(&self, source: &str) -> Result<Endpoint, RErr> {
+        if let Some(endpoint) = self.endpoints.borrow().get(source) {
+            return Ok(endpoint.clone());
+        }
+        let endpoint = if source == CRATES_IO_LOCK_SOURCE {
+            self.resolve_endpoint("crates-io", self.config.crates_io()?)?
         } else {
-            if self.offline {
+            let index = source
+                .strip_prefix("registry+")
+                .or_else(|| source.strip_prefix("sparse+"))
+                .ok_or_else(|| format!("Cargo.lock registry source 非法：{source}"))?;
+            let configured = self
+                .config
+                .registry_name_for_index(source)?
+                .or(self.config.registry_name_for_index(index)?);
+            let (name, registry) = match configured {
+                Some(name) => {
+                    let registry = self.config.registry(&name)?;
+                    (name, registry)
+                }
+                None => (
+                    source_key(source),
+                    RegistryConfig {
+                        index: if source.starts_with("sparse+") {
+                            source.to_string()
+                        } else {
+                            index.to_string()
+                        },
+                        token: None,
+                        credential_provider: None,
+                    },
+                ),
+            };
+            self.resolve_endpoint(&name, registry)?
+        };
+        self.endpoints
+            .borrow_mut()
+            .insert(source.to_string(), endpoint.clone());
+        Ok(endpoint)
+    }
+
+    fn resolve_endpoint(
+        &self,
+        logical_name: &str,
+        mut registry: RegistryConfig,
+    ) -> Result<Endpoint, RErr> {
+        let mut current = logical_name.to_string();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut source = self.config.source(&current)?;
+        while let Some(replacement) = source
+            .as_ref()
+            .and_then(|source| source.replace_with.clone())
+        {
+            if !seen.insert(current.clone()) || seen.contains(&replacement) {
                 return Err(format!(
-                    "MIRVM_OFFLINE：index 无本地缓存 {name}（先在线解析一次或放通网络）"
+                    "Cargo source replacement 形成环：{} -> {replacement}",
+                    seen.into_iter().collect::<Vec<_>>().join(" -> ")
                 ));
             }
-            let url = format!("{INDEX_URL}{}", Self::sparse_path(name)?);
-            let mut resp = self
-                .agent
-                .get(&url)
-                .call()
-                .map_err(|e| format!("sparse index 拉取失败 {url}: {e}"))?;
-            let text = resp
-                .body_mut()
-                .read_to_string()
-                .map_err(|e| format!("sparse index 读取失败 {url}: {e}"))?;
-            if let Some(parent) = file.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("index 缓存目录创建失败: {e}"))?;
+            current = replacement;
+            source = self.config.source(&current)?;
+            if source.is_none() {
+                if let Some(named_registry) = self.config.optional_registry(&current)? {
+                    registry = named_registry;
+                    break;
+                } else {
+                    return Err(format!(
+                        "Cargo source `{logical_name}` replace-with 指向未定义 source/registry `{current}`"
+                    ));
+                }
             }
-            std::fs::write(&file, &text)
-                .map_err(|e| format!("index 缓存落盘失败 {}: {e}", file.display()))?;
-            text
+        }
+        let mut endpoint_name = Some(current.clone());
+        if let Some(index) = source
+            .as_ref()
+            .and_then(|source| source.registry.as_deref())
+        {
+            if let Some(name) = self.config.registry_name_for_index(index)? {
+                registry = self.config.registry(&name)?;
+                endpoint_name = Some(name);
+            } else {
+                endpoint_name = None;
+            }
+        }
+        endpoint_from_config(&self.root, source.as_ref(), registry, endpoint_name)
+    }
+
+    /// 读 index 条目（缓存命中直接用；否则从配置选出的后端读取并落缓存）。
+    pub fn index_entry(&self, source: &str, name: &str) -> Result<IndexEntry, RErr> {
+        let cache_key = format!("{source}\u{1f}{name}");
+        if let Some(entry) = self.index_cache.borrow().get(&cache_key) {
+            return Ok(entry.clone());
+        }
+        let mut endpoint = self.endpoint(source)?;
+        let text = match endpoint.backend.clone() {
+            Backend::Sparse { base } => {
+                self.ensure_download_config(&mut endpoint)?;
+                let file = self.index_file(source, name)?;
+                if file.is_file() {
+                    std::fs::read_to_string(&file)
+                        .map_err(|e| format!("index 缓存读取失败 {}: {e}", file.display()))?
+                } else {
+                    if self.offline {
+                        return Err(format!("MIRVM_OFFLINE：{source} index 无本地缓存 {name}"));
+                    }
+                    let url = format!(
+                        "{}{}",
+                        ensure_trailing_slash(&base),
+                        Self::sparse_path(name)?
+                    );
+                    let token = if endpoint
+                        .download
+                        .as_ref()
+                        .is_some_and(|config| config.auth_required)
+                    {
+                        endpoint_token(&endpoint, &self.config)?
+                    } else {
+                        endpoint.token.clone()
+                    };
+                    let text = self.http_text(&url, token)?;
+                    write_cache(&file, text.as_bytes(), "index")?;
+                    text
+                }
+            }
+            Backend::GitIndex { url, checkout } => {
+                ensure_git_index(&checkout, &url, self.offline)?;
+                std::fs::read_to_string(checkout.join(Self::sparse_path(name)?)).map_err(|e| {
+                    format!(
+                        "Git registry index 无 {name}（{}）：{e}",
+                        checkout.display()
+                    )
+                })?
+            }
+            Backend::LocalRegistry { path } => {
+                std::fs::read_to_string(path.join("index").join(Self::sparse_path(name)?))
+                    .map_err(|e| format!("local registry 无 {name}（{}）：{e}", path.display()))?
+            }
+            Backend::Directory { path } => {
+                let entries = directory_index_entry(&path, name)?;
+                self.index_cache
+                    .borrow_mut()
+                    .insert(cache_key, entries.clone());
+                return Ok(entries);
+            }
         };
         let entry: IndexEntry = parse_index_lines(&text)?.into();
         self.index_cache
             .borrow_mut()
-            .insert(name.to_string(), entry.clone());
+            .insert(cache_key, entry.clone());
         Ok(entry)
     }
 
@@ -187,32 +380,44 @@ impl Registry {
     /// 确保 {name}-{version} 的解包源码在场，返回目录（读穿五级链）。
     pub fn ensure_source(
         &self,
+        source: &str,
         name: &str,
         version: &Version,
         cksum: Option<&str>,
     ) -> Result<PathBuf, RErr> {
+        let mut endpoint = self.endpoint(source)?;
+        if let Backend::Directory { path } = &endpoint.backend {
+            return ensure_directory_source(path, name, version, cksum);
+        }
         let dir_name = format!("{name}-{version}");
         // ① 自有 src
-        let own = self.root.join("src/crates.io").join(&dir_name);
+        let key = source_key(source);
+        let own = self.root.join("src").join(&key).join(&dir_name);
         if own.join(".cargo-ok").is_file() {
             return Ok(own);
         }
         // ③ cargo src（只读复用，不回拷——直接当解析输入）
-        if let Some(d) = glob_dirs(&cargo_registry_sub("src"), &dir_name)
-            .into_iter()
-            .next()
+        if source == CRATES_IO_LOCK_SOURCE
+            && let Some(d) = glob_dirs(&cargo_registry_sub("src"), &dir_name)
+                .into_iter()
+                .next()
         {
             return Ok(d);
         }
         // ② 自有 cache 的 .crate 文件；④ cargo cache 的 .crate 文件
         let own_crate = self
             .root
-            .join("cache/crates.io")
+            .join("cache")
+            .join(&key)
             .join(format!("{dir_name}.crate"));
         let crate_file = if own_crate.is_file() {
             own_crate
         } else {
-            let mut found = glob_dirs(&cargo_registry_sub("cache"), &format!("{dir_name}.crate"));
+            let mut found = if source == CRATES_IO_LOCK_SOURCE {
+                glob_dirs(&cargo_registry_sub("cache"), &format!("{dir_name}.crate"))
+            } else {
+                Vec::new()
+            };
             if found.is_empty() {
                 // ⑤ HTTP
                 if self.offline {
@@ -220,7 +425,17 @@ impl Registry {
                         "MIRVM_OFFLINE：{dir_name} 无本地缓存（自有/读穿均无）"
                     ));
                 }
-                let bytes = self.download_crate(name, version)?;
+                let bytes = match &endpoint.backend {
+                    Backend::LocalRegistry { path } => {
+                        std::fs::read(path.join(format!("{dir_name}.crate")))
+                            .map_err(|e| format!("local registry crate 缺失 {dir_name}: {e}"))?
+                    }
+                    Backend::Sparse { .. } | Backend::GitIndex { .. } => {
+                        self.ensure_download_config(&mut endpoint)?;
+                        self.download_crate(&endpoint, name, version, cksum)?
+                    }
+                    Backend::Directory { .. } => unreachable!(),
+                };
                 if let Some(parent) = own_crate.parent() {
                     std::fs::create_dir_all(parent)
                         .map_err(|e| format!("crate 缓存目录创建失败: {e}"))?;
@@ -240,11 +455,108 @@ impl Registry {
         Ok(own)
     }
 
-    fn download_crate(&self, name: &str, version: &Version) -> Result<Vec<u8>, RErr> {
-        let url = format!("{DL_URL}{name}/{name}-{version}.crate");
-        let mut resp = self
-            .agent
-            .get(&url)
+    fn ensure_download_config(&self, endpoint: &mut Endpoint) -> Result<(), RErr> {
+        if endpoint.download.is_some() {
+            return Ok(());
+        }
+        let text = match &endpoint.backend {
+            Backend::Sparse { base } => {
+                let url = format!("{}config.json", ensure_trailing_slash(base));
+                let cache = self
+                    .root
+                    .join("index")
+                    .join(source_key(&endpoint.index_url))
+                    .join("config.json");
+                if cache.is_file() {
+                    std::fs::read_to_string(&cache)
+                        .map_err(|e| format!("读取 registry config 失败: {e}"))?
+                } else {
+                    if self.offline {
+                        return Err(format!(
+                            "MIRVM_OFFLINE：registry {} 缺 config.json 缓存",
+                            endpoint.index_url
+                        ));
+                    }
+                    let text = self.http_text(&url, endpoint_token(endpoint, &self.config)?)?;
+                    write_cache(&cache, text.as_bytes(), "registry config")?;
+                    text
+                }
+            }
+            Backend::GitIndex { url, checkout } => {
+                ensure_git_index(checkout, url, self.offline)?;
+                std::fs::read_to_string(checkout.join("config.json")).map_err(|e| {
+                    format!("Git registry {} 缺 config.json: {e}", endpoint.index_url)
+                })?
+            }
+            Backend::LocalRegistry { path } => {
+                std::fs::read_to_string(path.join("index/config.json")).map_err(|e| {
+                    format!(
+                        "local registry {} 缺 index/config.json: {e}",
+                        path.display()
+                    )
+                })?
+            }
+            Backend::Directory { .. } => return Ok(()),
+        };
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| format!("registry {} config.json 非法: {e}", endpoint.index_url))?;
+        let template = value
+            .get("dl")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("registry {} config.json 缺字符串 dl", endpoint.index_url))?
+            .to_string();
+        endpoint.download = Some(DownloadConfig {
+            template,
+            auth_required: value
+                .get("auth-required")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        });
+        self.endpoints
+            .borrow_mut()
+            .values_mut()
+            .filter(|saved| saved.index_url == endpoint.index_url)
+            .for_each(|saved| saved.download = endpoint.download.clone());
+        Ok(())
+    }
+
+    fn http_text(&self, url: &str, token: Option<String>) -> Result<String, RErr> {
+        let mut request = self.agent.get(url);
+        if let Some(token) = token {
+            request = request.header("Authorization", token);
+        }
+        let mut response = request
+            .call()
+            .map_err(|e| format!("HTTP 获取失败 {url}: {e}"))?;
+        response
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| format!("HTTP 响应读取失败 {url}: {e}"))
+    }
+
+    fn download_crate(
+        &self,
+        endpoint: &Endpoint,
+        name: &str,
+        version: &Version,
+        cksum: Option<&str>,
+    ) -> Result<Vec<u8>, RErr> {
+        let download = endpoint
+            .download
+            .as_ref()
+            .ok_or("registry download config 未加载")?;
+        let url = download_url(&download.template, name, version, cksum)?;
+        let mut request = self.agent.get(&url);
+        if download.auth_required {
+            let token = endpoint_token(endpoint, &self.config)?.ok_or_else(|| {
+                format!(
+                    "registry {} 要求认证，但 Cargo 配置/credentials 没有可用凭据",
+                    endpoint.index_url
+                )
+            })?;
+            request = request.header("Authorization", token);
+        }
+        let mut resp = request
             .call()
             .map_err(|e| format!("crate 下载失败 {url}: {e}"))?;
         let mut buf = Vec::new();
@@ -254,6 +566,470 @@ impl Registry {
             .map_err(|e| format!("crate 下载读取失败 {url}: {e}"))?;
         Ok(buf)
     }
+}
+
+fn endpoint_from_config(
+    root: &Path,
+    source: Option<&SourceConfig>,
+    registry: RegistryConfig,
+    endpoint_name: Option<String>,
+) -> Result<Endpoint, RErr> {
+    let (index_url, backend) = match source {
+        Some(source) if source.directory.is_some() => {
+            let path = source.directory.clone().unwrap();
+            (
+                format!("directory+{}", path.display()),
+                Backend::Directory { path },
+            )
+        }
+        Some(source) if source.local_registry.is_some() => {
+            let path = source.local_registry.clone().unwrap();
+            (
+                format!("local-registry+{}", path.display()),
+                Backend::LocalRegistry { path },
+            )
+        }
+        Some(source) if source.registry.is_some() => {
+            let index = source.registry.clone().unwrap();
+            let backend = backend_for_index(root, &index);
+            (index, backend)
+        }
+        Some(source) if source.replace_with.is_none() => {
+            return Err(format!(
+                "Cargo source `{}` 没有 registry/local-registry/directory",
+                endpoint_name.as_deref().unwrap_or("unknown")
+            ));
+        }
+        _ => {
+            let index = registry.index.clone();
+            let backend = backend_for_index(root, &index);
+            (index, backend)
+        }
+    };
+    Ok(Endpoint {
+        index_url,
+        name: endpoint_name,
+        token: registry.token,
+        credential_provider: registry.credential_provider,
+        backend,
+        download: None,
+    })
+}
+
+fn backend_for_index(root: &Path, index: &str) -> Backend {
+    if let Some(base) = index.strip_prefix("sparse+") {
+        Backend::Sparse {
+            base: ensure_trailing_slash(base),
+        }
+    } else {
+        Backend::GitIndex {
+            url: index.to_string(),
+            checkout: root.join("index-git").join(source_key(index)),
+        }
+    }
+}
+
+fn lock_source(index: &str) -> String {
+    if index.starts_with("sparse+") || index.starts_with("registry+") {
+        index.to_string()
+    } else {
+        format!("registry+{index}")
+    }
+}
+
+fn source_key(source: &str) -> String {
+    format!("{:016x}", crate::lower::asm::fnv1a(source.as_bytes()))
+}
+
+fn ensure_trailing_slash(value: &str) -> String {
+    if value.ends_with('/') {
+        value.to_string()
+    } else {
+        format!("{value}/")
+    }
+}
+
+fn write_cache(path: &Path, bytes: &[u8], what: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("{what} 缓存目录创建失败 {}: {error}", parent.display()))?;
+    }
+    std::fs::write(path, bytes)
+        .map_err(|error| format!("{what} 缓存写入失败 {}: {error}", path.display()))
+}
+
+fn ensure_git_index(checkout: &Path, url: &str, offline: bool) -> Result<(), String> {
+    if checkout.join(".git").is_dir() {
+        let actual = command_output(
+            Command::new("git").arg("-C").arg(checkout).args([
+                "config",
+                "--get",
+                "remote.origin.url",
+            ]),
+            "读取 registry Git index origin",
+        )?;
+        if actual != url {
+            return Err(format!(
+                "registry Git index cache 身份不一致 {}：期望 {url}，实际 {actual}",
+                checkout.display()
+            ));
+        }
+        if !offline {
+            command_ok(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(checkout)
+                    .args(["fetch", "--force", "origin"]),
+                "更新 registry Git index",
+            )?;
+            command_ok(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(checkout)
+                    .args(["reset", "--hard", "FETCH_HEAD"]),
+                "切换 registry Git index",
+            )?;
+        }
+        return Ok(());
+    }
+    if offline {
+        return Err(format!(
+            "MIRVM_OFFLINE：registry Git index {url} 无本地缓存"
+        ));
+    }
+    if let Some(parent) = checkout.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("创建 registry Git index 目录失败: {error}"))?;
+    }
+    command_ok(
+        Command::new("git")
+            .args(["clone", "--no-tags", "--depth", "1", url])
+            .arg(checkout),
+        &format!("克隆 registry Git index {url}"),
+    )
+}
+
+fn command_ok(command: &mut Command, what: &str) -> Result<(), String> {
+    let output = command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|error| format!("{what} 启动失败: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{what} 失败（exit {:?}）：{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+fn command_output(command: &mut Command, what: &str) -> Result<String, String> {
+    let output = command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|error| format!("{what} 启动失败: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{what} 失败（exit {:?}）：{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn directory_index_entry(root: &Path, name: &str) -> Result<IndexEntry, String> {
+    let mut entries = Vec::new();
+    for item in std::fs::read_dir(root).map_err(|error| {
+        format!(
+            "读取 Cargo directory source {} 失败: {error}",
+            root.display()
+        )
+    })? {
+        let item = item.map_err(|error| format!("读取 directory source 条目失败: {error}"))?;
+        if !item.path().is_dir() || !item.path().join("Cargo.toml").is_file() {
+            continue;
+        }
+        let mut entry =
+            VendorDir::entry_from_dir(&item.path(), &format!("directory source 包 {name}"))?;
+        if entry.name != name {
+            continue;
+        }
+        let checksum_file = item.path().join(".cargo-checksum.json");
+        let checksum_text = std::fs::read_to_string(&checksum_file)
+            .map_err(|error| format!("读取 {} 失败: {error}", checksum_file.display()))?;
+        let checksum: serde_json::Value = serde_json::from_str(&checksum_text)
+            .map_err(|error| format!("{} 非法: {error}", checksum_file.display()))?;
+        entry.cksum = checksum
+            .get("package")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        entries.push(entry);
+    }
+    entries.sort_by(|left, right| left.version.cmp(&right.version));
+    if entries.is_empty() {
+        return Err(format!(
+            "Cargo directory source {} 无包 {name}",
+            root.display()
+        ));
+    }
+    Ok(entries.into())
+}
+
+fn ensure_directory_source(
+    root: &Path,
+    name: &str,
+    version: &Version,
+    expected_package_checksum: Option<&str>,
+) -> Result<PathBuf, String> {
+    let directory = find_directory_package(root, name, version)?;
+    let checksum_file = directory.join(".cargo-checksum.json");
+    let text = std::fs::read_to_string(&checksum_file)
+        .map_err(|error| format!("读取 {} 失败: {error}", checksum_file.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| format!("{} 非法: {error}", checksum_file.display()))?;
+    if let (Some(expected), Some(actual)) = (
+        expected_package_checksum,
+        value.get("package").and_then(serde_json::Value::as_str),
+    ) && expected != actual
+    {
+        return Err(format!(
+            "directory source {name}-{version} package checksum 不符：lock={expected} vendor={actual}"
+        ));
+    }
+    let files = value
+        .get("files")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| format!("{} 缺 files checksum 表", checksum_file.display()))?;
+    for (relative, checksum) in files {
+        let checksum = checksum.as_str().ok_or_else(|| {
+            format!(
+                "{} 的 files.{relative} checksum 非字符串",
+                checksum_file.display()
+            )
+        })?;
+        let bytes = std::fs::read(directory.join(relative))
+            .map_err(|error| format!("directory source 文件缺失 {relative}: {error}"))?;
+        let actual = sha256_hex(&bytes);
+        if actual != checksum.to_ascii_lowercase() {
+            return Err(format!(
+                "directory source 文件 {relative} sha256 校验失败（want {checksum} got {actual}）"
+            ));
+        }
+    }
+    Ok(directory)
+}
+
+fn find_directory_package(root: &Path, name: &str, version: &Version) -> Result<PathBuf, String> {
+    for item in std::fs::read_dir(root).map_err(|error| {
+        format!(
+            "读取 Cargo directory source {} 失败: {error}",
+            root.display()
+        )
+    })? {
+        let item = item.map_err(|error| format!("读取 directory source 条目失败: {error}"))?;
+        if !item.path().is_dir() || !item.path().join("Cargo.toml").is_file() {
+            continue;
+        }
+        let manifest = PackageManifest::read_dir(&item.path()).map_err(|error| {
+            format!(
+                "解析 directory source {} 失败: {error}",
+                item.path().display()
+            )
+        })?;
+        if manifest.name == name && manifest.version == *version {
+            return Ok(item.path());
+        }
+    }
+    Err(format!(
+        "Cargo directory source {} 缺 package {name} {version}",
+        root.display()
+    ))
+}
+
+fn endpoint_token(endpoint: &Endpoint, config: &CargoConfig) -> Result<Option<String>, String> {
+    let mut providers = if let Some(provider) = &endpoint.credential_provider {
+        vec![provider.clone()]
+    } else {
+        config.global_credential_providers()?
+    };
+    providers.reverse();
+    for provider in providers {
+        let provider = config.credential_provider(&provider)?;
+        let parts = command_parts(&provider)?;
+        let Some((program, configured_args)) = parts.split_first() else {
+            return Err("Cargo credential provider 命令为空".into());
+        };
+        if program == "cargo:token" {
+            if endpoint.token.is_some() {
+                return Ok(endpoint.token.clone());
+            }
+            continue;
+        }
+        if program == "cargo:token-from-stdout" {
+            let Some((command, args)) = configured_args.split_first() else {
+                return Err("cargo:token-from-stdout 缺命令".into());
+            };
+            let token = command_output(
+                Command::new(command).args(args),
+                "执行 Cargo token provider",
+            )?;
+            if !token.is_empty() {
+                return Ok(Some(token));
+            }
+            continue;
+        }
+        if program.starts_with("cargo:") {
+            return Err(format!(
+                "Cargo 内建 credential provider `{provider}` 不能由 mirvm 进程外调用；请配置该 provider 对应的 cargo-credential-* 可执行文件"
+            ));
+        }
+        if let Some(token) = external_credential(program, configured_args, endpoint)? {
+            return Ok(Some(token));
+        }
+    }
+    Ok(None)
+}
+
+fn external_credential(
+    program: &str,
+    configured_args: &[String],
+    endpoint: &Endpoint,
+) -> Result<Option<String>, String> {
+    let mut child = Command::new(program)
+        .arg("--cargo-plugin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("启动 Cargo credential provider `{program}` 失败: {error}"))?;
+    let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut hello = String::new();
+    stdout
+        .read_line(&mut hello)
+        .map_err(|error| format!("读取 credential provider hello 失败: {error}"))?;
+    let hello_value: serde_json::Value = serde_json::from_str(hello.trim())
+        .map_err(|error| format!("credential provider hello 非法: {error}"))?;
+    if !hello_value
+        .get("v")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|versions| versions.iter().any(|version| version.as_u64() == Some(1)))
+    {
+        return Err("credential provider 不支持协议 v1".into());
+    }
+    let request = serde_json::json!({
+        "v": 1,
+        "kind": "get",
+        "operation": "read",
+        "registry": {
+            "index-url": endpoint.index_url,
+            "name": endpoint.name,
+        },
+        "args": configured_args,
+    });
+    writeln!(child.stdin.take().unwrap(), "{request}")
+        .map_err(|error| format!("写 credential provider 请求失败: {error}"))?;
+    let mut response = String::new();
+    stdout
+        .read_line(&mut response)
+        .map_err(|error| format!("读取 credential provider 响应失败: {error}"))?;
+    let status = child
+        .wait()
+        .map_err(|error| format!("等待 credential provider 失败: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "credential provider `{program}` 失败（exit {:?}）",
+            status.code()
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_str(response.trim())
+        .map_err(|error| format!("credential provider 响应非法: {error}"))?;
+    let ok = value.get("Ok").unwrap_or(&value);
+    if let Some(token) = ok.get("token").and_then(serde_json::Value::as_str) {
+        return Ok(Some(token.to_string()));
+    }
+    if value.get("Err").is_some() {
+        return Ok(None);
+    }
+    Err("credential provider 响应既无 token 也无 Err".into())
+}
+
+fn command_parts(command: &str) -> Result<Vec<String>, String> {
+    if command.contains('\u{1f}') {
+        return Ok(command.split('\u{1f}').map(str::to_string).collect());
+    }
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for character in command.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if quote == Some(character) {
+            quote = None;
+        } else if quote.is_none() && matches!(character, '\'' | '"') {
+            quote = Some(character);
+        } else if quote.is_none() && character.is_whitespace() {
+            if !current.is_empty() {
+                parts.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(character);
+        }
+    }
+    if escaped || quote.is_some() {
+        return Err(format!(
+            "Cargo credential provider 命令引号/转义不完整：{command}"
+        ));
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    Ok(parts)
+}
+
+fn download_url(
+    template: &str,
+    name: &str,
+    version: &Version,
+    checksum: Option<&str>,
+) -> Result<String, String> {
+    let lower = name.to_ascii_lowercase();
+    let prefix = match lower.len() {
+        1 => "1".to_string(),
+        2 => "2".to_string(),
+        3 => format!("3/{}", &lower[..1]),
+        _ => format!("{}/{}", &lower[..2], &lower[2..4]),
+    };
+    let has_marker = [
+        "{crate}",
+        "{version}",
+        "{prefix}",
+        "{lowerprefix}",
+        "{sha256-checksum}",
+    ]
+    .iter()
+    .any(|marker| template.contains(marker));
+    let checksum = checksum.unwrap_or("");
+    if template.contains("{sha256-checksum}") && checksum.is_empty() {
+        return Err("registry dl 模板要求 {sha256-checksum}，但 index 没有 checksum".into());
+    }
+    let mut url = template
+        .replace("{crate}", name)
+        .replace("{version}", &version.to_string())
+        .replace("{prefix}", &prefix)
+        .replace("{lowerprefix}", &prefix.to_ascii_lowercase())
+        .replace("{sha256-checksum}", checksum);
+    if !has_marker {
+        url = format!("{}/{name}/{version}/download", url.trim_end_matches('/'));
+    }
+    Ok(url)
 }
 
 // ---------- index JSON 行解析 ----------
@@ -353,6 +1129,10 @@ fn parse_index_version(v: &serde_json::Value) -> Result<IndexVersion, RErr> {
             kind: d.get("kind").and_then(|x| x.as_str()).map(str::to_string),
             package: d
                 .get("package")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
+            registry: d
+                .get("registry")
                 .and_then(|x| x.as_str())
                 .map(str::to_string),
         });
@@ -736,10 +1516,17 @@ mod tests {
         let d = tmpdir("offline");
         // 无缓存 + offline：index 与 source 都必须响亮（测试不触网）
         let reg = Registry::open_at(d.clone(), true).unwrap();
-        let err = reg.index_entry("no-such-crate-mirvm-test").unwrap_err();
+        let err = reg
+            .index_entry(CRATES_IO_LOCK_SOURCE, "no-such-crate-mirvm-test")
+            .unwrap_err();
         assert!(err.contains("MIRVM_OFFLINE"), "{err}");
         let err = reg
-            .ensure_source("no-such", &Version::new(0, 0, 0), None)
+            .ensure_source(
+                CRATES_IO_LOCK_SOURCE,
+                "no-such",
+                &Version::new(0, 0, 0),
+                None,
+            )
             .unwrap_err();
         assert!(err.contains("MIRVM_OFFLINE"), "{err}");
         std::fs::remove_dir_all(&d).unwrap();

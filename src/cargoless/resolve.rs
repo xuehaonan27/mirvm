@@ -23,10 +23,10 @@ use std::path::{Path, PathBuf};
 
 use semver::{Version, VersionReq};
 
-use super::lockfile::{LockedDep, LockedPkg, Lockfile};
+use super::lockfile::{LockedDep, LockedPkg, Lockfile, UnusedPatch};
 use super::manifest::{
     DepKind, DepSource, FeatureValue, GitSpec, IncompatibleRustVersions, PackageManifest,
-    ResolverVersion, current_rust_version, parse_feature_value,
+    RegistryReference, ResolverVersion, current_rust_version, parse_feature_value,
 };
 use super::registry::{IndexEntry, IndexVersion, Registry};
 use pubgrub::Reporter as _;
@@ -34,9 +34,11 @@ use pubgrub::Reporter as _;
 // ---------- 供给面抽象（生产 = Registry；测试 = 内存 fake） ----------
 
 pub trait PkgSource {
-    fn index_entry(&mut self, name: &str) -> Result<IndexEntry, String>;
+    fn registry_source(&mut self, reference: &RegistryReference) -> Result<String, String>;
+    fn index_entry(&mut self, source: &str, name: &str) -> Result<IndexEntry, String>;
     fn ensure_source(
         &mut self,
+        source: &str,
         name: &str,
         version: &Version,
         cksum: Option<&str>,
@@ -53,16 +55,20 @@ pub trait PkgSource {
 }
 
 impl PkgSource for Registry {
-    fn index_entry(&mut self, name: &str) -> Result<IndexEntry, String> {
-        Registry::index_entry(self, name)
+    fn registry_source(&mut self, reference: &RegistryReference) -> Result<String, String> {
+        Registry::registry_source(self, reference)
+    }
+    fn index_entry(&mut self, source: &str, name: &str) -> Result<IndexEntry, String> {
+        Registry::index_entry(self, source, name)
     }
     fn ensure_source(
         &mut self,
+        source: &str,
         name: &str,
         version: &Version,
         cksum: Option<&str>,
     ) -> Result<PathBuf, String> {
-        Registry::ensure_source(self, name, version, cksum)
+        Registry::ensure_source(self, source, name, version, cksum)
     }
     fn ensure_git_package(
         &mut self,
@@ -210,7 +216,11 @@ pub fn resolve_for_known_with_features(
     let rust_version_policy = if root.ignore_rust_version {
         IncompatibleRustVersions::Allow
     } else {
-        super::resolver_config::incompatible_rust_versions(root.resolver)?
+        super::config::CargoConfig::load_at(
+            &root.lock_root,
+            super::config::cargo_home().as_deref(),
+        )?
+        .incompatible_rust_versions(root.resolver)?
     };
     let resolver_rust_version = root
         .resolver_rust_version
@@ -223,10 +233,115 @@ pub fn resolve_for_known_with_features(
         None
     };
 
+    let mut overrides = SourceOverrides::default();
+    let mut override_manifests = Vec::new();
+    for patch in &root.patches {
+        let logical_source = src.registry_source(&patch.registry)?;
+        let logical = registry_identity(&patch.dependency.package, &logical_source);
+        if let Some(mut manifest) =
+            load_override_manifest(&patch.dependency, input_lock.as_ref(), src)?
+        {
+            if manifest.name != patch.dependency.package {
+                return Err(format!(
+                    "[patch] 键 {} 指向的 package.name 是 {}",
+                    patch.dependency.package, manifest.name
+                ));
+            }
+            manifest.patches.clear();
+            manifest.replacements.clear();
+            let selected = local_manifest_key(&manifest);
+            overrides
+                .patches
+                .insert((logical, manifest.version.clone()), selected);
+            override_manifests.push(manifest);
+        } else if let DepSource::Registry(req, reference) = &patch.dependency.source {
+            let source = src.registry_source(reference)?;
+            let selected = registry_identity(&patch.dependency.package, &source);
+            let candidates = registry_entry(src, &selected)?;
+            let mut matched = false;
+            for candidate in candidates
+                .iter()
+                .filter(|candidate| req.matches(&candidate.version))
+            {
+                matched = true;
+                overrides.patches.insert(
+                    (logical.clone(), candidate.version.clone()),
+                    selected.clone(),
+                );
+            }
+            if !matched {
+                return Err(format!(
+                    "[patch] registry 来源没有 {} 的匹配版本 {}",
+                    patch.dependency.package, req
+                ));
+            }
+        }
+    }
+    for replacement in &root.replacements {
+        let logical_source = replacement
+            .source
+            .as_deref()
+            .map(|source| {
+                if source.starts_with("registry+") || source.starts_with("sparse+") {
+                    source.to_string()
+                } else {
+                    format!("registry+{source}")
+                }
+            })
+            .unwrap_or_else(|| CRATES_IO_LOCK_SOURCE.to_string());
+        let logical = registry_identity(&replacement.package, &logical_source);
+        let selected = if let Some(mut manifest) =
+            load_override_manifest(&replacement.dependency, input_lock.as_ref(), src)?
+        {
+            if manifest.name != replacement.package || manifest.version != replacement.version {
+                return Err(format!(
+                    "[replace] {}:{} 必须替换为同名同版本 package，实际为 {}:{}",
+                    replacement.package, replacement.version, manifest.name, manifest.version
+                ));
+            }
+            manifest.patches.clear();
+            manifest.replacements.clear();
+            let selected = local_manifest_key(&manifest);
+            override_manifests.push(manifest);
+            selected
+        } else if let DepSource::Registry(req, reference) = &replacement.dependency.source {
+            let source = src.registry_source(reference)?;
+            let selected = registry_identity(&replacement.package, &source);
+            if !req.matches(&replacement.version)
+                || !registry_entry(src, &selected)?
+                    .iter()
+                    .any(|candidate| candidate.version == replacement.version)
+            {
+                return Err(format!(
+                    "[replace] 来源没有 {} {}",
+                    replacement.package, replacement.version
+                ));
+            }
+            selected
+        } else {
+            unreachable!()
+        };
+        if overrides
+            .replacements
+            .insert((logical, replacement.version.clone()), selected)
+            .is_some()
+        {
+            return Err(format!(
+                "[replace] 重复指定 {} {}",
+                replacement.package, replacement.version
+            ));
+        }
+    }
+
     // path/Git 依赖 BFS。Git 的可变引用在这里解析成精确 commit；已有 lock
     // 只按 lock source 取 commit，不重新解释 branch/tag/default HEAD。
     let mut path_manifests: BTreeMap<String, PackageManifest> = BTreeMap::new();
     let mut queue: VecDeque<(PackageManifest, bool)> = VecDeque::new();
+    for manifest in override_manifests {
+        let identity = local_manifest_key(&manifest);
+        path_manifests.insert(identity, manifest.clone());
+        queue.push_back((manifest, false));
+    }
     queue.push_back((clone_root_shallow(root), true));
     while let Some((m, is_root)) = queue.pop_front() {
         for d in m.deps.iter().filter(|d| is_root || d.kind != DepKind::Dev) {
@@ -265,7 +380,7 @@ pub fn resolve_for_known_with_features(
                         .flatten();
                     Some(src.ensure_git_package(spec, &d.package, locked.as_deref())?)
                 }
-                DepSource::Registry(_) => None,
+                DepSource::Registry(..) => None,
             };
             if let Some(manifest) = next {
                 let identity = local_manifest_key(&manifest);
@@ -320,15 +435,19 @@ pub fn resolve_for_known_with_features(
             // litemap）；激活集单调扩张 ⇒ 收敛。
             let mut activated: BTreeSet<(String, Version, String)> = BTreeSet::new();
             let mut preferred_exact_versions = BTreeMap::new();
+            let fresh_context = FreshSolveContext {
+                rust_version_policy,
+                resolver_rust_version: &resolver_rust_version,
+                overrides: &overrides,
+            };
             loop {
                 let (vm, lf, ev) = solve_fresh(
                     root,
                     &path_manifests,
                     src,
                     &activated,
-                    rust_version_policy,
-                    &resolver_rust_version,
                     &mut preferred_exact_versions,
+                    &fresh_context,
                 )?;
                 let (nodes, mut new_activated) = unify_features(
                     root,
@@ -349,11 +468,12 @@ pub fn resolve_for_known_with_features(
                         &mut lf,
                         root,
                         &path_manifests,
-                        &vm,
                         &ev,
                         &nodes,
                         src,
+                        &overrides,
                     )?;
+                    fill_unused_patches(&mut lf, &path_manifests, src, &overrides)?;
                     let (build_nodes, _) = unify_features(
                         root,
                         &path_manifests,
@@ -403,6 +523,104 @@ fn clone_root_shallow(m: &PackageManifest) -> PackageManifest {
 }
 
 const LOCAL_ID_SEPARATOR: char = '\u{1f}';
+const CRATES_IO_LOCK_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
+
+fn registry_identity(name: &str, source: &str) -> String {
+    format!("{name}{LOCAL_ID_SEPARATOR}{source}")
+}
+
+fn identity_package_name(identity: &str) -> &str {
+    identity
+        .split_once(LOCAL_ID_SEPARATOR)
+        .map(|(name, _)| name)
+        .unwrap_or(identity)
+}
+
+fn identity_source(identity: &str) -> Option<&str> {
+    identity
+        .split_once(LOCAL_ID_SEPARATOR)
+        .map(|(_, source)| source)
+}
+
+fn registry_entry(src: &mut impl PkgSource, identity: &str) -> Result<IndexEntry, String> {
+    let source = identity_source(identity).unwrap_or(CRATES_IO_LOCK_SOURCE);
+    src.index_entry(source, identity_package_name(identity))
+}
+
+#[derive(Clone, Debug, Default)]
+struct SourceOverrides {
+    /// (原 registry 身份, 版本) -> patch 来源身份。
+    patches: BTreeMap<(String, Version), String>,
+    /// (被替换 registry 身份, 精确版本) -> replacement 来源身份。
+    replacements: BTreeMap<(String, Version), String>,
+}
+
+impl SourceOverrides {
+    fn selected_identity(&self, identity: &str, version: &Version) -> String {
+        self.replacements
+            .get(&(identity.to_string(), version.clone()))
+            .or_else(|| self.patches.get(&(identity.to_string(), version.clone())))
+            .cloned()
+            .unwrap_or_else(|| identity.to_string())
+    }
+
+    fn patched_entry(
+        &self,
+        src: &mut impl PkgSource,
+        manifests: &BTreeMap<String, PackageManifest>,
+        identity: &str,
+    ) -> Result<IndexEntry, String> {
+        let mut versions = registry_entry(src, identity)?.to_vec();
+        for ((logical, version), selected) in &self.patches {
+            if logical != identity {
+                continue;
+            }
+            let candidate = if let Some(manifest) = manifests.get(selected) {
+                super::vendor::VendorDir::entry_from_manifest(manifest)?
+            } else {
+                registry_entry(src, selected)?
+                    .iter()
+                    .find(|candidate| candidate.version == *version)
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!(
+                            "[patch] 来源 {} 没有 {} {version}",
+                            selected,
+                            identity_package_name(identity)
+                        )
+                    })?
+            };
+            versions.retain(|existing| existing.version != *version);
+            versions.push(candidate);
+        }
+        versions.sort_by(|left, right| left.version.cmp(&right.version));
+        Ok(versions.into())
+    }
+}
+
+fn load_override_manifest(
+    dependency: &super::manifest::DepDecl,
+    input_lock: Option<&Lockfile>,
+    src: &mut impl PkgSource,
+) -> Result<Option<PackageManifest>, String> {
+    match &dependency.source {
+        DepSource::Path(path) => {
+            let absolute = std::fs::canonicalize(path)
+                .or_else(|_| std::path::absolute(path))
+                .unwrap_or_else(|_| path.clone());
+            read_path_manifest(&absolute).map(Some)
+        }
+        DepSource::Git(spec) => {
+            let locked = input_lock
+                .map(|lock| locked_git_source(lock, spec, &dependency.package))
+                .transpose()?
+                .flatten();
+            src.ensure_git_package(spec, &dependency.package, locked.as_deref())
+                .map(Some)
+        }
+        DepSource::Registry(..) => Ok(None),
+    }
+}
 
 fn local_manifest_key(manifest: &PackageManifest) -> String {
     let source = manifest
@@ -416,7 +634,7 @@ fn local_package_name(identity: &str, manifests: &BTreeMap<String, PackageManife
     manifests
         .get(identity)
         .map(|manifest| manifest.name.clone())
-        .unwrap_or_else(|| identity.to_string())
+        .unwrap_or_else(|| identity_package_name(identity).to_string())
 }
 
 fn local_dep_identity(
@@ -438,7 +656,7 @@ fn local_dep_identity(
                 .lock_source
                 .as_deref()
                 .is_some_and(|source| source.starts_with(&format!("{}#", spec.source_id()))),
-            DepSource::Registry(_) => false,
+            DepSource::Registry(..) => false,
         }
     });
     let first = matches.next().map(|(identity, _)| identity.clone());
@@ -457,14 +675,14 @@ fn local_dep_identity(
 }
 
 fn read_path_manifest(path: &Path) -> Result<PackageManifest, String> {
-    let workspace = super::workspace::WorkspaceManifest::read(path)?;
+    let workspace = super::workspace::WorkspaceManifest::read_dependency(path)?;
     workspace
         .members
         .into_iter()
         .find(|member| member.root == path)
         .or_else(|| {
             std::fs::canonicalize(path).ok().and_then(|canonical| {
-                super::workspace::WorkspaceManifest::read(&canonical)
+                super::workspace::WorkspaceManifest::read_dependency(&canonical)
                     .ok()?
                     .members
                     .into_iter()
@@ -557,7 +775,8 @@ fn versions_from_lock(
                     ));
                 }
             };
-            let child_identity = locked_package_identity(child, path_manifests)?;
+            let effective_child = effective_locked_package(lf, child)?;
+            let child_identity = locked_package_identity(effective_child, path_manifests)?;
             // 边版本记录：lock 依赖行不带 kind 信息——Normal/Build 双键登记，
             // 消歧器 = 子 source 或版本串（同名同版本 Git source 也能分立）。
             for class in [UnitClass::Normal, UnitClass::Build] {
@@ -576,13 +795,9 @@ fn versions_from_lock(
                 );
             }
             if visited.insert((child_identity.clone(), child.version.clone())) {
-                stack.push((child, child_identity));
+                stack.push((effective_child, child_identity));
             }
         }
-    }
-    // path 包（可能不在 lock 的可达集里——lock 含它们但没 source；BFS 已覆盖）
-    for (name, m) in path_manifests {
-        visited.insert((name.clone(), m.version.clone()));
     }
     for (identity, v) in visited {
         let name = local_package_name(&identity, path_manifests);
@@ -599,7 +814,7 @@ fn versions_from_lock(
             .filter(|d| include_dev || d.kind != DepKind::Dev)
         {
             let req = match &d.source {
-                DepSource::Registry(req) => Some(req),
+                DepSource::Registry(req, _) => Some(req),
                 DepSource::Git(spec) => Some(&spec.version),
                 DepSource::Path(_) => None,
             };
@@ -623,6 +838,43 @@ fn versions_from_lock(
     Ok((map, edges))
 }
 
+fn effective_locked_package<'a>(
+    lock: &'a Lockfile,
+    package: &'a LockedPkg,
+) -> Result<&'a LockedPkg, String> {
+    let Some(replace) = package.replace.as_deref() else {
+        return Ok(package);
+    };
+    let mut parts = replace.split_whitespace();
+    let name = parts
+        .next()
+        .ok_or_else(|| format!("Cargo.lock replace 行非法：{replace}"))?;
+    let version = parts
+        .next()
+        .ok_or_else(|| format!("Cargo.lock replace 行缺版本：{replace}"))
+        .and_then(|version| {
+            Version::parse(version).map_err(|error| format!("Cargo.lock replace 版本非法：{error}"))
+        })?;
+    let candidates = lock
+        .packages
+        .iter()
+        .filter(|candidate| {
+            candidate.name == name
+                && candidate.version == version
+                && !std::ptr::eq(*candidate, package)
+        })
+        .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [replacement] => Ok(*replacement),
+        [] => Err(format!(
+            "Cargo.lock replace `{replace}` 找不到替身 package 行"
+        )),
+        _ => Err(format!(
+            "Cargo.lock replace `{replace}` 匹配多个替身 package 行"
+        )),
+    }
+}
+
 fn locked_package_identity(
     package: &LockedPkg,
     manifests: &BTreeMap<String, PackageManifest>,
@@ -639,7 +891,12 @@ fn locked_package_identity(
             package.name, package.version, package.source
         ));
     }
-    Ok(first.unwrap_or_else(|| package.name.clone()))
+    Ok(first.unwrap_or_else(|| match package.source.as_deref() {
+        Some(source) if source.starts_with("registry+") || source.starts_with("sparse+") => {
+            registry_identity(&package.name, source)
+        }
+        _ => package.name.clone(),
+    }))
 }
 
 // ---------- fresh 模式（pubgrub + lazy-bucket 多版本） ----------
@@ -700,6 +957,7 @@ type PreComparators = Vec<(u64, Option<u64>, Option<u64>)>;
 struct CratesIo<'a, S: PkgSource> {
     src: std::cell::RefCell<&'a mut S>,
     manifests: &'a BTreeMap<String, PackageManifest>,
+    overrides: &'a SourceOverrides,
     root: &'a PackageManifest,
     rust_version_policy: IncompatibleRustVersions,
     resolver_rust_version: &'a Version,
@@ -721,6 +979,7 @@ struct CratesIo<'a, S: PkgSource> {
     edge_assign: std::cell::RefCell<EdgeAssign>,
     /// get_dependencies 幂等 memo（同一 (P,V) 多次调用必须返回同一份分派）。
     deps_memo: std::cell::RefCell<BTreeMap<(Pkg, Version), DepsRc>>,
+    source_error: std::cell::RefCell<Option<String>>,
 }
 
 fn req_has_pre(req: &VersionReq) -> bool {
@@ -742,6 +1001,13 @@ fn cargo_versions_compatible(left: &Version, right: &Version) -> bool {
 }
 
 impl<'a, S: PkgSource> CratesIo<'a, S> {
+    fn index_entry(&self, identity: &str) -> Result<IndexEntry, std::io::Error> {
+        let mut source = self.src.borrow_mut();
+        self.overrides
+            .patched_entry(&mut **source, self.manifests, identity)
+            .map_err(io_err)
+    }
+
     fn rust_version_compatible(&self, version: &IndexVersion) -> bool {
         version
             .rust_version
@@ -769,7 +1035,7 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
         name: &str,
         range: &pubgrub::Ranges<Version>,
     ) -> Result<bool, std::io::Error> {
-        let vs = self.src.borrow_mut().index_entry(name).map_err(io_err)?;
+        let vs = self.index_entry(name)?;
         Ok(vs
             .iter()
             .any(|v| !v.yanked && range.contains(&v.version) && self.pre_allowed(name, &v.version)))
@@ -865,7 +1131,7 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
                 }
             }
             Pkg::Registry(name, _) => {
-                let vs = self.src.borrow_mut().index_entry(name).map_err(io_err)?;
+                let vs = self.index_entry(name)?;
                 let Some(iv) = vs.iter().find(|v| v.version == *version) else {
                     return Err(io_err(format!("{name} {version} 不在 index")));
                 };
@@ -873,7 +1139,23 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
                     if d.kind.as_deref() == Some("dev") {
                         continue; // dev 边不求（事先明说）
                     }
-                    let pkg_name = d.package.clone().unwrap_or_else(|| d.name.clone());
+                    let package_name = d.package.clone().unwrap_or_else(|| d.name.clone());
+                    let child_source = d
+                        .registry
+                        .as_deref()
+                        .map(|source| {
+                            if source.starts_with("sparse+") || source.starts_with("registry+") {
+                                source.to_string()
+                            } else {
+                                format!("registry+{source}")
+                            }
+                        })
+                        .unwrap_or_else(|| {
+                            identity_source(name)
+                                .unwrap_or(CRATES_IO_LOCK_SOURCE)
+                                .to_string()
+                        });
+                    let pkg_name = registry_identity(&package_name, &child_source);
                     // optional 未激活不求（按（父包名, 依赖键）门控；平台 cfg 不求值——并集语义）
                     if d.optional
                         && !self.activated.contains(&(
@@ -968,14 +1250,26 @@ fn collect_decl<'a, S: PkgSource>(
         return Ok(());
     }
     match &d.source {
-        DepSource::Registry(req) => {
+        DepSource::Registry(req, reference) => {
+            let source = provider
+                .src
+                .borrow_mut()
+                .registry_source(reference)
+                .map_err(|error| {
+                    let mut saved = provider.source_error.borrow_mut();
+                    if saved.is_none() {
+                        *saved = Some(error.clone());
+                    }
+                    io_err(error)
+                })?;
+            let identity = registry_identity(&d.package, &source);
             if req_has_pre(req) {
                 for c in &req.comparators {
                     if !c.pre.is_empty() {
                         provider
                             .allow_pre
                             .borrow_mut()
-                            .entry(d.package.clone())
+                            .entry(identity.clone())
                             .or_default()
                             .push((c.major, c.minor, c.patch));
                     }
@@ -983,7 +1277,7 @@ fn collect_decl<'a, S: PkgSource>(
             }
             raw.push((
                 d.key.clone(),
-                d.package.clone(),
+                identity,
                 req.clone(),
                 dep_unit_class(d.kind),
                 true,
@@ -1029,15 +1323,19 @@ impl<'a, S: PkgSource> pubgrub::DependencyProvider for CratesIo<'a, S> {
     ) -> Self::Priority {
         let n = match package {
             Pkg::Registry(name, _) => self
-                .src
-                .borrow_mut()
                 .index_entry(name)
                 .map(|vs| {
                     vs.iter()
                         .filter(|v| !v.yanked && range.contains(&v.version))
                         .count()
                 })
-                .unwrap_or(0),
+                .unwrap_or_else(|error| {
+                    let mut saved = self.source_error.borrow_mut();
+                    if saved.is_none() {
+                        *saved = Some(error.to_string());
+                    }
+                    0
+                }),
             _ => 1,
         };
         std::cmp::Reverse(n)
@@ -1056,7 +1354,7 @@ impl<'a, S: PkgSource> pubgrub::DependencyProvider for CratesIo<'a, S> {
                 .map(|m| m.version.clone())
                 .or(Some(Version::new(0, 0, 0)))),
             Pkg::Registry(name, _) => {
-                let vs = self.src.borrow_mut().index_entry(name).map_err(io_err)?;
+                let vs = self.index_entry(name)?;
                 let candidates: Vec<&IndexVersion> = vs
                     .iter()
                     .filter(|v| {
@@ -1095,7 +1393,7 @@ impl<'a, S: PkgSource> pubgrub::DependencyProvider for CratesIo<'a, S> {
         version: &Self::V,
     ) -> Result<pubgrub::Dependencies<Self::P, Self::VS, Self::M>, Self::Err> {
         if let Pkg::Registry(name, _) = package {
-            let vs = self.src.borrow_mut().index_entry(name).map_err(io_err)?;
+            let vs = self.index_entry(name)?;
             if !vs.iter().any(|v| v.version == *version) {
                 return Ok(pubgrub::Dependencies::Unavailable(format!(
                     "{name} {version} 不在 index"
@@ -1221,23 +1519,27 @@ type Solved = (
     EdgeVersions,                   // 每条 dep 边指向的版本
 );
 
+struct FreshSolveContext<'a> {
+    rust_version_policy: IncompatibleRustVersions,
+    resolver_rust_version: &'a Version,
+    overrides: &'a SourceOverrides,
+}
+
 fn solve_fresh(
     root: &PackageManifest,
     path_manifests: &BTreeMap<String, PackageManifest>,
     src: &mut impl PkgSource,
     activated: &BTreeSet<(String, Version, String)>,
-    rust_version_policy: IncompatibleRustVersions,
-    resolver_rust_version: &Version,
     preferred_exact_versions: &mut BTreeMap<String, Version>,
+    context: &FreshSolveContext<'_>,
 ) -> Result<Solved, String> {
     let (first, discovered) = solve_fresh_pass(
         root,
         path_manifests,
         src,
         activated,
-        rust_version_policy,
-        resolver_rust_version,
         preferred_exact_versions,
+        context,
     )?;
     let before = preferred_exact_versions.clone();
     for (name, version) in discovered {
@@ -1251,9 +1553,8 @@ fn solve_fresh(
         path_manifests,
         src,
         activated,
-        rust_version_policy,
-        resolver_rust_version,
         preferred_exact_versions,
+        context,
     )?;
     Ok(unified)
 }
@@ -1265,16 +1566,16 @@ fn solve_fresh_pass(
     path_manifests: &BTreeMap<String, PackageManifest>,
     src: &mut impl PkgSource,
     activated: &BTreeSet<(String, Version, String)>,
-    rust_version_policy: IncompatibleRustVersions,
-    resolver_rust_version: &Version,
     preferred_exact_versions: &BTreeMap<String, Version>,
+    context: &FreshSolveContext<'_>,
 ) -> Result<(Solved, BTreeMap<String, Version>), String> {
     let provider = CratesIo {
         src: std::cell::RefCell::new(src),
         manifests: path_manifests,
+        overrides: context.overrides,
         root,
-        rust_version_policy,
-        resolver_rust_version,
+        rust_version_policy: context.rust_version_policy,
+        resolver_rust_version: context.resolver_rust_version,
         preferred_exact_versions,
         allow_pre: std::cell::RefCell::new(BTreeMap::new()),
         activated,
@@ -1282,18 +1583,25 @@ fn solve_fresh_pass(
         bucket_ranges: std::cell::RefCell::new(BTreeMap::new()),
         edge_assign: std::cell::RefCell::new(BTreeMap::new()),
         deps_memo: std::cell::RefCell::new(BTreeMap::new()),
+        source_error: std::cell::RefCell::new(None),
     };
-    let selected = pubgrub::resolve(&provider, Pkg::Root, root.version.clone()).map_err(|e| {
-        format!(
-            "依赖求解失败（pubgrub）: {}",
-            match e {
-                pubgrub::PubGrubError::NoSolution(derivation) => {
-                    pubgrub::DefaultStringReporter::report(&derivation)
-                }
-                other => format!("{other}"),
+    let selected = match pubgrub::resolve(&provider, Pkg::Root, root.version.clone()) {
+        Ok(selected) => selected,
+        Err(error) => {
+            if let Some(source_error) = provider.source_error.borrow().clone() {
+                return Err(format!("依赖来源读取失败: {source_error}"));
             }
-        )
-    })?;
+            return Err(format!(
+                "依赖求解失败（pubgrub）: {}",
+                match error {
+                    pubgrub::PubGrubError::NoSolution(derivation) => {
+                        pubgrub::DefaultStringReporter::report(&derivation)
+                    }
+                    other => format!("{other}"),
+                }
+            ));
+        }
+    };
     // 出解集合（bucket → 版本）与全量边分派
     let mut bucket_versions: BTreeMap<(String, u32), Version> = BTreeMap::new();
     for (pkg, version) in selected {
@@ -1342,7 +1650,7 @@ fn solve_fresh_pass(
         // Cargo 1.83 起默认写 v4，但为 `rust-version <= 1.82` 的项目继续写
         // 旧工具链可读取的 v3。这里用 workspace 最低 MSRV，同 resolver 3
         // 候选偏好的基准一致；无声明时基准是当前 rustc。
-        format_version: if resolver_rust_version >= &Version::new(1, 83, 0) {
+        format_version: if context.resolver_rust_version >= &Version::new(1, 83, 0) {
             4
         } else {
             3
@@ -1352,25 +1660,25 @@ fn solve_fresh_pass(
             version: root.version.clone(),
             source: None,
             checksum: None,
+            replace: None,
             dependencies: vec![],
         }],
+        unused_patches: vec![],
     };
     for ((name, bucket), version) in &bucket_versions {
         if !reachable.contains(&(name.clone(), *bucket)) {
             continue;
         }
-        let package_name = local_package_name(name, path_manifests);
+        let selected = context.overrides.selected_identity(name, version);
+        let package_name = local_package_name(&selected, path_manifests);
         version_map
             .entry(package_name.clone())
             .or_default()
             .push(version.clone());
-        let (source, checksum) = if let Some(manifest) = path_manifests.get(name) {
+        let (source, checksum) = if let Some(manifest) = path_manifests.get(&selected) {
             (manifest.lock_source.clone(), None)
         } else {
-            let cksum = provider
-                .src
-                .borrow_mut()
-                .index_entry(name)
+            let cksum = registry_entry(&mut **provider.src.borrow_mut(), &selected)
                 .ok()
                 .and_then(|vs| {
                     vs.iter()
@@ -1378,7 +1686,11 @@ fn solve_fresh_pass(
                         .map(|v| v.cksum.clone())
                 });
             (
-                Some("registry+https://github.com/rust-lang/crates.io-index".to_string()),
+                Some(
+                    identity_source(&selected)
+                        .unwrap_or(CRATES_IO_LOCK_SOURCE)
+                        .to_string(),
+                ),
                 cksum,
             )
         };
@@ -1387,8 +1699,39 @@ fn solve_fresh_pass(
             version: version.clone(),
             source,
             checksum,
+            replace: None,
             dependencies: vec![],
         });
+        if context
+            .overrides
+            .replacements
+            .get(&(name.clone(), version.clone()))
+            .is_some_and(|replacement| replacement == &selected)
+        {
+            let original = registry_entry(&mut **provider.src.borrow_mut(), name)?;
+            let checksum = original
+                .iter()
+                .find(|candidate| candidate.version == *version)
+                .map(|candidate| candidate.cksum.clone())
+                .ok_or_else(|| {
+                    format!(
+                        "[replace] 原 package {} {version} 不在 registry index",
+                        identity_package_name(name)
+                    )
+                })?;
+            lock.packages.push(LockedPkg {
+                name: identity_package_name(name).to_string(),
+                version: version.clone(),
+                source: Some(
+                    identity_source(name)
+                        .unwrap_or(CRATES_IO_LOCK_SOURCE)
+                        .to_string(),
+                ),
+                checksum: Some(checksum),
+                replace: Some(format!("{} {version}", identity_package_name(name))),
+                dependencies: vec![],
+            });
+        }
     }
     for vs in version_map.values_mut() {
         vs.sort();
@@ -1407,15 +1750,17 @@ fn solve_fresh_pass(
         if !reachable.contains(&(pkg.clone(), *bucket)) {
             continue;
         }
+        let parent_identity = context.overrides.selected_identity(pname, pver);
+        let child_identity = context.overrides.selected_identity(pkg, v);
         edge_versions.insert(
             (
-                pname.clone(),
+                parent_identity,
                 pver.clone(),
                 key.clone(),
                 dis.clone(),
                 *class,
             ),
-            (pkg.clone(), v.clone()),
+            (child_identity, v.clone()),
         );
     }
     let mut exact_duplicate_names = BTreeSet::new();
@@ -1431,7 +1776,7 @@ fn solve_fresh_pass(
         .map(|(name, _)| name.as_str())
         .collect::<BTreeSet<_>>();
     for ((_pname, _pver, _key, dis, _class), (pkg, bucket)) in edge_assign.iter() {
-        if compatible_duplicate_names.contains(pkg.as_str())
+        if compatible_duplicate_names.contains(identity_package_name(pkg))
             && reachable.contains(&(pkg.clone(), *bucket))
             && VersionReq::parse(dis).is_ok_and(|req| req_is_full_exact(&req))
         {
@@ -1447,12 +1792,50 @@ fn solve_fresh_pass(
             })
             .min_by_key(|((_, bucket), _)| *bucket)
         {
-            next_preferences.insert(name, version.clone());
+            next_preferences.insert(identity_package_name(&name).to_string(), version.clone());
         }
     }
     // lock 依赖行在 feature 统一收敛后补齐（见 resolve() 迭代循环——
     // optional 门按（父包, 依赖键）判定，需要统一产物）
     Ok(((version_map, lock, edge_versions), next_preferences))
+}
+
+fn fill_unused_patches(
+    lock: &mut Lockfile,
+    manifests: &BTreeMap<String, PackageManifest>,
+    src: &mut impl PkgSource,
+    overrides: &SourceOverrides,
+) -> Result<(), String> {
+    for ((_logical, version), selected) in &overrides.patches {
+        let (name, source, checksum) = if let Some(manifest) = manifests.get(selected) {
+            (manifest.name.clone(), manifest.lock_source.clone(), None)
+        } else {
+            let name = identity_package_name(selected).to_string();
+            let source = identity_source(selected).map(str::to_string);
+            let checksum = registry_entry(src, selected)?
+                .iter()
+                .find(|candidate| candidate.version == *version)
+                .map(|candidate| candidate.cksum.clone())
+                .filter(|checksum| !checksum.is_empty());
+            (name, source, checksum)
+        };
+        let used = lock.packages.iter().any(|package| {
+            package.name == name && package.version == *version && package.source == source
+        });
+        if !used
+            && !lock.unused_patches.iter().any(|patch| {
+                patch.name == name && patch.version == *version && patch.source == source
+            })
+        {
+            lock.unused_patches.push(UnusedPatch {
+                name,
+                version: version.clone(),
+                source,
+                checksum,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// 给生成的 lock 补 dependencies 行（按需追加 version/source 消歧）；
@@ -1461,12 +1844,11 @@ fn fill_lock_dependency_lines(
     lock: &mut Lockfile,
     root: &PackageManifest,
     path_manifests: &BTreeMap<String, PackageManifest>,
-    version_map: &BTreeMap<String, Vec<Version>>,
     edge_versions: &EdgeVersions,
     nodes: &BTreeMap<NodeKey, FeatNode>,
     src: &mut impl PkgSource,
+    overrides: &SourceOverrides,
 ) -> Result<(), String> {
-    let _ = version_map;
     // optional 门按（父包, 父版本, 依赖键）判定：全局集合会把 A 包激活的
     // 同名依赖误植到 B 包（cipher/zeroize vs generic-array 实锤）；
     // 弱形引用（?/）同样放行（cargo 语义：yoke/serde?/alloc 实锤）
@@ -1510,12 +1892,30 @@ fn fill_lock_dependency_lines(
         };
         let (child_identity, child_version) = edge_version(edge_versions, parent, &dep)
             .ok_or_else(|| format!("{}@{} 的依赖 {key} 无精确 lock 边", parent.0, parent.1))?;
-        let (child_name, child_source) = match path_manifests.get(child_identity) {
-            Some(manifest) => (manifest.name.clone(), manifest.lock_source.clone()),
-            None => (
-                child_identity.clone(),
-                Some("registry+https://github.com/rust-lang/crates.io-index".to_string()),
-            ),
+        let replacement_original =
+            overrides
+                .replacements
+                .iter()
+                .find_map(|((original, version), replacement)| {
+                    (replacement == child_identity && version == child_version).then_some(original)
+                });
+        let (child_name, child_source) = if let Some(original) = replacement_original {
+            (
+                identity_package_name(original).to_string(),
+                identity_source(original).map(str::to_string),
+            )
+        } else {
+            match path_manifests.get(child_identity) {
+                Some(manifest) => (manifest.name.clone(), manifest.lock_source.clone()),
+                None => (
+                    identity_package_name(child_identity).to_string(),
+                    Some(
+                        identity_source(child_identity)
+                            .unwrap_or(CRATES_IO_LOCK_SOURCE)
+                            .to_string(),
+                    ),
+                ),
+            }
         };
         let same_name: Vec<&LockedPkg> = lock
             .packages
@@ -1566,14 +1966,14 @@ fn fill_lock_dependency_lines(
             .map(|d| -> Result<LockedDep, String> {
                 let class = dep_unit_class(d.kind);
                 let req = match &d.source {
-                    DepSource::Registry(r) => Some(r),
+                    DepSource::Registry(r, _) => Some(r),
                     DepSource::Git(spec) => Some(&spec.version),
                     DepSource::Path(_) => None,
                 };
                 let parent = (root.name.clone(), root.version.clone(), class);
                 let source_id = match &d.source {
                     DepSource::Git(spec) => Some(spec.source_id()),
-                    DepSource::Registry(_) | DepSource::Path(_) => None,
+                    DepSource::Registry(..) | DepSource::Path(_) => None,
                 };
                 line_for(&parent, &d.key, &d.package, req, source_id, class)
             })
@@ -1591,14 +1991,14 @@ fn fill_lock_dependency_lines(
                 .map(|d| -> Result<LockedDep, String> {
                     let class = dep_unit_class(d.kind);
                     let req = match &d.source {
-                        DepSource::Registry(r) => Some(r),
+                        DepSource::Registry(r, _) => Some(r),
                         DepSource::Git(spec) => Some(&spec.version),
                         DepSource::Path(_) => None,
                     };
                     let parent = (identity.clone(), m.version.clone(), class);
                     let source_id = match &d.source {
                         DepSource::Git(spec) => Some(spec.source_id()),
-                        DepSource::Registry(_) | DepSource::Path(_) => None,
+                        DepSource::Registry(..) | DepSource::Path(_) => None,
                     };
                     line_for(&parent, &d.key, &d.package, req, source_id, class)
                 })
@@ -1609,8 +2009,11 @@ fn fill_lock_dependency_lines(
         .packages
         .iter()
         .filter_map(|package| {
+            if package.replace.is_some() {
+                return None;
+            }
             let source = package.source.as_deref()?;
-            source.starts_with("registry+").then(|| {
+            (source.starts_with("registry+") || source.starts_with("sparse+")).then(|| {
                 (
                     package.name.clone(),
                     package.version.clone(),
@@ -1623,7 +2026,8 @@ fn fill_lock_dependency_lines(
         if name == root.name {
             continue;
         }
-        let vs = src.index_entry(&name)?;
+        let identity = registry_identity(&name, &source);
+        let vs = registry_entry(src, &identity)?;
         let iv = vs
             .iter()
             .find(|v| v.version == version)
@@ -1634,7 +2038,7 @@ fn fill_lock_dependency_lines(
                 .iter()
                 .filter(|d| d.kind.as_deref() != Some("dev"))
                 .filter(|d| {
-                    !d.optional || activated_keys(&name, &version).contains(&d.name.as_str())
+                    !d.optional || activated_keys(&identity, &version).contains(&d.name.as_str())
                 })
                 .map(|d| -> Result<LockedDep, String> {
                     let pkg_name = d.package.clone().unwrap_or_else(|| d.name.clone());
@@ -1643,7 +2047,7 @@ fn fill_lock_dependency_lines(
                     } else {
                         UnitClass::Normal
                     };
-                    let parent = (name.clone(), version.clone(), class);
+                    let parent = (identity.clone(), version.clone(), class);
                     line_for(&parent, &d.name, &pkg_name, Some(&d.req), None, class)
                 })
                 .collect::<Result<Vec<_>, _>>()?,
@@ -1785,7 +2189,7 @@ fn ensure_registry_node(
     if tables.contains_key(&(name.to_string(), version.clone(), class)) {
         return Ok(());
     }
-    let vs = src.index_entry(name)?;
+    let vs = registry_entry(src, name)?;
     let iv = vs
         .iter()
         .find(|v| v.version == *version)
@@ -2083,16 +2487,16 @@ fn featdeps(decls: &[super::manifest::DepDecl], include_dev: bool) -> Result<Vec
             optional: d.optional,
             default_features: d.default_features,
             features: d.features.clone(),
-            registry: matches!(d.source, DepSource::Registry(_)),
+            registry: matches!(d.source, DepSource::Registry(..)),
             platform_cfg: d.platform_cfg.clone(),
             req: match &d.source {
-                DepSource::Registry(req) => Some(req.to_string()),
+                DepSource::Registry(req, _) => Some(req.to_string()),
                 DepSource::Git(spec) => Some(spec.version.to_string()),
                 DepSource::Path(_) => None,
             },
             source_id: match &d.source {
                 DepSource::Git(spec) => Some(spec.source_id()),
-                DepSource::Registry(_) | DepSource::Path(_) => None,
+                DepSource::Registry(..) | DepSource::Path(_) => None,
             },
         })
         .collect())
@@ -2389,7 +2793,7 @@ fn node_featdeps(
     if let Some(m) = path_manifests.get(name) {
         return decls_to_featdeps(&m.deps);
     }
-    let vs = src.index_entry(name)?;
+    let vs = registry_entry(src, name)?;
     let iv = vs
         .iter()
         .find(|v| v.version == *version)
@@ -2534,16 +2938,18 @@ fn assemble_units(
             });
             continue;
         }
-        let dir = src.ensure_source(name, version, None)?;
-        let rm = read_registry_minimal(&dir, name, version)?;
+        let package_name = identity_package_name(name);
+        let source = identity_source(name).unwrap_or(CRATES_IO_LOCK_SOURCE);
+        let dir = src.ensure_source(source, package_name, version, None)?;
+        let rm = read_registry_minimal(&dir, package_name, version)?;
         index.insert((name.clone(), version.clone(), *class), units.len());
         units.push(Unit {
-            package: name.clone(),
+            package: package_name.to_string(),
             lib_name: rm.lib_name,
             version: version.clone(),
             source_dir: dir,
             from_registry: true,
-            immutable_source_id: None,
+            immutable_source_id: Some(source.to_string()),
             class: *class,
             features: node.features.clone(),
             declared_features: rm.declared_features,
@@ -2672,10 +3078,15 @@ fn validate_compiler_rust_version(
                 })
                 .and_then(|manifest| manifest.rust_version.clone())
         } else if unit.from_registry {
-            src.index_entry(&unit.package)?
-                .iter()
-                .find(|entry| entry.version == unit.version)
-                .and_then(|entry| entry.rust_version.clone())
+            src.index_entry(
+                unit.immutable_source_id
+                    .as_deref()
+                    .unwrap_or(CRATES_IO_LOCK_SOURCE),
+                &unit.package,
+            )?
+            .iter()
+            .find(|entry| entry.version == unit.version)
+            .and_then(|entry| entry.rust_version.clone())
         } else {
             path_manifests
                 .get(&unit.package)
@@ -2738,11 +3149,26 @@ mod tests {
     }
 
     impl PkgSource for FakeSource {
-        fn index_entry(&mut self, name: &str) -> Result<IndexEntry, String> {
+        fn registry_source(&mut self, reference: &RegistryReference) -> Result<String, String> {
+            Ok(match reference {
+                RegistryReference::CratesIo => CRATES_IO_LOCK_SOURCE.to_string(),
+                RegistryReference::Named(name) => format!("registry+test://{name}"),
+                RegistryReference::Index(index) => {
+                    if index.starts_with("sparse+") {
+                        index.clone()
+                    } else {
+                        format!("registry+{index}")
+                    }
+                }
+            })
+        }
+
+        fn index_entry(&mut self, _source: &str, name: &str) -> Result<IndexEntry, String> {
             Ok(self.index.get(name).cloned().unwrap_or_default().into())
         }
         fn ensure_source(
             &mut self,
+            _source: &str,
             name: &str,
             version: &Version,
             _cksum: Option<&str>,
@@ -2804,6 +3230,7 @@ mod tests {
             target: None,
             kind: None,
             package: None,
+            registry: None,
         }
     }
 

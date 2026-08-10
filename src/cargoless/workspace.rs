@@ -18,6 +18,14 @@ pub struct WorkspaceManifest {
 
 impl WorkspaceManifest {
     pub fn read(input: &Path) -> Result<Self, String> {
+        Self::read_inner(input, false)
+    }
+
+    pub(crate) fn read_dependency(input: &Path) -> Result<Self, String> {
+        Self::read_inner(input, true)
+    }
+
+    fn read_inner(input: &Path, dependency_only: bool) -> Result<Self, String> {
         let input = std::fs::canonicalize(input)
             .or_else(|_| std::path::absolute(input))
             .map_err(|e| format!("项目目录绝对化失败 {}: {e}", input.display()))?;
@@ -56,12 +64,6 @@ impl WorkspaceManifest {
                 members: vec![package],
             });
         }
-        if root_value.get("patch").is_some() || root_value.get("replace").is_some() {
-            return Err(
-                "workspace 的 [patch]/[replace] source replacement 尚未实现（D15 P5；不会静默忽略）"
-                    .into(),
-            );
-        }
         if workspace.get("lints").is_some() {
             return Err("workspace.lints 尚未实现；lint 会改变 rustc 行为，不能静默忽略".into());
         }
@@ -73,6 +75,7 @@ impl WorkspaceManifest {
             .or_else(|| inferred_package_resolver(&root_value));
         let resolver = match resolver.as_deref() {
             Some(value) => ResolverVersion::parse(value)?,
+            None if dependency_only => ResolverVersion::V1,
             None => {
                 return Err(
                     "虚拟或旧 edition workspace 未声明 resolver；Cargo 会采用 resolver=1，当前不能按 resolver=2 猜测"
@@ -80,7 +83,7 @@ impl WorkspaceManifest {
                 );
             }
         };
-        if resolver == ResolverVersion::V1 {
+        if resolver == ResolverVersion::V1 && !dependency_only {
             return Err(
                 "workspace resolver=1 尚未实现；不会按 resolver=2/3 猜测 feature 统一".into(),
             );
@@ -479,8 +482,55 @@ fn materialize_member(
     } else {
         member_table.remove("profile");
     }
+    // Cargo 只读取 workspace 根的 patch/replace；成员中的同名表被忽略。
+    for key in ["patch", "replace"] {
+        match workspace_root.get(key).cloned() {
+            Some(mut value) => {
+                absolutize_override_paths(key, &mut value, root);
+                member_table.insert(key.into(), value);
+            }
+            None => {
+                member_table.remove(key);
+            }
+        }
+    }
     member_table.remove("workspace");
     Ok(member)
+}
+
+fn absolutize_override_paths(kind: &str, value: &mut toml::Value, root: &Path) {
+    let Some(table) = value.as_table_mut() else {
+        return;
+    };
+    if kind == "patch" {
+        for registry in table
+            .iter_mut()
+            .filter_map(|(_, value)| value.as_table_mut())
+        {
+            for (_, dependency) in registry.iter_mut() {
+                absolutize_dependency_path(dependency, root);
+            }
+        }
+    } else {
+        for (_, dependency) in table.iter_mut() {
+            absolutize_dependency_path(dependency, root);
+        }
+    }
+}
+
+fn absolutize_dependency_path(dependency: &mut toml::Value, root: &Path) {
+    let Some(table) = dependency.as_table_mut() else {
+        return;
+    };
+    let Some(path) = table.get("path").and_then(toml::Value::as_str) else {
+        return;
+    };
+    if !Path::new(path).is_absolute() {
+        table.insert(
+            "path".into(),
+            toml::Value::String(root.join(path).display().to_string()),
+        );
+    }
 }
 
 fn materialize_dependency_table(
@@ -626,6 +676,36 @@ mod tests {
         assert!(wildcard_match("crates/*", "crates/x"));
         assert!(wildcard_match("foo-*", "foo-bar"));
         assert!(!wildcard_match("foo-*", "bar-foo"));
+    }
+
+    #[test]
+    fn resolver_one_is_rejected_for_roots_but_materialized_for_path_dependencies() {
+        let root = std::env::temp_dir().join(format!(
+            "mirvm-workspace-resolver-one-dependency-{}",
+            std::process::id()
+        ));
+        let member = root.join("member");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nresolver='1'\nmembers=['member']\n",
+        )
+        .unwrap();
+        std::fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname='member'\nversion='0.1.0'\nedition='2021'\n",
+        )
+        .unwrap();
+
+        let error = WorkspaceManifest::read(&member).unwrap_err();
+        assert!(error.contains("resolver=1"), "{error}");
+        let dependency = WorkspaceManifest::read_dependency(&member).unwrap();
+        let package = dependency
+            .members
+            .into_iter()
+            .find(|package| package.root == member)
+            .unwrap();
+        assert_eq!(package.resolver, ResolverVersion::V1);
     }
 
     #[test]

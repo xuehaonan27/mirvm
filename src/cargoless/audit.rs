@@ -31,7 +31,7 @@ pub struct AuditReport {
 /// 项目目录（含 Cargo.toml）审计。
 pub fn audit_project(dir: &Path) -> Result<AuditReport, String> {
     let manifest = PackageManifest::read_dir(dir)?;
-    let mut registry = Registry::open()?;
+    let mut registry = Registry::open_for(&manifest.lock_root)?;
     let plan = resolve(&manifest, &mut registry)?;
     let lock_path = manifest.root.join("Cargo.lock");
     let lock_check = lock_path
@@ -93,7 +93,7 @@ pub fn audit_script(file: &Path) -> Result<AuditReport, String> {
         });
     };
     let manifest = PackageManifest::from_frontmatter(stem, &manifest_text, file)?;
-    let mut registry = Registry::open()?;
+    let mut registry = Registry::open_for(&manifest.lock_root)?;
     let plan = resolve(&manifest, &mut registry)?;
 
     // 历史对照（信息级）：materialize_script 同口径哈希定位

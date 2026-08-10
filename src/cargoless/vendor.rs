@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use semver::Version;
 
-use super::manifest::{DepKind, DepSource, FeatureValue, PackageManifest};
+use super::manifest::{DepKind, DepSource, FeatureValue, PackageManifest, RegistryReference};
 use super::registry::{IndexDep, IndexEntry, IndexVersion};
 use super::resolve::PkgSource;
 
@@ -40,17 +40,21 @@ impl VendorDir {
     }
 
     /// 一个目录的 manifest → 单版本 IndexVersion（版本读 manifest 自报）。
-    fn entry_from_dir(dir: &Path, what: &str) -> Result<IndexVersion, String> {
+    pub(crate) fn entry_from_dir(dir: &Path, what: &str) -> Result<IndexVersion, String> {
         let m = PackageManifest::read_dir(dir).map_err(|e| {
             format!(
                 "vendor 源 {what}（{}）manifest 解析失败: {e}",
                 dir.display()
             )
         })?;
+        Self::entry_from_manifest(&m)
+    }
+
+    pub(crate) fn entry_from_manifest(m: &PackageManifest) -> Result<IndexVersion, String> {
         let mut deps = Vec::new();
         for d in &m.deps {
             let req = match &d.source {
-                DepSource::Registry(req) => req.clone(),
+                DepSource::Registry(req, _) => req.clone(),
                 DepSource::Git(spec) => spec.version.clone(),
                 // override 目录的 path 依赖：见文件头注（lock 钉版，req 恒配）
                 DepSource::Path(_) => semver::VersionReq::STAR,
@@ -68,6 +72,10 @@ impl VendorDir {
                     DepKind::Dev => Some("dev".to_string()),
                 },
                 package: (d.package != d.key).then(|| d.package.clone()),
+                registry: match &d.source {
+                    DepSource::Registry(_, RegistryReference::Index(index)) => Some(index.clone()),
+                    _ => None,
+                },
             });
         }
         let features = m
@@ -125,7 +133,11 @@ impl VendorDir {
 }
 
 impl PkgSource for VendorDir {
-    fn index_entry(&mut self, name: &str) -> Result<IndexEntry, String> {
+    fn registry_source(&mut self, _reference: &RegistryReference) -> Result<String, String> {
+        Ok("registry+vendor".to_string())
+    }
+
+    fn index_entry(&mut self, _source: &str, name: &str) -> Result<IndexEntry, String> {
         if let Some(hit) = self.cache.get(name) {
             return Ok(hit.clone());
         }
@@ -162,6 +174,7 @@ impl PkgSource for VendorDir {
 
     fn ensure_source(
         &mut self,
+        _source: &str,
         name: &str,
         version: &Version,
         _cksum: Option<&str>,
@@ -253,7 +266,7 @@ mod tests {
         );
 
         let mut src = VendorDir::new(vec![dir_a.clone(), dir_b.clone()], BTreeMap::new());
-        let vs = src.index_entry("foo").unwrap();
+        let vs = src.index_entry("registry+vendor", "foo").unwrap();
         assert_eq!(
             vs.iter().map(|v| v.version.to_string()).collect::<Vec<_>>(),
             vec!["1.0.0", "1.2.3"]
@@ -284,12 +297,22 @@ mod tests {
 
         // ensure_source：直返目录；缺版响亮
         let got = src
-            .ensure_source("foo", &Version::parse("1.2.3").unwrap(), None)
+            .ensure_source(
+                "registry+vendor",
+                "foo",
+                &Version::parse("1.2.3").unwrap(),
+                None,
+            )
             .unwrap();
         assert_eq!(got, dir_a.join("foo-1.2.3"));
-        let miss = src.ensure_source("foo", &Version::parse("9.9.9").unwrap(), None);
+        let miss = src.ensure_source(
+            "registry+vendor",
+            "foo",
+            &Version::parse("9.9.9").unwrap(),
+            None,
+        );
         assert!(miss.is_err(), "缺版必须响亮: {miss:?}");
-        let nope = src.index_entry("nonexistent");
+        let nope = src.index_entry("registry+vendor", "nonexistent");
         assert!(nope.is_err(), "缺包必须响亮: {nope:?}");
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -313,7 +336,9 @@ mod tests {
         let mut overrides = BTreeMap::new();
         overrides.insert("rustc-std-workspace-core".to_string(), ovl.clone());
         let mut src = VendorDir::new(vec![vend], overrides);
-        let vs = src.index_entry("rustc-std-workspace-core").unwrap();
+        let vs = src
+            .index_entry("registry+vendor", "rustc-std-workspace-core")
+            .unwrap();
         assert_eq!(vs.len(), 1);
         assert_eq!(vs[0].version.to_string(), "1.99.0");
         // path 依赖 → req *（lock 钉版，范围匹配恒配）
@@ -328,6 +353,7 @@ mod tests {
         // ensure_source 直返 override 目录（不问版本——patch 语义唯一身）
         let got = src
             .ensure_source(
+                "registry+vendor",
                 "rustc-std-workspace-core",
                 &Version::parse("1.99.0").unwrap(),
                 None,

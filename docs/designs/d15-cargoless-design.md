@@ -41,9 +41,10 @@ P1 的闭合过程把 cargo 的解析语义逐条实证出来（每条都有对�
      与 lock v3/v4 均按固定 Cargo 实证实现，见 decision-history §7.36。
    - req 遇本仓钉版未知的 semver 新 op 时退回 `Ranges::from_req`
      （pre 会丢，代码内响亮记账）。
-   - alt registry / source replacement 与 resolver 1（P5，响亮拒绝记名）；
-     resolver 2/3 常见 workspace 与 Git 依赖已补齐，见
-     decision-history §7.35/§7.36/§7.38。
+   - resolver 2/3 常见 workspace、Git、替代 registry、registry/local/directory
+     source replacement、patch/replace 与 pack self 已补齐，见 decision-history
+     §7.35/§7.36/§7.38-§7.41；resolver 1、Git source replacement 等剩余边界
+     继续响亮拒绝。
 
 
 > 状态：2026-07-23 调研定稿（四决策点当日裁定）；**P1 已收口（2026-07-27，
@@ -53,8 +54,9 @@ P1 的闭合过程把 cargo 的解析语义逐条实证出来（每条都有对�
 > decision-history §7.30）；P4 已收口（2026-07-29，sysroot 自管 + 默认
 > 翻转 self + compat 双轨定案，decision-history §7.31）**；resolver 2/3
 > 常见 workspace、rust-version-aware 选择与 Git 依赖已于 2026-08-08 至
-> 08-10 补齐（§7.35/§7.36/§7.38）。P5 剩余复杂语义按实需逐项立项
-> （alt registry/source replacement/resolver 1，响亮拒绝在案）。Cargo compat 已于
+> 08-10 补齐（§7.35/§7.36/§7.38）。替代 registry/Cargo config、常见 source
+> replacement/patch/replace 与 pack self 也已完成（§7.39-§7.41）。P5 剩余复杂语义
+> 按实需逐项立项（resolver 1、Git source replacement 等响亮拒绝在案）。Cargo compat 已于
 > 2026-08-10 裁定长期保留，默认 self 与显式 Cargo 回退持续双轨对拍（§7.37）。
 > 立项记录：[open-issues.md D15](../open-issues.md)；动机源头：decision-history §7.22
 > （C4 两轮绕行被否——"吃 cargo 产物就得绕"的处境要制度性消除）。

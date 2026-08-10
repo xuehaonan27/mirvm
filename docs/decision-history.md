@@ -1756,8 +1756,9 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   中但当前不可达的包误报。
 - **lock 版本**：Cargo 对最低 Rust 版本不高于 1.82 的项目写 lock v3，1.83 起写 v4；
   serializer 改为忠实写模型版本，不再把 v3 错写成 v4。真实 `home = "0.5"` workspace
-  探针中 Cargo 与 self 同选 0.5.9，self lock 只与 Cargo 相差生成器注释，并被 Cargo
-  `--locked --offline` 接受。
+  探针中 Cargo 与 self 同选 0.5.9；当时 self lock 只与 Cargo 相差生成器注释，并被
+  Cargo `--locked --offline` 接受。§7.40 为来源合同对拍进一步统一生成器头，当前新
+  lock 已逐字节一致。
 - **合同升级**：workspace 夹具改为 resolver 3，并让全部成员继承
   `workspace.package.rust-version = "1.85"`；原有 27 项结果/机制合同无需新增 harness
   即可判断，仍为 **27/27**。resolver 2 回归、单包合同和 lock 双向验收继续保留。
@@ -1804,6 +1805,56 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   在线/离线均输出 `17 19`，其 lock 被固定 Cargo `--locked` 接受。cargoless Rust 测试
   **105/105**，全量 Rust 测试 **193/193**，隔离可写 Cargo home 的 release fast
   **12/12**。下一批按计划转向 alt registry 与 Cargo 配置合并。
+
+### 7.39 2026-08-10：P5 第三批——替代 registry 与 Cargo 配置合同闭合
+
+- **裁判不漂移**：当前合同固定
+  `cargo 1.98.0-nightly (a335d47ff 2026-06-26)`；新 Cargo 只做差异观察，差异解释并
+  更新合同后才能升级裁判。Cargo config 按 `$CARGO_HOME`、项目祖先从浅到深、
+  `include` 先于包含文件、同目录 extensionless `config` 优先及环境变量覆盖合并。
+  只建模 resolver、registries、registry credential、source replacement 所需键，不把
+  “依赖来源够用”冒充完整 Cargo config。
+- **来源和认证**：registry 身份进入解析节点、lock 与自有 store；支持 sparse HTTP 与
+  Git registry index。认证复用 token/credentials，并实现 `cargo:token`、
+  `cargo:token-from-stdout`、credential alias 和 Cargo credential protocol v1；外部
+  provider 只接收 `--cargo-plugin`，配置参数放协议 JSON 的 `args`，不另设 mirvm 名单。
+- **验收**：本地认证 sparse registry 同时由固定 Cargo 和 self 首次获取；self fresh
+  lock 与 Cargo 逐字节一致，被 Cargo `--locked --offline` 接受；暖缓存离线复跑成功，
+  execve 审计为零 Cargo。认证日志同时钉住 registry 名、provider argv 与协议参数。
+
+### 7.40 2026-08-10：P5 第四批——source replacement、patch 与 replace 闭合
+
+- **替换链**：逻辑 lock 来源与实际取包后端分开。支持 registry 镜像、Cargo
+  local-registry 和 vendor directory，replacement 可连成链但形成环或引用不存在来源时
+  直接报错；directory 的 package 与逐文件 checksum 均校验，源码篡改不能进入构建。
+- **求解语义**：registry 目标上的 path/Git/registry `[patch]` 作为版本候选参与
+  PubGrub 求解，而不是求解后偷换源码；直接依赖和传递依赖共同选择补丁，未被约束选中的
+  版本写 Cargo `[[patch.unused]]` 且不进入构建图。`[replace]` 按精确名称和版本处理，
+  lock 保留原 registry package 行及 `replace` 指针，再记录真实替换 package。
+- **验收**：新增标准来源合同 **30/30**，覆盖 alternate registry、三类 replacement、
+  direct/transitive/unused patch、replace、替换环、离线复跑、篡改拒绝和 execve 零
+  Cargo。六类 self fresh lock 与固定 Cargo 逐字节相同，并全部通过 Cargo
+  `--locked --offline`。Git source replacement 与以 Git URL 为目标的 patch 未纳入本批
+  合同，仍是明确边界。
+
+### 7.41 2026-08-10：P5 第五批——pack 缺省 cargoless，Cargo 回退长期保留
+
+- **默认路径**：项目和 frontmatter 脚本的 `mirvm pack` 缺省调用 cargoless driver；
+  run/test/pack 因而共享 manifest、依赖图、lock、build.rs、proc-macro、native library
+  和编译调度。最终根 rustc 会话只在落 `.mirvm` 包的回调处分流，不复制依赖机制。
+- **双轨合同**：`MIRVM_DEPS=cargo` 仍显式进入原 Cargo runner，继续承担用户回退和行为
+  裁判；非法值直接拒绝，self 失败不会静默转 Cargo。pack 合同 **6/6**：默认生成包且
+  execve 零 Cargo，两轨产物都能在全新 `MIRVM_HOME` 运行，Cargo 轨由进程审计证明确实
+  启动固定 Cargo。
+- **伴生正确性修复**：空 home 验收暴露 rust-src workspace 使用 resolver 1。顶层
+  resolver 1 仍因 feature 统一语义未实现而拒绝；但路径依赖只需按其 workspace 物化包
+  元数据，不能把依赖所在 workspace 的 resolver 当成根 resolver。读取入口现已分开，
+  全新 home 的真实 sysroot 重建并运行 `fresh-sysroot-ok` 成功。
+- **总回归**：Rust 格式、严格 Clippy 与单元测试全绿（Rust 测试 **199/199**）；
+  `tests/run.sh fast` **12/12**，其中 workspace 27/27、Git 9/9、来源 30/30、pack
+  6/6、harness 自检 16/16。该档不运行性能基线。
+- **下一步**：按用户裁定不恢复、不运行性能基线；先做 P2 总 corpus 验收，据结果更新
+  剩余 P5 分类，再评审 D17 余项。
 
 ## 8. 尚未兑现或需要重新验证的架构承诺
 

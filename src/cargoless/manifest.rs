@@ -118,12 +118,21 @@ pub fn current_rust_version() -> Result<semver::Version, String> {
 /// 依赖来源。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DepSource {
-    /// crates.io（或读穿的本地缓存）：semver 需求。
-    Registry(semver::VersionReq),
+    /// registry 依赖：semver 需求与 manifest 中指定的仓库。
+    Registry(semver::VersionReq, RegistryReference),
     /// 本地路径依赖（已绝对化）。
     Path(PathBuf),
     /// Git 仓库依赖；可变引用会在获取阶段解析成精确 commit，lock 只记录精确结果。
     Git(GitSpec),
+}
+
+/// Manifest 中的 registry 写法。名称和显式 index 到依赖求解开始时才通过
+/// Cargo config 归约成 lock/source 使用的稳定 URL。
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RegistryReference {
+    CratesIo,
+    Named(String),
+    Index(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -193,6 +202,20 @@ pub struct DepDecl {
     pub kind: DepKind,
     /// 来自 `target.'cfg(...)'` 表时的 cfg 表达式（普通表 = None）。
     pub platform_cfg: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PatchDecl {
+    pub registry: RegistryReference,
+    pub dependency: DepDecl,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReplaceDecl {
+    pub package: String,
+    pub version: semver::Version,
+    pub source: Option<String>,
+    pub dependency: DepDecl,
 }
 
 impl DepDecl {
@@ -317,6 +340,9 @@ pub struct PackageManifest {
     pub lock_root: PathBuf,
     pub targets: Vec<Target>,
     pub deps: Vec<DepDecl>,
+    /// 只有顶层 package/workspace 根的覆盖生效；workspace 发现层会把根值物化给成员。
+    pub patches: Vec<PatchDecl>,
+    pub replacements: Vec<ReplaceDecl>,
     pub features: BTreeMap<String, Vec<FeatureValue>>,
     /// CLI 对这个测试根显式请求的 feature；依赖边的 feature 仍由 resolver 传播。
     pub requested_features: BTreeSet<String>,
@@ -498,9 +524,6 @@ impl PackageManifest {
     pub fn parse(text: &str, root: &Path) -> Result<Self, MErr> {
         let raw: RawManifest =
             toml::from_str(text).map_err(|e| format!("Cargo.toml 解析失败: {e}"))?;
-        if raw.patch.is_some() || raw.replace.is_some() {
-            return Err(unsupported("[patch]/[replace] source replacement"));
-        }
         let rustc_lint_flags = parse_lints(raw.lints.as_ref())?;
         if raw.package.is_none() && raw.workspace.is_some() {
             return Err(unsupported("virtual manifest（[workspace] 无 [package]）"));
@@ -646,6 +669,8 @@ impl PackageManifest {
                 &mut deps,
             )?;
         }
+        let patches = parse_patches(raw.patch.as_ref(), root)?;
+        let replacements = parse_replacements(raw.replace.as_ref(), root)?;
 
         let features = raw
             .features
@@ -703,6 +728,8 @@ impl PackageManifest {
             lock_root: root.to_path_buf(),
             targets,
             deps,
+            patches,
+            replacements,
             features,
             requested_features: BTreeSet::new(),
             dependency_features: BTreeMap::new(),
@@ -962,6 +989,102 @@ pub fn pkg_env_map(
 
 // ---------- 依赖表 ----------
 
+fn parse_patches(value: Option<&toml::Value>, root: &Path) -> Result<Vec<PatchDecl>, MErr> {
+    let Some(registries) = value else {
+        return Ok(Vec::new());
+    };
+    let registries = registries
+        .as_table()
+        .ok_or_else(|| "[patch] 必须是 registry 表".to_string())?;
+    let mut out = Vec::new();
+    for (registry, entries) in registries {
+        let entries = entries
+            .as_table()
+            .ok_or_else(|| format!("[patch.{registry}] 必须是依赖表"))?;
+        let table = Some(
+            entries
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        );
+        let mut dependencies = Vec::new();
+        parse_dep_table(&table, DepKind::Normal, root, None, &mut dependencies)?;
+        let registry = if registry == "crates-io" {
+            RegistryReference::CratesIo
+        } else if registry.contains("://") || registry.starts_with("sparse+") {
+            RegistryReference::Index(registry.clone())
+        } else {
+            RegistryReference::Named(registry.clone())
+        };
+        for dependency in dependencies {
+            if matches!(
+                dependency.source,
+                DepSource::Registry(_, RegistryReference::CratesIo)
+            ) {
+                return Err(format!(
+                    "[patch] 包 {} 没有声明 path/git/其他 registry 来源",
+                    dependency.package
+                ));
+            }
+            out.push(PatchDecl {
+                registry: registry.clone(),
+                dependency,
+            });
+        }
+    }
+    Ok(out)
+}
+
+fn parse_replacements(value: Option<&toml::Value>, root: &Path) -> Result<Vec<ReplaceDecl>, MErr> {
+    let Some(entries) = value else {
+        return Ok(Vec::new());
+    };
+    let entries = entries
+        .as_table()
+        .ok_or_else(|| "[replace] 必须是 package ID 表".to_string())?;
+    let mut out = Vec::new();
+    for (package_id, replacement) in entries {
+        let (source, package, version) = parse_replace_package_id(package_id)?;
+        let table = Some(BTreeMap::from([(package.clone(), replacement.clone())]));
+        let mut parsed = Vec::new();
+        parse_dep_table(&table, DepKind::Normal, root, None, &mut parsed)?;
+        let dependency = parsed.pop().unwrap();
+        if matches!(
+            dependency.source,
+            DepSource::Registry(_, RegistryReference::CratesIo)
+        ) {
+            return Err(format!(
+                "[replace] `{package_id}` 没有声明 path/git/其他 registry 来源"
+            ));
+        }
+        out.push(ReplaceDecl {
+            package,
+            version,
+            source,
+            dependency,
+        });
+    }
+    Ok(out)
+}
+
+fn parse_replace_package_id(
+    package_id: &str,
+) -> Result<(Option<String>, String, semver::Version), MErr> {
+    let (head, version) = package_id
+        .rsplit_once(':')
+        .ok_or_else(|| format!("[replace] package ID `{package_id}` 缺 `:version`"))?;
+    let version = semver::Version::parse(version)
+        .map_err(|error| format!("[replace] package ID `{package_id}` 版本非法: {error}"))?;
+    let (source, package) = match head.rsplit_once('#') {
+        Some((source, package)) => (Some(source.to_string()), package.to_string()),
+        None => (None, head.to_string()),
+    };
+    if package.is_empty() {
+        return Err(format!("[replace] package ID `{package_id}` 包名为空"));
+    }
+    Ok((source, package, version))
+}
+
 fn parse_dep_table(
     table: &Option<BTreeMap<String, toml::Value>>,
     kind: DepKind,
@@ -980,6 +1103,7 @@ fn parse_dep_table(
         let mut branch: Option<String> = None;
         let mut tag: Option<String> = None;
         let mut rev: Option<String> = None;
+        let mut registry: Option<RegistryReference> = None;
         match val {
             toml::Value::String(v) => req_str = v.clone(),
             toml::Value::Table(t) => {
@@ -1011,10 +1135,15 @@ fn parse_dep_table(
                         "branch" => branch = Some(v.as_str().ok_or("branch 非字符串")?.to_string()),
                         "tag" => tag = Some(v.as_str().ok_or("tag 非字符串")?.to_string()),
                         "rev" => rev = Some(v.as_str().ok_or("rev 非字符串")?.to_string()),
-                        "registry" | "registry-index" => {
-                            return Err(unsupported(format!(
-                                "依赖 {key} 的 {k} 源（私有 registry 归 P5）"
-                            )));
+                        "registry" => {
+                            registry = Some(RegistryReference::Named(
+                                v.as_str().ok_or("registry 非字符串")?.to_string(),
+                            ));
+                        }
+                        "registry-index" => {
+                            registry = Some(RegistryReference::Index(
+                                v.as_str().ok_or("registry-index 非字符串")?.to_string(),
+                            ));
                         }
                         // 已知无害键：public/private（cargo 新键）、artifact、lib、
                         // workspace（workspace.dependencies 继承——P5，见到响亮拒绝）
@@ -1049,6 +1178,9 @@ fn parse_dep_table(
         if git_url.is_some() && source.is_some() {
             return Err(format!("依赖 {key} 不能同时指定 git 与 path"));
         }
+        if registry.is_some() && (git_url.is_some() || source.is_some()) {
+            return Err(format!("依赖 {key} 不能同时指定 registry 与 git/path"));
+        }
         let source = match (source, git_url) {
             (Some(path), None) => path,
             (None, Some(url)) => {
@@ -1075,7 +1207,9 @@ fn parse_dep_table(
                     version: req,
                 })
             }
-            (None, None) => DepSource::Registry(req),
+            (None, None) => {
+                DepSource::Registry(req, registry.unwrap_or(RegistryReference::CratesIo))
+            }
             (Some(_), Some(_)) => unreachable!(),
         };
         out.push(DepDecl {
@@ -1566,7 +1700,10 @@ cc = "1"
         assert_eq!(get("itertools").package, "itertools");
         assert_eq!(
             get("itertools").source,
-            DepSource::Registry(semver::VersionReq::parse("0.14").unwrap())
+            DepSource::Registry(
+                semver::VersionReq::parse("0.14").unwrap(),
+                RegistryReference::CratesIo,
+            )
         );
         assert_eq!(get("renamed").package, "real-crate");
         assert!(get("renamed").optional);
@@ -1648,13 +1785,34 @@ cc = "1"
         )
         .unwrap_err();
         assert!(err.contains("P5"), "{err}");
+    }
 
-        let err = PackageManifest::parse(
-            "[package]\nname='d'\nversion='0.1.0'\n[patch.crates-io]\nfoo = { path = '../foo' }\n",
+    #[test]
+    fn parses_patch_and_replace_sources() {
+        let manifest = PackageManifest::parse(
+            "[package]\nname='d'\nversion='0.1.0'\n\
+             [patch.crates-io]\nfoo = { path = '../foo' }\n\
+             [replace]\n'bar:1.2.3' = { git = 'https://example.test/bar', rev = 'abc' }\n",
             Path::new("/tmp/x"),
         )
-        .unwrap_err();
-        assert!(err.contains("[patch]/[replace]"), "{err}");
+        .unwrap();
+        assert_eq!(manifest.patches.len(), 1);
+        assert_eq!(manifest.patches[0].registry, RegistryReference::CratesIo);
+        assert_eq!(manifest.patches[0].dependency.package, "foo");
+        assert_eq!(
+            manifest.patches[0].dependency.source,
+            DepSource::Path(PathBuf::from("/tmp/x/../foo"))
+        );
+        assert_eq!(manifest.replacements.len(), 1);
+        assert_eq!(manifest.replacements[0].package, "bar");
+        assert_eq!(
+            manifest.replacements[0].version,
+            semver::Version::new(1, 2, 3)
+        );
+        assert!(matches!(
+            manifest.replacements[0].dependency.source,
+            DepSource::Git(_)
+        ));
     }
 
     #[test]

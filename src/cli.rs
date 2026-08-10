@@ -60,9 +60,9 @@ ENV:
                       （用户回退 + 行为对拍）；**缺省/=self 走零 cargo 自有
                       调度**（D15 cargoless driver，P4 默认翻转：依赖解析/编译
                       调度/build.rs/proc-macro/rustflags/rerun-if 增量/并行调度
-                      全生命周期；mirvm test 已支持 resolver=2 常见 workspace；
-                      剩余拒绝面 = P5 边界：alt registry/source
-                      replacement/resolver 1 等，响亮拒绝点名）
+                      全生命周期；mirvm test 已支持 resolver=2/3 常见 workspace，
+                      替代 registry、常见 source replacement/patch/replace 与
+                      pack 共用该路径；resolver 1 等边界响亮拒绝）
     MIRVM_CLESS_JOBS  =N 时 cargoless 编译调度并发度（缺省 = 核数；=1 退化为
                       拓扑序串行，对拍调试用）
     MIRVM_TIMING      =1 时向 stderr 输出相位账本（frontend/lower/engine/total）
@@ -182,8 +182,8 @@ fn test_main(argv: impl Iterator<Item = String>) -> ExitCode {
 
 /// `mirvm pack <target> [-o out.mirvm]`（mode B 片②，designs/modeb-mirvmar-design.md）：
 /// cargo 项目（目录/Cargo.toml）、frontmatter 脚本、纯单文件 → .mirvm 包。
-/// cargo 两形态经 MIRVM_PACK 环境传入 runner；强制全量冷路径保包自包含
-/// （MIRVM_NO_BASE_IMAGE/MIRVM_NO_DEPS_IMAGE 同进 env）。
+/// 项目/frontmatter 缺省走 cargoless；`MIRVM_DEPS=cargo` 经 MIRVM_PACK
+/// 传入 runner。两条路径都强制全量冷路径，保证包自包含。
 fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
     let mut input = None;
     let mut out: Option<std::path::PathBuf> = None;
@@ -225,7 +225,16 @@ fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
     let out = out.unwrap_or_else(default_out);
     let out_abs = std::path::absolute(&out).unwrap_or(out);
 
-    // cargo 两形态（目录/Cargo.toml、frontmatter 脚本）：env 传入 runner
+    let deps_self = match std::env::var("MIRVM_DEPS").as_deref() {
+        Err(_) | Ok("self") => true,
+        Ok("cargo") => false,
+        Ok(other) => {
+            eprintln!("mirvm: MIRVM_DEPS only accepts `cargo` or `self` (got `{other}`)");
+            exit(2);
+        }
+    };
+
+    // 项目形态：缺省走自有调度；Cargo 轨只在显式回退时进入 runner。
     let is_cargo_dir =
         input_path.is_dir() || input_path.file_name().is_some_and(|f| f == "Cargo.toml");
     if is_cargo_dir {
@@ -234,12 +243,11 @@ fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
         } else {
             input_path.parent().unwrap_or(Path::new("."))
         };
-        // SAFETY: 单线程启动相
-        unsafe {
-            std::env::set_var("MIRVM_PACK", &out_abs);
-            std::env::set_var("MIRVM_NO_BASE_IMAGE", "1");
-            std::env::set_var("MIRVM_NO_DEPS_IMAGE", "1");
+        if deps_self {
+            return crate::cargoless::driver::pack_project(dir, &out_abs);
         }
+        // SAFETY: 单线程启动相。
+        unsafe { set_cargo_pack_env(&out_abs) };
         cargo_shim::phase_cargo(dir, &[], None, false);
     }
     let src = std::fs::read_to_string(&input_path).unwrap_or_else(|e| {
@@ -247,12 +255,12 @@ fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
         exit(1);
     });
     if let Some((manifest, body)) = parse_frontmatter(&src) {
-        let dir = materialize_script(&input_path, &manifest, &body);
-        unsafe {
-            std::env::set_var("MIRVM_PACK", &out_abs);
-            std::env::set_var("MIRVM_NO_BASE_IMAGE", "1");
-            std::env::set_var("MIRVM_NO_DEPS_IMAGE", "1");
+        if deps_self {
+            return crate::cargoless::driver::pack_script(&input_path, &out_abs);
         }
+        let dir = materialize_script(&input_path, &manifest, &body);
+        // SAFETY: 单线程启动相。
+        unsafe { set_cargo_pack_env(&out_abs) };
         cargo_shim::phase_cargo(&dir, &[], None, false);
     }
 
@@ -275,6 +283,15 @@ fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
     ];
     let program_argv = vec![input];
     pack_driver(rustc_args, program_argv, out_abs)
+}
+
+unsafe fn set_cargo_pack_env(out: &Path) {
+    // SAFETY: caller 保证仍处于 CLI 单线程启动相。
+    unsafe {
+        std::env::set_var("MIRVM_PACK", out);
+        std::env::set_var("MIRVM_NO_BASE_IMAGE", "1");
+        std::env::set_var("MIRVM_NO_DEPS_IMAGE", "1");
+    }
 }
 
 /// `mirvm cache status|purge …`：本地仓库（$HOME/.mirvm，MIRVM_HOME 可改址）管理。
@@ -410,8 +427,7 @@ fn deps_main(args: impl Iterator<Item = String>) -> ExitCode {
                 }
             }
             Err(e) => {
-                // P5 范畴的响亮拒绝（alt registry/source replacement 等）
-                // 是事先明说的边界，不算解析失败
+                // 仍明确归入 P5 的响亮拒绝是事先明说的边界，不算普通解析失败。
                 if e.contains("P5") {
                     println!("P5   {t}: {e}");
                 } else {
@@ -637,7 +653,7 @@ fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
 
 /// mode B 片②：pack 驱动——run_driver 冷半的同构（空 image 栈、无 L2 查询），
 /// 岔口在 callbacks.pack_out：after_analysis 末尾落 .mirvm 包代替执行。
-fn pack_driver(
+pub(crate) fn pack_driver(
     rustc_args: Vec<String>,
     program_argv: Vec<String>,
     out: std::path::PathBuf,

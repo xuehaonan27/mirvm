@@ -36,7 +36,8 @@
 |---|:---:|:---:|:---:|
 | Rust 格式、clippy、单元测试 | 是 | 是 | 是 |
 | 程序、Cargo、cargoless 三类差分 | 是 | 是 | 是 |
-| cargoless test/workspace/Git 合同 | 是 | 是 | 是 |
+| cargoless test/workspace/Git/来源合同 | 是 | 是 | 是 |
+| pack 默认 self 与 Cargo 回退合同 | 是 | 是 | 是 |
 | build.rs 增量合同 | 是 | 是 | 是 |
 | 测试框架防假绿回归 | 是 | 是 | 是 |
 | corpus smoke 探索跑批 | 否 | 是 | 由严格 corpus 覆盖 |
@@ -63,6 +64,8 @@ MIRVM_DEPS=cargo ./tests/run.sh gate
 | `contracts.cargoless-test` | 固定 Cargo 的 `cargo test` 选择、输出和退出码是权威 | `cless_test_contract/` |
 | `contracts.cargoless-workspace` | 固定 Cargo 的工作区、包、feature 和失败传播是权威 | `cless_workspace_contract/` |
 | `contracts.cargoless-git` | 固定 Cargo lock 格式加本地 Git 仓库的提交内容是权威 | 运行时生成 |
+| `contracts.cargoless-sources` | 固定 Cargo 裁判配置合并、alternate registry、credential provider、source replacement、patch/replace 与 lock | 运行时生成的本地 sparse/local/directory registry |
+| `contracts.pack` | 默认 pack 必须零 Cargo；显式回退必须进入固定 Cargo，两者产物均可脱离构建缓存运行 | 运行时生成的 path 依赖项目 |
 | `contracts.build-script-rerun` | build.rs 的输入变化和 Cargo 指令决定是否重跑 | `cless_br/`、`cless_libc.rs` |
 | `contracts.deps-image` | 固定输出、缓存文件数量和既定时间上限 | `a2_ws/` 的临时副本 |
 | `corpus.run` | 真实依赖探索跑批；检查退出码，XFAIL 还锁定诊断 | `cases.manifest`、`corpus/` |

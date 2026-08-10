@@ -124,8 +124,8 @@ mirvm run <x.mirvm> [-- <guest args>]
   （mode B 立项已响，冻结评审在片③后）;
 - 包运行期仍要求**固定基址可用**（与 L2 同契约；被占 = 拒绝非降级）;
 - proc-macro/build.rs 只在 **pack 期**真执行（D9 §5 硬边界原样）;
-- D15（砍 cargo）与本片正交：pack 期仍用 cargo 驱动 dep 构建，运行期
-  不需要——D15 到来时换的是 pack 期的构建驱动，包格式与 run 不变;
+- D15 后续施工已完成这里预留的替换：pack 期缺省使用 cargoless 自有依赖驱动，
+  `MIRVM_DEPS=cargo` 显式保留 Cargo 回退；包格式与 run 路径不因此改变;
 - fat artifact 多 target：节表 tag 预留（`MODULE@<triple>` 形态），v1 评。
 
 ## 9. 实现位置
