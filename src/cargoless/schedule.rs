@@ -383,11 +383,15 @@ pub fn fingerprints(
     Ok(fps.into_iter().map(|f| f.expect("全序已填")).collect())
 }
 
-/// 源 stamp：registry 单元 = 字面 "registry"（源按 cksum 不可变不盖戳——.crate
-/// 解包树的 mtime 是解包时刻，盖了只会制造无谓重建；版本号已覆盖内容）；
+/// 源 stamp：Git 单元 = lock 中的精确 source id（含 commit）；registry 单元 =
+/// 字面 "registry"（源按 cksum 不可变不盖戳——.crate 解包树的 mtime 是解包
+/// 时刻，盖了只会制造无谓重建；版本号已覆盖内容）；
 /// path 单元 = 递归遍历 source_dir（排除 target/ 与 .git/）全部文件的
 /// (相对路径, len, mtime_ns) 排序后折叠。根包同规则（root_fingerprint 复用）。
 fn source_stamp(u: &Unit) -> Result<String, String> {
+    if let Some(source_id) = &u.immutable_source_id {
+        return Ok(source_id.clone());
+    }
     source_stamp_dir(u.from_registry, &u.source_dir, &u.package)
 }
 
@@ -1292,6 +1296,7 @@ mod tests {
             version: Version::parse(version).unwrap(),
             source_dir: PathBuf::from(format!("/tmp/{name}")),
             from_registry,
+            immutable_source_id: None,
             class: UnitClass::Normal,
             features: features
                 .iter()
@@ -1530,6 +1535,27 @@ mod tests {
         };
         let fps3 = fingerprints(&plan, &relaxed, "stamp0", &[]).unwrap();
         assert_ne!(fps0[0], fps3[0], "profile 三员进 fp");
+    }
+
+    #[test]
+    fn fingerprint_distinguishes_git_commits() {
+        let mut first = diamond_plan();
+        first.units[0].immutable_source_id = Some(
+            "git+https://example.invalid/repo?branch=main#1111111111111111111111111111111111111111"
+                .to_string(),
+        );
+        let mut second = first.clone();
+        second.units[0].immutable_source_id = Some(
+            "git+https://example.invalid/repo?branch=main#2222222222222222222222222222222222222222"
+                .to_string(),
+        );
+        let first_fps = fingerprints(&first, &ProfileFlags::default(), "stamp", &[]).unwrap();
+        let second_fps = fingerprints(&second, &ProfileFlags::default(), "stamp", &[]).unwrap();
+        assert_ne!(first_fps[0], second_fps[0], "Git commit 必须进入自身指纹");
+        assert_ne!(
+            first_fps[1], second_fps[1],
+            "Git commit 变化必须沿依赖边传播"
+        );
     }
 
     #[test]

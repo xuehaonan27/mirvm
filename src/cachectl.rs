@@ -5,6 +5,7 @@
 //! - sysroot-<host>：MIR-rich std（内容键控稳定；仅 --sysroot 清）
 //! - scripts/：frontmatter 物化项目 + 两套 cargo target（不打包世界的本地依赖库 +
 //!   B 维 native 对拍构建；最大件；--scripts/--all 清）
+//! - registry/：cargoless crates.io 与 Git source/checkouts（--all 清）
 //! - deps/ base/ ir/：降低加速器，文件名 = fnv(build_id, …) 不透明哈希——
 //!   陈代判定读文件首字段 build_id（三族文件结构首字段均为它，postcard
 //!   varint 编码，peek 零解码无副作用；module 整解码会触发冻结区定基 mmap，禁用）
@@ -45,6 +46,7 @@ fn families() -> Vec<Family> {
         (format!("sysroot-{host}"), ""),
         ("scripts".into(), ""),
         ("target".into(), ""),
+        ("registry".into(), ""),
         ("deps".into(), "img"),
         ("base".into(), "img"),
         ("ir".into(), "bin"),
@@ -307,6 +309,9 @@ pub fn purge(root: &Path, plan: Purge) -> String {
         } else if name == "target" && whole(name, plan.target) {
             freed += rm_dir(&dir, "target cache all cleared", dry, &mut out);
             acted += 1;
+        } else if name == "registry" && plan.all {
+            freed += rm_dir(&dir, "registry/Git caches all cleared", dry, &mut out);
+            acted += 1;
         } else if name.starts_with("sysroot-") && plan.all && plan.sysroot {
             freed += rm_dir(
                 &dir,
@@ -432,6 +437,8 @@ mod tests {
         std::fs::write(sysroot.join("lib/x.rlib"), b"x").unwrap();
         fake_entry(&root.join("ir"), "a.bin", "0000000000000000");
         std::fs::create_dir_all(root.join("scripts/h/target")).unwrap();
+        std::fs::create_dir_all(root.join("registry/git/db")).unwrap();
+        std::fs::write(root.join("registry/git/db/object"), b"git").unwrap();
         purge(
             &root,
             Purge {
@@ -442,6 +449,7 @@ mod tests {
         assert!(sysroot.exists());
         assert!(!root.join("scripts").exists());
         assert!(!root.join("ir").exists());
+        assert!(!root.join("registry").exists());
         purge(
             &root,
             Purge {

@@ -25,7 +25,8 @@ use std::path::{Path, PathBuf};
 
 use semver::{Version, VersionReq};
 
-use super::manifest::parse_rust_version;
+use super::git::GitStore;
+use super::manifest::{GitSpec, PackageManifest, parse_rust_version};
 
 const INDEX_URL: &str = "https://index.crates.io/";
 const DL_URL: &str = "https://static.crates.io/crates/";
@@ -73,6 +74,7 @@ pub struct Registry {
     root: PathBuf,
     offline: bool,
     agent: ureq::Agent,
+    git: GitStore,
 }
 
 impl Registry {
@@ -93,10 +95,20 @@ impl Registry {
             .timeout_global(Some(std::time::Duration::from_secs(60)))
             .build();
         Ok(Self {
+            git: GitStore::open(root.join("git"), offline)?,
             root,
             offline,
             agent: config.into(),
         })
+    }
+
+    pub fn ensure_git_package(
+        &self,
+        spec: &GitSpec,
+        package: &str,
+        locked_source: Option<&str>,
+    ) -> Result<PackageManifest, RErr> {
+        self.git.ensure_package(spec, package, locked_source)
     }
 
     // ---------- sparse index ----------

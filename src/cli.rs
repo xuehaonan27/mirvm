@@ -56,12 +56,12 @@ ENV:
     MIRVM_JIT_STATS   =1 时进程退出经 atexit 打 JIT 助手频度统计（诊断用）
     MIRVM_CARGO_LOCKED 置位时 frontmatter/脚本项目按 --locked 构建（依赖锁定；
                       未置位 = clean 环境可重解析，见 open-issues G7）
-    MIRVM_DEPS        =cargo 时项目/脚本走 cargo 三阶段 compat 轨（双轨各自
-                      完整，删除条件另行评审）；**缺省/=self 走零 cargo 自有
+    MIRVM_DEPS        =cargo 时项目/脚本走长期保留的 cargo 三阶段 compat 轨
+                      （用户回退 + 行为对拍）；**缺省/=self 走零 cargo 自有
                       调度**（D15 cargoless driver，P4 默认翻转：依赖解析/编译
                       调度/build.rs/proc-macro/rustflags/rerun-if 增量/并行调度
                       全生命周期；mirvm test 已支持 resolver=2 常见 workspace；
-                      剩余拒绝面 = P5 边界：git 源/alt registry/source
+                      剩余拒绝面 = P5 边界：alt registry/source
                       replacement/resolver 1 等，响亮拒绝点名）
     MIRVM_CLESS_JOBS  =N 时 cargoless 编译调度并发度（缺省 = 核数；=1 退化为
                       拓扑序串行，对拍调试用）
@@ -410,7 +410,7 @@ fn deps_main(args: impl Iterator<Item = String>) -> ExitCode {
                 }
             }
             Err(e) => {
-                // P5 范畴的响亮拒绝（git 源/alt registry/source replacement 等）
+                // P5 范畴的响亮拒绝（alt registry/source replacement 等）
                 // 是事先明说的边界，不算解析失败
                 if e.contains("P5") {
                     println!("P5   {t}: {e}");
@@ -501,8 +501,8 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     let input_path = PathBuf::from(&input);
 
     // D15 P4 默认翻转：缺省 = self 零 cargo 自有调度（cargoless::driver）；
-    // =cargo 显式走 cargo 三阶段 compat 轨（双轨各自完整，删除条件另行评审，
-    // 设计档 §5 P4）；其他值响亮报错
+    // =cargo 显式走长期保留的 cargo 三阶段 compat 轨（用户回退 + 行为对拍）；
+    // 两轨各自完整，其他值响亮报错
     let deps_self = match std::env::var("MIRVM_DEPS").as_deref() {
         Err(_) | Ok("self") => true,
         Ok("cargo") => false,

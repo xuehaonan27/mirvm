@@ -4,8 +4,8 @@
 //! - `[package]`（name/version/edition/autobins/default-run/links）
 //! - `[lib]` / `[[bin]]` / `[[test]]` / `[[example]]` 与 Cargo 自动发现
 //! - `[dependencies]` / `[build-dependencies]` / `[dev-dependencies]`：version req、features、
-//!   optional、default-features、path；**git / 私有 registry（registry=/git/
-//!   branch/tag/rev 键）P5 范畴，响亮拒绝**
+//!   optional、default-features、path、git（默认分支/branch/tag/rev）；私有 registry
+//!   仍属 P5，响亮拒绝
 //! - `[features]` 三形态：`"foo"`（特性或隐式可选依赖）、`"dep:foo"`（显式
 //!   依赖激活）、`"foo?/bar"`（弱激活）
 //! - `[profile.*]`：只取 debug-assertions / overflow-checks / opt-level
@@ -122,6 +122,51 @@ pub enum DepSource {
     Registry(semver::VersionReq),
     /// 本地路径依赖（已绝对化）。
     Path(PathBuf),
+    /// Git 仓库依赖；可变引用会在获取阶段解析成精确 commit，lock 只记录精确结果。
+    Git(GitSpec),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GitReference {
+    DefaultBranch,
+    Branch(String),
+    Tag(String),
+    Rev(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitSpec {
+    pub url: String,
+    pub reference: GitReference,
+    pub version: semver::VersionReq,
+}
+
+impl GitSpec {
+    /// Cargo.lock 中 `#<commit>` 之前的 source id。
+    pub fn source_id(&self) -> String {
+        let query = match &self.reference {
+            GitReference::DefaultBranch => None,
+            GitReference::Branch(value) => Some(("branch", value.as_str())),
+            GitReference::Tag(value) => Some(("tag", value.as_str())),
+            GitReference::Rev(value) => Some(("rev", value.as_str())),
+        };
+        match query {
+            Some((key, value)) => format!("git+{}?{key}={}", self.url, percent_encode(value)),
+            None => format!("git+{}", self.url),
+        }
+    }
+}
+
+fn percent_encode(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 /// 依赖种类（dev-deps 不建）。
@@ -293,6 +338,11 @@ pub struct PackageManifest {
     /// Cargo `[lints]` 归约出的 rustc 参数。先放按 priority 排序的 level 参数，
     /// 再放 `unexpected_cfgs` 的 `--check-cfg` 两槽参数。
     pub rustc_lint_flags: Vec<String>,
+    /// 非 registry 包在 Cargo.lock 中的 source。根/普通 path 为 None；Git 包为
+    /// `git+URL?...#commit`。
+    pub lock_source: Option<String>,
+    /// Git checkout 根，用于让仓库内 path 依赖继承相同 Git source。
+    pub git_checkout_root: Option<PathBuf>,
 }
 
 // ---------- serde 原料（宽松，未知键忽略，已知不支持的键后置校验）----------
@@ -665,6 +715,8 @@ impl PackageManifest {
             default_run: pkg.default_run,
             pkg_env,
             rustc_lint_flags,
+            lock_source: None,
+            git_checkout_root: None,
         })
     }
 
@@ -924,6 +976,10 @@ fn parse_dep_table(
         let mut features = Vec::new();
         let mut optional = false;
         let mut default_features = true;
+        let mut git_url: Option<String> = None;
+        let mut branch: Option<String> = None;
+        let mut tag: Option<String> = None;
+        let mut rev: Option<String> = None;
         match val {
             toml::Value::String(v) => req_str = v.clone(),
             toml::Value::Table(t) => {
@@ -951,9 +1007,13 @@ fn parse_dep_table(
                         "default-features" => {
                             default_features = v.as_bool().ok_or("default-features 非布尔")?
                         }
-                        "git" | "branch" | "tag" | "rev" | "registry" | "registry-index" => {
+                        "git" => git_url = Some(v.as_str().ok_or("git 非字符串")?.to_string()),
+                        "branch" => branch = Some(v.as_str().ok_or("branch 非字符串")?.to_string()),
+                        "tag" => tag = Some(v.as_str().ok_or("tag 非字符串")?.to_string()),
+                        "rev" => rev = Some(v.as_str().ok_or("rev 非字符串")?.to_string()),
+                        "registry" | "registry-index" => {
                             return Err(unsupported(format!(
-                                "依赖 {key} 的 {k} 源（git/私有 registry 归 P5）"
+                                "依赖 {key} 的 {k} 源（私有 registry 归 P5）"
                             )));
                         }
                         // 已知无害键：public/private（cargo 新键）、artifact、lib、
@@ -967,12 +1027,56 @@ fn parse_dep_table(
             }
             _ => return Err(format!("依赖 {key} 形态不支持（非字符串非表）")),
         }
-        let source = match source {
-            Some(p) => p,
-            None => DepSource::Registry(
-                semver::VersionReq::parse(&req_str)
-                    .map_err(|e| format!("依赖 {key} version req 非法 {req_str}: {e}"))?,
-            ),
+        let req = semver::VersionReq::parse(&req_str)
+            .map_err(|e| format!("依赖 {key} version req 非法 {req_str}: {e}"))?;
+        let selectors = [branch.is_some(), tag.is_some(), rev.is_some()]
+            .into_iter()
+            .filter(|present| *present)
+            .count();
+        if selectors > 1 {
+            return Err(format!("依赖 {key} 的 branch/tag/rev 只能指定一个"));
+        }
+        if git_url.is_none() && selectors != 0 {
+            return Err(format!("依赖 {key} 指定 branch/tag/rev 但没有 git URL"));
+        }
+        if [branch.as_deref(), tag.as_deref(), rev.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(str::is_empty)
+        {
+            return Err(format!("依赖 {key} 的 branch/tag/rev 不能为空"));
+        }
+        if git_url.is_some() && source.is_some() {
+            return Err(format!("依赖 {key} 不能同时指定 git 与 path"));
+        }
+        let source = match (source, git_url) {
+            (Some(path), None) => path,
+            (None, Some(url)) => {
+                if url.is_empty() || url.starts_with('-') {
+                    return Err(format!("依赖 {key} 的 git URL 非法：`{url}`"));
+                }
+                if url.contains('?') || url.contains('#') {
+                    return Err(format!(
+                        "依赖 {key} 的 git URL 不能自带 query/fragment；请使用 branch/tag/rev"
+                    ));
+                }
+                let reference = if let Some(value) = branch {
+                    GitReference::Branch(value)
+                } else if let Some(value) = tag {
+                    GitReference::Tag(value)
+                } else if let Some(value) = rev {
+                    GitReference::Rev(value)
+                } else {
+                    GitReference::DefaultBranch
+                };
+                DepSource::Git(GitSpec {
+                    url,
+                    reference,
+                    version: req,
+                })
+            }
+            (None, None) => DepSource::Registry(req),
+            (Some(_), Some(_)) => unreachable!(),
         };
         out.push(DepDecl {
             key: key.clone(),
@@ -1476,13 +1580,68 @@ cc = "1"
     }
 
     #[test]
-    fn rejects_git_and_workspace_inherited_deps_loudly() {
-        let err = PackageManifest::parse(
-            "[package]\nname=\"d\"\nversion=\"0.1.0\"\n[dependencies]\nfoo = { git = \"https://x\" }",
+    fn parses_git_dependencies_and_cargo_source_ids() {
+        let manifest = PackageManifest::parse(
+            "[package]\nname='d'\nversion='0.1.0'\n[dependencies]\n\
+             default = { package='a', git='https://example.test/repo', version='^1' }\n\
+             branch = { package='b', git='ssh://example.test/repo', branch='topic/one', features=['x'] }\n\
+             tag = { package='c', git='file:///tmp/repo', tag='release 1' }\n\
+             revision = { package='e', git='https://example.test/e', rev='abc123' }\n",
             Path::new("/tmp/x"),
         )
-        .unwrap_err();
-        assert!(err.contains("P5"), "{err}");
+        .unwrap();
+        let source = |key: &str| {
+            let DepSource::Git(spec) = &manifest
+                .deps
+                .iter()
+                .find(|dep| dep.key == key)
+                .unwrap()
+                .source
+            else {
+                panic!("{key} 应为 Git 依赖")
+            };
+            spec.clone()
+        };
+        let default = source("default");
+        assert_eq!(default.source_id(), "git+https://example.test/repo");
+        assert_eq!(default.version.to_string(), "^1");
+        assert_eq!(
+            source("branch").source_id(),
+            "git+ssh://example.test/repo?branch=topic%2Fone"
+        );
+        assert_eq!(
+            source("tag").source_id(),
+            "git+file:///tmp/repo?tag=release%201"
+        );
+        assert_eq!(
+            source("revision").source_id(),
+            "git+https://example.test/e?rev=abc123"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_git_and_workspace_inherited_deps_loudly() {
+        for (dependency, needle) in [
+            (
+                "foo = { git='https://x', branch='main', tag='v1' }",
+                "只能指定一个",
+            ),
+            ("foo = { branch='main' }", "没有 git URL"),
+            (
+                "foo = { git='https://x', path='../x' }",
+                "同时指定 git 与 path",
+            ),
+            ("foo = { git='https://x', rev='' }", "不能为空"),
+            ("foo = { git='--upload-pack=bad' }", "git URL 非法"),
+            ("foo = { git='https://x?a=b' }", "不能自带 query/fragment"),
+        ] {
+            let err = PackageManifest::parse(
+                &format!("[package]\nname='d'\nversion='0.1.0'\n[dependencies]\n{dependency}\n"),
+                Path::new("/tmp/x"),
+            )
+            .unwrap_err();
+            assert!(err.contains(needle), "{dependency}: {err}");
+        }
         let err = PackageManifest::parse(
             "[package]\nname=\"d\"\nversion=\"0.1.0\"\n[dependencies]\nfoo.workspace = true",
             Path::new("/tmp/x"),

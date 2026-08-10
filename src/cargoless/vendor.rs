@@ -51,6 +51,7 @@ impl VendorDir {
         for d in &m.deps {
             let req = match &d.source {
                 DepSource::Registry(req) => req.clone(),
+                DepSource::Git(spec) => spec.version.clone(),
                 // override 目录的 path 依赖：见文件头注（lock 钉版，req 恒配）
                 DepSource::Path(_) => semver::VersionReq::STAR,
             };

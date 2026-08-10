@@ -6,7 +6,7 @@
 //! 写：保留模型指定的 v3/v4 头，包行使用两者共通的 canonical 形态（自解落锁
 //! 供复现与 cargo --locked 反证，设计档 §5 P1）。
 //!
-//! P1 子集：git source 的包行见到即响亮拒绝（与 manifest.rs 同纪律）。
+//! source 支持 crates.io registry 与精确 Git commit；Git 包没有 checksum。
 
 // P1 逐切接入中：resolve/audit 后续切片接入后摘除本 allow（设计档 §5）。
 #![allow(dead_code)]
@@ -21,8 +21,15 @@ pub struct LockedPkg {
     /// `"registry+https://github.com/rust-lang/crates.io-index"`；path 包为 None。
     pub source: Option<String>,
     pub checksum: Option<String>,
-    /// (name, 可选 version 串)——lock 行的依赖引用（同一 name 多版本时消歧用）。
-    pub dependencies: Vec<(String, Option<semver::Version>)>,
+    /// lock 行的依赖引用；同名包按 version，仍重名时再按 source 消歧。
+    pub dependencies: Vec<LockedDep>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LockedDep {
+    pub name: String,
+    pub version: Option<semver::Version>,
+    pub source: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -63,11 +70,28 @@ impl Lockfile {
         for p in raw.package.unwrap_or_default() {
             if let Some(src) = &p.source
                 && !src.starts_with("registry+")
+                && !src.starts_with("git+")
             {
-                return Err(format!(
-                    "lock 包 {} 的 source 子集外（git 源归 P5，响亮拒绝）: {src}",
-                    p.name
-                ));
+                return Err(format!("lock 包 {} 的 source 子集外: {src}", p.name));
+            }
+            if p.source
+                .as_deref()
+                .is_some_and(|source| source.starts_with("git+"))
+            {
+                let source = p.source.as_deref().unwrap();
+                let precise = source.rsplit_once('#').map(|(_, precise)| precise);
+                if !precise.is_some_and(|precise| {
+                    matches!(precise.len(), 40 | 64)
+                        && precise.bytes().all(|byte| byte.is_ascii_hexdigit())
+                }) {
+                    return Err(format!(
+                        "lock Git 包 {} 的 source 缺少 40/64 位精确 commit: {source}",
+                        p.name
+                    ));
+                }
+                if p.checksum.is_some() {
+                    return Err(format!("lock Git 包 {} 不应带 checksum", p.name));
+                }
             }
             let version = semver::Version::parse(&p.version)
                 .map_err(|e| format!("lock 包 {} 版本非法 {}: {e}", p.name, p.version))?;
@@ -134,10 +158,18 @@ impl Lockfile {
                 let mut lines: Vec<String> = p
                     .dependencies
                     .iter()
-                    .map(|(n, v)| match v {
-                        Some(v) => format!(" \"{n} {v}\","),
-                        None => format!(" \"{n}\","),
-                    })
+                    .map(
+                        |dependency| match (&dependency.version, &dependency.source) {
+                            (Some(version), Some(source)) => {
+                                format!(" \"{} {} ({})\",", dependency.name, version, source)
+                            }
+                            (Some(version), None) => {
+                                format!(" \"{} {}\",", dependency.name, version)
+                            }
+                            (None, None) => format!(" \"{}\",", dependency.name),
+                            (None, Some(_)) => unreachable!("source 消歧必须同时带 version"),
+                        },
+                    )
                     .collect();
                 lines.sort();
                 out.push_str(&format!("dependencies = [\n{}\n]\n", lines.join("\n")));
@@ -148,13 +180,13 @@ impl Lockfile {
 }
 
 /// lock 依赖行：`"name"` / `"name version"` / `"name version (source)"`。
-fn parse_dep_line(line: &str) -> Result<(String, Option<semver::Version>), LErr> {
+fn parse_dep_line(line: &str) -> Result<LockedDep, LErr> {
     let line = line.trim();
-    let without_src = line
+    let (without_src, source) = line
         .strip_suffix(')')
         .and_then(|l| l.split_once(" ("))
-        .map(|(l, _)| l)
-        .unwrap_or(line);
+        .map(|(line, source)| (line, Some(source.to_string())))
+        .unwrap_or((line, None));
     let mut it = without_src.split_whitespace();
     let name = it
         .next()
@@ -165,7 +197,24 @@ fn parse_dep_line(line: &str) -> Result<(String, Option<semver::Version>), LErr>
             semver::Version::parse(v).map_err(|e| format!("lock 依赖行 {line} 版本非法 {v}: {e}"))
         })
         .transpose()?;
-    Ok((name.to_string(), version))
+    if source.is_some() && version.is_none() {
+        return Err(format!("lock 依赖行带 source 时必须带 version: {line}"));
+    }
+    if let Some(source) = &source {
+        if !source.starts_with("registry+") && !source.starts_with("git+") {
+            return Err(format!("lock 依赖行 source 子集外: {source}"));
+        }
+        if source.starts_with("git+") && source.contains('#') {
+            return Err(format!(
+                "lock Git 依赖行 source 不应带精确 commit fragment: {source}"
+            ));
+        }
+    }
+    Ok(LockedDep {
+        name: name.to_string(),
+        version,
+        source,
+    })
 }
 
 #[cfg(test)]
@@ -207,8 +256,16 @@ version = "0.2.0"
         assert_eq!(
             demo.dependencies,
             vec![
-                ("anyhow".to_string(), None),
-                ("local".to_string(), Some(semver::Version::new(0, 2, 0)))
+                LockedDep {
+                    name: "anyhow".to_string(),
+                    version: None,
+                    source: None,
+                },
+                LockedDep {
+                    name: "local".to_string(),
+                    version: Some(semver::Version::new(0, 2, 0)),
+                    source: None,
+                }
             ]
         );
         let anyhow = &lf.find("anyhow")[0];
@@ -218,13 +275,40 @@ version = "0.2.0"
     }
 
     #[test]
-    fn rejects_git_source_loudly() {
-        let err = Lockfile::parse(
+    fn parses_git_source_with_precise_commit() {
+        let lock = Lockfile::parse(
             "version = 4\n\n[[package]]\nname = \"g\"\nversion = \"0.1.0\"\n\
-             source = \"git+https://github.com/x/y#abc\"\n",
+             source = \"git+https://github.com/x/y#0123456789abcdef0123456789abcdef01234567\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            lock.packages[0].source.as_deref(),
+            Some("git+https://github.com/x/y#0123456789abcdef0123456789abcdef01234567")
+        );
+    }
+
+    #[test]
+    fn parses_git_dependency_source_without_precise_fragment() {
+        let dependency = parse_dep_line(
+            "g 0.1.0 (git+https://github.com/x/y?rev=0123456789abcdef0123456789abcdef01234567)",
+        )
+        .unwrap();
+        assert_eq!(dependency.name, "g");
+        assert_eq!(dependency.version, Some(semver::Version::new(0, 1, 0)));
+        assert_eq!(
+            dependency.source.as_deref(),
+            Some("git+https://github.com/x/y?rev=0123456789abcdef0123456789abcdef01234567")
+        );
+    }
+
+    #[test]
+    fn rejects_git_source_without_precise_commit() {
+        let err = Lockfile::parse(
+            "version = 4\n\n[[package]]\nname='g'\nversion='0.1.0'\n\
+             source='git+https://github.com/x/y?branch=main'\n",
         )
         .unwrap_err();
-        assert!(err.contains("P5"), "{err}");
+        assert!(err.contains("精确 commit"), "{err}");
     }
 
     #[test]
@@ -237,7 +321,11 @@ version = "0.2.0"
                     version: semver::Version::new(1, 0, 0),
                     source: Some("registry+https://github.com/rust-lang/crates.io-index".into()),
                     checksum: Some("deadbeef".into()),
-                    dependencies: vec![("a".into(), None)],
+                    dependencies: vec![LockedDep {
+                        name: "a".into(),
+                        version: None,
+                        source: None,
+                    }],
                 },
                 LockedPkg {
                     name: "a".into(),

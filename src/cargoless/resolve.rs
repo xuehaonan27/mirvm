@@ -23,10 +23,10 @@ use std::path::{Path, PathBuf};
 
 use semver::{Version, VersionReq};
 
-use super::lockfile::{LockedPkg, Lockfile};
+use super::lockfile::{LockedDep, LockedPkg, Lockfile};
 use super::manifest::{
-    DepKind, DepSource, FeatureValue, IncompatibleRustVersions, PackageManifest, ResolverVersion,
-    current_rust_version, parse_feature_value,
+    DepKind, DepSource, FeatureValue, GitSpec, IncompatibleRustVersions, PackageManifest,
+    ResolverVersion, current_rust_version, parse_feature_value,
 };
 use super::registry::{IndexVersion, Registry};
 use pubgrub::Reporter as _;
@@ -41,6 +41,15 @@ pub trait PkgSource {
         version: &Version,
         cksum: Option<&str>,
     ) -> Result<PathBuf, String>;
+    fn ensure_git_package(
+        &mut self,
+        spec: &GitSpec,
+        package: &str,
+        locked_source: Option<&str>,
+    ) -> Result<PackageManifest, String> {
+        let _ = (spec, package, locked_source);
+        Err("当前 package source 不支持 Git 依赖".into())
+    }
 }
 
 impl PkgSource for Registry {
@@ -54,6 +63,14 @@ impl PkgSource for Registry {
         cksum: Option<&str>,
     ) -> Result<PathBuf, String> {
         Registry::ensure_source(self, name, version, cksum)
+    }
+    fn ensure_git_package(
+        &mut self,
+        spec: &GitSpec,
+        package: &str,
+        locked_source: Option<&str>,
+    ) -> Result<PackageManifest, String> {
+        Registry::ensure_git_package(self, spec, package, locked_source)
     }
 }
 
@@ -88,6 +105,9 @@ pub struct Unit {
     pub version: Version,
     pub source_dir: PathBuf,
     pub from_registry: bool,
+    /// Git 等不可变、但仅靠 package/version 无法区分的精确来源身份。
+    /// registry 包由 version + checksum 约束，保持 None；path 包走源树快照。
+    pub immutable_source_id: Option<String>,
     /// 本 unit 的类别（resolver v2 normal/build 分列的节点键成分；边类过滤
     /// 走 UnitDep.class，本字段是审计/模型面留存）。
     #[allow(dead_code)]
@@ -203,30 +223,66 @@ pub fn resolve_for_known_with_features(
         None
     };
 
-    // path 依赖 BFS（path 包及其传递 path 依赖的 manifest 全集）
+    // path/Git 依赖 BFS。Git 的可变引用在这里解析成精确 commit；已有 lock
+    // 只按 lock source 取 commit，不重新解释 branch/tag/default HEAD。
     let mut path_manifests: BTreeMap<String, PackageManifest> = BTreeMap::new();
     let mut queue: VecDeque<(PackageManifest, bool)> = VecDeque::new();
     queue.push_back((clone_root_shallow(root), true));
     while let Some((m, is_root)) = queue.pop_front() {
         for d in m.deps.iter().filter(|d| is_root || d.kind != DepKind::Dev) {
-            if let DepSource::Path(p) = &d.source
-                && !path_manifests.contains_key(&d.package)
-            {
-                let absolute = std::fs::canonicalize(p)
-                    .or_else(|_| std::path::absolute(p))
-                    .unwrap_or_else(|_| p.clone());
-                let pm = known_paths
-                    .iter()
-                    .find(|known| known.root == absolute)
-                    .cloned()
-                    .map(Ok)
-                    .unwrap_or_else(|| PackageManifest::read_dir(&absolute))
-                    .map_err(|e| {
-                        format!("path 依赖 {}（{}）: {e}", d.package, absolute.display())
-                    })?;
-                path_manifests.insert(d.package.clone(), pm);
+            let next = match &d.source {
+                DepSource::Path(path) => {
+                    let absolute = std::fs::canonicalize(path)
+                        .or_else(|_| std::path::absolute(path))
+                        .unwrap_or_else(|_| path.clone());
+                    let mut manifest = known_paths
+                        .iter()
+                        .find(|known| known.root == absolute)
+                        .cloned()
+                        .map(Ok)
+                        .unwrap_or_else(|| read_path_manifest(&absolute))
+                        .map_err(|error| {
+                            format!("path 依赖 {}（{}）: {error}", d.package, absolute.display())
+                        })?;
+                    if let Some(checkout) = &m.git_checkout_root {
+                        if !absolute.starts_with(checkout) {
+                            return Err(format!(
+                                "Git 包 {} 的 path 依赖 {} 逃出仓库 checkout；Cargo Git source 不允许引用仓库外路径",
+                                m.name,
+                                absolute.display()
+                            ));
+                        }
+                        manifest.lock_source = m.lock_source.clone();
+                        manifest.git_checkout_root = m.git_checkout_root.clone();
+                    }
+                    Some(manifest)
+                }
+                DepSource::Git(spec) => {
+                    let locked = input_lock
+                        .as_ref()
+                        .map(|lock| locked_git_source(lock, spec, &d.package))
+                        .transpose()?
+                        .flatten();
+                    Some(src.ensure_git_package(spec, &d.package, locked.as_deref())?)
+                }
+                DepSource::Registry(_) => None,
+            };
+            if let Some(manifest) = next {
+                let identity = local_manifest_key(&manifest);
+                if let Some(existing) = path_manifests.get(&identity) {
+                    if existing.root != manifest.root {
+                        return Err(format!(
+                            "本地/Git package 身份碰撞 `{}`：{} 与 {}",
+                            d.package,
+                            existing.root.display(),
+                            manifest.root.display()
+                        ));
+                    }
+                    continue;
+                }
+                path_manifests.insert(identity.clone(), manifest);
                 queue.push_back((
-                    clone_root_shallow(path_manifests.get(&d.package).unwrap()),
+                    clone_root_shallow(path_manifests.get(&identity).unwrap()),
                     false,
                 ));
             }
@@ -349,6 +405,106 @@ fn clone_root_shallow(m: &PackageManifest) -> PackageManifest {
     m.clone()
 }
 
+const LOCAL_ID_SEPARATOR: char = '\u{1f}';
+
+fn local_manifest_key(manifest: &PackageManifest) -> String {
+    let source = manifest
+        .lock_source
+        .clone()
+        .unwrap_or_else(|| format!("path+{}", manifest.root.display()));
+    format!("{}{LOCAL_ID_SEPARATOR}{source}", manifest.name)
+}
+
+fn local_package_name(identity: &str, manifests: &BTreeMap<String, PackageManifest>) -> String {
+    manifests
+        .get(identity)
+        .map(|manifest| manifest.name.clone())
+        .unwrap_or_else(|| identity.to_string())
+}
+
+fn local_dep_identity(
+    dependency: &super::manifest::DepDecl,
+    manifests: &BTreeMap<String, PackageManifest>,
+) -> Result<String, String> {
+    let mut matches = manifests.iter().filter(|(_, manifest)| {
+        if manifest.name != dependency.package {
+            return false;
+        }
+        match &dependency.source {
+            DepSource::Path(path) => {
+                let absolute = std::fs::canonicalize(path)
+                    .or_else(|_| std::path::absolute(path))
+                    .unwrap_or_else(|_| path.clone());
+                manifest.root == absolute
+            }
+            DepSource::Git(spec) => manifest
+                .lock_source
+                .as_deref()
+                .is_some_and(|source| source.starts_with(&format!("{}#", spec.source_id()))),
+            DepSource::Registry(_) => false,
+        }
+    });
+    let first = matches.next().map(|(identity, _)| identity.clone());
+    if matches.next().is_some() {
+        return Err(format!(
+            "依赖 {} 匹配到多个相同来源的本地/Git package",
+            dependency.package
+        ));
+    }
+    first.ok_or_else(|| {
+        format!(
+            "依赖 {} 的本地/Git package 已获取但无法按来源定位",
+            dependency.package
+        )
+    })
+}
+
+fn read_path_manifest(path: &Path) -> Result<PackageManifest, String> {
+    let workspace = super::workspace::WorkspaceManifest::read(path)?;
+    workspace
+        .members
+        .into_iter()
+        .find(|member| member.root == path)
+        .or_else(|| {
+            std::fs::canonicalize(path).ok().and_then(|canonical| {
+                super::workspace::WorkspaceManifest::read(&canonical)
+                    .ok()?
+                    .members
+                    .into_iter()
+                    .find(|member| member.root == canonical)
+            })
+        })
+        .ok_or_else(|| format!("{} 不是可解析的 Cargo package", path.display()))
+}
+
+fn locked_git_source(
+    lock: &Lockfile,
+    spec: &GitSpec,
+    package: &str,
+) -> Result<Option<String>, String> {
+    let source_id = spec.source_id();
+    let mut matches = lock.packages.iter().filter(|candidate| {
+        candidate.name == package
+            && spec.version.matches(&candidate.version)
+            && candidate
+                .source
+                .as_deref()
+                .is_some_and(|source| source.starts_with(&format!("{source_id}#")))
+    });
+    let first = matches.next().and_then(|package| package.source.clone());
+    if matches.next().is_some() {
+        return Err(format!(
+            "Cargo.lock 对 Git 依赖 {package} / {source_id} 有多个精确 commit，无法消歧"
+        ));
+    }
+    if first.is_none() {
+        return Err(format!(
+            "Cargo.lock 过期：Git 依赖 {package} 没有匹配 {source_id} 的 locked package"
+        ));
+    }
+    Ok(first)
+}
+
 // ---------- lock 模式 ----------
 
 fn versions_from_lock(
@@ -370,40 +526,60 @@ fn versions_from_lock(
             )
         })?;
     let mut visited: BTreeSet<(String, Version)> = BTreeSet::new();
-    let mut stack: Vec<&LockedPkg> = vec![root_locked];
-    while let Some(pkg) = stack.pop() {
-        for (depname, depver) in &pkg.dependencies {
-            let candidates = lf.find(depname);
-            let child = match (depver, candidates.len()) {
-                (Some(v), _) => candidates.iter().find(|p| p.version == *v).copied(),
-                (None, 1) => candidates.first().copied(),
-                (None, _) => {
+    let mut stack: Vec<(&LockedPkg, String)> = vec![(root_locked, root.name.clone())];
+    while let Some((pkg, parent_identity)) = stack.pop() {
+        for dependency in &pkg.dependencies {
+            let candidates: Vec<&LockedPkg> = lf
+                .find(&dependency.name)
+                .into_iter()
+                .filter(|candidate| {
+                    dependency
+                        .version
+                        .as_ref()
+                        .is_none_or(|version| candidate.version == *version)
+                        && dependency.source.as_ref().is_none_or(|source| {
+                            candidate.source.as_deref().is_some_and(|candidate| {
+                                lock_dependency_source(candidate) == *source
+                            })
+                        })
+                })
+                .collect();
+            let child = match candidates.as_slice() {
+                [child] => *child,
+                [] => {
                     return Err(format!(
-                        "lock 图歧义：{depname} 有 {} 个版本且父行未指版",
+                        "lock 图断链：{} {:?} {:?} 找不到包行",
+                        dependency.name, dependency.version, dependency.source
+                    ));
+                }
+                _ => {
+                    return Err(format!(
+                        "lock 图歧义：{} 匹配到 {} 个包行，依赖行缺少 version/source 消歧",
+                        dependency.name,
                         candidates.len()
                     ));
                 }
             };
-            let Some(child) = child else {
-                return Err(format!("lock 图断链：{depname} {depver:?} 找不到包行"));
-            };
+            let child_identity = locked_package_identity(child, path_manifests)?;
             // 边版本记录：lock 依赖行不带 kind 信息——Normal/Build 双键登记，
-            // 消歧器 = 子版本串（同名多 req 条目各 hint 分立，ruint 实锤）
+            // 消歧器 = 子 source 或版本串（同名同版本 Git source 也能分立）。
             for class in [UnitClass::Normal, UnitClass::Build] {
                 edges.insert(
                     (
-                        pkg.name.clone(),
+                        parent_identity.clone(),
                         pkg.version.clone(),
-                        depname.clone(),
-                        child.version.to_string(),
+                        dependency.name.clone(),
+                        child
+                            .source
+                            .clone()
+                            .unwrap_or_else(|| child.version.to_string()),
                         class,
                     ),
-                    (depname.clone(), child.version.clone()),
+                    (child_identity.clone(), child.version.clone()),
                 );
             }
-            // 同名多版本并存合法——visited 键必须含版本，否则后者被静默吃掉
-            if visited.insert((depname.clone(), child.version.clone())) {
-                stack.push(child);
+            if visited.insert((child_identity.clone(), child.version.clone())) {
+                stack.push((child, child_identity));
             }
         }
     }
@@ -411,7 +587,8 @@ fn versions_from_lock(
     for (name, m) in path_manifests {
         visited.insert((name.clone(), m.version.clone()));
     }
-    for (name, v) in visited {
+    for (identity, v) in visited {
+        let name = local_package_name(&identity, path_manifests);
         let vs = map.entry(name).or_default();
         if !vs.contains(&v) {
             vs.push(v);
@@ -424,16 +601,20 @@ fn versions_from_lock(
             .iter()
             .filter(|d| include_dev || d.kind != DepKind::Dev)
         {
-            if let DepSource::Registry(req) = &d.source {
-                let satisfied = map
+            let req = match &d.source {
+                DepSource::Registry(req) => Some(req),
+                DepSource::Git(spec) => Some(&spec.version),
+                DepSource::Path(_) => None,
+            };
+            if let Some(req) = req
+                && !map
                     .get(&d.package)
-                    .is_some_and(|vs| vs.iter().any(|v| req.matches(v)));
-                if !satisfied {
-                    return Err(format!(
-                        "Cargo.lock 过期：{} 的 locked 版本不满足 req {req}（manifest 变了，重解或删 lock）",
-                        d.package
-                    ));
-                }
+                    .is_some_and(|versions| versions.iter().any(|version| req.matches(version)))
+            {
+                return Err(format!(
+                    "Cargo.lock 过期：{} 的 locked 版本不满足 req {req}（manifest 变了，重解或删 lock）",
+                    d.package
+                ));
             }
         }
         Ok(())
@@ -443,6 +624,25 @@ fn versions_from_lock(
         check(m, false)?;
     }
     Ok((map, edges))
+}
+
+fn locked_package_identity(
+    package: &LockedPkg,
+    manifests: &BTreeMap<String, PackageManifest>,
+) -> Result<String, String> {
+    let mut matches = manifests.iter().filter(|(_, manifest)| {
+        manifest.name == package.name
+            && manifest.version == package.version
+            && manifest.lock_source == package.source
+    });
+    let first = matches.next().map(|(identity, _)| identity.clone());
+    if matches.next().is_some() {
+        return Err(format!(
+            "Cargo.lock package {} {} {:?} 匹配多个本地/Git package",
+            package.name, package.version, package.source
+        ));
+    }
+    Ok(first.unwrap_or_else(|| package.name.clone()))
 }
 
 // ---------- fresh 模式（pubgrub + lazy-bucket 多版本） ----------
@@ -467,7 +667,11 @@ impl std::fmt::Display for Pkg {
             Pkg::Root => write!(f, "<root>"),
             Pkg::Registry(n, 0) => write!(f, "{n}"),
             Pkg::Registry(n, k) => write!(f, "{n}#{k}"),
-            Pkg::Local(n) => write!(f, "<path:{n}>"),
+            Pkg::Local(n) => write!(
+                f,
+                "<local:{}>",
+                n.split(LOCAL_ID_SEPARATOR).next().unwrap_or(n)
+            ),
         }
     }
 }
@@ -747,10 +951,21 @@ fn collect_decl<'a, S: PkgSource>(
             ));
         }
         DepSource::Path(_) => {
+            let identity = local_dep_identity(d, provider.manifests).map_err(io_err)?;
             raw.push((
                 d.key.clone(),
-                d.package.clone(),
+                identity,
                 VersionReq::STAR,
+                dep_unit_class(d.kind),
+                false,
+            ));
+        }
+        DepSource::Git(spec) => {
+            let identity = local_dep_identity(d, provider.manifests).map_err(io_err)?;
+            raw.push((
+                d.key.clone(),
+                identity,
+                spec.version.clone(),
                 dep_unit_class(d.kind),
                 false,
             ));
@@ -1059,12 +1274,13 @@ fn solve_fresh(
         if !reachable.contains(&(name.clone(), *bucket)) {
             continue;
         }
+        let package_name = local_package_name(name, path_manifests);
         version_map
-            .entry(name.clone())
+            .entry(package_name.clone())
             .or_default()
             .push(version.clone());
-        let (source, checksum) = if path_manifests.contains_key(name) {
-            (None, None)
+        let (source, checksum) = if let Some(manifest) = path_manifests.get(name) {
+            (manifest.lock_source.clone(), None)
         } else {
             let cksum = provider
                 .src
@@ -1082,7 +1298,7 @@ fn solve_fresh(
             )
         };
         lock.packages.push(LockedPkg {
-            name: name.clone(),
+            name: package_name,
             version: version.clone(),
             source,
             checksum,
@@ -1122,7 +1338,7 @@ fn solve_fresh(
     Ok((version_map, lock, edge_versions))
 }
 
-/// 给生成的 lock 补 dependencies 行（name + 重名消歧 version）；
+/// 给生成的 lock 补 dependencies 行（按需追加 version/source 消歧）；
 /// optional 未激活不入（cargo lock 语义）。
 fn fill_lock_dependency_lines(
     lock: &mut Lockfile,
@@ -1133,6 +1349,7 @@ fn fill_lock_dependency_lines(
     nodes: &BTreeMap<NodeKey, FeatNode>,
     src: &mut impl PkgSource,
 ) -> Result<(), String> {
+    let _ = version_map;
     // optional 门按（父包, 父版本, 依赖键）判定：全局集合会把 A 包激活的
     // 同名依赖误植到 B 包（cipher/zeroize vs generic-array 实锤）；
     // 弱形引用（?/）同样放行（cargo 语义：yoke/serde?/alloc 实锤）
@@ -1148,23 +1365,16 @@ fn fill_lock_dependency_lines(
             })
             .collect()
     };
-    // (pkg name, version) → [(dep package, hint)]（同名多 req 条目各带
-    // 自身 hint 分立——ruint 四个 ark-ff 系列实锤；hint 经 req 精确查边分派）
-    type EdgeLines = BTreeMap<(String, Version), Vec<(String, Option<Version>)>>;
+    type LockIdentity = (String, Version, Option<String>);
+    type EdgeLines = BTreeMap<LockIdentity, Vec<LockedDep>>;
     let mut edges: EdgeLines = BTreeMap::new();
-    let hint_of = |parent: &NodeKey,
-                   key: &str,
-                   pkg_name: &str,
-                   req: Option<&VersionReq>,
-                   class: UnitClass|
-     -> Option<Version> {
-        if !version_map
-            .get(pkg_name)
-            .map(|vs| vs.len() > 1)
-            .unwrap_or(false)
-        {
-            return None;
-        }
+    let line_for = |parent: &NodeKey,
+                    key: &str,
+                    pkg_name: &str,
+                    req: Option<&VersionReq>,
+                    source_id: Option<String>,
+                    class: UnitClass|
+     -> Result<LockedDep, String> {
         let dep = FeatDep {
             key: key.to_string(),
             package: pkg_name.to_string(),
@@ -1179,92 +1389,152 @@ fn fill_lock_dependency_lines(
             registry: true,
             platform_cfg: None,
             req: req.map(|r| r.to_string()),
+            source_id,
         };
-        edge_version(edge_versions, parent, &dep).map(|(_, v)| v.clone())
+        let (child_identity, child_version) = edge_version(edge_versions, parent, &dep)
+            .ok_or_else(|| format!("{}@{} 的依赖 {key} 无精确 lock 边", parent.0, parent.1))?;
+        let (child_name, child_source) = match path_manifests.get(child_identity) {
+            Some(manifest) => (manifest.name.clone(), manifest.lock_source.clone()),
+            None => (
+                child_identity.clone(),
+                Some("registry+https://github.com/rust-lang/crates.io-index".to_string()),
+            ),
+        };
+        let same_name: Vec<&LockedPkg> = lock
+            .packages
+            .iter()
+            .filter(|package| package.name == child_name)
+            .collect();
+        if same_name.len() == 1 {
+            return Ok(LockedDep {
+                name: child_name,
+                version: None,
+                source: None,
+            });
+        }
+        let same_version: Vec<&LockedPkg> = same_name
+            .iter()
+            .copied()
+            .filter(|package| package.version == *child_version)
+            .collect();
+        if same_version.len() == 1 {
+            return Ok(LockedDep {
+                name: child_name,
+                version: Some(child_version.clone()),
+                source: None,
+            });
+        }
+        let source = child_source
+            .as_deref()
+            .map(lock_dependency_source)
+            .ok_or_else(|| {
+                format!(
+                    "lock 中同名同版本 path package {} {} 无 source，无法消歧",
+                    child_name, child_version
+                )
+            })?;
+        Ok(LockedDep {
+            name: child_name,
+            version: Some(child_version.clone()),
+            source: Some(source),
+        })
     };
     edges.insert(
-        (root.name.clone(), root.version.clone()),
+        (root.name.clone(), root.version.clone(), None),
         root.deps
             .iter()
             .filter(|d| {
                 !d.optional || activated_keys(&root.name, &root.version).contains(&d.key.as_str())
             })
-            .map(|d| {
+            .map(|d| -> Result<LockedDep, String> {
                 let class = dep_unit_class(d.kind);
                 let req = match &d.source {
                     DepSource::Registry(r) => Some(r),
+                    DepSource::Git(spec) => Some(&spec.version),
                     DepSource::Path(_) => None,
                 };
                 let parent = (root.name.clone(), root.version.clone(), class);
-                (
-                    d.package.clone(),
-                    hint_of(&parent, &d.key, &d.package, req, class),
-                )
+                let source_id = match &d.source {
+                    DepSource::Git(spec) => Some(spec.source_id()),
+                    DepSource::Registry(_) | DepSource::Path(_) => None,
+                };
+                line_for(&parent, &d.key, &d.package, req, source_id, class)
             })
-            .collect(),
+            .collect::<Result<Vec<_>, _>>()?,
     );
-    for (name, m) in path_manifests {
+    for (identity, m) in path_manifests {
         edges.insert(
-            (name.clone(), m.version.clone()),
+            (m.name.clone(), m.version.clone(), m.lock_source.clone()),
             m.deps
                 .iter()
                 .filter(|d| d.kind != DepKind::Dev)
                 .filter(|d| {
-                    !d.optional || activated_keys(name, &m.version).contains(&d.key.as_str())
+                    !d.optional || activated_keys(identity, &m.version).contains(&d.key.as_str())
                 })
-                .map(|d| {
+                .map(|d| -> Result<LockedDep, String> {
                     let class = dep_unit_class(d.kind);
                     let req = match &d.source {
                         DepSource::Registry(r) => Some(r),
+                        DepSource::Git(spec) => Some(&spec.version),
                         DepSource::Path(_) => None,
                     };
-                    let parent = (name.clone(), m.version.clone(), class);
-                    (
-                        d.package.clone(),
-                        hint_of(&parent, &d.key, &d.package, req, class),
-                    )
+                    let parent = (identity.clone(), m.version.clone(), class);
+                    let source_id = match &d.source {
+                        DepSource::Git(spec) => Some(spec.source_id()),
+                        DepSource::Registry(_) | DepSource::Path(_) => None,
+                    };
+                    line_for(&parent, &d.key, &d.package, req, source_id, class)
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, _>>()?,
         );
     }
-    for (name, versions) in version_map {
-        if path_manifests.contains_key(name) || name == &root.name {
+    let registry_packages: Vec<(String, Version, String)> = lock
+        .packages
+        .iter()
+        .filter_map(|package| {
+            let source = package.source.as_deref()?;
+            source.starts_with("registry+").then(|| {
+                (
+                    package.name.clone(),
+                    package.version.clone(),
+                    source.to_string(),
+                )
+            })
+        })
+        .collect();
+    for (name, version, source) in registry_packages {
+        if name == root.name {
             continue;
         }
-        for version in versions {
-            let vs = src.index_entry(name)?;
-            let iv = vs
+        let vs = src.index_entry(&name)?;
+        let iv = vs
+            .iter()
+            .find(|v| v.version == version)
+            .ok_or_else(|| format!("{name} {version} 不在 index"))?;
+        edges.insert(
+            (name.clone(), version.clone(), Some(source)),
+            iv.deps
                 .iter()
-                .find(|v| v.version == *version)
-                .ok_or_else(|| format!("{name} {version} 不在 index"))?;
-            edges.insert(
-                (name.clone(), version.clone()),
-                iv.deps
-                    .iter()
-                    .filter(|d| d.kind.as_deref() != Some("dev"))
-                    .filter(|d| {
-                        !d.optional || activated_keys(name, version).contains(&d.name.as_str())
-                    })
-                    .map(|d| {
-                        let pkg_name = d.package.clone().unwrap_or_else(|| d.name.clone());
-                        let class = if d.kind.as_deref() == Some("build") {
-                            UnitClass::Build
-                        } else {
-                            UnitClass::Normal
-                        };
-                        let parent = (name.clone(), version.clone(), class);
-                        (
-                            pkg_name.clone(),
-                            hint_of(&parent, &d.name, &pkg_name, Some(&d.req), class),
-                        )
-                    })
-                    .collect(),
-            );
-        }
+                .filter(|d| d.kind.as_deref() != Some("dev"))
+                .filter(|d| {
+                    !d.optional || activated_keys(&name, &version).contains(&d.name.as_str())
+                })
+                .map(|d| -> Result<LockedDep, String> {
+                    let pkg_name = d.package.clone().unwrap_or_else(|| d.name.clone());
+                    let class = if d.kind.as_deref() == Some("build") {
+                        UnitClass::Build
+                    } else {
+                        UnitClass::Normal
+                    };
+                    let parent = (name.clone(), version.clone(), class);
+                    line_for(&parent, &d.name, &pkg_name, Some(&d.req), None, class)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
     }
     for pkg in lock.packages.iter_mut() {
-        let mut lines: Vec<(String, Option<Version>)> = edges
-            .get(&(pkg.name.clone(), pkg.version.clone()))
+        let mut lines: Vec<LockedDep> = edges
+            .get(&(pkg.name.clone(), pkg.version.clone(), pkg.source.clone()))
             .cloned()
             .unwrap_or_default();
         lines.sort();
@@ -1272,6 +1542,15 @@ fn fill_lock_dependency_lines(
         pkg.dependencies = lines;
     }
     Ok(())
+}
+
+fn lock_dependency_source(source: &str) -> String {
+    if source.starts_with("git+") {
+        source.rsplit_once('#').map(|(id, _)| id).unwrap_or(source)
+    } else {
+        source
+    }
+    .to_string()
 }
 
 // ---------- feature 统一 ----------
@@ -1301,6 +1580,8 @@ struct FeatDep {
     platform_cfg: Option<String>,
     /// req 串（同名多 req 条目的边消歧器；path 依赖为 None）
     req: Option<String>,
+    /// Git manifest source id（不含精确 commit），供 lock 模式区分同名同版本来源。
+    source_id: Option<String>,
 }
 
 type FeatTable = BTreeMap<String, Vec<FeatureValue>>;
@@ -1351,12 +1632,16 @@ fn edge_version<'a>(
         .ok()
         .map(|r| req_to_ranges(&r));
     ev.iter()
-        .find(|((pn, pv, k, _dis, c), (_, dv))| {
+        .find(|((pn, pv, k, dis, c), (_, dv))| {
             pn == &parent.0
                 && pv == &parent.1
                 && (k == &dep.key || k == &dep.package)
                 && (*c == dep.class || *c == other)
                 && range.as_ref().is_none_or(|r| r.contains(dv))
+                && dep
+                    .source_id
+                    .as_ref()
+                    .is_none_or(|source_id| dis.starts_with(&format!("{source_id}#")))
         })
         .map(|(_, v)| v)
 }
@@ -1421,6 +1706,7 @@ fn ensure_registry_node(
             registry: true,
             platform_cfg: d.target.clone(),
             req: Some(d.req.to_string()),
+            source_id: None,
         });
     }
     register_node(
@@ -1441,6 +1727,17 @@ type Unified = (
     BTreeMap<NodeKey, FeatNode>,
     BTreeSet<(String, Version, String)>,
 );
+
+fn workspace_feature_seed<'a>(
+    key: &NodeKey,
+    manifests: &BTreeMap<String, PackageManifest>,
+    overrides: &'a FeatureOverrides,
+) -> Option<&'a BTreeSet<String>> {
+    overrides.get(key).or_else(|| {
+        let manifest = manifests.get(&key.0)?;
+        overrides.get(&(manifest.name.clone(), key.1.clone(), key.2))
+    })
+}
 
 fn unify_features(
     root: &PackageManifest,
@@ -1493,8 +1790,10 @@ fn unify_features(
             }
         }
     }
-    for (key, features) in workspace_features {
-        if let Some(node) = nodes.get_mut(key) {
+    for key in nodes.keys().cloned().collect::<Vec<_>>() {
+        if let Some(features) = workspace_feature_seed(&key, path_manifests, workspace_features)
+            && let Some(node) = nodes.get_mut(&key)
+        {
             node.features.extend(features.iter().cloned());
         }
     }
@@ -1592,7 +1891,9 @@ fn unify_features(
                     // 其子图永远不展开（syn/quote 实锤）
                     changed = true;
                 }
-                if let Some(seed) = workspace_features.get(&child_key) {
+                if let Some(seed) =
+                    workspace_feature_seed(&child_key, path_manifests, workspace_features)
+                {
                     let child = nodes.entry(child_key.clone()).or_default();
                     let before = child.features.len();
                     child.features.extend(seed.iter().cloned());
@@ -1669,7 +1970,12 @@ fn featdeps(decls: &[super::manifest::DepDecl], include_dev: bool) -> Result<Vec
             platform_cfg: d.platform_cfg.clone(),
             req: match &d.source {
                 DepSource::Registry(req) => Some(req.to_string()),
+                DepSource::Git(spec) => Some(spec.version.to_string()),
                 DepSource::Path(_) => None,
+            },
+            source_id: match &d.source {
+                DepSource::Git(spec) => Some(spec.source_id()),
+                DepSource::Registry(_) | DepSource::Path(_) => None,
             },
         })
         .collect())
@@ -1994,6 +2300,7 @@ fn node_featdeps(
             registry: true,
             platform_cfg: d.target.clone(),
             req: Some(d.req.to_string()),
+            source_id: None,
         })
         .collect())
 }
@@ -2083,15 +2390,18 @@ fn assemble_units(
                 .map(|t| (t.name.clone(), t.path.clone()))
                 // 无 lib 目标的 path 依赖是病理包（cargo 同拒）——回退缺省路径，
                 // dep 编译期 rustc 报文件不存在（响亮，不静默吞）
-                .unwrap_or_else(|| (name.replace('-', "_"), m.root.join("src/lib.rs")));
+                .unwrap_or_else(|| (m.name.replace('-', "_"), m.root.join("src/lib.rs")));
             let proc_macro = m.targets.iter().any(|t| t.is_lib() && t.proc_macro);
             index.insert((name.clone(), version.clone(), *class), units.len());
             units.push(Unit {
-                package: name.clone(),
+                package: m.name.clone(),
                 lib_name,
                 version: m.version.clone(),
                 source_dir: m.root.clone(),
-                from_registry: false,
+                // Cargo 会对 registry/Git 这类非 path 来源 cap lints；Git checkout
+                // 也按 commit 不可变处理，不参与 path 树增量扫描。
+                from_registry: m.lock_source.is_some(),
+                immutable_source_id: m.lock_source.clone(),
                 class: *class,
                 features: node.features.clone(),
                 declared_features: m.check_cfg_feature_values(),
@@ -2116,6 +2426,7 @@ fn assemble_units(
             version: version.clone(),
             source_dir: dir,
             from_registry: true,
+            immutable_source_id: None,
             class: *class,
             features: node.features.clone(),
             declared_features: rm.declared_features,
@@ -2271,6 +2582,7 @@ mod tests {
     struct FakeSource {
         root: PathBuf,
         index: BTreeMap<String, Vec<IndexVersion>>,
+        git: BTreeMap<(String, String), PackageManifest>,
         /// 包名 → 显式 `[lib] name`（lib 名 ≠ 包名的 extern 命名场景罐头，
         /// new_debug_unreachable 实锤形态）。
         lib_names: BTreeMap<String, String>,
@@ -2282,11 +2594,16 @@ mod tests {
             Self {
                 root,
                 index: BTreeMap::new(),
+                git: BTreeMap::new(),
                 lib_names: BTreeMap::new(),
             }
         }
         fn add(&mut self, name: &str, versions: Vec<IndexVersion>) {
             self.index.insert(name.to_string(), versions);
+        }
+        fn add_git(&mut self, source_id: &str, manifest: PackageManifest) {
+            self.git
+                .insert((source_id.to_string(), manifest.name.clone()), manifest);
         }
     }
 
@@ -2312,6 +2629,25 @@ mod tests {
             )
             .unwrap();
             Ok(dir)
+        }
+
+        fn ensure_git_package(
+            &mut self,
+            spec: &GitSpec,
+            package: &str,
+            locked_source: Option<&str>,
+        ) -> Result<PackageManifest, String> {
+            let mut manifest = self
+                .git
+                .get(&(spec.source_id(), package.to_string()))
+                .cloned()
+                .ok_or_else(|| format!("test Git package 不存在: {package}"))?;
+            manifest.lock_source = Some(
+                locked_source
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("{}#{}", spec.source_id(), "1".repeat(40))),
+            );
+            Ok(manifest)
         }
     }
 
@@ -2851,7 +3187,8 @@ mod tests {
         std::fs::create_dir_all(sibling.join("src")).unwrap();
         std::fs::write(
             sibling.join("Cargo.toml"),
-            "[package]\nname = \"sib\"\nversion = \"0.2.0\"\n[dependencies]\nr = \"1\"\n",
+            "[package]\nname = \"sib\"\nversion = \"0.2.0\"\n\
+             [features]\napp-side=[]\n[dependencies]\nr = \"1\"\n",
         )
         .unwrap();
         std::fs::write(sibling.join("src/lib.rs"), "").unwrap();
@@ -2876,6 +3213,179 @@ mod tests {
             .get("sib", &Version::parse("0.2.0").unwrap())
             .unwrap();
         assert!(sib_lock.source.is_none());
+        let mut overrides = FeatureOverrides::new();
+        overrides.insert(
+            ("sib".to_string(), Version::new(0, 2, 0), UnitClass::Normal),
+            BTreeSet::from(["app-side".to_string()]),
+        );
+        let with_workspace_features =
+            resolve_for_known_with_features(&root, &mut src, ResolvePurpose::Run, &[], &overrides)
+                .unwrap();
+        assert!(
+            with_workspace_features
+                .units
+                .iter()
+                .find(|unit| unit.package == "sib")
+                .unwrap()
+                .features
+                .contains("app-side"),
+            "工作区公开包名 feature 必须映射到带来源的本地节点"
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn git_repo_path_packages_share_precise_source_and_lock() {
+        let d = tmpdir("git-path");
+        let repo = d.join("repo");
+        let core = repo.join("core");
+        let helper = repo.join("helper");
+        for package in [&core, &helper] {
+            std::fs::create_dir_all(package.join("src")).unwrap();
+            std::fs::write(package.join("src/lib.rs"), "").unwrap();
+        }
+        std::fs::write(
+            core.join("Cargo.toml"),
+            "[package]\nname='git-core'\nversion='1.2.3'\nedition='2021'\n\
+             [dependencies]\ngit-helper={path='../helper'}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            helper.join("Cargo.toml"),
+            "[package]\nname='git-helper'\nversion='0.4.0'\nedition='2021'\n",
+        )
+        .unwrap();
+        let mut git_core = PackageManifest::parse(
+            &std::fs::read_to_string(core.join("Cargo.toml")).unwrap(),
+            &core,
+        )
+        .unwrap();
+        git_core.git_checkout_root = Some(repo.clone());
+        let root = root_project(
+            &d,
+            "[package]\nname='demo'\nversion='0.1.0'\n\
+             [dependencies]\nchosen={package='git-core',git='https://example.invalid/repo',branch='main',version='^1'}\n",
+        );
+        let mut src = FakeSource::new(d.join("srcstore"));
+        src.add_git("git+https://example.invalid/repo?branch=main", git_core);
+        let plan = resolve(&root, &mut src).unwrap();
+        let precise = format!(
+            "git+https://example.invalid/repo?branch=main#{}",
+            "1".repeat(40)
+        );
+        for package in ["git-core", "git-helper"] {
+            let unit = plan
+                .units
+                .iter()
+                .find(|unit| unit.package == package)
+                .unwrap();
+            assert!(unit.from_registry, "Git 包按不可变依赖处理");
+            assert_eq!(unit.immutable_source_id.as_deref(), Some(precise.as_str()));
+            assert_eq!(
+                plan.lock
+                    .packages
+                    .iter()
+                    .find(|locked| locked.name == package)
+                    .and_then(|locked| locked.source.as_deref()),
+                Some(precise.as_str())
+            );
+        }
+        std::fs::write(d.join("Cargo.lock"), plan.lock.serialize()).unwrap();
+        let locked_plan = resolve(&root, &mut src).unwrap();
+        assert_eq!(locked_plan.lock, plan.lock);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn same_git_package_from_two_revisions_stays_distinct() {
+        let d = tmpdir("git-two-revisions");
+        let mut src = FakeSource::new(d.join("srcstore"));
+        for revision in ["old", "new"] {
+            let repo = d.join(format!("repo-{revision}"));
+            let core = repo.join("core");
+            let helper = repo.join("helper");
+            for package in [&core, &helper] {
+                std::fs::create_dir_all(package.join("src")).unwrap();
+                std::fs::write(package.join("src/lib.rs"), "").unwrap();
+            }
+            std::fs::write(
+                core.join("Cargo.toml"),
+                "[package]\nname='git-core'\nversion='1.2.3'\nedition='2021'\n\
+                 [dependencies]\ngit-helper={path='../helper'}\n",
+            )
+            .unwrap();
+            std::fs::write(
+                helper.join("Cargo.toml"),
+                "[package]\nname='git-helper'\nversion='0.4.0'\nedition='2021'\n",
+            )
+            .unwrap();
+            let mut manifest = PackageManifest::parse(
+                &std::fs::read_to_string(core.join("Cargo.toml")).unwrap(),
+                &core,
+            )
+            .unwrap();
+            manifest.git_checkout_root = Some(repo);
+            src.add_git(
+                &format!("git+https://example.invalid/repo?rev={revision}"),
+                manifest,
+            );
+        }
+        let root = root_project(
+            &d,
+            "[package]\nname='demo'\nversion='0.1.0'\n\
+             [dependencies]\n\
+             old={package='git-core',git='https://example.invalid/repo',rev='old',version='^1'}\n\
+             new={package='git-core',git='https://example.invalid/repo',rev='new',version='^1'}\n",
+        );
+        let plan = resolve(&root, &mut src).unwrap();
+        assert_eq!(
+            plan.units
+                .iter()
+                .filter(|unit| unit.package == "git-core")
+                .count(),
+            2
+        );
+        assert_eq!(
+            plan.units
+                .iter()
+                .filter(|unit| unit.package == "git-helper")
+                .count(),
+            2
+        );
+        let root_sources: BTreeSet<String> = plan
+            .root_deps
+            .iter()
+            .map(|dependency| {
+                plan.units[dependency.unit]
+                    .immutable_source_id
+                    .clone()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(root_sources.len(), 2);
+        let root_lock = plan
+            .lock
+            .packages
+            .iter()
+            .find(|package| package.name == "demo")
+            .unwrap();
+        assert_eq!(root_lock.dependencies.len(), 2);
+        assert!(
+            root_lock
+                .dependencies
+                .iter()
+                .all(
+                    |dependency| dependency.version == Some(Version::new(1, 2, 3))
+                        && dependency.source.is_some()
+                )
+        );
+        let serialized = plan.lock.serialize();
+        let parsed = Lockfile::parse(&serialized).unwrap();
+        assert_eq!(parsed, plan.lock);
+        std::fs::write(d.join("Cargo.lock"), serialized).unwrap();
+        let locked = resolve(&root, &mut src).unwrap();
+        assert_eq!(locked.root_deps.len(), 2);
+        assert_ne!(locked.root_deps[0].unit, locked.root_deps[1].unit);
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -2945,11 +3455,19 @@ mod tests {
             .unwrap()
             .dependencies;
         assert!(
-            a_line.contains(&("h".to_string(), Some(Version::parse("0.14.5").unwrap()))),
+            a_line.contains(&LockedDep {
+                name: "h".to_string(),
+                version: Some(Version::parse("0.14.5").unwrap()),
+                source: None,
+            }),
             "a 行: {a_line:?}"
         );
         assert!(
-            b_line.contains(&("h".to_string(), Some(Version::parse("0.15.2").unwrap()))),
+            b_line.contains(&LockedDep {
+                name: "h".to_string(),
+                version: Some(Version::parse("0.15.2").unwrap()),
+                source: None,
+            }),
             "b 行: {b_line:?}"
         );
         // lock 可被自家 parser 回读
@@ -3045,7 +3563,7 @@ mod tests {
         let line: Vec<String> = syn_lock
             .dependencies
             .iter()
-            .map(|(n, _)| n.clone())
+            .map(|dependency| dependency.name.clone())
             .collect();
         assert!(
             line.contains(&"quote".to_string()),

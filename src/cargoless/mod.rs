@@ -20,12 +20,13 @@
 //!   零 crates.io）+ `--bin` 多目标选择 + **MIRVM_DEPS 默认翻 self**
 //!   （=cargo 显式 compat，双轨各自完整）。`workspace` + `mirvm test` 已接
 //!   resolver=2/3 常见多包形态与 rust-version-aware 选择；剩余拒绝面 =
-//!   P5 边界（git 源/alt registry/source replacement/resolver 1，响亮拒绝
+//!   P5 边界（alt registry/source replacement/resolver 1，响亮拒绝
 //!   点名，按实需逐项立项）。
 
 pub mod audit;
 pub mod buildrs;
 pub mod driver;
+pub mod git;
 pub mod lockfile;
 pub mod manifest;
 pub mod registry;

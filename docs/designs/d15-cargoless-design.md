@@ -41,9 +41,9 @@ P1 的闭合过程把 cargo 的解析语义逐条实证出来（每条都有对�
      与 lock v3/v4 均按固定 Cargo 实证实现，见 decision-history §7.36。
    - req 遇本仓钉版未知的 semver 新 op 时退回 `Ranges::from_req`
      （pre 会丢，代码内响亮记账）。
-   - git 源 / alt registry / source replacement 与 resolver 1（P5，响亮
-     拒绝记名）；resolver 2/3 常见 workspace 已补齐，见
-     decision-history §7.35/§7.36。
+   - alt registry / source replacement 与 resolver 1（P5，响亮拒绝记名）；
+     resolver 2/3 常见 workspace 与 Git 依赖已补齐，见
+     decision-history §7.35/§7.36/§7.38。
 
 
 > 状态：2026-07-23 调研定稿（四决策点当日裁定）；**P1 已收口（2026-07-27，
@@ -52,9 +52,10 @@ P1 的闭合过程把 cargo 的解析语义逐条实证出来（每条都有对�
 > （2026-07-28，corpus full 138 pass 1 p5 0 fail + gate DEPS=self 双轨绿，
 > decision-history §7.30）；P4 已收口（2026-07-29，sysroot 自管 + 默认
 > 翻转 self + compat 双轨定案，decision-history §7.31）**；resolver 2/3
-> 常见 workspace 与 rust-version-aware 选择已于 2026-08-08 至 08-10 补齐
-> （§7.35/§7.36）。P5 剩余复杂语义按实需逐项立项（git 源/alt registry/
-> source replacement/resolver 1，响亮拒绝在案）。
+> 常见 workspace、rust-version-aware 选择与 Git 依赖已于 2026-08-08 至
+> 08-10 补齐（§7.35/§7.36/§7.38）。P5 剩余复杂语义按实需逐项立项
+> （alt registry/source replacement/resolver 1，响亮拒绝在案）。Cargo compat 已于
+> 2026-08-10 裁定长期保留，默认 self 与显式 Cargo 回退持续双轨对拍（§7.37）。
 > 立项记录：[open-issues.md D15](../open-issues.md)；动机源头：decision-history §7.22
 > （C4 两轮绕行被否——"吃 cargo 产物就得绕"的处境要制度性消除）。
 > 本文遵循"闭合契约"纪律：每期写明闭合到哪条可观察边界；原理上不能闭合的
@@ -173,7 +174,7 @@ HTTP/tar 见决策点 ①。
   libgit2/rusqlite/mlua/tree_sitter 等 build.rs 重灾户）以零 cargo 进程
   跑通，stdout/stderr/exit 与 cargo 路径逐字节一致（新增对拍轴：
   self 路径 vs cargo 路径自一致 + 原三维判绿照常）。子集外构造
-  （workspace 复杂形态/git deps/alt registry）**响亮拒绝点名构造**，
+  （workspace 复杂形态/alt registry）**响亮拒绝点名构造**，
   不静默回退 cargo。
 - 验收：`MIRVM_DEPS=self bash tests/corpus.sh --tier smoke` 24/24。
 
@@ -191,14 +192,14 @@ HTTP/tar 见决策点 ①。
   ~27 crate 图；顺手砍掉意外 crates.io 依赖——agent-177 实锤 .d 引用
   ~/.cargo/registry，改走 rust-src `library/vendor/`）；`MIRVM_DEPS` 默认
   翻为 self，cargo 路径保留为显式 compat（`MIRVM_DEPS=cargo`），
-  **删除条件**另行评审（compat 不是救援，是双轨：两条路径各自完整）。
+  Cargo 路径按 §7.37 长期保留（用户显式回退和行为对拍；不是静默救援）。
 - 闭合契约：sysroot 构建零 cargo 进程；`mirvm run`（项目/脚本）默认路径
   全程零 cargo；compat 路径 gate 冒烟保留。
 - 验收：purge --sysroot 后冷建全绿；gate 双轨绿。
 
 ### P5 复杂语义按实需（resolver 2/3 workspace 已完成）
 
-- resolver 1、复杂成员 glob/嵌套 workspace/workspace lints、[patch]/[replace]、git deps、
+- resolver 1、复杂成员 glob/嵌套 workspace/workspace lints、[patch]/[replace]、
   alt registry、source replacement——**按 corpus 扩编实需逐项立项**；不承诺
   "cargo 全语义"（事先明说的不闭合面；遇到即响亮拒绝并登记，按实需扩）。
 

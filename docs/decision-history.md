@@ -1771,6 +1771,40 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   pack self 与总验收。最终验收为 Rust 测试 **186/186**、resolver 3 workspace 合同
   **27/27**、隔离可写 Cargo home/target 的 release `tests/run.sh fast` **11/11**。
 
+### 7.37 2026-08-10：Cargo compat 改为长期双轨，不再安排删除评审
+
+- **用户裁定**：mirvm 同时保留 Cargo 依赖路径和 cargoless 自有路径。缺省继续使用
+  cargoless；用户可用 `MIRVM_DEPS=cargo` 显式回退。
+- **原因**：Cargo compat 不只是故障救援，还承担 Cargo 行为裁判、版本迭代差异定位和
+  持续对拍。删除它会降低 cargoless 对齐 Cargo 的可验证性，也会拿走用户处理暂未覆盖
+  Cargo 构造的直接出口。
+- **长期合同**：两条路径各自完整并持续维护；默认 self 的零 Cargo 机制测试继续保留，
+  compat 的 Cargo native/runner 对拍也继续保留。compat 不得成为静默回退：只有用户
+  显式选择时才进入，self 遇到不支持构造仍应响亮报错。
+- **替代旧决策**：§7.31 的“P5 后重启删除评审”失效。后续 `mirvm pack` 翻 self 只是
+  改默认实现和减少强依赖，不构成删除 compat 的前置步骤。
+
+### 7.38 2026-08-10：P5 第二批 Git 依赖闭合
+
+- **获取与凭据**：新增 cargoless Git store。可变的默认分支、`branch`、`tag`、
+  `rev` 只在无锁求解时解析，系统 Git 负责网络与认证，直接复用 credential helper、
+  SSH agent 和 known_hosts；没有用户报名表或私有仓库特判。checkout 按仓库身份和精确
+  commit 分目录，submodule 按树中钉住的提交初始化。
+- **锁与离线**：Git package 的 lock source 必须含 40/64 位精确 commit 且无 checksum；
+  已有锁不重新解释浮动分支。暖缓存可离线复跑，冷缓存离线明确指出缺少哪个 commit；
+  缓存 origin 不符、checkout 文件或 submodule 被改动都拒绝继续。
+- **来源身份**：解析节点不再只按包名合并。本地内部身份包含精确 Git source，lock
+  依赖行保留 Cargo 的 `name version (source)` 消歧信息；因此同名同版本包来自同仓库
+  两个 commit 时，feature、依赖边、编译单元和缓存指纹都保持分立。修复过程中真实
+  抓到“fresh lock 已前进但误用旧编译产物”，根因正是旧指纹只写了 registry 常量；
+  现已由 Git commit 指纹回归钉死。
+- **验收**：默认分支、branch/tag/rev、仓库内 workspace/package、feature/path 边单测
+  通过；`cargoless_git_contract` **9/9** 覆盖 fresh、分支移动、locked/offline、冷缓存、
+  双 commit、Cargo lock 互认、execve 零 Cargo 和篡改拒绝。真实双 commit 程序 self
+  在线/离线均输出 `17 19`，其 lock 被固定 Cargo `--locked` 接受。cargoless Rust 测试
+  **105/105**，全量 Rust 测试 **193/193**，隔离可写 Cargo home 的 release fast
+  **12/12**。下一批按计划转向 alt registry 与 Cargo 配置合并。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT

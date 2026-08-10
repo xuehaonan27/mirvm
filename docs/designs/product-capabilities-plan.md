@@ -1,7 +1,7 @@
 # 产品能力补全计划
 
-> 状态：**P1 主链已完成；P2 第一批 resolver 3 / rust-version 已完成
-> （2026-08-10）**。
+> 状态：**P1 主链已完成；P2 第一批 resolver 3 / rust-version 与第二批 Git
+> 依赖已完成（2026-08-10）**。
 > 本文把当前明确缺失的产品
 > 能力合并成一条可执行路线；现状仍以 [current-status.md](../current-status.md) 为准，
 > 单项债务仍以 [open-issues.md](../open-issues.md) 为唯一登记入口。
@@ -72,13 +72,18 @@ package 选择和特性统一均在依赖机制内实现，没有命令层特判
      `home = "0.5"` 探针都选择 0.5.9，self lock 已被固定 Cargo 以
      `--locked --offline` 接受。空目录 fast 门禁同时暴露并补齐了 package `[lints]`
      到 rustc 参数和编译指纹的传播，当前 rust-src sysroot 可以从零构建。
-2. **Git 依赖**
+2. **Git 依赖（已完成，2026-08-10）**
    - 支持默认分支、`branch`、`tag`、`rev`、仓库内 workspace/package 和 feature；
      私有仓库复用 Git 既有凭据机制，不新增 mirvm 报名表。
    - 网络获取只负责把可变引用解析到不可变 commit；lock 记录精确 commit，本地内容
      存储按仓库身份与 commit 隔离。locked/offline 路径不得重新解释浮动分支。
    - 完成条件：首次获取、暖缓存离线、冷缓存离线失败、分支移动后 locked 不变、
      内容篡改拒绝、同仓库双 commit 共存，并证明 self 不启动 Cargo。
+   - 完成结果：默认分支、`branch`、`tag`、`rev`、仓库内 workspace/package、feature
+     与 path 边已接通；系统 Git 复用用户凭据和 submodule 机制。lock 精确记录 commit，
+     构建指纹包含完整 Git 来源；同名同版本的两个 commit 在解析图、编译缓存和 lock
+     依赖行中保持分立。`cargoless_git_contract` **9/9**，self 单/双 commit lock 均被
+     固定 Cargo `--locked` 接受，execve 审计证明 self 不启动 Cargo。
 3. **替代 registry 与 Cargo 配置合并**
    - 为依赖获取实现项目祖先目录和 `CARGO_HOME` 的 `.cargo/config.toml` 合并，覆盖
      `[registries]`、稀疏/Git index、认证读取；不借机实现无关 Cargo 配置键。
@@ -96,7 +101,9 @@ package 选择和特性统一均在依赖机制内实现，没有命令层特判
 5. **`mirvm pack` 翻到 self 依赖驱动**
    - `run`、`test`、`pack` 共用同一依赖图、build.rs、proc-macro、native library 和
      lock 规则；PATH 哨兵与进程审计证明默认路径不启动 Cargo。
-   - compat 暂留作 oracle、`deps audit` 验收和尚存协议的承载者；任一职责仍在就不删。
+   - Cargo compat 长期保留：用户可显式回退，也是 Cargo 行为对拍和差异定位的裁判；
+     cargoless 继续作为默认路径。两条路径都必须保持完整，不能把 compat 降成无人维护的
+     临时救援开关。
 6. **依赖阶段总验收**
    - 清零现有 corpus 中标作 D15 P5 的项目；每种来源都覆盖版本图、feature、fresh/
      locked/offline、篡改拒绝和双版本共存。
@@ -183,7 +190,7 @@ lints/复杂 package ID 与成员 glob、旧项目需要的 resolver 1。doctest
 以下事项明确不提前：
 
 - 不为未来 Cargo 形态增加通用 harness schema、inventory、provenance 元数据或远程 gate。
-- 不在 oracle、`deps audit` 或 `pack` 仍依赖 compat 时删除 Cargo compat。
+- 不删除 Cargo compat；默认 self 与显式 `MIRVM_DEPS=cargo` 是长期双轨合同。
 - 不把 doctest 伪装成普通 test target，也不为凑覆盖静默跳过 rustdoc 语义。
 - 不在 D3 mmap/惰性解码布局完成前冻结 `.mirvm` 格式。
 - 不在 OS 级沙箱完成前宣称可安全执行不受信任代码。

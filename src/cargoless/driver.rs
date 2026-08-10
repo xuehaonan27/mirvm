@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use super::buildrs::{self, BuildOutput};
-use super::lockfile::Lockfile;
+use super::lockfile::{LockedDep, Lockfile};
 use super::manifest::{DepKind, DepSource, PackageManifest, Target, TargetKind};
 use super::registry::Registry;
 use super::resolve::{
@@ -949,14 +949,26 @@ fn generate_workspace_lock(workspace: &WorkspaceManifest) -> Result<(), String> 
                     .get(&dep.package)
                     .and_then(|versions| versions.iter().find(|version| req.matches(version)))
                     .cloned(),
+                DepSource::Git(spec) => plan
+                    .version_map
+                    .get(&dep.package)
+                    .and_then(|versions| {
+                        versions
+                            .iter()
+                            .find(|version| spec.version.matches(version))
+                    })
+                    .cloned(),
             }
             .ok_or_else(|| format!("Dev 依赖 {} 没有已解版本", dep.package))?;
             let ambiguous = plan
                 .version_map
                 .get(&dep.package)
                 .is_some_and(|versions| versions.len() > 1);
-            row.dependencies
-                .push((dep.package.clone(), ambiguous.then_some(version)));
+            row.dependencies.push(LockedDep {
+                name: dep.package.clone(),
+                version: ambiguous.then_some(version),
+                source: None,
+            });
         }
         row.dependencies.sort();
         row.dependencies.dedup();
@@ -1383,6 +1395,13 @@ fn drive(manifest: &PackageManifest, program_args: &[String], bin_sel: Option<&s
             std::process::exit(1);
         }
     };
+    let lock_path = manifest.lock_root.join("Cargo.lock");
+    if !lock_path.is_file()
+        && let Err(error) = write_lock_atomic(&lock_path, &plan.lock)
+    {
+        eprintln!("mirvm: 写入 {} 失败: {error}", lock_path.display());
+        std::process::exit(1);
+    }
 
     // 2. links 互斥（cargo 同：同一 links 值至多一个包；根包也参查）
     if let Err(e) =
