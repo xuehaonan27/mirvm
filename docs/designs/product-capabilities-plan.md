@@ -1,6 +1,7 @@
 # 产品能力补全计划
 
-> 状态：**P1 主链与 resolver 2 常见 workspace 已完成（2026-08-08）**。
+> 状态：**P1 主链已完成；P2 第一批 resolver 3 / rust-version 已完成
+> （2026-08-10）**。
 > 本文把当前明确缺失的产品
 > 能力合并成一条可执行路线；现状仍以 [current-status.md](../current-status.md) 为准，
 > 单项债务仍以 [open-issues.md](../open-issues.md) 为唯一登记入口。
@@ -17,7 +18,7 @@
 
 ### P1：`mirvm test`，补齐开发主循环
 
-**进展（2026-08-08）**：单包与 resolver 2 常见 workspace 范围已完成，并由
+**进展（2026-08-10）**：单包与 resolver 2/3 常见 workspace 范围已完成，并由
 [cargoless 合同](mirvm-test-cargoless-contract.md) 约束；成员发现、继承、统一 lock、
 package 选择和特性统一均在依赖机制内实现，没有命令层特判。
 
@@ -37,11 +38,12 @@ package 选择和特性统一均在依赖机制内实现，没有命令层特判
 **用户结果**：Git 依赖、替代 registry 和 source replacement 可以直接解析、锁定、
 离线复跑，不要求用户改写项目；resolver 3 与 rust-version-aware 选择也能正确工作。
 
-- resolver 2 常见 workspace 多包图和精确包名选择已随 P1 完成；resolver 1/3、较复杂
+- resolver 2/3 常见 workspace、多包图、精确包名选择与 rust-version-aware
+  候选选择已完成；resolver 1、较复杂
   glob/package ID spec、嵌套 workspace 和 workspace lints 仍保持响亮拒绝，不冒充 Cargo 全语义。
 - Git 源以提交哈希入锁和内容存储；网络获取与离线消费分开，禁止浮动 HEAD 偷换内容。
 - 替代 registry 复用 Cargo 凭据的只读面；实现 index/source replacement 的来源映射。
-- 补 rust-version-aware 版本选择，并让 `mirvm pack` 改走自有依赖驱动。
+- 让 `mirvm pack` 改走自有依赖驱动。
 - 验收：现有 corpus 的 P5 项清零；每种来源都有首次获取、`--locked`、`--offline`、
   内容篡改拒绝和双版本共存用例。
 
@@ -55,7 +57,7 @@ package 选择和特性统一均在依赖机制内实现，没有命令层特判
 静默改变 mirvm 行为。沿用现有合同脚本，只有当前 RED 无法复现或判断时才增加最小
 夹具，不另建通用 harness。
 
-1. **resolver 3 与 rust-version-aware 选择**
+1. **resolver 3 与 rust-version-aware 选择（已完成，2026-08-10）**
    - 支持显式 `resolver = "3"`，以及 edition 2024 package 的隐式 resolver 3；
      resolver 1 继续响亮拒绝。
    - 读取包、workspace 继承和 registry index 中的 `rust-version`。按照 Cargo 的
@@ -64,6 +66,12 @@ package 选择和特性统一均在依赖机制内实现，没有命令层特判
    - fresh lock、既有 lock、`--locked`、`--offline` 和 resolver 2 回归一起验收。
    - 完成条件：Cargo 与 self 的选中版本、feature 图一致；双方生成的 lock 都能被
      对方在 `--locked --offline` 下接受。
+   - 完成结果：resolver 3 显式/edition 2024 隐式规则、workspace 最低 Rust 版本、
+     `fallback/allow` 配置层级、`--ignore-rust-version` 和编译前版本诊断均已落地；
+     Rust 1.82 及以前的项目写 lock v3，1.83 起写 v4。固定 Cargo 与 self 的真实
+     `home = "0.5"` 探针都选择 0.5.9，self lock 已被固定 Cargo 以
+     `--locked --offline` 接受。空目录 fast 门禁同时暴露并补齐了 package `[lints]`
+     到 rustc 参数和编译指纹的传播，当前 rust-src sysroot 可以从零构建。
 2. **Git 依赖**
    - 支持默认分支、`branch`、`tag`、`rev`、仓库内 workspace/package 和 feature；
      私有仓库复用 Git 既有凭据机制，不新增 mirvm 报名表。
@@ -155,7 +163,7 @@ lints/复杂 package ID 与成员 glob、旧项目需要的 resolver 1。doctest
 
 ## 3. 里程碑关系
 
-- P1 已完成；P2 从 Git/替代来源、resolver 3 与 rust-version-aware 选择继续扩项目覆盖。
+- P1 与 P2 第一批已完成；P2 从 Git 来源继续扩项目覆盖。
 - P3 是任何“不受信任代码执行”产品声明的硬前置。
 - P4 是 daemon、agent API 和 REPL 的硬前置。
 - P5 必须遵守“D3 先于 D4”；P6 的 fat artifact 依赖 P5 的 target 索引。
@@ -167,7 +175,7 @@ lints/复杂 package ID 与成员 glob、旧项目需要的 resolver 1。doctest
 
 当前唯一产品主队列是：
 
-`resolver 3/rust-version → Git → registry/config → replacement/patch → pack self → P2 总验收`
+`Git → registry/config → replacement/patch → pack self → P2 总验收`
 
 随后依次进入 OS 沙箱、稳定嵌入 API、D3 零拷贝后包格式冻结、跨平台。D16 性能线必须
 先 profile；只有实测命中才可穿插 JIT 机器码持久化，不能打断上述产品闭合。

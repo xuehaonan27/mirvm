@@ -23,7 +23,7 @@ P1 的闭合过程把 cargo 的解析语义逐条实证出来（每条都有对�
    borsh std → bytes?/std → bytes 入锁）。build 图仅 ①。
    **门按（父包, 依赖键）判定**——全局包名门会把 A 包激活的同名依赖
    误植到 B 包（zerovec 的 yoke → litemap 的 yoke ^0.8 实锤）。
-4. **feature 统一**：resolver v2 的 normal/build 边分列（同 crate 两类
+4. **feature 统一**：resolver v2/v3 的 normal/build 边分列（同 crate 两类
    feature 集不同 = 两个编译单元）；feature 引用必须指向 feature 或
    optional 依赖，否则响亮报错；边到达的 feature 旗标若无表项可展开，
    其本身若是非隐藏 optional 依赖键即激活该依赖（收尾清扫规则）。
@@ -31,20 +31,19 @@ P1 的闭合过程把 cargo 的解析语义逐条实证出来（每条都有对�
    且带 pre 的 comparator 点名时才可选（req_to_ranges 自写保留下界 pre；
    ark-ff-asm 0.5.0-alpha.0 误选实锤）。
 6. **yanked**：lock 在照吃（cargo 同）；fresh 求解跳过（no-solution 响亮）。
-7. **lock 形态**：canonical v4——依赖行每行尾逗号（cargo `--locked` 对
+7. **lock 形态**：canonical v3/v4——依赖行每行尾逗号（cargo `--locked` 对
    非 canonical lock 一律判"需重写"而拒）；同名多版本时依赖行写
-   `name version` 消歧 hint。
+   `name version` 消歧 hint。Cargo 为最低 Rust 版本不高于 1.82 的项目写 v3，
+   1.83 起写 v4。
 8. **已明说的 P1 边界（记账，不冒充闭合）**：
-   - **rust-version-aware 版本偏好未实现**（cargo 1.84+ 默认
-     `resolver.incompatible-rust-versions=fallback`：新版要求更高 rustc
-     时 cargo 回退选旧兼容版）。影响面 = 与 cargo 的选择可能不同但
-     lock 自洽可构建；钉版 nightly  bleeding-edge 下几乎不触发。
-     与 D14 store 合并评审时补。
+   - rust-version-aware 版本偏好原为本期边界，已于 2026-08-10 完成：
+     resolver 3、fallback/allow、workspace 最低版本、`--ignore-rust-version`
+     与 lock v3/v4 均按固定 Cargo 实证实现，见 decision-history §7.36。
    - req 遇本仓钉版未知的 semver 新 op 时退回 `Ranges::from_req`
      （pre 会丢，代码内响亮记账）。
-   - git 源 / alt registry / source replacement、resolver 1/3 与
-     rust-version-aware 选择（P5，响亮拒绝记名）；resolver 2 常见 workspace
-     已于 2026-08-08 随 `mirvm test` 合同补齐，见 decision-history §7.35。
+   - git 源 / alt registry / source replacement 与 resolver 1（P5，响亮
+     拒绝记名）；resolver 2/3 常见 workspace 已补齐，见
+     decision-history §7.35/§7.36。
 
 
 > 状态：2026-07-23 调研定稿（四决策点当日裁定）；**P1 已收口（2026-07-27，
@@ -52,9 +51,10 @@ P1 的闭合过程把 cargo 的解析语义逐条实证出来（每条都有对�
 > corpus smoke 24 双腿逐字节 24/24，decision-history §7.29）；P3 已收口
 > （2026-07-28，corpus full 138 pass 1 p5 0 fail + gate DEPS=self 双轨绿，
 > decision-history §7.30）；P4 已收口（2026-07-29，sysroot 自管 + 默认
-> 翻转 self + compat 双轨定案，decision-history §7.31）**；resolver 2
-> 常见 workspace 已于 2026-08-08 补齐（§7.35）。P5 剩余复杂语义按实需逐项
-> 立项（git 源/alt registry/source replacement/resolver 1、3，响亮拒绝在案）。
+> 翻转 self + compat 双轨定案，decision-history §7.31）**；resolver 2/3
+> 常见 workspace 与 rust-version-aware 选择已于 2026-08-08 至 08-10 补齐
+> （§7.35/§7.36）。P5 剩余复杂语义按实需逐项立项（git 源/alt registry/
+> source replacement/resolver 1，响亮拒绝在案）。
 > 立项记录：[open-issues.md D15](../open-issues.md)；动机源头：decision-history §7.22
 > （C4 两轮绕行被否——"吃 cargo 产物就得绕"的处境要制度性消除）。
 > 本文遵循"闭合契约"纪律：每期写明闭合到哪条可观察边界；原理上不能闭合的
@@ -196,9 +196,9 @@ HTTP/tar 见决策点 ①。
   全程零 cargo；compat 路径 gate 冒烟保留。
 - 验收：purge --sysroot 后冷建全绿；gate 双轨绿。
 
-### P5 复杂语义按实需（resolver 2 workspace 已完成）
+### P5 复杂语义按实需（resolver 2/3 workspace 已完成）
 
-- resolver 1/3、复杂成员 glob/嵌套 workspace/workspace lints、[patch]/[replace]、git deps、
+- resolver 1、复杂成员 glob/嵌套 workspace/workspace lints、[patch]/[replace]、git deps、
   alt registry、source replacement——**按 corpus 扩编实需逐项立项**；不承诺
   "cargo 全语义"（事先明说的不闭合面；遇到即响亮拒绝并登记，按实需扩）。
 

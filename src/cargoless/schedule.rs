@@ -371,6 +371,9 @@ pub fn fingerprints(
         for f in rustflags {
             put(f); // 按序：rustflags 顺序有语义（后旗压前旗）
         }
+        for flag in &u.rustc_lint_flags {
+            put(flag);
+        }
         put(&src_stamp);
         for d in &dep_fps {
             put(d);
@@ -479,6 +482,9 @@ pub fn root_fingerprint(
     put(sysroot_stamp);
     for f in rustflags {
         put(f); // 按序（unit fp 同款纪律）
+    }
+    for flag in &manifest.rustc_lint_flags {
+        put(flag);
     }
     put(&src_stamp);
     let mut dep_fps: Vec<&str> = plan
@@ -613,6 +619,7 @@ pub fn dep_rustc_args(
         a.push("--cap-lints".into());
         a.push("allow".into());
     }
+    a.extend(u.rustc_lint_flags.iter().cloned());
     a.push("--check-cfg".into());
     a.push("cfg(docsrs,test)".into());
     let vals = u
@@ -715,6 +722,7 @@ pub fn bin_rustc_args(
         a.push("--cfg".into());
         a.push(format!("feature=\"{f}\""));
     }
+    a.extend(manifest.rustc_lint_flags.iter().cloned());
     a.push("--check-cfg".into());
     a.push("cfg(docsrs,test)".into());
     let values = manifest.check_cfg_feature_values();
@@ -920,6 +928,7 @@ pub fn root_lib_rustc_args(
         a.push(format!("feature=\"{f}\""));
     }
     // path 包无 --cap-lints（cargo 同：照常告警）
+    a.extend(manifest.rustc_lint_flags.iter().cloned());
     a.push("--check-cfg".into());
     a.push("cfg(docsrs,test)".into());
     let values = manifest.check_cfg_feature_values();
@@ -1003,6 +1012,7 @@ pub fn host_rustc_args(
         a.push("--cap-lints".into());
         a.push("allow".into());
     }
+    a.extend(u.rustc_lint_flags.iter().cloned());
     a.push("--check-cfg".into());
     a.push("cfg(docsrs,test)".into());
     let vals = u
@@ -1075,6 +1085,7 @@ pub fn proc_macro_rustc_args(
         a.push("--cap-lints".into());
         a.push("allow".into());
     }
+    a.extend(u.rustc_lint_flags.iter().cloned());
     a.push("--check-cfg".into());
     a.push("cfg(docsrs,test)".into());
     let vals = u
@@ -1158,6 +1169,7 @@ pub fn build_script_rustc_args(
         a.push("--cap-lints".into());
         a.push("allow".into());
     }
+    a.extend(u.rustc_lint_flags.iter().cloned());
     a.push("--check-cfg".into());
     a.push("cfg(docsrs,test)".into());
     let vals = u
@@ -1223,6 +1235,7 @@ pub fn root_build_script_rustc_args(
         a.push("--cfg".into());
         a.push(format!("feature=\"{f}\""));
     }
+    a.extend(manifest.rustc_lint_flags.iter().cloned());
     a.push("--check-cfg".into());
     a.push("cfg(docsrs,test)".into());
     let values = manifest.check_cfg_feature_values();
@@ -1296,6 +1309,7 @@ mod tests {
             edition: "2021".to_string(),
             lib_path: PathBuf::from(format!("/tmp/{name}/src/lib.rs")),
             pkg_env: BTreeMap::new(),
+            rustc_lint_flags: Vec::new(),
         }
     }
 
@@ -1577,6 +1591,34 @@ mod tests {
                 .any(|w| w[0] == "-C" && w[1] == "overflow-checks=yes")
         );
         assert!(!a.iter().any(|x| x.starts_with("opt-level")));
+    }
+
+    #[test]
+    fn package_lints_reach_proc_macro_args_and_fingerprint() {
+        let mut plain = diamond_plan();
+        let plain_fps = fingerprints(&plain, &ProfileFlags::default(), "s", &[]).unwrap();
+        plain.units[1].rustc_lint_flags = vec![
+            "--warn=unexpected_cfgs".into(),
+            "--check-cfg".into(),
+            "cfg(bootstrap)".into(),
+        ];
+        let lint_fps = fingerprints(&plain, &ProfileFlags::default(), "s", &[]).unwrap();
+        assert_ne!(plain_fps[1], lint_fps[1], "lint 配置必须进入 unit 指纹");
+
+        let args = proc_macro_rustc_args(
+            &plain,
+            1,
+            &ProfileFlags::default(),
+            &lint_fps,
+            &layout(),
+            None,
+            &[],
+        );
+        assert!(args.iter().any(|arg| arg == "--warn=unexpected_cfgs"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--check-cfg", "cfg(bootstrap)"])
+        );
     }
 
     #[test]

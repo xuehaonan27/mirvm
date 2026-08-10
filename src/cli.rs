@@ -62,7 +62,7 @@ ENV:
                       调度/build.rs/proc-macro/rustflags/rerun-if 增量/并行调度
                       全生命周期；mirvm test 已支持 resolver=2 常见 workspace；
                       剩余拒绝面 = P5 边界：git 源/alt registry/source
-                      replacement/resolver 1、3 等，响亮拒绝点名）
+                      replacement/resolver 1 等，响亮拒绝点名）
     MIRVM_CLESS_JOBS  =N 时 cargoless 编译调度并发度（缺省 = 核数；=1 退化为
                       拓扑序串行，对拍调试用）
     MIRVM_TIMING      =1 时向 stderr 输出相位账本（frontend/lower/engine/total）

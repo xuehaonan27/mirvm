@@ -290,6 +290,9 @@ pub struct PackageManifest {
     pub default_run: Option<String>,
     /// CARGO_PKG_* 编译期 env 全集（缺键 = 空串，cargo 同契约；pkg_env_map 计算）。
     pub pkg_env: BTreeMap<String, String>,
+    /// Cargo `[lints]` 归约出的 rustc 参数。先放按 priority 排序的 level 参数，
+    /// 再放 `unexpected_cfgs` 的 `--check-cfg` 两槽参数。
+    pub rustc_lint_flags: Vec<String>,
 }
 
 // ---------- serde 原料（宽松，未知键忽略，已知不支持的键后置校验）----------
@@ -448,11 +451,7 @@ impl PackageManifest {
         if raw.patch.is_some() || raw.replace.is_some() {
             return Err(unsupported("[patch]/[replace] source replacement"));
         }
-        if raw.lints.is_some() {
-            return Err(unsupported(
-                "[lints]（会改变 rustc 行为，当前不能静默忽略）",
-            ));
-        }
+        let rustc_lint_flags = parse_lints(raw.lints.as_ref())?;
         if raw.package.is_none() && raw.workspace.is_some() {
             return Err(unsupported("virtual manifest（[workspace] 无 [package]）"));
         }
@@ -665,6 +664,7 @@ impl PackageManifest {
             links: pkg.links,
             default_run: pkg.default_run,
             pkg_env,
+            rustc_lint_flags,
         })
     }
 
@@ -760,6 +760,112 @@ impl PackageManifest {
         }
         out
     }
+}
+
+#[derive(Debug)]
+struct ParsedLint {
+    priority: i64,
+    flag: String,
+    check_cfg: Vec<String>,
+}
+
+/// Cargo `[lints]` 到 rustc argv 的归约。Cargo 保留同 priority 项的清单顺序；
+/// TOML map 启用 preserve_order，因此稳定排序只按 priority 即可复现。
+pub(super) fn parse_lints(value: Option<&toml::Value>) -> Result<Vec<String>, MErr> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let tools = value
+        .as_table()
+        .ok_or_else(|| "[lints] 必须是表".to_string())?;
+    if tools.contains_key("workspace") {
+        return Err(unsupported(
+            "[lints] workspace 继承（应先由 workspace 层物化）",
+        ));
+    }
+
+    let mut parsed = Vec::new();
+    for (tool, lints) in tools {
+        let lints = lints
+            .as_table()
+            .ok_or_else(|| format!("[lints.{tool}] 必须是表"))?;
+        for (name, spec) in lints {
+            let (level, priority, check_cfg) = match spec {
+                toml::Value::String(level) => (level.as_str(), 0, Vec::new()),
+                toml::Value::Table(table) => {
+                    if let Some(key) = table
+                        .keys()
+                        .find(|key| !matches!(key.as_str(), "level" | "priority" | "check-cfg"))
+                    {
+                        return Err(format!("lints.{tool}.{name} 含 Cargo 不认识的键 `{key}`"));
+                    }
+                    let level = table
+                        .get("level")
+                        .and_then(toml::Value::as_str)
+                        .ok_or_else(|| format!("lints.{tool}.{name}.level 必须是字符串"))?;
+                    let priority = match table.get("priority") {
+                        Some(value) => value
+                            .as_integer()
+                            .ok_or_else(|| format!("lints.{tool}.{name}.priority 必须是整数"))?,
+                        None => 0,
+                    };
+                    let check_cfg = match table.get("check-cfg") {
+                        Some(value) => {
+                            if tool != "rust" || name != "unexpected_cfgs" {
+                                return Err(
+                                    "check-cfg 只允许写在 lints.rust.unexpected_cfgs".to_string()
+                                );
+                            }
+                            value
+                                .as_array()
+                                .ok_or_else(|| {
+                                    "lints.rust.unexpected_cfgs.check-cfg 必须是字符串数组"
+                                        .to_string()
+                                })?
+                                .iter()
+                                .map(|item| {
+                                    item.as_str().map(str::to_string).ok_or_else(|| {
+                                        "lints.rust.unexpected_cfgs.check-cfg 包含非字符串成员"
+                                            .to_string()
+                                    })
+                                })
+                                .collect::<Result<Vec<_>, _>>()?
+                        }
+                        None => Vec::new(),
+                    };
+                    (level, priority, check_cfg)
+                }
+                _ => {
+                    return Err(format!("lints.{tool}.{name} 必须是 level 字符串或配置表"));
+                }
+            };
+            if !matches!(level, "allow" | "warn" | "deny" | "forbid") {
+                return Err(format!(
+                    "lints.{tool}.{name}.level 只接受 allow/warn/deny/forbid，实际为 `{level}`"
+                ));
+            }
+            let qualified = if tool == "rust" {
+                name.clone()
+            } else {
+                format!("{tool}::{name}")
+            };
+            parsed.push(ParsedLint {
+                priority,
+                flag: format!("--{level}={qualified}"),
+                check_cfg,
+            });
+        }
+    }
+    parsed.sort_by_key(|lint| lint.priority);
+    let mut flags = parsed
+        .iter()
+        .map(|lint| lint.flag.clone())
+        .collect::<Vec<_>>();
+    for check_cfg in parsed.into_iter().flat_map(|lint| lint.check_cfg) {
+        flags.push("--check-cfg".into());
+        flags.push(check_cfg);
+    }
+    Ok(flags)
 }
 
 /// CARGO_PKG_* env 全集（cargo 编译期 env 契约，env!/option_env! 可读）。
@@ -1390,13 +1496,53 @@ cc = "1"
         )
         .unwrap_err();
         assert!(err.contains("[patch]/[replace]"), "{err}");
+    }
 
-        let err = PackageManifest::parse(
-            "[package]\nname='d'\nversion='0.1.0'\n[lints.rust]\nunsafe_code='forbid'\n",
+    #[test]
+    fn parses_lints_in_cargo_priority_order() {
+        let manifest = PackageManifest::parse(
+            "[package]\nname='d'\nversion='0.1.0'\n\
+             [lints.rust]\nwarnings={level='allow',priority=-1}\n\
+             unused={level='allow',priority=0}\n\
+             dead_code={level='deny',priority=0}\n\
+             unexpected_cfgs={level='warn',priority=1,check-cfg=['cfg(bootstrap)']}\n\
+             unsafe_code={level='forbid',priority=2}\n\
+             [lints.clippy]\npedantic={level='warn',priority=-2}\n",
             Path::new("/tmp/x"),
         )
-        .unwrap_err();
-        assert!(err.contains("[lints]"), "{err}");
+        .unwrap();
+        assert_eq!(
+            manifest.rustc_lint_flags,
+            [
+                "--warn=clippy::pedantic",
+                "--allow=warnings",
+                "--allow=unused",
+                "--deny=dead_code",
+                "--warn=unexpected_cfgs",
+                "--forbid=unsafe_code",
+                "--check-cfg",
+                "cfg(bootstrap)",
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_lint_shapes_loudly() {
+        for (body, want) in [
+            ("unsafe_code='force-warn'", "allow/warn/deny/forbid"),
+            (
+                "unsafe_code={level='warn',check-cfg=['cfg(x)']}",
+                "unexpected_cfgs",
+            ),
+            ("unsafe_code={level='warn',priority='high'}", "必须是整数"),
+        ] {
+            let error = PackageManifest::parse(
+                &format!("[package]\nname='d'\nversion='0.1.0'\n[lints.rust]\n{body}\n"),
+                Path::new("/tmp/x"),
+            )
+            .unwrap_err();
+            assert!(error.contains(want), "{error}");
+        }
     }
 
     #[test]

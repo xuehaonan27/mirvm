@@ -35,7 +35,7 @@ rustc_version = "0.4.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 # D15（砍 cargo，src/cargoless/）：自有依赖解析与编译调度
-toml = { version = "1.1", features = ["serde"] }
+toml = { version = "1.1", features = ["serde", "preserve_order"] }
 semver = { version = "1.0.28", features = ["serde"] }
 pubgrub = "0.4"
 # version-ranges 的 semver 模块（Ranges::from_req）默认不编，显式开 feature

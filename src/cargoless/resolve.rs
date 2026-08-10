@@ -110,6 +110,8 @@ pub struct Unit {
     pub lib_path: PathBuf,
     /// CARGO_PKG_* env 全集（manifest::pkg_env_map 计算；dep 编译子进程 env）。
     pub pkg_env: BTreeMap<String, String>,
+    /// 本包 `[lints]` 生成的 rustc 参数；每个 target（含 build.rs）都要消费。
+    pub rustc_lint_flags: Vec<String>,
 }
 
 /// 解析结果。
@@ -1835,6 +1837,7 @@ struct RegistryMinimal {
     lib_path: PathBuf,
     pkg_env: BTreeMap<String, String>,
     declared_features: BTreeSet<String>,
+    rustc_lint_flags: Vec<String>,
 }
 
 fn read_registry_minimal(
@@ -1934,6 +1937,11 @@ fn read_registry_minimal(
         .and_then(toml::Value::as_table)
         .map(|features| features.keys().cloned().collect())
         .unwrap_or_default();
+    // registry 中的 Cargo.toml 是 Cargo 发布时归一化后的清单，仍可能保留
+    // `[lints]`；只复用 lint 解析，不能让完整 manifest 子集限制 registry 包。
+    let rustc_lint_flags = super::manifest::parse_lints(v.get("lints")).map_err(|error| {
+        format!("解析 registry 包 {package} {version} 的 [lints] 失败: {error}")
+    })?;
     Ok(RegistryMinimal {
         lib_name: name,
         proc_macro,
@@ -1944,6 +1952,7 @@ fn read_registry_minimal(
         lib_path,
         pkg_env,
         declared_features,
+        rustc_lint_flags,
     })
 }
 
@@ -2094,6 +2103,7 @@ fn assemble_units(
                 edition: m.edition.clone(),
                 lib_path,
                 pkg_env: m.pkg_env.clone(),
+                rustc_lint_flags: m.rustc_lint_flags.clone(),
             });
             continue;
         }
@@ -2117,6 +2127,7 @@ fn assemble_units(
             edition: rm.edition,
             lib_path: rm.lib_path,
             pkg_env: rm.pkg_env,
+            rustc_lint_flags: rm.rustc_lint_flags,
         });
     }
     // 依赖边填充（可构建节点 × host 为真边 × optional 激活门）

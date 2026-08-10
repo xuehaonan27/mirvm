@@ -1741,6 +1741,36 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   `diff_cless` **7/7**，Rust 测试 **176/176**；隔离 Cargo home 与全新 target 的 release
   `tests/run.sh fast` **11/11**。
 
+### 7.36 2026-08-10：D15 P5 第一批完成——resolver 3、rust-version 与 package lints
+
+- **权威和探针**：继续以 pinned Cargo 1.98 nightly 为裁判。最小项目实证：edition
+  2024 隐含 resolver 3；显式 resolver 3 可用于旧 edition；未声明 rust-version 时
+  以当前 rustc 为比较基准；混合 workspace 以全部成员最低 Rust 版本为基准。
+- **候选选择**：读取 package/workspace 继承和 registry index 的 `rust_version` /
+  `rust_version2`。resolver 3 默认 `fallback`，先取满足 semver、非 yanked 且与工作区
+  Rust 版本兼容的最高版；一个兼容版都没有时仍取通常的最高版，让后续诊断指出真实
+  Rust 版本要求。resolver 2 默认 `allow`；Cargo config 和
+  `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS` 按 Cargo 层级覆盖。
+- **命令边界**：`--ignore-rust-version` 同时关闭候选回退偏好与编译前 Rust 版本拒绝，
+  compat 轨透传 Cargo 同名参数。正常路径只检查实际要编译的根包/单元，不因仅在 lock
+  中但当前不可达的包误报。
+- **lock 版本**：Cargo 对最低 Rust 版本不高于 1.82 的项目写 lock v3，1.83 起写 v4；
+  serializer 改为忠实写模型版本，不再把 v3 错写成 v4。真实 `home = "0.5"` workspace
+  探针中 Cargo 与 self 同选 0.5.9，self lock 只与 Cargo 相差生成器注释，并被 Cargo
+  `--locked --offline` 接受。
+- **合同升级**：workspace 夹具改为 resolver 3，并让全部成员继承
+  `workspace.package.rust-version = "1.85"`；原有 27 项结果/机制合同无需新增 harness
+  即可判断，仍为 **27/27**。resolver 2 回归、单包合同和 lock 双向验收继续保留。
+- **真实 RED 带出的伴生修复**：从空 `MIRVM_HOME` 跑 fast 时，当前 rust-src 的
+  `proc_macro` 因 `[lints.rust]` 被旧解析器拒绝。Cargo `-vv` 探针确认 lint level 先按
+  priority 稳定排序，随后追加 `unexpected_cfgs.check-cfg`，且 build.rs 与普通 target
+  同样消费。现已严格校验 level/priority/check-cfg，将参数传给 root/path/registry、
+  host/proc-macro/build.rs 全部编译入口并写入指纹；空目录 sysroot 冷建成功。
+- **剩余边界和下一步**：resolver 1、workspace lints、复杂成员/package spec 继续响亮
+  拒绝。P2 主队列进入 Git 依赖，之后才是 alt registry/config、replacement/patch、
+  pack self 与总验收。最终验收为 Rust 测试 **186/186**、resolver 3 workspace 合同
+  **27/27**、隔离可写 Cargo home/target 的 release `tests/run.sh fast` **11/11**。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT

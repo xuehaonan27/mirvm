@@ -4,7 +4,7 @@
 //! 分期（每期闭合契约见设计档 §5；P1–P3 已收口，验收与语义实证清单见
 //! decision-history §7.28/§7.29/§7.30）：
 //! - P1（已收）：解析地基——`manifest`（Cargo.toml 模型 + cfg 平台求值 +
-//!   frontmatter 伪包）、`lockfile`（v1–v4 读写 + canonical v4）、
+//!   frontmatter 伪包）、`lockfile`（v1–v4 读写 + canonical v3/v4）、
 //!   `registry`（自有 store + 读穿 + sparse index + .crate 解包）、
 //!   `resolve`（双模式求解 + feature 统一 → 编译单元图）、`audit`。
 //! - P2（已收）：`schedule`（拓扑 + 内容指纹 + 每 crate rustc 参数 +
@@ -19,8 +19,9 @@
 //!   source replacement 共用）+ sysroot 构建换 cargoless 调度（零 cargo
 //!   零 crates.io）+ `--bin` 多目标选择 + **MIRVM_DEPS 默认翻 self**
 //!   （=cargo 显式 compat，双轨各自完整）。`workspace` + `mirvm test` 已接
-//!   resolver=2 常见多包形态；剩余拒绝面 = P5 边界（git 源/alt registry/
-//!   source replacement/resolver 1、3，响亮拒绝点名，按实需逐项立项）。
+//!   resolver=2/3 常见多包形态与 rust-version-aware 选择；剩余拒绝面 =
+//!   P5 边界（git 源/alt registry/source replacement/resolver 1，响亮拒绝
+//!   点名，按实需逐项立项）。
 
 pub mod audit;
 pub mod buildrs;
