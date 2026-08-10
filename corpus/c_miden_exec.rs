@@ -1,11 +1,11 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-miden-assembly = "=0.25.5"
-miden-processor = "=0.25.5"
+miden-assembly = "=0.25.8"
+miden-processor = "=0.25.8"
 ---
-// miden-vm 0.25.5（crates.io 2026-07-17 最新稳定线；批任务文本写 0.13/0.14/0.15，
-// 上游实际已发到 0.25。按 task 精神取最新稳定钉到 patch）VM-in-VM 执行差分。
+// miden-vm 0.25.8（0.25.5 于 2026-08-10 已被上游 yanked；同一 0.25 发布线
+// 的非 yanked 补丁版）VM-in-VM 执行差分。
 //
 // 形态与绕行（execute-only，绝不开证明）：
 //   * miden-vm umbrella crate 把 miden-prover 列为【非可选】依赖——证明器体量与
@@ -63,7 +63,7 @@ miden-processor = "=0.25.5"
 // 下从溢出区拉零回窗口。中期曾按错误模型绕过的死路（手工帧栈、栈上摘要互传、
 // procref 自递归）均已剔除。
 //
-// 三维实测（2026-07-17，全绿）：A/C/B 三进程 stdout 逐字节一致（8 行：fib
+// 0.25.5 三维实测（2026-07-17，全绿）：A/C/B 三进程 stdout 逐字节一致（8 行：fib
 // stack_top=[10946,6765,…] trace_len=128 core=75 range=45；fold [51207]
 // trace_len=128 core=65；rec emits=[0,1,3,6,10,15,21,28,36,45,55,66,78,91,105]
 // stack_top=[105] trace_len=1024 core=884 range=63 hash=560 bitwise=0 memory=46），

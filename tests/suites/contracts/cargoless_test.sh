@@ -2,7 +2,8 @@
 # `mirvm test` 的 cargoless 合同：固定 Cargo 是语义权威；compat 与 self
 # 必须给出同样的测试结果，self 腿还必须在 cargo 不可用时成立。
 set -u
-cd "$(dirname "$0")/.."
+. "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
+test_enter_repo
 
 MIRVM=${MIRVM:-$(pwd)/target/debug/mirvm}
 CARGO=${CARGO:-$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo}
@@ -11,13 +12,14 @@ STRACE=${STRACE:-$(command -v strace)}
 FIXTURE=$(pwd)/tests/fixtures/cless_test_contract
 CONTRACT_HOME=${MIRVM_CONTRACT_HOME:-${MIRVM_HOME:-$HOME/.mirvm}}
 HOST=$($RUSTC -vV | sed -n 's/^host: //p')
-CONTRACT_SYSROOT="$CONTRACT_HOME/sysroot-$HOST"
 [ -x "$MIRVM" ] || { echo "cargoless_test_contract: $MIRVM 不存在" >&2; exit 69; }
 [ -x "$CARGO" ] || { echo "cargoless_test_contract: pinned Cargo $CARGO 不存在" >&2; exit 69; }
 [ -x "$STRACE" ] || { echo "cargoless_test_contract: strace 不存在" >&2; exit 69; }
+ensure_test_sysroot "$MIRVM" "$CONTRACT_HOME" "$RUSTC" || exit $?
+CONTRACT_SYSROOT=$TEST_SYSROOT
 case "$($CARGO --version)" in
     "cargo 1.98.0-nightly "*) ;;
-    *) echo "cargoless_test_contract: Cargo 版本不在合同内: $($CARGO --version)" >&2; exit 65 ;;
+    *) echo "ERROR cargoless_test: Cargo 版本不在合同内: $($CARGO --version)" >&2; exit 69 ;;
 esac
 
 TMP=$(mktemp -d)
@@ -30,10 +32,6 @@ exit 97
 EOF
 chmod +x "$TMP/no-cargo/cargo"
 export MIRVM_CARGO_SENTINEL="$TMP/cargo-was-invoked"
-
-pass=0 fail=0
-ok() { pass=$((pass + 1)); echo "PASS $*"; }
-bad() { fail=$((fail + 1)); echo "FAIL $*"; }
 
 normalize() {
     sed -E \
@@ -197,5 +195,4 @@ else
     bad "pinned Cargo 普通 bin 合同漂移"
 fi
 
-echo "== $pass passed, $fail failed =="
-[ "$fail" = 0 ]
+suite_summary contracts.cargoless-test

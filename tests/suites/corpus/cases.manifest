@@ -1,11 +1,11 @@
-# corpus.manifest —— corpus 唯一真源（tests/lib.sh::manifest_rows 解析）。
+# cases.manifest —— corpus 唯一真源（tests/support/harness.sh 解析）。
 # 列：name  tier(smoke|full|manual)  timeout秒  mode(exit|oracle:<名>|diff)
 #        [env=K=V;K=V] [needs=<路径>] [args=a;b;c] [xfail=<code>:<grep 模式>]
 #        [group=<组>[,<组>...]]
 #
 # tier：smoke = 日常快层（run.sh smoke）；full = gate 全量防线；
 #        manual = 只手工跑批（贴 timeout 或依赖机侧前缀，needs 缺席记 SKIP）。
-# group：分组过滤键（corpus.sh / corpus_deps_pair.sh 的 --group；可叠加 --tier
+# group：分组过滤键（corpus.run / corpus.deps-pair 的 --group；可叠加 --tier
 #        取交集）。heavy = 实测墙钟最长的重负载子集（gate 最慢榜定编，~16 条）；
 #        无 group= 的条目属隐含 light 组。日常节奏：fast → smoke → 按需
 #        --group heavy，全量只在战役收尾（run.sh gate）。
@@ -16,7 +16,7 @@
 #       warm 复跑三维 == native 三维 + warm stdout == cold stdout。
 #       env 值含空格时写作 %20（如 RUSTFLAGS=--cap-lints%20allow——两侧同帽
 #       静默上游告警，stderr 对拍才只承载程序自身输出）；
-#       args 里 {ROOT} = 仓库根绝对路径（tests/lib.sh::parse_args 展开）。
+#       args 里 {ROOT} = 仓库根绝对路径（共享 harness 的 parse_args 展开）。
 # 纪律：新增 corpus driver 必须先在此登记（scripts 读、gate 读，无第二份名单）；
 #       driver 文件存在但无登记 = gate 响亮 FAIL。
 #
@@ -155,14 +155,14 @@ scraper_dom            full   90   exit
 arrow_rs               full   300  exit            
 fontdue                full   90   exit            
 unicode_rs             full   90   exit            
-rustpython_mini        full   300  exit             group=heavy
+rustpython_mini        full   300  exit             needs=/usr/lib/x86_64-linux-gnu/libffi.so group=heavy
 tree_sitter            smoke  90   exit            
 bzip2_csys             full   90   exit            
 wasmtime_wat           smoke  300  exit             group=heavy
 risc0_run              full   300  exit             group=heavy
 typst_pdf              full   300  exit             group=heavy
 datafusion_sql         full   400  exit             group=heavy
-miden_prove            full   400  exit             group=heavy
+miden_prove            full   400  exit             xfail=1:manifest.*D15 group=heavy
 ethers_evm             full   90   exit             group=heavy
 polars_lazy            full   180  exit             group=heavy
 xlsxwriter_rw          full   180  exit            
@@ -183,7 +183,7 @@ stemmers_multi         full   90   exit
 tokenizers_hf          full   180  exit             group=heavy
 whatlang_detect        full   90   exit            
 #
-# ---- 手工批条目（旧 corpus.sh 独有）----
+# ---- 手工批条目（不进入默认 gate）----
 jieba_cut              manual 180  exit            
 zstd_stream            full   90   exit            
 opencc                 manual 90   exit             needs=/tmp/opencc-local env=OPENCC_DIR=/tmp/opencc-local;OPENCC_LIBS=opencc;LD_LIBRARY_PATH=/tmp/opencc-local/lib
@@ -191,6 +191,6 @@ ugrep_bin              manual 90   exit             needs=/tmp/ugrep-local/bin/u
 #
 # ---- 真 cargo 项目（corpus/projects/<名>/，mode=diff：native cargo run 三维对拍）----
 # vendor 来源与 sha256 钉见 corpus/projects/README.md；{ROOT} = 仓库根绝对路径
-# （tests/lib.sh::parse_args 展开；两侧 cwd=项目目录下的相对路径无法同指一文件）。
+# （共享 harness 展开；两侧 cwd=项目目录下的相对路径无法同指一文件）。
 hexyl                   full   180  diff             env=RUSTFLAGS=--cap-lints%20allow args=--color;never;-n;256;{ROOT}/tests/fixtures/hexyl_input.bin
 tokei                   full   300  diff             env=RUSTFLAGS=--cap-lints%20allow args={ROOT}/tests/fixtures/tokei_input

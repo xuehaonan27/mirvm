@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use semver::Version;
 
 use super::manifest::{DepKind, DepSource, FeatureValue, PackageManifest};
-use super::registry::{IndexDep, IndexVersion};
+use super::registry::{IndexDep, IndexEntry, IndexVersion};
 use super::resolve::PkgSource;
 
 pub struct VendorDir {
@@ -27,7 +27,7 @@ pub struct VendorDir {
     overrides: BTreeMap<String, PathBuf>,
     /// index_entry 合成缓存（resolve 对同一包多次重查——unify 注册 +
     /// node_featdeps 再取；manifest 解析不便宜，查一次记一次）。
-    cache: BTreeMap<String, Vec<IndexVersion>>,
+    cache: BTreeMap<String, IndexEntry>,
 }
 
 impl VendorDir {
@@ -125,7 +125,7 @@ impl VendorDir {
 }
 
 impl PkgSource for VendorDir {
-    fn index_entry(&mut self, name: &str) -> Result<Vec<IndexVersion>, String> {
+    fn index_entry(&mut self, name: &str) -> Result<IndexEntry, String> {
         if let Some(hit) = self.cache.get(name) {
             return Ok(hit.clone());
         }
@@ -155,6 +155,7 @@ impl PkgSource for VendorDir {
             }
             entries
         };
+        let entries: IndexEntry = entries.into();
         self.cache.insert(name.to_string(), entries.clone());
         Ok(entries)
     }

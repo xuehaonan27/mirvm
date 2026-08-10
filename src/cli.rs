@@ -5,7 +5,7 @@
 //!
 //! 引擎 = M4 字节码 VM（加载相 lower + 执行相 engine）。tier-0（rustc InterpCx）已于
 //! 2026-07-09 移除——代码在 git 历史（tag 前缀 feat: M4.3 之前），差分 oracle 一直是
-//! native 编译直跑（tests/diff_vm.sh）。
+//! native 编译直跑（`differential.programs`）。
 
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, exit};

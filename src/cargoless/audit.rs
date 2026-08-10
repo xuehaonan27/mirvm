@@ -54,7 +54,7 @@ pub fn audit_project(dir: &Path) -> Result<AuditReport, String> {
 /// frontmatter 脚本审计（fresh 求解；验收 = 生成的 lock 被 cargo
 /// `--locked --offline` 原样接受——先 `cargo fetch --locked`（在线补取）
 /// 再 `--offline` 构建；历史物化 lock 的失配只作信息备注（时间漂移非分叉）。
-/// 与 tests/corpus.manifest 联动：条目带 needs= 且路径缺席时记 SKIP
+/// 与 tests/suites/corpus/cases.manifest 联动：条目带 needs= 且路径缺席时记 SKIP
 /// （与 gate 同口径，不算失败）。
 pub fn audit_script(file: &Path) -> Result<AuditReport, String> {
     let text = std::fs::read_to_string(file)
@@ -67,7 +67,7 @@ pub fn audit_script(file: &Path) -> Result<AuditReport, String> {
         }
         None => return Err(format!("{} 文件名非法", file.display())),
     };
-    // needs=/env= 联动（tests/corpus.manifest 唯一真源）
+    // needs=/env= 联动（corpus cases.manifest 唯一真源）
     let (needs, manifest_env) = manifest_fields(stem);
     if let Some(needs) = needs
         && !std::path::Path::new(&needs).exists()
@@ -235,10 +235,10 @@ fn empty_plan(file: &Path) -> ResolvePlan {
     }
 }
 
-/// tests/corpus.manifest 里该条目的 needs= 路径与 env= 串（无登记 = (None, None)）。
+/// corpus cases.manifest 里该条目的 needs= 路径与 env= 串（无登记 = (None, None)）。
 /// 脚本文件是 c_<name>.rs 而 manifest 行名是 <name>——双键查询。
 fn manifest_fields(stem: &str) -> (Option<String>, Option<String>) {
-    let Ok(text) = std::fs::read_to_string("tests/corpus.manifest") else {
+    let Ok(text) = std::fs::read_to_string("tests/suites/corpus/cases.manifest") else {
         return (None, None);
     };
     let bare = stem.strip_prefix("c_").unwrap_or(stem);

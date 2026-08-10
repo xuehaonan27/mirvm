@@ -13,7 +13,7 @@ JIT 默认开启）。
 > [docs/current-status.md](docs/current-status.md) 为准；文档权威与历史替代关系见
 > [docs/README.md](docs/README.md)。
 
-## 当前状态（2026-08-08 快照）
+## 当前状态（2026-08-10 快照）
 
 - **M4 完成**：自研 typed bytecode、tree-walking interpreter、tcx-free 执行相、真实地址内存、
   unwind、libffi FFI、native→guest thunk、1:1 OS 线程与 guest TLS。
@@ -29,8 +29,8 @@ JIT 默认开启）。
 - **corpus manifest 当前 166 项（139 full + 24 smoke + 3 manual）**，含 vendored
   真 cargo 项目（hexyl/tokei）：
   创建时完成 mirvm/native/逢调即编三维逐字节验收；持续门 =
-  `tests/corpus.manifest` 唯一真源（exit/oracle/diff 三口径，2026-07-23 管线整顿，
-  提升项见 [open-issues.md G7](docs/open-issues.md)）；`tests/gate.sh`
+  `tests/suites/corpus/cases.manifest` 唯一真源（exit/oracle/diff 三口径，
+  提升项见 [open-issues.md G7](docs/open-issues.md)）；`./tests/run.sh gate`
   2026-07-23 历史全 gate 为 **179 PASS / 0 XFAIL / 0 FAIL**；当前现场复验数字见
   [current-status.md §3](docs/current-status.md)。
 - **`.mirvm` 格式 v2**：包内携带所有自产动态库字节；运行不要求源码、原编译环境或
@@ -69,11 +69,11 @@ cargo build --release --locked
 ./target/release/mirvm pack path/to/project -o app.mirvm
 ./target/release/mirvm run app.mirvm
 
-# 当前基础回归；语义完整性仍以 current-status 中的诚实边界为准
-bash tests/run.sh fast     # 逢提交级：静态检查 + 差分 + 单包/工作区 test 合同 + gate_truth
-bash tests/run.sh smoke    # 批次级：fast + corpus smoke 层 + probes + runtime_gates
-bash tests/gate.sh         # 战役收尾全量（corpus 全防线 + perf + a2 + 上述全部）
-bash tests/corpus.sh --tier smoke   # corpus 手工跑批（tests/corpus.manifest 唯一真源）
+# 标准测试入口；完整套件说明见 tests/README.md
+./tests/run.sh fast
+./tests/run.sh smoke
+./tests/run.sh gate
+./tests/run.sh suite corpus.run --tier smoke
 ```
 
 真实 Cargo 项目的对拍走 `corpus/projects/`（vendor 真项目 + manifest `mode=diff` 三维

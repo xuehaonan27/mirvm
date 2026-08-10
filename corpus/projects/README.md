@@ -1,10 +1,10 @@
 # corpus/projects/ —— 真 cargo 项目对拍
 
 此目录收编**真实世界的 cargo 项目**（编译产出二进制的那种），vendor 进仓，
-在 tests/corpus.manifest 以 `mode=diff` 登记：tests/gate.sh 会把
+在 `tests/suites/corpus/cases.manifest` 以 `mode=diff` 登记；`./tests/run.sh gate` 会把
 `mirvm run <项目>` 与 `cargo run`（native）的 stdout/stderr/退出码三维
 逐字节对拍（另有 L2 warm 复跑防缓存回放）。判绿口径与夹具路径占位符
-（{ROOT}）见 tests/corpus.manifest 头注与 tests/lib.sh。
+（{ROOT}）见 cases.manifest 头注与 `tests/support/harness.sh`。
 
 ## 收编清单与 provenance 钉
 
@@ -29,7 +29,7 @@ Cargo.toml.orig、.cargo_vcs_info.json 等；未增删任何文件），可用
 ## 升级/新增纪律
 
 1. 新版本：下载 .crate → 校验 sha256 → 全量替换目录 → 更新上表 →
-   跑 `CORPUS_PROGS=<名> bash tests/gate.sh` 验证三维一致。
+   跑 `./tests/run.sh suite corpus.contract <名>` 验证三维一致。
 2. 新项目：先确认输出对固定输入逐字节确定（不定时不收编；
    不得用文本规范化掩盖非确定性）→ vendor → manifest 登记
    `mode=diff`（tier 先 full，撞红按欠账流程处理）→ 本表补行。

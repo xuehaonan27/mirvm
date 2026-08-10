@@ -1,4 +1,4 @@
-//! M4 引擎多线程 TSan 用例（spike4 义务的 M4 真身；tests/spike4_tsan.sh 载体）。
+//! M4 引擎多线程 TSan 用例（spike4 义务的 M4 真身；`runtime.tsan` 载体）。
 //!
 //! 8 宿主线程共享一个 `Shared`，各自边界 attach 拿每线程 Ctx：
 //! ① 解释执行 guest 原子自增（AtomicRmw——引擎必须发真宿主原子指令，spike4 义务）；

@@ -3,31 +3,32 @@ set -u
 
 script=${1:-}
 echo "$script" >>"$GATE_CALL_LOG"
+if [ "${GATE_FAIL_SUITE:-}" = "$script" ]; then
+    echo "FAIL injected failure: $script"
+    exit 1
+fi
+
 case "$script" in
-    tests/diff_cargo.sh)
+    tests/suites/differential/cargo.sh)
         echo 'PASS ecosystem'
         echo 'PASS ffi_zlib'
         echo 'PASS ripgrep_regex'
         echo 'PASS warning_return'
         echo 'PASS project'
-        echo '== 5 passed, 0 expected-red, 0 failed =='
+        echo '== differential.cargo: 5 passed, 0 skipped, 0 expected-failed, 0 failed =='
         ;;
-    tests/diff.sh)
-        echo '== 20 passed, 0 failed =='
+    tests/suites/differential/programs.sh)
+        echo '== differential.programs: 20 passed, 0 skipped, 0 expected-failed, 0 failed =='
         ;;
-    tests/a2_deps_image.sh)
-        echo 'PASS a2_deps_image'
-        ;;
-    tests/perf.sh)
-        ;;
-    tests/runtime_gates.sh)
+    tests/suites/runtime/semantics.sh)
         if [ -n "${SKIP_TSAN:-}" ]; then
             echo 'SKIP TSan（SKIP_TSAN=1）'
         else
             echo 'PASS TSan（含 tsan_mt 多线程真身，零警告）'
         fi
+        echo '== runtime.semantics: 1 passed, 0 skipped, 0 expected-failed, 0 failed =='
         ;;
-    tests/probes.sh)
+    tests/suites/runtime/x86_features.sh)
         for probe in addcarry xgetbv simd_insert simd_shift vzeroupper; do
             if [ "${M51_SKIP_PROBE:-}" = "$probe" ]; then
                 echo "SKIP m51_$probe: host lacks required CPU feature"
@@ -43,8 +44,20 @@ case "$script" in
             fi
         done
         ;;
+    tests/suites/performance/limits.sh)
+        if [ -n "${SKIP_PERF:-}" ]; then
+            echo 'SKIP 性能上限（SKIP_PERF=1；语义 gate 仍照常执行）'
+        fi
+        ;;
+    tests/suites/quality/rust.sh|tests/suites/differential/cargoless.sh|\
+    tests/suites/contracts/cargoless_test.sh|tests/suites/contracts/cargoless_workspace.sh|\
+    tests/suites/contracts/cargoless_git.sh|tests/suites/contracts/build_script_rerun.sh|\
+    tests/suites/contracts/deps_image.sh|tests/suites/corpus/contract.sh|\
+    tests/suites/runtime/jit_stats.sh|tests/suites/harness/truth.sh)
+        echo "PASS fake $script"
+        ;;
     *)
-        echo "unexpected nested gate: $script" >&2
+        echo "unexpected nested suite: $script" >&2
         exit 99
         ;;
 esac

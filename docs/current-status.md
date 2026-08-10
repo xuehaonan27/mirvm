@@ -1,6 +1,6 @@
 # mirvm 当前开发状态
 
-> 状态日期：2026-08-08（2026-07-22 外部审核
+> 状态日期：2026-08-10（2026-07-22 外部审核
 > [history/development-status-audit-2026-07-22.md](history/development-status-audit-2026-07-22.md)
 > 之后的 D15 P1-P4、稳定化与 `mirvm test` 工作区合同均已纳入，见
 > decision-history §7.21-§7.35）。
@@ -33,7 +33,7 @@
 | C4（dep crate global_asm 物化） | **片①完成（2026-07-23）** | 定稿方向一次落地（decision-history §7.22/§7.23，`176ae20`）：dep 编译期自 HIR 抽取 global_asm/naked 落 rlib 旁挂文本清单，bin 加载相按 crate 图序经 assemble 通道物化装载——不绕行（无 env 名单/无救援链）。验收：c_faer_lu 复原 faer 默认特性，native/默认/SYNC 三维逐字节一致。伴生：JIT 帧 >16 对齐潜伏错值修复（cranelift 栈基 16 上限 + 槽内余量代码级抬基）、C6 补面六件。片② = mode B 机器码节（D1），dep `sym` 指向 guest fn 残余转 R16 |
 | mode B（`.mirvm` 包 + pack/run + MC 机器码节） | **已实现；2026-08-07 自包含纠偏** | v1 的 MC 只覆盖 global_asm，static archive 物化 `.so` 仍依赖原缓存路径，且源码戳/env 默认门控，不是真单文件分发。**格式 v2 已修正**：所有自产库字节进入 NATIVELIBS；MC 缺省时也会在新机器按内容哈希自动物化；STAMPS/env 只作来源记录。解析器对长度、数量、offset、重叠、重复 tag 与每节 hash 全做 checked 校验。关闭 MC、移走原缓存、换全新 MIRVM_HOME 的真实包仍逐字节运行。格式仍不定死（D3 后再做 D4 冻结） |
 | **2026-08-07 现状复核与稳定化** | **完成** | 修复 JIT 多帧 unwind：同一 FrameTable 的完整 `.eh_frame` 一次注册，旧逐 FDE 做法在两层 JIT 栈会使 panic 无法启动；五个 unwind probe 与两个产品差分用例复绿。TSan 独立 crate 补入日志宏同源依赖并实跑零竞争。`threads_sync` 在 SYNC+阈值1+热缓存下连续 100 次通过，未复现独立崩溃，未做猜测性修补。另定位 pinned LLVM 22 的 release 清理链误编译，固定 `debug=2` 参与代码生成并在链接后剥离调试段；成品仍约 14.4 MiB，默认与 SYNC+阈值1 差分均 45/45。产品能力缺口与建议顺序见 [product-capabilities-plan.md](designs/product-capabilities-plan.md) |
-| **测试管线整顿（2026-07-23，decision-history §7.26）** | **完成** | `tests/corpus.manifest` **唯一真源**（tier/timeout/mode/env/needs/xfail 六列；164 脚本驱动全接线 = 137 full + 24 smoke + 3 manual——**双名单漂移实锤：13 个批6 条目两边都没接线**）+ `tests/run.sh` 分层入口（fast 逢提交 / smoke 批次级 / gate 收尾级）+ 时间/空间/cache 三维计量与磁盘护栏（lib.sh disk_guard + target 预算闸）+ 代号名退役（m4_/m5_/m51_ → gate.sh/runtime_gates.sh/probes.sh/perf.sh）+ real_projects 重型 harness 挪 tests/parked/。**corpus/projects/ 真 cargo 项目形态**：hexyl 0.17.0 + tokei 14.0.0 vendor（.crate 全量解包 + sha256 钉），manifest `mode=diff` = mirvm warm 三维 == native 三维 + warm stdout == cold stdout；两机制实锤（cargo 回放缓存告警 → 双侧 `--cap-lints allow` 同帽；mirvm 项目模式 guest cwd=项目目录 → `{ROOT}` 占位绕行，产品侧对齐待裁定 = [open-issues.md E36](open-issues.md)）。验收：gate_truth 12/12、run.sh fast 7/7、gate.sh 排练 17/0/1/0、**gate.sh 全量 179/0/0/0**（jiff_time 钉版后复绿，corpus.md 批11） |
+| **标准测试套件（2026-08-10；取代散落脚本）** | **完成** | `tests/run.sh` 是统一入口，提供 `fast`/`smoke`/`gate`、`suite <id>`、`list`；套件按 `quality`、`differential`、`contracts`、`corpus`、`runtime`、`performance`、`harness` 分目录。`tests/support/harness.sh` 统一路径、PASS/FAIL/SKIP/XFAIL、汇总、manifest 执行、cache 与磁盘保护；corpus 只保留 `tests/suites/corpus/cases.manifest` 一份条目清单。旧脚本已迁移或删除，`tests/README.md` 逐项说明用途和新增测试规则，`harness.truth` 锁住注册表覆盖、失败传播与 XFAIL 真实性。默认依赖轨仍为 cargoless self，Cargo compat 与独立 Cargo 裁判同时保留以便持续对拍。2026-07-23 整顿及其 179/0/0/0 是历史证据，不再是当前路径说明 |
 | **D15 P1（砍 cargo 之解析地基，2026-07-27，decision-history §7.27/§7.28）** | **完成** | `src/cargoless/` 五件：manifest（Cargo.toml 模型 + cfg 平台求值 + frontmatter 伪包）/ lockfile（v1–v4 读写 + canonical v3/v4）/ registry（自有 store + 读穿 cargo 缓存只读 + sparse index + .crate sha256 自实现校验 + 解包防护）/ resolve（lock/pubgrub 双模式 + feature 统一 + 单元装配）/ audit（`mirvm deps audit`：项目等值对账 + 脚本 cargo `--locked --offline` 验收链 + manifest needs/env 联动）。**cargo 解析语义全实证定稿**（resolve 图全平台并集 ∪ build 图 host 过滤、lazy-bucket 多版本 fork（hashbrown 0.14/0.15 类）、optional 门按（父包,父版本,依赖键）、?/ 弱引用级联（rust_decimal→borsh→bytes 实锤）、pre 精确规则、exact 钉兼容 build 元数据、lock canonical 尾逗号、同名多 req 条目分立、rename 双路匹配）；上游破洞六枚钉版（均验证 cargo 自家 fresh 同撞）。29 单测绿 + corpus 全量 audit 166 目标绿。P2/P3 已收（见下行）；rust-version-aware 偏好与 Git 来源分别在 2026-08-10 的 §7.36/§7.38 补齐 |
 | **D15 P2（砍 cargo 之编译调度，2026-07-27，decision-history §7.29）** | **完成** | cargoless 新增 schedule/buildrs/driver：`MIRVM_DEPS=self` 的 `mirvm run` 全程零 cargo——自排拓扑、自算每 crate rustc 参数（内容指纹含传递传播不变量）、proc-macro 闭包 ∪ build-deps 闭包真 rustc host 真 codegen（proc-macro 五钉/host rlib 形态全探针实锤）、build.rs 编译→执行→指令传播全生命周期（`-l` 只进本包、`-L` 传递、metadata 只给直接依赖者、无自动 DEP_*_ROOT、无自动 check-cfg 补钉——全按 probe_link 实证）。**闭合验收：corpus smoke 24 双腿（cargo vs self）stdout/stderr/exit 逐字节 24/24**；diff_cless 六夹具（PATH 只含 mirvm + 离线实证零 cargo 进程）。对拍暴露四枚修复当日落地（含 cargo 腿既有 bug：phase_wrapper 劫持 rustix 1.1.4 RUSTC_WRAPPER 探针竞态 EPIPE）。E36 状态精确化：self 路径以构造闭合（guest cwd = 调用者 cwd），compat 路径行为照旧（归 P4，见 open-issues E36）。P3 已收（见下行） |
 | **D15 P3（迁移全量 corpus 与双轨 gate，2026-07-28，decision-history §7.30）** | **完成** | 四切落地：① **rustflags 子集**（新 `rustflags.rs`：CARGO_ENCODED_RUSTFLAGS > RUSTFLAGS > config 三键，优先级/发现按 cargo；实证 13 条 rustc 行逐类核对定稿——rustflags 只落 target 单元，host 侧签名级不吃；进全 unit 指纹；伴生修 proc_macro 下划线双拼写、根包 [lib]+[[bin]] 根 lib 编译两枚缺口）。② **build.rs rerun-if 精细增量**（cargo 同语义重跑判定：默认面 registry 源不可变永不重跑 / path 树快照、rerun-if-changed 按 (len,mtime_ns)、env-changed 按值、links 直接依赖传递、存档缺席损坏自愈；存档 = build/<pkg>-<fp>/{output.txt,rerun.txt}，跳过执行则原始 stdout 重解析回放零失真，warning 同门控回放；libgit2 第二腿 20s→0s、tree_sitter 8s→0s）。③ **编译调度并行化**（`run_scheduler` Kahn 就绪队列 + std-only worker 池；完成表只归主线程、派发时捎依赖侧输入进 WorkMsg 零锁；jobs=1 与 Kahn FIFO 逐位一致的对拍锚；FpLocks 互斥同 fp 的 Normal/Build 双 unit；冷跑 wasmtime_wat 152s→79s、libgit2 19s→11s）。④ **full 层迁移**（137 条目双腿对拍 120/19 起 → 分诊修复四枚：extern 命名无 rename 时按 dep 包 lib target 名（new_debug_unreachable 实锤）、StrongDep 强形在有同名显式 feature 定义时被 dep: 遮蔽也置旗（zerotrie litemap 三态定稿）、build script env 补 CARGO_MANIFEST_LINKS（ring 实锤）、bin 会话 --remap-path-prefix + 脚本正文物化 src/main.rs（file!() 路径形态逐字节））。**P5 单列制度化**（对拍轴与 gate 的 corpus 段遇「归 P5」响亮拒绝单列 p5 不计失败；miden_prove 归列）；**双轨接线**（diff_cargo 恒钉 cargo 轨、gate DEPS 轴、a2 恒钉 cargo 轨——跨轨 image 共享原理性不可能、native 基线显式钉 RUSTC 防 rustup 代理按 cwd 解析的混合工具链）。**闭合验收：corpus_deps_pair --tier full 138 pass 1 p5 0 fail；cargo test 153；run.sh fast 9/9；gate DEPS=self（SKIP_TSAN=1）177 pass 1 p5 1 fail**（唯一 fail = 纯度门禁 mirvm-tsan 被工作树内并行重构卡住，与 D15 无关如实记）。P4（sysroot 自管 + MIRVM_DEPS 默认翻 self + `--bin`/`--package` 多目标选择 + compat 评审）待施 |
@@ -95,21 +95,28 @@ x86 asm wrapper。
 
 ## 3. 已验证边界
 
-- **当前增量验证（2026-08-08 实跑）**：`cargo fmt --all -- --check` 绿、Clippy
-  `-D warnings` 零诊断、`cargo test --locked --all-features` **176/176**、
-  `tests/cargoless_test_contract.sh` **20/20**、工作区合同 **27/27**、
-  `tests/diff_cless.sh` **7/7**。发布版 `tests/run.sh fast` 在隔离且可写的 Cargo
-  home/全新 target 中 **11/11**；其中默认与 SYNC JIT 差分、Cargo 兼容差分、两套
-  cargoless test 合同、build.rs 重跑与门禁自检全部通过。
-  **上一轮全矩阵（2026-08-07 实跑）**：
+- **当前增量验证（2026-08-10 实跑）**：`cargo fmt --all -- --check`、Clippy
+  `-D warnings`、`cargo test --locked --all-features` **195/195** 均通过；
+  `./tests/run.sh fast` **10 套件通过、0 失败**，其中程序差分默认/JIT 同步各
+  **45 PASS / 2 SKIP**、Cargo 裁判 **5/5**、cargoless **7/7**、单包 test 合同
+  **20/20**、工作区合同 **27/27**、Git 来源 **9/9**、build.rs **21/21**、
+  harness 自检 **16/16**。标准化前后受改动影响的 corpus 条目、Git 来源、运行时语义
+  另行定点复跑均通过；`miden_prove` 因当前不支持 `[patch.crates-io]` 为 XFAIL，
+  `rustpython_mini` 因本机缺 `libffi.so` 开发链接名为 SKIP。
+  本轮完整 `gate` 已真实跑过并暴露、推动修复 resolver 兼容版本统一、Git rust-version
+  校验误访问 crates.io、JIT 退出期与 Rayon 并发线程生命周期、以及数个 fixture 漂移；
+  修复后受影响路径均已定点复绿，但未再花约 40 分钟整轮复跑。当前仍有一个真实 RED：
+  `performance.limits` 的 `fib(32)` 最快 **97ms > 80ms**；输出正确且 JIT 有效，不放宽门槛，
+  已登记 [open-issues.md E7](open-issues.md)。因此当前不得宣称完整 `gate` 全绿。
+  **上一轮全矩阵（2026-08-07 实跑，以下路径和数字只作历史证据）**：
   `tests/diff.sh` **45/45**（默认与阈值=1 双态）、**+MIRVM_JIT_SYNC 同步发布
   45/45**（可准入函数首调同步编译并真跑机器码，编译失败 RED——audit F-05 起
   threshold=1 的证明力升级）、`tests/diff_cargo.sh` 5/5、
   `tests/gate_truth_regression.sh` 12/12、`tests/run.sh fast` 9/9、
   `tests/gate.sh` **179/0/0/0**（corpus 全防线 163 条目 = 161 脚本（smoke+full
   两层）+ hexyl/tokei 项目三维对拍；fib(32) JIT 62ms ≤80ms 硬门在列）、
-  TSan 零警告。测试管线 2026-07-23 整顿（decision-history §7.26）：套件入口
-  `tests/run.sh fast|smoke|gate`，corpus 唯一真源 `tests/corpus.manifest`。
+  TSan 零警告。该轮沿用 2026-07-23 测试管线；现行入口与规则见
+  [tests/README.md](../tests/README.md)。
   CI（`.github/workflows/ci.yml`）同构命令全绿（GitHub 侧操作暂停，本地同构为准）。
   **以下为各阶段 dated 历史记录**（保留备查，非本轮复跑）：
 - debug/release 构建可通过；执行必须优先使用 release 版本。当前 pinned LLVM 22 下，

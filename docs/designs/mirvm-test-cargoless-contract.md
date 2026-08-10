@@ -2,7 +2,8 @@
 
 > 生效日期：2026-08-10。这里的 “cargoless” 指 mirvm 自己解析清单、安排编译，
 > 运行过程中不启动 Cargo。实现事实以代码和
-> `tests/cargoless_test_contract.sh`、`tests/cargoless_workspace_contract.sh` 为准。
+> `tests/suites/contracts/cargoless_test.sh`、
+> `tests/suites/contracts/cargoless_workspace.sh` 为准。
 
 ## 1. 谁决定正确行为
 
@@ -82,8 +83,9 @@ virtual manifest、四成员、排除包、继承、目标条件 Dev 依赖、�
    诊断文字变化。
 3. 行为变化先改 manifest/resolve/schedule/driver 和对应单测，再改合同断言；不允许
    仅放宽归一化规则让测试变绿。
-4. 依次运行 `cargo test --locked`、两个合同、`tests/diff_cless.sh`，最后跑
-   `tests/run.sh fast`。三轨全部通过后，新的 pinned Cargo 才成为权威；工作区合同的
+4. 依次运行 `./tests/run.sh suite quality.rust`、两个合同、
+   `./tests/run.sh suite differential.cargoless`，最后跑 `./tests/run.sh fast`。
+   三轨全部通过后，新的 pinned Cargo 才成为权威；工作区合同的
    Cargo `-vv` 结构检查也必须重新人工核对。
 
 Cargo 主线继续迭代不会自动改变已发布 mirvm 的行为：每个 mirvm 版本绑定一个明确

@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
 # Workspace cargoless 合同：只覆盖当前多包产品切片，固定 Cargo 是行为权威。
 set -u
-cd "$(dirname "$0")/.."
+. "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
+test_enter_repo
 
 MIRVM=${MIRVM:-$(pwd)/target/debug/mirvm}
 CARGO=${CARGO:-$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo}
+RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
 STRACE=${STRACE:-$(command -v strace)}
 FIXTURE=$(pwd)/tests/fixtures/cless_workspace_contract
 CONTRACT_HOME=${MIRVM_CONTRACT_HOME:-${MIRVM_HOME:-$HOME/.mirvm}}
-HOST=$($(dirname "$CARGO")/rustc -vV | sed -n 's/^host: //p')
-CONTRACT_SYSROOT="$CONTRACT_HOME/sysroot-$HOST"
+HOST=$($RUSTC -vV | sed -n 's/^host: //p')
 
 [ -x "$MIRVM" ] || { echo "cargoless_workspace_contract: $MIRVM 不存在" >&2; exit 69; }
 [ -x "$CARGO" ] || { echo "cargoless_workspace_contract: pinned Cargo 不存在" >&2; exit 69; }
 [ -x "$STRACE" ] || { echo "cargoless_workspace_contract: strace 不存在" >&2; exit 69; }
+ensure_test_sysroot "$MIRVM" "$CONTRACT_HOME" "$RUSTC" || exit $?
+CONTRACT_SYSROOT=$TEST_SYSROOT
 case "$($CARGO --version)" in
     "cargo 1.98.0-nightly "*) ;;
-    *) echo "cargoless_workspace_contract: Cargo 版本不在合同内" >&2; exit 65 ;;
+    *) echo "ERROR cargoless_workspace: Cargo 版本不在合同内" >&2; exit 69 ;;
 esac
 
 TMP=$(mktemp -d)
@@ -25,10 +28,6 @@ mkdir -p "$TMP/no-cargo"
 printf '#!/bin/sh\n: >"$MIRVM_CARGO_SENTINEL"\nexit 97\n' >"$TMP/no-cargo/cargo"
 chmod +x "$TMP/no-cargo/cargo"
 export MIRVM_CARGO_SENTINEL="$TMP/cargo-was-invoked"
-pass=0 fail=0
-ok() { pass=$((pass + 1)); echo "PASS $*"; }
-bad() { fail=$((fail + 1)); echo "FAIL $*"; }
-
 normalize() {
     sed -E \
         -e 's/\([0-9]+\) panicked/(<TID>) panicked/' \
@@ -176,5 +175,4 @@ else
     tail -30 "$oracle"
 fi
 
-echo "== $pass passed, $fail failed =="
-[ "$fail" = 0 ]
+suite_summary contracts.cargoless-workspace

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/bldrs_rerun.sh —— D15 P3 切⑤b：build.rs rerun-if 精细增量语义轴
+# build.rs rerun-if 精细增量合同。
 # （MIRVM_DEBUG_BLDRS=1 观测 `bldrs run|skip <pkg> <原因>` 行）。
 # 场景（夹具 tests/fixtures/cless_br：根 build.rs 读 DEP_MYLINKS_FOO + 发
 # rerun-if-env-changed=BR_TOGGLE；bdep 带 links=mylinks 发 metadata）：
@@ -16,11 +16,11 @@
 #      `bldrs skip libc`（registry 源不可变 ⇒ 默认面永不重跑；第一遍
 #      run/skip 皆可——全局 build 缓存可能已有存档，不钉）
 set -u
-cd "$(dirname "$0")/.."
+. "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
+test_enter_repo
 MIRVM=${MIRVM:-$(pwd)/target/debug/mirvm}
 [ -x "$MIRVM" ] || { echo "bldrs_rerun: $MIRVM 不存在（先 cargo build）" >&2; exit 69; }
 MIRVM=$(realpath "$MIRVM")
-pass=0 fail=0
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 cp -r tests/fixtures/cless_br "$TMP/br"
 
@@ -105,5 +105,4 @@ done
 expect "⑥ registry libc 第二遍 skip" "bldrs skip libc" "$TMP/libc2.err"
 expect_cmp "⑥ libc 两遍输出逐字节同" "$TMP/libc1.out" "$TMP/libc2.out" same
 
-echo "== $pass passed, $fail failed =="
-[ $fail = 0 ]
+suite_summary contracts.build-script-rerun

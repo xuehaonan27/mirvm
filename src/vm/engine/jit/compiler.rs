@@ -32,6 +32,8 @@ use super::*;
 /// c2i 壳的引擎定位（单引擎进程模型，与 TRACK_DIAGNOSTIC 全局钩同一假设面）。
 pub(super) static SHARED: std::sync::atomic::AtomicPtr<Shared> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+static SHUTDOWN_REGISTERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// 启动编译服务（run_vm_engine 在 Shared 定型后调用；--jit off 时不启动）。
 pub fn start(shared: &'static Shared) {
@@ -39,18 +41,48 @@ pub fn start(shared: &'static Shared) {
         return;
     }
     SHARED.store(shared as *const Shared as *mut Shared, Ordering::Release);
+    shared.jit.stopping.store(false, Ordering::Release);
+    if SHUTDOWN_REGISTERED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+        && crate::os::process::atexit_native(shutdown_at_exit) != 0
+    {
+        SHUTDOWN_REGISTERED.store(false, Ordering::Release);
+        eprintln!("mirvm: 无法登记 JIT worker 退出收尾");
+        std::process::exit(70);
+    }
     let (tx, rx): (Sender<u32>, Receiver<u32>) = std::sync::mpsc::channel();
     *shared.jit.queue.lock().unwrap() = Some(tx);
     // 编译失败/线程死亡 = 静默维持解释（语义面零依赖 JIT）
-    let _ = std::thread::Builder::new()
+    let worker = std::thread::Builder::new()
         .name("mirvm-jit".into())
         .spawn(move || worker(shared, rx));
+    *shared.jit.worker.lock().unwrap() = worker.ok();
+}
+
+/// 注册早于 guest atexit 回调，因此按 libc 的逆序规则最后执行：先让 guest
+/// 回调继续使用已发布机器码，再停止编译 worker。`Shared` 和已发布机器码仍须
+/// 保持可达，因为进程级 guest 线程池在 atexit 期间尚未被操作系统终止。
+extern "C" fn shutdown_at_exit() {
+    let shared = SHARED.load(Ordering::Acquire);
+    if shared.is_null() {
+        return;
+    }
+    let shared = unsafe { &*shared };
+    shared.jit.stopping.store(true, Ordering::Release);
+    shared.jit.queue.lock().unwrap().take();
+    if let Some(worker) = shared.jit.worker.lock().unwrap().take() {
+        let _ = worker.join();
+    }
 }
 
 fn worker(shared: &'static Shared, rx: Receiver<u32>) {
     let dbg = std::env::var_os("MIRVM_JIT_DEBUG").is_some();
     let mut c = Compiler::new(shared);
     while let Ok(func) = rx.recv() {
+        if shared.jit.stopping.load(Ordering::Acquire) {
+            break;
+        }
         if dbg {
             eprintln!(
                 "mirvm-jit-debug: received compilation request for f{func} ({})",
@@ -73,6 +105,10 @@ fn worker(shared: &'static Shared, rx: Receiver<u32>) {
             }
         }
     }
+    // JIT 代码一经发布就可能仍在进程级线程池的休眠栈上。退出收尾必须
+    // join 编译线程，不能让它与 libc 清理并发；但也不能析构 JITModule
+    // 并解除已发布代码映射。地址空间由随后的进程退出一次性回收。
+    std::mem::forget(c);
 }
 
 // ===== 运行期助手（JIT 码经 import symbol 调回引擎）=====

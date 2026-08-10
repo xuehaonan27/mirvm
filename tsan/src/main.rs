@@ -1,6 +1,6 @@
 //! Spike 4 的 TSan harness：同源复用 `src/vm`（纯 Rust，零 rustc_private），
 //! 在全量插桩（-Zsanitizer=thread + -Zbuild-std）下跑并发用例。
-//! 判定：退出码 0 且无 "WARNING: ThreadSanitizer"（见 tests/spike4_tsan.sh）。
+//! 判定：退出码 0 且无 "WARNING: ThreadSanitizer"（见 `runtime.tsan`）。
 #![allow(dead_code)] // spike1-3 一并编入但只跑 spike4
 #![feature(cfg_sanitize)] // engine/ctx.rs：TSan 配置下 Ctx dtor 的处置分歧
 #![feature(f16)] // engine D8c：f16/f128 宿主直算（同源复用 src/vm 必须同 feature 集）

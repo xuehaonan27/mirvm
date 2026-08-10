@@ -15,7 +15,7 @@
 //! `Ctx.shared` 用裸指针（非 &'s）：避免 CompiledFn 背 HRTB 生命周期，且与 vmctx 纪律一致；
 //! 生存期由 thread::scope 保证。
 //!
-//! TSan 入口：`run_cases()`（tsan/ harness 复用同一份源码，见 tests/spike4_tsan.sh）。
+//! TSan 入口：`run_cases()`（tsan/ harness 复用同一份源码，见 `runtime.tsan`）。
 
 use std::panic::{self, AssertUnwindSafe};
 use std::process::ExitCode;

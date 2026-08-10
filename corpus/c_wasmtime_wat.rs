@@ -59,6 +59,8 @@ wasmtime = { version = "=46.0.1", features = ["cranelift"] }
 //   （批7 867b3de system_dylibs 同思路的 rlib 版）；② inline asm noreturn
 //   面孔（M5.x 欠账类目）。gate 接线建议 red_code=101 +
 //   red_pattern「无法安全转换为共享库」。
+// 2026-08-10：上述两层已越过；默认 JIT 与 MIRVM_JIT=off 均能跑完两次
+// trap 并正常退出。JIT worker 由 native atexit 在分配器清理前停止并 join。
 //
 // 三维复跑：
 //   A: target/release/mirvm run corpus/c_wasmtime_wat.rs

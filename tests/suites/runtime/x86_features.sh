@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
-# tests/probes.sh —— x86 特性探针（2026-07-23 起合并原 m51_*.sh 六件）。
+# x86 特性探针。
 # 每件以 native 编译直跑为 oracle，逐字节对比 mirvm；宿主缺 CPU 特性时该件
 # 必须打 SKIP（不得冒充 PASS），x86_vectors 的 pshufb/sha 两个子能力分别记账。
-# 输出行形状与原六脚本完全一致（gate.sh 与 gate_truth 锁此形状）。
-# 用法：bash tests/probes.sh
+# 每项能力分别记账，宿主不支持时记 SKIP。
 set -u
-cd "$(dirname "$0")/.."
+. "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
+test_enter_repo
 MIRVM=${MIRVM:-$(pwd)/target/release/mirvm}
 RUSTC=${RUSTC:-rustc}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-fail=0
-
 # probe_diff <名字> <fixture> <unavailable 行(可空)> [vm-call...]
 # 通用骨架：native 编译直跑 → mirvm run（可多次 vm-call 追加输出）→ 逐字节 diff。
 # 打印 PASS|SKIP|FAIL m51_<名字>(: 原因) 一行；返回 0=PASS/SKIP，1=FAIL。
@@ -39,11 +37,11 @@ probe_diff() {
     if [ -n "$unavail" ] && grep -Fxq "$unavail" "$TMP/$name.native.out"; then
         if [ "$mirvm_code" -eq 0 ] && diff -u "$TMP/$name.native.out" "$TMP/$name.mirvm.out" >/dev/null; then
             case "$unavail" in
-                'avx2 unavailable')    echo "SKIP m51_$name: host lacks AVX2" ;;
-                'sse4.1 unavailable')  echo "SKIP m51_$name: host lacks SSE4.1" ;;
-                'avx unavailable')     echo "SKIP m51_$name: host lacks AVX" ;;
-                'xgetbv unavailable')  echo "SKIP m51_$name: host CPUID lacks XSAVE/OSXSAVE" ;;
-                *)                     echo "SKIP m51_$name: host lacks required CPU feature" ;;
+                'avx2 unavailable')    skip "m51_$name: host lacks AVX2" ;;
+                'sse4.1 unavailable')  skip "m51_$name: host lacks SSE4.1" ;;
+                'avx unavailable')     skip "m51_$name: host lacks AVX" ;;
+                'xgetbv unavailable')  skip "m51_$name: host CPUID lacks XSAVE/OSXSAVE" ;;
+                *)                     skip "m51_$name: host lacks required CPU feature" ;;
             esac
             return 0
         fi
@@ -55,7 +53,7 @@ probe_diff() {
     if ! diff -u "$TMP/$name.native.out" "$TMP/$name.mirvm.out" >/dev/null; then
         echo "FAIL m51_$name: stdout differs"; diff -u "$TMP/$name.native.out" "$TMP/$name.mirvm.out" | head -10; return 1
     fi
-    echo "PASS m51_$name"
+    ok "m51_$name"
 }
 
 # x86_vectors：feature-gated stdarch；native 输出携带 pshuf=/sha= 状态行，
@@ -83,9 +81,9 @@ probe_x86_vectors() {
             return 1
         fi
         if [ "$status" = "$key=unavailable" ]; then
-            echo "SKIP m51_x86_vectors/$feature: host lacks $feature"
+            skip "m51_x86_vectors/$feature: host lacks $feature"
         else
-            echo "PASS m51_x86_vectors/$feature"
+            ok "m51_x86_vectors/$feature"
         fi
     done
 }
@@ -97,4 +95,4 @@ probe_diff simd_shift m51_simd_shift.rs 'avx2 unavailable' || fail=$((fail + 1))
 probe_diff vzeroupper m51_vzeroupper.rs 'avx unavailable' || fail=$((fail + 1))
 probe_x86_vectors || fail=$((fail + 1))
 
-[ "$fail" -eq 0 ]
+suite_summary runtime.x86-features

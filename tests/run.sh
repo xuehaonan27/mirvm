@@ -1,97 +1,242 @@
 #!/usr/bin/env bash
-# tests/run.sh —— 测试套件统一入口（2026-07-23 测试管线整顿）。
-#
-# 档位（由小到大）：
-#   fast    逢提交级：cargo fmt/clippy/test + diff.sh 双态 + diff_cargo + diff_cless
-#           + 单包/workspace/Git cargoless 合同 + bldrs_rerun + gate_truth
-#   smoke   战役批次级：fast + corpus smoke 层（tests/corpus.manifest）+ probes + runtime_gates
-#   gate    战役收尾级：静态/单元/gate_truth + tests/gate.sh 全量（其内部已含
-#           corpus 全防线 + diff 四态 + diff_cargo + perf + a2 + probes + runtime_gates）
-#   corpus  手工跑批：bash tests/run.sh corpus [--tier T|--group G|名字...]（转 tests/corpus.sh；
-#           --group heavy = 实测最慢 ~16 条重负载子集，无 group= 键属 light）
-#   perf    性能与资源计量（tests/perf.sh）
-#
-# 环境：MIRVM（默认 target/release/mirvm，fast/smoke/gate 统一导出）；
-#   SKIP_TSAN=1 / SKIP_PERF=1（语义同各叶脚本）；磁盘护栏见 tests/lib.sh。
-# 测试资产归属：demo/*.rs = diff.sh 差分用例（demo/m4/ = runtime_gates 的
-#   vm-call 夹具）；corpus/c_*.rs = 真实 crate 最小驱动（manifest 登记）；
-#   corpus/projects/<名>/ = 真 cargo 项目对拍（manifest mode=diff）；
-#   bench/ = 性能基准素材（perf.sh 体系消费）；tests/parked/ = 休眠基建存档。
+# mirvm 标准测试入口。用户和 CI 只从这里运行测试。
 set -u
-cd "$(dirname "$0")/.."
-MIRVM=${MIRVM:-$(pwd)/target/release/mirvm}
-export MIRVM
-. tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/support/harness.sh"
+test_enter_repo
+
+TEST_STATE_DIR=${MIRVM_TEST_STATE_DIR:-$REPO_ROOT/target/test-state}
+mkdir -p "$TEST_STATE_DIR"
+MIRVM_CONTRACT_HOME=${MIRVM_CONTRACT_HOME:-${TMPDIR:-/tmp}/mirvm-contract-home}
+mkdir -p "$MIRVM_CONTRACT_HOME"
+export MIRVM_CONTRACT_HOME
+if [ -z "${CARGO_HOME:-}" ] && { [ ! -d "$HOME/.cargo" ] || [ ! -w "$HOME/.cargo" ]; }; then
+    export CARGO_HOME="$TEST_STATE_DIR/cargo-home"
+    mkdir -p "$CARGO_HOME"
+fi
+if [ -z "${MIRVM_HOME:-}" ] && [ -d "$HOME/.mirvm" ] && [ ! -w "$HOME/.mirvm" ]; then
+    export MIRVM_HOME="$MIRVM_CONTRACT_HOME"
+    mkdir -p "$MIRVM_HOME"
+fi
+
+TOOLCHAIN=${TOOLCHAIN:-$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)}
+if [ -z "${CARGO:-}" ] || [ -z "${RUSTC:-}" ]; then
+    TOOLCHAIN_ROOT=$(rustc +"$TOOLCHAIN" --print sysroot 2>/dev/null) || {
+        echo "ERROR 固定 Rust 工具链不可用: $TOOLCHAIN" >&2
+        exit 69
+    }
+    CARGO=${CARGO:-$TOOLCHAIN_ROOT/bin/cargo}
+    RUSTC=${RUSTC:-$TOOLCHAIN_ROOT/bin/rustc}
+fi
+export TOOLCHAIN CARGO RUSTC
+
+suite_record() { # <suite-id>；输出：仓库相对脚本路径|用途
+    local id=$1 category name path description
+    [[ "$id" =~ ^[a-z0-9]+\.[a-z0-9][a-z0-9-]*$ ]] || return 1
+    category=${id%%.*}
+    name=${id#*.}
+    path="$TESTS_DIR/suites/$category/${name//-/_}.sh"
+    [ -f "$path" ] || return 1
+    description=$(sed -n '2{s/^#[[:space:]]*//;p;q;}' "$path")
+    [ -n "$description" ] || {
+        echo "ERROR 套件第二行缺少用途说明: ${path#"$REPO_ROOT"/}" >&2
+        return 1
+    }
+    printf '%s|%s\n' "${path#"$REPO_ROOT"/}" "$description"
+}
+
+suite_ids() {
+    local path relative id
+    while IFS= read -r -d '' path; do
+        relative=${path#"$TESTS_DIR/suites/"}
+        id=${relative%.sh}
+        id=${id//\//.}
+        printf '%s\n' "${id//_/-}"
+    done < <(find "$TESTS_DIR/suites" -mindepth 2 -maxdepth 2 -type f -name '*.sh' -print0 | sort -z)
+}
+
+list_suites() {
+    local id record
+    while IFS= read -r id; do
+        record=$(suite_record "$id") || return 1
+        printf '  %-34s %s\n' "$id" "${record#*|}"
+    done < <(suite_ids)
+}
 
 usage() {
-    sed -n '2,20p' tests/run.sh
-    exit 64
+    cat <<'EOF'
+用法：
+  ./tests/run.sh fast|smoke|gate
+  ./tests/run.sh suite <suite-id> [套件参数...]
+  ./tests/run.sh list
+  ./tests/run.sh help
+
+fast 是日常提交检查；smoke 增加小规模真实负载；gate 是完整收尾门禁。
+EOF
 }
 
-run_step() {  # <标题> <命令...>：跑一步，失败打尾 10 行并记账
-    local title=$1; shift
-    section_start "$title"
-    if "$@" >"$TMPDIR_RUN/$title.log" 2>&1; then
-        ok "$title"
-    else
-        bad "$title"
-        tail -10 "$TMPDIR_RUN/$title.log"
+MIRVM_EXPLICIT=0
+[ -n "${MIRVM:-}" ] && MIRVM_EXPLICIT=1
+PRODUCT_READY=0
+ensure_product() {
+    [ "$PRODUCT_READY" -eq 0 ] || return 0
+    if [ "$MIRVM_EXPLICIT" -eq 0 ]; then
+        echo "== build mirvm release =="
+        "$CARGO" build --release --locked || return 1
+        MIRVM="$REPO_ROOT/target/release/mirvm"
     fi
+    require_executable MIRVM "$MIRVM" || return $?
+    MIRVM=$(realpath "$MIRVM")
+    export MIRVM
+    PRODUCT_READY=1
+}
+
+suite_needs_product() {
+    local record path
+    record=$(suite_record "$1") || return 0
+    path="$REPO_ROOT/${record%%|*}"
+    ! grep -Fxq '# product: no' "$path"
+}
+
+TMPDIR_RUN=""
+start_run() {
+    [ -n "$TMPDIR_RUN" ] && return 0
+    TMPDIR_RUN=$(mktemp -d)
+    trap 'rm -rf "$TMPDIR_RUN"' EXIT
+}
+
+run_logged() { # <标题> <命令...>
+    local title=$1 code=0 log_name
+    shift
+    start_run
+    log_name=${title//[^a-zA-Z0-9_.-]/_}
+    section_start "$title"
+    "$@" >"$TMPDIR_RUN/$log_name.log" 2>&1 || code=$?
+    cat "$TMPDIR_RUN/$log_name.log"
+    case "$code" in
+        0)  ok "suite $title" ;;
+        77) skip "suite $title（宿主能力不足）" ;;
+        *)  bad "suite $title（exit=$code）" ;;
+    esac
     section_end
+    return 0
 }
 
-run_quality() {  # 静态检查与单元测试层
-    run_step "cargo fmt" cargo fmt --all -- --check
-    run_step "cargo clippy" cargo clippy --locked --all-targets --all-features -- -D warnings
-    run_step "cargo test" cargo test --locked --all-features
+run_suite() { # <显示标题> <suite-id> [参数...]
+    local title=$1 id=$2 record path
+    shift 2
+    record=$(suite_record "$id") || {
+        echo "ERROR 未知套件: $id" >&2
+        return 64
+    }
+    path=${record%%|*}
+    if suite_needs_product "$id"; then
+        ensure_product || {
+            bad "suite $title（产品构建或 MIRVM 检查失败）"
+            return 0
+        }
+    fi
+    run_logged "$title" bash "$path" "$@"
 }
 
-run_diff_family() {  # 差分家族（diff.sh 双态 + cargo 形态 + cargoless 对拍 + bldrs 增量 + 门禁自回归）
-    run_step "diff.sh" bash tests/diff.sh
-    run_step "diff.sh(JIT=1+SYNC)" env MIRVM_JIT_SYNC=1 MIRVM_JIT_THRESHOLD=1 bash tests/diff.sh
-    run_step "diff_cargo" bash tests/diff_cargo.sh
-    run_step "diff_cless" bash tests/diff_cless.sh
-    run_step "cargoless_test_contract" bash tests/cargoless_test_contract.sh
-    run_step "cargoless_workspace_contract" bash tests/cargoless_workspace_contract.sh
-    run_step "cargoless_git_contract" bash tests/cargoless_git_contract.sh
-    run_step "bldrs_rerun" bash tests/bldrs_rerun.sh
-    run_step "gate_truth" bash tests/gate_truth_regression.sh
+run_program_variant() { # <标题> [环境变量...]
+    local title=$1 record path
+    shift
+    ensure_product || { bad "suite $title（产品构建失败）"; return 0; }
+    record=$(suite_record differential.programs)
+    path=${record%%|*}
+    run_logged "$title" env "$@" bash "$path"
 }
 
-cmd=${1:-}
-[ $# -ge 1 ] && shift
+run_fast_obligations() {
+    run_suite quality.rust quality.rust
+    run_program_variant differential.programs
+    run_program_variant differential.programs.jit-sync MIRVM_JIT_SYNC=1 MIRVM_JIT_THRESHOLD=1
+    run_suite differential.cargo differential.cargo
+    run_suite differential.cargoless differential.cargoless
+    run_suite contracts.cargoless-test contracts.cargoless-test
+    run_suite contracts.cargoless-workspace contracts.cargoless-workspace
+    run_suite contracts.cargoless-git contracts.cargoless-git
+    run_suite contracts.build-script-rerun contracts.build-script-rerun
+    run_suite harness.truth harness.truth
+}
+
+run_profile() {
+    local profile=$1
+    start_run
+    cache_snapshot "profile $profile 起跑前"
+    disk_guard
+    case "$profile" in
+        fast)
+            run_fast_obligations
+            ;;
+        smoke)
+            run_fast_obligations
+            run_suite corpus.run.smoke corpus.run --tier smoke
+            run_suite runtime.x86-features runtime.x86-features
+            run_suite runtime.semantics runtime.semantics
+            ;;
+        gate)
+            run_suite quality.rust quality.rust
+            run_program_variant differential.programs
+            run_program_variant differential.programs.no-base MIRVM_NO_BASE_IMAGE=1 MIRVM_NO_IR_CACHE=1 ONLY=fib
+            run_program_variant differential.programs.jit-sync MIRVM_JIT_SYNC=1 MIRVM_JIT_THRESHOLD=1
+            run_program_variant differential.programs.jit-off MIRVM_JIT=off MIRVM_NO_IR_CACHE=1 ONLY=fib
+            run_suite differential.cargo differential.cargo
+            run_suite differential.cargoless differential.cargoless
+            run_suite contracts.cargoless-test contracts.cargoless-test
+            run_suite contracts.cargoless-workspace contracts.cargoless-workspace
+            run_suite contracts.cargoless-git contracts.cargoless-git
+            run_suite contracts.build-script-rerun contracts.build-script-rerun
+            run_suite contracts.deps-image contracts.deps-image
+            run_suite corpus.contract corpus.contract
+            run_suite runtime.x86-features runtime.x86-features
+            run_suite runtime.semantics runtime.semantics
+            run_suite runtime.jit-stats runtime.jit-stats
+            run_suite performance.limits performance.limits
+            run_suite harness.truth harness.truth
+            ;;
+    esac
+    target_budget_check
+    cache_snapshot "profile $profile 收尾后"
+    print_section_report
+    suite_summary "profile.$profile"
+}
+
+cmd=${1:-help}
+[ $# -gt 0 ] && shift
 case "$cmd" in
     fast|smoke|gate)
-        [ -x "$MIRVM" ] || { echo "run.sh: $MIRVM 不存在（先 cargo build --release）" >&2; exit 69; }
-        TMPDIR_RUN=$(mktemp -d); trap 'rm -rf "$TMPDIR_RUN"' EXIT
-        cache_snapshot "run $cmd 起跑前"
-        disk_guard
-        run_quality
-        if [ "$cmd" = gate ]; then
-            run_step "gate_truth" bash tests/gate_truth_regression.sh
-            run_step "gate.sh" bash tests/gate.sh
-        else
-            run_diff_family
-            if [ "$cmd" = smoke ]; then
-                run_step "corpus smoke" bash tests/corpus.sh --tier smoke
-                run_step "probes" bash tests/probes.sh
-                run_step "runtime_gates" bash tests/runtime_gates.sh
-            fi
-        fi
-        target_budget_check
-        cache_snapshot "run $cmd 收尾后"
+        [ $# -eq 0 ] || { usage >&2; exit 64; }
+        run_profile "$cmd"
+        ;;
+    suite)
+        [ $# -ge 1 ] || { usage >&2; exit 64; }
+        id=$1; shift
+        start_run
+        run_suite "$id" "$id" "$@" || exit $?
         print_section_report
-        echo "---"
-        echo "run $cmd: $pass pass, $fail fail"
-        [ "$fail" -eq 0 ]
+        suite_summary "run.$id"
+        ;;
+    list)
+        [ $# -eq 0 ] || { usage >&2; exit 64; }
+        list_suites
+        ;;
+    help|-h|--help)
+        usage
         ;;
     corpus)
-        exec bash tests/corpus.sh "$@"
+        start_run
+        run_suite corpus.run corpus.run "$@"
+        suite_summary run.corpus
         ;;
     perf)
-        exec bash tests/perf.sh "$@"
+        start_run
+        run_suite performance.limits performance.limits "$@"
+        suite_summary run.performance
         ;;
     *)
-        usage
+        echo "ERROR 未知命令: $cmd" >&2
+        usage >&2
+        exit 64
         ;;
 esac

@@ -8,7 +8,7 @@
 //! cranelift 只门控 M5.3b 的编译服务）。表按 S4 合并后 FuncId 空间建（base 函数
 //! 同等 tier-up，m5.3-design §4）。
 
-use std::sync::atomic::{AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 
 /// strict 失败哨兵（MIRVM_JIT_SYNC 验证模式）：可准入函数编译失败时
 /// worker 写入 slots——SYNC 等待方据此响亮 abort（区别于 0 = 未编译/
@@ -36,6 +36,11 @@ pub struct JitState {
     pub sync: bool,
     /// 编译请求通道（M5.3b：jit_compile::start 装填；cranelift feature 关 = 恒 None）
     pub queue: std::sync::Mutex<Option<std::sync::mpsc::Sender<u32>>>,
+    /// worker 必须在进程退出的分配器清理前 join；丢弃句柄会让 Cranelift
+    /// 与 libc/Rust 退出清理并发，造成跨 workload 漂移的堆破坏。
+    pub worker: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// 退出收尾置位后，worker 完成当前函数即丢弃尚未消费的编译请求。
+    pub stopping: AtomicBool,
 }
 
 impl JitState {
@@ -57,6 +62,8 @@ impl JitState {
             threshold,
             sync: std::env::var_os("MIRVM_JIT_SYNC").is_some(),
             queue: std::sync::Mutex::new(None),
+            worker: std::sync::Mutex::new(None),
+            stopping: AtomicBool::new(false),
         }
     }
 }
@@ -72,6 +79,8 @@ mod tests {
         assert_eq!(j.slots.len(), 7);
         assert_eq!(j.counters.len(), 7);
         assert!(j.slots.iter().all(|s| s.load(Ordering::Acquire) == 0));
+        assert!(j.worker.lock().unwrap().is_none());
+        assert!(!j.stopping.load(Ordering::Acquire));
         assert!(j.threshold > 0);
     }
 }

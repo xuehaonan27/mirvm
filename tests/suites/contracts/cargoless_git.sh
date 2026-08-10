@@ -1,26 +1,24 @@
 #!/usr/bin/env bash
 # Git 依赖合同：固定 Cargo 是格式裁判，self 负责获取、锁定、离线与双提交图。
 set -u
-cd "$(dirname "$0")/.."
+. "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
+test_enter_repo
 
 MIRVM=${MIRVM:-$(pwd)/target/debug/mirvm}
 CARGO=${CARGO:-$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo}
-RUSTC=$(dirname "$CARGO")/rustc
+RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
 STRACE=${STRACE:-$(command -v strace)}
 CONTRACT_HOME=${MIRVM_CONTRACT_HOME:-${MIRVM_HOME:-$HOME/.mirvm}}
 HOST=$($RUSTC -vV | sed -n 's/^host: //p')
-CONTRACT_SYSROOT="$CONTRACT_HOME/sysroot-$HOST"
 
 [ -x "$MIRVM" ] || { echo "cargoless_git_contract: $MIRVM 不存在" >&2; exit 69; }
 [ -x "$CARGO" ] || { echo "cargoless_git_contract: pinned Cargo 不存在" >&2; exit 69; }
 [ -x "$STRACE" ] || { echo "cargoless_git_contract: strace 不存在" >&2; exit 69; }
-[ -d "$CONTRACT_SYSROOT/lib/rustlib/$HOST/lib" ] || {
-    echo "cargoless_git_contract: $CONTRACT_SYSROOT 不完整（先运行前序 self 门禁建立 sysroot）" >&2
-    exit 69
-}
+ensure_test_sysroot "$MIRVM" "$CONTRACT_HOME" "$RUSTC" || exit $?
+CONTRACT_SYSROOT=$TEST_SYSROOT
 case "$($CARGO --version)" in
     "cargo 1.98.0-nightly "*) ;;
-    *) echo "cargoless_git_contract: Cargo 版本不在合同内" >&2; exit 65 ;;
+    *) echo "ERROR cargoless_git: Cargo 版本不在合同内" >&2; exit 69 ;;
 esac
 
 TMP=$(mktemp -d)
@@ -31,10 +29,6 @@ mkdir -p "$REPO/core/src" "$REPO/helper/src" "$TMP/no-cargo"
 printf '#!/bin/sh\n: >"$MIRVM_CARGO_SENTINEL"\nexit 97\n' >"$TMP/no-cargo/cargo"
 chmod +x "$TMP/no-cargo/cargo"
 export MIRVM_CARGO_SENTINEL="$TMP/cargo-was-invoked"
-pass=0 fail=0
-ok() { pass=$((pass + 1)); echo "PASS $*"; }
-bad() { fail=$((fail + 1)); echo "FAIL $*"; }
-
 cat >"$REPO/Cargo.toml" <<'EOF'
 [workspace]
 members = ["core", "helper"]
@@ -181,5 +175,4 @@ else
     bad "Git checkout 篡改错误不明确"
 fi
 
-echo "== $pass passed, $fail failed =="
-[ "$fail" = 0 ]
+suite_summary contracts.cargoless-git

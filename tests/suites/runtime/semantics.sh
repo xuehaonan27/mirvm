@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/runtime_gates.sh —— 运行时语义门（2026-07-23 起合并原 m4_gate0/1/2/4）。
+# 运行时语义合同：纯函数、值与内存、unwind 和线程。
 #
 # 四段（可单段执行，默认全量）：
 #   pure    纯函数九件 —— 真实 rustc MIR 降低后经引擎执行 == 数学常量；
@@ -12,17 +12,14 @@
 #   threads 真线程五用例差分 == native + tier-0 时代挂死双场景 + rayon 秒级
 #           + vm-stats 可达 trap-free + TSan 多线程用例（SKIP_TSAN=1 跳过）。
 #
-# 用法：bash tests/runtime_gates.sh [pure|digest|unwind|threads|all(默认)]
-#       SKIP_TSAN=1 bash tests/runtime_gates.sh
+# 用法：./tests/run.sh suite runtime.semantics [pure|digest|unwind|threads|all]
 set -u
-cd "$(dirname "$0")/.."
+. "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
+test_enter_repo
 MIRVM=${MIRVM:-$(pwd)/target/release/mirvm}
 TOOLCHAIN=${TOOLCHAIN:-nightly-2026-07-02}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-fail=0
-bad() { fail=$((fail + 1)); echo "FAIL $*"; }
-
 # ---- pure（原 m4_gate0）----
 run_pure() {
     local SRC=demo/m4/pure.rs pass=0 pfail=0
@@ -190,14 +187,14 @@ run_threads() {
 
     # ⑤ TSan 多线程用例（8 线程共享 Shared/各自 Ctx/thunk 工厂并发；引擎 Sync）
     if [ -z "${SKIP_TSAN:-}" ]; then
-        if bash tests/spike4_tsan.sh >"$TMP/tsan.out" 2>&1; then
+        if bash tests/suites/runtime/tsan.sh >"$TMP/tsan.out" 2>&1; then
             tok "TSan（含 tsan_mt 多线程真身，零警告）"
         else
             tbad "TSan"
             tail -10 "$TMP/tsan.out"
         fi
     else
-        echo "SKIP TSan（SKIP_TSAN=1）"
+        skip "TSan（SKIP_TSAN=1）"
     fi
 
     echo "gate-threads: $pass pass, $pfail fail"
@@ -205,17 +202,26 @@ run_threads() {
 }
 
 what=${1:-all}
+run_part() {
+    local name=$1
+    shift
+    if "$@"; then
+        ok "$name"
+    else
+        bad "$name"
+    fi
+}
 case "$what" in
-    pure)    run_pure    || fail=$((fail + 1)) ;;
-    digest)  run_digest  || fail=$((fail + 1)) ;;
-    unwind)  run_unwind  || fail=$((fail + 1)) ;;
-    threads) run_threads || fail=$((fail + 1)) ;;
+    pure)    run_part pure run_pure ;;
+    digest)  run_part digest run_digest ;;
+    unwind)  run_part unwind run_unwind ;;
+    threads) run_part threads run_threads ;;
     all)
-        echo "== pure ==";    run_pure    || fail=$((fail + 1))
-        echo "== digest ==";  run_digest  || fail=$((fail + 1))
-        echo "== unwind ==";  run_unwind  || fail=$((fail + 1))
-        echo "== threads =="; run_threads || fail=$((fail + 1))
+        echo "== pure ==";    run_part pure run_pure
+        echo "== digest ==";  run_part digest run_digest
+        echo "== unwind ==";  run_part unwind run_unwind
+        echo "== threads =="; run_part threads run_threads
         ;;
-    *) echo "usage: bash tests/runtime_gates.sh [pure|digest|unwind|threads|all]" >&2; exit 64 ;;
+    *) echo "usage: ./tests/run.sh suite runtime.semantics [pure|digest|unwind|threads|all]" >&2; exit 64 ;;
 esac
-[ "$fail" -eq 0 ]
+suite_summary runtime.semantics

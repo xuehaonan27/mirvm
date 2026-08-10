@@ -12,11 +12,11 @@
 # 灌自有 registry 的 index/src 缓存（sparse index 无 cargo 侧读穿，P1 定案）。
 # 脚本腿允许 cargo 腿联网（fresh 求解 cargo 侧可能查 index）。
 set -u
-cd "$(dirname "$0")/.."
+. "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
+test_enter_repo
 MIRVM=${MIRVM:-$(pwd)/target/debug/mirvm}
 [ -x "$MIRVM" ] || { echo "diff_cless: $MIRVM 不存在（先 cargo build）" >&2; exit 69; }
 MIRVM=$(realpath "$MIRVM")
-pass=0 fail=0
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
 # self 腿环境：PATH 只含 mirvm（cargo/rustc 都不在 PATH）
@@ -110,5 +110,4 @@ for leg in cargo self; do
 done
 check_pair binsel "$cargo_code" "$self_code"
 
-echo "== $pass passed, $fail failed =="
-[ $fail = 0 ]
+suite_summary differential.cargoless

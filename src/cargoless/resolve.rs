@@ -28,13 +28,13 @@ use super::manifest::{
     DepKind, DepSource, FeatureValue, GitSpec, IncompatibleRustVersions, PackageManifest,
     ResolverVersion, current_rust_version, parse_feature_value,
 };
-use super::registry::{IndexVersion, Registry};
+use super::registry::{IndexEntry, IndexVersion, Registry};
 use pubgrub::Reporter as _;
 
 // ---------- 供给面抽象（生产 = Registry；测试 = 内存 fake） ----------
 
 pub trait PkgSource {
-    fn index_entry(&mut self, name: &str) -> Result<Vec<IndexVersion>, String>;
+    fn index_entry(&mut self, name: &str) -> Result<IndexEntry, String>;
     fn ensure_source(
         &mut self,
         name: &str,
@@ -53,7 +53,7 @@ pub trait PkgSource {
 }
 
 impl PkgSource for Registry {
-    fn index_entry(&mut self, name: &str) -> Result<Vec<IndexVersion>, String> {
+    fn index_entry(&mut self, name: &str) -> Result<IndexEntry, String> {
         Registry::index_entry(self, name)
     }
     fn ensure_source(
@@ -319,10 +319,8 @@ pub fn resolve_for_known_with_features(
             // 进版本求解（cargo 语义——全局包名门会把 zerovec 的 yoke 误植到
             // litemap）；激活集单调扩张 ⇒ 收敛。
             let mut activated: BTreeSet<(String, Version, String)> = BTreeSet::new();
+            let mut preferred_exact_versions = BTreeMap::new();
             loop {
-                if std::env::var_os("MIRVM_DEBUG_UNIFY").is_some() {
-                    eprintln!("DBG-SOLVE pass activated={activated:?}");
-                }
                 let (vm, lf, ev) = solve_fresh(
                     root,
                     &path_manifests,
@@ -330,8 +328,9 @@ pub fn resolve_for_known_with_features(
                     &activated,
                     rust_version_policy,
                     &resolver_rust_version,
+                    &mut preferred_exact_versions,
                 )?;
-                let (nodes, new_activated) = unify_features(
+                let (nodes, mut new_activated) = unify_features(
                     root,
                     &path_manifests,
                     &ev,
@@ -340,9 +339,7 @@ pub fn resolve_for_known_with_features(
                     true,
                     workspace_features,
                 )?;
-                if std::env::var_os("MIRVM_DEBUG_UNIFY").is_some() {
-                    eprintln!("DBG-SOLVE pass end new_activated={new_activated:?}");
-                }
+                new_activated.extend(activated.iter().cloned());
                 if new_activated == activated {
                     // 收敛后才补 lock 依赖行：optional 门按（父包, 依赖键）
                     // 判定（全局集合会把 cipher 的 zeroize 误植到
@@ -706,6 +703,9 @@ struct CratesIo<'a, S: PkgSource> {
     root: &'a PackageManifest,
     rust_version_policy: IncompatibleRustVersions,
     resolver_rust_version: &'a Version,
+    /// 第一遍求解发现同名包被精确钉子拆成多版时，第二遍优先复用最早
+    /// 建立的版本。整遍固定不变，不能依赖求解中的可变 bucket 状态。
+    preferred_exact_versions: &'a BTreeMap<String, Version>,
     /// pre comparator 记录（cargo 精确规则：pre 版仅当被该包某 req 中
     /// major/minor/patch 全同且带 pre 的 comparator 点名时才可选——
     /// ark-ff-asm 0.5.0-alpha.0 误选实锤）。值 = (major, minor, patch)。
@@ -725,6 +725,20 @@ struct CratesIo<'a, S: PkgSource> {
 
 fn req_has_pre(req: &VersionReq) -> bool {
     req.comparators.iter().any(|c| !c.pre.is_empty())
+}
+
+fn req_is_full_exact(req: &VersionReq) -> bool {
+    req.comparators.len() == 1
+        && req.comparators[0].op == semver::Op::Exact
+        && req.comparators[0].minor.is_some()
+        && req.comparators[0].patch.is_some()
+}
+
+fn cargo_versions_compatible(left: &Version, right: &Version) -> bool {
+    if !left.pre.is_empty() || !right.pre.is_empty() || left.major != right.major {
+        return false;
+    }
+    left.major > 0 || (left.minor == right.minor && (left.minor > 0 || left.patch == right.patch))
 }
 
 impl<'a, S: PkgSource> CratesIo<'a, S> {
@@ -782,6 +796,31 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
             .borrow_mut()
             .insert((name.to_string(), next), range.clone());
         Ok(next)
+    }
+
+    /// 第二遍只惩罚会偏离既有精确版本的候选。第一遍没有偏好，因此仍是
+    /// 原来的最高版本优先；普通宽范围依赖也不参与排序。
+    fn dependency_split_cost(&self, candidate: &IndexVersion) -> usize {
+        candidate
+            .deps
+            .iter()
+            .filter(|dep| {
+                dep.kind.as_deref() != Some("dev")
+                    && req_is_full_exact(&dep.req)
+                    && (!dep.optional
+                        || self.activated.contains(&(
+                            candidate.name.clone(),
+                            candidate.version.clone(),
+                            dep.name.clone(),
+                        )))
+            })
+            .filter(|dep| {
+                let name = dep.package.as_deref().unwrap_or(&dep.name);
+                self.preferred_exact_versions
+                    .get(name)
+                    .is_some_and(|version| !dep.req.matches(version))
+            })
+            .count()
     }
 
     fn parent_lock_name(&self, package: &Pkg) -> String {
@@ -1026,21 +1065,26 @@ impl<'a, S: PkgSource> pubgrub::DependencyProvider for CratesIo<'a, S> {
                             && self.pre_allowed(name, &v.version)
                     })
                     .collect();
-                let preferred = match self.rust_version_policy {
-                    IncompatibleRustVersions::Allow => None,
-                    IncompatibleRustVersions::Fallback => candidates
-                        .iter()
-                        .copied()
-                        .filter(|version| self.rust_version_compatible(version))
-                        .map(|version| version.version.clone())
-                        .max(),
+                let compatible = candidates
+                    .iter()
+                    .copied()
+                    .filter(|version| self.rust_version_compatible(version))
+                    .collect::<Vec<_>>();
+                let eligible = match self.rust_version_policy {
+                    IncompatibleRustVersions::Fallback if !compatible.is_empty() => compatible,
+                    IncompatibleRustVersions::Allow | IncompatibleRustVersions::Fallback => {
+                        candidates
+                    }
                 };
-                Ok(preferred.or_else(|| {
-                    candidates
-                        .into_iter()
-                        .map(|version| version.version.clone())
-                        .max()
-                }))
+                let preferred = eligible
+                    .into_iter()
+                    .map(|version| (self.dependency_split_cost(version), version))
+                    .min_by(|(left_cost, left), (right_cost, right)| {
+                        left_cost
+                            .cmp(right_cost)
+                            .then_with(|| right.version.cmp(&left.version))
+                    });
+                Ok(preferred.map(|(_, version)| version.version.clone()))
             }
         }
     }
@@ -1184,13 +1228,54 @@ fn solve_fresh(
     activated: &BTreeSet<(String, Version, String)>,
     rust_version_policy: IncompatibleRustVersions,
     resolver_rust_version: &Version,
+    preferred_exact_versions: &mut BTreeMap<String, Version>,
 ) -> Result<Solved, String> {
+    let (first, discovered) = solve_fresh_pass(
+        root,
+        path_manifests,
+        src,
+        activated,
+        rust_version_policy,
+        resolver_rust_version,
+        preferred_exact_versions,
+    )?;
+    let before = preferred_exact_versions.clone();
+    for (name, version) in discovered {
+        preferred_exact_versions.entry(name).or_insert(version);
+    }
+    if *preferred_exact_versions == before {
+        return Ok(first);
+    }
+    let (unified, _) = solve_fresh_pass(
+        root,
+        path_manifests,
+        src,
+        activated,
+        rust_version_policy,
+        resolver_rust_version,
+        preferred_exact_versions,
+    )?;
+    Ok(unified)
+}
+
+/// 单遍版本求解。返回值第二项只记录“精确依赖导致同名多版本”时最早建立
+/// 的版本，供稳定的第二遍候选排序使用。
+fn solve_fresh_pass(
+    root: &PackageManifest,
+    path_manifests: &BTreeMap<String, PackageManifest>,
+    src: &mut impl PkgSource,
+    activated: &BTreeSet<(String, Version, String)>,
+    rust_version_policy: IncompatibleRustVersions,
+    resolver_rust_version: &Version,
+    preferred_exact_versions: &BTreeMap<String, Version>,
+) -> Result<(Solved, BTreeMap<String, Version>), String> {
     let provider = CratesIo {
         src: std::cell::RefCell::new(src),
         manifests: path_manifests,
         root,
         rust_version_policy,
         resolver_rust_version,
+        preferred_exact_versions,
         allow_pre: std::cell::RefCell::new(BTreeMap::new()),
         activated,
         buckets: std::cell::RefCell::new(BTreeMap::new()),
@@ -1333,9 +1418,41 @@ fn solve_fresh(
             (pkg.clone(), v.clone()),
         );
     }
+    let mut exact_duplicate_names = BTreeSet::new();
+    let compatible_duplicate_names = version_map
+        .iter()
+        .filter(|(_, versions)| {
+            versions.iter().enumerate().any(|(index, version)| {
+                versions[index + 1..]
+                    .iter()
+                    .any(|other| cargo_versions_compatible(version, other))
+            })
+        })
+        .map(|(name, _)| name.as_str())
+        .collect::<BTreeSet<_>>();
+    for ((_pname, _pver, _key, dis, _class), (pkg, bucket)) in edge_assign.iter() {
+        if compatible_duplicate_names.contains(pkg.as_str())
+            && reachable.contains(&(pkg.clone(), *bucket))
+            && VersionReq::parse(dis).is_ok_and(|req| req_is_full_exact(&req))
+        {
+            exact_duplicate_names.insert(pkg.clone());
+        }
+    }
+    let mut next_preferences = BTreeMap::new();
+    for name in exact_duplicate_names {
+        if let Some((_, version)) = bucket_versions
+            .iter()
+            .filter(|((package, bucket), _)| {
+                package == &name && reachable.contains(&(package.clone(), *bucket))
+            })
+            .min_by_key(|((_, bucket), _)| *bucket)
+        {
+            next_preferences.insert(name, version.clone());
+        }
+    }
     // lock 依赖行在 feature 统一收敛后补齐（见 resolve() 迭代循环——
     // optional 门按（父包, 依赖键）判定，需要统一产物）
-    Ok((version_map, lock, edge_versions))
+    Ok(((version_map, lock, edge_versions), next_preferences))
 }
 
 /// 给生成的 lock 补 dependencies 行（按需追加 version/source 消歧）；
@@ -2541,11 +2658,24 @@ fn validate_compiler_rust_version(
         incompatible.insert((root.name.clone(), root.version.clone(), required.clone()));
     }
     for unit in units {
-        let required = if unit.from_registry {
+        let git_source = unit
+            .immutable_source_id
+            .as_deref()
+            .filter(|source| source.starts_with("git+"));
+        let required = if let Some(source) = git_source {
+            path_manifests
+                .values()
+                .find(|manifest| {
+                    manifest.name == unit.package
+                        && manifest.version == unit.version
+                        && manifest.lock_source.as_deref() == Some(source)
+                })
+                .and_then(|manifest| manifest.rust_version.clone())
+        } else if unit.from_registry {
             src.index_entry(&unit.package)?
-                .into_iter()
+                .iter()
                 .find(|entry| entry.version == unit.version)
-                .and_then(|entry| entry.rust_version)
+                .and_then(|entry| entry.rust_version.clone())
         } else {
             path_manifests
                 .get(&unit.package)
@@ -2608,8 +2738,8 @@ mod tests {
     }
 
     impl PkgSource for FakeSource {
-        fn index_entry(&mut self, name: &str) -> Result<Vec<IndexVersion>, String> {
-            Ok(self.index.get(name).cloned().unwrap_or_default())
+        fn index_entry(&mut self, name: &str) -> Result<IndexEntry, String> {
+            Ok(self.index.get(name).cloned().unwrap_or_default().into())
         }
         fn ensure_source(
             &mut self,
@@ -3297,6 +3427,36 @@ mod tests {
     }
 
     #[test]
+    fn git_rust_version_comes_from_checkout_manifest() {
+        let d = tmpdir("git-rust-version");
+        let repo = d.join("repo");
+        let core = repo.join("core");
+        std::fs::create_dir_all(core.join("src")).unwrap();
+        std::fs::write(core.join("src/lib.rs"), "pub fn value() -> u32 { 1 }\n").unwrap();
+        std::fs::write(
+            core.join("Cargo.toml"),
+            "[package]\nname='git-core'\nversion='1.2.3'\nedition='2021'\nrust-version='999.0'\n",
+        )
+        .unwrap();
+        let mut git_core = PackageManifest::parse(
+            &std::fs::read_to_string(core.join("Cargo.toml")).unwrap(),
+            &core,
+        )
+        .unwrap();
+        git_core.git_checkout_root = Some(repo);
+        let root = root_project(
+            &d,
+            "[package]\nname='demo'\nversion='0.1.0'\n\
+             [dependencies]\nchosen={package='git-core',git='https://example.invalid/repo',version='^1'}\n",
+        );
+        let mut src = FakeSource::new(d.join("srcstore"));
+        src.add_git("git+https://example.invalid/repo", git_core);
+        let error = resolve(&root, &mut src).unwrap_err();
+        assert!(error.contains("git-core@1.2.3 要求 rustc 999.0"), "{error}");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
     fn same_git_package_from_two_revisions_stays_distinct() {
         let d = tmpdir("git-two-revisions");
         let mut src = FakeSource::new(d.join("srcstore"));
@@ -3386,6 +3546,40 @@ mod tests {
         let locked = resolve(&root, &mut src).unwrap();
         assert_eq!(locked.root_deps.len(), 2);
         assert_ne!(locked.root_deps[0].unit, locked.root_deps[1].unit);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn fresh_solve_downgrades_parent_to_avoid_compatible_duplicate() {
+        // Cargo 会优先统一同名包：wide@1.1 虽然较新，但它钉 core@1.0.1；
+        // 图中 pinned 已钉 core@1.0.0，而 wide@1.0 也满足 ^1，因此应回退，
+        // 不能仅为选择最新补丁版而保留两份 core。
+        let d = tmpdir("compatible-duplicate");
+        let root = root_project(
+            &d,
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n\
+             [dependencies]\ncontainer = \"1\"\n",
+        );
+        let mut src = FakeSource::new(d.join("srcstore"));
+        let mut container = iv("container", "1.0.0");
+        container.deps.push(idep("pinned", "1"));
+        container.deps.push(idep("wide", "^1.0"));
+        src.add("container", vec![container]);
+
+        let mut pinned = iv("pinned", "1.0.0");
+        pinned.deps.push(idep("core", "=1.0.0"));
+        src.add("pinned", vec![pinned]);
+
+        let mut wide_old = iv("wide", "1.0.0");
+        wide_old.deps.push(idep("core", "=1.0.0"));
+        let mut wide_new = iv("wide", "1.1.0");
+        wide_new.deps.push(idep("core", "=1.0.1"));
+        src.add("wide", vec![wide_old, wide_new]);
+        src.add("core", vec![iv("core", "1.0.0"), iv("core", "1.0.1")]);
+
+        let plan = resolve(&root, &mut src).unwrap();
+        assert_eq!(plan.version_map["wide"], vec![Version::new(1, 0, 0)]);
+        assert_eq!(plan.version_map["core"], vec![Version::new(1, 0, 0)]);
         std::fs::remove_dir_all(&d).unwrap();
     }
 

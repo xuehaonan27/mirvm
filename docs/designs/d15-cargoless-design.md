@@ -176,13 +176,13 @@ HTTP/tar 见决策点 ①。
   self 路径 vs cargo 路径自一致 + 原三维判绿照常）。子集外构造
   （workspace 复杂形态/alt registry）**响亮拒绝点名构造**，
   不静默回退 cargo。
-- 验收：`MIRVM_DEPS=self bash tests/corpus.sh --tier smoke` 24/24。
+- 验收：`MIRVM_DEPS=self ./tests/run.sh suite corpus.run --tier smoke` 24/24。
 
 ### P3 迁移：指纹精细化 + corpus 全量 + 双轨 gate
 
 - 范围：rerun-if 精细增量（build.rs 不重跑语义对齐）；corpus full 层
   全量迁移；gate 增 DEPS 轴（self 全量一轮 + cargo compat 路径保留冒烟）。
-- 闭合契约：`MIRVM_DEPS=self bash tests/gate.sh` 179/0/0/0 同构绿；
+- 闭合契约：`MIRVM_DEPS=self ./tests/run.sh gate` 全绿；
   每条目 self 路径与 cargo 路径逐字节一致。
 - 验收：gate DEPS=self 全绿；冷/热 L2 行为不变式照绿。
 

@@ -5,7 +5,8 @@
 # ripgrep_regex 与 warning_return。保留可注入的 expected-red 模式只用于门禁自身
 # 回归，以及未来滚动前沿时锁定原因/XPASS 行为。
 set -u
-cd "$(dirname "$0")/.."
+. "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
+test_enter_repo
 MIRVM=${MIRVM:-$(pwd)/target/debug/mirvm}
 CARGO=${CARGO:-$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo}
 RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
@@ -15,8 +16,6 @@ SCRIPT_CACHE=${SCRIPT_CACHE:-${MIRVM_HOME:-$HOME/.mirvm}/scripts}
 # compat 路径——即便外层（如 gate DEPS=self 全量轮）置了 MIRVM_DEPS=self，
 # 也不能让本轨静默翻成 self 路径（那等于 cargo 腿零覆盖）。
 export MIRVM_DEPS=cargo
-pass=0 xfail=0 fail=0
-
 show_diff() {
     local native_out="$1" mirvm_out="$2"
     diff "$native_out" "$mirvm_out" | head -10
@@ -68,7 +67,7 @@ check_expected_red() {
 
 # P3（M6 片3 调研）：L2 warm 复跑一致性。第二跑应命中 IR 缓存，其 stdout/stderr/
 # 退出码必须与首跑（随后对 native 判绿）逐字节一致——防"缓存回放旧语义/快照损伤"
-# 假绿；告警类项目（诚实不入缓存）第二跑=冷重演，同样必须一致。diff.sh 的 M6 片2
+# 假绿；告警类项目（诚实不入缓存）第二跑=冷重演，同样必须一致。程序差分套件的 M6 片2
 # 通道在 cargo 形态的对位；此前 runner 缓存路径零 gate 覆盖（环境化石化事故任何
 # gate 都抓不到），本维度补上。
 check_warm() {
@@ -188,5 +187,4 @@ if check_warm project "$TMP/proj.mirvm" "$TMP/proj.mirvm.err" "$mc" \
         "$TMP/proj.native.err" "$TMP/proj.mirvm.err"
 fi
 
-echo "== $pass passed, $xfail expected-red, $fail failed =="
-[ $fail = 0 ]
+suite_summary differential.cargo

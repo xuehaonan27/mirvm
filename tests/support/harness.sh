@@ -1,22 +1,82 @@
 # shellcheck shell=bash
-# tests/lib.sh —— 测试套件共享库（只被 source，不直接执行）。
+# tests/support/harness.sh —— 测试套件共享库（只被 source，不直接执行）。
 #
 # 提供四组能力：
 #   1) PASS/FAIL/SKIP/XFAIL 统一记账（ok/bad/skip/red + summary 尾行）
-#   2) corpus.manifest 解析（manifest_rows：唯一真源 → 规范化行）
+#   2) corpus cases.manifest 解析（manifest_rows：唯一真源 → 规范化行）
 #   3) corpus driver 执行器（corpus_run：env/needs/timeout/计时/磁盘护栏一体）
 #   4) 磁盘与 cache 管理（disk_guard / target_budget_check / cache_snapshot）
 #
 # 约定：source 本文件的脚本自己 set -u；计数器在 source 时初始化为 0。
-# 汇总尾行统一以 "$skip_count skip, $fail fail" 收尾（gate_truth 锁此形状）。
+
+TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+REPO_ROOT=$(cd "$TESTS_DIR/.." && pwd)
+
+test_enter_repo() {
+    cd "$REPO_ROOT"
+}
+
+require_executable() { # <说明> <路径>
+    local label=$1 path=$2
+    [ -x "$path" ] || {
+        echo "ERROR $label 不可用: $path" >&2
+        return 69
+    }
+}
+
+ensure_test_sysroot() { # <mirvm> <test-home> <rustc>；结果写入 TEST_SYSROOT
+    local mirvm=$1 test_home=$2 rustc=$3 host tmp code=0 shared_sysroot
+    host=$($rustc -vV | sed -n 's/^host: //p') || return 69
+    TEST_SYSROOT=${MIRVM_SYSROOT:-$test_home/sysroot-$host}
+    if [ -d "$TEST_SYSROOT/lib/rustlib/$host/lib" ]; then
+        export TEST_SYSROOT
+        return 0
+    fi
+    shared_sysroot=${MIRVM_SHARED_SYSROOT:-$HOME/.mirvm/sysroot-$host}
+    if [ -d "$shared_sysroot/lib/rustlib/$host/lib" ]; then
+        TEST_SYSROOT=$shared_sysroot
+        export TEST_SYSROOT
+        return 0
+    fi
+    mkdir -p "$test_home"
+    tmp=$(mktemp -d)
+    printf 'fn main() {}\n' >"$tmp/sysroot_probe.rs"
+    MIRVM_HOME="$test_home" "$mirvm" run "$tmp/sysroot_probe.rs" \
+        >"$tmp/out" 2>"$tmp/err" || code=$?
+    if [ "$code" -ne 0 ] || [ ! -d "$TEST_SYSROOT/lib/rustlib/$host/lib" ]; then
+        echo "ERROR 无法建立测试 sysroot: $TEST_SYSROOT（mirvm exit=$code）" >&2
+        tail -20 "$tmp/err" >&2
+        rm -rf "$tmp"
+        return 69
+    fi
+    rm -rf "$tmp"
+    export TEST_SYSROOT
+}
 
 # ---- ① 记账 ----
-pass=0 fail=0 skip_count=0 xfail=0 p5=0
+pass=0 fail=0 skip_count=0 xfail=0
 ok()   { pass=$((pass + 1)); echo "PASS $*"; }
 bad()  { fail=$((fail + 1)); echo "FAIL $*"; }
 skip() { skip_count=$((skip_count + 1)); echo "SKIP $*"; }
 red()  { xfail=$((xfail + 1)); echo "XFAIL $*"; }
-p5()   { p5=$((p5 + 1)); echo "P5 $*"; }
+
+record_expected_failure() { # <标签> <实际退出码> <code:grep-pattern> <stderr文件>
+    local label=$1 code=$2 spec=$3 errfile=$4
+    local want_code=${spec%%:*} want_pattern=${spec#*:}
+    if [ "$code" -eq 0 ]; then
+        bad "$label XPASS（已转绿：请摘 manifest 的 xfail= 并转正）"
+    elif [ "$code" -eq "$want_code" ] && grep -Eq "$want_pattern" "$errfile"; then
+        red "$label（$want_pattern）"
+    else
+        bad "$label（预期 xfail $want_code/'$want_pattern'，实 exit=$code）: $(tail -1 "$errfile" | head -c 100)"
+    fi
+}
+
+suite_summary() { # <suite-id>：打印统一汇总并返回套件状态
+    local suite_id=$1
+    echo "== $suite_id: $pass passed, $skip_count skipped, $xfail expected-failed, $fail failed =="
+    [ "$fail" -eq 0 ]
+}
 
 # ---- ② 计时 ----
 now_ms() { date +%s%N; }
@@ -39,7 +99,7 @@ print_section_report() {
 #   name  tier(smoke|full|manual)  timeout秒  mode(exit|oracle:<名>|diff)
 #         [env=K=V;K=V] [needs=<路径>] [args=a;b;c] [xfail=<code>:<grep 模式>]
 #         [group=<组>[,<组>...]]（分组键，如 group=heavy；无 group= 的条目属
-#         隐含 light 组——corpus.sh/corpus_deps_pair.sh 的 --group 按它过滤）
+#         隐含 light 组——corpus.run/corpus.deps-pair 的 --group 按它过滤）
 # 输出（管道分隔，域内无 |）：
 #   name|tier|tmo|mode|env|needs|args|xfail|groups
 # 用法：manifest_rows <tiers 逗号|all>            —— 按层过滤
@@ -74,7 +134,7 @@ manifest_rows() {
             printf "%s|%s|%s|%s|%s|%s|%s|%s|%s\n", name, tier, tmo, mode, envv, needs, args, xfail, groups
         }
         END { exit bad }
-    ' "$(dirname "${BASH_SOURCE[0]}")/corpus.manifest"
+    ' "$TESTS_DIR/suites/corpus/cases.manifest"
 }
 
 # manifest_group_rows <group> [tiers 逗号|all] —— 按组过滤（组键在输出第 9 列；

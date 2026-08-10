@@ -9,23 +9,22 @@
 # ffi_agg_probe（按值聚合 FfiAgg 合成矩阵 35/35）；C3 起含 noreturn_ud2
 #（asm noreturn 终止形，exit=132 双侧同，36/36）。
 # ecosystem/ffi_zlib 是 frontmatter/cargo
-# 形态（引擎 cargo 接线 M4.5），diff.sh 同样 SKIP（见 diff_cargo.sh）。
+# 形态由 differential.cargo 覆盖，本套件明确记作跳过。
 set -u
-cd "$(dirname "$0")/.."
+. "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
+test_enter_repo
 
 MIRVM=${MIRVM:-target/debug/mirvm}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-pass=0 fail=0
-
 for src in demo/*.rs; do
     name=$(basename "$src" .rs)
     [ "$name" = "fib" ] || [ -z "${ONLY:-}" ] || [ "$name" = "$ONLY" ] || continue
 
-    # 这两个文件带 Cargo frontmatter，必须由 diff_cargo.sh 编译；除此之外
+    # 这两个文件带 Cargo frontmatter，必须由 differential.cargo 编译；除此之外
     # 任意 rustc 失败都是真回归，不能用 SKIP 吞掉。
     if [ "$name" = ecosystem ] || [ "$name" = ffi_zlib ]; then
-        echo "SKIP $name (Cargo frontmatter; see diff_cargo.sh)"
+        skip "$name（Cargo frontmatter；见 differential.cargo）"
         continue
     fi
 
@@ -92,5 +91,4 @@ for src in demo/*.rs; do
     fi
 done
 
-echo "== $pass passed, $fail failed =="
-[ $fail = 0 ]
+suite_summary differential.programs

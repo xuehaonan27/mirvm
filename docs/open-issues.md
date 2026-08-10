@@ -1,6 +1,6 @@
 # mirvm 未解决债务与开放问题登记册
 
-> 覆盖 mirvm 自始（M0 tier-0 时代）至 2026-08-08 当前复核的
+> 覆盖 mirvm 自始（M0 tier-0 时代）至 2026-08-10 当前复核的
 > **全部**记录在案且至今未解决的债务、开放问题、响亮拒绝边界与暂缓项。
 > 本文是未解决事项的**唯一登记入口**；已根治/已完成项一律不收录（查
 > [current-status.md](current-status.md) 与 [decision-history.md](decision-history.md)）。
@@ -83,7 +83,7 @@
 | E4 | **CLIF 原子统一 SeqCst** | `记账` Cranelift 0.133 无弱序；JIT 侧全部最强序（合规强化，无分歧） | history/m5-log.md |
 | E5 | **JIT 机器码随模块常驻** | `记账` cranelift-jit 不支持逐函数释放，进程生命周期记账 | designs/m5-design.md |
 | E6 | **分配快路径/guest TLS 快路径内联未做** | `未立项` m5-design D5 格③空（分配走 mirvm_alloc 助手、TlsRef 走助手）；手卷 TLAB 同题（E14）。**2026-07-21 身份升格 = vmctx 复测双闸之闸①**（vmctx-passing §7；立项时以格③真实负载复测 T vs R，对照基线 = §7.20 计量：corpus alloc 7.82M / tls_ref 0.38M） | designs/m5-design.md §3，decision-history §7.20 |
-| E7 | **JIT 优化项池** | `未立项` SwitchInt 用 br_table 替代 icmp+brif 链；取址逃逸精化（Q1 残余优化触发器）；CallIndirect 内联缓存（挂 T3）；LSDA 存储升 JIT data object（挂 T3）；**2026-07-21 增**：SIMD 净映射家族 CLIF 向量内联（Q4 原案——T1-d 以全助手先行锚定正确性，提升纯属性能）；CallIndirect/Call 的 PLT try_call_indirect 快路（T1-c v1 统一 c2i-try_call 的预留项） | designs/m5.4-design.md |
+| E7 | **JIT 优化项池** | `未立项` SwitchInt 用 br_table 替代 icmp+brif 链；取址逃逸精化（Q1 残余优化触发器）；CallIndirect 内联缓存（挂 T3）；LSDA 存储升 JIT data object（挂 T3）；**2026-07-21 增**：SIMD 净映射家族 CLIF 向量内联（Q4 原案——T1-d 以全助手先行锚定正确性，提升纯属性能）；CallIndirect/Call 的 PLT try_call_indirect 快路（T1-c v1 统一 c2i-try_call 的预留项）。**当前实锤触发器（2026-08-10）**：标准 `performance.limits` 在热缓存下跑 `fib(32)` 最快约 **97ms**，超过既定 **80ms** 硬门；`MIRVM_TIMING` 约为 cache-load 52ms、engine 32ms，输出正确且 JIT 仍比关闭时约 1050ms 快。不得通过放宽门槛关闭；复现：`./tests/run.sh suite performance.limits` | designs/m5.4-design.md，tests/suites/performance/limits.sh |
 | E8 | **backtrace 真符号化 + 合成 IP 近似** | `绕行` 合成 IP 不经 dladdr（诚实 `<unknown>`，不伪造宿主符号）；真符号化（物化符号 ELF 给 dladdr）可选未立项 | current-status §4，decision-history §6.1 |
 | E9 | **`dl_iterate_phdr` 差分探针欠账** | `绕行` 走 native FFI「无观测到缺陷」，探针补课未做 | current-status §4，history/m5.2-design.md |
 | E10 | **guest TLS 实例块回收** | `记账` 每线程每 TLS 一小块泄漏（dtor 副作用已正确）；M4.4 起挂账「按需」，至今未立项 | history/m4-log.md:439 |
@@ -116,7 +116,7 @@
 | E33 | **unsafe trust-boundary 优先审计**（audit M-03，2026-07-22 登记） | `未立项` ~475 个 unsafe block、显式 SAFETY 注释仅 5 处——真实地址模型/FFI/ELF/asm-stub/unwind 决定大量 unsafe 不可避免；正确策略非机械补注释，而是优先审计 FFI、全局 Shared、ELF 解析、固定地址映射、thunk、unwind 五个信任边界，为每个实际不变量补最小证明或测试；ASan/fuzz 类保证无实锤前不立项 | history/development-status-audit-2026-07-22.md §9 |
 | E34 | **JIT 翻译器大 match 治理**（audit M-04 关联，2026-07-22 登记） | `记账` jit/translate.rs 2,939 行单文件三 match 是维护热点；分族拆文件的收益/扰动比未评，结构重构战役（E21）模式可复用，下次大改前评估 | src/vm/engine/jit/translate.rs |
 | E35 | **编译 worker FIFO 排空竞态**（2026-07-22 登记） | `记账` 短命程序退出时编译队列可能未排空——已投递函数永不发布（语义零影响：解释兜底正确；仅 JIT_DEBUG 口径观察与短程序性能非确定）。处置方向 = 退出前 drain 或记账接受，无实锤驱动前不动 | src/vm/engine/interp/mod.rs:414 |
-| E36 | **cargo 项目模式 guest cwd=项目目录，与 cargo run 语义分叉**（2026-07-23 测试管线整顿实锤） | **self 路径已闭合（D15 P2，decision-history §7.29）**：cargoless driver 全程不 chdir——guest cwd=调用者 cwd，与 cargo run（含 --manifest-path）语义一致。**长期保留的 compat 路径仍有欠账**：phase_cargo 以 current_dir=项目目录驱动 cargo，runner 继承之 → guest cwd=项目目录（`mirvm run <项目目录>` 时 guest cwd=项目目录；而 `cargo run` 从不 chdir——argv 探针实锤两语义分叉；corpus/projects 对拍以 {ROOT} 绝对化夹具路径绕行，harness 层合法）。不能再等删除 compat 自然消失，后续应在 compat runner 协议内传回原调用目录并补对拍 | tests/corpus.manifest {ROOT} 注，decision-history §7.26/§7.29/§7.37 |
+| E36 | **cargo 项目模式 guest cwd=项目目录，与 cargo run 语义分叉**（2026-07-23 测试管线整顿实锤） | **self 路径已闭合（D15 P2，decision-history §7.29）**：cargoless driver 全程不 chdir——guest cwd=调用者 cwd，与 cargo run（含 --manifest-path）语义一致。**长期保留的 compat 路径仍有欠账**：phase_cargo 以 current_dir=项目目录驱动 cargo，runner 继承之 → guest cwd=项目目录（`mirvm run <项目目录>` 时 guest cwd=项目目录；而 `cargo run` 从不 chdir——argv 探针实锤两语义分叉；corpus/projects 对拍以 {ROOT} 绝对化夹具路径绕行，harness 层合法）。不能再等删除 compat 自然消失，后续应在 compat runner 协议内传回原调用目录并补对拍 | `tests/suites/corpus/cases.manifest` {ROOT} 注，decision-history §7.26/§7.29/§7.37 |
 
 > E27（weak 符号真地址化缺定向验收）已于 2026-07-18 关闭并实修「weak extern
 > static 恒 0 判空 cell」缺陷——现走 GOT 启动相真解析（命中=真址/缺席=0；引擎

@@ -4,7 +4,7 @@
 > **§0–§4 = tier-0 时代（M2.5，2026-07-05）调研票据归档**——五张设计票据已全部兑现，
 > 逐 crate 过程细节见 git 历史（2026-07-18 文档精简时压缩为一屏）；
 > **§5 = 三维逐字节差分时代的当前活台账**（批1–11；条目唯一真源 =
-> `tests/corpus.manifest`，164 脚本驱动 + 2 vendored 真 cargo 项目）；
+> `tests/suites/corpus/cases.manifest`，164 脚本驱动 + 2 vendored 真 cargo 项目）；
 > **§6–§7 = 已投放清单与后续候选池**。
 > 当前可信边界见 [current-status.md](current-status.md)；撞出的未解决债务全部登记在
 > [open-issues.md](open-issues.md)。
@@ -13,12 +13,12 @@
 
 corpus = 一组**真实生态 crate 的最小驱动程序**（`corpus/c_*.rs`）外加
 **vendored 真 cargo 项目**（`corpus/projects/<名>/`，批11 起），用来发现真实
-代码对抽象机 / VM 边界提出的要求。**条目唯一真源 = `tests/corpus.manifest`**
+代码对抽象机 / VM 边界提出的要求。**条目唯一真源 = `tests/suites/corpus/cases.manifest`**
 （tier/timeout/mode/env/needs 全在此；新增 driver 必须先登记）。跑法：
-`bash tests/corpus.sh`（全量三层）、`bash tests/corpus.sh --tier smoke`（按层）、
-`bash tests/corpus.sh --group heavy`（按组——heavy = 实测最慢 ~16 条重负载，
+`./tests/run.sh suite corpus.run`（全量三层）、追加 `--tier smoke`（按层）、
+追加 `--group heavy`（按组，heavy = 实测最慢约 16 条重负载，
 无 group= 键的属 light；可与 --tier 叠加取交集）、
-`bash tests/corpus.sh <name>...`（按名子集）；release 二进制，stdout/stderr 落
+直接追加 `<name>...`（按名子集）；release 二进制，stdout/stderr 落
 `/tmp/corpus-out/<name>.{out,err}`。三维差分纪律与验收食谱见 §5 头注与
 [agents/onboarding.md](agents/onboarding.md)；gate 内判绿三口径
 （exit / oracle / diff）见 manifest 头注。
@@ -320,7 +320,7 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
 ### 批8 波2（2026-07-17，VM/语言机/大物 5 个；4 绿 / 1 expected-red 记档；修出 1 JIT bug）
 
 - **绿**：swc_parse（oxc 姊妹压强：swc 41.x 手写递归下降 + serde JSON
-  census + 错误模型差异记录）、miden_exec（0.25.5 **execute-only**：绕开
+  census + 错误模型差异记录）、miden_exec（0.25.8 **execute-only**：绕开
   umbrella 内嵌的 prover——直用 miden-assembly+processor；MASM 三程序
   含 dyncall 摘要注入的递归逃逸形态；trace 矩阵 ≠ 证明）、polodb
   （polodb_core 3.5.2：明确勘破上游 base update 泄漏事务语义并以打印
@@ -436,7 +436,7 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
   fastfloat_ryu/gluesql_db/h3_hex/jiff_time/nalgebra_la/plotters_chart/
   polars_frame/stemmers_multi/tokenizers_hf/whatlang_detect）两边都没接线**
   （创建时三维验收过却从不进任何 gate），zstd_stream 只在 corpus.sh 侧。
-  治理 = `tests/corpus.manifest` 唯一真源（tier/timeout/mode/env/needs/xfail
+  治理 = `tests/suites/corpus/cases.manifest` 唯一真源（tier/timeout/mode/env/needs/xfail
   六列，gate 与跑批共读），164 脚本驱动全接线：137 full + 24 smoke + 3 manual。
 - **判绿三口径**（gate 内）：`exit`（退出码，创建时三维验收的既定口径）/
   `oracle:<名>`（stdout 逐字节等于 tests/fixtures/oracles/<名>.txt，原内联

@@ -6,7 +6,7 @@
 # rustls 0.23 官方双 provider 之一，其归档形状（C+asm 静态归档、
 # -fvisibility=hidden 符号）在 mirvm 已实证全绿（docs/corpus.md 的 ring bug②
 # 修复记录）。本 driver 覆盖的 rustls API 面与 provider 选择无关。
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls = { version = "=0.23.42", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"
 ---
 // rustls 0.23 + rustls-pemfile 2：TLS 大物的无网络确定性面。不握手、不联网。
@@ -24,7 +24,7 @@ rustls-pemfile = "2"
 //    用随机 nonce（非 RFC6979，native 连跑两次签名即不同），签名本体不可
 //    打印，只打确定性的验签结果。（DigitallySignedStruct 经 internal Codec
 //    构造——rustls 自己的集成测试同款用法；internal 模块 semver-exempt，
-//    但 0.23.41 已钉在本地缓存）。
+//    但 0.23.42 已钉在合同中）。
 // 证书材料（构建期 openssl CLI 生成，运行期全确定）：
 //   openssl ecparam -genkey -name prime256v1 -out ca-key.pem
 //   openssl req -new -x509 -key ca-key.pem -out ca-cert.pem -days 7300 \

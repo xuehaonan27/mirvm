@@ -3,7 +3,7 @@
 > 本文只回答两个问题：**哪份文档管什么**、**冲突时信谁**。
 > 最后重整：2026-07-18（文档目录大精简：历史文档归档 `history/`、四个过时文档删除、
 > 新增 [open-issues.md](open-issues.md) 债务登记册与 [agents/onboarding.md](agents/onboarding.md)）；
-> 最后同步：2026-07-22（新增 HEAD `cda7421` 的一次性开发状况审查快照索引；不改变
+> 最后同步：2026-08-10（标准测试套件、cargoless 合同与当前验证边界已纳入；不改变
 > current-status/open-issues/decision-history 的既有权威顺序）。
 
 ## 1. 权威顺序（冲突时从高到低取信）
@@ -37,6 +37,7 @@
 | `README.md` | 门面：项目一句话、快速开始、权威指向 |
 | `DESIGN.md` | **契约**：RAM 命题、P0–P7、C0–C13 账本、里程碑（tier-0 与 M6=REPL 段为历史） |
 | `AGENTS.md` | agent 治理：issue tracker 归所、triage 标签、基建预算纪律 |
+| `tests/README.md` | 现行测试入口、全部套件用途、状态语义和新增测试要求 |
 
 ### docs/ 顶层（活文档）
 

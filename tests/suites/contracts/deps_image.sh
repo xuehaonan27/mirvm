@@ -8,10 +8,12 @@
 #   6. S3′c：同 workspace 第二 bin 白拿 image（键无项目身份；零新 image 文件）
 # oracle = 固定输出串 + 双态一致 + 时序门 + image 文件计数；任一缺失即 FAIL
 # （deps/*.img 在本 gate 起手清空——内容寻址可再生，自愈由设计保证；sysroot/底座不动）。
-set -euo pipefail
-cd "$(dirname "$0")/.."
+set -uo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
+test_enter_repo
 
 MIRVM=${MIRVM:-target/release/mirvm}
+RUSTC=${RUSTC:-rustc}
 # 本 gate 恒走 cargo compat 轨（D15 P3 双轨纪律）：S3′c 跨 bin 共享的
 # deps-image 键 = fnv(底座键, --extern 产物盖戳)——内容寻址按轨分立，
 # self 轨（target/cargoless）与 cargo 轨（target/mirvm）产物名/盖戳不同，
@@ -19,25 +21,29 @@ MIRVM=${MIRVM:-target/release/mirvm}
 # --bin 多 bin 选择，P4 记档）。self 轨的 deps-image 行为由 gate 的
 # corpus 段（DEPS=self 全量跑）隐含覆盖。
 export MIRVM_DEPS=cargo
-WS=tests/fixtures/a2_ws
-HOST=$(rustc -vV | sed -n 's/^host: //p')
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+cp -r tests/fixtures/a2_ws "$TMP/a2_ws"
+WS="$TMP/a2_ws"
+HOST=$($RUSTC -vV | sed -n 's/^host: //p')
 DEPS=${MIRVM_HOME:-$HOME/.mirvm}/deps
 SYSROOT=${MIRVM_HOME:-$HOME/.mirvm}/sysroot-$HOST
 # 统一依赖存储（D14）：mirvm run（步骤 1-5）经 cargo_project_command 落在共享
 # target dir，本脚本手工驱动的 bin2 必须同址，否则 extern 盖戳不同、image 不共享
 TARGET_MIRVM=${MIRVM_TARGET_DIR:-${MIRVM_HOME:-$HOME/.mirvm}/target/mirvm}
 CHANNEL=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
-CARGO=$HOME/.rustup/toolchains/$CHANNEL-$HOST/bin/cargo
+CARGO=${CARGO:-$HOME/.rustup/toolchains/$CHANNEL-$HOST/bin/cargo}
 MIRVM_ABS=$(cd "$(dirname "$MIRVM")" && pwd)/$(basename "$MIRVM")
-TMP=$(mktemp -d)
-cp "$WS/src/bin/a2_one.rs" "$TMP/a2_one.rs.bak"
-trap 'cp "$TMP/a2_one.rs.bak" "$WS/src/bin/a2_one.rs" 2>/dev/null || true; rm -rf "$TMP" tests/fixtures/a2_ws/target' EXIT
 
-fail() { echo "FAIL a2_deps_image: $*"; exit 1; }
+abort_test() {
+    bad "$*"
+    suite_summary contracts.deps-image || true
+    exit 1
+}
 
-[ -x "$MIRVM" ] || fail "mirvm 不存在: $MIRVM（先 cargo build --release）"
-[ -d "$SYSROOT" ] || fail "sysroot 不存在: $SYSROOT（先跑一次任意 mirvm run）"
-[ -x "$CARGO" ] || fail "锁定工具链 cargo 不存在: $CARGO"
+[ -x "$MIRVM" ] || abort_test "mirvm 不存在: $MIRVM"
+[ -d "$SYSROOT" ] || abort_test "sysroot 不存在: $SYSROOT"
+[ -x "$CARGO" ] || abort_test "固定工具链 Cargo 不存在: $CARGO"
 mkdir -p "$DEPS"
 rm -f "$DEPS"/*.img
 
@@ -48,43 +54,43 @@ le300() { awk -v m="$1" 'BEGIN{exit !(m+0<=300)}'; }
 # 1) 冷写（L2 旁路保证确定性冷启）：split 全量 + image 落盘
 before=$(ls "$DEPS" | wc -l)
 MIRVM_NO_IR_CACHE=1 MIRVM_TIMING=1 "$MIRVM" run "$WS" >"$TMP/cold.out" 2>"$TMP/cold.timing" \
-    || fail "冷写退出非零"
-grep -q 'a2_one: found quick at 9' "$TMP/cold.out" || fail "冷写输出错: $(cat "$TMP/cold.out")"
+    || abort_test "冷写退出非零"
+grep -q 'a2_one: found quick at 9' "$TMP/cold.out" || abort_test "冷写输出错: $(cat "$TMP/cold.out")"
 after=$(ls "$DEPS" | wc -l)
-[ "$after" -gt "$before" ] || fail "冷写未产出 image 文件"
+[ "$after" -gt "$before" ] || abort_test "冷写未产出 image 文件"
 
 # 2) 热读（L2 旁路，强制走 image 路径）：image 命中，只降 delta
 MIRVM_NO_IR_CACHE=1 MIRVM_TIMING=1 "$MIRVM" run "$WS" >"$TMP/warm.out" 2>"$TMP/warm.timing" \
-    || fail "热读退出非零"
-grep -q 'a2_one: found quick at 9' "$TMP/warm.out" || fail "热读输出错"
+    || abort_test "热读退出非零"
+grep -q 'a2_one: found quick at 9' "$TMP/warm.out" || abort_test "热读输出错"
 ms=$(lower_ms "$TMP/warm.timing")
-[ -n "$ms" ] || fail "热读无 lower 计时（image 未命中？）: $(cat "$TMP/warm.timing")"
-le300 "$ms" || fail "热读 lower ${ms}ms > 300ms"
+[ -n "$ms" ] || abort_test "热读无 lower 计时（image 未命中？）: $(cat "$TMP/warm.timing")"
+le300 "$ms" || abort_test "热读 lower ${ms}ms > 300ms"
 
 # 3) 编辑 bin1 重跑：输出正确 + image 不重建 + ≤300ms
 imgs_before_edit=$(ls "$DEPS" | wc -l)
 sed -i 's/found quick at/found QUICK at/' "$WS/src/bin/a2_one.rs"
 MIRVM_NO_IR_CACHE=1 MIRVM_TIMING=1 "$MIRVM" run "$WS" >"$TMP/edit.out" 2>"$TMP/edit.timing" \
-    || fail "编辑重跑退出非零"
-grep -q 'a2_one: found QUICK at 9' "$TMP/edit.out" || fail "编辑重跑输出错: $(cat "$TMP/edit.out")"
+    || abort_test "编辑重跑退出非零"
+grep -q 'a2_one: found QUICK at 9' "$TMP/edit.out" || abort_test "编辑重跑输出错: $(cat "$TMP/edit.out")"
 ms=$(lower_ms "$TMP/edit.timing")
-[ -n "$ms" ] || fail "编辑重跑无 lower 计时"
-le300 "$ms" || fail "编辑重跑 lower ${ms}ms > 300ms"
-[ "$(ls "$DEPS" | wc -l)" -eq "$imgs_before_edit" ] || fail "编辑重跑重建了 image（键含 bin 源？）"
+[ -n "$ms" ] || abort_test "编辑重跑无 lower 计时"
+le300 "$ms" || abort_test "编辑重跑 lower ${ms}ms > 300ms"
+[ "$(ls "$DEPS" | wc -l)" -eq "$imgs_before_edit" ] || abort_test "编辑重跑重建了 image（键含 bin 源？）"
 
 # 4) L2 矩阵：image 在场时未编辑复跑命中 L2（首跑入账、次跑命中）
-MIRVM_TIMING=1 "$MIRVM" run "$WS" >"$TMP/l2a.out" 2>"$TMP/l2a.timing" || fail "L2 入账跑退出非零"
-MIRVM_TIMING=1 "$MIRVM" run "$WS" >"$TMP/l2.out" 2>"$TMP/l2.timing" || fail "L2 复跑退出非零"
-grep -q 'a2_one: found QUICK at 9' "$TMP/l2.out" || fail "L2 复跑输出错"
+MIRVM_TIMING=1 "$MIRVM" run "$WS" >"$TMP/l2a.out" 2>"$TMP/l2a.timing" || abort_test "L2 入账跑退出非零"
+MIRVM_TIMING=1 "$MIRVM" run "$WS" >"$TMP/l2.out" 2>"$TMP/l2.timing" || abort_test "L2 复跑退出非零"
+grep -q 'a2_one: found QUICK at 9' "$TMP/l2.out" || abort_test "L2 复跑输出错"
 ms=$(cache_ms "$TMP/l2.timing")
-[ -n "$ms" ] || fail "L2 复跑未命中（无 cache-load）: $(cat "$TMP/l2.timing")"
-le300 "$ms" || fail "L2 cache-load ${ms}ms > 300ms"
+[ -n "$ms" ] || abort_test "L2 复跑未命中（无 cache-load）: $(cat "$TMP/l2.timing")"
+le300 "$ms" || abort_test "L2 cache-load ${ms}ms > 300ms"
 
 # 5) 双态：旁路 vs 默认输出一致（冷路径，L2 旁路）
 MIRVM_NO_DEPS_IMAGE=1 MIRVM_NO_IR_CACHE=1 "$MIRVM" run "$WS" >"$TMP/bypass.out" 2>/dev/null \
-    || fail "旁路运行退出非零"
-MIRVM_NO_IR_CACHE=1 "$MIRVM" run "$WS" >"$TMP/default.out" 2>/dev/null || fail "默认运行退出非零"
-diff -q "$TMP/bypass.out" "$TMP/default.out" >/dev/null || fail "双态输出不一致"
+    || abort_test "旁路运行退出非零"
+MIRVM_NO_IR_CACHE=1 "$MIRVM" run "$WS" >"$TMP/default.out" 2>/dev/null || abort_test "默认运行退出非零"
+diff -q "$TMP/bypass.out" "$TMP/default.out" >/dev/null || abort_test "双态输出不一致"
 
 # 6) S3′c：同 workspace 第二 bin（未跑过）白拿 bin1 的 image——
 #    零新 image 文件 + ≤300ms（键无项目身份，跨 bin 共享）
@@ -99,11 +105,12 @@ imgs_before_s3c=$(ls "$DEPS" | wc -l)
         --config "target.'cfg(all())'.runner=['$MIRVM_ABS','runner']" \
         --target-dir "$TARGET_MIRVM" --quiet --bin a2_two \
         >"$TMP/s3c.out" 2>"$TMP/s3c.timing"
-) || fail "S3′c bin2 运行退出非零"
-grep -q 'a2_two: found box at 13' "$TMP/s3c.out" || fail "S3′c 输出错: $(cat "$TMP/s3c.out")"
+) || abort_test "S3′c bin2 运行退出非零"
+grep -q 'a2_two: found box at 13' "$TMP/s3c.out" || abort_test "S3′c 输出错: $(cat "$TMP/s3c.out")"
 ms=$(lower_ms "$TMP/s3c.timing")
-[ -n "$ms" ] || fail "S3′c 无 lower 计时（image 未共享？）: $(cat "$TMP/s3c.timing")"
-le300 "$ms" || fail "S3′c lower ${ms}ms > 300ms"
-[ "$(ls "$DEPS" | wc -l)" -eq "$imgs_before_s3c" ] || fail "S3′c bin2 重建了 image（未共享）"
+[ -n "$ms" ] || abort_test "S3′c 无 lower 计时（image 未共享？）: $(cat "$TMP/s3c.timing")"
+le300 "$ms" || abort_test "S3′c lower ${ms}ms > 300ms"
+[ "$(ls "$DEPS" | wc -l)" -eq "$imgs_before_s3c" ] || abort_test "S3′c bin2 重建了 image（未共享）"
 
-echo "PASS a2_deps_image"
+ok "冷写、热读、编辑、旁路和跨 bin 共享"
+suite_summary contracts.deps-image

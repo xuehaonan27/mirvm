@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# tests/corpus_deps_pair.sh —— D15 P2 闭合契约对拍轴：corpus 指定层每条目跑
+# corpus 依赖路径对拍：指定层的每个条目各跑 Cargo 与 cargoless 两条路径，
 # 两腿（MIRVM_DEPS=cargo 三阶段旧路径 vs MIRVM_DEPS=self 零 cargo 自有调度），
 # stdout/stderr/exit 逐字节一致才判 PASS。
 #
-# 用法：bash tests/corpus_deps_pair.sh [--tier smoke|full|all] [--group 组] [name ...]
+# 用法：./tests/run.sh suite corpus.deps-pair [--tier smoke|full|all] [--group 组] [name ...]
 #   --group heavy 只跑 manifest group=heavy 的条目（light = 无 group= 键条目）；
 #   --tier 与 --group 可叠加（交集）；按名跑忽略组过滤
-# 环境同 corpus.sh（MIRVM / MIRVM_DISK_MIN_GB / MIRVM_TARGET_BUDGET_GB 等）。
+# 环境同 corpus.run（MIRVM / MIRVM_DISK_MIN_GB / MIRVM_TARGET_BUDGET_GB 等）。
 # 磁盘纪律：两腿各跑一遍 = 两遍开销；cache 清理口径与 corpus_run 相同
 # （deps/ir 每跑清，cargoless/cargo 两 target store 保留复用）。
 set -u
-cd "$(dirname "$0")/.."
+. "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
+test_enter_repo
 MIRVM=${MIRVM:-$(pwd)/target/release/mirvm}
 [ -x "$MIRVM" ] || { echo "corpus_deps_pair: $MIRVM 不存在（先 cargo build --release）" >&2; exit 69; }
-. tests/lib.sh
 CORPUS_TIMINGS_FILE=$(mktemp); export CORPUS_TIMINGS_FILE
 trap 'rm -f "$CORPUS_TIMINGS_FILE"' EXIT
 
@@ -54,7 +54,6 @@ else
     trap 'rm -rf "$OUT_C" "$OUT_S" "$CORPUS_TIMINGS_FILE"' EXIT
 fi
 
-pass=0 fail=0 skip_count=0 p5_count=0
 while IFS='|' read -r name _tier tmo mode envv needs args _xfail _groups; do
     [ -n "$name" ] || continue
     argv=()
@@ -66,12 +65,11 @@ while IFS='|' read -r name _tier tmo mode envv needs args _xfail _groups; do
     sc=$?
 
     if [ "$cc" -eq 77 ] || [ "$sc" -eq 77 ]; then
-        echo "SKIP  $name（needs 缺席：$needs）"
-        skip_count=$((skip_count + 1))
+        skip "$name（needs 缺席：$needs）"
         continue
     fi
     ok=1 why=""
-    # stderr 对比前规范化 panic 头的线程名/TID（diff.sh 同款先例：TID 随
+    # stderr 对比前规范化 panic 头的线程名/TID（程序差分套件已有同款先例：TID 随
     # 进程漂移天然不可逐字节；只规范化本来就不稳定的部分，其余差异照红）。
     sed -E "s/thread '[^']*' \([0-9]+\)/thread 'T'/" "$OUT_C/$name.err" >"$OUT_C/$name.err.n"
     sed -E "s/thread '[^']*' \([0-9]+\)/thread 'T'/" "$OUT_S/$name.err" >"$OUT_S/$name.err.n"
@@ -84,11 +82,7 @@ while IFS='|' read -r name _tier tmo mode envv needs args _xfail _groups; do
         pass=$((pass + 1))
     elif [ "$cc" -eq 0 ] && [ "$sc" -ne 0 ] \
         && grep -q "归 P5" "$OUT_S/$name.err" 2>/dev/null; then
-        # P5 边界单列：self 腿撞事先明说的 P5 拒绝面（git 源/alt registry/
-        # workspace 多包图等），cargo 腿通过 —— 照 cli.rs deps_main 先例，
-        # 计独立 p5 列，不算 fail。
-        echo "P5    $name（self 腿 P5 边界拒绝）"
-        p5_count=$((p5_count + 1))
+        red "$name（已知边界：归 P5）"
     else
         echo "FAIL  $name: $why"
         echo "--- cargo stderr 尾部 ---"; tail -5 "$OUT_C/$name.err" 2>/dev/null
@@ -97,10 +91,5 @@ while IFS='|' read -r name _tier tmo mode envv needs args _xfail _groups; do
     fi
 done <<< "$rows"
 
-echo "---"
-summary="deps_pair: $pass pass"
-[ "$skip_count" -gt 0 ] && summary="$summary, $skip_count skip"
-[ "$p5_count" -gt 0 ] && summary="$summary, $p5_count p5"
-echo "$summary, $fail fail"
 target_budget_check
-[ "$fail" -eq 0 ]
+suite_summary corpus.deps-pair

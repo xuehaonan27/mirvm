@@ -22,6 +22,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use semver::{Version, VersionReq};
 
@@ -43,6 +44,8 @@ pub struct IndexVersion {
     pub links: Option<String>,
     pub rust_version: Option<Version>,
 }
+
+pub type IndexEntry = Arc<[IndexVersion]>;
 
 /// index 里的依赖元数据（registry crate 的权威依赖描述——resolve 不读其
 /// Cargo.toml，与 cargo 同以 index 为准）。
@@ -75,6 +78,9 @@ pub struct Registry {
     offline: bool,
     agent: ureq::Agent,
     git: GitStore,
+    /// 单次命令内 index 条目不变；版本求解和 feature 收敛会反复查询同一
+    /// 包，缓存解析结果，避免每轮重新读取并解析整行 JSON。
+    index_cache: std::cell::RefCell<std::collections::BTreeMap<String, IndexEntry>>,
 }
 
 impl Registry {
@@ -99,6 +105,7 @@ impl Registry {
             root,
             offline,
             agent: config.into(),
+            index_cache: std::cell::RefCell::new(std::collections::BTreeMap::new()),
         })
     }
 
@@ -136,7 +143,10 @@ impl Registry {
     }
 
     /// 读 index 条目（缓存命中直接用；否则 HTTP 拉取并落缓存）。
-    pub fn index_entry(&self, name: &str) -> Result<Vec<IndexVersion>, RErr> {
+    pub fn index_entry(&self, name: &str) -> Result<IndexEntry, RErr> {
+        if let Some(entry) = self.index_cache.borrow().get(name) {
+            return Ok(entry.clone());
+        }
         let file = self.index_file(name)?;
         let text = if file.is_file() {
             std::fs::read_to_string(&file)
@@ -165,7 +175,11 @@ impl Registry {
                 .map_err(|e| format!("index 缓存落盘失败 {}: {e}", file.display()))?;
             text
         };
-        parse_index_lines(&text)
+        let entry: IndexEntry = parse_index_lines(&text)?.into();
+        self.index_cache
+            .borrow_mut()
+            .insert(name.to_string(), entry.clone());
+        Ok(entry)
     }
 
     // ---------- .crate 下载与解包 ----------

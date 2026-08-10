@@ -4,7 +4,7 @@
 // warning，byte 对拍先把 warning 面让开）。
 // D15 P3 切⑤b rerun-if-env-changed 面：BR_TOGGLE 经 rustc-env 进输出——
 // 值变 ⇒ 根包重跑且 guest 输出变；不变 ⇒ 跳过执行、存档回放逐字节同
-// （tests/bldrs_rerun.sh 步骤④⑤ 实证；对拍两腿皆未设 ⇒ 恒 "off"）。
+// （contracts.build-script-rerun 步骤④⑤实证；对拍两腿皆未设，所以恒为 "off"）。
 fn main() {
     let seen = std::env::var("DEP_MYLINKS_FOO").expect("DEP_MYLINKS_FOO 应在");
     println!("cargo::rustc-env=ROOT_SEEN={seen}");
