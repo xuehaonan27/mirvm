@@ -44,14 +44,20 @@ use super::workspace::WorkspaceManifest;
 
 /// `mirvm run <目录|Cargo.toml> [--bin <名>]`（MIRVM_DEPS=self）。
 /// bin_sel = --bin 选定的 bin 名（D15 P4 切⑥b，cargo run --bin 语义）。
-pub fn run_project(dir: &Path, program_args: &[String], bin_sel: Option<&str>) -> ExitCode {
-    let manifest = match PackageManifest::read_dir(dir) {
+pub fn run_project(
+    dir: &Path,
+    program_args: &[String],
+    bin_sel: Option<&str>,
+    ignore_rust_version: bool,
+) -> ExitCode {
+    let mut manifest = match PackageManifest::read_dir(dir) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("mirvm: 读取项目 {} 失败: {e}", dir.display());
             std::process::exit(1);
         }
     };
+    manifest.ignore_rust_version = ignore_rust_version;
     drive(&manifest, program_args, bin_sel)
 }
 
@@ -75,7 +81,7 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
             return ExitCode::from(2);
         }
     };
-    let workspace = match WorkspaceManifest::read(dir) {
+    let mut workspace = match WorkspaceManifest::read(dir) {
         Ok(workspace) => workspace,
         Err(e) => {
             eprintln!("mirvm: 读取项目 {} 失败: {e}", dir.display());
@@ -85,6 +91,11 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
     if request.offline {
         // SAFETY: CLI 启动相，尚未启动 worker/rustc/guest 线程。
         unsafe { std::env::set_var("MIRVM_OFFLINE", "1") };
+    }
+    if request.ignore_rust_version {
+        for member in &mut workspace.members {
+            member.ignore_rust_version = true;
+        }
     }
     if request.locked && !workspace.root.join("Cargo.lock").is_file() {
         eprintln!("mirvm test: --locked 要求 workspace 根已有 Cargo.lock");
@@ -513,6 +524,7 @@ struct TestRequest {
     features: BTreeSet<String>,
     all_features: bool,
     no_default_features: bool,
+    ignore_rust_version: bool,
 }
 
 struct SelectedTarget<'a> {
@@ -574,6 +586,7 @@ impl TestRequest {
                 }
                 "--all-features" => out.all_features = true,
                 "--no-default-features" => out.no_default_features = true,
+                "--ignore-rust-version" => out.ignore_rust_version = true,
                 _ if arg.starts_with("--bin=") => {
                     out.bin_names.insert(arg[6..].to_string());
                 }
@@ -1303,7 +1316,7 @@ pub fn run_root_recipe(mut argv: impl Iterator<Item = String>) -> ExitCode {
 
 /// `mirvm run <frontmatter 脚本>`（MIRVM_DEPS=self）：正文物化到脚本缓存目录
 /// （audit::script_cache_dir 同口径键），伪包 manifest 走同一 drive。
-pub fn run_script(file: &Path, program_args: &[String]) -> ExitCode {
+pub fn run_script(file: &Path, program_args: &[String], ignore_rust_version: bool) -> ExitCode {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
         Err(e) => {
@@ -1342,7 +1355,7 @@ pub fn run_script(file: &Path, program_args: &[String]) -> ExitCode {
         eprintln!("mirvm: 写入 {} 失败: {e}", main_rs.display());
         std::process::exit(1);
     }
-    let manifest =
+    let mut manifest =
         match PackageManifest::from_frontmatter_at(stem, &manifest_text, &cache, &main_rs) {
             Ok(m) => m,
             Err(e) => {
@@ -1350,6 +1363,7 @@ pub fn run_script(file: &Path, program_args: &[String]) -> ExitCode {
                 std::process::exit(1);
             }
         };
+    manifest.ignore_rust_version = ignore_rust_version;
     drive(&manifest, program_args, None)
 }
 

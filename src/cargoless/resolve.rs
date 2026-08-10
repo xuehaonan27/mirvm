@@ -24,7 +24,10 @@ use std::path::{Path, PathBuf};
 use semver::{Version, VersionReq};
 
 use super::lockfile::{LockedPkg, Lockfile};
-use super::manifest::{DepKind, DepSource, FeatureValue, PackageManifest, parse_feature_value};
+use super::manifest::{
+    DepKind, DepSource, FeatureValue, IncompatibleRustVersions, PackageManifest, ResolverVersion,
+    current_rust_version, parse_feature_value,
+};
 use super::registry::{IndexVersion, Registry};
 use pubgrub::Reporter as _;
 
@@ -178,6 +181,19 @@ pub fn resolve_for_known_with_features(
     known_paths: &[PackageManifest],
     workspace_features: &FeatureOverrides,
 ) -> Result<ResolvePlan, String> {
+    if root.resolver == ResolverVersion::V1 {
+        return Err("Cargo resolver=1 尚未实现；不会按 resolver=2/3 猜测 feature 统一".into());
+    }
+    let compiler_rust_version = current_rust_version()?;
+    let rust_version_policy = if root.ignore_rust_version {
+        IncompatibleRustVersions::Allow
+    } else {
+        super::resolver_config::incompatible_rust_versions(root.resolver)?
+    };
+    let resolver_rust_version = root
+        .resolver_rust_version
+        .clone()
+        .unwrap_or_else(|| compiler_rust_version.clone());
     let lock_path = root.lock_root.join("Cargo.lock");
     let input_lock = if lock_path.is_file() {
         Some(Lockfile::read(&lock_path)?)
@@ -249,7 +265,14 @@ pub fn resolve_for_known_with_features(
                 if std::env::var_os("MIRVM_DEBUG_UNIFY").is_some() {
                     eprintln!("DBG-SOLVE pass activated={activated:?}");
                 }
-                let (vm, lf, ev) = solve_fresh(root, &path_manifests, src, &activated)?;
+                let (vm, lf, ev) = solve_fresh(
+                    root,
+                    &path_manifests,
+                    src,
+                    &activated,
+                    rust_version_policy,
+                    &resolver_rust_version,
+                )?;
                 let (nodes, new_activated) = unify_features(
                     root,
                     &path_manifests,
@@ -301,6 +324,9 @@ pub fn resolve_for_known_with_features(
         src,
         purpose.includes_dev(),
     )?;
+    if !root.ignore_rust_version {
+        validate_compiler_rust_version(root, &path_manifests, &units, src, &compiler_rust_version)?;
+    }
 
     Ok(ResolvePlan {
         root_name: root.name.clone(),
@@ -472,6 +498,8 @@ struct CratesIo<'a, S: PkgSource> {
     src: std::cell::RefCell<&'a mut S>,
     manifests: &'a BTreeMap<String, PackageManifest>,
     root: &'a PackageManifest,
+    rust_version_policy: IncompatibleRustVersions,
+    resolver_rust_version: &'a Version,
     /// pre comparator 记录（cargo 精确规则：pre 版仅当被该包某 req 中
     /// major/minor/patch 全同且带 pre 的 comparator 点名时才可选——
     /// ark-ff-asm 0.5.0-alpha.0 误选实锤）。值 = (major, minor, patch)。
@@ -494,6 +522,12 @@ fn req_has_pre(req: &VersionReq) -> bool {
 }
 
 impl<'a, S: PkgSource> CratesIo<'a, S> {
+    fn rust_version_compatible(&self, version: &IndexVersion) -> bool {
+        version
+            .rust_version
+            .as_ref()
+            .is_none_or(|required| required <= self.resolver_rust_version)
+    }
     /// pre 版放行判定（cargo 精确规则）：该包存在带 pre 且 major/minor/
     /// patch 全同的 comparator 时才放行该 pre 版。
     fn pre_allowed(&self, name: &str, v: &Version) -> bool {
@@ -767,15 +801,29 @@ impl<'a, S: PkgSource> pubgrub::DependencyProvider for CratesIo<'a, S> {
                 .or(Some(Version::new(0, 0, 0)))),
             Pkg::Registry(name, _) => {
                 let vs = self.src.borrow_mut().index_entry(name).map_err(io_err)?;
-                Ok(vs
+                let candidates: Vec<&IndexVersion> = vs
                     .iter()
                     .filter(|v| {
                         !v.yanked
                             && range.contains(&v.version)
                             && self.pre_allowed(name, &v.version)
                     })
-                    .map(|v| v.version.clone())
-                    .max())
+                    .collect();
+                let preferred = match self.rust_version_policy {
+                    IncompatibleRustVersions::Allow => None,
+                    IncompatibleRustVersions::Fallback => candidates
+                        .iter()
+                        .copied()
+                        .filter(|version| self.rust_version_compatible(version))
+                        .map(|version| version.version.clone())
+                        .max(),
+                };
+                Ok(preferred.or_else(|| {
+                    candidates
+                        .into_iter()
+                        .map(|version| version.version.clone())
+                        .max()
+                }))
             }
         }
     }
@@ -917,11 +965,15 @@ fn solve_fresh(
     path_manifests: &BTreeMap<String, PackageManifest>,
     src: &mut impl PkgSource,
     activated: &BTreeSet<(String, Version, String)>,
+    rust_version_policy: IncompatibleRustVersions,
+    resolver_rust_version: &Version,
 ) -> Result<Solved, String> {
     let provider = CratesIo {
         src: std::cell::RefCell::new(src),
         manifests: path_manifests,
         root,
+        rust_version_policy,
+        resolver_rust_version,
         allow_pre: std::cell::RefCell::new(BTreeMap::new()),
         activated,
         buckets: std::cell::RefCell::new(BTreeMap::new()),
@@ -985,7 +1037,14 @@ fn solve_fresh(
     }
     let mut version_map: BTreeMap<String, Vec<Version>> = BTreeMap::new();
     let mut lock = Lockfile {
-        format_version: 4,
+        // Cargo 1.83 起默认写 v4，但为 `rust-version <= 1.82` 的项目继续写
+        // 旧工具链可读取的 v3。这里用 workspace 最低 MSRV，同 resolver 3
+        // 候选偏好的基准一致；无声明时基准是当前 rustc。
+        format_version: if resolver_rust_version >= &Version::new(1, 83, 0) {
+            4
+        } else {
+            3
+        },
         packages: vec![LockedPkg {
             name: root.name.clone(),
             version: root.version.clone(),
@@ -2143,6 +2202,53 @@ fn assemble_units(
     Ok((units, root_deps))
 }
 
+/// Cargo 的 fallback 只改变候选优先级，并不允许当前 rustc 编译一个明确要求
+/// 更高版本的包。这里只检查本次真正会编译的 unit；`cargo build` 不会因仅存在于
+/// lock 的 dev dependency 而失败，`mirvm test` 则会把其测试图 unit 纳入检查。
+fn validate_compiler_rust_version(
+    root: &PackageManifest,
+    path_manifests: &BTreeMap<String, PackageManifest>,
+    units: &[Unit],
+    src: &mut impl PkgSource,
+    compiler: &Version,
+) -> Result<(), String> {
+    let mut incompatible: BTreeSet<(String, Version, Version)> = BTreeSet::new();
+    if let Some(required) = &root.rust_version
+        && required > compiler
+    {
+        incompatible.insert((root.name.clone(), root.version.clone(), required.clone()));
+    }
+    for unit in units {
+        let required = if unit.from_registry {
+            src.index_entry(&unit.package)?
+                .into_iter()
+                .find(|entry| entry.version == unit.version)
+                .and_then(|entry| entry.rust_version)
+        } else {
+            path_manifests
+                .get(&unit.package)
+                .filter(|manifest| manifest.version == unit.version)
+                .and_then(|manifest| manifest.rust_version.clone())
+        };
+        if let Some(required) = required
+            && required > *compiler
+        {
+            incompatible.insert((unit.package.clone(), unit.version.clone(), required));
+        }
+    }
+    if incompatible.is_empty() {
+        return Ok(());
+    }
+    let packages = incompatible
+        .into_iter()
+        .map(|(name, version, required)| format!("  {name}@{version} 要求 rustc {required} 或更高"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(format!(
+        "当前 rustc {compiler} 不满足以下包的 rust-version:\n{packages}\n升级工具链，选择兼容依赖版本，或显式传 --ignore-rust-version"
+    ))
+}
+
 // ---------- 测试（离线；FakeSource 罐头 index + tempdir 源） ----------
 
 #[cfg(test)]
@@ -2237,7 +2343,8 @@ mod tests {
     fn root_project(d: &Path, manifest: &str) -> PackageManifest {
         std::fs::create_dir_all(d.join("src")).unwrap();
         std::fs::write(d.join("src/main.rs"), "fn main(){}").unwrap();
-        PackageManifest::parse(manifest, d).unwrap()
+        let manifest = manifest.replacen("[package]", "[package]\nedition=\"2021\"", 1);
+        PackageManifest::parse(&manifest, d).unwrap()
     }
 
     #[test]
@@ -2351,6 +2458,70 @@ mod tests {
                 .any(|dep| dep.unit == dev_ix && dep.kind == DepKind::Dev)
         );
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn resolver_three_prefers_compatible_versions_but_falls_back() {
+        let directory = tmpdir("resolver-three-rust-version");
+        let mut root = root_project(
+            &directory,
+            "[package]\nname='demo'\nversion='0.1.0'\nresolver='3'\nrust-version='1.70'\n\
+             [dependencies]\na='1'\n",
+        );
+        let mut compatible = iv("a", "1.0.0");
+        compatible.rust_version = Some(Version::new(1, 60, 0));
+        let mut too_new = iv("a", "1.1.0");
+        too_new.rust_version = Some(Version::new(1, 80, 0));
+        let mut source = FakeSource::new(directory.join("srcstore"));
+        source.add("a", vec![compatible, too_new]);
+
+        let fallback = resolve(&root, &mut source).unwrap();
+        assert_eq!(fallback.version_map["a"], vec![Version::new(1, 0, 0)]);
+        assert_eq!(
+            fallback.lock.format_version, 3,
+            "Cargo 为 rust-version 1.82 及更早项目保留 lock v3"
+        );
+
+        root.ignore_rust_version = true;
+        let allow = resolve(&root, &mut source).unwrap();
+        assert_eq!(allow.version_map["a"], vec![Version::new(1, 1, 0)]);
+
+        root.ignore_rust_version = false;
+        root.rust_version = Some(Version::new(1, 83, 0));
+        root.resolver_rust_version = root.rust_version.clone();
+        let modern_lock = resolve(&root, &mut source).unwrap();
+        assert_eq!(modern_lock.lock.format_version, 4);
+
+        root.rust_version = Some(Version::new(1, 50, 0));
+        root.resolver_rust_version = Some(Version::new(1, 50, 0));
+        let no_compatible = resolve(&root, &mut source).unwrap();
+        assert_eq!(
+            no_compatible.version_map["a"],
+            vec![Version::new(1, 1, 0)],
+            "没有兼容候选时 Cargo fallback 仍选择通常的最高版本"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn compiler_rust_version_rejection_can_be_explicitly_ignored() {
+        let directory = tmpdir("rust-version-diagnostic");
+        let mut root = root_project(
+            &directory,
+            "[package]\nname='demo'\nversion='0.1.0'\nresolver='3'\n\
+             [dependencies]\na='1'\n",
+        );
+        let mut future = iv("a", "1.0.0");
+        future.rust_version = Some(Version::new(999, 0, 0));
+        let mut source = FakeSource::new(directory.join("srcstore"));
+        source.add("a", vec![future]);
+        let error = resolve(&root, &mut source).unwrap_err();
+        assert!(error.contains("a@1.0.0"), "{error}");
+        assert!(error.contains("--ignore-rust-version"), "{error}");
+
+        root.ignore_rust_version = true;
+        assert!(resolve(&root, &mut source).is_ok());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

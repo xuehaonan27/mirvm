@@ -47,6 +47,58 @@ package 选择和特性统一均在依赖机制内实现，没有命令层特判
 
 对应欠账：D15 P5、D14、D18 的获取/环境部分。
 
+#### P2 施工批次（2026-08-10 定稿）
+
+以下批次按顺序闭合；前一批的语义和回归未通过前，不把后一批接入默认路径。
+“对齐 Cargo”采用版本化合同：固定版本 Cargo 是当前裁判，新 Cargo 版本只做差异
+观察；只有差异被解释、验收并记入决策记录后，才有意升级裁判，不能随工具链更新
+静默改变 mirvm 行为。沿用现有合同脚本，只有当前 RED 无法复现或判断时才增加最小
+夹具，不另建通用 harness。
+
+1. **resolver 3 与 rust-version-aware 选择**
+   - 支持显式 `resolver = "3"`，以及 edition 2024 package 的隐式 resolver 3；
+     resolver 1 继续响亮拒绝。
+   - 读取包、workspace 继承和 registry index 中的 `rust-version`。按照 Cargo 的
+     `resolver.incompatible-rust-versions = fallback/allow` 策略选择候选版本，不能把
+     “当前 rustc 编不过”误报成普通版本冲突。
+   - fresh lock、既有 lock、`--locked`、`--offline` 和 resolver 2 回归一起验收。
+   - 完成条件：Cargo 与 self 的选中版本、feature 图一致；双方生成的 lock 都能被
+     对方在 `--locked --offline` 下接受。
+2. **Git 依赖**
+   - 支持默认分支、`branch`、`tag`、`rev`、仓库内 workspace/package 和 feature；
+     私有仓库复用 Git 既有凭据机制，不新增 mirvm 报名表。
+   - 网络获取只负责把可变引用解析到不可变 commit；lock 记录精确 commit，本地内容
+     存储按仓库身份与 commit 隔离。locked/offline 路径不得重新解释浮动分支。
+   - 完成条件：首次获取、暖缓存离线、冷缓存离线失败、分支移动后 locked 不变、
+     内容篡改拒绝、同仓库双 commit 共存，并证明 self 不启动 Cargo。
+3. **替代 registry 与 Cargo 配置合并**
+   - 为依赖获取实现项目祖先目录和 `CARGO_HOME` 的 `.cargo/config.toml` 合并，覆盖
+     `[registries]`、稀疏/Git index、认证读取；不借机实现无关 Cargo 配置键。
+   - 来源身份包含 registry，保证不同 registry 的同名同版本包不碰撞；继续执行
+     checksum、locked、offline 和篡改拒绝。
+   - 完成条件：公共/私有替代 registry 的首次获取与离线复跑对齐 Cargo，配置缺失、
+     认证失败和来源冲突均响亮报错。
+4. **source replacement、`[patch]` 与 `[replace]`**
+   - source replacement 按来源映射链工作，覆盖 registry 镜像、local registry 和
+     directory vendor，并拒绝替换环。
+   - `[patch]` 的 path/Git/registry 包必须作为版本候选参与求解，不能在求解后替换
+     源码；旧式 `[replace]` 按精确 package ID 处理。
+   - 完成条件：直接/传递依赖、多版本、未使用 patch、替换链及 lock 来源均与 Cargo
+     一致。
+5. **`mirvm pack` 翻到 self 依赖驱动**
+   - `run`、`test`、`pack` 共用同一依赖图、build.rs、proc-macro、native library 和
+     lock 规则；PATH 哨兵与进程审计证明默认路径不启动 Cargo。
+   - compat 暂留作 oracle、`deps audit` 验收和尚存协议的承载者；任一职责仍在就不删。
+6. **依赖阶段总验收**
+   - 清零现有 corpus 中标作 D15 P5 的项目；每种来源都覆盖版本图、feature、fresh/
+     locked/offline、篡改拒绝和双版本共存。
+   - 只建设解析、获取、离线复跑所需的最小内容存储；完整 env/GC 等到真实数据产生
+     无法由现有 purge 处理的问题时再立项。
+
+P2 闭合后再评审 D17 余项，建议顺序为：根 proc-macro 测试、bench、workspace
+lints/复杂 package ID 与成员 glob、旧项目需要的 resolver 1。doctest 必须作为 rustdoc
+前端专项处理代码块提取、临时 crate、行号和 compile-fail，不并入普通 test harness。
+
 ### P3：OS 级沙箱与资源治理
 
 **用户结果**：执行不受信任代码时，有默认安全边界和明确的 CPU、内存、进程、文件、
@@ -110,3 +162,21 @@ package 选择和特性统一均在依赖机制内实现，没有命令层特判
 - D16 性能战役可穿插，但不得用性能工作代替上述产品完成条件。
 
 每一阶段开工前，应把本节拆成可独立验收的 issue；远程 GitHub 操作恢复前只在本地文档维护。
+
+## 4. 当前施工队列与禁止提前项（2026-08-10）
+
+当前唯一产品主队列是：
+
+`resolver 3/rust-version → Git → registry/config → replacement/patch → pack self → P2 总验收`
+
+随后依次进入 OS 沙箱、稳定嵌入 API、D3 零拷贝后包格式冻结、跨平台。D16 性能线必须
+先 profile；只有实测命中才可穿插 JIT 机器码持久化，不能打断上述产品闭合。
+
+以下事项明确不提前：
+
+- 不为未来 Cargo 形态增加通用 harness schema、inventory、provenance 元数据或远程 gate。
+- 不在 oracle、`deps audit` 或 `pack` 仍依赖 compat 时删除 Cargo compat。
+- 不把 doctest 伪装成普通 test target，也不为凑覆盖静默跳过 rustdoc 语义。
+- 不在 D3 mmap/惰性解码布局完成前冻结 `.mirvm` 格式。
+- 不在 OS 级沙箱完成前宣称可安全执行不受信任代码。
+- 不在多 Engine 所有权和失败隔离完成前建设 daemon、agent API 或 REPL。

@@ -2,6 +2,7 @@
 name = "workspace-tool"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 workspace-bridge = { path = "../bridge" }

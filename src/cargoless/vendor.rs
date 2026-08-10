@@ -88,11 +88,7 @@ impl VendorDir {
             deps,
             features,
             links: m.links.clone(),
-            rust_version: m
-                .pkg_env
-                .get("CARGO_PKG_RUST_VERSION")
-                .filter(|s| !s.is_empty())
-                .cloned(),
+            rust_version: m.rust_version.clone(),
         })
     }
 
@@ -263,7 +259,7 @@ mod tests {
         let v = &vs[1];
         assert_eq!(v.name, "foo");
         assert_eq!(v.links.as_deref(), Some("foo-native"));
-        assert_eq!(v.rust_version.as_deref(), Some("1.70"));
+        assert_eq!(v.rust_version, Some(Version::new(1, 70, 0)));
         assert!(!v.yanked);
         // deps：normal/build/target 三类齐全，rename/default-features/optional 保真
         let bar = v.deps.iter().find(|d| d.name == "bar").unwrap();

@@ -29,6 +29,7 @@ pub mod lockfile;
 pub mod manifest;
 pub mod registry;
 pub mod resolve;
+pub mod resolver_config;
 pub mod rustflags;
 pub mod schedule;
 pub mod vendor;

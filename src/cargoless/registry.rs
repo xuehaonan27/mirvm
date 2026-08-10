@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 
 use semver::{Version, VersionReq};
 
+use super::manifest::parse_rust_version;
+
 const INDEX_URL: &str = "https://index.crates.io/";
 const DL_URL: &str = "https://static.crates.io/crates/";
 
@@ -38,7 +40,7 @@ pub struct IndexVersion {
     pub deps: Vec<IndexDep>,
     pub features: std::collections::BTreeMap<String, Vec<String>>,
     pub links: Option<String>,
-    pub rust_version: Option<String>,
+    pub rust_version: Option<Version>,
 }
 
 /// index 里的依赖元数据（registry crate 的权威依赖描述——resolve 不读其
@@ -254,7 +256,8 @@ fn parse_index_version(v: &serde_json::Value) -> Result<IndexVersion, RErr> {
     let links = get_str("links").map(str::to_string);
     let rust_version = get_str("rust_version")
         .or_else(|| get_str("rust_version2"))
-        .map(str::to_string);
+        .map(|version| parse_rust_version(version, "registry rust_version"))
+        .transpose()?;
     let mut features = std::collections::BTreeMap::new();
     for (fk, fv) in v
         .get("features")
@@ -605,7 +608,7 @@ mod tests {
         assert_eq!(v.cksum, "abc123");
         assert!(!v.yanked);
         assert_eq!(v.links.as_deref(), Some("demo-sys"));
-        assert_eq!(v.rust_version.as_deref(), Some("1.70"));
+        assert_eq!(v.rust_version, Some(Version::new(1, 70, 0)));
         assert_eq!(v.features["default"], vec!["std"]);
         assert_eq!(v.features["weak"], vec!["d1?/inner"]);
         assert_eq!(v.deps.len(), 2);

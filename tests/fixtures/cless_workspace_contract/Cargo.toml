@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = ["app", "bridge", "shared", "tool"]
 exclude = ["test-helper", "feature-helper", "implicit-helper"]
 default-members = ["app"]
@@ -8,6 +8,7 @@ default-members = ["app"]
 version = "0.1.0"
 edition = "2024"
 authors = ["Workspace Author"]
+rust-version = "1.85"
 
 [workspace.dependencies]
 shared = { path = "shared", default-features = false, features = ["base"] }

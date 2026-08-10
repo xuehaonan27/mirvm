@@ -3,6 +3,7 @@ name = "workspace-app"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 shared = { workspace = true, features = ["app-side"] }

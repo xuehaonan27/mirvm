@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use super::manifest::PackageManifest;
+use super::manifest::{PackageManifest, ResolverVersion, current_rust_version};
 
 #[derive(Clone, Debug)]
 pub struct WorkspaceManifest {
@@ -71,19 +71,19 @@ impl WorkspaceManifest {
             .and_then(toml::Value::as_str)
             .map(str::to_string)
             .or_else(|| inferred_package_resolver(&root_value));
-        match resolver.as_deref() {
-            Some("2") => {}
-            Some(other) => {
-                return Err(format!(
-                    "workspace resolver={other} 尚未实现；当前只承诺 Cargo resolver=2"
-                ));
-            }
+        let resolver = match resolver.as_deref() {
+            Some(value) => ResolverVersion::parse(value)?,
             None => {
                 return Err(
                     "虚拟或旧 edition workspace 未声明 resolver；Cargo 会采用 resolver=1，当前不能按 resolver=2 猜测"
                         .into(),
                 );
             }
+        };
+        if resolver == ResolverVersion::V1 {
+            return Err(
+                "workspace resolver=1 尚未实现；不会按 resolver=2/3 猜测 feature 统一".into(),
+            );
         }
         let mut member_dirs = expand_patterns(&root, &member_patterns, true, "workspace.members")?;
         if !virtual_root {
@@ -145,6 +145,8 @@ impl WorkspaceManifest {
             let encoded = toml::to_string(&materialized)
                 .map_err(|e| format!("物化 workspace 成员 {} 失败: {e}", dir.display()))?;
             let mut package = PackageManifest::parse(&encoded, dir)?;
+            // Cargo 只使用顶层 workspace resolver；成员自己的 resolver 被忽略。
+            package.resolver = resolver;
             package.lock_root = root.clone();
             members.push(package);
         }
@@ -156,6 +158,23 @@ impl WorkspaceManifest {
                 pair[0].root.display(),
                 pair[1].root.display()
             ));
+        }
+        // resolver 3 的 fallback 排序和新 lock 的格式选择都使用整个 workspace
+        // 的最低 MSRV。未声明 rust-version 的成员以当前 rustc 计入；这与
+        // Cargo 的混合 MSRV workspace 启发式一致。
+        let current_rust = current_rust_version()?;
+        let workspace_rust = members
+            .iter()
+            .map(|member| {
+                member
+                    .rust_version
+                    .clone()
+                    .unwrap_or_else(|| current_rust.clone())
+            })
+            .min()
+            .unwrap_or_else(|| current_rust.clone());
+        for member in &mut members {
+            member.resolver_rust_version = Some(workspace_rust.clone());
         }
 
         let defaults = string_array(
@@ -708,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn edition_2024_workspace_requires_explicit_resolver_two() {
+    fn edition_2024_workspace_infers_resolver_three() {
         let root =
             std::env::temp_dir().join(format!("mirvm-workspace-resolver-{}", std::process::id()));
         let member = root.join("member");
@@ -725,8 +744,13 @@ mod tests {
              [workspace]\nmembers=['member']\n",
         )
         .unwrap();
-        let error = WorkspaceManifest::read(&root).unwrap_err();
-        assert!(error.contains("resolver=3"), "{error}");
+        let workspace = WorkspaceManifest::read(&root).unwrap();
+        assert!(
+            workspace
+                .members
+                .iter()
+                .all(|member| member.resolver == ResolverVersion::V3)
+        );
 
         std::fs::write(
             root.join("Cargo.toml"),
@@ -734,7 +758,46 @@ mod tests {
              [workspace]\nresolver='2'\nmembers=['member']\n",
         )
         .unwrap();
-        assert!(WorkspaceManifest::read(&root).is_ok());
+        let workspace = WorkspaceManifest::read(&root).unwrap();
+        assert!(
+            workspace
+                .members
+                .iter()
+                .all(|member| member.resolver == ResolverVersion::V2)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolver_three_uses_lowest_workspace_rust_version() {
+        let root = std::env::temp_dir().join(format!(
+            "mirvm-workspace-rust-version-{}",
+            std::process::id()
+        ));
+        for (name, rust_version) in [("old", Some("1.85")), ("current", None)] {
+            let member = root.join(name);
+            std::fs::create_dir_all(member.join("src")).unwrap();
+            std::fs::write(member.join("src/lib.rs"), "pub fn value() {}\n").unwrap();
+            std::fs::write(
+                member.join("Cargo.toml"),
+                format!(
+                    "[package]\nname='{name}'\nversion='0.1.0'\nedition='2024'\n{}",
+                    rust_version
+                        .map(|version| format!("rust-version='{version}'\n"))
+                        .unwrap_or_default()
+                ),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nresolver='3'\nmembers=['old', 'current']\n",
+        )
+        .unwrap();
+        let workspace = WorkspaceManifest::read(&root).unwrap();
+        assert!(workspace.members.iter().all(|member| {
+            member.resolver_rust_version == Some(semver::Version::new(1, 85, 0))
+        }));
         std::fs::remove_dir_all(root).unwrap();
     }
 

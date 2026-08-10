@@ -158,8 +158,13 @@ fn cargo_project_command(
 /// Cargo 负责选择一个 run bin，还是选择并串行启动若干 test harness。
 #[derive(Clone, Copy)]
 enum CargoAction<'a> {
-    Run { bin_sel: Option<&'a str> },
-    Test { cargo_args: &'a [String] },
+    Run {
+        bin_sel: Option<&'a str>,
+        ignore_rust_version: bool,
+    },
+    Test {
+        cargo_args: &'a [String],
+    },
 }
 
 impl CargoAction<'_> {
@@ -172,10 +177,23 @@ impl CargoAction<'_> {
 
     fn append_args(self, cmd: &mut Command) {
         match self {
-            Self::Run { bin_sel: Some(bin) } => {
+            Self::Run {
+                bin_sel: Some(bin),
+                ignore_rust_version,
+            } => {
                 cmd.arg("--bin").arg(bin);
+                if ignore_rust_version {
+                    cmd.arg("--ignore-rust-version");
+                }
             }
-            Self::Run { bin_sel: None } => {}
+            Self::Run {
+                bin_sel: None,
+                ignore_rust_version,
+            } => {
+                if ignore_rust_version {
+                    cmd.arg("--ignore-rust-version");
+                }
+            }
             Self::Test { cargo_args } => {
                 cmd.args(cargo_args);
             }
@@ -188,6 +206,7 @@ pub fn phase_cargo(
     project_dir: &std::path::Path,
     program_args: &[String],
     bin_sel: Option<&str>,
+    ignore_rust_version: bool,
 ) -> ! {
     // 绝对化：relative project_dir + current_dir + join(target/mirvm) 会把 target 目录
     // 拼成 project/project/target 的重复嵌套（A2 gate 实测）——且使同一项目的 rlib 路径
@@ -209,7 +228,10 @@ pub fn phase_cargo(
     let locked = std::env::var_os("MIRVM_CARGO_LOCKED").is_some();
     let cmd = cargo_project_command(
         project_dir,
-        CargoAction::Run { bin_sel },
+        CargoAction::Run {
+            bin_sel,
+            ignore_rust_version,
+        },
         program_args,
         &sysroot,
         &self_exe,
@@ -583,7 +605,10 @@ mod tests {
     fn cargo_project_command_is_locked() {
         let command = cargo_project_command(
             Path::new("/tmp/project"),
-            CargoAction::Run { bin_sel: None },
+            CargoAction::Run {
+                bin_sel: None,
+                ignore_rust_version: false,
+            },
             &[],
             Path::new("/tmp/sysroot"),
             Path::new("/tmp/mirvm"),
@@ -600,7 +625,10 @@ mod tests {
     fn ordinary_cargo_project_command_can_create_a_lockfile() {
         let command = cargo_project_command(
             Path::new("/tmp/project"),
-            CargoAction::Run { bin_sel: None },
+            CargoAction::Run {
+                bin_sel: None,
+                ignore_rust_version: false,
+            },
             &[],
             Path::new("/tmp/sysroot"),
             Path::new("/tmp/mirvm"),
@@ -613,7 +641,10 @@ mod tests {
     fn cargo_project_command_removes_ambient_wrapper_overrides() {
         let command = cargo_project_command(
             Path::new("/tmp/project"),
-            CargoAction::Run { bin_sel: None },
+            CargoAction::Run {
+                bin_sel: None,
+                ignore_rust_version: false,
+            },
             &[],
             Path::new("/tmp/sysroot"),
             Path::new("/tmp/mirvm"),

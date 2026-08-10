@@ -15,7 +15,7 @@
 //!   target_pointer_width/target_endian）+ any/all/not 组合；
 //!   `cfg(feature=..)` 不属于平台求值（cargo 同）；`cfg(target_feature=..)`
 //!   响亮拒绝（归 P5）
-//! - `[workspace]`：`workspace.rs` 先发现 resolver=2 多包图并物化
+//! - `[workspace]`：`workspace.rs` 先发现 resolver=2/3 多包图并物化
 //!   workspace.package/workspace.dependencies/root profile；本文件只解析物化后的包
 //! - doctest/bench 仍不做；测试目标由 `mirvm test` 消费。
 
@@ -24,6 +24,96 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+
+/// Cargo 的全局依赖求解规则版本。依赖包里自己的值会被顶层 package/workspace
+/// 覆盖，但仍需保存在 manifest 模型中，供单包作为顶层运行时使用。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResolverVersion {
+    V1,
+    V2,
+    V3,
+}
+
+impl ResolverVersion {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "1" => Ok(Self::V1),
+            "2" => Ok(Self::V2),
+            "3" => Ok(Self::V3),
+            other => Err(format!("resolver 必须是 1、2 或 3，实际为 `{other}`")),
+        }
+    }
+
+    pub fn inferred(edition: &str) -> Self {
+        match edition {
+            "2021" => Self::V2,
+            "2024" => Self::V3,
+            _ => Self::V1,
+        }
+    }
+}
+
+/// Cargo 对依赖声明的最低 Rust 版本不兼容时采用的选择策略。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IncompatibleRustVersions {
+    /// 不改变通常的“选择最高版本”顺序。
+    Allow,
+    /// 优先选择兼容版本；一个都没有时仍退回最高的不兼容版本。
+    Fallback,
+}
+
+impl IncompatibleRustVersions {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "allow" => Ok(Self::Allow),
+            "fallback" => Ok(Self::Fallback),
+            other => Err(format!(
+                "resolver.incompatible-rust-versions 只接受 `allow` 或 `fallback`，实际为 `{other}`"
+            )),
+        }
+    }
+}
+
+/// Cargo 的 rust-version 允许 1、2 或 3 段裸数字，不接受 semver 运算符、
+/// prerelease 或 build metadata。内部补齐到三段，便于稳定比较。
+pub fn parse_rust_version(value: &str, field: &str) -> Result<semver::Version, String> {
+    let parts: Vec<&str> = value.split('.').collect();
+    if parts.is_empty()
+        || parts.len() > 3
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err(format!(
+            "{field} 必须是 1、2 或 3 段裸版本号，实际为 `{value}`"
+        ));
+    }
+    let normalized = match parts.len() {
+        1 => format!("{}.0.0", parts[0]),
+        2 => format!("{}.{}.0", parts[0], parts[1]),
+        3 => value.to_string(),
+        _ => unreachable!(),
+    };
+    semver::Version::parse(&normalized).map_err(|error| format!("{field} 非法 `{value}`: {error}"))
+}
+
+/// mirvm 实际内嵌 rustc 对应的版本。使用构建时 sysroot 中的 rustc，避免 PATH
+/// 上另一个工具链影响依赖选择。
+pub fn current_rust_version() -> Result<semver::Version, String> {
+    static VERSION: std::sync::OnceLock<semver::Version> = std::sync::OnceLock::new();
+    if let Some(version) = VERSION.get() {
+        return Ok(version.clone());
+    }
+    let rustc = PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT")).join("bin/rustc");
+    let command = std::process::Command::new(&rustc);
+    let mut version = rustc_version::VersionMeta::for_command(command)
+        .map_err(|error| format!("读取 {} 版本失败: {error}", rustc.display()))?
+        .semver;
+    version.pre = semver::Prerelease::EMPTY;
+    version.build = semver::BuildMetadata::EMPTY;
+    let _ = VERSION.set(version.clone());
+    Ok(version)
+}
 
 /// 依赖来源。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -168,6 +258,15 @@ pub struct PackageManifest {
     pub name: String,
     pub version: semver::Version,
     pub edition: String,
+    /// 顶层 package/workspace 采用的全局 resolver；path/registry 依赖自身的值不生效。
+    pub resolver: ResolverVersion,
+    /// 本包声明的最低 Rust 版本。
+    pub rust_version: Option<semver::Version>,
+    /// resolver 3 的工作区比较基准。工作区会写入所有成员最低值；单包为自身
+    /// rust-version，缺席时由求解器使用当前 rustc。
+    pub resolver_rust_version: Option<semver::Version>,
+    /// `--ignore-rust-version` 同时关闭候选偏好与编译器版本拒绝。
+    pub ignore_rust_version: bool,
     pub root: PathBuf,
     /// Cargo.lock 所属目录。单包等于 root；workspace 成员指向 workspace 根。
     pub lock_root: PathBuf,
@@ -221,6 +320,7 @@ struct RawPackage {
     name: Option<String>,
     version: Option<toml::Value>,
     edition: Option<toml::Value>,
+    resolver: Option<String>,
     autobins: Option<bool>,
     autoexamples: Option<bool>,
     autotests: Option<bool>,
@@ -245,6 +345,7 @@ struct RawPackage {
 struct RawWorkspace {
     package: Option<RawWorkspacePackage>,
     members: Option<Vec<String>>,
+    resolver: Option<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -381,15 +482,46 @@ impl PackageManifest {
             Some(_) => return Err("package.edition 形态不支持".into()),
             None => "2015".to_string(),
         };
+        if !matches!(edition.as_str(), "2015" | "2018" | "2021" | "2024") {
+            return Err(format!("package.edition 不支持 `{edition}`"));
+        }
+        let resolver = raw
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.resolver.as_deref())
+            .or(pkg.resolver.as_deref())
+            .map(ResolverVersion::parse)
+            .transpose()?
+            .unwrap_or_else(|| ResolverVersion::inferred(&edition));
         // CARGO_PKG_* env 全集（cargo 契约：编译期 env! 可读；缺键 = 空串）。
         // readme = true 归约为 "README.md"（cargo 同）；license-file 只收字符串形。
-        let rust_version = match pkg.rust_version {
+        let rust_version_text = match pkg.rust_version {
             Some(toml::Value::String(v)) => Some(v),
             Some(toml::Value::Table(t)) if t.get("workspace").is_some() => {
                 ws_pkg.and_then(|w| w.rust_version.clone())
             }
-            _ => None,
+            Some(_) => return Err("package.rust-version 必须是字符串或 workspace 继承".into()),
+            None => None,
         };
+        let rust_version = rust_version_text
+            .as_deref()
+            .map(|version| parse_rust_version(version, "package.rust-version"))
+            .transpose()?;
+        if let Some(version) = &rust_version {
+            let minimum = match edition.as_str() {
+                "2015" => semver::Version::new(1, 0, 0),
+                "2018" => semver::Version::new(1, 31, 0),
+                "2021" => semver::Version::new(1, 56, 0),
+                "2024" => semver::Version::new(1, 85, 0),
+                _ => unreachable!(),
+            };
+            if version < &minimum {
+                return Err(format!(
+                    "package.rust-version {} 与 edition {edition} 所需的 Rust {minimum} 不兼容",
+                    rust_version_text.as_deref().unwrap_or("")
+                ));
+            }
+        }
         let readme = match &pkg.readme {
             Some(toml::Value::String(s)) => Some(s.clone()),
             Some(toml::Value::Boolean(true)) => Some("README.md".to_string()),
@@ -409,7 +541,7 @@ impl PackageManifest {
             pkg.license.as_deref(),
             license_file.as_deref(),
             readme.as_deref(),
-            rust_version.as_deref(),
+            rust_version_text.as_deref(),
         );
         if raw
             .workspace
@@ -514,6 +646,10 @@ impl PackageManifest {
             name,
             version,
             edition,
+            resolver,
+            rust_version: rust_version.clone(),
+            resolver_rust_version: rust_version,
+            ignore_rust_version: false,
             root: root.to_path_buf(),
             lock_root: root.to_path_buf(),
             targets,
@@ -1588,5 +1724,43 @@ license = "MIT"
         assert!(!vals.contains("serde"));
         // 非 optional 依赖永不进值表
         assert!(!vals.contains("plain"));
+    }
+
+    #[test]
+    fn resolver_and_rust_version_follow_cargo_manifest_rules() {
+        let directory = tmpdir("resolver-rust-version");
+        std::fs::create_dir_all(directory.join("src")).unwrap();
+        std::fs::write(directory.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let implicit = PackageManifest::parse(
+            "[package]\nname='implicit'\nversion='0.1.0'\nedition='2024'\nrust-version='1.85'\n",
+            &directory,
+        )
+        .unwrap();
+        assert_eq!(implicit.resolver, ResolverVersion::V3);
+        assert_eq!(implicit.rust_version, Some(semver::Version::new(1, 85, 0)));
+
+        let explicit = PackageManifest::parse(
+            "[package]\nname='explicit'\nversion='0.1.0'\nedition='2021'\nresolver='3'\nrust-version='1.62'\n",
+            &directory,
+        )
+        .unwrap();
+        assert_eq!(explicit.resolver, ResolverVersion::V3);
+        assert_eq!(explicit.rust_version, Some(semver::Version::new(1, 62, 0)));
+
+        let error = PackageManifest::parse(
+            "[package]\nname='too-old'\nversion='0.1.0'\nedition='2024'\nrust-version='1.62'\n",
+            &directory,
+        )
+        .unwrap_err();
+        assert!(error.contains("1.85.0"), "{error}");
+        assert!(
+            PackageManifest::parse(
+                "[package]\nname='bad'\nversion='0.1.0'\nedition='2021'\nrust-version='>=1.70'\n",
+                &directory,
+            )
+            .is_err()
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
