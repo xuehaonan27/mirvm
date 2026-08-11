@@ -94,8 +94,6 @@ pub(super) fn run_blocks(
                     }
                 }
                 edge.set(cleanup_edge(unwind));
-                let optional_libs: &[Box<str>] = &module.native_libs;
-                let required_libs: &[Box<str>] = &module.required_native_libs;
                 // C1：按值聚合返回 = Indirect 落点（调用点强制），ffi 层 memcpy 至
                 // 目的真地址；标量返回照旧走 u64 通道
                 let ret_dst = if let RetDest::Indirect(dst) = ret {
@@ -110,15 +108,7 @@ pub(super) fn run_blocks(
                 let stack_restore = crate::vm::engine::ffi::amplify_pthread_stack(sym, &av);
                 let r = {
                     let ffi = unsafe { &mut (*ctx).ffi };
-                    crate::vm::engine::ffi::call(
-                        ffi,
-                        optional_libs,
-                        required_libs,
-                        sym,
-                        sig,
-                        &av,
-                        ret_dst,
-                    )
+                    crate::vm::engine::ffi::call(ffi, module, sym, sig, &av, ret_dst)
                 };
                 if let Some((attr, orig)) = stack_restore {
                     crate::os::thread::attr_set_stack_size(attr, orig);

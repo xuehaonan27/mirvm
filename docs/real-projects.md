@@ -258,16 +258,17 @@ revision、lock hash、许可/维护策略与届时真实 PASS/XFAIL，再接入
   `/run/mirvm-project-side`，诊断路径统一 remap 到 `/mirvm-project`。这解决的是 harness 自造的
   随机路径噪声，不是通用路径 normalizer；程序主动读取宿主 `/proc` 等平台细节仍可能暴露差异。
 - harness 自有 rustc flags 只能经 proxy 追加；不得改回覆盖 `CARGO_ENCODED_RUSTFLAGS`，否则会吞掉
-  项目 `.cargo/config.toml` rustflags 并制造错误的 native baseline。当前
-  `MIRVM_ENCODED_RUSTFLAGS_APPEND` 是在 Cargo fingerprint 计算后由 wrapper 追加，值变化可能复用
-  旧 fake binary。CheckID 会因 harness 字节变化而分开 evidence，但不能证明 Cargo 已为变化后的追加值
-  重建产物；Cargo fingerprint 闭包仍需单独解决。
-- mirvm 的 build env 与 guest runtime env 尚未彻底分离；当前隔离合同不能外推成两个生命周期已经
-  具备完全独立的环境变量/权限面。
+  项目 `.cargo/config.toml` rustflags 并制造错误的 native baseline。2026-08-10 起
+  `MIRVM_ENCODED_RUSTFLAGS_APPEND` 按内容分 Cargo target store，暖缓存改值不会复用旧
+  fake binary；标准差分套件已覆盖该变化。
+- 构建期会安装记录的 rustc 环境，执行 guest 前恢复调用者的 cwd 与完整运行环境；这已解决
+  build env 污染 guest 的产品缺陷，但不代表 bubblewrap 两侧具备不同的权限模型。正式权限与资源
+  隔离仍归 OS worker。
 - 自定义 Cargo rustc/workspace wrapper 当前会 fail-closed；wrapper composition 是待实现兼容面，
   不能把拒绝写成 harness 或产品已支持 wrapper 链。
-- runner 的诊断 hook 是进程全局单槽；当前单次 CLI 进程只运行一个 compiler session，因此安全。
-  若未来实现 daemon、嵌入式或并发 compiler session，必须先改为带所有权校验/串行化的 guard。
+- rustc runner 的诊断 hook 仍是进程全局设施，但 compiler session 已由全局 guard 串行保护；
+  这保证当前多 Engine 基础不会并发改写诊断槽。稳定嵌入 API 若要并行编译，仍需 rustc 提供更小的
+  隔离边界或把编译移到独立进程。
 - 所有当前 case manifest 仍位于 Git-ignored artifacts；新增 workload 没有把它们升级成入库持续
   gate。现有 harness 已冻结；suite inventory/集合身份不是当前下一步，除非未来某个真实产品 RED
   证明缺少它会使失败无法复现或结果无法判定。

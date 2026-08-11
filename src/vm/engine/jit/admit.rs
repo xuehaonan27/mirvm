@@ -359,7 +359,7 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
             // T1-c：Resume（exception_slot → _Unwind_Resume 续传）与
             // TerminateAbort（mirvm_jit_terminate_abort 助手）
             Terminator::Resume | Terminator::TerminateAbort => true,
-            // T1-d：Trap-stub（mirvm_jit_trap 助手，interp 同文案同 exit(70)）
+            // T1-d：Trap-stub（mirvm_jit_trap 助手，interp 同文案同错误码 70）
             Terminator::Trap(_) => true,
         };
         if !ok {

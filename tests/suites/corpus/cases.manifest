@@ -162,7 +162,7 @@ wasmtime_wat           smoke  300  exit             group=heavy
 risc0_run              full   300  exit             group=heavy
 typst_pdf              full   300  exit             group=heavy
 datafusion_sql         full   400  exit             group=heavy
-miden_prove            full   400  exit             xfail=1:manifest.*D15 group=heavy
+miden_prove            full   400  exit             group=heavy
 ethers_evm             full   90   exit             group=heavy
 polars_lazy            full   180  exit             group=heavy
 xlsxwriter_rw          full   180  exit            

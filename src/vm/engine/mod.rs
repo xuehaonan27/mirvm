@@ -16,3 +16,4 @@ pub mod mcload;
 pub mod stats;
 pub mod thunks;
 pub mod tsan_mt;
+pub mod verify;

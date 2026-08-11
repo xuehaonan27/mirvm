@@ -77,7 +77,7 @@ pub(super) fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin>
     ] {
         out.insert(
             Symbol::intern(name),
-            ir::Builtin::Unsupported(ir::StaticStr(name)),
+            ir::Builtin::Unsupported(ir::StaticStr(name.into())),
         );
     }
     // backtrace 影子帧（D8e）：这四个由 Ctx 影子帧栈诚实回答（IP=合成 fn token）。

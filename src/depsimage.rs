@@ -166,6 +166,15 @@ pub fn try_load(
     if !frozen_ok {
         return None;
     }
+    crate::vm::engine::verify::module_with_prefix(
+        &f.module,
+        crate::vm::engine::verify::Prefix {
+            funcs: base.module.funcs.len(),
+            tls: base.module.tls.len(),
+            asm: base.module.asm_sites.len(),
+        },
+    )
+    .ok()?;
     // required .so 被清理 ⇒ miss 走冷路径自愈（ircache 同契约）
     if !f
         .module

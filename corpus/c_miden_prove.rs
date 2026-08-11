@@ -1,41 +1,25 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-miden-assembly = "=0.25.5"
-miden-processor = "=0.25.5"
-miden-prover = "=0.25.5"
-miden-verifier = "=0.25.5"
-
-# 上游破洞绕行（证据见头注「版本钉」第 3 条）：serde-wincode 0.1.2 的
-# wincode>=0.4,<1  fresh 解析到 0.6.0，与 miden-* 0.25.5 自用的 wincode^0.5.5
-# 撞 trait。把整个图的 wincode 钉到 0.5.5 的 git tag（内容与 registry 0.5.5 同源）。
-[patch.crates-io]
-wincode = { git = "https://github.com/anza-xyz/wincode", tag = "wincode@v0.5.5" }
+miden-assembly = "=0.25.8"
+miden-processor = "=0.25.8"
+miden-prover = "=0.25.8"
+miden-verifier = "=0.25.8"
 ---
-// miden-vm 0.25.5 证明面（prove → verify → 篡改反锚）三维差分。与批8 c_miden_exec
+// miden-vm 0.25.8 证明面（prove → verify → 篡改反锚）三维差分。与批8 c_miden_exec
 // 同族（同一 MASM fib 程序、同一 assembler/processor 底座），但本 driver 走完整
 // STARK 证明：miden-prover 出证明、miden-verifier 自验、篡改证明字节反向锚。
 //
 // 版本钉（相容组合证据）：
 //   * miden-assembly / miden-processor / miden-prover / miden-verifier 全部钉
-//     =0.25.5（crates.io 2026-07-18 最新稳定线，四者同 release train；上游
-//     miden-vm 仓库同 tag 发布，processor 0.25.5 与 prover 0.25.5 的依赖约束
-//     `version = "0.25"` 互相覆盖 0.25.5，无跨线错配）。
-//   * miden-prover 0.25.5 的 STARK 后端已从 winterfell 换成 Plonky3 系的
+//     =0.25.8：0.25.5 已于 2026-08-10 被 crates.io yanked，Cargo fresh 解析会
+//     正确拒绝；0.25.8 是同一 0.25 发布线的非 yanked 补丁版，四件同版。
+//   * miden-prover 0.25.8 的 STARK 后端是 Plonky3 系的
 //     miden-lifted-stark 0.28（经 miden-crypto 0.28 的 stark 模块 re-export），
 //     ProvingOptions 只选哈希函数（默认 Blake3_256），FRI/安全参数由
 //     miden-air::config 硬编码 96-bit——没有可调的证明参数面，默认即定值。
-//   * 上游破洞（2026-07-18 实证，附绕行）：miden-prover/verifier 0.25.5 声明
-//     `wincode = "0.5.5"` + `serde-wincode = "0.1"`；serde-wincode 0.1.2 的
-//     `wincode >=0.4,<1` 在 fresh resolve 时取 0.6.0（cargo 按各自 req 取最大，
-//     直挂 `wincode = "=0.5.5"` 不促成统一——/tmp 草项目实证两版本并存），
-//     SerdeCompat<StarkProofData> 的 SchemaRead 与 miden 期望的 wincode 0.5.5
-//     trait 错位 → miden-verifier lib.rs:220 E0277 编译失败（整系 0.25.3–0.25.5
-//     同 req 全中）。miden-vm 仓库自带 lock 钉在 wincode 0.5.5 故上游 CI 无恙，
-//     纯 fresh 消费者踩雷。绕行：frontmatter `[patch.crates-io]` 把 wincode 全图
-//     钉到 anza-xyz/wincode 的 tag `wincode@v0.5.5`（registry 0.5.5 的同源发布
-//     点），SerdeCompat 与 miden 两边 SchemaRead 归一。属「钉版本避上游破洞」
-//     类合法绕行，未裁剪任何规格面。
+//   * 0.25.5 为解决 wincode trait 分裂曾需要 Git `[patch]`；0.25.8 的 prover/
+//     verifier 已不再直接依赖旧 wincode，该补丁删除，恢复普通 crates.io fresh 图。
 //
 // 确定性说明（证明字节可复现的证据链）：
 //   * 证明器内部的 "randomness"（aux trace 随机挑战、FRI 挑战）全部来自
@@ -63,15 +47,16 @@ wincode = { git = "https://github.com/anza-xyz/wincode", tag = "wincode@v0.5.5" 
 //   B: d=$(grep -l 'name = "c_miden_prove"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname) && cd "$d" && RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
 //   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_miden_prove.rs
 //
-// 三维实测（2026-07-18，全绿）：A/B/C 三进程 stdout 逐字节一致（4 行：
+// 0.25.8 现行双轨复测（2026-08-10，全绿）：Cargo/cargoless stdout 逐字节一致，
+// 仍是以下 4 行且 stderr 全空；0.25.5 历史三维实测（2026-07-18）结果相同：
 // fib stack_top=[10946, 6765, 0, 0]；proof len=37599 fnv=449fe979d1395d47
 // security=96；verify=true security=96；verify_tampered=false），stderr 全真空
 // （0 字节）、exit 全 0。证明字节跨实现（mirvm 解释/JIT vs native）与跨进程
 // 复跑（A/A2、B/B2 各自双跑）指纹完全一致——Fiat-Shamir 全确定，无 ZK 随机带
 // 实证成立。时长：A 冷跑（含 245 crate 依赖闭包首次构建）6m19s、热跑 2m45s；
 // B 复跑 2.7s（运行本体）；C（JIT=1）2m44.7s（<180s 预算内，为最慢维）。
-// 依赖闭包 245 crate（miden 系 0.25.5 四件 + Plonky3 系 p3-* 15 件 + git
-// wincode 0.5.5）。无 FRONTIER、无引擎 bug 信号。
+// 当时依赖闭包 245 crate（miden 系 0.25.5 四件 + Plonky3 系 p3-* 15 件 + git
+// wincode 0.5.5）。当前 0.25.8 结果由标准 corpus 对拍重新记录。
 
 use std::sync::Arc;
 

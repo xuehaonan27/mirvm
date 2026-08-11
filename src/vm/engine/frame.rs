@@ -16,6 +16,9 @@ use super::ir::{Slot, Width};
 const REGION_CAP: usize = 1 << 30;
 
 pub struct ByteRegion {
+    /// Whole mapping, including one inaccessible page on each side.
+    mapping: *mut u8,
+    mapping_len: usize,
     base: *mut u8,
     /// 区内 bump 水位（相对 base 的字节数）
     sp: usize,
@@ -29,9 +32,23 @@ impl Default for ByteRegion {
 
 impl ByteRegion {
     pub fn new() -> Self {
-        let base = crate::os::mem::map_anon(REGION_CAP, crate::os::mem::Prot::RW, true);
-        assert!(!base.is_null(), "ByteRegion: mmap 失败");
-        ByteRegion { base, sp: 0 }
+        let guard = crate::os::mem::page_size();
+        let mapping_len = REGION_CAP
+            .checked_add(guard * 2)
+            .expect("ByteRegion: mapping length overflow");
+        let mapping = crate::os::mem::map_anon(mapping_len, crate::os::mem::Prot::NONE, true);
+        assert!(!mapping.is_null(), "ByteRegion: mmap 失败");
+        let base = unsafe { mapping.add(guard) };
+        if let Err(e) = crate::os::mem::protect(base, REGION_CAP, crate::os::mem::Prot::RW) {
+            unsafe { crate::os::mem::unmap(mapping, mapping_len) };
+            panic!("ByteRegion: {e}");
+        }
+        ByteRegion {
+            mapping,
+            mapping_len,
+            base,
+            sp: 0,
+        }
     }
 
     /// 为新帧切 `size` 字节（按 `align` 对齐、清零），返回**帧基址（真地址）**。
@@ -43,11 +60,10 @@ impl ByteRegion {
         let start = aligned - self.base as usize;
         let end = start + size as usize;
         if end > REGION_CAP {
-            eprintln!(
-                "mirvm[m4-engine]: guest 栈溢出（操作数区 {} MiB 耗尽）",
+            crate::vm::engine::interp::engine_abort(&format!(
+                "guest 栈溢出（操作数区 {} MiB 耗尽）",
                 REGION_CAP >> 20
-            );
-            std::process::exit(70);
+            ));
         }
         unsafe { std::ptr::write_bytes(self.base.add(start), 0, size as usize) };
         self.sp = end;
@@ -91,6 +107,6 @@ impl ByteRegion {
 
 impl Drop for ByteRegion {
     fn drop(&mut self) {
-        unsafe { crate::os::mem::unmap(self.base, REGION_CAP) };
+        unsafe { crate::os::mem::unmap(self.mapping, self.mapping_len) };
     }
 }

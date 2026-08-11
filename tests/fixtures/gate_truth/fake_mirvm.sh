@@ -71,4 +71,14 @@ case "$target" in
         echo 'project-ok'
         exit 7
         ;;
+    */fingerprint)
+        case "${MIRVM_ENCODED_RUSTFLAGS_APPEND:-}" in
+            *diff_flag_one*) echo one ;;
+            *diff_flag_two*) echo two ;;
+            *)
+                echo 'fake mirvm fingerprint flags missing' >&2
+                exit 99
+                ;;
+        esac
+        ;;
 esac

@@ -4,7 +4,7 @@
 //!   调用计数 + 编译请求通道；发布协议 = 编译线程 Release 写 / call_guest
 //!   Acquire 读（m5.3-design D4）。
 //! - 编译管线（`#[cfg(feature = "cranelift")]`；语义契约 = 与解释器逐位一致）：
-//!   `compiler`（SHARED/start/worker + Compiler/JITModule + eh_frames 注册）、
+//!   `compiler`（逐 Engine start/stop/worker + Compiler/JITModule + eh_frames 注册）、
 //!   `admit`（准入族：拒绝 = 永留解释）、`helpers`（mirvm_* 运行期助手 +
 //!   libm 符号表）、`translate`（Translator：槽 SSA + place 求值 + 三个大
 //!   match）、`frame`（FrameMap/analyze_frame 取址分析保守全集）、
@@ -35,7 +35,7 @@ mod lsda_probe;
 mod translate;
 
 #[cfg(feature = "cranelift")]
-pub(crate) use compiler::start;
+pub(crate) use compiler::{start, stop};
 
 /// Register one complete `.eh_frame` section with the process unwinder.
 ///

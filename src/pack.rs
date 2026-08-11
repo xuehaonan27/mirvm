@@ -327,6 +327,8 @@ pub(crate) fn write_package(
     module: &crate::vm::engine::ir::Module,
     out: &Path,
 ) -> Result<(), String> {
+    crate::vm::engine::verify::module(module)
+        .map_err(|e| format!("refusing to package invalid bytecode: {e}"))?;
     // 固定基要求（L2 同契约：非固定基 = 快照内嵌地址跨进程无效，不产包）
     if !module.frozen.as_ref().is_some_and(|f| f.at_fixed_base()) {
         return Err("冻结区不在固定基址（并发抢占/ASLR 冲突）——重试打包".into());
@@ -453,6 +455,8 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
     let mut module: crate::vm::engine::ir::Module =
         postcard::from_bytes(package.section(TAG_MODULE)?)
             .map_err(|e| format!("MODULE 节解析失败（冻结区固定基恢复未成立？）: {e}"))?;
+    crate::vm::engine::verify::module(&module)
+        .map_err(|e| format!("MODULE bytecode verification failed: {e}"))?;
     if reloc.requires_fixed_base && !module.frozen.as_ref().is_some_and(|f| f.at_fixed_base()) {
         return Err("包要求固定基址但当前进程不可用（被占/ASLR 冲突）——重试或空闲后跑".into());
     }
@@ -496,9 +500,7 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
             .map_err(|e| format!("fail to load MC image ({}): {e}", l.path))?;
         images.push(img);
     }
-    for image in images {
-        crate::vm::engine::mcload::register(image);
-    }
+    module.mc_images = images;
 
     let mut required_native_libs = Vec::with_capacity(libs.len());
     for lib in &libs {

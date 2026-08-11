@@ -27,7 +27,7 @@ pub struct ThunkCache {
 
 /// 每 thunk 冻结数据（leak 进程级；跨线程共享——Shared: Sync，其余为纯数据）。
 struct ThunkData {
-    shared: &'static Shared,
+    engine_id: u64,
     func: FuncId,
     args: Box<[FfiKind]>,
     ret: FfiKind,
@@ -109,7 +109,11 @@ unsafe extern "C" fn trampoline(
     args: *const *const c_void,
     data: &ThunkData,
 ) {
-    let ctx = super::ctx::attach(data.shared);
+    let Some(shared) = super::ctx::engine(data.engine_id) else {
+        super::interp::engine_abort("thunk 所属 Engine 已结束");
+    };
+    let activation = super::ctx::activate(&shared);
+    let ctx = activation.ctx();
     let av = unsafe { marshal_args(&data.args, args) };
     match &data.ret {
         FfiKind::Agg(agg) => {
@@ -137,7 +141,7 @@ unsafe extern "C" fn trampoline(
 }
 
 /// 取或造：同一 (条目地址, 签名) 恒得同一真码地址（fn ptr 相等语义）。
-pub fn get_or_create(shared: &'static Shared, entry: u64, func: FuncId, sig: &ForeignSig) -> u64 {
+pub fn get_or_create(shared: &Shared, entry: u64, func: FuncId, sig: &ForeignSig) -> u64 {
     let key = (entry, sig.clone());
     let mut map = shared.thunks.map.lock().unwrap();
     if let Some(&code) = map.get(&key) {
@@ -148,7 +152,7 @@ pub fn get_or_create(shared: &'static Shared, entry: u64, func: FuncId, sig: &Fo
         super::ffi::ffi_type(&sig.ret),
     );
     let data: &'static ThunkData = Box::leak(Box::new(ThunkData {
-        shared,
+        engine_id: shared.id,
         func,
         args: sig.args.clone().into(),
         ret: sig.ret.clone(),
@@ -162,20 +166,9 @@ pub fn get_or_create(shared: &'static Shared, entry: u64, func: FuncId, sig: &Fo
 
 // ===== P1 条目可执行化（decision-history §7.6）=====
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-/// 条目 stub 蹦床的引擎指针存放：trampoline 在任意 native 线程经它找回引擎
-/// （interp::ATEXIT_SHARED 同款单发布点——cli run_vm_engine 在 Shared 提升后
-/// 调 publish_shared；发布前被调 = 引擎不变量破坏，assert）。
-static ENTRY_SHARED: AtomicUsize = AtomicUsize::new(0);
-
-/// Shared 提升 &;'static 后调用（cold/warm 单一路径的同一发布点）。
-pub fn publish_shared(shared: &'static Shared) {
-    ENTRY_SHARED.store(shared as *const Shared as usize, Ordering::SeqCst);
-}
-
 /// 每条目 stub 的冻结数据（leak 进程级——guest 可长期持有码地址）。
 struct EntryThunkData {
+    engine_id: u64,
     func: FuncId,
     args: Box<[FfiKind]>,
     ret: FfiKind,
@@ -189,12 +182,11 @@ unsafe extern "C" fn entry_trampoline(
     args: *const *const c_void,
     data: &EntryThunkData,
 ) {
-    let shared = ENTRY_SHARED.load(Ordering::SeqCst) as *const Shared;
-    assert!(
-        !shared.is_null(),
-        "条目 stub 在 Shared 发布前被调（引擎不变量）"
-    );
-    let ctx = super::ctx::attach(unsafe { &*shared });
+    let Some(shared) = super::ctx::engine(data.engine_id) else {
+        super::interp::engine_abort("条目 stub 所属 Engine 已结束");
+    };
+    let activation = super::ctx::activate(&shared);
+    let ctx = activation.ctx();
     let av = unsafe { marshal_args(&data.args, args) };
     match &data.ret {
         FfiKind::Agg(agg) => {
@@ -225,6 +217,7 @@ unsafe extern "C" fn entry_trampoline(
 /// 同序 addr_of 烤进字节码的值，alloc_stub 必须逐位复现）。closure 进程级 leak
 /// （可执行页不回收——guest 持有码地址，exit 直通下无需回收）。
 fn materialize_domain(
+    engine_id: u64,
     sites: &[super::ir::EntryStubSite],
     arena: &mut super::codearena::StubArena,
 ) -> Result<(), String> {
@@ -234,6 +227,7 @@ fn materialize_domain(
             super::ffi::ffi_type(&site.sig.ret),
         );
         let data: &'static EntryThunkData = Box::leak(Box::new(EntryThunkData {
+            engine_id,
             func: site.func,
             args: site.sig.args.clone().into(),
             ret: site.sig.ret.clone(),
@@ -252,7 +246,10 @@ fn materialize_domain(
 /// 工序）：本域 + absorb 挂载各 image/底座域，配方 → closure → stub 字节 →
 /// 整域 RX。冷路径 arena 由 lower 带来（已映射）；warm/装载则在此按域 StrictMap
 /// ——域被占 = Err（装载方按 cache miss 处理，绝不在其他基址上重放）。
-pub fn materialize_all_entry_stubs(module: &mut super::ir::Module) -> Result<(), String> {
+pub fn materialize_all_entry_stubs(
+    module: &mut super::ir::Module,
+    engine_id: u64,
+) -> Result<(), String> {
     if !module.entry_stub_sites.is_empty() && !module.entry_stubs.is_mapped() {
         let home = module
             .frozen
@@ -262,14 +259,14 @@ pub fn materialize_all_entry_stubs(module: &mut super::ir::Module) -> Result<(),
         module.entry_stubs = super::codearena::StubArena::map_fixed(home)?;
     }
     let own_sites = std::mem::take(&mut module.entry_stub_sites);
-    materialize_domain(&own_sites, &mut module.entry_stubs)?;
+    materialize_domain(engine_id, &own_sites, &mut module.entry_stubs)?;
     module.entry_stub_sites = own_sites;
     let image_stubs = std::mem::take(&mut module.image_entry_stubs);
     for (home, sites, mut arena) in image_stubs {
         if !arena.is_mapped() {
             arena = super::codearena::StubArena::map_fixed(home)?;
         }
-        materialize_domain(&sites, &mut arena)?;
+        materialize_domain(engine_id, &sites, &mut arena)?;
         module.image_entry_stubs.push((home, sites, arena));
     }
     Ok(())

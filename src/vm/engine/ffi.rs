@@ -43,6 +43,7 @@ impl FfiState {
         name: &str,
         optional_libs: &[Box<str>],
         required_libs: &[Box<str>],
+        mc_images: &[super::mcload::McImage],
     ) -> Result<Option<usize>, String> {
         if let Some(&p) = self.syms.get(name) {
             return Ok((p != 0).then_some(p));
@@ -64,7 +65,7 @@ impl FfiState {
         // ①′MC 镜像（mode B 片③：包内自装载的自产 global_asm/dep_asm 族；
         // 与②同一语义位——guest 自产对象恒胜宿主同名库）
         if p == 0
-            && let Some(addr) = super::mcload::resolve(name)
+            && let Some(addr) = super::mcload::resolve(mc_images, name)
         {
             p = addr;
         }
@@ -148,7 +149,12 @@ pub(crate) fn resolve_got_fixups(module: &mut super::ir::Module) -> Result<(), S
     let mut resolved: Vec<u64> = Vec::with_capacity(module.foreign_syms.len());
     for s in &module.foreign_syms {
         match (
-            ffi.resolve(&s.name, &module.native_libs, &module.required_native_libs)?,
+            ffi.resolve(
+                &s.name,
+                &module.native_libs,
+                &module.required_native_libs,
+                &module.mc_images,
+            )?,
             s.weak,
         ) {
             (Some(p), _) => resolved.push(p as u64),
@@ -233,14 +239,19 @@ pub fn amplify_pthread_stack(sym: &str, av: &[u64]) -> Option<(*mut std::ffi::c_
 /// Ok(None) = 符号不存在（调用方给诊断）；Err = 必需库加载失败，禁止退化为 dlsym miss。
 pub fn call(
     state: &mut FfiState,
-    optional_libs: &[Box<str>],
-    required_libs: &[Box<str>],
+    module: &super::ir::Module,
     sym: &str,
     sig: &ForeignSig,
     args: &[u64],
     ret_dst: Option<u64>,
 ) -> Result<Option<u64>, String> {
-    let Some(fnptr) = state.resolve(sym, optional_libs, required_libs)? else {
+    let Some(fnptr) = state.resolve(
+        sym,
+        &module.native_libs,
+        &module.required_native_libs,
+        &module.mc_images,
+    )?
+    else {
         return Ok(None);
     };
     Ok(Some(call_addr(fnptr, sig, args, ret_dst)))
@@ -251,12 +262,11 @@ pub fn call(
 pub fn call_addr(fnptr: usize, sig: &ForeignSig, args: &[u64], ret_dst: Option<u64>) -> u64 {
     // F-07：实参/签名等长不变量——zip 静默截断曾吞掉变参真实尾参的类型
     if args.len() != sig.args.len() {
-        eprintln!(
-            "mirvm[m4-engine]: FFI 实参与签名不等长（实参 {} / 签名 {}；签名漂移或变参冻结缺口）",
+        crate::vm::engine::interp::engine_abort(&format!(
+            "FFI 实参与签名不等长（实参 {} / 签名 {}；签名漂移或变参冻结缺口）",
             args.len(),
             sig.args.len()
-        );
-        std::process::exit(70);
+        ));
     }
     let types: Vec<FfiType> = sig.args.iter().map(ffi_type).collect();
     let cif = match sig.fixed {
@@ -320,7 +330,7 @@ mod tests {
     fn missing_optional_candidate_still_allows_rtld_default_resolution() {
         let mut state = FfiState::default();
         let address = state
-            .resolve("malloc", &[missing_library()], &[])
+            .resolve("malloc", &[missing_library()], &[], &[])
             .expect("optional dlopen failure must stay optional");
         assert!(address.is_some(), "malloc should resolve from RTLD_DEFAULT");
     }
@@ -330,7 +340,7 @@ mod tests {
         let missing = missing_library();
         let mut state = FfiState::default();
         let error = state
-            .resolve("malloc", &[], std::slice::from_ref(&missing))
+            .resolve("malloc", &[], std::slice::from_ref(&missing), &[])
             .unwrap_err();
 
         assert!(
@@ -402,7 +412,7 @@ mod tests {
         let mut state = FfiState::default();
         let required: Box<str> = so.display().to_string().into();
         let resolved = state
-            .resolve("malloc", &[], std::slice::from_ref(&required))
+            .resolve("malloc", &[], std::slice::from_ref(&required), &[])
             .expect("required lib loads")
             .expect("malloc resolves");
         assert_ne!(

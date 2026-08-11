@@ -162,7 +162,11 @@ pub(crate) fn envs_current(envs: &[(String, Option<String>)]) -> bool {
 
 /// 热路径查找。返回的 Module 已含恢复到固定基址的冻结区；asm_stub_addrs 是
 /// 序列化时的陈旧地址，调用方**必须**以 asm_sites 重物化覆写后再执行。
-pub fn lookup(rustc_args: &[String], base_key: Option<&str>) -> Option<ir::Module> {
+pub fn lookup(
+    rustc_args: &[String],
+    base_key: Option<&str>,
+    prefix: crate::vm::engine::verify::Prefix,
+) -> Option<ir::Module> {
     if disabled() {
         return None;
     }
@@ -179,6 +183,8 @@ pub fn lookup(rustc_args: &[String], base_key: Option<&str>) -> Option<ir::Modul
     }
     // Module 反序列化内含冻结区固定基址恢复；失败（基址被占等）→ miss
     let module: ir::Module = postcard::from_bytes(module_bytes).ok()?;
+    // 形状正确不代表索引和帧范围安全。坏缓存按 miss 处理，由冷路径自愈。
+    crate::vm::engine::verify::module_with_prefix(&module, prefix).ok()?;
     // 加载相物化的 .so（native archive / global_asm）被清理 → miss 走冷路径自愈
     if !module
         .required_native_libs
@@ -196,8 +202,12 @@ pub fn store(
     rustc_args: &[String],
     module: &ir::Module,
     base_key: Option<&str>,
+    prefix: crate::vm::engine::verify::Prefix,
 ) -> bool {
     if disabled() {
+        return false;
+    }
+    if crate::vm::engine::verify::module_with_prefix(module, prefix).is_err() {
         return false;
     }
     // 冻结区不在固定基址（并发抢占/ASLR 冲突）⇒ 快照内嵌地址跨进程无效，不缓存

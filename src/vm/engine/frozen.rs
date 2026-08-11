@@ -187,11 +187,15 @@ unsafe impl Sync for FrozenArena {}
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{LazyLock, Mutex};
+
     use super::super::addrlayout::{
         BASE_IMAGE_FIXED_ADDR, DELTA_FIXED_ADDR, IMAGE_SPLINE_BASE, IMAGE_SPLINE_COUNT,
         IMAGE_SPLINE_STEP, image_addr, is_valid_home,
     };
     use super::FrozenArena;
+
+    static FIXED_ADDRESS_TEST: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     /// S3′ 样条域白名单：底座/delta/对齐样条合法，越界/未对齐/杂散非法。
     #[test]
@@ -220,6 +224,7 @@ mod tests {
     /// 固定基址快照/恢复往返：地址值稳定、内容逐字节保真、恢复后可继续分配。
     #[test]
     fn snapshot_restore_roundtrip_preserves_addresses_and_bytes() {
+        let _fixed_address = FIXED_ADDRESS_TEST.lock().unwrap();
         let mut a = FrozenArena::new();
         if !a.at_fixed_base() {
             // 并发单测抢占了固定基址——本测试需要独占，让位（其余断言无意义）
@@ -262,6 +267,7 @@ mod tests {
     /// 底座查找命中后的常见形态）恢复后逐位稳定。
     #[test]
     fn dual_domain_arenas_coexist_and_cross_references_survive_restore() {
+        let _fixed_address = FIXED_ADDRESS_TEST.lock().unwrap();
         let mut base = FrozenArena::new_base_image();
         let mut delta = FrozenArena::new();
         if !base.at_fixed_base() || !delta.at_fixed_base() {

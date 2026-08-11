@@ -154,7 +154,7 @@ impl<'tcx> Linker<'tcx> {
         // 其余内建（alloc/unwind/fork/atexit/signal/backtrace 系）是引擎接管的语义，
         // 无地址可物化——响亮 Trap（宿主进程也导出 __rust/_Unwind 系符号，直取 =
         // 打穿引擎的堆/panic/unwind 模型）。
-        if let Some(&b) = self.builtins.get(&link_name) {
+        if let Some(b) = self.builtins.get(&link_name).cloned() {
             use ir::Builtin as B;
             if !matches!(
                 b,

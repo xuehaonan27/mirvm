@@ -35,6 +35,7 @@ pub(super) fn call_guarding_terminate<R>(unwind: &UnwindAction, f: impl FnOnce()
     if let UnwindAction::Terminate = unwind {
         match panic::catch_unwind(AssertUnwindSafe(f)) {
             Ok(r) => r,
+            Err(e) if e.is::<EngineFault>() => panic::resume_unwind(e),
             Err(_) => {
                 eprintln!(
                     "mirvm[m4-engine]: unwind 抵达 Terminate 边界（double panic/ABI）——abort"
@@ -781,7 +782,7 @@ pub(crate) fn exec_builtin(
         // 天然一致；无其他 guest 线程 ⇒ 无跨线程锁死锁面）。多线程 fork
         // 响亮拒绝（native 下同为雷区）。exec 族走 foreign 直通，不经此。
         Builtin::HostFork => {
-            if crate::vm::engine::ctx::guest_spawned_threads() {
+            if unsafe { crate::vm::engine::ctx::guest_spawned_threads(ctx) } {
                 engine_abort(
                     "fork() 时 guest 已派生额外线程：多线程 fork 后仅 forking \
                      线程存活、其他线程持有的锁在子进程永久锁死（native 亦 UB）。\
@@ -796,7 +797,8 @@ pub(crate) fn exec_builtin(
                 // 换新。非 sync 子进程维持解释兜底语义不变）
                 #[cfg(feature = "cranelift")]
                 if unsafe { &*(*ctx).shared }.jit.sync {
-                    crate::vm::engine::jit::start(unsafe { &*(*ctx).shared });
+                    let shared = unsafe { (*ctx).shared_arc() };
+                    crate::vm::engine::jit::start(&shared);
                 }
             }
             pid as u64
@@ -804,9 +806,9 @@ pub(crate) fn exec_builtin(
         // atexit 家族（D8g）：登记 guest 回调，返回 0（成功）。
         // __cxa_atexit(fn, arg, dso)：fn 收 arg；on_exit(fn, arg)：fn 收
         //（status, arg）。atexit(fn)：无参。统一存 (fn, 形态, arg)。
-        Builtin::HostAtexit => atexit_register(a(0), AtexitKind::Plain, 0),
-        Builtin::HostCxaAtexit => atexit_register(a(0), AtexitKind::CxaArg, a(1)),
-        Builtin::HostOnExit => atexit_register(a(0), AtexitKind::OnExit, a(1)),
+        Builtin::HostAtexit => atexit_register(ctx, a(0), AtexitKind::Plain, 0),
+        Builtin::HostCxaAtexit => atexit_register(ctx, a(0), AtexitKind::CxaArg, a(1)),
+        Builtin::HostOnExit => atexit_register(ctx, a(0), AtexitKind::OnExit, a(1)),
         Builtin::HostSignal => {
             let (signum, handler) = (a(0) as i32, a(1) as usize);
             // guest handler（非 DFL/IGN）：async 信号 → 物化 AS-trampoline

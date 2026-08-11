@@ -448,10 +448,11 @@ flate2 原生容器/crc32fast 整块/aes-gcm/dalek 默认路径/rustfft-avx）�
   `mode=diff` = mirvm run 与 native cargo run 三维逐字节对拍。
   实锤两个机制点：① **cargo 会回放缓存告警**（warm 构建 stderr 仍含依赖
   告警，对拍被噪音炸）→ 两侧同帽 `--cap-lints allow`（manifest env 列，
-  `%20` 编码空格），stderr 只承载程序自身输出；② **mirvm 项目模式
+  `%20` 编码空格），stderr 只承载程序自身输出；② **当时 mirvm 项目模式
   guest cwd=项目目录**（cargo run 从不 chdir，二者语义分叉）→ 夹具路径
-  经 `{ROOT}` 占位绝对化（lib.sh::parse_args），产品侧对齐与否记
-  [open-issues.md E36](open-issues.md) 待裁定。L2 warm 复跑判定 = warm
+  经 `{ROOT}` 占位绝对化。该历史夹具保持不动；产品侧已于 2026-08-10 在
+  compat runner 协议内传回调用者 cwd，并以异目录 `--manifest-path` 差分关闭 E36
+  （decision-history §7.42）。L2 warm 复跑判定 = warm
   三维 == native 三维 + warm stdout == cold stdout（冷跑 stderr 含构建
   告警属构建事件，仅断言 exit 0）。
 - **接线即立功（jiff_time）**：全量 gate 首跑 178/179 绿，唯一红 = c_jiff_time——

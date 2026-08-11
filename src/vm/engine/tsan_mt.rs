@@ -8,7 +8,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::ctx::{Shared, attach};
+use super::ctx::{Engine, Shared, attach};
 use super::ir::{
     Block, FfiKind, ForeignSig, FuncBody, IntBinOp, MemOrd, Module, Operand, ParamAbi, RetAbi,
     RmwOp, Rvalue, ScalarPlace, Slot, Stmt, Terminator, Width,
@@ -73,7 +73,8 @@ fn build_module() -> Module {
 }
 
 pub fn run() -> bool {
-    let shared: &'static Shared = Box::leak(Box::new(Shared::new(build_module())));
+    let engine = Engine::new(Shared::new(build_module()));
+    let shared = std::sync::Arc::clone(engine.shared());
     static CELL: AtomicU64 = AtomicU64::new(0);
     const THREADS: u64 = 8;
     const N: u64 = 2000;
@@ -88,8 +89,9 @@ pub fn run() -> bool {
     let handles: Vec<_> = (0..THREADS)
         .map(|t| {
             let sig = sig.clone();
+            let shared = std::sync::Arc::clone(&shared);
             std::thread::spawn(move || {
-                let ctx = attach(shared);
+                let ctx = attach(&shared);
                 let addr = CELL.as_ptr() as u64;
                 for _ in 0..N {
                     // M5.3a Q4 豁免：TSan harness 自用入口不经 call_guest 收拢
@@ -97,7 +99,7 @@ pub fn run() -> bool {
                     interp::interp_frame(ctx, 0, &[addr]);
                 }
                 // thunk 工厂并发（同键）+ 跨线程真码调用（再入 attach）
-                let code = thunks::get_or_create(shared, 0x1000, 1, &sig);
+                let code = thunks::get_or_create(&shared, 0x1000, 1, &sig);
                 let f: unsafe extern "C" fn(u64) -> u64 =
                     unsafe { std::mem::transmute(code as usize) };
                 let mut acc = 0u64;

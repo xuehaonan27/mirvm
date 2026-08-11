@@ -159,11 +159,21 @@ compile_error!("harness-appended rustflags were lost");
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let caller_marker = std::fs::read_to_string("caller-marker.txt")
+        .expect("cargo run should preserve its caller's working directory");
+    let runtime_value = std::env::var("DIFF_RUNTIME_ENV").unwrap();
+    let cargo_pkg_at_runtime = std::env::var_os("CARGO_PKG_NAME").is_some();
+    let encoded_flags_at_runtime = std::env::var_os("CARGO_ENCODED_RUSTFLAGS").is_some();
     let v: serde_json::Value = serde_json::json!({"args": args.len()});
-    println!("{v} extra={:?}", &args[1..]);
+    println!(
+        "{v} extra={:?} marker={} runtime={} cargo_pkg_at_runtime={cargo_pkg_at_runtime} encoded_flags_at_runtime={encoded_flags_at_runtime}",
+        &args[1..], caller_marker.trim(), runtime_value,
+    );
     std::process::exit(7);
 }
 EOF
+CALLER="$TMP/caller"; mkdir -p "$CALLER"
+printf 'outside-project\n' > "$CALLER/caller-marker.txt"
 printf -v project_mirvm_flags '%s\x1f%s' \
     '--cfg=diff_cargo_harness_append' \
     '--check-cfg=cfg(diff_cargo_harness_append)'
@@ -171,20 +181,66 @@ printf -v project_mirvm_flags '%s\x1f%s\x1f%s' \
     "$project_mirvm_flags" \
     "--remap-path-prefix=$PROJ=/mirvm-diff-project" \
     '--remap-path-scope=diagnostics'
-MIRVM_ENCODED_RUSTFLAGS_APPEND="$project_mirvm_flags" \
+(cd "$CALLER" && DIFF_RUNTIME_ENV=first \
+    MIRVM_ENCODED_RUSTFLAGS_APPEND="$project_mirvm_flags" \
     "$MIRVM" run "$PROJ" -- x y \
-    >"$TMP/proj.mirvm" 2>"$TMP/proj.mirvm.err"; mc=$?
-MIRVM_ENCODED_RUSTFLAGS_APPEND="$project_mirvm_flags" \
+    >"$TMP/proj.mirvm" 2>"$TMP/proj.mirvm.err"); mc=$?
+(cd "$CALLER" && DIFF_RUNTIME_ENV=second \
+    MIRVM_ENCODED_RUSTFLAGS_APPEND="$project_mirvm_flags" \
     "$MIRVM" run "$PROJ" -- x y \
-    >"$TMP/proj.mirvm2" 2>"$TMP/proj.mirvm2.err"; mc2=$?
-(cd "$PROJ" && PROJECT_SUITE_RUSTC="$RUSTC" \
+    >"$TMP/proj.mirvm2" 2>"$TMP/proj.mirvm2.err"); mc2=$?
+(cd "$CALLER" && DIFF_RUNTIME_ENV=first PROJECT_SUITE_RUSTC="$RUSTC" \
     PROJECT_SUITE_ENCODED_RUSTFLAGS_APPEND="$project_mirvm_flags" \
-    RUSTC="$RUSTC_APPEND_PROXY" "$CARGO" run -q -- x y \
+    RUSTC="$RUSTC_APPEND_PROXY" "$CARGO" run -q \
+    --manifest-path "$PROJ/Cargo.toml" --config "$PROJ/.cargo/config.toml" -- x y \
     >"$TMP/proj.native" 2>"$TMP/proj.native.err"); nc=$?
-if check_warm project "$TMP/proj.mirvm" "$TMP/proj.mirvm.err" "$mc" \
-    "$TMP/proj.mirvm2" "$TMP/proj.mirvm2.err" "$mc2"; then
-    check_green project "$TMP/proj.native" "$TMP/proj.mirvm" "$nc" "$mc" 7 \
-        "$TMP/proj.native.err" "$TMP/proj.mirvm.err"
-fi
+(cd "$CALLER" && DIFF_RUNTIME_ENV=second PROJECT_SUITE_RUSTC="$RUSTC" \
+    PROJECT_SUITE_ENCODED_RUSTFLAGS_APPEND="$project_mirvm_flags" \
+    RUSTC="$RUSTC_APPEND_PROXY" "$CARGO" run -q \
+    --manifest-path "$PROJ/Cargo.toml" --config "$PROJ/.cargo/config.toml" -- x y \
+    >"$TMP/proj.native2" 2>"$TMP/proj.native2.err"); nc2=$?
+check_green project-cold "$TMP/proj.native" "$TMP/proj.mirvm" "$nc" "$mc" 7 \
+    "$TMP/proj.native.err" "$TMP/proj.mirvm.err"
+check_green project-warm-runtime-env "$TMP/proj.native2" "$TMP/proj.mirvm2" \
+    "$nc2" "$mc2" 7 "$TMP/proj.native2.err" "$TMP/proj.mirvm2.err"
+
+# Cargo fingerprint 合同：固定 Cargo 能看见的 rustflags 改变后必须重编；
+# compat 轨追加在 wrapper 内的 flags 也必须进入等价的 Cargo 新鲜度判断。
+FP_PROJ="$TMP/fingerprint"; mkdir -p "$FP_PROJ/src"
+cat > "$FP_PROJ/Cargo.toml" <<'EOF'
+[package]
+name = "fingerprint"
+version = "0.1.0"
+edition = "2024"
+EOF
+cat > "$FP_PROJ/src/main.rs" <<'EOF'
+#[cfg(all(diff_flag_one, diff_flag_two))]
+compile_error!("rustflags from two builds were combined");
+#[cfg(not(any(diff_flag_one, diff_flag_two)))]
+compile_error!("rustflags were not applied");
+
+fn main() {
+    #[cfg(diff_flag_one)]
+    println!("one");
+    #[cfg(diff_flag_two)]
+    println!("two");
+}
+EOF
+printf -v fp_one '%s\x1f%s' '--cfg=diff_flag_one' \
+    '--check-cfg=cfg(diff_flag_one,diff_flag_two)'
+printf -v fp_two '%s\x1f%s' '--cfg=diff_flag_two' \
+    '--check-cfg=cfg(diff_flag_one,diff_flag_two)'
+(cd "$FP_PROJ" && MIRVM_ENCODED_RUSTFLAGS_APPEND="$fp_one" \
+    "$MIRVM" run "$FP_PROJ" >"$TMP/fp-one.mirvm" 2>"$TMP/fp-one.mirvm.err"); fpm1=$?
+(cd "$FP_PROJ" && MIRVM_ENCODED_RUSTFLAGS_APPEND="$fp_two" \
+    "$MIRVM" run "$FP_PROJ" >"$TMP/fp-two.mirvm" 2>"$TMP/fp-two.mirvm.err"); fpm2=$?
+(cd "$FP_PROJ" && CARGO_ENCODED_RUSTFLAGS="$fp_one" RUSTC="$RUSTC" \
+    "$CARGO" run -q >"$TMP/fp-one.native" 2>"$TMP/fp-one.native.err"); fpn1=$?
+(cd "$FP_PROJ" && CARGO_ENCODED_RUSTFLAGS="$fp_two" RUSTC="$RUSTC" \
+    "$CARGO" run -q >"$TMP/fp-two.native" 2>"$TMP/fp-two.native.err"); fpn2=$?
+check_green rustflags-fingerprint-cold "$TMP/fp-one.native" "$TMP/fp-one.mirvm" \
+    "$fpn1" "$fpm1" 0 "$TMP/fp-one.native.err" "$TMP/fp-one.mirvm.err"
+check_green rustflags-fingerprint-change "$TMP/fp-two.native" "$TMP/fp-two.mirvm" \
+    "$fpn2" "$fpm2" 0 "$TMP/fp-two.native.err" "$TMP/fp-two.mirvm.err"
 
 suite_summary differential.cargo

@@ -10,7 +10,8 @@
 #   unwind  panic/catch/重抛九件 == native（同源 rustc -O，2026-07-09 生成）
 #           + vm-stats M4.1/M4.2 债务清零。
 #   threads 真线程五用例差分 == native + tier-0 时代挂死双场景 + rayon 秒级
-#           + vm-stats 可达 trap-free + TSan 多线程用例（SKIP_TSAN=1 跳过）。
+#           + JIT 栈溢出诊断 + vm-stats 可达 trap-free
+#           + TSan 多线程用例（SKIP_TSAN=1 跳过）。
 #
 # 用法：./tests/run.sh suite runtime.semantics [pure|digest|unwind|threads|all]
 set -u
@@ -176,7 +177,17 @@ run_threads() {
         tbad "c_rayon（exit=$code ${dt}ms）"
     fi
 
-    # ④ --vm-stats 复测：threads demo 可达路径 trap-free
+    # ④ 小栈 + threshold=1 强制进入编译码：必须在大帧序言前给明确诊断，
+    # 不能以 SIGSEGV 穿出。recursion_deep 是现有的永久深递归探针。
+    out=$(env MIRVM_STACK_SIZE=1m MIRVM_JIT_THRESHOLD=1 MIRVM_JIT_SYNC=1 \
+        timeout 60 "$MIRVM" run demo/recursion_deep.rs 2>&1); code=$?
+    if [ $code -eq 70 ] && echo "$out" | grep -q 'guest 栈溢出（JIT 编译帧进入前'; then
+        tok "JIT 栈溢出在帧序言前明确诊断"
+    else
+        tbad "JIT 栈溢出诊断（exit=$code: $out）"
+    fi
+
+    # ⑤ --vm-stats 复测：threads demo 可达路径 trap-free
     for name in threads_spawn threads_panic; do
         if "$MIRVM" run --vm-stats demo/$name.rs 2>/dev/null | grep -q "@entry: ✅ 可达路径 trap-free"; then
             tok "$name 可达 trap-free"
@@ -185,7 +196,7 @@ run_threads() {
         fi
     done
 
-    # ⑤ TSan 多线程用例（8 线程共享 Shared/各自 Ctx/thunk 工厂并发；引擎 Sync）
+    # ⑥ TSan 多线程用例（8 线程共享 Shared/各自 Ctx/thunk 工厂并发；引擎 Sync）
     if [ -z "${SKIP_TSAN:-}" ]; then
         if bash tests/suites/runtime/tsan.sh >"$TMP/tsan.out" 2>&1; then
             tok "TSan（含 tsan_mt 多线程真身，零警告）"

@@ -777,18 +777,20 @@ fn versions_from_lock(
             };
             let effective_child = effective_locked_package(lf, child)?;
             let child_identity = locked_package_identity(effective_child, path_manifests)?;
-            // 边版本记录：lock 依赖行不带 kind 信息——Normal/Build 双键登记，
-            // 消歧器 = 子 source 或版本串（同名同版本 Git source 也能分立）。
+            // 边版本记录：lock 依赖行不带 kind 信息——Normal/Build 双键登记。
+            // 消歧器同时保留已选子包的 source 与版本：registry 同源多版本不能
+            // 相互覆盖，Git 包又必须保留 URL/commit 供 manifest source 匹配。
+            let disambiguator = child.source.as_ref().map_or_else(
+                || child.version.to_string(),
+                |source| format!("{source} {}", child.version),
+            );
             for class in [UnitClass::Normal, UnitClass::Build] {
                 edges.insert(
                     (
                         parent_identity.clone(),
                         pkg.version.clone(),
                         dependency.name.clone(),
-                        child
-                            .source
-                            .clone()
-                            .unwrap_or_else(|| child.version.to_string()),
+                        disambiguator.clone(),
                         class,
                     ),
                     (child_identity.clone(), child.version.clone()),
@@ -3296,6 +3298,44 @@ mod tests {
         assert!(a_unit.features.contains("std"));
         assert!(!a_unit.from_registry || a_unit.source_dir.ends_with("a-1.2.0"));
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn lock_mode_keeps_same_named_dependency_versions_distinct() {
+        let d = tmpdir("lock-duplicate-dependency-name");
+        let root = root_project(
+            &d,
+            "[package]\nname=\"demo\"\nversion=\"0.1.0\"\n[dependencies]\nparent=\"1\"\n",
+        );
+        std::fs::write(
+            d.join("Cargo.lock"),
+            "version=4\n\
+             [[package]]\nname=\"demo\"\nversion=\"0.1.0\"\ndependencies=[\"parent\"]\n\
+             [[package]]\nname=\"parent\"\nversion=\"1.0.0\"\nsource=\"registry+https://github.com/rust-lang/crates.io-index\"\ndependencies=[\"h 0.2.1\",\"h 0.3.1\"]\n\
+             [[package]]\nname=\"h\"\nversion=\"0.2.1\"\nsource=\"registry+https://github.com/rust-lang/crates.io-index\"\n\
+             [[package]]\nname=\"h\"\nversion=\"0.3.1\"\nsource=\"registry+https://github.com/rust-lang/crates.io-index\"\n",
+        )
+        .unwrap();
+
+        let mut parent = iv("parent", "1.0.0");
+        parent.deps.push(idep("h", "^0.2"));
+        let mut renamed = idep("h_03", "^0.3");
+        renamed.package = Some("h".into());
+        parent.deps.push(renamed);
+        let mut src = FakeSource::new(d.join("srcstore"));
+        src.add("parent", vec![parent]);
+        src.add("h", vec![iv("h", "0.2.1"), iv("h", "0.3.1")]);
+
+        let plan = resolve(&root, &mut src).unwrap();
+        assert_eq!(
+            plan.version_map["h"],
+            vec![Version::new(0, 2, 1), Version::new(0, 3, 1)]
+        );
+        assert_eq!(
+            plan.units.iter().filter(|unit| unit.package == "h").count(),
+            2
+        );
+        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]

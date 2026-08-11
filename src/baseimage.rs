@@ -102,6 +102,7 @@ fn load(path: &std::path::Path, want_stamp: &str) -> Option<BaseImage> {
     let mut module = f.module;
     module.exports = f.export_syms.iter().cloned().collect();
     module.fn_addrs = f.fn_addr_pairs.iter().copied().collect();
+    crate::vm::engine::verify::module(&module).ok()?;
     Some(BaseImage {
         fn_by_sym: f.export_syms.into_iter().collect(),
         entry_by_sym: f.fn_entry_syms.into_iter().collect(),
@@ -476,6 +477,7 @@ pub fn build_main(mut argv: impl Iterator<Item = String>) -> ExitCode {
         out: PathBuf::from(out),
         ok: false,
     };
+    let _compiler_session = crate::cli::compiler_session_guard();
     let code = rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&rustc_args, &mut callbacks)
     });

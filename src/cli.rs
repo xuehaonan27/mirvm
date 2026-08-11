@@ -18,6 +18,14 @@ use rustc_middle::ty::TyCtxt;
 
 use crate::cargo_shim;
 
+static COMPILER_SESSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn compiler_session_guard() -> std::sync::MutexGuard<'static, ()> {
+    COMPILER_SESSION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 const USAGE: &str = "\
 mirvm — a Rust runtime with its own execution engine
 
@@ -619,36 +627,117 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     ];
     let mut program_argv = vec![input];
     program_argv.extend(program_args);
-    run_driver(rustc_args, program_argv, dump_mir, vm_call, vm_stats, false)
+    run_driver(
+        rustc_args,
+        program_argv,
+        dump_mir,
+        vm_call,
+        vm_stats,
+        false,
+        None,
+    )
 }
 
 // ===== cargo runner 回调 =====
 
 fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
+    let guest_process = GuestProcessState::from_cargo_runner();
     let (rustc_args, program_argv, env) = cargo_shim::parse_runner_invocation(argv);
+    // rustc 前端必须重演 wrapper 录下的构建环境；来宾执行前会完整恢复
+    // runner 刚启动时的运行环境，不能让这层覆盖进入 guest。
+    install_recorded_build_environment(env);
     // 构建期环境优先（env!() 展开、CARGO_* 等在编译会话里要可见）。
     // CARGO_MAKEFLAGS 指向已消亡的 jobserver，透传会招警告（cargo-miri 同款处理）。
-    for (k, v) in env {
-        if k == "CARGO_MAKEFLAGS" {
-            continue;
-        }
-        // MIRVM_* 是引擎控制面，永远取活环境（P1，coldstart-research §5）：录制回放
-        // 会把构建期旋钮化石化进假二进制——实证 MIRVM_NO_IR_CACHE 被化石化后 L2 对
-        // 该项目永久旁路且无迹象；MIRVM_TIMING 化石化则永久污染 stderr 差分。
-        // 编译语义变量（env!/CARGO_*）维持录制优先不变。
-        if k.starts_with("MIRVM_") {
-            continue;
-        }
-        // SAFETY: 单线程阶段，尚未启动解释
-        unsafe { std::env::set_var(k, v) };
-    }
     // mode B 片②：pack 会话（mirvm pack 经 phase_cargo 以 MIRVM_PACK 传入
     // 输出路径）——强制全量冷路径保包自包含（空 image 栈 + 旁路 L2/deps-image
     // 由 mirvm pack 以 MIRVM_NO_BASE_IMAGE/MIRVM_NO_DEPS_IMAGE 同进 env）
     if let Ok(out) = std::env::var("MIRVM_PACK") {
         return pack_driver(rustc_args, program_argv, std::path::PathBuf::from(out));
     }
-    run_driver(rustc_args, program_argv, false, None, false, true)
+    run_driver(
+        rustc_args,
+        program_argv,
+        false,
+        None,
+        false,
+        true,
+        Some(guest_process),
+    )
+}
+
+pub(crate) struct GuestProcessState {
+    cwd: Option<std::path::PathBuf>,
+    env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+}
+
+impl GuestProcessState {
+    fn from_cargo_runner() -> Self {
+        let cwd = std::env::var_os("MIRVM_GUEST_CWD").map(std::path::PathBuf::from);
+        let caller_sysroot = std::env::var_os("MIRVM_CALLER_SYSROOT");
+        let caller_had_sysroot =
+            std::env::var_os("MIRVM_CALLER_SYSROOT_PRESENT").is_some_and(|value| value == "1");
+        let mut env: std::collections::BTreeMap<_, _> = std::env::vars_os().collect();
+        for key in [
+            "MIRVM_CARGO_SESSION",
+            "MIRVM_GUEST_CWD",
+            "MIRVM_CALLER_SYSROOT",
+            "MIRVM_CALLER_SYSROOT_PRESENT",
+            "RUSTC_WRAPPER",
+        ] {
+            env.remove(std::ffi::OsStr::new(key));
+        }
+        if caller_had_sysroot {
+            if let Some(value) = caller_sysroot {
+                env.insert("MIRVM_SYSROOT".into(), value);
+            }
+        } else {
+            env.remove(std::ffi::OsStr::new("MIRVM_SYSROOT"));
+        }
+        Self {
+            cwd,
+            env: env.into_iter().collect(),
+        }
+    }
+
+    fn enter(&self) {
+        let current_keys: Vec<_> = std::env::vars_os().map(|(key, _)| key).collect();
+        // SAFETY: rustc has returned and the guest/JIT threads have not started.
+        unsafe {
+            for key in current_keys {
+                std::env::remove_var(key);
+            }
+            for (key, value) in &self.env {
+                std::env::set_var(key, value);
+            }
+        }
+        if let Some(cwd) = &self.cwd
+            && let Err(error) = std::env::set_current_dir(cwd)
+        {
+            eprintln!(
+                "mirvm: 无法进入 Cargo 调用者目录 {}: {error}",
+                cwd.display()
+            );
+            exit(1);
+        }
+    }
+}
+
+fn install_recorded_build_environment(env: Vec<(String, String)>) {
+    let current_keys: Vec<_> = std::env::vars_os()
+        .map(|(key, _)| key)
+        .filter(|key| !key.as_encoded_bytes().starts_with(b"MIRVM_"))
+        .collect();
+    // SAFETY: runner is still in its single-threaded startup phase.
+    unsafe {
+        for key in current_keys {
+            std::env::remove_var(key);
+        }
+        for (key, value) in env {
+            if key != "CARGO_MAKEFLAGS" && !key.starts_with("MIRVM_") {
+                std::env::set_var(key, value);
+            }
+        }
+    }
 }
 
 /// mode B 片②：pack 驱动——run_driver 冷半的同构（空 image 栈、无 L2 查询），
@@ -677,6 +766,7 @@ pub(crate) fn pack_driver(
         deps_image_loaded: false,
         pack_out: Some(out),
     };
+    let _compiler_session = compiler_session_guard();
     let compiler_code = rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&rustc_args, &mut callbacks)
     });
@@ -759,6 +849,7 @@ pub(crate) fn run_dep_compiler(rustc_args: Vec<String>) -> ! {
         out_dir,
         rlib_stem: format!("lib{crate_name}{extra}"),
     };
+    let _compiler_session = compiler_session_guard();
     let code = rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&rustc_args, &mut callbacks)
     });
@@ -1045,6 +1136,11 @@ impl Callbacks for MirvmCallbacks {
                     &self.rustc_args,
                     self.module.as_ref().expect("刚设置"),
                     self.stack.key(),
+                    crate::vm::engine::verify::Prefix {
+                        funcs: self.stack.total_fns(),
+                        tls: self.stack.total_tls(),
+                        asm: self.stack.total_asm(),
+                    },
                 )
             {
                 self.timing.cache_store = Some(t_store.elapsed());
@@ -1089,6 +1185,10 @@ fn run_vm_engine(
     vm_call: Option<&str>,
     vm_stats: bool,
 ) -> i32 {
+    if let Err(e) = crate::vm::engine::verify::module(&module) {
+        eprintln!("mirvm: bytecode verification failed: {e}");
+        return 70;
+    }
     if vm_stats {
         print!("{}", crate::vm::engine::stats::report(&module));
         return 0;
@@ -1101,22 +1201,26 @@ fn run_vm_engine(
         eprintln!("mirvm: {e}");
         exit(70);
     }
+    let mut shared = crate::vm::engine::ctx::Shared::new(module);
     // P1 条目可执行化（decision-history §7.6）：配方 → closure → stub 字节 →
     // 整域 RX（与上两道并列的全相工序；域被占 = 装载失败）
-    if let Err(e) = crate::vm::engine::thunks::materialize_all_entry_stubs(&mut module) {
+    if let Err(e) =
+        crate::vm::engine::thunks::materialize_all_entry_stubs(&mut shared.module, shared.id)
+    {
         eprintln!("mirvm: {e}");
         exit(70);
     }
-    // Shared 提升进程级 &'static（M4.4：thunk/多线程要求 Ctx 可在任意线程随时引用它）
-    let shared: &'static _ = Box::leak(Box::new(crate::vm::engine::ctx::Shared::new(module)));
-    // P1 蹦床寻引擎发布点（条目 stub 可在任意 native 线程被调）
-    crate::vm::engine::thunks::publish_shared(shared);
-    // M5.3b：编译服务（--jit off / feature 关 = 不启动，纯解释）
-    #[cfg(feature = "cranelift")]
-    crate::vm::engine::jit::start(shared);
+    let engine = crate::vm::engine::ctx::Engine::new(shared);
     let Some(spec) = vm_call else {
         // main 启动链：lang_start 照常解释，退出码 = Termination 产物
-        return on_guest_stack(move || crate::vm::engine::interp::run_main(shared));
+        let shared = std::sync::Arc::clone(engine.shared());
+        return match on_guest_stack(move || crate::vm::engine::interp::run_main(&shared)) {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("mirvm[m4-engine]: {e}");
+                e.exit_code
+            }
+        };
     };
     let (name, args) = match parse_vm_call(spec) {
         Ok(v) => v,
@@ -1125,14 +1229,15 @@ fn run_vm_engine(
             return 2;
         }
     };
-    match on_guest_stack(move || crate::vm::engine::interp::run_export(shared, &name, &args)) {
+    let shared = std::sync::Arc::clone(engine.shared());
+    match on_guest_stack(move || crate::vm::engine::interp::run_export(&shared, &name, &args)) {
         Ok(r) => {
             println!("{r}");
             0
         }
         Err(e) => {
-            eprintln!("mirvm: {e}");
-            1
+            eprintln!("mirvm[m4-engine]: {e}");
+            e.exit_code
         }
     }
 }
@@ -1193,6 +1298,7 @@ pub(crate) fn run_driver(
     vm_call: Option<String>,
     vm_stats: bool,
     suppress_runner_warning_summary: bool,
+    guest_process: Option<GuestProcessState>,
 ) -> ExitCode {
     let t_start = std::time::Instant::now();
     // S4/S3′ image 栈：装载底座 + 依赖 image 链（失败/旁路 = 空栈，全量冷路径自愈）。
@@ -1216,7 +1322,16 @@ pub(crate) fn run_driver(
     let base_key = stack.key().map(str::to_owned);
     // L2 热路径（M6 片2）：命中即跳过整个 rustc 会话（前端+metadata+mono+lower）。
     // dump-mir 需要 tcx，强制冷路径。S4/S3′：delta 条目与键链双验证（ircache）。
-    if !dump_mir && let Some(mut module) = crate::ircache::lookup(&rustc_args, base_key.as_deref())
+    if !dump_mir
+        && let Some(mut module) = crate::ircache::lookup(
+            &rustc_args,
+            base_key.as_deref(),
+            crate::vm::engine::verify::Prefix {
+                funcs: stack.total_fns(),
+                tls: stack.total_tls(),
+                asm: stack.total_asm(),
+            },
+        )
     {
         let timing = PhaseTiming {
             cache_load: Some(t_start.elapsed()),
@@ -1227,6 +1342,9 @@ pub(crate) fn run_driver(
             module.asm_stub_addrs = crate::lower::asm::materialize(&module.asm_sites);
         } else {
             crate::baseimage::absorb_stack(&mut module, stack); // 内含 asm 合并重物化
+        }
+        if let Some(guest) = &guest_process {
+            guest.enter();
         }
         let t_engine = std::time::Instant::now();
         let code = run_vm_engine(module, &program_argv, vm_call.as_deref(), vm_stats);
@@ -1252,6 +1370,7 @@ pub(crate) fn run_driver(
         deps_image_loaded,
         pack_out: None,
     };
+    let _compiler_session = compiler_session_guard();
     let compiler_code = rustc_driver::catch_with_exit_code(|| {
         rustc_driver::run_compiler(&rustc_args, &mut callbacks)
     });
@@ -1271,6 +1390,9 @@ pub(crate) fn run_driver(
         let stack = std::mem::replace(&mut callbacks.stack, crate::baseimage::ImageStack::empty());
         if !stack.is_empty() {
             crate::baseimage::absorb_stack(&mut module, stack);
+        }
+        if let Some(guest) = &guest_process {
+            guest.enter();
         }
         let t_engine = std::time::Instant::now();
         let code = run_vm_engine(

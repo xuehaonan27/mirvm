@@ -1341,7 +1341,15 @@ pub fn run_root_recipe(mut argv: impl Iterator<Item = String>) -> ExitCode {
     }
     let mut program_argv = vec![recipe.argv0];
     program_argv.extend(argv);
-    crate::cli::run_driver(recipe.rustc_args, program_argv, false, None, false, true)
+    crate::cli::run_driver(
+        recipe.rustc_args,
+        program_argv,
+        false,
+        None,
+        false,
+        true,
+        None,
+    )
 }
 
 /// `mirvm run <frontmatter 脚本>`（MIRVM_DEPS=self）：正文物化到脚本缓存目录
@@ -1657,7 +1665,7 @@ fn drive(
     if let Some(out) = pack_out {
         crate::cli::pack_driver(args, program_argv, out.to_path_buf())
     } else {
-        crate::cli::run_driver(args, program_argv, false, None, false, true)
+        crate::cli::run_driver(args, program_argv, false, None, false, true, None)
     }
 }
 

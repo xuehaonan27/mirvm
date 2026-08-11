@@ -101,6 +101,7 @@ fn exec(mut cmd: Command) -> ! {
 
 fn cargo_project_command(
     project_dir: &std::path::Path,
+    guest_cwd: &std::path::Path,
     action: CargoAction<'_>,
     program_args: &[String],
     sysroot: &std::path::Path,
@@ -127,9 +128,22 @@ fn cargo_project_command(
     // ×flags×toolchain）内容寻址，同一 crate 编译单元全机唯一一份；最终产物
     // 定位由 runner 协议供给（cargo 把假二进制路径传给 runner），不扫目录。
     // MIRVM_TARGET_DIR 可整体改址（隔离/测试用；默认 $MIRVM_HOME/target/mirvm）。
-    let target_dir = std::env::var_os("MIRVM_TARGET_DIR")
+    let mut target_dir = std::env::var_os("MIRVM_TARGET_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| crate::sysroot::cache_dir().join("target/mirvm"));
+    // These flags are appended inside our rustc wrapper, after Cargo has
+    // computed its normal fingerprint.  Partition only this exceptional
+    // channel by content so a changed value cannot reuse a fake binary (or a
+    // dependency rlib) recorded with the old flags.  Cargo-visible flags keep
+    // using Cargo's own fingerprints and the ordinary shared target store.
+    if let Some(encoded) =
+        std::env::var_os("MIRVM_ENCODED_RUSTFLAGS_APPEND").filter(|value| !value.is_empty())
+    {
+        let hash = crate::lower::asm::fnv1a(encoded.as_encoded_bytes());
+        target_dir = target_dir
+            .join("mirvm-append-rustflags")
+            .join(format!("{hash:016x}"));
+    }
     cmd.arg("--target-dir").arg(target_dir);
     if matches!(action, CargoAction::Run { .. }) {
         cmd.arg("--quiet");
@@ -151,6 +165,21 @@ fn cargo_project_command(
     cmd.env_remove("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER");
     cmd.env("MIRVM_CARGO_SESSION", "1");
     cmd.env("MIRVM_SYSROOT", sysroot);
+    // Cargo run keeps the directory from which the user invoked Cargo even
+    // when --manifest-path points elsewhere.  We drive Cargo from project_dir
+    // for config/workspace discovery, so carry the original directory to the
+    // runner and apply it only when guest execution begins.
+    cmd.env("MIRVM_GUEST_CWD", guest_cwd);
+    match std::env::var_os("MIRVM_SYSROOT") {
+        Some(value) => {
+            cmd.env("MIRVM_CALLER_SYSROOT_PRESENT", "1");
+            cmd.env("MIRVM_CALLER_SYSROOT", value);
+        }
+        None => {
+            cmd.env("MIRVM_CALLER_SYSROOT_PRESENT", "0");
+            cmd.env_remove("MIRVM_CALLER_SYSROOT");
+        }
+    }
     cmd
 }
 
@@ -208,6 +237,10 @@ pub fn phase_cargo(
     bin_sel: Option<&str>,
     ignore_rust_version: bool,
 ) -> ! {
+    let guest_cwd = std::env::current_dir().unwrap_or_else(|error| {
+        eprintln!("mirvm: 无法读取调用者当前目录: {error}");
+        exit(1);
+    });
     // 绝对化：relative project_dir + current_dir + join(target/mirvm) 会把 target 目录
     // 拼成 project/project/target 的重复嵌套（A2 gate 实测）——且使同一项目的 rlib 路径
     // 随调用形态（相对/绝对）漂移，deps-image 键失稳。
@@ -228,6 +261,7 @@ pub fn phase_cargo(
     let locked = std::env::var_os("MIRVM_CARGO_LOCKED").is_some();
     let cmd = cargo_project_command(
         project_dir,
+        &guest_cwd,
         CargoAction::Run {
             bin_sel,
             ignore_rust_version,
@@ -263,6 +297,7 @@ pub fn phase_cargo_test(
     let self_exe = std::env::current_exe().expect("current_exe 失败");
     let locked = std::env::var_os("MIRVM_CARGO_LOCKED").is_some();
     let cmd = cargo_project_command(
+        project_dir,
         project_dir,
         CargoAction::Test { cargo_args },
         harness_args,
@@ -547,7 +582,20 @@ pub fn parse_runner_invocation(
 
     // 组装解释会话参数：argv[0] 占位 + cargo 的原始参数 + 我们的 sysroot。
     // 剥掉 JSON 诊断/artifact 通知（那是给 cargo 消费的，现在 cargo 已退场）。
-    let sysroot = std::env::var("MIRVM_SYSROOT").expect("runner 阶段缺少 MIRVM_SYSROOT");
+    // Cargo 直接调用 runner 时环境里有内部 sysroot；CARGO_BIN_EXE_* 启动器却可能
+    // 被 guest 再次执行，此时用户运行环境已经按合同去掉了所有内部变量。旁置配方
+    // 保存了生成该启动器时的构建环境，因此它是两条路径共同、无需用户介入的后备。
+    let sysroot = std::env::var("MIRVM_SYSROOT")
+        .ok()
+        .or_else(|| {
+            info.env
+                .iter()
+                .find_map(|(key, value)| (key == "MIRVM_SYSROOT").then(|| value.clone()))
+        })
+        .unwrap_or_else(|| {
+            eprintln!("mirvm runner: 启动器配方缺少 MIRVM_SYSROOT（请清理对应 target 后重建）");
+            exit(1);
+        });
     let mut rustc_args = vec!["mirvm".to_string()];
     let mut it = info.args.iter().peekable();
     while let Some(a) = it.next() {
@@ -605,6 +653,7 @@ mod tests {
     fn cargo_project_command_is_locked() {
         let command = cargo_project_command(
             Path::new("/tmp/project"),
+            Path::new("/tmp/caller"),
             CargoAction::Run {
                 bin_sel: None,
                 ignore_rust_version: false,
@@ -625,6 +674,7 @@ mod tests {
     fn ordinary_cargo_project_command_can_create_a_lockfile() {
         let command = cargo_project_command(
             Path::new("/tmp/project"),
+            Path::new("/tmp/caller"),
             CargoAction::Run {
                 bin_sel: None,
                 ignore_rust_version: false,
@@ -641,6 +691,7 @@ mod tests {
     fn cargo_project_command_removes_ambient_wrapper_overrides() {
         let command = cargo_project_command(
             Path::new("/tmp/project"),
+            Path::new("/tmp/caller"),
             CargoAction::Run {
                 bin_sel: None,
                 ignore_rust_version: false,
@@ -670,6 +721,7 @@ mod tests {
         let cargo_args = vec!["--lib".to_string(), "needle".to_string()];
         let harness_args = vec!["--nocapture".to_string(), "--test-threads=1".to_string()];
         let command = cargo_project_command(
+            Path::new("/tmp/project"),
             Path::new("/tmp/project"),
             CargoAction::Test {
                 cargo_args: &cargo_args,

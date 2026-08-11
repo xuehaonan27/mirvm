@@ -29,46 +29,25 @@ use super::helpers::*;
 use super::translate::Translator;
 use super::*;
 
-/// c2i 壳的引擎定位（单引擎进程模型，与 TRACK_DIAGNOSTIC 全局钩同一假设面）。
-pub(super) static SHARED: std::sync::atomic::AtomicPtr<Shared> =
-    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
-static SHUTDOWN_REGISTERED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 /// 启动编译服务（run_vm_engine 在 Shared 定型后调用；--jit off 时不启动）。
-pub fn start(shared: &'static Shared) {
+pub fn start(shared: &std::sync::Arc<Shared>) {
     if !shared.jit.enabled {
         return;
     }
-    SHARED.store(shared as *const Shared as *mut Shared, Ordering::Release);
     shared.jit.stopping.store(false, Ordering::Release);
-    if SHUTDOWN_REGISTERED
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-        && crate::os::process::atexit_native(shutdown_at_exit) != 0
-    {
-        SHUTDOWN_REGISTERED.store(false, Ordering::Release);
-        eprintln!("mirvm: 无法登记 JIT worker 退出收尾");
-        std::process::exit(70);
-    }
     let (tx, rx): (Sender<u32>, Receiver<u32>) = std::sync::mpsc::channel();
     *shared.jit.queue.lock().unwrap() = Some(tx);
     // 编译失败/线程死亡 = 静默维持解释（语义面零依赖 JIT）
+    let worker_shared = std::sync::Arc::clone(shared);
     let worker = std::thread::Builder::new()
         .name("mirvm-jit".into())
-        .spawn(move || worker(shared, rx));
+        .spawn(move || worker(worker_shared, rx));
     *shared.jit.worker.lock().unwrap() = worker.ok();
 }
 
-/// 注册早于 guest atexit 回调，因此按 libc 的逆序规则最后执行：先让 guest
-/// 回调继续使用已发布机器码，再停止编译 worker。`Shared` 和已发布机器码仍须
-/// 保持可达，因为进程级 guest 线程池在 atexit 期间尚未被操作系统终止。
-extern "C" fn shutdown_at_exit() {
-    let shared = SHARED.load(Ordering::Acquire);
-    if shared.is_null() {
-        return;
-    }
-    let shared = unsafe { &*shared };
+/// 结束本 Engine 的编译服务。已发布机器码继续有效；尚未发布的请求回到解释器
+/// 兜底。每个 Engine 自己 join，不能让一个进程全局指针替最后启动者收尾。
+pub fn stop(shared: &Shared) {
     shared.jit.stopping.store(true, Ordering::Release);
     shared.jit.queue.lock().unwrap().take();
     if let Some(worker) = shared.jit.worker.lock().unwrap().take() {
@@ -76,9 +55,9 @@ extern "C" fn shutdown_at_exit() {
     }
 }
 
-fn worker(shared: &'static Shared, rx: Receiver<u32>) {
+fn worker(shared: std::sync::Arc<Shared>, rx: Receiver<u32>) {
     let dbg = std::env::var_os("MIRVM_JIT_DEBUG").is_some();
-    let mut c = Compiler::new(shared);
+    let mut c = Compiler::new(&shared);
     while let Ok(func) = rx.recv() {
         if shared.jit.stopping.load(Ordering::Acquire) {
             break;
@@ -115,8 +94,8 @@ fn worker(shared: &'static Shared, rx: Receiver<u32>) {
 
 /// c2i 万能壳：编译码调未编译 guest 函数（经蹦床打包）→ 回解释器。
 /// ctx 恢复 = 边界 TLS attach（thunk 工厂同款，幂等）。
-struct Compiler {
-    shared: &'static Shared,
+struct Compiler<'a> {
+    shared: &'a Shared,
     module: JITModule,
     fbc: FunctionBuilderContext,
     c2i: ClifFuncId,
@@ -148,12 +127,14 @@ struct Compiler {
     /// T1-d：SIMD/宽 stmt 与 SIMD rvalue 三件的统一助手（interp simd_exec 共享本体）
     simd_stmt: ClifFuncId,
     simd_rv: ClifFuncId,
+    /// Checks stack headroom before a compiled body allocates its frame.
+    stack_guard: ClifFuncId,
     /// 本批 (clif id, unwind info, try_call 函数的 LSDA 字节)——finalize 后统一注册
     pending_unwind: Vec<(ClifFuncId, UnwindInfo, Option<Vec<u8>>)>,
 }
 
-impl Compiler {
-    fn new(shared: &'static Shared) -> Self {
+impl<'a> Compiler<'a> {
+    fn new(shared: &'a Shared) -> Self {
         // T3（M5.5）：MIRVM_JIT_STATS=1 时开启助手频度统计（进程级一次）
         stat_init();
         let mut fb = settings::builder();
@@ -184,6 +165,7 @@ impl Compiler {
         jb.symbol("mirvm_call_foreign", mirvm_call_foreign as *const u8);
         jb.symbol("mirvm_call_builtin", mirvm_call_builtin as *const u8);
         jb.symbol("mirvm_alloc", mirvm_alloc as *const u8);
+        jb.symbol("mirvm_jit_stack_guard", mirvm_jit_stack_guard as *const u8);
         // M5.4b-3 助手注册表
         jb.symbol("mirvm_bin128_ovf", mirvm_bin128_ovf as *const u8);
         jb.symbol("mirvm_bin128_divrem", mirvm_bin128_divrem as *const u8);
@@ -347,6 +329,12 @@ impl Compiler {
         let simd_rv = module
             .declare_function("mirvm_simd_rv", Linkage::Import, &sig_sr)
             .unwrap();
+        let mut sig_sg = module.make_signature();
+        sig_sg.params.push(AbiParam::new(types::I64));
+        sig_sg.params.push(AbiParam::new(types::I64));
+        let stack_guard = module
+            .declare_function("mirvm_jit_stack_guard", Linkage::Import, &sig_sg)
+            .unwrap();
 
         Compiler {
             shared,
@@ -371,6 +359,7 @@ impl Compiler {
             trap,
             simd_stmt,
             simd_rv,
+            stack_guard,
             pending_unwind: Vec::new(),
         }
     }
@@ -438,7 +427,11 @@ impl Compiler {
             self.strict_fail(func);
             return;
         };
-        let Some(packed_id) = self.define_packed(func, body, abi, fast_id) else {
+        let Some(guarded_id) = self.define_guarded_fast(func, body, abi, fast_id) else {
+            self.strict_fail(func);
+            return;
+        };
+        let Some(packed_id) = self.define_packed(func, body, abi, guarded_id) else {
             self.strict_fail(func);
             return;
         };
@@ -448,11 +441,63 @@ impl Compiler {
         }
         self.register_pending_eh_frames();
 
-        let fast = self.module.get_finalized_function(fast_id) as u64;
+        let fast = self.module.get_finalized_function(guarded_id) as u64;
         let packed = self.module.get_finalized_function(packed_id) as u64;
         // 发布序：先 fast（自递归/他人调我）后 packed（interp 才可能进入编译码）
         jit.slots_fast[func as usize].store(fast, Ordering::Release);
         jit.slots[func as usize].store(packed, Ordering::Release);
+    }
+
+    /// Published fast entry. Keeping the check in a separate slot-free
+    /// function is important: putting it in `define_fast` would run only after
+    /// Cranelift's prologue had already moved the native stack pointer.
+    fn define_guarded_fast(
+        &mut self,
+        func: u32,
+        body: &ir::FuncBody,
+        abi: CalleeAbi,
+        fast: ClifFuncId,
+    ) -> Option<ClifFuncId> {
+        let sig = self.fast_sig(abi);
+        let id = self
+            .module
+            .declare_function(&format!("g{func}"), Linkage::Local, &sig)
+            .ok()?;
+        let mut cctx = self.module.make_context();
+        cctx.func.signature = sig;
+        {
+            let mut b = FunctionBuilder::new(&mut cctx.func, &mut self.fbc);
+            let entry = b.create_block();
+            b.append_block_params_for_function_params(entry);
+            b.switch_to_block(entry);
+            let params = b.block_params(entry).to_vec();
+            let guard = self.module.declare_func_in_func(self.stack_guard, b.func);
+            let fv = b.ins().iconst(types::I64, func as i64);
+            let explicit = u64::from(body.frame_size)
+                .saturating_add(u64::from(body.frame_align.saturating_sub(16)));
+            let frame = b.ins().iconst(types::I64, explicit as i64);
+            b.ins().call(guard, &[fv, frame]);
+            let target = self.module.declare_func_in_func(fast, b.func);
+            let call = b.ins().call(target, &params);
+            let results = b.inst_results(call).to_vec();
+            b.ins().return_(&results);
+            b.seal_all_blocks();
+            b.finalize();
+        }
+        if let Err(e) = self.module.define_function(id, &mut cctx) {
+            if std::env::var_os("MIRVM_JIT_DEBUG").is_some() {
+                eprintln!("mirvm-jit-debug: guarded entry define failed: {e:#?}");
+            }
+            return None;
+        }
+        if let Some(ui) = cctx
+            .compiled_code()
+            .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten())
+        {
+            self.pending_unwind.push((id, ui, None));
+        }
+        self.module.clear_context(&mut cctx);
+        Some(id)
     }
 
     /// strict 验证模式（MIRVM_JIT_SYNC，audit F-05）：可准入函数编译失败 =

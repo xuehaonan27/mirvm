@@ -7,7 +7,7 @@ use super::frame::FrameMap;
 use super::*;
 
 pub(super) struct Translator<'a, 'b> {
-    pub(super) shared: &'static Shared,
+    pub(super) shared: &'a Shared,
     pub(super) module: &'a mut JITModule,
     pub(super) b: &'a mut FunctionBuilder<'b>,
     pub(super) vars: std::collections::HashMap<u32, Variable>,
@@ -1361,7 +1361,7 @@ impl Translator<'_, '_> {
                 self.b.ins().call(fref, &[sp, pa, pb, z, pd, z, z]);
             }
             // T1-d：Trap/Nop（语句级 Trap = mirvm_jit_trap stmt 形，interp
-            // engine_abort 同文案同 exit(70)；call 后补 trap 保底——助手不返回）
+            // engine_abort 同文案同错误码 70；call 后补 trap 保底——助手不返回）
             Stmt::Trap(reason) => {
                 let fref = self.module.declare_func_in_func(self.trap, self.b.func);
                 let p = self.b.ins().iconst(types::I64, reason.as_ptr() as i64);
@@ -2927,7 +2927,7 @@ impl Translator<'_, '_> {
                 self.b.ins().trap(TrapCode::user(1).unwrap());
             }
             // T1-d：Trap-stub 终止子（mirvm_jit_trap 终止子形带 fn 名，interp
-            // runblocks 臂同文案同 exit(70)）
+            // runblocks 臂同文案同错误码 70）
             Terminator::Trap(reason) => {
                 let fref = self.module.declare_func_in_func(self.trap, self.b.func);
                 let p = self.b.ins().iconst(types::I64, reason.as_ptr() as i64);

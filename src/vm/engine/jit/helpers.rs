@@ -2,10 +2,53 @@
 //! unreachable/div_zero/volatile + 128/f128/f16 宿主直算 21 件 + libm
 //! 符号表。JIT 码经 import symbol 调回引擎；注册点 = compiler.rs。
 
-use super::compiler::SHARED;
 use super::*;
+
+fn active() -> (*mut crate::vm::engine::ctx::Ctx, &'static Shared) {
+    let ctx = crate::vm::engine::ctx::current();
+    (ctx, unsafe { &*(*ctx).shared })
+}
+
+fn active_shared() -> &'static Shared {
+    active().1
+}
+
+/// Called by the published fast-entry wrapper before entering a compiled body.
+/// The wrapper has no explicit stack slots, so this check runs before the
+/// body's Cranelift prologue reserves its guest frame.
+pub extern "C-unwind" fn mirvm_jit_stack_guard(func: u64, frame_bytes: u64) {
+    let (ctx, shared) = active();
+    let floor = unsafe { (*ctx).stack_floor };
+    if floor == 0 {
+        return;
+    }
+    let marker = 0u8;
+    let sp = &marker as *const u8 as usize;
+    // Keep room for backend spills and the diagnostic path itself in addition
+    // to the explicit guest frame represented in the bytecode.
+    let need = (frame_bytes as usize).saturating_add(256 << 10);
+    if sp <= floor.saturating_add(need) {
+        let name = shared
+            .module
+            .funcs
+            .get(func as usize)
+            .map(|body| &*body.name)
+            .unwrap_or("<unknown>");
+        crate::vm::engine::interp::engine_abort(&format!(
+            "guest 栈溢出（JIT 编译帧进入前触及安全边距；fn {name}）"
+        ));
+    }
+}
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64};
+
+fn terminate_or_resume_engine_fault(e: Box<dyn std::any::Any + Send>) -> ! {
+    if e.is::<crate::vm::engine::interp::EngineFault>() {
+        std::panic::resume_unwind(e);
+    }
+    eprintln!("mirvm[m4-engine]: unwind 抵达 Terminate 边界（double panic/ABI）——abort");
+    std::process::abort()
+}
 
 // ===== T3（M5.5 D5）助手频度统计：vmctx 终裁复测的格③对照基线 =====
 // MIRVM_JIT_STATS=1 时每个助手入口一次 fetch_add(Relaxed)，进程退出经
@@ -82,8 +125,7 @@ pub(super) fn stat_init() {
 
 pub(super) extern "C-unwind" fn mirvm_c2i(func: u64, args: *const u64, n: u64, ret: *mut u64) {
     stat(S_C2I);
-    let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
-    let ctx = crate::vm::engine::ctx::attach(shared);
+    let (ctx, _shared) = active();
     let a = unsafe { std::slice::from_raw_parts(args, n as usize) };
     let (lo, hi) = crate::vm::engine::interp::call_guest(ctx, func as u32, a);
     unsafe {
@@ -109,8 +151,7 @@ pub(super) extern "C-unwind" fn mirvm_call_terminate(
     ret: *mut u64,
 ) {
     stat(S_CTERM);
-    let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
-    let ctx = crate::vm::engine::ctx::attach(shared);
+    let (ctx, _shared) = active();
     let f = || {
         let a = unsafe { std::slice::from_raw_parts(args, n as usize) };
         crate::vm::engine::interp::call_guest(ctx, callee as u32, a)
@@ -120,10 +161,7 @@ pub(super) extern "C-unwind" fn mirvm_call_terminate(
             *ret = lo;
             *ret.add(1) = hi;
         },
-        Err(_) => {
-            eprintln!("mirvm[m4-engine]: unwind 抵达 Terminate 边界（double panic/ABI）——abort");
-            std::process::abort()
-        }
+        Err(e) => terminate_or_resume_engine_fault(e),
     }
 }
 
@@ -150,17 +188,11 @@ pub(super) extern "C-unwind" fn mirvm_call_indirect(
             mirvm_call_indirect(addr, args, n, ret, null_ok, native_sig, caller, 0)
         })) {
             Ok(()) => {}
-            Err(_) => {
-                eprintln!(
-                    "mirvm[m4-engine]: unwind 抵达 Terminate 边界（double panic/ABI）——abort"
-                );
-                std::process::abort()
-            }
+            Err(e) => terminate_or_resume_engine_fault(e),
         }
         return;
     }
-    let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
-    let ctx = crate::vm::engine::ctx::attach(shared);
+    let (ctx, shared) = active();
     let module = &shared.module;
     if null_ok != 0 && addr == 0 {
         return; // dyn 虚 drop 空槽：空操作（interp 同）
@@ -201,8 +233,7 @@ pub(super) extern "C-unwind" fn mirvm_call_indirect(
 /// T1-b TlsRef 助手（同本体 interp::tls_addr 的惰性物化——每线程实例块）。
 pub(super) extern "C-unwind" fn mirvm_tls_ref(id: u64) -> u64 {
     stat(S_TLS);
-    let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
-    let ctx = crate::vm::engine::ctx::attach(shared);
+    let (ctx, _shared) = active();
     crate::vm::engine::interp::tls_addr(ctx, id as u32)
 }
 
@@ -226,16 +257,10 @@ pub(super) extern "C-unwind" fn mirvm_call_foreign(
             mirvm_call_foreign(sym_ptr, sym_len, sig, args, n, ret_dst, caller, 0)
         })) {
             Ok(r) => r,
-            Err(_) => {
-                eprintln!(
-                    "mirvm[m4-engine]: unwind 抵达 Terminate 边界（double panic/ABI）——abort"
-                );
-                std::process::abort()
-            }
+            Err(e) => terminate_or_resume_engine_fault(e),
         };
     }
-    let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
-    let ctx = crate::vm::engine::ctx::attach(shared);
+    let (ctx, shared) = active();
     let module = &shared.module;
     let sym = unsafe {
         std::str::from_utf8_unchecked(std::slice::from_raw_parts(sym_ptr, sym_len as usize))
@@ -259,15 +284,7 @@ pub(super) extern "C-unwind" fn mirvm_call_foreign(
     let stack_restore = crate::vm::engine::ffi::amplify_pthread_stack(sym, &av);
     let r = {
         let ffi = unsafe { &mut (*ctx).ffi };
-        crate::vm::engine::ffi::call(
-            ffi,
-            &module.native_libs,
-            &module.required_native_libs,
-            sym,
-            sig,
-            &av,
-            ret_dst,
-        )
+        crate::vm::engine::ffi::call(ffi, module, sym, sig, &av, ret_dst)
     };
     if let Some((attr, orig)) = stack_restore {
         crate::os::thread::attr_set_stack_size(attr, orig);
@@ -305,17 +322,11 @@ pub(super) extern "C-unwind" fn mirvm_call_builtin(
             mirvm_call_builtin(builtin, args, n, ret_dst, caller, ret, 0)
         })) {
             Ok(()) => {}
-            Err(_) => {
-                eprintln!(
-                    "mirvm[m4-engine]: unwind 抵达 Terminate 边界（double panic/ABI）——abort"
-                );
-                std::process::abort()
-            }
+            Err(e) => terminate_or_resume_engine_fault(e),
         }
         return;
     }
-    let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
-    let ctx = crate::vm::engine::ctx::attach(shared);
+    let (ctx, shared) = active();
     let av = unsafe { std::slice::from_raw_parts(args, n as usize) };
     let (lo, hi) = crate::vm::engine::interp::exec_builtin(
         ctx,
@@ -345,8 +356,7 @@ pub(super) extern "C-unwind" fn mirvm_alloc(
     caller: u64,
 ) -> u64 {
     stat(S_ALLOC);
-    let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
-    let ctx = crate::vm::engine::ctx::attach(shared);
+    let (ctx, shared) = active();
     let builtin = match tag {
         0 => ir::Builtin::RustAlloc,
         1 => ir::Builtin::RustAllocZeroed,
@@ -371,25 +381,23 @@ unsafe extern "C" {
     pub fn _Unwind_Resume(ex: *mut u8) -> !;
 }
 
-/// Unreachable 终止子的诊断与解释器逐字节同口径（`mirvm[m4-engine]` 前缀 +
-/// exit(70)，不用裸 trap 的 SIGILL，也不用 abort 的 134——134 是
-/// TerminateAbort 的专用通道，两通道勿混）。
+/// Unreachable 终止子的诊断与解释器逐字节同口径。引擎错误退回执行边界，
+/// CLI 映射为 70；不用裸 trap 的 SIGILL，也不用 TerminateAbort 的 134。
 pub(super) extern "C-unwind" fn mirvm_jit_unreachable(func: u64) -> ! {
-    let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
+    let shared = active_shared();
     let name = shared
         .module
         .funcs
         .get(func as usize)
         .map(|f| &*f.name)
         .unwrap_or("?");
-    eprintln!("mirvm[m4-engine]: 到达 Unreachable（fn {name}）");
-    std::process::exit(70);
+    crate::vm::engine::interp::engine_abort(&format!("到达 Unreachable（fn {name}）"));
 }
 
 /// Trap 占位（T1-d：语句级/终止子同口）——诊断与退出码逐字节对齐 interp
 /// engine_abort：stmt 形 `TRAP: {reason}`；终止子形 `TRAP: {reason}（fn name）`
-/// （func == u64::MAX 为 stmt 形标记）。exit(70)，不是 abort（TerminateAbort
-/// 才是 134，两通道勿混）。
+/// （func == u64::MAX 为 stmt 形标记）。引擎错误退回执行边界，CLI 映射为 70；
+/// TerminateAbort 仍保持语义要求的 abort。
 pub(super) extern "C-unwind" fn mirvm_jit_trap(reason_ptr: u64, reason_len: u64, func: u64) -> ! {
     let reason = unsafe {
         std::str::from_utf8_unchecked(std::slice::from_raw_parts(
@@ -398,18 +406,17 @@ pub(super) extern "C-unwind" fn mirvm_jit_trap(reason_ptr: u64, reason_len: u64,
         ))
     };
     if func == u64::MAX {
-        eprintln!("mirvm[m4-engine]: TRAP: {reason}");
+        crate::vm::engine::interp::engine_abort(&format!("TRAP: {reason}"));
     } else {
-        let shared = unsafe { &*SHARED.load(Ordering::Acquire) };
+        let shared = active_shared();
         let name = shared
             .module
             .funcs
             .get(func as usize)
             .map(|f| &*f.name)
             .unwrap_or("?");
-        eprintln!("mirvm[m4-engine]: TRAP: {reason}（fn {name}）");
+        crate::vm::engine::interp::engine_abort(&format!("TRAP: {reason}（fn {name}）"));
     }
-    std::process::exit(70);
 }
 
 // ===== M5.4b 助手（与 interp 共享实现本体，不复制逻辑）=====
@@ -422,8 +429,7 @@ pub(super) extern "C-unwind" fn mirvm_jit_div_zero(kind: u64) -> ! {
         2 => "guest 128 位整除以零",
         _ => "guest 128 位取余以零",
     };
-    eprintln!("mirvm[m4-engine]: {what}");
-    std::process::exit(70);
+    crate::vm::engine::interp::engine_abort(what);
 }
 
 /// volatile 读（M5.4b-1）：走 interp 的 opaque 字节载体 + 分块分解同一实现。

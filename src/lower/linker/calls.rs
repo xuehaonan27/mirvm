@@ -72,7 +72,7 @@ impl<'tcx> Linker<'tcx> {
         if self.tcx.is_foreign_item(inst.def_id()) {
             let link_name = Symbol::intern(canonical_link_name(self.tcx.symbol_name(inst).name));
             // ①引擎原语（alloc/unwind/stub/快路径直通）
-            if let Some(&b) = self.builtins.get(&link_name) {
+            if let Some(b) = self.builtins.get(&link_name).cloned() {
                 return Ok(Callee::Builtin(b));
             }
             // ②链接仿真：按符号名在已链接 crate 的导出定义里找（tier-0

@@ -1,8 +1,8 @@
 # 产品能力补全计划
 
 > 状态：**P1 主链已完成；P2 的 resolver 3 / rust-version、Git 依赖、替代
-> registry/Cargo 配置、source replacement/patch/replace 与 pack self 五批均已完成
-> （2026-08-10），P2 总验收待做**。
+> registry/Cargo 配置、source replacement/patch/replace 与 pack self 五批及 full
+> corpus 总验收均已完成（2026-08-10，138 PASS / 1 SKIP / 0 FAIL）**。
 > 本文把当前明确缺失的产品
 > 能力合并成一条可执行路线；现状仍以 [current-status.md](../current-status.md) 为准，
 > 单项债务仍以 [open-issues.md](../open-issues.md) 为唯一登记入口。
@@ -128,12 +128,20 @@ package 选择和特性统一均在依赖机制内实现，没有命令层特判
      locked/offline、篡改拒绝和双版本共存。
    - 只建设解析、获取、离线复跑所需的最小内容存储；完整 env/GC 等到真实数据产生
      无法由现有 purge 处理的问题时再立项。
+   - 完成结果（2026-08-10）：第一轮 7 个 RED 逐项分诊并修复同源多版本 lock 边覆盖；
+     外部超时/瞬态错误定点复核，`miden_prove` 迁到非 yanked 的 0.25.8 并摘除 P5。
+     第二轮 full corpus **138 pass / 1 skip / 0 expected-fail / 0 fail**；唯一 SKIP 是
+     本机缺 `libffi.so` 开发链接名。最终非性能 `fast` **12/12**。
 
 P2 闭合后再评审 D17 余项，建议顺序为：根 proc-macro 测试、bench、workspace
 lints/复杂 package ID 与成员 glob、旧项目需要的 resolver 1。doctest 必须作为 rustdoc
 前端专项处理代码块提取、临时 crate、行号和 compile-fail，不并入普通 test harness。
 
 ### P3：OS 级沙箱与资源治理
+
+**进展（2026-08-10）**：VM 内第一层防护已补上操作数区双端 guard page 和 JIT
+入帧前栈检查。这只把越界与栈耗尽变成较清楚的失败，不能阻止任意 syscall、native
+FFI 或宿主进程级故障，因此不改变本阶段尚未完成的判断。
 
 **用户结果**：执行不受信任代码时，有默认安全边界和明确的 CPU、内存、进程、文件、
 网络限额；超限由宿主报告，不拖垮调用进程。
@@ -150,6 +158,12 @@ lints/复杂 package ID 与成员 glob、旧项目需要的 resolver 1。doctest
 对应欠账：D10、E23；不推翻已冻结的“VM 内虚拟地址隔离不是正式沙箱”结论。
 
 ### P4：稳定嵌入 API 与常驻服务
+
+**进展（2026-08-10）**：多 Engine 的内部身份和核心所有权已落地。Engine 各自持有
+Shared/JIT worker，线程执行态按 Engine id 隔离并支持嵌套恢复；引擎故障通过
+`RunError` 返回，guest TLS 与退出回调残留会清理，rustc 编译会话也已串行保护。
+仍缺公开稳定 API、native 回调撤销、JIT 活动码回收、长寿命宿主线程 TSD 回收及
+进程级故障隔离，所以不能把内部基础完成写成 P4 完成。
 
 **用户结果**：调用方可以在一个进程或服务中反复创建、运行和销毁 Engine，错误通过
 返回值传播，不直接退出宿主进程。
@@ -191,7 +205,8 @@ lints/复杂 package ID 与成员 glob、旧项目需要的 resolver 1。doctest
 
 - P1 与 P2 五个施工批次已完成；P2 还需跑总 corpus 验收并据实清理剩余 P5 分类。
 - P3 是任何“不受信任代码执行”产品声明的硬前置。
-- P4 是 daemon、agent API 和 REPL 的硬前置。
+- P4 核心内部基础已开始，但稳定公开 API 与剩余生命周期边界仍是 daemon、agent API
+  和 REPL 的硬前置。
 - P5 必须遵守“D3 先于 D4”；P6 的 fat artifact 依赖 P5 的 target 索引。
 - D16 性能战役可穿插，但不得用性能工作代替上述产品完成条件。
 
@@ -199,9 +214,9 @@ lints/复杂 package ID 与成员 glob、旧项目需要的 resolver 1。doctest
 
 ## 4. 当前施工队列与禁止提前项（2026-08-10）
 
-当前唯一产品主队列是：
+当前产品主队列是：
 
-`P2 总验收 → D17 余项复评 → OS 级沙箱与资源治理`
+`D17 余项复评 → OS 级沙箱与资源治理 → P4 稳定嵌入 API → D3 零拷贝装载`
 
 随后依次进入 OS 沙箱、稳定嵌入 API、D3 零拷贝后包格式冻结、跨平台。D16 性能线必须
 先 profile；只有实测命中才可穿插 JIT 机器码持久化，不能打断上述产品闭合。

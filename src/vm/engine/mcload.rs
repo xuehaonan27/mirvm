@@ -11,7 +11,9 @@
 
 use std::collections::HashMap;
 
-/// 装载完成的 MC 镜像（随进程生命周期——与 dlopen 句柄同一纪律，不卸）。
+/// 装载完成的 MC 镜像。符号只对持有它的 Module 可见；映射与 unwind 注册仍因
+/// 外部代码指针可能存活而不卸载。
+#[derive(Debug)]
 pub struct McImage {
     base: usize,
     #[allow(dead_code)] // 诊断面保留（调试打印用）
@@ -20,26 +22,12 @@ pub struct McImage {
     pub symbols: HashMap<Box<str>, u64>,
 }
 
-/// MC 注册表条目：(镜像基址, 符号表)。
-type McEntry = (u64, HashMap<Box<str>, u64>);
-
-/// 进程级 MC 符号注册表（(基址, 符号表) 序 = 装载序，与 required_native_libs
-/// 链接序同构）。resolve 的 ① 位在其上按序查。
-static MC_REGISTRY: std::sync::RwLock<Vec<McEntry>> = std::sync::RwLock::new(Vec::new());
-
-/// 注册镜像（装载序追加；永不移除——与 dlopen 句柄同生命周期纪律）。
-pub fn register(img: McImage) {
-    let mut reg = MC_REGISTRY.write().unwrap();
-    let bias = img.base as u64;
-    reg.push((bias, img.symbols));
-}
-
-/// MC 符号解析（① 位语义：先于全域）。None = 全部 MC 镜像都没有该符号。
-pub fn resolve(name: &str) -> Option<usize> {
-    let reg = MC_REGISTRY.read().unwrap();
-    for (bias, syms) in reg.iter() {
-        if let Some(&v) = syms.get(name) {
-            return Some((bias + v) as usize);
+/// MC 符号解析（① 位语义：先于全域）。镜像列表来自当前 Module，不能跨 Engine
+/// 搜索，否则两个包里的同名 global_asm 会互相串线。
+pub fn resolve(images: &[McImage], name: &str) -> Option<usize> {
+    for image in images {
+        if let Some(&v) = image.symbols.get(name) {
+            return Some((image.base as u64 + v) as usize);
         }
     }
     None
@@ -392,4 +380,30 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
         size,
         symbols,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn symbol_lookup_is_scoped_to_the_supplied_images() {
+        let image = |base, value| McImage {
+            base,
+            size: 0x1000,
+            symbols: HashMap::from([(Box::<str>::from("same_symbol"), value)]),
+        };
+        let first = image(0x1000, 0x20);
+        let second = image(0x4000, 0x80);
+
+        assert_eq!(
+            resolve(std::slice::from_ref(&first), "same_symbol"),
+            Some(0x1020)
+        );
+        assert_eq!(
+            resolve(std::slice::from_ref(&second), "same_symbol"),
+            Some(0x4080)
+        );
+        assert_eq!(resolve(&[], "same_symbol"), None);
+    }
 }

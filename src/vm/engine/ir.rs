@@ -941,29 +941,15 @@ pub enum UnwindAction {
     Terminate,
 }
 
-/// `&'static str` 的 Copy 载体（M6 片2）：裸 `&str` 字段会让 serde 给容器推导
-/// `'de: 'static` 借用约束；newtype + 手动 serde 隔断推导。反序列化 leak 一份——
-/// Unsupported 变体每模块有界、模块本身经 Box::leak 进程级共享（Shared::new 同风格）。
-#[derive(Clone, Copy, Debug)]
-pub struct StaticStr(pub &'static str);
-
-impl serde::Serialize for StaticStr {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(self.0)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for StaticStr {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let s: String = serde::Deserialize::deserialize(d)?;
-        Ok(StaticStr(Box::leak(s.into_boxed_str())))
-    }
-}
+/// Unsupported builtin 的自有名字。旧实现反序列化后泄漏 `&'static str`；Engine
+/// 现在有真实生命周期，因此名字也随 Module 一起释放。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct StaticStr(pub Box<str>);
 
 /// 引擎原语（foreign 三路处置①，debt-map §2-B）：std 自己声明的 runtime extern 边界，
 /// native 下由 codegen/链接器合成 shim——引擎在同一边界接管。
 /// alloc 系的引擎实现是 M4.1 第 5 步（堆内建）；落地前 lower 前置 `Stmt::Trap` 防静默。
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Builtin {
     /// `__rust_alloc(size, align) -> ptr`
     RustAlloc,
@@ -1464,6 +1450,10 @@ pub struct Module {
     /// 已由加载相物化、执行 foreign 前必须成功 dlopen 的共享库（当前为 M5.1 Static
     /// archive `.a → .so` 产物）。失败不可退化为普通 dlsym miss。
     pub required_native_libs: Vec<Box<str>>,
+    /// 当前包自装载的机器码镜像。只对本 Module 的 foreign 解析可见，避免多
+    /// Engine 同名 global_asm 串线；不进序列化，pack 加载时由 MC 节重建。
+    #[serde(skip)]
+    pub mc_images: Vec<super::mcload::McImage>,
     /// guest TLS 槽表（M4.4 D3：TlsId → 模板/尺寸；每线程实例在 Ctx.tls）
     pub tls: Vec<TlsSlot>,
     /// asm-stub wrapper 真地址（M5.0）：AsmStubId → `fn(*mut u8)` 机器地址（加载相

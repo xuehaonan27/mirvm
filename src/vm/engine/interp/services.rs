@@ -1,7 +1,6 @@
 //! 运行期服务三族（自 interp.rs I10-I12 整搬）：signal_thunk（D8d async
 //! 信号 AS-trampoline）/ backtrace 影子帧（D8e 合成 IP，诚实 <unknown>）/
-//! atexit 家族（D8g 注册表 + LIFO 回调执行）。AtomicU64Ptr/ATEXIT 私有
-//! 静态随族走；pub(super) 面供 runblocks/mod.rs。
+//! atexit 家族（D8g，每 Engine 注册表 + LIFO 回调执行）。
 
 use super::call::call_fn_addr;
 use super::*;
@@ -83,64 +82,65 @@ pub(super) struct AtexitEntry {
     kind: AtexitKind,
     arg: u64,
 }
-pub(super) static ATEXIT: Mutex<Vec<AtexitEntry>> = Mutex::new(Vec::new());
-pub(super) static ATEXIT_SHARED: AtomicU64Ptr = AtomicU64Ptr::new();
+static ATEXIT: std::sync::LazyLock<Mutex<std::collections::HashMap<usize, Vec<AtexitEntry>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
-/// 进程期 Shared 的裸指针存放（trampoline 在无 Ctx 的退出线程上找回引擎）。
-pub(super) struct AtomicU64Ptr(std::sync::atomic::AtomicUsize);
-impl AtomicU64Ptr {
-    const fn new() -> Self {
-        Self(std::sync::atomic::AtomicUsize::new(0))
-    }
-    pub(super) fn set(&self, p: *const Shared) {
-        self.0
-            .store(p as usize, std::sync::atomic::Ordering::SeqCst);
-    }
-    pub(super) fn get(&self) -> *const Shared {
-        self.0.load(std::sync::atomic::Ordering::SeqCst) as *const Shared
-    }
+pub(super) fn discard_atexit_callbacks(engine_id: u64) {
+    ATEXIT.lock().unwrap().remove(&(engine_id as usize));
 }
 
-pub(super) fn atexit_register(func: u64, kind: AtexitKind, arg: u64) -> u64 {
+#[cfg(test)]
+pub(super) fn seed_atexit_callback(engine_id: u64) {
+    ATEXIT
+        .lock()
+        .unwrap()
+        .entry(engine_id as usize)
+        .or_default()
+        .push(AtexitEntry {
+            func: 0,
+            kind: AtexitKind::Plain,
+            arg: 0,
+        });
+}
+
+#[cfg(test)]
+pub(super) fn has_atexit_callbacks(engine_id: u64) -> bool {
+    ATEXIT.lock().unwrap().contains_key(&(engine_id as usize))
+}
+
+pub(super) fn atexit_register(ctx: *mut Ctx, func: u64, kind: AtexitKind, arg: u64) -> u64 {
     // fn 必须是已知 guest 条目（非 guest 回调不接——防静默）
-    let shared = ATEXIT_SHARED.get();
-    if shared.is_null() {
-        engine_abort("atexit 在 Shared 发布前调用（引擎不变量）");
-    }
-    let module: &Module = unsafe { &(*shared).module };
+    let shared = unsafe { &*(*ctx).shared };
+    let module: &Module = &shared.module;
     if !module.fn_addrs.contains_key(&func) {
         engine_abort(&format!("atexit 回调 {func:#x} 不是已知 guest fn 条目"));
     }
     let mut reg = ATEXIT.lock().unwrap();
-    if reg.is_empty() {
-        // 首注册：挂 native trampoline（引擎链接的 libc atexit，非 guest dlsym）
-        crate::os::process::atexit_native(run_atexit_callbacks);
-    }
-    reg.push(AtexitEntry { func, kind, arg });
+    reg.entry(shared.id as usize)
+        .or_default()
+        .push(AtexitEntry { func, kind, arg });
     0
 }
 
-/// libc 在进程收尾（主线程）调用：LIFO 解释执行 guest 回调。
-extern "C" fn run_atexit_callbacks() {
-    let shared = ATEXIT_SHARED.get();
-    if shared.is_null() {
-        return;
-    }
-    // fresh Ctx（退出线程可能非 guest 执行线程；attach 幂等）
-    let ctx = crate::vm::engine::ctx::attach(unsafe { &*shared });
+/// 本 Engine 的虚拟进程收尾：LIFO 解释执行自己的 guest 回调。
+pub(super) fn run_atexit_callbacks(ctx: *mut Ctx, status: i32) {
+    let shared = unsafe { &*(*ctx).shared };
+    let key = shared.id as usize;
     // LIFO：后注册先执行（C 语义）
     loop {
         let entry = {
             let mut reg = ATEXIT.lock().unwrap();
-            match reg.pop() {
-                Some(e) => e,
-                None => break,
+            let entry = reg.get_mut(&key).and_then(Vec::pop);
+            if reg.get(&key).is_some_and(Vec::is_empty) {
+                reg.remove(&key);
             }
+            entry
         };
+        let Some(entry) = entry else { break };
         let args: &[u64] = match entry.kind {
             AtexitKind::Plain => &[],
             AtexitKind::CxaArg => &[entry.arg],
-            AtexitKind::OnExit => &[0, entry.arg],
+            AtexitKind::OnExit => &[status as u64, entry.arg],
         };
         // guest 回调 panic 穿到 C 退出路径 = abort（与 native 一致）
         let _ = call_fn_addr(ctx, entry.func, args, "atexit");

@@ -1856,6 +1856,75 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
 - **下一步**：按用户裁定不恢复、不运行性能基线；先做 P2 总 corpus 验收，据结果更新
   剩余 P5 分类，再评审 D17 余项。
 
+### 7.42 2026-08-10：E 批第一轮——多 Engine、验证器与故障边界
+
+- **Cargo 双轨边界先收口**：Cargo compat 现在把调用者目录通过内部协议交给 guest，
+  编译仍在项目目录进行，因此 `--manifest-path` 从别处启动时与 Cargo 的运行目录一致；
+  `MIRVM_ENCODED_RUSTFLAGS_APPEND` 的内容进入独立 target 分区，改值不会复用旧产物。
+  rustc 所需构建环境与 guest 运行环境分开保存和恢复。`differential.cargo` 8/8，覆盖
+  异目录运行、暖缓存运行环境变化和追加 rustflags 变化。
+- **多 Engine 触发器已经命中，选择 T**：旧设计的进程级 `SHARED` 单例无法表示同一
+  进程里的两个 Engine。选择 T，即按当前宿主线程记录“正在运行哪个 Engine”；每个
+  Engine 以 `Arc<Shared>` 持有程序，线程表按 Engine id 保存独立 `Ctx`，嵌套进入会在
+  返回时恢复外层。保留寄存器方案 R 只能缓存一个已经选定的 ctx，不能回答“当前是哪
+  个 Engine”，所以不是这次身份问题的解法；它只保留为 E6 性能触发后的候选优化。
+- **所有权与失败返回**：JIT worker、发布槽、fork 基线和 guest `atexit` 登记按 Engine
+  隔离；Engine 析构会停止并等待自己的 worker、注销入口并清理未执行的退出回调。
+  每线程 `Ctx` 持有 Shared，最终析构时释放 guest TLS 实例。反序列化后的 builtin 名称
+  改为 `Box<str>` 随 Module 回收，不再泄漏成 `'static`。机器码符号表也从进程全局表
+  移到各 Module：foreign 解析只搜索当前模块的镜像，同名 `global_asm` 不会跨 Engine
+  串用。rustc driver 的全局诊断状态由编译会话锁保护。引擎产生的 Trap、非法调用、
+  栈耗尽和 JIT 错误不再在库路径直接 `exit`，而是退到 `run_main`/`run_export`，以
+  `RunError` 返回消息和退出码；真正的 guest panic、Terminate double-panic 和宿主自身
+  panic 仍按各自 Rust 语义处理。
+- **字节码验证器 E20 完成**：新增穷尽匹配的验证 pass，检查函数/TLS/asm/块引用、
+  frame 和 slot 范围、SIMD 形状、inline asm 缓冲、GOT/frozen 地址及 FFI 布局。pack
+  写入、pack/基础镜像/依赖镜像/L2 读取和最终合并执行前都验证；坏缓存按 miss 处理，
+  外来包或镜像在产生 native 副作用前拒绝。
+- **栈与内存第一层保护**：操作数区现在两端各有一页 `PROT_NONE` guard。每个已发布
+  JIT 函数先进入无 frame 的 guard wrapper，在 Cranelift prologue 真正扣大栈帧前按
+  `MIRVM_STACK_SIZE` 检查并返回可诊断的错误；深递归回归要求退出码 70 和函数名，
+  不再接受裸 SIGSEGV。guest TLS 实例也在 Ctx 析构时回收，因此 E10、E11 可闭合部分、
+  E20、E25、E36 关闭。
+- **checked 模式重新划界**：L1 guard 已完成，但 L3 checked 不能用“地址当前已映射”
+  冒充。现有 `PlaceStep::Deref` 已抹掉 raw pointer、引用和所有者来源；合法地址又可能
+  来自 frame、frozen、mimalloc、用户 allocator、FFI、mmap 或 libc。只查映射会把 VM
+  元数据也误判合法，要求用户登记地址则把正确性负担转嫁给使用者。后续必须让 IR 保留
+  指针来源并由运行时自动维护所有权范围，或直接使用 P3 worker 的 OS 隔离；此前 E23
+  只关闭 L1，不宣称 checked 或沙箱完成。
+- **仍未宣称 E22 全闭合**：libffi closure 必须保持代码地址有效，native 已保存的回调
+  目前无法主动撤销；JIT 与自装载 MC 镜像也因活动代码指针不能安全卸载，当前只把
+  符号可见范围收回 Module。长期宿主线程直接执行 Engine 时的 TSD 释放边界、稳定公开
+  嵌入 API、动态库/回调注册撤销和进程级隔离仍需后续工作。当前单测覆盖双 Engine
+  ctx、嵌套恢复、析构注销、模块内 MC 符号隔离和引擎错误返回；
+  `runtime.semantics` 的 pure/digest/unwind/threads（含 TSan 与小栈 JIT）已通过本轮定向回归。
+
+### 7.43 2026-08-10：D15 P2 总 corpus 验收完成，默认 cargoless 主线闭合
+
+- **第一轮不是假绿**：`corpus.deps-pair --tier full` 得到 **131 pass / 1 skip /
+  7 fail**。三项真实差异来自 lock 图的同名多版本边：旧键只含 registry source，
+  `getrandom 0.2/0.3` 这类边会互相覆盖，实际撞出 `polodb`、`polars_lazy`、
+  `polars_frame`。最终键同时保留已选子包的 source 与 version；这样 registry 多版本
+  不覆盖，Git URL/commit 也不丢。新增单测同时锁住 registry 同源多版本、Git 仓库内
+  路径包与同包双 revision。
+- **其余失败逐项归因**：`faer_lu` 定点复跑直接通过，是同轮并发构建的瞬态
+  `ENOENT`；`risc0_run` 与 `datafusion_sql` 是外部获取超时，缓存就绪后 Cargo/self
+  定点均通过，未为它们改 harness。`miden_prove` 原钉的 0.25.5 已被 registry yanked，
+  Cargo 自己也不能 fresh 解析；迁到同发布线 0.25.8，并删除该版本不再需要的 wincode
+  Git patch。Cargo/self 的证明长度、摘要、验证与篡改拒绝输出逐字节一致，原 P5/XFAIL
+  正式摘除。
+- **总验收结果**：第二轮在统一入口完成 **138 pass / 1 skip / 0 expected-fail /
+  0 fail**，耗时 2,900,921ms。唯一 SKIP 是宿主缺少 `/usr/lib/x86_64-linux-gnu/libffi.so`
+  开发链接名的 `rustpython_mini`，不是两轨行为差异。由此 D15 的默认 cargoless 主线和
+  Cargo compat 裁判轨完成当前 corpus 总验收；resolver 1、Git source replacement、
+  以 Git URL 为目标的 patch 等仍按公开边界保留，不借总验收声称完整 Cargo。
+- **同轮非性能收口**：最终代码 `cargo test --locked --all-features` **208/208**；
+  `runtime.semantics` 四组全绿（threads 12/12，含 TSan 和 JIT 栈诊断）；pack **6/6**；
+  `tests/run.sh fast` **12/12**。fast 还撞出 Cargo compat 测试内再执行
+  `CARGO_BIN_EXE_*` 时内部 sysroot 被用户环境恢复清掉的问题：runner 现从启动器旁置
+  配方恢复内部 sysroot，无需用户保留变量；单包 **20/20**、workspace **27/27** 复绿。
+  按用户裁定，本轮未运行 `performance.limits` 或完整 `gate`。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT

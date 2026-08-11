@@ -13,7 +13,6 @@
 use std::cell::Cell;
 use std::mem::MaybeUninit;
 use std::panic::{self, AssertUnwindSafe};
-use std::process::exit;
 use std::sync::Mutex;
 
 use super::ctx::{Ctx, Shared};
@@ -29,6 +28,24 @@ use super::ir::{
 /// 解释执行，引擎只运载指针）。
 pub struct GuestPanic {
     pub exception: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct EngineFault {
+    pub message: String,
+    pub code: i32,
+}
+
+#[derive(Debug)]
+pub struct RunError {
+    pub message: String,
+    pub exit_code: i32,
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
 }
 
 /// 发起 guest panic（`resume_unwind` 不触发宿主 panic hook → 无噪声）。
@@ -95,16 +112,34 @@ mod volatile;
 
 use call::run_cleanup;
 pub(crate) use call::{call_guest_ffi, exec_builtin, interp_frame, ret_abi_of};
-use services::ATEXIT_SHARED;
+use services::run_atexit_callbacks;
+
+pub(crate) fn discard_engine_state(engine_id: u64) {
+    services::discard_atexit_callbacks(engine_id);
+}
+
+#[cfg(test)]
+pub(crate) fn seed_engine_state_for_test(engine_id: u64) {
+    services::seed_atexit_callback(engine_id);
+}
+
+#[cfg(test)]
+pub(crate) fn has_engine_state_for_test(engine_id: u64) -> bool {
+    services::has_atexit_callbacks(engine_id)
+}
 pub(crate) use volatile::{mem_read_volatile, mem_write_volatile};
 
 pub(crate) fn engine_abort(what: &str) -> ! {
-    eprintln!("mirvm[m4-engine]: {what}");
-    exit(70)
+    let ctx = super::ctx::current();
+    unsafe { (*ctx).engine_faulting = true };
+    panic::resume_unwind(Box::new(EngineFault {
+        message: what.to_owned(),
+        code: 70,
+    }))
 }
 
 /// guest TLS 实例真地址（M4.4 D3）：首访惰性物化——heap 分配 + 冻结模板拷贝。
-/// 每线程一份（Ctx 是 thread_local）；v1 记账：线程退出不跑 dtor、实例泄漏。
+/// 每线程一份（Ctx 是 thread-local）；guest dtor 与实例内存均在线程退出链收回。
 pub(crate) fn tls_addr(ctx: *mut Ctx, id: u32) -> u64 {
     let tls: &Vec<u64> = unsafe { &(*ctx).tls };
     if let Some(&a) = tls.get(id as usize)
@@ -386,7 +421,9 @@ struct FrameGuard {
 
 impl Drop for FrameGuard {
     fn drop(&mut self) {
-        if let Some(blk) = self.unwind_edge.get() {
+        if !unsafe { (*self.ctx).engine_faulting }
+            && let Some(blk) = self.unwind_edge.get()
+        {
             run_cleanup(self.ctx, self.func, self.base, blk);
         }
         region_restore(self.ctx, self.base);
@@ -476,54 +513,85 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
 }
 
 /// C1：FnId 的返回通道（thunk 分流——Indirect sret 直传 vs 小档重打包的判定源）。
-pub fn run_main(shared: &'static Shared) -> i32 {
+pub fn run_main(shared: &std::sync::Arc<Shared>) -> Result<i32, RunError> {
     let Some(entry) = shared.module.entry else {
-        eprintln!("mirvm[m4-engine]: no `main` entry (lib crate?)");
-        return 2;
+        return Err(RunError {
+            message: "no `main` entry (lib crate?)".into(),
+            exit_code: 2,
+        });
     };
-    let ctx_ptr = super::ctx::attach(shared); // 主线程与 guest 线程同一 attach 形态
-    ATEXIT_SHARED.set(shared); // D8g：退出 trampoline 找回引擎
-    super::ctx::set_fork_baseline(); // D8f：钉住单 guest 线程的 fork 守卫基线
+    let activation = super::ctx::activate(shared);
+    let ctx_ptr = activation.ctx();
+    super::ctx::set_fork_baseline(shared); // D8f：钉住单 guest 线程的 fork 守卫基线
     let args = [
         entry.main_addr,
         entry.argc,
         entry.argv_ptr,
         entry.sigpipe as u64,
     ];
-    match panic::catch_unwind(AssertUnwindSafe(|| {
+    let code = match panic::catch_unwind(AssertUnwindSafe(|| {
         call_guest(ctx_ptr, entry.lang_start, &args).0
     })) {
         Ok(code) => code as i32,
         Err(e) => match e.downcast::<GuestPanic>() {
             // lang_start 内部已 catch guest panic；穿到这 = panic 逃逸启动链（防御）
             Ok(_) => 101,
-            Err(host) => panic::resume_unwind(host),
+            Err(e) => match e.downcast::<EngineFault>() {
+                Ok(fault) => {
+                    unsafe { (*ctx_ptr).engine_faulting = false };
+                    return Err(RunError {
+                        message: fault.message,
+                        exit_code: fault.code,
+                    });
+                }
+                Err(host) => panic::resume_unwind(host),
+            },
         },
-    }
+    };
+    run_atexit_callbacks(ctx_ptr, code);
+    Ok(code)
 }
 
 /// dev 入口（M4.0 gate）：按导出名调一个函数。
 /// 顶层 catch：guest panic 穿出导出函数 = 未捕获 panic → 诊断 + 退出码 101
 /// （native lang_start 语义的近似；完整启动链 M4.3）。宿主 panic（VM bug）原样续传。
-pub fn run_export(shared: &'static Shared, name: &str, args: &[u64]) -> Result<u64, String> {
+pub fn run_export(
+    shared: &std::sync::Arc<Shared>,
+    name: &str,
+    args: &[u64],
+) -> Result<u64, RunError> {
     let Some(&id) = shared.module.exports.get(name) else {
         let mut names: Vec<&str> = shared.module.exports.keys().map(|k| &**k).collect();
         names.sort();
         names.retain(|n| !n.starts_with("_ZN") && !n.starts_with("_R"));
-        return Err(format!(
-            "export `{name}` doesn't exist, available: {names:?}"
-        ));
+        return Err(RunError {
+            message: format!("export `{name}` doesn't exist, available: {names:?}"),
+            exit_code: 2,
+        });
     };
-    let ctx_ptr = super::ctx::attach(shared);
-    super::ctx::set_fork_baseline(); // D8f
+    let activation = super::ctx::activate(shared);
+    let ctx_ptr = activation.ctx();
+    super::ctx::set_fork_baseline(shared); // D8f
     match panic::catch_unwind(AssertUnwindSafe(|| call_guest(ctx_ptr, id, args).0)) {
-        Ok(r) => Ok(r),
+        Ok(r) => {
+            run_atexit_callbacks(ctx_ptr, 0);
+            Ok(r)
+        }
         Err(e) => match e.downcast::<GuestPanic>() {
-            Ok(_) => {
-                eprintln!("mirvm[m4-engine]: guest panic not caught (report native exit code 101)");
-                exit(101)
-            }
-            Err(host) => panic::resume_unwind(host), // VM bug 绝不吞
+            Ok(_) => Err(RunError {
+                message: "guest panic not caught".into(),
+                exit_code: 101,
+            }),
+            Err(e) => match e.downcast::<EngineFault>() {
+                Ok(fault) => {
+                    unsafe { (*ctx_ptr).engine_faulting = false };
+                    Err(RunError {
+                        message: fault.message,
+                        exit_code: fault.code,
+                    })
+                }
+                Err(host) => panic::resume_unwind(host), // VM bug 绝不吞
+            },
         },
     }
 }
@@ -533,7 +601,34 @@ mod tests {
     use std::mem::MaybeUninit;
 
     use super::{eval_place_addr, mem_read_volatile, mem_write_volatile};
-    use crate::vm::engine::ir::{Operand, PlaceBase, PlaceExpr, PlaceStep, Width};
+    use crate::vm::engine::ctx::Shared;
+    use crate::vm::engine::ir::{
+        Block, FuncBody, Module, Operand, PlaceBase, PlaceExpr, PlaceStep, RetAbi, Terminator,
+        Width,
+    };
+
+    #[test]
+    fn engine_fault_returns_from_export_instead_of_exiting_the_host() {
+        let mut module = Module::default();
+        module.funcs.push(FuncBody {
+            frame_size: 0,
+            frame_align: 1,
+            ret: RetAbi::Zst,
+            params: Vec::new(),
+            caller_loc_off: None,
+            blocks: vec![Block {
+                stmts: Vec::new(),
+                term: Terminator::Trap("broken bytecode".into()),
+            }],
+            name: "trap_export".into(),
+        });
+        module.exports.insert("trap_export".into(), 0);
+        let shared = std::sync::Arc::new(Shared::new(module));
+
+        let err = super::run_export(&shared, "trap_export", &[]).unwrap_err();
+        assert_eq!(err.exit_code, 70);
+        assert!(err.message.contains("broken bytecode"), "{err}");
+    }
 
     #[test]
     fn dyn_tail_alignment_preserves_prefixes_larger_than_four_gibibytes() {
