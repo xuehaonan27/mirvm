@@ -236,7 +236,9 @@ where
 /// proc-macro 自身）。边不分类跟随——proc-macro 的 Build 边（它的
 /// build-deps）同样是 host 编译输入。闭包单元用真 rustc 真 codegen 编成
 /// host 产物。
-pub fn host_closure(plan: &ResolvePlan) -> BTreeSet<usize> {
+/// 根包本身是 proc-macro 时，它的 Normal 依赖也是宿主编译输入；依赖
+/// proc-macro 的闭包之外，再从根 Normal 边沿全依赖边扩张。
+pub fn host_closure_for_root(plan: &ResolvePlan, root_proc_macro: bool) -> BTreeSet<usize> {
     let mut set = BTreeSet::new();
     let mut stack: Vec<usize> = plan
         .units
@@ -245,6 +247,14 @@ pub fn host_closure(plan: &ResolvePlan) -> BTreeSet<usize> {
         .filter(|(_, u)| u.proc_macro)
         .map(|(i, _)| i)
         .collect();
+    if root_proc_macro {
+        stack.extend(
+            plan.root_deps
+                .iter()
+                .filter(|dep| dep.class == UnitClass::Normal)
+                .map(|dep| dep.unit),
+        );
+    }
     while let Some(i) = stack.pop() {
         if set.insert(i) {
             stack.extend(plan.units[i].deps.iter().map(|d| d.unit));
@@ -752,15 +762,25 @@ pub fn bin_rustc_args(
             extern_path(layout, &layout.deps, du, &fps[d.unit], "rlib")
         ));
     }
-    // 根包 lib target 的 --extern（同包隐式依赖，hexyl 实锤）：指
-    // root_lib_rustc_args 产出的 .rlib，与其余 --extern 同段混排
+    // 根包 lib target 的 --extern。同包根是 proc-macro 时指宿主动态库；
+    // 普通 lib 仍指 target rlib。
     if let Some((lib_name, lib_fp)) = root_lib {
+        let root_is_proc_macro = manifest
+            .targets
+            .iter()
+            .any(|target| target.is_lib() && target.proc_macro && target.name == lib_name);
+        let path = if root_is_proc_macro {
+            format!(
+                "{}/lib{}-{lib_fp}{}",
+                layout.host_deps.display(),
+                lib_name.replace('-', "_"),
+                std::env::consts::DLL_SUFFIX
+            )
+        } else {
+            format!("{deps}/lib{}-{lib_fp}.rlib", lib_name.replace('-', "_"))
+        };
         a.push("--extern".into());
-        a.push(format!(
-            "{}={deps}/lib{}-{lib_fp}.rlib",
-            lib_name.replace('-', "_"),
-            lib_name.replace('-', "_")
-        ));
+        a.push(format!("{}={path}", lib_name.replace('-', "_")));
     }
     a.push("-L".into());
     a.push(format!("dependency={deps}"));
@@ -817,6 +837,16 @@ pub fn test_target_rustc_args(
         // Cargo 的 harness=false 测试仍设置 cfg(test)，但保留用户 main。
         args.push("--cfg".into());
         args.push("test".into());
+    }
+    if manifest
+        .targets
+        .iter()
+        .any(|target| target.is_lib() && target.proc_macro && target.path == target_path)
+    {
+        args.push("-C".into());
+        args.push("prefer-dynamic".into());
+        args.push("--extern".into());
+        args.push("proc_macro".into());
     }
     append_root_dev_externs(&mut args, plan, fps, layout);
     args
@@ -975,6 +1005,76 @@ pub fn root_lib_rustc_args(
     a.push("-Zalways-encode-mir".into());
     a.push("-Zno-codegen".into());
     // rustflags 末尾追加：后旗压前旗（dep_rustc_args 同款纪律）
+    a.extend(rustflags.iter().cloned());
+    a
+}
+
+/// 根 proc-macro 的宿主动态库参数。它不能走 VM 的 `-Zno-codegen`
+/// 通道：后续 integration test 编译时 rustc 必须真实 dlopen 这个产物。
+#[allow(clippy::too_many_arguments)]
+pub fn root_proc_macro_rustc_args(
+    manifest: &PackageManifest,
+    plan: &ResolvePlan,
+    fps: &[String],
+    layout: &Layout,
+    lib_name: &str,
+    lib_path: &Path,
+    bo: Option<&BuildOutput>,
+    searches: &[String],
+    rustflags: &[String],
+    fp: &str,
+) -> Vec<String> {
+    let host = layout.host_deps.display();
+    let mut a = vec![real_rustc()];
+    a.push("--crate-name".into());
+    a.push(lib_name.replace('-', "_"));
+    a.push(format!("--edition={}", manifest.edition));
+    a.push(lib_path.display().to_string());
+    a.push("--crate-type=proc-macro".into());
+    a.push("--emit=dep-info,link".into());
+    a.push("-C".into());
+    a.push("prefer-dynamic".into());
+    a.push("-C".into());
+    a.push("embed-bitcode=no".into());
+    for feature in &plan.root_features {
+        a.push("--cfg".into());
+        a.push(format!("feature=\"{feature}\""));
+    }
+    a.extend(manifest.rustc_lint_flags.iter().cloned());
+    a.push("--check-cfg".into());
+    a.push("cfg(docsrs,test)".into());
+    let values = manifest.check_cfg_feature_values();
+    let vals = values
+        .iter()
+        .map(|value| format!("\"{value}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    a.push("--check-cfg".into());
+    a.push(format!("cfg(feature, values({vals}))"));
+    push_profile_flags(&mut a, &manifest.profile);
+    a.push("-C".into());
+    a.push(format!("metadata={fp}"));
+    a.push("-C".into());
+    a.push(format!("extra-filename=-{fp}"));
+    a.push("--out-dir".into());
+    a.push(host.to_string());
+    a.push("-L".into());
+    a.push(format!("dependency={host}"));
+    for dep in &plan.root_deps {
+        if dep.class != UnitClass::Normal {
+            continue;
+        }
+        let unit = &plan.units[dep.unit];
+        a.push("--extern".into());
+        a.push(format!(
+            "{}={}",
+            dep.key.replace('-', "_"),
+            extern_path(layout, &layout.host_deps, unit, &fps[dep.unit], "rlib")
+        ));
+    }
+    append_build_output(&mut a, bo, searches);
+    a.push("--extern".into());
+    a.push("proc_macro".into());
     a.extend(rustflags.iter().cloned());
     a
 }
@@ -1811,7 +1911,7 @@ mod tests {
     #[test]
     fn host_target_partition() {
         let plan = pm_plan();
-        let host = host_closure(&plan);
+        let host = host_closure_for_root(&plan, false);
         let target = target_units(&plan);
         assert_eq!(host, BTreeSet::from([0, 1, 2]), "proc-macro 闭包全进 host");
         assert_eq!(

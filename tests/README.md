@@ -61,11 +61,11 @@ MIRVM_DEPS=cargo ./tests/run.sh gate
 | `differential.programs` | `demo/*.rs` 的 native stdout、stderr、退出码是权威 | `demo/` |
 | `differential.cargo` | 固定 Cargo 的脚本和项目行为是权威 | `demo/`、`tests/fixtures/` |
 | `differential.cargoless` | Cargo 路径与 cargoless 路径逐字节一致 | `tests/fixtures/cless_*` |
-| `contracts.cargoless-test` | 固定 Cargo 的 `cargo test` 选择、输出和退出码是权威 | `cless_test_contract/` |
-| `contracts.cargoless-workspace` | 固定 Cargo 的工作区、包、feature 和失败传播是权威 | `cless_workspace_contract/` |
+| `contracts.cargoless-test` | 固定 Cargo 的 test/bench 选择、根 proc-macro 编译形状、输出和退出码是权威 | `cless_test_contract/`、`cless_proc_macro_test_contract/` |
+| `contracts.cargoless-workspace` | 固定 Cargo 的 resolver 1/2/3、复杂成员 glob、workspace lint、package spec、feature 和失败传播是权威 | `cless_workspace_contract/`、`cless_workspace_remaining_contract/` |
 | `contracts.cargoless-git` | 固定 Cargo lock 格式加本地 Git 仓库的提交内容是权威 | 运行时生成 |
 | `contracts.cargoless-sources` | 固定 Cargo 裁判配置合并、alternate registry、credential provider、source replacement、patch/replace 与 lock | 运行时生成的本地 sparse/local/directory registry |
-| `contracts.pack` | 默认 pack 必须零 Cargo；显式回退必须进入固定 Cargo，两者产物均可脱离构建缓存运行 | 运行时生成的 path 依赖项目 |
+| `contracts.pack` | 默认 pack 必须零 Cargo；显式回退必须进入固定 Cargo；产物可脱离构建缓存运行，mmap 惰性装载的热序文件不得改变第二次运行结果 | 运行时生成的 path 依赖项目 |
 | `contracts.build-script-rerun` | build.rs 的输入变化和 Cargo 指令决定是否重跑 | `cless_br/`、`cless_libc.rs` |
 | `contracts.deps-image` | 固定输出、缓存文件数量和既定时间上限 | `a2_ws/` 的临时副本 |
 | `corpus.run` | 真实依赖探索跑批；检查退出码，XFAIL 还锁定诊断 | `cases.manifest`、`corpus/` |

@@ -18,14 +18,14 @@ pub struct WorkspaceManifest {
 
 impl WorkspaceManifest {
     pub fn read(input: &Path) -> Result<Self, String> {
-        Self::read_inner(input, false)
+        Self::read_inner(input)
     }
 
     pub(crate) fn read_dependency(input: &Path) -> Result<Self, String> {
-        Self::read_inner(input, true)
+        Self::read_inner(input)
     }
 
-    fn read_inner(input: &Path, dependency_only: bool) -> Result<Self, String> {
+    fn read_inner(input: &Path) -> Result<Self, String> {
         let input = std::fs::canonicalize(input)
             .or_else(|_| std::path::absolute(input))
             .map_err(|e| format!("项目目录绝对化失败 {}: {e}", input.display()))?;
@@ -64,9 +64,6 @@ impl WorkspaceManifest {
                 members: vec![package],
             });
         }
-        if workspace.get("lints").is_some() {
-            return Err("workspace.lints 尚未实现；lint 会改变 rustc 行为，不能静默忽略".into());
-        }
         let member_patterns = string_array(workspace.get("members"), "workspace.members")?;
         let resolver = workspace
             .get("resolver")
@@ -75,19 +72,8 @@ impl WorkspaceManifest {
             .or_else(|| inferred_package_resolver(&root_value));
         let resolver = match resolver.as_deref() {
             Some(value) => ResolverVersion::parse(value)?,
-            None if dependency_only => ResolverVersion::V1,
-            None => {
-                return Err(
-                    "虚拟或旧 edition workspace 未声明 resolver；Cargo 会采用 resolver=1，当前不能按 resolver=2 猜测"
-                        .into(),
-                );
-            }
+            None => ResolverVersion::V1,
         };
-        if resolver == ResolverVersion::V1 && !dependency_only {
-            return Err(
-                "workspace resolver=1 尚未实现；不会按 resolver=2/3 猜测 feature 统一".into(),
-            );
-        }
         let mut member_dirs = expand_patterns(&root, &member_patterns, true, "workspace.members")?;
         if !virtual_root {
             member_dirs.insert(root.clone());
@@ -154,6 +140,21 @@ impl WorkspaceManifest {
             members.push(package);
         }
         members.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.root.cmp(&b.root)));
+        if virtual_root
+            && workspace.get("resolver").is_none()
+            && let Some((edition, implied_resolver)) = members
+                .iter()
+                .filter_map(|member| match member.edition.as_str() {
+                    "2021" => Some(("2021", "2")),
+                    "2024" => Some(("2024", "3")),
+                    _ => None,
+                })
+                .max_by_key(|(_, implied)| *implied)
+        {
+            eprintln!(
+                "warning: virtual workspace defaulting to `resolver = \"1\"` despite one or more workspace members being on edition {edition} which implies `resolver = \"{implied_resolver}\"`\n  |\n  = note: to keep the current resolver, specify `workspace.resolver = \"1\"` in the workspace root's manifest\n  = note: to use the edition {edition} resolver, specify `workspace.resolver = \"{implied_resolver}\"` in the workspace root's manifest\n  = note: for more details see https://doc.rust-lang.org/cargo/reference/resolver.html#resolver-versions"
+            );
+        }
         if let Some(pair) = members.windows(2).find(|pair| pair[0].name == pair[1].name) {
             return Err(format!(
                 "workspace 有两个同名包 `{}`（{} 与 {}）；当前 package 选择不能可靠消歧",
@@ -232,9 +233,98 @@ impl WorkspaceManifest {
         })
     }
 
-    pub fn member_by_name(&self, name: &str) -> Option<&PackageManifest> {
-        self.members.iter().find(|member| member.name == name)
+    /// Cargo package ID spec 的 workspace 子集：包名、`name@version`，以及
+    /// `path+file:///...#name@version`。返回多项时也像 Cargo 一样要求消歧。
+    pub fn member_by_spec(&self, spec: &str) -> Result<&PackageManifest, String> {
+        let parsed = PackageSpec::parse(spec)?;
+        let matches: Vec<_> = self
+            .members
+            .iter()
+            .filter(|member| parsed.matches(member))
+            .collect();
+        match matches.as_slice() {
+            [member] => Ok(*member),
+            [] => Err(format!("workspace 中没有匹配 package spec `{spec}` 的包")),
+            _ => Err(format!(
+                "package spec `{spec}` 匹配多个包，请补版本或完整 path package ID"
+            )),
+        }
     }
+}
+
+struct PackageSpec {
+    name: Option<String>,
+    version: Option<semver::VersionReq>,
+    path: Option<PathBuf>,
+}
+
+impl PackageSpec {
+    fn parse(spec: &str) -> Result<Self, String> {
+        let (source, fragment) = spec
+            .split_once('#')
+            .map_or((None, spec), |(source, fragment)| (Some(source), fragment));
+        let (name, version) = match fragment.rsplit_once('@') {
+            Some((name, version)) if !name.is_empty() && !version.is_empty() => {
+                let requirement = semver::VersionReq::parse(&format!("={version}"))
+                    .map_err(|error| format!("package spec `{spec}` 的版本非法: {error}"))?;
+                (Some(name.to_string()), Some(requirement))
+            }
+            _ if !fragment.is_empty() => (Some(fragment.to_string()), None),
+            _ => (None, None),
+        };
+        let path = source
+            .map(|source| {
+                let encoded = source
+                    .strip_prefix("path+file://")
+                    .or_else(|| source.strip_prefix("file://"))
+                    .ok_or_else(|| {
+                        format!("workspace package spec `{spec}` 的 source 不是 path+file")
+                    })?;
+                percent_decode(encoded).map(PathBuf::from)
+            })
+            .transpose()?;
+        Ok(Self {
+            name,
+            version,
+            path,
+        })
+    }
+
+    fn matches(&self, member: &PackageManifest) -> bool {
+        self.name.as_ref().is_none_or(|name| name == &member.name)
+            && self
+                .version
+                .as_ref()
+                .is_none_or(|version| version.matches(&member.version))
+            && self.path.as_ref().is_none_or(|path| {
+                std::fs::canonicalize(path)
+                    .or_else(|_| std::path::absolute(path))
+                    .is_ok_and(|path| path == member.root)
+            })
+    }
+}
+
+fn percent_decode(input: &str) -> Result<String, String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' {
+            let hex = bytes
+                .get(at + 1..at + 3)
+                .ok_or_else(|| format!("file URL 的百分号转义不完整: `{input}`"))?;
+            let text = std::str::from_utf8(hex).map_err(|error| error.to_string())?;
+            out.push(
+                u8::from_str_radix(text, 16)
+                    .map_err(|_| format!("file URL 的百分号转义非法: `%{text}`"))?,
+            );
+            at += 3;
+        } else {
+            out.push(bytes[at]);
+            at += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|error| format!("file URL 不是 UTF-8: {error}"))
 }
 
 fn inferred_package_resolver(root: &toml::Value) -> Option<String> {
@@ -302,13 +392,9 @@ fn expand_patterns(
 ) -> Result<BTreeSet<PathBuf>, String> {
     let mut out = BTreeSet::new();
     for pattern in patterns {
-        if Path::new(pattern).is_absolute()
-            || pattern.contains("**")
-            || pattern.contains('[')
-            || pattern.contains('?')
-        {
+        if Path::new(pattern).is_absolute() {
             return Err(format!(
-                "workspace 成员模式 `{pattern}` 暂不支持绝对路径、**、[] 或 ?；不会按不同规则猜测"
+                "workspace 成员模式 `{pattern}` 必须相对 workspace 根"
             ));
         }
         let parts: Vec<&str> = pattern.split('/').filter(|part| !part.is_empty()).collect();
@@ -341,7 +427,21 @@ fn expand_pattern_at(
         return Ok(());
     }
     let part = parts[at];
-    if !part.contains('*') {
+    if part == "**" {
+        // `**` 可吃零段或任意多段。
+        expand_pattern_at(dir, parts, at + 1, out)?;
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Ok(());
+        };
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("读取 workspace 成员目录失败: {e}"))?;
+            if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+                expand_pattern_at(&entry.path(), parts, at, out)?;
+            }
+        }
+        return Ok(());
+    }
+    if !part.contains(['*', '?', '[', '\\']) {
         return expand_pattern_at(&dir.join(part), parts, at + 1, out);
     }
     let entries = std::fs::read_dir(dir)
@@ -349,7 +449,7 @@ fn expand_pattern_at(
     for entry in entries {
         let entry = entry.map_err(|e| format!("读取 workspace 成员目录失败: {e}"))?;
         if entry.file_type().map_err(|e| e.to_string())?.is_dir()
-            && wildcard_match(part, &entry.file_name().to_string_lossy())
+            && wildcard_match(part, &entry.file_name().to_string_lossy())?
         {
             expand_pattern_at(&entry.path(), parts, at + 1, out)?;
         }
@@ -357,30 +457,90 @@ fn expand_pattern_at(
     Ok(())
 }
 
-fn wildcard_match(pattern: &str, text: &str) -> bool {
-    let parts: Vec<&str> = pattern.split('*').collect();
-    if parts.len() == 1 {
-        return pattern == text;
+fn wildcard_match(pattern: &str, text: &str) -> Result<bool, String> {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    let mut memo = std::collections::BTreeMap::new();
+    wildcard_match_at(&pattern, &text, 0, 0, &mut memo)
+}
+
+fn wildcard_match_at(
+    pattern: &[char],
+    text: &[char],
+    pi: usize,
+    ti: usize,
+    memo: &mut std::collections::BTreeMap<(usize, usize), bool>,
+) -> Result<bool, String> {
+    if let Some(result) = memo.get(&(pi, ti)) {
+        return Ok(*result);
     }
-    let mut rest = text;
-    for (i, part) in parts.iter().enumerate() {
-        if part.is_empty() {
-            continue;
+    let result = match pattern.get(pi) {
+        None => ti == text.len(),
+        Some('*') => {
+            wildcard_match_at(pattern, text, pi + 1, ti, memo)?
+                || (ti < text.len() && wildcard_match_at(pattern, text, pi, ti + 1, memo)?)
         }
-        if i == 0 && !pattern.starts_with('*') {
-            let Some(next) = rest.strip_prefix(part) else {
-                return false;
-            };
-            rest = next;
-        } else if i + 1 == parts.len() && !pattern.ends_with('*') {
-            return rest.ends_with(part);
-        } else if let Some(pos) = rest.find(part) {
-            rest = &rest[pos + part.len()..];
+        Some('?') => ti < text.len() && wildcard_match_at(pattern, text, pi + 1, ti + 1, memo)?,
+        Some('\\') => {
+            let literal = pattern
+                .get(pi + 1)
+                .ok_or_else(|| "workspace glob 末尾不能是反斜杠".to_string())?;
+            ti < text.len()
+                && text[ti] == *literal
+                && wildcard_match_at(pattern, text, pi + 2, ti + 1, memo)?
+        }
+        Some('[') => {
+            let (end, matched) = match_character_class(pattern, pi, text.get(ti).copied())?;
+            matched && wildcard_match_at(pattern, text, end + 1, ti + 1, memo)?
+        }
+        Some(literal) => {
+            ti < text.len()
+                && text[ti] == *literal
+                && wildcard_match_at(pattern, text, pi + 1, ti + 1, memo)?
+        }
+    };
+    memo.insert((pi, ti), result);
+    Ok(result)
+}
+
+fn match_character_class(
+    pattern: &[char],
+    start: usize,
+    candidate: Option<char>,
+) -> Result<(usize, bool), String> {
+    let mut at = start + 1;
+    let negated = matches!(pattern.get(at), Some('!') | Some('^'));
+    if negated {
+        at += 1;
+    }
+    let content_start = at;
+    let mut matched = false;
+    while let Some(&current) = pattern.get(at) {
+        if current == ']' && at > content_start {
+            return Ok((at, candidate.is_some() && (matched != negated)));
+        }
+        let (current, consumed) = if current == '\\' {
+            (
+                *pattern
+                    .get(at + 1)
+                    .ok_or_else(|| "workspace glob 字符组转义不完整".to_string())?,
+                2,
+            )
         } else {
-            return false;
+            (current, 1)
+        };
+        if pattern.get(at + consumed) == Some(&'-') {
+            let end = *pattern
+                .get(at + consumed + 1)
+                .ok_or_else(|| "workspace glob 字符范围不完整".to_string())?;
+            matched |= candidate.is_some_and(|value| current <= value && value <= end);
+            at += consumed + 2;
+        } else {
+            matched |= candidate == Some(current);
+            at += consumed;
         }
     }
-    true
+    Err("workspace glob 字符组缺少 `]`".into())
 }
 
 fn materialize_member(
@@ -442,6 +602,26 @@ fn materialize_member(
                 package.insert(key, value);
             }
         }
+    }
+
+    if let Some(lints) = member_table
+        .get("lints")
+        .and_then(toml::Value::as_table)
+        .filter(|lints| {
+            lints
+                .get("workspace")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(false)
+        })
+    {
+        if lints.len() != 1 {
+            return Err("[lints] workspace=true 不能与其他 lint 同时声明".into());
+        }
+        let inherited = workspace
+            .get("lints")
+            .cloned()
+            .ok_or_else(|| "[lints] 继承 workspace，但根没有 [workspace.lints]".to_string())?;
+        member_table.insert("lints".into(), inherited);
     }
 
     for dep_table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
@@ -673,13 +853,14 @@ mod tests {
 
     #[test]
     fn wildcard_segments_match() {
-        assert!(wildcard_match("crates/*", "crates/x"));
-        assert!(wildcard_match("foo-*", "foo-bar"));
-        assert!(!wildcard_match("foo-*", "bar-foo"));
+        assert!(wildcard_match("member-?", "member-a").unwrap());
+        assert!(wildcard_match("[ab]*", "alpha").unwrap());
+        assert!(wildcard_match("[!ab]*", "charlie").unwrap());
+        assert!(!wildcard_match("foo-*", "bar-foo").unwrap());
     }
 
     #[test]
-    fn resolver_one_is_rejected_for_roots_but_materialized_for_path_dependencies() {
+    fn resolver_one_is_materialized_for_roots_and_path_dependencies() {
         let root = std::env::temp_dir().join(format!(
             "mirvm-workspace-resolver-one-dependency-{}",
             std::process::id()
@@ -697,8 +878,8 @@ mod tests {
         )
         .unwrap();
 
-        let error = WorkspaceManifest::read(&member).unwrap_err();
-        assert!(error.contains("resolver=1"), "{error}");
+        let root_workspace = WorkspaceManifest::read(&member).unwrap();
+        assert_eq!(root_workspace.members[0].resolver, ResolverVersion::V1);
         let dependency = WorkspaceManifest::read_dependency(&member).unwrap();
         let package = dependency
             .members
@@ -706,6 +887,25 @@ mod tests {
             .find(|package| package.root == member)
             .unwrap();
         assert_eq!(package.resolver, ResolverVersion::V1);
+    }
+
+    #[test]
+    fn missing_workspace_resolver_uses_cargo_resolver_one_default() {
+        let root = std::env::temp_dir().join(format!(
+            "mirvm-workspace-implicit-resolver-one-{}",
+            std::process::id()
+        ));
+        let member = root.join("member");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers=['member']\n").unwrap();
+        std::fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname='member'\nversion='0.1.0'\nedition='2018'\n",
+        )
+        .unwrap();
+
+        let workspace = WorkspaceManifest::read(&root).unwrap();
+        assert_eq!(workspace.members[0].resolver, ResolverVersion::V1);
     }
 
     #[test]

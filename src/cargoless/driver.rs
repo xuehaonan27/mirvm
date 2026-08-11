@@ -311,6 +311,7 @@ fn prepare_test_package(
         &sysroot,
         &stamp,
         manifest.has_build_script,
+        manifest.targets.iter().any(|target| target.proc_macro),
         request.quiet,
     ) {
         Ok(c) => c,
@@ -327,11 +328,6 @@ fn prepare_test_package(
         .iter()
         .find(|t| t.is_lib())
         .map(|t| (t.name.clone(), t.path.clone(), t.proc_macro));
-    if root_lib.as_ref().is_some_and(|(_, _, pm)| *pm) {
-        eprintln!("mirvm test: 根 proc-macro 包测试尚未支持");
-        return Err(ExitCode::from(1));
-    }
-
     let root_fp = match schedule::root_fingerprint(
         &manifest,
         &plan,
@@ -364,26 +360,41 @@ fn prepare_test_package(
     let needs_root_lib = selected.iter().any(|s| {
         matches!(
             s.target.kind,
-            TargetKind::Bin | TargetKind::Test | TargetKind::Example
+            TargetKind::Bin | TargetKind::Test | TargetKind::Example | TargetKind::Bench
         )
     });
     if needs_root_lib
-        && let Some((name, path, _)) = &root_lib
-        && let Err(code) = compile_root_lib(
-            &manifest,
-            &plan,
-            &fps,
-            &sysroot,
-            &layout,
-            name,
-            path,
-            root_bo.as_ref(),
-            &root_searches,
-            &rustflags,
-            &root_fp,
-            &outputs,
-            &self_exe,
-        )
+        && let Some((name, path, proc_macro)) = &root_lib
+        && let Err(code) = if *proc_macro {
+            compile_root_proc_macro(
+                &manifest,
+                &plan,
+                &fps,
+                &layout,
+                name,
+                path,
+                root_bo.as_ref(),
+                &root_searches,
+                &rustflags,
+                &root_fp,
+            )
+        } else {
+            compile_root_lib(
+                &manifest,
+                &plan,
+                &fps,
+                &sysroot,
+                &layout,
+                name,
+                path,
+                root_bo.as_ref(),
+                &root_searches,
+                &rustflags,
+                &root_fp,
+                &outputs,
+                &self_exe,
+            )
+        }
     {
         return Err(code);
     }
@@ -394,7 +405,7 @@ fn prepare_test_package(
     let mut bin_launchers = BTreeMap::new();
     if selected
         .iter()
-        .any(|item| item.target.kind == TargetKind::Test)
+        .any(|item| matches!(item.target.kind, TargetKind::Test | TargetKind::Bench))
     {
         for target in manifest.targets.iter().filter(|target| target.is_bin()) {
             if !target
@@ -530,6 +541,9 @@ struct TestRequest {
     test_names: BTreeSet<String>,
     examples: bool,
     example_names: BTreeSet<String>,
+    benches: bool,
+    bench_names: BTreeSet<String>,
+    all_targets: bool,
     no_run: bool,
     no_fail_fast: bool,
     locked: bool,
@@ -568,6 +582,7 @@ impl TestRequest {
                 "--bins" => out.bins = true,
                 "--tests" => out.tests = true,
                 "--examples" => out.examples = true,
+                "--benches" => out.benches = true,
                 "--bin" => {
                     let value = take_value(&mut i, "--bin")?;
                     out.bin_names.insert(value);
@@ -580,6 +595,11 @@ impl TestRequest {
                     let value = take_value(&mut i, "--example")?;
                     out.example_names.insert(value);
                 }
+                "--bench" => {
+                    let value = take_value(&mut i, "--bench")?;
+                    out.bench_names.insert(value);
+                }
+                "--all-targets" => out.all_targets = true,
                 "--no-run" => out.no_run = true,
                 "--no-fail-fast" => out.no_fail_fast = true,
                 "--locked" => out.locked = true,
@@ -595,9 +615,6 @@ impl TestRequest {
                     out.excludes.insert(value);
                 }
                 "--doc" => return Err("doctest 需要 rustdoc 前端，D17 明确不支持".into()),
-                "--benches" | "--bench" | "--all-targets" => {
-                    return Err(format!("{arg} 包含 bench 目标，当前明确不支持"));
-                }
                 "--features" | "-F" => {
                     let value = take_value(&mut i, arg)?;
                     add_feature_values(&mut out.features, &value);
@@ -613,6 +630,9 @@ impl TestRequest {
                 }
                 _ if arg.starts_with("--example=") => {
                     out.example_names.insert(arg[10..].to_string());
+                }
+                _ if arg.starts_with("--bench=") => {
+                    out.bench_names.insert(arg[8..].to_string());
                 }
                 _ if arg.starts_with("--package=") => {
                     out.packages.insert(arg[10..].to_string());
@@ -651,18 +671,8 @@ impl TestRequest {
         if self.workspace {
             roots.extend(workspace.members.iter().map(|member| member.root.clone()));
         } else if !self.packages.is_empty() {
-            for name in &self.packages {
-                let member = workspace.member_by_name(name).ok_or_else(|| {
-                    format!(
-                        "workspace 中没有包 `{name}`（可用：{}）",
-                        workspace
-                            .members
-                            .iter()
-                            .map(|member| member.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                })?;
+            for spec in &self.packages {
+                let member = workspace.member_by_spec(spec)?;
                 roots.insert(member.root.clone());
             }
         } else if let Some(current) = &workspace.current_member {
@@ -670,10 +680,8 @@ impl TestRequest {
         } else {
             roots.extend(workspace.default_members.iter().cloned());
         }
-        for name in &self.excludes {
-            let member = workspace
-                .member_by_name(name)
-                .ok_or_else(|| format!("--exclude 指定的包 `{name}` 不在 workspace"))?;
+        for spec in &self.excludes {
+            let member = workspace.member_by_spec(spec)?;
             roots.remove(&member.root);
         }
         let selected: Vec<_> = workspace
@@ -755,6 +763,7 @@ impl TestRequest {
             (TargetKind::Bin, &self.bin_names),
             (TargetKind::Test, &self.test_names),
             (TargetKind::Example, &self.example_names),
+            (TargetKind::Bench, &self.bench_names),
         ] {
             for name in names {
                 if !manifests
@@ -766,17 +775,24 @@ impl TestRequest {
                 }
             }
         }
-        let broad = self.lib || self.bins || self.tests || self.examples;
+        let broad = self.lib
+            || self.bins
+            || self.tests
+            || self.examples
+            || self.benches
+            || self.all_targets;
         if !broad
             && (!self.bin_names.is_empty()
                 || !self.test_names.is_empty()
-                || !self.example_names.is_empty())
+                || !self.example_names.is_empty()
+                || !self.bench_names.is_empty())
         {
             manifests.retain(|manifest| {
                 manifest.targets.iter().any(|target| match target.kind {
                     TargetKind::Bin => self.bin_names.contains(&target.name),
                     TargetKind::Test => self.test_names.contains(&target.name),
                     TargetKind::Example => self.example_names.contains(&target.name),
+                    TargetKind::Bench => self.bench_names.contains(&target.name),
                     TargetKind::Lib => false,
                 })
             });
@@ -792,9 +808,12 @@ impl TestRequest {
             || self.bins
             || self.tests
             || self.examples
+            || self.benches
+            || self.all_targets
             || !self.bin_names.is_empty()
             || !self.test_names.is_empty()
             || !self.example_names.is_empty()
+            || !self.bench_names.is_empty()
     }
 
     fn select<'a>(
@@ -809,19 +828,22 @@ impl TestRequest {
                 TargetKind::Bin => self.bin_names.contains(&target.name),
                 TargetKind::Test => self.test_names.contains(&target.name),
                 TargetKind::Example => self.example_names.contains(&target.name),
+                TargetKind::Bench => self.bench_names.contains(&target.name),
                 TargetKind::Lib => false,
             };
             let requested = if explicit {
                 match target.kind {
-                    TargetKind::Lib => self.lib || self.tests,
-                    TargetKind::Bin => self.bins || self.tests || named,
-                    TargetKind::Test => self.tests || named,
-                    TargetKind::Example => self.examples || named,
+                    TargetKind::Lib => self.lib || self.tests || self.all_targets,
+                    TargetKind::Bin => self.bins || self.tests || self.all_targets || named,
+                    TargetKind::Test => self.tests || self.all_targets || named,
+                    TargetKind::Example => self.examples || self.all_targets || named,
+                    TargetKind::Bench => self.benches || self.all_targets || named,
                 }
             } else {
                 match target.kind {
                     TargetKind::Lib | TargetKind::Bin | TargetKind::Test => target.test,
                     TargetKind::Example => true, // 默认至少编译；test=true 才运行
+                    TargetKind::Bench => false,
                 }
             };
             if !requested {
@@ -845,7 +867,7 @@ impl TestRequest {
             selected.push(SelectedTarget {
                 target,
                 run,
-                include_dev: target.kind == TargetKind::Example,
+                include_dev: matches!(target.kind, TargetKind::Example | TargetKind::Bench),
             });
         }
         if selected.is_empty() {
@@ -854,7 +876,9 @@ impl TestRequest {
 
         // 选中 integration test 时，Cargo 还编译所有可用普通 bin，为
         // CARGO_BIN_EXE_* 提供进程入口；bin unit-test 与普通 bin 是两单元。
-        let has_integration = selected.iter().any(|s| s.target.kind == TargetKind::Test);
+        let has_integration = selected
+            .iter()
+            .any(|s| matches!(s.target.kind, TargetKind::Test | TargetKind::Bench));
         if has_integration {
             for target in manifest.targets.iter().filter(|t| t.is_bin()) {
                 if target
@@ -1081,6 +1105,56 @@ fn compile_root_lib(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn compile_root_proc_macro(
+    manifest: &PackageManifest,
+    plan: &ResolvePlan,
+    fps: &[String],
+    layout: &Layout,
+    lib_name: &str,
+    lib_path: &Path,
+    bo: Option<&BuildOutput>,
+    searches: &[String],
+    rustflags: &[String],
+    fp: &str,
+) -> Result<(), ExitCode> {
+    let stem = format!("lib{}-{fp}", lib_name.replace('-', "_"));
+    if layout
+        .host_deps
+        .join(format!("{stem}{}", std::env::consts::DLL_SUFFIX))
+        .is_file()
+    {
+        return Ok(());
+    }
+    let args = schedule::root_proc_macro_rustc_args(
+        manifest, plan, fps, layout, lib_name, lib_path, bo, searches, rustflags, fp,
+    );
+    let mut cmd = std::process::Command::new(&args[0]);
+    cmd.args(&args[1..]);
+    cmd.envs(manifest.pkg_env.iter());
+    cmd.env("CARGO_CRATE_NAME", lib_name.replace('-', "_"));
+    cmd.env("CARGO_MANIFEST_DIR", &manifest.root);
+    cmd.env("CARGO_MANIFEST_PATH", manifest.root.join("Cargo.toml"));
+    if let Some(bo) = bo {
+        cmd.env("OUT_DIR", layout.build_dir(&manifest.name, fp).join("out"));
+        cmd.envs(bo.envs.iter().map(|(key, value)| (key, value)));
+    }
+    match cmd.status() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(_) => {
+            eprintln!(
+                "mirvm: proc-macro 编译失败：根包 {} {}",
+                manifest.name, manifest.version
+            );
+            Err(ExitCode::from(1))
+        }
+        Err(error) => {
+            eprintln!("mirvm: proc-macro 编译子进程启动失败：{error}");
+            Err(ExitCode::from(1))
+        }
+    }
+}
+
 fn target_fingerprint(root_fp: &str, target: &Target) -> String {
     let key = format!(
         "{root_fp}\x1f{:?}\x1f{}\x1f{}\x1f{}",
@@ -1114,7 +1188,7 @@ fn root_target_env(
     if matches!(target.kind, TargetKind::Bin | TargetKind::Example) {
         env.insert("CARGO_BIN_NAME".into(), target.name.clone());
     }
-    if target.kind == TargetKind::Test {
+    if matches!(target.kind, TargetKind::Test | TargetKind::Bench) {
         let tmp = layout.deps.parent().unwrap_or(&layout.deps).join("tmp");
         let _ = std::fs::create_dir_all(&tmp);
         env.insert("CARGO_TARGET_TMPDIR".into(), tmp.display().to_string());
@@ -1489,6 +1563,7 @@ fn drive(
         &sysroot,
         &stamp,
         manifest.has_build_script,
+        manifest.targets.iter().any(|target| target.proc_macro),
         false,
     ) {
         Ok(t) => t,
@@ -1695,6 +1770,7 @@ pub fn compile_plan(
     sysroot: &Path,
     stamp: &str,
     root_has_build_script: bool,
+    root_proc_macro: bool,
     quiet_build_warnings: bool,
 ) -> Result<CompiledPlan, String> {
     // unit 级 Kahn 就绪队列并行调度（D15 P3 切⑤c）：unit 的全部依赖
@@ -1706,7 +1782,7 @@ pub fn compile_plan(
     }
     let fps = schedule::fingerprints(plan, profile, stamp, rustflags)
         .map_err(|e| format!("依赖指纹计算失败: {e}"))?;
-    let host_set = schedule::host_closure(plan);
+    let host_set = schedule::host_closure_for_root(plan, root_proc_macro);
     let target_set = schedule::target_units(plan);
     let build_set = schedule::build_closure(plan, root_has_build_script);
     let self_exe = std::env::current_exe().expect("current_exe 失败");

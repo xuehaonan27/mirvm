@@ -209,9 +209,6 @@ pub fn resolve_for_known_with_features(
     known_paths: &[PackageManifest],
     workspace_features: &FeatureOverrides,
 ) -> Result<ResolvePlan, String> {
-    if root.resolver == ResolverVersion::V1 {
-        return Err("Cargo resolver=1 尚未实现；不会按 resolver=2/3 猜测 feature 统一".into());
-    }
     let compiler_rust_version = current_rust_version()?;
     let rust_version_policy = if root.ignore_rust_version {
         IncompatibleRustVersions::Allow
@@ -2448,6 +2445,9 @@ fn unify_features(
                 }
             }
         }
+        if root.resolver == ResolverVersion::V1 {
+            changed |= unify_resolver_one_classes(&mut nodes);
+        }
         if !changed {
             // 收敛后：按（父包名, 依赖键）激活的 optional 依赖集 ∪ 弱形引用集
             // （迭代不动点输入；弱形引用同样进求解与 lock 行——cargo 语义）
@@ -2464,6 +2464,31 @@ fn unify_features(
         }
     }
     Err("feature 统一 64 轮未收敛（图异常）".to_string())
+}
+
+/// resolver 1 在依赖用途之间统一 feature。编译产物仍按 Normal/Build
+/// 分开（host 与 target 不能混用），但决定 `cfg(feature)` 和可选依赖的
+/// 三组状态必须相同，并在下一轮沿两边各自的依赖图继续传播。
+fn unify_resolver_one_classes(nodes: &mut BTreeMap<NodeKey, FeatNode>) -> bool {
+    let mut unified: BTreeMap<(String, Version), FeatNode> = BTreeMap::new();
+    for ((name, version, _), node) in nodes.iter() {
+        let combined = unified.entry((name.clone(), version.clone())).or_default();
+        combined.features.extend(node.features.iter().cloned());
+        combined.activated.extend(node.activated.iter().cloned());
+        combined.weak_refs.extend(node.weak_refs.iter().cloned());
+    }
+    let mut changed = false;
+    for ((name, version, _), node) in nodes.iter_mut() {
+        let combined = &unified[&(name.clone(), version.clone())];
+        if node.features != combined.features
+            || node.activated != combined.activated
+            || node.weak_refs != combined.weak_refs
+        {
+            *node = combined.clone();
+            changed = true;
+        }
+    }
+    changed
 }
 
 fn decls_to_featdeps(decls: &[super::manifest::DepDecl]) -> Result<Vec<FeatDep>, String> {

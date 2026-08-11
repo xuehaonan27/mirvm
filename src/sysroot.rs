@@ -290,6 +290,7 @@ fn build_sysroot(sysroot_dir: &Path) -> anyhow::Result<()> {
         &toolchain_stamp(),
         manifest.has_build_script,
         false,
+        false,
     )
     .map_err(|e| anyhow::anyhow!("sysroot 编译失败: {e}"))?;
 

@@ -1,0 +1,7 @@
+[workspace]
+members = ["crates/**/member-?", "tools/[ab]"]
+exclude = ["shared"]
+default-members = ["crates/nested/member-a"]
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(cless_workspace_lint)"] }

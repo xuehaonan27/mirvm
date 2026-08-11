@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 
 const MAGIC: &[u8; 8] = b"MIRVMAR\0";
-const FMT_VER: u32 = 2;
+const FMT_VER: u32 = 3;
 const SECTION_ENTRY_LEN: usize = 36;
 const WHOLE_HASH_LEN: usize = 16;
 
@@ -33,18 +33,17 @@ const TAG_MODULE: u32 = 4;
 const TAG_NATIVELIBS: u32 = 5;
 const TAG_RELOC: u32 = 6;
 const TAG_MC: u32 = 7;
+const TAG_FUNCS: u32 = 8;
+const FUNC_ENTRY_LEN: usize = 32;
 
 /// fnv1a-128（双程异种子；校验强度与 L2 同族，格式演进时随评）。
 fn hash128(data: &[u8]) -> u128 {
     let a = crate::lower::asm::fnv1a(data);
-    let b = crate::lower::asm::fnv1a(
-        b"\x01mirvmar"
-            .iter()
-            .chain(data.iter())
-            .copied()
-            .collect::<Vec<u8>>()
-            .as_slice(),
-    );
+    let mut b = 0xcbf2_9ce4_8422_2325u64;
+    for byte in b"\x01mirvmar".iter().chain(data) {
+        b ^= u64::from(*byte);
+        b = b.wrapping_mul(0x0000_0100_0000_01b3);
+    }
     ((a as u128) << 64) | b as u128
 }
 
@@ -85,8 +84,188 @@ struct Reloc {
     entry: Box<str>,
 }
 
+/// MODULE v3 只保存非函数元数据。借用写入形态避免复制冻结区和索引表。
+#[derive(Serialize)]
+struct ModuleMetaRef<'a> {
+    exports: &'a std::collections::HashMap<Box<str>, crate::vm::engine::ir::FuncId>,
+    frozen: &'a Option<crate::vm::engine::frozen::FrozenArena>,
+    fn_addrs: &'a std::collections::HashMap<u64, crate::vm::engine::ir::FuncId>,
+    native_libs: &'a [Box<str>],
+    required_native_libs: &'a [Box<str>],
+    tls: &'a [crate::vm::engine::ir::TlsSlot],
+    asm_stub_addrs: &'a [u64],
+    asm_sites: &'a [crate::vm::engine::ir::AsmSite],
+    foreign_syms: &'a [crate::vm::engine::ir::GotSym],
+    got_fixups: &'a [crate::vm::engine::ir::GotFixup],
+    entry_stub_sites: &'a [crate::vm::engine::ir::EntryStubSite],
+    custom_alloc_shims: Option<crate::vm::engine::ir::AllocShims>,
+    entry: Option<crate::vm::engine::ir::EntryPlan>,
+}
+
+impl<'a> From<&'a crate::vm::engine::ir::Module> for ModuleMetaRef<'a> {
+    fn from(module: &'a crate::vm::engine::ir::Module) -> Self {
+        Self {
+            exports: &module.exports,
+            frozen: &module.frozen,
+            fn_addrs: &module.fn_addrs,
+            native_libs: &module.native_libs,
+            required_native_libs: &module.required_native_libs,
+            tls: &module.tls,
+            asm_stub_addrs: &module.asm_stub_addrs,
+            asm_sites: &module.asm_sites,
+            foreign_syms: &module.foreign_syms,
+            got_fixups: &module.got_fixups,
+            entry_stub_sites: &module.entry_stub_sites,
+            custom_alloc_shims: module.custom_alloc_shims,
+            entry: module.entry,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ModuleMeta {
+    exports: std::collections::HashMap<Box<str>, crate::vm::engine::ir::FuncId>,
+    frozen: Option<crate::vm::engine::frozen::FrozenArena>,
+    fn_addrs: std::collections::HashMap<u64, crate::vm::engine::ir::FuncId>,
+    native_libs: Vec<Box<str>>,
+    required_native_libs: Vec<Box<str>>,
+    tls: Vec<crate::vm::engine::ir::TlsSlot>,
+    asm_stub_addrs: Vec<u64>,
+    asm_sites: Vec<crate::vm::engine::ir::AsmSite>,
+    foreign_syms: Vec<crate::vm::engine::ir::GotSym>,
+    got_fixups: Vec<crate::vm::engine::ir::GotFixup>,
+    entry_stub_sites: Vec<crate::vm::engine::ir::EntryStubSite>,
+    custom_alloc_shims: Option<crate::vm::engine::ir::AllocShims>,
+    entry: Option<crate::vm::engine::ir::EntryPlan>,
+}
+
+impl ModuleMeta {
+    fn into_module(self) -> crate::vm::engine::ir::Module {
+        crate::vm::engine::ir::Module {
+            funcs: Default::default(),
+            exports: self.exports,
+            frozen: self.frozen,
+            fn_addrs: self.fn_addrs,
+            native_libs: self.native_libs,
+            required_native_libs: self.required_native_libs,
+            mc_images: Vec::new(),
+            tls: self.tls,
+            asm_stub_addrs: self.asm_stub_addrs,
+            asm_sites: self.asm_sites,
+            foreign_syms: self.foreign_syms,
+            got_fixups: self.got_fixups,
+            entry_stub_sites: self.entry_stub_sites,
+            entry_stubs: Default::default(),
+            image_entry_stubs: Vec::new(),
+            custom_alloc_shims: self.custom_alloc_shims,
+            entry: self.entry,
+            image_frozens: Vec::new(),
+        }
+    }
+}
+
 fn postcard_bytes<T: Serialize>(v: &T) -> Result<Vec<u8>, String> {
     postcard::to_stdvec(v).map_err(|e| format!("fail to format package: {e}"))
+}
+
+fn build_function_section(funcs: &crate::vm::engine::ir::FuncTable) -> Result<Vec<u8>, String> {
+    let count = u32::try_from(funcs.len()).map_err(|_| "too many functions in package")?;
+    let table_len = funcs
+        .len()
+        .checked_mul(FUNC_ENTRY_LEN)
+        .and_then(|len| len.checked_add(4))
+        .ok_or("package function table is too large")?;
+    let mut encoded = Vec::with_capacity(funcs.len());
+    let mut offset = table_len;
+    for body in funcs {
+        let bytes = postcard_bytes(body)?;
+        let end = offset
+            .checked_add(bytes.len())
+            .ok_or("package function data is too large")?;
+        encoded.push((offset, bytes));
+        offset = end;
+    }
+    let mut out = Vec::with_capacity(offset);
+    out.extend_from_slice(&count.to_le_bytes());
+    for (offset, bytes) in &encoded {
+        out.extend_from_slice(
+            &u64::try_from(*offset)
+                .map_err(|_| "package function offset is too large")?
+                .to_le_bytes(),
+        );
+        out.extend_from_slice(
+            &u64::try_from(bytes.len())
+                .map_err(|_| "package function is too large")?
+                .to_le_bytes(),
+        );
+        out.extend_from_slice(&hash128(bytes).to_le_bytes());
+    }
+    for (_, bytes) in encoded {
+        out.extend_from_slice(&bytes);
+    }
+    Ok(out)
+}
+
+fn parse_function_section(
+    section: &[u8],
+    mapped_offset: usize,
+) -> Result<Vec<crate::vm::engine::ir::FuncBlob>, String> {
+    let mut cursor = Cursor {
+        data: section,
+        pos: 0,
+    };
+    let count = usize::try_from(cursor.u32("function count")?)
+        .map_err(|_| "package function count does not fit this host")?;
+    let table_end = count
+        .checked_mul(FUNC_ENTRY_LEN)
+        .and_then(|len| len.checked_add(4))
+        .ok_or("package function table length overflow")?;
+    if table_end > section.len() {
+        return Err("package function table is truncated or too large".into());
+    }
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(count)
+        .map_err(|_| "package function index is too large for available memory")?;
+    for index in 0..count {
+        let start = usize::try_from(cursor.u64("function offset")?)
+            .map_err(|_| format!("function {index} offset does not fit this host"))?;
+        let len = usize::try_from(cursor.u64("function length")?)
+            .map_err(|_| format!("function {index} length does not fit this host"))?;
+        let expected = cursor.u128("function hash")?;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| format!("function {index} range overflow"))?;
+        if start < table_end || end > section.len() {
+            return Err(format!("function {index} crossed FUNCS section boundary"));
+        }
+        if hash128(&section[start..end]) != expected {
+            return Err(format!("function {index} has wrong hash"));
+        }
+        entries.push((index, start, end, expected));
+    }
+    let mut sorted = entries.clone();
+    sorted.sort_unstable_by_key(|entry| entry.1);
+    if let Some(pair) = sorted.windows(2).find(|pair| pair[1].1 < pair[0].2) {
+        return Err(format!(
+            "functions {} and {} overlap in FUNCS section",
+            pair[0].0, pair[1].0
+        ));
+    }
+    entries
+        .into_iter()
+        .map(|(_, start, end, expected_hash)| {
+            Ok(crate::vm::engine::ir::FuncBlob {
+                start: mapped_offset
+                    .checked_add(start)
+                    .ok_or("mapped function offset overflow")?,
+                end: mapped_offset
+                    .checked_add(end)
+                    .ok_or("mapped function end overflow")?,
+                expected_hash,
+            })
+        })
+        .collect()
 }
 
 fn build_container(sections: &[(u32, Vec<u8>)]) -> Result<Vec<u8>, String> {
@@ -373,8 +552,9 @@ pub(crate) fn write_package(
             bytes: data,
         });
     }
-    let module_bytes =
-        postcard_bytes(&module).map_err(|e| format!("fail to serialize module: {e}"))?;
+    let module_bytes = postcard_bytes(&ModuleMetaRef::from(module))
+        .map_err(|e| format!("fail to serialize module metadata: {e}"))?;
+    let function_bytes = build_function_section(&module.funcs)?;
 
     let mut sections: Vec<(u32, Vec<u8>)> = vec![
         (TAG_META, postcard_bytes(&meta)?),
@@ -382,6 +562,7 @@ pub(crate) fn write_package(
         (TAG_MODULE, module_bytes),
         (TAG_NATIVELIBS, postcard_bytes(&libs)?),
         (TAG_RELOC, postcard_bytes(&reloc)?),
+        (TAG_FUNCS, function_bytes),
     ];
     if !mc_entries.is_empty() {
         sections.push((TAG_MC, postcard_bytes(&mc_entries)?));
@@ -422,7 +603,12 @@ pub(crate) fn is_package(path: &Path) -> bool {
 /// 装载 + 全校验（refuse-loud）。输入戳和编译时环境只作来源记录；包内 Module
 /// 已冻结其语义，运行时不再要求源码或原编译环境在场。
 pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
-    let raw = std::fs::read(path).map_err(|e| format!("fail to read package: {e}"))?;
+    let file = std::fs::File::open(path).map_err(|e| format!("fail to open package: {e}"))?;
+    // SAFETY: 只读映射；装载期持有 Arc<Mmap> 直到最后一个惰性函数释放。
+    // 调用方不得在包运行时原地改写/截断文件，这与可执行文件的 mmap 契约相同。
+    let raw = std::sync::Arc::new(
+        unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("fail to mmap package: {e}"))?,
+    );
     let package = parse_container(&raw)?;
     let meta: Meta = postcard::from_bytes(package.section(TAG_META)?)
         .map_err(|e| format!("fail to resolve META section: {e}"))?;
@@ -452,11 +638,23 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
     if &*reloc.entry != "main" {
         return Err(format!("unsupported package entry `{}`", reloc.entry));
     }
-    let mut module: crate::vm::engine::ir::Module =
-        postcard::from_bytes(package.section(TAG_MODULE)?)
-            .map_err(|e| format!("MODULE 节解析失败（冻结区固定基恢复未成立？）: {e}"))?;
-    crate::vm::engine::verify::module(&module)
+    let module_meta: ModuleMeta = postcard::from_bytes(package.section(TAG_MODULE)?)
+        .map_err(|e| format!("MODULE 节解析失败（冻结区固定基恢复未成立？）: {e}"))?;
+    let mut module = module_meta.into_module();
+    let function_section = package.section(TAG_FUNCS)?;
+    let mapped_offset = function_section.as_ptr() as usize - raw.as_ptr() as usize;
+    let function_blobs = parse_function_section(function_section, mapped_offset)?;
+    crate::vm::engine::verify::module_header_with_count(&module, function_blobs.len())
         .map_err(|e| format!("MODULE bytecode verification failed: {e}"))?;
+    // E20 红线：任何 MC/native 物化前逐函数做完整语义验证。临时对象随轮释放，
+    // 运行阶段仍从 mmap 按需解码，不把全函数常驻内存。
+    for (index, blob) in function_blobs.iter().enumerate() {
+        let body: crate::vm::engine::ir::FuncBody =
+            postcard::from_bytes(&raw[blob.start..blob.end])
+                .map_err(|e| format!("function {index} decode failed during verification: {e}"))?;
+        crate::vm::engine::verify::function_with_count(&module, function_blobs.len(), index, &body)
+            .map_err(|e| format!("MODULE bytecode verification failed: {e}"))?;
+    }
     if reloc.requires_fixed_base && !module.frozen.as_ref().is_some_and(|f| f.at_fixed_base()) {
         return Err("包要求固定基址但当前进程不可用（被占/ASLR 冲突）——重试或空闲后跑".into());
     }
@@ -511,12 +709,32 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
         required_native_libs.push(path.to_string_lossy().into_owned().into_boxed_str());
     }
     module.required_native_libs = required_native_libs;
+    let heat_key = format!("{:032x}", hash128(function_section));
+    let heat_path = crate::sysroot::cache_dir()
+        .join("package-heat")
+        .join(format!("{heat_key}.order"));
+    module.funcs = crate::vm::engine::ir::FuncTable::from_mmap(raw, function_blobs, heat_path);
     Ok(LoadedPackage { module })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_body(name: &str) -> crate::vm::engine::ir::FuncBody {
+        crate::vm::engine::ir::FuncBody {
+            frame_size: 8,
+            frame_align: 8,
+            ret: crate::vm::engine::ir::RetAbi::Zst,
+            params: Vec::new(),
+            caller_loc_off: None,
+            blocks: vec![crate::vm::engine::ir::Block {
+                stmts: Vec::new(),
+                term: crate::vm::engine::ir::Terminator::Return,
+            }],
+            name: name.into(),
+        }
+    }
 
     fn replace_whole_hash(raw: &mut Vec<u8>) {
         raw.truncate(raw.len() - WHOLE_HASH_LEN);
@@ -545,6 +763,28 @@ mod tests {
         let parsed = parse_container(&raw).unwrap();
         assert_eq!(parsed.section(TAG_META).unwrap(), [1, 2]);
         assert_eq!(parsed.section(99).unwrap(), [3, 4, 5]);
+    }
+
+    #[test]
+    fn function_section_indexes_independent_verified_blobs() {
+        let funcs =
+            crate::vm::engine::ir::FuncTable::from(vec![test_body("first"), test_body("second")]);
+        let section = build_function_section(&funcs).unwrap();
+        let blobs = parse_function_section(&section, 0).unwrap();
+        assert_eq!(blobs.len(), 2);
+        for (index, blob) in blobs.iter().enumerate() {
+            let body: crate::vm::engine::ir::FuncBody =
+                postcard::from_bytes(&section[blob.start..blob.end]).unwrap();
+            assert_eq!(&*body.name, ["first", "second"][index]);
+        }
+
+        let mut corrupt = section;
+        *corrupt.last_mut().unwrap() ^= 1;
+        assert!(
+            parse_function_section(&corrupt, 0)
+                .unwrap_err()
+                .contains("wrong hash")
+        );
     }
 
     #[test]

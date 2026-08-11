@@ -68,9 +68,10 @@ ENV:
                       （用户回退 + 行为对拍）；**缺省/=self 走零 cargo 自有
                       调度**（D15 cargoless driver，P4 默认翻转：依赖解析/编译
                       调度/build.rs/proc-macro/rustflags/rerun-if 增量/并行调度
-                      全生命周期；mirvm test 已支持 resolver=2/3 常见 workspace，
+                      全生命周期；mirvm test 已支持 resolver=1/2/3 workspace，
                       替代 registry、常见 source replacement/patch/replace 与
-                      pack 共用该路径；resolver 1 等边界响亮拒绝）
+                      pack 共用该路径；resolver 1/2/3 均按 Cargo 的 feature
+                      统一规则处理）
     MIRVM_CLESS_JOBS  =N 时 cargoless 编译调度并发度（缺省 = 核数；=1 退化为
                       拓扑序串行，对拍调试用）
     MIRVM_TIMING      =1 时向 stderr 输出相位账本（frontend/lower/engine/total）
@@ -585,7 +586,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         module.asm_stub_addrs = crate::lower::asm::materialize(&module.asm_sites);
         let mut program_argv = vec![input];
         program_argv.extend(program_args);
-        let code = run_vm_engine(module, &program_argv, vm_call.as_deref(), vm_stats);
+        let code = run_vm_engine(module, &program_argv, vm_call.as_deref(), vm_stats, true);
         exit(code);
     }
 
@@ -1184,8 +1185,9 @@ fn run_vm_engine(
     program_argv: &[String],
     vm_call: Option<&str>,
     vm_stats: bool,
+    already_verified: bool,
 ) -> i32 {
-    if let Err(e) = crate::vm::engine::verify::module(&module) {
+    if !already_verified && let Err(e) = crate::vm::engine::verify::module(&module) {
         eprintln!("mirvm: bytecode verification failed: {e}");
         return 70;
     }
@@ -1347,7 +1349,7 @@ pub(crate) fn run_driver(
             guest.enter();
         }
         let t_engine = std::time::Instant::now();
-        let code = run_vm_engine(module, &program_argv, vm_call.as_deref(), vm_stats);
+        let code = run_vm_engine(module, &program_argv, vm_call.as_deref(), vm_stats, false);
         let engine = (!vm_stats).then(|| t_engine.elapsed());
         print_phase_timing(&timing, engine, t_start.elapsed(), vm_stats);
         exit(code);
@@ -1400,6 +1402,7 @@ pub(crate) fn run_driver(
             &callbacks.program_argv,
             callbacks.vm_call.as_deref(),
             callbacks.vm_stats,
+            false,
         );
         // vm-stats 分支不跑 guest，engine 段无意义则不报
         let engine = (!callbacks.vm_stats).then(|| t_engine.elapsed());

@@ -1,6 +1,6 @@
-# mode B：`.mirvm` 包格式 v2 + pack/run/MC
+# mode B：`.mirvm` 包格式 v3 + pack/run/MC
 
-> 状态：**已实现，2026-08-07 完成自包含与解析边界复核**。母案：
+> 状态：**已实现；2026-08-07 完成自包含复核，2026-08-11 完成 D3 核心布局**。母案：
 > [distribution-design.md](distribution-design.md)
 > D9b（包 = L2 engine-IR 缓存的可移植化：版本头/校验/重定位段）；
 > 新增输入：[decision-history §7.22](../decision-history.md)（机器码节 = 第三类
@@ -16,11 +16,16 @@
 > v2 更正：v1 只把 global_asm 字节放入 MC，static archive 物化出的 `.so` 仍靠
 > 原缓存路径，且默认校验源码时间戳和编译环境，不能诚实称为可分发单文件。v2 将
 > 所有自产库字节纳入 NATIVELIBS，运行时按内容哈希自动物化；STAMPS/envs 只作来源记录。
+>
+> v3 更正：v2 用 `fs::read` 复制整包并一次 postcard 解码整个 Module，所有函数体会常驻。
+> v3 改为只读 mmap，MODULE 只保存非函数元数据，FUNCS 保存逐函数索引和独立函数体。
+> 运行时按实际访问惰性驻留并记录热序。E20 完整语义验证目前仍在首次装载时逐函数临时
+> 解码一次；这部分对象立即释放，后续执行再从 mmap 按需解码。
 
 ## 1. 目标 / 非目标
 
 **目标**：
-- 单文件包格式 v2 + `mirvm pack`（cargo 项目/脚本 → `.mirvm`）+
+- 单文件包格式 v3 + `mirvm pack`（cargo 项目/脚本 → `.mirvm`）+
   `mirvm run x.mirvm`（校验、装载、执行）。
 - 三维验收：pack+run 与 `mirvm run` 直接跑逐字节一致（eco / faer /
   wasmtime 三负载），拒绝探针（陈旧/缺库/基址冲突/版本错配）响亮。
@@ -31,11 +36,11 @@
 - static archive `.so` 的无文件进程内装载（当前从包内自动物化后 dlopen）；
 - L3 JIT 机器码缓存（D5 禁令面，与包无关）。
 
-## 2. 包格式 v2（容器）
+## 2. 包格式 v3（容器）
 
 ```
 offset 0   magic        8B   "MIRVMAR\0"
-           fmt_ver      u32  = 2
+           fmt_ver      u32  = 3
            build_id     u32 长度 + UTF-8（MIRVM_BUILD_ID，精确匹配）
            section_cnt  u32
 节表 ×N    tag u32 | off u64 | len u64 | fnv1a-128（节内容哈希）
@@ -48,11 +53,12 @@ offset 0   magic        8B   "MIRVMAR\0"
 |---|---|---|
 | META | ✓ | postcard：`{args, envs, base_key, target_triple, 是否含 BASE}`（= L2 Header 元信息） |
 | STAMPS | ✓ | postcard：`Vec<(path,size,mtime_ns)>`，只作构建来源记录，不参与运行许可 |
-| BASE | 可选 | **S4 BaseFile 原样嵌入**（std 底座；键与 META.base_key 互证） |
-| MODULE | ✓ | postcard `ir::Module`（delta-on-base（有 BASE 时）或全量；编码 = L2 条目本体） |
+| BASE | 保留 | 当前写入器不产出，装载器拒绝 BASE/delta 形态；不能把预留 tag 当成已支持 |
+| MODULE | ✓ | postcard 模块元数据：exports、frozen、地址表、TLS、asm/GOT/entry 等；不含函数体 |
 | NATIVELIBS | ✓ | postcard：`Vec<{path, role, fnv128, bytes}>`；所有自产 `.so` 字节都在包内，旧 path 只用于与 MODULE 互证及诊断 |
 | RELOC | ✓ | postcard：`{requires_fixed_base: bool, entry: Box<str>}`（固定基要求 + 入口符号；argv 经 run 转发） |
 | MC | 可选 | global_asm/dep_asm 的完整 ELF 字节；由进程内 mcload 解析、重定位和注册符号 |
+| FUNCS | ✓ | `count u32`；固定索引项 `offset u64 | len u64 | fnv1a-128`；随后连续保存各函数的 postcard `FuncBody` |
 
 校验语义（refuse-loud，**绝不静默重建**——包是分发物不是缓存）：
 - fmt_ver / build_id 不匹配 → 拒绝并指出重打工具链；
@@ -62,6 +68,8 @@ offset 0   magic        8B   "MIRVMAR\0"
   必须匹配；MC 还要与 role=global_asm 的条目互证；
 - 节数量必须能被剩余节表容纳；所有 offset/len 做 checked 范围换算，节不得越界、
   重叠或复用 tag；每个节都校验哈希，包括未知 tag；
+- FUNCS 的数量、表长度、每个函数范围和重叠关系做 checked 校验；装载时和每次需求解码
+  都重算逐函数哈希，损坏不得进入执行；
 - `requires_fixed_base` 而固定基不可用（被占/ASLR 冲突）→ 拒绝。
 
 ## 3. pack 流程（`mirvm pack <target> [-o out.mirvm]`）
@@ -69,27 +77,32 @@ offset 0   magic        8B   "MIRVMAR\0"
 与 `mirvm run` **同一条管线**到 Module 为止，岔口只改"执行 → 落盘"：
 
 1. **cargo 项目**：走 cargo_shim 全量构建（dep 照常 metadata-only + C4 清单），
-   lower 时**强制全量冷降低**（旁路 deps-image/底座分层——保证单模块自包含；
-   pack 是构建动作，秒级冷降低可付）;S4 底座存在时将其 BaseFile 字节嵌入
-   BASE 节（META.base_key 互证），MODULE 落 delta 形态。
-   无底座负载（纯 std 程序）→ 无 BASE 节，MODULE 全量。
+   lower 时**强制全量冷降低**（旁路 deps-image/底座分层，保证单模块自包含；
+   pack 是构建动作，秒级冷降低可付）。当前不写 BASE，MODULE 保存完整模块元数据，
+   FUNCS 独立保存所有函数体。
 2. **脚本/单文件**：同 1 的单文件变体（frontmatter 依赖同 cargo 路径）。
-3. 收集 META/STAMPS/NATIVELIBS（从 module.required_native_libs 展开、读取每个
+3. 先对内存 Module 做 E20 全量验证；再收集 META/STAMPS/NATIVELIBS（从
+   module.required_native_libs 展开、读取每个
    自产库字节、现场计算 fnv128、判别 global_asm 与 static_archive）、RELOC；
-   global_asm 默认同时进入 MC。最后以临时名 + rename 原子发布。
+   global_asm 默认同时进入 MC，并逐函数编码 FUNCS。最后以临时名 + rename 原子发布。
 
 ## 4. run 流程（`mirvm run x.mirvm [-- args]`）
 
-1. magic 嗅探（前 8 字节）→ 非包走既有路径;
-2. 全文件 whole_hash + 节 hash 校验;
+1. magic 嗅探（前 8 字节）→ 非包走既有路径；打开文件并建立只读 mmap，不复制整包；
+2. 在 mmap 上做全文件 whole_hash + 节 hash 校验；
 3. META：build_id / fmt_ver / target 校验；STAMPS/envs 只反序列化验证格式；
-4. 装载：**有 BASE → 复用 baseimage 装载（字节直接喂 BaseFile 解析，不读
-   `$HOME/.mirvm/base`）组成 image 栈 `[BASE, MODULE]`；无 BASE → 单模块**
-   ——与 warm 路径同一装载语义（frozen 固定基恢复、required_native_libs
+4. 从 MODULE 恢复非函数元数据，解析 FUNCS 固定索引。为保持 E20，在任何 MC/native
+   物化前逐函数临时解码并完成语义验证，随后释放临时对象；执行期的 FuncTable 仍绑定
+   mmap，函数第一次被访问时才解码并常驻。其余装载语义与 warm 路径相同（frozen
+   固定基恢复、required_native_libs
    从 NATIVELIBS 内嵌字节按哈希物化后 dlopen、asm_sites 幂等重物化、GOT
-   启动相重填、entry_stub_sites 启动相重建）——**全部机件已在仓，无新
-   执行路径**;
+   启动相重填、entry_stub_sites 启动相重建）；
 5. RELOC.entry 启动（main 启动链；argv 转发;`--vm-call` 语义不随包）。
+
+函数访问会自动记入本次真实顺序。Module 释放时以 FUNCS 节内容哈希为键，原子写到
+`$MIRVM_HOME/package-heat/<hash>.order`；下次装载由一个 `mirvm-decode` worker 按该顺序
+后台预取。需求任务永远先于预测任务；若预测中的函数突然被需求访问，会被提升到需求队列。
+等待上界是当前正在解码的一项加该需求自身，预测错误只影响速度，不改变语义。
 
 ## 5. MC（已实现）
 
@@ -113,9 +126,12 @@ mirvm run <x.mirvm> [-- <guest args>]
   LD_ST）/ c_wasmtime_wat（大依赖闭包 + fiber sym 跳过分支）——
   `mirvm run` 直接跑 vs `pack + run`（冷/热/包三跑）输出逐字节一致;
 - **拒绝探针**：fmt_ver、whole/节 hash、重复 tag、节表截断、offset 溢出、
-  节重叠、NATIVELIBS/MC 互证失败均返回错误，不 panic/OOM；
+  节重叠、FUNCS 表截断/越界/重叠/逐体哈希、NATIVELIBS/MC 互证失败均返回错误，
+  不 panic/OOM；
 - **自包含酸试**：关闭 MC 打包，移走原 native/global-asm 缓存，换全新
   MIRVM_HOME，包仍按内容哈希物化并逐字节运行；
+- **热序合同**：首次运行产生且只产生一个非空 `.order`；复用同一 MIRVM_HOME 的第二次
+  运行输出不变，证明预测通道不改变结果；
 - **gate5 全量** + cargo test + diff 双态（SYNC）维持绿。
 
 ## 8. 边界与触发器（如实）
@@ -126,11 +142,13 @@ mirvm run <x.mirvm> [-- <guest args>]
 - proc-macro/build.rs 只在 **pack 期**真执行（D9 §5 硬边界原样）;
 - D15 后续施工已完成这里预留的替换：pack 期缺省使用 cargoless 自有依赖驱动，
   `MIRVM_DEPS=cargo` 显式保留 Cargo 回退；包格式与 run 路径不因此改变;
-- fat artifact 多 target：节表 tag 预留（`MODULE@<triple>` 形态），v1 评。
+- D3 余项：E20 验证器仍读取解码后的 `FuncBody`。D4 冻结前要让语义验证直接消费档案
+  表示或等价的可证明表示，消除首次装载的临时 postcard 扫描；
+- fat artifact 多 target：节表 tag 预留（`MODULE@<triple>` 形态），D4 后评。
 
 ## 9. 实现位置
 
 - `src/pack.rs`：容器读写、检查式解析、自产库内嵌与内容寻址物化；
 - `src/vm/engine/mcload.rs`：MC ELF 进程内装载；
 - `src/cli.rs`：pack 子命令和 run 的 magic 分流；
-- 后续格式与零拷贝计划见 [product-capabilities-plan.md](product-capabilities-plan.md) P5。
+- 后续档案直接验证与格式冻结计划见 [product-capabilities-plan.md](product-capabilities-plan.md) P5。

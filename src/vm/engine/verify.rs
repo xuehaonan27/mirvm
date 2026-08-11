@@ -25,6 +25,24 @@ pub fn module_with_prefix(module: &Module, prefix: Prefix) -> Result<(), String>
     Verifier::new(module, prefix)?.run()
 }
 
+/// 索引化包先验证模块级引用；函数体由调用方从 mmap 切片逐个临时解码后
+/// 调 `function_with_count`，从而不把全体函数留在内存。
+pub(crate) fn module_header_with_count(module: &Module, funcs: usize) -> Result<(), String> {
+    Verifier::new_with_count(module, Prefix::default(), funcs)?.run_header()
+}
+
+pub(crate) fn function_with_count(
+    module: &Module,
+    funcs: usize,
+    index: usize,
+    body: &FuncBody,
+) -> Result<(), String> {
+    let verifier = Verifier::new_with_count(module, Prefix::default(), funcs)?;
+    verifier
+        .body(body)
+        .map_err(|error| format!("function {index} `{}`: {error}", body.name))
+}
+
 struct Verifier<'a> {
     module: &'a Module,
     prefix: Prefix,
@@ -35,7 +53,15 @@ struct Verifier<'a> {
 
 impl<'a> Verifier<'a> {
     fn new(module: &'a Module, prefix: Prefix) -> Result<Self, String> {
-        let funcs = total("function", prefix.funcs, module.funcs.len())?;
+        Self::new_with_count(module, prefix, module.funcs.len())
+    }
+
+    fn new_with_count(
+        module: &'a Module,
+        prefix: Prefix,
+        local_funcs: usize,
+    ) -> Result<Self, String> {
+        let funcs = total("function", prefix.funcs, local_funcs)?;
         let tls = total("TLS", prefix.tls, module.tls.len())?;
         let asm = total("inline-asm stub", prefix.asm, module.asm_sites.len())?;
         Ok(Self {
@@ -48,6 +74,15 @@ impl<'a> Verifier<'a> {
     }
 
     fn run(&self) -> Result<(), String> {
+        self.run_header()?;
+        for (i, body) in self.module.funcs.iter().enumerate() {
+            self.body(body)
+                .map_err(|e| format!("function {} `{}`: {e}", self.prefix.funcs + i, body.name))?;
+        }
+        Ok(())
+    }
+
+    fn run_header(&self) -> Result<(), String> {
         if !self.module.asm_stub_addrs.is_empty()
             && self.module.asm_stub_addrs.len() != self.module.asm_sites.len()
             && self.module.asm_stub_addrs.len() != self.asm
@@ -128,10 +163,6 @@ impl<'a> Verifier<'a> {
             }
         }
 
-        for (i, body) in self.module.funcs.iter().enumerate() {
-            self.body(body)
-                .map_err(|e| format!("function {} `{}`: {e}", self.prefix.funcs + i, body.name))?;
-        }
         Ok(())
     }
 

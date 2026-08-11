@@ -625,7 +625,8 @@ fn lower_inner(
     module.funcs = funcs
         .into_iter()
         .map(|f| f.expect("队列耗尽时每个 FuncId 必有产出"))
-        .collect();
+        .collect::<Vec<_>>()
+        .into();
 
     // 入口别名（--vm-stats 从程序入口做可达分析用）
     if let Some((entry_def, _)) = tcx.entry_fn(())

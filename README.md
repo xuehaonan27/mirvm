@@ -13,7 +13,7 @@ JIT 默认开启）。
 > [docs/current-status.md](docs/current-status.md) 为准；文档权威与历史替代关系见
 > [docs/README.md](docs/README.md)。
 
-## 当前状态（2026-08-10 快照）
+## 当前状态（2026-08-11 快照）
 
 - **M4 完成**：自研 typed bytecode、tree-walking interpreter、tcx-free 执行相、真实地址内存、
   unwind、libffi FFI、native→guest thunk、1:1 OS 线程与 guest TLS。
@@ -33,19 +33,20 @@ JIT 默认开启）。
   提升项见 [open-issues.md G7](docs/open-issues.md)）；`./tests/run.sh gate`
   2026-07-23 历史全 gate 为 **179 PASS / 0 XFAIL / 0 FAIL**；当前现场复验数字见
   [current-status.md §3](docs/current-status.md)。
-- **`.mirvm` 格式 v2**：包内携带所有自产动态库字节；运行不要求源码、原编译环境或
-  预存缓存。格式尚未冻结，跨 build/target 兼容仍未承诺。
-- **`mirvm test` 主链与常见工作区**：默认 self 路径无需 Cargo，支持 lib/bin/
-  integration/example、自定义 harness、开发依赖、test profile、常用选择与 libtest
-  参数；resolver 2 工作区支持成员/default-members/exclude、继承、`--workspace`、`-p`
-  和特性选择。固定 Cargo/compat/self 的单包合同 20/20、工作区合同 27/27。
+- **`.mirvm` 格式 v3**：包内携带所有自产动态库字节；只读 mmap 打开，函数体按独立
+  索引惰性驻留，并按上一轮真实访问顺序预取。运行不要求源码、原编译环境或预存缓存。
+  格式尚未冻结；首次装载仍为完整语义验证临时解码各函数，跨 build/target 兼容也未承诺。
+- **`mirvm test` Cargo 合同**：默认 self 路径无需 Cargo，支持 lib/bin/integration/
+  example/bench、自定义 harness、开发依赖、根 proc-macro、resolver 1/2/3 工作区、复杂
+  成员 glob、workspace lints、package spec、常用选择和 libtest 参数。固定
+  Cargo/compat/self 的单包合同 24/24、工作区合同 31/31；doctest 另归 rustdoc 前端。
 
 已知缺口、响亮拒绝边界与全部未解决债务集中登记在
 [docs/open-issues.md](docs/open-issues.md)；目前不能宣称支持"任意 Rust 程序"。
 当前开发基线是 Linux/ELF/x86_64，工具链锁定在 `nightly-2026-07-02`。根设计契约见
 [DESIGN.md](DESIGN.md)，frame/vmctx 等可逆架构决策及旧模型完整保留在
 [docs/decision-history.md](docs/decision-history.md)。
-复杂依赖来源、正式沙箱/资源治理、稳定嵌入 API/daemon、格式冻结与跨平台尚未完成，
+少见依赖来源余面、正式沙箱/资源治理、稳定嵌入 API/daemon、格式冻结与跨平台尚未完成，
 建议施工顺序见
 [产品能力补全计划](docs/designs/product-capabilities-plan.md)。
 
@@ -61,11 +62,11 @@ cargo build --release --locked
 ./target/release/mirvm run demo/ecosystem.rs
 ./target/release/mirvm run path/to/project -- arg1 arg2
 
-# 单包或 resolver 2 工作区测试；-- 后参数逐字传给 libtest
+# 单包或 resolver 1/2/3 工作区测试；-- 后参数逐字传给 libtest
 ./target/release/mirvm test path/to/project -- --nocapture
 ./target/release/mirvm test path/to/workspace --workspace --all-features
 
-# 打成自包含 .mirvm 包并运行（格式 v2 当前不定死，随开发可变动）
+# 打成自包含 .mirvm 包并运行（格式 v3 当前不定死，随开发可变动）
 ./target/release/mirvm pack path/to/project -o app.mirvm
 ./target/release/mirvm run app.mirvm
 

@@ -68,6 +68,20 @@ else
     bad "self 包运行失败: output=$self_output"
     tail -20 "$TMP/self-run.err"
 fi
+mapfile -t heat_files < <(find "$TMP/fresh-run-home/package-heat" -type f -name '*.order' 2>/dev/null)
+if [ "${#heat_files[@]}" = 1 ] && [ -s "${heat_files[0]}" ]; then
+    ok "包首次运行记录真实函数热序"
+else
+    bad "包首次运行未生成唯一的函数热序记录"
+fi
+second_output=$(MIRVM_HOME="$TMP/fresh-run-home" MIRVM_SYSROOT="$CONTRACT_SYSROOT" \
+    "$MIRVM" run "$SELF_PACKAGE" 2>"$TMP/self-run-second.err")
+if [ "$?" -eq 0 ] && [ "$second_output" = 321 ]; then
+    ok "包按预测热序预取后二跑结果一致"
+else
+    bad "包预测预取后二跑失败: output=$second_output"
+    tail -20 "$TMP/self-run-second.err"
+fi
 
 CARGO_PACKAGE="$TMP/cargo.mirvm"
 MIRVM_HOME="$CONTRACT_HOME" MIRVM_SYSROOT="$CONTRACT_SYSROOT" \

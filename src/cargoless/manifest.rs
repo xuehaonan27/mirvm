@@ -15,9 +15,9 @@
 //!   target_pointer_width/target_endian）+ any/all/not 组合；
 //!   `cfg(feature=..)` 不属于平台求值（cargo 同）；`cfg(target_feature=..)`
 //!   响亮拒绝（归 P5）
-//! - `[workspace]`：`workspace.rs` 先发现 resolver=2/3 多包图并物化
+//! - `[workspace]`：`workspace.rs` 先发现 resolver=1/2/3 多包图并物化
 //!   workspace.package/workspace.dependencies/root profile；本文件只解析物化后的包
-//! - doctest/bench 仍不做；测试目标由 `mirvm test` 消费。
+//! - doctest 仍不做；测试与 bench 目标由 `mirvm test` 消费。
 
 // 模型中仍有只被部分命令消费的字段，暂按模块边界保留。
 #![allow(dead_code)]
@@ -245,6 +245,7 @@ pub enum TargetKind {
     Bin,
     Test,
     Example,
+    Bench,
 }
 
 /// 一个可编译目标及其影响测试选择/编译方式的 manifest 属性。
@@ -384,6 +385,7 @@ struct RawManifest {
     bin: Option<Vec<RawBin>>,
     test: Option<Vec<RawTarget>>,
     example: Option<Vec<RawTarget>>,
+    bench: Option<Vec<RawTarget>>,
     dependencies: Option<BTreeMap<String, toml::Value>>,
     #[serde(rename = "build-dependencies")]
     build_dependencies: Option<BTreeMap<String, toml::Value>>,
@@ -403,6 +405,7 @@ struct RawPackage {
     autobins: Option<bool>,
     autoexamples: Option<bool>,
     autotests: Option<bool>,
+    autobenches: Option<bool>,
     links: Option<String>,
     build: Option<toml::Value>,
     #[serde(rename = "default-run")]
@@ -691,14 +694,17 @@ impl PackageManifest {
         let autobins = pkg.autobins.unwrap_or(true);
         let autoexamples = pkg.autoexamples.unwrap_or(true);
         let autotests = pkg.autotests.unwrap_or(true);
+        let autobenches = pkg.autobenches.unwrap_or(true);
         let targets = discover_targets(
             raw.lib.as_ref(),
             raw.bin.as_ref(),
             raw.test.as_ref(),
             raw.example.as_ref(),
+            raw.bench.as_ref(),
             autobins,
             autotests,
             autoexamples,
+            autobenches,
             &name,
             root,
         )?;
@@ -1403,9 +1409,11 @@ fn discover_targets(
     bin: Option<&Vec<RawBin>>,
     tests: Option<&Vec<RawTarget>>,
     examples: Option<&Vec<RawTarget>>,
+    benches: Option<&Vec<RawTarget>>,
     autobins: bool,
     autotests: bool,
     autoexamples: bool,
+    autobenches: bool,
     pkg_name: &str,
     root: &Path,
 ) -> Result<Vec<Target>, MErr> {
@@ -1528,6 +1536,12 @@ fn discover_targets(
         autoexamples,
         TargetKind::Example,
         &root.join("examples"),
+    ));
+    out.extend(discover_file_targets(
+        benches,
+        autobenches,
+        TargetKind::Bench,
+        &root.join("benches"),
     ));
     Ok(out)
 }

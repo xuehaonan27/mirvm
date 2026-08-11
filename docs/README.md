@@ -70,9 +70,9 @@
 | `async-stackless.md` | async 无栈状态机调研（C11 证据） |
 | `m5-design.md` | M5 总案（M5.0–M5.5 全完成）：D5 T/R 分层终裁、§7 gate6 判据——M5.5 原案之本 |
 | `m5.4-design.md` | M5.4a–d 施工蓝图（ABI 泛化 + LSDA 版式参数 + SIMD 覆盖矩阵；片 a–d 全落地） |
-| `modeb-mirvmar-design.md` | mode B：`.mirvm` 包格式 v2 + pack/run/MC（已落地；格式声明不定死） |
+| `modeb-mirvmar-design.md` | mode B：`.mirvm` 包格式 v3 + pack/run/MC/mmap 惰性函数装载（已落地；格式声明不定死） |
 | `product-capabilities-plan.md` | 明确缺失的产品能力与建议施工顺序（P1 已完成，后续阶段仍是规划） |
-| `mirvm-test-cargoless-contract.md` | `mirvm test` 单包与 resolver 2 workspace 的 self/compat/Cargo 三轨合同、明确边界与 Cargo 升级规程 |
+| `mirvm-test-cargoless-contract.md` | `mirvm test`/bench 与 resolver 1/2/3 workspace 的 self/compat/Cargo 三轨合同、明确边界与 Cargo 升级规程 |
 | `c1-ffi-agg-design.md` | C1 FFI 按值聚合封送设计（FfiAgg 冻结 + libffi struct 编组；R17 边界之母） |
 | `c2-rlib-symbols-design.md` | C2 native-archive「符号在 rlib」救援链设计（elfsym 枚举 + P1 跳板重链） |
 | `distribution-design.md` | 轨 C 分发 D9a–D9f 全文；未立项 ④⑤ 的唯一设计规范 |

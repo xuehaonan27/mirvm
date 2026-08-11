@@ -1,0 +1,13 @@
+[package]
+name = "cless_proc_macro_test_contract"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+pm-helper = { path = "pm-helper" }
+
+[dev-dependencies]
+test-helper = { path = "test-helper" }

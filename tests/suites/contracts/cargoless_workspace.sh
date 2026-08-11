@@ -9,6 +9,7 @@ CARGO=${CARGO:-$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-
 RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
 STRACE=${STRACE:-$(command -v strace)}
 FIXTURE=$(pwd)/tests/fixtures/cless_workspace_contract
+REMAINING=$(pwd)/tests/fixtures/cless_workspace_remaining_contract
 CONTRACT_HOME=${MIRVM_CONTRACT_HOME:-${MIRVM_HOME:-$HOME/.mirvm}}
 HOST=$($RUSTC -vV | sed -n 's/^host: //p')
 
@@ -84,6 +85,10 @@ triplet workspace_feature "$FIXTURE" 0 --workspace --features workspace-app/extr
 triplet unqualified_feature "$FIXTURE" 0 --workspace --features extra --test required -- --test-threads=1 --nocapture
 triplet all_features "$FIXTURE" 0 --workspace --all-features --lib -- --test-threads=1 --nocapture
 triplet no_default "$FIXTURE" 0 -p workspace-app --no-default-features --lib -- --test-threads=1 --nocapture
+triplet resolver_one "$REMAINING" 0 -p remaining-main@0.1.0 --lib -- --test-threads=1 --nocapture
+triplet complex_glob "$REMAINING" 0 -p remaining-tool-b@0.4.0 --lib --no-run
+triplet full_package_id "$REMAINING" 0 \
+    -p "path+file://$REMAINING/crates/nested/member-a#remaining-main@0.1.0" --lib --no-run
 
 WORKSPACE_FORCE_FAIL=1 triplet fail_fast "$FIXTURE" 101 --workspace --lib -- --test-threads=1 --nocapture
 WORKSPACE_FORCE_FAIL=1 triplet no_fail_fast "$FIXTURE" 101 --workspace --lib --no-fail-fast -- --test-threads=1 --nocapture
@@ -173,6 +178,24 @@ if [[ "$shared_line" == *'feature="app-side"'* ]] \
 else
     bad "pinned Cargo workspace rustc 结构漂移"
     tail -30 "$oracle"
+fi
+
+
+CARGO_TARGET_DIR="$TMP/oracle-remaining-target" "$CARGO" test \
+    --manifest-path "$REMAINING/Cargo.toml" --locked --offline \
+    -p remaining-main@0.1.0 --lib --no-run -vv \
+    >"$TMP/oracle-remaining.out" 2>"$TMP/oracle-remaining.err"
+remaining_oracle="$TMP/oracle-remaining.err"
+remaining_shared=$(rg 'shared/src/lib\.rs .*--crate-type lib' "$remaining_oracle" | head -1)
+remaining_root=$(rg 'member-a/src/lib\.rs .*--test' "$remaining_oracle" | head -1)
+if [[ "$remaining_shared" == *'feature="build"'* ]] \
+    && [[ "$remaining_shared" == *'feature="normal"'* ]] \
+    && [[ "$remaining_root" == *'--warn=unexpected_cfgs'* ]] \
+    && [[ "$remaining_root" == *'cfg(cless_workspace_lint)'* ]]; then
+    ok "pinned Cargo resolver 1 与 workspace lint 形状"
+else
+    bad "pinned Cargo resolver 1 与 workspace lint 形状漂移"
+    tail -30 "$remaining_oracle"
 fi
 
 suite_summary contracts.cargoless-workspace

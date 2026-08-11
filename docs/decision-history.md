@@ -1925,6 +1925,56 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   配方恢复内部 sysroot，无需用户保留变量；单包 **20/20**、workspace **27/27** 复绿。
   按用户裁定，本轮未运行 `performance.limits` 或完整 `gate`。
 
+### 7.44 2026-08-11：D17 余项闭合——bench、根 proc-macro 与 resolver 1
+
+- **旧状态**：`mirvm test` 已覆盖普通单包和 resolver 2/3 常见工作区，但 bench、根
+  proc-macro、resolver 1、复杂成员 glob、workspace lints 和完整 package ID spec 仍被
+  列作缺口。doctest 也在同一张表里，容易被误解成可以用普通 test target 顺手补上。
+- **Cargo 实证先行**：固定 toolchain 的 `cargo test/bench -vv --no-run` 证明：bench 是
+  带 `--test` 的测试 artifact 并使用 Dev 依赖；根 proc-macro 的普通库必须在宿主侧产出
+  动态库，根库 unit test 仍是 VM 的 `--test` artifact，integration test 则通过
+  `--extern` 加载宿主 proc-macro。resolver 1 会把 normal/dev/build 用途的 feature 合并，
+  但宿主和目标产物仍是不同编译单元。旧 edition 或虚拟工作区没写 resolver 时，Cargo
+  默认采用 resolver 1。
+- **新选择**：target 模型加入 Bench；manifest 自动发现 `benches/`，test CLI 支持
+  `--bench`/`--benches`/`--all-targets`。host closure 可以从根 proc-macro 的普通依赖出发，
+  根动态库、unit test 和 integration test 各走 Cargo 对应形状。resolver 1 的 feature、
+  optional 激活和弱 feature 引用在依赖用途间统一；`**`/`?`/`[]` glob、workspace lint
+  继承与路径/版本 package spec 在工作区机制内实现。没有 resolver 的旧工作区直接按
+  Cargo 默认使用 resolver 1，不要求用户补清单。
+- **验收**：单包合同 **24/24**，覆盖 bench、all-targets 和根 proc-macro；工作区合同
+  **31/31**，覆盖未显式声明的 resolver 1、normal/build feature 合并、复杂 glob、
+  workspace lint 和完整 path package ID。两脚本都以固定 Cargo `-vv` 为编译形状裁判，
+  self 腿继续由 PATH 哨兵和 execve 审计证明不启动 Cargo。
+- **边界重分配**：D17 的普通 test/bench Cargo 合同闭合。doctest 需要 rustdoc 处理代码块
+  提取、临时 crate、源行号和 compile-fail 诊断，另记 D19；不能把它伪装成 integration
+  test。嵌套 workspace 与同名成员由 Cargo 自身拒绝，不再误记成 mirvm 应当放行的余项。
+
+### 7.45 2026-08-11：D3 核心落地——mmap 容器、逐函数惰性驻留与热序调度
+
+- **旧状态**：格式 v2 用 `fs::read` 把整包复制到 Vec，再用 postcard 一次解码整个
+  `Module`；所有函数体在启动时同时物化并常驻。D3 原计划要求 mmap、逐函数惰性解码、
+  上次真实访问顺序预取和需求优先，但不能为节省启动工作绕过 E20 字节码验证器。
+- **新布局 = 不稳定格式 v3**：文件以只读 mmap 打开。MODULE 只保存非函数元数据；
+  新 FUNCS 节先存函数数目和固定大小的 offset/length/hash 索引，再存每个独立 postcard
+  `FuncBody`。解析器检查表长、整数溢出、边界、重叠和逐体哈希；需求解码时再次核对该
+  函数哈希。`Module.funcs` 改为同时支持原 Vec 形态和 mmap 惰性形态的 `FuncTable`，
+  既有 L2/base/deps 序列化仍保持原 sequence 编码，不被包格式改版带偏。
+- **调度选择**：单个 `mirvm-decode` worker 维护 demand 和 predicted 两个队列，永远先取
+  demand；已在预测队列的函数被访问时提升为 demand。预测不能中断一个已经开始的
+  postcard 解码，因此一次需求的等待上界是当前解码的一项加它自己。实际首次访问顺序
+  自动记录，Module 释放时按 FUNCS 内容哈希原子写入
+  `$MIRVM_HOME/package-heat/<hash>.order`，下一次装载据此预取；用户不维护热函数名单。
+- **E20 约束与剩余项**：现有验证器检查的是解码后的 IR 语义，不只是容器边界。为保证
+  任何 MC/native 副作用前完整拒绝坏字节码，v3 首次装载仍逐函数临时 postcard 解码、
+  运行 E20 验证并立即释放；执行期随后按需重新解码并驻留。这已经消除整文件复制和全函数
+  长期驻留，但不等于“首次装载完全不反序列化”。D3 仍保留档案直接语义验证余项，完成前
+  不启动 D4 格式冻结。
+- **验收与范围**：Rust 单测覆盖独立函数索引/逐体损坏拒绝和 demand 提升队首；pack
+  合同覆盖首次运行产生一个非空 heat 文件、同 home 第二次运行输出不变，自包含与 Cargo/
+  self 双轨继续通过。性能基线按维护者要求暂缓，本条只声明结构和正确性结果，不声明
+  启动时间或内存数字。OS 沙箱不在本轮施工范围。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT
@@ -1935,8 +1985,9 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
 - ~~P7 设想独立 `src/os/` 物理层~~（**2026-07-18/19 已兑现**：`src/os/` + `src/arch/` 双 leaf 建成，E21 闭合，见 §7.16）。
 - “engine 是 library”目前只是 crate 结构；进程退出、全局 TLS key、泄漏式生命周期使其还不是稳定
   多 Engine 嵌入 API。
-- `.mirvm` mode B 与方法级 JIT 已实现；当前包格式 v2 仍未冻结且精确绑定 build_id/target。
-  fat target artifact、checked 模式与 alloca 局部仍只是设计，不是现状。
+- `.mirvm` mode B 与方法级 JIT 已实现；当前包格式 v3 仍未冻结且精确绑定 build_id/target。
+  v3 已有 mmap/逐函数惰性驻留，但档案直接语义验证、fat target artifact、checked 模式
+  与 alloca 局部仍只是设计或余项，不是已完成能力。
 - static `.a`→`.so` 的受约束 Linux/ELF 切片已实现；非 PIC、跨 archive 依赖/顺序或重名、
   RTLD_DEFAULT 重名、constructor、thin、export-symbols 仍是明确拒绝面。它们需要新 link plan/
   生命周期设计，不能从 blake3 外推通用。

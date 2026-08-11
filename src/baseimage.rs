@@ -310,7 +310,7 @@ pub fn absorb_stack(delta: &mut ir::Module, stack: ImageStack) {
     let mut frozens = Vec::with_capacity(stack.images.len());
     for img in stack.images {
         let mut m = img.module;
-        funcs.append(&mut m.funcs);
+        m.funcs.drain_into(&mut funcs);
         tls.append(&mut m.tls);
         sites.append(&mut m.asm_sites);
         for (a, f) in m.fn_addrs {
@@ -349,8 +349,8 @@ pub fn absorb_stack(delta: &mut ir::Module, stack: ImageStack) {
             frozens.push(fr);
         }
     }
-    funcs.append(&mut delta.funcs);
-    delta.funcs = funcs;
+    delta.funcs.drain_into(&mut funcs);
+    delta.funcs = funcs.into();
     tls.append(&mut delta.tls);
     delta.tls = tls;
     sites.append(&mut delta.asm_sites);

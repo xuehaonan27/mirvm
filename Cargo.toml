@@ -46,6 +46,7 @@ flate2 = "1.1"
 tar = "0.4"
 log = "0.4"
 phf = "0.14.0"
+memmap2 = "0.2.3"
 
 # 让 rust-analyzer 认识 rustc_private crates（需在 IDE 端开启 rust-analyzer.rustc.source = "discover"）
 [package.metadata.rust-analyzer]

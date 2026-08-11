@@ -523,6 +523,7 @@ dependencies = [
  "libffi",
  "libmimalloc-sys",
  "log",
+ "memmap2",
  "phf",
  "postcard",
  "pubgrub",

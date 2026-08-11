@@ -67,7 +67,7 @@ fn build_module() -> Module {
         "tsan_mt::add3",
     );
     Module {
-        funcs: vec![bump, add3],
+        funcs: vec![bump, add3].into(),
         ..Default::default()
     }
 }

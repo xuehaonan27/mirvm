@@ -1,0 +1,14 @@
+[package]
+name = "remaining-main"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+shared = { package = "remaining-shared", path = "../../../shared", features = ["normal"] }
+
+[build-dependencies]
+shared = { package = "remaining-shared", path = "../../../shared", features = ["build"] }
+
+[lints]
+workspace = true

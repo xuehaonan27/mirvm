@@ -10,6 +10,7 @@ CARGO=${CARGO:-$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-
 RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
 STRACE=${STRACE:-$(command -v strace)}
 FIXTURE=$(pwd)/tests/fixtures/cless_test_contract
+PROC_FIXTURE=$(pwd)/tests/fixtures/cless_proc_macro_test_contract
 CONTRACT_HOME=${MIRVM_CONTRACT_HOME:-${MIRVM_HOME:-$HOME/.mirvm}}
 HOST=$($RUSTC -vV | sed -n 's/^host: //p')
 [ -x "$MIRVM" ] || { echo "cargoless_test_contract: $MIRVM 不存在" >&2; exit 69; }
@@ -58,14 +59,15 @@ triplet() {
     local name=$1 expected=$2
     shift 2
     local force=${CONTRACT_FORCE_FAIL:-0}
+    local project=${CONTRACT_FIXTURE:-$FIXTURE}
 
     if [ "$force" = 1 ]; then
         env CLESS_FORCE_FAIL=1 CARGO_TARGET_DIR="$TMP/native-target" \
-            "$CARGO" test --manifest-path "$FIXTURE/Cargo.toml" --locked --offline "$@" \
+            "$CARGO" test --manifest-path "$project/Cargo.toml" --locked --offline "$@" \
             >"$TMP/$name.native.out" 2>"$TMP/$name.native.err"
     else
         env -u CLESS_FORCE_FAIL CARGO_TARGET_DIR="$TMP/native-target" \
-            "$CARGO" test --manifest-path "$FIXTURE/Cargo.toml" --locked --offline "$@" \
+            "$CARGO" test --manifest-path "$project/Cargo.toml" --locked --offline "$@" \
             >"$TMP/$name.native.out" 2>"$TMP/$name.native.err"
     fi
     local nc=$?
@@ -73,12 +75,12 @@ triplet() {
     if [ "$force" = 1 ]; then
         env CLESS_FORCE_FAIL=1 MIRVM_HOME="$CONTRACT_HOME" \
             MIRVM_TARGET_DIR="$TMP/compat-target" MIRVM_DEPS=cargo \
-            "$MIRVM" test "$FIXTURE" --locked --offline "$@" \
+            "$MIRVM" test "$project" --locked --offline "$@" \
             >"$TMP/$name.compat.out" 2>"$TMP/$name.compat.err"
     else
         env -u CLESS_FORCE_FAIL MIRVM_HOME="$CONTRACT_HOME" \
             MIRVM_TARGET_DIR="$TMP/compat-target" MIRVM_DEPS=cargo \
-            "$MIRVM" test "$FIXTURE" --locked --offline "$@" \
+            "$MIRVM" test "$project" --locked --offline "$@" \
             >"$TMP/$name.compat.out" 2>"$TMP/$name.compat.err"
     fi
     local cc=$?
@@ -86,12 +88,12 @@ triplet() {
     if [ "$force" = 1 ]; then
         env CLESS_FORCE_FAIL=1 PATH="$TMP/no-cargo:$PATH" MIRVM_OFFLINE=1 \
             MIRVM_HOME="$TMP/self-home" MIRVM_SYSROOT="$CONTRACT_SYSROOT" MIRVM_DEPS=self \
-            "$MIRVM" test "$FIXTURE" --locked --offline "$@" \
+            "$MIRVM" test "$project" --locked --offline "$@" \
             >"$TMP/$name.self.out" 2>"$TMP/$name.self.err"
     else
         env -u CLESS_FORCE_FAIL PATH="$TMP/no-cargo:$PATH" MIRVM_OFFLINE=1 \
             MIRVM_HOME="$TMP/self-home" MIRVM_SYSROOT="$CONTRACT_SYSROOT" MIRVM_DEPS=self \
-            "$MIRVM" test "$FIXTURE" --locked --offline "$@" \
+            "$MIRVM" test "$project" --locked --offline "$@" \
             >"$TMP/$name.self.out" 2>"$TMP/$name.self.err"
     fi
     local sc=$?
@@ -119,7 +121,10 @@ triplet all_tests 0 --tests -- --test-threads=1 --nocapture
 triplet ignored 0 --lib ignored -- --ignored --test-threads=1 --nocapture
 triplet custom_harness 0 --test custom -- --custom-arg
 triplet example_no_run 0 --example compile_only --no-run
+triplet bench 0 --bench contract_bench -- --test-threads=1 --nocapture
+triplet all_targets_no_run 0 --all-targets --no-run
 triplet quiet 0 --lib --quiet -- --test-threads=1 --nocapture
+CONTRACT_FIXTURE="$PROC_FIXTURE" triplet root_proc_macro 0 --tests -- --test-threads=1 --nocapture
 
 CONTRACT_FORCE_FAIL=1 triplet fail_fast 101 --tests -- --test-threads=1 --nocapture
 for leg in native compat self; do
@@ -193,6 +198,19 @@ if [ -n "$normal_bin" ] && [[ "$normal_bin" != *"--test"* ]] \
     ok "pinned Cargo 普通 bin 不吃 dev 依赖"
 else
     bad "pinned Cargo 普通 bin 合同漂移"
+fi
+
+CARGO_TARGET_DIR="$TMP/oracle-proc-target" "$CARGO" test \
+    --manifest-path "$PROC_FIXTURE/Cargo.toml" --locked --offline --no-run -vv \
+    >"$TMP/oracle-proc.out" 2>"$TMP/oracle-proc.err"
+proc_oracle="$TMP/oracle-proc.err"
+if rg -q 'src/lib\.rs .*--crate-type proc-macro .*--extern pm_helper=.*--extern proc_macro' "$proc_oracle" \
+    && rg -q 'src/lib\.rs .*--test .*--extern pm_helper=.*--extern test_helper=.*--extern proc_macro' "$proc_oracle" \
+    && rg -q 'tests/use_macro\.rs .*--test .*--extern cless_proc_macro_test_contract=.*\.so .*--extern test_helper=' "$proc_oracle"; then
+    ok "pinned Cargo 根 proc-macro 测试形状"
+else
+    bad "pinned Cargo 根 proc-macro 测试形状漂移"
+    tail -30 "$proc_oracle"
 fi
 
 suite_summary contracts.cargoless-test

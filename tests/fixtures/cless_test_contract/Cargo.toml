@@ -28,3 +28,7 @@ harness = false
 [[example]]
 name = "compile_only"
 path = "examples/compile_only.rs"
+
+[[bench]]
+name = "contract_bench"
+path = "benches/contract_bench.rs"

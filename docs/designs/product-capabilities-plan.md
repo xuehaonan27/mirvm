@@ -2,7 +2,8 @@
 
 > 状态：**P1 主链已完成；P2 的 resolver 3 / rust-version、Git 依赖、替代
 > registry/Cargo 配置、source replacement/patch/replace 与 pack self 五批及 full
-> corpus 总验收均已完成（2026-08-10，138 PASS / 1 SKIP / 0 FAIL）**。
+> corpus 总验收均已完成（2026-08-10，138 PASS / 1 SKIP / 0 FAIL）；D17 余项与
+> D3 mmap/逐函数惰性装载核心已于 2026-08-11 完成**。
 > 本文把当前明确缺失的产品
 > 能力合并成一条可执行路线；现状仍以 [current-status.md](../current-status.md) 为准，
 > 单项债务仍以 [open-issues.md](../open-issues.md) 为唯一登记入口。
@@ -19,9 +20,10 @@
 
 ### P1：`mirvm test`，补齐开发主循环
 
-**进展（2026-08-10）**：单包与 resolver 2/3 常见 workspace 范围已完成，并由
+**进展（2026-08-11）**：D17 完成。单包、resolver 1/2/3 workspace、bench、根
+proc-macro 测试、复杂成员 glob、workspace lints 和完整路径 package spec 都由
 [cargoless 合同](mirvm-test-cargoless-contract.md) 约束；成员发现、继承、统一 lock、
-package 选择和特性统一均在依赖机制内实现，没有命令层特判。
+package 选择和特性统一均在依赖机制内实现，没有命令层特判。doctest 另归 rustdoc 前端。
 
 **用户结果**：项目可以直接运行单元测试，不必退回 cargo 才能完成“改代码、跑测试”。
 
@@ -39,9 +41,9 @@ package 选择和特性统一均在依赖机制内实现，没有命令层特判
 **用户结果**：Git 依赖、替代 registry 和 source replacement 可以直接解析、锁定、
 离线复跑，不要求用户改写项目；resolver 3 与 rust-version-aware 选择也能正确工作。
 
-- resolver 2/3 常见 workspace、多包图、精确包名选择与 rust-version-aware
-  候选选择已完成；resolver 1、较复杂
-  glob/package ID spec、嵌套 workspace 和 workspace lints 仍保持响亮拒绝，不冒充 Cargo 全语义。
+- resolver 1/2/3 常见 workspace、多包图、精确/版本/路径 package spec、复杂成员 glob、
+  workspace lints 与 rust-version-aware 候选选择已完成；嵌套 workspace 和同名成员按
+  Cargo 自身规则拒绝，不把 Cargo 的错误形态误写成 mirvm 缺口。
 - Git 源以提交哈希入锁和内容存储；网络获取与离线消费分开，禁止浮动 HEAD 偷换内容。
 - 替代 registry 复用 Cargo 凭据的只读面；实现 index/source replacement 的来源映射。
 - 让 `mirvm pack` 改走自有依赖驱动。
@@ -60,7 +62,7 @@ package 选择和特性统一均在依赖机制内实现，没有命令层特判
 
 1. **resolver 3 与 rust-version-aware 选择（已完成，2026-08-10）**
    - 支持显式 `resolver = "3"`，以及 edition 2024 package 的隐式 resolver 3；
-     resolver 1 继续响亮拒绝。
+     resolver 1 后续已在 D17 余项中补齐显式和默认推导及 feature 统一。
    - 读取包、workspace 继承和 registry index 中的 `rust-version`。按照 Cargo 的
      `resolver.incompatible-rust-versions = fallback/allow` 策略选择候选版本，不能把
      “当前 rustc 编不过”误报成普通版本冲突。
@@ -133,9 +135,9 @@ package 选择和特性统一均在依赖机制内实现，没有命令层特判
      第二轮 full corpus **138 pass / 1 skip / 0 expected-fail / 0 fail**；唯一 SKIP 是
      本机缺 `libffi.so` 开发链接名。最终非性能 `fast` **12/12**。
 
-P2 闭合后再评审 D17 余项，建议顺序为：根 proc-macro 测试、bench、workspace
-lints/复杂 package ID 与成员 glob、旧项目需要的 resolver 1。doctest 必须作为 rustdoc
-前端专项处理代码块提取、临时 crate、行号和 compile-fail，不并入普通 test harness。
+**D17 余项完成（2026-08-11）**：根 proc-macro 测试、bench、workspace lints、复杂
+package ID/成员 glob 和旧项目 resolver 1 已按上述顺序落地。doctest 继续作为 D19
+rustdoc 前端专项处理代码块提取、临时 crate、行号和 compile-fail，不并入普通 test harness。
 
 ### P3：OS 级沙箱与资源治理
 
@@ -178,6 +180,11 @@ Shared/JIT worker，线程执行态按 Engine id 隔离并支持嵌套恢复；�
 
 ### P5：包布局定型与可移植分发
 
+**进展（2026-08-11）**：D3 核心布局已完成。格式 v3 以只读 mmap 打开容器，将函数体
+拆成独立索引项，按访问惰性驻留，并用上一轮真实访问顺序后台预取；需求解码优先于预测。
+E20 完整语义验证仍要求首次装载逐函数临时解码一次，因此 D3 还剩“直接在档案表示上验证”
+这一项，完成前不启动 D4 格式冻结。
+
 **用户结果**：`.mirvm` 有明确兼容期和迁移规则，加载大型包不必整包复制解码，并能按
 目标平台选择内容。
 
@@ -187,7 +194,7 @@ Shared/JIT worker，线程执行态按 Engine id 隔离并支持嵌套恢复；�
 - 最后加入 fat artifact 的多 target 索引；仍只嵌入自产库，系统 ABI 库按目标契约解析。
 - 验收：旧兼容样本、未知可跳过节、不可兼容拒绝、大包内存上限、源码与缓存全缺失运行。
 
-对应欠账：D3、D4、D2；当前格式 v2 仍明确不稳定。
+对应欠账：D3 直接验证余项、D4、D2；当前格式 v3 仍明确不稳定。
 
 ### P6：跨平台
 
@@ -203,7 +210,7 @@ Shared/JIT worker，线程执行态按 Engine id 隔离并支持嵌套恢复；�
 
 ## 3. 里程碑关系
 
-- P1 与 P2 五个施工批次已完成；P2 还需跑总 corpus 验收并据实清理剩余 P5 分类。
+- P1、P2 五个施工批次和 P2 总 corpus 验收均已完成；D17 余项也已闭合。
 - P3 是任何“不受信任代码执行”产品声明的硬前置。
 - P4 核心内部基础已开始，但稳定公开 API 与剩余生命周期边界仍是 daemon、agent API
   和 REPL 的硬前置。
@@ -212,14 +219,14 @@ Shared/JIT worker，线程执行态按 Engine id 隔离并支持嵌套恢复；�
 
 每一阶段开工前，应把本节拆成可独立验收的 issue；远程 GitHub 操作恢复前只在本地文档维护。
 
-## 4. 当前施工队列与禁止提前项（2026-08-10）
+## 4. 当前施工队列与禁止提前项（2026-08-11）
 
 当前产品主队列是：
 
-`D17 余项复评 → OS 级沙箱与资源治理 → P4 稳定嵌入 API → D3 零拷贝装载`
+`D17 余项（完成） → D3 mmap/逐函数惰性装载核心（完成） → D3 档案直接语义验证 → D4 格式冻结评审`
 
-随后依次进入 OS 沙箱、稳定嵌入 API、D3 零拷贝后包格式冻结、跨平台。D16 性能线必须
-先 profile；只有实测命中才可穿插 JIT 机器码持久化，不能打断上述产品闭合。
+OS 沙箱按维护者本轮裁定暂缓，不进入这条施工链；这不改变“当前只能运行受信任代码”的
+产品边界。D16 性能线和性能基线也按维护者要求另期统一恢复，本轮不从未测数据推导收益。
 
 以下事项明确不提前：
 
