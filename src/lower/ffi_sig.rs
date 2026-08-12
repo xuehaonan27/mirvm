@@ -4,6 +4,15 @@
 
 use super::*;
 
+/// C 系 ABI 的 unwind 位。`None` 表示不是 libffi 可直调的 C/System ABI。
+pub(super) fn c_abi_unwind(abi: rustc_abi::ExternAbi) -> Option<bool> {
+    use rustc_abi::ExternAbi;
+    match abi {
+        ExternAbi::C { unwind } | ExternAbi::System { unwind } => Some(unwind),
+        _ => None,
+    }
+}
+
 /// extern "C" 系 fn-ptr 类型 → 冻结 ForeignSig（M4.4 FFI 反方向之二：调用点带上，
 /// 执行期条目反查未命中 = guest 持 native 真码 → libffi 按此直调）。
 /// None = Rust ABI / 变参 / 参数不可类——该调用点只能派发 guest 条目（未命中即诊断）。
@@ -12,19 +21,14 @@ pub(crate) fn freeze_c_fnptr_sig<'tcx>(
     env: TypingEnv<'tcx>,
     ty: rustc_middle::ty::Ty<'tcx>,
 ) -> Option<ir::ForeignSig> {
-    use rustc_abi::ExternAbi;
     let sig = ty.fn_sig(tcx).skip_binder();
     // F-09（2026-07-22 实锤反转）：C/C-unwind 均收——unwind 属性保全进
-    // ForeignSig.unwind（接受是「读过的」，不是「没看见」）。callback 形
-    // panic 仍 abort 于 nounwind trampoline 边界（libffi 闭包无 unwind
-    // info 原理阻塞，R18 记档）；longjmp 形机器层不受 ABI 属性影响。
-    if !matches!(sig.abi(), ExternAbi::C { .. } | ExternAbi::System { .. }) || sig.c_variadic() {
+    // ForeignSig.unwind（接受是「读过的」，不是「没看见」）。执行期 direct
+    // foreign、callback thunk 与 P1 条目均按该位选择 C/C-unwind 边界。
+    let unwind = c_abi_unwind(sig.abi())?;
+    if sig.c_variadic() {
         return None;
     }
-    let unwind = matches!(
-        sig.abi(),
-        ExternAbi::C { unwind: true } | ExternAbi::System { unwind: true }
-    );
     let mut args = Vec::with_capacity(sig.inputs().len());
     for &t in sig.inputs() {
         let k = ffi_kind_of(tcx, env, t).ok()?;
@@ -256,4 +260,22 @@ fn validate_agg_natural(agg: &ir::FfiAgg) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::c_abi_unwind;
+    use rustc_abi::ExternAbi;
+
+    #[test]
+    fn c_abi_unwind_preserves_plain_and_unwind_variants() {
+        assert_eq!(c_abi_unwind(ExternAbi::C { unwind: false }), Some(false));
+        assert_eq!(c_abi_unwind(ExternAbi::C { unwind: true }), Some(true));
+        assert_eq!(
+            c_abi_unwind(ExternAbi::System { unwind: false }),
+            Some(false)
+        );
+        assert_eq!(c_abi_unwind(ExternAbi::System { unwind: true }), Some(true));
+        assert_eq!(c_abi_unwind(ExternAbi::Rust), None);
+    }
 }

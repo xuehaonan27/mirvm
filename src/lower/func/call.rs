@@ -354,6 +354,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 ret: fret,
                 variadic,
                 thunk_args,
+                unwind: ffi_unwind,
             }) => {
                 let sig = if variadic {
                     let nfixed = fixed.len();
@@ -364,8 +365,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         ret: fret,
                         fixed: Some(nfixed),
                         thunk_args,
-                        // 出向 unwind 未建模（R18②；libffi 边界天然不可传播）
-                        unwind: false,
+                        unwind: ffi_unwind,
                     }
                 } else {
                     ir::ForeignSig {
@@ -373,7 +373,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         ret: fret,
                         fixed: None,
                         thunk_args,
-                        unwind: false,
+                        unwind: ffi_unwind,
                     }
                 };
                 Terminator::CallForeign {

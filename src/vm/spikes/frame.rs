@@ -1,8 +1,8 @@
-//! slaved 操作数区（v0，模型 A 的帧局部存储）。
+//! slaved 操作数区（Spike 1 原型，模型 A 的帧局部存储）。
 //!
 //! 所有帧的局部槽切在一条连续 `Vec` 上；每帧 `reserve` 一段、返回时 `restore`。
-//! 这是 frame-abi-bytecode.md §2.2 的 "slaved 操作数区 v0"——后续【必换】alloca
-//! 真内联（guest 局部直接在 native 栈上）。故这里保持一个**窄接口**，且
+//! 生产实现后来改为带 guard page 的 mmap ByteRegion；2026-08-12 又撤销了 alloca
+//! 必迁承诺，slaved 正式保留。这里仍保持一个**窄接口**，且
 //! **不与安全模式（fast/checked）耦合**：Spike 1 是 fast，不做任何范围检查；
 //! checked 模式将来只在 `GuestMemory::contains` 处相遇（见账本 C13 解耦要求）。
 

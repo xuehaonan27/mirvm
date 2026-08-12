@@ -1,9 +1,9 @@
 # mirvm 当前开发状态
 
-> 状态日期：2026-08-11（2026-07-22 外部审核
+> 状态日期：2026-08-12（2026-07-22 外部审核
 > [history/development-status-audit-2026-07-22.md](history/development-status-audit-2026-07-22.md)
 > 之后的 D15 P1-P5 来源批次、稳定化与 `mirvm test` 工作区合同均已纳入，见
-> decision-history §7.21-§7.46）。
+> decision-history §7.21-§7.50）。
 > 本文是当前状态的唯一汇总入口；
 > 若与早期计划、README 或交接文档冲突，以当前代码、可复现测试结果和本文为准。文档权威
 > 规则见 [README.md](README.md)。
@@ -45,6 +45,7 @@
 | **D15 P5 第三至五批及 P2 总验收（2026-08-10，decision-history §7.39-§7.43）** | **完成** | Cargo config 按 `$CARGO_HOME`、项目祖先、include 与环境覆盖合并依赖来源子集；替代 sparse/Git registry 有独立身份，认证复用 Cargo token/provider。source replacement 覆盖 registry 镜像、local registry 与 vendor directory，拒绝替换环和 checksum 篡改；registry 目标上的 path/Git/registry `[patch]` 参与版本求解，`[replace]` 保留 Cargo 锁语义。项目/frontmatter 的 `mirvm pack` 缺省走同一 cargoless 图，`MIRVM_DEPS=cargo` 显式回退长期保留。来源合同 **30/30**，每个 self fresh lock 与固定 Cargo 逐字节相同并被其 `--locked --offline` 接受；P2 full corpus 最终 **138 pass / 1 skip / 0 fail**，旧 `miden_prove` P5/XFAIL 已摘。D17 后续已补 resolver 1、复杂成员 glob/package spec 和 workspace lints。Git source replacement、以 Git URL 为目标的 patch、`paths`/HOST_RUSTFLAGS 等完整 Cargo config 仍是明确边界 |
 | **E 引擎与架构第一轮（2026-08-10，decision-history §7.42）** | **核心完成，E22/E23 余项保留** | 多 Engine 触发器命中后采用线程局部当前 Engine 身份：Shared/JIT worker/fork 基线/退出回调按 Engine 隔离，线程表按 Engine id 保存 Ctx，嵌套进入可恢复，guest TLS、builtin 字符串和遗留 atexit 项会回收；MC 符号只在当前 Module 内解析。引擎故障经 `RunError` 返回，不再从库路径直接退出宿主；rustc compiler 会话有全局 guard。新增穷尽字节码验证器，接入 pack、镜像、L2 和最终执行入口。操作数区双端 `PROT_NONE` guard 与 JIT 入帧前栈检查已落地，小栈深递归返回诊断而不是裸 SIGSEGV。仍未完成稳定公开嵌入 API、native 回调撤销、JIT/MC 活动码卸载、长寿命宿主线程 TSD 回收和 checked 指针来源机制；当前仍不宣称沙箱 |
 | **E 引擎与架构第二轮（2026-08-12，decision-history §7.47）** | **E3/E8/E24/E28/E31 完成** | 解释帧与真实 JIT unwind 帧按 CFA 合并；Engine 自动物化最小 ELF，让标准 Rust backtrace 解析客体函数名。IR/deps image 键加入文件内容 BLAKE3，并拒绝读取期 inode/ctime/path 身份漂移。Cargo compat 改占 `RUSTC` 槽，普通/workspace wrapper 的环境变量、config、顺序和适用范围继续由固定 Cargo 原样决定。固定 rustc 的 Global alloc error shim 已由 native 差分证实自然闭合，libc abort 不再多打印 MIRVM 私有诊断。同期修正 JIT cleanup 在 `try_call` 终结前切块的非法 Cranelift 构造。开放账中已实现项与明确接受的优化选择完成迁移 |
+| **E 引擎与架构第三轮（2026-08-12，decision-history §7.48-§7.50）** | **E9/E12/E13/R18 收口** | `dl_iterate_phdr` 已用真实动态库装载/枚举探针验证 native、解释器和同步 JIT 一致。解释态局部正式保留带 guard page 的 slaved ByteRegion，alloca 降为真实性能证据触发的候选。跨语言异常按源 `C/System { unwind }` 分治：普通 C 终止，C-unwind 保留 C++ 异常或 Rust panic 身份并执行 cleanup；非 C/System ABI 明确拒绝。guest panic 继续由宿主 Rust panic 运输，不再承诺独立 exception class/personality。合同与修复前后矩阵见 [designs/c-unwind-contract.md](designs/c-unwind-contract.md) |
 | 地址模型 P2（GOT 间接） | **完成（2026-07-17）** | §7.5b 手术单定场（真实地址模型保留）→ §7.5c 零 IR 变更 GOT 机制（槽 = 冻结区普通格 + 启动相重填；extern static/fn 值不再烤宿主地址，字节码复用 `Mem{Static(槽)}`/`SubImm` 通道，JIT/interp 零改动）→ §7.5d 拒缓存三判据全退役 + 纯 std 会话 want_split 修正（先存 A2 沉默债：L2 对纯 std 程序永 miss）。外来符号用例冷→热全通（c_process 463→30ms），gate5 117/0/0。JIT 间接调用准入记债（[open-issues.md E1](open-issues.md)） |
 | 地址模型 P1（fn 条目可执行化） | **完成（2026-07-17，commit `4202317`）** | §7.6：FFI 可派生条目值 = 可执行 stub 码址（新第三固定地址域族 0x6C00/0x6D00/0x6E00+k + libffi closure 蹦床 + 配方随模块、启动相重建封存 RX）——thunk 盲区结构性根治（旧 debt §6 关闭，对照见 [open-issues.md](open-issues.md)；负对照 flate2 C-libz 结构体内嵌回调往返，三维+L2 热一致）。残余边界 = 签名不可派生条目（Rust ABI/聚合/变参）保持数据槽，无实质盲区；SIGSEGV 诊断化可选后补（open-issues T4）。gate5 117/0/0 |
 | corpus 批7（激进 24 三波） | **完成（2026-07-17）** | 23/24 全绿可用（corpus.md §5 批7）；**修出两只产品 bug 当日修复**：native-archive 链接行收 crate 图动态库（`867b3de`，libgit2 红转绿）+ custom `#[global_allocator]` 运行时统一路由 `__rust_*`（§7.7，c_mimalloc 三维绿、跨堆 SIGSEGV 根治）。c_tree_sitter 按值聚合 FFI 记档（open-issues C1，**2026-07-18 C1 闭合后转正入 gate**）。gate5 128→**139**；corpus 实测真实 crate 总账 123 |
@@ -87,8 +88,8 @@ SIMD 族经 interp 共享本体助手），解释器继续作为差分 oracle �
   → Shared（进程期）+ 每个宿主线程一个 Ctx
   → interp_frame / run_blocks
       guest 调用：宿主递归
-      guest → native：dlsym + libffi
-      native → guest：libffi closure thunk + TLS attach
+      guest → native：dlsym + libffi（按源 ABI 选择 C / C-unwind）
+      native → guest：libffi closure thunk + TLS attach（callback/P1 同样按 ABI 分治）
       inline asm：调用已物化的 fn(*mut u8) stub
 ```
 
@@ -100,10 +101,10 @@ x86 asm wrapper。
 ## 3. 已验证边界
 
 - **当前增量验证（2026-08-12 实跑）**：`cargo fmt --all -- --check`、Clippy
-  `-D warnings`、`cargo test --locked --all-features` **213/213** 均通过。标准 `fast`
-  的 12 个叶套件已分项全部通过：首次聚合运行中 11 个产品叶全绿，唯一失败是
-  `harness.truth` 的假 Cargo 尚不认识新 wrapper 项目；最小同步替身后该叶 **16/16**
-  单独复绿。程序差分默认/JIT 同步各 **46 PASS / 2 SKIP**、Cargo 裁判 **12/12**、
+  `-D warnings`、`cargo test --locked --all-features` **220/220** 均通过。最终 release
+  产物的 `runtime.c-unwind` **11/11**；程序差分默认与强制同步 JIT 各
+  **47 PASS / 2 SKIP / 0 FAIL**。本轮没有重跑完整 `fast`/`gate` 或性能基线。
+  最近一次其余标准套件分项结果为：Cargo 裁判 **12/12**、
   cargoless **7/7**、单包 test/bench/doctest 合同
   **34/34**、工作区合同 **31/31**、Git 来源 **9/9**、来源合同 **30/30**、
   pack 合同 **8/8**、build.rs **21/21**、
@@ -118,7 +119,8 @@ x86 asm wrapper。
   校验误访问 crates.io、JIT 退出期与 Rayon 并发线程生命周期、以及数个 fixture 漂移；
   修复后受影响路径均已定点复绿，但未再花约 40 分钟整轮复跑。当前仍有一个真实 RED：
   `performance.limits` 的 `fib(32)` 最快 **97ms > 80ms**；输出正确且 JIT 有效，不放宽门槛，
-  已登记 [open-issues.md E7](open-issues.md)。因此当前不得宣称完整 `gate` 全绿。
+  已并入 [open-issues.md D16](open-issues.md) 的延期性能战役。因此当前不得宣称完整
+  `gate` 全绿。
   **上一轮全矩阵（2026-08-07 实跑，以下路径和数字只作历史证据）**：
   `tests/diff.sh` **45/45**（默认与阈值=1 双态）、**+MIRVM_JIT_SYNC 同步发布
   45/45**（可准入函数首调同步编译并真跑机器码，编译失败 RED——audit F-05 起
@@ -218,8 +220,9 @@ x86 asm wrapper。
 | M5.1 收口 | 六个 release native-differential tracer 脚本通过，x86_vectors 内 pshufb/SHA 分别记账；numbigint、xgetbv、sha2、blake3、ecosystem 全部转绿。M5.1 旧前沿 expected-red 已删除，diff_cargo 3/3；signal/backtrace 两个历史 XFAIL 已由 M5.2 转绿（见本表前两行） |
 | x86 向量 helper | pshufb128/256 与 SHA256 msg1/msg2/rnds2 已通过 tcx-free stdarch target-feature helpers 接入；m51_x86_vectors native 差分与 c_sha2 两个标准 SHA256 输出通过 |
 | guest 静态归档 | Linux/ELF 受约束路径已接产品：收集 rustc `Static NativeLib`、内容寻址 `.a→.so`，作为 required library 在任何 dlsym 前以 `RTLD_NOW` 加载；失败保留 `dlerror` 并立即终止。constructor/destructor 已分治（§7.8：`.init_array/.fini_array/ctors/dtors` 段经 DT_INIT 与 native 同构放行；裸 `.init/.fini` 仍拒）；RTLD_DEFAULT 同名碰撞已改归档句柄优先（`fb0b204`，native 链接期绑定语义）。其余拒绝面仍在：非 PIC、thin、跨 archive 依赖/顺序/重名导出、export-symbols——多 archive link plan 未立项（[open-issues.md R6](open-issues.md)），不是通用链接器 |
-| JIT | **生产已落地**：方法级 Cranelift JIT = M5.3 骨架 + M5.4a–d（标量/内存/128 位/原子/ABI 全形态/五调用助手/unwind 产品化双 CIE 全覆 LSDA/三表准入穷尽）+ M5.5 vmctx 终裁（T 骨架定稿），默认开启（`--jit off`/`MIRVM_JIT=off` 回退纯解释）。验证强度（2026-07-22 起）：`MIRVM_JIT_SYNC` 同步发布 + 可准入失败 RED。未实现：OSR/deopt/生产 tiering（E2）、JIT 码常驻（E5）、优化项池（E7：SIMD CLIF 向量内联/PLT try_call 快路/内联缓存等） |
+| JIT | **生产已落地**：方法级 Cranelift JIT = M5.3 骨架 + M5.4a–d（标量/内存/128 位/原子/ABI 全形态/五调用助手/unwind 产品化双 CIE 全覆 LSDA/三表准入穷尽）+ M5.5 vmctx 终裁（T 骨架定稿），默认开启（`--jit off`/`MIRVM_JIT=off` 回退纯解释）。验证强度（2026-07-22 起）：`MIRVM_JIT_SYNC` 同步发布 + 可准入失败 RED。当前接受的边界是无 OSR/deopt/生产 tiering、JIT 码随 Module 常驻；纯性能优化候选统一归延期的 D16，不再当作独立引擎缺陷 |
 | 生命周期/嵌入 | Engine 已持有 Shared 与自己的 JIT worker，线程执行态按 Engine id 隔离并支持嵌套恢复；guest TLS、退出回调残留可在生命周期结束时清理。引擎故障通过 `RunError` 返回，rustc driver 全局诊断状态由编译会话锁保护。尚非稳定公开嵌入 API：native 已保存的 libffi 回调无法主动撤销，closure/JIT 活动码仍需常驻；长寿命宿主线程 TSD 回收、动态库/回调注册撤销和进程级故障隔离仍开放 |
+| C/C-unwind 异常 | **R18 已闭合**：direct foreign、native fn pointer、callback/P1 入口都保全并消费源 ABI；普通 C 终止，C-unwind 保留 C++ 异常类型或 Rust panic payload，并在解释/JIT 帧执行 Drop；非 C/System ABI 响亮拒绝。标准 `runtime.c-unwind` 十一项覆盖纯解释器与强制同步 JIT。foreign exception 直接越出整个 Engine 仍不属于稳定嵌入 API 合同；详见 [designs/c-unwind-contract.md](designs/c-unwind-contract.md) |
 | 分发与产品面 | `.mirvm` mode B 已实现到不稳定格式 v3：只读 mmap 容器、逐函数索引/惰性驻留、真实热序预取与需求优先已落地；为满足 E20，首次装载仍逐函数临时解码验证，档案直接语义验证尚未完成。包运行不依赖源码或预存自产库缓存；跨 build_id/target 兼容、fat artifact 与格式冻结仍未做。daemon、REPL、稳定嵌入 API、checked 模式、资源治理和正式沙箱均未实现，当前只运行受信任代码。合并计划见 [product-capabilities-plan.md](designs/product-capabilities-plan.md) |
 | 平台 | 当前仅应宣称 Linux/ELF/x86_64 开发基线 |
 | Cargo wrapper / runner | MIRVM 占 Cargo 的 `RUSTC` 槽，用户普通/workspace wrapper 仍由 Cargo 按原生顺序从环境变量或 config 组合，MIRVM 在最内层捕获两层修改后的 rustc 参数。runner 在 lower 后用窄结构化 filter 去除额外 warning-count summary，但保留完整 driver 收尾，只在 compiler success 后执行 VM |

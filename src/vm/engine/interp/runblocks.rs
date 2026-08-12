@@ -106,10 +106,10 @@ pub(super) fn run_blocks(
                 // 诊断）。显式 stacksize（std::thread 恒显式）临时放大，调用后还原；
                 // guest 自供栈（setstack）不动。栈尺寸属 unspecified（ram-spec §2）。
                 let stack_restore = crate::vm::engine::ffi::amplify_pthread_stack(sym, &av);
-                let r = {
+                let r = call_guarding_terminate(unwind, || {
                     let ffi = unsafe { &mut (*ctx).ffi };
                     crate::vm::engine::ffi::call(ffi, module, sym, sig, &av, ret_dst)
-                };
+                });
                 if let Some((attr, orig)) = stack_restore {
                     crate::os::thread::attr_set_stack_size(attr, orig);
                 }
@@ -174,7 +174,14 @@ pub(super) fn run_blocks(
                         (None, &av[..])
                     };
                     (
-                        crate::vm::engine::ffi::call_addr(addr as usize, nsig, arg_slice, ret_dst),
+                        call_guarding_terminate(unwind, || {
+                            crate::vm::engine::ffi::call_addr(
+                                addr as usize,
+                                nsig,
+                                arg_slice,
+                                ret_dst,
+                            )
+                        }),
                         0,
                     )
                 } else {

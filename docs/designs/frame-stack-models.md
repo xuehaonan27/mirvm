@@ -279,7 +279,9 @@ guest panic 要退 guest 帧、逐帧跑 Drop。
 - A1：guest unwind ≠ 想用宿主 panic（语义不同）→ 得靠"向宿主递归上层返回特殊 unwinding 结果"显式退帧，与宿主栈纠缠，麻烦。
 - A2：显式走 native 帧找 handler（HotSpot 式），要与编译帧协调。
 - B：guest unwind = **显式 pop VM 帧、跑 Drop**，宿主栈（flat loop）完全不动。**干净**——这正是我们 D4"panic/catch_unwind 跨平台无痛"的原因（帧是 VM 自己的）。★
-- 跨 FFI（panic 要穿过 C 帧）：**两者都 abort**（Rust ABI：unwind 穿 C = UB → abort）。相同。
+- 跨 FFI 必须按 ABI 分治：普通 `C` 边界不允许 unwind，逃逸时终止；`C-unwind`
+  允许异常穿过并执行 cleanup。两种帧模型都必须遵守同一规则，现行合同见
+  [c-unwind-contract.md](c-unwind-contract.md)。
 - **差异**：B 的 guest unwind 明显更干净（与宿主栈解耦）；A 要显式退 native 帧（难，A1 尤甚）。
 
 ### 3.8 JIT 集成（M5，Cranelift）——A 的看家优势
@@ -342,7 +344,7 @@ A 的最大代价一直是"解释器更难写（native 栈帧布局）"。但 **
 
 **greenfield + JIT 硬约束下，mirvm 选 A（guest 帧在 native 栈）。** 佐证：最成功的两个 JIT VM（HotSpot、V8）都是 A，正因 JIT-first。B 的存在理由（协程）我们没有、B 的弱点（跨边界挂起）我们不碰，但 B 的**代价（JIT 难集成）我们全额承担**——B 在有 JIT 的世界对 mirvm 是纯负担。
 
-**A 对 mirvm 的具体形态**：每 guest 线程用其 OS 线程的 native 栈放 guest 帧；解释器按**与 Cranelift 共享的帧布局/调用约定**摆帧，起步可简单（冷层）；interp↔compiled 走 i2c/c2i 式廉价适配器（注意 A 也非零边界，HotSpot 也有适配器，只是同栈故便宜）；unwind 走一条 native 栈（解释帧+编译帧都带 unwind info），跨 FFI panic = abort；栈溢出 ≈ native（忠实）；OSR 可选、后置。
+**A 对 mirvm 的具体形态**：每 guest 线程用其 OS 线程的 native 栈放 guest 帧；解释器按**与 Cranelift 共享的帧布局/调用约定**摆帧，起步可简单（冷层）；interp↔compiled 走 i2c/c2i 式廉价适配器（注意 A 也非零边界，HotSpot 也有适配器，只是同栈故便宜）；unwind 走一条 native 栈（解释帧+编译帧都带 unwind info），普通 C 边界终止、C-unwind 边界传播并跑 cleanup；栈溢出 ≈ native（忠实）；OSR 可选、后置。
 
 ### 5.4 诚实的剩余代价（A 不免费）
 

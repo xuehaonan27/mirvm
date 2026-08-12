@@ -39,6 +39,7 @@
 | cargoless test/workspace/Git/来源合同 | 是 | 是 | 是 |
 | pack 默认 self 与 Cargo 回退合同 | 是 | 是 | 是 |
 | build.rs 增量合同 | 是 | 是 | 是 |
+| C/C-unwind 跨语言异常合同 | 是 | 是 | 是 |
 | 测试框架防假绿回归 | 是 | 是 | 是 |
 | corpus smoke 探索跑批 | 否 | 是 | 由严格 corpus 覆盖 |
 | x86 与运行时语义 | 否 | 是 | 是 |
@@ -72,6 +73,7 @@ MIRVM_DEPS=cargo ./tests/run.sh gate
 | `corpus.deps-pair` | 每个 corpus 条目的 Cargo/cargoless 三维一致 | `cases.manifest`、`corpus/` |
 | `corpus.contract` | 按 manifest 的 exit、oracle、diff、xfail 严格判定 | `cases.manifest`、`oracles/` |
 | `runtime.semantics` | 数学常量或同源 native 结果是运行时语义权威 | `demo/m4/`、`tsan/` |
+| `runtime.c-unwind` | 固定 rustc+C++ 是跨语言异常权威；解释器和强制同步 JIT 保持异常身份、Drop、普通 C 终止边界，并拒绝非 C/System ABI | `c_unwind_contract/` |
 | `runtime.x86-features` | 当前宿主 native 结果是各 x86 子能力权威 | `tests/fixtures/m51_*.rs` |
 | `runtime.tsan` | TSan 退出码为零且无数据竞争警告 | `tsan/` |
 | `runtime.jit-stats` | JIT 退出统计必须存在且关键桶非零 | `demo/jit_unwind_probe.rs` |

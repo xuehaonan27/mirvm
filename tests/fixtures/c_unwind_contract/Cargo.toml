@@ -1,0 +1,9 @@
+[package]
+name = "c-unwind-contract"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+default-run = "c-unwind-contract"
+
+[profile.dev]
+panic = "unwind"

@@ -81,7 +81,7 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
 | guest TLS dtor | M4.4 计划不运行 dtor | 实现中加入 pthread key 与最多三轮延迟析构；实例块回收仍是生命周期债务 |
 | `spread_arg` | 初判可忽略 | Rust-call ABI 真实需要 tuple 字段展平，M4.4 已实现 |
 | signal | “有 thunk 即可直通”曾被当成接近完成 | thunk 不是异步信号安全 trampoline；静默 StubZero 已移除，guest handler 当前明确 Trap，SIG_DFL/SIG_IGN 才受限直通；真实注册/投递仍未实现 |
-| guest backtrace / unwinder context | 移除 StubZero 后曾以“可 dlsym + 可回调 guest thunk”为由让 `_Unwind_Backtrace` 等走通用 host FFI | thunk 只解决调用方向，宿主 unwinder context 仍只含 libffi/解释器帧。当前除已专用实现的 Raise/Delete 外，Backtrace、Get/Set context、Resume/ForcedUnwind 家族全部明确 `Unsupported`；只在有 guest frame/IP/LSDA 翻译层及 differential probe 时重开 |
+| guest backtrace / unwinder context | 移除 StubZero 后曾以“可 dlsym + 可回调 guest thunk”为由让 `_Unwind_Backtrace` 等走通用 host FFI | thunk 只解决调用方向，宿主 unwinder context 仍只含 libffi/解释器帧。当前 Raise/Delete 有 guest 专用语义，Backtrace/GetIP/GetIPInfo/FindEnclosingFunction/GetCFA 由影子帧实现；其余 11 个 context/state/Resume/ForcedUnwind 符号明确 `Unsupported`，只在有相应 guest frame/IP/LSDA 翻译与差分探针时重开 |
 | volatile 宿主载体 | 第一版按 layout size 把 1/2/4/8/16-byte 值转成整数或对齐 8 的 `Volatile16` | `[u8;16]` alignment=1 反例触发宿主对齐 UB，含 padding 聚合值还会把未初始化字节解释为整数。现用 alignment=1 `MaybeUninit<[u8; N]>` 作 opaque 整值 volatile 事件，只作位型搬运；若未来扩展其他宽度，仍不得拆成多次 MMIO 访问 |
 | M5.0 范围 | 预期 div/cpuid/syscall 后多个 corpus 直接变绿 | 修完 asm 后暴露 `llvm.x86.*` 和静态归档下一层；实际结果以 m5-log 为准 |
 | SIMD / x86 intrinsic 路线 | M5 总设计倾向常见操作走 CLIF、异类走 asm stub；M5.1 初稿进一步提出 pshufb lane + SHA asm-stub，并扩通用向量 wrapper ABI | 标量 addcarry/subborrow/xgetbv 走 builtin；解释器向量路线改为 tcx-free stdarch target-feature helper（更小、隐式寄存器由 stdarch 处理），已由 native vector probe + c_sha2 验收为 active；旧通用 asm ABI 在 helper 面膨胀/缺 stdarch 表达时重开。JIT 的 CLIF/asm 选择不受此解释器决定封死 |
@@ -1043,8 +1043,9 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   45/45（新增 jit_unwind_probe / sat128_probe）、diff_cargo 5/5、
   m51 simd_insert/simd_shift/x86_vectors 全过、gate5 **167/0/0/0**
   （fib(32) JIT **54ms** ≤80ms 硬门维持，较 M5.4a/b 的 74ms 还收）。
-- **连带闭合/进展**：T1、E1（间接调用准入）闭合；R3 的
-  `_Unwind_Resume` 移出 Unsupported 面；E32 记进展（JIT 帧 = 真
+- **连带闭合/进展**：T1、E1（间接调用准入）闭合；JIT 内部 MIR `Resume` 已能用
+  `_Unwind_Resume` 续传宿主 unwinder，但 guest 可见的同名符号仍在 Unsupported 面；
+  E32 记进展（JIT 帧 = 真
   native 帧含真 unwinder 穿透/着陆，setjmp/longjmp 所在函数一旦发布
   即脱出 hazard 面；interp 帧路径维持原记账）。
 
@@ -2039,6 +2040,74 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   该叶 **16/16** 单独复绿。E31 两条内容变更单测、符号 ELF 单测、强制 JIT/纯解释
   backtrace 负载均在上述结果中通过。
 
+### 7.48 2026-08-12：E9 闭合；E 区性能项与接受限制归位
+
+- **E9 不再靠“没有观察到错误”**：新增 `demo/dl_iterate_phdr_probe.rs`，由 glibc
+  调用 guest 回调；回调先按 `size` 检查 `dl_phdr_info` 的公开前缀，在第一份有效 ELF
+  映像上返回固定值 73。native、纯解释和强制同步 JIT 的 stdout/stderr/退出码一致；
+  标准 `differential.programs` 默认与同步 JIT 两种入口各 **2/2**，都包含冷、热复跑。
+  地址、映像数量和路径不是稳定合同，测试不比较这些环境量。E9 关闭。
+- **E2/E5 是已知产品边界，不是待修错误**：当前不做 OSR（运行中的函数现场替换）、
+  deopt（从优化代码退回解释器）和生产级分层编译；无调用边界的长跑单循环因此不会中途
+  转 JIT。Cranelift JIT 也不支持逐函数释放，机器码随 Module 常驻。两项移入 H；前者
+  由真实长跑负载触发，后者由稳定嵌入 API 的资源有界验收触发。
+- **性能只保留一个施工入口**：原 E6/E7/E30/E37 都不描述错误语义，分别是快路径内联、
+  JIT 优化候选、旧 regex 基线复测和日志 v2。它们连同旧计量、97ms/80ms 红线、vmctx
+  复测闸门与日志估算一并并入 D16；没有删掉触发器，也没有用文档归类冒充性能已经改善。
+  按维护者现行裁定，性能基线仍延期统一恢复。
+
+### 7.49 2026-08-12：撤销 E12 的 alloca 必迁承诺
+
+- **旧选择**：2026-07-05 把 slaved 操作数区定义为 v0，承诺解释帧局部以后必须改放
+  native 栈上的动态 `alloca`；当时预期它更接近未来编译帧且局部性更好。
+- **后来证据**：生产 JIT 已经落地。热函数由 Cranelift 使用真正的 native 帧；未逃逸值
+  还能保留在 SSA/寄存器中，只有必须有地址的局部才落栈。alloca 因而只会改冷层解释器，
+  不会让解释器自动获得编译码的固定栈偏移寻址。当前 ByteRegion 也早已不是 Spike 1 的
+  `Vec<u64>`：它每线程一次 mmap、按需提交物理页、LIFO 水位分配、地址稳定且两端有
+  guard page。
+- **成本重估**：生产可用的动态 native 栈方案必须同时实现栈余量检查、跨页探测、帧清零、
+  正确的 unwind 信息和 checked 模式的逐帧地址追踪；它还让 guest 局部与解释器自己的
+  宿主栈竞争同一额度。只比较移动栈指针的微基准会漏掉这些必需成本。
+- **新选择**：解释态局部正式使用 slaved ByteRegion；编译态局部继续使用 Cranelift
+  native 帧与 SSA。撤销“alloca 是架构终态”和“后续必须迁移”，E12 从开放账移入 H。
+  这不改变 Model A：guest 调用活动仍逐层位于 native 调用栈。
+- **重开条件**：必须有可复现的真实解释器负载，证明局部存储是端到端主瓶颈；候选实现
+  计入清零、栈探测、unwind、深递归和 checked 成本后仍有显著收益，并保持现有正确性与
+  诊断合同。仅有合成微基准或“更纯”的实现偏好不足以重开。
+
+### 7.50 2026-08-12：R18 C-unwind 闭合，E13 定稿为宿主 Rust panic 运输层
+
+- **推翻的旧前提**：R18 曾认为 libffi closure 没有 unwind 信息、异常原理上不能穿过，
+  并据此把 callback panic 和 direct `C-unwind` 记作永久残余。项目实际捆绑的 libffi
+  3.6.0 在 Linux/x86_64 为 `ffi_closure_unix64` 提供 FDE；临时宿主探针让 Rust panic
+  与 C++ 异常双向穿过 closure，证明真正阻点是 mirvm 的 Rust wrapper 被写成普通
+  `extern "C"`。同样，libffi 的 `ffi_call` 机器层可传播，缺的是 Rust 侧合法的
+  `C-unwind` 声明。
+- **native 合同实测**：全链 `C-unwind` 时，C++ typed exception 穿 Rust cleanup 后仍由
+  C++ 按原类型捕获；Rust panic 经 C++ `catch(...); throw;` 后由 Rust catch 收回原 payload；
+  C++ 吞 Rust panic 必须终止。普通 C callback 的 panic 必须终止。Rust `catch_unwind`
+  遇到 foreign exception 在固定工具链上会终止，标准库也不保证捕获它。
+- **实现**：lowering 保全 direct 和 fn pointer 的 `C/System { unwind }` 位；出向调用只在
+  `unwind=true` 时用本地 `extern "C-unwind"` 声明调用同一 `ffi_call`；callback/P1 入口
+  按位选择 C 或 C-unwind wrapper。JIT 的 `try_call` 返回值改由 `TryCallRet` 正常块参数
+  承接。解释器 direct/native-indirect 调用补上 `UnwindAction::Terminate` 守卫，避免内层
+  C-unwind 异常越过 guest 普通 C wrapper。非 C/System ABI 不再默认为 plain C，而是在
+  lowering 阶段明确拒绝。
+- **验收**：标准 `runtime.c-unwind` 以固定 rustc+C++ 为 oracle，解释器和强制同步 JIT
+  十一项全绿，覆盖 C++ 类型身份、Rust payload、Drop 次数、吞 panic、plain-C panic、
+  direct/fn-pointer 两条 Terminate 边上的 foreign exception 与 Rust panic，以及两种
+  非 C/System ABI 拒绝。
+  `jit_foreign_probe` 另锁住有 cleanup 的标量返回。
+- **E13 裁决**：guest panic 正式继续用宿主 Rust panic 作运输层。guest catch 点只按
+  `GuestPanic` downcast，其余载荷继续展开；Engine 顶层把未捕获的 `GuestPanic` 映射为
+  退出码 101、把 `EngineFault` 映射为 `RunError`，只有其余宿主 panic 原样重抛。独立
+  exception class/personality 不能让标准 Rust catch 捕获 C++ 异常，反而会把 guest
+  异常先变成 foreign exception，并引入
+  自有 personality、两阶段展开和对象所有权的整套平台责任，因此不作终态承诺。
+- **重开条件**：稳定嵌入 API 明确要求分类异常越出 Engine；固定工具链升级让当前合同
+  回归变红；或实测证明 host/guest panic 共轨产生无法用局部 guard/pad 修复的错误。
+  详细合同和修复前矩阵见 `designs/c-unwind-contract.md`。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT
@@ -2050,8 +2119,8 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
 - “engine 是 library”目前只是 crate 结构；进程退出、全局 TLS key、泄漏式生命周期使其还不是稳定
   多 Engine 嵌入 API。
 - `.mirvm` mode B 与方法级 JIT 已实现；当前包格式 v3 仍未冻结且精确绑定 build_id/target。
-  v3 已有 mmap/逐函数惰性驻留，但档案直接语义验证、fat target artifact、checked 模式
-  与 alloca 局部仍只是设计或余项，不是已完成能力。
+  v3 已有 mmap/逐函数惰性驻留，但档案直接语义验证、fat target artifact 与 checked 模式
+  仍只是设计或余项，不是已完成能力。alloca 局部已由 §7.49 撤销为必做承诺。
 - static `.a`→`.so` 的受约束 Linux/ELF 切片已实现；非 PIC、跨 archive 依赖/顺序或重名、
   RTLD_DEFAULT 重名、constructor、thin、export-symbols 仍是明确拒绝面。它们需要新 link plan/
   生命周期设计，不能从 blake3 外推通用。

@@ -25,7 +25,8 @@ pub struct ThunkCache {
     map: Mutex<HashMap<(u64, ForeignSig), u64>>,
 }
 
-/// 每 thunk 冻结数据（leak 进程级；跨线程共享——Shared: Sync，其余为纯数据）。
+/// 每 thunk/条目 stub 的冻结数据（leak 进程级；跨线程共享——
+/// Shared: Sync，其余为纯数据）。
 struct ThunkData {
     engine_id: u64,
     func: FuncId,
@@ -94,21 +95,14 @@ unsafe fn repack_ret(result: *mut u8, agg: &super::ir::FfiAgg, lo: u64, hi: u64)
     }
 }
 
-/// trampoline（libffi Closure 回调，任意线程可入）：attach → 按签名搬实参 → 解释
-/// → 返回值写回。返回缓冲恒对齐（整数升位到 ffi_arg / F32 位在低 32，LE）。
+/// trampoline 与 P1 条目 stub 共用的执行体：attach → 按签名搬实参 →
+/// 解释 → 返回值写回。返回缓冲恒对齐（整数升位到 ffi_arg / F32 位在低
+/// 32，LE）。
 /// C1：ret = Agg 时分流——callee RetAbi::Indirect → result 经 call_guest_ffi 作
 /// 隐藏首实参（sret 直传，callee memcpy 至该址）；其余 → (lo,hi) 后 repack_ret
-/// 重打包为结构体字节。guest panic 穿出此边界 = extern "C" nounwind abort
-///（与 native 一致，设计 §4 风险表）。C-unwind 回调（ForeignSig.unwind 保全）
-/// 同走本蹦床——callback 内 panic 仍 abort 于边界：libffi 闭包代码无 unwind
-/// info，宿主 unwinder 原理性不可穿（R18 记档；longjmp 形不经 unwinder，
-/// 机器层不受 ABI 属性影响，可用——c_mlua_lua 实锤）。
-unsafe extern "C" fn trampoline(
-    _cif: &ffi_cif,
-    result: &mut u64,
-    args: *const *const c_void,
-    data: &ThunkData,
-) {
+/// 重打包为结构体字节。ABI 边界是否允许展开由外层 wrapper 决定，本体不复制
+/// 两份语义。
+unsafe fn trampoline_body(result: &mut u64, args: *const *const c_void, data: &ThunkData) {
     let Some(shared) = super::ctx::engine(data.engine_id) else {
         super::interp::engine_abort("thunk 所属 Engine 已结束");
     };
@@ -140,6 +134,56 @@ unsafe extern "C" fn trampoline(
     }
 }
 
+/// 普通 `extern "C"` 边界：guest panic 或 foreign exception 不得穿出，
+/// Rust 在该边界上保持 native 的 abort 语义。
+unsafe extern "C" fn trampoline_c(
+    _cif: &ffi_cif,
+    result: &mut u64,
+    args: *const *const c_void,
+    data: &ThunkData,
+) {
+    unsafe { trampoline_body(result, args, data) }
+}
+
+/// `extern "C-unwind"` 边界：允许 guest panic 或 foreign exception 继续穿过
+/// libffi closure，交给外层 Rust/C++ handler 处理。
+unsafe extern "C-unwind" fn trampoline_c_unwind(
+    _cif: &ffi_cif,
+    result: &mut u64,
+    args: *const *const c_void,
+    data: &ThunkData,
+) {
+    unsafe { trampoline_body(result, args, data) }
+}
+
+type ThunkCallback = libffi::low::Callback<ThunkData, u64>;
+
+/// libffi 5.x 在 Rust API 中把 closure callback 类型固定写成了
+/// `extern "C"`，但 C 与 C-unwind 的机器调用约定相同；差别只在 Rust
+/// 是否允许 unwinder 穿过该函数边界。libffi 只保存并从原生 closure
+/// 蹦床间接调用这个地址，不会通过转换后的 Rust `extern "C"` 类型调用
+/// 它。因此这里只擦除类型层差异，实际入口仍是 C-unwind wrapper。
+fn callback_for(unwind: bool) -> ThunkCallback {
+    if unwind {
+        let callback: unsafe extern "C-unwind" fn(
+            &ffi_cif,
+            &mut u64,
+            *const *const c_void,
+            &ThunkData,
+        ) = trampoline_c_unwind;
+        // SAFETY: 两种 ABI 的机器签名一致；转换后的值只作为不透明
+        // callback 地址交给 libffi，不经 Rust `extern "C"` 调用点执行。
+        unsafe {
+            std::mem::transmute::<
+                unsafe extern "C-unwind" fn(&ffi_cif, &mut u64, *const *const c_void, &ThunkData),
+                ThunkCallback,
+            >(callback)
+        }
+    } else {
+        trampoline_c
+    }
+}
+
 /// 取或造：同一 (条目地址, 签名) 恒得同一真码地址（fn ptr 相等语义）。
 pub fn get_or_create(shared: &Shared, entry: u64, func: FuncId, sig: &ForeignSig) -> u64 {
     let key = (entry, sig.clone());
@@ -157,7 +201,7 @@ pub fn get_or_create(shared: &Shared, entry: u64, func: FuncId, sig: &ForeignSig
         args: sig.args.clone().into(),
         ret: sig.ret.clone(),
     }));
-    let closure = Closure::new(cif, trampoline, data);
+    let closure = Closure::new(cif, callback_for(sig.unwind), data);
     let code = *closure.code_ptr() as usize as u64;
     std::mem::forget(closure); // 进程级永生（可执行页不回收——guest 持有码地址）
     map.insert(key, code);
@@ -165,53 +209,6 @@ pub fn get_or_create(shared: &Shared, entry: u64, func: FuncId, sig: &ForeignSig
 }
 
 // ===== P1 条目可执行化（decision-history §7.6）=====
-
-/// 每条目 stub 的冻结数据（leak 进程级——guest 可长期持有码地址）。
-struct EntryThunkData {
-    engine_id: u64,
-    func: FuncId,
-    args: Box<[FfiKind]>,
-    ret: FfiKind,
-}
-
-/// 条目 stub 的统一蹦床：attach → 搬参 → 解释 → 写回（trampoline 同款边界
-/// 纪律；panic 穿出 = abort）。C1：ret = Agg 的分流与重打包同 trampoline。
-unsafe extern "C" fn entry_trampoline(
-    _cif: &ffi_cif,
-    result: &mut u64,
-    args: *const *const c_void,
-    data: &EntryThunkData,
-) {
-    let Some(shared) = super::ctx::engine(data.engine_id) else {
-        super::interp::engine_abort("条目 stub 所属 Engine 已结束");
-    };
-    let activation = super::ctx::activate(&shared);
-    let ctx = activation.ctx();
-    let av = unsafe { marshal_args(&data.args, args) };
-    match &data.ret {
-        FfiKind::Agg(agg) => {
-            let (lo, hi) = super::interp::call_guest_ffi(
-                ctx,
-                data.func,
-                &data.args,
-                &av,
-                Some(result as *mut u64 as u64),
-            );
-            if !matches!(
-                super::interp::ret_abi_of(ctx, data.func),
-                super::ir::RetAbi::Indirect { .. }
-            ) {
-                unsafe { repack_ret(result as *mut u64 as *mut u8, agg, lo, hi) };
-            }
-        }
-        _ => {
-            let (lo, _hi) = super::interp::call_guest_ffi(ctx, data.func, &data.args, &av, None);
-            if data.ret != FfiKind::Void {
-                *result = lo;
-            }
-        }
-    }
-}
 
 /// 按配方物化单域全部 stub（先填后封 RX）：sites 位序 = stub 偏移序（lower 按
 /// 同序 addr_of 烤进字节码的值，alloc_stub 必须逐位复现）。closure 进程级 leak
@@ -226,13 +223,13 @@ fn materialize_domain(
             site.sig.args.iter().map(super::ffi::ffi_type),
             super::ffi::ffi_type(&site.sig.ret),
         );
-        let data: &'static EntryThunkData = Box::leak(Box::new(EntryThunkData {
+        let data: &'static ThunkData = Box::leak(Box::new(ThunkData {
             engine_id,
             func: site.func,
             args: site.sig.args.clone().into(),
             ret: site.sig.ret.clone(),
         }));
-        let closure = Closure::new(cif, entry_trampoline, data);
+        let closure = Closure::new(cif, callback_for(site.sig.unwind), data);
         let code = *closure.code_ptr() as usize as u64;
         std::mem::forget(closure);
         let addr = arena.alloc_stub();
@@ -270,4 +267,61 @@ pub fn materialize_all_entry_stubs(
         module.image_entry_stubs.push((home, sites, arena));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct PanicProbe;
+
+    unsafe extern "C-unwind" fn panic_probe(
+        _cif: &ffi_cif,
+        _result: &mut u64,
+        _args: *const *const c_void,
+        _data: &PanicProbe,
+    ) {
+        std::panic::panic_any(0x18u8);
+    }
+
+    #[test]
+    fn callback_selector_keeps_distinct_abi_wrappers() {
+        assert_eq!(callback_for(false) as *const (), trampoline_c as *const ());
+        assert_eq!(
+            callback_for(true) as *const (),
+            trampoline_c_unwind as *const ()
+        );
+    }
+
+    #[test]
+    fn libffi_closure_preserves_c_unwind_callback() {
+        let callback: unsafe extern "C-unwind" fn(
+            &ffi_cif,
+            &mut u64,
+            *const *const c_void,
+            &PanicProbe,
+        ) = panic_probe;
+        // SAFETY: 与 callback_for 相同：只向 libffi 传递地址，实际入口
+        // 仍是 C-unwind；测试下方也以 C-unwind 类型调用 closure 代码。
+        let callback: libffi::low::Callback<PanicProbe, u64> = unsafe {
+            std::mem::transmute::<
+                unsafe extern "C-unwind" fn(&ffi_cif, &mut u64, *const *const c_void, &PanicProbe),
+                libffi::low::Callback<PanicProbe, u64>,
+            >(callback)
+        };
+        let data = PanicProbe;
+        let closure = Closure::new(
+            Cif::new(
+                std::iter::empty::<libffi::middle::Type>(),
+                libffi::middle::Type::u64(),
+            ),
+            callback,
+            &data,
+        );
+        let code: &unsafe extern "C-unwind" fn() -> u64 = unsafe { closure.instantiate_code_ptr() };
+
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { code() }));
+        let payload = caught.expect_err("C-unwind callback 不应吞掉 panic");
+        assert_eq!(payload.downcast_ref::<u8>(), Some(&0x18));
+    }
 }

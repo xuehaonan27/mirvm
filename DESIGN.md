@@ -320,8 +320,16 @@ src/os/
   - **unwind = 候选 A**（复用 Cranelift landing-pad + Rust personality，因 JIT 定 Cranelift）；候选 B（自研栈行走）兜底。头号 M4 前置 spike。
   - **字节码贴近 MIR**（不下沉 CLIF）→ 解释器与 JIT 共享 MIR 级真理源、复用 cg_clif。**两级结构**：mirvmc（rustc 前端全 check → **Stable MIR/rustc_public + serde** → .mirvm 分发件，= .class/.jar 类比）；运行期"class loading"（按 target 冻结 layout C8 → 解释器寄存器字节码 + 喂 Cranelift，每平台一次缓存）。版本绑定诚实（classfile 版本号式，semver 转换）。
   - **分发格式 = 多 target 打包（定，2026-07-05 用户确认）**：**单产物跑任意 target 对完整 Rust 理论上不可能**（cfg 编译期按 target 剪枝=字面不同的程序 + usize/可观测 layout/const-eval；Java 能因无编译期 cfg/JVM 定 layout/定长基本类型，Rust 三条全违反=语言固有）。**采纳 fat artifact**：mirvmc 对 N 个 triple 各跑前端、打包 N 段（`.mirvm` 容器 = target 索引 + 各段 Stable-MIR），运行期挑匹配段 load → 消费端零工具链、覆盖常见平台、运行期可 JIT。os:: 每平台 build 时选定，与分发格式无关。
-  - **迁移承诺**：slaved 操作数区仅 v0，**后续必换 alloca**（真内联 native 栈；Rust 里需 unsafe/crate）。
-- **C13 VM 鲁棒性 / guest 打穿 VM（2026-07-05，详见 concurrency-arch.md §6）**：真实地址下 guest 与 VM 共享地址空间，故 guest **unsafe UB / FFI 缺陷 / inline asm** 能写 VM 自有内存 → 崩。**但 safe guest 代码证明上做不到（C3），只有 UB/native 缺陷能触发**。根本张力：真实地址与 Wasm 式廉价封闭不兼容、无免费午餐。**分层（用户定：砍 L2 MPK[太 arch-specific]/L4 沙箱[out of scope]，聚焦 L1+L3）**：L0 类型系统（白送，覆盖 safe 代码）；**L1 结构隔离**（VM 内存放已知地址区+guard page，且让 L3 检查退化成单次范围比较）；**L3 checked 模式**（opt-in，不可信/LLM 用）——**关键：Rust 类型系统让它比 Wasm 便宜**：safe 引用访问证明上有效不查，**只查 raw 指针解引用**（MIR 按指针类型区分，检查点极少）；检查=region check（addr∈guest 区，compare+branch predicted-taken）；**JIT 能插检查**（我们做 MIR→CLIF 降低，Cranelift 编我们给的 CLIF，机器码不脱掌控）；借 JVM（BCE 静态消除、deopt/profile；implicit-trap guard-page 对我们难因 guest 内存散=Wasm Memory64 问题）；诚实界（只查 raw 解引用漏"洗进 &T"路径，但野写几乎都走 raw 指针，性价比高；checked 是 lite→full Miri 的谱）。**Model-A 相互作用**：slaved 区让检查便宜、alloca 让检查难→checked 青睐 slaved 区。**解耦要求（用户定）：帧局部存储（slaved/alloca 轴 F）与安全模式（fast/checked 轴 S）是正交轴、实现不得耦合**，只在 `GuestMemory::contains(addr)` 谓词处相遇（fast 不调/checked 调；FrameStorage 提供，slaved=廉价范围比较/alloca=较贵）；**暂定配对 alloca+fast/slaved+checked 是默认配置非 hardwire**，任意组合可跑（同 JITBackend/os:: 纪律）。M4 定。profile checked 开销、opt-in。与 §7 OS 沙箱同源。
+  - **解释帧局部终裁（2026-08-12）**：slaved ByteRegion 是正式方案；JIT 编译帧已由
+    Cranelift 使用 native 栈与 SSA。alloca 不再是必做终态，只在真实解释器负载证明端到端
+    收益后重开（decision-history §7.49）。
+- **C13 VM 鲁棒性 / guest 打穿 VM（2026-07-05，详见 concurrency-arch.md §6）**：真实地址下 guest 与 VM 共享地址空间，故 guest **unsafe UB / FFI 缺陷 / inline asm** 能写 VM 自有内存 → 崩。**但 safe guest 代码证明上做不到（C3），只有 UB/native 缺陷能触发**。根本张力：真实地址与 Wasm 式廉价封闭不兼容、无免费午餐。**分层（用户定：砍 L2 MPK[太 arch-specific]/L4 沙箱[out of scope]，聚焦 L1+L3）**：L0 类型系统（白送，覆盖 safe 代码）；**L1 结构隔离**（VM 内存放已知地址区+guard page，且让 L3 检查退化成单次范围比较）；**L3 checked 模式**（opt-in，不可信/LLM 用）——**关键：Rust 类型系统让它比 Wasm 便宜**：safe 引用访问证明上有效不查，**只查 raw 指针解引用**（MIR 按指针类型区分，检查点极少）；检查=region check（addr∈guest 区，compare+branch predicted-taken）；**JIT 能插检查**（我们做 MIR→CLIF 降低，Cranelift 编我们给的 CLIF，机器码不脱掌控）；借 JVM（BCE 静态消除、deopt/profile；implicit-trap guard-page 对我们难因 guest 内存散=Wasm Memory64 问题）；诚实界（只查 raw 解引用漏"洗进 &T"路径，但野写几乎都走 raw 指针，性价比高；checked 是 lite→full Miri 的谱）。**Model-A 相互作用**：slaved 区让检查便宜，alloca 需要更贵的逐帧追踪；2026-08-12 已终裁解释器正式保留 slaved，alloca 只作真实性能证据触发的候选（decision-history §7.49）。checked 与局部存储仍通过 `GuestMemory::contains(addr)` 的窄接口解耦，不把安全语义硬编码进存储实现。profile checked 开销、opt-in。与 §7 OS 沙箱同源。
+- **FFI unwind 合同（2026-08-12）**：direct libffi 调用、native fn pointer、callback
+  thunk 与 P1 条目都保全并消费源 `C/System { unwind }` 属性。普通 C 是终止边界；
+  C-unwind 允许原 Rust panic/C++ exception 穿过并执行 cleanup，不做跨语言异常转换。
+  guest panic 继续以宿主 Rust panic 运输，在 guest catch 点及 Engine 顶层未捕获 panic
+  出口按类型区分；详见
+  `docs/designs/c-unwind-contract.md` 与 decision-history §7.50。
 
 ### 工程决策
 

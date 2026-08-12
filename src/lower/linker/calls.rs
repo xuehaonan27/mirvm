@@ -136,6 +136,12 @@ impl<'tcx> Linker<'tcx> {
             .fn_sig(inst.def_id())
             .instantiate(self.tcx, inst.args)
             .skip_binder();
+        let unwind = crate::lower::ffi_sig::c_abi_unwind(sig.abi()).ok_or_else(|| {
+            format!(
+                "foreign `{name}` ABI {:?} 不支持 libffi 直通（仅支持 C/System 及其 unwind 形式）",
+                sig.abi()
+            )
+        })?;
         let env = TypingEnv::fully_monomorphized();
         let mut args = Vec::with_capacity(sig.inputs().len());
         let mut thunk_args = Vec::new();
@@ -163,13 +169,16 @@ impl<'tcx> Linker<'tcx> {
                 if inner.c_variadic() {
                     return Err(format!("foreign `{name}` 参数 {t}: 变参回调不支持 thunk"));
                 }
-                // F-09：C-unwind 回调收——unwind 属性保全进内层签名
-                //（callback 形 panic 仍 abort 于 nounwind trampoline，R18 记档）
-                let inner_unwind = matches!(
-                    inner.abi(),
-                    rustc_abi::ExternAbi::C { unwind: true }
-                        | rustc_abi::ExternAbi::System { unwind: true }
-                );
+                // F-09/R18：C-unwind 回调的 unwind 属性保全进内层签名，
+                // thunk/P1 工厂据此选择可展开入口。
+                let inner_unwind = crate::lower::ffi_sig::c_abi_unwind(inner.abi()).ok_or_else(
+                    || {
+                        format!(
+                            "foreign `{name}` 回调 `{t}` 的 ABI {:?} 不支持 thunk（仅支持 C/System 及其 unwind 形式）",
+                            inner.abi()
+                        )
+                    },
+                )?;
                 let mut in_args = Vec::with_capacity(inner.inputs().len());
                 for &it in inner.inputs() {
                     let k = ffi_kind_of(self.tcx, env, it).map_err(|e| {
@@ -204,6 +213,7 @@ impl<'tcx> Linker<'tcx> {
             ret,
             variadic: sig.c_variadic(),
             thunk_args,
+            unwind,
         })
     }
 

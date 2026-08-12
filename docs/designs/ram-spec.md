@@ -117,7 +117,10 @@ UB 程序**不对拍**（两边都可任意）。
   或**接收控制权**（thunk 入）。native 的内存分配（Native Heap）、native 内部行为**在 RAM 之外**。
 - **inline asm**：RAM 内一段**不透明机器码效果**——不是 RAM 计算的一部分，mirvm 只能模拟其效果或函数级
   拦截（§7/C10）。
-- **跨边界的 UB**：Rust ABI 规定 unwind 穿 native 帧 = UB → mirvm **abort**（= native）。
+- **跨边界异常**：普通 `extern "C"` 不允许 unwind；Rust panic 从该边界逃出会终止，
+  foreign exception 反向穿入 Rust 属于 UB。`extern "C-unwind"` 明确允许系统展开器穿过，
+  mirvm 必须跑沿途 cleanup 并保留异常对象。Rust `catch_unwind` 不保证捕获 foreign
+  exception；固定工具链当前在它到达时终止。详见 [c-unwind-contract.md](c-unwind-contract.md)。
 
 含义：**"能在 mirvm 跑 ≈ 能通过 rustc 编译并在 native 跑"**，边界处两实现同样"移交给 native"——一致性在
 边界处由"双方都调真 native"保证。

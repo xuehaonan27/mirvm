@@ -1,21 +1,25 @@
-//! os::dll — Linux 动态装载原语：dlopen/dlsym/dlerror/dlinfo 装载基址。
-//!
-//! 归并：ffi.rs（ensure_libs 的 dlopen 两档 + 各级 dlsym）、lower/mod.rs
-//! （weak 缺席探测与必需库预载）、elfsym.rs（dlinfo 取 l_addr）。
-//! 绑定优先序（归档兜底→必需句柄→全域→可选句柄）与「符号不存在」的业务
-//! 语义留调用方；本层只供单发原语。句柄按 usize 出入（leaf 类型纪律）。
+//! Linux dynamic loading primitives.
+//! This layer is only for single issue primitives.
+//! Handles and return values are passed as [`usize`] (leaf type discipline).
+//! Business semantics like binding priority and symbol existence are left to
+//! the caller.
 
 use std::ffi::CStr;
 
-/// dlopen 档位（全部调用点恒带 RTLD_GLOBAL，固化为内部常量）。
+/// The dlopen mode.
+/// All call points always carry RTLD_GLOBAL (fixed as an internal constant).
 #[derive(Clone, Copy)]
 pub enum Mode {
     Now,
     Lazy,
 }
 
-/// dlopen：成功 = 句柄（usize，非 0）；失败 = Err（dlerror 详情——粘滞
-/// 线程局部状态，本函数内先清空再复制，调用方拿到的即是本失败文案）。
+/// `dlopen`.
+/// # Return value
+///
+/// - Success: handle(usize, non-zero).
+/// - Failure: Err with dlerror details. Message string is cleared and copied
+///   within this function, the caller gets owned failure message.
 pub fn open(path: &CStr, mode: Mode) -> Result<usize, String> {
     let flag = match mode {
         Mode::Now => libc::RTLD_NOW,
@@ -24,9 +28,10 @@ pub fn open(path: &CStr, mode: Mode) -> Result<usize, String> {
     open_with_flags(path, flag)
 }
 
-/// dlopen 显式旗形态（测试/局部可见性用；产品路径用 `open`）。
+/// `dlopen` with explicit flag form.
+/// Used for testing/partial visibility; use [`open`] for product paths.
 pub fn open_with_flags(path: &CStr, flag: i32) -> Result<usize, String> {
-    unsafe { libc::dlerror() }; // 清空粘滞错误
+    unsafe { libc::dlerror() }; // clear dlerror.
     let h = unsafe { libc::dlopen(path.as_ptr(), flag) };
     if h.is_null() {
         return Err(error_string());
@@ -34,37 +39,47 @@ pub fn open_with_flags(path: &CStr, flag: i32) -> Result<usize, String> {
     Ok(h as usize)
 }
 
-/// dlopen 常用旗常量（`open_with_flags` 的组合素材）。
+/// Commonly used flag constants for `dlopen`.
 pub const RTLD_NOW: i32 = libc::RTLD_NOW;
 pub const RTLD_LOCAL: i32 = libc::RTLD_LOCAL;
 
-/// dlclose。进程级 native 库句柄仍由其调用方有意常驻；Engine 私有且地址不逃逸的
-/// 符号镜像在 Module 析构时用本入口配对释放。
+/// `dlclose`.
+/// Process-level native library handles remain intentionally persistent with
+/// their caller.
+/// The symbolic image which is private to the Engine and with non-escapeable
+/// addresses is released using this entry point during Module destruction.
 ///
 /// # Safety
-/// handle 必须出自本层 open 且之后不再 dlsym。
+/// Handles must originate from [`open`] in this module and should not be
+/// [`sym`]ed again afterward.
 pub unsafe fn close(handle: usize) {
     unsafe { libc::dlclose(handle as *mut libc::c_void) };
 }
 
-/// dlsym 单发：命中 = 地址（非 0），未命中 = 0。handle = 0 表示全域
-/// （RTLD_DEFAULT 语义；glibc 下 dlsym(NULL, ...)）。
+/// dlsym (single issued)
+/// # Return value
+/// - hit: address (non-zero)
+/// - miss: 0.
+///
+/// Handle = 0 indicates global (RTLD_DEFAULT semantics; dlsym(NULL, ...) in glibc).
 pub fn sym(handle: usize, name: &CStr) -> usize {
     unsafe { libc::dlsym(handle as *mut libc::c_void, name.as_ptr()) as usize }
 }
 
-/// dlerror 当前值（无 = 固定兜底文案；先读先清是调用方节奏——
-/// 仅 `open` 内部使用时序正确，外露仅供特殊调用点）。
+/// The current value of dlerror.
+/// When dlerror message is empty, [`error_string`] returns fixed message
+/// `[dlerror without value]`. It's caller's duty to take care of this. Only
+/// used internally by [`open`] for correct timing.
 pub fn error_string() -> String {
     let e = unsafe { libc::dlerror() };
     if e.is_null() {
-        "dlerror 未提供详情".into()
+        "[dlerror without value]".into()
     } else {
         unsafe { CStr::from_ptr(e) }.to_string_lossy().into_owned()
     }
 }
 
-// glibc link_map（dlinfo RTLD_DI_LINKMAP 返回）的最小字段布局。
+// Minimal field layout of glibc link_map (returned by dlinfo RTLD_DI_LINKMAP).
 #[repr(C)]
 struct LinkMap {
     l_addr: usize,
@@ -74,8 +89,10 @@ struct LinkMap {
     l_prev: *mut LinkMap,
 }
 
-/// dlopen 句柄的装载基址（dlinfo → link_map.l_addr）。None = dlinfo 失败
-/// （句柄非法——刚 dlopen 的句柄不应发生）。
+/// The load base address of the dlopen handle (dlinfo => link_map.l_addr).
+/// If returns [`None`], it means [`dlinfo`] fails, and that usually means an
+/// invalid handle is passed to [`load_bias`].
+/// A handle just opened by [`dlopen`] should not be invalid.
 pub fn load_bias(handle: usize) -> Option<usize> {
     let mut lm: *mut LinkMap = std::ptr::null_mut();
     let r = unsafe {

@@ -2229,9 +2229,10 @@ impl Translator<'_, '_> {
     /// T1-c：try_call 的异常表发射器——异常表 tag0 → pad 块（TryCallExn(0)
     /// 块参 = 异常指针落点，def exception_var 后跳 IR cleanup 块）；normal
     /// 指向新建 ok 块（调用方在其上做 ret 写回再跳 IR target）。
-    /// 返回 (异常表, ok 块, pad 块)；调用方必须先在当前延续块发 try_call，
-    /// 再调用 `enter_cleanup_continuation` 填 pad 并进入 ok 块。Cranelift 不允许
-    /// 在 try_call 终结当前块之前临时切去 pad。
+    /// 返回 (异常表, ok 块, pad 块)；被调签名的返回值经 `TryCallRet` 传给
+    /// ok 块参数。调用方必须先在当前延续块发 try_call，再调用
+    /// `enter_cleanup_continuation` 填 pad 并进入 ok 块。Cranelift 不允许在
+    /// try_call 终结当前块之前临时切去 pad。
     ///（try_call 必须发在进入时的**当前块**而非 blocks[bi]——同一 IR 块内
     /// 前置 stmt 可能已把延续移进辅助块（div_zero_if/repeat_loop 等），
     /// 回 blocks[bi] 会在 brif 后追加指令 = verifier 拒收，strict 实证）
@@ -2250,7 +2251,12 @@ impl Translator<'_, '_> {
         let pad = self.b.create_block();
         self.b.append_block_param(pad, types::I64);
         let ok = self.b.create_block();
-        let normal = BlockCall::new(ok, [], &mut self.b.func.dfg.value_lists);
+        let mut normal_args = Vec::with_capacity(sig.returns.len());
+        for (i, ret) in sig.returns.iter().enumerate() {
+            self.b.append_block_param(ok, ret.value_type);
+            normal_args.push(BlockArg::TryCallRet(i as u32));
+        }
+        let normal = BlockCall::new(ok, normal_args, &mut self.b.func.dfg.value_lists);
         let pad_call = self.b.func.dfg.block_call(pad, &[BlockArg::TryCallExn(0)]);
         let sigref = self.b.func.import_signature(sig);
         let et = self
@@ -2717,8 +2723,8 @@ impl Translator<'_, '_> {
                 let nv = self.b.ins().iconst(types::I64, av.len() as i64);
                 let fv = self.b.ins().iconst(types::I64, func as i64);
                 macro_rules! foreign_write_back {
-                    ($call:expr) => {
-                        let r = self.b.inst_results($call)[0];
+                    ($r:expr) => {
+                        let r = $r;
                         match ret {
                             RetDest::Ignore => {}
                             RetDest::Scalar(p) => {
@@ -2740,12 +2746,11 @@ impl Translator<'_, '_> {
                     sig0.returns.push(AbiParam::new(types::I64));
                     let (et, ok, pad) = self.prepare_cleanup(sig0);
                     let z = self.b.ins().iconst(types::I64, 0);
-                    let call =
-                        self.b
-                            .ins()
-                            .try_call(fref, &[sp, sl, sg, ap, nv, ret_dst, fv, z], et);
+                    self.b
+                        .ins()
+                        .try_call(fref, &[sp, sl, sg, ap, nv, ret_dst, fv, z], et);
                     self.enter_cleanup_continuation(pad, *bb, ok, blocks);
-                    foreign_write_back!(call);
+                    foreign_write_back!(self.b.block_params(ok)[0]);
                     self.b.ins().jump(blocks[*target as usize], &[]);
                 } else {
                     let term = self.b.ins().iconst(
@@ -2756,7 +2761,7 @@ impl Translator<'_, '_> {
                         .b
                         .ins()
                         .call(fref, &[sp, sl, sg, ap, nv, ret_dst, fv, term]);
-                    foreign_write_back!(call);
+                    foreign_write_back!(self.b.inst_results(call)[0]);
                     self.b.ins().jump(blocks[*target as usize], &[]);
                 }
             }

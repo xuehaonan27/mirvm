@@ -1,4 +1,5 @@
-//! Linux 实现汇总（os 层唯一平台实现；各子模块契约见各自模块头）。
+//! Linux implementations summary.
+//! See the respective module header for the contract of each submodule.
 
 pub mod dll;
 pub mod mem;

@@ -38,6 +38,8 @@ pub(crate) enum Callee {
         ret: ir::FfiKind,
         variadic: bool,
         thunk_args: Vec<(usize, ir::ForeignSig)>,
+        /// 外层 foreign 声明是否允许异常越过调用边界（C-unwind/System-unwind）。
+        unwind: bool,
     },
 }
 

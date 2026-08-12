@@ -10,11 +10,24 @@
 //! 变参函数用 Cif::new_variadic(尾参类别由调用点实参冻结，x86_64 AL 语义 libffi 负责)。
 
 use std::collections::HashMap;
-use std::ffi::CString;
+use std::ffi::{CString, c_void};
+use std::mem::MaybeUninit;
 
 use libffi::middle::{Arg, Cif, CodePtr, Ret, Type as FfiType};
 
 use super::ir::{FfiKind, ForeignSig};
+
+// libffi-sys 把 ffi_call 声明成 plain C，Rust 因而不允许异常越过那次调用。
+// 同一原生符号另以 C-unwind 声明，只供 ForeignSig.unwind=true 的调用使用。
+unsafe extern "C-unwind" {
+    #[link_name = "ffi_call"]
+    fn ffi_call_unwind(
+        cif: *mut libffi::raw::ffi_cif,
+        fun: Option<unsafe extern "C" fn()>,
+        rvalue: *mut c_void,
+        avalue: *mut *mut c_void,
+    );
+}
 
 /// 每线程 FFI 状态（dlsym 结果缓存 + dlopen 句柄；dlsym 幂等，M4.4 各线程独立缓存无碍）。
 #[derive(Default)]
@@ -108,10 +121,11 @@ impl FfiState {
         }
 
         for cand in required_libs {
-            let cpath =
-                CString::new(&**cand).map_err(|_| format!("必需原生库路径含 NUL: `{cand}`"))?;
-            let h = crate::os::dll::open(&cpath, crate::os::dll::Mode::Now)
-                .map_err(|detail| format!("dlopen 必需原生库 `{cand}` 失败: {detail}"))?;
+            let cpath = CString::new(&**cand)
+                .map_err(|_| format!("[native library path must contains NUL]: `{cand}`"))?;
+            let h = crate::os::dll::open(&cpath, crate::os::dll::Mode::Now).map_err(|detail| {
+                format!("[dlopen needs native library] `{cand}` failure: {detail}")
+            })?;
             self.required_handles.push(h);
             // hidden 符号 .symtab 兜底表（口径见字段注）。基址或解析失败不建表：
             // dlsym 可见面不受影响，hidden 符号由 resolve 的既有诊断兜底——宁缺
@@ -288,6 +302,16 @@ pub fn call_addr(fnptr: usize, sig: &ForeignSig, args: &[u64], ret_dst: Option<u
             _ => Arg::new(buf),
         })
         .collect();
+    let mut raw_args = sig.unwind.then(|| {
+        args.iter()
+            .zip(sig.args.iter())
+            .zip(bufs.iter())
+            .map(|((&v, k), buf)| match k {
+                FfiKind::Agg(_) => v as usize as *mut c_void,
+                _ => buf.as_ptr().cast_mut().cast(),
+            })
+            .collect::<Vec<*mut c_void>>()
+    });
 
     if let FfiKind::Agg(agg) = &sig.ret {
         // C1 按值聚合返回：结果缓冲按 8 对齐桶分配（align>8 已在 freeze 边界拒），
@@ -296,7 +320,14 @@ pub fn call_addr(fnptr: usize, sig: &ForeignSig, args: &[u64], ret_dst: Option<u
         let dst = ret_dst.expect("按值聚合返回的调用方目的地址（引擎不变量）");
         let mut rbuf: Vec<u64> = vec![0; (agg.size as usize).div_ceil(8)];
         unsafe {
-            cif.call_return_into(CodePtr(fnptr as *mut _), &ffi_args, Ret::new(&mut rbuf[..]));
+            call_return_into(
+                &cif,
+                fnptr,
+                sig.unwind,
+                &ffi_args,
+                raw_args.as_deref_mut(),
+                &mut rbuf[..],
+            );
             std::ptr::copy_nonoverlapping(
                 rbuf.as_ptr() as *const u8,
                 dst as *mut u8,
@@ -309,14 +340,234 @@ pub fn call_addr(fnptr: usize, sig: &ForeignSig, args: &[u64], ret_dst: Option<u
     // SAFETY: 地址来自 dlsym / guest 持有的真码指针；签名按 rustc fn sig layout 冻结；
     // guest 缓冲即宿主缓冲。fast 立场（C4）：native 调用的正确性由 guest 程序负责。
     unsafe {
-        cif.call_return_into(CodePtr(fnptr as *mut _), &ffi_args, Ret::new(&mut ret[..]));
+        call_return_into(
+            &cif,
+            fnptr,
+            sig.unwind,
+            &ffi_args,
+            raw_args.as_deref_mut(),
+            &mut ret[..],
+        );
     }
     u64::from_le_bytes(ret)
 }
 
+/// 按冻结 ABI 选择 plain C / C-unwind ffi_call。C 路径保留 libffi crate 的
+/// 原声明；unwind 路径只改变 Rust 看见的边界属性，不改 CIF 与实参布局。
+unsafe fn call_return_into<T: ?Sized>(
+    cif: &Cif,
+    fnptr: usize,
+    unwind: bool,
+    ffi_args: &[Arg<'_>],
+    raw_args: Option<&mut [*mut c_void]>,
+    ret: &mut T,
+) {
+    if !unwind {
+        unsafe {
+            cif.call_return_into(CodePtr(fnptr as *mut _), ffi_args, Ret::new(ret));
+        }
+        return;
+    }
+
+    let raw_args = raw_args.expect("C-unwind ffi_call 必须准备原始实参数组");
+    assert_eq!(
+        unsafe { (*cif.as_raw_ptr()).nargs as usize },
+        raw_args.len(),
+        "C-unwind ffi_call 实参与 CIF 不等长"
+    );
+    unsafe {
+        call_return_into_unwind(
+            cif.as_raw_ptr(),
+            fnptr,
+            raw_args.as_mut_ptr(),
+            (ret as *mut T).cast(),
+        );
+    }
+}
+
+/// libffi::low::call_return_into 的 C-unwind 等价实现。小整数返回时 libffi
+/// 会写满一个寄存器，必须先收进 usize 再只复制真实宽度，避免覆盖调用方缓冲。
+unsafe fn call_return_into_unwind(
+    cif: *mut libffi::raw::ffi_cif,
+    fnptr: usize,
+    args: *mut *mut c_void,
+    ret: *mut c_void,
+) {
+    let rtype = unsafe { (*cif).rtype };
+    let return_size = unsafe { (*rtype).size };
+    let return_kind = unsafe { (*rtype).type_ };
+    let fun: unsafe extern "C" fn() = unsafe { std::mem::transmute(fnptr) };
+
+    if return_size >= std::mem::size_of::<usize>()
+        || return_kind == libffi::raw::FFI_TYPE_FLOAT
+        || return_kind == libffi::raw::FFI_TYPE_STRUCT
+        || return_kind == libffi::raw::FFI_TYPE_VOID
+    {
+        unsafe { ffi_call_unwind(cif, Some(fun), ret, args) };
+        return;
+    }
+
+    let mut register = MaybeUninit::<usize>::uninit();
+    unsafe {
+        ffi_call_unwind(cif, Some(fun), register.as_mut_ptr().cast(), args);
+    }
+    let register = unsafe { register.assume_init() };
+    let src = if cfg!(target_endian = "big") {
+        (&register as *const usize)
+            .cast::<u8>()
+            .wrapping_add(std::mem::size_of::<usize>() - return_size)
+    } else {
+        (&register as *const usize).cast::<u8>()
+    };
+    unsafe { std::ptr::copy_nonoverlapping(src, ret.cast(), return_size) };
+}
+
 #[cfg(test)]
 mod tests {
-    use super::FfiState;
+    use super::{FfiState, call_addr};
+    use crate::vm::engine::ir::{FfiAgg, FfiField, FfiKind, FfiLeaf, ForeignSig};
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct AggregateProbe {
+        wide: u64,
+        narrow: u32,
+    }
+
+    fn sig(args: Vec<FfiKind>, ret: FfiKind, fixed: Option<usize>, unwind: bool) -> ForeignSig {
+        ForeignSig {
+            args,
+            ret,
+            fixed,
+            thunk_args: vec![],
+            unwind,
+        }
+    }
+
+    unsafe extern "C" fn plain_add_one(v: u64) -> u64 {
+        v + 1
+    }
+
+    unsafe extern "C-unwind" fn unwind_panics() {
+        std::panic::panic_any(0x18_u32);
+    }
+
+    unsafe extern "C-unwind" fn unwind_i8() -> i8 {
+        -7
+    }
+
+    unsafe extern "C-unwind" fn unwind_u16() -> u16 {
+        0xabcd
+    }
+
+    unsafe extern "C-unwind" fn unwind_aggregate(value: AggregateProbe) -> AggregateProbe {
+        AggregateProbe {
+            wide: value.wide + 1,
+            narrow: value.narrow + 2,
+        }
+    }
+
+    fn aggregate_probe_kind() -> FfiKind {
+        FfiKind::Agg(FfiAgg {
+            size: std::mem::size_of::<AggregateProbe>() as u32,
+            align: std::mem::align_of::<AggregateProbe>() as u32,
+            fields: vec![
+                FfiField {
+                    off: 0,
+                    leaf: FfiLeaf::Scalar(FfiKind::U64),
+                },
+                FfiField {
+                    off: 8,
+                    leaf: FfiLeaf::Scalar(FfiKind::U32),
+                },
+            ],
+        })
+    }
+
+    #[test]
+    fn plain_c_and_c_unwind_use_separate_call_boundaries() {
+        let plain = sig(vec![FfiKind::U64], FfiKind::U64, None, false);
+        assert_eq!(
+            call_addr(plain_add_one as *const () as usize, &plain, &[41], None),
+            42
+        );
+
+        let unwind = sig(vec![], FfiKind::Void, None, true);
+        let panic = std::panic::catch_unwind(|| {
+            call_addr(unwind_panics as *const () as usize, &unwind, &[], None)
+        })
+        .expect_err("C-unwind ffi_call must let the panic return to Rust");
+        assert_eq!(panic.downcast_ref::<u32>(), Some(&0x18));
+    }
+
+    #[test]
+    fn c_unwind_path_preserves_small_integer_returns() {
+        let i8_sig = sig(vec![], FfiKind::I8, None, true);
+        assert_eq!(
+            call_addr(unwind_i8 as *const () as usize, &i8_sig, &[], None),
+            0xf9
+        );
+
+        let u16_sig = sig(vec![], FfiKind::U16, None, true);
+        assert_eq!(
+            call_addr(unwind_u16 as *const () as usize, &u16_sig, &[], None),
+            0xabcd
+        );
+    }
+
+    #[test]
+    fn c_unwind_path_preserves_aggregate_arguments_and_returns() {
+        let aggregate = aggregate_probe_kind();
+        let signature = sig(vec![aggregate.clone()], aggregate, None, true);
+        let input = AggregateProbe {
+            wide: 0x1020_3040_5060_7080,
+            narrow: 40,
+        };
+        let mut output = std::mem::MaybeUninit::<AggregateProbe>::uninit();
+
+        assert_eq!(
+            call_addr(
+                unwind_aggregate as *const () as usize,
+                &signature,
+                &[std::ptr::from_ref(&input) as u64],
+                Some(output.as_mut_ptr() as u64),
+            ),
+            0
+        );
+        assert_eq!(
+            unsafe { output.assume_init() },
+            AggregateProbe {
+                wide: 0x1020_3040_5060_7081,
+                narrow: 42,
+            }
+        );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn c_unwind_path_keeps_variadic_cif_rules() {
+        let mut out = [0u8; 8];
+        let format = c"%d";
+        let variadic = sig(
+            vec![FfiKind::Ptr, FfiKind::U64, FfiKind::Ptr, FfiKind::I32],
+            FfiKind::I32,
+            Some(3),
+            true,
+        );
+        let ret = call_addr(
+            libc::snprintf as *const () as usize,
+            &variadic,
+            &[
+                out.as_mut_ptr() as u64,
+                out.len() as u64,
+                format.as_ptr() as u64,
+                42,
+            ],
+            None,
+        );
+        assert_eq!(ret, 2);
+        assert_eq!(std::ffi::CStr::from_bytes_until_nul(&out).unwrap(), c"42");
+    }
 
     fn missing_library() -> Box<str> {
         format!(
@@ -348,11 +599,11 @@ mod tests {
             "required path missing from diagnostic: {error}"
         );
         assert!(
-            error.contains("dlopen 必需原生库"),
+            error.contains("[dlopen needs native library]"),
             "unexpected diagnostic: {error}"
         );
         assert!(
-            !error.contains("dlerror 未提供详情"),
+            !error.contains("[dlerror without value]"),
             "dlerror detail was lost: {error}"
         );
     }

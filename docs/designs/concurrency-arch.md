@@ -282,12 +282,10 @@ bounds-check 到一块线性内存，而 Rust guest 用真指针=真地址。**�
   guard-page 用不上——但 Rust safe/unsafe 区分让检查点本就少，靠此而非 guard-page 压开销。
 - **诚实界**：只查 raw 解引用会漏"unsafe 把野地址洗进 &T 再解"（要引用级校验=Miri 全量，慢）；但野写几乎
   都走 raw 指针，故性价比高。checked 是个谱：lite（raw 解引用，便宜，抓大多数）→ full Miri（全量，慢）。
-- **Model-A 相互作用（记）**：**slaved 操作数区**让 guest 局部在已知区、与 VM native-栈帧分开 → region check
-  便宜；**alloca**（frame-abi 承诺的后续迁移）让 guest 局部内联 native 栈、与 VM 状态交错 → region check 难。
-  → **checked 模式青睐 slaved 区**。**解耦要求（用户定）：帧局部存储（slaved/alloca，轴 F）与安全模式
-  （fast/checked，轴 S）是两根【正交轴】，实现【不得耦合】**——只在 `GuestMemory::contains(addr)->bool`
-  谓词处相遇（fast 不调 / checked 调；FrameStorage 提供，slaved=廉价范围比较、alloca=较贵需 per-alloc 追踪）。
-  **暂定配对 alloca+fast / slaved+checked 是默认配置、非 hardwire**，任意组合可编译运行。同 JITBackend/os:: 纪律。
+- **Model-A 相互作用（记）**：**slaved 操作数区**让 guest 局部在已知区、与 VM native-栈帧分开，
+  region check 便宜；alloca 会与 VM 状态交错并要求逐帧追踪。2026-08-12 已撤销 alloca 必迁承诺，
+  解释器正式保留 slaved；alloca 只在真实性能证据出现时重开。**解耦要求仍有效**：帧局部存储与
+  fast/checked 安全模式不得耦合，只在 `GuestMemory::contains(addr)->bool` 谓词处相遇。
 - **Profile**：checked 做成 **opt-in**（fast 模式无检查 ≈ native 速度；checked 供不可信/LLM）；解释器/JIT
   加不加检查的速度 delta 是明确的 profile + 优化目标（BCE/deopt 压）。
 

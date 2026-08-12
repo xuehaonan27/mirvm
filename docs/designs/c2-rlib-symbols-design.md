@@ -68,10 +68,10 @@ RTLD_LAZY 违反引擎必需库纪律且 P1 stub 不在进程动态符号表，�
 
 1. **MRE 转正**：`/tmp/mre` 重构为 corpus 探针（`c_rlib_sym_probe`：
    helper.a 蹦床 + `#[export_name]` Rust 定义回写观察量）——三维绿。
-2. **bzip2 C 后端复绿**：`c_bzip2_pure` 现走 0.6 纯 Rust 后端（绕行期决定）；
-   新增/回切 driver 走 **vendored C 后端**（BZ_NO_STDIO 断言桩经 rlib 注入
-   回调）——压缩/解压字节级 + **断言路径**（损档触发 `bz_internal_error` →
-   Rust panic 穿出 = 101，与 native 同出口）三维一致。
+2. **bzip2 C 后端复绿**：`c_bzip2_pure` 现走 0.6 纯 Rust后端（绕行期决定）；
+   新增/回切 driver 走 **vendored C 后端**，验证 BZ_NO_STDIO 断言桩经 rlib
+   注入回调的符号救援与正常压缩/解压。该 workload 的正常路径不会触发断言回调，
+   不能据此宣称回调 panic 已执行；该回调是普通 `extern "C"`，真 panic 逃逸时应终止。
 3. **c_wasmtime_wat 换面**：层①消除后 driver 红 pattern 由
    `无法安全转换为共享库`/101 换为 `inline asm noreturn`/70（层② C3 入口；
    driver 头注既定接线策略原话执行）。

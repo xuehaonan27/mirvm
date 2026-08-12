@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # 全量差分（唯一引擎 = M4 字节码 VM；tier-0 已移除，oracle 一直是 native）：
 # demo/*.rs 原生编译运行 vs mirvm main 启动链运行，对比 stdout、stderr + 退出码。
-# 全绿基线 30/30（M4.4 起含 threads_*；M5.0 起含 asm_probe；真实项目 TDD
+# 历史全绿基线从 30 个逐步扩充（M4.4 起含 threads_*；M5.0 起含 asm_probe；真实项目 TDD
 # 新增 track_caller_fn_ptr/u128_switch/volatile_wide；M5.2 起含 intrinsic_probe/
 # recursion_deep/simd_probe/atomic_order_probe/float_wide_probe/asm_extras_probe/signal_probe/fork_exec_probe/nested_dst_probe/wide_int_probe）。
 # P1 起含 struct_fnptr_escape（结构体内嵌 fn-ptr 逃逸负对照，31/31）。
 # 第 0 步起含 weak_extern/global_asm_guest_fn；批9 起含 zst_drop；C1 起含
-# ffi_agg_probe（按值聚合 FfiAgg 合成矩阵 35/35）；C3 起含 noreturn_ud2
-#（asm noreturn 终止形，exit=132 双侧同，36/36）。
+# ffi_agg_probe（按值聚合 FfiAgg 合成矩阵）；C3 起含 noreturn_ud2（asm noreturn
+# 终止形，exit=132 双侧同）；E9 起含 dl_iterate_phdr_probe（native 回调差分）。
 # ecosystem/ffi_zlib 是 frontmatter/cargo
 # 形态由 differential.cargo 覆盖，本套件明确记作跳过。
 set -u

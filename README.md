@@ -13,7 +13,7 @@ JIT 默认开启）。
 > [docs/current-status.md](docs/current-status.md) 为准；文档权威与历史替代关系见
 > [docs/README.md](docs/README.md)。
 
-## 当前状态（2026-08-11 快照）
+## 当前状态（2026-08-12 快照）
 
 - **M4 完成**：自研 typed bytecode、tree-walking interpreter、tcx-free 执行相、真实地址内存、
   unwind、libffi FFI、native→guest thunk、1:1 OS 线程与 guest TLS。
@@ -39,13 +39,17 @@ JIT 默认开启）。
 - **`mirvm test` Cargo 合同**：默认 self 路径无需 Cargo，支持 lib/bin/integration/
   example/bench、自定义 harness、开发依赖、根 proc-macro、resolver 1/2/3 工作区、复杂
   成员 glob、workspace lints、package spec、常用选择和 libtest 参数。固定
-  Cargo/compat/self 的单包合同 24/24、工作区合同 31/31；doctest 另归 rustdoc 前端。
+  Cargo/compat/self 的单包 test/bench/doctest 合同 34/34、工作区合同 31/31；doctest
+  仍由 rustdoc 前端提取和裁判，但统一由 `mirvm test` 调度。
 
 已知缺口、响亮拒绝边界与全部未解决债务集中登记在
 [docs/open-issues.md](docs/open-issues.md)；目前不能宣称支持"任意 Rust 程序"。
 当前开发基线是 Linux/ELF/x86_64，工具链锁定在 `nightly-2026-07-02`。根设计契约见
 [DESIGN.md](DESIGN.md)，frame/vmctx 等可逆架构决策及旧模型完整保留在
 [docs/decision-history.md](docs/decision-history.md)。
+FFI 的普通 C 与 C-unwind 已按源 ABI 分治：前者维持终止边界，后者允许 Rust panic
+或 C++ 异常穿过并执行 Drop；完整合同见
+[C-unwind 跨语言异常合同](docs/designs/c-unwind-contract.md)。
 少见依赖来源余面、正式沙箱/资源治理、稳定嵌入 API/daemon、格式冻结与跨平台尚未完成，
 建议施工顺序见
 [产品能力补全计划](docs/designs/product-capabilities-plan.md)。

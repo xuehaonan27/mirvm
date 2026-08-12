@@ -1,18 +1,26 @@
-//! 字节区帧存储：mmap 定容真地址区（M4.1 F6——帧地址终身稳定）。
+//! Byte area frame storage: mmap fixed-size true address area.
+//! (M4.1 F6 - frame address is stable for life).
 //!
-//! `Ref`/`RawPtr` 取的是**帧内局部的真地址**（&arr、buf.as_mut_ptr()），运行中区不得
-//! 搬家 → 定容 mmap（GuestMemory 同款）；匿名映射惰性提交，虚拟保留大、RSS 按触碰页算。
-//! 到界 = guest 栈溢出近似（frame-abi §9）：诊断退出（M4.2 起可换真 panic/abort 语义）。
+//! Rust structures like `Ref`/`RawPtr` takes the true address of the local a
+//! rea within the frame (&arr, buf.as_mut_ptr()), so the runtime area cannot
+//! be moved and fixed-size mmap is needed (same as GuestMemory).
+//! Virtual pages reservation is large, so anonymous mapping and lazy commit
+//! are adopted for not taking too much actual memory. (RSS is calculated
+//! based on touched pages.)
 //!
-//! 帧 = 按 (frame_size, frame_align) 切一段；局部 = 段内冻结偏移处的字节。
-//! 接口保持窄（C13 解耦纪律）：reserve/restore/read/write——**base 现在是真地址**，
-//! 帧内/堆上/statics 由此统一为裸地址读写（place 求值的地基）。
+//! Frame is cut into segments according to (frame_size, frame_align).
+//! Interface is kept narrow: reserve/restore/read/write.
+//! Base is true address, so intra-frame/heap/statics are unified as raw address
+//! read and write, forming the foundation of place evaluation.
 
 use super::ir::{Slot, Width};
+use crate::os::mem;
 
-/// 每区容量（M5.2 D8a：虚拟保留 1 GiB + MAP_NORESERVE，RSS 仍按触碰页——
-/// 与宿主执行栈同量级，操作数区不再先于栈守卫成为深递归的隐形上限；
-/// M4.4 起每 guest 线程一个区）。
+/// Size per region (M5.2 D8a: Virtually reserved 1 GiB + MAP_NORESERVE,
+/// RSS still based on touch pages - on the same scale as the host execution
+/// stack, operand region no longer becomes the implicit upper limit of deep
+/// recursion before stack guards; one region per guest thread from M4.4
+/// onwards).
 const REGION_CAP: usize = 1 << 30;
 
 pub struct ByteRegion {
@@ -20,7 +28,7 @@ pub struct ByteRegion {
     mapping: *mut u8,
     mapping_len: usize,
     base: *mut u8,
-    /// 区内 bump 水位（相对 base 的字节数）
+    /// Bump water level in the area (number of bytes relative to base)
     sp: usize,
 }
 
@@ -32,15 +40,15 @@ impl Default for ByteRegion {
 
 impl ByteRegion {
     pub fn new() -> Self {
-        let guard = crate::os::mem::page_size();
+        let guard = mem::page_size();
         let mapping_len = REGION_CAP
             .checked_add(guard * 2)
             .expect("ByteRegion: mapping length overflow");
-        let mapping = crate::os::mem::map_anon(mapping_len, crate::os::mem::Prot::NONE, true);
-        assert!(!mapping.is_null(), "ByteRegion: mmap 失败");
+        let mapping = mem::map_anon(mapping_len, mem::Prot::NONE, true);
+        assert!(!mapping.is_null(), "ByteRegion: mmap failed");
         let base = unsafe { mapping.add(guard) };
-        if let Err(e) = crate::os::mem::protect(base, REGION_CAP, crate::os::mem::Prot::RW) {
-            unsafe { crate::os::mem::unmap(mapping, mapping_len) };
+        if let Err(e) = mem::protect(base, REGION_CAP, mem::Prot::RW) {
+            unsafe { mem::unmap(mapping, mapping_len) };
             panic!("ByteRegion: {e}");
         }
         ByteRegion {
@@ -51,17 +59,18 @@ impl ByteRegion {
         }
     }
 
-    /// 为新帧切 `size` 字节（按 `align` 对齐、清零），返回**帧基址（真地址）**。
-    /// 与 `restore` 严格配对（slaved 于 interp_frame 递归）。
+    /// Cuts `size` bytes for the new frame (aligned by `align`, zeroed out).
+    /// Returns the frame base address (true address). Strictly paired with
+    /// `restore` (slaved in interp_frame recursion).
     pub fn reserve(&mut self, size: u32, align: u32) -> usize {
         let align = align.max(1) as usize;
-        // mmap base 页对齐 ⇒ 在绝对地址上对齐即可
+        // mmap base page alignment.
         let aligned = (self.base as usize + self.sp + align - 1) & !(align - 1);
         let start = aligned - self.base as usize;
         let end = start + size as usize;
         if end > REGION_CAP {
             crate::vm::engine::interp::engine_abort(&format!(
-                "guest 栈溢出（操作数区 {} MiB 耗尽）",
+                "guest stack overflow (operand area {} MiB exhausted)",
                 REGION_CAP >> 20
             ));
         }
@@ -75,11 +84,12 @@ impl ByteRegion {
         self.sp = base - self.base as usize;
     }
 
-    /// 按宽度零扩展读一个标量（base = 帧真地址）。
+    /// Read a scalar with zero-width extension (base = frame true address).
     #[inline]
     pub fn read(&self, base: usize, slot: Slot) -> u64 {
         let p = (base + slot.off as usize) as *const u8;
-        // 帧偏移按布局对齐构造；read_unaligned 起步（正确优先，优化后置）
+        // Frame offsets are constructed based on layout alignment.
+        // `read_unaligned` is the starting point (correctness takes precedence, optimization follows).
         unsafe {
             match slot.width {
                 Width::W8 => p.read_unaligned() as u64,
@@ -90,7 +100,7 @@ impl ByteRegion {
         }
     }
 
-    /// 按宽度截断写一个标量（base = 帧真地址）。
+    /// Write a scalar truncated to the width (base = frame true address) .
     #[inline]
     pub fn write(&mut self, base: usize, slot: Slot, v: u64) {
         let p = (base + slot.off as usize) as *mut u8;
@@ -107,6 +117,6 @@ impl ByteRegion {
 
 impl Drop for ByteRegion {
     fn drop(&mut self) {
-        unsafe { crate::os::mem::unmap(self.mapping, self.mapping_len) };
+        unsafe { mem::unmap(self.mapping, self.mapping_len) };
     }
 }
