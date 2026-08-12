@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 
 use super::buildrs::BuildOutput;
-use super::manifest::{DepKind, PackageManifest, ProfileFlags};
+use super::manifest::{DepKind, PackageManifest, ProfileFlags, Target};
 use super::resolve::{ResolvePlan, Unit, UnitClass};
 
 /// 产物布局（见文件头）。
@@ -534,6 +534,13 @@ fn push_profile_flags(a: &mut Vec<String>, p: &ProfileFlags) {
 fn real_rustc() -> String {
     PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT"))
         .join("bin/rustc")
+        .display()
+        .to_string()
+}
+
+fn real_rustdoc() -> String {
+    PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT"))
+        .join("bin/rustdoc")
         .display()
         .to_string()
 }
@@ -1077,6 +1084,111 @@ pub fn root_proc_macro_rustc_args(
     a.push("proc_macro".into());
     a.extend(rustflags.iter().cloned());
     a
+}
+
+/// 根 lib 的 rustdoc doctest 参数。rustdoc 继续负责 Markdown 提取、行号、
+/// compile_fail 和 harness 汇总；`--test-builder` 只把提取出的临时 crate
+/// 改交 mirvm 编译/执行。
+#[allow(clippy::too_many_arguments)]
+pub fn doctest_rustdoc_args(
+    manifest: &PackageManifest,
+    plan: &ResolvePlan,
+    fps: &[String],
+    sysroot: &Path,
+    layout: &Layout,
+    target: &Target,
+    root_fp: &str,
+    bo: Option<&BuildOutput>,
+    searches: &[String],
+    builder: &Path,
+) -> Vec<String> {
+    let crate_name = target.name.replace('-', "_");
+    let mut args = vec![real_rustdoc()];
+    args.push(format!("--edition={}", manifest.edition));
+    args.push("--crate-type".into());
+    args.push(if target.proc_macro {
+        "proc-macro".into()
+    } else {
+        "lib".into()
+    });
+    args.push("--color".into());
+    args.push("auto".into());
+    args.push("--crate-name".into());
+    args.push(crate_name.clone());
+    args.push("--test".into());
+    args.push(
+        target
+            .path
+            .strip_prefix(&manifest.root)
+            .unwrap_or(&target.path)
+            .display()
+            .to_string(),
+    );
+    args.push("--test-run-directory".into());
+    args.push(manifest.root.display().to_string());
+
+    let root_path = if target.proc_macro {
+        format!(
+            "{}/lib{}-{root_fp}{}",
+            layout.host_deps.display(),
+            crate_name,
+            std::env::consts::DLL_SUFFIX
+        )
+    } else {
+        format!("{}/lib{}-{root_fp}.rlib", layout.deps.display(), crate_name)
+    };
+    args.push("--extern".into());
+    args.push(format!("{crate_name}={root_path}"));
+
+    let mut externs = std::collections::BTreeSet::new();
+    for dep in &plan.root_deps {
+        if dep.kind == DepKind::Build || !externs.insert(dep.key.clone()) {
+            continue;
+        }
+        let unit = &plan.units[dep.unit];
+        let dir = if target.proc_macro && dep.kind == DepKind::Normal {
+            &layout.host_deps
+        } else {
+            &layout.deps
+        };
+        args.push("--extern".into());
+        args.push(format!(
+            "{}={}",
+            dep.key.replace('-', "_"),
+            extern_path(layout, dir, unit, &fps[dep.unit], "rlib")
+        ));
+    }
+    args.push("-L".into());
+    args.push(format!("dependency={}", layout.deps.display()));
+    args.push("-L".into());
+    args.push(format!("dependency={}", layout.host_deps.display()));
+    args.push("-C".into());
+    args.push("embed-bitcode=no".into());
+    for feature in &plan.root_features {
+        args.push("--cfg".into());
+        args.push(format!("feature=\"{feature}\""));
+    }
+    args.extend(manifest.rustc_lint_flags.iter().cloned());
+    args.push("--check-cfg".into());
+    args.push("cfg(docsrs,test)".into());
+    let values = manifest.check_cfg_feature_values();
+    let values = values
+        .iter()
+        .map(|value| format!("\"{value}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    args.push("--check-cfg".into());
+    args.push(format!("cfg(feature, values({values}))"));
+    append_build_output(&mut args, bo, searches);
+    args.push("--sysroot".into());
+    args.push(sysroot.display().to_string());
+    args.push("-Z".into());
+    args.push("unstable-options".into());
+    args.push("--test-builder".into());
+    args.push(builder.display().to_string());
+    args.push("--error-format".into());
+    args.push("human".into());
+    args
 }
 
 /// host 闭包普通单元的真 rustc 参数（切②，proc-macro2 实锤形态）：

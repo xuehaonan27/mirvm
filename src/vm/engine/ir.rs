@@ -1006,6 +1006,8 @@ pub enum Builtin {
     /// `_Unwind_GetIP(ctx)` / `_Unwind_GetIPInfo(ctx, &ip_before)`：读 synth ctx 的 IP。
     UnwindGetIp,
     UnwindGetIpInfo,
+    /// `_Unwind_GetCFA(ctx)`：读取合成上下文中的客体帧栈位置。
+    UnwindGetCfa,
     /// `_Unwind_FindEnclosingFunction(ip)`：合成 IP 即函数入口，返回 ip 自身。
     UnwindFindEnclosing,
     /// 不改变 guest 抽象机/RAM 状态的处理器 hint（如 `pause`、`vzeroupper`）。
@@ -1794,6 +1796,15 @@ pub struct AllocShims {
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Module {
     pub funcs: FuncTable,
+    /// FuncId 顺序的客体符号名轻量索引。v3 包把函数体保持惰性时，backtrace 仍能
+    /// 在不解码全部 FuncBody 的前提下建立标准 ELF 符号表。
+    pub function_names: Vec<Box<str>>,
+    /// 当前进程符号 ELF 中的 FuncId → 地址；加载相生成，不进缓存或包。
+    #[serde(skip)]
+    pub backtrace_ips: Vec<u64>,
+    /// 保持内存 ELF 文件和 dlopen 对象在 Engine 生命周期内有效。
+    #[serde(skip)]
+    pub backtrace_image: Option<super::backtrace::SymbolImage>,
     /// 导出名（no_mangle 符号）→ FuncId，--vm-call 查找用
     pub exports: std::collections::HashMap<Box<str>, FuncId>,
     /// 冻结区（statics/常量池/fn 条目；lower 物化，发布后只读——static mut 例外）
@@ -1851,6 +1862,11 @@ pub struct Module {
 }
 
 impl Module {
+    pub fn ensure_function_names(&mut self) {
+        if self.function_names.len() != self.funcs.len() {
+            self.function_names = self.funcs.iter().map(|body| body.name.clone()).collect();
+        }
+    }
     /// argv C 串表终结化（tier-0 setup_process_memory 同构；M6 片2 起从 lower 迁出）。
     /// argv 是**运行期输入**：不得进 L2 缓存快照，冷/热路径每次运行都在快照之后追加
     /// 分配并回填 EntryPlan——单一代码路径，杜绝冷热漂移。

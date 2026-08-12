@@ -1975,6 +1975,70 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   self 双轨继续通过。性能基线按维护者要求暂缓，本条只声明结构和正确性结果，不声明
   启动时间或内存数字。OS 沙箱不在本轮施工范围。
 
+### 7.46 2026-08-11：D3 余项定路；D19 rustdoc doctest 合同闭合
+
+- **D3 可以完成，但不能在 v3 上伪造“直接验证”**：v3 的 postcard 函数体是顺序编码，
+  E20 必须看到 block、slot、地址、FFI 布局和每条操作的结构关系；只检查容器哈希或另存
+  一份验证摘要，会允许外来包同时伪造摘要与执行体。后续应新建不稳定格式 v4，以带边界
+  检查的偏移式只读归档作为唯一函数体真源；E20 直接借用遍历它，运行时按首次访问从同一
+  已验证表示恢复 owned `FuncBody`。这会同时改包编码和验证器访问层，是 D4 前独立工程，
+  不是本轮 D19 的附带小改；性能基线仍按维护者要求暂缓。
+- **rustdoc 继续做它擅长的前端工作**：固定 rustdoc 自己提取 Markdown、生成临时 crate、
+  保持源码行号并裁判 `no_run`、`ignore`、`compile_fail`/错误码和
+  `should_panic(expected)`。MIRVM 通过固定工具链的 `--test-builder` 接口接管生成物：
+  合并库产带 MIR 的 metadata-only rlib，可运行 bin 先用 rustc 检查，再发布为旁置配方的
+  VM 启动器。这样没有重写 Markdown 解析器，也没有把 doctest 冒充 integration test。
+- **双轨一致**：默认 self 直接组织 rustdoc 参数；Cargo compat 用内部 rustdoc 包装入口
+  保留 Cargo 参数，只把 sysroot 和 test builder 改为 MIRVM 同源版本，并移除 Cargo 注入的
+  `--test-runtool`，避免启动器被重复套 runner。两轨都支持默认/`--doc`、根库、Dev 依赖、
+  build.rs cfg/env、过滤、静默、状态文字和退出码；`--doc --no-run` 与混合 target 选择按
+  Cargo 以 101 拒绝。
+- **验收**：新增 `cless_doctest_contract`，固定 Cargo/compat/self 三腿逐字比较正常、失败、
+  默认选择和参数拒绝；固定 Cargo `-vv` 钉住 rustdoc 根库、Dev 依赖和 build cfg；self
+  用 PATH 哨兵与 execve 审计证明零 Cargo。`contracts.cargoless-test` **34/34**。本条闭合
+  D19 的 `mirvm test` 范围，不据此宣称已经提供独立 `mirvm doc` 或 HTML 文档生成命令。
+
+### 7.47 2026-08-12：E3/E8/E24/E28/E31 闭合；接受项退出开放账
+
+- **E31 内容身份**：依赖镜像和 IR 缓存旧键只看路径、长度与纳秒 mtime。相同长度的
+  内容替换再恢复 mtime 时，两条路径都会误命中。现统一从同一文件描述符读取元数据和
+  BLAKE3 内容摘要，哈希前后元数据漂移则拒绝入键；回归明确构造“同长度、恢复 mtime”并
+  要求键变化。mtime 仍用于快速身份信息，但不再承担内容正确性，因此 E31 关闭。
+- **E3/E8 混合栈与符号**：解释器影子帧现在记录客体函数 IP 和对应宿主栈位置；JIT
+  发布时登记机器码地址范围和函数身份。`_Unwind_Backtrace` 先用宿主 unwinder 收集当前
+  JIT 帧，再按栈位置与解释帧合并。Engine 装载时还会从轻量函数名表生成只读最小 ELF，
+  通过 `dlopen` 纳入标准 Rust backtrace 的 ELF 符号查找；惰性包无需为此解码全部函数体。
+  `c_backtrace` 在纯解释与强制 JIT 下都要求捕获、深度增加和文本出现
+  `c_backtrace::deep`。E3/E8 关闭；尚未实现的 unwinder 上下文写入/Resume 家族仍按原
+  `Unsupported` 边界保留。
+- **伴生 JIT 正确性修复**：debug Cargo 差分暴露 Cranelift 基本块断言。根因是 cleanup
+  发射器在当前块尚未由 `try_call` 终结时先切去异常 pad；release 只是关闭断言，并不让
+  构造顺序正确。现先准备异常表和块，发 `try_call` 后再填 pad 与 normal continuation；
+  原始 ecosystem 同步 JIT 负载和完整 Cargo 差分均通过。
+- **E24 wrapper 组合**：固定 Cargo 探针确认普通 wrapper 在外、workspace wrapper 在内，
+  后者只用于 workspace 成员。MIRVM 不再占用或清空任何 wrapper 槽，而是占据 Cargo 的
+  `RUSTC` 编译器槽；因此环境变量、Cargo config、普通依赖/workspace 选择、两层顺序和
+  wrapper 对参数的修改仍完全由 Cargo 执行，MIRVM 作为最内层编译器捕获最终参数。真实
+  path 依赖项目分别用环境变量和 `.cargo/config.toml` 对拍固定 Cargo，输出及链顺序
+  **4/4**，`differential.cargo` 总计 **12/12**。E24 关闭。
+- **E28 旧前提失效**：固定 rustc 1.98 的 `allocator_kind=Global` 实测表明，最终 crate
+  已生成并解析 `__rust_alloc_error_handler`，它自然调用 std 的全局错误处理器，并不走
+  旧记录所称的未知符号 Trap；四个普通分配入口仍需既有程序级重路由，两者不能混为一谈。
+  新差分以自定义 `#[global_allocator]` 直接调用 `handle_alloc_error(123)`，native 与 MIRVM
+  冷/热都打印同一诊断并以 SIGABRT 结束。顺带删除 HostAbort 额外打印的 MIRVM 私有行，
+  恢复 libc abort 的 stderr 行为。E28 作为过时欠账关闭。
+- **从 open issues 移出的定型项**：E4 的 JIT 原子统一 SeqCst 是 Rust 内存模型允许的
+  合规强化；E18 的 Cranelift 自有内联明确保持关闭，只在真实性能问题中重新评估；E29
+  所谓“全改通用直通”不是产品能力，普通符号已有 dlsym+libffi，带 guest 语义或热路径的
+  专用 shim 应继续专用；E35 在退出时取消未发布优化任务，解释器仍给出同一程序结果，
+  不等待队列是已接受的短程序性能选择。四项转入 H 节，不再以未解决缺陷重复计数。
+- **验证范围**：本节不恢复性能基线，不运行 OS 沙箱或完整 gate。格式、严格 Clippy、
+  release 构建与 Rust 单测 **213/213** 通过；程序差分默认/同步 JIT 各
+  **46 PASS / 2 SKIP**，`differential.cargo` **12/12**，其余非性能 `fast` 产品叶
+  全绿。首次聚合仅有 `harness.truth` 的假 Cargo 不认识新 wrapper 项目；最小同步替身后
+  该叶 **16/16** 单独复绿。E31 两条内容变更单测、符号 ELF 单测、强制 JIT/纯解释
+  backtrace 负载均在上述结果中通过。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT

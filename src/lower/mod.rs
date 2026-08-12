@@ -586,6 +586,8 @@ fn lower_inner(
             entry_stubs: s.image_code_arena,
             ..Default::default()
         };
+        let mut image_module = image_module;
+        image_module.ensure_function_names();
         // image 导出素材（装载方零 tcx 依赖，BaseExports 同构）：fn 条目/static/TLS
         // 三索引只含 image 类。fn 条目以 image 区条目表为准（含底座命中但在 image
         // 区补建者——"总量恰一份"的单一身份在装载端可复现）。
@@ -627,6 +629,7 @@ fn lower_inner(
         .map(|f| f.expect("队列耗尽时每个 FuncId 必有产出"))
         .collect::<Vec<_>>()
         .into();
+    module.ensure_function_names();
 
     // 入口别名（--vm-stats 从程序入口做可达分析用）
     if let Some((entry_def, _)) = tcx.entry_fn(())

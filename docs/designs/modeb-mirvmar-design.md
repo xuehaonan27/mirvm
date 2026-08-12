@@ -142,8 +142,10 @@ mirvm run <x.mirvm> [-- <guest args>]
 - proc-macro/build.rs 只在 **pack 期**真执行（D9 §5 硬边界原样）;
 - D15 后续施工已完成这里预留的替换：pack 期缺省使用 cargoless 自有依赖驱动，
   `MIRVM_DEPS=cargo` 显式保留 Cargo 回退；包格式与 run 路径不因此改变;
-- D3 余项：E20 验证器仍读取解码后的 `FuncBody`。D4 冻结前要让语义验证直接消费档案
-  表示或等价的可证明表示，消除首次装载的临时 postcard 扫描；
+- D3 余项可做，但需要新不稳定格式 v4：把实际执行的函数体改为偏移式只读归档表示，
+  所有长度、偏移和枚举载荷先做边界检查，E20 再通过借用视图遍历同一份字节；运行时仅在
+  函数首次使用时从这份已验证表示恢复 `FuncBody`。并列摘要不能证明另一份 postcard
+  执行字节安全，因此不采用“双份表示 + 哈希相等”捷径；
 - fat artifact 多 target：节表 tag 预留（`MODULE@<triple>` 形态），D4 后评。
 
 ## 9. 实现位置

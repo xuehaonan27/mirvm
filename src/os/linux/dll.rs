@@ -38,12 +38,11 @@ pub fn open_with_flags(path: &CStr, flag: i32) -> Result<usize, String> {
 pub const RTLD_NOW: i32 = libc::RTLD_NOW;
 pub const RTLD_LOCAL: i32 = libc::RTLD_LOCAL;
 
-/// dlclose（产品路径句柄有意随进程生命周期，仅供测试/探测场景配对释放；
-/// 跨模块测试引用，lib 构建无调用方）。
+/// dlclose。进程级 native 库句柄仍由其调用方有意常驻；Engine 私有且地址不逃逸的
+/// 符号镜像在 Module 析构时用本入口配对释放。
 ///
 /// # Safety
 /// handle 必须出自本层 open 且之后不再 dlsym。
-#[cfg_attr(not(test), allow(dead_code))]
 pub unsafe fn close(handle: usize) {
     unsafe { libc::dlclose(handle as *mut libc::c_void) };
 }

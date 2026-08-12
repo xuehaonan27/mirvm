@@ -20,6 +20,10 @@ fn deep(n: u32) -> usize {
     }
 }
 
+fn named_frame_present() -> bool {
+    format!("{:?}", Backtrace::force_capture()).contains("c_backtrace::deep")
+}
+
 fn main() {
     let bt = Backtrace::force_capture();
     assert!(
@@ -33,5 +37,6 @@ fn main() {
         deeper >= shallow + 30,
         "递归深度未反映到影子帧：{shallow} -> {deeper}"
     );
-    println!("backtrace: captured, non-empty, depth reflected (+30 frames)");
+    assert!(named_frame_present(), "客体函数名未被标准 backtrace 符号化");
+    println!("backtrace: captured, named, non-empty, depth reflected (+30 frames)");
 }

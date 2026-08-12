@@ -93,6 +93,13 @@ pub fn main() -> ExitCode {
     let mut argv = std::env::args();
     let argv0 = argv.next().unwrap_or_default();
 
+    if cargo_shim::is_cargo_rustdoc(Path::new(&argv0)) {
+        cargo_shim::phase_cargo_rustdoc(argv);
+    }
+    if crate::cargoless::driver::is_doctest_builder(Path::new(&argv0)) {
+        return crate::cargoless::driver::run_doctest_builder(argv);
+    }
+
     // `CARGO_BIN_EXE_*` 的 self 启动器是指向 mirvm 的符号链接，旁边带根 bin
     // 配方。必须在普通命令分派前识别，否则会把 guest 参数误当成 mirvm 命令。
     if let Some(recipe) = crate::cargoless::driver::root_launcher_recipe(Path::new(&argv0)) {
@@ -123,7 +130,11 @@ pub fn main() -> ExitCode {
         return crate::cargoless::driver::run_root_recipe(argv);
     }
     if std::env::var_os("MIRVM_CARGO_SESSION").is_some() {
-        // RUSTC_WRAPPER：first = 真 rustc 路径
+        if std::env::var_os("MIRVM_CARGO_COMPILER").is_some() {
+            // Cargo 的 RUSTC 槽：first 已经是真 rustc 的第一个参数。
+            cargo_shim::phase_compiler(std::iter::once(first).chain(argv));
+        }
+        // 兼容旧会话/直接 wrapper 调用：first = 真 rustc 路径。
         cargo_shim::phase_wrapper(std::iter::once(first).chain(argv));
     }
 

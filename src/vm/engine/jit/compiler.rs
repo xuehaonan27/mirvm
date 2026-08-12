@@ -131,6 +131,7 @@ struct Compiler<'a> {
     stack_guard: ClifFuncId,
     /// 本批 (clif id, unwind info, try_call 函数的 LSDA 字节)——finalize 后统一注册
     pending_unwind: Vec<(ClifFuncId, UnwindInfo, Option<Vec<u8>>)>,
+    pending_guest_code: Vec<(ClifFuncId, u32, u64)>,
 }
 
 impl<'a> Compiler<'a> {
@@ -361,6 +362,7 @@ impl<'a> Compiler<'a> {
             simd_rv,
             stack_guard,
             pending_unwind: Vec::new(),
+            pending_guest_code: Vec::new(),
         }
     }
 
@@ -440,6 +442,7 @@ impl<'a> Compiler<'a> {
             return;
         }
         self.register_pending_eh_frames();
+        self.register_pending_guest_code();
 
         let fast = self.module.get_finalized_function(guarded_id) as u64;
         let packed = self.module.get_finalized_function(packed_id) as u64;
@@ -682,6 +685,10 @@ impl<'a> Compiler<'a> {
             };
             self.pending_unwind.push((id, ui, lsda));
         }
+        if let Some(compiled) = cctx.compiled_code() {
+            self.pending_guest_code
+                .push((id, func, compiled.code_buffer().len() as u64));
+        }
         self.module.clear_context(&mut cctx);
         Some(id)
     }
@@ -798,6 +805,17 @@ impl<'a> Compiler<'a> {
         let mut eh = EhFrame(EndianVec::new(RunTimeEndian::Little));
         table.write_eh_frame(&mut eh).unwrap();
         super::register_eh_frame_section(eh.0.into_vec());
+    }
+
+    fn register_pending_guest_code(&mut self) {
+        for (id, func, len) in self.pending_guest_code.drain(..) {
+            let start = self.module.get_finalized_function(id) as u64;
+            self.shared.jit.publish_guest_code(JitCodeRange {
+                start,
+                end: start.saturating_add(len),
+                func,
+            });
+        }
     }
 }
 

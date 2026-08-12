@@ -305,11 +305,13 @@ pub fn ensure() -> ImageStack {
 /// ——L2 warm 同款契约）。各 image 冻结区移交 delta.image_frozens 保活。
 pub fn absorb_stack(delta: &mut ir::Module, stack: ImageStack) {
     let mut funcs = Vec::with_capacity(stack.total_fns);
+    let mut function_names = Vec::with_capacity(stack.total_fns + delta.funcs.len());
     let mut tls = Vec::with_capacity(stack.total_tls);
     let mut sites = Vec::with_capacity(stack.total_asm);
     let mut frozens = Vec::with_capacity(stack.images.len());
     for img in stack.images {
         let mut m = img.module;
+        function_names.append(&mut m.function_names);
         m.funcs.drain_into(&mut funcs);
         tls.append(&mut m.tls);
         sites.append(&mut m.asm_sites);
@@ -350,7 +352,10 @@ pub fn absorb_stack(delta: &mut ir::Module, stack: ImageStack) {
         }
     }
     delta.funcs.drain_into(&mut funcs);
+    function_names.append(&mut delta.function_names);
     delta.funcs = funcs.into();
+    delta.function_names = function_names;
+    delta.ensure_function_names();
     tls.append(&mut delta.tls);
     delta.tls = tls;
     sites.append(&mut delta.asm_sites);

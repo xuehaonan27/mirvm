@@ -11,6 +11,7 @@ RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
 STRACE=${STRACE:-$(command -v strace)}
 FIXTURE=$(pwd)/tests/fixtures/cless_test_contract
 PROC_FIXTURE=$(pwd)/tests/fixtures/cless_proc_macro_test_contract
+DOC_FIXTURE=$(pwd)/tests/fixtures/cless_doctest_contract
 CONTRACT_HOME=${MIRVM_CONTRACT_HOME:-${MIRVM_HOME:-$HOME/.mirvm}}
 HOST=$($RUSTC -vV | sed -n 's/^host: //p')
 [ -x "$MIRVM" ] || { echo "cargoless_test_contract: $MIRVM 不存在" >&2; exit 69; }
@@ -37,7 +38,10 @@ export MIRVM_CARGO_SENTINEL="$TMP/cargo-was-invoked"
 normalize() {
     sed -E \
         -e 's/\([0-9]+\) panicked/(<TID>) panicked/' \
+        -e 's#/tmp/rustdoctest[^/ ]+#/tmp/rustdoctest<TMP>#g' \
+        -e "s#${DOC_FIXTURE//\#/\\#}/##g" \
         -e 's/finished in [0-9]+\.[0-9]+s/finished in <TIME>/' \
+        -e 's/all doctests ran in [0-9]+\.[0-9]+s; merged doctests compilation took [0-9]+\.[0-9]+s/all doctests ran in <TIME>; merged doctests compilation took <TIME>/' \
         -e '/^[[:space:]]*(Compiling|Finished|Running|Executable) /d' \
         -e '/^error: test failed, to rerun pass /d' \
         -e '/^error: [0-9]+ target(s)? failed:/d' \
@@ -62,23 +66,23 @@ triplet() {
     local project=${CONTRACT_FIXTURE:-$FIXTURE}
 
     if [ "$force" = 1 ]; then
-        env CLESS_FORCE_FAIL=1 CARGO_TARGET_DIR="$TMP/native-target" \
+        env CLESS_FORCE_FAIL=1 CLESS_DOCTEST_FORCE_FAIL=1 CARGO_TARGET_DIR="$TMP/native-target" \
             "$CARGO" test --manifest-path "$project/Cargo.toml" --locked --offline "$@" \
             >"$TMP/$name.native.out" 2>"$TMP/$name.native.err"
     else
-        env -u CLESS_FORCE_FAIL CARGO_TARGET_DIR="$TMP/native-target" \
+        env -u CLESS_FORCE_FAIL -u CLESS_DOCTEST_FORCE_FAIL CARGO_TARGET_DIR="$TMP/native-target" \
             "$CARGO" test --manifest-path "$project/Cargo.toml" --locked --offline "$@" \
             >"$TMP/$name.native.out" 2>"$TMP/$name.native.err"
     fi
     local nc=$?
 
     if [ "$force" = 1 ]; then
-        env CLESS_FORCE_FAIL=1 MIRVM_HOME="$CONTRACT_HOME" \
+        env CLESS_FORCE_FAIL=1 CLESS_DOCTEST_FORCE_FAIL=1 MIRVM_HOME="$CONTRACT_HOME" \
             MIRVM_TARGET_DIR="$TMP/compat-target" MIRVM_DEPS=cargo \
             "$MIRVM" test "$project" --locked --offline "$@" \
             >"$TMP/$name.compat.out" 2>"$TMP/$name.compat.err"
     else
-        env -u CLESS_FORCE_FAIL MIRVM_HOME="$CONTRACT_HOME" \
+        env -u CLESS_FORCE_FAIL -u CLESS_DOCTEST_FORCE_FAIL MIRVM_HOME="$CONTRACT_HOME" \
             MIRVM_TARGET_DIR="$TMP/compat-target" MIRVM_DEPS=cargo \
             "$MIRVM" test "$project" --locked --offline "$@" \
             >"$TMP/$name.compat.out" 2>"$TMP/$name.compat.err"
@@ -86,12 +90,12 @@ triplet() {
     local cc=$?
 
     if [ "$force" = 1 ]; then
-        env CLESS_FORCE_FAIL=1 PATH="$TMP/no-cargo:$PATH" MIRVM_OFFLINE=1 \
+        env CLESS_FORCE_FAIL=1 CLESS_DOCTEST_FORCE_FAIL=1 PATH="$TMP/no-cargo:$PATH" MIRVM_OFFLINE=1 \
             MIRVM_HOME="$TMP/self-home" MIRVM_SYSROOT="$CONTRACT_SYSROOT" MIRVM_DEPS=self \
             "$MIRVM" test "$project" --locked --offline "$@" \
             >"$TMP/$name.self.out" 2>"$TMP/$name.self.err"
     else
-        env -u CLESS_FORCE_FAIL PATH="$TMP/no-cargo:$PATH" MIRVM_OFFLINE=1 \
+        env -u CLESS_FORCE_FAIL -u CLESS_DOCTEST_FORCE_FAIL PATH="$TMP/no-cargo:$PATH" MIRVM_OFFLINE=1 \
             MIRVM_HOME="$TMP/self-home" MIRVM_SYSROOT="$CONTRACT_SYSROOT" MIRVM_DEPS=self \
             "$MIRVM" test "$project" --locked --offline "$@" \
             >"$TMP/$name.self.out" 2>"$TMP/$name.self.err"
@@ -125,6 +129,20 @@ triplet bench 0 --bench contract_bench -- --test-threads=1 --nocapture
 triplet all_targets_no_run 0 --all-targets --no-run
 triplet quiet 0 --lib --quiet -- --test-threads=1 --nocapture
 CONTRACT_FIXTURE="$PROC_FIXTURE" triplet root_proc_macro 0 --tests -- --test-threads=1 --nocapture
+CONTRACT_FIXTURE="$DOC_FIXTURE" triplet doctest 0 --doc -- --test-threads=1 --nocapture
+CONTRACT_FIXTURE="$DOC_FIXTURE" triplet doctest_default 0 -- --test-threads=1
+CONTRACT_FIXTURE="$DOC_FIXTURE" CONTRACT_FORCE_FAIL=1 triplet doctest_failure 101 --doc -- --test-threads=1 --nocapture
+CONTRACT_FIXTURE="$DOC_FIXTURE" triplet doctest_no_run_rejected 101 --doc --no-run
+CONTRACT_FIXTURE="$DOC_FIXTURE" triplet doctest_mixed_selection_rejected 101 --doc --lib
+
+for leg in native compat self; do
+    if rg -q 'compile fail .* ok' "$TMP/doctest.$leg.out" \
+        && rg -q 'should panic .* ok' "$TMP/doctest.$leg.out"; then
+        ok "doctest $leg compile_fail/should_panic 由 rustdoc 判定"
+    else
+        bad "doctest $leg 未覆盖 compile_fail/should_panic"
+    fi
+done
 
 CONTRACT_FORCE_FAIL=1 triplet fail_fast 101 --tests -- --test-threads=1 --nocapture
 for leg in native compat self; do
@@ -162,6 +180,20 @@ elif rg -q 'execve\("[^"]*/cargo",' "$TMP/self.execve"; then
     bad "self 腿通过绝对路径启动了 cargo"
 else
     ok "self 腿 execve 零 cargo"
+fi
+
+env -u CLESS_DOCTEST_FORCE_FAIL PATH="$TMP/no-cargo:$PATH" MIRVM_OFFLINE=1 \
+    MIRVM_HOME="$TMP/self-home" MIRVM_SYSROOT="$CONTRACT_SYSROOT" MIRVM_DEPS=self \
+    "$STRACE" -f -qq -e trace=execve -o "$TMP/doctest-self.execve" \
+    "$MIRVM" test "$DOC_FIXTURE" --locked --offline --doc -- --test-threads=1 \
+    >"$TMP/doctest-trace.out" 2>"$TMP/doctest-trace.err"
+doc_trace_code=$?
+if [ "$doc_trace_code" != 0 ]; then
+    bad "self doctest execve 审计运行失败: $doc_trace_code"
+elif rg -q 'execve\("[^"]*/cargo",' "$TMP/doctest-self.execve"; then
+    bad "self doctest 通过绝对路径启动了 cargo"
+else
+    ok "self doctest execve 零 cargo"
 fi
 
 for leg in native compat self; do
@@ -211,6 +243,19 @@ if rg -q 'src/lib\.rs .*--crate-type proc-macro .*--extern pm_helper=.*--extern 
 else
     bad "pinned Cargo 根 proc-macro 测试形状漂移"
     tail -30 "$proc_oracle"
+fi
+
+
+CARGO_TARGET_DIR="$TMP/oracle-doc-target" "$CARGO" test \
+    --manifest-path "$DOC_FIXTURE/Cargo.toml" --locked --offline --doc -vv \
+    >"$TMP/oracle-doc.out" 2>"$TMP/oracle-doc.err"
+doc_oracle="$TMP/oracle-doc.err"
+if rg -q 'rustdoc .*--crate-type lib .*--test src/lib\.rs .*--extern cless_doctest_contract=.*\.rlib .*--extern doctest_helper=.*\.rlib' "$doc_oracle" \
+    && rg -q -- '--cfg cless_doctest_cfg' "$doc_oracle"; then
+    ok "pinned Cargo rustdoc doctest 形状"
+else
+    bad "pinned Cargo rustdoc doctest 形状漂移"
+    tail -30 "$doc_oracle"
 fi
 
 suite_summary contracts.cargoless-test

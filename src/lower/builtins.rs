@@ -4,9 +4,9 @@
 
 use super::*;
 
-/// 符号是 mangled 的——`mangle_internal_symbol`）。Special = 默认分配器（引擎接管）；
-/// 非 special（自定义 #[global_allocator] 的 __rust_* → 用户 __rg_* 转发、
-/// __rust_alloc_error_handler）暂不注册 → 走 ③ Trap 诊断。
+/// 符号是 mangled 的（`mangle_internal_symbol`）。Special = 默认分配器（引擎接管）。
+/// 非 special 是 rustc 在最终 crate 内生成并解析的入口，不在 std 外部声明边界改写；
+/// 自定义 #[global_allocator] 的四个普通 `__rust_*` 入口另由 Module 级路由统一。
 pub(super) fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin> {
     use rustc_ast::expand::allocator::{self, SpecialAllocatorMethod as S};
     use rustc_symbol_mangling::mangle_internal_symbol;
@@ -94,9 +94,7 @@ pub(super) fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin>
         Symbol::intern("_Unwind_FindEnclosingFunction"),
         ir::Builtin::UnwindFindEnclosing,
     );
-    // GetCFA：backtrace 用作帧的 sp 身份（去重/相等）。合成帧无真 CFA，返回该帧
-    // synth IP 作唯一 sp 替身（每帧不同即满足身份用途）。
-    out.insert(Symbol::intern("_Unwind_GetCFA"), ir::Builtin::UnwindGetIp);
+    out.insert(Symbol::intern("_Unwind_GetCFA"), ir::Builtin::UnwindGetCfa);
     out.insert(
         Symbol::intern("_Unwind_DeleteException"),
         ir::Builtin::UnwindDeleteException,

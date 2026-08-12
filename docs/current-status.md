@@ -3,7 +3,7 @@
 > 状态日期：2026-08-11（2026-07-22 外部审核
 > [history/development-status-audit-2026-07-22.md](history/development-status-audit-2026-07-22.md)
 > 之后的 D15 P1-P5 来源批次、稳定化与 `mirvm test` 工作区合同均已纳入，见
-> decision-history §7.21-§7.45）。
+> decision-history §7.21-§7.46）。
 > 本文是当前状态的唯一汇总入口；
 > 若与早期计划、README 或交接文档冲突，以当前代码、可复现测试结果和本文为准。文档权威
 > 规则见 [README.md](README.md)。
@@ -38,11 +38,13 @@
 | **D15 P2（砍 cargo 之编译调度，2026-07-27，decision-history §7.29/§7.42）** | **完成** | cargoless 新增 schedule/buildrs/driver：`MIRVM_DEPS=self` 的 `mirvm run` 全程零 cargo——自排拓扑、自算每 crate rustc 参数（内容指纹含传递传播不变量）、proc-macro 闭包 ∪ build-deps 闭包真 rustc host 真 codegen（proc-macro 五钉/host rlib 形态全探针实锤）、build.rs 编译→执行→指令传播全生命周期（`-l` 只进本包、`-L` 传递、metadata 只给直接依赖者、无自动 DEP_*_ROOT、无自动 check-cfg 补钉——全按 probe_link 实证）。**闭合验收：corpus smoke 24 双腿（cargo vs self）stdout/stderr/exit 逐字节 24/24**；diff_cless 六夹具（PATH 只含 mirvm + 离线实证零 cargo 进程）。对拍暴露四枚修复当日落地（含 cargo 腿既有 bug：phase_wrapper 劫持 rustix 1.1.4 RUSTC_WRAPPER 探针竞态 EPIPE）。E36 后续也已关闭：compat runner 通过内部协议恢复调用者 cwd，编译仍保持 Cargo 项目目录；异目录 `--manifest-path` 回归已进入标准差分套件。P3 已收（见下行） |
 | **D15 P3（迁移全量 corpus 与双轨 gate，2026-07-28，decision-history §7.30）** | **完成** | 四切落地：① **rustflags 子集**（新 `rustflags.rs`：CARGO_ENCODED_RUSTFLAGS > RUSTFLAGS > config 三键，优先级/发现按 cargo；实证 13 条 rustc 行逐类核对定稿——rustflags 只落 target 单元，host 侧签名级不吃；进全 unit 指纹；伴生修 proc_macro 下划线双拼写、根包 [lib]+[[bin]] 根 lib 编译两枚缺口）。② **build.rs rerun-if 精细增量**（cargo 同语义重跑判定：默认面 registry 源不可变永不重跑 / path 树快照、rerun-if-changed 按 (len,mtime_ns)、env-changed 按值、links 直接依赖传递、存档缺席损坏自愈；存档 = build/<pkg>-<fp>/{output.txt,rerun.txt}，跳过执行则原始 stdout 重解析回放零失真，warning 同门控回放；libgit2 第二腿 20s→0s、tree_sitter 8s→0s）。③ **编译调度并行化**（`run_scheduler` Kahn 就绪队列 + std-only worker 池；完成表只归主线程、派发时捎依赖侧输入进 WorkMsg 零锁；jobs=1 与 Kahn FIFO 逐位一致的对拍锚；FpLocks 互斥同 fp 的 Normal/Build 双 unit；冷跑 wasmtime_wat 152s→79s、libgit2 19s→11s）。④ **full 层迁移**（137 条目双腿对拍 120/19 起 → 分诊修复四枚：extern 命名无 rename 时按 dep 包 lib target 名（new_debug_unreachable 实锤）、StrongDep 强形在有同名显式 feature 定义时被 dep: 遮蔽也置旗（zerotrie litemap 三态定稿）、build script env 补 CARGO_MANIFEST_LINKS（ring 实锤）、bin 会话 --remap-path-prefix + 脚本正文物化 src/main.rs（file!() 路径形态逐字节））。**P5 单列制度化**（对拍轴与 gate 的 corpus 段遇「归 P5」响亮拒绝单列 p5 不计失败；miden_prove 归列）；**双轨接线**（diff_cargo 恒钉 cargo 轨、gate DEPS 轴、a2 恒钉 cargo 轨——跨轨 image 共享原理性不可能、native 基线显式钉 RUSTC 防 rustup 代理按 cwd 解析的混合工具链）。**闭合验收：corpus_deps_pair --tier full 138 pass 1 p5 0 fail；cargo test 153；run.sh fast 9/9；gate DEPS=self（SKIP_TSAN=1）177 pass 1 p5 1 fail**（唯一 fail = 纯度门禁 mirvm-tsan 被工作树内并行重构卡住，与 D15 无关如实记）。P4（sysroot 自管 + MIRVM_DEPS 默认翻 self + `--bin`/`--package` 多目标选择 + compat 评审）待施 |
 | **D15 P4（sysroot 自管与默认翻转，2026-07-29，decision-history §7.31/§7.37）** | **完成** | ① **sysroot 自管**（`5c2e9bf`）：MIR sysroot 构建换 cargoless 调度——新 `vendor.rs`（VendorDir 通用 vendored-dir PkgSource，后续已复用于 source replacement）+ 伪根（std/test/proc_macro）+ library/Cargo.lock 增广 lock 模式 + compile_plan 纯抽取复用 + tmp 原子发布 + cargo 轨 dep 缓存换代连坐 purge + 顶层哨兵盖戳；**意外 crates.io 依赖根除**（.d 引用 ~/.cargo 数 = 0）；冷建 27.2s（metadata-only 无对象码，双轨 gate 全消费面实证无炸）25 crate 集对齐、PATH strip 零 cargo 实证。② **--bin 多目标选择**（`271425b`）：cargo run --bin 语义，错名响亮列名单；compat 轨直通。③ **长期双轨**：`MIRVM_DEPS` 缺省 = self，`=cargo` 是长期保留的用户回退与 Cargo 行为裁判；两条路径各自完整并持续对拍，不再安排 compat 删除评审。**当时边界**含 workspace 多包图；resolver 2/3、Git、替代 registry、常见 source replacement/patch/replace 与 pack self 已在后续 §7.35-§7.41 补齐；resolver 1 等仍开放 |
-| **D17 `mirvm test` Cargo 合同（2026-08-11）** | **完成；doctest 另立 rustdoc 能力** | Cargo compat 与默认 self 双轨均已接入。除既有 lib/bin/test/example、Normal/Dev 边、libtest/custom harness、工作区选择/继承/统一 lock/feature 外，现支持 bench 自动发现与 `--bench`/`--benches`/`--all-targets`、根 proc-macro 包的宿主动态库与 unit/integration test 分流、resolver 1 的显式和 Cargo 默认推导及跨依赖用途 feature 统一、`**`/`?`/`[]` 成员 glob、workspace lints 和带路径/版本的 package ID spec。固定 Cargo/compat/self 的单包合同 **24/24**、工作区合同 **31/31**；PATH 哨兵 + execve 审计证明 self 零 Cargo，固定 Cargo `-vv` 钉住 rustc 形状。规范见 [mirvm-test-cargoless-contract.md](designs/mirvm-test-cargoless-contract.md)。嵌套 workspace 与同名成员沿用 Cargo 自身的拒绝；doctest 需要 rustdoc 提取与诊断语义，不伪装成普通 test |
+| **D17 `mirvm test` Cargo 合同（2026-08-11）** | **完成** | Cargo compat 与默认 self 双轨均已接入。除 lib/bin/test/example、Normal/Dev 边、libtest/custom harness、工作区选择/继承/统一 lock/feature 外，现支持 bench、根 proc-macro、resolver 1、复杂成员 glob、workspace lints 和完整 package ID spec。D19 又以 rustdoc 专项接入 doctest，没有伪装成普通 test。固定 Cargo/compat/self 的单包/test/bench/doctest 合同 **34/34**、工作区合同 **31/31**；PATH 哨兵 + execve 审计证明 self 零 Cargo。规范见 [mirvm-test-cargoless-contract.md](designs/mirvm-test-cargoless-contract.md) |
+| **D19 doctest / rustdoc 前端（2026-08-11）** | **`mirvm test` 范围完成** | 固定 rustdoc 继续负责 Markdown 代码块提取、源行号、edition/cfg、`no_run`、`ignore`、`compile_fail` 和 `should_panic` 裁判；MIRVM test builder 把它生成的临时库编成带 MIR 的 metadata-only rlib，把可运行临时 crate 发布成 VM 启动器。默认 self 与 Cargo compat 均使用同一 MIR sysroot，支持默认/`--doc`、Dev 依赖、build.rs 输出、过滤与失败码；合同 **34/34**，self execve 零 Cargo。独立 `mirvm doc`/HTML 生成未由此宣称 |
 | **D15 P5 第一批：resolver 3 / rust-version（2026-08-10，decision-history §7.36）** | **完成** | 显式 resolver 3 与 edition 2024 隐式规则、workspace 最低 Rust 版本、registry index 的 `rust_version`/`rust_version2`、Cargo 配置 `resolver.incompatible-rust-versions=fallback/allow`、`--ignore-rust-version` 和编译前诊断已接通。fresh lock 按最低 Rust 版本写 v3/v4；固定 Cargo 与 self 的真实 `home=0.5` 探针同选 0.5.9，self lock 被 Cargo `--locked --offline` 接受。工作区合同改为 resolver 3 后仍 **27/27**。从空 `MIRVM_HOME` 跑 fast 时发现当前 rust-src 的 `proc_macro` 使用 `[lints.rust]`，已按 Cargo 的 priority 顺序传播 level/check-cfg 到全部 rustc target 并进入指纹；空目录 sysroot 冷建成功。Rust 测试 **186/186**，隔离可写 Cargo home/target 的 release fast **11/11** |
 | **D15 P5 第二批：Git 依赖（2026-08-10，decision-history §7.38）** | **完成** | 支持默认分支、branch/tag/rev、仓库内 workspace/package、feature 与 path 依赖；系统 Git 复用 credential helper/SSH agent/known_hosts，并初始化 submodule。可变引用只在 fresh 解析，lock 固定 commit；暖缓存离线复跑、冷缓存离线失败、缓存 origin 校验、checkout 篡改拒绝均落地。包身份和编译指纹包含精确 Git 来源，同名同版本双 commit 可在一个依赖图和锁文件中分立；self 单/双 commit lock 均被固定 Cargo `--locked` 接受。`cargoless_git_contract` **9/9**，execve 审计 self 零 Cargo；cargoless Rust 测试 **105/105**，全量 Rust 测试 **193/193**，隔离可写 Cargo home 的 release fast **12/12** |
 | **D15 P5 第三至五批及 P2 总验收（2026-08-10，decision-history §7.39-§7.43）** | **完成** | Cargo config 按 `$CARGO_HOME`、项目祖先、include 与环境覆盖合并依赖来源子集；替代 sparse/Git registry 有独立身份，认证复用 Cargo token/provider。source replacement 覆盖 registry 镜像、local registry 与 vendor directory，拒绝替换环和 checksum 篡改；registry 目标上的 path/Git/registry `[patch]` 参与版本求解，`[replace]` 保留 Cargo 锁语义。项目/frontmatter 的 `mirvm pack` 缺省走同一 cargoless 图，`MIRVM_DEPS=cargo` 显式回退长期保留。来源合同 **30/30**，每个 self fresh lock 与固定 Cargo 逐字节相同并被其 `--locked --offline` 接受；P2 full corpus 最终 **138 pass / 1 skip / 0 fail**，旧 `miden_prove` P5/XFAIL 已摘。D17 后续已补 resolver 1、复杂成员 glob/package spec 和 workspace lints。Git source replacement、以 Git URL 为目标的 patch、`paths`/HOST_RUSTFLAGS 等完整 Cargo config 仍是明确边界 |
 | **E 引擎与架构第一轮（2026-08-10，decision-history §7.42）** | **核心完成，E22/E23 余项保留** | 多 Engine 触发器命中后采用线程局部当前 Engine 身份：Shared/JIT worker/fork 基线/退出回调按 Engine 隔离，线程表按 Engine id 保存 Ctx，嵌套进入可恢复，guest TLS、builtin 字符串和遗留 atexit 项会回收；MC 符号只在当前 Module 内解析。引擎故障经 `RunError` 返回，不再从库路径直接退出宿主；rustc compiler 会话有全局 guard。新增穷尽字节码验证器，接入 pack、镜像、L2 和最终执行入口。操作数区双端 `PROT_NONE` guard 与 JIT 入帧前栈检查已落地，小栈深递归返回诊断而不是裸 SIGSEGV。仍未完成稳定公开嵌入 API、native 回调撤销、JIT/MC 活动码卸载、长寿命宿主线程 TSD 回收和 checked 指针来源机制；当前仍不宣称沙箱 |
+| **E 引擎与架构第二轮（2026-08-12，decision-history §7.47）** | **E3/E8/E24/E28/E31 完成** | 解释帧与真实 JIT unwind 帧按 CFA 合并；Engine 自动物化最小 ELF，让标准 Rust backtrace 解析客体函数名。IR/deps image 键加入文件内容 BLAKE3，并拒绝读取期 inode/ctime/path 身份漂移。Cargo compat 改占 `RUSTC` 槽，普通/workspace wrapper 的环境变量、config、顺序和适用范围继续由固定 Cargo 原样决定。固定 rustc 的 Global alloc error shim 已由 native 差分证实自然闭合，libc abort 不再多打印 MIRVM 私有诊断。同期修正 JIT cleanup 在 `try_call` 终结前切块的非法 Cranelift 构造。开放账中已实现项与明确接受的优化选择完成迁移 |
 | 地址模型 P2（GOT 间接） | **完成（2026-07-17）** | §7.5b 手术单定场（真实地址模型保留）→ §7.5c 零 IR 变更 GOT 机制（槽 = 冻结区普通格 + 启动相重填；extern static/fn 值不再烤宿主地址，字节码复用 `Mem{Static(槽)}`/`SubImm` 通道，JIT/interp 零改动）→ §7.5d 拒缓存三判据全退役 + 纯 std 会话 want_split 修正（先存 A2 沉默债：L2 对纯 std 程序永 miss）。外来符号用例冷→热全通（c_process 463→30ms），gate5 117/0/0。JIT 间接调用准入记债（[open-issues.md E1](open-issues.md)） |
 | 地址模型 P1（fn 条目可执行化） | **完成（2026-07-17，commit `4202317`）** | §7.6：FFI 可派生条目值 = 可执行 stub 码址（新第三固定地址域族 0x6C00/0x6D00/0x6E00+k + libffi closure 蹦床 + 配方随模块、启动相重建封存 RX）——thunk 盲区结构性根治（旧 debt §6 关闭，对照见 [open-issues.md](open-issues.md)；负对照 flate2 C-libz 结构体内嵌回调往返，三维+L2 热一致）。残余边界 = 签名不可派生条目（Rust ABI/聚合/变参）保持数据槽，无实质盲区；SIGSEGV 诊断化可选后补（open-issues T4）。gate5 117/0/0 |
 | corpus 批7（激进 24 三波） | **完成（2026-07-17）** | 23/24 全绿可用（corpus.md §5 批7）；**修出两只产品 bug 当日修复**：native-archive 链接行收 crate 图动态库（`867b3de`，libgit2 红转绿）+ custom `#[global_allocator]` 运行时统一路由 `__rust_*`（§7.7，c_mimalloc 三维绿、跨堆 SIGSEGV 根治）。c_tree_sitter 按值聚合 FFI 记档（open-issues C1，**2026-07-18 C1 闭合后转正入 gate**）。gate5 128→**139**；corpus 实测真实 crate 总账 123 |
@@ -97,11 +99,13 @@ x86 asm wrapper。
 
 ## 3. 已验证边界
 
-- **当前增量验证（2026-08-11 实跑）**：`cargo fmt --all -- --check`、Clippy
-  `-D warnings`、`cargo test --locked --all-features` **211/211** 均通过；
-  `./tests/run.sh fast` **12 套件通过、0 失败**，其中程序差分默认/JIT 同步各
-  **45 PASS / 2 SKIP**、Cargo 裁判 **8/8**、cargoless **7/7**、单包 test 合同
-  **24/24**、工作区合同 **31/31**、Git 来源 **9/9**、来源合同 **30/30**、
+- **当前增量验证（2026-08-12 实跑）**：`cargo fmt --all -- --check`、Clippy
+  `-D warnings`、`cargo test --locked --all-features` **213/213** 均通过。标准 `fast`
+  的 12 个叶套件已分项全部通过：首次聚合运行中 11 个产品叶全绿，唯一失败是
+  `harness.truth` 的假 Cargo 尚不认识新 wrapper 项目；最小同步替身后该叶 **16/16**
+  单独复绿。程序差分默认/JIT 同步各 **46 PASS / 2 SKIP**、Cargo 裁判 **12/12**、
+  cargoless **7/7**、单包 test/bench/doctest 合同
+  **34/34**、工作区合同 **31/31**、Git 来源 **9/9**、来源合同 **30/30**、
   pack 合同 **8/8**、build.rs **21/21**、
   harness 自检 **16/16**。标准化前后受改动影响的 corpus 条目、Git 来源、运行时语义
   另行定点复跑均通过。`miden_prove` 已迁到同发布线非 yanked 的 0.25.8，删除不再
@@ -109,7 +113,7 @@ x86 asm wrapper。
   `rustpython_mini` 因本机缺 `libffi.so` 开发链接名为 SKIP。
   P2 full corpus 总验收 **138 PASS / 1 SKIP / 0 FAIL**；`runtime.semantics` 四组也在
   最终 release 上通过，其中 threads **12/12** 含 TSan。
-  按维护者裁定，本轮未运行 `performance.limits` 或完整 `gate`。2026-08-10 的完整
+  按维护者裁定，本轮未运行 `performance.limits`、OS 沙箱或完整 `gate`。2026-08-10 的完整
   `gate` 尝试曾暴露、推动修复 resolver 兼容版本统一、Git rust-version
   校验误访问 crates.io、JIT 退出期与 Rayon 并发线程生命周期、以及数个 fixture 漂移；
   修复后受影响路径均已定点复绿，但未再花约 40 分钟整轮复跑。当前仍有一个真实 RED：
@@ -165,9 +169,10 @@ x86 asm wrapper。
   无外部 workload tool 的当前发布格式仍是 schema 3；显式声明外部工具的 case 使用 schema 4
   记录其身份。consumer 仍按独立 schema-2/3 路径验证既有历史对象，不把新字段静默回写成旧
   schema 当时已具备的事实。
-- 产品 Cargo shim 会在接管 Cargo 前检查非空 `RUSTC_WRAPPER` / `RUSTC_WORKSPACE_WRAPPER`，以及
-  有效的 `build.rustc-wrapper` / `build.rustc-workspace-wrapper`；发现任一自定义 wrapper 就
-  fail-closed。当前明确**不支持 wrapper composition**，不能把拒绝误写成项目 wrapper 已兼容。
+- Cargo compat 把 MIRVM 放在 Cargo 的 `RUSTC` 编译器槽，普通
+  `RUSTC_WRAPPER` 与 workspace wrapper 的选择、配置合并和嵌套顺序仍由固定 Cargo
+  决定。环境变量和 `build.rustc-wrapper` / `build.rustc-workspace-wrapper` 两种配置
+  都已与固定 Cargo 对拍；普通 wrapper 覆盖依赖与根包，workspace wrapper 只覆盖成员。
 - Cargo runner 的 callback 现在只 lower `Module`；lower 后才安装 `TRACK_DIAGNOSTIC` 结构化
   filter。它仅抑制无 lint/code/span/children/suggestions 的 `ForceWarning` `N warnings emitted`，
   并继续委托原 hook；guest 自己写出的同文 stderr 不经该路径。`run_compiler` 完整执行
@@ -204,7 +209,7 @@ x86 asm wrapper。
 | 类别 | 当前状态 |
 |---|---|
 | signal / `sigaction`（M5.2 D8d） | **async 信号 guest handler 已支持**：经 AS-trampoline（复用 M4.4 thunk 工厂，`(i32)->void`）真执行，signal() 与 sigaction() 两条注册路，重入（handler 内嵌套 raise）已 native 差分。SIG_DFL/IGN 直通。**sync 故障信号（SEGV/BUS/FPE/ILL/TRAP）guest handler 仍响亮拒绝**（宿主/guest 故障不可分辨）。c_signal 转绿 |
-| backtrace（M5.2 D8e） | **guest 影子帧栈已支持**：Ctx 维护每帧合成 IP，`_Unwind_Backtrace/GetIP(Info)/FindEnclosingFunction/GetCFA` 由影子帧诚实回答。合成 IP 不经 dladdr 符号化（诚实 `<unknown>`，不伪造宿主符号）→ backtrace 文本非 well-defined，oracle 是影子帧不变式（捕获/非空/深度反映）。c_backtrace 转绿。其余 `_Unwind_Set/GetGR/Resume/CFA-外` context 家族维持 `Unsupported`。`atexit` 已 builtin 化（引擎 LIFO + libc trampoline）；`dl_iterate_phdr` 仍走 native FFI |
+| backtrace（M5.2 D8e） | **解释/JIT 混合帧与真符号均已支持**：解释帧记录合成 CFA，宿主 unwinder 收集已发布 JIT 码段的真 IP/CFA，两者按栈位置合并后交给 guest 回调。加载 Engine 时自动物化最小 ELF 符号镜像，标准 Rust backtrace 可把函数地址解析为原 rustc 符号并解码名称；`c_backtrace` 同时检查深度和 `c_backtrace::deep`。其余 `_Unwind_Set/GetGR/Resume/CFA-外` context 家族维持 `Unsupported`。`atexit` 已 builtin 化（引擎 LIFO + libc trampoline）；`dl_iterate_phdr` 仍走 native FFI |
 | fork / exec（M5.2 D8f） | **exec 族直通**（进程替换语义正确）；**fork 仅 guest 单线程时放行**（守卫用 `/proc/self/task` 对 guest-main 基线判定，避 Ctx 计数 TOCTOU）——解锁 `Command::pre_exec`。多线程 fork、vfork/clone/setjmp 系维持响亮拒绝 |
 | volatile | 独立 volatile IR 使用 alignment=1 的 opaque `MaybeUninit` 字节载体，不把 padding 解释成宿主整数。1/2/4/8/16-byte 保持单个后端 volatile 事件；更宽 memory-repr 值先快照，再按 16/8/4/2/1-byte 块分解，不承诺原子性。该结论于 2026-07-13 推翻旧“其他宽度 Trap/不得拆”选择，演变见 decision-history |
 | direct dyn 尾字段 | sized prefix 后的 direct `dyn` 尾不能一律使用 lower 期静态 offset；当前从 vtable 读取运行期 alignment，并考虑 `repr(packed)` 上限后向上取整。slice/str 仍走静态公式，其他嵌套 DST 继续显式拒绝 |
@@ -217,7 +222,7 @@ x86 asm wrapper。
 | 生命周期/嵌入 | Engine 已持有 Shared 与自己的 JIT worker，线程执行态按 Engine id 隔离并支持嵌套恢复；guest TLS、退出回调残留可在生命周期结束时清理。引擎故障通过 `RunError` 返回，rustc driver 全局诊断状态由编译会话锁保护。尚非稳定公开嵌入 API：native 已保存的 libffi 回调无法主动撤销，closure/JIT 活动码仍需常驻；长寿命宿主线程 TSD 回收、动态库/回调注册撤销和进程级故障隔离仍开放 |
 | 分发与产品面 | `.mirvm` mode B 已实现到不稳定格式 v3：只读 mmap 容器、逐函数索引/惰性驻留、真实热序预取与需求优先已落地；为满足 E20，首次装载仍逐函数临时解码验证，档案直接语义验证尚未完成。包运行不依赖源码或预存自产库缓存；跨 build_id/target 兼容、fat artifact 与格式冻结仍未做。daemon、REPL、稳定嵌入 API、checked 模式、资源治理和正式沙箱均未实现，当前只运行受信任代码。合并计划见 [product-capabilities-plan.md](designs/product-capabilities-plan.md) |
 | 平台 | 当前仅应宣称 Linux/ELF/x86_64 开发基线 |
-| Cargo wrapper / runner | 非空 `RUSTC_WRAPPER` / `RUSTC_WORKSPACE_WRAPPER` 或有效的 `build.rustc-wrapper` / `build.rustc-workspace-wrapper` 当前都会在 MIR capture 前 fail-closed；尚无 wrapper composition。runner 在 lower 后用窄结构化 filter 去除额外 warning-count summary，但保留完整 driver 收尾，只在 compiler success 后执行 VM |
+| Cargo wrapper / runner | MIRVM 占 Cargo 的 `RUSTC` 槽，用户普通/workspace wrapper 仍由 Cargo 按原生顺序从环境变量或 config 组合，MIRVM 在最内层捕获两层修改后的 rustc 参数。runner 在 lower 后用窄结构化 filter 去除额外 warning-count summary，但保留完整 driver 收尾，只在 compiler success 后执行 VM |
 | 真实项目隔离 | build/check unshare network，所有 guest sandbox unshare PID，但不 unshare IPC；仅适用于受信任、固定 provenance 的 source，不是对抗性安全边界。构建期会安装记录的 rustc 环境，执行 guest 前再恢复调用者的 cwd 与完整运行环境。`MIRVM_ENCODED_RUSTFLAGS_APPEND` 按内容分 target store，暖缓存改值不会复用旧产物。正式资源隔离仍归 P3 OS worker |
 | 任意 Rust / 真实项目 | 尚不支持任意 Rust；已有严格 real-project harness、两个项目的十一个 correctness PASS workload，其中三个完成 benchmark，以及通用修复的最小差分回归。case 仍是 Git-ignored workspace evidence，远程固定 case 尚未入库 |
 
@@ -226,8 +231,8 @@ x86 asm wrapper。
 
 ## 5. 当前开发顺序
 
-1. **产品能力顺序**（2026-08-11 汇总）：D17 Cargo 合同和 D3 mmap/逐函数惰性驻留
-   核心已完成。下一步先补 D3 的档案直接语义验证，再评审 D4 格式冻结；OS 级沙箱按
+1. **产品能力顺序**（2026-08-11 汇总）：D17/D19 测试合同和 D3 mmap/逐函数惰性驻留
+   核心已完成。下一步先补 D3 的 v4 档案直接语义验证，再评审 D4 格式冻结；OS 级沙箱按
    维护者本轮裁定暂缓，不进入当前施工链。其余阶段边界和验收见
    [product-capabilities-plan.md](designs/product-capabilities-plan.md)。
 2. **性能与 corpus 持续线**：D16 仍按 profile → JIT 码持久化 → 零拷贝按需装载 →

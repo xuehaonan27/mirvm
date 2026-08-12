@@ -2229,27 +2229,24 @@ impl Translator<'_, '_> {
     /// T1-c：try_call 的异常表发射器——异常表 tag0 → pad 块（TryCallExn(0)
     /// 块参 = 异常指针落点，def exception_var 后跳 IR cleanup 块）；normal
     /// 指向新建 ok 块（调用方在其上做 ret 写回再跳 IR target）。
-    /// 返回 (异常表, ok 块)；调用方在当前延续块发 try_call 后 switch 到 ok 块。
+    /// 返回 (异常表, ok 块, pad 块)；调用方必须先在当前延续块发 try_call，
+    /// 再调用 `enter_cleanup_continuation` 填 pad 并进入 ok 块。Cranelift 不允许
+    /// 在 try_call 终结当前块之前临时切去 pad。
     ///（try_call 必须发在进入时的**当前块**而非 blocks[bi]——同一 IR 块内
     /// 前置 stmt 可能已把延续移进辅助块（div_zero_if/repeat_loop 等），
     /// 回 blocks[bi] 会在 brif 后追加指令 = verifier 拒收，strict 实证）
-    fn emit_cleanup(
+    fn prepare_cleanup(
         &mut self,
-        cleanup: ir::Bb,
         sig: cranelift_codegen::ir::Signature,
-        blocks: &[cranelift_codegen::ir::Block],
     ) -> (
         cranelift_codegen::ir::ExceptionTable,
+        cranelift_codegen::ir::Block,
         cranelift_codegen::ir::Block,
     ) {
         use cranelift_codegen::ir::{
             BlockArg, BlockCall, ExceptionTableData, ExceptionTableItem, ExceptionTag,
         };
         self.has_try_call = true;
-        let cur = self
-            .b
-            .current_block()
-            .expect("emit_cleanup 调用点必有当前块");
         let pad = self.b.create_block();
         self.b.append_block_param(pad, types::I64);
         let ok = self.b.create_block();
@@ -2269,13 +2266,22 @@ impl Translator<'_, '_> {
                     pad_call,
                 )],
             ));
+        (et, ok, pad)
+    }
+
+    fn enter_cleanup_continuation(
+        &mut self,
+        pad: cranelift_codegen::ir::Block,
+        cleanup: ir::Bb,
+        ok: cranelift_codegen::ir::Block,
+        blocks: &[cranelift_codegen::ir::Block],
+    ) {
         self.b.switch_to_block(pad);
         let exn = self.b.block_params(pad)[0];
         let ev = self.exception_var();
         self.b.def_var(ev, exn);
         self.b.ins().jump(blocks[cleanup as usize], &[]);
-        self.b.switch_to_block(cur);
-        (et, ok)
+        self.b.switch_to_block(ok);
     }
 
     /// 调用写回（interp 同形：Ignore/Indirect 不写，Scalar=lo，Pair=(lo,hi)）。
@@ -2392,14 +2398,14 @@ impl Translator<'_, '_> {
                         for _ in 0..4 {
                             sig0.params.push(AbiParam::new(types::I64));
                         }
-                        let (et, ok) = self.emit_cleanup(*bb, sig0, blocks);
+                        let (et, ok, pad) = self.prepare_cleanup(sig0);
                         let fref = self.module.declare_func_in_func(self.c2i, self.b.func);
                         let fv = self.b.ins().iconst(types::I64, *callee as i64);
                         let ap = self.b.ins().stack_addr(types::I64, args_ss, 0);
                         let nv = self.b.ins().iconst(types::I64, av.len() as i64);
                         let rp = self.b.ins().stack_addr(types::I64, ret_ss, 0);
                         self.b.ins().try_call(fref, &[fv, ap, nv, rp], et);
-                        self.b.switch_to_block(ok);
+                        self.enter_cleanup_continuation(pad, *bb, ok, blocks);
                         let lo = self.b.ins().stack_load(types::I64, ret_ss, 0);
                         let hi = self.b.ins().stack_load(types::I64, ret_ss, 8);
                         write_back!(lo, hi);
@@ -2588,12 +2594,12 @@ impl Translator<'_, '_> {
                     for _ in 0..8 {
                         sig0.params.push(AbiParam::new(types::I64));
                     }
-                    let (et, ok) = self.emit_cleanup(*bb, sig0, blocks);
+                    let (et, ok, pad) = self.prepare_cleanup(sig0);
                     let z = self.b.ins().iconst(types::I64, 0);
                     self.b
                         .ins()
                         .try_call(fref, &[addr, ap, nv, rp, nok, nsig, fv, z], et);
-                    self.b.switch_to_block(ok);
+                    self.enter_cleanup_continuation(pad, *bb, ok, blocks);
                     let lo = self.b.ins().stack_load(types::I64, ret_ss, 0);
                     let hi = self.b.ins().stack_load(types::I64, ret_ss, 8);
                     self.write_ret(ret, lo, hi);
@@ -2732,13 +2738,13 @@ impl Translator<'_, '_> {
                         sig0.params.push(AbiParam::new(types::I64));
                     }
                     sig0.returns.push(AbiParam::new(types::I64));
-                    let (et, ok) = self.emit_cleanup(*bb, sig0, blocks);
+                    let (et, ok, pad) = self.prepare_cleanup(sig0);
                     let z = self.b.ins().iconst(types::I64, 0);
                     let call =
                         self.b
                             .ins()
                             .try_call(fref, &[sp, sl, sg, ap, nv, ret_dst, fv, z], et);
-                    self.b.switch_to_block(ok);
+                    self.enter_cleanup_continuation(pad, *bb, ok, blocks);
                     foreign_write_back!(call);
                     self.b.ins().jump(blocks[*target as usize], &[]);
                 } else {
@@ -2810,12 +2816,12 @@ impl Translator<'_, '_> {
                     for _ in 0..7 {
                         sig0.params.push(AbiParam::new(types::I64));
                     }
-                    let (et, ok) = self.emit_cleanup(*bb, sig0, blocks);
+                    let (et, ok, pad) = self.prepare_cleanup(sig0);
                     let z = self.b.ins().iconst(types::I64, 0);
                     self.b
                         .ins()
                         .try_call(fref, &[bp, ap, nv, ret_dst, fv, rp, z], et);
-                    self.b.switch_to_block(ok);
+                    self.enter_cleanup_continuation(pad, *bb, ok, blocks);
                     let lo = self.b.ins().stack_load(types::I64, ret_ss, 0);
                     let hi = self.b.ins().stack_load(types::I64, ret_ss, 8);
                     self.write_ret(ret, lo, hi);

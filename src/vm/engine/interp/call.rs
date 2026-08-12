@@ -271,7 +271,13 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
     // 帧守卫：unwind 穿帧 = 跑 cleanup + 恢复区；正常返回 = 恢复区（edge 已空）
     // 影子帧入栈（D8e）：合成 IP = FUNC_IP_BASE + func×64（每 FuncId 唯一、非零、
     // 不可执行的 opaque token；作 backtrace 的 IP 恰好——从不解引用为代码）。
-    unsafe { (*ctx).shadow.push(func_synth_ip(func)) };
+    let shadow_marker = 0u8;
+    unsafe {
+        (*ctx).shadow.push(crate::vm::engine::ctx::ShadowFrame {
+            ip: func_synth_ip(ctx, func),
+            cfa: &shadow_marker as *const u8 as u64,
+        })
+    };
     let guard = FrameGuard {
         ctx,
         func,
@@ -774,10 +780,7 @@ pub(crate) fn exec_builtin(
         Builtin::HostGetenv => crate::os::process::getenv(a(0)),
         Builtin::HostWrite => crate::os::process::write_fd(a(0) as i32, a(1), a(2) as usize) as u64,
         Builtin::HostStrlen => crate::os::process::c_strlen(a(0)),
-        Builtin::HostAbort => {
-            eprintln!("mirvm[m4-engine]: guest abort()");
-            std::process::abort()
-        }
+        Builtin::HostAbort => std::process::abort(),
         // fork（D8f）：仅 guest 单线程放行（子进程=全进程拷贝，解释器状态
         // 天然一致；无其他 guest 线程 ⇒ 无跨线程锁死锁面）。多线程 fork
         // 响亮拒绝（native 下同为雷区）。exec 族走 foreign 直通，不经此。
@@ -868,6 +871,7 @@ pub(crate) fn exec_builtin(
             }
             mem_read(a(0), Width::W64)
         }
+        Builtin::UnwindGetCfa => mem_read(a(0) + 8, Width::W64),
         // 合成 IP 即函数入口 → 返回 ip 自身（enclosing fn start）
         Builtin::UnwindFindEnclosing => a(0),
         Builtin::CpuHintNop => 0,

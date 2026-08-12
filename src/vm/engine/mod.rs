@@ -3,6 +3,7 @@
 //! 加载相（MIR→本 IR 的降低）在 src/lower/（rustc_private 域），产物经 `ir::Module` 交接。
 
 pub mod addrlayout;
+pub mod backtrace;
 pub mod codearena;
 pub mod ctx;
 pub mod ffi;

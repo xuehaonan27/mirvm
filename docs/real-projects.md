@@ -97,10 +97,10 @@ cache。每次运行的 bubblewrap namespace 在私有 `/run` tmpfs 中建立
 native 必须先满足 `expected_exit`，然后逐字节比较 exit/stdout/stderr。运行后 tracked source
 必须保持不变。
 
-这不等于可以嵌套任意项目 rustc wrapper。产品 Cargo shim 在接管 Cargo 前会拒绝非空
-`RUSTC_WRAPPER` / `RUSTC_WORKSPACE_WRAPPER`，也会查询并拒绝有效的
-`build.rustc-wrapper` / `build.rustc-workspace-wrapper`。当前策略是 fail-closed；wrapper
-composition 尚未实现。
+Cargo compat 不再占用 wrapper 槽。产品把 MIRVM 放在 Cargo 的 `RUSTC` 编译器槽，
+所以项目的 `RUSTC_WRAPPER` / `RUSTC_WORKSPACE_WRAPPER` 以及 config 中对应设置仍由
+固定 Cargo 解析、选择和嵌套；MIRVM 在最内层接收 wrapper 修改后的参数。标准 Cargo
+差分套件已经覆盖环境变量和 `.cargo/config.toml` 两种来源。
 
 产品 runner 还要处理 Cargo 与 human rustc 的诊断协议差异：Cargo 已消费 target crate 的 JSON
 diagnostics，而 runner 重建的 human session 会在最终收尾额外打印 `N warnings emitted`。callback
@@ -264,8 +264,8 @@ revision、lock hash、许可/维护策略与届时真实 PASS/XFAIL，再接入
 - 构建期会安装记录的 rustc 环境，执行 guest 前恢复调用者的 cwd 与完整运行环境；这已解决
   build env 污染 guest 的产品缺陷，但不代表 bubblewrap 两侧具备不同的权限模型。正式权限与资源
   隔离仍归 OS worker。
-- 自定义 Cargo rustc/workspace wrapper 当前会 fail-closed；wrapper composition 是待实现兼容面，
-  不能把拒绝写成 harness 或产品已支持 wrapper 链。
+- 自定义 Cargo rustc/workspace wrapper 在 compat 轨由 Cargo 原样组合；标准差分钉住普通
+  wrapper 覆盖依赖与根包、workspace wrapper 只覆盖成员，以及两者的原生嵌套顺序。
 - rustc runner 的诊断 hook 仍是进程全局设施，但 compiler session 已由全局 guard 串行保护；
   这保证当前多 Engine 基础不会并发改写诊断槽。稳定嵌入 API 若要并行编译，仍需 rustc 提供更小的
   隔离边界或把编译移到独立进程。

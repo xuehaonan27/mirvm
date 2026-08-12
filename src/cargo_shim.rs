@@ -1,7 +1,9 @@
 //! cargo 集成三阶段（机制移植自 cargo-miri，MIT/Apache-2.0）：
 //!
-//! 1. `phase_cargo`：以 `cargo run` 驱动整个依赖图构建，但注入
-//!    RUSTC_WRAPPER=mirvm + target.runner=["mirvm","runner"] + 独立 target dir。
+//! 1. `phase_cargo`：以 `cargo run` 驱动整个依赖图构建，但把 Cargo 的
+//!    RUSTC 指向 mirvm，并注入 target.runner=["mirvm","runner"] + 独立 target dir。
+//!    Cargo 自己配置的 RUSTC_WRAPPER / RUSTC_WORKSPACE_WRAPPER 原样保留；因此
+//!    Cargo 仍负责决定普通依赖与 workspace 成员分别经过哪些 wrapper。
 //!    强制 `--target <host>`——这是区分 host crate（build script/proc-macro，
 //!    正常编译）与 target crate（要被解释，注入 MIR sysroot）的开关。
 //! 2. `phase_wrapper`：cargo 的每次 rustc 调用都经过这里。
@@ -31,51 +33,47 @@ fn toolchain_cargo() -> PathBuf {
     PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT")).join("bin/cargo")
 }
 
-fn configured_cargo_wrapper(
-    project_dir: &std::path::Path,
-    key: &str,
-) -> Result<Option<String>, String> {
-    let output = Command::new(toolchain_cargo())
-        .current_dir(project_dir)
-        .args([
-            "-Z",
-            "unstable-options",
-            "config",
-            "get",
-            key,
-            "--format=json-value",
-        ])
-        .output()
-        .map_err(|error| format!("无法查询 Cargo config `{key}`：{error}"))?;
-    if output.status.success() {
-        let value: String = serde_json::from_slice(&output.stdout)
-            .map_err(|error| format!("Cargo config `{key}` 不是字符串：{error}"))?;
-        return Ok((!value.is_empty()).then_some(value));
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains(&format!("config value `{key}` is not set")) {
-        return Ok(None);
-    }
-    let detail = stderr.lines().next().unwrap_or("unknown Cargo error");
-    Err(format!("查询 Cargo config `{key}` 失败：{detail}"))
+fn toolchain_rustdoc() -> PathBuf {
+    PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT")).join("bin/rustdoc")
 }
 
-fn reject_custom_rustc_wrappers(project_dir: &std::path::Path) -> Result<(), String> {
-    for key in ["RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"] {
-        if std::env::var_os(key).is_some_and(|value| !value.is_empty()) {
-            return Err(format!(
-                "不支持 Cargo wrapper `{key}`：尚不能与 MIR capture 组合"
-            ));
+pub(crate) fn ensure_self_symlink(self_exe: &Path, path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        if let (Ok(actual), Ok(expected)) =
+            (std::fs::canonicalize(path), std::fs::canonicalize(self_exe))
+            && actual == expected
+        {
+            return Ok(());
         }
-    }
-    for key in ["build.rustc-wrapper", "build.rustc-workspace-wrapper"] {
-        if configured_cargo_wrapper(project_dir, key)?.is_some() {
-            return Err(format!(
-                "不支持 Cargo wrapper `{key}`：尚不能与 MIR capture 组合"
-            ));
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("内部工具路径没有父目录: {}", path.display()))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("创建内部工具目录 {} 失败: {error}", parent.display()))?;
+        let tmp = parent.join(format!(
+            ".mirvm-tool-{}-{}.tmp",
+            std::process::id(),
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        match std::fs::remove_file(&tmp) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("清理内部工具 {} 失败: {error}", tmp.display())),
         }
+        symlink(self_exe, &tmp)
+            .map_err(|error| format!("创建内部工具 {} 失败: {error}", tmp.display()))?;
+        std::fs::rename(&tmp, path)
+            .map_err(|error| format!("发布内部工具 {} 失败: {error}", path.display()))?;
+        Ok(())
     }
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        let _ = (self_exe, path);
+        Err("Cargo doctest 当前只支持 Unix 主机".into())
+    }
 }
 
 fn arg_flag_value(args: &[String], flag: &str) -> Option<String> {
@@ -97,6 +95,39 @@ fn exec(mut cmd: Command) -> ! {
         exit(1);
     });
     exit(status.code().unwrap_or(1));
+}
+
+fn cargo_target_dir() -> PathBuf {
+    let mut target_dir = std::env::var_os("MIRVM_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| crate::sysroot::cache_dir().join("target/mirvm"));
+    if let Some(encoded) =
+        std::env::var_os("MIRVM_ENCODED_RUSTFLAGS_APPEND").filter(|value| !value.is_empty())
+    {
+        let hash = crate::lower::asm::fnv1a(encoded.as_encoded_bytes());
+        target_dir = target_dir
+            .join("mirvm-append-rustflags")
+            .join(format!("{hash:016x}"));
+    }
+    target_dir
+}
+
+fn ensure_cargo_doctest_tools(
+    project_dir: &Path,
+    self_exe: &Path,
+) -> Result<(PathBuf, PathBuf), String> {
+    let target_dir = cargo_target_dir();
+    let tools_root = if target_dir.is_absolute() {
+        target_dir
+    } else {
+        project_dir.join(target_dir)
+    };
+    let tools_dir = tools_root.join(".mirvm-tools");
+    let rustdoc = tools_dir.join("mirvm-rustdoc");
+    let doctest_builder = tools_dir.join("mirvm-doctest-builder");
+    ensure_self_symlink(self_exe, &rustdoc)?;
+    ensure_self_symlink(self_exe, &doctest_builder)?;
+    Ok((rustdoc, doctest_builder))
 }
 
 fn cargo_project_command(
@@ -128,23 +159,13 @@ fn cargo_project_command(
     // ×flags×toolchain）内容寻址，同一 crate 编译单元全机唯一一份；最终产物
     // 定位由 runner 协议供给（cargo 把假二进制路径传给 runner），不扫目录。
     // MIRVM_TARGET_DIR 可整体改址（隔离/测试用；默认 $MIRVM_HOME/target/mirvm）。
-    let mut target_dir = std::env::var_os("MIRVM_TARGET_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| crate::sysroot::cache_dir().join("target/mirvm"));
+    let target_dir = cargo_target_dir();
     // These flags are appended inside our rustc wrapper, after Cargo has
     // computed its normal fingerprint.  Partition only this exceptional
     // channel by content so a changed value cannot reuse a fake binary (or a
     // dependency rlib) recorded with the old flags.  Cargo-visible flags keep
     // using Cargo's own fingerprints and the ordinary shared target store.
-    if let Some(encoded) =
-        std::env::var_os("MIRVM_ENCODED_RUSTFLAGS_APPEND").filter(|value| !value.is_empty())
-    {
-        let hash = crate::lower::asm::fnv1a(encoded.as_encoded_bytes());
-        target_dir = target_dir
-            .join("mirvm-append-rustflags")
-            .join(format!("{hash:016x}"));
-    }
-    cmd.arg("--target-dir").arg(target_dir);
+    cmd.arg("--target-dir").arg(&target_dir);
     if matches!(action, CargoAction::Run { .. }) {
         cmd.arg("--quiet");
     }
@@ -153,17 +174,14 @@ fn cargo_project_command(
         cmd.args(program_args);
     }
 
-    cmd.env("RUSTC_WRAPPER", self_str);
-    // Preflight rejects effective custom wrappers. Remove the ambient form so
-    // Cargo cannot nest it ahead of rustc (an explicit empty value changes
-    // Cargo artifact fingerprints, so it is deliberately not used here).
-    cmd.env_remove("RUSTC_WORKSPACE_WRAPPER");
-    // Cargo also exposes the same build settings through environment-form
-    // config keys. Empty values disable wrappers but still perturb Cargo's
-    // effective config/fingerprint, so remove those aliases after preflight.
-    cmd.env_remove("CARGO_BUILD_RUSTC_WRAPPER");
-    cmd.env_remove("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER");
+    // MIRVM occupies Cargo's compiler slot rather than either wrapper slot.
+    // Cargo can therefore apply its ordinary wrapper outside the workspace
+    // wrapper exactly as it normally would, including wrappers supplied by
+    // config files and the CARGO_BUILD_* environment aliases. MIRVM remains
+    // innermost and sees the final argument vector after both wrappers.
+    cmd.env("RUSTC", self_str);
     cmd.env("MIRVM_CARGO_SESSION", "1");
+    cmd.env("MIRVM_CARGO_COMPILER", "1");
     cmd.env("MIRVM_SYSROOT", sysroot);
     // Cargo run keeps the directory from which the user invoked Cargo even
     // when --manifest-path points elsewhere.  We drive Cargo from project_dir
@@ -246,10 +264,6 @@ pub fn phase_cargo(
     // 随调用形态（相对/绝对）漂移，deps-image 键失稳。
     let project_dir =
         &std::path::absolute(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
-    if let Err(error) = reject_custom_rustc_wrappers(project_dir) {
-        eprintln!("mirvm: {error}");
-        exit(1);
-    }
     let sysroot = match crate::sysroot::ensure_sysroot() {
         Ok(p) => p,
         Err(e) => {
@@ -283,10 +297,6 @@ pub fn phase_cargo_test(
 ) -> ! {
     let project_dir =
         &std::path::absolute(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
-    if let Err(error) = reject_custom_rustc_wrappers(project_dir) {
-        eprintln!("mirvm: {error}");
-        exit(1);
-    }
     let sysroot = match crate::sysroot::ensure_sysroot() {
         Ok(p) => p,
         Err(e) => {
@@ -296,7 +306,12 @@ pub fn phase_cargo_test(
     };
     let self_exe = std::env::current_exe().expect("current_exe 失败");
     let locked = std::env::var_os("MIRVM_CARGO_LOCKED").is_some();
-    let cmd = cargo_project_command(
+    let (rustdoc, doctest_builder) = ensure_cargo_doctest_tools(project_dir, &self_exe)
+        .unwrap_or_else(|error| {
+            eprintln!("mirvm: {error}");
+            exit(1);
+        });
+    let mut cmd = cargo_project_command(
         project_dir,
         project_dir,
         CargoAction::Test { cargo_args },
@@ -305,10 +320,85 @@ pub fn phase_cargo_test(
         &self_exe,
         locked,
     );
+    cmd.env("RUSTDOC", rustdoc);
+    cmd.env("MIRVM_DOCTEST_BUILDER", doctest_builder);
+    cmd.env("MIRVM_DOCTEST_RUN_DIR", project_dir);
     exec(cmd)
 }
 
-/// 阶段 2：RUSTC_WRAPPER。argv = [<rustc 名字>, <rustc 参数...>]。
+pub fn is_cargo_rustdoc(argv0: &Path) -> bool {
+    argv0
+        .file_name()
+        .is_some_and(|name| name == "mirvm-rustdoc")
+}
+
+fn remove_value_arg(args: &mut Vec<String>, flag: &str) {
+    let mut out = Vec::with_capacity(args.len() + 2);
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == flag {
+            index += 2;
+            continue;
+        }
+        if args[index].starts_with(&format!("{flag}=")) {
+            index += 1;
+            continue;
+        }
+        out.push(args[index].clone());
+        index += 1;
+    }
+    *args = out;
+}
+
+fn replace_value_arg(args: &mut Vec<String>, flag: &str, value: String) {
+    remove_value_arg(args, flag);
+    args.push(flag.to_string());
+    args.push(value);
+}
+
+fn cargo_doctest_rustdoc_args(
+    mut args: Vec<String>,
+    sysroot: String,
+    builder: String,
+) -> Vec<String> {
+    remove_value_arg(&mut args, "--test-runtool");
+    remove_value_arg(&mut args, "--test-runtool-arg");
+    replace_value_arg(&mut args, "--sysroot", sysroot);
+    replace_value_arg(&mut args, "--test-builder", builder);
+    if !args
+        .windows(2)
+        .any(|pair| pair == ["-Z", "unstable-options"])
+        && !args.iter().any(|arg| arg == "-Zunstable-options")
+    {
+        args.push("-Z".into());
+        args.push("unstable-options".into());
+    }
+    args
+}
+
+/// Cargo 仍负责选择 doctest target 和组织 rustdoc 参数；这里只保证 rustdoc
+/// 提取出的临时 crate 与 Cargo wrapper 产出的库使用同一套 MIR sysroot，并把
+/// 临时可执行文件交给 MIRVM。
+pub fn phase_cargo_rustdoc(argv: impl Iterator<Item = String>) -> ! {
+    let mut args: Vec<String> = argv.collect();
+    if args.iter().any(|arg| arg == "--test") {
+        let sysroot = std::env::var("MIRVM_SYSROOT").expect("Cargo rustdoc 阶段缺少 MIRVM_SYSROOT");
+        let builder = std::env::var("MIRVM_DOCTEST_BUILDER")
+            .expect("Cargo rustdoc 阶段缺少 MIRVM_DOCTEST_BUILDER");
+        args = cargo_doctest_rustdoc_args(args, sysroot, builder);
+    }
+    let mut command = Command::new(toolchain_rustdoc());
+    command.args(args);
+    exec(command)
+}
+
+/// Cargo 的 RUSTC 槽直接调用 mirvm 时没有 `<rustc 名字>` 参数；补上固定
+/// toolchain 的 rustc 后进入与传统 wrapper 相同的处理路径。
+pub fn phase_compiler(argv: impl Iterator<Item = String>) -> ! {
+    phase_wrapper(std::iter::once(toolchain_rustc().display().to_string()).chain(argv))
+}
+
+/// 阶段 2：编译捕获。argv = [<rustc 名字>, <rustc 参数...>]。
 /// 注意：忽略 cargo 传来的 rustc 名字（裸 "rustc" 会被 rustup 按 cwd 解析到错误
 /// toolchain），一律用 pinned toolchain 的 rustc——proc-macro dylib 与 rlib 元数据
 /// 都必须和解释会话的编译器版本严格一致。
@@ -316,10 +406,6 @@ pub fn phase_wrapper(mut argv: impl Iterator<Item = String>) -> ! {
     let _rustc_name = argv.next();
     let rustc = toolchain_rustc();
     let mut args: Vec<String> = argv.collect();
-    if looks_like_nested_rustc_wrapper(&args) {
-        eprintln!("mirvm: 不支持嵌套 Cargo rustc wrapper：尚不能与 MIR capture 组合");
-        exit(1);
-    }
     append_encoded_rustflags(
         &mut args,
         std::env::var("MIRVM_ENCODED_RUSTFLAGS_APPEND")
@@ -406,11 +492,6 @@ fn runner_args_with_stable_paths(args: &[String]) -> Vec<String> {
         out.push(format!("--remap-path-prefix={}/=", cwd.display()));
     }
     out
-}
-
-fn looks_like_nested_rustc_wrapper(args: &[String]) -> bool {
-    args.first().is_some_and(|arg| !arg.starts_with('-'))
-        && args.get(1).is_some_and(|arg| arg.starts_with('-'))
 }
 
 fn append_encoded_rustflags(args: &mut Vec<String>, encoded: Option<&str>) {
@@ -624,10 +705,43 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        CargoAction, append_encoded_rustflags, cargo_project_command, configured_cargo_wrapper,
-        looks_like_nested_rustc_wrapper, read_fake_info, reject_custom_rustc_wrappers,
-        runner_args_with_stable_paths,
+        CargoAction, append_encoded_rustflags, cargo_doctest_rustdoc_args, cargo_project_command,
+        read_fake_info, runner_args_with_stable_paths,
     };
+
+    #[test]
+    fn cargo_doctest_replaces_the_native_runner_and_sysroot() {
+        let args = cargo_doctest_rustdoc_args(
+            [
+                "--test",
+                "src/lib.rs",
+                "--test-runtool=/tmp/mirvm",
+                "--test-runtool-arg",
+                "runner",
+                "--sysroot",
+                "/old/sysroot",
+                "--test-builder=/old/builder",
+                "--cfg",
+                "kept",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            "/mirvm/sysroot".into(),
+            "/mirvm/builder".into(),
+        );
+        assert!(!args.iter().any(|arg| arg.starts_with("--test-runtool")));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--sysroot", "/mirvm/sysroot"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--test-builder", "/mirvm/builder"])
+        );
+        assert!(args.windows(2).any(|pair| pair == ["--cfg", "kept"]));
+        assert_eq!(args.iter().filter(|arg| *arg == "--sysroot").count(), 1);
+    }
 
     #[test]
     fn harness_rustflags_are_appended_without_replacing_cargo_flags() {
@@ -688,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_project_command_removes_ambient_wrapper_overrides() {
+    fn cargo_project_command_occupies_rustc_and_leaves_wrapper_slots_to_cargo() {
         let command = cargo_project_command(
             Path::new("/tmp/project"),
             Path::new("/tmp/caller"),
@@ -702,16 +816,21 @@ mod tests {
             true,
         );
         assert!(command.get_envs().any(|(key, value)| {
-            key == OsStr::new("RUSTC_WORKSPACE_WRAPPER") && value.is_none()
+            key == OsStr::new("RUSTC") && value == Some(OsStr::new("/tmp/mirvm"))
+        }));
+        assert!(command.get_envs().any(|(key, value)| {
+            key == OsStr::new("MIRVM_CARGO_COMPILER") && value == Some(OsStr::new("1"))
         }));
         for key in [
+            "RUSTC_WRAPPER",
+            "RUSTC_WORKSPACE_WRAPPER",
             "CARGO_BUILD_RUSTC_WRAPPER",
             "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
         ] {
             assert!(
                 command
                     .get_envs()
-                    .any(|(candidate, value)| candidate == OsStr::new(key) && value.is_none())
+                    .all(|(candidate, _)| candidate != OsStr::new(key))
             );
         }
     }
@@ -788,47 +907,5 @@ mod tests {
             args.contains(&format!("--remap-path-prefix={}/=", cwd.display())),
             "absolute compiler input must still report Cargo's workspace-relative path"
         );
-    }
-
-    #[test]
-    fn nested_wrapper_argv_is_rejected_before_rustc_sees_a_compiler_as_input() {
-        assert!(looks_like_nested_rustc_wrapper(&[
-            "/path/to/rustc-proxy".to_string(),
-            "--crate-name".to_string(),
-            "demo".to_string(),
-        ]));
-        assert!(!looks_like_nested_rustc_wrapper(&[
-            "--crate-name".to_string(),
-            "demo".to_string(),
-        ]));
-    }
-
-    #[test]
-    fn configured_rustc_wrappers_are_rejected_before_cargo_nests_them() {
-        let root = std::env::temp_dir().join(format!(
-            "mirvm-cargo-wrapper-config-test-{}",
-            std::process::id()
-        ));
-        let cargo_dir = root.join(".cargo");
-        std::fs::create_dir_all(&cargo_dir).unwrap();
-
-        for key in ["rustc-wrapper", "rustc-workspace-wrapper"] {
-            std::fs::write(
-                cargo_dir.join("config.toml"),
-                format!("[build]\n{key} = \"/tmp/custom-wrapper\"\n"),
-            )
-            .unwrap();
-            let full_key = format!("build.{key}");
-            assert_eq!(
-                configured_cargo_wrapper(&root, &full_key).unwrap(),
-                Some("/tmp/custom-wrapper".to_string())
-            );
-            assert_eq!(
-                reject_custom_rustc_wrappers(&root).unwrap_err(),
-                format!("不支持 Cargo wrapper `{full_key}`：尚不能与 MIR capture 组合")
-            );
-        }
-
-        std::fs::remove_dir_all(root).unwrap();
     }
 }

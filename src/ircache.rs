@@ -8,8 +8,8 @@
 //! 输入清单校验。清单口径与 rustc 自身 dep-info 同构（rustc_interface::passes）：
 //! 本地源文件（source_map 非 imported）+ `include!` 追踪文件（sess.file_depinfo）+
 //! 全部上游 crate 工件（used_crate_source：含 sysroot std rlib，故 sysroot 变更天然
-//! 失配）+ `env!` 依赖（sess.env_depinfo）。文件以 (size, mtime_ns) 校验（cargo 指纹
-//! 同保真度；mtime 粒度风险已记 distribution-design §6）。
+//! 失配）+ `env!` 依赖（sess.env_depinfo）。文件以内容摘要校验；size/mtime 一并保存
+//! 用于诊断，但不再被当成内容身份。
 //!
 //! 防静默错值：任何校验不合即 miss（冷路径重建覆写）；冻结区非固定基址即拒绝
 //! 序列化/恢复（见 frozen.rs）；required .so 缺失即 miss（自愈而非运行期报错）。
@@ -27,6 +27,7 @@ pub(crate) struct FileStamp {
     pub path: String,
     pub size: u64,
     pub mtime_ns: u128,
+    pub digest: [u8; 32],
 }
 
 #[derive(Serialize, Deserialize)]
@@ -59,20 +60,12 @@ fn entry_path(rustc_args: &[String]) -> PathBuf {
 }
 
 fn stamp(path: &str) -> Option<FileStamp> {
-    let md = std::fs::metadata(path).ok()?;
-    if !md.is_file() {
-        return None;
-    }
-    let mtime_ns = md
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_nanos();
+    let stamped = crate::utils::content::file_content_stamp(Path::new(path)).ok()?;
     Some(FileStamp {
         path: path.to_string(),
-        size: md.len(),
-        mtime_ns,
+        size: stamped.size,
+        mtime_ns: stamped.mtime_ns,
+        digest: stamped.digest,
     })
 }
 
@@ -298,6 +291,29 @@ mod tests {
     }
 
     #[test]
+    fn stamp_detects_same_length_content_change_with_restored_mtime() {
+        let dir =
+            std::env::temp_dir().join(format!("mirvm-ircache-content-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("input.rs");
+        std::fs::write(&f, b"fn value() -> u8 { 1 }").unwrap();
+        let original_mtime = std::fs::metadata(&f).unwrap().modified().unwrap();
+        let p = f.display().to_string();
+        let before = stamp(&p).expect("可盖戳");
+
+        std::fs::write(&f, b"fn value() -> u8 { 2 }").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_modified(original_mtime)
+            .unwrap();
+        assert_ne!(stamp(&p).as_ref(), Some(&before));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn env_dep_matching_covers_set_unset_and_drift() {
         let name = "MIRVM_IRCACHE_TEST_ENV";
         // SAFETY: 单测进程内自有变量
@@ -317,13 +333,15 @@ mod tests {
             path: "a".into(),
             size: 1,
             mtime_ns: 2,
+            digest: [3; 32],
         };
         assert_eq!(
             a,
             FileStamp {
                 path: "a".into(),
                 size: 1,
-                mtime_ns: 2
+                mtime_ns: 2,
+                digest: [3; 32],
             }
         );
     }

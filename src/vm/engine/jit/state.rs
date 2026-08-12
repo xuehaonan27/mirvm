@@ -15,6 +15,13 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 /// 维持解释的正常值域；非 strict 模式绝不写入）。
 pub const FAIL_SENTINEL: u64 = u64::MAX;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JitCodeRange {
+    pub start: u64,
+    pub end: u64,
+    pub func: u32,
+}
+
 /// TODO: multiple guest threads may access to this structure, optimize
 /// access to this structure, e.g. take care of cache locality, or should
 /// it be made volatile.
@@ -41,6 +48,9 @@ pub struct JitState {
     pub worker: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
     /// 退出收尾置位后，worker 完成当前函数即丢弃尚未消费的编译请求。
     pub stopping: AtomicBool,
+    /// 已发布的客体 fast 函数体机器码范围。guarded/packed/c2i 包装不登记；
+    /// backtrace 因此每个客体调用只看到一个函数帧。
+    pub guest_code: std::sync::RwLock<Vec<JitCodeRange>>,
 }
 
 impl JitState {
@@ -64,7 +74,22 @@ impl JitState {
             queue: std::sync::Mutex::new(None),
             worker: std::sync::Mutex::new(None),
             stopping: AtomicBool::new(false),
+            guest_code: std::sync::RwLock::new(Vec::new()),
         }
+    }
+
+    pub fn publish_guest_code(&self, range: JitCodeRange) {
+        self.guest_code.write().unwrap().push(range);
+    }
+
+    pub fn guest_func_at(&self, ip: u64) -> Option<u32> {
+        self.guest_code
+            .read()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|range| range.start <= ip && ip < range.end)
+            .map(|range| range.func)
     }
 }
 
@@ -82,5 +107,6 @@ mod tests {
         assert!(j.worker.lock().unwrap().is_none());
         assert!(!j.stopping.load(Ordering::Acquire));
         assert!(j.threshold > 0);
+        assert!(j.guest_code.read().unwrap().is_empty());
     }
 }

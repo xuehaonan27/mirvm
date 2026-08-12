@@ -59,9 +59,9 @@ MIRVM_DEPS=cargo ./tests/run.sh gate
 |---|---|---|
 | `quality.rust` | 格式、clippy、Rust 单元测试 | `src/` |
 | `differential.programs` | `demo/*.rs` 的 native stdout、stderr、退出码是权威 | `demo/` |
-| `differential.cargo` | 固定 Cargo 的脚本和项目行为是权威 | `demo/`、`tests/fixtures/` |
+| `differential.cargo` | 固定 Cargo 的脚本、项目与普通/workspace rustc wrapper 组合行为是权威 | `demo/`、`rustc_wrapper_probe.sh`、其他 `tests/fixtures/` |
 | `differential.cargoless` | Cargo 路径与 cargoless 路径逐字节一致 | `tests/fixtures/cless_*` |
-| `contracts.cargoless-test` | 固定 Cargo 的 test/bench 选择、根 proc-macro 编译形状、输出和退出码是权威 | `cless_test_contract/`、`cless_proc_macro_test_contract/` |
+| `contracts.cargoless-test` | 固定 Cargo/rustdoc 的 test、bench、doctest 选择、编译形状、诊断、输出和退出码是权威 | `cless_test_contract/`、`cless_proc_macro_test_contract/`、`cless_doctest_contract/` |
 | `contracts.cargoless-workspace` | 固定 Cargo 的 resolver 1/2/3、复杂成员 glob、workspace lint、package spec、feature 和失败传播是权威 | `cless_workspace_contract/`、`cless_workspace_remaining_contract/` |
 | `contracts.cargoless-git` | 固定 Cargo lock 格式加本地 Git 仓库的提交内容是权威 | 运行时生成 |
 | `contracts.cargoless-sources` | 固定 Cargo 裁判配置合并、alternate registry、credential provider、source replacement、patch/replace 与 lock | 运行时生成的本地 sparse/local/directory registry |

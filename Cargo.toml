@@ -19,6 +19,7 @@ cranelift = [
 
 [dependencies]
 anyhow = "1.0.103"
+blake3 = "1.8"
 # cranelift 家族版本锁一致；gimli 与 cranelift-codegen 内部所用对齐（类型互通）
 cranelift-codegen = { version = "0.133.1", optional = true, features = ["unwind"] }
 cranelift-frontend = { version = "0.133.1", optional = true }

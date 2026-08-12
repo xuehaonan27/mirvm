@@ -1,5 +1,5 @@
 //! 运行期服务三族（自 interp.rs I10-I12 整搬）：signal_thunk（D8d async
-//! 信号 AS-trampoline）/ backtrace 影子帧（D8e 合成 IP，诚实 <unknown>）/
+//! 信号 AS-trampoline）/ backtrace 混合帧与符号 IP（D8e/E3/E8）/
 //! atexit 家族（D8g，每 Engine 注册表 + LIFO 回调执行）。
 
 use super::call::call_fn_addr;
@@ -38,28 +38,95 @@ pub(super) fn signal_thunk(ctx: *mut Ctx, signum: i32, handler: u64) -> usize {
 }
 
 // ===== backtrace 影子帧（D8e）=====
-/// 合成 IP 基址：高位在用户地址空间之上、非页对齐 → 绝不与真实代码/数据地址撞，
-/// dladdr 找不到（诚实 `<unknown>` 符号化，禁止伪造宿主符号）。
+/// ELF 符号镜像不可用时的保守后备 IP：高位在用户地址空间之上、非页对齐，
+/// 不与真实代码/数据地址撞；正常 Engine 装载会使用可符号化的 ELF 地址。
 const FUNC_IP_BASE: u64 = 0x5f5f_0000_0000_0000;
-pub(super) fn func_synth_ip(func: u32) -> u64 {
+fn fallback_func_ip(func: u32) -> u64 {
     FUNC_IP_BASE + (func as u64) * 64
 }
 
-/// `_Unwind_Backtrace(trace_fn, arg)`（D8e）：逐影子帧（栈顶→底）调 guest trace_fn
-/// (synth_ctx, arg)；trace_fn 返 0（_URC_NO_REASON）续，非 0 停。synth_ctx 指向一个
-/// 存 IP 的小缓冲，`_Unwind_GetIP(ctx)` 从中读。返回 _URC_END_OF_STACK(5)。
+pub(super) fn func_synth_ip(ctx: *mut Ctx, func: u32) -> u64 {
+    unsafe { &*(*ctx).shared }
+        .module
+        .backtrace_ips
+        .get(func as usize)
+        .copied()
+        .unwrap_or_else(|| fallback_func_ip(func))
+}
+
+#[repr(C)]
+struct GuestUnwindContext {
+    ip: u64,
+    cfa: u64,
+}
+
+#[repr(C)]
+struct HostFrame {
+    ip: u64,
+    cfa: u64,
+}
+
+unsafe extern "C" {
+    #[link_name = "_Unwind_Backtrace"]
+    fn host_unwind_backtrace(
+        trace: extern "C" fn(*mut libc::c_void, *mut libc::c_void) -> i32,
+        arg: *mut libc::c_void,
+    ) -> i32;
+    #[link_name = "_Unwind_GetIP"]
+    fn host_unwind_get_ip(ctx: *mut libc::c_void) -> usize;
+    #[link_name = "_Unwind_GetCFA"]
+    fn host_unwind_get_cfa(ctx: *mut libc::c_void) -> usize;
+}
+
+extern "C" fn collect_host_frame(ctx: *mut libc::c_void, arg: *mut libc::c_void) -> i32 {
+    let frames = unsafe { &mut *(arg as *mut Vec<HostFrame>) };
+    frames.push(HostFrame {
+        ip: unsafe { host_unwind_get_ip(ctx) as u64 },
+        cfa: unsafe { host_unwind_get_cfa(ctx) as u64 },
+    });
+    0
+}
+
+/// `_Unwind_Backtrace(trace_fn, arg)`：系统展开器读取活动 JIT 真机器帧，再按宿主栈
+/// 位置与解释影子帧合并。回调仍只拿到受控的 guest context，不会看到引擎宿主帧。
 pub(super) fn unwind_backtrace(ctx: *mut Ctx, trace_fn: u64, arg: u64) -> u64 {
-    // 快照影子帧（回调再入会 push/pop，不能借活栈迭代）。跳过栈顶自身
-    //（_Unwind_Backtrace 的帧不该出现在回溯里，= native 语义）。
-    let frames: Vec<u64> = {
-        let s = unsafe { &(*ctx).shadow };
-        s.iter().rev().skip(1).copied().collect()
+    let shared = unsafe { &*(*ctx).shared };
+    let mut host: Vec<HostFrame> = Vec::new();
+    unsafe {
+        host_unwind_backtrace(
+            collect_host_frame,
+            &mut host as *mut Vec<HostFrame> as *mut libc::c_void,
+        );
+    }
+
+    // 回调可能再入 guest 并改变活栈，所以先完整快照。x86_64 栈向低地址增长：
+    // CFA 小者在内层；同一 JIT 客体调用只登记 fast 本体，包装帧不会重复出现。
+    let mut frames: Vec<GuestUnwindContext> = unsafe {
+        (*ctx)
+            .shadow
+            .iter()
+            .map(|frame| GuestUnwindContext {
+                ip: frame.ip,
+                cfa: frame.cfa,
+            })
+            .collect()
     };
-    for ip in frames {
-        // synth _Unwind_Context = 单字缓冲存 IP（GetIP 读它）
-        let cell: u64 = ip;
-        let cell_ptr = &cell as *const u64 as u64;
-        let r = call_fn_addr(ctx, trace_fn, &[cell_ptr, arg], "_Unwind_Backtrace").0;
+    frames.extend(host.into_iter().filter_map(|frame| {
+        shared
+            .jit
+            .guest_func_at(frame.ip.saturating_sub(1))
+            .map(|func| GuestUnwindContext {
+                ip: func_synth_ip(ctx, func),
+                cfa: frame.cfa,
+            })
+    }));
+    frames.sort_unstable_by_key(|frame| frame.cfa);
+
+    // 当前正在调用 _Unwind_Backtrace 的 guest 帧由标准实现自身裁掉；我们的合成
+    // symbol address 无法与其入口指针直接比较，因此在这里等价跳过最内层客体帧。
+    for frame in frames.into_iter().skip(1) {
+        let frame_ptr = &frame as *const GuestUnwindContext as u64;
+        let r = call_fn_addr(ctx, trace_fn, &[frame_ptr, arg], "_Unwind_Backtrace").0;
         if r != 0 {
             break; // _URC_FOREIGN_EXCEPTION_CAUGHT / _URC_FAILURE 等 → 停
         }

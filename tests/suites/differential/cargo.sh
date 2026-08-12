@@ -11,6 +11,7 @@ MIRVM=${MIRVM:-$(pwd)/target/debug/mirvm}
 CARGO=${CARGO:-$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo}
 RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
 RUSTC_APPEND_PROXY=${RUSTC_APPEND_PROXY:-$(pwd)/tests/fixtures/rustc_proxy.sh}
+RUSTC_WRAPPER_PROBE=${RUSTC_WRAPPER_PROBE:-$(pwd)/tests/fixtures/rustc_wrapper_probe.sh}
 SCRIPT_CACHE=${SCRIPT_CACHE:-${MIRVM_HOME:-$HOME/.mirvm}/scripts}
 # 本套件是「cargo 模式差分」专轨（D15 P3 双轨纪律）：恒走 cargo 三阶段
 # compat 路径——即便外层（如 gate DEPS=self 全量轮）置了 MIRVM_DEPS=self，
@@ -242,5 +243,100 @@ check_green rustflags-fingerprint-cold "$TMP/fp-one.native" "$TMP/fp-one.mirvm" 
     "$fpn1" "$fpm1" 0 "$TMP/fp-one.native.err" "$TMP/fp-one.mirvm.err"
 check_green rustflags-fingerprint-change "$TMP/fp-two.native" "$TMP/fp-two.mirvm" \
     "$fpn2" "$fpm2" 0 "$TMP/fp-two.native.err" "$TMP/fp-two.mirvm.err"
+
+# Cargo wrapper 合同：固定 Cargo 决定普通 wrapper 在外、workspace wrapper 在内，
+# 且后者只用于 workspace 成员。MIRVM 必须占据最内层编译器位置，不能拒绝、吞掉
+# 或自己重排 Cargo 通过环境变量/config 得出的 wrapper 链。
+WRAP_DEP="$TMP/wrapper-dep"; mkdir -p "$WRAP_DEP/src"
+cat > "$WRAP_DEP/Cargo.toml" <<'EOF'
+[package]
+name = "wrapper_dep"
+version = "0.1.0"
+edition = "2024"
+EOF
+cat > "$WRAP_DEP/src/lib.rs" <<'EOF'
+pub fn value() -> u32 { 42 }
+EOF
+WRAP_PROJ="$TMP/wrapper-project"; mkdir -p "$WRAP_PROJ/src" "$WRAP_PROJ/.cargo"
+cat > "$WRAP_PROJ/Cargo.toml" <<'EOF'
+[package]
+name = "wrapper_root"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wrapper_dep = { path = "../wrapper-dep" }
+EOF
+cat > "$WRAP_PROJ/src/main.rs" <<'EOF'
+fn main() { println!("wrapper={}", wrapper_dep::value()); }
+EOF
+WRAP_TOOLS="$TMP/wrapper-tools"; mkdir -p "$WRAP_TOOLS"
+ln -s "$RUSTC_WRAPPER_PROBE" "$WRAP_TOOLS/ordinary-wrapper"
+ln -s "$RUSTC_WRAPPER_PROBE" "$WRAP_TOOLS/workspace-wrapper"
+
+check_wrapper_chain() {
+    local name="$1" native_log="$2" mirvm_log="$3"
+    local ordinary=ordinary-wrapper workspace=workspace-wrapper
+    local bad=0
+    for log in "$native_log.$ordinary" "$native_log.$workspace" \
+        "$mirvm_log.$ordinary" "$mirvm_log.$workspace"; do
+        if [ ! -s "$log" ]; then
+            echo "FAIL $name (wrapper 未执行: $log)"; bad=1
+        fi
+    done
+    if [ "$bad" = 0 ] \
+        && grep -Fq "$ordinary|$WRAP_TOOLS/$workspace|$RUSTC|" "$native_log.$ordinary" \
+        && grep -Fq "$ordinary|$RUSTC|--crate-name|wrapper_dep|" "$native_log.$ordinary" \
+        && grep -Fq "$workspace|$RUSTC|--crate-name|wrapper_root|" "$native_log.$workspace" \
+        && ! grep -Fq '|--crate-name|wrapper_dep|' "$native_log.$workspace" \
+        && grep -Fq "$ordinary|$WRAP_TOOLS/$workspace|$MIRVM|" "$mirvm_log.$ordinary" \
+        && grep -Fq "$ordinary|$MIRVM|--crate-name|wrapper_dep|" "$mirvm_log.$ordinary" \
+        && grep -Fq "$workspace|$MIRVM|--crate-name|wrapper_root|" "$mirvm_log.$workspace" \
+        && ! grep -Fq '|--crate-name|wrapper_dep|' "$mirvm_log.$workspace"; then
+        echo "PASS $name"; pass=$((pass+1))
+    else
+        if [ "$bad" = 0 ]; then
+            echo "FAIL $name (wrapper 顺序或适用范围与固定 Cargo 不一致)"
+            tail -20 "$native_log.$ordinary" "$native_log.$workspace" \
+                "$mirvm_log.$ordinary" "$mirvm_log.$workspace"
+        fi
+        fail=$((fail+1))
+    fi
+}
+
+NATIVE_ENV_LOG="$TMP/wrapper-native-env"
+MIRVM_ENV_LOG="$TMP/wrapper-mirvm-env"
+(cd "$WRAP_PROJ" && MIRVM_WRAPPER_PROBE_LOG="$NATIVE_ENV_LOG" RUSTC="$RUSTC" \
+    RUSTC_WRAPPER="$WRAP_TOOLS/ordinary-wrapper" \
+    RUSTC_WORKSPACE_WRAPPER="$WRAP_TOOLS/workspace-wrapper" \
+    CARGO_TARGET_DIR="$TMP/wrapper-native-env-target" "$CARGO" run -q \
+    >"$TMP/wrapper-native-env.out" 2>"$TMP/wrapper-native-env.err"); wne=$?
+(cd "$WRAP_PROJ" && MIRVM_WRAPPER_PROBE_LOG="$MIRVM_ENV_LOG" \
+    RUSTC_WRAPPER="$WRAP_TOOLS/ordinary-wrapper" \
+    RUSTC_WORKSPACE_WRAPPER="$WRAP_TOOLS/workspace-wrapper" \
+    MIRVM_TARGET_DIR="$TMP/wrapper-mirvm-env-target" "$MIRVM" run . \
+    >"$TMP/wrapper-mirvm-env.out" 2>"$TMP/wrapper-mirvm-env.err"); wme=$?
+check_green cargo-wrapper-env-output "$TMP/wrapper-native-env.out" \
+    "$TMP/wrapper-mirvm-env.out" "$wne" "$wme" 0 \
+    "$TMP/wrapper-native-env.err" "$TMP/wrapper-mirvm-env.err"
+check_wrapper_chain cargo-wrapper-env-chain "$NATIVE_ENV_LOG" "$MIRVM_ENV_LOG"
+
+cat > "$WRAP_PROJ/.cargo/config.toml" <<EOF
+[build]
+rustc-wrapper = "$WRAP_TOOLS/ordinary-wrapper"
+rustc-workspace-wrapper = "$WRAP_TOOLS/workspace-wrapper"
+EOF
+NATIVE_CONFIG_LOG="$TMP/wrapper-native-config"
+MIRVM_CONFIG_LOG="$TMP/wrapper-mirvm-config"
+(cd "$WRAP_PROJ" && MIRVM_WRAPPER_PROBE_LOG="$NATIVE_CONFIG_LOG" RUSTC="$RUSTC" \
+    CARGO_TARGET_DIR="$TMP/wrapper-native-config-target" "$CARGO" run -q \
+    >"$TMP/wrapper-native-config.out" 2>"$TMP/wrapper-native-config.err"); wnc=$?
+(cd "$WRAP_PROJ" && MIRVM_WRAPPER_PROBE_LOG="$MIRVM_CONFIG_LOG" \
+    MIRVM_TARGET_DIR="$TMP/wrapper-mirvm-config-target" "$MIRVM" run . \
+    >"$TMP/wrapper-mirvm-config.out" 2>"$TMP/wrapper-mirvm-config.err"); wmc=$?
+check_green cargo-wrapper-config-output "$TMP/wrapper-native-config.out" \
+    "$TMP/wrapper-mirvm-config.out" "$wnc" "$wmc" 0 \
+    "$TMP/wrapper-native-config.err" "$TMP/wrapper-mirvm-config.err"
+check_wrapper_chain cargo-wrapper-config-chain "$NATIVE_CONFIG_LOG" "$MIRVM_CONFIG_LOG"
 
 suite_summary differential.cargo

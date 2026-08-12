@@ -33,8 +33,11 @@ pub struct Shared {
 }
 
 impl Shared {
-    pub fn new(module: Module) -> Self {
+    pub fn new(mut module: Module) -> Self {
         static NEXT_ENGINE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        module.ensure_function_names();
+        super::backtrace::materialize_symbols(&mut module)
+            .unwrap_or_else(|error| panic!("客体 backtrace 符号映像建立失败: {error}"));
         let jit = super::jit::JitState::new(module.funcs.len());
         Shared {
             id: NEXT_ENGINE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -105,10 +108,16 @@ pub struct Ctx {
     /// heap 分配 + 模板拷贝）。guest dtor 先由 pthread-key thunk 执行，Ctx 最后
     /// 一轮析构时再释放实例内存。
     pub tls: Vec<u64>,
-    /// 影子帧栈（M5.2 D8e）：每个活动 interp_frame 的合成 IP（= 冻结 fn 条目地址或
-    /// 每 FuncId 唯一 token）。`_Unwind_Backtrace` 逐帧回调，`_Unwind_GetIP` 读它。
+    /// 活动解释帧。IP 供 guest unwinder 消费，CFA 是该解释调用在宿主栈上的位置；
+    /// backtrace 用 CFA 把解释帧与系统展开器读出的 JIT 真机器帧恢复成一个调用序列。
     /// enter 时 push、FrameGuard::drop 时 pop（与 depth 同生命周期，unwind 安全）。
-    pub shadow: Vec<u64>,
+    pub shadow: Vec<ShadowFrame>,
+}
+
+#[derive(Clone, Copy)]
+pub struct ShadowFrame {
+    pub ip: u64,
+    pub cfa: u64,
 }
 
 impl Ctx {

@@ -1,1 +1,1 @@
-backtrace: captured, non-empty, depth reflected (+30 frames)
+backtrace: captured, named, non-empty, depth reflected (+30 frames)

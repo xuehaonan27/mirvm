@@ -87,6 +87,7 @@ struct Reloc {
 /// MODULE v3 只保存非函数元数据。借用写入形态避免复制冻结区和索引表。
 #[derive(Serialize)]
 struct ModuleMetaRef<'a> {
+    function_names: &'a [Box<str>],
     exports: &'a std::collections::HashMap<Box<str>, crate::vm::engine::ir::FuncId>,
     frozen: &'a Option<crate::vm::engine::frozen::FrozenArena>,
     fn_addrs: &'a std::collections::HashMap<u64, crate::vm::engine::ir::FuncId>,
@@ -105,6 +106,7 @@ struct ModuleMetaRef<'a> {
 impl<'a> From<&'a crate::vm::engine::ir::Module> for ModuleMetaRef<'a> {
     fn from(module: &'a crate::vm::engine::ir::Module) -> Self {
         Self {
+            function_names: &module.function_names,
             exports: &module.exports,
             frozen: &module.frozen,
             fn_addrs: &module.fn_addrs,
@@ -124,6 +126,7 @@ impl<'a> From<&'a crate::vm::engine::ir::Module> for ModuleMetaRef<'a> {
 
 #[derive(Deserialize)]
 struct ModuleMeta {
+    function_names: Vec<Box<str>>,
     exports: std::collections::HashMap<Box<str>, crate::vm::engine::ir::FuncId>,
     frozen: Option<crate::vm::engine::frozen::FrozenArena>,
     fn_addrs: std::collections::HashMap<u64, crate::vm::engine::ir::FuncId>,
@@ -143,6 +146,7 @@ impl ModuleMeta {
     fn into_module(self) -> crate::vm::engine::ir::Module {
         crate::vm::engine::ir::Module {
             funcs: Default::default(),
+            function_names: self.function_names,
             exports: self.exports,
             frozen: self.frozen,
             fn_addrs: self.fn_addrs,
@@ -160,6 +164,8 @@ impl ModuleMeta {
             custom_alloc_shims: self.custom_alloc_shims,
             entry: self.entry,
             image_frozens: Vec::new(),
+            backtrace_ips: Vec::new(),
+            backtrace_image: None,
         }
     }
 }
@@ -644,6 +650,13 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
     let function_section = package.section(TAG_FUNCS)?;
     let mapped_offset = function_section.as_ptr() as usize - raw.as_ptr() as usize;
     let function_blobs = parse_function_section(function_section, mapped_offset)?;
+    if module.function_names.len() != function_blobs.len() {
+        return Err(format!(
+            "MODULE function name table has {} entries, expected {}",
+            module.function_names.len(),
+            function_blobs.len()
+        ));
+    }
     crate::vm::engine::verify::module_header_with_count(&module, function_blobs.len())
         .map_err(|e| format!("MODULE bytecode verification failed: {e}"))?;
     // E20 红线：任何 MC/native 物化前逐函数做完整语义验证。临时对象随轮释放，

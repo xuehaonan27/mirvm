@@ -45,6 +45,23 @@ case "$name" in
                 ;;
         esac
         ;;
+    wrapper_root)
+        ordinary=${RUSTC_WRAPPER:-}
+        workspace=${RUSTC_WORKSPACE_WRAPPER:-}
+        if [ -z "$ordinary" ] && [ -f .cargo/config.toml ]; then
+            ordinary=$(sed -n 's/^rustc-wrapper = "\(.*\)"/\1/p' .cargo/config.toml)
+            workspace=$(sed -n 's/^rustc-workspace-wrapper = "\(.*\)"/\1/p' .cargo/config.toml)
+        fi
+        ordinary_name=$(basename "$ordinary")
+        workspace_name=$(basename "$workspace")
+        printf '%s|%s|%s|-vV\n' "$ordinary_name" "$workspace" "$RUSTC" \
+            >>"$MIRVM_WRAPPER_PROBE_LOG.$ordinary_name"
+        printf '%s|%s|--crate-name|wrapper_dep|\n' "$ordinary_name" "$RUSTC" \
+            >>"$MIRVM_WRAPPER_PROBE_LOG.$ordinary_name"
+        printf '%s|%s|--crate-name|wrapper_root|\n' "$workspace_name" "$RUSTC" \
+            >>"$MIRVM_WRAPPER_PROBE_LOG.$workspace_name"
+        echo 'wrapper=42'
+        ;;
     *)
         echo "unexpected fake cargo package: $name" >&2
         exit 99

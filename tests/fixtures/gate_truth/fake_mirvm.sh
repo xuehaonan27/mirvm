@@ -27,6 +27,26 @@ fi
 
 target=${2:-}
 case "$target" in
+    .)
+        if grep -Fq 'name = "wrapper_root"' Cargo.toml 2>/dev/null; then
+            ordinary=${RUSTC_WRAPPER:-}
+            workspace=${RUSTC_WORKSPACE_WRAPPER:-}
+            if [ -z "$ordinary" ] && [ -f .cargo/config.toml ]; then
+                ordinary=$(sed -n 's/^rustc-wrapper = "\(.*\)"/\1/p' .cargo/config.toml)
+                workspace=$(sed -n 's/^rustc-workspace-wrapper = "\(.*\)"/\1/p' .cargo/config.toml)
+            fi
+            ordinary_name=$(basename "$ordinary")
+            workspace_name=$(basename "$workspace")
+            printf '%s|%s|%s|-vV\n' "$ordinary_name" "$workspace" "$0" \
+                >>"$MIRVM_WRAPPER_PROBE_LOG.$ordinary_name"
+            printf '%s|%s|--crate-name|wrapper_dep|\n' "$ordinary_name" "$0" \
+                >>"$MIRVM_WRAPPER_PROBE_LOG.$ordinary_name"
+            printf '%s|%s|--crate-name|wrapper_root|\n' "$workspace_name" "$0" \
+                >>"$MIRVM_WRAPPER_PROBE_LOG.$workspace_name"
+            echo 'wrapper=42'
+            exit 0
+        fi
+        ;;
     demo/ecosystem.rs)
         case "${SCENARIO:-xfail}" in
             false_positive) exit 101 ;;

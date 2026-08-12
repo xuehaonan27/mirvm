@@ -4,10 +4,10 @@
 //! 进 image 栈 `[std 底座, deps-image]`，runner 只 lower delta（bin 附着物）。
 //!
 //! 键（pre-key，**pre-compiler 可算**——L2 热路径在编译会话之前，不可依赖 tcx）：
-//! `fnv(MIRVM_BUILD_ID, 底座键, 排序后的 --extern 工件 (path,size,mtime_ns) 盖戳)`。
+//! `fnv(MIRVM_BUILD_ID, 底座键, 排序后的 --extern 工件内容盖戳)`。
 //! --extern 只含直接依赖（eco 4 个），传递闭包由 **cargo 重建传播**覆盖（任一传递
 //! crate 变更 ⇒ 其反向依赖链上的直接依赖被 cargo 重编译 ⇒ 直接 rlib 盖戳变）；
-//! mtime 粒度残余风险与 ircache 同账（distribution-design §6）。**不含 bin 源与项目
+//! 内容摘要兜住同大小且 mtime 被恢复的改写。**不含 bin 源与项目
 //! 身份** ⇒ bin 编辑必命中；同 lockfile + 同工具链的项目共享（S3′c）。
 //! **A2-3 起默认开启**；`MIRVM_NO_DEPS_IMAGE=1` 全程旁路（双态对拍用）。
 //! v1 边界：--extern 为空（无 registry 依赖的纯 std 程序）不产/不用 image——
@@ -26,8 +26,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::vm::engine::ir;
 
-/// --extern 工件盖戳清单（path, size, mtime_ns；排序去重）
-type ExternStamps = Vec<(String, u64, u128)>;
+/// --extern 工件盖戳清单（path, size, mtime_ns, BLAKE3；排序去重）
+type ExternStamps = Vec<(String, u64, u128, [u8; 32])>;
 
 /// deps-image 文件（v1 = postcard 整包；module 的 exports/fn_addrs 保留在 module 内
 /// ——无字节确定性契约，免去 BaseFile 的排序 Vec 摘出/重建舞）。
@@ -51,7 +51,7 @@ struct DepsFileRef<'a> {
     build_id: &'a str,
     base_key: &'a str,
     lowering_fp: (bool, bool, bool),
-    extern_stamps: &'a [(String, u64, u128)],
+    extern_stamps: &'a [(String, u64, u128, [u8; 32])],
     module: &'a ir::Module,
     fn_entry_syms: &'a [(Box<str>, u64)],
     static_syms: &'a [(Box<str>, u64)],
@@ -89,22 +89,14 @@ fn extern_paths(rustc_args: &[String]) -> Option<Vec<String>> {
     Some(paths)
 }
 
-/// (path, size, mtime_ns) 盖戳；任一文件不可盖戳 ⇒ None（不产/不用 image）。
-fn stamp_externs(paths: &[String]) -> Option<Vec<(String, u64, u128)>> {
+/// 内容盖戳；任一文件不可稳定读取 ⇒ None（不产/不用 image）。
+fn stamp_externs(paths: &[String]) -> Option<ExternStamps> {
     paths
         .iter()
         .map(|p| {
-            let md = std::fs::metadata(p).ok()?;
-            if !md.is_file() {
-                return None;
-            }
-            let mtime_ns = md
-                .modified()
-                .ok()?
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()?
-                .as_nanos();
-            Some((p.clone(), md.len(), mtime_ns))
+            let stamped =
+                crate::utils::content::file_content_stamp(std::path::Path::new(p)).ok()?;
+            Some((p.clone(), stamped.size, stamped.mtime_ns, stamped.digest))
         })
         .collect()
 }
@@ -122,13 +114,15 @@ pub fn pre_key(rustc_args: &[String], base_key: &str) -> Option<(String, ExternS
     let mut key = String::from(env!("MIRVM_BUILD_ID"));
     key.push('\u{1f}');
     key.push_str(base_key);
-    for (p, size, mt) in &stamps {
+    for (p, size, mt, digest) in &stamps {
         key.push('\u{1f}');
         key.push_str(p);
         key.push('\u{1e}');
         key.push_str(&size.to_string());
         key.push('\u{1e}');
         key.push_str(&mt.to_string());
+        key.push('\u{1e}');
+        key.push_str(&crate::utils::content::digest_hex(digest));
     }
     let h = crate::lower::asm::fnv1a(key.as_bytes());
     if std::env::var_os("MIRVM_A2_DEBUG").is_some() {
@@ -307,5 +301,31 @@ mod tests {
             "regex=/t/a.rlib".to_string(),
         ];
         assert_eq!(super::extern_paths(&dup).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn pre_key_detects_same_length_content_change_with_restored_mtime() {
+        let dir = std::env::temp_dir().join(format!(
+            "mirvm-depsimage-content-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let artifact = dir.join("libdep.rlib");
+        std::fs::write(&artifact, b"first").unwrap();
+        let original_mtime = std::fs::metadata(&artifact).unwrap().modified().unwrap();
+        let args = vec![format!("--extern=dep={}", artifact.display())];
+        let before = super::pre_key(&args, "base").unwrap().0;
+
+        std::fs::write(&artifact, b"other").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&artifact)
+            .unwrap()
+            .set_modified(original_mtime)
+            .unwrap();
+        let after = super::pre_key(&args, "base").unwrap().0;
+        assert_ne!(before, after);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -2,7 +2,7 @@
 
 > 状态：**P1 主链已完成；P2 的 resolver 3 / rust-version、Git 依赖、替代
 > registry/Cargo 配置、source replacement/patch/replace 与 pack self 五批及 full
-> corpus 总验收均已完成（2026-08-10，138 PASS / 1 SKIP / 0 FAIL）；D17 余项与
+> corpus 总验收均已完成（2026-08-10，138 PASS / 1 SKIP / 0 FAIL）；D17、D19 与
 > D3 mmap/逐函数惰性装载核心已于 2026-08-11 完成**。
 > 本文把当前明确缺失的产品
 > 能力合并成一条可执行路线；现状仍以 [current-status.md](../current-status.md) 为准，
@@ -23,14 +23,15 @@
 **进展（2026-08-11）**：D17 完成。单包、resolver 1/2/3 workspace、bench、根
 proc-macro 测试、复杂成员 glob、workspace lints 和完整路径 package spec 都由
 [cargoless 合同](mirvm-test-cargoless-contract.md) 约束；成员发现、继承、统一 lock、
-package 选择和特性统一均在依赖机制内实现，没有命令层特判。doctest 另归 rustdoc 前端。
+package 选择和特性统一均在依赖机制内实现，没有命令层特判。D19 后续也已用 rustdoc
+前端接入 doctest，没有把代码块伪装成普通 test。
 
 **用户结果**：项目可以直接运行单元测试，不必退回 cargo 才能完成“改代码、跑测试”。
 
 - 解析 lib/bin/test target，按 `cfg(test)` 重编本包；复用现有 `test` sysroot crate。
 - 接入 libtest harness，透传过滤器、`--nocapture`、`--ignored`、线程数和退出码。
-- 覆盖 workspace 根、默认/当前成员、指定 package 和 workspace 特性；doctest 明确留待
-  rustdoc 前端专项。
+- 覆盖 workspace 根、默认/当前成员、指定 package 和 workspace 特性；doctest 由固定
+  rustdoc 提取、裁判，临时 crate 交给 VM 编译执行。
 - 验收：至少一个 lib、bin、integration test、失败测试和 panic 测试与
   `cargo test` 的可观察结果一致；默认依赖驱动全程不启动 cargo。
 
@@ -135,9 +136,9 @@ package 选择和特性统一均在依赖机制内实现，没有命令层特判
      第二轮 full corpus **138 pass / 1 skip / 0 expected-fail / 0 fail**；唯一 SKIP 是
      本机缺 `libffi.so` 开发链接名。最终非性能 `fast` **12/12**。
 
-**D17 余项完成（2026-08-11）**：根 proc-macro 测试、bench、workspace lints、复杂
-package ID/成员 glob 和旧项目 resolver 1 已按上述顺序落地。doctest 继续作为 D19
-rustdoc 前端专项处理代码块提取、临时 crate、行号和 compile-fail，不并入普通 test harness。
+**D17/D19 完成（2026-08-11）**：根 proc-macro 测试、bench、workspace lints、复杂
+package ID/成员 glob 和旧项目 resolver 1 已落地；doctest 由固定 rustdoc 处理代码块、
+临时 crate、行号和 compile-fail，MIRVM 只接管临时 crate 的 MIR 编译与执行。
 
 ### P3：OS 级沙箱与资源治理
 
@@ -183,7 +184,9 @@ Shared/JIT worker，线程执行态按 Engine id 隔离并支持嵌套恢复；�
 **进展（2026-08-11）**：D3 核心布局已完成。格式 v3 以只读 mmap 打开容器，将函数体
 拆成独立索引项，按访问惰性驻留，并用上一轮真实访问顺序后台预取；需求解码优先于预测。
 E20 完整语义验证仍要求首次装载逐函数临时解码一次，因此 D3 还剩“直接在档案表示上验证”
-这一项，完成前不启动 D4 格式冻结。
+这一项，完成前不启动 D4 格式冻结。该余项可做，但需要不稳定格式 v4：实际执行字节本身
+改为可边界检查、可借用遍历的偏移式归档表示，E20 直接验证同一表示；不能靠并列摘要证明
+另一份 postcard 函数体安全。
 
 **用户结果**：`.mirvm` 有明确兼容期和迁移规则，加载大型包不必整包复制解码，并能按
 目标平台选择内容。
@@ -223,7 +226,7 @@ E20 完整语义验证仍要求首次装载逐函数临时解码一次，因此 
 
 当前产品主队列是：
 
-`D17 余项（完成） → D3 mmap/逐函数惰性装载核心（完成） → D3 档案直接语义验证 → D4 格式冻结评审`
+`D17/D19（完成） → D3 mmap/逐函数惰性装载核心（完成） → D3 v4 档案直接语义验证 → D4 格式冻结评审`
 
 OS 沙箱按维护者本轮裁定暂缓，不进入这条施工链；这不改变“当前只能运行受信任代码”的
 产品边界。D16 性能线和性能基线也按维护者要求另期统一恢复，本轮不从未测数据推导收益。

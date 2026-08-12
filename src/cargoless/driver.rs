@@ -95,6 +95,14 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
             return ExitCode::from(2);
         }
     };
+    if request.doc && request.no_run {
+        eprintln!("error: can't skip running doc tests with --no-run");
+        return ExitCode::from(101);
+    }
+    if request.doc && request.has_non_doc_target_selection() {
+        eprintln!("error: can't mix --doc with other target selecting options");
+        return ExitCode::from(101);
+    }
     let mut workspace = match WorkspaceManifest::read(dir) {
         Ok(workspace) => workspace,
         Err(e) => {
@@ -171,19 +179,34 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
     }
     test_args.extend(harness_args.iter().cloned());
     let mut failed = false;
-    'packages: for package in prepared {
-        for recipe in package.recipes {
+    let mut stopped = false;
+    'packages: for package in &prepared {
+        for recipe in &package.recipes {
             let code = run_recipe_child(
                 &package.self_exe,
                 &package.root,
                 &package.sysroot,
-                &recipe,
+                recipe,
                 &test_args,
             );
             if code != 0 {
                 failed = true;
                 if !request.no_fail_fast {
+                    stopped = true;
                     break 'packages;
+                }
+            }
+        }
+    }
+    if !stopped {
+        'doctests: for package in &prepared {
+            let Some(task) = &package.doctest else {
+                continue;
+            };
+            if run_doctest_task(task, &package.sysroot, &test_args, request.quiet) != 0 {
+                failed = true;
+                if !request.no_fail_fast {
+                    break 'doctests;
                 }
             }
         }
@@ -200,6 +223,15 @@ struct PreparedTests {
     root: PathBuf,
     sysroot: PathBuf,
     recipes: Vec<PathBuf>,
+    doctest: Option<DoctestTask>,
+}
+
+struct DoctestTask {
+    package: String,
+    rustdoc: PathBuf,
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+    cwd: PathBuf,
 }
 
 /// Cargo resolver v2 会把同一次 workspace 命令中到达同一包、同一版本、同一
@@ -282,6 +314,20 @@ fn prepare_test_package(
             return Err(ExitCode::from(1));
         }
     };
+    let doctest_target = request.wants_doctest().then(|| {
+        manifest
+            .targets
+            .iter()
+            .find(|target| target.is_lib() && target.doctest)
+    });
+    let doctest_target = match doctest_target {
+        Some(Some(target)) => Some(target),
+        Some(None) if request.doc => {
+            eprintln!("mirvm test: --doc 要求包有启用 doctest 的 lib target");
+            return Err(ExitCode::from(101));
+        }
+        _ => None,
+    };
 
     let sysroot = match std::env::var_os("MIRVM_SYSROOT") {
         Some(p) => PathBuf::from(p),
@@ -362,7 +408,7 @@ fn prepare_test_package(
             s.target.kind,
             TargetKind::Bin | TargetKind::Test | TargetKind::Example | TargetKind::Bench
         )
-    });
+    }) || doctest_target.is_some();
     if needs_root_lib
         && let Some((name, path, proc_macro)) = &root_lib
         && let Err(code) = if *proc_macro {
@@ -521,6 +567,44 @@ fn prepare_test_package(
             return Err(ExitCode::from(1));
         }
     }
+    let doctest = if let Some(target) = doctest_target {
+        let builder = match write_doctest_builder(&self_exe, &layout, &manifest, &root_fp) {
+            Ok(builder) => builder,
+            Err(error) => {
+                eprintln!("mirvm test: {error}");
+                return Err(ExitCode::from(1));
+            }
+        };
+        let args = schedule::doctest_rustdoc_args(
+            &manifest,
+            &plan,
+            &fps,
+            &sysroot,
+            &layout,
+            target,
+            &root_fp,
+            root_bo.as_ref(),
+            &root_searches,
+            &builder,
+        );
+        let env = root_target_env(
+            &manifest,
+            target,
+            root_bo.as_ref(),
+            &layout,
+            &root_fp,
+            &BTreeMap::new(),
+        );
+        Some(DoctestTask {
+            package: manifest.name.clone(),
+            rustdoc: PathBuf::from(&args[0]),
+            args: args[1..].to_vec(),
+            env,
+            cwd: manifest.root.clone(),
+        })
+    } else {
+        None
+    };
     Ok(PreparedTests {
         self_exe,
         root: manifest.root,
@@ -529,6 +613,7 @@ fn prepare_test_package(
             .into_iter()
             .map(|(_, recipe, _, _, _)| recipe)
             .collect(),
+        doctest,
     })
 }
 
@@ -543,6 +628,7 @@ struct TestRequest {
     example_names: BTreeSet<String>,
     benches: bool,
     bench_names: BTreeSet<String>,
+    doc: bool,
     all_targets: bool,
     no_run: bool,
     no_fail_fast: bool,
@@ -614,7 +700,7 @@ impl TestRequest {
                     let value = take_value(&mut i, "--exclude")?;
                     out.excludes.insert(value);
                 }
-                "--doc" => return Err("doctest 需要 rustdoc 前端，D17 明确不支持".into()),
+                "--doc" => out.doc = true,
                 "--features" | "-F" => {
                     let value = take_value(&mut i, arg)?;
                     add_feature_values(&mut out.features, &value);
@@ -804,6 +890,20 @@ impl TestRequest {
     }
 
     fn has_explicit_selection(&self) -> bool {
+        self.doc
+            || self.lib
+            || self.bins
+            || self.tests
+            || self.examples
+            || self.benches
+            || self.all_targets
+            || !self.bin_names.is_empty()
+            || !self.test_names.is_empty()
+            || !self.example_names.is_empty()
+            || !self.bench_names.is_empty()
+    }
+
+    fn has_non_doc_target_selection(&self) -> bool {
         self.lib
             || self.bins
             || self.tests
@@ -814,6 +914,10 @@ impl TestRequest {
             || !self.test_names.is_empty()
             || !self.example_names.is_empty()
             || !self.bench_names.is_empty()
+    }
+
+    fn wants_doctest(&self) -> bool {
+        self.doc || (!self.has_explicit_selection() && !self.no_run)
     }
 
     fn select<'a>(
@@ -870,7 +974,7 @@ impl TestRequest {
                 include_dev: matches!(target.kind, TargetKind::Example | TargetKind::Bench),
             });
         }
-        if selected.is_empty() {
+        if selected.is_empty() && !self.doc {
             return Err("没有可测试目标".into());
         }
 
@@ -1263,6 +1367,209 @@ fn launcher_recipe_path(launcher: &Path) -> PathBuf {
     let mut path = launcher.as_os_str().to_os_string();
     path.push(".mirvm-recipe.json");
     PathBuf::from(path)
+}
+
+pub fn is_doctest_builder(argv0: &Path) -> bool {
+    argv0
+        .file_name()
+        .is_some_and(|name| name == "mirvm-doctest-builder")
+}
+
+fn write_doctest_builder(
+    self_exe: &Path,
+    layout: &Layout,
+    manifest: &PackageManifest,
+    root_fp: &str,
+) -> Result<PathBuf, String> {
+    let dir = layout.build_dir(&manifest.name, root_fp).join("doctest");
+    let builder = dir.join("mirvm-doctest-builder");
+    crate::cargo_shim::ensure_self_symlink(self_exe, &builder)?;
+    Ok(builder)
+}
+
+fn arg_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|arg| arg == flag)
+        .and_then(|index| args.get(index + 1).cloned())
+        .or_else(|| {
+            args.iter()
+                .find_map(|arg| arg.strip_prefix(&format!("{flag}=")).map(str::to_owned))
+        })
+}
+
+fn doctest_crate_type(args: &[String]) -> Option<String> {
+    arg_value(args, "--crate-type")
+}
+
+fn remove_output_arg(args: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "-o" {
+            index += 2;
+            continue;
+        }
+        if args[index].starts_with("-o=") {
+            index += 1;
+            continue;
+        }
+        out.push(args[index].clone());
+        index += 1;
+    }
+    out
+}
+
+/// rustdoc `--test-builder` 入口。库 bundle 用真 rustc 生成带 MIR 的
+/// metadata-only rlib；bin 先做真 rustc 类型检查，再把目标路径发布为
+/// mirvm 启动器。rustdoc 因而仍能自己判断 compile_fail。
+pub fn run_doctest_builder(argv: impl Iterator<Item = String>) -> ExitCode {
+    let args: Vec<String> = argv.collect();
+    let crate_type = doctest_crate_type(&args).unwrap_or_default();
+    let rustc = PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT")).join("bin/rustc");
+    if crate_type == "lib" {
+        let status = std::process::Command::new(&rustc)
+            .args(&args)
+            .arg("--emit=dep-info,metadata,link")
+            .arg("-Zalways-encode-mir")
+            .arg("-Zno-codegen")
+            .status();
+        return match status {
+            Ok(status) if status.success() => ExitCode::SUCCESS,
+            Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
+            Err(error) => {
+                eprintln!("mirvm doctest builder: 启动 rustc 失败: {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
+    if crate_type != "bin" {
+        eprintln!("mirvm doctest builder: 不支持的 crate type `{crate_type}`");
+        return ExitCode::from(1);
+    }
+    let Some(output) = arg_value(&args, "-o").map(PathBuf::from) else {
+        eprintln!("mirvm doctest builder: bin 编译缺少 -o");
+        return ExitCode::from(1);
+    };
+    let check_dir = output
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("mirvm-check");
+    if let Err(error) = std::fs::create_dir_all(&check_dir) {
+        eprintln!(
+            "mirvm doctest builder: 创建检查目录 {} 失败: {error}",
+            check_dir.display()
+        );
+        return ExitCode::from(1);
+    }
+    let check_args = remove_output_arg(&args);
+    let status = std::process::Command::new(&rustc)
+        .args(&check_args)
+        .arg("--emit=metadata")
+        .arg("--out-dir")
+        .arg(&check_dir)
+        .arg("-Zalways-encode-mir")
+        .arg("-Zno-codegen")
+        .status();
+    match status {
+        Ok(status) if status.success() => {}
+        Ok(status) => return ExitCode::from(status.code().unwrap_or(1) as u8),
+        Err(error) => {
+            eprintln!("mirvm doctest builder: 启动 rustc 检查失败: {error}");
+            return ExitCode::from(1);
+        }
+    }
+
+    let cwd = std::env::var_os("MIRVM_DOCTEST_RUN_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let recipe = RootRunRecipe {
+        rustc_args: std::iter::once("mirvm-doctest-rustc".to_string())
+            .chain(args.iter().cloned())
+            .collect(),
+        env: Vec::new(),
+        cwd,
+        argv0: output.display().to_string(),
+    };
+    let recipe_path = launcher_recipe_path(&output);
+    let bytes = match serde_json::to_vec(&recipe) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("mirvm doctest builder: 配方序列化失败: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let tmp = recipe_path.with_extension(format!("tmp-{}", std::process::id()));
+    if let Err(error) =
+        std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, &recipe_path))
+    {
+        eprintln!(
+            "mirvm doctest builder: 发布配方 {} 失败: {error}",
+            recipe_path.display()
+        );
+        return ExitCode::from(1);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        match std::fs::remove_file(&output) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                eprintln!(
+                    "mirvm doctest builder: 替换输出 {} 失败: {error}",
+                    output.display()
+                );
+                return ExitCode::from(1);
+            }
+        }
+        let self_exe = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("mirvm doctest builder: current_exe 失败: {error}");
+                return ExitCode::from(1);
+            }
+        };
+        if let Err(error) = symlink(self_exe, &output) {
+            eprintln!(
+                "mirvm doctest builder: 创建启动器 {} 失败: {error}",
+                output.display()
+            );
+            return ExitCode::from(1);
+        }
+        ExitCode::SUCCESS
+    }
+    #[cfg(not(unix))]
+    {
+        eprintln!("mirvm doctest builder: runner 当前只支持 Unix 主机");
+        ExitCode::from(1)
+    }
+}
+
+fn run_doctest_task(task: &DoctestTask, sysroot: &Path, test_args: &[String], quiet: bool) -> i32 {
+    if !quiet {
+        eprintln!("{:>12} {}", "Doc-tests", task.package);
+    }
+    let mut command = std::process::Command::new(&task.rustdoc);
+    command.args(&task.args);
+    for arg in test_args {
+        command.arg("--test-args").arg(arg);
+    }
+    command
+        .current_dir(&task.cwd)
+        .envs(task.env.iter().cloned())
+        .env("MIRVM_SYSROOT", sysroot)
+        .env("MIRVM_DOCTEST_RUN_DIR", &task.cwd)
+        .env("MIRVM_NO_IR_CACHE", "1");
+    let code = command
+        .status()
+        .ok()
+        .and_then(|status| status.code())
+        .unwrap_or(1);
+    if code != 0 {
+        eprintln!("error: doctest failed, to rerun pass `--doc`");
+    }
+    code
 }
 
 /// CLI 启动最早期用 argv[0] 识别 `CARGO_BIN_EXE_*` 启动器。
