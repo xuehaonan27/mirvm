@@ -205,6 +205,8 @@ enum TagInfo {
 struct LowerCx<'tcx, 'a> {
     tcx: TyCtxt<'tcx>,
     typing_env: TypingEnv<'tcx>,
+    /// 当前正在降低的单态实例；用于精确标记标准 main 捕获调用点。
+    instance: Instance<'tcx>,
     /// 本函数的 def_id（asm_target_features 查询用，M5.0 inline asm 寄存器分配）
     def_id: rustc_hir::def_id::DefId,
     frame: FrameLayout<'tcx>,
@@ -469,7 +471,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         let p = self.linker.frozen_alloc_bytes(&bits.to_le_bytes());
                         LoweredOp::Bytes {
                             place: PlaceLow {
-                                base: PlaceBase::Static(p),
+                                base: PlaceBase::Static(ir::LinkAddr(p)),
                                 steps: Vec::new(),
                                 ty,
                                 meta: None,
@@ -492,20 +494,16 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 {
                     LoweredOp::Scalar(op)
                 } else {
-                    LoweredOp::Scalar(Operand::Imm {
-                        bits: base.wrapping_add(off.bytes()),
-                        width: Width::W64,
-                    })
+                    LoweredOp::Scalar(Operand::AddrImm(ir::LinkAddr(
+                        base.wrapping_add(off.bytes()),
+                    )))
                 }
             }
             mir::ConstValue::Slice { alloc_id, meta } => {
                 // &str/&[u8] 字面量：胖指针 pair =（数据真地址, meta）
                 let base = self.linker.ensure_alloc(alloc_id)?;
                 LoweredOp::Pair(
-                    Operand::Imm {
-                        bits: base,
-                        width: Width::W64,
-                    },
+                    Operand::AddrImm(ir::LinkAddr(base)),
                     Operand::Imm {
                         bits: meta,
                         width: Width::W64,
@@ -519,7 +517,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     .ensure_alloc(alloc_id)?
                     .wrapping_add(offset.bytes());
                 let sexpr = |o: u64| PlaceExpr {
-                    base: PlaceBase::Static(base.wrapping_add(o)),
+                    base: PlaceBase::Static(ir::LinkAddr(base.wrapping_add(o))),
                     steps: Box::new([]),
                 };
                 match kind {
@@ -540,7 +538,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     ),
                     ValKind::Other { size } => LoweredOp::Bytes {
                         place: PlaceLow {
-                            base: PlaceBase::Static(base),
+                            base: PlaceBase::Static(ir::LinkAddr(base)),
                             steps: Vec::new(),
                             ty,
                             meta: None,
@@ -636,10 +634,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
         };
         let (prov, off) = ptr.prov_and_relative_offset();
         let base = self.linker.ensure_alloc(prov.alloc_id())?;
-        Ok(Operand::Imm {
-            bits: base.wrapping_add(off.bytes()),
-            width: Width::W64,
-        })
+        Ok(Operand::AddrImm(ir::LinkAddr(
+            base.wrapping_add(off.bytes()),
+        )))
     }
 
     /// 被调方 requires_caller_location 时的隐藏尾实参：本帧转发或按调用点合成。
@@ -672,7 +669,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
     fn wide_const(&mut self, v: u128) -> PlaceExpr {
         let base = self.linker.frozen_alloc_bytes(&v.to_le_bytes());
         PlaceExpr {
-            base: PlaceBase::Static(base),
+            base: PlaceBase::Static(ir::LinkAddr(base)),
             steps: Box::new([]),
         }
     }
@@ -1723,7 +1720,6 @@ pub(crate) fn lower_instance<'tcx>(
         typing_env,
         EarlyBinder::bind(tcx, body_ref.clone()),
     );
-
     let mut frame = frame::freeze(tcx, typing_env, &body)?;
 
     // 返回通道（_0，ABI v2）：聚合 = indirect + sret 槽（帧尾追加 8 字节）
@@ -1840,6 +1836,7 @@ pub(crate) fn lower_instance<'tcx>(
     let mut cx = LowerCx {
         tcx,
         typing_env,
+        instance,
         def_id: instance.def_id(),
         frame,
         linker,

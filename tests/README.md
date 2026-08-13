@@ -58,22 +58,22 @@ MIRVM_DEPS=cargo ./tests/run.sh gate
 
 | 套件 ID | 作用和行为权威 | 主要夹具 |
 |---|---|---|
-| `quality.rust` | 格式、clippy、Rust 单元测试 | `src/` |
-| `differential.programs` | `demo/*.rs` 的 native stdout、stderr、退出码是权威 | `demo/` |
+| `quality.rust` | 格式、clippy、Rust 单元测试；嵌入回归锁定 signal guest `oldact`/query 地址、非 LIFO close 恢复、inactive owner 定向、close/JIT 锁期间只登记后安全点派送，以及自产 archive `signal`/`sigaction`/`raise` owner bridge；子进程回归还锁定 native fini 中任何异常必须诊断后 `abort`，不得卡住 `Closing` | `src/` |
+| `differential.programs` | `demo/*.rs` 的 native stdout、stderr、退出码是权威；`signal_probe` 还要求同步 nested `raise` 顺序、计数与 SIG_IGN 行为相同 | `demo/` |
 | `differential.cargo` | 固定 Cargo 的脚本、项目与普通/workspace rustc wrapper 组合行为是权威 | `demo/`、`rustc_wrapper_probe.sh`、其他 `tests/fixtures/` |
 | `differential.cargoless` | Cargo 路径与 cargoless 路径逐字节一致 | `tests/fixtures/cless_*` |
 | `contracts.cargoless-test` | 固定 Cargo/rustdoc 的 test、bench、doctest 选择、编译形状、诊断、输出和退出码是权威 | `cless_test_contract/`、`cless_proc_macro_test_contract/`、`cless_doctest_contract/` |
 | `contracts.cargoless-workspace` | 固定 Cargo 的 resolver 1/2/3、复杂成员 glob、workspace lint、package spec、feature 和失败传播是权威 | `cless_workspace_contract/`、`cless_workspace_remaining_contract/` |
 | `contracts.cargoless-git` | 固定 Cargo lock 格式加本地 Git 仓库的提交内容是权威 | 运行时生成 |
 | `contracts.cargoless-sources` | 固定 Cargo 裁判配置合并、alternate registry、credential provider、source replacement、patch/replace 与 lock | 运行时生成的本地 sparse/local/directory registry |
-| `contracts.pack` | 默认 pack 必须零 Cargo；显式回退必须进入固定 Cargo；产物可脱离构建缓存运行，mmap 惰性装载的热序文件不得改变第二次运行结果 | 运行时生成的 path 依赖项目 |
+| `contracts.pack` | 默认 pack 必须零 Cargo；显式回退必须进入固定 Cargo；v4 产物可脱离构建缓存运行，进程自有不可变快照的热序预取不得改变第二次运行结果；同一 `Package` 可并发重复实例化，实例的 static/TLS、P1（guest 原生入口）地址、native ctor/fini、global_asm/C2 bridge 彼此隔离，关闭后的旧指针不得指向新 Engine | 运行时生成的 path 依赖项目、`package_embed.rs` |
 | `contracts.build-script-rerun` | build.rs 的输入变化和 Cargo 指令决定是否重跑 | `cless_br/`、`cless_libc.rs` |
 | `contracts.deps-image` | 固定输出、缓存文件数量和既定时间上限 | `a2_ws/` 的临时副本 |
 | `corpus.run` | 真实依赖探索跑批；检查退出码，XFAIL 还锁定诊断 | `cases.manifest`、`corpus/` |
 | `corpus.deps-pair` | 每个 corpus 条目的 Cargo/cargoless 三维一致 | `cases.manifest`、`corpus/` |
 | `corpus.contract` | 按 manifest 的 exit、oracle、diff、xfail 严格判定 | `cases.manifest`、`oracles/` |
-| `runtime.semantics` | 数学常量或同源 native 结果是运行时语义权威 | `demo/m4/`、`tsan/` |
-| `runtime.c-unwind` | 固定 rustc+C++ 是跨语言异常权威；解释器和强制同步 JIT 保持异常身份、Drop、普通 C 终止边界，并拒绝非 C/System ABI | `c_unwind_contract/` |
+| `runtime.semantics` | 数学常量或同源 native 结果是运行时语义权威；`unwind` 段共 13 项：既有 9 项展开/恢复语义，加上解释/JIT 各一项未捕获 guest payload 恰一次 Drop、清理后继续调用与第二次 panic，再加解释/JIT 各一项真实 `lang_start` main panic 与正常 `Termination` 101 的区分 | `demo/m4/`、`tsan/` |
+| `runtime.c-unwind` | 固定 rustc+C++ 是跨语言异常权威；13 项要求解释器和强制同步 JIT 保持异常身份、Drop、普通 C 终止边界，C++ typed exception 可穿出整个 Engine，C++ exception 到达 guest catch 时终止，并拒绝非 C/System ABI | `c_unwind_contract/` |
 | `runtime.x86-features` | 当前宿主 native 结果是各 x86 子能力权威 | `tests/fixtures/m51_*.rs` |
 | `runtime.tsan` | TSan 退出码为零且无数据竞争警告 | `tsan/` |
 | `runtime.jit-stats` | JIT 退出统计必须存在且关键桶非零 | `demo/jit_unwind_probe.rs` |

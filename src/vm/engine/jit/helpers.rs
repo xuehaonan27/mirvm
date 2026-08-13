@@ -13,6 +13,13 @@ fn active_shared() -> &'static Shared {
     active().1
 }
 
+/// JIT landing pads classify the exception they actually received. A separate
+/// EngineFault may be suspended by a native catch on the same thread, so TLS
+/// state cannot answer whether this particular unwind should skip cleanup.
+pub(super) extern "C" fn mirvm_exception_is_engine_fault(exception: u64) -> u64 {
+    u64::from(unsafe { crate::vm::engine::unwind::raw_is_engine_fault(exception as *mut u8) })
+}
+
 /// Called by the published fast-entry wrapper before entering a compiled body.
 /// The wrapper has no explicit stack slots, so this check runs before the
 /// body's Cranelift prologue reserves its guest frame.
@@ -39,16 +46,15 @@ pub extern "C-unwind" fn mirvm_jit_stack_guard(func: u64, frame_bytes: u64) {
         ));
     }
 }
+
+/// Compiled-code safe point. This runs in ordinary VM state, never in the
+/// kernel signal frame, so pthread TLS lookup and guest execution are allowed.
+pub(super) extern "C-unwind" fn mirvm_poll_signals() {
+    let (ctx, _shared) = active();
+    crate::vm::engine::ctx::drain_pending_signals(ctx);
+}
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64};
-
-fn terminate_or_resume_engine_fault(e: Box<dyn std::any::Any + Send>) -> ! {
-    if e.is::<crate::vm::engine::interp::EngineFault>() {
-        std::panic::resume_unwind(e);
-    }
-    eprintln!("mirvm[m4-engine]: unwind 抵达 Terminate 边界（double panic/ABI）——abort");
-    std::process::abort()
-}
 
 // ===== T3（M5.5 D5）助手频度统计：vmctx 终裁复测的格③对照基线 =====
 // MIRVM_JIT_STATS=1 时每个助手入口一次 fetch_add(Relaxed)，进程退出经
@@ -134,6 +140,26 @@ pub(super) extern "C-unwind" fn mirvm_c2i(func: u64, args: *const u64, n: u64, r
     }
 }
 
+/// 固定 std 启动链中包住用户 main 的 catch 调用。签名与 c2i 相同，但在调用期间
+/// 建立 main 捕获作用域；被调函数及其内部 intrinsic 仍可各自进入 JIT。
+pub(super) extern "C-unwind" fn mirvm_call_main_catch(
+    func: u64,
+    args: *const u64,
+    n: u64,
+    ret: *mut u64,
+) {
+    stat(S_C2I);
+    let (ctx, _shared) = active();
+    crate::vm::engine::ctx::call_main_panic_boundary(ctx, || {
+        let a = unsafe { std::slice::from_raw_parts(args, n as usize) };
+        let (lo, hi) = crate::vm::engine::interp::call_guest(ctx, func as u32, a);
+        unsafe {
+            *ret = lo;
+            *ret.add(1) = hi;
+        }
+    });
+}
+
 /// T1-c TerminateAbort 助手（interp runblocks TerminateAbort 臂同文案同码：
 /// UnwindTerminate（double panic/ABI 边界）→ abort）。
 pub(super) extern "C-unwind" fn mirvm_jit_terminate_abort() -> ! {
@@ -141,9 +167,9 @@ pub(super) extern "C-unwind" fn mirvm_jit_terminate_abort() -> ! {
     std::process::abort()
 }
 
-/// T1-c Terminate 边界的直接调用助手（interp call_guarding_terminate 同语义：
-/// 外包宿主 catch_unwind，panic 抵达 = 同文案 eprintln + abort；c2i 形包装
-/// （callee, args, n, ret）——Terminate 边的 Call 不走 PLT，经此回本体）。
+/// T1-c Terminate 边界的直接调用助手。interp/JIT 共用 raw exception 分类：
+/// EngineFault 继续退到所属 Engine，其余 unwind 到达 guest Terminate 即 abort。
+/// c2i 形包装（callee, args, n, ret）——Terminate 边的 Call 不走 PLT，经此回本体。
 pub(super) extern "C-unwind" fn mirvm_call_terminate(
     callee: u64,
     args: *const u64,
@@ -156,20 +182,17 @@ pub(super) extern "C-unwind" fn mirvm_call_terminate(
         let a = unsafe { std::slice::from_raw_parts(args, n as usize) };
         crate::vm::engine::interp::call_guest(ctx, callee as u32, a)
     };
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-        Ok((lo, hi)) => unsafe {
-            *ret = lo;
-            *ret.add(1) = hi;
-        },
-        Err(e) => terminate_or_resume_engine_fault(e),
+    let (lo, hi) = crate::vm::engine::unwind::guard_terminate(f);
+    unsafe {
+        *ret = lo;
+        *ret.add(1) = hi;
     }
 }
 
 /// T1-b CallIndirect 助手（m5.4-design §3.2；interp runblocks CallIndirect 臂
 /// 同一派发：fn_addrs 反查 → call_guest 本体；未命中 + native_sig →
 /// ffi::call_addr 本体；空槽 null_ok 空操作 / 空指针与未知目标的诊断同 interp）。
-/// terminate 旗（T1-c）：置位时本体外包宿主 catch_unwind，panic 抵达 =
-/// call_guarding_terminate 同文案 + abort。
+/// terminate 旗（T1-c）：置位时由统一 raw classifier 处置异常。
 pub(super) extern "C-unwind" fn mirvm_call_indirect(
     addr: u64,
     args: *const u64,
@@ -182,14 +205,9 @@ pub(super) extern "C-unwind" fn mirvm_call_indirect(
 ) {
     stat(S_INDIR);
     if terminate != 0 {
-        // T1-c：Terminate 边界 = call_guarding_terminate 同语义（外包宿主
-        // catch_unwind，panic 抵达 = 同文案 eprintln + abort）
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::vm::engine::unwind::guard_terminate(|| {
             mirvm_call_indirect(addr, args, n, ret, null_ok, native_sig, caller, 0)
-        })) {
-            Ok(()) => {}
-            Err(e) => terminate_or_resume_engine_fault(e),
-        }
+        });
         return;
     }
     let (ctx, shared) = active();
@@ -252,13 +270,9 @@ pub(super) extern "C-unwind" fn mirvm_call_foreign(
 ) -> u64 {
     stat(S_FOREIGN);
     if terminate != 0 {
-        // T1-c：Terminate 边界 = call_guarding_terminate 同语义
-        return match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        return crate::vm::engine::unwind::guard_terminate(|| {
             mirvm_call_foreign(sym_ptr, sym_len, sig, args, n, ret_dst, caller, 0)
-        })) {
-            Ok(r) => r,
-            Err(e) => terminate_or_resume_engine_fault(e),
-        };
+        });
     }
     let (ctx, shared) = active();
     let module = &shared.module;
@@ -267,25 +281,25 @@ pub(super) extern "C-unwind" fn mirvm_call_foreign(
     };
     let sig = unsafe { &*(sig as *const crate::vm::engine::ir::ForeignSig) };
     let mut av: Vec<u64> = unsafe { std::slice::from_raw_parts(args, n as usize) }.to_vec();
-    // M4.4 D1：fn-ptr 实参位——guest fn 条目地址逃逸给 native 前物化 thunk 真码；
-    // NULL 与已是 native 真码（反查未命中，guest 转传）原样直传；P1 可派生条目值
-    // 本身已是 stub 码址——跳过二次物化（interp 同判据）
-    for (pos, inner) in &sig.thunk_args {
-        let v = av[*pos];
-        if v != 0
-            && !crate::vm::engine::codearena::is_stub_addr(v)
-            && let Some(&fid) = module.fn_addrs.get(&v)
-        {
-            av[*pos] = crate::vm::engine::thunks::get_or_create(shared, v, fid, inner);
-        }
-    }
+    let callbacks = crate::vm::engine::thunks::prepare_foreign_callbacks(shared, sym, sig, &mut av);
     let ret_dst = (ret_dst != 0).then_some(ret_dst);
     // D8a：guest 线程栈放大（显式 stacksize 临时放大、调用后还原；自供栈不动）
     let stack_restore = crate::vm::engine::ffi::amplify_pthread_stack(sym, &av);
-    let r = {
+    // native 可同步回调 guest，回调又可在同一 Ctx 中调用 foreign。只在符号
+    // 解析阶段借 FFI 缓存；取得函数地址后先结束借用，再把控制权交给 native。
+    let resolved = {
         let ffi = unsafe { &mut (*ctx).ffi };
-        crate::vm::engine::ffi::call(ffi, module, sym, sig, &av, ret_dst)
+        ffi.resolve(
+            sym,
+            &module.native_libs,
+            &module.required_native_libs,
+            &module.native_images,
+            &module.mc_images,
+        )
     };
+    let r = resolved.map(|resolved| {
+        resolved.map(|fnptr| crate::vm::engine::ffi::call_addr(fnptr, sig, &av, ret_dst))
+    });
     if let Some((attr, orig)) = stack_restore {
         crate::os::thread::attr_set_stack_size(attr, orig);
     }
@@ -300,6 +314,7 @@ pub(super) extern "C-unwind" fn mirvm_call_foreign(
             "foreign `{sym}` 符号不存在（归档兜底表 / dlsym 全域均未命中；fn {caller_name}）"
         ));
     };
+    callbacks.complete(r);
     r
 }
 
@@ -314,16 +329,13 @@ pub(super) extern "C-unwind" fn mirvm_call_builtin(
     caller: u64,
     ret: *mut u64,
     terminate: u64,
+    role: u64,
 ) {
     stat(S_BUILTIN);
     if terminate != 0 {
-        // T1-c：Terminate 边界 = call_guarding_terminate 同语义
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            mirvm_call_builtin(builtin, args, n, ret_dst, caller, ret, 0)
-        })) {
-            Ok(()) => {}
-            Err(e) => terminate_or_resume_engine_fault(e),
-        }
+        crate::vm::engine::unwind::guard_terminate(|| {
+            mirvm_call_builtin(builtin, args, n, ret_dst, caller, ret, 0, role)
+        });
         return;
     }
     let (ctx, shared) = active();
@@ -336,6 +348,11 @@ pub(super) extern "C-unwind" fn mirvm_call_builtin(
         av,
         (ret_dst != 0).then_some(ret_dst),
         &ir::UnwindAction::Continue,
+        match role {
+            0 => ir::BuiltinCallRole::Normal,
+            1 => ir::BuiltinCallRole::MainPanicCatcher,
+            _ => crate::vm::engine::interp::engine_abort("JIT builtin 调用职责编码非法"),
+        },
     );
     unsafe {
         *ret = lo;
@@ -372,6 +389,7 @@ pub(super) extern "C-unwind" fn mirvm_alloc(
         &av,
         None,
         &ir::UnwindAction::Continue,
+        ir::BuiltinCallRole::Normal,
     );
     lo
 }

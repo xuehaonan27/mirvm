@@ -4,18 +4,18 @@
 //! 字段级瞬态借用）。M4.1：place 求值（地址表达式 → 真地址裸读写，帧/堆/statics 统一）
 //! + 调用约定 v2（标量 1 槽 / pair 2 槽 / 大聚合 indirect+sret）。
 //!
-//! M4.2 unwind（spike3 协议平移）：**guest 异常 = 宿主 panic 载 `GuestPanic`**（同一平台
-//! unwinder + personality，候选 A）。解释帧的 landing pad = `FrameGuard`（动态 LSDA：
-//! `unwind_edge` 在每个可 unwind 终止子前设置）——unwind 穿帧时其 Drop 跑 cleanup 链
-//! （`Resume` 结束=返回让 unwind 续传，单条 native 栈零协调）+ 恢复操作数区。
-//! catch 点 downcast 区分 GuestPanic / 宿主 panic（VM bug 原样续传，绝不吞）。
+//! M4.2 unwind：guest panic 外包一层 MIRVM 自有异常，其中保留 guest 标准库
+//! 原始异常指针和所属 Engine。解释帧以 raw catch 取得实际穿帧的异常指针；
+//! `unwind_edge` 在每个可 unwind 终止子前设置，landing boundary 先按该异常的身份
+//! 决定是否跑 cleanup，再续传。`FrameGuard` 只负责恢复操作数区和影子帧。
+//! catch 点只消费本 Engine 的 guest panic；异主异常、EngineFault 和宿主异常
+//! 原样续传。
 
 use std::cell::Cell;
 use std::mem::MaybeUninit;
-use std::panic::{self, AssertUnwindSafe};
 use std::sync::Mutex;
 
-use super::ctx::{Ctx, Shared};
+use super::ctx::{Ctx, Engine, Shared};
 use super::frame::ByteRegion;
 use super::ir::{
     AsmIoDst, AsmIoVal, Bb, Block, FfiAgg, FfiKind, FfiLeaf, FuncBody, IntBinOp, IntCc, Module,
@@ -23,23 +23,44 @@ use super::ir::{
     ScalarPlace, Slot, Stmt, SwitchDiscr, Terminator, UnwindAction, Width,
 };
 
-/// guest panic 的宿主载体（spike3 协议）：exception = guest 侧 `_Unwind_Exception` 指针
-/// （panic_unwind 的 Exception 结构在 guest 堆闭环——Box::into_raw/from_raw 全在 guest
-/// 解释执行，引擎只运载指针）。
-pub struct GuestPanic {
-    pub exception: u64,
-}
-
-#[derive(Debug)]
-pub(crate) struct EngineFault {
-    pub message: String,
-    pub code: i32,
-}
-
 #[derive(Debug)]
 pub struct RunError {
+    pub kind: RunErrorKind,
     pub message: String,
     pub exit_code: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunErrorKind {
+    MissingEntry,
+    MissingExport,
+    EngineFault,
+    EngineClosed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunOutcome<T> {
+    Returned(T),
+    GuestPanic,
+}
+
+/// Untyped two-register return used by the trusted raw export surface.
+///
+/// Scalar exports use `lo`; pair returns use both words. An indirect return
+/// still writes through the caller-provided sret pointer in `args[0]`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RawReturn {
+    pub lo: u64,
+    pub hi: u64,
+}
+
+impl<T> RunOutcome<T> {
+    pub fn into_returned(self) -> Option<T> {
+        match self {
+            Self::Returned(value) => Some(value),
+            Self::GuestPanic => None,
+        }
+    }
 }
 
 impl std::fmt::Display for RunError {
@@ -48,9 +69,12 @@ impl std::fmt::Display for RunError {
     }
 }
 
-/// 发起 guest panic（`resume_unwind` 不触发宿主 panic hook → 无噪声）。
+/// 发起 guest panic：内层指针仍完全由 guest 标准库管理，外层只标记
+/// MIRVM 异常身份和所属 Engine。
 pub(crate) fn raise_guest(exception: u64) -> ! {
-    panic::resume_unwind(Box::new(GuestPanic { exception }))
+    let ctx = super::ctx::current();
+    let shared = unsafe { (*ctx).shared_arc() };
+    super::unwind::raise_guest(shared, exception)
 }
 
 #[inline]
@@ -110,8 +134,9 @@ pub(crate) mod simd_exec;
 mod stmt;
 mod volatile;
 
-use call::run_cleanup;
-pub(crate) use call::{call_guest_ffi, exec_builtin, interp_frame, ret_abi_of};
+#[cfg(feature = "cranelift")]
+pub(crate) use call::exec_builtin;
+pub(crate) use call::{call_guest_ffi, interp_frame, ret_abi_of};
 use services::run_atexit_callbacks;
 
 pub(crate) fn discard_engine_state(engine_id: u64) {
@@ -127,15 +152,12 @@ pub(crate) fn seed_engine_state_for_test(engine_id: u64) {
 pub(crate) fn has_engine_state_for_test(engine_id: u64) -> bool {
     services::has_atexit_callbacks(engine_id)
 }
+#[cfg(any(test, feature = "cranelift"))]
 pub(crate) use volatile::{mem_read_volatile, mem_write_volatile};
 
 pub(crate) fn engine_abort(what: &str) -> ! {
     let ctx = super::ctx::current();
-    unsafe { (*ctx).engine_faulting = true };
-    panic::resume_unwind(Box::new(EngineFault {
-        message: what.to_owned(),
-        code: 70,
-    }))
+    super::unwind::raise_engine_fault(ctx, what.to_owned(), 70)
 }
 
 /// guest TLS 实例真地址（M4.4 D3）：首访惰性物化——heap 分配 + 冻结模板拷贝。
@@ -151,7 +173,8 @@ pub(crate) fn tls_addr(ctx: *mut Ctx, id: u32) -> u64 {
     let t = module.tls[id as usize];
     let addr = super::heap::alloc(t.size.max(1), t.align as u64);
     unsafe {
-        std::ptr::copy_nonoverlapping(t.template as *const u8, addr as *mut u8, t.size as usize);
+        let template = module.resolve_link_addr(t.template);
+        std::ptr::copy_nonoverlapping(template as *const u8, addr as *mut u8, t.size as usize);
         let tls = &mut (*ctx).tls;
         if tls.len() <= id as usize {
             tls.resize(id as usize + 1, 0);
@@ -165,7 +188,7 @@ pub(crate) fn tls_addr(ctx: *mut Ctx, id: u32) -> u64 {
 pub(super) fn eval_place_addr(ctx: *mut Ctx, base: usize, expr: &PlaceExpr) -> u64 {
     let mut addr = match expr.base {
         PlaceBase::Local(off) => base as u64 + off as u64,
-        PlaceBase::Static(a) => a,
+        PlaceBase::Static(a) => unsafe { &(*(*ctx).shared).module }.resolve_link_addr(a),
     };
     for step in &expr.steps {
         match step {
@@ -221,6 +244,10 @@ pub(super) fn eval_operand(ctx: *mut Ctx, base: usize, op: &Operand) -> (u64, Wi
             (mem_read(addr, *width), *width)
         }
         Operand::Imm { bits, width } => (*bits, *width),
+        Operand::AddrImm(addr) => (
+            unsafe { &(*(*ctx).shared).module }.resolve_link_addr(*addr),
+            Width::W64,
+        ),
         Operand::AddrOf(expr) => (eval_place_addr(ctx, base, expr), Width::W64),
         Operand::SubImm { base: b, sub } => {
             let (v, w) = eval_operand(ctx, base, b);
@@ -413,23 +440,25 @@ pub(super) fn int_ovf(op: OvfOp, signed: bool, a: u64, b: u64, w: Width) -> (u64
 
 struct FrameGuard {
     ctx: *mut Ctx,
-    func: u32,
-    base: usize,
+    depth_active: bool,
+    base: Option<usize>,
+    shadow_active: bool,
     /// 动态 LSDA：当前可 unwind 终止子的 cleanup 边（Call 前设置、返回后清除）
     unwind_edge: Cell<Option<Bb>>,
 }
 
 impl Drop for FrameGuard {
     fn drop(&mut self) {
-        if !unsafe { (*self.ctx).engine_faulting }
-            && let Some(blk) = self.unwind_edge.get()
-        {
-            run_cleanup(self.ctx, self.func, self.base, blk);
-        }
-        region_restore(self.ctx, self.base);
         unsafe {
-            (*self.ctx).depth -= 1;
-            (*self.ctx).shadow.pop(); // D8e：影子帧出栈（与 depth 同生命周期）
+            if self.shadow_active {
+                (*self.ctx).shadow.pop(); // D8e：影子帧出栈（与 depth 同生命周期）
+            }
+            if let Some(base) = self.base {
+                region_restore(self.ctx, base);
+            }
+            if self.depth_active {
+                (*self.ctx).depth -= 1;
+            }
         }
     }
 }
@@ -512,59 +541,132 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
     interp_frame(ctx, func, args)
 }
 
+/// Return an uncaught guest panic to the guest standard library before the
+/// Engine reports it. `cleanup` lowers the guest panic counter and yields the
+/// opaque two-word panic Box; its own guest drop glue then runs the payload's
+/// destructor and allocator route. No host-side Rust layout is assumed here.
+fn dispose_uncaught_guest_panic(ctx: *mut Ctx, payload: super::unwind::GuestPanicPayload) {
+    payload.transfer(|shared, inner| {
+        let Some(plan) = shared.module.guest_panic_cleanup else {
+            eprintln!("mirvm[m4-engine]: executable Module has no guest panic cleanup plan");
+            std::process::abort()
+        };
+        match super::unwind::catch_raw(|| {
+            let (data, vtable) = call_guest(ctx, plan.cleanup, &[inner]);
+            let mut opaque_box = [data, vtable];
+            call_guest(ctx, plan.drop_payload, &[opaque_box.as_mut_ptr() as u64]);
+        }) {
+            Ok(()) => {}
+            Err(exception) => exception.abort_during_panic_cleanup(),
+        }
+    });
+}
+
+pub(crate) fn dispose_guest_panic_during_startup(
+    shared: &std::sync::Arc<Shared>,
+    payload: super::unwind::GuestPanicPayload,
+) {
+    let activation = super::ctx::activate(shared);
+    dispose_uncaught_guest_panic(activation.ctx(), payload);
+}
+
 /// C1：FnId 的返回通道（thunk 分流——Indirect sret 直传 vs 小档重打包的判定源）。
-pub fn run_main(shared: &std::sync::Arc<Shared>) -> Result<i32, RunError> {
+pub fn run_main(engine: &Engine) -> Result<RunOutcome<i32>, RunError> {
+    let lease = engine.execution_lease().map_err(|_| RunError {
+        kind: RunErrorKind::EngineClosed,
+        message: "Engine is closed".into(),
+        exit_code: 70,
+    })?;
+    let shared = lease.shared();
     let Some(entry) = shared.module.entry else {
         return Err(RunError {
+            kind: RunErrorKind::MissingEntry,
             message: "no `main` entry (lib crate?)".into(),
             exit_code: 2,
         });
     };
     let activation = super::ctx::activate(shared);
     let ctx_ptr = activation.ctx();
+    let main_run = super::ctx::begin_main_run(ctx_ptr);
     super::ctx::set_fork_baseline(shared); // D8f：钉住单 guest 线程的 fork 守卫基线
     let args = [
-        entry.main_addr,
+        shared.module.resolve_link_addr(entry.main_addr),
         entry.argc,
         entry.argv_ptr,
         entry.sigpipe as u64,
     ];
-    let code = match panic::catch_unwind(AssertUnwindSafe(|| {
-        call_guest(ctx_ptr, entry.lang_start, &args).0
-    })) {
-        Ok(code) => code as i32,
-        Err(e) => match e.downcast::<GuestPanic>() {
-            // lang_start 内部已 catch guest panic；穿到这 = panic 逃逸启动链（防御）
-            Ok(_) => 101,
-            Err(e) => match e.downcast::<EngineFault>() {
-                Ok(fault) => {
-                    unsafe { (*ctx_ptr).engine_faulting = false };
-                    return Err(RunError {
-                        message: fault.message,
-                        exit_code: fault.code,
-                    });
-                }
-                Err(host) => panic::resume_unwind(host),
-            },
+    let outcome = match super::unwind::catch_raw(|| call_guest(ctx_ptr, entry.lang_start, &args).0)
+    {
+        Ok(code) => {
+            if main_run.finish() {
+                RunOutcome::GuestPanic
+            } else {
+                RunOutcome::Returned(code as i32)
+            }
+        }
+        Err(exception) => match exception.take_mirvm(shared) {
+            Ok(super::unwind::MirvmPayload::Guest(payload)) => {
+                dispose_uncaught_guest_panic(ctx_ptr, payload);
+                RunOutcome::GuestPanic
+            }
+            Ok(super::unwind::MirvmPayload::EngineFault(fault)) => {
+                let fault = super::ctx::drain_current_thread_signal_deliveries_after_fault(
+                    ctx_ptr,
+                    fault.finish(),
+                );
+                return Err(RunError {
+                    kind: RunErrorKind::EngineFault,
+                    message: fault.message,
+                    exit_code: fault.code,
+                });
+            }
+            Ok(super::unwind::MirvmPayload::EngineClosed) => {
+                return Err(RunError {
+                    kind: RunErrorKind::EngineClosed,
+                    message: "Engine closed during execution".into(),
+                    exit_code: 70,
+                });
+            }
+            Err(exception) => exception.resume_or_rethrow(),
         },
     };
-    run_atexit_callbacks(ctx_ptr, code);
-    Ok(code)
+    let exit_code = match outcome {
+        RunOutcome::Returned(code) => code,
+        RunOutcome::GuestPanic => 101,
+    };
+    run_atexit_callbacks(ctx_ptr, exit_code);
+    Ok(outcome)
 }
 
 /// dev 入口（M4.0 gate）：按导出名调一个函数。
 /// 顶层 catch：guest panic 穿出导出函数 = 未捕获 panic → 诊断 + 退出码 101
 /// （native lang_start 语义的近似；完整启动链 M4.3）。宿主 panic（VM bug）原样续传。
-pub fn run_export(
-    shared: &std::sync::Arc<Shared>,
+///
+/// # Safety
+///
+/// `args` is an untyped ABI slot array. It must match the export's exact
+/// lowered parameters. Every slot interpreted as a pointer/reference must
+/// satisfy the guest type's validity, alignment, aliasing and lifetime rules
+/// for the entire call. For an indirect return, `args[0]` must be the valid
+/// sret destination required by that lowered ABI; the returned `RawReturn`
+/// words are meaningful only for scalar/pair return ABIs.
+pub unsafe fn run_export(
+    engine: &Engine,
     name: &str,
     args: &[u64],
-) -> Result<u64, RunError> {
+) -> Result<RunOutcome<RawReturn>, RunError> {
+    let lease = engine.execution_lease().map_err(|_| RunError {
+        kind: RunErrorKind::EngineClosed,
+        message: "Engine is closed".into(),
+        exit_code: 70,
+    })?;
+    let shared = lease.shared();
     let Some(&id) = shared.module.exports.get(name) else {
         let mut names: Vec<&str> = shared.module.exports.keys().map(|k| &**k).collect();
         names.sort();
         names.retain(|n| !n.starts_with("_ZN") && !n.starts_with("_R"));
         return Err(RunError {
+            kind: RunErrorKind::MissingExport,
             message: format!("export `{name}` doesn't exist, available: {names:?}"),
             exit_code: 2,
         });
@@ -572,26 +674,33 @@ pub fn run_export(
     let activation = super::ctx::activate(shared);
     let ctx_ptr = activation.ctx();
     super::ctx::set_fork_baseline(shared); // D8f
-    match panic::catch_unwind(AssertUnwindSafe(|| call_guest(ctx_ptr, id, args).0)) {
-        Ok(r) => {
+    match super::unwind::catch_raw(|| call_guest(ctx_ptr, id, args)) {
+        Ok((lo, hi)) => {
             run_atexit_callbacks(ctx_ptr, 0);
-            Ok(r)
+            Ok(RunOutcome::Returned(RawReturn { lo, hi }))
         }
-        Err(e) => match e.downcast::<GuestPanic>() {
-            Ok(_) => Err(RunError {
-                message: "guest panic not caught".into(),
-                exit_code: 101,
+        Err(exception) => match exception.take_mirvm(shared) {
+            Ok(super::unwind::MirvmPayload::Guest(payload)) => {
+                dispose_uncaught_guest_panic(ctx_ptr, payload);
+                Ok(RunOutcome::GuestPanic)
+            }
+            Ok(super::unwind::MirvmPayload::EngineFault(fault)) => {
+                let fault = super::ctx::drain_current_thread_signal_deliveries_after_fault(
+                    ctx_ptr,
+                    fault.finish(),
+                );
+                Err(RunError {
+                    kind: RunErrorKind::EngineFault,
+                    message: fault.message,
+                    exit_code: fault.code,
+                })
+            }
+            Ok(super::unwind::MirvmPayload::EngineClosed) => Err(RunError {
+                kind: RunErrorKind::EngineClosed,
+                message: "Engine closed during execution".into(),
+                exit_code: 70,
             }),
-            Err(e) => match e.downcast::<EngineFault>() {
-                Ok(fault) => {
-                    unsafe { (*ctx_ptr).engine_faulting = false };
-                    Err(RunError {
-                        message: fault.message,
-                        exit_code: fault.code,
-                    })
-                }
-                Err(host) => panic::resume_unwind(host), // VM bug 绝不吞
-            },
+            Err(exception) => exception.resume_or_rethrow(),
         },
     }
 }
@@ -601,10 +710,10 @@ mod tests {
     use std::mem::MaybeUninit;
 
     use super::{eval_place_addr, mem_read_volatile, mem_write_volatile};
-    use crate::vm::engine::ctx::Shared;
+    use crate::vm::engine::ctx::{Engine, Shared};
     use crate::vm::engine::ir::{
-        Block, FuncBody, Module, Operand, PlaceBase, PlaceExpr, PlaceStep, RetAbi, Terminator,
-        Width,
+        Block, FuncBody, Module, Operand, PlaceBase, PlaceExpr, PlaceStep, RetAbi, Rvalue,
+        ScalarPlace, Slot, Stmt, Terminator, Width,
     };
 
     #[test]
@@ -623,11 +732,61 @@ mod tests {
             name: "trap_export".into(),
         });
         module.exports.insert("trap_export".into(), 0);
-        let shared = std::sync::Arc::new(Shared::new(module));
+        let engine = Engine::new(Shared::new(module));
 
-        let err = super::run_export(&shared, "trap_export", &[]).unwrap_err();
+        let err = unsafe { super::run_export(&engine, "trap_export", &[]) }.unwrap_err();
+        assert_eq!(err.kind, super::RunErrorKind::EngineFault);
         assert_eq!(err.exit_code, 70);
         assert!(err.message.contains("broken bytecode"), "{err}");
+    }
+
+    #[test]
+    fn raw_export_preserves_both_pair_return_words() {
+        let lo = Slot {
+            off: 0,
+            width: Width::W64,
+        };
+        let hi = Slot {
+            off: 8,
+            width: Width::W64,
+        };
+        let mut module = Module::default();
+        module.funcs.push(FuncBody {
+            frame_size: 16,
+            frame_align: 8,
+            ret: RetAbi::Pair(lo, hi),
+            params: Vec::new(),
+            caller_loc_off: None,
+            blocks: vec![Block {
+                stmts: vec![
+                    Stmt::Assign {
+                        dst: ScalarPlace::Slot(lo),
+                        rv: Rvalue::Use(Operand::Imm {
+                            bits: 0x0123_4567_89ab_cdef,
+                            width: Width::W64,
+                        }),
+                    },
+                    Stmt::Assign {
+                        dst: ScalarPlace::Slot(hi),
+                        rv: Rvalue::Use(Operand::Imm {
+                            bits: 0xfedc_ba98_7654_3210,
+                            width: Width::W64,
+                        }),
+                    },
+                ],
+                term: Terminator::Return,
+            }],
+            name: "pair_export".into(),
+        });
+        module.exports.insert("pair".into(), 0);
+        let engine = Engine::new(Shared::new(module));
+
+        let result = unsafe { super::run_export(&engine, "pair", &[]) }
+            .unwrap()
+            .into_returned()
+            .unwrap();
+        assert_eq!(result.lo, 0x0123_4567_89ab_cdef);
+        assert_eq!(result.hi, 0xfedc_ba98_7654_3210);
     }
 
     #[test]
@@ -635,7 +794,7 @@ mod tests {
         let vtable = [0u64, 0, 32];
         let unaligned = u32::MAX as u64 + 18;
         let expr = PlaceExpr {
-            base: PlaceBase::Static(0x1000),
+            base: PlaceBase::Local(0x1000),
             steps: vec![PlaceStep::VTableAlignOffset {
                 meta: Operand::Imm {
                     bits: vtable.as_ptr() as u64,

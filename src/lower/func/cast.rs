@@ -294,15 +294,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         let op = match self.linker.foreign_fn_slot(inst) {
                             Some(slot) => Operand::Mem {
                                 expr: PlaceExpr {
-                                    base: PlaceBase::Static(slot),
+                                    base: PlaceBase::Static(ir::LinkAddr(slot)),
                                     steps: Box::new([]),
                                 },
                                 width: Width::W64,
                             },
-                            None => Operand::Imm {
-                                bits: addr,
-                                width: w,
-                            },
+                            None => Operand::AddrImm(ir::LinkAddr(addr)),
                         };
                         Ok(vec![Stmt::Assign {
                             dst: dst_p.scalar_place(w),
@@ -329,15 +326,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         let op = match self.linker.foreign_fn_slot(inst) {
                             Some(slot) => Operand::Mem {
                                 expr: PlaceExpr {
-                                    base: PlaceBase::Static(slot),
+                                    base: PlaceBase::Static(ir::LinkAddr(slot)),
                                     steps: Box::new([]),
                                 },
                                 width: Width::W64,
                             },
-                            None => Operand::Imm {
-                                bits: addr,
-                                width: w,
-                            },
+                            None => Operand::AddrImm(ir::LinkAddr(addr)),
                         };
                         Ok(vec![Stmt::Assign {
                             dst: dst_p.scalar_place(w),

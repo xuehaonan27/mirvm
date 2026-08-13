@@ -44,6 +44,7 @@ pub(crate) struct Linker<'tcx> {
     pub(crate) got_syms: Vec<ir::GotSym>,
     pub(crate) got_idx: FxHashMap<Box<str>, u32>,
     pub(crate) got_fixups: Vec<ir::GotFixup>,
+    pub(crate) frozen_relocs: Vec<ir::FrozenReloc>,
     /// foreign 分配 → (符号名, weak)：非 weak extern static 与 extern fn 取址两类
     ///（weak extern static 走 foreign_slot 直道不登记本表——E27，2026-07-18）；
     /// 重定位/常量发码经它把"烤值"转"槽位"。
@@ -87,6 +88,16 @@ pub(crate) struct Linker<'tcx> {
     pub(crate) next_fn: ir::FuncId,
     /// 底座导出素材：本会话物化的非 foreign static（DefId, 冻结区地址）
     pub(crate) static_defs: Vec<(rustc_hir::def_id::DefId, u64)>,
+    /// 固定 std 启动链中，外层调用边界和最终执行捕获的 intrinsic 调用点。
+    pub(crate) main_catch_site: Option<MainCatchSite<'tcx>>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct MainCatchSite<'tcx> {
+    pub(crate) boundary_caller: Instance<'tcx>,
+    pub(crate) boundary_callee: ir::FuncId,
+    pub(crate) catcher_caller: Instance<'tcx>,
+    pub(crate) catcher_intrinsic: Instance<'tcx>,
 }
 
 impl<'tcx> Linker<'tcx> {
@@ -126,6 +137,7 @@ impl<'tcx> Linker<'tcx> {
             got_syms: Vec::new(),
             got_idx: FxHashMap::default(),
             got_fixups: Vec::new(),
+            frozen_relocs: Vec::new(),
             foreign_alloc_sym: FxHashMap::default(),
             foreign_slots: std::collections::HashMap::new(),
             code_arena,
@@ -144,6 +156,7 @@ impl<'tcx> Linker<'tcx> {
             delta_first_asm: stack.total_asm() as ir::AsmStubId,
             next_fn: delta_first_fn,
             static_defs: Vec::new(),
+            main_catch_site: None,
         }
     }
 
@@ -164,6 +177,7 @@ impl<'tcx> Linker<'tcx> {
             image_got_syms: Vec::new(),
             image_got_idx: FxHashMap::default(),
             image_got_fixups: Vec::new(),
+            image_frozen_relocs: Vec::new(),
             image_code_arena: crate::vm::engine::codearena::StubArena::new_image(0),
             image_stub_sites: Vec::new(),
         });
@@ -238,7 +252,7 @@ impl<'tcx> Linker<'tcx> {
             if def_id.krate != rustc_hir::def_id::LOCAL_CRATE {
                 let j = s.image_tls_slots.len() as ir::TlsId;
                 s.image_tls_slots.push(ir::TlsSlot {
-                    template,
+                    template: ir::LinkAddr(template),
                     size,
                     align: align as u32,
                 });
@@ -252,7 +266,7 @@ impl<'tcx> Linker<'tcx> {
         }
         let id = self.delta_first_tls + self.tls_slots.len() as ir::TlsId;
         self.tls_slots.push(ir::TlsSlot {
-            template,
+            template: ir::LinkAddr(template),
             size,
             align: align as u32,
         });

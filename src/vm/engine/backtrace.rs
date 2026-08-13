@@ -223,7 +223,8 @@ pub fn materialize_symbols(module: &mut Module) -> Result<(), String> {
         .map_err(|error| format!("写入内存 ELF 失败: {error}"))?;
     file.rewind()
         .map_err(|error| format!("重置内存 ELF 失败: {error}"))?;
-    let path = std::ffi::CString::new(format!("/proc/self/fd/{fd}")).unwrap();
+    let path = std::ffi::CString::new(format!("/proc/self/fd/{fd}"))
+        .map_err(|_| "内存 ELF fd 路径意外包含 NUL".to_string())?;
     let handle = crate::os::dll::open_with_flags(
         &path,
         crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL,

@@ -5,6 +5,10 @@
 #![feature(cfg_sanitize)] // engine/ctx.rs：TSan 配置下 Ctx dtor 的处置分歧
 #![feature(f16)] // engine D8c：f16/f128 宿主直算（同源复用 src/vm 必须同 feature 集）
 #![feature(f128)]
+#![feature(core_intrinsics)] // engine raw unwind catch 同源编译
+#![feature(rustc_attrs)] // engine raw catch callback 的 nounwind 契约
+#![feature(thread_local)] // engine deferred signal mailbox 使用无析构原生 TLS
+#![allow(internal_features)]
 
 #[path = "../../src/utils/logs.rs"]
 mod logs; // os::process 的 mirvm_log! 同源依赖

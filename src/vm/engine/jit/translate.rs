@@ -20,6 +20,7 @@ pub(super) struct Translator<'a, 'b> {
     pub(super) frame_base_var: Option<Variable>,
     pub(super) unreachable: ClifFuncId,
     pub(super) c2i: ClifFuncId,
+    pub(super) call_main_catch: ClifFuncId,
     pub(super) memmove: ClifFuncId,
     pub(super) memset: ClifFuncId,
     pub(super) memcmp: ClifFuncId,
@@ -37,11 +38,13 @@ pub(super) struct Translator<'a, 'b> {
     pub(super) terminate_abort: ClifFuncId,
     pub(super) call_terminate: ClifFuncId,
     pub(super) unwind_resume: ClifFuncId,
+    pub(super) exception_is_engine_fault: ClifFuncId,
     /// T1-d：Trap 占位助手（语句级/终止子同口）
     pub(super) trap: ClifFuncId,
     /// T1-d：SIMD/宽 stmt 与 SIMD rvalue 三件的统一助手（interp simd_exec 共享本体）
     pub(super) simd_stmt: ClifFuncId,
     pub(super) simd_rv: ClifFuncId,
+    pub(super) poll_signals: ClifFuncId,
     pub(super) exception_var: Option<Variable>,
     pub(super) has_try_call: bool,
 }
@@ -166,7 +169,10 @@ impl Translator<'_, '_> {
     fn place_addr(&mut self, pe: &ir::PlaceExpr) -> Value {
         let mut addr = match pe.base {
             ir::PlaceBase::Local(off) => self.addr_of_local(off),
-            ir::PlaceBase::Static(a) => self.b.ins().iconst(types::I64, a as i64),
+            ir::PlaceBase::Static(a) => self
+                .b
+                .ins()
+                .iconst(types::I64, self.shared.module.resolve_link_addr(a) as i64),
         };
         for step in pe.steps.iter() {
             match step {
@@ -424,6 +430,13 @@ impl Translator<'_, '_> {
         self.b.inst_results(call)[0]
     }
 
+    fn poll_signals(&mut self) {
+        let fref = self
+            .module
+            .declare_func_in_func(self.poll_signals, self.b.func);
+        self.b.ins().call(fref, &[]);
+    }
+
     fn operand(&mut self, op: &Operand) -> (Value, Width) {
         match op {
             Operand::Slot(s) => (self.read_slot(*s), s.width),
@@ -433,6 +446,10 @@ impl Translator<'_, '_> {
                     .ins()
                     .iconst(types::I64, (*bits & width.mask()) as i64);
                 (v, *width)
+            }
+            Operand::AddrImm(addr) => {
+                let runtime = self.shared.module.resolve_link_addr(*addr);
+                (self.b.ins().iconst(types::I64, runtime as i64), Width::W64)
             }
             Operand::Mem { expr, width } => {
                 let a = self.place_addr(expr);
@@ -558,6 +575,7 @@ impl Translator<'_, '_> {
 
         for (bi, blk) in body.blocks.iter().enumerate() {
             self.b.switch_to_block(blocks[bi]);
+            self.poll_signals();
             for st in &blk.stmts {
                 self.stmt(st);
             }
@@ -2286,7 +2304,27 @@ impl Translator<'_, '_> {
         let exn = self.b.block_params(pad)[0];
         let ev = self.exception_var();
         self.b.def_var(ev, exn);
-        self.b.ins().jump(blocks[cleanup as usize], &[]);
+
+        // EngineFault 表示引擎自身已失去继续执行 guest cleanup 的能力。按 pad
+        // 实际接住的异常指针分类；线程上可能另有被 native catch 暂停的 fault，
+        // 它不能影响这次独立 unwind。
+        let fault_query = self
+            .module
+            .declare_func_in_func(self.exception_is_engine_fault, self.b.func);
+        let call = self.b.ins().call(fault_query, &[exn]);
+        let fault = self.b.inst_results(call)[0];
+        let is_fault = self.b.ins().icmp_imm(IntCC::NotEqual, fault, 0);
+        let resume = self.b.create_block();
+        self.b
+            .ins()
+            .brif(is_fault, resume, &[], blocks[cleanup as usize], &[]);
+
+        self.b.switch_to_block(resume);
+        let unwind_resume = self
+            .module
+            .declare_func_in_func(self.unwind_resume, self.b.func);
+        self.b.ins().call(unwind_resume, &[exn]);
+        self.b.ins().trap(TrapCode::user(1).unwrap());
         self.b.switch_to_block(ok);
     }
 
@@ -2355,6 +2393,7 @@ impl Translator<'_, '_> {
                 ret,
                 target,
                 unwind,
+                role,
             } => {
                 // 展平 av（interp Call 臂同序：RetDest::Indirect 前插目的真地址 +
                 // 逐实参；lower 已把 Pair 实参展开为两槽、幻影尾参附加在末）
@@ -2447,45 +2486,7 @@ impl Translator<'_, '_> {
                         self.b.ins().jump(blocks[*target as usize], &[]);
                     }
                     UnwindAction::Continue => {
-                        let cb = &self.shared.module.funcs[*callee as usize];
-                        let plt = callee_abi(cb).filter(|cabi| cabi.nparams == av.len());
-                        if let Some(cabi) = plt {
-                            // 热路：PLT 内存间接——load slots_fast[callee] + call_indirect
-                            //（恒定形状；蹦床→fast 的升级对调用点透明）
-                            let slot_addr = &self.shared.jit.slots_fast[*callee as usize]
-                                as *const std::sync::atomic::AtomicU64
-                                as i64;
-                            let ap = self.b.ins().iconst(types::I64, slot_addr);
-                            let fp = self
-                                .b
-                                .ins()
-                                .load(types::I64, MemFlagsData::trusted(), ap, 0);
-                            let sig = {
-                                let mut s = self.module.make_signature();
-                                for _ in 0..av.len() {
-                                    s.params.push(AbiParam::new(types::I64));
-                                }
-                                for _ in 0..cabi.nrets {
-                                    s.returns.push(AbiParam::new(types::I64));
-                                }
-                                s
-                            };
-                            let sigref = self.b.import_signature(sig);
-                            let call = self.b.ins().call_indirect(sigref, fp, &av);
-                            let lo = if cabi.nrets >= 1 {
-                                self.b.inst_results(call)[0]
-                            } else {
-                                self.b.ins().iconst(types::I64, 0)
-                            };
-                            let hi = if cabi.nrets >= 2 {
-                                self.b.inst_results(call)[1]
-                            } else {
-                                self.b.ins().iconst(types::I64, 0)
-                            };
-                            write_back!(lo, hi);
-                        } else {
-                            // 冷路：调用点直接 c2i（打包展平实参回解释器——interp 本就吃
-                            // 展平 av，callee 任意 ABI 语义一致；panic 类分支的归宿）
+                        if matches!(role, ir::CallRole::MainPanicBoundary) {
                             let args_ss = self.b.create_sized_stack_slot(StackSlotData::new(
                                 StackSlotKind::ExplicitSlot,
                                 (av.len().max(1) * 8) as u32,
@@ -2499,7 +2500,9 @@ impl Translator<'_, '_> {
                                 16,
                                 3,
                             ));
-                            let fref = self.module.declare_func_in_func(self.c2i, self.b.func);
+                            let fref = self
+                                .module
+                                .declare_func_in_func(self.call_main_catch, self.b.func);
                             let fv = self.b.ins().iconst(types::I64, *callee as i64);
                             let ap = self.b.ins().stack_addr(types::I64, args_ss, 0);
                             let nv = self.b.ins().iconst(types::I64, av.len() as i64);
@@ -2508,12 +2511,76 @@ impl Translator<'_, '_> {
                             let lo = self.b.ins().stack_load(types::I64, ret_ss, 0);
                             let hi = self.b.ins().stack_load(types::I64, ret_ss, 8);
                             write_back!(lo, hi);
+                        } else {
+                            let cb = &self.shared.module.funcs[*callee as usize];
+                            let plt = callee_abi(cb).filter(|cabi| cabi.nparams == av.len());
+                            if let Some(cabi) = plt {
+                                // 热路：PLT 内存间接——load slots_fast[callee] + call_indirect
+                                //（恒定形状；蹦床→fast 的升级对调用点透明）
+                                let slot_addr = &self.shared.jit.slots_fast[*callee as usize]
+                                    as *const std::sync::atomic::AtomicU64
+                                    as i64;
+                                let ap = self.b.ins().iconst(types::I64, slot_addr);
+                                let fp =
+                                    self.b
+                                        .ins()
+                                        .load(types::I64, MemFlagsData::trusted(), ap, 0);
+                                let sig = {
+                                    let mut s = self.module.make_signature();
+                                    for _ in 0..av.len() {
+                                        s.params.push(AbiParam::new(types::I64));
+                                    }
+                                    for _ in 0..cabi.nrets {
+                                        s.returns.push(AbiParam::new(types::I64));
+                                    }
+                                    s
+                                };
+                                let sigref = self.b.import_signature(sig);
+                                let call = self.b.ins().call_indirect(sigref, fp, &av);
+                                let lo = if cabi.nrets >= 1 {
+                                    self.b.inst_results(call)[0]
+                                } else {
+                                    self.b.ins().iconst(types::I64, 0)
+                                };
+                                let hi = if cabi.nrets >= 2 {
+                                    self.b.inst_results(call)[1]
+                                } else {
+                                    self.b.ins().iconst(types::I64, 0)
+                                };
+                                write_back!(lo, hi);
+                            } else {
+                                // 冷路：调用点直接 c2i（打包展平实参回解释器——interp 本就吃
+                                // 展平 av，callee 任意 ABI 语义一致；panic 类分支的归宿）
+                                let args_ss = self.b.create_sized_stack_slot(StackSlotData::new(
+                                    StackSlotKind::ExplicitSlot,
+                                    (av.len().max(1) * 8) as u32,
+                                    3,
+                                ));
+                                for (i, v) in av.iter().enumerate() {
+                                    self.b.ins().stack_store(*v, args_ss, (i * 8) as i32);
+                                }
+                                let ret_ss = self.b.create_sized_stack_slot(StackSlotData::new(
+                                    StackSlotKind::ExplicitSlot,
+                                    16,
+                                    3,
+                                ));
+                                let fref = self.module.declare_func_in_func(self.c2i, self.b.func);
+                                let fv = self.b.ins().iconst(types::I64, *callee as i64);
+                                let ap = self.b.ins().stack_addr(types::I64, args_ss, 0);
+                                let nv = self.b.ins().iconst(types::I64, av.len() as i64);
+                                let rp = self.b.ins().stack_addr(types::I64, ret_ss, 0);
+                                self.b.ins().call(fref, &[fv, ap, nv, rp]);
+                                let lo = self.b.ins().stack_load(types::I64, ret_ss, 0);
+                                let hi = self.b.ins().stack_load(types::I64, ret_ss, 8);
+                                write_back!(lo, hi);
+                            }
                         }
                         self.b.ins().jump(blocks[*target as usize], &[]);
                     }
                 }
             }
             Terminator::Return => {
+                self.poll_signals();
                 match body.ret {
                     RetAbi::Zst => {
                         self.b.ins().return_(&[]);
@@ -2771,6 +2838,7 @@ impl Translator<'_, '_> {
                 ret,
                 target,
                 unwind,
+                role,
             } => {
                 // T1-b：分配系四件走 mirvm_alloc 快路（引擎堆同一入口，tag
                 // 分派）；其余走 mirvm_call_builtin（exec_builtin 同一本体）
@@ -2818,14 +2886,15 @@ impl Translator<'_, '_> {
                     let rp = self.b.ins().stack_addr(types::I64, ret_ss, 0);
                     let fv = self.b.ins().iconst(types::I64, func as i64);
                     let mut sig0 = self.module.make_signature();
-                    for _ in 0..7 {
+                    for _ in 0..8 {
                         sig0.params.push(AbiParam::new(types::I64));
                     }
                     let (et, ok, pad) = self.prepare_cleanup(sig0);
                     let z = self.b.ins().iconst(types::I64, 0);
+                    let role = self.b.ins().iconst(types::I64, *role as i64);
                     self.b
                         .ins()
-                        .try_call(fref, &[bp, ap, nv, ret_dst, fv, rp, z], et);
+                        .try_call(fref, &[bp, ap, nv, ret_dst, fv, rp, z, role], et);
                     self.enter_cleanup_continuation(pad, *bb, ok, blocks);
                     let lo = self.b.ins().stack_load(types::I64, ret_ss, 0);
                     let hi = self.b.ins().stack_load(types::I64, ret_ss, 8);
@@ -2899,9 +2968,10 @@ impl Translator<'_, '_> {
                         types::I64,
                         i64::from(matches!(unwind, UnwindAction::Terminate)),
                     );
+                    let role = self.b.ins().iconst(types::I64, *role as i64);
                     self.b
                         .ins()
-                        .call(fref, &[bp, ap, nv, ret_dst, fv, rp, term]);
+                        .call(fref, &[bp, ap, nv, ret_dst, fv, rp, term, role]);
                     let lo = self.b.ins().stack_load(types::I64, ret_ss, 0);
                     let hi = self.b.ins().stack_load(types::I64, ret_ss, 8);
                     self.write_ret(ret, lo, hi);

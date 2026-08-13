@@ -52,6 +52,7 @@ pub(super) fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin>
     // 明确 Trap，直到有专用实现。其余旧 StubZero 项改走 dlsym+libffi；
     // atexit/dl_iterate_phdr 的显式 fn-ptr 参数可由 M4.4 thunk 工厂处理。
     out.insert(Symbol::intern("signal"), ir::Builtin::HostSignal);
+    out.insert(Symbol::intern("raise"), ir::Builtin::HostRaise);
     out.insert(Symbol::intern("sigaction"), ir::Builtin::HostSigaction);
     // 宿主 unwinder 从 libffi/解释器的 native stack 取回 IP，无法代表
     // guest 的冻结函数条目。回调 thunk 只解决调用方向，不会翻译栈帧；

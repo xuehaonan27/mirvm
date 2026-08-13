@@ -100,7 +100,7 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
             }
             Operand::AddrOf(expr) => scan_place(out, expr, Extent::Escape, fsz),
             Operand::SubImm { base, .. } => scan_op(out, base, fsz),
-            Operand::Slot(_) | Operand::Imm { .. } => {}
+            Operand::Slot(_) | Operand::Imm { .. } | Operand::AddrImm(_) => {}
         }
     }
     fn scan_sp(out: &mut FrameMap, sp: &ScalarPlace, fsz: u32) {

@@ -76,6 +76,15 @@ impl<'tcx> LowerCx<'tcx, '_> {
         if name.as_str() == "catch_unwind" {
             let (dst_p, w) = self.place_scalar(destination)?;
             let tgt = target.ok_or("catch_unwind 发散？")?.as_u32();
+            let role = self
+                .linker
+                .main_catch_site
+                .filter(|site| {
+                    site.catcher_caller == self.instance && site.catcher_intrinsic == *inst
+                })
+                .map_or(ir::BuiltinCallRole::Normal, |_| {
+                    ir::BuiltinCallRole::MainPanicCatcher
+                });
             return Ok(Some((
                 vec![],
                 Terminator::CallBuiltin {
@@ -88,6 +97,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     ret: RetDest::Scalar(dst_p.scalar_place(w)),
                     target: tgt,
                     unwind: self.lower_unwind(unwind),
+                    role,
                 },
             )));
         }
@@ -456,6 +466,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         ret: RetDest::Ignore,
                         target: tgt,
                         unwind: ir::UnwindAction::Continue,
+                        role: ir::BuiltinCallRole::Normal,
                     },
                 )));
             }
@@ -470,6 +481,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         ret: RetDest::Ignore,
                         target: tgt,
                         unwind: ir::UnwindAction::Continue,
+                        role: ir::BuiltinCallRole::Normal,
                     },
                 )));
             }
@@ -1102,7 +1114,14 @@ pub(super) fn operand_deref_at(op: Operand, off: u32) -> Result<Operand, String>
         // 常量 vtable 地址（常量 dyn 引用）：运行期从冻结区读槽
         Operand::Imm { bits, .. } => Operand::Mem {
             expr: PlaceExpr {
-                base: PlaceBase::Static(bits.wrapping_add(off as u64)),
+                base: PlaceBase::Static(ir::LinkAddr(bits.wrapping_add(off as u64))),
+                steps: Box::new([]),
+            },
+            width: Width::W64,
+        },
+        Operand::AddrImm(addr) => Operand::Mem {
+            expr: PlaceExpr {
+                base: PlaceBase::Static(ir::LinkAddr(addr.0.wrapping_add(off as u64))),
                 steps: Box::new([]),
             },
             width: Width::W64,

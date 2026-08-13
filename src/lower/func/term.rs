@@ -172,6 +172,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         ret: RetDest::Ignore,
                         target: unreach,
                         unwind: self.lower_unwind(*unwind),
+                        role: ir::CallRole::Normal,
                     },
                 });
                 (
@@ -233,6 +234,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             ret: RetDest::Ignore,
                             target: target.as_u32(),
                             unwind: self.lower_unwind(*unwind),
+                            role: ir::CallRole::Normal,
                         },
                     ));
                 }

@@ -32,7 +32,7 @@ tier-0（rustc `InterpCx` + 协作调度）上跑了五批 22 crate + 3 定向�
 |---|---|---|
 | §2.1 协作调度 vs 真阻塞 syscall | 阻塞释放依赖另一 guest 线程即死（net_echo_threaded 挂死实锤）；阻塞式线程服务器是主流模式 | M4.4 真 1:1 线程 |
 | §2.2 inline asm 三面孔（cpuid / rustix 裸 syscall / num-bigint 算术原语） | asm 本身就是机器码，直接 JIT（B 决策）；虚拟 CPU = 真宿主 CPU | M5.0 asm-stub 工厂 + M5.1/M5.2 补面 |
-| §2.3 dlsym 直通边界 | 默认直通 + denylist 形状可行；**rustix 裸 syscall 无符号可拦，与 os:: 收口的张力至今成立**（→ [open-issues.md](open-issues.md) E19） | M4 denylist；signal/回调经 M4.4 thunk 转正 |
+| §2.3 dlsym 直通边界 | 默认直通 + denylist 形状可行；**rustix 裸 syscall 无符号可拦，与 os:: 收口的张力至今成立**（→ [open-issues.md](open-issues.md) E19） | M4 denylist；普通回调经 M4.4 thunk 转正；signal 当时同路、现由 decision-history §7.54 的登记桩取代 |
 | §2.4 协作调度性能（rayon 28s） | 协作只能作对拍基底，性能要真线程 + JIT | M5.3 方法级 JIT |
 | §2.5 InterpCx 检查器 overlay 误报（walkdir/process/mmap 三实例） | native 真地址指针算术被判 UB——tier-0 第一号阻塞 | M4 clean-slate 甩掉 AllocId overlay |
 | §2.6 fork/clone 处置 | denylist 非围栏（asm-JIT 落地后可绕）；终局 = 三分支持（fork+exec / 单线程 / 多线程） | M5.2 D8f 单线程放行；多线程仍拒（open-issues R2） |

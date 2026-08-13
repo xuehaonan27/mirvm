@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 
 const MAGIC: &[u8; 8] = b"MIRVMAR\0";
-const FMT_VER: u32 = 3;
+const FMT_VER: u32 = 4;
 const SECTION_ENTRY_LEN: usize = 36;
 const WHOLE_HASH_LEN: usize = 16;
 
@@ -60,7 +60,7 @@ struct Meta {
 
 /// NATIVELIBS 节条目：自产库清单。`path` 只用于互证和诊断；执行所需字节
 /// 始终随包携带，不再从该旧路径读取。
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct NativeLibEntry {
     path: String,
     /// 0=static_archive 1=global_asm（bin/dep 同族，cache/global-asm 域）
@@ -71,7 +71,7 @@ struct NativeLibEntry {
 
 /// MC 节条目（片③）：自产 global_asm/dep_asm 族 `.so` 原始字节——装载时
 /// 进程内自装载（mcload），不经 dlopen；与 NATIVELIBS 按 fnv 互证。
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct McEntry {
     fnv: u128,
     bytes: Vec<u8>,
@@ -84,13 +84,16 @@ struct Reloc {
     entry: Box<str>,
 }
 
-/// MODULE v3 只保存非函数元数据。借用写入形态避免复制冻结区和索引表。
+/// MODULE v4 只保存非函数元数据。借用写入形态避免复制冻结区和索引表。
 #[derive(Serialize)]
 struct ModuleMetaRef<'a> {
     function_names: &'a [Box<str>],
     exports: &'a std::collections::HashMap<Box<str>, crate::vm::engine::ir::FuncId>,
-    frozen: &'a Option<crate::vm::engine::frozen::FrozenArena>,
-    fn_addrs: &'a std::collections::HashMap<u64, crate::vm::engine::ir::FuncId>,
+    frozen: Option<crate::vm::engine::frozen::FrozenSnapshot>,
+    link_fn_addrs: &'a std::collections::HashMap<
+        crate::vm::engine::ir::LinkAddr,
+        crate::vm::engine::ir::FuncId,
+    >,
     native_libs: &'a [Box<str>],
     required_native_libs: &'a [Box<str>],
     tls: &'a [crate::vm::engine::ir::TlsSlot],
@@ -98,8 +101,10 @@ struct ModuleMetaRef<'a> {
     asm_sites: &'a [crate::vm::engine::ir::AsmSite],
     foreign_syms: &'a [crate::vm::engine::ir::GotSym],
     got_fixups: &'a [crate::vm::engine::ir::GotFixup],
-    entry_stub_sites: &'a [crate::vm::engine::ir::EntryStubSite],
+    frozen_relocs: &'a [crate::vm::engine::ir::FrozenReloc],
+    entry_stub_sites: Vec<crate::vm::engine::ir::EntryStubSite>,
     custom_alloc_shims: Option<crate::vm::engine::ir::AllocShims>,
+    guest_panic_cleanup: Option<crate::vm::engine::ir::GuestPanicCleanup>,
     entry: Option<crate::vm::engine::ir::EntryPlan>,
 }
 
@@ -108,8 +113,12 @@ impl<'a> From<&'a crate::vm::engine::ir::Module> for ModuleMetaRef<'a> {
         Self {
             function_names: &module.function_names,
             exports: &module.exports,
-            frozen: &module.frozen,
-            fn_addrs: &module.fn_addrs,
+            frozen: module.frozen.as_ref().map(|frozen| {
+                frozen
+                    .to_snapshot()
+                    .expect("package preflight checked frozen base")
+            }),
+            link_fn_addrs: &module.link_fn_addrs,
             native_libs: &module.native_libs,
             required_native_libs: &module.required_native_libs,
             tls: &module.tls,
@@ -117,19 +126,32 @@ impl<'a> From<&'a crate::vm::engine::ir::Module> for ModuleMetaRef<'a> {
             asm_sites: &module.asm_sites,
             foreign_syms: &module.foreign_syms,
             got_fixups: &module.got_fixups,
-            entry_stub_sites: &module.entry_stub_sites,
+            frozen_relocs: &module.frozen_relocs,
+            entry_stub_sites: module
+                .entry_stub_sites
+                .iter()
+                .chain(
+                    module
+                        .image_entry_stubs
+                        .iter()
+                        .flat_map(|(_, sites, _)| sites.iter()),
+                )
+                .cloned()
+                .collect(),
             custom_alloc_shims: module.custom_alloc_shims,
+            guest_panic_cleanup: module.guest_panic_cleanup,
             entry: module.entry,
         }
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ModuleMeta {
     function_names: Vec<Box<str>>,
     exports: std::collections::HashMap<Box<str>, crate::vm::engine::ir::FuncId>,
-    frozen: Option<crate::vm::engine::frozen::FrozenArena>,
-    fn_addrs: std::collections::HashMap<u64, crate::vm::engine::ir::FuncId>,
+    frozen: Option<crate::vm::engine::frozen::FrozenSnapshot>,
+    link_fn_addrs:
+        std::collections::HashMap<crate::vm::engine::ir::LinkAddr, crate::vm::engine::ir::FuncId>,
     native_libs: Vec<Box<str>>,
     required_native_libs: Vec<Box<str>>,
     tls: Vec<crate::vm::engine::ir::TlsSlot>,
@@ -137,36 +159,57 @@ struct ModuleMeta {
     asm_sites: Vec<crate::vm::engine::ir::AsmSite>,
     foreign_syms: Vec<crate::vm::engine::ir::GotSym>,
     got_fixups: Vec<crate::vm::engine::ir::GotFixup>,
+    frozen_relocs: Vec<crate::vm::engine::ir::FrozenReloc>,
     entry_stub_sites: Vec<crate::vm::engine::ir::EntryStubSite>,
     custom_alloc_shims: Option<crate::vm::engine::ir::AllocShims>,
+    guest_panic_cleanup: Option<crate::vm::engine::ir::GuestPanicCleanup>,
     entry: Option<crate::vm::engine::ir::EntryPlan>,
 }
 
 impl ModuleMeta {
-    fn into_module(self) -> crate::vm::engine::ir::Module {
-        crate::vm::engine::ir::Module {
+    fn instantiate(&self) -> Result<crate::vm::engine::ir::Module, String> {
+        let frozen = self
+            .frozen
+            .as_ref()
+            .map(crate::vm::engine::frozen::FrozenArena::restore_dynamic)
+            .transpose()?;
+        let mut module = crate::vm::engine::ir::Module {
             funcs: Default::default(),
-            function_names: self.function_names,
-            exports: self.exports,
-            frozen: self.frozen,
-            fn_addrs: self.fn_addrs,
-            native_libs: self.native_libs,
-            required_native_libs: self.required_native_libs,
+            function_names: self.function_names.clone(),
+            exports: self.exports.clone(),
+            frozen,
+            load_map: Default::default(),
+            fn_addrs: self
+                .link_fn_addrs
+                .iter()
+                .map(|(&addr, &func)| (addr.0, func))
+                .collect(),
+            link_fn_addrs: self.link_fn_addrs.clone(),
+            executable_entry_addrs: Default::default(),
+            native_libs: self.native_libs.clone(),
+            required_native_libs: self.required_native_libs.clone(),
+            required_native_hashes: Vec::new(),
+            native_images: Vec::new(),
             mc_images: Vec::new(),
-            tls: self.tls,
-            asm_stub_addrs: self.asm_stub_addrs,
-            asm_sites: self.asm_sites,
-            foreign_syms: self.foreign_syms,
-            got_fixups: self.got_fixups,
-            entry_stub_sites: self.entry_stub_sites,
+            tls: self.tls.clone(),
+            asm_stub_addrs: self.asm_stub_addrs.clone(),
+            asm_sites: self.asm_sites.clone(),
+            foreign_syms: self.foreign_syms.clone(),
+            got_fixups: self.got_fixups.clone(),
+            frozen_relocs: self.frozen_relocs.clone(),
+            entry_stub_sites: self.entry_stub_sites.clone(),
             entry_stubs: Default::default(),
             image_entry_stubs: Vec::new(),
             custom_alloc_shims: self.custom_alloc_shims,
+            guest_panic_cleanup: self.guest_panic_cleanup,
             entry: self.entry,
             image_frozens: Vec::new(),
             backtrace_ips: Vec::new(),
             backtrace_image: None,
-        }
+        };
+        module.rebuild_load_map();
+        module.load_map.require_mapped();
+        Ok(module)
     }
 }
 
@@ -531,7 +574,7 @@ pub(crate) fn write_package(
         target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
     };
     let reloc = Reloc {
-        requires_fixed_base: true,
+        requires_fixed_base: false,
         entry: "main".into(),
     };
     // NATIVELIBS：所有自产库字节随包携带。global_asm 族另入 MC 节走进程内
@@ -589,10 +632,84 @@ pub(crate) fn write_package(
     Ok(())
 }
 
-/// 装载好的包（module 已恢复冻结区基址；调用方接 warm 后半段：
-/// asm_sites 重物化 → run_vm_engine）。
+/// 已校验的不可变包镜像。`instantiate` 每次创建独立的冻结内存和机器码镜像。
 pub(crate) struct LoadedPackage {
-    pub module: crate::vm::engine::ir::Module,
+    raw: std::sync::Arc<[u8]>,
+    module_meta: ModuleMeta,
+    function_blobs: Vec<crate::vm::engine::ir::FuncBlob>,
+    libs: Vec<NativeLibEntry>,
+    mc_entries: Vec<McEntry>,
+    heat_path: PathBuf,
+}
+
+/// A validated, immutable `.mirvm` artifact that can create multiple independent Engines.
+pub struct Package {
+    loaded: LoadedPackage,
+}
+
+impl Package {
+    /// Copy and fully validate a package without allocating an Engine or executing guest code.
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, String> {
+        load_package(path.as_ref()).map(|loaded| Self { loaded })
+    }
+
+    /// Create an independent Engine instance from this artifact.
+    ///
+    /// # Safety
+    ///
+    /// Package verification proves the container and VM bytecode shape, but cannot prove that
+    /// embedded native libraries, foreign symbol declarations, and FFI signatures agree with
+    /// the host process. The caller must trust those package inputs and ABI declarations.
+    pub unsafe fn instantiate(&self) -> Result<crate::vm::engine::Engine, String> {
+        let mut module = self.loaded.instantiate()?;
+        module.asm_stub_addrs = crate::lower::asm::try_materialize(&module.asm_sites)?;
+        module.finalize_entry_argv(&[])?;
+        unsafe { crate::vm::engine::Engine::from_module_unchecked(module) }
+    }
+}
+
+impl LoadedPackage {
+    pub(crate) fn instantiate(&self) -> Result<crate::vm::engine::ir::Module, String> {
+        let mut module = self.module_meta.instantiate()?;
+        let mut covered_hashes = HashSet::with_capacity(self.mc_entries.len());
+        let mut images = Vec::with_capacity(self.mc_entries.len());
+        for mc in &self.mc_entries {
+            covered_hashes.insert(mc.fnv);
+            let lib = self
+                .libs
+                .iter()
+                .find(|lib| lib.role == 1 && lib.fnv == mc.fnv)
+                .ok_or_else(|| {
+                    format!(
+                        "validated package lost the native entry for MC image {:032x}",
+                        mc.fnv
+                    )
+                })?;
+            let image = crate::vm::engine::mcload::load(&mc.bytes)
+                .map_err(|e| format!("fail to load MC image ({}): {e}", lib.path))?;
+            images.push(image);
+        }
+        module.mc_images = images;
+
+        let mut required_native_libs = Vec::with_capacity(self.libs.len());
+        let mut required_native_hashes = Vec::with_capacity(self.libs.len());
+        for lib in &self.libs {
+            if lib.role == 1 && covered_hashes.contains(&lib.fnv) {
+                continue;
+            }
+            let path = materialize_native_blob_at(&crate::sysroot::cache_dir(), lib)?;
+            required_native_libs.push(path.to_string_lossy().into_owned().into_boxed_str());
+            required_native_hashes.push(lib.fnv);
+        }
+        module.required_native_libs = required_native_libs;
+        module.required_native_hashes = required_native_hashes;
+        module.funcs = crate::vm::engine::ir::FuncTable::from_bytes(
+            self.raw.clone(),
+            self.function_blobs.clone(),
+            self.heat_path.clone(),
+        );
+        Ok(module)
+    }
 }
 
 /// 包嗅探：前 8 字节是 magic 即包（run 的岔路判据）。
@@ -609,12 +726,11 @@ pub(crate) fn is_package(path: &Path) -> bool {
 /// 装载 + 全校验（refuse-loud）。输入戳和编译时环境只作来源记录；包内 Module
 /// 已冻结其语义，运行时不再要求源码或原编译环境在场。
 pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
-    let file = std::fs::File::open(path).map_err(|e| format!("fail to open package: {e}"))?;
-    // SAFETY: 只读映射；装载期持有 Arc<Mmap> 直到最后一个惰性函数释放。
-    // 调用方不得在包运行时原地改写/截断文件，这与可执行文件的 mmap 契约相同。
-    let raw = std::sync::Arc::new(
-        unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("fail to mmap package: {e}"))?,
-    );
+    // `Package::load` is safe, so its result must not retain the filesystem's mutable inode.
+    // Copy once, then validate and lazily decode exclusively from this immutable snapshot.
+    let raw: std::sync::Arc<[u8]> = std::fs::read(path)
+        .map_err(|e| format!("fail to read package: {e}"))?
+        .into();
     let package = parse_container(&raw)?;
     let meta: Meta = postcard::from_bytes(package.section(TAG_META)?)
         .map_err(|e| format!("fail to resolve META section: {e}"))?;
@@ -645,8 +761,8 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
         return Err(format!("unsupported package entry `{}`", reloc.entry));
     }
     let module_meta: ModuleMeta = postcard::from_bytes(package.section(TAG_MODULE)?)
-        .map_err(|e| format!("MODULE 节解析失败（冻结区固定基恢复未成立？）: {e}"))?;
-    let mut module = module_meta.into_module();
+        .map_err(|e| format!("fail to resolve MODULE section: {e}"))?;
+    let module = module_meta.instantiate()?;
     let function_section = package.section(TAG_FUNCS)?;
     let mapped_offset = function_section.as_ptr() as usize - raw.as_ptr() as usize;
     let function_blobs = parse_function_section(function_section, mapped_offset)?;
@@ -660,16 +776,23 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
     crate::vm::engine::verify::module_header_with_count(&module, function_blobs.len())
         .map_err(|e| format!("MODULE bytecode verification failed: {e}"))?;
     // E20 红线：任何 MC/native 物化前逐函数做完整语义验证。临时对象随轮释放，
-    // 运行阶段仍从 mmap 按需解码，不把全函数常驻内存。
+    // 运行阶段仍从 owned snapshot 按需解码，不把全函数常驻内存。
+    let mut main_boundaries = 0;
+    let mut main_catchers = 0;
     for (index, blob) in function_blobs.iter().enumerate() {
         let body: crate::vm::engine::ir::FuncBody =
             postcard::from_bytes(&raw[blob.start..blob.end])
                 .map_err(|e| format!("function {index} decode failed during verification: {e}"))?;
         crate::vm::engine::verify::function_with_count(&module, function_blobs.len(), index, &body)
             .map_err(|e| format!("MODULE bytecode verification failed: {e}"))?;
+        let (boundaries, catchers) = crate::vm::engine::verify::body_main_role_counts(&body);
+        main_boundaries += boundaries;
+        main_catchers += catchers;
     }
-    if reloc.requires_fixed_base && !module.frozen.as_ref().is_some_and(|f| f.at_fixed_base()) {
-        return Err("包要求固定基址但当前进程不可用（被占/ASLR 冲突）——重试或空闲后跑".into());
+    crate::vm::engine::verify::main_role_counts(&module, main_boundaries, main_catchers)
+        .map_err(|e| format!("MODULE bytecode verification failed: {e}"))?;
+    if reloc.requires_fixed_base {
+        return Err("package v4 cannot require a fixed runtime base".into());
     }
     if module.required_native_libs.len() != libs.len()
         || module
@@ -696,7 +819,6 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
     }
 
     let mut covered_hashes = HashSet::with_capacity(mc_entries.len());
-    let mut images = Vec::with_capacity(mc_entries.len());
     for mc in &mc_entries {
         if hash128(&mc.bytes) != mc.fnv {
             return Err("package MC entry has wrong content hash".into());
@@ -704,35 +826,30 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
         if !covered_hashes.insert(mc.fnv) {
             return Err("package MC section contains a duplicate image".into());
         }
-        let Some(l) = libs.iter().find(|l| l.role == 1 && l.fnv == mc.fnv) else {
+        let Some(_) = libs.iter().find(|l| l.role == 1 && l.fnv == mc.fnv) else {
             return Err("包 MC 节含 NATIVELIBS 无互证条目（不符或多余）".into());
         };
-        let img = crate::vm::engine::mcload::load(&mc.bytes)
-            .map_err(|e| format!("fail to load MC image ({}): {e}", l.path))?;
-        images.push(img);
     }
-    module.mc_images = images;
-
-    let mut required_native_libs = Vec::with_capacity(libs.len());
-    for lib in &libs {
-        if lib.role == 1 && covered_hashes.contains(&lib.fnv) {
-            continue;
-        }
-        let path = materialize_native_blob_at(&crate::sysroot::cache_dir(), lib)?;
-        required_native_libs.push(path.to_string_lossy().into_owned().into_boxed_str());
-    }
-    module.required_native_libs = required_native_libs;
     let heat_key = format!("{:032x}", hash128(function_section));
     let heat_path = crate::sysroot::cache_dir()
         .join("package-heat")
         .join(format!("{heat_key}.order"));
-    module.funcs = crate::vm::engine::ir::FuncTable::from_mmap(raw, function_blobs, heat_path);
-    Ok(LoadedPackage { module })
+    drop(module);
+    Ok(LoadedPackage {
+        raw,
+        module_meta,
+        function_blobs,
+        libs,
+        mc_entries,
+        heat_path,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static NEXT_PACKAGE_TEST: AtomicU64 = AtomicU64::new(0);
 
     fn test_body(name: &str) -> crate::vm::engine::ir::FuncBody {
         crate::vm::engine::ir::FuncBody {
@@ -770,12 +887,78 @@ mod tests {
         MAGIC.len() + 4 + 4 + env!("MIRVM_BUILD_ID").len() + 4
     }
 
+    fn package_bytes_for_module(module: &crate::vm::engine::ir::Module) -> Vec<u8> {
+        build_container(&[
+            (
+                TAG_META,
+                postcard_bytes(&Meta {
+                    args: Vec::new(),
+                    envs: Vec::new(),
+                    base_key: None,
+                    target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+                })
+                .unwrap(),
+            ),
+            (
+                TAG_STAMPS,
+                postcard_bytes(&Vec::<crate::ircache::FileStamp>::new()).unwrap(),
+            ),
+            (
+                TAG_MODULE,
+                postcard_bytes(&ModuleMetaRef::from(module)).unwrap(),
+            ),
+            (
+                TAG_NATIVELIBS,
+                postcard_bytes(&Vec::<NativeLibEntry>::new()).unwrap(),
+            ),
+            (
+                TAG_RELOC,
+                postcard_bytes(&Reloc {
+                    requires_fixed_base: false,
+                    entry: "main".into(),
+                })
+                .unwrap(),
+            ),
+            (TAG_FUNCS, build_function_section(&module.funcs).unwrap()),
+        ])
+        .unwrap()
+    }
+
+    fn load_test_package(bytes: &[u8]) -> Result<Package, String> {
+        let path = std::env::temp_dir().join(format!(
+            "mirvm-package-verify-{}-{}.mirvm",
+            std::process::id(),
+            NEXT_PACKAGE_TEST.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let result = Package::load(&path);
+        std::fs::remove_file(path).unwrap();
+        result
+    }
+
     #[test]
     fn parser_accepts_writer_output() {
         let raw = build_container(&[(TAG_META, vec![1, 2]), (99, vec![3, 4, 5])]).unwrap();
         let parsed = parse_container(&raw).unwrap();
         assert_eq!(parsed.section(TAG_META).unwrap(), [1, 2]);
         assert_eq!(parsed.section(99).unwrap(), [3, 4, 5]);
+    }
+
+    #[test]
+    fn module_section_preserves_guest_panic_cleanup_plan() {
+        let mut module = crate::vm::engine::ir::Module::default();
+        let plan = crate::vm::engine::ir::GuestPanicCleanup {
+            cleanup: 12,
+            drop_payload: 34,
+        };
+        module.guest_panic_cleanup = Some(plan);
+
+        let encoded = postcard_bytes(&ModuleMetaRef::from(&module)).unwrap();
+        let decoded: ModuleMeta = postcard::from_bytes(&encoded).unwrap();
+        assert_eq!(
+            decoded.instantiate().unwrap().guest_panic_cleanup,
+            Some(plan)
+        );
     }
 
     #[test]
@@ -867,6 +1050,69 @@ mod tests {
     }
 
     #[test]
+    fn malformed_p1_tables_are_rejected_by_safe_load_without_panicking() {
+        use crate::vm::engine::ir::{EntryStubSite, FfiKind, ForeignSig, LinkAddr};
+
+        let addr = LinkAddr(0x6c00_0000_1000);
+        let sig = ForeignSig {
+            args: Vec::new(),
+            ret: FfiKind::U64,
+            fixed: None,
+            thunk_args: Vec::new(),
+            unwind: true,
+        };
+        let mut missing = crate::vm::engine::ir::Module::default();
+        missing.funcs.push(test_body("callback"));
+        missing.ensure_function_names();
+        missing.link_fn_addrs.insert(addr, 0);
+        let missing_bytes = package_bytes_for_module(&missing);
+        let result = std::panic::catch_unwind(|| load_test_package(&missing_bytes));
+        let error = result
+            .expect("safe Package::load panicked")
+            .err()
+            .expect("malformed package was accepted");
+        assert!(error.contains("no matching entry stub"), "{error}");
+
+        let mut duplicate = missing;
+        let site = EntryStubSite {
+            link_addr: addr,
+            func: 0,
+            sig,
+        };
+        duplicate.entry_stub_sites = vec![site.clone(), site];
+        let duplicate_bytes = package_bytes_for_module(&duplicate);
+        let result = std::panic::catch_unwind(|| load_test_package(&duplicate_bytes));
+        let error = result
+            .expect("safe Package::load panicked")
+            .err()
+            .expect("malformed package was accepted");
+        assert!(error.contains("duplicates entry link address"), "{error}");
+    }
+
+    #[test]
+    fn entry_without_frozen_memory_is_rejected_by_safe_load_without_panicking() {
+        use crate::vm::engine::ir::{EntryPlan, LinkAddr};
+
+        let mut module = crate::vm::engine::ir::Module::default();
+        module.funcs.push(test_body("lang_start"));
+        module.ensure_function_names();
+        module.entry = Some(EntryPlan {
+            lang_start: 0,
+            main_addr: LinkAddr(0x6c00_0000_1000),
+            argc: 0,
+            argv_ptr: 0,
+            sigpipe: 0,
+        });
+        let bytes = package_bytes_for_module(&module);
+        let result = std::panic::catch_unwind(|| load_test_package(&bytes));
+        let error = result
+            .expect("safe Package::load panicked")
+            .err()
+            .expect("entry without frozen memory was accepted");
+        assert!(error.contains("no frozen memory for argv"), "{error}");
+    }
+
+    #[test]
     fn native_blob_materialization_uses_embedded_bytes() {
         let root = std::env::temp_dir().join(format!(
             "mirvm-pack-test-{}-{}",
@@ -889,5 +1135,255 @@ mod tests {
             lib.bytes
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn one_loaded_package_instantiates_isolated_frozen_memory_twice() {
+        use crate::vm::engine::ir::{
+            Block, FuncBody, IntBinOp, LinkAddr, Operand, PlaceBase, PlaceExpr, RetAbi, Rvalue,
+            ScalarPlace, Slot, Stmt, Terminator, Width,
+        };
+
+        let mut module = crate::vm::engine::ir::Module::default();
+        let mut frozen = crate::vm::engine::frozen::FrozenArena::new();
+        let link_cell = frozen.alloc(8, 8);
+        unsafe { (link_cell as *mut u64).write(41) };
+        let link_pointer = frozen.alloc(8, 8);
+        unsafe { (link_pointer as *mut u64).write(link_cell) };
+        module.frozen = Some(frozen);
+        module
+            .frozen_relocs
+            .push(crate::vm::engine::ir::FrozenReloc {
+                at: LinkAddr(link_pointer),
+                target: crate::vm::engine::ir::FrozenRelocTarget::Frozen(LinkAddr(link_cell)),
+            });
+        let ret = Slot {
+            off: 0,
+            width: Width::W64,
+        };
+        let cell_place = || PlaceExpr {
+            base: PlaceBase::Static(LinkAddr(link_cell)),
+            steps: Box::new([]),
+        };
+        module.funcs.push(FuncBody {
+            frame_size: 8,
+            frame_align: 8,
+            ret: RetAbi::Scalar(ret),
+            params: Vec::new(),
+            caller_loc_off: None,
+            blocks: vec![Block {
+                stmts: vec![
+                    Stmt::Assign {
+                        dst: ScalarPlace::Slot(ret),
+                        rv: Rvalue::IntBin {
+                            op: IntBinOp::Add,
+                            signed: false,
+                            a: Operand::Mem {
+                                expr: cell_place(),
+                                width: Width::W64,
+                            },
+                            b: Operand::Imm {
+                                bits: 1,
+                                width: Width::W64,
+                            },
+                        },
+                    },
+                    Stmt::Assign {
+                        dst: ScalarPlace::Mem {
+                            expr: cell_place(),
+                            width: Width::W64,
+                        },
+                        rv: Rvalue::Use(Operand::Slot(ret)),
+                    },
+                ],
+                term: Terminator::Return,
+            }],
+            name: "bump_static".into(),
+        });
+        module.funcs.push(FuncBody {
+            frame_size: 8,
+            frame_align: 8,
+            ret: RetAbi::Scalar(ret),
+            params: Vec::new(),
+            caller_loc_off: None,
+            blocks: vec![Block {
+                stmts: vec![Stmt::Assign {
+                    dst: ScalarPlace::Slot(ret),
+                    rv: Rvalue::Use(Operand::AddrImm(LinkAddr(link_cell))),
+                }],
+                term: Terminator::Return,
+            }],
+            name: "static_address".into(),
+        });
+        let tls_ptr = Slot {
+            off: 8,
+            width: Width::W64,
+        };
+        module.tls.push(crate::vm::engine::ir::TlsSlot {
+            template: LinkAddr(link_cell),
+            size: 8,
+            align: 8,
+        });
+        module.funcs.push(FuncBody {
+            frame_size: 16,
+            frame_align: 8,
+            ret: RetAbi::Scalar(ret),
+            params: Vec::new(),
+            caller_loc_off: None,
+            blocks: vec![Block {
+                stmts: vec![
+                    Stmt::Assign {
+                        dst: ScalarPlace::Slot(tls_ptr),
+                        rv: Rvalue::TlsRef(0),
+                    },
+                    Stmt::Assign {
+                        dst: ScalarPlace::Slot(ret),
+                        rv: Rvalue::Use(Operand::Mem {
+                            expr: PlaceExpr {
+                                base: PlaceBase::Local(tls_ptr.off),
+                                steps: vec![crate::vm::engine::ir::PlaceStep::Deref]
+                                    .into_boxed_slice(),
+                            },
+                            width: Width::W64,
+                        }),
+                    },
+                ],
+                term: Terminator::Return,
+            }],
+            name: "tls_value".into(),
+        });
+        module.exports.insert("bump".into(), 0);
+        module.exports.insert("address".into(), 1);
+        module.exports.insert("tls".into(), 2);
+        module.ensure_function_names();
+
+        let sections = vec![
+            (
+                TAG_META,
+                postcard_bytes(&Meta {
+                    args: Vec::new(),
+                    envs: Vec::new(),
+                    base_key: None,
+                    target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+                })
+                .unwrap(),
+            ),
+            (
+                TAG_STAMPS,
+                postcard_bytes(&Vec::<crate::ircache::FileStamp>::new()).unwrap(),
+            ),
+            (
+                TAG_MODULE,
+                postcard_bytes(&ModuleMetaRef::from(&module)).unwrap(),
+            ),
+            (
+                TAG_NATIVELIBS,
+                postcard_bytes(&Vec::<NativeLibEntry>::new()).unwrap(),
+            ),
+            (
+                TAG_RELOC,
+                postcard_bytes(&Reloc {
+                    requires_fixed_base: false,
+                    entry: "main".into(),
+                })
+                .unwrap(),
+            ),
+            (TAG_FUNCS, build_function_section(&module.funcs).unwrap()),
+        ];
+        let bytes = build_container(&sections).unwrap();
+        drop(module);
+
+        let path = std::env::temp_dir().join(format!(
+            "mirvm-package-instance-{}-{}.mirvm",
+            std::process::id(),
+            NEXT_PACKAGE_TEST.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let package = load_package(&path).unwrap();
+        // A safe loaded artifact owns its verified bytes. Mutating and deleting the source
+        // inode after load must not affect later lazy decoding or instantiation.
+        std::fs::write(&path, b"replaced after Package::load").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let first = unsafe {
+            crate::vm::engine::Engine::from_module_unchecked(package.instantiate().unwrap())
+        }
+        .unwrap();
+        let second = unsafe {
+            crate::vm::engine::Engine::from_module_unchecked(package.instantiate().unwrap())
+        }
+        .unwrap();
+
+        let first_cell = first.shared().module.resolve_link_addr(LinkAddr(link_cell));
+        let second_cell = second
+            .shared()
+            .module
+            .resolve_link_addr(LinkAddr(link_cell));
+        let first_pointer = first
+            .shared()
+            .module
+            .resolve_link_addr(LinkAddr(link_pointer));
+        let second_pointer = second
+            .shared()
+            .module
+            .resolve_link_addr(LinkAddr(link_pointer));
+        assert_ne!(first_cell, second_cell);
+        assert_eq!(
+            unsafe { (first_pointer as *const u64).read_unaligned() },
+            first_cell
+        );
+        assert_eq!(
+            unsafe { (second_pointer as *const u64).read_unaligned() },
+            second_cell
+        );
+
+        assert_eq!(
+            unsafe { crate::vm::engine::raw::run_export_raw(&first, "address", &[]) }
+                .unwrap()
+                .into_returned()
+                .map(|value| value.lo),
+            Some(first_cell)
+        );
+        assert_eq!(
+            unsafe { crate::vm::engine::raw::run_export_raw(&second, "address", &[]) }
+                .unwrap()
+                .into_returned()
+                .map(|value| value.lo),
+            Some(second_cell)
+        );
+        assert_eq!(
+            unsafe { crate::vm::engine::raw::run_export_raw(&first, "tls", &[]) }
+                .unwrap()
+                .into_returned()
+                .map(|value| value.lo),
+            Some(41)
+        );
+        assert_eq!(
+            unsafe { crate::vm::engine::raw::run_export_raw(&second, "tls", &[]) }
+                .unwrap()
+                .into_returned()
+                .map(|value| value.lo),
+            Some(41)
+        );
+        assert_eq!(
+            unsafe { crate::vm::engine::raw::run_export_raw(&first, "bump", &[]) }
+                .unwrap()
+                .into_returned()
+                .map(|value| value.lo),
+            Some(42)
+        );
+        assert_eq!(
+            unsafe { crate::vm::engine::raw::run_export_raw(&second, "bump", &[]) }
+                .unwrap()
+                .into_returned()
+                .map(|value| value.lo),
+            Some(42)
+        );
+        assert_eq!(
+            unsafe { crate::vm::engine::raw::run_export_raw(&first, "bump", &[]) }
+                .unwrap()
+                .into_returned()
+                .map(|value| value.lo),
+            Some(43)
+        );
     }
 }

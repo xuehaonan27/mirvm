@@ -43,6 +43,40 @@ pub(crate) fn function_with_count(
         .map_err(|error| format!("function {index} `{}`: {error}", body.name))
 }
 
+pub(crate) fn main_role_counts(
+    module: &Module,
+    boundaries: usize,
+    catchers: usize,
+) -> Result<(), String> {
+    if module.entry.is_some() && boundaries != 1 {
+        return Err(format!(
+            "executable module has {boundaries} main panic boundaries, expected exactly one"
+        ));
+    }
+    if module.entry.is_some() && catchers != 1 {
+        return Err(format!(
+            "executable module has {catchers} main panic catchers, expected exactly one"
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn body_main_role_counts(body: &FuncBody) -> (usize, usize) {
+    body.blocks
+        .iter()
+        .fold((0, 0), |(boundaries, catchers), block| match block.term {
+            Terminator::Call {
+                role: CallRole::MainPanicBoundary,
+                ..
+            } => (boundaries + 1, catchers),
+            Terminator::CallBuiltin {
+                role: BuiltinCallRole::MainPanicCatcher,
+                ..
+            } => (boundaries, catchers + 1),
+            _ => (boundaries, catchers),
+        })
+}
+
 struct Verifier<'a> {
     module: &'a Module,
     prefix: Prefix,
@@ -75,14 +109,27 @@ impl<'a> Verifier<'a> {
 
     fn run(&self) -> Result<(), String> {
         self.run_header()?;
+        let mut main_boundaries = 0;
+        let mut main_catchers = 0;
         for (i, body) in self.module.funcs.iter().enumerate() {
             self.body(body)
                 .map_err(|e| format!("function {} `{}`: {e}", self.prefix.funcs + i, body.name))?;
+            let (boundaries, catchers) = body_main_role_counts(body);
+            main_boundaries += boundaries;
+            main_catchers += catchers;
+        }
+        // Delta images can refer to a boundary stored in an earlier image layer. The merged
+        // executable (prefix zero) must contain exactly one before it can run or be packed.
+        if self.prefix.funcs == 0 {
+            main_role_counts(self.module, main_boundaries, main_catchers)?;
         }
         Ok(())
     }
 
     fn run_header(&self) -> Result<(), String> {
+        if self.module.entry.is_some() && self.module.frozen.is_none() {
+            return Err("executable module has an entry plan but no frozen memory for argv".into());
+        }
         if !self.module.asm_stub_addrs.is_empty()
             && self.module.asm_stub_addrs.len() != self.module.asm_sites.len()
             && self.module.asm_stub_addrs.len() != self.asm
@@ -105,6 +152,13 @@ impl<'a> Verifier<'a> {
             self.func(id)
                 .map_err(|e| format!("function address {addr:#x}: {e}"))?;
         }
+        for (&addr, &id) in &self.module.link_fn_addrs {
+            if addr.0 == 0 {
+                return Err("logical function address table contains a null address".into());
+            }
+            self.func(id)
+                .map_err(|e| format!("logical function address {:#x}: {e}", addr.0))?;
+        }
         for (i, slot) in self.module.tls.iter().enumerate() {
             if slot.align == 0 || !slot.align.is_power_of_two() {
                 return Err(format!(
@@ -113,7 +167,8 @@ impl<'a> Verifier<'a> {
                     slot.align
                 ));
             }
-            self.frozen_range(slot.template, slot.size, false)
+            let template = self.module.try_resolve_link_addr(slot.template)?;
+            self.frozen_range(template, slot.size, false)
                 .map_err(|e| format!("TLS slot {} template: {e}", self.prefix.tls + i))?;
         }
         for (i, fixup) in self.module.got_fixups.iter().enumerate() {
@@ -124,21 +179,75 @@ impl<'a> Verifier<'a> {
                     self.module.foreign_syms.len()
                 ));
             }
-            self.frozen_range(fixup.addr, 8, false)
+            let addr = self.module.try_resolve_link_addr(fixup.addr)?;
+            self.frozen_range(addr, 8, false)
                 .map_err(|e| format!("GOT fixup {i}: {e}"))?;
         }
-        for (i, site) in self.module.entry_stub_sites.iter().enumerate() {
-            self.func(site.func)
-                .map_err(|e| format!("entry stub {i}: {e}"))?;
-            self.foreign_sig(&site.sig)
-                .map_err(|e| format!("entry stub {i}: {e}"))?;
+        for (i, reloc) in self.module.frozen_relocs.iter().enumerate() {
+            let at = self.module.try_resolve_link_addr(reloc.at)?;
+            self.frozen_range(at, 8, false)
+                .map_err(|e| format!("frozen relocation {i} write address: {e}"))?;
+            match reloc.target {
+                FrozenRelocTarget::Frozen(target) => {
+                    let target = self.module.try_resolve_link_addr(target)?;
+                    self.frozen_range(target, 0, true)
+                        .map_err(|e| format!("frozen relocation {i} target: {e}"))?;
+                }
+                FrozenRelocTarget::Entry(target) => {
+                    if !self.module.link_fn_addrs.contains_key(&target) {
+                        return Err(format!(
+                            "frozen relocation {i} refers to unknown entry {:#x}",
+                            target.0
+                        ));
+                    }
+                }
+            }
         }
-        for (arena_i, (_, sites, _)) in self.module.image_entry_stubs.iter().enumerate() {
-            for (site_i, site) in sites.iter().enumerate() {
-                self.func(site.func)
-                    .map_err(|e| format!("image entry stub {arena_i}:{site_i}: {e}"))?;
+        let mut entry_sites = std::collections::HashMap::new();
+        {
+            let mut verify_entry_site = |label: &str, site: &EntryStubSite| -> Result<(), String> {
+                self.func(site.func).map_err(|e| format!("{label}: {e}"))?;
+                if self.module.link_fn_addrs.get(&site.link_addr) != Some(&site.func) {
+                    return Err(format!(
+                        "{label} link address {:#x} is absent or names a different function",
+                        site.link_addr.0
+                    ));
+                }
+                if self.module.load_map.resolves_frozen(site.link_addr) {
+                    return Err(format!(
+                        "{label} link address {:#x} overlaps frozen memory",
+                        site.link_addr.0
+                    ));
+                }
+                if entry_sites.insert(site.link_addr, site.func).is_some() {
+                    return Err(format!(
+                        "{label} duplicates entry link address {:#x}",
+                        site.link_addr.0
+                    ));
+                }
                 self.foreign_sig(&site.sig)
-                    .map_err(|e| format!("image entry stub {arena_i}:{site_i}: {e}"))?;
+                    .map_err(|e| format!("{label}: {e}"))?;
+                Ok(())
+            };
+            for (i, site) in self.module.entry_stub_sites.iter().enumerate() {
+                verify_entry_site(&format!("entry stub {i}"), site)?;
+            }
+            for (arena_i, (_, sites, _)) in self.module.image_entry_stubs.iter().enumerate() {
+                for (site_i, site) in sites.iter().enumerate() {
+                    verify_entry_site(&format!("image entry stub {arena_i}:{site_i}"), site)?;
+                }
+            }
+        }
+        if self.module.load_map.is_strict() {
+            for (&addr, &func) in &self.module.link_fn_addrs {
+                if !self.module.load_map.resolves_frozen(addr)
+                    && entry_sites.get(&addr) != Some(&func)
+                {
+                    return Err(format!(
+                        "logical function address {:#x} is outside frozen memory but has no matching entry stub",
+                        addr.0
+                    ));
+                }
             }
         }
         if let Some(shims) = self.module.custom_alloc_shims {
@@ -152,10 +261,26 @@ impl<'a> Verifier<'a> {
                     .map_err(|e| format!("global allocator `{name}` shim: {e}"))?;
             }
         }
+        if let Some(plan) = self.module.guest_panic_cleanup {
+            if plan.cleanup == plan.drop_payload {
+                return Err(
+                    "guest panic cleanup and payload drop glue refer to the same function".into(),
+                );
+            }
+            self.func(plan.cleanup)
+                .map_err(|e| format!("guest panic cleanup: {e}"))?;
+            self.func(plan.drop_payload)
+                .map_err(|e| format!("guest panic payload drop glue: {e}"))?;
+        }
         if let Some(entry) = self.module.entry {
             self.func(entry.lang_start)
                 .map_err(|e| format!("entry lang_start: {e}"))?;
-            if !self.module.fn_addrs.contains_key(&entry.main_addr) {
+            let known = if self.module.link_fn_addrs.is_empty() {
+                self.module.fn_addrs.contains_key(&entry.main_addr.0)
+            } else {
+                self.module.link_fn_addrs.contains_key(&entry.main_addr)
+            };
+            if !known {
                 return Err(format!(
                     "entry main address {:#x} is absent from the function address table",
                     entry.main_addr
@@ -577,24 +702,57 @@ impl<'a> Verifier<'a> {
                 ret,
                 target,
                 unwind,
+                role,
             } => {
                 self.func(*callee)?;
                 self.operands(body, args)?;
                 self.ret_dest(body, ret)?;
                 self.bb(body, *target)?;
-                self.unwind(body, *unwind)
+                self.unwind(body, *unwind)?;
+                if matches!(role, crate::vm::engine::ir::CallRole::MainPanicBoundary)
+                    && !matches!(unwind, UnwindAction::Continue)
+                {
+                    return Err("main panic boundary call must use Continue unwind action".into());
+                }
+                Ok(())
             }
             Terminator::CallBuiltin {
+                builtin,
                 args,
                 ret,
                 target,
                 unwind,
-                ..
+                role,
             } => {
                 self.operands(body, args)?;
                 self.ret_dest(body, ret)?;
                 self.bb(body, *target)?;
-                self.unwind(body, *unwind)
+                self.unwind(body, *unwind)?;
+                if matches!(role, BuiltinCallRole::MainPanicCatcher) {
+                    let byte_ret = matches!(
+                        ret,
+                        RetDest::Scalar(ScalarPlace::Slot(Slot {
+                            width: Width::W8,
+                            ..
+                        })) | RetDest::Scalar(ScalarPlace::Mem {
+                            width: Width::W8,
+                            ..
+                        })
+                    );
+                    if !matches!(builtin, Builtin::CatchUnwind)
+                        || !matches!(unwind, UnwindAction::Continue)
+                        || args.len() != 3
+                        || !args.iter().all(|arg| arg.width() == Width::W64)
+                        || !byte_ret
+                    {
+                        return Err(
+                            "main panic catcher must be CatchUnwind with three pointer-width \
+                             arguments, a byte scalar return, and Continue unwind action"
+                                .into(),
+                        );
+                    }
+                }
+                Ok(())
             }
             Terminator::CallForeign {
                 sig,
@@ -729,6 +887,11 @@ impl<'a> Verifier<'a> {
             Operand::Slot(slot) => self.slot(body, *slot),
             Operand::Mem { expr, .. } | Operand::AddrOf(expr) => self.place(body, expr),
             Operand::Imm { .. } => Ok(()),
+            Operand::AddrImm(addr) => match self.module.try_resolve_link_addr(*addr) {
+                Ok(runtime) => self.frozen_range(runtime, 0, true),
+                Err(_) if self.module.link_fn_addrs.contains_key(addr) => Ok(()),
+                Err(error) => Err(error),
+            },
             Operand::SubImm { base, .. } => self.operand(body, base),
         }
     }
@@ -743,11 +906,14 @@ impl<'a> Verifier<'a> {
                     ));
                 }
             }
-            PlaceBase::Static(addr) => self.frozen_range(
-                addr,
-                0,
-                self.prefix.funcs != 0 || self.prefix.tls != 0 || self.prefix.asm != 0,
-            )?,
+            PlaceBase::Static(addr) => {
+                let runtime = self.module.try_resolve_link_addr(addr)?;
+                self.frozen_range(
+                    runtime,
+                    0,
+                    self.prefix.funcs != 0 || self.prefix.tls != 0 || self.prefix.asm != 0,
+                )?
+            }
         }
         for step in &place.steps {
             match step {
@@ -1014,6 +1180,179 @@ mod tests {
         }
     }
 
+    fn p1_sig() -> ForeignSig {
+        ForeignSig {
+            args: Vec::new(),
+            ret: FfiKind::U64,
+            fixed: None,
+            thunk_args: Vec::new(),
+            unwind: true,
+        }
+    }
+
+    fn strict_p1_header(addr: LinkAddr) -> Module {
+        let mut module = Module::default();
+        module.funcs.push(body(Terminator::Return));
+        module.link_fn_addrs.insert(addr, 0);
+        module.entry_stub_sites.push(EntryStubSite {
+            link_addr: addr,
+            func: 0,
+            sig: p1_sig(),
+        });
+        module.load_map.require_mapped();
+        module
+    }
+
+    fn executable_with_roles(
+        roles: &[(CallRole, UnwindAction)],
+        catchers: &[(Builtin, UnwindAction)],
+    ) -> Module {
+        let mut module = Module::default();
+        module.funcs.push(body(Terminator::Return));
+        for &(role, unwind) in roles {
+            module.funcs.push(body(Terminator::Call {
+                callee: 0,
+                args: Vec::new(),
+                ret: RetDest::Ignore,
+                target: 0,
+                unwind,
+                role,
+            }));
+        }
+        for (builtin, unwind) in catchers {
+            module.funcs.push(body(Terminator::CallBuiltin {
+                builtin: builtin.clone(),
+                args: vec![
+                    Operand::Imm {
+                        bits: 0x1010,
+                        width: Width::W64,
+                    },
+                    Operand::Imm {
+                        bits: 0,
+                        width: Width::W64,
+                    },
+                    Operand::Imm {
+                        bits: 0x2020,
+                        width: Width::W64,
+                    },
+                ],
+                ret: RetDest::Scalar(ScalarPlace::Slot(Slot {
+                    off: 0,
+                    width: Width::W8,
+                })),
+                target: 0,
+                unwind: *unwind,
+                role: BuiltinCallRole::MainPanicCatcher,
+            }));
+        }
+        module.fn_addrs.insert(0x1010, 0);
+        module.entry = Some(EntryPlan {
+            lang_start: 0,
+            main_addr: LinkAddr(0x1010),
+            argc: 0,
+            argv_ptr: 0,
+            sigpipe: 0,
+        });
+        module.frozen = Some(super::super::frozen::FrozenArena::new());
+        module
+    }
+
+    #[test]
+    fn executable_requires_exactly_one_main_panic_boundary() {
+        let missing = executable_with_roles(&[], &[]);
+        let err = module(&missing).unwrap_err();
+        assert!(err.contains("0 main panic boundaries"), "{err}");
+
+        let valid = executable_with_roles(
+            &[(CallRole::MainPanicBoundary, UnwindAction::Continue)],
+            &[(Builtin::CatchUnwind, UnwindAction::Continue)],
+        );
+        module(&valid).unwrap();
+
+        let duplicate = executable_with_roles(
+            &[
+                (CallRole::MainPanicBoundary, UnwindAction::Continue),
+                (CallRole::MainPanicBoundary, UnwindAction::Continue),
+            ],
+            &[(Builtin::CatchUnwind, UnwindAction::Continue)],
+        );
+        let err = module(&duplicate).unwrap_err();
+        assert!(err.contains("2 main panic boundaries"), "{err}");
+    }
+
+    #[test]
+    fn main_panic_boundary_requires_continue_unwind() {
+        let invalid = executable_with_roles(
+            &[(CallRole::MainPanicBoundary, UnwindAction::Cleanup(0))],
+            &[(Builtin::CatchUnwind, UnwindAction::Continue)],
+        );
+        let err = module(&invalid).unwrap_err();
+        assert!(err.contains("must use Continue"), "{err}");
+    }
+
+    #[test]
+    fn executable_requires_one_well_formed_main_panic_catcher() {
+        let missing = executable_with_roles(
+            &[(CallRole::MainPanicBoundary, UnwindAction::Continue)],
+            &[],
+        );
+        let err = module(&missing).unwrap_err();
+        assert!(err.contains("0 main panic catchers"), "{err}");
+
+        let malformed = executable_with_roles(
+            &[(CallRole::MainPanicBoundary, UnwindAction::Continue)],
+            &[(Builtin::HostAbort, UnwindAction::Continue)],
+        );
+        let err = module(&malformed).unwrap_err();
+        assert!(err.contains("must be CatchUnwind"), "{err}");
+
+        let mut malformed_shape = executable_with_roles(
+            &[(CallRole::MainPanicBoundary, UnwindAction::Continue)],
+            &[(Builtin::CatchUnwind, UnwindAction::Continue)],
+        );
+        let mut funcs = Vec::new();
+        malformed_shape.funcs.drain_into(&mut funcs);
+        let Terminator::CallBuiltin { args, ret, .. } = &mut funcs[2].blocks[0].term else {
+            unreachable!()
+        };
+        args.pop();
+        *ret = RetDest::Ignore;
+        malformed_shape.funcs = funcs.into();
+        let err = module(&malformed_shape).unwrap_err();
+        assert!(err.contains("three pointer-width arguments"), "{err}");
+
+        let mut malformed_width = executable_with_roles(
+            &[(CallRole::MainPanicBoundary, UnwindAction::Continue)],
+            &[(Builtin::CatchUnwind, UnwindAction::Continue)],
+        );
+        let mut funcs = Vec::new();
+        malformed_width.funcs.drain_into(&mut funcs);
+        let Terminator::CallBuiltin { args, .. } = &mut funcs[2].blocks[0].term else {
+            unreachable!()
+        };
+        args[1] = Operand::Imm {
+            bits: 0,
+            width: Width::W8,
+        };
+        malformed_width.funcs = funcs.into();
+        let err = module(&malformed_width).unwrap_err();
+        assert!(err.contains("three pointer-width arguments"), "{err}");
+    }
+
+    #[test]
+    fn partial_image_can_leave_main_boundary_in_an_earlier_layer() {
+        let partial = executable_with_roles(&[], &[]);
+        module_with_prefix(
+            &partial,
+            Prefix {
+                funcs: 1,
+                tls: 0,
+                asm: 0,
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn accepts_absolute_ids_in_a_partial_image() {
         let mut m = Module::default();
@@ -1023,6 +1362,7 @@ mod tests {
             ret: RetDest::Ignore,
             target: 0,
             unwind: UnwindAction::Continue,
+            role: crate::vm::engine::ir::CallRole::Normal,
         }));
         module_with_prefix(
             &m,
@@ -1055,5 +1395,77 @@ mod tests {
         m.exports.insert("bad".into(), 1);
         let err = module(&m).unwrap_err();
         assert!(err.contains("function id 1"), "{err}");
+    }
+
+    #[test]
+    fn strict_artifact_requires_exactly_one_site_for_each_executable_entry() {
+        let addr = LinkAddr(0x6100_0000_1000);
+        let valid = strict_p1_header(addr);
+        module(&valid).unwrap();
+
+        let mut missing = strict_p1_header(addr);
+        missing.entry_stub_sites.clear();
+        let err = module(&missing).unwrap_err();
+        assert!(err.contains("has no matching entry stub"), "{err}");
+
+        let mut duplicate = strict_p1_header(addr);
+        duplicate
+            .entry_stub_sites
+            .push(duplicate.entry_stub_sites[0].clone());
+        let err = module(&duplicate).unwrap_err();
+        assert!(err.contains("duplicates entry link address"), "{err}");
+    }
+
+    #[test]
+    fn entry_site_must_not_overlap_frozen_memory() {
+        let mut frozen = super::super::frozen::FrozenArena::new();
+        let addr = LinkAddr(frozen.alloc(8, 8));
+        let mut artifact = strict_p1_header(addr);
+        artifact.frozen = Some(frozen);
+        artifact.rebuild_load_map();
+        artifact.load_map.require_mapped();
+        let err = module(&artifact).unwrap_err();
+        assert!(err.contains("overlaps frozen memory"), "{err}");
+    }
+
+    #[test]
+    fn verifies_guest_panic_cleanup_function_ids() {
+        let mut valid = Module::default();
+        valid.funcs.push(body(Terminator::Return));
+        valid.funcs.push(body(Terminator::Return));
+        valid.guest_panic_cleanup = Some(GuestPanicCleanup {
+            cleanup: 0,
+            drop_payload: 1,
+        });
+        module(&valid).unwrap();
+
+        let mut invalid = valid;
+        invalid.guest_panic_cleanup = Some(GuestPanicCleanup {
+            cleanup: 0,
+            drop_payload: 2,
+        });
+        let err = module(&invalid).unwrap_err();
+        assert!(err.contains("payload drop glue"), "{err}");
+        assert!(err.contains("function id 2"), "{err}");
+    }
+
+    #[test]
+    fn accepts_guest_panic_cleanup_across_base_and_delta() {
+        let mut delta = Module::default();
+        delta.funcs.push(body(Terminator::Return));
+        delta.guest_panic_cleanup = Some(GuestPanicCleanup {
+            cleanup: 0,
+            drop_payload: 2,
+        });
+
+        module_with_prefix(
+            &delta,
+            Prefix {
+                funcs: 2,
+                tls: 0,
+                asm: 0,
+            },
+        )
+        .unwrap();
     }
 }

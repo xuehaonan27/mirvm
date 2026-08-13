@@ -35,11 +35,104 @@ cat >"$APP/Cargo.toml" <<'EOF'
 name = "pack-contract"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [dependencies]
 pack-dep = { path = "../dep" }
 EOF
-printf 'fn main() { println!("{}", pack_dep::value()); }\n' >"$APP/src/main.rs"
+cat >"$APP/build.rs" <<'EOF'
+use std::path::PathBuf;
+use std::process::Command;
+
+fn main() {
+    let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    let object = out.join("c2_bridge.o");
+    let archive = out.join("libc2_bridge.a");
+    assert!(Command::new("cc")
+        .args(["-fPIC", "-c"])
+        .arg(root.join("c2_bridge.c"))
+        .arg("-o")
+        .arg(&object)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("ar")
+        .arg("crs")
+        .arg(&archive)
+        .arg(&object)
+        .status()
+        .unwrap()
+        .success());
+    println!("cargo::rerun-if-changed=c2_bridge.c");
+    println!("cargo::rustc-link-search=native={}", out.display());
+    println!("cargo::rustc-link-lib=static=c2_bridge");
+}
+EOF
+cat >"$APP/c2_bridge.c" <<'EOF'
+#include <fcntl.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <unistd.h>
+extern uint64_t callback(void);
+static uint64_t ctor_value;
+__attribute__((constructor)) static void c2_init(void) { ctor_value = callback(); }
+__attribute__((destructor)) static void c2_fini(void) {
+    const char *path = getenv("MIRVM_FINI_LOG");
+    if (!path) return;
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) return;
+    char line[2] = {(char)('0' + ctor_value), '\n'};
+    (void)write(fd, line, sizeof(line));
+    (void)close(fd);
+}
+uint64_t c2_bridge(void) { return callback(); }
+uint64_t c2_ctor_value(void) { return ctor_value; }
+EOF
+cat >"$APP/src/main.rs" <<'EOF'
+use std::arch::global_asm;
+
+static mut COUNTER: u64 = 0;
+
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn callback() -> u64 {
+    unsafe {
+        COUNTER += 1;
+        COUNTER
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn callback_ptr() -> usize { callback as usize }
+
+global_asm!(
+    r#"
+.globl bridge_callback
+.type bridge_callback,@function
+bridge_callback:
+    sub rsp, 8
+    call {callback}
+    add rsp, 8
+    ret
+"#,
+    callback = sym callback,
+);
+
+unsafe extern "C-unwind" { fn bridge_callback() -> u64; }
+unsafe extern "C-unwind" { fn c2_bridge() -> u64; }
+unsafe extern "C-unwind" { fn c2_ctor_value() -> u64; }
+
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn through_bridge() -> u64 { unsafe { bridge_callback() } }
+
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn through_c2() -> u64 { unsafe { c2_bridge() } }
+
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn constructor_value() -> u64 { unsafe { c2_ctor_value() } }
+
+fn main() { println!("{}", pack_dep::value()); }
+EOF
 printf '#!/bin/sh\n: >"$MIRVM_CARGO_SENTINEL"\nexit 97\n' >"$NO_CARGO/cargo"
 chmod +x "$NO_CARGO/cargo"
 export MIRVM_CARGO_SENTINEL="$TMP/cargo-was-invoked"
@@ -81,6 +174,34 @@ if [ "$?" -eq 0 ] && [ "$second_output" = 321 ]; then
 else
     bad "包预测预取后二跑失败: output=$second_output"
     tail -20 "$TMP/self-run-second.err"
+fi
+
+# Public embedding API: source-independent concurrent instances, distinct callback identity,
+# per-instance global_asm bridge slots, and stable EngineClosed tombstones without ABA.
+MIRVM_DIR=$(cd "$(dirname "$MIRVM")" && pwd)
+MIRVM_LIB=${MIRVM_LIB:-$MIRVM_DIR/libmirvm.rlib}
+MIRVM_LINK_DEPS="$MIRVM_DIR/deps"
+RUSTC_SYSROOT=$("$RUSTC" --print sysroot)
+EMBED="$TMP/package-embed"
+"$RUSTC" tests/fixtures/package_embed.rs --edition=2024 \
+    --extern "mirvm=$MIRVM_LIB" -L "dependency=$MIRVM_LINK_DEPS" \
+    -C prefer-dynamic -C "link-arg=-Wl,-rpath,$RUSTC_SYSROOT/lib" \
+    -o "$EMBED" >"$TMP/embed-build.out" 2>"$TMP/embed-build.err"
+embed_build=$?
+if [ "$embed_build" -ne 0 ]; then
+    bad "公开 Package 嵌入探针编译失败"
+    tail -20 "$TMP/embed-build.err"
+else
+    embed_output=$(MIRVM_HOME="$TMP/embed-home" "$EMBED" "$SELF_PACKAGE" \
+        2>"$TMP/embed-run.err")
+    embed_code=$?
+    if [ "$embed_code" -eq 0 ] \
+        && [ "$embed_output" = "unique=true ctor=1,1 direct=2,2 bridge=3,3 c2=4,4 live=5 fresh_ctor=1 fresh=2 closed=true aba=true fini=true" ]; then
+        ok "公开 Package 双 Engine 的构造/析构/P1/global_asm/C2/关闭后 ABA 合同"
+    else
+        bad "公开 Package 双 Engine 结果错误: exit=$embed_code output=$embed_output"
+        tail -20 "$TMP/embed-run.err"
+    fi
 fi
 
 CARGO_PACKAGE="$TMP/cargo.mirvm"

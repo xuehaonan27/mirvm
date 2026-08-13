@@ -1,40 +1,16 @@
-//! 运行期服务三族（自 interp.rs I10-I12 整搬）：signal_thunk（D8d async
-//! 信号 AS-trampoline）/ backtrace 混合帧与符号 IP（D8e/E3/E8）/
+//! 运行期服务三族（自 interp.rs I10-I12 整搬）：signal handler
+//! 条目解析 / backtrace 混合帧与符号 IP（D8e/E3/E8）/
 //! atexit 家族（D8g，每 Engine 注册表 + LIFO 回调执行）。
 
 use super::call::call_fn_addr;
 use super::*;
 
-pub(super) fn signal_thunk(ctx: *mut Ctx, signum: i32, handler: u64) -> usize {
-    // 同步故障信号：guest handler 不可支持（诊断退出而非静默）
-    if matches!(
-        signum,
-        crate::os::signal::SIGSEGV
-            | crate::os::signal::SIGBUS
-            | crate::os::signal::SIGFPE
-            | crate::os::signal::SIGILL
-            | crate::os::signal::SIGTRAP
-    ) {
-        engine_abort(&format!(
-            "guest handler for synchronous fault signal {signum}（SEGV/BUS/FPE/ILL/TRAP：\
-             宿主与 guest 故障不可分辨，D8l）"
-        ));
-    }
+pub(super) fn resolve_signal_handler(
+    ctx: *mut Ctx,
+    handler: u64,
+) -> crate::vm::engine::thunks::SignalHandlerResolution {
     let shared: &'static Shared = unsafe { &*(*ctx).shared };
-    let Some(&func) = shared.module.fn_addrs.get(&handler) else {
-        engine_abort(&format!(
-            "signal handler {handler:#x} 不是已知 guest fn 条目"
-        ));
-    };
-    // 信号 handler ABI = `extern "C" fn(c_int)`；thunk 工厂造真码入口 + 边界 attach。
-    let sig = crate::vm::engine::ir::ForeignSig {
-        args: vec![FfiKind::I32],
-        ret: FfiKind::Void,
-        fixed: None,
-        thunk_args: vec![],
-        unwind: false,
-    };
-    crate::vm::engine::thunks::get_or_create(shared, handler, func, &sig) as usize
+    crate::vm::engine::thunks::resolve_signal_handler(shared, handler)
 }
 
 // ===== backtrace 影子帧（D8e）=====

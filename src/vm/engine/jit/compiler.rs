@@ -99,6 +99,7 @@ struct Compiler<'a> {
     module: JITModule,
     fbc: FunctionBuilderContext,
     c2i: ClifFuncId,
+    call_main_catch: ClifFuncId,
     unreachable: ClifFuncId,
     /// M5.4a：Copy/帧清零的宿主 memmove/memset 通道
     memmove: ClifFuncId,
@@ -122,6 +123,8 @@ struct Compiler<'a> {
     terminate_abort: ClifFuncId,
     call_terminate: ClifFuncId,
     unwind_resume: ClifFuncId,
+    /// JIT cleanup pad 按实际接住的异常指针识别 EngineFault。
+    exception_is_engine_fault: ClifFuncId,
     /// T1-d：Trap 占位助手（interp engine_abort 同文案同退出码）
     trap: ClifFuncId,
     /// T1-d：SIMD/宽 stmt 与 SIMD rvalue 三件的统一助手（interp simd_exec 共享本体）
@@ -129,6 +132,8 @@ struct Compiler<'a> {
     simd_rv: ClifFuncId,
     /// Checks stack headroom before a compiled body allocates its frame.
     stack_guard: ClifFuncId,
+    /// Deferred async-signal delivery at compiled block boundaries.
+    poll_signals: ClifFuncId,
     /// 本批 (clif id, unwind info, try_call 函数的 LSDA 字节)——finalize 后统一注册
     pending_unwind: Vec<(ClifFuncId, UnwindInfo, Option<Vec<u8>>)>,
     pending_guest_code: Vec<(ClifFuncId, u32, u64)>,
@@ -148,6 +153,7 @@ impl<'a> Compiler<'a> {
             .unwrap();
         let mut jb = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         jb.symbol("mirvm_c2i", mirvm_c2i as *const u8);
+        jb.symbol("mirvm_call_main_catch", mirvm_call_main_catch as *const u8);
         jb.symbol("mirvm_jit_unreachable", mirvm_jit_unreachable as *const u8);
         jb.symbol("mirvm_jit_div_zero", mirvm_jit_div_zero as *const u8);
         jb.symbol("mirvm_volatile_load", mirvm_volatile_load as *const u8);
@@ -158,6 +164,10 @@ impl<'a> Compiler<'a> {
             mirvm_jit_terminate_abort as *const u8,
         );
         jb.symbol("mirvm_call_terminate", mirvm_call_terminate as *const u8);
+        jb.symbol(
+            "mirvm_exception_is_engine_fault",
+            mirvm_exception_is_engine_fault as *const u8,
+        );
         jb.symbol("_Unwind_Resume", _Unwind_Resume as *const u8);
         jb.symbol("mirvm_jit_trap", mirvm_jit_trap as *const u8);
         jb.symbol("mirvm_simd_stmt", mirvm_simd_stmt as *const u8);
@@ -167,6 +177,7 @@ impl<'a> Compiler<'a> {
         jb.symbol("mirvm_call_builtin", mirvm_call_builtin as *const u8);
         jb.symbol("mirvm_alloc", mirvm_alloc as *const u8);
         jb.symbol("mirvm_jit_stack_guard", mirvm_jit_stack_guard as *const u8);
+        jb.symbol("mirvm_poll_signals", mirvm_poll_signals as *const u8);
         // M5.4b-3 助手注册表
         jb.symbol("mirvm_bin128_ovf", mirvm_bin128_ovf as *const u8);
         jb.symbol("mirvm_bin128_divrem", mirvm_bin128_divrem as *const u8);
@@ -208,6 +219,9 @@ impl<'a> Compiler<'a> {
         }
         let c2i = module
             .declare_function("mirvm_c2i", Linkage::Import, &sig_c2i)
+            .unwrap();
+        let call_main_catch = module
+            .declare_function("mirvm_call_main_catch", Linkage::Import, &sig_c2i)
             .unwrap();
         let mut sig_unr = module.make_signature();
         sig_unr.params.push(AbiParam::new(types::I64));
@@ -270,9 +284,9 @@ impl<'a> Compiler<'a> {
             .declare_function("mirvm_call_foreign", Linkage::Import, &sig_cf)
             .unwrap();
         // T1-b CallBuiltin 助手（builtin 指针 + av 数组 + n + ret_dst + caller +
-        // (lo,hi) 写出指针 + terminate 旗（T1-c））；分配系快路六参直返 u64
+        // (lo,hi) 写出指针 + terminate 旗（T1-c）+ 调用职责）；分配系快路六参直返 u64
         let mut sig_cb = module.make_signature();
-        for _ in 0..7 {
+        for _ in 0..8 {
             sig_cb.params.push(AbiParam::new(types::I64));
         }
         let call_builtin = module
@@ -303,6 +317,12 @@ impl<'a> Compiler<'a> {
         sig_ur.params.push(AbiParam::new(types::I64));
         let unwind_resume = module
             .declare_function("_Unwind_Resume", Linkage::Import, &sig_ur)
+            .unwrap();
+        let mut sig_efi = module.make_signature();
+        sig_efi.params.push(AbiParam::new(types::I64));
+        sig_efi.returns.push(AbiParam::new(types::I64));
+        let exception_is_engine_fault = module
+            .declare_function("mirvm_exception_is_engine_fault", Linkage::Import, &sig_efi)
             .unwrap();
         // T1-d：Trap 助手（reason 指针/长度 + func（u64::MAX = stmt 形））
         let mut sig_tr = module.make_signature();
@@ -336,12 +356,20 @@ impl<'a> Compiler<'a> {
         let stack_guard = module
             .declare_function("mirvm_jit_stack_guard", Linkage::Import, &sig_sg)
             .unwrap();
+        let poll_signals = module
+            .declare_function(
+                "mirvm_poll_signals",
+                Linkage::Import,
+                &module.make_signature(),
+            )
+            .unwrap();
 
         Compiler {
             shared,
             module,
             fbc: FunctionBuilderContext::new(),
             c2i,
+            call_main_catch,
             unreachable,
             memmove,
             memset,
@@ -357,10 +385,12 @@ impl<'a> Compiler<'a> {
             terminate_abort,
             call_terminate,
             unwind_resume,
+            exception_is_engine_fault,
             trap,
             simd_stmt,
             simd_rv,
             stack_guard,
+            poll_signals,
             pending_unwind: Vec::new(),
             pending_guest_code: Vec::new(),
         }
@@ -634,6 +664,7 @@ impl<'a> Compiler<'a> {
                 frame_ss,
                 unreachable: self.unreachable,
                 c2i: self.c2i,
+                call_main_catch: self.call_main_catch,
                 memmove: self.memmove,
                 memset: self.memset,
                 memcmp: self.memcmp,
@@ -648,9 +679,11 @@ impl<'a> Compiler<'a> {
                 terminate_abort: self.terminate_abort,
                 call_terminate: self.call_terminate,
                 unwind_resume: self.unwind_resume,
+                exception_is_engine_fault: self.exception_is_engine_fault,
                 trap: self.trap,
                 simd_stmt: self.simd_stmt,
                 simd_rv: self.simd_rv,
+                poll_signals: self.poll_signals,
                 exception_var: None,
                 has_try_call: false,
                 frame_base_var: None,

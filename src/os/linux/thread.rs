@@ -1,45 +1,57 @@
-//! os::thread — Linux pthread 原语：TLS key 族、栈界探测、attr 栈尺寸、
-//! `/proc/self/task` 线程计数。
+//! Linux pthread primitives.
+//! - TLS key family
+//! - stack boundary detection
+//! - `attr` stack size
+//! - `/proc/self/task` thread count
 //!
-//! 归并：ctx.rs（Ctx TLS key 族 + 栈安全下界的 getattr 部分）、ffi.rs
-//! amplify_pthread_stack 的 attr 读写、glibc 未设-stacksize 假地址知识。
-//! 原语不裁决：Ctx attach/dtor 语义、fork 基线判定、栈放大的 AMPLIFY/FLOOR
-//! 策略、安全边距规则全部留引擎；本层只给诚实的 pthread 读写。
-//!
-//! 类型纪律：attr 指针以 c_void 出入（libc pthread 类型不外泄签名）。
+//! Primitives are not adjudicated. Detailed behaviours like `ctx` attach,
+//! dtor semantics, fork baseline determination, stack amplification policies,
+//! safety rules, are all left to the engine. The module only do honest pthread
+//! read/write.
+//! Type discipline: `attr` pointers are entered and exited as `c_void` (libc
+//!  pthread type signatures are not leaked).
 
 use std::ffi::c_void;
 
-/// pthread TLS key（创建后进程内唯一；dtor 形态由调用方定）。
+/// pthread TLS key.
+/// Unique within the process after creation (`dtor` determined by the caller).
 #[derive(Clone, Copy)]
 pub struct TlsKey(libc::pthread_key_t);
 
-/// pthread_key_create；失败 panic（现存语义：引擎没有无钥匙的降级路径）。
+impl TlsKey {
+    pub fn as_raw(self) -> libc::pthread_key_t {
+        self.0
+    }
+}
+
+/// Thin wrapper of `pthread_key_create`.
+/// Panic on failure. The engine does not have a keyless downgrade path.
 pub fn tls_key_create(dtor: Option<unsafe extern "C" fn(*mut c_void)>) -> TlsKey {
     let mut k: libc::pthread_key_t = 0;
     let rc = unsafe { libc::pthread_key_create(&mut k, dtor) };
-    assert_eq!(rc, 0, "pthread_key_create 失败: {rc}");
+    assert_eq!(rc, 0, "pthread_key_create failed: {rc}");
     TlsKey(k)
 }
 
-/// pthread_getspecific。
+/// Thin wrapper of `pthread_getspecific`.
 ///
 /// # Safety
-/// 与原生语义一致；调用方保证读出指针的回收纪律。
+/// Consistent with libc semantics.
 pub unsafe fn tls_get(key: TlsKey) -> *mut c_void {
     unsafe { libc::pthread_getspecific(key.0) }
 }
 
-/// pthread_setspecific。
+/// Thin wrapper of `pthread_setspecific`
 ///
 /// # Safety
-/// 与原生语义一致。
+/// Consistent with libc semantics.
 pub unsafe fn tls_set(key: TlsKey, p: *mut c_void) {
     unsafe { libc::pthread_setspecific(key.0, p) };
 }
 
-/// 本线程栈 [lo, lo+size)（pthread_getattr_np + getstack + destroy）。
-/// 主线程 getattr 内部读 /proc——非热路径原语；失败 None（调用方保守处理）。
+/// This thread's stack [lo, lo+size) (pthread_getattr_np + getstack + destroy).
+/// The main thread's `getattr` function internally reads `/proc` (non-hot path
+///  primitive). `None` on failure (conservative handled by the caller).
 pub fn current_stack_bounds() -> Option<(usize, usize)> {
     unsafe {
         let mut attr: libc::pthread_attr_t = std::mem::zeroed();
@@ -74,14 +86,17 @@ pub fn stack_addr_is_unset(lo: usize) -> bool {
     lo == 0 || lo >= 1 << 48
 }
 
-/// pthread_attr_setstacksize；成功 true。
+/// Thin wrapper of `pthread_attr_setstacksize`.
+/// Returns `true` on success.
 pub fn attr_set_stack_size(attr: *mut c_void, size: usize) -> bool {
     unsafe { libc::pthread_attr_setstacksize(attr as *mut libc::pthread_attr_t, size) == 0 }
 }
 
-/// OS 线程数（`/proc/self/task` 目录项计数；fork 守卫基线的唯一可靠来源——
-/// pthread_create 返回后新线程即存在，应用层计数器有 TOCTOU 窗口）。
-/// 读取失败 0（调用方保守处理）。
+/// Get OS thread count.
+/// `/proc/self/task` directory entry count. The only reliable source of fork
+/// guard baseline—new threads exist immediately after pthread_create returns.
+/// Application-level counters have a TOCTOU window.
+/// Returns 0 on failure.
 pub fn os_thread_count() -> usize {
     std::fs::read_dir("/proc/self/task")
         .map(|d| d.count())

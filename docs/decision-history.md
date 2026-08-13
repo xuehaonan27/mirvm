@@ -50,8 +50,9 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
 1. Spike 2 为验证再入和 i2c/c2i，使用显式 `*mut Ctx` 参数（旧称 P）。这是合适的实验骨架，
    但 plain-C 函数指针逃逸时会产生签名错位。
 2. [designs/vmctx-passing.md](designs/vmctx-passing.md) 比较 P、thread-local（T）和固定寄存器（R），得出
-   native→guest 回调必须按**当前线程**查 ctx；跨线程回调与 signal 使捕获创建线程 ctx 的 thunk
-   原理上不正确。因此边界 TLS + lazy attach 被确定。
+   普通 native→guest 回调必须按**当前线程**查 ctx；跨线程回调使捕获创建线程 ctx 的 thunk
+   原理上不正确。因此边界 TLS + lazy attach 被确定。当时也把 signal 纳入这条入口；§7.54
+   后来证明信号帧根本不应 attach ctx，而应只登记、再由 owner Engine 安全点建立新 activation。
 3. Spike 5 的窄 fib 微基准中 R 比 P 快约 8%，证明 R 可行，但没有覆盖真实寄存器压力，不能据此
    终裁生产约定。
 4. 2026-07-11 的 [m5-design.md](designs/m5-design.md) D5 不再做 P/R 二选一：生产 M5 先采用
@@ -80,7 +81,7 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
 | inline asm | 曾写成“Cranelift 能降低 inline asm” | Cranelift 本身不处理 asm；M5.0 采用 cg_clif 风格 GAS wrapper + 外部汇编器 + dlopen |
 | guest TLS dtor | M4.4 计划不运行 dtor | 实现中加入 pthread key 与最多三轮延迟析构；实例块回收仍是生命周期债务 |
 | `spread_arg` | 初判可忽略 | Rust-call ABI 真实需要 tuple 字段展平，M4.4 已实现 |
-| signal | “有 thunk 即可直通”曾被当成接近完成 | thunk 不是异步信号安全 trampoline；静默 StubZero 已移除，guest handler 当前明确 Trap，SIG_DFL/SIG_IGN 才受限直通；真实注册/投递仍未实现 |
+| signal | “有 thunk 即可直通”曾被当成接近完成 | §7.54-§7.55 已落地固定 22 字节原子登记桩、进程定向 owner inbox（待处理信号箱）、`SI_TKILL` 目标 pthread cell（线程槽）与普通安全点派送；oldact/非 LIFO close/线程退出收口/在途 frame、受控 `raise` 和自产 archive 三符号桥已闭合。同步故障、realtime、高级 flags 与进程定向外部信号的安全点延迟仍是 R1/R21 的明确边界 |
 | guest backtrace / unwinder context | 移除 StubZero 后曾以“可 dlsym + 可回调 guest thunk”为由让 `_Unwind_Backtrace` 等走通用 host FFI | thunk 只解决调用方向，宿主 unwinder context 仍只含 libffi/解释器帧。当前 Raise/Delete 有 guest 专用语义，Backtrace/GetIP/GetIPInfo/FindEnclosingFunction/GetCFA 由影子帧实现；其余 11 个 context/state/Resume/ForcedUnwind 符号明确 `Unsupported`，只在有相应 guest frame/IP/LSDA 翻译与差分探针时重开 |
 | volatile 宿主载体 | 第一版按 layout size 把 1/2/4/8/16-byte 值转成整数或对齐 8 的 `Volatile16` | `[u8;16]` alignment=1 反例触发宿主对齐 UB，含 padding 聚合值还会把未初始化字节解释为整数。现用 alignment=1 `MaybeUninit<[u8; N]>` 作 opaque 整值 volatile 事件，只作位型搬运；若未来扩展其他宽度，仍不得拆成多次 MMIO 访问 |
 | M5.0 范围 | 预期 div/cpuid/syscall 后多个 corpus 直接变绿 | 修完 asm 后暴露 `llvm.x86.*` 和静态归档下一层；实际结果以 m5-log 为准 |
@@ -292,8 +293,9 @@ B 仍在以下条件下值得重评：产品明确需要栈式协程/可保存 c
   本 nightly 宿主 `f16`/`f128` 全套可用，引擎加 `#![feature(f16,f128)]` 直接用——rustc 把
   引擎自身的 f16/f128 运算下降到与 native guest **同一批** compiler-builtins/libm 符号，
   同源即位同，少一层手写 FFI（且 libffi longdouble 在 x86-64 是 80 位，接不了 binary128）。
-- **D8d/D8e 机制沿用而非新造**：signal 的 AS-trampoline 直接复用 M4.4 thunk 工厂（handler
-  = `extern "C" fn(c_int)` 与逃逸 guest fn 同构）；backtrace 影子帧的 IP 是合成 token
+- **D8d/D8e 机制沿用而非新造**：signal 当时的 AS-trampoline 直接复用 M4.4 thunk 工厂
+  （handler = `extern "C" fn(c_int)` 与逃逸 guest fn 同构）；这段信号帧直执行机制已被
+  §7.54 推翻，现只作历史。backtrace 影子帧的 IP 是合成 token
   （非真 fn 条目地址），dladdr 诚实 miss → oracle 用不变式而非 native 逐字节。
 - **D8f fork 守卫的 TOCTOU 教训**：初版用 Ctx 计数判 guest 线程数，实测**漏放**多线程
   fork——pthread_create 返回后新线程即存在，但其 Ctx 要 trampoline attach 才建，有窗口。
@@ -2108,6 +2110,280 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   回归变红；或实测证明 host/guest panic 共轨产生无法用局部 guard/pad 修复的错误。
   详细合同和修复前矩阵见 `designs/c-unwind-contract.md`。
 
+### 7.51 2026-08-12：真实嵌入入口推翻 E13 降级，采用自有异常类与原始分类
+
+- **为什么立即重开**：维护者指出“稳定嵌入 API 尚未发布”不等于没有真实嵌入需求。
+  当前 crate 本来就是 library，P1 可执行入口和 libffi callback 已经能让 native 代码回调
+  Engine，也能让一个 Engine 的入口穿过另一个 Engine。能立即构造的生产路径不应被
+  延期成未来触发器，因此 §7.50 的 E13 降级结论只保留为历史，不再代表现行设计。
+- **三个真实 RED**：① Engine A 的 C-unwind thunk 在 Engine B 内调用时，B 的 guest
+  `catch_unwind` 会把 A 的 guest panic 当成自己的异常并运行 B 的 catch 函数；
+  ② A 的 `EngineFault` 穿过 B 时会被 B 顶层错误消费，A 的 fault 状态留在在途状态；
+  ③ Engine 顶层使用标准 Rust `catch_unwind` 时，C++ typed exception 到达这里会以
+  `Rust cannot catch foreign exceptions` 终止，外层 C++ 无法按原类型和值接回。
+  同一轮还确认旧 `run_main` 会把正常返回 101 和未捕获 guest panic 都表示成同一个
+  `Ok(101)`，library 调用者无法分辨程序结果。
+- **新选择：自有异常类，不自研 personality**：MIRVM 用独立 exception class 包住
+  guest 标准库给出的原始异常指针，或包住 `EngineFault`。捕获边界直接取得系统展开器的
+  原始对象并分类；分类时核对 class、对齐、ABI cookie、当前进程 canary，再用
+  `Arc::ptr_eq` 核对对象内保存的 `Arc<Shared>` 所属 Engine。MIRVM 没有另写决定每帧如何
+  展开的 personality；解释帧继续借宿主展开，JIT 帧继续使用已有 Rust personality 和
+  LSDA cleanup。这只增加可靠身份和所有权判断，没有接管两阶段栈展开算法。
+- **guest payload 仍归 guest std**：自有异常只是外壳，不读取 std 的私有
+  Exception/Box/vtable 布局。guest catch 消费本 Engine 外壳后，把内层原始指针交给
+  guest catch 函数；未捕获时，Engine 调用固定工具链的 guest
+  `std::panicking::catch_unwind::cleanup` 降低 panic 计数，再由同一 guest 类型的 drop
+  glue 析构 payload 并走 guest allocator。payload Drop 再 panic 时按 double-panic 终止，
+  不能伪装成普通 `RunError`。
+- **EngineFault 单独传播**：每个宿主线程只允许一个在途 `EngineFault`，异常携带所属
+  Engine 和发起 Ctx。它穿过另一个 Engine 的 guest catch、顶层和 `Terminate` 守卫时
+  继续展开；解释器 FrameGuard 与 JIT cleanup pad 都查询线程级标记并跳过 guest cleanup。
+  只有所属 Engine 的执行边界可以消费它、清除标记并生成
+  `RunErrorKind::EngineFault`。同一线程出现第二个在途 fault，或错误所有者试图消费，都会
+  响亮终止。
+- **Engine 顶层合同**：`run_main`/`run_export` 现在返回
+  `Result<RunOutcome<T>, RunError>`。`RunOutcome::Returned(value)` 与
+  `RunOutcome::GuestPanic` 分立；缺入口/导出和 `EngineFault` 由 `RunErrorKind` 分类。
+  CLI 才把 guest panic 映射为 101，正常返回 101 在 library API 中保持正常返回。未识别
+  的宿主 Rust panic 原样续传；C++ foreign exception 也不转换，沿 C-unwind 原样穿出
+  整个 Engine，由外层 C++ typed catch 接回。相反，C++ exception 到达 guest
+  `catch_unwind` 时仍严格按固定 rustc 终止，guest catch 函数不得运行。
+- **验收**：解释器和强制同步 JIT 的多 Engine 定向测试锁住 guest panic 所属、
+  `EngineFault` 跨 Engine 时不运行 guest cleanup/不被异主消费、owner 清理状态后可继续
+  调用，以及宿主 Rust panic 原 payload 续传。`runtime.c-unwind` 扩为 **13/13**，新增
+  “C++ typed exception 穿出整个 Engine”和“foreign exception 到达 guest catch 必须
+  终止”；`runtime.semantics unwind` **11/11**，新增两种执行模式下未捕获 payload 的
+  guest 侧计数复位、恰一次 Drop、Drop 内再次 guest 调用与第二次 panic。
+- **仍开放的边界**：本条闭合执行期间的异常身份、归属、资源回收和结果分类，不关闭
+  E22。与执行并发发生的 Engine drop、native 已保存 libffi callback 的撤销、JIT/MC
+  活动码卸载、长寿命宿主线程 TSD 和稳定公开生命周期协议仍需独立解决。
+
+### 7.52 2026-08-12：逐异常对象决定 cleanup；真实 lang_start main 结果闭合
+
+- **保留并推翻 §7.51 的错误机制**：§7.51 把“线程上存在在途 `EngineFault`”写成解释器
+  FrameGuard 与 JIT cleanup pad 的共同跳过条件，并禁止同线程第二个 fault。严格审查指出，
+  native catch 可以暂停外层 `EngineFault` 而不消费它，随后在同一宿主线程重入 Engine。
+  此时新发生的 guest panic 是另一只异常，必须正常运行 guest cleanup；重入代码也可以
+  产生并先结清一只内层 `EngineFault`。线程布尔无法回答 landing pad 当前收到的是哪只
+  异常，因此 §7.51 该段只保留为错误结论的历史证据，不再代表现行实现。
+- **FrameGuard 回滚与正确分类点**：解释器不再让 `FrameGuard::drop` 查询线程状态并执行
+  cleanup。每个 `interp_frame` 在 `run_blocks` 外设置 raw catch，直接分类本次捕获的异常
+  对象；只有当前对象不是 `EngineFault` 时才进入 MIR cleanup，随后原样续传。FrameGuard
+  退回单一职责：恢复操作数区、影子帧与深度。JIT landing pad 同样把展开器交来的实际
+  exception pointer 传给只读 classifier，只为这只对象决定进入 cleanup 还是立即 resume。
+- **TLS 只做 owner 清账**：线程上下文保存带单调 nonce 的 `EngineFaultToken` LIFO 栈。
+  token 同时记录 owner id 与发起 Ctx；消费时必须由当前 owner 匹配栈顶 token。它不参与
+  cleanup 分类。native catch 暂停外层 fault 后，重入 guest panic 会照常 cleanup；重入的
+  内层 fault 可 push/finish/pop，外层 token 仍存活，最后再由外层 owner 结清。
+- **新增回归证据**：解释器和强制同步 JIT 都覆盖两条原先会失败的重入路径：暂停外层
+  fault 后，独立 guest panic 的 cleanup 必须执行一次；暂停外层 fault 后，内层
+  `EngineFault` 必须独立返回 `RunErrorKind::EngineFault`，结清后外层 fault 仍可由原 owner
+  消费。原有跨 Engine fault 测试继续要求异主 catch/顶层不能消费，且当前 fault 自身不跑
+  guest cleanup。
+- **真实 main 暴露第二个 101 缺口**：§7.51 只让 Engine 顶层区分“越出顶层的 guest
+  panic”和正常返回值；真实 `std::rt::lang_start_internal` 会先在 guest 内部捕获 main
+  panic，再以 `Termination` 路径返回 101，所以顶层看到的仍是正常整数。以数值或符号名
+  猜测都不可靠。
+- **精确框定固定 std 的 main catch**：lowering 从 lang item `start` 的真实 MIR 调用图
+  出发，验证唯一 `lang_start_internal`、外层 `std::panic::catch_unwind` 闭包和其中唯一的
+  main catch；不依赖 DefId 数值或人工函数名单。该直接调用冻结为
+  `CallRole::MainPanicBoundary`。固定 std 调用图改形时 lowering 响亮失败，不把升级风险
+  转嫁给嵌入者。
+- **每次 run_main 独立记账**：每个 Ctx 为嵌套 `run_main` 保存 LIFO 状态。进入标记调用
+  后，只允许紧随的第一层 guest `catch_unwind` intrinsic 认领该边界；它捕获本 Engine 的
+  guest panic 时标记本次运行。`lang_start` 正常返回后，`run_main` 据此返回
+  `RunOutcome::GuestPanic` 或 `RunOutcome::Returned(101)`。用户 main 内自己的嵌套 catch
+  不会误认领，嵌套 run 也不会串状态。
+- **解释/JIT/包合同**：解释器在 `CallRole` 处建立作用域；JIT 对该调用使用专门 helper，
+  被调函数内部仍可正常发布机器码。role 随 IR/postcard、image rebase 与 `.mirvm` 函数体
+  保存；验证器要求完整可执行模块恰有一个 `MainPanicBoundary` 且 unwind 为 `Continue`，
+  mmap pack 装载的逐函数验证也汇总同一计数。部分 image 可把边界留在前层，但合并后的
+  最终可执行模块必须重新满足唯一性。
+- **验收**：`runtime.semantics unwind` 在原九个语义用例和两种执行模式的未捕获 payload
+  清理之外，又用真实 lowering + `lang_start_internal` 在解释器/强制同步 JIT 各对拍一次
+  main panic 与正常 `Termination` 101，现为 **13/13**；JIT 腿还要求启动闭包真实发布。
+- **E22 当时口径（已由 §7.53 推翻）**：本条曾把 `Engine::shared` 和
+  `run_export` 一并写成 safe Rust 公开入口，并把并发 close、callback 生命期和活动码
+  回收一并留给未来的稳定 API。这个公开面描述不准：现行 `Shared` 不公开，无类型
+  `run_export_raw` 是 `unsafe`；并发关闭与每 Engine 资源隔离已在 §7.53 立即实现。
+
+### 7.53 2026-08-13：真实嵌入立即施工；Package v4 与 Engine 关闭协议
+
+- **为什么不是未来项**：§7.51/§7.52 已证明当前 library、P1 函数指针和 native callback
+  能立即形成真实嵌入调用。维护者进一步指出，可重复创建同一程序实例也不需要等待外部用户
+  报名：现有 `.mirvm` 包和几行宿主代码就能制造需求。旧 E22 把并发 close、回调生命周期和
+  多实例资源隔离推迟到“稳定 API 立项”以后，是把当前机制问题改名成未来产品问题，现废止。
+- **公开面先说准**：新增 `Package::load(path)` 安全地复制并完整校验包，返回不再依赖源
+  inode 的不可变对象。它不是“安全执行任意包”的证明：容器/字节码验证无法证明内嵌 native
+  库、宿主符号与 FFI ABI 声明相符，所以 `Package::instantiate` 必须是 `unsafe`。同理，
+  `Engine::from_module_unchecked` 与无类型的 `vm::engine::raw::run_export_raw` 保持 `unsafe`；
+  后者只返回两个机器字。`Shared` 与 engine 内部模块不再公开。已有 Engine 上的 `run_main`、
+  状态和 close/wait 操作是 safe，但这不能冒充完整的 safe typed export API。
+- **Package v4 是映像，不是实例**：v3 的 Module 仍混有固定运行地址，一份包只能占用一套
+  frozen/P1 地址。v4 把 artifact 身份改为 `LinkAddr`（逻辑链接地址），另存 P1
+  `EntryStubSite` 配方与 `FrozenReloc`（冻结指针重定位）。`Package::load` 持有 owned byte
+  snapshot；每次 instantiate 独立映射 frozen/TLS、恢复函数表、装载 MC/native 映像，先建
+  `LoadMap` 的 `LinkAddr -> 本实例真实地址`，再统一修补 Static、AddrImm、entry、GOT 和
+  frozen 内指针。同一 `Package` 可以并发重复实例化；load 后改写或删除源包不影响对象。
+- **P1 改成每 Engine 运行身份**：P1 的白话含义是“交给原生代码调用的 guest 函数入口”。
+  每个 Engine 由配方生成独有 libffi closure；global_asm 与 C2 archive 不再烤固定入口，
+  而是经 RIP 相对隐藏槽跳到本 Engine closure。自产 archive 每实例使用唯一文件身份，避免
+  动态加载器合并 mutable global。旧 P1 closure 与 owner 墓碑不回收、不复用地址，所以关闭
+  A 后的陈旧指针不会因地址复用误调后来创建的 B，这闭合了 ABA（旧地址先失效、又碰巧代表
+  新对象）问题。
+- **关闭状态机和执行租约**：Engine handle 可 clone；显式 `close` 或最后一个 handle drop
+  把 `Running` 原子改为 `Closing`。`ExecutionLease`（执行租约）是每个公开调用、native
+  回调、构造/析构执行仍在使用 Engine 的计数凭据。Closing 拒绝新的普通入口，但允许当前
+  native 调用链重入和已经登记的回调完成。计数归零后才进入内部 `Finalizing`，释放重资源并
+  发布 `Closed`。空闲 Engine 同步 finalise；活动 Engine 由收尾线程等待。`wait_closed` 在
+  当前线程仍位于该 Engine 调用链时返回 `ActiveOnCurrentThread`，避免等待自己释放租约；
+  外层退出后可正常等待。
+- **延迟回调不能只看“现在有没有线程在跑”**：native `pthread_create` 可能已经收下 guest
+  start 地址、但新线程尚未进入；pthread 线程私有数据（TSD）析构器也可能等到线程退出才调。
+  新 `DeferredHold`（延迟持有）复用生命周期计数，覆盖“已登记，尚未执行或撤销”的空窗。
+  direct foreign 与自产 native archive 的 pthread_create/key_create/setspecific/key_delete
+  都进入同一登记表；guest closure 和纯 native 间接 start/dtor 都覆盖。close 同步按 POSIX
+  四轮上限清理当前线程 TSD，远端线程有值则保持 Closing 直到线程退出或 key 删除；删除后
+  已取出的旧 void destructor 只走稳定 no-op 墓碑。构造/析构期间新建的这类工作也必须再
+  清账一次，不能在第一轮归零后漏过。
+- **暂停异常也属于延迟生命期**：MIRVM 异常可能被 native catch 暂停，活动 Engine 调用栈
+  此时已经退去，但异常以后仍可重抛给原 owner。异常对象持有 `DeferredHold`，直到被消费、
+  删除或继续抛出，防止 close 在空窗中释放其 `Shared`。每帧 cleanup 仍按 §7.52 的实际异常
+  指针分类；生命周期持有不重新引入线程布尔判据。
+- **长寿命宿主线程不再钉住 Engine**：每线程 `Ctx` 改由 `CtxSlot`（上下文槽）间接持有，
+  Shared 只登记弱引用。Finalizing 已证明全部租约和延迟持有退出，此时可从收尾线程清空所有
+  槽内 Ctx，归还 guest TLS、mimalloc 对象、1 GiB 虚拟 ByteRegion 和 `Arc<Shared>`。长期
+  不退出的宿主 worker 只留一个空槽；首次再次 attach 会重建 Ctx，弱槽表也会顺手剪掉已退出
+  线程的条目。
+- **native 生命周期显式分阶段**：自产 `.so`/MC 先映射和重定位，保持可写以填 P1、GOT、
+  pthread bridge，再封最终页权限；任何 constructor 之前所有入口已可用。生命周期是
+  `Unstarted -> Starting -> Completed -> Finalized`，只对 Completed 映像在 close 时按逆序
+  执行一次 fini，部分 constructor 失败不伪装成完整实例并运行 fini。ctor 收到真实
+  `argc/argv/envp`，可回调 guest；它的 guest panic、`EngineFault`、`EngineClosed` 或可删除的
+  foreign exception 在启动边界分类成 `Result` 失败，再走关闭协议。宿主 Rust panic 和
+  不能安全删除的 foreign exception 保持原对象续传，但也必须先完成关闭。fini 则是
+  **不可展开的拆除边界**：它一旦开始，无论 guest panic、`EngineFault`、`EngineClosed`、
+  foreign exception 还是宿主 Rust panic 逃出，都固定诊断
+  `native finalizer unwound during Engine teardown` 后 `abort`；不沿用 guest
+  `Terminate` 边界中对 `EngineFault` 的续传规则，也不允许异常逃出后把 Engine 永久留在
+  `Closing`。进入 constructor 之前的失败由 RAII 回收 closure、MC frame/mapping 和
+  动态库句柄；一旦 constructor 可运行，地址可能已经逃逸，后续失败也走关闭墓碑
+  而非冒险卸载。
+- **什么按 Engine 回收，什么保留到进程结束**：close 会 join JIT worker，释放 Shared、
+  Module/frozen、Ctx/guest TLS、未发布的 closure 与映像，并刷新 heat 顺序。已发布的普通/P1
+  libffi closure、JIT 机器码及系统 unwinder 使用的 `.eh_frame`、committed MC 映像和自产
+  动态库映像保留到进程结束。理由不是“暂时没写 drop”，而是任意 native 代码可以复制裸
+  函数地址、休眠在已发布栈帧里，通用 FFI 没有枚举并撤销所有副本的协议。关闭后的 callback
+  只持小型 `EngineControl` 墓碑，不再持有 Module；C-unwind 入口稳定报告 `EngineClosed`，
+  普通 C 入口按不得展开的 ABI 终止。
+- **不让未知期限反过来卡死 close**：只有 pthread/TSD 这类具备可观察完成或撤销事件的 API
+  获得 DeferredHold。任意第三方库若无限期保存 callback，不得让 `wait_closed` 永久等待，
+  而走进程期 closure + 关闭墓碑。真实 workload 撞到另一种有明确完成事件的注册 API 时，
+  为该 API 补最小登记/撤销合同；若产品要求任意 native 库资源严格有界，只能采用子进程隔离
+  一次性回收，不能要求使用者人工报名回调，也不能假装通用裸指针可安全卸载。
+- **验证合同**：标准 pack 合同覆盖 load 后改写/删除源包、同一 Package 并发建多 Engine、
+  static/TLS 与 P1 地址隔离、global_asm/C2 owner、每实例 ctor/fini、关闭旧指针和新实例不
+  复用地址。Engine 单测覆盖 close/execute/reentry 竞态、same-thread wait、pthread start、
+  TSD 四轮/远端退出/delete 竞态、暂停异常持有、constructor 回调/失败和长寿命宿主线程
+  Ctx 释放。最终通过数字只记实际验收结果，不在本决策条目预填。
+- **仍开放的边界**：E22 现在只保留 safe typed export 与进程期裸地址两件真边界；E23
+  checked 指针来源、D10 进程隔离/资源治理、跨平台与格式冻结各自不变。本节不声称容器验证
+  能证明 native ABI，也不声称 Engine close 可从任意第三方库手中收回裸函数指针。
+
+### 7.54 2026-08-13：signal 改为原子登记与安全点派送；多 Engine 关闭闭合
+
+- **推翻 M5.2 信号帧直执行**：M5.2 的 AS-trampoline 会在内核任意打断点进入 libffi、TLS
+  attach 和 guest 解释/JIT。函数签名相同不等于异步信号安全：这些路径会取锁、分配、读取
+  可被中断的 Engine 状态，也可能展开；被打断线程当前激活的 Engine 还未必是该 handler 的
+  owner。Package v4 又使同一进程存在多 Engine 和非 LIFO close，旧实现没有进程级
+  disposition 所有权、`oldact` 反译或在途 frame 关闭协议。因此 §6.1/M5.2 的“直接复用
+  callback thunk”只保留为历史证据，不再代表现行机制。
+- **内核帧只登记，不执行 guest**：每次 guest handler 安装都创建不可移动、进程期存活的
+  `SignalRegistration` 和独有的固定 22 字节 RX 桩。桩只把 registration 地址装入寄存器并
+  尾跳固定 adapter；adapter 校验 signal 后只读进程期内存并做原子操作，把实际事件计数写进
+  owner `EngineControl` 的 inbox。它不查 TLS、不拿 mutex、不分配、不调用 libffi/guest，
+  也不发起 unwind。允许新 frame 的 active 位与在途 frame 计数合在同一个原子字中，close
+  清 active 位后不会发生“已观察为零、随后又进来一帧”的竞态。
+- **普通安全点恢复完整执行语义**：解释器块入口/返回与 JIT helper 等普通执行位置排空当前
+  Engine inbox；每个 handler 取得 Closing 仍允许的已登记回调租约，并建立全新 activation，
+  再应用 handler 自身和 `sa_mask` 的传统 signal mask。新 activation 的 nonce/`run_main`
+  状态与被中断调用分开，signal handler 内的 catch 或 nested guest 调用不能冒领外层真实 main
+  catcher。handler 若展开则在 signal 的普通 C 边界终止，不会穿回内核 signal frame。若 A
+  不活动而 B 正运行，A 的进程信号只进 A inbox，B 不执行它；A 下次进入安全点才派送。
+- **`raise` 保持同步嵌套**：guest `HostRaise` 先在普通 VM 状态重新核对当前内核 disposition，
+  对仍属 guest 的 top registration 直接取得在途计数并同步派送；不同 signal 的嵌套 handler
+  在内层 `raise` 返回前完成，同 signal 因默认 mask 暂存，外层 handler 返回后、原 `raise`
+  返回前继续派送。SIG_DFL/SIG_IGN 或真实 native handler 仍交给 libc。自产 native archive
+  链接时只 interpose `signal`/`sigaction`/`raise` 三个符号，经隐藏 owner 槽进入同一路径；
+  这不声称能看见任意第三方动态库内部的同名调用。
+- **guest 视图与 kernel 视图分开**：进程 registry 为每个 signal 保存安装前原生基线及按安装
+  次序排列的 Engine 节点；节点同时保存 guest-visible action 与实际 kernel stub action。
+  `signal` 返回值、`sigaction` 查询和 `oldact` 因而返回 guest 原 handler/flags/mask，不泄漏
+  stub。安装、同步 `raise` 和关闭都在 registry 锁内重读 kernel action；若宿主或第三方绕过
+  MIRVM 改了 disposition，旧链失去所有权，后续 close 不会覆盖这次外部更改。
+- **非 LIFO close 与在途 frame 有确定顺序**：关闭 Engine 会先停用它的全部 registration，
+  从每条 disposition 链移除该 owner；只有被移除节点仍是当前 kernel top 时，才恢复存活的
+  上一层或原生基线。随后等待所有已经通过 active 门的 frame/同步调用退出，再在 Closing 的
+  普通 activation 排空已登记事件。handler 在 drain 中重新注册也会进入下一轮“停用、等待、
+  drain”，直到该 Engine 不再拥有节点或 pending，才清 inbox 并进入 Finalizing。这使 A/B
+  以任意顺序关闭都不会串 owner、丢掉已经登记的事件或提前释放 Shared。
+- **验收与边界**：解释器和强制同步 JIT 的嵌入回归覆盖 guest 地址 `oldact`/query、A/B
+  非 LIFO close 恢复原生 action、A 不活动/B 活动时只给 A 排队，以及 close/JIT 锁持有期间
+  frame 只登记、解锁后的安全点才允许 handler 嵌套 guest。native 差分 probe 锁定同步嵌套
+  顺序和 SIG_IGN，archive 单测锁定三符号 owner 桥；最终数字只记实际整体验收，不在此预填。
+  同步故障 signal guest handler 仍按 R1 拒绝；realtime、高级 `sigaction` flags、跨线程定向
+  投递与安全点延迟边界精确登记在 R21。更低延迟只能增加普通执行安全点，不能退回信号帧跑
+  guest。
+
+### 7.55 2026-08-13：线程定向 signal 进入目标 pthread；关闭与线程退出共同收口
+
+- **推翻的旧边界**：§7.54 曾拒绝 `pthread_kill` 等线程定向信号，理由是不能在内核 signal
+  frame 内进入任意时刻的 guest，又不能把“发给目标线程”改成 owner Engine 随便找一条线程
+  执行。真实嵌入立即需要 `raise`、阻塞等待、跨线程 `pthread_kill` 和并发 close 共同成立，
+  因此继续拒绝不是可接受的产品边界。解决办法仍然是不在 signal frame 跑 guest，但登记位置
+  必须从“只有 owner inbox”扩成“进程事件归 owner、线程事件归目标 pthread”。
+- **保留内核可观察语义**：受控 `HostRaise`（MIRVM 承接的 `raise`）调用真实 libc `raise`，
+  不再伪造自定义排队标记。
+  Linux 由此给出 `SI_TKILL`，也就是“发给当前/指定 pthread”的 `siginfo` 来源码。信号被阻塞
+  时继续留在内核待决集合，`sigwaitinfo`/`rt_sigtimedwait` 可以消费并看到真实来源；不能
+  为了方便识别而改成可被 guest 观察到的 `SI_QUEUE`。未阻塞时，受控 `HostRaise` 在普通执行
+  状态排空本线程事件，handler 完成后才返回，包括 handler 内再次 `raise` 的嵌套顺序。
+- **目标线程有自己的稳定槽**：每条已接入的 pthread 都有一个进程期 inbox；每次成功安装
+  handler 都是一个 registration generation（一次注册代际）。系统在普通状态预先为
+  `(pthread, 注册代际)` 链入固定 cell（槽），再允许内核看见登记桩或发布线程 inbox。内核从
+  桩跳入的固定登记函数只读当前线程的 local-exec TLS（编译器固定偏移的线程局部存储）和这些
+  预建槽，并做原子操作；不取锁、不分配、不调用 libffi/guest。传统信号在同一槽内按 POSIX
+  语义合并，但第一次、第二次、第三次替换各有自己的槽，不会把旧 handler 的事件算到新
+  handler。进程定向事件仍进入 callback owner 的 `EngineControl` inbox；`SI_TKILL` 只进入
+  目标 pthread 对应的槽。
+- **派送线程不能替换**：原生 `pthread_kill` 返回只表示内核接受投递，handler 在目标 pthread
+  下一普通安全点运行；若目标线程正在退出，则由它自己的退出收口运行。close 会停止新登记，
+  恢复正确的内核 disposition，并等待已经通过门的 frame、owner inbox 和所有目标线程 cell；
+  执行关闭的线程或别的活跃线程不得代跑目标事件。这样既不在异步 frame 内进入 guest，
+  也不丢掉 pthread 身份。
+- **线程退出顺序**：glibc 的四轮上限是整条 pthread key 表的四次扫描，不是每个 key 各有
+  四轮。`Ctx` 在第三轮结束前登记“下一轮是全局末轮”；第四轮到达 `Ctx` key 后，以原始
+  pthread key 号为单调游标，只补跑尚未被 glibc 扫过的高号受管值一次。游标已经越过的低号
+  key 即使被 signal handler 重设，也只清值并释放生命周期持有，不能凭空制造第五轮。收口在
+  原线程 mask 下交替排空目标线程 signal cell 和仍合资格的 TSD 值；最终再由内核阻塞所有可
+  捕获的传统信号，复查两边为空，关闭 inbox 并等待在途 frame，最后放弃本轮已无资格再调用
+  的残值。退出前不恢复物理 mask，避免“刚判空又进一帧”；handler 仍看到原来的逻辑 mask。
+- **等待不能卡住事件所属线程**：`wait_closed` 若发现当前 pthread 自己仍持有目标 Engine 的
+  thread-directed cell，返回 `ActiveOnCurrentThread`，让宿主先离开等待并到下一安全点或线程
+  退出收口执行 handler。检查与睡眠之间仍可能刚好到达 signal frame，因此等待使用有界超时
+  反复检查，而不是只在阻塞前看一次；Engine 已 Closed 时始终优先返回成功。
+- **进程期地址与陈旧桩**：固定 22 字节 stub、`SignalRegistration` 和线程 cell 都可能被
+  内核或原生代码留下裸地址，因此不释放、不复用，保留到进程结束。这不是让关闭后的 owner
+  继续可调用：若原生代码绕过受控入口，在 owner 已关闭后回装旧 stub，下一次裸内核投递只能
+  `_exit(70)`；若同一状态由受控 `HostRaise` 发现，则在普通状态报告 `EngineFault(70)`。两条
+  路都快速、明确地失败，不能重试挂住，也不能误投给后来 Engine。
+- **验收与仍拒绝的面**：真实内核回归覆盖未阻塞/阻塞 `raise`、`sigwaitinfo` 来源、跨线程
+  `pthread_kill` 的目标身份、registration 替换与同代合并、并发 close、TSD 最后一帧及陈旧
+  stub 失败；解释器和强制同步 JIT 共用同一合同。同步故障 guest handler、realtime 逐事件
+  队列、三参数 `SA_SIGINFO`、替代栈 `SA_ONSTACK`、`SA_NODEFER` 和 `SA_RESETHAND` 仍按
+  R1/R21 响亮拒绝。进程定向外部事件仍只承诺 owner Engine 下一普通安全点可见，不外推原生
+  handler 级即时延迟。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT
@@ -2116,14 +2392,18 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
 > 以 §7.21 与各专项条目为准。
 
 - ~~P7 设想独立 `src/os/` 物理层~~（**2026-07-18/19 已兑现**：`src/os/` + `src/arch/` 双 leaf 建成，E21 闭合，见 §7.16）。
-- “engine 是 library”目前只是 crate 结构；进程退出、全局 TLS key、泄漏式生命周期使其还不是稳定
-  多 Engine 嵌入 API。
-- `.mirvm` mode B 与方法级 JIT 已实现；当前包格式 v3 仍未冻结且精确绑定 build_id/target。
-  v3 已有 mmap/逐函数惰性驻留，但档案直接语义验证、fat target artifact 与 checked 模式
-  仍只是设计或余项，不是已完成能力。alloca 局部已由 §7.49 撤销为必做承诺。
-- static `.a`→`.so` 的受约束 Linux/ELF 切片已实现；非 PIC、跨 archive 依赖/顺序或重名、
-  RTLD_DEFAULT 重名、constructor、thin、export-symbols 仍是明确拒绝面。它们需要新 link plan/
-  生命周期设计，不能从 blake3 外推通用。
+- ~~“engine 是 library”目前只是 crate 结构~~（**§7.51-§7.53 已兑现真实嵌入**）：
+  Package v4、结构化 main 结果、每 Engine 地址隔离与 close/wait 生命周期均已存在。公开安全面
+  只有 package 校验和既有 Engine 操作；instantiate/raw export 的 native ABI 信任仍为
+  `unsafe`。进程期函数地址与 safe typed binding 的剩余边界精确归 E22。
+- `.mirvm` mode B 与方法级 JIT 已实现；当前包格式 v4 仍未冻结且精确绑定 build_id/target。
+  v4 保留逐函数惰性驻留和热序，但为 safe `Package::load` 使用 owned snapshot，仍须逐函数
+  临时解码完成语义验证。档案直接借用验证、fat target artifact 与 checked 模式仍只是设计
+  或余项，不是已完成能力。alloca 局部已由 §7.49 撤销为必做承诺。
+- static `.a`→`.so` 的受约束 Linux/ELF 切片已实现；每实例 `.init_array`/`.fini_array`
+  生命周期和 archive-first 符号解析已经支持。非 PIC、跨 archive 依赖/顺序或重名、thin、
+  export-symbols 与裸 `.init`/`.fini` 仍是明确拒绝面，需要新 link plan，不能从现有单 archive
+  路径外推通用。
 
 ## 9. 改变决策时的记录模板
 

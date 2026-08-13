@@ -44,6 +44,11 @@ impl Rebase {
         }
     }
 
+    pub(super) fn guest_panic_cleanup(&self, plan: &mut ir::GuestPanicCleanup) {
+        plan.cleanup = self.fn_id(plan.cleanup);
+        plan.drop_payload = self.fn_id(plan.drop_payload);
+    }
+
     /// 单函数体重映射。op 级字段只有 3 处（设计 §9 实证）：Call.callee /
     /// InlineAsm.stub / Rvalue::TlsRef。**编译期穷尽**（or-pattern 全枚举，新变体
     /// = 非穷尽编译错误——防"新增携带 id 的 op 被遗忘"的静默错值）。
@@ -117,5 +122,31 @@ impl Rebase {
                 | ir::Terminator::Trap(_) => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guest_panic_cleanup_rebases_image_and_delta_functions() {
+        let rb = Rebase {
+            first_fn: 10,
+            image_fns: 3,
+            first_tls: 0,
+            image_tls: 0,
+            first_asm: 0,
+            image_asm: 0,
+        };
+        let mut plan = ir::GuestPanicCleanup {
+            cleanup: IMAGE_TAG | 1,
+            drop_payload: 10,
+        };
+
+        rb.guest_panic_cleanup(&mut plan);
+
+        assert_eq!(plan.cleanup, 11);
+        assert_eq!(plan.drop_payload, 13);
     }
 }

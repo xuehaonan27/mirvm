@@ -181,11 +181,12 @@ handler 从静默成功改为明确不支持，并为 volatile 建立独立 IR �
 opaque `MaybeUninit` 字节载体，避免低对齐/padding 的宿主 UB。同理，在 guest frame/IP
 映射存在前，backtrace 与 unwinder context API 必须明确拒绝，不得返回宿主解释器栈。
 
-> 2026-07-18 更新：上述两条“缺口”随后均已兑现——M5.2 D8d（async signal handler 经
-> AS-trampoline 真注册真投递；同步故障信号 handler 仍响亮拒绝）、M5.2 D8e（guest 影子帧
-> backtrace）与 2026-07-13 宽 volatile 快照分块。当前残余边界（故障信号、unwinder
-> context 家族等）集中登记在 [open-issues.md](../open-issues.md) R1/R3，属于实现缺口
-> 而非 RAM 允许的偏差。
+> 2026-08-13 更新：上述两条“缺口”随后均已兑现——async signal handler 已从 M5.2 的
+> 信号帧 AS-trampoline 直执行重构为固定原子登记桩 + 普通安全点派送；进程定向事件进入
+> owner Engine inbox，`SI_TKILL` 线程定向事件进入目标 pthread 按注册代际建立的稳定槽。
+> M5.2 D8e 已实现 guest 影子帧 backtrace，宽 volatile 也已使用快照分块。当前残余边界（同步
+> 故障 signal、realtime/高级 flags、进程定向外部事件的安全点延迟、unwinder context 家族等）集中登记在
+> [open-issues.md](../open-issues.md) R1/R21/R3，属于实现缺口而非 RAM 允许的偏差。
 
 ---
 

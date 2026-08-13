@@ -175,7 +175,9 @@ pub fn lookup(
         return None;
     }
     // Module 反序列化内含冻结区固定基址恢复；失败（基址被占等）→ miss
-    let module: ir::Module = postcard::from_bytes(module_bytes).ok()?;
+    let mut module: ir::Module = postcard::from_bytes(module_bytes).ok()?;
+    module.rebuild_load_map();
+    module.rebuild_fn_addrs();
     // 形状正确不代表索引和帧范围安全。坏缓存按 miss 处理，由冷路径自愈。
     crate::vm::engine::verify::module_with_prefix(&module, prefix).ok()?;
     // 加载相物化的 .so（native archive / global_asm）被清理 → miss 走冷路径自愈

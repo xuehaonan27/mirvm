@@ -8,6 +8,7 @@
 #   digest  值与内存九函数 digest == native（期望值内嵌，来自同源 rustc -O 直跑，
 #           2026-07-08 生成——demo/m4/digest.rs 改动须同步再生）+ vm-stats M4.1 债务清零。
 #   unwind  panic/catch/重抛九件 == native（同源 rustc -O，2026-07-09 生成）
+#           + 真实 lang_start 区分 main panic 与正常 Termination 101
 #           + vm-stats M4.1/M4.2 债务清零。
 #   threads 真线程五用例差分 == native + tier-0 时代挂死双场景 + rayon 秒级
 #           + JIT 栈溢出诊断 + vm-stats 可达 trap-free
@@ -119,6 +120,87 @@ run_unwind() {
     ucheck 'msg_digest(42)' 71
     ucheck 'rethrow_digest(1)' 5503
     ucheck 'rethrow_digest(2)' 1103
+
+    # 这个导出故意让 panic 穿到 Engine 顶层。顶层清理 guest std 的 panic
+    # 计数后才析构 payload；payload 的 Drop 再跑一个普通 guest 调用，并发起、
+    # 捕获和释放第二个 panic。stdout 因而同时锁住计数复位、析构恰一次和
+    # 同一 Engine 清理后的继续执行能力。
+    local expected mode code
+    expected=$(printf '%s\n' \
+        'top-payload-drop=1 panicking=false' \
+        'normal-after-top-cleanup=42' \
+        'second-panic-caught=true panicking=false' \
+        'second-payload-drop=1 panicking=false' \
+        'payload-drop-counts=1:1 panicking=false')
+    for mode in interp jit; do
+        if [ "$mode" = interp ]; then
+            env -u RUST_BACKTRACE MIRVM_JIT=off \
+                "$MIRVM" run --engine vm --vm-call uncaught_payload_cleanup_probe "$SRC" \
+                >"$TMP/top-panic.$mode.out" 2>"$TMP/top-panic.$mode.err"
+        else
+            env -u RUST_BACKTRACE MIRVM_JIT=on MIRVM_JIT_SYNC=1 MIRVM_JIT_THRESHOLD=1 \
+                "$MIRVM" run --engine vm --vm-call uncaught_payload_cleanup_probe "$SRC" \
+                >"$TMP/top-panic.$mode.out" 2>"$TMP/top-panic.$mode.err"
+        fi
+        code=$?
+        if [ "$code" -eq 101 ] \
+            && [ "$(cat "$TMP/top-panic.$mode.out")" = "$expected" ] \
+            && rg -q 'guest panic not caught' "$TMP/top-panic.$mode.err"; then
+            echo "PASS uncaught payload cleanup ($mode)"
+            pass=$((pass + 1))
+        else
+            echo "FAIL uncaught payload cleanup ($mode): exit=$code"
+            cat "$TMP/top-panic.$mode.out"
+            tail -20 "$TMP/top-panic.$mode.err"
+            pfail=$((pfail + 1))
+        fi
+    done
+
+    # 必须经过真实 rustc lowering 和 std::rt::lang_start_internal。两条路径的 OS
+    # 退出码都是 101；Engine 的结构化结果仍须区分 main panic 与正常 Termination。
+    # 旁路 base/L2 防止手工 Module 或旧缓存给出假绿；JIT 还要求启动闭包真发布。
+    local main_src=demo/main_outcome_probe.rs panic_code normal_code
+    for mode in interp jit; do
+        if [ "$mode" = interp ]; then
+            env MIRVM_NO_BASE_IMAGE=1 MIRVM_NO_IR_CACHE=1 MIRVM_JIT=off \
+                "$MIRVM" run --engine vm "$main_src" -- panic \
+                >"$TMP/main-panic.$mode.out" 2>"$TMP/main-panic.$mode.err"
+            panic_code=$?
+            env MIRVM_NO_BASE_IMAGE=1 MIRVM_NO_IR_CACHE=1 MIRVM_JIT=off \
+                "$MIRVM" run --engine vm "$main_src" \
+                >"$TMP/main-101.$mode.out" 2>"$TMP/main-101.$mode.err"
+            normal_code=$?
+        else
+            env MIRVM_NO_BASE_IMAGE=1 MIRVM_NO_IR_CACHE=1 MIRVM_JIT=on \
+                MIRVM_JIT_SYNC=1 MIRVM_JIT_THRESHOLD=1 MIRVM_JIT_DEBUG=1 \
+                "$MIRVM" run --engine vm "$main_src" -- panic \
+                >"$TMP/main-panic.$mode.out" 2>"$TMP/main-panic.$mode.err"
+            panic_code=$?
+            env MIRVM_NO_BASE_IMAGE=1 MIRVM_NO_IR_CACHE=1 MIRVM_JIT=on \
+                MIRVM_JIT_SYNC=1 MIRVM_JIT_THRESHOLD=1 MIRVM_JIT_DEBUG=1 \
+                "$MIRVM" run --engine vm "$main_src" \
+                >"$TMP/main-101.$mode.out" 2>"$TMP/main-101.$mode.err"
+            normal_code=$?
+        fi
+        if [ "$panic_code" -eq 101 ] && [ "$normal_code" -eq 101 ] \
+            && rg -q 'main outcome probe' "$TMP/main-panic.$mode.err" \
+            && ! rg -q 'main outcome probe' "$TMP/main-101.$mode.err" \
+            && ! rg -q 'guest panic not caught' "$TMP/main-panic.$mode.err" \
+            && ! rg -q 'guest panic not caught' "$TMP/main-101.$mode.err" \
+            && ! rg -q 'release=false|failed to be compiled|panicked at .*translate\.rs' \
+                "$TMP/main-panic.$mode.err" \
+            && { [ "$mode" = interp ] \
+                || rg -q 'release=true .*\(_RNCNvNt[^ ]*_3std2rt19lang_start_internal0C' \
+                    "$TMP/main-panic.$mode.err"; }; then
+            echo "PASS real main panic != normal Termination 101 ($mode)"
+            pass=$((pass + 1))
+        else
+            echo "FAIL real main outcome classification ($mode): panic=$panic_code normal=$normal_code"
+            tail -20 "$TMP/main-panic.$mode.err"
+            tail -20 "$TMP/main-101.$mode.err"
+            pfail=$((pfail + 1))
+        fi
+    done
     echo "gate-unwind: $pass pass, $pfail fail"
     [ "$pfail" -eq 0 ] || return 1
 

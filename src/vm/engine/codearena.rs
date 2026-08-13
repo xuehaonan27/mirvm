@@ -14,27 +14,7 @@ pub const STUB_STRIDE: u64 = 16;
 const CODE_CAP: usize = 64 << 20;
 
 /// 代码域基址数值、样条参数与白名单判据统归 `super::addrlayout`（共享常量层）。
-use super::addrlayout::{
-    BASE_CODE_ADDR, DELTA_CODE_ADDR, IMAGE_CODE_COUNT, IMAGE_CODE_SPLINE, IMAGE_CODE_STEP,
-    image_code_addr, is_valid_code_home,
-};
-
-/// 值是否落在任一 stub 代码域带（P1：FFI 可派生条目的 fn-ptr 值——本身已是
-/// 可执行码址；逃逸物化点据此跳过二次包装，decision-history §7.6 项5）
-pub fn is_stub_addr(v: u64) -> bool {
-    let a = v as usize;
-    if (DELTA_CODE_ADDR..DELTA_CODE_ADDR + CODE_CAP).contains(&a) {
-        return true;
-    }
-    if (BASE_CODE_ADDR..BASE_CODE_ADDR + CODE_CAP).contains(&a) {
-        return true;
-    }
-    if a >= IMAGE_CODE_SPLINE {
-        let off = a - IMAGE_CODE_SPLINE;
-        return off / IMAGE_CODE_STEP < IMAGE_CODE_COUNT && off % IMAGE_CODE_STEP < CODE_CAP;
-    }
-    false
-}
+use super::addrlayout::{BASE_CODE_ADDR, DELTA_CODE_ADDR, image_code_addr, is_valid_code_home};
 
 /// 单地址域的 stub 区（本模块域一份；image 域随 absorb 另挂）。
 pub struct StubArena {

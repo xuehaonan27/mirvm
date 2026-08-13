@@ -2,15 +2,71 @@
 // 无 println——全量差分 M4.3 起）。#[unsafe(no_mangle)] = 收集根 + --vm-call 稳定名。
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 static DROPS: AtomicU64 = AtomicU64::new(0);
+static TOP_PAYLOAD_DROPS: AtomicUsize = AtomicUsize::new(0);
+static SECOND_PAYLOAD_DROPS: AtomicUsize = AtomicUsize::new(0);
 
 struct G(u64);
 impl Drop for G {
     fn drop(&mut self) {
         DROPS.fetch_add(self.0, Ordering::SeqCst);
     }
+}
+
+struct SecondTopPayload;
+
+impl Drop for SecondTopPayload {
+    fn drop(&mut self) {
+        let count = SECOND_PAYLOAD_DROPS.fetch_add(1, Ordering::SeqCst) + 1;
+        println!(
+            "second-payload-drop={count} panicking={}",
+            std::thread::panicking()
+        );
+    }
+}
+
+struct TopPayload;
+
+impl Drop for TopPayload {
+    fn drop(&mut self) {
+        let count = TOP_PAYLOAD_DROPS.fetch_add(1, Ordering::SeqCst) + 1;
+        println!(
+            "top-payload-drop={count} panicking={}",
+            std::thread::panicking()
+        );
+        println!("normal-after-top-cleanup={}", normal_after_top_cleanup(40));
+
+        let second = std::panic::catch_unwind(|| {
+            std::panic::panic_any(SecondTopPayload);
+        });
+        println!(
+            "second-panic-caught={} panicking={}",
+            second.is_err(),
+            std::thread::panicking()
+        );
+        drop(second);
+        println!(
+            "payload-drop-counts={}:{} panicking={}",
+            TOP_PAYLOAD_DROPS.load(Ordering::SeqCst),
+            SECOND_PAYLOAD_DROPS.load(Ordering::SeqCst),
+            std::thread::panicking()
+        );
+    }
+}
+
+#[inline(never)]
+fn normal_after_top_cleanup(value: u64) -> u64 {
+    value + 2
+}
+
+/// Engine 顶层接住的 panic 必须交还 guest std 做计数复位和 payload 析构。
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn uncaught_payload_cleanup_probe() -> u64 {
+    TOP_PAYLOAD_DROPS.store(0, Ordering::SeqCst);
+    SECOND_PAYLOAD_DROPS.store(0, Ordering::SeqCst);
+    std::panic::panic_any(TopPayload)
 }
 
 /// catch_unwind 捕获 + Drop 在 unwind 中执行（奇数 panic：100·1000+10；偶数：7·1000+10）

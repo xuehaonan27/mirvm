@@ -104,9 +104,12 @@ impl<'tcx> Linker<'tcx> {
         if image_side {
             let s = self.split.as_mut().expect("split");
             let i = s.image_stub_sites.len() as u32;
-            s.image_stub_sites
-                .push(ir::EntryStubSite { func: fid, sig });
             let addr = s.image_code_arena.addr_of(i as u64);
+            s.image_stub_sites.push(ir::EntryStubSite {
+                link_addr: ir::LinkAddr(addr),
+                func: fid,
+                sig,
+            });
             s.image_fn_entries.insert(inst, addr);
             self.entry_stub_ids.insert(inst, i);
             addr
@@ -118,9 +121,12 @@ impl<'tcx> Linker<'tcx> {
                 );
             }
             let i = self.entry_stub_sites.len() as u32;
-            self.entry_stub_sites
-                .push(ir::EntryStubSite { func: fid, sig });
             let addr = self.code_arena.addr_of(i as u64);
+            self.entry_stub_sites.push(ir::EntryStubSite {
+                link_addr: ir::LinkAddr(addr),
+                func: fid,
+                sig,
+            });
             self.entry_stub_ids.insert(inst, i);
             addr
         }

@@ -3,7 +3,8 @@
 > 本文只回答两个问题：**哪份文档管什么**、**冲突时信谁**。
 > 最后重整：2026-07-18（文档目录大精简：历史文档归档 `history/`、四个过时文档删除、
 > 新增 [open-issues.md](open-issues.md) 债务登记册与 [agents/onboarding.md](agents/onboarding.md)）；
-> 最后同步：2026-08-12（标准测试套件、cargoless 合同、C-unwind 合同与当前验证边界已纳入；不改变
+> 最后同步：2026-08-13（Package v4、Engine 关闭协议、延迟 pthread 回调、
+> 多 Engine/真线程 signal 与 C-unwind/E13 嵌入合同已纳入；不改变
 > current-status/open-issues/decision-history 的既有权威顺序）。
 
 ## 1. 权威顺序（冲突时从高到低取信）
@@ -70,11 +71,11 @@
 | `async-stackless.md` | async 无栈状态机调研（C11 证据） |
 | `m5-design.md` | M5 总案（M5.0–M5.5 全完成）：D5 T/R 分层终裁、§7 gate6 判据——M5.5 原案之本 |
 | `m5.4-design.md` | M5.4a–d 施工蓝图（ABI 泛化 + LSDA 版式参数 + SIMD 覆盖矩阵；片 a–d 全落地） |
-| `modeb-mirvmar-design.md` | mode B：`.mirvm` 包格式 v3 + pack/run/MC/mmap 惰性函数装载（已落地；格式声明不定死） |
-| `product-capabilities-plan.md` | 明确缺失的产品能力与建议施工顺序（P1 已完成，后续阶段仍是规划） |
+| `modeb-mirvmar-design.md` | mode B：`.mirvm` 包格式 v4、可重复实例化 `Package`、每 Engine guest 原生入口（P1）/native/机器码节（MC）、关闭/signal 生命周期与惰性函数装载（已落地；格式声明不定死） |
+| `product-capabilities-plan.md` | 明确缺失的产品能力与建议施工顺序（P1/P2 与 P4 的基础生命周期已完成，其余阶段仍是规划） |
 | `mirvm-test-cargoless-contract.md` | `mirvm test`/bench 与 resolver 1/2/3 workspace 的 self/compat/Cargo 三轨合同、明确边界与 Cargo 升级规程 |
 | `c1-ffi-agg-design.md` | C1 FFI 按值聚合封送设计（FfiAgg 冻结 + libffi struct 编组；R17 边界之母） |
-| `c-unwind-contract.md` | C/C-unwind 跨语言异常合同、native 实测矩阵、实现纪律与 E13 裁决 |
+| `c-unwind-contract.md` | C/C-unwind 跨语言异常合同、native/真实嵌入实测矩阵、逐异常对象分类、真实 main 结果、signal 的 owner/目标线程安全点 activation、关闭期间异常持有、native fini 不可展开边界与 E13 现行裁决 |
 | `c2-rlib-symbols-design.md` | C2 native-archive「符号在 rlib」救援链设计（elfsym 枚举 + P1 跳板重链） |
 | `distribution-design.md` | 轨 C 分发 D9a–D9f 全文；未立项 ④⑤ 的唯一设计规范 |
 

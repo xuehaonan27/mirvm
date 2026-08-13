@@ -16,6 +16,7 @@
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rustc_abi::{Align, Size};
 use rustc_ast::ast::InlineAsmTemplatePiece;
@@ -28,6 +29,8 @@ use rustc_target::asm::{
 };
 
 use crate::vm::engine::ir;
+
+static NEXT_MATERIALIZE_TEMP: AtomicU64 = AtomicU64::new(0);
 
 /// asm-stub 批量物化（M5.0 步 2）：全部 wrapper 文本拼一个 .s → cc 汇编成 .so →
 /// dlopen → 逐站点**自带符号名** dlsym → 真地址表（AsmStubId = 位序 → u64）。
@@ -113,8 +116,12 @@ pub(crate) fn refill_syscall_slot(handle: usize) {
 }
 
 pub(crate) fn materialize(sites: &[ir::AsmSite]) -> Vec<u64> {
+    try_materialize(sites).unwrap_or_else(|error| panic!("asm-stub 物化失败: {error}"))
+}
+
+pub(crate) fn try_materialize(sites: &[ir::AsmSite]) -> Result<Vec<u64>, String> {
     if sites.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let mut src = String::new();
     src.push_str("# mirvm asm-stub 工厂产物（M5.0）——请勿手改\n");
@@ -129,44 +136,60 @@ pub(crate) fn materialize(sites: &[ir::AsmSite]) -> Vec<u64> {
     let h = fnv1a(src.as_bytes());
 
     let dir = crate::sysroot::cache_dir().join("asm-stubs");
-    std::fs::create_dir_all(&dir).expect("创建 asm-stub 缓存目录失败");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("创建 asm-stub 缓存目录 `{}` 失败: {e}", dir.display()))?;
     let so: PathBuf = dir.join(format!("{h:016x}.so"));
 
     if !so.exists() {
-        let s_path = dir.join(format!("{h:016x}.s"));
-        std::fs::write(&s_path, &src).expect("写 asm-stub .s 失败");
+        let serial = NEXT_MATERIALIZE_TEMP.fetch_add(1, Ordering::Relaxed);
+        let suffix = format!("{}.{}", std::process::id(), serial);
+        let s_path = dir.join(format!("{h:016x}.tmp.{suffix}.s"));
+        std::fs::write(&s_path, &src)
+            .map_err(|e| format!("写 asm-stub 临时汇编 `{}` 失败: {e}", s_path.display()))?;
         // -shared -fPIC：wrapper 自包含（无外部符号），dlopen 后 dlsym 各站点即得真址。
-        // 先写临时名再 rename 原子发布——并发 mirvm 进程同键物化时绝不 dlopen 半成品
-        let tmp = dir.join(format!("{h:016x}.so.tmp.{}", std::process::id()));
-        let status = std::process::Command::new("cc")
+        // 源与产物都用进程+序号唯一临时名；同进程并发实例化不会相互截断。
+        let tmp = dir.join(format!("{h:016x}.so.tmp.{suffix}"));
+        let output = std::process::Command::new("cc")
             .args(["-shared", "-fPIC", "-nostdlib", "-o"])
             .arg(&tmp)
             .arg(&s_path)
-            .status()
-            .expect("调用 cc 汇编 asm-stub 失败（PATH 缺 cc？）");
-        assert!(
-            status.success(),
-            "cc 汇编 asm-stub 失败（源：{}）",
-            s_path.display()
-        );
-        std::fs::rename(&tmp, &so).expect("asm-stub .so 原子发布失败");
+            .output()
+            .map_err(|e| format!("调用 cc 汇编 asm-stub 失败（PATH 缺 cc？）: {e}"))?;
+        let _ = std::fs::remove_file(&s_path);
+        if !output.status.success() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!(
+                "cc 汇编 asm-stub 失败（status={}）:\n{}{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        std::fs::rename(&tmp, &so).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("asm-stub .so 原子发布 `{}` 失败: {e}", so.display())
+        })?;
     }
 
-    let c_so = std::ffi::CString::new(so.as_os_str().as_encoded_bytes()).unwrap();
+    let c_so = std::ffi::CString::new(so.as_os_str().as_encoded_bytes())
+        .map_err(|_| format!("asm-stub 路径含 NUL: {}", so.display()))?;
     let handle = crate::os::dll::open_with_flags(
         &c_so,
         crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL,
     )
-    .unwrap_or_else(|_| panic!("dlopen asm-stub .so 失败: {}", so.display()));
+    .map_err(|detail| format!("dlopen asm-stub .so `{}` 失败: {detail}", so.display()))?;
     refill_syscall_slot(handle);
 
     sites
         .iter()
-        .map(|site| {
-            let name = std::ffi::CString::new(&*site.name).unwrap();
+        .map(|site| -> Result<u64, String> {
+            let name = std::ffi::CString::new(&*site.name)
+                .map_err(|_| format!("asm-stub 符号名含 NUL: {:?}", site.name))?;
             let addr = crate::os::dll::sym(handle, &name);
-            assert!(addr != 0, "dlsym {} 失败", site.name);
-            addr as u64
+            if addr == 0 {
+                return Err(format!("dlsym asm-stub `{}` 失败", site.name));
+            }
+            Ok(addr as u64)
         })
         .collect()
 }
@@ -601,7 +624,7 @@ impl<'tcx> Gen<'_, 'tcx> {
 
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
-    use super::materialize;
+    use super::{materialize, try_materialize};
     use crate::vm::engine::ir;
 
     #[test]
@@ -628,6 +651,28 @@ mirvm_asm_0:
         let stub: unsafe extern "C" fn(*mut u8) = unsafe { std::mem::transmute(addrs[0]) };
         unsafe { stub((&mut value as *mut u64).cast()) };
         assert_eq!(value, 0x0123_4567_89ab_cdef);
+    }
+
+    #[test]
+    fn concurrent_materialization_of_one_hash_is_safe() {
+        let name = format!("mirvm_asm_parallel_{}", std::process::id());
+        let site = ir::AsmSite {
+            name: name.clone().into(),
+            text: format!(
+                ".globl {name}\n.type {name},@function\n{name}:\n    ret\n.size {name}, .-{name}\n"
+            ),
+        };
+        let threads = (0..8)
+            .map(|_| {
+                let site = site.clone();
+                std::thread::spawn(move || try_materialize(&[site]))
+            })
+            .collect::<Vec<_>>();
+        let addrs = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap().unwrap()[0])
+            .collect::<Vec<_>>();
+        assert!(addrs.iter().all(|addr| *addr == addrs[0]));
     }
 
     #[test]

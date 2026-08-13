@@ -13,7 +13,7 @@ pub(super) fn scalar_slot(p: &ScalarPlace) -> Option<Slot> {
 
 pub(super) fn operand_ok(op: &Operand) -> bool {
     match op {
-        Operand::Slot(_) | Operand::Imm { .. } => true,
+        Operand::Slot(_) | Operand::Imm { .. } | Operand::AddrImm(_) => true,
         // M5.4a：内存/地址操作数（place 求值通道全部内联）
         Operand::Mem { expr, .. } | Operand::AddrOf(expr) => place_ok(expr),
         Operand::SubImm { base, .. } => operand_ok(base),

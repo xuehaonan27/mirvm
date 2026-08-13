@@ -5,6 +5,18 @@
 use super::*;
 
 impl<'tcx> Linker<'tcx> {
+    fn frozen_reloc_push(&mut self, image: bool, reloc: ir::FrozenReloc) {
+        if image {
+            self.split
+                .as_mut()
+                .expect("image frozen relocation requires split")
+                .image_frozen_relocs
+                .push(reloc);
+        } else {
+            self.frozen_relocs.push(reloc);
+        }
+    }
+
     /// P2：本侧符号表 idx（名字首现才登记；image 侧在 Split 三表）
     pub(super) fn got_intern(&mut self, name: &str, weak: bool, image: bool) -> u32 {
         let (syms, idx_map) = if image {
@@ -68,7 +80,7 @@ impl<'tcx> Linker<'tcx> {
         self.got_fixup_push(
             ctx_image,
             ir::GotFixup {
-                addr,
+                addr: ir::LinkAddr(addr),
                 sym: idx,
                 addend: 0,
             },
@@ -90,7 +102,7 @@ impl<'tcx> Linker<'tcx> {
         let slot = self.foreign_slot(&name, init, weak);
         let mem = ir::Operand::Mem {
             expr: ir::PlaceExpr {
-                base: ir::PlaceBase::Static(slot),
+                base: ir::PlaceBase::Static(ir::LinkAddr(slot)),
                 steps: Box::new([]),
             },
             width: ir::Width::W64,
@@ -141,6 +153,14 @@ impl<'tcx> Linker<'tcx> {
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), base as *mut u8, size as usize) };
         // 重定位：ptr 位置存的 8 字节 = 目标内偏移（addend）→ 换成目标真地址 + addend
         for (off, prov) in a.provenance().ptrs().iter() {
+            // TypeId uses an AllocId-shaped provenance carrier for a plain integer hash:
+            // ensure_alloc deliberately returns base zero, so its addend is already the final
+            // value and must not be treated as a relocatable guest pointer.
+            let entry_target = match self.tcx.global_alloc(prov.alloc_id()) {
+                GlobalAlloc::Function { .. } => Some(true),
+                GlobalAlloc::TypeId { .. } => None,
+                _ => Some(false),
+            };
             let target = self.ensure_alloc(prov.alloc_id())?;
             let at = (base + off.bytes()) as *mut u64;
             let addend = unsafe {
@@ -155,9 +175,21 @@ impl<'tcx> Linker<'tcx> {
                 self.got_fixup_push(
                     image,
                     ir::GotFixup {
-                        addr: base + off.bytes(),
+                        addr: ir::LinkAddr(base + off.bytes()),
                         sym: idx,
                         addend,
+                    },
+                );
+            } else if let Some(entry_target) = entry_target {
+                self.frozen_reloc_push(
+                    image,
+                    ir::FrozenReloc {
+                        at: ir::LinkAddr(base + off.bytes()),
+                        target: if entry_target {
+                            ir::FrozenRelocTarget::Entry(ir::LinkAddr(target.wrapping_add(addend)))
+                        } else {
+                            ir::FrozenRelocTarget::Frozen(ir::LinkAddr(target.wrapping_add(addend)))
+                        },
                     },
                 );
             }

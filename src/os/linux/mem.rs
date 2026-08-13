@@ -1,15 +1,18 @@
-//! os::mem — Linux 匿名映射原语（mmap/mprotect/munmap + 偏好固定基址）。
+//! Linux anonymous mapping primitives.
+//! (mmap/mprotect/munmap + preference for fixed base address)
+//! The engine's sole channel for all anonymous mappings, merging three mmap
+//! forms: frozen, codearena, and frame. Only `usize`/raw pointer/Prot appears.
+//! No guest concept is allowed. Capacity, base address value (addrlayout),
+//! and exhaustion message are all the caller's responsibility.
 //!
-//! 引擎所有匿名映射的唯一通道：frozen（冻结区）、codearena（stub 码域）、
-//! frame（字节区帧）三处 mmap 形态的归并。只出现 usize/裸指针/Prot——
-//! 无 guest 概念；容量、基址数值（addrlayout）与耗尽文案都是调用方的事。
-//!
-//! 失败语义（与归并前三处形态逐字对齐，调用方各自决定措辞）：
-//! - 动态映射失败 → 空指针（调用方 assert/panic）。
-//! - 偏好固定基址被占或失败 → Ok(None)（调用方决定动态回退/响亮报错；
-//!   MAP_FIXED_NOREPLACE 绝不覆盖既有映射）。
+//! Failure semantics (aligned verbatim with the three memory map forms, each
+//! caller decides its wording):
+//! - Dynamic mapping failure → null pointer (caller assert/panic).
+//! - Preference for fixed base address is occupied or fails → Ok(None)
+//!   (caller decides dynamic rollback/loud error; MAP_FIXED_NOREPLACE never
+//!   overwrites existing mappings).
 
-/// mmap 保护标志的窄枚举（调用点不再散落 libc 常量）。
+/// Narrow enumeration of mmap protection flags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Prot(std::os::raw::c_int);
 
@@ -28,8 +31,10 @@ pub fn page_size() -> usize {
     n as usize
 }
 
-/// 匿名私有动态映射；`noreserve` = 虚拟保留不占提交（frame 1GiB 区形态）。
-/// 失败返回空指针（与归并前 `!= MAP_FAILED` 判式一致，措辞归调用方）。
+/// Anonymous private dynamic mapping.
+/// `noreserve`: virtual reservation that does not occupy a commit.
+/// Returns a null pointer on failure (consistent with the `!= MAP_FAILED`
+/// condition before merging, wording attributed to the caller).
 pub fn map_anon(size: usize, prot: Prot, noreserve: bool) -> *mut u8 {
     let mut flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS;
     if noreserve {
@@ -43,8 +48,10 @@ pub fn map_anon(size: usize, prot: Prot, noreserve: bool) -> *mut u8 {
     }
 }
 
-/// 偏好固定基址映射（MAP_FIXED_NOREPLACE）：成功 Some，被占/失败 None。
-/// 引擎可缓存性地基（JVM CDS 同思路；错基址 = 静默错值，故绝不覆盖既有映射）。
+/// Preferred fixed base address mapping (MAP_FIXED_NOREPLACE).
+/// Some on success, None on failure.
+/// Engine cacheability base (same approach as JVM CDS). Faulty base address
+/// means silent fault value, therefore never overwrite existing mappings.
 pub fn map_fixed_preferred(addr: usize, size: usize, prot: Prot) -> Option<*mut u8> {
     let p = unsafe {
         libc::mmap(
@@ -62,19 +69,21 @@ pub fn map_fixed_preferred(addr: usize, size: usize, prot: Prot) -> Option<*mut 
     Some(p as *mut u8)
 }
 
-/// mprotect 窄封装（codearena 填完封存 RX 的 W^X 形态）。
+/// Thin wrapper of `mprotect`.
+/// Codearena fills the W^X shape of the sealed RX.
 pub fn protect(addr: *mut u8, size: usize, prot: Prot) -> Result<(), String> {
     let rc = unsafe { libc::mprotect(addr as *mut libc::c_void, size, prot.0) };
     if rc != 0 {
-        return Err(format!("mprotect({addr:p}, {size:#x}) 失败 rc={rc}"));
+        return Err(format!("mprotect({addr:p}, {size:#x}) failed rc={rc}"));
     }
     Ok(())
 }
 
-/// munmap（调用方持容量与生命周期）。
+/// Unmap the memory region. Caller holds capacity and lifecycle.
 ///
 /// # Safety
-/// addr/size 必须出自本层一次成功映射的同一区间；调用方保证之后不再触碰。
+/// addr/size must come from the same range that was successfully mapped in
+/// this module. the caller guarantees that it will not be touched again.
 pub unsafe fn unmap(addr: *mut u8, size: usize) {
     unsafe { libc::munmap(addr as *mut libc::c_void, size) };
 }

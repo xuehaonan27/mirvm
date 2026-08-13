@@ -23,6 +23,17 @@ pub struct FrozenArena {
     at_fixed_base: bool,
     /// 本区所属域的固定基址（serde 自描述用；动态回退时仍记原意向域）。
     home: usize,
+    /// 本区内容被 lower 时使用的地址基址。动态实例的 `base` 会变化，链接基址不变。
+    link_base: usize,
+}
+
+/// 可重复实例化的冻结区镜像。它只含洁净字节和这些字节所使用的链接时基址，
+/// 自身不占用客体地址空间。
+#[derive(Clone, Debug)]
+pub struct FrozenSnapshot {
+    home: usize,
+    link_base: usize,
+    bytes: Vec<u8>,
 }
 
 impl Default for FrozenArena {
@@ -43,6 +54,7 @@ impl FrozenArena {
                 used: 0,
                 at_fixed_base: true,
                 home,
+                link_base: p as usize,
             };
         }
         let base = crate::os::mem::map_anon(FROZEN_CAP, crate::os::mem::Prot::RW, false);
@@ -52,6 +64,7 @@ impl FrozenArena {
             used: 0,
             at_fixed_base: false,
             home,
+            link_base: base as usize,
         }
     }
 
@@ -88,6 +101,35 @@ impl FrozenArena {
             used: snapshot.len(),
             at_fixed_base: true,
             home,
+            link_base: home,
+        })
+    }
+
+    /// 从可复用镜像创建一个独立运行实例。每次都用匿名地址，避免同一 artifact
+    /// 的实例争抢固定映射；镜像中的绝对指针由 Module 的 FrozenReloc 随后修补。
+    pub fn restore_dynamic(snapshot: &FrozenSnapshot) -> Result<Self, String> {
+        if snapshot.bytes.len() > FROZEN_CAP {
+            return Err("frozen snapshot exceeds arena capacity".into());
+        }
+        if !is_valid_home(snapshot.home) {
+            return Err(format!(
+                "invalid frozen snapshot home: {:#x}",
+                snapshot.home
+            ));
+        }
+        let base = crate::os::mem::map_anon(FROZEN_CAP, crate::os::mem::Prot::RW, false);
+        if base.is_null() {
+            return Err("fail to map frozen instance".into());
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(snapshot.bytes.as_ptr(), base, snapshot.bytes.len());
+        }
+        Ok(Self {
+            base,
+            used: snapshot.bytes.len(),
+            at_fixed_base: false,
+            home: snapshot.home,
+            link_base: snapshot.link_base,
         })
     }
 
@@ -99,6 +141,30 @@ impl FrozenArena {
     /// 本区所属域的固定基址（S4：装载方核对"底座真的在底座域"）。
     pub fn home(&self) -> usize {
         self.home
+    }
+
+    pub fn link_base(&self) -> u64 {
+        self.link_base as u64
+    }
+
+    pub fn runtime_base(&self) -> u64 {
+        self.base as u64
+    }
+
+    pub fn used(&self) -> u64 {
+        self.used as u64
+    }
+
+    /// 固定地址 lower 产物转为不占映射的包镜像。
+    pub fn to_snapshot(&self) -> Result<FrozenSnapshot, String> {
+        if !self.at_fixed_base {
+            return Err("frozen arena is not at its link-time base".into());
+        }
+        Ok(FrozenSnapshot {
+            home: self.home,
+            link_base: self.link_base,
+            bytes: self.snapshot().to_vec(),
+        })
     }
 
     /// 快照 = used 前缀（洁净态责任在调用方：guest 运行前拍）。
@@ -166,6 +232,41 @@ impl<'de> serde::Deserialize<'de> for FrozenArena {
             )));
         }
         FrozenArena::restore(bytes, home).map_err(serde::de::Error::custom)
+    }
+}
+
+impl serde::Serialize for FrozenSnapshot {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeTuple;
+        let mut t = serializer.serialize_tuple(3)?;
+        t.serialize_element(&(self.home as u64))?;
+        t.serialize_element(&(self.link_base as u64))?;
+        t.serialize_element(&serde_bytes_shim::Bytes(&self.bytes))?;
+        t.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for FrozenSnapshot {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let (home, link_base, bytes): (u64, u64, Vec<u8>) =
+            serde::Deserialize::deserialize(deserializer)?;
+        let home = usize::try_from(home).map_err(serde::de::Error::custom)?;
+        let link_base = usize::try_from(link_base).map_err(serde::de::Error::custom)?;
+        if !is_valid_home(home) || link_base != home {
+            return Err(serde::de::Error::custom(format!(
+                "invalid frozen snapshot domain: home={home:#x}, link={link_base:#x}"
+            )));
+        }
+        if bytes.len() > FROZEN_CAP {
+            return Err(serde::de::Error::custom(
+                "frozen snapshot exceeds arena capacity",
+            ));
+        }
+        Ok(Self {
+            home,
+            link_base,
+            bytes,
+        })
     }
 }
 

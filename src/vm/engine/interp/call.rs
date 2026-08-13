@@ -6,7 +6,9 @@
 use super::*;
 use super::{
     runblocks::run_blocks,
-    services::{AtexitKind, atexit_register, func_synth_ip, signal_thunk, unwind_backtrace},
+    services::{
+        AtexitKind, atexit_register, func_synth_ip, resolve_signal_handler, unwind_backtrace,
+    },
 };
 use crate::vm::engine::ir;
 
@@ -33,16 +35,7 @@ pub(super) fn cleanup_edge(u: &UnwindAction) -> Option<Bb> {
 #[inline]
 pub(super) fn call_guarding_terminate<R>(unwind: &UnwindAction, f: impl FnOnce() -> R) -> R {
     if let UnwindAction::Terminate = unwind {
-        match panic::catch_unwind(AssertUnwindSafe(f)) {
-            Ok(r) => r,
-            Err(e) if e.is::<EngineFault>() => panic::resume_unwind(e),
-            Err(_) => {
-                eprintln!(
-                    "mirvm[m4-engine]: unwind 抵达 Terminate 边界（double panic/ABI）——abort"
-                );
-                std::process::abort()
-            }
-        }
+        crate::vm::engine::unwind::guard_terminate(f)
     } else {
         f()
     }
@@ -174,10 +167,20 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
     let module: &Module = unsafe { &(*(*ctx).shared).module };
     let body: &FuncBody = &module.funcs[func as usize];
 
-    let depth = unsafe {
-        (*ctx).depth += 1;
-        (*ctx).depth
+    // 序言也会发生 EngineFault（栈守卫、参数 ABI、操作数区穷尽）。
+    // 从第一次修改 Ctx 状态起就建立分阶段守卫，只撤销已完成的步骤。
+    let mut guard = FrameGuard {
+        ctx,
+        depth_active: false,
+        base: None,
+        shadow_active: false,
+        unwind_edge: Cell::new(None),
     };
+    let Some(depth) = (unsafe { (*ctx).depth.checked_add(1) }) else {
+        engine_abort(&format!("guest 解释深度计数溢出（fn {}）", body.name));
+    };
+    unsafe { (*ctx).depth = depth };
+    guard.depth_active = true;
     let sp_approx = &depth as *const u32 as usize;
     if unsafe { (*ctx).stack_floor } > sp_approx {
         engine_abort(&format!(
@@ -187,6 +190,7 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
     }
 
     let base = region_reserve(ctx, body.frame_size, body.frame_align);
+    guard.base = Some(base);
     // prologue：按 ParamAbi 消费实参槽（槽数先验——不匹配给名字与期望，勿裸越界 panic）
     let needed: usize = matches!(body.ret, RetAbi::Indirect { .. }) as usize
         + body
@@ -268,7 +272,7 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
         );
     }
 
-    // 帧守卫：unwind 穿帧 = 跑 cleanup + 恢复区；正常返回 = 恢复区（edge 已空）
+    // 帧守卫始终恢复操作数区；外围 raw catch 按实际异常身份选择 cleanup。
     // 影子帧入栈（D8e）：合成 IP = FUNC_IP_BASE + func×64（每 FuncId 唯一、非零、
     // 不可执行的 opaque token；作 backtrace 的 IP 恰好——从不解引用为代码）。
     let shadow_marker = 0u8;
@@ -278,15 +282,20 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
             cfa: &shadow_marker as *const u8 as u64,
         })
     };
-    let guard = FrameGuard {
-        ctx,
-        func,
-        base,
-        unwind_edge: Cell::new(None),
-    };
-    match run_blocks(ctx, func, base, &guard.unwind_edge, 0) {
-        Exit::Ret(lo, hi) => (lo, hi), // guard drop → region 恢复
-        Exit::Resume => engine_abort(&format!("Resume 出现在正常执行路径（fn {}）", body.name)),
+    guard.shadow_active = true;
+    match crate::vm::engine::unwind::catch_raw(|| {
+        run_blocks(ctx, func, base, &guard.unwind_edge, 0)
+    }) {
+        Ok(Exit::Ret(lo, hi)) => (lo, hi), // guard drop → region 恢复
+        Ok(Exit::Resume) => engine_abort(&format!("Resume 出现在正常执行路径（fn {}）", body.name)),
+        Err(exception) => {
+            if !exception.is_engine_fault()
+                && let Some(cleanup) = guard.unwind_edge.get()
+            {
+                run_cleanup(ctx, func, base, cleanup);
+            }
+            exception.resume_or_rethrow()
+        }
     }
 }
 
@@ -299,6 +308,7 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
 /// lane 的 sret 字节已在本体内落盘、返 (0, 0)。ret 形态写回由调用点统一
 /// （Ignore/Indirect 不写、Scalar=lo、Pair=(lo,hi)——lower 只发匹配形态，
 /// 原臂内的形态诊断随统一写回退役）。edge 协议随体保留。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_builtin(
     ctx: *mut Ctx,
     body: &ir::FuncBody,
@@ -307,6 +317,7 @@ pub(crate) fn exec_builtin(
     av: &[u64],
     ret_dst: Option<u64>,
     unwind: &ir::UnwindAction,
+    role: ir::BuiltinCallRole,
 ) -> (u64, u64) {
     use crate::vm::engine::ir::Builtin;
     let _ = body; // 签名预留（两调用点诊断对称）；臂内不经 body（module 自 ctx 取）
@@ -814,28 +825,53 @@ pub(crate) fn exec_builtin(
         Builtin::HostOnExit => atexit_register(ctx, a(0), AtexitKind::OnExit, a(1)),
         Builtin::HostSignal => {
             let (signum, handler) = (a(0) as i32, a(1) as usize);
-            // guest handler（非 DFL/IGN）：async 信号 → 物化 AS-trampoline
-            //（D8d）；sync 故障信号 → 响亮拒绝（宿主/guest 故障不可分辨）。
-            let real =
-                if handler != crate::os::signal::SIG_DFL && handler != crate::os::signal::SIG_IGN {
-                    signal_thunk(ctx, signum, handler as u64)
+            let resolution =
+                if handler == crate::os::signal::SIG_DFL || handler == crate::os::signal::SIG_IGN {
+                    crate::vm::engine::thunks::SignalHandlerResolution::Unknown
                 } else {
-                    handler
+                    resolve_signal_handler(ctx, handler as u64)
                 };
-            crate::os::signal::signal(signum, real) as u64
-        }
-        Builtin::HostSigaction => {
-            let (signum, act, oldact) = (a(0) as i32, a(1), a(2));
-            // guest handler 藏在 sigaction 结构里：thunk 后写一份改过 handler
-            // 的副本给内核（原结构不动——guest 可能复用/读回）。
-            let mut patched = unsafe { crate::os::signal::Sigaction::copy_from(act) };
-            if let Some(p) = patched.as_mut() {
-                let h = p.handler();
-                if h != crate::os::signal::SIG_DFL && h != crate::os::signal::SIG_IGN {
-                    p.set_handler(signal_thunk(ctx, signum, h as u64));
+            let control = unsafe { (*ctx).shared().control() };
+            match crate::vm::engine::signal::install_signal_resolved(
+                control, signum, handler, resolution,
+            ) {
+                Ok(old) => old as u64,
+                Err(error) => {
+                    if let Some(errno) = error.libc_errno() {
+                        crate::os::process::set_errno(errno);
+                        crate::os::signal::SIG_ERR as u64
+                    } else {
+                        engine_abort(&error.to_string())
+                    }
                 }
             }
-            crate::os::signal::sigaction(signum, patched.as_ref(), oldact) as u64
+        }
+        Builtin::HostRaise => crate::vm::engine::ctx::raise_signal(ctx, a(0) as i32) as u64,
+        Builtin::HostSigaction => {
+            let (signum, act, oldact) = (a(0) as i32, a(1), a(2));
+            let action = unsafe { crate::os::signal::Sigaction::copy_from(act) };
+            let resolution = action.as_ref().map(|action| {
+                let handler = action.handler();
+                if handler == crate::os::signal::SIG_DFL || handler == crate::os::signal::SIG_IGN {
+                    crate::vm::engine::thunks::SignalHandlerResolution::Unknown
+                } else {
+                    resolve_signal_handler(ctx, handler as u64)
+                }
+            });
+            let control = unsafe { (*ctx).shared().control() };
+            match crate::vm::engine::signal::install_sigaction_resolved(
+                control, signum, action, resolution, oldact,
+            ) {
+                Ok(result) => result as u64,
+                Err(error) => {
+                    if let Some(errno) = error.libc_errno() {
+                        crate::os::process::set_errno(errno);
+                        (-1i32) as u64
+                    } else {
+                        engine_abort(&error.to_string())
+                    }
+                }
+            }
         }
         Builtin::Unsupported(name) => engine_abort(&format!("unsupported builtin `{}`", name.0)),
         Builtin::UnwindDeleteException => {
@@ -953,20 +989,29 @@ pub(crate) fn exec_builtin(
             unreachable!("x86 vector builtin 已由 indirect vector 通道处理")
         }
         Builtin::HostSyscall => crate::os::process::syscall(a(0) as i64, &av[1..]) as u64,
-        // rust_try：宿主 catch；guest panic → 调 catch_fn(data, exc) 返 1
+        // rust_try：原始 unwinder catch；仅当前 Engine 的 guest panic
+        // 调 catch_fn(data, exc) 返 1，异主/宿主异常继续展开。
         Builtin::CatchUnwind => {
             let (try_fn, data, catch_fn) = (a(0), a(1), a(2));
-            match panic::catch_unwind(AssertUnwindSafe(|| {
+            let shared = unsafe { (*ctx).shared_arc() };
+            let mut main_catch = crate::vm::engine::ctx::claim_main_panic_catch(ctx, role);
+            match crate::vm::engine::unwind::catch_raw(|| {
                 call_fn_addr(ctx, try_fn, &[data], "catch_unwind.try")
-            })) {
+            }) {
                 Ok(_) => 0,
-                Err(e) => match e.downcast::<GuestPanic>() {
-                    Ok(gp) => {
-                        call_fn_addr(ctx, catch_fn, &[data, gp.exception], "catch_unwind.catch");
-                        1
+                Err(exception) => match exception.at_guest_catch(&shared) {
+                    crate::vm::engine::unwind::GuestCatchDisposition::Guest(payload) => {
+                        if let Some(main_catch) = &mut main_catch {
+                            main_catch.mark_panicked();
+                        }
+                        payload.transfer(|_, inner| {
+                            call_fn_addr(ctx, catch_fn, &[data, inner], "catch_unwind.catch");
+                            1
+                        })
                     }
-                    // 宿主 panic（VM bug）不是 guest 异常：原样续传
-                    Err(host) => panic::resume_unwind(host),
+                    crate::vm::engine::unwind::GuestCatchDisposition::Resume(exception) => {
+                        exception.resume_or_rethrow()
+                    }
                 },
             }
         }

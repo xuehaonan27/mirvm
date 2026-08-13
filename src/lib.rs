@@ -6,6 +6,10 @@
 #![feature(cfg_sanitize)] // ctx.rs：TSan 配置下 Ctx dtor 的处置分歧
 #![feature(f16)] // D8c：引擎宿主直算 f16（rustc 下降到与 native 同一批转换/libm 符号）
 #![feature(f128)] // D8c：同上，f128（compiler-builtins __*tf* + glibc *f128 libm）
+#![feature(core_intrinsics)] // 原始 unwind 捕获，按 exception class 区分所有者
+#![feature(rustc_attrs)] // raw unwind catch callback 必须保证不展开
+#![feature(thread_local)] // async signal mailbox 的无析构原生 ELF TLS 指针
+#![allow(internal_features)] // core_intrinsics 仅用于上述引擎边界
 
 extern crate rustc_abi;
 extern crate rustc_apfloat;

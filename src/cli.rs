@@ -585,8 +585,10 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
 
     // mode B 片②：.mirvm 包嗅探（先于文本读取——包是二进制）
     if crate::pack::is_package(&input_path) {
-        let module = match crate::pack::load_package(&input_path) {
-            Ok(p) => p.module,
+        let module = match crate::pack::load_package(&input_path)
+            .and_then(|package| package.instantiate())
+        {
+            Ok(module) => module,
             Err(reason) => {
                 eprintln!("mirvm: fail to load {}: {reason}", input_path.display());
                 exit(70);
@@ -1207,28 +1209,34 @@ fn run_vm_engine(
         return 0;
     }
     // argv 终结化（M6 片2）：运行期输入在快照语义之后布置，冷/热单一路径
-    module.finalize_entry_argv(program_argv);
-    // P2 启动相 GOT 重填（decision-history §7.5c）：foreign 符号值 = 本进程
-    // 真地址；冷路径与 lower 初填一致（幂等），热路径换掉上进程陈旧地址
-    if let Err(e) = crate::vm::engine::ffi::resolve_got_fixups(&mut module) {
+    if let Err(e) = module.finalize_entry_argv(program_argv) {
         eprintln!("mirvm: {e}");
-        exit(70);
+        return 70;
     }
-    let mut shared = crate::vm::engine::ctx::Shared::new(module);
+    let shared = crate::vm::engine::ctx::Shared::new(module);
     // P1 条目可执行化（decision-history §7.6）：配方 → closure → stub 字节 →
     // 整域 RX（与上两道并列的全相工序；域被占 = 装载失败）
-    if let Err(e) =
-        crate::vm::engine::thunks::materialize_all_entry_stubs(&mut shared.module, shared.id)
-    {
-        eprintln!("mirvm: {e}");
-        exit(70);
-    }
-    let engine = crate::vm::engine::ctx::Engine::new(shared);
+    let engine = match crate::vm::engine::ctx::Engine::try_new(shared) {
+        Ok(engine) => engine,
+        Err(e) => {
+            eprintln!("mirvm: {e}");
+            return 70;
+        }
+    };
     let Some(spec) = vm_call else {
         // main 启动链：lang_start 照常解释，退出码 = Termination 产物
-        let shared = std::sync::Arc::clone(engine.shared());
-        return match on_guest_stack(move || crate::vm::engine::interp::run_main(&shared)) {
-            Ok(code) => code,
+        let execution = engine.clone();
+        let result = on_guest_stack(move || crate::vm::engine::interp::run_main(&execution));
+        if let Err(error) = engine.wait_closed() {
+            eprintln!("mirvm[m4-engine]: cannot wait for Engine teardown: {error:?}");
+            return 70;
+        }
+        return match result {
+            Ok(crate::vm::engine::interp::RunOutcome::Returned(code)) => code,
+            // `lang_start` has already run the guest panic hook. Match native
+            // stderr here and only translate the structured outcome to its OS
+            // exit status.
+            Ok(crate::vm::engine::interp::RunOutcome::GuestPanic) => 101,
             Err(e) => {
                 eprintln!("mirvm[m4-engine]: {e}");
                 e.exit_code
@@ -1242,11 +1250,24 @@ fn run_vm_engine(
             return 2;
         }
     };
-    let shared = std::sync::Arc::clone(engine.shared());
-    match on_guest_stack(move || crate::vm::engine::interp::run_export(&shared, &name, &args)) {
-        Ok(r) => {
-            println!("{r}");
+    let execution = engine.clone();
+    let result = on_guest_stack(move || {
+        // CLI arguments are scalar u64 slots parsed for the explicitly named
+        // dev export; pointer-bearing embedding calls are not exposed here.
+        unsafe { crate::vm::engine::interp::run_export(&execution, &name, &args) }
+    });
+    if let Err(error) = engine.wait_closed() {
+        eprintln!("mirvm[m4-engine]: cannot wait for Engine teardown: {error:?}");
+        return 70;
+    }
+    match result {
+        Ok(crate::vm::engine::interp::RunOutcome::Returned(r)) => {
+            println!("{}", r.lo);
             0
+        }
+        Ok(crate::vm::engine::interp::RunOutcome::GuestPanic) => {
+            eprintln!("mirvm[m4-engine]: guest panic not caught");
+            101
         }
         Err(e) => {
             eprintln!("mirvm[m4-engine]: {e}");

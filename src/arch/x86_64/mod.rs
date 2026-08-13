@@ -1,4 +1,4 @@
-//! x86_64 实现汇总（arch 层唯一架构实现；各子模块契约见各自模块头）。
+//! x86_64 implementation summary
 
 pub mod asmstub;
 pub mod intrinsics;

@@ -114,6 +114,10 @@ fn main() {
                 DROPS.load(Ordering::SeqCst)
             );
         },
+        "foreign-at-catch-unwind" => {
+            let _ = panic::catch_unwind(AssertUnwindSafe(|| unsafe { cpp_throw_marker() }));
+            println!("unexpected catch_unwind return");
+        }
         "panic-rethrow" => {
             let caught = panic::catch_unwind(AssertUnwindSafe(|| unsafe {
                 cpp_call_catch_rethrow(panic_from_guest)

@@ -396,21 +396,21 @@ pub(crate) unsafe fn cmp_ps<const LANES: usize>(
         let y = unsafe { (b as *const f32).add(i).read_unaligned() };
         let un = x.is_nan() || y.is_nan();
         let r = match imm & 0x1f {
-            0 | 16 => x == y,           // EQ_OQ / EQ_OS
-            1 | 17 => x < y,            // LT_OS / LT_OQ
-            2 | 18 => x <= y,           // LE_OS / LE_OQ
-            3 | 19 => un,               // UNORD_Q / UNORD_S
-            4 | 20 => !(!un && x == y), // NEQ_UQ / NEQ_US
-            5 | 21 => !(x < y),         // NLT_US / NLT_UQ
-            6 | 22 => !(x <= y),        // NLE_US / NLE_UQ
-            7 | 23 => !un,              // ORD_Q / ORD_S
-            8 | 24 => un || x == y,     // EQ_UQ / EQ_US
-            9 | 25 => !(x >= y),        // NGE_US / NGE_UQ
-            10 | 26 => !(x > y),        // NGT_US / NGT_UQ
+            0 | 16 => x == y,           // EQ_OQ    / EQ_OS
+            1 | 17 => x < y,            // LT_OS    / LT_OQ
+            2 | 18 => x <= y,           // LE_OS    / LE_OQ
+            3 | 19 => un,               // UNORD_Q  / UNORD_S
+            4 | 20 => !(!un && x == y), // NEQ_UQ   / NEQ_US
+            5 | 21 => !(x < y),         // NLT_US   / NLT_UQ
+            6 | 22 => !(x <= y),        // NLE_US   / NLE_UQ
+            7 | 23 => !un,              // ORD_Q    / ORD_S
+            8 | 24 => un || x == y,     // EQ_UQ    / EQ_US
+            9 | 25 => !(x >= y),        // NGE_US   / NGE_UQ
+            10 | 26 => !(x > y),        // NGT_US   / NGT_UQ
             11 | 27 => false,           // FALSE_OQ / FALSE_OS
-            12 | 28 => !un && x != y,   // NEQ_OQ / NEQ_OS
-            13 | 29 => !un && x >= y,   // GE_OS / GE_OQ
-            14 | 30 => !un && x > y,    // GT_OS / GT_OQ
+            12 | 28 => !un && x != y,   // NEQ_OQ   / NEQ_OS
+            13 | 29 => !un && x >= y,   // GE_OS    / GE_OQ
+            14 | 30 => !un && x > y,    // GT_OS    / GT_OQ
             _ => true,                  // 15|31: TRUE_UQ / TRUE_US
         };
         let m = if r { u32::MAX } else { 0 };
@@ -432,21 +432,21 @@ pub(crate) unsafe fn cmp_pd<const LANES: usize>(
         let y = unsafe { (b as *const f64).add(i).read_unaligned() };
         let un = x.is_nan() || y.is_nan();
         let r = match imm & 0x1f {
-            0 | 16 => x == y,           // EQ_OQ / EQ_OS
-            1 | 17 => x < y,            // LT_OS / LT_OQ
-            2 | 18 => x <= y,           // LE_OS / LE_OQ
-            3 | 19 => un,               // UNORD_Q / UNORD_S
-            4 | 20 => !(!un && x == y), // NEQ_UQ / NEQ_US
-            5 | 21 => !(x < y),         // NLT_US / NLT_UQ
-            6 | 22 => !(x <= y),        // NLE_US / NLE_UQ
-            7 | 23 => !un,              // ORD_Q / ORD_S
-            8 | 24 => un || x == y,     // EQ_UQ / EQ_US
-            9 | 25 => !(x >= y),        // NGE_US / NGE_UQ
-            10 | 26 => !(x > y),        // NGT_US / NGT_UQ
+            0 | 16 => x == y,           // EQ_OQ    / EQ_OS
+            1 | 17 => x < y,            // LT_OS    / LT_OQ
+            2 | 18 => x <= y,           // LE_OS    / LE_OQ
+            3 | 19 => un,               // UNORD_Q  / UNORD_S
+            4 | 20 => !(!un && x == y), // NEQ_UQ   / NEQ_US
+            5 | 21 => !(x < y),         // NLT_US   / NLT_UQ
+            6 | 22 => !(x <= y),        // NLE_US   / NLE_UQ
+            7 | 23 => !un,              // ORD_Q    / ORD_S
+            8 | 24 => un || x == y,     // EQ_UQ    / EQ_US
+            9 | 25 => !(x >= y),        // NGE_US   / NGE_UQ
+            10 | 26 => !(x > y),        // NGT_US   / NGT_UQ
             11 | 27 => false,           // FALSE_OQ / FALSE_OS
-            12 | 28 => !un && x != y,   // NEQ_OQ / NEQ_OS
-            13 | 29 => !un && x >= y,   // GE_OS / GE_OQ
-            14 | 30 => !un && x > y,    // GT_OS / GT_OQ
+            12 | 28 => !un && x != y,   // NEQ_OQ   / NEQ_OS
+            13 | 29 => !un && x >= y,   // GE_OS    / GE_OQ
+            14 | 30 => !un && x > y,    // GT_OS    / GT_OQ
             _ => true,                  // 15|31: TRUE_UQ / TRUE_US
         };
         let m = if r { u64::MAX } else { 0 };

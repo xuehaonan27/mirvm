@@ -6,6 +6,10 @@
 > decision-history §7.20）为准：native→guest 边界是 TLS + lazy attach（生产）；编译码
 > 零 ctx 站点实证；P 不再是生产候选。完整时间线与重开条件见
 > [decision-history.md](../decision-history.md)。原文保留三案论证。
+> 2026-08-13 补注：signal 已由 decision-history §7.54-§7.55 改为内核 frame 只原子登记；
+> 进程定向事件归 owner Engine，`SI_TKILL` 线程定向事件归目标 pthread，二者都在普通安全点
+> 建立新 activation。它不再走本文的 TLS attach/thunk 边界。下文把
+> signal 与普通 callback 同列的句子保留为当时论证，不是现行 signal 实现。
 >
 > 2026-07-07 时的**结论先行**：
 > - **边界机制已被逼定**：FFI 逃逸指针 / native 回调 / 信号处理器的入口，必须**按当前线程查找执行态
@@ -239,8 +243,9 @@ native→guest 边界 : 一次 TLS 读（+ 首次 attach）
 | **编译态** guest fn | 需捕获式 thunk（且跨线程错） | **零 thunk**——f_boundary 本身就是 plain-C native 码 |
 | **解释态** guest fn | 需 thunk | 仍需 thunk（它没有机器地址——这本来就是 thunk 的本职），thunk 的 prologue 与 f_boundary 共用同一段 TLS/attach 逻辑 |
 
-即：thunk 从"每个逃逸指针都要"收窄回它的本职（给解释态函数一个机器地址），corpus §2.3 的
-signal-thunk、pthread start_routine thunk 都落在这条既有路径上，且**热身后**（函数被 JIT）逃逸
+即：thunk 从"每个逃逸指针都要"收窄回它的本职（给解释态函数一个机器地址），corpus §2.3
+当时的 signal-thunk（已由 §7.54 推翻）和 pthread start_routine thunk 曾被归入这条路径，
+且**热身后**（函数被 JIT）逃逸
 指针可以直接给 f_boundary 地址、thunk 消失——与 frame-abi §8 "JIT tier thunk 消失"的既有判断吻合。
 
 ### 5.2 内部约定的最后一个自由度（历史比较；已由 M5 D5 分层结论替代）

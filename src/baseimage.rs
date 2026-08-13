@@ -102,6 +102,8 @@ fn load(path: &std::path::Path, want_stamp: &str) -> Option<BaseImage> {
     let mut module = f.module;
     module.exports = f.export_syms.iter().cloned().collect();
     module.fn_addrs = f.fn_addr_pairs.iter().copied().collect();
+    module.rebuild_load_map();
+    module.rebuild_fn_addrs();
     crate::vm::engine::verify::module(&module).ok()?;
     Some(BaseImage {
         fn_by_sym: f.export_syms.into_iter().collect(),
@@ -318,6 +320,9 @@ pub fn absorb_stack(delta: &mut ir::Module, stack: ImageStack) {
         for (a, f) in m.fn_addrs {
             delta.fn_addrs.entry(a).or_insert(f);
         }
+        for (a, f) in m.link_fn_addrs {
+            delta.link_fn_addrs.entry(a).or_insert(f);
+        }
         for (s, f) in m.exports {
             delta.exports.entry(s).or_insert(f);
         }
@@ -334,6 +339,7 @@ pub fn absorb_stack(delta: &mut ir::Module, stack: ImageStack) {
         // P2 GOT 随 image 合流（decision-history §7.5c）：sym 按名去重、fixup
         // idx 重编；image 样条域地址固定基稳定，合流后仍指向同一冻结格
         delta.absorb_got(m.foreign_syms, m.got_fixups);
+        delta.frozen_relocs.append(&mut m.frozen_relocs);
         // P1 条目 stub 随 image 合流（§7.6）：配方与代码域按挂载，启动相按域重建
         if !m.entry_stub_sites.is_empty() || m.entry_stubs.is_mapped() {
             let home = m
@@ -363,6 +369,8 @@ pub fn absorb_stack(delta: &mut ir::Module, stack: ImageStack) {
     delta.asm_stub_addrs = crate::lower::asm::materialize(&delta.asm_sites);
     // entry = delta 权威
     delta.image_frozens = frozens;
+    delta.rebuild_load_map();
+    delta.rebuild_fn_addrs();
 }
 
 // ===== 构建端（`mirvm __build-base-image <path>` 子进程）=====

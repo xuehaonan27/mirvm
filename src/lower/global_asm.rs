@@ -52,21 +52,36 @@ pub(crate) fn materialize<'tcx>(
     if asm.trim().is_empty() {
         return Ok(None);
     }
-    // 可执行跳板统一前置（Intel 语法，站点指令无关）：guest fn 符号 = 全局函数，
-    // 体 = `movabs rax, stub码址; jmp rax`——机器码 call 进跳板即达 P1 条目 stub、
-    // 蹦床回解释器。`.set` ABS 形式在 Intel 模式下 `call` 不可发码（GAS 实锤），
-    // 故用真跳板体（同 .so 内相对调用，链接期自洽）。
+    // 可执行跳板统一前置。桥只烤入 RIP 相对的隐藏数据槽，不烤运行期 P1 地址；
+    // 每个 Engine 装载自己的机器码映像/共享库副本后，把自己的 closure 地址写槽。
     let mut head = String::from(".intel_syntax noprefix\n");
     let mut dedup = std::collections::HashSet::new();
+    let mut slots = std::collections::BTreeSet::new();
     for (name, addr) in abs_defs {
         if dedup.insert(name.clone()) {
+            let slot = crate::vm::engine::ir::native_entry_slot_name(
+                crate::vm::engine::ir::LinkAddr(addr),
+            );
             let _ = writeln!(head, ".globl {name}");
+            let _ = writeln!(head, ".hidden {name}");
             let _ = writeln!(head, ".type {name},@function");
             let _ = writeln!(head, "{name}:");
-            let _ = writeln!(head, "    movabs rax, {addr:#x}");
-            let _ = writeln!(head, "    jmp rax");
+            let _ = writeln!(head, "    jmp QWORD PTR [rip + {slot}]");
             let _ = writeln!(head, ".size {name}, . - {name}");
+            slots.insert(slot);
         }
+    }
+    if !slots.is_empty() {
+        head.push_str(".pushsection .data.mirvm_p1,\"aw\",@progbits\n.balign 8\n");
+        for slot in slots {
+            let _ = writeln!(head, ".globl {slot}");
+            let _ = writeln!(head, ".hidden {slot}");
+            let _ = writeln!(head, ".type {slot},@object");
+            let _ = writeln!(head, ".size {slot},8");
+            let _ = writeln!(head, "{slot}:");
+            let _ = writeln!(head, "    .quad 0");
+        }
+        head.push_str(".popsection\n");
     }
     let asm = format!("{head}{asm}");
     Ok(Some(assemble(&asm)?))
@@ -430,7 +445,11 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, String> {
     let mut asm = asm.to_string();
     strip_slash_comments(&mut asm);
     crate::lower::asm::rewrite_syscall_text(&mut asm);
-    let hash = crate::lower::asm::fnv1a(asm.as_bytes());
+    asm.push('\n');
+    asm.push_str(crate::native_archive::NATIVE_RUNTIME_BRIDGE_ASM);
+    let mut hash_input = b"mirvm-global-asm-v3\0".to_vec();
+    hash_input.extend_from_slice(asm.as_bytes());
+    let hash = crate::lower::asm::fnv1a(&hash_input);
     let dir = crate::sysroot::cache_dir().join("global-asm");
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建 global-asm 缓存目录失败: {e}"))?;
     let so = dir.join(format!("{hash:016x}.so"));
@@ -441,9 +460,10 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, String> {
     std::fs::write(&s_path, asm).map_err(|e| format!("写 global-asm .s 失败: {e}"))?;
     let tmp = dir.join(format!("{hash:016x}.so.tmp{}", std::process::id()));
     let status = std::process::Command::new("cc")
-        .args(["-shared", "-fPIC", "-nostartfiles", "-o"])
+        .args(["-shared", "-fPIC", "-nostartfiles", "-Wl,-Bsymbolic", "-o"])
         .arg(&tmp)
         .arg(&s_path)
+        .args(crate::native_archive::NATIVE_RUNTIME_WRAP_FLAGS)
         .status()
         .map_err(|e| format!("调用 cc 汇编 global-asm 失败（PATH 缺 cc？）: {e}"))?;
     if !status.success() {

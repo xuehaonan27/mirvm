@@ -11,8 +11,14 @@ use rustc_middle::ty::TyCtxt;
 use rustc_session::search_paths::PathKind;
 use rustc_target::spec::{BinaryFormat, Os};
 
-const CACHE_FORMAT_VERSION: &[u8] = b"mirvm-native-archive-v1";
-const LINK_PREFIX: &[&str] = &["-shared", "-Wl,-z,defs", "-Wl,--whole-archive"];
+const CACHE_FORMAT_VERSION: &[u8] = b"mirvm-native-archive-v4";
+const LINK_PREFIX: &[&str] = &[
+    "-shared",
+    "-Wl,-z,defs",
+    "-Wl,-z,text",
+    "-Wl,-Bsymbolic",
+    "-Wl,--whole-archive",
+];
 /// 闭包基准 = std 经 `#[link]` 带给 guest 最终链接的系统库集（glibc：m/dl/pthread/
 /// rt/util/gcc_s；native 语义里这些恒在场，rustc 的 C 静态归档可直接引用其符号——
 /// libsqlite3 的 FTS5 引 libm `log`、pthread 族皆此类，corpus 批3 rusqlite 实锤）。
@@ -27,6 +33,144 @@ const LINK_SUFFIX: &[&str] = &[
     "-lutil",
     "-lgcc_s",
 ];
+pub(crate) const NATIVE_RUNTIME_WRAP_FLAGS: &[&str] = &[
+    "-Wl,--wrap=pthread_create",
+    "-Wl,--wrap=pthread_key_create",
+    "-Wl,--wrap=pthread_setspecific",
+    "-Wl,--wrap=pthread_key_delete",
+    "-Wl,--wrap=signal",
+    "-Wl,--wrap=sigaction",
+    "-Wl,--wrap=raise",
+];
+pub(crate) const NATIVE_RUNTIME_BRIDGE_ASM: &str = r#"
+.intel_syntax noprefix
+.text
+.p2align 4
+.globl __wrap_pthread_create
+.hidden __wrap_pthread_create
+.type __wrap_pthread_create,@function
+__wrap_pthread_create:
+    mov r8, QWORD PTR [rip + __mirvm_pthread_owner]
+    jmp QWORD PTR [rip + __mirvm_pthread_create_target]
+.size __wrap_pthread_create,.-__wrap_pthread_create
+
+.p2align 4
+.globl __wrap_pthread_key_create
+.hidden __wrap_pthread_key_create
+.type __wrap_pthread_key_create,@function
+__wrap_pthread_key_create:
+    mov rdx, QWORD PTR [rip + __mirvm_pthread_owner]
+    jmp QWORD PTR [rip + __mirvm_pthread_key_create_target]
+.size __wrap_pthread_key_create,.-__wrap_pthread_key_create
+
+.p2align 4
+.globl __wrap_pthread_setspecific
+.hidden __wrap_pthread_setspecific
+.type __wrap_pthread_setspecific,@function
+__wrap_pthread_setspecific:
+    mov rdx, QWORD PTR [rip + __mirvm_pthread_owner]
+    jmp QWORD PTR [rip + __mirvm_pthread_setspecific_target]
+.size __wrap_pthread_setspecific,.-__wrap_pthread_setspecific
+
+.p2align 4
+.globl __wrap_pthread_key_delete
+.hidden __wrap_pthread_key_delete
+.type __wrap_pthread_key_delete,@function
+__wrap_pthread_key_delete:
+    mov rsi, QWORD PTR [rip + __mirvm_pthread_owner]
+    jmp QWORD PTR [rip + __mirvm_pthread_key_delete_target]
+.size __wrap_pthread_key_delete,.-__wrap_pthread_key_delete
+
+.p2align 4
+.globl __wrap_signal
+.hidden __wrap_signal
+.type __wrap_signal,@function
+__wrap_signal:
+    mov rdx, QWORD PTR [rip + __mirvm_signal_owner]
+    jmp QWORD PTR [rip + __mirvm_signal_target]
+.size __wrap_signal,.-__wrap_signal
+
+.p2align 4
+.globl __wrap_sigaction
+.hidden __wrap_sigaction
+.type __wrap_sigaction,@function
+__wrap_sigaction:
+    mov rcx, QWORD PTR [rip + __mirvm_signal_owner]
+    jmp QWORD PTR [rip + __mirvm_sigaction_target]
+.size __wrap_sigaction,.-__wrap_sigaction
+
+.p2align 4
+.globl __wrap_raise
+.hidden __wrap_raise
+.type __wrap_raise,@function
+__wrap_raise:
+    mov rsi, QWORD PTR [rip + __mirvm_signal_owner]
+    jmp QWORD PTR [rip + __mirvm_raise_target]
+.size __wrap_raise,.-__wrap_raise
+
+.pushsection .data.mirvm_pthread,"aw",@progbits
+.p2align 3
+.globl __mirvm_pthread_owner
+.hidden __mirvm_pthread_owner
+.type __mirvm_pthread_owner,@object
+.size __mirvm_pthread_owner,8
+__mirvm_pthread_owner:
+    .quad 0
+.globl __mirvm_pthread_create_target
+.hidden __mirvm_pthread_create_target
+.type __mirvm_pthread_create_target,@object
+.size __mirvm_pthread_create_target,8
+__mirvm_pthread_create_target:
+    .quad 0
+.globl __mirvm_pthread_key_create_target
+.hidden __mirvm_pthread_key_create_target
+.type __mirvm_pthread_key_create_target,@object
+.size __mirvm_pthread_key_create_target,8
+__mirvm_pthread_key_create_target:
+    .quad 0
+.globl __mirvm_pthread_setspecific_target
+.hidden __mirvm_pthread_setspecific_target
+.type __mirvm_pthread_setspecific_target,@object
+.size __mirvm_pthread_setspecific_target,8
+__mirvm_pthread_setspecific_target:
+    .quad 0
+.globl __mirvm_pthread_key_delete_target
+.hidden __mirvm_pthread_key_delete_target
+.type __mirvm_pthread_key_delete_target,@object
+.size __mirvm_pthread_key_delete_target,8
+__mirvm_pthread_key_delete_target:
+    .quad 0
+.popsection
+
+.pushsection .data.mirvm_signal,"aw",@progbits
+.p2align 3
+.globl __mirvm_signal_owner
+.hidden __mirvm_signal_owner
+.type __mirvm_signal_owner,@object
+.size __mirvm_signal_owner,8
+__mirvm_signal_owner:
+    .quad 0
+.globl __mirvm_signal_target
+.hidden __mirvm_signal_target
+.type __mirvm_signal_target,@object
+.size __mirvm_signal_target,8
+__mirvm_signal_target:
+    .quad 0
+.globl __mirvm_sigaction_target
+.hidden __mirvm_sigaction_target
+.type __mirvm_sigaction_target,@object
+.size __mirvm_sigaction_target,8
+__mirvm_sigaction_target:
+    .quad 0
+.globl __mirvm_raise_target
+.hidden __mirvm_raise_target
+.type __mirvm_raise_target,@object
+.size __mirvm_raise_target,8
+__mirvm_raise_target:
+    .quad 0
+.popsection
+.section .note.GNU-stack,"",@progbits
+"#;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 /// 收集 crate 图传播的系统动态库名（corpus 批7 c_libgit2 实锤）：`-sys` crate
@@ -87,7 +231,7 @@ pub(crate) fn system_dylibs(tcx: TyCtxt<'_>) -> Vec<Box<str>> {
 }
 
 #[cfg(test)]
-fn materialize_in(archive: &Path, cache_dir: &Path) -> Result<PathBuf, String> {
+pub(crate) fn materialize_in(archive: &Path, cache_dir: &Path) -> Result<PathBuf, String> {
     materialize_for_target_in(
         archive,
         cache_dir,
@@ -326,6 +470,7 @@ fn materialize_for_target_in(
     let link_flags = LINK_PREFIX
         .iter()
         .chain(LINK_SUFFIX)
+        .chain(NATIVE_RUNTIME_WRAP_FLAGS)
         .copied()
         .chain(extra_flags.iter().map(|s| s.as_str()))
         .collect::<Vec<_>>()
@@ -335,6 +480,7 @@ fn materialize_for_target_in(
         link_flags.as_bytes(),
         target.as_bytes(),
         &cc_identity,
+        NATIVE_RUNTIME_BRIDGE_ASM.as_bytes(),
         &bytes,
     ]);
     std::fs::create_dir_all(cache_dir)
@@ -343,13 +489,17 @@ fn materialize_for_target_in(
     if so.exists() {
         return Ok(so);
     }
+    let native_runtime_bridge = native_runtime_bridge_object(cache_dir, target, cc, &cc_identity)?;
 
     let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
     let tmp = cache_dir.join(format!("{hash}.so.tmp.{}.{serial}", std::process::id()));
     let output = Command::new(cc)
         .args(LINK_PREFIX)
         .arg(archive)
-        .args(LINK_SUFFIX)
+        .arg(LINK_SUFFIX[0])
+        .arg(&native_runtime_bridge)
+        .args(NATIVE_RUNTIME_WRAP_FLAGS)
+        .args(&LINK_SUFFIX[1..])
         .args(&extra_flags)
         .arg("-o")
         .arg(&tmp)
@@ -370,6 +520,7 @@ fn materialize_for_target_in(
                 &bytes,
                 &cc_identity,
                 &link_flags,
+                &native_runtime_bridge,
                 linker,
             )?
         {
@@ -389,6 +540,65 @@ fn materialize_for_target_in(
     Ok(so)
 }
 
+fn native_runtime_bridge_object(
+    cache_dir: &Path,
+    target: &str,
+    cc: &Path,
+    cc_identity: &[u8],
+) -> Result<PathBuf, String> {
+    let hash = content_hash([
+        CACHE_FORMAT_VERSION,
+        b"native-runtime-bridge",
+        target.as_bytes(),
+        cc_identity,
+        NATIVE_RUNTIME_BRIDGE_ASM.as_bytes(),
+    ]);
+    let object = cache_dir.join(format!("{hash}.native-runtime.o"));
+    if object.exists() {
+        return Ok(object);
+    }
+
+    let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let source = cache_dir.join(format!(
+        "{hash}.native-runtime.s.tmp.{}.{serial}",
+        std::process::id()
+    ));
+    let temporary = cache_dir.join(format!(
+        "{hash}.native-runtime.o.tmp.{}.{serial}",
+        std::process::id()
+    ));
+    std::fs::write(&source, NATIVE_RUNTIME_BRIDGE_ASM).map_err(|e| {
+        format!(
+            "写 native runtime bridge 汇编 `{}` 失败: {e}",
+            source.display()
+        )
+    })?;
+    let output = Command::new(cc)
+        .args(["-x", "assembler", "-fPIC", "-c"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&temporary)
+        .output()
+        .map_err(|e| format!("启动 cc 组装 native runtime bridge 失败: {e}"))?;
+    let _ = std::fs::remove_file(&source);
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!(
+            "cc 组装 native runtime bridge 失败:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    std::fs::rename(&temporary, &object).map_err(|e| {
+        let _ = std::fs::remove_file(&temporary);
+        format!(
+            "原子发布 native runtime bridge `{}` 失败: {e}",
+            object.display()
+        )
+    })?;
+    Ok(object)
+}
+
 /// C2「符号在 rlib」救援链（designs/c2-rlib-symbols-design.md §2）：
 /// 首链失败后，静态枚举归档 SHN_UNDEF 符号 ∩ crate 图 rlib 导出 fn 集
 /// （`Linker::exported_defs`，与 native final link 集符集同源）——交集内 fn
@@ -405,6 +615,7 @@ fn rescue_with_rlib_symbols(
     archive_bytes: &[u8],
     cc_identity: &[u8],
     link_flags: &str,
+    native_runtime_bridge: &Path,
     linker: &mut crate::lower::linker::Linker<'_>,
 ) -> Result<Option<PathBuf>, String> {
     use rustc_span::Symbol;
@@ -441,16 +652,33 @@ fn rescue_with_rlib_symbols(
         pairs.push((name, addr));
     }
     pairs.sort();
-    // 隐藏跳板 .s（C7 同款形制；只在 .so 内部绑定，不污染进程全局命名空间）
+    // 隐藏跳板 .s（C7 同款形制）。桥只引用隐藏数据槽；每个 Engine 在自己的
+    // .so 副本里写入自己的 P1 closure 地址，产物中不再烤固定运行地址。
     let mut asm = String::from(".intel_syntax noprefix\n");
+    let mut slots = std::collections::BTreeSet::new();
     for (name, addr) in &pairs {
         use std::fmt::Write as _;
+        let slot =
+            crate::vm::engine::ir::native_entry_slot_name(crate::vm::engine::ir::LinkAddr(*addr));
         let _ = writeln!(asm, ".globl {name}");
         let _ = writeln!(asm, ".hidden {name}");
         let _ = writeln!(asm, ".type {name},@function");
         let _ = writeln!(asm, "{name}:");
-        let _ = writeln!(asm, "    movabs rax, {addr:#x}");
-        let _ = writeln!(asm, "    jmp rax");
+        let _ = writeln!(asm, "    jmp QWORD PTR [rip + {slot}]");
+        slots.insert(slot);
+    }
+    if !slots.is_empty() {
+        asm.push_str(".pushsection .data.mirvm_p1,\"aw\",@progbits\n.balign 8\n");
+        for slot in slots {
+            use std::fmt::Write as _;
+            let _ = writeln!(asm, ".globl {slot}");
+            let _ = writeln!(asm, ".hidden {slot}");
+            let _ = writeln!(asm, ".type {slot},@object");
+            let _ = writeln!(asm, ".size {slot},8");
+            let _ = writeln!(asm, "{slot}:");
+            let _ = writeln!(asm, "    .quad 0");
+        }
+        asm.push_str(".popsection\n");
     }
     // 缓存键 = 首链键域 + inject 对（模块专属；P1 码址跨进程稳定，同模块恒命中）
     let mut inject_key: Vec<u8> = Vec::new();
@@ -494,7 +722,10 @@ fn rescue_with_rlib_symbols(
         .args(LINK_PREFIX)
         .arg(archive)
         .arg(&o_path)
-        .args(LINK_SUFFIX)
+        .arg(LINK_SUFFIX[0])
+        .arg(native_runtime_bridge)
+        .args(NATIVE_RUNTIME_WRAP_FLAGS)
+        .args(&LINK_SUFFIX[1..])
         .args(extra_flags)
         .arg("-o")
         .arg(&tmp)
@@ -619,6 +850,37 @@ mod tests {
     use super::{materialize_for_target_in, materialize_in, reject_symbol_ambiguity};
 
     static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+    static SIGNAL_SIGNUM: AtomicU64 = AtomicU64::new(0);
+    static SIGNAL_HANDLER: AtomicU64 = AtomicU64::new(0);
+    static SIGNAL_OWNER: AtomicU64 = AtomicU64::new(0);
+    static SIGACTION_SIGNUM: AtomicU64 = AtomicU64::new(0);
+    static SIGACTION_OWNER: AtomicU64 = AtomicU64::new(0);
+    static RAISE_SIGNUM: AtomicU64 = AtomicU64::new(0);
+    static RAISE_OWNER: AtomicU64 = AtomicU64::new(0);
+
+    extern "C" fn test_native_signal(signum: i32, handler: usize, owner: u64) -> usize {
+        SIGNAL_SIGNUM.store(signum as u64, Ordering::Relaxed);
+        SIGNAL_HANDLER.store(handler as u64, Ordering::Relaxed);
+        SIGNAL_OWNER.store(owner, Ordering::Relaxed);
+        handler
+    }
+
+    extern "C" fn test_native_sigaction(
+        signum: i32,
+        _act: *const libc::c_void,
+        _oldact: *mut libc::c_void,
+        owner: u64,
+    ) -> i32 {
+        SIGACTION_SIGNUM.store(signum as u64, Ordering::Relaxed);
+        SIGACTION_OWNER.store(owner, Ordering::Relaxed);
+        71
+    }
+
+    extern "C" fn test_native_raise(signum: i32, owner: u64) -> i32 {
+        RAISE_SIGNUM.store(signum as u64, Ordering::Relaxed);
+        RAISE_OWNER.store(owner, Ordering::Relaxed);
+        73
+    }
 
     struct TempDir(PathBuf);
 
@@ -697,7 +959,10 @@ mod tests {
         let archive_path = dir.join("libnon_pic_probe.a");
         std::fs::write(&source_path, source).unwrap();
         let cc = Command::new("cc")
-            .arg("-c")
+            // Force an actually absolute text relocation. On x86-64 the default
+            // small model emits PC-relative code even without `-fPIC`; -Bsymbolic
+            // can resolve that code safely inside the private Engine image.
+            .args(["-fno-pic", "-mcmodel=large", "-c"])
             .arg(&source_path)
             .arg("-o")
             .arg(&object_path)
@@ -749,6 +1014,75 @@ mod tests {
         let probe: unsafe extern "C" fn() -> u64 =
             unsafe { std::mem::transmute(address as *const u8) };
         assert_eq!(unsafe { probe() }, 0x51a);
+        unsafe { crate::os::dll::close(handle) };
+    }
+
+    #[test]
+    fn native_signal_calls_receive_the_engine_owner() {
+        const OWNER: u64 = 0x0ddc_0ffe_e15e_c7ed;
+        const HANDLER: usize = 0x1234_5678;
+
+        let temp = TempDir::new("signal-bridge");
+        let archive = make_archive(
+            temp.path(),
+            "#include <signal.h>\n\
+             void *mirvm_call_signal(int signum, void *handler) {\n\
+                 return (void *)signal(signum, (void (*)(int))handler);\n\
+             }\n\
+             int mirvm_call_sigaction(int signum) { return sigaction(signum, 0, 0); }\n\
+             int mirvm_call_raise(int signum) { return raise(signum); }\n",
+        );
+
+        let so = materialize_in(&archive, &temp.path().join("cache")).unwrap();
+        let c_so = CString::new(so.as_os_str().as_encoded_bytes()).unwrap();
+        let handle = crate::os::dll::open_with_flags(
+            &c_so,
+            crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL,
+        )
+        .unwrap_or_else(|e| panic!("dlopen {} failed: {e}", so.display()));
+        let bias = crate::os::dll::load_bias(handle).expect("native bridge load bias") as u64;
+        let hidden = crate::elfsym::hidden_symtab_values(so.to_str().unwrap()).unwrap();
+        let patch = |name: &str, value: u64| {
+            let offset = hidden
+                .get(name)
+                .unwrap_or_else(|| panic!("native bridge has no hidden slot `{name}`"));
+            let address = bias
+                .checked_add(*offset)
+                .expect("native bridge slot address");
+            unsafe { (address as *mut u64).write(value) };
+        };
+        patch("__mirvm_signal_owner", OWNER);
+        patch(
+            "__mirvm_signal_target",
+            test_native_signal as *const () as usize as u64,
+        );
+        patch(
+            "__mirvm_sigaction_target",
+            test_native_sigaction as *const () as usize as u64,
+        );
+        patch(
+            "__mirvm_raise_target",
+            test_native_raise as *const () as usize as u64,
+        );
+
+        let signal: unsafe extern "C" fn(i32, usize) -> usize =
+            unsafe { std::mem::transmute(crate::os::dll::sym(handle, c"mirvm_call_signal")) };
+        let sigaction: unsafe extern "C" fn(i32) -> i32 =
+            unsafe { std::mem::transmute(crate::os::dll::sym(handle, c"mirvm_call_sigaction")) };
+        let raise: unsafe extern "C" fn(i32) -> i32 =
+            unsafe { std::mem::transmute(crate::os::dll::sym(handle, c"mirvm_call_raise")) };
+
+        assert_eq!(unsafe { signal(1234, HANDLER) }, HANDLER);
+        assert_eq!(SIGNAL_SIGNUM.load(Ordering::Relaxed), 1234);
+        assert_eq!(SIGNAL_HANDLER.load(Ordering::Relaxed), HANDLER as u64);
+        assert_eq!(SIGNAL_OWNER.load(Ordering::Relaxed), OWNER);
+        assert_eq!(unsafe { sigaction(1235) }, 71);
+        assert_eq!(SIGACTION_SIGNUM.load(Ordering::Relaxed), 1235);
+        assert_eq!(SIGACTION_OWNER.load(Ordering::Relaxed), OWNER);
+        assert_eq!(unsafe { raise(1236) }, 73);
+        assert_eq!(RAISE_SIGNUM.load(Ordering::Relaxed), 1236);
+        assert_eq!(RAISE_OWNER.load(Ordering::Relaxed), OWNER);
+
         unsafe { crate::os::dll::close(handle) };
     }
 

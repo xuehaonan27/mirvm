@@ -28,7 +28,7 @@ const SHT_SYMTAB: u32 = 2;
 /// Err = 不是预期的 ELF64 LE / 结构越界（格式损坏——物化产物不应如此）。
 /// 产品面只用 hidden_symtab_values；本原始视图留作单测对照（visible 符号双道同址）。
 #[cfg(test)]
-pub fn symtab_values(so_path: &str) -> Result<HashMap<Box<str>, u64>, String> {
+pub(crate) fn symtab_values(so_path: &str) -> Result<HashMap<Box<str>, u64>, String> {
     symbol_table_values(so_path, SHT_SYMTAB)
 }
 

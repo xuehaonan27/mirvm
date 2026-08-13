@@ -334,19 +334,30 @@ impl<'tcx> LowerCx<'tcx, '_> {
         };
         let unwind = self.lower_unwind(unwind);
         let term = match ct {
-            CallTarget::Direct(Callee::Func(id)) => Terminator::Call {
-                callee: id,
-                args: ir_args,
-                ret,
-                target: tgt,
-                unwind,
-            },
+            CallTarget::Direct(Callee::Func(id)) => {
+                let role = self
+                    .linker
+                    .main_catch_site
+                    .filter(|site| {
+                        site.boundary_caller == self.instance && site.boundary_callee == id
+                    })
+                    .map_or(ir::CallRole::Normal, |_| ir::CallRole::MainPanicBoundary);
+                Terminator::Call {
+                    callee: id,
+                    args: ir_args,
+                    ret,
+                    target: tgt,
+                    unwind,
+                    role,
+                }
+            }
             CallTarget::Direct(Callee::Builtin(b)) => Terminator::CallBuiltin {
                 builtin: b,
                 args: ir_args,
                 ret,
                 target: tgt,
                 unwind,
+                role: ir::BuiltinCallRole::Normal,
             },
             CallTarget::Direct(Callee::Foreign {
                 sym,

@@ -1,13 +1,19 @@
-//! os::process — Linux 进程原语：getenv/write/strlen/fork/atexit/syscall 直通。
+//! Linux process primitives.
 //!
-//! 归并 interp.rs 的 Host* builtin 触点。原语不裁决：单线程 fork 守卫、
-//! abort 文案、atexit 注册表与 LIFO 回调执行留引擎；本层只做诚实的 libc
-//! 调用。未列举 syscall 族唯一通道 = `syscall` 变参单点（C10 直通纪律：
-//! 不为每个 syscall 建壳）。地址值按 u64 出入（leaf 类型纪律）。
+//! Primitives are not adjudicated. Detailed behaviours like single-threaded
+//! fork guards, abort documentation, atexit registry, and LIFO callback
+//! execution, are all left to the engine. This module only performs honest
+//! libc calls.
+//! System calls that's unlisted here, should only pass through [`syscall`].
+//! Currently os::process does not build a shim for every system call. But may
+//! do so later.
+//! Address values are u64 encoded (leaf type discipline).
 
 use crate::mirvm_log;
 
-/// getenv(3)：name_addr = guest 侧 NUL 结尾字符串真地址；返回真地址或 0。
+/// Safe wrapper of `getenv(3)`.
+/// `name_addr`: guest side NUL-terminated string's  true address.
+/// Returns true address, or 0 on failure.
 pub fn getenv(name_addr: u64) -> u64 {
     unsafe { libc::getenv(name_addr as *const libc::c_char) as u64 }
 }
@@ -26,6 +32,23 @@ pub fn c_strlen(s_addr: u64) -> u64 {
 /// 守卫（单线程放行）在引擎侧；exec 族走 foreign 直通，不经此。
 pub fn fork() -> i64 {
     unsafe { libc::fork() as i64 }
+}
+
+/// raise(3)：向当前宿主线程同步投递信号。Engine 对 guest handler 的同步
+/// 执行顺序在上层裁决；本层只保留 libc 返回值/errno 语义。
+pub fn raise(signum: i32) -> i32 {
+    unsafe { libc::raise(signum) }
+}
+
+/// Read/write the calling pthread's libc `errno`. Callers must read it
+/// immediately after the failing libc operation, before formatting or any
+/// other library call can overwrite it.
+pub fn errno() -> i32 {
+    unsafe { *libc::__errno_location() }
+}
+
+pub fn set_errno(value: i32) {
+    unsafe { *libc::__errno_location() = value };
 }
 
 /// atexit(3)：挂 native trampoline（引擎链接的 libc atexit，非 guest dlsym）。

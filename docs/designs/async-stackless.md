@@ -164,7 +164,9 @@ guest（tokio reactor）调 `epoll_create1`/`epoll_ctl`/`epoll_wait`：
 
 - Rust async 编译期降低成**无栈状态机（普通 MIR）**，mirvm **零引擎侧特殊支持**即可解释（实证：与 native 逐位一致）。
 - async **对帧模型 A/B 无诉求**（无栈 → 不冻结解释器栈）→ 确认 C11 选 A 不因 async 付代价。
-- async I/O（epoll/socket/eventfd/timerfd/io_uring）是**纯直通真内核 fd**，signal handler 走 thunk，**全无 emulation**。
+- async I/O（epoll/socket/eventfd/timerfd/io_uring）是**纯直通真内核 fd**；signal handler
+  “走 thunk”是本次历史调研当时的判断，已由 decision-history §7.54 推翻为原子登记桩 +
+  普通安全点派送。这两者都不需要模拟一套内核 I/O。
 - mirvm 支持完整 async 只欠：这批**直通 I/O handler**（薄，roadmap）+ 真线程（已有）+ tier-0 GIL 的"阻塞前放锁"纪律。
 
 ---

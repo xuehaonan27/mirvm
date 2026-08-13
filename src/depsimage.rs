@@ -144,7 +144,9 @@ pub fn try_load(
 ) -> Option<crate::baseimage::BaseImage> {
     let (key, stamps) = pre_key(rustc_args, &base.key)?;
     let data = std::fs::read(file_path(&key)).ok()?;
-    let f: DepsFile = postcard::from_bytes(&data).ok()?;
+    let mut f: DepsFile = postcard::from_bytes(&data).ok()?;
+    f.module.rebuild_load_map();
+    f.module.rebuild_fn_addrs();
     // 精确相等校验：build id、底座键、盖戳清单（碰撞免疫）、降低指纹分层
     if f.build_id != env!("MIRVM_BUILD_ID")
         || f.base_key != base.key

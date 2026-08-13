@@ -91,7 +91,81 @@ pub enum PlaceBase {
     /// 帧内局部：真地址 = 帧基址 + off
     Local(u32),
     /// 冻结区真地址（statics/常量池，M4.1 第 4 步物化）
-    Static(u64),
+    Static(LinkAddr),
+}
+
+/// 包内记录的链接时地址。它与普通整数分型，加载实例可据此统一换算为本实例地址。
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LinkAddr(pub u64);
+
+impl std::fmt::LowerHex for LinkAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::LowerHex::fmt(&self.0, f)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LoadRange {
+    link_start: u64,
+    runtime_start: u64,
+    len: u64,
+}
+
+/// 一次 Module 实例的地址换算表。artifact 中保存 LinkAddr，实例创建后才得到
+/// runtime address；普通整数不经过这张表。
+#[derive(Debug, Default)]
+pub struct LoadMap {
+    ranges: Vec<LoadRange>,
+    exact: std::collections::HashMap<LinkAddr, u64>,
+    strict: bool,
+}
+
+impl LoadMap {
+    pub fn add_frozen(&mut self, arena: &super::frozen::FrozenArena) {
+        self.ranges.push(LoadRange {
+            link_start: arena.link_base(),
+            runtime_start: arena.runtime_base(),
+            len: arena.used(),
+        });
+    }
+
+    pub fn add_exact(&mut self, link: LinkAddr, runtime: u64) -> Result<(), String> {
+        if self.exact.insert(link, runtime).is_some() {
+            return Err(format!("duplicate exact load mapping for {:#x}", link.0));
+        }
+        Ok(())
+    }
+
+    pub fn require_mapped(&mut self) {
+        self.strict = true;
+    }
+
+    pub(crate) fn is_strict(&self) -> bool {
+        self.strict
+    }
+
+    pub(crate) fn resolves_frozen(&self, addr: LinkAddr) -> bool {
+        self.ranges.iter().any(|range| {
+            addr.0
+                .checked_sub(range.link_start)
+                .is_some_and(|off| off < range.len)
+        })
+    }
+
+    pub fn resolve(&self, addr: LinkAddr) -> Option<u64> {
+        if let Some(&runtime) = self.exact.get(&addr) {
+            return Some(runtime);
+        }
+        self.ranges.iter().find_map(|range| {
+            let off = addr.0.checked_sub(range.link_start)?;
+            (off < range.len).then(|| range.runtime_start + off)
+        })
+    }
+
+    pub fn resolve_or_identity(&self, addr: LinkAddr) -> Option<u64> {
+        self.resolve(addr)
+            .or_else(|| (!self.strict).then_some(addr.0))
+    }
 }
 
 /// 地址表达式的一步（lower 已把 Field/Downcast 折叠成 Offset）。
@@ -141,6 +215,8 @@ pub enum Operand {
         bits: u64,
         width: Width,
     },
+    /// 链接时地址立即数。加载时只重定位这个显式地址形态，绝不猜测普通整数。
+    AddrImm(LinkAddr),
     /// place 的真地址本身（indirect 实参 = 传聚合的地址）
     AddrOf(PlaceExpr),
     /// 值减常量（Subslice 的 slice meta：len' = len − k；M4.4）
@@ -157,6 +233,7 @@ impl Operand {
             Operand::Slot(s) => s.width,
             Operand::Mem { width, .. } => *width,
             Operand::Imm { width, .. } => *width,
+            Operand::AddrImm(_) => Width::W64,
             Operand::AddrOf(_) => Width::W64,
             Operand::SubImm { base, .. } => base.width(),
         }
@@ -962,10 +1039,12 @@ pub enum Builtin {
     /// `__rust_no_alloc_shim_is_unstable_v2()`：分配前哨兵，空操作
     NoAllocShim,
     /// `_Unwind_RaiseException(exc) -> !`：unwind 原语（M4.2，spike3 的 raise）——
-    /// 宿主 unwinder 载运 guest exception 指针（panic_unwind 结构在 guest 堆闭环）
+    /// 宿主 unwinder 载运 MIRVM 自有异常，其内保留 guest exception 指针；
+    /// panic_unwind 结构仍由 guest 标准库在 guest 堆中管理。
     UnwindRaise,
     /// `catch_unwind(try_fn, data, catch_fn) -> i32` intrinsic（rust_try）：
-    /// 宿主 catch + 间接调用派发；downcast 区分 GuestPanic/宿主 panic
+    /// 原始 unwinder catch + 异常类别/所属 Engine 分类 + 间接调用派发。
+    /// 只有当前 Engine 的 guest panic 会交给 `catch_fn`。
     CatchUnwind,
     /// os:: 最小直通（panic 链需要，真实地址零编组；M4.3 换正式注册表 dlsym+libffi）
     HostGetenv,
@@ -988,11 +1067,14 @@ pub enum Builtin {
     HostOnExit,
     /// `syscall(nr, ...) -> long` 可变参直通（按实参个数分派）
     HostSyscall,
-    /// `signal(signum, SIG_DFL|SIG_IGN)`：不含 guest 回调，可安全直通；其他 handler
-    /// 执行期明确失败，直到有异步信号安全的专用 thunk。
+    /// `signal(signum, handler)`：guest handler 经稳定内核信号桩登记到
+    /// 所属 Engine inbox，再由普通 VM 安全点执行。
     HostSignal,
-    /// `sigaction(signum, act, oldact)` 的受限直通：查询（act=NULL）或
-    /// act.handler=SIG_DFL/SIG_IGN；结构体中的 guest handler 仍明确失败。
+    /// `raise(signum)`：当前 guest 线程的同步信号投递。与异步内核投递不同，
+    /// handler 必须在 `raise` 返回前执行完，才能保持 POSIX 的嵌套顺序。
+    HostRaise,
+    /// `sigaction(signum, act, oldact)`：进程级注册表保留 guest-visible
+    /// handler/mask/flags，并在 Engine 关闭时恢复前一代 disposition。
     HostSigaction,
     /// 已知不能安全直通的宿主边界。执行到必须明确失败，绝不伪造成功。
     /// 包括需要异步安全专用实现的边界，以及需要 guest frame/context
@@ -1215,7 +1297,7 @@ pub type TlsId = u32;
 /// 每线程首访时 heap 分配 size 字节拷模板。v1 记账：dtor 不跑（设计 D3）。
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TlsSlot {
-    pub template: u64,
+    pub template: LinkAddr,
     pub size: u64,
     pub align: u32,
 }
@@ -1288,6 +1370,25 @@ pub enum SwitchDiscr {
     Wide(PlaceExpr),
 }
 
+/// 直接 guest 调用在标准启动链中的职责。绝大多数调用是 `Normal`；固定工具链的
+/// `lang_start_internal` 只把包住用户 `main` 的那次 `catch_unwind` 标成
+/// `MainPanicBoundary`，让 Engine 在 guest std 消费异常后仍能保留结构化结果。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum CallRole {
+    #[default]
+    Normal,
+    MainPanicBoundary,
+}
+
+/// 引擎原语调用在标准启动链中的职责。只有固定工具链中经结构校验的那一个
+/// 固定工具链的 `std::intrinsics::catch_unwind` 调用点会标成 `MainPanicCatcher`。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum BuiltinCallRole {
+    #[default]
+    Normal,
+    MainPanicCatcher,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Terminator {
     Goto(Bb),
@@ -1302,6 +1403,8 @@ pub enum Terminator {
         ret: RetDest,
         target: Bb,
         unwind: UnwindAction,
+        #[serde(default)]
+        role: CallRole,
     },
     /// 引擎原语调用（不是 guest 函数，无 Call 边）。
     CallBuiltin {
@@ -1310,6 +1413,8 @@ pub enum Terminator {
         ret: RetDest,
         target: Bb,
         unwind: UnwindAction,
+        #[serde(default)]
+        role: BuiltinCallRole,
     },
     /// foreign 直通（os:: P7 处置①的通用道）：dlsym + libffi 按冻结签名直调——
     /// 真实地址模型零编组（guest 指针即宿主指针）。
@@ -1384,7 +1489,7 @@ pub struct FuncBody {
 }
 
 /// 函数表有两种所有权：lower/L2/image 仍是普通 Vec；`.mirvm` 包只保留
-/// mmap、函数切片索引和按需发布槽。解释器/JIT 继续通过 `len/get/index/iter`
+/// 加载时取得的不可变字节快照、函数切片索引和按需发布槽。解释器/JIT 继续通过 `len/get/index/iter`
 /// 使用同一接口。
 pub struct FuncTable {
     storage: FuncStorage,
@@ -1408,7 +1513,7 @@ pub(crate) struct FuncBlob {
 }
 
 struct DecodeState {
-    map: std::sync::Arc<memmap2::Mmap>,
+    map: std::sync::Arc<[u8]>,
     blobs: Box<[FuncBlob]>,
     cells: Box<[std::sync::OnceLock<Result<FuncBody, String>>]>,
     queue: std::sync::Mutex<DecodeQueue>,
@@ -1467,8 +1572,8 @@ impl FromIterator<FuncBody> for FuncTable {
 }
 
 impl FuncTable {
-    pub(crate) fn from_mmap(
-        map: std::sync::Arc<memmap2::Mmap>,
+    pub(crate) fn from_bytes(
+        map: std::sync::Arc<[u8]>,
         blobs: Vec<FuncBlob>,
         heat_path: std::path::PathBuf,
     ) -> Self {
@@ -1545,6 +1650,12 @@ impl FuncTable {
             unreachable!()
         };
         out.append(funcs);
+    }
+
+    pub(crate) fn flush_heat_order(&self) {
+        if let FuncStorage::Lazy(lazy) = &self.storage {
+            write_heat_order(&lazy.state);
+        }
     }
 
     fn make_eager(&mut self) {
@@ -1744,7 +1855,7 @@ impl<'de> serde::Deserialize<'de> for FuncTable {
 pub struct EntryPlan {
     pub lang_start: FuncId,
     /// 用户 main 的 D4 条目真地址（lang_start 第一实参，经 CallIndirect 派发）
-    pub main_addr: u64,
+    pub main_addr: LinkAddr,
     pub argc: u64,
     /// argv C 串指针表的真地址（冻结区）
     pub argv_ptr: u64,
@@ -1763,18 +1874,41 @@ pub struct GotSym {
 /// `*addr = resolve(foreign_syms[sym]) + addend`。
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct GotFixup {
-    pub addr: u64,
+    pub addr: LinkAddr,
     pub sym: u32,
     pub addend: u64,
 }
 
-/// P1 条目可执行化配方（decision-history §7.6）：本域 stub 位序 = 表位序，
-/// 每条 =（被取址的 FFI 可派生 guest fn, 其冻结 cif 签名）；启动相经 libffi
-/// Closure 物化成 stub 字节（代码域固定基，偏移稳定 ⇒ fn-ptr 值可烤/可序列化）。
+/// 冻结字节中的一处客体指针。`at` 是要写的 8 字节格，`target` 是它应指向的
+/// 链接地址（已折入 addend）；实例化时两端分别经 LoadMap 换算后再写入。
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct FrozenReloc {
+    pub at: LinkAddr,
+    pub target: FrozenRelocTarget,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub enum FrozenRelocTarget {
+    Frozen(LinkAddr),
+    Entry(LinkAddr),
+}
+
+/// P1 条目可执行化配方（decision-history §7.6）。artifact 只保存 guest fn 的
+/// 逻辑地址、FuncId 与冻结的 C ABI 签名；每个 Engine 在启动相经 libffi 物化独有
+/// closure，真实 fn-ptr 不进缓存或包。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EntryStubSite {
+    /// artifact 中所有该 fn-ptr 引用共享的逻辑身份；每个 Engine 映射到独有 closure。
+    pub link_addr: LinkAddr,
     pub func: FuncId,
     pub sig: ForeignSig,
+}
+
+/// Hidden ELF symbol used by native bridges that call back into a guest entry.
+/// The symbol identifies the artifact address only; each Engine writes its own
+/// runtime closure address into the corresponding slot while instantiating.
+pub(crate) fn native_entry_slot_name(link_addr: LinkAddr) -> String {
+    format!("__mirvm_p1_target_{:016x}", link_addr.0)
 }
 
 /// 自定义 `#[global_allocator]` 的 `__rust_*` shim 四件套 FuncId（corpus 批7
@@ -1792,10 +1926,23 @@ pub struct AllocShims {
     pub alloc_zeroed: FuncId,
 }
 
+/// 未捕获 guest panic 的客体侧资源回收计划。
+///
+/// `cleanup` 是固定工具链里 `std::panicking::catch_unwind::cleanup` 的客体
+/// 函数：它接收 panic_unwind 的原始异常指针，取出 `Box<dyn Any + Send>` 并
+/// 减少 guest 的 panic 计数。`drop_payload` 是该 Box 类型的 drop glue，负责
+/// 运行用户载荷的 Drop 并通过 guest 自己的全局分配器释放内存。引擎只搬运两个
+/// 不透明机器字，不读取标准库私有 Exception/Box/vtable 布局。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GuestPanicCleanup {
+    pub cleanup: FuncId,
+    pub drop_payload: FuncId,
+}
+
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Module {
     pub funcs: FuncTable,
-    /// FuncId 顺序的客体符号名轻量索引。v3 包把函数体保持惰性时，backtrace 仍能
+    /// FuncId 顺序的客体符号名轻量索引。包把函数体保持惰性时，backtrace 仍能
     /// 在不解码全部 FuncBody 的前提下建立标准 ELF 符号表。
     pub function_names: Vec<Box<str>>,
     /// 当前进程符号 ELF 中的 FuncId → 地址；加载相生成，不进缓存或包。
@@ -1808,13 +1955,30 @@ pub struct Module {
     pub exports: std::collections::HashMap<Box<str>, FuncId>,
     /// 冻结区（statics/常量池/fn 条目；lower 物化，发布后只读——static mut 例外）
     pub frozen: Option<super::frozen::FrozenArena>,
+    /// 本 Module 实例的链接地址 → 运行地址映射。包/镜像实例化时建立，不入 artifact。
+    #[serde(skip)]
+    pub load_map: LoadMap,
     /// fn-ptr 条目真地址 → FuncId（D4 反查；间接调用派发 M4.1 第 5 步）
     pub fn_addrs: std::collections::HashMap<u64, FuncId>,
+    /// `fn_addrs` 的 artifact 地址形态。动态实例或 P1 closure 地址变化后据此重建。
+    pub link_fn_addrs: std::collections::HashMap<LinkAddr, FuncId>,
+    /// 本 Engine 已物化、可直接交给 native 的 P1 closure 地址。
+    #[serde(skip)]
+    pub executable_entry_addrs: std::collections::HashSet<u64>,
     /// `-l` 链接指令的可选共享库候选路径；不存在时继续尝试其他候选。
     pub native_libs: Vec<Box<str>>,
     /// 已由加载相物化、执行 foreign 前必须成功 dlopen 的共享库（当前为 M5.1 Static
     /// archive `.a → .so` 产物）。失败不可退化为普通 dlsym miss。
     pub required_native_libs: Vec<Box<str>>,
+    /// Expected content identity for each required native library. A zero
+    /// value denotes a raw in-process Module whose caller did not supply an
+    /// artifact hash; Package instances always carry and verify this list.
+    #[serde(skip)]
+    pub required_native_hashes: Vec<u128>,
+    /// 已完成系统依赖解析与 ELF 重定位、但由 Engine 显式管理 init/fini 的
+    /// per-Engine 自产共享库映像；不进入缓存或包。
+    #[serde(skip)]
+    pub native_images: Vec<super::native_instance::NativeImage>,
     /// 当前包自装载的机器码镜像。只对本 Module 的 foreign 解析可见，避免多
     /// Engine 同名 global_asm 串线；不进序列化，pack 加载时由 MC 节重建。
     #[serde(skip)]
@@ -1834,23 +1998,29 @@ pub struct Module {
     /// 字节码/冻结字节烤槽址不烤值；启动相按名重解析后逐 fixup 点重写内容，
     /// 模块对 ASLR 位置无关。image 侧各自的表随 image 模块走（absorb 按名合流）。
     pub foreign_syms: Vec<GotSym>,
-    /// P2 启动相修补点：`*(addr) = resolve(foreign_syms[sym]) + addend`；addr 在
-    /// 本模块冻结域（固定基 ⇒ 跨进程稳定）。槽位本体以 addend=0 登记。
+    /// P2 启动相修补点：`*(addr) = resolve(foreign_syms[sym]) + addend`；addr 是
+    /// 本模块冻结域的 LinkAddr，实例化后通过 LoadMap 找到真实槽位。
     pub got_fixups: Vec<GotFixup>,
-    /// P1 条目可执行化配方（decision-history §7.6）：本域被取址的 FFI 可派生
-    /// guest fn 有序表（位序 = stub 偏移 ×16）；启动相重建 stub 字节后封存 RX。
+    /// 冻结区内部/跨冻结域的客体指针重定位，不含 foreign GOT 修补点。
+    pub frozen_relocs: Vec<FrozenReloc>,
+    /// P1 条目可执行化配方（decision-history §7.6）：本域被取址且可导出 C ABI 的
+    /// guest fn；每个 Engine 由这些配方建立独有 closure 与 LinkAddr 映射。
     pub entry_stub_sites: Vec<EntryStubSite>,
-    /// 本域运行期 stub 代码域句柄（不进快照：字节按配方每进程重建——
-    /// asm_stub_addrs 同契约）；冷路径自 lower 带来，warm 启动相重映射。
+    /// lower 期用于分配稳定逻辑地址的旧代码域句柄。启动 Engine 时释放映射，
+    /// 运行期只执行 per-Engine libffi closure；该字段不进 artifact。
     #[serde(skip)]
     pub entry_stubs: super::codearena::StubArena,
-    /// absorb 挂载的 image/底座条目 stub（配方随 image 文件走；合流后按各自
-    /// 代码域重建）：(代码域基址, 配方, 运行期句柄)。
+    /// absorb 挂载的 image/底座条目逻辑地址域与配方：
+    /// (链接地址域基址, 配方, lower 期地址分配句柄)。
     #[serde(skip)]
     pub image_entry_stubs: Vec<(usize, Vec<EntryStubSite>, super::codearena::StubArena)>,
     /// 自定义 #[global_allocator] 的 __rust_* shim（AllocShims 字段注）：
     /// kind=Global 时 delta 侧登记，运行期 interp CallBuiltin(Rust*) 臂统一路由。
     pub custom_alloc_shims: Option<AllocShims>,
+    /// Engine 顶层接住未捕获 guest panic 后必须执行的客体侧回收计划。
+    /// 手工测试 Module 和不能独立执行的 image 栈层可以没有；所有可执行的
+    /// full/delta lower 产物都必须有，真实运行入口遇到 None 必须拒绝而非泄漏。
+    pub guest_panic_cleanup: Option<GuestPanicCleanup>,
     /// main 启动链（M4.3；--vm-call 模式下为 None）
     pub entry: Option<EntryPlan>,
     /// S4/S3′ image 栈冻结区（absorb 时挂载底座 + 各依赖 image 的冻结区，与本模块
@@ -1861,6 +2031,70 @@ pub struct Module {
 }
 
 impl Module {
+    /// 将链接时地址换算为本 Module 实例的运行地址。
+    /// 动态装载映射接入前，冷 lower 产物保持恒等映射。
+    pub fn resolve_link_addr(&self, addr: LinkAddr) -> u64 {
+        self.load_map
+            .resolve_or_identity(addr)
+            .unwrap_or_else(|| panic!("unmapped artifact address {:#x}", addr.0))
+    }
+
+    pub fn try_resolve_link_addr(&self, addr: LinkAddr) -> Result<u64, String> {
+        self.load_map
+            .resolve_or_identity(addr)
+            .ok_or_else(|| format!("unmapped artifact address {:#x}", addr.0))
+    }
+
+    pub fn is_executable_entry(&self, addr: u64) -> bool {
+        self.executable_entry_addrs.contains(&addr)
+    }
+
+    pub fn rebuild_load_map(&mut self) {
+        let mut map = LoadMap::default();
+        if let Some(frozen) = &self.frozen {
+            map.add_frozen(frozen);
+        }
+        for frozen in &self.image_frozens {
+            map.add_frozen(frozen);
+        }
+        self.load_map = map;
+    }
+
+    pub fn apply_frozen_relocs(&self) -> Result<(), String> {
+        for (index, reloc) in self.frozen_relocs.iter().enumerate() {
+            let at = self
+                .load_map
+                .resolve(reloc.at)
+                .ok_or_else(|| format!("frozen relocation {index} write address is unmapped"))?;
+            let target_link = match reloc.target {
+                FrozenRelocTarget::Frozen(addr) | FrozenRelocTarget::Entry(addr) => addr,
+            };
+            let target = self.load_map.resolve(target_link).ok_or_else(|| {
+                format!(
+                    "frozen relocation {index} target address {:#x} ({:?}) is unmapped",
+                    target_link.0, reloc.target
+                )
+            })?;
+            unsafe { (at as *mut u64).write_unaligned(target) };
+        }
+        Ok(())
+    }
+
+    pub fn rebuild_fn_addrs(&mut self) {
+        if self.link_fn_addrs.is_empty() {
+            self.link_fn_addrs = self
+                .fn_addrs
+                .iter()
+                .map(|(&addr, &func)| (LinkAddr(addr), func))
+                .collect();
+        }
+        self.fn_addrs = self
+            .link_fn_addrs
+            .iter()
+            .map(|(&addr, &func)| (self.resolve_link_addr(addr), func))
+            .collect();
+    }
+
     pub fn ensure_function_names(&mut self) {
         if self.function_names.len() != self.funcs.len() {
             self.function_names = self.funcs.iter().map(|body| body.name.clone()).collect();
@@ -1869,11 +2103,14 @@ impl Module {
     /// argv C 串表终结化（tier-0 setup_process_memory 同构；M6 片2 起从 lower 迁出）。
     /// argv 是**运行期输入**：不得进 L2 缓存快照，冷/热路径每次运行都在快照之后追加
     /// 分配并回填 EntryPlan——单一代码路径，杜绝冷热漂移。
-    pub fn finalize_entry_argv(&mut self, argv: &[String]) {
+    pub fn finalize_entry_argv(&mut self, argv: &[String]) -> Result<(), String> {
         let Some(entry) = self.entry.as_mut() else {
-            return;
+            return Ok(());
         };
-        let frozen = self.frozen.as_mut().expect("entry 存在则冻结区必在");
+        let frozen = self
+            .frozen
+            .as_mut()
+            .ok_or("executable module has no frozen memory for argv")?;
         let mut ptrs: Vec<u64> = Vec::with_capacity(argv.len());
         for a in argv {
             let bytes = a.as_bytes();
@@ -1891,6 +2128,7 @@ impl Module {
         // 尾 NULL 由清零保证
         entry.argc = argv.len() as u64;
         entry.argv_ptr = table;
+        Ok(())
     }
 
     /// GOT 合流（P2，S4/S3′ absorb）：image 侧符号表并入本模块——sym 按名去重，

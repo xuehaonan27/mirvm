@@ -51,17 +51,21 @@ pub struct FfiState {
 
 impl FfiState {
     /// 解析符号真地址（缓存，含缺席缓存）。None = 全部搜索域都没有。
+    ///
+    /// 调用方拿到地址后必须先结束对 `FfiState` 的可变借用，再进入原生代码：
+    /// 原生函数可以同步回调 guest，而 guest 回调可以再次解析并调用 foreign 符号。
     pub(crate) fn resolve(
         &mut self,
         name: &str,
         optional_libs: &[Box<str>],
         required_libs: &[Box<str>],
+        native_images: &[super::native_instance::NativeImage],
         mc_images: &[super::mcload::McImage],
     ) -> Result<Option<usize>, String> {
         if let Some(&p) = self.syms.get(name) {
             return Ok((p != 0).then_some(p));
         }
-        self.ensure_libs(optional_libs, required_libs)?;
+        self.ensure_libs(optional_libs, required_libs, native_images)?;
         let Ok(cname) = CString::new(name) else {
             return Ok(None);
         };
@@ -115,25 +119,37 @@ impl FfiState {
         &mut self,
         optional_libs: &[Box<str>],
         required_libs: &[Box<str>],
+        native_images: &[super::native_instance::NativeImage],
     ) -> Result<(), String> {
         if self.libs_loaded {
             return Ok(());
         }
 
-        for cand in required_libs {
-            let cpath = CString::new(&**cand)
-                .map_err(|_| format!("[native library path must contains NUL]: `{cand}`"))?;
-            let h = crate::os::dll::open(&cpath, crate::os::dll::Mode::Now).map_err(|detail| {
-                format!("[dlopen needs native library] `{cand}` failure: {detail}")
-            })?;
-            self.required_handles.push(h);
-            // hidden 符号 .symtab 兜底表（口径见字段注）。基址或解析失败不建表：
-            // dlsym 可见面不受影响，hidden 符号由 resolve 的既有诊断兜底——宁缺
-            // 勿滥，错基址表会把符号静默解到野地址。
-            if let Some(bias) = crate::os::dll::load_bias(h)
-                && let Ok(syms) = crate::elfsym::hidden_symtab_values(cand)
-            {
-                self.archive_fallbacks.push((bias as u64, syms));
+        if !native_images.is_empty() {
+            if native_images.len() != required_libs.len() {
+                return Err("native image/path count mismatch".into());
+            }
+            for image in native_images {
+                self.required_handles.push(image.handle());
+                self.archive_fallbacks
+                    .push((image.bias(), image.hidden_symbol_values().clone()));
+            }
+        } else {
+            // Direct FfiState probes may still supply raw paths. Product Engine
+            // startup always prepares staged NativeImage objects before this point.
+            for cand in required_libs {
+                let cpath = CString::new(&**cand)
+                    .map_err(|_| format!("[native library path must contains NUL]: `{cand}`"))?;
+                let h =
+                    crate::os::dll::open(&cpath, crate::os::dll::Mode::Now).map_err(|detail| {
+                        format!("[dlopen needs native library] `{cand}` failure: {detail}")
+                    })?;
+                self.required_handles.push(h);
+                if let Some(bias) = crate::os::dll::load_bias(h)
+                    && let Ok(syms) = crate::elfsym::hidden_symtab_values(cand)
+                {
+                    self.archive_fallbacks.push((bias as u64, syms));
+                }
             }
         }
         for cand in optional_libs {
@@ -159,7 +175,11 @@ pub(crate) fn resolve_got_fixups(module: &mut super::ir::Module) -> Result<(), S
         return Ok(());
     }
     let mut ffi = FfiState::default();
-    ffi.ensure_libs(&module.native_libs, &module.required_native_libs)?;
+    ffi.ensure_libs(
+        &module.native_libs,
+        &module.required_native_libs,
+        &module.native_images,
+    )?;
     let mut resolved: Vec<u64> = Vec::with_capacity(module.foreign_syms.len());
     for s in &module.foreign_syms {
         match (
@@ -167,6 +187,7 @@ pub(crate) fn resolve_got_fixups(module: &mut super::ir::Module) -> Result<(), S
                 &s.name,
                 &module.native_libs,
                 &module.required_native_libs,
+                &module.native_images,
                 &module.mc_images,
             )?,
             s.weak,
@@ -183,7 +204,8 @@ pub(crate) fn resolve_got_fixups(module: &mut super::ir::Module) -> Result<(), S
     }
     for f in &module.got_fixups {
         // 修补点 addr 恒指冻结域内 8 字节格（lower 登记纪律）；冻结区映射终身 RW。
-        unsafe { *(f.addr as *mut u64) = resolved[f.sym as usize].wrapping_add(f.addend) };
+        let addr = module.resolve_link_addr(f.addr);
+        unsafe { *(addr as *mut u64) = resolved[f.sym as usize].wrapping_add(f.addend) };
     }
     Ok(())
 }
@@ -247,28 +269,6 @@ pub fn amplify_pthread_stack(sym: &str, av: &[u64]) -> Option<(*mut std::ffi::c_
         return None;
     }
     Some((attr, size))
-}
-
-/// 直调。args = 求值好的 u64 位（指针即真地址；F32 位在低 32）。返回 u64 位。
-/// Ok(None) = 符号不存在（调用方给诊断）；Err = 必需库加载失败，禁止退化为 dlsym miss。
-pub fn call(
-    state: &mut FfiState,
-    module: &super::ir::Module,
-    sym: &str,
-    sig: &ForeignSig,
-    args: &[u64],
-    ret_dst: Option<u64>,
-) -> Result<Option<u64>, String> {
-    let Some(fnptr) = state.resolve(
-        sym,
-        &module.native_libs,
-        &module.required_native_libs,
-        &module.mc_images,
-    )?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(call_addr(fnptr, sig, args, ret_dst)))
 }
 
 /// 按真码地址直调（CallForeign 的共用尾；也是 CallIndirect 反查未命中时的
@@ -424,8 +424,18 @@ unsafe fn call_return_into_unwind(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::{FfiState, call_addr};
-    use crate::vm::engine::ir::{FfiAgg, FfiField, FfiKind, FfiLeaf, ForeignSig};
+    use crate::vm::engine::ctx::{Engine, Shared};
+    use crate::vm::engine::interp::{RunOutcome, run_export};
+    use crate::vm::engine::ir::{
+        Block, FfiAgg, FfiField, FfiKind, FfiLeaf, ForeignSig, FuncBody, MemOrd, Module, Operand,
+        ParamAbi, RetAbi, RetDest, Rvalue, ScalarPlace, Slot, Stmt, Terminator, UnwindAction,
+        Width,
+    };
+
+    static REENTRANT_FOREIGN_LEN: AtomicU64 = AtomicU64::new(0);
 
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -482,6 +492,190 @@ mod tests {
                 },
             ],
         })
+    }
+
+    fn reentrant_foreign_module(data: *mut u64) -> Module {
+        const CALLBACK_ADDR: u64 = 0xf11f_1f11;
+        let callback_sig = ForeignSig {
+            args: vec![FfiKind::Ptr, FfiKind::Ptr],
+            ret: FfiKind::I32,
+            fixed: None,
+            thunk_args: Vec::new(),
+            unwind: true,
+        };
+        let outer_ret = Slot {
+            off: 0,
+            width: Width::W64,
+        };
+        let len = Slot {
+            off: 8,
+            width: Width::W64,
+        };
+        let callback_ret = Slot {
+            off: 0,
+            width: Width::W32,
+        };
+        let callback = FuncBody {
+            frame_size: 32,
+            frame_align: 8,
+            ret: RetAbi::Scalar(callback_ret),
+            params: vec![
+                ParamAbi::Scalar(Slot {
+                    off: 16,
+                    width: Width::W64,
+                }),
+                ParamAbi::Scalar(Slot {
+                    off: 24,
+                    width: Width::W64,
+                }),
+            ],
+            caller_loc_off: None,
+            blocks: vec![
+                Block {
+                    stmts: Vec::new(),
+                    term: Terminator::CallForeign {
+                        sym: "strlen".into(),
+                        sig: sig(vec![FfiKind::Ptr], FfiKind::U64, None, true),
+                        args: vec![Operand::Imm {
+                            bits: c"nested".as_ptr() as u64,
+                            width: Width::W64,
+                        }],
+                        ret: RetDest::Scalar(ScalarPlace::Slot(len)),
+                        target: 1,
+                        unwind: UnwindAction::Continue,
+                    },
+                },
+                Block {
+                    stmts: vec![
+                        Stmt::AtomicStore {
+                            addr: Operand::Imm {
+                                bits: REENTRANT_FOREIGN_LEN.as_ptr() as u64,
+                                width: Width::W64,
+                            },
+                            val: Operand::Slot(len),
+                            order: MemOrd::SeqCst,
+                        },
+                        Stmt::Assign {
+                            dst: ScalarPlace::Slot(callback_ret),
+                            rv: Rvalue::Use(Operand::Imm {
+                                bits: 0,
+                                width: Width::W32,
+                            }),
+                        },
+                    ],
+                    term: Terminator::Return,
+                },
+            ],
+            name: "qsort_guest_callback_calls_strlen".into(),
+        };
+        let outer = FuncBody {
+            frame_size: 8,
+            frame_align: 8,
+            ret: RetAbi::Scalar(outer_ret),
+            params: Vec::new(),
+            caller_loc_off: None,
+            blocks: vec![
+                Block {
+                    stmts: Vec::new(),
+                    term: Terminator::CallForeign {
+                        sym: "qsort".into(),
+                        sig: ForeignSig {
+                            args: vec![FfiKind::Ptr, FfiKind::U64, FfiKind::U64, FfiKind::Ptr],
+                            ret: FfiKind::Void,
+                            fixed: None,
+                            thunk_args: vec![(3, callback_sig)],
+                            unwind: true,
+                        },
+                        args: vec![
+                            Operand::Imm {
+                                bits: data as u64,
+                                width: Width::W64,
+                            },
+                            Operand::Imm {
+                                bits: 2,
+                                width: Width::W64,
+                            },
+                            Operand::Imm {
+                                bits: std::mem::size_of::<u64>() as u64,
+                                width: Width::W64,
+                            },
+                            Operand::Imm {
+                                bits: CALLBACK_ADDR,
+                                width: Width::W64,
+                            },
+                        ],
+                        ret: RetDest::Ignore,
+                        target: 1,
+                        unwind: UnwindAction::Continue,
+                    },
+                },
+                Block {
+                    stmts: vec![Stmt::Assign {
+                        dst: ScalarPlace::Slot(outer_ret),
+                        rv: Rvalue::Use(Operand::Imm {
+                            bits: 0x51_51,
+                            width: Width::W64,
+                        }),
+                    }],
+                    term: Terminator::Return,
+                },
+            ],
+            name: "qsort_synchronously_calls_guest".into(),
+        };
+        let mut module = Module {
+            funcs: vec![outer, callback].into(),
+            ..Module::default()
+        };
+        module.exports.insert("probe".into(), 0);
+        module.fn_addrs.insert(CALLBACK_ADDR, 1);
+        module
+    }
+
+    #[test]
+    fn native_callback_can_reenter_guest_and_make_another_foreign_call() {
+        #[allow(unused_mut)]
+        let mut modes = vec![("interp", false)];
+        #[cfg(feature = "cranelift")]
+        modes.push(("jit", true));
+
+        for (mode, jit) in modes {
+            REENTRANT_FOREIGN_LEN.store(0, Ordering::SeqCst);
+            let mut data = [2_u64, 1];
+            let module = reentrant_foreign_module(data.as_mut_ptr());
+            crate::vm::engine::verify::module(&module)
+                .unwrap_or_else(|error| panic!("{mode}: invalid reentry probe: {error}"));
+            let mut shared = Shared::new(module);
+            shared.jit.enabled = jit;
+            if jit {
+                shared.jit.threshold = 1;
+                shared.jit.sync = true;
+            }
+            let engine = Engine::new(shared);
+
+            let result = unsafe { run_export(&engine, "probe", &[]) };
+            assert!(
+                matches!(result, Ok(RunOutcome::Returned(value)) if value.lo == 0x51_51),
+                "{mode}: synchronous native callback did not return through the guest: {result:?}"
+            );
+            assert_eq!(
+                REENTRANT_FOREIGN_LEN.load(Ordering::SeqCst),
+                6,
+                "{mode}: guest callback did not finish its nested strlen foreign call"
+            );
+            if jit {
+                assert!(
+                    engine
+                        .shared()
+                        .jit
+                        .slots
+                        .iter()
+                        .take(2)
+                        .all(|slot| slot.load(Ordering::Acquire) != 0),
+                    "{mode}: forced synchronous JIT did not publish both guest functions"
+                );
+            }
+            engine.wait_closed().unwrap();
+        }
     }
 
     #[test]
@@ -581,7 +775,7 @@ mod tests {
     fn missing_optional_candidate_still_allows_rtld_default_resolution() {
         let mut state = FfiState::default();
         let address = state
-            .resolve("malloc", &[missing_library()], &[], &[])
+            .resolve("malloc", &[missing_library()], &[], &[], &[])
             .expect("optional dlopen failure must stay optional");
         assert!(address.is_some(), "malloc should resolve from RTLD_DEFAULT");
     }
@@ -591,7 +785,7 @@ mod tests {
         let missing = missing_library();
         let mut state = FfiState::default();
         let error = state
-            .resolve("malloc", &[], std::slice::from_ref(&missing), &[])
+            .resolve("malloc", &[], std::slice::from_ref(&missing), &[], &[])
             .unwrap_err();
 
         assert!(
@@ -663,7 +857,7 @@ mod tests {
         let mut state = FfiState::default();
         let required: Box<str> = so.display().to_string().into();
         let resolved = state
-            .resolve("malloc", &[], std::slice::from_ref(&required), &[])
+            .resolve("malloc", &[], std::slice::from_ref(&required), &[], &[])
             .expect("required lib loads")
             .expect("malloc resolves");
         assert_ne!(

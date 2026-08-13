@@ -142,7 +142,8 @@ if run_fake_gate "$TMP/gate.out" SKIP_TSAN=1; then
         tests/suites/contracts/cargoless_sources.sh tests/suites/contracts/pack.sh \
         tests/suites/contracts/build_script_rerun.sh tests/suites/contracts/deps_image.sh \
         tests/suites/corpus/contract.sh tests/suites/runtime/x86_features.sh \
-        tests/suites/runtime/semantics.sh tests/suites/runtime/jit_stats.sh \
+        tests/suites/runtime/semantics.sh tests/suites/runtime/c_unwind.sh \
+        tests/suites/runtime/jit_stats.sh \
         tests/suites/performance/limits.sh tests/suites/harness/truth.sh; do
         grep -Fxq "$leaf" "$call_log" || { missing=1; echo "缺调用: $leaf"; }
     done

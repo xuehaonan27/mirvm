@@ -2,13 +2,14 @@
 //! cleanup 链共用）——Goto/SwitchInt/Call/CallForeign/CallIndirect/
 //! CallBuiltin（T1-b 起薄臂：语义体提取至 call::exec_builtin，JIT 助手
 //! 共享同一本体）/InlineAsm/Return/Resume/Terminate。
-//! edge: Cell<Option<Bb>> 协议与 mod.rs 的 FrameGuard 同侧未拆。
+//! edge: Cell<Option<Bb>> 把当前 cleanup 目标交给 interp_frame 的 raw catch 边界。
 
 use super::*;
 use super::{
     call::{call_guarding_terminate, cleanup_edge, exec_builtin},
     stmt::exec_stmt,
 };
+use crate::vm::engine::ir::CallRole;
 
 pub(super) fn run_blocks(
     ctx: *mut Ctx,
@@ -22,6 +23,7 @@ pub(super) fn run_blocks(
 
     let mut blk = entry as usize;
     loop {
+        crate::vm::engine::ctx::drain_pending_signals(ctx);
         let block: &Block = &body.blocks[blk];
         for stmt in &block.stmts {
             exec_stmt(ctx, base, stmt);
@@ -52,6 +54,7 @@ pub(super) fn run_blocks(
                 ret,
                 target,
                 unwind,
+                role,
             } => {
                 let mut av: Vec<u64> = Vec::with_capacity(aops.len() + 1);
                 if let RetDest::Indirect(dst) = ret {
@@ -59,7 +62,13 @@ pub(super) fn run_blocks(
                 }
                 av.extend(aops.iter().map(|o| eval_operand(ctx, base, o).0));
                 edge.set(cleanup_edge(unwind)); // callee 若 panic，本帧从这条边清理
-                let (lo, hi) = call_guarding_terminate(unwind, || call_guest(ctx, *callee, &av)); // ← 宿主递归
+                let call = || call_guarding_terminate(unwind, || call_guest(ctx, *callee, &av));
+                let (lo, hi) = match role {
+                    CallRole::Normal => call(),
+                    CallRole::MainPanicBoundary => {
+                        crate::vm::engine::ctx::call_main_panic_boundary(ctx, call)
+                    }
+                };
                 edge.set(None);
                 match ret {
                     RetDest::Ignore | RetDest::Indirect(_) => {}
@@ -80,19 +89,9 @@ pub(super) fn run_blocks(
                 unwind,
             } => {
                 let mut av: Vec<u64> = aops.iter().map(|o| eval_operand(ctx, base, o).0).collect();
-                // M4.4 D1：fn-ptr 实参位——guest fn 条目地址逃逸给 native 前物化 thunk
-                // 真码；NULL 与已是 native 真码（反查未命中，guest 转传）原样直传。
-                // P1（§7.6）：FFI 可派生条目值本身已是 stub 码址——跳过二次物化。
-                for (pos, inner) in &sig.thunk_args {
-                    let v = av[*pos];
-                    if v != 0
-                        && !crate::vm::engine::codearena::is_stub_addr(v)
-                        && let Some(&fid) = module.fn_addrs.get(&v)
-                    {
-                        let shared: &'static Shared = unsafe { &*(*ctx).shared };
-                        av[*pos] = crate::vm::engine::thunks::get_or_create(shared, v, fid, inner);
-                    }
-                }
+                let shared: &'static Shared = unsafe { &*(*ctx).shared };
+                let callbacks =
+                    crate::vm::engine::thunks::prepare_foreign_callbacks(shared, sym, sig, &mut av);
                 edge.set(cleanup_edge(unwind));
                 // C1：按值聚合返回 = Indirect 落点（调用点强制），ffi 层 memcpy 至
                 // 目的真地址；标量返回照旧走 u64 通道
@@ -106,10 +105,25 @@ pub(super) fn run_blocks(
                 // 诊断）。显式 stacksize（std::thread 恒显式）临时放大，调用后还原；
                 // guest 自供栈（setstack）不动。栈尺寸属 unspecified（ram-spec §2）。
                 let stack_restore = crate::vm::engine::ffi::amplify_pthread_stack(sym, &av);
-                let r = call_guarding_terminate(unwind, || {
+                // 符号解析会改每线程 FFI 缓存；必须在进入 native 前结束这次可变
+                // 借用。native 可同步回调 guest，回调又可在同一 Ctx 中调用 foreign。
+                let resolved = call_guarding_terminate(unwind, || {
                     let ffi = unsafe { &mut (*ctx).ffi };
-                    crate::vm::engine::ffi::call(ffi, module, sym, sig, &av, ret_dst)
+                    ffi.resolve(
+                        sym,
+                        &module.native_libs,
+                        &module.required_native_libs,
+                        &module.native_images,
+                        &module.mc_images,
+                    )
                 });
+                let r = match resolved {
+                    Ok(Some(fnptr)) => Ok(Some(call_guarding_terminate(unwind, || {
+                        crate::vm::engine::ffi::call_addr(fnptr, sig, &av, ret_dst)
+                    }))),
+                    Ok(None) => Ok(None),
+                    Err(reason) => Err(reason),
+                };
                 if let Some((attr, orig)) = stack_restore {
                     crate::os::thread::attr_set_stack_size(attr, orig);
                 }
@@ -126,6 +140,7 @@ pub(super) fn run_blocks(
                         body.name
                     ));
                 };
+                callbacks.complete(r);
                 match ret {
                     RetDest::Ignore => {}
                     RetDest::Scalar(p) => place_write(ctx, base, p, r),
@@ -207,6 +222,7 @@ pub(super) fn run_blocks(
                 ret,
                 target,
                 unwind,
+                role,
             } => {
                 // T1-b：语义体提取至 exec_builtin（call.rs；JIT mirvm_call_builtin/
                 // mirvm_alloc 助手共享同一本体）——本臂只余实参/ret_dst 求值与
@@ -218,7 +234,7 @@ pub(super) fn run_blocks(
                 } else {
                     None
                 };
-                let (lo, hi) = exec_builtin(ctx, body, edge, builtin, &av, ret_dst, unwind);
+                let (lo, hi) = exec_builtin(ctx, body, edge, builtin, &av, ret_dst, unwind, *role);
                 match ret {
                     RetDest::Ignore | RetDest::Indirect(_) => {}
                     RetDest::Scalar(p) => place_write(ctx, base, p, lo),
@@ -297,6 +313,7 @@ pub(super) fn run_blocks(
                 blk = *target as usize;
             }
             Terminator::Return => {
+                crate::vm::engine::ctx::drain_pending_signals(ctx);
                 let r = match body.ret {
                     RetAbi::Zst => (0, 0),
                     RetAbi::Scalar(rs) => (slot_read(ctx, base, rs), 0),

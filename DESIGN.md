@@ -84,7 +84,10 @@ RAM 只要求**可观测行为**一致，其余全自由。这是贯穿一切的
 1. **LLM/Agent 脚本执行**：单文件快启动；沙箱与资源限制；rustc 自带的结构化 JSON 诊断（免费）。语法对齐 cargo script frontmatter（RFC 3424）。
 2. **项目开发内循环加速**：`mirvm run .` 跑完整 cargo 项目，改一行亚秒重跑（省 codegen+链接；依赖 MIR 一次构建全局缓存）。
 3. **REPL/Notebook**（后置，未立项——原「M6」编号已被轨 C 冷启动占用，见 docs/open-issues.md D11）：VM 拥有持久堆，状态持久化天然成立，跨 cell 借用不再是问题。
-4. **嵌入式引擎**（后置）：engine 是 library、CLI 是薄壳，这条路从第一天就不被堵死。
+4. **嵌入式引擎**：真实 `Package`/Engine 生命周期已经存在，但公开信任边界必须写准。
+   `Package::load` 是 safe 的 owned snapshot 校验；`Package::instantiate`、手工 Module 和
+   无类型 raw export 是 `unsafe`，因为系统无法证明包内 native/FFI 声明。当前不是完整的
+   safe typed API。
 
 **执行引擎现状 = 解释器 + 方法级 JIT 双轨**（M5 全收：M5.3 骨架 + M5.4a–d 翻译器
 全覆盖 + M5.5 vmctx 终裁计量与 gate6 收口均已落地，JIT 默认开启、可 `--jit off`
@@ -167,20 +170,33 @@ fn into_pthread_t(self)-> RawPthread { self.id }          // 交出真 pthread_t
 | 解释 → native（FFI，已做） | 编组参数，call 真机器码 |
 | **native → 解释**（回调/线程体） | 把解释态函数 **materialize 成真 thunk（libffi closure）**，被调时重入解释器 |
 
-所以：**当一个指向解释态函数的指针要逃逸给 native 时，把它 materialize 成真 thunk。** 于是 `thread_start` 有真地址，`pthread_create` 变成**纯直通**，std wrapper 原样工作；`Thread.id` 是**真 pthread_t** → join/as_pthread_t/into_pthread_t/futex/mutex **全部走真 libc、零拦截**。这个 thunk 机制**顺手解决 C→Rust 回调**（qsort 比较器、signal handler 同理）。**Miri native-lib 正是这么做的**（`build_libffi_closure`：Function 分配的地址 = libffi closure）；我们现在的"函数分配泄漏 1 字节占位地址"只在**解释器自己调**时够用，一旦 **native 要调**就升级成 closure。**JIT tier**：thread_start 是真机器码，连 thunk 都不需要，std wrapper 直接通——所以 thunk 是解释/字节码 tier 特有的边界桥。
+所以：**当一个指向 guest 函数的指针要逃逸给 native 时，把它 materialize 成真 thunk。**
+thunk 是一小段可执行桥，native 调它时会先取得 Engine 执行租约，再 attach 当前线程的
+`Ctx`，最后进入解释器或已发布 JIT 代码。`Thread.id` 仍是真 `pthread_t`，join、futex、
+mutex 和线程调度仍由真 libc/内核完成。当前只对 `pthread_create` 和 pthread 线程私有数据
+key 的创建、赋值、删除增加生命周期桥：它不模拟 pthread，只记录“回调已经登记但还没
+执行或撤销”的时期，防止 close 提前释放 Engine。普通回调和 P1（交给原生代码调用的 guest
+函数入口）即使目标函数已 JIT，
+也继续使用每 Engine 独有的稳定 closure 地址，因为原生代码可能比较或长期保存函数指针。
 
-### 拦截边界（对应 §7）：native 操作几乎拦不住，且不该试
+### 拦截边界（对应 §7）：只拦有明确生命周期合同的窄入口
 
-拦截只发生在**解释代码的 foreign-call 边界**。越界即瞎，且**广泛拦截 native 操作是工程灾难**：
-- guest（std 或裸 `extern "C"`）调 pthread_create → 纯直通真 libc（`thread_start` 已是真 thunk）。✓
+拦截发生在 guest 的 foreign-call 边界，以及 mirvm 自己生成的 native archive 桥内。
+越过这些已知入口后不能假装看见第三方库内部状态：
+- guest（std 或裸 `extern "C"`）调 pthread_create → 先登记一次性延迟持有，再调用真 libc；
+  线程入口开始或创建失败时清账。✓
 - guest `dlopen` 取真函数指针直接 call → 走 FFI，回调若指向解释态函数亦走 thunk。✓
-- C 库内部 spawn 线程 → **永远看不见**，是真 native 线程跑 native 代码，无妨（回调 Rust 时走 thunk）。
+- mirvm 自产 archive 内调 pthread → 隐藏槽转到同一生命周期桥，线程仍是真 native 线程。✓
+- guest 或自产 archive 调 `signal`/`sigaction`/`raise` → 进入带 Engine owner 的进程级信号
+  登记表；自产 archive 只包住这三个已知符号，不外推到任意第三方动态库内部。✓
+- 任意第三方库私自保存回调且不给完成/撤销事件 → 无法推知安全释放时刻；closure 保留到
+  进程结束，Engine close 后只留下稳定的关闭身份。
 
 ### 真线程现状与已淘汰的 tier-0 对照
 
 | | 当前 M4 真线程模型 | 已删除 tier-0（协作式） |
 |---|---|---|
-| pthread_create | 纯直通真 libc（thread_start = 真 thunk） | 建 GuestThread，假线程复用一条宿主线程 |
+| pthread_create | 生命周期桥登记后调用真 libc（thread_start = 真 thunk） | 建 GuestThread，假线程复用一条宿主线程 |
 | into_pthread_t / 交 C | 真 pthread_t，**能用** | **假值，一用就废——合法程序跑错** |
 | join/futex | 真 libc 直通 | 自建等待队列（emulation） |
 
@@ -193,6 +209,24 @@ fn into_pthread_t(self)-> RawPthread { self.id }          // 交出真 pthread_t
 
 InterpCx 的内存 map、MonoHashMap（RefCell 遍地）不 Sync；M4 通过冻结执行元数据、`Shared` 发布后
 只读、每线程 `Ctx` 与真宿主原子摆脱了这个限制。引擎自身的并发安全由 TSan gate 持续验证。
+
+### Engine 关闭与宿主线程回收
+
+Engine 的公开状态是 `Running -> Closing -> Closed`；内部 `Finalizing` 表示普通调用、
+延迟回调和 native 析构已经结束，正在解除 Shared 所拥有的重资源。每次执行先取得
+`ExecutionLease`（执行租约），也就是“本次调用还在使用 Engine”的计数凭据；pthread 已
+接收但尚未启动的回调、线程私有数据析构器和被 native catch 暂停的 MIRVM 异常使用
+`DeferredHold`（延迟持有）覆盖没有活动调用栈的空窗。`close` 禁止新的普通入口，但允许
+原调用链、已登记回调和析构函数完成；`wait_closed` 等它们清账。本线程仍在该 Engine 的
+调用链里时，等待会明确返回错误，避免等待自己退出。
+构造函数的受控失败会转成 `Result` 并启动关闭；析构函数已处于不可回滚的拆除
+阶段，任何 guest、引擎、foreign 或宿主 Rust 异常逃出都固定诊断后 `abort`，不能
+续传并把 Engine 留在 `Closing`。
+
+`Ctx` 是每个宿主线程进入某个 Engine 时使用的执行上下文。宿主线程的 TLS 只保存一个
+`CtxSlot`（上下文槽），Engine 以弱引用登记这些槽。所有租约退出后，finalizer 会从任意
+收尾线程清空槽内的 `Ctx`；因此长期不退出的线程不会继续持有 guest TLS、帧 ByteRegion、
+frozen 或整份 Shared。槽本身是很小的空墓碑，等宿主线程退出再消失。
 
 ### Rust 三红利（并行 VM 比 JVM 当年容易）
 
@@ -223,6 +257,13 @@ native 栈。调用活动与局部存储是两条正交轴。完整 A/B 选择�
 [docs/designs/frame-stack-models.md](docs/designs/frame-stack-models.md)、[docs/designs/frame-abi-bytecode.md](docs/designs/frame-abi-bytecode.md)
 和 [docs/decision-history.md](docs/decision-history.md)。
 
+mode B 的 `.mirvm` v4 包是可重复实例化的映像。`Package::load` 把源文件复制为不可变
+进程内快照并完整校验；每次实例化再建立独立 frozen/TLS、自产 native/MC 映像和 P1
+closure。包内的 `LinkAddr` 是逻辑链接地址，不是固定运行地址；`LoadMap` 在每个 Engine
+启动时把它翻成该实例的真实地址，再应用 `FrozenReloc` 修补静态指针。P1 是交给原生代码
+调用的 guest 函数入口；旧 P1 地址永不复用，所以关闭 A 后的陈旧指针不会碰巧调用后来
+创建的 B。
+
 ---
 
 ## 7. 抽象机器边界（FFI / intrinsics / native）
@@ -234,13 +275,31 @@ native 栈。调用活动与局部存储是两条正交轴。完整 A/B 选择�
 1. **RAM 内建 / 由 handler 服务**：
    - **intrinsics**：RAM 计算的一部分，VM 原生理解（如 JVM 字节码指令）。
    - **分配器**：拦截动机是**归属 + 元数据**。`__rust_alloc`（Rust 分配器，编译器合成、无 MIR，MIR 层的 foreign-call 边界拦截）→ 落**托管 Rust Heap**（速度/并发/隔离），解释器为其建元数据以解引用。`libc::malloc`/`calloc`/`free` 等 native 分配器 → **直通真 libc、落 Native Heap**（否则 guest malloc 的指针交 C free 会崩）。解释器对 Native Heap 指针回退裸宿主访问（§4）。**"一处"= 托管 Rust Heap 的分配器入口；native 分配不进这一处，是另一条真 libc 直通路。**
-   - **unwind**：M4 复用宿主 panic/unwinder 并用 FrameGuard 执行 guest cleanup；“跨平台无痛”
-     仍需逐平台验证，不能从 Linux 基线外推。
+   - **unwind**：M4 复用宿主 panic/unwinder；解释器 raw catch 与 JIT landing pad 按当前捕获到的
+     异常指针决定执行还是跳过 guest cleanup。`FrameGuard` 只恢复解释帧的 region、shadow 与
+     深度，不负责判断异常类别。“跨平台无痛”仍需逐平台验证，不能从 Linux 基线外推。
    - **线程**（§5）：**不 emulate、不 wrap pthread，用真 OS 线程**。解释态 `thread_start`
      逃逸时物化成 libffi closure thunk，入口通过 TLS attach 当前线程的 `Ctx`。这项机件支持
-     pthread 与普通 native 回调；signal 注册/投递已由 M5.2 支持（async handler 经
-     AS-trampoline 真注册真投递），同步故障信号 handler 仍响亮拒绝
-     （docs/open-issues.md R1）。
+     pthread 与普通 native 回调。
+   - **signal**：传统异步 signal 使用独立机制，不走 libffi closure。每次 guest 注册物化固定
+     22 字节 RX 桩；内核信号帧只做固定 TLS 读取与原子登记，不加锁、不分配，也不执行 guest
+     或展开。进程定向事件进入注册 Engine 的 inbox（待处理信号箱）；`SI_TKILL` 是内核表示
+     “这个信号发给指定 pthread”的来源码，这类事件进入目标 pthread 的稳定 cell（槽）。槽按
+     `(目标 pthread, registration generation)` 建立；registration generation 指一次成功的
+     handler 安装，因此同一传统信号可以在同一代内合并，但替换前后的注册不会混在一起。
+     目标线程在块入口/返回等安全点取得执行租约和全新 activation（本次执行上下文）后调用
+     handler。真实 libc `raise` 也产生 `SI_TKILL`：未阻塞时，受控 `HostRaise`（MIRVM 的
+     `raise` 入口）返回前排空本线程
+     事件；阻塞时事件继续留在内核，`sigwaitinfo` 可见真实来源码。close 先关闭登记门、按进程级
+     owner 链恢复仍存活的上一层或原生 disposition，再等待已进入桩的 frame 和已接收的目标
+     线程事件；它不能换线程代跑。线程退出把 pthread 全局最后一轮 TSD 按原始 key 号扫描，
+     与本线程 signal cell 交替排空，再在内核阻塞可捕获的传统信号、复查并关闭线程 inbox；
+     当前线程若仍有自己的目标事件，`wait_closed` 返回而不睡住等待自己；退出收口最后释放
+     已不能再进入第五轮的 TSD 残值。`signal`/`sigaction` 查询和 `oldact` 仍反译为 guest 地址。
+     固定桩、registration 和线程 cell 保留到进程结束；owner 关闭后若原生代码回装旧桩，裸
+     内核投递以 `_exit(70)` 失败，受控 `HostRaise` 报 `EngineFault(70)`。同步故障、realtime、
+     `SA_SIGINFO/SA_ONSTACK/SA_NODEFER/SA_RESETHAND` 仍响亮拒绝；进程定向外部信号的可见
+     延迟以 owner Engine 安全点为界。
 
 
 2. **纯直通（FFI 到系统 libc）**——真资源、不涉及解释态实体：open/read/clock/getrandom、数学函数（libm）。**用系统 libc**（`dlsym(RTLD_DEFAULT)` + 按 `-l` 指令 dlopen）；target==host 保证 ABI 逐位一致。这批现在是手写 shim（历史包袱），neat 的终态是通用直通通道——但那是 polish，不急。
@@ -282,7 +341,7 @@ src/os/
   linux/
     mem.rs      — mmap/mprotect/munmap + 偏好固定基址（frozen/codearena/frame 归并）
     thread.rs   — pthread TLS 族 + 栈界探测 + attr 栈尺寸 + /proc 线程计数
-    signal.rs   — signal/sigaction 直通 + sigaction 副本改 handler + SEGV dump
+    signal.rs   — signal/sigaction 原语、disposition 查询/安装与 SEGV dump
     dll.rs      — dlopen/dlsym/dlerror/dlinfo 装载基址（+ 测试档 open_with_flags/close）
     process.rs  — getenv/write/strlen/fork/atexit/syscall 变参单点 + JIT libcall 地址族
 ```
@@ -308,7 +367,7 @@ src/os/
 - **C6 tier-0 弱内存序偏差（historical）**：协作模式 SC 执行、无重排、调度确定；当前 M4
   真线程引擎不继承这一实现偏差。
 - **C7 性能基准**：regex 编译（DFA + Unicode 表）42s 是 1 号基准；VM 评审须给该案例预估收益。
-- **C8 真线程架构（§5，看过 std 源码后定，2026-07-05）**：**不 emulate、不 wrap pthread，用真 OS 线程**。std 已 wrap pthread（`thread_start` 是 std 的 extern C fn，`Thread.id` 是真 pthread_t）。VM 唯一要做的是 **FFI 的反方向**：解释态函数指针逃逸给 native 时 materialize 成**真 thunk（libffi closure，Miri `build_libffi_closure` 同款）**。于是 pthread_create **纯直通**（非拦截/wrap），join/into_pthread_t/as_pthread_t/futex/mutex 全走真 libc。同一 thunk 机制**解决 C→Rust 回调**（qsort/signal，之前 defer 的问题）。JIT tier 下 thread_start 是真机器码，thunk 消失。tier-0 不 Sync → GIL-over-真线程过渡（into_pthread_t 成立，结构同 VM tier，去锁即并行）；**协作式是扔掉的 emulation**。引擎线程安全三招：**降低时元数据冻结**（layout/偏移/vtable 烘焙进字节码，运行期不触 tcx）、**降低在加载相 + JIT 后台服务线程**（HotSpot compiler-thread 同构，为 M5 后台 JIT 铺路）、Rust Heap per-thread arena（**TLAB，直接上**）。**并发架构完整设计见 docs/designs/concurrency-arch.md**：状态三分（每线程私有/发布后只读/显式同步）；唯一敌人=tcx 不 Sync——**tcx 是加载相的事、执行相永远无 tcx**（Rust 单态化静态→eager 降完全部字节码；模式 A 有 tcx 但关在单线程加载相、模式 B .mirvm 根本无 tcx；JIT 后台服务也不碰 tcx）；atomics 引擎不介入（真原子指令真地址）；spike 验收=引擎自身过 TSan（guest 竞争排除，那是 guest 责任）。开放问题：发布协议、TLAB remote-free 细节、隔离强度。
+- **C8 真线程架构（§5，看过 std 源码后定，2026-07-05）**：**不 emulate、不 wrap pthread，用真 OS 线程**。std 已 wrap pthread（`thread_start` 是 std 的 extern C fn，`Thread.id` 是真 pthread_t）。VM 唯一要做的是 **FFI 的反方向**：解释态函数指针逃逸给 native 时 materialize 成**真 thunk（libffi closure，Miri `build_libffi_closure` 同款）**。于是 pthread_create **纯直通**（非拦截/wrap），join/into_pthread_t/as_pthread_t/futex/mutex 全走真 libc。同一 thunk 机制解决 qsort 等普通 C→Rust 回调；当时把 signal 也归入此路，现已由 §7.54 推翻为固定登记桩 + 安全点派送。JIT tier 下 thread_start 是真机器码，thunk 消失。tier-0 不 Sync → GIL-over-真线程过渡（into_pthread_t 成立，结构同 VM tier，去锁即并行）；**协作式是扔掉的 emulation**。引擎线程安全三招：**降低时元数据冻结**（layout/偏移/vtable 烘焙进字节码，运行期不触 tcx）、**降低在加载相 + JIT 后台服务线程**（HotSpot compiler-thread 同构，为 M5 后台 JIT 铺路）、Rust Heap per-thread arena（**TLAB，直接上**）。**并发架构完整设计见 docs/designs/concurrency-arch.md**：状态三分（每线程私有/发布后只读/显式同步）；唯一敌人=tcx 不 Sync——**tcx 是加载相的事、执行相永远无 tcx**（Rust 单态化静态→eager 降完全部字节码；模式 A 有 tcx 但关在单线程加载相、模式 B .mirvm 根本无 tcx；JIT 后台服务也不碰 tcx）；atomics 引擎不介入（真原子指令真地址）；spike 验收=引擎自身过 TSan（guest 竞争排除，那是 guest 责任）。开放问题：发布协议、TLAB remote-free 细节、隔离强度。
 - **C9 FFI/native 写内存**（§7）：真实地址让 FFI 零编组；一个地址空间两种代码碰两个堆（native 写 Rust Heap；解释器对 Native Heap 指针回退裸宿主访问——运行时可，检查器不可）；值表示不能假设"只有解释器写内存"；libm 逃逸宿主直算通道 VM tier 要保留（intrinsic 化）。
 - **C10 边界与拦截（§7，2026-07-05 三次修正）**：拦截只在**解释代码的 foreign-call 边界**，**绝不广泛拦截 native 操作（工程灾难）**。动机——**归属+元数据**（`__rust_alloc`→托管 Rust Heap，MIR 层拦；`libc::malloc`→真 libc→Native Heap 直通）/ **真线程最小介入**（只 pthread_create 插蹦床，余皆真 libc 直通）/ **纯直通**（真资源，handler 转发真 OS）。inline asm 无调用边界，只能模拟或函数级拦。native 内部/裸指针调用看不见，记录为限制。沙箱：OS 级(seccomp)管安全，mirvm 钩子仅虚拟化。
 - **C11 帧栈模型 = A（2026-07-05 定，详见 docs/designs/frame-stack-models.md）**：greenfield +
@@ -317,7 +376,10 @@ src/os/
   都内联 native 栈”。B 的完整论证与重开条件仍保留在 decision-history。
 - **C12 JIT 后端 + 字节码 + 分发（2026-07-05 定，详见 docs/designs/frame-abi-bytecode.md §7.5）**：
   - **JIT = Cranelift，藏在 `JITBackend` trait 后**（P7 同纪律，copy-and-patch 备选）。为 JIT 而生、≈10× 快于 LLVM 编译、质量≈debug build（正合目标）；**cg_clif 已趟通 MIR→Cranelift+Rust ABI+unwinding**，复用。耦合可控：抽不掉的只有调用约定（=Rust ABI，我们本就用）+ unwind 模型（=Rust 原生 landing-pad，逃不掉），**都非 Cranelift 特有**；不为它牺牲内存/线程/元数据模型。
-  - **unwind = 候选 A**（复用 Cranelift landing-pad + Rust personality，因 JIT 定 Cranelift）；候选 B（自研栈行走）兜底。头号 M4 前置 spike。
+  - **unwind = 已实现的 A**：解释器借宿主系统展开，Cranelift 生成 landing pad/LSDA，
+    两者复用 Rust personality。MIRVM 自有异常类只负责区分 guest panic、`EngineFault`
+    和所属 Engine，不另写 personality 或自研栈行走。每个捕获点按实际异常对象分类，线程内
+    token 栈只核对 owner 与 LIFO 消费顺序（现行裁决见 decision-history §7.52）。
   - **字节码贴近 MIR**（不下沉 CLIF）→ 解释器与 JIT 共享 MIR 级真理源、复用 cg_clif。**两级结构**：mirvmc（rustc 前端全 check → **Stable MIR/rustc_public + serde** → .mirvm 分发件，= .class/.jar 类比）；运行期"class loading"（按 target 冻结 layout C8 → 解释器寄存器字节码 + 喂 Cranelift，每平台一次缓存）。版本绑定诚实（classfile 版本号式，semver 转换）。
   - **分发格式 = 多 target 打包（定，2026-07-05 用户确认）**：**单产物跑任意 target 对完整 Rust 理论上不可能**（cfg 编译期按 target 剪枝=字面不同的程序 + usize/可观测 layout/const-eval；Java 能因无编译期 cfg/JVM 定 layout/定长基本类型，Rust 三条全违反=语言固有）。**采纳 fat artifact**：mirvmc 对 N 个 triple 各跑前端、打包 N 段（`.mirvm` 容器 = target 索引 + 各段 Stable-MIR），运行期挑匹配段 load → 消费端零工具链、覆盖常见平台、运行期可 JIT。os:: 每平台 build 时选定，与分发格式无关。
   - **解释帧局部终裁（2026-08-12）**：slaved ByteRegion 是正式方案；JIT 编译帧已由
@@ -327,15 +389,43 @@ src/os/
 - **FFI unwind 合同（2026-08-12）**：direct libffi 调用、native fn pointer、callback
   thunk 与 P1 条目都保全并消费源 `C/System { unwind }` 属性。普通 C 是终止边界；
   C-unwind 允许原 Rust panic/C++ exception 穿过并执行 cleanup，不做跨语言异常转换。
-  guest panic 继续以宿主 Rust panic 运输，在 guest catch 点及 Engine 顶层未捕获 panic
-  出口按类型区分；详见
-  `docs/designs/c-unwind-contract.md` 与 decision-history §7.50。
+  guest panic 的内层对象继续归 guest 标准库，但展开时包在带 owner 的 MIRVM 自有异常
+  外壳中；guest catch 只消费本 Engine 的 panic，未捕获 payload 也交回 guest std 清理。
+  每个解释器 raw catch 和 JIT landing pad 都按当前异常指针分类：只有当前对象确为
+  `EngineFault` 才跳过 guest cleanup。线程内带 nonce 的 LIFO token 栈只记录 owner 和消费
+  顺序，不参与 cleanup 决策；因此 native catch 暂停外层故障后，同线程重入 guest panic
+  仍会 cleanup，嵌套 `EngineFault` 也能独立入栈和消费。lower 精确标记真实 `lang_start`
+  的 `MainPanicBoundary`，每次 `run_main` 的状态栈再把 main panic 与正常 `Termination`
+  返回 101 分开；解释器、JIT、pack 与 verifier 共守该合同。C++ exception 到达 guest
+  `catch_unwind` 时按固定 rustc 终止；若直接到达 Engine 顶层，则不消费、不改写，外层
+  C++ 仍可按原类型捕获。详见 `docs/designs/c-unwind-contract.md` 与 decision-history
+  §7.50-§7.52。
+- **嵌入生命周期合同（2026-08-13）**：最后一个 Engine handle drop 或显式 `close`
+  进入 Closing；执行租约与延迟持有共同阻止过早 Finalizing。pthread start 与线程私有数据
+  （TSD）析构器
+  有明确完成或撤销事件，close 必须等待并清账；没有这类事件的任意 library-retained
+  callback 不得让 `wait_closed` 永久等待，而是保留进程期 closure 和小型关闭墓碑。native
+  映像先重定位、填 P1/GOT/bridge 槽，再逐实例运行 ctor；只有 ctor 全部完成才在 close
+  逆序运行一次 fini。ctor 受控异常分类成 `Result` 失败；fini 不允许异常逃出，
+  任何展开都固定诊断后 `abort`。已发布 JIT/MC/native 代码及 unwinder 表保留到进程结束；Shared、
+  frozen、guest TLS、Ctx 和未发布资源按 Engine 回收。详见 decision-history §7.53。
+- **嵌入 signal 合同（2026-08-13）**：进程级 registry 保存每个 signal 的原生基线和按安装
+  次序排列的 Engine 节点；guest 可见 action 与内核固定桩分开保存，查询/`oldact` 不泄漏桩
+  地址。进程定向事件进 owner inbox，`SI_TKILL` 线程定向事件进目标 pthread 的逐注册代际
+  cell；close 等待二者和在途 frame，不能把线程事件拿到别处代跑，线程退出负责先阻塞再排空。
+  自产 native archive 的 `signal`/`sigaction`/`raise` 经隐藏 owner 槽进入同一合同，未阻塞的
+  `raise` 返回前完成 handler。固定桩、registration 和 cell 进程期保留；关闭后回装旧桩会以
+  状态 70 明确失败。详见 decision-history §7.54-§7.55；拒绝边界见 open-issues R1/R21。
 
 ### 工程决策
 
 - **nightly 锁定 + 定期 bump**：rustc_private API 随 nightly 漂移；`rust-toolchain.toml` 锁日期版本（当前 nightly-2026-07-02 / rustc 1.98.0-nightly），每月 bump；rustc 交互隔离在少数模块。关注 Miri 同步提交作迁移指南。
 - **依赖以 `-Zalways-encode-mir` 构建**：rlib 携全部函数 MIR；内容寻址全局缓存（`$HOME/.mirvm`，`MIRVM_HOME` 改址）。
-- **engine 是 library，CLI 是薄壳**：为嵌入与测试留路。
+- **engine 是 library，CLI 是薄壳**：公开的安全加载入口只有 `Package::load`；从可信包
+  建 Engine 的 `Package::instantiate` 仍是 `unsafe`。既有 Engine 上的 `run_main`、状态、
+  `close`/`wait_closed` 是 safe，执行出口用 `RunOutcome`/`RunErrorKind` 区分正常返回、guest
+  panic、关闭和引擎错误。内部 `Shared` 不公开；手工 Module 与无类型 raw export 收在
+  `vm::engine::raw` 的 unsafe 面。完整 safe typed export API 仍未建立。
 - **借鉴 Miri 代码**（MIT/Apache-2.0，保留 attribution）：shim 结构、intrinsic 清单、native-lib 机制是最佳代码参考——但**仅代码，不是心智模型**（P1）。
 
 ---
@@ -371,7 +461,8 @@ src/os/
 - **M6 冷启动/轨 C**（✅ 2026-07-14~15）：S1 小件包、S2 依赖剪 codegen、S4 std
   预降底座、S3′b A2 纯化聚合 deps-image。编号说明：原愿景「M6 REPL/Notebook」被
   轨 C 占用，REPL 未立项（docs/open-issues.md D11）。施工日志见 docs/history/m6-log.md。
-- **M7+ 嵌入 API / REPL/Notebook**（后置，未立项）。
+- **M7+ safe typed 嵌入绑定 / REPL/Notebook**（后置；真实 Package/Engine 生命周期已落地，
+  剩余信任边界见 E22）。
 
 ### tier-0 实现日志（历史：如何在 rustc 解释器上 bootstrap 出 RAM 实现）
 
@@ -413,9 +504,9 @@ src/os/
 | 测试假阳性 / 语义误报 | 绿色必须比较输出或不变式；双方都失败不得算 PASS；预期红锁定原因 |
 | silent stub | 未实现的可观察语义必须 Trap 或真实实现，不允许返回成功伪装支持 |
 | M4 解释器性能天花板 | 方法级 JIT 已落地（M5.3/M5.4a–d/M5.5，默认开启）；JIT-on/off/native 三方差分；fib(32) JIT 54–80ms ≤80ms 硬门 |
-| FFI C→Rust 回调 | thunk + TLS attach 已有；逐类验证真实注册/生命周期，signal 不能仅凭 thunk 宣称支持 |
+| FFI C→Rust 回调 | 普通回调用 thunk + TLS attach；signal 已单独使用固定原子登记桩和安全点派送，不在信号帧运行 libffi/guest |
 | 平台耦合 | 当前只宣称 Linux/ELF/x86_64；抽取 OS 边界后再扩平台 |
-| 生命周期与嵌入 | 将进程退出、全局 TLS key 与泄漏式资源收敛成可恢复、多 Engine 生命周期 API |
+| 生命周期与嵌入 | close/wait、执行租约、pthread 延迟回调、CtxSlot 与逐实例 ctor/fini 已有；保留进程期代码地址是对任意 native 指针无法撤销的明确边界。后续只可补 safe typed export 或针对具体 native API 的撤销合同，不能宣称容器校验能证明任意 FFI ABI |
 
 ## 12. 先行者参考
 

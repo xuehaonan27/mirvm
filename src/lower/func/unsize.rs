@@ -159,10 +159,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     .principal()
                     .map(|b| self.tcx.instantiate_bound_regions_with_erased(b));
                 let vt_id = self.tcx.vtable_allocation((st, principal));
-                Ok(Operand::Imm {
-                    bits: self.linker.ensure_alloc(vt_id)?,
-                    width: Width::W64,
-                })
+                Ok(Operand::AddrImm(ir::LinkAddr(
+                    self.linker.ensure_alloc(vt_id)?,
+                )))
             }
             _ => Err(format!("unsize 尾对 {st} → {dt}（M4.4+）")),
         }

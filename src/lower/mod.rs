@@ -18,7 +18,7 @@ use std::collections::VecDeque;
 
 use rustc_data_structures::fx::FxHashMap;
 use rustc_middle::mir::interpret::{AllocId, ConstAllocation, GlobalAlloc};
-use rustc_middle::ty::{Instance, InstanceKind, TyCtxt, TypingEnv};
+use rustc_middle::ty::{self, Instance, InstanceKind, TyCtxt, TypingEnv};
 use rustc_span::Symbol;
 
 use crate::vm::engine::frozen::FrozenArena;
@@ -98,6 +98,7 @@ pub(crate) struct Split<'tcx> {
     image_got_syms: Vec<ir::GotSym>,
     image_got_idx: FxHashMap<Box<str>, u32>,
     image_got_fixups: Vec<ir::GotFixup>,
+    image_frozen_relocs: Vec<ir::FrozenReloc>,
     /// P1（§7.6）image 侧 stub 代码区与配方表（image 类实例的可执行条目恒在
     /// image 域——跨运行稳定域，与 fn 条目同域纪律；收尾随 image 模块走）
     image_code_arena: crate::vm::engine::codearena::StubArena,
@@ -224,6 +225,376 @@ fn lower_one<'tcx>(
     body
 }
 
+/// 固定工具链中，标准 `catch_unwind` 已经有一条完整的客体侧资源回收链：
+/// 私有 `cleanup` 函数拆开 panic_unwind 异常并减少 panic 计数，返回的 Box 再由
+/// rustc 为其精确类型生成 drop glue。把两者强制放进 lowering worklist，Engine
+/// 顶层即可只搬运不透明机器字完成回收，无需读取任何 std 私有对象布局。
+fn register_guest_panic_cleanup<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    linker: &mut Linker<'tcx>,
+) -> ir::GuestPanicCleanup {
+    const CLEANUP_PATH: &str = "std::panicking::catch_unwind::cleanup";
+
+    let cleanup_inst = linker
+        .exported_defs()
+        .values()
+        .map(|&(inst, _)| inst)
+        .find(|inst| tcx.def_path_str(inst.def_id()) == CLEANUP_PATH)
+        .unwrap_or_else(|| {
+            panic!("固定工具链缺少 `{CLEANUP_PATH}`：无法在客体侧释放未捕获 panic 载荷")
+        });
+    let sig = tcx
+        .fn_sig(cleanup_inst.def_id())
+        .instantiate(tcx, cleanup_inst.args)
+        .skip_binder();
+    if sig.inputs().len() != 1 || !sig.inputs()[0].is_raw_ptr() {
+        panic!(
+            "固定工具链 `{CLEANUP_PATH}` 参数签名已变化（当前为 `{sig}`）：\
+             无法可靠接管未捕获 panic 载荷"
+        );
+    }
+    let payload_ty = sig.output();
+    if !payload_ty.is_box_global(tcx)
+        || !matches!(
+            payload_ty.boxed_ty().map(|ty| ty.kind()),
+            Some(rustc_middle::ty::TyKind::Dynamic(..))
+        )
+    {
+        panic!(
+            "固定工具链 `{CLEANUP_PATH}` 返回类型已变化（当前为 `{payload_ty}`）：\
+             预期客体全局分配器上的 trait-object Box"
+        );
+    }
+
+    let drop_inst = Instance::resolve_drop_glue(tcx, payload_ty);
+    ir::GuestPanicCleanup {
+        cleanup: linker.func_id(cleanup_inst),
+        drop_payload: linker.func_id(drop_inst),
+    }
+}
+
+/// 从 lang item `start` 的真实 MIR 调用图找到包住用户 `main` 的外层调用，以及最终
+/// 执行捕获的 intrinsic 调用。调用关系和单态参数从 MIR 推导；路径只用于确认这些
+/// 推导出的节点仍是固定工具链约定的 std 实现，不依赖易漂移的 DefId 数值。
+fn discover_main_catch_site<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    typing_env: TypingEnv<'tcx>,
+    start: Instance<'tcx>,
+) -> Result<
+    (
+        Instance<'tcx>,
+        Instance<'tcx>,
+        Instance<'tcx>,
+        Instance<'tcx>,
+    ),
+    String,
+> {
+    fn body<'tcx>(
+        tcx: TyCtxt<'tcx>,
+        typing_env: TypingEnv<'tcx>,
+        instance: Instance<'tcx>,
+    ) -> rustc_middle::mir::Body<'tcx> {
+        let source = tcx.instance_mir(instance.def);
+        instance.instantiate_mir_and_normalize_erasing_regions(
+            tcx,
+            typing_env,
+            rustc_middle::ty::EarlyBinder::bind(tcx, source.clone()),
+        )
+    }
+
+    fn direct_calls<'tcx>(
+        tcx: TyCtxt<'tcx>,
+        typing_env: TypingEnv<'tcx>,
+        body: &rustc_middle::mir::Body<'tcx>,
+    ) -> Vec<(Instance<'tcx>, rustc_middle::mir::UnwindAction)> {
+        body.basic_blocks
+            .iter()
+            .filter_map(|block| {
+                let rustc_middle::mir::TerminatorKind::Call { func, unwind, .. } =
+                    &block.terminator().kind
+                else {
+                    return None;
+                };
+                let ty::FnDef(def_id, args) = func.ty(&body.local_decls, tcx).kind() else {
+                    return None;
+                };
+                Some((
+                    Instance::expect_resolve(
+                        tcx,
+                        typing_env,
+                        *def_id,
+                        args,
+                        block.terminator().source_info.span,
+                    ),
+                    *unwind,
+                ))
+            })
+            .collect()
+    }
+
+    fn operand_local<'tcx>(
+        operand: &rustc_middle::mir::Operand<'tcx>,
+    ) -> Option<rustc_middle::mir::Local> {
+        match operand {
+            rustc_middle::mir::Operand::Copy(place) | rustc_middle::mir::Operand::Move(place)
+                if place.projection.is_empty() =>
+            {
+                Some(place.local)
+            }
+            _ => None,
+        }
+    }
+
+    fn reified_fn<'tcx>(
+        tcx: TyCtxt<'tcx>,
+        typing_env: TypingEnv<'tcx>,
+        body: &rustc_middle::mir::Body<'tcx>,
+        local: rustc_middle::mir::Local,
+        use_loc: rustc_middle::mir::Location,
+    ) -> Result<Instance<'tcx>, String> {
+        use rustc_middle::mir::visit::{PlaceContext, Visitor};
+
+        struct Writes {
+            local: rustc_middle::mir::Local,
+            locations: Vec<rustc_middle::mir::Location>,
+        }
+
+        impl<'tcx> Visitor<'tcx> for Writes {
+            fn visit_place(
+                &mut self,
+                place: &rustc_middle::mir::Place<'tcx>,
+                context: PlaceContext,
+                location: rustc_middle::mir::Location,
+            ) {
+                if place.local == self.local && context.is_mutating_use() {
+                    self.locations.push(location);
+                }
+                self.super_place(place, context, location);
+            }
+        }
+
+        let mut writes = Writes {
+            local,
+            locations: Vec::new(),
+        };
+        writes.visit_body(body);
+        let [definition] = writes.locations.as_slice() else {
+            return Err(format!(
+                "局部 {local:?} 预期恰有一个写入，实际为 {} 个",
+                writes.locations.len()
+            ));
+        };
+        if !definition.dominates(use_loc, body.basic_blocks.dominators()) {
+            return Err(format!(
+                "局部 {local:?} 的唯一写入 {definition:?} 不支配捕获调用 {use_loc:?}"
+            ));
+        }
+        let block = &body.basic_blocks[definition.block];
+        let Some(statement) = block.statements.get(definition.statement_index) else {
+            return Err(format!(
+                "局部 {local:?} 的唯一写入发生在 terminator，不是函数指针重化赋值"
+            ));
+        };
+        let rustc_middle::mir::StatementKind::Assign(assign) = &statement.kind else {
+            return Err(format!("局部 {local:?} 的唯一写入不是 Assign"));
+        };
+        let (destination, rvalue) = &**assign;
+        if destination.local != local || !destination.projection.is_empty() {
+            return Err(format!("局部 {local:?} 的唯一写入不是整局部赋值"));
+        }
+        let rustc_middle::mir::Rvalue::Cast(
+            rustc_middle::mir::CastKind::PointerCoercion(
+                ty::adjustment::PointerCoercion::ReifyFnPointer(..),
+                _,
+            ),
+            operand,
+            _,
+        ) = rvalue
+        else {
+            return Err(format!("局部 {local:?} 的唯一写入不是函数指针重化"));
+        };
+        let ty::FnDef(def_id, args) = operand.ty(&body.local_decls, tcx).kind() else {
+            return Err(format!("局部 {local:?} 的重化来源不是 FnDef"));
+        };
+        Instance::resolve_for_fn_ptr(tcx, typing_env, *def_id, args)
+            .ok_or_else(|| format!("局部 {local:?} 的函数指针实例无法解析"))
+    }
+
+    let start_calls = direct_calls(tcx, typing_env, &body(tcx, typing_env, start));
+    let [(lang_start_internal, _)] = start_calls.as_slice() else {
+        return Err(format!(
+            "固定工具链 start MIR 预期恰有一个直接调用，实际为 {} 个",
+            start_calls.len()
+        ));
+    };
+    let lang_start_path = tcx.def_path_str(lang_start_internal.def_id());
+    if lang_start_path != "std::rt::lang_start_internal" {
+        return Err(format!(
+            "固定工具链 start 的直接调用已从 std::rt::lang_start_internal 变为 \
+             {lang_start_path}"
+        ));
+    }
+
+    let internal_calls = direct_calls(
+        tcx,
+        typing_env,
+        &body(tcx, typing_env, *lang_start_internal),
+    );
+    let outer_catches: Vec<_> = internal_calls
+        .into_iter()
+        .filter_map(|(call, _)| {
+            call.args.types().find_map(|ty| match ty.kind() {
+                ty::Closure(def_id, args) => Some((call, *def_id, args)),
+                _ => None,
+            })
+        })
+        .collect();
+    let [(outer_catch, runtime_closure_def, runtime_closure_args)] = outer_catches.as_slice()
+    else {
+        return Err(format!(
+            "固定工具链 lang_start_internal MIR 预期恰有一个闭包型直接调用，实际为 {} 个",
+            outer_catches.len()
+        ));
+    };
+    let outer_catch_path = tcx.def_path_str(outer_catch.def_id());
+    if outer_catch_path != "std::panic::catch_unwind" {
+        return Err(format!(
+            "固定工具链 lang_start_internal 的闭包型调用已从 std::panic::catch_unwind \
+             变为 {outer_catch_path}"
+        ));
+    }
+    let runtime_closure = Instance::resolve_closure(
+        tcx,
+        *runtime_closure_def,
+        runtime_closure_args,
+        ty::ClosureKind::FnOnce,
+    );
+    let main_catches: Vec<_> =
+        direct_calls(tcx, typing_env, &body(tcx, typing_env, runtime_closure))
+            .into_iter()
+            .filter(|(call, _)| call.def_id() == outer_catch.def_id())
+            .collect();
+    let [(main_catch, unwind)] = main_catches.as_slice() else {
+        return Err(format!(
+            "固定工具链 lang_start 运行时闭包预期恰有一个 main catch 调用，实际为 {} 个",
+            main_catches.len()
+        ));
+    };
+    if !matches!(unwind, rustc_middle::mir::UnwindAction::Continue) {
+        return Err(format!(
+            "固定工具链 main catch 调用的 unwind 已从 Continue 变为 {unwind:?}"
+        ));
+    }
+
+    let outer_body = body(tcx, typing_env, *main_catch);
+    let internal_calls = direct_calls(tcx, typing_env, &outer_body);
+    let [(internal_catch, internal_unwind)] = internal_calls.as_slice() else {
+        return Err(format!(
+            "固定工具链 std::panic::catch_unwind MIR 预期恰有一个直接调用，实际为 {} 个",
+            internal_calls.len()
+        ));
+    };
+    let internal_path = tcx.def_path_str(internal_catch.def_id());
+    if internal_path != "std::panicking::catch_unwind" {
+        return Err(format!(
+            "固定工具链 std::panic::catch_unwind 的实现调用已从 \
+             std::panicking::catch_unwind 变为 {internal_path}"
+        ));
+    }
+    if !matches!(internal_unwind, rustc_middle::mir::UnwindAction::Continue) {
+        return Err(format!(
+            "固定工具链 std::panicking::catch_unwind 调用的 unwind 已从 Continue 变为 \
+             {internal_unwind:?}"
+        ));
+    }
+
+    let internal_body = body(tcx, typing_env, *internal_catch);
+    let mut intrinsic_sites = Vec::new();
+    for (bb, block) in internal_body.basic_blocks.iter_enumerated() {
+        let rustc_middle::mir::TerminatorKind::Call {
+            func, args, unwind, ..
+        } = &block.terminator().kind
+        else {
+            continue;
+        };
+        let ty::FnDef(def_id, generic_args) = func.ty(&internal_body.local_decls, tcx).kind()
+        else {
+            continue;
+        };
+        let intrinsic = Instance::expect_resolve(
+            tcx,
+            typing_env,
+            *def_id,
+            generic_args,
+            block.terminator().source_info.span,
+        );
+        if !matches!(intrinsic.def, ty::InstanceKind::Intrinsic(_))
+            || tcx.item_name(intrinsic.def_id()).as_str() != "catch_unwind"
+        {
+            continue;
+        }
+        intrinsic_sites.push((intrinsic, args, *unwind, internal_body.terminator_loc(bb)));
+    }
+    let [(catch_intrinsic, args, intrinsic_unwind, intrinsic_loc)] = intrinsic_sites.as_slice()
+    else {
+        return Err(format!(
+            "固定工具链 std::panicking::catch_unwind MIR 预期恰有一个 std \
+             catch_unwind intrinsic，实际为 {} 个",
+            intrinsic_sites.len()
+        ));
+    };
+    let intrinsic_path = tcx.def_path_str(catch_intrinsic.def_id());
+    if intrinsic_path != "std::intrinsics::catch_unwind" {
+        return Err(format!(
+            "固定工具链捕获 intrinsic 已从 std::intrinsics::catch_unwind 变为 \
+             {intrinsic_path}"
+        ));
+    }
+    if args.len() != 3 {
+        return Err(format!(
+            "固定工具链 std catch_unwind intrinsic 预期 3 个参数，实际为 {} 个",
+            args.len()
+        ));
+    }
+    if !matches!(
+        intrinsic_unwind,
+        rustc_middle::mir::UnwindAction::Unreachable
+    ) {
+        return Err(format!(
+            "固定工具链 std catch_unwind intrinsic 的 unwind 已从 Unreachable 变为 \
+             {intrinsic_unwind:?}"
+        ));
+    }
+    let try_local = operand_local(&args[0].node)
+        .ok_or("固定工具链 std catch_unwind 的 do_call 参数已不再来自局部函数指针")?;
+    let catch_local = operand_local(&args[2].node)
+        .ok_or("固定工具链 std catch_unwind 的 do_catch 参数已不再来自局部函数指针")?;
+    let do_call = reified_fn(tcx, typing_env, &internal_body, try_local, *intrinsic_loc).map_err(
+        |reason| format!("固定工具链 std catch_unwind 的 do_call 函数指针来源无法确认：{reason}"),
+    )?;
+    let do_catch = reified_fn(tcx, typing_env, &internal_body, catch_local, *intrinsic_loc)
+        .map_err(|reason| {
+            format!("固定工具链 std catch_unwind 的 do_catch 函数指针来源无法确认：{reason}")
+        })?;
+    let do_call_path = tcx.def_path_str(do_call.def_id());
+    let do_catch_path = tcx.def_path_str(do_catch.def_id());
+    if do_call_path != "std::panicking::catch_unwind::do_call"
+        || do_catch_path != "std::panicking::catch_unwind::do_catch"
+    {
+        return Err(format!(
+            "固定工具链 std catch_unwind 回调已变化：try={do_call_path}, \
+             catch={do_catch_path}"
+        ));
+    }
+
+    Ok((
+        runtime_closure,
+        *main_catch,
+        *internal_catch,
+        *catch_intrinsic,
+    ))
+}
+
 fn lower_inner(
     tcx: TyCtxt<'_>,
     stack: &crate::baseimage::ImageStack,
@@ -289,24 +660,21 @@ fn lower_inner(
             v.push(so);
         }
         for so in &v {
-            let cpath = std::ffi::CString::new(&**so).expect("原生库路径不含 NUL");
-            let h = crate::os::dll::open(&cpath, crate::os::dll::Mode::Now)
-                .unwrap_or_else(|detail| panic!("必需原生库 `{so}` 降低期 dlopen 失败: {detail}"));
-            // 句柄有意不 dlclose（与运行期 FfiState 同：随进程生命周期）。
+            // lower 只需要符号地址，不拥有 native 生命周期。私有副本经 staged loader
+            // 完成映射/重定位但不运行 init/fini，constructor 统一留给 Engine 启动相。
+            let image =
+                crate::vm::engine::native_instance::open_for_lower(std::path::Path::new(&**so))
+                    .unwrap_or_else(|detail| panic!("必需原生库 `{so}` 降低期装载失败: {detail}"));
+            let h = image.handle();
             // 记 required 句柄（dynsym 可见符号的链接序解析，先于全域——
             // native 链接期绑定，psm/rustc_driver 碰撞实锤）。
             linker.archive_handles.push(h);
             // T5：global_asm 物化的 .so 若含 syscall 间接槽则当场重填
             // （系统库无此符号，静默跳过）
-            crate::lower::asm::refill_syscall_slot(h);
-            // hidden 符号 .symtab 兜底表（口径同 FfiState：只收不进 .dynsym 的
-            // 符号）。基址或解析失败不建表——dlsym 可见面不受影响，hidden 符号
-            // 由取址路径的既有诊断兜底（宁缺勿滥：错基址表会静默解到野地址）。
-            if let Some(bias) = crate::os::dll::load_bias(h)
-                && let Ok(syms) = crate::elfsym::hidden_symtab_values(so)
-            {
-                linker.archive_fallbacks.push((bias as u64, syms));
-            }
+            linker
+                .archive_fallbacks
+                .push((image.bias(), image.hidden_symbol_values().clone()));
+            std::mem::forget(image);
         }
         v
     };
@@ -333,6 +701,10 @@ fn lower_inner(
     for inst in collect::collect(tcx) {
         linker.func_id(inst);
     }
+
+    // Engine 顶层可能在 lang_start 之外（run_export/嵌入调用）接住 guest panic；
+    // 这两只客体函数即使不在用户程序的静态可达集里也必须保留。
+    let mut guest_panic_cleanup = register_guest_panic_cleanup(tcx, &mut linker);
 
     // 自定义 #[global_allocator] 的 __rust_* shim（corpus 批7 c_mimalloc 实锤修）：
     // kind=Global 时 HIR 展开器已在本地 crate 生成 __rust_{alloc,dealloc,realloc,
@@ -406,11 +778,21 @@ fn lower_inner(
             tcx.mk_args(&[main_ret.into()]),
             rustc_span::DUMMY_SP,
         );
+        let (boundary_caller, main_catch, catcher_caller, catcher_intrinsic) =
+            discover_main_catch_site(tcx, typing_env, start_inst)
+                .unwrap_or_else(|reason| panic!("无法框定固定 std 的 main panic 捕获点：{reason}"));
+        let main_catch = linker.func_id(main_catch);
+        linker.main_catch_site = Some(linker::MainCatchSite {
+            boundary_caller,
+            boundary_callee: main_catch,
+            catcher_caller,
+            catcher_intrinsic,
+        });
         let lang_start = linker.func_id(start_inst);
         // argc/argv 置零占位：finalize_entry_argv 每次运行回填（运行期输入不进快照）
         ir::EntryPlan {
             lang_start,
-            main_addr,
+            main_addr: ir::LinkAddr(main_addr),
             argc: 0,
             argv_ptr: 0,
             sigpipe,
@@ -523,6 +905,7 @@ fn lower_inner(
             shims.realloc = rb.fn_id(shims.realloc);
             shims.alloc_zeroed = rb.fn_id(shims.alloc_zeroed);
         }
+        rb.guest_panic_cleanup(&mut guest_panic_cleanup);
         for v in linker.ids.values_mut() {
             *v = rb.fn_id(*v);
         }
@@ -583,6 +966,7 @@ fn lower_inner(
             // 装载/absorb 时按名合流进 delta 并重编 idx
             foreign_syms: s.image_got_syms,
             got_fixups: s.image_got_fixups,
+            frozen_relocs: s.image_frozen_relocs,
             // P1 image 侧（§7.6）：配方随 image 文件，代码域句柄运行期随域重建
             entry_stub_sites: s.image_stub_sites,
             entry_stubs: s.image_code_arena,
@@ -590,6 +974,8 @@ fn lower_inner(
         };
         let mut image_module = image_module;
         image_module.ensure_function_names();
+        image_module.rebuild_load_map();
+        image_module.rebuild_fn_addrs();
         // image 导出素材（装载方零 tcx 依赖，BaseExports 同构）：fn 条目/static/TLS
         // 三索引只含 image 类。fn 条目以 image 区条目表为准（含底座命中但在 image
         // 区补建者——"总量恰一份"的单一身份在装载端可复现）。
@@ -709,15 +1095,19 @@ fn lower_inner(
     // P2 GOT（decision-history §7.5c）delta 侧（image 侧已随 split_image 走）
     module.foreign_syms = linker.got_syms;
     module.got_fixups = linker.got_fixups;
+    module.frozen_relocs = linker.frozen_relocs;
     // P1（§7.6）本域配方与代码域句柄（image 侧已随 split_image 走）
     module.entry_stub_sites = linker.entry_stub_sites;
     module.entry_stubs = linker.code_arena;
     // 自定义分配器 shim（程序级语义，delta 权威：shim 恒 LOCAL_CRATE——split
     // 与否同此一处，base/deps image 按 Default 烘的臂在运行期经它路由）
     module.custom_alloc_shims = custom_alloc_shims;
+    module.guest_panic_cleanup = Some(guest_panic_cleanup);
     if split_image.is_none() {
         module.entry = entry;
     }
+    module.rebuild_load_map();
+    module.rebuild_fn_addrs();
     (module, base_exports, split_image)
 }
 
@@ -821,6 +1211,7 @@ mod tests {
                 ret: ir::RetDest::Ignore,
                 target: 0,
                 unwind: ir::UnwindAction::Continue,
+                role: ir::CallRole::Normal,
             },
             vec![ir::Stmt::Assign {
                 dst: ir::ScalarPlace::Slot(ir::Slot {
@@ -869,6 +1260,7 @@ mod tests {
                 ret: ir::RetDest::Ignore,
                 target: 0,
                 unwind: ir::UnwindAction::Continue,
+                role: ir::BuiltinCallRole::Normal,
             },
             vec![],
         );

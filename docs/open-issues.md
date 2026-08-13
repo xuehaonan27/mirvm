@@ -1,6 +1,6 @@
 # mirvm 未解决债务与开放问题登记册
 
-> 覆盖 mirvm 自始（M0 tier-0 时代）至 2026-08-12 当前复核的
+> 覆盖 mirvm 自始（M0 tier-0 时代）至 2026-08-13 当前复核的
 > **全部**记录在案且至今未解决的债务、开放问题、响亮拒绝边界与暂缓项。
 > 本文是未解决事项的**唯一登记入口**；已根治/已完成项一律不收录（查
 > [current-status.md](current-status.md) 与 [decision-history.md](decision-history.md)）。
@@ -75,9 +75,9 @@
 
 <!-- E1（JIT 间接调用准入）已闭合 2026-07-21、E9（dl_iterate_phdr 差分探针）
      已闭合 2026-08-12、E12（alloca 必迁承诺）已撤销 2026-08-12、E13（guest
-     异常运输层）已裁决 2026-08-12、E21（os/arch 双 leaf）已闭合 2026-07-18/19，
+     异常分类与运输）已重裁并闭合 2026-08-12、E21（os/arch 双 leaf）已闭合 2026-07-18/19，
      按「只收未解决」规则移出——证据与重开条件见 decision-history
-     §7.19/§7.48/§7.49/§7.50/§7.16 -->
+     §7.19/§7.48/§7.49/§7.50-§7.52/§7.16 -->
 
 | ID | 事项 | 状态与内容 | 出处 |
 |---|---|---|---|
@@ -91,7 +91,7 @@
 
 | ID | 事项 | 状态与内容 | 出处 |
 |---|---|---|---|
-| E22 | **稳定多 Engine 嵌入 API / 生命周期余项** | `施工中` 核心身份和失败边界已完成：Engine 持有 Shared/JIT worker，线程表按 Engine id 隔离 Ctx，嵌套激活可恢复；guest TLS、builtin 字符串与未执行 atexit 项会回收，引擎错误经 `RunError` 返回，rustc 编译会话已串行保护；MC 符号只在当前 Module 内解析，不再跨 Engine 串用。剩余硬边界：native 已保存的 libffi 回调无法主动撤销且 closure 代码仍需常驻；JIT/MC 活动码不能安全卸载；长寿命宿主线程直接执行时的 TSD 回收尚无稳定公开协议；动态库/回调注册撤销、公开 API 和进程级故障隔离仍未完成。guest 语义要求的 abort 不等于引擎错误，不应改写 | decision-history §7.42，designs/vmctx-passing.md §7 |
+| E22 | **嵌入公开信任面与进程期函数地址** | `记账 + 未立项` **已完成的机制**：Package v4 可重复实例化；每 Engine P1/native/MC 隔离且旧地址不复用；Running/Closing/Finalizing/Closed、执行租约、pthread start/线程私有数据（TSD）析构器的 `DeferredHold`、暂停异常持有、逐实例 ctor/fini、`close`/`wait_closed` 与长寿命线程 `CtxSlot` 清理已接通；传统异步 signal 也已有进程定向 owner inbox（待处理信号箱）、`SI_TKILL` 目标 pthread cell（线程槽）、在途 frame 原子计数、非 LIFO disposition 恢复和 close/线程退出 drain，不再是 E22 的生命周期欠口。固定桩、registration（一次 handler 安装的登记对象）和线程槽因原生代码可能保留其地址而存活到进程结束，关闭后的陈旧桩只会明确以状态 70 失败，不会误投到新 owner。ctor 受控异常转成实例化 `Result` 失败，fini 是不可展开的拆除边界，任何 MIRVM/foreign/宿主 Rust 异常逃出都固定诊断后 `abort`。**剩余一：不是全 safe typed API。** `Package::load` 是 safe 的 owned snapshot 校验，但 `Package::instantiate` 必须是 `unsafe`：验证器不能证明包内 native 库、宿主符号和 FFI 签名相符。手工 Module 与 raw 两机器字 export 同样 `unsafe`，`Shared` 不公开。要关闭这部分，必须为具体导出签名生成/验证 typed binding，不能把责任藏回用户配置。**剩余二：裸地址没有通用撤销协议。** 任意第三方库可无限期保存 callback；引擎不知道所有副本何时消失，所以已发布普通/P1 closure、JIT 码/展开表、committed MC/native 映像保留到进程结束。close 后 closure 只持小型 owner 墓碑，不持有 Module；C-unwind 稳定报告 `EngineClosed`，普通 C 按 ABI 终止，新 Engine 不复用旧 P1 地址。若真实产品要求进程内资源严格有界，只能为被撞到的具体 native 注册 API 建立完成/撤销合同，或用子进程隔离一次性回收；不能声称通用 FFI 能找回所有裸指针。进程级故障隔离另归 D10/E23，不由生命周期计数冒充 | decision-history §7.42/§7.51-§7.55，designs/modeb-mirvmar-design.md §6 |
 | E23 | **checked 模式（L3）未建；L1 已完成** | `未立项` 操作数区双端 `PROT_NONE` guard 和 JIT 入帧前栈检查已经完成。L3 仍缺指针来源：现有 IR 的 Deref 不区分 raw/reference，也不知道 frame、frozen、allocator、FFI 或 mmap 所有者；只查 mapped 会误放 VM 元数据，要求用户登记则是绕行。闭合需由 lowering/IR 保留来源并由运行时自动维护所有权范围；正式沙箱仍归 P3 OS worker | decision-history §7.42，DESIGN.md C13 |
 | E26 | **平台仅 Linux/ELF/x86_64** | `记账` pthread/dlopen/GNU 链接/x86 asm wrapper 依赖面；unwind「跨平台无痛」未逐平台验证；macOS 次之后议 | current-status §4，DESIGN.md §11 |
 | E32 | **inline-asm setjmp/longjmp 的捕获帧内存复用 hazard（C3 定稿边界）** | `记账` asm-stub 模型下 setjmp 捕获点在 stub 包装帧；解释帧在捕获与恢复之间复用该宿主栈内存的合成协议可撞死（v2 spike 实锤，落点 `Channel::send` 内部）。真实 workload（wasmtime 全 trap 面）不发生该形态、三维确定性绿。消除 = JIT 真帧身份（compiled guest fn = native 帧语义）；不宣称全形态闭合。**进展 2026-07-21（T1）**：JIT 帧已是真 native 帧（含真 unwinder 穿透/着陆，双 CIE + 全覆 LSDA）——setjmp/longjmp 所在函数一旦发布即脱出 hazard 面；interp 帧路径维持原记账 | [parked/c3-resume-spike.md](parked/c3-resume-spike.md)，decision-history §7.19 |
@@ -110,20 +110,20 @@
 | ID | 事项 | 内容 | 出处 |
 |---|---|---|---|
 | D2 | **发行形态与命名（D9f⑤）** | 先 miri 式后 JDK 式自包含 tarball（成熟后）；kit 命名候选 MDK/mirvm toolkit（MRsDK 已否决） | designs/distribution-design.md |
-| D3 | **mmap 与逐函数惰性装载；档案直接验证余项** | **核心已完成（2026-08-11，§7.45）**：不稳定格式 v3 用只读 mmap 代替整文件复制；MODULE 只存模块元数据，FUNCS 用固定索引指向独立函数体并保存逐体哈希。运行时只让实际访问或预取命中的函数体常驻；真实访问顺序写入内容寻址 heat 文件供下次后台预取，需求队列始终优先，预测错只影响速度。函数范围、重叠、哈希与解码都 fail-closed。**余项可以完成，但不是 v3 小修**：postcard 是顺序编码，E20 要看完整结构语义，因此首次装载仍须逐函数临时解码。正确施工是新建不稳定 v4 的偏移式只读归档表示，让校验器直接遍历有边界检查的归档视图，运行时按需从同一份已校验表示恢复 `FuncBody`；校验摘要和执行字节必须同源，不能另存一份可伪造摘要来代替。完成前不启动 D4；性能基线按维护者要求另期统一恢复 | history/coldstart-research.md V6，decision-history §7.32/§7.45/§7.46 |
-| D4 | **对外格式冻结重估** | M5.3 收官触发器（2026-07-15）已响。D3 的 mmap/逐函数布局已于 2026-08-11 落为不稳定格式 v3，但首次装载仍为 E20 做临时逐函数解码；先闭合 D3 档案直接验证，再评审兼容窗口、能力位、迁移工具和损坏/签名策略，避免把验证表示也过早冻死 | decision-history §7，§7.32/§7.45 |
+| D3 | **逐函数惰性装载；档案直接验证与整包复制余项** | **核心已完成（2026-08-11，§7.45）**：MODULE 只存模块元数据，FUNCS 用固定索引指向独立函数体并保存逐体哈希；运行时只让实际访问或预取命中的 `FuncBody` 常驻，真实访问顺序驱动下次后台预取，需求始终优先。v3 曾直接 mmap 源 inode；v4 为了让 safe `Package::load` 在源文件改写/删除后仍保持同一已验证对象，改为一次复制 owned snapshot，保留惰性对象驻留但不再宣称整包零复制。**余项**：postcard 是顺序编码，E20 仍要求 load 时逐函数临时解码；未来偏移式只读归档必须让验证器和执行器遍历同一份有边界检查的不可变字节，并同时说明 snapshot 所有权，不能重引入可变 inode 的校验后替换窗口。下一格式编号不预留；完成前不启动 D4，性能基线另期恢复 | history/coldstart-research.md V6，decision-history §7.32/§7.45/§7.53 |
+| D4 | **对外格式冻结重估** | M5.3 收官触发器已响。当前不稳定格式 v4 已补逻辑链接地址和可重复实例化，但首次 load 仍为 E20 做临时逐函数解码，并且 safe owned snapshot 会复制整包。先闭合 D3 的档案直接验证/所有权合同，再评审兼容窗口、能力位、迁移工具和损坏/签名策略；不要因版本号已经到 4 就误称格式冻结 | decision-history §7，§7.32/§7.45/§7.53 |
 | D5 | **L3 JIT 机器码缓存** | 禁令条件「M5.3–M5.5 定型前禁做」已随 M5.5 收官（2026-07-21）消失；**2026-07-29 判为 dev 循环最大单根杠杆**（热函数每进程重烧 = 纯白烧），既有 MC 机器码节 + 进程内 ELF 装载器已证 JIT 产物可序列化再装载；归 D16 候选 | designs/distribution-design.md，history/m5.3-design.md，decision-history §7.32 |
 | D6 | **S3′c 完整形态（跨项目共享）** | 路径无关内容哈希键（~50ms/次）+ tainted 层/多层 image 合并；按实需立项（已兑现的只是同 workspace 跨 bin 冒烟） | current-status §5.8，history/s3b-a2-design.md §3.4 |
 | D7 | **frontend 相成本无杠杆认领；V5 `-Zthreads` 并行 lower 未立项** | eco ~143ms / ripgrep ~730-800ms 在账无人认领；V5（tcx DynSync+worklist rayon 化）在 V3 不建后无人重启 | history/coldstart-research.md，m6-log 片8/10 |
 | D8 | **8 个 correctness case 未 benchmark** | ripgrep_gzip/parallel_nomatch/mmap_binary/parallel_match/multiline_replace、tokei_sort_code/streaming_json/rust_files | real-projects.md §5 |
 | D9 | **registry 依赖 crate 底座化 / 自适应底座 / 底座 AOT 机器码入 base** | S4 三未立项方向；第三条与「机器码不入缓存」世界观冲突，立项前先核 | history/s4-base-image-design.md §0/§4 |
 | D10 | **M3 产品面** | daemon、agent API、资源治理、正式沙箱、虚拟化钩子（假 FS/路径重定向/计费——区分 guest 调 open 与解释器自读缓存） | DESIGN.md §9，§7 沙箱节 |
-| D11 | **REPL/Notebook + 嵌入 API（M7+）** | 原愿景 M6 编号已被轨 C 冷启动占用；REPL = 持久堆天然成立，未立项 | DESIGN.md §3/§9 |
+| D11 | **REPL/Notebook + safe typed 嵌入绑定（M7+）** | 原愿景 M6 编号已被轨 C 冷启动占用；Package/Engine 真实关闭协议已完成，不能继续把嵌入本身写成未来需求。剩余公开信任面精确归 E22：为具体 export 建 typed binding，而不是把 raw ABI 伪装成 safe。REPL = 持久堆天然成立，仍未立项 | DESIGN.md §3/§9，E22 |
 | D12 | **`-Cincremental` 脚本路径** | 非当前杠杆；触发式重启（「大用户 crate 编辑-重跑」形态）；`finalize_session_directory` 坑在案 | history/coldstart-research.md §4 |
 | D13 | **地址模型 P5 增量（扩域/回收）** | 维持现固定基址样条工程；增量能力记 M7+ | decision-history §7.5b |
 | D14 | **原生内容寻址依赖存储（统一依赖 cache 终态；用户 2026-07-18 裁定方向）** | 去重单位 = 完整编译键（crate 版本 × features × 依赖闭包 × cfg/flags × toolchain）：多脚本/多项目共引 X@V 时其构建产物机器级唯一。**近期片已落地（§7.15：共享 cargo target dir，fingerprint 即编译键内容寻址；实测 ethers 二跑 0.66s、两树并集 525M）**；**终态 = mirvm 原生 store（`~/.mirvm/store/<编译键哈希>/`，自管 build plan + extern 注入），与 `.mirvm` 本地解析同设计；P5 依赖来源和 env/GC 开工时合并评审**。并发模型已裁定：发布一次后续只读命中、无大锁常驻；清理粒度粗可接受 | 2026-07-18 缓存讨论，decision-history §7.14/§7.15 |
 | D15 | **砍掉默认路径对 Cargo 的强依赖（自有依赖解析 + 编译调度；用户 2026-07-22 纳入日程）** | **P1-P5 与 P2 总 corpus 验收均已完成**（2026-07-27 至 08-10，decision-history §7.28-§7.43）：除自有解析/编译调度、workspace/resolver 2/3、Git 依赖外，现已支持依赖来源所需的 Cargo config 层叠、替代 sparse/Git registry 与 Cargo credential provider、registry/local-registry/directory source replacement、registry 目标上的 path/Git/registry `[patch]`、旧式 `[replace]`，且 `mirvm pack` 缺省复用 cargoless。来源合同 30/30；self locks 与固定 Cargo 逐字节相同并被其离线锁定检查接受；full corpus 最终 **138 pass / 1 skip / 0 fail**。D17 又补齐 resolver 1、复杂成员 glob/package ID 和 workspace lints。**长期边界**：Cargo compat 不删除，作为用户显式回退、行为裁判和持续对拍路径；cargoless 保持默认。**仍开放**：Git source replacement、以 Git URL 为目标的 patch、`paths`/HOST_RUSTFLAGS 等完整 Cargo config 余面；嵌套 workspace 与同名成员按 Cargo 自身规则拒绝，不是 mirvm 私设边界 | decision-history §7.22/§7.27-§7.44，[d15-cargoless-design.md](designs/d15-cargoless-design.md)，[mirvm test 合同](designs/mirvm-test-cargoless-contract.md) |
-| D16 | **统一性能战役（用户 2026-07-29 立项，当前延期）** | 恢复时先跑 `MIRVM_TIMING` 相位账本、dev 循环改一行重跑和日志设计 §7 三组基准，不从旧数字猜收益。主候选按裁定序：①**D5/L3 JIT 码持久化**；②D3 已完成的 mmap/逐函数驻留/热序预取实测；③后台服务线程；④D12 `-Cincremental`。原 E6/E7/E30/E37 统一在本战役内裁判：分配与 guest TLS 助手内联（旧计量 alloc 7.82M / tls_ref 0.38M，进场时触发 vmctx T/R 复测）、SwitchInt/取址逃逸/间接调用/LSDA/SIMD/PLT 等 JIT 候选、C7 regex 旧 42s 靶子的 JIT 后复测，以及日志 v2 ring/消费者线程。已知未复核红线是热缓存 `fib(32)` 约 97ms > 80ms；不得放宽门槛关账。日志 v1 已过 TSan，v2 文档数字仍只是估算。性能基线按维护者要求另期统一恢复；线程原则仍是 guest 优先、demand > 预测序 > 闲时回填，模式 A 懒降低维持否决 | designs/m5-design.md §3，designs/m5.4-design.md，designs/mirvm_high_performance_log.md，decision-history §7.20/§7.32/§7.33/§7.45 |
+| D16 | **统一性能战役（用户 2026-07-29 立项，当前延期）** | 恢复时先跑 `MIRVM_TIMING` 相位账本、dev 循环改一行重跑和日志设计 §7 三组基准，不从旧数字猜收益。主候选按裁定序：①**D5/L3 JIT 码持久化**；②D3 已完成的逐函数驻留/热序预取与 v4 owned snapshot 整包复制实测；③后台服务线程；④D12 `-Cincremental`。原 E6/E7/E30/E37 统一在本战役内裁判：分配与 guest TLS 助手内联（旧计量 alloc 7.82M / tls_ref 0.38M，进场时触发 vmctx T/R 复测）、SwitchInt/取址逃逸/间接调用/LSDA/SIMD/PLT 等 JIT 候选、C7 regex 旧 42s 靶子的 JIT 后复测，以及日志 v2 ring/消费者线程。已知未复核红线是热缓存 `fib(32)` 约 97ms > 80ms；不得放宽门槛关账。日志 v1 已过 TSan，v2 文档数字仍只是估算。性能基线按维护者要求另期统一恢复；线程原则仍是 guest 优先、demand > 预测序 > 闲时回填，模式 A 懒降低维持否决 | designs/m5-design.md §3，designs/m5.4-design.md，designs/mirvm_high_performance_log.md，decision-history §7.20/§7.32/§7.33/§7.45/§7.53 |
 | D17 | **mirvm test（用户 2026-07-29 立项）** | **Cargo test/bench 合同完成（2026-08-11，§7.44），D19 doctest 后续并入同一命令**：bench、根 proc-macro、resolver 1、复杂成员 glob、workspace lints 和完整 package spec 均已闭合。单包/test/bench/doctest 合同 **34/34**、workspace 合同 **31/31**；self 腿由 PATH 哨兵 + execve 审计证明零 Cargo，固定 Cargo/rustdoc `-vv` 是行为裁判 | [mirvm test 合同](designs/mirvm-test-cargoless-contract.md)，decision-history §7.32/§7.34-§7.46 |
 | D19 | **doctest / rustdoc 前端** | **`mirvm test` 范围已完成（2026-08-11，§7.46）**：默认与 `--doc` 选择、参数冲突、根库和 Dev 依赖、build.rs cfg/env、源行号、`no_run`、`ignore`、`compile_fail`/错误码、`should_panic(expected)`、过滤参数、状态文字和退出码均由固定 Cargo/rustdoc 三轨对拍。rustdoc 继续提取和裁判代码块，MIRVM 的 test builder 只把临时 crate 产为带 MIR 的库与 VM 启动器；self execve 审计零 Cargo。独立 HTML 文档生成不是 `mirvm test` 的执行能力，本项不据此宣称存在 `mirvm doc` | [mirvm test 合同](designs/mirvm-test-cargoless-contract.md)，decision-history §7.46 |
 | D18 | **env/GC 管理面（用户 2026-07-29 裁定）** | uv 式环境 = 全局 store（D14 已有）+ 环境（lock 物化的引用集，`~/.mirvm/envs/` 登记为根）；**GC = 登记根 + 标记-清扫**（否决裸引用计数：落盘计数崩溃半截即永久不一致；sweep 崩溃安全、无计数一致性）；purge 环境 = 摘根 + 从根集合可达性扫描回收不可达。缺包行为：默认自动拉取（日志明示），--offline/--locked 响亮报错 + 提示 fetch 指令。与 D14 终态原生 store 合并评审 | decision-history §7.32 |
@@ -151,6 +151,7 @@
 | R17 | **FFI 按值封送残余边界（C1 闭合后）** | union 按值（SysV union 分类另规则）、SIMD 向量按值、变参尾参位聚合、align>8 聚合、multi-variant enum 按值——五形态 freeze 响亮 Err（文案可鉴红分类）；`{i128}`/f128/long-double/_Complex 既有标量边界不动。**2026-07-22 增第六形态**：packed/align(N) 非自然布局聚合（audit F-06——libffi 类型系统只能表达自然布局，冻结校验 `validate_agg_natural` 已把此类从静默错调改为 freeze 响亮拒绝；完整 padding 表达按真实 workload 触发再立）。各形态同 helper 可扩 | src/lower/ffi_sig.rs，designs/c1-ffi-agg-design.md §0 |
 | R19 | **`#![no_main]` / `#[start]` 入口形态拒绝**（2026-07-22 登记） | 入口类型非 `EntryFnType::Main` 一律响亮拒绝（exit 1 + 诊断，src/cli.rs:489）；嵌入式/bootloader 式入口形态无 corpus 实锤，重开需真实 workload | src/cli.rs |
 | R20 | **libffi foreign/callback 仅支持 C/System ABI** | C/System 的 plain/unwind 两形均已闭合；其他 ABI 不再静默压成 plain C，而是在 lowering 阶段明确拒绝。重开必须为目标 ABI 建立真实 adapter 和 native 对拍，不能凭当前平台机器形状看似相同直接放行 | designs/c-unwind-contract.md，src/lower/linker/calls.rs |
+| R21 | **异步 signal 支持面边界**（2026-08-13 定稿） | 当前闭合的是 Linux/ELF/x86_64 上传统、无 guest 高级 flag 的进程定向和线程定向 handler。进程定向事件进入 callback owner 的 inbox（注册 Engine 的待处理信号箱）；`pthread_kill`/真实 libc `raise` 的 `SI_TKILL` 进入目标 pthread 按本次 handler 安装建立的稳定 cell（线程槽），只能由该线程在安全点或退出时执行。未阻塞的 `HostRaise`（MIRVM 承接的 `raise`）返回前完成；阻塞时事件留在内核，`sigwaitinfo` 仍能观察真实 `SI_TKILL`。close 等待已接收的目标线程事件，不能换线程代跑；若当前线程自己仍有事件，`wait_closed` 返回 `ActiveOnCurrentThread`。pthread 退出按 glibc 全局末轮的原始 key 号顺序交替收口 TSD 与 signal，最后才物理阻塞可捕获信号、复查并关闭 inbox。固定桩、registration（一次 handler 安装的登记对象）和线程槽进程期保留；owner 关闭后回装旧桩时，裸内核投递 `_exit(70)`，`HostRaise` 报 `EngineFault(70)`。**仍拒绝**：同步故障 guest handler；realtime（需要逐事件排队并保留 `siginfo`）；`SA_SIGINFO`（需要三参数 guest ABI）、`SA_ONSTACK`（需要替代栈生命周期）、`SA_NODEFER`/`SA_RESETHAND`（会改变 mask/注册状态机）。进程定向外部信号只承诺在 owner Engine 下一普通安全点派送，不承诺原生 handler 级即时延迟；不能退回信号帧直接跑 guest | current-status §4，decision-history §7.54-§7.55 |
 
 ## G. 维护态与基建
 
@@ -202,10 +203,10 @@
 | `abort` 信号差异（R11）/ TSan TSD 绕行（R12） | 授权差异 / 测试规避 | history/m4-log.md |
 | JIT 原子序、Cranelift 内联与退出排队 | JIT 原子统一 SeqCst 是合规强化；Cranelift 自有内联保持关闭；进程退出不等待纯优化编译队列，解释结果不受影响 | decision-history §7.47 |
 | 手写 host shim 全部改写 | 通用符号走 dlsym+libffi；需要 guest 语义或热路径的专用 shim 保留，不以代码形式统一为目标 | decision-history §7.47 |
-| OSR/deopt/生产 tiering 与 JIT 逐函数释放（原 E2/E5） | 当前接受：无调用边界的长跑单循环不会中途 JIT；Cranelift JIT 机器码随 Module 常驻。前者只在真实长跑负载要求 OSR 时重开；后者由稳定嵌入 API 的资源有界验收触发，不冒充当前执行正确性缺陷 | decision-history §7.48，designs/frame-abi-bytecode.md §10.4 |
+| OSR/deopt/生产 tiering 与 JIT 逐函数释放（原 E2/E5） | 当前接受：无调用边界的长跑单循环不会中途 JIT；Engine close 会停止 worker、释放 Shared，但 Cranelift 已发布机器码和 `.eh_frame` 保留到进程结束，因为可能仍有休眠 native 栈/展开器引用。前者只在真实长跑负载要求 OSR 时重开；后者若要求严格进程内有界，须先证明所有外来入口和栈引用都已撤销，或采用进程隔离 | decision-history §7.48/§7.53，designs/frame-abi-bytecode.md §10.4 |
 | 解释帧必须从 slaved ByteRegion 迁到 alloca（原 E12） | 撤销“必须迁移”：解释器正式使用带 guard page 的每线程 ByteRegion；JIT 已使用 Cranelift native 帧与 SSA。alloca 只是真实解释器性能瓶颈出现后的候选，不是架构终态 | decision-history §7.49，designs/frame-abi-bytecode.md §2.2 |
-| guest 异常必须使用独立 exception class/personality（原 E13） | 当前定稿为宿主 Rust panic 运输层：guest catch 只接 `GuestPanic`；Engine 顶层另把 `EngineFault` 转成 `RunError`，未识别的宿主 panic 原样重抛。独立 class 不能让标准 Rust catch 捕获 C++ exception，也不能单独解决本次三方合同。仅稳定嵌入 API 需要分类异常越出 Engine、工具链升级打红，或共轨产生不可局部修复的实错时重开 | decision-history §7.50，designs/c-unwind-contract.md §7 |
-| C-unwind 边界残余（原 R18） | 已闭合：direct foreign、native fn pointer、callback/P1 与解释/JIT cleanup 均按源 C/System ABI 分治；普通 C 保持终止，C-unwind 保持异常身份并传播，其他 ABI 响亮拒绝。旧“libffi closure 无 unwind info”前提已被捆绑 libffi 真机实测推翻 | decision-history §7.50，designs/c-unwind-contract.md |
+| guest 异常类 / personality（原 E13） | 已采用 MIRVM 独立异常类和原始异常分类器：外壳区分 guest panic/`EngineFault` 并携所属 Engine，内层 guest panic 对象仍由 guest std 捕获或释放。**没有采用独立 personality**；解释/JIT cleanup 继续复用已有 Rust personality 与 LSDA。每个解释器 raw catch/JIT landing pad 按当前异常指针决定是否 cleanup，TLS token 栈只做 owner/LIFO 记账；lower 精确标出的 `MainPanicBoundary` 与每次 `run_main` 状态栈另行解决真实 main panic 和正常 101 混淆。这样解决多 Engine 串线、同线程嵌套故障与结构化出口，不声称能让 guest `catch_unwind` 捕获 C++ exception | decision-history §7.50-§7.52，designs/c-unwind-contract.md §7 |
+| C-unwind 边界残余（原 R18） | 已闭合：direct foreign、native fn pointer、callback/P1 与解释/JIT cleanup 均按源 C/System ABI 分治；普通 C 保持终止，C-unwind 保持异常身份并传播，其他 ABI 响亮拒绝。C++ typed exception 可原样穿出整个 Engine；到达 guest `catch_unwind` 则按固定 rustc 终止。旧“libffi closure 无 unwind info”前提已被捆绑 libffi 真机实测推翻 | decision-history §7.50-§7.52，designs/c-unwind-contract.md |
 
 ## 旧编号对照（m4-debt-map.md 已删，本文承接）
 

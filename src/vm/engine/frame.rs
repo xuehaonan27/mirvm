@@ -84,6 +84,11 @@ impl ByteRegion {
         self.sp = base - self.base as usize;
     }
 
+    #[cfg(test)]
+    pub(crate) fn used(&self) -> usize {
+        self.sp
+    }
+
     /// Read a scalar with zero-width extension (base = frame true address).
     #[inline]
     pub fn read(&self, base: usize, slot: Slot) -> u64 {
