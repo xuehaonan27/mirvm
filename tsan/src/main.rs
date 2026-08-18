@@ -10,16 +10,19 @@
 #![feature(thread_local)] // engine deferred signal mailbox 使用无析构原生 TLS
 #![allow(internal_features)]
 
+#[path = "../../src/arch/mod.rs"]
+mod arch; // arch 层（interp 的 x86 触点经 crate::arch::；同上纪律）
 #[path = "../../src/utils/logs.rs"]
 mod logs; // os::process 的 mirvm_log! 同源依赖
 #[path = "../../src/os/mod.rs"]
 mod os; // P7 os 层（engine 触点经 crate::os:: 原语；同源复用门禁随之扩展）
-#[path = "../../src/arch/mod.rs"]
-mod arch; // arch 层（interp 的 x86 触点经 crate::arch::；同上纪律）
-#[path = "../../src/vm/mod.rs"]
-mod vm;
+mod product_adapters;
+pub(crate) use product_adapters::{lower, sysroot};
 #[path = "../../src/elfsym.rs"]
 mod elfsym; // ffi.rs 的归档 .symtab 兜底（纯 Rust，同源复用）
+mod telemetry; // capture/format 同源编译；ctx 的 trace activation 不能在 harness 里打桩
+#[path = "../../src/vm/mod.rs"]
+mod vm;
 
 fn main() -> std::process::ExitCode {
     // spike4（冻结工件）+ M4 引擎多线程真身（M4.4：共享 Shared/每线程 Ctx/thunk 工厂）

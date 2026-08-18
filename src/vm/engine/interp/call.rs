@@ -805,6 +805,10 @@ pub(crate) fn exec_builtin(
             }
             let pid = crate::os::process::fork();
             if pid == 0 {
+                // The child has no writer thread and must never publish into
+                // the copied parent generation. This hook is store-only and
+                // runs before any JIT service is restarted.
+                crate::telemetry::capture::after_fork_child();
                 // 子进程：编译线程不随 fork 存活。SYNC 验证模式
                 //（MIRVM_JIT_SYNC）的发布等待依赖活的编译服务——重启
                 //（继承的已发布码页/槽表/eh_frames 仍有效；队列与 worker
@@ -989,6 +993,9 @@ pub(crate) fn exec_builtin(
             unreachable!("x86 vector builtin 已由 indirect vector 通道处理")
         }
         Builtin::HostSyscall => crate::os::process::syscall(a(0) as i64, &av[1..]) as u64,
+        Builtin::HostSyscallTrace => {
+            crate::telemetry::capture::host_syscall(a(0) as i64, &av[1..]) as u64
+        }
         // rust_try：原始 unwinder catch；仅当前 Engine 的 guest panic
         // 调 catch_fn(data, exc) 返 1，异主/宿主异常继续展开。
         Builtin::CatchUnwind => {

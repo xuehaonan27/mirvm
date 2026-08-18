@@ -2384,6 +2384,239 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   R1/R21 响亮拒绝。进程定向外部事件仍只承诺 owner Engine 下一普通安全点可见，不外推原生
   handler 级即时延迟。
 
+### 7.56 2026-08-13：日志/profile 旧稿退回审计，未批准新架构
+
+- **旧状态**：§7.32 把“日志 v1 在外施工”和“v2 ring + 消费者线程”当作既有路线，
+  并预先裁定与 cache write-behind 共用服务线程；D16 又沿用了“v1 已过 TSan”的表述。
+- **触发证据**：当前仓库只有 `mirvm_log!` 宏。文本臂同步锁标准流，等级臂转发进程全局
+  `log` facade；没有 mirvm 自有 backend、`MIRVM_LOG` 读取或 `trace-log` feature。真实热
+  路径 `MIRVM_SYSCALL_TRACE` 每次重新查环境、格式化并同步写 `stderr`。旧设计所列
+  `2 ns`/`100 ns`/`200 ns`、ring 容量和 v1/v2 状态均无产品实测支持。
+- **安全性反证**：旧稿让致命 signal handler flush 普通 ring；但当前 fixed adapter 的
+  现行不变量是只访问进程期稳定内存、原子和 local-exec TLS。`write(2)` 可在 signal
+  handler 使用，并不使遍历 ring、等待未提交槽或读取普通 TLS 安全。现有
+  `MIRVM_SEGV_DUMP` 在 signal frame 中格式化、读 `/proc` 和写文件，只能视作待替换的开发
+  排障债务，不能作为新底座。
+- **本次选择**：旧稿退回为“审计讨论稿”，不批准施工；诊断文本、结构化事件、聚合指标、
+  采样 profile、时间线 trace 和 emergency 崩溃记录先分开建模。它们可以共享标识、decoder
+  或经实测共享 writer，但不再按日志等级选传输路径，也不靠解析人类文本做 profile。
+  ring 形态、丢失/阻塞政策、文件格式、后台线程归属和性能门槛仍是 open，须按讨论稿
+  §12 逐项由用户裁决。
+- **首个取证切片**：若基础合同批准，以 MIRVM 自己生成、解释或能安全双物化的 syscall 点
+  做第一条结构化事件纵切，只交付足以验证和导出的 `inspect`/`export`。旧
+  `MIRVM_SYSCALL_TRACE` 只覆盖被改写的汇编点，降为性能债务基线，不能冒充全进程 syscall
+  流。完整 syscall 流另接 Linux raw-syscall tracepoint；profile 先接外部 `perf`，并在 JIT
+  发布点提供真实机器码范围。现有 backtrace token ELF 不是 JIT profile 地址映射。
+- **被替代范围**：§7.32 的共享服务线程和日志 v1/v2 路线降为历史候选；§7.48/D16 的性能
+  入口仍有效，但不得把旧日志状态或估算当作基线。
+- **第一项用户裁决（2026-08-13）**：确认诊断日志、结构化事件、聚合指标、采样 profile、
+  时间线 trace 和崩溃记录是不同的数据合同。它们可以共享 session/进程/线程/Engine 标识、
+  decoder，以及经实测证明合适的部分落盘设施；不得因此默认共享容量、背压或丢失语义。
+  其余候选架构继续保持 open，按设计稿 §12 逐项讨论。
+- **第二项用户裁决（2026-08-13）**：运行正确性和前进性高于遥测完整性。Engine 执行、
+  constructor、fini、延后 handler、TSD 回调和 close 期间，任何诊断/事件/指标/trace 都不得
+  等待输出端；容量耗尽可丢，但须以计数和 sequence 缺口如实暴露。真实错误由 `Result`、
+  `RunOutcome` 或退出码交付，不能依赖日志落盘。CLI 只有在回到控制边界后才可同步显示
+  最终诊断；嵌入执行路径不得直接调用可能锁住或重入的宿主全局 logger。
+- **第三项用户裁决（2026-08-13）**：采集会话是进程级概念，不随单个 Engine 开关。进程
+  启动时只自动准备极小固定的内存 emergency 槽，不创建文件或线程；普通诊断文件、事件、
+  指标、trace 和 profile 默认关闭，由 CLI capture/profile 命令或进程级嵌入 API 明确开启。
+  开启后当前/后续线程与 Engine 自动纳入，fork 子进程自动切新 generation 和独立文件，
+  不要求调用者报名线程、Engine 或 handler。环境变量只作兼容排障入口；在真实证据证明
+  emergency 槽不足前，不建立默认常驻普通事件黑匣子。
+- **第四项用户裁决（2026-08-13）**：机器读取的权威原始记录使用二进制；JSONL、CSV、
+  可读文本和 Perfetto 都是离线派生格式，人类诊断文本不是脚本合同。每个进程/fork 代际
+  独占原始文件，不并发追加同一文件。本项不冻结 magic、header、chunk、checksum、扩展名
+  或字段宽度，具体字节布局继续讨论。
+- **第五项用户裁决（2026-08-13）**：原始文件采用块级恢复。只有 header、payload、commit
+  footer/checksum 完整且校验通过的 chunk 才可信；普通进程崩溃后恢复此前所有可信块并舍弃
+  尾部半块，signal handler 不扫描或 flush 普通 ring。正常 `End` 才精确汇总 produced、
+  written、dropped 等总账；异常结束只报告可证实的 sequence 缺口和未知尾部。恢复工具不改
+  原活动文件，而另存可信前缀。不为每块 `fsync`，所以不承诺内存 ring、在途块或断电时尚未
+  持久化的数据；checksum 算法、chunk 大小、扩展名和刷盘周期仍未冻结。
+- **讨论顺序纠偏（2026-08-13）**：用户明确否决在系统尚未实现时继续优先讨论 schema
+  兼容，要求先把最高效实现细化到时间戳指令、指针传递、guest 停顿、cache line、commit、
+  writer 和 profile 插桩。兼容问题延后到首个真实文件出现后；这不是兼容策略裁决。异步
+  “传指针”只允许传预分配 recorder/page/slot 的稳定地址，不能把 guest/栈 payload 借给
+  writer。当前按设计稿 §5.2.1 的热路径依赖树继续逐项讨论。
+- **第六项用户裁决（2026-08-13，热路径第一项）**：时间戳按含义付费，而非统一读取。
+  聚合计数不读时间；高频普通事件在自动 TSC 资格检查通过时使用裸 `RDTSC`，以线程 sequence
+  作为权威顺序、TSC 只作近似定位；严格 timeline/span 边界使用有序 TSC 读取。生产者只存
+  原始计数，不逐事件换算纳秒；控制线程采集 TSC 与 `CLOCK_MONOTONIC_RAW` 的分段校准锚点，
+  离线转换。CPU/内核时钟源/跨核同步不满足资格时自动退到 vDSO
+  `clock_gettime(CLOCK_MONOTONIC_RAW)`，调用者不能强制开启错误快路。当前 KVM 开发机就是
+  退化案例。具体 fence 语义、`TSC_AUX`/clock epoch 和本机窄 probe 见设计稿 §5.2.2。
+- **第七项用户裁决（2026-08-13，热路径第二项）**：采用普通/trace 两套执行代码，而不是
+  在每个事件点动态检查 enabled。普通 JIT 保持现有纯 guest ABI，新增采集指令、TLS load、
+  分支、隐藏参数和保留寄存器均为零；默认 perf profile 也不切换代码。timeline 开启后才进入
+  独立 trace JIT 域，在 x86-64 用 `r15` 保存稳定的每线程 `ProducerHot*`，事件内联写页；
+  普通/trace 调用槽各自闭合，边界和异常展开负责 save/set/restore，native 回调从 TLS/
+  activation 重建而不信入口寄存器。解释器同样分 plain/trace 循环。尚未物化 trace JIT
+  的函数先走 trace interpreter，不等待编译。详见设计稿 §5.2.3。
+- **对第七项的实现复核（同日）**：撤销“线程可在下一块安全点直接切换代码域”的错误
+  表述。现有块安全点没有 OSR/deopt 状态映射，不能把带活寄存器/栈槽的 plain JIT 帧迁成
+  trace 帧。第七项只确认关闭态零插桩和独立代码域；动态 start/stop 对已经运行的 activation
+  在哪个可重建边界生效，仍需下一项裁决，不能用一次普通安全点握手假装已经解决。
+- **第八项用户裁决（2026-08-13，热路径第三项）**：普通结构化事件使用 per-pthread
+  SPSC 页环。当前 pthread 独占写 current page，writer 只读 release 发布后的整页；
+  producer 热状态、published tail 和 returned head 分占 cache line。页内 cursor 是线程
+  私有完成标志，不做逐事件 `FREE/WRITING/COMMITTED` 原子提交；只有页发布/归还使用
+  release/acquire。无空页时不等、不转、不分配、不覆盖，只推进 sequence 和本地 drop
+  计数。内核 signal frame 使用独立 emergency/sampler 存储，绝不打断并复用普通页。
+  进程 MPSC 不进入逐事件热路；若需要全局发布页通知，其共享成本只能在页边界摊销。页
+  大小、每线程页数和低流量半页封存政策仍待后续裁决。详见设计稿 §5.3。
+- **第九项用户裁决（2026-08-13，代码域生效边界）**：第一版只在最外层 guest activation
+  入口选择 plain/trace，并让整条调用链（含 native 同步回调 guest）继承该域。`start()`
+  先 armed，新进入者才 trace；已经运行的 plain 帧不迁移。`stop()` 只阻止新 trace root，
+  已有 trace 调用链记录到返回。请求与逐线程 effective/end 分开记录，工具不得冒充完整覆盖。
+  用户同时要求把“长期 guest 运行中动态开启 timeline”记为明确需求触发器：真实 workload
+  一旦证明长期不返回宿主且必须中途开启/停止，就重开 OSR/可重建代码域迁移；不得以每块
+  轮询作绕行。外部 sampling profile 不受此限制。
+- **第十项用户裁决（2026-08-13，热页发布策略）**：hot timeline 的 active page 不设周期
+  watermark 或时间 deadline，也不读取 writer flush request。只在页满、最外层 trace
+  activation 返回、pthread 正常退出、stop 后 producer 已静止或显式冷控制边界封页并 release
+  发布。nested activation/native 回调/deferred handler 在同一调用链内继续写当前 pthread 页。
+  低事件率半页晚到是已选择的可见延迟；崩溃前未发布页仍是未知尾部。若真实长期 trace
+  workload 提出最大可见延迟硬指标，再实测 K-watermark/deadline，不能预先给每事件加检查。
+  该触发器与长期 plain activation 动态迁入 trace 的 OSR 触发器分立。
+- **第十一项用户裁决（2026-08-13，writer 唤醒；2026-08-14 修正内存顺序）**：writer 空闲
+  时使用进程级状态字和 futex 睡眠。后续审计否决了“writer 普通 store 后复查、producer
+  条件 CAS”的初稿：两个 CPU 可能各自读到旧值，留下有页却睡死的 StoreLoad 竞态。正确
+  基线是 writer 用 AcqRel swap 置 `SLEEPING` 后复查，producer 在整页 release 发布后用
+  AcqRel swap 置 `AWAKE`；只有读到旧值 `SLEEPING` 的 producer 执行一次 `futex_wake(1)`。
+  因此成本如实记为每封页一次 locked RMW，而不是普通 load；逐事件路径仍不读 writer 状态、
+  不轮询、不调用 syscall。首版 writer 扫描稳定 producer 列表，只有真实大量休眠线程证明
+  扫描成为瓶颈时，才评估页级 ready MPSC 队列。
+- **第十二项用户裁决（2026-08-14，writer 归属）**：普通 capture 关闭时没有 writer；开启后
+  每个 process generation 恰好一个独立 `mirvm-capture` writer，供全部 Engine 使用，但不与
+  cache、JIT、惰性解码或 close worker 共线程。仓库当前并不存在 cache write-behind 服务；
+  复用只会新造混合职责，并让不可抢占的序列化/阻塞 I/O 阻止 trace 页归还，甚至让等解码的
+  guest 直接被日志拖住。writer 只排空 sealed pages、组 chunk、校验、写盘和归还页，不在线
+  格式化、符号化、排序或压缩；使用普通调度且空闲 futex 睡眠。Engine close 不停止它，正常
+  capture stop 才在 producer 静止后 drain/End/join。永久 sink 错误后继续消费并归还页，同时
+  记 sink loss。实现必须让现有 fork 守卫自动识别 MIRVM 自己创建的服务线程，并在 child 中
+  作废父代 writer/producer/fd、普通边界自动新建 generation；不得把 fork 负担转给调用者。
+  具体 I/O API仍待下一项裁决。
+- **第十三项用户裁决（2026-08-14，writer I/O）**：第一版由独立 writer 直接以 buffered
+  `pwritev` 写 sealed producer pages，不先复制到 staging，不用 `io_uring`、文件 `mmap` 或
+  在线压缩。每个 process generation 独占文件并由单 writer 维护显式 offset；writer 用固定
+  `iovec[]` 机会式批量当前可见页，不等待凑批，checksum 后按 header、page 有效区、footer
+  顺序写入。实现必须正确处理 `EINTR`、正数短写和 `IOV_MAX`；某页全部字节被内核接受后才
+  可归还，完整 footer 被接受后 chunk 才计入 written。成功不等于 fsync，维持既定断电边界。
+  staging 只有在相同总内存下确证 write 长尾导致页环耗尽时才与增加 per-thread pages 对拍；
+  `io_uring` 只有单 outstanding write 吃不满仍有带宽的存储且造成 drop 时重开；`mmap` 只有
+  writer 复制/syscall 已成主要扰动时重开；在线压缩只在 sink 长期字节吞吐或文件预算成为
+  blocker 时评估。持续输入率超过 sink 吞吐时，上述机制都只能延迟而不能消除丢失。
+- **第十四项用户裁决（2026-08-14，页容量所有权）**：否决每 pthread 固定相同页数；每种
+  数据合同拥有独立的进程级硬页池，pthread 在首次 trace root 冷边界自动懒建自己的 SPSC
+  ring，至少双页起步，额外页由 writer 根据实际发布率和 page-return gap 自动放入该 producer
+  的 free-page queue。全局池只在控制/writer 路径管理，逐事件仍不访问；页满且无 free page
+  时立即 drop，后续有页后自动恢复，不要求用户报名或救援。预算用
+  `N_i >= q_i + 1 + ceil(A_i(L)/U)` 计算，并在进程硬字节预算下让各活跃 producer 覆盖尽量
+  一致的 writer 停顿窗口，而非先到先占。descriptor 可保持稳定，但退出线程的 page 必须在
+  TSD/signal 收口及 writer drain 后归池，不能让历史线程耗尽预算。绝对内存、页数和批次扣页
+  数必须由真实 MIRVM-owned syscall event 的事件率、归还长尾和同预算 drop 曲线裁决；
+  memory cap 只改变 retention/loss，不是正确性开关。
+- **第十五项用户裁决（2026-08-14，logical page 等级）**：logical page 总长包含首个 64B
+  header cache line。新 producer 至少以两张 4 KiB starter 开始（4032B payload）；writer 根据
+  页级编码速率、真实 return gap 和硬页池预算自动补 64 KiB hot pages（65472B payload），
+  producer 只在页满慢路径换 pointer，逐事件不识别等级。不能因低率线程最终填满 starter 就
+  升级，`ROOT_RETURN` 半页也不触发；静止且无在途页时可自动收回 hot page。当时说明性的
+  固定 64B record 容量已由第20项真实 64B/24B syscall pair 取代，page class 机制不变。16 KiB
+  必须在相同总内存下做挑战基准，证据成立才加入第三等级；2 MiB 不作 logical publish page，
+  DTLB 若成瓶颈只可用2 MiB backing slab承载仍为64 KiB的logical pages。page由少量普通匿名
+  mmap slab切分、只需64B对齐、不依赖hugepage；record不跨页，sealed page一个iovec。NUMA
+  first-touch/prefault归属仍待真实 minor-fault与远端访问对拍。
+- **第十六项用户裁决（2026-08-14，syscall 采集边界）**：第一条内部 SPSC 纵切定义为
+  MIRVM-owned syscall event，只覆盖 `Builtin::HostSyscall`、可双物化 inline-asm wrapper 等
+  MIRVM 自己掌握的 syscall 点。plain 版本保持原 syscall 指令及 raw/libc 各自的返回与 errno
+  语义，且不读 recorder/TLS；trace 版本在站点内联固定整数记录后执行同一 syscall。旧路径
+  只作债务基线：本机 release 窄基准约为裸 syscall 332 cycles、slot 间接 call 至理想
+  `syscall; ret` leaf 384、旧
+  TRACE-off 588、TRACE-on 且 `stderr=/dev/null` 16,828；其栈/red-zone、YMM/ZMM 上半部和 raw
+  errno 语义也不能作为新底座。stateful global/native、opaque archive 与 libc 内部等全进程
+  syscall 只能在内核边界完整观察，另由 Linux raw-syscall tracepoint 写独立 stream；能力或
+  权限不可用时响亮报告，不把局部内部事件冒充完整流。两份流各有容量、sequence 和 loss
+  账本，离线合并。
+- **第十七项用户裁决（2026-08-15，syscall 返回记录）**：所有正常返回的 MIRVM-owned
+  syscall 都分别提交调用前的 `SyscallEnter` 和返回后的独立 `SyscallExit`；禁止预留一条记录
+  并跨 syscall 保持未完成。`exec`、`exit`、崩溃等不返回情形只有 Enter 合法；任一侧出现
+  sequence 缺口时，工具只能报告不完整 span，不得猜返回值或耗时。raw Exit 保存原始 `RAX`；
+  libc 语义 Exit 在任何记录操作前保存返回值和 `errno`，且不得改变 guest 最终观察到的
+  `errno`。Enter-only 只作为 benchmark 对照，用来单独计量 Exit 的额外时间读取、容量判断、
+  stores 和页发布成本，不是正式采集模式。
+- **第十八项用户裁决（2026-08-15，syscall 配对）**：Enter/Exit 不写显式 `call_id`。
+  decoder 按 `(process generation, thread generation)` 和 event sequence 维护未闭合 syscall
+  栈；同线程嵌套时，Exit 关闭最近的 Enter。显式 ID 会占两条记录的字段，raw syscall 站点
+  还必须跨调用保存它，而该路径没有免费寄存器。任一 sequence 缺口、fork generation 切换、
+  session 结尾或异常未知尾部都立即截断当前栈；未闭合 Enter 与孤立 Exit 只报告
+  `incomplete`，不得按 syscall 编号、参数或邻近时间推测配对。
+- **第十九项用户裁决（2026-08-15，内部 syscall 时间）**：首版 MIRVM-owned
+  `SyscallEnter`/`SyscallExit` 是无逐事件时间戳的因果/结果流，以 sequence、参数、result 和
+  errno 语义为权威。严格 span 的两次有序 TSC 读取在当前窄 probe 中已约需 108–117 cycles；
+  当前 KVM 又不满足 TSC 快路资格，而 vDSO 是普通 SysV 调用，插入任意 raw syscall 站点会
+  触碰 guest 栈并要求保存 caller-saved GPR 和完整向量状态。不得为统一字段重建旧 trampoline。
+  duration 只由独立 Linux raw-syscall stream 提供，并且只在两份流均无相关 loss、按 tid/
+  顺序/syscall 身份可无歧义关联时生成；内核流不可用或关联失败时明确报告不可用，不猜测。
+  将来若真实问题要求带 Engine 归因的 guest-observed latency，作为独立严格 timeline 合同
+  重开，而不向这条结构化事件热路补 vDSO。
+- **第二十项用户裁决（2026-08-15，syscall 记录宽度）**：使用 syscall 专用的两种定长
+  编码：Enter 64B（8B control、8B number、六个 8B 参数），Exit 24B（8B control、8B
+  result、8B errno/status），每个正常 pair 共 88B。control 自描述 kind/length/raw-libc 语义；
+  sequence 由页头起点和记录次序推导，不逐条写。raw 站点不能用会改变 RFLAGS 的普通容量
+  compare，因此冷路径设置 `pair_budget=floor(remaining/88)`；Enter 只用
+  `mov/jrcxz/lea` 扣一个额度并提交完整 64B，Exit 借已保证的24B直接提交，不再比较。额度不
+  创建半条 Exit；不返回只浪费容量。writer 只写 page header + `used_bytes`，页尾和旧内容不
+  落盘。相对统一64B Exit，pair bytes与11个qword stores均减少31.25%；32B Exit只作同预算
+  对拍，除非实测对齐收益胜过持续多写8B，否则不采用。
+- **第二十一项用户裁决（2026-08-16，Engine 归因）**：`engine_id` 逻辑上属于每条事件，
+  物理上不逐条重复。page header 快照该页第一条记录处的实际 Engine（`0`=无 Engine）；同一
+  pthread 的实际 Engine 改变时，activation 冷边界写16B `EngineContext(control,id)`，A→B→A
+  依次写B、A，同Engine递归不写。页尾不足先滚页，新header直接写实际id。marker和header均
+  无法提交时进入 `context_unsynced`：sequence/context-loss继续计数、所有payload drop、
+  `pair_budget`不可用，直到按runtime实际当前Engine成功写新header/marker才恢复；不得沿用旧
+  id误记。fork child丢弃父归因状态，新generation重建。decoder遇sequence缺口时同时清空
+  syscall配对栈与Engine归因，直到下一页header恢复。否决逐事件多写8B，也否决per-Engine
+  ring导致的页膨胀和同pthread全序分裂。
+- **第二十二项用户裁决（2026-08-16，errno 热路）**：每个 pthread 只在 capture producer
+  attach 的冷边界调用一次 `__errno_location()`，把 `errno_ptr` 缓存在仅由该线程读取的
+  producer cache line；未开启 capture 时没有该调用。`HostSyscall` 返回后先保留 result，只有
+  `result == -1` 才从缓存指针读取一次 errno，并编码 `errno_valid=1`；成功 Exit 不读 errno，
+  固定编码 invalid/0，raw Exit 则始终保存原始 `RAX` 且不碰 libc errno。producer 的逐事件、
+  页满、drop、封页和唤醒路径只准使用普通内存、原子和不设置 errno 的 raw futex leaf，禁止
+  libc helper，因此全路径 errno-transparent，不为每条 syscall 增加保存/恢复 store。不得每次
+  调 `__errno_location()`，也不得硬编码 glibc 的 `FS:` 私有偏移。writer 不解引用该指针；
+  fork child 废弃父 generation producer，并在 child 的新 producer 冷边界重新取得指针。
+- **第二十三项用户裁决（2026-08-16，Enter drop 后的返回路径）**：Enter 在滚页后仍无法
+  提交时，本次调用锁定为 `unrecorded-pair`。producer 先为未写出的 Enter 推进一次
+  sequence/drop，再执行原 syscall；只有在同一 process generation 正常返回时，才为被抑制的
+  Exit 再推进一次 sequence/drop，随后直接返回。返回点不得因阻塞期间已有 free page 而重新
+  取页、封页、唤醒 writer 或写孤立 Exit；采集只从下一次 Enter 恢复。内核 signal frame 不写
+  普通页，受管延后 handler 在 Exit 后才运行，因此首版 producer 不为不存在的 syscall 嵌套
+  增加 `open_depth/tainted_page`。nonreturn 只有一次 Enter drop；失败 exec 等正常返回有第二次
+  drop。fork 父按正常返回处理，child 先切换 process generation，绝不触碰复制来的父
+  producer、sequence 或 Exit drop。raw 成功/失败使用两条生成式控制流，不跨 syscall 保存
+  bool，计数与跳转必须保持 guest RFLAGS。专门的 `HostFork` 只走 fork 生命周期协议，
+  `SYS_rt_sigreturn` plain bypass；二者不冒充首版 direct pair。
+- **第二十四项用户裁决（2026-08-17，`ProducerFast` 热线）**：`r15` 指向稳定的
+  `ProducerHot`，其首个独占64B cache line固定为 `ProducerFast { cursor:u64,
+  pair_budget:u64, errno_ptr:u64, reserved:[u8;40] }`。健康 Enter只读写前两项，raw Exit只更新
+  cursor，libc Exit只在失败时再读errno指针；剩余40B保留，不得塞入writer/session共享状态。
+  control由代码点immediate给出，Engine从page header/16B marker继承；sequence、drop、page、
+  end、fork、session和stop全在页头或producer冷线，writer在producer活跃时永不读fast/cold
+  两线。marker只写在完整pair之间，成功后按`floor((payload_end-cursor)/88)`重算budget。封页
+  设payload used为U、marker数为M，必须验证`U>=16M`及`(U-16M)%88==0`，再算
+  `P=(U-16M)/88`、`record_count=2P+M`，由page first_sequence推进next_sequence；健康syscall
+  不逐条改sequence/drop。marker也占sequence，无法提交且无法开新页时在冷账本记一次drop并
+  进入context-unsynced；无页的正常返回pair在冷线一次增加两个sequence/drop。
+- **第二十五项用户裁决（2026-08-18，剩余设计整体转施工）**：用户不再逐项问答，批准
+  `mirvm_high_performance_log.md` §12.1 的首版默认包整体成为施工合同；§12.2 的页池数字、
+  page class阈值、24/32B Exit、writer批量/checksum、NUMA、ready MPSC、I/O候选和正式性能门
+  必须由首个真实纵切自动裁判，不许人工先填；§12.3 的schema长期兼容、完整kernel syscall
+  流、一般timeline/Perfetto、OSR动态启停、signal解释栈采样、rotation/durability、未触发I/O
+  优化和完整epoch回收明确延期。施工按1A `HostSyscall + recorder/writer/v0 decoder +
+  inspect/export`、1B stateless inline-asm raw site分片；1A完成不得冒充全部覆盖。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT

@@ -1236,6 +1236,11 @@ pub enum Builtin {
     X86PsllD128,
     /// `llvm.x86.sse2.psrl.d(a, count)`（`_mm_srl_epi32`）：v4i32 逻辑右移，同律。
     X86PsrlD128,
+    /// Capture-capable Module 在 Engine 冷创建边界由 `HostSyscall` 改写而来。
+    /// 该内部变体经通用 builtin 助手记录，避免给普通 syscall/JIT 路径
+    /// 增加 session 检查。
+    /// 放在枚举尾部，保持既有 postcard variant 编号不变。
+    HostSyscallTrace,
 }
 
 /// libffi 直通的参数/返回类别（lower 期从 fn sig layout 冻结；os:: P7 直通处置）。
@@ -1634,6 +1639,14 @@ impl FuncTable {
             funcs: self,
             next: 0,
         }
+    }
+
+    fn iter_mut(&mut self) -> std::slice::IterMut<'_, FuncBody> {
+        self.make_eager();
+        let FuncStorage::Eager(funcs) = &mut self.storage else {
+            unreachable!()
+        };
+        funcs.iter_mut()
     }
 
     pub fn push(&mut self, body: FuncBody) {
@@ -2100,6 +2113,22 @@ impl Module {
             self.function_names = self.funcs.iter().map(|body| body.name.clone()).collect();
         }
     }
+
+    /// Freeze this Engine instance into the capture-capable execution domain.
+    /// The serialized Module stays plain; rewriting happens only after a session
+    /// has armed capture and before `Shared` publishes the Module for execution.
+    pub(crate) fn rewrite_host_syscalls_for_capture(&mut self) {
+        for body in self.funcs.iter_mut() {
+            for block in &mut body.blocks {
+                let Terminator::CallBuiltin { builtin, .. } = &mut block.term else {
+                    continue;
+                };
+                if matches!(builtin, Builtin::HostSyscall) {
+                    *builtin = Builtin::HostSyscallTrace;
+                }
+            }
+        }
+    }
     /// argv C 串表终结化（tier-0 setup_process_memory 同构；M6 片2 起从 lower 迁出）。
     /// argv 是**运行期输入**：不得进 L2 缓存快照，冷/热路径每次运行都在快照之后追加
     /// 分配并回填 EntryPlan——单一代码路径，杜绝冷热漂移。
@@ -2164,7 +2193,10 @@ impl Module {
 
 #[cfg(test)]
 mod tests {
-    use super::{DecodeQueue, Width};
+    use super::{
+        Block, Builtin, BuiltinCallRole, DecodeQueue, FuncBody, Module, RetAbi, RetDest,
+        Terminator, UnwindAction, Width,
+    };
 
     #[test]
     fn width_roundtrips_supported_byte_sizes_and_masks_values() {
@@ -2193,5 +2225,54 @@ mod tests {
         assert_eq!(queue.pop_next(), Some(3));
         assert_eq!(queue.pop_next(), Some(1));
         assert_eq!(queue.pop_next(), Some(2));
+    }
+
+    #[test]
+    fn capture_rewrite_changes_only_plain_host_syscalls() {
+        let body = |name: &str, builtin| FuncBody {
+            frame_size: 0,
+            frame_align: 1,
+            ret: RetAbi::Zst,
+            params: Vec::new(),
+            caller_loc_off: None,
+            blocks: vec![Block {
+                stmts: Vec::new(),
+                term: Terminator::CallBuiltin {
+                    builtin,
+                    args: Vec::new(),
+                    ret: RetDest::Ignore,
+                    target: 0,
+                    unwind: UnwindAction::Continue,
+                    role: BuiltinCallRole::Normal,
+                },
+            }],
+            name: name.into(),
+        };
+        let mut module = Module {
+            funcs: vec![
+                body("plain", Builtin::HostSyscall),
+                body("already_trace", Builtin::HostSyscallTrace),
+                body("other", Builtin::HostWrite),
+            ]
+            .into(),
+            ..Module::default()
+        };
+
+        module.rewrite_host_syscalls_for_capture();
+        module.rewrite_host_syscalls_for_capture();
+
+        let builtins: Vec<&Builtin> = module
+            .funcs
+            .iter()
+            .map(|body| {
+                let Terminator::CallBuiltin { builtin, .. } = &body.blocks[0].term else {
+                    unreachable!()
+                };
+                builtin
+            })
+            .collect();
+        assert!(matches!(builtins[0], Builtin::HostSyscallTrace));
+        assert!(matches!(builtins[1], Builtin::HostSyscallTrace));
+        assert!(matches!(builtins[2], Builtin::HostWrite));
     }
 }

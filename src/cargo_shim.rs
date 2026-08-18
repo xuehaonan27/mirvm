@@ -112,6 +112,29 @@ fn cargo_target_dir() -> PathBuf {
     target_dir
 }
 
+fn cargo_runner_config(self_exe: &Path, capture_directory: Option<&Path>) -> String {
+    let quote = |value: &Path| {
+        value
+            .to_str()
+            .expect("mirvm runner path is not UTF-8")
+            .replace('\\', "\\\\")
+            .replace('\'', "\\'")
+    };
+    let mut config = format!(
+        "target.'cfg(all())'.runner=['{}', 'runner'",
+        quote(self_exe)
+    );
+    if let Some(directory) = capture_directory {
+        config.push_str(&format!(
+            ", '{}', '{}'",
+            crate::cli::INTERNAL_CAPTURE_DIRECTORY_ARG,
+            quote(directory)
+        ));
+    }
+    config.push(']');
+    config
+}
+
 fn ensure_cargo_doctest_tools(
     project_dir: &Path,
     self_exe: &Path,
@@ -150,9 +173,9 @@ fn cargo_project_command(
     // 强制 host target：让 host/target crate 可区分，且激活 target.runner
     cmd.arg("--target").arg(env!("MIRVM_HOST"));
     // 所有"运行二进制"的动作转给我们
-    let runner_toml = self_str.replace('\\', "\\\\").replace('\'', "\\'");
-    cmd.arg("--config").arg(format!(
-        "target.'cfg(all())'.runner=['{runner_toml}', 'runner']"
+    cmd.arg("--config").arg(cargo_runner_config(
+        self_exe,
+        crate::cli::capture_directory(),
     ));
     // 统一依赖存储（D14 近期片，2026-07-18 裁定）：所有脚本/项目的 mirvm 构建
     // 共享同一 target dir——cargo fingerprint 即编译键（版本×features×依赖闭包
@@ -706,8 +729,21 @@ mod tests {
 
     use super::{
         CargoAction, append_encoded_rustflags, cargo_doctest_rustdoc_args, cargo_project_command,
-        read_fake_info, runner_args_with_stable_paths,
+        cargo_runner_config, read_fake_info, runner_args_with_stable_paths,
     };
+
+    #[test]
+    fn capture_directory_is_carried_only_by_the_runner_argv() {
+        let config = cargo_runner_config(
+            Path::new("/tmp/mirvm"),
+            Some(Path::new("/tmp/capture output")),
+        );
+        assert_eq!(
+            config,
+            "target.'cfg(all())'.runner=['/tmp/mirvm', 'runner', \
+             '--mirvm-capture-directory', '/tmp/capture output']"
+        );
+    }
 
     #[test]
     fn cargo_doctest_replaces_the_native_runner_and_sysroot() {

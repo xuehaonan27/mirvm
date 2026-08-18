@@ -9,6 +9,7 @@ publish = false
 [workspace]
 
 [dependencies]
+blake3 = "1.8"
 libc = "0.2"
 libffi = "5.1.1"
 libmimalloc-sys = "0.1.49"

@@ -35,6 +35,9 @@ USAGE:
     mirvm pack <target>  [-o out.mirvm]                  # cargo 项目 / 脚本 / 单文件 → .mirvm 包
     mirvm run <dir | Cargo.toml> [-- <program args>]     # cargo 项目（依赖自动构建为 MIR rlib）
     mirvm test [dir | Cargo.toml] [OPTIONS] [TESTNAME] [-- <libtest args>]
+    mirvm capture [-o DIR] -- run <input> [OPTIONS]      # 采集一次真实 guest 执行
+    mirvm log inspect <file | session-dir>              # 校验 v0 事件流及终结总账
+    mirvm log export <file | session-dir> [FILTERS]     # 导出可信记录为 JSONL
     mirvm cache status                                   # 本地仓库各组件体量 + 陈代体量
     mirvm cache purge [--dry-run]                        # 默认 = 清陈代（deps/base/ir 非本 build 代）
     mirvm cache purge --deps|--base|--ir                 # 对应族全清（所有代）
@@ -140,8 +143,10 @@ pub fn main() -> ExitCode {
 
     match first.as_str() {
         "run" => run_main(argv),
+        "capture" => capture_main(argv),
         "test" => test_main(argv),
         "pack" => pack_main(argv),
+        "log" => crate::telemetry::tool::main(argv),
         "cache" => cache_main(argv),
         "deps" => deps_main(argv),
         "spike1" => crate::vm::spikes::spike1::run(),
@@ -155,6 +160,90 @@ pub fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+pub(crate) const INTERNAL_CAPTURE_DIRECTORY_ARG: &str = "--mirvm-capture-directory";
+static CAPTURE_DIRECTORY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+pub(crate) fn capture_directory() -> Option<&'static Path> {
+    CAPTURE_DIRECTORY.get().map(PathBuf::as_path)
+}
+
+pub(crate) fn set_capture_directory(directory: PathBuf) -> Result<(), PathBuf> {
+    CAPTURE_DIRECTORY.set(directory)
+}
+
+pub(crate) fn take_internal_capture_directory<I>(
+    argv: &mut std::iter::Peekable<I>,
+) -> Result<Option<PathBuf>, ()>
+where
+    I: Iterator<Item = String>,
+{
+    if !argv
+        .peek()
+        .is_some_and(|arg| arg == INTERNAL_CAPTURE_DIRECTORY_ARG)
+    {
+        return Ok(None);
+    }
+    argv.next();
+    argv.next().map(PathBuf::from).map(Some).ok_or(())
+}
+
+fn capture_main(mut args: impl Iterator<Item = String>) -> ExitCode {
+    let mut output = None;
+    let mut command = Vec::new();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-o" | "--output" => {
+                let Some(path) = args.next() else {
+                    eprintln!("mirvm capture: {arg} needs a directory");
+                    return ExitCode::from(2);
+                };
+                if output.replace(PathBuf::from(path)).is_some() {
+                    eprintln!("mirvm capture: output directory was specified more than once");
+                    return ExitCode::from(2);
+                }
+            }
+            "--" => {
+                command.extend(args);
+                break;
+            }
+            _ => {
+                eprintln!("mirvm capture: expected `--` before the MIRVM command\n{USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if command.first().map(String::as_str) != Some("run") {
+        eprintln!("mirvm capture: the first implementation accepts `-- run ...`");
+        return ExitCode::from(2);
+    }
+
+    let output =
+        output.unwrap_or_else(|| PathBuf::from(format!("mirvm-capture-{}", std::process::id())));
+    let output = if output.is_absolute() {
+        output
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(output),
+            Err(error) => {
+                eprintln!("mirvm capture: cannot resolve the output directory: {error}");
+                return ExitCode::from(1);
+            }
+        }
+    };
+    if let Err(error) = std::fs::create_dir_all(&output) {
+        eprintln!(
+            "mirvm capture: cannot create output directory {}: {error}",
+            output.display()
+        );
+        return ExitCode::from(1);
+    }
+    if set_capture_directory(output).is_err() {
+        eprintln!("mirvm capture: a capture request is already configured in this process");
+        return ExitCode::from(2);
+    }
+    run_main(command.into_iter().skip(1))
 }
 
 /// `mirvm test [项目] [Cargo 选择参数/TESTNAME] [-- libtest 参数]`。
@@ -655,6 +744,20 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
 // ===== cargo runner 回调 =====
 
 fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
+    let mut argv = argv.peekable();
+    match take_internal_capture_directory(&mut argv) {
+        Err(()) => {
+            eprintln!("mirvm capture: runner is missing the capture directory");
+            return ExitCode::from(2);
+        }
+        Ok(Some(directory)) => {
+            if set_capture_directory(directory).is_err() {
+                eprintln!("mirvm capture: runner received more than one capture request");
+                return ExitCode::from(2);
+            }
+        }
+        Ok(None) => {}
+    }
     let guest_process = GuestProcessState::from_cargo_runner();
     let (rustc_args, program_argv, env) = cargo_shim::parse_runner_invocation(argv);
     // rustc 前端必须重演 wrapper 录下的构建环境；来宾执行前会完整恢复
@@ -1213,6 +1316,37 @@ fn run_vm_engine(
         eprintln!("mirvm: {e}");
         return 70;
     }
+    let mut capture = if let Some(directory) = CAPTURE_DIRECTORY.get() {
+        let output = directory.join(format!("events-{}-0.mlog", std::process::id()));
+        match crate::telemetry::CaptureSession::start(crate::telemetry::CaptureOptions::new(output))
+        {
+            Ok(session) => Some(session),
+            Err(error) => {
+                eprintln!("mirvm capture: cannot start event writer: {error}");
+                return 70;
+            }
+        }
+    } else {
+        None
+    };
+    let code = run_vm_engine_loaded(module, vm_call);
+    if let Some(session) = &mut capture {
+        match session.finish(std::time::Duration::from_secs(30)) {
+            Ok(crate::telemetry::CaptureFinish::Finished(_)) => {}
+            Ok(crate::telemetry::CaptureFinish::InProgress) => {
+                eprintln!("mirvm capture: writer did not finish within 30 seconds");
+                return 70;
+            }
+            Err(error) => {
+                eprintln!("mirvm capture: cannot finish event file: {error}");
+                return 70;
+            }
+        }
+    }
+    code
+}
+
+fn run_vm_engine_loaded(module: crate::vm::engine::ir::Module, vm_call: Option<&str>) -> i32 {
     let shared = crate::vm::engine::ctx::Shared::new(module);
     // P1 条目可执行化（decision-history §7.6）：配方 → closure → stub 字节 →
     // 整域 RX（与上两道并列的全相工序；域被占 = 装载失败）
@@ -1557,7 +1691,30 @@ fn write_if_changed(path: &Path, contents: &str) {
 mod tests {
     use rustc_errors::{DiagInner, Level};
 
-    use super::is_runner_warning_summary;
+    use super::{
+        INTERNAL_CAPTURE_DIRECTORY_ARG, is_runner_warning_summary, take_internal_capture_directory,
+    };
+
+    #[test]
+    fn internal_capture_argument_is_removed_before_guest_arguments_are_built() {
+        let mut argv = [
+            INTERNAL_CAPTURE_DIRECTORY_ARG,
+            "/tmp/capture",
+            "/tmp/fake-bin",
+            "guest-argument",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .peekable();
+        assert_eq!(
+            take_internal_capture_directory(&mut argv).unwrap(),
+            Some(std::path::PathBuf::from("/tmp/capture"))
+        );
+        assert_eq!(
+            argv.collect::<Vec<_>>(),
+            ["/tmp/fake-bin", "guest-argument"]
+        );
+    }
 
     #[test]
     fn runner_filter_accepts_only_rustc_warning_count_summaries() {

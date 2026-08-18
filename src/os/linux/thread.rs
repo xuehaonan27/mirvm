@@ -13,6 +13,37 @@
 
 use std::ffi::c_void;
 
+#[cfg(target_arch = "x86_64")]
+std::arch::global_asm!(
+    ".globl mirvm_futex_wait_raw",
+    ".hidden mirvm_futex_wait_raw",
+    ".type mirvm_futex_wait_raw,@function",
+    "mirvm_futex_wait_raw:",
+    "mov edx, esi",
+    "mov eax, 202",
+    "mov esi, 128",
+    "mov r10d, 0",
+    "syscall",
+    "ret",
+    ".size mirvm_futex_wait_raw, .-mirvm_futex_wait_raw",
+    ".globl mirvm_futex_wake_one_raw",
+    ".hidden mirvm_futex_wake_one_raw",
+    ".type mirvm_futex_wake_one_raw,@function",
+    "mirvm_futex_wake_one_raw:",
+    "mov eax, 202",
+    "mov esi, 129",
+    "mov edx, 1",
+    "syscall",
+    "ret",
+    ".size mirvm_futex_wake_one_raw, .-mirvm_futex_wake_one_raw",
+);
+
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" {
+    fn mirvm_futex_wait_raw(addr: *const u32, expected: u32) -> i64;
+    fn mirvm_futex_wake_one_raw(addr: *const u32) -> i64;
+}
+
 /// pthread TLS key.
 /// Unique within the process after creation (`dtor` determined by the caller).
 #[derive(Clone, Copy)]
@@ -101,4 +132,38 @@ pub fn os_thread_count() -> usize {
     std::fs::read_dir("/proc/self/task")
         .map(|d| d.count())
         .unwrap_or(0)
+}
+
+/// Wait while `*addr == expected`, returning the kernel's raw result. This
+/// leaf never writes libc `errno`; callers use it for telemetry wakeups that
+/// must be invisible to the guest syscall contract.
+#[cfg(target_arch = "x86_64")]
+pub fn futex_wait_raw(addr: *const u32, expected: u32) -> i64 {
+    // SAFETY: the caller keeps the aligned atomic word alive for the wait.
+    unsafe { mirvm_futex_wait_raw(addr, expected) }
+}
+
+/// Wake at most one waiter, returning the kernel's raw result without touching
+/// libc `errno`.
+#[cfg(target_arch = "x86_64")]
+pub fn futex_wake_one_raw(addr: *const u32) -> i64 {
+    // SAFETY: the caller keeps the aligned atomic word alive for the syscall.
+    unsafe { mirvm_futex_wake_one_raw(addr) }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU32;
+
+    #[test]
+    fn raw_futex_wait_passes_expected_without_touching_errno() {
+        let word = AtomicU32::new(1);
+        unsafe { *libc::__errno_location() = 73 };
+
+        let rc = futex_wait_raw(word.as_ptr(), 0);
+
+        assert_eq!(rc, -(libc::EAGAIN as i64));
+        assert_eq!(unsafe { *libc::__errno_location() }, 73);
+    }
 }

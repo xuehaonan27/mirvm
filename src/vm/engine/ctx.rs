@@ -26,6 +26,9 @@ pub struct Shared {
     pub id: u64,
     pub module: Module,
     pub thunks: super::thunks::ThunkCache,
+    /// Frozen when this Engine is created. Capture-capable Engines keep their
+    /// trace IR after a session stops; later activations may bind a new session.
+    pub(crate) trace_capable: bool,
     /// J1 分层基座（M5.3a）：PLT 槽 + 计数，按合并后 FuncId 空间建。
     /// 槽的写入者是 M5.3b 编译线程（单原子交换发布），此外发布后只读纪律不变。
     pub jit: super::jit::JitState,
@@ -45,6 +48,10 @@ impl Shared {
 
     pub(crate) fn try_from_module(mut module: Module) -> Result<Self, String> {
         static NEXT_ENGINE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let trace_capable = crate::telemetry::capture::is_armed();
+        if trace_capable {
+            module.rewrite_host_syscalls_for_capture();
+        }
         module.ensure_function_names();
         super::backtrace::materialize_symbols(&mut module)?;
         let jit = super::jit::JitState::new(module.funcs.len());
@@ -53,6 +60,7 @@ impl Shared {
             id,
             module,
             thunks: super::thunks::ThunkCache::default(),
+            trace_capable,
             jit,
             control: Arc::new(EngineControl::new(id)),
             ctx_slots: Mutex::new(Vec::new()),
@@ -1441,6 +1449,9 @@ struct ThreadContexts {
     teardown_rounds: u8,
     final_tsd_cursor: Option<libc::pthread_key_t>,
     final_tsd_active: bool,
+    /// Avoid touching telemetry from final TSD on threads that never entered a
+    /// capture-capable Engine.
+    telemetry_touched: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1466,6 +1477,7 @@ impl ThreadContexts {
             teardown_rounds: 0,
             final_tsd_cursor: None,
             final_tsd_active: false,
+            telemetry_touched: false,
         }
     }
 
@@ -1690,6 +1702,9 @@ unsafe extern "C" fn ctx_key_dtor(p: *mut std::ffi::c_void) {
             }
         }
         super::deferred::abandon_current_thread_tsd_for_exit();
+        if (*contexts).telemetry_touched {
+            crate::telemetry::capture::retire_current_thread();
+        }
         crate::os::thread::tls_set(key, std::ptr::null_mut());
         drop(Box::from_raw(contexts));
     }
@@ -1912,6 +1927,7 @@ pub struct ActivationGuard {
     ctx: *mut Ctx,
     engine_id: u64,
     activation: u64,
+    telemetry: Option<crate::telemetry::capture::ActivationToken>,
 }
 
 impl ActivationGuard {
@@ -1944,6 +1960,14 @@ impl Drop for ActivationGuard {
             // after the token is gone, may start work queued under the mask.
             start_signal_finalizers =
                 (*self.contexts).signal_mask == 0 && (*self.contexts).in_flight_faults.is_empty();
+        }
+        if let Some(token) = self.telemetry {
+            let restored_engine_id = if self.previous.is_null() {
+                0
+            } else {
+                unsafe { (*self.previous).shared().id }
+            };
+            crate::telemetry::capture::activation_exit(token, restored_engine_id);
         }
         if drain_deferred && !std::thread::panicking() {
             super::deferred::drain_current_thread(&shared);
@@ -2005,6 +2029,12 @@ pub fn activate(shared: &Arc<Shared>) -> ActivationGuard {
         (*contexts).current_activation = activation;
         (*contexts).active_engines.push(shared.id);
         let previous_signal_owner = super::signal::activate_owner(shared.id);
+        let telemetry = if shared.trace_capable {
+            (*contexts).telemetry_touched = true;
+            Some(crate::telemetry::capture::activation_enter(shared.id))
+        } else {
+            None
+        };
         ActivationGuard {
             contexts,
             previous,
@@ -2013,6 +2043,7 @@ pub fn activate(shared: &Arc<Shared>) -> ActivationGuard {
             ctx,
             engine_id: shared.id,
             activation,
+            telemetry,
         }
     }
 }

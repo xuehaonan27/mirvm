@@ -1684,16 +1684,66 @@ fn run_recipe_child(
     args: &[String],
 ) -> i32 {
     let mut cmd = std::process::Command::new(self_exe);
-    cmd.arg("__cless-run-root")
-        .arg(recipe)
+    cmd.arg("__cless-run-root");
+    append_capture_directory_arg(&mut cmd, crate::cli::capture_directory());
+    cmd.arg(recipe)
         .args(args)
         .current_dir(cwd)
         .env("MIRVM_SYSROOT", sysroot);
     cmd.status().ok().and_then(|s| s.code()).unwrap_or(1)
 }
 
+fn append_capture_directory_arg(command: &mut std::process::Command, directory: Option<&Path>) {
+    if let Some(directory) = directory {
+        command
+            .arg(crate::cli::INTERNAL_CAPTURE_DIRECTORY_ARG)
+            .arg(directory);
+    }
+}
+
+#[cfg(test)]
+mod capture_argv_tests {
+    use std::ffi::OsStr;
+    use std::path::Path;
+    use std::process::Command;
+
+    use super::append_capture_directory_arg;
+
+    #[test]
+    fn root_capture_argument_precedes_the_recipe_and_guest_arguments() {
+        let mut command = Command::new("/tmp/mirvm");
+        command.arg("__cless-run-root");
+        append_capture_directory_arg(&mut command, Some(Path::new("/tmp/capture")));
+        command.arg("/tmp/recipe").arg("guest-argument");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                OsStr::new("__cless-run-root"),
+                OsStr::new("--mirvm-capture-directory"),
+                OsStr::new("/tmp/capture"),
+                OsStr::new("/tmp/recipe"),
+                OsStr::new("guest-argument"),
+            ]
+        );
+    }
+}
+
 /// `__cless-run-root <recipe> [program args]` 子进程入口。
-pub fn run_root_recipe(mut argv: impl Iterator<Item = String>) -> ExitCode {
+pub fn run_root_recipe(argv: impl Iterator<Item = String>) -> ExitCode {
+    let mut argv = argv.peekable();
+    match crate::cli::take_internal_capture_directory(&mut argv) {
+        Err(()) => {
+            eprintln!("mirvm capture: __cless-run-root 缺采集目录");
+            return ExitCode::from(2);
+        }
+        Ok(Some(directory)) => {
+            if crate::cli::set_capture_directory(directory).is_err() {
+                eprintln!("mirvm capture: __cless-run-root 收到重复采集请求");
+                return ExitCode::from(2);
+            }
+        }
+        Ok(None) => {}
+    }
     let Some(path) = argv.next() else {
         eprintln!("mirvm: __cless-run-root 缺配方路径");
         return ExitCode::from(2);
