@@ -136,7 +136,15 @@ struct Compiler<'a> {
     poll_signals: ClifFuncId,
     /// 本批 (clif id, unwind info, try_call 函数的 LSDA 字节)——finalize 后统一注册
     pending_unwind: Vec<(ClifFuncId, UnwindInfo, Option<Vec<u8>>)>,
-    pending_guest_code: Vec<(ClifFuncId, u32, u64)>,
+    #[cfg(test)]
+    fail_after_symbol: Option<JitSymbolRole>,
+}
+
+struct PendingJitSymbol {
+    id: ClifFuncId,
+    func: u32,
+    role: JitSymbolRole,
+    size: u64,
 }
 
 impl<'a> Compiler<'a> {
@@ -392,7 +400,8 @@ impl<'a> Compiler<'a> {
             stack_guard,
             poll_signals,
             pending_unwind: Vec::new(),
-            pending_guest_code: Vec::new(),
+            #[cfg(test)]
+            fail_after_symbol: None,
         }
     }
 
@@ -445,9 +454,9 @@ impl<'a> Compiler<'a> {
         }
         for (c, cabi) in callees {
             if jit.slots_fast[c as usize].load(Ordering::Acquire) == 0
-                && let Some(tramp) = self.define_c2i_trampoline(c, cabi)
+                && let Some((tramp, ranges)) = self.define_c2i_trampoline(c, cabi)
             {
-                jit.slots_fast[c as usize].store(tramp as u64, Ordering::Release);
+                jit.publish_c2i_entry(c, tramp as u64, ranges);
             }
         }
 
@@ -455,30 +464,47 @@ impl<'a> Compiler<'a> {
         // stderr 吐 panic——差分 oracle 的 stderr 逐字节比对会被线程 id 污染，实测抓获）；
         // MIRVM_JIT_SYNC 验证模式例外：可准入失败 = FAIL 哨兵响亮记（audit F-05）
         // TODO: 加入 log 系统之后应该向 log 系统输出错误
-        let Some(fast_id) = self.define_fast(func, body, abi) else {
+        let Some((fast_id, fast_symbol)) = self.define_fast(func, body, abi) else {
             self.strict_fail(func);
             return;
         };
-        let Some(guarded_id) = self.define_guarded_fast(func, body, abi, fast_id) else {
+        let mut symbols = vec![fast_symbol];
+        #[cfg(test)]
+        if self.fail_after_symbol == Some(JitSymbolRole::FastBody) {
+            return;
+        }
+        let Some((guarded_id, guarded_symbol)) = self.define_guarded_fast(func, body, abi, fast_id)
+        else {
             self.strict_fail(func);
             return;
         };
-        let Some(packed_id) = self.define_packed(func, body, abi, guarded_id) else {
+        symbols.push(guarded_symbol);
+        #[cfg(test)]
+        if self.fail_after_symbol == Some(JitSymbolRole::Guarded) {
+            return;
+        }
+        let Some((packed_id, packed_symbol)) = self.define_packed(func, body, abi, guarded_id)
+        else {
             self.strict_fail(func);
             return;
         };
+        symbols.push(packed_symbol);
+        #[cfg(test)]
+        if self.fail_after_symbol == Some(JitSymbolRole::Packed) {
+            return;
+        }
         if self.module.finalize_definitions().is_err() {
             self.strict_fail(func);
             return;
         }
         self.register_pending_eh_frames();
-        self.register_pending_guest_code();
+        let ranges = self.finalized_symbol_ranges(symbols);
 
         let fast = self.module.get_finalized_function(guarded_id) as u64;
         let packed = self.module.get_finalized_function(packed_id) as u64;
         // 发布序：先 fast（自递归/他人调我）后 packed（interp 才可能进入编译码）
-        jit.slots_fast[func as usize].store(fast, Ordering::Release);
-        jit.slots[func as usize].store(packed, Ordering::Release);
+        // 所有内存范围在这两个 Release store 前完成；perf-map 只由显式 stop 写出。
+        jit.publish_compiled_entries(func, fast, packed, ranges);
     }
 
     /// Published fast entry. Keeping the check in a separate slot-free
@@ -490,7 +516,7 @@ impl<'a> Compiler<'a> {
         body: &ir::FuncBody,
         abi: CalleeAbi,
         fast: ClifFuncId,
-    ) -> Option<ClifFuncId> {
+    ) -> Option<(ClifFuncId, PendingJitSymbol)> {
         let sig = self.fast_sig(abi);
         let id = self
             .module
@@ -529,8 +555,17 @@ impl<'a> Compiler<'a> {
         {
             self.pending_unwind.push((id, ui, None));
         }
+        let size = cctx.compiled_code()?.code_buffer().len() as u64;
         self.module.clear_context(&mut cctx);
-        Some(id)
+        Some((
+            id,
+            PendingJitSymbol {
+                id,
+                func,
+                role: JitSymbolRole::Guarded,
+                size,
+            },
+        ))
     }
 
     /// strict 验证模式（MIRVM_JIT_SYNC，audit F-05）：可准入函数编译失败 =
@@ -549,7 +584,11 @@ impl<'a> Compiler<'a> {
 
     /// c2i 蹦床：fast 签名，打包实参进栈上数组，调 mirvm_c2i 回解释器。
     /// 任何编译失败 = None（调用方跳过本槽预热，静默维持解释）。
-    fn define_c2i_trampoline(&mut self, target: u32, abi: CalleeAbi) -> Option<*const u8> {
+    fn define_c2i_trampoline(
+        &mut self,
+        target: u32,
+        abi: CalleeAbi,
+    ) -> Option<(*const u8, Vec<JitSymbolRange>)> {
         let sig = self.fast_sig(abi);
         let id = self
             .module
@@ -609,12 +648,21 @@ impl<'a> Compiler<'a> {
         {
             self.pending_unwind.push((id, ui, None));
         }
+        let size = cctx.compiled_code()?.code_buffer().len() as u64;
+        let symbol = PendingJitSymbol {
+            id,
+            func: target,
+            role: JitSymbolRole::C2i,
+            size,
+        };
         self.module.clear_context(&mut cctx);
         if self.module.finalize_definitions().is_err() {
             return None;
         }
         self.register_pending_eh_frames();
-        Some(self.module.get_finalized_function(id))
+        let entry = self.module.get_finalized_function(id);
+        let ranges = self.finalized_symbol_ranges(vec![symbol]);
+        Some((entry, ranges))
     }
 
     /// fast 本体：字节码块 → CLIF；槽 → SSA 变量（I64 零扩到宽不变量）。
@@ -624,7 +672,7 @@ impl<'a> Compiler<'a> {
         func: u32,
         body: &ir::FuncBody,
         abi: CalleeAbi,
-    ) -> Option<ClifFuncId> {
+    ) -> Option<(ClifFuncId, PendingJitSymbol)> {
         let sig = self.fast_sig(abi);
         let id = self
             .module
@@ -718,12 +766,17 @@ impl<'a> Compiler<'a> {
             };
             self.pending_unwind.push((id, ui, lsda));
         }
-        if let Some(compiled) = cctx.compiled_code() {
-            self.pending_guest_code
-                .push((id, func, compiled.code_buffer().len() as u64));
-        }
+        let size = cctx.compiled_code()?.code_buffer().len() as u64;
         self.module.clear_context(&mut cctx);
-        Some(id)
+        Some((
+            id,
+            PendingJitSymbol {
+                id,
+                func,
+                role: JitSymbolRole::FastBody,
+                size,
+            },
+        ))
     }
 
     /// packed 入口：`(args: *const u64, ret: *mut u64)`——interp i2c 一跳。
@@ -733,7 +786,7 @@ impl<'a> Compiler<'a> {
         body: &ir::FuncBody,
         abi: CalleeAbi,
         fast: ClifFuncId,
-    ) -> Option<ClifFuncId> {
+    ) -> Option<(ClifFuncId, PendingJitSymbol)> {
         let _ = body;
         let mut sig = self.module.make_signature();
         sig.params.push(AbiParam::new(types::I64));
@@ -789,8 +842,17 @@ impl<'a> Compiler<'a> {
         {
             self.pending_unwind.push((id, ui, None));
         }
+        let size = cctx.compiled_code()?.code_buffer().len() as u64;
         self.module.clear_context(&mut cctx);
-        Some(id)
+        Some((
+            id,
+            PendingJitSymbol {
+                id,
+                func,
+                role: JitSymbolRole::Packed,
+                size,
+            },
+        ))
     }
 
     /// spike5 管线：FrameTable → eh_frame 字节 → 整段注册。字节由注册入口保留到
@@ -840,15 +902,22 @@ impl<'a> Compiler<'a> {
         super::register_eh_frame_section(eh.0.into_vec());
     }
 
-    fn register_pending_guest_code(&mut self) {
-        for (id, func, len) in self.pending_guest_code.drain(..) {
-            let start = self.module.get_finalized_function(id) as u64;
-            self.shared.jit.publish_guest_code(JitCodeRange {
-                start,
-                end: start.saturating_add(len),
-                func,
-            });
-        }
+    fn finalized_symbol_ranges(&self, symbols: Vec<PendingJitSymbol>) -> Vec<JitSymbolRange> {
+        symbols
+            .into_iter()
+            .map(|pending| {
+                let guest_name = &self.shared.module.funcs[pending.func as usize].name;
+                let start = self.module.get_finalized_function(pending.id) as u64;
+                JitSymbolRange::new(
+                    self.shared.id,
+                    pending.func,
+                    pending.role,
+                    start,
+                    pending.size,
+                    guest_name,
+                )
+            })
+            .collect()
     }
 }
 
@@ -912,6 +981,126 @@ fn collect_call_sites(cctx: &cranelift_codegen::Context) -> Vec<(u64, Option<u64
         }
     }
     cs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body(name: &str, first: Terminator) -> ir::FuncBody {
+        ir::FuncBody {
+            frame_size: 8,
+            frame_align: 8,
+            ret: RetAbi::Zst,
+            params: Vec::new(),
+            caller_loc_off: None,
+            blocks: vec![
+                ir::Block {
+                    stmts: Vec::new(),
+                    term: first,
+                },
+                ir::Block {
+                    stmts: Vec::new(),
+                    term: Terminator::Return,
+                },
+            ],
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn real_compilation_registers_every_executable_role() {
+        let caller = body(
+            "profile_caller",
+            Terminator::Call {
+                callee: 1,
+                args: Vec::new(),
+                ret: RetDest::Ignore,
+                target: 1,
+                unwind: UnwindAction::Continue,
+                role: ir::CallRole::Normal,
+            },
+        );
+        let callee = body("profile_callee", Terminator::Return);
+        let shared = Shared::new(ir::Module {
+            funcs: vec![caller, callee].into(),
+            ..ir::Module::default()
+        });
+        let mut compiler = Compiler::new(&shared);
+
+        compiler.compile(0);
+
+        assert_ne!(shared.jit.slots[0].load(Ordering::Acquire), 0);
+        let ranges = shared.jit.symbol_ranges();
+        assert_eq!(ranges.len(), 4);
+        assert!(ranges.iter().any(|range| {
+            range.func_id == 0 && range.role == JitSymbolRole::FastBody && range.size != 0
+        }));
+        assert!(ranges.iter().any(|range| {
+            range.func_id == 0 && range.role == JitSymbolRole::Guarded && range.size != 0
+        }));
+        assert!(ranges.iter().any(|range| {
+            range.func_id == 0 && range.role == JitSymbolRole::Packed && range.size != 0
+        }));
+        assert!(ranges.iter().any(|range| {
+            range.func_id == 1 && range.role == JitSymbolRole::C2i && range.size != 0
+        }));
+        assert_eq!(
+            ranges
+                .iter()
+                .filter(|range| shared.jit.guest_func_at(range.start) == Some(range.func_id))
+                .count(),
+            1,
+            "only the fast body may become a MIRVM guest backtrace frame"
+        );
+
+        // Published code and registered unwind metadata have process lifetime
+        // in production; keep that same lifetime in this direct compiler test.
+        std::mem::forget(compiler);
+    }
+
+    #[test]
+    fn failed_request_cannot_leak_symbols_into_the_next_compile_batch() {
+        let shared = Shared::new(ir::Module {
+            funcs: vec![
+                body("failed_profile_target", Terminator::Return),
+                body("successful_profile_target", Terminator::Return),
+            ]
+            .into(),
+            ..ir::Module::default()
+        });
+        let mut compiler = Compiler::new(&shared);
+        compiler.fail_after_symbol = Some(JitSymbolRole::FastBody);
+
+        compiler.compile(0);
+
+        assert_eq!(shared.jit.slots[0].load(Ordering::Acquire), 0);
+        assert!(shared.jit.symbol_ranges().is_empty());
+
+        compiler.fail_after_symbol = None;
+        compiler.compile(1);
+
+        assert_ne!(shared.jit.slots[1].load(Ordering::Acquire), 0);
+        let ranges = shared.jit.symbol_ranges();
+        assert_eq!(ranges.len(), 3);
+        assert!(ranges.iter().all(|range| range.func_id == 1));
+        assert!(
+            ranges
+                .iter()
+                .any(|range| range.role == JitSymbolRole::FastBody)
+        );
+        assert!(
+            ranges
+                .iter()
+                .any(|range| range.role == JitSymbolRole::Guarded)
+        );
+        assert!(
+            ranges
+                .iter()
+                .any(|range| range.role == JitSymbolRole::Packed)
+        );
+        std::mem::forget(compiler);
+    }
 }
 
 // ===== 函数体翻译 =====

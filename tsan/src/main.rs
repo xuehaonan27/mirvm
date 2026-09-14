@@ -20,13 +20,16 @@ mod product_adapters;
 pub(crate) use product_adapters::{lower, sysroot};
 #[path = "../../src/elfsym.rs"]
 mod elfsym; // ffi.rs 的归档 .symtab 兜底（纯 Rust，同源复用）
-mod telemetry; // capture/format 同源编译；ctx 的 trace activation 不能在 harness 里打桩
+mod telemetry; // capture/format 同源编译；另跑一条真实 arm session 生命周期
 #[path = "../../src/vm/mod.rs"]
 mod vm;
 
 fn main() -> std::process::ExitCode {
     // spike4（冻结工件）+ M4 引擎多线程真身（M4.4：共享 Shared/每线程 Ctx/thunk 工厂）
-    if vm::spikes::spike4::run_cases() && vm::engine::tsan_mt::run() {
+    if vm::spikes::spike4::run_cases()
+        && vm::engine::tsan_mt::run()
+        && telemetry::run_capture_lifecycle_case()
+    {
         println!("tsan-harness: 用例全 PASS（竞争判定看 TSan 输出）");
         std::process::ExitCode::SUCCESS
     } else {

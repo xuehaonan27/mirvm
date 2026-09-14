@@ -1,13 +1,15 @@
 # mirvm 日志、事件与性能剖析设计
 
-> **状态：审计讨论稿，未批准，禁止据此直接施工。**
+> **状态：现行设计与施工蓝图。** §12.0 区分已实现的 1A 参考纵切与待施部分；
+> §11 中 L1、P1 与 D0 已完成；L2–L4、P2 和数据裁决仍在施工队列，
+> 未完成项不得写成已有能力。
 >
 > 2026-08-13 审计推翻了旧稿的几个前提：仓库当前没有 mirvm 自有日志
 > backend，没有读取 `MIRVM_LOG`，也没有 `trace-log` Cargo feature；旧稿中的
 > v1/v2、纳秒成本和 ring 容量均不是已实现或已实测事实。
 >
-> 本文先记录已经能从代码和操作系统约束推出的结论，再列出仍需逐项讨论的
-> 选择。用户确认前，不把候选方案写成现行合同。
+> 本文记录已经确认的合同、实现事实和仍须由实测裁定的参数。§12.2 中的候选数字只有
+> 真实数据能转成默认值；这不改变其余已批准部分的施工状态。
 
 ---
 
@@ -1048,48 +1050,73 @@ profile 还要比较：热点前 N 名是否稳定、样本丢失率、采样频
 - 反汇编审计内核/采样入口：无锁、分配、Rust TLS 初始化、格式化、unwind、guest/JIT
   调用。
 
-## 11. 建议施工顺序
+## 11. 现行施工队列
 
-这不是批准施工，只是依赖关系：
+下面的 L 是日志采集主线，P 是用 Linux perf 做外部采样的 profile 线。顺序表示真实依赖，
+不是要求两条线串行等待。
 
-1. 先确认本文的数据分类、默认可靠性和特殊环境合同；
-2. 用真实的 MIRVM-owned `SyscallEnter`/`SyscallExit` 对做第一条纵切，加
-   `inspect`/`export`，同时保留原 syscall 语义的 correctness 对拍；旧
-   `MIRVM_SYSCALL_TRACE` 只作性能债务基线；
-3. 用该真实事件率决定页池绝对预算、4K/16K/64K 等级、每 producer 页数和 writer
-   page-return-gap；MPSC 只在真实证明发布页扫描成为瓶颈时作为页级通知候选；
-4. 接 Linux raw-syscall tracepoint，交付独立的全进程 syscall stream；同时接外部 perf，
-   并在 JIT 发布点提供真实代码地址映射；
-5. 根据 perf 缺口决定是否需要解释器安全点采样；
-6. 只有现有工具仍回答不了具体性能问题时，再建设通用 timeline trace、Perfetto 导出
-   或 signal-based 解释栈采样。
+1. **L1——页和线程生命周期闭合（2026-08-19 已完成）**：固定 4 KiB 页下已有进程硬页池、
+   page-less producer 自动救援、returned-page 通道、TSD retire 后移出活跃扫描表，以及
+   writer 每轮每 producer 至多取一页的公平基线。零预算 attach、退线程归页后恢复、2,048
+   个短命线程不积累扫描项、双 producer 公平顺序和 offer/retire 同轮所有权已有回归；真实
+   arm session 的 publish/return/retire/rescue 链也已在 TSan 下零竞争告警。
+2. **L2——fork 子代自动重建（下一步）**：child hook 先把子进程切入 drop-only，普通边界
+   自动创建新 process generation、文件、页池、writer、producer 和 errno pointer。覆盖
+   `HostFork`、泛型 `SYS_fork` 和 native 再入；父子不得共享账本、fd 或页状态。
+3. **L3——真正的 HostSyscall 热路径（随后）**：稳定 `ProducerFast` ABI 和共用冷慢路，
+   移除通用 JIT builtin helper 与健康 pair 的逐记录冷 sequence 更新；trace JIT 用 `r15`
+   固定当前 producer，plain 代码继续保持零 telemetry/TLS 读取和零保留 `r15`。
+4. **L4——1B stateless inline-asm raw site（L3 之后）**：复用同一 producer ABI 双物化 raw
+   syscall 站点，以 RFLAGS、除 `rcx/r11` 外 GPR、red zone、栈、XMM/YMM/ZMM 和 raw 返回值
+   对拍为交付门。L4 完成后，首个 MIRVM-owned syscall 纵切才算完整。
+5. **P1——JIT 机器码地址登记（2026-08-19 已完成）**：独立 `JitSymbolRange`
+   覆盖 fast body、guarded、packed、c2i 全部执行范围。编译请求只在本地收集范围；
+   finalize 成功后先把整批登记到内存 registry，再以 Release 发布入口 slot，失败批次
+   直接丢弃。`install` 在 registry mutex 外以 no-replace 创建空 map；显式 `stop` 在锁内先切
+   `Inactive` 并快照，再在锁外批量 write/flush，截断点后的范围归下一 session。JIT worker
+   不做 map I/O；fork child registry/map 重置仍留给 L2/P2。
+6. **P2——真实 profile 工具（待施，可与 L2–L4 并行）**：交付 `mirvm profile capture` 和
+   薄脚本，首版只承诺 Linux user-space、IP-only、inherit。权限不足、lost samples 或缺地址
+   映射必须响亮失败或标成 incomplete；随后立即重跑 `fib(32)` 与 D16 真实 workload。
+7. **D0——诊断通道分层（2026-08-19 已完成）**：默认 `mirvm run` 仍按 Cargo
+   语义，让 compiler（含 frontend/lower）诊断、MIRVM control 和 guest stderr 物理共用 fd2，
+   字节与顺序不变。capture 在 command boundary 建立 `DiagnosticRouter`，把前两类逐字节
+   tee 到 `diagnostics.log`；child attached marker 避免 runner 重复路由，guest fd2 绝不进入 router
+   或普通事件 ring。direct、cargoless、Cargo runner 及主流程前失败的逐字节合同
+   31/31 通过；正常路径 atexit 收口并 no-replace 发布，异常结束保留 partial。
+8. **数据裁决——自适应页池和 writer 调参（L1–L4 与 P2 之后）**：在相同进程内存预算下
+   比较 4/16/64 KiB、24/32B Exit、return gap、drop 曲线、guest cycles、RSS 和 writer CPU，
+   再实现 4 KiB→64 KiB 自动晋升/回收并裁定批量与 checksum。16 KiB、ready MPSC、staging
+   和其他 I/O 路径只有实测胜出才进入实现，不能先写死数字。
 
-不要为了“统一”先迁移 `MIRVM_TIMING`、`MIRVM_JIT_STATS` 等所有探针。第一条真实
-纵切能运行并给可信结果后，冻结工具基建，回到产品问题。
+不要为了“统一”先迁移 `MIRVM_TIMING`、`MIRVM_JIT_STATS` 等所有探针。L/P 当前交付物足够
+裁判具体产品问题后，冻结工具基建并回到被测产品路径。
 
 ## 12. 已确认项与剩余批量裁决
 
 2026-08-17 用户要求停止逐项问答，剩余决策一次列全。2026-08-18 用户批准按这份分组开始
-施工：§12.1 成为首版实现合同；§12.2 必须由真实纵切数据裁判，不再人工拍数字；§12.3 明确
-不进入首版。施工仍按 §11 的1A HostSyscall、1B stateless raw site 两个可验收切片推进，1A
-完成不能冒充整个纵切完成。
+施工：§12.1 成为首版实现合同；§12.2 必须由真实数据裁判，不再人工拍数字；§12.3 不进入
+首版，但每项都有明确进入条件，不作无限期搁置。施工按 §11 的 L1–L4、P1–P2、D0 与数据
+裁决推进；当前 1A HostSyscall 参考实现不能冒充整个 syscall 纵切或性能终态。2026-08-19
+L1、P1 与 D0 已完成；主线下一项仍是 L2，P2 可与 L2–L4 并行进入。
 
 1. **已确认**：六类数据各有独立合同，只共享必要且经证明合适的底层设施；
 2. **已确认**：Engine 执行/拆除期间所有遥测均不得等待输出端；允许丢失但必须计数，
    CLI 回到控制边界后才可同步显示最终诊断；
 3. **已确认**：固定 emergency 内存自动准备；普通采集明确开启并由 CLI/进程级 API
-   自动建立 session，开启后自动纳入所有线程、Engine 和 fork 代际；
+   自动建立 session。当前进程中的线程和 Engine 自动纳入；fork 子代先进入 drop-only，
+   自动建立独立代际属于 L2，完成前不得写成已有能力；
 4. **已确认**：每进程/fork 代际的权威原始记录使用二进制；JSONL、CSV、可读文本和
-   Perfetto 都是离线派生格式；具体字节布局仍未冻结；
+   Perfetto 都是离线派生格式。1A 已有内部 v0 字节布局，但尚无跨版本兼容承诺；
 5. **已确认**：原始文件按 chunk 提交和校验；崩溃恢复所有完整块、舍弃尾部半块，
    signal handler 不 flush，正常 `End` 才提供精确总账；
-6. **暂缓**：schema 兼容在首个实现和真实文件出现后讨论；当前先细化热路径；
+6. **后置到格式首次演进**：schema 兼容在首个实现和真实文件出现后讨论；当前先细化热路径；
 7. **已确认**：时间戳按语义分三档；计数不读时间，普通事件用合格的 relaxed TSC，
    严格边界用有序 TSC，不合格环境自动退到 vDSO；生产者只存原始值，离线按锚点换算；
 8. **已确认**：普通 JIT 零采集指令；timeline 使用独立代码域，并用 `r15` 保存稳定的
    每线程 `ProducerHot*`；解释器同样按入口选择 plain/trace 循环。代码域只在最外层 guest
-   activation 入口选择，调用链内不迁移；长期运行中动态开启 timeline 明确延期到 OSR/
-   可重建 frame 的真实需求触发；
+   activation 入口选择，调用链内不迁移；长期运行中动态开启 timeline 在相应真实 workload
+   进入验收时重开 OSR/可重建 frame；
 9. **已确认**：普通事件使用 per-pthread SPSC 页环，页内无逐事件原子 commit，整页以
    release/acquire 转交；进程 MPSC 不进入逐事件热路。active page 只在页满或线程自然离开
    trace 的静止边界发布，不做周期 watermark/deadline；
@@ -1110,7 +1137,7 @@ profile 还要比较：热点前 N 名是否稳定、样本丢失率、采样频
     `ProducerFast` 首行只含 `cursor/pair_budget/errno_ptr`；writer 不读 producer fast/cold 两行，
     marker 后冷路径重算 budget，封页由 used bytes 和 marker 数推导 sequence。
 
-### 12.0 当前施工状态（2026-08-18）
+### 12.0 当前施工状态（2026-08-19）
 
 第一条 **1A 可运行纵切**已经落地：进程级 capture session、每 pthread 双 4 KiB
 独占页、页级 SPSC 发布、独立 writer、v0 chunk/BLAKE3/End 总账、
@@ -1120,12 +1147,29 @@ Cargo runner/cargoless root，不写入 guest 可见环境；正常完成以 no-
 发布，不能覆盖旧日志。返回型 syscall、失败 errno、两页耗尽/恢复、`SYS_exit`
 提前封口、fork 父账本、解释/JIT 自动改写和 TSan 同源构建均已有回归。
 
-这仍然只是用来建立正确性与取得真实数据的纵切，**不是性能终态，也不是 1A/1B
-全部完成**。当前 HostSyscall trace 仍走通用 JIT builtin helper，并逐 record 更新冷
-sequence；producer 仍是固定双 4 KiB 页。尚未落地的近项包括：真正的全局硬页池、
-page-less 自动救援、4 KiB→64 KiB 自适应、retired producer 从扫描表摘除、fork child
-新 generation/独立文件、页级公平批量、trace JIT 的 pinned producer 快路，以及 1B
-stateless inline-asm raw site。profile/perf-map/JIT range 仍在后续纵切，不在这里冒充存在。
+L1 也已闭合：所有 producer 共用有硬字节上限的进程页池；拿不到双 4 KiB starter 仍会
+attach，并在后续 Enter 以一次 acquire 检查 writer 的 offer；retired producer 排空后从
+writer 活跃扫描表单遍摘除并归页。writer 每轮每 producer 最多写一页。会话结束还会回收
+全部页内存；这条 ownership 链已由定向竞态测试和真实 TSan arm session 覆盖。
+
+P1 也已闭合：所有 Cranelift fast body/guarded/packed/c2i 地址范围由成功编译
+请求成批登记，再以 Release 发布入口 slot；失败请求的本地批次直接丢弃。
+registry 登记只改内存；perf-map 仅在显式 stop 控制边界快照后在锁外批量写入/
+flush，不再拖住 JIT worker 或 teardown。真正启动 Linux perf 及 fork child map 代际仍属
+P2/L2。D0 同样已闭合：capture 从 command boundary 起路由 compiler/frontend/lower 与
+MIRVM control，子进程通过 attached marker 继承；默认 fd2 合流字节/顺序不变，
+guest fd2 不进 router。direct、cargoless、runner、早期参数/输入错误等 31/31
+逐字节合同已通过。
+
+这仍然**不是性能终态，也不是 1A/1B 全部完成**。当前 HostSyscall trace 仍走通用 JIT
+builtin helper并逐 record 更新冷 sequence；每个获页 producer 仍固定使用双 4 KiB starter，
+公开入口的 64 MiB 硬池值只是首轮实现默认值，不是数据裁决。4 KiB→64 KiB 自适应、fork
+child 新 generation/独立文件、trace JIT pinned producer 快路、1B stateless inline-asm raw
+site 和 P2 profile 命令仍未完成。
+
+现行主线下一项是 L2，L3–L4 随后闭合 HostSyscall 热路和 raw site；P2 可并行进入，
+并须在数据裁决阶段前完成。数据裁决才负责冻结硬页池预算、4 KiB→64 KiB
+晋升阈值和后续 writer 参数，L1 的固定双页实现不能充当这些数字的最终证据。
 
 ### 12.1 已确认：首版施工合同（用户 2026-08-18 整体批准）
 
@@ -1183,8 +1227,15 @@ stateless inline-asm raw site。profile/perf-map/JIT range 仍在后续纵切，
     失败errno、raw返回值、RFLAGS/GPR/red-zone/XMM-YMM-ZMM、plain/trace行为对拍；页满/drop/
     context、短写/sink error、线程退出、busy fork、signal在写字段/cursor/seal/publish四点注入。
     反汇编硬门是 plain 无 telemetry/TLS/保留r15，健康pair无原子/锁/额外syscall，drop有界。
+12. **诊断通道**：默认 `mirvm run` 的 fd2 字节和顺序保持 Cargo 语义；内部路由区分
+    compiler/lower、MIRVM control、guest stderr。capture/profile 只把前两类 tee 到独立
+    diagnostics stream，绝不截获 guest fd2 或把文本塞入普通事件 ring。direct、cargoless、
+    Cargo runner 三条路径必须同时接通，不接受只修其中一条的临时分叉。
 
-### 12.2 已确认：只能由首个真实纵切裁判，不预设数字
+### 12.2 已确认：只能由专项基准纵切裁判，不预设数字
+
+1A 已经产生真实文件，但它仍含通用 helper、固定双页和逐记录冷账本，不能用来冻结性能
+参数。L1–L4 与 P2 完成后，按 §11 的数据裁决阶段在相同预算、交替 workload 下裁定下列项目：
 
 1. 进程硬页池绝对字节、每 producer min/max、water-fill 公平参数、return-gap 分位数；
 2. 4K→64K 晋升/回收阈值、16K 第三类、owner与writer prefault/NUMA、2MiB backing slab；
@@ -1200,17 +1251,31 @@ stateless inline-asm raw site。profile/perf-map/JIT range 仍在后续纵切，
 9. external perf若只显示解释器热点而无法归因，再裁安全点 logical sampling；只有其偏差被
    实证不可接受，才讨论signal采样。trace JIT也只在trace interpreter真实成本后决定。
 
-### 12.3 已确认：明确延期，不阻塞首个纵切
+### 12.3 已确认：后置队列及进入条件
 
-1. 长期 schema 兼容、最终扩展名/session品牌、通用字典和格式插件；
-2. kernel raw-syscall完整流及duration关联、一般timeline、Perfetto和通用查询；
-3. 长期 plain activation 中动态启停timeline的OSR/deopt，以及active-page watermark/deadline；
-4. signal驱动解释器栈采样、任意PID attach、非Linux/ELF/x86-64 profiler；
-5. rotation、在线byte cap、断电durability/final fsync、常驻持久黑匣子；
-6. ready-page MPSC、staging/io_uring/mmap/compression、CPU affinity/nice等未触发优化；
-7. trace code/producer descriptor的完整epoch回收；首版可在扫描表摘除后保留有界tombstone；
-8. 全面迁移 `MIRVM_TIMING/JIT_STATS` 和六类合同大统一。首个真实工具足够裁当前问题后，
-   按基础设施预算纪律冻结它并回到产品工作。
+这些项目不阻塞 L1–L4/P1–P2，但也不作无限期搁置；满足各自条件时进入下一轮设计或施工：
+
+1. **schema 兼容**：v0 第一次需要被第二版 producer/consumer 读取，或准备对外承诺稳定格式
+   时进入；同时裁定最终扩展名、session 品牌、字典和格式插件边界。
+2. **kernel raw-syscall 完整流与 duration 关联**：L4 完成后，首个需要观察 libc 内部、opaque
+   archive 或全进程 syscall duration 的真实诊断进入时施工；内部流不得代替它。
+3. **一般 timeline、Perfetto 和通用查询**：P2、内部 syscall 流与需要时的 kernel 流仍不能
+   回答一个具名性能问题时进入；不得为了格式统一提前建设。
+4. **长期 activation 动态启停**：真实 workload 同时证明 guest 长期不返回宿主且必须中途
+   start/stop 时，重开 OSR/deopt 或其他可重建 frame 方案；已经处于 trace 域的长运行若提出
+   最大可见延迟，再独立裁定 active-page watermark/deadline。
+5. **解释器 logical/signal sampling**：P2 只显示解释器宿主热点、不能归因 guest 逻辑位置时
+   先做安全点 logical sampling；只有其偏差实测不可接受才进入 signal sampling。任意 PID
+   attach 和非 Linux/ELF/x86-64 profiler 在出现对应部署需求时进入。
+6. **rotation 与 durability**：首个长时运行或有磁盘上限、掉电恢复要求的 capture 场景进入
+   前施工 byte cap、rotation、final fsync 或持久黑匣子；短命开发采集不预付该成本。
+7. **未触发 I/O 优化**：数据裁决证明稳定 producer 扫描、`pwritev` 或调度造成主瓶颈后，
+   分别挑战 ready-page MPSC、staging/io_uring/mmap/compression、CPU affinity/nice；未证明者
+   不进入产品路径。
+8. **完整 epoch 回收**：动态 capture start/stop 或 trace code/producer descriptor 数量可随
+   进程寿命无界增长前施工；此前只允许扫描表摘除后的有界 tombstone。
+9. **全面迁移旧探针**：有一个具体问题必须联合查询 `MIRVM_TIMING/JIT_STATS` 与新采集流时
+   才迁移对应探针，不启动六类合同大统一。工具足够裁当前问题后仍按基础设施预算纪律冻结。
 
 ## 13. 外部依据
 

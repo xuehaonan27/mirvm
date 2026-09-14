@@ -670,17 +670,19 @@ pub fn parse_runner_invocation(
     mut argv: impl Iterator<Item = String>,
 ) -> (Vec<String>, Vec<String>, Vec<(String, String)>) {
     let fake_bin = argv.next().unwrap_or_else(|| {
-        eprintln!("mirvm runner: 缺少二进制路径参数");
+        crate::diagnostics::control(format_args!("mirvm runner: 缺少二进制路径参数"));
         exit(2);
     });
     let program_args: Vec<String> = argv.collect();
 
     let data = read_fake_info(Path::new(&fake_bin)).unwrap_or_else(|e| {
-        eprintln!("mirvm runner: 读取 {fake_bin} 失败: {e}");
+        crate::diagnostics::control(format_args!("mirvm runner: 读取 {fake_bin} 失败: {e}"));
         exit(1);
     });
     let info: CrateRunInfo = serde_json::from_str(&data).unwrap_or_else(|_| {
-        eprintln!("mirvm runner: {fake_bin} 不是 mirvm 的假二进制（试试删掉 target/mirvm 重跑）");
+        crate::diagnostics::control(format_args!(
+            "mirvm runner: {fake_bin} 不是 mirvm 的假二进制（试试删掉 target/mirvm 重跑）"
+        ));
         exit(1);
     });
 
@@ -697,7 +699,9 @@ pub fn parse_runner_invocation(
                 .find_map(|(key, value)| (key == "MIRVM_SYSROOT").then(|| value.clone()))
         })
         .unwrap_or_else(|| {
-            eprintln!("mirvm runner: 启动器配方缺少 MIRVM_SYSROOT（请清理对应 target 后重建）");
+            crate::diagnostics::control(format_args!(
+                "mirvm runner: 启动器配方缺少 MIRVM_SYSROOT（请清理对应 target 后重建）"
+            ));
             exit(1);
         });
     let mut rustc_args = vec!["mirvm".to_string()];

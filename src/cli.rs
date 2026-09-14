@@ -164,6 +164,7 @@ pub fn main() -> ExitCode {
 
 pub(crate) const INTERNAL_CAPTURE_DIRECTORY_ARG: &str = "--mirvm-capture-directory";
 static CAPTURE_DIRECTORY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static FORWARDED_CAPTURE_DIRECTORY: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 pub(crate) fn capture_directory() -> Option<&'static Path> {
     CAPTURE_DIRECTORY.get().map(PathBuf::as_path)
@@ -171,6 +172,16 @@ pub(crate) fn capture_directory() -> Option<&'static Path> {
 
 pub(crate) fn set_capture_directory(directory: PathBuf) -> Result<(), PathBuf> {
     CAPTURE_DIRECTORY.set(directory)
+}
+
+pub(crate) fn set_forwarded_capture_directory(directory: PathBuf) -> Result<(), PathBuf> {
+    CAPTURE_DIRECTORY.set(directory)?;
+    let _ = FORWARDED_CAPTURE_DIRECTORY.set(());
+    Ok(())
+}
+
+fn capture_directory_is_forwarded() -> bool {
+    FORWARDED_CAPTURE_DIRECTORY.get().is_some()
 }
 
 pub(crate) fn take_internal_capture_directory<I>(
@@ -243,6 +254,18 @@ fn capture_main(mut args: impl Iterator<Item = String>) -> ExitCode {
         eprintln!("mirvm capture: a capture request is already configured in this process");
         return ExitCode::from(2);
     }
+    let _diagnostic_router = match crate::diagnostics::DiagnosticRouter::start(
+        capture_directory(),
+        capture_directory_is_forwarded(),
+    ) {
+        Ok(router) => router,
+        Err(error) => {
+            crate::diagnostics::control(format_args!(
+                "mirvm capture: cannot start diagnostics stream: {error}"
+            ));
+            return ExitCode::from(70);
+        }
+    };
     run_main(command.into_iter().skip(1))
 }
 
@@ -570,7 +593,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     while let Some(arg) = args.next() {
         let mut next = |name: &str| {
             args.next().unwrap_or_else(|| {
-                eprintln!("mirvm: {name} needs argument(s)");
+                crate::diagnostics::control(format_args!("mirvm: {name} needs argument(s)"));
                 exit(2);
             })
         };
@@ -586,7 +609,9 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
             "--engine" => {
                 let e = next("--engine");
                 if e != "vm" {
-                    eprintln!("mirvm: 引擎 `{e}` 已不存在（tier-0 已移除；唯一引擎 = vm）");
+                    crate::diagnostics::control(format_args!(
+                        "mirvm: 引擎 `{e}` 已不存在（tier-0 已移除；唯一引擎 = vm）"
+                    ));
                     exit(2);
                 }
             }
@@ -597,7 +622,10 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
             "--ignore-rust-version" => ignore_rust_version = true,
             "--stack-size" => {
                 let v = next("--stack-size");
-                parse_stack_size(&v); // 先验证再落 env（错在入口就响）
+                if let Err(message) = parse_stack_size(&v) {
+                    crate::diagnostics::control(format_args!("{message}"));
+                    exit(2);
+                }
                 // 落 env 让 cargo 形态（wrapper→runner 子进程）同一旋钮生效。
                 // 此刻仍是单线程启动相（rustc 会话尚未开始）。
                 unsafe { std::env::set_var("MIRVM_STACK_SIZE", v) };
@@ -606,7 +634,9 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
                 let v = next("--jit");
                 if v != "on" && v != "off" {
                     // TODO: tiered JIT?
-                    eprintln!("mirvm: --jit only accepts on|off (got `{v}`)");
+                    crate::diagnostics::control(format_args!(
+                        "mirvm: --jit only accepts on|off (got `{v}`)"
+                    ));
                     exit(2);
                 }
                 // 同 --stack-size：落 env 使 cargo 形态经 runner 生效
@@ -614,13 +644,15 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
             }
             _ if input.is_none() && !arg.starts_with('-') => input = Some(arg),
             _ => {
-                eprintln!("mirvm: unknown argument `{arg}`\n{USAGE}");
+                crate::diagnostics::control(format_args!(
+                    "mirvm: unknown argument `{arg}`\n{USAGE}"
+                ));
                 exit(2);
             }
         }
     }
     let Some(input) = input else {
-        eprint!("{USAGE}");
+        crate::diagnostics::control_raw(format_args!("{USAGE}"));
         exit(2);
     };
     let input_path = PathBuf::from(&input);
@@ -632,7 +664,9 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         Err(_) | Ok("self") => true,
         Ok("cargo") => false,
         Ok(other) => {
-            eprintln!("mirvm: MIRVM_DEPS only accepts `cargo` or `self` (got `{other}`)");
+            crate::diagnostics::control(format_args!(
+                "mirvm: MIRVM_DEPS only accepts `cargo` or `self` (got `{other}`)"
+            ));
             exit(2);
         }
     };
@@ -668,7 +702,9 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     }
     if let Some(b) = &bin_sel {
         // 脚本/单文件/包形态无 --bin 概念（cargo script 同）——响亮拒绝不静默吞
-        eprintln!("mirvm: --bin {b} 只适用于 cargo 项目形态（目录/Cargo.toml）");
+        crate::diagnostics::control(format_args!(
+            "mirvm: --bin {b} 只适用于 cargo 项目形态（目录/Cargo.toml）"
+        ));
         exit(2);
     }
 
@@ -679,7 +715,10 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         {
             Ok(module) => module,
             Err(reason) => {
-                eprintln!("mirvm: fail to load {}: {reason}", input_path.display());
+                crate::diagnostics::control(format_args!(
+                    "mirvm: fail to load {}: {reason}",
+                    input_path.display()
+                ));
                 exit(70);
             }
         };
@@ -693,7 +732,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     }
 
     let src = std::fs::read_to_string(&input_path).unwrap_or_else(|e| {
-        eprintln!("mirvm: fail to read {input}: {e}");
+        crate::diagnostics::control(format_args!("mirvm: fail to read {input}: {e}"));
         exit(1);
     });
 
@@ -716,7 +755,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         .unwrap_or_else(|| match crate::sysroot::ensure_sysroot() {
             Ok(p) => p.display().to_string(),
             Err(e) => {
-                eprintln!("mirvm: fail to build sysroot: {e}");
+                crate::diagnostics::control(format_args!("mirvm: fail to build sysroot: {e}"));
                 exit(1);
             }
         });
@@ -751,13 +790,25 @@ fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::from(2);
         }
         Ok(Some(directory)) => {
-            if set_capture_directory(directory).is_err() {
+            if set_forwarded_capture_directory(directory).is_err() {
                 eprintln!("mirvm capture: runner received more than one capture request");
                 return ExitCode::from(2);
             }
         }
         Ok(None) => {}
     }
+    let _diagnostic_router = match crate::diagnostics::DiagnosticRouter::start(
+        capture_directory(),
+        capture_directory_is_forwarded(),
+    ) {
+        Ok(router) => router,
+        Err(error) => {
+            crate::diagnostics::control(format_args!(
+                "mirvm capture: cannot start diagnostics stream: {error}"
+            ));
+            return ExitCode::from(70);
+        }
+    };
     let guest_process = GuestProcessState::from_cargo_runner();
     let (rustc_args, program_argv, env) = cargo_shim::parse_runner_invocation(argv);
     // rustc 前端必须重演 wrapper 录下的构建环境；来宾执行前会完整恢复
@@ -816,7 +867,7 @@ impl GuestProcessState {
         }
     }
 
-    fn enter(&self) {
+    fn enter(&self) -> Result<(), String> {
         let current_keys: Vec<_> = std::env::vars_os().map(|(key, _)| key).collect();
         // SAFETY: rustc has returned and the guest/JIT threads have not started.
         unsafe {
@@ -830,12 +881,12 @@ impl GuestProcessState {
         if let Some(cwd) = &self.cwd
             && let Err(error) = std::env::set_current_dir(cwd)
         {
-            eprintln!(
+            return Err(format!(
                 "mirvm: 无法进入 Cargo 调用者目录 {}: {error}",
                 cwd.display()
-            );
-            exit(1);
+            ));
         }
+        Ok(())
     }
 }
 
@@ -874,6 +925,7 @@ pub(crate) fn pack_driver(
         module: None,
         suppress_runner_warning_summary: true,
         runner_finalization_filter_installed: false,
+        route_compiler_diagnostics: false,
         t_start,
         timing: PhaseTiming::default(),
         rustc_args: rustc_args.clone(),
@@ -1094,6 +1146,7 @@ struct MirvmCallbacks {
     module: Option<crate::vm::engine::ir::Module>,
     suppress_runner_warning_summary: bool,
     runner_finalization_filter_installed: bool,
+    route_compiler_diagnostics: bool,
     /// 相位计时（M6 片1，D9f①）：t_start = run_driver 进入时刻
     t_start: std::time::Instant,
     timing: PhaseTiming,
@@ -1154,25 +1207,36 @@ fn print_phase_timing(
         line.push_str(&format!(" engine={:.1}ms", ms(d)));
     }
     line.push_str(&format!(" total={:.1}ms", ms(total)));
-    eprintln!("{line}");
+    crate::diagnostics::control(format_args!("{line}"));
 }
 
 impl Callbacks for MirvmCallbacks {
     fn config(&mut self, config: &mut rustc_interface::interface::Config) {
         // 告警计数钩（L2 入账前提）：psess_created 在 interface 覆写 TRACK_DIAGNOSTIC
         // 之后、首次解析之前触发——全会话诊断零缺口。
-        config.psess_created = Some(Box::new(|_psess| install_warning_counter()));
+        let emitter = crate::diagnostics::CompilerEmitterSpec::for_capture(
+            &config.opts,
+            self.route_compiler_diagnostics,
+        );
+        config.psess_created = Some(Box::new(move |psess| {
+            install_warning_counter();
+            if let Some(emitter) = emitter {
+                emitter.install(psess);
+            }
+        }));
     }
 
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         self.timing.frontend = Some(self.t_start.elapsed());
         let Some((def_id, entry_ty)) = tcx.entry_fn(()) else {
-            eprintln!("mirvm: 未找到 entry fn（需要 `fn main`）");
+            crate::diagnostics::control(format_args!("mirvm: 未找到 entry fn（需要 `fn main`）"));
             self.exit_code = Some(1);
             return Compilation::Stop;
         };
         if !matches!(entry_ty, rustc_session::config::EntryFnType::Main { .. }) {
-            eprintln!("mirvm: 暂不支持 #![no_main]/start 类型的入口");
+            crate::diagnostics::control(format_args!(
+                "mirvm: 暂不支持 #![no_main]/start 类型的入口"
+            ));
             self.exit_code = Some(1);
             return Compilation::Stop;
         }
@@ -1227,10 +1291,13 @@ impl Callbacks for MirvmCallbacks {
                     out,
                 ) {
                     Ok(()) => {
-                        eprintln!("mirvm: 包已写出 {}", out.display());
+                        crate::diagnostics::control(format_args!(
+                            "mirvm: 包已写出 {}",
+                            out.display()
+                        ));
                     }
                     Err(reason) => {
-                        eprintln!("mirvm: 打包失败: {reason}");
+                        crate::diagnostics::control(format_args!("mirvm: 打包失败: {reason}"));
                         self.exit_code = Some(1);
                     }
                 }
@@ -1274,8 +1341,8 @@ impl Callbacks for MirvmCallbacks {
 
 /// 引擎入口：缺省跑 main 启动链；`--vm-call 'name(args…)'` 直调导出函数（gate 入口）；
 /// `--vm-stats` = Trap 债务统计（各期开工前的调研仪器）。
-/// `--stack-size` / `MIRVM_STACK_SIZE` 解析：字节数，可带 k/m/g 后缀。非法即诊断退出。
-fn parse_stack_size(s: &str) -> usize {
+/// `--stack-size` / `MIRVM_STACK_SIZE` 解析：字节数，可带 k/m/g 后缀。
+fn parse_stack_size(s: &str) -> Result<usize, String> {
     let t = s.trim();
     let (num, mult): (&str, usize) = match t.as_bytes().last() {
         Some(b'k' | b'K') => (&t[..t.len() - 1], 1 << 10),
@@ -1283,17 +1350,16 @@ fn parse_stack_size(s: &str) -> usize {
         Some(b'g' | b'G') => (&t[..t.len() - 1], 1 << 30),
         _ => (t, 1),
     };
-    let Ok(n) = num.trim().parse::<usize>() else {
-        eprintln!("mirvm: 无法解析栈尺寸 `{s}`（例：8m、1g、67108864）");
-        exit(2);
-    };
+    let n = num
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| format!("mirvm: 无法解析栈尺寸 `{s}`（例：8m、1g、67108864）"))?;
     let bytes = n.saturating_mul(mult);
     // 下限护住引擎自身序言 + 边距；上限防笔误（虚拟保留也别要 128T）
     if !(1 << 20..=1 << 40).contains(&bytes) {
-        eprintln!("mirvm: 栈尺寸 {s} 超出 [1m, 1t] 合理区间");
-        exit(2);
+        return Err(format!("mirvm: 栈尺寸 {s} 超出 [1m, 1t] 合理区间"));
     }
-    bytes
+    Ok(bytes)
 }
 
 fn run_vm_engine(
@@ -1304,7 +1370,7 @@ fn run_vm_engine(
     already_verified: bool,
 ) -> i32 {
     if !already_verified && let Err(e) = crate::vm::engine::verify::module(&module) {
-        eprintln!("mirvm: bytecode verification failed: {e}");
+        crate::diagnostics::control(format_args!("mirvm: bytecode verification failed: {e}"));
         return 70;
     }
     if vm_stats {
@@ -1313,7 +1379,7 @@ fn run_vm_engine(
     }
     // argv 终结化（M6 片2）：运行期输入在快照语义之后布置，冷/热单一路径
     if let Err(e) = module.finalize_entry_argv(program_argv) {
-        eprintln!("mirvm: {e}");
+        crate::diagnostics::control(format_args!("mirvm: {e}"));
         return 70;
     }
     let mut capture = if let Some(directory) = CAPTURE_DIRECTORY.get() {
@@ -1322,7 +1388,9 @@ fn run_vm_engine(
         {
             Ok(session) => Some(session),
             Err(error) => {
-                eprintln!("mirvm capture: cannot start event writer: {error}");
+                crate::diagnostics::control(format_args!(
+                    "mirvm capture: cannot start event writer: {error}"
+                ));
                 return 70;
             }
         }
@@ -1334,11 +1402,15 @@ fn run_vm_engine(
         match session.finish(std::time::Duration::from_secs(30)) {
             Ok(crate::telemetry::CaptureFinish::Finished(_)) => {}
             Ok(crate::telemetry::CaptureFinish::InProgress) => {
-                eprintln!("mirvm capture: writer did not finish within 30 seconds");
+                crate::diagnostics::control(format_args!(
+                    "mirvm capture: writer did not finish within 30 seconds"
+                ));
                 return 70;
             }
             Err(error) => {
-                eprintln!("mirvm capture: cannot finish event file: {error}");
+                crate::diagnostics::control(format_args!(
+                    "mirvm capture: cannot finish event file: {error}"
+                ));
                 return 70;
             }
         }
@@ -1353,16 +1425,24 @@ fn run_vm_engine_loaded(module: crate::vm::engine::ir::Module, vm_call: Option<&
     let engine = match crate::vm::engine::ctx::Engine::try_new(shared) {
         Ok(engine) => engine,
         Err(e) => {
-            eprintln!("mirvm: {e}");
+            crate::diagnostics::control(format_args!("mirvm: {e}"));
             return 70;
         }
     };
     let Some(spec) = vm_call else {
         // main 启动链：lang_start 照常解释，退出码 = Termination 产物
         let execution = engine.clone();
-        let result = on_guest_stack(move || crate::vm::engine::interp::run_main(&execution));
+        let result = match on_guest_stack(move || crate::vm::engine::interp::run_main(&execution)) {
+            Ok(result) => result,
+            Err(error) => {
+                crate::diagnostics::control(format_args!("{}", error.message));
+                return error.exit_code;
+            }
+        };
         if let Err(error) = engine.wait_closed() {
-            eprintln!("mirvm[m4-engine]: cannot wait for Engine teardown: {error:?}");
+            crate::diagnostics::control(format_args!(
+                "mirvm[m4-engine]: cannot wait for Engine teardown: {error:?}"
+            ));
             return 70;
         }
         return match result {
@@ -1372,7 +1452,7 @@ fn run_vm_engine_loaded(module: crate::vm::engine::ir::Module, vm_call: Option<&
             // exit status.
             Ok(crate::vm::engine::interp::RunOutcome::GuestPanic) => 101,
             Err(e) => {
-                eprintln!("mirvm[m4-engine]: {e}");
+                crate::diagnostics::control(format_args!("mirvm[m4-engine]: {e}"));
                 e.exit_code
             }
         };
@@ -1380,18 +1460,26 @@ fn run_vm_engine_loaded(module: crate::vm::engine::ir::Module, vm_call: Option<&
     let (name, args) = match parse_vm_call(spec) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("mirvm: fail to resolve `--vm-call`: {e}");
+            crate::diagnostics::control(format_args!("mirvm: fail to resolve `--vm-call`: {e}"));
             return 2;
         }
     };
     let execution = engine.clone();
-    let result = on_guest_stack(move || {
+    let result = match on_guest_stack(move || {
         // CLI arguments are scalar u64 slots parsed for the explicitly named
         // dev export; pointer-bearing embedding calls are not exposed here.
         unsafe { crate::vm::engine::interp::run_export(&execution, &name, &args) }
-    });
+    }) {
+        Ok(result) => result,
+        Err(error) => {
+            crate::diagnostics::control(format_args!("{}", error.message));
+            return error.exit_code;
+        }
+    };
     if let Err(error) = engine.wait_closed() {
-        eprintln!("mirvm[m4-engine]: cannot wait for Engine teardown: {error:?}");
+        crate::diagnostics::control(format_args!(
+            "mirvm[m4-engine]: cannot wait for Engine teardown: {error:?}"
+        ));
         return 70;
     }
     match result {
@@ -1400,11 +1488,11 @@ fn run_vm_engine_loaded(module: crate::vm::engine::ir::Module, vm_call: Option<&
             0
         }
         Ok(crate::vm::engine::interp::RunOutcome::GuestPanic) => {
-            eprintln!("mirvm[m4-engine]: guest panic not caught");
+            crate::diagnostics::control(format_args!("mirvm[m4-engine]: guest panic not caught"));
             101
         }
         Err(e) => {
-            eprintln!("mirvm[m4-engine]: {e}");
+            crate::diagnostics::control(format_args!("mirvm[m4-engine]: {e}"));
             e.exit_code
         }
     }
@@ -1414,9 +1502,19 @@ fn run_vm_engine_loaded(module: crate::vm::engine::ir::Module, vm_call: Option<&
 /// 解释帧宿主成本数十倍于 native 帧，借调用方线程的 8–16 MiB 栈只能容 ~8k 帧，
 /// 对 native 栈界严重失真。guest panic 已在 run_main/run_export 内消化；穿出
 /// join 的是宿主 panic（VM bug）——原样续传，绝不吞。
-fn on_guest_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+struct GuestStackStartError {
+    message: String,
+    exit_code: i32,
+}
+
+fn on_guest_stack<R: Send + 'static>(
+    f: impl FnOnce() -> R + Send + 'static,
+) -> Result<R, GuestStackStartError> {
     let reserve = match std::env::var("MIRVM_STACK_SIZE") {
-        Ok(s) => parse_stack_size(&s),
+        Ok(s) => parse_stack_size(&s).map_err(|message| GuestStackStartError {
+            message,
+            exit_code: 2,
+        })?,
         Err(_) => 1 << 30,
     };
     let spawned = std::thread::Builder::new()
@@ -1425,17 +1523,19 @@ fn on_guest_stack<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> 
         .spawn(f);
     match spawned {
         Ok(h) => match h.join() {
-            Ok(r) => r,
+            Ok(r) => Ok(r),
             Err(host_panic) => std::panic::resume_unwind(host_panic),
         },
-        Err(e) => {
+        Err(error) => {
             // 不静默降级到调用方小栈（栈语义会悄悄变差）——响亮退出并给旋钮。
             // 典型触发：vm.overcommit_memory=2 的严格提交环境。
-            eprintln!(
-                "mirvm: guest 执行线程创建失败（stack 保留 {reserve} 字节）：{e}；\
-                 请用 --stack-size / MIRVM_STACK_SIZE 调小后重试"
-            );
-            exit(70)
+            Err(GuestStackStartError {
+                message: format!(
+                    "mirvm: guest 执行线程创建失败（stack 保留 {reserve} 字节）：{error}；\
+                     请用 --stack-size / MIRVM_STACK_SIZE 调小后重试"
+                ),
+                exit_code: 70,
+            })
         }
     }
 }
@@ -1468,6 +1568,18 @@ pub(crate) fn run_driver(
     suppress_runner_warning_summary: bool,
     guest_process: Option<GuestProcessState>,
 ) -> ExitCode {
+    let mut diagnostic_router = match crate::diagnostics::DiagnosticRouter::start(
+        capture_directory(),
+        capture_directory_is_forwarded(),
+    ) {
+        Ok(router) => router,
+        Err(error) => {
+            crate::diagnostics::control(format_args!(
+                "mirvm capture: cannot start diagnostics stream: {error}"
+            ));
+            return ExitCode::from(70);
+        }
+    };
     let t_start = std::time::Instant::now();
     // S4/S3′ image 栈：装载底座 + 依赖 image 链（失败/旁路 = 空栈，全量冷路径自愈）。
     // 降低指纹（ub/overflow/contract checks）要到会话内才能验证——after_analysis 复核。
@@ -1501,6 +1613,9 @@ pub(crate) fn run_driver(
             },
         )
     {
+        // A cache hit has no compiler session; seal that empty phase before
+        // MIRVM control and guest execution begin.
+        diagnostic_router.seal_compiler();
         let timing = PhaseTiming {
             cache_load: Some(t_start.elapsed()),
             ..PhaseTiming::default()
@@ -1511,13 +1626,28 @@ pub(crate) fn run_driver(
         } else {
             crate::baseimage::absorb_stack(&mut module, stack); // 内含 asm 合并重物化
         }
-        if let Some(guest) = &guest_process {
-            guest.enter();
+        if let Some(guest) = &guest_process
+            && let Err(message) = guest.enter()
+        {
+            crate::diagnostics::control(format_args!("{message}"));
+            if let Err(error) = diagnostic_router.finish() {
+                crate::diagnostics::control(format_args!(
+                    "mirvm capture: cannot finish diagnostics stream: {error}"
+                ));
+                exit(70);
+            }
+            exit(1);
         }
         let t_engine = std::time::Instant::now();
         let code = run_vm_engine(module, &program_argv, vm_call.as_deref(), vm_stats, false);
         let engine = (!vm_stats).then(|| t_engine.elapsed());
         print_phase_timing(&timing, engine, t_start.elapsed(), vm_stats);
+        if let Err(error) = diagnostic_router.finish() {
+            crate::diagnostics::control(format_args!(
+                "mirvm capture: cannot finish diagnostics stream: {error}"
+            ));
+            exit(70);
+        }
         exit(code);
     }
     let mut callbacks = MirvmCallbacks {
@@ -1529,6 +1659,7 @@ pub(crate) fn run_driver(
         module: None,
         suppress_runner_warning_summary,
         runner_finalization_filter_installed: false,
+        route_compiler_diagnostics: diagnostic_router.is_active(),
         t_start,
         timing: PhaseTiming::default(),
         rustc_args: rustc_args.clone(),
@@ -1545,10 +1676,25 @@ pub(crate) fn run_driver(
     if callbacks.runner_finalization_filter_installed {
         restore_runner_finalization_filter();
     }
+    // run_compiler performs finish_diagnostics, delayed-bug flushing and
+    // compiler drop before returning. Only now may its stream be sealed.
+    diagnostic_router.seal_compiler();
     if compiler_code != ExitCode::SUCCESS {
+        if let Err(error) = diagnostic_router.finish() {
+            crate::diagnostics::control(format_args!(
+                "mirvm capture: cannot finish diagnostics stream: {error}"
+            ));
+            return ExitCode::from(70);
+        }
         return compiler_code;
     }
     if let Some(code) = callbacks.exit_code {
+        if let Err(error) = diagnostic_router.finish() {
+            crate::diagnostics::control(format_args!(
+                "mirvm capture: cannot finish diagnostics stream: {error}"
+            ));
+            exit(70);
+        }
         exit(code);
     }
     if let Some(mut module) = callbacks.module.take() {
@@ -1559,8 +1705,17 @@ pub(crate) fn run_driver(
         if !stack.is_empty() {
             crate::baseimage::absorb_stack(&mut module, stack);
         }
-        if let Some(guest) = &guest_process {
-            guest.enter();
+        if let Some(guest) = &guest_process
+            && let Err(message) = guest.enter()
+        {
+            crate::diagnostics::control(format_args!("{message}"));
+            if let Err(error) = diagnostic_router.finish() {
+                crate::diagnostics::control(format_args!(
+                    "mirvm capture: cannot finish diagnostics stream: {error}"
+                ));
+                exit(70);
+            }
+            exit(1);
         }
         let t_engine = std::time::Instant::now();
         let code = run_vm_engine(
@@ -1578,7 +1733,19 @@ pub(crate) fn run_driver(
             t_start.elapsed(),
             callbacks.vm_stats,
         );
+        if let Err(error) = diagnostic_router.finish() {
+            crate::diagnostics::control(format_args!(
+                "mirvm capture: cannot finish diagnostics stream: {error}"
+            ));
+            exit(70);
+        }
         exit(code);
+    }
+    if let Err(error) = diagnostic_router.finish() {
+        crate::diagnostics::control(format_args!(
+            "mirvm capture: cannot finish diagnostics stream: {error}"
+        ));
+        return ExitCode::from(70);
     }
     compiler_code
 }

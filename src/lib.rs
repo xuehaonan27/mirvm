@@ -35,6 +35,7 @@ pub mod cargo_shim;
 pub(crate) mod cargoless;
 pub mod cli;
 pub mod depsimage;
+pub(crate) mod diagnostics;
 pub(crate) mod elfsym;
 pub mod ircache;
 pub mod lower;

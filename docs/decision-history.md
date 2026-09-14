@@ -2616,6 +2616,68 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   流、一般timeline/Perfetto、OSR动态启停、signal解释栈采样、rotation/durability、未触发I/O
   优化和完整epoch回收明确延期。施工按1A `HostSyscall + recorder/writer/v0 decoder +
   inspect/export`、1B stateless inline-asm raw site分片；1A完成不得冒充全部覆盖。
+- **第二十六项用户裁决（2026-08-18，日志与 profile 余项进入显式队列）**：1A 参考纵切
+  落地后，用户要求全局硬页池/自动救援/retire、fork child 新代际、HostSyscall 直接热路、
+  trace JIT `r15`、1B raw site、4 KiB→64 KiB 自适应和 perf-map/profile 全部提上日程，不能
+  继续只写“后续”或“延期”。现按 L1 生命周期 → L2 fork → L3 HostSyscall 热路 → L4 raw
+  site 排主线；P1 JIT 地址登记 → P2 perf capture 在 L1 后并行；最后以相同内存预算的数据
+  裁决自动伸缩和 writer 参数。§12.3 仍不阻塞首版，但每项改绑明确进入条件，不作无限期
+  搁置。该裁决不改变“性能数字只能由真实 workload 决定”和基建够用即冻结的纪律。
+- **第二十七项用户裁决（2026-08-18，诊断来源分层但默认 fd2 不变）**：代码审计确认
+  `run_compiler` 先输出 compiler/frontend/lower 诊断，runner 只窄删额外 warning-count
+  summary，compiler 成功后 guest 才继承同一 fd2 运行；MIRVM control 也写该 fd。因此当前
+  warning 与运行期 stderr 共用 fd2、按实际发生顺序出现，符合默认 `mirvm run` 的 Cargo
+  语义，不应为“看起来混在一起”而改写顺序。新增 D0 `DiagnosticRouter` 当时待施（现已由
+  §7.58 闭合）：内部区分
+  compiler/lower、MIRVM control、guest stderr；capture/profile 自动把前两类逐字节 tee 到
+  独立 diagnostics stream，guest fd2 绝不进入 router 或普通事件 ring。direct、cargoless、
+  Cargo runner 必须一次覆盖，故本轮只排期，不半实现单一路径。
+
+### 7.57 2026-08-19：日志 L1 页与线程生命周期闭合
+
+- **旧状态**：1A 为每个 producer 固定分配双 4 KiB 页；预算耗尽时不能注册 page-less
+  producer，retired descriptor 永久留在 writer 扫描表，writer 一轮会清空单个 producer 的
+  全部已发布页。该形态只证明文件链正确，未兑现 §7.56 第二十六项的 L1 合同。
+- **实现选择**：每个 capture session 建一个按字节硬封顶的进程页池，首版池元素固定为双
+  4 KiB starter。拿不到页仍创建 producer；无 active page 的每次新 Enter 只做一次 acquire
+  检查 writer offer，失败立即 drop。writer 排空 retired producer 后以单遍 retain 从活跃表
+  摘除并归页，历史 descriptor 只留在终结账本；每轮每 producer 最多消费一页。会话结束在
+  active root 归零、所有页已排空且所有 producer `has_active=false` 后回收全部页内存。
+- **所有权证据**：新增零预算 attach、退线程归页后自动恢复、2,048 短命线程扫描表归零、
+  双 producer `A/B/A/B` 页序和 writer offer/producer retire 同轮竞态回归。TSan 独立 crate
+  新增真实 arm session 的 publish/return/retire/rescue case，零竞争告警；既有 Engine capture
+  解释/JIT 纵切与 telemetry 27 项也通过。
+- **未外推边界**：公开入口当前 64 MiB 只是首轮实现默认值；producer 仍固定双 4 KiB 页。
+  4/16/64 KiB、自动晋升/回收、最终硬池数字与 writer 后续批量仍由 §12.2 数据裁决，L2 fork、
+  L3 热路、L4 raw site 和 P1/P2 均未因 L1 完成而自动完成。
+
+### 7.58 2026-08-19：P1 JIT 地址登记与 D0 诊断通道闭合
+
+- **P1 最终机制**：`JitSymbolRange` 分开登记 fast body、guarded、packed、c2i，
+  显示名带 Engine/Func/role。每个编译请求在局部累积 symbol batch；finalize 成功后
+  先把整批登记到 per-Engine 视图和进程内存 registry，再 Release 发布调用 slot。
+  失败请求丢弃局部批次，不能留下未发布范围。
+- **P1 I/O 与会话截断**：JIT register 只做内存 push，不读写 perf-map。`install`
+  在 registry mutex 外以 no-replace 创建空 map；显式 `stop` 在锁内先切成
+  `Inactive` 并快照全部已登记范围，然后在锁外批量 write/flush。截断点之后才
+  register 的范围归下一 session，慢或失败的 map I/O 不再拖住 JIT worker/teardown。
+- **P1 闭合证据**：确定性失败注入证明失败 batch 不泄漏到下一 compile；JIT 定向
+  15/15、check、Clippy `-D warnings` 与 embedding exact 全部通过。
+- **P1 未外推边界**：当前只有地址登记与 perf-map 冷路 API，没有 `mirvm profile capture`、
+  perf 权限/lost sample 裁判或脚本；这些仍属 P2。fork child 不能继承父 registry/file 状态，
+  重置与新代际由 L2/P2 一起闭合。
+- **D0 最终机制**：默认 run 不启用 router，compiler/frontend/lower、MIRVM control
+  与 guest stderr 继续物理共用 fd2，原始字节、顺序、stdout 和退出码不变。
+  capture 在 command boundary 就 arm `DiagnosticRouter`：rustc emitter 与 MIRVM control 同时
+  写原 fd2 并逐字节 tee 到独立 `diagnostics.log`；child attached marker 让 runner
+  继承已建立路由而不重复包装。guest 仍直接写 fd2，绝不进入 router 或普通
+  事件 ring。正常路径由 atexit 收口后 no-replace 发布，异常结束保留 partial。
+- **D0 闭合证据**：direct、cargoless 与 Cargo runner 三路分别对拍 plain/capture；
+  compiler warning 和 control error 被收录，含 NUL、非 UTF-8、ANSI 和同文 warning 的
+  guest 单次 write 被完整排除。表驱动合同另覆盖 stack/jit bad、unknown arg、
+  missing input（含无换行 usage bytes）、invalid `MIRVM_DEPS`、单文件 `--bin`、
+  missing source 与 forwarded runner fake-binary 解析错误。plain/capture 的 stdout、stderr、
+  exit 与 diagnostics 均逐字节断言，`runtime.diagnostics` 31/31 通过。
 
 ## 8. 尚未兑现或需要重新验证的架构承诺
 

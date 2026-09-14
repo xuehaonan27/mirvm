@@ -1737,33 +1737,46 @@ pub fn run_root_recipe(argv: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::from(2);
         }
         Ok(Some(directory)) => {
-            if crate::cli::set_capture_directory(directory).is_err() {
+            if crate::cli::set_forwarded_capture_directory(directory).is_err() {
                 eprintln!("mirvm capture: __cless-run-root 收到重复采集请求");
                 return ExitCode::from(2);
             }
         }
         Ok(None) => {}
     }
+    let _diagnostic_router =
+        match crate::diagnostics::DiagnosticRouter::start(crate::cli::capture_directory(), true) {
+            Ok(router) => router,
+            Err(error) => {
+                crate::diagnostics::control(format_args!(
+                    "mirvm capture: cannot start diagnostics stream: {error}"
+                ));
+                return ExitCode::from(70);
+            }
+        };
     let Some(path) = argv.next() else {
-        eprintln!("mirvm: __cless-run-root 缺配方路径");
+        crate::diagnostics::control(format_args!("mirvm: __cless-run-root 缺配方路径"));
         return ExitCode::from(2);
     };
     let data = match std::fs::read(&path) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("mirvm: 读取测试配方 {path} 失败: {e}");
+            crate::diagnostics::control(format_args!("mirvm: 读取测试配方 {path} 失败: {e}"));
             return ExitCode::from(1);
         }
     };
     let recipe: RootRunRecipe = match serde_json::from_slice(&data) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("mirvm: 测试配方 {path} 损坏: {e}");
+            crate::diagnostics::control(format_args!("mirvm: 测试配方 {path} 损坏: {e}"));
             return ExitCode::from(1);
         }
     };
     if let Err(e) = std::env::set_current_dir(&recipe.cwd) {
-        eprintln!("mirvm: 测试工作目录 {} 不可进入: {e}", recipe.cwd.display());
+        crate::diagnostics::control(format_args!(
+            "mirvm: 测试工作目录 {} 不可进入: {e}",
+            recipe.cwd.display()
+        ));
         return ExitCode::from(1);
     }
     for (key, value) in recipe.env {

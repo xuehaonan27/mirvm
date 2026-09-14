@@ -8,7 +8,8 @@ set -u
 cd "$REPO_ROOT/tsan"
 TOOLCHAIN=${TOOLCHAIN:-nightly-2026-07-02}
 
-OUT=$(RUSTFLAGS="-Zsanitizer=thread" TSAN_OPTIONS="halt_on_error=1" \
+OUT=$(MIRVM_BUILD_ID=0000000000000000 \
+    RUSTFLAGS="-Zsanitizer=thread" TSAN_OPTIONS="halt_on_error=1" \
     cargo +"$TOOLCHAIN" run -Zbuild-std --target x86_64-unknown-linux-gnu --release 2>&1)
 CODE=$?
 

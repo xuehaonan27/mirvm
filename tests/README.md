@@ -74,6 +74,7 @@ MIRVM_DEPS=cargo ./tests/run.sh gate
 | `corpus.contract` | 按 manifest 的 exit、oracle、diff、xfail 严格判定 | `cases.manifest`、`oracles/` |
 | `runtime.semantics` | 数学常量或同源 native 结果是运行时语义权威；`unwind` 段共 13 项：既有 9 项展开/恢复语义，加上解释/JIT 各一项未捕获 guest payload 恰一次 Drop、清理后继续调用与第二次 panic，再加解释/JIT 各一项真实 `lang_start` main panic 与正常 `Termination` 101 的区分 | `demo/m4/`、`tsan/` |
 | `runtime.c-unwind` | 固定 rustc+C++ 是跨语言异常权威；13 项要求解释器和强制同步 JIT 保持异常身份、Drop、普通 C 终止边界，C++ typed exception 可穿出整个 Engine，C++ exception 到达 guest catch 时终止，并拒绝非 C/System ABI | `c_unwind_contract/` |
+| `runtime.diagnostics` | direct、cargoless 与 Cargo runner 三路默认 stderr 保持原字节；capture 从命令参数解析起独立保存编译器和 MIRVM 控制诊断，不得混入 guest 同文、NUL、非 UTF-8 或 ANSI 字节 | `diagnostic_router_*.rs` |
 | `runtime.x86-features` | 当前宿主 native 结果是各 x86 子能力权威 | `tests/fixtures/m51_*.rs` |
 | `runtime.tsan` | TSan 退出码为零且无数据竞争警告 | `tsan/` |
 | `runtime.jit-stats` | JIT 退出统计必须存在且关键桶非零 | `demo/jit_unwind_probe.rs` |

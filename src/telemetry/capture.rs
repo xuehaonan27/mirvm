@@ -90,12 +90,62 @@ impl PagePair {
     }
 }
 
+struct PagePool {
+    budget_bytes: usize,
+    allocated_bytes: AtomicUsize,
+    free: Mutex<Vec<usize>>,
+}
+
+impl PagePool {
+    fn new(budget_bytes: usize) -> Self {
+        Self {
+            budget_bytes,
+            allocated_bytes: AtomicUsize::new(0),
+            free: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn take_starter(&self) -> *mut PagePair {
+        if let Some(addr) = self.free.lock().unwrap_or_else(|e| e.into_inner()).pop() {
+            return addr as *mut PagePair;
+        }
+        if self
+            .allocated_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(STARTER_BYTES)
+                    .filter(|next| *next <= self.budget_bytes)
+            })
+            .is_err()
+        {
+            return ptr::null_mut();
+        }
+        Box::into_raw(Box::new(PagePair::new()))
+    }
+
+    fn return_starter(&self, pages: *mut PagePair) {
+        if pages.is_null() {
+            return;
+        }
+        let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
+        free.push(pages as usize);
+    }
+
+    unsafe fn release_all(&self) {
+        let pages = std::mem::take(&mut *self.free.lock().unwrap_or_else(|e| e.into_inner()));
+        let allocated = self.allocated_bytes.swap(0, Ordering::AcqRel);
+        debug_assert_eq!(allocated, pages.len().saturating_mul(STARTER_BYTES));
+        for addr in pages {
+            unsafe { drop(Box::from_raw(addr as *mut PagePair)) };
+        }
+    }
+}
+
 #[repr(C, align(64))]
 struct ProducerCold {
-    active_slot: u8,
     has_active: bool,
     context_unsynced: bool,
-    _pad0: [u8; 5],
+    _pad0: [u8; 6],
+    active_page: *mut Page,
     next_publish: u64,
     next_sequence: u64,
     page_first_sequence: u64,
@@ -143,7 +193,7 @@ struct Producer {
     writer: WriterLine,
     retired: RetiredLine,
     session: *const SessionCore,
-    pages: *mut PagePair,
+    pages: AtomicPtr<PagePair>,
     producer_id: u64,
     thread_generation: u32,
     tid: u32,
@@ -172,10 +222,10 @@ impl Producer {
                 _reserved: [0; 40],
             }),
             cold: UnsafeCell::new(ProducerCold {
-                active_slot: 0,
                 has_active: false,
                 context_unsynced: false,
-                _pad0: [0; 5],
+                _pad0: [0; 6],
+                active_page: ptr::null_mut(),
                 next_publish: 0,
                 next_sequence: 0,
                 page_first_sequence: 0,
@@ -207,7 +257,7 @@ impl Producer {
                 _pad: [0; 63],
             },
             session,
-            pages,
+            pages: AtomicPtr::new(pages),
             producer_id,
             thread_generation,
             tid,
@@ -226,7 +276,16 @@ impl Producer {
 
     #[inline]
     unsafe fn page(&self, slot: usize) -> &Page {
-        unsafe { &(*self.pages).pages[slot] }
+        let pages = self.pages.load(Ordering::Relaxed);
+        debug_assert!(!pages.is_null());
+        unsafe { &(*pages).pages[slot] }
+    }
+
+    #[inline]
+    unsafe fn active_page(&self) -> &Page {
+        let page = unsafe { (*self.cold_ptr()).active_page };
+        debug_assert!(!page.is_null());
+        unsafe { &*page }
     }
 }
 
@@ -236,10 +295,10 @@ struct SessionCore {
     writer_state: AtomicU32,
     writer_done: AtomicBool,
     producers: Mutex<Vec<usize>>,
+    active_producers: Mutex<Vec<usize>>,
     next_producer: AtomicU64,
     next_thread_generation: AtomicU32,
-    page_budget_bytes: usize,
-    page_bytes_reserved: AtomicUsize,
+    page_pool: PagePool,
     sink_loss: AtomicU64,
     owner_tid: u32,
 }
@@ -264,20 +323,11 @@ impl SessionCore {
             false
         }
     }
-
-    fn reserve_starter(&self) -> bool {
-        self.page_bytes_reserved
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                used.checked_add(STARTER_BYTES)
-                    .filter(|next| *next <= self.page_budget_bytes)
-            })
-            .is_ok()
-    }
 }
 
 /// Internal construction options. The byte cap is a hard process budget, not
 /// a correctness switch; a producer that cannot obtain pages remains attached
-/// and automatically retries when a future pool implementation offers pages.
+/// and automatically retries when the writer returns pages to the pool.
 pub(crate) struct StartOptions {
     pub(crate) output: PathBuf,
     pub(crate) page_budget_bytes: usize,
@@ -346,10 +396,10 @@ impl CaptureSession {
             writer_state: AtomicU32::new(WRITER_AWAKE),
             writer_done: AtomicBool::new(false),
             producers: Mutex::new(Vec::new()),
+            active_producers: Mutex::new(Vec::new()),
             next_producer: AtomicU64::new(1),
             next_thread_generation: AtomicU32::new(1),
-            page_budget_bytes: options.page_budget_bytes,
-            page_bytes_reserved: AtomicUsize::new(0),
+            page_pool: PagePool::new(options.page_budget_bytes),
             sink_loss: AtomicU64::new(0),
             owner_tid,
         }));
@@ -616,11 +666,7 @@ fn producer_for_session(core: *mut SessionCore, engine_id: u64) -> *mut Producer
     let errno_ptr = unsafe { libc::__errno_location() };
     let saved_errno = unsafe { *errno_ptr };
     let core_ref = unsafe { &*core };
-    let pages = if core_ref.reserve_starter() {
-        Box::into_raw(Box::new(PagePair::new()))
-    } else {
-        ptr::null_mut()
-    };
+    let pages = core_ref.page_pool.take_starter();
     let producer_id = core_ref.next_producer.fetch_add(1, Ordering::Relaxed);
     let thread_generation = core_ref
         .next_thread_generation
@@ -640,6 +686,11 @@ fn producer_for_session(core: *mut SessionCore, engine_id: u64) -> *mut Producer
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .push(producer as usize);
+    core_ref
+        .active_producers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(producer as usize);
     TLS_CACHED_SESSION.store(core, Ordering::Relaxed);
     TLS_CACHED_PRODUCER.store(producer, Ordering::Relaxed);
     // Allocation, registry locking and gettid are cold attach work, but none
@@ -649,7 +700,7 @@ fn producer_for_session(core: *mut SessionCore, engine_id: u64) -> *mut Producer
 }
 
 unsafe fn open_page(producer: &Producer) -> bool {
-    if producer.pages.is_null() {
+    if producer.pages.load(Ordering::Acquire).is_null() {
         return false;
     }
     let cold = unsafe { &mut *producer.cold_ptr() };
@@ -666,7 +717,7 @@ unsafe fn open_page(producer: &Producer) -> bool {
     let fast = unsafe { &mut *producer.fast_ptr() };
     fast.cursor = (base + PAGE_HEADER_BYTES) as u64;
     fast.pair_budget = ((PAGE_BYTES - PAGE_HEADER_BYTES) / SYSCALL_PAIR_BYTES) as u64;
-    cold.active_slot = slot as u8;
+    cold.active_page = page as *const Page as *mut Page;
     cold.has_active = true;
     cold.context_unsynced = false;
     cold.page_first_sequence = cold.next_sequence;
@@ -680,13 +731,13 @@ unsafe fn seal_page(producer: &Producer) {
     if !cold.has_active {
         return;
     }
-    let slot = cold.active_slot as usize;
-    let page = unsafe { producer.page(slot) };
+    let page = unsafe { producer.active_page() };
     let base = page.bytes.get().cast::<u8>() as usize;
     let cursor = unsafe { (*producer.fast_ptr()).cursor as usize };
     let used = cursor.saturating_sub(base + PAGE_HEADER_BYTES);
     if used == 0 {
         cold.has_active = false;
+        cold.active_page = ptr::null_mut();
         unsafe {
             (*producer.fast_ptr()).cursor = 0;
             (*producer.fast_ptr()).pair_budget = 0;
@@ -713,6 +764,7 @@ unsafe fn seal_page(producer: &Producer) {
     (unsafe { &mut *page.bytes.get() })[..PAGE_HEADER_BYTES].copy_from_slice(&encoded_header);
 
     cold.has_active = false;
+    cold.active_page = ptr::null_mut();
     cold.page_ordinal = cold.page_ordinal.wrapping_add(1);
     cold.next_publish = cold.next_publish.wrapping_add(1);
     unsafe {
@@ -744,8 +796,7 @@ unsafe fn set_engine(producer: &Producer, engine_id: u64) {
         return;
     }
 
-    let active_slot = unsafe { (&*producer.cold.get()).active_slot as usize };
-    let page = unsafe { producer.page(active_slot) };
+    let page = unsafe { producer.active_page() };
     let base = page.bytes.get().cast::<u8>() as usize;
     let cursor = unsafe { (*producer.fast_ptr()).cursor as usize };
     if PAGE_BYTES - (cursor - base) < ENGINE_CONTEXT_BYTES {
@@ -824,7 +875,7 @@ unsafe fn record_syscall_enter(producer: &Producer, nr: i64, args: &[u64]) -> En
         return EnterDisposition::DropCapacity;
     }
     fast.pair_budget -= 1;
-    let page = unsafe { producer.page(cold.active_slot as usize) };
+    let page = unsafe { producer.active_page() };
     let base = page.bytes.get().cast::<u8>() as usize;
     let offset = fast.cursor as usize - base;
     let mut encoded_args = [0_u64; 6];
@@ -865,7 +916,7 @@ unsafe fn record_syscall_exit(
         EnterDisposition::Recorded => {}
     }
     let fast = unsafe { &mut *producer.fast_ptr() };
-    let page = unsafe { producer.page(cold.active_slot as usize) };
+    let page = unsafe { producer.active_page() };
     let base = page.bytes.get().cast::<u8>() as usize;
     let offset = fast.cursor as usize - base;
     let encoded = SyscallExit {
@@ -896,13 +947,13 @@ fn writer_main(
     loop {
         let mut did_work = false;
         let producers = core
-            .producers
+            .active_producers
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         for producer_addr in producers {
             let producer = unsafe { &*(producer_addr as *const Producer) };
-            while writer_has_page(producer) {
+            if writer_has_page(producer) {
                 did_work = true;
                 let page = writer_page(producer);
                 let bytes = sealed_page_bytes(page);
@@ -930,6 +981,14 @@ fn writer_main(
                 }
                 writer_return_page(producer);
             }
+            if producer.pages.load(Ordering::Acquire).is_null()
+                && writer_offer_starter(core, producer)
+            {
+                did_work = true;
+            }
+        }
+        if writer_reap_retired(core) {
+            did_work = true;
         }
 
         let stopping = core.phase.load(Ordering::Acquire) != PHASE_ARMED;
@@ -952,6 +1011,7 @@ fn writer_main(
         core.writer_state.store(WRITER_AWAKE, Ordering::Release);
     }
 
+    reclaim_session_pages(core);
     let summary = summarize(core);
     let result = if let Some(error) = sink_error {
         Err(error)
@@ -973,6 +1033,27 @@ fn writer_main(
     );
     core.writer_done.store(true, Ordering::Release);
     result
+}
+
+fn reclaim_session_pages(core: &SessionCore) {
+    debug_assert_eq!(core.active_roots.load(Ordering::Acquire), 0);
+    let producers = core
+        .producers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    for addr in producers {
+        let producer = unsafe { &*(addr as *const Producer) };
+        debug_assert!(!unsafe { (&*producer.cold.get()).has_active });
+        debug_assert!(!writer_has_page(producer));
+        let pages = producer.pages.swap(ptr::null_mut(), Ordering::AcqRel);
+        core.page_pool.return_starter(pages);
+    }
+    core.active_producers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+    unsafe { core.page_pool.release_all() };
 }
 
 #[derive(Default)]
@@ -1005,8 +1086,49 @@ fn writer_return_page(producer: &Producer) {
     producer.returned.head.store(*head, Ordering::Release);
 }
 
+fn writer_offer_starter(core: &SessionCore, producer: &Producer) -> bool {
+    if producer.retired.retired.load(Ordering::Acquire) {
+        return false;
+    }
+    let pages = core.page_pool.take_starter();
+    if pages.is_null() {
+        return false;
+    }
+    if producer.retired.retired.load(Ordering::Acquire) {
+        core.page_pool.return_starter(pages);
+        return false;
+    }
+    if producer
+        .pages
+        .compare_exchange(ptr::null_mut(), pages, Ordering::Release, Ordering::Acquire)
+        .is_err()
+    {
+        core.page_pool.return_starter(pages);
+        return false;
+    }
+    true
+}
+
+fn writer_reap_retired(core: &SessionCore) -> bool {
+    let mut removed = false;
+    core.active_producers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|addr| {
+            let producer = unsafe { &*(*addr as *const Producer) };
+            if !producer.retired.retired.load(Ordering::Acquire) || writer_has_page(producer) {
+                return true;
+            }
+            let pages = producer.pages.swap(ptr::null_mut(), Ordering::AcqRel);
+            core.page_pool.return_starter(pages);
+            removed = true;
+            false
+        });
+    removed
+}
+
 fn any_published(core: &SessionCore) -> bool {
-    core.producers
+    core.active_producers
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
@@ -1550,11 +1672,13 @@ mod tests {
         else {
             panic!("page-less capture writer did not stop");
         };
+        assert_eq!(summary.producers, 1);
         assert_eq!(summary.encoded_records, 0);
         assert_eq!(summary.producer_drops, 2);
         let outcome = decode_file(&duplicate, &mut |_| Ok(())).unwrap();
         assert_eq!(outcome.health, Health::Clean, "{:?}", outcome.issues);
         let end = outcome.report.session_end.unwrap();
+        assert_eq!(end.producer_count, 1);
         assert_eq!(end.attempted, 2);
         assert_eq!(end.encoded, 0);
         assert_eq!(end.drop_capacity, 2);
@@ -1569,10 +1693,10 @@ mod tests {
             writer_state: AtomicU32::new(WRITER_AWAKE),
             writer_done: AtomicBool::new(false),
             producers: Mutex::new(Vec::new()),
+            active_producers: Mutex::new(Vec::new()),
             next_producer: AtomicU64::new(2),
             next_thread_generation: AtomicU32::new(2),
-            page_budget_bytes: STARTER_BYTES,
-            page_bytes_reserved: AtomicUsize::new(STARTER_BYTES),
+            page_pool: PagePool::new(STARTER_BYTES),
             sink_loss: AtomicU64::new(0),
             owner_tid: unsafe { libc::gettid() as u32 },
         }));
@@ -1620,10 +1744,10 @@ mod tests {
             writer_state: AtomicU32::new(WRITER_AWAKE),
             writer_done: AtomicBool::new(false),
             producers: Mutex::new(Vec::new()),
+            active_producers: Mutex::new(Vec::new()),
             next_producer: AtomicU64::new(2),
             next_thread_generation: AtomicU32::new(2),
-            page_budget_bytes: STARTER_BYTES,
-            page_bytes_reserved: AtomicUsize::new(STARTER_BYTES),
+            page_pool: PagePool::new(STARTER_BYTES),
             sink_loss: AtomicU64::new(0),
             owner_tid: unsafe { libc::gettid() as u32 },
         }));
@@ -1665,6 +1789,336 @@ mod tests {
         assert!(matches!(recovered, EnterDisposition::Recorded));
         unsafe { record_syscall_exit(producer, recovered, 1, 0) };
         assert_eq!(crate::os::process::errno(), libc::EDOM);
+    }
+
+    #[test]
+    fn page_less_producer_recovers_after_retired_pages_return_to_pool() {
+        const CHILD_ENV: &str = "MIRVM_CAPTURE_POOL_RESCUE_CHILD";
+        if let Some(output) = std::env::var_os(CHILD_ENV) {
+            let output = PathBuf::from(output);
+            let mut session =
+                CaptureSession::start(StartOptions::new(&output, STARTER_BYTES)).unwrap();
+            let (owner_ready_tx, owner_ready_rx) = std::sync::mpsc::channel();
+            let (owner_seal_tx, owner_seal_rx) = std::sync::mpsc::channel();
+            let (owner_sealed_tx, owner_sealed_rx) = std::sync::mpsc::channel();
+            let (owner_retire_tx, owner_retire_rx) = std::sync::mpsc::channel();
+            let owner = std::thread::spawn(move || {
+                let token = activation_enter(0x61);
+                let producer = TLS_ACTIVE_PRODUCER.load(Ordering::Relaxed);
+                assert!(!producer.is_null());
+                assert_eq!(
+                    host_syscall(libc::SYS_getpid, &[]),
+                    unsafe { libc::getpid() } as i64
+                );
+                owner_ready_tx.send(producer as usize).unwrap();
+                owner_seal_rx.recv().unwrap();
+                activation_exit(token, 0);
+                owner_sealed_tx.send(()).unwrap();
+                owner_retire_rx.recv().unwrap();
+                retire_current_thread();
+            });
+            let owner_producer = owner_ready_rx.recv().unwrap() as *const Producer;
+
+            let (waiting_ready_tx, waiting_ready_rx) = std::sync::mpsc::channel();
+            let (waiting_release_tx, waiting_release_rx) = std::sync::mpsc::channel();
+            let waiting = std::thread::spawn(move || {
+                let token = activation_enter(0x62);
+                let producer = TLS_ACTIVE_PRODUCER.load(Ordering::Relaxed);
+                assert!(!producer.is_null());
+                assert!(unsafe { (*producer).pages.load(Ordering::Acquire).is_null() });
+                assert_eq!(
+                    host_syscall(libc::SYS_getpid, &[]),
+                    unsafe { libc::getpid() } as i64
+                );
+                let drops_after_first = unsafe { (*(*producer).cold_ptr()).capacity_drops };
+                assert_eq!(drops_after_first, 2);
+                waiting_ready_tx.send(()).unwrap();
+                waiting_release_rx.recv().unwrap();
+
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while unsafe { (*producer).pages.load(Ordering::Acquire).is_null() }
+                    && Instant::now() < deadline
+                {
+                    std::thread::yield_now();
+                }
+                let offered = unsafe { !(*producer).pages.load(Ordering::Acquire).is_null() };
+                if offered {
+                    assert_eq!(
+                        host_syscall(libc::SYS_getpid, &[]),
+                        unsafe { libc::getpid() } as i64
+                    );
+                }
+                let recovered = offered
+                    && unsafe { (*(*producer).cold_ptr()).capacity_drops == drops_after_first };
+                activation_exit(token, 0);
+                retire_current_thread();
+                recovered
+            });
+            waiting_ready_rx.recv().unwrap();
+            assert_eq!(
+                session
+                    .core
+                    .page_pool
+                    .allocated_bytes
+                    .load(Ordering::Acquire),
+                STARTER_BYTES
+            );
+
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while session.core.writer_state.load(Ordering::Acquire) != WRITER_SLEEPING
+                && Instant::now() < deadline
+            {
+                std::thread::yield_now();
+            }
+            assert_eq!(
+                session.core.writer_state.load(Ordering::Acquire),
+                WRITER_SLEEPING,
+                "writer did not sleep before the releasing producer made progress"
+            );
+
+            owner_seal_tx.send(()).unwrap();
+            owner_sealed_rx.recv().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while (unsafe {
+                (*owner_producer).returned.head.load(Ordering::Acquire)
+                    != (*owner_producer).published.tail.load(Ordering::Acquire)
+            } || session.core.writer_state.load(Ordering::Acquire) != WRITER_SLEEPING)
+                && Instant::now() < deadline
+            {
+                std::thread::yield_now();
+            }
+            assert_eq!(
+                unsafe { (*owner_producer).returned.head.load(Ordering::Acquire) },
+                unsafe { (*owner_producer).published.tail.load(Ordering::Acquire) },
+                "writer did not drain the releasing producer before its retirement"
+            );
+            assert_eq!(
+                session.core.writer_state.load(Ordering::Acquire),
+                WRITER_SLEEPING,
+                "writer did not sleep before the retirement wakeup"
+            );
+
+            owner_retire_tx.send(()).unwrap();
+            owner.join().unwrap();
+            waiting_release_tx.send(()).unwrap();
+            assert!(
+                waiting.join().unwrap(),
+                "page-less producer never received the retired starter pages"
+            );
+
+            let FinishStatus::Finished(summary) = session.finish(Duration::from_secs(2)).unwrap()
+            else {
+                panic!("capture writer did not stop");
+            };
+            assert_eq!(summary.producers, 2);
+            assert!(summary.encoded_records >= 4);
+            assert_eq!(
+                session
+                    .core
+                    .page_pool
+                    .allocated_bytes
+                    .load(Ordering::Acquire),
+                0
+            );
+            let outcome = decode_file(&output, &mut |_| Ok(())).unwrap();
+            assert_eq!(outcome.health, Health::Clean, "{:?}", outcome.issues);
+            return;
+        }
+
+        let output = test_path();
+        let status = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(
+                "telemetry::capture::tests::page_less_producer_recovers_after_retired_pages_return_to_pool",
+            )
+            .arg("--test-threads=1")
+            .env(CHILD_ENV, &output)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn retired_short_lived_threads_leave_the_writer_scan() {
+        const CHILD_ENV: &str = "MIRVM_CAPTURE_RETIRED_SCAN_CHILD";
+        const THREADS: usize = 2_048;
+        if let Some(output) = std::env::var_os(CHILD_ENV) {
+            let output = PathBuf::from(output);
+            let mut session = CaptureSession::start(StartOptions::new(&output, 0)).unwrap();
+            for _ in 0..THREADS {
+                std::thread::spawn(|| {
+                    let token = activation_enter(0x71);
+                    assert_eq!(
+                        host_syscall(libc::SYS_getpid, &[]),
+                        unsafe { libc::getpid() } as i64
+                    );
+                    activation_exit(token, 0);
+                    retire_current_thread();
+                })
+                .join()
+                .unwrap();
+            }
+
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while writer_active_scan_len(session.core) != 0 && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            assert_eq!(
+                writer_active_scan_len(session.core),
+                0,
+                "retired producer descriptors accumulated in the writer scan"
+            );
+
+            let FinishStatus::Finished(summary) = session.finish(Duration::from_secs(2)).unwrap()
+            else {
+                panic!("capture writer did not stop");
+            };
+            assert_eq!(summary.producers, THREADS as u64);
+            assert_eq!(summary.encoded_records, 0);
+            assert_eq!(summary.producer_drops, (THREADS * 2) as u64);
+            return;
+        }
+
+        let output = test_path();
+        let status = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("telemetry::capture::tests::retired_short_lived_threads_leave_the_writer_scan")
+            .arg("--test-threads=1")
+            .env(CHILD_ENV, &output)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn writer_takes_at_most_one_page_per_producer_per_round() {
+        let output = test_path();
+        let partial = partial_path(&output);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&partial)
+            .unwrap();
+        let offset = write_file_header(&mut file, unsafe { libc::getpid() }).unwrap();
+        let core = Box::leak(Box::new(SessionCore {
+            phase: AtomicU8::new(PHASE_STOPPING),
+            active_roots: AtomicUsize::new(0),
+            writer_state: AtomicU32::new(WRITER_AWAKE),
+            writer_done: AtomicBool::new(false),
+            producers: Mutex::new(Vec::new()),
+            active_producers: Mutex::new(Vec::new()),
+            next_producer: AtomicU64::new(3),
+            next_thread_generation: AtomicU32::new(3),
+            page_pool: PagePool::new(STARTER_BYTES * 2),
+            sink_loss: AtomicU64::new(0),
+            owner_tid: unsafe { libc::gettid() as u32 },
+        }));
+        for producer_id in [1_u64, 2] {
+            let pages = core.page_pool.take_starter();
+            assert!(!pages.is_null());
+            let producer = Box::leak(Box::new(Producer::new(
+                core,
+                pages,
+                producer_id,
+                producer_id as u32,
+                producer_id as u32,
+                producer_id,
+                unsafe { libc::__errno_location() },
+            )));
+            for _ in 0..90 {
+                let disposition = unsafe { record_syscall_enter(producer, libc::SYS_getpid, &[]) };
+                assert!(matches!(disposition, EnterDisposition::Recorded));
+                unsafe { record_syscall_exit(producer, disposition, 1, 0) };
+            }
+            unsafe { seal_page(producer) };
+            assert_eq!(producer.published.tail.load(Ordering::Acquire), 2);
+            core.producers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(producer as *mut Producer as usize);
+            core.active_producers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(producer as *mut Producer as usize);
+        }
+
+        writer_main(core, file, offset, &partial, &output).unwrap();
+        let mut producer_order = Vec::new();
+        let outcome = decode_file(&output, &mut |event| {
+            producer_order.push(event.context.producer_id);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(outcome.health, Health::Clean, "{:?}", outcome.issues);
+        assert_eq!(producer_order.len(), 360);
+        assert_eq!(producer_order[0], 1);
+        assert_eq!(producer_order[90], 2);
+        assert_eq!(producer_order[180], 1);
+        assert_eq!(producer_order[270], 2);
+        assert_eq!(core.page_pool.allocated_bytes.load(Ordering::Acquire), 0);
+        std::fs::remove_file(output).unwrap();
+    }
+
+    #[test]
+    fn writer_offer_and_retire_in_one_round_keep_one_page_owner() {
+        let core = Box::leak(Box::new(SessionCore {
+            phase: AtomicU8::new(PHASE_ARMED),
+            active_roots: AtomicUsize::new(0),
+            writer_state: AtomicU32::new(WRITER_AWAKE),
+            writer_done: AtomicBool::new(false),
+            producers: Mutex::new(Vec::new()),
+            active_producers: Mutex::new(Vec::new()),
+            next_producer: AtomicU64::new(2),
+            next_thread_generation: AtomicU32::new(2),
+            page_pool: PagePool::new(STARTER_BYTES),
+            sink_loss: AtomicU64::new(0),
+            owner_tid: unsafe { libc::gettid() as u32 },
+        }));
+        let producer = Box::leak(Box::new(Producer::new(
+            core,
+            ptr::null_mut(),
+            1,
+            1,
+            unsafe { libc::gettid() as u32 },
+            1,
+            unsafe { libc::__errno_location() },
+        )));
+        let addr = producer as *mut Producer as usize;
+        core.producers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(addr);
+        core.active_producers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(addr);
+
+        assert!(writer_offer_starter(core, producer));
+        let offered = producer.pages.load(Ordering::Acquire);
+        assert!(!offered.is_null());
+        producer.retired.retired.store(true, Ordering::Release);
+        assert!(writer_reap_retired(core));
+        assert!(producer.pages.load(Ordering::Acquire).is_null());
+        assert_eq!(writer_active_scan_len(core), 0);
+        let free = core
+            .page_pool
+            .free
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(free.as_slice(), &[offered as usize]);
+        drop(free);
+
+        reclaim_session_pages(core);
+        assert_eq!(core.page_pool.allocated_bytes.load(Ordering::Acquire), 0);
+    }
+
+    fn writer_active_scan_len(core: &SessionCore) -> usize {
+        core.active_producers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 
     #[test]
