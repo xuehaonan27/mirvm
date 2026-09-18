@@ -257,8 +257,10 @@ x86 asm wrapper。
    （实现前置）已完成 2026-09-18——MIRVM 服务线程自动登记，fork 守卫不再把 capture writer
    误判成 guest pthread，并在 fork 子代按 pid 变化自愈基线；子代第一个会话取得独立
    `process_generation`，写入文件头并进入事件文件名（父 `events-<pid>-0`、子
-   `events-<pid>-1`，§7.59）。**L2 剩余**：子代自动建立自己的文件、页池、
-   writer、producer 与 errno pointer；完成前子代仍是 drop-only。之后是 L3 HostSyscall 直接
+   `events-<pid>-1`）；并已发布 fork 安全的**重建配方**（`RebuildRecipe`，子代读派生内存，
+   不需要锁或分配）。**L2 剩余**：接上重建的消费者——子代在普通边界建自己的文件、页池、
+   writer、producer 与 errno pointer，并为其孤儿会话实现进程退出收尾；完成前子代仍是
+   drop-only。之后是 L3 HostSyscall 直接
    热路与 trace JIT `r15` → L4 stateless inline-asm raw site。
    L4 完成前不宣称首个内部 syscall 纵切完成。
 3. **profile 并行线**：P1 JIT 地址范围/perf-map 已完成；register 只改内存，

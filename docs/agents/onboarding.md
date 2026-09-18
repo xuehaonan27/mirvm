@@ -22,6 +22,10 @@
   缓存与 `~/.cargo` 缓存都可离线复用。`harness` 内部起的 cargo 不会继承调用者的
   `http_proxy`，所以要在 `~/.cargo/config.toml` 写 `[http] proxy = "..."`，否则每个
   冷依赖都要等 30s 超时并假红（`differential.cargo` 一轮曾因此从 6 分钟涨到 35 分钟）。
+- **MIRVM 自有 registry 也不读 cargo 缓存**（sparse index 无 cargo 侧读穿），所以
+  `mirvm` 自己解析依赖时同样需要网络。容器上要**整轮套件**跑在 `withproxy` 下，
+  否则 `differential.cargoless` 会以 `HTTP fetch failed ... Network is unreachable`
+  预热失败（实测：不带代理 4 项失败、245s；带代理 7/7、16s）。
 - **`rg` 是 7 个套件的断言工具**（`tests/suites/contracts/*`、`runtime/*`），容器与 CI
   都没有预装；缺它不是 SKIP 而是大量 `rg: command not found` 假红。装到 PATH 上即可
   （无免密 sudo 时用官方 musl 静态二进制放 `~/.cargo/bin`）。
