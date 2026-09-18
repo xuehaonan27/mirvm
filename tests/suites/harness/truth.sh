@@ -47,7 +47,7 @@ diff_stderr_out=$(ONLY=fib MIRVM="$DIFF_STDERR_MIRVM" \
     /bin/bash tests/suites/differential/programs.sh 2>&1)
 diff_stderr_code=$?
 if [ "$diff_stderr_code" -ne 0 ] \
-    && echo "$diff_stderr_out" | grep -Fq 'FAIL fib: stderr 不一致'; then
+    && echo "$diff_stderr_out" | grep -Fq 'FAIL fib: stderr differs'; then
     ok 'differential.programs 拒绝 mirvm 单侧多出的 stderr'
 else
     bad "differential.programs stderr false green (exit=$diff_stderr_code)"
@@ -125,7 +125,7 @@ fi
 
 unknown_out=$(/bin/bash tests/run.sh suite does.not.exist 2>&1)
 unknown_code=$?
-if [ "$unknown_code" -eq 64 ] && echo "$unknown_out" | grep -Fq '未知套件'; then
+if [ "$unknown_code" -eq 64 ] && echo "$unknown_out" | grep -Fq 'unknown suite'; then
     ok '统一入口拒绝未知套件并返回用法错误'
 else
     bad "统一入口未知套件状态错误（exit=$unknown_code）"
