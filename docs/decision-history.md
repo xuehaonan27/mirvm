@@ -2720,10 +2720,25 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   不关心命名时才自行 claim。这样父进程 `events-<pid>-0.mlog`、子进程
   `events-<childpid>-1.mlog`，文件名与 header 不会不一致（实测：父 0，解码头
   `process_generation = "0"`）。
-- **本片未兑现（仍属 L2）**：子进程**尚未**自动建立自己的文件、页池、writer、producer 和
-  errno pointer；`after_fork_child` 仍只把父代 producer 与缓存置空，子代恢复录制仍要等显式
-  新会话。因此子代当前仍是 drop-only，采集在子进程里不可见——这是设计 §11 队列第 2 项的
-  剩余部分，完成后才能宣称 L2 闭合。P2 的 `mirvm profile capture` 仍未实现。
+- **本片机制（四）fork 安全的重建配方**：子代要建自己的会话，但**不许**碰父代的 session core、
+  页池、writer 线程或 fd，只能读派生内存里稳定不变的部分。因此父代把
+  `RebuildRecipe { directory, page_budget_bytes }` 泄漏到进程结束，并把地址存进原子；
+  fork 复制地址空间时该指针已在，子代读取它既不需要分配器也不需要锁。
+  `publish_rebuild_recipe` 在会话可见之前发布（首个 Engine 一起来就 fork 也覆盖得到）；
+  `request_stop` 撤回发布（owner 停会话后不再有新子代期待重建）。文件名是**推导**而非存储：
+  子代在自己的 pid 与代际上生成 `events-<child pid>-<child generation>.mlog`，落在父代输出
+  目录里。
+- **闭合证据（配方片）**：`cargo fmt --check`、`clippy -D warnings` 干净；`cargo test` **389/389**
+  连跑三次。两条新单测：配方可发布/读取/撤回；以及配方内存**经真实产品路径 fork**
+  （`host_syscall(SYS_fork)`）后在子进程里仍读到父代的值。第一版把全局配方当作断言对象，
+  被并行测试的 `request_stop` 清掉而 flake——已改为由父代在 fork 前取地址、传给孩子断言，
+  测的是派生内存而不是全局指针。
+- **本片未兑现（仍属 L2）**：重建的**消费者**还没接——子代尚未自动建立自己的文件、页池、
+  writer、producer 和 errno pointer，`after_fork_child` 仍只把父代 producer 与缓存置空。
+  已定下但**尚未实现**的收尾协议：子代没有 `finish()` 调用点，其孤儿会话应在进程退出时由
+  进程级收尾停会话、唤醒 writer 并有界 join，写出正常 `End`（设计 §6.2 明确不依赖 TSD
+  flush）。完成前子代仍是 drop-only，不得写成 L2 已闭合。P2 的 `mirvm profile capture`
+  仍未实现。
 
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
