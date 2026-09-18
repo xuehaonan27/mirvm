@@ -105,7 +105,7 @@ pub struct PerfMapStatus {
     pub error: Option<String>,
 }
 
-struct PerfMapRegistry {
+pub(crate) struct PerfMapRegistry {
     ranges: Vec<JitSymbolRange>,
     sink: Option<Box<dyn Write + Send>>,
     health: PerfMapHealth,
@@ -527,25 +527,9 @@ impl JitState {
         with_registry(registry, |registry| registry.register(range));
     }
 
-    /// 两个可调用入口变为可见之前，先登记本批全部范围。
-    pub(crate) fn publish_compiled_entries(
-        &self,
-        func: u32,
-        guarded_entry: u64,
-        packed_entry: u64,
-        ranges: Vec<JitSymbolRange>,
-    ) {
-        self.publish_compiled_entries_with(
-            func,
-            guarded_entry,
-            packed_entry,
-            ranges,
-            perf_registry(),
-        );
-    }
-
     fn publish_compiled_entries_with(
         &self,
+        domain: CodeDomain,
         func: u32,
         guarded_entry: u64,
         packed_entry: u64,
@@ -570,17 +554,44 @@ impl JitState {
         for range in ranges {
             self.register_symbol_range_with(range, registry);
         }
-        self.slots_fast[func as usize].store(guarded_entry, Ordering::Release);
-        self.slots[func as usize].store(packed_entry, Ordering::Release);
+        self.publish_entries_to(self.slots_for(domain), func, guarded_entry, packed_entry);
     }
 
-    /// c2i 也先登记，编译码随后才能从槽中读到其地址；文件只在 stop 控制边界写出。
-    pub(crate) fn publish_c2i_entry(&self, func: u32, entry: u64, ranges: Vec<JitSymbolRange>) {
-        self.publish_c2i_entry_with(func, entry, ranges, perf_registry());
+    fn publish_entries_to(
+        &self,
+        slots: DomainSlotSet<'_>,
+        func: u32,
+        guarded_entry: u64,
+        packed_entry: u64,
+    ) {
+        slots.slots_fast[func as usize].store(guarded_entry, Ordering::Release);
+        slots.slots[func as usize].store(packed_entry, Ordering::Release);
+    }
+
+    /// Publish a compiled body into its domain's slots, registering ranges with
+    /// the process registry. This is the production entry point; the `_with`
+    /// cores take an injected registry so tests can observe registration.
+    pub(crate) fn publish_compiled_entries_for(
+        &self,
+        domain: CodeDomain,
+        func: u32,
+        guarded_entry: u64,
+        packed_entry: u64,
+        ranges: Vec<JitSymbolRange>,
+    ) {
+        self.publish_compiled_entries_with(
+            domain,
+            func,
+            guarded_entry,
+            packed_entry,
+            ranges,
+            perf_registry(),
+        );
     }
 
     fn publish_c2i_entry_with(
         &self,
+        domain: CodeDomain,
         func: u32,
         entry: u64,
         ranges: Vec<JitSymbolRange>,
@@ -592,7 +603,18 @@ impl JitState {
         for range in ranges {
             self.register_symbol_range_with(range, registry);
         }
-        self.slots_fast[func as usize].store(entry, Ordering::Release);
+        self.slots_for(domain).slots_fast[func as usize].store(entry, Ordering::Release);
+    }
+
+    /// c2i trampoline into its domain's slots (production entry point).
+    pub(crate) fn publish_c2i_entry_for(
+        &self,
+        domain: CodeDomain,
+        func: u32,
+        entry: u64,
+        ranges: Vec<JitSymbolRange>,
+    ) {
+        self.publish_c2i_entry_with(domain, func, entry, ranges, perf_registry());
     }
 
     // P2 会把这个 per-Engine 视图与进程级快照一并接出。
@@ -659,6 +681,7 @@ mod tests {
 
         let j = JitState::new(4);
         j.publish_compiled_entries_with(
+            super::CodeDomain::Plain,
             3,
             0x2000,
             0x3000,
@@ -670,6 +693,7 @@ mod tests {
             &registry,
         );
         j.publish_c2i_entry_with(
+            super::CodeDomain::Plain,
             2,
             0x4000,
             vec![range(2, JitSymbolRole::C2i, 0x4000, 0x1d)],
@@ -728,6 +752,7 @@ mod tests {
 
         let j = JitState::new(1);
         j.publish_c2i_entry_with(
+            super::CodeDomain::Plain,
             0,
             0x5000,
             vec![range(0, JitSymbolRole::C2i, 0x5000, 0x20)],
@@ -774,6 +799,7 @@ mod tests {
         let registry = Mutex::new(PerfMapRegistry::default());
         let j = JitState::new(1);
         j.publish_c2i_entry_with(
+            super::CodeDomain::Plain,
             0,
             0x6000,
             vec![range(0, JitSymbolRole::C2i, 0x6000, 0x21)],
@@ -813,7 +839,13 @@ mod tests {
                 let start = 0x7000 + engine_id * 0x100;
                 let range =
                     JitSymbolRange::new(engine_id, 0, JitSymbolRole::C2i, start, 0x22, "target");
-                j.publish_c2i_entry_with(0, start, vec![range], &registry);
+                j.publish_c2i_entry_with(
+                    super::CodeDomain::Plain,
+                    0,
+                    start,
+                    vec![range],
+                    &registry,
+                );
                 assert_eq!(j.slots_fast[0].load(Ordering::Acquire), start);
             }));
         }
@@ -871,6 +903,7 @@ mod tests {
         let registry = std::sync::Arc::new(Mutex::new(PerfMapRegistry::default()));
         let j = JitState::new(2);
         j.publish_c2i_entry_with(
+            super::CodeDomain::Plain,
             0,
             0x9000,
             vec![range(0, JitSymbolRole::C2i, 0x9000, 0x24)],
@@ -934,6 +967,7 @@ mod tests {
         }
 
         j.publish_c2i_entry_with(
+            super::CodeDomain::Plain,
             1,
             0xa000,
             vec![range(1, JitSymbolRole::C2i, 0xa000, 0x25)],
@@ -1004,6 +1038,7 @@ mod tests {
         });
         let j = JitState::new(1);
         j.publish_c2i_entry_with(
+            super::CodeDomain::Plain,
             0,
             0xb000,
             vec![range(0, JitSymbolRole::C2i, 0xb000, 0x26)],
@@ -1077,6 +1112,7 @@ mod tests {
         });
         let j = JitState::new(1);
         j.publish_c2i_entry_with(
+            super::CodeDomain::Plain,
             0,
             0x8000,
             vec![range(0, JitSymbolRole::C2i, 0x8000, 0x23)],
