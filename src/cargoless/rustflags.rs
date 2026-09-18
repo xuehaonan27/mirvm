@@ -185,7 +185,10 @@ mod tests {
         assert_eq!(f, vec!["--from-env"], "env overrides config");
         // Empty env still overrides config (presence wins, empty = empty list)
         let f = resolve(|k| (k == "RUSTFLAGS").then(String::new), &dir).unwrap();
-        assert!(f.is_empty(), "empty env overrides config and yields empty list");
+        assert!(
+            f.is_empty(),
+            "empty env overrides config and yields empty list"
+        );
         // Only when all are absent does config apply
         let f = resolve(no_env, &dir).unwrap();
         assert_eq!(f, vec!["--from-config"]);
@@ -199,7 +202,11 @@ mod tests {
             Path::new("/nonexistent"),
         )
         .unwrap();
-        assert_eq!(f, vec!["--cfg", "foo bar"], "empty segments dropped, inner whitespace kept");
+        assert_eq!(
+            f,
+            vec!["--cfg", "foo bar"],
+            "empty segments dropped, inner whitespace kept"
+        );
         // env splits on whitespace
         let f = resolve(
             |k| (k == "RUSTFLAGS").then(|| "  --cap-lints  allow\t--cfg x ".to_string()),
@@ -263,7 +270,11 @@ mod tests {
         )
         .unwrap();
         let f = resolve(no_env, &dir).unwrap();
-        assert_eq!(f, vec!["--from-triple"], "target.<triple> has highest priority");
+        assert_eq!(
+            f,
+            vec!["--from-triple"],
+            "target.<triple> has highest priority"
+        );
         // Triple absent: cfg(all()) wins
         std::fs::write(
             dir.join(".cargo/config.toml"),
@@ -272,7 +283,11 @@ mod tests {
         )
         .unwrap();
         let f = resolve(no_env, &dir).unwrap();
-        assert_eq!(f, vec!["--from-cfg-all"], "cfg(all()) always-true special case beats build");
+        assert_eq!(
+            f,
+            vec!["--from-cfg-all"],
+            "cfg(all()) always-true special case beats build"
+        );
         // Other cfg expressions are not evaluated; the key is ignored and falls back to build
         std::fs::write(
             dir.join(".cargo/config.toml"),
@@ -281,7 +296,11 @@ mod tests {
         )
         .unwrap();
         let f = resolve(no_env, &dir).unwrap();
-        assert_eq!(f, vec!["--from-build"], "cfg(windows) not evaluated, ignored");
+        assert_eq!(
+            f,
+            vec!["--from-build"],
+            "cfg(windows) not evaluated, ignored"
+        );
         // Target table present but no rustflags key -> fall through to next level
         std::fs::write(
             dir.join(".cargo/config.toml"),
@@ -314,7 +333,10 @@ mod tests {
         assert_eq!(f, vec!["--cap-lints", "allow"]);
         // Invalid type errors loudly
         std::fs::write(dir.join(".cargo/config.toml"), "[build]\nrustflags = 42\n").unwrap();
-        assert!(resolve(no_env, &dir).is_err(), "integer rustflags must error");
+        assert!(
+            resolve(no_env, &dir).is_err(),
+            "integer rustflags must error"
+        );
         // Bad toml errors loudly
         std::fs::write(dir.join(".cargo/config.toml"), "[build\n").unwrap();
         assert!(resolve(no_env, &dir).is_err(), "bad toml must error");

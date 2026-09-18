@@ -7,12 +7,27 @@
 
 ## 环境事实
 
-- 机器：Linux x86_64。构建期工具 cmake/g++/perl/make 在场；**nasm/clang/go 缺席**
-  （决定 corpus 候选可判性：rocksdb=bindgen 无 libclang、ravif=nasm 均判不可）。
-- 工具链：rustc 1.98.0-nightly（`nightly-2026-07-02`，rust-toolchain.toml 锁定）。
+- 机器：Linux x86_64。构建期工具 cmake/g++/perl/make 在场；**nasm 缺席**（`dev-cpu-hg`
+  容器有 clang 与 go，所以 corpus 候选可判性按容器实测，别照抄旧结论）。
+  rocksdb=bindgen 无 libclang、ravif=nasm 仍判不可。
+- 工具链：rustc 1.98.0-nightly（`nightly-2026-07-02`，rust-toolchain.toml 锁定；
+  容器实装 commit `4c9d2bfe4`，2026-07-01 构建）。
   rustc-src 在 `~/.rustup/toolchains/nightly-2026-07-02-*/lib/rustlib/rustc-src/rust/compiler`。
   月度 bump 由人发起，bump 前先在 m4-log/m5-log 查同类漂移先例。
 - 构建：`cargo build --release --locked`（**锁文件铁律**）；执行与性能一律 release。
+- **linux-x86_64 开发容器 `dev-cpu-hg`**（`ssh dev-cpu-hg`，见 `~/ENV.md`）：出厂不带
+  Rust，需要自行 `rustup toolchain install nightly-2026-07-02` 并装 `rustc-dev,rust-src,
+  llvm-tools,rustfmt,clippy`。外网必须逐命令走 `withproxy`，**不要**全局导出代理。
+- corpus 首次拉取依赖走 crates.io sparse index，需带代理；拉过一次 MIRVM registry
+  缓存与 `~/.cargo` 缓存都可离线复用。`harness` 内部起的 cargo 不会继承调用者的
+  `http_proxy`，所以要在 `~/.cargo/config.toml` 写 `[http] proxy = "..."`，否则每个
+  冷依赖都要等 30s 超时并假红（`differential.cargo` 一轮曾因此从 6 分钟涨到 35 分钟）。
+- **`rg` 是 7 个套件的断言工具**（`tests/suites/contracts/*`、`runtime/*`），容器与 CI
+  都没有预装；缺它不是 SKIP 而是大量 `rg: command not found` 假红。装到 PATH 上即可
+  （无免密 sudo 时用官方 musl 静态二进制放 `~/.cargo/bin`）。
+- `differential.programs` 里的 `demo/jit_unwind_probe.rs`（30,000 次 panic+catch）
+  在 mirvm 下约 2m31s，native 约 0.3s（差 ~470×，语义逐字节一致）；`fast` 总时长
+  主要由它决定，别把它误判成挂死。
 - Cranelift 0.133.1：同一 `FrameTable` 生成的 `.eh_frame` 含共享 CIE，必须把完整、
   零结尾的节一次交给 `__register_frame`；逐 FDE 注册会在多层 JIT unwind 时失败。
   Cranelift 原子无弱序（JIT 统一 SeqCst，记账在案）。

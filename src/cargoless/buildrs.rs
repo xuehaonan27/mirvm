@@ -501,7 +501,9 @@ fn parse_record(text: &str) -> Result<RerunRecord, String> {
         } else if let Some(var) = line.strip_prefix("E0\t") {
             rec.envs.push((unesc(var)?, None));
         } else if let Some(rest) = line.strip_prefix("E1\t") {
-            let (var, val) = rest.split_once('\t').ok_or("E1 line missing value column")?;
+            let (var, val) = rest
+                .split_once('\t')
+                .ok_or("E1 line missing value column")?;
             rec.envs.push((unesc(var)?, Some(unesc(val)?)));
         } else {
             return Err(format!("rerun.txt bad line: {line}"));

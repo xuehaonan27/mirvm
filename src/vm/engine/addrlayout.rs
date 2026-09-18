@@ -59,7 +59,10 @@ pub const IMAGE_CODE_COUNT: usize = 1300;
 
 /// Code-region base for the k-th dependency image.
 pub fn image_code_addr(k: usize) -> usize {
-    assert!(k < IMAGE_CODE_COUNT, "image code spline out of bounds: k={k}");
+    assert!(
+        k < IMAGE_CODE_COUNT,
+        "image code spline out of bounds: k={k}"
+    );
     IMAGE_CODE_SPLINE + k * IMAGE_CODE_STEP
 }
 

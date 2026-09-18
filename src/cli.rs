@@ -577,7 +577,11 @@ fn deps_main(args: impl Iterator<Item = String>) -> ExitCode {
         }
     }
     println!("---");
-    println!("deps audit: {} targets, {} failures", targets.len(), failures);
+    println!(
+        "deps audit: {} targets, {} failures",
+        targets.len(),
+        failures
+    );
     if failures == 0 {
         ExitCode::SUCCESS
     } else {

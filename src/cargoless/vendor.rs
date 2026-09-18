@@ -115,7 +115,12 @@ impl VendorDir {
         for dir in &self.dirs {
             let rd = match std::fs::read_dir(dir) {
                 Ok(rd) => rd,
-                Err(e) => return Err(format!("vendor directory read failed {}: {e}", dir.display())),
+                Err(e) => {
+                    return Err(format!(
+                        "vendor directory read failed {}: {e}",
+                        dir.display()
+                    ));
+                }
             };
             for ent in rd {
                 let ent = ent.map_err(|e| format!("vendor directory entry read failed: {e}"))?;
@@ -148,7 +153,10 @@ impl PkgSource for VendorDir {
         }
         let entries = if let Some(dir) = self.overrides.get(name) {
             // override directory = the single version of this package (patch semantics: exact replacement)
-            vec![Self::entry_from_dir(dir, &format!("override package {name}"))?]
+            vec![Self::entry_from_dir(
+                dir,
+                &format!("override package {name}"),
+            )?]
         } else {
             let mut entries = Vec::new();
             for (version, dir) in self.scan_versions(name)? {

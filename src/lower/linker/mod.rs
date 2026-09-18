@@ -217,7 +217,10 @@ impl<'tcx> Linker<'tcx> {
     }
     pub(super) fn set_asm_stub(&mut self, id: ir::AsmStubId, text: String) {
         if id & IMAGE_TAG != 0 {
-            let s = self.split.as_mut().expect("tagged stub id exists only in split mode");
+            let s = self
+                .split
+                .as_mut()
+                .expect("tagged stub id exists only in split mode");
             s.image_asm_sites[(id & !IMAGE_TAG) as usize].text = text;
         } else {
             self.asm_sites[(id - self.delta_first_asm) as usize].text = text;
@@ -261,7 +264,9 @@ impl<'tcx> Linker<'tcx> {
                 return Ok(id);
             }
             if s.current_image {
-                panic!("A2 closure violation: image instance references local TLS static (classifier missed)");
+                panic!(
+                    "A2 closure violation: image instance references local TLS static (classifier missed)"
+                );
             }
         }
         let id = self.delta_first_tls + self.tls_slots.len() as ir::TlsId;

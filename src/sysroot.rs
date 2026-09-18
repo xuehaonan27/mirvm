@@ -15,9 +15,11 @@
 //!   rustc-std-workspace trio and windows-sys point back into library/);
 //! - Compile = same driver::compile_plan pipeline (Layout::at points to sysroot lib flat dir
 //!   + separate staging for host artifacts; --sysroot passed **toolchain** — outputs cannot be
-//!   used as their own compile input); flags aligned with old build: debug-assertions off,
-//!   overflow-checks on, -Zalways-encode-mir (carried by dep_rustc_args),
-//!   -Zforce-unstable-if-unmarked (rustflags channel, only lands on target units).
+//!     used as their own compile input); flags aligned with the old build:
+//!   - debug-assertions off, overflow-checks on;
+//!   - `-Zalways-encode-mir` carried by dep_rustc_args;
+//!   - `-Zforce-unstable-if-unmarked` on the rustflags channel (target units only).
+//!
 //!   Dependency artifacts still use -Zno-codegen metadata-only — mirvm only consumes MIR,
 //!   object code is pure waste (old sysroot carrying object code was a cargo historical shape,
 //!   not a requirement).

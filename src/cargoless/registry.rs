@@ -326,7 +326,9 @@ impl Registry {
                         .map_err(|e| format!("index cache read failed {}: {e}", file.display()))?
                 } else {
                     if self.offline {
-                        return Err(format!("MIRVM_OFFLINE: {source} index has no local cache for {name}"));
+                        return Err(format!(
+                            "MIRVM_OFFLINE: {source} index has no local cache for {name}"
+                        ));
                     }
                     let url = format!(
                         "{}{}",
@@ -356,10 +358,10 @@ impl Registry {
                     )
                 })?
             }
-            Backend::LocalRegistry { path } => {
-                std::fs::read_to_string(path.join("index").join(Self::sparse_path(name)?))
-                    .map_err(|e| format!("local registry missing {name} ({}): {e}", path.display()))?
-            }
+            Backend::LocalRegistry { path } => std::fs::read_to_string(
+                path.join("index").join(Self::sparse_path(name)?),
+            )
+            .map_err(|e| format!("local registry missing {name} ({}): {e}", path.display()))?,
             Backend::Directory { path } => {
                 let entries = directory_index_entry(&path, name)?;
                 self.index_cache
@@ -440,8 +442,9 @@ impl Registry {
                     std::fs::create_dir_all(parent)
                         .map_err(|e| format!("crate cache directory creation failed: {e}"))?;
                 }
-                std::fs::write(&own_crate, &bytes)
-                    .map_err(|e| format!("crate cache write failed {}: {e}", own_crate.display()))?;
+                std::fs::write(&own_crate, &bytes).map_err(|e| {
+                    format!("crate cache write failed {}: {e}", own_crate.display())
+                })?;
                 found.push(own_crate.clone());
             }
             found.remove(0)
@@ -485,7 +488,10 @@ impl Registry {
             Backend::GitIndex { url, checkout } => {
                 ensure_git_index(checkout, url, self.offline)?;
                 std::fs::read_to_string(checkout.join("config.json")).map_err(|e| {
-                    format!("Git registry {} missing config.json: {e}", endpoint.index_url)
+                    format!(
+                        "Git registry {} missing config.json: {e}",
+                        endpoint.index_url
+                    )
                 })?
             }
             Backend::LocalRegistry { path } => {
@@ -503,7 +509,12 @@ impl Registry {
         let template = value
             .get("dl")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| format!("registry {} config.json missing string dl", endpoint.index_url))?
+            .ok_or_else(|| {
+                format!(
+                    "registry {} config.json missing string dl",
+                    endpoint.index_url
+                )
+            })?
             .to_string();
         endpoint.download = Some(DownloadConfig {
             template,
@@ -651,8 +662,12 @@ fn ensure_trailing_slash(value: &str) -> String {
 
 fn write_cache(path: &Path, bytes: &[u8], what: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("{what} cache directory creation failed {}: {error}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "{what} cache directory creation failed {}: {error}",
+                parent.display()
+            )
+        })?;
     }
     std::fs::write(path, bytes)
         .map_err(|error| format!("{what} cache write failed {}: {error}", path.display()))
@@ -1018,7 +1033,9 @@ fn download_url(
     .any(|marker| template.contains(marker));
     let checksum = checksum.unwrap_or("");
     if template.contains("{sha256-checksum}") && checksum.is_empty() {
-        return Err("registry dl template requires {sha256-checksum} but index has no checksum".into());
+        return Err(
+            "registry dl template requires {sha256-checksum} but index has no checksum".into(),
+        );
     }
     let mut url = template
         .replace("{crate}", name)
@@ -1051,8 +1068,8 @@ fn parse_index_lines(text: &str) -> Result<Vec<IndexVersion>, RErr> {
 fn parse_index_version(v: &serde_json::Value) -> Result<IndexVersion, RErr> {
     let get_str = |k: &str| v.get(k).and_then(|x| x.as_str());
     let name = get_str("name").ok_or("missing name")?.to_string();
-    let version =
-        Version::parse(get_str("vers").ok_or("missing vers")?).map_err(|e| format!("vers invalid: {e}"))?;
+    let version = Version::parse(get_str("vers").ok_or("missing vers")?)
+        .map_err(|e| format!("vers invalid: {e}"))?;
     let cksum = get_str("cksum").ok_or("missing cksum")?.to_string();
     let yanked = v.get("yanked").and_then(|x| x.as_bool()).unwrap_or(false);
     let links = get_str("links").map(str::to_string);
@@ -1105,8 +1122,12 @@ fn parse_index_version(v: &serde_json::Value) -> Result<IndexVersion, RErr> {
             .get("name")
             .and_then(|x| x.as_str())
             .ok_or("dep missing name")?;
-        let req = VersionReq::parse(d.get("req").and_then(|x| x.as_str()).ok_or("dep missing req")?)
-            .map_err(|e| format!("dep {dname} req invalid: {e}"))?;
+        let req = VersionReq::parse(
+            d.get("req")
+                .and_then(|x| x.as_str())
+                .ok_or("dep missing req")?,
+        )
+        .map_err(|e| format!("dep {dname} req invalid: {e}"))?;
         let features = d
             .get("features")
             .and_then(|x| x.as_array())
@@ -1156,7 +1177,9 @@ fn parse_index_version(v: &serde_json::Value) -> Result<IndexVersion, RErr> {
 fn verify_cksum(bytes: &[u8], cksum: Option<&str>, dir_name: &str) -> Result<(), RErr> {
     let Some(want) = cksum else { return Ok(()) };
     if want.len() != 64 || !want.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(format!("{dir_name} cksum format invalid (not 64 hex sha256)"));
+        return Err(format!(
+            "{dir_name} cksum format invalid (not 64 hex sha256)"
+        ));
     }
     let got = sha256_hex(bytes);
     if got != want.to_ascii_lowercase() {
@@ -1310,7 +1333,9 @@ fn unpack_crate(bytes: &[u8], dest: &Path, dir_name: &str) -> Result<(), RErr> {
             .map(|c| c.as_os_str().to_string_lossy().into_owned())
             .unwrap_or_default();
         if top != dir_name {
-            return Err(format!("crate top directory {top} does not match {dir_name} — refusing to unpack"));
+            return Err(format!(
+                "crate top directory {top} does not match {dir_name} — refusing to unpack"
+            ));
         }
         let rel: PathBuf = comps.collect();
         if rel.as_os_str().is_empty() {
@@ -1323,7 +1348,10 @@ fn unpack_crate(bytes: &[u8], dest: &Path, dir_name: &str) -> Result<(), RErr> {
                 std::path::Component::ParentDir | std::path::Component::RootDir
             )
         }) {
-            return Err(format!("crate contains traversal path {} — refusing to unpack", rel.display()));
+            return Err(format!(
+                "crate contains traversal path {} — refusing to unpack",
+                rel.display()
+            ));
         }
         let target = dest.join(&rel);
         if entry.header().entry_type().is_dir() {

@@ -322,7 +322,9 @@ fn prepare_test_package(
     let doctest_target = match doctest_target {
         Some(Some(target)) => Some(target),
         Some(None) if request.doc => {
-            eprintln!("mirvm test: --doc requires a package with a lib target that has doctest enabled");
+            eprintln!(
+                "mirvm test: --doc requires a package with a lib target that has doctest enabled"
+            );
             return Err(ExitCode::from(101));
         }
         _ => None,
@@ -729,7 +731,9 @@ impl TestRequest {
                     add_feature_values(&mut out.features, &arg[11..]);
                 }
                 _ if arg.starts_with('-') => {
-                    return Err(format!("unsupported Cargo test argument `{arg}`, will not be silently swallowed"));
+                    return Err(format!(
+                        "unsupported Cargo test argument `{arg}`, will not be silently swallowed"
+                    ));
                 }
                 _ => {
                     if out.filter.replace(arg.clone()).is_some() {
@@ -801,7 +805,10 @@ impl TestRequest {
                     .find(|manifest| manifest.name == package)
                 {
                     if !manifest.check_cfg_feature_values().contains(feature) {
-                        return Err(format!("package `{}` has no feature `{feature}`", manifest.name));
+                        return Err(format!(
+                            "package `{}` has no feature `{feature}`",
+                            manifest.name
+                        ));
                     }
                     manifest.requested_features.insert(feature.to_string());
                     continue;
@@ -837,7 +844,9 @@ impl TestRequest {
                 }
             }
             if !found {
-                return Err(format!("none of the selected packages have feature `{feature}`"));
+                return Err(format!(
+                    "none of the selected packages have feature `{feature}`"
+                ));
             }
         }
         Ok(())
@@ -1075,7 +1084,10 @@ fn generate_workspace_lock(workspace: &WorkspaceManifest) -> Result<(), String> 
             .iter_mut()
             .find(|package| package.name == member.name && package.version == member.version)
         else {
-            return Err(format!("resolution result is missing workspace member {}", member.name));
+            return Err(format!(
+                "resolution result is missing workspace member {}",
+                member.name
+            ));
         };
         for dep in member
             .deps
@@ -1326,7 +1338,10 @@ fn write_root_recipe(
         .build_dir(&manifest.name, root_fp)
         .join("test-recipes");
     std::fs::create_dir_all(&dir).unwrap_or_else(|e| {
-        eprintln!("mirvm: failed to create test recipe directory {}: {e}", dir.display());
+        eprintln!(
+            "mirvm: failed to create test recipe directory {}: {e}",
+            dir.display()
+        );
         std::process::exit(1);
     });
     let kind = format!("{:?}", target.kind).to_ascii_lowercase();
@@ -1591,8 +1606,12 @@ fn write_bin_launcher(
     let dir = layout
         .build_dir(&manifest.name, root_fp)
         .join("bin-launchers");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("failed to create bin launcher directory {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        format!(
+            "failed to create bin launcher directory {}: {e}",
+            dir.display()
+        )
+    })?;
     let safe_name: String = target
         .name
         .chars()
@@ -1612,7 +1631,8 @@ fn write_bin_launcher(
         cwd: manifest.root.clone(),
         argv0: launcher.display().to_string(),
     };
-    let bytes = serde_json::to_vec(&recipe).map_err(|e| format!("bin recipe serialization failed: {e}"))?;
+    let bytes =
+        serde_json::to_vec(&recipe).map_err(|e| format!("bin recipe serialization failed: {e}"))?;
     if std::fs::read(&recipe_path).ok().as_deref() != Some(bytes.as_slice()) {
         std::fs::write(&recipe_path, bytes)
             .map_err(|e| format!("write bin recipe {} failed: {e}", recipe_path.display()))?;
@@ -1628,7 +1648,12 @@ fn write_bin_launcher(
             match std::fs::remove_file(&launcher) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(format!("replace bin launcher {} failed: {e}", launcher.display())),
+                Err(e) => {
+                    return Err(format!(
+                        "replace bin launcher {} failed: {e}",
+                        launcher.display()
+                    ));
+                }
             }
             symlink(self_exe, &launcher)
                 .map_err(|e| format!("create bin launcher {} failed: {e}", launcher.display()))?;
@@ -1760,7 +1785,9 @@ pub fn run_root_recipe(argv: impl Iterator<Item = String>) -> ExitCode {
     let data = match std::fs::read(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::diagnostics::control(format_args!("mirvm: failed to read test recipe {path}: {e}"));
+            crate::diagnostics::control(format_args!(
+                "mirvm: failed to read test recipe {path}: {e}"
+            ));
             return ExitCode::from(1);
         }
     };
@@ -1820,7 +1847,10 @@ fn script_manifest(file: &Path) -> PackageManifest {
     let Some((manifest_text, body)) = crate::cli::parse_frontmatter_pub(&text) else {
         // 路由层（cli.rs run_main）保证只在有 frontmatter 时进来；
         // 裸单文件是形态 3 快路径，不经此
-        eprintln!("mirvm: {} has no frontmatter (internal routing error)", file.display());
+        eprintln!(
+            "mirvm: {} has no frontmatter (internal routing error)",
+            file.display()
+        );
         std::process::exit(2);
     };
     let stem = file
@@ -1830,7 +1860,10 @@ fn script_manifest(file: &Path) -> PackageManifest {
     let cache = super::audit::script_cache_dir(file);
     let src_dir = cache.join("src");
     if let Err(e) = std::fs::create_dir_all(&src_dir) {
-        eprintln!("mirvm: failed to create script cache directory {}: {e}", src_dir.display());
+        eprintln!(
+            "mirvm: failed to create script cache directory {}: {e}",
+            src_dir.display()
+        );
         std::process::exit(1);
     }
     // Layout is isomorphic to cargo-leg materialized projects (cli.rs materialize_script: body in
@@ -1851,7 +1884,10 @@ fn script_manifest(file: &Path) -> PackageManifest {
     match PackageManifest::from_frontmatter_at(stem, &manifest_text, &cache, &main_rs) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("mirvm: failed to parse frontmatter of {}: {e}", file.display());
+            eprintln!(
+                "mirvm: failed to parse frontmatter of {}: {e}",
+                file.display()
+            );
             std::process::exit(1);
         }
     }
@@ -2000,7 +2036,9 @@ fn drive(
             );
             std::process::exit(1);
         }
-        let fp = root_fp.as_ref().expect("root_lib present means fp must already be computed");
+        let fp = root_fp
+            .as_ref()
+            .expect("root_lib present means fp must already be computed");
         let stem = format!("lib{}-{}", lib_name.replace('-', "_"), fp);
         let hit = layout.deps.join(format!("{stem}.rmeta")).is_file()
             && layout.deps.join(format!("{stem}.rlib")).is_file();
@@ -2085,7 +2123,9 @@ fn drive(
     let root_lib_ref = root_lib.as_ref().map(|(n, _, _)| {
         (
             n.as_str(),
-            root_fp.as_deref().expect("root_lib present means fp must already be computed"),
+            root_fp
+                .as_deref()
+                .expect("root_lib present means fp must already be computed"),
         )
     });
     let args = schedule::bin_rustc_args(
@@ -2710,7 +2750,10 @@ fn run_compile(cmd: &mut std::process::Command, u: &Unit, what: &str) -> Result<
         )
     })?;
     if !status.success() {
-        return Err(format!("{what} compilation failed: {} {}", u.package, u.version));
+        return Err(format!(
+            "{what} compilation failed: {} {}",
+            u.package, u.version
+        ));
     }
     Ok(())
 }

@@ -1753,7 +1753,10 @@ impl LazyFuncs {
                 }
             }
         }
-        match self.state.cells[index].get().expect("function decode slot not published") {
+        match self.state.cells[index]
+            .get()
+            .expect("function decode slot not published")
+        {
             Ok(body) => body,
             Err(error) => panic!("verified function failed during lazy decode: {error}"),
         }

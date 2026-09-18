@@ -14,10 +14,10 @@
 //!    interpreter and compiler threads naturally interoperate on the same real address via atomic
 //!    RMW (real address model).
 //!
-//! The RFC §2 three-part state is realized in the skeleton: `Shared` (read-only after publication)
-//! + `Ctx` (per-thread private cell). `Shared` is pure immutable data → Rust Sync → `&Shared`
-//! compiles across scoped threads, the type-level expression of "execution phase is tcx-free ⇒
-//! engine Sync" (C8) (skeleton has no tcx = mode B runtime shape).
+//! The RFC §2 three-part state is realized in the skeleton: `Shared` (read-only after
+//! publication) + `Ctx` (per-thread private cell). `Shared` is pure immutable data →
+//! Rust Sync → `&Shared` compiles across scoped threads, the type-level expression of
+//! "execution phase is tcx-free ⇒ engine Sync" (C8) (skeleton has no tcx = mode B runtime shape).
 //! `Ctx.shared` is a raw pointer (not &'s): avoids burdening CompiledFn with HRTB lifetimes and
 //! matches the vmctx discipline; lifetime is guaranteed by thread::scope.
 //!

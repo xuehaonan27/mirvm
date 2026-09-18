@@ -99,7 +99,9 @@ fn ffi_agg_of<'tcx>(
     let size = layout.layout.size().bytes() as u32;
     let align = layout.layout.align().abi.bytes() as u32;
     if align > 8 {
-        return Err(format!("by-value aggregate align={align} > 8 (C1 boundary)"));
+        return Err(format!(
+            "by-value aggregate align={align} > 8 (C1 boundary)"
+        ));
     }
     let mut fields = Vec::new();
     // ScalarPair ({ptr,len} / two-scalar-field shape): both leaves emitted directly by primitive
@@ -111,13 +113,15 @@ fn ffi_agg_of<'tcx>(
         fields.push(ir::FfiField {
             off: ao,
             leaf: ir::FfiLeaf::Scalar(
-                scalar_ffi_kind(a.primitive()).map_err(|p| format!("scalar {p:?} not supported"))?,
+                scalar_ffi_kind(a.primitive())
+                    .map_err(|p| format!("scalar {p:?} not supported"))?,
             ),
         });
         fields.push(ir::FfiField {
             off: bo,
             leaf: ir::FfiLeaf::Scalar(
-                scalar_ffi_kind(b.primitive()).map_err(|p| format!("scalar {p:?} not supported"))?,
+                scalar_ffi_kind(b.primitive())
+                    .map_err(|p| format!("scalar {p:?} not supported"))?,
             ),
         });
         let agg = ir::FfiAgg {
@@ -138,7 +142,10 @@ fn ffi_agg_of<'tcx>(
         }
     }
     if layout.ty.is_union() {
-        return Err("by-value aggregate union (C1 boundary; SysV union classification separate rule)".into());
+        return Err(
+            "by-value aggregate union (C1 boundary; SysV union classification separate rule)"
+                .into(),
+        );
     }
     // expand field by field (Memory-layout Adt/tuple/array; slice fat already hit in ScalarPair branch above)
     let env = rustc_middle::ty::TypingEnv::fully_monomorphized();
@@ -148,7 +155,9 @@ fn ffi_agg_of<'tcx>(
     };
     match layout.ty.kind() {
         rustc_middle::ty::TyKind::Array(elem_ty, n) => {
-            let n = n.try_to_target_usize(tcx).ok_or("by-value aggregate array length not evaluable")?;
+            let n = n
+                .try_to_target_usize(tcx)
+                .ok_or("by-value aggregate array length not evaluable")?;
             let elem_layout = layout_of_ty(*elem_ty)?;
             let stride = elem_layout.layout.size().bytes() as u32;
             for i in 0..n {
@@ -180,7 +189,11 @@ fn ffi_agg_of<'tcx>(
                 )?;
             }
         }
-        other => return Err(format!("by-value aggregate type shape {other:?} not supported")),
+        other => {
+            return Err(format!(
+                "by-value aggregate type shape {other:?} not supported"
+            ));
+        }
     }
     let agg = ir::FfiAgg {
         size,
