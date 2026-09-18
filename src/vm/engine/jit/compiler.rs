@@ -153,6 +153,34 @@ struct PendingJitSymbol {
     size: u64,
 }
 
+/// Which code domain a compiled body belongs to (design §5.2.3).
+///
+/// The domain is chosen once, at the outermost guest activation entry, and stays
+/// fixed for that whole call chain. It decides two things: which ISA the module
+/// was built with (the trace domain pins a register), and which publish slots
+/// the body lands in. Plain code must stay exactly as it is today: no pinned
+/// register, no collection state, zero cost for a session that is not running.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CodeDomain {
+    Plain,
+    /// Consumed by activation-entry domain selection in the next L3 slice; until
+    /// then only tests construct it, so keep the variant visible rather than
+    /// deleting and re-adding it.
+    #[allow(dead_code)]
+    Trace,
+}
+
+/// Flags for the plain domain: byte-for-byte the configuration `Compiler::new`
+/// has always used. Extracted so the two domains are visibly the same except for
+/// the one setting the trace domain adds.
+fn plain_domain_flags() -> settings::Flags {
+    let mut fb = settings::builder();
+    fb.set("opt_level", "speed").unwrap();
+    fb.set("unwind_info", "true").unwrap();
+    fb.set("preserve_frame_pointers", "true").unwrap();
+    settings::Flags::new(fb)
+}
+
 /// ISA for the trace code domain (design §5.2.3).
 ///
 /// The trace domain is a separate Cranelift ISA/module from the plain domain:
@@ -173,10 +201,24 @@ pub(crate) fn trace_domain_flags() -> settings::Flags {
     fb.set("opt_level", "speed").unwrap();
     fb.set("unwind_info", "true").unwrap();
     fb.set("preserve_frame_pointers", "true").unwrap();
-    // The pinned register is what makes `get_pinned_reg`/`set_pinned_reg`
-    // meaningful; without it Cranelift rejects those instructions.
+    // The one deliberate delta from the plain domain: the pinned register is
+    // what makes `get_pinned_reg`/`set_pinned_reg` meaningful, and without it
+    // Cranelift rejects those instructions.
     fb.set("enable_pinned_reg", "true").unwrap();
     settings::Flags::new(fb)
+}
+
+/// ISA for a domain. The plain arm is the historical configuration; the trace arm
+/// is the same flags plus the pinned register.
+fn domain_isa(domain: CodeDomain) -> cranelift_codegen::isa::OwnedTargetIsa {
+    let flags = match domain {
+        CodeDomain::Plain => plain_domain_flags(),
+        CodeDomain::Trace => trace_domain_flags(),
+    };
+    cranelift_native::builder()
+        .expect("native ISA builder")
+        .finish(flags)
+        .expect("native ISA accepts the domain flags")
 }
 
 /// Build the trace domain's ISA from [`trace_domain_flags`].
@@ -190,16 +232,16 @@ pub(crate) fn trace_domain_isa() -> cranelift_codegen::isa::OwnedTargetIsa {
 
 impl<'a> Compiler<'a> {
     fn new(shared: &'a Shared) -> Self {
+        Self::with_domain(shared, CodeDomain::Plain)
+    }
+
+    /// Build a compiler for an explicit code domain. The plain domain is what
+    /// every production path uses today; the trace domain exists so the
+    /// domain's semantics can be tested before it is wired to activation entry.
+    fn with_domain(shared: &'a Shared, domain: CodeDomain) -> Self {
         // T3（M5.5）：MIRVM_JIT_STATS=1 时开启助手频度统计（进程级一次）
         stat_init();
-        let mut fb = settings::builder();
-        fb.set("opt_level", "speed").unwrap();
-        fb.set("unwind_info", "true").unwrap();
-        fb.set("preserve_frame_pointers", "true").unwrap();
-        let isa = cranelift_native::builder()
-            .unwrap()
-            .finish(settings::Flags::new(fb))
-            .unwrap();
+        let isa = domain_isa(domain);
         let mut jb = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         jb.symbol("mirvm_c2i", mirvm_c2i as *const u8);
         jb.symbol("mirvm_call_main_catch", mirvm_call_main_catch as *const u8);
@@ -1027,6 +1069,29 @@ fn collect_call_sites(cctx: &cranelift_codegen::Context) -> Vec<(u64, Option<u64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L3: the trace domain must compile the same guest IR as the plain domain.
+    /// The domain may only change how recorder state is addressed (the pinned
+    /// register); if it changed guest codegen, the trace and plain runs of one
+    /// program would diverge, which no gate would catch until the domain is
+    /// wired to activation entry. Compiling the same body in both domains and
+    /// requiring a published entry from each is the cheapest standing check.
+    #[test]
+    fn both_code_domains_compile_the_same_body() {
+        for domain in [CodeDomain::Plain, CodeDomain::Trace] {
+            let shared = Shared::new(ir::Module {
+                funcs: vec![body("domain_body", Terminator::Return)].into(),
+                ..ir::Module::default()
+            });
+            let mut compiler = Compiler::with_domain(&shared, domain);
+            compiler.compile(0);
+            assert_ne!(
+                shared.jit.slots_fast[0].load(Ordering::Acquire),
+                0,
+                "{domain:?} published no fast entry"
+            );
+        }
+    }
 
     /// L3: the trace domain is a separate ISA because pinning a register is an
     /// ISA-wide decision.  Plain code must keep `r15` allocatable and carry no
