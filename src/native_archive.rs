@@ -448,8 +448,12 @@ fn materialize_for_target_in(
     extra_libs: &[Box<str>],
     linker: Option<&mut crate::lower::linker::Linker<'_>>,
 ) -> Result<PathBuf, String> {
-    let bytes = std::fs::read(archive)
-        .map_err(|e| format!("Failed to read static native archive `{}`: {e}", archive.display()))?;
+    let bytes = std::fs::read(archive).map_err(|e| {
+        format!(
+            "Failed to read static native archive `{}`: {e}",
+            archive.display()
+        )
+    })?;
     if bytes.starts_with(b"!<thin>\n") {
         return Err(format!(
             "Rejecting thin static archive `{}`: archive bytes do not contain member objects, so it cannot be used as a complete-content hash cache key",
@@ -457,7 +461,10 @@ fn materialize_for_target_in(
         ));
     }
     if !bytes.starts_with(b"!<arch>\n") {
-        return Err(format!("`{}` is not a supported Unix ar archive", archive.display()));
+        return Err(format!(
+            "`{}` is not a supported Unix ar archive",
+            archive.display()
+        ));
     }
     // Lifecycle-section partition (§7.8): .init_array/.fini_array family **allowed**—loader
     // DT_INIT_ARRAY semantics = native process-startup constructor (proven by aws-lc do_library_init /
@@ -488,8 +495,12 @@ fn materialize_for_target_in(
         NATIVE_RUNTIME_BRIDGE_ASM.as_bytes(),
         &bytes,
     ]);
-    std::fs::create_dir_all(cache_dir)
-        .map_err(|e| format!("Failed to create native archive cache directory `{}`: {e}", cache_dir.display()))?;
+    std::fs::create_dir_all(cache_dir).map_err(|e| {
+        format!(
+            "Failed to create native archive cache directory `{}`: {e}",
+            cache_dir.display()
+        )
+    })?;
     let so = cache_dir.join(format!("{hash}.so"));
     if so.exists() {
         return Ok(so);
@@ -509,7 +520,12 @@ fn materialize_for_target_in(
         .arg("-o")
         .arg(&tmp)
         .output()
-        .map_err(|e| format!("Failed to launch cc to convert `{}`: {e}", archive.display()))?;
+        .map_err(|e| {
+            format!(
+                "Failed to launch cc to convert `{}`: {e}",
+                archive.display()
+            )
+        })?;
     if !output.status.success() {
         let _ = std::fs::remove_file(&tmp);
         // C2: "symbols in rlib" rescue chain (designs/c2-rlib-symbols-design.md §2)—
@@ -540,7 +556,10 @@ fn materialize_for_target_in(
     }
     std::fs::rename(&tmp, &so).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
-        format!("Atomic publish of native archive cache `{}` failed: {e}", so.display())
+        format!(
+            "Atomic publish of native archive cache `{}` failed: {e}",
+            so.display()
+        )
     })?;
     Ok(so)
 }
@@ -716,9 +735,15 @@ fn rescue_with_rlib_symbols(
         .arg(&o_path)
         .arg(&s_path)
         .status()
-        .map_err(|e| format!("Failed to launch cc to assemble rlib trampoline (is cc missing from PATH?): {e}"))?;
+        .map_err(|e| {
+            format!(
+                "Failed to launch cc to assemble rlib trampoline (is cc missing from PATH?): {e}"
+            )
+        })?;
     if !st.success() {
-        return Err(format!("cc assembly of rlib trampoline failed (status={st})"));
+        return Err(format!(
+            "cc assembly of rlib trampoline failed (status={st})"
+        ));
     }
     // Relink: trampoline object placed after archive so its defined symbols bind unresolved references inside the archive
     let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
@@ -735,14 +760,22 @@ fn rescue_with_rlib_symbols(
         .arg("-o")
         .arg(&tmp)
         .output()
-        .map_err(|e| format!("Failed to launch cc for relink `{}`: {e}", archive.display()))?;
+        .map_err(|e| {
+            format!(
+                "Failed to launch cc for relink `{}`: {e}",
+                archive.display()
+            )
+        })?;
     if !output.status.success() {
         let _ = std::fs::remove_file(&tmp);
         return Ok(None);
     }
     std::fs::rename(&tmp, &so).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
-        format!("Atomic publish of native archive cache `{}` failed: {e}", so.display())
+        format!(
+            "Atomic publish of native archive cache `{}` failed: {e}",
+            so.display()
+        )
     })?;
     Ok(Some(so))
 }
@@ -1215,7 +1248,10 @@ mod tests {
         );
 
         let error = materialize_in(&archive, &temp.path().join("cache")).unwrap_err();
-        assert!(error.contains("dependency"), "unexpected diagnostic: {error}");
+        assert!(
+            error.contains("dependency"),
+            "unexpected diagnostic: {error}"
+        );
         assert!(
             error.contains("mirvm_missing_dependency"),
             "linker detail lost: {error}"
@@ -1299,7 +1335,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_ne!(first, second, "extra libs list must participate in cache key");
+        assert_ne!(
+            first, second,
+            "extra libs list must participate in cache key"
+        );
     }
 
     #[test]
@@ -1381,7 +1420,8 @@ mod tests {
         };
         let (sa, sb, sc) = (mat(&weak_a), mat(&weak_b), mat(&strong_c));
         // All-weak: allowed (native first-wins isomorphic)
-        reject_symbol_ambiguity(&[sa.clone(), sb.clone()]).expect("duplicate all-weak names must be allowed");
+        reject_symbol_ambiguity(&[sa.clone(), sb.clone()])
+            .expect("duplicate all-weak names must be allowed");
         // strong + weak: allowed (native strong-wins same resolution)
         reject_symbol_ambiguity(&[sa.clone(), sc.clone()]).expect("strong+weak must be allowed");
         // Two strong: remain rejected (native would already be a link error)

@@ -1012,7 +1012,9 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
 
     let bare_desc = match (bare.status.code(), bare.status.signal()) {
         (_, Some(sig)) => {
-            format!("signal {sig} (abort, as expected: JIT frames have no CFI, system unwinder cannot walk them)")
+            format!(
+                "signal {sig} (abort, as expected: JIT frames have no CFI, system unwinder cannot walk them)"
+            )
         }
         (Some(c), _) => format!("exit code {c}"),
         _ => "unknown".into(),

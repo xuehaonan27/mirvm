@@ -9,8 +9,8 @@
 //! - **guest exception = host Rust panic carrying `GuestPanic`** — this is the concrete form of
 //!   candidate A, not a replacement: Rust panic itself is "platform unwinder (_Unwind_RaiseException)
 //!   + Rust personality + landing pad". Raise uses `resume_unwind` (does not trigger panic hook,
-//!   no noise). The catch point downcasts to distinguish: GuestPanic is handled per guest semantics;
-//!   host panic (VM bug) is re-raised as-is, never swallowed.
+//!     no noise). The catch point downcasts to distinguish: GuestPanic is handled per guest
+//!     semantics; host panic (VM bug) is re-raised as-is, never swallowed.
 //! - **interp frame's unwind participation = `CleanupGuard`** (host Rust spelling of landing pad):
 //!   when unwind crosses the frame, the guard's Drop runs → runs this frame's cleanup chain along
 //!   the current unwind edge → restores the operand region → returns (unwind continues
@@ -884,7 +884,11 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
     }
     {
         let (prog, kinds) = case3_prog();
-        ok &= check("case3 catch in compiled frame", vm_case(prog, kinds), nref::case3());
+        ok &= check(
+            "case3 catch in compiled frame",
+            vm_case(prog, kinds),
+            nref::case3(),
+        );
     }
 
     // case 4: cross-FFI abort (child process, assert SIGABRT)
@@ -906,7 +910,9 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
     }
 
     if ok {
-        println!("--- spike3: all PASS (mixed-stack unwind validation passed, candidate A confirmed) ---");
+        println!(
+            "--- spike3: all PASS (mixed-stack unwind validation passed, candidate A confirmed) ---"
+        );
         ExitCode::SUCCESS
     } else {
         println!("--- spike3: FAIL present ---");

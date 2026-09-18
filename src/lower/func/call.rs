@@ -189,7 +189,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
             // rust-call ABI: tail tuple unpacked field by field (physical convention = field flattening)
             if rust_call && i == args.len() - 1 {
                 if let Err(e) = self.untuple_rust_call_arg(&a.node, &mut ir_args) {
-                    pre.push(Stmt::Trap(format!("rust-call tail arg: {e}").into_boxed_str()));
+                    pre.push(Stmt::Trap(
+                        format!("rust-call tail arg: {e}").into_boxed_str(),
+                    ));
                     ir_args.clear();
                 }
                 continue;
@@ -206,7 +208,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         let k = crate::lower::ffi_kind_of(self.tcx, self.typing_env, t)
                             .map_err(|e| format!("variadic arg {t}: {e}"))?;
                         if matches!(k, ir::FfiKind::Agg(_)) {
-                            return Err(format!("variadic tail arg passed by-value aggregate ({t}, C1 boundary)"));
+                            return Err(format!(
+                                "variadic tail arg passed by-value aggregate ({t}, C1 boundary)"
+                            ));
                         }
                         tail_kinds.push(k);
                     }
@@ -252,7 +256,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     let dp = match self.resolve_place(&pl) {
                         Ok(dp) => dp,
                         Err(e) => {
-                            pre.push(Stmt::Trap(format!("C1 arg destination: {e}").into_boxed_str()));
+                            pre.push(Stmt::Trap(
+                                format!("C1 arg destination: {e}").into_boxed_str(),
+                            ));
                             ir_args.clear();
                             break;
                         }
@@ -287,7 +293,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }) {
                 Ok(r) => r,
                 Err(e) => {
-                    pre.push(Stmt::Trap(format!("call return destination: {e}").into_boxed_str()));
+                    pre.push(Stmt::Trap(
+                        format!("call return destination: {e}").into_boxed_str(),
+                    ));
                     RetDest::Ignore
                 }
             }
@@ -313,7 +321,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
             match self.resolve_place(destination) {
                 Ok(dp) => RetDest::Indirect(dp.expr()),
                 Err(e) => {
-                    pre.push(Stmt::Trap(format!("C1 return destination: {e}").into_boxed_str()));
+                    pre.push(Stmt::Trap(
+                        format!("C1 return destination: {e}").into_boxed_str(),
+                    ));
                     RetDest::Ignore
                 }
             }

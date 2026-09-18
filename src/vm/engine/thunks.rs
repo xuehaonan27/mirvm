@@ -98,10 +98,14 @@ unsafe fn repack_ret(result: *mut u8, agg: &super::ir::FfiAgg, lo: u64, hi: u64)
         let (v, leaf) = match i {
             0 => (lo, &f.leaf),
             1 => (hi, &f.leaf),
-            _ => super::interp::engine_abort("C1 repack: >2 top-level fields with Pair/Scalar return channel"),
+            _ => super::interp::engine_abort(
+                "C1 repack: >2 top-level fields with Pair/Scalar return channel",
+            ),
         };
         let super::ir::FfiLeaf::Scalar(k) = leaf else {
-            super::interp::engine_abort("C1 repack: top-level nested leaf with Pair/Scalar return channel");
+            super::interp::engine_abort(
+                "C1 repack: top-level nested leaf with Pair/Scalar return channel",
+            );
         };
         let dst = unsafe { result.add(f.off as usize) };
         unsafe {

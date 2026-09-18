@@ -79,12 +79,20 @@ impl FrozenArena {
 
     /// Restore from a snapshot into the given domain (L2 warm / base image / dependency image load). Err if the fixed base is occupied—the caller treats this as a cache miss and never replays the snapshot at another base (snapshots embed absolute addresses; wrong base = silently wrong values).
     pub fn restore(snapshot: &[u8], home: usize) -> Result<Self, String> {
-        assert!(snapshot.len() <= FROZEN_CAP, "frozen snapshot exceeds arena capacity");
-        assert!(is_valid_home(home), "invalid frozen restore domain: {home:#x}");
+        assert!(
+            snapshot.len() <= FROZEN_CAP,
+            "frozen snapshot exceeds arena capacity"
+        );
+        assert!(
+            is_valid_home(home),
+            "invalid frozen restore domain: {home:#x}"
+        );
         let Some(p) =
             crate::os::mem::map_fixed_preferred(home, FROZEN_CAP, crate::os::mem::Prot::RW)
         else {
-            return Err(format!("frozen fixed base {home:#x} is occupied; cannot restore snapshot"));
+            return Err(format!(
+                "frozen fixed base {home:#x} is occupied; cannot restore snapshot"
+            ));
         };
         unsafe {
             std::ptr::copy_nonoverlapping(snapshot.as_ptr(), p, snapshot.len());
@@ -203,7 +211,9 @@ impl std::fmt::Debug for FrozenArena {
 impl serde::Serialize for FrozenArena {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         if !self.at_fixed_base {
-            return Err(serde::ser::Error::custom("frozen arena is not at fixed base, cannot serialize"));
+            return Err(serde::ser::Error::custom(
+                "frozen arena is not at fixed base, cannot serialize",
+            ));
         }
         use serde::ser::SerializeTuple;
         let mut t = serializer.serialize_tuple(2)?;
@@ -352,7 +362,10 @@ mod tests {
         // Append allocation after restore (argv finalization uses this path)
         let mut b = b;
         let r = b.alloc(8, 8);
-        assert!(r >= q + 9, "appended allocation must lie after the snapshot");
+        assert!(
+            r >= q + 9,
+            "appended allocation must lie after the snapshot"
+        );
     }
 
     /// S4 dual-domain: base-image and delta arenas coexist; cross-domain absolute pointers (delta→base direction, the common shape after a base lookup hits) are bit-stable after restore.
@@ -380,12 +393,18 @@ mod tests {
         drop(delta);
         drop(base);
 
-        let _base2 = FrozenArena::restore(&base_snap, BASE_IMAGE_FIXED_ADDR).expect("base image restore failed");
-        let _delta2 = FrozenArena::restore(&delta_snap, DELTA_FIXED_ADDR).expect("delta restore failed");
+        let _base2 = FrozenArena::restore(&base_snap, BASE_IMAGE_FIXED_ADDR)
+            .expect("base image restore failed");
+        let _delta2 =
+            FrozenArena::restore(&delta_snap, DELTA_FIXED_ADDR).expect("delta restore failed");
         unsafe {
             let cross = (d_ptr as *const u64).read();
             assert_eq!(cross, b_cell, "cross-domain pointer is bit-stable");
-            assert_eq!((cross as *const u64).read(), 0x42, "base content is readable through the cross-domain pointer");
+            assert_eq!(
+                (cross as *const u64).read(),
+                0x42,
+                "base content is readable through the cross-domain pointer"
+            );
         }
     }
 }

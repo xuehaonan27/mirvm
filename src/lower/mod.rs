@@ -205,7 +205,10 @@ pub fn lower_for_base_build(tcx: TyCtxt<'_>) -> (ir::Module, BaseExports) {
         true,
         false,
     );
-    (module, exports.expect("image build mode must produce export material"))
+    (
+        module,
+        exports.expect("image build mode must produce export material"),
+    )
 }
 
 /// Dependency image build session lowering (S3′b): stack = already-loaded image chain below,
@@ -226,7 +229,10 @@ pub fn lower_for_image_build(
 ) -> (ir::Module, BaseExports) {
     let (module, exports, _) =
         lower_inner(tcx, stack, FrozenArena::new_image(k), true, false, false);
-    (module, exports.expect("image build mode must produce export material"))
+    (
+        module,
+        exports.expect("image build mode must produce export material"),
+    )
 }
 
 /// A2 rebase (s3b-a2-design §4.2): split lower finalization, unifying tagged/dual-space ids into
@@ -427,7 +433,9 @@ fn discover_main_catch_site<'tcx>(
         };
         let (destination, rvalue) = &**assign;
         if destination.local != local || !destination.projection.is_empty() {
-            return Err(format!("the only write to local {local:?} is not a whole-local assignment"));
+            return Err(format!(
+                "the only write to local {local:?} is not a whole-local assignment"
+            ));
         }
         let rustc_middle::mir::Rvalue::Cast(
             rustc_middle::mir::CastKind::PointerCoercion(
@@ -438,7 +446,9 @@ fn discover_main_catch_site<'tcx>(
             _,
         ) = rvalue
         else {
-            return Err(format!("the only write to local {local:?} is not a fn-ptr reify"));
+            return Err(format!(
+                "the only write to local {local:?} is not a fn-ptr reify"
+            ));
         };
         let ty::FnDef(def_id, args) = operand.ty(&body.local_decls, tcx).kind() else {
             return Err(format!("the reify source for local {local:?} is not FnDef"));
@@ -592,10 +602,12 @@ fn discover_main_catch_site<'tcx>(
              {intrinsic_unwind:?}"
         ));
     }
-    let try_local = operand_local(&args[0].node)
-        .ok_or("pinned toolchain std catch_unwind do_call argument no longer comes from a local fn-ptr")?;
-    let catch_local = operand_local(&args[2].node)
-        .ok_or("pinned toolchain std catch_unwind do_catch argument no longer comes from a local fn-ptr")?;
+    let try_local = operand_local(&args[0].node).ok_or(
+        "pinned toolchain std catch_unwind do_call argument no longer comes from a local fn-ptr",
+    )?;
+    let catch_local = operand_local(&args[2].node).ok_or(
+        "pinned toolchain std catch_unwind do_catch argument no longer comes from a local fn-ptr",
+    )?;
     let do_call = reified_fn(tcx, typing_env, &internal_body, try_local, *intrinsic_loc).map_err(
         |reason| format!("pinned toolchain std catch_unwind do_call fn-ptr source cannot be confirmed: {reason}"),
     )?;
@@ -672,7 +684,10 @@ fn lower_inner(
                     continue;
                 }
                 let text = std::fs::read_to_string(&manifest).unwrap_or_else(|e| {
-                    panic!("dep global_asm manifest `{}` read failed: {e}", manifest.display())
+                    panic!(
+                        "dep global_asm manifest `{}` read failed: {e}",
+                        manifest.display()
+                    )
                 });
                 let so = global_asm::assemble(&text).unwrap_or_else(|reason| {
                     panic!(
@@ -692,9 +707,12 @@ fn lower_inner(
             // Lowering only needs symbol addresses; it does not own native lifetime. The private copy
             // is mapped/relocated by the staged loader but init/fini are not run; constructors are
             // left to the Engine startup phase.
-            let image =
-                crate::vm::engine::native_instance::open_for_lower(std::path::Path::new(&**so))
-                    .unwrap_or_else(|detail| panic!("required native library `{so}` loading failed during lowering: {detail}"));
+            let image = crate::vm::engine::native_instance::open_for_lower(std::path::Path::new(
+                &**so,
+            ))
+            .unwrap_or_else(|detail| {
+                panic!("required native library `{so}` loading failed during lowering: {detail}")
+            });
             let h = image.handle();
             // Record required handle (dynsym-visible symbol link-order resolution, before global scope —
             // native link-time binding, psm/rustc_driver collision confirmed).
@@ -813,8 +831,9 @@ fn lower_inner(
             rustc_span::DUMMY_SP,
         );
         let (boundary_caller, main_catch, catcher_caller, catcher_intrinsic) =
-            discover_main_catch_site(tcx, typing_env, start_inst)
-                .unwrap_or_else(|reason| panic!("cannot frame the pinned std main panic catch site: {reason}"));
+            discover_main_catch_site(tcx, typing_env, start_inst).unwrap_or_else(|reason| {
+                panic!("cannot frame the pinned std main panic catch site: {reason}")
+            });
         let main_catch = linker.func_id(main_catch);
         linker.main_catch_site = Some(linker::MainCatchSite {
             boundary_caller,

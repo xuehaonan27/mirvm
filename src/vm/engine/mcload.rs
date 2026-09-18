@@ -77,7 +77,9 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
         return Err(bad());
     }
     if u16_at(bytes, 16) != Some(3) {
-        return Err("MC image is not ET_DYN (self-produced family should be a shared object)".into());
+        return Err(
+            "MC image is not ET_DYN (self-produced family should be a shared object)".into(),
+        );
     }
     if u16_at(bytes, 18) != Some(62) {
         return Err("MC image is not x86_64 (EM_X86_64)".into());
@@ -142,7 +144,9 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
                 hi = hi.max((v + m + page - 1) & !(page - 1));
             }
             PT_DYNAMIC => dynamic = Some((vaddr, memsz)),
-            PT_INTERP => return Err("MC image has PT_INTERP (not a self-produced shared object)".into()),
+            PT_INTERP => {
+                return Err("MC image has PT_INTERP (not a self-produced shared object)".into());
+            }
             _ => {}
         }
     }
@@ -447,7 +451,8 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
                 ));
             }
             let name = dyn_str_at(name_off)?;
-            let c = std::ffi::CString::new(name.as_str()).map_err(|_| "symbol name contains NUL")?;
+            let c =
+                std::ffi::CString::new(name.as_str()).map_err(|_| "symbol name contains NUL")?;
             let p = crate::os::dll::sym(0, &c);
             if p != 0 {
                 return Ok(p as u64);
@@ -496,7 +501,9 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
             }
             16..=18 => Err("MC image contains TLS relocation (DTPMOD/DTPOFF not handled)".into()),
             5 => Err("MC image contains COPY relocation (not handled)".into()),
-            other => Err(format!("MC image contains unsupported relocation type {other}")),
+            other => Err(format!(
+                "MC image contains unsupported relocation type {other}"
+            )),
         }
     };
     if let Some(r0) = rela {

@@ -190,7 +190,8 @@ impl<'tcx> Linker<'tcx> {
         let exported = self.exported_defs().get(&link_name).copied();
         if let Some((target, is_weak)) = exported {
             if is_weak && !rust_internal {
-                let cname = std::ffi::CString::new(name).map_err(|_| "symbol name contains NUL".to_string())?;
+                let cname = std::ffi::CString::new(name)
+                    .map_err(|_| "symbol name contains NUL".to_string())?;
                 let strong = crate::os::dll::sym(0, &cname);
                 if strong != 0 {
                     return Ok(bake(self, strong as u64));
@@ -221,7 +222,8 @@ impl<'tcx> Linker<'tcx> {
         // confirmed cases). Archive `.so` files are loaded with RTLD_NOW|RTLD_GLOBAL before
         // draining the worklist (head of lower_inner); handles are in self.archive_handles;
         // global fallback to real system libraries.
-        let cname = std::ffi::CString::new(name).map_err(|_| "symbol name contains NUL".to_string())?;
+        let cname =
+            std::ffi::CString::new(name).map_err(|_| "symbol name contains NUL".to_string())?;
         let mut p = 0u64;
         for (bias, syms) in &self.archive_fallbacks {
             if let Some(&v) = syms.get(name) {

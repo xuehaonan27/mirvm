@@ -1015,7 +1015,9 @@ pub(crate) fn call_main_panic_boundary<R>(ctx: *mut Ctx, f: impl FnOnce() -> R) 
     };
     let state = &mut states[index];
     if state.boundary_activation.is_some() {
-        super::interp::engine_abort("duplicate entry into main panic catch boundary during the same main execution");
+        super::interp::engine_abort(
+            "duplicate entry into main panic catch boundary during the same main execution",
+        );
     }
     state.boundary_activation = Some(current_activation(ctx));
     state.catcher_claimed = false;
@@ -1773,9 +1775,15 @@ pub fn current() -> *mut Ctx {
         panic!("JIT helper called before Engine activation");
     };
     let contexts = unsafe { crate::os::thread::tls_get(key) } as *mut ThreadContexts;
-    assert!(!contexts.is_null(), "JIT helper called before thread attach");
+    assert!(
+        !contexts.is_null(),
+        "JIT helper called before thread attach"
+    );
     let ctx = unsafe { (*contexts).current };
-    assert!(!ctx.is_null(), "JIT helper called outside Engine activation scope");
+    assert!(
+        !ctx.is_null(),
+        "JIT helper called outside Engine activation scope"
+    );
     ctx
 }
 
@@ -2006,7 +2014,9 @@ fn current_activation(ctx: *mut Ctx) -> u64 {
     if contexts.is_null()
         || unsafe { (*contexts).current != ctx || (*contexts).current_activation == 0 }
     {
-        super::interp::engine_abort("main panic catch does not belong to the current Engine activation");
+        super::interp::engine_abort(
+            "main panic catch does not belong to the current Engine activation",
+        );
     }
     unsafe { (*contexts).current_activation }
 }
