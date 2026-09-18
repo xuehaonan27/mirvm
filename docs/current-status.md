@@ -259,8 +259,11 @@ x86 asm wrapper。
    `process_generation`，写入文件头并进入事件文件名（父 `events-<pid>-0`、子
    `events-<pid>-1`）；并已发布 fork 安全的**重建配方**（`RebuildRecipe`，子代读派生内存，
    不需要锁或分配）。**L2 剩余**：接上重建的消费者——子代在普通边界建自己的文件、页池、
-   writer、producer 与 errno pointer，并为其孤儿会话实现进程退出收尾；完成前子代仍是
-   drop-only。之后是 L3 HostSyscall 直接
+   writer、producer 与 errno pointer，并为其孤儿会话实现进程退出收尾。**2026-09-18 复核
+   （§7.60）**：子代会话的建立、代际与 pid、`.partial` 可解码均已实测成立（用仓库自己的
+   `demo/fork_exec_probe.rs`）；但真实 `mirvm capture` 对普通程序（`Command`、`std::fs`、
+   libc FFI）**收不到任何事件**（`pages: 0 / records: 0`），因此"子进程是否真的落盘事件"
+   无法验收。该覆盖缺口比子代重建更基础，已单列。之后是 L3 HostSyscall 直接
    热路与 trace JIT `r15` → L4 stateless inline-asm raw site。
    L4 完成前不宣称首个内部 syscall 纵切完成。
 3. **profile 并行线**：P1 JIT 地址范围/perf-map 已完成；register 只改内存，

@@ -2740,6 +2740,31 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   flush）。完成前子代仍是 drop-only，不得写成 L2 已闭合。P2 的 `mirvm profile capture`
   仍未实现。
 
+### 7.60 2026-09-18：L2 复核——子代重建已可用，但 capture 对真实程序零事件
+
+- **推翻本会话早先的结论**：此前三轮我判定"子代 fork 后重建不可达"，那是因为用了自制探针。
+  改用仓库自己的 `demo/fork_exec_probe.rs`（真实 workload）跑 capture，**子代文件确实生成**：
+  `events-<parent pid>-0.mlog` 与 `events-<child pid>-1.mlog.partial` 并存，子文件的
+  `process_generation` = 1、pid = 子进程，`inspect` 的 issue 只有
+  `SessionEnd is absent; only committed chunks are trusted`（`status: unclean`）——这正是设计
+  对 `.partial` 的定义，不是缺陷。fork+exec 会在 publish 前替换进程映像、`_exit` 不跑退出钩子，
+  因此留下可恢复的 `.partial` 是该场景的正确形态。
+- **同一次复核暴露一个更基础的问题**：真实 `mirvm capture` 会话**收不到任何事件**。实测
+  `Command::new(...).spawn()/.output()`、`std::fs::read`、libc FFI `fork` 三种探针，父文件都是
+  `pages: 0 / records: 0`（672 字节 = 只有文件头与 End 块）；加临时探针确认
+  `Builtin::HostSyscallTrace` 在这些运行里**一次都没被调用**。直接原因清楚：带采集的
+  `Shared::new` 只把 `Builtin::HostSyscall` 节点改写成 `HostSyscallTrace`
+  （`ir.rs:2201`），而普通程序（含 `Command`）的 syscall 经 libc 直调，lower 后没有该节点，
+  改写无对象。设计 §2.3 声称 libc 包装是"现成挂载点"，但当前产品路径并未兑现。
+- **影响**：L2 的"子进程是否真的把事件落进自己的文件"**无法验收**，因为父进程也收不到事件；
+  日志采集主线的对外价值同样受限。这比子代重建更值得优先处理。
+- **已确认可用**：子代会话建立时机正确（fork 后回到普通边界）、代际与 pid 正确、文件可解码；
+  服务线程登记与 fork 守卫修复（§7.59）保持有效。
+- **未兑现**：①子代提交事件（被上面的缺口挡住，无法判定）；②capture 对 libc 直调 syscall 的
+  覆盖（`std::process`、`std::fs` 等普通路径）；③`Command` 在 glibc 上可能走
+  `posix_spawn`，需确认它是否构成第三条 spawn 入口。
+- **再次重估触发器**：出现任何需要"看真实程序 syscall 行为"的调试需求时，先解②。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT
