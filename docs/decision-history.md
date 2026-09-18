@@ -2713,6 +2713,13 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   第一个会话取下一号、第二个复用同号，且子进程的值不回流父进程）。后者顺带钉住一个事实：
   测试必须走产品 fork 路径（`host_syscall(SYS_fork)`），裸 `libc::fork()` 不经过 MIRVM 包装，
   因此不会触发 child hook。
+- **本片机制（三）文件名与文件头用同一个代际**：CLI 之前把输出名硬编码成
+  `events-<pid>-0.mlog`。现在代际在**命名之前**一次确定：CLI 用
+  `capture::claim_process_generation()` 取名并把同一个值通过
+  `CaptureOptions::with_process_generation` 交给会话，`StartOptions` 只在调用者
+  不关心命名时才自行 claim。这样父进程 `events-<pid>-0.mlog`、子进程
+  `events-<childpid>-1.mlog`，文件名与 header 不会不一致（实测：父 0，解码头
+  `process_generation = "0"`）。
 - **本片未兑现（仍属 L2）**：子进程**尚未**自动建立自己的文件、页池、writer、producer 和
   errno pointer；`after_fork_child` 仍只把父代 producer 与缓存置空，子代恢复录制仍要等显式
   新会话。因此子代当前仍是 drop-only，采集在子进程里不可见——这是设计 §11 队列第 2 项的

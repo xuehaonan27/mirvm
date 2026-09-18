@@ -1589,9 +1589,10 @@ pub fn set_fork_baseline(shared: &Shared) {
     shared
         .fork_baseline_threads
         .store(guest_thread_count(), std::sync::atomic::Ordering::SeqCst);
-    shared
-        .fork_baseline_pid
-        .store(unsafe { libc::getpid() }, std::sync::atomic::Ordering::SeqCst);
+    shared.fork_baseline_pid.store(
+        unsafe { libc::getpid() },
+        std::sync::atomic::Ordering::SeqCst,
+    );
 }
 
 /// Threads the guest is accountable for: real OS threads minus MIRVM service threads, saturating so
@@ -1621,7 +1622,11 @@ fn guest_thread_count_for(shared: &Shared) -> usize {
     let raw = crate::os::thread::os_thread_count();
     let service = crate::os::thread::service_thread_count();
     let pid = unsafe { libc::getpid() };
-    if shared.fork_baseline_pid.load(std::sync::atomic::Ordering::SeqCst) != pid {
+    if shared
+        .fork_baseline_pid
+        .load(std::sync::atomic::Ordering::SeqCst)
+        != pid
+    {
         let base = guest_threads_from(raw, service);
         shared
             .fork_baseline_threads

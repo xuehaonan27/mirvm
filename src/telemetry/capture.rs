@@ -331,6 +331,11 @@ impl SessionCore {
 pub(crate) struct StartOptions {
     pub(crate) output: PathBuf,
     pub(crate) page_budget_bytes: usize,
+    /// Fork generation to record. `None` claims the next one for this process,
+    /// which is what a caller that does not name its file after the generation
+    /// wants; callers that do name the file must pass the same value they used
+    /// for the name.
+    pub(crate) process_generation: Option<u64>,
 }
 
 impl StartOptions {
@@ -338,7 +343,13 @@ impl StartOptions {
         Self {
             output: output.into(),
             page_budget_bytes,
+            process_generation: None,
         }
+    }
+
+    pub(crate) fn with_process_generation(mut self, generation: u64) -> Self {
+        self.process_generation = Some(generation);
+        self
     }
 }
 
@@ -388,7 +399,11 @@ impl CaptureSession {
             .open(&partial)?;
         let owner_pid = unsafe { libc::getpid() };
         let owner_tid = unsafe { libc::gettid() as u32 };
-        let offset = write_file_header(&mut file, owner_pid)?;
+        let process_generation = match options.process_generation {
+            Some(generation) => generation,
+            None => claim_process_generation(),
+        };
+        let offset = write_file_header(&mut file, owner_pid, process_generation)?;
 
         let core = Box::leak(Box::new(SessionCore {
             phase: AtomicU8::new(PHASE_ARMED),
@@ -1312,7 +1327,7 @@ static PROCESS_GENERATION: AtomicU64 = AtomicU64::new(0);
 static GENERATION_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Generation this process's next capture session belongs to.
-fn claim_process_generation() -> u64 {
+pub(crate) fn claim_process_generation() -> u64 {
     if GENERATION_PENDING.swap(false, Ordering::SeqCst) {
         PROCESS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1
     } else {
@@ -1326,7 +1341,11 @@ fn reset_generation_after_fork() {
     GENERATION_PENDING.store(true, Ordering::SeqCst);
 }
 
-fn write_file_header(file: &mut File, pid: libc::pid_t) -> io::Result<i64> {
+fn write_file_header(
+    file: &mut File,
+    pid: libc::pid_t,
+    process_generation: u64,
+) -> io::Result<i64> {
     let sequence = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
     let mut session_id = [0_u8; 16];
     session_id[..8].copy_from_slice(&(pid as u64).to_le_bytes());
@@ -1339,7 +1358,7 @@ fn write_file_header(file: &mut File, pid: libc::pid_t) -> io::Result<i64> {
         pid: pid as u32,
         session_id,
         build_id,
-        process_generation: claim_process_generation(),
+        process_generation,
         segment_number: 0,
         monotonic_anchor: 0,
         wall_unix_ns: 0,
@@ -1507,7 +1526,11 @@ mod tests {
             payload[8..].copy_from_slice(&second.to_le_bytes());
             let written =
                 unsafe { libc::write(pipe_fds[1], payload.as_ptr().cast(), payload.len()) };
-            let code = if written == payload.len() as isize { 0 } else { 3 };
+            let code = if written == payload.len() as isize {
+                0
+            } else {
+                3
+            };
             unsafe { libc::_exit(code) };
         }
         unsafe { libc::close(pipe_fds[1]) };
@@ -2109,7 +2132,7 @@ mod tests {
             .create_new(true)
             .open(&partial)
             .unwrap();
-        let offset = write_file_header(&mut file, unsafe { libc::getpid() }).unwrap();
+        let offset = write_file_header(&mut file, unsafe { libc::getpid() }, 0).unwrap();
         let core = Box::leak(Box::new(SessionCore {
             phase: AtomicU8::new(PHASE_STOPPING),
             active_roots: AtomicUsize::new(0),
