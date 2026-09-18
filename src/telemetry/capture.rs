@@ -659,6 +659,9 @@ pub(crate) fn after_fork_child() {
     // Engine's fork baseline happens lazily in the fork guard, which detects
     // the new pid (`guest_thread_count_for`).
     crate::os::thread::reset_service_threads_after_fork();
+    // The inherited generation belongs to the parent; the child's first session
+    // must take the next number so the two files cannot be read as one stream.
+    reset_generation_after_fork();
 }
 
 fn producer_for_session(core: *mut SessionCore, engine_id: u64) -> *mut Producer {
@@ -1299,6 +1302,30 @@ fn publish_without_replace(partial_path: &Path, final_path: &Path) -> io::Result
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Fork generation of this process. `fork` duplicates it, so the child sees the
+/// parent's value and must not reuse it: the first session started after the
+/// fork takes the next number (`reset_generation_after_fork` marks that). The
+/// header value identifies which process's records a file holds, so a parent and
+/// child writing concurrently cannot be mistaken for one stream
+/// (design §5.5/§6.3, L2).
+static PROCESS_GENERATION: AtomicU64 = AtomicU64::new(0);
+static GENERATION_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Generation this process's next capture session belongs to.
+fn claim_process_generation() -> u64 {
+    if GENERATION_PENDING.swap(false, Ordering::SeqCst) {
+        PROCESS_GENERATION.fetch_add(1, Ordering::SeqCst) + 1
+    } else {
+        PROCESS_GENERATION.load(Ordering::SeqCst)
+    }
+}
+
+/// Mark that this process is a `fork` child: its inherited generation belongs to
+/// the parent, so the first session it starts must take the next one.
+fn reset_generation_after_fork() {
+    GENERATION_PENDING.store(true, Ordering::SeqCst);
+}
+
 fn write_file_header(file: &mut File, pid: libc::pid_t) -> io::Result<i64> {
     let sequence = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
     let mut session_id = [0_u8; 16];
@@ -1312,7 +1339,7 @@ fn write_file_header(file: &mut File, pid: libc::pid_t) -> io::Result<i64> {
         pid: pid as u32,
         session_id,
         build_id,
-        process_generation: 0,
+        process_generation: claim_process_generation(),
         segment_number: 0,
         monotonic_anchor: 0,
         wall_unix_ns: 0,
@@ -1451,6 +1478,77 @@ mod tests {
         assert_eq!(std::mem::size_of::<ProducerFast>(), 64);
         assert_eq!(std::mem::align_of::<ProducerFast>(), 64);
         assert_eq!(std::mem::offset_of!(ProducerFast, errno_ptr), 16);
+    }
+
+    /// L2: a `fork` child must not reuse the parent's generation, and must keep
+    /// claiming that same generation for later sessions in the same process.
+    /// Exercised across a real fork; the parent's value must not move.
+    #[test]
+    fn forked_child_advances_the_process_generation_once() {
+        // Make the parent own its generation; a session would do the same, but
+        // the global "one session per process" rule forbids starting another
+        // here while parallel tests run capture sessions.
+        let parent_generation = claim_process_generation();
+
+        let mut pipe_fds = [0_i32; 2];
+        assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+        // Use the product fork path (HostFork / generic SYS_fork both funnel
+        // through `host_syscall`), not a raw libc::fork, so the post-fork hook
+        // actually runs.
+        let pid = host_syscall(libc::SYS_fork, &[]) as libc::pid_t;
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            unsafe { libc::close(pipe_fds[0]) };
+            // The child inherits the parent's generation plus the pending mark.
+            let first = claim_process_generation() as u64;
+            let second = claim_process_generation() as u64;
+            let mut payload = [0_u8; 16];
+            payload[..8].copy_from_slice(&first.to_le_bytes());
+            payload[8..].copy_from_slice(&second.to_le_bytes());
+            let written =
+                unsafe { libc::write(pipe_fds[1], payload.as_ptr().cast(), payload.len()) };
+            let code = if written == payload.len() as isize { 0 } else { 3 };
+            unsafe { libc::_exit(code) };
+        }
+        unsafe { libc::close(pipe_fds[1]) };
+        let mut payload = [0_u8; 16];
+        let mut read = 0_usize;
+        while read < payload.len() {
+            let got = unsafe {
+                libc::read(
+                    pipe_fds[0],
+                    payload[read..].as_mut_ptr().cast(),
+                    payload.len() - read,
+                )
+            };
+            if got <= 0 {
+                break;
+            }
+            read += got as usize;
+        }
+        unsafe { libc::close(pipe_fds[0]) };
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status), "child did not exit normally");
+        assert_eq!(libc::WEXITSTATUS(status), 0, "child failed to report");
+        assert_eq!(read, payload.len(), "short read from the child");
+
+        let child_first = u64::from_le_bytes(payload[..8].try_into().unwrap());
+        let child_second = u64::from_le_bytes(payload[8..].try_into().unwrap());
+        assert_eq!(
+            child_first,
+            parent_generation + 1,
+            "the child's first session must take the next generation"
+        );
+        assert_eq!(
+            child_second, child_first,
+            "later sessions in the same child reuse their own generation"
+        );
+        assert_eq!(
+            claim_process_generation(),
+            parent_generation,
+            "the child's generation must not leak back into the parent"
+        );
     }
 
     #[test]
