@@ -29,9 +29,13 @@ pub struct Shared {
     pub id: u64,
     pub module: Module,
     pub thunks: super::thunks::ThunkCache,
-    /// Frozen when this Engine is created. Capture-capable Engines keep their
-    /// trace IR after a session stops; later activations may bind a new session.
-    pub(crate) trace_capable: bool,
+    /// Code domain this Engine's activations use (design §5.2.3). Chosen once,
+    /// when the Engine is created, and then held for every activation of this
+    /// Engine: guest calls native and native callbacks back into guest stay in
+    /// the chain they entered from, so a running activation never migrates.
+    /// Plain must stay the default and must not reserve a register or carry
+    /// collection state.
+    pub(crate) domain: super::jit::CodeDomain,
     /// J1 tiering base (M5.3a): PLT slots + counters, built over the merged FuncId space.
     /// Slot writers are M5.3b compiler threads (published via single atomic swap); otherwise the
     /// read-only-after-publication discipline holds.
@@ -56,10 +60,16 @@ impl Shared {
 
     pub(crate) fn try_from_module(mut module: Module) -> Result<Self, String> {
         static NEXT_ENGINE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let trace_capable = crate::telemetry::capture::is_armed();
-        if trace_capable {
+        // One fact, decided once: whether a session is armed now fixes this
+        // Engine's code domain for its whole lifetime.
+        let domain = if crate::telemetry::capture::is_armed() {
+            // Only the trace domain records, so only it needs the rewritable
+            // syscall form; plain keeps the untouched IR.
             module.rewrite_host_syscalls_for_capture();
-        }
+            super::jit::CodeDomain::Trace
+        } else {
+            super::jit::CodeDomain::Plain
+        };
         module.ensure_function_names();
         super::backtrace::materialize_symbols(&mut module)?;
         let jit = super::jit::JitState::new(module.funcs.len());
@@ -68,7 +78,7 @@ impl Shared {
             id,
             module,
             thunks: super::thunks::ThunkCache::default(),
-            trace_capable,
+            domain,
             jit,
             control: Arc::new(EngineControl::new(id)),
             ctx_slots: Mutex::new(Vec::new()),
@@ -2114,7 +2124,11 @@ pub fn activate(shared: &Arc<Shared>) -> ActivationGuard {
         (*contexts).current_activation = activation;
         (*contexts).active_engines.push(shared.id);
         let previous_signal_owner = super::signal::activate_owner(shared.id);
-        let telemetry = if shared.trace_capable {
+        // The code domain is decided here, at the outermost guest activation:
+        // it is the Engine's frozen choice, so nested activations (guest -> native
+        // -> guest) inherit the chain they entered from instead of re-deciding.
+        let domain = shared.domain;
+        let telemetry = if domain == super::jit::CodeDomain::Trace {
             (*contexts).telemetry_touched = true;
             Some(crate::telemetry::capture::activation_enter(shared.id))
         } else {
@@ -2425,6 +2439,56 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Acquire),
             0
         );
+    }
+
+    /// L3: the code domain is frozen when an Engine is created, and arming a
+    /// session later must NOT migrate it. That is the design's confirmed first
+    /// version (§5.2.3): plain activations keep running plain, and only threads
+    /// entering guest after arming pick up trace. Getting this backwards would
+    /// silently move a running guest into a domain whose bodies expect recorder
+    /// state the running frame does not have.
+    #[test]
+    fn code_domain_is_frozen_at_engine_creation() {
+        use crate::vm::engine::jit::CodeDomain;
+
+        // No session armed here, so this Engine is born plain and stays plain.
+        let plain = Shared::new(context_export_module());
+        assert_eq!(plain.domain, CodeDomain::Plain);
+        assert_eq!(plain.domain, CodeDomain::Plain);
+
+        let path = std::env::temp_dir().join(format!(
+            "mirvm-domain-{}-{}.mlog",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let session = crate::telemetry::capture::CaptureSession::start(
+            crate::telemetry::capture::StartOptions::new(
+                &path,
+                crate::telemetry::capture::STARTER_BYTES,
+            ),
+        );
+        let Ok(session) = session else {
+            // Another parallel test owns the process-wide session; the frozen
+            // domain of an already-created Engine is what matters and is asserted
+            // above, so skip the arming half rather than fight the global.
+            return;
+        };
+        // Arming after creation cannot migrate the Engine that already exists.
+        assert_eq!(
+            plain.domain,
+            CodeDomain::Plain,
+            "an Engine created before arming must not migrate to trace"
+        );
+
+        // An Engine created while the session is armed is trace for its lifetime.
+        let trace = Shared::new(context_export_module());
+        assert_eq!(trace.domain, CodeDomain::Trace);
+        assert_eq!(trace.domain, CodeDomain::Trace);
+        drop(session);
+        std::fs::remove_file(&path).ok();
     }
 
     /// L2 prerequisite: MIRVM's own service threads are invisible to the fork
