@@ -2800,6 +2800,27 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
 - **环境**：Mac 已装 `nightly-2026-07-02`（rustc/rustfmt 均为 `4c9d2bfe4`，与容器同版本），
   本机 `cargo fmt` 自此为权威，不再需要"改完 scp 到容器再拉回"的往返。
 
+### 7.62 2026-09-18：L3 第三片——代码域参数化与域等价验证
+
+- **动机**：钉寄存器是 ISA 级决定，所以 plain 与 trace 必须**各自持有 ISA/module**，不能是一个
+  开关。同时域一旦影响 guest 代码生成，plain 与 trace 跑同一程序就会分叉——而这条在域真正接到
+  activation 入口之前**没有任何 gate 会发现**。所以先做域参数化 + 等价验证，再接线。
+- **本片机制**：新增 `CodeDomain { Plain, Trace }`；`Compiler::new` 收敛为
+  `with_domain(shared, Plain)`，plain 路径逐字节不变；抽出 `plain_domain_flags()`（历史配置的
+  唯一真源）与 `domain_isa(domain)`，trace 臂 = plain 配置 + `enable_pinned_reg`，
+  使"两个域只差一个设置"在代码里可见而不是靠描述。
+- **闭合证据**：新增 `both_code_domains_compile_the_same_body`——同一 IR body 分别在 Plain 与
+  Trace 下编译，两域都必须发布出非零 fast 入口（若域改变了 guest 代码生成或 r15 约束破坏
+  降低，这一步会先炸）。连同已有的 `trace_domain_enables_the_pinned_register_and_plain_does_not`
+  构成域级回归。`cargo test` **392/392**。
+- **本片未兑现（L3 主体仍未动）**：trace 编译器模块与其独立发布槽/展开信息/JIT 地址映射；
+  在**最外层 guest activation 入口**按会话选择域并贯穿整条调用链；trace 入口
+  `set_pinned_reg(producer)` 与 syscall 站点经 `get_pinned_reg` 调热路；所有进出边界（含异常
+  展开 landing pad）的 save/restore；native 回调入口从 activation/TLS 重取 producer。
+  `CodeDomain::Trace` 目前只被测试构造，已带精确 `#[allow(dead_code)]` 注明消费者。
+- **环境**：Mac 的 `nightly-2026-07-02` 与容器同版本（`4c9d2bfe4`），本机 `cargo fmt` 即权威，
+  本轮已验证"本机 fmt + 容器 clippy/test"的分工稳定。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT
