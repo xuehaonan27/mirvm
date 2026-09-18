@@ -420,6 +420,9 @@ impl CaptureSession {
         }));
         let core_addr = core as *const SessionCore as usize;
         let final_path = options.output;
+        // A fork child must be able to rebuild this session on its own, so the
+        // recipe is published before the session becomes visible (L2).
+        publish_rebuild_recipe(&final_path, options.page_budget_bytes);
         let writer = match std::thread::Builder::new()
             .name("mirvm-capture".into())
             .spawn(move || {
@@ -445,6 +448,8 @@ impl CaptureSession {
         if unsafe { libc::getpid() } != self.owner_pid {
             return;
         }
+        // No new child should expect a rebuild once the owner has stopped.
+        clear_rebuild_recipe();
         let _ = self.core.phase.compare_exchange(
             PHASE_ARMED,
             PHASE_STOPPING,
@@ -1341,6 +1346,62 @@ fn reset_generation_after_fork() {
     GENERATION_PENDING.store(true, Ordering::SeqCst);
 }
 
+/// Everything a `fork` child needs to build **its own** capture session, in a
+/// form that survives `fork` unchanged (L2, design §5.5/§6.3).
+///
+/// The child cannot use the parent's session, page pool, writer or file
+/// descriptors: none of them may be touched after a fork. It can only read
+/// stable, immutable memory. So the parent publishes one leaked recipe for the
+/// lifetime of the process and stores its address in an atomic; the pointer is
+/// already there when the child's address space is duplicated, and reading it
+/// needs neither the allocator nor a lock.
+// The consumer (the fork child's rebuild) lands in the next L2 slice; until
+// then only the publication and the tests read these.
+#[allow(dead_code)]
+struct RebuildRecipe {
+    directory: PathBuf,
+    page_budget_bytes: usize,
+}
+
+/// Address of the immutable recipe, or 0 when no automatic rebuild is pending.
+/// Written only on control paths (session start, session stop); read on the
+/// child's first ordinary boundary.
+static REBUILD_RECIPE: AtomicUsize = AtomicUsize::new(0);
+
+/// Publish the description a `fork` child needs to rebuild this session. The
+/// output file is always `events-<pid>-<generation>.mlog` in the directory of
+/// the parent's own output, so the child derives its own name from its own pid
+/// and the generation it claims.
+fn publish_rebuild_recipe(output: &Path, page_budget_bytes: usize) {
+    let Some(directory) = output.parent() else {
+        REBUILD_RECIPE.store(0, Ordering::Release);
+        return;
+    };
+    let recipe = Box::leak(Box::new(RebuildRecipe {
+        directory: directory.to_path_buf(),
+        page_budget_bytes,
+    }));
+    REBUILD_RECIPE.store(recipe as *const RebuildRecipe as usize, Ordering::Release);
+}
+
+/// Stop asking for an automatic rebuild. The leaked allocation stays valid, so a
+/// child that already read the address is unaffected.
+fn clear_rebuild_recipe() {
+    REBUILD_RECIPE.store(0, Ordering::Release);
+}
+
+/// The recipe a `fork` child must rebuild from, if one is published.
+#[allow(dead_code)] // consumed by the fork child's rebuild (next L2 slice)
+fn pending_rebuild_recipe() -> Option<&'static RebuildRecipe> {
+    let address = REBUILD_RECIPE.load(Ordering::Acquire);
+    if address == 0 {
+        return None;
+    }
+    // SAFETY: the recipe is leaked for the lifetime of the process, so the
+    // pointer stays valid for as long as any child may read it.
+    Some(unsafe { &*(address as *const RebuildRecipe) })
+}
+
 fn write_file_header(
     file: &mut File,
     pid: libc::pid_t,
@@ -1490,6 +1551,66 @@ mod tests {
     fn test_path() -> PathBuf {
         let id = NEXT_PATH.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("mirvm-capture-{}-{id}.mlog", std::process::id()))
+    }
+
+    /// L2: the rebuild recipe is plain immutable memory whose address is
+    /// inherited unchanged by `fork`, so a child can read it without taking any
+    /// lock or running allocator code.
+    #[test]
+    fn rebuild_recipe_is_published_and_readable() {
+        let path = std::env::temp_dir().join("events-1-0.mlog");
+        let directory = path.parent().unwrap().to_path_buf();
+        publish_rebuild_recipe(&path, 4096);
+        let recipe = pending_rebuild_recipe().expect("recipe must be published");
+        assert_eq!(recipe.directory, directory);
+        assert_eq!(recipe.page_budget_bytes, 4096);
+        clear_rebuild_recipe();
+        assert!(pending_rebuild_recipe().is_none(), "clear must unpublish");
+    }
+
+    /// L2: the published recipe's memory is inherited by `fork`, which is the
+    /// whole point of publishing an address instead of storing the recipe in a
+    /// session a child may not touch.
+    ///
+    /// The parent captures the address before forking and hands it to the child,
+    /// so this checks the inherited memory rather than the global pointer, which
+    /// parallel tests may legitimately clear.
+    #[test]
+    fn rebuild_recipe_memory_survives_fork() {
+        let path = std::env::temp_dir().join("events-1-0.mlog");
+        publish_rebuild_recipe(&path, 8192);
+        let address = REBUILD_RECIPE.load(Ordering::Acquire);
+        assert_ne!(address, 0, "recipe must be published before the fork");
+
+        let mut pipe_fds = [0_i32; 2];
+        assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
+        // Product fork path, so the child hook runs (a raw libc::fork does not).
+        let pid = host_syscall(libc::SYS_fork, &[]) as libc::pid_t;
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            unsafe { libc::close(pipe_fds[0]) };
+            // SAFETY: the recipe is leaked for the process lifetime, and the
+            // child inherited the same address space.
+            let seen = unsafe { (*(address as *const RebuildRecipe)).page_budget_bytes };
+            let payload = seen.to_le_bytes();
+            let written =
+                unsafe { libc::write(pipe_fds[1], payload.as_ptr().cast(), payload.len()) };
+            let code = if written == payload.len() as isize { 0 } else { 3 };
+            unsafe { libc::_exit(code) };
+        }
+        unsafe { libc::close(pipe_fds[1]) };
+        let mut payload = [0_u8; 8];
+        let got = unsafe { libc::read(pipe_fds[0], payload.as_mut_ptr().cast(), payload.len()) };
+        unsafe { libc::close(pipe_fds[0]) };
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(libc::WIFEXITED(status), "child did not exit normally");
+        assert_eq!(got, 8, "child did not report");
+        assert_eq!(
+            u64::from_le_bytes(payload),
+            8192,
+            "the child must read the parent's recipe through the inherited address"
+        );
     }
 
     #[test]
