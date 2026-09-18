@@ -98,4 +98,59 @@ if [ -n "${child_file:-}" ] && [ -n "${parent_file:-}" ]; then
     fi
 fi
 
+# L3 trace domain: with every admissible body compiled and published before it
+# first runs, the guest executes trace code rather than the interpreter. Two
+# things must still hold. The pinned syscall site must be the one recording (the
+# helper below has no other caller), and the fork child must end up with exactly
+# the records the interpreted run produced -- the child resumes inside the
+# parent's compiled body with the parent's recorder still pinned, so a child that
+# does not replace that recorder writes its events into the parent's memory and
+# leaves its own file empty.
+TRACE_SESSION="$TMP/session-trace"
+mkdir -p "$TRACE_SESSION"
+trace_rc=0
+MIRVM_HOME="$HOME_DIR" MIRVM_SYSROOT="$TEST_SYSROOT" \
+    MIRVM_JIT_THRESHOLD=1 MIRVM_JIT_SYNC=1 MIRVM_JIT_STATS=1 \
+    "$MIRVM" capture -o "$TRACE_SESSION" -- run tests/fixtures/telemetry_fork_child.rs \
+    >"$TMP/out_trace" 2>"$TMP/err_trace" || trace_rc=$?
+if [ "$trace_rc" -eq 0 ] && grep -q '^child-exit=0$' "$TMP/out_trace"; then
+    ok "trace-domain run completed with a clean child exit"
+else
+    bad "trace-domain run failed (exit=$trace_rc)"
+    tail -20 "$TMP/err_trace"
+fi
+
+if grep -q 'syscall_trace=[1-9]' "$TMP/err_trace"; then
+    ok "trace-domain run recorded through the pinned register"
+else
+    bad "trace-domain run never reached the pinned syscall site"
+fi
+
+trace_parent=$(ls "$TRACE_SESSION"/events-*.mlog 2>/dev/null | head -1)
+trace_child=$(ls "$TRACE_SESSION"/events-*.mlog.partial "$TRACE_SESSION"/events-*.mlog 2>/dev/null \
+    | grep -v "$(basename "${trace_parent:-none}")" | head -1)
+
+if [ -n "${trace_parent:-}" ] && [ -n "${trace_child:-}" ]; then
+    trace_parent_records=$(file_field "$trace_parent" records)
+    trace_child_records=$(file_field "$trace_child" records)
+    trace_child_gen=$(file_field "$trace_child" process_generation)
+    if [ "$trace_parent_records" = "${parent_records:-none}" ]; then
+        ok "trace domain parent recorded the same events ($trace_parent_records)"
+    else
+        bad "trace parent records=$trace_parent_records, interpreted run=$parent_records"
+    fi
+    if [ "$trace_child_records" = "${child_records:-none}" ]; then
+        ok "trace domain fork child recorded the same events ($trace_child_records)"
+    else
+        bad "trace child records=$trace_child_records, interpreted run=$child_records"
+    fi
+    if [ "$trace_child_gen" = "1" ]; then
+        ok "trace domain fork child records generation 1"
+    else
+        bad "trace domain fork child generation=$trace_child_gen, want 1"
+    fi
+else
+    bad "trace-domain run did not produce one file per process"
+fi
+
 suite_summary runtime.telemetry

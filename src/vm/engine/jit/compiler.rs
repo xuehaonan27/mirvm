@@ -147,6 +147,9 @@ struct Compiler<'a> {
     stack_guard: ClifFuncId,
     /// Deferred async-signal delivery at compiled block boundaries.
     poll_signals: ClifFuncId,
+    /// The trace domain's syscall site helper (design §5.2.3). The caller passes
+    /// the recorder it read from the pinned register.
+    host_syscall_trace: ClifFuncId,
     /// 本批 (clif id, unwind info, try_call 函数的 LSDA 字节)——finalize 后统一注册
     pending_unwind: Vec<(ClifFuncId, UnwindInfo, Option<Vec<u8>>)>,
     #[cfg(test)]
@@ -158,23 +161,6 @@ struct PendingJitSymbol {
     func: u32,
     role: JitSymbolRole,
     size: u64,
-}
-
-/// Which code domain a compiled body belongs to (design §5.2.3).
-///
-/// The domain is chosen once, at the outermost guest activation entry, and stays
-/// fixed for that whole call chain. It decides two things: which ISA the module
-/// was built with (the trace domain pins a register), and which publish slots
-/// the body lands in. Plain code must stay exactly as it is today: no pinned
-/// register, no collection state, zero cost for a session that is not running.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CodeDomain {
-    Plain,
-    /// Consumed by activation-entry domain selection in the next L3 slice; until
-    /// then only tests construct it, so keep the variant visible rather than
-    /// deleting and re-adding it.
-    #[allow(dead_code)]
-    Trace,
 }
 
 /// Flags for the plain domain: byte-for-byte the configuration the compiler
@@ -272,6 +258,10 @@ impl<'a> Compiler<'a> {
         jb.symbol("mirvm_alloc", mirvm_alloc as *const u8);
         jb.symbol("mirvm_jit_stack_guard", mirvm_jit_stack_guard as *const u8);
         jb.symbol("mirvm_poll_signals", mirvm_poll_signals as *const u8);
+        jb.symbol(
+            "mirvm_host_syscall_trace",
+            mirvm_host_syscall_trace as *const u8,
+        );
         // M5.4b-3 助手注册表
         jb.symbol("mirvm_bin128_ovf", mirvm_bin128_ovf as *const u8);
         jb.symbol("mirvm_bin128_divrem", mirvm_bin128_divrem as *const u8);
@@ -457,8 +447,19 @@ impl<'a> Compiler<'a> {
                 &module.make_signature(),
             )
             .unwrap();
+        // L3：trace 域 syscall 站点助手
+        // （producer / nr / args / n / 实际使用的 producer 出参 → 结果）。
+        // 只由 trace 域的身体调用；plain 域从不发这条 import。
+        let mut sig_hst = module.make_signature();
+        for _ in 0..5 {
+            sig_hst.params.push(AbiParam::new(types::I64));
+        }
+        sig_hst.returns.push(AbiParam::new(types::I64));
+        let host_syscall_trace = module
+            .declare_function("mirvm_host_syscall_trace", Linkage::Import, &sig_hst)
+            .unwrap();
 
-        Compiler {
+        let mut compiler = Compiler {
             shared,
             domain,
             module,
@@ -486,10 +487,120 @@ impl<'a> Compiler<'a> {
             simd_rv,
             stack_guard,
             poll_signals,
+            host_syscall_trace,
             pending_unwind: Vec::new(),
             #[cfg(test)]
             fail_after_symbol: None,
+        };
+        // The trace domain can only publish bodies once its boundary trampoline
+        // exists: a trace body reads the recorder from the pinned register, so
+        // entering one without the pin would read garbage. Installing it before
+        // the first compile keeps that ordering true by construction.
+        if domain == CodeDomain::Trace {
+            compiler.install_trace_enter();
         }
+        compiler
+    }
+
+    /// Define and publish the trace domain's boundary entry (design §5.2.3).
+    ///
+    /// Trace bodies address the recorder through the pinned register, which is
+    /// not callee-saved under that convention, so `r15` must be installed on the
+    /// way in and restored on the way out -- including when the call unwinds, or
+    /// ABI-conforming Rust would get a clobbered callee-saved register back.
+    /// This is the one place that happens; internal trace calls inherit the pin.
+    ///
+    /// If the definition fails nothing is published, and [`Compiler::compile`]
+    /// refuses to produce a trace body, so the interpreter (which records through
+    /// TLS) stays the fallback exactly as it does for any other compile failure.
+    fn install_trace_enter(&mut self) {
+        let Some(id) = self.define_trace_enter() else {
+            return;
+        };
+        if self.module.finalize_definitions().is_err() {
+            return;
+        }
+        self.register_pending_eh_frames();
+        let addr = self.module.get_finalized_function(id) as u64;
+        debug_assert_ne!(addr, 0, "a finalized trace entry has an address");
+        self.shared.jit.trace_enter.store(addr, Ordering::Release);
+    }
+
+    fn define_trace_enter(&mut self) -> Option<ClifFuncId> {
+        use cranelift_codegen::ir::{
+            BlockArg, BlockCall, ExceptionTableData, ExceptionTableItem, ExceptionTag,
+        };
+        let mut sig = self.module.make_signature();
+        for _ in 0..4 {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        let id = self
+            .module
+            .declare_function("mirvm_trace_enter", Linkage::Local, &sig)
+            .ok()?;
+        let mut cctx = self.module.make_context();
+        cctx.func.signature = sig.clone();
+        {
+            let mut b = FunctionBuilder::new(&mut cctx.func, &mut self.fbc);
+            let entry = b.create_block();
+            b.append_block_params_for_function_params(entry);
+            b.switch_to_block(entry);
+            let ps = b.block_params(entry).to_vec();
+            let (producer, body, args, ret) = (ps[0], ps[1], ps[2], ps[3]);
+
+            let saved = b.ins().get_pinned_reg(types::I64);
+            b.ins().set_pinned_reg(producer);
+
+            let pad = b.create_block();
+            b.append_block_param(pad, types::I64);
+            let ok = b.create_block();
+            let normal = BlockCall::new(
+                ok,
+                std::iter::empty::<BlockArg>(),
+                &mut b.func.dfg.value_lists,
+            );
+            let pad_call = b.func.dfg.block_call(pad, &[BlockArg::TryCallExn(0)]);
+            let mut body_sig = self.module.make_signature();
+            body_sig.params.push(AbiParam::new(types::I64));
+            body_sig.params.push(AbiParam::new(types::I64));
+            let sigref = b.func.import_signature(body_sig);
+            let et = b.func.dfg.exception_tables.push(ExceptionTableData::new(
+                sigref,
+                normal,
+                [ExceptionTableItem::Tag(
+                    ExceptionTag::with_number(0).unwrap(),
+                    pad_call,
+                )],
+            ));
+            b.ins().try_call_indirect(body, &[args, ret], et);
+
+            b.switch_to_block(ok);
+            b.ins().set_pinned_reg(saved);
+            b.ins().return_(&[]);
+
+            b.switch_to_block(pad);
+            let exn = b.block_params(pad)[0];
+            b.ins().set_pinned_reg(saved);
+            let resume = self.module.declare_func_in_func(self.unwind_resume, b.func);
+            b.ins().call(resume, &[exn]);
+            b.ins().trap(TrapCode::user(1).unwrap());
+
+            b.seal_all_blocks();
+            b.finalize();
+        }
+        if let Err(e) = self.module.define_function(id, &mut cctx) {
+            if std::env::var_os("MIRVM_JIT_DEBUG").is_some() {
+                eprintln!("mirvm-jit-debug: trace boundary define failed: {e:#?}");
+            }
+            return None;
+        }
+        let ui = cctx
+            .compiled_code()
+            .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten())?;
+        let lsda = build_lsda(&collect_call_sites(&cctx));
+        self.pending_unwind.push((id, ui, Some(lsda)));
+        self.module.clear_context(&mut cctx);
+        Some(id)
     }
 
     fn fast_sig(&mut self, abi: CalleeAbi) -> Signature {
@@ -506,6 +617,12 @@ impl<'a> Compiler<'a> {
     /// 编译一个函数（过阈值请求）。拒绝/失败 = 静默维持解释。
     fn compile(&mut self, func: u32) {
         let jit = &self.shared.jit;
+        if self.domain == CodeDomain::Trace && jit.trace_enter.load(Ordering::Acquire) == 0 {
+            // Without the boundary pin a trace body has no recorder to read, so
+            // it must not be built at all; interpretation keeps recording through
+            // TLS and stays correct.
+            return;
+        }
         if jit.slots_for(self.domain).slots[func as usize].load(Ordering::Acquire) != 0 {
             return; // 已编译（本域）
         }
@@ -792,6 +909,7 @@ impl<'a> Compiler<'a> {
             };
             let mut tr = Translator {
                 shared: self.shared,
+                domain: self.domain,
                 module: &mut self.module,
                 b: &mut b,
                 vars: std::collections::HashMap::new(),
@@ -819,6 +937,7 @@ impl<'a> Compiler<'a> {
                 simd_stmt: self.simd_stmt,
                 simd_rv: self.simd_rv,
                 poll_signals: self.poll_signals,
+                host_syscall_trace: self.host_syscall_trace,
                 exception_var: None,
                 has_try_call: false,
                 frame_base_var: None,
@@ -1144,6 +1263,157 @@ mod tests {
             format!("{}", isa.triple()).contains("x86_64"),
             "this slice's pinned-register story is x86-64 only, got {}",
             isa.triple()
+        );
+    }
+
+    /// A trace body that reports the pinned register instead of running guest
+    /// code. It uses the packed trace ABI, because that is the shape the boundary
+    /// calls; no guest program can express a register read, which is exactly why
+    /// the boundary's two obligations are checked with it here.
+    fn define_pin_probe(compiler: &mut Compiler<'_>) -> u64 {
+        let mut sig = compiler.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        sig.params.push(AbiParam::new(types::I64));
+        let id = compiler
+            .module
+            .declare_function("mirvm_test_read_pinned", Linkage::Local, &sig)
+            .unwrap();
+        let mut cctx = compiler.module.make_context();
+        cctx.func.signature = sig;
+        {
+            let mut b = FunctionBuilder::new(&mut cctx.func, &mut compiler.fbc);
+            let entry = b.create_block();
+            b.append_block_params_for_function_params(entry);
+            b.switch_to_block(entry);
+            let ret = b.block_params(entry)[1];
+            let pinned = b.ins().get_pinned_reg(types::I64);
+            b.ins().store(MemFlagsData::trusted(), pinned, ret, 0);
+            b.ins().return_(&[]);
+            b.seal_all_blocks();
+            b.finalize();
+        }
+        compiler.module.define_function(id, &mut cctx).unwrap();
+        compiler.module.clear_context(&mut cctx);
+        compiler.module.finalize_definitions().unwrap();
+        compiler.module.get_finalized_function(id) as u64
+    }
+
+    /// A body that unwinds instead of returning. Rust's own calling convention
+    /// matches the packed trace ABI, and its frames carry unwind tables, so this
+    /// drives the boundary's landing pad with a real unwind rather than a
+    /// simulation of one.
+    unsafe extern "C-unwind" fn unwind_through_boundary(_args: *const u64, _ret: *mut u64) {
+        panic!("trace boundary unwind probe");
+    }
+
+    /// L3: the trace domain's boundary is the one place the pinned register is
+    /// installed and the one place it is restored. A body that reads the pin
+    /// proves the install; reading the *host's* register before and after a call
+    /// proves the restore, on the normal path and on the unwinding path alike --
+    /// the latter is why the boundary carries an LSDA instead of being a plain
+    /// save/call/restore sequence.
+    #[test]
+    fn trace_entry_pins_the_recorder_and_restores_it_even_when_it_unwinds() {
+        const PINNED: u64 = 0x5052_4f44_5543_4552;
+        let shared = Shared::new(ir::Module {
+            funcs: vec![body("domain_body", Terminator::Return)].into(),
+            ..ir::Module::default()
+        });
+        let mut compiler = Compiler::with_domain(&shared, CodeDomain::Trace);
+        let enter = shared.jit.trace_enter.load(Ordering::Acquire);
+        assert_ne!(enter, 0, "the trace domain published no boundary entry");
+
+        let probe = define_pin_probe(&mut compiler);
+        type Packed = extern "C" fn(*const u64, *mut u64);
+        let read_pin: Packed = unsafe { std::mem::transmute(probe as usize) };
+
+        let mut ret = [0u64; 2];
+        // Read the host's own register first: everything below must leave it
+        // exactly like this.
+        let mut host = [0u64; 2];
+        read_pin(std::ptr::null(), host.as_mut_ptr());
+        let host_value = std::hint::black_box(host[0]);
+        assert_ne!(
+            host_value, PINNED,
+            "the host already held the probe value, so this test proves nothing"
+        );
+
+        // Called through the boundary, the probe sees the recorder the boundary
+        // installed. It only reads, so the host's own register survives.
+        unsafe {
+            crate::vm::engine::jit::call_trace_body(enter, PINNED as *mut _, probe, &[], &mut ret)
+        };
+        assert_eq!(
+            ret[0], PINNED,
+            "the boundary did not pin the recorder register before the call"
+        );
+
+        unsafe {
+            crate::vm::engine::jit::call_trace_body(enter, PINNED as *mut _, probe, &[], &mut ret)
+        };
+        read_pin(std::ptr::null(), host.as_mut_ptr());
+        assert_eq!(
+            std::hint::black_box(host[0]),
+            host_value,
+            "the normal path did not restore the host's register"
+        );
+
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            crate::vm::engine::jit::call_trace_body(
+                enter,
+                PINNED as *mut _,
+                unwind_through_boundary as *const u8 as u64,
+                &[],
+                &mut ret,
+            )
+        }));
+        assert!(
+            caught.is_err(),
+            "a panic raised inside a trace body did not reach the host"
+        );
+        read_pin(std::ptr::null(), host.as_mut_ptr());
+        let after_unwind = std::hint::black_box(host[0]);
+        assert_ne!(
+            after_unwind, PINNED,
+            "the unwinding path left the recorder pinned in the host's register"
+        );
+        assert_eq!(
+            after_unwind, host_value,
+            "the unwinding path did not restore the host's register"
+        );
+    }
+
+    /// L3: the trace domain's own syscall site must actually compile. If the
+    /// pinned lowering were rejected, the body would silently stay interpreted
+    /// and the differential gates would still pass while the feature did
+    /// nothing -- so the published trace entry is the assertion.
+    #[test]
+    fn trace_domain_compiles_a_pinned_syscall_body() {
+        let mut probe = body(
+            "pinned_syscall",
+            Terminator::CallBuiltin {
+                builtin: ir::Builtin::HostSyscallTrace,
+                args: vec![Operand::Imm {
+                    bits: libc::SYS_getpid as u64,
+                    width: Width::W64,
+                }],
+                ret: RetDest::Ignore,
+                target: 1,
+                unwind: UnwindAction::Continue,
+                role: ir::BuiltinCallRole::Normal,
+            },
+        );
+        probe.ret = RetAbi::Zst;
+        let shared = Shared::new(ir::Module {
+            funcs: vec![probe].into(),
+            ..ir::Module::default()
+        });
+        let mut compiler = Compiler::with_domain(&shared, CodeDomain::Trace);
+        compiler.compile(0);
+        assert_ne!(
+            shared.jit.slots_for(CodeDomain::Trace).slots[0].load(Ordering::Acquire),
+            0,
+            "the trace domain rejected a body containing its own syscall site"
         );
     }
 

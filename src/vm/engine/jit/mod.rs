@@ -35,7 +35,11 @@ mod lsda_probe;
 mod translate;
 
 #[cfg(feature = "cranelift")]
-pub(crate) use compiler::{CodeDomain, start, stop};
+pub(crate) use compiler::{start, stop};
+/// Test-only view of the helper frequency table, so a test can prove a path ran
+/// rather than only that its effects match another path's.
+#[cfg(all(test, feature = "cranelift"))]
+pub(crate) use helpers::stat_value;
 
 /// Register one complete `.eh_frame` section with the process unwinder.
 ///
@@ -51,6 +55,62 @@ pub(crate) fn register_eh_frame_section(mut bytes: Vec<u8>) {
     bytes.extend_from_slice(&[0, 0, 0, 0]);
     let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
     unsafe { __register_frame(bytes.as_ptr()) };
+}
+
+/// Enter one packed trace body through the trace domain's boundary entry.
+///
+/// A trace body reads this thread's recorder from the pinned register, so it may
+/// only run behind the trampoline that installs that register -- which also
+/// restores it afterwards, on the unwinding path as well as the normal one. The
+/// producer is always handed in from the activation, so a native callback that
+/// re-enters the guest can never be served a register value some other ABI left
+/// behind.
+///
+/// # Safety
+///
+/// `enter` must be the boundary entry the trace compiler published, `body` a
+/// packed body compiled into the same module, and `producer` the calling
+/// thread's live recorder.
+///
+/// Without the code generator no trace entry can be published, so that build
+/// keeps the same signature and never reaches the body.
+#[cfg(not(feature = "cranelift"))]
+pub(crate) unsafe fn call_trace_body(
+    _enter: u64,
+    _producer: *mut crate::telemetry::capture::Producer,
+    _body: u64,
+    _args: &[u64],
+    _ret: &mut [u64; 2],
+) -> (u64, u64) {
+    unreachable!("this build has no code generator, so it publishes no trace body")
+}
+
+/// Enter one packed trace body through the trace domain's boundary entry.
+///
+/// A trace body reads this thread's recorder from the pinned register, so it may
+/// only run behind the trampoline that installs that register -- which also
+/// restores it afterwards, on the unwinding path as well as the normal one. The
+/// producer is always handed in from the activation, so a native callback that
+/// re-enters the guest can never be served a register value some other ABI left
+/// behind.
+///
+/// # Safety
+///
+/// `enter` must be the boundary entry the trace compiler published, `body` a
+/// packed body compiled into the same module, and `producer` the calling
+/// thread's live recorder.
+#[cfg(feature = "cranelift")]
+pub(crate) unsafe fn call_trace_body(
+    enter: u64,
+    producer: *mut crate::telemetry::capture::Producer,
+    body: u64,
+    args: &[u64],
+    ret: &mut [u64; 2],
+) -> (u64, u64) {
+    type TraceEnter = unsafe extern "C-unwind" fn(u64, u64, *const u64, *mut u64);
+    let f: TraceEnter = unsafe { std::mem::transmute(enter as usize) };
+    unsafe { f(producer as u64, body, args.as_ptr(), ret.as_mut_ptr()) };
+    (ret[0], ret[1])
 }
 
 // 编译管线的共享 imports（feature 门内；子模块经 `use super::*` 继承）。

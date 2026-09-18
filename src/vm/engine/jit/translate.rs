@@ -8,6 +8,10 @@ use super::*;
 
 pub(super) struct Translator<'a, 'b> {
     pub(super) shared: &'a Shared,
+    /// The domain this body is being compiled for. The PLT hot path bakes the
+    /// address of that domain's `slots_fast` into the machine code, so a trace
+    /// body can only ever resolve trace callees (and vice versa).
+    pub(super) domain: CodeDomain,
     pub(super) module: &'a mut JITModule,
     pub(super) b: &'a mut FunctionBuilder<'b>,
     pub(super) vars: std::collections::HashMap<u32, Variable>,
@@ -45,6 +49,8 @@ pub(super) struct Translator<'a, 'b> {
     pub(super) simd_stmt: ClifFuncId,
     pub(super) simd_rv: ClifFuncId,
     pub(super) poll_signals: ClifFuncId,
+    /// L3：trace 域 syscall 站点助手（首个参数 = 钉在寄存器里的 recorder）。
+    pub(super) host_syscall_trace: ClifFuncId,
     pub(super) exception_var: Option<Variable>,
     pub(super) has_try_call: bool,
 }
@@ -2328,6 +2334,55 @@ impl Translator<'_, '_> {
         self.b.switch_to_block(ok);
     }
 
+    /// L3：trace 域 syscall 站点（设计 §5.2.3）。操作数里 `0` 是 syscall 号，
+    /// 其余是参数；recorder 从边界钉住的寄存器读，助手负责真正的 syscall 与
+    /// Enter/Exit 一对记录。
+    fn trace_syscall_site(
+        &mut self,
+        args: &[ir::Operand],
+        ret: &RetDest,
+        target: ir::Bb,
+        blocks: &[cranelift_codegen::ir::Block],
+    ) {
+        let mut av: Vec<Value> = Vec::with_capacity(args.len());
+        for a in args {
+            av.push(self.operand(a).0);
+        }
+        let nr = match av.first() {
+            Some(v) => *v,
+            None => self.b.ins().iconst(types::I64, 0),
+        };
+        let nargs = av.len().saturating_sub(1);
+        let arg_ss = self.b.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            (nargs.max(1) * 8) as u32,
+            3,
+        ));
+        for (i, v) in av.iter().skip(1).enumerate() {
+            self.b.ins().stack_store(*v, arg_ss, (i * 8) as i32);
+        }
+        let producer = self.b.ins().get_pinned_reg(types::I64);
+        let ap = self.b.ins().stack_addr(types::I64, arg_ss, 0);
+        let nv = self.b.ins().iconst(types::I64, nargs as i64);
+        // The helper reports the recorder it actually used: a fork child's first
+        // recording syscall replaces the inherited one, and this is where the
+        // replacement reaches the register the rest of the body reads.
+        let used_ss =
+            self.b
+                .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
+        let up = self.b.ins().stack_addr(types::I64, used_ss, 0);
+        let fref = self
+            .module
+            .declare_func_in_func(self.host_syscall_trace, self.b.func);
+        let call = self.b.ins().call(fref, &[producer, nr, ap, nv, up]);
+        let lo = self.b.inst_results(call)[0];
+        let used = self.b.ins().stack_load(types::I64, used_ss, 0);
+        self.b.ins().set_pinned_reg(used);
+        let hi = self.b.ins().iconst(types::I64, 0);
+        self.write_ret(ret, lo, hi);
+        self.b.ins().jump(blocks[target as usize], &[]);
+    }
+
     /// 调用写回（interp 同形：Ignore/Indirect 不写，Scalar=lo，Pair=(lo,hi)）。
     fn write_ret(&mut self, ret: &RetDest, lo: Value, hi: Value) {
         match ret {
@@ -2516,8 +2571,10 @@ impl Translator<'_, '_> {
                             let plt = callee_abi(cb).filter(|cabi| cabi.nparams == av.len());
                             if let Some(cabi) = plt {
                                 // 热路：PLT 内存间接——load slots_fast[callee] + call_indirect
-                                //（恒定形状；蹦床→fast 的升级对调用点透明）
-                                let slot_addr = &self.shared.jit.slots_fast[*callee as usize]
+                                //（恒定形状；蹦床→fast 的升级对调用点透明）。槽数组按本域选：
+                                //trace 体只认 trace 槽，plain 体只认 plain 槽。
+                                let slot_addr = &self.shared.jit.slots_for(self.domain).slots_fast
+                                    [*callee as usize]
                                     as *const std::sync::atomic::AtomicU64
                                     as i64;
                                 let ap = self.b.ins().iconst(types::I64, slot_addr);
@@ -2840,6 +2897,16 @@ impl Translator<'_, '_> {
                 unwind,
                 role,
             } => {
+                // L3：trace 域的自有 syscall 站点（设计 §5.2.3）。recorder 从
+                // activation 边界钉住的寄存器读出，站点本身不查 TLS、不查
+                // session；syscall 与 Enter/Exit 一对记录都在助手本体内。
+                if self.domain == CodeDomain::Trace
+                    && matches!(builtin, ir::Builtin::HostSyscallTrace)
+                    && matches!(unwind, UnwindAction::Continue)
+                {
+                    self.trace_syscall_site(args, ret, *target, blocks);
+                    return;
+                }
                 // T1-b：分配系四件走 mirvm_alloc 快路（引擎堆同一入口，tag
                 // 分派）；其余走 mirvm_call_builtin（exec_builtin 同一本体）
                 let alloc_tag = match builtin {

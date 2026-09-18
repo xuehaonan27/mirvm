@@ -1060,19 +1060,27 @@ profile 还要比较：热点前 N 名是否稳定、样本丢失率、采样频
    writer 每轮每 producer 至多取一页的公平基线。零预算 attach、退线程归页后恢复、2,048
    个短命线程不积累扫描项、双 producer 公平顺序和 offer/retire 同轮所有权已有回归；真实
    arm session 的 publish/return/retire/rescue 链也已在 TSan 下零竞争告警。
-2. **L2——fork 子代自动重建（下一步；第一片完成 2026-09-18）**：child hook 先把子进程切入 drop-only，普通边界
+2. **L2——fork 子代自动重建（已完成 2026-09-18）**：child hook 先把子进程切入 drop-only，普通边界
    自动创建新 process generation、文件、页池、writer、producer 和 errno pointer。覆盖
    `HostFork`、泛型 `SYS_fork` 和 native 再入；父子不得共享账本、fd 或页状态。
-   **已完成** = 实现前置（MIRVM 服务线程自动登记，fork 守卫按
+   **已兑现** = 实现前置（MIRVM 服务线程自动登记，fork 守卫按
    `os_thread_count − service_thread_count` 判定 guest 线程数，fork 子代按 pid 自愈基线）、
-   子代代际身份（文件头与文件名同源）、以及 fork 安全的**重建配方**
-   （`RebuildRecipe`，泄漏到进程结束 + 原子地址，子代读派生内存即可）。
-   **剩余** = 重建的消费者：子代在普通边界用配方建自己的文件、页池、writer、producer 与
-   errno pointer，并为其孤儿会话实现进程退出收尾（停会话 → 唤醒 writer → 有界 join →
-   正常 `End`）。在完成前子代仍是 drop-only，不得写成已有能力。
-3. **L3——真正的 HostSyscall 热路径（随后）**：稳定 `ProducerFast` ABI 和共用冷慢路，
-   移除通用 JIT builtin helper 与健康 pair 的逐记录冷 sequence 更新；trace JIT 用 `r15`
-   固定当前 producer，plain 代码继续保持零 telemetry/TLS 读取和零保留 `r15`。
+   子代代际身份（文件头与文件名同源）、fork 安全的**重建配方**
+   （`RebuildRecipe`，泄漏到进程结束 + 原子地址，子代读派生内存即可），以及配方的消费者
+   （子代在普通边界自建文件、页池、writer、producer 与 errno pointer）。回归 =
+   `runtime.telemetry`：父 gen0 / 子 gen1 两个文件各带本进程 pid 与自己的记录。裁决见
+   decision-history §7.59/§7.60。
+3. **L3——真正的 HostSyscall 热路径（施工中；钉住的站点已接通 2026-09-18）**：稳定
+   `ProducerFast` ABI 和共用冷慢路；trace JIT 用 `r15` 固定当前 producer，plain 代码继续
+   保持零 telemetry/TLS 读取和零保留 `r15`。
+   **已兑现** = 热路内核 `record_syscall_enter_inline`；trace 域独立 ISA/module 与独立发布槽；
+   代码域按 Engine 冻结并在整条调用链保持；边界蹦床（save/set/restore `r15`，含展开
+   landing pad）；trace 域 syscall 站点经 `get_pinned_reg` 直调钉住的入口（无 TLS 查找、
+   无 session 检查）；fork 子代在第一次记录性 syscall 处重建会话并修复钉住的寄存器。
+   证据见 decision-history §7.61-§7.63。
+   **剩余** = 页内内联写（§5.9 的 64B Enter + 24B Exit 形状）与解释器单独一条 trace 循环；
+   另有一条待裁决偏离：设计要求域在**最外层 activation 入口**选择，当前实现是 Engine 构造时
+   冻结（§7.63 末段）。这两项收口前不得宣称 L3 完成。
 4. **L4——1B stateless inline-asm raw site（L3 之后）**：复用同一 producer ABI 双物化 raw
    syscall 站点，以 RFLAGS、除 `rcx/r11` 外 GPR、red zone、栈、XMM/YMM/ZMM 和 raw 返回值
    对拍为交付门。L4 完成后，首个 MIRVM-owned syscall 纵切才算完整。
