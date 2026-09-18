@@ -492,6 +492,21 @@ extern "C" fn drain_lingering_writer() {
     // SAFETY: the session core is leaked for the process lifetime, so the
     // address stays valid here.
     let core = unsafe { &*(address as *const SessionCore) };
+    // A fork child has no owner that will call `finish`, so nobody has sealed
+    // its producers' active pages. Without this the writer sees no published
+    // page and the child's file keeps its records in memory instead of writing
+    // chunks (L2). `seal_page` publishes and wakes the writer itself.
+    let producers: Vec<usize> = core
+        .active_producers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    for producer in producers {
+        let producer = producer as *const Producer;
+        // SAFETY: producers are leaked for the process lifetime, and the writer
+        // only touches a page after `seal_page` publishes it.
+        unsafe { seal_page(&*producer) };
+    }
     let _ = core.phase.compare_exchange(
         PHASE_ARMED,
         PHASE_STOPPING,

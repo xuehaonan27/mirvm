@@ -2758,11 +2758,21 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   `activation_enter` 的同款序列：`producer_for_session` → `current_engine` → `open_page` →
   TLS 存储）。判据 trace 证实修复生效：子进程出现 `attach ... producer_null=false` 及随后的
   `record`/`recording`，修复前一条都没有。
-- **仍未兑现**：子进程的页**没有落盘**。`_exit` 直接退内核，跳过
-  `prepare_nonreturning_syscall`，页永不封存；改用 `std::process::exit` 正常退出后文件仍是
-  `.partial` 且 `chunks: 0`，说明 lingering 会话的封页/发布链路还有一段没接通。
-  这是 L2 剩下的最后一段。
-- **再次重估触发器**：任何需要"看子进程内部事件"的调试需求，先解上面的落盘链路。
+- **收口（同轮完成）**：子进程的页落盘缺在退出收尾——`drain_lingering_writer` 只停会话和唤醒
+  writer，**从不封存子进程 producer 的活动页**，因此没有任何 page 交给 writer，文件停在
+  `chunks: 0`。修法：收尾里先对 `active_producers` 逐个 `seal_page`（它自身就完成发布 + 唤醒），
+  再切 `PHASE_STOPPING` 并做有界等待。**实测收口**：父 `events-<pid>-0.mlog`（generation 0、
+  2 条记录、`status: clean`）与子 `events-<child pid>-1.mlog`（generation 1、4 条记录、
+  `status: clean`）并存；`_exit` 路径仍如实保留可恢复的 `.partial`。
+- **gate 工件**：新增 `runtime.telemetry` 套件（`tests/suites/runtime/telemetry.sh` + 探针
+  `tests/fixtures/telemetry_fork_child.rs`），已注册进 `fast` 与 `gate`；断言 8 条：父/子各有
+  自己的文件、父 generation 0 / 子 generation 1、子文件带子 pid、两侧各有自己的 committed
+  记录。`harness.truth` 的假入口白名单同步更新，自检保持 16/16。
+- **L2 状态**：**闭合**。服务线程登记、fork 基线自愈、代际身份、命名一致、fork 安全配方、
+  裸 `SYS_fork` 覆盖、builtin 边界 hook、子进程 producer 挂载、退出封页发布共九片全部落地，
+  证据为上述套件与 389 条单测。
+- **仍属后续（非 L2）**：采集目前只记录变参 `libc::syscall` 形态；`std::fs`/`Command` 走各自
+  builtin，不在该事件流内，完整 syscall 覆盖是设计 §2.3 的后续工作。
 
 ## 8. 尚未兑现或需要重新验证的架构承诺
 

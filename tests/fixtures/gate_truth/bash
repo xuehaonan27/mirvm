@@ -55,7 +55,7 @@ case "$script" in
     tests/suites/contracts/pack.sh|tests/suites/contracts/build_script_rerun.sh|\
     tests/suites/contracts/deps_image.sh|tests/suites/corpus/contract.sh|\
     tests/suites/runtime/c_unwind.sh|tests/suites/runtime/diagnostics.sh|\
-    tests/suites/runtime/jit_stats.sh|\
+    tests/suites/runtime/telemetry.sh|tests/suites/runtime/jit_stats.sh|\
     tests/suites/harness/truth.sh)
         echo "PASS fake $script"
         ;;
