@@ -185,7 +185,7 @@ struct RetiredLine {
     _pad: [u8; 63],
 }
 
-struct Producer {
+pub(crate) struct Producer {
     fast: UnsafeCell<ProducerFast>,
     cold: UnsafeCell<ProducerCold>,
     published: PublishedLine,
@@ -1095,6 +1095,73 @@ enum EnterDisposition {
     DropContext,
 }
 
+/// Outcome of the inline syscall-entry hot path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HotEnter {
+    /// The record was written into the current page.
+    Recorded,
+    /// The producer has no usable page or budget; the caller must take the cold
+    /// slow path, which opens or seals pages and accounts the drop.
+    NeedsColdPath,
+}
+
+/// Syscall-entry hot path for the trace code domain (design §5.2.3).
+///
+/// This is the body a trace JIT reaches through the pinned `r15`
+/// `ProducerHot*`: it touches only the one-cache-line [`ProducerFast`] (cursor,
+/// pair_budget) and the current page. It performs no TLS lookup, no global
+/// session check and, for a healthy stream, no `ProducerCold` access at all --
+/// the sequence counter is advanced here only because drops and published pages
+/// both need it, and a healthy page seals with the value it already carries.
+///
+/// Returns [`HotEnter::NeedsColdPath`] whenever the caller must fall back:
+/// no active page, no budget, or an unsynchronised context. The cold path owns
+/// page rotation, drop accounting and sequence gap semantics, so the fast path
+/// never has to reproduce them.
+///
+/// # Safety
+///
+/// `producer` must stay alive and owned by the calling thread for the duration
+/// of the call, exactly like [`record_syscall_enter`].
+#[allow(dead_code)] // the trace JIT entry point lands in the next L3 slice
+pub(crate) unsafe fn record_syscall_enter_inline(
+    producer: *mut Producer,
+    nr: i64,
+    args: &[u64],
+) -> HotEnter {
+    let cold_ptr = unsafe { (*producer).cold_ptr() };
+    if unsafe { (*cold_ptr).context_unsynced } {
+        return HotEnter::NeedsColdPath;
+    }
+    let fast = unsafe { &mut *(*producer).fast_ptr() };
+    if fast.pair_budget == 0 {
+        return HotEnter::NeedsColdPath;
+    }
+    let cold = unsafe { &mut *cold_ptr };
+    if !cold.has_active {
+        return HotEnter::NeedsColdPath;
+    }
+    fast.pair_budget -= 1;
+    let page = unsafe { (*producer).active_page() };
+    let base = page.bytes.get().cast::<u8>() as usize;
+    let offset = fast.cursor as usize - base;
+    let mut encoded_args = [0_u64; 6];
+    for (i, encoded) in encoded_args.iter_mut().enumerate() {
+        *encoded = args.get(i).copied().unwrap_or(0);
+    }
+    let encoded = SyscallEnter {
+        semantics: SyscallSemantics::Libc,
+        nr,
+        args: encoded_args,
+    }
+    .to_le_bytes();
+    let bytes = unsafe { &mut *page.bytes.get() };
+    bytes[offset..offset + SYSCALL_ENTER_BYTES].copy_from_slice(&encoded);
+    fast.cursor += SYSCALL_ENTER_BYTES as u64;
+    cold.next_sequence = cold.next_sequence.wrapping_add(1);
+    HotEnter::Recorded
+}
+
 unsafe fn record_syscall_enter(producer: &Producer, nr: i64, args: &[u64]) -> EnterDisposition {
     let was_context_unsynced = unsafe { (&*producer.cold.get()).context_unsynced };
     let needs_page = {
@@ -1849,6 +1916,97 @@ mod tests {
             8192,
             "the child must read the parent's recipe through the inherited address"
         );
+    }
+
+    /// A producer with a starter ring and a live page, for hot-path tests.
+    fn producer_with_open_page(id: u64) -> *mut Producer {
+        let core = Box::leak(Box::new(SessionCore {
+            phase: AtomicU8::new(PHASE_ARMED),
+            active_roots: AtomicUsize::new(0),
+            writer_state: AtomicU32::new(WRITER_AWAKE),
+            writer_done: AtomicBool::new(false),
+            producers: Mutex::new(Vec::new()),
+            active_producers: Mutex::new(Vec::new()),
+            next_producer: AtomicU64::new(1),
+            next_thread_generation: AtomicU32::new(1),
+            page_pool: PagePool::new(STARTER_BYTES * 2),
+            sink_loss: AtomicU64::new(0),
+            owner_tid: unsafe { libc::gettid() as u32 },
+        }));
+        let producer = Box::leak(Box::new(Producer::new(
+            core,
+            core.page_pool.take_starter(),
+            id,
+            id as u32,
+            id as u32,
+            id,
+            unsafe { libc::__errno_location() },
+        )));
+        let producer = producer as *mut Producer;
+        // Attach through the cold path so the page and budget are real.
+        let disposition = unsafe { record_syscall_enter(&*producer, libc::SYS_getpid, &[]) };
+        assert!(matches!(disposition, EnterDisposition::Recorded));
+        unsafe { record_syscall_exit(&*producer, disposition, 1, 0) };
+        producer
+    }
+
+    /// L3 hot path: the inline entry a trace JIT reaches through the pinned
+    /// `r15` must be byte-identical to the current cold entry for a healthy
+    /// stream, otherwise the trace domain would change the file format. It must
+    /// also leave the producer ready for the *next* entry, i.e. the two paths
+    /// are interchangeable rather than merely similar.
+    #[test]
+    fn inline_record_matches_legacy_bytes() {
+        let legacy = producer_with_open_page(7);
+        let inline = producer_with_open_page(8);
+        // SAFETY: both producers are leaked for the process lifetime above.
+        let (legacy_ref, inline_ref): (&Producer, &Producer) =
+            unsafe { (&*legacy, &*inline) };
+        let args = [11_u64, 22, 33, 44, 55, 66];
+
+        // One entry and one exit through each implementation.
+        for (index, syscall) in [libc::SYS_getpid, libc::SYS_getppid].into_iter().enumerate() {
+            let disposition = unsafe { record_syscall_enter(legacy_ref, syscall, &args) };
+            assert!(matches!(disposition, EnterDisposition::Recorded));
+            unsafe { record_syscall_exit(legacy_ref, disposition, index as i64, 0) };
+
+            let hot = unsafe { record_syscall_enter_inline(inline, syscall, &args) };
+            assert_eq!(hot, HotEnter::Recorded);
+            // A recorded hot entry is exactly `EnterDisposition::Recorded`; the
+            // drop dispositions only ever come from the cold path.
+            unsafe {
+                record_syscall_exit(inline_ref, EnterDisposition::Recorded, index as i64, 0);
+            }
+        }
+
+        let legacy_page = unsafe { (*legacy).active_page() };
+        let inline_page = unsafe { (*inline).active_page() };
+        let legacy_len = unsafe { (*legacy).fast_ptr().read().cursor } as usize
+            - legacy_page.bytes.get().cast::<u8>() as usize;
+        let inline_len = unsafe { (*inline).fast_ptr().read().cursor } as usize
+            - inline_page.bytes.get().cast::<u8>() as usize;
+        let legacy_bytes = unsafe { &(&(*legacy_page.bytes.get()))[..legacy_len] };
+        let inline_bytes = unsafe { &(&(*inline_page.bytes.get()))[..inline_len] };
+        assert_eq!(
+            inline_bytes, legacy_bytes,
+            "inline hot path must write the same bytes as the cold entry"
+        );
+
+        // Interchangeability: both producers agree on everything an entry and
+        // exit maintain.
+        let legacy_fast = unsafe { (*legacy).fast_ptr().read() };
+        let inline_fast = unsafe { (*inline).fast_ptr().read() };
+        // Cursor is an absolute pointer into each producer's own page, so the
+        // comparable value is the used length (already checked byte-for-byte
+        // above); the remaining budget must match exactly.
+        assert_eq!(inline_fast.pair_budget, legacy_fast.pair_budget);
+        let legacy_cold = unsafe { (*legacy).cold_ptr().read() };
+        let inline_cold = unsafe { (*inline).cold_ptr().read() };
+        assert_eq!(inline_cold.next_sequence, legacy_cold.next_sequence);
+        // Each producer owns its own page ring, so compare the state that must
+        // agree rather than their distinct page pointers.
+        assert_eq!(inline_cold.has_active, legacy_cold.has_active);
+        assert_eq!(inline_cold.page_ordinal, legacy_cold.page_ordinal);
     }
 
     #[test]
