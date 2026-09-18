@@ -570,10 +570,11 @@ fn rebuild_session_from_recipe() -> bool {
         return true;
     }
     let process_generation = claim_process_generation();
-    let output = recipe.directory.join(format!(
-        "events-{}-{process_generation}.mlog",
-        unsafe { libc::getpid() }
-    ));
+    let output = recipe
+        .directory
+        .join(format!("events-{}-{process_generation}.mlog", unsafe {
+            libc::getpid()
+        }));
     let attempt = || -> io::Result<()> {
         if std::fs::symlink_metadata(&output).is_ok() {
             return Err(io::Error::new(
@@ -1813,7 +1814,11 @@ mod tests {
             let payload = seen.to_le_bytes();
             let written =
                 unsafe { libc::write(pipe_fds[1], payload.as_ptr().cast(), payload.len()) };
-            let code = if written == payload.len() as isize { 0 } else { 3 };
+            let code = if written == payload.len() as isize {
+                0
+            } else {
+                3
+            };
             unsafe { libc::_exit(code) };
         }
         unsafe { libc::close(pipe_fds[1]) };
