@@ -2774,6 +2774,32 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
 - **仍属后续（非 L2）**：采集目前只记录变参 `libc::syscall` 形态；`std::fs`/`Command` 走各自
   builtin，不在该事件流内，完整 syscall 覆盖是设计 §2.3 的后续工作。
 
+### 7.61 2026-09-18：L3 起步——热路内核与 trace 域 ISA
+
+- **可行性先钉死**：设计 §5.2.3 要求 trace 域在 x86-64 用 `r15` 固定当前宿主线程的
+  `ProducerHot*`。查 cranelift 0.133.1 源码确认两条硬事实：① 该后端**钉的正是 R15**
+  （`isa/x64/inst/regs.rs` 的 `PINNED_REG = R15`，注释明确"must be the same as
+  Spidermonkey's HeapReg"）；② `set_pinned_reg`/`get_pinned_reg` 两个 CLIF 指令都有 x64
+  降低规则。所以"固定寄存器"不是近似方案，是这版后端直接支持的形状。
+- **第一片：热路内核**（`record_syscall_enter_inline`）。设计要的热路只碰一行 cache line 的
+  `ProducerFast`（cursor/pair_budget）+ 当前页；当前 `record_syscall_enter` 每记录都读写
+  `ProducerCold`。新函数在无活动页/无预算/上下文未同步时返回 `HotEnter::NeedsColdPath`，
+  页轮换、drop 记账、sequence gap 语义全部留在冷路。**正确性用字节对拍钉住**
+  （`inline_record_matches_legacy_bytes`）：同一序列分别走冷路与快路，断言页内容逐字节相同、
+  剩余预算相同、`next_sequence`/`page_ordinal` 相同。诊断中修掉自己两处错误断言（比了绝对
+  cursor 与页指针——各自拥有自己的 ring，本就不同），改比"必须一致的值"。
+- **第二片：trace 域 ISA**（`trace_domain_flags`/`trace_domain_isa`）。钉寄存器是 **ISA 级**
+  决定，因此 trace 域不能是 plain ISA 上的一个开关：plain 代码必须保持 `r15` 可分配、不携带
+  任何采集状态。新增独立构造函数把这条分离落在一个可测的地方；测试同时断言 trace 域
+  `enable_pinned_reg() == true` 且 plain 域为 `false`。
+- **本片未兑现（L3 主体）**：trace 编译器模块与独立发布槽/展开信息/地址映射；在最外层
+  guest activation 入口选择代码域；进入 trace 域时 `set_pinned_reg(producer)` 并让 syscall
+  站点经 `get_pinned_reg` 调热路；所有进出边界（含异常展开 landing pad）的 save/restore；
+  native 回调入口不相信传入寄存器、从 activation/TLS 重取。两个新函数暂带
+  `#[allow(dead_code)]` 并注明消费者是下一片。
+- **环境**：Mac 已装 `nightly-2026-07-02`（rustc/rustfmt 均为 `4c9d2bfe4`，与容器同版本），
+  本机 `cargo fmt` 自此为权威，不再需要"改完 scp 到容器再拉回"的往返。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT

@@ -260,7 +260,9 @@ x86 asm wrapper。
    producer 挂载、退出封页发布。端到端证据：`runtime.telemetry` 8/8——父
    `events-<pid>-0.mlog`（generation 0）与子 `events-<child pid>-1.mlog`（generation 1）各有
    自己的 committed 记录，`_exit` 路径如实保留可恢复 `.partial`。下一步是 L3 HostSyscall 直接
-   热路与 trace JIT `r15`，随后 L4 stateless inline-asm raw site；L4 完成前不宣称首个内部
+   热路与 trace JIT `r15`（**已起步 2026-09-18，§7.61**：热路内核
+   `record_syscall_enter_inline` 与 trace 域 ISA/`enable_pinned_reg` 已落地并各有单测；
+   trace 编译器模块、代码域选择与 `r15` 固定尚未接），随后 L4 stateless inline-asm raw site；L4 完成前不宣称首个内部
    syscall 纵切完成。注：当前只记录变参 `libc::syscall` 形态，`std::fs`/`Command` 走各自
    builtin，完整 syscall 覆盖属后续工作。
 
