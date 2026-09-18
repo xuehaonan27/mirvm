@@ -654,6 +654,11 @@ pub(crate) fn after_fork_child() {
     TLS_CACHED_PRODUCER.store(ptr::null_mut(), Ordering::Relaxed);
     TLS_CACHED_SESSION.store(ptr::null_mut(), Ordering::Relaxed);
     TLS_ACTIVATION_DEPTH.store(0, Ordering::Relaxed);
+    // The child kept the service-thread counter but none of the threads it
+    // counted; fork duplicates only the calling thread. Re-pinning each
+    // Engine's fork baseline happens lazily in the fork guard, which detects
+    // the new pid (`guest_thread_count_for`).
+    crate::os::thread::reset_service_threads_after_fork();
 }
 
 fn producer_for_session(core: *mut SessionCore, engine_id: u64) -> *mut Producer {
@@ -941,6 +946,11 @@ fn writer_main(
     partial_path: &Path,
     final_path: &Path,
 ) -> io::Result<CaptureSummary> {
+    // The guest cannot have created this thread, so the fork guard must not
+    // count it as a guest pthread (design §5.5/§6.3). Registration happens
+    // before the thread is reachable, and the guard rebuilds the baseline after
+    // fork.
+    let _service = crate::os::thread::ServiceThreadGuard::register();
     let fd = file.as_raw_fd();
     let mut sink_error: Option<io::Error> = None;
     let mut stats = WriterStats::default();

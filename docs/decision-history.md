@@ -2679,6 +2679,38 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   missing source 与 forwarded runner fake-binary 解析错误。plain/capture 的 stdout、stderr、
   exit 与 diagnostics 均逐字节断言，`runtime.diagnostics` 31/31 通过。
 
+### 7.59 2026-09-18：日志 L2 第一片——服务线程登记与 fork 基线自愈
+
+- **本片目标**：L2（fork 子代独立代际）的实现前置。设计 §5.5/§6.3 明确要求「实现必须由
+  MIRVM 的进程级服务生命周期自动登记自身线程，让 fork 守卫区分运行时服务线程和
+  guest/宿主并发线程；不得要求调用者避开 fork 或手调基线」。本片只做这个前置，代际重建
+  仍未实现。
+- **旧状态的实测缺陷**：`guest_spawned_threads` 直接把 `/proc/self/task` 计数与
+  guest main 启动时钉的基线比较。capture 会话在 guest 启动之后开启时，writer 线程会把
+  计数抬高 1，于是此后**任何** fork 都被误判为「guest 已多线程」并响亮拒绝。这不是
+  理论风险：basline 钉点（`interp/mod.rs:591/676`）与 session 建立点（`cli.rs` capture
+  命令）没有固定先后。
+- **本片机制**：新增 `ServiceThreadGuard`（`src/os/linux/thread.rs`）——register/drop
+  维护一个进程级原子计数；capture writer 在 `writer_main` 首行注册。fork 守卫改用它：
+  `guest_thread_count() = os_thread_count() - service_thread_count()`，用 `saturating_sub`
+  保证账目出错时只少算、不回绕。注册发生在 `std::thread::spawn` 返回之前，所以守卫
+  不可能观察到「线程已存在但未登记」；`pthread_create` 在持有 libc 全局锁时读
+  `/proc/self/task`，也不会与创建竞争。
+- **顺带修出的第二个缺陷**：fork 子进程继承父代的基线和 pid，但没有继承父代的服务线程。
+  子进程里服务计数归零、基线偏高，导致**子进程再 fork 会被误拒**。修法是基线自愈：
+  `Shared` 增加 `fork_baseline_pid`；`guest_thread_count_for(&Shared)` 发现 pid 与钉基线
+  时不一致就重算并重钉。只在钉点和这里写这两个字段，因此读-比较-写落在单线程的子进程里。
+  `after_fork_child()` 另外调用 `reset_service_threads_after_fork()` 把服务计数归零。
+- **闭合证据**：`cargo fmt --check` 干净；`cargo clippy --locked --all-features -D warnings`
+  0 错；`cargo test --locked --all-features` **386/386**（新增
+  `service_threads_are_excluded_from_the_guest_fork_baseline`）。该单测只断言与进程实际
+  线程数无关的不变量（换算函数的饱和行为、基线在服务线程退出后仍稳定、pid 变化触发重算），
+  因为 `cargo test` 并行执行，其它测试的 capture writer 也会注册服务线程。
+- **本片未兑现（仍属 L2）**：子进程**尚未**自动建立自己的 process generation、文件、页池、
+  writer、producer 和 errno pointer；`after_fork_child` 仍只把父代 producer 与缓存置空。
+  因此子代当前仍是 drop-only，采集在子进程里不可见——这是设计 §11 队列第 2 项的剩余部分，
+  完成后才能宣称 L2 闭合。P2 的 `mirvm profile capture` 仍未实现。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT
