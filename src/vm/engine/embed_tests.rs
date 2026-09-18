@@ -1061,6 +1061,14 @@ fn capture_session_records_automatic_host_syscall_rewrite() {
                     0,
                     "trace function was not JIT-published in its own domain"
                 );
+                // Trace compiled code is the only caller of the pinned syscall
+                // helper, so a non-zero count is what separates "the body ran
+                // through the register the boundary installed" from "the
+                // interpreter recorded the same bytes through TLS".
+                assert!(
+                    crate::vm::engine::jit::stat_value("syscall_trace") > 0,
+                    "the trace Engine never reached its pinned syscall site"
+                );
             }
             engine.wait_closed().unwrap();
         }
@@ -1106,6 +1114,9 @@ fn capture_session_records_automatic_host_syscall_rewrite() {
         .arg("vm::engine::embed_tests::capture_session_records_automatic_host_syscall_rewrite")
         .arg("--test-threads=1")
         .env(CHILD_ENV, &output)
+        // The child must count helper entries: the assertion that the trace
+        // domain reached its pinned syscall site reads that counter.
+        .env("MIRVM_JIT_STATS", "1")
         .spawn()
         .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

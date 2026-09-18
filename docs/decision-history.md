@@ -2821,6 +2821,72 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
 - **环境**：Mac 的 `nightly-2026-07-02` 与容器同版本（`4c9d2bfe4`），本机 `cargo fmt` 即权威，
   本轮已验证"本机 fmt + 容器 clippy/test"的分工稳定。
 
+### 7.63 2026-09-18：L3 第四片——trace 边界与钉住的 syscall 站点
+
+- **动机**：上一片之后 trace 域真的被执行了，但 `r15` 还是装饰：没有人写它、没有人读它，
+  `record_syscall_enter_inline` 在生产路径上不可达。本片把这条纵切接通，并把接线过程中
+  撞出的三个既有缺陷一起修掉。
+- **撞出的既有缺陷（三件，都不是本片新写的代码）**：
+  1. **编译码 PLT 恒读 plain 槽**：`translate.rs` 的调用点热路把 `shared.jit.slots_fast`
+     的地址烤进机器码，于是 trace 域的身体永远解析不到 trace 域的 callee——每个编译码
+     调用都退化成 c2i 冷路。修法 = `Translator` 带上本域，槽地址按 `slots_for(domain)` 取，
+     一个编译期内决议，plain 逐字节不变。
+  2. **`--no-default-features` 根本编不过**：`CodeDomain` 定义在 cranelift 门内的
+     `compiler.rs`，而 TSan harness 同源编译的 `state.rs`/`ctx.rs` 无条件引用它。把枚举
+     搬到 feature-free 的 `state.rs`（那里本来就不依赖 Cranelift），TSan 那条路径才重新成立。
+  3. **CI 的 clippy 命令在 HEAD 上是红的**：`--all-targets` 下 `capture.rs` 测试里两处
+     `claim_process_generation() as u64` 是冗余转换。这是上一片自己留下的，删除后
+     `cargo clippy --locked --all-targets --all-features -- -D warnings` 全绿。
+- **本片机制**：
+  - **边界蹦床**（`Compiler::define_trace_enter`）：trace 模块里物化一个
+    `mirvm_trace_enter(producer, body, args, ret)`，做
+    `save r15 → set_pinned_reg(producer) → try_call_indirect(body) → restore r15`，
+    **landing pad 同样 restore 后 `_Unwind_Resume`**。它就是设计要求的"进入 trace 域的边界
+    save/set/restore"，异常展开不再只照顾正常返回。地址在 worker 起手时（任何身体发布之前）
+    写进 `JitState.trace_enter`；蹦床建不出来时 `compile()` 拒绝产出 trace 身体——钉寄存器
+    不是一个身体可以缺省运行的优化。
+  - **分派只从这个边界进**：`call_guest` 在 trace 域下必须同时看到"本线程有 recorder"与
+    "蹦床已发布"，否则回解释器（解释器照旧走 TLS，仍是 oracle）。两者都在调用点现读，因为
+    蹦床由 JIT worker 异步发布——一开始快照一次会让最早的调用永远进不去。
+  - **syscall 站点**：trace 域里 `Builtin::HostSyscallTrace` 直接降成
+    `get_pinned_reg → mirvm_host_syscall_trace(producer, nr, args, n, &used)`，不再绕
+    `mirvm_call_builtin`。recorder 从寄存器拿，这条路径没有 TLS 查找、没有 session 检查；
+    syscall 本身、fork 守卫、exit/exit_group 交账、errno 语义全部复用与解释器同一本体
+    （`run_libc_syscall`，冷路/热路只差一个入口）。plain 域从不发这条 import。
+  - **fork 子代的钉寄存器**（接线时撞出的真 bug）：子代在父进程的编译码中间恢复，`r15` 里
+    还是**父进程的 recorder**；`after_fork_child()` 清的是 TLS，清不掉寄存器。于是子代把
+    自己的事件写进父进程遗留的页，自己的文件全空——默认阈值下子代走解释器所以没暴露，
+    `MIRVM_JIT_THRESHOLD=1 MIRVM_JIT_SYNC=1` 一开就现形。修法 = `run_libc_syscall` 在
+    子代重建标记置位时走 `rebuild_on_boundary()`（建会话 + 挂本线程 producer）并使用它，
+    把实际使用的 recorder 回传给助手，编译码在站点后 `set_pinned_reg(used)` 修好寄存器。
+    于是"子代第一次记录性 syscall"同时修好记录归属与后续所有站点的寄存器。
+- **闭合证据**：
+  - `trace_entry_pins_the_recorder_and_restores_it_even_when_it_unwinds`：一个只读钉寄存器的
+    探针体证明边界装了 pin；直接调用同一探针读宿主寄存器，证明正常路径与展开路径都还原。
+    **两处反向对照实做**：删掉 pad 的 restore → 断言 `!= PINNED` 失败；删掉正常路径的
+    restore → 紧随其后的宿主读断言失败。测试有区分力，不是恒真。
+  - `trace_domain_compiles_a_pinned_syscall_body`：trace 域的 syscall 身体必须发布出非零槽
+    （否则它会静默留解释，对拍照样全过而功能是空的）。
+  - `pinned_entry_records_without_thread_local_state`：TLS 为空时钉住的入口照样记录，
+    且字节与冷路逐字节相同——这是"热路不看 TLS"的直接断言。
+  - `capture_session_records_automatic_host_syscall_rewrite`：新增
+    `syscall_trace` 频度桶断言（该助手只有 trace 编译码会调），把"编译身体真的走了钉住站点"
+    和"记录字节与解释一致"分开证。
+  - `runtime.telemetry` 8 → **13 断言**：新增一段 `MIRVM_JIT_THRESHOLD=1 MIRVM_JIT_SYNC=1`
+    真机纵切，断言子代文件记录数与解释跑一致、代际仍为 1、且 `syscall_trace` 非零。这正是
+    上面那个 fork 子代缺陷的回归门（修前子代 0 记录）。
+  - `cargo test` **397/397**；`cargo fmt --check`（本机权威）干净；完整 CI clippy 命令干净。
+- **本片未兑现（仍是 L3 主体）**：raw site 的"页内内联写"（当前仍是助手本体内写，站点只有
+  `get_pinned_reg`；1B/§5.9 的 64B+24B 内联形状未做）；解释器**单独一条 trace 循环**（现在
+  仍是入口按域选择、解释器本体不分叉）；4→64 KiB 自适应页类与 P2 profile。
+- **如实记录的设计偏离**：设计说"代码域只在最外层 guest activation 入口选择一次"，当前实现
+  是**Engine 构造时（`try_from_module` 读 `capture::is_armed()`）冻结一次**。对
+  `mirvm capture`（会话先于 Engine）语义等价；对"先建 Engine、后开会话"的嵌入用法则不等价
+  ——该 Engine 永远是 plain。这条是 L3 收口前必须裁决的偏差，不是已完成能力。
+- **另一条如实记录**：钉寄存器只在 syscall 站点自愈。子代在 fork 之后、第一个 syscall 之前
+  若一直不碰 syscall 站点，寄存器里仍是父进程 recorder；这无害（除 syscall 站点外没有人读
+  它），但不是"任何进入 trace 域的路径都重设"的完整形态，1B 重开此项。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT

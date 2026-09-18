@@ -499,7 +499,28 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
         // Dispatch into the current activation's code domain. This is the single
         // point where a trace run stops consulting plain entries; the plain arm
         // borrows the historical fields, so the plain path is unchanged.
-        let domain_slots = jit.slots_for(crate::vm::engine::ctx::current_code_domain());
+        let domain = crate::vm::engine::ctx::current_code_domain();
+        let domain_slots = jit.slots_for(domain);
+        // A trace body addresses recorder state through the register the
+        // activation boundary pinned. It may therefore only be entered through
+        // that boundary: if this thread has no recorder, or the trace domain has
+        // not published its boundary yet (the JIT worker installs it
+        // asynchronously), the interpreter -- which records through TLS -- is the
+        // correct way to run the function, not a raw entry.
+        let enter_trace = |entry: u64| -> Option<(u64, u64)> {
+            if domain != crate::vm::engine::jit::CodeDomain::Trace {
+                return None;
+            }
+            let producer = crate::telemetry::capture::current_producer();
+            let trampoline = jit.trace_enter.load(std::sync::atomic::Ordering::Acquire);
+            if producer.is_null() || trampoline == 0 {
+                return None;
+            }
+            let mut ret = [0u64; 2];
+            Some(unsafe {
+                crate::vm::engine::jit::call_trace_body(trampoline, producer, entry, args, &mut ret)
+            })
+        };
         // If there's compiled code, then call it
         let mut entry =
             domain_slots.slots[func as usize].load(std::sync::atomic::Ordering::Acquire);
@@ -507,7 +528,13 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
             fail_abort(ctx);
         }
         if entry != 0 && entry != crate::vm::engine::jit::FAIL_SENTINEL {
-            return call_compiled(entry);
+            match enter_trace(entry) {
+                Some(ret) => return ret,
+                None if domain == crate::vm::engine::jit::CodeDomain::Plain => {
+                    return call_compiled(entry);
+                }
+                None => {}
+            }
         }
 
         // If function not compiled yet, collect statistics, may send compilation request
@@ -532,7 +559,13 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
                     fail_abort(ctx);
                 }
                 if entry != 0 {
-                    return call_compiled(entry);
+                    match enter_trace(entry) {
+                        Some(ret) => return ret,
+                        None if domain == crate::vm::engine::jit::CodeDomain::Plain => {
+                            return call_compiled(entry);
+                        }
+                        None => break,
+                    }
                 }
                 spins += 1;
                 if spins >= 1 << 28 {

@@ -797,36 +797,94 @@ pub(crate) fn activation_exit(token: ActivationToken, restored_engine_id: u64) {
 /// exactly the original syscall path; stopped trace-capable Engines therefore
 /// remain transparent.
 pub(crate) fn host_syscall(nr: i64, args: &[u64]) -> i64 {
+    let producer = TLS_ACTIVE_PRODUCER.load(Ordering::Relaxed);
+    unsafe { run_libc_syscall(producer, nr, args, SyscallEnterPath::Cold).0 }
+}
+
+/// The trace code domain's syscall entry (design §5.2.3). The producer is the
+/// one the activation boundary pinned, read from the register rather than from
+/// thread-local storage, so recording performs no TLS lookup and no global
+/// session check. Everything else -- the syscall itself, the fork guard, the
+/// exit/exit_group hand-over and the errno that accompanies a `-1` result -- is
+/// the same body the interpreter uses.
+///
+/// Returns the recorder the call actually used alongside the syscall result. A
+/// `fork` child's first recording syscall replaces the recorder it inherited,
+/// and only the trace domain needs that replacement told back to it, because
+/// only the trace domain keeps a copy of the recorder in a register.
+///
+/// # Safety
+///
+/// `producer` must be the calling thread's live recorder, or null.
+pub(crate) unsafe fn host_syscall_pinned(
+    producer: *mut Producer,
+    nr: i64,
+    args: &[u64],
+) -> (i64, *mut Producer) {
+    unsafe { run_libc_syscall(producer, nr, args, SyscallEnterPath::Inline) }
+}
+
+/// Where an entry record comes from. The cold entry owns page rotation, drop
+/// accounting and the sequence gap; the inline entry is the trace domain's hot
+/// path and hands back to the cold entry whenever it cannot write in place.
+#[derive(Clone, Copy)]
+enum SyscallEnterPath {
+    Cold,
+    Inline,
+}
+
+/// The syscall result together with the recorder that recorded it.
+unsafe fn run_libc_syscall(
+    producer: *mut Producer,
+    nr: i64,
+    args: &[u64],
+    path: SyscallEnterPath,
+) -> (i64, *mut Producer) {
+    let mut producer = producer;
     if CHILD_NEEDS_REBUILD.load(Ordering::Acquire) {
         // First ordinary boundary after a fork. `activation_enter` only runs
         // when an Engine is entered, and a fork child keeps running inside the
-        // Engine it forked in, so the rebuild belongs here instead.
-        rebuild_session_from_recipe();
+        // Engine it forked in, so the rebuild belongs here instead. The child
+        // also took a copy of the parent's recorder -- in TLS and, for the trace
+        // domain, in the pinned register -- so the caller has to be told which
+        // recorder this call really used.
+        rebuild_on_boundary();
+        let attached = TLS_ACTIVE_PRODUCER.load(Ordering::Relaxed);
+        if !attached.is_null() {
+            producer = attached;
+        }
     }
     // A real rt_sigreturn site belongs to the kernel signal frame and may not
     // touch the ordinary per-pthread page. The raw-site implementation in 1B
     // enforces the same bypass before it reaches this libc-oriented helper.
     if nr == libc::SYS_rt_sigreturn {
-        return crate::os::process::syscall(nr, args);
+        return (crate::os::process::syscall(nr, args), producer);
     }
-    let producer = TLS_ACTIVE_PRODUCER.load(Ordering::Relaxed);
     if producer.is_null() {
         let result = crate::os::process::syscall(nr, args);
         if nr == libc::SYS_fork && result == 0 {
             after_fork_child();
         }
-        return result;
+        return (result, producer);
     }
 
-    let disposition = unsafe { record_syscall_enter(&*producer, nr, args) };
+    let disposition = unsafe {
+        match path {
+            SyscallEnterPath::Cold => record_syscall_enter(&*producer, nr, args),
+            SyscallEnterPath::Inline => match record_syscall_enter_inline(producer, nr, args) {
+                HotEnter::Recorded => EnterDisposition::Recorded,
+                HotEnter::NeedsColdPath => record_syscall_enter(&*producer, nr, args),
+            },
+        }
+    };
     if nr == libc::SYS_exit || nr == libc::SYS_exit_group {
         unsafe { prepare_nonreturning_syscall(&*producer) };
-        return crate::os::process::syscall(nr, args);
+        return (crate::os::process::syscall(nr, args), producer);
     }
     let result = crate::os::process::syscall(nr, args);
     if nr == libc::SYS_fork && result == 0 {
         after_fork_child();
-        return result;
+        return (result, producer);
     }
     let errno = if result == -1 {
         unsafe { *((*(*producer).fast_ptr()).errno_ptr as *const i32) }
@@ -834,7 +892,14 @@ pub(crate) fn host_syscall(nr: i64, args: &[u64]) -> i64 {
         0
     };
     unsafe { record_syscall_exit(&*producer, disposition, result, errno) };
-    result
+    (result, producer)
+}
+
+/// The calling thread's recorder, or null when this thread is not recording.
+/// The activation boundary reads it once per entry to pin the trace domain's
+/// register; no per-event path may call it (design §5.2.3).
+pub(crate) fn current_producer() -> *mut Producer {
+    TLS_ACTIVE_PRODUCER.load(Ordering::Relaxed)
 }
 
 unsafe fn prepare_nonreturning_syscall(producer: &Producer) {
@@ -1123,7 +1188,6 @@ pub(crate) enum HotEnter {
 ///
 /// `producer` must stay alive and owned by the calling thread for the duration
 /// of the call, exactly like [`record_syscall_enter`].
-#[allow(dead_code)] // the trace JIT entry point lands in the next L3 slice
 pub(crate) unsafe fn record_syscall_enter_inline(
     producer: *mut Producer,
     nr: i64,
@@ -1950,6 +2014,50 @@ mod tests {
         producer
     }
 
+    /// L3 pinned entry: the trace domain reaches the recorder through the
+    /// register its boundary installed, never through thread-local state. This
+    /// is the property the pinned path exists for, so it is asserted directly:
+    /// with no producer in TLS at all, the pinned entry must record exactly the
+    /// bytes the cold entry records, and must return the real syscall result.
+    #[test]
+    fn pinned_entry_records_without_thread_local_state() {
+        let cold = producer_with_open_page(17);
+        let pinned = producer_with_open_page(18);
+        let args = [5_u64, 6, 7, 8, 9, 10];
+
+        let displaced = TLS_ACTIVE_PRODUCER.swap(ptr::null_mut(), Ordering::Relaxed);
+        assert!(
+            displaced.is_null(),
+            "the test harness must not already be recording on this thread"
+        );
+        let (result, used) = unsafe { host_syscall_pinned(pinned, libc::SYS_getpid, &args) };
+        assert_eq!(
+            result,
+            unsafe { libc::syscall(libc::SYS_getpid) } as i64,
+            "the pinned entry must still perform the syscall"
+        );
+        assert_eq!(
+            used, pinned,
+            "a pinned call with a usable recorder must report that same recorder back"
+        );
+
+        let disposition = unsafe { record_syscall_enter(&*cold, libc::SYS_getpid, &args) };
+        assert!(matches!(disposition, EnterDisposition::Recorded));
+        unsafe { record_syscall_exit(&*cold, disposition, result, 0) };
+
+        let cold_page = unsafe { (*cold).active_page() };
+        let pinned_page = unsafe { (*pinned).active_page() };
+        let cold_len = unsafe { (*cold).fast_ptr().read().cursor } as usize
+            - cold_page.bytes.get().cast::<u8>() as usize;
+        let pinned_len = unsafe { (*pinned).fast_ptr().read().cursor } as usize
+            - pinned_page.bytes.get().cast::<u8>() as usize;
+        assert_eq!(
+            unsafe { &(&(*pinned_page.bytes.get()))[..pinned_len] },
+            unsafe { &(&(*cold_page.bytes.get()))[..cold_len] },
+            "the pinned entry must write what the cold entry writes"
+        );
+    }
+
     /// L3 hot path: the inline entry a trace JIT reaches through the pinned
     /// `r15` must be byte-identical to the current cold entry for a healthy
     /// stream, otherwise the trace domain would change the file format. It must
@@ -2038,8 +2146,8 @@ mod tests {
         if pid == 0 {
             unsafe { libc::close(pipe_fds[0]) };
             // The child inherits the parent's generation plus the pending mark.
-            let first = claim_process_generation() as u64;
-            let second = claim_process_generation() as u64;
+            let first = claim_process_generation();
+            let second = claim_process_generation();
             let mut payload = [0_u8; 16];
             payload[..8].copy_from_slice(&first.to_le_bytes());
             payload[8..].copy_from_slice(&second.to_le_bytes());

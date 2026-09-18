@@ -62,7 +62,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 // inlined compiled code sites per activated ctx"—input data for T vs R retests. When disabled,
 // only one relaxed load, zero observation cost.
 pub(super) static STAT_ON: AtomicBool = AtomicBool::new(false);
-static STAT: [AtomicU64; 12] = [
+static STAT: [AtomicU64; 13] = [
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
@@ -76,7 +77,7 @@ static STAT: [AtomicU64; 12] = [
     AtomicU64::new(0),
     AtomicU64::new(0),
 ];
-const STAT_NAMES: [&str; 12] = [
+const STAT_NAMES: [&str; 13] = [
     "alloc",
     "tls_ref",
     "c2i",
@@ -89,6 +90,7 @@ const STAT_NAMES: [&str; 12] = [
     "volatile_store",
     "call_terminate",
     "bin128_ovf",
+    "syscall_trace",
 ];
 const S_ALLOC: usize = 0;
 const S_TLS: usize = 1;
@@ -102,12 +104,27 @@ const S_VLOAD: usize = 8;
 const S_VSTORE: usize = 9;
 const S_CTERM: usize = 10;
 const S_BIN128: usize = 11;
+/// The one bucket reachable only from trace-domain compiled code, so a non-zero
+/// count is direct evidence that the pinned syscall site executed rather than the
+/// interpreter's thread-local one.
+const S_SYSCALL_TRACE: usize = 12;
 
 #[inline(always)]
 fn stat(i: usize) {
     if STAT_ON.load(Ordering::Relaxed) {
         STAT[i].fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// Frequency of one helper bucket. A test that must prove a path ran -- rather
+/// than only that its effects match another path's -- reads it here.
+#[cfg(test)]
+pub(crate) fn stat_value(name: &str) -> u64 {
+    let index = STAT_NAMES
+        .iter()
+        .position(|n| *n == name)
+        .expect("unknown helper stat bucket");
+    STAT[index].load(Ordering::Relaxed)
 }
 
 extern "C" fn stat_dump() {
@@ -392,6 +409,33 @@ pub(super) extern "C-unwind" fn mirvm_alloc(
         ir::BuiltinCallRole::Normal,
     );
     lo
+}
+
+/// The trace code domain's `HostSyscall` site (design §5.2.3). Trace code reads
+/// the recorder from the register the boundary pinned and passes it here, so the
+/// recording path below never loads thread-local state and never checks whether
+/// a session is running. `args` points at the call's operands minus the syscall
+/// number, `n` counts them.
+///
+/// `used` receives the recorder the call actually recorded into. A `fork` child
+/// resumes inside the parent's compiled body with the parent's recorder still in
+/// the register, so its first recording syscall replaces that recorder and hands
+/// the replacement back; the caller writes it into the pinned register, which is
+/// what keeps the next syscall in that child from recording into the parent's
+/// page.
+pub(super) extern "C" fn mirvm_host_syscall_trace(
+    producer: u64,
+    nr: i64,
+    args: *const u64,
+    n: u64,
+    used: *mut u64,
+) -> i64 {
+    stat(S_SYSCALL_TRACE);
+    let av = unsafe { std::slice::from_raw_parts(args, n as usize) };
+    let (result, used_producer) =
+        unsafe { crate::telemetry::capture::host_syscall_pinned(producer as *mut _, nr, av) };
+    unsafe { *used = used_producer as u64 };
+    result
 }
 
 // T1-c Resume 终止子的宿主 unwinder 续传口（cg_clif Resume 同构）。
