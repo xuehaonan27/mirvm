@@ -130,7 +130,7 @@ fi
 if MIRVM_HOME="$TMP/cold-home" MIRVM_SYSROOT="$CONTRACT_SYSROOT" MIRVM_OFFLINE=1 \
     MIRVM_DEPS=self "$MIRVM" run "$APP" >"$TMP/cold.out" 2>"$TMP/cold.err"; then
     bad "cold-cache offline unexpectedly succeeded"
-elif rg -q 'locked commit .* not in local cache' "$TMP/cold.err"; then
+elif rg -q 'locked commit .* 不在本地缓存' "$TMP/cold.err"; then
     ok "cold-cache offline fails loudly"
 else
     bad "cold-cache offline error unclear"
@@ -169,7 +169,7 @@ CHECKOUT=$(find "$SELF_HOME/registry/git/checkouts" -path "*/$MIDDLE/core/src/li
 printf 'pub fn value() -> usize { 99 }\n' >"$CHECKOUT"
 if run_self "$APP" >"$TMP/tamper.out" 2>"$TMP/tamper.err"; then
     bad "Git checkout tampering unexpectedly succeeded"
-elif rg -q 'Git checkout content modified' "$TMP/tamper.err"; then
+elif rg -q 'Git checkout 内容被修改' "$TMP/tamper.err"; then
     ok "Git checkout tampering rejected"
 else
     bad "Git checkout tampering error unclear"
