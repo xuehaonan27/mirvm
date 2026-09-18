@@ -102,6 +102,10 @@ fn worker(shared: std::sync::Arc<Shared>, rx: Receiver<u32>) {
 /// ctx 恢复 = 边界 TLS attach（thunk 工厂同款，幂等）。
 struct Compiler<'a> {
     shared: &'a Shared,
+    /// Which domain's ISA this compiler builds with and which slot set it
+    /// publishes into. Plain borrows the historical slots, so its shape and cost
+    /// are unchanged.
+    domain: CodeDomain,
     module: JITModule,
     fbc: FunctionBuilderContext,
     c2i: ClifFuncId,
@@ -457,6 +461,7 @@ impl<'a> Compiler<'a> {
 
         Compiler {
             shared,
+            domain,
             module,
             fbc: FunctionBuilderContext::new(),
             c2i,
@@ -502,8 +507,8 @@ impl<'a> Compiler<'a> {
     /// 编译一个函数（过阈值请求）。拒绝/失败 = 静默维持解释。
     fn compile(&mut self, func: u32) {
         let jit = &self.shared.jit;
-        if jit.slots[func as usize].load(Ordering::Acquire) != 0 {
-            return; // 已编译
+        if jit.slots_for(self.domain).slots[func as usize].load(Ordering::Acquire) != 0 {
+            return; // 已编译（本域）
         }
         let Some(body) = self.shared.module.funcs.get(func as usize) else {
             return;
@@ -536,10 +541,10 @@ impl<'a> Compiler<'a> {
             }
         }
         for (c, cabi) in callees {
-            if jit.slots_fast[c as usize].load(Ordering::Acquire) == 0
+            if jit.slots_for(self.domain).slots_fast[c as usize].load(Ordering::Acquire) == 0
                 && let Some((tramp, ranges)) = self.define_c2i_trampoline(c, cabi)
             {
-                jit.publish_c2i_entry(c, tramp as u64, ranges);
+                jit.publish_c2i_entry_for(self.domain, c, tramp as u64, ranges);
             }
         }
 
@@ -587,7 +592,7 @@ impl<'a> Compiler<'a> {
         let packed = self.module.get_finalized_function(packed_id) as u64;
         // 发布序：先 fast（自递归/他人调我）后 packed（interp 才可能进入编译码）
         // 所有内存范围在这两个 Release store 前完成；perf-map 只由显式 stop 写出。
-        jit.publish_compiled_entries(func, fast, packed, ranges);
+        jit.publish_compiled_entries_for(self.domain, func, fast, packed, ranges);
     }
 
     /// Published fast entry. Keeping the check in a separate slot-free
@@ -661,7 +666,7 @@ impl<'a> Compiler<'a> {
                 "mirvm-jit-strict: f{func} ({}) meets compilation threshold but failed to be compiled",
                 self.shared.module.funcs[func as usize].name
             );
-            jit.slots[func as usize].store(FAIL_SENTINEL, Ordering::Release);
+            jit.slots_for(self.domain).slots[func as usize].store(FAIL_SENTINEL, Ordering::Release);
         }
     }
 
@@ -1085,10 +1090,24 @@ mod tests {
             });
             let mut compiler = Compiler::with_domain(&shared, domain);
             compiler.compile(0);
+            // Each domain publishes into its own slot set; the trace entry must
+            // not appear in the plain slots, which is the isolation the split
+            // exists for.
+            let own = shared.jit.slots_for(domain).slots_fast[0].load(Ordering::Acquire);
             assert_ne!(
-                shared.jit.slots_fast[0].load(Ordering::Acquire),
-                0,
-                "{domain:?} published no fast entry"
+                own, 0,
+                "{domain:?} published no fast entry in its own slots"
+            );
+            let other =
+                match domain {
+                    CodeDomain::Plain => shared.jit.slots_for(CodeDomain::Trace).slots_fast[0]
+                        .load(Ordering::Acquire),
+                    CodeDomain::Trace => shared.jit.slots_for(CodeDomain::Plain).slots_fast[0]
+                        .load(Ordering::Acquire),
+                };
+            assert_eq!(
+                other, 0,
+                "{domain:?} leaked an entry into the other domain's slots"
             );
         }
     }
