@@ -496,8 +496,13 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
                 shared.module.funcs[func as usize].name
             ))
         };
+        // Dispatch into the current activation's code domain. This is the single
+        // point where a trace run stops consulting plain entries; the plain arm
+        // borrows the historical fields, so the plain path is unchanged.
+        let domain_slots = jit.slots_for(crate::vm::engine::ctx::current_code_domain());
         // If there's compiled code, then call it
-        let mut entry = jit.slots[func as usize].load(std::sync::atomic::Ordering::Acquire);
+        let mut entry =
+            domain_slots.slots[func as usize].load(std::sync::atomic::Ordering::Acquire);
         if entry == crate::vm::engine::jit::FAIL_SENTINEL && jit.sync {
             fail_abort(ctx);
         }
@@ -521,7 +526,8 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
         if jit.sync && prev + 1 >= jit.threshold {
             let mut spins = 0u32;
             loop {
-                entry = jit.slots[func as usize].load(std::sync::atomic::Ordering::Acquire);
+                entry =
+                    domain_slots.slots[func as usize].load(std::sync::atomic::Ordering::Acquire);
                 if entry == crate::vm::engine::jit::FAIL_SENTINEL {
                     fail_abort(ctx);
                 }

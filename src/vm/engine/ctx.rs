@@ -1457,6 +1457,11 @@ struct ThreadContexts {
     /// Engine are strictly distinguished from the interrupted execution.
     current_activation: u64,
     next_activation: u64,
+    /// Code domain of the innermost activation on this thread, saved and restored
+    /// like `current_activation`. Dispatch reads it to pick the domain's slot set,
+    /// so a guest -> native -> guest chain keeps the domain it entered from and
+    /// never mixes slot sets mid-chain (design §5.2.3).
+    domain: super::jit::CodeDomain,
     /// Engine ids for every active entry on this host thread. Looking only at
     /// `current` loses an outer Engine across A -> native -> B nesting, which
     /// can make `wait_closed(A)` deadlock on its own lease and can reject a
@@ -1500,6 +1505,9 @@ impl ThreadContexts {
             current: std::ptr::null_mut(),
             current_activation: 0,
             next_activation: 1,
+            // Plain until an activation says otherwise: the default must not
+            // reserve a register or carry collection state.
+            domain: super::jit::CodeDomain::Plain,
             active_engines: Vec::new(),
             signal_mask: 0,
             close_signal_drain: false,
@@ -1570,6 +1578,21 @@ pub(crate) fn current_thread_is_in_final_tsd_pass(key: libc::pthread_key_t) -> b
             .final_tsd_cursor
             .is_some_and(|cursor| (*contexts).final_tsd_active || key < cursor)
     }
+}
+
+/// Code domain of the innermost activation on this host thread. Dispatch uses it
+/// to select the publish slots, which is the single point where a trace run stops
+/// consulting plain entries (design §5.2.3). Plain is the answer outside any
+/// activation, so the default path never reserves a register.
+pub(crate) fn current_code_domain() -> super::jit::CodeDomain {
+    let Some(ctx_key) = CTX_KEY.get().copied() else {
+        return super::jit::CodeDomain::Plain;
+    };
+    let contexts = unsafe { crate::os::thread::tls_get(ctx_key) } as *mut ThreadContexts;
+    if contexts.is_null() {
+        return super::jit::CodeDomain::Plain;
+    }
+    unsafe { (*contexts).domain }
 }
 
 pub(crate) fn current_thread_final_tsd_pass_is_armed() -> bool {
@@ -2016,6 +2039,10 @@ pub struct ActivationGuard {
     contexts: *mut ThreadContexts,
     previous: *mut Ctx,
     previous_activation: u64,
+    /// Domain of the activation this one nests inside, restored on exit so a
+    /// native callback returning to an outer guest chain resumes that chain's
+    /// domain rather than the callee's.
+    previous_domain: super::jit::CodeDomain,
     previous_signal_owner: u64,
     ctx: *mut Ctx,
     engine_id: u64,
@@ -2046,6 +2073,7 @@ impl Drop for ActivationGuard {
             (*self.contexts).active_engines.pop();
             (*self.contexts).current = self.previous;
             (*self.contexts).current_activation = self.previous_activation;
+            (*self.contexts).domain = self.previous_domain;
             drain_deferred = shared.control().is_closing()
                 && !(*self.contexts).active_engines.contains(&self.engine_id);
             // An EngineFault unwinds the handler activation before its outer
@@ -2114,6 +2142,7 @@ pub fn activate(shared: &Arc<Shared>) -> ActivationGuard {
         }
         let previous = (*contexts).current;
         let previous_activation = (*contexts).current_activation;
+        let previous_domain = (*contexts).domain;
         let activation = (*contexts).next_activation;
         if activation == 0 {
             eprintln!("mirvm[m4-engine]: Engine activation counter exhausted");
@@ -2124,10 +2153,12 @@ pub fn activate(shared: &Arc<Shared>) -> ActivationGuard {
         (*contexts).current_activation = activation;
         (*contexts).active_engines.push(shared.id);
         let previous_signal_owner = super::signal::activate_owner(shared.id);
-        // The code domain is decided here, at the outermost guest activation:
-        // it is the Engine's frozen choice, so nested activations (guest -> native
-        // -> guest) inherit the chain they entered from instead of re-deciding.
+        // The code domain of this activation is the Engine's frozen choice. It is
+        // installed for the duration of the activation so dispatch reads one
+        // value; a nested activation saves and restores it, which keeps a
+        // guest -> native -> guest chain in the domain it entered from.
         let domain = shared.domain;
+        (*contexts).domain = domain;
         let telemetry = if domain == super::jit::CodeDomain::Trace {
             (*contexts).telemetry_touched = true;
             Some(crate::telemetry::capture::activation_enter(shared.id))
@@ -2138,6 +2169,7 @@ pub fn activate(shared: &Arc<Shared>) -> ActivationGuard {
             contexts,
             previous,
             previous_activation,
+            previous_domain,
             previous_signal_owner,
             ctx,
             engine_id: shared.id,

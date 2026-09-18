@@ -1052,10 +1052,14 @@ fn capture_session_records_automatic_host_syscall_rewrite() {
                 "{mode} result changed under capture: {result:?}"
             );
             if jit {
+                // The Engine is in the trace domain, so its compiled body is
+                // published into the trace slots; dispatch picks that set on its
+                // own, which is what makes this a trace-domain run at all.
+                let domain = engine.shared().domain;
                 assert_ne!(
-                    engine.shared().jit.slots[0].load(Ordering::Acquire),
+                    engine.shared().jit.slots_for(domain).slots[0].load(Ordering::Acquire),
                     0,
-                    "trace function was not JIT-published"
+                    "trace function was not JIT-published in its own domain"
                 );
             }
             engine.wait_closed().unwrap();

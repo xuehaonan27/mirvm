@@ -45,9 +45,12 @@ pub fn start(shared: &std::sync::Arc<Shared>) {
     *shared.jit.queue.lock().unwrap() = Some(tx);
     // 编译失败/线程死亡 = 静默维持解释（语义面零依赖 JIT）
     let worker_shared = std::sync::Arc::clone(shared);
+    // The worker compiles for the Engine's frozen domain, so the code it
+    // publishes lands in the slot set dispatch will read for that domain.
+    let worker_domain = shared.domain;
     let worker = std::thread::Builder::new()
         .name("mirvm-jit".into())
-        .spawn(move || worker(worker_shared, rx));
+        .spawn(move || worker(worker_shared, rx, worker_domain));
     *shared.jit.worker.lock().unwrap() = worker.ok();
 }
 
@@ -61,9 +64,9 @@ pub fn stop(shared: &Shared) {
     }
 }
 
-fn worker(shared: std::sync::Arc<Shared>, rx: Receiver<u32>) {
+fn worker(shared: std::sync::Arc<Shared>, rx: Receiver<u32>, domain: CodeDomain) {
     let dbg = std::env::var_os("MIRVM_JIT_DEBUG").is_some();
-    let mut c = Compiler::new(&shared);
+    let mut c = Compiler::with_domain(&shared, domain);
     while let Ok(func) = rx.recv() {
         if shared.jit.stopping.load(Ordering::Acquire) {
             break;
@@ -174,7 +177,7 @@ pub(crate) enum CodeDomain {
     Trace,
 }
 
-/// Flags for the plain domain: byte-for-byte the configuration `Compiler::new`
+/// Flags for the plain domain: byte-for-byte the configuration the compiler
 /// has always used. Extracted so the two domains are visibly the same except for
 /// the one setting the trace domain adds.
 fn plain_domain_flags() -> settings::Flags {
@@ -235,10 +238,6 @@ pub(crate) fn trace_domain_isa() -> cranelift_codegen::isa::OwnedTargetIsa {
 }
 
 impl<'a> Compiler<'a> {
-    fn new(shared: &'a Shared) -> Self {
-        Self::with_domain(shared, CodeDomain::Plain)
-    }
-
     /// Build a compiler for an explicit code domain. The plain domain is what
     /// every production path uses today; the trace domain exists so the
     /// domain's semantics can be tested before it is wired to activation entry.
@@ -1187,7 +1186,7 @@ mod tests {
             funcs: vec![caller, callee].into(),
             ..ir::Module::default()
         });
-        let mut compiler = Compiler::new(&shared);
+        let mut compiler = Compiler::with_domain(&shared, CodeDomain::Plain);
 
         compiler.compile(0);
 
@@ -1230,7 +1229,7 @@ mod tests {
             .into(),
             ..ir::Module::default()
         });
-        let mut compiler = Compiler::new(&shared);
+        let mut compiler = Compiler::with_domain(&shared, CodeDomain::Plain);
         compiler.fail_after_symbol = Some(JitSymbolRole::FastBody);
 
         compiler.compile(0);
