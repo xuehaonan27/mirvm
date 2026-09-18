@@ -371,6 +371,11 @@ pub(crate) struct CaptureSession {
     core: &'static SessionCore,
     writer: Option<JoinHandle<io::Result<CaptureSummary>>>,
     owner_pid: libc::pid_t,
+    /// A `fork` child's own session outlives every handle in its process. Its
+    /// `Drop` only stops the session and hands the bounded drain to the exit
+    /// hook; the creator's `Drop` would otherwise look like the owner taking the
+    /// writer down.
+    lingering: bool,
 }
 
 impl CaptureSession {
@@ -393,54 +398,26 @@ impl CaptureSession {
             Err(error) => return Err(error),
         }
         let partial = partial_path(&options.output);
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&partial)?;
-        let owner_pid = unsafe { libc::getpid() };
-        let owner_tid = unsafe { libc::gettid() as u32 };
         let process_generation = match options.process_generation {
             Some(generation) => generation,
             None => claim_process_generation(),
         };
-        let offset = write_file_header(&mut file, owner_pid, process_generation)?;
-
-        let core = Box::leak(Box::new(SessionCore {
-            phase: AtomicU8::new(PHASE_ARMED),
-            active_roots: AtomicUsize::new(0),
-            writer_state: AtomicU32::new(WRITER_AWAKE),
-            writer_done: AtomicBool::new(false),
-            producers: Mutex::new(Vec::new()),
-            active_producers: Mutex::new(Vec::new()),
-            next_producer: AtomicU64::new(1),
-            next_thread_generation: AtomicU32::new(1),
-            page_pool: PagePool::new(options.page_budget_bytes),
-            sink_loss: AtomicU64::new(0),
-            owner_tid,
-        }));
-        let core_addr = core as *const SessionCore as usize;
-        let final_path = options.output;
-        // A fork child must be able to rebuild this session on its own, so the
-        // recipe is published before the session becomes visible (L2).
-        publish_rebuild_recipe(&final_path, options.page_budget_bytes);
-        let writer = match std::thread::Builder::new()
-            .name("mirvm-capture".into())
-            .spawn(move || {
-                // SAFETY: SessionCore is intentionally process-lifetime stable.
-                let core = unsafe { &*(core_addr as *const SessionCore) };
-                writer_main(core, file, offset, &partial, &final_path)
-            }) {
-            Ok(writer) => writer,
-            Err(error) => {
-                core.phase.store(PHASE_FINISHED, Ordering::Release);
-                return Err(error);
-            }
-        };
-        ACTIVE.store(core, Ordering::Release);
+        let (core, writer) = build_session_core(
+            file,
+            &partial,
+            options.output,
+            options.page_budget_bytes,
+            process_generation,
+        )?;
         Ok(Self {
             core,
             writer: Some(writer),
-            owner_pid,
+            owner_pid: unsafe { libc::getpid() },
+            lingering: false,
         })
     }
 
@@ -484,7 +461,185 @@ impl CaptureSession {
 impl Drop for CaptureSession {
     fn drop(&mut self) {
         self.request_stop();
+        if !self.lingering {
+            return;
+        }
+        // Nobody will call `finish` for a forked child's session; arrange for the
+        // process's exit hook to drain and publish it instead (design §6.2: no
+        // reliance on TLS destructors or on a caller remembering to finish).
+        arm_lingering_writer(self.core);
     }
+}
+
+/// A `fork` child may be inside a trace activation when it forks, so the rebuild
+/// is deferred to the activation boundary rather than run from the kernel-side
+/// hook, which may not open files or spawn threads.
+static CHILD_NEEDS_REBUILD: AtomicBool = AtomicBool::new(false);
+
+/// Session a `fork` child started for itself, waiting for the exit hook to drain
+/// it. 0 when there is nothing pending.
+static LINGERING_WRITER: AtomicUsize = AtomicUsize::new(0);
+
+/// Process-exit hook: stop a child's own session and wait (bounded) for its
+/// writer, so the file is published with a normal `End` instead of being left
+/// half-written. `_exit`/signal exits never run this, and the file then stays as
+/// `.partial`, which the decoder already repairs.
+extern "C" fn drain_lingering_writer() {
+    let address = LINGERING_WRITER.swap(0, Ordering::AcqRel);
+    if address == 0 {
+        return;
+    }
+    // SAFETY: the session core is leaked for the process lifetime, so the
+    // address stays valid here.
+    let core = unsafe { &*(address as *const SessionCore) };
+    let _ = core.phase.compare_exchange(
+        PHASE_ARMED,
+        PHASE_STOPPING,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
+    core.wake_writer();
+    let _ = wait_for_writer_publish(core, Duration::from_secs(5));
+}
+
+/// Hand a lingering session to the process exit hook.
+fn arm_lingering_writer(core: &'static SessionCore) {
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| unsafe {
+        libc::atexit(drain_lingering_writer);
+    });
+    LINGERING_WRITER.store(core as *const SessionCore as usize, Ordering::Release);
+}
+
+/// Build the session a `fork` child owes itself, from the parent's published
+/// recipe (L2, design §6.3). Runs only on an ordinary boundary: it opens files
+/// and spawns a thread, which the kernel-side fork hook may never do.
+///
+/// The child's first claim advances the generation it inherited, and that same
+/// value ends up in both the file name and the header.
+fn rebuild_session_from_recipe() -> bool {
+    if !CHILD_NEEDS_REBUILD.swap(false, Ordering::AcqRel) {
+        // Not a fork child, or the rebuild was already handled.
+        return false;
+    }
+    let Some(recipe) = pending_rebuild_recipe() else {
+        return false;
+    };
+    let _start = START_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !ACTIVE.load(Ordering::Acquire).is_null() {
+        // Another thread in this process already rebuilt, or a session was
+        // started explicitly; either way this process is covered.
+        return true;
+    }
+    let process_generation = claim_process_generation();
+    let output = recipe.directory.join(format!(
+        "events-{}-{process_generation}.mlog",
+        unsafe { libc::getpid() }
+    ));
+    let attempt = || -> io::Result<()> {
+        if std::fs::symlink_metadata(&output).is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "the child capture file already exists",
+            ));
+        }
+        let partial = partial_path(&output);
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&partial)?;
+        let (core, writer) = build_session_core(
+            file,
+            &partial,
+            output,
+            recipe.page_budget_bytes,
+            process_generation,
+        )?;
+        // The child's session has no owner that will call `finish`, so hand its
+        // writer to the process exit hook.
+        Box::leak(Box::new(CaptureSession {
+            core,
+            writer: Some(writer),
+            owner_pid: unsafe { libc::getpid() },
+            lingering: true,
+        }));
+        arm_lingering_writer(core);
+        Ok(())
+    };
+    match attempt() {
+        Ok(()) => true,
+        Err(_) => {
+            // Fails closed: recording stays off for this child instead of
+            // retrying on every activation.
+            clear_rebuild_recipe();
+            false
+        }
+    }
+}
+
+type CaptureWriterHandle = std::thread::JoinHandle<io::Result<CaptureSummary>>;
+
+/// Build one session's runtime state and start its writer. Shared by the normal
+/// start path and by a `fork` child rebuilding its own session, so both get the
+/// same page pool, writer protocol and publication order.
+fn build_session_core(
+    mut file: File,
+    partial: &Path,
+    final_path: PathBuf,
+    page_budget_bytes: usize,
+    process_generation: u64,
+) -> io::Result<(&'static SessionCore, CaptureWriterHandle)> {
+    let owner_pid = unsafe { libc::getpid() };
+    let owner_tid = unsafe { libc::gettid() as u32 };
+    let offset = write_file_header(&mut file, owner_pid, process_generation)?;
+    let core = Box::leak(Box::new(SessionCore {
+        phase: AtomicU8::new(PHASE_ARMED),
+        active_roots: AtomicUsize::new(0),
+        writer_state: AtomicU32::new(WRITER_AWAKE),
+        writer_done: AtomicBool::new(false),
+        producers: Mutex::new(Vec::new()),
+        active_producers: Mutex::new(Vec::new()),
+        next_producer: AtomicU64::new(1),
+        next_thread_generation: AtomicU32::new(1),
+        page_pool: PagePool::new(page_budget_bytes),
+        sink_loss: AtomicU64::new(0),
+        owner_tid,
+    }));
+    let core_addr = core as *const SessionCore as usize;
+    // A fork child must be able to rebuild this session on its own, so the
+    // recipe is published before the session becomes visible (L2).
+    publish_rebuild_recipe(&final_path, page_budget_bytes);
+    let partial = partial.to_path_buf();
+    let writer = match std::thread::Builder::new()
+        .name("mirvm-capture".into())
+        .spawn(move || {
+            // SAFETY: SessionCore is intentionally process-lifetime stable.
+            let core = unsafe { &*(core_addr as *const SessionCore) };
+            writer_main(core, file, offset, &partial, &final_path)
+        }) {
+        Ok(writer) => writer,
+        Err(error) => {
+            core.phase.store(PHASE_FINISHED, Ordering::Release);
+            return Err(error);
+        }
+    };
+    ACTIVE.store(core, Ordering::Release);
+    Ok((core, writer))
+}
+
+/// Wait for a writer to finish and publish, bounded by `timeout` so an
+/// unrecoverable I/O path cannot hang process exit. Returns whether the file
+/// reached its final name (a timed-out file stays as `.partial` and is
+/// recoverable).
+fn wait_for_writer_publish(core: &SessionCore, timeout: Duration) -> bool {
+    let started = Instant::now();
+    while !core.writer_done.load(Ordering::Acquire) {
+        if started.elapsed() >= timeout {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    true
 }
 
 #[derive(Clone, Copy)]
@@ -501,6 +656,11 @@ pub(crate) fn is_armed() -> bool {
 }
 
 pub(crate) fn activation_enter(engine_id: u64) -> ActivationToken {
+    if CHILD_NEEDS_REBUILD.load(Ordering::Acquire) {
+        // First ordinary boundary after a fork: build this process's own
+        // session before any producer tries to attach to a parent page.
+        rebuild_session_from_recipe();
+    }
     let active = TLS_ACTIVE_PRODUCER.load(Ordering::Relaxed);
     if !active.is_null() {
         TLS_ACTIVATION_DEPTH.fetch_add(1, Ordering::Relaxed);
@@ -583,6 +743,12 @@ pub(crate) fn activation_exit(token: ActivationToken, restored_engine_id: u64) {
 /// exactly the original syscall path; stopped trace-capable Engines therefore
 /// remain transparent.
 pub(crate) fn host_syscall(nr: i64, args: &[u64]) -> i64 {
+    if CHILD_NEEDS_REBUILD.load(Ordering::Acquire) {
+        // First ordinary boundary after a fork. `activation_enter` only runs
+        // when an Engine is entered, and a fork child keeps running inside the
+        // Engine it forked in, so the rebuild belongs here instead.
+        rebuild_session_from_recipe();
+    }
     // A real rt_sigreturn site belongs to the kernel signal frame and may not
     // touch the ordinary per-pthread page. The raw-site implementation in 1B
     // enforces the same bypass before it reaches this libc-oriented helper.
@@ -668,6 +834,16 @@ pub(crate) fn retire_current_thread() {
 /// The child has no copy of the writer thread. Only stable TLS/global atomic
 /// stores are permitted here; inherited locks, pages and file handles remain
 /// unreachable until an ordinary boundary creates a new process generation.
+/// Post-syscall hook for every path that can return in a `fork` child. The
+/// generic `SYS_fork` (raw inline-asm syscall through `mirvm_syscall_dispatch`)
+/// and the interpreter's HostFork builtin both end up here, which is what design
+/// §6.3 requires: coverage may not depend on which spelling the guest used.
+pub(crate) fn fork_child_guard(nr: i64, result: i64) {
+    if nr == libc::SYS_fork && result == 0 {
+        after_fork_child();
+    }
+}
+
 pub(crate) fn after_fork_child() {
     ACTIVE.store(ptr::null_mut(), Ordering::Release);
     TLS_ACTIVE_PRODUCER.store(ptr::null_mut(), Ordering::Relaxed);
@@ -682,6 +858,10 @@ pub(crate) fn after_fork_child() {
     // The inherited generation belongs to the parent; the child's first session
     // must take the next number so the two files cannot be read as one stream.
     reset_generation_after_fork();
+    // A rebuild needs an ordinary boundary: it opens files and spawns a thread,
+    // neither of which the kernel-side hook may do. Mark it and let the first
+    // trace activation carry it out.
+    CHILD_NEEDS_REBUILD.store(true, Ordering::Release);
 }
 
 fn producer_for_session(core: *mut SessionCore, engine_id: u64) -> *mut Producer {
