@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
 
+use super::compiler::CodeDomain;
+
 /// strict 失败哨兵（MIRVM_JIT_SYNC 验证模式）：可准入函数编译失败时
 /// worker 写入 slots——SYNC 等待方据此响亮 abort（区别于 0 = 未编译/
 /// 维持解释的正常值域；非 strict 模式绝不写入）。
@@ -392,12 +394,51 @@ pub fn jit_symbol_ranges() -> Vec<JitSymbolRange> {
 /// TODO: multiple guest threads may access to this structure, optimize
 /// access to this structure, e.g. take care of cache locality, or should
 /// it be made volatile.
+/// One code domain's publish slots (design §5.2.3). Plain and trace code must
+/// never share slots: a trace body assumes recorder state the plain domain does
+/// not have, so a slot written by one domain must be invisible to the other.
+#[allow(dead_code)] // dispatch selects through slots_for (next L3 slice); tests exercise it now
+pub(crate) struct DomainSlots {
+    pub(crate) domain: CodeDomain,
+    /// interp i2c face: FuncId -> packed entry address (0 = not compiled).
+    pub(crate) slots: Vec<AtomicU64>,
+    /// compiled cc->cc face: FuncId -> fast entry / c2i trampoline address.
+    pub(crate) slots_fast: Vec<AtomicU64>,
+}
+
+impl DomainSlots {
+    fn new(domain: CodeDomain, fn_count: usize) -> Self {
+        Self {
+            domain,
+            slots: (0..fn_count).map(|_| AtomicU64::new(0)).collect(),
+            slots_fast: (0..fn_count).map(|_| AtomicU64::new(0)).collect(),
+        }
+    }
+}
+
+/// The slot set dispatch serves for a domain. Exactly one place decides this, so
+/// plain and trace runs cannot accidentally read each other's entries. It borrows
+/// rather than copies: the plain side stays the historical `slots`/`slots_fast`
+/// fields instead of gaining a duplicate.
+#[derive(Clone, Copy)]
+#[allow(dead_code)] // see DomainSlots
+pub(crate) struct DomainSlotSet<'a> {
+    pub(crate) domain: CodeDomain,
+    pub(crate) slots: &'a [AtomicU64],
+    pub(crate) slots_fast: &'a [AtomicU64],
+}
+
 pub struct JitState {
     /// PLT 槽（interp i2c 面）：FuncId → packed 入口机器地址（0 = 未编译，走解释）。
     pub slots: Vec<AtomicU64>,
     /// PLT 槽（编译码 cc→cc 面）：FuncId → fast 入口 / c2i 蹦床地址（0 = 尚无）。
     /// 只有编译码的调用点读它（load + call_indirect）；interp 不消费。
     pub slots_fast: Vec<AtomicU64>,
+    /// The trace domain's own slot set. Kept beside the plain one so dispatch has
+    /// exactly one selection point; a trace activation does not consult the plain
+    /// slots and vice versa.
+    #[allow(dead_code)] // selected through slots_for (next L3 slice)
+    pub(crate) trace: DomainSlots,
     /// 调用计数（Relaxed；竞态丢计无害——只影响触发时刻，不影响语义）
     pub counters: Vec<AtomicU32>,
     /// `--jit off` / `MIRVM_JIT=off` ⇒ false：纯解释，计数也不做（对拍口径）
@@ -436,6 +477,7 @@ impl JitState {
         JitState {
             slots: (0..fn_count).map(|_| AtomicU64::new(0)).collect(),
             slots_fast: (0..fn_count).map(|_| AtomicU64::new(0)).collect(),
+            trace: DomainSlots::new(CodeDomain::Trace, fn_count),
             counters: (0..fn_count).map(|_| AtomicU32::new(0)).collect(),
             enabled,
             threshold,
@@ -445,6 +487,24 @@ impl JitState {
             stopping: AtomicBool::new(false),
             guest_code: RwLock::new(Vec::new()),
             symbol_ranges: RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Publish slots for a code domain. The plain arm returns the historical
+    /// fields, so the plain path keeps its exact shape and cost.
+    #[allow(dead_code)] // dispatch consumes this in the next L3 slice
+    pub(crate) fn slots_for(&self, domain: CodeDomain) -> DomainSlotSet<'_> {
+        match domain {
+            CodeDomain::Plain => DomainSlotSet {
+                domain,
+                slots: &self.slots,
+                slots_fast: &self.slots_fast,
+            },
+            CodeDomain::Trace => DomainSlotSet {
+                domain,
+                slots: &self.trace.slots,
+                slots_fast: &self.trace.slots_fast,
+            },
         }
     }
 
@@ -1034,5 +1094,29 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| error.contains("injected perf-map write failure"))
         );
+    }
+    /// L3: plain and trace publish slots must be fully independent. A trace body
+    /// assumes recorder state the plain domain does not have, so an address
+    /// published for one domain must never become visible to the other -- and the
+    /// selection itself must be a view, not a copy, so the plain path keeps the
+    /// exact fields it had before the domain split.
+    #[test]
+    fn plain_and_trace_publish_slots_are_independent() {
+        let jit = super::JitState::new(3);
+        let plain = jit.slots_for(super::CodeDomain::Plain);
+        let trace = jit.slots_for(super::CodeDomain::Trace);
+        assert_eq!(plain.slots.len(), 3);
+        assert_eq!(trace.slots.len(), 3);
+        assert_eq!(plain.domain, super::CodeDomain::Plain);
+        assert_eq!(trace.domain, super::CodeDomain::Trace);
+
+        // Publishing into the trace domain leaves the plain entries untouched.
+        trace.slots[1].store(0xabcd, Ordering::Release);
+        assert_eq!(jit.slots[1].load(Ordering::Acquire), 0);
+        assert_eq!(jit.trace.slots[1].load(Ordering::Acquire), 0xabcd);
+
+        // And the plain view still borrows the historical fields.
+        plain.slots[2].store(0x1234, Ordering::Release);
+        assert_eq!(jit.slots[2].load(Ordering::Acquire), 0x1234);
     }
 }
