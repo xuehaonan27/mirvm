@@ -511,6 +511,14 @@ fn arm_lingering_writer(core: &'static SessionCore) {
     LINGERING_WRITER.store(core as *const SessionCore as usize, Ordering::Release);
 }
 
+/// Ordinary-boundary hook for every host builtin. Cheap when no fork happened:
+/// one relaxed-ish atomic load.
+pub(crate) fn rebuild_on_boundary() {
+    if CHILD_NEEDS_REBUILD.load(Ordering::Acquire) {
+        rebuild_session_from_recipe();
+    }
+}
+
 /// Build the session a `fork` child owes itself, from the parent's published
 /// recipe (L2, design §6.3). Runs only on an ordinary boundary: it opens files
 /// and spawns a thread, which the kernel-side fork hook may never do.

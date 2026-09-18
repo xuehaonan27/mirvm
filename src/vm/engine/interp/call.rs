@@ -320,6 +320,12 @@ pub(crate) fn exec_builtin(
     role: ir::BuiltinCallRole,
 ) -> (u64, u64) {
     use crate::vm::engine::ir::Builtin;
+    // Every host builtin in both backends funnels through here, so this is the
+    // one ordinary boundary a `fork` child is guaranteed to reach. The rebuild
+    // must not run earlier: `after_fork_child` is kernel-side and may only
+    // store, while this runs with the allocator and thread machinery available
+    // (design §6.3, L2).
+    crate::telemetry::capture::rebuild_on_boundary();
     let _ = body; // 签名预留（两调用点诊断对称）；臂内不经 body（module 自 ctx 取）
     let module: &Module = unsafe { &(*(*ctx).shared).module };
     let a = |i: usize| av[i];
