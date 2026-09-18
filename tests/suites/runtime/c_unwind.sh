@@ -348,8 +348,8 @@ check_abort plain_c_nested_panic_indirect plain-c-nested-panic-indirect \
 # libffi only promises C/System calling conventions. Other ABIs must be explicitly rejected during lowering,
 # not dressed up as plain C via `unwind=false` and called speculatively.
 check_reject unsupported_outer_abi unsupported_outer_abi \
-    'foreign `cpp_no_throw` ABI is not supported by libffi passthrough'
+    'foreign `cpp_no_throw` ABI Rust 不支持 libffi 直通'
 check_reject unsupported_callback_abi unsupported_callback_abi \
-    'foreign `cpp_call_plain_c` callback .* ABI is not supported by thunk'
+    'foreign `cpp_call_plain_c` 回调 `unsafe fn\(\)` 的 ABI Rust 不支持 thunk'
 
 suite_summary runtime.c-unwind
