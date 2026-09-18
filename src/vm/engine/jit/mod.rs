@@ -35,7 +35,7 @@ mod lsda_probe;
 mod translate;
 
 #[cfg(feature = "cranelift")]
-pub(crate) use compiler::{start, stop};
+pub(crate) use compiler::{CodeDomain, start, stop};
 
 /// Register one complete `.eh_frame` section with the process unwinder.
 ///

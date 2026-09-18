@@ -26,7 +26,7 @@ use super::format::{
 };
 
 const PAGE_BYTES: usize = PAGE_BYTES_4K as usize;
-const STARTER_BYTES: usize = PAGE_BYTES * 2;
+pub(crate) const STARTER_BYTES: usize = PAGE_BYTES * 2;
 
 const PHASE_ARMED: u8 = 1;
 const PHASE_STOPPING: u8 = 2;

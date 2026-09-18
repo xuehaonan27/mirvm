@@ -1035,7 +1035,11 @@ fn capture_session_records_automatic_host_syscall_rewrite() {
                 host_syscall_module(Builtin::HostSyscall, libc::SYS_getpid, &[]),
                 jit,
             );
-            assert!(engine.shared().trace_capable, "{mode} Engine stayed plain");
+            assert_eq!(
+                engine.shared().domain,
+                crate::vm::engine::jit::CodeDomain::Trace,
+                "{mode} Engine stayed plain"
+            );
             engine_ids.push(engine.shared().id);
             let result = unsafe { run_export(&engine, "probe", &[]) };
             assert!(
