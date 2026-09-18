@@ -93,9 +93,13 @@ pub extern "C" fn mirvm_syscall_dispatch(nr: i64, args: *const u64) -> i64 {
             args[5]
         );
     }
-    syscall(nr, args)
+    let result = syscall(nr, args);
+    // A generic `SYS_fork` that returns here is a fork child. The interpreter's
+    // HostFork builtin notifies separately; both converge on the same hook so
+    // coverage does not depend on how the guest spelled the fork (design §6.3).
+    crate::telemetry::capture::fork_child_guard(nr, result);
+    result
 }
-
 /// syscall(2) 变参直通：全未列举 syscall 族的唯一通道。args 取前 6 参
 /// （x86_64 寄存器上限），超出忽略——与归并前 HostSyscall 臂的界一致。
 pub fn syscall(n: i64, args: &[u64]) -> i64 {
