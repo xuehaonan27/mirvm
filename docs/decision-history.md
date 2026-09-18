@@ -2701,15 +2701,22 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   `Shared` 增加 `fork_baseline_pid`；`guest_thread_count_for(&Shared)` 发现 pid 与钉基线
   时不一致就重算并重钉。只在钉点和这里写这两个字段，因此读-比较-写落在单线程的子进程里。
   `after_fork_child()` 另外调用 `reset_service_threads_after_fork()` 把服务计数归零。
+- **本片机制（二）代际身份**：`PROCESS_GENERATION` 是进程期稳定计数，`after_fork_child` 置
+  `GENERATION_PENDING`；子进程的**第一个**会话把代际推进一位，之后的会话（同一进程）复用该值。
+  文件头的 `process_generation` 不再硬编码 0，改由 `claim_process_generation()` 提供，因此父子
+  并发写出的文件不能在离线侧被读成同一条流（header 里同时带各自 pid）。
 - **闭合证据**：`cargo fmt --check` 干净；`cargo clippy --locked --all-features -D warnings`
-  0 错；`cargo test --locked --all-features` **386/386**（新增
-  `service_threads_are_excluded_from_the_guest_fork_baseline`）。该单测只断言与进程实际
-  线程数无关的不变量（换算函数的饱和行为、基线在服务线程退出后仍稳定、pid 变化触发重算），
-  因为 `cargo test` 并行执行，其它测试的 capture writer 也会注册服务线程。
-- **本片未兑现（仍属 L2）**：子进程**尚未**自动建立自己的 process generation、文件、页池、
-  writer、producer 和 errno pointer；`after_fork_child` 仍只把父代 producer 与缓存置空。
-  因此子代当前仍是 drop-only，采集在子进程里不可见——这是设计 §11 队列第 2 项的剩余部分，
-  完成后才能宣称 L2 闭合。P2 的 `mirvm profile capture` 仍未实现。
+  0 错；`cargo test --locked --all-features` **387/387**。新增两条单测：
+  `service_threads_are_excluded_from_the_guest_fork_baseline`（只断言与进程实际线程数无关的
+  不变量，因为并行测试的 capture writer 也会注册服务线程——第一版断言绝对值，在并行下确实
+  被抓出 flake，已改）与 `forked_child_advances_the_process_generation_once`（真 fork：子进程
+  第一个会话取下一号、第二个复用同号，且子进程的值不回流父进程）。后者顺带钉住一个事实：
+  测试必须走产品 fork 路径（`host_syscall(SYS_fork)`），裸 `libc::fork()` 不经过 MIRVM 包装，
+  因此不会触发 child hook。
+- **本片未兑现（仍属 L2）**：子进程**尚未**自动建立自己的文件、页池、writer、producer 和
+  errno pointer；`after_fork_child` 仍只把父代 producer 与缓存置空，子代恢复录制仍要等显式
+  新会话。因此子代当前仍是 drop-only，采集在子进程里不可见——这是设计 §11 队列第 2 项的
+  剩余部分，完成后才能宣称 L2 闭合。P2 的 `mirvm profile capture` 仍未实现。
 
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
