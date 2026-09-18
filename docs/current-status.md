@@ -253,8 +253,11 @@ x86 asm wrapper。
    再沿用“预留 v4”旧称；完成后再评审 D4 格式冻结。OS 级沙箱按
    维护者本轮裁定暂缓，不进入当前施工链。其余阶段边界和验收见
    [product-capabilities-plan.md](designs/product-capabilities-plan.md)。
-2. **日志采集主线（进行中）**：L1 固定 4 KiB 硬页池、自动救援和 retire 已完成；下一步
-   L2 fork child 独立代际 → L3 HostSyscall 直接热路与 trace JIT `r15` → L4 stateless
+2. **日志采集主线（进行中）**：L1 固定 4 KiB 硬页池、自动救援和 retire 已完成；L2 第一片
+   （实现前置）已完成 2026-09-18——MIRVM 服务线程自动登记，fork 守卫不再把 capture writer
+   误判成 guest pthread，并在 fork 子代按 pid 变化自愈基线（§7.59）。**L2 剩余**：子代自动
+   建立独立 process generation、文件、页池、writer、producer 与 errno pointer；完成前子代
+   仍是 drop-only。之后是 L3 HostSyscall 直接热路与 trace JIT `r15` → L4 stateless
    inline-asm raw site。
    L4 完成前不宣称首个内部 syscall 纵切完成。
 3. **profile 并行线**：P1 JIT 地址范围/perf-map 已完成；register 只改内存，

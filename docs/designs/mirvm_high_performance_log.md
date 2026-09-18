@@ -1060,9 +1060,13 @@ profile 还要比较：热点前 N 名是否稳定、样本丢失率、采样频
    writer 每轮每 producer 至多取一页的公平基线。零预算 attach、退线程归页后恢复、2,048
    个短命线程不积累扫描项、双 producer 公平顺序和 offer/retire 同轮所有权已有回归；真实
    arm session 的 publish/return/retire/rescue 链也已在 TSan 下零竞争告警。
-2. **L2——fork 子代自动重建（下一步）**：child hook 先把子进程切入 drop-only，普通边界
+2. **L2——fork 子代自动重建（下一步；第一片完成 2026-09-18）**：child hook 先把子进程切入 drop-only，普通边界
    自动创建新 process generation、文件、页池、writer、producer 和 errno pointer。覆盖
    `HostFork`、泛型 `SYS_fork` 和 native 再入；父子不得共享账本、fd 或页状态。
+   **已完成的第一片** = 本项的实现前置：MIRVM 服务线程自动登记（`ServiceThreadGuard`），
+   fork 守卫按 `os_thread_count − service_thread_count` 判定 guest 线程数，并对 fork 子代
+   做 pid 检测后的基线自愈（decision-history §7.59）。**剩余** = 子代代际、文件、页池、
+   writer、producer、errno pointer 的自动重建；在完成前子代仍是 drop-only，不得写成已有能力。
 3. **L3——真正的 HostSyscall 热路径（随后）**：稳定 `ProducerFast` ABI 和共用冷慢路，
    移除通用 JIT builtin helper 与健康 pair 的逐记录冷 sequence 更新；trace JIT 用 `r15`
    固定当前 producer，plain 代码继续保持零 telemetry/TLS 读取和零保留 `r15`。

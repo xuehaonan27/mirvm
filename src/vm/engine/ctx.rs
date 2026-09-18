@@ -42,6 +42,10 @@ pub struct Shared {
     /// slots after the execution count reaches zero.
     ctx_slots: Mutex<Vec<Weak<CtxSlot>>>,
     fork_baseline_threads: std::sync::atomic::AtomicUsize,
+    /// Process id that pinned `fork_baseline_threads`. A `fork` child keeps the
+    /// value but not the parent's service threads, so a mismatching pid marks a
+    /// baseline that must be recomputed before the guard can trust it.
+    fork_baseline_pid: std::sync::atomic::AtomicI32,
 }
 
 impl Shared {
@@ -69,6 +73,7 @@ impl Shared {
             control: Arc::new(EngineControl::new(id)),
             ctx_slots: Mutex::new(Vec::new()),
             fork_baseline_threads: std::sync::atomic::AtomicUsize::new(0),
+            fork_baseline_pid: std::sync::atomic::AtomicI32::new(0),
         })
     }
 
@@ -1570,32 +1575,77 @@ pub(crate) fn test_ctx_key() -> libc::pthread_key_t {
     CTX_KEY.get().copied().unwrap().as_raw()
 }
 
-/// Fork guard baseline (M5.2 D8f): OS thread count when guest main starts (`/proc/self/task`).
-/// At this moment = mirvm internal threads (main-in-join, guest-exec, allocator) + 0 guest-spawned
-/// threads. **Use the real OS thread count, not the Ctx count**: after pthread_create returns the
-/// new thread already exists, but its Ctx is not created until trampoline attach—Ctx counting has a
-/// TOCTOU window and would miss it. Fork is allowed only when the current thread count equals the
-/// baseline (guest has not spawned any threads).
+/// Fork guard baseline (M5.2 D8f): count of threads attributable to the guest when guest main
+/// starts. At this moment = mirvm internal threads (main-in-join, guest-exec, allocator) plus any
+/// MIRVM service thread already running (capture writer), and 0 guest-spawned threads.
+/// **Use the real OS thread count, not the Ctx count**: after pthread_create returns the new thread
+/// already exists, but its Ctx is not created until trampoline attach—Ctx counting has a TOCTOU
+/// window and would miss it. MIRVM's own service threads are subtracted because the guest can never
+/// have created them (design: mirvm_high_performance_log.md §5.5/§6.3).
+/// Fork is allowed only when the current guest-attributable count equals the baseline.
 /// Called at the guest main start point (run_main/run_export): pins the baseline for a single
 /// guest thread.
 pub fn set_fork_baseline(shared: &Shared) {
-    shared.fork_baseline_threads.store(
-        crate::os::thread::os_thread_count(),
-        std::sync::atomic::Ordering::SeqCst,
-    );
+    shared
+        .fork_baseline_threads
+        .store(guest_thread_count(), std::sync::atomic::Ordering::SeqCst);
+    shared
+        .fork_baseline_pid
+        .store(unsafe { libc::getpid() }, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// Whether the guest has spawned extra threads (HostFork guard): current OS thread count >
-/// baseline means yes. If the baseline is unset (0) or reading failed, conservatively treat it as
-/// "multi-threaded" (reject fork).
+/// Threads the guest is accountable for: real OS threads minus MIRVM service threads, saturating so
+/// an accounting error under-counts instead of wrapping. Returns 0 when `/proc/self/task` is
+/// unreadable, which the guard already treats as "cannot judge".
+pub(crate) fn guest_thread_count() -> usize {
+    guest_threads_from(
+        crate::os::thread::os_thread_count(),
+        crate::os::thread::service_thread_count(),
+    )
+}
+
+/// Pure form of the guest thread accounting, so the fork-guard arithmetic is
+/// testable without depending on how many threads the whole test process
+/// happens to have.
+fn guest_threads_from(raw: usize, service: usize) -> usize {
+    raw.saturating_sub(service)
+}
+
+/// Guest-attributable thread count for `shared`, repairing a baseline that a `fork` child inherited.
+/// `fork` keeps only the calling thread, so the child's service-thread count is zero while the
+/// inherited baseline still counted the parent's service threads. Without this repair a child that
+/// forks again would compare 1 thread against the parent's inflated baseline and see a
+/// multi-threaded guest. Both values are only written at pin points (guest main start) and here, so
+/// the read/compare/write below is confined to the single-threaded child.
+fn guest_thread_count_for(shared: &Shared) -> usize {
+    let raw = crate::os::thread::os_thread_count();
+    let service = crate::os::thread::service_thread_count();
+    let pid = unsafe { libc::getpid() };
+    if shared.fork_baseline_pid.load(std::sync::atomic::Ordering::SeqCst) != pid {
+        let base = guest_threads_from(raw, service);
+        shared
+            .fork_baseline_threads
+            .store(base, std::sync::atomic::Ordering::SeqCst);
+        shared
+            .fork_baseline_pid
+            .store(pid, std::sync::atomic::Ordering::SeqCst);
+        return base;
+    }
+    guest_threads_from(raw, service)
+}
+
+/// Whether the guest has spawned extra threads (HostFork guard): current guest-attributable thread
+/// count > baseline means yes. If the baseline is unset (0) or reading failed, conservatively treat
+/// it as "multi-threaded" (reject fork).
 /// # Safety
 ///
 /// `ctx` must be a `Ctx` whose host thread is still inside its active scope.
 pub unsafe fn guest_spawned_threads(ctx: *mut Ctx) -> bool {
-    let base = unsafe { &*(*ctx).shared }
+    let shared = unsafe { &*(*ctx).shared };
+    let base = shared
         .fork_baseline_threads
         .load(std::sync::atomic::Ordering::SeqCst);
-    base == 0 || crate::os::thread::os_thread_count() > base
+    base == 0 || guest_thread_count_for(shared) > base
 }
 
 /// Ctx teardown during the TSD phase: deferred for 3 rounds (re-hang → glibc appends rounds, max
@@ -2369,6 +2419,65 @@ mod tests {
                 .active_executions
                 .load(std::sync::atomic::Ordering::Acquire),
             0
+        );
+    }
+
+    /// L2 prerequisite: MIRVM's own service threads are invisible to the fork
+    /// guard. A baseline pinned while one is live must stay valid after it
+    /// exits, and a baseline inherited across a pid change must be repaired
+    /// instead of rejecting the child's later forks.
+    ///
+    /// Assertions are deliberately independent of the absolute OS thread count:
+    /// `cargo test` runs tests in parallel threads, so only differences within
+    /// one thread of control and self-consistency between the two functions are
+    /// meaningful.
+    #[test]
+    fn service_threads_are_excluded_from_the_guest_fork_baseline() {
+        use crate::os::thread::ServiceThreadGuard;
+
+        // The accounting itself, independent of the process thread count.
+        assert_eq!(super::guest_threads_from(5, 0), 5);
+        assert_eq!(super::guest_threads_from(5, 2), 3);
+        assert_eq!(
+            super::guest_threads_from(1, 4),
+            0,
+            "an over-counted service total must saturate, never wrap"
+        );
+
+        // The fork guard's subtraction must be the only consumer of the service
+        // count; nothing here asserts an absolute value because other tests run
+        // capture writers (hence service threads) in parallel.
+        let service = ServiceThreadGuard::register();
+
+        // A baseline pinned with a service thread live stays pinned afterwards,
+        // so the writer exiting cannot retroactively reject a fork.
+        let shared = Shared::new(context_export_module());
+        super::set_fork_baseline(&shared);
+        let pinned = shared
+            .fork_baseline_threads
+            .load(std::sync::atomic::Ordering::SeqCst);
+        drop(service);
+        assert_eq!(
+            shared
+                .fork_baseline_threads
+                .load(std::sync::atomic::Ordering::SeqCst),
+            pinned,
+            "service thread exit must not invalidate the pinned baseline"
+        );
+
+        shared
+            .fork_baseline_pid
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            super::guest_thread_count_for(&shared),
+            super::guest_thread_count()
+        );
+        assert_eq!(
+            shared
+                .fork_baseline_pid
+                .load(std::sync::atomic::Ordering::SeqCst),
+            unsafe { libc::getpid() },
+            "the repair must re-stamp the current pid"
         );
     }
 }
