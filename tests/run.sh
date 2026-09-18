@@ -161,6 +161,7 @@ run_fast_obligations() {
     run_suite contracts.build-script-rerun contracts.build-script-rerun
     run_suite runtime.c-unwind runtime.c-unwind
     run_suite runtime.diagnostics runtime.diagnostics
+    run_suite runtime.telemetry runtime.telemetry
     run_suite harness.truth harness.truth
 }
 
@@ -199,6 +200,7 @@ run_profile() {
             run_suite runtime.semantics runtime.semantics
             run_suite runtime.c-unwind runtime.c-unwind
             run_suite runtime.diagnostics runtime.diagnostics
+    run_suite runtime.telemetry runtime.telemetry
             run_suite runtime.jit-stats runtime.jit-stats
             run_suite performance.limits performance.limits
             run_suite harness.truth harness.truth

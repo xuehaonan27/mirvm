@@ -253,17 +253,17 @@ x86 asm wrapper。
    再沿用“预留 v4”旧称；完成后再评审 D4 格式冻结。OS 级沙箱按
    维护者本轮裁定暂缓，不进入当前施工链。其余阶段边界和验收见
    [product-capabilities-plan.md](designs/product-capabilities-plan.md)。
-2. **日志采集主线（进行中）**：L1 固定 4 KiB 硬页池、自动救援和 retire 已完成；L2 前两片
-   （实现前置）已完成 2026-09-18——MIRVM 服务线程自动登记，fork 守卫不再把 capture writer
-   误判成 guest pthread，并在 fork 子代按 pid 变化自愈基线；子代第一个会话取得独立
-   `process_generation`，写入文件头并进入事件文件名（父 `events-<pid>-0`、子
-   `events-<pid>-1`）；并已发布 fork 安全的**重建配方**（`RebuildRecipe`，子代读派生内存，
-   不需要锁或分配）。**L2 剩余**：接上重建的消费者——子代在普通边界建自己的文件、页池、
-   writer、producer 与 errno pointer，并为其孤儿会话实现进程退出收尾。**2026-09-18 复核（§7.60）**：子代会话的建立、代际与 pid、`.partial` 可解码均实测成立；
-且已修掉"子进程没有 producer、事件全部直通不记录"的缺陷（`rebuild_on_boundary` 重建后
-挂 producer）。**剩余**：子进程的页尚未落盘（`_exit` 跳过封页；正常退出也仍 `chunks: 0`）。
-另注：采集当前只记录变参 `libc::syscall` 形态，`std::fs`/`Command` 走各自 builtin、不在该
-事件流内，完整 syscall 覆盖是设计中的后续工作。
+2. **日志采集主线**：L1 固定 4 KiB 硬页池、自动救援和 retire 已完成；**L2 已闭合
+   （2026-09-18，§7.59/§7.60）**——MIRVM 服务线程自动登记（fork 守卫不再把 capture writer
+   误判成 guest pthread）、fork 子代基线自愈、子代独立 `process_generation`（同时进入文件头与
+   文件名）、fork 安全的 `RebuildRecipe`、裸 `SYS_fork` 覆盖、builtin 边界 hook、子进程
+   producer 挂载、退出封页发布。端到端证据：`runtime.telemetry` 8/8——父
+   `events-<pid>-0.mlog`（generation 0）与子 `events-<child pid>-1.mlog`（generation 1）各有
+   自己的 committed 记录，`_exit` 路径如实保留可恢复 `.partial`。下一步是 L3 HostSyscall 直接
+   热路与 trace JIT `r15`，随后 L4 stateless inline-asm raw site；L4 完成前不宣称首个内部
+   syscall 纵切完成。注：当前只记录变参 `libc::syscall` 形态，`std::fs`/`Command` 走各自
+   builtin，完整 syscall 覆盖属后续工作。
+
 3. **profile 并行线**：P1 JIT 地址范围/perf-map 已完成；register 只改内存，
    显式 stop 先在锁内切 `Inactive` 并快照，再在锁外 write/flush。P2 Linux perf capture
    现可与 L2–L4 并行，必须报告权限、lost samples 和缺映射，且不切 trace 代码域；
