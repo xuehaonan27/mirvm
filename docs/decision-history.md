@@ -2740,30 +2740,29 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   flush）。完成前子代仍是 drop-only，不得写成 L2 已闭合。P2 的 `mirvm profile capture`
   仍未实现。
 
-### 7.60 2026-09-18：L2 复核——子代重建已可用，但 capture 对真实程序零事件
+### 7.60 2026-09-18：L2 复核——子代重建可用，缺口收窄到"子进程事件落盘"
 
-- **推翻本会话早先的结论**：此前三轮我判定"子代 fork 后重建不可达"，那是因为用了自制探针。
-  改用仓库自己的 `demo/fork_exec_probe.rs`（真实 workload）跑 capture，**子代文件确实生成**：
-  `events-<parent pid>-0.mlog` 与 `events-<child pid>-1.mlog.partial` 并存，子文件的
-  `process_generation` = 1、pid = 子进程，`inspect` 的 issue 只有
-  `SessionEnd is absent; only committed chunks are trusted`（`status: unclean`）——这正是设计
-  对 `.partial` 的定义，不是缺陷。fork+exec 会在 publish 前替换进程映像、`_exit` 不跑退出钩子，
-  因此留下可恢复的 `.partial` 是该场景的正确形态。
-- **同一次复核暴露一个更基础的问题**：真实 `mirvm capture` 会话**收不到任何事件**。实测
-  `Command::new(...).spawn()/.output()`、`std::fs::read`、libc FFI `fork` 三种探针，父文件都是
-  `pages: 0 / records: 0`（672 字节 = 只有文件头与 End 块）；加临时探针确认
-  `Builtin::HostSyscallTrace` 在这些运行里**一次都没被调用**。直接原因清楚：带采集的
-  `Shared::new` 只把 `Builtin::HostSyscall` 节点改写成 `HostSyscallTrace`
-  （`ir.rs:2201`），而普通程序（含 `Command`）的 syscall 经 libc 直调，lower 后没有该节点，
-  改写无对象。设计 §2.3 声称 libc 包装是"现成挂载点"，但当前产品路径并未兑现。
-- **影响**：L2 的"子进程是否真的把事件落进自己的文件"**无法验收**，因为父进程也收不到事件；
-  日志采集主线的对外价值同样受限。这比子代重建更值得优先处理。
-- **已确认可用**：子代会话建立时机正确（fork 后回到普通边界）、代际与 pid 正确、文件可解码；
-  服务线程登记与 fork 守卫修复（§7.59）保持有效。
-- **未兑现**：①子代提交事件（被上面的缺口挡住，无法判定）；②capture 对 libc 直调 syscall 的
-  覆盖（`std::process`、`std::fs` 等普通路径）；③`Command` 在 glibc 上可能走
-  `posix_spawn`，需确认它是否构成第三条 spawn 入口。
-- **再次重估触发器**：出现任何需要"看真实程序 syscall 行为"的调试需求时，先解②。
+- **推翻本会话两次错误结论，均因探针不合法**：
+  ① 我曾判定"子代 fork 后重建不可达"——实际用仓库自己的 `demo/fork_exec_probe.rs` 跑 capture，
+  子文件确实生成（`events-<child pid>-1.mlog.partial`，`process_generation`=1、pid=子进程，
+  `inspect` 仅报 `SessionEnd is absent`，即设计对 `.partial` 的定义）。
+  ② 我又曾判定"capture 对真实程序零事件"——实际并不成立：带 `libc::syscall(...)` 的探针得到
+  `pages: 1 / records: 4`。真实边界是：**只有变参 `syscall` 符号被注册为记录型 builtin**
+  （`lower/builtins.rs:49` → `HostSyscall`），`std::fs`/`Command` 走各自的 builtin
+  （HostWrite/HostFork）**本就不属于这条事件流**。设计 §2.3 把"拦截一切 syscall"拆成多形态，
+  完整覆盖是后续工作，不是当前缺陷。
+- **本轮真正的修复**：`host_syscall` 只在 `TLS_ACTIVE_PRODUCER` 非空时记录，而该 producer 只在
+  `activation_enter`（进 Engine 时）创建；fork 子进程在**已进入的 Engine 内**继续跑，永远不再
+  进 Engine，于是永远没有 producer，子进程每个 syscall 都走"空 producer 直通"路径。
+  `rebuild_on_boundary` 现在在重建子会话后**当场挂上属于新会话的 producer**（复用
+  `activation_enter` 的同款序列：`producer_for_session` → `current_engine` → `open_page` →
+  TLS 存储）。判据 trace 证实修复生效：子进程出现 `attach ... producer_null=false` 及随后的
+  `record`/`recording`，修复前一条都没有。
+- **仍未兑现**：子进程的页**没有落盘**。`_exit` 直接退内核，跳过
+  `prepare_nonreturning_syscall`，页永不封存；改用 `std::process::exit` 正常退出后文件仍是
+  `.partial` 且 `chunks: 0`，说明 lingering 会话的封页/发布链路还有一段没接通。
+  这是 L2 剩下的最后一段。
+- **再次重估触发器**：任何需要"看子进程内部事件"的调试需求，先解上面的落盘链路。
 
 ## 8. 尚未兑现或需要重新验证的架构承诺
 

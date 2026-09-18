@@ -259,13 +259,11 @@ x86 asm wrapper。
    `process_generation`，写入文件头并进入事件文件名（父 `events-<pid>-0`、子
    `events-<pid>-1`）；并已发布 fork 安全的**重建配方**（`RebuildRecipe`，子代读派生内存，
    不需要锁或分配）。**L2 剩余**：接上重建的消费者——子代在普通边界建自己的文件、页池、
-   writer、producer 与 errno pointer，并为其孤儿会话实现进程退出收尾。**2026-09-18 复核
-   （§7.60）**：子代会话的建立、代际与 pid、`.partial` 可解码均已实测成立（用仓库自己的
-   `demo/fork_exec_probe.rs`）；但真实 `mirvm capture` 对普通程序（`Command`、`std::fs`、
-   libc FFI）**收不到任何事件**（`pages: 0 / records: 0`），因此"子进程是否真的落盘事件"
-   无法验收。该覆盖缺口比子代重建更基础，已单列。之后是 L3 HostSyscall 直接
-   热路与 trace JIT `r15` → L4 stateless inline-asm raw site。
-   L4 完成前不宣称首个内部 syscall 纵切完成。
+   writer、producer 与 errno pointer，并为其孤儿会话实现进程退出收尾。**2026-09-18 复核（§7.60）**：子代会话的建立、代际与 pid、`.partial` 可解码均实测成立；
+且已修掉"子进程没有 producer、事件全部直通不记录"的缺陷（`rebuild_on_boundary` 重建后
+挂 producer）。**剩余**：子进程的页尚未落盘（`_exit` 跳过封页；正常退出也仍 `chunks: 0`）。
+另注：采集当前只记录变参 `libc::syscall` 形态，`std::fs`/`Command` 走各自 builtin、不在该
+事件流内，完整 syscall 覆盖是设计中的后续工作。
 3. **profile 并行线**：P1 JIT 地址范围/perf-map 已完成；register 只改内存，
    显式 stop 先在锁内切 `Inactive` 并快照，再在锁外 write/flush。P2 Linux perf capture
    现可与 L2–L4 并行，必须报告权限、lost samples 和缺映射，且不切 trace 代码域；
