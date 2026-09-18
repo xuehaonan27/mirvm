@@ -1960,12 +1960,14 @@ mod tests {
         let legacy = producer_with_open_page(7);
         let inline = producer_with_open_page(8);
         // SAFETY: both producers are leaked for the process lifetime above.
-        let (legacy_ref, inline_ref): (&Producer, &Producer) =
-            unsafe { (&*legacy, &*inline) };
+        let (legacy_ref, inline_ref): (&Producer, &Producer) = unsafe { (&*legacy, &*inline) };
         let args = [11_u64, 22, 33, 44, 55, 66];
 
         // One entry and one exit through each implementation.
-        for (index, syscall) in [libc::SYS_getpid, libc::SYS_getppid].into_iter().enumerate() {
+        for (index, syscall) in [libc::SYS_getpid, libc::SYS_getppid]
+            .into_iter()
+            .enumerate()
+        {
             let disposition = unsafe { record_syscall_enter(legacy_ref, syscall, &args) };
             assert!(matches!(disposition, EnterDisposition::Recorded));
             unsafe { record_syscall_exit(legacy_ref, disposition, index as i64, 0) };
