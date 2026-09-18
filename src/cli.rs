@@ -1395,9 +1395,16 @@ fn run_vm_engine(
         return 70;
     }
     let mut capture = if let Some(directory) = CAPTURE_DIRECTORY.get() {
-        let output = directory.join(format!("events-{}-0.mlog", std::process::id()));
-        match crate::telemetry::CaptureSession::start(crate::telemetry::CaptureOptions::new(output))
-        {
+        // Name the file after the process generation the header will record, so
+        // a parent and its forked children are distinguishable before decoding.
+        let process_generation = crate::telemetry::capture::claim_process_generation();
+        let output = directory.join(format!(
+            "events-{}-{process_generation}.mlog",
+            std::process::id()
+        ));
+        let options = crate::telemetry::CaptureOptions::new(output)
+            .with_process_generation(process_generation);
+        match crate::telemetry::CaptureSession::start(options) {
             Ok(session) => Some(session),
             Err(error) => {
                 crate::diagnostics::control(format_args!(

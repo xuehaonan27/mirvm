@@ -13,16 +13,36 @@ pub(crate) mod tool;
 const INITIAL_PAGE_BUDGET_BYTES: usize = 64 << 20;
 
 /// Options for one process-wide capture session.
+///
+/// The fork generation is settled here, not inside the writer: callers that
+/// name the output after the generation (the CLI's
+/// `events-<pid>-<generation>.mlog`) must use the same value the file header
+/// records, so both come from one claim.
 #[derive(Clone, Debug)]
 pub struct CaptureOptions {
     output: PathBuf,
+    process_generation: u64,
 }
 
 impl CaptureOptions {
     pub fn new(output: impl AsRef<Path>) -> Self {
         Self {
             output: output.as_ref().to_path_buf(),
+            process_generation: capture::claim_process_generation(),
         }
+    }
+
+    /// Claim the generation, then hand it to the option that names the file, so
+    /// the name and the header agree.
+    pub fn with_process_generation(mut self, process_generation: u64) -> Self {
+        self.process_generation = process_generation;
+        self
+    }
+
+    /// Fork generation this session belongs to. A `fork` child takes a new
+    /// generation, so a parent and its children never share one.
+    pub fn process_generation(&self) -> u64 {
+        self.process_generation
     }
 }
 
@@ -56,10 +76,10 @@ pub struct CaptureSession {
 
 impl CaptureSession {
     pub fn start(options: CaptureOptions) -> io::Result<Self> {
-        capture::CaptureSession::start(capture::StartOptions::new(
-            options.output,
-            INITIAL_PAGE_BUDGET_BYTES,
-        ))
+        capture::CaptureSession::start(
+            capture::StartOptions::new(options.output, INITIAL_PAGE_BUDGET_BYTES)
+                .with_process_generation(options.process_generation),
+        )
         .map(|inner| Self { inner })
     }
 
