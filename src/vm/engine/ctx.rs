@@ -2473,16 +2473,20 @@ mod tests {
         shared
             .fork_baseline_pid
             .store(1, std::sync::atomic::Ordering::SeqCst);
+        let repaired = super::guest_thread_count_for(&shared);
+        let stamped = shared
+            .fork_baseline_pid
+            .load(std::sync::atomic::Ordering::SeqCst);
+        // Compare the stamp against the repair's own result rather than a second
+        // `getpid()`: a parallel test may `fork`, which would change the answer
+        // between the two reads.
+        assert_ne!(stamped, 1, "the repair must re-stamp the current pid");
         assert_eq!(
-            super::guest_thread_count_for(&shared),
-            super::guest_thread_count()
-        );
-        assert_eq!(
+            repaired,
             shared
-                .fork_baseline_pid
+                .fork_baseline_threads
                 .load(std::sync::atomic::Ordering::SeqCst),
-            unsafe { libc::getpid() },
-            "the repair must re-stamp the current pid"
+            "the repair must pin what it returned"
         );
     }
 }
