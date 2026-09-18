@@ -514,8 +514,38 @@ fn arm_lingering_writer(core: &'static SessionCore) {
 /// Ordinary-boundary hook for every host builtin. Cheap when no fork happened:
 /// one relaxed-ish atomic load.
 pub(crate) fn rebuild_on_boundary() {
-    if CHILD_NEEDS_REBUILD.load(Ordering::Acquire) {
-        rebuild_session_from_recipe();
+    if !CHILD_NEEDS_REBUILD.load(Ordering::Acquire) {
+        return;
+    }
+    // A fork child keeps running inside the Engine it forked in, so it never
+    // re-enters `activation_enter` and never gets a producer for its own
+    // session. Without one, `host_syscall` sees a null producer and passes the
+    // syscall through without recording, leaving the child's file empty. Attach
+    // the producer here, where allocation and locking are allowed.
+    let engine_id = {
+        let inherited = TLS_ACTIVE_PRODUCER.load(Ordering::Relaxed);
+        if inherited.is_null() {
+            0
+        } else {
+            unsafe { (*(*inherited).cold_ptr()).current_engine }
+        }
+    };
+    if !rebuild_session_from_recipe() {
+        return;
+    }
+    let core = ACTIVE.load(Ordering::Acquire);
+    if core.is_null() {
+        return;
+    }
+    let producer = producer_for_session(core, engine_id);
+    TLS_ACTIVE_PRODUCER.store(producer, Ordering::Relaxed);
+    TLS_ACTIVATION_DEPTH.store(1, Ordering::Relaxed);
+    if !producer.is_null() {
+        unsafe {
+            let producer = &*producer;
+            (*producer.cold_ptr()).current_engine = engine_id;
+            let _ = open_page(producer);
+        }
     }
 }
 
