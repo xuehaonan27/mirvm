@@ -1,34 +1,29 @@
-//! 冻结区：statics / 常量池 / fn-ptr 条目的真地址存储（M4.1 第 4 步）。
+//! Frozen arena: true-address storage for statics / const pools / fn-ptr entries (M4.1 step 4).
 //!
-//! 加载相物化（两遍法：先分后填破指针环，见 lower），发布后随 Module 只读共享——
-//! 例外是 static mut / 内部可变性：guest 可写（真实地址裸写，引擎不经手）。
-//! mmap RW 定容（GuestMemory/ByteRegion 同款）：地址终身稳定，重定位一次成真。
+//! Materialized in the load phase (two-pass: allocate first, then fill to break pointer cycles; see lower), then shared read-only with Module after publish—
+//! except for static mut / interior mutability: guest-writable (raw writes to real addresses, engine does not mediate).
+//! mmap RW with fixed capacity (same as GuestMemory/ByteRegion): addresses are stable for life; relocation becomes real once.
 //!
-//! M6 片2（D9b/D9c，L2 缓存）：**固定基址**。冻结区内的绝对地址（fn 条目、statics
-//! 互指、字节码内嵌 const、fn_addrs 键）跨进程稳定的前提是区基址稳定——JVM CDS 同
-//! 思路：映射到偏好地址，被占则响亮回退动态基址（本进程照常运行，仅不可缓存）。
-//! 快照 = used 前缀字节；恢复 = 固定基址重映射 + memcpy（必须在 guest 运行前，
-//! 快照语义 = lower 刚完成的洁净态；argv 等运行期输入不入快照，见 Module::finalize_entry_argv）。
+//! M6 slice 2 (D9b/D9c, L2 cache): **fixed base**. Absolute addresses inside the frozen arena (fn entries, statics pointing at each other, bytecode-inlined consts, fn_addrs keys) are stable across processes only if the arena base is stable—same idea as JVM CDS: map to the preferred address; if occupied, fall back loudly to a dynamic base (this process still runs, just not cacheable).
+//! Snapshot = the used-prefix bytes; restore = remap at fixed base + memcpy (must happen before guest runs; snapshot semantics = the clean state right after lower; runtime inputs such as argv are not in the snapshot; see Module::finalize_entry_argv).
 
-/// 冻结区容量（虚拟保留；触碰才占物理页）。
+/// Frozen arena capacity (virtually reserved; physical pages are allocated on touch).
 const FROZEN_CAP: usize = 256 << 20;
 
-/// 固定基址数值与白名单判据统归 `super::addrlayout`（共享常量层）；
-/// 选址论证与域模型见其模块头。
+/// Fixed-base numeric values and whitelist criteria live in `super::addrlayout` (shared constant layer); see that module header for address-selection rationale and domain model.
 use super::addrlayout::{BASE_IMAGE_FIXED_ADDR, DELTA_FIXED_ADDR, image_addr, is_valid_home};
 
 pub struct FrozenArena {
     base: *mut u8,
     used: usize,
     at_fixed_base: bool,
-    /// 本区所属域的固定基址（serde 自描述用；动态回退时仍记原意向域）。
+    /// The fixed base of this arena's home domain (used for serde self-description; the intended domain is still recorded when dynamically falling back).
     home: usize,
-    /// 本区内容被 lower 时使用的地址基址。动态实例的 `base` 会变化，链接基址不变。
+    /// The address base used when this arena's contents were lowered. The runtime `base` of a dynamic instance may change, but the link base does not.
     link_base: usize,
 }
 
-/// 可重复实例化的冻结区镜像。它只含洁净字节和这些字节所使用的链接时基址，
-/// 自身不占用客体地址空间。
+/// A reusable frozen-arena image that can be instantiated repeatedly. Contains only clean bytes and the link-time base those bytes use; it does not occupy guest address space itself.
 #[derive(Clone, Debug)]
 pub struct FrozenSnapshot {
     home: usize,
@@ -44,8 +39,7 @@ impl Default for FrozenArena {
 
 impl FrozenArena {
     fn new_at(home: usize) -> Self {
-        // 先试本域固定基址（缓存可用的前提）；被占（并发单测/罕见 ASLR 冲突）则
-        // 回退动态基址——语义不变，仅本进程产出不可序列化。
+        // Try this domain's fixed base first (prerequisite for cacheability); if occupied (concurrent tests / rare ASLR collision) fall back to a dynamic base—semantics unchanged, only this process's output is not serializable.
         if let Some(p) =
             crate::os::mem::map_fixed_preferred(home, FROZEN_CAP, crate::os::mem::Prot::RW)
         {
@@ -58,7 +52,7 @@ impl FrozenArena {
             };
         }
         let base = crate::os::mem::map_anon(FROZEN_CAP, crate::os::mem::Prot::RW, false);
-        assert!(!base.is_null(), "FrozenArena: mmap 失败");
+        assert!(!base.is_null(), "FrozenArena: mmap failed");
         FrozenArena {
             base,
             used: 0,
@@ -68,30 +62,29 @@ impl FrozenArena {
         }
     }
 
-    /// 程序模块（delta；无底座时=全量模块）的冻结区。
+    /// Frozen arena for the program module (delta; equals the full module when there is no base image).
     pub fn new() -> Self {
         Self::new_at(DELTA_FIXED_ADDR)
     }
 
-    /// 底座构建会话专用（S4）。
+    /// For base-image build sessions only (S4).
     pub fn new_base_image() -> Self {
         Self::new_at(BASE_IMAGE_FIXED_ADDR)
     }
 
-    /// 依赖 image 构建会话专用（S3′）：落第 k 个样条域。
+    /// For dependency-image build sessions only (S3'): placed in the k-th spline domain.
     pub fn new_image(k: usize) -> Self {
         Self::new_at(image_addr(k))
     }
 
-    /// 从快照恢复到指定域（L2 warm / 底座 / 依赖 image 装载）。固定基址被占即 Err——
-    /// 调用方按缓存 miss 处理，绝不在其他基址上重放快照（快照内嵌绝对地址，错基址=静默错值）。
+    /// Restore from a snapshot into the given domain (L2 warm / base image / dependency image load). Err if the fixed base is occupied—the caller treats this as a cache miss and never replays the snapshot at another base (snapshots embed absolute addresses; wrong base = silently wrong values).
     pub fn restore(snapshot: &[u8], home: usize) -> Result<Self, String> {
-        assert!(snapshot.len() <= FROZEN_CAP, "冻结区快照超容量");
-        assert!(is_valid_home(home), "冻结区恢复域非法: {home:#x}");
+        assert!(snapshot.len() <= FROZEN_CAP, "frozen snapshot exceeds arena capacity");
+        assert!(is_valid_home(home), "invalid frozen restore domain: {home:#x}");
         let Some(p) =
             crate::os::mem::map_fixed_preferred(home, FROZEN_CAP, crate::os::mem::Prot::RW)
         else {
-            return Err(format!("冻结区固定基址 {home:#x} 被占，无法恢复快照"));
+            return Err(format!("frozen fixed base {home:#x} is occupied; cannot restore snapshot"));
         };
         unsafe {
             std::ptr::copy_nonoverlapping(snapshot.as_ptr(), p, snapshot.len());
@@ -105,8 +98,7 @@ impl FrozenArena {
         })
     }
 
-    /// 从可复用镜像创建一个独立运行实例。每次都用匿名地址，避免同一 artifact
-    /// 的实例争抢固定映射；镜像中的绝对指针由 Module 的 FrozenReloc 随后修补。
+    /// Create a separate runnable instance from a reusable image. Uses an anonymous address each time so that instances of the same artifact do not contend for the fixed mapping; absolute pointers in the image are later patched by the Module's FrozenReloc.
     pub fn restore_dynamic(snapshot: &FrozenSnapshot) -> Result<Self, String> {
         if snapshot.bytes.len() > FROZEN_CAP {
             return Err("frozen snapshot exceeds arena capacity".into());
@@ -133,12 +125,12 @@ impl FrozenArena {
         })
     }
 
-    /// 是否落在固定基址（false ⇒ 本区地址跨进程不稳定，禁止序列化）。
+    /// Whether this arena is at its fixed base (false ⇒ addresses are not stable across processes; serialization is forbidden).
     pub fn at_fixed_base(&self) -> bool {
         self.at_fixed_base
     }
 
-    /// 本区所属域的固定基址（S4：装载方核对"底座真的在底座域"）。
+    /// The fixed base of this arena's home domain (S4: loader checks that the base image really is in the base-image domain).
     pub fn home(&self) -> usize {
         self.home
     }
@@ -155,7 +147,7 @@ impl FrozenArena {
         self.used as u64
     }
 
-    /// 固定地址 lower 产物转为不占映射的包镜像。
+    /// Turn a fixed-address lower product into a package image that does not occupy a mapping.
     pub fn to_snapshot(&self) -> Result<FrozenSnapshot, String> {
         if !self.at_fixed_base {
             return Err("frozen arena is not at its link-time base".into());
@@ -167,12 +159,12 @@ impl FrozenArena {
         })
     }
 
-    /// 快照 = used 前缀（洁净态责任在调用方：guest 运行前拍）。
+    /// Snapshot = the used prefix (clean-state responsibility lies with the caller: snapshot before the guest runs).
     pub fn snapshot(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.base, self.used) }
     }
 
-    /// bump 分配（按 align 对齐、清零），返回真地址。
+    /// Bump allocation (aligned to `align`, zeroed), returning the real address.
     pub fn alloc(&mut self, size: u64, align: u64) -> u64 {
         let align = align.max(1) as usize;
         let aligned = (self.base as usize + self.used + align - 1) & !(align - 1);
@@ -180,7 +172,7 @@ impl FrozenArena {
         let end = start + size as usize;
         assert!(
             end <= FROZEN_CAP,
-            "FrozenArena: 冻结区耗尽（{} MiB）",
+            "FrozenArena: frozen arena exhausted ({} MiB)",
             FROZEN_CAP >> 20
         );
         self.used = end;
@@ -204,14 +196,14 @@ impl std::fmt::Debug for FrozenArena {
     }
 }
 
-// L2/底座序列化：非固定基址的区含跨进程不稳定地址——序列化必须失败
-// （上层按"本次不缓存"处理），绝不产出会静默错值的快照。
-// S4 起**自描述**：(home, bytes) 元组——反序列化恢复到快照自带的域，
-// 域白名单在 restore 里断言（防伪造快照把区放到任意地址）。
+// L2/base serialization: an arena not at fixed base contains cross-process-unstable addresses—serialization must fail
+// (the upper layer treats this as "not cacheable this time"), never producing a snapshot with silently wrong values.
+// Since S4 it is **self-describing**: (home, bytes) tuple—deserialize restores to the domain carried in the snapshot,
+// and the domain whitelist is asserted in restore (forged snapshots cannot place the arena at arbitrary addresses).
 impl serde::Serialize for FrozenArena {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         if !self.at_fixed_base {
-            return Err(serde::ser::Error::custom("冻结区不在固定基址，不可序列化"));
+            return Err(serde::ser::Error::custom("frozen arena is not at fixed base, cannot serialize"));
         }
         use serde::ser::SerializeTuple;
         let mut t = serializer.serialize_tuple(2)?;
@@ -223,12 +215,12 @@ impl serde::Serialize for FrozenArena {
 
 impl<'de> serde::Deserialize<'de> for FrozenArena {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        // postcard bytes = 借用切片可用；用 &[u8] 承接避免中间拷贝
+        // postcard bytes = borrowable slice; use &[u8] to avoid an intermediate copy
         let (home, bytes): (u64, &[u8]) = serde::Deserialize::deserialize(deserializer)?;
         let home = usize::try_from(home).map_err(serde::de::Error::custom)?;
         if !is_valid_home(home) {
             return Err(serde::de::Error::custom(format!(
-                "冻结区快照域非法: {home:#x}"
+                "invalid frozen snapshot domain: {home:#x}"
             )));
         }
         FrozenArena::restore(bytes, home).map_err(serde::de::Error::custom)
@@ -270,8 +262,7 @@ impl<'de> serde::Deserialize<'de> for FrozenSnapshot {
     }
 }
 
-/// serialize_bytes 的元组内嵌形态：Serialize for &[u8] 走序列 u8 编码（postcard 下
-/// 逐字节 varint，体积/速度都劣化）——包一层强制 bytes 通道。
+/// Tuple-embedded form of serialize_bytes: Serialize for &[u8] would serialize each u8 (varint per byte under postcard, worse size/speed)—wrap it to force the bytes channel.
 mod serde_bytes_shim {
     pub struct Bytes<'a>(pub &'a [u8]);
     impl serde::Serialize for Bytes<'_> {
@@ -281,8 +272,8 @@ mod serde_bytes_shim {
     }
 }
 
-// SAFETY: 发布后只读（static mut 的 guest 写走裸地址，不经 &self）；
-// 区随 Module 生命周期共享给各执行线程（C8 发布后只读纪律）。
+// SAFETY: read-only after publish (static mut writes go through raw addresses, not &self);
+// the arena is shared across execution threads for the Module's lifetime (C8 post-publish read-only discipline).
 unsafe impl Send for FrozenArena {}
 unsafe impl Sync for FrozenArena {}
 
@@ -298,7 +289,7 @@ mod tests {
 
     static FIXED_ADDRESS_TEST: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-    /// S3′ 样条域白名单：底座/delta/对齐样条合法，越界/未对齐/杂散非法。
+    /// S3' spline-domain whitelist: base image / delta / aligned splines are valid; out-of-bounds / unaligned / stray addresses are invalid.
     #[test]
     fn image_spline_home_validation() {
         assert!(is_valid_home(BASE_IMAGE_FIXED_ADDR));
@@ -306,37 +297,37 @@ mod tests {
         assert!(is_valid_home(image_addr(0)));
         assert!(is_valid_home(image_addr(1)));
         assert!(is_valid_home(image_addr(IMAGE_SPLINE_COUNT - 1)));
-        // 未对齐（样条中点）非法
+        // unaligned (mid-spline) is invalid
         assert!(!is_valid_home(IMAGE_SPLINE_BASE + IMAGE_SPLINE_STEP / 2));
-        // 越界非法
+        // out-of-bounds is invalid
         assert!(!is_valid_home(
             IMAGE_SPLINE_BASE + IMAGE_SPLINE_COUNT * IMAGE_SPLINE_STEP
         ));
-        // 杂散地址非法（伪造快照防线）
+        // stray address is invalid (forged-snapshot defense)
         assert!(!is_valid_home(0x1234_5678));
         assert!(!is_valid_home(0x7f00_0000_0000));
-        // 样条不触 mmap 自顶向下带
+        // splines do not touch the mmap top-down region
         assert!(image_addr(IMAGE_SPLINE_COUNT - 1) < 0x7f00_0000_0000);
-        // 各域两两不交叠（FROZEN_CAP 远小于步距）
+        // domains are pairwise non-overlapping (FROZEN_CAP is far smaller than the step)
         assert!(image_addr(0) > DELTA_FIXED_ADDR);
         assert!(image_addr(1) - image_addr(0) == IMAGE_SPLINE_STEP);
     }
 
-    /// 固定基址快照/恢复往返：地址值稳定、内容逐字节保真、恢复后可继续分配。
+    /// Fixed-base snapshot/restore roundtrip: address values are stable, contents are byte-for-byte faithful, and allocation can continue after restore.
     #[test]
     fn snapshot_restore_roundtrip_preserves_addresses_and_bytes() {
         let _fixed_address = FIXED_ADDRESS_TEST.lock().unwrap();
         let mut a = FrozenArena::new();
         if !a.at_fixed_base() {
-            // 并发单测抢占了固定基址——本测试需要独占，让位（其余断言无意义）
-            eprintln!("skip: 固定基址被占");
+            // Concurrent tests took the fixed base—this test needs exclusive access, so skip (remaining assertions would be meaningless)
+            eprintln!("skip: fixed base occupied");
             return;
         }
         let p = a.alloc(16, 8);
         let q = a.alloc(9, 1);
         unsafe {
             (p as *mut u64).write(0xdead_beef_cafe_f00d);
-            // 冻结区典型形态：内嵌指向区内的绝对指针
+            // Typical frozen-arena shape: an embedded absolute pointer into the arena
             ((p + 8) as *mut u64).write(q);
             std::ptr::copy_nonoverlapping(
                 c"mirvm-l2".to_bytes_with_nul().as_ptr(),
@@ -347,32 +338,31 @@ mod tests {
         let snap = a.snapshot().to_vec();
         drop(a);
 
-        let b = FrozenArena::restore(&snap, DELTA_FIXED_ADDR).expect("恢复失败");
+        let b = FrozenArena::restore(&snap, DELTA_FIXED_ADDR).expect("restore failed");
         assert!(b.at_fixed_base());
         unsafe {
             assert_eq!((p as *const u64).read(), 0xdead_beef_cafe_f00d);
             let q2 = ((p + 8) as *const u64).read();
-            assert_eq!(q2, q, "内嵌绝对指针必须逐位稳定");
+            assert_eq!(q2, q, "embedded absolute pointer must be bit-stable");
             assert_eq!(
                 std::slice::from_raw_parts(q2 as *const u8, 9),
                 b"mirvm-l2\0"
             );
         }
-        // 恢复后追加分配（argv 终结化走此路径）
+        // Append allocation after restore (argv finalization uses this path)
         let mut b = b;
         let r = b.alloc(8, 8);
-        assert!(r >= q + 9, "追加分配必须落在快照之后");
+        assert!(r >= q + 9, "appended allocation must lie after the snapshot");
     }
 
-    /// S4 双域：底座区与 delta 区同时在场，跨域绝对指针（delta→base 方向，
-    /// 底座查找命中后的常见形态）恢复后逐位稳定。
+    /// S4 dual-domain: base-image and delta arenas coexist; cross-domain absolute pointers (delta→base direction, the common shape after a base lookup hits) are bit-stable after restore.
     #[test]
     fn dual_domain_arenas_coexist_and_cross_references_survive_restore() {
         let _fixed_address = FIXED_ADDRESS_TEST.lock().unwrap();
         let mut base = FrozenArena::new_base_image();
         let mut delta = FrozenArena::new();
         if !base.at_fixed_base() || !delta.at_fixed_base() {
-            eprintln!("skip: 固定基址被占");
+            eprintln!("skip: fixed base occupied");
             return;
         }
         assert_eq!(
@@ -381,7 +371,7 @@ mod tests {
         );
         let b_cell = base.alloc(8, 8);
         unsafe { (b_cell as *mut u64).write(0x42) };
-        // delta 内嵌指向底座的绝对指针（fn 条目/静态去重的形态）
+        // delta embeds an absolute pointer into the base arena (shape of fn entries / static deduplication)
         let d_ptr = delta.alloc(8, 8);
         unsafe { (d_ptr as *mut u64).write(b_cell) };
 
@@ -390,12 +380,12 @@ mod tests {
         drop(delta);
         drop(base);
 
-        let _base2 = FrozenArena::restore(&base_snap, BASE_IMAGE_FIXED_ADDR).expect("底座恢复");
-        let _delta2 = FrozenArena::restore(&delta_snap, DELTA_FIXED_ADDR).expect("delta 恢复");
+        let _base2 = FrozenArena::restore(&base_snap, BASE_IMAGE_FIXED_ADDR).expect("base image restore failed");
+        let _delta2 = FrozenArena::restore(&delta_snap, DELTA_FIXED_ADDR).expect("delta restore failed");
         unsafe {
             let cross = (d_ptr as *const u64).read();
-            assert_eq!(cross, b_cell, "跨域指针逐位稳定");
-            assert_eq!((cross as *const u64).read(), 0x42, "经跨域指针可读底座内容");
+            assert_eq!(cross, b_cell, "cross-domain pointer is bit-stable");
+            assert_eq!((cross as *const u64).read(), 0x42, "base content is readable through the cross-domain pointer");
         }
     }
 }

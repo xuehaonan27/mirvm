@@ -1,19 +1,19 @@
-//! Spike 5：真 Cranelift 接入——编译码 ↔ VM 执行态转换的实测。
+//! Spike 5: real Cranelift integration — practical test of compiled code ↔ VM execution state transition.
 //!
-//! 兑现挂起的 M4 检查点（spike2"Cranelift 能否发此约定"、vmctx-passing"内部约定等真数据"、
-//! spike3"真 Cranelift 的 CFI/LSDA 留复核"）。杀五个未知：
-//! 1. **i2c 对真 JIT 码**：interp 拿 finalize 出的 code ptr 直接调 Cranelift 机器码；
-//! 2. **c2i 从真 JIT 码**：JIT 码经 imported `mirvm_call_guest` shim 调回解释器；
-//! 3. **cc→cc 直接调用**：两个 JIT fib 模块内直接 call（FuncRef），非经 dispatch；
-//! 4. **vmctx 内部约定 P vs R**：P=显式 ctx 首参（Wasmtime 式）、R=pinned r15
-//!    （HotSpot 式：边界入口 set_pinned_reg，内部 get_pinned_reg，多入口结构）——
-//!    两变体可行性 + vcode + 微基准；
-//! 5. **unwind 穿真 JIT 帧（probe）**：裸跑预期 abort（cranelift-jit 不注册系统 eh_frame，
-//!    其异常路线是 wasmtime-unwinder=自有两阶段 unwinder，与宿主 Rust unwinder 不互操作
-//!    ——我们不采）；stretch = 自发射 SystemV unwind info → gimli 拼 .eh_frame →
-//!    `__register_frame` 注册（cg_clif JIT 模式同款）→ 传播应成功。
+//! Settle pending M4 checkpoints (spike2 "can Cranelift emit this convention", vmctx-passing "real data for internal conventions",
+//! spike3 "real Cranelift CFI/LSDA left for review"). Kill five unknowns:
+//! 1. **i2c to real JIT code**: interp takes the finalized code ptr and directly calls Cranelift machine code;
+//! 2. **c2i from real JIT code**: JIT code calls back into the interpreter via the imported `mirvm_call_guest` shim;
+//! 3. **cc→cc direct call**: direct call inside two JIT fib modules (FuncRef), not via dispatch;
+//! 4. **vmctx internal convention P vs R**: P = explicit ctx first arg (Wasmtime style), R = pinned r15
+//!    (HotSpot style: boundary entry set_pinned_reg, internal get_pinned_reg, multi-entry structure) —
+//!    feasibility of both variants + vcode + micro-benchmark;
+//! 5. **unwind through real JIT frames (probe)**: bare run expected to abort (cranelift-jit does not register system eh_frame,
+//!    its exception path is wasmtime-unwinder = own two-phase unwinder, not interoperable with host Rust unwinder
+//!    — we do not adopt it); stretch = self-emit SystemV unwind info → gimli assembles .eh_frame →
+//!    `__register_frame` registration (same as cg_clif JIT mode) → propagation should succeed.
 //!
-//! 解释器核心沿用 spike3 协议（CleanupGuard/字段级瞬态借用），自含。
+//! Interpreter core follows the spike3 protocol (CleanupGuard/field-level transient borrowing), self-contained.
 
 use std::mem;
 use std::process::ExitCode;
@@ -35,7 +35,7 @@ use super::bytecode::{
 };
 use super::frame::{OperandRegion, Word};
 
-// ===== 解释器核心（spike3 形状，自含）=====
+// ===== interpreter core (spike3 shape, self-contained) =====
 
 struct GuestPanic {
     payload: Word,
@@ -105,7 +105,7 @@ fn call_guest(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
     }
 }
 
-/// c2i shim：JIT 码经 imported symbol 调回统一 dispatch（i2c/c2i 的 c2i 半边）。
+/// c2i shim: JIT code calls back to unified dispatch via imported symbol (the c2i half of i2c/c2i).
 extern "C-unwind" fn mirvm_call_guest(ctx: *mut Ctx, func: u64, arg: u64) -> u64 {
     call_guest(ctx, func as u32, &[arg])
 }
@@ -142,7 +142,7 @@ fn run_cleanup_chain(ctx: *mut Ctx, func: u32, base: usize, entry: u32) {
                 blk = *target as usize;
             }
             Terminator::Resume => return,
-            t => unreachable!("cleanup 链非法终止子: {t:?}"),
+            t => unreachable!("illegal cleanup-chain terminator: {t:?}"),
         }
     }
 }
@@ -245,7 +245,7 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
                 mem::forget(guard);
                 return r;
             }
-            Terminator::Resume => unreachable!("Resume 只出现在 cleanup 链"),
+            Terminator::Resume => unreachable!("Resume only appears in cleanup chain"),
         }
     }
 }
@@ -256,7 +256,7 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let v = eval_rvalue(ctx, base, rv);
             reg_write(ctx, base, *dst, v);
         }
-        Stmt::Store(..) => unreachable!("spike5 不用 Store"),
+        Stmt::Store(..) => unreachable!("spike5 does not use Store"),
     }
 }
 
@@ -284,11 +284,11 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> Word {
                 BinOp::Ge => (a >= b) as u64,
             }
         }
-        rv => unreachable!("spike5 不用内存构造: {rv:?}"),
+        rv => unreachable!("spike5 does not use memory constructor: {rv:?}"),
     }
 }
 
-// ===== 解释侧字节码 =====
+// ===== interpreter-side bytecode =====
 
 fn s(n: u32) -> Operand {
     Operand::Slot(n)
@@ -303,7 +303,7 @@ fn bin(op: BinOp, a: Operand, b: Operand) -> Rvalue {
     Rvalue::Binary(op, a, b)
 }
 
-/// 互递归 fib（同 spike2 形状）
+/// mutually recursive fib (same shape as spike2)
 fn fib_body(callee: u32) -> Body {
     use BinOp::*;
     use Rvalue::Use;
@@ -353,7 +353,7 @@ fn fib_body(callee: u32) -> Body {
     }
 }
 
-/// 顶帧（catch，probe 用；own=100）
+/// top frame (catch, used by probe; own=100)
 fn top_catch_body(callee: u32) -> Body {
     use Terminator::*;
     let blocks = vec![
@@ -400,7 +400,7 @@ fn top_catch_body(callee: u32) -> Body {
     }
 }
 
-/// probe 底帧：own=102；Panic(777)
+/// probe bottom frame: own=102; Panic(777)
 fn probe_bottom_body() -> Body {
     use Terminator::*;
     let blocks = vec![
@@ -450,14 +450,14 @@ fn fib_ref(n: u64) -> u64 {
     }
 }
 
-// ===== Cranelift 装配 =====
+// ===== Cranelift assembly =====
 
-/// vmctx 内部约定两变体（docs/designs/vmctx-passing.md §5.2 的实测对象）
+/// two variants of the vmctx internal convention (practical target of docs/designs/vmctx-passing.md §5.2)
 #[derive(Clone, Copy, PartialEq)]
 enum Conv {
-    /// P：显式 ctx 首参，内部调用层层传（Wasmtime 式）
+    /// P: explicit ctx first arg, passed through every internal call (Wasmtime style)
     ExplicitCtx,
-    /// R：pinned r15，边界入口 set_pinned_reg、内部 get_pinned_reg（HotSpot 式多入口）
+    /// R: pinned r15, boundary entry set_pinned_reg, internal get_pinned_reg (HotSpot-style multi-entry)
     PinnedReg,
 }
 
@@ -475,23 +475,23 @@ fn make_isa(pinned: bool) -> Arc<dyn TargetIsa> {
         .unwrap()
 }
 
-/// JIT 调用目标：模块内直接（cc→cc）或经 c2i shim。
+/// JIT call target: direct inside module (cc→cc) or via c2i shim.
 enum Callee {
     Direct(ClifFuncId),
     Shim { shim: ClifFuncId, partner: i64 },
 }
 
-/// 一个变体的 JIT 产物。module 保活（代码内存归它管）。
+/// JIT artifact for one variant. module kept alive (code memory owned by it).
 struct Jitted {
     module: JITModule,
-    /// 经 shim 调对方的 fib 边界入口（混合矩阵用）
+    /// fib boundary entry called via shim to the other side (used by mixed matrix)
     shim_a: *const u8,
     shim_b: *const u8,
-    /// 模块内直接互递归的 fib 边界入口（cc→cc + 基准用）
+    /// fib boundary entry for direct mutual recursion inside module (cc→cc + benchmark)
     direct_a: *const u8,
-    /// probe 中间帧（仅 P 模块构建）
+    /// probe intermediate frame (only built in P module)
     probe_mid: *const u8,
-    /// (函数, unwind info)——eh_frame 注册用
+    /// (function, unwind info) — used for eh_frame registration
     unwind: Vec<(ClifFuncId, UnwindInfo)>,
     vcode: String,
 }
@@ -507,15 +507,15 @@ fn emit_call(
         Callee::Direct(fid) => {
             let fref = module.declare_func_in_func(*fid, b.func);
             let args: Vec<Value> = match ctxv {
-                Some(c) => vec![c, karg], // P：ctx 层层传
-                None => vec![karg],       // R fast：内部调用不带 ctx
+                Some(c) => vec![c, karg], // P: ctx passed level by level
+                None => vec![karg],       // R fast: internal calls do not carry ctx
             };
             let call = b.ins().call(fref, &args);
             b.inst_results(call)[0]
         }
         Callee::Shim { shim, partner } => {
             let fref = module.declare_func_in_func(*shim, b.func);
-            // 需要 ctx 的时刻：P 用参数，R 用 pinned reg（vmctx doc §5 的 get_pinned_reg 时刻）
+            // moment ctx is needed: P uses parameter, R uses pinned reg (the get_pinned_reg moment in vmctx doc §5)
             let c = match ctxv {
                 Some(c) => c,
                 None => b.ins().get_pinned_reg(types::I64),
@@ -527,7 +527,7 @@ fn emit_call(
     }
 }
 
-/// 造一个 fib 函数体：`has_ctx_param`=P（首参 ctx）/ R-fast（无 ctx 参）。
+/// Build a fib function body: `has_ctx_param`=P (first arg ctx) / R-fast (no ctx arg).
 fn define_fib(
     module: &mut JITModule,
     fbc: &mut FunctionBuilderContext,
@@ -574,9 +574,9 @@ fn define_fib(
     finish_define(module, id, &mut cctx, out);
 }
 
-/// R 变体的边界入口（= vmctx doc §5 的 f_boundary）：
-/// 保存入 r15 → set_pinned_reg(ctx) → call fast(n) → 恢复 r15 → return。
-/// 保存/恢复让 r15 对宿主调用方保持 callee-saved 语义（宿主 rustc 代码自由用 r15）。
+/// R variant boundary entry (= f_boundary in vmctx doc §5):
+/// save into r15 → set_pinned_reg(ctx) → call fast(n) → restore r15 → return.
+/// save/restore keeps r15 callee-saved semantics for the host caller (host rustc code may freely use r15).
 fn define_entry_r(
     module: &mut JITModule,
     fbc: &mut FunctionBuilderContext,
@@ -610,7 +610,7 @@ fn define_entry_r(
     finish_define(module, id, &mut cctx, out);
 }
 
-/// probe 中间帧（P 约定）：mid(ctx, x) = shim(ctx, BOTTOM, x) + 1
+/// probe intermediate frame (P convention): mid(ctx, x) = shim(ctx, BOTTOM, x) + 1
 fn define_probe_mid(
     module: &mut JITModule,
     fbc: &mut FunctionBuilderContext,
@@ -660,7 +660,7 @@ fn finish_define(
     module.clear_context(cctx);
 }
 
-/// 装配一个变体的 JIT 模块：shim 互递归对 + 直接互递归对（+ P 的 probe_mid）。
+/// Assemble a variant's JIT module: shim mutual-recursion pair + direct mutual-recursion pair (+ P's probe_mid).
 fn build_jit(conv: Conv) -> Jitted {
     let isa = make_isa(conv == Conv::PinnedReg);
     let mut jb = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
@@ -673,7 +673,7 @@ fn build_jit(conv: Conv) -> Jitted {
     sig_entry.params.push(AbiParam::new(i64t));
     sig_entry.params.push(AbiParam::new(i64t));
     sig_entry.returns.push(AbiParam::new(i64t));
-    let mut sig_fast = module.make_signature(); // (n) -> r（R 内部）
+    let mut sig_fast = module.make_signature(); // (n) -> r (R internal)
     sig_fast.params.push(AbiParam::new(i64t));
     sig_fast.returns.push(AbiParam::new(i64t));
     let mut sig_shim = module.make_signature(); // (ctx, func, arg) -> r
@@ -687,7 +687,7 @@ fn build_jit(conv: Conv) -> Jitted {
         .unwrap();
     let mut out = (Vec::new(), String::new());
 
-    // guest FuncId 约定（矩阵）：0=fib_a, 1=fib_b
+    // guest FuncId convention (matrix): 0=fib_a, 1=fib_b
     let (shim_a, shim_b, direct_a, probe_mid);
     match conv {
         Conv::ExplicitCtx => {
@@ -750,7 +750,7 @@ fn build_jit(conv: Conv) -> Jitted {
             probe_mid = module.get_finalized_function(pm);
         }
         Conv::PinnedReg => {
-            // fast 内部函数（无 ctx 参）+ 边界入口（f_boundary：save/set/restore pinned）
+            // fast internal functions (no ctx arg) + boundary entry (f_boundary: save/set/restore pinned)
             let fsa = module
                 .declare_function("fast_shim_a_r", Linkage::Local, &sig_fast)
                 .unwrap();
@@ -830,10 +830,10 @@ fn build_jit(conv: Conv) -> Jitted {
     }
 }
 
-// ===== eh_frame 自注册（stretch；cg_clif JIT 模式同款）=====
+// ===== eh_frame self-registration (stretch; same as cg_clif JIT mode) =====
 
-/// 把各 JIT 函数的 SystemV unwind info 拼成 .eh_frame 并注册给系统 unwinder，
-/// 让宿主 Rust panic 的传播能走过 JIT 帧（CFI-only，无 personality/landing pad）。
+/// Assemble each JIT function's SystemV unwind info into .eh_frame and register it with the system unwinder,
+/// so host Rust panic propagation can walk through JIT frames (CFI-only, no personality/landing pad).
 fn register_eh_frames(jit: &Jitted) {
     use gimli::RunTimeEndian;
     use gimli::write::{Address, EhFrame, EndianVec, FrameTable};
@@ -878,7 +878,7 @@ fn bench_one(name: &str, mut f: impl FnMut() -> u64, want: u64) {
         let t = Instant::now();
         let r = std::hint::black_box(f());
         let dt = t.elapsed().as_secs_f64() * 1e3;
-        assert_eq!(r, want, "bench {name} 结果错误");
+        assert_eq!(r, want, "bench {name} result incorrect");
         best = best.min(dt);
     }
     println!("  {name:26} {best:9.3} ms");
@@ -923,9 +923,9 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
 
     let mut ok = true;
 
-    // —— 两变体 × 4 配置矩阵 ——
+    // —— two variants × 4 config matrix ——
     for (vname, conv) in [
-        ("P 显式ctx参", Conv::ExplicitCtx),
+        ("P explicit-ctx arg", Conv::ExplicitCtx),
         ("R pinned-r15", Conv::PinnedReg),
     ] {
         let jit = build_jit(conv);
@@ -949,7 +949,7 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
         );
         ok &= run_matrix(
             vname,
-            "jit    / jit（直接调用）",
+            "jit    / jit (direct call)",
             FuncKind::Compiled(fd),
             FuncKind::Interp,
         );
@@ -966,7 +966,7 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
             FuncKind::Interp,
         );
 
-        // —— 微基准（fib(30)，直接调用配置）——
+        // —— micro-benchmark (fib(30), direct-call config) ——
         if ok {
             let want = fib_ref(30);
             println!("bench [{vname}] fib(30):");
@@ -975,7 +975,7 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
             };
             let mut ictx = Ctx::new(prog, vec![FuncKind::Interp, FuncKind::Interp]);
             bench_one(
-                "interp（骨架 tree-walk）",
+                "interp (skeleton tree-walk)",
                 || call_guest(&mut ictx as *mut Ctx, 0, &[30]),
                 want,
             );
@@ -984,7 +984,7 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
             };
             let mut jctx = Ctx::new(prog2, vec![FuncKind::Interp, FuncKind::Interp]);
             bench_one(
-                "jit（cc→cc 直接调用）",
+                "jit (cc→cc direct call)",
                 || fd(&mut jctx as *mut Ctx, 30),
                 want,
             );
@@ -994,11 +994,11 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
                 want,
             );
         }
-        // jit.module 活到此处之后（指针使用完毕）
+        // jit.module lives until after this point (pointers no longer used)
         drop(jit);
     }
 
-    // —— unwind 穿真 JIT 帧（子进程 probe）——
+    // —— unwind through real JIT frames (subprocess probe) ——
     let exe = std::env::current_exe().expect("current_exe");
     use std::os::unix::process::ExitStatusExt as _;
     let bare = std::process::Command::new(&exe)
@@ -1012,22 +1012,22 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
 
     let bare_desc = match (bare.status.code(), bare.status.signal()) {
         (_, Some(sig)) => {
-            format!("信号 {sig}（abort，如预期：JIT 帧无 CFI，系统 unwinder 走不过）")
+            format!("signal {sig} (abort, as expected: JIT frames have no CFI, system unwinder cannot walk them)")
         }
-        (Some(c), _) => format!("退出码 {c}"),
-        _ => "未知".into(),
+        (Some(c), _) => format!("exit code {c}"),
+        _ => "unknown".into(),
     };
-    println!("probe 裸跑（无 eh_frame 注册）: {bare_desc}");
+    println!("probe bare run (no eh_frame registration): {bare_desc}");
 
     let reg_out = String::from_utf8_lossy(&reg.stdout);
     if reg.status.success() && reg_out.contains("probe result=777 drops=[102, 100]") {
         println!(
-            "PASS probe eh_frame 注册后: guest panic 穿真 JIT 帧传播 + catch 正确（{}）",
+            "PASS probe after eh_frame registration: guest panic propagates through real JIT frames + catch correct ({})",
             reg_out.trim()
         );
     } else {
         println!(
-            "FAIL probe eh_frame 注册后: status={:?} signal={:?} out={}",
+            "FAIL probe after eh_frame registration: status={:?} signal={:?} out={}",
             reg.status.code(),
             reg.status.signal(),
             reg_out.trim()
@@ -1037,11 +1037,11 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
 
     if ok {
         println!(
-            "--- spike5: 全 PASS（真 Cranelift：i2c/c2i/cc→cc 直接调用/P&R 两约定/unwind 穿 JIT 帧）---"
+            "--- spike5: all PASS (real Cranelift: i2c/c2i/cc→cc direct call/P&R conventions/unwind through JIT frames) ---"
         );
         ExitCode::SUCCESS
     } else {
-        println!("--- spike5: 有 FAIL ---");
+        println!("--- spike5: has FAIL ---");
         ExitCode::from(1)
     }
 }

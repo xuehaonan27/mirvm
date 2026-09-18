@@ -1,5 +1,5 @@
-// mirvm 的第一个测试输入：纯计算 + std 集合 + 格式化输出。
-// M0: 只用于 --dump-mir 观察 MIR；M1 起要求解释执行结果与原生编译一致。
+// mirvm's first test input: pure computation + std collections + formatted output.
+// M0: only used to observe MIR with --dump-mir; from M1 onward the interpreted result must match native compilation.
 
 fn fib(n: u64) -> u64 {
     if n < 2 { n } else { fib(n - 1) + fib(n - 2) }

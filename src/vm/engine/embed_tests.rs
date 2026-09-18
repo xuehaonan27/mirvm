@@ -3754,7 +3754,7 @@ fn engine_closed_obeys_a_guest_terminate_boundary() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("unwind 抵达 Terminate 边界"),
+        stderr.contains("unwind reached Terminate boundary"),
         "Terminate child failed for the wrong reason:\n{stderr}"
     );
 }

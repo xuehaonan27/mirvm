@@ -1,7 +1,7 @@
 #!/bin/bash
 set -u
 
-# M5.3c fib 硬门形状：run --vm-call 'fib(32)' demo/m4/pure.rs
+# M5.3c fib hard-gate shape: run --vm-call 'fib(32)' demo/m4/pure.rs
 if [ "${2:-}" = --vm-call ] && [ "${3:-}" = 'fib(32)' ]; then
     echo 2178309
     exit 0

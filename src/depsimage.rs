@@ -1,24 +1,24 @@
-//! A2 deps-image（s3b-a2-design §3）：bin 无关实例的跨运行缓存——S4 std 底座对
-//! registry 依赖闭包的推广。依赖闭包的 lower 产物（"纯化聚合"：只含 purity=Pure
-//! 实例）在 bin 的**首次冷跑**里由 split lower 产出并落盘；编辑 bin 重跑时装载
-//! 进 image 栈 `[std 底座, deps-image]`，runner 只 lower delta（bin 附着物）。
+//! A2 deps-image (s3b-a2-design §3): cross-run cache for binary-independent instances — extension of the S4 std base
+//! to registry dependency closures. The lowering product of a dependency closure ("purified aggregate": only purity=Pure
+//! instances) is produced by split lower and written to disk during a binary's **first cold run**; editing the binary and rerunning loads
+//! it into the image stack `[std base, deps-image]`, and the runner lowers only delta (binary attachments).
 //!
-//! 键（pre-key，**pre-compiler 可算**——L2 热路径在编译会话之前，不可依赖 tcx）：
-//! `fnv(MIRVM_BUILD_ID, 底座键, 排序后的 --extern 工件内容盖戳)`。
-//! --extern 只含直接依赖（eco 4 个），传递闭包由 **cargo 重建传播**覆盖（任一传递
-//! crate 变更 ⇒ 其反向依赖链上的直接依赖被 cargo 重编译 ⇒ 直接 rlib 盖戳变）；
-//! 内容摘要兜住同大小且 mtime 被恢复的改写。**不含 bin 源与项目
-//! 身份** ⇒ bin 编辑必命中；同 lockfile + 同工具链的项目共享（S3′c）。
-//! **A2-3 起默认开启**；`MIRVM_NO_DEPS_IMAGE=1` 全程旁路（双态对拍用）。
-//! v1 边界：--extern 为空（无 registry 依赖的纯 std 程序）不产/不用 image——
-//! 那是 S4 底座已经覆盖的地盘。
+//! Key (pre-key, **computable pre-compiler** — L2 hot path runs before the compiler session, cannot depend on tcx):
+//! `fnv(MIRVM_BUILD_ID, base key, sorted --extern artifact content stamps)`.
+//! --extern contains only direct dependencies (4 in the eco); the transitive closure is covered by **cargo rebuild propagation** (any changed transitive
+//! crate change ⇒ its direct dependencies on the reverse dependency chain are recompiled by cargo ⇒ direct rlib stamp changes);
+//! content digest catches same-size rewrites with restored mtime. **Does not include binary source or project
+//! identity** ⇒ binary edits always hit; same lockfile + same toolchain projects share (S3′c).
+//! **Enabled by default from A2-3**; `MIRVM_NO_DEPS_IMAGE=1` bypasses entirely (for two-state cross-checking).
+//! v1 boundary: empty --extern (pure-std program with no registry dependencies) does not produce/use image —
+//! that territory is already covered by the S4 base.
 //!
-//! 正确性红线（与 chain 时代同一条）：image 的绝对 FuncId/地址只在"装载栈下 ==
-//! 构建栈下"（below 恒 = [底座]，键含底座键）时有效；任何校验不合 = 不装载
-//! （全量降低自愈，绝不错值）。降低指纹分层验证：image.fp == 底座.fp（装载时）+
-//! 底座.fp == 会话.fp（after_analysis fp_matches）⇒ image.fp == 会话.fp。
-//! 字节确定性：**不作契约**（与 L2 条目同规则——身份由键/文件名承载，无 cmp 消费方；
-//! 底座文件的确定性契约是"跨程序共享底座"专有，见 decision-history §7.3）。
+//! Correctness red line (same as the chain era): image's absolute FuncId/addresses are valid only when "load stack below ==
+//! build stack below" (below always = [base], key includes base key); any validation mismatch = do not load
+//! (full lowering self-heals, never wrong-value). Layered lowering-fingerprint validation: image.fp == base.fp (at load time) +
+//! base.fp == session.fp (after_analysis fp_matches) ⇒ image.fp == session.fp.
+//! Byte determinism: **not guaranteed** (same rule as L2 entries — identity is carried by key/file name, no cmp consumer;
+//! base-file determinism contract is specific to "sharing bases across programs", see decision-history §7.3).
 
 use std::path::PathBuf;
 
@@ -26,18 +26,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::vm::engine::ir;
 
-/// --extern 工件盖戳清单（path, size, mtime_ns, BLAKE3；排序去重）
+/// --extern artifact stamp list (path, size, mtime_ns, BLAKE3; sorted and deduped)
 type ExternStamps = Vec<(String, u64, u128, [u8; 32])>;
 
-/// deps-image 文件（v1 = postcard 整包；module 的 exports/fn_addrs 保留在 module 内
-/// ——无字节确定性契约，免去 BaseFile 的排序 Vec 摘出/重建舞）。
+/// deps-image file (v1 = postcard whole package; module's exports/fn_addrs stay inside the module
+/// — no byte-determinism contract, avoiding BaseFile's sorted Vec extraction/reconstruction dance).
 #[derive(Serialize, Deserialize)]
 struct DepsFile {
     build_id: String,
-    /// below = [底座] 的精确身份（错配装载 = 全盘错值，必须精确相等）
+    /// Exact identity of below = [base] (mismatched load = total wrong-value, must be exactly equal)
     base_key: String,
     lowering_fp: (bool, bool, bool),
-    /// pre-key 素材回比（哈希碰撞免疫）：排序后的 --extern 工件盖戳
+    /// Pre-key material for comparison (hash-collision immune): sorted --extern artifact stamps
     extern_stamps: ExternStamps,
     module: ir::Module,
     fn_entry_syms: Vec<(Box<str>, u64)>,
@@ -45,7 +45,7 @@ struct DepsFile {
     tls_syms: Vec<(Box<str>, ir::TlsId)>,
 }
 
-/// 写入侧的借用形态（ir::Module 非 Clone——FrozenArena 持有 mmap 所有权）。
+/// Borrowed shape for writing (ir::Module is not Clone — FrozenArena owns the mmap).
 #[derive(Serialize)]
 struct DepsFileRef<'a> {
     build_id: &'a str,
@@ -58,8 +58,8 @@ struct DepsFileRef<'a> {
     tls_syms: &'a [(Box<str>, ir::TlsId)],
 }
 
-/// 启用判定（A2-3 起默认开）：唯一旋钮 = 旁路 `MIRVM_NO_DEPS_IMAGE=1`（诊断/对拍
-/// 双态用）。A2-2 期的 `MIRVM_DEPS_IMAGE=1` 启用旋钮已退役（残留无害）。
+/// Enablement check (default on from A2-3): only knob = bypass `MIRVM_NO_DEPS_IMAGE=1` (diagnostics / two-state
+/// cross-check). The A2-2 `MIRVM_DEPS_IMAGE=1` enable knob is retired (harmless if left over).
 pub fn bypassed() -> bool {
     std::env::var_os("MIRVM_NO_DEPS_IMAGE").is_some_and(|v| !v.is_empty())
 }
@@ -68,9 +68,9 @@ fn deps_dir() -> PathBuf {
     crate::sysroot::cache_dir().join("deps")
 }
 
-/// pre-key 的素材：rustc_args 中 `--extern name=path`（两参形态）与
-/// `--extern=name=path`（单参形态）的 path 列表（去重排序）。
-/// 无 path 的 --extern（裸名）⇒ None：v1 不产/不用 image（自愈，防静默错值）。
+/// Material for pre-key: in rustc_args, `--extern name=path` (two-arg form) and
+/// `--extern=name=path` (single-arg form) path lists (deduped and sorted).
+/// --extern without path (bare name) ⇒ None: v1 does not produce/use image (self-heal, prevent silent wrong-value).
 fn extern_paths(rustc_args: &[String]) -> Option<Vec<String>> {
     let mut paths = Vec::new();
     let mut it = rustc_args.iter();
@@ -89,7 +89,7 @@ fn extern_paths(rustc_args: &[String]) -> Option<Vec<String>> {
     Some(paths)
 }
 
-/// 内容盖戳；任一文件不可稳定读取 ⇒ None（不产/不用 image）。
+/// Content stamping; any file not stably readable ⇒ None (do not produce/use image).
 fn stamp_externs(paths: &[String]) -> Option<ExternStamps> {
     paths
         .iter()
@@ -101,10 +101,10 @@ fn stamp_externs(paths: &[String]) -> Option<ExternStamps> {
         .collect()
 }
 
-/// pre-key = fnv(build_id, 底座键, 排序盖戳)。返回 (key, 盖戳清单)；
-/// 任一素材不可得 ⇒ None（调用方按"无 image"处理，全量降低自愈）。
-/// **--extern 为空 ⇒ None**（v1 边界：无依赖的纯 std 程序走 S4 底座域，
-/// 不为它们建"std 残余共享 image"——那是 S4 已经覆盖的地盘）。
+/// pre-key = fnv(build_id, base key, sorted stamps). Returns (key, stamp list);
+/// any material unavailable ⇒ None (caller treats as "no image", full lowering self-heals).
+/// **Empty --extern ⇒ None** (v1 boundary: dependency-free pure-std programs go through S4 base domain,
+/// no "std residual shared image" is built for them — that territory is already covered by S4).
 pub fn pre_key(rustc_args: &[String], base_key: &str) -> Option<(String, ExternStamps)> {
     let paths = extern_paths(rustc_args)?;
     if paths.is_empty() {
@@ -135,9 +135,9 @@ fn file_path(key: &str) -> PathBuf {
     deps_dir().join(format!("{key}.img"))
 }
 
-/// 装载 deps-image（pre-compiler 调用）。`base` = 已在场的底座（键与 fp 分层验证）；
-/// 成功 = 待 push 上栈的 BaseImage（其 key = pre-key，供 L2 键链）。
-/// 一切不合/失败 = None（全量降低自愈，主路径不发声——stderr 参与 native 差分）。
+/// Load deps-image (pre-compiler call). `base` = already-present base (key and fp validated in layers);
+/// success = BaseImage to push onto stack (its key = pre-key, used for L2 key chain).
+/// any mismatch/failure = None (full lowering self-heals, main path stays silent — stderr participates in native diff).
 pub fn try_load(
     rustc_args: &[String],
     base: &crate::baseimage::BaseImage,
@@ -147,7 +147,7 @@ pub fn try_load(
     let mut f: DepsFile = postcard::from_bytes(&data).ok()?;
     f.module.rebuild_load_map();
     f.module.rebuild_fn_addrs();
-    // 精确相等校验：build id、底座键、盖戳清单（碰撞免疫）、降低指纹分层
+    // Exact-equality validation: build id, base key, stamp list (collision immune), layered lowering fingerprint
     if f.build_id != env!("MIRVM_BUILD_ID")
         || f.base_key != base.key
         || f.extern_stamps != stamps
@@ -155,7 +155,7 @@ pub fn try_load(
     {
         return None;
     }
-    // 冻结区必须真的落在样条 k=0 域（防御：文件被换/域被抢都不接受）
+    // Frozen area must actually land in spline k=0 domain (defense: reject if file swapped or domain stolen)
     let frozen_ok = f.module.frozen.as_ref().is_some_and(|fr| {
         fr.at_fixed_base() && fr.home() == crate::vm::engine::addrlayout::image_addr(0)
     });
@@ -171,7 +171,7 @@ pub fn try_load(
         },
     )
     .ok()?;
-    // required .so 被清理 ⇒ miss 走冷路径自愈（ircache 同契约）
+    // required .so removed ⇒ miss falls back to cold-path self-heal (same contract as ircache)
     if !f
         .module
         .required_native_libs
@@ -192,9 +192,9 @@ pub fn try_load(
     })
 }
 
-/// split 产物的入账与上栈（A2-2 管线）：可缓存则写盘（原子发布），返回待 push 的
-/// BaseImage。写盘失败/不可缓存/pre-key 不可得 = 仅本次无文件（后续运行全量降低
-/// 自愈），返回的上栈层键退化为进程唯一占位——L2 键链自然失效，绝不误命中。
+/// Persist and push split product (A2-2 pipeline): write to disk if cacheable (atomic publish), returning the
+/// BaseImage to push. Write failure / not cacheable / pre-key unavailable = no file for this run only (subsequent runs do full lowering
+/// self-heal), returned stack-layer key degrades to process-unique placeholder — L2 key chain naturally invalid across runs, never false-hit.
 pub fn store_and_wrap(
     rustc_args: &[String],
     base_key: &str,
@@ -202,10 +202,10 @@ pub fn store_and_wrap(
     image: crate::lower::SplitImage,
 ) -> crate::baseimage::BaseImage {
     let mut bi = image.into_base_image(fp);
-    // 可缓存性判据：冻结区必须在样条 k=0 固定域（快照内嵌绝对地址跨进程稳定
-    // 的前提）；条目 stub 代码域同规则（P1：fn-ptr 值域 = stub 码址）。foreign
-    // 符号自 P2 起经 GOT 槽间接（decision-history §7.5c）：image 侧 GOT 表随
-    // 文件走、装载后经启动相重填本进程真值——不再是写盘障碍。
+    // Cacheability criterion: frozen area must be in fixed spline k=0 domain (prerequisite for embedded absolute addresses in snapshot to remain stable across processes)
+    // Entry stub code area follows same rule (P1: fn-ptr value domain = stub code address). Foreign
+    // symbols from P2 onward go through GOT slots indirectly (decision-history §7.5c): image-side GOT table travels with
+    // the file and is refilled with this process's real values after loading during startup — no longer a write-to-disk obstacle.
     let cacheable = bi.module.frozen.as_ref().is_some_and(|fr| {
         fr.at_fixed_base() && fr.home() == crate::vm::engine::addrlayout::image_addr(0)
     }) && (bi.module.entry_stub_sites.is_empty()
@@ -263,14 +263,14 @@ pub fn store_and_wrap(
             }
         }
     }
-    // 退化键：进程唯一 ⇒ L2 键链跨运行不误命中（本运行内存 absorb 不受影响）
+    // Degraded key: process-unique ⇒ L2 key chain never false-hits across runs (in-memory absorb for this run is unaffected)
     bi.key = format!("a2-unstable-{}", std::process::id());
     bi
 }
 
 #[cfg(test)]
 mod tests {
-    /// --extern 两参/单参形态都解析出 path；裸名 --extern ⇒ None（自愈）
+    /// Both two-arg and single-arg --extern forms are parsed to path; bare-name --extern ⇒ None (self-heal)
     #[test]
     fn extern_paths_parse_both_forms_and_reject_bare_name() {
         let args = vec![
@@ -284,7 +284,7 @@ mod tests {
             "-C".to_string(),
             "metadata=xyz".to_string(),
         ];
-        let paths = super::extern_paths(&args).expect("解析成功");
+        let paths = super::extern_paths(&args).expect("parse succeeded");
         assert_eq!(
             paths,
             vec![
@@ -295,7 +295,7 @@ mod tests {
         );
         let bare = vec!["--extern".to_string(), "regex".to_string()];
         assert_eq!(super::extern_paths(&bare), None);
-        // 重复 --extern 去重
+        // Duplicate --extern deduped
         let dup = vec![
             "--extern".to_string(),
             "regex=/t/a.rlib".to_string(),

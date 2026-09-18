@@ -1,6 +1,6 @@
-//! terminator 与 unwind 降低（自 func.rs F10 整搬）：lower_terminator 全族
-//! （Goto/SwitchInt/Assert→panic 块合成/Call→call.rs/InlineAsm→asm.rs）
-//! + lower_unwind。唯一入口 = mod.rs lower_instance。
+//! terminator and unwind lowering (moved wholesale from func.rs F10): full lower_terminator family
+//! (Goto/SwitchInt/Assert→panic block synthesis/Call→call.rs/InlineAsm→asm.rs)
+//! + lower_unwind. Single entry point = mod.rs lower_instance.
 
 use super::*;
 
@@ -9,14 +9,14 @@ impl<'tcx> LowerCx<'tcx, '_> {
         match u {
             mir::UnwindAction::Cleanup(bb) => ir::UnwindAction::Cleanup(bb.as_u32()),
             mir::UnwindAction::Terminate(_) => ir::UnwindAction::Terminate,
-            // Unreachable：unwind 到此 = UB（fast 不检测）——当 Continue
+            // Unreachable: unwinding here = UB (fast does not check) — treated as Continue
             mir::UnwindAction::Continue | mir::UnwindAction::Unreachable => {
                 ir::UnwindAction::Continue
             }
         }
     }
 
-    /// 终止子 → (追加语句, ir 终止子)。
+    /// terminator → (extra statements, ir terminator).
     pub(super) fn lower_terminator(
         &mut self,
         term: &mir::Terminator<'tcx>,
@@ -37,7 +37,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }
                     _ => {
                         return Err(format!(
-                            "SwitchInt 判别式不是整数标量（ty={}）",
+                            "SwitchInt discriminant is not an integer scalar (ty={})",
                             self.op_ty(discr)?
                         ));
                     }
@@ -53,10 +53,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
             TK::Return => (vec![], Terminator::Return),
             TK::Unreachable => (vec![], Terminator::Unreachable),
-            // cleanup 链尾：返回 guard.drop 让宿主 unwind 续传（spike3 协议）
+            // cleanup chain tail: return guard.drop to let host unwind continue (spike3 protocol)
             TK::UnwindResume => (vec![], Terminator::Resume),
             TK::UnwindTerminate(_) => (vec![], Terminator::TerminateAbort),
-            // 分析用假边：codegen 语义 = 直跳真目标
+            // analysis-only fake edges: codegen semantics = jump straight to real target
             TK::FalseEdge { real_target, .. } | TK::FalseUnwind { real_target, .. } => {
                 (vec![], Terminator::Goto(real_target.as_u32()))
             }
@@ -67,8 +67,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 target,
                 unwind,
             } => {
-                // cg_ssa codegen_assert_terminator 同构：条件分支 + 合成 panic 块
-                //（Call panic lang item，实参 + location 尾参——panic fn 全 track_caller）
+                // isomorphic to cg_ssa codegen_assert_terminator: conditional branch + synthesized panic block
+                // (Call panic lang item, args + location tail arg—all panic fns are track_caller)
                 let c = self.lower_operand_scalar(cond)?;
                 use rustc_hir::LangItem;
                 let mut pre: Vec<Stmt> = Vec::new();
@@ -85,17 +85,17 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         LangItem::PanicMisalignedPointerDereference
                     }
                     mir::AssertKind::InvalidEnumConstruction(op) => {
-                        // cg_ssa：panic_invalid_enum_construction(source: u128)
-                        // （core panicking.rs 的 lang fn 签名）——u128 实参走
-                        // Indirect ABI（传 16 字节源地址，interp.rs:2313 的
-                        // copy_nonoverlapping 通道，与 finish_call 的 Bytes
-                        // 实参 `Operand::AddrOf` 同构；polars 批6 实锤）
+                        // cg_ssa: panic_invalid_enum_construction(source: u128)
+                        // (core panicking.rs lang fn signature)—u128 arg uses
+                        // Indirect ABI (pass 16-byte source address, interp.rs:2313
+                        // copy_nonoverlapping path, isomorphic to finish_call Bytes
+                        // arg `Operand::AddrOf`; proven by polars batch 6)
                         let v = match self.lower_operand(op)? {
                             LoweredOp::Bytes { place, .. } => Operand::AddrOf(place.expr()),
                             LoweredOp::Scalar(o) => {
-                                // 窄 tag：按符号扩展进两个相邻 scratch 槽
-                                // （低 64=扩展值，高 64=符号广播/0），首槽地址即
-                                // 16 字节 Indirect 实参
+                                // narrow tag: sign-extend into two adjacent scratch slots
+                                // (low 64 = extended value, high 64 = sign broadcast / 0), first slot address
+                                // is the 16-byte Indirect arg
                                 let ty = self.op_ty(op)?;
                                 let signed = frame::ty_signed(ty);
                                 let src_w = match o {
@@ -137,10 +137,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                 })
                             }
                             LoweredOp::Zst => {
-                                return Err("InvalidEnumConstruction 实参为 Zst".into());
+                                return Err("InvalidEnumConstruction arg is Zst".into());
                             }
                             LoweredOp::Pair(..) => {
-                                return Err("InvalidEnumConstruction 实参为 pair（M4.2+）".into());
+                                return Err("InvalidEnumConstruction arg is pair (M4.2+)".into());
                             }
                         };
                         pargs.push(v);
@@ -157,7 +157,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 });
                 let def_id = self.tcx.require_lang_item(lang_item, term.source_info.span);
                 let callee = self.linker.func_id(Instance::mono(self.tcx, def_id));
-                // 合成：panic 块（发散 Call → Unreachable 落点）
+                // synthesize: panic block (diverging Call → Unreachable landing)
                 let unreach = (self.mir_block_count + self.extra_blocks.len()) as Bb;
                 self.extra_blocks.push(ir::Block {
                     stmts: vec![],
@@ -192,13 +192,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
             } => {
                 let p = self.resolve_place(place)?;
                 if p.ty.needs_drop(self.tcx, self.typing_env) {
-                    // dyn place：虚 drop = vtable 槽 0 间接调（cg_ssa 同构；
-                    // resolve_drop_glue 会解析回自身 → 无限递归）
+                    // dyn place: virtual drop = indirect call via vtable slot 0 (isomorphic to cg_ssa;
+                    // resolve_drop_glue would resolve back to itself → infinite recursion)
                     if let ty::Dynamic(..) = p.ty.kind() {
                         let meta = p
                             .meta
                             .clone()
-                            .ok_or_else(|| format!("dyn Drop 无 vtable meta（ty={}）", p.ty))?;
+                            .ok_or_else(|| format!("dyn Drop has no vtable meta (ty={})", p.ty))?;
                         let callee = operand_deref_at(meta, 0)?;
                         return Ok((
                             vec![],
@@ -213,9 +213,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             },
                         ));
                     }
-                    // 正常路径 Drop = 普通 Call（F2）：drop_in_place 合成 shim，
-                    // 实参 = place 真地址（*mut T）；unsized place（Box<[T]> 内容等）
-                    // 的 glue 参数是胖指针 → 补 meta 半（resolve_place 的 meta 跟踪）。
+                    // normal Drop path = ordinary Call (F2): drop_in_place synthesized shim,
+                    // arg = place real address (*mut T); unsized place (Box<[T]> contents, etc.)
+                    // glue argument is a fat pointer → add meta half (resolve_place meta tracking).
                     let glue = Instance::resolve_drop_glue(self.tcx, p.ty);
                     let callee = self.linker.func_id(glue);
                     let mut glue_args = vec![Operand::AddrOf(p.expr())];
@@ -223,7 +223,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         let meta = p
                             .meta
                             .clone()
-                            .ok_or_else(|| format!("unsized Drop 无 meta（ty={}）", p.ty))?;
+                            .ok_or_else(|| format!("unsized Drop has no meta (ty={})", p.ty))?;
                         glue_args.push(meta);
                     }
                     return Ok((
@@ -249,13 +249,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 fn_span,
                 ..
             } => {
-                // callee 解析：常量 FnDef → Instance；FnPtr → 间接调用
+                // callee resolution: constant FnDef → Instance; FnPtr → indirect call
                 let fn_ty = self.op_ty(func)?;
                 let ty::FnDef(def_id, gargs) = fn_ty.kind() else {
                     if fn_ty.is_fn_ptr() {
-                        // fn-ptr 间接调用：值 = D4 条目真地址，引擎反查派发；
-                        // extern "C" 系另冻结 native 签名（反查未命中 = 运行期 dlsym
-                        // 所得真码 → libffi 直调，M4.4 FFI 反方向之二）
+                        // fn-ptr indirect call: value = D4 entry real address, engine resolves and dispatches;
+                        // extern "C" family additionally freezes native signature (resolution miss = real code
+                        // obtained at runtime via dlsym → libffi direct call, second direction of M4.4 FFI)
                         let callee_op = self.lower_operand_scalar(func)?;
                         let native_sig =
                             crate::lower::freeze_c_fnptr_sig(self.tcx, self.typing_env, fn_ty);
@@ -271,7 +271,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             *unwind,
                         );
                     }
-                    return Err(format!("间接调用（ty={fn_ty}，M4.1+）"));
+                    return Err(format!("indirect call (ty={fn_ty}, M4.1+)"));
                 };
                 let mut inst = Instance::expect_resolve(
                     self.tcx,
@@ -280,9 +280,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     gargs,
                     term.source_info.span,
                 );
-                // dyn 虚派发：receiver 胖指针拆 (data, vtable)，
-                // callee = *(vtable + idx*8)，receiver 实参换 data 半。
-                // track_caller 方法照传 location（vtable 侧是 VTable shim 接收）。
+                // dyn virtual dispatch: receiver fat pointer split into (data, vtable),
+                // callee = *(vtable + idx*8), receiver arg replaced with data half.
+                // track_caller methods still pass location (vtable side receives via VTable shim).
                 if let InstanceKind::Virtual(_, idx) = inst.def {
                     // #[track_caller] 的 Location 取 fn_span（被调名段）——
                     // cg_ssa `SourceInfo { span: fn_span, ..terminator.source_info }`

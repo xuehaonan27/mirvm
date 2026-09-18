@@ -1,4 +1,4 @@
-// 时间 + 文件系统 shims 验收（输出与真实时间/路径无关，可与 native 对拍）
+// Time + filesystem shims acceptance (output independent of real time/path, can be diffed against native)
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn main() {
@@ -14,9 +14,9 @@ fn main() {
     println!("epoch sane: {}", epoch > 1_700_000_000);
 
     let p = std::env::temp_dir().join(format!("mirvm_test_{acc}.txt"));
-    std::fs::write(&p, "hello mirvm 文件往返").unwrap();
+    std::fs::write(&p, "hello mirvm file roundtrip").unwrap();
     let s = std::fs::read_to_string(&p).unwrap();
-    println!("fs roundtrip: {} (len={})", s == "hello mirvm 文件往返", s.len());
+    println!("fs roundtrip: {} (len={})", s == "hello mirvm file roundtrip", s.len());
     std::fs::remove_file(&p).unwrap();
     println!("fs cleanup: {}", !p.exists());
 }

@@ -1,31 +1,30 @@
-//! `cargoless/driver.rs` —— `mirvm run` 的零 cargo 新路径（D15 P2 切①/②/③，
-//! 设计档 §3.6/§5 P2），替代 cargo_shim::phase_cargo 的三阶段（cargo run +
-//! RUSTC_WRAPPER + runner 协议）：
+//! `cargoless/driver.rs` — the cargo-less new path for `mirvm run` (D15 P2 cuts ①/②/③, design §3.6/§5 P2), replacing the three phases of cargo_shim::phase_cargo (cargo run +
+//! RUSTC_WRAPPER + runner protocol):
 //!
 //! ```text
-//! resolve（P1 求解器）→ links 互斥校验 → unit 级 Kahn 就绪队列并行调度
-//! （P3 切⑤c：N 个 worker，MIRVM_CLESS_JOBS 覆盖，缺省 available_parallelism；
-//! =1 与旧串行 topo 序逐位一致——对拍调试锚。unit 的全部依赖完成即就绪，
-//! unit 内部阶段保持串行）：
-//!   build.rs 全生命周期（切③ + P3 切⑤b 精细增量）：host 真编译 build script
-//!     （fp 命中跳过）→ rerun 判定（buildrs::should_rerun，cargo 同语义——
-//!     存档在 build/<pkg>-<fp>/{output.txt,rerun.txt}，跳过则从 output.txt
-//!     重解析回放 BuildOutput，warning 门控同款）→ 以 cargo 兼容 env 执行 →
-//!     指令解析 → BuildOutput 回传主线程入完成表（本 unit 记入 re_ran，
-//!     links 传递判定用）
-//!   host 集（proc-macro 闭包 ∪ build-deps 闭包）→ spawn 真 rustc 真 codegen
-//!   target 集 → 起 `__cless-dep` 子进程（cli::run_dep_compiler：
-//!   in-process rustc_driver + global_asm 抽取）
-//!   （双侧编译都吃本 unit BuildOutput 修正：cfg/check-cfg/link 旗进 argv，
-//!   OUT_DIR/rustc-env 进子进程 env——proc-macro2 的 build.rs cfg 进其 host
-//!   编译，serde_derive 类全链解锁的关键）
-//! → 全 unit 汇合后回主线程：根包 build.rs 同生命周期 → bin 走既有
-//!   MirvmCallbacks 会话（OUT_DIR/rustc-env/cfg 修正同样进 bin 会话）
+//! resolve (P1 resolver) → links mutex check → unit-level Kahn ready-queue parallel scheduling
+//! (P3 cut ⑤c: N workers, MIRVM_CLESS_JOBS override, default available_parallelism;
+//! =1 matches the old serial topo order bit-for-bit — differential debugging anchor. A unit is ready once all its deps finish,
+//! stages inside a unit remain serial):
+//!   build.rs full lifecycle (cut ③ + P3 cut ⑤b fine-grained incrementality): host really compiles the build script
+//!     (skip on fp hit) → rerun decision (buildrs::should_rerun, same semantics as cargo —
+//!     stored in build/<pkg>-<fp>/{output.txt,rerun.txt}; when skipped, reparse output.txt
+//!     to replay BuildOutput, same warning gate) → execute with cargo-compatible env →
+//!     instruction parsing → BuildOutput returned to main thread into completion table (this unit recorded in re_ran,
+//!     used for links propagation decisions)
+//!   host set (proc-macro closure ∪ build-deps closure) → spawn real rustc with real codegen
+//!   target set → spawn `__cless-dep` child (cli::run_dep_compiler:
+//!   in-process rustc_driver + global_asm extraction)
+//!   (both sides consume this unit's BuildOutput corrections: cfg/check-cfg/link flags enter argv,
+//!   OUT_DIR/rustc-env enter child env — proc-macro2's build.rs cfg enters its host
+//!   compilation, the key to unlocking serde_derive-like full chains)
+//! → after all units converge back to main thread: root build.rs same lifecycle → bin uses existing
+//!   MirvmCallbacks session (OUT_DIR/rustc-env/cfg corrections also enter bin session)
 //! ```
 //!
-//! 传播规则（-l 只进本包、-L 进传递依赖者、metadata 只给直接依赖者的
-//! build script、无自动 DEP_*_ROOT、无自动 check-cfg 补钉）全是切③ 实证
-//! 结论，明细在 buildrs.rs 文件头。
+//! Propagation rules (-l only enters this package, -L enters transitive dependents, metadata only goes to direct dependents'
+//! build script, no automatic DEP_*_ROOT, no automatic check-cfg patch) are all cut ③ empirical
+//! conclusions; details are in the buildrs.rs file header.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -42,8 +41,8 @@ use super::resolve::{
 use super::schedule::{self, Layout};
 use super::workspace::WorkspaceManifest;
 
-/// `mirvm run <目录|Cargo.toml> [--bin <名>]`（MIRVM_DEPS=self）。
-/// bin_sel = --bin 选定的 bin 名（D15 P4 切⑥b，cargo run --bin 语义）。
+/// `mirvm run <dir|Cargo.toml> [--bin <name>]` (MIRVM_DEPS=self).
+/// bin_sel = the bin name selected by --bin (D15 P4 cut ⑥b, cargo run --bin semantics).
 pub fn run_project(
     dir: &Path,
     program_args: &[String],
@@ -53,7 +52,7 @@ pub fn run_project(
     let mut manifest = match PackageManifest::read_dir(dir) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("mirvm: 读取项目 {} 失败: {e}", dir.display());
+            eprintln!("mirvm: failed to read project {}: {e}", dir.display());
             std::process::exit(1);
         }
     };
@@ -61,22 +60,22 @@ pub fn run_project(
     drive(&manifest, program_args, bin_sel, None)
 }
 
-/// `mirvm pack <目录|Cargo.toml>` 的默认 self 路径。依赖、build.rs、
-/// proc-macro 和根包编译与 `run_project` 完全共用，只在最终 rustc 会话把
-/// “执行”换成写出自包含包。
+/// `mirvm pack <dir|Cargo.toml>` default self path. Deps, build.rs,
+/// proc-macro and root package compilation are fully shared with `run_project`; only the final rustc session swaps
+/// "execution" for writing a self-contained package.
 pub fn pack_project(dir: &Path, out: &Path) -> ExitCode {
     let manifest = match PackageManifest::read_dir(dir) {
         Ok(manifest) => manifest,
         Err(error) => {
-            eprintln!("mirvm: 读取项目 {} 失败: {error}", dir.display());
+            eprintln!("mirvm: failed to read project {}: {error}", dir.display());
             std::process::exit(1);
         }
     };
     drive(&manifest, &[], None, Some(out))
 }
 
-/// 一个根测试目标的独立执行配方。Cargo 每个测试 artifact 各起一进程；self
-/// 路径也把 rustc 参数和编译期环境封进配方，再由 `__cless-run-root` 子进程执行。
+/// Independent execution recipe for a root test target. Cargo spawns one process per test artifact; the self
+/// path also seals rustc args and compile-time env into the recipe, then executes via the `__cless-run-root` child.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct RootRunRecipe {
     rustc_args: Vec<String>,
@@ -85,8 +84,8 @@ struct RootRunRecipe {
     argv0: String,
 }
 
-/// `mirvm test` 的 self 路径。workspace 先归约为完整成员清单，再统一多包
-/// feature 与编译键；所有选中包准备完成后才开始执行测试。
+/// `mirvm test` self path. The workspace is first reduced to a complete member list, then multi-package
+/// features and compile keys are unified; tests only start after all selected packages are prepared.
 pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) -> ExitCode {
     let request = match TestRequest::parse(cargo_args) {
         Ok(r) => r,
@@ -106,12 +105,12 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
     let mut workspace = match WorkspaceManifest::read(dir) {
         Ok(workspace) => workspace,
         Err(e) => {
-            eprintln!("mirvm: 读取项目 {} 失败: {e}", dir.display());
+            eprintln!("mirvm: failed to read project {}: {e}", dir.display());
             return ExitCode::from(1);
         }
     };
     if request.offline {
-        // SAFETY: CLI 启动相，尚未启动 worker/rustc/guest 线程。
+        // SAFETY: CLI startup phase; worker/rustc/guest threads have not started yet.
         unsafe { std::env::set_var("MIRVM_OFFLINE", "1") };
     }
     if request.ignore_rust_version {
@@ -120,7 +119,7 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
         }
     }
     if request.locked && !workspace.root.join("Cargo.lock").is_file() {
-        eprintln!("mirvm test: --locked 要求 workspace 根已有 Cargo.lock");
+        eprintln!("mirvm test: --locked requires an existing Cargo.lock at the workspace root");
         return ExitCode::from(1);
     }
     let mut manifests = match request.select_packages(&workspace) {
@@ -149,14 +148,14 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
         let mut lock_workspace = workspace.clone();
         lock_workspace.members = known.clone();
         if let Err(e) = generate_workspace_lock(&lock_workspace) {
-            eprintln!("mirvm test: 生成 workspace Cargo.lock 失败: {e}");
+            eprintln!("mirvm test: failed to generate workspace Cargo.lock: {e}");
             return ExitCode::from(1);
         }
     }
     let plans = match resolve_workspace_plans(&manifests, &known) {
         Ok(plans) => plans,
         Err(e) => {
-            eprintln!("mirvm: 依赖解析失败: {e}");
+            eprintln!("mirvm: dependency resolution failed: {e}");
             return ExitCode::from(1);
         }
     };
@@ -234,9 +233,9 @@ struct DoctestTask {
     cwd: PathBuf,
 }
 
-/// Cargo resolver v2 会把同一次 workspace 命令中到达同一包、同一版本、同一
-/// normal/build 类别的 feature 求并集。各根先独立求图，再把结果反灌，直到所有
-/// 根得到同一个并集；中间结果不编译，因此不会把未收敛图发布到缓存。
+/// Cargo resolver v2 unions features reaching the same package, same version, same
+/// normal/build class within one workspace command. Each root resolves its graph independently, then feeds the result back, until all
+/// roots reach the same union; intermediate results are not compiled, so unconverged graphs are not published to cache.
 fn resolve_workspace_plans(
     manifests: &[PackageManifest],
     known_members: &[PackageManifest],
@@ -287,7 +286,7 @@ fn resolve_workspace_plans(
         }
         features = next;
     }
-    Err("workspace feature 统一 64 轮未收敛（图异常）".into())
+    Err("workspace feature unification did not converge after 64 rounds (graph anomaly)".into())
 }
 
 fn prepare_test_package(
@@ -297,7 +296,7 @@ fn prepare_test_package(
 ) -> Result<PreparedTests, ExitCode> {
     manifest.profile = manifest.test_profile;
     if request.locked && !manifest.lock_root.join("Cargo.lock").is_file() {
-        eprintln!("mirvm test: --locked 要求现有 Cargo.lock");
+        eprintln!("mirvm test: --locked requires an existing Cargo.lock");
         return Err(ExitCode::from(1));
     }
 
@@ -323,7 +322,7 @@ fn prepare_test_package(
     let doctest_target = match doctest_target {
         Some(Some(target)) => Some(target),
         Some(None) if request.doc => {
-            eprintln!("mirvm test: --doc 要求包有启用 doctest 的 lib target");
+            eprintln!("mirvm test: --doc requires a package with a lib target that has doctest enabled");
             return Err(ExitCode::from(101));
         }
         _ => None,
@@ -334,7 +333,7 @@ fn prepare_test_package(
         None => match crate::sysroot::ensure_sysroot() {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("mirvm: 构建 sysroot 失败: {e}");
+                eprintln!("mirvm: failed to build sysroot: {e}");
                 return Err(ExitCode::from(1));
             }
         },
@@ -345,7 +344,7 @@ fn prepare_test_package(
     let rustflags = match super::rustflags::from_env_and_disk(&manifest.root) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("mirvm: rustflags 解析失败: {e}");
+            eprintln!("mirvm: failed to parse rustflags: {e}");
             return Err(ExitCode::from(1));
         }
     };
@@ -368,7 +367,7 @@ fn prepare_test_package(
     };
     let UnitTables { outputs, re_ran } = compiled.tables;
     let fps = compiled.fps;
-    let self_exe = std::env::current_exe().expect("current_exe 失败");
+    let self_exe = std::env::current_exe().expect("current_exe failed");
     let root_lib = manifest
         .targets
         .iter()
@@ -384,7 +383,7 @@ fn prepare_test_package(
     ) {
         Ok(fp) => fp,
         Err(e) => {
-            eprintln!("mirvm: 根包指纹计算失败: {e}");
+            eprintln!("mirvm: root package fingerprint computation failed: {e}");
             return Err(ExitCode::from(1));
         }
     };
@@ -556,8 +555,8 @@ fn prepare_test_package(
         }
     }
 
-    // Cargo 先编完全部 test artifacts 再开始执行。预检静默告警，真实执行
-    // 会通过 runner 会话发一次；若预检失败，再用真实会话重放诊断。
+    // Cargo compiles all test artifacts before execution starts. Pre-check suppresses warnings; real execution
+    // emits them once through the runner session; if pre-check fails, replay diagnostics with the real session.
     for (_, recipe, args, fp, env) in &recipes {
         let check = check_args(args, &layout, fp);
         if !run_root_check(&self_exe, &manifest.root, &check, env, !request.no_run) {
@@ -661,7 +660,7 @@ impl TestRequest {
                 *i += 1;
                 args.get(*i)
                     .cloned()
-                    .ok_or_else(|| format!("{name} 需要目标名"))
+                    .ok_or_else(|| format!("{name} requires a target name"))
             };
             match arg.as_str() {
                 "--lib" => out.lib = true,
@@ -730,11 +729,11 @@ impl TestRequest {
                     add_feature_values(&mut out.features, &arg[11..]);
                 }
                 _ if arg.starts_with('-') => {
-                    return Err(format!("不支持的 Cargo test 参数 `{arg}`，不会静默吞掉"));
+                    return Err(format!("unsupported Cargo test argument `{arg}`, will not be silently swallowed"));
                 }
                 _ => {
                     if out.filter.replace(arg.clone()).is_some() {
-                        return Err("Cargo test 只接受一个 TESTNAME 过滤串".into());
+                        return Err("Cargo test accepts only one TESTNAME filter string".into());
                     }
                 }
             }
@@ -748,10 +747,10 @@ impl TestRequest {
         workspace: &WorkspaceManifest,
     ) -> Result<Vec<PackageManifest>, String> {
         if self.workspace && !self.packages.is_empty() {
-            return Err("--workspace 与 --package 不能同时使用".into());
+            return Err("--workspace and --package cannot be used together".into());
         }
         if !self.workspace && !self.excludes.is_empty() {
-            return Err("--exclude 只能与 --workspace 一起使用".into());
+            return Err("--exclude can only be used with --workspace".into());
         }
         let mut roots = BTreeSet::new();
         if self.workspace {
@@ -777,7 +776,7 @@ impl TestRequest {
             .cloned()
             .collect();
         if selected.is_empty() {
-            return Err("package 选择结果为空".into());
+            return Err("package selection is empty".into());
         }
         Ok(selected)
     }
@@ -802,7 +801,7 @@ impl TestRequest {
                     .find(|manifest| manifest.name == package)
                 {
                     if !manifest.check_cfg_feature_values().contains(feature) {
-                        return Err(format!("包 `{}` 没有 feature `{feature}`", manifest.name));
+                        return Err(format!("package `{}` has no feature `{feature}`", manifest.name));
                     }
                     manifest.requested_features.insert(feature.to_string());
                     continue;
@@ -825,7 +824,7 @@ impl TestRequest {
                 }
                 if !found {
                     return Err(format!(
-                        "feature `{spec}` 既不指向选中包，也不指向其直接依赖"
+                        "feature `{spec}` points to neither a selected package nor its direct dependency"
                     ));
                 }
                 continue;
@@ -838,7 +837,7 @@ impl TestRequest {
                 }
             }
             if !found {
-                return Err(format!("选中的包均没有 feature `{feature}`"));
+                return Err(format!("none of the selected packages have feature `{feature}`"));
             }
         }
         Ok(())
@@ -857,7 +856,7 @@ impl TestRequest {
                     .flat_map(|manifest| &manifest.targets)
                     .any(|target| target.kind == kind && &target.name == name)
                 {
-                    return Err(format!("没有名为 `{name}` 的 {kind:?} 目标"));
+                    return Err(format!("no {kind:?} target named `{name}`"));
                 }
             }
         }
@@ -884,7 +883,7 @@ impl TestRequest {
             });
         }
         if manifests.is_empty() {
-            return Err("目标选择结果为空".into());
+            return Err("target selection is empty".into());
         }
         Ok(())
     }
@@ -946,7 +945,7 @@ impl TestRequest {
             } else {
                 match target.kind {
                     TargetKind::Lib | TargetKind::Bin | TargetKind::Test => target.test,
-                    TargetKind::Example => true, // 默认至少编译；test=true 才运行
+                    TargetKind::Example => true, // compiled by default; only runs when test=true
                     TargetKind::Bench => false,
                 }
             };
@@ -960,7 +959,7 @@ impl TestRequest {
             if !features_ready {
                 if explicit && named {
                     return Err(format!(
-                        "目标 `{}` 需要未启用 features: {}",
+                        "target `{}` requires features that are not enabled: {}",
                         target.name,
                         target.required_features.join(", ")
                     ));
@@ -975,7 +974,7 @@ impl TestRequest {
             });
         }
         if selected.is_empty() && !self.doc {
-            return Err("没有可测试目标".into());
+            return Err("no testable targets".into());
         }
 
         // 选中 integration test 时，Cargo 还编译所有可用普通 bin，为
@@ -1011,15 +1010,15 @@ fn add_feature_values(out: &mut BTreeSet<String>, value: &str) {
     );
 }
 
-/// 无锁 workspace 的一次性全成员求解。Cargo 的 workspace lock 覆盖所有成员的
-/// 全部 feature 可达依赖，与本次实际编译选择分开；合成根只负责形成这张最大解析图。
-/// 落盘前删除它，并把成员的非可选 Dev 边补回各自 lock 行。
+/// One-time all-member resolution for a lockless workspace. Cargo's workspace lock covers all members'
+/// feature-reachable dependencies, separate from this compilation's actual selection; the synthetic root only forms this maximal resolution graph.
+/// Delete it before writing, and add members' non-optional Dev edges back to their respective lock rows.
 fn generate_workspace_lock(workspace: &WorkspaceManifest) -> Result<(), String> {
     let mut synthetic = workspace
         .members
         .first()
         .cloned()
-        .ok_or_else(|| "workspace 没有成员".to_string())?;
+        .ok_or_else(|| "workspace has no members".to_string())?;
     synthetic.name = format!("__mirvm_workspace_root_{:x}", std::process::id());
     synthetic.version = semver::Version::new(0, 0, 0);
     synthetic.root = workspace.root.clone();
@@ -1045,7 +1044,7 @@ fn generate_workspace_lock(workspace: &WorkspaceManifest) -> Result<(), String> 
             platform_cfg: None,
         })
         .collect();
-    // 非可选 Dev 包也必须进入版本选择；成员 lock 行在下方补依赖引用。
+    // Non-optional Dev packages must also enter version selection; member lock rows get dependency references added below.
     for (member_ix, member) in workspace.members.iter().enumerate() {
         for dep in member
             .deps
@@ -1076,7 +1075,7 @@ fn generate_workspace_lock(workspace: &WorkspaceManifest) -> Result<(), String> 
             .iter_mut()
             .find(|package| package.name == member.name && package.version == member.version)
         else {
-            return Err(format!("求解结果缺 workspace 成员 {}", member.name));
+            return Err(format!("resolution result is missing workspace member {}", member.name));
         };
         for dep in member
             .deps
@@ -1105,7 +1104,7 @@ fn generate_workspace_lock(workspace: &WorkspaceManifest) -> Result<(), String> 
                     })
                     .cloned(),
             }
-            .ok_or_else(|| format!("Dev 依赖 {} 没有已解版本", dep.package))?;
+            .ok_or_else(|| format!("Dev dependency {} has no resolved version", dep.package))?;
             let ambiguous = plan
                 .version_map
                 .get(&dep.package)
@@ -1125,8 +1124,8 @@ fn generate_workspace_lock(workspace: &WorkspaceManifest) -> Result<(), String> 
 fn write_lock_atomic(path: &Path, lock: &Lockfile) -> Result<(), String> {
     let tmp = path.with_extension(format!("lock.mirvm-{}", std::process::id()));
     std::fs::write(&tmp, lock.serialize())
-        .map_err(|e| format!("写 {} 失败: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("发布 {} 失败: {e}", path.display()))
+        .map_err(|e| format!("write {} failed: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("publish {} failed: {e}", path.display()))
 }
 
 fn sort_packages_dependency_first(manifests: &mut Vec<PackageManifest>) {
@@ -1149,7 +1148,7 @@ fn sort_packages_dependency_first(manifests: &mut Vec<PackageManifest>) {
             })
             .map(|(name, _)| name.clone());
         let Some(name) = ready else {
-            // Cargo 会在后续依赖解析响亮报告环；这里保持确定顺序，不伪造诊断。
+            // Cargo will loudly report cycles in later dependency resolution; here we keep a deterministic order and do not fabricate diagnostics.
             ordered.extend(remaining.into_values());
             break;
         };
@@ -1197,13 +1196,13 @@ fn compile_root_lib(
         Ok(status) if status.success() => Ok(()),
         Ok(_) => {
             eprintln!(
-                "mirvm: lib 编译失败：根包 {} {}",
+                "mirvm: lib compilation failed: root package {} {}",
                 manifest.name, manifest.version
             );
             Err(ExitCode::from(1))
         }
         Err(e) => {
-            eprintln!("mirvm: lib 编译子进程启动失败：{e}");
+            eprintln!("mirvm: lib compilation child process failed to start: {e}");
             Err(ExitCode::from(1))
         }
     }
@@ -1247,13 +1246,13 @@ fn compile_root_proc_macro(
         Ok(status) if status.success() => Ok(()),
         Ok(_) => {
             eprintln!(
-                "mirvm: proc-macro 编译失败：根包 {} {}",
+                "mirvm: proc-macro compilation failed: root package {} {}",
                 manifest.name, manifest.version
             );
             Err(ExitCode::from(1))
         }
         Err(error) => {
-            eprintln!("mirvm: proc-macro 编译子进程启动失败：{error}");
+            eprintln!("mirvm: proc-macro compilation child process failed to start: {error}");
             Err(ExitCode::from(1))
         }
     }
@@ -1327,7 +1326,7 @@ fn write_root_recipe(
         .build_dir(&manifest.name, root_fp)
         .join("test-recipes");
     std::fs::create_dir_all(&dir).unwrap_or_else(|e| {
-        eprintln!("mirvm: 创建测试配方目录 {} 失败: {e}", dir.display());
+        eprintln!("mirvm: failed to create test recipe directory {}: {e}", dir.display());
         std::process::exit(1);
     });
     let kind = format!("{:?}", target.kind).to_ascii_lowercase();
@@ -1353,10 +1352,10 @@ fn write_root_recipe(
             .display()
             .to_string(),
     };
-    let bytes = serde_json::to_vec(&recipe).expect("测试配方序列化失败");
+    let bytes = serde_json::to_vec(&recipe).expect("test recipe serialization failed");
     if std::fs::read(&path).ok().as_deref() != Some(bytes.as_slice()) {
         std::fs::write(&path, bytes).unwrap_or_else(|e| {
-            eprintln!("mirvm: 写测试配方 {} 失败: {e}", path.display());
+            eprintln!("mirvm: failed to write test recipe {}: {e}", path.display());
             std::process::exit(1);
         });
     }
@@ -1419,9 +1418,9 @@ fn remove_output_arg(args: &[String]) -> Vec<String> {
     out
 }
 
-/// rustdoc `--test-builder` 入口。库 bundle 用真 rustc 生成带 MIR 的
-/// metadata-only rlib；bin 先做真 rustc 类型检查，再把目标路径发布为
-/// mirvm 启动器。rustdoc 因而仍能自己判断 compile_fail。
+/// rustdoc `--test-builder` entry. The lib bundle uses real rustc to produce a MIR-bearing
+/// metadata-only rlib; bin first does real rustc type checking, then publishes the target path as a
+/// mirvm launcher. rustdoc can therefore still decide compile_fail itself.
 pub fn run_doctest_builder(argv: impl Iterator<Item = String>) -> ExitCode {
     let args: Vec<String> = argv.collect();
     let crate_type = doctest_crate_type(&args).unwrap_or_default();
@@ -1437,17 +1436,17 @@ pub fn run_doctest_builder(argv: impl Iterator<Item = String>) -> ExitCode {
             Ok(status) if status.success() => ExitCode::SUCCESS,
             Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
             Err(error) => {
-                eprintln!("mirvm doctest builder: 启动 rustc 失败: {error}");
+                eprintln!("mirvm doctest builder: failed to start rustc: {error}");
                 ExitCode::from(1)
             }
         };
     }
     if crate_type != "bin" {
-        eprintln!("mirvm doctest builder: 不支持的 crate type `{crate_type}`");
+        eprintln!("mirvm doctest builder: unsupported crate type `{crate_type}`");
         return ExitCode::from(1);
     }
     let Some(output) = arg_value(&args, "-o").map(PathBuf::from) else {
-        eprintln!("mirvm doctest builder: bin 编译缺少 -o");
+        eprintln!("mirvm doctest builder: bin compilation is missing -o");
         return ExitCode::from(1);
     };
     let check_dir = output
@@ -1456,7 +1455,7 @@ pub fn run_doctest_builder(argv: impl Iterator<Item = String>) -> ExitCode {
         .join("mirvm-check");
     if let Err(error) = std::fs::create_dir_all(&check_dir) {
         eprintln!(
-            "mirvm doctest builder: 创建检查目录 {} 失败: {error}",
+            "mirvm doctest builder: failed to create check directory {}: {error}",
             check_dir.display()
         );
         return ExitCode::from(1);
@@ -1474,7 +1473,7 @@ pub fn run_doctest_builder(argv: impl Iterator<Item = String>) -> ExitCode {
         Ok(status) if status.success() => {}
         Ok(status) => return ExitCode::from(status.code().unwrap_or(1) as u8),
         Err(error) => {
-            eprintln!("mirvm doctest builder: 启动 rustc 检查失败: {error}");
+            eprintln!("mirvm doctest builder: failed to start rustc check: {error}");
             return ExitCode::from(1);
         }
     }
@@ -1495,7 +1494,7 @@ pub fn run_doctest_builder(argv: impl Iterator<Item = String>) -> ExitCode {
     let bytes = match serde_json::to_vec(&recipe) {
         Ok(bytes) => bytes,
         Err(error) => {
-            eprintln!("mirvm doctest builder: 配方序列化失败: {error}");
+            eprintln!("mirvm doctest builder: recipe serialization failed: {error}");
             return ExitCode::from(1);
         }
     };
@@ -1504,7 +1503,7 @@ pub fn run_doctest_builder(argv: impl Iterator<Item = String>) -> ExitCode {
         std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, &recipe_path))
     {
         eprintln!(
-            "mirvm doctest builder: 发布配方 {} 失败: {error}",
+            "mirvm doctest builder: failed to publish recipe {}: {error}",
             recipe_path.display()
         );
         return ExitCode::from(1);
@@ -1517,7 +1516,7 @@ pub fn run_doctest_builder(argv: impl Iterator<Item = String>) -> ExitCode {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 eprintln!(
-                    "mirvm doctest builder: 替换输出 {} 失败: {error}",
+                    "mirvm doctest builder: failed to replace output {}: {error}",
                     output.display()
                 );
                 return ExitCode::from(1);
@@ -1526,13 +1525,13 @@ pub fn run_doctest_builder(argv: impl Iterator<Item = String>) -> ExitCode {
         let self_exe = match std::env::current_exe() {
             Ok(path) => path,
             Err(error) => {
-                eprintln!("mirvm doctest builder: current_exe 失败: {error}");
+                eprintln!("mirvm doctest builder: current_exe failed: {error}");
                 return ExitCode::from(1);
             }
         };
         if let Err(error) = symlink(self_exe, &output) {
             eprintln!(
-                "mirvm doctest builder: 创建启动器 {} 失败: {error}",
+                "mirvm doctest builder: failed to create launcher {}: {error}",
                 output.display()
             );
             return ExitCode::from(1);
@@ -1541,7 +1540,7 @@ pub fn run_doctest_builder(argv: impl Iterator<Item = String>) -> ExitCode {
     }
     #[cfg(not(unix))]
     {
-        eprintln!("mirvm doctest builder: runner 当前只支持 Unix 主机");
+        eprintln!("mirvm doctest builder: runner currently only supports Unix hosts");
         ExitCode::from(1)
     }
 }
@@ -1572,7 +1571,7 @@ fn run_doctest_task(task: &DoctestTask, sysroot: &Path, test_args: &[String], qu
     code
 }
 
-/// CLI 启动最早期用 argv[0] 识别 `CARGO_BIN_EXE_*` 启动器。
+/// CLI startup uses argv[0] in the earliest phase to recognize `CARGO_BIN_EXE_*` launchers.
 pub fn root_launcher_recipe(argv0: &Path) -> Option<PathBuf> {
     let recipe = launcher_recipe_path(argv0);
     recipe.is_file().then_some(recipe)
@@ -1593,7 +1592,7 @@ fn write_bin_launcher(
         .build_dir(&manifest.name, root_fp)
         .join("bin-launchers");
     std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("创建 bin 启动器目录 {} 失败: {e}", dir.display()))?;
+        .map_err(|e| format!("failed to create bin launcher directory {}: {e}", dir.display()))?;
     let safe_name: String = target
         .name
         .chars()
@@ -1613,10 +1612,10 @@ fn write_bin_launcher(
         cwd: manifest.root.clone(),
         argv0: launcher.display().to_string(),
     };
-    let bytes = serde_json::to_vec(&recipe).map_err(|e| format!("bin 配方序列化失败: {e}"))?;
+    let bytes = serde_json::to_vec(&recipe).map_err(|e| format!("bin recipe serialization failed: {e}"))?;
     if std::fs::read(&recipe_path).ok().as_deref() != Some(bytes.as_slice()) {
         std::fs::write(&recipe_path, bytes)
-            .map_err(|e| format!("写 bin 配方 {} 失败: {e}", recipe_path.display()))?;
+            .map_err(|e| format!("write bin recipe {} failed: {e}", recipe_path.display()))?;
     }
 
     #[cfg(unix)]
@@ -1629,17 +1628,17 @@ fn write_bin_launcher(
             match std::fs::remove_file(&launcher) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(format!("替换 bin 启动器 {} 失败: {e}", launcher.display())),
+                Err(e) => return Err(format!("replace bin launcher {} failed: {e}", launcher.display())),
             }
             symlink(self_exe, &launcher)
-                .map_err(|e| format!("创建 bin 启动器 {} 失败: {e}", launcher.display()))?;
+                .map_err(|e| format!("create bin launcher {} failed: {e}", launcher.display()))?;
         }
         Ok(launcher)
     }
     #[cfg(not(unix))]
     {
         let _ = self_exe;
-        Err("CARGO_BIN_EXE 启动器当前只支持 Unix 主机".into())
+        Err("CARGO_BIN_EXE launcher currently only supports Unix hosts".into())
     }
 }
 
@@ -1728,17 +1727,17 @@ mod capture_argv_tests {
     }
 }
 
-/// `__cless-run-root <recipe> [program args]` 子进程入口。
+/// `__cless-run-root <recipe> [program args]` child entry point.
 pub fn run_root_recipe(argv: impl Iterator<Item = String>) -> ExitCode {
     let mut argv = argv.peekable();
     match crate::cli::take_internal_capture_directory(&mut argv) {
         Err(()) => {
-            eprintln!("mirvm capture: __cless-run-root 缺采集目录");
+            eprintln!("mirvm capture: __cless-run-root missing capture directory");
             return ExitCode::from(2);
         }
         Ok(Some(directory)) => {
             if crate::cli::set_forwarded_capture_directory(directory).is_err() {
-                eprintln!("mirvm capture: __cless-run-root 收到重复采集请求");
+                eprintln!("mirvm capture: __cless-run-root received duplicate capture request");
                 return ExitCode::from(2);
             }
         }
@@ -1755,32 +1754,32 @@ pub fn run_root_recipe(argv: impl Iterator<Item = String>) -> ExitCode {
             }
         };
     let Some(path) = argv.next() else {
-        crate::diagnostics::control(format_args!("mirvm: __cless-run-root 缺配方路径"));
+        crate::diagnostics::control(format_args!("mirvm: __cless-run-root missing recipe path"));
         return ExitCode::from(2);
     };
     let data = match std::fs::read(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::diagnostics::control(format_args!("mirvm: 读取测试配方 {path} 失败: {e}"));
+            crate::diagnostics::control(format_args!("mirvm: failed to read test recipe {path}: {e}"));
             return ExitCode::from(1);
         }
     };
     let recipe: RootRunRecipe = match serde_json::from_slice(&data) {
         Ok(r) => r,
         Err(e) => {
-            crate::diagnostics::control(format_args!("mirvm: 测试配方 {path} 损坏: {e}"));
+            crate::diagnostics::control(format_args!("mirvm: test recipe {path} corrupted: {e}"));
             return ExitCode::from(1);
         }
     };
     if let Err(e) = std::env::set_current_dir(&recipe.cwd) {
         crate::diagnostics::control(format_args!(
-            "mirvm: 测试工作目录 {} 不可进入: {e}",
+            "mirvm: test working directory {} is not accessible: {e}",
             recipe.cwd.display()
         ));
         return ExitCode::from(1);
     }
     for (key, value) in recipe.env {
-        // SAFETY: 独立子进程启动相，rustc/guest 线程尚未创建。
+        // SAFETY: independent child startup phase; rustc/guest threads have not been created.
         unsafe { std::env::set_var(key, value) };
     }
     let mut program_argv = vec![recipe.argv0];
@@ -1796,15 +1795,15 @@ pub fn run_root_recipe(argv: impl Iterator<Item = String>) -> ExitCode {
     )
 }
 
-/// `mirvm run <frontmatter 脚本>`（MIRVM_DEPS=self）：正文物化到脚本缓存目录
-/// （audit::script_cache_dir 同口径键），伪包 manifest 走同一 drive。
+/// `mirvm run <frontmatter script>` (MIRVM_DEPS=self): the body is materialized into the script cache directory
+/// (same key as audit::script_cache_dir), and the pseudo-package manifest goes through the same drive.
 pub fn run_script(file: &Path, program_args: &[String], ignore_rust_version: bool) -> ExitCode {
     let mut manifest = script_manifest(file);
     manifest.ignore_rust_version = ignore_rust_version;
     drive(&manifest, program_args, None, None)
 }
 
-/// `mirvm pack <frontmatter 脚本>` 的默认 self 路径。
+/// `mirvm pack <frontmatter script>` default self path.
 pub fn pack_script(file: &Path, out: &Path) -> ExitCode {
     let manifest = script_manifest(file);
     drive(&manifest, &[], None, Some(out))
@@ -1814,14 +1813,14 @@ fn script_manifest(file: &Path) -> PackageManifest {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("mirvm: 读取脚本 {} 失败: {e}", file.display());
+            eprintln!("mirvm: failed to read script {}: {e}", file.display());
             std::process::exit(1);
         }
     };
     let Some((manifest_text, body)) = crate::cli::parse_frontmatter_pub(&text) else {
         // 路由层（cli.rs run_main）保证只在有 frontmatter 时进来；
         // 裸单文件是形态 3 快路径，不经此
-        eprintln!("mirvm: {} 无 frontmatter（内部路由错误）", file.display());
+        eprintln!("mirvm: {} has no frontmatter (internal routing error)", file.display());
         std::process::exit(2);
     };
     let stem = file
@@ -1831,28 +1830,28 @@ fn script_manifest(file: &Path) -> PackageManifest {
     let cache = super::audit::script_cache_dir(file);
     let src_dir = cache.join("src");
     if let Err(e) = std::fs::create_dir_all(&src_dir) {
-        eprintln!("mirvm: 创建脚本缓存目录 {} 失败: {e}", src_dir.display());
+        eprintln!("mirvm: failed to create script cache directory {}: {e}", src_dir.display());
         std::process::exit(1);
     }
-    // 布局与 cargo 腿物化项目同形（cli.rs materialize_script：正文在
-    // <cache>/src/main.rs）——file!()/panic Location remap 后与 cargo 腿的
-    // "src/main.rs" 逐字节同（redb_kv/gix_pure 实锤）；root 仍 = <cache>
-    // （CARGO_MANIFEST_DIR 与 cargo 腿一致）。
+    // Layout is isomorphic to cargo-leg materialized projects (cli.rs materialize_script: body in
+    // <cache>/src/main.rs) — after file!()/panic Location remap it is byte-identical to the cargo leg's
+    // "src/main.rs" (redb_kv/gix_pure proven); root remains = <cache>
+    // (CARGO_MANIFEST_DIR matches cargo leg).
     let main_rs = src_dir.join("main.rs");
-    // write-if-changed：内容相同不重写——mtime 稳定是 cargo 指纹/L2 的共同前提
-    // （cli.rs materialize_script 同款纪律）
+    // write-if-changed: do not rewrite if content is identical — stable mtime is a shared prerequisite for cargo fingerprint/L2
+    // (same discipline as cli.rs materialize_script)
     if std::fs::read(&main_rs)
         .ok()
         .is_none_or(|old| old != body.as_bytes())
         && let Err(e) = std::fs::write(&main_rs, &body)
     {
-        eprintln!("mirvm: 写入 {} 失败: {e}", main_rs.display());
+        eprintln!("mirvm: write {} failed: {e}", main_rs.display());
         std::process::exit(1);
     }
     match PackageManifest::from_frontmatter_at(stem, &manifest_text, &cache, &main_rs) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("mirvm: 解析 {} 的 frontmatter 失败: {e}", file.display());
+            eprintln!("mirvm: failed to parse frontmatter of {}: {e}", file.display());
             std::process::exit(1);
         }
     }
@@ -1864,18 +1863,18 @@ fn drive(
     bin_sel: Option<&str>,
     pack_out: Option<&Path>,
 ) -> ExitCode {
-    // 1. P1 求解器：lock 在按 lock（闭合），lock 缺席 pubgrub fresh 解
+    // 1. P1 resolver: lock present use lock (closed), lock absent pubgrub fresh solve
     let mut registry = match Registry::open_for(&manifest.lock_root) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("mirvm: registry 打开失败: {e}");
+            eprintln!("mirvm: failed to open registry: {e}");
             std::process::exit(1);
         }
     };
     let plan = match resolve(manifest, &mut registry) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("mirvm: 依赖解析失败: {e}");
+            eprintln!("mirvm: dependency resolution failed: {e}");
             std::process::exit(1);
         }
     };
@@ -1883,11 +1882,11 @@ fn drive(
     if !lock_path.is_file()
         && let Err(error) = write_lock_atomic(&lock_path, &plan.lock)
     {
-        eprintln!("mirvm: 写入 {} 失败: {error}", lock_path.display());
+        eprintln!("mirvm: write {} failed: {error}", lock_path.display());
         std::process::exit(1);
     }
 
-    // 2. links 互斥（cargo 同：同一 links 值至多一个包；根包也参查）
+    // 2. links mutex (same as cargo: at most one package per links value; root package also checked)
     if let Err(e) =
         buildrs::check_links_unique(Some((&manifest.name, manifest.links.as_deref())), &plan)
     {
@@ -1895,33 +1894,33 @@ fn drive(
         std::process::exit(1);
     }
 
-    // 3. sysroot：MIRVM_SYSROOT 环境优先，否则自产（与 cli.rs run 路径同口径）
+    // 3. sysroot: MIRVM_SYSROOT env takes priority, otherwise self-built (same measure as cli.rs run path)
     let sysroot = match std::env::var_os("MIRVM_SYSROOT") {
         Some(p) => PathBuf::from(p),
         None => match crate::sysroot::ensure_sysroot() {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("mirvm: 构建 sysroot 失败: {e}");
+                eprintln!("mirvm: failed to build sysroot: {e}");
                 std::process::exit(1);
             }
         },
     };
 
-    // 4. 指纹 + 编译段（compile_plan 抽取件，D15 P4 切⑥a——drive 与
-    // sysroot 自管构建共用同一流水线；本段的 stamp/sysroot/rustflags 三
-    // 输入在 drive 侧的来源注释见下行各段）
+    // 4. fingerprint + compile segment (compile_plan extracted component, D15 P4 cut ⑥a — drive and
+    // sysroot self-build share the same pipeline; sources of this segment's stamp/sysroot/rustflags
+    // inputs on the drive side are annotated in the following segments)
     let layout = Layout::new();
-    // sysroot stamp 进指纹（sysroot 换代 ⇒ 全量重编）；ensure 之后必有值，
-    // 缺值回退字面量不致命（后果只是 fp 粗一档，不引入新错误路径）
+    // sysroot stamp enters fingerprint (sysroot generation change ⇒ full rebuild); after ensure there must be a value,
+    // fallback literal on absence is non-fatal (only makes fp coarser, no new error path)
     let stamp = crate::sysroot::current_stamp_value()
         .unwrap_or_else(|| "sysroot-stamp-unknown".to_string());
-    // rustflags（D15 P3 切⑤a）解析一次穿线到底：只进 target 侧参数
-    // （dep/bin 末尾追加），指纹全 unit 统一吃（host 侧跟随失效无害，
-    // v1 从简；解析/优先级/边界见 rustflags.rs 头注）
+    // rustflags (D15 P3 cut ⑤a) parsed once and threaded through: only enter target-side args
+    // (appended at end of dep/bin), fingerprint consumed uniformly for whole unit (host side following stale is harmless,
+    // v1 simplified; parsing/priority/boundaries see rustflags.rs header)
     let rustflags = match super::rustflags::from_env_and_disk(&manifest.root) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("mirvm: rustflags 解析失败: {e}");
+            eprintln!("mirvm: failed to parse rustflags: {e}");
             std::process::exit(1);
         }
     };
@@ -1937,7 +1936,7 @@ fn drive(
         false,
     ) {
         Ok(t) => t,
-        // 第一枚编译错误（worker 回传原文）——与串行同形响亮点名后退出
+        // first compile error (worker returns original text) — exit after loudly naming, same shape as serial
         Err(e) => {
             eprintln!("mirvm: {e}");
             std::process::exit(1);
@@ -1946,16 +1945,16 @@ fn drive(
     let UnitTables { outputs, re_ran } = compiled.tables;
     let fps = compiled.fps;
 
-    // 5b 起根 lib/bin 会话还需自家 exe（__cless-dep 通道）；unit 编译段的
-    // self_exe 在 compile_plan 内部，这里单取
-    let self_exe = std::env::current_exe().expect("current_exe 失败");
+    // 5b onward root lib/bin session also needs own exe (__cless-dep channel); compile_plan segment's
+    // self_exe is inside compile_plan, here we just take it
+    let self_exe = std::env::current_exe().expect("current_exe failed");
 
-    // 5. 根包 build.rs 同生命周期（根不是 unit：边表取 plan.root_deps，
-    // fp 单算；OUT_DIR/rustc-env/cfg 修正进 bin 会话）
-    // 根 lib target（切⑤a full 层迁移面，hexyl 实锤）：[lib]+[[bin]] 双
-    // target 时 bin 隐式依赖同名 lib——cargo 先把根 lib 编成 target rlib
-    // 再让 bin --extern 它。fp 与根 build.rs 共用 root_fingerprint（同包
-    // 同配方），故 fp 计算条件 = has_build_script || 有 lib target。
+    // 5. root build.rs same lifecycle (root is not a unit: edge table uses plan.root_deps,
+    // fp computed separately; OUT_DIR/rustc-env/cfg corrections enter bin session)
+    // root lib target (cut ⑤a full-layer migration surface, hexyl proven): when [lib]+[[bin]] dual
+    // targets, bin implicitly depends on the same-name lib — cargo first compiles root lib into target rlib
+    // then lets bin --extern it. fp shares root_fingerprint with root build.rs (same package same recipe),
+    // so fp computation condition = has_build_script || has lib target.
     let root_lib = manifest
         .targets
         .iter()
@@ -1974,34 +1973,34 @@ fn drive(
         ) {
             Ok(f) => f,
             Err(e) => {
-                eprintln!("mirvm: 根包指纹计算失败: {e}");
+                eprintln!("mirvm: root package fingerprint computation failed: {e}");
                 std::process::exit(1);
             }
         };
         root_fp = Some(fp);
     }
     if manifest.has_build_script {
-        let fp = root_fp.clone().expect("上一步已算");
-        // 根的 ran 无人消费（根无下游，links 传不到它头上），只走观测行
+        let fp = root_fp.clone().expect("computed in previous step");
+        // root's ran has no consumer (root has no downstream, links cannot reach it), only goes to observation line
         let (bo, _ran) = run_build_lifecycle_root(
             manifest, &plan, &fps, &layout, &fp, &outputs, &re_ran, false,
         );
         root_bo = Some(bo);
     }
 
-    // 5b. 根 lib target 编译（__cless-dep 通道，fp 命中跳过；根 build.rs
-    // 的 bo 修正与 OUT_DIR/rustc-env 同款注入——必须在根 build.rs 之后）
+    // 5b. root lib target compilation (__cless-dep channel, skip on fp hit; root build.rs
+    // bo corrections and OUT_DIR/rustc-env injected same way — must be after root build.rs)
     if let Some((lib_name, lib_path, lib_pm)) = &root_lib {
         if *lib_pm {
-            // proc-macro 根 lib + bin 组合（cargo 编 dylib 再 --extern）v1
-            // 未接——响亮拒绝记档，不静默错编
+            // proc-macro root lib + bin combination (cargo compiles dylib then --extern) not wired in v1
+            // — loudly reject and record, do not silently miscompile
             eprintln!(
-                "mirvm: 根包 {} 是 proc-macro lib 且带 bin，组合未接（P5 边界）",
+                "mirvm: root package {} is a proc-macro lib and has a bin, combination not wired (P5 boundary)",
                 manifest.name
             );
             std::process::exit(1);
         }
-        let fp = root_fp.as_ref().expect("root_lib 在场必已算 fp");
+        let fp = root_fp.as_ref().expect("root_lib present means fp must already be computed");
         let stem = format!("lib{}-{}", lib_name.replace('-', "_"), fp);
         let hit = layout.deps.join(format!("{stem}.rmeta")).is_file()
             && layout.deps.join(format!("{stem}.rlib")).is_file();
@@ -2022,7 +2021,7 @@ fn drive(
             );
             let mut cmd = std::process::Command::new(&self_exe);
             cmd.arg("__cless-dep").args(&args[1..]);
-            // 根包编译期 env（CARGO_PKG_* 全集 + manifest 两员，cargo 同）
+            // root package compile-time env (full CARGO_PKG_* set + two manifest entries, same as cargo)
             cmd.envs(manifest.pkg_env.iter());
             cmd.env("CARGO_CRATE_NAME", lib_name.replace('-', "_"));
             cmd.env("CARGO_MANIFEST_DIR", &manifest.root);
@@ -2040,7 +2039,7 @@ fn drive(
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!(
-                        "mirvm: lib 编译子进程启动失败（根包 {} {}）: {e}",
+                        "mirvm: lib compilation child process failed to start (root package {} {}): {e}",
                         manifest.name, manifest.version
                     );
                     std::process::exit(1);
@@ -2048,7 +2047,7 @@ fn drive(
             };
             if !status.success() {
                 eprintln!(
-                    "mirvm: lib 编译失败：根包 {} {}",
+                    "mirvm: lib compilation failed: root package {} {}",
                     manifest.name, manifest.version
                 );
                 std::process::exit(1);
@@ -2056,7 +2055,7 @@ fn drive(
         }
     }
 
-    // 6. bin：根 crate 走既有 MirvmCallbacks 会话（after_analysis 停，零产物）
+    // 6. bin: root crate goes through existing MirvmCallbacks session (stops at after_analysis, zero artifacts)
     let (bin_name, bin_path) = match manifest.runnable_bin_opt(bin_sel) {
         Ok(b) => b,
         Err(e) => {
@@ -2064,8 +2063,8 @@ fn drive(
             std::process::exit(1);
         }
     };
-    // SAFETY: 单线程启动相（rustc 会话未起、引擎未跑），env 写入无并发读者。
-    // bin 会话在同进程内（runner_main 的 env 回放同款 pattern）。
+    // SAFETY: single-threaded startup phase (rustc session not started, engine not running), env writes have no concurrent readers.
+    // bin session is in-process (same env-replay pattern as runner_main).
     unsafe {
         for (k, v) in &manifest.pkg_env {
             std::env::set_var(k, v);
@@ -2075,7 +2074,7 @@ fn drive(
         std::env::set_var("CARGO_MANIFEST_DIR", &manifest.root);
         std::env::set_var("CARGO_MANIFEST_PATH", manifest.root.join("Cargo.toml"));
         if let (Some(bo), Some(fp)) = (&root_bo, &root_fp) {
-            // 根 build.rs 的 rustc-env + OUT_DIR 进 bin 会话（env! 可读，cargo 同）
+            // root build.rs rustc-env + OUT_DIR enter bin session (readable by env!, same as cargo)
             std::env::set_var("OUT_DIR", layout.build_dir(&manifest.name, fp).join("out"));
             for (k, v) in &bo.envs {
                 std::env::set_var(k, v);
@@ -2086,7 +2085,7 @@ fn drive(
     let root_lib_ref = root_lib.as_ref().map(|(n, _, _)| {
         (
             n.as_str(),
-            root_fp.as_deref().expect("root_lib 在场必已算 fp"),
+            root_fp.as_deref().expect("root_lib present means fp must already be computed"),
         )
     });
     let args = schedule::bin_rustc_args(
@@ -2102,11 +2101,11 @@ fn drive(
         &rustflags,
         root_lib_ref,
     );
-    // argv0 = 合成产物路径（cargo run 的 argv0 语义 = 最终二进制路径；本会话
-    // 零产物，用 deps/<bin> 占位——guest 只见 argv 字符串，不读文件）
+    // argv0 = synthesized artifact path (cargo run argv0 semantics = final binary path; this session
+    // produces zero artifacts, use deps/<bin> as placeholder — guest only sees argv string, does not read file)
     let mut program_argv = vec![layout.deps.join(bin_name).display().to_string()];
     program_argv.extend(program_args.iter().cloned());
-    // 全程不 chdir：guest cwd = 调用者 cwd，与 cargo run 语义一致（E36 闭合）
+    // no chdir throughout: guest cwd = caller cwd, consistent with cargo run semantics (E36 closed)
     if let Some(out) = pack_out {
         crate::cli::pack_driver(args, program_argv, out.to_path_buf())
     } else {
@@ -2114,23 +2113,23 @@ fn drive(
     }
 }
 
-/// compile_plan 的返回件：完成表 + unit 指纹表（drive 的根包阶段还要拿
-/// fps 算根指纹——root_fingerprint 的 dep fp 成分；sysroot 构建不消费）。
+/// compile_plan return value: completion table + unit fingerprint table (drive's root package phase also uses
+/// fps to compute root fingerprint — dep fp component of root_fingerprint; sysroot build does not consume).
 pub struct CompiledPlan {
     pub tables: UnitTables,
     pub fps: Vec<String>,
 }
 
-/// unit 编译段（drive 原第 4 段，D15 P4 切⑥a 抽成共用件）：指纹 +
-/// host/target/build 集合 + unit 级 Kahn 就绪队列并行调度（run_scheduler）
-/// 跑完全部 unit 流水线。drive 与 sysroot 自管构建共用：
+/// unit compile segment (drive original segment 4, D15 P4 cut ⑥a extracted shared component): fingerprints +
+/// host/target/build sets + unit-level Kahn ready-queue parallel scheduling (run_scheduler)
+/// runs all unit pipelines. Shared by drive and sysroot self-build:
 ///
-/// - drive 传 MIR sysroot 与其 stamp（本跑编译的消费底座）；
-/// - sysroot 构建传 **toolchain sysroot** 与其盖戳——产出物不能当自己的
-///   编译输入（编译 std 的 --sysroot 只能是发行版工具链，鸡生蛋）。
+/// - drive passes MIR sysroot and its stamp (the consumption base for this run's compilation);
+/// - sysroot build passes **toolchain sysroot** and its stamp — outputs cannot be their own
+///   compile input (the --sysroot for compiling std can only be the distro toolchain, chicken-and-egg).
 ///
-/// 失败 = 第一枚编译错误原文（调用方补「mirvm: 」前缀响亮退出，
-/// 与抽取前逐字节同形）。
+/// Failure = first compile error original text (caller prepends `mirvm: ` prefix and exits loudly,
+/// byte-identical to before extraction).
 #[allow(clippy::too_many_arguments)]
 pub fn compile_plan(
     plan: &ResolvePlan,
@@ -2143,38 +2142,38 @@ pub fn compile_plan(
     root_proc_macro: bool,
     quiet_build_warnings: bool,
 ) -> Result<CompiledPlan, String> {
-    // unit 级 Kahn 就绪队列并行调度（D15 P3 切⑤c）：unit 的全部依赖
-    // 「完成」（build.rs 生命周期 + host/target 编译按集合归属全结束）
-    // 即就绪；N 个 worker 各把领到的 unit 的完整流水线（build.rs 判定/
-    // 执行 → 编译）跑完，完成表只在主线程汇集。
+    // unit-level Kahn ready-queue parallel scheduling (D15 P3 cut ⑤c): a unit is ready when all its deps are 'done'
+    // (build.rs lifecycle + host/target compilation all finished according to set membership);
+    // N workers each run the full pipeline of assigned units (build.rs decision/
+    // execution → compilation), completion table is only gathered on the main thread.
     for d in [&layout.deps, &layout.host_deps, &layout.build_root] {
-        std::fs::create_dir_all(d).map_err(|e| format!("创建 {} 失败: {e}", d.display()))?;
+        std::fs::create_dir_all(d).map_err(|e| format!("create {} failed: {e}", d.display()))?;
     }
     let fps = schedule::fingerprints(plan, profile, stamp, rustflags)
-        .map_err(|e| format!("依赖指纹计算失败: {e}"))?;
+        .map_err(|e| format!("dependency fingerprint computation failed: {e}"))?;
     let host_set = schedule::host_closure_for_root(plan, root_proc_macro);
     let target_set = schedule::target_units(plan);
     let build_set = schedule::build_closure(plan, root_has_build_script);
-    let self_exe = std::env::current_exe().expect("current_exe 失败");
+    let self_exe = std::env::current_exe().expect("current_exe failed");
     let jobs = cless_jobs();
     let (dependents, mut indeg) = schedule::dep_graph(plan);
-    // worker 共享的只读上下文（thread::scope 借用，调度期全程不可变——完成
-    // 表不跨线程，无锁必要）。线程安全核对（切⑤c 设计钉）：
-    // - driver 进程内**没有** rustc 会话——编译全在 __cless-dep/真 rustc
-    //   子进程，worker 间无编译器全局状态；
-    // - env 写入全在 Command 实例上（per-child，线程安全）；worker 内禁止
-    //   std::env::set_var（全 crate 核对：set_var 只在 bin 阶段 = 汇合后
-    //   主线程；build script 的 env 全走 Command.envs）。std::env::var
-    //   读取（rerun 门 env_get、build_script_env 的 CARGO_HOME 等）与
-    //   set_var 不并发，安全；
-    // - 目录创建 create_dir_all 幂等；产物内容寻址（fp 盖戳），不同 unit
-    //   不同 stem 无两名冲突；同 fp 重复 unit（同包同版本同 feature 的
-    //   Normal/Build 双 unit——fp 不含 class 会撞名）由 FpLocks 把整个
-    //   流水线互斥：后到者开工时产物已齐、rerun 门读存档跳过，与串行
-    //   「先行者跑、后到者全跳过」逐字节同效；
-    // - MIRVM_DEBUG_BLDRS 观测行与子进程诊断在 jobs>1 时允许交错（debug
-    //   旋钮；对拍轴 = jobs=1 与串行同序 + 默认 N 的 corpus 判官——
-    //   program 输出在汇合后的 bin 会话，天然串行）。
+    // Worker shared read-only context (borrowed via thread::scope, immutable for the whole scheduling phase — completion
+    // table is not cross-thread, no lock needed). Thread-safety check (cut ⑤c design pin):
+    // - no rustc session inside the driver process — compilation is entirely in __cless-dep/real-rustc
+    //   child processes, no compiler global state between workers;
+    // - all env writes are on Command instances (per-child, thread-safe); std::env::set_var is forbidden
+    //   inside workers (whole-crate check: set_var only in bin phase = main thread after convergence;
+    //   build script env all goes through Command.envs). std::env::var
+    //   reads (rerun gate env_get, build_script_env's CARGO_HOME, etc.) do not race
+    //   with set_var, safe;
+    // - directory creation create_dir_all is idempotent; artifact content-addressed (fp stamped), different units
+    //   use different stems so no name collision; same-fp duplicate units (Normal/Build dual units with same
+    //   package/version/feature — fp omits class so names collide) are serialized by FpLocks over the whole
+    //   pipeline: when the late worker starts, artifacts are already complete and rerun gate reads archive to skip,
+    //   byte-identical to serial 'first runner runs, late runners all skip';
+    // - MIRVM_DEBUG_BLDRS observation lines and child diagnostics may interleave when jobs>1 (debug
+    //   knob; differential anchor = jobs=1 matches serial order + default N corpus judge —
+    //   program output is in the converged bin session, naturally serial).
     let ctx = SharedCtx {
         plan,
         profile,
@@ -2214,15 +2213,15 @@ pub fn compile_plan(
     Ok(CompiledPlan { tables, fps })
 }
 
-/// 并发度（切⑤c）：MIRVM_CLESS_JOBS 覆盖，缺省 available_parallelism
-/// （拿不到回退 1）。**=1 时派发序与旧串行 topo 序逐位一致——对拍调试锚，
-/// 钉**。非法值（非正整数）响亮拒绝退出。
+/// Concurrency (cut ⑤c): MIRVM_CLESS_JOBS override, default available_parallelism
+/// (fallback to 1 if unavailable). **=1 dispatch order matches old serial topo order bit-for-bit — differential debugging anchor,
+/// pinned**. Illegal values (non-positive integers) are loudly rejected and exit.
 fn cless_jobs() -> usize {
     match std::env::var("MIRVM_CLESS_JOBS") {
         Ok(raw) => match raw.parse::<usize>() {
             Ok(n) if n >= 1 => n,
             _ => {
-                eprintln!("mirvm: MIRVM_CLESS_JOBS={raw} 无效（应为正整数）");
+                eprintln!("mirvm: MIRVM_CLESS_JOBS={raw} invalid (must be a positive integer)");
                 std::process::exit(1);
             }
         },
@@ -2232,8 +2231,8 @@ fn cless_jobs() -> usize {
     }
 }
 
-/// worker 共享的只读上下文（thread::scope 借用；调度期全程不可变——完成表
-/// 不跨线程，无锁必要）。线程安全核对明细见 drive() 第 4 段头注。
+/// Worker shared read-only context (borrowed via thread::scope; immutable for the whole scheduling phase — completion table
+/// is not cross-thread, no lock needed). Thread-safety check details see drive() segment 4 header note.
 struct SharedCtx<'a> {
     plan: &'a ResolvePlan,
     profile: &'a super::manifest::ProfileFlags,
@@ -2246,14 +2245,15 @@ struct SharedCtx<'a> {
     target_set: &'a BTreeSet<usize>,
     build_set: &'a BTreeSet<usize>,
     quiet_build_warnings: bool,
-    /// 同 fp 重复 unit 的流水线互斥锁表（drive() 头注第三条）。
+    /// Pipeline mutex lock table for same-fp duplicate units (drive() header note item 3).
     fp_locks: FpLocks,
 }
 
-/// fp → 互斥锁的懒建表：同包同版本同 feature 的 Normal/Build 双 unit 的
-/// fp 相同（fp 不含 class）会撞产物名/build 目录——整个流水线按 fp 互斥，
-/// 后到者开工时产物已齐、rerun 门读存档跳过，与串行「先行者跑、后到者
-/// 全跳过」同效。锁表本体只在取锁瞬间持有；唯一 fp 的锁零竞争。
+/// Lazy fp → mutex table: Normal/Build dual units with same package/version/feature have the same fp (fp omits class)
+/// and collide on artifact names/build dirs — the whole pipeline is mutexed by fp; when the late worker starts,
+/// artifacts are already complete and the rerun gate reads the archive to skip, same effect as serial
+/// 'first runner runs, late runners all skip'. The lock table itself is only held during lock acquisition;
+/// unique-fp locks have zero contention.
 #[derive(Default)]
 struct FpLocks(std::sync::Mutex<BTreeMap<String, std::sync::Arc<std::sync::Mutex<()>>>>);
 
@@ -2261,53 +2261,53 @@ impl FpLocks {
     fn lock_for(&self, fp: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
         self.0
             .lock()
-            .expect("fp 锁表中毒（内部错误）")
+            .expect("fp lock table poisoned (internal error)")
             .entry(fp.to_string())
             .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(())))
             .clone()
     }
 }
 
-/// 完成表（只归主线程所有：worker 开工所需的依赖侧输入——DEP_* env、
-/// 传递 -L 汇集、links 重跑名单——由主线程在**派发时**从此表算好随
-/// WorkMsg 带走；此刻全部依赖必已完成，取值与串行版在 unit 开头算的
-/// 逐位相等）。compile_plan 的返回件（D15 P4 切⑥a 起 pub——drive 的
-/// 根包阶段消费；sysroot 构建取 Ok 即罢不读字段）。
+/// Completion table (owned only by main thread: dependency-side inputs needed by workers — DEP_* env,
+/// transitive -L aggregation, links rerun list — are computed from this table by the main thread at **dispatch** time
+/// and carried along with WorkMsg; at that moment all deps must be done, values are bit-identical
+/// to the serial version computed at unit start). compile_plan return value (pub since D15 P4 cut ⑥a —
+/// consumed by drive's root package phase; sysroot build takes Ok and does not read fields).
 #[derive(Default)]
 pub struct UnitTables {
-    /// unit 下标 → 已执行的 BuildOutput（本 unit 编译修正 + 依赖者 -L
-    /// 汇集 + 直接依赖者 build script 的 DEP_* 三处消费）。
+    /// unit index → executed BuildOutput (consumed in three places: this unit's compilation corrections, dependents' -L
+    /// aggregation, direct dependents' build script DEP_*).
     pub outputs: BTreeMap<usize, BuildOutput>,
-    /// 本次会话真正重跑了 build.rs 的 unit（切⑤b 条件 4 links 传递：
-    /// 直接依赖中带 links 的包在 re_ran ⇒ 依赖者也重跑，DEP_* 输入可能变）。
+    /// Units whose build.rs was actually rerun in this session (cut ⑤b condition 4 links propagation:
+    /// a package with links in direct dependencies being in re_ran ⇒ dependent also reruns, DEP_* input may change).
     pub re_ran: BTreeSet<usize>,
 }
 
-/// 一个 unit 的开工令（主线程派发时算好全部依赖侧输入，见 UnitTables 注；
-/// fp 命中的 unit 也照算——纯计算无输出，换来 worker 零访问完成表）。
+/// A unit's work order (main thread computes all dependency-side inputs at dispatch time, see UnitTables note;
+/// also computed for fp-hit units — pure computation with no output, in exchange workers never access the completion table).
 struct WorkMsg {
     ix: usize,
-    /// 跑 build.rs 生命周期（has_build_script ∧ 在任一编译集；孤儿
-    /// build-dep 不跑——父包没 build.rs 的那种 cargo 本不编译，跑它的
-    /// build.rs 是越权执行）
+    /// Run build.rs lifecycle (has_build_script ∧ in any compile set; orphan
+    /// build-deps do not run — cargo does not compile the kind whose parent has no build.rs,
+    /// running its build.rs is overreach)
     run_build: bool,
-    /// 直接依赖的 DEP_* env（dep_metadata_env 同口径；run_build=false 时空）
+    /// DEP_* env from direct dependencies (same measure as dep_metadata_env; empty when run_build=false)
     dep_env: BTreeMap<String, String>,
-    /// 直接依赖中带 links 且本会话已重跑的包名（rerun 门条件 4）
+    /// Names of packages with links in direct dependencies that reran in this session (rerun gate condition 4)
     dep_links_reran: Vec<String>,
-    /// 传递 -L 汇集（aggregate_link_searches 同口径；不在任何编译集时空）
+    /// Transitive -L aggregation (same measure as aggregate_link_searches; empty when not in any compile set)
     searches: Vec<String>,
 }
 
-/// 一个 unit 的完成回执（worker → 主线程）。
+/// A unit's completion receipt (worker → main thread).
 struct PerUnitDone {
-    /// build.rs 产物（没跑 build.rs 的 unit 为 None）
+    /// build.rs output (None for units that did not run build.rs)
     bo: Option<BuildOutput>,
-    /// 本次是否真重跑了 build.rs
+    /// whether build.rs was actually rerun this time
     ran: bool,
 }
 
-/// 派发令构造（主线程）：集合归属判定 + 依赖侧输入计算。
+/// Work order construction (main thread): set membership decision + dependency-side input computation.
 fn build_work_msg(ctx: &SharedCtx, t: &UnitTables, ix: usize) -> WorkMsg {
     let u = &ctx.plan.units[ix];
     let in_host = ctx.host_set.contains(&ix) || ctx.build_set.contains(&ix);
@@ -2316,8 +2316,8 @@ fn build_work_msg(ctx: &SharedCtx, t: &UnitTables, ix: usize) -> WorkMsg {
     let (dep_env, dep_links_reran) = if run_build {
         (
             buildrs::dep_metadata_env(ctx.plan, &u.deps, &t.outputs),
-            // 条件 4 links 传递：直接依赖中带 links 且本次重跑了的包
-            // （DEP_* 只给直接依赖者——传递再远一层由各层自己判定覆盖）
+            // Condition 4 links propagation: packages with links in direct dependencies that reran this time
+            // (DEP_* only goes to direct dependents — further propagation is decided/covered by each layer itself)
             u.deps
                 .iter()
                 .filter(|d| t.re_ran.contains(&d.unit) && ctx.plan.units[d.unit].links.is_some())
@@ -2341,16 +2341,16 @@ fn build_work_msg(ctx: &SharedCtx, t: &UnitTables, ix: usize) -> WorkMsg {
     }
 }
 
-/// 一个 unit 的完整流水线（worker 线程）：fp 锁互斥（同 fp 重复 unit）→
-/// build.rs 生命周期 → host 侧编译 → target 侧编译；命中的阶段照旧跳过
-/// （**锁内**查盘——同 fp 先行者的产物必须可见才算命中）。失败回传错误
-/// 原文（「mirvm: 」前缀由主线程汇合后补，与串行文案逐字节同形）。
+/// A unit's full pipeline (worker thread): fp-lock mutex (same-fp duplicate units) →
+/// build.rs lifecycle → host-side compile → target-side compile; hit stages are skipped as usual
+/// (**disk checked inside the lock** — artifacts from same-fp predecessor must be visible to count as hit). Failure returns
+/// original error text (`mirvm: ` prefix added by main thread after convergence, byte-identical to serial text).
 fn run_unit_pipeline(msg: WorkMsg, ctx: &SharedCtx) -> Result<PerUnitDone, String> {
     let ix = msg.ix;
     let u = &ctx.plan.units[ix];
     let fp = &ctx.fps[ix];
-    // 同 fp 重复 unit 互斥（锁中毒只可能来自先行 worker 恐慌——内部错误已
-    // 在收尾，取内层继续，不叠加失败）
+    // Same-fp duplicate unit mutex (lock poisoning can only come from a predecessor worker panic — internal error already
+    // finalized at that point, take inner and continue, do not stack failures)
     let fp_mutex = ctx.fp_locks.lock_for(fp);
     let _fp_guard = fp_mutex.lock().unwrap_or_else(|e| e.into_inner());
     let stem = format!("lib{}-{}", u.lib_name, fp);
@@ -2358,14 +2358,14 @@ fn run_unit_pipeline(msg: WorkMsg, ctx: &SharedCtx) -> Result<PerUnitDone, Strin
         bo: None,
         ran: false,
     };
-    // build.rs 生命周期（就绪判定保证其 build-deps 及其 build.rs 都已完成）
+    // build.rs lifecycle (ready decision guarantees its build-deps and their build.rs are all done)
     if msg.run_build {
         let (bo, ran) = run_build_lifecycle(u, ix, ctx, msg.dep_env, msg.dep_links_reran)?;
         done.ran = ran;
         done.bo = Some(bo);
     }
     let bo = done.bo.as_ref();
-    // host 侧：proc-macro 本体产 dylib；闭包普通单元（含 build-deps 闭包）产 host rlib
+    // host side: proc-macro proper produces dylib; closure normal units (including build-deps closure) produce host rlib
     if ctx.host_set.contains(&ix) || ctx.build_set.contains(&ix) {
         let hit = if u.proc_macro {
             ctx.layout
@@ -2411,9 +2411,9 @@ fn run_unit_pipeline(msg: WorkMsg, ctx: &SharedCtx) -> Result<PerUnitDone, Strin
             run_compile(&mut cmd, u, what)?;
         }
     }
-    // target 侧：照旧 __cless-dep（-Zno-codegen rlib）
+    // target side: same as before __cless-dep (-Zno-codegen rlib)
     if ctx.target_set.contains(&ix) {
-        // 指纹命中：内容寻址，同名产物即同内容，跳过
+        // fingerprint hit: content-addressed, same-name artifact means same content, skip
         let hit = ctx.layout.deps.join(format!("{stem}.rmeta")).is_file()
             && ctx.layout.deps.join(format!("{stem}.rlib")).is_file();
         if !hit {
@@ -2438,12 +2438,12 @@ fn run_unit_pipeline(msg: WorkMsg, ctx: &SharedCtx) -> Result<PerUnitDone, Strin
     Ok(done)
 }
 
-/// 一个 unit 的 build.rs 全生命周期：build script 编译（fp 命中跳过）→
-/// rerun 判定（切⑤b：buildrs::should_rerun，cargo 同语义）——跳过则读
-/// output.txt 重解析回放 BuildOutput，跑则以 cargo 兼容 env 执行并写存档
-/// （执行成功后——失败本函数已回传错误，无半存档）→ (BuildOutput, 是否真跑)。
-/// `dep_env`/`dep_links_reran` 由主线程派发时算好捎来（WorkMsg 注）。
-/// 任何一步失败回传错误原文（主线程汇合后响亮点名）。
+/// A unit's build.rs full lifecycle: build script compilation (skip on fp hit) →
+/// rerun decision (cut ⑤b: buildrs::should_rerun, same semantics as cargo) — if skipped, read
+/// output.txt and reparse to replay BuildOutput; if run, execute with cargo-compatible env and write archive
+/// (only after successful execution — failure already returned by this function, no partial archive) → (BuildOutput, whether it actually ran).
+/// `dep_env`/`dep_links_reran` are computed and carried by the main thread at dispatch time (see WorkMsg note).
+/// Any step failure returns original error text (main thread loudly names after convergence).
 fn run_build_lifecycle(
     u: &Unit,
     ix: usize,
@@ -2455,7 +2455,7 @@ fn run_build_lifecycle(
     let bdir = ctx.layout.build_dir(&u.package, fp);
     if let Err(e) = std::fs::create_dir_all(bdir.join("out")) {
         return Err(format!(
-            "创建 build 目录 {} 失败（{} {}）: {e}",
+            "failed to create build directory {} ({} {}): {e}",
             bdir.display(),
             u.package,
             u.version
@@ -2468,8 +2468,8 @@ fn run_build_lifecycle(
         let mut cmd = std::process::Command::new(&args[0]);
         cmd.args(&args[1..]);
         apply_unit_env(&mut cmd, u);
-        // 被编译的 crate 是 build script 本体（cargo 同：CARGO_CRATE_NAME
-        // 跟着被编译 crate 走，不是所属包 lib 名）
+        // The compiled crate is the build script itself (same as cargo: CARGO_CRATE_NAME
+        // follows the compiled crate, not the owning package's lib name)
         cmd.env("CARGO_CRATE_NAME", "build_script_build");
         run_compile(&mut cmd, u, "build script")?;
     }
@@ -2496,8 +2496,8 @@ fn run_build_lifecycle(
     )
 }
 
-/// 根包 build.rs 生命周期（根不是 unit：pkg_env/features/profile 由
-/// manifest/plan 直供；根是本地 path 包，warning 照常显示）。
+/// Root package build.rs lifecycle (root is not a unit: pkg_env/features/profile supplied
+/// directly by manifest/plan; root is a local path package, warnings shown normally).
 #[allow(clippy::too_many_arguments)]
 fn run_build_lifecycle_root(
     manifest: &PackageManifest,
@@ -2512,7 +2512,7 @@ fn run_build_lifecycle_root(
     let bdir = layout.build_dir(&manifest.name, root_fp);
     if let Err(e) = std::fs::create_dir_all(bdir.join("out")) {
         eprintln!(
-            "mirvm: 创建 build 目录 {} 失败（根包 {}）: {e}",
+            "mirvm: failed to create build directory {} (root package {}): {e}",
             bdir.display(),
             manifest.name
         );
@@ -2523,7 +2523,7 @@ fn run_build_lifecycle_root(
         let args = schedule::root_build_script_rustc_args(manifest, plan, fps, layout, root_fp);
         let mut cmd = std::process::Command::new(&args[0]);
         cmd.args(&args[1..]);
-        // 根包编译期 env（CARGO_PKG_* 全集 + manifest 两员，cargo 同）
+        // root package compile-time env (full CARGO_PKG_* set + two manifest entries, same as cargo)
         cmd.envs(manifest.pkg_env.iter());
         cmd.env("CARGO_CRATE_NAME", "build_script_build");
         cmd.env("CARGO_MANIFEST_DIR", &manifest.root);
@@ -2535,7 +2535,7 @@ fn run_build_lifecycle_root(
             Ok(s) => s,
             Err(e) => {
                 eprintln!(
-                    "mirvm: build script 编译子进程启动失败（根包 {} {}）: {e}",
+                    "mirvm: build script compilation child process failed to start (root package {} {}): {e}",
                     manifest.name, manifest.version
                 );
                 std::process::exit(1);
@@ -2543,7 +2543,7 @@ fn run_build_lifecycle_root(
         };
         if !status.success() {
             eprintln!(
-                "mirvm: build script 编译失败：根包 {} {}",
+                "mirvm: build script compilation failed: root package {} {}",
                 manifest.name, manifest.version
             );
             std::process::exit(1);
@@ -2565,7 +2565,7 @@ fn run_build_lifecycle_root(
         .filter(|d| re_ran.contains(&d.unit) && plan.units[d.unit].links.is_some())
         .map(|d| plan.units[d.unit].package.clone())
         .collect();
-    // 根阶段在汇合后主线程跑——错误照旧响亮退出（文案与 worker 回传同形）
+    // root phase runs on main thread after convergence — errors still exit loudly (text same shape as worker returns)
     match rerun_gate(
         &manifest.name,
         &manifest.version.to_string(),
@@ -2585,14 +2585,14 @@ fn run_build_lifecycle_root(
     }
 }
 
-/// rerun 门（切⑤b）：判定（buildrs::should_rerun）→ 跳过则读存档
-/// output.txt 重解析回放（指令流零序列化失真，warning 按同门控从缓存
-/// 回放——cargo 同）；跑则执行 + 写 output.txt/rerun.txt 两份存档。
-/// MIRVM_DEBUG_BLDRS=1 时向 stderr 打 `bldrs run|skip <pkg> <原因>` 观测行
-/// （切⑤c：jobs>1 时各 worker 的观测行允许交错——debug 旋钮，非对拍面）。
-/// 返回 (BuildOutput, 本次是否真跑)；失败回传错误原文（调用方补「mirvm: 」
-/// 前缀响亮退出——主线程的根路径就地补，worker 路径汇合后补）。
-// 平铺参数先例同 run_build_lifecycle
+/// rerun gate (cut ⑤b): decision (buildrs::should_rerun) → if skip, read archive
+/// output.txt and reparse to replay (instruction stream zero serialization distortion, warnings replayed from cache
+/// under same gate — same as cargo); if run, execute + write both output.txt and rerun.txt archives.
+/// When MIRVM_DEBUG_BLDRS=1, print `bldrs run|skip <pkg> <reason>` observation line to stderr
+/// (cut ⑤c: observation lines from workers may interleave when jobs>1 — debug knob, not differential surface).
+/// Returns (BuildOutput, whether this run actually ran); failure returns original error text (caller prepends `mirvm: `
+/// prefix and exits loudly — root path on main thread prepends in place, worker path prepends after convergence).
+// flat parameter precedent same as run_build_lifecycle
 #[allow(clippy::too_many_arguments)]
 fn rerun_gate(
     pkg: &str,
@@ -2618,7 +2618,7 @@ fn rerun_gate(
         eprintln!("bldrs {} {pkg} {why}", if rerun { "run" } else { "skip" });
     }
     if !rerun {
-        // 跳过执行：output.txt 重解析即 BuildOutput（回放失败按损坏自愈落跑）
+        // skip execution: output.txt reparse is BuildOutput (replay failure treated as corrupted archive, self-healing by falling through to run)
         if let Ok(stdout) = std::fs::read_to_string(bdir.join("output.txt"))
             && let Ok(bo) = buildrs::parse_instructions(&stdout)
         {
@@ -2635,8 +2635,8 @@ fn rerun_gate(
         env,
         quiet_build_warnings,
     )?;
-    // 存档写失败不致命——下次 no-record 重跑自愈（磁盘层故障前序编译写已
-    // 先炸）；静默，不惊扰对拍 stderr
+    // archive write failure is non-fatal — next no-record rerun self-heals (disk-layer failure would have already blown
+    // earlier compilation writes); silent, does not disturb differential stderr
     let _ = buildrs::write_record(bdir, &stdout, &bo, from_registry, pkg, pkg_root, &env_get);
     Ok((bo, true))
 }
@@ -2651,9 +2651,9 @@ fn show_warnings(pkg: &str, ver: &str, from_registry: bool, bo: &BuildOutput, qu
     }
 }
 
-/// 执行 + 指令解析 + warning 回吐，返回 (BuildOutput, 原始 stdout)
-/// （原始 stdout 供调用方写 output.txt 存档——回放靠重解析，零序列化失真）。
-/// 失败回传错误原文（调用方补「mirvm: 」前缀响亮退出）。
+/// Execute + instruction parse + warning replay, returns (BuildOutput, raw stdout)
+/// (raw stdout for caller to write output.txt archive — replay relies on reparse, zero serialization distortion).
+/// Failure returns original error text (caller prepends `mirvm: ` prefix and exits loudly).
 fn exec_and_parse(
     pkg: &str,
     ver: &str,
@@ -2664,15 +2664,15 @@ fn exec_and_parse(
     quiet_build_warnings: bool,
 ) -> Result<(BuildOutput, String), String> {
     let stdout = buildrs::run_build_script(bexe, cwd, env)
-        .map_err(|e| format!("build script 执行失败（{pkg} {ver}）: {e}"))?;
+        .map_err(|e| format!("build script execution failed ({pkg} {ver}): {e}"))?;
     let bo = buildrs::parse_instructions(&stdout)
-        .map_err(|e| format!("build script 指令解析失败（{pkg} {ver}）: {e}"))?;
+        .map_err(|e| format!("build script instruction parse failed ({pkg} {ver}): {e}"))?;
     show_warnings(pkg, ver, from_registry, &bo, quiet_build_warnings);
     Ok((bo, stdout))
 }
 
-/// cargo 编译期 env 契约（源码 env! 可读）：CARGO_PKG_* 全集 + crate/manifest
-/// 三员（cargo 对每次 rustc 调用都设；host 真 rustc 与 __cless-dep 两侧同款）。
+/// cargo compile-time env contract (readable by source env!): full CARGO_PKG_* set + three crate/manifest
+/// entries (cargo sets these on every rustc call; same on both host real rustc and __cless-dep sides).
 fn apply_unit_env(cmd: &mut std::process::Command, u: &Unit) {
     cmd.envs(u.pkg_env.iter());
     cmd.env("CARGO_CRATE_NAME", &u.lib_name);
@@ -2683,8 +2683,8 @@ fn apply_unit_env(cmd: &mut std::process::Command, u: &Unit) {
     );
 }
 
-/// 本 unit build script 的编译期 env 注入：OUT_DIR + rustc-env（cargo 对
-/// 有 build script 的包编译时设；env! 可读）。
+/// This unit's build script compile-time env injection: OUT_DIR + rustc-env (set by cargo when compiling
+/// packages with a build script; readable by env!).
 fn apply_build_env(
     cmd: &mut std::process::Command,
     layout: &Layout,
@@ -2700,17 +2700,17 @@ fn apply_build_env(
     }
 }
 
-/// 编译子进程同步跑到底；启动/编译失败回传错误原文（what = 产物类别，
-/// 点名 crate——主线程汇合后补「mirvm: 」前缀响亮退出，与串行文案同形）。
+/// Compile child process runs synchronously to completion; startup/compile failure returns original error text (what = artifact category,
+/// names the crate — main thread prepends `mirvm: ` prefix and exits loudly after convergence, same shape as serial text).
 fn run_compile(cmd: &mut std::process::Command, u: &Unit, what: &str) -> Result<(), String> {
     let status = cmd.status().map_err(|e| {
         format!(
-            "{what} 编译子进程启动失败（{} {}）: {e}",
+            "{what} compilation child process failed to start ({} {}): {e}",
             u.package, u.version
         )
     })?;
     if !status.success() {
-        return Err(format!("{what} 编译失败：{} {}", u.package, u.version));
+        return Err(format!("{what} compilation failed: {} {}", u.package, u.version));
     }
     Ok(())
 }

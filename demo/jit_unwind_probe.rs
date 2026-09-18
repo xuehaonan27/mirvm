@@ -1,7 +1,7 @@
-//! T1-c unwind 产品化探针（m5.4-design §3.4）：
-//! try_call 着陆（Cleanup 边 panic → cleanup pad 在 JIT 帧内执行 + Drop
-//! 顺序与 native 一致）+ catch_unwind 捕获 + payload 保全 + Resume 续传。
-//! 三维（native / JIT-off / JIT=1）逐字节一致 + MIRVM_JIT_DEBUG 发布实证。
+//! T1-c unwind productization probe (m5.4-design §3.4):
+//! try_call landing (Cleanup-edge panic → cleanup pad executes inside JIT frame + Drop
+//! order matches native) + catch_unwind capture + payload preservation + Resume propagation.
+//! Byte-identical across three dimensions (native / JIT-off / JIT=1) + MIRVM_JIT_DEBUG release evidence.
 struct D(u64);
 impl Drop for D {
     fn drop(&mut self) {

@@ -1,15 +1,16 @@
 //! mirvm — Rust runtime with its own execution engine.
-//! 架构与决策见 DESIGN.md。engine 是 library（D10），CLI 只是薄壳。
+//! Architecture and design decisions are in DESIGN.md. The engine is the library (D10); the CLI is just a thin shell.
 
 #![feature(rustc_private)]
-#![feature(box_patterns)] // lower 匹配 MIR 的 Box 字段
-#![feature(cfg_sanitize)] // ctx.rs：TSan 配置下 Ctx dtor 的处置分歧
-#![feature(f16)] // D8c：引擎宿主直算 f16（rustc 下降到与 native 同一批转换/libm 符号）
-#![feature(f128)] // D8c：同上，f128（compiler-builtins __*tf* + glibc *f128 libm）
-#![feature(core_intrinsics)] // 原始 unwind 捕获，按 exception class 区分所有者
-#![feature(rustc_attrs)] // raw unwind catch callback 必须保证不展开
-#![feature(thread_local)] // async signal mailbox 的无析构原生 ELF TLS 指针
-#![allow(internal_features)] // core_intrinsics 仅用于上述引擎边界
+#![feature(box_patterns)] // lower matches MIR Box fields
+#![feature(cfg_sanitize)] // ctx.rs: divergence in Ctx dtor handling under TSan config
+#![feature(f16)]
+// D8c: engine host computes f16 directly (rustc lowers to the same conversion/libm symbols as native)
+#![feature(f128)] // D8c: same as above, f128 (compiler-builtins __*tf* + glibc *f128 libm)
+#![feature(core_intrinsics)] // raw unwind capture; distinguish owner by exception class
+#![feature(rustc_attrs)] // raw unwind catch callback must guarantee no unwinding
+#![feature(thread_local)] // destructor-less native ELF TLS pointer for async signal mailbox
+#![allow(internal_features)] // core_intrinsics only used for the above engine boundary
 
 extern crate rustc_abi;
 extern crate rustc_apfloat;

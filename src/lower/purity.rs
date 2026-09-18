@@ -1,6 +1,6 @@
-//! Purity 测量探针（自 lower/mod.rs M8 整搬）：PurityStats/Purity/
-//! classify_purity/arg_mentions_local——A2 split 的 instance 分类器与
-//! --vm-stats 账本（MIRVM_PURITY_STATS=1 门控）。
+//! Purity measurement probe (moved whole from lower/mod.rs M8): PurityStats/Purity/
+//! classify_purity/arg_mentions_local -- the A2 split instance classifier and
+//! --vm-stats ledger (gated by MIRVM_PURITY_STATS=1).
 
 use super::*;
 
@@ -9,9 +9,9 @@ pub(super) struct PurityStats {
     local: (u64, u128),
     tainted: (u64, u128),
     pure: (u64, u128),
-    /// pure 集按 crate 分解（deps-image 内容的来源分布）
+    /// pure set broken down by crate (source distribution of deps-image content)
     pure_crates: FxHashMap<Symbol, (u64, u128)>,
-    /// tainted 实例逐条（符号, ns）——打印 top 用；量小（预期数百）
+    /// tainted instances one by one (symbol, ns) -- for printing top; small volume (expected hundreds)
     tainted_insts: Vec<(Box<str>, u128)>,
 }
 
@@ -22,7 +22,7 @@ pub(super) enum Purity {
 }
 
 impl Purity {
-    /// image 类 = Pure（bin 无关实例，deps-image 候选）；Local/Tainted = delta 类。
+    /// image class = Pure (bin-independent instances, deps-image candidates); Local/Tainted = delta classes.
     pub(super) fn is_image(&self) -> bool {
         matches!(self, Purity::Pure)
     }
@@ -59,7 +59,7 @@ impl PurityStats {
         eprintln!("[purity] tainted: {} inst, {} ms", t.0, ms(t.1));
         eprintln!("[purity] pure:    {} inst, {} ms", p.0, ms(p.1));
         eprintln!(
-            "[purity] A2 每编辑重降 = local+tainted = {} inst, {} ms（总降低 {} inst, {} ms）",
+            "[purity] A2 re-lower per edit = local+tainted = {} inst, {} ms (total saved {} inst, {} ms)",
             l.0 + t.0,
             ms(l.1 + t.1),
             l.0 + t.0 + p.0,
@@ -78,11 +78,11 @@ impl PurityStats {
     }
 }
 
-/// instance 的 purity 分类（口径见 PurityStats 头注）。
+/// Purity classification of an instance (see PurityStats header for definition).
 pub(super) fn classify_purity(inst: Instance<'_>) -> Purity {
     use rustc_hir::def_id::LOCAL_CRATE;
     use rustc_middle::ty::ShimKind;
-    // 定义性 DefId：任一为本地 ⇒ 这是 bin 自己的代码（本地闭包的 ClosureOnce 等）。
+    // Defining DefId: if any is local => this is the bin's own code (ClosureOnce of local closures, etc.).
     let local_def = match inst.def {
         InstanceKind::Item(d) | InstanceKind::Intrinsic(d) | InstanceKind::Virtual(d, _) => {
             d.krate == LOCAL_CRATE
@@ -110,7 +110,7 @@ pub(super) fn classify_purity(inst: Instance<'_>) -> Purity {
     if local_def {
         return Purity::Local;
     }
-    // shim 额外携带的类型（不进 args 的）。
+    // Extra types carried by shim (not in args).
     let shim_tys: &[rustc_middle::ty::Ty<'_>] = match inst.def {
         InstanceKind::Shim(ShimKind::FnPtr(_, t))
         | InstanceKind::Shim(ShimKind::Clone(_, t))
@@ -130,7 +130,7 @@ pub(super) fn classify_purity(inst: Instance<'_>) -> Purity {
     }
 }
 
-/// 顶层提及 LOCAL_CRATE 的 def？（配合 walk() 的深遍历覆盖一切嵌套位）
+/// Def at the top level that mentions LOCAL_CRATE? (Deep walk() traversal covers all nested bits)
 pub(super) fn arg_mentions_local(arg: rustc_middle::ty::GenericArg<'_>) -> bool {
     use rustc_hir::def_id::LOCAL_CRATE;
     use rustc_middle::ty::TyKind;
@@ -154,7 +154,7 @@ pub(super) fn arg_mentions_local(arg: rustc_middle::ty::GenericArg<'_>) -> bool 
     if did.is_some_and(|d| d.krate == LOCAL_CRATE) {
         return true;
     }
-    // walk 不下钻 trait 对象的谓词 DefId（rustc_type_ir walk.rs Dynamic 分支只推 args）
+    // walk does not descend into trait-object predicate DefId (rustc_type_ir walk.rs Dynamic branch only pushes args)
     if let TyKind::Dynamic(preds, ..) = t.kind() {
         return preds
             .principal()

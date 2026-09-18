@@ -1,17 +1,21 @@
-//! `cargoless/vendor.rs` —— vendored 目录供给面（D15 P4 切⑥a，`PkgSource`
-//! 的第二种生产实现，与 `Registry` 并列；P5 的 source replacement 复用本件）。
+//! `cargoless/vendor.rs` — vendored directory supply surface (D15 P4 cut⑥a, the second
+//! production implementation of `PkgSource`, alongside `Registry`; reused by P5 source
+//! replacement).
 //!
-//! 供给形态两种，都零网络、零写出界（ensure_source 直返目录本体）：
-//! - `dirs`：`cargo vendor` 产物目录集——`<name>-<version>/` 平铺，manifest
-//!   是 cargo 归一化形态（`[lib]` 显式、`build = false` 等，我们的 parser
-//!   已支持）。rust-src 的 `library/vendor/` 就是这个形态，版本与
-//!   `library/Cargo.lock` 逐一对齐。
-//! - `overrides`：包名 → 目录的精确映射，服务「registry 名、本地身」的包
-//!   （rust-src 的 `[patch.crates-io]`：rustc-std-workspace 三件套与
-//!   windows-sys 指向 `library/` 下同名片目录）。override 目录的 manifest
-//!   是**原始形态**（path 依赖未归一化）——path 边转成 req `*` 的 IndexDep：
-//!   版本由 lock 钉死，req 只参与 edge_version 的范围匹配，`*` 恒配
-//!   （cargo patch 语义：patched 包内部照原图解析，锁优先）。
+//! Two supply shapes, both zero-network and zero-write-outside (ensure_source returns
+//! the directory itself):
+//! - `dirs`: `cargo vendor` output directories — `<name>-<version>/` laid flat, manifest
+//!   is cargo-normalized form (`[lib]` explicit, `build = false`, etc.; our parser
+//!   already supports). rust-src's `library/vendor/` is this shape, versions aligned
+//!   one-to-one with `library/Cargo.lock`.
+//! - `overrides`: package name -> directory precise mapping, serving packages that are
+//!   "registry by name, local by body" (rust-src's `[patch.crates-io]`:
+//!   rustc-std-workspace trio and windows-sys point to same-name subdirectories under
+//!   `library/`). Override-directory manifests are in **raw form** (path deps not
+//!   normalized) — path edges become IndexDep req `*`: the version is pinned by the
+//!   lock, req only participates in edge_version range matching, `*` always matches
+//!   (cargo patch semantics: patched packages resolve internally by their original
+//!   graph, lock wins).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -25,8 +29,9 @@ use super::resolve::PkgSource;
 pub struct VendorDir {
     dirs: Vec<PathBuf>,
     overrides: BTreeMap<String, PathBuf>,
-    /// index_entry 合成缓存（resolve 对同一包多次重查——unify 注册 +
-    /// node_featdeps 再取；manifest 解析不便宜，查一次记一次）。
+    /// index_entry synthesis cache (resolve re-queries the same package many times —
+    /// unify registration plus node_featdeps re-fetch; manifest parsing is not cheap,
+    /// so remember each result).
     cache: BTreeMap<String, IndexEntry>,
 }
 
@@ -39,11 +44,11 @@ impl VendorDir {
         }
     }
 
-    /// 一个目录的 manifest → 单版本 IndexVersion（版本读 manifest 自报）。
+    /// One directory's manifest -> single-version IndexVersion (version read from manifest self-report).
     pub(crate) fn entry_from_dir(dir: &Path, what: &str) -> Result<IndexVersion, String> {
         let m = PackageManifest::read_dir(dir).map_err(|e| {
             format!(
-                "vendor 源 {what}（{}）manifest 解析失败: {e}",
+                "vendor source {what} ({}) manifest parse failed: {e}",
                 dir.display()
             )
         })?;
@@ -56,7 +61,7 @@ impl VendorDir {
             let req = match &d.source {
                 DepSource::Registry(req, _) => req.clone(),
                 DepSource::Git(spec) => spec.version.clone(),
-                // override 目录的 path 依赖：见文件头注（lock 钉版，req 恒配）
+                // override directory's path dep: see file-header note (lock pins version, req always matches)
                 DepSource::Path(_) => semver::VersionReq::STAR,
             };
             deps.push(IndexDep {
@@ -91,7 +96,7 @@ impl VendorDir {
         Ok(IndexVersion {
             name: m.name.clone(),
             version: m.version.clone(),
-            // vendor 源无 cksum 概念（ensure_source 不校验——内容即本地树）
+            // vendor source has no cksum concept (ensure_source does not verify — content is the local tree)
             cksum: String::new(),
             yanked: false,
             deps,
@@ -101,19 +106,19 @@ impl VendorDir {
         })
     }
 
-    /// 扫 dirs 找 `<name>-<version>/` 目录（目录名剥 `{name}-` 前缀后按
-    /// semver 解析；`r-efi` 撞 `r-efi-alloc-2.1.0` 这类前缀误配由解析
-    /// 失败自然跳过）。版本集按 semver 排序（确定性）。
+    /// Scan dirs for `<name>-<version>/` directories (strip the `{name}-` prefix and parse
+    /// the rest as semver; prefix collisions like `r-efi` vs `r-efi-alloc-2.1.0` naturally
+    /// fall through as parse failures). Versions are sorted by semver (deterministic).
     fn scan_versions(&self, name: &str) -> Result<Vec<(Version, PathBuf)>, String> {
         let prefix = format!("{name}-");
         let mut out = Vec::new();
         for dir in &self.dirs {
             let rd = match std::fs::read_dir(dir) {
                 Ok(rd) => rd,
-                Err(e) => return Err(format!("vendor 目录读取失败 {}: {e}", dir.display())),
+                Err(e) => return Err(format!("vendor directory read failed {}: {e}", dir.display())),
             };
             for ent in rd {
-                let ent = ent.map_err(|e| format!("vendor 目录条目读取失败: {e}"))?;
+                let ent = ent.map_err(|e| format!("vendor directory entry read failed: {e}"))?;
                 let file_name = ent.file_name();
                 let Some(dir_name) = file_name.to_str() else {
                     continue;
@@ -122,7 +127,7 @@ impl VendorDir {
                     continue;
                 };
                 let Ok(version) = Version::parse(ver_text) else {
-                    continue; // 前缀撞名（name 是别人的前缀），不是本包版本
+                    continue; // prefix collision (name is someone else's prefix), not a version of this package
                 };
                 out.push((version, ent.path()));
             }
@@ -142,17 +147,18 @@ impl PkgSource for VendorDir {
             return Ok(hit.clone());
         }
         let entries = if let Some(dir) = self.overrides.get(name) {
-            // override 目录 = 该包的唯一版本（patch 语义：精确替换）
-            vec![Self::entry_from_dir(dir, &format!("override 包 {name}"))?]
+            // override directory = the single version of this package (patch semantics: exact replacement)
+            vec![Self::entry_from_dir(dir, &format!("override package {name}"))?]
         } else {
             let mut entries = Vec::new();
             for (version, dir) in self.scan_versions(name)? {
-                let iv = Self::entry_from_dir(&dir, &format!("包 {name}"))?;
-                // 目录名是权威版本键（lock 按它钉）；manifest 自报应一致，
-                // 不一致响亮——拿错版本比报错难查得多
+                let iv = Self::entry_from_dir(&dir, &format!("package {name}"))?;
+                // Directory name is the authoritative version key (lock pins by it); manifest self-report
+                // should match, and if it does not we fail loudly — wrong version is much harder to debug
+                // than an error.
                 if iv.version != version {
                     return Err(format!(
-                        "vendor 目录 {} 的 manifest 自报版本 {} 与目录名不符",
+                        "vendor directory {} manifest self-report version {} does not match directory name",
                         dir.display(),
                         iv.version
                     ));
@@ -161,7 +167,7 @@ impl PkgSource for VendorDir {
             }
             if entries.is_empty() {
                 return Err(format!(
-                    "vendor 源无 {name}（{:?} 与 overrides 均无）",
+                    "vendor source has no {name} (neither {:?} nor overrides)",
                     self.dirs
                 ));
             }
@@ -190,13 +196,13 @@ impl PkgSource for VendorDir {
             }
         }
         Err(format!(
-            "vendor 源无 {want} 目录（{:?}）——lock 钉的版本与 vendor 树脱节",
+            "vendor source has no {want} directory ({:?}) — lock-pinned version is out of sync with vendor tree",
             self.dirs
         ))
     }
 }
 
-/// FeatureValue → index 文本形态（parse_feature_value 的逆映射，无损）。
+/// FeatureValue -> index text form (inverse of parse_feature_value, lossless).
 fn feature_value_text(v: &FeatureValue) -> String {
     match v {
         FeatureValue::Simple(s) => s.clone(),
@@ -218,7 +224,7 @@ mod tests {
         d
     }
 
-    /// 在 dir 下物化一个 vendor 包目录（归一化形态 manifest）。
+    /// Materialize one vendor package directory under dir (normalized-form manifest).
     fn write_pkg(dir: &Path, dir_name: &str, manifest: &str) -> PathBuf {
         let pkg = dir.join(dir_name);
         std::fs::create_dir_all(pkg.join("src")).unwrap();
@@ -257,7 +263,7 @@ mod tests {
             "[package]\nname = \"foo\"\nversion = \"1.0.0\"\n\
              [lib]\npath = \"src/lib.rs\"\n",
         );
-        // 前缀撞名目录：foo-bar 的包不应混进 foo 的版本集
+        // Prefix-collision directory: foo-bar should not pollute foo's version set.
         write_pkg(
             &dir_b,
             "foo-bar-9.9.9",
@@ -276,7 +282,7 @@ mod tests {
         assert_eq!(v.links.as_deref(), Some("foo-native"));
         assert_eq!(v.rust_version, Some(Version::new(1, 70, 0)));
         assert!(!v.yanked);
-        // deps：normal/build/target 三类齐全，rename/default-features/optional 保真
+        // deps: normal/build/target all present; rename/default-features/optional preserved
         let bar = v.deps.iter().find(|d| d.name == "bar").unwrap();
         assert_eq!(bar.req.to_string(), "^0.4");
         assert_eq!(bar.features, vec!["x"]);
@@ -291,11 +297,11 @@ mod tests {
         assert_eq!(btool.kind.as_deref(), Some("build"));
         let win = v.deps.iter().find(|d| d.name == "winonly").unwrap();
         assert_eq!(win.target.as_deref(), Some("cfg(windows)"));
-        // features：三形态值反转回文本
+        // features: three forms round-trip back to text
         assert_eq!(v.features["default"], vec!["bar"]);
         assert_eq!(v.features["full"], vec!["dep:bar", "renamed/y", "btool?/z"]);
 
-        // ensure_source：直返目录；缺版响亮
+        // ensure_source: returns directory directly; missing version fails loudly
         let got = src
             .ensure_source(
                 "registry+vendor",
@@ -311,9 +317,9 @@ mod tests {
             &Version::parse("9.9.9").unwrap(),
             None,
         );
-        assert!(miss.is_err(), "缺版必须响亮: {miss:?}");
+        assert!(miss.is_err(), "missing version must fail loudly: {miss:?}");
         let nope = src.index_entry("registry+vendor", "nonexistent");
-        assert!(nope.is_err(), "缺包必须响亮: {nope:?}");
+        assert!(nope.is_err(), "missing package must fail loudly: {nope:?}");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -341,7 +347,7 @@ mod tests {
             .unwrap();
         assert_eq!(vs.len(), 1);
         assert_eq!(vs[0].version.to_string(), "1.99.0");
-        // path 依赖 → req *（lock 钉版，范围匹配恒配）
+        // path dep -> req * (lock pins version, range match always succeeds)
         let core = vs[0].deps.iter().find(|d| d.name == "core").unwrap();
         assert_eq!(core.req, semver::VersionReq::STAR);
         let cb = vs[0]
@@ -350,7 +356,7 @@ mod tests {
             .find(|d| d.name == "compiler_builtins")
             .unwrap();
         assert_eq!(cb.features, vec!["compiler-builtins"]);
-        // ensure_source 直返 override 目录（不问版本——patch 语义唯一身）
+        // ensure_source returns override directory directly (regardless of version — patch semantics, single body)
         let got = src
             .ensure_source(
                 "registry+vendor",

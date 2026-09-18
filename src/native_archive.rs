@@ -1,4 +1,4 @@
-//! Linux/ELF 静态原生归档装载：将经过约束检查的 PIC `.a` 物化成可 `dlopen` 的 `.so`。
+//! Linux/ELF static native archive loader: materialize a constraint-checked PIC `.a` into a dlopen-able `.so`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -19,11 +19,13 @@ const LINK_PREFIX: &[&str] = &[
     "-Wl,-Bsymbolic",
     "-Wl,--whole-archive",
 ];
-/// 闭包基准 = std 经 `#[link]` 带给 guest 最终链接的系统库集（glibc：m/dl/pthread/
-/// rt/util/gcc_s；native 语义里这些恒在场，rustc 的 C 静态归档可直接引用其符号——
-/// libsqlite3 的 FTS5 引 libm `log`、pthread 族皆此类，corpus 批3 rusqlite 实锤）。
-/// 它们落成产出 .so 的 DT_NEEDED，dlopen 时由宿主环境解析；`-z defs` 对除此之外
-/// 的未定义引用（跨归档/guest 符号）继续响亮拒绝，闭包纪律不松动。
+/// Closure baseline = the set of system libraries that std brings to the guest's final link via `#[link]`
+/// (glibc: m/dl/pthread/rt/util/gcc_s; these are always present in native semantics, so rustc C static archives
+/// can reference their symbols directly—e.g. libsqlite3's FTS5 references libm `log`, and the pthread family,
+/// proven by corpus batch 3 rusqlite).
+/// They become DT_NEEDED entries of the produced .so and are resolved by the host environment at dlopen time;
+/// `-z defs` continues to loudly reject undefined references outside this set (cross-archive / guest symbols),
+/// so closure discipline is not relaxed.
 const LINK_SUFFIX: &[&str] = &[
     "-Wl,--no-whole-archive",
     "-lm",
@@ -173,13 +175,13 @@ __mirvm_raise_target:
 "#;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
-/// 收集 crate 图传播的系统动态库名（corpus 批7 c_libgit2 实锤）：`-sys` crate
-/// 的 `cargo:rustc-link-lib` 只写 rlib 元数据——native 最终链接行有这些 `-l`，
-/// 而元数据驱动方（bin 命令行）没有。静态归档的 C 对象引这些库（libgit2.a 的
-/// crc32/deflate → libz-sys 的 `z`）时，闭包链接行必须同样带上——与
-/// `system_dylib_preload`（lower 的 RTLD_GLOBAL 预载）同一收集口径，双消费。
-/// Static{bundle:None|Some(true)} 是整档进 rlib 的真静态归档（archive 通道，
-/// 上方循环处理，此处跳过）；Framework/LinkArg/wasm 不在本切片。
+/// Collect system dynamic library names propagated through the crate graph (proven by corpus batch 7 c_libgit2):
+/// `-sys` crates' `cargo:rustc-link-lib` only writes rlib metadata—the native final link command line has these `-l`
+/// entries, while the metadata driver (the bin command line) does not. When C objects in a static archive reference
+/// these libraries (e.g. libgit2.a's crc32/deflate → libz-sys's `z`), the closure link line must also include them—
+/// same collection scope as `system_dylib_preload` (lower's RTLD_GLOBAL preload), consumed in both places.
+/// Static { bundle: None | Some(true) } are true static archives that go entirely into the rlib (handled by the
+/// archive path in the loop above, skipped here); Framework / LinkArg / wasm are out of scope for this slice.
 pub(crate) fn system_dylibs(tcx: TyCtxt<'_>) -> Vec<Box<str>> {
     let sess = tcx.sess;
     let mut names: Vec<Box<str>> = Vec::new();
@@ -188,9 +190,9 @@ pub(crate) fn system_dylibs(tcx: TyCtxt<'_>) -> Vec<Box<str>> {
             continue;
         }
         for lib in tcx.native_libraries(cnum) {
-            // 系统动态链接类 = Dylib/RawDylib + Unspecified（bare `-l ssl`，Dylib
-            // 为默认）+ Static{bundle:false}（对象不进 rlib、链接期按系统库解析——
-            // libc 的 m/dl/pthread/rt/util 即此形）
+            // System dynamic-link kinds = Dylib/RawDylib + Unspecified (bare `-l ssl`, Dylib
+            // is the default) + Static { bundle: false } (objects do not go into the rlib,
+            // resolved as system libraries at link time—libc's m/dl/pthread/rt/util are this shape)
             let system_dylib = matches!(
                 lib.kind,
                 NativeLibKind::Dylib { .. }
@@ -217,7 +219,7 @@ pub(crate) fn system_dylibs(tcx: TyCtxt<'_>) -> Vec<Box<str>> {
             }
         }
     }
-    // CLI `-l` 同口径（search path 形式由调用方另行处理）
+    // Same scope as CLI `-l` (search-path form is handled by the caller separately)
     for lib in &sess.opts.libs {
         if matches!(lib.kind, NativeLibKind::Static { .. }) {
             continue;
@@ -242,12 +244,13 @@ pub(crate) fn materialize_in(archive: &Path, cache_dir: &Path) -> Result<PathBuf
     )
 }
 
-/// 收集当前 crate graph 的 Static native libraries，并把每个独立归档转换成 `.so`。
+/// Collect the current crate graph's Static native libraries and convert each independent archive into a `.so`.
 ///
-/// 只实现 Linux/ELF 的受约束垂直切片。每个 archive 独立以 `-z defs` 链接，因此跨归档
-/// 依赖、依赖顺序和非 PIC relocation 都会响亮失败；不会猜测一个通用 native link plan。
-/// C2：转换失败进入「符号在 rlib」救援链（undefined ∩ crate 图 rlib 导出 fn ⇒
-/// P1 条目隐藏跳板注入重链；`linker = None` 的单测直接走原错误路径）。
+/// Only a constrained vertical slice for Linux/ELF is implemented. Each archive is linked independently with `-z defs`,
+/// so cross-archive dependencies, dependency ordering, and non-PIC relocations fail loudly; no generic native link plan is guessed.
+/// C2: on conversion failure, enter the "symbols in rlib" rescue chain
+/// (undefined ∩ crate-graph rlib exported fn ⇒ inject hidden P1-entry trampolines and relink;
+/// unit tests with `linker = None` take the original error path directly).
 pub(crate) fn materialize_static_libraries<'tcx>(
     tcx: TyCtxt<'tcx>,
     linker: &mut crate::lower::linker::Linker<'tcx>,
@@ -261,8 +264,9 @@ pub(crate) fn materialize_static_libraries<'tcx>(
     let target = sess.opts.target_triple.tuple();
     let cache = crate::sysroot::cache_dir().join("native-archives");
     let mut shared_objects = Vec::<PathBuf>::new();
-    // crate 图系统动态库（c_libgit2 实锤：静态归档 C 对象引元数据传播的 `-l`
-    // 库符号时，闭包链接行必须同样带上；与 lower 的 RTLD_GLOBAL 预载同清单）
+    // Crate-graph system dynamic libraries (proven by c_libgit2: when a static archive's C objects reference
+    // `-l` library symbols propagated via metadata, the closure link line must also include them;
+    // same list as lower's RTLD_GLOBAL preload)
     let extra_libs = system_dylibs(tcx);
 
     for cnum in std::iter::once(LOCAL_CRATE).chain(tcx.used_crates(()).iter().copied()) {
@@ -284,16 +288,16 @@ pub(crate) fn materialize_static_libraries<'tcx>(
                 || sess.target.binary_format != BinaryFormat::Elf
             {
                 return Err(format!(
-                    "crate `{crate_name}` 的 Static native library `{}` 只能由当前 host \
-                     Linux/ELF 归档装载切片处理（host: {}, 当前 target: {target}）",
+                    "crate `{crate_name}`'s Static native library `{}` can only be handled by the current host \
+                     Linux/ELF archive-loading slice (host: {}, current target: {target})",
                     lib.name,
                     env!("MIRVM_HOST")
                 ));
             }
             if export_symbols.is_some() {
                 return Err(format!(
-                    "crate `{crate_name}` 的 Static native library `{}` 使用了 \
-                     `+/-export-symbols` modifier；M5.1 归档装载尚未定义其 `.so` 等价语义",
+                    "crate `{crate_name}`'s Static native library `{}` uses the \
+                     `+/-export-symbols` modifier; M5.1 archive loading has not defined its `.so` equivalent semantics",
                     lib.name
                 ));
             }
@@ -312,7 +316,7 @@ pub(crate) fn materialize_static_libraries<'tcx>(
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(
-                    "找不到 crate `{crate_name}` 的 Static native library `{}`（文件 `{filename}`）；\
+                    "Cannot find crate `{crate_name}`'s Static native library `{}` (file `{filename}`); \
                      rustc native search paths: [{}]",
                     lib.name, searched
                 )
@@ -337,27 +341,27 @@ pub(crate) fn materialize_static_libraries<'tcx>(
         .collect())
 }
 
-/// 物化期歧义拒绝：归档 **.dynsym 可见**导出符号不得**跨归档**重名（解析依赖
-/// 装载顺序，M5.1 拒绝猜测 native linker 顺序）。
+/// Reject ambiguity at materialization time: archive **.dynsym-visible** exported symbols must not
+/// **share names across archives** (resolution would depend on load order; M5.1 refuses to guess native linker order).
 ///
-/// weak 语义修正（2026-07-18，corpus 批10 c_risc0_run 实锤）：重名符号按
-/// native 链接语义分治——**全部 weak 定义放行**（weak/COMDAT 首件胜出，装载序
-/// = crate 图序与 native 链接序同构；risc0 三个 -sys crate 各导 C++ sized-delete
-/// `_ZdlPvS_` COMDAT 即此族）；**恰一个 strong 定义放行**（strong 胜 weak，
-/// native 同款静默决议）；**≥2 个 strong 定义维持拒**（native 下本就 link error，
-/// 我们同样响亮拒）。
+/// Weak-semantic correction (2026-07-18, proven by corpus batch 10 c_risc0_run): duplicate symbols are handled
+/// according to native link semantics—**all-weak definitions are allowed** (weak/COMDAT first-wins; load order
+/// is isomorphic to crate-graph order and native link order; the three risc0 `-sys` crates each export the
+/// C++ sized-delete `_ZdlPvS_` COMDAT, which belongs to this family); **exactly one strong definition is allowed**
+/// (strong wins over weak, same silent resolution as native); **≥2 strong definitions remain rejected**
+/// (native would already be a link error, so we also reject loudly).
 ///
-/// 与 **RTLD_DEFAULT 既有定义**的碰撞此前同列（①），自 dynsym 归档句柄优先
-/// 解析后不再拒绝：解析序 ①hidden 兜底表 → ②归档句柄（链接序）→ ③dlsym
-/// 全域，guest 链进的对象（hidden 或 dynsym 可见）恒胜宿主进程同名库——
-/// native 链接期绑定语义（psm 的 rust_psm_on_stack vs 宿主 librustc_driver
-/// 内嵌副本，corpus 批6 c_polars_frame 实锤；zstd-sys 的 ZSTD_* vs libLLVM
-/// 内嵌库同族）。已知残余：归档**内部**对碰撞符号的跨引用仍经动态链接器
-/// 全局序（mirror 不了，corpus 无此形态——psm 四符号均为 Rust 侧调用、
-/// 内部无交叉引用）。
+/// Collisions with **existing RTLD_DEFAULT definitions** used to be rejected alongside (1); since dynsym archive handles
+/// now take priority, they are no longer rejected: resolution order is ① hidden fallback table → ② archive handle
+/// (link order) → ③ global dlsym. Objects linked by the guest (hidden or dynsym-visible) always beat host-process
+/// libraries of the same name—native link-time binding semantics (psm's `rust_psm_on_stack` vs the embedded copy
+/// in the host `librustc_driver`, proven by corpus batch 6 c_polars_frame; zstd-sys's ZSTD_* vs libLLVM's embedded
+/// library are the same family). Known residual: **intra-archive** cross-references to colliding symbols still go through
+/// the dynamic linker's global order (cannot be mirrored; no such shape exists in the corpus—the four psm symbols are
+/// only called from the Rust side with no internal cross-references).
 ///
-/// 不进 .dynsym 的 hidden 符号（.symtab 兜底表承载）刻意不做任何碰撞检查：
-/// 解析序上恒先于全域，碰撞本就解析到归档，无歧义可拒。
+/// Hidden symbols that do not enter .dynsym (carried by the .symtab fallback table) deliberately skip all collision checks:
+/// in resolution order they always precede the global scope, so collisions already resolve to the archive, leaving no ambiguity to reject.
 fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), String> {
     let mut owners = HashMap::<String, (PathBuf, bool)>::new();
     for shared_object in shared_objects {
@@ -367,13 +371,13 @@ fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), String> {
             .output()
             .map_err(|e| {
                 format!(
-                    "无法检查归档共享库 `{}` 的导出符号（启动 nm 失败）: {e}",
+                    "Cannot inspect exported symbols of archive shared library `{}` (failed to launch nm): {e}",
                     shared_object.display()
                 )
             })?;
         if !output.status.success() {
             return Err(format!(
-                "无法检查归档共享库 `{}` 的导出符号（nm 失败）:\n{}{}",
+                "Cannot inspect exported symbols of archive shared library `{}` (nm failed):\n{}{}",
                 shared_object.display(),
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
@@ -381,23 +385,23 @@ fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), String> {
         }
         let symbols = String::from_utf8(output.stdout).map_err(|e| {
             format!(
-                "归档共享库 `{}` 的 nm 输出不是 UTF-8: {e}",
+                "nm output for archive shared library `{}` is not UTF-8: {e}",
                 shared_object.display()
             )
         })?;
         for line in symbols.lines() {
             let mut it = line.split_ascii_whitespace();
             let Some(symbol) = it.next() else { continue };
-            // posix 格式第二字段 = 类型字母（W/w = weak 函数、V/v = weak 对象、
-            // u = GNU unique（COMDAT 意图的内联变量/局部 static 一族，native
-            // 静态链接合并、glibc 动态链接恒 RTLD_LOCAL——跨归档同名无歧义）；
-            // 余者按 strong 计）
+            // POSIX format second field = type letter (W/w = weak function, V/v = weak object,
+            // u = GNU unique (inline variables/local statics intended as COMDAT; merged by native
+            // static linking, always RTLD_LOCAL in glibc dynamic linking—no cross-archive ambiguity);
+            // everything else counts as strong)
             let weak = it
                 .next()
                 .is_some_and(|t| t.starts_with(['W', 'w', 'V', 'v', 'u']));
             std::ffi::CString::new(symbol).map_err(|_| {
                 format!(
-                    "归档共享库 `{}` 导出含 NUL 的非法符号名",
+                    "Archive shared library `{}` exports an illegal symbol name containing NUL",
                     shared_object.display()
                 )
             })?;
@@ -410,15 +414,15 @@ fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), String> {
                     let strongs = usize::from(!prev_weak) + usize::from(!weak);
                     if strongs >= 2 {
                         return Err(format!(
-                            "静态归档导出符号 `{symbol}` 同时来自 `{}` 与 `{}`（双 strong \
-                             定义）；运行期 dlsym 解析将依赖装载顺序，M5.1 拒绝猜测 \
-                             native linker 顺序",
+                            "Static archive exported symbol `{symbol}` is defined by both `{}` and `{}` \
+                             (two strong definitions); runtime dlsym resolution would depend on load order; \
+                             M5.1 refuses to guess native linker order",
                             prev_path.display(),
                             shared_object.display()
                         ));
                     }
-                    // 全 weak（首件胜出）或恰一 strong（strong 胜 weak）：native
-                    // 链接语义同款静默决议——strong 定义入主表
+                    // All-weak (first wins) or exactly one strong (strong wins over weak): native
+                    // link semantics silently resolve the same way—the strong definition enters the owner table
                     if prev_weak && !weak {
                         e.insert((shared_object.clone(), weak));
                     }
@@ -445,27 +449,28 @@ fn materialize_for_target_in(
     linker: Option<&mut crate::lower::linker::Linker<'_>>,
 ) -> Result<PathBuf, String> {
     let bytes = std::fs::read(archive)
-        .map_err(|e| format!("读取静态原生归档 `{}` 失败: {e}", archive.display()))?;
+        .map_err(|e| format!("Failed to read static native archive `{}`: {e}", archive.display()))?;
     if bytes.starts_with(b"!<thin>\n") {
         return Err(format!(
-            "拒绝 thin 静态归档 `{}`：归档字节不包含成员 object，不能作为完整内容哈希缓存键",
+            "Rejecting thin static archive `{}`: archive bytes do not contain member objects, so it cannot be used as a complete-content hash cache key",
             archive.display()
         ));
     }
     if !bytes.starts_with(b"!<arch>\n") {
-        return Err(format!("`{}` 不是受支持的 Unix ar 归档", archive.display()));
+        return Err(format!("`{}` is not a supported Unix ar archive", archive.display()));
     }
-    // 生命周期段分治（§7.8）：.init_array/.fini_array 一族**放行**——loader 的
-    // DT_INIT_ARRAY 语义 = native 进程启动期 constructor（aws-lc do_library_init /
-    // mimalloc mi_process_attach 实锤；mirvm 从不 dlclose，fini 无观察口）；
-    // 旧式 `.init`/`.fini` 段仍**拒**——那是把裸函数体注入初始化帧的旧 gcc 技艺，
-    // 注入内容无帧纪律、跨工具链执行语义本就脆（仓库内实测 DL 期 SIGSEGV）；
-    // 真实 workload（近年 C 库一族全走 constructor-attribute）不供养该项，
-    // 宁可响亮拒给诊断，不虚标支持。
+    // Lifecycle-section partition (§7.8): .init_array/.fini_array family **allowed**—loader
+    // DT_INIT_ARRAY semantics = native process-startup constructor (proven by aws-lc do_library_init /
+    // mimalloc mi_process_attach; mirvm never dlcloses, so fini has no observable side);
+    // legacy `.init`/`.fini` sections remain **rejected**—that is the old gcc trick of injecting
+    // bare function bodies into the init frame, with no frame discipline and fragile cross-toolchain
+    // execution semantics (measured in-repo as SIGSEGV during dlopen);
+    // real workloads (recent C libraries all use constructor attributes) do not need it,
+    // so we prefer a loud rejection with a clear diagnosis over falsely claiming support.
     reject_legacy_init_sections(archive)?;
     let cc_identity = compiler_identity(cc)?;
-    // extra_libs（crate 图系统动态库 `-l<name>`）同时进缓存键与 cc 链接行——
-    // 名单变化必须换缓存槽，旧闭包不得误命中（c_libgit2 修复的键纪律）
+    // extra_libs (crate-graph system dynamic libraries `-l<name>`) enter both the cache key and the cc link line—
+    // list changes must change cache slots, so old closures cannot be falsely reused (the key discipline fixed by c_libgit2)
     let extra_flags: Vec<String> = extra_libs.iter().map(|n| format!("-l{n}")).collect();
     let link_flags = LINK_PREFIX
         .iter()
@@ -484,7 +489,7 @@ fn materialize_for_target_in(
         &bytes,
     ]);
     std::fs::create_dir_all(cache_dir)
-        .map_err(|e| format!("创建原生归档缓存目录 `{}` 失败: {e}", cache_dir.display()))?;
+        .map_err(|e| format!("Failed to create native archive cache directory `{}`: {e}", cache_dir.display()))?;
     let so = cache_dir.join(format!("{hash}.so"));
     if so.exists() {
         return Ok(so);
@@ -504,12 +509,12 @@ fn materialize_for_target_in(
         .arg("-o")
         .arg(&tmp)
         .output()
-        .map_err(|e| format!("启动 cc 转换 `{}` 失败: {e}", archive.display()))?;
+        .map_err(|e| format!("Failed to launch cc to convert `{}`: {e}", archive.display()))?;
     if !output.status.success() {
         let _ = std::fs::remove_file(&tmp);
-        // C2：「符号在 rlib」救援链（designs/c2-rlib-symbols-design.md §2）——
-        // undefined ∩ crate 图 rlib 导出 fn ⇒ P1 条目隐藏跳板注入重链；
-        // 救不了（无交集/不可派生/重链仍败）走原错误路径，诊断逐字节同前
+        // C2: "symbols in rlib" rescue chain (designs/c2-rlib-symbols-design.md §2)—
+        // undefined ∩ crate-graph rlib exported fn ⇒ inject hidden P1-entry trampolines and relink;
+        // if rescue fails (no intersection / non-derivable signature / relink still fails), take the original error path with byte-identical diagnostics
         if let Some(linker) = linker
             && let Some(so) = rescue_with_rlib_symbols(
                 archive,
@@ -527,7 +532,7 @@ fn materialize_for_target_in(
             return Ok(so);
         }
         return Err(format!(
-            "静态原生归档 `{}` 无法安全转换为共享库（要求 ELF PIC、依赖在本归档内闭合）:\n{}{}",
+            "Static native archive `{}` cannot be safely converted to a shared library (requires ELF PIC, dependencies closed within this archive):\n{}{}",
             archive.display(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
@@ -535,7 +540,7 @@ fn materialize_for_target_in(
     }
     std::fs::rename(&tmp, &so).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
-        format!("原子发布原生归档缓存 `{}` 失败: {e}", so.display())
+        format!("Atomic publish of native archive cache `{}` failed: {e}", so.display())
     })?;
     Ok(so)
 }
@@ -569,7 +574,7 @@ fn native_runtime_bridge_object(
     ));
     std::fs::write(&source, NATIVE_RUNTIME_BRIDGE_ASM).map_err(|e| {
         format!(
-            "写 native runtime bridge 汇编 `{}` 失败: {e}",
+            "Writing native runtime bridge assembly `{}` failed: {e}",
             source.display()
         )
     })?;
@@ -579,12 +584,12 @@ fn native_runtime_bridge_object(
         .arg("-o")
         .arg(&temporary)
         .output()
-        .map_err(|e| format!("启动 cc 组装 native runtime bridge 失败: {e}"))?;
+        .map_err(|e| format!("Failed to launch cc to assemble native runtime bridge: {e}"))?;
     let _ = std::fs::remove_file(&source);
     if !output.status.success() {
         let _ = std::fs::remove_file(&temporary);
         return Err(format!(
-            "cc 组装 native runtime bridge 失败:\n{}{}",
+            "cc assembly of native runtime bridge failed:\n{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ));
@@ -592,19 +597,19 @@ fn native_runtime_bridge_object(
     std::fs::rename(&temporary, &object).map_err(|e| {
         let _ = std::fs::remove_file(&temporary);
         format!(
-            "原子发布 native runtime bridge `{}` 失败: {e}",
+            "Atomic publish of native runtime bridge `{}` failed: {e}",
             object.display()
         )
     })?;
     Ok(object)
 }
 
-/// C2「符号在 rlib」救援链（designs/c2-rlib-symbols-design.md §2）：
-/// 首链失败后，静态枚举归档 SHN_UNDEF 符号 ∩ crate 图 rlib 导出 fn 集
-/// （`Linker::exported_defs`，与 native final link 集符集同源）——交集内 fn
-/// 预算 P1 可执行条目、发射 `.hidden` 跳板、并入重链。返回 None = 救不了
-/// （无交集 / 签名不可派生 / 重链仍败），调用方走原错误路径；
-/// Err = 物化期诊断（枚举/跳板组装失败——同 `-z defs` 一族的响亮拒绝纪律）。
+/// C2 "symbols in rlib" rescue chain (designs/c2-rlib-symbols-design.md §2):
+/// After the first link fails, statically enumerate the archive's SHN_UNDEF symbols ∩ crate-graph rlib exported-fn set
+/// (`Linker::exported_defs`, same source as the native final-link symbol set)—for fn in the intersection,
+/// budget P1 executable entries, emit `.hidden` trampolines, and merge them into the relink. Returns None if rescue fails
+/// (no intersection / non-derivable signature / relink still fails); caller takes the original error path.
+/// Err = materialization-time diagnosis (enumeration / trampoline assembly failed—same loud-rejection discipline as `-z defs`).
 #[allow(clippy::too_many_arguments)]
 fn rescue_with_rlib_symbols(
     archive: &Path,
@@ -623,7 +628,7 @@ fn rescue_with_rlib_symbols(
     if undefs.is_empty() {
         return Ok(None);
     }
-    // 与 rlib 导出集求交（键名统一 canonical_link_name 剥 \x01 前缀家族）
+    // Intersect with rlib export set (key names unified by canonical_link_name stripping the \x01 prefix family)
     let mut hit: Vec<(Box<str>, rustc_middle::ty::Instance<'_>)> = Vec::new();
     {
         let exports = linker.exported_defs();
@@ -640,7 +645,7 @@ fn rescue_with_rlib_symbols(
     if hit.is_empty() {
         return Ok(None);
     }
-    // 预算 P1 条目（签名可派生为前提；不可派生 = 无 thunk ABI，交还原错误路径）
+    // Budget P1 entries (signature derivability is required; non-derivable = no thunk ABI, hand back to original error path)
     let mut pairs: Vec<(Box<str>, u64)> = Vec::with_capacity(hit.len());
     for (name, inst) in hit {
         if linker.entry_ffi_sig(inst).is_none() {
@@ -648,12 +653,12 @@ fn rescue_with_rlib_symbols(
         }
         let addr = linker
             .fn_entry_addr(inst)
-            .map_err(|e| format!("rlib 符号 `{name}` 的 P1 条目预算失败: {e}"))?;
+            .map_err(|e| format!("Budgeting P1 entry for rlib symbol `{name}` failed: {e}"))?;
         pairs.push((name, addr));
     }
     pairs.sort();
-    // 隐藏跳板 .s（C7 同款形制）。桥只引用隐藏数据槽；每个 Engine 在自己的
-    // .so 副本里写入自己的 P1 closure 地址，产物中不再烤固定运行地址。
+    // Hidden trampoline .s (same shape as C7). The bridge only references hidden data slots; each Engine writes
+    // its own P1 closure address into its copy of the .so, so the artifact no longer bakes in a fixed runtime address.
     let mut asm = String::from(".intel_syntax noprefix\n");
     let mut slots = std::collections::BTreeSet::new();
     for (name, addr) in &pairs {
@@ -680,7 +685,7 @@ fn rescue_with_rlib_symbols(
         }
         asm.push_str(".popsection\n");
     }
-    // 缓存键 = 首链键域 + inject 对（模块专属；P1 码址跨进程稳定，同模块恒命中）
+    // Cache key = first-link key fields + inject pairs (module-specific; P1 code addresses are stable across processes, so same module always hits)
     let mut inject_key: Vec<u8> = Vec::new();
     for (name, addr) in &pairs {
         inject_key.extend_from_slice(name.as_bytes());
@@ -700,10 +705,10 @@ fn rescue_with_rlib_symbols(
     if so.exists() {
         return Ok(Some(so));
     }
-    // 组装跳板对象（与 native_archive 转换同款 cc 通道）
+    // Assemble trampoline object (same cc path as native_archive conversion)
     let s_path = cache_dir.join(format!("{hash}.s"));
     std::fs::write(&s_path, &asm)
-        .map_err(|e| format!("写 rlib 跳板汇编 `{s_path:?}` 失败: {e}"))?;
+        .map_err(|e| format!("Writing rlib trampoline assembly `{s_path:?}` failed: {e}"))?;
     let o_path = cache_dir.join(format!("{hash}.tramp.o"));
     let st = Command::new(cc)
         .arg("-c")
@@ -711,11 +716,11 @@ fn rescue_with_rlib_symbols(
         .arg(&o_path)
         .arg(&s_path)
         .status()
-        .map_err(|e| format!("启动 cc 组装 rlib 跳板失败（PATH 缺 cc？）: {e}"))?;
+        .map_err(|e| format!("Failed to launch cc to assemble rlib trampoline (is cc missing from PATH?): {e}"))?;
     if !st.success() {
-        return Err(format!("cc 组装 rlib 跳板失败（status={st}）"));
+        return Err(format!("cc assembly of rlib trampoline failed (status={st})"));
     }
-    // 重链：跳板对象置于归档后（定义符号供归档内未解析引用绑定）
+    // Relink: trampoline object placed after archive so its defined symbols bind unresolved references inside the archive
     let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
     let tmp = cache_dir.join(format!("{hash}.so.tmp.{}.{serial}", std::process::id()));
     let output = Command::new(cc)
@@ -730,14 +735,14 @@ fn rescue_with_rlib_symbols(
         .arg("-o")
         .arg(&tmp)
         .output()
-        .map_err(|e| format!("启动 cc 重链 `{}` 失败: {e}", archive.display()))?;
+        .map_err(|e| format!("Failed to launch cc for relink `{}`: {e}", archive.display()))?;
     if !output.status.success() {
         let _ = std::fs::remove_file(&tmp);
         return Ok(None);
     }
     std::fs::rename(&tmp, &so).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
-        format!("原子发布原生归档缓存 `{}` 失败: {e}", so.display())
+        format!("Atomic publish of native archive cache `{}` failed: {e}", so.display())
     })?;
     Ok(Some(so))
 }
@@ -746,10 +751,10 @@ fn compiler_identity(cc: &Path) -> Result<Vec<u8>, String> {
     let version = Command::new(cc)
         .arg("--version")
         .output()
-        .map_err(|e| format!("无法查询 C 编译器 `{}` 版本: {e}", cc.display()))?;
+        .map_err(|e| format!("Cannot query C compiler `{}` version: {e}", cc.display()))?;
     if !version.status.success() {
         return Err(format!(
-            "查询 C 编译器 `{}` 版本失败: {}",
+            "Querying C compiler `{}` version failed: {}",
             cc.display(),
             String::from_utf8_lossy(&version.stderr)
         ));
@@ -757,10 +762,10 @@ fn compiler_identity(cc: &Path) -> Result<Vec<u8>, String> {
     let machine = Command::new(cc)
         .arg("-dumpmachine")
         .output()
-        .map_err(|e| format!("无法查询 C 编译器 `{}` target: {e}", cc.display()))?;
+        .map_err(|e| format!("Cannot query C compiler `{}` target: {e}", cc.display()))?;
     if !machine.status.success() {
         return Err(format!(
-            "查询 C 编译器 `{}` target 失败: {}",
+            "Querying C compiler `{}` target failed: {}",
             cc.display(),
             String::from_utf8_lossy(&machine.stderr)
         ));
@@ -783,13 +788,13 @@ fn reject_legacy_init_sections(archive: &Path) -> Result<(), String> {
         .output()
         .map_err(|e| {
             format!(
-                "无法检查静态原生归档 `{}` 的 legacy init 段（启动 readelf 失败）: {e}",
+                "Cannot inspect legacy init sections of static native archive `{}` (failed to launch readelf): {e}",
                 archive.display()
             )
         })?;
     if !output.status.success() {
         return Err(format!(
-            "无法检查静态原生归档 `{}` 的 legacy init 段（readelf 失败）:\n{}{}",
+            "Cannot inspect legacy init sections of static native archive `{}` (readelf failed):\n{}{}",
             archive.display(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
@@ -806,8 +811,8 @@ fn reject_legacy_init_sections(archive: &Path) -> Result<(), String> {
     });
     if has_legacy {
         return Err(format!(
-            "拒绝带旧式 `.init`/`.fini` 段的静态原生归档 `{}`：\
-             注入裸函数体的旧 gcc 技艺执行语义不可靠（.init_array 一族已放行）",
+            "Rejecting static native archive `{}` with legacy `.init`/`.fini` sections: \
+             the old gcc trick of injecting bare function bodies has unreliable execution semantics (.init_array family is allowed)",
             archive.display()
         ));
     }
@@ -1100,9 +1105,9 @@ mod tests {
 
     #[test]
     fn constructor_runs_at_dlopen_after_lifecycle_guard_is_lifted() {
-        // §7.8：生命周期卫士解码——dlopen 的 DT_INIT_ARRAY 语义 = native 进程启动期
-        // constructor（aws-lc do_library_init / mimalloc mi_process_attach 两实锤）；
-        // mirvm 从不 dlclose，fini 无观察口（与 native exit 由 OS 回收同）。
+        // §7.8: lifecycle guard decoded—dlopen's DT_INIT_ARRAY semantics = native process-startup
+        // constructor (two proven cases: aws-lc do_library_init / mimalloc mi_process_attach);
+        // mirvm never dlcloses, so fini has no observable side (same as native exit being reclaimed by the OS).
         let temp = TempDir::new("constructor-accepted");
         let archive = make_archive(
             temp.path(),
@@ -1126,16 +1131,16 @@ mod tests {
         assert_eq!(
             unsafe { probe() },
             42,
-            "DT_INIT_ARRAY 必须已在 dlopen 时执行（constructor 置 42）"
+            "DT_INIT_ARRAY must have already executed at dlopen time (constructor set it to 42)"
         );
         unsafe { crate::os::dll::close(handle) };
     }
 
     #[test]
     fn legacy_elf_init_and_fini_sections_are_rejected() {
-        // §7.8 分治：旧式 `.init`/`.fini` 段维持拒（注入裸函数体的旧 gcc 技艺，
-        // 执行语义不可靠——本仓库实测 DL 期 SIGSEGV）；`.init_array` 一族已放行
-        //（见 constructor_runs_at_dlopen_after_lifecycle_guard_is_lifted）。
+        // §7.8 partition: legacy `.init`/`.fini` sections remain rejected (old gcc trick of injecting
+        // bare function bodies, unreliable execution semantics—measured in-repo as SIGSEGV during dlopen);
+        // .init_array family is allowed (see constructor_runs_at_dlopen_after_lifecycle_guard_is_lifted).
         let temp = TempDir::new("legacy-init-fini");
         for section in [".init", ".fini"] {
             let dir = temp.path().join(section.trim_start_matches('.'));
@@ -1210,7 +1215,7 @@ mod tests {
         );
 
         let error = materialize_in(&archive, &temp.path().join("cache")).unwrap_err();
-        assert!(error.contains("依赖"), "unexpected diagnostic: {error}");
+        assert!(error.contains("dependency"), "unexpected diagnostic: {error}");
         assert!(
             error.contains("mirvm_missing_dependency"),
             "linker detail lost: {error}"
@@ -1294,7 +1299,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_ne!(first, second, "extra libs 名单必须参与缓存键");
+        assert_ne!(first, second, "extra libs list must participate in cache key");
     }
 
     #[test]
@@ -1337,11 +1342,11 @@ mod tests {
             error.contains("mirvm_duplicate_symbol"),
             "unexpected diagnostic: {error}"
         );
-        assert!(error.contains("顺序"), "unexpected diagnostic: {error}");
+        assert!(error.contains("order"), "unexpected diagnostic: {error}");
     }
 
-    /// weak/COMDAT 语义（c_risc0_run 实锤）：跨归档同名符号——全 weak 放行
-    ///（首件胜出）；恰一 strong + weak 放行（strong 胜出）；双 strong 维持拒。
+    /// weak/COMDAT semantics (proven by c_risc0_run): duplicate symbols across archives—
+    /// all-weak allowed (first wins); exactly one strong + weak allowed (strong wins); two strong remain rejected.
     #[test]
     fn duplicate_weak_symbols_follow_native_link_semantics() {
         let temp = TempDir::new("duplicate-weak");
@@ -1375,11 +1380,11 @@ mod tests {
             .unwrap()
         };
         let (sa, sb, sc) = (mat(&weak_a), mat(&weak_b), mat(&strong_c));
-        // 全 weak：放行（native 首件胜出同构）
-        reject_symbol_ambiguity(&[sa.clone(), sb.clone()]).expect("全 weak 同名必须放行");
-        // strong + weak：放行（native strong 胜出同款决议）
-        reject_symbol_ambiguity(&[sa.clone(), sc.clone()]).expect("strong+weak 必须放行");
-        // 双 strong：维持拒（native 下本就 link error）
+        // All-weak: allowed (native first-wins isomorphic)
+        reject_symbol_ambiguity(&[sa.clone(), sb.clone()]).expect("duplicate all-weak names must be allowed");
+        // strong + weak: allowed (native strong-wins same resolution)
+        reject_symbol_ambiguity(&[sa.clone(), sc.clone()]).expect("strong+weak must be allowed");
+        // Two strong: remain rejected (native would already be a link error)
         let strong_d_dir = temp.path().join("d4");
         std::fs::create_dir_all(&strong_d_dir).unwrap();
         let strong_d = make_archive(
@@ -1392,9 +1397,10 @@ mod tests {
 
     #[test]
     fn symbol_already_in_process_is_accepted_under_handle_first_resolution() {
-        // dynsym 归档句柄优先解析落地后的新语义：归档导出符号与进程既有定义
-        // （此处特意用 malloc，进程必有定义）碰撞不再拒绝——归档句柄恒先命中，
-        // native 链接期绑定可复现（guest 自己的对象恒胜宿主同名库）。
+        // New semantics after dynsym archive-handle priority: collisions between archive-exported symbols
+        // and existing process definitions (here deliberately using malloc, which every process defines)
+        // are no longer rejected—the archive handle always resolves first, reproducible as native link-time binding
+        // (the guest's own objects always beat host libraries of the same name).
         let temp = TempDir::new("process-symbol");
         let archive = make_archive(
             temp.path(),

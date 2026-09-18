@@ -1,8 +1,8 @@
-//! T1-b JIT 调用助手探针（m5.4-design §3.2）：
-//! CallIndirect（dyn 虚派发 = fn_addrs 反查命中 / fn-ptr 直调）、
-//! TlsRef（#[thread_local] 取址，mirvm_tls_ref 惰性物化同本体）、
-//! InlineAsm（asm-stub 真地址直调，槽 ABI 同 interp）。
-//! 三维（native / JIT-off / JIT=1）逐字节一致 + MIRVM_JIT_DEBUG 发布实证。
+//! T1-b JIT call-helper probe (m5.4-design §3.2):
+//! CallIndirect (dyn virtual dispatch = fn_addrs reverse lookup hit / fn-ptr direct call),
+//! TlsRef (#[thread_local] address-of, mirvm_tls_ref lazily materialized same as host),
+//! InlineAsm (asm-stub real-address direct call, slot ABI same as interp).
+//! Byte-identical across three dimensions (native / JIT-off / JIT=1) + MIRVM_JIT_DEBUG release evidence.
 #![feature(thread_local)]
 
 use std::arch::asm;

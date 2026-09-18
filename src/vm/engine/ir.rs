@@ -1,27 +1,32 @@
-//! M4 引擎字节码 IR（类型化；纯 Rust，零 rustc 类型——完全自包含的冻结产物）。
+//! M4 engine bytecode IR (typed; pure Rust, zero rustc types — a fully self-contained frozen artifact).
 //!
-//! M4.1 升级（m4.1-design §3.1）：**静态槽 → place 求值**。Deref/Index 是运行期地址，
-//! 静态偏移撑不住 → 地址表达式 `PlaceExpr`（lower 编译投影链，引擎按序求值得真地址）。
-//! 帧基址是真地址（F6）⇒ 帧内/堆上/statics 统一为裸地址读写。
-//! 快路径保留：纯帧内静态偏移的标量访问仍是 `Slot`（零求值开销）。
+//! M4.1 upgrade (m4.1-design §3.1): **static slots → place evaluation**. Deref/Index are runtime
+//! addresses, so static offsets are insufficient → address expression `PlaceExpr` (lower compiles the
+//! projection chain; the engine evaluates it in order to obtain the real address).
+//! The frame base is a real address (F6), so frame-local/heap/static accesses all become raw-address
+//! reads/writes.
+//! Fast path kept: purely frame-local static-offset scalar accesses still use `Slot` (zero evaluation
+//! overhead).
 //!
-//! 与 spike bytecode（../bytecode.rs）分离：spikes 是冻结的验证工件，本 IR 是 M4 真身。
+//! Separated from the spike bytecode (../bytecode.rs): spikes are frozen validation artifacts; this IR
+//! is the real M4 body.
 
 pub type Bb = u32;
 pub type FuncId = u32;
-/// inline asm 站点 id（M5.0 asm-stub 工厂）：索引 `Module.asm_stub_addrs`。
+/// Inline asm site id (M5.0 asm-stub factory): index into `Module.asm_stub_addrs`.
 pub type AsmStubId = u32;
 
-/// asm-stub 物化配方的单站点（M5.0 起；A2 起符号名与位序解耦，见 Module.asm_sites）。
+/// A single asm-stub materialization recipe (from M5.0; from A2 symbol names are decoupled from
+/// bit order, see `Module.asm_sites`).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AsmSite {
-    /// wrapper 的 dlsym 符号名（lower 生成 GAS 文本时烤入 .globl/.type/.size）
+    /// dlsym symbol name of the wrapper (baked into `.globl`/`.type`/`.size` when lower emits GAS text)
     pub name: Box<str>,
-    /// wrapper GAS 全文
+    /// Full wrapper GAS text
     pub text: String,
 }
 
-/// 标量宽度。W128 = 两槽通道（M4.1 第 3 步）。
+/// Scalar width. W128 = two-slot channel (M4.1 step 3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Width {
     W8,
@@ -60,41 +65,43 @@ impl Width {
     }
 }
 
-/// InlineAsm 输入值通道（批10 xmm/向量槽 16B 通道扩展，c_typst_pdf 供养）：
-/// 标量 = 8B 值按宽写低位；VecBytes = 向量字节通道（place 真地址 + 全宽 size，
-/// xmm/ymm/zmm = 16/32/64 字节，与 wrapper `movups/vmovups` 槽同源）。
+/// InlineAsm input value channel (batch 10 xmm/vector slot 16B channel extension, feeds
+/// c_typst_pdf):
+/// Scalar = 8B value written low per width; VecBytes = vector byte channel (place real address +
+/// full width size, xmm/ymm/zmm = 16/32/64 bytes, same source as wrapper `movups/vmovups` slots).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum AsmIoVal {
     Scalar(Operand),
     VecBytes(PlaceExpr, u32),
 }
 
-/// InlineAsm 输出落点通道（同 AsmIoVal 双形态）。
+/// InlineAsm output destination channel (same dual form as `AsmIoVal`).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum AsmIoDst {
     Scalar(ScalarPlace),
     VecBytes(PlaceExpr, u32),
 }
 
-/// 帧内标量槽（快路径）：冻结偏移（Field 投影已折进 off）。
+/// Frame-local scalar slot (fast path): frozen offset (Field projections already folded into `off`).
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Slot {
     pub off: u32,
     pub width: Width,
 }
 
-// ===== place 求值（M4.1 核心）=====
+// ===== Place evaluation (M4.1 core) =====
 
-/// 地址表达式的基。
+/// Base of an address expression.
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PlaceBase {
-    /// 帧内局部：真地址 = 帧基址 + off
+    /// Frame-local: real address = frame base + off
     Local(u32),
-    /// 冻结区真地址（statics/常量池，M4.1 第 4 步物化）
+    /// Frozen-area real address (statics/constant pool, materialized in M4.1 step 4)
     Static(LinkAddr),
 }
 
-/// 包内记录的链接时地址。它与普通整数分型，加载实例可据此统一换算为本实例地址。
+/// Link-time address recorded in the package. Distinct from ordinary integers so a loaded instance can
+/// uniformly translate it to the instance address.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LinkAddr(pub u64);
 
@@ -111,8 +118,8 @@ struct LoadRange {
     len: u64,
 }
 
-/// 一次 Module 实例的地址换算表。artifact 中保存 LinkAddr，实例创建后才得到
-/// runtime address；普通整数不经过这张表。
+/// Per-Module-instance address translation table. Artifacts store `LinkAddr`; the runtime address is
+/// only known after instance creation. Ordinary integers do not pass through this table.
 #[derive(Debug, Default)]
 pub struct LoadMap {
     ranges: Vec<LoadRange>,
@@ -168,45 +175,45 @@ impl LoadMap {
     }
 }
 
-/// 地址表达式的一步（lower 已把 Field/Downcast 折叠成 Offset）。
+/// One step of an address expression (lower has folded Field/Downcast into Offset).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PlaceStep {
-    /// 当前地址处读出指针（W64），地址切换为它
+    /// Read a pointer (W64) at the current address and switch the address to it
     Deref,
-    /// 常量字节偏移（可负——slice 尾投影 `len-k` 折出负项）
+    /// Constant byte offset (may be negative — slice tail projection `len-k` folds into a negative term)
     Offset(i32),
-    /// 含 dyn 尾字段的 DST：`unaligned` 必须按 vtable 的运行期 alignment 向上取整。
-    /// `packed` 对应外层 `repr(packed(N))` 对字段 alignment 的上限。
+    /// DST with a dynamic tail field: `unaligned` must be rounded up to the runtime alignment from the
+    /// vtable. `packed` is the upper bound on field alignment imposed by an outer `repr(packed(N))`.
     VTableAlignOffset {
         meta: Operand,
         unaligned: u64,
         packed: Option<u64>,
     },
-    /// 动态下标：地址 += 帧内 idx 槽值 × stride
+    /// Dynamic index: address += value of frame-local idx slot × stride
     IndexScaled { idx: Slot, stride: u64 },
 }
 
-/// 地址表达式：引擎按序求值 → 真地址 u64。
+/// Address expression: the engine evaluates it in order → real address u64.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PlaceExpr {
     pub base: PlaceBase,
     pub steps: Box<[PlaceStep]>,
 }
 
-/// 标量位置：读/写一个 ≤64 位标量的落点。
+/// Scalar place: the destination for reading/writing a ≤64-bit scalar.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ScalarPlace {
-    /// 快路径：帧内静态槽
+    /// Fast path: frame-local static slot
     Slot(Slot),
-    /// 慢路径：地址表达式处的标量
+    /// Slow path: scalar at an address expression
     Mem { expr: PlaceExpr, width: Width },
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Operand {
-    /// 帧内静态槽（快路径）
+    /// Frame-local static slot (fast path)
     Slot(Slot),
-    /// 地址表达式处的标量
+    /// Scalar at an address expression
     Mem {
         expr: PlaceExpr,
         width: Width,
@@ -215,11 +222,12 @@ pub enum Operand {
         bits: u64,
         width: Width,
     },
-    /// 链接时地址立即数。加载时只重定位这个显式地址形态，绝不猜测普通整数。
+    /// Link-time address immediate. Only this explicit address form is relocated at load time;
+    /// ordinary integers are never guessed to be addresses.
     AddrImm(LinkAddr),
-    /// place 的真地址本身（indirect 实参 = 传聚合的地址）
+    /// The real address of a place itself (indirect argument = passing an aggregate by address)
     AddrOf(PlaceExpr),
-    /// 值减常量（Subslice 的 slice meta：len' = len − k；M4.4）
+    /// Value minus constant (Subslice slice meta: len' = len − k; M4.4)
     SubImm {
         base: Box<Operand>,
         sub: u64,
@@ -271,7 +279,8 @@ pub enum OvfOp {
     Mul,
 }
 
-/// 标量浮点宽度（M5.2 D8c：f16 进标量通道；f128 走 128 位宽通道，不在此）。
+/// Scalar floating-point width (M5.2 D8c: f16 enters the scalar channel; f128 uses the 128-bit wide
+/// channel, not here).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FloatW {
     F16,
@@ -279,21 +288,22 @@ pub enum FloatW {
     F64,
 }
 
-/// f128 宽通道的标量侧类别（F128From/ToScalar）。Int 的宽度在语句 w 字段。
+/// Scalar-side category for the f128 wide channel (F128From/ToScalar). Int width is in the statement's
+/// `w` field.
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum F128Scalar {
     F(FloatW),
     Int { signed: bool },
 }
 
-/// f128 单目（Neg + 一元数学族）。
+/// f128 unary op (Neg + unary math family).
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum F128UnOp {
     Neg,
     Math(MathUnOp),
 }
 
-/// F128MathBin 右操作数（powi 是 i32 标量）。
+/// Right-hand operand of F128MathBin (powi uses an i32 scalar).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum F128Rhs {
     Wide(PlaceExpr),
@@ -306,11 +316,12 @@ pub enum FloatOp {
     Sub,
     Mul,
     Div,
-    /// IEEE fmod（Rust `%` 浮点语义）
+    /// IEEE fmod (Rust `%` floating-point semantics)
     Rem,
 }
 
-/// 数学一元（must_be_overridden float intrinsic 的合成处置：宿主 f32/f64 直算，P7）
+/// Math unary ops (synthetic handling of must_be_overridden float intrinsics: host f32/f64 direct
+/// computation, P7).
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum MathUnOp {
     Sqrt,
@@ -329,7 +340,7 @@ pub enum MathUnOp {
     RoundTiesEven,
 }
 
-/// 数学二元（powf/powi/copysign/minnum/maxnum；powi 的 b 是 i32 位）
+/// Math binary ops (powf/powi/copysign/minnum/maxnum; powi's b is i32 bits).
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum MathBinOp {
     Pow,
@@ -339,7 +350,7 @@ pub enum MathBinOp {
     Maxnum,
 }
 
-/// 位操作单目（ctpop/ctlz/cttz/bswap/bitreverse intrinsic 内建）
+/// Bitwise unary ops (builtins for ctpop/ctlz/cttz/bswap/bitreverse intrinsics).
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum BitUnOp {
     Popcount,
@@ -349,10 +360,11 @@ pub enum BitUnOp {
     Bitreverse,
 }
 
-/// C++20 内存序（M5.2 D8j：lower 从 atomic intrinsic 的 const 泛型 `ORD` 冻结）。
-/// 旧实现整体折叠 SeqCst——合规（强化序 = 允许集合子集）但违 concurrency-arch
-/// "弱内存序自然恢复"承诺，且 x86 上 Relaxed store 白吃 xchg 代价。现按 guest
-/// 请求的序映射宿主原子指令，弱序可见性行为与 native 同源恢复。
+/// C++20 memory order (M5.2 D8j: lower freezes it from the atomic intrinsic's const generic `ORD`).
+/// The old implementation folded everything to SeqCst — correct (a stronger order is an allowed subset)
+/// but broke the concurrency-arch "weak memory order natural recovery" promise, and on x86 a Relaxed
+/// store paid the xchg cost for nothing. Now the requested order is mapped to host atomic instructions,
+/// so weak-order visibility behaves the same as native.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MemOrd {
     Relaxed,
@@ -362,9 +374,9 @@ pub enum MemOrd {
     SeqCst,
 }
 
-/// 原子 RMW（fetch_* 家族；序由 MemOrd 冻结，D8j）。
-/// fetch_max/min 的有符号性由 intrinsic 名冻结（atomic_max/min=有符号，atomic_umax/umin=无符号），
-/// 执行器据此选 AtomicI*/AtomicU*。
+/// Atomic RMW (fetch_* family; order frozen by MemOrd, D8j).
+/// The signedness of fetch_max/min is frozen by the intrinsic name (atomic_max/min = signed,
+/// atomic_umax/umin = unsigned); the executor selects AtomicI*/AtomicU* accordingly.
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum RmwOp {
     Xchg,
@@ -380,22 +392,23 @@ pub enum RmwOp {
     UMin,
 }
 
-/// SIMD lane 元素类别（M5.2 D8b）：所有 lane 运算按类别分派语义。
-/// 历史教训：M4.1 最小集对全部 lane 按整数位运算——float lane 的 add/cmp 是
-/// **静默错值**（+0.0/−0.0 相等性、NaN 自反性都不是位比较），当时仅因 corpus
-/// 全为整数 lane 未爆雷。本类型使"忘带类别"在类型层不可表示。
-/// 指针 lane 按 `Int{signed:false}` 处置（真实地址模型位透传）。
+/// SIMD lane element category (M5.2 D8b): all lane operations dispatch semantics by category.
+/// Historical lesson: the M4.1 minimal set treated every lane as integer bitops — float lane add/cmp
+/// would be **silently wrong** (+0.0/−0.0 equality, NaN reflexivity are not bit comparisons), and it
+/// only didn't blow up because the corpus was all-integer lanes. This type makes "forgot the category"
+/// unrepresentable at the type level.
+/// Pointer lanes are treated as `Int{signed:false}` (real-address model, bits pass through).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LaneKind {
     Int {
         signed: bool,
     },
-    /// f32/f64（按 lane_bytes 分派；f16/f128 lane 在 lower 期拒绝，D8c）
+    /// f32/f64 (dispatched by lane_bytes; f16/f128 lanes are rejected at lower time, D8c)
     Float,
 }
 
-/// SIMD 逐 lane 双目（M5.2 D8b 全家族；有符号性/浮点性收敛进 LaneKind）。
-/// 比较产出 mask lane（真=全 1）。
+/// SIMD per-lane binary op (M5.2 D8b full family; signedness/float-ness converged into LaneKind).
+/// Comparisons produce mask lanes (true = all 1s).
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum SimdBinOp {
     Eq,
@@ -412,22 +425,23 @@ pub enum SimdBinOp {
     Mul,
     Div,
     Rem,
-    /// 饱和加/减（整数 lane 专属）
+    /// Saturating add/sub (integer lanes only)
     SatAdd,
     SatSub,
-    /// minimum/maximum_number_nsz（浮点 lane 专属）：minnum/maxnum 语义 +
-    /// "±0.0 任取"自由——宿主 `f::min/max`（=minnum/maxnum）恒在允许集合内。
+    /// minimum/maximum_number_nsz (float lanes only): minnum/maxnum semantics +
+    /// the freedom to pick either +0.0/−0.0 — host `f::min/max` (= minnum/maxnum) is always in the
+    /// allowed set.
     MinNum,
     MaxNum,
-    /// 左移对 signed/unsigned lane 的位级结果相同。
+    /// Left shift has the same bit-level result for signed/unsigned lanes.
     Shl,
-    /// 右移按 lane 类别选择算术/逻辑语义。
+    /// Right shift chooses arithmetic/logical semantics by lane category.
     Shr,
 }
 
-/// SIMD 逐 lane 单目（M5.2 D8b）。浮点族要求 Float lane；位族要求 Int lane
-/// （lower 期校验）。超越函数逐 lane 调宿主 libm——native 无 fast-math 时
-/// scalarize 到同一 libm，同源即位同。
+/// SIMD per-lane unary op (M5.2 D8b). Float family requires Float lanes; bit family requires Int lanes
+/// (checked at lower time). Transcendental functions per lane call host libm — when native has no
+/// fast-math they scalarize to the same libm, so same source means same bits.
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum SimdUnOp {
     Neg,
@@ -452,9 +466,10 @@ pub enum SimdUnOp {
     Bitreverse,
 }
 
-/// SIMD 横向归约（M5.2 D8b）：ordered/unordered 均按 lane 序折叠——unordered
-/// 的"任意结合序"集合包含顺序折叠，故顺序实现恒合规。float min/max 用宿主
-/// `f{32,64}::min/max`（minnum/maxnum 语义，与 LLVM reduce.fmin/fmax 一致）。
+/// SIMD horizontal reduction (M5.2 D8b): ordered/unordered are both folded in lane order — the
+/// "any associative order" set for unordered includes sequential folding, so sequential implementation
+/// is always compliant. Float min/max use host `f{32,64}::min/max` (minnum/maxnum semantics, matching
+/// LLVM reduce.fmin/fmax).
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum SimdReduceOp {
     Add,
@@ -469,51 +484,52 @@ pub enum SimdReduceOp {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Rvalue {
     Use(Operand),
-    /// guest TLS 实例真地址（M4.4 D3）：Ctx.tls[id] 惰性物化（heap 分配 + 模板拷贝）。
+    /// Guest TLS instance real address (M4.4 D3): `Ctx.tls[id]` is materialized lazily (heap alloc +
+    /// template copy).
     TlsRef(TlsId),
-    // （Subslice 的 meta 走 Operand::SubImm，无独立 rvalue）
+    // (Subslice meta goes through Operand::SubImm, no independent rvalue)
     IntBin {
         op: IntBinOp,
         signed: bool,
         a: Operand,
         b: Operand,
     },
-    /// → bool（W8）
+    /// → bool (W8)
     IntCmp {
         cc: IntCc,
         signed: bool,
         a: Operand,
         b: Operand,
     },
-    /// 按位取反（掩到宽度）
+    /// Bitwise NOT (masked to width)
     NotBits(Operand),
-    /// 逻辑取反（bool：xor 1）——rustc 对 bool 的 Not 语义
+    /// Logical NOT (bool: xor 1) — rustc's Not semantics for bool
     NotBool(Operand),
-    /// 二补数取负
+    /// Two's-complement negation
     Neg(Operand),
-    /// IntToInt：截断后按 from 的符号扩展到 to
+    /// IntToInt: truncate then sign-extend from `from` to `to`
     Cast {
         from: (Width, bool),
         to: Width,
         a: Operand,
     },
-    /// 取 place 真地址（Ref/RawPtr 同一实现——真实地址模型）
+    /// Take the real address of a place (Ref/RawPtr share the implementation — real-address model)
     Ref(PlaceExpr),
-    /// 指针算术：ptr + count × stride（BinOp::Offset 与 offset/arith_offset intrinsic）
+    /// Pointer arithmetic: ptr + count × stride (BinOp::Offset and offset/arith_offset intrinsics)
     PtrOffset {
         ptr: Operand,
         count: Operand,
         stride: u64,
     },
-    /// 三路比较（BinOp::Cmp）→ Ordering（i8：-1/0/1）
+    /// Three-way compare (BinOp::Cmp) → Ordering (i8: -1/0/1)
     IntCmp3 {
         signed: bool,
         a: Operand,
         b: Operand,
     },
-    /// niche 编码判别式读（Direct 编码在 lower 期溶解为 Cast）：
-    /// rel = (tag - niche_start) 按 tag 宽 wrapping；rel < len → variants_start+rel，
-    /// 否则 untagged。niche 不变量：discr 值 == variant index（rustc layout sanity check）。
+    /// Niche-encoded discriminant read (Direct encoding dissolves into Cast at lower time):
+    /// rel = (tag - niche_start) wrapping at tag width; rel < len → variants_start+rel,
+    /// otherwise untagged. Niche invariant: discr value == variant index (rustc layout sanity check).
     NicheDiscr {
         tag: Operand,
         niche_start: u64,
@@ -521,21 +537,23 @@ pub enum Rvalue {
         variants_len: u64,
         untagged: u64,
     },
-    /// 浮点四则（位进位出：操作数是 f16/f32/f64 的位型；f128 走 F128Bin）
+    /// Floating-point arithmetic (bits in, bits out: operands are f16/f32/f64 bit-patterns; f128 uses
+    /// F128Bin)
     FloatBin {
         op: FloatOp,
         fw: FloatW,
         a: Operand,
         b: Operand,
     },
-    /// 数学一元/二元（宿主直算；M4.5 补 must_be_overridden float intrinsic 面）
+    /// Math unary/binary (host direct computation; M4.5 fills in the must_be_overridden float
+    /// intrinsic surface)
     MathUn {
         op: MathUnOp,
         fw: FloatW,
         a: Operand,
     },
-    /// 融合乘加（fma/fmuladd intrinsic，M5.2 D8i）：a*b+c 单次舍入（宿主 mul_add）。
-    /// fmuladd 允许融合或不融合两种结果，融合实现在允许集合内。
+    /// Fused multiply-add (fma/fmuladd intrinsic, M5.2 D8i): a*b+c single rounding (host mul_add).
+    /// fmuladd allows either fused or unfused results; the fused implementation is in the allowed set.
     MathFma {
         fw: FloatW,
         a: Operand,
@@ -548,12 +566,12 @@ pub enum Rvalue {
         a: Operand,
         b: Operand,
     },
-    /// 无符号取大（unsized 尾对齐 = max(sized_align, 运行期 vtable align)，M4.5）
+    /// Unsigned max (unsized tail alignment = max(sized_align, runtime vtable align), M4.5)
     UMax {
         a: Operand,
         b: Operand,
     },
-    /// 浮点比较（IEEE 语义，NaN 全 false 除 Ne）→ bool
+    /// Float comparison (IEEE semantics, NaN all false except Ne) → bool
     FloatCmp {
         cc: IntCc,
         fw: FloatW,
@@ -564,13 +582,13 @@ pub enum Rvalue {
         fw: FloatW,
         a: Operand,
     },
-    /// 标量浮点互转（f16/f32/f64；f128 参与的走 F128FromScalar/F128ToScalar）
+    /// Scalar float conversion (f16/f32/f64; f128 variants use F128FromScalar/F128ToScalar)
     FloatCast {
         from: FloatW,
         to: FloatW,
         a: Operand,
     },
-    /// float → int（Rust `as` 饱和语义：NaN→0、越界→边界）
+    /// float → int (Rust `as` saturation semantics: NaN→0, out-of-range→boundary)
     FloatToInt {
         from: FloatW,
         to: Width,
@@ -583,64 +601,65 @@ pub enum Rvalue {
         to: FloatW,
         a: Operand,
     },
-    /// f128 比较（16 字节 place 操作数）→ bool（IEEE 语义）
+    /// f128 comparison (16-byte place operands) → bool (IEEE semantics)
     F128Cmp {
         cc: IntCc,
         a: PlaceExpr,
         b: PlaceExpr,
     },
-    /// 位操作单目（按操作数宽度语义：ctlz(W8) 是 8 位前导零）
+    /// Bitwise unary op (semantics by operand width: ctlz(W8) is 8-bit leading zeros)
     BitUn {
         op: BitUnOp,
         a: Operand,
     },
-    /// 原子读（真宿主原子指令——spike4 义务；SeqCst）
+    /// Atomic load (real host atomic instruction — spike4 obligation; SeqCst)
     AtomicLoad {
         addr: Operand,
         width: Width,
         order: MemOrd,
     },
-    /// 指针差（ptr_offset_from[_unsigned]）：(a - b) / stride（i64 除法）
+    /// Pointer difference (ptr_offset_from[_unsigned]): (a - b) / stride (i64 division)
     PtrDiff {
         a: Operand,
         b: Operand,
         stride: u64,
     },
-    /// SIMD movemask：收集各 lane 最高位 → 整数标量（simd_bitmask）
+    /// SIMD movemask: collect each lane's high bit → integer scalar (simd_bitmask)
     SimdBitmask {
         a: PlaceExpr,
         lanes: u16,
         lane_bytes: u8,
     },
-    /// 字节比较（compare_bytes intrinsic = memcmp）→ i32（-1/0/1 语义按首异字节）
+    /// Byte comparison (compare_bytes intrinsic = memcmp) → i32 (-1/0/1 semantics by first differing
+    /// byte)
     MemCmp {
         a: Operand,
         b: Operand,
         n: Operand,
     },
-    /// 128 位整数比较（TypeId 判等等；操作数是 16 字节 place）→ bool
+    /// 128-bit integer comparison (TypeId equality, etc.; operands are 16-byte places) → bool
     Cmp128 {
         cc: IntCc,
         signed: bool,
         a: PlaceExpr,
         b: PlaceExpr,
     },
-    /// 饱和算术（saturating_add/sub intrinsic）
+    /// Saturating arithmetic (saturating_add/sub intrinsic)
     IntSat {
         op: OvfOp,
         signed: bool,
         a: Operand,
         b: Operand,
     },
-    /// SIMD 归约（simd_reduce_all/any：mask 向量全真/任真）→ bool
+    /// SIMD reduction (simd_reduce_all/any: mask vector all true / any true) → bool
     SimdReduce {
         all: bool,
         a: PlaceExpr,
         lanes: u16,
         lane_bytes: u8,
     },
-    /// SIMD 算术/位横向归约（M5.2 D8b：simd_reduce_{add,mul}_{ordered,unordered}
-    /// 与 and/or/xor/min/max）→ lane 宽标量（float 归位型）。按 lane 序折叠。
+    /// SIMD arithmetic/bit horizontal reduction (M5.2 D8b: simd_reduce_{add,mul}_{ordered,unordered}
+    /// and and/or/xor/min/max) → lane-width scalar (float returns typed). Folded in lane order.
     SimdReduceArith {
         op: SimdReduceOp,
         lane: LaneKind,
@@ -656,8 +675,8 @@ pub enum Stmt {
         dst: ScalarPlace,
         rv: Rvalue,
     },
-    /// *WithOverflow：一次写 (值槽, 溢出旗标槽)——MIR 的 (T,bool) 标量对，
-    /// 两个 dst 的 off 来自冻结的 pair 布局（.0/.1 的 Field 偏移）。
+    /// *WithOverflow: writes (value slot, overflow flag slot) in one go — MIR's (T,bool) scalar pair.
+    /// The two `dst` offsets come from the frozen pair layout (Field offsets of .0/.1).
     AssignOverflow {
         op: OvfOp,
         signed: bool,
@@ -666,44 +685,46 @@ pub enum Stmt {
         dst_val: ScalarPlace,
         dst_flag: ScalarPlace,
     },
-    /// 聚合搬运（memcpy 语义；pair/聚合整体拷贝的通道）
+    /// Aggregate move (memcpy semantics; channel for pair/aggregate whole copies)
     Copy {
         dst: PlaceExpr,
         src: PlaceExpr,
         size: u32,
     },
-    /// 重复填充：dst 起 count 个元素，每个 elem_size 字节，值来自 src 标量或 memcpy
-    /// （`[expr; N]` 的 Repeat rvalue；elem ≤8 字节走标量循环）
+    /// Repeat fill: starting at `dst`, `count` elements of `elem_size` bytes each, value from scalar
+    /// `src` or memcpy (`[expr; N]` Repeat rvalue; elem ≤8 bytes uses the scalar loop)
     RepeatScalar {
         dst: PlaceExpr,
         val: Operand,
         count: u64,
         elem_size: u32,
     },
-    /// 原子写（SeqCst）
+    /// Atomic store (SeqCst)
     AtomicStore {
         addr: Operand,
         val: Operand,
         order: MemOrd,
     },
-    /// 等宽 volatile 整体读。执行器用 alignment=1 的 opaque `MaybeUninit`
-    /// 字节载体搬运，不解释聚合值的 padding。后端能直接表示的宽度保持为
-    /// 单个 volatile 事件；更宽的 memory-repr 值按目标可承载的块分解。
+    /// Same-width volatile whole read. The executor moves bytes through an alignment=1 opaque
+    /// `MaybeUninit` carrier without interpreting aggregate padding. Widths the backend can represent
+    /// directly stay as a single volatile event; wider memory-repr values are split into target-sized
+    /// chunks.
     VolatileLoad {
         addr: Operand,
         dst: PlaceExpr,
         size: u32,
     },
-    /// 等宽 volatile 整体写；`src` 是位型来源 place，padding 只按原始字节
-    /// 搬运。memory-repr 值对应 rustc 的 volatile memcpy 路径。aligned/unaligned
-    /// intrinsic 在 guest 端的前置条件不同，但执行器共用对齐 1 的宿主载体，
-    /// 避免增加额外对齐要求。
+    /// Same-width volatile whole write; `src` is the bit-pattern source place, padding is moved only as
+    /// raw bytes. memory-repr values correspond to rustc's volatile memcpy path. aligned/unaligned
+    /// intrinsics have different guest preconditions, but the executor shares an alignment-1 host
+    /// carrier to avoid adding extra alignment requirements.
     VolatileStore {
         addr: Operand,
         src: PlaceExpr,
         size: u32,
     },
-    /// 原子比较交换：dst_val = 旧值，dst_ok = 是否成功（succ/fail 双序，D8j）
+    /// Atomic compare-exchange: dst_val = old value, dst_ok = whether it succeeded (succ/fail dual
+    /// orders, D8j)
     AtomicCxchg {
         addr: Operand,
         expected: Operand,
@@ -714,7 +735,7 @@ pub enum Stmt {
         succ: MemOrd,
         fail: MemOrd,
     },
-    /// 原子 RMW：dst = 旧值
+    /// Atomic RMW: dst = old value
     AtomicRmw {
         op: RmwOp,
         addr: Operand,
@@ -722,7 +743,7 @@ pub enum Stmt {
         dst: ScalarPlace,
         order: MemOrd,
     },
-    /// 动态长度内存拷贝（copy/copy_nonoverlapping intrinsic：count × elem_size 字节）
+    /// Dynamic-length memory copy (copy/copy_nonoverlapping intrinsic: count × elem_size bytes)
     MemCopy {
         dst: Operand,
         src: Operand,
@@ -730,14 +751,14 @@ pub enum Stmt {
         elem_size: u64,
         overlap: bool,
     },
-    /// 动态长度填充（write_bytes：val 是 u8，count × elem_size 字节）
+    /// Dynamic-length fill (write_bytes: val is u8, count × elem_size bytes)
     MemSet {
         dst: Operand,
         val: Operand,
         count: Operand,
         elem_size: u64,
     },
-    /// SIMD 逐 lane 双目（dst/a/b 是向量 place；几何冻结自 layout）
+    /// SIMD per-lane binary op (dst/a/b are vector places; geometry frozen from layout)
     SimdBin {
         op: SimdBinOp,
         lane: LaneKind,
@@ -747,7 +768,7 @@ pub enum Stmt {
         lanes: u16,
         lane_bytes: u8,
     },
-    /// SIMD 逐 lane 单目（M5.2 D8b）
+    /// SIMD per-lane unary op (M5.2 D8b)
     SimdUn {
         op: SimdUnOp,
         lane: LaneKind,
@@ -756,8 +777,8 @@ pub enum Stmt {
         lanes: u16,
         lane_bytes: u8,
     },
-    /// SIMD 融合乘加（simd_fma/simd_relaxed_fma；Float lane 专属，宿主 mul_add
-    /// 单次舍入——relaxed 允许融合/不融合，融合恒在允许集合内）
+    /// SIMD fused multiply-add (simd_fma/simd_relaxed_fma; Float lanes only, host mul_add single
+    /// rounding — relaxed allows fused/unfused, fused is always in the allowed set)
     SimdFma {
         dst: PlaceExpr,
         a: PlaceExpr,
@@ -766,8 +787,8 @@ pub enum Stmt {
         lanes: u16,
         lane_bytes: u8,
     },
-    /// SIMD 漏斗移位（simd_funnel_shl/shr；Int lane，shift 是逐 lane 向量；
-    /// shift ≥ lane 位宽 = guest UB → 响亮终止）
+    /// SIMD funnel shift (simd_funnel_shl/shr; Int lanes, shift is a per-lane vector;
+    /// shift ≥ lane bit-width = guest UB → loud termination)
     SimdFunnel {
         left: bool,
         dst: PlaceExpr,
@@ -777,9 +798,11 @@ pub enum Stmt {
         lanes: u16,
         lane_bytes: u8,
     },
-    /// SIMD 逐 lane 转换（simd_cast/simd_as/指针族；lanes 两侧相同、宽度可异）。
-    /// saturate：simd_as 的 float→int 语义（Rust `as`：饱和 + NaN→0）；
-    /// simd_cast 的界外是 guest UB，实现同走饱和（UB 下任何值都在允许集合内）。
+    /// SIMD per-lane cast (simd_cast/simd_as/pointer family; lane count is the same on both sides,
+    /// widths may differ).
+    /// saturate: simd_as float→int semantics (Rust `as`: saturate + NaN→0);
+    /// simd_cast out-of-range is guest UB, implementation also saturates (any value is in the allowed
+    /// set under UB).
     SimdCast {
         dst: PlaceExpr,
         src: PlaceExpr,
@@ -789,8 +812,8 @@ pub enum Stmt {
         dst_lane: LaneKind,
         dst_bytes: u8,
     },
-    /// SIMD 逐 lane 选择（simd_select：mask lane 全 1 取 a、全 0 取 b——由
-    /// 类型不变量保证，按符号位判；mask 向量 lane 宽可异于数据 lane）
+    /// SIMD per-lane select (simd_select: mask lane all-1s picks a, all-0s picks b — guaranteed by
+    /// type invariant, judged by sign bit; mask vector lane width may differ from data lane width)
     SimdSelect {
         mask: PlaceExpr,
         mask_bytes: u8,
@@ -800,7 +823,7 @@ pub enum Stmt {
         lanes: u16,
         lane_bytes: u8,
     },
-    /// SIMD 位掩码选择（simd_select_bitmask：标量掩码第 i 位选 lane i）
+    /// SIMD bitmask select (simd_select_bitmask: scalar mask bit i selects lane i)
     SimdSelectBitmask {
         mask: Operand,
         a: PlaceExpr,
@@ -809,8 +832,9 @@ pub enum Stmt {
         lanes: u16,
         lane_bytes: u8,
     },
-    /// SIMD 散布地址读（simd_gather(val, ptr, mask)：mask lane 真→读 *ptr[i]，
-    /// 假→取 passthru lane；逐 lane 条件访存，假 lane **绝不佯读**——防越界）
+    /// SIMD scattered-address read (simd_gather(val, ptr, mask): mask lane true → read *ptr[i],
+    /// false → take passthru lane; per-lane conditional access, false lanes **never fake-read** —
+    /// prevents out-of-bounds)
     SimdGather {
         passthru: PlaceExpr,
         ptrs: PlaceExpr,
@@ -820,7 +844,7 @@ pub enum Stmt {
         lanes: u16,
         lane_bytes: u8,
     },
-    /// SIMD 散布地址写（simd_scatter(val, ptr, mask)；假 lane 绝不佯写）
+    /// SIMD scattered-address write (simd_scatter(val, ptr, mask); false lanes never fake-write)
     SimdScatter {
         values: PlaceExpr,
         ptrs: PlaceExpr,
@@ -829,8 +853,8 @@ pub enum Stmt {
         lanes: u16,
         lane_bytes: u8,
     },
-    /// SIMD 连续掩码读（simd_masked_load(mask, base, val)：base 是标量元素指针，
-    /// lane i 地址 = base + i×lane_bytes；假 lane 取 passthru，绝不佯读）
+    /// SIMD contiguous masked load (simd_masked_load(mask, base, val): base is a pointer to a scalar
+    /// element, lane i address = base + i×lane_bytes; false lanes take passthru, never fake-read)
     SimdMaskedLoad {
         mask: PlaceExpr,
         mask_bytes: u8,
@@ -840,7 +864,7 @@ pub enum Stmt {
         lanes: u16,
         lane_bytes: u8,
     },
-    /// SIMD 连续掩码写（simd_masked_store(mask, base, val)；假 lane 绝不佯写）
+    /// SIMD contiguous masked store (simd_masked_store(mask, base, val); false lanes never fake-write)
     SimdMaskedStore {
         mask: PlaceExpr,
         mask_bytes: u8,
@@ -849,7 +873,7 @@ pub enum Stmt {
         lanes: u16,
         lane_bytes: u8,
     },
-    /// SIMD 运行期索引抽取（simd_extract_dyn；越界 = guest UB → 响亮终止）
+    /// SIMD dynamic-index extract (simd_extract_dyn; out-of-bounds = guest UB → loud termination)
     SimdExtractDyn {
         src: PlaceExpr,
         idx: Operand,
@@ -857,7 +881,7 @@ pub enum Stmt {
         lanes: u16,
         lane_bytes: u8,
     },
-    /// SIMD 运行期索引插入（simd_insert_dyn：dst = src 整体拷贝后改 idx lane）
+    /// SIMD dynamic-index insert (simd_insert_dyn: dst = whole copy of src then modify idx lane)
     SimdInsertDyn {
         src: PlaceExpr,
         idx: Operand,
@@ -866,8 +890,8 @@ pub enum Stmt {
         lanes: u16,
         lane_bytes: u8,
     },
-    /// SIMD 指针逐 lane 位移（simd_arith_offset：ptr[i] + offset[i]×stride，
-    /// wrapping——真实地址模型下即语义）
+    /// SIMD pointer per-lane offset (simd_arith_offset: ptr[i] + offset[i]×stride,
+    /// wrapping — that is the semantics under the real-address model)
     SimdArithOffset {
         ptrs: PlaceExpr,
         offsets: PlaceExpr,
@@ -875,15 +899,15 @@ pub enum Stmt {
         dst: PlaceExpr,
         lanes: u16,
     },
-    /// SIMD 广播（simd_splat / _mm_set1）：val 复制到每个 lane
+    /// SIMD broadcast (simd_splat / _mm_set1): val copied to every lane
     SimdSplat {
         dst: PlaceExpr,
         val: Operand,
         lanes: u16,
         lane_bytes: u8,
     },
-    /// 128 位整数双目（宿主 u128 直算：读两半组 → 算 → 写两半）；
-    /// with_overflow 时 dst 是 (u128, bool) 布局（旗标写 dst+16）
+    /// 128-bit integer binary op (host u128 direct: read halves → compute → write halves);
+    /// with_overflow: dst is a (u128, bool) layout (flag written at dst+16)
     Bin128 {
         op: IntBinOp,
         signed: bool,
@@ -892,7 +916,7 @@ pub enum Stmt {
         dst: PlaceExpr,
         with_overflow: bool,
     },
-    /// 128 位饱和算术（saturating_add/sub intrinsic 的宽形态；宿主 u128/i128 直算）
+    /// 128-bit saturating arithmetic (wide form of saturating_add/sub intrinsic; host u128/i128 direct)
     Sat128 {
         op: OvfOp,
         signed: bool,
@@ -900,76 +924,76 @@ pub enum Stmt {
         b: PlaceExpr,
         dst: PlaceExpr,
     },
-    /// 128 位整数 → 标量浮点（u128/i128 as f16/f32/f64；宿主直转）
+    /// 128-bit integer → scalar float (u128/i128 as f16/f32/f64; host direct cast)
     Wide128ToFloat {
         src: PlaceExpr,
         signed: bool,
         to: FloatW,
         dst: ScalarPlace,
     },
-    /// 标量浮点 → 128 位整数（f16/f32/f64 as i128/u128；`as` 饱和语义，D8k）
+    /// Scalar float → 128-bit integer (f16/f32/f64 as i128/u128; `as` saturation semantics, D8k)
     FloatToWide128 {
         src: Operand,
         from: FloatW,
         signed: bool,
         dst: PlaceExpr,
     },
-    /// 128 位位单目，结果仍 128 位（bswap/bitreverse，D8k）
+    /// 128-bit bitwise unary op, result still 128 bits (bswap/bitreverse, D8k)
     Bit128 {
         op: BitUnOp,
         src: PlaceExpr,
         dst: PlaceExpr,
     },
-    /// 128 位计数类位单目（ctpop/ctlz/cttz，结果 u32 标量，D8k）
+    /// 128-bit count-style bitwise unary op (ctpop/ctlz/cttz, result u32 scalar, D8k)
     Bit128Count {
         op: BitUnOp,
         src: PlaceExpr,
         dst: ScalarPlace,
     },
-    // ===== f128 宽通道（M5.2 D8c：16 字节值走 place，宿主 f128 直算——
-    // rustc 把引擎自身的 f128 运算下降到与 native guest 同一批
-    // compiler-builtins/__*tf* + glibc *f128 libm 符号，同源即位同）=====
-    /// f128 四则（含 Rem=fmodf128）
+    // ===== f128 wide channel (M5.2 D8c: 16-byte values go through places, host f128 direct —
+    // rustc lowers the engine's own f128 operations to the same compiler-builtins/__*tf* +
+    // glibc *f128 libm symbols as the native guest, so same source means same bits) =====
+    /// f128 arithmetic (includes Rem=fmodf128)
     F128Bin {
         op: FloatOp,
         a: PlaceExpr,
         b: PlaceExpr,
         dst: PlaceExpr,
     },
-    /// f128 数学二元（powi 的 rhs 是 i32 标量，其余 wide）
+    /// f128 math binary op (powi's rhs is an i32 scalar, others wide)
     F128MathBin {
         op: MathBinOp,
         a: PlaceExpr,
         b: F128Rhs,
         dst: PlaceExpr,
     },
-    /// f128 单目（取负 + 全部一元数学）
+    /// f128 unary op (negation + all unary math)
     F128Un {
         op: F128UnOp,
         a: PlaceExpr,
         dst: PlaceExpr,
     },
-    /// f128 融合乘加（宿主 mul_add 单次舍入）
+    /// f128 fused multiply-add (host mul_add single rounding)
     F128Fma {
         a: PlaceExpr,
         b: PlaceExpr,
         c: PlaceExpr,
         dst: PlaceExpr,
     },
-    /// 标量（f16/f32/f64/整数 ≤64）→ f128
+    /// Scalar (f16/f32/f64/integer ≤64) → f128
     F128FromScalar {
         src: Operand,
         kind: F128Scalar,
         dst: PlaceExpr,
     },
-    /// f128 → 标量（float 互转 / `as` 饱和到整数）
+    /// f128 → scalar (float cross-cast / `as` saturate to integer)
     F128ToScalar {
         src: PlaceExpr,
         kind: F128Scalar,
         w: Width,
         dst: ScalarPlace,
     },
-    /// i128/u128 ↔ f128（宿主 as）
+    /// i128/u128 ↔ f128 (host cast)
     F128FromWideInt {
         src: PlaceExpr,
         signed: bool,
@@ -980,8 +1004,8 @@ pub enum Stmt {
         signed: bool,
         dst: PlaceExpr,
     },
-    /// 128 位 niche 判别式读（regex_automata 的 Result<DFA,_> 大 niche，M4.5）：
-    /// rel = tag − niche_start（u128 wrapping）；rel < len → variants_start+rel，否则 untagged
+    /// 128-bit niche discriminant read (regex_automata's Result<DFA,_> big niche, M4.5):
+    /// rel = tag − niche_start (u128 wrapping); rel < len → variants_start+rel, otherwise untagged
     NicheDiscr128 {
         tag: PlaceExpr,
         niche_start: u128,
@@ -990,17 +1014,18 @@ pub enum Stmt {
         untagged: u64,
         dst: ScalarPlace,
     },
-    /// 语句级 Trap 占位：执行到即诊断退出，但**块的终止子照常降低**——
-    /// 保住 Call 边，使 --vm-stats 的可达分析准确（仪器盲点修复）。
+    /// Statement-level Trap placeholder: reaching it diagnoses and exits, but **the block terminator
+    /// is still lowered** — preserving Call edges so `--vm-stats` reachability analysis is accurate
+    /// (instrumentation blind-spot fix).
     Trap(Box<str>),
     Nop,
-    /// 内存栅栏（M4.4 D4）：atomic_fence → 宿主 fence(SeqCst)；
-    /// single_thread（atomic_singlethreadfence）→ compiler_fence(SeqCst)
+    /// Memory fence (M4.4 D4): atomic_fence → host fence(SeqCst);
+    /// single_thread (atomic_singlethreadfence) → compiler_fence(SeqCst)
     Fence {
         single_thread: bool,
         order: MemOrd,
     },
-    /// `[expr; N]` 聚合元素通道（M4.4）：dst[0] 已写好，从它铺满 i∈[1,count)
+    /// `[expr; N]` aggregate element channel (M4.4): dst[0] already written, fill from it for i∈[1,count)
     RepeatBytes {
         first: PlaceExpr,
         count: u64,
@@ -1008,24 +1033,26 @@ pub enum Stmt {
     },
 }
 
-/// unwind 处置（M4.2 起全语义：FrameGuard 动态 LSDA，spike3 协议）。
-/// MIR 的 Unreachable 折进 Continue（unwind 到此=UB，fast 不检测）。
+/// Unwind action (full semantics from M4.2: FrameGuard dynamic LSDA, spike3 protocol).
+/// MIR Unreachable folds into Continue (unwinding here = UB, fast path does not check).
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum UnwindAction {
     Continue,
     Cleanup(Bb),
-    /// unwind 到此即中止（double panic / extern "C" ABI 边界）
+    /// Unwinding here aborts (double panic / extern "C" ABI boundary)
     Terminate,
 }
 
-/// Unsupported builtin 的自有名字。旧实现反序列化后泄漏 `&'static str`；Engine
-/// 现在有真实生命周期，因此名字也随 Module 一起释放。
+/// Owned name of an unsupported builtin. The old implementation leaked `&'static str` after
+/// deserialization; the Engine now has a real lifetime, so the name is released with the Module.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct StaticStr(pub Box<str>);
 
-/// 引擎原语（foreign 三路处置①，debt-map §2-B）：std 自己声明的 runtime extern 边界，
-/// native 下由 codegen/链接器合成 shim——引擎在同一边界接管。
-/// alloc 系的引擎实现是 M4.1 第 5 步（堆内建）；落地前 lower 前置 `Stmt::Trap` 防静默。
+/// Engine primitives (foreign three-way handling ①, debt-map §2-B): runtime extern boundaries declared
+/// by std itself, synthesized into shims by codegen/linker on native — the engine takes over at the
+/// same boundary.
+/// The alloc-family engine implementation is M4.1 step 5 (heap built-ins); lower inserts a preceding
+/// `Stmt::Trap` before they land, to prevent silent failure.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Builtin {
     /// `__rust_alloc(size, align) -> ptr`
@@ -1036,120 +1063,126 @@ pub enum Builtin {
     RustRealloc,
     /// `__rust_alloc_zeroed(size, align) -> ptr`
     RustAllocZeroed,
-    /// `__rust_no_alloc_shim_is_unstable_v2()`：分配前哨兵，空操作
+    /// `__rust_no_alloc_shim_is_unstable_v2()`: allocation sentinel, no-op
     NoAllocShim,
-    /// `_Unwind_RaiseException(exc) -> !`：unwind 原语（M4.2，spike3 的 raise）——
-    /// 宿主 unwinder 载运 MIRVM 自有异常，其内保留 guest exception 指针；
-    /// panic_unwind 结构仍由 guest 标准库在 guest 堆中管理。
+    /// `_Unwind_RaiseException(exc) -> !`: unwind primitive (M4.2, spike3 raise) —
+    /// the host unwinder carries MIRVM's own exception, preserving the guest exception pointer inside;
+    /// panic_unwind structures are still managed by the guest standard library in guest heap.
     UnwindRaise,
-    /// `catch_unwind(try_fn, data, catch_fn) -> i32` intrinsic（rust_try）：
-    /// 原始 unwinder catch + 异常类别/所属 Engine 分类 + 间接调用派发。
-    /// 只有当前 Engine 的 guest panic 会交给 `catch_fn`。
+    /// `catch_unwind(try_fn, data, catch_fn) -> i32` intrinsic (rust_try):
+    /// raw unwinder catch + exception category / owning Engine classification + indirect call dispatch.
+    /// Only guest panics from the current Engine are handed to `catch_fn`.
     CatchUnwind,
-    /// os:: 最小直通（panic 链需要，真实地址零编组；M4.3 换正式注册表 dlsym+libffi）
+    /// Minimal os:: passthrough (needed by panic chain, real-address zero marshalling; M4.3 replaces
+    /// with formal registry dlsym+libffi)
     HostGetenv,
     /// `write(fd, buf, len) -> isize`
     HostWrite,
     /// `strlen(s) -> usize`
     HostStrlen,
-    /// `abort() -> !`（libc abort 语义；core::intrinsics::abort 也汇入）
+    /// `abort() -> !` (libc abort semantics; core::intrinsics::abort also flows here)
     HostAbort,
-    /// `fork()`（M5.2 D8f）：guest 单线程时放行（子进程=全进程拷贝，解释器状态天然
-    /// 一致）；多 guest 线程时响亮拒绝（native 下也是雷区）。解锁 Command::pre_exec
-    /// 与单线程 daemonize。exec 族从 denylist 移出走 foreign 直通（进程替换本就正确）。
+    /// `fork()` (M5.2 D8f): allowed when guest is single-threaded (child = full process copy,
+    /// interpreter state naturally consistent); loudly rejected with multiple guest threads (also a
+    /// minefield on native). Unlocks Command::pre_exec and single-threaded daemonize. exec family moved
+    /// off the denylist to foreign passthrough (process replacement is inherently correct).
     HostFork,
-    /// `atexit(fn)`/`__cxa_atexit(fn,arg,dso)`/`on_exit(fn,arg)`：注册 guest 退出
-    /// 回调（D8g）。glibc 不导出 `atexit` 供 guest dlsym，故走 builtin：引擎自持
-    /// LIFO 注册表，首注册时经引擎自身链接的 libc `atexit` 挂一个 native trampoline，
-    /// 进程收尾按 LIFO 解释执行 guest 回调。返回 0（成功）。
+    /// `atexit(fn)`/`__cxa_atexit(fn,arg,dso)`/`on_exit(fn,arg)`: register guest exit callbacks (D8g).
+    /// glibc does not export `atexit` for guest dlsym, so this goes through builtin: the engine keeps a
+    /// LIFO registry, and on first registration hooks a native trampoline via the engine's own linked
+    /// libc `atexit`; at process teardown guest callbacks are interpreted in LIFO order. Returns 0
+    /// (success).
     HostAtexit,
     HostCxaAtexit,
     HostOnExit,
-    /// `syscall(nr, ...) -> long` 可变参直通（按实参个数分派）
+    /// `syscall(nr, ...) -> long` variadic passthrough (dispatched by actual argument count)
     HostSyscall,
-    /// `signal(signum, handler)`：guest handler 经稳定内核信号桩登记到
-    /// 所属 Engine inbox，再由普通 VM 安全点执行。
+    /// `signal(signum, handler)`: guest handler is registered through a stable kernel signal stub into
+    /// the owning Engine inbox, then executed at a normal VM safepoint.
     HostSignal,
-    /// `raise(signum)`：当前 guest 线程的同步信号投递。与异步内核投递不同，
-    /// handler 必须在 `raise` 返回前执行完，才能保持 POSIX 的嵌套顺序。
+    /// `raise(signum)`: synchronous signal delivery for the current guest thread. Unlike asynchronous
+    /// kernel delivery, the handler must finish before `raise` returns to preserve POSIX nesting order.
     HostRaise,
-    /// `sigaction(signum, act, oldact)`：进程级注册表保留 guest-visible
-    /// handler/mask/flags，并在 Engine 关闭时恢复前一代 disposition。
+    /// `sigaction(signum, act, oldact)`: process-level registry keeps the guest-visible handler/mask/
+    /// flags, and restores the previous disposition when the Engine shuts down.
     HostSigaction,
-    /// 已知不能安全直通的宿主边界。执行到必须明确失败，绝不伪造成功。
-    /// 包括需要异步安全专用实现的边界，以及需要 guest frame/context
-    /// 翻译、不能把宿主解释器状态直接暴露给 guest 的 unwinder API。
+    /// A host boundary known to be unsafe to passthrough. Reaching it must fail explicitly, never fake
+    /// success. Includes boundaries needing async-signal-safe dedicated implementations, and unwinder
+    /// APIs that need guest frame/context translation and cannot expose host interpreter state to the
+    /// guest.
     Unsupported(StaticStr),
-    /// `_Unwind_DeleteException`：按 Itanium ABI 调用异常对象内的 cleanup 回调。
+    /// `_Unwind_DeleteException`: calls the cleanup callback inside the exception object per the Itanium
+    /// ABI.
     UnwindDeleteException,
-    /// backtrace 影子帧（M5.2 D8e）：Ctx 影子帧栈诚实回答，IP=合成 fn token。
-    /// `_Unwind_Backtrace(trace_fn, arg)` 逐帧回调 guest trace_fn。
+    /// Backtrace shadow frame (M5.2 D8e): Ctx shadow frame stack answers honestly, IP = synthetic fn
+    /// token. `_Unwind_Backtrace(trace_fn, arg)` calls guest trace_fn per frame.
     UnwindBacktrace,
-    /// `_Unwind_GetIP(ctx)` / `_Unwind_GetIPInfo(ctx, &ip_before)`：读 synth ctx 的 IP。
+    /// `_Unwind_GetIP(ctx)` / `_Unwind_GetIPInfo(ctx, &ip_before)`: read synth ctx IP.
     UnwindGetIp,
     UnwindGetIpInfo,
-    /// `_Unwind_GetCFA(ctx)`：读取合成上下文中的客体帧栈位置。
+    /// `_Unwind_GetCFA(ctx)`: reads the object frame stack position in the synthetic context.
     UnwindGetCfa,
-    /// `_Unwind_FindEnclosingFunction(ip)`：合成 IP 即函数入口，返回 ip 自身。
+    /// `_Unwind_FindEnclosingFunction(ip)`: synthetic IP is the function entry, returns ip itself.
     UnwindFindEnclosing,
-    /// 不改变 guest 抽象机/RAM 状态的处理器 hint（如 `pause`、`vzeroupper`）。
-    /// 解释器不持久化宿主向量寄存器状态，因此执行期可正确忽略。
+    /// Processor hint that does not change guest abstract machine / RAM state (e.g. `pause`,
+    /// `vzeroupper`). The interpreter does not persist host vector register state, so it can be
+    /// correctly ignored at runtime.
     CpuHintNop,
-    /// `core::intrinsics::breakpoint()`：执行真 int3——与 native 同为 SIGTRAP
-    /// 可观测行为（未被跟踪时进程默认终止）。
+    /// `core::intrinsics::breakpoint()`: executes real int3 — same SIGTRAP observable behavior as native
+    /// (process terminates by default when not traced).
     Breakpoint,
-    /// `llvm.x86.addcarry.64(carry, a, b) -> (carry, result)`：
-    /// LLVM unadjusted intrinsic 的 pair 字段顺序保持原样。
+    /// `llvm.x86.addcarry.64(carry, a, b) -> (carry, result)`:
+    /// LLVM unadjusted intrinsic pair field order is preserved.
     AddCarry64,
-    /// `llvm.x86.subborrow.64(borrow, a, b) -> (borrow, result)`。
+    /// `llvm.x86.subborrow.64(borrow, a, b) -> (borrow, result)`.
     SubBorrow64,
-    /// `llvm.x86.xgetbv(xcr) -> u64`：读取真实宿主扩展控制寄存器。
+    /// `llvm.x86.xgetbv(xcr) -> u64`: reads the real host extended control register.
     Xgetbv,
-    /// 无可移植 `simd_*` 等价的 x86 向量硬件 intrinsic。参数和返回向量仍通过
-    /// frozen bytecode 的 indirect place ABI 传递；执行器助手调用真实宿主指令。
+    /// x86 vector hardware intrinsics with no portable `simd_*` equivalent. Arguments and return vectors
+    /// still pass through the frozen bytecode indirect place ABI; executor helpers call real host
+    /// instructions.
     X86Pshufb128,
     X86Pshufb256,
     X86Sha256Msg1,
     X86Sha256Msg2,
     X86Sha256Rnds2,
-    /// `llvm.x86.sse2.psad.bw(a, b)`（`_mm_sad_epu8`）：两组 8 字节绝对差和，
-    /// 分别以 u64 落 qword lane 0/1（其余位清零）。
+    /// `llvm.x86.sse2.psad.bw(a, b)` (`_mm_sad_epu8`): sum of absolute differences of two 8-byte
+    /// groups, each placed as u64 in qword lane 0/1 (other bits cleared).
     X86PsadBw128,
-    /// `llvm.x86.avx2.psad.bw(a, b)`（`_mm256_sad_epu8`）：每 128 位 lane 同上，
-    /// 共 4 个 u64 结果。
+    /// `llvm.x86.avx2.psad.bw(a, b)` (`_mm256_sad_epu8`): same per 128-bit lane, 4 u64 results total.
     X86PsadBw256,
-    /// `llvm.x86.pclmulqdq(a, b, imm8)`（`_mm_clmulepi64_si128`）：imm8 bit0/bit4
-    /// 各选 a/b 的 qword 做 64×64→128 无进位乘法；imm8 其余位硬件忽略。
+    /// `llvm.x86.pclmulqdq(a, b, imm8)` (`_mm_clmulepi64_si128`): imm8 bit0/bit4 each select a qword
+    /// of a/b for 64×64→128 carryless multiply; other imm8 bits are ignored by hardware.
     X86Pclmulqdq,
-    /// `llvm.x86.aesni.aesenc(a, round_key)` 等 AES-NI 单轮系（128 位）。
+    /// `llvm.x86.aesni.aesenc(a, round_key)` etc. AES-NI single-round family (128-bit).
     X86AesEnc,
     X86AesEncLast,
     X86AesDec,
     X86AesDecLast,
-    /// `llvm.x86.aesni.aesimc(a)`：InvMixColumns（解密轮密钥变换）。
+    /// `llvm.x86.aesni.aesimc(a)`: InvMixColumns (decryption round-key transformation).
     X86AesImc,
-    /// `llvm.x86.aesni.aeskeygenassist(a, imm8)`：SubWord/RotWord ⊕ RCON(=imm8)。
+    /// `llvm.x86.aesni.aeskeygenassist(a, imm8)`: SubWord/RotWord ⊕ RCON(=imm8).
     X86AesKeygenAssist,
-    /// `llvm.x86.sse42.crc32.32.8/16/32` 与 `.64.64`（`_mm_crc32_u8/16/32/64`）：
-    /// CRC32C 硬件语义（反射多项式 0x82F63B78 / 64 位 0xC96C5795D7870F42，
-    /// 无首尾取反——首尾取反由包装层负责）。标量通道。
+    /// `llvm.x86.sse42.crc32.32.8/16/32` and `.64.64` (`_mm_crc32_u8/16/32/64`):
+    /// CRC32C hardware semantics (reflected polynomial 0x82F63B78 / 64-bit 0xC96C5795D7870F42,
+    /// no initial/final inversion — inversion handled by wrapper). Scalar channel.
     X86Crc32U8,
     X86Crc32U16,
     X86Crc32U32,
     X86Crc32U64,
-    /// `llvm.x86.avx2.permd(a, idx)`（`_mm256_permutevar8x32_epi32`）：
-    /// 跨 lane dword 置换，dst.dword[i] = a.dword[idx.dword[i] & 7]。
+    /// `llvm.x86.avx2.permd(a, idx)` (`_mm256_permutevar8x32_epi32`):
+    /// cross-lane dword permute, dst.dword[i] = a.dword[idx.dword[i] & 7].
     X86Permd256,
-    /// `llvm.x86.avx2.gather.q.pd.256(src, base, vindex, mask, scale)`：
-    /// 分 lane 条件收集——mask lane 符号位置位才读 base+vindex*scale（f64），
-    /// 否则拷 src lane；mask 关闭的 lane 绝不触内存（fault suppression）。
+    /// `llvm.x86.avx2.gather.q.pd.256(src, base, vindex, mask, scale)`:
+    /// per-lane conditional gather — mask lane sign bit set reads base+vindex*scale (f64),
+    /// otherwise copies src lane; mask-off lanes never touch memory (fault suppression).
     X86GatherQPd256,
-    /// `llvm.x86.avx2.gather.d.pd.256`：同上，但 vindex 是 4×i32（符号扩展到
-    /// 64 位参与地址算术）。
+    /// `llvm.x86.avx2.gather.d.pd.256`: same, but vindex is 4×i32 (sign-extended to 64 bits for address
+    /// arithmetic).
     X86GatherDPd256,
-    /// `llvm.x86.avx512.vpmadd52l/h.uq.128/256/512(a, b, c)`：52 位无符号乘加，
-    /// dst.qword[i] = a[i] + (b[i][51:0]×c[i][51:0]) 的 bit[51:0]（l）或
-    /// bit[103:52]（h），加法按 64 位回绕。
+    /// `llvm.x86.avx512.vpmadd52l/h.uq.128/256/512(a, b, c)`: 52-bit unsigned multiply-add,
+    /// dst.qword[i] = a[i] + (b[i][51:0]×c[i][51:0]) bit[51:0] (l) or bit[103:52] (h), addition wraps
+    /// at 64 bits.
     X86Pmadd52Lo128,
     X86Pmadd52Hi128,
     X86Pmadd52Lo256,
@@ -1157,93 +1190,97 @@ pub enum Builtin {
     X86Pmadd52Lo512,
     X86Pmadd52Hi512,
     /// `llvm.x86.ssse3.pmadd.ub.sw.128` / `llvm.x86.avx2.pmadd.ub.sw`
-    /// （`_mm(256)_maddubs_epi16`）：a 无符号字节 × b 有符号字节，相邻两积之和
-    /// 饱和到 i16（simd-adler32 主力）。
+    /// (`_mm(256)_maddubs_epi16`): a unsigned byte × b signed byte, sum of adjacent products
+    /// saturates to i16 (simd-adler32 workhorse).
     X86PmaddUbSw128,
     X86PmaddUbSw256,
-    /// `llvm.x86.sse2.pmadd.wd` / `llvm.x86.avx2.pmadd.wd`（`_mm(256)_madd_epi16`）：
-    /// 相邻 i16 对积之和放 i32（MIN×MIN+MIN×MIN 回绕为 i32::MIN，硬件定义）。
+    /// `llvm.x86.sse2.pmadd.wd` / `llvm.x86.avx2.pmadd.wd` (`_mm(256)_madd_epi16`):
+    /// sum of adjacent i16 pair products placed in i32 (MIN×MIN+MIN×MIN wraps to i32::MIN,
+    /// hardware-defined).
     X86PmaddWd128,
     X86PmaddWd256,
-    /// `llvm.x86.sse3.ldu.dq(p)`（`_mm_lddqu_si128`）：非对齐 16 字节纯 load
-    ///（语义与 loadu 逐位同义；corpus 批8 c_tantivy 实锤补建）。
+    /// `llvm.x86.sse3.ldu.dq(p)` (`_mm_lddqu_si128`): unaligned 16-byte pure load
+    /// (semantically bit-identical to loadu; corpus batch 8 c_tantivy proved the need).
     X86Lddqu128,
-    /// `llvm.x86.avx.ldu.dq.256(p)`（`_mm256_lddqu_si256`）：同形 32 字节。
+    /// `llvm.x86.avx.ldu.dq.256(p)` (`_mm256_lddqu_si256`): same shape, 32 bytes.
     X86Lddqu256,
-    /// `llvm.x86.vcvtps2ph.128(a, rounding)`（`_mm_cvtps_ph`）：f32x4 → f16x4 打包
-    /// 进低 64 位、高 64 位清零。`rounding`：imm[2]=0 → imm[1:0] 舍入模式
-    /// （0=RNE/1=floor/2=ceil/3=trunc）；imm[2]=1 → MXCSR.RC（引擎恒宿默认 RNE）。
-    /// 软件模型与硬件指令逐位一致（NaN：qbit 强置 + 载荷右移 13 位截断；
-    /// 溢出/次正规/四种舍入模式见 x86.rs 对拍单测）。
+    /// `llvm.x86.vcvtps2ph.128(a, rounding)` (`_mm_cvtps_ph`): f32x4 → f16x4 packed into low 64 bits,
+    /// high 64 bits cleared. `rounding`: imm[2]=0 → imm[1:0] rounding mode
+    /// (0=RNE/1=floor/2=ceil/3=trunc); imm[2]=1 → MXCSR.RC (engine always uses default RNE).
+    /// Software model is bit-identical to hardware (NaN: qbit forced + payload shifted right 13 bits;
+    /// overflow/subnormal/four rounding modes see x86.rs unit tests).
     X86Cvtps2ph128,
-    /// `llvm.x86.vcvtph2ps.128(a)`（`_mm_cvtph_ps`）：f16x8 低 64 位 → f32x4，
-    /// 精确展开（NaN：qbit 强置 + 载荷左移 13 位；次正规精确规格化）。
-    /// 注：晚近 stdarch 的 `_mm_cvtph_ps` 已 portable 化（simd_shuffle/simd_cast，
-    /// 走 f16 lane 通道而非本符号）；本符号为旧发射面/直调保留。
+    /// `llvm.x86.vcvtph2ps.128(a)` (`_mm_cvtph_ps`): f16x8 low 64 bits → f32x4,
+    /// exact expansion (NaN: qbit forced + payload shifted left 13 bits; subnormals exactly normalized).
+    /// Note: recent stdarch `_mm_cvtph_ps` has been portable-ized (simd_shuffle/simd_cast, taking the
+    /// f16 lane path rather than this symbol); this symbol is kept for old emit surfaces / direct calls.
     X86Cvtph2ps128,
-    /// `llvm.x86.vcvtps2ph.256(a, rounding)`（`_mm256_cvtps_ph`）：f32x8 → f16x8，
-    /// 返回 128 位。舍入语义同 .128。
+    /// `llvm.x86.vcvtps2ph.256(a, rounding)` (`_mm256_cvtps_ph`): f32x8 → f16x8, returns 128 bits.
+    /// Rounding semantics same as .128.
     X86Cvtps2ph256,
-    /// `llvm.x86.vcvtph2ps.256(a)`（`_mm256_cvtph_ps`）：f16x8 → f32x8，精确展开。
+    /// `llvm.x86.vcvtph2ps.256(a)` (`_mm256_cvtph_ps`): f16x8 → f32x8, exact expansion.
     X86Cvtph2ps256,
-    /// `llvm.x86.sse.max.ps(a, b)` 与 `.min`（`_mm_max_ps`/`_mm_min_ps`）：
-    /// `a>b ? a : b` / `a<b ? a : b`——unordered → 第二源、±0 相等 → 第二源、
-    /// NaN 位透传（Rust 标量比较天然同构，对拍钉死）。
+    /// `llvm.x86.sse.max.ps(a, b)` and `.min` (`_mm_max_ps`/`_mm_min_ps`):
+    /// `a>b ? a : b` / `a<b ? a : b` — unordered → second source, ±0 equal → second source,
+    /// NaN passes through bit-identically (matches Rust scalar comparison, pinned by tests).
     X86MaxPs128,
     X86MinPs128,
-    /// `llvm.x86.avx.max.ps.256` / `.min`：f32x8 逐 lane 同 .128 语义。
+    /// `llvm.x86.avx.max.ps.256` / `.min`: f32x8 per-lane, same semantics as .128.
     X86MaxPs256,
     X86MinPs256,
-    /// `llvm.x86.sse.cmp.ps(a, b, imm8)` / `llvm.x86.avx.cmp.ps.256`：
-    /// 全 32 谓词表（EQ/LT/LE/UNORD/NEQ/NLT/NLE/ORD ×Q/S + EQ_UQ/NGE/NGT/FALSE/
-    /// NEQ_OQ/GE/GT/TRUE ×Q/S——S/Q 只差异常旗标，值位相同），真 lane 成全 1。
+    /// `llvm.x86.sse.cmp.ps(a, b, imm8)` / `llvm.x86.avx.cmp.ps.256`:
+    /// full 32-predicate table (EQ/LT/LE/UNORD/NEQ/NLT/NLE/ORD ×Q/S + EQ_UQ/NGE/NGT/FALSE/
+    /// NEQ_OQ/GE/GT/TRUE ×Q/S — S/Q only differ in exception flags, value bits are the same),
+    /// true lane becomes all 1s.
     X86CmpPs128,
     X86CmpPs256,
-    /// `llvm.x86.sse2.cmp.pd` / `llvm.x86.avx.cmp.pd.256`（同 cmp.ps 谓词表，
-    /// f64 lane + 64 位掩码；faer 默认特性 V3 内核实锤，C6 按需队列）
+    /// `llvm.x86.sse2.cmp.pd` / `llvm.x86.avx.cmp.pd.256` (same predicate table as cmp.ps,
+    /// f64 lane + 64-bit mask; faer default feature V3 kernel proved, C6 on-demand queue)
     X86CmpPd128,
     X86CmpPd256,
     /// `llvm.x86.sse2.max.pd` / `min.pd` / `llvm.x86.avx.max.pd.256` / `min.pd.256`
-    ///（maxmin_ps 同语义 f64 lane；faer V3 实锤，C6 按需队列）
+    /// (maxmin_ps semantics on f64 lanes; faer V3 proved, C6 on-demand queue)
     X86MaxPd128,
     X86MinPd128,
     X86MaxPd256,
     X86MinPd256,
-    /// `llvm.x86.sse2.max.sd` / `min.sd`（标量 f64 max/min；faer V3 实锤）
+    /// `llvm.x86.sse2.max.sd` / `min.sd` (scalar f64 max/min; faer V3 proved)
     X86MaxSd,
     X86MinSd,
-    /// `llvm.x86.sse41.round.ps(a, imm8)` / `llvm.x86.avx.round.ps.256`：
-    /// imm[3:0] 舍入（0=RNE/1=floor/2=ceil/3=trunc + bit2→MXCSR(=RNE) + bit3 仅
-    /// 异常旗标抑制）。NaN：载荷保留 + qbit 强置（x86.rs 显式臂——libm/roundss
-    /// 的 NaN 位行为随宿主构建目标漂移，不可依赖）。
+    /// `llvm.x86.sse41.round.ps(a, imm8)` / `llvm.x86.avx.round.ps.256`:
+    /// imm[3:0] rounding (0=RNE/1=floor/2=ceil/3=trunc + bit2→MXCSR(=RNE) + bit3 only suppresses
+    /// exception flags). NaN: payload preserved + qbit forced (x86.rs explicit arm — libm/roundss NaN
+    /// bit behavior drifts with host build target, do not rely on it).
     X86RoundPs128,
     X86RoundPs256,
-    /// `llvm.x86.sse2.cvtps2dq(a)`（`_mm_cvtps_epi32`）：f32→i32 按 MXCSR.RC=RNE
-    /// 取整；NaN/越界/±inf → 0x80000000（indefinite）。
+    /// `llvm.x86.sse2.cvtps2dq(a)` (`_mm_cvtps_epi32`): f32→i32 rounded per MXCSR.RC=RNE;
+    /// NaN/out-of-range/±inf → 0x80000000 (indefinite).
     X86CvtPs2dq128,
-    /// `llvm.x86.sse2.cvttps2dq(a)`（`_mm_cvttps_epi32`）：同上但截断取整。
+    /// `llvm.x86.sse2.cvttps2dq(a)` (`_mm_cvttps_epi32`): same but truncate rounding.
     X86CvttPs2dq128,
-    /// `llvm.x86.avx.cvt.ps2dq.256` / `.cvtt.ps2dq.256`：f32x8 版同上两符号。
+    /// `llvm.x86.avx.cvt.ps2dq.256` / `.cvtt.ps2dq.256`: f32x8 versions of the above two symbols.
     X86CvtPs2dq256,
     X86CvttPs2dq256,
-    /// `llvm.x86.sse41.blendvps(a, b, mask)` / `llvm.x86.avx.blendv.ps.256`：
-    /// mask lane 符号位置位取 b、清零取 a（纯位选择，无算术）。
+    /// `llvm.x86.sse41.blendvps(a, b, mask)` / `llvm.x86.avx.blendv.ps.256`:
+    /// mask lane sign bit set picks b, cleared picks a (pure bit selection, no arithmetic).
     X86BlendvPs128,
     X86BlendvPs256,
-    /// `llvm.x86.sse2.psll.d(a, count)`（`_mm_sll_epi32`）：v4i32 逻辑左移；
-    /// count 为向量操作数低 64 位单一计数值，count>31 → 全零（tiny-skia
-    /// lowp u32x4 通道实锤）。count 向量高位字节硬件照样读低 64 位忽略其余。
+    /// `llvm.x86.sse2.psll.d(a, count)` (`_mm_sll_epi32`): v4i32 logical left shift;
+    /// count is a single count value in the low 64 bits of the vector operand, count>31 → all zeros
+    /// (tiny-skia lowp u32x4 channel proved). The count vector's high bytes are still read by hardware
+    /// as low 64 bits, others ignored.
     X86PsllD128,
-    /// `llvm.x86.sse2.psrl.d(a, count)`（`_mm_srl_epi32`）：v4i32 逻辑右移，同律。
+    /// `llvm.x86.sse2.psrl.d(a, count)` (`_mm_srl_epi32`): v4i32 logical right shift, same rule.
     X86PsrlD128,
-    /// Capture-capable Module 在 Engine 冷创建边界由 `HostSyscall` 改写而来。
-    /// 该内部变体经通用 builtin 助手记录，避免给普通 syscall/JIT 路径
-    /// 增加 session 检查。
-    /// 放在枚举尾部，保持既有 postcard variant 编号不变。
+    /// Rewritten from `HostSyscall` at the cold-create boundary of a capture-capable Module.
+    /// This internal variant is recorded by the generic builtin helper to avoid adding session checks
+    /// to the ordinary syscall/JIT path.
+    /// Placed at the end of the enum to keep existing postcard variant numbers unchanged.
     HostSyscallTrace,
 }
 
-/// libffi 直通的参数/返回类别（lower 期从 fn sig layout 冻结；os:: P7 直通处置）。
+/// libffi passthrough argument/return category (frozen at lower time from fn sig layout; os:: P7
+/// passthrough handling).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum FfiKind {
     I8,
@@ -1258,15 +1295,16 @@ pub enum FfiKind {
     F64,
     Ptr,
     Void,
-    /// 按值聚合（C1）：字节按 rustc layout 在两侧内存以**真地址**交接——
-    /// 出向 = libffi avalue 直指 guest 内存并自行 eightbyte 注册编组；
-    /// 入向 = closure avalue 指向字节，marshal 按 callee ParamAbi 映射
-    /// （Indirect 传址 / Scalar·Pair 按 FfiAgg 声明序字段读值）。
+    /// Pass-by-value aggregate (C1): bytes are handed off in guest memory at **real address** on both
+    /// sides — outbound = libffi avalue points straight at guest memory and handles eightbyte register
+    /// marshalling itself; inbound = closure avalue points at the bytes, marshal maps per callee
+    /// ParamAbi (Indirect by address / Scalar·Pair reads values in declared field order).
     Agg(FfiAgg),
 }
 
-/// C1 按值聚合的冻结布局（rustc layout 展开；声明序字段，padding 隐含于偏移）。
-/// align ≤ 8 是施工边界（结果缓冲按 8 对齐分配）。
+/// C1 pass-by-value aggregate frozen layout (rustc layout expansion; declared-order fields, padding
+/// implicit in offsets).
+/// align ≤ 8 is the construction boundary (result buffer allocated with 8-byte alignment).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct FfiAgg {
     pub size: u32,
@@ -1274,32 +1312,34 @@ pub struct FfiAgg {
     pub fields: Vec<FfiField>,
 }
 
-/// C1 聚合字段：偏移 + 叶子（递归嵌套；ZST 成员不入列，padding 靠 size/off 保持）。
+/// C1 aggregate field: offset + leaf (recursive nesting; ZST members omitted, padding kept by
+/// size/off).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct FfiField {
     pub off: u32,
     pub leaf: FfiLeaf,
 }
 
-/// C1 聚合叶子：标量或嵌套聚合（ScalarPair {ptr,len} / 内层结构同型展开）。
+/// C1 aggregate leaf: scalar or nested aggregate (ScalarPair {ptr,len} / inner struct same shape).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum FfiLeaf {
     Scalar(FfiKind),
     Agg(FfiAgg),
 }
 
-/// Bin128 的右操作数：128 位 place 或 ≤64 位标量（Shl/Shr 的移位量）。
+/// Right-hand operand of Bin128: 128-bit place or ≤64-bit scalar (shift amount for Shl/Shr).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Bin128Rhs {
     Wide(PlaceExpr),
     Scalar(Operand),
 }
 
-/// guest TLS 槽 id（`#[thread_local]` static 的稠密编号，M4.4 D3）。
+/// Guest TLS slot id (dense number for `#[thread_local]` statics, M4.4 D3).
 pub type TlsId = u32;
 
-/// guest TLS 槽描述（lower 冻结）：template = 初始字节在冻结区的真地址（含重定位），
-/// 每线程首访时 heap 分配 size 字节拷模板。v1 记账：dtor 不跑（设计 D3）。
+/// Guest TLS slot description (frozen at lower time): template = initial bytes' real address in the
+/// frozen area (includes relocations), first per-thread access heap-allocates `size` bytes and copies
+/// the template. v1 accounting: dtor does not run (design D3).
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TlsSlot {
     pub template: LinkAddr,
@@ -1307,47 +1347,52 @@ pub struct TlsSlot {
     pub align: u32,
 }
 
-/// 冻结的 foreign 签名。变参函数按**调用点实参**冻结尾参（fixed = 固定参数个数）。
-/// Eq/Hash：thunk 工厂缓存键（M4.4 D1——(fn 条目地址, 逃逸位签名) → 真码地址）。
+/// Frozen foreign signature. Variadic functions freeze trailing args per **call-site actuals**
+/// (`fixed` = number of fixed parameters).
+/// Eq/Hash: thunk factory cache key (M4.4 D1 — (fn entry address, escaped-bit signature) → real code
+/// address).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ForeignSig {
     pub args: Vec<FfiKind>,
     pub ret: FfiKind,
-    /// Some(n) = 变参函数，前 n 个是固定参数（libffi prep_cif_var）
+    /// Some(n) = variadic function, first n are fixed parameters (libffi prep_cif_var)
     pub fixed: Option<usize>,
-    /// fn-ptr 类型的参数位（M4.4 D1）：位置 + 该 fn ptr 自身的冻结签名。
-    /// 执行期：该位实参 = fn 条目地址（fn_addrs 反查命中）→ 换 thunk 真码；
-    /// NULL 或已是 native 真码 → 原样直传。内层签名的 thunk_args 恒空（不嵌套）。
+    /// fn-ptr type argument bits (M4.4 D1): position + the frozen signature of that fn ptr itself.
+    /// At runtime: the actual argument at this position = fn entry address (reverse-lookup hit in
+    /// fn_addrs) → swapped to thunk real code; NULL or already-native real code → passed through.
+    /// Inner signature's thunk_args is always empty (no nesting).
     pub thunk_args: Vec<(usize, ForeignSig)>,
-    /// F-09/R18：ABI 的 unwind 属性保全。false 走普通 C 边界，true 走允许
-    /// 异常穿过的 C-unwind 边界；direct foreign、callback 与 native fn-ptr 共用。
+    /// F-09/R18: preserve ABI unwind attribute. false = ordinary C boundary, true = C-unwind boundary
+    /// that allows exceptions through; shared by direct foreign, callback, and native fn-ptr.
     #[serde(default)]
     pub unwind: bool,
 }
 
-/// 参数在 callee 帧内的落位（引擎调用约定 v2：实参展平为 `&[u64]` 槽序列）。
+/// Argument landing position inside the callee frame (engine calling convention v2: actuals are
+/// flattened into a `&[u64]` slot sequence).
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ParamAbi {
-    /// ZST：不占实参槽
+    /// ZST: occupies no argument slot
     Zst,
-    /// 标量：1 槽
+    /// Scalar: 1 slot
     Scalar(Slot),
-    /// 标量对：2 槽（lo, hi 各自的帧内槽，偏移来自冻结 pair 布局）
+    /// Scalar pair: 2 slots (lo, hi frame-local slots, offsets from frozen pair layout)
     Pair(Slot, Slot),
-    /// 大聚合：1 槽 = src 真地址；prologue memcpy `size` 字节到帧内 `off`
+    /// Large aggregate: 1 slot = source real address; prologue memcpy `size` bytes to frame `off`
     Indirect { off: u32, size: u32 },
 }
 
-/// 返回通道（引擎调用约定 v2）。
+/// Return channel (engine calling convention v2).
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum RetAbi {
     Zst,
-    /// 标量：interp_frame 返回 lo
+    /// Scalar: interp_frame returns lo
     Scalar(Slot),
-    /// 标量对：返回 (lo, hi)
+    /// Scalar pair: returns (lo, hi)
     Pair(Slot, Slot),
-    /// 大聚合：caller 前插隐藏首实参 = 目的真地址；callee Return 时
-    /// memcpy(隐藏指针槽, _0 槽, size)。隐藏指针槽附加在帧尾（sret_off）。
+    /// Large aggregate: caller prepends a hidden first argument = destination real address; on callee
+    /// Return, memcpy(hidden pointer slot, _0 slot, size). Hidden pointer slot is appended at frame
+    /// tail (sret_off).
     Indirect {
         ret_off: u32,
         size: u32,
@@ -1355,29 +1400,31 @@ pub enum RetAbi {
     },
 }
 
-/// Call 的返回落点（caller 侧）。
+/// Return landing point of a Call (caller side).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum RetDest {
-    /// 忽略（ZST 或无落点）
+    /// Ignored (ZST or no destination)
     Ignore,
     Scalar(ScalarPlace),
-    /// pair 两半的落点（dst place + 冻结的两半偏移/宽度）
+    /// Pair of half landing points (dst place + frozen half offsets/widths)
     Pair(ScalarPlace, ScalarPlace),
-    /// 大聚合：caller 求好目的真地址，作为隐藏首实参传入（Call 时前插）
+    /// Large aggregate: caller computes the destination real address and passes it as the hidden first
+    /// argument (prepended at Call time)
     Indirect(PlaceExpr),
 }
 
-/// `SwitchInt` 判别值。普通整数沿用标量 operand；i128/u128 保持在 place 中，执行期
-/// 一次读取完整 128 位，不能先截成 u64。
+/// `SwitchInt` discriminant. Ordinary integers use a scalar operand; i128/u128 stay in a place and are
+/// read as full 128 bits at runtime, not truncated to u64 first.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum SwitchDiscr {
     Scalar(Operand),
     Wide(PlaceExpr),
 }
 
-/// 直接 guest 调用在标准启动链中的职责。绝大多数调用是 `Normal`；固定工具链的
-/// `lang_start_internal` 只把包住用户 `main` 的那次 `catch_unwind` 标成
-/// `MainPanicBoundary`，让 Engine 在 guest std 消费异常后仍能保留结构化结果。
+/// Role of a direct guest call in the standard startup chain. The vast majority of calls are `Normal`;
+/// the fixed toolchain's `lang_start_internal` marks the one `catch_unwind` wrapping user `main` as
+/// `MainPanicBoundary`, so the Engine can still keep a structured result after guest std consumes the
+/// exception.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CallRole {
     #[default]
@@ -1385,8 +1432,9 @@ pub enum CallRole {
     MainPanicBoundary,
 }
 
-/// 引擎原语调用在标准启动链中的职责。只有固定工具链中经结构校验的那一个
-/// 固定工具链的 `std::intrinsics::catch_unwind` 调用点会标成 `MainPanicCatcher`。
+/// Role of an engine primitive call in the standard startup chain. Only the one fixed-toolchain
+/// `std::intrinsics::catch_unwind` call site that passes structural validation is marked
+/// `MainPanicCatcher`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BuiltinCallRole {
     #[default]
@@ -1411,7 +1459,7 @@ pub enum Terminator {
         #[serde(default)]
         role: CallRole,
     },
-    /// 引擎原语调用（不是 guest 函数，无 Call 边）。
+    /// Engine primitive call (not a guest function, no Call edge).
     CallBuiltin {
         builtin: Builtin,
         args: Vec<Operand>,
@@ -1421,8 +1469,8 @@ pub enum Terminator {
         #[serde(default)]
         role: BuiltinCallRole,
     },
-    /// foreign 直通（os:: P7 处置①的通用道）：dlsym + libffi 按冻结签名直调——
-    /// 真实地址模型零编组（guest 指针即宿主指针）。
+    /// Foreign passthrough (generic path for os:: P7 handling ①): dlsym + libffi direct call using the
+    /// frozen signature — real-address model, zero marshalling (guest pointer is host pointer).
     CallForeign {
         sym: Box<str>,
         sig: ForeignSig,
@@ -1431,12 +1479,14 @@ pub enum Terminator {
         target: Bb,
         unwind: UnwindAction,
     },
-    /// 间接调用（fn-ptr / dyn 虚派发）：callee 求值 = fn 条目真地址（D4），
-    /// 经 Module.fn_addrs 反查 FuncId。--vm-stats 可达分析无出边（已知盲点）。
-    /// null_ok：dyn 虚 drop 的 vtable 槽 0 可为 null（无 Drop 的类型）= 空操作。
-    /// native_sig（M4.4，FFI 反方向之二）：extern "C" 系 fn-ptr 调用点的冻结签名——
-    /// 反查未命中 = guest 持 native 真码（运行期 dlsym 所得，如 __pthread_get_minstack）
-    /// → libffi 按此签名直调；None（Rust ABI / 不可类）时未命中即诊断退出。
+    /// Indirect call (fn-ptr / dyn virtual dispatch): callee evaluates to the fn entry real address
+    /// (D4), reverse-looked up through `Module.fn_addrs` to FuncId. `--vm-stats` reachability analysis
+    /// has no outgoing edge (known blind spot).
+    /// null_ok: dyn virtual drop's vtable slot 0 may be null (types without Drop) = no-op.
+    /// native_sig (M4.4, second direction of FFI): frozen signature at extern "C" fn-ptr call sites —
+    /// reverse-lookup miss = guest holds native real code (runtime dlsym result, e.g.
+    /// __pthread_get_minstack) → direct libffi call with this signature; None (Rust ABI / unclassifiable)
+    /// means a miss diagnoses and exits.
     CallIndirect {
         callee: Operand,
         args: Vec<Operand>,
@@ -1446,29 +1496,35 @@ pub enum Terminator {
         null_ok: bool,
         native_sig: Option<ForeignSig>,
     },
-    /// inline asm 站点（M5.0 asm-stub 工厂，corpus §2.2 三面孔归宿）：
-    /// stub 索引 `Module.asm_stub_addrs`（加载相 cc 汇编 + dlopen 物化的 wrapper 真址，
-    /// `fn(*mut u8)` 槽缓冲 ABI）。执行 = 栈开 buf_size 缓冲、按 ins 写入槽、call 真址、
-    /// 按 outs 从槽读出落点。三面孔全 `unwind unreachable`（MAY_UNWIND 已在 lower 拒）。
+    /// Inline asm site (M5.0 asm-stub factory, corpus §2.2 three-face destination):
+    /// stub indexes `Module.asm_stub_addrs` (load-phase cc assembly + dlopen materialized wrapper real
+    /// address, `fn(*mut u8)` slot-buffer ABI). Execution = stack-allocate buf_size buffer, write slots
+    /// per `ins`, call real address, read destination per `outs`. All three faces are `unwind
+    /// unreachable` (MAY_UNWIND is rejected at lower time).
     InlineAsm {
         stub: AsmStubId,
         buf_size: u32,
-        /// (缓冲槽偏移, 输入值通道)——标量写 8B 槽低位；向量字节通道拷全宽
+        /// (buffer slot offset, input value channel) — scalar writes 8B low in slot; vector byte channel
+        /// copies full width
         ins: Vec<(u32, AsmIoVal)>,
-        /// (缓冲槽偏移, 输出落点通道)——标量读 8B 槽低位；向量字节通道拷全宽
+        /// (buffer slot offset, output destination channel) — scalar reads 8B low from slot; vector byte
+        /// channel copies full width
         outs: Vec<(u32, AsmIoDst)>,
         target: Bb,
     },
     Return,
     Unreachable,
-    /// cleanup 链尾（MIR UnwindResume）：只在 guard.drop 的 cleanup 执行中出现——
-    /// 返回即让宿主 unwind 自动继续（spike3：单条 native 栈，VM 侧零协调）
+    /// Cleanup chain tail (MIR UnwindResume): only appears in guard.drop cleanup execution — returning
+    /// lets the host unwinder continue automatically (spike3: single native stack, zero VM-side
+    /// coordination)
     Resume,
-    /// MIR UnwindTerminate：到达即 abort
+    /// MIR UnwindTerminate: abort on reach
     TerminateAbort,
-    /// ★ Trap-stub：未支持构造的占位（M4 增量协议的核心机制）。
-    /// lowering 对收集全集是全量的——不认识的构造绝不中止，就地降为 Trap；
-    /// 只有被执行的路径必须 trap-free。诊断串指出"哪一期欠的账"。
+    /// ★ Trap-stub: placeholder for unsupported constructs (core mechanism of the M4 incremental
+    /// protocol).
+    /// Lowering is total over the collected set — unknown constructs never abort; they are lowered to
+    /// Trap locally; only executed paths must be trap-free. The diagnostic string says "which milestone
+    /// is still owed".
     Trap(Box<str>),
 }
 
@@ -1482,20 +1538,22 @@ pub struct Block {
 pub struct FuncBody {
     pub frame_size: u32,
     pub frame_align: u32,
-    /// 返回通道（_0）
+    /// Return channel (_0)
     pub ret: RetAbi,
-    /// 参数落位（_1..=_argc；实参槽序 = 展平序）
+    /// Argument landing positions (_1..=_argc; argument slot order = flattened order)
     pub params: Vec<ParamAbi>,
-    /// #[track_caller]：&Location 隐藏尾实参的帧内槽（ABI 幻影参，cg_ssa 同构）
+    /// #[track_caller]: hidden trailing argument &Location's frame-local slot (ABI phantom param,
+    /// cg_ssa isomorphic)
     pub caller_loc_off: Option<u32>,
     pub blocks: Vec<Block>,
-    /// 诊断用（符号名）
+    /// For diagnostics (symbol name)
     pub name: Box<str>,
 }
 
-/// 函数表有两种所有权：lower/L2/image 仍是普通 Vec；`.mirvm` 包只保留
-/// 加载时取得的不可变字节快照、函数切片索引和按需发布槽。解释器/JIT 继续通过 `len/get/index/iter`
-/// 使用同一接口。
+/// The function table has two ownership modes: lower/L2/image still use an ordinary Vec; `.mirvm`
+/// packages keep only the immutable byte snapshot taken at load time, function slice indices, and
+/// on-demand publish slots. The interpreter/JIT continue to use the same interface through
+/// `len/get/index/iter`.
 pub struct FuncTable {
     storage: FuncStorage,
 }
@@ -1695,9 +1753,9 @@ impl LazyFuncs {
                 }
             }
         }
-        match self.state.cells[index].get().expect("函数解码槽未发布") {
+        match self.state.cells[index].get().expect("function decode slot not published") {
             Ok(body) => body,
-            Err(error) => panic!("已验证函数在惰性解码时失败: {error}"),
+            Err(error) => panic!("verified function failed during lazy decode: {error}"),
         }
     }
 }
@@ -1862,29 +1920,29 @@ impl<'de> serde::Deserialize<'de> for FuncTable {
     }
 }
 
-/// main 启动计划（cg_ssa create_entry_fn 同构）：
-/// `lang_start(main fn-ptr, argc, argv, sigpipe) -> isize`（返回值 = 进程退出码）。
+/// main startup plan (isomorphic to cg_ssa create_entry_fn):
+/// `lang_start(main fn-ptr, argc, argv, sigpipe) -> isize` (return value = process exit code).
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct EntryPlan {
     pub lang_start: FuncId,
-    /// 用户 main 的 D4 条目真地址（lang_start 第一实参，经 CallIndirect 派发）
+    /// User main's D4 entry real address (first argument to lang_start, dispatched via CallIndirect)
     pub main_addr: LinkAddr,
     pub argc: u64,
-    /// argv C 串指针表的真地址（冻结区）
+    /// Real address of the argv C-string pointer table (frozen area)
     pub argv_ptr: u64,
     pub sigpipe: u8,
 }
 
-/// P2 GOT 符号表项（decision-history §7.5c）：weak = 未命中写 0 不终止
-/// （extern weak 符号缺席取址 = NULL 语义）。
+/// P2 GOT symbol table entry (decision-history §7.5c): weak = on miss write 0, do not abort
+/// (extern weak symbol absent address = NULL semantics).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GotSym {
     pub name: Box<str>,
     pub weak: bool,
 }
 
-/// P2 启动相修补点（decision-history §7.5c）：加载相写
-/// `*addr = resolve(foreign_syms[sym]) + addend`。
+/// P2 startup-phase fixup point (decision-history §7.5c): load phase writes
+/// `*addr = resolve(foreign_syms[sym]) + addend`.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct GotFixup {
     pub addr: LinkAddr,
@@ -1892,8 +1950,9 @@ pub struct GotFixup {
     pub addend: u64,
 }
 
-/// 冻结字节中的一处客体指针。`at` 是要写的 8 字节格，`target` 是它应指向的
-/// 链接地址（已折入 addend）；实例化时两端分别经 LoadMap 换算后再写入。
+/// One object pointer inside the frozen bytes. `at` is the 8-byte cell to write, `target` is the link
+/// address it should point to (addend already folded); at instantiation both ends are translated via
+/// LoadMap before writing.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct FrozenReloc {
     pub at: LinkAddr,
@@ -1906,12 +1965,13 @@ pub enum FrozenRelocTarget {
     Entry(LinkAddr),
 }
 
-/// P1 条目可执行化配方（decision-history §7.6）。artifact 只保存 guest fn 的
-/// 逻辑地址、FuncId 与冻结的 C ABI 签名；每个 Engine 在启动相经 libffi 物化独有
-/// closure，真实 fn-ptr 不进缓存或包。
+/// P1 entry executable recipe (decision-history §7.6). The artifact only stores the guest fn's logical
+/// address, FuncId, and frozen C ABI signature; each Engine materializes a unique closure at startup
+/// via libffi. Real fn-ptrs are not cached or packaged.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EntryStubSite {
-    /// artifact 中所有该 fn-ptr 引用共享的逻辑身份；每个 Engine 映射到独有 closure。
+    /// Logical identity shared by all fn-ptr references to this fn in the artifact; each Engine maps it
+    /// to a unique closure.
     pub link_addr: LinkAddr,
     pub func: FuncId,
     pub sig: ForeignSig,
@@ -1924,13 +1984,13 @@ pub(crate) fn native_entry_slot_name(link_addr: LinkAddr) -> String {
     format!("__mirvm_p1_target_{:016x}", link_addr.0)
 }
 
-/// 自定义 `#[global_allocator]` 的 `__rust_*` shim 四件套 FuncId（corpus 批7
-/// c_mimalloc 实锤修）：rustc_ast::expand::global_allocator 为含该属性的 crate
-/// 生成的四只本地转发 fn（体 = 调用户 GlobalAlloc 各法）。
-/// 分配语义是**程序级**的：base/deps image 按 Default 会话烘焙的
-/// `CallBuiltin(Rust*)` 臂与 delta/image 的 guest shim 必须路由到**同一台**
-/// 分配器——否则跨堆 free（mimalloc 元数据 SIGSEGV）。运行期 interp 以此字段
-/// 统一上提路由，与字节码烘在哪台会话无关。
+/// FuncIds for the four `__rust_*` shims of a custom `#[global_allocator]` (corpus batch 7
+/// c_mimalloc proved the fix): rustc_ast::expand::global_allocator generates four local forwarding
+/// fns (body = call each method of the user's GlobalAlloc) for crates with that attribute.
+/// Allocation semantics are **program-level**: the base/deps image's `CallBuiltin(Rust*)` arms baked
+/// with the Default session and the delta/image's guest shim must route to the **same**
+/// allocator — otherwise cross-heap free causes mimalloc metadata SIGSEGV. At runtime interp uses this
+/// field to unify upward routing, regardless of which session the bytecode was baked in.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct AllocShims {
     pub alloc: FuncId,
@@ -1939,13 +1999,14 @@ pub struct AllocShims {
     pub alloc_zeroed: FuncId,
 }
 
-/// 未捕获 guest panic 的客体侧资源回收计划。
+/// Guest-side resource reclamation plan for uncaught guest panics.
 ///
-/// `cleanup` 是固定工具链里 `std::panicking::catch_unwind::cleanup` 的客体
-/// 函数：它接收 panic_unwind 的原始异常指针，取出 `Box<dyn Any + Send>` 并
-/// 减少 guest 的 panic 计数。`drop_payload` 是该 Box 类型的 drop glue，负责
-/// 运行用户载荷的 Drop 并通过 guest 自己的全局分配器释放内存。引擎只搬运两个
-/// 不透明机器字，不读取标准库私有 Exception/Box/vtable 布局。
+/// `cleanup` is the object function `std::panicking::catch_unwind::cleanup` in the fixed toolchain:
+/// it receives the panic_unwind raw exception pointer, takes out the `Box<dyn Any + Send>`, and
+/// decrements the guest panic count. `drop_payload` is the drop glue for that Box, responsible for
+/// running the user payload's Drop and freeing memory through the guest's own global allocator. The
+/// engine only moves two opaque machine words; it does not read std's private Exception/Box/vtable
+/// layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GuestPanicCleanup {
     pub cleanup: FuncId,
@@ -1955,97 +2016,114 @@ pub struct GuestPanicCleanup {
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Module {
     pub funcs: FuncTable,
-    /// FuncId 顺序的客体符号名轻量索引。包把函数体保持惰性时，backtrace 仍能
-    /// 在不解码全部 FuncBody 的前提下建立标准 ELF 符号表。
+    /// Lightweight FuncId-order object symbol name index. When the package keeps function bodies lazy,
+    /// backtrace can still build a standard ELF symbol table without decoding every FuncBody.
     pub function_names: Vec<Box<str>>,
-    /// 当前进程符号 ELF 中的 FuncId → 地址；加载相生成，不进缓存或包。
+    /// FuncId → address in the current process symbol ELF; generated at load time, not cached or
+    /// packaged.
     #[serde(skip)]
     pub backtrace_ips: Vec<u64>,
-    /// 保持内存 ELF 文件和 dlopen 对象在 Engine 生命周期内有效。
+    /// Keeps the in-memory ELF file and dlopen object alive for the Engine lifetime.
     #[serde(skip)]
     pub backtrace_image: Option<super::backtrace::SymbolImage>,
-    /// 导出名（no_mangle 符号）→ FuncId，--vm-call 查找用
+    /// Exported name (no_mangle symbol) → FuncId, used by --vm-call lookup
     pub exports: std::collections::HashMap<Box<str>, FuncId>,
-    /// 冻结区（statics/常量池/fn 条目；lower 物化，发布后只读——static mut 例外）
+    /// Frozen area (statics/constant pool/fn entries; materialized by lower, read-only after publish —
+    /// except static mut)
     pub frozen: Option<super::frozen::FrozenArena>,
-    /// 本 Module 实例的链接地址 → 运行地址映射。包/镜像实例化时建立，不入 artifact。
+    /// This Module instance's link address → runtime address mapping. Built at package/image
+    /// instantiation, not part of the artifact.
     #[serde(skip)]
     pub load_map: LoadMap,
-    /// fn-ptr 条目真地址 → FuncId（D4 反查；间接调用派发 M4.1 第 5 步）
+    /// fn-ptr entry real address → FuncId (D4 reverse lookup; indirect call dispatch M4.1 step 5)
     pub fn_addrs: std::collections::HashMap<u64, FuncId>,
-    /// `fn_addrs` 的 artifact 地址形态。动态实例或 P1 closure 地址变化后据此重建。
+    /// Artifact-address form of `fn_addrs`. Rebuilt after dynamic instance or P1 closure addresses
+    /// change.
     pub link_fn_addrs: std::collections::HashMap<LinkAddr, FuncId>,
-    /// 本 Engine 已物化、可直接交给 native 的 P1 closure 地址。
+    /// P1 closure addresses already materialized by this Engine and directly usable by native.
     #[serde(skip)]
     pub executable_entry_addrs: std::collections::HashSet<u64>,
-    /// `-l` 链接指令的可选共享库候选路径；不存在时继续尝试其他候选。
+    /// Optional shared library candidate paths from `-l` link directives; if one does not exist, other
+    /// candidates are tried.
     pub native_libs: Vec<Box<str>>,
-    /// 已由加载相物化、执行 foreign 前必须成功 dlopen 的共享库（当前为 M5.1 Static
-    /// archive `.a → .so` 产物）。失败不可退化为普通 dlsym miss。
+    /// Shared libraries already materialized by the loading phase that must dlopen successfully before
+    /// executing foreign code (currently M5.1 Static archive `.a → .so` products). Failure must not
+    /// degrade to an ordinary dlsym miss.
     pub required_native_libs: Vec<Box<str>>,
     /// Expected content identity for each required native library. A zero
     /// value denotes a raw in-process Module whose caller did not supply an
     /// artifact hash; Package instances always carry and verify this list.
     #[serde(skip)]
     pub required_native_hashes: Vec<u128>,
-    /// 已完成系统依赖解析与 ELF 重定位、但由 Engine 显式管理 init/fini 的
-    /// per-Engine 自产共享库映像；不进入缓存或包。
+    /// Per-Engine self-produced shared library images that have finished system-dependency resolution
+    /// and ELF relocation but are explicitly managed by the Engine for init/fini; not cached or
+    /// packaged.
     #[serde(skip)]
     pub native_images: Vec<super::native_instance::NativeImage>,
-    /// 当前包自装载的机器码镜像。只对本 Module 的 foreign 解析可见，避免多
-    /// Engine 同名 global_asm 串线；不进序列化，pack 加载时由 MC 节重建。
+    /// This package's self-loaded machine-code image. Visible only to this Module's foreign resolution,
+    /// avoiding global_asm name collisions across Engines; not serialized, rebuilt from MC section on
+    /// package load.
     #[serde(skip)]
     pub mc_images: Vec<super::mcload::McImage>,
-    /// guest TLS 槽表（M4.4 D3：TlsId → 模板/尺寸；每线程实例在 Ctx.tls）
+    /// Guest TLS slot table (M4.4 D3: TlsId → template/size; per-thread instance in Ctx.tls)
     pub tls: Vec<TlsSlot>,
-    /// asm-stub wrapper 真地址（M5.0）：AsmStubId → `fn(*mut u8)` 机器地址（加载相
-    /// cc 汇编 + dlopen + dlsym 物化）。执行相只读 u64 直调，纯度不破。
-    /// **不进 L2 快照语义**——warm 路径以 asm_sites 幂等重物化后覆写。
+    /// asm-stub wrapper real addresses (M5.0): AsmStubId → `fn(*mut u8)` machine address (load phase
+    /// cc assembly + dlopen + dlsym materialization). Execution phase only reads u64 and calls directly,
+    /// purity preserved.
+    /// **Not part of L2 snapshot semantics** — warm path materializes idempotently from asm_sites and
+    /// overwrites.
     pub asm_stub_addrs: Vec<u64>,
-    /// asm-stub 物化配方（M6 片2）：符号名 + wrapper GAS 全文，AsmStubId（= 位序）序。
-    /// warm 加载用它重跑 asm::materialize（内容哈希命中 .so 缓存则只 dlopen+dlsym；
-    /// 被清则重 cc，自愈）。**符号名与位序解耦**：A2 split 模式的最终位序收尾才知，
-    /// 用类前缀名（mirvm_asm_xi{j}/xd{k}）；非 split 路径沿用位序名 mirvm_asm_{id}。
+    /// asm-stub materialization recipe (M6 slice 2): symbol name + wrapper GAS full text, ordered by
+    /// AsmStubId (= bit order). Warm load reruns asm::materialize with it (if content hash hits the .so
+    /// cache, only dlopen+dlsym; if cleared, re-cc self-heals). **Symbol names decoupled from bit
+    /// order**: A2 split mode only knows final bit order at the end, so class-prefix names
+    /// (mirvm_asm_xi{j}/xd{k}) are used; non-split paths keep the positional names mirvm_asm_{id}.
     pub asm_sites: Vec<AsmSite>,
-    /// P2 GOT 符号表（decision-history §7.5c）：槽 = 冻结区普通 8 字节格（本域），
-    /// 字节码/冻结字节烤槽址不烤值；启动相按名重解析后逐 fixup 点重写内容，
-    /// 模块对 ASLR 位置无关。image 侧各自的表随 image 模块走（absorb 按名合流）。
+    /// P2 GOT symbol table (decision-history §7.5c): slots are ordinary 8-byte cells in the frozen area
+    /// (this field); bytecode/frozen bytes bake slot addresses, not values. At startup names are
+    /// re-resolved and each fixup point rewrites the content, keeping the module position-independent
+    /// across ASLR. Image sides each have their own table and are merged by name on absorb.
     pub foreign_syms: Vec<GotSym>,
-    /// P2 启动相修补点：`*(addr) = resolve(foreign_syms[sym]) + addend`；addr 是
-    /// 本模块冻结域的 LinkAddr，实例化后通过 LoadMap 找到真实槽位。
+    /// P2 startup-phase fixup points: `*(addr) = resolve(foreign_syms[sym]) + addend`; addr is this
+    /// module's frozen-domain LinkAddr, and the real slot is found via LoadMap after instantiation.
     pub got_fixups: Vec<GotFixup>,
-    /// 冻结区内部/跨冻结域的客体指针重定位，不含 foreign GOT 修补点。
+    /// Object pointer relocations inside/between frozen domains, excluding foreign GOT fixup points.
     pub frozen_relocs: Vec<FrozenReloc>,
-    /// P1 条目可执行化配方（decision-history §7.6）：本域被取址且可导出 C ABI 的
-    /// guest fn；每个 Engine 由这些配方建立独有 closure 与 LinkAddr 映射。
+    /// P1 entry executable recipe (decision-history §7.6): guest fns in this domain that are address-
+    /// taken and exportable with C ABI; each Engine builds unique closures and LinkAddr mappings from
+    /// these recipes.
     pub entry_stub_sites: Vec<EntryStubSite>,
-    /// lower 期用于分配稳定逻辑地址的旧代码域句柄。启动 Engine 时释放映射，
-    /// 运行期只执行 per-Engine libffi closure；该字段不进 artifact。
+    /// Old code-area handle used by lower for allocating stable logical addresses. Mapping is released
+    /// when starting the Engine; runtime only executes per-Engine libffi closures; this field is not
+    /// part of the artifact.
     #[serde(skip)]
     pub entry_stubs: super::codearena::StubArena,
-    /// absorb 挂载的 image/底座条目逻辑地址域与配方：
-    /// (链接地址域基址, 配方, lower 期地址分配句柄)。
+    /// absorb-mounted image/base entry logical-address domains and recipes:
+    /// (link-address domain base, recipe, lower-time address allocation handle).
     #[serde(skip)]
     pub image_entry_stubs: Vec<(usize, Vec<EntryStubSite>, super::codearena::StubArena)>,
-    /// 自定义 #[global_allocator] 的 __rust_* shim（AllocShims 字段注）：
-    /// kind=Global 时 delta 侧登记，运行期 interp CallBuiltin(Rust*) 臂统一路由。
+    /// `#[global_allocator]` custom `__rust_*` shims (see AllocShims note): kind=Global is registered
+    /// on the delta side, and at runtime interp CallBuiltin(Rust*) arms unify routing.
     pub custom_alloc_shims: Option<AllocShims>,
-    /// Engine 顶层接住未捕获 guest panic 后必须执行的客体侧回收计划。
-    /// 手工测试 Module 和不能独立执行的 image 栈层可以没有；所有可执行的
-    /// full/delta lower 产物都必须有，真实运行入口遇到 None 必须拒绝而非泄漏。
+    /// Object-side cleanup plan the Engine top level must execute after catching an uncaught guest
+    /// panic. Hand-built test Modules and non-executable image stack layers may be None; all executable
+    /// full/delta lower products must have one, and the real run entry must refuse None rather than
+    /// leak.
     pub guest_panic_cleanup: Option<GuestPanicCleanup>,
-    /// main 启动链（M4.3；--vm-call 模式下为 None）
+    /// main startup chain (M4.3; None in --vm-call mode)
     pub entry: Option<EntryPlan>,
-    /// S4/S3′ image 栈冻结区（absorb 时挂载底座 + 各依赖 image 的冻结区，与本模块
-    /// 同寿命——delta 字节码里嵌了跨域绝对地址，这些域必须活到 guest 结束）。
-    /// **不进 L2 快照**——image 文件各自有其生命周期，delta 条目只以键链引用（ircache 双验证）。
+    /// S4/S3′ image-stack frozen areas (absorb mounts base + each dependency image's frozen area,
+    /// same lifetime as this module — delta bytecode embeds cross-domain absolute addresses, and those
+    /// domains must live until guest exit).
+    /// **Not part of L2 snapshot** — image files have their own lifecycles, delta entries only refer by
+    /// key chain (ircache double verification).
     #[serde(skip)]
     pub image_frozens: Vec<super::frozen::FrozenArena>,
 }
 
 impl Module {
-    /// 将链接时地址换算为本 Module 实例的运行地址。
-    /// 动态装载映射接入前，冷 lower 产物保持恒等映射。
+    /// Translate a link-time address to this Module instance's runtime address.
+    /// Cold lower products keep the identity mapping until dynamic load mapping is attached.
     pub fn resolve_link_addr(&self, addr: LinkAddr) -> u64 {
         self.load_map
             .resolve_or_identity(addr)
@@ -2129,9 +2207,11 @@ impl Module {
             }
         }
     }
-    /// argv C 串表终结化（tier-0 setup_process_memory 同构；M6 片2 起从 lower 迁出）。
-    /// argv 是**运行期输入**：不得进 L2 缓存快照，冷/热路径每次运行都在快照之后追加
-    /// 分配并回填 EntryPlan——单一代码路径，杜绝冷热漂移。
+    /// argv C-string table finalization (isomorphic to tier-0 setup_process_memory; moved from lower
+    /// starting M6 slice 2).
+    /// argv is a **runtime input**: it must not enter the L2 cache snapshot; cold/hot paths both
+    /// append allocation and backfill after the snapshot each run — single code path, eliminating
+    /// cold/hot drift.
     pub fn finalize_entry_argv(&mut self, argv: &[String]) -> Result<(), String> {
         let Some(entry) = self.entry.as_mut() else {
             return Ok(());
@@ -2154,15 +2234,15 @@ impl Module {
         for (i, &p) in ptrs.iter().enumerate() {
             unsafe { *((table + i as u64 * 8) as *mut u64) = p };
         }
-        // 尾 NULL 由清零保证
+        // trailing NULL is guaranteed by zeroing
         entry.argc = argv.len() as u64;
         entry.argv_ptr = table;
         Ok(())
     }
 
-    /// GOT 合流（P2，S4/S3′ absorb）：image 侧符号表并入本模块——sym 按名去重，
-    /// fixup 的 sym 索引重编为合并后 idx；fixup addr 在 image 样条域（固定基），
-    /// 合流后仍指向同一冻结格，原样接管。
+    /// GOT merge (P2, S4/S3′ absorb): image-side symbol table is merged into this module — symbols
+    /// deduplicated by name, fixup sym indices remapped to merged idx; fixup addr is in the image spline
+    /// domain (fixed base), and after merge still points to the same frozen cell, taken over as-is.
     pub fn absorb_got(&mut self, syms: Vec<GotSym>, mut fixups: Vec<GotFixup>) {
         if fixups.is_empty() {
             return;
@@ -2171,7 +2251,7 @@ impl Module {
         for s in syms {
             let idx = match self.foreign_syms.iter().position(|e| e.name == s.name) {
                 Some(i) => {
-                    // F-08：合流同样做 weak/strong 合并（任一 strong 即 strong）
+                    // F-08: merge also does weak/strong merge (any strong makes strong)
                     if !s.weak {
                         self.foreign_syms[i].weak = false;
                     }

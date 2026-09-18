@@ -1,4 +1,4 @@
-// 注释行
+// comment line
 
 fn main() {
     let x = 1 + 2;

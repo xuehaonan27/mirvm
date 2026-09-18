@@ -1,4 +1,4 @@
-// String / Vec / 排序 / 格式化
+// String / Vec / sort / format
 fn main() {
     let mut s = String::from("hello");
     s.push_str(", mirvm");

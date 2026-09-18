@@ -1,12 +1,14 @@
-//! 加载相：MIR → M4 引擎字节码的降低（rustc_private 域，tcx 关在这里）。
+//! Loading phase: lowering MIR to M4-engine bytecode (rustc_private domain; tcx is confined here).
 //!
-//! 编排（M4.0 设计 §3 + D1 修正，debt-map §2-A）：mono 收集给**种子**（collector 是
-//! codegen/链接视角，跨 crate 非泛型函数不收）→ **worklist 闭包扩集**（lower 遇到不在表
-//! 里的 callee 就分配 FuncId 入队——解释视角没有"链接 libstd.so"可言，一切 MIR 自己降）
-//! → 产出纯 Rust 的 `ir::Module`。
+//! Orchestration (M4.0 design §3 + D1 amendment, debt-map §2-A): mono collection yields the
+//! **seed** (the collector takes a codegen/linking view, so non-generic functions across crates
+//! are not collected) → **worklist closure expansion** (when lowering meets a callee not in the
+//! table it assigns a FuncId and enqueues it — from the interpreter’s point of view there is no
+//! "link libstd.so"; all MIR is lowered by us) → produces a pure-Rust `ir::Module`.
 //!
-//! **Trap-stub 全覆盖**：对全集 lowering 是全量的——不认识的构造绝不中止，
-//! 就地降为 `Trap(诊断)`；只有被执行到的路径必须 trap-free（M4 增量协议）。
+//! **Trap-stub full coverage**: lowering is total for the whole input — unrecognized constructs
+//! never abort; they are lowered in-place to `Trap(diagnostic)`; only executed paths must be
+//! trap-free (M4 incremental protocol).
 
 pub mod asm;
 pub mod collect;
@@ -24,33 +26,38 @@ use rustc_span::Symbol;
 use crate::vm::engine::frozen::FrozenArena;
 use crate::vm::engine::ir;
 
-/// 调用目标的解析结果（foreign 三路处置，debt-map §2-B）。
+/// Resolution result for a call target (foreign three-way handling, debt-map §2-B).
 pub(crate) enum Callee {
-    /// 普通 guest 函数（含链接仿真②解出的 std 实现、intrinsic fallback body 补收）
+    /// Ordinary guest function (includes std implementations resolved by linking emulation②,
+    /// and intrinsic fallback bodies collected retroactively).
     Func(ir::FuncId),
-    /// 引擎原语①（std runtime extern 边界：alloc/unwind 系 + stub）
+    /// Engine primitive① (std runtime extern boundary: alloc/unwind family + stubs).
     Builtin(ir::Builtin),
-    /// os:: 直通③（dlsym+libffi）：固定参数 FfiKind 已冻结；变参尾由调用点实参补。
-    /// thunk_args = fn-ptr 类型的参数位 + 其内层冻结签名（M4.4 D1 thunk 工厂）
+    /// os:: pass-through③ (dlsym+libffi): fixed arguments are frozen as FfiKind; the variadic
+    /// tail is filled from call-site arguments.
+    /// thunk_args = fn-ptr typed argument positions + their inner frozen signatures (M4.4 D1 thunk factory).
     Foreign {
         sym: Box<str>,
         args: Vec<ir::FfiKind>,
         ret: ir::FfiKind,
         variadic: bool,
         thunk_args: Vec<(usize, ir::ForeignSig)>,
-        /// 外层 foreign 声明是否允许异常越过调用边界（C-unwind/System-unwind）。
+        /// Whether the outer foreign declaration lets exceptions cross the call boundary (C-unwind/System-unwind).
         unwind: bool,
     },
 }
 
-/// 危险符号（P7 denylist）：绝不直通 native——会绕开进程/线程模型。
-/// M4.4 D2：pthread_create/join/detach 已移出（真线程直通，fn-ptr 实参经 thunk 工厂）。
-/// M4.5 D3：posix_spawn 系移出（子体立即 exec，VM 状态从不在子进程运行——与裸 fork
-/// 带完整 VM 镜像着陆本质不同；file_actions/attr 是不透明指针，真实地址直传成立）。
-/// 保留 pthread_exit（glibc 强制 unwind 绕过 FrameGuard）与裸 fork/exec/setjmp 系。
-/// M5.2 D8f：fork 移出（→ HostFork builtin，guest 单线程时放行）；exec 移出
-/// DENY_PREFIX（进程替换语义 = VM 状态消失本就正确，foreign 直通）。vfork/clone/
-/// setjmp 系维持拒绝（帧模型级工程，D8l）。
+/// Dangerous symbols (P7 denylist): never pass through to native — they would bypass the
+/// process/thread model.
+/// M4.4 D2: pthread_create/join/detach removed (real thread pass-through; fn-ptr arguments go
+/// through the thunk factory).
+/// M4.5 D3: posix_spawn family removed (child execs immediately; VM state never runs in the
+/// child — fundamentally different from a raw fork landing with a full VM image; file_actions/
+/// attr are opaque pointers, so passing real addresses works).
+/// Keep pthread_exit (glibc forces unwind around FrameGuard) and the raw fork/exec/setjmp families.
+/// M5.2 D8f: fork removed (→ HostFork builtin, allowed when guest is single-threaded); exec removed
+/// to DENY_PREFIX (process-replacement semantics = VM state disappearing is already correct, foreign pass-through).
+/// vfork/clone/setjmp family remain rejected (frame-model level engineering, D8l).
 const DENY_EXACT: &[&str] = &[
     "vfork",
     "clone",
@@ -64,49 +71,57 @@ const DENY_EXACT: &[&str] = &[
 ];
 const DENY_PREFIX: &[&str] = &[];
 
-/// A2 split 标签位（s3b-a2-design §4.2）：image 类 id = `IMAGE_TAG | 位序`，
-/// delta 类 id = 今日路径的 untagged 值。rebase 前绝不进执行相（2^31 实例不可能）。
-/// FuncId/TlsId/AsmStubId 同构（均 u32）。
+/// A2 split tag bit (s3b-a2-design §4.2): image-class id = `IMAGE_TAG | bit-index`,
+/// delta-class id = the untagged value for today’s path. Never enter the execution phase before
+/// rebase (2^31 instances impossible).
+/// FuncId/TlsId/AsmStubId are isomorphic (all u32).
 const IMAGE_TAG: u32 = 0x8000_0000;
 
-/// A2 split 状态（s3b-a2-design §4）：双队列/双 arena/双去重表。
-/// delta 侧沿用 Linker 主字段（queue/funcs/frozen/alloc_addrs/tls_slots/asm_sites）。
+/// A2 split state (s3b-a2-design §4): dual queue / dual arena / dual dedup tables.
+/// Delta side reuses the main Linker fields (queue/funcs/frozen/alloc_addrs/tls_slots/asm_sites).
 pub(crate) struct Split<'tcx> {
-    /// image 类实例的冻结区（样条 k=0 域，0x6A00）
+    /// Frozen area for image-class instances (spline k=0 domain, 0x6A00).
     image_frozen: FrozenArena,
-    /// image 类待降低队列（标签 id）
+    /// Pending-lowering queue for image-class instances (tagged ids).
     image_queue: VecDeque<(ir::FuncId, Instance<'tcx>)>,
-    /// image 类函数体（位序 j → 标签 id `IMAGE_TAG|j`）
+    /// Image-class function bodies (bit-index j → tagged id `IMAGE_TAG|j`).
     image_funcs: Vec<Option<ir::FuncBody>>,
-    /// 下一个 image 类 id 序数
+    /// Next image-class id ordinal.
     image_fn_next: ir::FuncId,
-    /// image 类 TLS 槽（标签 TlsId 同构）
+    /// Image-class TLS slots (TlsId is isomorphic).
     image_tls_slots: Vec<ir::TlsSlot>,
-    /// image 类 asm 站点（符号名 mirvm_asm_xi{j}）
+    /// Image-class asm sites (symbol names mirvm_asm_xi{j}).
     image_asm_sites: Vec<ir::AsmSite>,
-    /// image 区常量去重表（delta 区 = Linker.alloc_addrs；提升 = 双份物化，见 §4.3）
+    /// Image-side constant dedup table (delta side = Linker.alloc_addrs; promotion = duplicate
+    /// materialization, see §4.3).
     image_alloc_addrs: FxHashMap<AllocId, u64>,
-    /// image 区 fn 条目表（instance → 条目地址；含底座命中但在 image 区补建者——
-    /// 装载端 fn_entry_syms 索引的唯一权威，保"总量恰一份"的单一身份可复现）
+    /// Image-side fn entry table (instance → entry address; includes base hits that are
+    /// supplementary-built in the image area — the sole authority for the loader-side
+    /// fn_entry_syms index, preserving reproducible single identity "exactly one copy total").
     image_fn_entries: FxHashMap<Instance<'tcx>, u64>,
-    /// 当前降低实例是否为 image 类（ensure_alloc Memory 路由 + closure 护栏用）
+    /// Whether the current lowering instance is image-class (used for ensure_alloc Memory routing
+    /// and closure guard).
     current_image: bool,
-    /// image 类实例表（rebase 后写盘自检用：逐 instance 复查无 LOCAL_CRATE 沾染）
+    /// Image-class instance table (for post-rebase disk self-check: per-instance review confirms
+    /// no LOCAL_CRATE contamination).
     image_insts: Vec<Instance<'tcx>>,
-    /// P2 GOT（decision-history §7.5c）image 侧三表：符号表/去重/修补点（槽开在
-    /// image_frozen；收尾随 image 模块走，absorb 时按名合流进 delta 并重编 idx）
+    /// P2 GOT (decision-history §7.5c) image-side three tables: symbol table / dedup / fixup points
+    /// (slots live in image_frozen; finalization goes with the image module, merged by name into
+    /// delta during absorb and renumbered idx).
     image_got_syms: Vec<ir::GotSym>,
     image_got_idx: FxHashMap<Box<str>, u32>,
     image_got_fixups: Vec<ir::GotFixup>,
     image_frozen_relocs: Vec<ir::FrozenReloc>,
-    /// P1（§7.6）image 侧 stub 代码区与配方表（image 类实例的可执行条目恒在
-    /// image 域——跨运行稳定域，与 fn 条目同域纪律；收尾随 image 模块走）
+    /// P1 (§7.6) image-side stub code area and recipe table (executable entries of image-class
+    /// instances always live in the image domain — the cross-run stable domain, same-domain
+    /// discipline as fn entries; finalization goes with the image module).
     image_code_arena: crate::vm::engine::codearena::StubArena,
     image_stub_sites: Vec<ir::EntryStubSite>,
 }
 
-/// A2 split 产物（s3b-a2-design）：deps-image 模块 + 栈索引素材（BaseExports 同构）。
-/// 模块冻结区在样条 k=0 域；fn/TLS/asm 与 exports/fn_addrs 已 rebase 成绝对 id。
+/// A2 split output (s3b-a2-design): deps-image module + stack index material (isomorphic to BaseExports).
+/// Module frozen area is in spline k=0 domain; fn/TLS/asm and exports/fn_addrs have been rebased
+/// to absolute ids.
 pub struct SplitImage {
     pub module: ir::Module,
     pub fn_entry_syms: Vec<(Box<str>, u64)>,
@@ -115,8 +130,8 @@ pub struct SplitImage {
 }
 
 impl SplitImage {
-    /// 包装成栈层（A2-1 内存态 absorb；A2-2 写盘后由文件装载取代）。
-    /// fp = 构建会话的降低指纹（同会话构建，与栈恒一致）。
+    /// Wrap into a stack layer (A2-1 in-memory absorb; A2-2 after disk write, replaced by file load).
+    /// fp = build-session lowering fingerprint (same-session build, always consistent with the stack).
     pub fn into_base_image(self, fp: (bool, bool, bool)) -> crate::baseimage::BaseImage {
         crate::baseimage::BaseImage {
             fn_by_sym: self
@@ -135,11 +150,12 @@ impl SplitImage {
     }
 }
 
-/// 加载相"链接器"：FuncId 分配 + worklist 闭包扩集（D1 修正），外加 native 链接器
-/// 职责的仿真——**特判的不是"panic 是什么"，是"链接器本来会做什么"**（debt-map §2-B）：
-/// ① 引擎原语表（codegen allocator-shim 的同一符号清单）；
-/// ② 导出符号解析（weak lang item：core 的 extern `panic_impl` → std 的 `rust_begin_unwind`）；
-/// ③ 未知 foreign 暂 Trap（os:: 注册表 M4.3）。
+/// Loading-phase "linker": FuncId allocation + worklist closure expansion (D1 amendment), plus
+/// emulation of native-linker responsibilities — **the special-case is not "what panic is" but
+/// "what the linker would have done"** (debt-map §2-B):
+/// ① engine primitive table (same symbol list as the codegen allocator-shim);
+/// ② exported symbol resolution (weak lang item: core’s extern `panic_impl` → std’s `rust_begin_unwind`);
+/// ③ unknown foreign temporarily trapped (os:: registry M4.3).
 pub(crate) mod linker;
 use linker::Linker;
 mod builtins;
@@ -151,30 +167,34 @@ pub(crate) use ffi_sig::{canonical_link_name, ffi_kind_of, freeze_c_fnptr_sig};
 use purity::{PurityStats, classify_purity};
 use rebase::Rebase;
 
-/// 底座导出素材（S4：底座构建会话随模块一起产出，程序会话不用）。
+/// Base export material (S4: produced together with the module in a base build session; not used in
+/// program sessions).
 pub struct BaseExports {
     pub fn_entry_syms: Vec<(Box<str>, u64)>,
     pub static_syms: Vec<(Box<str>, u64)>,
     pub tls_syms: Vec<(Box<str>, ir::TlsId)>,
 }
 
-/// 程序会话降低：base 在场时按 symbol_name 复用底座（fn/static/TLS），
-/// 产出 delta 模块（fn/TLS/asm id 从底座计数起编；absorb 合并后运行）。
-/// A2（s3b-a2-design，`MIRVM_DEPS_IMAGE=1` 且底座在场时）：split lower——bin
-/// 无关实例分轨成 deps-image（SplitImage，样条 k=0 域），delta 只含 bin 附着物。
+/// Program-session lowering: when the base is present, reuse it by symbol_name (fn/static/TLS),
+/// producing a delta module (fn/TLS/asm ids start from base counters; absorb-merged before running).
+/// A2 (s3b-a2-design, when `MIRVM_DEPS_IMAGE=1` and base is present): split lower — bin-unrelated
+/// instances are split off into deps-image (SplitImage, spline k=0 domain); delta only contains
+/// bin attachments.
 pub fn lower_program(
     tcx: TyCtxt<'_>,
     stack: &crate::baseimage::ImageStack,
     split: bool,
 ) -> (ir::Module, Option<SplitImage>) {
-    // A2 v1：split 判定（启用/旁路/本会话已装载/底座在场 Q2）由调用方（cli）给出
+    // A2 v1: split decision (enable/bypass/already-loaded-this-session/base-present Q2) is given by the caller (cli).
     let (module, _, split_image) = lower_inner(tcx, stack, FrozenArena::new(), false, false, split);
     (module, split_image)
 }
 
-/// 底座构建会话降低（合成空 main）：栈空、冻结区落底座域，导出 sym 索引。
-/// 排除 LOCAL_CRATE——合成 crate 的本地项（空 main + shim）符号名带本地
-/// disambiguator，不属"sysroot 面"、不与真实程序相撞。
+/// Base build session lowering (synthetic empty main): empty stack, frozen area in base domain,
+/// export sym index.
+/// Exclude LOCAL_CRATE — local items of the synthetic crate (empty main + shim) carry a local
+/// disambiguator in their symbol names, do not belong to the "sysroot face", and will not collide
+/// with a real program.
 pub fn lower_for_base_build(tcx: TyCtxt<'_>) -> (ir::Module, BaseExports) {
     let empty = crate::baseimage::ImageStack::empty();
     let (module, exports, _) = lower_inner(
@@ -185,17 +205,20 @@ pub fn lower_for_base_build(tcx: TyCtxt<'_>) -> (ir::Module, BaseExports) {
         true,
         false,
     );
-    (module, exports.expect("image 构建模式必有导出素材"))
+    (module, exports.expect("image build mode must produce export material"))
 }
 
-/// 依赖 image 构建会话降低（S3′b）：栈 = 栈下已装 image 链，冻结区落第 k 样条域，
-/// 导出 sym 索引。该 crate mono 集减栈下已有 = 本 image 内容（偏移合并同底座）。
-/// **不排除 LOCAL_CRATE**——LOCAL_CRATE 正是要成像的依赖 crate 本身，其符号名跨
-/// 程序稳定（同版本依赖 = 同符号名，这正是复用的前提）。
+/// Dependency image build session lowering (S3′b): stack = already-loaded image chain below,
+/// frozen area in spline k domain, export sym index. This crate’s mono set minus what is already
+/// below the stack = this image’s content (offset merge same as base).
+/// **Does NOT exclude LOCAL_CRATE** — LOCAL_CRATE is precisely the dependency crate to be imaged;
+/// its symbol names are stable across programs (same-version dependency = same symbol name, which
+/// is the prerequisite for reuse).
 ///
-/// 预留口（2026-07-19 用户裁定保留）：全仓当前零调用方——依赖 image 的构建侧
-/// 尚未接线（S3′b 只兑现了装载侧 A2 聚合）。未来依赖 image 构建线重启时启用；
-/// 勿因「无调用方」再提删除。
+/// Reserved hook (kept by user decision on 2026-07-19): currently zero callers in the repo — the
+/// dependency image build side is not yet wired up (S3′b only delivered the loader-side A2
+/// aggregation). Enable when the dependency image build line restarts in the future; do not
+/// propose deletion again just because there are no callers.
 pub fn lower_for_image_build(
     tcx: TyCtxt<'_>,
     stack: &crate::baseimage::ImageStack,
@@ -203,11 +226,12 @@ pub fn lower_for_image_build(
 ) -> (ir::Module, BaseExports) {
     let (module, exports, _) =
         lower_inner(tcx, stack, FrozenArena::new_image(k), true, false, false);
-    (module, exports.expect("image 构建模式必有导出素材"))
+    (module, exports.expect("image build mode must produce export material"))
 }
 
-/// A2 rebase（s3b-a2-design §4.2）：split lower 收尾，把标签/双空间 id 统一成绝对 id。
-/// 降低单个 instance（worklist 循环体）：trap-stub 全覆盖 + purity 探针记账。
+/// A2 rebase (s3b-a2-design §4.2): split lower finalization, unifying tagged/dual-space ids into
+/// absolute ids.
+/// Lower a single instance (worklist loop body): trap-stub full coverage + purity probe accounting.
 fn lower_one<'tcx>(
     tcx: TyCtxt<'tcx>,
     typing_env: TypingEnv<'tcx>,
@@ -225,10 +249,11 @@ fn lower_one<'tcx>(
     body
 }
 
-/// 固定工具链中，标准 `catch_unwind` 已经有一条完整的客体侧资源回收链：
-/// 私有 `cleanup` 函数拆开 panic_unwind 异常并减少 panic 计数，返回的 Box 再由
-/// rustc 为其精确类型生成 drop glue。把两者强制放进 lowering worklist，Engine
-/// 顶层即可只搬运不透明机器字完成回收，无需读取任何 std 私有对象布局。
+/// In the pinned toolchain, standard `catch_unwind` already has a complete guest-side resource
+/// cleanup chain: the private `cleanup` function unpacks the panic_unwind exception and decrements
+/// the panic count, and the returned Box is then dropped by rustc-generated drop glue for its exact
+/// type. Forcing both into the lowering worklist lets the Engine top level recycle everything by
+/// moving opaque machine words, without reading any std private object layout.
 fn register_guest_panic_cleanup<'tcx>(
     tcx: TyCtxt<'tcx>,
     linker: &mut Linker<'tcx>,
@@ -241,7 +266,7 @@ fn register_guest_panic_cleanup<'tcx>(
         .map(|&(inst, _)| inst)
         .find(|inst| tcx.def_path_str(inst.def_id()) == CLEANUP_PATH)
         .unwrap_or_else(|| {
-            panic!("固定工具链缺少 `{CLEANUP_PATH}`：无法在客体侧释放未捕获 panic 载荷")
+            panic!("pinned toolchain is missing `{CLEANUP_PATH}`: cannot release uncaught panic payload on the guest side")
         });
     let sig = tcx
         .fn_sig(cleanup_inst.def_id())
@@ -249,8 +274,8 @@ fn register_guest_panic_cleanup<'tcx>(
         .skip_binder();
     if sig.inputs().len() != 1 || !sig.inputs()[0].is_raw_ptr() {
         panic!(
-            "固定工具链 `{CLEANUP_PATH}` 参数签名已变化（当前为 `{sig}`）：\
-             无法可靠接管未捕获 panic 载荷"
+            "pinned toolchain `{CLEANUP_PATH}` parameter signature has changed (now `{sig}`): \
+             cannot reliably take over the uncaught panic payload"
         );
     }
     let payload_ty = sig.output();
@@ -261,8 +286,8 @@ fn register_guest_panic_cleanup<'tcx>(
         )
     {
         panic!(
-            "固定工具链 `{CLEANUP_PATH}` 返回类型已变化（当前为 `{payload_ty}`）：\
-             预期客体全局分配器上的 trait-object Box"
+            "pinned toolchain `{CLEANUP_PATH}` return type has changed (now `{payload_ty}`): \
+             expected a trait-object Box on the guest global allocator"
         );
     }
 
@@ -273,9 +298,11 @@ fn register_guest_panic_cleanup<'tcx>(
     }
 }
 
-/// 从 lang item `start` 的真实 MIR 调用图找到包住用户 `main` 的外层调用，以及最终
-/// 执行捕获的 intrinsic 调用。调用关系和单态参数从 MIR 推导；路径只用于确认这些
-/// 推导出的节点仍是固定工具链约定的 std 实现，不依赖易漂移的 DefId 数值。
+/// From the real MIR call graph of the lang item `start`, find the outer call wrapping the user
+/// `main`, and finally the intrinsic call that performs the catch. Call relationships and
+/// monomorphization args are derived from MIR; the paths only confirm that these derived nodes are
+/// still the std implementations agreed upon by the pinned toolchain, without relying on
+/// drift-prone DefId numbers.
 fn discover_main_catch_site<'tcx>(
     tcx: TyCtxt<'tcx>,
     typing_env: TypingEnv<'tcx>,
@@ -380,27 +407,27 @@ fn discover_main_catch_site<'tcx>(
         writes.visit_body(body);
         let [definition] = writes.locations.as_slice() else {
             return Err(format!(
-                "局部 {local:?} 预期恰有一个写入，实际为 {} 个",
+                "local {local:?} expected exactly one write, found {}",
                 writes.locations.len()
             ));
         };
         if !definition.dominates(use_loc, body.basic_blocks.dominators()) {
             return Err(format!(
-                "局部 {local:?} 的唯一写入 {definition:?} 不支配捕获调用 {use_loc:?}"
+                "the only write to local {local:?} at {definition:?} does not dominate the catch call {use_loc:?}"
             ));
         }
         let block = &body.basic_blocks[definition.block];
         let Some(statement) = block.statements.get(definition.statement_index) else {
             return Err(format!(
-                "局部 {local:?} 的唯一写入发生在 terminator，不是函数指针重化赋值"
+                "the only write to local {local:?} occurs at a terminator, not a fn-ptr reify assignment"
             ));
         };
         let rustc_middle::mir::StatementKind::Assign(assign) = &statement.kind else {
-            return Err(format!("局部 {local:?} 的唯一写入不是 Assign"));
+            return Err(format!("the only write to local {local:?} is not Assign"));
         };
         let (destination, rvalue) = &**assign;
         if destination.local != local || !destination.projection.is_empty() {
-            return Err(format!("局部 {local:?} 的唯一写入不是整局部赋值"));
+            return Err(format!("the only write to local {local:?} is not a whole-local assignment"));
         }
         let rustc_middle::mir::Rvalue::Cast(
             rustc_middle::mir::CastKind::PointerCoercion(
@@ -411,26 +438,26 @@ fn discover_main_catch_site<'tcx>(
             _,
         ) = rvalue
         else {
-            return Err(format!("局部 {local:?} 的唯一写入不是函数指针重化"));
+            return Err(format!("the only write to local {local:?} is not a fn-ptr reify"));
         };
         let ty::FnDef(def_id, args) = operand.ty(&body.local_decls, tcx).kind() else {
-            return Err(format!("局部 {local:?} 的重化来源不是 FnDef"));
+            return Err(format!("the reify source for local {local:?} is not FnDef"));
         };
         Instance::resolve_for_fn_ptr(tcx, typing_env, *def_id, args)
-            .ok_or_else(|| format!("局部 {local:?} 的函数指针实例无法解析"))
+            .ok_or_else(|| format!("cannot resolve fn-ptr instance for local {local:?}"))
     }
 
     let start_calls = direct_calls(tcx, typing_env, &body(tcx, typing_env, start));
     let [(lang_start_internal, _)] = start_calls.as_slice() else {
         return Err(format!(
-            "固定工具链 start MIR 预期恰有一个直接调用，实际为 {} 个",
+            "pinned toolchain start MIR expected exactly one direct call, found {}",
             start_calls.len()
         ));
     };
     let lang_start_path = tcx.def_path_str(lang_start_internal.def_id());
     if lang_start_path != "std::rt::lang_start_internal" {
         return Err(format!(
-            "固定工具链 start 的直接调用已从 std::rt::lang_start_internal 变为 \
+            "pinned toolchain start direct call changed from std::rt::lang_start_internal to \
              {lang_start_path}"
         ));
     }
@@ -452,15 +479,15 @@ fn discover_main_catch_site<'tcx>(
     let [(outer_catch, runtime_closure_def, runtime_closure_args)] = outer_catches.as_slice()
     else {
         return Err(format!(
-            "固定工具链 lang_start_internal MIR 预期恰有一个闭包型直接调用，实际为 {} 个",
+            "pinned toolchain lang_start_internal MIR expected exactly one closure-typed direct call, found {}",
             outer_catches.len()
         ));
     };
     let outer_catch_path = tcx.def_path_str(outer_catch.def_id());
     if outer_catch_path != "std::panic::catch_unwind" {
         return Err(format!(
-            "固定工具链 lang_start_internal 的闭包型调用已从 std::panic::catch_unwind \
-             变为 {outer_catch_path}"
+            "pinned toolchain lang_start_internal closure call changed from std::panic::catch_unwind \
+             to {outer_catch_path}"
         ));
     }
     let runtime_closure = Instance::resolve_closure(
@@ -476,13 +503,13 @@ fn discover_main_catch_site<'tcx>(
             .collect();
     let [(main_catch, unwind)] = main_catches.as_slice() else {
         return Err(format!(
-            "固定工具链 lang_start 运行时闭包预期恰有一个 main catch 调用，实际为 {} 个",
+            "pinned toolchain lang_start runtime closure expected exactly one main catch call, found {}",
             main_catches.len()
         ));
     };
     if !matches!(unwind, rustc_middle::mir::UnwindAction::Continue) {
         return Err(format!(
-            "固定工具链 main catch 调用的 unwind 已从 Continue 变为 {unwind:?}"
+            "pinned toolchain main catch call unwind changed from Continue to {unwind:?}"
         ));
     }
 
@@ -490,20 +517,20 @@ fn discover_main_catch_site<'tcx>(
     let internal_calls = direct_calls(tcx, typing_env, &outer_body);
     let [(internal_catch, internal_unwind)] = internal_calls.as_slice() else {
         return Err(format!(
-            "固定工具链 std::panic::catch_unwind MIR 预期恰有一个直接调用，实际为 {} 个",
+            "pinned toolchain std::panic::catch_unwind MIR expected exactly one direct call, found {}",
             internal_calls.len()
         ));
     };
     let internal_path = tcx.def_path_str(internal_catch.def_id());
     if internal_path != "std::panicking::catch_unwind" {
         return Err(format!(
-            "固定工具链 std::panic::catch_unwind 的实现调用已从 \
-             std::panicking::catch_unwind 变为 {internal_path}"
+            "pinned toolchain std::panic::catch_unwind implementation call changed from \
+             std::panicking::catch_unwind to {internal_path}"
         ));
     }
     if !matches!(internal_unwind, rustc_middle::mir::UnwindAction::Continue) {
         return Err(format!(
-            "固定工具链 std::panicking::catch_unwind 调用的 unwind 已从 Continue 变为 \
+            "pinned toolchain std::panicking::catch_unwind call unwind changed from Continue to \
              {internal_unwind:?}"
         ));
     }
@@ -538,21 +565,21 @@ fn discover_main_catch_site<'tcx>(
     let [(catch_intrinsic, args, intrinsic_unwind, intrinsic_loc)] = intrinsic_sites.as_slice()
     else {
         return Err(format!(
-            "固定工具链 std::panicking::catch_unwind MIR 预期恰有一个 std \
-             catch_unwind intrinsic，实际为 {} 个",
+            "pinned toolchain std::panicking::catch_unwind MIR expected exactly one std \
+             catch_unwind intrinsic, found {}",
             intrinsic_sites.len()
         ));
     };
     let intrinsic_path = tcx.def_path_str(catch_intrinsic.def_id());
     if intrinsic_path != "std::intrinsics::catch_unwind" {
         return Err(format!(
-            "固定工具链捕获 intrinsic 已从 std::intrinsics::catch_unwind 变为 \
+            "pinned toolchain catch intrinsic changed from std::intrinsics::catch_unwind to \
              {intrinsic_path}"
         ));
     }
     if args.len() != 3 {
         return Err(format!(
-            "固定工具链 std catch_unwind intrinsic 预期 3 个参数，实际为 {} 个",
+            "pinned toolchain std catch_unwind intrinsic expected 3 arguments, found {}",
             args.len()
         ));
     }
@@ -561,20 +588,20 @@ fn discover_main_catch_site<'tcx>(
         rustc_middle::mir::UnwindAction::Unreachable
     ) {
         return Err(format!(
-            "固定工具链 std catch_unwind intrinsic 的 unwind 已从 Unreachable 变为 \
+            "pinned toolchain std catch_unwind intrinsic unwind changed from Unreachable to \
              {intrinsic_unwind:?}"
         ));
     }
     let try_local = operand_local(&args[0].node)
-        .ok_or("固定工具链 std catch_unwind 的 do_call 参数已不再来自局部函数指针")?;
+        .ok_or("pinned toolchain std catch_unwind do_call argument no longer comes from a local fn-ptr")?;
     let catch_local = operand_local(&args[2].node)
-        .ok_or("固定工具链 std catch_unwind 的 do_catch 参数已不再来自局部函数指针")?;
+        .ok_or("pinned toolchain std catch_unwind do_catch argument no longer comes from a local fn-ptr")?;
     let do_call = reified_fn(tcx, typing_env, &internal_body, try_local, *intrinsic_loc).map_err(
-        |reason| format!("固定工具链 std catch_unwind 的 do_call 函数指针来源无法确认：{reason}"),
+        |reason| format!("pinned toolchain std catch_unwind do_call fn-ptr source cannot be confirmed: {reason}"),
     )?;
     let do_catch = reified_fn(tcx, typing_env, &internal_body, catch_local, *intrinsic_loc)
         .map_err(|reason| {
-            format!("固定工具链 std catch_unwind 的 do_catch 函数指针来源无法确认：{reason}")
+            format!("pinned toolchain std catch_unwind do_catch fn-ptr source cannot be confirmed: {reason}")
         })?;
     let do_call_path = tcx.def_path_str(do_call.def_id());
     let do_catch_path = tcx.def_path_str(do_catch.def_id());
@@ -582,7 +609,7 @@ fn discover_main_catch_site<'tcx>(
         || do_catch_path != "std::panicking::catch_unwind::do_catch"
     {
         return Err(format!(
-            "固定工具链 std catch_unwind 回调已变化：try={do_call_path}, \
+            "pinned toolchain std catch_unwind callbacks changed: try={do_call_path}, \
              catch={do_catch_path}"
         ));
     }
@@ -604,10 +631,11 @@ fn lower_inner(
     split: bool,
 ) -> (ir::Module, Option<BaseExports>, Option<SplitImage>) {
     let typing_env = TypingEnv::fully_monomorphized();
-    // P1（§7.6）：本域 stub 代码区与冻结区同 k 域（frozen.home() 记意向域，
-    // 动态回退下推导仍一致；各自的固定基/回退独立判定，缓存门槛两用其判）
+    // P1 (§7.6): this-domain stub code area shares the k-domain with the frozen area (frozen.home()
+    // records the intended domain; derivation remains consistent under dynamic fallback; each
+    // fixed-base/fallback decision is independent, and the cache threshold uses both decisions).
     let code_home = crate::vm::engine::addrlayout::code_home_for_frozen(frozen.home())
-        .expect("P1：冻结域非法，stub 代码域不可推");
+        .expect("P1: invalid frozen domain, cannot derive stub code domain");
     let mut linker = Linker::new(
         tcx,
         stack,
@@ -618,18 +646,19 @@ fn lower_inner(
         linker.activate_split();
     }
 
-    // 静态归档 / global_asm+naked 的 `.so` 在排干 worklist 前物化并
-    // RTLD_NOW|RTLD_GLOBAL 加载：extern fn 被当作值取址（fn-ptr）时，
-    // fn_entry_addr 需在降低期 dlsym 其真符号地址（native 链接器语义的直译）。
-    // 顺序敏感：reject_symbol_ambiguity 依赖"我方尚未 dlopen"的 RTLD_DEFAULT
-    // 状态，故全模块只此一处物化（装配段复用清单，不再二次审计）；运行期
-    // FfiState::ensure_libs 的重复 dlopen 是幂等 refcount。失败响亮终止。
+    // Materialize and RTLD_NOW|RTLD_GLOBAL load static archives / global_asm+naked `.so` before
+    // draining the worklist: when an extern fn is taken as a value (fn-ptr), fn_entry_addr must
+    // dlsym its real symbol address during lowering (literal translation of native linker semantics).
+    // Order-sensitive: reject_symbol_ambiguity relies on the RTLD_DEFAULT state "we have not dlopen'd
+    // yet", so the whole module materializes only here (assembly-segment reuse list, no re-audit);
+    // runtime FfiState::ensure_libs repeated dlopen is an idempotent refcount. Fail loudly.
     let required_native_libs: Vec<Box<str>> = {
         let mut v = crate::native_archive::materialize_static_libraries(tcx, &mut linker)
-            .unwrap_or_else(|reason| panic!("Static native library 装载失败: {reason}"));
-        // C4（decision-history §7.22）：dep crate 的 global_asm 清单（dep 编译期
-        // 自 HIR 抽取的 `.mirasm.s` 文本，rlib 旁挂）——按 crate 图序经同一
-        // assemble 通道物化装载；pulp LD_ST 表类符号经此进全局域
+            .unwrap_or_else(|reason| panic!("Static native library loading failed: {reason}"));
+        // C4 (decision-history §7.22): dependency crate global_asm manifests (`.mirasm.s` text
+        // extracted from HIR at dep compile time, side-attached next to the rlib) — materialize and
+        // load through the same assemble channel in crate-graph order; pulp LD_ST-table-like symbols
+        // enter the global domain this way.
         for cnum in tcx.used_crates(()) {
             if tcx.crate_dep_kind(*cnum).macros_only() {
                 continue;
@@ -643,11 +672,11 @@ fn lower_inner(
                     continue;
                 }
                 let text = std::fs::read_to_string(&manifest).unwrap_or_else(|e| {
-                    panic!("dep global_asm 清单 `{}` 读取失败: {e}", manifest.display())
+                    panic!("dep global_asm manifest `{}` read failed: {e}", manifest.display())
                 });
                 let so = global_asm::assemble(&text).unwrap_or_else(|reason| {
                     panic!(
-                        "dep global_asm 清单 `{}` 物化失败: {reason}",
+                        "dep global_asm manifest `{}` materialization failed: {reason}",
                         manifest.display()
                     )
                 });
@@ -655,22 +684,23 @@ fn lower_inner(
             }
         }
         if let Some(so) = global_asm::materialize(tcx, &mut linker)
-            .unwrap_or_else(|reason| panic!("global_asm/naked 物化失败: {reason}"))
+            .unwrap_or_else(|reason| panic!("global_asm/naked materialization failed: {reason}"))
         {
             v.push(so);
         }
         for so in &v {
-            // lower 只需要符号地址，不拥有 native 生命周期。私有副本经 staged loader
-            // 完成映射/重定位但不运行 init/fini，constructor 统一留给 Engine 启动相。
+            // Lowering only needs symbol addresses; it does not own native lifetime. The private copy
+            // is mapped/relocated by the staged loader but init/fini are not run; constructors are
+            // left to the Engine startup phase.
             let image =
                 crate::vm::engine::native_instance::open_for_lower(std::path::Path::new(&**so))
-                    .unwrap_or_else(|detail| panic!("必需原生库 `{so}` 降低期装载失败: {detail}"));
+                    .unwrap_or_else(|detail| panic!("required native library `{so}` loading failed during lowering: {detail}"));
             let h = image.handle();
-            // 记 required 句柄（dynsym 可见符号的链接序解析，先于全域——
-            // native 链接期绑定，psm/rustc_driver 碰撞实锤）。
+            // Record required handle (dynsym-visible symbol link-order resolution, before global scope —
+            // native link-time binding, psm/rustc_driver collision confirmed).
             linker.archive_handles.push(h);
-            // T5：global_asm 物化的 .so 若含 syscall 间接槽则当场重填
-            // （系统库无此符号，静默跳过）
+            // T5: if a global_asm-materialized .so contains syscall indirect slots, refill them now
+            // (system libraries lack this symbol, silently skip).
             linker
                 .archive_fallbacks
                 .push((image.bias(), image.hidden_symbol_values().clone()));
@@ -680,16 +710,18 @@ fn lower_inner(
     };
 
     let sess = tcx.sess;
-    // 元数据 Dylib 预载（corpus 批5 openssl 实锤）：cargo 把 `-sys` build.rs 的
-    // rustc-link-lib 只写 rlib 元数据（bin 的 rustc 命令行无 -l/-L；rustc 链接期
-    // 自己从元数据补）。native 语义里这些库恒进最终链接；我们的 fn-ptr 烘焙
-    // （降低期 dlsym 全域）与运行期 CallForeign 都需要它们先在全局域可见——std
-    // 自带的 m/dl/pthread/rt/util/gcc_s 亦同源（#[link] 属性落在 libstd）。
-    // Static 走上方 archive 通道；Framework/wasm 不在本切片。
-    // 收集口径与 native_archive 闭包链接行共用（c_libgit2 修复，system_dylibs）。
+    // Metadata dylib preload (corpus batch 5 openssl confirmed): cargo only writes `-sys` build.rs
+    // rustc-link-lib into rlib metadata (the bin rustc command line has no -l/-L; rustc itself
+    // supplements them from metadata at link time). In native semantics these libraries always enter
+    // the final link; our fn-ptr baking (dlsym global during lowering) and runtime CallForeign both
+    // need them visible in the global domain first — std’s own m/dl/pthread/rt/util/gcc_s come from
+    // the same source (#[link] attributes live in libstd).
+    // Static goes through the archive path above; Framework/wasm are not in this slice.
+    // Collection scope is shared with native_archive closure link line (c_libgit2 fix, system_dylibs).
     let dylib_names = crate::native_archive::system_dylibs(tcx);
     let dylib_candidates = soname_candidates(&dylib_names);
-    // 尽力预载（缺失者留待真引用处的既有响亮诊断）；句柄随进程生命周期。
+    // Best-effort preload (missing ones left to existing loud diagnostics at real use sites); handles
+    // live for the process lifetime.
     for cand in &dylib_candidates {
         let Ok(cpath) = std::ffi::CString::new(&**cand) else {
             continue;
@@ -697,21 +729,22 @@ fn lower_inner(
         let _ = crate::os::dll::open(&cpath, crate::os::dll::Mode::Now);
     }
 
-    // 种子 = mono collector 集（D1：与 native codegen 同一起点，正确性白拿）
+    // Seed = mono collector set (D1: same starting point as native codegen, correctness for free).
     for inst in collect::collect(tcx) {
         linker.func_id(inst);
     }
 
-    // Engine 顶层可能在 lang_start 之外（run_export/嵌入调用）接住 guest panic；
-    // 这两只客体函数即使不在用户程序的静态可达集里也必须保留。
+    // Engine top level may catch guest panic outside lang_start (run_export / embedded calls);
+    // these two guest functions must be kept even if they are not in the user program’s static
+    // reachable set.
     let mut guest_panic_cleanup = register_guest_panic_cleanup(tcx, &mut linker);
 
-    // 自定义 #[global_allocator] 的 __rust_* shim（corpus 批7 c_mimalloc 实锤修）：
-    // kind=Global 时 HIR 展开器已在本地 crate 生成 __rust_{alloc,dealloc,realloc,
-    // alloc_zeroed} 四只转发 fn（rustc_allocator 等 flag 标记，body = 调用户
-    // GlobalAlloc）——登记 FuncId 供运行期 interp CallBuiltin(Rust*) 臂统一路由
-    // （分配是程序级语义：base/deps image 按 Default 会话烘的臂与用户分配器
-    // 不得并存，跨堆 free = mimalloc 元数据 SIGSEGV）。
+    // Custom #[global_allocator] __rust_* shims (corpus batch 7 c_mimalloc confirmed fix):
+    // when kind=Global the HIR expander has already generated __rust_{alloc,dealloc,realloc,
+    // alloc_zeroed} four forwarding fns in the local crate (rustc_allocator etc. flags, body = call
+    // user GlobalAlloc) — register FuncId for runtime interp CallBuiltin(Rust*) arm unified routing
+    // (allocation is program-level semantics: base/deps image arms baked by Default session and user
+    // allocator cannot coexist; cross-heap free = mimalloc metadata SIGSEGV).
     let mut custom_alloc_shims: Option<ir::AllocShims> = if let Some(kind) = tcx.allocator_kind(())
         && matches!(kind, rustc_ast::expand::allocator::AllocatorKind::Global)
     {
@@ -747,29 +780,30 @@ fn lower_inner(
                 realloc,
                 alloc_zeroed,
             }),
-            // 四件不齐 = 生成面不完整（不应发生；None 落引擎堆既有纪律）
+            // Not all four present = incomplete generation surface (shouldn’t happen; None falls back
+            // to existing engine heap discipline).
             _ => None,
         }
     } else {
         None
     };
 
-    // main 启动计划（cg_ssa create_entry_fn 同构）：
+    // Main entry plan (isomorphic to cg_ssa create_entry_fn):
     // lang_start::<main_ret>(main fn-ptr, argc, argv, sigpipe) -> isize
     let entry = tcx.entry_fn(()).map(|(main_def, entry_ty)| {
         let rustc_session::config::EntryFnType::Main { sigpipe } = entry_ty;
         let main_inst = Instance::mono(tcx, main_def);
-        // main 是本地 Rust fn，必非 foreign——取址路径不会失败
+        // main is a local Rust fn, definitely not foreign — address-taking path cannot fail.
         let main_addr = linker
             .fn_entry_addr(main_inst)
-            .expect("main fn 条目地址（本地 fn，非 foreign）");
+            .expect("main fn entry address (local fn, not foreign)");
         let main_ret = tcx
             .fn_sig(main_def)
             .no_bound_vars()
-            .expect("main 无晚绑定区域")
+            .expect("main has no late-bound regions")
             .output()
             .no_bound_vars()
-            .expect("main 返回无晚绑定");
+            .expect("main return has no late-bound regions");
         let start_def = tcx.require_lang_item(rustc_hir::LangItem::Start, rustc_span::DUMMY_SP);
         let start_inst = Instance::expect_resolve(
             tcx,
@@ -780,7 +814,7 @@ fn lower_inner(
         );
         let (boundary_caller, main_catch, catcher_caller, catcher_intrinsic) =
             discover_main_catch_site(tcx, typing_env, start_inst)
-                .unwrap_or_else(|reason| panic!("无法框定固定 std 的 main panic 捕获点：{reason}"));
+                .unwrap_or_else(|reason| panic!("cannot frame the pinned std main panic catch site: {reason}"));
         let main_catch = linker.func_id(main_catch);
         linker.main_catch_site = Some(linker::MainCatchSite {
             boundary_caller,
@@ -789,7 +823,8 @@ fn lower_inner(
             catcher_intrinsic,
         });
         let lang_start = linker.func_id(start_inst);
-        // argc/argv 置零占位：finalize_entry_argv 每次运行回填（运行期输入不进快照）
+        // argc/argv zero placeholder: finalize_entry_argv backfills each run (runtime input does not
+        // enter the snapshot).
         ir::EntryPlan {
             lang_start,
             main_addr: ir::LinkAddr(main_addr),
@@ -801,15 +836,16 @@ fn lower_inner(
 
     let mut module = ir::Module::default();
     let mut funcs: Vec<Option<ir::FuncBody>> = Vec::new();
-    // S4：delta 模块的 funcs 向量按本地位序存放（absorb 时 base++delta 拼接后，
-    // 位置 = delta_first_fn + 本地位序 = 字节码里的绝对 FuncId）
+    // S4: delta module funcs vector stored by local ordinal (after absorb base++delta concatenation,
+    // position = delta_first_fn + local ordinal = absolute FuncId in bytecode).
     let first = linker.delta_first_fn;
     let mut purity = std::env::var_os("MIRVM_PURITY_STATS")
         .is_some_and(|v| !v.is_empty())
         .then(PurityStats::default);
     if linker.split.is_some() {
-        // A2 split：不动点轮替排干双队列（image 体只发现 image 类——purity 向下
-        // 封闭；delta 体两类都发现）。current_image 决定 arena 路由（§4.3）。
+        // A2 split: fixed-point alternating drain of dual queues (image bodies only discover image-class
+        // items — purity is downward-closed; delta bodies discover both classes). current_image decides
+        // arena routing (§4.3).
         loop {
             let mut progressed = false;
             while let Some((id, inst)) = linker
@@ -856,7 +892,7 @@ fn lower_inner(
         p.dump();
     }
 
-    // ===== A2 split：rebase + 双模块装配 =====
+    // ===== A2 split: rebase + dual module assembly =====
     let mut split_image = None;
     if let Some(mut s) = linker.split.take() {
         let image_fns = s.image_funcs.len() as u32;
@@ -870,14 +906,15 @@ fn lower_inner(
             first_asm: linker.delta_first_asm,
             image_asm,
         };
-        // A2 自检（§5.3②）：image 实例逐条复查 purity——任何漏判都是错值级
+        // A2 self-check (§5.3②): per-image-instance purity review — any misclassification is a
+        // value-level error.
         for inst in &s.image_insts {
             assert!(
                 classify_purity(*inst).is_image(),
-                "A2 自检失败：image 实例复查非 pure（分类器状态错误）"
+                "A2 self-check failed: image instance review is not pure (classifier state error)"
             );
         }
-        // 函数体 + 两表 + entry plan 重映射
+        // Function bodies + two tables + entry plan remapping.
         for b in s.image_funcs.iter_mut().flatten() {
             rb.body(b);
         }
@@ -890,15 +927,16 @@ fn lower_inner(
         for v in linker.fn_addrs.values_mut() {
             *v = rb.fn_id(*v);
         }
-        // P1 配方表的 FuncId 同规则重映射（s.image_stub_sites 在下方装配前）
+        // P1 recipe table FuncId remapping under the same rule (s.image_stub_sites before assembly below).
         for site in linker.entry_stub_sites.iter_mut() {
             site.func = rb.fn_id(site.func);
         }
         for site in s.image_stub_sites.iter_mut() {
             site.func = rb.fn_id(site.func);
         }
-        // 自定义分配器 shim 的 FuncId 同规则重映射（c_mimalloc ABI 错调根因：
-        // 漏映射则运行期路由到移位前的野 FuncId，call_guest 打错函数体）
+        // Custom allocator shim FuncId remapping under the same rule (c_mimalloc ABI wrong-call root
+        // cause: missing mapping makes runtime route to a stale shifted FuncId and call_guest hits
+        // the wrong body).
         if let Some(shims) = custom_alloc_shims.as_mut() {
             shims.alloc = rb.fn_id(shims.alloc);
             shims.dealloc = rb.fn_id(shims.dealloc);
@@ -919,7 +957,7 @@ fn lower_inner(
         let entry = entry;
         module.entry = entry;
 
-        // exports 按值域分拆（设计 §9：底座 id < first 恒留 delta 侧）
+        // Split exports by value domain (design §9: base ids < first always stay on delta side).
         let image_lo = first;
         let image_hi = first + image_fns;
         let in_image = |id: &ir::FuncId| *id >= image_lo && *id < image_hi;
@@ -930,13 +968,15 @@ fn lower_inner(
             .map(|(s, id)| (s.clone(), *id))
             .collect();
         module.exports.retain(|_, id| !in_image(id));
-        // fn_addrs 按【地址域】分拆：条目物理上在 image 冻结区（image_fn_entries 的
-        // 值集 = image 类 + S4 补建的全部条目）就随 image 走。按值域分会把补建条目
-        // （底座值域 < first、条目在 image 区）留在建者 delta 侧——消费方装载该
-        // image 后，其静态里烘焙的补建地址在运行期反查表无登记（absorb_stack 只并
-        // image.fn_addrs，消费方自己的 fn_entry_addr 复用分支也不登记），间接调用
-        // abort「不是已知 fn 条目」（corpus 批1 撞出的缓存污染实锤根因；负对照
-        // edit_rand v2-v6 五连崩 0x6a0000001630/core::fmt::write）。
+        // Split fn_addrs by address domain: entries physically in the image frozen area (value set of
+        // image_fn_entries = image-class + all S4 supplementary entries) go with the image. Splitting
+        // by value domain would leave supplementary entries (base value domain < first but entry in
+        // image area) on the builder’s delta side — after the consumer loads this image, those baked
+        // supplementary addresses in its static data are not registered in the runtime reverse lookup
+        // table (absorb_stack only merges image.fn_addrs, and the consumer’s own fn_entry_addr reuse
+        // branch also doesn’t register), so indirect calls abort "not a known fn entry" (corpus batch
+        // 1 confirmed cache-pollution root cause; negative control edit_rand v2-v6 five consecutive
+        // crashes 0x6a0000001630/core::fmt::write).
         let image_entry_addrs: std::collections::HashSet<u64> =
             s.image_fn_entries.values().copied().collect();
         let image_fn_addrs: std::collections::HashMap<u64, ir::FuncId> = linker
@@ -957,17 +997,18 @@ fn lower_inner(
             funcs: s
                 .image_funcs
                 .into_iter()
-                .map(|f| f.expect("image 队列耗尽时每个 id 必有产出"))
+                .map(|f| f.expect("every id must have output when the image queue is drained"))
                 .collect(),
             tls: s.image_tls_slots,
             asm_sites: s.image_asm_sites,
             frozen: Some(s.image_frozen),
-            // P2 GOT image 侧（decision-history §7.5c）：随 image 模块走，
-            // 装载/absorb 时按名合流进 delta 并重编 idx
+            // P2 GOT image side (decision-history §7.5c): goes with the image module, merged by name
+            // during load/absorb into delta and renumbered idx.
             foreign_syms: s.image_got_syms,
             got_fixups: s.image_got_fixups,
             frozen_relocs: s.image_frozen_relocs,
-            // P1 image 侧（§7.6）：配方随 image 文件，代码域句柄运行期随域重建
+            // P1 image side (§7.6): recipes go with the image file; code-area handles rebuilt at runtime
+            // per domain.
             entry_stub_sites: s.image_stub_sites,
             entry_stubs: s.image_code_arena,
             ..Default::default()
@@ -976,9 +1017,10 @@ fn lower_inner(
         image_module.ensure_function_names();
         image_module.rebuild_load_map();
         image_module.rebuild_fn_addrs();
-        // image 导出素材（装载方零 tcx 依赖，BaseExports 同构）：fn 条目/static/TLS
-        // 三索引只含 image 类。fn 条目以 image 区条目表为准（含底座命中但在 image
-        // 区补建者——"总量恰一份"的单一身份在装载端可复现）。
+        // Image export material (zero tcx dependency on loader side, isomorphic to BaseExports): fn
+        // entry/static/TLS three indexes contain only image-class items. Fn entries use the image-area
+        // entry table as authority (includes base hits that are supplementary-built in the image area —
+        // reproducible single identity "exactly one copy total" on the loader side).
         let fn_entry_syms = s
             .image_fn_entries
             .iter()
@@ -1009,27 +1051,29 @@ fn lower_inner(
             static_syms,
             tls_syms,
         });
-        // delta 侧 tls_slots/asm_sites 本就只有 delta 槽（image 槽在 Split 字段里，
-        // 已随 SplitImage 移出），无需再动。
+        // Delta-side tls_slots/asm_sites already only contain delta slots (image slots live in Split
+        // fields and have already been moved out with SplitImage), so no further action needed.
     }
     module.funcs = funcs
         .into_iter()
-        .map(|f| f.expect("队列耗尽时每个 FuncId 必有产出"))
+        .map(|f| f.expect("every FuncId must have output when the queue is drained"))
         .collect::<Vec<_>>()
         .into();
     module.ensure_function_names();
 
-    // 入口别名（--vm-stats 从程序入口做可达分析用）
+    // Entry alias (used by --vm-stats for reachability analysis from the program entry).
     if let Some((entry_def, _)) = tcx.entry_fn(())
         && let Some(&id) = linker.ids.get(&Instance::mono(tcx, entry_def))
     {
         module.exports.insert("@entry".into(), id);
     }
-    // dylib dlopen 候选（运行期 FfiState ensure_libs 的 optional 类）：与降低期
-    // 预载同一清单（元数据 + CLI 合并、ldconfig 扩展的版本项）——one build 口径。
+    // dylib dlopen candidates (optional class for runtime FfiState ensure_libs): same list as the
+    // lowering-time preload (metadata + CLI merge, ldconfig-expanded versioned entries) — one-build
+    // scope.
     module.native_libs = dylib_candidates.clone();
-    // CLI `-l` 额外补 search-path 限定形态（tier-0 旧契约保留；Static 只走上方
-    // 经过验证的必需 archive 路径，不能伪装成可选 `.so` 候选）。
+    // CLI `-l` additionally supplements search-path limited form (tier-0 old contract kept; Static
+    // only goes through the verified required archive path above and cannot masquerade as optional
+    // `.so` candidates).
     for lib in &sess.opts.libs {
         if matches!(lib.kind, rustc_hir::attrs::NativeLibKind::Static { .. }) {
             continue;
@@ -1042,19 +1086,24 @@ fn lower_inner(
             }
         }
     }
-    // 上游 crate build.rs 的 Static native libraries（M5.1 D2）+ global_asm/naked
-    // 物化（M5.2 D8h）：清单已在排干 worklist 前物化并 RTLD_GLOBAL 加载
-    // （fn-ptr 取址的降低期 dlsym 依赖；单点物化保 reject_symbol_ambiguity 的
-    // "尚未 dlopen" 前提），此处只移交 Module。
+    // Upstream crate build.rs Static native libraries (M5.1 D2) + global_asm/naked materialization
+    // (M5.2 D8h): manifests were already materialized and RTLD_GLOBAL loaded before draining the
+    // worklist (fn-ptr address-taking lowering-time dlsym depends on this; single-point
+    // materialization preserves the "not yet dlopen'd" precondition of reject_symbol_ambiguity),
+    // only hand over Module here.
     module.required_native_libs = required_native_libs;
-    // asm-stub 批量物化（M5.0）：全部 wrapper cc 汇编 + dlopen + dlsym → 真地址表。
-    // 配方留在 Module（M6 片2）：L2 warm 路径以 asm_sites 幂等重物化。
-    // A2 split：image 站点随 SplitImage 走（absorb 时合并重物化，与 L2 warm 同契约）。
+    // asm-stub batch materialization (M5.0): all wrapper cc assembly + dlopen + dlsym → real address
+    // table. Recipes stay in Module (M6 slice 2): L2 warm path idempotently rematerializes from
+    // asm_sites.
+    // A2 split: image sites go with SplitImage (merged and rematerialized during absorb, same
+    // contract as L2 warm).
     module.asm_sites = std::mem::take(&mut linker.asm_sites);
     module.asm_stub_addrs = asm::materialize(&module.asm_sites);
-    // S4 底座导出素材（构建模式）：sym 索引在此一次算清，装载方零 tcx 依赖。
-    // 合成 crate 的本地项（空 main 及其 shim）不入索引——其符号名带本地
-    // disambiguator 不会与真实程序相撞，但索引的语义是"sysroot 面"，如实排除。
+    // S4 base export material (build mode): sym indexes computed once here, zero tcx dependency on
+    // loader side.
+    // Synthetic crate local items (empty main and its shim) are not entered into the index — their
+    // symbol names carry a local disambiguator and will not collide with a real program, but the
+    // index semantics are "sysroot face", so exclude truthfully.
     let base_exports = emit_exports.then(|| {
         use rustc_hir::def_id::LOCAL_CRATE;
         let keep = |krate| !exclude_local || krate != LOCAL_CRATE;
@@ -1086,21 +1135,22 @@ fn lower_inner(
         }
     });
 
-    // 冻结区与 fn 条目反查表移交执行相
+    // Hand over frozen area and fn-entry reverse lookup table to the execution phase.
     module.frozen = Some(linker.frozen);
     if split_image.is_none() {
         module.fn_addrs = linker.fn_addrs.into_iter().collect();
     }
     module.tls = linker.tls_slots;
-    // P2 GOT（decision-history §7.5c）delta 侧（image 侧已随 split_image 走）
+    // P2 GOT (decision-history §7.5c) delta side (image side already went with split_image).
     module.foreign_syms = linker.got_syms;
     module.got_fixups = linker.got_fixups;
     module.frozen_relocs = linker.frozen_relocs;
-    // P1（§7.6）本域配方与代码域句柄（image 侧已随 split_image 走）
+    // P1 (§7.6) this-domain recipe and code-area handle (image side already went with split_image).
     module.entry_stub_sites = linker.entry_stub_sites;
     module.entry_stubs = linker.code_arena;
-    // 自定义分配器 shim（程序级语义，delta 权威：shim 恒 LOCAL_CRATE——split
-    // 与否同此一处，base/deps image 按 Default 烘的臂在运行期经它路由）
+    // Custom allocator shim (program-level semantics, delta authority: shim is always LOCAL_CRATE —
+    // same place regardless of split; base/deps image arms baked by Default are routed through it at
+    // runtime).
     module.custom_alloc_shims = custom_alloc_shims;
     module.guest_panic_cleanup = Some(guest_panic_cleanup);
     if split_image.is_none() {
@@ -1111,9 +1161,10 @@ fn lower_inner(
     (module, base_exports, split_image)
 }
 
-/// dylib dlopen 候选 SONAME 清单（按序去重）：dev 符号链 `lib{name}.so` →
-/// `ldconfig -p` 的版本项绝对路径（`lib{name}.so.N` 带点锚前缀，libssl.so.3 类；
-/// ldconfig 缺失/无命中则仅靠符号链）。cargo 的 rlib 元数据 -l 与 CLI -l 共用。
+/// dylib dlopen candidate SONAME list (deduplicated in order): dev symlink `lib{name}.so` →
+/// versioned absolute path from `ldconfig -p` (`lib{name}.so.N` with dotted anchor prefix, like
+/// libssl.so.3; if ldconfig is missing/has no hit, rely only on the symlink). cargo rlib metadata -l
+/// and CLI -l share this.
 fn soname_candidates(names: &[Box<str>]) -> Vec<Box<str>> {
     let mut out: Vec<Box<str>> = Vec::new();
     let mut push = |c: String| {
@@ -1150,7 +1201,7 @@ mod tests {
     use super::{IMAGE_TAG, Rebase};
     use crate::vm::engine::ir;
 
-    /// first=100、image 5 个的 rebase 基准（fn/TLS/asm 各自独立空间同构）
+    /// Rebase baseline for first=100, image 5 (fn/TLS/asm independent isomorphic spaces).
     fn rb() -> Rebase {
         Rebase {
             first_fn: 100,
@@ -1165,29 +1216,29 @@ mod tests {
     #[test]
     fn rebase_fn_id_three_ranges() {
         let rb = rb();
-        // 底座 id（< first）不动
+        // Base ids (< first) unchanged.
         assert_eq!(rb.fn_id(0), 0);
         assert_eq!(rb.fn_id(99), 99);
-        // delta untagged（≥ first）统一 +image_fns
+        // Delta untagged (≥ first) uniformly +image_fns.
         assert_eq!(rb.fn_id(100), 105);
         assert_eq!(rb.fn_id(137), 142);
-        // image 标签（TAG|j）→ first + j
+        // Image tag (TAG|j) → first + j.
         assert_eq!(rb.fn_id(IMAGE_TAG), 100);
         assert_eq!(rb.fn_id(IMAGE_TAG | 4), 104);
-        // 三空间同构：TLS/ASM 同形（各自 first/count）
+        // Three isomorphic spaces: TLS/ASM same shape (each first/count).
         assert_eq!(rb.tls_id(19), 19);
         assert_eq!(rb.tls_id(20), 23);
         assert_eq!(rb.tls_id(IMAGE_TAG | 2), 22);
         assert_eq!(rb.asm_id(6), 6);
         assert_eq!(rb.asm_id(7), 9);
         assert_eq!(rb.asm_id(IMAGE_TAG | 1), 8);
-        // 标签位绝不残留进执行相
+        // Tag bits must never remain in the execution phase.
         for id in [0, 99, 100, 137, IMAGE_TAG, IMAGE_TAG | 4] {
             assert_eq!(rb.fn_id(id) & IMAGE_TAG, 0);
         }
     }
 
-    /// 构造最小 body：一个 block，term 任选，返回后可加 stmt
+    /// Construct minimal body: one block, term arbitrary, stmts can be added after return.
     fn body_with(term: ir::Terminator, stmts: Vec<ir::Stmt>) -> ir::FuncBody {
         ir::FuncBody {
             frame_size: 0,
@@ -1203,7 +1254,7 @@ mod tests {
     #[test]
     fn rebase_body_remaps_only_id_carrying_ops() {
         let rb = rb();
-        // Call.callee：三区间各自重映射
+        // Call.callee: three ranges each remapped.
         let mut b = body_with(
             ir::Terminator::Call {
                 callee: IMAGE_TAG | 3,
@@ -1223,7 +1274,7 @@ mod tests {
         );
         rb.body(&mut b);
         let ir::Terminator::Call { callee, .. } = &b.blocks[0].term else {
-            panic!("Call 不变体");
+            panic!("Call is not the expected variant");
         };
         assert_eq!(*callee, 103);
         let ir::Stmt::Assign {
@@ -1231,11 +1282,11 @@ mod tests {
             ..
         } = &b.blocks[0].stmts[0]
         else {
-            panic!("TlsRef 不变体");
+            panic!("TlsRef is not the expected variant");
         };
         assert_eq!(*id, 21);
 
-        // InlineAsm.stub 重映射；CallIndirect（无 id 字段）与其他语句不动
+        // InlineAsm.stub remapped; CallIndirect (no id field) and other statements unchanged.
         let mut b2 = body_with(
             ir::Terminator::InlineAsm {
                 stub: 8,
@@ -1248,11 +1299,11 @@ mod tests {
         );
         rb.body(&mut b2);
         let ir::Terminator::InlineAsm { stub, .. } = &b2.blocks[0].term else {
-            panic!("InlineAsm 不变体");
+            panic!("InlineAsm is not the expected variant");
         };
         assert_eq!(*stub, 10); // untagged ≥ first_asm(7) → +image_asm(2)
 
-        // CallBuiltin / Trap / Goto 等不携带 id 的终止子保持原样
+        // CallBuiltin / Trap / Goto and other id-less terminators remain unchanged.
         let mut b3 = body_with(
             ir::Terminator::CallBuiltin {
                 builtin: ir::Builtin::HostAbort,

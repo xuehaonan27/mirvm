@@ -1,5 +1,5 @@
-// C3 spike 面孔②：ud2 终止形——flushed 打印后调 ud2 noreturn stub，
-// 宿主收 SIGILL（native 同；两侧 stderr 真空、exit=128+SIGILL）。
+// C3 spike face ②: ud2 termination form — after flushed print, call ud2 noreturn stub,
+// host receives SIGILL (same as native; both sides have empty stderr, exit=128+SIGILL).
 use std::io::Write as _;
 
 fn main() {

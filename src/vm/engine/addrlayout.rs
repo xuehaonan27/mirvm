@@ -1,37 +1,43 @@
-//! 固定基址布局（P1/P2/S3′/S4 地址模型，decision-history §7.5b/§7.6/§7.5c/§7.3）：
-//! 引擎可缓存性的地基常量层——冻结区三域（数据）与代码域三族（stub 码址）
-//! 的全部固定基址/样条参数与白名单判据。frozen.rs/codearena.rs 的 arena 实现
-//! 以此为准；ir 序列化白名单、baseimage/depsimage 装载校验、lower 装配共享同
-//! 一套数值，禁止任何第二处字面量。
+//! Fixed-base address layout (P1/P2/S3'/S4 address models, decision-history §7.5b/§7.6/§7.5c/§7.3):
+//! the foundational constant layer for engine cacheability — all fixed bases/spline
+//! parameters and whitelist criteria for the three frozen data regions and the three
+//! code-region families. Arena implementations in frozen.rs/codearena.rs use this as
+//! the source of truth; IR serialization whitelists, baseimage/depsimage load
+//! validation, and lower assembly all share the same numeric values; no second literal
+//! is allowed.
 //!
-//! 选址论证（Linux x86_64 虚拟地址空间知识，与 global_asm/asm-stub 的 x86_64
-//! 硬门同前提）：PIE 映像/brk 随机化上界 ~0x66xx_xxxx_xxxx（mmap_rnd_bits=28），
-//! mmap 自顶向下区在 0x7fxx_xxxx_xxxx 附近——0x68–0x6E 带落在两带之间的空洞；
-//! 与影子 IP（FUNC_IP_BASE，非规范高位、从不映射）无交集。样条步距 16 GiB
-//! 远大于各区容量（空洞供未来扩容），上界 1300 不触 0x7f。
+//! Site-selection rationale (Linux x86_64 virtual address space knowledge, same
+//! premise as the global_asm/asm-stub x86_64 hard floor): PIE image/brk randomization
+//! upper bound ~0x66xx_xxxx_xxxx (mmap_rnd_bits=28), the top-down mmap region is near
+//! 0x7fxx_xxxx_xxxx — the 0x68–0x6E band falls in the hole between the two and does
+//! not intersect the shadow IP region (FUNC_IP_BASE, non-canonical high bits, never
+//! mapped). The spline step of 16 GiB is far larger than each region's capacity (the
+//! hole allows future expansion), and the upper bound of 1300 stays below 0x7f.
 
-// ---- 冻结区三域（数据：statics/常量池/fn-ptr 条目；S4 双域 + S3′ 依赖样条）----
+// ---- Three frozen data regions (data: statics/constant pool/fn-ptr entries; S4 dual regions + S3' dependency splines) ----
 
-/// 底座域（跨程序共享的 std 预降低模块）固定基址。
+/// Fixed base of the base image region (std pre-lowered modules shared across programs).
 pub const BASE_IMAGE_FIXED_ADDR: usize = 0x6800_0000_0000;
-/// delta 域（本程序模块；无底座时=全量模块）固定基址。
+/// Fixed base of the delta region (this program's modules; equals the full set when no base image exists).
 pub const DELTA_FIXED_ADDR: usize = 0x6900_0000_0000;
 
-/// 依赖 image 域样条：每个 registry 依赖 image 占一固定域，起点 0x6A00、
-/// 步距 16 GiB，k 由 lockfile 拓扑序分配。栈 = [底座][img_k…][delta]，
-/// 各域绝对地址跨域互指全稳定（可缓存性判据①对每域成立）。
+/// Dependency image region spline: each registry dependency image occupies one fixed
+/// region, starting at 0x6A00 with a 16 GiB step; k is assigned by lockfile topology
+/// order. Stack = [base][img_k…][delta]; absolute addresses across regions are mutually
+/// stable (cacheability criterion ① holds for every region).
 pub const IMAGE_SPLINE_BASE: usize = 0x6A00_0000_0000;
 pub const IMAGE_SPLINE_STEP: usize = 1 << 34;
 pub const IMAGE_SPLINE_COUNT: usize = 1300;
 
-/// 第 k 个依赖 image 的固定域基址。
+/// Fixed-region base for the k-th dependency image.
 pub fn image_addr(k: usize) -> usize {
-    assert!(k < IMAGE_SPLINE_COUNT, "image 样条越界: k={k}");
+    assert!(k < IMAGE_SPLINE_COUNT, "image spline out of bounds: k={k}");
     IMAGE_SPLINE_BASE + k * IMAGE_SPLINE_STEP
 }
 
-/// 合法冻结域白名单：底座 / delta / 依赖 image 样条（对齐且在界内）。
-/// restore 与 serde 反序列化都过它——防伪造快照把区放到任意地址（错基址=静默错值）。
+/// Valid frozen-region whitelist: base / delta / dependency image splines (aligned and in bounds).
+/// Both restore and serde deserialization go through it — prevents forged snapshots from
+/// placing regions at arbitrary addresses (wrong base = silent wrong values).
 pub fn is_valid_home(addr: usize) -> bool {
     addr == BASE_IMAGE_FIXED_ADDR
         || addr == DELTA_FIXED_ADDR
@@ -40,25 +46,26 @@ pub fn is_valid_home(addr: usize) -> bool {
             && (addr - IMAGE_SPLINE_BASE) / IMAGE_SPLINE_STEP < IMAGE_SPLINE_COUNT)
 }
 
-// ---- 代码域三族（P1 条目 stub：fn-ptr 值可执行化；与冻结区三域同构互不相交）----
+// ---- Three code-region families (P1 entry stubs: fn-ptr values made executable; isomorphic to but disjoint from the three frozen regions) ----
 
-/// delta 代码域固定基址。
+/// Fixed base of the delta code region.
 pub const DELTA_CODE_ADDR: usize = 0x6C00_0000_0000;
-/// 底座代码域固定基址。
+/// Fixed base of the base code region.
 pub const BASE_CODE_ADDR: usize = 0x6D00_0000_0000;
-/// 依赖 image 代码域样条（k 与冻结样条同一分配序）。
+/// Dependency image code-region spline (k uses the same assignment order as the frozen spline).
 pub const IMAGE_CODE_SPLINE: usize = 0x6E00_0000_0000;
 pub const IMAGE_CODE_STEP: usize = 1 << 34;
 pub const IMAGE_CODE_COUNT: usize = 1300;
 
-/// 第 k 个依赖 image 的代码域基址。
+/// Code-region base for the k-th dependency image.
 pub fn image_code_addr(k: usize) -> usize {
-    assert!(k < IMAGE_CODE_COUNT, "image 代码样条越界: k={k}");
+    assert!(k < IMAGE_CODE_COUNT, "image code spline out of bounds: k={k}");
     IMAGE_CODE_SPLINE + k * IMAGE_CODE_STEP
 }
 
-/// 冻结域基址 → 本模块的代码域基址（同一 k 的不变量：delta↔delta、底座↔底座、
-/// image_spline(k)↔image_code(k)）。非冻结白名单基址 ⇒ None（引擎不变量违规）。
+/// Frozen-region base -> this module's code-region base (same-k invariant: delta↔delta,
+/// base↔base, image_spline(k)↔image_code(k)). Non-whitelisted frozen base => None
+/// (engine invariant violation).
 pub fn code_home_for_frozen(home: usize) -> Option<usize> {
     match home {
         DELTA_FIXED_ADDR => Some(DELTA_CODE_ADDR),
@@ -73,7 +80,7 @@ pub fn code_home_for_frozen(home: usize) -> Option<usize> {
     }
 }
 
-/// 合法代码域白名单（serde 配方回放与装载防御双验证；伪造快照防线）。
+/// Valid code-region whitelist (double-checked during serde recipe replay and load defense; forged snapshot guard).
 pub fn is_valid_code_home(addr: usize) -> bool {
     addr == DELTA_CODE_ADDR
         || addr == BASE_CODE_ADDR

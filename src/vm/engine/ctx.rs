@@ -1,16 +1,18 @@
-//! 执行环境：Shared（发布后只读）+ Ctx（每线程执行态，vmctx）。
+//! Execution environment: Shared (read-only after publication) + Ctx (per-thread execution state, vmctx).
 //!
-//! 状态三分（concurrency-arch §2）在真引擎的落地；raw-ptr ctx + 字段级瞬态借用
-//! 纪律沿用 spike2/3/4。Shared 由 Engine 以 Arc 持有；每线程 Ctx 也持一份 Arc，
-//! 因而执行态结束前模块不会被释放。Ctx 落 **自管 pthread key**——
-//! **边界 TLS attach**（vmctx-passing §1，JNI 同款）是所有入口
-//! （run_main / run_export / thunk）进入引擎的唯一门。
+//! Concrete implementation of the three-way state split (concurrency-arch §2) in the real engine;
+//! raw-ptr ctx + field-level transient borrows follow the spike2/3/4 discipline. Shared is held
+//! by Engine via Arc; each per-thread Ctx also keeps an Arc, so the module is not released while
+//! execution state lives. Ctx lives on a **self-managed pthread key**—
+//! **boundary TLS attach** (vmctx-passing §1, same as JNI) is the only gate through which every
+//! entry point (run_main / run_export / thunk) enters the engine.
 //!
-//! 为什么不用宿主 `thread_local!`：guest 的 TLS dtor（std run_dtors 经 pthread_key
-//! 注册，thunk 化）跑在 pthread TSD 相位，而宿主 C++ TLS 析构**先于** TSD 相位
-//! （glibc start_thread：__call_tls_dtors → __nptl_deallocate_tsd）——彼时 Ctx 已亡，
-//! dtor thunk 内 attach 撞已销毁宿主 TLS。自管 pthread key + **迟退 N 轮**（dtor 里
-//! 重新 setspecific 挂回，glibc 上限 4 轮）让 Ctx 存活到 guest key dtor 之后。
+//! Why not use host `thread_local!`: guest TLS dtors (std run_dtors registered via pthread_key,
+//! thunkified) run in the pthread TSD phase, while host C++ TLS destructors run **before** the
+//! TSD phase (glibc start_thread: __call_tls_dtors → __nptl_deallocate_tsd)—at that point Ctx is
+//! already gone, and attach inside the dtor thunk would hit destroyed host TLS. Self-managed
+//! pthread key + **deferred teardown for N rounds** (re-setspecific in the dtor, glibc max 4
+//! rounds) keeps Ctx alive until after the guest key dtor runs.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
@@ -19,9 +21,10 @@ use super::ffi::FfiState;
 use super::frame::ByteRegion;
 use super::ir::Module;
 
-/// 发布后只读：加载相建好、执行相 lock-free 共享读（引擎 Sync 的根基，spike4）。
-/// 例外 = thunks（M4.4 D1）：执行期按需物化的 thunk 缓存——Mutex 显式同步，
-/// 状态三分（concurrency-arch §2）的第三格，合法。
+/// Read-only after publication: built during load phase, lock-free shared reads during execution
+/// phase (foundation of Engine Sync, spike4). Exception = thunks (M4.4 D1): thunk cache
+/// materialized on demand during execution—Mutex provides explicit synchronization, the third
+/// cell of the three-way state split (concurrency-arch §2), legitimate.
 pub struct Shared {
     pub id: u64,
     pub module: Module,
@@ -29,8 +32,9 @@ pub struct Shared {
     /// Frozen when this Engine is created. Capture-capable Engines keep their
     /// trace IR after a session stops; later activations may bind a new session.
     pub(crate) trace_capable: bool,
-    /// J1 分层基座（M5.3a）：PLT 槽 + 计数，按合并后 FuncId 空间建。
-    /// 槽的写入者是 M5.3b 编译线程（单原子交换发布），此外发布后只读纪律不变。
+    /// J1 tiering base (M5.3a): PLT slots + counters, built over the merged FuncId space.
+    /// Slot writers are M5.3b compiler threads (published via single atomic swap); otherwise the
+    /// read-only-after-publication discipline holds.
     pub jit: super::jit::JitState,
     control: Arc<EngineControl>,
     /// Every host thread owns its slot; Shared keeps only weak discovery links
@@ -851,33 +855,40 @@ fn finalize_shared(shared: &Shared) {
 
 const SIGNAL_DRAIN_ROUNDS: usize = 8;
 
-/// 每线程执行态（vmctx）。M4.4 起每 guest 线程一份，生命周期 = 宿主 thread_local。
+/// Per-thread execution state (vmctx). Since M4.4 one per guest thread, lifetime = host thread_local.
 pub struct Ctx {
     pub shared: *const Shared,
     shared_owner: Arc<Shared>,
     pub region: ByteRegion,
-    /// 解释帧递归深度（诊断计数；溢出判定改用 stack_floor 真栈守卫，M5.2 D8a）
+    /// Interpreted-frame recursion depth (diagnostic count; overflow detection now uses the real
+    /// stack guard `stack_floor`, M5.2 D8a).
     pub depth: u32,
-    /// 普通执行态正在派送 mailbox；handler 内经过的嵌套安全点不得递归 drain。
+    /// Ordinary execution state is delivering mailbox messages; nested safepoints traversed inside
+    /// a handler must not recursively drain.
     signal_draining: bool,
-    /// 宿主执行栈安全下界（M5.2 D8a）：本线程栈低端 + 安全边距。interp_frame 的
-    /// 栈指针近似值低于此 = guest 栈溢出（诊断退出而非宿主 SIGSEGV）。真栈字节
-    /// 守卫替代旧的固定帧数上限（8000）：随线程真实栈自适应（主执行线程 1 GiB、
-    /// guest 线程放大后的栈、外来 native 线程 thunk 再入均正确）。0 = 探测失败，
-    /// 不守卫（与旧世界的裸奔等价，getattr_np 在 glibc 上对含主线程的所有线程可用）。
+    /// Host execution stack safety floor (M5.2 D8a): low end of this thread's stack + safety margin.
+    /// When an interp_frame stack pointer approximation falls below this, it is a guest stack
+    /// overflow (diagnostic exit rather than host SIGSEGV). The real byte guard replaces the old
+    /// fixed frame limit (8000): it adapts to the thread's real stack (main execution thread 1 GiB,
+    /// amplified guest thread stacks, and foreign native thread thunk re-entry all work). 0 means
+    /// probe failed and no guard is applied (equivalent to the old unguarded world; getattr_np is
+    /// available for all threads including the main thread on glibc).
     pub stack_floor: usize,
-    /// foreign 直通状态（dlsym 缓存 + dlopen 句柄；dlsym 幂等，每线程独立缓存无碍）
+    /// Foreign passthrough state (dlsym cache + dlopen handles; dlsym is idempotent, per-thread
+    /// independent caches are harmless).
     pub ffi: FfiState,
-    /// guest TLS 实例表（M4.4 D3）：TlsId → 本线程实例真地址（0 = 未物化，首访
-    /// heap 分配 + 模板拷贝）。guest dtor 先由 pthread-key thunk 执行，Ctx 最后
-    /// 一轮析构时再释放实例内存。
+    /// Guest TLS instance table (M4.4 D3): TlsId → real address of this thread's instance
+    /// (0 = not materialized; first visit heap-allocates + copies the template). Guest dtors run
+    /// first via the pthread-key thunk; instance memory is freed only in Ctx's final teardown round.
     pub tls: Vec<u64>,
-    /// 活动解释帧。IP 供 guest unwinder 消费，CFA 是该解释调用在宿主栈上的位置；
-    /// backtrace 用 CFA 把解释帧与系统展开器读出的 JIT 真机器帧恢复成一个调用序列。
-    /// enter 时 push、FrameGuard::drop 时 pop（与 depth 同生命周期，unwind 安全）。
+    /// Active interpreted frames. IP is consumed by the guest unwinder; CFA is the location of this
+    /// interpreted call on the host stack. The backtrace uses CFA to merge interpreted frames with
+    /// JIT real-machine frames read by the system unwinder into a single call sequence. Pushed on
+    /// enter and popped on FrameGuard::drop (same lifetime as depth, unwind-safe).
     pub shadow: Vec<ShadowFrame>,
-    /// 当前线程在本 Engine 上嵌套执行的 `run_main` 状态。每次运行独立记录，避免
-    /// 正常返回 101 与 guest std 把 main panic 转成 101 后无法区分。
+    /// Nested `run_main` states for this thread on this Engine. Each run is recorded independently
+    /// so that a normal return 101 cannot be confused with guest std converting a main panic into
+    /// 101.
     main_runs: Vec<MainRunState>,
 }
 
@@ -973,7 +984,7 @@ impl MainBoundaryGuard {
         let state = unsafe { &mut (&mut (*self.ctx).main_runs)[self.index] };
         if !state.catcher_claimed || state.catcher_active {
             super::interp::engine_abort(
-                "固定 std 的 main panic 捕获调用未经过预期 catch_unwind intrinsic",
+                "fixed std main panic catch call did not pass the expected catch_unwind intrinsic",
             );
         }
         state.boundary_activation = None;
@@ -994,16 +1005,17 @@ impl Drop for MainBoundaryGuard {
     }
 }
 
-/// 执行 IR 标出的标准 main 捕获调用。边界记住当前 Engine 入口的激活编号；signal
-/// handler 或 native thunk 重入会获得另一编号，不能借用外层边界认领 main panic。
+/// Execute the standard main catch call marked by the IR. The boundary records the activation
+/// number of the current Engine entry; signal handlers or native thunk re-entries receive a
+/// different number and cannot borrow the outer boundary to claim a main panic.
 pub(crate) fn call_main_panic_boundary<R>(ctx: *mut Ctx, f: impl FnOnce() -> R) -> R {
     let states = unsafe { &mut (*ctx).main_runs };
     let Some(index) = states.len().checked_sub(1) else {
-        super::interp::engine_abort("main panic 捕获调用出现在 run_main 之外");
+        super::interp::engine_abort("main panic catch call appeared outside run_main");
     };
     let state = &mut states[index];
     if state.boundary_activation.is_some() {
-        super::interp::engine_abort("同一次 main 执行重复进入 panic 捕获边界");
+        super::interp::engine_abort("duplicate entry into main panic catch boundary during the same main execution");
     }
     state.boundary_activation = Some(current_activation(ctx));
     state.catcher_claimed = false;
@@ -1039,8 +1051,9 @@ impl Drop for MainCatchGuard {
     }
 }
 
-/// 只有降低阶段精确标出的 intrinsic 且仍在同一次 Engine 激活中，才能认领 main
-/// 捕获。普通 catch、signal handler 和 native thunk 重入都返回 `None`。
+/// Only the intrinsic precisely marked by the lowering phase and still within the same Engine
+/// activation may claim the main catch. Ordinary catches, signal handlers, and native thunk
+/// re-entries all return `None`.
 pub(crate) fn claim_main_panic_catch(
     ctx: *mut Ctx,
     role: super::ir::BuiltinCallRole,
@@ -1344,8 +1357,9 @@ impl Drop for SignalDrainGuard {
     }
 }
 
-/// 在普通 VM 状态派送已登记信号。每轮先拿走一个传统 signal pending set；handler
-/// 产生的新信号进入下一轮。轮数有界，剩余事件留给下一个块入口/返回安全点。
+/// Deliver registered signals in ordinary VM state. Each round first takes one traditional signal
+/// pending set; new signals produced by the handler enter the next round. Rounds are bounded, and
+/// remaining events are left for the next block entry or return safepoint.
 pub(crate) fn drain_pending_signals(ctx: *mut Ctx) {
     drain_pending_signals_with_mode(ctx, false);
 }
@@ -1421,8 +1435,9 @@ impl CtxSlot {
 struct ThreadContexts {
     by_engine: HashMap<usize, Arc<CtxSlot>>,
     current: *mut Ctx,
-    /// 当前嵌入入口的编号。每次 `activate` 分配新值，退出时恢复外层值；因此同一
-    /// Engine 的 signal/thunk 重入也与被打断的执行严格区分。
+    /// Serial number for the current embedded entry. A new value is allocated on each `activate`
+    /// and restored to the outer value on exit; therefore signal/thunk re-entries into the same
+    /// Engine are strictly distinguished from the interrupted execution.
     current_activation: u64,
     next_activation: u64,
     /// Engine ids for every active entry on this host thread. Looking only at
@@ -1503,10 +1518,10 @@ impl ThreadContexts {
     }
 }
 
-/// 本线程栈安全下界：os::thread 取 [lo, lo+size)，下界加安全边距。
-/// 边距覆盖单次 interp_frame 的宿主最坏用量 + 最深处的 FFI/unwind/诊断路径；
-/// 小栈取 1/8 防止边距吃光可用区。仅 Ctx 创建时调一次（getattr 对主线程读
-/// /proc，非热路径）。
+/// This thread's stack safety floor: os::thread returns [lo, lo+size); the floor adds a safety
+/// margin. The margin covers the worst-case host usage of a single interp_frame plus the deepest
+/// FFI/unwind/diagnostic path; for small stacks use 1/8 so the margin does not consume the usable
+/// area. Called only once per Ctx creation (getattr reads /proc for the main thread, not hot path).
 fn thread_stack_floor() -> usize {
     let Some((lo, size)) = crate::os::thread::current_stack_bounds() else {
         return 0;
@@ -1518,7 +1533,7 @@ fn thread_stack_floor() -> usize {
     lo + margin
 }
 
-/// Ctx 的 pthread key（进程唯一；dtor = ctx_key_dtor）。
+/// Ctx's pthread key (process-wide; dtor = ctx_key_dtor).
 static CTX_KEY: OnceLock<crate::os::thread::TlsKey> = OnceLock::new();
 
 #[thread_local]
@@ -1553,12 +1568,14 @@ pub(crate) fn test_ctx_key() -> libc::pthread_key_t {
     CTX_KEY.get().copied().unwrap().as_raw()
 }
 
-/// fork 守卫基线（M5.2 D8f）：guest main 启动时的 OS 线程数（`/proc/self/task`）。
-/// 此刻 = mirvm 内部线程（main-in-join、guest-exec、分配器）+ 0 个 guest 派生线程。
-/// **用真 OS 线程数而非 Ctx 计数**：pthread_create 返回后新线程即存在，但其 Ctx
-/// 要到 trampoline attach 才建——Ctx 计数有 TOCTOU 窗口会漏计。fork 只在当前线程数
-/// == 基线（guest 未派生任何线程）时放行。
-/// guest main 启动点调用（run_main/run_export）：钉住单 guest 线程的基线。
+/// Fork guard baseline (M5.2 D8f): OS thread count when guest main starts (`/proc/self/task`).
+/// At this moment = mirvm internal threads (main-in-join, guest-exec, allocator) + 0 guest-spawned
+/// threads. **Use the real OS thread count, not the Ctx count**: after pthread_create returns the
+/// new thread already exists, but its Ctx is not created until trampoline attach—Ctx counting has a
+/// TOCTOU window and would miss it. Fork is allowed only when the current thread count equals the
+/// baseline (guest has not spawned any threads).
+/// Called at the guest main start point (run_main/run_export): pins the baseline for a single
+/// guest thread.
 pub fn set_fork_baseline(shared: &Shared) {
     shared.fork_baseline_threads.store(
         crate::os::thread::os_thread_count(),
@@ -1566,11 +1583,12 @@ pub fn set_fork_baseline(shared: &Shared) {
     );
 }
 
-/// guest 是否已派生额外线程（HostFork 守卫）：当前 OS 线程数 > 基线 = 是。
-/// 基线未设（0）或读取失败时保守判"多线程"（拒绝 fork）。
+/// Whether the guest has spawned extra threads (HostFork guard): current OS thread count >
+/// baseline means yes. If the baseline is unset (0) or reading failed, conservatively treat it as
+/// "multi-threaded" (reject fork).
 /// # Safety
 ///
-/// `ctx` 必须是当前线程仍处于激活范围内的 `Ctx`。
+/// `ctx` must be a `Ctx` whose host thread is still inside its active scope.
 pub unsafe fn guest_spawned_threads(ctx: *mut Ctx) -> bool {
     let base = unsafe { &*(*ctx).shared }
         .fork_baseline_threads
@@ -1578,9 +1596,9 @@ pub unsafe fn guest_spawned_threads(ctx: *mut Ctx) -> bool {
     base == 0 || crate::os::thread::os_thread_count() > base
 }
 
-/// TSD 相位的 Ctx 收尾：迟退 3 轮（重新挂回 → glibc 追加轮次，上限 4）——guest 的
-/// pthread-key dtor（std run_dtors thunk，键序不可控）总能在存活的 Ctx 上执行；
-/// 末轮真正销毁（ByteRegion munmap 等）。
+/// Ctx teardown during the TSD phase: deferred for 3 rounds (re-hang → glibc appends rounds, max
+/// 4)—guest pthread-key dtors (std run_dtors thunk, key order uncontrollable) can always execute
+/// on a living Ctx; the final round actually destroys it (ByteRegion munmap, etc.).
 fn block_thread_signals_for_exit() -> libc::sigset_t {
     let mut signals: libc::sigset_t = unsafe { std::mem::zeroed() };
     unsafe { libc::sigemptyset(&mut signals) };
@@ -1710,21 +1728,23 @@ unsafe extern "C" fn ctx_key_dtor(p: *mut std::ffi::c_void) {
     }
 }
 
-/// 边界 TLS attach：本线程首次进入引擎时创建 Ctx（新 guest 线程执行态的诞生点），
-/// 之后幂等返回同一实例——再入（guest→native→thunk→guest）天然拿到同一 vmctx，
-/// 操作数区按纪律化栈继续嵌套（spike2 形状）。
+/// Boundary TLS attach: creates the Ctx on this thread's first entry into the engine (birth point
+/// of a new guest thread's execution state), then idempotently returns the same instance on later
+/// entries—re-entries (guest→native→thunk→guest) naturally get the same vmctx, and the operand
+/// region continues nesting on the disciplined stack (spike2 shape).
 ///
-/// 返回裸指针（Box 钉地址，raw-ptr vmctx 在 native 栈间传递——借用纪律 §9）。
-/// 主线程的 Ctx 随进程 exit 一并回收（glibc exit 不走 TSD 相位，与 native 同）。
+/// Returns a raw pointer (Box pins the address; raw-ptr vmctx is passed across native stacks—
+/// borrow discipline §9). The main thread's Ctx is reclaimed together with process exit (glibc exit
+/// does not go through the TSD phase, same as native).
 // Used by the separately compiled TSan harness; product entries go through
 // `activate`, which also establishes an activation identity.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn attach(shared: &Arc<Shared>) -> *mut Ctx {
     super::signal::initialize_current_thread_inbox();
     let key = *CTX_KEY.get_or_init(|| {
-        // TSan 配置：不注册 dtor——TSan 的线程态在 TSD 相位前已析构，插桩代码
-        // 不可在彼时运行（Ctx 每线程泄漏，仅测试配置；dtor 链由 threads_panic
-        // 差分在真配置验证）。
+        // TSan config: do not register a dtor—TSan's thread state is destroyed before the TSD
+        // phase, so instrumented code must not run then (Ctx leaks per thread, test-only config;
+        // the dtor chain is validated by the threads_panic differential test in real config).
         #[cfg(sanitize = "thread")]
         let dtor: Option<unsafe extern "C" fn(*mut std::ffi::c_void)> = None;
         #[cfg(not(sanitize = "thread"))]
@@ -1750,12 +1770,12 @@ pub fn attach(shared: &Arc<Shared>) -> *mut Ctx {
 
 pub fn current() -> *mut Ctx {
     let Some(key) = CTX_KEY.get().copied() else {
-        panic!("JIT 助手在 Engine 激活前被调用");
+        panic!("JIT helper called before Engine activation");
     };
     let contexts = unsafe { crate::os::thread::tls_get(key) } as *mut ThreadContexts;
-    assert!(!contexts.is_null(), "JIT 助手在线程 attach 前被调用");
+    assert!(!contexts.is_null(), "JIT helper called before thread attach");
     let ctx = unsafe { (*contexts).current };
-    assert!(!ctx.is_null(), "JIT 助手在 Engine 激活范围外被调用");
+    assert!(!ctx.is_null(), "JIT helper called outside Engine activation scope");
     ctx
 }
 
@@ -1980,13 +2000,13 @@ impl Drop for ActivationGuard {
 
 fn current_activation(ctx: *mut Ctx) -> u64 {
     let Some(key) = CTX_KEY.get().copied() else {
-        super::interp::engine_abort("main panic 捕获发生在 Engine 激活之外");
+        super::interp::engine_abort("main panic catch happened outside Engine activation");
     };
     let contexts = unsafe { crate::os::thread::tls_get(key) } as *mut ThreadContexts;
     if contexts.is_null()
         || unsafe { (*contexts).current != ctx || (*contexts).current_activation == 0 }
     {
-        super::interp::engine_abort("main panic 捕获不属于当前 Engine 激活");
+        super::interp::engine_abort("main panic catch does not belong to the current Engine activation");
     }
     unsafe { (*contexts).current_activation }
 }

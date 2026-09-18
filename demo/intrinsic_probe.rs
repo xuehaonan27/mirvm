@@ -1,7 +1,7 @@
-// M5.2 D8i 标量 intrinsic 差集的永久差分探针：fabs 泛型名（本 nightly 漂移）、
-// atomic fetch_max/min 四变体、fma/fmuladd、fast/algebraic 浮点、volatile 批量访存、
-// nontemporal_store、ptr_mask、vtable_size/align、nullary 类型查询——与 native 同机对拍。
-// breakpoint 不在此（SIGTRAP 终止进程，无法差分续跑）。
+// M5.2 D8i permanent differential probe for the scalar-intrinsic delta set: fabs generic name (drifts on this nightly),
+// four variants of atomic fetch_max/min, fma/fmuladd, fast/algebraic floats, volatile bulk memory access,
+// nontemporal_store, ptr_mask, vtable_size/align, nullary type queries -- compared bit-for-bit with native on the same machine.
+// breakpoint is not here (SIGTRAP terminates the process; cannot continue differential run).
 #![feature(core_intrinsics, ptr_metadata, variant_count)]
 #![allow(internal_features)]
 

@@ -1,13 +1,16 @@
-//! thunk 工厂（M4.4 D1，本期唯一新机制）：FFI 反方向的兑现。
+//! thunk factory (M4.4 D1, the only new mechanism this cycle): delivering the opposite FFI
+//! direction.
 //!
-//! DESIGN §5：std 已把 pthread wrap 好（thread_start 是 std 的 extern "C" Rust fn），
-//! 引擎唯一缺口 = 解释态函数指针逃逸给 native 时 materialize 成真机器码。libffi
-//! Closure 按冻结签名造 trampoline；入口做**边界 TLS attach**（vmctx-passing §1，
-//! JNI 同款）——新 guest 线程执行态（Ctx）的诞生点。
+//! DESIGN §5: std already wraps pthread well (thread_start is std's extern "C" Rust fn); the
+//! engine's only gap = when an interpreted function pointer escapes to native, materialize it
+//! into real machine code. libffi Closure builds a trampoline from the frozen signature; the entry
+//! does a boundary TLS attach (vmctx-passing §1, same as JNI) — the birth point of a new guest
+//! thread execution state (Ctx).
 //!
-//! 生命周期：thunk 代码与小型 ThunkData 进程级永生，保证已逃逸地址始终可调用；
-//! ThunkData 只持 EngineControl tombstone，不持 Module。Engine 关闭后 C-unwind thunk
-//! 抛 EngineClosed，普通 C thunk按不可展开 ABI 终止，Module 仍可正常回收。
+//! Lifecycle: thunk code and small ThunkData live for process lifetime, guaranteeing escaped
+//! addresses remain callable; ThunkData only holds an EngineControl tombstone, not a Module. After
+//! Engine closes, the C-unwind thunk raises EngineClosed; ordinary C thunks terminate with a
+//! non-unwind ABI, while the Module can still be normally reclaimed.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -20,15 +23,16 @@ use libffi::middle::{Cif, Closure};
 use super::ctx::Shared;
 use super::ir::{FfiKind, ForeignSig, FuncId};
 
-/// (fn 条目地址, 逃逸位签名) → thunk 真码地址。Mutex = 状态三分的"显式同步"格；
-/// 创建是冷路径（每 (fn, 签名) 一次），锁全程持有，简单正确优先。
+/// (fn entry address, escaped-bit signature) → thunk real code address. Mutex = "explicit
+/// synchronization" lattice of the three-state split; creation is a cold path (once per
+/// (fn, signature)), lock held for the whole duration, simplicity/correctness first.
 #[derive(Default)]
 pub struct ThunkCache {
     map: Mutex<HashMap<(u64, ForeignSig), u64>>,
 }
 
-/// 每 thunk/条目 stub 的冻结数据（leak 进程级；跨线程共享——
-/// Shared: Sync，其余为纯数据）。
+/// Frozen data per thunk / entry stub (leaked for process lifetime; shared across threads —
+/// Shared: Sync, rest is plain data).
 struct ThunkData {
     control: Arc<super::ctx::EngineControl>,
     engine_id: u64,
@@ -55,10 +59,11 @@ enum ThunkKind {
     },
 }
 
-/// 按声明宽度搬实参（trampoline/entry_trampoline 共用；closure 实参槽只保证
-/// 声明宽度有效；引擎值 = 宽度掩码位，LE）。
-/// C1：聚合参数 = closure avalue 恒指向聚合字节（各档同形）→ 传**字节真地址**，
-/// callee 侧 ParamAbi 展开由 interp::call_guest_ffi 按 FfiAgg 映射。
+/// Move args by declared width (shared by trampoline / entry_trampoline; closure arg slots only
+/// guarantee declared width is valid; engine value = width-masked bits, LE).
+/// C1: aggregate arg = closure avalue always points to aggregate bytes (same shape across classes)
+/// → pass the real byte address; callee-side ParamAbi expansion is mapped by
+/// interp::call_guest_ffi according to FfiAgg.
 unsafe fn marshal_args(kinds: &[FfiKind], args: *const *const c_void) -> Vec<u64> {
     let mut av: Vec<u64> = Vec::with_capacity(kinds.len());
     for (i, k) in kinds.iter().enumerate() {
@@ -74,7 +79,7 @@ unsafe fn marshal_args(kinds: &[FfiKind], args: *const *const c_void) -> Vec<u64
                 FfiKind::I64 | FfiKind::U64 | FfiKind::F64 | FfiKind::Ptr => {
                     (p as *const u64).read_unaligned()
                 }
-                FfiKind::Void => 0, // lower 已拒 ZST 回调参（不可达）
+                FfiKind::Void => 0, // lower already rejects ZST callback args (unreachable)
             }
         };
         av.push(v);
@@ -82,20 +87,21 @@ unsafe fn marshal_args(kinds: &[FfiKind], args: *const *const c_void) -> Vec<u64
     av
 }
 
-/// C1：按值聚合返回（ret = Agg，callee RetAbi **非** Indirect 的小档）重打包——
-/// (lo,hi) 按 FfiAgg 声明序字段写回结构体字节（先整面清零保 padding，字段位再覆
-/// 写；与 libffi rvalue 的 SysV 字节像逐位一致）。顶层嵌套叶与 Pair/Scalar 返回
-/// 通道结构性互斥（同 rustc layout 推导——出现即引擎不变量破坏）。
+/// C1: aggregate return by value (ret = Agg, callee RetAbi non-Indirect small class) repacking —
+/// (lo,hi) writes FfiAgg field bytes back in declared order (zero whole surface first to preserve
+/// padding, then overwrite field bits; bit-identical to libffi rvalue's SysV byte image). Top-level
+/// nested leaf and Pair/Scalar return channels are structurally mutually exclusive (same rustc
+/// layout inference — occurrence means engine invariant violation).
 unsafe fn repack_ret(result: *mut u8, agg: &super::ir::FfiAgg, lo: u64, hi: u64) {
     unsafe { std::ptr::write_bytes(result, 0, agg.size as usize) };
     for (i, f) in agg.fields.iter().enumerate() {
         let (v, leaf) = match i {
             0 => (lo, &f.leaf),
             1 => (hi, &f.leaf),
-            _ => super::interp::engine_abort("C1 重打包：>2 顶层字段遇 Pair/Scalar 返回通道"),
+            _ => super::interp::engine_abort("C1 repack: >2 top-level fields with Pair/Scalar return channel"),
         };
         let super::ir::FfiLeaf::Scalar(k) = leaf else {
-            super::interp::engine_abort("C1 重打包：顶层嵌套叶遇 Pair/Scalar 返回通道");
+            super::interp::engine_abort("C1 repack: top-level nested leaf with Pair/Scalar return channel");
         };
         let dst = unsafe { result.add(f.off as usize) };
         unsafe {
@@ -109,20 +115,20 @@ unsafe fn repack_ret(result: *mut u8, agg: &super::ir::FfiAgg, lo: u64, hi: u64)
                     (dst as *mut u64).write_unaligned(v)
                 }
                 FfiKind::Void | FfiKind::Agg(_) => {
-                    super::interp::engine_abort("C1 重打包：非法叶类")
+                    super::interp::engine_abort("C1 repack: illegal leaf kind")
                 }
             }
         }
     }
 }
 
-/// trampoline 与 P1 条目 stub 共用的执行体：attach → 按签名搬实参 →
-/// 解释 → 返回值写回。返回缓冲恒对齐（整数升位到 ffi_arg / F32 位在低
-/// 32，LE）。
-/// C1：ret = Agg 时分流——callee RetAbi::Indirect → result 经 call_guest_ffi 作
-/// 隐藏首实参（sret 直传，callee memcpy 至该址）；其余 → (lo,hi) 后 repack_ret
-/// 重打包为结构体字节。ABI 边界是否允许展开由外层 wrapper 决定，本体不复制
-/// 两份语义。
+/// Common execution body shared by trampoline and P1 entry stub: attach → move args by signature
+/// → interpret → write back return value. Return buffer always aligned (integers promoted to
+/// ffi_arg / F32 bits in low 32, LE).
+/// C1: when ret = Agg, branch — callee RetAbi::Indirect → result passed as hidden first arg
+/// through call_guest_ffi (sret passed directly, callee memcpy's to that address); others →
+/// (lo,hi) then repack_ret to struct bytes. Whether the ABI boundary allows unwind is decided by
+/// the outer wrapper; the body does not duplicate two semantics.
 unsafe fn trampoline_body(
     result: &mut u64,
     args: *const *const c_void,
@@ -161,8 +167,8 @@ unsafe fn trampoline_body(
     }
 }
 
-/// 普通 `extern "C"` 边界：guest panic 或 foreign exception 不得穿出，
-/// Rust 在该边界上保持 native 的 abort 语义。
+/// Ordinary `extern "C"` boundary: guest panic or foreign exception must not cross out; Rust
+/// preserves native abort semantics at this boundary.
 unsafe extern "C" fn trampoline_c(
     _cif: &ffi_cif,
     result: &mut u64,
@@ -227,8 +233,8 @@ unsafe extern "C" fn trampoline_c(
     drop(tsd_callback);
 }
 
-/// `extern "C-unwind"` 边界：允许 guest panic 或 foreign exception 继续穿过
-/// libffi closure，交给外层 Rust/C++ handler 处理。
+/// `extern "C-unwind"` boundary: allows guest panic or foreign exception to continue through
+/// libffi closure, handed to the outer Rust/C++ handler.
 unsafe extern "C-unwind" fn trampoline_c_unwind(
     _cif: &ffi_cif,
     result: &mut u64,
@@ -280,11 +286,11 @@ impl EntryClosures {
     }
 }
 
-/// libffi 5.x 在 Rust API 中把 closure callback 类型固定写成了
-/// `extern "C"`，但 C 与 C-unwind 的机器调用约定相同；差别只在 Rust
-/// 是否允许 unwinder 穿过该函数边界。libffi 只保存并从原生 closure
-/// 蹦床间接调用这个地址，不会通过转换后的 Rust `extern "C"` 类型调用
-/// 它。因此这里只擦除类型层差异，实际入口仍是 C-unwind wrapper。
+/// libffi 5.x hard-codes the closure callback type as `extern "C"` in the Rust API, but C and
+/// C-unwind have identical machine calling conventions; the difference is only whether Rust allows
+/// the unwinder to cross that function boundary. libffi only stores and indirectly calls this
+/// address from the native closure trampoline, not through the transmuted Rust `extern "C" type.
+/// So here we only erase the type-level difference; the actual entry remains the C-unwind wrapper.
 fn callback_for(unwind: bool) -> ThunkCallback {
     if unwind {
         let callback: unsafe extern "C-unwind" fn(
@@ -293,8 +299,9 @@ fn callback_for(unwind: bool) -> ThunkCallback {
             *const *const c_void,
             &ThunkData,
         ) = trampoline_c_unwind;
-        // SAFETY: 两种 ABI 的机器签名一致；转换后的值只作为不透明
-        // callback 地址交给 libffi，不经 Rust `extern "C"` 调用点执行。
+        // SAFETY: both ABIs have identical machine signatures; the transmuted value is only given
+        // to libffi as an opaque callback address, not executed through a Rust `extern "C"` call
+        // site.
         unsafe {
             std::mem::transmute::<
                 unsafe extern "C-unwind" fn(&ffi_cif, &mut u64, *const *const c_void, &ThunkData),
@@ -306,7 +313,8 @@ fn callback_for(unwind: bool) -> ThunkCallback {
     }
 }
 
-/// 取或造：同一 (条目地址, 签名) 恒得同一真码地址（fn ptr 相等语义）。
+/// Get or create: same (entry address, signature) always yields the same real code address (fn ptr
+/// equality semantics).
 pub(crate) fn get_or_create(shared: &Shared, entry: u64, func: FuncId, sig: &ForeignSig) -> u64 {
     let key = (entry, sig.clone());
     let mut map = shared.thunks.map.lock().unwrap();
@@ -327,7 +335,7 @@ pub(crate) fn get_or_create(shared: &Shared, entry: u64, func: FuncId, sig: &For
     }));
     let closure = Closure::new(cif, callback_for(sig.unwind), data);
     let code = *closure.code_ptr() as usize as u64;
-    std::mem::forget(closure); // 进程级永生（可执行页不回收——guest 持有码地址）
+    std::mem::forget(closure); // process-lifetime immortal (executable page not reclaimed — guest holds code address)
     THUNK_DATA.lock().unwrap().insert(code, data);
     map.insert(key, code);
     code
@@ -644,11 +652,11 @@ pub(crate) fn prepare_foreign_callbacks(
     }
 }
 
-// ===== P1 条目可执行化（decision-history §7.6）=====
+// ===== P1 entry executable (decision-history §7.6) =====
 
-/// 按配方为一个 Engine 物化独有 closure。site.link_addr 是 artifact 身份，
-/// closure code 是本 Engine 的运行身份；closure 与 tombstone 进程级永生，旧地址
-/// 永不复用，因此关闭后仍能稳定归属原 Engine。
+/// Materialize an Engine-private closure per recipe. site.link_addr is artifact identity; closure
+/// code is this Engine's runtime identity; closure and tombstone live for process lifetime, old
+/// addresses never reused, so after close it still stably belongs to the original Engine.
 fn materialize_domain(
     module: &mut super::ir::Module,
     control: &Arc<super::ctx::EngineControl>,
@@ -681,9 +689,10 @@ fn materialize_domain(
     Ok(())
 }
 
-/// P1 启动相物化器（run_vm_engine 与 argv 终结化/GOT 重填并列的第三道全相
-/// 工序）：本域 + absorb 挂载各 image/底座域，配方 → 每 Engine closure →
-/// LoadMap exact 映射。所有映射就绪后统一重建 fn_addrs 并应用冻结指针重定位。
+/// P1 startup-phase materializer (third full-phase step alongside run_vm_engine and argv
+/// finalization / GOT refill): own domain + absorb-mounted image / base domains, recipe →
+/// per-Engine closure → LoadMap exact mapping. After all mappings ready, rebuild fn_addrs uniformly
+/// and apply frozen pointer relocs.
 pub(crate) fn materialize_all_entry_stubs(
     module: &mut super::ir::Module,
     control: &Arc<super::ctx::EngineControl>,
@@ -742,8 +751,8 @@ mod tests {
             *const *const c_void,
             &PanicProbe,
         ) = panic_probe;
-        // SAFETY: 与 callback_for 相同：只向 libffi 传递地址，实际入口
-        // 仍是 C-unwind；测试下方也以 C-unwind 类型调用 closure 代码。
+        // SAFETY: same as callback_for: only pass the address to libffi; actual entry is still
+        // C-unwind; the test below also calls the closure code through the C-unwind type.
         let callback: libffi::low::Callback<PanicProbe, u64> = unsafe {
             std::mem::transmute::<
                 unsafe extern "C-unwind" fn(&ffi_cif, &mut u64, *const *const c_void, &PanicProbe),
@@ -762,7 +771,7 @@ mod tests {
         let code: &unsafe extern "C-unwind" fn() -> u64 = unsafe { closure.instantiate_code_ptr() };
 
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { code() }));
-        let payload = caught.expect_err("C-unwind callback 不应吞掉 panic");
+        let payload = caught.expect_err("C-unwind callback should not swallow panic");
         assert_eq!(payload.downcast_ref::<u8>(), Some(&0x18));
     }
 }

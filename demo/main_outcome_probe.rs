@@ -1,4 +1,4 @@
-//! 真实 `lang_start` 主程序结果分类探针。
+//! Real `lang_start` main-program outcome classification probe.
 
 use std::process::{ExitCode, Termination};
 

@@ -1,11 +1,11 @@
-//! CLI 与 rustc 驱动薄壳。三种运行形态：
-//! - `mirvm run <脚本|项目>`：用户入口
-//! - `mirvm <rustc> <args...>`（MIRVM_CARGO_SESSION 下）：cargo 的 RUSTC_WRAPPER
-//! - `mirvm runner <假二进制> <args...>`：cargo 的 target runner，真正的解释入口
+//! CLI and rustc driver shim. Three runtime forms:
+//! - `mirvm run <script|project>`: user entry point
+//! - `mirvm <rustc> <args...>` (under MIRVM_CARGO_SESSION): cargo's RUSTC_WRAPPER
+//! - `mirvm runner <fake-binary> <args...>`: cargo's target runner, the real interpreter entry
 //!
-//! 引擎 = M4 字节码 VM（加载相 lower + 执行相 engine）。tier-0（rustc InterpCx）已于
-//! 2026-07-09 移除——代码在 git 历史（tag 前缀 feat: M4.3 之前），差分 oracle 一直是
-//! native 编译直跑（`differential.programs`）。
+//! Engine = M4 bytecode VM (loading phase lower + execution phase engine). tier-0 (rustc InterpCx)
+//! was removed on 2026-07-09 — code is in git history (before tag prefix feat: M4.3); the
+//! differential oracle has always been native compile-and-run (`differential.programs`).
 
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, exit};
@@ -30,66 +30,65 @@ const USAGE: &str = "\
 mirvm — a Rust runtime with its own execution engine
 
 USAGE:
-    mirvm run <file.rs>  [OPTIONS] [-- <program args>]   # 单文件（可带 frontmatter 依赖）
-    mirvm run <x.mirvm>  [OPTIONS] [-- <program args>]   # 跑 .mirvm 包（mode B 片②）
-    mirvm pack <target>  [-o out.mirvm]                  # cargo 项目 / 脚本 / 单文件 → .mirvm 包
-    mirvm run <dir | Cargo.toml> [-- <program args>]     # cargo 项目（依赖自动构建为 MIR rlib）
+    mirvm run <file.rs>  [OPTIONS] [-- <program args>]   # single file (may declare frontmatter deps)
+    mirvm run <x.mirvm>  [OPTIONS] [-- <program args>]   # run a .mirvm package (mode B slice 2)
+    mirvm pack <target>  [-o out.mirvm]                  # cargo project / script / single file -> .mirvm package
+    mirvm run <dir | Cargo.toml> [-- <program args>]     # cargo project (deps auto-built as MIR rlibs)
     mirvm test [dir | Cargo.toml] [OPTIONS] [TESTNAME] [-- <libtest args>]
-    mirvm capture [-o DIR] -- run <input> [OPTIONS]      # 采集一次真实 guest 执行
-    mirvm log inspect <file | session-dir>              # 校验 v0 事件流及终结总账
-    mirvm log export <file | session-dir> [FILTERS]     # 导出可信记录为 JSONL
-    mirvm cache status                                   # 本地仓库各组件体量 + 陈代体量
-    mirvm cache purge [--dry-run]                        # 默认 = 清陈代（deps/base/ir 非本 build 代）
-    mirvm cache purge --deps|--base|--ir                 # 对应族全清（所有代）
-    mirvm cache purge --scripts                          # scripts/ 全清（物化项目清单）
-    mirvm cache purge --target                           # 统一 target dir 全清（共享依赖存储，最大件）
-    mirvm cache purge --all [--sysroot]                  # 除 sysroot 外全清；加旗连 sysroot（完全冷启动）
+    mirvm capture [-o DIR] -- run <input> [OPTIONS]      # record one real guest execution
+    mirvm log inspect <file | session-dir>              # validate v0 event stream and final ledger
+    mirvm log export <file | session-dir> [FILTERS]     # export attested record as JSONL
+    mirvm cache status                                   # local store component sizes + stale-generation size
+    mirvm cache purge [--dry-run]                        # default = remove stale generations (deps/base/ir not of current build)
+    mirvm cache purge --deps|--base|--ir                 # purge entire family (all generations)
+    mirvm cache purge --scripts                          # purge scripts/ (materialized project list)
+    mirvm cache purge --target                           # purge unified target dir (shared dep store, largest)
+    mirvm cache purge --all [--sysroot]                  # purge everything except sysroot; with flag, also sysroot (full cold start)
 
 OPTIONS:
-    --dump-mir        打印 entry fn 的 MIR 后退出（仅单文件直通模式）
-    --edition <ED>    默认 2024（仅单文件直通模式）
-    --sysroot <PATH>  使用指定 sysroot（默认：自动构建带全量 MIR 的缓存 sysroot）
-    --vm-call <SPEC>  直接调导出函数（gate/调试入口），如 'fib(25)'；缺省跑 main 启动链
-    --vm-stats        打印 Trap 债务统计（每期开工前的调研仪器）后退出
-    --stack-size <N>  guest 主执行栈虚拟保留（默认 1g；接受 k/m/g 后缀，JVM -Xss 同位）
-    --jit <on|off>    方法级 JIT（M5.3–M5.5 全收，默认 on；off = 纯解释对拍口径）
-    --ignore-rust-version  忽略 package.rust-version（项目/依赖脚本，Cargo 同名语义）
+    --dump-mir        print entry fn MIR and exit (single-file passthrough mode only)
+    --edition <ED>    default 2024 (single-file passthrough mode only)
+    --sysroot <PATH>  use the given sysroot (default: auto-build cached sysroot with full MIR)
+    --vm-call <SPEC>  call an exported function directly (gate/debug entry), e.g. 'fib(25)'; default runs the main startup chain
+    --vm-stats        print Trap-debt statistics (pre-flight survey instrument) and exit
+    --stack-size <N>  guest main execution stack virtual reservation (default 1g; accepts k/m/g suffix, same seat as JVM -Xss)
+    --jit <on|off>    method-level JIT (M5.3-M5.5, default on; off = pure interpreter differential benchmark)
+    --ignore-rust-version  ignore package.rust-version (project/dep scripts, same semantics as Cargo)
 
 ENV:
-    MIRVM_HOME        本地仓库根（默认 $HOME/.mirvm；sysroot/scripts/target/各缓存族所在）
-    MIRVM_TARGET_DIR  mirvm 构建统一 target dir 改址（默认 $MIRVM_HOME/target/mirvm）
-    MIRVM_SYSROOT     等价于 --sysroot
-    MIRVM_STACK_SIZE  等价于 --stack-size（cargo 项目形态经环境传给 runner）
-    MIRVM_JIT         等价于 --jit（off/0 = 纯解释对拍口径）
-    MIRVM_JIT_THRESHOLD 编译触发阈值（默认 1000；诊断用）
-    MIRVM_JIT_SYNC    =1 时 JIT 验证模式：投递后等待发布/失败，可准入编译失败响亮
-                      终止（gate 用；证明 threshold=1 差分真跑机器码）
-    MIRVM_JIT_STATS   =1 时进程退出经 atexit 打 JIT 助手频度统计（诊断用）
-    MIRVM_CARGO_LOCKED 置位时 frontmatter/脚本项目按 --locked 构建（依赖锁定；
-                      未置位 = clean 环境可重解析，见 open-issues G7）
-    MIRVM_DEPS        =cargo 时项目/脚本走长期保留的 cargo 三阶段 compat 轨
-                      （用户回退 + 行为对拍）；**缺省/=self 走零 cargo 自有
-                      调度**（D15 cargoless driver，P4 默认翻转：依赖解析/编译
-                      调度/build.rs/proc-macro/rustflags/rerun-if 增量/并行调度
-                      全生命周期；mirvm test 已支持 resolver=1/2/3 workspace，
-                      替代 registry、常见 source replacement/patch/replace 与
-                      pack 共用该路径；resolver 1/2/3 均按 Cargo 的 feature
-                      统一规则处理）
-    MIRVM_CLESS_JOBS  =N 时 cargoless 编译调度并发度（缺省 = 核数；=1 退化为
-                      拓扑序串行，对拍调试用）
-    MIRVM_TIMING      =1 时向 stderr 输出相位账本（frontend/lower/engine/total）
-    MIRVM_NO_IR_CACHE =1 时旁路 L2 engine-IR 缓存（读写全禁；诊断/对拍用）
-    MIRVM_NO_BASE_IMAGE =1 时旁路 std 预降低底座（全量冷降低；诊断/对拍用）
+    MIRVM_HOME        local store root (default $HOME/.mirvm; houses sysroot/scripts/target/cache families)
+    MIRVM_TARGET_DIR  relocate mirvm's unified target dir (default $MIRVM_HOME/target/mirvm)
+    MIRVM_SYSROOT     equivalent to --sysroot
+    MIRVM_STACK_SIZE  equivalent to --stack-size (passed via env to runner in cargo-project form)
+    MIRVM_JIT         equivalent to --jit (off/0 = pure interpreter differential benchmark)
+    MIRVM_JIT_THRESHOLD  compilation trigger threshold (default 1000; diagnostic)
+    MIRVM_JIT_SYNC    =1 enables JIT verify mode: enqueue and wait for publish/failure, allowing
+                      compile failures to terminate loudly (gate use; proves threshold=1 differential really runs machine code)
+    MIRVM_JIT_STATS   =1 prints JIT helper frequency stats at process exit via atexit (diagnostic)
+    MIRVM_CARGO_LOCKED when set, frontmatter/script projects build with --locked (dep lock;
+                      unset = clean env may re-resolve, see open-issues G7)
+    MIRVM_DEPS        =cargo routes project/script through the long-term cargo three-phase compat track
+                      (user fallback + behavioral differential); **default/=self uses zero-cargo own
+                      scheduling** (D15 cargoless driver, P4 default flip: dep resolution/compilation
+                      scheduling/build.rs/proc-macro/rustflags/rerun-if incremental/parallel scheduling
+                      full lifecycle; mirvm test already supports resolver=1/2/3 workspace,
+                      alternate registry, common source replacement/patch/replace, and
+                      pack shares this path; resolver 1/2/3 all follow Cargo's unified feature rules)
+    MIRVM_CLESS_JOBS  =N sets cargoless compilation scheduling concurrency (default = core count; =1 falls back to
+                      topological serial order, for differential debugging)
+    MIRVM_TIMING      =1 writes phase ledger to stderr (frontend/lower/engine/total)
+    MIRVM_NO_IR_CACHE =1 bypasses L2 engine-IR cache (read/write disabled; diagnostic/differential)
+    MIRVM_NO_BASE_IMAGE =1 bypasses std pre-lowered base image (full cold lowering; diagnostic/differential)
 
 DEV:
-    mirvm spike1..5   跑已冻结的 M4 前置 spike（回归自检；见 docs/history/spike*.md）
-    MIRVM_JIT_DEBUG   =1 时 JIT 编译线程打 收到/发布 流水（刻意的诊断旋钮）
-    MIRVM_JIT_DEBUG_DUMP =1 时转储编译失败函数的 CLIF（叠加 MIRVM_JIT_DEBUG）
-    MIRVM_SEGV_DUMP   =1 时 SIGSEGV 打印 fault RIP（JIT 码崩点定位）
+    mirvm spike1..5   run the frozen M4 precursor spikes (regression self-check; see docs/history/spike*.md)
+    MIRVM_JIT_DEBUG   =1 logs JIT compiler thread receive/publish flow (deliberate diagnostic knob)
+    MIRVM_JIT_DEBUG_DUMP =1 dumps CLIF for functions that fail compilation (stacked on MIRVM_JIT_DEBUG)
+    MIRVM_SEGV_DUMP   =1 prints fault RIP on SIGSEGV (JIT code crash site location)
 ";
 
 pub fn main() -> ExitCode {
-    // 排障旋钮（M5.4b）：SIGSEGV 时打印 fault RIP，用于 JIT 码崩点定位。
+    // Troubleshooting knob (M5.4b): print fault RIP on SIGSEGV to locate JIT code crash site.
     if std::env::var_os("MIRVM_SEGV_DUMP").is_some() {
         crate::os::signal::install_segv_dump();
     }
@@ -103,8 +102,9 @@ pub fn main() -> ExitCode {
         return crate::cargoless::driver::run_doctest_builder(argv);
     }
 
-    // `CARGO_BIN_EXE_*` 的 self 启动器是指向 mirvm 的符号链接，旁边带根 bin
-    // 配方。必须在普通命令分派前识别，否则会把 guest 参数误当成 mirvm 命令。
+    // `CARGO_BIN_EXE_*` self launchers are symlinks to mirvm with a root bin recipe next to
+    // them. Must be recognized before ordinary command dispatch, or guest args are mistaken for
+    // mirvm commands.
     if let Some(recipe) = crate::cargoless::driver::root_launcher_recipe(Path::new(&argv0)) {
         return crate::cargoless::driver::run_root_recipe(
             std::iter::once(recipe.display().to_string()).chain(argv),
@@ -115,17 +115,17 @@ pub fn main() -> ExitCode {
         return ExitCode::from(2);
     };
 
-    // cargo 会话中的两个回调形态
+    // Two callback forms in a cargo session
     if first == "runner" {
         return runner_main(argv);
     }
-    // S4 底座构建子进程（必须先于 MIRVM_CARGO_SESSION 分流：runner 里触发的
-    // 构建子进程带着 cargo 会话环境，不能被误路由进 phase_wrapper）
+    // S4 base-image build subprocess (must precede MIRVM_CARGO_SESSION dispatch: builds triggered
+    // inside runner carry the cargo session env and must not be misrouted into phase_wrapper)
     if first == "__build-base-image" {
         return crate::baseimage::build_main(argv);
     }
-    // D15：cargoless dep 编译子进程（cargoless::driver 的调度落点；
-    // 同样必须先于 MIRVM_CARGO_SESSION 分流）
+    // D15: cargoless dep compilation subprocess (landing point for cargoless::driver scheduling;
+    // also must precede MIRVM_CARGO_SESSION dispatch)
     if first == "__cless-dep" {
         return run_cless_dep(argv.collect());
     }
@@ -134,10 +134,10 @@ pub fn main() -> ExitCode {
     }
     if std::env::var_os("MIRVM_CARGO_SESSION").is_some() {
         if std::env::var_os("MIRVM_CARGO_COMPILER").is_some() {
-            // Cargo 的 RUSTC 槽：first 已经是真 rustc 的第一个参数。
+            // Cargo's RUSTC slot: first is already the first real rustc argument.
             cargo_shim::phase_compiler(std::iter::once(first).chain(argv));
         }
-        // 兼容旧会话/直接 wrapper 调用：first = 真 rustc 路径。
+        // Backward compat for old sessions / direct wrapper calls: first = real rustc path.
         cargo_shim::phase_wrapper(std::iter::once(first).chain(argv));
     }
 
@@ -269,9 +269,10 @@ fn capture_main(mut args: impl Iterator<Item = String>) -> ExitCode {
     run_main(command.into_iter().skip(1))
 }
 
-/// `mirvm test [项目] [Cargo 选择参数/TESTNAME] [-- libtest 参数]`。
-/// 项目参数只在第一槽识别；缺省当前目录。Cargo 兼容轨保留原参数逐字解释，
-/// self 轨在 cargoless::driver 内按同一合同解析。
+/// `mirvm test [project] [Cargo selection args/TESTNAME] [-- libtest args]`.
+/// The project argument is recognized only in the first slot; defaults to the current directory.
+/// The Cargo compat track keeps original args interpreted verbatim; the self track resolves them
+/// inside cargoless::driver under the same contract.
 fn test_main(argv: impl Iterator<Item = String>) -> ExitCode {
     let mut before = Vec::new();
     let mut harness_args = Vec::new();
@@ -310,12 +311,12 @@ fn test_main(argv: impl Iterator<Item = String>) -> ExitCode {
     }
 }
 
-// ===== 用户入口 =====
+// ===== user entry points =====
 
-/// `mirvm pack <target> [-o out.mirvm]`（mode B 片②，designs/modeb-mirvmar-design.md）：
-/// cargo 项目（目录/Cargo.toml）、frontmatter 脚本、纯单文件 → .mirvm 包。
-/// 项目/frontmatter 缺省走 cargoless；`MIRVM_DEPS=cargo` 经 MIRVM_PACK
-/// 传入 runner。两条路径都强制全量冷路径，保证包自包含。
+/// `mirvm pack <target> [-o out.mirvm]` (mode B slice 2, designs/modeb-mirvmar-design.md):
+/// cargo project (directory/Cargo.toml), frontmatter script, or plain single file -> .mirvm package.
+/// Projects/frontmatter default to cargoless; `MIRVM_DEPS=cargo` is passed into runner via MIRVM_PACK.
+/// Both paths force the full cold route so the package is self-contained.
 fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
     let mut input = None;
     let mut out: Option<std::path::PathBuf> = None;
@@ -366,7 +367,7 @@ fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
         }
     };
 
-    // 项目形态：缺省走自有调度；Cargo 轨只在显式回退时进入 runner。
+    // Project form: default to own scheduling; Cargo track enters runner only on explicit fallback.
     let is_cargo_dir =
         input_path.is_dir() || input_path.file_name().is_some_and(|f| f == "Cargo.toml");
     if is_cargo_dir {
@@ -378,7 +379,7 @@ fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
         if deps_self {
             return crate::cargoless::driver::pack_project(dir, &out_abs);
         }
-        // SAFETY: 单线程启动相。
+        // SAFETY: single-threaded startup phase.
         unsafe { set_cargo_pack_env(&out_abs) };
         cargo_shim::phase_cargo(dir, &[], None, false);
     }
@@ -391,12 +392,12 @@ fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
             return crate::cargoless::driver::pack_script(&input_path, &out_abs);
         }
         let dir = materialize_script(&input_path, &manifest, &body);
-        // SAFETY: 单线程启动相。
+        // SAFETY: single-threaded startup phase.
         unsafe { set_cargo_pack_env(&out_abs) };
         cargo_shim::phase_cargo(&dir, &[], None, false);
     }
 
-    // 纯单文件：直接 pack_driver（与 run 的形态 3 同参）
+    // Plain single file: pack_driver directly (same args as run form 3)
     let sysroot =
         std::env::var("MIRVM_SYSROOT").unwrap_or_else(|_| match crate::sysroot::ensure_sysroot() {
             Ok(p) => p.display().to_string(),
@@ -418,7 +419,7 @@ fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
 }
 
 unsafe fn set_cargo_pack_env(out: &Path) {
-    // SAFETY: caller 保证仍处于 CLI 单线程启动相。
+    // SAFETY: caller guarantees we are still in the CLI single-threaded startup phase.
     unsafe {
         std::env::set_var("MIRVM_PACK", out);
         std::env::set_var("MIRVM_NO_BASE_IMAGE", "1");
@@ -426,7 +427,7 @@ unsafe fn set_cargo_pack_env(out: &Path) {
     }
 }
 
-/// `mirvm cache status|purge …`：本地仓库（$HOME/.mirvm，MIRVM_HOME 可改址）管理。
+/// `mirvm cache status|purge ...`: manage the local store ($HOME/.mirvm, relocatable via MIRVM_HOME).
 fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
     let root = crate::sysroot::cache_dir();
     let mut plan = crate::cachectl::Purge::default();
@@ -454,7 +455,7 @@ fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("purge") => {
-            // 无旗默认 = 清陈代（保守面）；任何目标旗在场则按旗走
+            // No flags by default = remove stale generations (conservative); any target flag present follows the flag
             if !(plan.deps || plan.base || plan.ir || plan.scripts || plan.target || plan.all) {
                 plan.stale = true;
             }
@@ -468,9 +469,9 @@ fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
     }
 }
 
-/// `mirvm deps audit <目标...>`（D15 P1 审计工具）：目标 = 项目目录（含
-/// Cargo.toml）或 frontmatter 脚本；逐目标 resolve 并与对照 lock 对账，
-/// 任一目标解析失败或对账失配即非零退出。
+/// `mirvm deps audit <target...>` (D15 P1 audit tool): target = project directory (containing
+/// Cargo.toml) or frontmatter script; resolve per target and reconcile against the reference lock,
+/// exiting non-zero if any target fails to resolve or the reconciliation mismatches.
 fn deps_main(args: impl Iterator<Item = String>) -> ExitCode {
     let mut sub = None;
     let mut targets: Vec<String> = Vec::new();
@@ -508,23 +509,29 @@ fn deps_main(args: impl Iterator<Item = String>) -> ExitCode {
         match result {
             Ok(report) => {
                 if report.mode == "skip" {
-                    println!("SKIP {}（needs 缺席，与 gate 同口径不算失败）", report.name);
+                    println!(
+                        "SKIP {} (needs absent, not counted as failure per the same gate standard)",
+                        report.name
+                    );
                     continue;
                 }
                 let head = format!(
-                    "{}（{} 模式，{} 单元，{} 包版本）",
+                    "{} ({} mode, {} units, {} package versions)",
                     report.name,
                     report.mode,
                     report.units,
                     report.plan.version_map.len()
                 );
-                // 判负条件：项目 = 对账等值；脚本 = cargo 验收链
+                // Failure conditions: project = lock reconciliation equality; script = cargo acceptance chain
                 let mut fail: Option<String> = None;
                 if report.mode == "lock"
                     && let Some((lock_desc, mismatches)) = &report.lock_check
                     && !mismatches.is_empty()
                 {
-                    fail = Some(format!("对账失配 {} 条 vs {lock_desc}", mismatches.len()));
+                    fail = Some(format!(
+                        "reconciliation mismatch: {} entries vs {lock_desc}",
+                        mismatches.len()
+                    ));
                     for m in mismatches.iter().take(5) {
                         println!("     {m}");
                     }
@@ -536,30 +543,30 @@ fn deps_main(args: impl Iterator<Item = String>) -> ExitCode {
                 }
                 match fail {
                     Some(why) => {
-                        println!("FAIL {head}：{why}");
+                        println!("FAIL {head}: {why}");
                         failures += 1;
                     }
                     None => {
                         print!("OK   {head}");
                         if let Some((lock_desc, mismatches)) = &report.lock_check {
                             if mismatches.is_empty() {
-                                print!("；对账 == {lock_desc}");
+                                print!("; reconciliation == {lock_desc}");
                             } else if report.mode == "fresh" {
                                 print!(
-                                    "；历史对照 {} 条时间漂移（信息级，非判负）",
+                                    "; {} timestamp-drift entries in historical reference (informational, not a failure)",
                                     mismatches.len()
                                 );
                             }
                         }
                         if report.acceptance.is_some() {
-                            print!("；cargo --locked --offline 接受");
+                            print!("; cargo --locked --offline accepted");
                         }
                         println!();
                     }
                 }
             }
             Err(e) => {
-                // 仍明确归入 P5 的响亮拒绝是事先明说的边界，不算普通解析失败。
+                // P5 loud rejections are an upfront-stated boundary and not ordinary resolution failures.
                 if e.contains("P5") {
                     println!("P5   {t}: {e}");
                 } else {
@@ -570,7 +577,7 @@ fn deps_main(args: impl Iterator<Item = String>) -> ExitCode {
         }
     }
     println!("---");
-    println!("deps audit: {} 目标，{} 失败", targets.len(), failures);
+    println!("deps audit: {} targets, {} failures", targets.len(), failures);
     if failures == 0 {
         ExitCode::SUCCESS
     } else {
@@ -605,19 +612,19 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
             "--dump-mir" => dump_mir = true,
             "--edition" => edition = next("--edition"),
             "--sysroot" => sysroot = Some(next("--sysroot")),
-            // 兼容旧 gate 脚本：--engine vm 是唯一引擎，吞掉参数即可
+            // Backward compat for old gate scripts: --engine vm is the only engine, just consume it
             "--engine" => {
                 let e = next("--engine");
                 if e != "vm" {
                     crate::diagnostics::control(format_args!(
-                        "mirvm: 引擎 `{e}` 已不存在（tier-0 已移除；唯一引擎 = vm）"
+                        "mirvm: engine `{e}` no longer exists (tier-0 removed; the only engine is vm)"
                     ));
                     exit(2);
                 }
             }
             "--vm-call" => vm_call = Some(next("--vm-call")),
             "--vm-stats" => vm_stats = true,
-            // D15 P4 切⑥b：cargo run --bin 语义（项目形态；脚本/单文件无此概念）
+            // D15 P4 cut 6b: cargo run --bin semantics (project form only; no meaning for script/single-file)
             "--bin" => bin_sel = Some(next("--bin")),
             "--ignore-rust-version" => ignore_rust_version = true,
             "--stack-size" => {
@@ -626,8 +633,8 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
                     crate::diagnostics::control(format_args!("{message}"));
                     exit(2);
                 }
-                // 落 env 让 cargo 形态（wrapper→runner 子进程）同一旋钮生效。
-                // 此刻仍是单线程启动相（rustc 会话尚未开始）。
+                // Set env so the cargo form (wrapper -> runner subprocess) uses the same knob.
+                // We are still in the single-threaded startup phase (rustc session has not begun).
                 unsafe { std::env::set_var("MIRVM_STACK_SIZE", v) };
             }
             "--jit" => {
@@ -639,7 +646,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
                     ));
                     exit(2);
                 }
-                // 同 --stack-size：落 env 使 cargo 形态经 runner 生效
+                // Same as --stack-size: set env so the cargo form takes effect via runner
                 unsafe { std::env::set_var("MIRVM_JIT", v) };
             }
             _ if input.is_none() && !arg.starts_with('-') => input = Some(arg),
@@ -657,9 +664,9 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     };
     let input_path = PathBuf::from(&input);
 
-    // D15 P4 默认翻转：缺省 = self 零 cargo 自有调度（cargoless::driver）；
-    // =cargo 显式走长期保留的 cargo 三阶段 compat 轨（用户回退 + 行为对拍）；
-    // 两轨各自完整，其他值响亮报错
+    // D15 P4 default flip: default = self zero-cargo own scheduling (cargoless::driver);
+    // =cargo explicitly uses the long-term cargo three-phase compat track (user fallback + behavioral differential);
+    // both tracks are complete, other values are rejected loudly
     let deps_self = match std::env::var("MIRVM_DEPS").as_deref() {
         Err(_) | Ok("self") => true,
         Ok("cargo") => false,
@@ -671,7 +678,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         }
     };
 
-    // 形态 1：cargo 项目（目录或 Cargo.toml）
+    // Form 1: cargo project (directory or Cargo.toml)
     if input_path.is_dir() {
         if deps_self {
             return crate::cargoless::driver::run_project(
@@ -701,14 +708,14 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         cargo_shim::phase_cargo(dir, &program_args, bin_sel.as_deref(), ignore_rust_version);
     }
     if let Some(b) = &bin_sel {
-        // 脚本/单文件/包形态无 --bin 概念（cargo script 同）——响亮拒绝不静默吞
+        // Script/single-file/package forms have no --bin concept (same as cargo script) — reject loudly, do not silently swallow
         crate::diagnostics::control(format_args!(
-            "mirvm: --bin {b} 只适用于 cargo 项目形态（目录/Cargo.toml）"
+            "mirvm: --bin {b} is only valid for cargo project form (directory/Cargo.toml)"
         ));
         exit(2);
     }
 
-    // mode B 片②：.mirvm 包嗅探（先于文本读取——包是二进制）
+    // mode B slice 2: sniff .mirvm package (before text read — package is binary)
     if crate::pack::is_package(&input_path) {
         let module = match crate::pack::load_package(&input_path)
             .and_then(|package| package.instantiate())
@@ -722,7 +729,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
                 exit(70);
             }
         };
-        // warm 后半段与 run_driver 热路径同形（空 image 栈：asm 配方幂等重物化）
+        // warm second half mirrors run_driver hot path (empty image stack: asm recipes idempotently rematerialized)
         let mut module = module;
         module.asm_stub_addrs = crate::lower::asm::materialize(&module.asm_sites);
         let mut program_argv = vec![input];
@@ -736,7 +743,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         exit(1);
     });
 
-    // 形态 2：带 frontmatter 依赖声明的单文件脚本 → 物化成 cargo 项目
+    // Form 2: single-file script with frontmatter dependency declaration -> materialize into cargo project
     if let Some((manifest, body)) = parse_frontmatter(&src) {
         if deps_self {
             return crate::cargoless::driver::run_script(
@@ -749,7 +756,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         cargo_shim::phase_cargo(&dir, &program_args, None, ignore_rust_version);
     }
 
-    // 形态 3：纯单文件，零 cargo 快路径（M1 同款）
+    // Form 3: plain single file, zero-cargo fast path (same as M1)
     let sysroot = sysroot
         .or_else(|| std::env::var("MIRVM_SYSROOT").ok())
         .unwrap_or_else(|| match crate::sysroot::ensure_sysroot() {
@@ -780,7 +787,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     )
 }
 
-// ===== cargo runner 回调 =====
+// ===== cargo runner callback =====
 
 fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
     let mut argv = argv.peekable();
@@ -811,8 +818,9 @@ fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
     };
     let guest_process = GuestProcessState::from_cargo_runner();
     let (rustc_args, program_argv, env) = cargo_shim::parse_runner_invocation(argv);
-    // rustc 前端必须重演 wrapper 录下的构建环境；来宾执行前会完整恢复
-    // runner 刚启动时的运行环境，不能让这层覆盖进入 guest。
+    // The rustc frontend must replay the build environment recorded by the wrapper; before guest
+    // execution the runner's initial runtime environment is fully restored, so this layer must not
+    // leak into the guest.
     install_recorded_build_environment(env);
     // 构建期环境优先（env!() 展开、CARGO_* 等在编译会话里要可见）。
     // CARGO_MAKEFLAGS 指向已消亡的 jobserver，透传会招警告（cargo-miri 同款处理）。
@@ -1097,7 +1105,7 @@ fn install_runner_finalization_filter() {
 }
 
 /// 会话 guest 可见告警计数（M6 片2）：**有告警的编译不入 L2 缓存**。warm 路径跳过
-/// rustc 会话，无法重演诊断——静默吞告警违反 run-from-source 语义（native 差分口径
+/// rustc 会话，无法重演诊断——静默吞告警违反 run-from-source 语义（native 差分 benchmark
 /// = 每次新鲜编译必发告警）。告警程序每跑冷路径重演；零告警程序才享受缓存。
 ///
 /// 安装时机 = `psess_created`（Session 建成、任何解析之前）：rustc_interface 的

@@ -1,5 +1,5 @@
-// M4.0 gate：纯整数函数。#[unsafe(no_mangle)] 使其成为 mono 收集根 + 稳定导出名
-// （--vm-call 按符号名查）。main 留空——M4.0 不跑 std 启动链（M4.3 起）。
+// M4.0 gate: pure integer functions. #[unsafe(no_mangle)] makes them mono collection roots + stable exported names
+// (looked up by symbol name for --vm-call). main is left empty — M4.0 does not run the std startup chain (from M4.3 onward).
 #![allow(dead_code)]
 
 #[unsafe(no_mangle)]
@@ -45,9 +45,9 @@ pub fn popcount_manual(mut x: u64) -> u64 {
 
 #[unsafe(no_mangle)]
 pub fn mix_signed(a: i64, b: i64) -> u64 {
-    // 有符号算术/比较/转换的小混合
+    // small mix of signed arithmetic/compare/conversion
     let d = if a < b { b - a } else { a - b };
-    let e = (d as i32) as i64; // 窄化再扩展
+    let e = (d as i32) as i64; // narrow then widen
     (e * 2 - 1) as u64
 }
 

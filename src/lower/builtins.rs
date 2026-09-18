@@ -1,12 +1,12 @@
-//! engine_builtins 内建符号大表（自 lower/mod.rs M7 整搬）：unwind/
-//! atexit/signal/backtrace/x86 全族注册（llvm.x86.* → ir::Builtin 映射
-//! 数据——rustc 类型耦合，记档留 lower 域，不进 arch/）。
+//! engine_builtins built-in symbol table (moved wholesale from lower/mod.rs M7): unwind/
+//! atexit/signal/backtrace/x86 full family registration (llvm.x86.* → ir::Builtin mapping
+//! data—tied to rustc types, documented in the lower domain, not in arch/).
 
 use super::*;
 
-/// 符号是 mangled 的（`mangle_internal_symbol`）。Special = 默认分配器（引擎接管）。
-/// 非 special 是 rustc 在最终 crate 内生成并解析的入口，不在 std 外部声明边界改写；
-/// 自定义 #[global_allocator] 的四个普通 `__rust_*` 入口另由 Module 级路由统一。
+/// Symbols are mangled (`mangle_internal_symbol`). Special = default allocator (engine-managed).
+/// Non-special entries are generated and resolved by rustc inside the final crate, not rewritten at the std external-declaration boundary;
+/// the four ordinary `__rust_*` entries for a custom #[global_allocator] are routed uniformly at the Module level.
 pub(super) fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin> {
     use rustc_ast::expand::allocator::{self, SpecialAllocatorMethod as S};
     use rustc_symbol_mangling::mangle_internal_symbol;
@@ -30,39 +30,40 @@ pub(super) fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin>
     let sentinel =
         mangle_internal_symbol(tcx, rustc_ast::expand::allocator::NO_ALLOC_SHIM_IS_UNSTABLE);
     out.insert(Symbol::intern(&sentinel), ir::Builtin::NoAllocShim);
-    // unwind 原语（M4.2）：panic_unwind 照常解释，引擎在平台 unwinder 符号层接管
+    // unwind primitive (M4.2): panic_unwind is still interpreted; the engine takes over at the platform unwinder symbol layer
     out.insert(
         Symbol::intern("_Unwind_RaiseException"),
         ir::Builtin::UnwindRaise,
     );
-    // 快路径直通（panic 链高频；其余 foreign 走通用 dlsym+libffi 道）
+    // fast-path passthrough (frequent in panic chains; remaining foreign symbols use the generic dlsym+libffi path)
     out.insert(Symbol::intern("getenv"), ir::Builtin::HostGetenv);
     out.insert(Symbol::intern("write"), ir::Builtin::HostWrite);
     out.insert(Symbol::intern("strlen"), ir::Builtin::HostStrlen);
     out.insert(Symbol::intern("abort"), ir::Builtin::HostAbort);
-    // fork（D8f）：builtin 守卫 guest 线程数后经 os::process::fork 直通（P7 os 层）。
+    // fork (D8f): the builtin guards the guest thread count then passes through to os::process::fork (P7 os layer).
     out.insert(Symbol::intern("fork"), ir::Builtin::HostFork);
-    // atexit 家族（D8g）：glibc 不导出 `atexit` 供 guest dlsym → builtin 接管。
+    // atexit family (D8g): glibc does not export `atexit` for guest dlsym → builtin takes over.
     out.insert(Symbol::intern("atexit"), ir::Builtin::HostAtexit);
     out.insert(Symbol::intern("__cxa_atexit"), ir::Builtin::HostCxaAtexit);
     out.insert(Symbol::intern("on_exit"), ir::Builtin::HostOnExit);
     out.insert(Symbol::intern("syscall"), ir::Builtin::HostSyscall);
-    // signal/sigaction 的 handler 藏在整数/结构体中，不能由通用 FFI fn-ptr 参数
-    // thunk 化；而且 signal trampoline 必须异步信号安全，普通 libffi closure 不满足。
-    // 明确 Trap，直到有专用实现。其余旧 StubZero 项改走 dlsym+libffi；
-    // atexit/dl_iterate_phdr 的显式 fn-ptr 参数可由 M4.4 thunk 工厂处理。
+    // signal/sigaction handlers are hidden inside integers/structs and cannot be thunked by the
+    // generic FFI fn-ptr parameter path; moreover, the signal trampoline must be async-signal-safe,
+    // which ordinary libffi closures are not. Explicitly Trap until a dedicated implementation exists.
+    // Remaining old StubZero items go through dlsym+libffi; explicit fn-ptr arguments for
+    // atexit/dl_iterate_phdr can be handled by the M4.4 thunk factory.
     out.insert(Symbol::intern("signal"), ir::Builtin::HostSignal);
     out.insert(Symbol::intern("raise"), ir::Builtin::HostRaise);
     out.insert(Symbol::intern("sigaction"), ir::Builtin::HostSigaction);
-    // 宿主 unwinder 从 libffi/解释器的 native stack 取回 IP，无法代表
-    // guest 的冻结函数条目。回调 thunk 只解决调用方向，不会翻译栈帧；
-    // 所以在 guest-frame/IP 映射完成前必须明确拒绝，不能返回貌似成功
-    // 的宿主 backtrace。
-    // `_Unwind_RaiseException` / `_Unwind_DeleteException` 上面有 guest 专用语义；
-    // 其余 libgcc context/stack API 若直通，看到的只会是宿主解释器帧。
-    // 整组显式 deny，避免从 GetIPInfo/CFA/LSDA 等旁路重新引入静默错值。
-    // 仍拒绝的 unwinder context/state API：直通看到的只是宿主解释器帧，无 guest
-    // 语义。整组显式 deny，避免从 CFA/LSDA/SetGR 等旁路重新引入静默错值。
+    // The host unwinder retrieves IPs from the libffi/interpreter native stack and cannot represent
+    // guest frozen function entries. Callback thunks only resolve the call direction, not stack frames;
+    // therefore, until guest-frame/IP mapping is done, explicitly reject rather than return a
+    // seemingly-successful host backtrace.
+    // `_Unwind_RaiseException` / `_Unwind_DeleteException` have guest-specific semantics above;
+    // remaining libgcc context/stack APIs, if passed through, would see only host interpreter frames.
+    // Deny the whole group explicitly to avoid reintroducing silently-wrong values via GetIPInfo/CFA/LSDA.
+    // Still-denied unwinder context/state APIs: passthrough would see only host interpreter frames,
+    // with no guest semantics. Deny the whole group explicitly to avoid silently-wrong values via CFA/LSDA/SetGR.
     for name in [
         "_Unwind_Find_FDE",
         "_Unwind_ForcedUnwind",
@@ -81,7 +82,7 @@ pub(super) fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin>
             ir::Builtin::Unsupported(ir::StaticStr(name.into())),
         );
     }
-    // backtrace 影子帧（D8e）：这四个由 Ctx 影子帧栈诚实回答（IP=合成 fn token）。
+    // backtrace shadow frames (D8e): these four are answered honestly from the Ctx shadow frame stack (IP = synthetic fn token).
     out.insert(
         Symbol::intern("_Unwind_Backtrace"),
         ir::Builtin::UnwindBacktrace,
@@ -241,7 +242,7 @@ pub(super) fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin>
         Symbol::intern("llvm.x86.avx2.pmadd.wd"),
         ir::Builtin::X86PmaddWd256,
     );
-    // 族⑨ LDDQU（c_tantivy bitpacking/termdict 列值读取派发点）：ldu.dq 纯 load
+    // Family ⑨ LDDQU (c_tantivy bitpacking/termdict column-value read dispatch): ldu.dq pure load
     out.insert(
         Symbol::intern("llvm.x86.sse3.ldu.dq"),
         ir::Builtin::X86Lddqu128,
@@ -250,7 +251,7 @@ pub(super) fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin>
         Symbol::intern("llvm.x86.avx.ldu.dq.256"),
         ir::Builtin::X86Lddqu256,
     );
-    // 族⑧ F16C（half 2.x 运行期探测后的 f16c 通道）
+    // Family ⑧ F16C (f16c path after half 2.x runtime detection)
     out.insert(
         Symbol::intern("llvm.x86.vcvtps2ph.128"),
         ir::Builtin::X86Cvtps2ph128,
@@ -267,8 +268,8 @@ pub(super) fn engine_builtins(tcx: TyCtxt<'_>) -> FxHashMap<Symbol, ir::Builtin>
         Symbol::intern("llvm.x86.vcvtph2ps.256"),
         ir::Builtin::X86Cvtph2ps256,
     );
-    // 族⑨ packed-f32（tiny-skia simd 默认路径；rcp/rsqrt 有意不注册——
-    // 硬件近似不可便携复现，保持响亮 trap，见 m9 报告）
+    // Family ⑨ packed-f32 (tiny-skia simd default path; rcp/rsqrt intentionally not registered—
+    // hardware approximations are not reproducibly portable, kept as loud trap, see m9 report)
     out.insert(
         Symbol::intern("llvm.x86.sse.max.ps"),
         ir::Builtin::X86MaxPs128,

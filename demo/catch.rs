@@ -1,4 +1,4 @@
-// catch_unwind：捕获 panic 恢复执行 + Drop 在 unwind 中运行
+// catch_unwind: capture panic and resume execution + Drop runs during unwind
 use std::panic;
 
 struct Guard(&'static str);

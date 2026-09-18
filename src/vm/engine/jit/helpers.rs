@@ -1,6 +1,6 @@
-//! mirvm_* 运行期助手（自 jit_compile.rs J3-J5 整搬）：c2i 万能壳/
-//! unreachable/div_zero/volatile + 128/f128/f16 宿主直算 21 件 + libm
-//! 符号表。JIT 码经 import symbol 调回引擎；注册点 = compiler.rs。
+//! mirvm_* runtime helpers (moved whole from jit_compile.rs J3-J5): c2i universal wrapper /
+//! unreachable/div_zero/volatile + 128/f128/f16 host direct-eval 21 ops + libm
+//! symbol table. JIT code calls back into the engine via import symbols; registration point = compiler.rs.
 
 use super::*;
 
@@ -42,7 +42,7 @@ pub extern "C-unwind" fn mirvm_jit_stack_guard(func: u64, frame_bytes: u64) {
             .map(|body| &*body.name)
             .unwrap_or("<unknown>");
         crate::vm::engine::interp::engine_abort(&format!(
-            "guest 栈溢出（JIT 编译帧进入前触及安全边距；fn {name}）"
+            "guest stack overflow (JIT compiled frame hit safety margin before entry; fn {name})"
         ));
     }
 }
@@ -56,11 +56,11 @@ pub(super) extern "C-unwind" fn mirvm_poll_signals() {
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
-// ===== T3（M5.5 D5）助手频度统计：vmctx 终裁复测的格③对照基线 =====
-// MIRVM_JIT_STATS=1 时每个助手入口一次 fetch_add(Relaxed)，进程退出经
-// libc atexit 单行 dump。频度回答的是「分配/TLS 内联后编译码每激活 ctx
-// 站点密度」的实测上界——T vs R 复测时的输入数据。关闭时仅一次 relaxed
-// load，零观测成本。
+// ===== T3 (M5.5 D5) helper frequency stats: grid-③ baseline for vmctx final arbiter retest =====
+// With MIRVM_JIT_STATS=1 each helper entry does one fetch_add(Relaxed); process exit dumps a
+// single line via libc atexit. Frequency answers the measured upper bound of "allocation / TLS
+// inlined compiled code sites per activated ctx"—input data for T vs R retests. When disabled,
+// only one relaxed load, zero observation cost.
 pub(super) static STAT_ON: AtomicBool = AtomicBool::new(false);
 static STAT: [AtomicU64; 12] = [
     AtomicU64::new(0),

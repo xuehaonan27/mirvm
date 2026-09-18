@@ -1,6 +1,6 @@
-//! eval_rvalue（自 interp.rs I7 整搬）：30+ rvalue 臂——int/float/f128/
-//! math/atomic load/simd reduce/Cmp128 等。调用方 = stmt.rs 的 Assign 臂；
-//! 语义镜像对象 = jit/translate 的 rvalue 大 match（逐位一致契约）。
+//! eval_rvalue (moved whole from interp.rs I7): 30+ rvalue arms -- int/float/f128/
+//! math/atomic load/simd reduce/Cmp128 etc. Caller = Assign arm in stmt.rs;
+//! semantic mirror = jit/translate's big rvalue match (bit-identical contract).
 
 use super::*;
 
@@ -43,7 +43,7 @@ pub(super) fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
         Rvalue::PtrOffset { ptr, count, stride } => {
             let (p, _) = eval_operand(ctx, base, ptr);
             let (c, cw) = eval_operand(ctx, base, count);
-            // count 按有符号处理（ptr::sub 编译成负 count 的 offset）
+            // count is treated as signed (ptr::sub compiles to a negative-count offset)
             let delta = (sext(c, cw) as u64).wrapping_mul(*stride);
             p.wrapping_add(delta)
         }
@@ -123,8 +123,8 @@ pub(super) fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
                 }};
             }
             match fw {
-                // f16 数学：std 实现即 promote-f32 计算再回舍——与 native 对 *f16
-                // 的下降同源（sqrt 经 f32 双舍入安全有数学保证）
+                // f16 math: std implementation promotes to f32 computation then rounds back -- same lowering
+                // as native for *f16 (sqrt via f32 double-rounding is mathematically safe)
                 FloatW::F16 => un!(f16::from_bits(av as u16)).to_bits() as u64,
                 FloatW::F32 => un!(f32::from_bits(av as u32)).to_bits() as u64,
                 FloatW::F64 => un!(f64::from_bits(av)).to_bits(),
@@ -223,7 +223,7 @@ pub(super) fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
         Rvalue::FloatCast { from, to, a } => {
             use crate::vm::engine::ir::FloatW as W;
             let (av, _) = eval_operand(ctx, base, a);
-            // 全组合宿主 `as`（同宽位透传）
+            // all-combinations host `as` (same-width bits pass through)
             match (from, to) {
                 (W::F16, W::F16) | (W::F32, W::F32) | (W::F64, W::F64) => av,
                 (W::F16, W::F32) => (f16::from_bits(av as u16) as f32).to_bits() as u64,
@@ -241,7 +241,7 @@ pub(super) fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
             a,
         } => {
             let (av, _) = eval_operand(ctx, base, a);
-            // f16/f32→f64 精确保值 ⇒ 统一经 f64；宿主 `as` 即 Rust 饱和语义（NaN→0、越界→边界）
+            // f16/f32→f64 precisely preserves value => unify through f64; host `as` is Rust saturation semantics (NaN→0, out-of-range→boundary)
             let x = match from {
                 crate::vm::engine::ir::FloatW::F16 => f16::from_bits(av as u16) as f64,
                 crate::vm::engine::ir::FloatW::F32 => f32::from_bits(av as u32) as f64,
@@ -267,7 +267,7 @@ pub(super) fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
         Rvalue::IntToFloat { from, to, a } => {
             use crate::vm::engine::ir::FloatW;
             let (av, _) = eval_operand(ctx, base, a);
-            // 每目标宽度都用宿主直转（`as` 正确舍入；避免中转双舍入）
+            // Each target width uses host direct cast (`as` rounds correctly; avoid double-rounding through an intermediate)
             macro_rules! i2f {
                 ($t:ty) => {
                     (if from.1 {
@@ -292,7 +292,7 @@ pub(super) fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
             use std::sync::atomic::*;
             let (p, _) = eval_operand(ctx, base, addr);
             let o = host_ord(*order);
-            // 真宿主原子指令（spike4 义务）；序按 guest 请求（D8j）
+            // Real host atomic instructions (spike4 obligation); ordering as guest requested (D8j)
             unsafe {
                 match width {
                     Width::W8 => AtomicU8::from_ptr(p as *mut u8).load(o) as u64,

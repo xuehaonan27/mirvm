@@ -1,6 +1,6 @@
-# 标题
+# Title
 
-正文一行。
+One line of body text.
 
 ```rust
 fn in_code_block() {}

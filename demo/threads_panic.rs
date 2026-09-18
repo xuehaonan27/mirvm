@@ -1,4 +1,4 @@
-// scoped threads + 线程 panic → join Err 恢复 + 线程内 TLS Drop
+// scoped threads + thread panic → join Err recovery + in-thread TLS Drop
 use std::thread;
 
 thread_local! {
@@ -13,7 +13,7 @@ impl Drop for Guard {
 }
 
 fn main() {
-    // scoped：借用栈上数据
+    // scoped: borrow stack data
     let mut data = vec![1u32, 2, 3, 4];
     thread::scope(|s| {
         let (a, b) = data.split_at_mut(2);
@@ -22,7 +22,7 @@ fn main() {
     });
     println!("scoped = {data:?}");
 
-    // 线程 panic → join Err，进程不倒
+    // thread panic → join Err, process survives
     let h = thread::spawn(|| {
         panic!("worker exploded");
     });
@@ -35,7 +35,7 @@ fn main() {
     }
     println!("main survives");
 
-    // 线程内 TLS Drop（线程退出时运行析构）
+    // in-thread TLS Drop (destructors run on thread exit)
     let t = thread::spawn(|| {
         GUARD.with(|_| {});
         println!("worker done");

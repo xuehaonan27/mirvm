@@ -1,8 +1,8 @@
-//! T1-b CallForeign 探针（m5.4-design §3.2）：libc qsort + guest 比较子
-//! （thunk_args 物化：guest fn 条目地址逃逸给 native 前物化 thunk 真码，
-//! qsort 回调经 thunk 蹦回解释器/JIT 帧）+ C-unwind 标量返回（活 Drop
-//! 迫使 MIR 生成 cleanup 边，锁定 try_call 正常返回通道）。三维逐字节一致
-//! + 发布实证。
+//! T1-b CallForeign probe (m5.4-design §3.2): libc qsort + guest comparator
+//! (thunk_args materialization: real thunk code is materialized before the guest fn entry address escapes to native,
+//! qsort callback bounces back into interpreter/JIT frames through the thunk) + C-unwind scalar return (live Drop
+//! forces MIR to emit cleanup edges, locking the try_call normal-return path). Byte-identical across three dimensions
+//! + release evidence.
 use std::ffi::c_void;
 
 unsafe extern "C" {

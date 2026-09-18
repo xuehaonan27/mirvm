@@ -29,8 +29,8 @@ mod tests {
             super::tool_side(),
             super::extra()
         );
-        // 作为 workspace 测试根时 Cargo 启用本包 default；作为 app/tool 的
-        // 依赖单元时才启用 workspace.dependencies 继承的 base。
+        // When running as the workspace test root, Cargo enables this crate's default feature;
+        // when used as a dependency of app/tool, only the base inherited from workspace.dependencies is enabled.
         assert!(super::base() || cfg!(feature = "default-on"));
     }
 }

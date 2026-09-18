@@ -1,21 +1,27 @@
-//! Spike 3：混合栈 unwind（**头号硬骨头**，frame-abi-bytecode.md §7 候选 A 的验证）。
+//! Spike 3: mixed-stack unwind (**the hardest bone**, frame-abi-bytecode.md §7 candidate A
+//! validation).
 //!
-//! 验证：一条混着解释帧 + 编译帧的 native 栈上，guest panic 沿栈退帧、按 guest 顺序跑
-//! Drop、被 catch_unwind 接住（或穿 plain-C 帧 = abort）。
+//! Validation: on a native stack mixing interp frames + compiled frames, guest panic unwinds
+//! frames along the stack, runs Drop in guest order, is caught by catch_unwind (or crossing a
+//! plain-C frame = abort).
 //!
-//! 机制选型（详见 docs/spike3-mixed-stack-unwind.md）：
-//! - **guest 异常 = 宿主 Rust panic 载 `GuestPanic`** —— 这是候选 A 的具象而非替代品：
-//!   Rust panic 本身就是"平台 unwinder（_Unwind_RaiseException）+ Rust personality +
-//!   landing pad"。raise 用 `resume_unwind`（不触发 panic hook，无噪声）。catch 点
-//!   downcast 区分：GuestPanic 按 guest 语义处理；宿主 panic（VM bug）原样续传，绝不吞。
-//! - **解释帧的 unwind 参与 = `CleanupGuard`**（landing pad 的宿主 Rust 写法）：unwind
-//!   穿帧时 guard 的 Drop 执行 → 按"当前 unwind 边"解释跑本帧 cleanup 链 → 恢复操作数区
-//!   → 返回（unwind 自动继续）。guard 里的动态 `unwind_edge` = 解释帧的"动态 LSDA"
-//!   （编译帧里这是静态 call-site → landing pad 表）。
-//! - **编译帧替身 = `extern "C-unwind" fn` + drop guard**：rustc 把 guard 的 Drop 编进
-//!   该帧的 landing pad，与 Cranelift 给编译帧发 landing pad 跑 drop glue 机制字面相同。
-//!   注意必须 `"C-unwind"` ABI —— plain `extern "C"` 在 unwind 穿过时 abort（Rust 1.81+），
-//!   这正是"JIT 调用约定必须 unwind-capable"的第一条产出，也免费给了跨 FFI abort 的测试机制。
+//! Mechanism selection (see docs/spike3-mixed-stack-unwind.md):
+//! - **guest exception = host Rust panic carrying `GuestPanic`** — this is the concrete form of
+//!   candidate A, not a replacement: Rust panic itself is "platform unwinder (_Unwind_RaiseException)
+//!   + Rust personality + landing pad". Raise uses `resume_unwind` (does not trigger panic hook,
+//!   no noise). The catch point downcasts to distinguish: GuestPanic is handled per guest semantics;
+//!   host panic (VM bug) is re-raised as-is, never swallowed.
+//! - **interp frame's unwind participation = `CleanupGuard`** (host Rust spelling of landing pad):
+//!   when unwind crosses the frame, the guard's Drop runs → runs this frame's cleanup chain along
+//!   the current unwind edge → restores the operand region → returns (unwind continues
+//!   automatically). The dynamic `unwind_edge` inside the guard is the interp frame's **dynamic
+//!   LSDA** (in compiled frames this is the static call-site → landing pad table).
+//! - **compiled-frame stand-in = `extern "C-unwind" fn` + drop guard**: rustc compiles the guard's
+//!   Drop into that frame's landing pad, literally the same mechanism as Cranelift emitting a
+//!   landing pad for compiled frames to run drop glue. Must use `"C-unwind"` ABI — plain
+//!   `extern "C"` aborts when unwind crosses (Rust 1.81+), which is the first deliverable of
+//!   "JIT calling convention must be unwind-capable", and also gives a free test mechanism for
+//!   cross-FFI abort.
 
 use std::cell::Cell;
 use std::panic::{self, AssertUnwindSafe};
@@ -26,19 +32,19 @@ use super::bytecode::{
 };
 use super::frame::{OperandRegion, Word};
 
-// ===== guest 异常对象 =====
+// ===== guest exception object =====
 
-/// guest panic 载荷。宿主 Rust panic 机制承载（候选 A：同一 unwinder + personality）。
+/// guest panic payload. Carried by host Rust panic mechanism (candidate A: same unwinder + personality).
 struct GuestPanic {
     payload: Word,
 }
 
-/// 发起 guest panic。`resume_unwind` 不触发 panic hook → 无噪声输出。
+/// Initiate guest panic. `resume_unwind` does not trigger panic hook → no noise output.
 fn raise_guest(payload: Word) -> ! {
     panic::resume_unwind(Box::new(GuestPanic { payload }))
 }
 
-// ===== 执行上下文（vmctx，纪律同 spike2 / docs/designs/vmctx-passing.md）=====
+// ===== execution context (vmctx, same discipline as spike2 / docs/designs/vmctx-passing.md) =====
 
 type CompiledFn = extern "C-unwind" fn(*mut Ctx, u64) -> u64;
 
@@ -52,7 +58,8 @@ struct Ctx {
     prog: Program,
     kinds: Vec<FuncKind>,
     region: OperandRegion,
-    /// Drop 顺序验证日志：每个 Drop（解释帧终止子 / 编译帧 guard）记一个值
+    /// Drop-order validation log: each Drop (interp-frame terminator / compiled-frame guard)
+    /// records a value
     drop_log: Vec<Word>,
 }
 
@@ -67,7 +74,8 @@ impl Ctx {
     }
 }
 
-// 字段级瞬态借用 helper（勿整体 &mut *ctx——与长活 &prog 冲突；见 spike2 教训）
+// Field-level transient borrow helpers (do not take a whole &mut *ctx — conflicts with long-lived
+// &prog; see spike2 lessons)
 #[inline]
 fn reg_reserve(ctx: *mut Ctx, n: u32) -> usize {
     let r: &mut OperandRegion = unsafe { &mut (*ctx).region };
@@ -94,7 +102,7 @@ fn log_drop(ctx: *mut Ctx, v: Word) {
     l.push(v);
 }
 
-/// 统一 dispatch（同 spike2：既是 i2c 也是 c2i）。
+/// Unified dispatch (same as spike2: both i2c and c2i).
 fn call_guest(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
     let kinds: &Vec<FuncKind> = unsafe { &(*ctx).kinds };
     match kinds[func as usize] {
@@ -103,13 +111,15 @@ fn call_guest(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
     }
 }
 
-// ===== 解释帧的 unwind 参与 =====
+// ===== interp frame's unwind participation =====
 
-/// 帧守卫 = 解释帧的 landing pad。正常返回被 forget；guest panic 穿帧时其 Drop 在
-/// unwind 中执行：跑 cleanup 链（若有边）→ 恢复操作数区（§2.2 "unwind: 恢复区 SP"）。
+/// Frame guard = interp frame's landing pad. Forgotten on normal return; when guest panic crosses
+/// the frame, its Drop runs during unwind: runs cleanup chain (if there is an edge) → restores the
+/// operand region (§2.2 "unwind: restore region SP").
 ///
-/// `unwind_edge` 在每个可 unwind 终止子（Call/Panic）执行前更新——它就是解释帧的
-/// **动态 LSDA**（编译帧的静态等价物：call-site → landing pad 表）。
+/// `unwind_edge` is updated before each unwindable terminator (Call/Panic) executes — it is the
+/// interp frame's **dynamic LSDA** (the static equivalent in compiled frames: call-site → landing
+/// pad table).
 struct CleanupGuard {
     ctx: *mut Ctx,
     func: u32,
@@ -126,9 +136,10 @@ impl Drop for CleanupGuard {
     }
 }
 
-/// 解释执行 cleanup 链（Drop/Goto/Call 子集，`Resume` 结束）。在 guard::drop（即
-/// landing pad）里跑；链中的 Call 可再入混合执行（如调编译 helper——C++ 析构调函数的
-/// 日常，我们必须也行）。链中再 panic = 双 panic → abort（与 native 一致）。
+/// Interpret cleanup chain (subset of Drop/Goto/Call, `Resume` ends). Runs inside guard::drop
+/// (i.e. landing pad); Call in the chain can re-enter mixed execution (e.g. calling a compiled
+/// helper — routine in C++ destructors, we must support it too). Panic inside chain = double panic
+/// → abort (same as native).
 fn run_cleanup_chain(ctx: *mut Ctx, func: u32, base: usize, entry: u32) {
     let prog: &Program = unsafe { &(*ctx).prog };
     let body: &Body = &prog.funcs[func as usize];
@@ -156,8 +167,8 @@ fn run_cleanup_chain(ctx: *mut Ctx, func: u32, base: usize, entry: u32) {
                 reg_write(ctx, base, *dst, r);
                 blk = *target as usize;
             }
-            Terminator::Resume => return, // 链尾：返回 guard，unwind 自动继续
-            t => unreachable!("cleanup 链非法终止子: {t:?}"),
+            Terminator::Resume => return, // end of chain: return to guard, unwind continues automatically
+            t => unreachable!("illegal cleanup terminator: {t:?}"),
         }
     }
 }
@@ -170,7 +181,7 @@ fn edge(u: &UnwindAction) -> Option<u32> {
     }
 }
 
-// ===== 解释器主循环（spike2 的 unwind 化演进）=====
+// ===== interpreter main loop (unwind evolution of spike2) =====
 
 fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
     let prog: &Program = unsafe { &(*ctx).prog };
@@ -215,7 +226,7 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
                 unwind,
             } => {
                 let av: Vec<Word> = aops.iter().map(|o| eval_operand(ctx, base, *o)).collect();
-                guard.unwind_edge.set(edge(unwind)); // callee 若 panic，本帧从这条边清理
+                guard.unwind_edge.set(edge(unwind)); // if callee panics, this frame cleans up from this edge
                 let r = call_guest(ctx, *callee, &av);
                 guard.unwind_edge.set(None);
                 reg_write(ctx, base, *dst, r);
@@ -227,7 +238,7 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
             }
             Terminator::Panic { payload, unwind } => {
                 let p = eval_operand(ctx, base, *payload);
-                guard.unwind_edge.set(edge(unwind)); // 本帧 live Drop 由自己的 guard 跑
+                guard.unwind_edge.set(edge(unwind)); // this frame's live Drops are run by its own guard
                 raise_guest(p);
             }
             Terminator::CatchCall {
@@ -250,7 +261,7 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
                             reg_write(ctx, base, *catch_dst, gp.payload);
                             blk = *catch_target as usize;
                         }
-                        // 宿主 panic（VM bug）不是 guest 异常：原样续传，绝不吞
+                        // host panic (VM bug) is not a guest exception: re-raise as-is, never swallow
                         Err(host) => panic::resume_unwind(host),
                     },
                 }
@@ -258,11 +269,11 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
             Terminator::Return => {
                 let r = reg_read(ctx, base, 0);
                 reg_restore(ctx, base);
-                std::mem::forget(guard); // 正常路径解除守卫（unwind 语义只属 unwind 路径）
+                std::mem::forget(guard); // normal path disarms guard (unwind semantics only apply to unwind path)
                 return r;
             }
             Terminator::Resume => {
-                unreachable!("Resume 只出现在 cleanup 链（由 CleanupGuard 执行）")
+                unreachable!("Resume only appears in cleanup chains (executed by CleanupGuard)")
             }
         }
     }
@@ -274,7 +285,7 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let v = eval_rvalue(ctx, base, rv);
             reg_write(ctx, base, *dst, v);
         }
-        Stmt::Store(..) => unreachable!("spike3 不用内存构造"),
+        Stmt::Store(..) => unreachable!("spike3 does not use memory constructs"),
     }
 }
 
@@ -302,15 +313,16 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> Word {
                 BinOp::Ge => (a >= b) as u64,
             }
         }
-        rv => unreachable!("spike3 不用内存构造: {rv:?}"),
+        rv => unreachable!("spike3 does not use memory constructs: {rv:?}"),
     }
 }
 
-// ===== 编译帧替身 =====
+// ===== compiled-frame stand-in =====
 
-/// 编译帧的 landing pad 替身：rustc 把本 guard 的 Drop 编进帧的 landing pad——
-/// 与 Cranelift 给编译帧发 landing pad 跑 drop glue 机制字面相同。
-/// （normal 路径同样 drop——与字节码帧"两条路径都 Drop"对齐。）
+/// Compiled-frame landing-pad stand-in: rustc compiles this guard's Drop into the frame's landing
+/// pad — literally the same mechanism as Cranelift emitting a landing pad for compiled frames to
+/// run drop glue.
+/// (normal path also drops — aligned with bytecode frame "Drop on both paths".)
 struct CGuard {
     ctx: *mut Ctx,
     v: Word,
@@ -321,7 +333,7 @@ impl Drop for CGuard {
     }
 }
 
-// --- case 2：混合链的编译帧 ---
+// --- case 2: compiled frames in the mixed chain ---
 extern "C-unwind" fn cc2_f1(ctx: *mut Ctx, x: u64) -> u64 {
     let _g = CGuard { ctx, v: 101 };
     call_guest(ctx, 2, &[x]).wrapping_add(1)
@@ -334,13 +346,13 @@ extern "C-unwind" fn cc2_f5(ctx: *mut Ctx, _x: u64) -> u64 {
     let _g = CGuard { ctx, v: 105 };
     raise_guest(777)
 }
-/// cleanup 链里被 Call 的编译 helper（landing pad 内再入混合执行）
+/// Compiled helper called from cleanup chain (re-enter mixed execution inside landing pad)
 extern "C-unwind" fn cc_logger(ctx: *mut Ctx, v: u64) -> u64 {
     log_drop(ctx, v);
     v
 }
 
-// --- case 3：catch 在编译帧（模拟 JIT 的 catch landing pad）---
+// --- case 3: catch in compiled frame (simulates JIT catch landing pad) ---
 extern "C-unwind" fn cc3_f1_catch(ctx: *mut Ctx, x: u64) -> u64 {
     let _g = CGuard { ctx, v: 101 };
     match panic::catch_unwind(AssertUnwindSafe(|| call_guest(ctx, 2, &[x]))) {
@@ -356,8 +368,9 @@ extern "C-unwind" fn cc3_f3_raise(ctx: *mut Ctx, _x: u64) -> u64 {
     raise_guest(777)
 }
 
-// --- case 4：跨 FFI abort ---
-/// 模拟真 C 帧：plain `extern "C"`，unwind 穿过 = abort（Rust 1.81+ 语义，= 真 C 的处置）
+// --- case 4: cross-FFI abort ---
+/// Simulates a real C frame: plain `extern "C"`, unwind crossing = abort (Rust 1.81+ semantics,
+/// = real C handling)
 extern "C" fn cc4_plain_c(ctx: *mut Ctx, x: u64) -> u64 {
     call_guest(ctx, 2, &[x])
 }
@@ -369,7 +382,7 @@ extern "C-unwind" fn cc4_raise(ctx: *mut Ctx, _x: u64) -> u64 {
     raise_guest(777)
 }
 
-// ===== 字节码 builder =====
+// ===== bytecode builder =====
 
 fn s(n: u32) -> Operand {
     Operand::Slot(n)
@@ -384,9 +397,9 @@ fn bin(op: BinOp, a: Operand, b: Operand) -> Rvalue {
     Rvalue::Binary(op, a, b)
 }
 
-/// 中间帧：own=100+d；调 callee（unwind 边指向 cleanup）；
-/// 正常：Drop(own)、ret=callee_ret+1；cleanup：Drop(own) → Resume。
-/// 槽：0=ret 1=x 2=own 3=callret 4=scratch
+/// Middle frame: own=100+d; calls callee (unwind edge points to cleanup);
+/// normal: Drop(own), ret=callee_ret+1; cleanup: Drop(own) → Resume.
+/// slots: 0=ret 1=x 2=own 3=callret 4=scratch
 fn mid_body(d: u64, callee: u32) -> Body {
     use Terminator::*;
     Body {
@@ -436,7 +449,8 @@ fn mid_body(d: u64, callee: u32) -> Body {
     }
 }
 
-/// 中间帧变体：cleanup 里多一个对编译 helper 的 Call（landing pad 内再入混合执行）
+/// Middle-frame variant: extra Call to compiled helper in cleanup (re-enter mixed execution inside
+/// landing pad)
 fn mid_body_cleanup_call(d: u64, callee: u32, logger: u32) -> Body {
     use Terminator::*;
     Body {
@@ -474,7 +488,7 @@ fn mid_body_cleanup_call(d: u64, callee: u32, logger: u32) -> Body {
                     unwind: UnwindAction::Continue,
                 },
             },
-            // bb4: cleanup 内 Call 编译 logger(9002) -> bb5
+            // bb4: cleanup Calls compiled logger(9002) -> bb5
             Block {
                 stmts: vec![],
                 term: Call {
@@ -494,7 +508,7 @@ fn mid_body_cleanup_call(d: u64, callee: u32, logger: u32) -> Body {
     }
 }
 
-/// 底帧：own=100+d；Panic(777)（unwind 边覆盖自己的 live Drop）。
+/// Bottom frame: own=100+d; Panic(777) (unwind edge covers its own live Drop).
 fn bottom_body(d: u64) -> Body {
     use Terminator::*;
     Body {
@@ -524,8 +538,8 @@ fn bottom_body(d: u64) -> Body {
     }
 }
 
-/// 顶帧（catch）：own=100；CatchCall(callee)；正常：ret=dst、Drop(own)；
-/// 接住：ret=payload、Drop(own)。槽：2=own 3=dst 4=catch_dst
+/// Top frame (catch): own=100; CatchCall(callee); normal: ret=dst, Drop(own);
+/// caught: ret=payload, Drop(own). slots: 2=own 3=dst 4=catch_dst
 fn top_catch_body(callee: u32) -> Body {
     use Terminator::*;
     Body {
@@ -573,7 +587,7 @@ fn top_catch_body(callee: u32) -> Body {
     }
 }
 
-/// 顶帧（不 catch，case3/4 用）：own=100；Call(callee)；正常 Drop(own)、ret=callret+1。
+/// Top frame (no catch, for case3/4): own=100; Call(callee); normal Drop(own), ret=callret+1.
 fn top_plain_body(callee: u32) -> Body {
     use Terminator::*;
     Body {
@@ -629,9 +643,9 @@ fn dummy_body() -> Body {
     }
 }
 
-// ===== 各用例的程序 + kinds =====
+// ===== programs + kinds for each case =====
 
-/// case 1：6 帧纯解释链；底部 Panic(777)；顶帧 catch。
+/// case 1: 6-frame pure interp chain; bottom Panic(777); top frame catches.
 fn case1_prog() -> (Program, Vec<FuncKind>) {
     let funcs = vec![
         top_catch_body(1),
@@ -644,16 +658,16 @@ fn case1_prog() -> (Program, Vec<FuncKind>) {
     (Program { funcs }, vec![FuncKind::Interp; 6])
 }
 
-/// case 2（headline）：interp/compiled 交替；f2 的 cleanup 里 Call 编译 logger。
+/// case 2 (headline): interp/compiled alternating; f2's cleanup Calls compiled logger.
 fn case2_prog() -> (Program, Vec<FuncKind>) {
     use FuncKind::{Compiled, Interp};
     let funcs = vec![
-        top_catch_body(1),              // 0 interp（catch）
+        top_catch_body(1),              // 0 interp (catch)
         dummy_body(),                   // 1 compiled cc2_f1
-        mid_body_cleanup_call(2, 3, 6), // 2 interp（cleanup 内 Call logger）
+        mid_body_cleanup_call(2, 3, 6), // 2 interp (cleanup Calls logger)
         dummy_body(),                   // 3 compiled cc2_f3
         mid_body(4, 5),                 // 4 interp
-        dummy_body(),                   // 5 compiled cc2_f5（raise）
+        dummy_body(),                   // 5 compiled cc2_f5 (raise)
         dummy_body(),                   // 6 compiled cc_logger
     ];
     let kinds = vec![
@@ -668,7 +682,7 @@ fn case2_prog() -> (Program, Vec<FuncKind>) {
     (Program { funcs }, kinds)
 }
 
-/// case 3：catch 在编译帧；顶帧解释（不 catch）。
+/// case 3: catch in compiled frame; top frame interp (no catch).
 fn case3_prog() -> (Program, Vec<FuncKind>) {
     use FuncKind::{Compiled, Interp};
     let funcs = vec![
@@ -686,7 +700,7 @@ fn case3_prog() -> (Program, Vec<FuncKind>) {
     (Program { funcs }, kinds)
 }
 
-/// case 4：链中插 plain extern "C" 帧；深处 panic → 预期 abort。
+/// case 4: plain extern "C" frame inserted in chain; deep panic → expected abort.
 fn case4_prog() -> (Program, Vec<FuncKind>) {
     use FuncKind::{Compiled, Interp};
     let funcs = vec![
@@ -699,7 +713,7 @@ fn case4_prog() -> (Program, Vec<FuncKind>) {
     (Program { funcs }, kinds)
 }
 
-// ===== native 参考实现（结构镜像；drop 顺序不靠手推，靠对拍）=====
+// ===== native reference implementation (structural mirror; drop order verified by comparison) =====
 
 mod nref {
     use std::cell::RefCell;
@@ -737,7 +751,7 @@ mod nref {
         }
     }
 
-    // case 1：6 帧链，底部 raise
+    // case 1: 6-frame chain, bottom raise
     fn c1_chain(d: u64) -> u64 {
         let _v = D(100 + d);
         if d == 5 {
@@ -755,7 +769,8 @@ mod nref {
         (r, take_log())
     }
 
-    // case 2：结构同 case1，f2 的 Drop 额外经 helper 记 9002（镜像 cleanup 内 Call）
+    // case 2: same structure as case1, f2's Drop additionally logs 9002 via helper
+    // (mirrors Call inside cleanup)
     struct D2(u64);
     impl Drop for D2 {
         fn drop(&mut self) {
@@ -796,7 +811,7 @@ mod nref {
         (r, take_log())
     }
 
-    // case 3：catch 在中间帧
+    // case 3: catch in middle frame
     fn c3_f1(x: u64) -> u64 {
         let _v = D(101);
         match catch(|| c3_f2(x)) {
@@ -842,7 +857,7 @@ fn check(name: &str, vm: (Word, Vec<Word>), native: (Word, Vec<Word>)) -> bool {
 }
 
 pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
-    // 子进程模式：预期在混合链穿 plain extern "C" 帧时 abort
+    // child-process mode: expected to abort when mixed chain crosses a plain extern "C" frame
     if argv.next().as_deref() == Some("--case=ffi-abort") {
         let (prog, kinds) = case4_prog();
         let (r, _) = vm_case(prog, kinds);
@@ -854,7 +869,7 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
     {
         let (prog, kinds) = case1_prog();
         ok &= check(
-            "case1 纯解释链 panic+Drop+catch",
+            "case1 pure-interp-chain panic+Drop+catch",
             vm_case(prog, kinds),
             nref::case1(),
         );
@@ -862,17 +877,17 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
     {
         let (prog, kinds) = case2_prog();
         ok &= check(
-            "case2 混合栈交替（headline）+ cleanup 内 Call",
+            "case2 mixed-stack alternating (headline) + Call inside cleanup",
             vm_case(prog, kinds),
             nref::case2(),
         );
     }
     {
         let (prog, kinds) = case3_prog();
-        ok &= check("case3 catch 在编译帧", vm_case(prog, kinds), nref::case3());
+        ok &= check("case3 catch in compiled frame", vm_case(prog, kinds), nref::case3());
     }
 
-    // case 4：跨 FFI abort（子进程，断言 SIGABRT）
+    // case 4: cross-FFI abort (child process, assert SIGABRT)
     let exe = std::env::current_exe().expect("current_exe");
     let out = std::process::Command::new(exe)
         .args(["spike3", "--case=ffi-abort"])
@@ -881,20 +896,20 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
     use std::os::unix::process::ExitStatusExt as _;
     let sig = out.status.signal();
     if sig == Some(libc::SIGABRT) || sig == Some(libc::SIGILL) {
-        println!("PASS case4 跨 FFI abort（子进程信号 {}）", sig.unwrap());
+        println!("PASS case4 cross-FFI abort (child signal {})", sig.unwrap());
     } else {
         println!(
-            "FAIL case4 跨 FFI abort: 子进程状态 {:?}（期望 SIGABRT）",
+            "FAIL case4 cross-FFI abort: child status {:?} (expected SIGABRT)",
             out.status
         );
         ok = false;
     }
 
     if ok {
-        println!("--- spike3: 全 PASS（混合栈 unwind 验证通过，候选 A 坐实）---");
+        println!("--- spike3: all PASS (mixed-stack unwind validation passed, candidate A confirmed) ---");
         ExitCode::SUCCESS
     } else {
-        println!("--- spike3: 有 FAIL ---");
+        println!("--- spike3: FAIL present ---");
         ExitCode::from(1)
     }
 }

@@ -1,4 +1,4 @@
-// spawn + join：返回值传递、多线程并发计算（输出与调度顺序无关）
+// spawn + join: return-value passing, multi-thread concurrent compute (output independent of scheduling order)
 use std::thread;
 
 fn main() {
@@ -9,7 +9,7 @@ fn main() {
     println!("results = {results:?}");
     println!("total = {}", results.iter().sum::<u64>());
 
-    // 嵌套 spawn
+    // nested spawn
     let outer = thread::spawn(|| {
         let inner = thread::spawn(|| 21u32);
         inner.join().unwrap() * 2

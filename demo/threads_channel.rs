@@ -1,4 +1,4 @@
-// mpsc channel：生产者-消费者（求和结果与调度无关）
+// mpsc channel: producer-consumer (sum result independent of scheduling)
 use std::sync::mpsc;
 use std::thread;
 

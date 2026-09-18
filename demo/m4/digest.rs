@@ -1,12 +1,12 @@
-// M4.1 gate/调研：值与内存的 digest 函数集（返回 u64 校验和，无 println——全量差分 M4.3 起）。
-// #[unsafe(no_mangle)] = mono 收集根 + --vm-call 稳定名。
+// M4.1 gate/survey: digest functions over values and memory (returns a u64 checksum, no println -- full differential from M4.3 onward).
+// #[unsafe(no_mangle)] = mono collection root + stable --vm-call name.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::BuildHasherDefault;
 
-/// Vec：push/增长/迭代/求和（堆分配 + 聚合 + 投影 + Drop glue）
+/// Vec: push/grow/iterate/sum (heap allocation + aggregate + projection + Drop glue)
 #[unsafe(no_mangle)]
 pub fn vec_digest(n: u64) -> u64 {
     let mut v: Vec<u64> = Vec::new();
@@ -22,7 +22,7 @@ pub fn vec_digest(n: u64) -> u64 {
     s.wrapping_add(v.len() as u64)
 }
 
-/// String：字面量 + push_str + 字节求和（&str 常量 + 胖指针 + UTF-8 字节）
+/// String: literal + push_str + byte sum (&str constant + fat pointer + UTF-8 bytes)
 #[unsafe(no_mangle)]
 pub fn string_digest(reps: u64) -> u64 {
     let mut s = String::from("mirvm-");
@@ -38,7 +38,7 @@ pub fn string_digest(reps: u64) -> u64 {
     acc
 }
 
-/// HashMap（确定性 hasher，无 getrandom——OS 是 M4.3 的事）
+/// HashMap (deterministic hasher, no getrandom -- OS is M4.3's problem)
 #[unsafe(no_mangle)]
 pub fn map_digest(n: u64) -> u64 {
     let mut m: HashMap<u64, u64, BuildHasherDefault<DefaultHasher>> = HashMap::default();
@@ -58,14 +58,14 @@ pub fn map_digest(n: u64) -> u64 {
     s.wrapping_add(m.len() as u64)
 }
 
-/// Box：堆上单值 + 解引用（exchange_malloc 路径）
+/// Box: single heap value + dereference (exchange_malloc path)
 #[unsafe(no_mangle)]
 pub fn box_digest(x: u64) -> u64 {
     let b = Box::new(x * 7);
     *b + 1
 }
 
-/// 枚举：Option/Result 构造 + match（判别式读写 + Downcast 投影 + niche）
+/// Enum: Option/Result construction + match (discriminant read/write + Downcast projection + niche)
 #[unsafe(no_mangle)]
 pub fn enum_digest(x: u64) -> u64 {
     let o: Option<u64> = if x % 2 == 0 { Some(x) } else { None };
@@ -81,7 +81,7 @@ pub fn enum_digest(x: u64) -> u64 {
     a.wrapping_add(b)
 }
 
-/// 数组/切片：栈上数组 + 动态下标 + 越界检查 + 切片迭代
+/// Array/slice: stack array + dynamic index + bounds check + slice iteration
 #[unsafe(no_mangle)]
 pub fn slice_digest(n: u64) -> u64 {
     let mut arr = [0u64; 16];
@@ -98,7 +98,7 @@ pub fn slice_digest(n: u64) -> u64 {
     s + sl.len() as u64
 }
 
-/// static：只读表引用（statics 冻结 + 重定位）
+/// static: read-only table reference (statics frozen + relocated)
 static TABLE: [u64; 8] = [3, 1, 4, 1, 5, 9, 2, 6];
 static MSG: &str = "frozen-static";
 
@@ -109,7 +109,7 @@ pub fn static_digest(idx: u64) -> u64 {
     t * 100 + m
 }
 
-/// 裸指针算术（真实地址模型的 §2.5 形状：ptr_int demo 的纯计算版）
+/// Raw pointer arithmetic (real-address model §2.5 shape: pure-computation version of ptr_int demo)
 #[unsafe(no_mangle)]
 pub fn rawptr_digest(n: u64) -> u64 {
     let mut buf = [0u64; 8];

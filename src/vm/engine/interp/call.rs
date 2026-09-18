@@ -1,7 +1,7 @@
-//! 调用与 FFI 入向（自 interp.rs I13 整搬）：call_fn_addr/cleanup_edge/
+//! Call and incoming FFI (moved whole from interp.rs I13): call_fn_addr/cleanup_edge/
 //! call_guarding_terminate/run_cleanup + ret_abi_of/call_guest_ffi/
-//! interp_frame（模型 A 宿主递归，真栈字节守卫）。call_guest（发布协议
-//! 读侧锚点）留在 mod.rs——与 jit/compiler worker 写侧注释不可分离。
+//! interp_frame (model A: host recursion, real stack byte guard). call_guest (publish protocol
+//! reader anchor) stays in mod.rs — inseparable from jit/compiler worker writer-side comments.
 
 use super::*;
 use super::{
@@ -16,7 +16,7 @@ pub(super) fn call_fn_addr(ctx: *mut Ctx, addr: u64, args: &[u64], caller: &str)
     let module: &Module = unsafe { &(*(*ctx).shared).module };
     let Some(&fid) = module.fn_addrs.get(&addr) else {
         engine_abort(&format!(
-            "间接调用目标 {addr:#x} 不是已知 fn 条目（调用者 {caller}）"
+            "indirect call target {addr:#x} is not a known fn entry (caller {caller})"
         ));
     };
     call_guest(ctx, fid, args)

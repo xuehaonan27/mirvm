@@ -1,5 +1,5 @@
-// 一个真正会挂起的 future：第一次 poll 返回 Pending，第二次返回 Ready。
-// 驱动 async fn 经历真实的"存状态→Pending→恢复"循环，poll 次数 > 1。
+// A future that actually suspends: first poll returns Pending, second returns Ready.
+// Drives the async fn through a real save-state→Pending→resume cycle, with poll count > 1.
 use std::future::Future;
 use std::pin::{pin, Pin};
 use std::task::{Context, Poll, Waker};
@@ -15,8 +15,8 @@ impl Future for PendOnce {
 fn pend_once(v: u32) -> PendOnce { PendOnce { polled: false, val: v } }
 
 async fn outer() -> u32 {
-    let a = pend_once(10).await;   // 挂起 1 次
-    let b = pend_once(a + 5).await; // 挂起 1 次
+    let a = pend_once(10).await;   // suspends once
+    let b = pend_once(a + 5).await; // suspends once
     a + b
 }
 
@@ -32,5 +32,5 @@ fn main() {
             Poll::Pending => continue,
         }
     };
-    println!("result = {result}, polls = {polls}");  // a=10,b=15 → 25；poll 3 次
+    println!("result = {result}, polls = {polls}");  // a=10, b=15 → 25; polls 3 times
 }

@@ -1,28 +1,28 @@
-//! `cargoless/buildrs.rs` —— build.rs 全生命周期的「指令 ↔ env ↔ 校验」半
-//! （D15 P2 切③，设计档 §3 清单 7；D15 P3 切⑤b 加重跑判定）。编译参数形态
-//! 在 schedule.rs（build_script_rustc_args），调度在 driver.rs；本文件只管：
-//! 指令解析（cargo::/cargo: 两形）、CARGO_CFG_* 映射、执行 env 构建、
-//! DEP_* 传播键规范化、links 互斥校验、-L 传递汇集、**rerun-if 精细增量**
-//! （存档写读 + 重跑判定，cargo 同语义）。
+//! `cargoless/buildrs.rs` — build.rs full-lifecycle "instructions ↔ env ↔ validation" half
+//! (D15 P2 cut③, design doc §3 checklist 7; D15 P3 cut⑤b adds rerun decision). Compilation argument shapes
+//! are in schedule.rs (build_script_rustc_args), scheduling in driver.rs; this file only handles:
+//! instruction parsing (cargo::/cargo: two forms), CARGO_CFG_* mapping, execution env construction,
+//! DEP_* propagation key normalization, links mutual-exclusion validation, -L propagation collection, **rerun-if fine-grained incrementality**
+//! (record write/read + rerun decision, cargo-equivalent semantics).
 //!
-//! 传播规则全部按切③ 实证钉（/tmp/probe_link，cargo 1.98 逐条验证）：
-//! - `-l`（rustc-link-lib）只进**本包**自己的编译行；`-L`（rustc-link-search）
-//!   进本包 + 全部传递依赖者；rustc-cfg/check-cfg/rustc-env/link-arg 只进本包。
-//! - metadata（cargo::metadata=K=V）经 `DEP_<LINKS>_<K>` env 只给**直接依赖者**
-//!   的 build script（传递依赖者看不到）；cargo **不**自动注入 DEP_<LINKS>_ROOT
-//!   （那是 -sys crate 自发 metadata=root 的惯例，非 cargo 行为）。
-//! - cargo **不**对 rustc-cfg 自动补 --check-cfg（serde 一族是显式发
-//!   rustc-check-cfg；probe 的 sysd 行实锤无自动补钉）。
-//! - build script 的 warning 只有 path 包才显示（registry 包默认吞，-vv 才见）。
+//! Propagation rules pinned by cut③ empirical evidence (/tmp/probe_link, cargo 1.98 verified line by line):
+//! - `-l` (rustc-link-lib) enters only **this package**'s own compile line; `-L` (rustc-link-search)
+//!   enters this package + all transitive dependents; rustc-cfg/check-cfg/rustc-env/link-arg enter only this package.
+//! - metadata (cargo::metadata=K=V) via `DEP_<LINKS>_<K>` env goes only to **direct dependents**
+//!   build scripts (transitive dependents cannot see); cargo does **not** auto-inject DEP_<LINKS>_ROOT
+//!   (that is the -sys crate convention of self-emitting metadata=root, not cargo behavior).
+//! - cargo does **not** auto-add --check-cfg for rustc-cfg (the serde family explicitly emits
+//!   rustc-check-cfg; the sysd line in probe empirically shows no auto-add).
+//! - build script warnings are shown only for path packages (registry packages swallow by default, visible only with -vv).
 //!
-//! 重跑判定（切⑤b，cargo 同语义；细节见 should_rerun 头注）：未触发重跑
-//! 条件 ⇒ 跳过执行，从存档 output.txt 重新 parse_instructions 得 BuildOutput
-//! ——指令流零序列化失真，DEP_*/OUT_DIR/warning 等全部可观察产出与重跑
-//! 逐字节一致。fp 变（旗/依赖/工具链/源）⇒ 新 fp 目录存档天然缺席 ⇒
-//! 重跑——「源变 ⇒ 重跑」这条由指纹先行覆盖，rerun 存档的真正主战场 =
-//! **fp 不变时**（连续 run、env 变化、包外 rerun-if-changed 路径）的
-//! skip/run 决策；registry 包默认面（未发 rerun-if-changed）永不重跑
-//! （源按 cksum 不可变）是最大收益面。
+//! Rerun decision (cut⑤b, cargo-equivalent semantics; details see should_rerun header comment): if rerun triggers are not met
+//! then skip execution, re-parse output.txt into BuildOutput
+//! — instruction stream has zero serialization distortion, all observable outputs like DEP_*/OUT_DIR/warning are byte-for-byte identical to a real rerun
+//! byte-for-byte identical. fp change (flags/dependencies/toolchain/source) ⇒ the new fp directory naturally lacks a record ⇒
+//! rerun — "source change ⇒ rerun" is already covered by the fingerprint, the real battleground of rerun records =
+//! **when fp is unchanged** (consecutive runs, env changes, out-of-package rerun-if-changed paths) for
+//! skip/run decisions; registry packages' default face (no rerun-if-changed emitted) never rerun
+//! (source is immutable by cksum) is the biggest win.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -30,39 +30,39 @@ use std::path::{Path, PathBuf};
 use super::manifest::ProfileFlags;
 use super::resolve::{ResolvePlan, UnitClass, UnitDep};
 
-/// 一个 build script 一次执行产出的解析后指令集。
+/// Parsed instruction set produced by a single build-script execution.
 #[derive(Clone, Debug, Default)]
 pub struct BuildOutput {
-    /// rustc-cfg 原始串（`foo` / `foo="bar"`）→ --cfg 只进本包编译。
+    /// rustc-cfg raw string (`foo` / `foo="bar"`) → --cfg enters only this package's compilation.
     pub cfgs: Vec<String>,
-    /// rustc-check-cfg 原始串（`cfg(foo, values("bar"))`）→ --check-cfg 只进本包。
+    /// rustc-check-cfg raw string (`cfg(foo, values("bar"))`) → --check-cfg enters only this package.
     pub check_cfgs: Vec<String>,
-    /// rustc-env（VAR=VALUE）→ 本包编译期 env（env! 可读；经 cmd.env 注入）。
+    /// rustc-env (VAR=VALUE) → this package's compile-time env (readable via env!; injected through cmd.env).
     pub envs: Vec<(String, String)>,
-    /// rustc-link-lib 原始 LIB 段（[KIND[:MOD]=]NAME）→ -l 只进本包。
+    /// rustc-link-lib raw LIB segment ([KIND[:MOD]=]NAME) → -l enters only this package.
     pub link_libs: Vec<String>,
-    /// rustc-link-search 原始 [KIND=]PATH → -L 进本包 + 传递依赖者。
+    /// rustc-link-search raw [KIND=]PATH → -L enters this package + transitive dependents.
     pub link_searches: Vec<String>,
-    /// rustc-link-arg / rustc-link-arg-bins → -C link-arg= 只进本包
-    /// （cargo 对无 bin 目标的包发 link-arg-bins 是硬错误；v1 不做该项校验，
-    /// 只收集——mirvm 的最终 bin 是会话解释不产生链接，旗标本就惰性）。
+    /// rustc-link-arg / rustc-link-arg-bins → -C link-arg= enters only this package
+    /// (cargo hard errors when emitting link-arg-bins for a package with no bin target; v1 does not validate this,
+    /// only collects — mirvm's final bin is session-interpreted and produces no link, so the flag is already lazy).
     pub link_args: Vec<String>,
-    /// cargo::metadata=K=V → DEP_<LINKS>_<K> 给直接依赖者的 build script。
+    /// cargo::metadata=K=V → DEP_<LINKS>_<K> for direct dependents' build scripts.
     pub metadata: BTreeMap<String, String>,
-    /// cargo::warning=MSG（driver 按 from_registry 门控显示，cargo 同口径）。
+    /// cargo::warning=MSG (driver gates display by from_registry, same standard as cargo).
     pub warnings: Vec<String>,
-    /// cargo::rerun-if-changed=PATH（切⑤b：存档与重跑判定消费；≥1 枚即取代
-    /// 默认面——cargo 同：发了就只盯这些路径，不再全树扫描）。
+    /// cargo::rerun-if-changed=PATH (cut⑤b: consumed by record and rerun decision; ≥1 instances replace
+    /// the default face — cargo-equivalent: once emitted, only watch these paths, no full-tree scan).
     pub rerun_if_changed: Vec<String>,
-    /// cargo::rerun-if-env-changed=VAR（与文件面独立叠加，两面通用）。
+    /// cargo::rerun-if-env-changed=VAR (added independently to the file face, applies to both faces).
     pub rerun_if_env_changed: Vec<String>,
 }
 
-/// 指令解析：行首 `cargo::`（新形，1.77+）与 `cargo:`（legacy 单冒号）都吃。
-/// 新形未知键忽略（cargo 前向兼容同口径）；legacy 未知键按 metadata 收
-/// （cargo 同——老 build.rs 的 `cargo:KEY=VALUE` 就是 links metadata 旧形）。
-/// cargo::error → Err（driver 补 crate 名）；rerun-if-* 两形都收进
-/// BuildOutput（切⑤b 重跑判定消费，见 should_rerun）。
+/// Instruction parsing: line prefixes `cargo::` (new form, 1.77+) and `cargo:` (legacy single colon) are both accepted.
+/// Unknown keys in new form are ignored (cargo forward-compatibility same standard); unknown legacy keys are taken as metadata
+/// (cargo-equivalent — old build.rs `cargo:KEY=VALUE` is the legacy form of links metadata).
+/// cargo::error → Err (driver appends crate name); rerun-if-* both forms are collected into
+/// BuildOutput (cut⑤b rerun decision consumes them, see should_rerun).
 pub fn parse_instructions(stdout: &str) -> Result<BuildOutput, String> {
     let mut out = BuildOutput::default();
     for line in stdout.lines() {
@@ -72,7 +72,7 @@ pub fn parse_instructions(stdout: &str) -> Result<BuildOutput, String> {
         } else if let Some(rest) = line.strip_prefix("cargo:") {
             apply(&mut out, rest, true)?;
         }
-        // 其余行是 build script 自己的 println!——cargo 同样忽略（-vv 才显示）
+        // Remaining lines are the build script's own println! — cargo also ignores them (visible only with -vv)
     }
     Ok(out)
 }
@@ -86,14 +86,14 @@ fn apply(out: &mut BuildOutput, instr: &str, legacy: bool) -> Result<(), String>
         "rustc-link-lib" => out.link_libs.push(value.to_string()),
         "rustc-link-search" => out.link_searches.push(value.to_string()),
         "rustc-flags" => {
-            // 只允许 -l/-L（cargo 同），拆开入两类
+            // Only -l/-L allowed (cargo-equivalent), split into the two categories
             for tok in value.split_whitespace() {
                 if let Some(v) = tok.strip_prefix("-l") {
                     out.link_libs.push(v.to_string());
                 } else if let Some(v) = tok.strip_prefix("-L") {
                     out.link_searches.push(v.to_string());
                 } else {
-                    return Err(format!("rustc-flags 只允许 -l/-L 旗（收到 `{tok}`）"));
+                    return Err(format!("rustc-flags only allows -l/-L flags (got `{tok}`)"));
                 }
             }
         }
@@ -101,19 +101,19 @@ fn apply(out: &mut BuildOutput, instr: &str, legacy: bool) -> Result<(), String>
         "rustc-check-cfg" => out.check_cfgs.push(value.to_string()),
         "rustc-env" => {
             let Some((k, v)) = value.split_once('=') else {
-                return Err(format!("rustc-env 缺 `=`：`{value}`"));
+                return Err(format!("rustc-env missing `=`: `{value}`"));
             };
             out.envs.push((k.to_string(), v.to_string()));
         }
         "rustc-link-arg" | "rustc-link-arg-bins" => out.link_args.push(value.to_string()),
         "metadata" => {
             let Some((k, v)) = value.split_once('=') else {
-                return Err(format!("metadata 缺 `=`：`{value}`"));
+                return Err(format!("metadata missing `=`: `{value}`"));
             };
             out.metadata.insert(k.to_string(), v.to_string());
         }
         "warning" => out.warnings.push(value.to_string()),
-        "error" => return Err(format!("build script 发了 cargo::error：{value}")),
+        "error" => return Err(format!("build script emitted cargo::error: {value}")),
         // 切⑤b：两形都收（cargo 对 legacy rerun-if 同样认账）
         "rerun-if-changed" => out.rerun_if_changed.push(value.to_string()),
         "rerun-if-env-changed" => out.rerun_if_env_changed.push(value.to_string()),
@@ -127,7 +127,7 @@ fn apply(out: &mut BuildOutput, instr: &str, legacy: bool) -> Result<(), String>
 }
 
 /// DEP_* 键规范化（cargo envify 同）：ASCII 字母数字大写，其余一律 `_`
-/// （my-links.x → MY_LINKS_X）。
+/// (my-links.x → MY_LINKS_X).
 pub fn envify(s: &str) -> String {
     s.chars()
         .map(|c| {
@@ -140,16 +140,16 @@ pub fn envify(s: &str) -> String {
         .collect()
 }
 
-/// CARGO_CFG_* env 全集（E2 实证：cargo 就是 `rustc --print cfg` 的通用
-/// 映射——k="v" 原子按 key 分组、多值逗号连、裸旗 → 空串值；再按 profile
-/// 强制 DEBUG_ASSERTIONS/PANIC 两员；FEATURE = 本包启用 feature 逗号连）。
+/// Full CARGO_CFG_* env set (E2 empirical: cargo is the generic mapping of `rustc --print cfg`
+/// mapping — k="v" atoms grouped by key, multiple values joined with commas, bare flags → empty string values; then profile
+/// forces DEBUG_ASSERTIONS/PANIC; FEATURE = this package's enabled features joined with commas).
 /// 原子集来自 manifest.rs 的 host_cfg_atoms（与 cargo 平台匹配同源）。
 pub fn cargo_cfg_env(
     enabled_features: &BTreeSet<String>,
     profile: &ProfileFlags,
 ) -> BTreeMap<String, String> {
     let atoms = super::manifest::host_cfg_atoms();
-    // key → 收集到的非裸值（host_cfg_atoms 是 BTreeSet，字典序即cargo 拼接序）
+    // key → collected non-bare values (host_cfg_atoms is a BTreeSet, lexicographic order is cargo's concatenation order)
     let mut grouped: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for atom in atoms {
         if let Some((k, v)) = atom.split_once('=') {
@@ -162,7 +162,7 @@ pub fn cargo_cfg_env(
     for (k, vs) in &grouped {
         out.insert(format!("CARGO_CFG_{}", k.to_uppercase()), vs.join(","));
     }
-    // profile 强制两员（cargo 按 profile 钉，不随 --print cfg 原子有无）
+    // profile forces two entries (cargo pins by profile, regardless of --print cfg atom presence)
     if profile.debug_assertions {
         out.insert("CARGO_CFG_DEBUG_ASSERTIONS".into(), String::new());
     } else {
@@ -180,9 +180,9 @@ pub fn cargo_cfg_env(
     out
 }
 
-/// 直接依赖的 links metadata → DEP_<LINKS>_<KEY> env（E1(d) 实证：**只给
-/// 直接依赖者**，传递依赖者看不到；links 与 metadata 键都过 envify；
-/// 无自动 ROOT——cargo 不注入 DEP_<LINKS>_ROOT）。
+/// Direct-dependency links metadata → DEP_<LINKS>_<KEY> env (E1(d) empirical: **only given
+/// to direct dependents**, transitive dependents cannot see; both links and metadata keys pass through envify;
+/// no automatic ROOT — cargo does not inject DEP_<LINKS>_ROOT).
 pub fn dep_metadata_env(
     plan: &ResolvePlan,
     dep_edges: &[UnitDep],
@@ -202,38 +202,38 @@ pub fn dep_metadata_env(
     env
 }
 
-/// build script 执行 env 的全部输入（平铺参数太多，收成上下文结构）。
+/// All inputs for build script execution env (too many flat parameters, gathered into a context struct).
 pub struct ExecCtx<'a> {
-    /// CARGO_PKG_* 全集（unit.pkg_env / manifest.pkg_env）。
+    /// Full CARGO_PKG_* set (unit.pkg_env / manifest.pkg_env).
     pub pkg_env: &'a BTreeMap<String, String>,
-    /// 包根（cwd 也用它）。
+    /// Package root (also used as cwd).
     pub source_dir: &'a Path,
-    /// 本包启用 feature（CARGO_CFG_FEATURE）。
+    /// This package's enabled features (CARGO_CFG_FEATURE).
     pub features: &'a BTreeSet<String>,
     pub profile: &'a ProfileFlags,
-    /// OUT_DIR = build_root/<pkg>-<fp>/out。
+    /// OUT_DIR = build_root/<pkg>-<fp>/out.
     pub out_dir: &'a Path,
-    /// 直接依赖的 DEP_* env（dep_metadata_env 产出）。
+    /// DEP_* env from direct dependencies (produced by dep_metadata_env).
     pub dep_env: BTreeMap<String, String>,
-    /// 本包 manifest `links` 值（CARGO_MANIFEST_LINKS；无 links 键则不设——
-    /// ring 0.17.14 build.rs `env::var("CARGO_MANIFEST_LINKS").unwrap()` 实锤，
-    /// cargo 文档：the manifest links value）。
+    /// This package manifest `links` value (CARGO_MANIFEST_LINKS; not set if no links key —
+    /// ring 0.17.14 build.rs `env::var("CARGO_MANIFEST_LINKS").unwrap()` empirically proves it,
+    /// cargo docs: the manifest links value).
     pub links: Option<&'a str>,
-    /// LD_LIBRARY_PATH 组成目（host_deps + deps；proc-macro build-dep 的
-    /// .so 运行期 dlopen 要能找到）。
+    /// LD_LIBRARY_PATH component directories (host_deps + deps; proc-macro build-dep
+    /// .so must be findable by dlopen at runtime).
     pub ld_dirs: &'a [PathBuf],
 }
 
-/// build script 执行 env 全集（E2 实证清单逐条核对，cargo 1.98 同一工具链
-/// 实机 dump）。不设 CARGO_MAKEFLAGS：jobserver 不在——cli.rs runner 段同款
-/// 处理（串行调度无令牌协议可给）。
+/// Full build script execution env (E2 empirical checklist verified line by line, same toolchain as cargo 1.98
+/// real-machine dump). No CARGO_MAKEFLAGS: jobserver is absent — same handling as cli.rs runner section
+/// (serial scheduling has no token protocol to give).
 pub fn build_script_env(ctx: &ExecCtx) -> BTreeMap<String, String> {
     let mut env = ctx.pkg_env.clone();
     env.extend(cargo_cfg_env(ctx.features, ctx.profile));
     env.extend(ctx.dep_env.iter().map(|(k, v)| (k.clone(), v.clone())));
-    // CARGO_FEATURE_<NAME>=1 逐启用 feature（cargo 同；build.rs 探测 feature
-    // 的正典通道——cranelift-codegen 按 CARGO_FEATURE_PULLEY 决定生成
-    // pulley_inst_gen.rs 实锤，缺了它 OUT_DIR 产物缺文件、include! 炸）
+    // CARGO_FEATURE_<NAME>=1 for each enabled feature (cargo-equivalent; build.rs detects features
+    // through the canonical channel — cranelift-codegen decides generating
+    // pulley_inst_gen.rs empirically; without it OUT_DIR output lacks files and include! blows up)
     for f in ctx.features {
         env.insert(format!("CARGO_FEATURE_{}", envify(f)), "1".to_string());
     }
@@ -268,8 +268,8 @@ pub fn build_script_env(ctx: &ExecCtx) -> BTreeMap<String, String> {
     put("RUSTC", sysroot.join("bin/rustc").display().to_string());
     put("RUSTDOC", sysroot.join("bin/rustdoc").display().to_string());
     put("RUST_RECURSION_COUNT", "1".into());
-    // 与 cargo 的差：cargo 填真 cargo 路径，我们填 mirvm 当前 exe——
-    // build.rs 里 env!("CARGO")/var("CARGO") 可观察到这个差，夹具不触
+    // Difference from cargo: cargo fills the real cargo path, we fill mirvm's current exe —
+    // this difference is observable in build.rs via env!("CARGO")/var("CARGO"), test fixtures do not rely on it
     let cargo = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "mirvm".into());
@@ -280,8 +280,8 @@ pub fn build_script_env(ctx: &ExecCtx) -> BTreeMap<String, String> {
             .unwrap_or_default()
     });
     put("CARGO_HOME", cargo_home);
-    // cargo 形态：<build 目录族>:<deps>:<rustlib lib>:<toolchain lib>；
-    // 我们 = host_deps + deps + 工具链两目
+    // cargo form: <build dir family>:<deps>:<rustlib lib>:<toolchain lib>;
+    // ours = host_deps + deps + two toolchain dirs
     let mut ld: Vec<String> = ctx
         .ld_dirs
         .iter()
@@ -298,8 +298,8 @@ pub fn build_script_env(ctx: &ExecCtx) -> BTreeMap<String, String> {
     env
 }
 
-/// 同步执行 build script：cwd = 包根；stdin null；stdout 捕获（=指令流）；
-/// stderr 捕获，仅失败时随错误回吐（cargo 同）。非零退出响亮报错。
+/// Synchronously execute build script: cwd = package root; stdin null; stdout captured (= instruction stream);
+/// stderr captured, returned with error only on failure (cargo-equivalent). Non-zero exit is a loud error.
 pub fn run_build_script(
     exe: &Path,
     cwd: &Path,
@@ -312,20 +312,20 @@ pub fn run_build_script(
         .stderr(std::process::Stdio::piped())
         .envs(env)
         .output()
-        .map_err(|e| format!("build script 启动失败 {}: {e}", exe.display()))?;
+        .map_err(|e| format!("build script launch failed {}: {e}", exe.display()))?;
     if !out.status.success() {
         return Err(format!(
-            "build script 退出非零（{}）：\n{}",
+            "build script exited non-zero ({}):\n{}",
             out.status,
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    String::from_utf8(out.stdout).map_err(|e| format!("build script stdout 非 UTF-8: {e}"))
+    String::from_utf8(out.stdout).map_err(|e| format!("build script stdout not UTF-8: {e}"))
 }
 
-/// links 互斥（cargo 同：同一 links 值至多一个包——防重复符号）。根包与
-/// 全部 unit 一起查；同名包的 Normal/Build 双 unit 共享 links 不算冲突
-/// （按 (包, 版本) 判重）。
+/// links mutual exclusion (cargo-equivalent: same links value at most one package — prevents duplicate symbols). Root package and
+/// all units checked together; Normal/Build dual units of the same package sharing links are not conflicts
+/// (deduplicated by (package, version)).
 pub fn check_links_unique(
     root: Option<(&str, Option<&str>)>,
     plan: &ResolvePlan,
@@ -335,7 +335,7 @@ pub fn check_links_unique(
         match seen.get(links) {
             Some((p, v)) if p == pkg && v == ver => Ok(()),
             Some((p, v)) => Err(format!(
-                "links 键冲突：`{links}` 同时被 {p} {v} 与 {pkg} {ver} 声明（cargo 同拒：同一 links 至多一个包）"
+                "links key conflict: `{links}` declared by both {p} {v} and {pkg} {ver} (cargo-equivalent rejection: same links at most one package)"
             )),
             None => {
                 seen.insert(links.to_string(), (pkg.to_string(), ver.to_string()));
@@ -344,7 +344,7 @@ pub fn check_links_unique(
         }
     };
     if let Some((name, Some(links))) = root {
-        note(links, name, "（根包）")?;
+        note(links, name, "(root package)")?;
     }
     for u in &plan.units {
         if let Some(links) = &u.links {
@@ -354,11 +354,11 @@ pub fn check_links_unique(
     Ok(())
 }
 
-/// -L 传播汇集（E1(a)(b) 实证：rustc-link-search 进本包 + 全部传递依赖
-/// 者）：从 `edges` 的 Normal 类边出发沿 Normal 边 BFS，收集闭包内全部
-/// 已执行 BuildOutput 的 link_searches。proc-macro unit 收自身一份但不再
-/// 深入（它的依赖是 host 世界的，与 target 链接无关——与 target_units
-/// 同一条界）。
+/// -L propagation collection (E1(a)(b) empirical: rustc-link-search enters this package + all transitive
+/// dependents): starting from Normal-class edges in `edges`, BFS along Normal edges, collecting all
+/// executed BuildOutput link_searches. proc-macro unit collects its own but does not
+/// go deeper (its dependencies are host-world, unrelated to target linking — same boundary as target_units
+/// same boundary).
 pub fn aggregate_link_searches(
     plan: &ResolvePlan,
     edges: &[UnitDep],
@@ -392,30 +392,30 @@ pub fn aggregate_link_searches(
     out
 }
 
-// ---------- 切⑤b：rerun-if 精细增量（存档 ↔ 重跑判定，cargo 同语义） ----------
+// ---------- cut⑤b: rerun-if fine-grained incrementality (record ↔ rerun decision, cargo-equivalent semantics) ----------
 //
-// 存档两份，落 `build/<pkg>-<fp>/`（driver 的 record_dir）：
-// - `output.txt`：上次执行的**原始 stdout**。未重跑时重新 parse_instructions
-//   得 BuildOutput——指令流零序列化失真（DEP_*/OUT_DIR/warning 回放全等价），
-//   不另建序列化格式。
-// - `rerun.txt`：重跑条件存档，手写行格式（不引序列化依赖）：
+// Two records land in `build/<pkg>-<fp>/` (driver's record_dir):
+// - `output.txt`: **raw stdout** from last execution. When not rerunning, re-parse_instructions
+//   into BuildOutput — instruction stream has zero serialization distortion (DEP_*/OUT_DIR/warning playback fully equivalent),
+//   no separate serialization format.
+// - `rerun.txt`: rerun-condition record, hand-written line format (no serialization dependency):
 //     首行 `mirvm-bldrs-rerun-v1 changed` | `mirvm-bldrs-rerun-v1 default`
-//       ——changed = 发过 ≥1 枚 rerun-if-changed（取代默认面）；default = 未发。
+//       — changed = emitted ≥1 rerun-if-changed (replaces default face); default = none emitted.
 //     changed 面逐路径一行：`P\t<len>\t<mtime_ns>\t<esc(原样路径)>`
-//       （存档时刻 stat 失败记 `P\t-\t-\t...`；判定时当前缺席或存档缺席都按
-//       变化计——保守，cargo 同口径）。
-//     default 面 path/根包一行树快照：`T\t<折叠串>`（source_stamp_dir 同款
+//       (stat failure at record time is logged as `P\t-\t-\t...`; current absence or record absence at decision time both count
+//       as change — conservative, cargo-equivalent).
+//     default face path/root-package tree snapshot one line: `T\t<folded string>` (same as source_stamp_dir
 //       (路径:len:mtime_ns) 排序 \u{1e} 折叠，占本行剩余全部不再分列）；
-//       registry 包源按 cksum 不可变，无 T 行（判定时直接 skip）。
-//     rerun-if-env-changed 两面通用逐变量一行：
-//       `E0\t<esc(var)>`（当时缺席）/ `E1\t<esc(var)>\t<esc(值)>`。
-//   esc：`\`→`\\`、制表符→`\t`、换行→`\n`（路径/env 值含分列符的理论面兜死；
-//   非 UTF-8 路径经 display 有损——存档判定同走 display 串，stat 失败按
-//   变化计，保守不错过）。
-// 存档在**执行成功后**写（失败 driver 已响亮退出，无半存档）；两文件缺一或
-// 解析失败 ⇒ 判 run 自愈。
+//       registry package sources are immutable by cksum, no T line (decision directly skip).
+//     rerun-if-env-changed one variable per line, applies to both faces:
+//       `E0\t<esc(var)>` (absent then) / `E1\t<esc(var)>\t<esc(value)>`.
+//   esc: `\`→`\\`, tab→`\t`, newline→`\n` (theoretical case of path/env value containing column separators is covered;
+//   non-UTF-8 paths go through display lossily — record and decision both use the display string, stat failure
+//   counts as change, conservative and won't miss).
+// Records are written **after successful execution** (on failure driver already exits loudly, no half-record); missing either file or
+// parse failure ⇒ decision run self-heals.
 
-/// 行内转义（见上格式说明）。
+/// Inline escaping (see format description above).
 fn esc(s: &str) -> String {
     let mut o = String::with_capacity(s.len());
     for c in s.chars() {
@@ -438,7 +438,7 @@ fn unesc(s: &str) -> Result<String, String> {
                 Some('\\') => o.push('\\'),
                 Some('t') => o.push('\t'),
                 Some('n') => o.push('\n'),
-                other => return Err(format!("rerun.txt 坏转义 \\{}", other.unwrap_or('?'))),
+                other => return Err(format!("rerun.txt bad escape \\{}", other.unwrap_or('?'))),
             }
         } else {
             o.push(c);
@@ -447,28 +447,28 @@ fn unesc(s: &str) -> Result<String, String> {
     Ok(o)
 }
 
-/// 一个 rerun-if-changed 路径的存档快照 (len, mtime_ns)；None = 存档时刻缺席
-/// （判定时当前缺席/存档缺席都按变化计——保守，cargo 同口径）。
+/// A rerun-if-changed path record snapshot (len, mtime_ns); None = absent at record time
+/// (current absence/record absence at decision time both count as change — conservative, cargo-equivalent).
 type FileStamp = Option<(u64, u128)>;
 
 /// 解析后的 rerun.txt（should_rerun 的判定输入）。
 struct RerunRecord {
-    /// Some = changed 面：(显示用原样路径, 存档快照)。
+    /// Some = changed face: (display-original path, record snapshot).
     changed_paths: Option<Vec<(String, FileStamp)>>,
-    /// default 面 path/根包的树快照（registry 无）。
+    /// default face path/root-package tree snapshot (none for registry).
     tree: Option<String>,
-    /// (var, 当时值（None = 当时缺席）)。
+    /// (var, value at that time (None = absent then)).
     envs: Vec<(String, Option<String>)>,
 }
 
 fn parse_record(text: &str) -> Result<RerunRecord, String> {
     let mut lines = text.lines();
-    let face = lines.next().ok_or("rerun.txt 空")?;
+    let face = lines.next().ok_or("rerun.txt empty")?;
     let mut rec = RerunRecord {
         changed_paths: match face {
             "mirvm-bldrs-rerun-v1 changed" => Some(Vec::new()),
             "mirvm-bldrs-rerun-v1 default" => None,
-            _ => return Err(format!("rerun.txt 首行不识：{face}")),
+            _ => return Err(format!("rerun.txt first line unrecognized: {face}")),
         },
         tree: None,
         envs: Vec::new(),
@@ -494,23 +494,23 @@ fn parse_record(text: &str) -> Result<RerunRecord, String> {
             };
             rec.changed_paths
                 .as_mut()
-                .ok_or("default 面混入 P 行")?
+                .ok_or("default face mixed with P line")?
                 .push((unesc(path)?, stamp));
         } else if let Some(stamp) = line.strip_prefix("T\t") {
             rec.tree = Some(stamp.to_string());
         } else if let Some(var) = line.strip_prefix("E0\t") {
             rec.envs.push((unesc(var)?, None));
         } else if let Some(rest) = line.strip_prefix("E1\t") {
-            let (var, val) = rest.split_once('\t').ok_or("E1 行缺值列")?;
+            let (var, val) = rest.split_once('\t').ok_or("E1 line missing value column")?;
             rec.envs.push((unesc(var)?, Some(unesc(val)?)));
         } else {
-            return Err(format!("rerun.txt 坏行：{line}"));
+            return Err(format!("rerun.txt bad line: {line}"));
         }
     }
     Ok(rec)
 }
 
-/// (len, mtime_ns) 快照（source_stamp_dir 行内同款取法：mtime 失败记 0）。
+/// (len, mtime_ns) snapshot (same in-line retrieval as source_stamp_dir: mtime failure recorded as 0).
 fn len_mtime(p: &Path) -> Option<(u64, u128)> {
     let md = std::fs::metadata(p).ok()?;
     let mtime_ns = md
@@ -522,8 +522,8 @@ fn len_mtime(p: &Path) -> Option<(u64, u128)> {
     Some((md.len(), mtime_ns))
 }
 
-/// rerun-if-changed 的 PATH 解析：绝对路径原样，相对路径拼包根（cargo 同——
-/// 相对者相对 CARGO_MANIFEST_DIR）。
+/// rerun-if-changed PATH parsing: absolute path as-is, relative path joined to package root (cargo-equivalent —
+/// relative paths are relative to CARGO_MANIFEST_DIR).
 fn absolutize(pkg_root: &Path, p: &str) -> PathBuf {
     let path = Path::new(p);
     if path.is_absolute() {
@@ -533,8 +533,8 @@ fn absolutize(pkg_root: &Path, p: &str) -> PathBuf {
     }
 }
 
-/// 执行成功后写存档（output.txt = 原始 stdout；rerun.txt = 条件存档）。
-/// `env_get` 注入便于单测；失败由调用方按「下次 no-record 重跑自愈」忽略。
+/// Write records after successful execution (output.txt = raw stdout; rerun.txt = condition record).
+/// `env_get` injected for unit testing; failures ignored by caller as "next no-record rerun self-heals".
 pub fn write_record(
     record_dir: &Path,
     stdout: &str,
@@ -548,7 +548,7 @@ pub fn write_record(
     if bo.rerun_if_changed.is_empty() {
         t.push_str("mirvm-bldrs-rerun-v1 default\n");
         if !from_registry {
-            // 默认面快照与指纹盖戳同折叠（source_stamp_dir 排除 target/.git）
+            // default face snapshot folded the same way as fingerprint stamp (source_stamp_dir excludes target/.git)
             let stamp = super::schedule::source_stamp_dir(false, pkg_root, pkg)?;
             t.push_str("T\t");
             t.push_str(&stamp);
@@ -572,29 +572,29 @@ pub fn write_record(
     }
     let w = |name: &str, data: &str| {
         std::fs::write(record_dir.join(name), data)
-            .map_err(|e| format!("写 {name} 失败（{}）: {e}", record_dir.display()))
+            .map_err(|e| format!("writing {name} failed ({}): {e}", record_dir.display()))
     };
     w("rerun.txt", &t)?;
     w("output.txt", stdout)
 }
 
-/// 重跑判定（cargo 同语义；返回 (是否重跑, 原因短语)——原因供
-/// MIRVM_DEBUG_BLDRS=1 的 `bldrs run|skip <pkg> <原因>` 观测行）。
-/// 规则：
-/// 1. 存档两员缺一 ⇒ run（`no-record`；fp 变 ⇒ 新 fp 目录天然走这条，
-///    「源/旗/依赖/工具链变 ⇒ 重跑」由指纹先行免费覆盖）。
-/// 2. rerun.txt 损坏 ⇒ run（`bad-record`，自愈）。
-/// 3. 直接依赖中带 links 的包本次会话重跑了 ⇒ run（`links-dep:<dep>`；
-///    DEP_* 输入可能变，cargo 同。只看直接依赖——DEP_* 本就只给直接
-///    依赖者；更远的传递由各层自己的判定覆盖）。
-/// 4. rerun-if-env-changed=VAR：当前进程值 ≠ 存档值 ⇒ run（`env:<var>`）。
-/// 5. 文件面：
-///    - changed 面：任一 PATH 的 (len, mtime_ns) ≠ 存档 ⇒ run
-///      （`changed-path:<p>`；当前缺席或存档缺席都按变化计——保守，cargo 同）。
-///    - default 面：registry ⇒ 永不重跑（`registry-default-skip`，源按 cksum
-///      不可变）；path/根包 ⇒ 重算树快照 ≠ 存档 ⇒ run（`default-tree`）。
+/// Rerun decision (cargo-equivalent semantics; returns (should_rerun, reason_phrase) — reason for
+/// MIRVM_DEBUG_BLDRS=1 `bldrs run|skip <pkg> <reason>` observation line).
+/// Rules:
+/// 1. Missing either record file ⇒ run (`no-record`; fp change ⇒ new fp directory naturally takes this path,
+///    "source/flag/dependency/toolchain change ⇒ rerun" is already covered for free by fingerprint).
+/// 2. rerun.txt corrupted ⇒ run (`bad-record`, self-heals).
+/// 3. A direct dependency with links reran in this session ⇒ run (`links-dep:<dep>`;
+///    DEP_* input may change, cargo-equivalent. Only direct dependencies — DEP_* is only given to direct
+///    dependents; farther transit is covered by each layer's own decision).
+/// 4. rerun-if-env-changed=VAR: current process value ≠ recorded value ⇒ run (`env:<var>`).
+/// 5. File face:
+///    - changed face: any PATH's (len, mtime_ns) ≠ recorded ⇒ run
+///      (`changed-path:<p>`; current absence or record absence both count as change — conservative, cargo-equivalent).
+///    - default face: registry ⇒ never rerun (`registry-default-skip`, source immutable by cksum
+///      immutable); path/root-package ⇒ recomputed tree snapshot ≠ record ⇒ run (`default-tree`).
 ///
-///    全部一致 ⇒ skip（`changed-intact` / `default-tree-intact`）。
+///    All consistent ⇒ skip (`changed-intact` / `default-tree-intact`).
 pub fn should_rerun(
     record_dir: &Path,
     from_registry: bool,
@@ -634,12 +634,12 @@ pub fn should_rerun(
                 return (false, "registry-default-skip".to_string());
             }
             let Some(old) = &rec.tree else {
-                // default 面 path 包存档必有 T 行——缺了按损坏自愈
+                // default-face path package record must have a T line — missing it self-heals as corrupted
                 return (true, "bad-record".to_string());
             };
             match super::schedule::source_stamp_dir(false, pkg_root, pkg) {
                 Ok(now) if &now == old => (false, "default-tree-intact".to_string()),
-                // 树读不出来也按变化计（保守；fp 阶段已读过同一棵树，几乎到不了这）
+                // tree unread also counts as change (conservative; fp stage already read the same tree, rarely reaches here)
                 _ => (true, "default-tree".to_string()),
             }
         }
@@ -663,11 +663,11 @@ mod tests {
              cargo::rustc-link-arg=-Wl,--x\n\
              cargo::rustc-link-arg-bins=-Wl,--y\n\
              cargo::metadata=foo=bar\n\
-             cargo::warning=小心点\n\
+             cargo::warning=be careful\n\
              cargo::rerun-if-changed=build.rs\n\
              cargo::rerun-if-env-changed=CC\n\
-             cargo::future-new-key=被忽略\n\
-             普通输出行当没看见\n",
+             cargo::future-new-key=ignored\n\
+             ordinary output line ignored\n",
         )
         .unwrap();
         assert_eq!(out.link_libs, ["static=probehelper", "foo"]);
@@ -677,15 +677,15 @@ mod tests {
         assert_eq!(out.envs, [("ROOT_SEEN".to_string(), "bar".to_string())]);
         assert_eq!(out.link_args, ["-Wl,--x", "-Wl,--y"]);
         assert_eq!(out.metadata.get("foo").map(String::as_str), Some("bar"));
-        assert_eq!(out.warnings, ["小心点"]);
-        // 切⑤b：rerun-if 两键收进 BuildOutput（重跑判定消费）
+        assert_eq!(out.warnings, ["be careful"]);
+        // cut⑤b: rerun-if keys collected into BuildOutput (consumed by rerun decision)
         assert_eq!(out.rerun_if_changed, ["build.rs"]);
         assert_eq!(out.rerun_if_env_changed, ["CC"]);
     }
 
     #[test]
     fn parse_legacy_single_colon_and_unknown_as_metadata() {
-        // legacy 单冒号：已知键照常，未知键按 metadata 收（cargo 同口径）
+        // legacy single colon: known keys as usual, unknown keys taken as metadata (cargo-equivalent)
         let out = parse_instructions(
             "cargo:rustc-link-lib=z\n\
              cargo:rustc-cfg=old\n\
@@ -695,7 +695,7 @@ mod tests {
         .unwrap();
         assert_eq!(out.link_libs, ["z"]);
         assert_eq!(out.cfgs, ["old"]);
-        assert_eq!(out.link_searches, ["/p"], "CRLF 尾要剥");
+        assert_eq!(out.link_searches, ["/p"], "CRLF tail must be stripped");
         assert_eq!(
             out.metadata.get("root").map(String::as_str),
             Some("/opt/sys")
@@ -704,13 +704,13 @@ mod tests {
 
     #[test]
     fn parse_error_and_bad_forms_are_loud() {
-        let e = parse_instructions("cargo::error=缺 libfoo").unwrap_err();
-        assert!(e.contains("缺 libfoo"), "{e}");
+        let e = parse_instructions("cargo::error=missing libfoo").unwrap_err();
+        assert!(e.contains("missing libfoo"), "{e}");
         let e = parse_instructions("cargo::rustc-env=NOEQ").unwrap_err();
         assert!(e.contains("rustc-env"), "{e}");
         let e = parse_instructions("cargo::rustc-flags=-O2").unwrap_err();
         assert!(e.contains("-l/-L"), "{e}");
-        // 新形未知键静默忽略（前向兼容），不报错
+        // new-form unknown keys silently ignored (forward compatibility), no error
         parse_instructions("cargo::brand-new=1").unwrap();
     }
 
@@ -785,22 +785,22 @@ mod tests {
         assert_eq!(
             env.get("CARGO_CFG_UNIX").map(String::as_str),
             Some(""),
-            "裸旗 unix → 空串值"
+            "bare unix flag → empty string value"
         );
         let atomic = env.get("CARGO_CFG_TARGET_HAS_ATOMIC").unwrap();
         assert!(
             atomic.split(',').count() >= 4 && atomic.contains("ptr"),
-            "多值逗号连: {atomic}"
+            "multiple values comma-joined: {atomic}"
         );
         assert_eq!(
             env.get("CARGO_CFG_FEATURE").map(String::as_str),
             Some("derive,std"),
-            "feature 逗号连（BTreeSet 字典序）"
+            "features comma-joined (BTreeSet lexicographic order)"
         );
         assert_eq!(
             env.get("CARGO_CFG_DEBUG_ASSERTIONS").map(String::as_str),
             Some(""),
-            "dev profile → 在场空串"
+            "dev profile → present empty string"
         );
         assert_eq!(
             env.get("CARGO_CFG_PANIC").map(String::as_str),
@@ -819,7 +819,7 @@ mod tests {
 
     // ---- 切⑤b：重跑判定矩阵 + 存档往返 ----
 
-    /// 每测试一枚独立临时目录（并行不互踩）；返回 (record_dir, pkg_root)。
+    /// One independent temp directory per test (parallel-safe); returns (record_dir, pkg_root).
     fn rerun_tmp(tag: &str) -> (PathBuf, PathBuf) {
         let base =
             std::env::temp_dir().join(format!("mirvm-bldrs-rerun-{tag}-{}", std::process::id()));
@@ -840,7 +840,7 @@ mod tests {
         }
     }
 
-    /// changed 面夹具：包内 build.rs + 一枚 env 变量。
+    /// changed-face fixture: in-package build.rs + one env variable.
     fn changed_bo() -> BuildOutput {
         BuildOutput {
             rerun_if_changed: vec!["build.rs".into()],
@@ -855,7 +855,7 @@ mod tests {
         let env = env_of(&[]);
         let (run, why) = should_rerun(&record, false, "demo", &root, &[], &env);
         assert!(run && why == "no-record", "{why}");
-        // 只有 rerun.txt 没有 output.txt 同样 no-record（两员缺一不可）
+        // rerun.txt alone without output.txt also yields no-record (both files required)
         std::fs::write(record.join("rerun.txt"), "mirvm-bldrs-rerun-v1 default\n").unwrap();
         let (run, why) = should_rerun(&record, true, "demo", &root, &[], &env);
         assert!(run && why == "no-record", "{why}");
@@ -867,7 +867,7 @@ mod tests {
         std::fs::write(root.join("build.rs"), "fn main(){}").unwrap();
         let env = env_of(&[("X", "1")]);
         write_record(&record, "stdout", &changed_bo(), false, "demo", &root, &env).unwrap();
-        // 存档往返：同 env 同文件 ⇒ skip（changed-intact）
+        // record round-trip: same env same file ⇒ skip (changed-intact)
         let (run, why) = should_rerun(&record, false, "demo", &root, &[], &env);
         assert!(!run && why == "changed-intact", "{why}");
     }
@@ -879,7 +879,7 @@ mod tests {
         std::fs::write(&f, "fn main(){}").unwrap();
         let env = env_of(&[("X", "1")]);
         write_record(&record, "s", &changed_bo(), false, "demo", &root, &env).unwrap();
-        // 只动 mtime（len 不变）⇒ run（(len, mtime_ns) 元组比对）
+        // only mtime changed (len unchanged) ⇒ run ((len, mtime_ns) tuple comparison)
         std::fs::File::options()
             .write(true)
             .open(&f)
@@ -888,7 +888,7 @@ mod tests {
             .unwrap();
         let (run, why) = should_rerun(&record, false, "demo", &root, &[], &env);
         assert!(run && why == "changed-path:build.rs", "{why}");
-        // 文件缺席按变化计（保守，cargo 同口径）
+        // file absence counts as change (conservative, cargo-equivalent)
         std::fs::remove_file(&f).unwrap();
         let (run, why) = should_rerun(&record, false, "demo", &root, &[], &env);
         assert!(run && why == "changed-path:build.rs", "{why}");
@@ -908,7 +908,7 @@ mod tests {
             &env_of(&[("X", "1")]),
         )
         .unwrap();
-        // 值变 ⇒ run；值撤（缺席）⇒ run
+        // value change ⇒ run; value removed (absent) ⇒ run
         let (run, why) = should_rerun(&record, false, "demo", &root, &[], &env_of(&[("X", "2")]));
         assert!(run && why == "env:X", "{why}");
         let (run, why) = should_rerun(&record, false, "demo", &root, &[], &env_of(&[]));
@@ -918,7 +918,7 @@ mod tests {
     #[test]
     fn registry_default_face_never_reruns() {
         let (record, root) = rerun_tmp("registry-default");
-        // registry 包默认面：pkg_root 连造都不用造（不读树）⇒ skip
+        // registry package default face: pkg_root need not even be created (tree not read) ⇒ skip
         let env = env_of(&[]);
         write_record(
             &record,
@@ -950,10 +950,10 @@ mod tests {
             &env,
         )
         .unwrap();
-        // 往返 skip（默认面树快照一致）
+        // round-trip skip (default-face tree snapshot consistent)
         let (run, why) = should_rerun(&record, false, "demo", &root, &[], &env);
         assert!(!run && why == "default-tree-intact", "{why}");
-        // 包内任意文件变化（新增）⇒ run
+        // any in-package file change (added) ⇒ run
         std::fs::write(root.join("src/new.rs"), "").unwrap();
         let (run, why) = should_rerun(&record, false, "demo", &root, &[], &env);
         assert!(run && why == "default-tree", "{why}");
@@ -965,7 +965,7 @@ mod tests {
         std::fs::write(root.join("build.rs"), "fn main(){}").unwrap();
         let env = env_of(&[("X", "1")]);
         write_record(&record, "s", &changed_bo(), false, "demo", &root, &env).unwrap();
-        // 直接依赖的 links 包本次重跑了 ⇒ 本包也 run（DEP_* 输入可能变）
+        // direct-dependency links package reran this session ⇒ this package also run (DEP_* input may change)
         let deps = vec!["bdep".to_string()];
         let (run, why) = should_rerun(&record, false, "demo", &root, &deps, &env);
         assert!(run && why == "links-dep:bdep", "{why}");
@@ -977,7 +977,7 @@ mod tests {
         std::fs::write(root.join("build.rs"), "fn main(){}").unwrap();
         let env = env_of(&[("X", "1")]);
         write_record(&record, "s", &changed_bo(), false, "demo", &root, &env).unwrap();
-        std::fs::write(record.join("rerun.txt"), "这不是存档").unwrap();
+        std::fs::write(record.join("rerun.txt"), "this is not a record").unwrap();
         let (run, why) = should_rerun(&record, false, "demo", &root, &[], &env);
         assert!(run && why == "bad-record", "{why}");
     }
@@ -986,6 +986,6 @@ mod tests {
     fn esc_roundtrip_and_bad_escape() {
         assert_eq!(esc("a\\b\tc\nd"), "a\\\\b\\tc\\nd");
         assert_eq!(unesc(&esc("a\\b\tc\nd")).unwrap(), "a\\b\tc\nd");
-        assert!(unesc("孤\\").is_err());
+        assert!(unesc("lone\\").is_err());
     }
 }

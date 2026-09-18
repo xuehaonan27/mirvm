@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Workspace cargoless 合同：只覆盖当前多包产品切片，固定 Cargo 是行为权威。
+# Workspace cargoless contract: covers only the current multi-package product slice; the pinned Cargo is the behavioral authority.
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
 test_enter_repo
@@ -13,14 +13,14 @@ REMAINING=$(pwd)/tests/fixtures/cless_workspace_remaining_contract
 CONTRACT_HOME=${MIRVM_CONTRACT_HOME:-${MIRVM_HOME:-$HOME/.mirvm}}
 HOST=$($RUSTC -vV | sed -n 's/^host: //p')
 
-[ -x "$MIRVM" ] || { echo "cargoless_workspace_contract: $MIRVM 不存在" >&2; exit 69; }
-[ -x "$CARGO" ] || { echo "cargoless_workspace_contract: pinned Cargo 不存在" >&2; exit 69; }
-[ -x "$STRACE" ] || { echo "cargoless_workspace_contract: strace 不存在" >&2; exit 69; }
+[ -x "$MIRVM" ] || { echo "cargoless_workspace_contract: $MIRVM missing" >&2; exit 69; }
+[ -x "$CARGO" ] || { echo "cargoless_workspace_contract: pinned Cargo missing" >&2; exit 69; }
+[ -x "$STRACE" ] || { echo "cargoless_workspace_contract: strace missing" >&2; exit 69; }
 ensure_test_sysroot "$MIRVM" "$CONTRACT_HOME" "$RUSTC" || exit $?
 CONTRACT_SYSROOT=$TEST_SYSROOT
 case "$($CARGO --version)" in
     "cargo 1.98.0-nightly "*) ;;
-    *) echo "ERROR cargoless_workspace: Cargo 版本不在合同内" >&2; exit 69 ;;
+    *) echo "ERROR cargoless_workspace: Cargo version not in contract" >&2; exit 69 ;;
 esac
 
 TMP=$(mktemp -d)
@@ -58,15 +58,15 @@ triplet() {
         normalize <"$TMP/$name.$leg.err" >"$TMP/$name.$leg.norm.err"
     done
     if [ "$nc" != "$expected" ] || [ "$cc" != "$expected" ] || [ "$sc" != "$expected" ]; then
-        bad "$name 退出码 native=$nc compat=$cc self=$sc，期望 $expected"
+        bad "$name exit code native=$nc compat=$cc self=$sc, expected $expected"
         tail -20 "$TMP/$name.self.err"
     elif ! diff -q "$TMP/$name.native.norm.out" "$TMP/$name.compat.norm.out" >/dev/null \
         || ! diff -q "$TMP/$name.native.norm.out" "$TMP/$name.self.norm.out" >/dev/null; then
-        bad "$name stdout 不一致"
+        bad "$name stdout differs"
         diff -u "$TMP/$name.native.norm.out" "$TMP/$name.self.norm.out" | head -60
     elif ! diff -q "$TMP/$name.native.norm.err" "$TMP/$name.compat.norm.err" >/dev/null \
         || ! diff -q "$TMP/$name.native.norm.err" "$TMP/$name.self.norm.err" >/dev/null; then
-        bad "$name stderr 不一致"
+        bad "$name stderr differs"
         diff -u "$TMP/$name.native.norm.err" "$TMP/$name.self.norm.err" | head -40
     else
         ok "$name"
@@ -94,22 +94,22 @@ WORKSPACE_FORCE_FAIL=1 triplet fail_fast "$FIXTURE" 101 --workspace --lib -- --t
 WORKSPACE_FORCE_FAIL=1 triplet no_fail_fast "$FIXTURE" 101 --workspace --lib --no-fail-fast -- --test-threads=1 --nocapture
 for leg in native compat self; do
     if rg -q 'WORKSPACE_(APP|TOOL)' "$TMP/fail_fast.$leg.out"; then
-        bad "fail_fast $leg 在首个失败包后仍继续"
+        bad "fail_fast $leg continued after first failed package"
     else
-        ok "fail_fast $leg 停止"
+        ok "fail_fast $leg stopped"
     fi
     if rg -q 'WORKSPACE_APP' "$TMP/no_fail_fast.$leg.out" \
         && rg -q 'WORKSPACE_TOOL' "$TMP/no_fail_fast.$leg.out"; then
-        ok "no_fail_fast $leg 继续其他成员"
+        ok "no_fail_fast $leg continued other members"
     else
-        bad "no_fail_fast $leg 未继续其他成员"
+        bad "no_fail_fast $leg did not continue other members"
     fi
 done
 
 if [ -e "$MIRVM_CARGO_SENTINEL" ]; then
-    bad "self 腿启动了 cargo"
+    bad "self leg launched cargo"
 else
-    ok "self 腿零 cargo"
+    ok "self leg zero cargo"
 fi
 PATH="$TMP/no-cargo:$PATH" MIRVM_HOME="$TMP/self-home" MIRVM_SYSROOT="$CONTRACT_SYSROOT" \
     MIRVM_DEPS=self "$STRACE" -f -qq -e trace=execve -o "$TMP/self.execve" \
@@ -117,11 +117,11 @@ PATH="$TMP/no-cargo:$PATH" MIRVM_HOME="$TMP/self-home" MIRVM_SYSROOT="$CONTRACT_
     >"$TMP/trace.out" 2>"$TMP/trace.err"
 trace_code=$?
 if [ "$trace_code" != 0 ]; then
-    bad "self execve 审计运行失败: $trace_code"
+    bad "self execve audit run failed: $trace_code"
 elif rg -q 'execve\("[^"]*/cargo",' "$TMP/self.execve"; then
-    bad "self 腿通过绝对路径启动了 cargo"
+    bad "self leg launched cargo via absolute path"
 else
-    ok "self 腿 execve 零 cargo"
+    ok "self leg execve zero cargo"
 fi
 
 FRESH="$TMP/fresh-workspace"
@@ -133,16 +133,16 @@ PATH="$TMP/no-cargo:$PATH" MIRVM_HOME="$TMP/fresh-home" MIRVM_SYSROOT="$CONTRACT
     >"$TMP/fresh.self.out" 2>"$TMP/fresh.self.err"
 fresh_code=$?
 if [ "$fresh_code" != 0 ] || [ ! -f "$FRESH/Cargo.lock" ]; then
-    bad "self 无锁 workspace 未生成可用 Cargo.lock"
+    bad "self lockless workspace did not produce a usable Cargo.lock"
     tail -20 "$TMP/fresh.self.err"
 elif ! CARGO_TARGET_DIR="$TMP/fresh-native-target" "$CARGO" test \
     --manifest-path "$FRESH/Cargo.toml" --locked --offline -p workspace-app --lib --no-run \
     --features extra \
     >"$TMP/fresh.native.out" 2>"$TMP/fresh.native.err"; then
-    bad "self 生成的 workspace Cargo.lock 未被 pinned Cargo 接受"
+    bad "self-generated workspace Cargo.lock not accepted by pinned Cargo"
     tail -20 "$TMP/fresh.native.err"
 else
-    ok "self 无锁 workspace 生成 pinned Cargo 可接受的统一 lock"
+    ok "self lockless workspace produced a unified lock acceptable to pinned Cargo"
 fi
 
 for leg in native compat self; do
@@ -154,9 +154,9 @@ for leg in native compat self; do
         [ "$count" = 1 ] || bad_count=1
     done
     if [ "${#counts[@]}" -gt 0 ] && [ "$bad_count" = 0 ]; then
-        ok "$leg workspace build.rs 每个编译键只执行一次"
+        ok "$leg workspace build.rs executed once per compile key"
     else
-        bad "$leg workspace build.rs 重跑异常: ${counts[*]:-<missing>}"
+        bad "$leg workspace build.rs rerun anomaly: ${counts[*]:-<missing>}"
     fi
 done
 
@@ -192,9 +192,9 @@ if [[ "$remaining_shared" == *'feature="build"'* ]] \
     && [[ "$remaining_shared" == *'feature="normal"'* ]] \
     && [[ "$remaining_root" == *'--warn=unexpected_cfgs'* ]] \
     && [[ "$remaining_root" == *'cfg(cless_workspace_lint)'* ]]; then
-    ok "pinned Cargo resolver 1 与 workspace lint 形状"
+    ok "pinned Cargo resolver 1 and workspace lint shape"
 else
-    bad "pinned Cargo resolver 1 与 workspace lint 形状漂移"
+    bad "pinned Cargo resolver 1 and workspace lint shape drift"
     tail -30 "$remaining_oracle"
 fi
 

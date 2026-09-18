@@ -40,9 +40,9 @@ fn put_u64(out: &mut [u8], offset: usize, value: u64) {
 
 fn push_cstr(table: &mut Vec<u8>, value: &[u8]) -> Result<u32, String> {
     if value.contains(&0) {
-        return Err("客体函数名含 NUL".into());
+        return Err("guest function name contains NUL".into());
     }
-    let offset = u32::try_from(table.len()).map_err(|_| "ELF 字符串表过大")?;
+    let offset = u32::try_from(table.len()).map_err(|_| "ELF string table too large")?;
     table.extend_from_slice(value);
     table.push(0);
     Ok(offset)
@@ -79,14 +79,16 @@ fn build_elf(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
     }
 
     let text_off = align(EHDR + PHNUM * PHDR, SLOT);
-    let text_len = names.len().checked_mul(SLOT).ok_or("ELF text 过大")?;
+    let text_len = names.len().checked_mul(SLOT).ok_or("ELF text too large")?;
     let dynstr_off = text_off + text_len;
     let dynsym_off = align(dynstr_off + dynstr.len(), 8);
-    let sym_len = (names.len() + 1).checked_mul(24).ok_or("ELF symtab 过大")?;
+    let sym_len = (names.len() + 1)
+        .checked_mul(24)
+        .ok_or("ELF symtab too large")?;
     let hash_off = align(dynsym_off + sym_len, 4);
     let hash_len = (2 + 1 + names.len() + 1)
         .checked_mul(4)
-        .ok_or("ELF hash 过大")?;
+        .ok_or("ELF hash too large")?;
     let dynamic_off = align(hash_off + hash_len, 8);
     let dynamic_len = 6 * 16;
     let strtab_off = dynamic_off + dynamic_len;
@@ -214,23 +216,23 @@ pub fn materialize_symbols(module: &mut Module) -> Result<(), String> {
     let fd = unsafe { libc::memfd_create(c"mirvm-guest-symbols".as_ptr(), libc::MFD_CLOEXEC) };
     if fd < 0 {
         return Err(format!(
-            "memfd_create 失败: {}",
+            "memfd_create failed: {}",
             std::io::Error::last_os_error()
         ));
     }
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
     file.write_all(&bytes)
-        .map_err(|error| format!("写入内存 ELF 失败: {error}"))?;
+        .map_err(|error| format!("writing in-memory ELF failed: {error}"))?;
     file.rewind()
-        .map_err(|error| format!("重置内存 ELF 失败: {error}"))?;
+        .map_err(|error| format!("rewinding in-memory ELF failed: {error}"))?;
     let path = std::ffi::CString::new(format!("/proc/self/fd/{fd}"))
-        .map_err(|_| "内存 ELF fd 路径意外包含 NUL".to_string())?;
+        .map_err(|_| "in-memory ELF fd path unexpectedly contains NUL".to_string())?;
     let handle = crate::os::dll::open_with_flags(
         &path,
         crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL,
     )
-    .map_err(|error| format!("dlopen 内存 ELF 失败: {error}"))?;
-    let bias = crate::os::dll::load_bias(handle).ok_or("读取内存 ELF 装载基址失败")?;
+    .map_err(|error| format!("dlopen of in-memory ELF failed: {error}"))?;
+    let bias = crate::os::dll::load_bias(handle).ok_or("reading in-memory ELF load base failed")?;
     module.backtrace_ips = (0..module.function_names.len())
         .map(|index| (bias + text_off + index * 16) as u64)
         .collect();

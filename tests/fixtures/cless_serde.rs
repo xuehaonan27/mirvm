@@ -4,10 +4,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ---
 
-// differential.cargoless 的 proc-macro 与 build.rs 全链夹具。
-// （host 编译 + 执行 + cfg 进其 host 编译）+ serde_core/serde 的 build.rs +
-// serde_derive proc-macro host dylib——build.rs 与 proc-macro 两条机制同图。
-// 输出确定性文本，cargo 腿与 self 腿逐字节对拍。
+// differential.cargoless full-chain fixture for proc-macro and build.rs.
+// (host compile + run + cfg into its host compile) + serde_core/serde build.rs +
+// serde_derive proc-macro host dylib — build.rs and proc-macro mechanisms in the same graph.
+// Deterministic output, byte-identical between cargo leg and self leg.
 fn main() {
     #[derive(serde::Serialize)]
     struct Point {

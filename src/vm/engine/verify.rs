@@ -25,8 +25,8 @@ pub fn module_with_prefix(module: &Module, prefix: Prefix) -> Result<(), String>
     Verifier::new(module, prefix)?.run()
 }
 
-/// 索引化包先验证模块级引用；函数体由调用方从 mmap 切片逐个临时解码后
-/// 调 `function_with_count`，从而不把全体函数留在内存。
+/// Indexed packages first verify module-level references; function bodies are decoded one by one
+/// by the caller from mmap slices via `function_with_count`, so the entire function set is not kept in memory.
 pub(crate) fn module_header_with_count(module: &Module, funcs: usize) -> Result<(), String> {
     Verifier::new_with_count(module, Prefix::default(), funcs)?.run_header()
 }

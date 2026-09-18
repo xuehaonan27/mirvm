@@ -1,19 +1,22 @@
-//! L2 post-mono engine-IR 缓存（M6 片2；distribution-design.md D9b/D9c，JVM AppCDS 对映）。
+//! L2 post-mono engine-IR cache (M6 slice 2; distribution-design.md D9b/D9c, JVM AppCDS
+//! counterpart).
 //!
-//! 冷路径（miss）：rustc 前端 → lower → **store**（guest 运行前的洁净快照）→ 运行。
-//! 热路径（hit）：**lookup** → asm-stub 重物化 → argv 终结化 → 运行——整个 rustc
-//! 会话（前端+metadata+mono+lower）被跳过。
+//! Cold path (miss): rustc frontend → lower → **store** (clean snapshot before guest runs) → run.
+//! Hot path (hit): **lookup** → asm-stub rematerialization → argv finalization → run — the entire
+//! rustc session (frontend + metadata + mono + lower) is skipped.
 //!
-//! 键 = fnv(MIRVM_BUILD_ID, rustc_args)；条目头 = 完整 args 回比（哈希碰撞免疫）+
-//! 输入清单校验。清单口径与 rustc 自身 dep-info 同构（rustc_interface::passes）：
-//! 本地源文件（source_map 非 imported）+ `include!` 追踪文件（sess.file_depinfo）+
-//! 全部上游 crate 工件（used_crate_source：含 sysroot std rlib，故 sysroot 变更天然
-//! 失配）+ `env!` 依赖（sess.env_depinfo）。文件以内容摘要校验；size/mtime 一并保存
-//! 用于诊断，但不再被当成内容身份。
+//! Key = fnv(MIRVM_BUILD_ID, rustc_args); entry header = full args replay (hash-collision proof) +
+//! input manifest validation. Manifest scope is isomorphic to rustc's own dep-info
+//! (rustc_interface::passes): local source files (source_map non-imported) + `include!` tracked
+//! files (sess.file_depinfo) + all upstream crate artifacts (used_crate_source: includes sysroot
+//! std rlib, so sysroot changes naturally mismatch) + `env!` dependencies (sess.env_depinfo). Files
+//! are validated by content digest; size/mtime are also stored for diagnostics but are no longer
+//! treated as content identity.
 //!
-//! 防静默错值：任何校验不合即 miss（冷路径重建覆写）；冻结区非固定基址即拒绝
-//! 序列化/恢复（见 frozen.rs）；required .so 缺失即 miss（自愈而非运行期报错）。
-//! `MIRVM_NO_IR_CACHE=1` 全程旁路。
+//! Guard against silent wrong values: any validation mismatch is a miss (cold path rebuilds and
+//! overwrites); frozen area not at fixed base is rejected for serialization/restore (see
+//! frozen.rs); missing required .so is a miss (self-heal rather than runtime error).
+//! `MIRVM_NO_IR_CACHE=1` bypasses the cache entirely.
 
 use std::path::{Path, PathBuf};
 
@@ -35,11 +38,11 @@ struct Header {
     build_id: String,
     args: Vec<String>,
     files: Vec<FileStamp>,
-    /// `env!`/`option_env!` 依赖：(名, 编译时值；None = 编译时未设)
+    /// `env!`/`option_env!` dependencies: (name, value at compile time; None = not set at compile time)
     envs: Vec<(String, Option<String>)>,
-    /// S4 分层：delta 模块引用的底座键（None = 无底座的全量模块）。
-    /// delta 字节码/冻结区内嵌底座绝对量（FuncId 偏移、底座地址）——
-    /// 错配底座装载 = 全盘错值，必须精确相等。
+    /// S4 layering: base key referenced by the delta module (None = full module with no base).
+    /// Delta bytecode/frozen area embeds base absolutes (FuncId offset, base addresses) — a
+    /// mismatched base load is globally wrong, so keys must match exactly.
     base_key: Option<String>,
 }
 
@@ -69,9 +72,10 @@ fn stamp(path: &str) -> Option<FileStamp> {
     })
 }
 
-/// 头部三重相等：build id（跨构建陈账）+ 完整 args 回比（哈希碰撞免疫）+
-/// 底座键精确相等（S4：delta 内嵌底座绝对量——FuncId 偏移/底座地址——底座换代或
-/// 在场性变化时错配装载 = 全盘错值；None 侧亦须精确，无底座会话不得吃底座 delta）。
+/// Header triple equality: build id (stale across builds) + full args replay (hash-collision proof) +
+/// base key exact equality (S4: delta embeds base absolutes — FuncId offsets / base addresses — a
+/// base replacement or presence change makes a mismatched load globally wrong; None side must also
+/// match exactly, a no-base session must not consume a base delta).
 fn header_matches(header: &Header, rustc_args: &[String], base_key: Option<&str>) -> bool {
     header.build_id == env!("MIRVM_BUILD_ID")
         && header.args == rustc_args
@@ -86,13 +90,13 @@ fn env_matches(name: &str, recorded: &Option<String>) -> bool {
     }
 }
 
-/// 盖戳收集结果：(文件戳清单, `env!` 依赖清单)。
+/// Stamp collection result: (file stamp manifest, `env!` dependency manifest).
 pub(crate) type InputStamps = (Vec<FileStamp>, Vec<(String, Option<String>)>);
 
-/// 输入清单收集（rustc dep-info 同构口径；mode B 包与 L2 共用）：
-/// 本地源文件（source_map 非 imported）+ `include!` 追踪文件 + 全部上游 crate
-/// 工件（used_crate_source：含 sysroot std rlib）+ `env!` 依赖。任一文件无法
-/// 盖戳（消失/非常规）= None（宁不缓存/打包）。
+/// Input manifest collection (isomorphic to rustc dep-info scope; shared by mode B packaging and
+/// L2): local source files (source_map non-imported) + `include!` tracked files + all upstream
+/// crate artifacts (used_crate_source: includes sysroot std rlib) + `env!` dependencies. If any
+/// file cannot be stamped (missing/unusual) = None (prefer not to cache/package).
 pub(crate) fn collect_input_stamps(tcx: TyCtxt<'_>) -> Option<InputStamps> {
     let sess = tcx.sess;
     let mut files: Vec<String> = sess
@@ -120,8 +124,9 @@ pub(crate) fn collect_input_stamps(tcx: TyCtxt<'_>) -> Option<InputStamps> {
     }
     files.sort();
     files.dedup();
-    // 绝对化（mode B 实证：cargo 会话给本地 crate 的是相对路径（src/main.rs），
-    // 包可在任意 cwd 装载；canonicalize 失败时保持原路径由 stamp 复核兜底）
+    // Make absolute (mode B evidence: cargo gives local crate relative paths (src/main.rs), but the
+    // package may be loaded from any cwd; keep original path if canonicalize fails, stamp check
+    // covers it)
     let files: Vec<String> = files
         .iter()
         .map(|p| {
@@ -143,18 +148,20 @@ pub(crate) fn collect_input_stamps(tcx: TyCtxt<'_>) -> Option<InputStamps> {
     Some((stamps, envs))
 }
 
-/// 盖戳逐项与本地文件当前态复核（mode B 包装载校验与 L2 lookup 共用）
+/// Replay each stamp against the current local file state (shared by mode B package load validation
+/// and L2 lookup).
 pub(crate) fn stamps_current(files: &[FileStamp]) -> bool {
     files.iter().all(|f| stamp(&f.path).as_ref() == Some(f))
 }
 
-/// env 依赖逐项与当前环境复核（同上共用）
+/// Replay each env dependency against the current environment (shared as above).
 pub(crate) fn envs_current(envs: &[(String, Option<String>)]) -> bool {
     envs.iter().all(|(k, v)| env_matches(k, v))
 }
 
-/// 热路径查找。返回的 Module 已含恢复到固定基址的冻结区；asm_stub_addrs 是
-/// 序列化时的陈旧地址，调用方**必须**以 asm_sites 重物化覆写后再执行。
+/// Hot-path lookup. The returned Module already has its frozen area restored to a fixed base;
+/// asm_stub_addrs are stale addresses from serialization, the caller **must** rematerialize and
+/// overwrite via asm_sites before executing.
 pub fn lookup(
     rustc_args: &[String],
     base_key: Option<&str>,
@@ -174,13 +181,15 @@ pub fn lookup(
     if !envs_current(&header.envs) {
         return None;
     }
-    // Module 反序列化内含冻结区固定基址恢复；失败（基址被占等）→ miss
+    // Module deserialization includes frozen-area fixed-base restoration; failure (base occupied
+    // etc.) → miss
     let mut module: ir::Module = postcard::from_bytes(module_bytes).ok()?;
     module.rebuild_load_map();
     module.rebuild_fn_addrs();
-    // 形状正确不代表索引和帧范围安全。坏缓存按 miss 处理，由冷路径自愈。
+    // Correct shape does not guarantee index and frame range safety. Bad cache is treated as miss
+    // and self-healed by the cold path.
     crate::vm::engine::verify::module_with_prefix(&module, prefix).ok()?;
-    // 加载相物化的 .so（native archive / global_asm）被清理 → miss 走冷路径自愈
+    // Materialized .so files (native archive / global_asm) removed → miss, self-healed by cold path
     if !module
         .required_native_libs
         .iter()
@@ -191,7 +200,8 @@ pub fn lookup(
     Some(module)
 }
 
-/// 冷路径入账（lower 刚完成、guest 未运行的洁净态）。返回是否真正写入。
+/// Cold-path store (clean state right after lower finishes and before guest runs). Returns whether
+/// the write actually happened.
 pub fn store(
     tcx: TyCtxt<'_>,
     rustc_args: &[String],
@@ -205,21 +215,24 @@ pub fn store(
     if crate::vm::engine::verify::module_with_prefix(module, prefix).is_err() {
         return false;
     }
-    // 冻结区不在固定基址（并发抢占/ASLR 冲突）⇒ 快照内嵌地址跨进程无效，不缓存
+    // Frozen area not at fixed base (concurrent preempt / ASLR conflict) ⇒ embedded addresses in
+    // snapshot are cross-process invalid, do not cache
     if !module.frozen.as_ref().is_some_and(|f| f.at_fixed_base()) {
         return false;
     }
-    // P1 条目 stub 域不在固定基址 ⇒ fn-ptr 值域跨进程不稳定，不缓存（同规则）
+    // P1 entry stub domain not at fixed base ⇒ fn-ptr value domain is cross-process unstable, do
+    // not cache (same rule)
     if !module.entry_stub_sites.is_empty() && !module.entry_stubs.at_fixed_base() {
         return false;
     }
-    // foreign 符号（environ 类 extern static / extern fn 取址）自 P2 起经 GOT 槽
-    // 间接（decision-history §7.5c）：GOT 表随快照走、启动相重填本进程真值——
-    // 不再是缓存障碍，原「宿主地址直嵌拒缓存」判据（M6 片2）已退役。
+    // Foreign symbols (environ-like extern static / extern fn address-taking) are indirected
+    // through GOT slots since P2 (decision-history §7.5c): GOT table travels with snapshot and is
+    // refilled by this process's real values at startup — no longer a cache blocker, the old
+    // "embedded host address rejects cache" criterion (M6 slice 2) is retired.
 
-    // 输入清单（rustc dep-info 同构口径，与 mode B 包共用收集器）
+    // Input manifest (isomorphic to rustc dep-info scope, shared collector with mode B packaging)
     let Some((stamps, envs)) = collect_input_stamps(tcx) else {
-        return false; // 有输入文件无法盖戳（消失/非常规）——宁不缓存
+        return false; // some input file could not be stamped (missing/unusual) — prefer not to cache
     };
 
     let header = Header {
@@ -237,7 +250,8 @@ pub fn store(
         Err(_) => return false,
     }
 
-    // 原子发布（asm-stub 工厂同款：临时名写全再 rename，读方绝不见半成品）
+    // Atomic publish (same as asm-stub factory: write full temp then rename, readers never see a
+    // half-finished file)
     let path = entry_path(rustc_args);
     let Some(dir) = path.parent() else {
         return false;
@@ -268,13 +282,13 @@ mod tests {
         let f = dir.join("input.rs");
         std::fs::write(&f, b"fn main() {}").unwrap();
         let p = f.display().to_string();
-        let s0 = stamp(&p).expect("可盖戳");
+        let s0 = stamp(&p).expect("stampable");
 
-        // 尺寸变化必失配
+        // size change must mismatch
         std::fs::write(&f, b"fn main() { let _ = 1; }").unwrap();
         assert_ne!(stamp(&p).as_ref(), Some(&s0));
 
-        // 同尺寸、mtime 后移也必失配（内容同长的改写由 mtime 兜住）
+        // same size but later mtime must also mismatch (rewrites of equal length are caught by mtime)
         std::fs::write(&f, b"fn main() {}").unwrap();
         let s1 = stamp(&p).unwrap();
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(7);
@@ -286,7 +300,7 @@ mod tests {
             .unwrap();
         assert_ne!(stamp(&p).as_ref(), Some(&s1));
 
-        // 消失 = 无戳
+        // missing = no stamp
         std::fs::remove_file(&f).unwrap();
         assert_eq!(stamp(&p), None);
         let _ = std::fs::remove_dir_all(&dir);
@@ -301,7 +315,7 @@ mod tests {
         std::fs::write(&f, b"fn value() -> u8 { 1 }").unwrap();
         let original_mtime = std::fs::metadata(&f).unwrap().modified().unwrap();
         let p = f.display().to_string();
-        let before = stamp(&p).expect("可盖戳");
+        let before = stamp(&p).expect("stampable");
 
         std::fs::write(&f, b"fn value() -> u8 { 2 }").unwrap();
         std::fs::File::options()
@@ -318,7 +332,7 @@ mod tests {
     #[test]
     fn env_dep_matching_covers_set_unset_and_drift() {
         let name = "MIRVM_IRCACHE_TEST_ENV";
-        // SAFETY: 单测进程内自有变量
+        // SAFETY: test-only variable within this single test process
         unsafe { std::env::remove_var(name) };
         assert!(env_matches(name, &None));
         assert!(!env_matches(name, &Some("x".into())));
@@ -358,13 +372,13 @@ mod tests {
             envs: Vec::new(),
             base_key: base_key.map(str::to_owned),
         };
-        // 同键 ✓；换代 ✗；在场性变化（有→无 / 无→有）双向 ✗
+        // same key ✓; replacement ✗; presence change (some→none / none→some) both ways ✗
         assert!(super::header_matches(&mk(Some("k1")), &args, Some("k1")));
         assert!(!super::header_matches(&mk(Some("k1")), &args, Some("k2")));
         assert!(!super::header_matches(&mk(Some("k1")), &args, None));
         assert!(!super::header_matches(&mk(None), &args, Some("k1")));
         assert!(super::header_matches(&mk(None), &args, None));
-        // 既有轴回归：args 漂移仍拒
+        // existing axis regression: args drift still rejected
         let other = vec!["mirvm".to_string(), "y.rs".to_string()];
         assert!(!super::header_matches(&mk(None), &other, None));
     }

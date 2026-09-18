@@ -1,9 +1,9 @@
-// Mutex 计数器 + Arc 共享 + Condvar 通知
+// Mutex counter + Arc sharing + Condvar notification
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 fn main() {
-    // Mutex 争用计数
+    // Mutex contention counter
     let counter = Arc::new(Mutex::new(0u64));
     let handles: Vec<_> = (0..8)
         .map(|_| {
@@ -20,7 +20,7 @@ fn main() {
     }
     println!("counter = {}", *counter.lock().unwrap());
 
-    // Condvar：等待就绪信号
+    // Condvar: wait for ready signal
     let pair = Arc::new((Mutex::new(false), Condvar::new()));
     let p2 = Arc::clone(&pair);
     let waiter = thread::spawn(move || {

@@ -1,21 +1,28 @@
-//! Spike 4：并发——N 条**真宿主线程**各跑 interp_frame，引擎过 TSan（4-spike 收官）。
+//! Spike 4: concurrency — N **real host threads** each run interp_frame, engine passes TSan
+//! (4-spike finale).
 //!
-//! 验证 docs/designs/concurrency-arch.md 的三个核心主张（RFC 验收 = 过 TSan）：
-//! 1. **引擎 Sync、无 GIL**：共享只读程序 + per-thread 执行态，VM 自有状态零数据竞争。
-//!    用例全部设计成 guest 无竞争（C4 排除 guest 竞争），故任何 TSan 报告 = 引擎 bug。
-//! 2. **阻塞 syscall 活性**（corpus §2.1 收束）：tier-0 协作调度上挂死的 socketpair
-//!    场景（c_blocking_io），真线程引擎上必须跑通——阻塞只挡自己那条线程。
-//! 3. **原子 = 宿主原子指令、跨 tier 互操作**：解释器执行 guest 原子必须发真宿主原子
-//!    （tier-0 用普通读写模拟，单线程合法；真线程下那是引擎自身的数据竞争，TSan 会抓）；
-//!    解释线程与编译线程对同一真地址原子 RMW 天然互操作（真实地址模型）。
+//! Validates the three core claims of docs/designs/concurrency-arch.md (RFC acceptance = TSan clean):
+//! 1. **Engine is Sync, no GIL**: shared read-only program + per-thread execution state, zero
+//!    data races on VM-owned state. Cases are designed so the guest is race-free (C4 rules out
+//!    guest races), so any TSan report is an engine bug.
+//! 2. **Blocking syscall liveness** (corpus §2.1 closed): the socketpair scenario that deadlocks
+//!    on tier-0 cooperative scheduling (c_blocking_io) must pass on real threads — blocking only
+//!    stalls its own OS thread.
+//! 3. **Atomics = host atomics, cross-tier interoperable**: the interpreter executing a guest
+//!    atomic must issue a real host atomic (tier-0 may simulate with plain reads/writes, which is
+//!    legal single-threaded; on real threads that becomes an engine data race that TSan catches);
+//!    interpreter and compiler threads naturally interoperate on the same real address via atomic
+//!    RMW (real address model).
 //!
-//! 状态三分（RFC §2）在骨架上落地：`Shared`（发布后只读格）+ `Ctx`（每线程私有格）。
-//! `Shared` 是纯不可变数据 → Rust 自动 Sync → `&Shared` 跨 scoped 线程**编译通过**，
-//! 即"执行相 tcx-free ⇒ 引擎 Sync"（C8）的类型层体现（骨架无 tcx = 模式 B 运行形态）。
-//! `Ctx.shared` 用裸指针（非 &'s）：避免 CompiledFn 背 HRTB 生命周期，且与 vmctx 纪律一致；
-//! 生存期由 thread::scope 保证。
+//! The RFC §2 three-part state is realized in the skeleton: `Shared` (read-only after publication)
+//! + `Ctx` (per-thread private cell). `Shared` is pure immutable data → Rust Sync → `&Shared`
+//! compiles across scoped threads, the type-level expression of "execution phase is tcx-free ⇒
+//! engine Sync" (C8) (skeleton has no tcx = mode B runtime shape).
+//! `Ctx.shared` is a raw pointer (not &'s): avoids burdening CompiledFn with HRTB lifetimes and
+//! matches the vmctx discipline; lifetime is guaranteed by thread::scope.
 //!
-//! TSan 入口：`run_cases()`（tsan/ harness 复用同一份源码，见 `runtime.tsan`）。
+//! TSan entry point: `run_cases()` (the tsan/ harness reuses this source via #[path], see
+//! `runtime.tsan`).
 
 use std::panic::{self, AssertUnwindSafe};
 use std::process::ExitCode;
@@ -27,7 +34,7 @@ use super::bytecode::{
 use super::frame::{OperandRegion, Word};
 use super::memory::GuestMemory;
 
-// ===== guest 异常（同 spike3 机制，自含）=====
+// ===== guest exceptions (same mechanism as spike3, self-contained) =====
 
 struct GuestPanic {
     payload: Word,
@@ -37,7 +44,7 @@ fn raise_guest(payload: Word) -> ! {
     panic::resume_unwind(Box::new(GuestPanic { payload }))
 }
 
-// ===== 状态三分：Shared（发布后只读）+ Ctx（每线程私有）=====
+// ===== Three-part state: Shared (read-only after publication) + Ctx (per-thread private) =====
 
 type CompiledFn = extern "C-unwind" fn(*mut Ctx, u64) -> u64;
 
@@ -47,13 +54,14 @@ enum FuncKind {
     Compiled(CompiledFn),
 }
 
-/// 发布后只读：spawn 前建好，线程只 `&` 共享，lock-free 读。纯不可变数据 → 自动 Sync。
+/// Read-only after publication: built before spawn, threads only hold `&` references,
+/// lock-free reads. Pure immutable data → automatically Sync.
 struct Shared {
     prog: Program,
     kinds: Vec<FuncKind>,
 }
 
-/// 每线程执行态（vmctx，每线程一份；docs/designs/vmctx-passing.md §1.2）。
+/// Per-thread execution state (vmctx, one per thread; docs/designs/vmctx-passing.md §1.2).
 struct Ctx {
     shared: *const Shared,
     region: OperandRegion,
@@ -70,7 +78,7 @@ impl Ctx {
     }
 }
 
-// 字段级瞬态借用（纪律同 spike2/3）
+// Field-level transient borrows (same discipline as spike2/3)
 #[inline]
 fn reg_reserve(ctx: *mut Ctx, n: u32) -> usize {
     let r: &mut OperandRegion = unsafe { &mut (*ctx).region };
@@ -97,7 +105,7 @@ fn log_drop(ctx: *mut Ctx, v: Word) {
     l.push(v);
 }
 
-/// 统一 dispatch（i2c/c2i，同 spike2/3）。
+/// Unified dispatch (i2c/c2i, same as spike2/3).
 fn call_guest(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
     let sh: &Shared = unsafe { &*(*ctx).shared };
     match sh.kinds[func as usize] {
@@ -106,7 +114,7 @@ fn call_guest(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
     }
 }
 
-// ===== unwind 参与（同 spike3 协议，自含）=====
+// ===== unwind participation (same protocol as spike3, self-contained) =====
 
 struct CleanupGuard {
     ctx: *mut Ctx,
@@ -152,7 +160,7 @@ fn run_cleanup_chain(ctx: *mut Ctx, func: u32, base: usize, entry: u32) {
                 blk = *target as usize;
             }
             Terminator::Resume => return,
-            t => unreachable!("cleanup 链非法终止子: {t:?}"),
+            t => unreachable!("cleanup chain has illegal terminator: {t:?}"),
         }
     }
 }
@@ -165,7 +173,7 @@ fn edge(u: &UnwindAction) -> Option<u32> {
     }
 }
 
-// ===== 解释器（spike3 协议 + AtomicAdd）=====
+// ===== Interpreter (spike3 protocol + AtomicAdd) =====
 
 fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
     let sh: &Shared = unsafe { &*(*ctx).shared };
@@ -255,7 +263,7 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
                 std::mem::forget(guard);
                 return r;
             }
-            Terminator::Resume => unreachable!("Resume 只出现在 cleanup 链"),
+            Terminator::Resume => unreachable!("Resume only appears in cleanup chains"),
         }
     }
 }
@@ -266,7 +274,7 @@ fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let v = eval_rvalue(ctx, base, rv);
             reg_write(ctx, base, *dst, v);
         }
-        Stmt::Store(..) => unreachable!("spike4 不用 Store"),
+        Stmt::Store(..) => unreachable!("spike4 does not use Store"),
     }
 }
 
@@ -297,18 +305,20 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> Word {
         Rvalue::AtomicAdd(p, v) => {
             let addr = eval_operand(ctx, base, *p);
             let val = eval_operand(ctx, base, *v);
-            // 引擎义务：解释器执行 guest 原子必须发真宿主原子指令。
-            // （用普通读写实现的话，真线程下 TSan 在此报引擎数据竞争——本 spike 的判定点。）
+            // Engine obligation: the interpreter executing a guest atomic must issue a real host
+            // atomic instruction.
+            // (Implementing this with plain reads/writes would make TSan report an engine data race
+            // here under real threads — the deciding point of this spike.)
             let a = unsafe { AtomicU64::from_ptr(addr as *mut u64) };
             a.fetch_add(val, Ordering::SeqCst)
         }
-        rv => unreachable!("spike4 不用内存构造: {rv:?}"),
+        rv => unreachable!("spike4 does not use memory constructors: {rv:?}"),
     }
 }
 
-// ===== 编译帧替身 =====
+// ===== Compiled frame stand-ins =====
 
-/// landing pad 替身（同 spike3）：drop 时记日志（正常/unwind 两路径一致）。
+/// Landing-pad stand-in (same as spike3): logs on drop (normal and unwind paths alike).
 struct CGuard {
     ctx: *mut Ctx,
     v: Word,
@@ -319,7 +329,7 @@ impl Drop for CGuard {
     }
 }
 
-// --- case A：混合 fib 的编译半边 ---
+// --- case A: compiled half of mixed fib ---
 extern "C-unwind" fn cc_fib_b(ctx: *mut Ctx, n: u64) -> u64 {
     if n < 2 {
         return n;

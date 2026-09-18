@@ -1,26 +1,32 @@
-//! M5.3b：字节码 → Cranelift 翻译器（标量子集）+ 编译服务线程（m5.3-design §4，D3/D4/D5）。
+//! M5.3b: bytecode → Cranelift translator (scalar subset) + compiler service thread
+//! (m5.3-design §4, D3/D4/D5).
 //!
-//! 输入 = 冻结的 `ir::FuncBody`（D3：JIT 吃字节码不吃 MIR；tcx 不出执行相）。
-//! 语义契约 = **与解释器逐位一致**（JIT-on/off 差分是第一 oracle）：所有值保持
-//! "I64 零扩到宽"的槽不变量，运算按 interp 的 int_bin/int_cmp/int_ovf 恒等式镜像，
-//! 结果按宽 band 掩回。帧局部全部提升 Cranelift SSA 变量（v1 准入排除取址/内存
-//! 操作数 ⇒ 无栈帧内存）；入口统一 def 0（有效 MIR 无读前未写路径，此为确定化）。
+//! Input = frozen `ir::FuncBody` (D3: JIT consumes bytecode, not MIR; tcx does not enter the
+//! execution phase).
+//! Semantic contract = **bit-identical to the interpreter** (JIT-on/off differential is the
+//! first oracle): all values preserve the "I64 zero-extended to width" slot invariant; operations
+//! mirror interp's int_bin/int_cmp/int_ovf identities; results are masked back by width band.
+//! Frame locals are all promoted to Cranelift SSA variables (v1 admission excludes address-of /
+//! memory operands ⇒ no stack frame memory); entry uniformly defs 0 (valid MIR has no
+//! read-before-write paths, this makes it deterministic).
 //!
-//! 调用（D5 两入口 + PLT）：
-//! - **fast**：纯 guest 签名（n×I64 → 0/1×I64）。编译码间经 `slots_fast[callee]`
-//!   内存间接（load + call_indirect，调用点恒定形状）；未编译 callee 的槽先发
-//!   **c2i 蹦床**（fast 形状，内部打包实参调 `mirvm_c2i` 回解释器）。
-//! - **packed**：`extern "C-unwind" fn(*const u64, *mut u64)`——interp 的 i2c 一跳
-//!   （call_guest 读 `slots[f]`）。
+//! Calls (D5 two entries + PLT):
+//! - **fast**: pure guest signature (n×I64 → 0/1×I64). Compiled code calls via `slots_fast[callee]`
+//!   memory indirection (load + call_indirect, call site has constant shape); slots of not-yet-
+//!   compiled callees first receive a **c2i trampoline** (fast shape, internally packs arguments
+//!   and calls `mirvm_c2i` back to the interpreter).
+//! - **packed**: `extern "C-unwind" fn(*const u64, *mut u64)` — one interp i2c hop
+//!   (call_guest reads `slots[f]`).
 //!
-//! 发布序 = 先 fast 后 packed（Release）；call_guest Acquire 读 ⇒ 进入编译码的
-//! 线程必见其 callee 蹦床/入口（happens-before 链）。
+//! Publish order = fast first, then packed (Release); call_guest Acquire read ⇒ any thread
+//! entering compiled code must see its callee trampoline/entry (happens-before chain).
 //!
-//! unwind（D6 v1 = CFI-only）：spike5 管线——create_unwind_info → gimli FrameTable
-//! → 整段 `.eh_frame` 一次注册。准入已排除 cleanup 边（unwind-transparent：panic
-//! 只穿透，不着陆）。
+//! unwind (D6 v1 = CFI-only): spike5 pipeline — create_unwind_info → gimli FrameTable
+//! → whole `.eh_frame` section registered at once. Admission already excludes cleanup edges
+//! (unwind-transparent: panic only passes through, does not land).
 //!
-//! 单 worker 线程持 JITModule（代码内存进程生命周期，cranelift-jit 无逐函数释放）。
+//! Single worker thread holds the JITModule (code memory lives for the process lifetime;
+//! cranelift-jit has no per-function release).
 
 use super::admit::{CalleeAbi, admit, callee_abi};
 use super::frame::analyze_frame;
@@ -29,7 +35,7 @@ use super::helpers::*;
 use super::translate::Translator;
 use super::*;
 
-/// 启动编译服务（run_vm_engine 在 Shared 定型后调用；--jit off 时不启动）。
+/// Start the compiler service (called by run_vm_engine after Shared is finalized; not started when --jit off).
 pub fn start(shared: &std::sync::Arc<Shared>) {
     if !shared.jit.enabled {
         return;

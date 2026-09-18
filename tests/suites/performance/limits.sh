@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# 时间性能硬门与空间/cache 资源计量。
+# Time performance hard gate and space/cache resource metering.
 #
-# 时间硬门（D2/M5.3 既定锚点；SKIP_PERF=1 只跳这三件，计量照常）：
-#   ① 空 main 加载相 < 1s（热 sysroot 缓存）
-#   ② c_rayon < 5s（含语义 oracle 'par_sort ok = true'）
-#   ③ fib(32) JIT ≤ 80ms（≈10× native；解释锚点 940ms。三跑取最小：
-#     每 `mirvm run` 是新进程、JIT 后台线程重编译，满载 gate 下偶被饿死一轮
-#     （回退解释 940ms）——多跑取最快杀调度毛刺，契约不变）
-# 资源计量（总是执行）：
-#   cache 各分部体量、磁盘可用、target 预算闸（共享 harness）。
+# Time hard gates (established D2/M5.3 anchors; SKIP_PERF=1 skips only these three, metering still runs):
+#   ① empty main load phase < 1s (warm sysroot cache)
+#   ② c_rayon < 5s (including semantic oracle 'par_sort ok = true')
+#   ③ fib(32) JIT ≤ 80ms (≈10× native; interpreter anchor 940ms. Three runs, take minimum:
+#     each `mirvm run` is a fresh process, JIT background thread recompiles, under full gate load it may be starved once
+#     (falling back to interpreter 940ms) — multiple runs take the fastest to kill scheduling noise, contract unchanged)
+# Resource metering (always runs):
+#   cache sub-section sizes, disk availability, target budget gate (shared harness).
 #
-# 用法：./tests/run.sh suite performance.limits [--metrics-only]
+# Usage: ./tests/run.sh suite performance.limits [--metrics-only]
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
 test_enter_repo
@@ -27,24 +27,24 @@ esac
 
 if [ "$metrics_only" -eq 0 ]; then
     if [ -n "${SKIP_PERF:-}" ]; then
-        skip "性能上限（SKIP_PERF=1；语义 gate 仍照常执行）"
+        skip "performance ceiling (SKIP_PERF=1; semantic gate still runs normally)"
     else
         echo 'fn main(){}' >"$TMP/empty.rs"
         t0=$(date +%s%N); "$MIRVM" run "$TMP/empty.rs" >"$TMP/load.out" 2>"$TMP/load.err"; load_code=$?
         load_ms=$(( ($(date +%s%N) - t0) / 1000000 ))
         [ $load_code -eq 0 ] && [ $load_ms -lt 1000 ] \
-            && ok "加载相 ${load_ms}ms（< 1s 硬门）" \
-            || bad "加载相 exit=$load_code ${load_ms}ms（要求 exit=0 且 < 1s）"
+            && ok "load phase ${load_ms}ms (< 1s hard gate)" \
+            || bad "load phase exit=$load_code ${load_ms}ms (requires exit=0 and < 1s)"
         t0=$(date +%s%N); "$MIRVM" run corpus/c_rayon.rs >"$TMP/rayon.out" 2>"$TMP/rayon.err"; rayon_code=$?
         rayon_ms=$(( ($(date +%s%N) - t0) / 1000000 ))
         if [ $rayon_code -eq 0 ] && grep -q 'par_sort ok = true' "$TMP/rayon.out" \
             && [ $rayon_ms -lt 5000 ]; then
             rayon_divisor=$rayon_ms; [ $rayon_divisor -gt 0 ] || rayon_divisor=1
-            ok "rayon ${rayon_ms}ms（< 5s 硬门；tier-0 28s，≈$((28000/rayon_divisor))×）"
+            ok "rayon ${rayon_ms}ms (< 5s hard gate; tier-0 28s, ≈$((28000/rayon_divisor))×)"
         else
-            bad "rayon exit=$rayon_code ${rayon_ms}ms（要求语义 oracle 且 < 5s）"
+            bad "rayon exit=$rayon_code ${rayon_ms}ms (requires semantic oracle and < 5s)"
         fi
-        # M5.3 JIT 硬门：fib(32) ≤ 10× native ≈ ≤80ms 墙钟，三跑取最小
+        # M5.3 JIT hard gate: fib(32) ≤ 10× native ≈ ≤80ms wall clock, three runs take minimum
         fib_ms=999999 fib_code=1 fib_out=""
         for _ in 1 2 3; do
             t0=$(date +%s%N)
@@ -55,16 +55,16 @@ if [ "$metrics_only" -eq 0 ]; then
             { [ $fib_code -eq 0 ] && [ "$fib_out" = "2178309" ]; } || break
         done
         if [ $fib_code -eq 0 ] && [ "$fib_out" = "2178309" ] && [ $fib_ms -lt 80 ]; then
-            ok "fib(32) JIT ${fib_ms}ms（≤80ms=10× native 硬门；解释锚点 940ms）"
+            ok "fib(32) JIT ${fib_ms}ms (≤80ms = 10× native hard gate; interpreter anchor 940ms)"
         else
-            bad "fib(32) JIT exit=$fib_code out=$fib_out ${fib_ms}ms（要求 2178309 且 <80ms）"
+            bad "fib(32) JIT exit=$fib_code out=$fib_out ${fib_ms}ms (requires 2178309 and <80ms)"
         fi
     fi
 fi
 
-echo "== 资源计量 =="
+echo "== Resource metering =="
 cache_snapshot "perf"
 target_budget_check
 home_dir=${MIRVM_HOME:-$HOME/.mirvm}
-echo "[磁盘] $(df -h "$home_dir" 2>/dev/null | awk 'NR==2{print "可用 "$4" / 共 "$2"（"$5" 已用）"}')"
+echo "[disk] $(df -h "$home_dir" 2>/dev/null | awk 'NR==2{print "available "$4" / total "$2" ("$5" used)"}')"
 suite_summary performance.limits

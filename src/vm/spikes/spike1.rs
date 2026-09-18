@@ -1,9 +1,9 @@
-//! Spike 1 差分 harness：手写三个字节码程序，在进程内与 native Rust 参考实现对比。
+//! Spike 1 differential harness: three hand-written bytecode programs compared in-process with native Rust references.
 //!
-//! tier-0 已与 native 逐位一致（diff 16/16），故"骨架 == native 参考" ⇔ "骨架 == tier-0"。
-//! - fib（递归）  : 验 Call 宿主递归 + SwitchInt + BinOp（模型 A 核心）
-//! - loop-sum     : 验 Goto/SwitchInt 循环（非递归控制流）
-//! - mem-array-sum: 验真地址裸内存（Alloc/Store/Load，兑现 §2.5）
+//! tier-0 is already bit-identical to native (diff 16/16), so "skeleton == native reference" ⇔ "skeleton == tier-0".
+//! - fib (recursive): verifies host-recursive Call + SwitchInt + BinOp (model A core)
+//! - loop-sum       : verifies Goto/SwitchInt loop (non-recursive control flow)
+//! - mem-array-sum  : verifies real-address bare memory (Alloc/Store/Load, honoring §2.5)
 
 use std::process::ExitCode;
 
@@ -12,7 +12,7 @@ use super::bytecode::{
 };
 use super::interp::Vm;
 
-// 简写构造子，让手写字节码可读。
+// Shorthand constructors to keep hand-written bytecode readable.
 fn s(n: u32) -> Operand {
     Operand::Slot(n)
 }

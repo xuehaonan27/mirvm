@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 诊断路由合同：三种编译路径保持默认 stderr，同时 capture 只收编译器和 MIRVM 诊断。
+# Diagnostics routing contract: three compilation paths keep default stderr, while capture only collects compiler and MIRVM diagnostics.
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
 test_enter_repo
@@ -38,42 +38,42 @@ run_case() { # <name> <deps> <fixture> <unused-name> <missing-symbol> <guest-hex
     if [ "$plain_code" -eq 70 ] && [ "$capture_code" -eq 70 ] \
         && cmp -s "$plain/stdout" "$captured/stdout" \
         && cmp -s "$plain/stderr" "$captured/stderr"; then
-        ok "$name 默认 stdout/stderr/exit 在 capture 前后逐字节不变"
+        ok "$name default stdout/stderr/exit byte-identical before and after capture"
     else
-        bad "$name 默认输出漂移（plain=$plain_code capture=$capture_code）"
+        bad "$name default output drifted (plain=$plain_code capture=$capture_code)"
         diff -u "$plain/stderr" "$captured/stderr" | head -40
     fi
 
     diag="$session/diagnostics.log"
     if [ ! -f "$diag" ]; then
-        bad "$name capture 未生成 diagnostics.log"
+        bad "$name capture did not generate diagnostics.log"
         return
     fi
-    if grep -aFq "function \`$unused_name\` is never used" "$diag" \
-        && grep -aFq "foreign \`$missing\` 符号不存在" "$diag"; then
-        ok "$name diagnostics 含编译器 warning 与 MIRVM control error"
+    if grep -aFq "foreign \`$unused_name\` is never used" "$diag" \
+        && grep -aFq "foreign \`$missing\` symbol does not exist" "$diag"; then
+        ok "$name diagnostics contains compiler warning and MIRVM control error"
     else
-        bad "$name diagnostics 缺编译器或 MIRVM 诊断"
+        bad "$name diagnostics missing compiler or MIRVM diagnostic"
     fi
 
     if hex_file "$diag" | grep -Fq "$guest_hex"; then
-        bad "$name diagnostics 混入 guest NUL/非 UTF-8/ANSI 字节"
+        bad "$name diagnostics mixed in guest NUL/non-UTF-8/ANSI bytes"
     else
-        ok "$name diagnostics 不含 guest 二进制 stderr"
+        ok "$name diagnostics contains no guest binary stderr"
     fi
     if grep -aFq 'router-guest-binary-' "$diag"; then
-        bad "$name diagnostics 混入 guest 同文 warning 所在的单次 write"
+        bad "$name diagnostics mixed in the single write carrying the guest's own warning text"
     else
-        ok "$name guest 同文 warning 所在的单次 write 未被误收"
+        ok "$name guest same-text warning single write not mistakenly captured"
     fi
 
     stderr_hex=$(hex_file "$captured/stderr")
     diagnostics_hex=$(hex_file "$diag")
     expected_hex=${stderr_hex/"$guest_hex"/}
     if [ "$expected_hex" != "$stderr_hex" ] && [ "$diagnostics_hex" = "$expected_hex" ]; then
-        ok "$name diagnostics 是物理 stderr 精确去掉 guest 单次 write 后的字节"
+        ok "$name diagnostics is physical stderr with the guest single write removed byte-exactly"
     else
-        bad "$name compiler/control tee 不是逐字节副本"
+        bad "$name compiler/control tee is not a byte-exact copy"
     fi
 }
 
@@ -107,15 +107,15 @@ run_early_control_case() { # <name> <exit> <MIRVM_DEPS> [run args...]
         && [ "$capture_code" -eq "$expected_code" ] \
         && cmp -s "$plain/stdout" "$captured/stdout" \
         && cmp -s "$plain/stderr" "$captured/stderr"; then
-        ok "$name 默认 stdout/stderr/exit 在 capture 前后逐字节不变"
+        ok "$name default stdout/stderr/exit byte-identical before and after capture"
     else
-        bad "$name 默认输出漂移（plain=$plain_code capture=$capture_code）"
+        bad "$name default output drifted (plain=$plain_code capture=$capture_code)"
     fi
     if [ -f "$session/diagnostics.log" ] \
         && cmp -s "$captured/stderr" "$session/diagnostics.log"; then
-        ok "$name run_driver 前 control 被逐字节 tee 并发布"
+        ok "$name pre-run_driver control byte-exactly teed and published"
     else
-        bad "$name run_driver 前 control 未进入 diagnostics.log"
+        bad "$name pre-run_driver control did not enter diagnostics.log"
     fi
 }
 
@@ -145,15 +145,15 @@ runner_capture_code=0
 if [ "$runner_plain_code" -eq 1 ] && [ "$runner_capture_code" -eq 1 ] \
     && cmp -s "$runner_plain/stdout" "$runner_captured/stdout" \
     && cmp -s "$runner_plain/stderr" "$runner_captured/stderr"; then
-    ok "forwarded runner early control 默认 stdout/stderr/exit 逐字节不变"
+    ok "forwarded runner early control default stdout/stderr/exit byte-identical"
 else
-    bad "forwarded runner early control 默认输出漂移"
+    bad "forwarded runner early control default output drifted"
 fi
 if [ -f "$runner_session/diagnostics.log" ] \
     && cmp -s "$runner_captured/stderr" "$runner_session/diagnostics.log"; then
-    ok "runner 假二进制解析错误被逐字节 tee 并发布"
+    ok "runner fake-binary parse error byte-exactly teed and published"
 else
-    bad "runner 假二进制解析错误未进入 diagnostics.log"
+    bad "runner fake-binary parse error did not enter diagnostics.log"
 fi
 
 suite_summary runtime.diagnostics

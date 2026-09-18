@@ -1,6 +1,6 @@
-//! exec_stmt（自 interp.rs I8 整搬）：40+ Stmt 臂——原子族/memcpy-set/
-//! SIMD（本体 T1-d 整搬至 simd_exec.rs，interp/JIT 共享）/128 位·f128/
-//! Fence/RepeatBytes。调用方 = runblocks 主循环。
+//! exec_stmt (moved whole from interp.rs I8): 40+ Stmt arms -- atomics/memcpy-set/
+//! SIMD (moved whole to simd_exec.rs in T1-d, shared by interp/JIT)/128-bit f128/
+//! Fence/RepeatBytes. Caller = runblocks main loop.
 
 use super::*;
 use super::{
@@ -31,7 +31,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
         Stmt::Copy { dst, src, size } => {
             let d = eval_place_addr(ctx, base, dst);
             let s = eval_place_addr(ctx, base, src);
-            // memmove 语义（guest 侧重叠是 UB，但引擎自身不因此崩——防御性）
+            // memmove semantics (overlapping writes in guest are UB, but the engine must not crash -- defensive)
             unsafe { std::ptr::copy(s as *const u8, d as *mut u8, *size as usize) };
         }
         Stmt::RepeatScalar {
@@ -132,7 +132,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                         R::Or => a.fetch_or(v as $t, o),
                         R::Xor => a.fetch_xor(v as $t, o),
                         R::Nand => a.fetch_nand(v as $t, o),
-                        // fetch_max/min：有符号变体经同址 AtomicI*（位型回写零扩展）
+                        // fetch_max/min: signed variants use AtomicI* at the same address (bitwise result zero-extended on writeback)
                         R::UMax => a.fetch_max(v as $t, o),
                         R::UMin => a.fetch_min(v as $t, o),
                         R::Max => unsafe { <$iat>::from_ptr(p as *mut $it) }
@@ -505,13 +505,13 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                     IntBinOp::Mul => xs.overflowing_mul(ys),
                     IntBinOp::Div => {
                         if ys == 0 {
-                            engine_abort("guest 128 位整除以零");
+                            engine_abort("guest 128-bit integer division by zero");
                         }
                         (xs.wrapping_div(ys), false)
                     }
                     IntBinOp::Rem => {
                         if ys == 0 {
-                            engine_abort("guest 128 位取余以零");
+                            engine_abort("guest 128-bit integer remainder by zero");
                         }
                         (xs.wrapping_rem(ys), false)
                     }
@@ -529,13 +529,13 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                     IntBinOp::Mul => x.overflowing_mul(y),
                     IntBinOp::Div => {
                         if y == 0 {
-                            engine_abort("guest 128 位整除以零");
+                            engine_abort("guest 128-bit integer division by zero");
                         }
                         (x / y, false)
                     }
                     IntBinOp::Rem => {
                         if y == 0 {
-                            engine_abort("guest 128 位取余以零");
+                            engine_abort("guest 128-bit integer remainder by zero");
                         }
                         (x % y, false)
                     }
@@ -615,7 +615,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let r = match op {
                 B::Bswap => x.swap_bytes(),
                 B::Bitreverse => x.reverse_bits(),
-                _ => engine_abort("Bit128 只承载 bswap/bitreverse"),
+                _ => engine_abort("Bit128 only carries bswap/bitreverse"),
             };
             let pd = eval_place_addr(ctx, base, dst);
             unsafe { (pd as *mut u128).write_unaligned(r) };
@@ -627,7 +627,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                 B::Popcount => x.count_ones(),
                 B::Ctlz => x.leading_zeros(),
                 B::Cttz => x.trailing_zeros(),
-                _ => engine_abort("Bit128Count 只承载 ctpop/ctlz/cttz"),
+                _ => engine_abort("Bit128Count only carries ctpop/ctlz/cttz"),
             };
             place_write(ctx, base, dst, r as u64);
         }
@@ -639,7 +639,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
         } => {
             use crate::vm::engine::ir::FloatW;
             let (v, _) = eval_operand(ctx, base, src);
-            // f16/f32→f64 精确保值 ⇒ 统一经 f64；宿主 `as` 即饱和语义（NaN→0、越界→边界）
+            // f16/f32→f64 precisely preserves value => unify through f64; host `as` is saturation semantics (NaN→0, out-of-range→boundary)
             let x = match from {
                 FloatW::F16 => f16::from_bits(v as u16) as f64,
                 FloatW::F32 => f32::from_bits(v as u32) as f64,
@@ -653,7 +653,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let pd = eval_place_addr(ctx, base, dst);
             unsafe { (pd as *mut u128).write_unaligned(bits) };
         }
-        // ===== f128 宽通道（D8c）=====
+        // ===== f128 wide path (D8c) =====
         Stmt::F128Bin { op, a, b, dst } => {
             use crate::vm::engine::ir::FloatOp as F;
             let (x, y) = (

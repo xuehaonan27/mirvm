@@ -1,25 +1,26 @@
-//! 构建并缓存"携带全量 MIR"的 sysroot（DESIGN.md D5）。
+//! Build and cache the sysroot that "carries full MIR" (DESIGN.md D5).
 //!
-//! 发行版 std 的 rlib 只给泛型/#[inline] 函数编码 MIR，解释非泛型 std 函数
-//! 必须用 `-Zalways-encode-mir` 从 rust-src 重建 std。D15 P4 切⑥a 起由
-//! **cargoless 自有调度**直接构建（此前是 rustc-build-sysroot crate 驱动
-//! cargo——std 的 backtrace 闭包按 crates.io 解析，.d 引用
-//! `~/.cargo/registry`，且全程要 cargo 进程；本切片砍掉，零 cargo 进程、
-//! 零 crates.io/零 ~/.cargo 依赖）：
+//! Release std rlibs only encode MIR for generic/#[inline] functions; interpreting non-generic
+//! std functions requires rebuilding std from rust-src with `-Zalways-encode-mir`. Since D15 P4
+//! cut ⑥a, this is done directly by **cargoless's own scheduler** (previously driven by the
+//! rustc-build-sysroot crate, which ran cargo — std's backtrace closure resolved via crates.io,
+//! .d referenced `~/.cargo/registry`, and the whole process needed a cargo process; this slice
+//! removes that: zero cargo processes, zero crates.io / zero ~/.cargo dependencies):
 //!
-//! - 伪根包：`cache_dir()/sysroot-build/root/` 物化的合成 manifest（path 边
-//!   指 `library/{std,test,proc_macro}`，std 带 panic-unwind+backtrace
-//!   feature——与旧构建的 std_features 对齐）+ library/Cargo.lock 增广本
-//!   （原文 + 伪根包行），resolve 走 lock 模式全钉版；
-//! - 供给面 = `VendorDir`（`library/vendor/` + `[patch.crates-io]` 四件
-//!   override——rustc-std-workspace 三件套与 windows-sys 指回 library/）；
-//! - 编译 = driver::compile_plan 同一流水线（Layout::at 指 sysroot lib 平铺
-//!   目 + 独立 staging 收 host 产物；--sysroot 传 **toolchain**——产出物
-//!   不能当自己的编译输入）；flags 对齐旧构建：debug-assertions 关、
-//!   overflow-checks 开、-Zalways-encode-mir（dep_rustc_args 自带）、
-//!   -Zforce-unstable-if-unmarked（rustflags 通道，只落 target 单元）。
-//!   dep 产物照旧 -Zno-codegen metadata-only——mirvm 只消费 MIR，对象码
-//!   纯白烧（旧 sysroot 带对象码是 cargo 历史形态，非需求）。
+//! - Pseudo-root package: materialized synthetic manifest at `cache_dir()/sysroot-build/root/`
+//!   (path edges point to `library/{std,test,proc_macro}`, std with panic-unwind+backtrace
+//!   features — aligned with the old build's std_features) + augmented library/Cargo.lock
+//!   (original text + pseudo-root row), resolve uses lock mode with all versions pinned;
+//! - Supply side = `VendorDir` (`library/vendor/` + four `[patch.crates-io]` overrides —
+//!   rustc-std-workspace trio and windows-sys point back into library/);
+//! - Compile = same driver::compile_plan pipeline (Layout::at points to sysroot lib flat dir
+//!   + separate staging for host artifacts; --sysroot passed **toolchain** — outputs cannot be
+//!   used as their own compile input); flags aligned with old build: debug-assertions off,
+//!   overflow-checks on, -Zalways-encode-mir (carried by dep_rustc_args),
+//!   -Zforce-unstable-if-unmarked (rustflags channel, only lands on target units).
+//!   Dependency artifacts still use -Zno-codegen metadata-only — mirvm only consumes MIR,
+//!   object code is pure waste (old sysroot carrying object code was a cargo historical shape,
+//!   not a requirement).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -30,7 +31,7 @@ use crate::cargoless::schedule::Layout;
 use crate::cargoless::vendor::VendorDir;
 use crate::cargoless::{buildrs, resolve};
 
-/// 编译期烘焙的 toolchain sysroot（见 build.rs），rustc 从这里取。
+/// Toolchain sysroot baked at compile time (see build.rs); rustc takes it from here.
 fn toolchain_root() -> &'static Path {
     Path::new(env!("MIRVM_DEFAULT_SYSROOT"))
 }

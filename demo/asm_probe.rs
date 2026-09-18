@@ -1,10 +1,10 @@
-// M5.0 asm-stub 工厂的永久差分探针：三面孔（div/syscall/cpuid，corpus §2.2）
-// + 类分配 + 显式寄存器 + inout/lateout clobber —— 与 native 同机对拍。
-// cpuid 差分有效性来自"虚拟 CPU = 真宿主 CPU"（同机 native 看到相同特性）。
+// M5.0 permanent differential probe for the asm-stub factory: three faces (div/syscall/cpuid, corpus §2.2)
+// + class allocation + explicit registers + inout/lateout clobber -- compared bit-for-bit with native on the same machine.
+// cpuid differential validity comes from "virtual CPU = real host CPU" (native on the same machine sees the same features).
 use std::arch::asm;
 
-/// 面孔 3（算术原语）：128/64 宽除法（numbigint div_wide 同形）。
-/// 显式 inout("dx")/("ax") + in(reg) 类操作数。
+/// Face 3 (arithmetic primitive): 128/64 wide division (same shape as numbigint div_wide).
+/// Explicit inout("dx")/("ax") + in(reg) class operands.
 fn div_wide(hi: u64, lo: u64, d: u64) -> (u64, u64) {
     let (q, r);
     unsafe {

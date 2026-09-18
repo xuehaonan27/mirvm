@@ -1,10 +1,10 @@
-// D15 P2 切③ 对拍夹具的 build-dep：写 $OUT_DIR/gen.rs（OUT_DIR 传播进本
-// crate 编译的实证），发 links metadata（foo=bar → 根 build.rs 的
-// DEP_MYLINKS_FOO）与 rustc-cfg（配套 check-cfg，零 warning 纪律）。
+// D15 P2 cut-③ diff fixture build-dep: writes $OUT_DIR/gen.rs (empirical proof that OUT_DIR propagates into this
+// crate's compile), emits links metadata (foo=bar → root build.rs DEP_MYLINKS_FOO) and rustc-cfg (with matching
+// check-cfg, zero-warning discipline).
 fn main() {
-    let out = std::env::var("OUT_DIR").expect("OUT_DIR 应在");
+    let out = std::env::var("OUT_DIR").expect("OUT_DIR must be set");
     std::fs::write(format!("{out}/gen.rs"), "pub const N: u32 = 7;\n")
-        .expect("gen.rs 写入失败");
+        .expect("gen.rs write failed");
     println!("cargo::metadata=foo=bar");
     println!("cargo::rustc-check-cfg=cfg(bdep_feat)");
     println!("cargo::rustc-cfg=bdep_feat");

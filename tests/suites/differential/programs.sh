@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
-# 全量差分（唯一引擎 = M4 字节码 VM；tier-0 已移除，oracle 一直是 native）：
-# demo/*.rs 原生编译运行 vs mirvm main 启动链运行，对比 stdout、stderr + 退出码。
-# 历史全绿基线从 30 个逐步扩充（M4.4 起含 threads_*；M5.0 起含 asm_probe；真实项目 TDD
-# 新增 track_caller_fn_ptr/u128_switch/volatile_wide；M5.2 起含 intrinsic_probe/
-# recursion_deep/simd_probe/atomic_order_probe/float_wide_probe/asm_extras_probe/signal_probe/fork_exec_probe/nested_dst_probe/wide_int_probe）。
-# P1 起含 struct_fnptr_escape（结构体内嵌 fn-ptr 逃逸负对照，31/31）。
-# 第 0 步起含 weak_extern/global_asm_guest_fn；批9 起含 zst_drop；C1 起含
-# ffi_agg_probe（按值聚合 FfiAgg 合成矩阵）；C3 起含 noreturn_ud2（asm noreturn
-# 终止形，exit=132 双侧同）；E9 起含 dl_iterate_phdr_probe（native 回调差分）。
-# ecosystem/ffi_zlib 是 frontmatter/cargo
-# 形态由 differential.cargo 覆盖，本套件明确记作跳过。
+# Full differential (sole engine = M4 bytecode VM; tier-0 removed, oracle always native):
+# demo/*.rs native compile+run vs mirvm main startup-chain run, compare stdout, stderr + exit code.
+# Historical all-green baseline grew step by step (M4.4+ includes threads_*; M5.0+ includes asm_probe;
+# real-project TDD added track_caller_fn_ptr/u128_switch/volatile_wide; M5.2+ includes intrinsic_probe/
+# recursion_deep/simd_probe/atomic_order_probe/float_wide_probe/asm_extras_probe/signal_probe/fork_exec_probe/nested_dst_probe/wide_int_probe).
+# P1+ includes struct_fnptr_escape (struct-embedded fn-ptr escape negative control, 31/31).
+# Step 0+ includes weak_extern/global_asm_guest_fn; batch 9+ includes zst_drop; C1+ includes
+# ffi_agg_probe (by-value aggregate FfiAgg synthetic matrix); C3+ includes noreturn_ud2 (asm noreturn
+# terminal shape, exit=132 both sides same); E9+ includes dl_iterate_phdr_probe (native callback differential).
+# ecosystem/ffi_zlib has Cargo frontmatter and is covered by differential.cargo; this suite explicitly skips it.
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
 test_enter_repo
@@ -21,16 +20,16 @@ for src in demo/*.rs; do
     name=$(basename "$src" .rs)
     [ "$name" = "fib" ] || [ -z "${ONLY:-}" ] || [ "$name" = "$ONLY" ] || continue
 
-    # 这两个文件带 Cargo frontmatter，必须由 differential.cargo 编译；除此之外
-    # 任意 rustc 失败都是真回归，不能用 SKIP 吞掉。
+    # These two files carry Cargo frontmatter and must be compiled by differential.cargo; any other
+    # rustc failure is a real regression and must not be swallowed by SKIP.
     if [ "$name" = ecosystem ] || [ "$name" = ffi_zlib ]; then
-        skip "$name（Cargo frontmatter；见 differential.cargo）"
+        skip "$name (Cargo frontmatter; see differential.cargo)"
         continue
     fi
 
-    # native（同一 pinned toolchain；关掉环境变量干扰）
+    # native (same pinned toolchain; suppress environment interference)
     rustc --edition 2024 -o "$TMP/$name" "$src" 2>"$TMP/$name.rustc.err" || {
-        echo "FAIL $name: rustc 编译失败"
+        echo "FAIL $name: rustc compilation failed"
         cat "$TMP/$name.rustc.err"
         fail=$((fail + 1))
         continue
@@ -45,32 +44,33 @@ for src in demo/*.rs; do
 
     ok=1
     if ! diff -q "$TMP/$name.native.out" "$TMP/$name.mirvm.out" >/dev/null; then
-        ok=0; why="stdout 不一致"
+        ok=0; why="stdout differs"
     elif [ "$native_code" != "$mirvm_code" ]; then
-        ok=0; why="退出码 native=$native_code mirvm=$mirvm_code"
+        ok=0; why="exit code native=$native_code mirvm=$mirvm_code"
     fi
 
-    # stderr 对比：只规范化本来就不稳定的线程名与 TID；任一侧多出的诊断都失败。
+    # stderr comparison: only normalize thread names and TIDs that are inherently unstable; any extra diagnostic on either side fails.
     if [ $ok = 1 ]; then
         sed -E "s/thread '[^']*' \([0-9]+\)/thread 'T'/" "$TMP/$name.native.err" >"$TMP/$name.native.err.n"
         sed -E "s/thread '[^']*' \([0-9]+\)/thread 'T'/" "$TMP/$name.mirvm.err" >"$TMP/$name.mirvm.err.n"
         if ! diff -q "$TMP/$name.native.err.n" "$TMP/$name.mirvm.err.n" >/dev/null; then
-            ok=0; why="stderr 不一致"
+            ok=0; why="stderr differs"
         fi
     fi
 
-    # L2 warm 复跑（M6 片2）：第二次运行命中 IR 缓存（首跑已入账），产出必须仍与
-    # native 三项一致——防"缓存回放旧语义/快照损伤"假绿。冷/热差异只允许出现在耗时。
+    # L2 warm rerun (M6 slice 2): second run hits IR cache (first run already committed), output must still match
+    # native on all three metrics — guards against "cache replays old semantics / snapshot damage" false greens.
+    # Cold/hot differences are allowed only in elapsed time.
     if [ $ok = 1 ]; then
         env -u RUST_BACKTRACE "$MIRVM" run "$src" >"$TMP/$name.mirvm2.out" 2>"$TMP/$name.mirvm2.err"
         mirvm2_code=$?
         sed -E "s/thread '[^']*' \([0-9]+\)/thread 'T'/" "$TMP/$name.mirvm2.err" >"$TMP/$name.mirvm2.err.n"
         if ! diff -q "$TMP/$name.native.out" "$TMP/$name.mirvm2.out" >/dev/null; then
-            ok=0; why="L2 warm 复跑 stdout 不一致"
+            ok=0; why="L2 warm rerun stdout differs"
         elif [ "$native_code" != "$mirvm2_code" ]; then
-            ok=0; why="L2 warm 复跑退出码 native=$native_code mirvm=$mirvm2_code"
+            ok=0; why="L2 warm rerun exit code native=$native_code mirvm=$mirvm2_code"
         elif ! diff -q "$TMP/$name.native.err.n" "$TMP/$name.mirvm2.err.n" >/dev/null; then
-            ok=0; why="L2 warm 复跑 stderr 不一致"
+            ok=0; why="L2 warm rerun stderr differs"
         fi
     fi
 

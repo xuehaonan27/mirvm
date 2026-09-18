@@ -1,9 +1,9 @@
-//! arch::x86_64::intrinsics — x86_64 硬件 intrinsic 执行体（arch 层纯件）。
+//! arch::x86_64::intrinsics — x86_64 hardware intrinsic implementations (pure arch-layer code).
 //!
-//! 这些函数在 `llvm.x86.*` 边界后执行真宿主指令；guest 与宿主是同一个
-//! 虚拟 CPU，调用方必经 guest 正常 CPUID 派发到达。只摸裸指针/整数——
-//! 无引擎类型、无 OS 依赖（arch/ 层 leaf 纪律，os/ 同）。
-//! （自 vm/engine/x86.rs 整搬，可见性 pub(super)→pub(crate)，零逻辑 diff。）
+//! These functions execute real host instructions behind the `llvm.x86.*` boundary; guest and host are the same
+//! virtual CPU, and callers reach them only through the guest's normal CPUID dispatch. They touch only raw pointers/ints —
+//! no engine types, no OS dependencies (arch/ leaf-layer discipline, same as os/).
+//! (Moved wholesale from vm/engine/x86.rs; visibility changed pub(super)→pub(crate), zero logic diff.)
 
 //! after the guest's normal CPUID dispatch selected it.
 
@@ -61,7 +61,7 @@ pub(crate) unsafe fn sha256rnds2(dst: *mut u8, a: *const u8, b: *const u8, round
     unsafe { _mm_storeu_si128(dst.cast::<__m128i>(), result) };
 }
 
-/// SSE2 `psadbw`：两组 8 字节绝对差和，以 u64 落 qword lane 0/1（其余位清零）。
+/// SSE2 `psadbw`: sum of absolute 8-byte differences for two groups, result as u64 in qword lanes 0/1 (other bits cleared).
 #[target_feature(enable = "sse2")]
 pub(crate) unsafe fn psad_bw128(dst: *mut u8, a: *const u8, b: *const u8) {
     let a = unsafe { _mm_loadu_si128(a.cast::<__m128i>()) };
@@ -70,7 +70,7 @@ pub(crate) unsafe fn psad_bw128(dst: *mut u8, a: *const u8, b: *const u8) {
     unsafe { _mm_storeu_si128(dst.cast::<__m128i>(), result) };
 }
 
-/// AVX2 `vpsadbw`：每 128 位 lane 独立，共 4 个 u64 和。
+/// AVX2 `vpsadbw`: per 128-bit lane, four u64 sums total.
 #[target_feature(enable = "avx2")]
 pub(crate) unsafe fn psad_bw256(dst: *mut u8, a: *const u8, b: *const u8) {
     let a = unsafe { _mm256_loadu_si256(a.cast::<__m256i>()) };
@@ -79,8 +79,8 @@ pub(crate) unsafe fn psad_bw256(dst: *mut u8, a: *const u8, b: *const u8) {
     unsafe { _mm256_storeu_si256(dst.cast::<__m256i>(), result) };
 }
 
-/// PCLMULQDQ：imm8 bit0/bit4 各选 a/b 的 qword 做无进位乘法；imm 其余位硬件
-/// 忽略（`imm & 0x11` 同构）。imm 是运行时参数，按 4 种合法组合分派 const generic。
+/// PCLMULQDQ: imm8 bit0/bit4 each select a/b qword for carryless multiply; hardware ignores the rest of imm
+/// (isomorphic to `imm & 0x11`). imm is a runtime argument; dispatch to four legal const-generic combinations.
 #[target_feature(enable = "pclmulqdq")]
 pub(crate) unsafe fn pclmulqdq(dst: *mut u8, a: *const u8, b: *const u8, imm: u64) {
     let a = unsafe { _mm_loadu_si128(a.cast::<__m128i>()) };
@@ -133,7 +133,7 @@ pub(crate) unsafe fn aesimc(dst: *mut u8, a: *const u8) {
     unsafe { _mm_storeu_si128(dst.cast::<__m128i>(), result) };
 }
 
-/// Rijndael S-box（`aeskeygenassist` 软件模型的 SubWord 用）。
+/// Rijndael S-box (used as SubWord in the `aeskeygenassist` software model).
 const AES_SBOX: [u8; 256] = [
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
     0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
@@ -153,12 +153,12 @@ const AES_SBOX: [u8; 256] = [
     0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16,
 ];
 
-/// AESKEYGENASSIST 的软件模型。imm8 是运行时参数（const generic 覆盖不了 256
-/// 值）；逐位复刻 SDM：X1/X3 = src 的 dword 1/3，
-/// dst = [SubWord(X1), RotWord(SubWord(X1))⊕imm8, SubWord(X3),
-/// RotWord(SubWord(X3))⊕imm8]（RotWord：字节序 [b0,b1,b2,b3]→[b1,b2,b3,b0]，
-/// 即 u32 循环右移 8）。unit test 与硬件 `aeskeygenassist` 对拍多个 imm 保证
-/// 逐位一致。
+/// Software model of AESKEYGENASSIST. imm8 is a runtime argument (const generics cannot cover 256
+/// values); bitwise reproduction of the SDM: X1/X3 = source dwords 1/3,
+/// dst = [SubWord(X1), RotWord(SubWord(X1)) xor imm8, SubWord(X3),
+/// RotWord(SubWord(X3)) xor imm8] (RotWord: byte order [b0,b1,b2,b3]→[b1,b2,b3,b0],
+/// i.e. u32 rotate right by 8). Unit tests cross-check against hardware `aeskeygenassist` for several imm
+/// values to guarantee bit-exact behavior.
 pub(crate) unsafe fn aeskeygenassist(dst: *mut u8, a: *const u8, imm: u64) {
     let sub_word = |w: u32| {
         let mut r = 0u32;
@@ -183,7 +183,7 @@ pub(crate) unsafe fn aeskeygenassist(dst: *mut u8, a: *const u8, imm: u64) {
     unsafe { (dst as *mut [u32; 4]).write_unaligned(out) };
 }
 
-/// SSE4.2 CRC32（CRC32C 硬件语义，无首尾取反——包装层负责）。标量通道。
+/// SSE4.2 CRC32 (CRC32C hardware semantics, no pre/post complement — wrapper handles that). Scalar path.
 #[target_feature(enable = "sse4.2")]
 pub(crate) unsafe fn crc32_u8(crc: u32, v: u8) -> u32 {
     _mm_crc32_u8(crc, v)
@@ -204,7 +204,7 @@ pub(crate) unsafe fn crc32_u64(crc: u64, v: u64) -> u64 {
     _mm_crc32_u64(crc, v)
 }
 
-/// AVX2 `vpermd`：dst.dword[i] = a.dword[idx.dword[i] & 7]（跨 lane）。
+/// AVX2 `vpermd`: dst.dword[i] = a.dword[idx.dword[i] & 7] (cross-lane).
 #[target_feature(enable = "avx2")]
 pub(crate) unsafe fn permd256(dst: *mut u8, a: *const u8, idx: *const u8) {
     let a = unsafe { _mm256_loadu_si256(a.cast::<__m256i>()) };
@@ -213,7 +213,7 @@ pub(crate) unsafe fn permd256(dst: *mut u8, a: *const u8, idx: *const u8) {
     unsafe { _mm256_storeu_si256(dst.cast::<__m256i>(), result) };
 }
 
-/// SSSE3 `pmaddubsw`：a 无符号字节 × b 有符号字节，相邻两积之和饱和到 i16。
+/// SSSE3 `pmaddubsw`: unsigned bytes of a × signed bytes of b, sum of adjacent products saturated to i16.
 #[target_feature(enable = "ssse3")]
 pub(crate) unsafe fn pmaddubsw128(dst: *mut u8, a: *const u8, b: *const u8) {
     let a = unsafe { _mm_loadu_si128(a.cast::<__m128i>()) };
@@ -222,7 +222,7 @@ pub(crate) unsafe fn pmaddubsw128(dst: *mut u8, a: *const u8, b: *const u8) {
     unsafe { _mm_storeu_si128(dst.cast::<__m128i>(), result) };
 }
 
-/// AVX2 `vpmaddubsw`：每 128 位 lane 独立。
+/// AVX2 `vpmaddubsw`: per 128-bit lane.
 #[target_feature(enable = "avx2")]
 pub(crate) unsafe fn pmaddubsw256(dst: *mut u8, a: *const u8, b: *const u8) {
     let a = unsafe { _mm256_loadu_si256(a.cast::<__m256i>()) };
@@ -231,7 +231,7 @@ pub(crate) unsafe fn pmaddubsw256(dst: *mut u8, a: *const u8, b: *const u8) {
     unsafe { _mm256_storeu_si256(dst.cast::<__m256i>(), result) };
 }
 
-/// SSE2 `pmaddwd`：相邻 i16 对积之和放 i32。
+/// SSE2 `pmaddwd`: sum of adjacent i16-pair products stored as i32.
 #[target_feature(enable = "sse2")]
 pub(crate) unsafe fn pmaddwd128(dst: *mut u8, a: *const u8, b: *const u8) {
     let a = unsafe { _mm_loadu_si128(a.cast::<__m128i>()) };
@@ -240,15 +240,15 @@ pub(crate) unsafe fn pmaddwd128(dst: *mut u8, a: *const u8, b: *const u8) {
     unsafe { _mm_storeu_si128(dst.cast::<__m128i>(), result) };
 }
 
-/// LDDQU 族（`llvm.x86.sse3.ldu.dq` / `llvm.x86.avx.ldu.dq.256`；
-/// `_mm_lddqu_si128` / `_mm256_lddqu_si256`）：语义 = 普通非对齐 16/32 字节
-/// load（与 loadu 逐位同义——lddqu 的未缓存跨行微优化提示在本模型无影响）。
-/// corpus 批8 c_tantivy 实锤补建（bitpacking avx2/termdict 列值读取派发点）。
+/// LDDQU family (`llvm.x86.sse3.ldu.dq` / `llvm.x86.avx.ldu.dq.256`;
+/// `_mm_lddqu_si128` / `_mm256_lddqu_si256`): semantics = ordinary unaligned 16/32-byte
+/// load (bit-identical to loadu — lddqu's non-temporal cross-line micro-optimization hint has no effect in this model).
+/// Added after corpus batch 8 c_tantivy (bitpacking avx2 / termdict column-value read dispatch point).
 pub(crate) unsafe fn lddqu<const W: usize>(dst: *mut u8, src: *const u8) {
     unsafe { std::ptr::copy_nonoverlapping(src, dst, W) };
 }
 
-/// AVX2 `vpmaddwd`：每 128 位 lane 独立。
+/// AVX2 `vpmaddwd`: per 128-bit lane.
 #[target_feature(enable = "avx2")]
 pub(crate) unsafe fn pmaddwd256(dst: *mut u8, a: *const u8, b: *const u8) {
     let a = unsafe { _mm256_loadu_si256(a.cast::<__m256i>()) };
@@ -257,10 +257,10 @@ pub(crate) unsafe fn pmaddwd256(dst: *mut u8, a: *const u8, b: *const u8) {
     unsafe { _mm256_storeu_si256(dst.cast::<__m256i>(), result) };
 }
 
-/// `vgatherqpd` 的软件模型（`llvm.x86.avx2.gather.q.pd.256`）：mask lane 符号位
-/// 置位才读 `base + vindex*scale`（f64），否则拷 src lane。**mask 关闭的 lane
-/// 绝不触内存**（fault suppression——野索引 lane 被 mask 时硬件同样不读）。
-/// 地址按 64 位回绕算术（硬件同）。scale 合法值为 1/2/4/8（LLVM 发射已约束）。
+/// Software model of `vgatherqpd` (`llvm.x86.avx2.gather.q.pd.256`): a mask lane reads from memory only if its sign bit is set,
+/// reading `base + vindex*scale` (f64); otherwise it copies the src lane. **Lanes whose mask is off
+/// never touch memory** (fault suppression — wild-index lanes masked off are also not read by hardware).
+/// Addresses use 64-bit wrapping arithmetic (same as hardware). scale legal values are 1/2/4/8 (constrained by LLVM emission).
 pub(crate) unsafe fn gather_q_pd_256(
     dst: *mut u8,
     src: *const u8,
@@ -282,8 +282,8 @@ pub(crate) unsafe fn gather_q_pd_256(
     }
 }
 
-/// `vgatherdpd`（256 位 form）的软件模型（`llvm.x86.avx2.gather.d.pd.256`）：
-/// 与 q 版同形，但索引是 4×i32，参与地址算术前符号扩展到 64 位。
+/// Software model of `vgatherdpd` (256-bit form) (`llvm.x86.avx2.gather.d.pd.256`):
+/// Same shape as the q variant, but indices are 4×i32, sign-extended to 64 bits before address arithmetic.
 pub(crate) unsafe fn gather_d_pd_256(
     dst: *mut u8,
     src: *const u8,
@@ -305,10 +305,10 @@ pub(crate) unsafe fn gather_d_pd_256(
     }
 }
 
-/// AVX512IFMA `vpmadd52l/h.uq` 的软件模型：dst.qword[i] =
-/// a[i] + (b[i][51:0] × c[i][51:0]) 的 bit[51:0]（LO）或 bit[103:52]（HI），
-/// 加法按 64 位回绕。52×52 → 104 位中间积用 u128 精确承载。unit test 与硬件
-/// `_mm*_madd52lo/hi_epu64` 对拍（含高位污染输入，钉死输入掩码语义）。
+/// Software model of AVX512IFMA `vpmadd52l/h.uq`: dst.qword[i] =
+/// a[i] + low 52 bits (LO) or bits 103:52 (HI) of (b[i][51:0] × c[i][51:0]),
+/// addition wraps at 64 bits. 52×52 → 104-bit intermediate product fits exactly in u128. Unit tests cross-check
+/// against hardware `_mm*_madd52lo/hi_epu64` (including high-bit-polluted inputs, pinning input-mask semantics).
 pub(crate) unsafe fn vpmadd52<const LANES: usize, const HI: bool>(
     dst: *mut u8,
     a: *const u8,
@@ -334,12 +334,12 @@ pub(crate) unsafe fn vpmadd52<const LANES: usize, const HI: bool>(
     }
 }
 
-// ===== packed-f32 lane 软件模型（族⑨：tiny-skia simd 默认路径）=====
-// 全部可精确模型化：`if a > b { a } else { b }` 等 Rust 标量运算与硬件指令同位
-// 结果（unordered/±0/NaN 位透传皆同——unit test 逐一对拍 `_mm_*`/`_mm256_*`）。
+// ===== packed-f32 lane software model (family ⑨: tiny-skia simd default path) =====
+// All can be modeled exactly: Rust scalar ops like `if a > b { a } else { b }` produce bit-identical results to hardware,
+// including unordered/±0/NaN passthrough — unit tests cross-check each against `_mm_*`/`_mm256_*`).
 
-/// MAXPS/MINPS 逐 lane：`max ? a>b : a<b` 真取 a、否则取 b（unordered → 第二源
-/// b；±0 相等 → b；NaN 位透传——对拍确认与 Rust 比较同构）。
+/// MAXPS/MINPS per lane: `max ? a>b : a<b` picks a if true, otherwise b (unordered → second source
+/// b; ±0 equal → b; NaN bits passthrough — cross-checked to be isomorphic to Rust comparisons).
 pub(crate) unsafe fn maxmin_ps<const LANES: usize, const MAX: bool>(
     dst: *mut u8,
     a: *const u8,
@@ -359,8 +359,8 @@ pub(crate) unsafe fn maxmin_ps<const LANES: usize, const MAX: bool>(
     }
 }
 
-/// MAXPD/MINPD 逐 lane：与 maxmin_ps 同语义（unordered → b；±0 相等 → b；
-/// NaN 位透传），f64 lane 版（faer 默认特性 V3 内核实锤，C6 按需队列）
+/// MAXPD/MINPD per lane: same semantics as maxmin_ps (unordered → b; ±0 equal → b;
+/// NaN bits passthrough), f64 lane variant (confirmed by faer default feature V3 kernel, C6 on-demand queue)
 pub(crate) unsafe fn maxmin_pd<const LANES: usize, const MAX: bool>(
     dst: *mut u8,
     a: *const u8,
@@ -380,10 +380,10 @@ pub(crate) unsafe fn maxmin_pd<const LANES: usize, const MAX: bool>(
     }
 }
 
-/// CMPPS/VCMPPS 全 32 谓词（S/Q 后缀只差异常旗标，值位相同 → 按值对拍一起）。
-/// imm = SDM imm8：真 lane 写 0xFFFF_FFFF，假写 0。
-// 否定比较即 NLT/NLE/NGE/NGT 谓词语义本体：NaN 无序时这些谓词为真，恰靠
-// `!(x < y)` 这类否定比较表达；改写为 partial_cmp 会改变 NaN 行为，保留原式。
+/// CMPPS/VCMPPS all 32 predicates (S/Q suffixes differ only in exception flags; value bits are identical → checked together by value).
+/// imm = SDM imm8: true lanes write 0xFFFF_FFFF, false lanes write 0.
+// Negated comparisons are the essence of NLT/NLE/NGE/NGT predicates: these are true on unordered NaN, which is exactly
+// expressed by negated comparisons like `!(x < y)`; rewriting as partial_cmp would change NaN behavior, so keep the original.
 #[allow(clippy::neg_cmp_op_on_partial_ord)]
 pub(crate) unsafe fn cmp_ps<const LANES: usize>(
     dst: *mut u8,
@@ -418,8 +418,8 @@ pub(crate) unsafe fn cmp_ps<const LANES: usize>(
     }
 }
 
-/// CMPPD：与 cmp_ps 同一张 IEEE 谓词表（imm&0x1f），f64 lane + 64 位掩码。
-///（faer 默认特性 V3 内核实锤缺它，C6 按需队列）
+/// CMPPD: same IEEE predicate table as cmp_ps (imm&0x1f), f64 lanes + 64-bit masks.
+/// (faer default feature V3 kernel was confirmed to need this, C6 on-demand queue)
 #[allow(clippy::neg_cmp_op_on_partial_ord)]
 pub(crate) unsafe fn cmp_pd<const LANES: usize>(
     dst: *mut u8,
@@ -454,10 +454,10 @@ pub(crate) unsafe fn cmp_pd<const LANES: usize>(
     }
 }
 
-/// ROUNDPS：imm[3:0]：bit2=0 → imm[1:0] 舍入（0=RNE/1=floor/2=ceil/3=trunc）；
-/// bit2=1 → MXCSR.RC（引擎恒宿默认 RNE）；bit3 只抑制异常旗标，与值位无关。
-/// NaN：硬件语义 = 载荷保留 + qbit 强置——显式臂实现（不显式置信性 libm/
-/// roundss 的 NaN 位行为，后者随宿主构建目标特征漂移）。
+/// ROUNDPS: imm[3:0]: if bit2=0 → imm[1:0] selects rounding (0=RNE/1=floor/2=ceil/3=trunc);
+/// bit2=1 → MXCSR.RC (engine always-host default is RNE); bit3 only suppresses exception flags and does not affect value bits.
+/// NaN: hardware semantics = payload preserved + qbit forced — explicit-arm implementation (do not implicitly trust libm/
+/// roundss NaN bit behavior, which drifts with host build target features).
 pub(crate) unsafe fn round_ps<const LANES: usize>(dst: *mut u8, a: *const u8, imm: u64) {
     for i in 0..LANES {
         let x = unsafe { (a as *const f32).add(i).read_unaligned() };
@@ -468,7 +468,7 @@ pub(crate) unsafe fn round_ps<const LANES: usize>(dst: *mut u8, a: *const u8, im
                 1 => x.floor(),
                 2 => x.ceil(),
                 3 => x.trunc(),
-                // 0 或 bit2=1（MXCSR，默认 RNE）
+                // 0 or bit2=1 (MXCSR, default RNE)
                 _ => x.round_ties_even(),
             }
         };
@@ -476,8 +476,8 @@ pub(crate) unsafe fn round_ps<const LANES: usize>(dst: *mut u8, a: *const u8, im
     }
 }
 
-/// CVTPS2DQ/CVTTPS2DQ：取整（RNE 或截断）后 i32；NaN/越界（含 2^31 边界）/±inf
-/// → 0x80000000（indefinite，对拍钉死）。取整在 f32 域完成（精确）再饱和检查。
+/// CVTPS2DQ/CVTTPS2DQ: round (RNE or truncate) to i32; NaN/out-of-range (including 2^31 boundary)/±inf
+/// → 0x80000000 (indefinite, pinned by cross-check). Rounding is done in the f32 domain (exact) then saturation-checked.
 pub(crate) unsafe fn cvt_ps2dq<const LANES: usize, const TRUNC: bool>(dst: *mut u8, a: *const u8) {
     for i in 0..LANES {
         let x = unsafe { (a as *const f32).add(i).read_unaligned() };
@@ -495,7 +495,7 @@ pub(crate) unsafe fn cvt_ps2dq<const LANES: usize, const TRUNC: bool>(dst: *mut 
     }
 }
 
-/// BLENDVPS：mask lane 符号位置位取 b、清零取 a（纯位选择）。
+/// BLENDVPS: per lane, if mask sign bit is set take b, else a (pure bitwise select).
 pub(crate) unsafe fn blendv_ps<const LANES: usize>(
     dst: *mut u8,
     a: *const u8,
@@ -510,8 +510,8 @@ pub(crate) unsafe fn blendv_ps<const LANES: usize>(
     }
 }
 
-/// PSLL/PSRL.d 软件模型：count = count 操作数低 64 位（高位字节忽略）；
-/// count > 31 → 全零 lane（SDM）。逻辑移位，位进出精确。
+/// PSLL/PSRL.d software model: count = low 64 bits of count operand (high bytes ignored);
+/// count > 31 → all-zero lane (SDM). Logical shift, bits move in/out exactly.
 pub(crate) unsafe fn pshift32<const LANES: usize, const LEFT: bool>(
     dst: *mut u8,
     a: *const u8,
@@ -530,9 +530,9 @@ pub(crate) unsafe fn pshift32<const LANES: usize, const LEFT: bool>(
     }
 }
 
-// ===== f16 ↔ f32 软件模型（族⑧ F16C VCVTPS2PH/VCVTPH2PS）=====
+// ===== f16 ↔ f32 software model (family ⑧ F16C VCVTPS2PH/VCVTPH2PS) =====
 
-/// VCVTPS2PH 舍入模式（imm[1:0]；imm[2]=1 时 = MXCSR.RC，引擎恒宿默认 RNE）。
+/// VCVTPS2PH rounding mode (imm[1:0]; imm[2]=1 means MXCSR.RC, engine always-host default RNE).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HalfRound {
     Rne,
@@ -541,35 +541,35 @@ pub(crate) enum HalfRound {
     Trunc,
 }
 
-/// f32（位型）→ f16（位型），VCVTPS2PH 精确语义：次正规/溢出/四种舍入模式精确；
-/// NaN → qbit 强置 + 载荷右移 13 位截断（`7f800001→7e00` 型，对拍钉死）。
+/// f32 (bit pattern) → f16 (bit pattern), exact VCVTPS2PH semantics: subnormal/overflow/four rounding modes exact;
+/// NaN → qbit forced + payload shifted right 13 bits truncated (pattern like `7f800001→7e00`, pinned by cross-check).
 pub(crate) fn f32_to_f16_sw(bits: u32, mode: HalfRound) -> u16 {
     let sign = ((bits >> 31) as u16) << 15;
     let exp = ((bits >> 23) & 0xff) as i32;
     let mant = bits & 0x007f_ffff;
     if exp == 0xff {
         if mant != 0 {
-            // NaN：qbit 强置 + 载荷高位截断（低 13 位丢弃——硬件不折进 bit0）
+            // NaN: qbit forced + high payload truncated (low 13 bits dropped — hardware does not carry into bit0)
             return sign | 0x7e00 | ((mant >> 13) as u16);
         }
         return sign | 0x7c00; // ±inf → ±inf
     }
     if exp == 0 && mant == 0 {
-        return sign; // ±0 → ±0（任何舍入模式）
+        return sign; // ±0 → ±0 (any rounding mode)
     }
-    // 数值 = mant_full × 2^(e-23)；f32 次正规 exp=0 ⇒ mant_full=mant, e=-126
+    // value = mant_full × 2^(e-23); f32 subnormal exp=0 ⇒ mant_full=mant, e=-126
     let (mant_full, e) = if exp == 0 {
         (mant, -126)
     } else {
         (mant | 0x0080_0000, exp - 127)
     };
-    // 定向舍入折进幅值域：away = (Up && 非负) || (Down && 负)；Rne/Trunc 无关符号
+    // Directed rounding carries into magnitude domain: away = (Up && non-negative) || (Down && negative); Rne/Trunc ignore sign
     let away = matches!(
         (mode, sign != 0),
         (HalfRound::Up, false) | (HalfRound::Down, true)
     );
     if e > 15 {
-        // 幅值 ≥ 2^16（RNE 下也必 >65520 沸点）：away/Rne → inf，否则最大正规
+        // magnitude ≥ 2^16 (also >65520 saturation point under RNE): away/Rne → inf, else max normal
         return if matches!(mode, HalfRound::Rne) || away {
             sign | 0x7c00
         } else {
@@ -577,7 +577,7 @@ pub(crate) fn f32_to_f16_sw(bits: u32, mode: HalfRound) -> u16 {
         };
     }
     if e >= -14 {
-        // 正规道：留 11 位（含隐藏位），丢 13 位
+        // Normal path: keep 11 bits (including hidden bit), drop 13 bits
         let keep = mant_full >> 13;
         let dropped = mant_full & 0x1fff;
         let inc = match mode {
@@ -586,7 +586,7 @@ pub(crate) fn f32_to_f16_sw(bits: u32, mode: HalfRound) -> u16 {
             HalfRound::Trunc => false,
         };
         let keep = keep + u32::from(inc);
-        // 尾数进位上推指数（含 RNE 的 65520→inf 沸点）
+        // Mantissa carry pushes exponent up (includes RNE 65520→inf saturation point)
         let (e16, mhi) = if keep == 0x800 {
             (e + 1, 0x400u32)
         } else {
@@ -601,9 +601,9 @@ pub(crate) fn f32_to_f16_sw(bits: u32, mode: HalfRound) -> u16 {
         }
         return sign | (((e16 + 15) as u16) << 10) | ((mhi & 0x3ff) as u16);
     }
-    // 次正规道：结果码即幅值以 2^-24 为 LSB 的整数（码 0x400 = 最小正规，无缝衔接）
+    // Subnormal path: result code is magnitude as integer with LSB 2^-24 (code 0x400 = smallest normal, seamless)
     if e < -25 {
-        // 低于半 LSB：Rne/Trunc → ±0；away → 1 个 LSB
+        // Below half LSB: Rne/Trunc → ±0; away → 1 LSB
         return sign | u16::from(away);
     }
     let shift = (-e - 1) as u32; // 14..=24
@@ -618,8 +618,8 @@ pub(crate) fn f32_to_f16_sw(bits: u32, mode: HalfRound) -> u16 {
     sign | (keep + u32::from(inc)) as u16
 }
 
-/// f16（位型）→ f32（位型），VCVTPH2PS 精确展开：次正规精确规格化；
-/// NaN → qbit 强置 + 载荷左移 13 位（对拍钉死）。
+/// f16 (bit pattern) → f32 (bit pattern), exact VCVTPH2PS expansion: subnormals normalized exactly;
+/// NaN → qbit forced + payload shifted left 13 bits (pinned by cross-check).
 pub(crate) fn f16_to_f32_sw(bits: u16) -> u32 {
     let bits = u32::from(bits);
     let sign = (bits & 0x8000) << 16;
@@ -627,7 +627,7 @@ pub(crate) fn f16_to_f32_sw(bits: u16) -> u32 {
     let mant = bits & 0x03ff;
     if exp == 0x1f {
         if mant != 0 {
-            // NaN：qbit 强置（f32 bit22）+ 载荷左移 13 位
+            // NaN: qbit forced (f32 bit22) + payload shifted left 13 bits
             return sign | 0x7fc0_0000 | (mant << 13);
         }
         return sign | 0x7f80_0000; // ±inf → ±inf
@@ -636,7 +636,7 @@ pub(crate) fn f16_to_f32_sw(bits: u16) -> u32 {
         if mant == 0 {
             return sign; // ±0 → ±0
         }
-        // 次正规 → 正规规格化（值恒可精确表示）
+        // Subnormal → normalized (value is always exactly representable)
         let mut m = mant;
         let mut e: i32 = -14;
         while m & 0x400 == 0 {
@@ -649,11 +649,11 @@ pub(crate) fn f16_to_f32_sw(bits: u16) -> u32 {
     sign | (((exp as i32 - 15 + 127) as u32) << 23) | (mant << 13)
 }
 
-/// VCVTPS2PH：f32 lanes → f16 打包进输出低 LANES×2 字节，其余清零
-/// （.128：LANES=4，输出 16 字节的低 8；.256：LANES=8，输出 16 字节整体）。
+/// VCVTPS2PH: f32 lanes → f16 packed into low LANES×2 bytes of output, rest zeroed
+/// (.128: LANES=4, low 8 of 16 output bytes; .256: LANES=8, full 16 output bytes).
 pub(crate) unsafe fn cvtps2ph<const LANES: usize>(dst: *mut u8, a: *const u8, imm: u64) {
     let mode = match imm & 7 {
-        // bit2=1（imm&4）→ MXCSR.RC，引擎恒宿默认 = RNE
+        // bit2=1 (imm&4) → MXCSR.RC, engine always-host default = RNE
         1 => HalfRound::Down,
         2 => HalfRound::Up,
         3 => HalfRound::Trunc,
@@ -665,12 +665,12 @@ pub(crate) unsafe fn cvtps2ph<const LANES: usize>(dst: *mut u8, a: *const u8, im
         let h = f32_to_f16_sw(x, mode);
         unsafe { (dst as *mut u16).add(i).write_unaligned(h) };
     }
-    // 输出高位清零（.128 的 v8i16 返回：高 4 lane = 0）
+    // Clear output high bits (.128 v8i16 return: high 4 lanes = 0)
     unsafe { std::ptr::write_bytes(dst.add(LANES * 2), 0, 16 - LANES * 2) };
 }
 
-/// VCVTPH2PS：f16 lanes（输入低 LANES×2 字节）→ f32 lanes（输出 LANES×4 字节）
-/// （.128：LANES=4 → 16 字节；.256：LANES=8 → 32 字节）。
+/// VCVTPH2PS: f16 lanes (low LANES×2 input bytes) → f32 lanes (LANES×4 output bytes)
+/// (.128: LANES=4 → 16 bytes; .256: LANES=8 → 32 bytes).
 pub(crate) unsafe fn cvtph2ps<const LANES: usize>(dst: *mut u8, a: *const u8) {
     for i in 0..LANES {
         let h = unsafe { (a as *const u16).add(i).read_unaligned() };

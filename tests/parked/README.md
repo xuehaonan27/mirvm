@@ -1,29 +1,29 @@
-# tests/parked/ —— 休眠基建存档
+# tests/parked/ — parked test-infrastructure archive
 
-此处存放**当前不进任何 gate、也不进 CI** 的测试基建，保留备将来复用；
-不是可执行文档，引用前先读本说明。
+This directory holds **test infrastructure that currently runs in no gate and no CI**, kept for future reuse;
+it is not executable documentation, read this note before referencing.
 
 ## real_projects.sh + real_projects_regression.sh + project_suite_evidence.py
 
-2026-07-13 建的"真实 Cargo 项目 correctness/benchmark"重型 harness
-（ripgrep/tokei 工作集，bwrap 隔离 + 内容寻址证据链）。合同文档：
-[docs/real-projects.md](../../docs/real-projects.md)。
+Heavy "real Cargo project correctness/benchmark" harness built on 2026-07-13
+(ripgrep/tokei workload, bwrap isolation + content-addressed evidence chain). Contract document:
+[docs/real-projects.md](../../docs/real-projects.md).
 
-**休眠原因（2026-07-23 测试管线整顿实锤）**：
+**Why parked (confirmed by 2026-07-23 test pipeline cleanup)**:
 
-- case 文件与源码镜像位于 git-ignore 的 `artifacts/real-projects/`，仓内无一例；
-  本机 artifacts 早已不存在，harness 实际零执行。
-- 不进 CI（CI 只跑 gate_truth + gate.sh），自身却有 118K 的自回归脚本——
-  基建超过产品，违反 AGENTS.md 基建预算纪律。
-- 其"真项目对拍"职责已由更轻的 `corpus/projects/<名>/`（manifest mode=diff，
-  native cargo run 三维对拍）接替。
+- Case files and source mirrors live in git-ignored `artifacts/real-projects/`; no cases are in-repo.
+- Local artifacts no longer exist, so the harness actually executes zero cases.
+- Not in CI (CI only runs gate_truth + gate.sh), yet the harness itself is 118K of self-regression script —
+  infrastructure exceeding product violates the AGENTS.md infrastructure budget discipline.
+- Its "real-project differential" duty has been taken over by the lighter `corpus/projects/<name>/`
+  (manifest mode=diff, native cargo run three-way differential).
 
-**复活条件**：需要带 provenance 钉版 + 沙箱执行的真实项目证据链时（例如
-对外发布兼容性声明），回此处；注意三脚本内的相对路径假设是 `tests/` 根，
-复活时要么挪回要么改路径。彼时请先重读基建预算纪律：能跑当前真实负载并
-产出可信判绿即冻结。
+**Revival condition**: when real-project evidence chain with pinned provenance + sandboxed execution is needed
+(e.g. external compatibility release statement), return here; note that the three scripts assume `tests/` as root,
+so either move them back or adjust paths on revival. At that time re-read the infrastructure budget discipline:
+once the current real workload runs and produces trustworthy pass/fail results, freeze it.
 
-## 历史
+## History
 
-- `tests/project_suite_rustc_proxy.sh` 不是休眠件——它是 diff_cargo.sh 的
-  活动依赖，2026-07-23 挪至 `tests/fixtures/rustc_proxy.sh`。
+- `tests/project_suite_rustc_proxy.sh` is not parked — it is an active dependency of diff_cargo.sh,
+  moved to `tests/fixtures/rustc_proxy.sh` on 2026-07-23.

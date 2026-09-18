@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 固定真实 Cargo 项目的 correctness / benchmark 入口。
-# 实现分层内容身份、native↔mirvm 精确差分，以及 correctness-gated benchmark evidence。
+# Fixed entry point for real Cargo project correctness / benchmark.
+# Implements layered content identity, native↔mirvm exact diffing, and correctness-gated benchmark evidence.
 set -u
 cd "$(dirname "$0")/.."
 
@@ -1355,7 +1355,7 @@ run_isolated() {
     if [ "$kind" != exit ] || [[ ! "$code" =~ ^[0-9]+$ ]]; then
         return 1
     fi
-    # wrapper_code 允许等于 guest code；隔离层是否真实完成由 status_file 单独证明。
+    # wrapper_code may equal guest code; whether the isolation layer actually completed is proven separately by status_file.
     [ "$wrapper_code" -eq "$code" ] || return 1
     return 0
 }

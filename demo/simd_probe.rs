@@ -1,8 +1,8 @@
-// M5.2 D8b simd 全家族的永久差分探针：LaneKind 语义边界与 native 同机对拍。
-// 重点打"曾经的静默错值面"：float lane 的比较/算术不是位运算（+0.0==−0.0、
-// NaN 不自反、NaN 传播）、有符号 lane 的除法/移位/饱和边界、掩码访存不佯读写。
-// 无公开 API 的面（funnel/masked/dyn lane/arith_offset）直调 core intrinsics
-// ——native 由同一 pinned rustc 编译，同源对拍成立。
+// M5.2 D8b permanent differential probe for the full simd family: LaneKind semantic boundary vs. native on the same machine.
+// Focuses on the "formerly silent wrong-value surface": float lane compare/arithmetic is not bitwise (+0.0==−0.0,
+// NaN is not reflexive, NaN propagation), signed lane division/shift/saturation boundaries, masked memory must not fake reads/writes.
+// Surfaces with no public API (funnel/masked/dyn lane/arith_offset) call core intrinsics directly
+// -- native is compiled by the same pinned rustc, so same-source differential comparison holds.
 #![feature(portable_simd, core_intrinsics)]
 #![allow(internal_features)]
 
@@ -13,7 +13,7 @@ use std::simd::prelude::*;
 fn float_lanes() {
     let z = f32x4::from_array([0.0, -0.0, f32::NAN, f32::INFINITY]);
     let y = f32x4::from_array([-0.0, 0.0, f32::NAN, 1.0e30]);
-    // 位比较会把 +0.0/−0.0 判不等、NaN 判相等——两者都是错的
+    // Bitwise compare would deem +0.0/−0.0 unequal and NaN equal -- both are wrong.
     println!("f eq/ne = {:?} {:?}", z.simd_eq(y).to_array(), z.simd_ne(y).to_array());
     println!("f lt/ge = {:?} {:?}", z.simd_lt(y).to_array(), z.simd_ge(y).to_array());
     let s = z + y;
@@ -33,7 +33,7 @@ fn float_lanes() {
         t.sin().to_array(), t.exp().to_array(), t.ln().to_array());
     println!("f fma = {:?}",
         f32x4::splat(1.5).mul_add(f32x4::splat(2.0), f32x4::splat(-1.0)).to_array());
-    // reduce：顺序折叠 vs unordered 的允许集合（顺序恒在内）
+    // reduce: ordered fold vs. unordered allowed set (ordered is always in the set)
     let r = f32x4::from_array([1.5, 2.5, 3.5, 4.5]);
     println!("f reduce sum/mul/min/max = {} {} {} {}",
         r.reduce_sum(), r.reduce_product(), r.reduce_min(), r.reduce_max());
@@ -60,7 +60,7 @@ fn int_lanes() {
     println!("i reduce = {} {} {} {} {}",
         a.reduce_sum(), a.reduce_product(), a.reduce_min(), a.reduce_max(),
         u.reduce_and());
-    // funnel（无公开 API）：拼接窗口移位
+    // funnel (no public API): concatenated-window shift
     let fa = u32x4::from_array([0xDEAD_BEEF, 1, 0x8000_0000, 0xFFFF_FFFF]);
     let fb = u32x4::from_array([0x1234_5678, 0x8000_0000, 0, 1]);
     let fs = u32x4::from_array([8, 1, 31, 0]);
@@ -84,7 +84,7 @@ fn casts() {
 }
 
 fn memory_lanes() {
-    // gather/scatter：假 lane 的指针指向哨兵，佯读/佯写会破坏哨兵值
+    // gather/scatter: dummy-lane pointers point to a sentinel; fake reads/writes would corrupt the sentinel value
     let data = [10i32, 20, 30, 40];
     let sentinel = Box::new(-1i32);
     let ptrs = Simd::<*const i32, 4>::from_array([
@@ -117,13 +117,13 @@ fn memory_lanes() {
     };
     println!("masked_store = {mout:?}");
 
-    // 动态 lane
+    // dynamic lane
     let v = u32x4::from_array([11, 22, 33, 44]);
     let e: u32 = unsafe { si::simd_extract_dyn(v, 2) };
     let v2: u32x4 = unsafe { si::simd_insert_dyn(v, 1, 99u32) };
     println!("dyn = {e} {:?}", v2.to_array());
 
-    // arith_offset：指针 lane 逐 lane 位移
+    // arith_offset: pointer lane offset element-by-element
     let base = Simd::<*const i32, 4>::from_array([&data[0]; 4]);
     let off = Simd::<isize, 4>::from_array([0, 1, 2, 3]);
     let stepped: Simd<*const i32, 4> = unsafe { si::simd_arith_offset(base, off) };

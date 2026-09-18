@@ -1,5 +1,5 @@
-// M5.2 D8g/D8h 永久差分探针：global_asm! 定义的符号、naked fn、inline asm const/sym
-// 操作数、atexit LIFO 回调——全部与 native 同机对拍。
+// M5.2 D8g/D8h permanent differential probe: symbols defined by global_asm!, naked fn, inline asm const/sym
+// operands, atexit LIFO callbacks — all compared against native on the same machine.
 use std::arch::{asm, global_asm, naked_asm};
 use std::os::raw::c_int;
 

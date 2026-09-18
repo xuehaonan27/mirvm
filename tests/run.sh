@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# mirvm 标准测试入口。用户和 CI 只从这里运行测试。
+# mirvm standard test entry point. Users and CI run tests only through here.
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/support/harness.sh"
 test_enter_repo
@@ -21,7 +21,7 @@ fi
 TOOLCHAIN=${TOOLCHAIN:-$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)}
 if [ -z "${CARGO:-}" ] || [ -z "${RUSTC:-}" ]; then
     TOOLCHAIN_ROOT=$(rustc +"$TOOLCHAIN" --print sysroot 2>/dev/null) || {
-        echo "ERROR 固定 Rust 工具链不可用: $TOOLCHAIN" >&2
+        echo "ERROR pinned Rust toolchain unavailable: $TOOLCHAIN" >&2
         exit 69
     }
     CARGO=${CARGO:-$TOOLCHAIN_ROOT/bin/cargo}
@@ -29,7 +29,7 @@ if [ -z "${CARGO:-}" ] || [ -z "${RUSTC:-}" ]; then
 fi
 export TOOLCHAIN CARGO RUSTC
 
-suite_record() { # <suite-id>；输出：仓库相对脚本路径|用途
+suite_record() { # <suite-id>; output: repo-relative script path|purpose
     local id=$1 category name path description
     [[ "$id" =~ ^[a-z0-9]+\.[a-z0-9][a-z0-9-]*$ ]] || return 1
     category=${id%%.*}
@@ -38,7 +38,7 @@ suite_record() { # <suite-id>；输出：仓库相对脚本路径|用途
     [ -f "$path" ] || return 1
     description=$(sed -n '2{s/^#[[:space:]]*//;p;q;}' "$path")
     [ -n "$description" ] || {
-        echo "ERROR 套件第二行缺少用途说明: ${path#"$REPO_ROOT"/}" >&2
+        echo "ERROR suite second line missing purpose description: ${path#"$REPO_ROOT"/}" >&2
         return 1
     }
     printf '%s|%s\n' "${path#"$REPO_ROOT"/}" "$description"
@@ -64,13 +64,13 @@ list_suites() {
 
 usage() {
     cat <<'EOF'
-用法：
+Usage:
   ./tests/run.sh fast|smoke|gate
-  ./tests/run.sh suite <suite-id> [套件参数...]
+  ./tests/run.sh suite <suite-id> [suite args...]
   ./tests/run.sh list
   ./tests/run.sh help
 
-fast 是日常提交检查；smoke 增加小规模真实负载；gate 是完整收尾门禁。
+fast is the daily commit check; smoke adds small real-world loads; gate is the full final gate.
 EOF
 }
 
@@ -104,7 +104,7 @@ start_run() {
     trap 'rm -rf "$TMPDIR_RUN"' EXIT
 }
 
-run_logged() { # <标题> <命令...>
+run_logged() { # <title> <command...>
     local title=$1 code=0 log_name
     shift
     start_run
@@ -114,34 +114,34 @@ run_logged() { # <标题> <命令...>
     cat "$TMPDIR_RUN/$log_name.log"
     case "$code" in
         0)  ok "suite $title" ;;
-        77) skip "suite $title（宿主能力不足）" ;;
+        77) skip "suite $title (host capability insufficient)" ;;
         *)  bad "suite $title（exit=$code）" ;;
     esac
     section_end
     return 0
 }
 
-run_suite() { # <显示标题> <suite-id> [参数...]
+run_suite() { # <display-title> <suite-id> [args...]
     local title=$1 id=$2 record path
     shift 2
     record=$(suite_record "$id") || {
-        echo "ERROR 未知套件: $id" >&2
+        echo "ERROR unknown suite: $id" >&2
         return 64
     }
     path=${record%%|*}
     if suite_needs_product "$id"; then
         ensure_product || {
-            bad "suite $title（产品构建或 MIRVM 检查失败）"
+            bad "suite $title (product build or MIRVM check failed)"
             return 0
         }
     fi
     run_logged "$title" bash "$path" "$@"
 }
 
-run_program_variant() { # <标题> [环境变量...]
+run_program_variant() { # <title> [env vars...]
     local title=$1 record path
     shift
-    ensure_product || { bad "suite $title（产品构建失败）"; return 0; }
+    ensure_product || { bad "suite $title (product build failed)"; return 0; }
     record=$(suite_record differential.programs)
     path=${record%%|*}
     run_logged "$title" env "$@" bash "$path"
@@ -167,7 +167,7 @@ run_fast_obligations() {
 run_profile() {
     local profile=$1
     start_run
-    cache_snapshot "profile $profile 起跑前"
+    cache_snapshot "profile $profile before start"
     disk_guard
     case "$profile" in
         fast)
@@ -205,7 +205,7 @@ run_profile() {
             ;;
     esac
     target_budget_check
-    cache_snapshot "profile $profile 收尾后"
+    cache_snapshot "profile $profile after finish"
     print_section_report
     suite_summary "profile.$profile"
 }
@@ -243,7 +243,7 @@ case "$cmd" in
         suite_summary run.performance
         ;;
     *)
-        echo "ERROR 未知命令: $cmd" >&2
+        echo "ERROR unknown command: $cmd" >&2
         usage >&2
         exit 64
         ;;

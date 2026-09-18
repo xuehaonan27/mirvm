@@ -1,150 +1,125 @@
-# mirvm 测试套件
+# mirvm Test Suite
 
-本文是现行测试入口、套件用途和新增测试规则的唯一说明。历史设计文档可以记录
-旧文件名，但用户、CI 和现行文档只能通过 `tests/run.sh` 运行测试。
+This document is the single source of truth for the current test entry point, suite purposes, and rules for adding new tests. Historical design documents may record old file names, but users, CI, and current documentation must run tests only through `tests/run.sh`.
 
-## 运行入口
+## Entry Point
 
 ```bash
 ./tests/run.sh fast
 ./tests/run.sh smoke
 ./tests/run.sh gate
 ./tests/run.sh list
-./tests/run.sh suite <suite-id> [套件参数...]
+./tests/run.sh suite <suite-id> [suite-args...]
 ```
 
-- `fast`：日常提交检查。
-- `smoke`：在 `fast` 的义务上增加小规模真实负载和运行时检查。
-- `gate`：收尾门禁，覆盖 `fast`、`smoke` 的全部义务，再增加完整 corpus、
-  性能、依赖镜像和额外运行模式。
-- `list`：列出所有活动套件及用途。
-- `suite`：只运行一个套件。例：
-  `./tests/run.sh suite corpus.run --tier smoke`。
+- `fast`: daily commit check.
+- `smoke`: adds small real workloads and runtime checks on top of `fast`.
+- `gate`: final gating, covering everything in `fast` and `smoke`, plus full corpus, performance, dependency image, and extra run modes.
+- `list`: list all active suites and their purposes.
+- `suite`: run a single suite. Example:
+  `./tests/run.sh suite corpus.run --tier smoke`.
 
-入口会先切换到仓库根目录，所以可以从任意工作目录调用。未设置 `MIRVM` 时，
-需要产品二进制的套件会先执行 `cargo build --release --locked`；显式设置 `MIRVM`
-时使用指定二进制。固定 Rust 工具链来自 `rust-toolchain.toml`。
+The entry point switches to the repository root first, so it can be invoked from any working directory. When `MIRVM` is not set, suites that need the product binary first run `cargo build --release --locked`; when `MIRVM` is set explicitly, the specified binary is used. The pinned Rust toolchain comes from `rust-toolchain.toml`.
 
-默认 Cargo home 不可写时，入口使用 `target/test-state/cargo-home`。默认 mirvm home
-不可写时，入口使用 `${TMPDIR:-/tmp}/mirvm-contract-home`。可以用 `CARGO_HOME`、
-`MIRVM_HOME`、`MIRVM_CONTRACT_HOME` 显式覆盖。入口负责建立可写目录，不要求用户
-为每个套件手工准备环境。
+When the default Cargo home is not writable, the entry point uses `target/test-state/cargo-home`. When the default mirvm home is not writable, it uses `${TMPDIR:-/tmp}/mirvm-contract-home`. These can be overridden explicitly with `CARGO_HOME`, `MIRVM_HOME`, and `MIRVM_CONTRACT_HOME`. The entry point is responsible for creating writable directories; it does not require users to manually prepare the environment for each suite.
 
-## 档位内容
+## Tier Contents
 
-| 套件组 | `fast` | `smoke` | `gate` |
+| Suite Group | `fast` | `smoke` | `gate` |
 |---|:---:|:---:|:---:|
-| Rust 格式、clippy、单元测试 | 是 | 是 | 是 |
-| 程序、Cargo、cargoless 三类差分 | 是 | 是 | 是 |
-| cargoless test/workspace/Git/来源合同 | 是 | 是 | 是 |
-| pack 默认 self 与 Cargo 回退合同 | 是 | 是 | 是 |
-| build.rs 增量合同 | 是 | 是 | 是 |
-| C/C-unwind 跨语言异常合同 | 是 | 是 | 是 |
-| 测试框架防假绿回归 | 是 | 是 | 是 |
-| corpus smoke 探索跑批 | 否 | 是 | 由严格 corpus 覆盖 |
-| x86 与运行时语义 | 否 | 是 | 是 |
-| 完整严格 corpus | 否 | 否 | 是 |
-| 依赖镜像、JIT 统计、性能上限 | 否 | 否 | 是 |
+| Rust fmt, clippy, unit tests | yes | yes | yes |
+| program, Cargo, cargoless three-way differential | yes | yes | yes |
+| cargoless test/workspace/git/source contract | yes | yes | yes |
+| pack default self and Cargo fallback contract | yes | yes | yes |
+| build.rs incremental contract | yes | yes | yes |
+| C/C-unwind cross-language exception contract | yes | yes | yes |
+| harness anti-false-green regression | yes | yes | yes |
+| corpus smoke exploratory batch | no | yes | covered by strict corpus |
+| x86 and runtime semantics | no | yes | yes |
+| full strict corpus | no | no | yes |
+| dependency image, JIT stats, performance limits | no | no | yes |
 
-`gate` 不会为了形式重复运行相同套件，但它检查的行为范围必须是前两档的完整
-上级。默认产品路径是 cargoless；`differential.cargo` 始终保留 Cargo 回退路径，
-`differential.cargoless` 始终比较两条路径。完整 Cargo 兼容轨使用：
+`gate` does not rerun the same suite redundantly for formality, but the behavior coverage it checks must be a complete superset of the first two tiers. The default product path is cargoless; `differential.cargo` always keeps the Cargo fallback path, and `differential.cargoless` always compares both paths. For the full Cargo compatibility track, use:
 
 ```bash
 MIRVM_DEPS=cargo ./tests/run.sh gate
 ```
 
-## 套件目录
+## Suite Directory
 
-| 套件 ID | 作用和行为权威 | 主要夹具 |
+| Suite ID | Purpose and Behavioral Authority | Main Fixtures |
 |---|---|---|
-| `quality.rust` | 格式、clippy、Rust 单元测试；嵌入回归锁定 signal guest `oldact`/query 地址、非 LIFO close 恢复、inactive owner 定向、close/JIT 锁期间只登记后安全点派送，以及自产 archive `signal`/`sigaction`/`raise` owner bridge；子进程回归还锁定 native fini 中任何异常必须诊断后 `abort`，不得卡住 `Closing` | `src/` |
-| `differential.programs` | `demo/*.rs` 的 native stdout、stderr、退出码是权威；`signal_probe` 还要求同步 nested `raise` 顺序、计数与 SIG_IGN 行为相同 | `demo/` |
-| `differential.cargo` | 固定 Cargo 的脚本、项目与普通/workspace rustc wrapper 组合行为是权威 | `demo/`、`rustc_wrapper_probe.sh`、其他 `tests/fixtures/` |
-| `differential.cargoless` | Cargo 路径与 cargoless 路径逐字节一致 | `tests/fixtures/cless_*` |
-| `contracts.cargoless-test` | 固定 Cargo/rustdoc 的 test、bench、doctest 选择、编译形状、诊断、输出和退出码是权威 | `cless_test_contract/`、`cless_proc_macro_test_contract/`、`cless_doctest_contract/` |
-| `contracts.cargoless-workspace` | 固定 Cargo 的 resolver 1/2/3、复杂成员 glob、workspace lint、package spec、feature 和失败传播是权威 | `cless_workspace_contract/`、`cless_workspace_remaining_contract/` |
-| `contracts.cargoless-git` | 固定 Cargo lock 格式加本地 Git 仓库的提交内容是权威 | 运行时生成 |
-| `contracts.cargoless-sources` | 固定 Cargo 裁判配置合并、alternate registry、credential provider、source replacement、patch/replace 与 lock | 运行时生成的本地 sparse/local/directory registry |
-| `contracts.pack` | 默认 pack 必须零 Cargo；显式回退必须进入固定 Cargo；v4 产物可脱离构建缓存运行，进程自有不可变快照的热序预取不得改变第二次运行结果；同一 `Package` 可并发重复实例化，实例的 static/TLS、P1（guest 原生入口）地址、native ctor/fini、global_asm/C2 bridge 彼此隔离，关闭后的旧指针不得指向新 Engine | 运行时生成的 path 依赖项目、`package_embed.rs` |
-| `contracts.build-script-rerun` | build.rs 的输入变化和 Cargo 指令决定是否重跑 | `cless_br/`、`cless_libc.rs` |
-| `contracts.deps-image` | 固定输出、缓存文件数量和既定时间上限 | `a2_ws/` 的临时副本 |
-| `corpus.run` | 真实依赖探索跑批；检查退出码，XFAIL 还锁定诊断 | `cases.manifest`、`corpus/` |
-| `corpus.deps-pair` | 每个 corpus 条目的 Cargo/cargoless 三维一致 | `cases.manifest`、`corpus/` |
-| `corpus.contract` | 按 manifest 的 exit、oracle、diff、xfail 严格判定 | `cases.manifest`、`oracles/` |
-| `runtime.semantics` | 数学常量或同源 native 结果是运行时语义权威；`unwind` 段共 13 项：既有 9 项展开/恢复语义，加上解释/JIT 各一项未捕获 guest payload 恰一次 Drop、清理后继续调用与第二次 panic，再加解释/JIT 各一项真实 `lang_start` main panic 与正常 `Termination` 101 的区分 | `demo/m4/`、`tsan/` |
-| `runtime.c-unwind` | 固定 rustc+C++ 是跨语言异常权威；13 项要求解释器和强制同步 JIT 保持异常身份、Drop、普通 C 终止边界，C++ typed exception 可穿出整个 Engine，C++ exception 到达 guest catch 时终止，并拒绝非 C/System ABI | `c_unwind_contract/` |
-| `runtime.diagnostics` | direct、cargoless 与 Cargo runner 三路默认 stderr 保持原字节；capture 从命令参数解析起独立保存编译器和 MIRVM 控制诊断，不得混入 guest 同文、NUL、非 UTF-8 或 ANSI 字节 | `diagnostic_router_*.rs` |
-| `runtime.x86-features` | 当前宿主 native 结果是各 x86 子能力权威 | `tests/fixtures/m51_*.rs` |
-| `runtime.tsan` | TSan 退出码为零且无数据竞争警告 | `tsan/` |
-| `runtime.jit-stats` | JIT 退出统计必须存在且关键桶非零 | `demo/jit_unwind_probe.rs` |
-| `performance.limits` | 已有加载、rayon、fib 时间上限和缓存预算 | `corpus/c_rayon.rs`、`demo/m4/pure.rs` |
-| `harness.truth` | 确定性假程序证明框架不会假绿或吞失败 | `tests/fixtures/gate_truth/` |
+| `quality.rust` | fmt, clippy, Rust unit tests; embedded regression locks for signal guest `oldact`/query address, non-LIFO close recovery, inactive owner routing, safe-point dispatch only registered after close/JIT lock, and self-produced archive `signal`/`sigaction`/`raise` owner bridge; subprocess regression also locks that any exception in native fini must be diagnosed and then `abort`, never stuck in `Closing` | `src/` |
+| `differential.programs` | native stdout, stderr, and exit code of `demo/*.rs` are authoritative; `signal_probe` also requires synchronous nested `raise` order, count, and SIG_IGN behavior to match | `demo/` |
+| `differential.cargo` | fixed Cargo's behavior for scripts, projects, and plain/workspace rustc wrapper combinations is authoritative | `demo/`, `rustc_wrapper_probe.sh`, other `tests/fixtures/` |
+| `differential.cargoless` | Cargo path and cargoless path must match byte-for-byte | `tests/fixtures/cless_*` |
+| `contracts.cargoless-test` | fixed Cargo/rustdoc's selection of test/bench/doctest, compilation shape, diagnostics, output, and exit code are authoritative | `cless_test_contract/`, `cless_proc_macro_test_contract/`, `cless_doctest_contract/` |
+| `contracts.cargoless-workspace` | fixed Cargo's resolver 1/2/3, complex member globs, workspace lint, package spec, features, and failure propagation are authoritative | `cless_workspace_contract/`, `cless_workspace_remaining_contract/` |
+| `contracts.cargoless-git` | fixed Cargo lock format plus local Git repo commit contents are authoritative | generated at runtime |
+| `contracts.cargoless-sources` | fixed Cargo source config merging, alternate registry, credential provider, source replacement, patch/replace, and lock | locally generated sparse/local/directory registry at runtime |
+| `contracts.pack` | default pack must use zero Cargo; explicit fallback must enter fixed Cargo; v4 artifacts must run without build cache; the process's own immutable snapshot hot-order prefetch must not change second-run results; the same `Package` can be instantiated concurrently and repeatedly, with static/TLS, P1 (guest native entry) address, native ctor/fini, global_asm/C2 bridge isolated per instance; old pointers after close must not point to a new Engine | path-dependency projects generated at runtime, `package_embed.rs` |
+| `contracts.build-script-rerun` | build.rs input changes and Cargo directives decide whether to rerun | `cless_br/`, `cless_libc.rs` |
+| `contracts.deps-image` | fixed output, cache file count, and set time limits | temporary copy of `a2_ws/` |
+| `corpus.run` | real-dependency exploratory batch; checks exit code, and XFAIL also locks diagnostics | `cases.manifest`, `corpus/` |
+| `corpus.deps-pair` | three-way consistency of Cargo/cargoless for each corpus entry | `cases.manifest`, `corpus/` |
+| `corpus.contract` | strict verdict per manifest exit/oracle/diff/xfail | `cases.manifest`, `oracles/` |
+| `runtime.semantics` | math constants or same-source native results are runtime semantics authority; the `unwind` section has 13 items: 9 existing unwind/recovery semantics, plus one each for interpreter and JIT where an uncaught guest payload drops exactly once, cleanup then continues calling and second panic, plus one each for interpreter and JIT distinguishing real `lang_start` main panic from normal `Termination` 101 | `demo/m4/`, `tsan/` |
+| `runtime.c-unwind` | fixed rustc+C++ is the cross-language exception authority; 13 items require interpreter and forced-sync JIT to preserve exception identity, Drop, ordinary C termination boundary, C++ typed exception can pass through the whole Engine, C++ exception terminates when reaching guest catch, and reject non-C/System ABI | `c_unwind_contract/` |
+| `runtime.diagnostics` | direct, cargoless, and Cargo runner default stderr keep original bytes; capture independently saves compiler and MIRVM control diagnostics from command-arg parsing, must not mix in guest same-text, NUL, non-UTF-8, or ANSI bytes | `diagnostic_router_*.rs` |
+| `runtime.x86-features` | current host native result is the authority for each x86 sub-capability | `tests/fixtures/m51_*.rs` |
+| `runtime.tsan` | TSan exit code is zero and no data-race warnings | `tsan/` |
+| `runtime.jit-stats` | JIT exit stats must exist and key buckets must be non-zero | `demo/jit_unwind_probe.rs` |
+| `performance.limits` | existing load, rayon, fib time limits and cache budget | `corpus/c_rayon.rs`, `demo/m4/pure.rs` |
+| `harness.truth` | deterministic fake programs prove the framework cannot false-green or swallow failures | `tests/fixtures/gate_truth/` |
 
-`tests/support/harness.sh` 是共享实现，不是测试。它负责根目录定位、PASS/FAIL/
-SKIP/XFAIL 计数、统一汇总、corpus manifest 解析、临时 sysroot 准备、计时和磁盘
-保护。`tests/parked/` 是停放材料，不属于活动套件，不能从 `run.sh list` 到达。
+`tests/support/harness.sh` is shared implementation, not a test. It handles root-directory location, PASS/FAIL/SKIP/XFAIL counting, unified summary, corpus manifest parsing, temporary sysroot preparation, timing, and disk protection. `tests/parked/` is parked material, not part of active suites, and cannot be reached from `run.sh list`.
 
-## 判定规则
+## Verdict Rules
 
-每个测试项只能使用以下状态：
+Each test item may use only the following states:
 
-| 状态 | 含义 | 是否让套件失败 |
+| State | Meaning | Causes Suite Failure |
 |---|---|:---:|
-| `PASS` | 要求确实执行并通过 | 否 |
-| `FAIL` | 产品行为、行为权威或测试框架不符合要求 | 是 |
-| `SKIP` | 宿主确实不具备该项能力，并写明原因 | 否 |
-| `XFAIL` | 已登记的产品缺口以精确退出码和诊断失败 | 否 |
-| `XPASS` | 已登记缺口意外转绿，必须更新合同 | 是 |
+| `PASS` | requirement was actually executed and passed | no |
+| `FAIL` | product behavior, behavioral authority, or test framework does not meet the requirement | yes |
+| `SKIP` | host genuinely lacks the capability, with reason stated | no |
+| `XFAIL` | registered product gap fails with exact exit code and diagnostics | no |
+| `XPASS` | registered gap unexpectedly turns green, contract must be updated | yes |
 
-缺少 `strace`、固定 Cargo、Rust 工具链或测试 sysroot 属于环境错误，不能写成
-SKIP。原来的 `P5` 记账不再作为测试状态；当前明确未实现的边界必须写成带精确
-原因的 XFAIL。
+Missing `strace`, fixed Cargo, Rust toolchain, or test sysroot is an environment error, not a SKIP. The old `P5` accounting is no longer a test state; currently explicit unimplemented boundaries must be written as XFAIL with precise reasons.
 
-套件退出码：
+Suite exit codes:
 
-- `0`：没有意外失败。
-- `1`：存在 FAIL 或 XPASS。
-- `64`：命令参数错误。
-- `69`：必要工具或测试环境不可用。
-- `77`：整个套件只能因宿主能力缺失而跳过。
+- `0`: no unexpected failures.
+- `1`: FAIL or XPASS exists.
+- `64`: command argument error.
+- `69`: required tool or test environment unavailable.
+- `77`: entire suite skipped only due to missing host capability.
 
-每个叶套件必须用 `suite_summary <suite-id>` 输出统一尾行。总入口依据退出码判断
-套件结果，不通过搜索任意说明文字猜测成功。套件输出在该套件结束时完整打印，
-失败信息不会只保留最后几行。
+Each leaf suite must output a uniform trailing line with `suite_summary <suite-id>`. The top entry judges suite results by exit code, not by grepping arbitrary explanatory text. Suite output is printed in full when that suite ends; failure messages are not kept only in the last few lines.
 
-## 编写要求
+## Writing Requirements
 
-1. 新脚本放在 `tests/suites/<类别>/`，文件名说明行为，不使用里程碑代号。
-2. 套件 ID 由路径自动产生：例如 `contracts/cargoless_git.sh` 对应
-   `contracts.cargoless-git`。脚本第二行必须是单行用途说明；不依赖产品二进制的套件
-   再声明 `# product: no`。不得另建人工注册表。
-3. 脚本必须 source `tests/support/harness.sh`，随后调用 `test_enter_repo`。不得假定
-   调用者的当前目录。
-4. 文件头必须说明测试什么、为什么需要、谁是行为权威、哪些输入会被比较。
-5. 原生 Rust 或固定 Cargo 作为权威时，权威侧必须先达到明示的预期退出码。
-   双方同样构建失败或运行失败不能算通过。
-6. 对拍默认比较 stdout、stderr、退出码三项。只能过滤时间、线程号等确实不稳定的
-   字段，每条过滤规则都要在脚本中说明原因。
-7. 已提交夹具只读。需要改文件时，先复制到 `mktemp -d` 创建的目录，并用 trap
-   清理。测试结束后 `git status --short` 不得出现测试产生的修改。
-8. 套件必须可单独运行，不能依赖前一个套件留下 lock、sysroot、环境变量或文件。
-   共享缓存可以加速，但缓存缺失不能改变判定标准。
-9. 聚合型套件不要使用 `set -e`，因为预期非零退出码本身可能是合同。每个外部命令
-   必须显式捕获并判断退出码。
-10. SKIP 只用于宿主能力差异。必要工具缺失、fixture 丢失、manifest 非法必须响亮
-   失败。
-11. 默认串行运行。性能、缓存和部分系统能力共享全局状态，当前没有可信的并行合同。
+1. New scripts go in `tests/suites/<category>/`; file names describe behavior; no milestone codenames.
+2. Suite IDs are derived automatically from the path: e.g. `contracts/cargoless_git.sh` becomes `contracts.cargoless-git`. The second line of the script must be a single-line purpose description; suites that do not depend on the product binary additionally declare `# product: no`. Do not create a manual registry.
+3. Scripts must source `tests/support/harness.sh`, then call `test_enter_repo`. Do not assume the caller's current directory.
+4. The file header must state what is being tested, why it is needed, who is the behavioral authority, and which inputs are compared.
+5. When native Rust or fixed Cargo is the authority, the authority side must first reach the explicit expected exit code. Both sides failing to build or run the same way does not count as passing.
+6. Differential comparison defaults to stdout, stderr, and exit code. Only filter fields that are genuinely unstable such as time and thread IDs; each filter rule must explain why in the script.
+7. Committed fixtures are read-only. When a file needs to be modified, first copy it to a directory created by `mktemp -d` and clean up with trap. After the test ends, `git status --short` must not show modifications produced by the test.
+8. Suites must be runnable standalone and cannot rely on a previous suite leaving locks, sysroot, environment variables, or files. Shared caches may speed things up, but cache misses must not change the verdict standard.
+9. Aggregate suites must not use `set -e`, because expected non-zero exit codes may themselves be the contract. Every external command must explicitly capture and judge its exit code.
+10. SKIP is only for host capability differences. Missing required tools, lost fixtures, or invalid manifests must fail loudly.
+11. Run serially by default. Performance, cache, and some system capabilities share global state; there is currently no trustworthy parallel contract.
 
-## 新增套件步骤
+## Steps to Add a New Suite
 
-1. 先写能够因目标缺陷失败的断言，并验证失败原因正确。
-2. 在 `tests/suites/` 下添加叶脚本，复用共享 harness。
-3. 确认 `./tests/run.sh list` 已按路径自动发现它，无需人工报名。
-4. 在本文件的套件表中写明用途、行为权威和夹具。
-5. 明确加入 `fast`、`smoke`、`gate` 的验收政策，或说明它为什么只能手工运行。
-6. 若修改入口、状态传播或汇总，必须先扩充 `harness.truth`。
-7. 依次运行 `bash -n`、目标单套件、`fast`，按影响范围再运行 `smoke` 或 `gate`。
+1. First write assertions that can fail due to the target defect, and verify the failure reason is correct.
+2. Add a leaf script under `tests/suites/`, reusing the shared harness.
+3. Confirm `./tests/run.sh list` has automatically discovered it without manual registration.
+4. Describe its purpose, behavioral authority, and fixtures in the suite table in this file.
+5. Explicitly add it to the acceptance policy of `fast`, `smoke`, or `gate`, or explain why it can only be run manually.
+6. If modifying entry, state propagation, or summary, first extend `harness.truth`.
+7. Run `bash -n`, the target single suite, `fast`, and then `smoke` or `gate` depending on scope.
 
-套件数量目前很小，不增加第二份机器清单或结果数据库。自动发现只依赖目录和文件名，
-档位仍在 `tests/run.sh` 中明示验收内容，避免测试基础设施成为新的产品工程。
+The number of suites is currently small; no second machine inventory or result database is added. Auto-discovery depends only on directories and file names, while tier contents still explicitly state acceptance coverage in `tests/run.sh`, so test infrastructure does not become a new product engineering effort.

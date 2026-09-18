@@ -1,26 +1,30 @@
-//! MC 机器码节的进程内装载（mode B 片③，designs/modeb-mirvmar-design.md §5）：
-//! 自产 `.so`（global_asm/dep_asm 族）**不经 dlopen**——自解析 ELF64、自映射、
-//! 自重定位、注册 eh_frame、建符号表，并入 foreign 解析链的 ① 位（先于
-//! RTLD_DEFAULT，与归档句柄同一语义位：guest 自产对象恒胜宿主同名库）。
+//! In-process loading of MC machine-code sections (mode B slice③, designs/modeb-mirvmar-design.md §5):
+//! self-produced `.so` files (global_asm/dep_asm family) **without dlopen** — self-parse
+//! ELF64, self-map, self-relocate, register eh_frame, build a symbol table, and join
+//! the foreign resolution chain at priority ① (ahead of RTLD_DEFAULT, same semantic
+//! priority as archive handles: guest-produced objects always beat host libs of the
+//! same name).
 //!
-//! 数据源 = 包内 MC 节的 `.so` 原始字节（片② NATIVELIBS 的 fnv 互证）；本
-//! 装载器对系统链接器零依赖（kernel mmap/mprotect + 自解析，无 ld.so/ld.so.cache
-//! 概念）。边界（一律响亮拒绝）：非 ET_DYN x86_64、PT_INTERP、TLS/COPY 重定位、
-//! 非弱未定义外部符号、STT_GNU_IFUNC——这些形态不属于自产 global_asm 族，
-//! 遇到即说明该 .so 并非本族产物。
+//! Data source = the raw bytes of the package's MC-section `.so` (slice② NATIVELIBS
+//! fnv mutual verification); this loader has zero dependency on the system linker
+//! (kernel mmap/mprotect + self-parsing, no ld.so/ld.so.cache concepts). Boundaries
+//! (all rejected loudly): non-ET_DYN x86_64, PT_INTERP, TLS/COPY relocations,
+//! non-weak undefined external symbols, STT_GNU_IFUNC — these shapes do not belong to
+//! the self-produced global_asm family; encountering them means the .so is not our
+//! product.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// 装载完成的 MC 镜像。符号只对持有它的 Module 可见；映射与 unwind 注册仍因
-/// 外部代码指针可能存活而不卸载。
+/// A loaded MC image. Symbols are visible only to the Module that holds it; mapping and
+/// unwind registration are not undone because external code pointers may still be alive.
 #[derive(Debug)]
 pub struct McImage {
     mapping: usize,
     load_bias: usize,
-    #[allow(dead_code)] // 诊断面保留（调试打印用）
+    #[allow(dead_code)] // kept for diagnostics (debug prints)
     size: usize,
-    /// 符号 → 镜像内真地址（STB_GLOBAL/WEAK 且已定义；hidden 与 dynsym 两族并集）
+    /// symbol -> real in-image address (STB_GLOBAL/WEAK and defined; union of hidden and dynsym families)
     pub symbols: HashMap<Box<str>, u64>,
     executable_ranges: Box<[(usize, usize)]>,
     lifecycle: super::native_instance::NativeLifecycle,
@@ -28,8 +32,9 @@ pub struct McImage {
     committed: AtomicBool,
 }
 
-/// MC 符号解析（① 位语义：先于全域）。镜像列表来自当前 Module，不能跨 Engine
-/// 搜索，否则两个包里的同名 global_asm 会互相串线。
+/// MC symbol resolution (priority ① semantics: ahead of the whole process). Image list
+/// comes from the current Module; do not search across Engines, otherwise two packages'
+/// global_asm symbols would cross-wire.
 pub fn resolve(images: &[McImage], name: &str) -> Option<usize> {
     for image in images {
         if let Some(&v) = image.symbols.get(name) {
@@ -39,7 +44,7 @@ pub fn resolve(images: &[McImage], name: &str) -> Option<usize> {
     None
 }
 
-// ===== ELF64 装载 =====
+// ===== ELF64 loading =====
 
 fn u16_at(b: &[u8], off: usize) -> Option<u16> {
     Some(u16::from_le_bytes(b.get(off..off + 2)?.try_into().ok()?))
@@ -62,9 +67,9 @@ struct Shdr {
     entsize: u64,
 }
 
-/// 装载一个 ELF64 DYN 镜像（自产 global_asm/dep_asm 族 .so 的原始字节）。
+/// Load an ELF64 DYN image (raw bytes of a self-produced global_asm/dep_asm family .so).
 pub fn load(bytes: &[u8]) -> Result<McImage, String> {
-    let bad = || "MC 镜像不是预期的 ELF64 LE DYN（或已损坏）".to_string();
+    let bad = || "MC image is not the expected ELF64 LE DYN (or is corrupt)".to_string();
     if bytes.len() < 64 || bytes[0..4] != [0x7f, b'E', b'L', b'F'] {
         return Err(bad());
     }
@@ -72,10 +77,10 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
         return Err(bad());
     }
     if u16_at(bytes, 16) != Some(3) {
-        return Err("MC 镜像非 ET_DYN（自产族应是共享对象）".into());
+        return Err("MC image is not ET_DYN (self-produced family should be a shared object)".into());
     }
     if u16_at(bytes, 18) != Some(62) {
-        return Err("MC 镜像非 x86_64（EM_X86_64）".into());
+        return Err("MC image is not x86_64 (EM_X86_64)".into());
     }
     let phoff = u64_at(bytes, 32).ok_or_else(bad)? as usize;
     let phentsize = u16_at(bytes, 54).ok_or_else(bad)? as usize;
@@ -113,7 +118,7 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
         })
     };
 
-    // PT_LOAD 全景：span 计算 + PT_INTERP 拒（共享对象不应有）
+    // PT_LOAD overview: span calculation + reject PT_INTERP (shared objects should not have it)
     const PT_LOAD: u32 = 1;
     const PT_DYNAMIC: u32 = 2;
     const PT_INTERP: u32 = 3;
@@ -137,15 +142,15 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
                 hi = hi.max((v + m + page - 1) & !(page - 1));
             }
             PT_DYNAMIC => dynamic = Some((vaddr, memsz)),
-            PT_INTERP => return Err("MC 镜像带 PT_INTERP（不是自产共享对象）".into()),
+            PT_INTERP => return Err("MC image has PT_INTERP (not a self-produced shared object)".into()),
             _ => {}
         }
     }
     if loads.is_empty() || lo >= hi {
-        return Err("MC 镜像无 PT_LOAD".into());
+        return Err("MC image has no PT_LOAD".into());
     }
     let size = hi - lo;
-    // 段 flags（ELF：X=1 W=2 R=4）→ 最终 mprotect 形态
+    // Segment flags (ELF: X=1 W=2 R=4) -> final mprotect form
     let seg_prot = |flags: u32| -> crate::os::mem::Prot {
         if flags & 1 != 0 {
             crate::os::mem::Prot::RX
@@ -155,7 +160,7 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
     };
     let raw = crate::os::mem::map_anon(size, crate::os::mem::Prot::RW, false);
     if raw.is_null() {
-        return Err(format!("MC 镜像映射失败（{size:#x} 字节）"));
+        return Err(format!("MC image mapping failed ({size:#x} bytes)"));
     }
     struct MappingGuard {
         mapping: *mut u8,
@@ -222,7 +227,7 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
         }
     }
 
-    // 节头串表（找 .symtab/.strtab/.eh_frame 用）
+    // Section-header string table (used to find .symtab/.strtab/.eh_frame)
     let shstr = shdr(shstrndx).ok_or_else(bad)?;
     let sec_name = |s: &Shdr| -> &str {
         let start = (shstr.off + u64::from(s.name_off)) as usize;
@@ -234,7 +239,7 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
         std::str::from_utf8(&bytes[start..end]).unwrap_or("")
     };
 
-    // .dynamic：RELA/JMPREL 位置（vaddr → base 换算）
+    // .dynamic: RELA/JMPREL locations (vaddr -> base conversion)
     let mut rela = None;
     let mut relasz = 0u64;
     let mut jmprel = None;
@@ -286,7 +291,7 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
         }
     }
 
-    // .symtab/.strtab/.eh_frame 收集
+    // Collect .symtab/.strtab/.eh_frame
     let mut symtab: Option<Shdr> = None;
     let mut strtab: Option<Shdr> = None;
     let mut dynsym: Option<Shdr> = None;
@@ -302,8 +307,8 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
         }
     }
     let (sym_s, str_s) = (
-        symtab.ok_or("MC 镜像缺 .symtab")?,
-        strtab.ok_or("MC 镜像缺 .strtab")?,
+        symtab.ok_or("MC image lacks .symtab")?,
+        strtab.ok_or("MC image lacks .strtab")?,
     );
     let dyn_s = dynsym.ok_or("MC image lacks .dynsym")?;
     let dyn_str_s = shdr(dyn_s.link as usize).ok_or_else(bad)?;
@@ -340,9 +345,9 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
             .iter()
             .position(|&c| c == 0)
             .map(|p| start + p)
-            .ok_or("MC 镜像 strtab 越界")?;
+            .ok_or("MC image strtab out of bounds")?;
         Ok(std::str::from_utf8(&bytes[start..end])
-            .map_err(|_| "MC 镜像符号名非 UTF-8")?
+            .map_err(|_| "MC image symbol name is not UTF-8")?
             .to_string())
     };
     let syment = sym_s.entsize.max(24) as usize;
@@ -386,8 +391,8 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
         ))
     };
 
-    // 符号表（注册面：GLOBAL/WEAK 且已定义；P1 与 runtime bridge 槽即使被
-    // ld localize 也必须保留，因为它们是每个 Engine 启动相的内部写入协议）。
+    // Symbol table (registration side: GLOBAL/WEAK and defined; P1 and runtime-bridge slots
+    // must be kept even if ld localized them, because they are the per-Engine startup internal-write protocol).
     let mut symbols: HashMap<Box<str>, u64> = HashMap::new();
     for j in 0..symcount {
         let (name_off, info, shndx, value) = sym_at(j).ok_or_else(bad)?;
@@ -406,11 +411,11 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
         {
             continue;
         }
-        // 存 vaddr（register/resolve 统一 bias+value，与 archive_fallbacks 同形）
+        // Store vaddr (register/resolve both use bias+value, same shape as archive_fallbacks)
         symbols.insert(name.into_boxed_str(), value);
     }
 
-    // 重定位应用
+    // Relocation application
     let apply = |off: u64, info: u64, addend: i64| -> Result<(), String> {
         let ty = info as u32;
         let sym_idx = (info >> 32) as usize;
@@ -421,7 +426,7 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
             ));
         }
         let place = loaded_address(off, "relocation target")?;
-        // 符号地址：内部（自 symtab 已定义）→ 外部（RTLD_DEFAULT）→ 弱缺席 0
+        // Symbol address: internal (already defined in symtab) -> external (RTLD_DEFAULT) -> weak missing 0
         let sym_addr = |idx: usize| -> Result<u64, String> {
             if idx == 0 {
                 return Ok(0);
@@ -442,22 +447,22 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
                 ));
             }
             let name = dyn_str_at(name_off)?;
-            let c = std::ffi::CString::new(name.as_str()).map_err(|_| "符号名含 NUL")?;
+            let c = std::ffi::CString::new(name.as_str()).map_err(|_| "symbol name contains NUL")?;
             let p = crate::os::dll::sym(0, &c);
             if p != 0 {
                 return Ok(p as u64);
             }
             if (info2 >> 4) == 2 {
-                return Ok(0); // WEAK 缺席 = 0
+                return Ok(0); // WEAK missing = 0
             }
             Err(format!(
-                "MC 重定位符号 `{name}` 未命中（RTLD_DEFAULT 均无）"
+                "MC relocation symbol `{name}` not found (neither archive fallback nor RTLD_DEFAULT)"
             ))
         };
         match ty {
             0 => Ok(()), // NONE
             8 => {
-                // RELATIVE：*(place) = base + addend
+                // RELATIVE: *(place) = base + addend
                 unsafe {
                     std::ptr::write_unaligned(
                         place as *mut u64,
@@ -467,7 +472,7 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
                 Ok(())
             }
             1 => {
-                // 64：*(place) = sym + addend
+                // 64: *(place) = sym + addend
                 let s = sym_addr(sym_idx)?;
                 unsafe {
                     std::ptr::write_unaligned(place as *mut u64, s.wrapping_add(addend as u64))
@@ -475,7 +480,7 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
                 Ok(())
             }
             2 => {
-                // PC32：*(place) = sym + addend - place
+                // PC32: *(place) = sym + addend - place
                 let s = sym_addr(sym_idx)?;
                 let value = i128::from(s) + i128::from(addend) - place as i128;
                 let value = i32::try_from(value)
@@ -484,14 +489,14 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
                 Ok(())
             }
             6 | 7 => {
-                // GLOB_DAT / JUMP_SLOT：*(place) = sym
+                // GLOB_DAT / JUMP_SLOT: *(place) = sym
                 let s = sym_addr(sym_idx)?;
                 unsafe { std::ptr::write_unaligned(place as *mut u64, s) };
                 Ok(())
             }
-            16..=18 => Err("MC 镜像含 TLS 重定位（DTPMOD/DTPOFF 未接）".into()),
-            5 => Err("MC 镜像含 COPY 重定位（不接）".into()),
-            other => Err(format!("MC 镜像含未支持重定位类型 {other}")),
+            16..=18 => Err("MC image contains TLS relocation (DTPMOD/DTPOFF not handled)".into()),
+            5 => Err("MC image contains COPY relocation (not handled)".into()),
+            other => Err(format!("MC image contains unsupported relocation type {other}")),
         }
     };
     if let Some(r0) = rela {

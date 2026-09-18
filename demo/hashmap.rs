@@ -1,4 +1,4 @@
-// HashMap（getrandom 种子）+ BTreeMap（确定性输出）
+// HashMap (getrandom seed) + BTreeMap (deterministic output)
 use std::collections::{BTreeMap, HashMap};
 
 fn main() {
@@ -6,7 +6,7 @@ fn main() {
     for (i, w) in ["apple", "banana", "cherry", "apple", "banana", "apple"].iter().enumerate() {
         *hm.entry(w.to_string()).or_insert(0) += i as i32 + 1;
     }
-    // 输出经 BTreeMap 排序，避免 HashMap 迭代顺序不确定
+    // output sorted by BTreeMap to avoid nondeterministic HashMap iteration order
     let sorted: BTreeMap<_, _> = hm.into_iter().collect();
     for (k, v) in &sorted {
         println!("{k} => {v}");

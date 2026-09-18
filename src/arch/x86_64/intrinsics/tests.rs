@@ -1,5 +1,5 @@
-//! arch::x86_64::intrinsics 的硬件交叉验证（stdarch 已知向量 + 真机对照）。
-//! （自 vm/engine/x86.rs 测试簇整搬，零逻辑 diff。）
+//! Hardware cross-check for arch::x86_64::intrinsics (stdarch known vectors + real machine comparison).
+//! (Moved whole from vm/engine/x86.rs test cluster, zero logic diff.)
 
 use super::{
     aesdec, aesdeclast, aesenc, aesenclast, aesimc, aeskeygenassist, crc32_u8, crc32_u16,
@@ -11,7 +11,7 @@ use super::{
 #[test]
 fn lddqu_matches_unaligned_load_contract_and_hw() {
     let buf: [u8; 40] = std::array::from_fn(|i| (i as u8).wrapping_mul(37).wrapping_add(11));
-    // 语义 = 非对齐 16/32 字节纯 load（与 loadu 逐位同义）
+    // semantics = unaligned 16/32-byte pure load (bitwise synonymous with loadu)
     let mut got128 = [0u8; 16];
     unsafe { lddqu::<16>(got128.as_mut_ptr(), buf.as_ptr().add(3)) };
     assert_eq!(got128[..], buf[3..19]);
@@ -93,7 +93,7 @@ fn sha256_helpers_match_stdarch_known_vectors() {
     );
 }
 
-/// 把 (lo, hi) 两个 u64 拼成 16 字节 LE（对应 `_mm_set_epi64x(hi, lo)` 的布局）。
+/// Pack two u64 values (lo, hi) into 16 bytes LE (matching the layout of `_mm_set_epi64x(hi, lo)`).
 fn qwords(lo: u64, hi: u64) -> [u8; 16] {
     let mut out = [0u8; 16];
     out[..8].copy_from_slice(&lo.to_le_bytes());
@@ -106,7 +106,7 @@ fn psad_matches_stdarch_known_vectors() {
     if !std::is_x86_feature_detected!("sse2") {
         return;
     }
-    // stdarch test_mm_sad_epu8 已知答案
+    // stdarch test_mm_sad_epu8 known answer
     let a: [u8; 16] = [
         255, 254, 253, 252, 1, 2, 3, 4, 155, 154, 153, 152, 1, 2, 3, 4,
     ];
@@ -116,7 +116,7 @@ fn psad_matches_stdarch_known_vectors() {
     assert_eq!(got, qwords(1020, 614));
 
     if std::is_x86_feature_detected!("avx2") {
-        // stdarch test_mm256_sad_epu8：每组 8×|2-4| = 16
+        // stdarch test_mm256_sad_epu8: each group 8*|2-4| = 16
         let a = [2u8; 32];
         let b = [4u8; 32];
         let mut got = [0u8; 32];
@@ -132,7 +132,7 @@ fn pclmulqdq_matches_intel_whitepaper_vectors() {
     if !std::is_x86_feature_detected!("pclmulqdq") {
         return;
     }
-    // Intel clmul 白皮书已知答案（stdarch test_mm_clmulepi64_si128）
+    // Intel clmul whitepaper known answer (stdarch test_mm_clmulepi64_si128)
     let a = qwords(0x63746f725d53475d, 0x7b5b546573745665);
     let b = qwords(0x5b477565726f6e5d, 0x4869285368617929);
     let cases = [
@@ -145,7 +145,7 @@ fn pclmulqdq_matches_intel_whitepaper_vectors() {
         let mut got = [0u8; 16];
         unsafe { pclmulqdq(got.as_mut_ptr(), a.as_ptr(), b.as_ptr(), imm) };
         assert_eq!(got, expected, "imm={imm:#x}");
-        // 高位 imm 位硬件忽略：OR 0xEE 后与低位等价
+        // high imm bits ignored by hardware: OR 0xEE equivalent to low bits
         let mut got2 = [0u8; 16];
         unsafe { pclmulqdq(got2.as_mut_ptr(), a.as_ptr(), b.as_ptr(), imm | 0xee) };
         assert_eq!(got2, expected, "imm|0xEE={imm:#x}");
@@ -157,7 +157,7 @@ fn aesni_matches_msdn_known_vectors() {
     if !std::is_x86_feature_detected!("aes") {
         return;
     }
-    // MSDN/stdarch 常量（test_mm_aesenc_si128 等同组）
+    // MSDN/stdarch constants (test_mm_aesenc_si128 same group)
     let a = qwords(0x8899aabbccddeeff, 0x0123456789abcdef);
     let k = qwords(0x0022446688aaccee, 0x1133557799bbddff);
     let mut got = [0u8; 16];
@@ -173,10 +173,10 @@ fn aesni_matches_msdn_known_vectors() {
     unsafe { aesimc(got.as_mut_ptr(), a.as_ptr()) };
     assert_eq!(got, qwords(0x6633441122770055, 0xc66c82284ee40aa0));
 
-    // keygenassist 软件模型：MSDN 已知答案（imm=5）无条件成立
+    // keygenassist software model: MSDN known answer (imm=5) holds unconditionally
     unsafe { aeskeygenassist(got.as_mut_ptr(), a.as_ptr(), 5) };
     assert_eq!(got, qwords(0xeac4eea9c4eeacea, 0x857c266b7c266e85));
-    // 并与硬件对拍多个 imm（覆盖 RCON 全字节语义）
+    // and cross-check multiple imm values against hardware (covers full-byte RCON semantics)
     use std::arch::x86_64::{_mm_aeskeygenassist_si128, _mm_loadu_si128, _mm_storeu_si128};
     for imm in [0x00u64, 0x01, 0x02, 0x1b, 0x36, 0x5a, 0x80, 0xa5, 0xff] {
         let mut hw = [0u8; 16];
@@ -206,14 +206,14 @@ fn crc32_matches_stdarch_vectors_and_known_answer() {
     if !std::is_x86_feature_detected!("sse4.2") {
         return;
     }
-    // stdarch 已知答案
+    // stdarch known answer
     unsafe {
         assert_eq!(crc32_u8(0x2aa1e72b, 0x2a), 0xf24122e4);
         assert_eq!(crc32_u16(0x8ecec3b5, 0x22b), 0x13bb2fb);
         assert_eq!(crc32_u32(0xae2912c8, 0x845fed), 0xffae2ed1);
         assert_eq!(crc32_u64(0x7819dccd3e824, 0x2a22b845fed), 0xbb6cdc6c);
     }
-    // CRC32C("123456789") = 0xe3069283（包装层提供首尾取反）
+    // CRC32C("123456789") = 0xe3069283 (wrapper provides initial/final inversion)
     let mut crc = 0xffff_ffffu32;
     for &byte in b"123456789" {
         crc = unsafe { crc32_u8(crc, byte) };
@@ -243,7 +243,7 @@ fn permd256_matches_stdarch_known_vector() {
 
 #[test]
 fn gather_q_pd_256_respects_mask_and_never_reads_masked_lanes() {
-    // arr[i] = i as f64；scale=8 ⇒ f64 字寻址（stdarch test_mm256_mask_i64gather_pd）
+    // arr[i] = i as f64; scale=8 ⇒ f64 word addressing (stdarch test_mm256_mask_i64gather_pd)
     let arr: [f64; 128] = std::array::from_fn(|i| i as f64);
     let src = [256.0f64; 4];
     let vindex: [i64; 4] = [0, 16, 64, 96];
@@ -261,7 +261,7 @@ fn gather_q_pd_256_respects_mask_and_never_reads_masked_lanes() {
     }
     assert_eq!(got, [0.0, 16.0, 64.0, 256.0]);
 
-    // fault suppression：被 mask 的 lane 挂野索引（读即 SIGSEGV 的地址）也不得触内存
+    // fault suppression: masked lanes with wild indices (addresses that would SIGSEGV on read) must not touch memory
     let mask_all_off = [0.0f64; 4];
     let wild: [i64; 4] = [0x7fff_ffff_fff0_0000; 4];
     let src2 = [42.0f64; 4];
@@ -270,7 +270,7 @@ fn gather_q_pd_256_respects_mask_and_never_reads_masked_lanes() {
         gather_q_pd_256(
             got2.as_mut_ptr().cast::<u8>(),
             src2.as_ptr().cast::<u8>(),
-            1, // base=1：配合野索引必为不可读地址
+            1, // base=1: combined with wild index yields unreadable address
             wild.as_ptr().cast::<u8>(),
             mask_all_off.as_ptr().cast::<u8>(),
             8,
@@ -278,7 +278,7 @@ fn gather_q_pd_256_respects_mask_and_never_reads_masked_lanes() {
     }
     assert_eq!(got2, [42.0; 4]);
 
-    // 与硬件 vgatherqpd 对拍（全 mask 开 + 混合 mask 各一组）
+    // cross-check against hardware vgatherqpd (all-mask-on + mixed-mask each one set)
     if std::is_x86_feature_detected!("avx2") {
         use std::arch::x86_64::{
             _mm256_loadu_pd, _mm256_loadu_si256, _mm256_mask_i64gather_pd, _mm256_storeu_pd,
@@ -315,13 +315,13 @@ fn gather_q_pd_256_respects_mask_and_never_reads_masked_lanes() {
 
 #[test]
 fn gather_d_pd_256_sign_extends_i32_indexes_and_respects_mask() {
-    // arr[i] = i as f64；scale=8 ⇒ f64 字寻址；i32 索引符号扩展（负索引回卷寻址）
+    // arr[i] = i as f64; scale=8 ⇒ f64 word addressing; i32 indices sign-extended (negative index wraps addressing)
     let arr: [f64; 128] = std::array::from_fn(|i| i as f64);
     let src = [9.0f64; 4];
     let vindex: [i32; 4] = [5, -1, 120, 0];
     let mask = [-1.0f64, -1.0, -1.0, 0.0];
     let mut got = [0.0f64; 4];
-    // base 故意抬 8 字节：idx=-1 ⇒ addr = base-8 = arr[0]
+    // base deliberately raised 8 bytes: idx=-1 ⇒ addr = base-8 = arr[0]
     let base = unsafe { arr.as_ptr().add(1) } as u64;
     unsafe {
         gather_d_pd_256(
@@ -362,12 +362,12 @@ fn gather_d_pd_256_sign_extends_i32_indexes_and_respects_mask() {
 
 #[test]
 fn vpmadd52_matches_stdarch_vectors_and_hw_cross_check() {
-    // stdarch 已知答案（128/256/512 同值广播）：a=10<<40, b=(11<<40)+4, c=(12<<40)+3
+    // stdarch known answer（128/256/512 同值广播）：a=10<<40, b=(11<<40)+4, c=(12<<40)+3
     let a = [10u64 << 40; 8];
     let b = [(11u64 << 40) + 4; 8];
     let c = [(12u64 << 40) + 3; 8];
     let mut got = [0u64; 8];
-    // lo 已知答案：128
+    // lo known answer: 128
     unsafe {
         vpmadd52::<2, false>(
             got.as_mut_ptr().cast::<u8>(),
@@ -377,7 +377,7 @@ fn vpmadd52_matches_stdarch_vectors_and_hw_cross_check() {
         )
     };
     assert_eq!(&got[..2], &[100055558127628u64; 2]);
-    // hi 已知答案
+    // hi known answer
     unsafe {
         vpmadd52::<2, true>(
             got.as_mut_ptr().cast::<u8>(),
@@ -387,7 +387,7 @@ fn vpmadd52_matches_stdarch_vectors_and_hw_cross_check() {
         )
     };
     assert_eq!(&got[..2], &[11030549757952u64; 2]);
-    // 4/8 lane 同输入广播
+    // 4/8 lane same-input broadcast
     unsafe {
         vpmadd52::<4, false>(
             got.as_mut_ptr().cast::<u8>(),
@@ -416,7 +416,7 @@ fn vpmadd52_matches_stdarch_vectors_and_hw_cross_check() {
     };
     assert_eq!(got, [11030549757952u64; 8]);
 
-    // 硬件对拍：输入高 12 位污染（钉死 52 位输入掩码语义）+ 非常规 lane 值
+    // hardware cross-check: high 12 input bits polluted (pins 52-bit input mask semantics) + non-canonical lane values
     if std::is_x86_feature_detected!("avx512ifma")
         && std::is_x86_feature_detected!("avx512vl")
         && std::is_x86_feature_detected!("avx512f")
@@ -507,7 +507,7 @@ fn vpmadd52_matches_stdarch_vectors_and_hw_cross_check() {
 #[test]
 fn pmadd_matches_stdarch_known_vectors() {
     if std::is_x86_feature_detected!("ssse3") {
-        // stdarch test_mm_maddubs_epi16（含饱和组）
+        // stdarch test_mm_maddubs_epi16 (includes saturated group)
         let a: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
         let b: [i8; 16] = [4, 63, 4, 3, 24, 12, 6, 19, 12, 5, 5, 10, 4, 1, 8, 0];
         let expected: [i16; 8] = [130, 24, 192, 194, 158, 175, 66, 120];
@@ -553,7 +553,7 @@ fn pmadd_matches_stdarch_known_vectors() {
         assert_eq!(got, expected);
     }
     if std::is_x86_feature_detected!("avx2") {
-        // stdarch test_mm256_maddubs_epi16：2*4+2*4 = 16 广播
+        // stdarch test_mm256_maddubs_epi16: 2*4+2*4 = 16 broadcast
         let a = [2u8; 32];
         let b = [4i8; 32];
         let mut got = [0i16; 16];
@@ -565,7 +565,7 @@ fn pmadd_matches_stdarch_known_vectors() {
             )
         };
         assert_eq!(got, [16i16; 16]);
-        // stdarch test_mm256_madd_epi16：2*4+2*4 = 16 广播
+        // stdarch test_mm256_madd_epi16: 2*4+2*4 = 16 broadcast
         let a = [2i16; 16];
         let b = [4i16; 16];
         let mut got = [0i32; 8];
@@ -592,7 +592,7 @@ fn pmadd_matches_stdarch_known_vectors() {
             )
         };
         assert_eq!(got, expected);
-        // MIN*MIN+MIN*MIN 回绕为 i32::MIN（硬件定义）
+        // MIN*MIN+MIN*MIN wraps to i32::MIN (hardware-defined)
         let a: [i16; 8] = [i16::MIN, i16::MIN, 0, 0, 0, 0, 0, 0];
         let b: [i16; 8] = [i16::MIN, i16::MIN, 0, 0, 0, 0, 0, 0];
         let mut got = [0i32; 4];
@@ -607,8 +607,8 @@ fn pmadd_matches_stdarch_known_vectors() {
     }
 }
 
-/// VCVTPS2PH 软件模型 vs 硬件 `_mm_cvtps_ph::<imm>`：全 f16 域往返 + 边界
-/// 沸点 + LCG 随机大谱系 × imm 0..7 全舍入模式（含 MXCSR=CUR_DIRECTION 4..7）。
+/// VCVTPS2PH software model vs hardware `_mm_cvtps_ph::<imm>`: full f16 domain round-trip + boundaries
+/// boiling point + LCG random large spectrum × imm 0..7 all rounding modes (including MXCSR=CUR_DIRECTION 4..7).
 #[test]
 fn cvtps2ph_software_matches_f16c_hardware_bitwise() {
     if !std::is_x86_feature_detected!("f16c") {
@@ -624,15 +624,15 @@ fn cvtps2ph_software_matches_f16c_hardware_bitwise() {
                 1 => _mm_cvtps_ph::<1>(v),
                 2 => _mm_cvtps_ph::<2>(v),
                 3 => _mm_cvtps_ph::<3>(v),
-                _ => _mm_cvtps_ph::<4>(v), // 4 = CUR_DIRECTION：默认 MXCSR = RNE
+                _ => _mm_cvtps_ph::<4>(v), // 4 = CUR_DIRECTION: default MXCSR = RNE
             }
         };
         let mut o = [0u16; 8];
         unsafe { _mm_storeu_si128(o.as_mut_ptr().cast(), r) };
         o[0]
     };
-    // 软件模型与硬件对照：imm 0..3 显式舍入、4 MXCSR(=RNE)。stdarch const 泛型
-    // 限 imm<5；imm[3]（no-exc）只影响异常旗标、不影响值位（native 探针实录）。
+    // software model vs hardware reference: imm 0..3 explicit rounding, 4 MXCSR(=RNE). stdarch const generic
+    // limits imm<5; imm[3] (no-exc) only affects exception flags, not value bits (native probe recorded).
     let check = |bits: u32| {
         for (imm, mode) in [
             (0u64, HalfRound::Rne),
@@ -647,7 +647,7 @@ fn cvtps2ph_software_matches_f16c_hardware_bitwise() {
                 expect,
                 "bits={bits:08x} imm={imm}"
             );
-            // 高端 helper 同路（.256 宽度全 lane + .128 高 64 位清零另验）
+            // high-end helper same path (.256 width all lanes + .128 high 64 bits zeroed, separately checked)
             let f = [f32::from_bits(bits); 8];
             let mut o = [0u16; 8];
             unsafe { cvtps2ph::<8>(o.as_mut_ptr().cast::<u8>(), f.as_ptr().cast::<u8>(), imm) };
@@ -660,11 +660,11 @@ fn cvtps2ph_software_matches_f16c_hardware_bitwise() {
             assert_eq!(
                 &o4[4..],
                 [0u16; 4],
-                "helper128 高 64 位清零 bits={bits:08x} imm={imm}"
+                "helper128 high 64 bits cleared bits={bits:08x} imm={imm}"
             );
         }
     };
-    // ① NaN/inf/±0/次正规/沸点 全列出
+    // ① NaN/inf/±0/subnormal/boiling point all listed
     let specials: [u32; 33] = [
         0x0000_0000,
         0x8000_0000,
@@ -703,11 +703,11 @@ fn cvtps2ph_software_matches_f16c_hardware_bitwise() {
     for &b in &specials {
         check(b);
     }
-    // ② 全 f16 位型的 f32 映像（往返域全盖）
+    // ② full f16 bit-pattern f32 image (round-trip domain fully covered)
     for u in 0u32..=0xffff {
         check(f16_to_f32_sw(u as u16));
     }
-    // ③ LCG 随机 200 万（×8 imm）
+    // ③ 2 million LCG random (×8 imm)
     let mut rng = 0x9e3779b97f4a7c15u64;
     for _ in 0..2_000_000 {
         rng ^= rng << 13;
@@ -715,7 +715,7 @@ fn cvtps2ph_software_matches_f16c_hardware_bitwise() {
         rng ^= rng << 17;
         check(rng as u32);
     }
-    // ④ VCVTPH2PS：全 65536 位型软件 vs helper + 已知硬件位型（NaN qbit 强置等）
+    // ④ VCVTPH2PS: all 65536 bit-patterns software vs helper + known hardware bit-pattern (NaN qbit forced etc.)
     if std::is_x86_feature_detected!("f16c") {
         use std::arch::x86_64::{_mm_cvtph_ps, _mm_cvtsi32_si128, _mm_storeu_ps};
         for u in 0u32..=0xffff {
@@ -727,7 +727,7 @@ fn cvtps2ph_software_matches_f16c_hardware_bitwise() {
                 o[0].to_bits()
             };
             assert_eq!(sw, hw, "ph2ps {u:04x}");
-            // 8-lane helper（.256 同路：每 lane 同值）
+            // 8-lane helper (.256 same path: each lane same value)
             let v = [u as u16; 8];
             let mut o = [0u32; 8];
             unsafe { cvtph2ps::<8>(o.as_mut_ptr().cast::<u8>(), v.as_ptr().cast::<u8>()) };
@@ -738,12 +738,12 @@ fn cvtps2ph_software_matches_f16c_hardware_bitwise() {
     }
 }
 
-/// 族⑨ packed-f32 lane 软件模型 vs 硬件指令对拍（max/min/cmp/round/cvt/blendv，
-/// 128/256 双宽；NaN 位透传、±0 同位、32 谓词全表、舍入 imm 全表）。
+/// Family ⑨ packed-f32 lane software model vs hardware instruction cross-check (max/min/cmp/round/cvt/blendv,
+/// 128/256 double width; NaN bit passthrough, ±0 same bits, full 32-predicate table, full rounding imm table).
 #[test]
 fn packed_ps_lane_models_match_hardware_bitwise() {
     use super::{blendv_ps, cmp_ps, cvt_ps2dq, maxmin_ps, round_ps};
-    // (a,b) 组合覆盖：正常序/逆序/±0/±inf/qNaN/sNaN/载荷相异
+    // (a,b) combinations cover: normal/reversed order/±0/±inf/qNaN/sNaN/different payload
     let bits_a: [u32; 9] = [
         0x3f80_0000,
         0xbf80_0000,
@@ -801,7 +801,7 @@ fn packed_ps_lane_models_match_hardware_bitwise() {
             }
         }
     }
-    // cmp.ps 128/256 全 32 谓词 × 全位型组合（含相同 NaN 输入的同位比较）
+    // cmp.ps 128/256 full 32 predicates × full bit-pattern combinations (including same-bit comparison for same-NaN input)
     if std::is_x86_feature_detected!("sse") && std::is_x86_feature_detected!("avx") {
         use std::arch::x86_64::{
             _mm_cmp_ps, _mm_loadu_ps, _mm_storeu_ps, _mm256_cmp_ps, _mm256_loadu_ps,
@@ -880,7 +880,7 @@ fn packed_ps_lane_models_match_hardware_bitwise() {
             }
         }
     }
-    // round.ps imm 0..=15（bit2 MXCSR / bit3 no-exc 位组合）
+    // round.ps imm 0..=15 (bit2 MXCSR / bit3 no-exc bit combination)
     if std::is_x86_feature_detected!("sse4.1") {
         use std::arch::x86_64::{_mm_loadu_ps, _mm_round_ps, _mm_storeu_ps};
         let inputs: [u32; 14] = [
@@ -936,7 +936,7 @@ fn packed_ps_lane_models_match_hardware_bitwise() {
             }
         }
     }
-    // cvt/cvtt 边界（indefinite 0x80000000 域），128/256 双宽
+    // cvt/cvtt boundaries (indefinite 0x80000000 domain), 128/256 double width
     if std::is_x86_feature_detected!("sse2") && std::is_x86_feature_detected!("avx") {
         use std::arch::x86_64::{
             _mm_cvtps_epi32, _mm_cvttps_epi32, _mm_loadu_ps, _mm_storeu_si128, _mm256_cvtps_epi32,
@@ -993,7 +993,7 @@ fn packed_ps_lane_models_match_hardware_bitwise() {
             }
         }
     }
-    // blendv：mask 符号位纯位选择
+    // blendv: mask sign bit pure bit selection
     if std::is_x86_feature_detected!("sse4.1") {
         use std::arch::x86_64::{_mm_blendv_ps, _mm_loadu_ps, _mm_storeu_ps};
         let a = [1.5f32, -2.25, 0.0, f32::NAN];
@@ -1019,8 +1019,8 @@ fn packed_ps_lane_models_match_hardware_bitwise() {
     }
 }
 
-/// PSLL/PSRL.d 软件模型 vs SSE2 硬件：count 阈值边界（31/32/33/全高字节）
-/// 与数据位型边界（含 0x80000000 位型，确认逻辑右移不铺符号）。
+/// PSLL/PSRL.d software model vs SSE2 hardware: count threshold boundaries (31/32/33/all-high bytes)
+/// and data bit-pattern boundaries (including 0x80000000 bit-pattern, confirming logical right shift does not spread sign).
 #[test]
 fn pshift_d_models_match_sse2_hardware() {
     use super::pshift32;
@@ -1032,7 +1032,7 @@ fn pshift_d_models_match_sse2_hardware() {
         [0x0000_0001u32, 0x8000_0000, 0xffff_ffff, 0x1234_5678],
         [0x0000_0000u32, 0x7fff_ffff, 0x8000_0001, 0x0000_0002],
     ];
-    // count 高 64 位随意污染（硬件忽略）；边界 31/32/33
+    // count high 64 bits randomly polluted (hardware ignores); boundaries 31/32/33
     let counts: [[u64; 2]; 8] = [
         [0, 0],
         [1, 0],

@@ -1,42 +1,42 @@
-//! mirvm 本地仓库（`$HOME/.mirvm`，`MIRVM_HOME` 可改址）的盘点与清理：
-//! `mirvm cache status` / `mirvm cache purge`（decision-history §7.14）。
+//! Inventory and cleanup of the mirvm local repository (`$HOME/.mirvm`, address changeable via `MIRVM_HOME`):
+//! `mirvm cache status` / `mirvm cache purge` (decision-history §7.14).
 //!
-//! 族谱与陈代语义：
-//! - sysroot-<host>：MIR-rich std（内容键控稳定；仅 --sysroot 清）
-//! - scripts/：frontmatter 物化项目 + 两套 cargo target（不打包世界的本地依赖库 +
-//!   B 维 native 对拍构建；最大件；--scripts/--all 清）
-//! - registry/：cargoless crates.io 与 Git source/checkouts（--all 清）
-//! - deps/ base/ ir/：降低加速器，文件名 = fnv(build_id, …) 不透明哈希——
-//!   陈代判定读文件首字段 build_id（三族文件结构首字段均为它，postcard
-//!   varint 编码，peek 零解码无副作用；module 整解码会触发冻结区定基 mmap，禁用）
-//! - native-archives/ global-asm/ asm-stubs/：内容键控 .so（运行期 dlopen 对象）
+//! Family tree and generational semantics:
+//! - sysroot-<host>: MIR-rich std (content-keyed stable; cleared only by --sysroot)
+//! - scripts/: frontmatter materialized projects + two cargo targets (local dependency libraries without packaging the world +
+//!   B-dimensional native cross-build; largest; cleared by --scripts/--all)
+//! - registry/: cargoless crates.io and Git source/checkouts (cleared by --all)
+//! - deps/ base/ ir/: lowering accelerators, filenames = fnv(build_id, …) opaque hash —
+//!   generational staleness checks read the first field build_id from files (first field of all three families,
+//!   postcard varint encoding, peek zero-decode has no side effects; full module decode would trigger frozen-region base mmap, disabled)
+//! - native-archives/ global-asm/ asm-stubs/: content-keyed .so (runtime dlopen objects)
 //!
-//! 一切组件自愈：purge 任何族只影响下次速度，不影响正确性。
+//! All components self-heal: purging any family only affects next-run speed, not correctness.
 
 use std::path::{Path, PathBuf};
 
-/// 清理计划（cli 旗解析产物）。
+/// Cleanup plan (product of CLI flag parsing).
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Purge {
-    /// 陈代三族（deps/base/ir 中 build_id ≠ 当前编译的文件 + tmp 孤儿/垃圾）
+    /// Three generational families (files in deps/base/ir whose build_id ≠ current build + tmp orphans/junk)
     pub stale: bool,
     pub deps: bool,
     pub base: bool,
     pub ir: bool,
     pub scripts: bool,
-    /// 统一 target dir（D14 共享依赖存储；最大件之一）
+    /// Unified target dir (D14 shared dependency storage; one of the largest)
     pub target: bool,
-    /// 除 sysroot 外全清（三族所有代 + scripts + 三个 .so 族）
+    /// Clear everything except sysroot (all generations of three families + scripts + three .so families)
     pub all: bool,
-    /// 连 sysroot 也清（完全冷启动；仅随 --all 语义叠加）
+    /// Clear sysroot too (full cold start; only stacked on --all semantics)
     pub sysroot: bool,
     pub dry_run: bool,
 }
 
 struct Family {
-    /// 展示名（= 目录名）
+    /// Display name (= directory name)
     name: String,
-    /// 陈代语义（build_id 首字段判代）族的条目扩展名；空 = 非陈代族
+    /// Generational semantics (build_id first field determines generation) family entry extension; empty = non-generational family
     entry_ext: &'static str,
 }
 
@@ -59,7 +59,7 @@ fn families() -> Vec<Family> {
     .collect()
 }
 
-/// 递归累加目录体量与文件数；不存在 ⇒ (0, 0)。
+/// Recursively accumulate directory size and file count; nonexistent ⇒ (0, 0).
 fn du(path: &Path) -> (u64, u64) {
     let mut bytes = 0u64;
     let mut files = 0u64;
@@ -96,8 +96,8 @@ fn human(bytes: u64) -> String {
     }
 }
 
-/// postcard varint（1.x 稳定方案：≤250 单字节；0xFB=u16 / 0xFC=u32 / 0xFD=u64 /
-/// 0xFE=u128 小端后跟）。返回 (值, 消耗字节数)。
+/// postcard varint (1.x stable scheme: ≤250 single byte; 0xFB=u16 / 0xFC=u32 / 0xFD=u64 /
+/// 0xFE=u128 little-endian follows). Returns (value, bytes consumed).
 fn varint(b: &[u8]) -> Option<(u128, usize)> {
     let (&tag, rest) = b.split_first()?;
     Some(match tag {
@@ -119,8 +119,8 @@ fn varint(b: &[u8]) -> Option<(u128, usize)> {
     })
 }
 
-/// 陈代三族文件首字段 build_id 的零解码 peek（String = varint 长度 + UTF-8）。
-/// 只读头 32 字节：build_id 恒为 16 位小写 hex（`{:016x}`），绰绰有余。
+/// Zero-decode peek of the first-field build_id in the three generational families (String = varint length + UTF-8).
+/// Read only first 32 bytes: build_id is always 16-digit lowercase hex (`{:016x}`), more than enough.
 fn file_build_id(path: &Path) -> Option<String> {
     use std::io::Read;
     let mut buf = [0u8; 32];
@@ -132,7 +132,7 @@ fn file_build_id(path: &Path) -> Option<String> {
     String::from_utf8(s.to_vec()).ok()
 }
 
-/// 单文件陈代判定：Staleness::Current / Stale / Garbage（tmp 孤儿与解析失败件）。
+/// Single-file generational classification: Staleness::Current / Stale / Garbage (tmp orphans and parse failures).
 #[derive(Debug, PartialEq, Eq)]
 enum Staleness {
     Current,
@@ -141,7 +141,7 @@ enum Staleness {
 }
 
 fn classify(path: &Path) -> Staleness {
-    // tmp 孤儿（`.{name}.tmp-{pid}` 点文件）与任何解析失败件 = 垃圾（自愈无风险）
+    // tmp orphans (`.{name}.tmp-{pid}` dot files) and any parse failures = garbage (self-heal risk-free)
     if path
         .file_name()
         .is_some_and(|n| n.to_string_lossy().starts_with('.'))
@@ -155,9 +155,9 @@ fn classify(path: &Path) -> Staleness {
     }
 }
 
-/// 族内按陈代分类（仅 generational 族用）。返回 (当前代, 陈代, 垃圾) 三列表。
-/// 只有条目扩展名（ir=bin / deps,base=img）与 tmp 孤儿（点文件）进入判定；
-/// 其余文件（build.log 等构建副产、src/ 目录）一律不碰不报。
+/// Classify within family by generation (only for generational families). Returns (current, stale, garbage) three lists.
+/// Only entry extensions (ir=bin / deps,base=img) and tmp orphans (dot files) enter classification;
+/// other files (build.log and other build byproducts, src/ directories) are left untouched and unreported.
 fn split_generational(dir: &Path, entry_ext: &str) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
     let (mut cur, mut stale, mut garb) = (Vec::new(), Vec::new(), Vec::new());
     let Ok(rd) = std::fs::read_dir(dir) else {
@@ -191,7 +191,7 @@ fn size_of(paths: &[PathBuf]) -> u64 {
         .sum()
 }
 
-/// `mirvm cache status` 全文。
+/// Full text of `mirvm cache status`.
 pub fn status(root: &Path) -> String {
     let mut out = format!(
         "mirvm local cache {} (build {})\n",
@@ -223,7 +223,7 @@ pub fn status(root: &Path) -> String {
             out += &format!("  {:<36} {:>9}  ({files} items)\n", fam.name, human(bytes));
         }
     }
-    // 非族属杂项（如 tests 的 project-suite）
+    // non-family miscellaneous items (e.g. tests project-suite)
     if let Ok(rd) = std::fs::read_dir(root) {
         for e in rd.flatten() {
             let p = e.path();
@@ -248,7 +248,7 @@ pub fn status(root: &Path) -> String {
     out
 }
 
-/// 执行清理，返回报告全文。dry_run 只列动作不动手。
+/// Execute cleanup, return full report. dry_run lists actions without touching anything.
 pub fn purge(root: &Path, plan: Purge) -> String {
     let mut out = String::new();
     let (mut freed, mut acted) = (0u64, 0u64);
@@ -280,7 +280,7 @@ pub fn purge(root: &Path, plan: Purge) -> String {
         bytes
     };
 
-    // 整族旗与 --all 的并集语义
+    // whole-family flag union semantics with --all
     let whole = |name: &str, flag: bool| flag || (plan.all && name != "sysroot");
     for fam in families() {
         let name = fam.name.as_str();
@@ -325,7 +325,7 @@ pub fn purge(root: &Path, plan: Purge) -> String {
             acted += 1;
         }
     }
-    // 空目录扫除（purge 后族目录本身留空壳无害，保持仓库根可枚举）
+    // empty directory sweep (leaving empty family directory shells after purge is harmless, keeps repo root enumerable)
     if !dry {
         for fam in families() {
             let d = root.join(&fam.name);
@@ -360,7 +360,7 @@ mod tests {
         dir
     }
 
-    /// 与三族文件结构同形：首字段 String（postcard varint + UTF-8）。
+    /// Same shape as the three families' files: first field String (postcard varint + UTF-8).
     fn fake_entry(dir: &Path, name: &str, build_id: &str) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
         let p = dir.join(name);
@@ -401,10 +401,10 @@ mod tests {
         let deps = root.join("deps");
         let cur = fake_entry(&deps, "cur.img", env!("MIRVM_BUILD_ID"));
         let old = fake_entry(&deps, "old.img", "0000000000000000");
-        // 非条目文件（构建副产）不进入判定、不碰不报
+        // non-entry files (build byproducts) do not enter classification, are left untouched and unreported
         let log = deps.join("build.log");
         std::fs::write(&log, b"build output").unwrap();
-        // dry-run：只报不动
+        // dry-run: list only, no action
         let report = purge(
             &root,
             Purge {
@@ -416,7 +416,7 @@ mod tests {
         assert!(report.contains("to be deleted"));
         assert!(!report.contains("build.log"));
         assert!(old.exists() && cur.exists());
-        // 真清：陈代走、当代留、副产不动
+        // real cleanup: stale goes, current stays, byproducts untouched
         let report = purge(
             &root,
             Purge {

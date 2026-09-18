@@ -342,7 +342,7 @@ impl CaughtException {
         }
 
         std::mem::forget(self);
-        eprintln!("mirvm[m4-engine]: unwind 抵达 Terminate 边界（double panic/ABI）——abort");
+        eprintln!("mirvm[m4-engine]: unwind reached Terminate boundary (double panic/ABI) — abort");
         std::process::abort()
     }
 

@@ -20,25 +20,25 @@ struct Task {
 }
 
 fn main() {
-    // serde_json：解析 + 修改 + 序列化
+    // serde_json: parse + modify + serialize
     let json = r#"{"id":7,"title":"ship mirvm M2","tags":["rust","vm"],"done":false}"#;
     let mut task: Task = serde_json::from_str(json).expect("parse");
     task.done = true;
     task.tags.push("interpreted".into());
     println!("serde: {}", serde_json::to_string(&task).unwrap());
 
-    // regex：提取
+    // regex: extract
     let re = Regex::new(r"(\w+)@(\w+)\.(\w+)").unwrap();
-    let text = "联系: alice@example.com, bob@test.org";
+    let text = "Contact: alice@example.com, bob@test.org";
     let emails: Vec<String> = re.captures_iter(text).map(|c| format!("{}@{}", &c[1], &c[2])).collect();
     println!("regex: {emails:?}");
 
-    // rand：区间随机数（值不比对，只验证可运行 + 落在区间内）
+    // rand: range random number (value not compared, only verify it runs + falls in range)
     let mut rng = rand::rng();
     let n: u32 = rng.random_range(10..20);
     println!("rand in range: {}", (10..20).contains(&n));
 
-    // 组合：JSON 数组统计
+    // combo: JSON array stats
     let data: Vec<Task> = serde_json::from_str(
         r#"[{"id":1,"title":"a","tags":[],"done":true},
             {"id":2,"title":"b","tags":["x"],"done":false},

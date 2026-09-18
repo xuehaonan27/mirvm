@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pack 双轨合同：缺省 cargoless 零 Cargo，显式回退仍由固定 Cargo 驱动。
+# pack dual-track contract: default is cargoless zero-Cargo, explicit fallback still driven by pinned Cargo.
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
 test_enter_repo
@@ -9,9 +9,9 @@ CARGO=${CARGO:-$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-
 RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
 STRACE=${STRACE:-$(command -v strace)}
 CONTRACT_HOME=${MIRVM_CONTRACT_HOME:-${MIRVM_HOME:-$HOME/.mirvm}}
-[ -x "$MIRVM" ] || { echo "pack_contract: $MIRVM 不存在" >&2; exit 69; }
-[ -x "$CARGO" ] || { echo "pack_contract: pinned Cargo 不存在" >&2; exit 69; }
-[ -x "$STRACE" ] || { echo "pack_contract: strace 不存在" >&2; exit 69; }
+[ -x "$MIRVM" ] || { echo "pack_contract: $MIRVM does not exist" >&2; exit 69; }
+[ -x "$CARGO" ] || { echo "pack_contract: pinned Cargo does not exist" >&2; exit 69; }
+[ -x "$STRACE" ] || { echo "pack_contract: strace does not exist" >&2; exit 69; }
 ensure_test_sysroot "$MIRVM" "$CONTRACT_HOME" "$RUSTC" || exit $?
 CONTRACT_SYSROOT=$TEST_SYSROOT
 
@@ -143,36 +143,36 @@ PATH="$NO_CARGO:$PATH" MIRVM_HOME="$SELF_HOME" MIRVM_SYSROOT="$CONTRACT_SYSROOT"
     "$MIRVM" pack "$APP" -o "$SELF_PACKAGE" >"$TMP/self-pack.out" 2>"$TMP/self-pack.err"
 self_code=$?
 if [ "$self_code" -eq 0 ] && [ -s "$SELF_PACKAGE" ]; then
-    ok "pack 缺省 self 生成包"
+    ok "pack default self produced package"
 else
-    bad "pack 缺省 self 失败: exit=$self_code"
+    bad "pack default self failed: exit=$self_code"
     tail -20 "$TMP/self-pack.err"
 fi
 if [ -e "$MIRVM_CARGO_SENTINEL" ] || rg -q 'execve\("[^"]*/cargo"' "$TMP/self.execve"; then
-    bad "pack 缺省路径启动了 Cargo"
+    bad "pack default path launched Cargo"
 else
-    ok "pack 缺省路径 execve 零 Cargo"
+    ok "pack default path execve zero Cargo"
 fi
 self_output=$(MIRVM_HOME="$TMP/fresh-run-home" MIRVM_SYSROOT="$CONTRACT_SYSROOT" \
     "$MIRVM" run "$SELF_PACKAGE" 2>"$TMP/self-run.err")
 if [ "$?" -eq 0 ] && [ "$self_output" = 321 ]; then
-    ok "self 包在全新 MIRVM_HOME 自包含运行"
+    ok "self package self-contained run in fresh MIRVM_HOME"
 else
-    bad "self 包运行失败: output=$self_output"
+    bad "self package run failed: output=$self_output"
     tail -20 "$TMP/self-run.err"
 fi
 mapfile -t heat_files < <(find "$TMP/fresh-run-home/package-heat" -type f -name '*.order' 2>/dev/null)
 if [ "${#heat_files[@]}" = 1 ] && [ -s "${heat_files[0]}" ]; then
-    ok "包首次运行记录真实函数热序"
+    ok "package recorded real function heat order on first run"
 else
-    bad "包首次运行未生成唯一的函数热序记录"
+    bad "package first run did not produce a unique function heat record"
 fi
 second_output=$(MIRVM_HOME="$TMP/fresh-run-home" MIRVM_SYSROOT="$CONTRACT_SYSROOT" \
     "$MIRVM" run "$SELF_PACKAGE" 2>"$TMP/self-run-second.err")
 if [ "$?" -eq 0 ] && [ "$second_output" = 321 ]; then
-    ok "包按预测热序预取后二跑结果一致"
+    ok "package second run consistent after predicted heat prefetch"
 else
-    bad "包预测预取后二跑失败: output=$second_output"
+    bad "package predicted prefetch second run failed: output=$second_output"
     tail -20 "$TMP/self-run-second.err"
 fi
 
@@ -189,7 +189,7 @@ EMBED="$TMP/package-embed"
     -o "$EMBED" >"$TMP/embed-build.out" 2>"$TMP/embed-build.err"
 embed_build=$?
 if [ "$embed_build" -ne 0 ]; then
-    bad "公开 Package 嵌入探针编译失败"
+    bad "public Package embed probe compilation failed"
     tail -20 "$TMP/embed-build.err"
 else
     embed_output=$(MIRVM_HOME="$TMP/embed-home" "$EMBED" "$SELF_PACKAGE" \
@@ -197,9 +197,9 @@ else
     embed_code=$?
     if [ "$embed_code" -eq 0 ] \
         && [ "$embed_output" = "unique=true ctor=1,1 direct=2,2 bridge=3,3 c2=4,4 live=5 fresh_ctor=1 fresh=2 closed=true aba=true fini=true" ]; then
-        ok "公开 Package 双 Engine 的构造/析构/P1/global_asm/C2/关闭后 ABA 合同"
+        ok "public Package dual-engine construction/destruction/P1/global_asm/C2/post-close ABA contract"
     else
-        bad "公开 Package 双 Engine 结果错误: exit=$embed_code output=$embed_output"
+        bad "public Package dual-engine result wrong: exit=$embed_code output=$embed_output"
         tail -20 "$TMP/embed-run.err"
     fi
 fi
@@ -212,27 +212,27 @@ MIRVM_HOME="$CONTRACT_HOME" MIRVM_SYSROOT="$CONTRACT_SYSROOT" \
 cargo_code=$?
 if [ "$cargo_code" -eq 0 ] && [ -s "$CARGO_PACKAGE" ] \
     && rg -q 'execve\("[^"]*/cargo"' "$TMP/cargo.execve"; then
-    ok "MIRVM_DEPS=cargo 保留固定 Cargo 回退"
+    ok "MIRVM_DEPS=cargo keeps pinned Cargo fallback"
 else
-    bad "Cargo 回退 pack 未成立: exit=$cargo_code"
+    bad "Cargo fallback pack did not hold: exit=$cargo_code"
     tail -20 "$TMP/cargo-pack.err"
 fi
 cargo_output=$(MIRVM_HOME="$TMP/fresh-cargo-run-home" MIRVM_SYSROOT="$CONTRACT_SYSROOT" \
     "$MIRVM" run "$CARGO_PACKAGE" 2>"$TMP/cargo-run.err")
 if [ "$?" -eq 0 ] && [ "$cargo_output" = 321 ]; then
-    ok "Cargo 回退包在全新 MIRVM_HOME 自包含运行"
+    ok "Cargo fallback package self-contained run in fresh MIRVM_HOME"
 else
-    bad "Cargo 回退包运行失败: output=$cargo_output"
+    bad "Cargo fallback package run failed: output=$cargo_output"
     tail -20 "$TMP/cargo-run.err"
 fi
 
 if MIRVM_DEPS=invalid "$MIRVM" pack "$APP" -o "$TMP/invalid.mirvm" \
     >"$TMP/invalid.out" 2>"$TMP/invalid.err"; then
-    bad "pack 接受了非法 MIRVM_DEPS"
+    bad "pack accepted invalid MIRVM_DEPS"
 elif rg -q 'only accepts `cargo` or `self`' "$TMP/invalid.err"; then
-    ok "pack 非法 MIRVM_DEPS 明确拒绝"
+    ok "pack invalid MIRVM_DEPS rejected cleanly"
 else
-    bad "pack 非法 MIRVM_DEPS 诊断不明确"
+    bad "pack invalid MIRVM_DEPS diagnosis unclear"
 fi
 
 suite_summary contracts.pack

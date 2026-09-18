@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rust 源码质量：格式、静态检查和单元测试。
+# Rust source quality: formatting, static checks, and unit tests.
 # product: no
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"

@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# 运行时语义合同：纯函数、值与内存、unwind 和线程。
+# Runtime semantics contract: pure functions, values and memory, unwind and threads.
 #
-# 四段（可单段执行，默认全量）：
-#   pure    纯函数九件 —— 真实 rustc MIR 降低后经引擎执行 == 数学常量；
-#           末尾编译独立 harness 作执行相纯度门禁（vm/ 漏 rustc 类型即编译失败；
-#           只编译，TSan 执行唯一归 threads 段，SKIP_TSAN 因而能完整跳过）。
-#   digest  值与内存九函数 digest == native（期望值内嵌，来自同源 rustc -O 直跑，
-#           2026-07-08 生成——demo/m4/digest.rs 改动须同步再生）+ vm-stats M4.1 债务清零。
-#   unwind  panic/catch/重抛九件 == native（同源 rustc -O，2026-07-09 生成）
-#           + 真实 lang_start 区分 main panic 与正常 Termination 101
-#           + vm-stats M4.1/M4.2 债务清零。
-#   threads 真线程五用例差分 == native + tier-0 时代挂死双场景 + rayon 秒级
-#           + JIT 栈溢出诊断 + vm-stats 可达 trap-free
-#           + TSan 多线程用例（SKIP_TSAN=1 跳过）。
+# Four segments (can run single segment, default all):
+#   pure    nine pure-function cases — real rustc MIR lowered then engine-executed == mathematical constant;
+#           compile standalone harness at end as execution-phase purity gate (vm/ missing rustc type causes compile failure;
+#           compile only, TSan execution belongs solely to threads segment, so SKIP_TSAN can fully skip).
+#   digest  nine value-and-memory function digests == native (expected values embedded, from same-source rustc -O direct run,
+#           generated 2026-07-08 — changes to demo/m4/digest.rs must be regenerated in sync) + vm-stats M4.1 debt cleared.
+#   unwind  nine panic/catch/rethrow cases == native (same-source rustc -O, generated 2026-07-09)
+#           + real lang_start distinguishes main panic from normal Termination 101
+#           + vm-stats M4.1/M4.2 debt cleared.
+#   threads five real-thread differential cases == native + two tier-0-era hang scenarios + rayon sub-second
+#           + JIT stack-overflow diagnosis + vm-stats reachable trap-free
+#           + TSan multi-thread cases (skipped with SKIP_TSAN=1).
 #
-# 用法：./tests/run.sh suite runtime.semantics [pure|digest|unwind|threads|all]
+# Usage: ./tests/run.sh suite runtime.semantics [pure|digest|unwind|threads|all]
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
 test_enter_repo
@@ -22,7 +22,7 @@ MIRVM=${MIRVM:-$(pwd)/target/release/mirvm}
 TOOLCHAIN=${TOOLCHAIN:-nightly-2026-07-02}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-# ---- pure（原 m4_gate0）----
+# ---- pure (formerly m4_gate0) ----
 run_pure() {
     local SRC=demo/m4/pure.rs pass=0 pfail=0
     pcheck() {
@@ -48,18 +48,18 @@ run_pure() {
     echo "gate-pure: $pass pass, $pfail fail"
     [ "$pfail" -eq 0 ] || return 1
 
-    echo "--- 纯度门禁（独立 harness 编译）---"
+    echo "--- purity gate (standalone harness compile) ---"
     if cargo +"$TOOLCHAIN" build --manifest-path tsan/Cargo.toml --release --locked \
         >"$TMP/purity.out" 2>&1; then
-        echo "纯度门禁 PASS（vm/ 零 rustc_private）"
+        echo "purity gate PASS (vm/ zero rustc_private)"
     else
-        echo "纯度门禁 FAIL"
+        echo "purity gate FAIL"
         tail -10 "$TMP/purity.out"
         return 1
     fi
 }
 
-# ---- digest（原 m4_gate1）----
+# ---- digest (formerly m4_gate1) ----
 run_digest() {
     local SRC=demo/m4/digest.rs pass=0 pfail=0
     dcheck() {
@@ -73,7 +73,7 @@ run_digest() {
             head -3 "$TMP/digest.err"; pfail=$((pfail + 1))
         fi
     }
-    # 期望值 = 同源 native（rustc -O）直跑
+    # expected values = same-source native (rustc -O) direct run
     dcheck 'vec_digest(10)' 155
     dcheck 'string_digest(5)' 14655057013503867354
     dcheck 'map_digest(20)' 2490
@@ -86,18 +86,18 @@ run_digest() {
     echo "gate-digest: $pass pass, $pfail fail"
     [ "$pfail" -eq 0 ] || return 1
 
-    echo "--- vm-stats 复测（M4.1 份内债务清零）---"
+    echo "--- vm-stats recheck (M4.1 in-scope debt cleared) ---"
     local stats
     stats=$("$MIRVM" run --engine vm --vm-stats "$SRC" 2>/dev/null | sed -n '/各导出\/入口的可达 Trap/,$p')
     if echo "$stats" | grep -E '_digest.*\| .*M4\.1:' >/dev/null; then
-        echo "FAIL：可达集中仍有 M4.1 份内债务："
+        echo "FAIL: reachable set still has M4.1 in-scope debt:"
         echo "$stats" | grep -E '_digest.*M4\.1:'
         return 1
     fi
-    echo "M4.1 份内债务清零 PASS"
+    echo "M4.1 in-scope debt cleared PASS"
 }
 
-# ---- unwind（原 m4_gate2）----
+# ---- unwind (formerly m4_gate2) ----
 run_unwind() {
     local SRC=demo/m4/unwind.rs pass=0 pfail=0
     ucheck() {
@@ -121,10 +121,10 @@ run_unwind() {
     ucheck 'rethrow_digest(1)' 5503
     ucheck 'rethrow_digest(2)' 1103
 
-    # 这个导出故意让 panic 穿到 Engine 顶层。顶层清理 guest std 的 panic
-    # 计数后才析构 payload；payload 的 Drop 再跑一个普通 guest 调用，并发起、
-    # 捕获和释放第二个 panic。stdout 因而同时锁住计数复位、析构恰一次和
-    # 同一 Engine 清理后的继续执行能力。
+    # This export deliberately lets panic propagate to Engine top level. Top-level cleanup resets guest std panic
+    # count before dropping payload; payload Drop then runs a normal guest call, and raises,
+    # catches and releases a second panic. stdout therefore locks count reset, drop exactly once, and
+    # continued execution after the same Engine cleanup.
     local expected mode code
     expected=$(printf '%s\n' \
         'top-payload-drop=1 panicking=false' \
@@ -156,9 +156,9 @@ run_unwind() {
         fi
     done
 
-    # 必须经过真实 rustc lowering 和 std::rt::lang_start_internal。两条路径的 OS
-    # 退出码都是 101；Engine 的结构化结果仍须区分 main panic 与正常 Termination。
-    # 旁路 base/L2 防止手工 Module 或旧缓存给出假绿；JIT 还要求启动闭包真发布。
+    # Must go through real rustc lowering and std::rt::lang_start_internal. Both paths OS
+    # exit code is 101; Engine structured result must still distinguish main panic from normal Termination.
+    # Bypass base/L2 to prevent manual Module or old cache from faking green; JIT also requires startup closure truly published.
     local main_src=demo/main_outcome_probe.rs panic_code normal_code
     for mode in interp jit; do
         if [ "$mode" = interp ]; then
@@ -204,24 +204,24 @@ run_unwind() {
     echo "gate-unwind: $pass pass, $pfail fail"
     [ "$pfail" -eq 0 ] || return 1
 
-    echo "--- vm-stats 复测（M4.1/M4.2 份内债务清零）---"
+    echo "--- vm-stats recheck (M4.1/M4.2 in-scope debt cleared) ---"
     local stats
     stats=$("$MIRVM" run --engine vm --vm-stats "$SRC" 2>/dev/null | sed -n '/各导出\/入口的可达 Trap/,$p')
     if echo "$stats" | grep -E '_digest.*\| .*M4\.[12]:' >/dev/null; then
-        echo "FAIL：可达集中仍有 M4.1/M4.2 份内债务："
+        echo "FAIL: reachable set still has M4.1/M4.2 in-scope debt:"
         echo "$stats" | grep -E '_digest.*M4\.[12]:'
         return 1
     fi
-    echo "M4.1/M4.2 份内债务清零 PASS"
+    echo "M4.1/M4.2 in-scope debt cleared PASS"
 }
 
-# ---- threads（原 m4_gate4）----
+# ---- threads (formerly m4_gate4) ----
 run_threads() {
     local pass=0 pfail=0
     tok() { pass=$((pass + 1)); echo "PASS $*"; }
     tbad() { pfail=$((pfail + 1)); echo "FAIL $*"; }
 
-    # ① threads_* 五用例差分（stdout + 退出码 + 规范化 stderr）
+    # ① threads_* five-case differential (stdout + exit code + normalized stderr)
     local name ncode mcode
     for name in threads_spawn threads_channel threads_sync threads_time threads_panic; do
         local src=demo/$name.rs
@@ -240,7 +240,7 @@ run_threads() {
         fi
     done
 
-    # ② tier-0 时代挂死双场景（真阻塞 syscall + 真线程；须秒级完成）
+    # ② two tier-0-era hang scenarios (real blocking syscall + real threads; must finish in seconds)
     local out code dt t0
     out=$(timeout 60 "$MIRVM" run corpus/c_blocking_io.rs 2>&1); code=$?
     [ $code -eq 0 ] && [ "$out" = 'got: [104, 105]' ] \
@@ -249,7 +249,7 @@ run_threads() {
     [ $code -eq 0 ] && [ "$out" = 'echo = "echo"' ] \
         && tok "c_net_echo_threaded（线程化回环服务器）" || tbad "c_net_echo_threaded（exit=$code: $out）"
 
-    # ③ rayon 秒级（tier-0 28s；work-stealing 池 + par_iter/par_sort）
+    # ③ rayon sub-second (tier-0 28s; work-stealing pool + par_iter/par_sort)
     t0=$(date +%s%N)
     out=$(timeout 120 "$MIRVM" run corpus/c_rayon.rs 2>&1); code=$?
     dt=$(( ($(date +%s%N) - t0) / 1000000 ))
@@ -259,17 +259,17 @@ run_threads() {
         tbad "c_rayon（exit=$code ${dt}ms）"
     fi
 
-    # ④ 小栈 + threshold=1 强制进入编译码：必须在大帧序言前给明确诊断，
-    # 不能以 SIGSEGV 穿出。recursion_deep 是现有的永久深递归探针。
+    # ④ small stack + threshold=1 forces compiled code: must give clear diagnosis before large-frame prologue,
+    # must not exit as SIGSEGV. recursion_deep is the existing permanent deep-recursion probe.
     out=$(env MIRVM_STACK_SIZE=1m MIRVM_JIT_THRESHOLD=1 MIRVM_JIT_SYNC=1 \
         timeout 60 "$MIRVM" run demo/recursion_deep.rs 2>&1); code=$?
     if [ $code -eq 70 ] && echo "$out" | grep -q 'guest 栈溢出（JIT 编译帧进入前'; then
-        tok "JIT 栈溢出在帧序言前明确诊断"
+        tok "JIT stack overflow clearly diagnosed before frame prologue"
     else
         tbad "JIT 栈溢出诊断（exit=$code: $out）"
     fi
 
-    # ⑤ --vm-stats 复测：threads demo 可达路径 trap-free
+    # ⑤ --vm-stats recheck: threads demo reachable path trap-free
     for name in threads_spawn threads_panic; do
         if "$MIRVM" run --vm-stats demo/$name.rs 2>/dev/null | grep -q "@entry: ✅ 可达路径 trap-free"; then
             tok "$name 可达 trap-free"
@@ -278,10 +278,10 @@ run_threads() {
         fi
     done
 
-    # ⑥ TSan 多线程用例（8 线程共享 Shared/各自 Ctx/thunk 工厂并发；引擎 Sync）
+    # ⑥ TSan multi-thread cases (8 threads share Shared / per-thread Ctx / thunk factory concurrently; engine Sync)
     if [ -z "${SKIP_TSAN:-}" ]; then
         if bash tests/suites/runtime/tsan.sh >"$TMP/tsan.out" 2>&1; then
-            tok "TSan（含 tsan_mt 多线程真身，零警告）"
+            tok "TSan (includes tsan_mt multi-thread real body, zero warnings)"
         else
             tbad "TSan"
             tail -10 "$TMP/tsan.out"
