@@ -153,6 +153,41 @@ struct PendingJitSymbol {
     size: u64,
 }
 
+/// ISA for the trace code domain (design §5.2.3).
+///
+/// The trace domain is a separate Cranelift ISA/module from the plain domain:
+/// it enables the pinned register so trace code can hold the current thread's
+/// recorder state in `r15` and reach the inline syscall path without a TLS
+/// lookup or a global session check. On x86-64 Cranelift's pinned register is
+/// exactly `r15` (`isa/x64/inst/regs.rs`, documented there as matching
+/// Spidermonkey's HeapReg), so enabling it is what the design asks for rather
+/// than an approximation.
+///
+/// The setting is ISA-wide, so the trace domain cannot be a flag on the plain
+/// ISA: plain code must keep `r15` allocatable and carry no collection state.
+/// This constructor exists so that separation has a single, testable home; the
+/// compiler module split that consumes it lands in the next L3 slice.
+#[allow(dead_code)] // consumed by the trace compiler module (next L3 slice)
+pub(crate) fn trace_domain_flags() -> settings::Flags {
+    let mut fb = settings::builder();
+    fb.set("opt_level", "speed").unwrap();
+    fb.set("unwind_info", "true").unwrap();
+    fb.set("preserve_frame_pointers", "true").unwrap();
+    // The pinned register is what makes `get_pinned_reg`/`set_pinned_reg`
+    // meaningful; without it Cranelift rejects those instructions.
+    fb.set("enable_pinned_reg", "true").unwrap();
+    settings::Flags::new(fb)
+}
+
+/// Build the trace domain's ISA from [`trace_domain_flags`].
+#[allow(dead_code)] // consumed by the trace compiler module (next L3 slice)
+pub(crate) fn trace_domain_isa() -> cranelift_codegen::isa::OwnedTargetIsa {
+    cranelift_native::builder()
+        .expect("native ISA builder")
+        .finish(trace_domain_flags())
+        .expect("native ISA accepts the trace domain flags")
+}
+
 impl<'a> Compiler<'a> {
     fn new(shared: &'a Shared) -> Self {
         // T3（M5.5）：MIRVM_JIT_STATS=1 时开启助手频度统计（进程级一次）
@@ -992,6 +1027,42 @@ fn collect_call_sites(cctx: &cranelift_codegen::Context) -> Vec<(u64, Option<u64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L3: the trace domain is a separate ISA because pinning a register is an
+    /// ISA-wide decision.  Plain code must keep `r15` allocatable and carry no
+    /// recorder state, so the two domains cannot share one `Flags`.
+    #[test]
+    fn trace_domain_enables_the_pinned_register_and_plain_does_not() {
+        let trace = trace_domain_flags();
+        assert!(
+            trace.enable_pinned_reg(),
+            "trace domain must enable the pinned register (r15 on x86-64)"
+        );
+
+        // The plain domain must stay exactly as it is: no pinned register, so
+        // plain code keeps r15 free and costs nothing for collection.
+        let mut plain_builder = settings::builder();
+        plain_builder.set("opt_level", "speed").unwrap();
+        plain_builder.set("unwind_info", "true").unwrap();
+        plain_builder
+            .set("preserve_frame_pointers", "true")
+            .unwrap();
+        let plain = settings::Flags::new(plain_builder);
+        assert!(
+            !plain.enable_pinned_reg(),
+            "plain domain must not reserve a register for collection"
+        );
+
+        // The trace ISA must build on this host. On x86-64 Cranelift's pinned
+        // register is r15, which is what the design asks trace code to hold the
+        // current producer in.
+        let isa = trace_domain_isa();
+        assert!(
+            format!("{}", isa.triple()).contains("x86_64"),
+            "this slice's pinned-register story is x86-64 only, got {}",
+            isa.triple()
+        );
+    }
 
     fn body(name: &str, first: Terminator) -> ir::FuncBody {
         ir::FuncBody {
