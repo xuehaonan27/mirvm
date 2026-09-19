@@ -29,6 +29,12 @@
 - **`rg` 是 7 个套件的断言工具**（`tests/suites/contracts/*`、`runtime/*`），容器与 CI
   都没有预装；缺它不是 SKIP 而是大量 `rg: command not found` 假红。装到 PATH 上即可
   （无免密 sudo 时用官方 musl 静态二进制放 `~/.cargo/bin`）。
+- `contracts.cargoless-sources` 与 `contracts.cargoless-git` 里有一批**本机 HTTP fixture
+  registry**（`127.0.0.1:<临时端口>` 的 sparse index / config.json）。整轮跑在 `withproxy`
+  下时，代理会去连这些本机地址并返回 "empty reply from server"，于是 alternate registry、
+  registry replacement 整组假红（实测 4 项）。`tests/support/harness.sh` 的
+  `test_enter_repo` 因此统一把 `127.0.0.1,localhost` 追加进 `no_proxy`/`NO_PROXY`；
+  手工单独跑某个套件时也要自带这一步。
 - `differential.programs` 里的 `demo/jit_unwind_probe.rs`（30,000 次 panic+catch）
   在 mirvm 下约 2m31s，native 约 0.3s（差 ~470×，语义逐字节一致）；`fast` 总时长
   主要由它决定，别把它误判成挂死。
