@@ -1,4 +1,4 @@
 [toolchain]
-# Pin a dated version; bump monthly (rustc 1.98.0-nightly c397dae80).
+# Pin a dated version; bump monthly (rustc 1.98.0-nightly 4c9d2bfe4, 2026-07-01).
 channel = "nightly-2026-07-02"
 components = ["rustc-dev", "rust-src", "llvm-tools", "rustfmt", "clippy"]
