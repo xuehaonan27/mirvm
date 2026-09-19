@@ -95,4 +95,8 @@ stdout/stderr/exit 三维全部逐字节一致才算绿。唯一入口是 `./tes
 - 债务登记在 `../open-issues.md`；决策推翻在 `../decision-history.md`；
   阶段账目进 `../history/` 对应日志。
 - `MIRVM_SEGV_DUMP` / `MIRVM_JIT_DEBUG` 是刻意的诊断旋钮，勿删。
-- GitHub/远程全面暂停（AGENTS.md）；commit 纪律与基建预算纪律同见 AGENTS.md。
+- **提交会自动推送到 `origin main`**（实测：commit 后约 20 秒即以 `update by push` 落到
+  GitHub；`git ls-remote origin main` 可核实）。因此**不要改写已经存在的提交**
+  （`commit --amend`、`rebase`、`filter-branch` 都会换 SHA）——那会让本地 `main` 与
+  `origin/main` 分叉成两条历史，需要 force-push 才能收拾。要改提交信息就**在其上追加一个
+  新提交**；确实必须改写时，先停下来问维护者。这条取代旧记录里的"远程暂停"。
