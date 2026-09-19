@@ -9,9 +9,9 @@ mirvm 是一个以 rustc 为前端、自建执行引擎的 Rust 抽象机器运�
 自己的运行时执行；执行引擎 = tree-walking 解释器 + 方法级 Cranelift JIT（M5.0–M5.5 全收，
 JIT 默认开启）。
 
-> 项目仍处于开发阶段，不是完整 Rust 语义的成品。当前状态、已知缺口和下一步以
-> [docs/current-status.md](docs/current-status.md) 为准；文档权威与历史替代关系见
-> [docs/README.md](docs/README.md)。
+> 项目仍处于开发阶段，不是完整 Rust 语义的成品。当前状态与已验证边界以
+> [docs/current-status.md](docs/current-status.md) 为准，未解决债务见
+> [docs/open-issues.md](docs/open-issues.md)。
 
 ## 当前状态（2026-08-13 快照）
 
@@ -80,8 +80,8 @@ JIT 默认开启）。
 已知缺口、响亮拒绝边界与全部未解决债务集中登记在
 [docs/open-issues.md](docs/open-issues.md)；目前不能宣称支持"任意 Rust 程序"。
 当前开发基线是 Linux/ELF/x86_64，工具链锁定在 `nightly-2026-07-02`。根设计契约见
-[DESIGN.md](DESIGN.md)，frame/vmctx 等可逆架构决策及旧模型完整保留在
-[docs/decision-history.md](docs/decision-history.md)。
+[DESIGN.md](DESIGN.md)，frame/vmctx 等架构决策与现行语义合同见
+[docs/designs/](docs/designs/)。
 FFI 的普通 C 与 C-unwind 已按源 ABI 分治：前者维持终止边界，后者允许 Rust panic
 或 C++ 异常穿过并执行 Drop。引擎只为 guest panic/`EngineFault` 增加自有异常身份，
 继续复用 Rust personality；各帧按实际异常对象分类，不用线程级标记决定 cleanup，也不把
@@ -92,9 +92,8 @@ C++ 异常转换成 Rust panic。完整合同见
 “原 Engine 已关闭”身份，不再保留整份 Shared；已知有完成事件的 pthread 线程私有数据
 （TSD）回调则由上述
 延迟持有等待并清账。少见依赖来源余面、safe typed 嵌入 API、正式沙箱/资源治理、daemon、
-格式冻结与跨平台尚未完成，
-建议施工顺序见
-[产品能力补全计划](docs/designs/product-capabilities-plan.md)。
+格式冻结与跨平台尚未完成，逐条状态见
+[docs/open-issues.md](docs/open-issues.md) 的 D/E/G 分区。
 
 ## 快速开始
 
@@ -124,8 +123,7 @@ cargo build --release --locked
 ```
 
 真实 Cargo 项目的对拍走 `corpus/projects/`（vendor 真项目 + manifest `mode=diff` 三维
-逐字节，provenance 钉见其 README）；旧重型 harness 合同存档在
-[docs/real-projects.md](docs/real-projects.md)（已停放）。目前不能宣称支持
+逐字节，provenance 钉见其 README）。目前不能宣称支持
 “任意 Rust 程序”。远程仓库和 GitHub Issues/PRD/PR 操作当前暂停，维护者明确恢复前不要执行。
 
 单文件可使用 cargo script / RFC 3424 风格 frontmatter 声明依赖：

@@ -11,7 +11,7 @@
 > 目标：定清 VM tier 如何真并行、哪些状态怎么同步、C8 三招的具体形态、spike 验收（过 TSan）。
 > 与 frame-abi-bytecode.md 配套（帧/字节码那半），本文管"并发那半"，两者需共同成立（C11）。
 >
-> **Spike 4 验收通过（2026-07-07，history/spike4-concurrency-tsan.md）**：8 真宿主线程并行混合
+> **Spike 4 验收通过（2026-07-07）**：8 真宿主线程并行混合
 > 执行（i2c/c2i 并发）+ 跨 tier 同址原子 + 阻塞 syscall 活性（corpus §2.1 场景收束）+ 并发混合栈
 > unwind，**TSan 全量插桩零竞争警告**。状态三分以 Shared（发布后只读）/Ctx（每线程私有）落地，
 > 引擎执行路径零锁。新增引擎义务：**解释器执行 guest 原子必须发真宿主原子指令**（tier-0 的普通

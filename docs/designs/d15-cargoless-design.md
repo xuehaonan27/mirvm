@@ -3,7 +3,7 @@
 ## 8. P1 施工实录：求解语义定稿（2026-07-27）
 
 P1 的闭合过程把 cargo 的解析语义逐条实证出来（每条都有对拍实锤，
-证据链在 decision-history §7.28）。定稿规则如下，即 `resolve.rs` 的
+证据链在 git 历史）。定稿规则如下，即 `resolve.rs` 的
 当前实现口径：
 
 1. **resolve 图 vs build 图分裂**：Cargo.lock 的解析图是全平台并集
@@ -38,28 +38,28 @@ P1 的闭合过程把 cargo 的解析语义逐条实证出来（每条都有对�
 8. **已明说的 P1 边界（记账，不冒充闭合）**：
    - rust-version-aware 版本偏好原为本期边界，已于 2026-08-10 完成：
      resolver 3、fallback/allow、workspace 最低版本、`--ignore-rust-version`
-     与 lock v3/v4 均按固定 Cargo 实证实现，见 decision-history §7.36。
+     与 lock v3/v4 均按固定 Cargo 实证实现，见 git 历史。
    - req 遇本仓钉版未知的 semver 新 op 时退回 `Ranges::from_req`
      （pre 会丢，代码内响亮记账）。
    - resolver 1/2/3 常见 workspace、复杂成员 glob/package spec、workspace lints、Git、替代 registry、registry/local/directory
-     source replacement、patch/replace 与 pack self 已补齐，见 decision-history
+     source replacement、patch/replace 与 pack self 已补齐，见 git 历史
      §7.35/§7.36/§7.38-§7.44；Git source replacement 等剩余边界
      继续响亮拒绝。
 
 
 > 状态：2026-07-23 调研定稿（四决策点当日裁定）；**P1 已收口（2026-07-27，
-> §8 求解语义定稿，decision-history §7.28）；P2 已收口（2026-07-27，
-> corpus smoke 24 双腿逐字节 24/24，decision-history §7.29）；P3 已收口
+> §8 求解语义定稿）；P2 已收口（2026-07-27，
+> corpus smoke 24 双腿逐字节 24/24）；P3 已收口
 > （2026-07-28，corpus full 138 pass 1 p5 0 fail + gate DEPS=self 双轨绿，
-> decision-history §7.30）；P4 已收口（2026-07-29，sysroot 自管 + 默认
-> 翻转 self + compat 双轨定案，decision-history §7.31）**；resolver 2/3
+> git 历史）；P4 已收口（2026-07-29，sysroot 自管 + 默认
+> 翻转 self + compat 双轨定案）**；resolver 2/3
 > 常见 workspace、rust-version-aware 选择与 Git 依赖已于 2026-08-08 至
 > 08-10 补齐（§7.35/§7.36/§7.38）。替代 registry/Cargo config、常见 source
 > replacement/patch/replace 与 pack self 也已完成（§7.39-§7.41）；resolver 1、复杂成员
 > glob/package spec 与 workspace lints 已随 D17 余项完成（§7.44）。P5 剩余复杂语义
 > 按实需逐项立项（Git source replacement 等响亮拒绝在案）。Cargo compat 已于
 > 2026-08-10 裁定长期保留，默认 self 与显式 Cargo 回退持续双轨对拍（§7.37）。
-> 立项记录：[open-issues.md D15](../open-issues.md)；动机源头：decision-history §7.22
+> 立项记录：[open-issues.md D15](../open-issues.md)；动机源头：git 历史
 > （C4 两轮绕行被否——"吃 cargo 产物就得绕"的处境要制度性消除）。
 > 本文遵循"闭合契约"纪律：每期写明闭合到哪条可观察边界；原理上不能闭合的
 > 事先明说，不许绕行冒充闭合。

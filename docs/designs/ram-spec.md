@@ -229,6 +229,6 @@ opaque `MaybeUninit` 字节载体，避免低对齐/padding 的宿主 UB。同�
 | **语义（WHAT）** | 本文 RAM-SPEC |
 | 内存实现（HOW） | DESIGN.md §4 |
 | 并发实现（HOW） | docs/designs/concurrency-arch.md |
-| 帧/字节码/JIT（HOW） | docs/designs/frame-abi-bytecode.md、docs/designs/frame-stack-models.md |
-| async（HOW） | docs/designs/async-stackless.md |
+| 帧/字节码/JIT（HOW） | docs/designs/frame-abi-bytecode.md、git 历史 |
+| async（HOW） | git 历史 |
 | 边界/os（HOW） | DESIGN.md §7、P7 os:: |

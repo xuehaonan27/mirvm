@@ -29,7 +29,7 @@
 
 - **phase_cargo**：驱动真 `cargo run`，注入 `RUSTC_WRAPPER=mirvm` +
   `target.runner=["mirvm","runner"]` + 统一 `$MIRVM_HOME/target/mirvm`
-  （D14 近期片，2026-07-18 由每项目独立 target dir 改共享，decision-history
+  （D14 近期片，2026-07-18 由每项目独立 target dir 改共享
   §7.15）；强制 `--target <host>` 作为 host/target crate 区分开关。
   依赖解析/下载/失败即停 = cargo 原生行为（`Cargo.lock`、`~/.cargo`
   registry 缓存全部白嫖）。
@@ -64,7 +64,7 @@
 | `~/.mirvm/asm-stubs`、`global-asm` | asm 工厂 `.so` | 内容哈希 |
 | `~/.mirvm/scripts` | frontmatter 脚本物化项目 | 路径+内容哈希 |
 
-> 2026-07-18（decision-history §7.14）：缓存根由 `~/.cache/mirvm` 迁 `$HOME/.mirvm`
+> 2026-07-18：缓存根由 `~/.cache/mirvm` 迁 `$HOME/.mirvm`
 > （`MIRVM_HOME` 可改址），并补管理面 `mirvm cache status|purge`（陈代 GC/整族/
 > scripts/全清多档）；deps/base/ir 陈代由 build_id 首字段 peek 判定。
 
@@ -111,8 +111,8 @@
   `.mirvm` 包 + `mirvm pack` 子命令（**排 M5.3 后**）→ ⑤ 发行形态与命名收尾。
   **命名**：MRsDK 否决（混排难念）；"kit"命名推迟到 mode B 出实物；届时候选
   MDK / "mirvm toolkit"。
-  **2026-07-14 顺序修订（用户裁定，decision-history §7.2）**：①② 完成后 M5.3 定
-  Pending，插入冷启动杠杆施工（[coldstart-research.md](../history/coldstart-research.md)）：
+  **2026-07-14 顺序修订（用户裁定）**：①② 完成后 M5.3 定
+  Pending，插入冷启动杠杆施工（coldstart-research.md）：
   S1（sysroot 仪式 stamp + 缓存盲区 P1/P2/P3 修缮）→ S2（=③ 依赖剪 codegen）→
   S4（std 预降低底座，模式 B 的 sysroot 侧特例，先设计过审）→ S3 懒降低与 M5.3 JIT
   联合分层设计过审后动工；④⑤ 位次不变。
@@ -122,7 +122,7 @@
 | 层 | 内容 | 状态 |
 |---|---|---|
 | L0 | registry/git 源码（`~/.cargo`，跨项目） | ✅ cargo 白嫖 |
-| L1 | 依赖 rlib/MIR-rlib + 指纹（`~/.mirvm/target/{mirvm,native}`，全机共享） | ✅ 已有；**跨项目共享已落地（D14 近期片，decision-history §7.15）** |
+| L1 | 依赖 rlib/MIR-rlib + 指纹（`~/.mirvm/target/{mirvm,native}`，全机共享） | ✅ 已有；**跨项目共享已落地（D14 近期片）** |
 | L1.5 | sysroot / native `.so` / asm-stubs / 脚本物化 | ✅ 已有（内容哈希） |
 | **L2** | **post-mono engine-IR 整包缓存** | ❌ **最高价值缺口**：把每跑必付 ~3s 压成"反序列化+跑" |
 | L3 | JIT code cache | ❌ M5.3–5.5 定型（CFI/PLT/重定位）前禁做 |

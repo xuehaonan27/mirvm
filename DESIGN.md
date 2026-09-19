@@ -3,8 +3,8 @@
 > 工作代号 `mirvm`（MIR Virtual Machine）。
 > 奠基 2026-07-03；2026-07-05 确立当前心智模型（抽象机器 + VM 作者视角）。
 > 本文档是项目的**长期心智模型与设计契约**，不是阶段进度表。当前实现、已知缺口和下一步见
-> [docs/current-status.md](docs/current-status.md)；文档权威顺序见 [docs/README.md](docs/README.md)；
-> frame/vmctx 等可逆决策及旧模型见 [docs/decision-history.md](docs/decision-history.md)。
+> [docs/current-status.md](docs/current-status.md)；未解决债务见
+> [docs/open-issues.md](docs/open-issues.md)，frame/vmctx 等契约见 [docs/designs/](docs/designs/)。
 > 本文后半保留早期 tier-0、候选目录和里程碑记录作为历史；标为目标的结构不得误写成现状。
 
 ---
@@ -253,9 +253,8 @@ M4 完成后它没有“退居 oracle”，而是被删除；当前差分 oracle
 
 **M4 当前采用 Model A 的 tree-walking 形态**：每个 guest 调用活动对应一个宿主
 `interp_frame` 递归帧；解释态局部字节位于随递归 LIFO 推进的 mmap ByteRegion，而非直接内联
-native 栈。调用活动与局部存储是两条正交轴。完整 A/B 选择理由、旧模型价值与重开条件见
-[docs/designs/frame-stack-models.md](docs/designs/frame-stack-models.md)、[docs/designs/frame-abi-bytecode.md](docs/designs/frame-abi-bytecode.md)
-和 [docs/decision-history.md](docs/decision-history.md)。
+native 栈。调用活动与局部存储是两条正交轴。完整 A/B 选择理由与重开条件见
+[docs/designs/frame-abi-bytecode.md](docs/designs/frame-abi-bytecode.md)。
 
 mode B 的 `.mirvm` v4 包是可重复实例化的映像。`Package::load` 把源文件复制为不可变
 进程内快照并完整校验；每次实例化再建立独立 frozen/TLS、自产 native/MC 映像和 P1
@@ -353,7 +352,7 @@ src/os/
 ### 约束账本（按时间追加的历史账本）
 
 > 下列 C0–C13 保存当时的约束与理由，不保证每句仍描述当前代码。例如 C5/C6 只属于已删除
-> tier-0，C11/C12 的部分未来承诺尚未实现。当前归并结论与重开条件见 decision-history。
+> tier-0，C11/C12 的部分未来承诺尚未实现。当前归并结论与重开条件见 git 历史。
 
 - **C0 抽象机器脊柱**（§1）：正确性契约 + as-if 自由 + FFI=RAM 边界。一切决策的根。
 - **C1 生而并发**（§5，第一红线）：产品引擎默认 1:1 真并行。早期曾计划用
@@ -370,22 +369,22 @@ src/os/
 - **C8 真线程架构（§5，看过 std 源码后定，2026-07-05）**：**不 emulate、不 wrap pthread，用真 OS 线程**。std 已 wrap pthread（`thread_start` 是 std 的 extern C fn，`Thread.id` 是真 pthread_t）。VM 唯一要做的是 **FFI 的反方向**：解释态函数指针逃逸给 native 时 materialize 成**真 thunk（libffi closure，Miri `build_libffi_closure` 同款）**。于是 pthread_create **纯直通**（非拦截/wrap），join/into_pthread_t/as_pthread_t/futex/mutex 全走真 libc。同一 thunk 机制解决 qsort 等普通 C→Rust 回调；当时把 signal 也归入此路，现已由 §7.54 推翻为固定登记桩 + 安全点派送。JIT tier 下 thread_start 是真机器码，thunk 消失。tier-0 不 Sync → GIL-over-真线程过渡（into_pthread_t 成立，结构同 VM tier，去锁即并行）；**协作式是扔掉的 emulation**。引擎线程安全三招：**降低时元数据冻结**（layout/偏移/vtable 烘焙进字节码，运行期不触 tcx）、**降低在加载相 + JIT 后台服务线程**（HotSpot compiler-thread 同构，为 M5 后台 JIT 铺路）、Rust Heap per-thread arena（**TLAB，直接上**）。**并发架构完整设计见 docs/designs/concurrency-arch.md**：状态三分（每线程私有/发布后只读/显式同步）；唯一敌人=tcx 不 Sync——**tcx 是加载相的事、执行相永远无 tcx**（Rust 单态化静态→eager 降完全部字节码；模式 A 有 tcx 但关在单线程加载相、模式 B .mirvm 根本无 tcx；JIT 后台服务也不碰 tcx）；atomics 引擎不介入（真原子指令真地址）；spike 验收=引擎自身过 TSan（guest 竞争排除，那是 guest 责任）。开放问题：发布协议、TLAB remote-free 细节、隔离强度。
 - **C9 FFI/native 写内存**（§7）：真实地址让 FFI 零编组；一个地址空间两种代码碰两个堆（native 写 Rust Heap；解释器对 Native Heap 指针回退裸宿主访问——运行时可，检查器不可）；值表示不能假设"只有解释器写内存"；libm 逃逸宿主直算通道 VM tier 要保留（intrinsic 化）。
 - **C10 边界与拦截（§7，2026-07-05 三次修正）**：拦截只在**解释代码的 foreign-call 边界**，**绝不广泛拦截 native 操作（工程灾难）**。动机——**归属+元数据**（`__rust_alloc`→托管 Rust Heap，MIR 层拦；`libc::malloc`→真 libc→Native Heap 直通）/ **真线程最小介入**（只 pthread_create 插蹦床，余皆真 libc 直通）/ **纯直通**（真资源，handler 转发真 OS）。inline asm 无调用边界，只能模拟或函数级拦。native 内部/裸指针调用看不见，记录为限制。沙箱：OS 级(seccomp)管安全，mirvm 钩子仅虚拟化。
-- **C11 帧栈模型 = A（2026-07-05 定，详见 docs/designs/frame-stack-models.md）**：greenfield +
+- **C11 帧栈模型 = A（2026-07-05 定，详见 git 历史）**：greenfield +
   JIT 硬约束下选 A（HotSpot/V8 式），非 B（CPython/Lua）。M4 落地的是 tree-walking A1：
   guest **调用活动**在 native 栈，局部字节在 slaved ByteRegion；不能简写成“所有 guest 帧字节
-  都内联 native 栈”。B 的完整论证与重开条件仍保留在 decision-history。
+  都内联 native 栈”。B 的完整论证与重开条件仍保留在 git 历史。
 - **C12 JIT 后端 + 字节码 + 分发（2026-07-05 定，详见 docs/designs/frame-abi-bytecode.md §7.5）**：
   - **JIT = Cranelift，藏在 `JITBackend` trait 后**（P7 同纪律，copy-and-patch 备选）。为 JIT 而生、≈10× 快于 LLVM 编译、质量≈debug build（正合目标）；**cg_clif 已趟通 MIR→Cranelift+Rust ABI+unwinding**，复用。耦合可控：抽不掉的只有调用约定（=Rust ABI，我们本就用）+ unwind 模型（=Rust 原生 landing-pad，逃不掉），**都非 Cranelift 特有**；不为它牺牲内存/线程/元数据模型。
   - **unwind = 已实现的 A**：解释器借宿主系统展开，Cranelift 生成 landing pad/LSDA，
     两者复用 Rust personality。MIRVM 自有异常类只负责区分 guest panic、`EngineFault`
     和所属 Engine，不另写 personality 或自研栈行走。每个捕获点按实际异常对象分类，线程内
-    token 栈只核对 owner 与 LIFO 消费顺序（现行裁决见 decision-history §7.52）。
+    token 栈只核对 owner 与 LIFO 消费顺序（现行裁决见 git 历史）。
   - **字节码贴近 MIR**（不下沉 CLIF）→ 解释器与 JIT 共享 MIR 级真理源、复用 cg_clif。**两级结构**：mirvmc（rustc 前端全 check → **Stable MIR/rustc_public + serde** → .mirvm 分发件，= .class/.jar 类比）；运行期"class loading"（按 target 冻结 layout C8 → 解释器寄存器字节码 + 喂 Cranelift，每平台一次缓存）。版本绑定诚实（classfile 版本号式，semver 转换）。
   - **分发格式 = 多 target 打包（定，2026-07-05 用户确认）**：**单产物跑任意 target 对完整 Rust 理论上不可能**（cfg 编译期按 target 剪枝=字面不同的程序 + usize/可观测 layout/const-eval；Java 能因无编译期 cfg/JVM 定 layout/定长基本类型，Rust 三条全违反=语言固有）。**采纳 fat artifact**：mirvmc 对 N 个 triple 各跑前端、打包 N 段（`.mirvm` 容器 = target 索引 + 各段 Stable-MIR），运行期挑匹配段 load → 消费端零工具链、覆盖常见平台、运行期可 JIT。os:: 每平台 build 时选定，与分发格式无关。
   - **解释帧局部终裁（2026-08-12）**：slaved ByteRegion 是正式方案；JIT 编译帧已由
     Cranelift 使用 native 栈与 SSA。alloca 不再是必做终态，只在真实解释器负载证明端到端
-    收益后重开（decision-history §7.49）。
-- **C13 VM 鲁棒性 / guest 打穿 VM（2026-07-05，详见 concurrency-arch.md §6）**：真实地址下 guest 与 VM 共享地址空间，故 guest **unsafe UB / FFI 缺陷 / inline asm** 能写 VM 自有内存 → 崩。**但 safe guest 代码证明上做不到（C3），只有 UB/native 缺陷能触发**。根本张力：真实地址与 Wasm 式廉价封闭不兼容、无免费午餐。**分层（用户定：砍 L2 MPK[太 arch-specific]/L4 沙箱[out of scope]，聚焦 L1+L3）**：L0 类型系统（白送，覆盖 safe 代码）；**L1 结构隔离**（VM 内存放已知地址区+guard page，且让 L3 检查退化成单次范围比较）；**L3 checked 模式**（opt-in，不可信/LLM 用）——**关键：Rust 类型系统让它比 Wasm 便宜**：safe 引用访问证明上有效不查，**只查 raw 指针解引用**（MIR 按指针类型区分，检查点极少）；检查=region check（addr∈guest 区，compare+branch predicted-taken）；**JIT 能插检查**（我们做 MIR→CLIF 降低，Cranelift 编我们给的 CLIF，机器码不脱掌控）；借 JVM（BCE 静态消除、deopt/profile；implicit-trap guard-page 对我们难因 guest 内存散=Wasm Memory64 问题）；诚实界（只查 raw 解引用漏"洗进 &T"路径，但野写几乎都走 raw 指针，性价比高；checked 是 lite→full Miri 的谱）。**Model-A 相互作用**：slaved 区让检查便宜，alloca 需要更贵的逐帧追踪；2026-08-12 已终裁解释器正式保留 slaved，alloca 只作真实性能证据触发的候选（decision-history §7.49）。checked 与局部存储仍通过 `GuestMemory::contains(addr)` 的窄接口解耦，不把安全语义硬编码进存储实现。profile checked 开销、opt-in。与 §7 OS 沙箱同源。
+    收益后重开。
+- **C13 VM 鲁棒性 / guest 打穿 VM（2026-07-05，详见 concurrency-arch.md §6）**：真实地址下 guest 与 VM 共享地址空间，故 guest **unsafe UB / FFI 缺陷 / inline asm** 能写 VM 自有内存 → 崩。**但 safe guest 代码证明上做不到（C3），只有 UB/native 缺陷能触发**。根本张力：真实地址与 Wasm 式廉价封闭不兼容、无免费午餐。**分层（用户定：砍 L2 MPK[太 arch-specific]/L4 沙箱[out of scope]，聚焦 L1+L3）**：L0 类型系统（白送，覆盖 safe 代码）；**L1 结构隔离**（VM 内存放已知地址区+guard page，且让 L3 检查退化成单次范围比较）；**L3 checked 模式**（opt-in，不可信/LLM 用）——**关键：Rust 类型系统让它比 Wasm 便宜**：safe 引用访问证明上有效不查，**只查 raw 指针解引用**（MIR 按指针类型区分，检查点极少）；检查=region check（addr∈guest 区，compare+branch predicted-taken）；**JIT 能插检查**（我们做 MIR→CLIF 降低，Cranelift 编我们给的 CLIF，机器码不脱掌控）；借 JVM（BCE 静态消除、deopt/profile；implicit-trap guard-page 对我们难因 guest 内存散=Wasm Memory64 问题）；诚实界（只查 raw 解引用漏"洗进 &T"路径，但野写几乎都走 raw 指针，性价比高；checked 是 lite→full Miri 的谱）。**Model-A 相互作用**：slaved 区让检查便宜，alloca 需要更贵的逐帧追踪；2026-08-12 已终裁解释器正式保留 slaved，alloca 只作真实性能证据触发的候选。checked 与局部存储仍通过 `GuestMemory::contains(addr)` 的窄接口解耦，不把安全语义硬编码进存储实现。profile checked 开销、opt-in。与 §7 OS 沙箱同源。
 - **FFI unwind 合同（2026-08-12）**：direct libffi 调用、native fn pointer、callback
   thunk 与 P1 条目都保全并消费源 `C/System { unwind }` 属性。普通 C 是终止边界；
   C-unwind 允许原 Rust panic/C++ exception 穿过并执行 cleanup，不做跨语言异常转换。
@@ -398,8 +397,7 @@ src/os/
   的 `MainPanicBoundary`，每次 `run_main` 的状态栈再把 main panic 与正常 `Termination`
   返回 101 分开；解释器、JIT、pack 与 verifier 共守该合同。C++ exception 到达 guest
   `catch_unwind` 时按固定 rustc 终止；若直接到达 Engine 顶层，则不消费、不改写，外层
-  C++ 仍可按原类型捕获。详见 `docs/designs/c-unwind-contract.md` 与 decision-history
-  §7.50-§7.52。
+  C++ 仍可按原类型捕获。详见 `docs/designs/c-unwind-contract.md`。
 - **嵌入生命周期合同（2026-08-13）**：最后一个 Engine handle drop 或显式 `close`
   进入 Closing；执行租约与延迟持有共同阻止过早 Finalizing。pthread start 与线程私有数据
   （TSD）析构器
@@ -408,14 +406,14 @@ src/os/
   映像先重定位、填 P1/GOT/bridge 槽，再逐实例运行 ctor；只有 ctor 全部完成才在 close
   逆序运行一次 fini。ctor 受控异常分类成 `Result` 失败；fini 不允许异常逃出，
   任何展开都固定诊断后 `abort`。已发布 JIT/MC/native 代码及 unwinder 表保留到进程结束；Shared、
-  frozen、guest TLS、Ctx 和未发布资源按 Engine 回收。详见 decision-history §7.53。
+  frozen、guest TLS、Ctx 和未发布资源按 Engine 回收。详见 git 历史。
 - **嵌入 signal 合同（2026-08-13）**：进程级 registry 保存每个 signal 的原生基线和按安装
   次序排列的 Engine 节点；guest 可见 action 与内核固定桩分开保存，查询/`oldact` 不泄漏桩
   地址。进程定向事件进 owner inbox，`SI_TKILL` 线程定向事件进目标 pthread 的逐注册代际
   cell；close 等待二者和在途 frame，不能把线程事件拿到别处代跑，线程退出负责先阻塞再排空。
   自产 native archive 的 `signal`/`sigaction`/`raise` 经隐藏 owner 槽进入同一合同，未阻塞的
   `raise` 返回前完成 handler。固定桩、registration 和 cell 进程期保留；关闭后回装旧桩会以
-  状态 70 明确失败。详见 decision-history §7.54-§7.55；拒绝边界见 open-issues R1/R21。
+  状态 70 明确失败。详见 git 历史；拒绝边界见 open-issues R1/R21。
 
 ### 工程决策
 
@@ -441,13 +439,13 @@ src/os/
   - ✅ 线程（tier-0 协作实现，§5）：pthread/futex/nanosleep/TLS 析构；差分 12/12。
   - ✅ 真实地址内存（§4 前身）：MirvmAllocBytes 真对齐 + prepared 破指针环。
   - ✅ libffi FFI（§7）：dlsym + 编组 + native 写内存暴露；libz-sys 真 C 库往返与 native 逐字节一致（diff 14/14 + cargo 3/3）。
-  - corpus 调研随后成为 M4/M5 的输入；其 2026-07-05 快照见 docs/corpus.md。
+  - corpus 调研随后成为 M4/M5 的输入；其 2026-07-05 快照见 git 历史。
 - **RAM-SPEC 文档**（✅ 2026-07-05 草稿，docs/designs/ram-spec.md）：抽象机器语义契约——正确性契约、定义度四级、RAM 边界、as-if 自由、声明的偏差、与 native/Miri 关系。mirvm"事实标准实现"的书面承诺。
 - **M3 产品面**（未实现/后置）：daemon、agent API、资源治理与正式沙箱。
 - **M4 字节码 VM**（✅ 2026-07-10）：自研 typed-bytecode、tcx-free tree-walking engine、
-  FFI/unwind/真线程/TLS/thunk；tier-0 同期退役。实际结果见 docs/history/m4-log.md。
+  FFI/unwind/真线程/TLS/thunk；tier-0 同期退役。实际结果见 git 历史。
 - **M5.0 asm-stub 工厂**（✅ 2026-07-11，复审 2026-07-12）：有限 x86_64 inline asm
-  加载相物化；实际结果见 docs/history/m5-log.md。
+  加载相物化；实际结果见 git 历史。
 - **M5.1 语义轨收口**（✅ 2026-07-12）：addcarry/subborrow 已使 numbigint 转绿，
   xgetbv 已 native 差分，pshufb/SHA helpers 已使 sha2 转绿；静态归档产品接入与 ecosystem
   补面分别使 blake3/ecosystem 转绿；diff_cargo 3/3。signal guest handler 是独立明确 XFAIL。
@@ -456,11 +454,11 @@ src/os/
   **M5.4c/d**（✅ 2026-07-21）：ABI 泛化全形态 + 五调用助手 + unwind 产品化
   （双 CIE 全覆 LSDA）+ 准入三表穷尽（SIMD 族经 interp 共享本体助手）。
   **M5.5**（✅ 2026-07-21）：vmctx 终裁（T 骨架生产定稿 + 复测双触发器）+
-  m5_gate6 收口全绿——M5 战役全收（docs/decision-history.md §7.19/§7.20）。
-  施工日志见 docs/history/m5-log.md。
+  m5_gate6 收口全绿——M5 战役全收。
+  施工日志见 git 历史。
 - **M6 冷启动/轨 C**（✅ 2026-07-14~15）：S1 小件包、S2 依赖剪 codegen、S4 std
   预降底座、S3′b A2 纯化聚合 deps-image。编号说明：原愿景「M6 REPL/Notebook」被
-  轨 C 占用，REPL 未立项（docs/open-issues.md D11）。施工日志见 docs/history/m6-log.md。
+  轨 C 占用，REPL 未立项（docs/open-issues.md D11）。施工日志见 git 历史。
 - **M7+ safe typed 嵌入绑定 / REPL/Notebook**（后置；真实 Package/Engine 生命周期已落地，
   剩余信任边界见 E22）。
 

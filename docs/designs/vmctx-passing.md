@@ -3,10 +3,10 @@
 > 文档状态：**保留的机制比较与决策历史；终裁已落笔（2026-07-21，本文 §7）**。
 > 2026-07-07 原文在 Spike 2 后比较 P/T/R；2026-07-11 的分层结论（m5-design D5）与
 > 2026-07-21 的终裁落笔（T 骨架生产定稿 + 复测双触发器 = E6 进场 / 多 Engine 立项，
-> decision-history §7.20）为准：native→guest 边界是 TLS + lazy attach（生产）；编译码
+> git 历史）为准：native→guest 边界是 TLS + lazy attach（生产）；编译码
 > 零 ctx 站点实证；P 不再是生产候选。完整时间线与重开条件见
-> [decision-history.md](../decision-history.md)。原文保留三案论证。
-> 2026-08-13 补注：signal 已由 decision-history §7.54-§7.55 改为内核 frame 只原子登记；
+> git 历史。原文保留三案论证。
+> 2026-08-13 补注：signal 已由 git 历史 改为内核 frame 只原子登记；
 > 进程定向事件归 owner Engine，`SI_TKILL` 线程定向事件归目标 pthread，二者都在普通安全点
 > 建立新 activation。它不再走本文的 TLS attach/thunk 边界。下文把
 > signal 与普通 callback 同列的句子保留为当时论证，不是现行 signal 实现。
@@ -261,7 +261,7 @@ native→guest 边界 : 一次 TLS 读（+ 首次 attach）
 
 二者都正确（边界已由 TLS 兜住），差异是纯性能/工程，**等 Spike/M4 有了真 Cranelift 管线再拿数据定**。
 
-**Spike 5 初判数据（2026-07-07，history/spike5-cranelift-adapters.md）**：两变体都在真 Cranelift 上
+**Spike 5 初判数据（2026-07-07）**：两变体都在真 Cranelift 上
 实现并全对（`enable_pinned_reg`/`get/set_pinned_reg` 开箱即用；R 的 f_boundary 按 §5 图实现：
 save→set→call fast→restore，宿主 callee-saved 语义保持，重入幂等）。fib(30) 直接调用微基准：
 **R（pinned r15）5.47ms vs P（显式参）5.90ms——R 快 ~8%**；vcode 坐实 P 的 threading 税
@@ -318,7 +318,7 @@ V8=寄存器缓存+TLS。mirvm 因为 plain-C FFI 没有走私通道，边界只
 > - unwind_probe（30000 迭代 panic 密径）：`alloc=118529、tls_ref=268212、
 >   c2i=3.59M、call_terminate=2.97M`——格② 密度的极端形态；这些调用本身
 >   就是助手，T/R 之差不作用于它们。
-> - corpus per-crate 分布：见 decision-history §7.20（T3 片2 全量跑批）。
+> - corpus per-crate 分布：见 git 历史（T3 片2 全量跑批）。
 >
 > **复测触发器（双闸，用户 2026-07-21 裁定并列；先到先裁）**：
 > 1. **E6 进场**——分配快路径内联 / guest TLS 快路径内联进编译码立项时，
