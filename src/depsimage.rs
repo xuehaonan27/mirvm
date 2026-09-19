@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::vm::engine::ir;
+use crate::vm::ir;
 
 /// --extern artifact stamp list (path, size, mtime_ns, BLAKE3; sorted and deduped)
 type ExternStamps = Vec<(String, u64, u128, [u8; 32])>;
@@ -160,15 +160,16 @@ pub fn try_load(
         return None;
     }
     // Frozen area must actually land in spline k=0 domain (defense: reject if file swapped or domain stolen)
-    let frozen_ok = f.module.frozen.as_ref().is_some_and(|fr| {
-        fr.at_fixed_base() && fr.home() == crate::vm::engine::addrlayout::image_addr(0)
-    });
+    let frozen_ok =
+        f.module.frozen.as_ref().is_some_and(|fr| {
+            fr.at_fixed_base() && fr.home() == crate::vm::addrlayout::image_addr(0)
+        });
     if !frozen_ok {
         return None;
     }
-    crate::vm::engine::verify::module_with_prefix(
+    crate::vm::verify::module_with_prefix(
         &f.module,
-        crate::vm::engine::verify::Prefix {
+        crate::vm::verify::Prefix {
             funcs: base.module.funcs.len(),
             tls: base.module.tls.len(),
             asm: base.module.asm_sites.len(),
@@ -212,10 +213,10 @@ pub fn store_and_wrap(
     // follows the same rule, since an fn-ptr value is a stub code address. Foreign symbols go through GOT
     // slots: the image-side GOT table travels with the file and is refilled with this process's real values
     // at startup, so it does not block writing the file.
-    let cacheable = bi.module.frozen.as_ref().is_some_and(|fr| {
-        fr.at_fixed_base() && fr.home() == crate::vm::engine::addrlayout::image_addr(0)
-    }) && (bi.module.entry_stub_sites.is_empty()
-        || bi.module.entry_stubs.at_fixed_base());
+    let cacheable =
+        bi.module.frozen.as_ref().is_some_and(|fr| {
+            fr.at_fixed_base() && fr.home() == crate::vm::addrlayout::image_addr(0)
+        }) && (bi.module.entry_stub_sites.is_empty() || bi.module.entry_stubs.at_fixed_base());
     let keyed = pre_key(rustc_args, base_key);
     if let (true, Some((key, stamps))) = (cacheable, keyed) {
         let mut fn_entry_syms = bi

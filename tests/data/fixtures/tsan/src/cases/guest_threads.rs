@@ -19,12 +19,12 @@
 
 use std::sync::{Arc, mpsc};
 
-use crate::vm::engine::ctx::{
+use crate::vm::ctx::{
     Engine, EngineState, Shared, attach, guest_spawned_threads, set_fork_baseline,
 };
-use crate::vm::engine::deferred::{TsdRegistration, prepare_pthread_operation};
-use crate::vm::engine::interp;
-use crate::vm::engine::ir::{
+use crate::vm::deferred::{TsdRegistration, prepare_pthread_operation};
+use crate::vm::interp;
+use crate::vm::ir::{
     Block, FuncBody, IntBinOp, Module, Operand, ParamAbi, RetAbi, Rvalue, ScalarPlace, Slot, Stmt,
     Terminator, Width,
 };

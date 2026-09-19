@@ -172,7 +172,7 @@ struct MirvmCallbacks {
     exit_code: Option<i32>,
     vm_call: Option<String>,
     vm_stats: bool,
-    module: Option<crate::vm::engine::ir::Module>,
+    module: Option<crate::vm::ir::Module>,
     suppress_runner_warning_summary: bool,
     runner_finalization_filter_installed: bool,
     route_compiler_diagnostics: bool,
@@ -369,7 +369,7 @@ impl Callbacks for MirvmCallbacks {
                     &self.rustc_args,
                     self.module.as_ref().expect("just set"),
                     self.stack.key(),
-                    crate::vm::engine::verify::Prefix {
+                    crate::vm::verify::Prefix {
                         funcs: self.stack.total_fns(),
                         tls: self.stack.total_tls(),
                         asm: self.stack.total_asm(),
@@ -415,18 +415,18 @@ pub(super) fn parse_stack_size(s: &str) -> Result<usize, String> {
 }
 
 pub(super) fn run_vm_engine(
-    mut module: crate::vm::engine::ir::Module,
+    mut module: crate::vm::ir::Module,
     program_argv: &[String],
     vm_call: Option<&str>,
     vm_stats: bool,
     already_verified: bool,
 ) -> i32 {
-    if !already_verified && let Err(e) = crate::vm::engine::verify::module(&module) {
+    if !already_verified && let Err(e) = crate::vm::verify::module(&module) {
         crate::diagnostics::control(format_args!("mirvm: bytecode verification failed: {e}"));
         return 70;
     }
     if vm_stats {
-        print!("{}", crate::vm::engine::stats::report(&module));
+        print!("{}", crate::vm::stats::report(&module));
         return 0;
     }
     // Finalize argv: runtime input is placed after snapshot semantics; one path for cold and warm.
@@ -477,11 +477,11 @@ pub(super) fn run_vm_engine(
     code
 }
 
-fn run_vm_engine_loaded(module: crate::vm::engine::ir::Module, vm_call: Option<&str>) -> i32 {
-    let shared = crate::vm::engine::ctx::Shared::new(module);
+fn run_vm_engine_loaded(module: crate::vm::ir::Module, vm_call: Option<&str>) -> i32 {
+    let shared = crate::vm::ctx::Shared::new(module);
     // Make entry stubs executable: recipe -> closure -> stub bytes -> whole-region RX (a
     // full-phase step alongside the two above; an occupied region means load failure).
-    let engine = match crate::vm::engine::ctx::Engine::try_new(shared) {
+    let engine = match crate::vm::ctx::Engine::try_new(shared) {
         Ok(engine) => engine,
         Err(e) => {
             crate::diagnostics::control(format_args!("mirvm: {e}"));
@@ -491,7 +491,7 @@ fn run_vm_engine_loaded(module: crate::vm::engine::ir::Module, vm_call: Option<&
     let Some(spec) = vm_call else {
         // main startup chain: interpret lang_start as usual; the exit code is Termination's product.
         let execution = engine.clone();
-        let result = match on_guest_stack(move || crate::vm::engine::interp::run_main(&execution)) {
+        let result = match on_guest_stack(move || crate::vm::interp::run_main(&execution)) {
             Ok(result) => result,
             Err(error) => {
                 crate::diagnostics::control(format_args!("{}", error.message));
@@ -505,11 +505,11 @@ fn run_vm_engine_loaded(module: crate::vm::engine::ir::Module, vm_call: Option<&
             return 70;
         }
         return match result {
-            Ok(crate::vm::engine::interp::RunOutcome::Returned(code)) => code,
+            Ok(crate::vm::interp::RunOutcome::Returned(code)) => code,
             // `lang_start` has already run the guest panic hook. Match native
             // stderr here and only translate the structured outcome to its OS
             // exit status.
-            Ok(crate::vm::engine::interp::RunOutcome::GuestPanic) => 101,
+            Ok(crate::vm::interp::RunOutcome::GuestPanic) => 101,
             Err(e) => {
                 crate::diagnostics::control(format_args!("mirvm[m4-engine]: {e}"));
                 e.exit_code
@@ -527,7 +527,7 @@ fn run_vm_engine_loaded(module: crate::vm::engine::ir::Module, vm_call: Option<&
     let result = match on_guest_stack(move || {
         // CLI arguments are scalar u64 slots parsed for the explicitly named
         // dev export; pointer-bearing embedding calls are not exposed here.
-        unsafe { crate::vm::engine::interp::run_export(&execution, &name, &args) }
+        unsafe { crate::vm::interp::run_export(&execution, &name, &args) }
     }) {
         Ok(result) => result,
         Err(error) => {
@@ -542,11 +542,11 @@ fn run_vm_engine_loaded(module: crate::vm::engine::ir::Module, vm_call: Option<&
         return 70;
     }
     match result {
-        Ok(crate::vm::engine::interp::RunOutcome::Returned(r)) => {
+        Ok(crate::vm::interp::RunOutcome::Returned(r)) => {
             println!("{}", r.lo);
             0
         }
-        Ok(crate::vm::engine::interp::RunOutcome::GuestPanic) => {
+        Ok(crate::vm::interp::RunOutcome::GuestPanic) => {
             crate::diagnostics::control(format_args!("mirvm[m4-engine]: guest panic not caught"));
             101
         }
@@ -675,7 +675,7 @@ pub(crate) fn run_driver(
         && let Some(mut module) = crate::ircache::lookup(
             &rustc_args,
             base_key.as_deref(),
-            crate::vm::engine::verify::Prefix {
+            crate::vm::verify::Prefix {
                 funcs: stack.total_fns(),
                 tls: stack.total_tls(),
                 asm: stack.total_asm(),

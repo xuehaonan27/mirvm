@@ -276,8 +276,8 @@ machine-code cache.
 - **`make gate`** with the full set, `cargo test` and the SYNC differential stay green.
 
 Implementation locations: `src/pack.rs` for the container and content-addressed materialization;
-`src/vm/engine/{mcload,native_instance,signal}.rs` for in-process MC loading, per-Engine native image
-isolation, the P1 hidden slot and the disposition owner chain; `src/vm/engine/ctx/` for close state,
+`src/vm/{mcload,native_instance,signal}.rs` for in-process MC loading, per-Engine native image
+isolation, the P1 hidden slot and the disposition owner chain; `src/vm/ctx/` for close state,
 execution leases, deferred callbacks and `CtxSlot` cleanup; `src/cli/` for the pack subcommand and
 run's magic dispatch.
 

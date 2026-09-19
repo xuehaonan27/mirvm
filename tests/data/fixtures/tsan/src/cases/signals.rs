@@ -20,12 +20,12 @@ use std::sync::mpsc;
 use std::thread;
 
 use crate::os::signal::Sigaction;
-use crate::vm::engine::ctx::{Engine, Shared, attach, drain_pending_signals};
-use crate::vm::engine::ir::{
+use crate::vm::ctx::{Engine, Shared, attach, drain_pending_signals};
+use crate::vm::ir::{
     Block, FfiKind, ForeignSig, FuncBody, Module, Operand, ParamAbi, RetAbi, RetDest, Slot,
     Terminator, UnwindAction, Width,
 };
-use crate::vm::engine::{signal, thunks};
+use crate::vm::{signal, thunks};
 
 /// Guest-visible handler address; the engine resolves it through `Module.fn_addrs`.
 const HANDLER_ADDR: u64 = 0xe2b1;

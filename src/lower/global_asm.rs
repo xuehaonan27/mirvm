@@ -67,9 +67,7 @@ pub(crate) fn materialize<'tcx>(
     let mut slots = std::collections::BTreeSet::new();
     for (name, addr) in abs_defs {
         if dedup.insert(name.clone()) {
-            let slot = crate::vm::engine::ir::native_entry_slot_name(
-                crate::vm::engine::ir::LinkAddr(addr),
-            );
+            let slot = crate::vm::ir::native_entry_slot_name(crate::vm::ir::LinkAddr(addr));
             let _ = writeln!(head, ".globl {name}");
             let _ = writeln!(head, ".hidden {name}");
             let _ = writeln!(head, ".type {name},@function");

@@ -73,7 +73,7 @@ jpeg-encoder = "0.7"
 // ⚠ zune-jpeg = "0.4" keeps default features (x86/neon/std): on x86 it keeps runtime
 //    is_x86_feature_detected dispatch to the SSE/AVX decode fast path; all dimensions share
 //    one feature set, and the mirvm side has guest CPUID dispatch plus the x86 helper
-//    surface (src/vm/engine/x86.rs), so hitting a not-yet-builtin intrinsic reddens ①
+//    surface (src/vm/x86.rs), so hitting a not-yet-builtin intrinsic reddens ①
 //    rather than pre-stripping the feature to dodge the probe surface.
 // ⚠ image = "0.25" uses default-features=false + ["jpeg"]: this driver only uses the jpeg
 //    encode/decode surface, so unrelated png/gif features are dropped to narrow the

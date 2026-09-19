@@ -270,13 +270,13 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
 - **G9** `UNSCHEDULED`: compiler-required deletion candidates — module-level `#![allow(dead_code)]` in
   `src/cargoless/{lockfile,manifest}.rs` may hide real dead code; `src/cargoless/resolver_config.rs` is
   entirely `#![cfg(test)]`, has no consumer and duplicates resolver policy from `config.rs`; the
-  duplicated `(lo,hi)` out-store and the unread `trap_if` `_msg` in `src/vm/engine/jit/helpers.rs`; a
+  duplicated `(lo,hi)` out-store and the unread `trap_if` `_msg` in `src/vm/jit/helpers.rs`; a
   single-use `addr_of_local` in `jit/translate.rs`; duplicated union merging in `src/baseimage.rs` and
   two nearly identical ELF64 traversals in `src/elfsym.rs`; a stale `#[allow(dead_code)]` in
   `src/telemetry/capture/session.rs` and a duplicated `#[cfg(test)] #[cfg(test)]` in `thread_ctx.rs`.
   Each was left because reading without changing cannot prove it.
 - **G10** `UNSCHEDULED`: two TSan harness blind spots. (a) JIT is outside the net: `tests/data/fixtures/tsan/Cargo.toml`
-  omits cranelift and `src/vm/engine/jit/**` is cfg'd out behind `feature = "cranelift"`, so JIT worker
+  omits cranelift and `src/vm/jit/**` is cfg'd out behind `feature = "cranelift"`, so JIT worker
   slot/`trace_enter` publication and the trace domain's pinned-register path are uninstrumented;
   covering them costs a cranelift dependency and slows the build. (b) Fork-child capture rebuild is
   structurally untestable — TSan refuses to create a thread after a multithreaded fork (exit 66), and

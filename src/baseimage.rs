@@ -25,7 +25,7 @@ use rustc_interface::interface::Compiler;
 use rustc_middle::ty::TyCtxt;
 use serde::{Deserialize, Serialize};
 
-use crate::vm::engine::ir;
+use crate::vm::ir;
 
 /// Base image file (v1: one postcard blob).
 ///
@@ -98,7 +98,7 @@ fn load(path: &std::path::Path, want_stamp: &str) -> Option<BaseImage> {
     // The frozen region must really land in the base-image domain (rejects a swapped file
     // or a taken domain alike)
     let frozen_ok = f.module.frozen.as_ref().is_some_and(|fr| {
-        fr.at_fixed_base() && fr.home() == crate::vm::engine::addrlayout::BASE_IMAGE_FIXED_ADDR
+        fr.at_fixed_base() && fr.home() == crate::vm::addrlayout::BASE_IMAGE_FIXED_ADDR
     });
     if !frozen_ok {
         return None;
@@ -116,7 +116,7 @@ fn load(path: &std::path::Path, want_stamp: &str) -> Option<BaseImage> {
     module.link_fn_addrs = f.link_fn_addr_pairs.iter().copied().collect();
     module.rebuild_load_map();
     module.rebuild_fn_addrs();
-    crate::vm::engine::verify::module(&module).ok()?;
+    crate::vm::verify::module(&module).ok()?;
     Some(BaseImage {
         fn_by_sym: f.export_syms.into_iter().collect(),
         entry_by_sym: f.fn_entry_syms.into_iter().collect(),
@@ -371,7 +371,7 @@ pub fn absorb_stack(delta: &mut ir::Module, stack: ImageStack) {
             let home = m
                 .frozen
                 .as_ref()
-                .and_then(|f| crate::vm::engine::addrlayout::code_home_for_frozen(f.home()))
+                .and_then(|f| crate::vm::addrlayout::code_home_for_frozen(f.home()))
                 .expect("image frozen region is invalid; stub code domain cannot be derived");
             delta.image_entry_stubs.push((
                 home,
@@ -412,7 +412,7 @@ impl Callbacks for BaseBuildCallbacks {
         // Cacheability criterion (same shape as the L2 store; the base image is shared
         // across programs, so the contract is less negotiable still)
         let frozen_ok = module.frozen.as_ref().is_some_and(|fr| {
-            fr.at_fixed_base() && fr.home() == crate::vm::engine::addrlayout::BASE_IMAGE_FIXED_ADDR
+            fr.at_fixed_base() && fr.home() == crate::vm::addrlayout::BASE_IMAGE_FIXED_ADDR
         });
         if !frozen_ok {
             eprintln!("base-image: frozen region is not in the base-image fixed domain, giving up");

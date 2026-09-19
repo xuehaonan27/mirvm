@@ -1,9 +1,9 @@
 #![feature(rustc_private)]
 
 use mirvm::pack::Package;
-use mirvm::vm::engine::raw::run_export_raw;
+use mirvm::vm::raw::run_export_raw;
 
-fn export(engine: &mirvm::vm::engine::Engine, name: &str) -> u64 {
+fn export(engine: &mirvm::vm::Engine, name: &str) -> u64 {
     unsafe { run_export_raw(engine, name, &[]) }
         .unwrap_or_else(|error| panic!("{name} export failed: {error}"))
         .into_returned()

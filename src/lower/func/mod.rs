@@ -15,7 +15,7 @@ use rustc_middle::ty::{self, EarlyBinder, Instance, InstanceKind, Ty, TyCtxt, Ty
 
 use super::frame::{self, FrameLayout, ValKind};
 use super::{Callee, Linker};
-use crate::vm::engine::ir::{
+use crate::vm::ir::{
     self, Bb, IntBinOp, IntCc, Operand, OvfOp, ParamAbi, PlaceBase, PlaceExpr, PlaceStep, RetAbi,
     RetDest, Rvalue, ScalarPlace, Slot, Stmt, SwitchDiscr, Terminator, Width,
 };

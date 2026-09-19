@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use rustc_middle::ty::TyCtxt;
 use serde::{Deserialize, Serialize};
 
-use crate::vm::engine::ir;
+use crate::vm::ir;
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub(crate) struct FileStamp {
@@ -165,7 +165,7 @@ pub(crate) fn envs_current(envs: &[(String, Option<String>)]) -> bool {
 pub fn lookup(
     rustc_args: &[String],
     base_key: Option<&str>,
-    prefix: crate::vm::engine::verify::Prefix,
+    prefix: crate::vm::verify::Prefix,
 ) -> Option<ir::Module> {
     if disabled() {
         return None;
@@ -188,7 +188,7 @@ pub fn lookup(
     module.rebuild_fn_addrs();
     // Correct shape does not guarantee index and frame range safety. Bad cache is treated as miss
     // and self-healed by the cold path.
-    crate::vm::engine::verify::module_with_prefix(&module, prefix).ok()?;
+    crate::vm::verify::module_with_prefix(&module, prefix).ok()?;
     // Materialized .so files (native archive / global_asm) removed → miss, self-healed by cold path
     if !module
         .required_native_libs
@@ -207,12 +207,12 @@ pub fn store(
     rustc_args: &[String],
     module: &ir::Module,
     base_key: Option<&str>,
-    prefix: crate::vm::engine::verify::Prefix,
+    prefix: crate::vm::verify::Prefix,
 ) -> bool {
     if disabled() {
         return false;
     }
-    if crate::vm::engine::verify::module_with_prefix(module, prefix).is_err() {
+    if crate::vm::verify::module_with_prefix(module, prefix).is_err() {
         return false;
     }
     // Frozen area not at fixed base (concurrent preempt / ASLR conflict) ⇒ embedded addresses in

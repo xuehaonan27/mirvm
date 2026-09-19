@@ -81,7 +81,7 @@ instead of quietly looking like a pass.
 ## What this does not cover
 
 * **The JIT.** The shared `src/vm` gates its JIT half on `feature = "cranelift"`, and this crate
-  does not provide cranelift, so `src/vm/engine/jit/**` is compiled out here. The JIT worker's
+  does not provide cranelift, so `src/vm/jit/**` is compiled out here. The JIT worker's
   slot/`trace_enter` publication and the trace-domain pinned-register path are therefore **not**
   instrumented. Closing that gap means adding the cranelift dependency set plus a `cranelift`
   feature to `Cargo.toml`; the build gets slower, which is why it is a separate decision.

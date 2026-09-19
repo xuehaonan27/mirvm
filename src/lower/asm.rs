@@ -33,7 +33,7 @@ use rustc_target::asm::{
     X86InlineAsmRegClass, allocatable_registers,
 };
 
-use crate::vm::engine::ir;
+use crate::vm::ir;
 
 static NEXT_MATERIALIZE_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -685,7 +685,7 @@ impl<'tcx> Gen<'_, 'tcx> {
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::{materialize, try_materialize};
-    use crate::vm::engine::ir;
+    use crate::vm::ir;
 
     #[test]
     fn materialized_stub_is_callable_and_writes_its_buffer() {

@@ -23,8 +23,8 @@ use rustc_middle::mir::interpret::{AllocId, ConstAllocation, GlobalAlloc};
 use rustc_middle::ty::{Instance, InstanceKind, TyCtxt, TypingEnv};
 use rustc_span::Symbol;
 
-use crate::vm::engine::frozen::FrozenArena;
-use crate::vm::engine::ir;
+use crate::vm::frozen::FrozenArena;
+use crate::vm::ir;
 
 /// Resolution result for a call target (foreign three-way handling).
 pub(crate) enum Callee {
@@ -112,7 +112,7 @@ pub(crate) struct Split<'tcx> {
     /// Image-side stub code area and recipe table. Executable entries of image-class instances
     /// always live in the image domain so the addresses stay stable across runs, matching the fn
     /// entry discipline; finalization travels with the image module.
-    image_code_arena: crate::vm::engine::codearena::StubArena,
+    image_code_arena: crate::vm::codearena::StubArena,
     image_stub_sites: Vec<ir::EntryStubSite>,
 }
 
@@ -315,13 +315,13 @@ fn lower_inner(
     // The stub code area shares its domain with the frozen area. `frozen.home()` records which
     // domain the frozen area was allocated in; the derived code domain stays consistent even when
     // the frozen area falls back to a dynamic base, because the two decisions are independent.
-    let code_home = crate::vm::engine::addrlayout::code_home_for_frozen(frozen.home())
+    let code_home = crate::vm::addrlayout::code_home_for_frozen(frozen.home())
         .expect("invalid frozen domain, cannot derive stub code domain");
     let mut linker = Linker::new(
         tcx,
         stack,
         frozen,
-        crate::vm::engine::codearena::StubArena::new_at(code_home),
+        crate::vm::codearena::StubArena::new_at(code_home),
     );
     if split {
         linker.activate_split();
@@ -377,12 +377,12 @@ fn lower_inner(
             // Lowering only needs symbol addresses and does not own the native lifetime. The private
             // copy is mapped and relocated by the staged loader, but its init/fini are not run:
             // constructors belong to the Engine startup phase.
-            let image = crate::vm::engine::native_instance::open_for_lower(std::path::Path::new(
-                &**so,
-            ))
-            .unwrap_or_else(|detail| {
-                panic!("required native library `{so}` loading failed during lowering: {detail}")
-            });
+            let image = crate::vm::native_instance::open_for_lower(std::path::Path::new(&**so))
+                .unwrap_or_else(|detail| {
+                    panic!(
+                        "required native library `{so}` loading failed during lowering: {detail}"
+                    )
+                });
             let h = image.handle();
             // Record the required handle so dynsym-visible symbols resolve in link order, before the
             // global scope -- that is native link-time binding.
@@ -890,7 +890,7 @@ fn soname_candidates(names: &[Box<str>]) -> Vec<Box<str>> {
 #[cfg(test)]
 mod tests {
     use super::{IMAGE_TAG, Rebase};
-    use crate::vm::engine::ir;
+    use crate::vm::ir;
 
     /// Rebase baseline for first=100, image 5 (fn/TLS/asm independent isomorphic spaces).
     fn rb() -> Rebase {

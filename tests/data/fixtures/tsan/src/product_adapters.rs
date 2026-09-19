@@ -3,12 +3,10 @@
 pub(crate) mod sysroot {
     use std::path::PathBuf;
 
+    /// `src/sysroot.rs` builds a sysroot and needs rustc, so only its store root is reused here;
+    /// the register owns the `MIRVM_HOME` fallback.
     pub(crate) fn cache_dir() -> PathBuf {
-        if let Some(path) = std::env::var_os("MIRVM_HOME") {
-            return PathBuf::from(path);
-        }
-        let home = std::env::var_os("HOME").expect("HOME is not set");
-        PathBuf::from(home).join(".mirvm")
+        crate::options::get().home.clone()
     }
 }
 
