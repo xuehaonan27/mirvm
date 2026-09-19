@@ -174,7 +174,7 @@ MIRVM_LIB=${MIRVM_LIB:-$MIRVM_DIR/libmirvm.rlib}
 MIRVM_LINK_DEPS="$MIRVM_DIR/deps"
 RUSTC_SYSROOT=$("$RUSTC" --print sysroot)
 EMBED="$TMP/package-embed"
-"$RUSTC" tests/fixtures/package_embed.rs --edition=2024 \
+"$RUSTC" tests/suites/contracts/fixtures/package-embed.rs --edition=2024 \
     --extern "mirvm=$MIRVM_LIB" -L "dependency=$MIRVM_LINK_DEPS" \
     -C prefer-dynamic -C "link-arg=-Wl,-rpath,$RUSTC_SYSROOT/lib" \
     -o "$EMBED" >"$TMP/embed-build.out" 2>"$TMP/embed-build.err"

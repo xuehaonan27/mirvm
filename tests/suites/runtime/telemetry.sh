@@ -24,7 +24,7 @@ mkdir -p "$SESSION"
 # the differential suites).
 capture_rc=0
 MIRVM_HOME="$HOME_DIR" MIRVM_SYSROOT="$TEST_SYSROOT" \
-    "$MIRVM" capture -o "$SESSION" -- run tests/fixtures/telemetry_fork_child.rs \
+    "$MIRVM" capture -o "$SESSION" -- run tests/scripts/probe_telemetry_fork_child.rs \
     >"$TMP/out" 2>"$TMP/err" || capture_rc=$?
 if [ "$capture_rc" -eq 0 ] && grep -q '^child-exit=0$' "$TMP/out"; then
     ok "fork probe ran with a clean child exit"
@@ -115,7 +115,7 @@ mkdir -p "$TRACE_SESSION"
 trace_rc=0
 MIRVM_HOME="$HOME_DIR" MIRVM_SYSROOT="$TEST_SYSROOT" \
     MIRVM_JIT_THRESHOLD=1 MIRVM_JIT_SYNC=1 MIRVM_JIT_STATS=1 \
-    "$MIRVM" capture -o "$TRACE_SESSION" -- run tests/fixtures/telemetry_fork_child.rs \
+    "$MIRVM" capture -o "$TRACE_SESSION" -- run tests/scripts/probe_telemetry_fork_child.rs \
     >"$TMP/out_trace" 2>"$TMP/err_trace" || trace_rc=$?
 if [ "$trace_rc" -eq 0 ] && grep -q '^child-exit=0$' "$TMP/out_trace"; then
     ok "trace-domain run completed with a clean child exit"

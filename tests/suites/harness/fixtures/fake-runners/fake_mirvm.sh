@@ -68,10 +68,10 @@ case "$target" in
     tests/scripts/ffi_zlib.rs)
         echo 'ffi-ok'
         ;;
-    tests/fixtures/real_ripgrep_regex.rs)
+    tests/scripts/probe_real_ripgrep_regex.rs)
         echo 'regex-ok'
         ;;
-    tests/fixtures/cargo_warning_return.rs)
+    tests/scripts/probe_cargo_warning_return.rs)
         echo 'warning-return-ok'
         ;;
     tests/scripts/c_signal.rs)

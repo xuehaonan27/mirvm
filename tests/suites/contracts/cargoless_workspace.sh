@@ -4,8 +4,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
 suite_init
 STRACE=${STRACE:-$(command -v strace)}
-FIXTURE=$REPO_ROOT/tests/fixtures/cless_workspace_contract
-REMAINING=$REPO_ROOT/tests/fixtures/cless_workspace_remaining_contract
+FIXTURE=$REPO_ROOT/tests/suites/contracts/fixtures/cargoless/workspace-contract
+REMAINING=$REPO_ROOT/tests/suites/contracts/fixtures/cargoless/workspace-legacy-contract
 CONTRACT_HOME=${MIRVM_CONTRACT_HOME:-${MIRVM_HOME:-$HOME/.mirvm}}
 HOST=$(rustc_host)
 require_executable strace "$STRACE" || exit $?

@@ -5,7 +5,7 @@
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
 suite_init
-FIXTURE=$REPO_ROOT/tests/fixtures/c_unwind_contract
+FIXTURE=$REPO_ROOT/tests/suites/runtime/fixtures/c-unwind-contract
 CONTRACT_HOME=${MIRVM_CONTRACT_HOME:-${MIRVM_HOME:-$HOME/.mirvm}}
 
 require_executable cargo "$CARGO" || exit $?

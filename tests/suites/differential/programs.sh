@@ -16,6 +16,7 @@ for src in tests/scripts/*.rs; do
     case "$name" in
         c_*) continue ;; # corpus driver
         vmcall_*) continue ;; # --vm-call probe: driven by runtime.semantics
+        probe_*) continue ;; # owned by one suite (diagnostics, telemetry, x86, cargo mode)
         ecosystem | ffi_zlib)
             skip "$name (Cargo frontmatter; see differential.cargo)"
             continue

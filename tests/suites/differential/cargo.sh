@@ -7,8 +7,8 @@
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
 suite_init
-RUSTC_APPEND_PROXY=${RUSTC_APPEND_PROXY:-$REPO_ROOT/tests/fixtures/rustc_proxy.sh}
-RUSTC_WRAPPER_PROBE=${RUSTC_WRAPPER_PROBE:-$REPO_ROOT/tests/fixtures/rustc_wrapper_probe.sh}
+RUSTC_APPEND_PROXY=${RUSTC_APPEND_PROXY:-$REPO_ROOT/tests/suites/differential/fixtures/rustc_proxy.sh}
+RUSTC_WRAPPER_PROBE=${RUSTC_WRAPPER_PROBE:-$REPO_ROOT/tests/suites/differential/fixtures/rustc_wrapper_probe.sh}
 SCRIPT_CACHE=${SCRIPT_CACHE:-${MIRVM_HOME:-$HOME/.mirvm}/scripts}
 # This suite is the dedicated cargo-mode differential track: it always takes the cargo
 # three-phase compat path. Even when an outer layer (e.g. a gate DEPS=self full run)
@@ -128,8 +128,8 @@ else
     diff_script ecosystem tests/scripts/ecosystem.rs ecosystem green 0
 fi
 diff_script ffi_zlib tests/scripts/ffi_zlib.rs ffi_zlib green 0
-diff_script ripgrep_regex tests/fixtures/real_ripgrep_regex.rs real_ripgrep_regex green 0
-diff_script warning_return tests/fixtures/cargo_warning_return.rs cargo_warning_return green 0
+diff_script ripgrep_regex tests/scripts/probe_real_ripgrep_regex.rs real_ripgrep_regex green 0
+diff_script warning_return tests/scripts/probe_cargo_warning_return.rs cargo_warning_return green 0
 
 # 2) cargo project mode
 PROJ="$TMP/proj"; mkdir -p "$PROJ/.cargo" "$PROJ/src"

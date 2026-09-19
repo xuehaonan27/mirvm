@@ -79,11 +79,11 @@ script_guest_hex=$(printf '%s' 'warning: 1 warning emitted
 router-guest-binary-script:' | od -An -tx1 -v | tr -d ' \n')
 script_guest_hex="${script_guest_hex}00ff1b5b33316d0a"
 
-run_case direct self tests/fixtures/diagnostic_router_direct.rs \
+run_case direct self tests/scripts/probe_diagnostic_router_direct.rs \
     router_unused_direct mirvm_diagnostic_router_missing_direct "$direct_guest_hex"
-run_case cargoless self tests/fixtures/diagnostic_router_script.rs \
+run_case cargoless self tests/scripts/probe_diagnostic_router_script.rs \
     router_unused_script mirvm_diagnostic_router_missing_script "$script_guest_hex"
-run_case cargo-runner cargo tests/fixtures/diagnostic_router_script.rs \
+run_case cargo-runner cargo tests/scripts/probe_diagnostic_router_script.rs \
     router_unused_script mirvm_diagnostic_router_missing_script "$script_guest_hex"
 
 run_early_control_case() { # <name> <exit> <MIRVM_DEPS> [run args...]
@@ -115,14 +115,14 @@ run_early_control_case() { # <name> <exit> <MIRVM_DEPS> [run args...]
 }
 
 run_early_control_case stack-invalid 2 self \
-    --stack-size bad tests/fixtures/diagnostic_router_direct.rs
+    --stack-size bad tests/scripts/probe_diagnostic_router_direct.rs
 run_early_control_case jit-invalid 2 self \
-    --jit maybe tests/fixtures/diagnostic_router_direct.rs
+    --jit maybe tests/scripts/probe_diagnostic_router_direct.rs
 run_early_control_case unknown-argument 2 self --not-a-mirvm-option
 run_early_control_case missing-input 2 self
-run_early_control_case invalid-deps 2 invalid tests/fixtures/diagnostic_router_direct.rs
+run_early_control_case invalid-deps 2 invalid tests/scripts/probe_diagnostic_router_direct.rs
 run_early_control_case bin-on-file 2 self \
-    --bin selected tests/fixtures/diagnostic_router_direct.rs
+    --bin selected tests/scripts/probe_diagnostic_router_direct.rs
 run_early_control_case missing-source 1 self "$TMP/no-such-source.rs"
 
 runner_plain="$TMP/runner-control-plain"

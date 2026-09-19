@@ -18,7 +18,7 @@ suite_init
 # bare cargo manually, because the self path has no --bin multi-bin selection.
 # Self-track deps-image behavior is covered implicitly by the gate's corpus segment (DEPS=self full run).
 export MIRVM_DEPS=cargo
-cp -r tests/fixtures/a2_ws "$TMP/a2_ws"
+cp -r tests/suites/contracts/fixtures/cargoless/two-bin-workspace "$TMP/a2_ws"
 WS="$TMP/a2_ws"
 HOST=$(rustc_host)
 DEPS=${MIRVM_HOME:-$HOME/.mirvm}/deps
