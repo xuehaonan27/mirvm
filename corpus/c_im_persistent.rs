@@ -4,40 +4,40 @@
 im = "15"
 rpds = "1"
 ---
-// im 15 + rpds 1 持久化数据结构差分。两 crate 纯 Rust，无 FFI；压力点在
-// Rc/Arc 结构共享 + copy-on-write（make_mut 路径）、HAMT 逐位 walk 与碰撞调和、
-// sized-chunks RRB 树 split/append、rb-tree 自平衡，以及共享子树的计数 drop glue。
-// 覆盖：
-//   im::Vector<i64> — collect / push_back / pop_back / set / 持久 update() /
-//     split_off-append 往返 / take-skip 边界 / 多版本共存（构造 v2 后 v0/v1
-//     逐位复打证明未被改写）
-//   im::HashMap<u32,i64,BuildHasherDefault<DefaultHasher>>（换确定 hasher：
-//     DefaultHasher::new 内部键固定）— insert / get / contains_key / 持久
-//     update()-without() / clone 后原地 remove / 原始 HAMT 迭代序指纹 +
-//     sort 后确定序逐行
-//   im::OrdMap<i32,u64> — insert / get_min / get_max / get_prev / get_next /
-//     range / 持久 without / split_lookup 三分割再人工拼接回等值副本
-//   rpds::List — push_front / first / last / drop_first 谱系 / reverse / iter
-//   rpds::Stack — push / peek / pop 谱系 / size / 空栈 pop、peek
-//   rpds::Queue — enqueue / peek / dequeue 谱系 / FIFO 迭代序 / 空 dequeue
-//   rpds::RedBlackTreeMap — insert / remove（mut 版布尔）/ first / last /
-//     range(Excluded,Included) / contains_key
-//   深沉 clone：im::Vector 与 rpds::List 各 10k 版本共存于 Vec，只打计数与
-//     抽样指纹——若结构共享失效（全量物化 = 千万级元素副本）必爆内存，不能
-//     完成即是失败信号；不打印任何指针。
-// 确定性铁律：随机取自定种 xorshift64*；HashMap 输出为「原始迭代序 FNV 指纹
-// （双方同一 hasher 算法 + 同一插入序列 ⇒ 同序）+ 键排序后逐行」两路；无
-// 浮点、无时间/线程/地址/路径；所有算术 wrapping。
+// im 15 + rpds 1 persistent data structure differential: native cargo output must
+// match interpreter/JIT output byte for byte. Both crates are pure Rust, no FFI;
+// stress points: Rc/Arc structural sharing + copy-on-write (make_mut path), HAMT
+// bitwise walk/collision reconciliation, RRB split/append, rb-tree balance, drop glue.
+// Coverage:
+//   im::Vector<i64>: collect / push_back / pop_back / set / persistent update() /
+//     split_off-append round trip / take-skip bounds / versions coexist untouched
+//   im::HashMap<u32,i64,BuildHasherDefault<DefaultHasher>> (deterministic hasher:
+//     DefaultHasher::new has fixed internal keys) -- insert / get / contains_key /
+//     persistent update()-without() / in-place remove after clone / raw HAMT
+//     iteration-order fingerprint + sorted deterministic order line by line
+//   im::OrdMap<i32,u64> -- insert / get_min / get_max / get_prev / get_next /
+//     range / persistent without / split_lookup into three parts rejoined by hand
+//   rpds::List -- push_front / first / last / drop_first lineage / reverse / iter
+//   rpds::Stack -- push / peek / pop lineage / size / empty pop, peek
+//   rpds::Queue -- enqueue / peek / dequeue lineage / FIFO iteration order / empty dequeue
+//   rpds::RedBlackTreeMap -- insert / remove (mut version returns bool) / first /
+//     last / range(Excluded,Included) / contains_key
+//   deep clone: im::Vector and rpds::List keep 10k versions each, printing only counts
+//     and sampled fingerprints, never pointers -- if structural sharing fails (full
+//     materialization = tens of millions of element copies) it must OOM; that is failure.
+// determinism: fixed-seed xorshift64*; HashMap prints a raw iteration-order FNV
+// fingerprint (same hasher + same insertion sequence => same order) then key-sorted
+// lines; no floats, time, thread, address or path; all arithmetic is wrapping.
 use std::collections::hash_map::DefaultHasher;
 use std::hash::BuildHasherDefault;
 
 use im::{OrdMap, Vector};
 use rpds::{List, Queue, RedBlackTreeMap, Stack};
 
-/// 确定 hasher 的 im::HashMap 别名（替掉默认 RandomState）。
+/// im::HashMap alias with a deterministic hasher (replaces the default RandomState).
 type DetMap = im::HashMap<u32, i64, BuildHasherDefault<DefaultHasher>>;
 
-/// 定种 xorshift64*（native/mirvm 同序列）。
+/// Fixed-seed xorshift64* (identical sequence in native and mirvm).
 struct Rng(u64);
 
 impl Rng {
@@ -55,7 +55,7 @@ impl Rng {
     }
 }
 
-/// 内联 FNV-1a：u64 元素序列指纹。
+/// Inline FNV-1a: fingerprint of a u64 element sequence.
 fn fnv_vals<I: IntoIterator<Item = u64>>(vals: I) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     for v in vals {
@@ -67,7 +67,7 @@ fn fnv_vals<I: IntoIterator<Item = u64>>(vals: I) -> u64 {
     h
 }
 
-/// 从 rng 抽互不重复的 key（碰撞即重抽；种子固定 ⇒ 双侧同走）。
+/// Draw unique keys from rng (redraw on collision; fixed seed => both sides agree).
 fn draw_keys(rng: &mut Rng, n: usize, space: u64) -> Vec<u64> {
     let mut out: Vec<u64> = Vec::with_capacity(n);
     while out.len() < n {
@@ -80,13 +80,13 @@ fn draw_keys(rng: &mut Rng, n: usize, space: u64) -> Vec<u64> {
 }
 
 fn im_vector() {
-    // 构建；再 clone+原子改 走 persistent 工作流
+    // build; then clone + one mutation exercises the persistent workflow
     let v0: Vector<i64> = (0..512).collect();
     let mut v1 = v0.clone();
     for x in 512..520 {
         v1.push_back(x);
     }
-    // 持久 update：v2 是 v1 的新版，v0/v1 必须原样
+    // persistent update: v2 is a new version of v1; v0/v1 must stay as they were
     let v2 = v1.update(100, -100);
     println!(
         "vec build len={} sum={} front={:?} back={:?}",
@@ -105,7 +105,7 @@ fn im_vector() {
         v2.len()
     );
 
-    // 分裂 split_off（原地吐右半）→ append 收回复原文
+    // split_off (mutates in place, yields the right half) -> append restores the whole
     let mut left = v1.clone();
     let right = left.split_off(200);
     println!(
@@ -124,7 +124,7 @@ fn im_vector() {
         right.len()
     );
 
-    // take / skip 持久切片（含 0 与 len 边界）
+    // take / skip persistent slices (including the 0 and len boundaries)
     println!(
         "vec take/skip take100.len={} take0.len={} skip420.len={} skip_all.len={}",
         v1.take(100).len(),
@@ -133,7 +133,7 @@ fn im_vector() {
         v1.skip(v1.len()).len()
     );
 
-    // pop_back 链 + set（返回旧值）
+    // pop_back chain + set (returns the old value)
     let mut v3 = v1.clone();
     let mut pops = Vec::new();
     for _ in 0..113 {
@@ -150,7 +150,7 @@ fn im_vector() {
         v3[7]
     );
 
-    // 边界/空路径（先行求值，避免同语句内 &/&mut 冲突）
+    // boundary/empty paths (evaluate first to avoid &/&mut conflicts in one statement)
     let mut empty: Vector<i64> = Vector::new();
     let e_front = empty.front().copied();
     let e_pop = empty.pop_back();
@@ -171,7 +171,7 @@ fn im_hashmap() {
     for &k in &keys {
         h0.insert(k as u32, k as i64 * 3);
     }
-    // 持久 update / without：h1、h2 出来后 h0 逐位不变
+    // persistent update / without: h0 stays bitwise unchanged once h1 and h2 exist
     let k5 = keys[5] as u32;
     let k6 = keys[6] as u32;
     let h1 = h0.update(k5, -1);
@@ -193,7 +193,7 @@ fn im_hashmap() {
         h2.get(&k5),
         h2.get(&k6)
     );
-    // clone 后原地 remove（含 miss），原版本不动
+    // in-place remove after clone (including a miss); the original version is untouched
     let mut h3 = h2.clone();
     let old0 = h3.remove(&(keys[0] as u32));
     let old_miss = h3.remove(&777_777);
@@ -204,10 +204,10 @@ fn im_hashmap() {
         h3.len(),
         h2.len()
     );
-    // 原始 HAMT 迭代序指纹（确定 hasher ⇒ 双侧同序）
+    // raw HAMT iteration-order fingerprint (deterministic hasher => same order both sides)
     let fp = fnv_vals(h0.iter().map(|(k, v)| (*k as u64) ^ ((*v as u64) << 32)));
     println!("hmap rawiter fp={:016x}", fp);
-    // sort 后确定序：先 6 行 + 汇总指纹
+    // deterministic order after sort: first 6 lines + rollup fingerprint
     let mut flat: Vec<(u32, i64)> = h0.iter().map(|(k, v)| (*k, *v)).collect();
     flat.sort_unstable();
     for (k, v) in flat.iter().take(6) {
@@ -227,7 +227,7 @@ fn im_ordmap() {
     for (i, &k) in keys.iter().enumerate() {
         m.insert(k as i32, (k as u64) << 7 | i as u64);
     }
-    // 有序端点 + 邻接探针
+    // ordered endpoints + adjacency probes
     let med = keys[33] as i32;
     println!(
         "omap len={} min={:?} max={:?} prev(med)={:?} next(med)={:?}",
@@ -237,7 +237,7 @@ fn im_ordmap() {
         m.get_prev(&med).map(|(k, _)| *k),
         m.get_next(&med).map(|(k, _)| *k)
     );
-    // range：确定升序窗口
+    // range: deterministic ascending window
     let win: Vec<(i32, u64)> = m.range(200..2000).map(|(k, v)| (*k, *v)).collect();
     println!(
         "omap range n={} first={:?} last={:?} fp={:016x}",
@@ -246,7 +246,7 @@ fn im_ordmap() {
         win.last().map(|(k, _)| *k),
         fnv_vals(win.iter().map(|(k, v)| (*k as u32 as u64) ^ (*v << 32)))
     );
-    // 持久 without
+    // persistent without
     let m2 = m.without(&med);
     println!(
         "omap without m.len={} m2.len={} m.has={} m2.has={}",
@@ -255,7 +255,7 @@ fn im_ordmap() {
         m.contains_key(&med),
         m2.contains_key(&med)
     );
-    // split_lookup 三分割 → 人工插回拼成等值副本
+    // split_lookup into three parts -> reinsert by hand into an equal copy
     let (left, hit, right) = m.split_lookup(&med);
     let mut back = left.clone();
     if let Some(v) = hit {
@@ -274,7 +274,7 @@ fn im_ordmap() {
 }
 
 fn rpds_basics() {
-    // List：push_front 谱系 + drop_first 谱系 + reverse
+    // List: push_front lineage + drop_first lineage + reverse
     let l0: List<i64> = (0..40).map(|i| i as i64).collect();
     let l1 = l0.push_front(-1);
     let l2 = l1.push_front(-2);
@@ -310,7 +310,7 @@ fn rpds_basics() {
         le.is_empty()
     );
 
-    // Stack：push/pop 谱系 + 空栈路径
+    // Stack: push/pop lineage + empty-stack paths
     let mut st: Stack<i64> = Stack::new();
     for i in 0..30 {
         st = st.push(i);
@@ -331,7 +331,7 @@ fn rpds_basics() {
         Stack::<i64>::new().peek()
     );
 
-    // Queue：enqueue/dequeue 谱系 + FIFO 迭代序
+    // Queue: enqueue/dequeue lineage + FIFO iteration order
     let mut q: Queue<i64> = Queue::new();
     for i in 0..40 {
         q = q.enqueue(i as i64 * 10);
@@ -356,7 +356,7 @@ fn rpds_basics() {
         Queue::<i64>::new().peek()
     );
 
-    // RedBlackTreeMap：反序插入 → 自平衡升序；range / remove(flip)
+    // RedBlackTreeMap: reverse-order insertion -> self-balanced ascending; range / remove(flip)
     let mut rbt: RedBlackTreeMap<i32, i64> = RedBlackTreeMap::new();
     for i in (0..256).rev() {
         rbt = rbt.insert(i as i32, (i as i64) * 7);
@@ -384,7 +384,7 @@ fn rpds_basics() {
         win.last(),
         win.iter().fold(0i64, |a, (_, v)| a.wrapping_add(*v))
     );
-    // 升序首尾各 3 行（sort 后打印确定序的 rb 版本）
+    // first/last 3 lines in ascending order (sorted rb version printed deterministically)
     let sorted: Vec<(i32, i64)> = rbt.iter().map(|(k, v)| (*k, *v)).collect();
     let tail3: Vec<(i32, i64)> = sorted[sorted.len() - 3..].to_vec();
     for (k, v) in sorted.iter().take(3).copied().chain(tail3) {
@@ -393,7 +393,7 @@ fn rpds_basics() {
 }
 
 fn deep_clone_10k() {
-    // im::Vector：10k 版本共存，每版 push_back 一次——结构共享才容得下
+    // im::Vector: 10k versions coexist, each with one push_back -- only structural sharing fits
     let base: Vector<i64> = (0..2048).collect();
     let mut keep_v: Vec<Vector<i64>> = Vec::with_capacity(10_000);
     keep_v.push(base);
@@ -402,7 +402,7 @@ fn deep_clone_10k() {
         nv.push_back(i as i64);
         keep_v.push(nv);
     }
-    // 抽样验证：keep[k] len = 2048+k，尾部 push 值序列（n>0 时第 2048 位 = 0）
+    // sampled check: keep[k].len = 2048+k and the tail push values (index 2048 = 0 when k>0)
     let mut ok_lens = 0usize;
     let mut ok_tail = 0usize;
     for (k, v) in keep_v.iter().enumerate() {
@@ -431,7 +431,7 @@ fn deep_clone_10k() {
     drop(keep_v);
     println!("deep10k imvec dropped=true");
 
-    // rpds::List：10k 个 push_front 版本——头链全共享
+    // rpds::List: 10k push_front versions -- the entire head chain is shared
     let mut keep_l: Vec<List<i64>> = Vec::with_capacity(10_000);
     let mut cur: List<i64> = List::new();
     for i in 0..10_000 {

@@ -3,8 +3,8 @@
 [dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 ---
-// 多线程运行时：worker 线程会各自阻塞在真 epoll_wait 上。
-// 预期：协作调度器把它们多路复用到一条真线程 → worker 互等 → 死锁/挂起。
+// Multi-threaded runtime: the worker threads each block on a real epoll_wait. Expected:
+// the cooperative scheduler multiplexes them onto one thread, so the workers deadlock.
 fn main() {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)

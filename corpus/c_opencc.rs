@@ -1,46 +1,43 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# opencc-rust =1.1.19（1.x 线最新；2.0.0 已于 2026-07-08 发布，本任务钉 1.x）。
-# default features：不开 static-dictionaries（任务钉 default；该 feature 只是把
-# 词典嵌进二进制，链接面不变）。crate 本体是 C++ OpenCC 的 extern "C" FFI
-# binding（libc + pkg-config build），非纯 Rust。
+# opencc-rust =1.1.19 (latest on the 1.x line; 2.0.0 was released 2026-07-08 and this
+# fixture stays pinned to 1.x). Default features, so static-dictionaries is off: it only
+# embeds the dictionaries and leaves the link surface unchanged. A C++ OpenCC FFI crate
+# (libc + pkg-config build), not pure Rust.
 opencc-rust = "=1.1.19"
 ---
-// opencc-rust 1.1.19（OpenCC 简繁转换大表，C FFI）差分。
-//
-// 环境前置（本机无系统 libopencc，按任务纪律不装系统库）：
-//   源码构建 OpenCC C++ ver.1.1.9（build.rs 的 pkg-config 版本区间锁
-//   1.1.2..=1.2.0；上游最新 1.3/1.4 会被 max-version 拒绝）安装至
-//   /tmp/opencc-local（libopencc.so + share/opencc/*.json/*.ocd2 词典）。
-//   三维统一三个环境变量，缺一即回退 pkg-config 而 panic：
-//     OPENCC_DIR=/tmp/opencc-local      build.rs 找 lib/include 根
-//     OPENCC_LIBS=opencc                不设则 build.rs 仍以 pkg-config 猜库名
-//     LD_LIBRARY_PATH=/tmp/opencc-local/lib   运行期 dlopen/native 动态链接
-//   词典路径不依赖环境：opencc_open 相对名走库编译期 PKGDATADIR。
-//
-// 测试面（FFI 全链路）：
-//   ① 四方向样本句逐字打印 + 锚定 assert_eq（发/髮、乾/幹、檯/台一对多分词
-//      消歧，麵/麪 异体，ASCII/半角旁通）：四个 OpenCC 句柄（*mut c_void 不透明
-//      指针，native 堆对象）并存互访。
-//   ② convert_to_buffer：native 直接写入 guest String 缓冲（真实地址模型下
-//      原生写回访客分配）；convert 返回串是 native malloc 的 C 串，guest
-//      CStr::from_ptr 读 native 内存（无 AllocId 读路径）+ opencc_convert_utf8_free 归还。
-//   ③ 错误路径：相对/绝对坏配置名 → Rust 侧静态 Err 串（稳定）。
-//   ④ 一篇 ~1.3KB 简体长文：原文/s2t/s2tw/逆向 t2s 各阶段字节长度 + FNV-1a
-//      指纹（长文本恰在最长匹配分词 + 大表查询上压）。
-//
-// 三维复跑（每维都以同一 env 前缀）：
+// Differential driver for OpenCC's simplified/traditional conversion tables (the
+// opencc-rust 1.1.19 crate) behind a C FFI.
+// Environment: no system libopencc on this host, and installing system libraries is out
+// of scope. Build the OpenCC C++ source ver.1.1.9 and install it to /tmp/opencc-local
+// (libopencc.so + share/opencc/*.json/*.ocd2 dictionaries). build.rs pins the
+// pkg-config range to 1.1.2..=1.2.0, so upstream 1.3/1.4 are rejected.
+// All three dimensions must share these variables; missing one means a pkg-config
+// fallback and panic:
+//   OPENCC_DIR=/tmp/opencc-local           root in which build.rs finds lib/include
+//   OPENCC_LIBS=opencc                     otherwise build.rs still guesses a library
+//   LD_LIBRARY_PATH=/tmp/opencc-local/lib  runtime dlopen/native dynamic linking
+// Dictionary paths need no environment: opencc_open resolves relative names through the
+// library's compile-time PKGDATADIR.
+// What it exercises: four-direction sample sentences printed verbatim with anchored
+// assert_eq, covering one-to-many segmentation disambiguation, variant characters and
+// ASCII/half-width bypass, through four OpenCC handles (opaque *mut c_void native heap
+// objects) that coexist and are used interleaved; convert_to_buffer, where native code
+// writes straight into a guest String buffer and convert returns a native malloc'd C
+// string that the guest reads with CStr::from_ptr (no AllocId read path) and frees with
+// opencc_convert_utf8_free; relative and absolute bad config names, which produce a
+// stable Rust-side Err; and a ~1.3KB simplified-Chinese article, whose per-stage byte
+// lengths and FNV-1a fingerprints stress longest-match segmentation plus large lookups.
+// Each dimension re-runs this fixture with the env prefix above:
 //   A: OPENCC_DIR=/tmp/opencc-local OPENCC_LIBS=opencc LD_LIBRARY_PATH=/tmp/opencc-local/lib \
 //        target/release/mirvm run corpus/c_opencc.rs
-//   B: cd ~/.cache/mirvm/scripts/$(grep -rl 'name = "c_opencc"' ~/.cache/mirvm/scripts/*/Cargo.toml | head -1 | xargs dirname | xargs basename) && \
-//        OPENCC_DIR=/tmp/opencc-local OPENCC_LIBS=opencc LD_LIBRARY_PATH=/tmp/opencc-local/lib \
-//        RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \
-//        "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
-//   C: MIRVM_JIT_THRESHOLD=1 + A 维同 env。
-//
-// FRONTIER：无（先行 scratch 原生验证 FFI 链路全通；mirvm 真实地址模型预期覆盖
-// native 读/写回访客所有四形态）。若日后引擎在 FFI 指针面回归，本 driver 即探针。
+//   B: the cached script's Cargo project with dimension A's env, RUSTC and cargo
+//      pointing at the nightly-2026-07-02 toolchain, `cargo run -q`
+//   C: MIRVM_JIT_THRESHOLD=1 with dimension A's env.
+// The native scratch runs took this FFI chain end to end, and the real address model is
+// expected to cover all four native-to-guest read/write forms. If the engine ever
+// regresses on the FFI pointer surface, this driver is the probe.
 use opencc_rust::*;
 
 fn fnv1a(data: &[u8]) -> u64 {
@@ -75,7 +72,8 @@ const TW2S_SAMPLES: &[(&str, &str)] = &[
     ("臺灣正體中文轉換測試字串", "台湾正体中文转换测试字串"),
 ];
 
-// ~1.3KB 简体长文（定长常量，含标点/数字/半角字母）。
+// ~1.3KB simplified-Chinese article: fixed length, with punctuation, digits and
+// half-width letters.
 const LONG: &str = "简繁转换的历史几乎与汉字信息化的历史等长。上世纪七十年代，中国大陆推行简化字方案之后，海峡两岸的计算机系统分别建立了各自的编码与字表，同一份文稿在两地之间流转时，需要逐字甚至逐词地对照替换。早期的转换程序大多只有一张单字映射表，遇到头发与发生、干燥与干部这类一对多的字，便会产生啼笑皆非的结果。现代的转换引擎引入分词与词组匹配，先按最长优先的策略把输入切分成词条，再在词典里查找每个词条对应的写法，因此能把方便面转换为方便麪，也能把服务器转换为伺服器。即便如此，地区词差异仍然棘手：软件在台湾常称软体，内存在台湾常称记忆体，而网络在香港又多写作網絡。优秀的转换器必须维护多套词库，并允许使用者自定义词条。本测试串约四百字，内含标点、数字 12345 与 abc 等半角符号，用于验证长文本转换在解释器、原生与即时编译三个维度上产生逐字节一致的结果。转换完成后再做一轮逆向转换，记录每一阶段输出的字节长度与哈希指纹，任何维度的分歧都会在指纹中现形。";
 
 fn run(cc: &OpenCC, tag: &str, samples: &[(&str, &str)]) {
@@ -87,7 +85,7 @@ fn run(cc: &OpenCC, tag: &str, samples: &[(&str, &str)]) {
 }
 
 fn main() {
-    // 四个 native 句柄先全建（不透明指针表多个并存），再交错使用。
+    // Build all four native handles first, then use them interleaved.
     let s2t = OpenCC::new(DefaultConfig::S2T).unwrap();
     let t2s = OpenCC::new(DefaultConfig::T2S).unwrap();
     let s2tw = OpenCC::new(DefaultConfig::S2TW).unwrap();
@@ -102,20 +100,22 @@ fn main() {
         ]
     );
 
-    // ① 四方向样本（逐字打印；锚点 = OpenCC 1.1.9 词典原生真值）
+    // (1) Four-direction samples, printed verbatim; the anchors are OpenCC 1.1.9's native
+    // dictionary values.
     run(&s2t, "s2t", S2T_SAMPLES);
     run(&t2s, "t2s", T2S_SAMPLES);
     run(&s2tw, "s2tw", S2TW_SAMPLES);
     run(&tw2s, "tw2s", TW2S_SAMPLES);
 
-    // ② convert_to_buffer：native 写进 guest String 缓冲 + convert 读 native 串
+    // (2) convert_to_buffer: native code writes into a guest String buffer, and convert
+    // reads back a native string.
     let head = tw2s.convert("涼風有訊");
     let buf = tw2s.convert_to_buffer("，秋月無邊", head.clone());
     assert_eq!(buf, format!("{}{}", tw2s.convert("涼風有訊"), tw2s.convert("，秋月無邊")));
     assert_eq!(buf, "凉风有讯，秋月无边");
     println!("buffer 「{head}」+=「，秋月無邊」→「{buf}」");
 
-    // ③ 错误路径（Rust 侧静态串，稳定锚）
+    // (3) Error paths; the Rust-side strings are static, so the anchors are stable.
     for p in ["nope.json", "/nonexistent-dir-tw2sp/s2t.json"] {
         match OpenCC::new(p) {
             Ok(_) => println!("open {p} unexpected ok"),
@@ -123,7 +123,7 @@ fn main() {
         }
     }
 
-    // ④ 长文：每阶段字节长度 + FNV-1a 指纹
+    // (4) Long article: per-stage byte length plus FNV-1a fingerprint.
     assert!(LONG.len() < 2048);
     let long_t = s2t.convert(LONG);
     let long_tw = s2tw.convert(LONG);

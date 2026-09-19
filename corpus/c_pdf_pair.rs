@@ -4,31 +4,31 @@
 printpdf = "0.7"
 lopdf = { version = "0.34", default-features = false, features = ["nom_parser"] }
 ---
-// printpdf 0.7 生成 + lopdf 0.34 解析的 PDF 闭环（生成→逐字节锚定→解析→重存
-// →再解析）。内建 Helvetica/Helvetica-Bold（不嵌字体）：两页（A4 portrait +
-// A4 landscape）/ 六文本行（含 PDF 字面字符串转义边界 ( ) \ % $）/ 三矩形
-// （Fill/FillStroke/Stroke 三 PaintMode）/ 开合两条多段线 / Rgb 填充+描边色 +
-// 线宽。lopdf 面：load_mem / version / get_pages / get_and_decode_page_content
-// 操作码直方图（BTreeMap 序）/ extract_text 空白归一化后与原文比对 / objects
-// 变体遍历计数 / save_to 重存+重载再提取 roundtrip / 坏文件、截断、页号越界
-// 三条错误路径。
-//
-// 确定性记录：① printpdf 的 document_id 与 trailer instance_id 全走其
-// utils.rs 的定种全局 xorshift（RAND_SEED=2100，SeqCst fetch_add），单线程
-// 顺序调用下逐 run 同一序列——非真随机，无需绕行。② PdfMetadata::new 默认
-// 刻 OffsetDateTime::now_utc() 三枚时间戳进 Info 字典（壁钟！），driver 用
-// with_creation_date/with_metadata_date/with_mod_date 钉到固定 epoch。
-// ③ 默认 Custom conformance 不嵌 XMP/ICC；内建字体不嵌子集。④ lopdf 钉
-// default-features=false+nom_parser：默认 features 含 rayon（无必要负载）
-// 与 chrono_time；pom/nom 任一即提供 parser_aux（extract_text）。
-// ⑤ printpdf 的 save_to_bytes 在 release 才 prune+compress——mirvm/native 两
-// harness 均 debug profile（cargo run 无 --release），两侧同为未压缩流。
+// printpdf 0.7 generation plus lopdf 0.34 parsing of one PDF: generate,
+// byte-anchor, parse, re-save, parse again. Built-in Helvetica/Helvetica-Bold
+// (no embedded fonts), two pages (A4 portrait + A4 landscape), six text lines
+// (including the PDF literal-string escape boundaries ( ) \ % $), three
+// rectangles (Fill, FillStroke and Stroke PaintMode), one open and one closed
+// polyline, and Rgb fill/outline colors with a line width.
+// lopdf: load_mem, version, get_pages, a get_and_decode_page_content operator
+// histogram (BTreeMap order), extract_text compared against the source after
+// whitespace normalization, an objects variant walk with counts, a save_to
+// roundtrip re-extract, and three error paths (junk file, truncation and an
+// out-of-range page number).
+// Determinism: printpdf's document_id and the trailer instance_id both come
+// from the fixed-seed global xorshift in its utils.rs (RAND_SEED=2100, SeqCst
+// fetch_add), so sequential single-threaded calls repeat the same sequence.
+// PdfMetadata::new would stamp OffsetDateTime::now_utc() (wall clock) into the
+// Info dictionary, so the driver pins all three dates to a fixed epoch.
+// printpdf prunes and compresses streams only in release builds, and both
+// harnesses run debug (cargo run without --release), so both sides see an
+// uncompressed stream.
 use std::collections::BTreeMap;
 
 use printpdf::path::PaintMode;
 use printpdf::{BuiltinFont, Color, Line, Mm, PdfDocument, Point, Rect, Rgb};
 
-/// 内联 FNV-1a（二进制内容锚定，不打印原始字节）。
+/// Inline FNV-1a, used to anchor the binary content without printing raw bytes.
 fn fnv1a(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for &b in data {
@@ -38,13 +38,13 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 空白归一化（两侧同码即确定）：extract_text 把每个 ET 结尾折成 '\n'、
-/// TJ 数组元素间插空格，比对原文前统一折叠任意空白。
+/// Whitespace normalization, applied identically on extraction and source:
+/// extract_text folds each ET into '\n' and spaces TJ array elements.
 fn normalize(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// lopdf Object 顶层变体分类（对象遍历计数用）。
+/// Top-level lopdf Object variant classification, used by the object walk tally.
 fn class(o: &lopdf::Object) -> &'static str {
     use lopdf::Object::*;
     match o {
@@ -62,7 +62,7 @@ fn class(o: &lopdf::Object) -> &'static str {
 }
 
 fn main() {
-    // ---- ① printpdf 生成：两页 / 六文本行 / 三矩形 / 两条线 ----
+    // ---- (1) printpdf generation: 2 pages / 6 text lines / 3 rects / 2 lines ----
     let fixed = printpdf::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
     let (doc, page1, layer1) =
         PdfDocument::new("mirvm corpus pdf_pair", Mm(210.0), Mm(297.0), "Layer 1");
@@ -134,7 +134,7 @@ fn main() {
     let bytes = doc.save_to_bytes().unwrap();
     println!("generated len={} fnv={:016x}", bytes.len(), fnv1a(&bytes));
 
-    // ---- ② lopdf 解析：版本 / 页数 / 逐页操作码直方图 / 文本提取比对 ----
+    // ---- (2) lopdf parse: version / pages / per-page operator histogram / text ----
     let parsed = lopdf::Document::load_mem(&bytes).unwrap();
     println!("version = {}", parsed.version);
     let pages = parsed.get_pages();
@@ -158,7 +158,7 @@ fn main() {
     println!("extracted = {norm:?}");
     println!("extracted-ok = {}", norm == expected);
 
-    // ---- ③ 对象遍历计数（BTreeMap 确定序）----
+    // ---- (3) object walk counts (BTreeMap order) ----
     let mut hist: BTreeMap<&str, usize> = BTreeMap::new();
     for obj in parsed.objects.values() {
         *hist.entry(class(obj)).or_default() += 1;
@@ -168,7 +168,7 @@ fn main() {
         println!("  {k} = {v}");
     }
 
-    // ---- ④ lopdf 重存 roundtrip：字节锚定 + 重载再提取 ----
+    // ---- (4) lopdf re-save roundtrip: byte anchor + reload and re-extract ----
     let mut redoc = lopdf::Document::load_mem(&bytes).unwrap();
     let mut resaved = Vec::new();
     redoc.save_to(&mut resaved).unwrap();
@@ -177,7 +177,7 @@ fn main() {
     let reextract = reparsed.extract_text(&[1, 2]).unwrap();
     println!("resave-extract-ok = {}", normalize(&reextract) == expected);
 
-    // ---- ⑤ 错误路径：坏文件 / 截断 / 页号越界 ----
+    // ---- (5) error paths: junk file / truncation / page number out of range ----
     match lopdf::Document::load_mem(b"mirvm: definitely not a pdf payload") {
         Ok(_) => println!("junk load unexpectedly ok"),
         Err(e) => println!("junk load err = {e}"),

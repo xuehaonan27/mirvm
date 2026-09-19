@@ -5,26 +5,26 @@ ark-ff = "0.4"
 ark-ec = "0.4"
 ark-bls12-381 = "0.4"
 ---
-// arkworks 0.4 三件套差分：ark-ff（Fp/Fp2/Fp6/Fp12 域塔 + Montgomery 256/384 limb
-// 算术，重 u128 进位路径）+ ark-ec（短 Weierstrass 群算术 + 双线性配对框架）+
-// ark-bls12-381（BLS12-381 固定参数：Fq 381-bit = 6×u64、Fr 255-bit = 4×u64、G1/G2）。
-// 内容：
-//   ① BigInteger256 底层：wrapping 加减乘、add_nocarry/sub_noborrow 进位位、
-//     mul2/div2、num_bits/get_bit、bits/bytes roundtrip、全序比较。
-//   ② Fr ↔ BigInteger256 互转：from_bigint（含 =MODULUS 的 None 边界）、
-//     into_bigint roundtrip、-1 = MODULUS-1 谱系、四则与除法 roundtrip。
-//   ③ Fq：固定元素四则 / square / double / neg / inverse（零元 None 边界）/
-//     pow（0/1/7/48bit 指数）/ frobenius_map / sqrt 往返 / sum_of_products /
-//     除法 roundtrip / 借位回绕——全部打印 into_bigint（Montgomery 约化后）的
-//     limb hex 谱系。
-//   ④ Fq2/Fq6/Fq12：固定元 new 构造，加/乘/平方/逆（含 Fq6 frobenius 与 pow、
-//     Fq12 pow 小指数与 frobenius_map(1)）、Fq2 sqrt 往返。
-//   ⑤ G1：generator 坐标、double 与 g+g 一致、(a+b)+c 结合律、neg 归零、
-//     标量乘（小标量 5 / 大标量 4×u64 limbs）、4 点 MSM == 手工和、zero/零标量边界。
-//   ⑥ G2：同类操作（Fq2 坐标谱系）。
-//   ⑦ Bls12-381 配对一次：pairing(g1, g2) → Fq12 的 72 个 limb 字节流 FNV-1a 指纹。
-// 确定性：全部元素从固定整数构造（无 rng/时间/地址/HashMap 序）；只打印 limb
-// hex / 布尔 / 整数；stderr 必空。
+// arkworks 0.4 trio differential: ark-ff (Fp/Fp2/Fp6/Fp12 tower + Montgomery 256/384-limb
+// arithmetic, heavy on the u128 carry path) + ark-ec (short Weierstrass group arithmetic
+// + bilinear pairing) + ark-bls12-381 (fixed params: Fq 381-bit = 6×u64, Fr 255-bit = 4×u64, G1/G2).
+// Coverage:
+//   ① BigInteger256 internals: wrapping add/sub/mul, add_nocarry/sub_noborrow carry bits,
+//     mul2/div2, num_bits/get_bit, bits/bytes roundtrip, total-order comparison.
+//   ② Fr <-> BigInteger256: from_bigint (None boundary at =MODULUS), into_bigint
+//     roundtrip, the -1 = MODULUS-1 lineage, the four operations and division roundtrip.
+//   ③ Fq: the four operations on fixed elements / square / double / neg / inverse (None
+//     boundary at zero) / pow (0/1/7/48-bit exponents) / frobenius_map / sqrt roundtrip /
+//     sum_of_products / division roundtrip / borrow wraparound; all print the limb hex
+//     lineage of into_bigint (after Montgomery reduction).
+//   ④ Fq2/Fq6/Fq12: new from fixed elements, add/mul/square/inverse (including Fq6
+//     frobenius and pow, Fq12 small-exponent pow and frobenius_map(1)), Fq2 sqrt roundtrip.
+//   ⑤ G1: generator coordinates, double == g+g, (a+b)+c associativity, neg to zero,
+//      scalar multiplication (small scalar 5 / large 4×u64-limb scalar), 4-point MSM == manual sum, zero boundaries.
+//   ⑥ G2: the same operations (Fq2 coordinate lineage).
+//   ⑦ One BLS12-381 pairing: pairing(g1, g2) -> FNV-1a fingerprint of the Fq12 72-limb byte stream.
+// Determinism: every element is built from fixed integers (no rng/time/address/HashMap
+// order); only limb hex / booleans / integers are printed; stderr must be empty.
 use ark_bls12_381::{
     Bls12_381, Fq, Fq12, Fq2, Fq6, Fr, G1Affine, G1Projective, G2Affine, G2Projective,
 };
@@ -33,7 +33,7 @@ use ark_ec::{AffineRepr, CurveGroup, Group, VariableBaseMSM};
 use ark_ff::biginteger::{BigInt, BigInteger};
 use ark_ff::{Field, One, PrimeField, Zero};
 
-/// limb 谱系：little-endian limb 序，逐个 {:016x}。
+/// Limb lineage: little-endian limb order, each as {:016x}.
 fn h<const N: usize>(b: &BigInt<N>) -> String {
     let mut s = String::from("[");
     for (i, l) in b.0.iter().enumerate() {
@@ -62,7 +62,7 @@ fn hq12(x: &Fq12) -> String {
     format!("{}|{}", hq6(&x.c0), hq6(&x.c1))
 }
 
-/// Fq12 的 72 个 canonical limb（c0.c0.c0 … 固定遍历序）。
+/// The 72 canonical Fq12 limbs (c0.c0.c0 ... in a fixed traversal order).
 fn fq12_limbs(w: &Fq12) -> Vec<u64> {
     let mut v = Vec::with_capacity(72);
     for f6 in [w.c0, w.c1] {
@@ -85,7 +85,7 @@ fn fnv1a(data: &[u8]) -> u64 {
 }
 
 fn main() {
-    // ---- ① BigInteger256 limb 底层算术 ----
+    // ---- ① BigInteger256 limb-level arithmetic ----
     let x = BigInt::<4>::new([
         0xfedcba9876543210,
         0x0123456789abcdef,
@@ -148,7 +148,7 @@ fn main() {
     println!("b256.cmp x>y={} y>x={} x==x={}", x > y, y > x, x == x);
     println!("b256.even/odd x={}/{} y={}/{}", x.is_even(), x.is_odd(), y.is_even(), y.is_odd());
 
-    // ---- ② Fr ↔ BigInteger256 互转 ----
+    // ---- ② Fr <-> BigInteger256 conversion ----
     println!("fr.modulus = {}", h(&Fr::MODULUS));
     let a = Fr::from(0x0123456789abcdefu64);
     let b = Fr::from(0xfedcba9876543210u64);
@@ -177,11 +177,11 @@ fn main() {
     println!("fr.pow0==1 = {}", a.pow([0u64]) == Fr::one());
     println!("fr.zero.inv none = {}", Fr::zero().inverse().is_none());
 
-    // ---- ③ Fq Montgomery limb 谱系 ----
+    // ---- ③ Fq Montgomery limb lineage ----
     println!("fq.modulus = {}", h(&Fq::MODULUS));
     let f1 = Fq::from(0x1234567890abcdefu64);
     let f2 = Fq::from(0x0fedcba987654321u64);
-    // 6 个固定 limb，最高 limb 0x0123… < q 最高 limb 0x1a01… ⇒ 保证 < q。
+    // Six fixed limbs; the top limb 0x0123... < q's top limb 0x1a01..., so the value is < q.
     let f3 = Fq::from_bigint(BigInt::<6>::new([
         0xdeadbeefcafebabe,
         0x0123456789abcdef,
@@ -224,7 +224,7 @@ fn main() {
         Fq::from_bigint(Fq::MODULUS).is_none()
     );
 
-    // ---- ④ Fq2 / Fq6 / Fq12 域塔 ----
+    // ---- ④ Fq2 / Fq6 / Fq12 tower ----
     let e21 = Fq2::new(f1, f2);
     let e22 = Fq2::new(f2, f3);
     println!("fq2.e22 = {}", hq2(&e22));
@@ -263,7 +263,7 @@ fn main() {
     println!("fq12.pow5 = {}", hq12(&w1.pow([5u64])));
     println!("fq12.frob1 = {}", hq12(&w1.frobenius_map(1)));
 
-    // ---- ⑤ G1 群算术 ----
+    // ---- ⑤ G1 group arithmetic ----
     let g = G1Affine::generator();
     println!("g1.gen.x = {}", hq(&g.x));
     println!("g1.gen.y = {}", hq(&g.y));
@@ -300,7 +300,7 @@ fn main() {
     println!("g1.mul0==0 = {}", p.mul_bigint([0u64]).is_zero());
     println!("g1.mul1==self = {}", p.mul_bigint([1u64]) == p);
     println!("g1.zero.infinity = {}", G1Affine::zero().infinity);
-    // 4 点 MSM（Pippenger）与手工和交叉校验
+    // 4-point MSM (Pippenger) cross-checked against the manual sum
     let bases = [g, g5a, gka, (p + g5).into_affine()];
     let scalars = [
         Fr::from(7u64),
@@ -315,7 +315,7 @@ fn main() {
     println!("g1.msm.x = {}", hq(&msma.x));
     println!("g1.msm.y = {}", hq(&msma.y));
 
-    // ---- ⑥ G2 群算术（Fq2 坐标）----
+    // ---- ⑥ G2 group arithmetic (Fq2 coordinates) ----
     let h2 = G2Affine::generator();
     println!("g2.gen.x = {}", hq2(&h2.x));
     println!("g2.gen.y = {}", hq2(&h2.y));
@@ -339,7 +339,7 @@ fn main() {
         (G2Projective::zero() + rk) == rk
     );
 
-    // ---- ⑦ BLS12-381 配对一次 → 72 limb 字节 FNV ----
+    // ---- ⑦ one BLS12-381 pairing -> 72-limb byte FNV ----
     let e = Bls12_381::pairing(g, h2);
     let limbs = fq12_limbs(&e.0);
     let mut buf = Vec::with_capacity(limbs.len() * 8);

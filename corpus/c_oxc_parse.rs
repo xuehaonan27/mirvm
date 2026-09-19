@@ -1,14 +1,14 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# oxc_parser 0.140.0（2026-07-17 时点最新；oxc 全线 crate 同号发布，一并钉
-# =0.140.0）。default features 仅 ["regular_expression"]（正则文本走
-# oxc_regular_expression 验证），oxc_parser 本体无 napi/wasm 可选件可裁。
-# 附带 oxc_ast/oxc_estree 的 serialize feature：Program ESTree JSON 序列化，
-# 供 kind census 使用（serializer 为结构驱动、字段序固定，Determinism 安全）。
-# serde_json 沿用 corpus 既有 "1" 钉法（批1 已绿）。依赖闭包 62 crates
-# （num-bigint 0.5 在列但只走 BigInt 词法解析不经 div_wide asm；miette 实收
-# 为 oxc-miette fork；无一 C/FFI 件），远低于 150 上限。
+# Pin oxc_parser =0.140.0 (newest as of 2026-07-17; the whole oxc crate line
+# is released under one version, so all oxc crates are pinned together).
+# default features are only ["regular_expression"]; no napi/wasm part exists.
+# serialize on oxc_ast/oxc_estree yields Program ESTree JSON, structure-driven
+# with a fixed field order, so it is determinism-safe.
+# serde_json keeps the corpus-wide "1" pin. The closure is 62 crates with no
+# C/FFI member, and num-bigint 0.5 only lexes BigInt, never div_wide asm.
+# Pinning keeps the AST shape and node counts this fixture asserts on.
 oxc_parser = "=0.140.0"
 oxc_allocator = "=0.140.0"
 oxc_span = "=0.140.0"
@@ -17,35 +17,35 @@ oxc_ast = { version = "=0.140.0", features = ["serialize"] }
 oxc_estree = { version = "=0.140.0", features = ["serialize"] }
 serde_json = "1"
 ---
-// oxc_parser 0.140（oxc JS/TS 编译工具链，Arena AST + u32 span）三维差分。
-// 批7 波2 大物槽：解析 4 个源 ——
-//   S1 ES 脚本（ModuleKind::Script）：函数/递归、regex literal
-//      （ParseOptions.parse_regular_expression=true，过 oxc_regular_expression）、
-//      模板串、destructuring+rest、spread、for-of、位运算；
-//   S2 TS（unambiguous→module）：generic interface、enum、class implements+
-//      parameter properties、satisfies、type alias、export default、never；
-//   S3 JSX：hooks 解构、fragment、三元/箭头内 JSX、attributes、表达式容器；
-//   S4 TSX 含语法错误：JSX 闭合标签错配（可恢复，2 label 含打开点）+ 顶层
-//      return（TS 1108，带 code scope/number）——panicked=false、AST 完整。
-// 测试面：
-//   ① 每源解析 meta：panicked/diagnostics 数/body 语句数/module 判定；
-//   ② AST 节点 kind census——Program 经 CompactSerializer(include_ts_fields=
-//      false, ranges=true) 出 ESTree JSON，serde_json 重解析后按 "type" 字段
-//      全量计数进 BTreeMap 定序单行打印；
-//   ③ typed AST 锚点 span：S1 FunctionDeclaration fib、S2 TSInterfaceDeclaration
-//      Shape、S3 首个 JSXElement（语句树手写下潜，覆盖 Statement/Declaration/
-//      Expression 枚举判别样态）；
-//   ④ S4 逐条诊断打印 severity/code/message/label span+文本/help。
-//   assert_eq! 锚定 4 源节点总数、锚点 span、诊断计数等关键常量。
-// 确定，无 IO/时间/随机；census gather 走 BTreeMap；stderr 真空。
-// FRONTIER：无。
-//
-// 三维复跑：
+// oxc_parser 0.140 (the oxc JS/TS toolchain, arena AST with u32 spans)
+// differential over four sources:
+//   S1 ES script (ModuleKind::Script): functions and recursion, a regex literal
+//      (parse_regular_expression=true, so oxc_regular_expression handles it),
+//      template string, destructuring with rest, spread, for-of, bitwise ops;
+//   S2 TS (unambiguous, resolves to a module): a generic interface, an enum, a
+//      class with implements and parameter properties, satisfies, type alias,
+//      export default, never;
+//   S3 JSX: hooks destructuring, a fragment, JSX in ternaries and arrows,
+//      attributes, expression containers;
+//   S4 TSX with syntax errors: a mismatched JSX closing tag (recoverable, 2
+//      labels including the open point) and a top-level return (TS 1108, with a
+//      code scope and number); panicked=false and the AST stays complete.
+// The oracle checks:
+//   1. per-source meta: panicked, diagnostic count, body statement count, module;
+//   2. an AST node-kind census: the Program is serialized to ESTree JSON with
+//      CompactSerializer(include_ts_fields=false, ranges=true), reparsed by
+//      serde_json, and every object with a "type" field is counted into a
+//      BTreeMap printed as one line in key order;
+//   3. typed-AST anchor spans: S1's FunctionDeclaration fib, S2's interface
+//      declaration Shape, S3's first JSXElement, found by walking the statement
+//      tree by hand across the Statement/Declaration/Expression variants;
+//   4. S4's diagnostics, each printed with severity, code, message, label span
+//      and text, and help.
+//   assert_eq! pins the four node totals, the anchor spans and the diagnostics.
+// Deterministic, with no IO, time or randomness; the census uses a BTreeMap
+// and stderr stays empty.
+// The three-way re-run:
 //   A: target/release/mirvm run corpus/c_oxc_parse.rs
-//   B: cd "$(grep -l 'name = "c_oxc_parse"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname)" && \
-//        RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \
-//        "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
-//   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_oxc_parse.rs
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
@@ -57,7 +57,7 @@ use oxc_parser::{ParseOptions, Parser, ParserReturn};
 use oxc_span::{GetSpan, SourceType};
 use serde_json::Value;
 
-// ① ES 脚本（非 module）。
+// (1) ES script (not a module).
 const SRC_ES: &str = r#"var total = 0;
 function fib(n) {
   if (n < 2) return n;
@@ -71,7 +71,7 @@ for (const x of arr) { total += x; }
 total = total ^ (total >> 1);
 "#;
 
-// ② TS（unambiguous→module）。
+// (2) TS (unambiguous, resolves to a module).
 const SRC_TS: &str = r#"interface Shape<T extends object = object> {
   kind: string;
   area(): number;
@@ -89,7 +89,7 @@ export default c;
 function assertNever(x: never): never { throw new Error("bad"); }
 "#;
 
-// ③ JSX（module）。
+// (3) JSX (module).
 const SRC_JSX: &str = r#"import { useState } from "react";
 const items = ["a", "b", "c"];
 export function List({ title, onPick }) {
@@ -110,7 +110,7 @@ export function List({ title, onPick }) {
 }
 "#;
 
-// ④ TSX 含语法错误：闭合标签错配 + 顶层 return，均可恢复 → AST 保留。
+// (4) TSX with syntax errors: closing-tag mismatch plus a top-level return, both recoverable.
 const SRC_TSX_BAD: &str = r#"export const App = (props: { name: string }) => {
   const [count, setCount] = useCount<number>(0);
   return (
@@ -124,16 +124,16 @@ export const X = <span>{count}</span>;
 return;
 "#;
 
-/// ESTree JSON：include_ts_fields=false（标准 ESTree 字段集）、ranges=true（
-/// 节点带 start/end）。仅作 census 中间物，不直接打印。
+/// ESTree JSON: include_ts_fields=false (the standard ESTree field set) and
+/// ranges=true (nodes carry start/end). A census intermediate, never printed.
 fn estree_json(program: &Program<'_>) -> String {
     let mut ser = CompactSerializer::new(false, true);
     program.serialize(&mut ser);
     ser.into_string()
 }
 
-/// 遍历 JSON 值树，统计带 "type" 字符串字段的对象 = AST 节点 kind 计数。
-/// 返回 (总节点数, BTree 定序的 `kind:count|...` 单行)。
+/// Walk the JSON value tree and count every object with a "type" string field,
+/// i.e. the AST node kinds. Returns (total, BTree-ordered `kind:count|...`).
 fn census(json: &str) -> (u64, String) {
     let v: Value = serde_json::from_str(json).unwrap();
     let mut map: BTreeMap<String, u64> = BTreeMap::new();
@@ -169,7 +169,7 @@ fn walk(v: &Value, map: &mut BTreeMap<String, u64>, total: &mut u64) {
     }
 }
 
-/// 表达式树里找第一个 JSXElement（覆盖 JSX/括号/三元/箭头形态枚举判别）。
+/// Find the first JSXElement in an expression tree, covering the JSX,
 fn jsx_of_expr<'b, 'a>(e: &'b Expression<'a>) -> Option<&'b JSXElement<'a>> {
     match e {
         Expression::JSXElement(el) => Some(el),
@@ -191,8 +191,8 @@ fn jsx_of_expr<'b, 'a>(e: &'b Expression<'a>) -> Option<&'b JSXElement<'a>> {
     }
 }
 
-/// 语句树里找第一个 JSXElement（typed AST 下潜，覆盖 Statement/Declaration
-/// 枚举判别样态）。
+/// Find the first JSXElement in a statement tree by descending the typed AST,
+/// covering the Statement and Declaration enum variants.
 fn first_jsx<'b, 'a>(s: &'b Statement<'a>) -> Option<&'b JSXElement<'a>> {
     match s {
         Statement::ExpressionStatement(e) => jsx_of_expr(&e.expression),
@@ -224,7 +224,7 @@ fn first_jsx<'b, 'a>(s: &'b Statement<'a>) -> Option<&'b JSXElement<'a>> {
     }
 }
 
-/// 解析单个源并打印 meta + census + 全量诊断；返回 (总节点数, 诊断数, panicked)。
+/// Parse one source, print meta + census + all diagnostics; return
 fn report(label: &str, src: &str, st: SourceType) -> (u64, usize, bool) {
     let allocator = Allocator::default();
     let options = ParseOptions {
@@ -276,7 +276,7 @@ fn report(label: &str, src: &str, st: SourceType) -> (u64, usize, bool) {
 fn main() {
     println!("oxc_parser 0.140.0 JS/TS/JSX differential");
 
-    // ---- ① ES 脚本 ----
+    // ---- (1) ES script ----
     let (n1, d1, p1) = report("S1 es-script", SRC_ES, SourceType::script());
     {
         let allocator = Allocator::default();
@@ -306,7 +306,7 @@ fn main() {
     assert_eq!(d1, 0);
     assert!(!p1);
 
-    // ---- ② TS ----
+    // ---- (2) TS ----
     let (n2, d2, _p2) = report("S2 ts-module", SRC_TS, SourceType::ts());
     {
         let allocator = Allocator::default();
@@ -335,7 +335,7 @@ fn main() {
     assert_eq!(n2, 99, "S2 node total");
     assert_eq!(d2, 0);
 
-    // ---- ③ JSX ----
+    // ---- (3) JSX ----
     let (n3, d3, _p3) = report("S3 jsx-module", SRC_JSX, SourceType::jsx());
     {
         let allocator = Allocator::default();
@@ -360,7 +360,7 @@ fn main() {
     assert_eq!(n3, 118, "S3 node total");
     assert_eq!(d3, 0);
 
-    // ---- ④ TSX 语法错误（可恢复）----
+    // ---- (4) TSX syntax errors (recoverable) ----
     let (n4, d4, p4) = report("S4 tsx-bad", SRC_TSX_BAD, SourceType::tsx());
     println!("recover ok = {}", !p4);
     assert_eq!(n4, 62, "S4 node total");

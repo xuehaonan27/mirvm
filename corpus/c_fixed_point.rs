@@ -148,11 +148,11 @@ fn arith_chains() {
     let c = I32F32::from_num(0.375);
     pv!("mul_add 7.25*(-2.5)+0.375", a.mul_add(b, c));
     let step = a * b + c;
-    pv!("a*b+c 分步", step);
-    println!("mul_add == 分步 : {}", a.mul_add(b, c) == step);
+    pv!("a*b+c stepwise", step);
+    println!("mul_add == stepwise : {}", a.mul_add(b, c) == step);
     pv!("mean(1/3, 1.5)", third.mean(I32F32::from_num(1.5)));
 
-    // lerp：t.lerp(start, end)
+    // lerp: t.lerp(start, end)
     let t = I32F32::from_num(0.625);
     pv!(
         "lerp t=0.625 [2, 9.5]",

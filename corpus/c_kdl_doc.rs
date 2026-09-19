@@ -3,32 +3,32 @@
 [dependencies]
 kdl = "6"
 ---
-// kdl 6.7：KDL v2 文档格式差分（winnow 手写解析器 + miette 诊断，纯 Rust）。
-// ① 混排文档解析：嵌套节点/属性/类型注解/行+块注释/slashdash（节点、entry、
-//    children 三形）/分号终结/CRLF/空 children；值谱系：裸标识符串、各转义串、
-//    原始串 #""#、多行串、空串、数字十/十六/八/二进+下划线+i128 边界、浮点
-//    含指数与 #inf/#-inf/#nan、#true/#false/#null。
-// ② 确定序树打印（文档序；浮点锁 to_bits）。
-// ③ API 面：KdlDocument parse/Display/get/get_mut/get_arg/iter_args/
+// kdl 6.7: KDL v2 document-format differential (winnow parser + miette diagnostics, pure Rust).
+// ① mixed document parsing: nested nodes/props/type annotations/line+block comments/slashdash
+//    (node/entry/children forms)/semicolon termination/CRLF/empty children; values: bare identifier
+//    strings, each escape form, raw #""#, multi-line, empty, decimal/hex/octal/binary integers with
+//    underscores, i128 boundaries, floats, #inf/#-inf/#nan, #true/#false/#null.
+// ② deterministic tree printing (document order; floats pinned by to_bits).
+// ③ API surface: KdlDocument parse/Display/get/get_mut/get_arg/iter_args/
 //    iter_dash_args/nodes/nodes_mut/len/is_empty/clear_format_recursive/
-//    autoformat；KdlNode new/name/set_name/ty/set_ty/entries/entry/entry_mut/
+//    autoformat; KdlNode new/name/set_name/ty/set_ty/entries/entry/entry_mut/
 //    get/get_mut/children/children_mut/set_children/len/is_empty/push/remove/
-//    retain；KdlEntry new/new_prop/name/value/value_mut/set_value/ty/set_ty/
-//    len/is_empty/clear_format/parse；KdlIdentifier value/repr/parse；
-//    KdlValue is_*/as_*。
-// ④ 修改（增节点/删子节点/删 entry/改值/头部插入）→ autoformat → to_string
-//    → 重解析语义等价（手写 sem_eq，忽略 format/repr/span）；
-//    clear_format_recursive 正则化锚 FNV-1a。
-// ⑤ 错误路径三条（ASCII 输入避免 span char/byte 歧义）：诊断 message/label/
-//    help/severity/span + 手算行列号。
-// 已知 API 坑（native 同行为，非 mirvm 差异）：node.remove(名字) 按
-// KdlIdentifier 全等（含 repr）比较，解析所得名字带 repr 故按名删不掉——
-// 演示后用 retain 按 value() 谓词删。另：inf/nan/true/false/null 为保留
-// 字不能作裸节点名（用 pos-inf/not-a-num）；i128::MIN 字面量溢出解析器
-// （幅值先按 i128 解析），负边界用 -i128::MAX。
+//    retain; KdlEntry new/new_prop/name/value/value_mut/set_value/ty/set_ty/
+//    len/is_empty/clear_format/parse; KdlIdentifier value/repr/parse;
+//    KdlValue is_*/as_*.
+// ④ mutation (add/remove node, remove entry, change value, insert at head) -> autoformat ->
+//    to_string -> reparse semantic equality (hand-written sem_eq, ignoring format/repr/span);
+//    clear_format_recursive canonicalization anchored by FNV-1a.
+// ⑤ three error paths (ASCII input avoids span char/byte ambiguity): diagnostic message/label/
+//    help/severity/span + hand-computed line/column.
+// Known API traps (native behaves the same, not a mirvm difference): node.remove(name) compares by
+// full KdlIdentifier equality (including repr); parsed names carry repr, so remove-by-name fails
+// -- the demo removes by value() predicate with retain. Also: inf/nan/true/false/null are
+// reserved words and cannot be bare node names (use pos-inf/not-a-num); i128::MIN overflows the
+// parser (magnitude is parsed as i128 first), so the negative boundary uses -i128::MAX.
 use kdl::{KdlDocument, KdlEntry, KdlIdentifier, KdlNode, KdlValue};
 
-/// FNV-1a 64（文本输出锚定）。
+/// FNV-1a 64 (anchors the text output).
 fn fnv1a(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for &b in data {
@@ -102,13 +102,13 @@ fn node_eq(a: &KdlNode, b: &KdlNode) -> bool {
         }
 }
 
-/// 语义等价：忽略 format/repr/span，只比名字/类型/entry 序/子树。
+/// Semantic equality: ignores format/repr/span and compares only name/type/entry order/subtree.
 fn sem_eq(a: &KdlDocument, b: &KdlDocument) -> bool {
     a.nodes().len() == b.nodes().len()
         && a.nodes().iter().zip(b.nodes()).all(|(x, y)| node_eq(x, y))
 }
 
-/// ASCII 输入的行/列号（1 起）。
+/// Line/column of an offset in ASCII input (1-based).
 fn line_col(input: &str, offset: usize) -> (usize, usize) {
     let mut line = 1;
     let mut col = 1;
@@ -208,7 +208,7 @@ crlf 1
 ";
 
 fn main() {
-    // ① 解析 + 格式保留往返
+    // ① parse + format-preserving roundtrip
     let doc = KdlDocument::parse(DOC).unwrap();
     let rendered = doc.to_string();
     println!(
@@ -219,14 +219,14 @@ fn main() {
         doc.is_empty()
     );
 
-    // ② 确定序树打印
+    // ② deterministic-order tree printing
     let mut tree = String::new();
     for n in doc.nodes() {
         dump_node(n, 0, &mut tree);
     }
     print!("{tree}");
 
-    // ③ API 面探测
+    // ③ API surface probes
     let meta = doc.get("meta").unwrap();
     println!(
         "meta name={:?} ty={:?} entries={} arg0={}",
@@ -315,9 +315,9 @@ fn main() {
         nanv.as_float().unwrap().to_bits()
     );
 
-    // ④ 修改 → autoformat → to_string → 重解析语义等价
+    // ④ mutation -> autoformat -> to_string -> reparse semantic equality
     let mut m = KdlDocument::parse(DOC).unwrap();
-    // 增：手工构造带类型注解/参数/属性/子树的节点
+    // add: hand-build a node with a type annotation, argument, properties and subtree
     let mut extra = KdlNode::new("added");
     extra.set_ty("marker");
     extra.push(KdlEntry::new(KdlValue::Integer(7)));
@@ -331,8 +331,8 @@ fn main() {
     subdoc.nodes_mut().push(sub);
     extra.set_children(subdoc);
     m.nodes_mut().push(extra);
-    // 删：numbers/hex 子节点（按位置）；props/key2（先演示按名 remove 的
-    // repr 全等坑，再用 retain 按 value() 谓词删）
+    // remove: numbers/hex child node (by position); props/key2 (first demonstrates
+    // the repr-equality trap of remove by name, then removes by value() predicate with retain)
     let numbers = m.get_mut("numbers").unwrap();
     let ch = numbers.children_mut().as_mut().unwrap();
     let pos = ch
@@ -348,7 +348,7 @@ fn main() {
         "remove_by_name={rm_by_name} props_entries_after={}",
         props.entries().len()
     );
-    // 改值一：entry_mut + set_value + clear_format（清掉旧 value_repr）
+    // change value 1: entry_mut + set_value + clear_format (clears the stale value_repr)
     let strings = m.get_mut("strings").unwrap();
     let plain = strings.children_mut().as_mut().unwrap().nodes_mut()
         [0]
@@ -356,14 +356,14 @@ fn main() {
         .unwrap();
     plain.set_value(KdlValue::Integer(99));
     plain.clear_format();
-    // 改值二：value_mut 直改（无 entry 访问，autoformat 时统一正则化）
+    // change value 2: mutate value_mut directly (no entry access; autoformat canonicalizes it)
     let strings = m.get_mut("strings").unwrap();
     let quoted = strings.children_mut().as_mut().unwrap().nodes_mut()
         [1]
         .get_mut(0)
         .unwrap();
     *quoted = KdlValue::String("replaced".into());
-    // 头部插入
+    // insert at the head
     let mut first = KdlNode::new("inserted");
     first.push(KdlEntry::new_prop("at", 0));
     m.nodes_mut().insert(0, first);
@@ -377,7 +377,7 @@ fn main() {
     let m2 = KdlDocument::parse(&out).unwrap();
     println!("reparse_sem_eq={}", sem_eq(&m, &m2));
     println!("reparse_preserve={}", m2.to_string() == out);
-    // clear_format_recursive 正则化锚（丢注释/slashdash 原文）
+    // clear_format_recursive canonicalization anchor (drops comment/slashdash text)
     let mut c = KdlDocument::parse(DOC).unwrap();
     c.clear_format_recursive();
     let cs = c.to_string();
@@ -387,12 +387,12 @@ fn main() {
         fnv1a(cs.as_bytes())
     );
 
-    // ⑤ 错误路径：坏语法（ASCII）→ 诊断 + 行列号
+    // ⑤ error paths: bad syntax (ASCII) -> diagnostics + line/column
     report_err("e-float", "bad 1.\n");
     report_err("e-string", "node \"unterminated\n");
     report_err("e-brace", "a {\n  b 1\n");
 
-    // ⑥ 单点 parse API：KdlEntry / KdlNode / KdlIdentifier
+    // ⑥ single-item parse API: KdlEntry / KdlNode / KdlIdentifier
     let e = KdlEntry::parse("key=(u8)0xff").unwrap();
     println!(
         "entry.parse name={:?} ty={:?} val={}",

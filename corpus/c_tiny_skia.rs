@@ -3,22 +3,22 @@
 [dependencies]
 tiny-skia = { version = "0.11", default-features = false, features = ["std"] }
 ---
-// tiny-skia 0.11 标量路径（default-features off：无 simd、无 png）2D 光栅化差分。
-// 128x96 Pixmap 上 32 轮确定性场景，每轮全量覆盖：fill_rect / 手工圆角矩形
-// （cubic κ 拟合圆弧）/ 圆 / 封闭三次贝塞尔（EvenOdd fill + dash stroke）/
-// 三停点线性渐变（Pad+Reflect）/ rotate∘scale∘translate transform 组合 /
-// Mask clip / SourceOver·Plus·Multiply alpha 合成 / draw_pixmap 半透明旋转
-// 贴图（Bilinear 采样）。多轮重复让 MIRVM_JIT_THRESHOLD=1 下热点函数必然
-// 走到 JIT 编译产物。每轮打印像素 FNV-1a；末尾抽样像素 RGBA hex、浮点
-// to_bits 锁位、边界/错误路径布尔。全固定常量，无随机/时间/地址；成功路径
-// stderr 为空。
+// tiny-skia 0.11 scalar path (default-features off: no simd/png) 2D rasterization
+// differential. 32 deterministic rounds on a 128x96 Pixmap, each round covering the whole
+// surface: fill_rect / hand-built rounded rect (κ cubic arc fit) / circle / closed cubic
+// Bezier (EvenOdd fill + dash stroke) / three-stop linear gradient (Pad+Reflect) /
+// rotate∘scale∘translate composition / Mask clip / SourceOver·Plus·Multiply alpha compositing
+// / draw_pixmap of a semi-transparent rotated tile (Bilinear). Repeated rounds push hot
+// functions into JIT output at MIRVM_JIT_THRESHOLD=1. Each round prints a pixel FNV-1a; at the
+// end it samples RGBA hex, float to_bits, and boundary/error-path booleans. All constants
+// fixed; no randomness/time/addresses; empty stderr on success.
 use tiny_skia::*;
 
 const W: u32 = 128;
 const H: u32 = 96;
 const ROUNDS: u32 = 32;
 
-/// 每轮换用的纯色表（索引由轮数确定性推导）。
+/// Color table cycled per round (the index derives deterministically from the round number).
 const PALETTE: [[u8; 4]; 3] = [
     [200, 60, 48, 255],
     [48, 144, 200, 255],
@@ -34,7 +34,7 @@ fn fnv1a(b: &[u8]) -> u64 {
     h
 }
 
-/// 手工圆角矩形：四段三次贝塞尔拟合 90° 圆弧（κ 常数），浮点密集。
+/// Hand-built rounded rect: four cubic Beziers approximate the 90° arc (κ constant), float-heavy.
 fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Path {
     const KAPPA: f32 = 0.5522847498307936;
     let c = r * KAPPA;
@@ -52,16 +52,16 @@ fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Path {
     pb.finish().unwrap()
 }
 
-/// 一轮完整场景：六个绘制阶段全量 API 面。返回该轮的组合 transform（供位打印）。
+/// One full round: six drawing stages over the whole API surface; returns the composed transform.
 fn draw_scene(pm: &mut Pixmap, tile: PixmapRef<'_>, round: u32) -> Transform {
-    let rot = (round * 7) as f32 * 1.5; // 旋转角（度）
-    let dx = ((round * 13) % 11) as f32 - 5.0; // 横向抖动
-    let phase = round as f32 * 0.03125; // 渐变相位（2^-5 步进，二进制精确）
+    let rot = (round * 7) as f32 * 1.5; // rotation angle (degrees)
+    let dx = ((round * 13) % 11) as f32 - 5.0; // horizontal jitter
+    let phase = round as f32 * 0.03125; // gradient phase (2^-5 steps, exact in binary)
     let c = PALETTE[(round as usize) % PALETTE.len()];
 
     pm.fill(Color::from_rgba8(24, 28, 36, 255));
 
-    // ① fill_rect：不透明纯色 SourceOver
+    // ① fill_rect: opaque solid-color SourceOver
     let mut paint = Paint::default();
     paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
     pm.fill_rect(
@@ -71,7 +71,7 @@ fn draw_scene(pm: &mut Pixmap, tile: PixmapRef<'_>, round: u32) -> Transform {
         None,
     );
 
-    // ② 圆角矩形 + 三停点线性渐变（Pad，渐变 transform 随轮旋转），AA on
+    // ② rounded rect + three-stop linear gradient (Pad, gradient transform rotates per round), AA on
     let rr = rounded_rect_path(52.0, 6.0, 64.0, 30.0, 8.0);
     paint.shader = LinearGradient::new(
         Point::from_xy(52.0, 6.0),
@@ -88,7 +88,7 @@ fn draw_scene(pm: &mut Pixmap, tile: PixmapRef<'_>, round: u32) -> Transform {
     paint.anti_alias = true;
     pm.fill_path(&rr, &paint, FillRule::Winding, Transform::identity(), None);
 
-    // ③ 圆 + rotate∘scale∘translate 组合 transform + 半透明白 SourceOver
+    // ③ circle + rotate∘scale∘translate composition transform + semi-transparent white SourceOver
     let mut pb = PathBuilder::new();
     pb.push_circle(30.0, 62.0, 18.0);
     let circle = pb.finish().unwrap();
@@ -99,7 +99,7 @@ fn draw_scene(pm: &mut Pixmap, tile: PixmapRef<'_>, round: u32) -> Transform {
         .post_translate(4.0, -2.0);
     pm.fill_path(&circle, &paint, FillRule::Winding, ts, None);
 
-    // ④ 封闭三次贝塞尔（带内孔）：EvenOdd fill（Reflect 渐变）+ dash stroke
+    // ④ closed cubic Bezier (with inner hole): EvenOdd fill (Reflect gradient) + dash stroke
     let mut pb = PathBuilder::new();
     pb.move_to(66.0, 44.0);
     pb.cubic_to(92.0, 40.0, 118.0, 52.0, 112.0, 70.0);
@@ -135,7 +135,7 @@ fn draw_scene(pm: &mut Pixmap, tile: PixmapRef<'_>, round: u32) -> Transform {
     };
     pm.stroke_path(&bez, &paint, &stroke, Transform::identity(), None);
 
-    // ⑤ clip：圆角矩形 clip mask 内画 Plus 合成矩形（越界部分被裁）
+    // ⑤ clip: a Plus-composited rect inside a rounded-rect clip mask (out-of-bounds parts clipped)
     let mut mask = Mask::new(W, H).unwrap();
     let clip_shape = rounded_rect_path(8.0 + dx, 40.0, 44.0, 48.0, 10.0);
     mask.fill_path(&clip_shape, FillRule::Winding, true, Transform::identity());
@@ -148,7 +148,7 @@ fn draw_scene(pm: &mut Pixmap, tile: PixmapRef<'_>, round: u32) -> Transform {
         Some(&mask),
     );
 
-    // ⑥ draw_pixmap：opacity 0.6 + Multiply + 旋转 Bilinear 采样
+    // ⑥ draw_pixmap: opacity 0.6 + Multiply + rotated Bilinear sampling
     let ppaint = PixmapPaint {
         opacity: 0.6,
         blend_mode: BlendMode::Multiply,
@@ -162,7 +162,7 @@ fn draw_scene(pm: &mut Pixmap, tile: PixmapRef<'_>, round: u32) -> Transform {
 fn main() {
     let mut pm = Pixmap::new(W, H).unwrap();
 
-    // 32x32 斜渐变 tile（draw_pixmap 的源，内容逐轮不变）
+    // 32x32 diagonal gradient tile (draw_pixmap's source; contents unchanged across rounds)
     let mut tile = Pixmap::new(32, 32).unwrap();
     let mut tpaint = Paint::default();
     tpaint.shader = LinearGradient::new(
@@ -186,7 +186,7 @@ fn main() {
         println!("r{round:02} fnv={:016x}", fnv1a(pm.data()));
     }
 
-    // 浮点结果锁位打印（末轮 transform）
+    // bit-locked float-output printing (last round's transform)
     let mut pt = Point::from_xy(30.0, 62.0);
     ts.map_point(&mut pt);
     println!("map-bits x={:08x} y={:08x}", pt.x.to_bits(), pt.y.to_bits());
@@ -194,7 +194,7 @@ fn main() {
     println!("scale-bits sx={:08x} sy={:08x}", sx.to_bits(), sy.to_bits());
     println!("invert-some={}", ts.invert().is_some());
 
-    // 边界/错误路径（文本确定性布尔）
+    // boundary/error paths (textually deterministic booleans)
     println!("pixmap-0-size-none={}", Pixmap::new(0, 10).is_none());
     println!("rect-nan-none={}", Rect::from_xywh(f32::NAN, 0.0, 1.0, 1.0).is_none());
     println!("color-oob-none={}", Color::from_rgba(1.5, 0.0, 0.0, 1.0).is_none());
@@ -237,7 +237,7 @@ fn main() {
         Transform::from_scale(0.0, 1.0).invert().is_none()
     );
 
-    // 抽样像素 RGBA hex + 终 hash + 不透明像素计数（末轮场景）
+    // sampled pixel RGBA hex + final hash + opaque pixel count (last round's scene)
     let pts = [
         (0, 0),
         (7, 9),

@@ -1,45 +1,45 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# 钉 0.20.4（0.20 系列末版）。default-features = false：默认 features 是
-# progressbar(indicatif)/onig(Oniguruma C 库 FFI)/esaxx_fast(esaxx-rs C++
-# 后缀数组)——三者对本 driver 的编码覆盖面无任何贡献却引入 FFI/线程风险。
-# 关闭后依赖树全为纯 Rust：esaxx-rs 以 default-features=false 走纯 Rust sais.rs
-# （仅 Unigram 训练用到），spm_precompiled 是 prost 预编译的 sentencepiece
-# charsmap 解析器（纯 Rust）。
-# 绕行记录：0.20.4 的 src/utils/mod.rs 中 `mod onig` 无条件编译
-# （lib.rs 无 feature 门），通体依赖 `onig` crate——default-features=false 后
-# 编译 E0432/E0433（utils/onig.rs:3 `use onig::Regex`）。onig 是 Oniguruma
-# 的 C FFI（cc 编译 C 源码进 native-archive）。绕行 = 开 `unstable_wasm`
-# feature：把 SysRegex 后端从 onig 换成 fancy-regex（纯 Rust 回溯正则，
-# 支持 lookahead），语义等价——两侧同一份后端，逐字节对拍不受影响；
-# feature 顺带开的 getrandom/js 只在 wasm32 目标下激活，native 无额外依赖。
+# Pinned 0.20.4 (last of the 0.20 series). default-features = false drops the
+# progressbar (indicatif), onig (Oniguruma C FFI) and esaxx_fast (esaxx-rs C++
+# suffix array) features: none contributes to this driver's encoding coverage,
+# but each adds FFI/threading risk. With them off the tree is pure Rust
+# (esaxx-rs uses pure-Rust sais.rs, needed only by the Unigram trainer;
+# spm_precompiled is a prost-precompiled sentencepiece charsmap parser).
+# Workaround: 0.20.4's src/utils/mod.rs compiles `mod onig` unconditionally
+# (lib.rs has no feature gate) and depends on the `onig` crate throughout, so
+# default-features=false fails to build with E0432/E0433 (utils/onig.rs:3);
+# onig is Oniguruma's C FFI, compiled by cc into a native archive. Switching
+# to pure-Rust fancy-regex via `unstable_wasm` (a backtracking regex with
+# lookahead) is semantically equivalent, so both sides share one backend; the
+# getrandom/js feature it also enables activates only on wasm32, native adds none.
 tokenizers = { version = "=0.20.4", default-features = false, features = ["unstable_wasm"] }
 ---
-// tokenizers 0.20.4（HuggingFace，unicode 重）差分。不引 fixture：全部模型经
-// builder API 内存构造。三大模型齐上：
-//   ① WordLevel + Normalizer Sequence(Lowercase→NFD→StripAccents)
-//      + Whitespace pretok + WordPieceDecoder + BertProcessing 后处理
-//      + AddedToken special mask（aho-corasick matcher 路径）
-//   ② BPE：手工 vocab+merges（merge 秩序驱动子词拆分），whitespace pretok；
-//      另一支 BPE + ByteLevel(add_prefix_space/trim_offsets/regex 三参数)
-//      + ByteLevelDecoder（bytes_to_unicode 映射表路径，emoji/CJK 走字节化）
-//   ③ Unigram：手工 (token, f64) 分数表 Viterbi 切分（浮点分不进输出，
-//      只打印 ids/tokens/offsets，IEEE 确定性下两边逐位一致）
-// 覆盖：encode 单句/pair、ids/tokens/offsets/type_ids/attention_mask/
-// special_tokens_mask/word_ids 全字段、decode skip/不 skip special、
-// truncation 谱系（max_length/stride/左右方向/三 strategy/非法参数错误路径）、
-// padding 谱系（Fixed/BatchLongest/左右方向/pad_to_multiple_of）、
-// token_to_id/id_to_token/get_vocab_size、to_string→from_str 内存 roundtrip
-// （compact+pretty 两种 serde_json 序列化）、空串/空 decode/纯 OOV/纯空白边界、
-// WordLevel/BPE builder 错误路径。
-// 确定性：不迭代 get_vocab 的 HashMap——词汇表打印用 (id,token) 按 id 排序的
-// 自身构造出场序；无 batch API（rayon-cond 维持在串行阈值内）；不触 dropout/
-// thread_rng（getrandom 不被调用）；无时间/地址/线程序。
-// 上游怪癖锚点：tok1/tok2 的 vocab 刻意留 id 洞（10+ 起跳、20+ 起跳），
-// save/to_string 触发 tokenizers models/mod.rs:54 的字面 println!
-// （"The OrderedVocab you are attempting to save contains holes ..."——不是
-// log::warn! 管道，直接砸 stdout），洞 id 列表由 vocab 内容决定，两侧一致。
+// tokenizers 0.20.4 (HuggingFace, unicode-heavy) differential. No fixture: every
+// model is built in memory through the builder API. Three models:
+//   ① WordLevel + Normalizer Sequence(Lowercase -> NFD -> StripAccents)
+//      + Whitespace pretok + WordPieceDecoder + BertProcessing post-processor
+//      + AddedToken special mask (aho-corasick matcher path)
+//   ② BPE: hand-written vocab+merges (merge rank drives subword splitting),
+//      whitespace pretok; a second BPE + ByteLevel (add_prefix_space /
+//      trim_offsets / regex) + ByteLevelDecoder (bytes_to_unicode table path;
+//      emoji/CJK take the byte path)
+//   ③ Unigram: hand-written (token, f64) score table, Viterbi segmentation
+//      (scores stay internal; only ids/tokens/offsets print, IEEE-deterministic)
+// Covers: encode single/pair, all ids/tokens/offsets/type_ids/attention_mask/
+// special_tokens_mask/word_ids fields, decode skipping or keeping specials,
+// truncation spectrum (max_length/stride/direction/strategies/invalid args),
+// padding spectrum (Fixed/BatchLongest/direction/pad_to_multiple_of),
+// token_to_id/id_to_token/get_vocab_size, to_string -> from_str roundtrip
+// (compact + pretty), empty/edge inputs, WordLevel/BPE builder error paths.
+// Determinism: get_vocab's HashMap is never iterated -- the vocab prints from
+// the (id, token) pairs in construction order sorted by id; no batch API
+// (rayon-cond stays serial); getrandom is never called; no time/address dumps.
+// Upstream quirk anchor: tok1/tok2 vocabs deliberately leave id holes (start at
+// 10+, 20+); save/to_string triggers the literal println! at tokenizers
+// models/mod.rs:54 ("The OrderedVocab you are attempting to save contains
+// holes ..."), straight to stdout (not log::warn!); hole ids are vocab-derived.
 use std::collections::HashMap;
 use std::str::FromStr;
 
@@ -66,8 +66,8 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// encode 全字段 dump：ids/tokens/offsets/type_ids/attention_mask/
-/// special_tokens_mask/word_ids，以及两种 decode。
+/// Dump every encode field: ids/tokens/offsets/type_ids/attention_mask/
+/// special_tokens_mask/word_ids, plus both decode variants.
 fn dump(tk: &Tokenizer, label: &str, input: &str) {
     let e = tk.encode(input, true).unwrap();
     dump_enc(label, &e);
@@ -91,7 +91,7 @@ fn dump_enc(label: &str, e: &Encoding) {
     println!("{label} words    = {:?}", e.get_word_ids());
 }
 
-/// WordLevel 词汇表：special 小 id + 词大 id，(id, token) 出场序即确定性打印序。
+/// WordLevel vocab: small ids for specials, large for words; (id, token) order is deterministic.
 fn wordlevel_vocab() -> (Vec<(u32, &'static str)>, HashMap<String, u32>) {
     let pairs: Vec<(u32, &str)> = vec![
         (0, "[PAD]"),
@@ -130,7 +130,7 @@ fn build_wordlevel() -> Tokenizer {
         .build()
         .unwrap();
     let mut tk = Tokenizer::new(wl);
-    // Lowercase → NFD → StripAccents：NFD 把 é 拆成 e+U+0301，strip 再摘掉组合符
+    // Lowercase -> NFD -> StripAccents: NFD splits é into e+U+0301, then strip removes it
     tk.with_normalizer(Some(NSeq::new(vec![
         Lowercase.into(),
         NFD.into(),
@@ -142,7 +142,7 @@ fn build_wordlevel() -> Tokenizer {
         ("[SEP]".to_string(), 3),
         ("[CLS]".to_string(), 2),
     )));
-    // AddedToken special：😀 与 🤖 不经 normalizer、整体命中 special mask
+    // AddedToken specials: 😀 and 🤖 skip the normalizer and hit the special mask whole
     let n = tk.add_special_tokens(&[
         AddedToken::from("😀", true),
         AddedToken::from("🤖", true),
@@ -152,8 +152,8 @@ fn build_wordlevel() -> Tokenizer {
     tk
 }
 
-/// BPE 手工 vocab+merges：秩序驱动——"hug"→[hug]；"pug"→[pug]；
-/// "bugs" merges 无 b 头缀 → 拆成 b,u,g + unk(s)；"lower"→[lo(or low), w, er]。
+/// Hand-written BPE vocab+merges: rank-driven -- "hug" -> [hug], "pug" -> [pug];
+/// "bugs" has no b-initial merge -> b,u,g + unk(s); "lower" -> [lo|low, w, er].
 fn build_bpe_ws() -> (Tokenizer, Vec<(u32, &'static str)>) {
     let pairs: Vec<(u32, &str)> = vec![
         (0, "<unk>"), (1, "h"), (2, "u"), (3, "g"), (4, "p"), (5, "n"),
@@ -182,11 +182,11 @@ fn build_bpe_ws() -> (Tokenizer, Vec<(u32, &'static str)>) {
     (tk, pairs)
 }
 
-/// BPE + ByteLevel 全链：chars→bytes→unicode-alphabet pre-tokenize（regex 拆分），
-/// ByteLevelDecoder 还原。emoji/CJK 全部走字节化路径。
+/// Full BPE + ByteLevel chain: chars -> bytes -> unicode-alphabet pre-tokenize
+/// (regex split), restored by ByteLevelDecoder. emoji/CJK all take the byte path.
 fn build_bpe_bytelevel() -> Tokenizer {
-    // ByteLevel 字节字母表的两个锚点token + 合并对：
-    // "Ġthe" 之类词首合并——Ġ 是空格 0x20 的映射。
+    // Two anchor tokens of the ByteLevel byte alphabet plus merge pairs:
+    // word-initial merges like "Ġthe" -- Ġ maps to space 0x20.
     let pairs: Vec<(u32, &str)> = vec![
         (0, "a"), (1, "b"), (2, "c"), (3, "d"), (4, "e"), (5, "f"),
         (6, "g"), (7, "h"), (8, "i"), (9, "j"), (10, "k"), (11, "l"),
@@ -216,7 +216,7 @@ fn build_bpe_bytelevel() -> Tokenizer {
     tk
 }
 
-/// Unigram：手工分数表，Viterbi 做 "hello"。分数仅参与内部比较，不打印。
+/// Unigram: hand-written score table; Viterbi segments "hello". Scores stay internal.
 fn build_unigram() -> Tokenizer {
     let vocab: Vec<(String, f64)> = [
         ("<unk>", 0.0),
@@ -227,7 +227,7 @@ fn build_unigram() -> Tokenizer {
         ("he", -0.45),
         ("ll", -0.25),
         ("lo", -0.28),
-        ("llư", -9.0), // 干扰项：高惩罚路径
+        ("llư", -9.0), // distractor: high-penalty path
     ]
     .iter()
     .map(|(t, s)| (t.to_string(), *s))
@@ -237,7 +237,7 @@ fn build_unigram() -> Tokenizer {
 }
 
 fn main() {
-    // ================= tok1：WordLevel 全链 =================
+    // ================= tok1: full WordLevel chain =================
     let mut tk1 = build_wordlevel();
     println!(
         "tok1 lookups = {:?} {:?} {:?} {:?}",
@@ -248,25 +248,25 @@ fn main() {
     );
     for (label, s) in [
         ("t1/s0 ascii", "Hello World RUST mir vm"),
-        ("t1/s1 nfc", "Café Naïve café"), // NFC：é/ï 单码点
-        ("t1/s2 nfd", "Cafe\u{301} Nai\u{308}ve"), // NFD：e+U+0301, i+U+0308
-        ("t1/s3 cjk", "我爱 自然语言 处理 文字"), // 部分 OOV：文字
-        ("t1/s4 emoji", "hello 😀 世界 🤖"), // special token 命中 + OOV
+        ("t1/s1 nfc", "Café Naïve café"), // NFC: é/ï are single code points
+        ("t1/s2 nfd", "Cafe\u{301} Nai\u{308}ve"), // NFD: e+U+0301, i+U+0308
+        ("t1/s3 cjk", "我爱 自然语言 处理 文字"), // partial OOV: the last word
+        ("t1/s4 emoji", "hello 😀 世界 🤖"), // special token hits + OOV
         ("t1/s5 empty", ""),
         ("t1/s6 blanks", "   \t  "),
     ] {
         dump(&tk1, label, s);
     }
-    // NFC 与 NFD 归一后 ids 必须一致
+    // NFC and NFD must normalize to identical ids
     let a = tk1.encode("Café Naïve", true).unwrap();
     let b = tk1.encode("Cafe\u{301} Nai\u{308}ve", true).unwrap();
     println!("t1/norm-eq ids_a={:?} ids_b={:?} eq={}", a.get_ids(), b.get_ids(), a.get_ids() == b.get_ids());
 
-    // pair + BertProcessing：type_ids 0/1 分界
+    // pair + BertProcessing: type_ids split at 0/1
     let pair = tk1.encode(("the quick brown fox", "jumps over lazy dog"), true).unwrap();
     dump_enc("t1/pair", &pair);
 
-    // ---- truncation 谱系（LongestFirst / 两个方向 / stride 溢出块） ----
+    // ---- truncation spectrum (LongestFirst / both directions / stride overflow) ----
     let long_pair = ("the quick brown fox jumps over lazy dog cafe naive", "hello world rust mir vm");
     for (label, tp) in [
         ("tr/right s0", TruncationParams { max_length: 8, stride: 0, direction: TruncationDirection::Right, strategy: TruncationStrategy::LongestFirst }),
@@ -276,8 +276,8 @@ fn main() {
         ("tr/only2", TruncationParams { max_length: 6, stride: 0, direction: TruncationDirection::Right, strategy: TruncationStrategy::OnlySecond }),
     ] {
         tk1.with_truncation(Some(tp)).unwrap();
-        // Err 也打印：SequenceTooShort 是合法错误路径（max_length 小于
-        // special tokens 占用后无可截内容时触发）
+        // Errors are printed too: SequenceTooShort is a valid path (fired when
+        // max_length leaves nothing to truncate after the special tokens)
         match tk1.encode(long_pair, true) {
             Ok(e) => {
                 println!(
@@ -293,7 +293,7 @@ fn main() {
             Err(e) => println!("{label} err = {e}"),
         }
     }
-    // 错误路径 1：单句 + OnlySecond（无第二序列可截）
+    // Error path 1: single sequence + OnlySecond (no second sequence to truncate)
     tk1.with_truncation(Some(TruncationParams {
         max_length: 4,
         stride: 0,
@@ -305,9 +305,9 @@ fn main() {
         Ok(_) => println!("tr/only2-single unexpectedly ok"),
         Err(e) => println!("tr/only2-single err = {e}"),
     }
-    // 错误路径 2：stride ≥ effective max length（= max_length - n_added）
-    // → with_truncation 直接拒绝。注意 max_length=0 会撞上 tokenizers 上游
-    // debug 构建的 subtract-overflow panic（mod.rs:622 无减法检查），不演示。
+    // Error path 2: stride >= effective max length (= max_length - n_added),
+    // which with_truncation rejects outright. NOTE: max_length=0 hits an
+    // upstream subtract-overflow panic in debug builds (mod.rs:622), so it is omitted.
     match tk1.with_truncation(Some(TruncationParams {
         max_length: 3,
         stride: 3,
@@ -319,7 +319,7 @@ fn main() {
     }
     tk1.with_truncation(None).unwrap();
 
-    // ---- padding 谱系 ----
+    // ---- padding spectrum ----
     for (label, pp) in [
         ("pd/fixed12-R", PaddingParams { strategy: PaddingStrategy::Fixed(12), direction: PaddingDirection::Right, pad_to_multiple_of: None, pad_id: 0, pad_type_id: 0, pad_token: "[PAD]".to_string() }),
         ("pd/fixed12-L", PaddingParams { strategy: PaddingStrategy::Fixed(12), direction: PaddingDirection::Left, pad_to_multiple_of: None, pad_id: 0, pad_type_id: 0, pad_token: "[PAD]".to_string() }),
@@ -337,7 +337,7 @@ fn main() {
     }
     tk1.with_padding(None);
 
-    // ---- to_string → from_str 内存 roundtrip（compact + pretty）----
+    // ---- to_string -> from_str in-memory roundtrip (compact + pretty) ----
     let js = tk1.to_string(false).unwrap();
     println!("t1/ser compact len={} fnv={:016x}", js.len(), fnv1a(js.as_bytes()));
     let tk1r = Tokenizer::from_str(&js).unwrap();
@@ -350,7 +350,7 @@ fn main() {
     let e3 = tk1p.encode("hello world rust", true).unwrap();
     println!("t1/ser pretty-roundtrip eq={}", e1.get_ids() == e3.get_ids());
 
-    // ================= tok2：BPE 手工 merges =================
+    // ================= tok2: hand-written BPE merges =================
     let (tk2, _) = build_bpe_ws();
     for (label, s) in [
         ("t2/s0 merge", "hug pug bugs"),
@@ -361,7 +361,7 @@ fn main() {
     ] {
         dump(&tk2, label, s);
     }
-    // serde roundtrip：merges 表往返
+    // serde roundtrip: the merges table survives the trip
     let js2 = tk2.to_string(false).unwrap();
     println!("t2/ser len={} fnv={:016x}", js2.len(), fnv1a(js2.as_bytes()));
     let tk2r = Tokenizer::from_str(&js2).unwrap();
@@ -369,7 +369,7 @@ fn main() {
     let f2 = tk2r.encode("hug pug lower", true).unwrap();
     println!("t2/ser roundtrip eq={} toks={:?}", f1.get_ids() == f2.get_ids(), f2.get_tokens());
 
-    // ---- BPE builder 错误路径：merges 引用未在 vocab 中的合成 token ----
+    // ---- BPE builder error path: a merge references a synthesized token not in the vocab ----
     let bad_vocab: HashMap<String, u32> = [("a".to_string(), 0u32), ("b".to_string(), 1u32)]
         .into_iter()
         .collect();
@@ -381,7 +381,7 @@ fn main() {
         Err(e) => println!("t2/bad-merges err = {e}"),
     }
 
-    // ================= tok3：BPE + ByteLevel =================
+    // ================= tok3: BPE + ByteLevel =================
     let tk3 = build_bpe_bytelevel();
     for (label, s) in [
         ("t3/s0 bpe", "abc abc ab"),
@@ -392,7 +392,7 @@ fn main() {
         dump(&tk3, label, s);
     }
 
-    // ================= tok4：Unigram =================
+    // ================= tok4: Unigram =================
     let tk4 = build_unigram();
     println!(
         "t4 lookups = {:?} {:?} {:?}",
@@ -404,7 +404,7 @@ fn main() {
         dump(&tk4, label, s);
     }
 
-    // ---- WordLevel 无 unk_token 行为锚点：OOV 词触发 MissingUnkToken 错误 ----
+    // ---- WordLevel without unk_token anchor: an OOV word raises MissingUnkToken ----
     let v_nounk: HashMap<String, u32> = [("a".to_string(), 0u32)]
         .into_iter()
         .collect();
@@ -416,7 +416,7 @@ fn main() {
         Err(e) => println!("t1/no-unk err = {e}"),
     }
 
-    // ================= 公共边界 =================
+    // ================= shared edges =================
     println!("edge decode-empty = {:?}", tk1.decode(&[], true).unwrap());
     println!("edge decode-unk   = {:?}", tk1.decode(&[1], true).unwrap());
     println!(

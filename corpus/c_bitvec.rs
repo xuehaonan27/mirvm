@@ -3,14 +3,14 @@
 [dependencies]
 bitvec = "1"
 ---
-// bitvec 1：位级语义差分。打包位指针（元素地址 + 位序号）+ 严格别名规则，
-// 是 mirvm place/ABI 边界的压力形状。覆盖：宏/from_slice/view_bits 三族构造、
-// by-value 布尔运算链、split_at/splice/rotate/reverse 区间操作、popcount 与
-// iter_ones 统计、u8/u16/u32 × le/be × Msb0/Lsb0 互转矩阵、BitArray 定长与
-// into_inner、push/pop/resize 生长边界。全部固定向量，无随机/时间/地址。
+// bitvec 1: bit-level differential. Packed bit pointers (element address + bit index)
+// plus strict-aliasing rules stress the mirvm place/ABI boundary. Covers:
+// macro/from_slice/view_bits constructors, by-value boolean chains, split_at/splice/
+// rotate/reverse, popcount and iter_ones counting, the u8/u16/u32 × le/be × Msb0/Lsb0
+// conversion matrix, and BitArray plus push/pop/resize growth edges. Fixed vectors only.
 use bitvec::prelude::*;
 
-/// 位片 → 定长 01 文本（迭代序，与存储/endian 无关的语义视图）
+/// Bit slice -> fixed-width 01 text (iteration order, independent of storage endianness).
 fn bstr<T: BitStore, O: BitOrder>(s: &BitSlice<T, O>) -> String {
     s.iter().by_vals().map(|b| if b { '1' } else { '0' }).collect()
 }
@@ -24,11 +24,11 @@ fn fnv1a(b: &[u8]) -> u64 {
     h
 }
 
-/// 位域互转矩阵：u32(le+be+不满宽) / u16 / u8，按具体位序展开
-/// （BitField 只为 Msb0/Lsb0 两个具体位序实现，不能用泛型 O）
+/// Bit-field conversion matrix: u32 (le+be+sub-width) / u16 / u8, expanded per concrete
+/// bit order (BitField is implemented only for the concrete Msb0/Lsb0, so O cannot be generic).
 macro_rules! field_matrix {
     ($o:ty, $tag:literal) => {{
-        // u32：le/be 两方向 store + 双端 load
+        // u32: store in both le/be directions + load from both ends
         let mut le = bitvec![u8, $o; 0; 32];
         le.store_le(0x1234_5678u32);
         println!("5 {} st_le bits={}", $tag, bstr(&le));
@@ -37,7 +37,7 @@ macro_rules! field_matrix {
         be.store_be(0x1234_5678u32);
         println!("5 {} st_be bits={}", $tag, bstr(&be));
         println!("5 {} be-> rt={} ld_le={:08x}", $tag, be.load_be::<u32>() == 0x1234_5678, be.load_le::<u32>());
-        // 20 位不满宽 slice 的 load（高位补零语义）
+        // load from a 20-bit sub-width slice (high bits zero-extended)
         let part = &le[4..24];
         println!("5 {} part20 ld_le={:08x} ld_be={:08x}", $tag, part.load_le::<u32>(), part.load_be::<u32>());
         // u16
@@ -53,7 +53,7 @@ macro_rules! field_matrix {
 }
 
 fn main() {
-    // ① 三族构造 + 两种位序视图
+    // ① the three constructor families + both bit-order views
     let m = bitvec![u8, Msb0; 1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0];
     println!("1 macro  len={} ones={} bits={}", m.len(), m.count_ones(), bstr(&m));
     let bytes = [0xA3u8, 0x7C, 0x82];
@@ -67,7 +67,7 @@ fn main() {
     let st = bits![u8, Msb0; 1, 1, 0, 1];
     println!("1 static len={} bits={}", st.len(), bstr(st));
 
-    // ② by-value 布尔运算链（16 位三向量）
+    // ② by-value boolean operator chains (three 16-bit vectors)
     let a = bitvec![u8, Msb0; 1,1,0,0, 1,0,1,0, 0,0,1,1, 1,1,1,1];
     let b = bitvec![u8, Msb0; 1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,0];
     let c = bitvec![u8, Msb0; 0,0,0,0, 1,1,1,1, 0,1,0,1, 1,1,0,0];
@@ -82,17 +82,17 @@ fn main() {
     println!("2 a|b    bits={} ones={}", bstr(&or), or.count_ones());
     println!("2 a^b    bits={} ones={}", bstr(&xor), xor.count_ones());
     println!("2 !a     bits={} ones={}", bstr(&not), not.count_ones());
-    // 复合链：((a&b) | (a^c)) ^ !c
+    // composite chain: ((a&b) | (a^c)) ^ !c
     let chain = ((a.clone() & &b) | (a.clone() ^ &c)) ^ !c.clone();
     println!("2 chain  bits={} ones={}", bstr(&chain), chain.count_ones());
-    // assign 族原地链
+    // in-place assign-family chain
     let mut acc = a.clone();
     acc &= &b;
     acc |= &c;
     acc ^= &a;
     println!("2 assign bits={} ones={}", bstr(&acc), acc.count_ones());
 
-    // ③ 区间操作：split_at / splice / rotate / reverse
+    // ③ range operations: split_at / splice / rotate / reverse
     let sp = BitVec::<u8, Msb0>::from_slice(&[0b1101_0011, 0b0110_1010, 0b1010_1100]);
     let (l, r) = sp.split_at(10);
     println!("3 split  l={} r={}", bstr(l), bstr(r));
@@ -112,7 +112,7 @@ fn main() {
     rev.reverse();
     println!("3 revall bits={}", bstr(&rev));
 
-    // ④ popcount / 迭代统计（40 位固定图案）
+    // ④ popcount / iteration counts (fixed 40-bit pattern)
     let p = BitVec::<u8, Msb0>::from_slice(&[0b1110_0001, 0b0011_0111, 0b1000_0000, 0b0000_0000, 0b0111_1111]);
     println!("4 pop    len={} ones={} zeros={}", p.len(), p.count_ones(), p.count_zeros());
     println!("4 edge   lz={} lo={} tz={} to={}", p.leading_zeros(), p.leading_ones(), p.trailing_zeros(), p.trailing_ones());
@@ -124,7 +124,7 @@ fn main() {
     println!("4 iter0  [{}]", zeros.join(","));
     let win: Vec<String> = p.chunks(8).map(|ch| ch.count_ones().to_string()).collect();
     println!("4 win8   [{}]", win.join(","));
-    // backing store 字节指纹：40 字节 LCG（固定种子）→ from_slice → raw fnv
+    // backing-store byte fingerprint: 40-byte LCG (fixed seed) -> from_slice -> raw fnv
     let mut seed = 0x243F_6A88_85A3_08D3u64;
     let mut buf = [0u8; 40];
     for x in buf.iter_mut() {
@@ -137,11 +137,11 @@ fn main() {
     let rt = BitVec::<u8, Msb0>::from_vec(raw.to_vec());
     println!("4 store  roundtrip={} ones={}", rt.as_raw_slice() == raw, rt.count_ones());
 
-    // ⑤ 位域互转矩阵：u8/u16/u32 × le/be × 两种位序
+    // ⑤ bit-field conversion matrix: u8/u16/u32 × le/be × both bit orders
     field_matrix!(Msb0, "msb");
     field_matrix!(Lsb0, "lsb");
 
-    // ⑥ BitArray 定长：宏构造 / set / into_inner / 定长布尔 / new 包裸数组
+    // ⑥ BitArray fixed length: macro / set / into_inner / booleans / new wrapping a raw array
     let mut ba = bitarr![u8, Msb0; 1,0,1,0, 0,1,0,1, 1,1,0,0, 0,0,1,1];
     println!("6 arr    len={} bits={}", ba.len(), bstr(&ba));
     ba.set(0, false);
@@ -158,7 +158,7 @@ fn main() {
     let raw32: [u32; 2] = bx.into_inner();
     println!("6 raw32  {:08x},{:08x}", raw32[0], raw32[1]);
 
-    // ⑦ 生长与边界：空向量、push/pop、resize、split_at(0)、非整字节尾
+    // ⑦ growth and edges: empty vector, push/pop, resize, split_at(0), non-byte-aligned tail
     let mut g = BitVec::<u8, Msb0>::new();
     println!("7 empty  len={} ones={} bits=[{}]", g.len(), g.count_ones(), bstr(&g));
     for i in 0..17 {

@@ -3,26 +3,26 @@
 [dependencies]
 zstd = "0.13"
 ---
-// zstd 0.13（FFI 绑定 C zstd 1.5.7：zstd-sys 用 cc 把 lib/*.c +
-// huf_decompress_amd64.S 编成静态 .a，mirvm 走「静态归档 → .so → RTLD_NOW」
-// 通道加载）三维差分。压缩/解压的计算主体在 native C 里跑，两侧同源同参 →
-// 帧字节天然确定；Rust 侧（zstd/zstd-safe 薄封装、io glue、错误串映射）才是
-// 被解释/JIT 的对象。
+// zstd 0.13 (FFI binding to C zstd 1.5.7: zstd-sys uses cc to compile lib/*.c plus
+// huf_decompress_amd64.S into a static .a, which mirvm loads via the "static archive ->
+// .so -> RTLD_NOW" channel) three-way differential. Compression/decompression itself runs
+// in native C with identical inputs and parameters on both sides, so frame bytes are
+// deterministic; the interpreted/JIT object is the Rust wrapper/io-glue/error-string layer.
 //
-// 覆盖：
+// Coverage:
 // ① bulk::{compress,decompress,compress_to_buffer,decompress_to_buffer} ×
-//    level -3/1/9/19 × {结构化重复日志, 定种 xorshift 随机} roundtrip。
-// ② stream::{Encoder,Decoder} 同矩阵：333B 分块写 / 777B 分块读。
-// ③ 便捷面 encode_all/decode_all/copy_encode/copy_decode；双帧拼接下默认
-//    Decoder 拼到 EOF vs single_frame 只取首帧。
-// ④ 字典：raw-content dict（stream Encoder/Decoder::with_dictionary）、
-//    prepared EncoderDictionary/DecoderDictionary（bulk with_prepared_dictionary
-//    复用同一 ctx 连压 6 条小记录）、无字典解码字典帧的错误路径。
-// ⑤ 错误路径：垃圾数据 bulk/流解码、截断 bulk 帧、截断流（read 到 EOF 撞
-//    "incomplete frame"）、非法 level=99、容量不足、空输入 encode/decode。
+//    level -3/1/9/19 × {structured repetitive log, seeded xorshift random} roundtrip.
+// ② stream::{Encoder,Decoder} over the same matrix: 333B chunked writes / 777B chunked reads.
+// ③ Convenience surface encode_all/decode_all/copy_encode/copy_decode; with two
+//    concatenated frames the default Decoder runs to EOF vs single_frame taking only the first.
+// ④ Dictionaries: raw-content dict (stream Encoder/Decoder::with_dictionary),
+//    prepared EncoderDictionary/DecoderDictionary (bulk with_prepared_dictionary
+//    reusing one ctx to compress 6 small records), and decoding a dict frame without the dict.
+// ⑤ Error paths: junk bulk/stream decode, truncated bulk frame, truncated stream (read hits
+//    EOF with "incomplete frame"), illegal level=99, small capacity, empty input encode/decode.
 //
-// 确定性：只打印长度/FNV-1a/布尔断言与 zstd C 库错误串（ZSTD_getErrorString
-// 常量）；随机用定种 xorshift64*；无时间/地址/HashMap 序；stderr 为零。
+// Determinism: prints only lengths/FNV-1a/booleans and zstd C library error strings
+// (ZSTD_getErrorString constants); seeded xorshift64*; no time/address/HashMap order; stderr empty.
 use std::io::{Read, Write};
 
 use zstd::bulk;
@@ -38,7 +38,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 定种 xorshift64*（native/mirvm 同序列）。
+/// Seeded xorshift64* (same sequence natively and under mirvm).
 struct Rng(u64);
 
 impl Rng {
@@ -61,7 +61,7 @@ impl Rng {
     }
 }
 
-/// 结构化重复日志（高压缩率；定长序号保证确定性）。
+/// Structured repetitive log: highly compressible, fixed-width sequence numbers for determinism.
 fn structured() -> Vec<u8> {
     let mut d = Vec::new();
     let mut i = 0u32;
@@ -79,7 +79,7 @@ fn structured() -> Vec<u8> {
     d
 }
 
-/// 分块读到 EOF（返回 Err 时把已读长度一并给出，供错误路径打印）。
+/// Read to EOF in 777-byte chunks; read errors propagate to the caller.
 fn read_chunked<R: Read>(r: &mut R) -> std::io::Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut buf = [0u8; 777];
@@ -102,7 +102,7 @@ fn main() {
         println!("set {name} raw={} rfnv={:016x}", data.len(), fnv1a(data));
     }
 
-    // ① bulk 两函数 × 四 level × 两数据集
+    // ① bulk compress/decompress × four levels × two data sets
     for (name, data) in &sets {
         for level in [-3, 1, 9, 19] {
             let comp = bulk::compress(data, level).unwrap();
@@ -116,7 +116,7 @@ fn main() {
         }
     }
 
-    // ①b to_buffer 变体 + compress_bound
+    // ①b to_buffer variants + compress_bound
     let d0 = &sets[0].1;
     let bound = zstd::zstd_safe::compress_bound(d0.len());
     let mut cbuf = vec![0u8; bound];
@@ -128,7 +128,7 @@ fn main() {
         dbuf == *d0
     );
 
-    // ② stream Encoder/Decoder 同矩阵（分块写、分块读）
+    // ② stream Encoder/Decoder over the same matrix (chunked writes, chunked reads)
     for (name, data) in &sets {
         for level in [-3, 1, 9, 19] {
             let mut enc = Encoder::new(Vec::new(), level).unwrap();
@@ -147,7 +147,7 @@ fn main() {
         }
     }
 
-    // ③ 便捷面 + 多帧拼接 / single_frame
+    // ③ convenience surface + multi-frame concatenation / single_frame
     let e1 = stream::encode_all(&d0[..], 3).unwrap();
     let b1 = stream::decode_all(&e1[..]).unwrap();
     println!(
@@ -175,7 +175,7 @@ fn main() {
     let first = read_chunked(&mut Decoder::new(&two[..]).unwrap().single_frame()).unwrap();
     println!("two-frames single n={} rt={}", first.len(), first == *d0);
 
-    // ④ 字典：6 条相似小记录；prepared dict + bulk ctx 复用；raw dict + stream
+    // ④ dictionaries: 6 similar small records; prepared dict + bulk ctx reuse; raw dict + stream
     let dict: Vec<u8> = b"user= action=login ip=10.0. status=ok session=abcdef".to_vec();
     let recs: Vec<Vec<u8>> = (0..6u32)
         .map(|i| {
@@ -221,7 +221,7 @@ fn main() {
         back == blob
     );
 
-    // ⑤ 错误路径与边界
+    // ⑤ error paths and boundaries
     let junk = Rng(0xDEADBEEFCAFEF00D).bytes(64);
     match bulk::decompress(&junk, 4096) {
         Ok(_) => println!("bulk junk unexpectedly ok"),

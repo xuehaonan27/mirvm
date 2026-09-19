@@ -4,42 +4,42 @@
 unicode-segmentation = "1"
 unicode-normalization = "0.1"
 ---
-// unicode-segmentation 1.13 + unicode-normalization 0.1.25（UAX 系查表双雄）差分。
+// Differential fixture for unicode-segmentation 1.13 + unicode-normalization 0.1.25.
 //
-// 覆盖清单：
-//   ① grapheme_indices 扩展簇分段：ZWJ 家庭、ZWJ+VS16 复合（吻）、RI 旗对、
-//     keycap、VS16、肤色修饰、天城文 conjunct、组合叠加、CRLF、CJK、谚文、
-//     RTL(希/阿) 混排、数字环境、未分配码点+非字符、default-ignorable 裸连
-//     ——逐段 [start,end) + escape_debug。
-//   ② split_word_bound_indices + unicode_words：小数/千分位/货币/百分号/
-//     科学计数/进制、缩写点/连字符/撇号、email/URL、CJK 混数字、RTL 混数字、
-//     emoji 串、ZWSP 与 SOFT HYPHEN 边界。
-//   ③ unicode_sentences：Mr./Dr./St./Vol./Prof. 缩写、省略号、问号叹号、
-//     CJK 句读、希伯来句读、阿拉伯问号。
-//   ④ NFD/NFC/NFKD/NFKC 四形式：预组合/全组合序列、Å/ANGSTROM/A+ring 三衣、
-//     谚文音节与 conjoining jamo 互转、连字/上标/全角/带圈数字/分数/平方单位
-//     （compat 专属）、deva 可分解预组合、未分配与非字符恒等、
-//     default-ignorable 恒等；is_nfd/nfc/nfkd/nfkc quick check（0.1.25 顶层
-//     自由函数）+ is_nfc_quick 三态枚举；四形式互转往返布尔断言；
-//     cjk_compat_variants 变异选择子替换。
+// Coverage:
+//   ① grapheme_indices extended clusters: ZWJ family, ZWJ+VS16 composite (kiss),
+//     RI flag pairs, keycap, VS16, skin tone, Devanagari conjunct, stacked
+//     combining marks, CRLF, CJK, Hangul, RTL (Hebrew/Arabic), digit context,
+//     unassigned + noncharacters, bare default-ignorables -- [start,end) + escape_debug.
+//   ② split_word_bound_indices + unicode_words: decimal/thousands/currency/percent,
+//     scientific notation and radix, abbreviation dots/hyphens/apostrophes,
+//     email/URL, CJK and RTL mixed with digits, emoji runs, ZWSP/SOFT HYPHEN edges.
+//   ③ unicode_sentences: Mr./Dr./St./Vol./Prof., ellipsis, question and exclamation
+//     marks, CJK sentence punctuation, Hebrew punctuation, Arabic question mark.
+//   ④ NFD/NFC/NFKD/NFKC: precomposed/fully decomposed, the Å/ANGSTROM/A+ring
+//     triple, Hangul syllables <-> conjoining jamo, ligatures, superscripts,
+//     fullwidth, circled digits, fractions and square units (compat-only),
+//     decomposable Devanagari precomposed, unassigned/noncharacter and
+//     default-ignorable identity; is_nfd/nfc/nfkd/nfkc quick check (top-level
+//     free fn in 0.1.25) + is_nfc_quick enum; round trips; cjk_compat_variants.
 //   ⑤ char::{compose, decompose_canonical, decompose_compatible,
-//     canonical_combining_class, is_combining_mark}：含谚文算术组合与 None。
-//   ⑥ 流式与一次性等价：整块一次性 nfc 基准；逐 char 增量拉流 == 一次性断言；
-//     安全切点（空格 starter 边界）逐块 nfc 裸露拼接与 stream_safe 包裹拼接
-//     均 == 一次性断言；危险切点（斩在组合序列腰上）裸露拼接发散、
-//     stream_safe 不担急救（UAX15-D4 只管 >30 连非起始符插 CGJ）如实打印；
-//     31 连 U+0301 触发 stream_safe 插入 U+034F CGJ 的计数断言；
-//     is_nfc_stream_safe/is_nfd_stream_safe 布尔。
-//   ⑦ 未分配/非字符/私用/default-ignorable 单码点专测行：grapheme 数、
-//     word 数、is_public_assigned、is_combining_mark、ccc、nfkc 是否改写。
-//   末尾全结果字节 fnv 指纹。
+//     canonical_combining_class, is_combining_mark}: Hangul arithmetic composition and None.
+//   ⑥ streaming equals one-shot: whole-buffer nfc baseline; per-char incremental
+//     pull == one-shot; safe cut (space starter) chunk-wise nfc, bare and
+//     stream_safe-wrapped concatenation both == one-shot; hazardous cut (through
+//     a combining sequence) diverges bare and stream_safe does not rescue it
+//     (UAX15-D4 inserts CGJ only after >30 non-starters), printed as-is; 31
+//     consecutive U+0301 counts the CGJ insert; stream-safe booleans.
+//   ⑦ single-code-point rows for unassigned/noncharacter/private-use/default-
+//     ignorable: grapheme count, word count, is_public_assigned, mark, ccc, nfkc rewrite.
+//   Trailing FNV fingerprint over every result byte.
 //
-// 确定性：全部输入为定值字面量；输出仅计数/字节偏移/escape_debug 文本/布尔/
-//   枚举 Debug/版本号常量；无浮点、无随机、无时间、无地址、无线程、
-//   无 HashMap 迭代；不建临时文件；stderr 为空。
-// 绕行/钉版本：无。unicode-segmentation 1.13.3 / unicode-normalization 0.1.25
-//   均纯 Rust 静态表（normalization 仅依赖纯 Rust tinyvec）；两 crate 本次
-//   均解析到 Unicode 17.0.0 表，三维使用同一 Cargo.lock 与构建目录。
+// Determinism: every input is a fixed literal; output is only counts, byte offsets,
+//   escape_debug text, booleans, enum Debug and version constants; no floats, no
+//   randomness, no time, no addresses, no threads, no HashMap iteration; no temp files; stderr empty.
+// Bypasses/version pins: none beyond these. unicode-segmentation 1.13.3 /
+//   unicode-normalization 0.1.25 are pure-Rust static tables (normalization depends
+//   only on pure-Rust tinyvec); both resolve to Unicode 17.0.0, and all three dimensions share one Cargo.lock and build directory.
 use unicode_normalization::char::{
     canonical_combining_class, compose, decompose_canonical, decompose_compatible,
     is_combining_mark, is_public_assigned,
@@ -50,7 +50,7 @@ use unicode_normalization::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-/// 内联 FNV-1a（全结果字节锚定）。
+/// Inline FNV-1a over every result byte, used to anchor the output.
 struct Sink(u64);
 
 impl Sink {
@@ -62,12 +62,12 @@ impl Sink {
     }
 }
 
-/// escape_debug 的短路函数（段文本安全形式）。
+/// Shorthand for `escape_debug` over a segment's text.
 fn ed(s: &str) -> String {
     s.escape_debug().collect()
 }
 
-/// 单字符 → "U+xxxx"。
+/// Single char -> "U+xxxx".
 fn cu(c: char) -> String {
     format!("U+{:04X}", c as u32)
 }
@@ -80,26 +80,26 @@ fn main() {
         UNICODE_VERSION
     );
 
-    // ① grapheme 簇分段
+    // ① grapheme cluster segmentation
     println!("== graphemes ==");
     #[rustfmt::skip]
     let gtexts: &[&str] = &[
-        "नमस्ते दुनिया",                            // 天城文（含 conjunct）
-        "क्‍ष ज्ञ क्ष",                                 // virama+ZWJ 显式 conjunct
-        "👨\u{200D}👩\u{200D}👧\u{200D}👦",                     // ZWJ 家庭
-        "👩\u{200D}❤\u{FE0F}‍\u{200D}💋\u{200D}👨",               // ZWJ+VS16 复合
-        "🇨🇳🇺🇸",                             // 两对 RI 旗
-        "1️⃣2️⃣ ✔️ 👍🏽 ❤\u{FE0F}",                    // keycap/VS16/肤色
-        "e\u{0301}cole a\u{0300}\u{0301}\u{0302}ma", // 组合叠加
-        "Ångström Mötley Crüe",                     // 预组合拉丁
-        "שלום world שלום12",                        // 希伯来 RTL 混排
-        "مرحبا بالعالم ٣٤٥",                        // 阿拉伯 RTL + 阿拉伯数字
-        "日本語のテキスト、テスト123",               // CJK 混数字
-        "한국어 한글 테스트",                        // 谚文
-        "abc\r\ndef\tghi",                          // CRLF 单簇 + TAB 控制
-        "\u{0378}\u{2FE1}\u{FDD0}\u{10FFFF}",       // 未分配/非字符
-        "\u{AD}\u{034F}\u{200B}\u{200D}\u{2060}\u{FE0F}", // default-ignorable 裸连
-        "3.14 & 1,000,000",                         // 数字环境
+        "नमस्ते दुनिया",                            // Devanagari (includes conjunct)
+        "क्‍ष ज्ञ क्ष",                                 // virama+ZWJ explicit conjunct
+        "👨\u{200D}👩\u{200D}👧\u{200D}👦",                     // ZWJ family
+        "👩\u{200D}❤\u{FE0F}‍\u{200D}💋\u{200D}👨",               // ZWJ+VS16 composite
+        "🇨🇳🇺🇸",                             // two RI flag pairs
+        "1️⃣2️⃣ ✔️ 👍🏽 ❤\u{FE0F}",                    // keycap/VS16/skin tone
+        "e\u{0301}cole a\u{0300}\u{0301}\u{0302}ma", // stacked combining marks
+        "Ångström Mötley Crüe",                     // precomposed Latin
+        "שלום world שלום12",                        // Hebrew RTL mixed run
+        "مرحبا بالعالم ٣٤٥",                        // Arabic RTL + Arabic-Indic digits
+        "日本語のテキスト、テスト123",               // CJK with digits
+        "한국어 한글 테스트",                        // Hangul
+        "abc\r\ndef\tghi",                          // CRLF single cluster + TAB control
+        "\u{0378}\u{2FE1}\u{FDD0}\u{10FFFF}",       // unassigned/noncharacter
+        "\u{AD}\u{034F}\u{200B}\u{200D}\u{2060}\u{FE0F}", // bare default-ignorable concatenation
+        "3.14 & 1,000,000",                         // digit context
     ];
     for (ti, s) in gtexts.iter().enumerate() {
         let gs: Vec<(usize, &str)> = s.grapheme_indices(true).collect();
@@ -115,7 +115,7 @@ fn main() {
         }
     }
 
-    // ② word 边界（unicode_words 实词 + split_word_bounds 全界两遍）
+    // ② word boundaries (unicode_words content words + split_word_bounds over all boundaries)
     println!("== words ==");
     #[rustfmt::skip]
     let wtexts: &[&str] = &[
@@ -144,7 +144,7 @@ fn main() {
         }
     }
 
-    // ③ sentence 边界
+    // ③ sentence boundaries
     println!("== sentences ==");
     #[rustfmt::skip]
     let stexts: &[&str] = &[
@@ -164,22 +164,22 @@ fn main() {
         }
     }
 
-    // ④ 四形式 + quick check + 互转往返 + cjk_compat_variants
+    // ④ the four forms + quick check + round trips + cjk_compat_variants
     println!("== normalize ==");
     #[rustfmt::skip]
     let ntexts: &[&str] = &[
-        "Ângström Å for café",                 // 预组合；Å 拉丁
-        "\u{212B}\u{00C5}A\u{030A} triple",    // ANGSTROM / Å / A+ring 三方
-        "e\u{0301} a\u{0300}\u{0301} n\u{0303} o\u{0308}", // 全组合序列
-        "한 국 어 한글",                         // 谚文音节（已组合）
-        "\u{1100}\u{1161}\u{11A8}\u{1101}\u{1161}\u{11A8}", // conjoining jamo 原串
-        "ﬁle ﬂow ofﬁce ﬀ",                     // 连字（compat 专属）
-        "x² + ³√2 ≈ Åℌ ℝ",                     // 上标/双线体（compat 专属）
-        "Ｆｕｌｌｗｉｄｔｈ　ＡＢＣ１２３",       // 全角+全角空格
-        "①⑫㉑ ½⅜ ㍈㎡ ㌀",                      // 带圈/分数/平方单位
-        "\u{0958}\u{09DC}\u{0A33} deva",       // Indic 可分解预组合
-        "\u{0378}\u{FDD0}\u{10FFFF}",          // 未分配/非字符恒等
-        "\u{034F}\u{200D}\u{2060}\u{FE0F}\u{AD}", // default-ignorable 恒等
+        "Ângström Å for café",                 // precomposed; Å Latin
+        "\u{212B}\u{00C5}A\u{030A} triple",    // ANGSTROM / Å / A+ring triple
+        "e\u{0301} a\u{0300}\u{0301} n\u{0303} o\u{0308}", // fully decomposed sequence
+        "한 국 어 한글",                         // Hangul syllable (already composed)
+        "\u{1100}\u{1161}\u{11A8}\u{1101}\u{1161}\u{11A8}", // conjoining jamo raw string
+        "ﬁle ﬂow ofﬁce ﬀ",                     // ligature (compat-only)
+        "x² + ³√2 ≈ Åℌ ℝ",                     // superscript/double-struck (compat-only)
+        "Ｆｕｌｌｗｉｄｔｈ　ＡＢＣ１２３",       // fullwidth + ideographic space
+        "①⑫㉑ ½⅜ ㍈㎡ ㌀",                      // circled/fraction/square units
+        "\u{0958}\u{09DC}\u{0A33} deva",       // decomposable Indic precomposed
+        "\u{0378}\u{FDD0}\u{10FFFF}",          // unassigned/noncharacter identity
+        "\u{034F}\u{200D}\u{2060}\u{FE0F}\u{AD}", // default-ignorable identity
         "\u{F901}\u{2F801}",                   // CJK compatibility ideograph
     ];
     for (ti, s) in ntexts.iter().enumerate() {
@@ -200,7 +200,7 @@ fn main() {
             is_nfkc(s),
             is_nfc_quick(s.chars())
         );
-        // 四形式互转往返断言
+        // round-trip booleans between the four forms
         let d2c: String = nfd.chars().nfc().collect();
         let c2d: String = nfc.chars().nfd().collect();
         let kd2kc: String = nfkd.chars().nfkc().collect();
@@ -217,14 +217,14 @@ fn main() {
         sink.feed(&nfkd);
         sink.feed(&nfkc);
     }
-    // cjk_compat_variants：compat ideograph → 标准形 + 变异选择子
+    // cjk_compat_variants: compat ideograph -> standard form + variation selector
     for c in ['\u{F901}', '\u{2F801}', '任', '語'] {
         let v: String = [c].into_iter().cjk_compat_variants().collect();
         println!("cjkvar {} => c={} {}", cu(c), v.chars().count(), ed(&v));
         sink.feed(&v);
     }
 
-    // ⑤ char:: 自由函数面
+    // ⑤ char:: free-function surface
     println!("== char-compose ==");
     for (a, b) in [
         ('e', '\u{0301}'),
@@ -265,22 +265,22 @@ fn main() {
         );
     }
 
-    // ⑥ 流式与一次性等价
+    // ⑥ streaming vs one-shot equivalence
     println!("== streaming ==");
-    // 整块一次性 nfc 基准（混搭：组合符 + 预组合 + jamo + 分词环境）
+    // whole-buffer one-shot nfc baseline (mix: combining marks + precomposed + jamo + word-break context)
     let whole = "Que\u{0301}rie a\u{0308}nsi \u{1101}\u{1161} ko\u{0303}x co\u{0315}\u{0300}m";
     let oneshot: String = whole.nfc().collect();
     println!("stream oneshot = {}", ed(&oneshot));
-    // 逐 char 增量拉流（同迭代器手工步进累计）== 一次性
+    // per-char incremental pull (manual steps over the same iterator) == one-shot
     let mut inc = String::new();
     for ch in whole.nfc() {
         inc.push(ch);
     }
     println!("stream pull-1eq = {}", inc == oneshot);
-    // 安全切点：空格处（starter 边界）分两块逐块 nfc，裸露拼接与
-    // stream_safe 包裹拼接均应与一次性一致
+    // safe cut point: split into two chunks at a space (starter boundary), nfc each;
+    // bare concatenation and stream_safe-wrapped concatenation both match one-shot
     let (s1, s2) = whole.split_once(' ').unwrap();
-    let s2ws = format!(" {s2}"); // 第二块含前导空格，还原字节
+    let s2ws = format!(" {s2}"); // second chunk keeps the leading space so the bytes are restored
     let safeb_naive: String = [s1, &s2ws].iter().map(|c| c.nfc().collect::<String>()).collect();
     let safeb_ss: String = [s1, &s2ws]
         .iter()
@@ -291,7 +291,7 @@ fn main() {
         safeb_naive == oneshot,
         safeb_ss == oneshot
     );
-    // 危险切点：斩在 starter 'e' 与其组合符 U+0301 之间
+    // hazardous cut point: split between starter 'e' and its combining mark U+0301
     let (h1, h2) = (&whole[..3], &whole[3..]); // "Que" | "\u{0301}rie ..."
     let haz_naive: String = [h1, h2].iter().map(|c| c.nfc().collect::<String>()).collect();
     let haz_ss: String = [h1, h2]
@@ -308,7 +308,7 @@ fn main() {
     sink.feed(&oneshot);
     sink.feed(&safeb_ss);
     sink.feed(&haz_ss);
-    // UAX15-D4：连非起始符 >30 → stream_safe 插入 U+034F CGJ
+    // UAX15-D4: >30 consecutive non-starters -> stream_safe inserts U+034F CGJ
     let runs: Vec<String> = [30usize, 31, 45, 61]
         .iter()
         .map(|&n| core::iter::repeat_n('\u{0301}', n).collect())
@@ -330,18 +330,18 @@ fn main() {
         is_nfd_stream_safe(whole)
     );
 
-    // ⑦ 未分配 / 非字符 / 私用 / default-ignorable 单码点专测
+    // ⑦ single-code-point rows: unassigned / noncharacter / private-use / default-ignorable
     println!("== edge-cp ==");
     for c in [
-        '\u{0378}', // 未分配（希腊区洞）
+        '\u{0378}', // unassigned (hole in the Greek block)
         '\u{0382}',
         '\u{0838}',
-        '\u{2FE1}', // 未分配
-        '\u{FDD0}', // 非字符
+        '\u{2FE1}', // unassigned
+        '\u{FDD0}', // noncharacter
         '\u{FFFE}',
         '\u{FFFF}',
-        '\u{10FFFF}', // 非字符（面顶）
-        '\u{E000}',   // 私用区
+        '\u{10FFFF}', // noncharacter (top of plane)
+        '\u{E000}',   // private-use area
         '\u{AD}',     // SOFT HYPHEN
         '\u{034F}',   // CGJ
         '\u{200B}',   // ZWSP

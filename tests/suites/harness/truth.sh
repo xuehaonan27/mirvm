@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# 测试框架自身的回归：锁住双方同败假绿、预期失败原因、失败状态传播，
-# 统一入口的套件清单和 gate 覆盖，以及 SKIP 不会冒充具体能力已通过。
-# 全部使用确定性 fake runner，不构建项目。
+# Regression for the harness itself: locks false green on both-legs-fail, expected-failure
+# reasons, failure-status propagation, the unified entry point's suite list and gate
+# coverage, and that SKIP never impersonates a passed capability. Uses only deterministic fake runners and builds nothing.
 # product: no
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
@@ -25,15 +25,15 @@ run_diff_case() {
     fi
 }
 
-# 旧实现会把双方 exit=101、空 stdout 判成 PASS。
+# Both legs exiting 101 with empty stdout must not be judged PASS.
 run_diff_case false_positive 1 'FAIL ecosystem (native baseline exit=101, want=0)'
-# 注入的已知前沿必须以精确原因记作 XFAIL。
-run_diff_case xfail 0 'XFAIL ecosystem (synthetic.frontier; M5.1 expected red)' \
+# An injected known frontier must be recorded as XFAIL with an exact reason.
+run_diff_case xfail 0 'XFAIL ecosystem (synthetic.frontier; expected red)' \
     synthetic.frontier
-# 一旦功能转绿，必须推动 expected-red 清单，而不是永久吞掉成功。
+# Once a feature turns green the expected-red list must be promoted, not silently swallow the success.
 run_diff_case xpass 1 'XPASS ecosystem (remove/update expected-red frontier)' \
     synthetic.frontier
-# stdout/exit 相同但 mirvm 多出 stderr 也必须失败。
+# Identical stdout/exit with extra mirvm-only stderr must also fail.
 run_diff_case stderr_only 1 'FAIL ecosystem (native=0 mirvm=0)'
 
 DIFF_STDERR_MIRVM="$TMP/diff-stderr-mirvm"
@@ -48,7 +48,7 @@ diff_stderr_out=$(ONLY=fib MIRVM="$DIFF_STDERR_MIRVM" \
 diff_stderr_code=$?
 if [ "$diff_stderr_code" -ne 0 ] \
     && echo "$diff_stderr_out" | grep -Fq 'FAIL fib: stderr differs'; then
-    ok 'differential.programs 拒绝 mirvm 单侧多出的 stderr'
+    ok 'differential.programs rejects extra stderr from the mirvm side alone'
 else
     bad "differential.programs stderr false green (exit=$diff_stderr_code)"
     echo "$diff_stderr_out"
@@ -59,9 +59,9 @@ out=$(SCENARIO=corpus_fail MIRVM="$FIX/fake_mirvm.sh" OUT="$TMP/corpus" \
 code=$?
 if [ "$code" -ne 0 ] \
     && echo "$out" | grep -Fq 'corpus.run: 0 passed, 0 skipped, 0 expected-failed, 1 failed'; then
-    ok 'corpus.run 传播失败状态'
+    ok 'corpus.run propagates failure status'
 else
-    bad "corpus.run 未传播失败状态 (exit=$code)"
+    bad "corpus.run did not propagate failure status (exit=$code)"
     echo "$out"
 fi
 
@@ -71,11 +71,11 @@ xfail_out=$(
      record_expected_failure synthetic 134 '134:corrupted' "$TMP/xfail.err"
      suite_summary synthetic.xfail)
 )
-if echo "$xfail_out" | grep -Fq 'XFAIL synthetic（corrupted）' \
+if echo "$xfail_out" | grep -Fq 'XFAIL synthetic (corrupted)' \
     && echo "$xfail_out" | grep -Fq '1 expected-failed, 0 failed'; then
-    ok '共享 XFAIL 判定锁定退出码和诊断'
+    ok 'shared XFAIL decision locks exit code and diagnostic'
 else
-    bad '共享 XFAIL 判定未正确计数'
+    bad 'shared XFAIL decision counted incorrectly'
     echo "$xfail_out"
 fi
 
@@ -87,9 +87,9 @@ if MIRVM="$FIX/fake_mirvm.sh" TOOLCHAIN=gate-truth-nightly \
         'cargo +gate-truth-nightly build --manifest-path tsan/Cargo.toml --release --locked' \
         "$purity_log" \
     && ! grep -Fq 'tests/suites/runtime/tsan.sh' "$purity_log"; then
-    ok 'runtime.semantics pure 只编译纯度 harness，不重复 TSan'
+    ok 'runtime.semantics pure compiles only the purity harness, not TSan again'
 else
-    bad 'runtime.semantics pure 仍隐式执行 TSan 或未构建纯度 harness'
+    bad 'runtime.semantics pure still runs TSan implicitly or did not build the purity harness'
     cat "$TMP/pure.out"
     test -f "$purity_log" && cat "$purity_log"
 fi
@@ -111,24 +111,24 @@ while IFS= read -r -d '' leaf; do
     discovered_id=${discovered_id//\//.}
     discovered_id=${discovered_id//_/-}
     echo "$list_out" | awk '{print $1}' | grep -Fxq "$discovered_id" || {
-        echo "list 缺自动发现套件: $discovered_id"
+        echo "list is missing auto-discovered suite: $discovered_id"
         missing_listed=1
     }
 done < <(find "$REPO_ROOT/tests/suites" -mindepth 2 -maxdepth 2 -type f -name '*.sh' -print0)
 if [ "$list_code" -eq 0 ] && [ "$(echo "$list_out" | awk '{print $1}' | sort | uniq -d | wc -l)" -eq 0 ] \
     && [ "$missing_listed" -eq 0 ]; then
-    ok '统一入口可从任意目录自动发现且不重复地列出全部套件'
+    ok 'unified entry point lists every suite once from any directory'
 else
-    bad "统一入口 list 错误（exit=$list_code）"
+    bad "unified entry point list wrong (exit=$list_code)"
     echo "$list_out"
 fi
 
 unknown_out=$(/bin/bash tests/run.sh suite does.not.exist 2>&1)
 unknown_code=$?
 if [ "$unknown_code" -eq 64 ] && echo "$unknown_out" | grep -Fq 'unknown suite'; then
-    ok '统一入口拒绝未知套件并返回用法错误'
+    ok 'unified entry point rejects an unknown suite with a usage error'
 else
-    bad "统一入口未知套件状态错误（exit=$unknown_code）"
+    bad "unified entry point wrong status for an unknown suite (exit=$unknown_code)"
 fi
 
 call_log="$TMP/gate-calls"
@@ -145,29 +145,29 @@ if run_fake_gate "$TMP/gate.out" SKIP_TSAN=1; then
         tests/suites/runtime/semantics.sh tests/suites/runtime/c_unwind.sh \
         tests/suites/runtime/jit_stats.sh \
         tests/suites/performance/limits.sh tests/suites/harness/truth.sh; do
-        grep -Fxq "$leaf" "$call_log" || { missing=1; echo "缺调用: $leaf"; }
+        grep -Fxq "$leaf" "$call_log" || { missing=1; echo "missing call: $leaf"; }
     done
-    [ "$missing" -eq 0 ] && ok 'gate 覆盖 fast、smoke 和完整门禁的全部义务' \
-        || bad 'gate 缺少叶套件调用'
+    [ "$missing" -eq 0 ] && ok 'gate covers every obligation of fast, smoke and the full profile' \
+        || bad 'gate is missing a leaf-suite call'
 else
-    bad 'gate 聚合 fixture 执行失败'
+    bad 'gate aggregation fixture failed'
     cat "$TMP/gate.out"
 fi
 
-if grep -Fq 'SKIP TSan（SKIP_TSAN=1）' "$TMP/gate.out" \
+if grep -Fq 'SKIP TSan (SKIP_TSAN=1)' "$TMP/gate.out" \
     && ! grep -Fq 'PASS TSan' "$TMP/gate.out"; then
-    ok 'gate 保留 TSan SKIP，不伪造具体能力 PASS'
+    ok 'gate keeps the TSan SKIP and does not fake a capability PASS'
 else
-    bad 'gate 把 TSan SKIP 冒充 PASS'
+    bad 'gate passes off the TSan SKIP as PASS'
 fi
 
 if run_fake_gate "$TMP/gate-probe-skip.out" M51_SKIP_PROBE=simd_shift \
     && grep -Fq 'SKIP m51_simd_shift: host lacks required CPU feature' \
         "$TMP/gate-probe-skip.out" \
     && ! grep -Fq 'PASS m51_simd_shift' "$TMP/gate-probe-skip.out"; then
-    ok 'gate 将探针特性缺失独立记作 SKIP'
+    ok 'gate records a missing probe feature as its own SKIP'
 else
-    bad 'gate 把探针特性缺失冒充 PASS'
+    bad 'gate passes off the missing probe feature as PASS'
     cat "$TMP/gate-probe-skip.out"
 fi
 
@@ -176,28 +176,28 @@ if run_fake_gate "$TMP/gate-vector-partial.out" M51_SKIP_VECTOR_FEATURE=sha \
     && grep -Fq 'SKIP m51_x86_vectors/sha: host lacks sha' \
         "$TMP/gate-vector-partial.out" \
     && ! grep -Fxq 'PASS m51_x86_vectors' "$TMP/gate-vector-partial.out"; then
-    ok 'gate 将 x86 vector 子特性分别记为 PASS/SKIP'
+    ok 'gate records x86 vector sub-features as separate PASS/SKIP'
 else
-    bad 'gate 把未执行的 SHA helper 冒充 vector 整体 PASS'
+    bad 'gate passes off the unrun SHA helper as a whole-vector PASS'
     cat "$TMP/gate-vector-partial.out"
 fi
 
 if run_fake_gate "$TMP/gate-skip-perf.out" SKIP_TSAN=1 SKIP_PERF=1 \
-    && grep -Fq 'SKIP 性能上限（SKIP_PERF=1；语义 gate 仍照常执行）' \
+    && grep -Fq 'SKIP performance limits (SKIP_PERF=1; the semantics gate still runs as usual)' \
         "$TMP/gate-skip-perf.out"; then
-    ok 'gate SKIP_PERF 只跳过时序门并独立计数'
+    ok 'gate SKIP_PERF skips only the timing gate and counts separately'
 else
-    bad 'gate SKIP_PERF 行为错误'
+    bad 'gate SKIP_PERF behavior wrong'
     cat "$TMP/gate-skip-perf.out"
 fi
 
 if ! run_fake_gate "$TMP/gate-fail.out" \
     GATE_FAIL_SUITE=tests/suites/contracts/cargoless_git.sh \
-    && grep -Fq 'suite contracts.cargoless-git（exit=1）' "$TMP/gate-fail.out" \
+    && grep -Fq 'suite contracts.cargoless-git (exit=1)' "$TMP/gate-fail.out" \
     && grep -Eq 'profile\.gate: .* 1 failed' "$TMP/gate-fail.out"; then
-    ok '叶套件失败会让 gate 非零退出'
+    ok 'a leaf-suite failure makes the gate exit non-zero'
 else
-    bad 'gate 吞掉了叶套件失败'
+    bad 'gate swallowed a leaf-suite failure'
     cat "$TMP/gate-fail.out"
 fi
 

@@ -3,10 +3,10 @@
 [dependencies]
 hickory-proto = "0.26"
 ---
-// hickory-proto 0.26：DNS 报文编解码差分。构造 query/response → to_vec 编码
-// → from_vec 解回，打印 hex、逐字段、FNV-1a checksum、roundtrip 布尔。
-// 覆盖：9 种 RData、域名压缩指针（0xC0）、EDNS(OPT)、TTL 边界、truncate、
-// idna(punycode)、root 名、四类 decode 错误路径。全固定向量，无随机/时间。
+// hickory-proto 0.26: DNS message encode/decode differential. Query/response is
+// built, to_vec-encoded and from_vec-decoded, printing hex, every field, an FNV-1a
+// checksum and the roundtrip boolean. Covers 9 RData kinds, compression pointers
+// (0xC0), EDNS(OPT), TTL edges, truncate, idna, root name, 4 decode errors; no RNG/time.
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::rdata::{A, AAAA, CNAME, MX, NS, PTR, SOA, SRV, TXT};
 use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
@@ -116,7 +116,7 @@ fn dump_message(tag: &str, m: &Message) {
     }
 }
 
-/// 编码 → 打印字节指纹 → 解回 → dump → roundtrip 布尔
+/// Encode → print the byte fingerprint → decode back → dump the fields → roundtrip boolean
 fn roundtrip(tag: &str, msg: &Message) {
     let bytes = msg.to_vec().unwrap();
     println!("{tag} encoded len={} fnv={:016x}", bytes.len(), fnv1a(&bytes));
@@ -127,14 +127,14 @@ fn roundtrip(tag: &str, msg: &Message) {
 }
 
 fn main() {
-    // ① 标准 query：RD + 两个 question（A / AAAA）
+    // ① Standard query: RD plus two questions (A / AAAA)
     let mut q = Message::new(0xBEEF, MessageType::Query, OpCode::Query);
     q.metadata.recursion_desired = true;
     q.add_query(Query::query(Name::from_ascii("www.example.com.").unwrap(), RecordType::A));
     q.add_query(Query::query(Name::from_ascii("ipv6.example.com.").unwrap(), RecordType::AAAA));
     roundtrip("1", &q);
 
-    // ② response：九种 RData + glue + EDNS；共享后缀触发压缩指针
+    // ② Response: nine RData kinds + glue + EDNS; shared suffixes trigger compression
     let mut r = Message::new(0x1234, MessageType::Response, OpCode::Query);
     r.metadata.recursion_desired = true;
     r.metadata.recursion_available = true;
@@ -202,7 +202,7 @@ fn main() {
     r.set_edns(edns);
     roundtrip("2", &r);
 
-    // ③ NXDomain error response：SOA authority，无 answer
+    // ③ NXDomain error response: SOA in authority, no answer
     let mut nx = Message::new(0x0002, MessageType::Response, OpCode::Query);
     nx.metadata.recursion_desired = true;
     nx.metadata.recursion_available = true;
@@ -223,12 +223,12 @@ fn main() {
     ));
     roundtrip("3", &nx);
 
-    // ④ truncate：清 sections、置 tc、留 queries/edns
+    // ④ truncate: clears the sections, sets tc, keeps queries/edns
     let t = r.truncate();
     println!("4 truncated tc={} an={} ns={} ar={} q={}", t.metadata.truncation, t.answers.len(), t.authorities.len(), t.additionals.len(), t.queries.len());
     roundtrip("4", &t);
 
-    // ⑤ Name 细节：root、大小写保留、idna(punycode)、label 计数、查询类
+    // ⑤ Name details: root, case preservation, idna (punycode), label count, query class
     let root = Name::root();
     println!("5 root ascii={:?} labels={} len={}", root.to_ascii(), root.num_labels(), root.len());
     let mixed = Name::from_ascii("WWW.Example.COM.").unwrap();
@@ -241,13 +241,13 @@ fn main() {
     msg5.add_query(qc);
     roundtrip("5", &msg5);
 
-    // ⑥ decode 错误路径（文本确定性）
+    // ⑥ decode error paths (the printed text is deterministic)
     let e1 = Message::from_vec(&[]).unwrap_err();
     println!("6 empty-input err: {e1}");
     let full = r.to_vec().unwrap();
     let e2 = Message::from_vec(&full[..full.len() / 2]).unwrap_err();
     println!("6 truncated-input err: {e2}");
-    // 压缩指针指向自身（idx=12, ptr=12）
+    // Compression pointer pointing at itself (idx=12, ptr=12)
     let mut bad = vec![0x12, 0x34, 0x81, 0x80, 0, 1, 0, 0, 0, 0, 0, 0];
     bad.extend_from_slice(&[0xC0, 0x0C, 0, 1, 0, 1]);
     let e3 = Message::from_vec(&bad).unwrap_err();

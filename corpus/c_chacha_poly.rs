@@ -3,19 +3,19 @@
 [dependencies]
 chacha20poly1305 = "0.10"
 ---
-// chacha20poly1305 0.10（ChaCha20 流 cipher + Poly1305 MAC 的 AEAD）差分：
-// ChaCha20-Poly1305 与 XChaCha20-Poly1305 两变体全 API 面对拍。
-// 覆盖：RFC 8439 §2.8.2 与 draft-arciszewski-xchacha-03 A.1 已知答案自查
-// （硬编码期望 ct/tag 双向比对：encrypt 对常量、decrypt 常量对明文）；
-// 固定 key/nonce/aad 定向量（alloc encrypt/decrypt 打印 ct+tag hex）；
-// in-place（encrypt_in_place/decrypt_in_place）与 detached-tag
-// （encrypt_in_place_detached/decrypt_in_place_detached）同 alloc 逐字节一致性；
-// 篡改 ct/tag、错 aad、缺 aad、错 key、错 nonce、截断 blob 的失败例（必须
-// is_err）；明文谱系 0/1/63/64/65/127/128/129/255B（整块与跨 64B 块界，
-// 每长度独立 nonce），输出 len+blob 长度+FNV-1a+roundtrip 布尔（短块附 hex）。
-// 说明：chacha20 0.9 / poly1305 0.8 在 x86_64 运行期 cpuid 探测选 avx2
-// backend；poly1305 avx2 的 llvm.x86.avx2.permd 已内建（2026-07-15），
-// 本 driver 直接走硬件后端，无需 c_snow_noise 旧例的 poly1305_force_soft。
+// chacha20poly1305 0.10 differential (ChaCha20 stream cipher + Poly1305 MAC, as an AEAD):
+// the full API surface for both ChaCha20-Poly1305 and XChaCha20-Poly1305.
+// Covers RFC 8439 §2.8.2 and draft-arciszewski-xchacha-03 A.1 known answers (hardcoded
+// expected ct/tag compared both ways: encrypt against the constants, decrypt the constants
+// against the plaintext); fixed key/nonce/aad vectors (alloc encrypt/decrypt printing ct+tag
+// hex); byte-for-byte agreement between the in-place API (encrypt_in_place/decrypt_in_place),
+// the detached-tag API (encrypt_in_place_detached/decrypt_in_place_detached) and alloc;
+// failure cases for tampered ct/tag, wrong aad, missing aad, wrong key, wrong nonce and a
+// truncated blob (all must be is_err); plaintext spectrum 0/1/63/64/65/127/128/129/255 B
+// (whole blocks and across the 64 B block boundary, independent nonce per length), printing
+// len + blob length + FNV-1a + a roundtrip boolean (hex for short blocks).
+// chacha20 0.9 / poly1305 0.8 pick the avx2 backend by runtime cpuid on x86_64; the
+// llvm.x86.avx2.permd intrinsic poly1305 needs is built in, so no force-soft path is required.
 use chacha20poly1305::aead::{Aead, AeadInPlace, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce, Tag, XChaCha20Poly1305, XNonce};
 
@@ -43,7 +43,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 定种 xorshift64* PRNG（native/mirvm 同序列），谱系明文用。
+/// Seeded xorshift64* PRNG with the same sequence on native and mirvm; supplies the plaintexts.
 struct Rng(u64);
 
 impl Rng {
@@ -66,14 +66,14 @@ impl Rng {
     }
 }
 
-/// blob = ciphertext || tag(16B)，拆开打印；空 ct 以 `-` 占位（不留尾随空格）。
+/// blob = ciphertext || 16-byte tag, printed split; an empty ct prints `-` (no trailing space).
 fn report(label: &str, blob: &[u8]) {
     let (ct, tag) = blob.split_at(blob.len() - 16);
     println!("{label} ct  = {}", if ct.is_empty() { "-".into() } else { hex(ct) });
     println!("{label} tag = {}", hex(tag));
 }
 
-// ---- RFC 8439 §2.8.2 常量 ----
+// ---- RFC 8439 §2.8.2 constants ----
 const KAT_KEY: [u8; 32] = [
     0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e,
     0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d,
@@ -96,7 +96,7 @@ const XCHACHA_CT: &str = "bd6d179d3e83d43b9576579493c0e939572a1700252bfaccbed290
 const XCHACHA_TAG: &str = "c0875924c1c7987947deafd8780acf49";
 
 fn main() {
-    // ---- ① KAT：RFC 8439 §2.8.2（ChaCha20-Poly1305）----
+    // ---- ① KAT: RFC 8439 §2.8.2 (ChaCha20-Poly1305) ----
     let key = Key::from_slice(&KAT_KEY);
     let c = ChaCha20Poly1305::new(key);
     let kat_blob = c
@@ -112,7 +112,7 @@ fn main() {
     let (ct, tag) = kat_blob.split_at(kat_blob.len() - 16);
     println!("kat/rfc8439 ct_ok  = {}", hex(ct) == RFC8439_CT);
     println!("kat/rfc8439 tag_ok = {}", hex(tag) == RFC8439_TAG);
-    // 反向：decrypt 硬编码常量 blob → 必须还原明文
+    // Reverse direction: decrypting the hardcoded blob must recover the plaintext
     let mut exp = unhex(RFC8439_CT);
     exp.extend_from_slice(&unhex(RFC8439_TAG));
     let back = c
@@ -126,7 +126,7 @@ fn main() {
         .unwrap();
     println!("kat/rfc8439 dec_ok = {}", back == KAT_PT);
 
-    // ---- ② KAT：draft-arciszewski-xchacha-03 A.1（XChaCha20-Poly1305）----
+    // ---- ② KAT: draft-arciszewski-xchacha-03 A.1 (XChaCha20-Poly1305) ----
     let xc = XChaCha20Poly1305::new(key);
     let xkat_blob = xc
         .encrypt(
@@ -154,7 +154,7 @@ fn main() {
         .unwrap();
     println!("kat/xchacha dec_ok = {}", xback == KAT_PT);
 
-    // ---- ③ 定向量：项目固定 key/nonce/aad，两变体 ----
+    // ---- ③ Fixed vectors: project key/nonce/aad, both variants ----
     let dkey = Key::from_slice(&[
         0x42, 0x90, 0xbc, 0xb1, 0x54, 0x17, 0x35, 0x31, 0xf3, 0x14, 0xf5, 0x7c, 0x08, 0x8c,
         0x7e, 0x1e, 0x0e, 0x6d, 0x5c, 0xf7, 0x5e, 0x3c, 0x30, 0x81, 0x0b, 0xa9, 0xd6, 0x52,
@@ -203,7 +203,7 @@ fn main() {
         .unwrap();
     println!("direct/xchacha roundtrip = {}", dxback == msg);
 
-    // ---- ④ in-place 与 detached-tag 同 alloc 逐字节一致 ----
+    // ---- ④ in-place and detached-tag agree byte-for-byte with alloc ----
     let mut buf = msg.to_vec();
     dc.encrypt_in_place(dnonce, aad, &mut buf).unwrap();
     println!("inplace enc eq alloc = {}", buf == dblob);
@@ -226,7 +226,7 @@ fn main() {
         .unwrap();
     println!("detached roundtrip    = {}", dbuf == msg);
 
-    // XChaCha in-place 一致性
+    // XChaCha in-place agreement
     let mut xbuf = msg.to_vec();
     dxc.encrypt_in_place(dxnonce, aad, &mut xbuf).unwrap();
     println!("x/inplace enc eq alloc = {}", xbuf == dxblob);
@@ -238,7 +238,7 @@ fn main() {
         .unwrap();
     println!("x/detached roundtrip   = {}", xdbuf == msg);
 
-    // ---- ⑤ 失败例（全部必须 is_err）----
+    // ---- ⑤ Failure cases (all must be is_err) ----
     let mut t1 = dblob.clone();
     t1[7] ^= 0x01;
     println!(
@@ -312,7 +312,7 @@ fn main() {
         dc.decrypt_in_place_detached(dnonce, aad, &mut t4, badtag)
             .is_err()
     );
-    // XChaCha 失败路径抽查
+    // Spot checks of the XChaCha failure paths
     let mut xt = dxblob.clone();
     xt[0] ^= 0x40;
     println!(
@@ -338,7 +338,7 @@ fn main() {
         .is_err()
     );
 
-    // ---- ⑥ 明文谱系：0/1/整块 64B/跨界/多块，逐长度独立 nonce ----
+    // ---- ⑥ Plaintext spectrum: 0/1/one 64 B block/cross-boundary/multi-block, per-length nonce ----
     for len in [0usize, 1, 63, 64, 65, 127, 128, 129, 255] {
         let mut rng = Rng(0x9e37_79b9_7f4a_7c15 ^ (len as u64).wrapping_mul(0x100_0000_01b3));
         let pt = rng.bytes(len);

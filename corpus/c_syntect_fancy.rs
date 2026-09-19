@@ -1,52 +1,52 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# syntect 5.2.0（5.x 最新，钉 =patch 防漂移）。按任务钉选
-# default-features=false + ["parsing","default-fancy"]：
-#   - 砍 default 的 onig C 后端（regex-onig → onig_sys C 构建 + libonig
-#     闭包链接，是重 FFI 且非本 driver 测试面）；
-#   - default-fancy 自带 parsing/default-syntaxes/default-themes/html/
-#     regex-fancy（fancy-regex 纯 Rust）+ plist-load/yaml-load/dump-*
-#     （后四者只多拖 serde/解析依赖，不走其运行面，任务指定全收）。
-# "parsing" 显式重列：任务钉选原文如此，二者取并集无害。
-# 闭包 ≈30 crate（fancy-regex/bitflags/bincode/flate2(miniz_oxide)/
-# plist(quick-xml 系)/yaml-rust/serde_json/thiserror/walkdir…），全部纯 Rust。
+# syntect 5.2.0 (latest 5.x; pinned with =patch to prevent drift). The pin selects
+# default-features=false + ["parsing","default-fancy"]:
+#   - drops the default onig C backend (regex-onig -> onig_sys C build + libonig
+#     linkage, heavy FFI and outside this driver's test surface);
+#   - default-fancy brings parsing/default-syntaxes/default-themes/html/
+#     regex-fancy (fancy-regex, pure Rust) + plist-load/yaml-load/dump-*
+#     (the last four only add serde/parsing deps and are not exercised; enabled anyway).
+# "parsing" is listed explicitly as well; the union is harmless.
+# Closure is ~30 crates (fancy-regex/bitflags/bincode/flate2(miniz_oxide)/
+# plist(quick-xml family)/yaml-rust/serde_json/thiserror/walkdir...), all pure Rust.
 syntect = { version = "=5.2.0", default-features = false, features = ["parsing", "default-fancy"] }
 ---
-// syntect 5.2.0（fancy-regex 纯 Rust 后端）语法高亮 HTML 三维差分：
-// 对 rust / yaml / markdown 三个内嵌代码片段，用 crate 内置静态语法集
-// （SyntaxSet::load_defaults_newlines）与内置主题集（ThemeSet::load_defaults，
-// 选 InspiredGitHub）生成带内联颜色样式的 HTML。
+// syntect 5.2.0 (fancy-regex pure-Rust backend): three-way differential over
+// syntax-highlighted HTML. For three inline snippets (rust / yaml / markdown) it uses the
+// crate's built-in static syntax set (SyntaxSet::load_defaults_newlines) and built-in
+// theme set (ThemeSet::load_defaults, choosing InspiredGitHub) to emit inline-styled HTML.
 //
-// 任务书原文 toml，但 syntect 5.2.0 内置语法集（75 个）根本不含 TOML
-// ——探针全表列出 exts 实证（Markdown=["md",…]、Rust=["rs"]、无 TOML 条目；
-// `find_syntax_by_extension("toml")` 返回 None，A 维实测在第 2 片段 unwrap
-// panic）。
-// 按任务「语法定义用 crate 内置静态集」的约束，以同角色（配置/标记、带
-// # 注释）的内置 YAML 语法替代（ext "yaml"），三片段组合「代码/配置/文档」
-// 原意保持。
+// TOML is absent from the syntax set built into syntect 5.2.0 (75 entries): the full
+// extension table shows it (Markdown=["md",...], Rust=["rs"], no TOML entry;
+// `find_syntax_by_extension("toml")` returns None, so a toml snippet would unwrap-
+// panic).
+// With syntaxes constrained to the crate's built-in static set, the toml slot uses the
+// built-in YAML syntax (ext "yaml"), which fills the same role (configuration/markup with
+// # comments); the code/config/document trio of the three snippets is preserved.
 //
-// 测试面：
-//   ① 内嵌 dump 装载：default_syntaxes/default_themes 是 zlib 压缩的 bincode
-//      静态资产 → flate2(miniz_oxide)+simd-adler32 的 adler32 校验（单次
-//      update ≥32B 的 SIMD 派发走 _mm*_sad_epu8 = llvm.x86.psad.bw 族，
-//      2026-07-15 已内建的七族修复之一；本 driver 顺带当这条修复的回归网）；
-//      资产计数（syntax 数/theme 数/name 全列）+ scope 打印锚定 bincode
-//      反序列化与 BTreeMap 序。
-//   ② 高亮主体：fancy-regex 驱动的 Sublime 语法状态机逐行着色 →
-//      highlighted_html_for_string；每段锚定 syntax 名/scope/输出行数/
-//      span 计数/颜色 token 十六进制序（按出现序去重的 Vec，非哈希集），
-//      HTML 输出行随后全量打印。
-//   ③ 混合面：rust 片段含 raw string 与 // 注释、yaml 含 # 行内注释/非标
-//      量（bool/int/列表）与非 ASCII、markdown 含标题/粗体/行内码/链接/
-//      列表/引用+非 ASCII，HTML 实体转义（&<>"）经 raw string 与注释压到。
-//   ④ 错误/空路径：find_syntax_by_extension("nope") → None 锚定。
+// Test surface:
+//   ① Embedded dump loading: default_syntaxes/default_themes are zlib-compressed bincode
+//      static assets -> the flate2(miniz_oxide)+simd-adler32 adler32 check (a single
+//      update >=32B dispatches SIMD through the _mm*_sad_epu8 = llvm.x86.psad.bw family,
+//      one of the runtime's implemented SIMD paths; this driver also regresses it);
+//      asset counts (syntax count / theme count / all names) + scope output anchor the
+//      bincode deserialization and BTreeMap order.
+//   ② Highlighting core: the fancy-regex-driven Sublime syntax state machine colors the
+//      text line by line -> highlighted_html_for_string; each snippet anchors syntax
+//      name/scope/output line count/span count/hex color-token order (a Vec deduped in
+//      first-seen order, not a hash set), then the full HTML output is printed.
+//   ③ Mixed surface: the rust snippet has a raw string and // comments; yaml has # line
+//      comments, non-scalar values (bool/int/list) and non-ASCII; markdown has heading/
+//      bold/inline code/link/list/quote plus non-ASCII and HTML entity escapes (&<>").
+//   ④ Error/empty path: find_syntax_by_extension("nope") -> None is anchored.
 //
-// 确定性：资产全为 crate 编译期内嵌静态数据；输入为内嵌字面量；无 IO/
-// 时间/随机/线程/哈希序（颜色去重用保序 Vec；theme 名遍历走 BTreeMap
-// 键序）；输出 ≤80 行；无浮点；stderr 真空（driver 零 warning）。
+// Determinism: assets are static data embedded at crate compile time; inputs are embedded
+// literals; no IO/time/random/threads/hash order (colors dedupe with an order-preserving
+// Vec, theme names follow BTreeMap key order); output <=80 lines, no floats, stderr empty.
 //
-// 三维复跑命令（仓库根）：
+// Three-way rerun commands (repo root):
 //   A: target/release/mirvm run corpus/c_syntect_fancy.rs
 //   B: cd $(grep -l 'name = "c_syntect_fancy"' ~/.cache/mirvm/scripts/*/Cargo.toml \
 //        | head -1 | xargs dirname) && \
@@ -54,7 +54,7 @@ syntect = { version = "=5.2.0", default-features = false, features = ["parsing",
 //      "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
 //   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_syntect_fancy.rs
 //
-// FRONTIER：无（期待全绿）。
+// No known limitation; expect all green.
 use syntect::highlighting::ThemeSet;
 use syntect::html::highlighted_html_for_string;
 use syntect::parsing::SyntaxSet;
@@ -95,7 +95,7 @@ fn fnv1a(data: &[u8]) -> u64 {
 }
 
 fn main() {
-    // ---- ① 静态资产装载（zlib+bincode 反序列化路径）----
+    // ---- ① static asset loading (zlib+bincode deserialization path) ----
     let ps = SyntaxSet::load_defaults_newlines();
     println!("syntaxes = {}", ps.syntaxes().len());
     let ts = ThemeSet::load_defaults();
@@ -105,7 +105,7 @@ fn main() {
     let bg = theme.settings.background.unwrap();
     println!("theme bg = #{:02x}{:02x}{:02x}{:02x}", bg.r, bg.g, bg.b, bg.a);
 
-    // ---- ② 三片段高亮 ----
+    // ---- ② highlight the three snippets ----
     let mut all = String::new();
     for (ext, code) in [("rs", RUST), ("yaml", YAML), ("md", MARKDOWN)] {
         let syntax = ps.find_syntax_by_extension(ext).unwrap();
@@ -131,7 +131,7 @@ fn main() {
         all.push_str(&html);
     }
 
-    // ---- ④ 汇总 + 空路径 ----
+    // ---- ④ summary + empty path ----
     println!("missing ext found = {}", ps.find_syntax_by_extension("nope").is_some());
     println!("fnv-all = {:016x}", fnv1a(all.as_bytes()));
 }

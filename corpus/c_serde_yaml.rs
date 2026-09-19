@@ -4,11 +4,11 @@
 serde_yaml = "0.9"
 serde = { version = "1", features = ["derive"] }
 ---
-// serde_yaml 0.9：内部是 libyaml 的纯 Rust 移植（unsafe-libyaml，C 风格
-// 状态机 scanner/parser/emitter）。覆盖：多文档 / 嵌套 map-seq /
-// 锚点别名+merge key / 数字谱系 / unicode / 块标量与折叠标量 /
-// parse→改→serialize roundtrip / 错误路径行列号。
-// 键序确定性：Mapping 基于 IndexMap，保持插入序，输出按插入序。
+// serde_yaml 0.9 is internally a pure-Rust port of libyaml (unsafe-libyaml, a C-style
+// state machine scanner/parser/emitter). Coverage: multi-document / nested map-seq /
+// anchor alias + merge key / number lineage / unicode / block and folded scalars /
+// parse -> mutate -> serialize roundtrip / error-path line and column.
+// Key-order determinism: Mapping is IndexMap-backed; insertion order is preserved in output.
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Deserializer, Mapping, Number, Value};
 use std::collections::BTreeMap;
@@ -34,7 +34,7 @@ fn kind(v: &Value) -> &'static str {
     }
 }
 
-// 统计子树节点数（确定性遍历：seq 按下标，map 按插入序）。
+// Count subtree nodes (deterministic traversal: seq by index, map by insertion order).
 fn count_nodes(v: &Value) -> u64 {
     1 + match v {
         Value::Sequence(s) => s.iter().map(count_nodes).sum(),
@@ -45,7 +45,7 @@ fn count_nodes(v: &Value) -> u64 {
 }
 
 fn main() {
-    // ① 多文档流：--- / ... 分隔，逐文档反序列化
+    // ① multi-document stream: separated by --- / ..., deserialize document by document
     let multi = "---\nname: alpha\nvalue: 1\n...\n---\n[1, 2, 3]\n---\njust a scalar\n";
     let mut docs = 0;
     for document in Deserializer::from_str(multi) {
@@ -56,7 +56,7 @@ fn main() {
     }
     println!("docs total = {docs}");
 
-    // ② 嵌套 map-seq：下标链式访问 + 子树计数
+    // ② nested map-seq: chained index access + subtree counting
     let nested = "root:\n  - name: n0\n    tags: [x, y]\n  - name: n1\n    tags:\n      - z\n      - w\nmeta:\n  count: 2\n  ok: true\n";
     let v: Value = serde_yaml::from_str(nested).unwrap();
     println!("nested nodes = {}", count_nodes(&v));
@@ -72,7 +72,7 @@ fn main() {
         .collect();
     println!("top keys = {top_keys:?}");
 
-    // ③ 锚点 / 别名 / merge key
+    // ③ anchors / aliases / merge key
     let anchored = "defaults: &def\n  retries: 3\n  timeout: 30\nprod:\n  <<: *def\n  timeout: 60\ncopy: *def\n";
     let mut v: Value = serde_yaml::from_str(anchored).unwrap();
     println!("alias resolved = {}", v["copy"]["retries"].as_u64().unwrap());
@@ -85,7 +85,7 @@ fn main() {
     );
     println!("merge key gone = {}", v["prod"].get("<<").is_none());
 
-    // ④ 数字谱系：十进制/hex/octal/边界/浮点/特殊值；浮点按位型打印
+    // ④ number lineage: decimal/hex/octal/boundaries/floats/special values; floats by bit pattern
     for tok in [
         "0",
         "-0",
@@ -118,11 +118,11 @@ fn main() {
         };
         println!("num {tok:>22} => {desc}");
     }
-    // Number 手工构造 + as_f64 对整数的强制转换
+    // Hand-built Number + as_f64 coercion of an integer
     let n = Number::from(7);
     println!("num7 i64={} f64bits={:016x}", n.as_i64().unwrap(), n.as_f64().unwrap().to_bits());
 
-    // ⑤ unicode：CJK / 非 BMP / 转义
+    // ⑤ unicode: CJK / non-BMP / escapes
     let uni = "greeting: '你好，世界'\nemoji: \"\\U0001F600 smile\"\nesc: \"tab\\there quote\\\"\"\n";
     let v: Value = serde_yaml::from_str(uni).unwrap();
     let g = v["greeting"].as_str().unwrap();
@@ -133,14 +133,14 @@ fn main() {
     let uni_ser = serde_yaml::to_string(&v).unwrap();
     println!("uni roundtrip eq = {}", serde_yaml::from_str::<Value>(&uni_ser).unwrap() == v);
 
-    // ⑥ 块标量（literal | / |- / |+）与折叠标量（> / >-）
+    // ⑥ block scalars (literal | / |- / |+) and folded scalars (> / >-)
     let blocks = "literal: |\n  line1\n  line2\nliteral_strip: |-\n  a\n  b\nliteral_keep: |+\n  c\n\nfolded: >\n  hello\n  world\nfolded_strip: >-\n  x\n  y\n";
     let v: Value = serde_yaml::from_str(blocks).unwrap();
     for k in ["literal", "literal_strip", "literal_keep", "folded", "folded_strip"] {
         println!("block {k} = {:?}", v[k].as_str().unwrap());
     }
 
-    // ⑦ parse → 改 → serialize → reparse roundtrip
+    // ⑦ parse -> mutate -> serialize -> reparse roundtrip
     let src = "name: demo\nitems: [1, 2, 3]\nnested:\n  flag: true\n";
     let mut v: Value = serde_yaml::from_str(src).unwrap();
     v["items"].as_sequence_mut().unwrap().push(Value::from(4u64));
@@ -153,7 +153,7 @@ fn main() {
     let v2: Value = serde_yaml::from_str(&out).unwrap();
     println!("roundtrip eq = {}", v == v2);
 
-    // ⑧ 键序：手工 Mapping（插入序）+ flow mapping 解析保序
+    // ⑧ key order: hand-built Mapping (insertion order) + flow mapping parse keeps order
     let mut m = Mapping::new();
     for (k, i) in [("zeta", 1u64), ("alpha", 2), ("mid", 3)] {
         m.insert(Value::from(k), Value::from(i));
@@ -169,7 +169,7 @@ fn main() {
         .collect();
     println!("flow keys = {keys:?}");
 
-    // ⑨ 显式 tag：!tag 解析与再发射
+    // ⑨ explicit tag: !tag parsing and re-emission
     let tagged: Value = serde_yaml::from_str("!mytag [1, 2]").unwrap();
     match &tagged {
         Value::Tagged(t) => println!(
@@ -181,7 +181,7 @@ fn main() {
     }
     println!("tagged ser = {}", serde_yaml::to_string(&tagged).unwrap().trim_end());
 
-    // ⑩ 派生结构体的 typed 反序列化 / 序列化（含嵌套容器、浮点位型）
+    // ⑩ typed deserialize / serialize of a derived struct (nested containers, float bits)
     let cfg: Config = serde_yaml::from_str(
         "name: svc\nreplicas: 3\nratio: 0.75\nflags: [true, false, true]\nports:\n  http: 80\n  grpc: 9000\n",
     )
@@ -201,7 +201,7 @@ fn main() {
     println!("cfg roundtrip eq = {}", cfg == cfg2);
     println!("cfg ser = {}", cfg_ser.trim_end().replace('\n', " | "));
 
-    // ⑪ 错误路径：行/列/字节索引（文本确定性）
+    // ⑪ error path: line/column/byte index (text determinism)
     for (label, bad) in [
         ("unclosed_flow", "a: [1, 2"),
         ("tab_indent", "\tx: 1"),
@@ -224,7 +224,7 @@ fn main() {
             },
         }
     }
-    // 类型不匹配错误（typed 路径）
+    // type-mismatch error (typed path)
     match serde_yaml::from_str::<u32>("name: not_a_number") {
         Ok(x) => println!("err typed: got {x}"),
         Err(err) => match err.location() {

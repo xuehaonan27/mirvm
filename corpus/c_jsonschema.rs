@@ -1,7 +1,7 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# jsonschema pinned to the exact patch, "锁死" meaning =0.48.0.
+# jsonschema pinned to the exact patch, "locked" meaning =0.48.0.
 # default-features = false: 0.48's defaults are resolve-http + resolve-file +
 # tls-aws-lc-rs, which pull reqwest/hyper/rustls and the cmake-built C library
 # aws-lc-sys (198 crates in the graph). That breaks the pure-Rust target and no
@@ -36,7 +36,7 @@ serde_json = "=1.0.150"
 // time, RNG or environment enters. Valid counts are pinned with assert_eq!.
 //
 //
-// 三维复跑：
+// Three-way rerun:
 //   A: target/release/mirvm run corpus/c_jsonschema.rs
 //   B: cd $(grep -l 'name = "c_jsonschema"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname) \
 //        && RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \

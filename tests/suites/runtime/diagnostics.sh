@@ -50,7 +50,7 @@ run_case() { # <name> <deps> <fixture> <unused-name> <missing-symbol> <guest-hex
         return
     fi
     if grep -aFq "function \`$unused_name\` is never used" "$diag" \
-        && grep -aFq "foreign \`$missing\` 符号不存在" "$diag"; then
+        && grep -aFq "foreign \`$missing\` symbol not found" "$diag"; then
         ok "$name diagnostics contains compiler warning and MIRVM control error"
     else
         bad "$name diagnostics missing compiler or MIRVM diagnostic"

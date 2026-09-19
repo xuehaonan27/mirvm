@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# x86 特性探针。
-# 每件以 native 编译直跑为 oracle，逐字节对比 mirvm；宿主缺 CPU 特性时该件
-# 必须打 SKIP（不得冒充 PASS），x86_vectors 的 pshufb/sha 两个子能力分别记账。
-# 每项能力分别记账，宿主不支持时记 SKIP。
+# x86 feature probes.
+# Each item uses a directly-run native build as its oracle and compares mirvm byte-
+# for-byte. A host missing the CPU feature must SKIP that item (never fake PASS);
+# x86_vectors accounts for the pshufb and sha sub-capabilities separately.
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
 test_enter_repo
@@ -10,14 +10,14 @@ MIRVM=${MIRVM:-$(pwd)/target/release/mirvm}
 RUSTC=${RUSTC:-rustc}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-# probe_diff <名字> <fixture> <unavailable 行(可空)> [vm-call...]
-# 通用骨架：native 编译直跑 → mirvm run（可多次 vm-call 追加输出）→ 逐字节 diff。
-# 打印 PASS|SKIP|FAIL m51_<名字>(: 原因) 一行；返回 0=PASS/SKIP，1=FAIL。
+# probe_diff <name> <fixture> <unavailable line (may be empty)> [vm-call...]
+# Shared skeleton: compile and run natively -> mirvm run (extra vm-calls append output) -> byte diff.
+# Prints one PASS|SKIP|FAIL m51_<name>(: reason) line; returns 0 for PASS/SKIP, 1 for FAIL.
 probe_diff() {
     local name="$1" src="tests/fixtures/$2" unavail="$3"
     shift 3
     "$RUSTC" --edition 2024 -o "$TMP/$name.native" "$src" 2>"$TMP/$name.rustc.err" || {
-        echo "FAIL m51_$name: rustc 编译失败"; cat "$TMP/$name.rustc.err"; return 1; }
+        echo "FAIL m51_$name: rustc build failed"; cat "$TMP/$name.rustc.err"; return 1; }
     local native_code=0 mirvm_code=0
     "$TMP/$name.native" >"$TMP/$name.native.out" 2>"$TMP/$name.native.err" || native_code=$?
     if [ $# -gt 0 ]; then
@@ -56,12 +56,12 @@ probe_diff() {
     ok "m51_$name"
 }
 
-# x86_vectors：feature-gated stdarch；native 输出携带 pshuf=/sha= 状态行，
-# diff 一致后按子能力分别打 PASS/SKIP。
+# x86_vectors: feature-gated stdarch; the native output carries pshuf=/sha= status
+# lines; once the diff matches, each sub-capability is PASSed or SKIPped separately.
 probe_x86_vectors() {
     local name=x86_vectors src=tests/fixtures/m51_x86_vectors.rs
     "$RUSTC" --edition 2024 -o "$TMP/$name.native" "$src" 2>"$TMP/$name.rustc.err" || {
-        echo "FAIL m51_x86_vectors: rustc 编译失败"; cat "$TMP/$name.rustc.err"; return 1; }
+        echo "FAIL m51_x86_vectors: rustc build failed"; cat "$TMP/$name.rustc.err"; return 1; }
     "$TMP/$name.native" >"$TMP/$name.native.out" 2>"$TMP/$name.native.err"
     local mirvm_code=0
     "$MIRVM" run "$src" >"$TMP/$name.mirvm.out" 2>"$TMP/$name.mirvm.err" || mirvm_code=$?

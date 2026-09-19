@@ -1,23 +1,23 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# logos 0.14（最新 0.14.x），default features（std + derive 内含 logos-derive，
-# 生成表驱动 DFA 的宏在编译期展开，运行期是纯字符串区间扫描）。词法器 crate
-# 的代表面：derive 大表词法 + span/slice 区间记账。
+# logos 0.14 (latest 0.14.x), default features (std + derive, which includes
+# logos-derive: its table-driven DFA macro expands at compile time, leaving pure
+# string-interval scanning at runtime). Lexer-crate surface: derive tables + span/slice bookkeeping.
 logos = "0.14"
 ---
-// logos 0.14（表驱动 DFA 词法器，derive 编译期生成）三维差分：mini 四则表达式
-// lexer——数字 / 四运算（+ - * /）/ 左右括号 / 空白与 // 行注释（skip 规则），
-// token 类型 + slice + span 序列全打印；两处词法错误（'@'、'#'）的 Err(()) 的
-// span 定位，且错误后迭代继续（下一 token 照常给出）。另锚定 Lexer 元 API：
-// source()/remainder()/next() 交错与最终归空。
+// logos 0.14 (table-driven DFA lexer, derive-generated at compile time) three-way
+// differential over a mini arithmetic lexer: numbers, + - * /, parens, whitespace
+// and // line comments (skip rules). Prints every token type + slice + span, plus
+// Err(()) spans for two lexical errors ('@', '#'); iteration continues after each.
+// Also anchors the Lexer meta API (source/remainder/next, final exhaustion to empty).
 //
-// 纯字符串区间计算，无 IO/随机/时间/哈希序——输出天然确定；stderr 真空
-// （driver 零 warning）。注意调用点 #[derive] 的 Logos 宏把 "/" 单字符 token
-// 与 "//" 起头的行注释 skip regex 并置：logos 采用最长匹配胜出，"//..." 整体
-// 匹配比一般长命中 skip；孤 "/" 只命中 token——本 driver 两者都踩。
+// Pure string-interval computation, no IO/random/time/hash order -- output is
+// naturally deterministic, stderr empty (zero driver warnings). Note the #[derive]
+// Logos macro places the "/" token next to the "//" line-comment skip regex:
+// longest match wins, so "//..." takes skip and a lone "/" takes only the token; both occur.
 //
-// 三维复跑命令（仓库根）：
+// Three-way rerun commands (from the repo root):
 //   A: target/release/mirvm run corpus/c_logos_lex.rs
 //   B: cd $(grep -l 'name = "c_logos_lex"' ~/.cache/mirvm/scripts/*/Cargo.toml \
 //        | head -1 | xargs dirname) && \
@@ -25,7 +25,7 @@ logos = "0.14"
 //      "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
 //   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_logos_lex.rs
 //
-// FRONTIER：无（期待全绿）。
+// FRONTIER: none (expect all green).
 use logos::Logos;
 use std::ops::Range;
 
@@ -48,7 +48,7 @@ enum Token {
     RParen,
 }
 
-/// 全量打印一个源串的 token 流（类型/slice/span），错误按 ERR 行打印 span。
+/// Print one source string's full token stream (type/slice/span); errors print their span on an ERR line.
 fn lex_dump(tag: &str, src: &str) -> (Vec<(Token, Range<usize>)>, Vec<Range<usize>>) {
     println!("[{tag}] len={} src=\"{}\"", src.len(), src.escape_debug());
     let mut toks = Vec::new();
@@ -72,7 +72,7 @@ fn lex_dump(tag: &str, src: &str) -> (Vec<(Token, Range<usize>)>, Vec<Range<usiz
 }
 
 fn main() {
-    // ① 干净输入：全 7 种 token + 空白 + 中段行注释 + 换行后接括号组。
+    // ① Clean input: 7 token kinds + whitespace + a mid-stream comment + a paren group after a newline.
     let (t1, e1) = lex_dump(
         "clean",
         "12 + 34*( 56- 7 ) / 89 // final result\n( 10 )",
@@ -98,12 +98,12 @@ fn main() {
     );
     assert!(e1.is_empty());
 
-    // ② 词法错误 '@'：span 指向 2..3，错误后迭代正常继续。
+    // ② Lexical error '@': span points at 2..3; iteration continues normally after the error.
     let (t2, e2) = lex_dump("err-at", "7 @ 8");
     assert_eq!(e2, vec![2..3]);
     assert_eq!(t2, vec![(Token::Num, 0..1), (Token::Num, 4..5)]);
 
-    // ③ 词法错误 '#' 混在括号表达式内：span 指向 5..6。
+    // ③ Lexical error '#' inside a parenthesized expression: span points at 5..6.
     let (t3, e3) = lex_dump("err-hash", "(1 + #2)");
     assert_eq!(e3, vec![5..6]);
     assert_eq!(
@@ -117,7 +117,7 @@ fn main() {
         ]
     );
 
-    // ④ Lexer 元 API：source/remainder 归约与重新 lexer 起点。
+    // ④ Lexer meta API: source/remainder reduction and a fresh lexer's start.
     let mut lex = Token::lexer("99+ 5*11");
     println!(
         "meta src_len={} rem0={}",

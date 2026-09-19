@@ -2,8 +2,8 @@
 ---
 [dependencies]
 ---
-// §2.1 网络形态危险探针（预期挂死，不入自动批）：
-// client.read_exact 阻塞等 server 线程 echo，但协作调度下 server 线程跑不起来 → 挂。
+// Network hazard probe (expected to hang; excluded from the automated batch): the client's
+// read_exact waits for the server thread's echo, which never runs under cooperative scheduling.
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
@@ -22,7 +22,7 @@ fn main() {
     let mut client = TcpStream::connect(addr).unwrap();
     client.write_all(b"echo").unwrap();
     let mut resp = [0u8; 4];
-    client.read_exact(&mut resp).unwrap(); // 阻塞等 server 线程 → §2.1 挂死
+    client.read_exact(&mut resp).unwrap(); // blocks on the server thread -> hang
     println!("echo = {:?}", std::str::from_utf8(&resp).unwrap());
     server.join().unwrap();
 }

@@ -1,79 +1,79 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# aws-lc-rs =1.17.1（当前最新稳定 1.x，2026-07-17 crates.io 核实）+ default-features
-# （aws-lc-sys + alloc + ring-io + ring-sig-verify；fips 非默认不开——任务口径
-# 「非默认 provider 系可裁则裁」）。aws-lc-sys 显式钉 =0.42.0 且 default-features=false
-# （与 aws-lc-rs 内部要求形一致——0.42.x 目前仅此一版，显式钉是防未来 0.42.1 漂移的
-# 廉价保险；其 API 不直接使用）。aws-lc-sys 0.42.0 = AWS-LC C 巨物静态归档（~2000
-# 文件）：本机 Linux x86_64 非 FIPS + 预制源路径走 CcBuilder（cc 直编 .c/.S，
-# 无需 bindgen/perl/nasm；cmake 在场仅兜底），重 C 构建属任务明示预期。
-# mirvm 侧加载通道 = native-archive「static .a → .so 闭包」（rusqlite/zstd/libgit2
-# 先例）；aws-lc-sys 全符号带 `aws_lc_0_42_0_` BORINGSSL_PREFIX 前缀，与宿主
-# OpenSSL 全域命名空间零碰撞（zstd 静默换库类风险不存在——已查
-# generated-include/openssl/boringssl_prefix_symbols.h 实证）。guest 只做指针级
-# FFI 调用（无按值聚合封送，不触 open-issues C1 结构边界；无 guest 回调传入 C，
-# 不触 thunk 盲区）。
+# aws-lc-rs =1.17.1 (latest stable 1.x) + default features (aws-lc-sys + alloc + ring-io +
+# ring-sig-verify); fips stays off as the non-default provider line. aws-lc-sys is pinned
+# =0.42.0 with default-features=false, matching the shape aws-lc-rs requires; 0.42.x has
+# only this release, so the explicit pin guards against future 0.42.1 drift. Its API is
+# not used directly. aws-lc-sys 0.42.0 is the huge AWS-LC C static archive (~2000 files):
+# on Linux x86_64 non-FIPS with prebuilt sources it goes through CcBuilder (cc compiles
+# .c/.S directly, no bindgen/perl/nasm; cmake is only a fallback), and heavy C build.
+# mirvm loads it through native-archive "static .a -> .so closure" (rusqlite/zstd/libgit2
+# precedent). Every symbol carries the `aws_lc_0_42_0_` BORINGSSL_PREFIX prefix, so there
+# is zero collision with the host OpenSSL namespace (verified against the
+# generated-include/openssl/boringssl_prefix_symbols.h header). The guest makes only
+# pointer-level FFI calls: no by-value aggregate marshalling, so the open-issues C1
+# struct boundary is untouched, and no guest callbacks into C, so the thunk blind spot stays untouched.
 aws-lc-rs = "=1.17.1"
 aws-lc-sys = { version = "=0.42.0", default-features = false }
 ---
-// aws-lc-rs（AWS-LC C FFI 大物；批8 波1 重 FFI 条目）六族定向量三维差分。
-// ★ 已修复（2026-07-17，三维全绿入册）：
-//   A 维原在依赖降低期死于 native_archive lifecycle 拒装（aws-lc 全量
-//   constructor/destructor section），放行后又在 EVP_AEAD* 调用链全非确定
-//   撞死在 GCM 入口——三层根因与修法链（decision-history §7.8）：
-//   ① constructor 分治解码：.init_array/.fini_array 一族由 loader 的
-//      DT_INIT 语义原生执行（= native 进程启动期 constructor；aws-lc
-//      do_library_init 意义完全一致），守卫从"全段拒"收窄为"旧式 `.init`/
-//      `.fini` 裸注入段仍拒"（执行语义不可靠且真实 workload 不供养）。
-//   ② `#[link_name = "\u{1}..."]`（aws-lc-sys BORINGSSL_PREFIX 全符号家族）
-//      的 LLVM `\x01`=verbatim 前缀未剥除——dlsym 以加前缀名查找必然全域
-//      未命中：lower 各 dlsym 口径统一 `canonical_link_name` 剥除。
-//   ③ P2 GOT 对带前缀符号的键名去重度（`foreign_fn_slot`/`foreign_alloc_sym`
-//      未同剥）→ fn-ptr 常量掉回烤 Imm（跨运行腐旧地址，Heisenberg 崩点）。
-//   绕行遗留：无（driver 内嵌已知答案断言全量原样在跑，修复后断言成立）。
+// aws-lc-rs (heavy AWS-LC C FFI): three-way differential over six fixed-vector families.
+// The A path loads aws-lc through the native-archive lifecycle; the loading rules it
+// pins are: constructor sections of the .init_array/.fini_array family run natively at
+// load time, the LLVM verbatim prefix on BORINGSSL_PREFIX symbols is stripped before
+// every dlsym, and GOT keys for those symbols are deduplicated under the stripped name.
+//   ① constructor split: .init_array/.fini_array run through the loader's DT_INIT
+//      semantics, which matches the native process-startup constructor and aws-lc's
+//      do_library_init; only legacy bare .init/.fini sections are still rejected,
+//      because their execution semantics cannot be trusted.
+//   ② the LLVM `\x01` verbatim prefix on `#[link_name = "\u{1}..."]` (the whole
+//      aws-lc-sys BORINGSSL_PREFIX symbol family) must be stripped before dlsym:
+//      lookups under the prefixed name always miss, so every dlsym path strips it via `canonical_link_name`.
+//   ③ GOT key deduplication must strip the same prefix for `foreign_fn_slot` and
+//      `foreign_alloc_sym`, or an fn-ptr constant falls back to a baked Imm (stale cross-run address).
+// No workaround remains: the driver's embedded known-answer assertions all run unmodified.
 //
-// 全部 key/nonce/plaintext/iki/sig 为源码内嵌固定常量；所用算法（SHA-2/HMAC/
-// HKDF/AES-GCM/Ed25519/RSA-PKCS1v15 验签）均为零随机 API（不触 RAND），
-// 输出跨进程完全确定。定向量真值来源（创建期宿主交叉核验）：
-//   SHA-256/SHA-512 空串/abc/双多block向量 = FIPS 180-4 经典已知答案；
-//   HMAC-SHA256 两例 = RFC 4231 TC1/TC2；HKDF-SHA256 = RFC 5869 TC1
-//    （宿主 python3 hashlib/hmac 实算复核一致）；
-//   AES-256-GCM = McGrew/Viega GCM 256-bit key 60B pt 向量（宿主 OpenSSL
-//     3.x EVP 实算锚定 ct||tag，双跑 Δct==Δpt 密钥流一致性另证）；
-//   Ed25519 = 固定种子 0x5A*32（RFC 8032 纯确定性签名；宿主 cryptography
-//     库实算锚定 pk/sig 已知答案）；
-//   RSA-2048 = 构建期 openssl CLI 生成的固定密钥（n/e 组件内嵌，
-//     PKCS1v15+SHA-256 签名为确定性填充，签名人本体不进输出路径，只打印
-//     验签布尔）。
-// 测试面：
-//   ① digest：SHA-256 空串/abc/56B 双 block 向量 hex 打印 + 已知答案
-//      assert_eq；Context 分片流式（奇数切点，含 0 长 update）== one-shot
-//      布尔；SHA-512 abc + 112B 双 block 向量 hex + 已知答案 assert_eq；
-//      SHA-512 亦做分片流式一致性布尔；digest 输出长度断言。
-//   ② hmac：RFC4231 TC1/TC2 Tag hex 打印 + 已知答案 assert_eq +
-//      hmac::verify 正例布尔 + 篡改末字节反例布尔。
-//   ③ hkdf：RFC5869 TC1 Salt::extract → Prk（opaque 不可打印）→ expand
-//      （单段 info；KeyType 为公开 trait，本地实现 42B 定长类型——aws-lc-rs
-//      无内建 42B 长度类型，内建 Algorithm 的 len 恒为 digest 输出长 32）
-//      → fill 42B OKM hex 打印 + 已知答案 assert_eq；另测 expand 越界
-//      （len > 255*HashLen 于 expand 期即 Err）布尔。
-//   ④ aead：AES-256-GCM 固定 key/nonce/aad/pt 60B，
-//      seal_in_place_append_tag → ct(60B) hex + tag(16B) hex 打印 +
-//      已知答案 assert_eq；open_in_place roundtrip == pt 布尔；
-//      篡改 ct 末字节 → open Err 布尔；错 aad → open Err 布尔；
-//      UnboundKey 错 key 长（31B）→ Err 布尔。
-//   ⑤ ed25519：from_seed_unchecked(0x5A*32) → pk hex + sign(msg) sig hex
-//      打印 + 已知答案 assert_eq；UnparsedPublicKey verify 正例布尔 +
-//      错消息反例布尔 + 篡改 sig 反例布尔。
-//   ⑥ rsa：RsaPublicKeyComponents{n,e}（hex 内嵌、运行期解码）verify
-//      PKCS1v15+SHA-256 正例布尔 + 篡改 sig 末字节反例布尔 + 错消息反例
-//      布尔 + 篡改 n（末字节 xor 1，公钥-签名失配）反例布尔——全部经
-//      aws-lc-rs 的 build_rsa → EVP 真实验签路径。
-// 确定性：常量全内嵌；无 HashMap 序/RNG/时间/线程/env/路径入输出；错误一律
-// 归约为布尔（aws-lc-rs 错误为 Unspecified 单态，无文案面）；stdout 28 行
-// 全 hex/布尔，stderr 真空（driver 零 warning；B 维 cargo run -q 实测）。
-// 三维复跑：
+// All keys/nonces/plaintexts/ikm/sigs are fixed constants embedded in the source; the
+// algorithms used (SHA-2/HMAC/HKDF/AES-GCM/Ed25519/RSA-PKCS1v15 verify) are all zero-
+// randomness APIs (no RAND); output is fully deterministic across processes. Ground truth (host-verified):
+//   SHA-256/SHA-512 empty/abc/double-block vectors = FIPS 180-4 known answers;
+//   two HMAC-SHA256 cases = RFC 4231 TC1/TC2; HKDF-SHA256 = RFC 5869 TC1
+//    (recomputed with host python3 hashlib/hmac);
+//   AES-256-GCM = McGrew/Viega GCM 256-bit-key 60B-pt vector (the host OpenSSL
+//     3.x EVP computed ct||tag, and a double run proved keystream consistency Δct==Δpt);
+//   Ed25519 = fixed seed 0x5A*32 (RFC 8032 deterministic signing; the host
+//     cryptography library computed the pk/sig known answers);
+//   RSA-2048 = a fixed key generated by the openssl CLI at build time (n/e components
+//     embedded; PKCS1v15+SHA-256 signing is deterministic padding; the signer itself
+//     never enters the output path, only the verify boolean is printed).
+// Test surface:
+//   ① digest: SHA-256 empty/abc/56B double-block vector hex + known-answer
+//      assert_eq; Context streaming in pieces (odd cut points, including a 0-length
+//      update) == one-shot boolean; SHA-512 abc + 112B double-block vector hex +
+//      known-answer assert_eq; SHA-512 also checks streaming consistency; digest output-length assertions.
+//   ② hmac: RFC4231 TC1/TC2 Tag hex + known-answer assert_eq +
+//      hmac::verify positive boolean + tampered-last-byte negative boolean.
+//   ③ hkdf: RFC5869 TC1 Salt::extract -> Prk (opaque, unprintable) -> expand (single
+//      info segment; KeyType is a public trait, locally implemented as a 42B fixed-
+//      length type, since aws-lc-rs has no built-in 42B type and the built-in Algorithm
+//      len is always the digest output length 32) -> fill 42B OKM hex + known-answer
+//      assert_eq; also the expand overflow (len > 255*HashLen errors at expand) boolean.
+//   ④ aead: AES-256-GCM fixed key/nonce/aad/60B pt,
+//      seal_in_place_append_tag -> ct(60B) hex + tag(16B) hex +
+//      known-answer assert_eq; open_in_place roundtrip == pt boolean;
+//      tampered ct last byte -> open Err boolean; wrong aad -> open Err boolean;
+//      UnboundKey wrong key length (31B) -> Err boolean.
+//   ⑤ ed25519: from_seed_unchecked(0x5A*32) -> pk hex + sign(msg) sig hex
+//      with known-answer assert_eq; UnparsedPublicKey verify positive boolean +
+//      wrong-message negative boolean + tampered-sig negative boolean.
+//   ⑥ rsa: RsaPublicKeyComponents{n,e} (hex embedded, decoded at runtime) verify
+//      PKCS1v15+SHA-256 positive boolean + tampered sig last byte + wrong message
+//      + tampered n (last byte xor 1, public-key/signature mismatch) negative booleans
+//      -- all through aws-lc-rs build_rsa -> EVP real verification.
+// Determinism: constants are all embedded; no HashMap order/RNG/time/threads/env/path
+// enters the output; errors reduce to booleans (aws-lc-rs errors are the single
+// Unspecified state, no message surface); stdout is 28 lines of hex/booleans, stderr empty.
+// Three-way rerun:
 //   A: target/release/mirvm run corpus/c_aws_lc.rs
 //   B: cd "$(grep -l 'name = "c_aws_lc"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname)" && \
 //        RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \
@@ -112,7 +112,7 @@ fn unhex(s: &str) -> Vec<u8> {
 }
 
 fn main() {
-    // ---------- ① digest：SHA-256 / SHA-512 定向量 + 流式一致性 ----------
+    // ---------- ① digest: SHA-256 / SHA-512 fixed vectors + streaming consistency ----------
     let s256_empty = digest::digest(&digest::SHA256, b"");
     assert_eq!(
         hex(s256_empty.as_ref()),
@@ -135,7 +135,7 @@ fn main() {
     );
     println!("sha256(m56)  = {}", hex(s256_m56.as_ref()));
 
-    // 分片流式（奇数切点 + 0 长 update）必须等于 one-shot。
+    // Streaming in pieces (odd cut points + a 0-length update) must equal one-shot.
     let mut ctx = digest::Context::new(&digest::SHA256);
     ctx.update(&M56[..1]);
     ctx.update(b"");
@@ -169,7 +169,7 @@ fn main() {
     assert_eq!(digest::SHA256.output_len(), 32);
     assert_eq!(digest::SHA512.output_len(), 64);
 
-    // ---------- ② hmac：RFC 4231 TC1/TC2 ----------
+    // ---------- ② hmac: RFC 4231 TC1/TC2 ----------
     let k1 = hmac::Key::new(hmac::HMAC_SHA256, &[0x0b_u8; 20]);
     let t1 = hmac::sign(&k1, b"Hi There");
     assert_eq!(
@@ -193,9 +193,9 @@ fn main() {
     );
     println!("hmac tc2     = {}", hex(t2.as_ref()));
 
-    // ---------- ③ hkdf：RFC 5869 TC1 ----------
-    // aws-lc-rs 的 Okm 长度由 KeyType 绑定（无 42B 内建类型）；KeyType 是公开
-    // trait，本地实现 42B 与越界 8161B（=255*32+1，HKDF_expand 必拒）两个类型。
+    // ---------- ③ hkdf: RFC 5869 TC1 ----------
+    // aws-lc-rs binds Okm length to KeyType (no built-in 42B type); KeyType is a public
+    // trait, implemented here for 42B and for the out-of-range 8161B (=255*32+1, rejected by HKDF_expand).
     struct Okm42;
     impl hkdf::KeyType for Okm42 {
         fn len(&self) -> usize {
@@ -220,10 +220,10 @@ fn main() {
         "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
     );
     println!("hkdf okm42   = {}", hex(&out));
-    // 越界长度在 expand 期即拒（len > 255*HashLen → Unspecified）。
+    // Out-of-range length is rejected at expand time (len > 255*HashLen -> Unspecified).
     println!("hkdf oversize err = {}", prk.expand(&hkdf_infos, Okm8161).is_err());
 
-    // ---------- ④ aead：AES-256-GCM 固定向量 + roundtrip + 篡改 ----------
+    // ---------- ④ aead: AES-256-GCM fixed vector + roundtrip + tampering ----------
     let key = unhex("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308");
     let nonce = unhex("cafebabefacedbaddecaf888");
     let aad = unhex("feedfacedeadbeeffeedfacedeadbeefabaddad2");
@@ -270,7 +270,7 @@ fn main() {
 
     let mut tampered = in_out.clone();
     let n = tampered.len();
-    tampered[n - 17] ^= 1; // 篡改 ct 末字节（tag 前一字节）
+    tampered[n - 17] ^= 1; // tamper the last ct byte (the byte before the tag)
     println!(
         "gcm tamper reject = {}",
         LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key).unwrap())
@@ -293,7 +293,7 @@ fn main() {
             .is_err()
     );
 
-    // ---------- ⑤ ed25519：固定种子 sign/verify ----------
+    // ---------- ⑤ ed25519: fixed-seed sign/verify ----------
     let pair = Ed25519KeyPair::from_seed_unchecked(&[0x5a_u8; 32]).unwrap();
     let pk = pair.public_key();
     assert_eq!(
@@ -323,7 +323,7 @@ fn main() {
     *bad_sig.last_mut().unwrap() ^= 1;
     println!("ed25519 tamper reject = {}", pub_key.verify(ED_MSG, &bad_sig).is_err());
 
-    // ---------- ⑥ rsa：固定公钥组件 PKCS1v15+SHA-256 验签 ----------
+    // ---------- ⑥ rsa: fixed public-key components, PKCS1v15+SHA-256 verify ----------
     let rsa_n = unhex(concat!(
         "ed2114c8d51696810dec038eea795019c485d983135cc98826924f25c474f4637e",
         "58375a77fd3c854f7dae47303ffe3996d6a2aacb23c4a0f02111077ecfa1597179",

@@ -3,10 +3,10 @@
 [dependencies]
 libc = "0.2"
 ---
-// 信号处理：注册 guest 处理函数 + raise。handler 是解释代码（无机器地址），
-// 内核信号投递需要真机器地址 → 需 thunk（同 pthread_create start_routine）。
-// 当前引擎须明确报“不支持 guest handler”，不可伪造成功；未来真实支持后，本 fixture
-// 仍要求 handler 被调用并以 handler=true 作为 oracle。
+// Signal handling: register a guest handler, then raise. The handler is interpreted code
+// with no machine address, while kernel signal delivery needs a real one, so a thunk is
+// required (same as pthread_create's start_routine). The engine must report "guest handler
+// unsupported" rather than fake success; once supported, the oracle requires handler=true.
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static HIT: AtomicBool = AtomicBool::new(false);

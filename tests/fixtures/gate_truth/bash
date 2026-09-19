@@ -22,9 +22,9 @@ case "$script" in
         ;;
     tests/suites/runtime/semantics.sh)
         if [ -n "${SKIP_TSAN:-}" ]; then
-            echo 'SKIP TSan（SKIP_TSAN=1）'
+            echo 'SKIP TSan (SKIP_TSAN=1)'
         else
-            echo 'PASS TSan（含 tsan_mt 多线程真身，零警告）'
+            echo 'PASS TSan (includes the real tsan_mt multi-threaded body; zero warnings)'
         fi
         echo '== runtime.semantics: 1 passed, 0 skipped, 0 expected-failed, 0 failed =='
         ;;
@@ -46,7 +46,7 @@ case "$script" in
         ;;
     tests/suites/performance/limits.sh)
         if [ -n "${SKIP_PERF:-}" ]; then
-            echo 'SKIP 性能上限（SKIP_PERF=1；语义 gate 仍照常执行）'
+            echo 'SKIP performance limits (SKIP_PERF=1; the semantics gate still runs as usual)'
         fi
         ;;
     tests/suites/quality/rust.sh|tests/suites/differential/cargoless.sh|\

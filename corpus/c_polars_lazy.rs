@@ -3,85 +3,85 @@
 [dependencies]
 polars = { version = "=0.44.2", default-features = false, features = ["lazy", "dtype-date", "dtype-datetime", "fmt_no_tty", "cse", "semi_anti_join", "rank", "moment", "cum_agg", "rolling_window", "is_in", "is_between", "is_unique", "is_first_distinct", "unique_counts", "diff", "pct_change", "round_series", "sign", "abs", "coalesce"] }
 ---
-// c_polars_lazy —— polars 0.44.2 lazy frame 计划侧大面：查询优化器（计划文本/
-// pushdown 开关/优化前后结果对拍/CSE）+ 宽表达式电池 + lazy plan 执行
-// （group_by 含 moment、over 窗口、inner/semi/anti join、union、limit、错误
-// 路径），全内存帧零 IO。批6 c_polars_frame（eager 已三维绿）的计划侧接棒。
+// c_polars_lazy -- broad plan-side surface for polars 0.44.2 lazy frames: query optimizer (plan text /
+// pushdown switches / optimized-vs-unoptimized cross-check / CSE) + wide expression battery + lazy plan
+// execution (group_by with moment, over windows, inner/semi/anti join, union, limit, error
+// paths), all on in-memory frames with zero IO.
 //
-// 版本钉（相容组合证据）：
-//   * polars 钉 =0.44.2——与批6 c_polars_frame 完全同版同基座：该版 eager 全
-//     链路（含 lazy group_by/join 小面）已三维逐字节绿，psm/stacker dynsym
-//     撞车已于 fb0b204 修复入册，依赖树（polars-core/plan/lazy/ops/mem-engine
-//     + arrow2 + psm + chrono）在场实证可构建可跑，无版本线赌博。
-//   * feature 面 = 批6 实证基座四件（lazy + dtype-date + dtype-datetime +
-//     fmt_no_tty）之上叠加计划侧 17 件，全部映射到 polars-lazy/polars-plan/
-//     polars-ops 内部 crate（0.44.2 Cargo.toml 逐件核实，不引入新外部重依赖）。
-//     dtype-datetime 保留批6 记档的上游 feature 破洞绕行：polars-io 0.44.2 的
-//     csv/write datetime serializer 无条件引用 chrono，而 chrono 只由
-//     dtype-datetime 挂上，lazy→polars-plan 又无条件开 polars-io/csv——不开
-//     dtype-datetime 则 default-features=false 组合直接 E0433。
+// Version pinning (evidence for a compatible combination):
+//   * polars pinned to =0.44.2, the same version and base as the eager fixtures: that
+//     version's eager pipeline (including small lazy group_by/join surfaces) is byte-identical
+//     across the three runs and the psm/stacker dynsym collision is fixed in the dependency
+//     tree (polars-core/plan/lazy/ops/mem-engine + arrow2 + psm + chrono), so no version gamble.
+//   * feature set = the proven four-feature base (lazy + dtype-date + dtype-datetime +
+//     fmt_no_tty) plus 17 plan-side features, all mapping onto polars-lazy/polars-plan/
+//     polars-ops internal crates (verified against 0.44.2's Cargo.toml, no new heavy
+//     external dependency). dtype-datetime keeps the upstream feature-hole workaround:
+//     polars-io 0.44.2's csv/write datetime serializer references chrono unconditionally,
+//     and chrono is only attached by dtype-datetime, while lazy -> polars-plan turns on
+//     polars-io/csv unconditionally; without dtype-datetime the combo fails with E0433.
 //
-// 确定性说明：
-//   * 数据全内联定值（orders 12 行 + quota 4 行），零随机、零 now()、零环境
-//     变量、零 IO；POLARS_VERBOSE 未设，优化器 eprintln 全静默，stderr 真空。
-//   * 排序全序锁死：每个 sort 的 by 列表末位必带唯一键 id（或唯一键 region），
-//     弥补 SortMultipleOptions 默认 maintain_order=false 的不稳定排序；group_by
-//     /join/union 输出序（哈希布局相关）一律先 sort 唯一键再打印。
-//   * 浮点无分歧：qty/price 列归约（mean/skew/kurtosis/rolling_mean/
-//     pct_change）均为单 chunk 小数据定序 IEEE 运算，Display 走 std fmt 最短
-//     往返格式（NaN 一律 "NaN"），跨实现位级一致以批6 mean 绿为实证先例。
-//   * 计划文本（explain(false/true)）为纯字符串树打印，无地址无哈希序；
-//     CSE 的 CACHE 节点 id 由进程内顺序计数器分配，双维同码同序。
-//   * CSE 触发形态经 native 实验锁定（0.44.2 语义，非 mirvm 分叉）：
-//     elim_cmn_subplans 只对「恒等子计划」去重——共享 with_columns 基座的
-//     self-join / 恒等分支 union 得 CACHE（caches=2）；互补/不同 filter 的
-//     分支 union 与两侧各挂不同 filter 的 self-join 均不去重（caches=0，
-//     to_alp 把可下推 filter 直接写进 DataFrameScan.filter 使两 scan 失配，
-//     has_duplicate_scans 闸门关闭）。本 driver S7 取官方 test_cse_self_joins
-//     同族的内存帧 self-join 形态。
+// Determinism:
+//   * all data is inline and fixed (orders 12 rows + quota 4 rows): zero randomness,
+//     zero now(), zero env vars, zero IO; POLARS_VERBOSE is unset, so stderr stays empty.
+//   * every sort is locked to a total order: each sort's by list ends with the unique key
+//     id (or region), compensating for SortMultipleOptions' default maintain_order=false
+//     unstable sort; group_by/join/union output is sorted by that key before printing.
+//   * no floating-point divergence: the qty/price reductions (mean/skew/kurtosis/
+//     rolling_mean/pct_change) are ordered IEEE ops on small single-chunk data, and
+//     Display uses std fmt's shortest round-trip (NaN always "NaN"), so bits agree.
+//   * plan text (explain(false/true)) is a pure string tree: no addresses, no hash order;
+//     the CSE CACHE node id comes from an in-process counter, so identical code, same order.
+//   * the CSE trigger shapes are pinned down by native experiment (0.44.2 semantics,
+//     not a mirvm fork): elim_cmn_subplans deduplicates only "identical subplans" -- a
+//     self-join sharing a with_columns base or a union of identical branches yields CACHE
+//     (caches=2); a union of complementary/differently filtered branches and a self-join
+//     with a different filter on each side are not deduplicated (caches=0, because to_alp
+//     writes the pushable filter into DataFrameScan.filter, making the scans mismatch and
+//     closing the has_duplicate_scans gate). S7 takes the upstream test_cse_self_joins shape.
 //
-// 复红定因参照：
-//   * 三维复跑：
+// Failure triage:
+//   * three-way differential rerun:
 //     A: target/release/mirvm run corpus/c_polars_lazy.rs
 //     B: d=$(grep -l 'name = "c_polars_lazy"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname) && cd "$d" && cargo +nightly-2026-07-02 run -q
 //     C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_polars_lazy.rs
-//   * 若 A/C 红：先看 stderr 首行——mirvm TRAP 按前缀「mirvm[m4-engine]: TRAP:」
-//     定位引擎缺口；若 panic 于 native archive 装载（psm 系）对照批6 记档
-//     fb0b204；若三维数值/计划文本分叉，先用 S1/S7 的 explain 文本定位优化器
-//     层，再用 S3 电池逐列二分表达式。
+//   * if A/C fail: read the first stderr line -- a mirvm TRAP ("mirvm[m4-engine]: TRAP:")
+//     points at an engine gap; a panic loading the native archive (psm family) is the known
+//     psm dynsym collision; if the runs diverge in numbers or plan text, localize with the
+//     S1/S7 explain text, then bisect expressions column by column with the S3 battery.
 //
-// 三维实测（2026-07-18，全绿）：A/B/C 三进程 stdout 逐字节一致（274 行
-// 18927 字节，20 条 anchor 行全过：S1 has_selection/projected/differ 全
-// true、S2 opt_consistent=true、S7 caches=2/differ/cse_consistent 全 true、
-// S8 has_sort_by=true），stderr 全真空（0 字节）、exit 全 0；A2 复跑与 A
-// 逐字节一致（跨进程确定）。时长：A 首轮含 351 crate 依赖闭包首次构建
-// ≤90s（构建侧未超预算）；热缓存 A 4.9s；B（cargo 全量构建+运行）59.7s；
-// C（JIT=1）4.2s。依赖闭包 351 crate（polars-* 系 22 件 + psm/stacker +
-// chrono/chrono-tz）。无 FRONTIER、无引擎 bug 信号。
+// Oracle: the native release run, the cargo build run and the JIT run must all agree byte-for-byte on
+// stdout, and every anchor line must pass: S1 has_selection/projected/differ all
+// true, S2 opt_consistent=true, S7 caches=2/differ/cse_consistent all true and
+// S8 has_sort_by=true; stderr must be empty and the exit status 0, and a repeated native run must
+// match the first one byte-for-byte, so the fixture is deterministic across processes. The anchors
+// hash and length the printed data (S0), plan text (S1), optimization on/off consistency (S2),
+// the expression battery (S3), group_by aggregates (S4), over windows (S5), joins (S6), CSE (S7),
+// sort/limit (S8) and the error path (S9), so any divergence shows up as a hash mismatch. No FRONTIER needed.
 //
-// 覆盖清单：
-//   S0  数据锚：orders/quota 全帧 Display + FNV-1a/64。
-//   S1  查询优化器计划文本：filter→with_columns→select→sort 链的未优化
-//       explain(false) 全文、优化后 explain(true) 全文（断言含 SELECTION=
-//       predicate pushdown、PROJECT 列裁剪=projection pushdown），再与三
-//       pushdown 全关的优化计划比对 differ=true。
-//   S2  优化前后结果对拍：同查询 OptFlags::default() 全开 vs
-//       without_optimizations()（仅留 TYPE_COERCION）逐字节一致。
-//   S3  表达式电池 ×4 帧：算术/when-then-otherwise/coalesce/rolling_mean/
+// Coverage list:
+//   S0  data anchors: full-frame Display + FNV-1a/64 for orders/quota.
+//   S1  query optimizer plan text: the unoptimized explain(false) text of the
+//       filter -> with_columns -> select -> sort chain, the optimized explain(true)
+//       text (asserting SELECTION = predicate pushdown and PROJECT = projection pushdown
+//       or column pruning), then the plan with all three pushdowns disabled -> differ=true.
+//   S2  optimized vs unoptimized result cross-check: the same query with OptFlags::default() all on vs
+//       without_optimizations() (leaving only TYPE_COERCION) must be byte-identical.
+//   S3  expression battery over 4 frames: arithmetic/when-then-otherwise/coalesce/rolling_mean/
 //       cum_sum/shift/diff/pct_change/rank(Dense)/abs/sign/round/is_between/
-//       is_in(Series 字面量)/is_unique/is_first_distinct + unique_counts
-//       （按首次出现序，单列独立帧）。
-//   S4  group_by 聚合 ×2 帧：sum/mean/count/null_count + skew/kurtosis
-//       （moment 面，含同值组 NaN 谱系）。
-//   S5  over 窗口：sum/rank/mean over(partition by region) 后 sort id。
-//   S6  join 三面：inner（左右各丢行）/ semi / anti（semi_anti_join 面）。
-//   S7  CSE：共享 with_columns 基座的 self-join（38 行 n² 扇出，sort
-//       [id,id_right] 全序）：默认开 CSE 的 explain(true) 全文（断言
-//       caches=2）vs 关 CSE（caches=0、differ=true），两态 collect 结果
-//       逐字节一致。
-//   S8  slice/limit：sort 降序带 tiebreak + limit(4) 的优化计划锚（SORT BY
-//       断言；limit 在 0.44.2 优化计划文本中不单独显式）与 top4 结果。
-//   S9  错误路径：select 不存在列的 ColumnNotFound 错误文本。
+//       is_in(Series literal)/is_unique/is_first_distinct + unique_counts
+//       (in first-occurrence order, an independent single-column frame).
+//   S4  group_by aggregation over 2 frames: sum/mean/count/null_count + skew/kurtosis
+//       (the moment surface, including the all-equal-group NaN spectrum).
+//   S5  over windows: sum/rank/mean over(partition by region), then sort by id.
+//   S6  three join shapes: inner (a row dropped on each side) / semi / anti (the semi_anti_join surface).
+//   S7  CSE: a self-join sharing a with_columns base (38-row n² fan-out, sort
+//       [id,id_right] total order): the explain(true) text with CSE on by default (asserting
+//       caches=2) vs CSE off (caches=0, differ=true), and the collect results of the two states
+//       must be byte-identical.
+//   S8  slice/limit: an optimized-plan anchor for a descending sort with tiebreak + limit(4) (SORT BY
+//       assertion; limit is not shown separately in the 0.44.2 optimized plan text) plus the top-4 result.
+//   S9  error path: the ColumnNotFound error text for selecting a missing column.
 use polars::prelude::*;
 use polars::series::ops::NullBehavior;
 
@@ -194,11 +194,11 @@ fn main() -> PolarsResult<()> {
     let orders = orders()?;
     let quota = quota()?;
 
-    // S0 数据锚
+    // S0 data anchors
     show("S0.orders", &orders);
     show("S0.quota", &quota);
 
-    // S1 优化器计划文本：filter→with_columns→select→sort
+    // S1 optimizer plan text: filter -> with_columns -> select -> sort
     let q1 = orders
         .clone()
         .lazy()
@@ -239,7 +239,7 @@ fn main() -> PolarsResult<()> {
         plan_nopush != plan_opt
     );
 
-    // S2 优化开/关结果对拍（collect_with_optimizations 双态）
+    // S2 optimized on/off result cross-check (both collect_with_optimizations states)
     let s2_on = q1.clone().collect()?;
     let s2_off = q1.without_optimizations().collect()?;
     let on_s = s2_on.to_string();
@@ -252,7 +252,7 @@ fn main() -> PolarsResult<()> {
         fnv1a(on_s.as_bytes())
     );
 
-    // S3 表达式电池（先锁 id 序，再分三帧打印）
+    // S3 expression battery (lock the id order first, then print in three frames)
     let roll3 = RollingOptionsFixedWindow {
         window_size: 3,
         min_periods: 1,
@@ -323,15 +323,15 @@ fn main() -> PolarsResult<()> {
         col("price_r1"),
     ]);
     show("S3c", &s3c.collect()?);
-    // unique_counts 语义为「按首次出现序输出每个相异值的计数」（长度=相异值
-    // 个数≠帧高，进 with_columns 会 ShapeMismatch），单列 select 独立锚。
+    // unique_counts emits the count of each distinct value in first-occurrence order
+    // (length = distinct count != frame height, so with_columns raises ShapeMismatch); anchor in a select.
     let s3d = orders
         .clone()
         .lazy()
         .select([col("region").unique_counts().alias("reg_ucnt")]);
     show("S3d", &s3d.collect()?);
 
-    // S4 group_by 聚合（含 moment 面；sort 唯一键 region 锁序）
+    // S4 group_by aggregation (moment surface included; sort by the unique key region to lock order)
     let s4a = orders
         .clone()
         .lazy()
@@ -356,7 +356,7 @@ fn main() -> PolarsResult<()> {
         .sort(["region"], Default::default());
     show("S4b", &s4b.collect()?);
 
-    // S5 over 窗口（partition by region；窗口 join 后 sort id 锁序）
+    // S5 over windows (partition by region; sort by id after the window join to lock order)
     let s5 = orders
         .clone()
         .lazy()
@@ -382,7 +382,7 @@ fn main() -> PolarsResult<()> {
         ]);
     show("S5", &s5.collect()?);
 
-    // S6 join 三面（west 左独有 / central 右独有；semi/anti 走 semi_anti_join）
+    // S6 three join shapes (west is left-only / central is right-only; semi/anti go through semi_anti_join)
     let s6_inner = orders
         .clone()
         .lazy()
@@ -420,10 +420,10 @@ fn main() -> PolarsResult<()> {
         .select([col("id"), col("region"), col("qty")]);
     show("S6.anti", &s6_anti.collect()?);
 
-    // S7 CSE：共享 with_columns 基座的 self-join（polars 0.44.2 实证形态——
-    // CSE 只对恒等子计划去重；互补 filter 分支的 union 不去重，native 实验
-    // 记录见头注「确定性说明」），默认开 CSE vs 显式关，计划与结果双锚。
-    // join 键 region 组内 n² 行（38 行），sort [id, id_right] 全序锁死。
+    // S7 CSE: a self-join sharing a with_columns base (the shape observed with polars
+    // 0.44.2 -- CSE dedups only identical subplans; a union of complementary filter
+    // branches is not, see the header "Determinism" note). CSE on by default vs off;
+    // the join key region fans out to n² rows per group (38), sorted totally on [id, id_right].
     let lf7 = orders
         .clone()
         .lazy()
@@ -475,7 +475,7 @@ fn main() -> PolarsResult<()> {
         fnv1a(u_on.as_bytes())
     );
 
-    // S8 slice/limit：降序 + id tiebreak 全序 + limit(4)
+    // S8 slice/limit: descending order + id tiebreak total order + limit(4)
     let s8 = orders
         .clone()
         .lazy()
@@ -493,7 +493,7 @@ fn main() -> PolarsResult<()> {
     );
     show("S8.top4", &s8.collect()?);
 
-    // S9 错误路径：不存在列
+    // S9 error path: missing column
     let err = orders
         .lazy()
         .select([col("nope")])

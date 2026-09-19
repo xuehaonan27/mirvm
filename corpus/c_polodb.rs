@@ -1,91 +1,91 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# 分工条目标名「polodb-lite」：crates.io 实勘该名从未发布。PoloDB 家族的嵌入式
-# 库 = polodb_core（polodb 是 MongoDB 兼容 server 壳）。按条目「最新 3.x、纯 Rust、
-# temp file + WAL」三约束对齐：polodb_core 钉 =3.5.2（3.x 最新）。其它大代排除理由：
-#   5.x：依赖 polodb-librocksdb-sys（C++ rocksdb 捆绑构建，需 clang/cmake——clang
-#        本机缺席且并非「纯 Rust」）；
-#   4.x：纯 Rust 但超出「3.x」钉选口径。
-# 3.5.2 Linux 生效闭包全纯 Rust：bson 2/byteorder/crc64fast/getrandom 0.2/hashbrown/
-# lru/num_enum/serde/uuid 1（web-sys/winapi/js-sys 为 cfg 平台门控，Linux 不编译）。
-# WAL = 内建 journal：db 路径旁落 <name>.db.journal，默认满 1000B 与主库 merge；
-# unix 文件锁走 libc flock(LOCK_EX|LOCK_NB)，重开走 journal recovery。
+# polodb_core is the embedded document database of the PoloDB family (`polodb`
+# itself is the MongoDB-compatible server shell). Pinned to =3.5.2, the newest 3.x:
+# 5.x depends on polodb-librocksdb-sys, a bundled C++ rocksdb build that needs
+# clang/cmake and is not pure Rust; 4.x is outside the 3.x line.
+# The 3.5.2 Linux closure is entirely pure Rust: bson 2, byteorder, crc64fast,
+# getrandom 0.2, hashbrown, lru, num_enum, serde, uuid 1 (web-sys/winapi/js-sys are
+# cfg-gated and not compiled on Linux).
+# WAL is the built-in journal: <name>.db.journal sits beside the db path and merges
+# into the main file once it reaches 1000 bytes; unix locking is libc
+# flock(LOCK_EX|LOCK_NB), and reopening runs journal recovery.
 polodb_core = "=3.5.2"
-# 上游语义破洞实锤（2026-07-27）：polodb_core 3.5.2 请求 uuid 的
-# "getrandom" feature——该 feature 在 uuid 1.14+ 被移除（1.13 起改名
-# rng-getrandom），max 解到 1.24.0 即"feature 不存在"（cargo 自家 fresh
-# 解析同撞，非 mirvm 分叉）。钉 uuid = 1.6.1（driver 验收时代的历史 lock
-# 同版，getrandom feature 在场）。
+# polodb_core 3.5.2 requests uuid's "getrandom" feature, which was removed in
+# uuid 1.14+ (renamed to rng-getrandom in 1.13). Resolving uuid to 1.24.0 fails
+# with "requested a feature that does not exist"; plain cargo resolves the same way, so this is not a
+# mirvm fork. Pin uuid = 1.6.1: that is where the getrandom feature is still
+# present.
 uuid = "=1.6.1"
 ---
-// polodb_core 3.5.2 嵌入式文档库差分（批8 波2：VM/语言机——polodb 自带查询
-// 字节码 VM，btree 页存 + journal WAL + 乐观会话事务，VM-in-VM 压力面）。
+// polodb_core 3.5.2 embedded document database differential: the crate ships its own
+// query bytecode VM, btree pages, journal WAL and optimistic session transactions.
 //
-// 测试面清单（条目共六项全覆盖；其中「索引字段」按实勘降级，见下注）：
-//   ① temp 目录建库（.db + .db.journal 起点清空，版本行锚定 3.5.2）；
-//   ② 事务段批量插入：40 user docs，BSON 型别覆盖 Int32/Int64/Double(from_bits
-//      定值表)/Boolean/String/Binary(变长定种)/嵌套 Document/Array/Null/固定
-//      DateTime/固定字节 ObjectId；blobs 集合 2 docs（16KB 大二值——跨 4 页
-//      large-ticket 溢出链；2KB 字符串）；
-//   ③ 主键 B-tree 即唯一索引——二级 create_index 不可用的既定降级：
-//      3.5.2 里 Collection::create_index 为私有、Database::create_index 为
-//      pub(super)，落到 internal_create_index = unimplemented!()（源码实勘），
-//      任何公开路径都到不了索引创建。故「索引字段」以 `_id` 主键 B-tree 面
-//      覆盖：点查（pkey 快路）/非键字段等值全扫/[$gte,$lt) 范围/$or/$in，
-//      全量回读即主键序；
-//   ④ 更新+删除事务段（ClientSession 乐观事务：写入攒 page_map、commit 时
-//      才对全局 journal 加锁落盘——3.5.2 会话模型实勘）：tx2 内 $set/$inc/
-//      $mul/$max/$unset/delete_many+commit；tx3 插入 5 行事务内计数 41 后
-//      abort 回滚不见；
-//   ⑤ 错误路径：$set _id 非法 / 重复 _id DataExist / 不存在集合 find/count/
-//      update（match 双分支打印，Err/Ok 皆定，native 定 oracle）；无事务
-//      commit/rollback 文案；
-//   ⑥ 关闭重开持久性：pre-close 全量 ids + BSON 逐字节 FNV 锚 → drop →
-//      open_file 重开（FileBackend::drop checkpoint + journal recovery）→
-//      同口径全量回读 assert_eq 对撞 + 更新/删除痕迹抽样复读 + 清理文件。
+// Coverage:
+//   ① Create the db in a temp dir (.db + .db.journal cleared at the start);
+//   ② Bulk insert in a transaction: 40 user docs covering BSON Int32/Int64/Double
+//      (from_bits table)/Boolean/String/Binary (variable length)/nested
+//      Document/Array/Null/fixed DateTime/fixed-byte ObjectId; blobs gets 2 docs
+//      (16KB binary across a 4-page large-ticket overflow chain; 2KB string);
+//   ③ The primary-key B-tree is the only unique index -- secondary create_index is
+//      unreachable in 3.5.2: Collection::create_index is private and
+//      Database::create_index is pub(super), landing on internal_create_index =
+//      unimplemented!(), so no public path can create an index. Index coverage
+//      therefore uses the `_id` B-tree: point lookup (pkey fast path), non-key
+//      equality full scan, [$gte,$lt) range, $or, $in, full read in pkey order;
+//   ④ Update + delete transaction (ClientSession optimistic: writes accumulate in
+//      page_map and the global journal is locked only at commit): tx2 does
+//      $set/$inc/$mul/$max/$unset/delete_many + commit; tx3 inserts 5 rows, sees 41
+//      inside the transaction, aborts, and the rows are gone;
+//   ⑤ Error paths: $set on _id illegal / duplicate _id DataExist / find, count and
+//      update on a missing collection (both match arms print, Err and Ok are both
+//      deterministic, native is the oracle); commit/rollback with no transaction;
+//   ⑥ Close/reopen persistence: pre-close full ids + byte-for-byte BSON FNV anchor
+//      -> drop -> reopen (FileBackend::drop checkpoint + journal recovery) -> same
+//      full re-read checked with assert_eq + spot re-read of update/delete traces;
 //
-//   上游 3.5.2 行为实勘（双维同文，driver 结构据此安排）：
-//     * base session（无 session 的自动提交路径）的 update_one/update_many
-//       会泄漏全局 journal Write 事务（DbAuto 计数失衡）：此后任何
-//       ClientSession commit（需全局 journal 锁）报
-//       StartTransactionInAnotherTransaction，且泄漏的预-close 可见更新
-//       在 drop 时被 journal 恢复丢弃、重开后回退（native 实测复现，见
-//       [8][9] 段——作为确定性数据点打印断言，两维必须同文）。故全部
-//       会话 commit 段（[1][2]）排在任何 base update（[8]）之前；
-//     * 不存在集合的 find_many 返回 Ok(空)、count 返回 Ok(0)（[3] 实勘行）。
-//   「索引字段」降级为 `_id` 主键 B-tree 面为唯一条目外偏差，其余全覆盖。
+// Upstream 3.5.2 behaviours the driver depends on:
+//   * update_one/update_many on the base session (the auto-commit path with no
+//     session) leak a global journal Write transaction (DbAuto refcount imbalance):
+//     any later ClientSession commit (which needs the global journal lock) reports
+//     StartTransactionInAnotherTransaction, and the leaked, pre-close-visible update
+//     is discarded by journal recovery on drop and reverts after reopen (printed as
+//     a deterministic data point in [8][9]); every session commit section ([1][2]) is
+//     therefore ordered before any base update ([8]);
+//   * find_many on a missing collection returns Ok(empty) and count returns Ok(0);
+//     the `_id` primary-key B-tree standing in for index fields is the only deviation.
 //
-// 确定性纪律：
-//   - `_id` 一律显式赋 i64——fix_doc 对缺 _id 文档自动生成 ObjectId::new()
-//     （进程随机，源码实勘），本 driver 从不缺省；
-//   - 引擎内部随机源（集合 uuid = Uuid::now_v1、会话 ObjectId、journal salt）
-//     一律不打印；InsertManyResult.inserted_ids 是 HashMap，只打印 len；
-//   - list_collection_names 客户端再排序；f64 只打 to_bits()；文档摘要一律
-//     bson::to_vec 后 FNV（BSON 序即插入序，跨进程稳定）；无路径/时间/地址输出；
-//   - 数据全由定种 xorshift64* 生成；stderr 真空。
+// Determinism discipline:
+//   - `_id` is always explicit i64: fix_doc auto-generates a random ObjectId::new()
+//     for a document without _id, so the driver never omits it;
+//   - engine-internal random sources (collection uuid = Uuid::now_v1, session
+//     ObjectId, journal salt) are never printed; inserted_ids is a HashMap, only its
+//     len is printed; names are re-sorted; f64 only via to_bits();
+//     digests are bson::to_vec then FNV (BSON order = insertion order, stable
+//     across processes); seeded xorshift64*; no path/time/address; stderr empty.
 //
-// 三维复跑：
-//   A: target/release/mirvm run corpus/c_polodb.rs
-//   B: cd "$(grep -l 'name = "c_polodb"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname)" && \
-//        RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \
-//        "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
-//   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_polodb.rs
+// Differential oracle: the same fixture is run three ways and the three outputs are
+// compared.
+//   A: the release mirvm binary interpreted (`mirvm run corpus/c_polodb.rs`);
+//   B: the cached cargo project for this script, built and run with the real nightly
+//      rustc (native), against the same pinned Cargo.lock;
+//   C: the mirvm run with MIRVM_JIT_THRESHOLD=1, compiling every guest fn.
 //
-// 构建预算备注：闭包 ~40 crate 全 Rust 无 C，轻量（A 热 4.4s、B 增量 0.1s、
-// C 热 4.0s，wall）。FRONTIER 绕行：无。
-// 2026-07-18 首跑三维逐字节一致、exit 全 0、stderr 全空（各维复跑两次锁定）：
-//   ① 会话乐观事务全通道（start/commit/abort + 事务内可读、回滚不见）三维同文；
-//   ② journal WAL 持久性闭环——tx1/tx2 commit 数据跨 drop+reopen 全量 FNV 对撞
-//      相等，FileBackend::drop checkpoint + 重开 recovery 无分歧；
-//   ③ 上游 3.5.2 的 base-update 泄漏语义（[8] 预-close 可见、[9] 重开回退）
-//      与 native 逐字节同文复现——属 crate 内部逻辑，非引擎分歧；
-//   ④ CRC64 帧校验（crc64fast）、flock、页溢出 large-ticket、bson 全型别
-//      编解码经 JIT 阈 1 与解释器无分歧。引擎疑似问题：未发现。
+// The oracle requires all three runs to agree byte-for-byte with exit 0 and empty
+// stderr. FRONTIER: none.
+//   * session optimistic transactions (start/commit/abort, in-transaction reads,
+//     aborted rows gone): identical across all three runs;
+//   * journal WAL persistence: tx1/tx2 commits survive drop+reopen with an equal full
+//     FNV, FileBackend::drop checkpoint + reopen recovery without divergence;
+//   * upstream 3.5.2 base-update leak ([8] visible pre-close, [9] reverted after
+//     reopen): reproduces in the native run as crate-internal logic, not a bug;
+//   * CRC64 frames (crc64fast), flock, large-ticket page overflow and all BSON type
+//     codecs: no divergence between JIT-threshold-1 and the interpreter.
 use polodb_core::bson::{doc, oid::ObjectId, spec::BinarySubtype, Binary, Bson, DateTime, Document};
 use polodb_core::Database;
 
-/// 定种 xorshift64*（native/mirvm/JIT 三维同序列）。
+/// Seeded xorshift64* (same sequence in native, mirvm and JIT).
 struct Rng(u64);
 
 impl Rng {
@@ -117,12 +117,12 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 文档逐字节锚：BSON 编码 FNV（字段序 = 插入序，两侧一致）。
+/// Byte-for-byte document anchor: FNV over the BSON encoding (field order = insertion order).
 fn doc_fnv(d: &Document) -> u64 {
     fnv1a(&polodb_core::bson::to_vec(d).unwrap())
 }
 
-/// 定值 Double 位模式表（0.0/-0.0/1.5/-2.25/π/MAX/最小次正规/1e-8）。
+/// Fixed Double bit patterns (0.0/-0.0/1.5/-2.25/π/MAX/smallest subnormal/1e-8).
 const F64_BITS: [u64; 8] = [
     0x0000000000000000,
     0x8000000000000000,
@@ -134,7 +134,7 @@ const F64_BITS: [u64; 8] = [
     0x3e45798ee2308c3a,
 ];
 
-/// 第 i 个 user 文档（全型别覆盖，字段全定值）。
+/// User document `i` (every BSON type, all field values fixed).
 fn user_doc(i: i64) -> Document {
     let blen = 8 + ((i * 7) % 24) as usize;
     let mut oid_bytes = [0u8; 12];
@@ -180,7 +180,7 @@ fn get_str<'a>(d: &'a Document, k: &str) -> &'a str {
     }
 }
 
-/// 全量回读：ids 序列 + 逐文档 BSON FNV 折叠（_id 主键 B-tree 序）。
+/// Full re-read: id sequence + per-document BSON FNV fold (in `_id` primary-key order).
 fn scan_all(col: &polodb_core::Collection<Document>) -> (usize, String, u64) {
     let all = col.find_many(None).unwrap();
     let mut ids = Vec::with_capacity(all.len());
@@ -196,14 +196,14 @@ fn scan_all(col: &polodb_core::Collection<Document>) -> (usize, String, u64) {
 fn main() {
     let path = std::env::temp_dir().join("mirvm_c_polodb.db");
     let journal = std::env::temp_dir().join("mirvm_c_polodb.db.journal");
-    let _ = std::fs::remove_file(&path); // 起点清空，多跑不累加
+    let _ = std::fs::remove_file(&path); // clear at start so repeated runs do not accumulate
     let _ = std::fs::remove_file(&journal);
 
-    // ---- [0] 建库 ----
+    // ---- [0] open the database ----
     let db = Database::open_file(&path).unwrap();
     println!("[0] opened version={}", Database::get_version());
 
-    // ---- [1] tx1（会话乐观事务）：全部 40 users + 2 blobs，commit ----
+    // ---- [1] tx1 (session optimistic transaction): all 40 users + 2 blobs, commit ----
     let (u_ins, b_ins) = {
         let col = db.collection::<Document>("users");
         let blobs = db.collection::<Document>("blobs");
@@ -214,7 +214,7 @@ fn main() {
             col.insert_one_with_session(user_doc(i), &mut s).unwrap();
             u_ins += 1;
         }
-        let big = Rng(0xB16B_0001).bytes(16 * 1024); // 16KB 跨 4 页溢出链
+        let big = Rng(0xB16B_0001).bytes(16 * 1024); // 16KB across a 4-page overflow chain
         let texts: String = (0..2048u32).map(|k| (b'a' + (k % 26) as u8) as char).collect();
         blobs
             .insert_one_with_session(
@@ -241,7 +241,7 @@ fn main() {
     };
     println!("[1] tx1_users={u_ins} tx1_blobs={b_ins} count users={n_users} blobs={n_blobs} cols={}", names.join("|"));
 
-    // ---- [2] tx2：更新($set/$inc/$mul/$max/$unset) + 删除，commit ----
+    // ---- [2] tx2: update ($set/$inc/$mul/$max/$unset) + delete, commit ----
     let (m1, mm, m6, mu, md) = {
         let col = db.collection::<Document>("users");
         let mut s = db.start_session().unwrap();
@@ -280,7 +280,7 @@ fn main() {
     let n_after_tx2 = db.collection::<Document>("users").count_documents().unwrap();
     println!("[2] tx2 set1={m1} mul_max={mm} m6={m6} unset={mu} deleted={md} count={n_after_tx2}");
 
-    // ---- [3] 查询面（base 读，自动提交路径）：点查全型别 / 等值 / 范围 / 复合 ----
+    // ---- [3] query surface (base reads, auto-commit): point lookup, equality, range ----
     {
         let col = db.collection::<Document>("users");
         let d = col.find_one(doc! { "_id": 7i64 }).unwrap().unwrap();
@@ -342,7 +342,7 @@ fn main() {
             blen, bfnv, nested_a, arr_join, nil_null, ts_ms, oid_hex
         );
         println!("[3] miss none={}", col.find_one(doc! { "_id": 999i64 }).unwrap().is_none());
-        // tx2 更新痕迹复读
+        // re-read the tx2 update traces
         let d3 = col.find_one(doc! { "_id": 3i64 }).unwrap().unwrap();
         let d4 = col.find_one(doc! { "_id": 4i64 }).unwrap().unwrap();
         let mut pieces = Vec::new();
@@ -358,7 +358,7 @@ fn main() {
             d4.get("nil").is_some(),
             pieces.join(",")
         );
-        // 非键字段等值全扫
+        // equality full scan on a non-key field
         let hits = col.find_many(doc! { "group": 2i32 }).unwrap();
         let ids: Vec<String> = hits.iter().map(|d| get_i64(d, "_id").to_string()).collect();
         let mut acc: u64 = 0xcbf29ce484222325;
@@ -367,13 +367,13 @@ fn main() {
             acc = acc.wrapping_mul(0x100000001b3);
         }
         println!("[3] group=2 n={} ids={} fnv={:016x}", hits.len(), ids.join(","), acc);
-        // 主键范围（贯通 tx2 删除洞）
+        // primary-key range (spans the tx2 delete hole)
         let hits = col
             .find_many(doc! { "_id": { "$gte": 10i64, "$lt": 20i64 } })
             .unwrap();
         let ids: Vec<String> = hits.iter().map(|d| get_i64(d, "_id").to_string()).collect();
         println!("[3] range [10,20) n={} ids={}", hits.len(), ids.join(","));
-        // 复合谓词
+        // compound predicates
         let or_hits = col
             .find_many(doc! { "$or": [ { "_id": 3i64 }, { "group": 4i32 } ] })
             .unwrap();
@@ -386,7 +386,7 @@ fn main() {
         println!("[3] in n={} ids={}", in_hits.len(), in_ids.join(","));
     }
 
-    // ---- [4] tx3 abort：事务内可见、回滚不见；无事务报错文案 ----
+    // ---- [4] tx3 abort: visible in-transaction, gone after rollback; no-transaction errors ----
     {
         let col = db.collection::<Document>("users");
         let mut s = db.start_session().unwrap();
@@ -409,7 +409,7 @@ fn main() {
         }
     }
 
-    // ---- [5] 错误路径（match 双分支打印）----
+    // ---- [5] error paths (both match arms print) ----
     {
         let col = db.collection::<Document>("users");
         match col.update_one(doc! { "_id": 5i64 }, doc! { "$set": { "_id": 55i64 } }) {
@@ -432,7 +432,7 @@ fn main() {
         }
     }
 
-    // ---- [6] blobs 大对象读回（large-ticket 溢出链）----
+    // ---- [6] blobs large-object read-back (large-ticket overflow chain) ----
     let blob_fnv = {
         let blobs = db.collection::<Document>("blobs");
         let d0 = blobs.find_one(doc! { "_id": 0i64 }).unwrap().unwrap();
@@ -447,7 +447,7 @@ fn main() {
         fnv
     };
 
-    // ---- [7] pre-close 全量锚（此后只做不破坏锚的操作）----
+    // ---- [7] pre-close full anchor (only anchor-preserving operations follow) ----
     let (pre_n, pre_ids, pre_fnv) = {
         let col = db.collection::<Document>("users");
         scan_all(&col)
@@ -455,8 +455,8 @@ fn main() {
     println!("[7] pre-close n={pre_n} ids={pre_ids}");
     println!("[7] pre-close fnv={pre_fnv:016x} blob_fnv={blob_fnv:016x}");
 
-    // ---- [8] base session 更新（3.5.2 上游语义：泄漏 journal 写事务，预-close
-    //      可见、drop 时被丢弃、重开回退——确定性数据点，两维同文才准）----
+    // ---- [8] base session update (upstream 3.5.2: leaks a journal write transaction,
+    //      visible pre-close, dropped on drop, reverted after reopen) ----
     {
         let col = db.collection::<Document>("users");
         let up = col
@@ -474,7 +474,7 @@ fn main() {
         );
     }
 
-    // ---- [9] 关闭重开：commit 数据持久 + base 泄漏更新回退（上游语义对撞）----
+    // ---- [9] close and reopen: committed data persists, leaked base update reverts ----
     drop(db);
     let db = Database::open_file(&path).unwrap();
     let (post_n, post_ids, post_fnv, post_blob_fnv, id5_reverted, spot) = {
@@ -510,7 +510,7 @@ fn main() {
     assert!(id5_reverted);
     drop(db);
 
-    // ---- [10] 清理临时库文件 ----
+    // ---- [10] clean up the temp database files ----
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&journal);
     println!("[10] cleaned={}", !path.exists() && !journal.exists());

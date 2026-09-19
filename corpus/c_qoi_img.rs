@@ -3,21 +3,21 @@
 [dependencies]
 qoi = "0.4"
 ---
-// qoi 0.4（QOI "Quite Okay Image" 格式：纯整数、纯 safe Rust，唯一依赖 bytemuck）
-// 差分：内存生成 96x64 程序化图案，五段分区各对准一条编码 op 路径——
-//   y<10   微增量渐变   → QOI_OP_DIFF
-//   y<21   中量绿偏渐变 → QOI_OP_LUMA
-//   y<35   xor 纹理     → QOI_OP_RGB / QOI_OP_RGBA（RGBA 版 alpha 随纹理噪声）
-//   y<42   8 色循环调色板 → QOI_OP_INDEX
-//   其余   横向恒色条带  → QOI_OP_RUN（跨行长 run，触发 run==62 截断刷新）
-// 覆盖：encode_to_vec/decode_to_vec free fn、Encoder（with_colorspace 双值、
-// channels/header/required_buf_len、encode_to_buf）、Decoder（with_channels
-// 3↔4 交叉解码、channels/required_buf_len、decode_to_buf、data() 尾）、
-// decode_header、encode_max_len、encode_to_buf/decode_to_buf free fn、
-// Header::n_pixels/n_bytes、流式 encode_to_stream/from_stream、1x1 边界；
-// 错误路径：坏魔数 / 非法 channels / 非法 colorspace / 截断头 / 截断体 /
-// 坏 padding / 像素数不符 / 零维度 / 输出缓冲过小（编码+解码）。
-// 输出：尺寸、FNV-1a、逐像素比对计数、op 普查——全整数全确定，无浮点。
+// qoi 0.4 (QOI "Quite Okay Image": integer-only, pure safe Rust, only bytemuck)
+// differential over an in-memory 96x64 procedural image; five bands, one op each:
+//   y<10   fine incremental gradient     -> QOI_OP_DIFF
+//   y<21   medium green-biased gradient  -> QOI_OP_LUMA
+//   y<35   xor texture                   -> QOI_OP_RGB / QOI_OP_RGBA (noisy alpha)
+//   y<42   8-colour rotating palette     -> QOI_OP_INDEX
+//   rest   constant horizontal bands     -> QOI_OP_RUN (cross-row runs, run==62 flush)
+// Coverage: encode_to_vec/decode_to_vec free fns, Encoder (both with_colorspace
+// values, channels/header/required_buf_len, encode_to_buf), Decoder (with_channels
+// 3<->4 cross decode, channels/required_buf_len, decode_to_buf, trailing data()),
+// decode_header, encode_max_len, encode_to_buf/decode_to_buf free fns,
+// Header::n_pixels/n_bytes, streaming encode_to_stream/from_stream, the 1x1 edge;
+// error paths: bad magic / bad channels / bad colorspace / truncated header or
+// body / bad padding / pixel-count mismatch / zero dim / small output buffer (both).
+// Output: dimensions, FNV-1a, per-pixel mismatch counts, op census -- integers only.
 use qoi::{
     Channels, ColorSpace, Decoder, Encoder, decode_header, decode_to_buf, decode_to_vec,
     encode_max_len, encode_to_buf, encode_to_vec,
@@ -26,7 +26,7 @@ use qoi::{
 const W: u32 = 96;
 const H: u32 = 64;
 
-/// 8 色循环调色板（INDEX 区）：hash 槽复用，必然命中 QOI_OP_INDEX。
+/// 8-colour rotating palette (INDEX band): the hash slots repeat, so QOI_OP_INDEX always hits.
 const PALETTE: [[u8; 3]; 8] = [
     [0x11, 0x22, 0x33],
     [0xaa, 0xbb, 0xcc],
@@ -38,24 +38,24 @@ const PALETTE: [[u8; 3]; 8] = [
     [0xca, 0xfe, 0xba],
 ];
 
-/// 程序化 RGB 图案（x,y → 像素），分区见文件头注释。
+/// Procedural RGB pattern (x,y -> pixel); the bands are described in the file header.
 fn rgb_at(x: u32, y: u32) -> [u8; 3] {
     if y < 10 {
-        // 逐像素增量 ∈ {(0,1,0),(1,1,0),(0,1,-1),(1,1,-1)}：全落在 DIFF 域
+        // Per-pixel deltas ∈ {(0,1,0),(1,1,0),(0,1,-1),(1,1,-1)}: all inside the DIFF range
         let g = (x as u8).wrapping_add(y as u8);
         [g / 4, g, 200 - g / 2]
     } else if y < 21 {
-        // 逐像素增量 (5,6,4)：dg=6 ∈ LUMA 域，dr-dg=-1、db-dg=-2 ∈ [-8,7]
+        // Per-pixel delta (5,6,4): dg=6 ∈ LUMA range, dr-dg=-1 and db-dg=-2 ∈ [-8,7]
         let (r, g, b) = ((x * 5) as u8, (x * 6) as u8, (x * 4) as u8);
         [r, g.wrapping_add(y as u8), b]
     } else if y < 35 {
-        // xor 纹理：大伪随机跳变 → RGB(A) op；量化到 32 色制造 INDEX 复用
+        // xor texture: large pseudorandom jumps -> RGB(A) ops; 32-colour quantization repeats INDEX
         let v = (((x * 3) ^ (y * 5) ^ x.wrapping_mul(y)) & 0xf8) as u8;
         [v, v ^ 0x5a, v.rotate_left(3)]
     } else if y < 42 {
         PALETTE[(x % 8) as usize]
     } else {
-        // 横向恒色条带：每 3 行一色，行内/行间连续 → 长 RUN（96*3 > 62 必截断）
+        // Constant-colour bands, 3 rows each, continuous across rows -> long RUNs (96*3 > 62)
         let band = ((y - 42) / 3) as u8;
         [
             band.wrapping_mul(40),
@@ -65,8 +65,8 @@ fn rgb_at(x: u32, y: u32) -> [u8; 3] {
     }
 }
 
-/// alpha 谱系：渐变/调色板/条带区恒 255（保住 DIFF/LUMA/INDEX/RUN），
-/// xor 纹理区随图案噪声（逐像素变 → 强制 QOI_OP_RGBA）。
+/// Alpha profile: 255 in the gradient/palette/band regions (keeping DIFF/LUMA/INDEX/RUN),
+/// and following the texture noise in the xor region (changes per pixel -> QOI_OP_RGBA).
 fn alpha_at(x: u32, y: u32) -> u8 {
     if (21..35).contains(&y) {
         (((x * 3) ^ (y * 5) ^ x.wrapping_mul(y)) & 0xf8) as u8
@@ -96,10 +96,10 @@ fn build_rgba() -> Vec<u8> {
     v
 }
 
-/// alpha 恒 255 的 RGBA 图：供 RGBA→RGB 交叉解码用。qoi-rust 0.4 的 (3,4)
-/// 跨通道解码把 index hash 链的 alpha 强制为 255（encode 侧用真实 alpha），
-/// 流中一旦有 alpha 变化，后续 QOI_OP_INDEX 会查错槽——上游语义偏差，
-/// 故跨通道精确性检查只在 alpha 不变的流上锚定。
+/// RGBA image with alpha fixed at 255, for the RGBA->RGB cross decode: qoi-rust 0.4
+/// forces alpha to 255 in the index hash chain on a 4->3 channel decode (the encoder
+/// used the real alpha), so once the stream changes alpha, later QOI_OP_INDEX probes
+/// the wrong slot. Exact cross-channel checks are anchored on alpha-flat streams only.
 fn build_rgba_flat() -> Vec<u8> {
     let mut v = Vec::with_capacity((W * H * 4) as usize);
     for y in 0..H {
@@ -120,7 +120,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 逐像素比对：返回 (不匹配像素数, 首个不匹配下标或 -1)。
+/// Per-pixel comparison: (number of mismatching pixels, index of the first mismatch or -1).
 fn pixel_diff(a: &[u8], b: &[u8], ch: usize) -> (usize, i64) {
     if a.len() != b.len() {
         return (usize::MAX, -2);
@@ -137,11 +137,11 @@ fn pixel_diff(a: &[u8], b: &[u8], ch: usize) -> (usize, i64) {
     (n, first)
 }
 
-/// 沿 op 流走一遍（跳过各 op 负载字节，止于 8 字节 padding 前），
-/// 返回六种 op 的出现次数——编码路径覆盖的结构化指纹。
+/// Walk the op stream (skipping each op's payload bytes, stopping before the 8-byte
+/// padding) and count the six ops -- a structural fingerprint of the encoder path.
 fn op_census(enc: &[u8]) -> (u32, u32, u32, u32, u32, u32) {
     let (mut rgb, mut rgba, mut diff, mut luma, mut index, mut run) = (0, 0, 0, 0, 0, 0);
-    let mut i = 14; // QOI 头固定 14 字节
+    let mut i = 14; // fixed 14-byte QOI header
     while i < enc.len() - 8 {
         let b = enc[i];
         i += 1;
@@ -166,7 +166,7 @@ fn op_census(enc: &[u8]) -> (u32, u32, u32, u32, u32, u32) {
     (rgb, rgba, diff, luma, index, run)
 }
 
-/// ① 单组 roundtrip：编码 → 尺寸/FNV/op 普查 → 解码逐像素比对。
+/// ① One roundtrip group: encode -> size/FNV/op census -> decode and compare per pixel.
 fn roundtrip(tag: &str, raw: &[u8], cs: ColorSpace) {
     let enc = Encoder::new(raw, W, H)
         .unwrap()
@@ -197,7 +197,7 @@ fn main() {
     let rgb = build_rgb();
     let rgba = build_rgba();
 
-    // ① 通道数 3/4 × colorspace 双值 全组合 roundtrip
+    // ① All combinations of 3/4 channels × the two colorspace values
     roundtrip("rgb/srgb  ", &rgb, ColorSpace::Srgb);
     roundtrip("rgb/linear", &rgb, ColorSpace::Linear);
     roundtrip("rgba/srgb ", &rgba, ColorSpace::Srgb);
@@ -206,7 +206,7 @@ fn main() {
              ColorSpace::Srgb.is_srgb(), ColorSpace::Linear.is_linear(),
              Channels::Rgb.is_rgb(), Channels::Rgba.is_rgba());
 
-    // ② 交叉解码：RGBA(alpha 恒 255)→RGB 精确还原、RGB→RGBA（alpha=255）
+    // ② Cross decode: RGBA (alpha fixed at 255) -> RGB exactly, and RGB -> RGBA (alpha=255)
     let rgba_flat = build_rgba_flat();
     let enc_rgba = encode_to_vec(&rgba_flat, W, H).unwrap();
     let mut d = Decoder::new(&enc_rgba).unwrap().with_channels(Channels::Rgb);
@@ -229,7 +229,7 @@ fn main() {
     let (m, f) = pixel_diff(&dec, &expect, 4);
     println!("xdec rgb->rgba: len={} fnv={:016x} mismatch={m} first={f}", dec.len(), fnv1a(&dec));
 
-    // ③ Header/缓冲/流式 API 面
+    // ③ Header / buffer / streaming API surface
     let h = decode_header(&enc_rgb).unwrap();
     println!(
         "header: {}x{} ch={} cs={} px={} bytes={}",
@@ -266,13 +266,13 @@ fn main() {
     let outs = ds.decode_to_vec().unwrap();
     println!("stream: n={ns} len={} enc_eq={} dec_eq={}", s.len(), s == enc_rgb, outs == rgb);
 
-    // ④ 边界：1x1（单像素直接走 run 尾刷新 + RGBA 通道推断）
+    // ④ edge case 1x1: a single pixel goes straight to the run tail flush + RGBA inference
     let one = [7u8, 8, 9, 255];
     let e1 = encode_to_vec(one, 1, 1).unwrap();
     let (h1, d1) = decode_to_vec(&e1).unwrap();
     println!("edge 1x1: enc={} fnv={:016x} ch={} eq={}", e1.len(), fnv1a(&e1), h1.channels.as_u8(), d1 == one);
 
-    // ⑤ 错误路径（Display 文本全为整数/字节数组，确定）
+    // ⑤ error paths (the Display text is all integers/byte arrays, so it is deterministic)
     let mut bad = enc_rgb.clone();
     bad[0] = 0;
     println!("err magic: {}", decode_to_vec(&bad).unwrap_err());

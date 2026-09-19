@@ -3,26 +3,26 @@
 [dependencies]
 faer = "0.21"
 ---
-// faer 0.21 线性代数差分（pulp SIMD 运行时分发探测）。固定字面量/闭包矩阵，
-// 无随机源；set_global_parallelism(Par::Seq) 锁单线程使并行归约序不泄露线程数。
+// faer 0.21 linear-algebra differential (pulp SIMD runtime dispatch probe). Fixed
+// literal/closure matrices, no randomness; Par::Seq pins one thread so reduction order is fixed.
 //
-// 特性史（C4 闭合后订正）：
-//   曾以 default-features=false 绕行——默认特性开 pulp/std → V3 运行期检测
-//   命中 → mask_between 读 static LD_ST[544]（pulp build.rs 生成的 global_asm
-//   例程 `libpulp_v0_21_5_{ld,st}_b32s_<mask>`）→ dep crate global_asm 符号
-//   无处可解析，mirvm 曾 TRAP。C4（decision-history §7.22）后：mirvm 在 dep
-//   编译期从 HIR 抽取 global_asm 落清单（`.mirasm.s`），bin 加载相同通道
-//   物化装载——默认特性恢复，pulp 真走 LD_ST 汇编路径。
-//   注：旧注释称 default-features=false 时 pulp 无 std 检测面（0.21.5 实测
-//   形态）；新版 pulp（0.22+）no-std 亦自带 cpuid 检测，勿以此推断未来。
+// Hazard: faer is used with its default features. Defaults enable pulp/std, whose
+//   runtime dispatch picks the V3 path and mask_between reads static LD_ST[544]
+//   (pulp build.rs global_asm routine `libpulp_v0_21_5_{ld,st}_b32s_<mask>`); a
+//   dependency-crate global_asm symbol has no static definition to resolve, so
+//   mirvm TRAPs unless it materializes one. mirvm extracts dependency-crate
+//   global_asm at compile time from HIR into a manifest (`.mirasm.s`); the bin
+//   materializes it on the same load channel, so the default features work and
+//   pulp really takes the LD_ST assembly path. Newer pulp (0.22+) also detects CPU
+//   features in no-std, so the old no-std claim must not be generalized.
 //
-// 覆盖：Mat 构造（mat! 宏 / from_fn 闭包 / identity）/ partial_piv_lu
-// （L、U、P/inv 置换、solve、inverse、reconstruct）/ full_piv_lu（P、Q 双置换）/
-// qr（compute_Q、R、方阵 solve）+ 矩形 least-squares / determinant /
-// 精确奇异 rank-1 矩阵（det=0、inverse 出 inf/nan bits）/ 三角解残差 /
-// Mat Mul（gemm 路径）/ transpose-mul / norm_max / ColRef 视图。
-// 全部 f64 打印 to_bits() 锁位型，尾随每矩阵 FNV-1a 汇总行。
-// 确定性：输出只由字面量与 IEEE 754 基本运算决定；无 HashMap/时间/地址/线程数。
+// Coverage: Mat construction (mat! / from_fn / identity) / partial_piv_lu (L, U,
+// P/inv permutations, solve, inverse, reconstruct) / full_piv_lu (P and Q) / qr
+// (compute_Q, R, square solve) + rectangular least-squares / determinant / exactly
+// singular rank-1 (det=0, inverse yields inf/nan bits) / triangular solve residuals /
+// Mat Mul (gemm path) / transpose-mul / norm_max / ColRef views. Every f64 prints
+// to_bits() to pin the bit pattern, with a trailing per-matrix FNV-1a summary line.
+// Deterministic: literals and IEEE 754 arithmetic only; no HashMap/time/address/threads.
 use faer::linalg::solvers::{DenseSolveCore, Solve, SolveLstsqCore};
 use faer::{Conj, Mat, Par, mat};
 
@@ -39,11 +39,11 @@ fn dump(tag: &str, m: faer::MatRef<'_, f64>) {
         for j in 0..m.ncols() {
             let v = m[(i, j)];
             let mut bits = v.to_bits();
-            // NaN 符号位掩零：NaN 经 NaN 运算传播时符号属实现定义域（IEEE
-            // 允许自选；实证：同一 faer 奇异 inverse，native O0=7ff8 与
-            // mirvm 一致、native O3=fff8；rustc const-eval 亦一律 +nan）。
-            // 掩零后三态逐字节一致；payload 与 inf/-inf 区分保留，有穷值
-            // 全位照旧——oracle 不替 LLVM 相位签背书（2026-07-22 用户裁定）。
+            // Mask the NaN sign bit: a NaN from NaN arithmetic has an
+            // implementation-defined sign (IEEE permits either). For one faer singular
+            // inverse: native O0 = 7ff8 (matches mirvm), O3 = fff8, rustc const-eval = +nan.
+            // Masking makes them byte-identical; payload and inf/-inf distinction survive,
+            // finite bits unchanged. The oracle does not certify LLVM's choice of NaN sign.
             if v.is_nan() {
                 bits &= 0x7fff_ffff_ffff_ffff;
             }
@@ -59,7 +59,7 @@ fn dump(tag: &str, m: faer::MatRef<'_, f64>) {
 }
 
 fn lu_battery(tag: &str, a: Mat<f64>, b: Mat<f64>) {
-    // partial-piv LU：置换 + L/U + solve + inverse
+    // partial-piv LU: permutation + L/U + solve + inverse
     let lu = a.as_ref().partial_piv_lu();
     {
         let (fwd, inv) = lu.P().arrays();
@@ -72,11 +72,11 @@ fn lu_battery(tag: &str, a: Mat<f64>, b: Mat<f64>) {
     dump(&format!("{tag}.lu.inv"), lu.inverse().as_ref());
     dump(&format!("{tag}.lu.recon"), lu.reconstruct().as_ref());
 
-    // 残差 r = A*x - b（走 gemm matmul 路径）
+    // Residual r = A*x - b (goes through the gemm matmul path)
     let r = a.as_ref() * x.as_ref() - b.as_ref();
     println!("{tag}.lu.resid_norm_max={:016x}", r.as_ref().norm_max().to_bits());
 
-    // full-piv LU：双置换面
+    // full-piv LU: both permutation faces
     let flu = a.as_ref().full_piv_lu();
     {
         let (pf, pi) = flu.P().arrays();
@@ -99,7 +99,7 @@ fn main() {
     faer::set_global_parallelism(Par::Seq);
     println!("par=Seq (get={:?})", faer::get_global_parallelism());
 
-    // ① 4x4：首列主元 0.125 非最大 → 强制行交换；均为二进制精确分数
+    // (1) 4x4: first-column pivot 0.125 is not maximal -> forced row swap; exact binary fractions
     let a4 = mat![
         [0.125, 2.0, -1.0, 3.0],
         [4.0, 1.25, 0.5, -2.0],
@@ -113,12 +113,12 @@ fn main() {
     qr_battery("A4", a4.clone(), b4.clone());
     println!("A4.det={:016x}", a4.as_ref().determinant().to_bits());
 
-    // 双右端 solve（Mat 4x2 rhs）
+    // two-right-hand-side solve (4x2 Mat rhs)
     let b42 = mat![[1.0, -1.0], [2.0, -2.0], [3.0, -3.0], [4.0, -4.0]];
     let lu42 = a4.as_ref().partial_piv_lu();
     dump("A4.lu.x2", lu42.solve(b42.as_ref()).as_ref());
 
-    // ② 8x8：from_fn 闭包构对角占优矩阵，元素仍为精确二进制分数
+    // (2) 8x8: from_fn closure builds a diagonally dominant matrix, still exact binary fractions
     let a8 = Mat::from_fn(8usize, 8usize, |i, j| {
         let off = ((i * 7 + j * 13 + 3) % 19) as f64;
         (off - 9.0) / 4.0 + if i == j { 8.0 } else { 0.0 }
@@ -128,7 +128,7 @@ fn main() {
     qr_battery("A8", a8.clone(), b8.clone());
     println!("A8.det={:016x}", a8.as_ref().determinant().to_bits());
 
-    // ③ 矩形 5x3 QR least-squares（thin Q/R + solve_lstsq_in_place）
+    // (3) rectangular 5x3 QR least-squares (thin Q/R + solve_lstsq_in_place)
     let a53 = Mat::from_fn(5usize, 3usize, |i, j| ((i * 5 + j * 7 + 1) % 11) as f64 / 2.0 - 2.0);
     let b5 = mat![[1.0], [-2.0], [0.5], [3.0], [-0.25]];
     let qr53 = a53.as_ref().qr();
@@ -136,14 +136,14 @@ fn main() {
     dump("A53.qr.thinR", qr53.thin_R());
     let mut lstsq_rhs = b5.clone();
     qr53.solve_lstsq_in_place_with_conj(Conj::No, lstsq_rhs.as_mut());
-    // m×n (m≥n)：in-place 解覆写 rhs 前 n 行
+    // m×n (m≥n): the in-place solution overwrites the first n rows of rhs
     dump("A53.qr.lstsq_x", lstsq_rhs.as_ref().subrows(0usize, 3usize));
-    // 残差范数：|A*x - b|（thin Q^T b 面也隐式对已覆盖）
+    // residual norm: |A*x - b| (this implicitly checks the thin Q^T b side too)
     let x3 = lstsq_rhs.as_ref().subrows(0usize, 3usize);
     let r53 = a53.as_ref() * x3 - b5.as_ref();
     println!("A53.qr.lstsq_resid_norm_max={:016x}", r53.as_ref().norm_max().to_bits());
 
-    // ④ 精确奇异 rank-1：det=±0；inverse 出 nan（确定性 IEEE 位型）
+    // (4) exactly singular rank-1: det=±0; inverse yields nan (deterministic IEEE bits)
     let s4 = Mat::from_fn(4usize, 4usize, |i, j| {
         let v = [1.0f64, 2.0, 3.0, 4.0];
         let w = [0.5f64, -1.0, 2.0, 0.25];
@@ -158,7 +158,7 @@ fn main() {
     dump("S4.lu.U", slu.U());
     dump("S4.lu.inv", slu.inverse().as_ref());
 
-    // ⑤ Mat 基础代数面：Mul（gemm）、transpose×self、identity、norm_max、ColRef
+    // (5) Mat basic algebra: Mul (gemm), transpose×self, identity, norm_max, ColRef
     let g = a4.as_ref() * a4.as_ref();
     dump("A4*A4", g.as_ref());
     let t = a4.transpose() * a4.as_ref();
@@ -175,7 +175,7 @@ fn main() {
     }
     println!("A4.col0_sum={:016x}", csum.to_bits());
 
-    // ⑥ f64 边界值谱：±0、非规范小数、大数 —— solve 位型对拍
+    // (6) f64 edge-value spectrum: ±0, subnormal fraction, huge values -- solve bit comparison
     let edge = mat![
         [1.0e300, 0.0],
         [-0.0, 1.0e-300],

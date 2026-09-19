@@ -1,46 +1,46 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# =2.2.0 patch 钉死（与批1 c_ed25519 已锁闭包同版，离线可重建）。不设任何
-# backend env：默认（x86_64+nightly 自动 simd）backend 正是本条测试对象。
+# =2.2.0 patch-pinned so the closure stays rebuildable offline. No backend env is
+# set: the default (x86_64+nightly auto simd) backend is what this case exercises.
 ed25519-dalek = "=2.2.0"
-# 间接依赖显式 patch 钉死（4.1.3，与批1 锁定同值），防 registry 新 patch 漂移
-# 导致闭包不可复现。
+# Indirect dependency pinned with an explicit patch (4.1.3) so a new registry patch
+# cannot drift the closure into something unreproducible.
 curve25519-dalek = "=4.1.3"
 ---
-// ed25519-dalek 默认 simd backend 直跑——批1 c_ed25519（serial env 绕行）的解锁加测。
+// Runs ed25519-dalek on its default simd backend, with no backend env set.
 //
-// 背景与钉选理由：curve25519-dalek 4.1.3 在 x86_64+nightly 下 auto 选 simd
-// backend；Avx2/ifma 多版本函数以 #[target_feature] 编译、运行期 guest CPUID
-// （直通宿主）派发。本机带 avx512ifma → 派发选中 ifma 路径 → 域乘法走
-// llvm.x86.avx512.vpmadd52*——批1 时六宽未内建，以
-// CARGO_CFG_CURVE25519_DALEK_BACKEND=serial 绕行（gate5 至今为 c_ed25519 注入
-// 该 env，名键不命中本 driver）；2b4766b 起 vpmadd52 全内建 → 本 driver 不设
-// env 直跑默认路径，验收解锁。
+// Pinning rationale: curve25519-dalek 4.1.3 auto-selects a simd backend on
+// x86_64+nightly; the Avx2/ifma multi-version functions are compiled with
+// #[target_feature] and dispatched at runtime from guest CPUID (passed straight
+// through from the host). With avx512ifma present, dispatch selects the ifma path
+// so field multiplication uses llvm.x86.avx512.vpmadd52*; those intrinsics are
+// built in, so this driver sets no env and runs the default path. The gate injects
+// CARGO_CFG_CURVE25519_DALEK_BACKEND=serial for c_ed25519 only.
 //
-// 测试面：
-//   ① RFC8032 §7.1 TEST 1/2/3：sk→pk 派生逐字节锚定、sign 逐字节锚定定向量、
-//      verify / verify_strict 正例（assert + 稳定 print）；
-//   ② 定种 keygen（两枚硬编码种子 × 3 条消息：空/短/175B 跨 SHA-512 双块）：
-//      pk/sig hex 打印、同消息双签确定性、序列化 roundtrip、flip-msg/flip-sig
-//      反例、跨密钥反例、fnv1a 汇总；
-//   ③ backend 一致性（手工一次性，不进三维门禁）：本文件输出与 serial env 下
-//      输出逐字节一致——canonical encoding 数学值不随 backend 变（见命令④）。
-//      另覆盖压解/小阶边界：全零 y（二次剩余巧合 → 二阶点）、y=1 identity，
-//      二者可解压但 strict 验签拒签。
+// Coverage:
+//   ① RFC8032 §7.1 TEST 1/2/3: sk→pk derivation and sign anchored byte-for-byte to
+//      the vectors, plus verify / verify_strict positives (assert + stable print);
+//   ② fixed-seed keygen (two hardcoded seeds × 3 messages: empty / short / 175B
+//      spanning two SHA-512 blocks): pk/sig hex prints, re-sign determinism,
+//      serialization roundtrip, flip-msg / flip-sig and cross-key negatives,
+//      fnv1a summary;
+//   ③ decompression / small-order edges: all-zero y (a quadratic-residue
+//      coincidence → order-2 point) and y=1 identity both decompress; strict
+//      verification rejects them. Backend consistency is checked manually (see ④).
 //
-// 确定性：无随机源/无时间/无 env 读取——种子与消息全部硬编码，ed25519 签名本身
-// 无 nonce 熵（RFC8032 确定签名）；输出全为十六进制与布尔稳定行（约 60 行）。
-// FRONTIER：无（vpmadd52 内建已落地， docs/corpus.md §5 M5.x 队列核销记录）。
+// Determinism: no randomness, time or env reads; seeds and messages are hardcoded,
+// ed25519 signing has no nonce entropy (RFC8032), and output is hex/boolean lines (~60).
+// FRONTIER: none (the vpmadd52 intrinsics are built in).
 //
-// 复跑（仓库根）：
+// Re-run (from the repo root):
 //   A: target/release/mirvm run corpus/c_ed25519_default.rs
 //   B: cd $(dirname $(grep -l 'name = "c_ed25519_default"' ~/.cache/mirvm/scripts/*/Cargo.toml)) && \
 //      RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \
 //      "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
 //   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_ed25519_default.rs
-//   ④ backend 对比（手工）：CARGO_CFG_CURVE25519_DALEK_BACKEND=serial \
-//      target/release/mirvm run corpus/c_ed25519_default.rs —— stdout 应与 A 逐字节一致。
+//   ④ backend comparison (manual): CARGO_CFG_CURVE25519_DALEK_BACKEND=serial \
+//      target/release/mirvm run corpus/c_ed25519_default.rs -- stdout must match A byte-for-byte.
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
 fn hex(bytes: &[u8]) -> String {
@@ -75,7 +75,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// RFC8032 §7.1 测试向量（Ed25519，TEST 1/2/3）。
+/// RFC8032 §7.1 test vectors (Ed25519, TEST 1/2/3).
 const RFC: [(&str, &str, &str, &str); 3] = [
     (
         "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
@@ -100,7 +100,7 @@ const RFC: [(&str, &str, &str, &str); 3] = [
     ),
 ];
 
-/// ① RFC8032 定向量：派生与签名结果硬锚定（assert），打印留三维对拍记录。
+/// ① RFC8032 vectors: derivation and signature hard-anchored by assert; prints are the record.
 fn rfc_vectors() {
     for (i, (seed_h, pk_h, msg_h, sig_h)) in RFC.iter().enumerate() {
         let n = i + 1;
@@ -114,12 +114,12 @@ fn rfc_vectors() {
         let sk = SigningKey::from_bytes(&seed);
         let pk = sk.verifying_key().to_bytes();
         println!("rfc{n} pk = {}", hex(&pk));
-        assert_eq!(pk, pk_expected, "rfc{n} pk 派生偏离 RFC8032");
+        assert_eq!(pk, pk_expected, "rfc{n} pk derivation deviates from RFC8032");
 
         let sig = sk.sign(&msg);
         let sig_bytes = sig.to_bytes();
         println!("rfc{n} sig = {}", hex(&sig_bytes));
-        assert_eq!(sig_bytes, sig_expected, "rfc{n} 签名偏离 RFC8032");
+        assert_eq!(sig_bytes, sig_expected, "rfc{n} signature deviates from RFC8032");
 
         let vk = VerifyingKey::from_bytes(&pk_expected).unwrap();
         println!("rfc{n} verify = {}", vk.verify(&msg, &sig).is_ok());
@@ -127,7 +127,7 @@ fn rfc_vectors() {
     }
 }
 
-/// ② 定种 keygen + 签验：一批稳定 print + 正反例。
+/// ② Fixed-seed keygen and sign/verify: stable prints plus positives and negatives.
 fn round(label: &str, seed: [u8; 32], msgs: &[&[u8]], sink: &mut Vec<u8>) {
     let sk = SigningKey::from_bytes(&seed);
     let vk: VerifyingKey = sk.verifying_key();
@@ -146,7 +146,7 @@ fn round(label: &str, seed: [u8; 32], msgs: &[&[u8]], sink: &mut Vec<u8>) {
         sink.extend_from_slice(&sig_bytes);
         println!("{label} sig{i} (len {}) = {}", msg.len(), hex(&sig_bytes));
 
-        // ed25519 是确定性签名：同消息再签一次必须逐字节相等
+        // ed25519 signing is deterministic: re-signing the same message must be byte-identical
         println!(
             "{label} sig{i} deterministic = {}",
             sig_bytes == sk.sign(msg).to_bytes()
@@ -155,7 +155,7 @@ fn round(label: &str, seed: [u8; 32], msgs: &[&[u8]], sink: &mut Vec<u8>) {
         println!("{label} sig{i} verify = {}", vk.verify(msg, &sig).is_ok());
         println!("{label} sig{i} strict = {}", vk.verify_strict(msg, &sig).is_ok());
 
-        // 反例一：消息翻转一字节 → 必须失败
+        // Negative case 1: flip one message byte → must fail
         let mut bad_msg = msg.to_vec();
         if bad_msg.is_empty() {
             bad_msg.push(0x01);
@@ -164,7 +164,7 @@ fn round(label: &str, seed: [u8; 32], msgs: &[&[u8]], sink: &mut Vec<u8>) {
         }
         println!("{label} sig{i} flip-msg err = {}", vk.verify(&bad_msg, &sig).is_err());
 
-        // 反例二：签名翻转一字节 → 必须失败
+        // Negative case 2: flip one signature byte → must fail
         let mut bad_bytes = sig_bytes;
         bad_bytes[10] ^= 0x80;
         let bad_sig = Signature::from_bytes(&bad_bytes);
@@ -175,7 +175,7 @@ fn round(label: &str, seed: [u8; 32], msgs: &[&[u8]], sink: &mut Vec<u8>) {
 fn main() {
     rfc_vectors();
 
-    // ② 两枚硬编码种子：一枚常数、一枚 xorshift 派生。
+    // ② Two hardcoded seeds: one constant, one derived by xorshift.
     let seed_a = [0x2a_u8; 32];
     let mut seed_b = [0u8; 32];
     let mut x = 0x9E37_79B9_7F4A_7C15_u64;
@@ -186,7 +186,7 @@ fn main() {
         *b = x.wrapping_mul(0x2545_F491_4F6C_DD1D) as u8;
     }
 
-    // 三条消息：空 / 短 / 175B（跨 SHA-512 两个 128B 分块）。
+    // Three messages: empty / short / 175B (spanning two 128B SHA-512 blocks).
     let mut long = Vec::new();
     for i in 0..175_u32 {
         long.push(i.wrapping_mul(7).wrapping_add(3) as u8);
@@ -197,14 +197,14 @@ fn main() {
     round("seedA", seed_a, &msgs, &mut sink);
     round("seedB", seed_b, &msgs, &mut sink);
 
-    // 跨密钥反例：seedA 的签名不能用 seedB 的公钥验证
+    // Cross-key negative: seedA's signature must not verify under seedB's public key
     let sig_a = SigningKey::from_bytes(&seed_a).sign(msgs[2]);
     let vk_b = SigningKey::from_bytes(&seed_b).verifying_key();
     println!("cross-key verify err = {}", vk_b.verify(msgs[2], &sig_a).is_err());
 
-    // 压解/小阶边界：全零字节 = y=0，x²=(y²-1)/(dy²+1)=-1 在模 p 下恰为二次
-    // 剩余 → 解压成功（二阶点 (±√-1, 0)，属小阶点）；严格验签必须拒绝。
-    // y=1（identity 弱公钥）解压成功、basic 验签自然失败、strict 明确拒绝。
+    // Decompression / small-order edges: all-zero bytes = y=0 gives x²=(y²-1)/(dy²+1)=-1,
+    // exactly a quadratic residue mod p → decompression succeeds (order-2 point (±√-1, 0),
+    // small order); strict rejects. y=1 identity decompresses; basic verify fails, strict rejects.
     let vk_zero = VerifyingKey::from_bytes(&[0u8; 32]).unwrap();
     println!("vk all-zero decompress ok = true");
     let rfc_msg = unhex(RFC[0].2);

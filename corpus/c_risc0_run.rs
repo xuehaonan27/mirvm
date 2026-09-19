@@ -260,7 +260,7 @@ const EC_SOFTWARE: u32 = 2;
 // syscall numbers (the Syscall enum)
 const NR_READ: u32 = 12;
 const NR_WRITE: u32 = 16;
-// fd（fileno）
+// fd (fileno)
 const FD_STDIN: u32 = 0;
 const FD_JOURNAL: u32 = 3;
 

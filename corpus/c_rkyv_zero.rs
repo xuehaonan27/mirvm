@@ -3,22 +3,22 @@
 [dependencies]
 rkyv = "0.8"
 ---
-// rkyv 0.8 零拷贝序列化差分（unsafe/unaligned 偏门）。derive(Archive/
-// Serialize/Deserialize) 的嵌套结构：String（inline/out-of-line 两种 repr）
-// / Vec / HashMap→ArchivedHashMap（swiss table，FxHasher64）/ BTreeMap→
-// ArchivedBTreeMap / enum（unit/tuple/struct 三变体）/ Option / Option<Box>
-// 递归，外加 [bool;3]、u8、u16、奇长 Vec<u8> 等尺寸非 8 倍数的对齐边界成员。
-// 覆盖：to_bytes（尺寸+FNV 锚定）→ access 经 bytecheck 全量校验后零拷贝逐
-// 字段读（不解构）并与原值交叉断言 → deserialize / from_bytes /
-// from_bytes_unchecked(unsafe) 三路 roundtrip 布尔 → access_unchecked
-// (unsafe) 旁路读 → 三条校验错误路径（截断 / UTF-8 篡改 0xFF / 非对齐根
-// 指针）。
-//
-// 确定性：源 HashMap 一律用 BuildHasherDefault<DefaultHasher>——RandomState
-// 每跑随机换种，其迭代序决定 archived swiss table 的物理槽位布局，会让
-// 序列化字节逐 run 发散（native/mirvm 对拍必炸）；DefaultHasher::new() 固定
-// key，同插入序同布局。ArchivedHashMap 迭代（FxHasher64 槽序）收集后排序再
-// 打印。只打印值/计数/排序条目/FNV/布尔，不打印地址与原始字节。
+// rkyv 0.8 zero-copy serialization differential (unsafe/unaligned corner cases).
+// derive(Archive/Serialize/Deserialize) tree: String (inline/out-of-line repr),
+// Vec, HashMap -> ArchivedHashMap (swiss table, FxHasher64), BTreeMap ->
+// ArchivedBTreeMap, enum (unit/tuple/struct), Option, Option<Box> recursion,
+// plus non-8-multiple alignment members: [bool;3], u8, u16, odd-length Vec<u8>.
+// Covers: to_bytes (size + FNV anchor) -> access (bytecheck full validation,
+// zero-copy field-by-field read without destructuring, cross-assert vs the
+// original) -> deserialize / from_bytes / from_bytes_unchecked(unsafe) three-
+// way roundtrip booleans -> access_unchecked(unsafe) bypass read -> three
+// validation error paths: truncated / UTF-8 tamper 0xFF / unaligned root.
+// Determinism: every source HashMap uses BuildHasherDefault<DefaultHasher>;
+// RandomState reseeds per run and its iteration order fixes the archived swiss
+// table layout, so the bytes would diverge per run and break the native/mirvm
+// differential. DefaultHasher::new() pins the key: same insertion order ->
+// same layout. ArchivedHashMap iteration (FxHasher64 slot order) is sorted
+// before printing; only values, counts, entries, FNV and booleans appear.
 use rkyv::rancor::Error;
 use rkyv::util::AlignedVec;
 use rkyv::{
@@ -29,7 +29,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::BuildHasherDefault;
 
-/// 固定 key 的 SipHash——同代码同插入序则迭代序确定（见文件头注）。
+/// SipHash with a fixed key: same insertion order -> deterministic iteration order.
 type DetMap<K, V> = HashMap<K, V, BuildHasherDefault<DefaultHasher>>;
 
 fn det_map<K, V>() -> DetMap<K, V> {
@@ -45,7 +45,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 校验错误的确定归类（rkyv validator 文案含裸地址，不能原文打印）。
+/// Maps validation errors to stable labels: rkyv validator text embeds a raw address.
 fn err_kind(e: &Error) -> &'static str {
     let msg = e.to_string();
     if msg.contains("unaligned pointer") {
@@ -75,8 +75,8 @@ struct Profile {
     quotas: BTreeMap<String, u64>,
     status: Status,
     friend: Option<u64>,
-    flags: [bool; 3], // 尺寸非 8 倍数成员
-    level: u8,        // 对齐边界：单字节成员
+    flags: [bool; 3], // member sized not a multiple of 8
+    level: u8,        // one-byte member at the alignment boundary
 }
 
 #[derive(Archive, Serialize, Deserialize, Debug, PartialEq)]
@@ -86,8 +86,8 @@ struct Team {
     lead: Option<Box<Profile>>,
     labels: BTreeMap<String, String>,
     index: DetMap<String, u32>,
-    blob: Vec<u8>, // 奇长度 13
-    marker: u16,   // 对齐边界：两字节成员
+    blob: Vec<u8>, // odd length 13
+    marker: u16,   // two-byte member at the alignment boundary
 }
 
 fn build_team() -> Team {
@@ -102,7 +102,7 @@ fn build_team() -> Team {
     let p1 = Profile {
         id: 42,
         nick: "alice 汉字🎉".to_string(),
-        tags: vec!["admin".to_string(), "汉".to_string(), String::new()], // 空串边界
+        tags: vec!["admin".to_string(), "汉".to_string(), String::new()], // empty-string boundary
         scores: scores1,
         quotas: quotas1,
         status: Status::Active,
@@ -115,12 +115,12 @@ fn build_team() -> Team {
     scores2.insert("math".to_string(), 55);
     let p2 = Profile {
         id: u64::MAX,
-        // > INLINE_CAPACITY → out-of-line repr；内嵌唯一 marker 供篡改定位
+        // > INLINE_CAPACITY -> out-of-line repr; unique embedded marker for tamper location
         nick: "bob mrk3.14159-zzz padding-abcdefghijklmnopqrstuvwxyz0123456789"
             .to_string(),
-        tags: Vec::new(),             // 空 Vec
+        tags: Vec::new(),             // empty Vec
         scores: scores2,
-        quotas: BTreeMap::new(),      // 空 BTreeMap
+        quotas: BTreeMap::new(),      // empty BTreeMap
         status: Status::Suspended(30),
         friend: None,
         flags: [false; 3],
@@ -132,8 +132,8 @@ fn build_team() -> Team {
     let p3 = Profile {
         id: 1_000_000_007,
         nick: "carol".to_string(),
-        tags: vec!["x".repeat(40)],   // 长 tag
-        scores: det_map(),            // 空 HashMap
+        tags: vec!["x".repeat(40)],   // long tag
+        scores: det_map(),            // empty HashMap
         quotas: quotas3,
         status: Status::Banned {
             reason: "spam 垃圾".to_string(),
@@ -182,7 +182,7 @@ fn build_team() -> Team {
 fn main() {
     let team = build_team();
 
-    // ---- ① 序列化：尺寸 + FNV 锚定 ----
+    // ---- ① serialize: size + FNV anchor ----
     let bytes = to_bytes::<Error>(&team).unwrap();
     println!(
         "archive len={} len%8={} fnv={:016x} aligned16={}",
@@ -192,7 +192,7 @@ fn main() {
         bytes.as_ptr().align_offset(16) == 0
     );
 
-    // ---- ② checked access：bytecheck 全量校验 + 零拷贝逐字段读 ----
+    // ---- ② checked access: bytecheck full validation + zero-copy field reads ----
     let archived = access::<ArchivedTeam, Error>(&bytes).unwrap();
     println!(
         "name={} members={} marker={}",
@@ -210,7 +210,7 @@ fn main() {
             p.flags,
             tags
         );
-        // ArchivedHashMap 槽序迭代 → 收集排序后打印（见文件头注）
+        // ArchivedHashMap slot-order iteration -> collect, sort, print (see header)
         let mut sc: Vec<(String, u32)> = p
             .scores
             .iter()
@@ -240,14 +240,14 @@ fn main() {
             None => println!("m{i} friend=none"),
         }
     }
-    // BTreeMap → 有序迭代，无需再排
+    // BTreeMap iterates in order; no re-sort needed
     let labels: Vec<(String, String)> = archived
         .labels
         .iter()
         .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
         .collect();
     println!("labels={labels:?}");
-    // ArchivedHashMap::get 命中 / 未命中
+    // ArchivedHashMap::get hit / miss
     for key in ["alpha", "theta", "ghost"] {
         match archived.index.get(key) {
             Some(v) => println!("index {key}={}", u32::from(*v)),
@@ -271,7 +271,7 @@ fn main() {
         fnv1a(archived.blob.as_slice())
     );
 
-    // 零拷贝读与原值交叉断言（不经 deserialize）
+    // Zero-copy reads cross-asserted against the original (without deserialize)
     println!(
         "zc name eq={} members len eq={}",
         archived.name.as_str() == team.name,
@@ -291,7 +291,7 @@ fn main() {
     };
     println!("zc status eq={zc_status}");
 
-    // ---- ③ 三路 roundtrip 布尔 ----
+    // ---- ③ three-way roundtrip booleans ----
     let back = deserialize::<Team, Error>(archived).unwrap();
     println!("deserialize roundtrip eq={}", back == team);
     let back2 = from_bytes::<Team, Error>(&bytes).unwrap();
@@ -299,7 +299,7 @@ fn main() {
     let back3 = unsafe { from_bytes_unchecked::<Team, Error>(&bytes).unwrap() };
     println!("from_bytes_unchecked roundtrip eq={}", back3 == team);
 
-    // ---- ④ access_unchecked（unsafe 零校验旁路读）----
+    // ---- ④ access_unchecked (unsafe, no validation, bypass read) ----
     let uarch = unsafe { access_unchecked::<ArchivedTeam>(&bytes) };
     println!(
         "unchecked name eq={} blob eq={}",
@@ -307,15 +307,15 @@ fn main() {
         fnv1a(uarch.blob.as_slice()) == fnv1a(archived.blob.as_slice())
     );
 
-    // ---- ⑤ bytecheck 错误路径：截断 / UTF-8 篡改 / 非对齐根 ----
-    // rkyv ArchiveValidator 的错误文案内嵌裸指针地址（ASLR 随机，native/mirvm
-    // 必不同）——截断与非对齐两条只打印归类标签；"invalid UTF-8" 文案无地址，
-    // 原文打印。
+    // ---- ⑤ bytecheck error paths: truncation / UTF-8 tamper / unaligned root ----
+    // rkyv ArchiveValidator text embeds a raw pointer address (randomized by ASLR
+    // and always different across native/mirvm) -- truncation and unaligned root
+    // print only the label; "invalid UTF-8" carries no address and prints verbatim.
     match access::<ArchivedTeam, Error>(&bytes[..bytes.len() - 8]) {
         Ok(_) => println!("truncated: unexpected ok"),
         Err(e) => println!("truncated err kind={}", err_kind(&e)),
     }
-    // 定位唯一 marker 串，写入恒非法 UTF-8 字节 0xFF
+    // Locate the unique marker string and write the always-invalid UTF-8 byte 0xFF
     let mark = b"mrk3.14159-zzz";
     let pos = bytes
         .windows(mark.len())
@@ -329,7 +329,7 @@ fn main() {
         Ok(_) => println!("utf8-tamper: unexpected ok"),
         Err(e) => println!("utf8-tamper err: {e}"),
     }
-    // 前缀 1 字节使根指针非对齐（基址+1 必为奇地址 → 必不满足对齐要求）
+    // One prefix byte unaligns the root pointer (base+1 is odd -> alignment never holds)
     let mut raw = Vec::with_capacity(bytes.len() + 1);
     raw.push(0u8);
     raw.extend_from_slice(&bytes);

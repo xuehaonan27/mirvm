@@ -4,44 +4,44 @@
 lz4_flex = "0.11"
 snap = "1"
 ---
-// lz4_flex 0.11 + snap 1（均零依赖纯 Rust）：LZ4 与 Snappy 的块级 + frame/stream
-// 两级 roundtrip 差分。压缩器对同输入同参数逐字节确定，压缩流 FNV 直接锚定；
-// 两端错误 Display 文本逐字节一致同样是断言面。
+// lz4_flex 0.11 + snap 1 (both zero-dependency pure Rust): two-level block + frame/stream
+// roundtrip differential. Compressors are byte-for-byte deterministic for the same input and
+// parameters (compressed-stream FNV anchored); both sides' error `Display` text is asserted too.
 //
-// 已知 FRONTIER（无法绕行，原样保留复现）：snap 的 frame 层（write::FrameEncoder /
-// read::FrameDecoder / read::FrameEncoder）每个数据块都要算掩码 crc32c，其
-// CheckSummer 在 x86_64 上按 `is_x86_feature_detected!("sse4.2")` 运行期派发到
-// `crc32c_sse`（core::arch::_mm_crc32_u64/_mm_crc32_u8）——mirvm 未内建对应
-// intrinsic，首个数据块写入即 TRAP 进程退出（exit 70）：
-//   mirvm[m4-engine]: TRAP: foreign `llvm.x86.sse42.crc32.64.64`（LLVM 内部符号，
-//   按需内建）（fn ...core_arch...sse42...__mm_crc32_u64...）
-// 与 aesni 同属「运行期探测」类：mirvm 的 guest CPUID 透报宿主 sse4.2，crate 内
-// 无 force-soft 开关；软表路径（crc32c_slice16）与硬件路径算值相同但选择不可外部
-// 干预；snap 全部 1.x 版本（1.0.0/1.0.1/1.0.5/1.1.0/1.1.1 逐一核实）均带此 SSE
-// 派发，无版本钉可钉；frame 格式校验不可跳过（空输入挡无数据块、不触发校验，
-// 但属退化覆盖，不采用）。lz4_flex 全线（block+frame，xxhash 为纯 Rust）与
-// snap::raw（raw 格式无校验）不受此 FRONTIER 影响。
+// Known FRONTIER (unavoidable; kept as a reproduction): snap's frame layer (write::FrameEncoder /
+// read::FrameDecoder / read::FrameEncoder) computes a masked crc32c for every data chunk via
+// its CheckSummer, which on x86_64 dispatches at run time on `is_x86_feature_detected!("sse4.2")`
+// to `crc32c_sse` (core::arch::_mm_crc32_u64/_mm_crc32_u8). mirvm does not build that intrinsic,
+// so writing the first data chunk TRAPs and the process exits (exit 70):
+//   mirvm[m4-engine]: TRAP: foreign `llvm.x86.sse42.crc32.64.64` (LLVM-internal symbol,
+//   built in on demand) (fn ...core_arch...sse42...__mm_crc32_u64...)
+// Same "runtime detection" class as aesni: mirvm's guest CPUID reports the host's sse4.2 and
+// the crate has no force-soft switch; the soft table path (crc32c_slice16) computes the same
+// values but cannot be forced from outside. Every snap 1.x version (1.0.0/1.0.1/1.0.5/1.1.0/
+// 1.1.1, checked individually) carries this SSE dispatch, so no version pin helps; the frame
+// checksum cannot be skipped either (empty input carries no data chunk and triggers none, but
+// that is degenerate coverage). lz4_flex (pure-Rust xxhash) and snap::raw are unaffected.
 //
-// 覆盖：
-//  * lz4_flex::block —— compress/decompress（裸块，显式尺寸）、
-//    compress_prepend_size/decompress_size_prepended（4B LE 尺寸头）、
-//    compress_into/decompress_into（调用方缓冲）、get_maximum_output_size；
-//    错误路径：垃圾字面量 / 越界 offset / 截断流 / 坏尺寸头。
-//  * lz4_flex::frame —— FrameEncoder/FrameDecoder（Write/Read 流式，1000B 喂块
-//    × 997B 读块跨块边界）、with_frame_info 自定义头（Max64KB / Linked /
-//    块校验 + 内容校验 + 显式 content_size，96KB 文本 → 多 block）；
-//    错误路径：坏魔数 WrongMagicNumber / 截断 / 改内容校验字节。
-//  * snap::raw —— Encoder/Decoder 的 compress_vec/decompress_vec 与
-//    compress/decompress 调用方缓冲两路、max_compress_len/decompress_len；
-//    错误路径：空输入 Empty / 空头 Header / 超大 varint TooBig / 有头无体 /
-//    截断流 / 数据字节损坏。
-//  * snap::write::FrameEncoder + snap::read::FrameDecoder（snappy framing：
-//    64KB 块 × 掩码 crc32c）、snap::read::FrameEncoder（读端压缩反向 API）；
-//    错误路径：坏魔数 StreamHeader / 截断 mid-chunk / 改数据字节触发校验错。
+// Coverage:
+//  * lz4_flex::block -- compress/decompress (raw block, explicit size),
+//    compress_prepend_size/decompress_size_prepended (4-byte LE size header),
+//    compress_into/decompress_into (caller buffer), get_maximum_output_size;
+//    error paths: junk literals / out-of-range offset / truncated stream / bad size header.
+//  * lz4_flex::frame -- FrameEncoder/FrameDecoder (Write/Read streaming, 1000-byte write
+//    chunks x 997-byte reads crossing block boundaries), with_frame_info custom header
+//    (Max64KB / Linked / block + content checksums + explicit content_size; 96KB text -> many
+//    blocks); error paths: bad magic WrongMagicNumber / truncation / flipped checksum byte.
+//  * snap::raw -- Encoder/Decoder compress_vec/decompress_vec and the caller-buffer
+//    compress/decompress paths, plus max_compress_len/decompress_len;
+//    error paths: empty input Empty / empty header Header / oversized varint TooBig / header
+//    without body / truncated stream / corrupt data byte.
+//  * snap::write::FrameEncoder + snap::read::FrameDecoder (snappy framing: 64KB chunks
+//    x masked crc32c), snap::read::FrameEncoder (read-side compressor, reversed API);
+//    error paths: bad magic StreamHeader / mid-chunk truncation / checksum mismatch.
 //
-// 输入档：结构化重复文本 96KB / 全零 16KB / 定种 xorshift64* 随机 32KB /
-// 单字节 / 空。输出：长度 + FNV-1a + roundtrip 布尔 + 错误文本。
-// 无时间/地址/HashMap 序；成功路径 stderr 为空。
+// Input tiers: structured repetitive text 96KB / all-zero 16KB / seeded xorshift64* random 32KB /
+// single byte / empty. Output: length + FNV-1a + roundtrip bool + error text.
+// No time/address/HashMap ordering; stderr is empty on success paths.
 use std::io::{Read, Write};
 
 fn fnv1a(data: &[u8]) -> u64 {
@@ -53,7 +53,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 定种 xorshift64* PRNG（native/mirvm 同序列）。
+/// Seeded xorshift64* PRNG (same sequence under native and mirvm).
 struct Rng(u64);
 
 impl Rng {
@@ -76,7 +76,7 @@ impl Rng {
     }
 }
 
-/// 结构化重复文本：定长记录号 + 小周期字段（高压缩率且跨块有重复可引）。
+/// Structured repetitive text: fixed-width record id + small-period fields; repeats span blocks.
 fn make_text() -> Vec<u8> {
     let mut d = Vec::new();
     let mut i = 0u32;
@@ -93,7 +93,7 @@ fn make_text() -> Vec<u8> {
     d
 }
 
-/// 小缓冲循环读到 EOF：返回完整输出或第一个错误（错误文本亦参与对拍）。
+/// Loop small reads to EOF: full output, or the first error (error text is also compared).
 fn read_chunked<R: Read>(mut r: R, chunk: usize) -> std::io::Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut buf = vec![0u8; chunk];
@@ -132,21 +132,21 @@ fn main() {
         println!("payload {name} len={} fnv={:016x}", p.len(), fnv1a(p));
     }
 
-    // ---- ① lz4 块级：裸块（显式尺寸）× 全输入档 ----
+    // ---- ① lz4 block level: raw block (explicit size) x all input tiers ----
     for &(name, p) in &tiers {
         let c = lz4_flex::block::compress(p);
         let back = lz4_flex::block::decompress(&c, p.len()).unwrap();
         report(&format!("lz4-block {name}"), p, &c, &back);
     }
 
-    // ---- ② lz4 块级：4B LE 尺寸头变体 ----
+    // ---- ② lz4 block level: 4-byte LE size-header variant ----
     for &(name, p) in &tiers {
         let c = lz4_flex::block::compress_prepend_size(p);
         let back = lz4_flex::block::decompress_size_prepended(&c).unwrap();
         report(&format!("lz4-block-sp {name}"), p, &c, &back);
     }
 
-    // ---- ③ lz4 块级：调用方缓冲 API（compress_into/decompress_into）----
+    // ---- ③ lz4 block level: caller-buffer API (compress_into/decompress_into) ----
     {
         let mut cbuf = vec![0u8; lz4_flex::block::get_maximum_output_size(text.len())];
         let n = lz4_flex::block::compress_into(&text, &mut cbuf).unwrap();
@@ -159,13 +159,13 @@ fn main() {
         );
     }
 
-    // ---- ④ lz4 块级错误路径 ----
-    // 0xff 起始：字面量长度扩展字节一路越界 → ExpectedAnotherByte
+    // ---- ④ lz4 block-level error paths ----
+    // 0xff start: literal-length extension byte runs past the end -> ExpectedAnotherByte
     match lz4_flex::block::decompress(b"\xff\xff\xff\xff\xff", 64) {
         Ok(v) => println!("lz4-junk-lit ok len={}", v.len()),
         Err(e) => println!("lz4-junk-lit err: {e}"),
     }
-    // token 0x00：0 字面量后 offset=1 但输出为空 → OffsetOutOfBounds
+    // token 0x00: after 0 literals offset=1 but the output is empty -> OffsetOutOfBounds
     match lz4_flex::block::decompress(&[0x00, 0x01, 0x00, 0x00], 16) {
         Ok(v) => println!("lz4-junk-off ok len={}", v.len()),
         Err(e) => println!("lz4-junk-off err: {e}"),
@@ -176,18 +176,18 @@ fn main() {
         Ok(v) => println!("lz4-trunc ok len={} eq={}", v.len(), v == text),
         Err(e) => println!("lz4-trunc err: {e}"),
     }
-    // 尺寸头声称 5 字节，体只有 2 字节
+    // size header claims 5 bytes, body holds only 2
     match lz4_flex::block::decompress_size_prepended(b"\x05\x00\x00\x00zz") {
         Ok(v) => println!("lz4-sp-short ok len={}", v.len()),
         Err(e) => println!("lz4-sp-short err: {e}"),
     }
-    // 尺寸头本身不足 4 字节
+    // the size header itself is shorter than 4 bytes
     match lz4_flex::block::decompress_size_prepended(b"\x01\x02") {
         Ok(v) => println!("lz4-sp-tiny ok len={}", v.len()),
         Err(e) => println!("lz4-sp-tiny err: {e}"),
     }
 
-    // ---- ⑤ lz4 frame：流式 Write/Read × 全输入档（1000B 喂 × 997B 读）----
+    // ---- ⑤ lz4 frame: streaming Write/Read x all input tiers (1000B write x 997B read) ----
     for &(name, p) in &tiers {
         let mut enc = lz4_flex::frame::FrameEncoder::new(Vec::new());
         for chunk in p.chunks(1000) {
@@ -198,7 +198,7 @@ fn main() {
         report(&format!("lz4-frame {name}"), p, &c, &back);
     }
 
-    // ---- ⑥ lz4 frame：自定义头（多块 linked + 双校验 + content_size）----
+    // ---- ⑥ lz4 frame: custom header (multi-block linked + both checksums + content_size) ----
     let fi = lz4_flex::frame::FrameInfo::new()
         .block_size(lz4_flex::frame::BlockSize::Max64KB)
         .block_mode(lz4_flex::frame::BlockMode::Linked)
@@ -211,7 +211,7 @@ fn main() {
     let back = read_chunked(lz4_flex::frame::FrameDecoder::new(&lz4fi_c[..]), 4096).unwrap();
     report("lz4-frame-fi text", &text, &lz4fi_c, &back);
 
-    // ---- ⑦ lz4 frame 错误路径 ----
+    // ---- ⑦ lz4 frame error paths ----
     match read_chunked(
         lz4_flex::frame::FrameDecoder::new(&b"\xde\xad\xbe\xef not an lz4 frame"[..]),
         64,
@@ -224,7 +224,7 @@ fn main() {
         Ok(v) => println!("lz4-frame-trunc ok len={} eq={}", v.len(), v == text),
         Err(e) => println!("lz4-frame-trunc err: {e}"),
     }
-    // 末 4 字节是内容校验：翻转末字节 → ContentChecksumError
+    // last 4 bytes are the content checksum: flip the final byte -> ContentChecksumError
     let mut bad = lz4fi_c.clone();
     let last = bad.len() - 1;
     bad[last] ^= 0xFF;
@@ -233,7 +233,7 @@ fn main() {
         Err(e) => println!("lz4-frame-corrupt err: {e}"),
     }
 
-    // ---- ⑧ snap raw：Encoder/Decoder × 全输入档 ----
+    // ---- ⑧ snap raw: Encoder/Decoder x all input tiers ----
     for n in [0usize, 1, 1000, 96 * 1024] {
         println!("snap-max_compress_len({n}) = {}", snap::raw::max_compress_len(n));
     }
@@ -250,7 +250,7 @@ fn main() {
         );
     }
 
-    // ---- ⑨ snap raw：调用方缓冲 API（compress/decompress）----
+    // ---- ⑨ snap raw: caller-buffer API (compress/decompress) ----
     {
         let mut cbuf = vec![0u8; snap::raw::max_compress_len(text.len())];
         let n = snap::raw::Encoder::new()
@@ -267,7 +267,7 @@ fn main() {
         );
     }
 
-    // ---- ⑩ snap raw 错误路径 ----
+    // ---- ⑩ snap raw error paths ----
     match snap::raw::Decoder::new().decompress_vec(b"") {
         Ok(v) => println!("snap-empty ok len={}", v.len()),
         Err(e) => println!("snap-empty err: {e}"),
@@ -276,12 +276,12 @@ fn main() {
         Ok(n) => println!("snap-hdrlen-empty ok {n}"),
         Err(e) => println!("snap-hdrlen-empty err: {e}"),
     }
-    // 5×0xff 的 varint 头 ≈ 3.4e10 > 2^32-1 → TooBig（先于任何分配）
+    // 5x0xff varint header ~= 3.4e10 > 2^32-1 -> TooBig (checked before any allocation)
     match snap::raw::Decoder::new().decompress_vec(&[0xff; 5]) {
         Ok(v) => println!("snap-toobig ok len={}", v.len()),
         Err(e) => println!("snap-toobig err: {e}"),
     }
-    // varint 头声称 128 字节但无数据体
+    // varint header claims 128 bytes but there is no data body
     match snap::raw::Decoder::new().decompress_vec(&[0x80, 0x01]) {
         Ok(v) => println!("snap-nobody ok len={}", v.len()),
         Err(e) => println!("snap-nobody err: {e}"),
@@ -300,7 +300,7 @@ fn main() {
         Err(e) => println!("snap-corrupt err: {e}"),
     }
 
-    // ---- ⑪ snap frame：write::FrameEncoder + read::FrameDecoder × 全输入档 ----
+    // ---- ⑪ snap frame: write::FrameEncoder + read::FrameDecoder x all input tiers ----
     for &(name, p) in &tiers {
         let mut enc = snap::write::FrameEncoder::new(Vec::new());
         for chunk in p.chunks(1000) {
@@ -311,7 +311,7 @@ fn main() {
         report(&format!("snap-frame {name}"), p, &c, &back);
     }
 
-    // ---- ⑫ snap frame：读端压缩器（read::FrameEncoder 反向 API）----
+    // ---- ⑫ snap frame: read-side compressor (read::FrameEncoder, reversed API) ----
     let mut rside = Vec::new();
     snap::read::FrameEncoder::new(&text[..])
         .read_to_end(&mut rside)
@@ -319,7 +319,7 @@ fn main() {
     let back = read_chunked(snap::read::FrameDecoder::new(&rside[..]), 2048).unwrap();
     report("snap-frame-readside text", &text, &rside, &back);
 
-    // ---- ⑬ snap frame 错误路径 ----
+    // ---- ⑬ snap frame error paths ----
     match read_chunked(
         snap::read::FrameDecoder::new(&b"definitely not a snappy stream!!"[..]),
         64,
@@ -330,13 +330,13 @@ fn main() {
     let mut enc = snap::write::FrameEncoder::new(Vec::new());
     enc.write_all(&text).unwrap();
     let snap_frame_c = enc.into_inner().unwrap();
-    // 96KB 文本 → 两个 64KB 数据块；1/3 处截断落在首块中段
+    // 96KB text -> two 64KB data chunks; a 1/3 truncation lands mid-way through the first chunk.
     let cut = &snap_frame_c[..snap_frame_c.len() / 3];
     match read_chunked(snap::read::FrameDecoder::new(cut), 4096) {
         Ok(v) => println!("snap-frame-trunc ok len={} eq={}", v.len(), v == text),
         Err(e) => println!("snap-frame-trunc err: {e}"),
     }
-    // 翻转数据块中段一字节：raw 解码错或 crc32c 校验错
+    // flip one mid-chunk data byte: raw decode error or crc32c checksum error
     let mut bad = snap_frame_c.clone();
     let at = bad.len() * 2 / 3;
     bad[at] ^= 0xFF;

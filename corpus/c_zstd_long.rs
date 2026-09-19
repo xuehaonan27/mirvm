@@ -1,55 +1,55 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# zstd 钉 exact 0.13.3（绑定 C zstd 1.5.7 / zstd-sys 2.0.16 / zstd-safe 7.2.4，
-# 全在本地 registry 缓存）。默认特性（legacy/arrays/zdict_builder）保留；
-# 补开非默认的 zstdmt 且仅为它：zstd-sys 只在 zstdmt 下给 C 库编
-# ZSTD_MULTITHREAD + -pthread，否则 NbWorkers(2) 只回确定性错误串
-# "unsupported parameter"，达不到本 driver 的线程面测试面（zstd::safe::CCtx
-# set_parameter 不经任何 feature 门控，受门控的是 C 库是否带多线程代码）。
+# zstd pinned to exact 0.13.3 (binding C zstd 1.5.7 / zstd-sys 2.0.16 / zstd-safe 7.2.4,
+# all present in the local registry cache). Default features (legacy/arrays/zdict_builder)
+# stay on; the non-default zstdmt is enabled for one reason: zstd-sys only compiles the C
+# library with ZSTD_MULTITHREAD + -pthread under zstdmt, so without it NbWorkers(2)
+# returns only the deterministic "unsupported parameter" error and the driver's threading
+# surface is unreachable (set_parameter itself is ungated; the gate is the C library's threading code).
 zstd = { version = "=0.13.3", features = ["zstdmt"] }
 ---
-// zstd 0.13.3 长输入三维差分：16MiB 程序生成的确定性三层混合数据 →
-// level 1/9 全量压缩、level 19 只压前 4MiB 切片收口成本、外加一次
-// zstd::safe::CCtx 多线程参数路径（CompressionLevel(3) + NbWorkers(2)，
-// 一次性 compress2；C 层实际走 ZSTDMT 分 job 并行，帧字节与同参数各次运行
-// 逐字节可复现——线程调度不进输出）。压缩/解压计算主体在 native C 里跑，
-// 两个维度同源同参，帧字节天然逐字节一致（c_zstd_stream 已实证该通道）。
+// zstd 0.13.3 long-input differential over three dimensions: 16 MiB of program-generated,
+// deterministic three-layer mixed data -> full compression at level 1/9, level 19 over only
+// the first 4 MiB slice to bound the cost, plus one zstd::safe::CCtx multi-threaded
+// parameter path (CompressionLevel(3) + NbWorkers(2), a single compress2). The C layer
+// splits into ZSTDMT jobs, and the frame bytes are reproducible run to run for the same
+// parameters -- thread scheduling never reaches the output. The compression and
+// decompression work happens in native C with identical inputs and parameters on both
+// dimensions, so the frame bytes match byte for byte (c_zstd_stream already proves that
+// channel).
 //
-// 数据生成（全部仅依赖定种 LCG，无时间/rand/env）：
-//   text  8MiB = 2MiB 定种 LCG 拼装的日志体 unique 文本 ×4（extend_from_within
-//          翻倍；人为制造远程重复，供高档大窗口/LDM 命中）；
-//   rep   4MiB = 周期 [6,127,4096,250000] 四段各 1MiB 纯周期字节段
-//          （段内严格 p-周期：翻倍保持 p 整倍长，尾部单段补齐同因）；
-//   rnd   4MiB = 定种 LCG 小端字节流（近不可压段）。
-// 结构统计：每层长度/生成周期 + 熵特征计数（在层首 256KiB 采样窗上数
-// 不同字节值数/相邻等值连跑次数/零字节数/最长等值连跑），全确定性整数。
-// 指纹：fnv64 = 按 8 字节小端块滚动的 FNV-1a 变体（尾部零填充成块），
-// 逐字节大输入下保持解释器可承受的迭代量；与 FNV-1a 同种子同素数。
+// Data generation (seeded LCG only; no time, rand or env):
+//   text  8 MiB = 2 MiB of seeded-LCG log-like unique text repeated 4x
+//          (extend_from_within doubling to create long-range repeats for the large-window
+//          / LDM matcher at high levels);
+//   rep   4 MiB = four 1 MiB purely periodic byte segments with periods
+//          [6,127,4096,250000] (strictly p-periodic inside a segment: doubling keeps a
+//          whole multiple of p, and the tail is padded for the same reason);
+//   rnd   4 MiB = a seeded-LCG little-endian byte stream (the near-incompressible layer).
+// Structural statistics: each layer's length and generation period, plus entropy counts
+// over the first 256 KiB sampling window (distinct byte values, equal-adjacent runs, zero
+// bytes and the longest equal run) -- all deterministic integers.
+// Fingerprint: fnv64 is an FNV-1a variant that rolls over 8-byte little-endian blocks
+// (zero-padding the tail into a block), keeping the iteration count bearable for the
+// interpreter on a large byte-wise input; same seed and prime as FNV-1a.
 //
-// 覆盖清单：
-//   ① level 1 / 9 全量 16MiB bulk::compress → 尺寸 + fnv64 + 千分位整数比
-//      + bulk::decompress 逐字节 roundtrip 断言；
-//   ② level 19 仅前 4MiB 切片（收口 btopt 成本）同口径；
-//   ③ zstd::safe::CCtx 参数路径：CompressionLevel(3) + NbWorkers(2) 一次性
-//      compress2（ZSTDMT 真并行面），同口径 roundtrip；
-//   ④ 常量锚点：min/max/default level + runtime version_number()。
+// Coverage:
+//   ① full 16 MiB bulk::compress at level 1/9 -> size + fnv64 + a permille integer ratio
+//      + a byte-for-byte bulk::decompress roundtrip assertion;
+//   ② level 19 over only the first 4 MiB slice (bounds the btopt cost), same accounting;
+//   ③ the zstd::safe::CCtx parameter path: CompressionLevel(3) + NbWorkers(2), one
+//      compress2 (the real ZSTDMT parallel surface), same roundtrip accounting;
+//   ④ constant anchors: min/max/default level + runtime version_number().
 //
-// 确定性：只打印整数/布尔/hex 指纹；无绝对路径、地址、HashMap 序；
-// 无 warning；stderr 真空。roundtrip 比对 = Vec<u8> ==（memcmp 逐字节）。
+// Deterministic: prints only integers, booleans and hex fingerprints; no absolute paths,
+// addresses or HashMap order; no warnings; empty stderr. A roundtrip comparison is
+// Vec<u8> ==, i.e. a byte-for-byte memcmp.
 //
-// 成本声明：B 维 level 19 压 4MiB 高冗余文本为秒级到十几秒级（btopt），
-// level 9 全量为亚秒到秒级；A/C 维压缩主体同在 native C，解释器/JIT 只承担
-// 数据生成与指纹（数百万次小迭代）。预计各维远低于 60s。
-//
-// 三维复跑（A 首跑后 B 才有脚本目录）：
-//   A: target/release/mirvm run corpus/c_zstd_long.rs
-//   B: cd "$(dirname "$(grep -l 'name = "c_zstd_long"' ~/.cache/mirvm/scripts/*/Cargo.toml)")" && \
-//      RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \
-//      "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
-//   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_zstd_long.rs
-//
-// FRONTIER 绕行：无（多线程帧在生成本机即可逐字节复现）。
+// Cost: level 19 over 4 MiB of highly redundant text takes seconds to tens of seconds
+// (btopt), while level 9 over the full input is sub-second to seconds; the compression
+// itself stays in native C on every dimension, and the interpreter/JIT only drives data
+// generation and fingerprinting (a few million small iterations).
 use zstd::zstd_safe::{CCtx, CParameter};
 
 const MIB: usize = 1024 * 1024;
@@ -60,7 +60,7 @@ const REPEAT_PERIODS: [usize; 4] = [6, 127, 4096, 250_000];
 const RANDOM_LAYER: usize = 4 * MIB;
 const STAT_WINDOW: usize = 256 * 1024;
 
-/// 定种 LCG（MMIX 参数；wrapping u64，跨平台同序列）。
+/// Seeded LCG (MMIX parameters; wrapping u64, same sequence on every platform).
 struct Lcg(u64);
 
 impl Lcg {
@@ -73,7 +73,7 @@ impl Lcg {
     }
 }
 
-/// 按 8 字节块滚动的 FNV-1a 变体指纹（迭代量 1/8，确定性同 FNV-1a）。
+/// FNV-1a variant fingerprint rolling over 8-byte blocks (1/8 the iterations, same determinism).
 fn fnv64(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     let mut it = data.chunks_exact(8);
@@ -112,7 +112,7 @@ const TEXT_TOKENS: &[&str] = &[
     "sierra", "tango", "uniform", "victor", "whiskey", "xray",
 ];
 
-/// text 层的 2MiB unique 文本：`>L<行号> <3-5 词> crc=<0..999>\n` ×至满。
+/// The text layer's 2 MiB of unique text: `>L<line> <3-5 words> crc=<0..999>\n` until full.
 fn gen_unique_text(target: usize) -> Vec<u8> {
     let mut v = Vec::with_capacity(target + 128);
     let mut t = Lcg(0x9E3779B97F4A7C15);
@@ -134,8 +134,8 @@ fn gen_unique_text(target: usize) -> Vec<u8> {
     v
 }
 
-/// rep 层：每个周期段 = p 字节定种小写模式翻倍到 ≤seg，尾部单段补齐
-/// （长保持 p 整倍 → 内容严格 p-周期）。
+/// rep layer: each period segment is a p-byte seeded lowercase pattern doubled up to ≤ seg,
+/// with the tail padded once (the length stays a multiple of p -> strictly p-periodic content).
 fn gen_repeat_layer(seg: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(REPEAT_PERIODS.len() * seg + 8);
     let mut t = Lcg(0x1B2C3D4E5F607182);
@@ -157,7 +157,7 @@ fn gen_repeat_layer(seg: usize) -> Vec<u8> {
     out
 }
 
-/// rnd 层：定种 LCG 小端字节流。
+/// rnd layer: a seeded-LCG little-endian byte stream.
 fn gen_random_layer(target: usize) -> Vec<u8> {
     let mut t = Lcg(0xDEADF00D12345678);
     let mut out = Vec::with_capacity(target + 8);
@@ -168,7 +168,7 @@ fn gen_random_layer(target: usize) -> Vec<u8> {
     out
 }
 
-/// 层首 256KiB 采样窗上的熵特征计数（全确定性）。
+/// Entropy counts over the first 256 KiB sampling window (fully deterministic).
 fn print_stats(label: &str, d: &[u8]) {
     let n = d.len().min(STAT_WINDOW);
     let s = &d[..n];
@@ -202,7 +202,7 @@ fn print_stats(label: &str, d: &[u8]) {
     );
 }
 
-/// 单档压缩 + 逐字节 roundtrip + 千分位比 + 指纹，一行。
+/// One level's compression + byte-for-byte roundtrip + permille ratio + fingerprint, one line.
 fn roundtrip_line(label: &str, level: i32, input: &[u8]) {
     let comp = zstd::bulk::compress(input, level).unwrap();
     let back = zstd::bulk::decompress(&comp, input.len()).unwrap();
@@ -218,7 +218,7 @@ fn roundtrip_line(label: &str, level: i32, input: &[u8]) {
 }
 
 fn main() {
-    // ---- 数据：text(8MiB) rep(4MiB) rnd(4MiB) 三层拼接，共 16MiB ----
+    // ---- Data: text (8 MiB), rep (4 MiB) and rnd (4 MiB) concatenated, 16 MiB total ----
     let text_u = gen_unique_text(TEXT_UNIQUE);
     let mut text = text_u.clone();
     while text.len() < TEXT_LAYER {
@@ -247,12 +247,12 @@ fn main() {
     data.extend_from_slice(&rnd);
     println!("raw len={} fnv64={:016x}", data.len(), fnv64(&data));
 
-    // ---- ① level 1 / 9 全量；② level 19 仅前 4MiB 切片 ----
+    // ---- ① levels 1 and 9 over the whole input; ② level 19 over only the first 4 MiB ----
     roundtrip_line("l1 ", 1, &data);
     roundtrip_line("l9 ", 9, &data);
     roundtrip_line("l19", 19, &data[..4 * MIB]);
 
-    // ---- ③ zstd::safe::CCtx 多线程参数路径（level 3 + NbWorkers=2）----
+    // ---- ③ zstd::safe::CCtx multi-threaded parameter path (level 3 + NbWorkers=2) ----
     let mut cctx = CCtx::create();
     cctx.set_parameter(CParameter::CompressionLevel(3)).unwrap();
     cctx.set_parameter(CParameter::NbWorkers(2)).unwrap();
@@ -270,7 +270,7 @@ fn main() {
         fnv64(&mt)
     );
 
-    // ---- ④ 常量锚点 ----
+    // ---- ④ Constant anchors ----
     println!(
         "levels min={} max={} default={} ver={}",
         zstd::zstd_safe::min_c_level(),

@@ -1,31 +1,31 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# 钉 0.14.3（0.14 系最新）：显式 SIMD JSON——stage-1 结构位分类走 AVX2/SSE4.2
-# 运行时 CPUID 派发（is_x86_feature_detected!，mirvm asm-stub 真机 cpuid 回真特性：
-# guest/host 选同一实现），pshuf.b/pmadd 等 llvm.x86.* 热路径全在已内建族内。
+# Pinned 0.14.3 (latest 0.14.x): explicit SIMD JSON. stage-1 structural-bit
+# classification dispatches AVX2/SSE4.2 on runtime CPUID (is_x86_feature_detected!;
+# mirvm's asm-stub cpuid returns real host features, so guest/host agree).
 simd-json = "=0.14.3"
 ---
-// simd-json 0.14.3：显式 SIMD intrinsic 面压力+探测。runtime-detection（默认
-// feature）下 stage-1 选 AVX2 实现（_mm256_shuffle_epi8=llvm.x86.avx2.pshuf.b、
-// maddubs/madd 已内建；movemask/cmpeq 为通用 simd 降级无形体外符号），UTF-8 校验走
-// simdutf8 ChunkedUtf8Validator（同套 AVX2 表查算法）。halfbrown 对象表默认
-// FxHasher（BuildHasherDefault，无随机种子）→ 对象迭代/stringify 键序为纯计算
-// 函数，native/mirvm 可逐字节对拍。
-// 覆盖：guest cpuid 特性探测锚定（is_x86_feature_detected! 五特性，native/guest
-// 同选 AVX2 即公平对拍）/ 标量根 / 嵌套索引 / as_* 转换与缺失键 / to_owned_value
-// vs from_slice::<OwnedValue> 两入口 / to_string+to_vec+to_writer+pretty 四路序列化
-// roundtrip / 数字谱系（i64::MIN、u64::MAX+1、-0.0、subnormal、下溢 1e-999、
-// 超 f53 精度整数）/ 全 escape+代理对+CJK / 40 键对象（超 halfbrown 32 上限→
-// hashbrown probing+FxHasher，原生侧 sse2 Group）与 256 整数大数组（SWAR 数字
-// 解析）/ 多个 ≥64B 字符串（stage-1 满块分类+utf8 满块校验）/ borrowed 零拷贝
-// 入口 / Buffers 复用 / 十类错误路径（烂语法、未终结字符串、非法 UTF-8、
-// Depth 超限、空输入、trail 垃圾、尾逗号）。确定性：定种 xorshift64* 生成大文档；
-// f64 全 to_bits 打印；聚合走整数与 fnv；不打印地址/时间/路径。
+// simd-json 0.14.3: explicit SIMD intrinsic surface stress and probe. Under the
+// default runtime-detection feature stage-1 selects AVX2 (_mm256_shuffle_epi8 =
+// llvm.x86.avx2.pshuf.b; maddubs/madd built in; movemask/cmpeq generic SIMD, no
+// vector symbol). UTF-8 validation uses simdutf8's ChunkedUtf8Validator.
+// halfbrown tables default to FxHasher (BuildHasherDefault, no seed), so object
+// iteration/stringify key order is pure computation: byte-for-byte native/mirvm.
+// Covers: guest cpuid feature-probe anchor (both sides must pick AVX2), scalar
+// root, nested indexing, as_* conversions and missing keys, to_owned_value vs
+// from_slice, four serialization paths, the number spectrum (i64::MIN,
+// u64::MAX+1, -0.0, subnormal, 1e-999, past-f53 integers), escapes + surrogate
+// pairs + CJK, a 40-key object (past halfbrown's 32 limit -> hashbrown probing +
+// FxHasher, sse2 Group natively) and a 256-int array, strings >= 64B (stage-1
+// full-block classify + utf8 full-block check), borrowed zero-copy, Buffers
+// reuse, and ten error paths (bad syntax, unterminated string, invalid UTF-8,
+// depth, empty input, trailing garbage, trailing comma). Determinism: seeded
+// xorshift64*, f64 via to_bits, integer/fnv aggregation, no addresses/time/paths.
 use simd_json::prelude::*;
 use simd_json::{Buffers, OwnedValue, ValueType};
 
-/// 定种 xorshift64*（native/mirvm 同序列）。
+/// Seeded xorshift64* (same sequence for native and mirvm).
 struct Rng(u64);
 
 impl Rng {
@@ -52,7 +52,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 标量节点锚定打印：类型 + 位级表示（f64 to_bits）。
+/// Anchor-print a scalar node: type plus bit-level representation (f64 via to_bits).
 fn scalar_line(label: &str, v: &OwnedValue) {
     let ty = match v.value_type() {
         ValueType::Null => "null",
@@ -81,7 +81,7 @@ fn scalar_line(label: &str, v: &OwnedValue) {
     println!("{label} {ty} {repr}");
 }
 
-/// 递归聚合：节点计数 / i64+u64 缠绕和 / f64 位异或 / 串字节 fnv——全整数确定。
+/// Recursive aggregate: node count, wrapping i64+u64 sum, f64 bit xor, string fnv.
 struct Agg {
     nodes: u64,
     isum: i64,
@@ -106,7 +106,7 @@ fn walk(v: &OwnedValue, agg: &mut Agg) {
         }
     } else if let Some(o) = v.as_object() {
         for (k, e) in o.iter() {
-            agg.nodes += 1; // 键也是确定计算产物
+            agg.nodes += 1; // keys are deterministic computation products too
             agg.fxor ^= fnv1a(k.as_bytes());
             walk(e, agg);
         }
@@ -114,8 +114,8 @@ fn walk(v: &OwnedValue, agg: &mut Agg) {
 }
 
 fn main() {
-    // ⓪ 派发前提锚定：guest cpuid（asm-stub 真机）应回 host 真特性——native/guest
-    // 同选 AVX2 实现才是公平对拍；任一侧回退 portable 即此行 DIFF。
+    // ⓪ Dispatch precondition anchor: guest cpuid (asm-stub, real machine) must
+    // report the host features, so both sides pick AVX2; a portable fallback DIFFs.
     println!(
         "detect avx2={} sse4.2={} ssse3={} pclmulqdq={} bmi2={}",
         std::is_x86_feature_detected!("avx2"),
@@ -125,7 +125,7 @@ fn main() {
         std::is_x86_feature_detected!("bmi2")
     );
 
-    // ① 标量根文档（SIMD 短尾路径 <64B）
+    // ① Scalar root documents (SIMD short-tail path, < 64B)
     for (label, src) in [
         ("r-int", "42"),
         ("r-neg", "-17"),
@@ -140,7 +140,7 @@ fn main() {
         scalar_line(label, &v);
     }
 
-    // ② 固定嵌套文档：索引链 + as_* + 缺失键 + 克隆内部值
+    // ② Fixed nested document: index chains + as_* + missing keys + cloning an inner value
     let doc = br#"{"a":{"b":[1,2,{"c":"hi","d":[1,-2]}]},"n":-3,"f":1.25,"ok":true,"z":null}"#;
     let mut d = doc.to_vec();
     let v: OwnedValue = simd_json::to_owned_value(&mut d).unwrap();
@@ -154,7 +154,7 @@ fn main() {
     let fixed: OwnedValue = v["a"]["b"][2]["d"].clone();
     println!("nest d-clone {}", simd_json::to_string(&fixed).unwrap());
 
-    // ③ 四路序列化 + roundtrip（键序 = halfbrown FxHasher 纯计算序，两侧可比）
+    // ③ Four serialization paths + roundtrip (key order = halfbrown FxHasher computation order)
     let s = simd_json::to_string(&v).unwrap();
     let mut sd = s.clone().into_bytes();
     let v2: OwnedValue = simd_json::to_owned_value(&mut sd).unwrap();
@@ -168,11 +168,11 @@ fn main() {
     let mut wbuf: Vec<u8> = Vec::new();
     simd_json::to_writer(&mut wbuf, &v).unwrap();
     println!("to_writer len={} fnv={:016x}", wbuf.len(), fnv1a(&wbuf));
-    // serde 反序列化入口（Deserializer→Visitor 路径）
+    // serde deserialization entry (Deserializer -> Visitor path)
     let mut d2 = doc.to_vec();
     let t: OwnedValue = simd_json::from_slice(&mut d2).unwrap();
     println!("from_slice eq={}", t == v);
-    // mutate（as_object_mut insert）→ 再 roundtrip
+    // mutate (as_object_mut insert) -> roundtrip again
     let mut m = v.clone();
     m.as_object_mut().unwrap().insert("extra".to_string(), "added".into());
     let ms = simd_json::to_string(&m).unwrap();
@@ -180,7 +180,7 @@ fn main() {
     let m2: OwnedValue = simd_json::to_owned_value(&mut msd).unwrap();
     println!("mutated keys={} rt-eq={}", m.as_object().unwrap().len(), m == m2);
 
-    // ④ 数字谱系（SWAR/下溢/溢出/精度全边界）
+    // ④ Number spectrum (SWAR / underflow / overflow / precision boundaries)
     for (label, src) in [
         ("n-zero", "0"),
         ("n-negzero", "-0.0"),
@@ -200,7 +200,7 @@ fn main() {
         scalar_line(label, &v);
     }
 
-    // ⑤ escape 全覆盖 + 代理对 + 多字节（stringparse SIMD 跳引号 + 解转义缓冲）
+    // ⑤ Full escapes + surrogate pairs + multibyte (stringparse SIMD quote skip + unescape buffer)
     let esc = r#"{"esc":"q\" bs\\ sl\/ b\b f\f n\n r\r t\t upA lowé hi\u20ac pair𝄞","han":"汉字界叟","emo":"🦀🎉"}"#;
     let mut ed = esc.as_bytes().to_vec();
     let ev: OwnedValue = simd_json::to_owned_value(&mut ed).unwrap();
@@ -213,8 +213,8 @@ fn main() {
     scalar_line("han", &ev["han"]);
     scalar_line("emo", &ev["emo"]);
 
-    // ⑥ 生成式大文档：40 键对象（超 halfbrown 32 上限→hashbrown 表）、256 整数
-    // 数组（SWAR 数字解析）、≥64B ASCII/CJK 长串（stage-1 满块 + utf8 满块校验）。
+    // ⑥ Generated large document: 40-key object (past halfbrown's 32 limit ->
+    // hashbrown table), 256-int array, >= 64B ASCII/CJK strings (full-block stages).
     let mut rng = Rng(0x9e3779b97f4a7c15);
     let mut big = String::from("{\"ints\":[");
     for i in 0..256u64 {
@@ -239,7 +239,7 @@ fn main() {
         match i % 4 {
             0 => big.push_str(&format!("{}", rng.next() % 1000)),
             1 => {
-                // ≥64B 转义串（stringparse 解转义 + stage-1 连续块）
+                // >= 64B escaped string (stringparse unescape + stage-1 contiguous block)
                 big.push('"');
                 for _ in 0..9 {
                     big.push_str(r"tab\ttrail ");
@@ -271,7 +271,7 @@ fn main() {
         "big agg nodes={} isum={} usum={} fxor={:016x} strfnv={:016x}",
         agg.nodes, agg.isum, agg.usum, agg.fxor, agg.strfnv
     );
-    // 键迭代原序（FxHasher+probing 纯计算序——native/mirvm 语义一致才逐字节同）
+    // Key iteration order (FxHasher + probing is pure computation, so native/mirvm agree byte-for-byte)
     let keys: Vec<&str> = bdoc["obj"].as_object().unwrap().keys().map(String::as_str).collect();
     println!("big objkeys {}", keys.join(","));
     let bser = simd_json::to_string(&bdoc).unwrap();
@@ -279,7 +279,7 @@ fn main() {
     let bdoc2: OwnedValue = simd_json::to_owned_value(&mut bsd).unwrap();
     println!("big ser len={} fnv={:016x} eq={}", bser.len(), fnv1a(bser.as_bytes()), bdoc == bdoc2);
 
-    // ⑦ borrowed 零拷贝入口（无 escape 串借源切片，含 escape 用解转义缓冲）
+    // ⑦ Borrowed zero-copy entry (escape-free strings borrow the source slice; escaped ones use the buffer)
     let bsrc = String::from(r#"{"plain":"borrowed slice","uni":"雪花slice","arr":[true,null,7]}"#);
     let mut bytes = bsrc.into_bytes();
     let bv: simd_json::BorrowedValue = simd_json::to_borrowed_value(&mut bytes).unwrap();
@@ -291,7 +291,7 @@ fn main() {
         bv["arr"].as_array().unwrap().len()
     );
 
-    // ⑧ Buffers 复用入口：同一 buffer 连续解析三篇
+    // ⑧ Buffers reuse: parse three documents in a row with one buffer
     let mut bufs = Buffers::new(4096);
     for (label, src) in [("b1", "[1,2,3]"), ("b2", "{\"x\":null}"), ("b3", "\"s\"")] {
         let mut d = src.as_bytes().to_vec();
@@ -299,7 +299,7 @@ fn main() {
         scalar_line(label, &v);
     }
 
-    // ⑨ 错误路径十连（文本为库内固定格式：ErrorType 名 + 字符索引）
+    // ⑨ Ten error paths (library-fixed text: ErrorType name + character index)
     let cases: Vec<(&str, Vec<u8>)> = vec![
         ("e-tape", br#"{"a": [1, 2, }"#.to_vec()),
         ("e-open", b"[1, 2".to_vec()),
@@ -310,14 +310,14 @@ fn main() {
         ("e-empty", Vec::new()),
         ("e-trail", b"1 2".to_vec()),
         ("e-comma", b"[1,]".to_vec()),
-        ("e-iovf", b"18446744073709551616".to_vec()), // u64 溢出：simd-json 报 InvalidNumber
+        ("e-iovf", b"18446744073709551616".to_vec()), // u64 overflow: simd-json reports InvalidNumber
         ("e-lead0", b"01".to_vec()),
     ];
     for (label, mut d) in cases {
         let e = simd_json::to_owned_value(&mut d).unwrap_err();
         println!("{label} {e}");
     }
-    // 深层嵌套正路径（tape 栈堆上动态增长，无硬 Depth 限制）
+    // Deep nesting positive path (the tape stack grows on the heap; no hard depth limit)
     let deep = format!("{}0{}", "[".repeat(1100), "]".repeat(1100));
     let mut dd = deep.into_bytes();
     let deepv: OwnedValue = simd_json::to_owned_value(&mut dd).unwrap();

@@ -4,34 +4,34 @@
 rust_xlsxwriter = "0.80"
 calamine = "0.26"
 ---
-// rust_xlsxwriter 0.80 + calamine 0.26 自洽闭环：内存 Vec<u8> 建 xlsx → Cursor 读回。
-// 写侧（rust_xlsxwriter）：多 sheet（Data/Calc/Series/Empty）、数字/文本（CJK+emoji）
-// /布尔/公式（含字符串缓存结果 t="str"）/日期（固定值 + 显式日期格式）/合并单元格
-// /列宽（字符单位 + 像素两 API）；DocProperties::set_creation_datetime 钉死
-// dcterms:created，zip 无 time feature（entry mtime 恒 1980-01-01）→ 整档字节可复现，
-// 打印 len + fnv 锚定。
-// 读侧（calamine）：sheet_names、逐 sheet worksheet_range（Range 元数据 + cells()
-// 行主序逐格打印 类型+值，浮点/日期序列值一律 to_bits 锁位）、worksheet_formula
-// （公式文本面）、load_merged_regions + merged_regions(_by_sheet)、边界（空 sheet
-// 元数据、range.get/get_value 越界 None、不存在 sheet 的错误路径）。
-// 确定性：输出只含 Vec 序/计数/位型/布尔断言，无时间/地址/HashMap 序。
+// rust_xlsxwriter 0.80 + calamine 0.26 self-contained loop: build an xlsx in an in-memory
+// Vec<u8> and read it back through a Cursor.
+// Write side (rust_xlsxwriter): several sheets (Data/Calc/Series/Empty); numbers / text
+// (CJK + emoji) / booleans / formulas (including a cached string result, t="str") / dates
+// (fixed value plus an explicit date format) / merged cells / column widths (character-unit
+// and pixel API); DocProperties::set_creation_datetime pins dcterms:created and zip has no
+// time feature (entry mtime is always 1980-01-01), so the archive is byte-reproducible and
+// its len + fnv are the printed anchor; native output is byte-identical across runs.
+// Read side (calamine): sheet_names; per sheet worksheet_range (Range metadata plus cells()
+// printed row-major as type+value, float and date serial values pinned via to_bits);
+// worksheet_formula (formula text); load_merged_regions and merged_regions(_by_sheet);
+// boundaries (empty-sheet metadata, out-of-range get / get_value -> None, missing sheet).
+// Deterministic: output is only Vec order, counts, bit patterns and boolean assertions --
+// no time, addresses or HashMap order.
 //
-// 已知 FRONTIER（mirvm 默认维与 JIT 维同址 TRAP，exit 70，stdout 空）：
-//   mirvm[m4-engine]: TRAP: foreign `llvm.x86.pclmulqdq`（LLVM 内部符号，按需内建）
-//   （fn core::core_arch::x86::pclmulqdq::__mm_clmulepi64_si128 @ crc32fast）
-// 机理：rust_xlsxwriter 与 calamine 都经 zip 2.x → crc32fast 算 entry CRC32；
-// crc32fast 带 std 时运行期 cpuid 探测（guest 直通宿主特性位）选 pclmulqdq
-// 硬件路径，单次 update ≥128B 即执行 _mm_clmulepi64_si128——mirvm 未内建该
-// llvm.x86 intrinsic（corpus.md M5.x 欠账队列已列此条）。任务预判的 psad.bw
-// （simd-adler32）不会撞：zip 的 deflate 是 flate2 raw deflate（c_zip_arch 已
-// 实证），真正的必经阻塞是 crc32fast/pclmulqdq。绕行排查：① stored 压缩无效——
-// Stored entry 同样算 CRC32；② driver 控不住分块——写侧 rust_xlsxwriter 对每个
-// XML 部件 write_all 整缓冲（最小工作簿的 [Content_Types].xml 也 >128B，空
-// workbook 即撞），读侧 calamine 以 8KB BufReader 包 ZipFile 的 Crc32Reader，
-// 两侧写/读块长都在 crate 内部，无法像 c_zip_arch 那样 64B 分块；③ 强制
-// crc32fast 可移植基线路径需其 no_std 编译期分支，但 zip 默认 features 并集
-// 必带 std（运行期探测），下游无法减。native 输出两跑逐字节一致（含整档
-// fnv），作参考基准保留。
+// Known limitation: both the default and the JIT dimension TRAP at the same address with exit
+// 70 and empty stdout -- mirvm[m4-engine]: TRAP: foreign `llvm.x86.pclmulqdq` (LLVM-internal,
+// must be built in on demand), in pclmulqdq::__mm_clmulepi64_si128 called from crc32fast.
+// Mechanism: rust_xlsxwriter and calamine both go through zip 2.x -> crc32fast for an entry's
+// CRC32; with std, crc32fast probes cpuid at runtime (the guest passes host feature bits
+// through) and picks the pclmulqdq path, running _mm_clmulepi64_si128 as soon as one update
+// reaches 128 B. The psad.bw (simd-adler32) path is not hit, because zip's deflate is flate2
+// raw deflate (as c_zip_arch shows); crc32fast/pclmulqdq is the real blocker. No workaround
+// holds: stored compression still computes CRC32; write and read block sizes both live inside
+// the crates (the writer emits each XML part in one buffer, calamine wraps the Crc32Reader
+// in an 8 KB BufReader), so neither can be chunked at 64 B as c_zip_arch does;
+// forcing crc32fast's portable baseline needs its no_std compile-time branch, but zip's
+// default feature union always pulls in std, so a downstream driver cannot select it.
 use calamine::{Data, Reader, Xlsx};
 use rust_xlsxwriter::{DocProperties, ExcelDateTime, Format, Formula, Workbook};
 use std::io::Cursor;
@@ -45,7 +45,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// Data 变体的确定序标签；浮点与日期序列值按位打印。
+/// Deterministic label for each Data variant; float and date serial values print as bits.
 fn data_tag(d: &Data) -> String {
     match d {
         Data::Int(i) => format!("Int({i})"),
@@ -62,14 +62,14 @@ fn data_tag(d: &Data) -> String {
 
 fn build_xlsx() -> Vec<u8> {
     let mut wb = Workbook::new();
-    // 钉死文档创建时间，否则 core.xml 嵌入 utc_now → 整档字节不可复现。
+    // Pin the document creation time; otherwise core.xml embeds utc_now and the archive is not reproducible.
     let created = ExcelDateTime::from_ymd(2024, 3, 14)
         .unwrap()
         .and_hms(15, 9, 26)
         .unwrap();
     wb.set_properties(&DocProperties::new().set_creation_datetime(&created));
 
-    // ---- Sheet 1 "Data"：混合类型 + 合并单元格 + 列宽 ----
+    // ---- Sheet 1 "Data": mixed types + merged cells + column widths ----
     let ws = wb.add_worksheet();
     ws.set_name("Data").unwrap();
     ws.write_string(0, 0, "hello").unwrap();
@@ -79,7 +79,7 @@ fn build_xlsx() -> Vec<u8> {
     ws.write_number(1, 2, 1e300).unwrap();
     ws.write_boolean(2, 0, true).unwrap();
     ws.write_boolean(2, 1, false).unwrap();
-    // 固定日期值 + 显式日期数字格式（无格式时 calamine 只会看到 Float 序列值）。
+    // Fixed date value plus an explicit date number format (without one calamine sees only a Float serial).
     let date_fmt = Format::new().set_num_format("yyyy-mm-dd hh:mm:ss");
     let dt = ExcelDateTime::from_ymd(2024, 3, 14)
         .unwrap()
@@ -90,7 +90,7 @@ fn build_xlsx() -> Vec<u8> {
     ws.set_column_width(0, 24).unwrap();
     ws.set_column_width_pixels(1, 120).unwrap();
 
-    // ---- Sheet 2 "Calc"：公式 + 缓存结果（数值与字符串两类） ----
+    // ---- Sheet 2 "Calc": formulas + cached results (numeric and string) ----
     let ws = wb.add_worksheet();
     ws.set_name("Calc").unwrap();
     ws.write_number(0, 0, 1.0).unwrap();
@@ -100,7 +100,7 @@ fn build_xlsx() -> Vec<u8> {
         .unwrap();
     ws.write_formula(1, 1, &Formula::new("=A1*A2+A3").set_result("5"))
         .unwrap();
-    // 字符串缓存结果 → t="str" 单元格。
+    // A cached string result -> a t="str" cell.
     ws.write_formula(
         2,
         1,
@@ -108,7 +108,7 @@ fn build_xlsx() -> Vec<u8> {
     )
     .unwrap();
 
-    // ---- Sheet 3 "Series"：确定性数值块（50×4），给 deflate 真实负载 ----
+    // ---- Sheet 3 "Series": a deterministic numeric block (50×4) to give deflate real payload ----
     let ws = wb.add_worksheet();
     ws.set_name("Series").unwrap();
     for r in 0..50u32 {
@@ -118,7 +118,7 @@ fn build_xlsx() -> Vec<u8> {
         }
     }
 
-    // ---- Sheet 4 "Empty"：空 sheet 边界 ----
+    // ---- Sheet 4 "Empty": the empty-sheet boundary ----
     let ws = wb.add_worksheet();
     ws.set_name("Empty").unwrap();
 
@@ -126,18 +126,18 @@ fn build_xlsx() -> Vec<u8> {
 }
 
 fn main() {
-    // ===== 写侧 =====
+    // ===== Write side =====
     let bytes = build_xlsx();
     println!("xlsx len={} fnv={:016x}", bytes.len(), fnv1a(&bytes));
 
-    // ===== 读侧 =====
+    // ===== Read side =====
     let mut xls: Xlsx<_> = Xlsx::new(Cursor::new(bytes)).unwrap();
 
-    // ① sheet 名列表
+    // ① Sheet name list
     let names = xls.sheet_names();
     println!("sheets = {names:?}");
 
-    // ② 逐 sheet：Range 元数据 + 行主序逐格 类型+值
+    // ② Per sheet: Range metadata + row-major per-cell type+value
     for name in &names {
         let range = xls.worksheet_range(name).unwrap();
         println!(
@@ -153,7 +153,7 @@ fn main() {
         }
     }
 
-    // ③ 公式文本面（缓存值已在 ② 的 Calc 格中打印）
+    // ③ Formula text surface (cached values were already printed by ② for the Calc cells)
     let frange = xls.worksheet_formula("Calc").unwrap();
     println!("formula sheet: empty = {}", frange.is_empty());
     for (r, c, f) in frange.cells() {
@@ -162,7 +162,7 @@ fn main() {
         }
     }
 
-    // ④ 合并区域（加载后全量 + 按 sheet 过滤两 API）
+    // ④ Merged regions (both the loaded full set and the per-sheet filter API)
     xls.load_merged_regions().unwrap();
     println!("merged count = {}", xls.merged_regions().len());
     for (sheet, _path, dims) in xls.merged_regions() {
@@ -174,7 +174,7 @@ fn main() {
         xls.merged_regions_by_sheet("Calc").len()
     );
 
-    // ⑤ 边界：越界访问 / 空 sheet / 不存在 sheet 错误路径
+    // ⑤ Boundaries: out-of-range access / empty sheet / missing-sheet error path
     let range = xls.worksheet_range("Data").unwrap();
     println!("inbounds get(1,1) = {}", data_tag(range.get((1, 1)).unwrap()));
     println!("oob get(100,100) is_some = {}", range.get((100, 100)).is_some());
@@ -195,7 +195,7 @@ fn main() {
         Ok(_) => println!("missing sheet: unexpected ok"),
         Err(e) => println!("missing sheet err: {e}"),
     }
-    // 损坏档错误路径：截断的 zip 打不开。
+    // Corrupt-archive error path: a truncated zip will not open.
     match Xlsx::new(Cursor::new(b"not an xlsx at all".to_vec())) {
         Ok(_) => println!("junk xlsx: unexpected ok"),
         Err(e) => println!("junk xlsx err: {e}"),

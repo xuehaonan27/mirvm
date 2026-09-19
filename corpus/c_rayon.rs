@@ -3,7 +3,7 @@
 [dependencies]
 rayon = "1"
 ---
-// 数据并行：work-stealing 线程池。压测我们的真实多线程实现。
+// Data parallelism: a work-stealing thread pool; stresses the real multi-threaded runtime.
 use rayon::prelude::*;
 
 fn main() {

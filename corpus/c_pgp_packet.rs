@@ -3,34 +3,34 @@
 [dependencies]
 pgp = "0.14"
 ---
-// pgp 0.14（rpgp）OpenPGP packet 解析/构造面差分（不签名不加密）。
-// 素材：crate 自带 tests 目录，内嵌两份 armor 原文——
-//   ① tests/openpgp/pgp263-test.pub.asc 的 armor 块（pgp2.6.3 RSA-888 老公钥，
-//      V2/V3 世代的旧包格式路径）；
-//   ② tests/openpgp/samplemsgs/sig-1-key-1.asc 全文（GnuPG v2 风格独立签名包，
-//      Issuer/IssuerFingerprint 子包路径）。
-// 覆盖：SignedPublicKey / StandaloneSignature 的 from_armor_single 字段面
-// （版本/PublicKeyAlgorithm/指纹 hex/KeyID/创建时间戳/过期间隔、RSA 模长、e、
-// userid、direct/revocation 签名与子包计数、逐子包粗分类+部分载荷）；
-// armor roundtrip（to_armored_string 再解析 PartialEq 相等 + 字节 fnv 锚定）；
-// 二进制 roundtrip（ser::Serialize::to_bytes → from_bytes → 相等）；
-// from_reader_single 的 is_binary 嗅探支路（headers=None）；
-// 错误路径四条：坏 armor 头（无法识别 BEGIN 标记）、块类型错配
-// （签名块当公钥解）、垃圾二进制 from_bytes、截断字节 from_bytes。
+// pgp 0.14 (rpgp) OpenPGP packet parse/build differential (no signing, no encryption).
+// Material: the crate's own tests directory, with two armored samples embedded --
+//   1) the armor block from tests/openpgp/pgp263-test.pub.asc (pgp2.6.3 RSA-888 old
+//      public key, the V2/V3-era legacy packet format path);
+//   2) the full text of tests/openpgp/samplemsgs/sig-1-key-1.asc (GnuPG v2 style
+//      standalone signature packet, the Issuer/IssuerFingerprint subpacket path).
+// Coverage: SignedPublicKey / StandaloneSignature from_armor_single field surface
+// (version/PublicKeyAlgorithm/fingerprint hex/KeyID/creation timestamp/expiration
+// interval, RSA modulus bits, e, userid, direct/revocation signatures and subpacket
+// counts, per-subpacket classification + partial payloads); armor roundtrip
+// (to_armored_string re-parsed for PartialEq equality + byte fnv anchor); binary
+// roundtrip (ser::Serialize::to_bytes -> from_bytes -> equality); is_binary sniff
+// branch of from_reader_single (headers=None); four error paths: bad armor header
+// (no BEGIN marker), sig block as public key, junk binary, truncated bytes (from_bytes).
 //
-// 已知债绕行（语义同类，见 docs/m4-log.md「dyn trait 上溯 vtable 变换，
-// M4.2+」）：armor 体（base64/CRC/footer）层的错误在 crate 内部一律被
-// `Dearmor::read` 包成 `io::Error::new(Other, msg)`，再经 `Error::IOError`
-// 的 `{source:?}` 或 io::Error 的 Display 走 `Box<dyn Error+Send+Sync>`
-// → `dyn Debug/Display` 上溯——mirvm lower 期 TRAP（本 driver 初版亲测：
-// 非法 base64 体在 from_armor_single 内部构造错误字符串时即炸，诊断原文
-// `TRAP: dyn 上溯 vtable 变换（dyn std::error::Error + std::marker::Send +
-// std::marker::Sync → dyn std::fmt::Debug，M4.2+）`）。改装甲头层错误输入：
-// 头解析错误在 dearmor 流包装之前经 bail! 走 `Error::Message(String)`，
-// Display/Debug 链不触 dyn——native 可跑、mirvm 可拍。
-// 确定性：armor Headers 为 BTreeMap（键序保序）；时间一律 chrono
-// .timestamp() 整数秒；指纹/KeyID/签名前缀/密钥位数据均本文件手写 hex
-// 打印；错误打印 Display 固定串；不打印地址/线程序/HashMap 序；stderr 为空。
+// Known-debt workaround (same semantic class): armor body (base64/CRC/footer) layer
+// errors are always wrapped by `Dearmor::read` as `io::Error::new(Other, msg)`,
+// then travel via `Error::IOError`'s `{source:?}` or io::Error's Display up the
+// `Box<dyn Error+Send+Sync>` -> `dyn Debug/Display` upcast, which TRAPs during
+// mirvm lowering: an invalid base64 body blows up inside from_armor_single while
+// it builds the error string (observed with the first version of this driver;
+// diagnostic from the lowering's `dyn upcast ...` rejection family). So use armor-header-layer
+// error inputs: a header parse error goes through bail! before the dearmor
+// stream wrapper and becomes `Error::Message(String)`, whose Display/Debug
+// chain never touches dyn -- native can run it, mirvm traps.
+// Determinism: armor Headers is a BTreeMap (key order kept); times are chrono
+// .timestamp() seconds; fingerprints/KeyIDs/sig-prefixes/key bits are hand-written
+// hex; errors are fixed Display strings; no addr/thread-id/HashMap order; stderr empty.
 use pgp::armor::Headers;
 use pgp::composed::{ArmorOptions, Deserializable, SignedPublicKey, StandaloneSignature};
 use pgp::packet::SubpacketData;
@@ -38,7 +38,7 @@ use pgp::packet::Signature;
 use pgp::ser::Serialize;
 use pgp::types::{Mpi, PublicKeyTrait, PublicParams};
 
-/// 素材① armor 块（原文件 armor 外还有一行统计头表，不属于 armor 数据，故略去）。
+/// Material (1) armor block (the stats header line outside the armor is omitted; not armor data).
 const PUB_KEY: &str = r#"-----BEGIN PGP PUBLIC KEY BLOCK-----
 Version: 2.6.3a
 
@@ -52,7 +52,7 @@ HNzQ/+nbWnebQn18XUV2SdM1PzMOblD+nISte7+WUfWzlD7YUJPkFPw=
 -----END PGP PUBLIC KEY BLOCK-----
 "#;
 
-/// 素材② 独立签名块全文。
+/// Material (2) full standalone signature block.
 const SIG: &str = r#"-----BEGIN PGP SIGNATURE-----
 Version: GnuPG v2
 
@@ -72,7 +72,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 手写 hex（小写），替代 hex crate。
+/// Hand-written lowercase hex, replacing the hex crate.
 fn hex(b: &[u8]) -> String {
     let mut s = String::with_capacity(b.len() * 2);
     for x in b {
@@ -81,7 +81,7 @@ fn hex(b: &[u8]) -> String {
     s
 }
 
-/// MPI 有效位长（RSA 模长等）。
+/// MPI effective bit length (RSA modulus bits, etc.).
 fn mpi_bits(m: &Mpi) -> usize {
     let b = m.as_bytes();
     match b.first() {
@@ -90,7 +90,7 @@ fn mpi_bits(m: &Mpi) -> usize {
     }
 }
 
-/// 公钥参数粗描：RSA 模长+e；ECC 曲线名；其余打形状。
+/// Coarse public-key params: RSA modulus bits + e; ECC curve name; other shapes.
 fn params_desc(p: &PublicParams) -> String {
     match p {
         PublicParams::RSA { n, e } => format!("RSA n-bits={} e={}", mpi_bits(n), hex(e.as_bytes())),
@@ -110,7 +110,7 @@ fn params_desc(p: &PublicParams) -> String {
     }
 }
 
-/// PublicKeyTrait 字段面（主 key packet / subkey packet 通用）。
+/// PublicKeyTrait field surface (shared by primary key packet / subkey packet).
 fn dump_key_pkt<K: PublicKeyTrait>(label: &str, k: &K) {
     println!(
         "{label} version={:?} alg={:?}",
@@ -132,7 +132,7 @@ fn dump_key_pkt<K: PublicKeyTrait>(label: &str, k: &K) {
     );
 }
 
-/// 子包粗分类名 + 常见载荷（确定性字段）。
+/// Coarse subpacket class name + common payload (deterministic fields).
 fn sp_desc(d: &SubpacketData) -> String {
     match d {
         SubpacketData::SignatureCreationTime(t) => {
@@ -177,7 +177,7 @@ fn sp_desc(d: &SubpacketData) -> String {
     }
 }
 
-/// 签名包字段面 + 子包逐条。
+/// Signature packet field surface + per-subpacket dump.
 fn dump_sig(label: &str, s: &Signature) {
     println!(
         "{label} sigver={:?} typ={:?} pub={:?} hash={:?} signed_prefix={}",
@@ -218,7 +218,7 @@ fn dump_sig(label: &str, s: &Signature) {
     );
 }
 
-/// armor 头（BTreeMap 键序确定）。
+/// Armor headers (BTreeMap key order is deterministic).
 fn dump_headers(h: &Headers) {
     println!("headers n={}", h.len());
     for (k, vs) in h {
@@ -226,7 +226,7 @@ fn dump_headers(h: &Headers) {
     }
 }
 
-/// SignedPublicKey 全字段面。
+/// SignedPublicKey full field surface.
 fn dump_signed_key(key: &SignedPublicKey) {
     dump_key_pkt("primary", &key.primary_key);
     println!("expires_at={:?}", key.expires_at().map(|t| t.timestamp()));
@@ -260,13 +260,13 @@ fn dump_signed_key(key: &SignedPublicKey) {
 }
 
 fn main() {
-    // ---- ① 公钥 armor 解析 + 字段面 ----
+    // ---- ① public key armor parse + field surface ----
     let (key, kh) = SignedPublicKey::from_armor_single(PUB_KEY.as_bytes()).unwrap();
     println!("== signed public key ==");
     dump_headers(&kh);
     dump_signed_key(&key);
 
-    // ---- ② 公钥 armor roundtrip ----
+    // ---- ② public key armor roundtrip ----
     let a1 = key.to_armored_string(ArmorOptions::default()).unwrap();
     println!("key armor len={} fnv={:016x}", a1.len(), fnv1a(a1.as_bytes()));
     let (key2, kh2) = SignedPublicKey::from_string(&a1).unwrap();
@@ -274,7 +274,7 @@ fn main() {
     let a2 = key2.to_armored_string(ArmorOptions::default()).unwrap();
     println!("key armor stable={}", a1 == a2);
 
-    // ---- ③ 公钥二进制 roundtrip + from_reader 嗅探支路 ----
+    // ---- ③ public key binary roundtrip + from_reader sniffing branch ----
     let kbin = key.to_bytes().unwrap();
     println!("key bin len={} fnv={:016x}", kbin.len(), fnv1a(&kbin));
     let key3 = SignedPublicKey::from_bytes(&kbin[..]).unwrap();
@@ -282,13 +282,13 @@ fn main() {
     let (key4, kh4) = SignedPublicKey::from_reader_single(&kbin[..]).unwrap();
     println!("key reader roundtrip={} headers-is-none={}", key == key4, kh4.is_none());
 
-    // ---- ④ 独立签名包解析 + 字段面 ----
+    // ---- ④ standalone signature packet parse + field surface ----
     let (ssig, sh) = StandaloneSignature::from_armor_single(SIG.as_bytes()).unwrap();
     println!("== standalone signature ==");
     dump_headers(&sh);
     dump_sig("sig", &ssig.signature);
 
-    // ---- ⑤ 签名 armor / 二进制 roundtrip ----
+    // ---- ⑤ signature armor / binary roundtrip ----
     let s1 = ssig.to_armored_string(ArmorOptions::default()).unwrap();
     println!("sig armor len={} fnv={:016x}", s1.len(), fnv1a(s1.as_bytes()));
     let (ssig2, _) = StandaloneSignature::from_armor_single(s1.as_bytes()).unwrap();
@@ -298,7 +298,7 @@ fn main() {
     let ssig3 = StandaloneSignature::from_bytes(&sbin[..]).unwrap();
     println!("sig bin roundtrip={}", ssig == ssig3);
 
-    // ---- ⑥ 错误路径（均避开 io-Custom 包装族，见文件头绕行注）----
+    // ---- ⑥ error paths (all avoid the io-Custom wrapper family; see header note) ----
     let bad = "definitely not an armor block, no BEGIN marker anywhere\n";
     match SignedPublicKey::from_armor_single(bad.as_bytes()) {
         Ok(_) => println!("bad-armor unexpectedly ok"),

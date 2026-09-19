@@ -1,13 +1,13 @@
 # shellcheck shell=bash
-# tests/support/harness.sh —— 测试套件共享库（只被 source，不直接执行）。
+# tests/support/harness.sh -- shared library for the test suites (sourced, never executed directly).
 #
-# 提供四组能力：
-#   1) PASS/FAIL/SKIP/XFAIL 统一记账（ok/bad/skip/red + summary 尾行）
-#   2) corpus cases.manifest 解析（manifest_rows：唯一真源 → 规范化行）
-#   3) corpus driver 执行器（corpus_run：env/needs/timeout/计时/磁盘护栏一体）
-#   4) 磁盘与 cache 管理（disk_guard / target_budget_check / cache_snapshot）
+# Provides four groups of helpers:
+#   1) unified PASS/FAIL/SKIP/XFAIL accounting (ok/bad/skip/red + the summary trailer)
+#   2) cases.manifest parsing (manifest_rows: single source of truth -> normalized rows)
+#   3) the corpus driver runner (corpus_run: env/needs/timeout/timing/disk guard in one place)
+#   4) disk and cache management (disk_guard / target_budget_check / cache_snapshot)
 #
-# 约定：source 本文件的脚本自己 set -u；计数器在 source 时初始化为 0。
+# Convention: sourcing scripts run their own set -u; counters start at 0 when this file is sourced.
 
 TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 REPO_ROOT=$(cd "$TESTS_DIR/.." && pwd)
@@ -22,15 +22,15 @@ test_enter_repo() {
     export NO_PROXY="$no_proxy"
 }
 
-require_executable() { # <说明> <路径>
+require_executable() { # <description> <path>
     local label=$1 path=$2
     [ -x "$path" ] || {
-        echo "ERROR $label 不可用: $path" >&2
+        echo "ERROR $label unavailable: $path" >&2
         return 69
     }
 }
 
-ensure_test_sysroot() { # <mirvm> <test-home> <rustc>；结果写入 TEST_SYSROOT
+ensure_test_sysroot() { # <mirvm> <test-home> <rustc>; result exported as TEST_SYSROOT
     local mirvm=$1 test_home=$2 rustc=$3 host tmp code=0 shared_sysroot
     host=$($rustc -vV | sed -n 's/^host: //p') || return 69
     TEST_SYSROOT=${MIRVM_SYSROOT:-$test_home/sysroot-$host}
@@ -50,7 +50,7 @@ ensure_test_sysroot() { # <mirvm> <test-home> <rustc>；结果写入 TEST_SYSROO
     MIRVM_HOME="$test_home" "$mirvm" run "$tmp/sysroot_probe.rs" \
         >"$tmp/out" 2>"$tmp/err" || code=$?
     if [ "$code" -ne 0 ] || [ ! -d "$TEST_SYSROOT/lib/rustlib/$host/lib" ]; then
-        echo "ERROR 无法建立测试 sysroot: $TEST_SYSROOT（mirvm exit=$code）" >&2
+        echo "ERROR cannot build the test sysroot: $TEST_SYSROOT (mirvm exit=$code)" >&2
         tail -20 "$tmp/err" >&2
         rm -rf "$tmp"
         return 69
@@ -59,32 +59,32 @@ ensure_test_sysroot() { # <mirvm> <test-home> <rustc>；结果写入 TEST_SYSROO
     export TEST_SYSROOT
 }
 
-# ---- ① 记账 ----
+# ---- ① accounting ----
 pass=0 fail=0 skip_count=0 xfail=0
 ok()   { pass=$((pass + 1)); echo "PASS $*"; }
 bad()  { fail=$((fail + 1)); echo "FAIL $*"; }
 skip() { skip_count=$((skip_count + 1)); echo "SKIP $*"; }
 red()  { xfail=$((xfail + 1)); echo "XFAIL $*"; }
 
-record_expected_failure() { # <标签> <实际退出码> <code:grep-pattern> <stderr文件>
+record_expected_failure() { # <label> <actual exit> <code:grep-pattern> <stderr file>
     local label=$1 code=$2 spec=$3 errfile=$4
     local want_code=${spec%%:*} want_pattern=${spec#*:}
     if [ "$code" -eq 0 ]; then
-        bad "$label XPASS（已转绿：请摘 manifest 的 xfail= 并转正）"
+        bad "$label XPASS (now green: drop xfail= from the manifest and promote it)"
     elif [ "$code" -eq "$want_code" ] && grep -Eq "$want_pattern" "$errfile"; then
-        red "$label（$want_pattern）"
+        red "$label ($want_pattern)"
     else
-        bad "$label（预期 xfail $want_code/'$want_pattern'，实 exit=$code）: $(tail -1 "$errfile" | head -c 100)"
+        bad "$label (wanted xfail $want_code/'$want_pattern', actual exit=$code): $(tail -1 "$errfile" | head -c 100)"
     fi
 }
 
-suite_summary() { # <suite-id>：打印统一汇总并返回套件状态
+suite_summary() { # <suite-id>: print the unified summary and return the suite status
     local suite_id=$1
     echo "== $suite_id: $pass passed, $skip_count skipped, $xfail expected-failed, $fail failed =="
     [ "$fail" -eq 0 ]
 }
 
-# ---- ② 计时 ----
+# ---- ② timing ----
 now_ms() { date +%s%N; }
 SECTION_REPORT=()
 _section_t0=0 _section_name=""
@@ -92,24 +92,24 @@ section_start() { _section_name="$1"; _section_t0=$(now_ms); }
 section_end() {
     local ms=$(( ($(now_ms) - _section_t0) / 1000000 ))
     SECTION_REPORT+=("$(printf '%-28s %8dms' "$_section_name" "$ms")")
-    echo "[计时] $_section_name ${ms}ms"
+    echo "[timing] $_section_name ${ms}ms"
 }
 print_section_report() {
     [ ${#SECTION_REPORT[@]} -eq 0 ] && return 0
-    echo "== 分段耗时 =="
+    echo "== section timings =="
     printf '%s\n' "${SECTION_REPORT[@]}"
 }
 
-# ---- ③ corpus.manifest 解析 ----
-# 行格式（# 起注释，空白分隔）：
-#   name  tier(smoke|full|manual)  timeout秒  mode(exit|oracle:<名>|diff)
-#         [env=K=V;K=V] [needs=<路径>] [args=a;b;c] [xfail=<code>:<grep 模式>]
-#         [group=<组>[,<组>...]]（分组键，如 group=heavy；无 group= 的条目属
-#         隐含 light 组——corpus.run/corpus.deps-pair 的 --group 按它过滤）
-# 输出（管道分隔，域内无 |）：
+# ---- ③ cases.manifest parsing ----
+# Line format (# starts a comment, whitespace separated):
+#   name  tier(smoke|full|manual)  timeout-seconds  mode(exit|oracle:<name>|diff)
+#         [env=K=V;K=V] [needs=<path>] [args=a;b;c] [xfail=<code>:<grep pattern>]
+#         [group=<group>[,<group>...]] (group key, e.g. group=heavy; entries without
+#         group= belong to the implicit light group that --group filters on)
+# Output (pipe separated, no | inside a field):
 #   name|tier|tmo|mode|env|needs|args|xfail|groups
-# 用法：manifest_rows <tiers 逗号|all>            —— 按层过滤
-# 非法字段/非法枚举值 → stderr 报错并以非零退出（登记错误必须响亮）。
+# Usage: manifest_rows <comma-separated tiers|all>   -- filter by tier
+# A bad field or enum value reports to stderr and exits non-zero (a registration error must fail loudly).
 manifest_rows() {
     local tiers="$1"
     awk -v tiers="$tiers" '
@@ -117,13 +117,13 @@ manifest_rows() {
         {
             name=$1; tier=$2; tmo=$3; mode=$4
             if (tier !~ /^(smoke|full|manual)$/) {
-                printf "manifest: %s 非法 tier %s\n", name, tier > "/dev/stderr"; bad=1; next
+                printf "manifest: %s invalid tier %s\n", name, tier > "/dev/stderr"; bad=1; next
             }
             if (mode !~ /^(exit|diff|oracle:.+)$/) {
-                printf "manifest: %s 非法 mode %s\n", name, mode > "/dev/stderr"; bad=1; next
+                printf "manifest: %s invalid mode %s\n", name, mode > "/dev/stderr"; bad=1; next
             }
             if (tmo !~ /^[0-9]+$/) {
-                printf "manifest: %s 非法 timeout %s\n", name, tmo > "/dev/stderr"; bad=1; next
+                printf "manifest: %s invalid timeout %s\n", name, tmo > "/dev/stderr"; bad=1; next
             }
             envv=""; needs=""; args=""; xfail=""; groups=""
             for (i = 5; i <= NF; i++) {
@@ -133,7 +133,7 @@ manifest_rows() {
                 else if ($i ~ /^xfail=/) xfail = substr($i, 7)
                 else if ($i ~ /^group=/) groups = substr($i, 7)
                 else {
-                    printf "manifest: %s 未知字段 %s\n", name, $i > "/dev/stderr"; bad=1
+                    printf "manifest: %s unknown field %s\n", name, $i > "/dev/stderr"; bad=1
                 }
             }
             if (tiers != "all" && index("," tiers ",", "," tier ",") == 0) next
@@ -143,8 +143,8 @@ manifest_rows() {
     ' "$TESTS_DIR/suites/corpus/cases.manifest"
 }
 
-# manifest_group_rows <group> [tiers 逗号|all] —— 按组过滤（组键在输出第 9 列；
-# 无 group= 的条目只在 group=light 时命中）
+# manifest_group_rows <group> [comma-separated tiers|all] -- filter by group (the group key is
+# output column 9; entries without group= match only group=light)
 manifest_group_rows() {
     local group="$1" tiers="${2:-all}"
     manifest_rows "$tiers" | awk -F'|' -v g="$group" '
@@ -153,7 +153,7 @@ manifest_group_rows() {
     '
 }
 
-# manifest_lookup <name> —— 单条查询（手工跑批按名过滤用）；查无此行 → 非零
+# manifest_lookup <name> -- single-row lookup (for filtering a manual batch by name); no row -> non-zero
 manifest_lookup() {
     local name="$1" row
     row=$(manifest_rows all | grep -F "|" | awk -F'|' -v n="$name" '$1 == n { print; found=1 } END { exit !found }') \
@@ -161,18 +161,18 @@ manifest_lookup() {
     printf '%s\n' "$row"
 }
 
-# ---- ④ corpus driver 执行器 ----
+# ---- ④ corpus driver runner ----
 # corpus_run <outdir> <name> <tmo> <env> <needs> [args...]
-# 行为：
-#   - driver 定位：corpus/c_<name>.rs（script）或 corpus/projects/<name>/（project，
-#     mirvm run <目录>）；两者皆无 → 返回 2（登记错误，调用方记 FAIL）
-#   - needs 缺席 → 返回 77（调用方记 SKIP）
-#   - env 串 K=V;K=V 逐项 export，跑完 unset
-#   - timeout <tmo> 包住 mirvm run；stdout/stderr 落 <outdir>/<name>.{out,err}
-#   - 逐驱动磁盘纪律：deps/ir image 跑完即无复读者，默认 purge（MIRVM_GATE_KEEP_CACHE=1 旁路）；
-#     每驱动前 disk_guard（可用空间见底自动升级清理，仍不足响亮中止）
-#   - 墙钟秒数追加到 ${CORPUS_TIMINGS_FILE:-/dev/null}（"秒 名" 行，供最慢榜）
-# 返回：mirvm/timeout 的退出码（needs 缺席 = 77，driver 缺席 = 2）
+# Behavior:
+#   - driver location: corpus/c_<name>.rs (script) or corpus/projects/<name>/ (project,
+#     mirvm run <directory>); neither exists -> return 2 (registration error, caller records FAIL)
+#   - needs absent -> return 77 (caller records SKIP)
+#   - export each K=V in the env string item by item, unset after the run
+#   - timeout <tmo> wraps mirvm run; stdout/stderr land in <outdir>/<name>.{out,err}
+#   - per-driver disk discipline: nothing reads deps/ir images after a run, so purge by default
+#     (MIRVM_GATE_KEEP_CACHE=1 bypasses); disk_guard runs before each driver (escalating
+#     cleanup when free space bottoms out, and aborting loudly if still short); wall-clock
+#     seconds go to ${CORPUS_TIMINGS_FILE:-/dev/null} as "<seconds> <name>" for the slowest list. Returns the mirvm/timeout exit code (needs absent = 77, driver absent = 2).
 corpus_run() {
     local outdir="$1" name="$2" tmo="$3" envv="$4" needs="$5"
     shift 5
@@ -184,7 +184,7 @@ corpus_run() {
     elif [ -d "$proj" ]; then
         target="$proj"
     else
-        echo "corpus_run: $name 在 manifest 有登记但 corpus/ 下无 driver" >&2
+        echo "corpus_run: $name is registered in the manifest but has no driver under corpus/" >&2
         return 2
     fi
     if [ -n "$needs" ] && [ ! -e "$needs" ]; then
@@ -200,7 +200,7 @@ corpus_run() {
         for pair in $envv; do
             [ -n "$pair" ] || continue
             k=${pair%%=*}
-            # %20 解码为空格（manifest 字段空白分隔，值内空格须编码）
+            # Decode %20 to a space (manifest fields are whitespace separated, so spaces inside values are encoded)
             pair=${pair//%20/ }
             export "$pair"
             env_names+=("$k")
@@ -223,7 +223,7 @@ corpus_run() {
 
     local k
     for k in "${env_names[@]}"; do unset "$k"; done
-    # 常规环境噪音也清掉（与旧 gate5 同款防御）
+    # Clear routine environment noise too; leftover flags can leak into the guest.
     unset CARGO_CFG_CURVE25519_DALEK_BACKEND RUSTFLAGS CFLAGS 2>/dev/null || true
 
     if [ -z "${MIRVM_GATE_KEEP_CACHE:-}" ]; then
@@ -232,18 +232,18 @@ corpus_run() {
     return "$code"
 }
 
-# print_slowest [N] —— 最慢榜（corpus 跑批末尾调用）
+# print_slowest [N] -- slowest list (called at the end of a corpus batch)
 print_slowest() {
     local n=${1:-10} f=${CORPUS_TIMINGS_FILE:-}
     [ -n "$f" ] && [ -s "$f" ] || return 0
-    echo "== 最慢 $n 个 corpus 驱动（秒）=="
+    echo "== slowest $n corpus drivers (seconds) =="
     sort -rn "$f" | head -"$n" | awk '{ printf "  %6ds  %s\n", $1, $2 }'
 }
 
-# parse_args <分号串> <数组名>：拆分 manifest args 串进数组；
-# {ROOT} 占位替换为仓库根绝对路径——项目对拍两侧 cwd 不同（mirvm 项目模式
-# guest cwd=项目目录，native cargo run cwd=项目目录或调用处），相对路径无法
-# 同指一文件；绝对路径与 cwd 无关，两边解析恒一致。
+# parse_args <semicolon string> <array name>: split a manifest args string into an array;
+# the {ROOT} placeholder becomes the repo root absolute path. The two legs of a project
+# differential have different cwds (mirvm project mode: guest cwd = project dir; native cargo
+# run: project dir or the caller's cwd), so a relative path cannot name the same file; an absolute path is cwd-independent and resolves identically.
 parse_args() {
     local _root; _root=$(pwd)
     local -n _out=$2
@@ -254,16 +254,16 @@ parse_args() {
     IFS=$_oldifs
 }
 
-# ---- ⑤ 磁盘与 cache 管理 ----
+# ---- ⑤ disk and cache management ----
 _mirvm_home() { printf '%s' "${MIRVM_HOME:-$HOME/.mirvm}"; }
 
-_avail_gb() {  # <path> → 可用 GiB（整数）
+_avail_gb() {  # <path> -> available GiB (integer)
     df -Pk "$1" 2>/dev/null | awk 'NR==2{print int($4/1024/1024)}'
 }
 
-# disk_guard：可用空间低于 MIRVM_DISK_MIN_GB（默认 8G）时逐级升级清理：
-#   ① 清陈代+deps/ir（下次冷构建代价小） ② --target（共享依赖存储，代价大）
-#   ③ 仍不足 → 响亮 exit 3（不许把磁盘打爆还继续跑）
+# disk_guard: when free space drops below MIRVM_DISK_MIN_GB (default 8G), escalate cleanup:
+#   ① clear old generations + deps/ir (cheap to rebuild cold)  ② --target (shared dependency
+#   store, expensive)  ③ still short -> exit 3 loudly (never keep running with a full disk)
 disk_guard() {
     local min_gb=${MIRVM_DISK_MIN_GB:-8} home_dir
     home_dir=$(_mirvm_home)
@@ -273,24 +273,24 @@ disk_guard() {
     avail=$(_avail_gb "$home_dir")
     [ -n "$avail" ] || return 0
     [ "$avail" -ge "$min_gb" ] && return 0
-    echo "disk-guard: 可用 ${avail}G < 下限 ${min_gb}G，清陈代+deps/ir"
+    echo "disk-guard: ${avail}G available < ${min_gb}G floor; clearing old generations + deps/ir"
     "$mirvm" cache purge >/dev/null 2>&1 || true
     "$mirvm" cache purge --deps --ir >/dev/null 2>&1 || true
     avail=$(_avail_gb "$home_dir")
     if [ "$avail" -lt "$min_gb" ]; then
-        echo "disk-guard: 仍 ${avail}G，追加 --target（共享依赖存储重建代价大，迫不得已）"
+        echo "disk-guard: still ${avail}G; adding --target (rebuilding the shared dependency store is costly, last resort)"
         "$mirvm" cache purge --target >/dev/null 2>&1 || true
         avail=$(_avail_gb "$home_dir")
     fi
     if [ "$avail" -lt "$min_gb" ]; then
-        echo "disk-guard: 两级清理后仍 ${avail}G < ${min_gb}G，响亮中止（先手工腾磁盘）" >&2
+        echo "disk-guard: still ${avail}G < ${min_gb}G after both cleanup levels; aborting loudly (free disk space by hand first)" >&2
         exit 3
     fi
 }
 
-# target_budget_check：统一 target dir 超 MIRVM_TARGET_BUDGET_GB（默认 24G）→
-# 自动 purge --target 并报告。这是"防 cache 把盘养爆"的预算闸；
-# 代价是下一轮全冷重建，所以只在超预算时触发。
+# target_budget_check: when the unified target dir exceeds MIRVM_TARGET_BUDGET_GB (default 24G),
+# purge --target automatically and report. This budget gate keeps the cache from filling the disk;
+# the cost is a fully cold rebuild next round, so it only triggers when over budget.
 target_budget_check() {
     local budget=${MIRVM_TARGET_BUDGET_GB:-24} home_dir t mb
     home_dir=$(_mirvm_home)
@@ -300,17 +300,17 @@ target_budget_check() {
     [ -n "$mb" ] || return 0
     if [ "$mb" -gt $((budget * 1024)) ]; then
         local mirvm=${MIRVM:-$(pwd)/target/release/mirvm}
-        echo "target-budget: $t 达 ${mb}MiB > 预算 ${budget}G，执行 cache purge --target"
+        echo "target-budget: $t reached ${mb}MiB > ${budget}G budget; running cache purge --target"
         "$mirvm" cache purge --target >/dev/null 2>&1 || true
-        echo "target-budget: 清理后 $(du -sm "$t" 2>/dev/null | cut -f1)MiB"
+        echo "target-budget: $(du -sm "$t" 2>/dev/null | cut -f1)MiB after cleanup"
     fi
 }
 
-# cache_snapshot <标签>：打印 cache 各分部体量与磁盘可用（跑前跑后各一次）
+# cache_snapshot <label>: print each cache segment size and free disk (once before and after a run)
 cache_snapshot() {
     local home_dir
     home_dir=$(_mirvm_home)
-    [ -d "$home_dir" ] || { echo "[cache $1] $home_dir 不存在"; return 0; }
-    echo "[cache $1] 合计 $(du -sm "$home_dir" 2>/dev/null | cut -f1)MiB；磁盘可用 $(_avail_gb "$home_dir")G；分部（MiB）："
+    [ -d "$home_dir" ] || { echo "[cache $1] $home_dir does not exist"; return 0; }
+    echo "[cache $1] total $(du -sm "$home_dir" 2>/dev/null | cut -f1)MiB; disk available $(_avail_gb "$home_dir")G; segments (MiB):"
     du -sm "$home_dir"/* 2>/dev/null | sort -rn | head -8 | sed "s|$home_dir/||" | awk '{ printf "  %8d  %s\n", $1, $2 }'
 }

@@ -3,32 +3,32 @@
 [dependencies]
 redb = "2"
 ---
-// redb 2.6：纯 Rust 嵌入式 KV（B-tree 页存储 + xxh3 页 checksum + flock 文件锁，
-// 无 mmap、零依赖）。覆盖：temp_dir 建库；单 write txn 跨双表插入（u64→&[u8] 与
-// &str→u64 复合）；read txn 点查（命中/未命中）+ range 正/反向扫描（BTree 确定序）
-// + first/last/len/iter 计数锚点；同 txn 更新（insert 覆盖回旧值）与删除（remove
-// 回旧值 / 未命中 None / pop_last）；显式 abort() 与 drop 隐式 abort 的不可见性；
-// MVCC 快照隔离（commit 前开启的 read txn 看不到新提交）；同 txn 重复 open_table
-// 的 TableAlreadyOpen 与不存在表的 TableDoesNotExist 错误路径；drop 后重开的
-// 持久性校验（含文件长度锚点）；1MB 大 value 写入/读回/二次重开持久性
-// （len+FNV-1a+eq）。结尾 remove_file 清理（开头也清一次，多跑不累加）。
-//
-// 确定性：数据全部由定种 xorshift64* 生成；输出只有计数/长度/排序键列/FNV 哈希/
-// 布尔断言与 redb 错误 Display（TableDoesNotExist 仅含表名；TableAlreadyOpen 含
-// 首个 open 的 Location——两维共用同一 materialized src/main.rs 与同一 redb 源
-// 路径，行/列逐字节一致）。不打印路径/时间/地址；stderr 为空。
-// 页 checksum 的 xxh3 在 >240B 页上走 AVX2 路径，但本 nightly 的 core_arch 把它
-// 实现为通用 simd_*（非 llvm.x86.* 专用降级），mirvm Simd IR 直接覆盖，与 native
-// 按 xxh3 算法定义逐位一致——无 FRONTIER。
-//
-// 注：AccessGuard 带 Drop，借用延续到作用域结束——取值一律块内提取后立即释放。
+// redb 2.6 differential: pure-Rust embedded KV (B-tree pages, xxh3 page checksums, flock
+// locking, no mmap, zero dependencies). Creates a database under temp_dir; one write txn
+// inserts into two tables (u64 -> &[u8], &str -> u64); read txn point lookups (hit and
+// miss) with forward/reverse range scans in BTree order plus first/last/len/iter anchors;
+// in-txn update (insert returns the old value) and remove (old value / miss -> None /
+// pop_last); an explicit abort() and an implicit abort on drop are both invisible; MVCC
+// snapshot isolation (a read txn opened before a commit does not see it); TableAlreadyOpen
+// and TableDoesNotExist error paths; persistence after reopen (with a file-length anchor);
+// a 1 MiB value written, read back and persisted across a second reopen; remove_file
+// cleanup at the start and the end, so repeated runs do not accumulate.
+// Deterministic: all data comes from a seeded xorshift64*; output is only counts, lengths,
+// sorted key lists, FNV hashes, booleans and redb's error Display (TableDoesNotExist
+// carries only the table name; TableAlreadyOpen carries the Location of the first open,
+// and both dimensions share one materialized src/main.rs and the same redb source paths,
+// so the text is byte-identical). No paths, time or addresses are printed; stderr is empty.
+// The page checksum's xxh3 uses an AVX2 path above 240 B, but this nightly's core_arch
+// implements it as generic simd_*, which mirvm's Simd IR covers directly and which matches
+// native bit for bit. AccessGuard's Drop keeps its borrow alive to the end of its scope, so
+// values are always extracted inside a block and released immediately.
 use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
 
 const T_NUM: TableDefinition<u64, &[u8]> = TableDefinition::new("num_kv");
 const T_STR: TableDefinition<&str, u64> = TableDefinition::new("str_kv");
 const T_NOPE: TableDefinition<u64, u64> = TableDefinition::new("nope");
 
-/// 定种 xorshift64* PRNG（native/mirvm 同序列）。
+/// Seeded xorshift64* PRNG with the same sequence on native and mirvm.
 struct Rng(u64);
 
 impl Rng {
@@ -60,7 +60,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 第 i 行的确定性值（长度 8..=55B 变化）。
+/// Deterministic value for row i (its length varies over 8..=55 B).
 fn row_val(i: u64) -> Vec<u8> {
     let len = 8 + (i * 13) % 48;
     Rng(0x5EED_0000 + i).bytes(len as usize)
@@ -68,9 +68,9 @@ fn row_val(i: u64) -> Vec<u8> {
 
 fn main() {
     let path = std::env::temp_dir().join("mirvm_c_redb_kv.redb");
-    let _ = std::fs::remove_file(&path); // 起点清空，多跑不累加
+    let _ = std::fs::remove_file(&path); // start clean; repeated runs do not accumulate
 
-    // ---- ① 建库 + 单 write txn 跨双表插入 ----
+    // ---- ① Create the database + one write txn inserting into both tables ----
     let db = Database::create(&path).unwrap();
     let w = db.begin_write().unwrap();
     {
@@ -86,7 +86,7 @@ fn main() {
     w.commit().unwrap();
     println!("[1] committed num=40 str=25");
 
-    // ---- ② read txn：点查 + range 扫描（确定序）----
+    // ---- ② Read txn: point lookups + range scans (deterministic order) ----
     let r = db.begin_read().unwrap();
     let tn = r.open_table(T_NUM).unwrap();
     let ts = r.open_table(T_STR).unwrap();
@@ -145,7 +145,7 @@ fn main() {
     drop(tn);
     drop(r);
 
-    // ---- ③ 同 txn 更新 + 删除（旧值回传）----
+    // ---- ③ In-txn update + remove (old values returned) ----
     let w = db.begin_write().unwrap();
     {
         let mut tn = w.open_table(T_NUM).unwrap();
@@ -201,7 +201,7 @@ fn main() {
     drop(tn);
     drop(r);
 
-    // ---- ④ abort 语义：显式 abort / drop 隐式 abort / abort 撤销删除 ----
+    // ---- ④ Abort semantics: explicit abort / implicit abort on drop / abort undoing a remove ----
     let a1 = db.begin_write().unwrap();
     {
         let mut tn = a1.open_table(T_NUM).unwrap();
@@ -215,7 +215,7 @@ fn main() {
         let mut tn = a2.open_table(T_NUM).unwrap();
         tn.insert(1002u64, row_val(1002).as_slice()).unwrap();
     }
-    drop(a2); // 未 commit 直接 drop = 隐式 abort
+    drop(a2); // dropping without commit = implicit abort
     let a3 = db.begin_write().unwrap();
     {
         let mut tn = a3.open_table(T_NUM).unwrap();
@@ -236,7 +236,7 @@ fn main() {
     drop(tn);
     drop(r);
 
-    // ---- ⑤ MVCC：commit 前开启的 read txn 看不到新提交 ----
+    // ---- ⑤ MVCC: a read txn opened before the commit does not see it ----
     let r0 = db.begin_read().unwrap();
     let w = db.begin_write().unwrap();
     {
@@ -257,7 +257,7 @@ fn main() {
     drop(r0);
     drop(r1);
 
-    // ---- ⑥ 错误路径：不存在表 / 同 txn 重复 open_table ----
+    // ---- ⑥ Error paths: missing table / repeated open_table in the same txn ----
     let r = db.begin_read().unwrap();
     match r.open_table(T_NOPE) {
         Ok(_) => println!("[6] open nope unexpected ok"),
@@ -274,7 +274,7 @@ fn main() {
     }
     w.abort().unwrap();
 
-    // ---- ⑦ drop 后重开：持久性校验 ----
+    // ---- ⑦ Reopen after drop: persistence checks ----
     drop(db);
     let db = Database::create(&path).unwrap();
     let r = db.begin_read().unwrap();
@@ -302,7 +302,7 @@ fn main() {
     drop(tn);
     drop(r);
 
-    // ---- ⑧ 1MB 大 value：写入 / 读回 / 二次重开持久性 ----
+    // ---- ⑧ 1 MiB value: write / read back / persisted across a second reopen ----
     let big = Rng(0xB16B_00B5).bytes(1 << 20);
     println!("[8] big gen len={} fnv={:016x}", big.len(), fnv1a(&big));
     let w = db.begin_write().unwrap();
@@ -339,7 +339,7 @@ fn main() {
     println!("[8] reopened first k={} last_is_max={}", rfkv, rlast_max);
     drop(db);
 
-    // ---- ⑨ 清理临时库文件 ----
+    // ---- ⑨ Clean up the temporary database file ----
     std::fs::remove_file(&path).unwrap();
     println!("[9] removed={}", !path.exists());
     println!("redb_kv ok");

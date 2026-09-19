@@ -4,75 +4,75 @@
 git2 = { version = "=0.20.4", default-features = false }
 libgit2-sys = "=0.18.5"
 ---
-// git2 0.20.4（libgit2 C FFI；任务钉 0.19/0.20 stable 线最新 = 0.20.4——上游
-// 已发 0.21.0（2026-07-17），不在本槽位授权范围）+ libgit2-sys 钉 =0.18.5
-// （内嵌 C 树 1.9.4；精确钉死 C 源码面，防 ^0.18.3 漂到新 C 版）。feature：
-// default-features = false——本面全本地（init/写文件/commit/tree/log/status/
-// refs），不需要网络；剥掉 default（ssh+https）拉入的 libssh2-sys/openssl-sys/
-// openssl-probe 三重 C 构建（corpus feature 最小化纪律）。宿主无系统 libgit2
-// （pkg-config 探不到 libgit2.pc）→ libgit2-sys 走 vendored 内置静态构建（cc
-// 把 bundled libgit2 1.9.4 编成 .a；mirvm 经「static .a → .so 闭包」
-// native-archive 通道加载，批3 rusqlite / 批5 zstd 已实证）——重 C 构建属
-// 预期（任务明示）。
+// git2 0.20.4 (libgit2 through the C FFI) + libgit2-sys pinned to =0.18.5. The pin
+// matters because libgit2-sys wraps the C sources: an unpinned ^0.18.3 could drift
+// onto a different libgit2 C version, so both crates are exact-pinned and the C
+// surface is fixed at bundled libgit2 1.9.4. default-features = false drops the ssh
+// and https features: this fixture is entirely local (init, file writes, commit,
+// tree, log, status, refs) and needs no network, and the default set would pull in
+// the libssh2-sys / openssl-sys / openssl-probe C builds. The host has no system
+// libgit2 (pkg-config finds no libgit2.pc), so libgit2-sys builds the vendored
+// libgit2 1.9.4 into a static archive with cc and mirvm loads it through the
+// static-archive-to-shared-object closure channel; the heavy C build is expected.
 //
-// 测试面（批7 波2；全程 git2 API，不 spawn git 命令）：
-//   libgit2 运行时版本锚（1.9.4）→ 临时目录 init_opts(initial_head="master"，
-//   钉死分支名不吃全局 gitconfig）→ std::fs 写 3 个固定文件（README.md /
-//   src/main.rs / 定种 xorshift data.bin 32B）→ index.add_path（排序序）+
-//   write + write_tree → 显式固定签名（名字/邮箱/时间戳全硬编码，Time::new
-//   恒定 offset +01:00，不吃 env）两次 commit（第二次改 README + 加
-//   src/lib.rs，父=c1）→ annotated tag v1.0（固定 tagger）→ 读回全打印：
-//   两个 commit id / tree id（纯内容寻址，sha1 锚定）、HEAD name/target、
-//   revwalk TIME|TOPOLOGICAL 序 log（id/time/offset/parents/summary）、tree
-//   递归清单（{:06o} mode/kind/path/oid，git 规范序）、get_path 命中/未命中、
-//   5 blob len+fnv1a+与原文逐字节比对 bool、refs 列表（BTreeMap 序）、本地
-//   分支列表、HEAD/master reflog 条数+逐条（old→new/msg）、status 空检查
-//   （→制造脏态：改 README + 两个 untracked（含嵌套目录）打印排序后
-//   path/flags → 复原后再空检查）、index 条目（mode/path/oid，BTree 序）、
-//   三个错误路径（缺引用 / 零 oid tag / open 非仓库——打印 ErrorCode/
-//   ErrorClass 枚举 Debug，不打印可能含路径的 message）、workdir 文件清单
-//   （递归排序，跳过 .git）、结尾清理目录。
+// Test surface (the whole fixture uses the git2 API; no `git` subprocess is spawned):
+//   libgit2 runtime version anchor (1.9.4) -> init_opts in a temp dir with
+//   initial_head="master" (branch name pinned, the global gitconfig is not consulted)
+//   -> std::fs writes three fixed files (README.md, src/main.rs, 32-byte seeded
+//   xorshift data.bin) -> index.add_path in sorted order plus write and write_tree ->
+//   two commits under fixed signatures (name/email/timestamp hard-coded, Time::new
+//   with a constant +01:00 offset and no env), the second editing README and adding
+//   src/lib.rs with the first commit as parent -> annotated v1.0 tag with a fixed
+//   tagger -> read back and print: both commit ids and tree ids (pure content
+//   addressing, sha1-anchored), HEAD name/shorthand/target, the revwalk log in
+//   TIME|TOPOLOGICAL order (id/time/offset/parents/summary), the recursive tree
+//   listing ({:06o} mode/kind/path/oid, canonical git order), get_path hit and miss,
+//   the 5 blobs' len+fnv1a and byte-for-byte comparison with the source, the refs
+//   list (BTreeMap order), the local branch list, HEAD/master reflog counts and
+//   entries (old->new/msg), the status check (clean -> dirty: edited README plus two
+//   untracked files, one nested, printing sorted path/flags -> restored clean), the
+//   index entries (mode/path/oid, BTree order), and the three error paths.
 //
-// 确定性：全部身份/时间戳/内容硬编码；commit/tree/tag 走 sha1 内容寻址；
-// 集合一律 BTreeMap/BTreeSet；无 HashMap 序/RNG（xorshift 定种）/时间/线程/
-// 绝对路径/env 入输出；B 维 native 实测 stdout 58 行全确定（重跑 commit id
-// 锚定同值）、stderr 真空、exit 0。
+// Determinism: all identities, timestamps and contents are hard-coded; commit/tree/tag
+// use sha1 content addressing; every collection is a BTreeMap/BTreeSet; no HashMap
+// order, RNG (xorshift is seeded), time, thread, absolute path or env value reaches
+// the output. A native run measured 58 deterministic stdout lines, empty stderr, exit 0.
 //
-// ★ 已修复（2026-07-17，commit 867b3de；原 FRONTIER 全文折叠备查）：
-//   闭包链接行缺 crate 图动态库（libz-sys 的 `z`）——native_archive.rs 新增
-//   system_dylibs(tcx) 统一收集并与 lower 预载共用名单，cc 链接行追加
-//   `-l<name>`（-lgcc_s 后 -o 前）且入缓存键。修复后断言成立：本 driver
-//   零改动三维转绿（以下 B oracle 输出即现输出，commit id 锚定未漂移）。
-//   另注：刻意未注册任何 Rust→C 回调（TreeWalk 回调 API 不用，用
-//   tree.iter() 等价替代——纯保守选择，非盲区所需；P1 后结构体内嵌回调
-//   本身已可执行化）。
+// Oracle: this fixture is one half of a native/differential pair. Its stdout is
+// compared line for line against the same program built by real rustc and run
+// natively, so every printed id, oid, ordering, count and flag must match and
+// stderr must be empty on the success paths.
 //
-// <details><summary>原 FRONTIER 记录（expected-red 定档文本，机制已修）</summary>
+// Ids come from git objects read back from the repository rather than recomputed:
+// commit, tree, blob and tag ids are sha1 over the object bytes, so identical bytes
+// give identical ids under both engines. The two commit ids, both tree ids and the
+// tag id are anchored this way, and assert_ne! on commits and trees confirms that
+// the second commit really changed them.
 //
-//   trap 原文（mirvm run，exit 101，rustc thread panic）：
-//     src/lower/mod.rs:2002: Static native library 装载失败: 静态原生归档
-//     `…/build/libgit2-sys-*/out/build/libgit2.a` 无法安全转换为共享库
-//     （要求 ELF PIC、依赖在本归档内闭合）:
-//     /usr/bin/ld: … indexer.c:361: undefined reference to `crc32'
-//     … filebuf.c/zstream.c: undefined reference to `deflate'/`inflate' 族
-//   根因（机制级实锤）：native_archive.rs 的闭包链接行 = LINK_PREFIX
-//   （-shared -z,defs --whole-archive）+ 归档 + LINK_SUFFIX（写死
-//   -lm -ldl -lpthread -lrt -lutil -lgcc_s）。libz-sys stock-zlib 动态模式
-//   只经 rlib 元数据传播 `cargo:rustc-link-lib=z`（无 libz.a 产出）→ 批5
-//   修复收集 crate 图动态元数据库做 RTLD_GLOBAL 预载，但闭包链接是**独立
-//   cc 子进程**且行序上发生在预载之前——预载够不着；独立 ld 的 -z defs
-//   必须命令行自带 -lz。缺的不是 glibc 家族而是 crate 图传播的动态元数据
-//   库，LINK_SUFFIX 硬编码清单覆盖不到。
-//   与批3 rusqlite（libsqlite3.a 引 libm `log`）同族新形态。
-//   证据链：①手动重放同链接行（无 -lz）复现 17 处 undefined reference；
-//   ②同命令追加 -lz → LINK_OK 且产 DT_NEEDED libz.so.1；③最小复现
-//   libgit2-sys 单依赖即炸——与 git2 Rust 层无关。
-//   绕行排查（均不可）：静态 libz → zlib 变独立静态归档，闭包逐归档独立
-//   -z defs 闭合，跨归档引用同病；build 期 env 不可记入三维纪律；
-//   LIBGIT2_SYS_USE_PKG_CONFIG → 宿主无 libgit2.pc。
+// Error paths print the ErrorCode/ErrorClass enum Debug and never the Error message,
+// whose text can embed an absolute path and would differ per machine.
 //
-// </details>
-// 三维复跑：
+// The fixture registers no Rust-to-C callbacks: tree traversal uses tree.iter()
+// instead of the TreeWalk callback API, so the run stays off the callback ABI.
+//
+// Several results are asserted, not just printed: the two commit ids and tree ids
+// differ, every blob equals its source bytes, and both clean status checks are zero.
+//
+// The status section is the only part that mutates the worktree: it asserts a clean
+// tree, builds a dirty state (edited README plus two untracked files, one nested),
+// prints the sorted path/flag pairs, restores the original bytes and asserts clean
+// again. The recursive workdir listing skips .git and is BTreeSet-ordered.
+//
+// Printed paths are relative (src/main.rs, data.bin, dir/extra.txt) under a fixed
+// temp-directory name, so no machine-specific absolute path reaches stdout.
+//
+// The reflog section reads both HEAD and refs/heads/master and prints every entry
+// (old id -> new id plus message) in order, anchoring the reflog rewrite order.
+//
+// The data.bin blob is byte-identical in both trees, so the fixture also checks
+// that identical content deduplicates to one blob object.
+//
+// Three-way re-run (repo root):
 //   A: target/release/mirvm run corpus/c_libgit2.rs
 //   B: cd "$(grep -l 'name = "c_libgit2"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname)" && \
 //        RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \
@@ -88,7 +88,7 @@ use git2::{
 
 const NAME: &str = "Mirvm Tester";
 const EMAIL: &str = "tester@example.com";
-/// 两个 commit 的固定时间戳（秒；offset 恒 +01:00 = 60 分钟）。
+/// The two commits' fixed timestamps (seconds; the offset is always +01:00 = 60 minutes).
 const T1: i64 = 1_700_000_000;
 const T2: i64 = 1_700_000_600;
 
@@ -109,7 +109,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 定种 xorshift64* 生成 32 字节二进制 blob（二进制 blob 边界）。
+/// Seeded xorshift64* producing a 32-byte binary blob (binary-blob boundary).
 fn data_bin() -> Vec<u8> {
     let mut out = Vec::new();
     let mut x = 0x9E3779B97F4A7C15u64;
@@ -127,7 +127,7 @@ fn sig(secs: i64) -> Signature<'static> {
     Signature::new(NAME, EMAIL, &Time::new(secs, 60)).unwrap()
 }
 
-/// 递归收集 tree 遍历行（顺序 = tree 条目序，git 规范序 → 确定）。
+/// Recursively collect tree traversal rows (order = tree entry order, canonical git order).
 fn walk_tree(repo: &Repository, tree: &git2::Tree, prefix: &str, out: &mut Vec<String>) {
     for e in tree.iter() {
         let path = format!("{prefix}{}", e.name().unwrap());
@@ -145,7 +145,7 @@ fn walk_tree(repo: &Repository, tree: &git2::Tree, prefix: &str, out: &mut Vec<S
     }
 }
 
-/// 递归列出 workdir 文件（跳过 .git），BTreeSet 序保证确定。
+/// Recursively list workdir files (skipping .git); BTreeSet order keeps it deterministic.
 fn list_workdir(dir: &Path, prefix: &str, out: &mut BTreeSet<String>) {
     for entry in fs::read_dir(dir).unwrap() {
         let entry = entry.unwrap();
@@ -176,18 +176,18 @@ fn main() {
         v.nsec()
     );
 
-    // 固定子目录：开头清一次再建，结尾删除——多跑不累加。
+    // Fixed subdirectory: cleared and recreated at the start, removed at the end (no accumulation).
     let root = std::env::temp_dir().join("mirvm_corpus_libgit2");
     if root.exists() {
         fs::remove_dir_all(&root).unwrap();
     }
     fs::create_dir_all(&root).unwrap();
 
-    // git2 对象（Tree/Commit/Statuses/…）借用 repo 且实现 Drop——借用区随
-    // 内层作用域结束自动按逆序释放（repo 最先声明故最后 drop）；作用域外再
-    // 做目录清理。
+    // git2 objects (Tree/Commit/Statuses/...) borrow the repo and implement Drop, so this
+    // inner scope releases them in reverse order (repo is declared first and drops last);
+    // the directory cleanup happens after the scope ends.
     {
-        // ---- ① init + 写文件 + 两个固定时间戳的 commit ----
+        // ---- ① init + write files + two commits with fixed timestamps ----
         let mut opts = RepositoryInitOptions::new();
         opts.initial_head("master");
         let repo = Repository::init_opts(&root, &opts).unwrap();
@@ -210,7 +210,7 @@ fn main() {
         }
 
         let mut index = repo.index().unwrap();
-        // 排序序 add，消除入参序影响。
+        // Add in sorted order so the call order cannot influence the result.
         for p in ["README.md", "data.bin", "src/main.rs"] {
             index.add_path(Path::new(p)).unwrap();
         }
@@ -224,7 +224,7 @@ fn main() {
         println!("commit1 = {c1}");
         println!("tree1 = {tree1}");
 
-        // 第二个 commit：改 README.md，加 src/lib.rs（workdir 同步更新）。
+        // Second commit: edit README.md, add src/lib.rs (workdir updated to match).
         fs::write(root.join("README.md"), README2).unwrap();
         fs::write(root.join("src/lib.rs"), LIB_RS).unwrap();
         for p in ["README.md", "src/lib.rs"] {
@@ -243,7 +243,7 @@ fn main() {
         assert_ne!(c1, c2);
         assert_ne!(tree1, tree2);
 
-        // annotated tag（固定 tagger）充实 refs 列表。
+        // Annotated tag with a fixed tagger, to populate the refs list.
         let tag_oid = repo
             .tag("v1.0", c1_obj.as_object(), &sig1, "release v1.0\n", false)
             .unwrap();
@@ -283,7 +283,7 @@ fn main() {
         }
         println!("log count = {nlog}");
 
-        // ---- ③ tree 遍历 + 路径查找 ----
+        // ---- ③ tree traversal + path lookup ----
         let mut rows = Vec::new();
         walk_tree(&repo, &tree2_obj, "", &mut rows);
         println!("tree2 entries = {}", rows.len());
@@ -297,7 +297,7 @@ fn main() {
             Err(e) => println!("lookup nope.txt err = {:?}/{:?}", e.code(), e.class()),
         }
 
-        // ---- ④ blob 读取校验（len/fnv/逐字节比对原文）----
+        // ---- ④ blob read-back check (len/fnv/byte-for-byte comparison with the source) ----
         let b_readme1 = tree1_obj.get_path(Path::new("README.md")).unwrap().id();
         let b_readme2 = tree2_obj.get_path(Path::new("README.md")).unwrap().id();
         let b_main = tree2_obj.get_path(Path::new("src/main.rs")).unwrap().id();
@@ -323,7 +323,7 @@ fn main() {
             assert_eq!(content, expect);
         }
 
-        // ---- ⑤ refs 列表（BTreeMap 序）+ 本地分支 ----
+        // ---- ⑤ refs list (BTreeMap order) + local branches ----
         let mut refs = BTreeMap::new();
         for r in repo.references().unwrap() {
             let r = r.unwrap();
@@ -360,7 +360,7 @@ fn main() {
             println!("reflog {name} count = {n}");
         }
 
-        // ---- ⑦ status：净 → 脏 → 复原净 ----
+        // ---- ⑦ status: clean -> dirty -> restored clean ----
         let mut so = StatusOptions::new();
         so.include_untracked(true).recurse_untracked_dirs(true);
         let sts = repo.statuses(Some(&mut so)).unwrap();
@@ -388,7 +388,7 @@ fn main() {
         println!("status restored entries = {}", sts.len());
         assert_eq!(sts.len(), 0);
 
-        // ---- ⑧ index 条目（BTree 序）----
+        // ---- ⑧ index entries (BTree order) ----
         let index = repo.index().unwrap();
         println!("index entries = {}", index.len());
         for e in index.iter() {
@@ -400,12 +400,12 @@ fn main() {
             );
         }
 
-        // ---- ⑨ workdir 文件清单（递归、BTreeSet 序）----
+        // ---- ⑨ workdir file list (recursive, BTreeSet order) ----
         let mut files = BTreeSet::new();
         list_workdir(&root, "", &mut files);
         println!("workdir files = {files:?}");
 
-        // ---- ⑩ 错误路径：缺引用 / 零 oid / 非仓库 ----
+        // ---- ⑩ error paths: missing ref / zero oid / non-repo ----
         match repo.find_reference("refs/heads/nope") {
             Ok(_) => println!("nope ref unexpected ok"),
             Err(e) => println!("nope ref err = {:?}/{:?}", e.code(), e.class()),
@@ -426,7 +426,7 @@ fn main() {
         fs::remove_dir_all(&notrepo).unwrap();
     }
 
-    // ---- ⑪ 清理 ----
+    // ---- ⑪ cleanup ----
     fs::remove_dir_all(&root).unwrap();
     println!("cleanup exists = {}", root.exists());
 }
