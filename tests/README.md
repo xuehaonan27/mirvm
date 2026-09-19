@@ -17,12 +17,20 @@ make list        # every case, with its mode and tier
 make modes       # the available run methods
 make case C=<id> [ARGS="..."]
 make mode M=<mode> [ARGS="..."]
-make inventory
+make validate    # every case: the mode exists and declares the fields it uses
+make inventory   # manifest <-> data/: no orphans, no missing targets, no scripts under data/
 make projects    # fetch the data/projects submodules
 ```
 
 `make` is the interface and `tests/run.sh` is the implementation. `tests/run.sh` takes the same
-commands (`tier`, `case`, `mode`, `list`, `modes`, `inventory`) if make is unavailable.
+commands (`tier`, `case`, `mode`, `list`, `modes`, `validate`, `inventory`) if make is unavailable.
+
+`validate` and `inventory` build nothing, so a manifest typo or an unjustified asset costs seconds.
+The framework needs no particular bash version and no product to check itself: the
+`framework-self-test` case drives the real dispatcher and the real modes with the fake product and
+fake Cargo under `data/fixtures/fakes/`, covering false green, a misbehaving product, both legs
+failing, stderr-only differences, status propagation, batch aggregation, SKIP-versus-PASS and the
+expected-red decisions.
 
 ## Layout
 

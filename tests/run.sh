@@ -9,6 +9,7 @@
 #   ./tests/run.sh list [--mode M] [--tier T]
 #   ./tests/run.sh modes                    the available modes and their purpose
 #   ./tests/run.sh inventory                manifest <-> data/ cross-check, no orphans, no scripts
+#   ./tests/run.sh validate                 every case's mode exists and declares the fields it uses
 #   ./tests/run.sh help
 #
 # Makefile is the interface (`make test|smoke|gate`); this script is its implementation.
@@ -58,6 +59,10 @@ manifest_rows() {
     ' "$MANIFEST"
 }
 
+# require_manifest: fail loudly on a malformed manifest before any selection happens. A process
+# substitution cannot report the parser's status, so this is the one place the check lives.
+require_manifest() { manifest_rows >/dev/null || exit $?; }
+
 # mode_meta <mode> -> "<declared fields>|<required fields>|<product>" ; also validates the mode exists
 mode_meta() {
     local mode=$1 path=$LIB_DIR/modes/$mode.sh
@@ -100,7 +105,7 @@ select_rows() { # <filter kind> <value> [extra args ignored]
             case) [ "$name" = "$value" ] && SELECTED+=("$name") ;;
             mode) [ "$mode" = "$value" ] && SELECTED+=("$name") ;;
         esac
-    done < <(manifest_rows) || exit $?
+    done < <(manifest_rows)
 }
 
 row_of() { # <name> -> the manifest row, non-zero when absent
@@ -213,16 +218,19 @@ cmd_inventory() {
                     refs+=("$DATA_DIR/$value")
                     [ -e "$DATA_DIR/$value" ] || { echo "MISSING (case $name): data/$value"; bad=1; } ;;
                 needs)
+                    # needs= is exactly the "may be absent" field: an absent path makes the case a
+                    # SKIP, so it is never an inventory error. It still counts as a reference.
                     case "$value" in
                         /*) continue ;;
                     esac
                     local need=${value//\{DATA\}/$DATA_DIR}
                     need=${need//\{ROOT\}/$REPO_ROOT}
-                    [ -e "$need" ] || { echo "MISSING (case $name): $value"; bad=1; } ;;
+                    [ -e "$need" ] && refs+=("$need") ;;
                 fixture)
                     local one
                     local -a parts=()
-                    expand_list "$value" parts
+                    expand_list "$value"
+                    parts=(${EXPANDED[@]+${EXPANDED[@]}})
                     for one in ${parts[@]+"${parts[@]}"}; do
                         refs+=("$DATA_DIR/$one")
                         [ -e "$DATA_DIR/$one" ] || { echo "MISSING (case $name): data/$one"; bad=1; }
@@ -230,13 +238,14 @@ cmd_inventory() {
                 args)
                     local a
                     local -a argv=()
-                    expand_list "$value" argv
+                    expand_list "$value"
+                    argv=(${EXPANDED[@]+${EXPANDED[@]}})
                     for a in ${argv[@]+"${argv[@]}"}; do
                         case "$a" in
                             "$DATA_DIR"/*) refs+=("$a"); [ -e "$a" ] || { echo "MISSING (case $name): ${a#"$DATA_DIR"/}"; bad=1; } ;;
                         esac
                     done ;;
-                verdict)
+                verdict | stdout)
                     case "$value" in
                         oracle:*)
                             refs+=("$DATA_DIR/fixtures/oracles/${value#oracle:}.txt")
@@ -245,10 +254,11 @@ cmd_inventory() {
                     esac ;;
             esac
         done
-    done < <(manifest_rows) || exit $?
+    done < <(manifest_rows)
 
     local file covered ref
     while IFS= read -r file; do
+        case "$file" in */README.md) continue ;; esac   # documentation about data, not data
         covered=0
         for ref in ${refs[@]+"${refs[@]}"}; do
             case "$file" in "$ref" | "$ref"/*) covered=1; break ;; esac
@@ -265,17 +275,50 @@ cmd_inventory() {
     return "$bad"
 }
 
+# ---- validation ----
+# Static check of every case: the mode exists, every field in the line is declared by that mode, and
+# every required field is present. It runs no product, so a manifest typo costs seconds, not a build.
+cmd_validate() {
+    local bad=0 row name mode tier _timeout fields meta declared required key
+    local total=0
+    while IFS='|' read -r name mode tier _timeout fields; do
+        [ -n "$name" ] || continue
+        total=$((total + 1))
+        meta=$(mode_meta "$mode") || { echo "ERROR case $name: unknown mode $mode"; bad=1; continue; }
+        IFS='|' read -r declared required _ <<<"$meta"
+        for key_and_value in $fields; do
+            key=${key_and_value%%=*}
+            case " $declared " in
+                *" $key "*) ;;
+                *) echo "ERROR case $name: mode $mode does not declare field $key"; bad=1 ;;
+            esac
+        done
+        for key in $required; do
+            case " $fields " in
+                *" $key"=*) ;;
+                *) echo "ERROR case $name: mode $mode requires field $key"; bad=1 ;;
+            esac
+        done
+    done < <(manifest_rows)
+    if [ "$bad" -eq 0 ]; then
+        echo "validate: $total cases valid"
+    fi
+    return "$bad"
+}
+
 # ---- commands ----
 cmd=${1:-help}
 [ $# -gt 0 ] && shift
 case "$cmd" in
     tier)
         [ $# -ge 1 ] || { usage >&2; exit 64; }
+        require_manifest
         select_rows tier "$1"
         run_selected
         ;;
     case)
         [ $# -ge 1 ] || { usage >&2; exit 64; }
+        require_manifest
         name=$1; shift
         select_rows case "$name"
         [ ${#SELECTED[@]} -gt 0 ] || { echo "ERROR unknown case: $name" >&2; exit 64; }
@@ -283,6 +326,7 @@ case "$cmd" in
         ;;
     mode)
         [ $# -ge 1 ] || { usage >&2; exit 64; }
+        require_manifest
         mode=$1; shift
         select_rows mode "$mode"
         [ ${#SELECTED[@]} -gt 0 ] || { echo "ERROR no case uses mode: $mode" >&2; exit 64; }
@@ -303,7 +347,7 @@ case "$cmd" in
             [ -n "$filter_mode" ] && [ "$mode" != "$filter_mode" ] && continue
             [ -n "$filter_tier" ] && [ "$tier" != "$filter_tier" ] && continue
             printf '%-34s %-20s %-7s %s\n' "$name" "$mode" "$tier" "$timeout"
-        done < <(manifest_rows) || exit $?
+        done < <(manifest_rows)
         ;;
     modes)
         for path in "$LIB_DIR"/modes/*.sh; do
@@ -312,7 +356,12 @@ case "$cmd" in
         done
         ;;
     inventory)
+        require_manifest
         cmd_inventory
+        ;;
+    validate)
+        require_manifest
+        cmd_validate
         ;;
     help | -h | --help | "")
         usage

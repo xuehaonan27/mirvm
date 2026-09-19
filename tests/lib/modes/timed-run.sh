@@ -19,8 +19,10 @@ mode_run() {
     apply_env "$(field env "")"
 
     local -a pre=() guest=()
-    expand_list "$(field args "")" pre
-    expand_list "$(field guest "")" guest
+    expand_list "$(field args "")"
+    pre=(${EXPANDED[@]+"${EXPANDED[@]}"})
+    expand_list "$(field guest "")"
+    guest=(${EXPANDED[@]+"${EXPANDED[@]}"})
 
     local best=99999999 run ms t0 code out
     for ((run = 1; run <= runs; run++)); do

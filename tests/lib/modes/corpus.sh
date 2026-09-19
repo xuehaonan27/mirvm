@@ -26,7 +26,8 @@ mode_run() {
 
     apply_env "$(field env "")"
     local -a args=()
-    expand_list "$(field args "")" args
+    expand_list "$(field args "")"
+    args=(${EXPANDED[@]+"${EXPANDED[@]}"})
     local -a cmd=(env -u RUST_BACKTRACE "$MIRVM" run "$DATA_DIR/$input")
     [ ${#args[@]} -gt 0 ] && cmd+=(-- "${args[@]}")
 

@@ -264,8 +264,8 @@ x86-vzeroupper   native-diff  smoke  60  input=programs/probe_x86_vzeroupper.rs 
 x86-vectors      native-diff  smoke  60  input=programs/probe_x86_vectors.rs sub_caps=pshuf;sha
 
 # unwind, outcomes and statistics: declared facts, checked against the run
-uncaught-payload-interp  run-expect  smoke  120  input=programs/vmcall_unwind.rs args=--engine;vm;--vm-call;uncaught_payload_cleanup_probe env=MIRVM_JIT=off exit=101 stdout=oracle:uncaught-payload.txt stderr=guest%20panic%20not%20caught
-uncaught-payload-jit     run-expect  smoke  120  input=programs/vmcall_unwind.rs args=--engine;vm;--vm-call;uncaught_payload_cleanup_probe env=MIRVM_JIT=on;MIRVM_JIT_SYNC=1;MIRVM_JIT_THRESHOLD=1 exit=101 stdout=oracle:uncaught-payload.txt stderr=guest%20panic%20not%20caught
+uncaught-payload-interp  run-expect  smoke  120  input=programs/vmcall_unwind.rs args=--engine;vm;--vm-call;uncaught_payload_cleanup_probe env=MIRVM_JIT=off exit=101 stdout=oracle:uncaught-payload stderr=guest%20panic%20not%20caught
+uncaught-payload-jit     run-expect  smoke  120  input=programs/vmcall_unwind.rs args=--engine;vm;--vm-call;uncaught_payload_cleanup_probe env=MIRVM_JIT=on;MIRVM_JIT_SYNC=1;MIRVM_JIT_THRESHOLD=1 exit=101 stdout=oracle:uncaught-payload stderr=guest%20panic%20not%20caught
 main-panic-interp  run-expect  smoke  120  input=programs/main_outcome_probe.rs guest=panic env=MIRVM_JIT=off exit=101 stderr=main%20outcome%20probe stderr_absent=guest%20panic%20not%20caught|release=false
 main-panic-jit     run-expect  smoke  120  input=programs/main_outcome_probe.rs guest=panic env=MIRVM_JIT=on;MIRVM_JIT_SYNC=1;MIRVM_JIT_THRESHOLD=1 exit=101 stderr=release=true.*_3std2rt19lang_start_internal0C stderr_absent=guest%20panic%20not%20caught
 main-101-interp    run-expect  smoke  120  input=programs/main_outcome_probe.rs env=MIRVM_JIT=off exit=101 stderr_absent=main%20outcome%20probe|guest%20panic%20not%20caught
@@ -278,7 +278,7 @@ vmstats-digest-debt    run-expect  smoke  120  input=programs/vmcall_digest.rs a
 vmstats-unwind-debt    run-expect  smoke  120  input=programs/vmcall_unwind.rs args=--engine;vm;--vm-stats stdout_absent=_digest.*M4\.[12]:
 
 # the execution phase under ThreadSanitizer, and the fence that keeps it tcx-free
-tsan          tsan           smoke  900  fixture=fixtures/tsan expect=mixed-stack-fib;atomic-cross-tier;blocking-io-liveness;mixed-stack-unwind;engine-atomics-thunk-cache;capture-session-lifecycle;engine-close-race;guest-threads;signal-delivery;fork-guard
+tsan          tsan           smoke  900  crate=fixtures/tsan expect=mixed-stack-fib;atomic-cross-tier;blocking-io-liveness;mixed-stack-unwind;engine-atomics-thunk-cache;capture-session-lifecycle;engine-close-race;guest-threads;signal-delivery;fork-guard
 purity-fence  compile-crate  fast   300  crate=fixtures/tsan
 
 # timing ceilings and resource metering

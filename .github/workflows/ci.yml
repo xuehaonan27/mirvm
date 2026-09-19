@@ -37,6 +37,10 @@ jobs:
           --component rustc-dev --component rust-src --component llvm-tools
           --component rustfmt --component clippy
 
+      # Static first: a manifest typo or an unjustified asset should not cost a release build.
+      - name: Test inventory
+        run: make validate inventory
+
       # make test = quality.rust (fmt, clippy, cargo test) + the program/Cargo/cargoless
       # differentials + the cargoless and pack contracts + harness.truth.
       - name: Fast gate

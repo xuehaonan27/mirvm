@@ -79,7 +79,7 @@ case_init() {
 # dispatcher refuses a field the mode does not declare, so a typo in tests/manifest fails loudly.
 field() { # <key> [default] -> value on stdout, non-zero when absent and no default
     local key=$1 arg
-    for arg in "${CASE_FIELDS[@]}"; do
+    for arg in ${CASE_FIELDS[@]+"${CASE_FIELDS[@]}"}; do
         case "$arg" in
             "$key"=*) printf '%s\n' "${arg#*=}"; return 0 ;;
         esac
@@ -100,34 +100,37 @@ field_required() { # <key>
 # case_fixtures: expands the case's fixture field into FIXTURES, as absolute paths under data/.
 case_fixtures() {
     FIXTURES=()
-    local spec _rels=() _r
+    local spec _r
     spec=$(field fixture "") || return 0
-    expand_list "$spec" _rels
-    for _r in ${_rels[@]+"${_rels[@]}"}; do FIXTURES+=("$DATA_DIR/$_r"); done
+    expand_list "$spec"
+    for _r in ${EXPANDED[@]+"${EXPANDED[@]}"}; do FIXTURES+=("$DATA_DIR/$_r"); done
 }
 
-# expand_list <semicolon string> <array name>: splits a manifest list field, decodes %20 to a space,
-# and expands {DATA} and {ROOT}. Manifest fields cannot contain a literal space.
+# expand_list <semicolon string>: splits a manifest list field into the global EXPANDED, decoding
+# %20 to a space and expanding {DATA} and {ROOT}. Manifest fields cannot contain a literal space.
+# It fills a global rather than a named array so the framework needs no bash 4 nameref: callers copy
+# EXPANDED into their own array before the next call.
+EXPANDED=()
 expand_list() {
     local _oldifs=$IFS _item
-    local -n _out=$2
+    EXPANDED=()
     IFS=';'
     for _item in $1; do
         [ -n "$_item" ] || continue
         _item=${_item//%20/ }
         _item=${_item//\{DATA\}/$DATA_DIR}
         _item=${_item//\{ROOT\}/$REPO_ROOT}
-        _out+=("$_item")
+        EXPANDED+=("$_item")
     done
     IFS=$_oldifs
 }
 
 # apply_env <semicolon K=V list>: exports each assignment for the rest of the run.
 apply_env() {
-    local _assignments=() _pair
+    local _pair
     [ -n "$1" ] || return 0
-    expand_list "$1" _assignments
-    for _pair in "${_assignments[@]}"; do
+    expand_list "$1"
+    for _pair in ${EXPANDED[@]+"${EXPANDED[@]}"}; do
         export "$_pair"
     done
 }
@@ -136,10 +139,23 @@ apply_env() {
 # run_case_cmd <out-prefix> <command...>: runs the command under the case timeout, writing
 # <prefix>.out, <prefix>.err and <prefix>.code. Returns 0 unless the command could not be started;
 # the guest's own status lands in <prefix>.code so a mode can assert on it.
+# The timeout binary is `timeout` on Linux and `gtimeout` where coreutils is installed separately.
+# Without either, the case runs unbounded and says so once: the container has `timeout`, and only
+# development on a machine without it is affected.
+TIMEOUT_BIN=$(command -v timeout || command -v gtimeout || true)
+TIMEOUT_WARNED=0
 run_case_cmd() {
     local prefix=$1 code=0
     shift
-    timeout "$CASE_TIMEOUT" "$@" >"$prefix.out" 2>"$prefix.err" || code=$?
+    if [ -n "$TIMEOUT_BIN" ]; then
+        "$TIMEOUT_BIN" "$CASE_TIMEOUT" "$@" >"$prefix.out" 2>"$prefix.err" || code=$?
+    else
+        if [ "$TIMEOUT_WARNED" -eq 0 ]; then
+            echo "note: no timeout binary on PATH; case timeouts are not enforced here" >&2
+            TIMEOUT_WARNED=1
+        fi
+        "$@" >"$prefix.out" 2>"$prefix.err" || code=$?
+    fi
     printf '%s\n' "$code" >"$prefix.code"
     return 0
 }

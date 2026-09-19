@@ -24,7 +24,8 @@ mode_run() {
 
     apply_env "$(field env "")"
     local -a args=()
-    expand_list "$(field args "")" args
+    expand_list "$(field args "")"
+    args=(${EXPANDED[@]+"${EXPANDED[@]}"})
 
     local leg
     for leg in cargo self; do
