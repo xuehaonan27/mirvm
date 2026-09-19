@@ -73,6 +73,7 @@
 | `m5.4-design.md` | M5.4a–d 施工蓝图（ABI 泛化 + LSDA 版式参数 + SIMD 覆盖矩阵；片 a–d 全落地） |
 | `modeb-mirvmar-design.md` | mode B：`.mirvm` 包格式 v4、可重复实例化 `Package`、每 Engine guest 原生入口（P1）/native/机器码节（MC）、关闭/signal 生命周期与惰性函数装载（已落地；格式声明不定死） |
 | `product-capabilities-plan.md` | 明确缺失的产品能力与建议施工顺序（P1/P2 与 P4 的基础生命周期已完成，其余阶段仍是规划） |
+| `upstream-consistency-plan.md` | 与 rust-lang 主线一致性：三层机制现状盘点 + B1–B3 建议（bump 制度化 / 上游套件 oracle / rustc_public 跟踪）——**建议未立项** |
 | `mirvm-test-cargoless-contract.md` | `mirvm test`/bench 与 resolver 1/2/3 workspace 的 self/compat/Cargo 三轨合同、明确边界与 Cargo 升级规程 |
 | `c1-ffi-agg-design.md` | C1 FFI 按值聚合封送设计（FfiAgg 冻结 + libffi struct 编组；R17 边界之母） |
 | `c-unwind-contract.md` | C/C-unwind 跨语言异常合同、native/真实嵌入实测矩阵、逐异常对象分类、真实 main 结果、signal 的 owner/目标线程安全点 activation、关闭期间异常持有、native fini 不可展开边界与 E13 现行裁决 |
