@@ -61,8 +61,8 @@ T4 已并入 R1。现行施工队列沿用日志设计里的 L（日志采集主
 
 | ID | 事项 | 闭合边界与依赖 | 出处 |
 |---|---|---|---|
-| T7 / L2 | **fork 子代采集代际** | 下一步（L1 已完成）；child 先 drop-only，普通边界自动建立独立 generation、文件、页池、writer、producer 与 errno pointer；覆盖 HostFork、泛型 fork、native 再入，父子账本不得串写 | 同上 §6.3/§11 |
-| T8 / L3 | **HostSyscall 直接热路** | L1 已完成；稳定 ProducerFast/冷慢路，移除通用 JIT helper 与健康 pair 的逐记录冷 sequence 更新，trace JIT 以 `r15` 固定 producer；plain 反汇编保持零采集成本 | 同上 §5.2.3/§11 |
+| T7 / L2 | **fork 子代采集代际** | **已闭合（2026-09-18）**：子代在普通边界按配方自建 generation、文件、页池、writer、producer 与 errno pointer；回归 `runtime.telemetry`（父 gen0 / 子 gen1 各自 pid 与记录） | decision-history §7.59/§7.60 |
+| T8 / L3 | **HostSyscall 直接热路** | **部分闭合（2026-09-18）**：trace 域独立 ISA/module、独立发布槽、边界蹦床（含展开 landing pad）、`get_pinned_reg` 直调的 syscall 站点、fork 子代钉寄存器修复均已落地并有回归（§7.61-§7.63）。**剩余三项**：① 健康 pair 的逐记录冷 sequence 更新尚未移除——`next_sequence` 同时是 producer-end 账本的 `attempted`，改成页内推导会动 v0 文件/sequence 合同，须单独裁决；② 设计要求代码域在**最外层 activation 入口**选择，当前是 Engine 构造时冻结，补齐需要同一 Engine 同时物化 plain/trace 两套代码与解释器两条循环；③ 页内内联写（§5.9 的 64B Enter + 24B Exit）尚未做。plain 反汇编零采集成本 | 同上 §5.2.3/§5.3/§11 |
 | T9 / L4 | **1B stateless raw syscall site** | 依赖 L3；双物化 inline-asm raw site，并以 RFLAGS、GPR、red zone、栈、完整向量态和 raw 返回语义对拍闭合。完成后才能宣称首个内部 syscall 纵切完成 | 同上 §5.9/§11 |
 | T11 / P2 | **Linux perf capture** | P1 已完成，可与 L2–L4 并行；交付 profile 命令和薄脚本，首版 user-space/IP-only/inherit，权限、lost samples、缺映射均响亮失败或标 incomplete；重跑 fib 与 D16 真实 workload；fork registry/map 重置与 L2 闭合 | 同上 §9/§11 |
 | T12 / 数据裁决 | **自适应页池与 writer 参数** | 依赖 L1–L4/P2；同一内存预算下实测 4/16/64 KiB、24/32B Exit、return gap、drop、guest cycles、RSS 与 writer CPU，再实现 4→64 KiB 自动伸缩并裁定批量/checksum；不得先填数字 | 同上 §10/§12.2 |

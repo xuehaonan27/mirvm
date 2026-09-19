@@ -14,6 +14,12 @@ REPO_ROOT=$(cd "$TESTS_DIR/.." && pwd)
 
 test_enter_repo() {
     cd "$REPO_ROOT"
+    # Several suites stand up fixture registries on 127.0.0.1. Where the machine
+    # reaches crates.io through an HTTP proxy, that proxy must not intercept the
+    # fixtures: cargo then reports "empty reply from server" and the gate bills an
+    # environment artifact as a product failure.
+    export no_proxy="127.0.0.1,localhost${no_proxy:+,$no_proxy}"
+    export NO_PROXY="$no_proxy"
 }
 
 require_executable() { # <说明> <路径>
