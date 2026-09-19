@@ -40,10 +40,16 @@ executed in a VM. `DESIGN.md` is the contract; `docs/designs/` holds the per-top
   source into a process-owned immutable snapshot, and each `unsafe instantiate` builds an independent
   Engine, so one package instantiates repeatedly and concurrently. Artifacts use logical `LinkAddr`
   values with per-Engine mapping of frozen/TLS/native/MC images and callback entry closures.
-- **Test and capture tooling** — `tests/run.sh` is the only entry point (`fast`/`smoke`/`gate`,
-  `suite <id>`, `list`); suites are grouped `quality`, `differential`, `contracts`, `corpus`,
-  `runtime`, `performance`, `harness`, with `tests/support/harness.sh` providing paths,
-  PASS/FAIL/SKIP/XFAIL, summaries, manifests, caching and disk protection.
+- **Test and capture tooling** — `make` is the interface (`test`/`smoke`/`gate`, `list`,
+  `suite S=<id>`, `projects`, `clean`) and `tests/run.sh` is the implementation it forwards to;
+  suites are grouped `quality`, `differential`, `contracts`, `corpus`,
+  `runtime`, `performance`, `harness`, with `tests/support/harness.sh` providing the bootstrap,
+  PASS/FAIL/SKIP/XFAIL, summaries, manifests, comparison primitives, caching and disk protection.
+  Every test asset lives under `tests/` — guest programs in `tests/scripts/` (one namespace, three
+  kinds: `c_*` corpus drivers, `vmcall_*` exported-entry probes, the rest differential programs),
+  real Cargo projects as pinned submodules in `tests/projects/`, contract fixtures and oracles in
+  `tests/fixtures/`, the TSan crate in `tests/tsan/` — so no test script sits at the repository root
+  and no third-party source is vendored into it.
   `tests/suites/corpus/cases.manifest` is the only corpus list. Telemetry captures internal syscall
   events, decodes and inspects them offline, keeps a process-wide page pool and registers JIT address
   ranges for perf-maps only at an explicit stop.

@@ -2,29 +2,16 @@
 # Workspace cargoless contract: covers only the current multi-package product slice; the pinned Cargo is the behavioral authority.
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-test_enter_repo
-
-MIRVM=${MIRVM:-$(pwd)/target/debug/mirvm}
-CARGO=${CARGO:-$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo}
-RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
+suite_init
 STRACE=${STRACE:-$(command -v strace)}
-FIXTURE=$(pwd)/tests/fixtures/cless_workspace_contract
-REMAINING=$(pwd)/tests/fixtures/cless_workspace_remaining_contract
+FIXTURE=$REPO_ROOT/tests/fixtures/cless_workspace_contract
+REMAINING=$REPO_ROOT/tests/fixtures/cless_workspace_remaining_contract
 CONTRACT_HOME=${MIRVM_CONTRACT_HOME:-${MIRVM_HOME:-$HOME/.mirvm}}
-HOST=$($RUSTC -vV | sed -n 's/^host: //p')
-
-[ -x "$MIRVM" ] || { echo "cargoless_workspace_contract: $MIRVM missing" >&2; exit 69; }
-[ -x "$CARGO" ] || { echo "cargoless_workspace_contract: pinned Cargo missing" >&2; exit 69; }
-[ -x "$STRACE" ] || { echo "cargoless_workspace_contract: strace missing" >&2; exit 69; }
+HOST=$(rustc_host)
+require_executable strace "$STRACE" || exit $?
 ensure_test_sysroot "$MIRVM" "$CONTRACT_HOME" "$RUSTC" || exit $?
 CONTRACT_SYSROOT=$TEST_SYSROOT
-case "$($CARGO --version)" in
-    "cargo 1.98.0-nightly "*) ;;
-    *) echo "ERROR cargoless_workspace: Cargo version not in contract" >&2; exit 69 ;;
-esac
-
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+require_pinned_cargo || exit $?
 mkdir -p "$TMP/no-cargo"
 printf '#!/bin/sh\n: >"$MIRVM_CARGO_SENTINEL"\nexit 97\n' >"$TMP/no-cargo/cargo"
 chmod +x "$TMP/no-cargo/cargo"

@@ -6,7 +6,7 @@
 #           compile standalone harness at end as execution-phase purity gate (vm/ missing rustc type causes compile failure;
 #           compile only, TSan execution belongs solely to threads segment, so SKIP_TSAN can fully skip).
 #   digest  nine value-and-memory function digests == native (expected values embedded, from same-source rustc -O direct run;
-#           changes to demo/m4/digest.rs must be regenerated in sync) + vm-stats M4.1 debt cleared.
+#           changes to tests/scripts/vmcall_digest.rs must be regenerated in sync) + vm-stats M4.1 debt cleared.
 #   unwind  nine panic/catch/rethrow cases == native (same-source rustc -O)
 #           + real lang_start distinguishes main panic from normal Termination 101
 #           + vm-stats M4.1/M4.2 debt cleared.
@@ -17,14 +17,10 @@
 # Usage: ./tests/run.sh suite runtime.semantics [pure|digest|unwind|threads|all]
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-test_enter_repo
-MIRVM=${MIRVM:-$(pwd)/target/release/mirvm}
-TOOLCHAIN=${TOOLCHAIN:-nightly-2026-07-02}
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+suite_init
 # ---- pure ----
 run_pure() {
-    local SRC=demo/m4/pure.rs pass=0 pfail=0
+    local SRC=tests/scripts/vmcall_pure.rs pass=0 pfail=0
     pcheck() {
         local spec="$1" want="$2" got code
         got=$("$MIRVM" run --engine vm --vm-call "$spec" "$SRC" 2>"$TMP/pure.err")
@@ -53,7 +49,7 @@ run_pure() {
     # reads with `env!` must be supplied here (the product gets it from build.rs; the TSan
     # execution gate uses the same zero value).
     if MIRVM_BUILD_ID=0000000000000000 \
-        cargo +"$TOOLCHAIN" build --manifest-path tsan/Cargo.toml --release --locked \
+        cargo +"$TOOLCHAIN" build --manifest-path tests/tsan/Cargo.toml --release --locked \
         >"$TMP/purity.out" 2>&1; then
         echo "purity gate PASS (vm/ zero rustc_private)"
     else
@@ -65,7 +61,7 @@ run_pure() {
 
 # ---- digest ----
 run_digest() {
-    local SRC=demo/m4/digest.rs pass=0 pfail=0
+    local SRC=tests/scripts/vmcall_digest.rs pass=0 pfail=0
     dcheck() {
         local spec="$1" want="$2" got code
         got=$("$MIRVM" run --engine vm --vm-call "$spec" "$SRC" 2>"$TMP/digest.err")
@@ -103,7 +99,7 @@ run_digest() {
 
 # ---- unwind ----
 run_unwind() {
-    local SRC=demo/m4/unwind.rs pass=0 pfail=0
+    local SRC=tests/scripts/vmcall_unwind.rs pass=0 pfail=0
     ucheck() {
         local spec="$1" want="$2" got code
         got=$("$MIRVM" run --engine vm --vm-call "$spec" "$SRC" 2>"$TMP/unwind.err" | tail -1)
@@ -163,7 +159,7 @@ run_unwind() {
     # Must go through real rustc lowering and std::rt::lang_start_internal. Both paths OS
     # exit code is 101; Engine structured result must still distinguish main panic from normal Termination.
     # Bypass base/L2 to prevent manual Module or old cache from faking green; JIT also requires startup closure truly published.
-    local main_src=demo/main_outcome_probe.rs panic_code normal_code
+    local main_src=tests/scripts/main_outcome_probe.rs panic_code normal_code
     for mode in interp jit; do
         if [ "$mode" = interp ]; then
             env MIRVM_NO_BASE_IMAGE=1 MIRVM_NO_IR_CACHE=1 MIRVM_JIT=off \
@@ -228,12 +224,12 @@ run_threads() {
     # ① threads_* five-case differential (stdout + exit code + normalized stderr)
     local name ncode mcode
     for name in threads_spawn threads_channel threads_sync threads_time threads_panic; do
-        local src=demo/$name.rs
+        local src=tests/scripts/$name.rs
         rustc --edition 2024 -o "$TMP/$name" "$src" 2>/dev/null || { tbad "$name (rustc)"; continue; }
         env -u RUST_BACKTRACE "$TMP/$name" >"$TMP/$name.n.out" 2>"$TMP/$name.n.err"; ncode=$?
         env -u RUST_BACKTRACE timeout 60 "$MIRVM" run "$src" >"$TMP/$name.m.out" 2>"$TMP/$name.m.err"; mcode=$?
-        sed -E "s/thread '[^']*' \([0-9]+\)/thread 'T'/" "$TMP/$name.n.err" >"$TMP/$name.n.err.x"
-        sed -E "s/thread '[^']*' \([0-9]+\)/thread 'T'/" "$TMP/$name.m.err" >"$TMP/$name.m.err.x"
+        normalize_stderr "$TMP/$name.n.err" "$TMP/$name.n.err.x"
+        normalize_stderr "$TMP/$name.m.err" "$TMP/$name.m.err.x"
         if diff -q "$TMP/$name.n.out" "$TMP/$name.m.out" >/dev/null \
             && [ "$ncode" = "$mcode" ] \
             && diff -q "$TMP/$name.n.err.x" "$TMP/$name.m.err.x" >/dev/null; then
@@ -246,16 +242,16 @@ run_threads() {
 
     # ② two blocking-syscall hang scenarios (real blocking syscall + real threads; must finish in seconds)
     local out code dt t0
-    out=$(timeout 60 "$MIRVM" run corpus/c_blocking_io.rs 2>&1); code=$?
+    out=$(timeout 60 "$MIRVM" run tests/scripts/c_blocking_io.rs 2>&1); code=$?
     [ $code -eq 0 ] && [ "$out" = 'got: [104, 105]' ] \
         && tok "c_blocking_io (a blocking read blocks only itself)" || tbad "c_blocking_io (exit=$code: $out)"
-    out=$(timeout 60 "$MIRVM" run corpus/c_net_echo_threaded.rs 2>&1); code=$?
+    out=$(timeout 60 "$MIRVM" run tests/scripts/c_net_echo_threaded.rs 2>&1); code=$?
     [ $code -eq 0 ] && [ "$out" = 'echo = "echo"' ] \
         && tok "c_net_echo_threaded (threaded loopback server)" || tbad "c_net_echo_threaded (exit=$code: $out)"
 
     # ③ rayon sub-second (work-stealing pool + par_iter/par_sort)
     t0=$(date +%s%N)
-    out=$(timeout 120 "$MIRVM" run corpus/c_rayon.rs 2>&1); code=$?
+    out=$(timeout 120 "$MIRVM" run tests/scripts/c_rayon.rs 2>&1); code=$?
     dt=$(( ($(date +%s%N) - t0) / 1000000 ))
     if [ $code -eq 0 ] && echo "$out" | grep -q "par_sort ok = true" && [ $dt -lt 20000 ]; then
         tok "c_rayon (${dt}ms, < 20s hard gate)"
@@ -266,7 +262,7 @@ run_threads() {
     # ④ small stack + threshold=1 forces compiled code: must give clear diagnosis before large-frame prologue,
     # must not exit as SIGSEGV. recursion_deep is the existing permanent deep-recursion probe.
     out=$(env MIRVM_STACK_SIZE=1m MIRVM_JIT_THRESHOLD=1 MIRVM_JIT_SYNC=1 \
-        timeout 60 "$MIRVM" run demo/recursion_deep.rs 2>&1); code=$?
+        timeout 60 "$MIRVM" run tests/scripts/recursion_deep.rs 2>&1); code=$?
     if [ $code -eq 70 ] && echo "$out" | grep -q 'guest stack overflow (JIT compiled frame hit safety margin before entry'; then
         tok "JIT stack overflow clearly diagnosed before frame prologue"
     else
@@ -275,7 +271,7 @@ run_threads() {
 
     # ⑤ --vm-stats recheck: threads demo reachable path trap-free
     for name in threads_spawn threads_panic; do
-        if "$MIRVM" run --vm-stats demo/$name.rs 2>/dev/null | grep -q "@entry: ✅ reachable path trap-free"; then
+        if "$MIRVM" run --vm-stats tests/scripts/$name.rs 2>/dev/null | grep -q "@entry: ✅ reachable path trap-free"; then
             tok "$name reachable trap-free"
         else
             tbad "$name reachable set has a Trap (vm-stats)"

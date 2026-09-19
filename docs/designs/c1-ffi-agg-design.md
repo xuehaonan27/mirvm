@@ -44,7 +44,7 @@ Three-dimension byte equality is the requirement: mirvm default / native `cargo 
 | multi field | covered | covered | covered |
 | nested | covered | covered | covered |
 
-- Synthetic matrix probe `demo/ffi_agg_probe.rs`: the matrix above; cc compiles a small .so at runtime through `Command` + `dlopen`; the comparison is two-dimension isomorphic as specified here. `corpus/c_tree_sitter.rs`, registered as `tree_sitter` in `tests/suites/corpus/cases.manifest`, is green as-is in three dimensions; the B-dimension 15-line oracle is fixed.
+- Synthetic matrix probe `tests/scripts/ffi_agg_probe.rs`: the matrix above; cc compiles a small .so at runtime through `Command` + `dlopen`; the comparison is two-dimension isomorphic as specified here. `tests/scripts/c_tree_sitter.rs`, registered as `tree_sitter` in `tests/suites/corpus/cases.manifest`, is green as-is in three dimensions; the B-dimension 15-line oracle is fixed.
 - Commands: `./tests/run.sh suite corpus.run tree_sitter`; full gate `./tests/run.sh gate`.
 
 ## 5. Open items

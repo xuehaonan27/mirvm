@@ -25,6 +25,11 @@ Host, toolchain and network facts that cost real time when rediscovered.
 - The local HTTP fixture registries used by `contracts.cargoless-sources` and `contracts.cargoless-git`
   must bypass the proxy: `tests/support/harness.sh` appends `127.0.0.1,localhost` to `no_proxy`. A
   hand-run suite must do the same or those cases go red.
+- `tests/projects/` holds real Cargo projects as submodules. `make projects`
+  (`git submodule update --init --recursive`) fetches them and needs the proxy from the macOS
+  checkout, e.g. `git -c http.proxy=$PROXY submodule update --init --recursive`; direct access
+  times out there. The container's route to GitHub has not been confirmed — when it is absent the two
+  `mode=diff` corpus entries record SKIP through their `needs=` path instead of failing.
 
 ## Building and pushing
 

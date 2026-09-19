@@ -1,7 +1,7 @@
 #!/bin/bash
 set -u
 
-# M5.3c fib hard-gate shape: run --vm-call 'fib(32)' demo/m4/pure.rs
+# M5.3c fib hard-gate shape: run --vm-call 'fib(32)' tests/scripts/vmcall_pure.rs
 if [ "${2:-}" = --vm-call ] && [ "${3:-}" = 'fib(32)' ]; then
     echo 2178309
     exit 0
@@ -47,7 +47,7 @@ case "$target" in
             exit 0
         fi
         ;;
-    demo/ecosystem.rs)
+    tests/scripts/ecosystem.rs)
         case "${SCENARIO:-xfail}" in
             false_positive) exit 101 ;;
             xfail)
@@ -65,7 +65,7 @@ case "$target" in
                 ;;
         esac
         ;;
-    demo/ffi_zlib.rs)
+    tests/scripts/ffi_zlib.rs)
         echo 'ffi-ok'
         ;;
     tests/fixtures/real_ripgrep_regex.rs)
@@ -74,17 +74,17 @@ case "$target" in
     tests/fixtures/cargo_warning_return.rs)
         echo 'warning-return-ok'
         ;;
-    corpus/c_signal.rs)
+    tests/scripts/c_signal.rs)
         echo 'mirvm: unsupported builtin `signal`' >&2
         exit 70
         ;;
-    corpus/c_rayon.rs)
+    tests/scripts/c_rayon.rs)
         echo 'par_sort ok = true'
         ;;
-    corpus/c_volatile.rs)
+    tests/scripts/c_volatile.rs)
         echo 'volatile aligned=0x0123456789abcdef unaligned=0x89abcdef pair=0x90a0b0c0d0e0f000:0x1020304050607080'
         ;;
-    demo/jit_unwind_probe.rs)
+    tests/scripts/jit_unwind_probe.rs)
         echo 'mirvm-jit-stats: c2i=7 c2i_slow=0 i2c=0 alloc=0 tls_ref=0' >&2
         ;;
     */proj)

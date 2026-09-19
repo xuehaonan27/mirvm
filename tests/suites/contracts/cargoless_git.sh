@@ -2,27 +2,14 @@
 # Git dependency contract: pinned Cargo is the format referee; self handles fetch, lock, offline, and dual-commit graph.
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-test_enter_repo
-
-MIRVM=${MIRVM:-$(pwd)/target/debug/mirvm}
-CARGO=${CARGO:-$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo}
-RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
+suite_init
 STRACE=${STRACE:-$(command -v strace)}
 CONTRACT_HOME=${MIRVM_CONTRACT_HOME:-${MIRVM_HOME:-$HOME/.mirvm}}
-HOST=$($RUSTC -vV | sed -n 's/^host: //p')
-
-[ -x "$MIRVM" ] || { echo "cargoless_git_contract: $MIRVM does not exist" >&2; exit 69; }
-[ -x "$CARGO" ] || { echo "cargoless_git_contract: pinned Cargo does not exist" >&2; exit 69; }
-[ -x "$STRACE" ] || { echo "cargoless_git_contract: strace does not exist" >&2; exit 69; }
+HOST=$(rustc_host)
+require_executable strace "$STRACE" || exit $?
 ensure_test_sysroot "$MIRVM" "$CONTRACT_HOME" "$RUSTC" || exit $?
 CONTRACT_SYSROOT=$TEST_SYSROOT
-case "$($CARGO --version)" in
-    "cargo 1.98.0-nightly "*) ;;
-    *) echo "ERROR cargoless_git: Cargo version not in contract" >&2; exit 69 ;;
-esac
-
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+require_pinned_cargo || exit $?
 REPO="$TMP/repo"
 SELF_HOME="$TMP/self-home"
 mkdir -p "$REPO/core/src" "$REPO/helper/src" "$TMP/no-cargo"

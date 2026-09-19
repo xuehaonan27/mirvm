@@ -17,11 +17,7 @@
 #      runs or skips is not pinned, since the global build cache may already hold an archive)
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-test_enter_repo
-MIRVM=${MIRVM:-$(pwd)/target/debug/mirvm}
-[ -x "$MIRVM" ] || { echo "bldrs_rerun: $MIRVM not found (build it first)" >&2; exit 69; }
-MIRVM=$(realpath "$MIRVM")
-TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+suite_init
 cp -r tests/fixtures/cless_br "$TMP/br"
 
 # <description> <pattern> <file>: grep -F fixed-point assertion

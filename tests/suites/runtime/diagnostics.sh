@@ -2,17 +2,12 @@
 # Diagnostics routing contract: three compilation paths keep default stderr, while capture only collects compiler and MIRVM diagnostics.
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-test_enter_repo
+suite_init
 
-MIRVM=${MIRVM:-$REPO_ROOT/target/release/mirvm}
-require_executable MIRVM "$MIRVM" || exit $?
-
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
 HOME_DIR="$TMP/home"
 mkdir -p "$HOME_DIR"
 ensure_test_sysroot "$MIRVM" "$HOME_DIR" "$RUSTC" || exit $?
-host=$($RUSTC -vV | sed -n 's/^host: //p')
+host=$(rustc_host)
 home_sysroot="$HOME_DIR/sysroot-$host"
 if [ "$TEST_SYSROOT" != "$home_sysroot" ] && [ ! -e "$home_sysroot" ]; then
     ln -s "$TEST_SYSROOT" "$home_sysroot"

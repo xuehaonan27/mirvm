@@ -13,10 +13,7 @@
 # Usage: ./tests/run.sh suite performance.limits [--metrics-only]
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-test_enter_repo
-MIRVM=${MIRVM:-$(pwd)/target/release/mirvm}
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+suite_init
 
 metrics_only=0
 case "${1:-}" in
@@ -35,7 +32,7 @@ if [ "$metrics_only" -eq 0 ]; then
         [ $load_code -eq 0 ] && [ $load_ms -lt 1000 ] \
             && ok "load phase ${load_ms}ms (< 1s hard gate)" \
             || bad "load phase exit=$load_code ${load_ms}ms (requires exit=0 and < 1s)"
-        t0=$(date +%s%N); "$MIRVM" run corpus/c_rayon.rs >"$TMP/rayon.out" 2>"$TMP/rayon.err"; rayon_code=$?
+        t0=$(date +%s%N); "$MIRVM" run tests/scripts/c_rayon.rs >"$TMP/rayon.out" 2>"$TMP/rayon.err"; rayon_code=$?
         rayon_ms=$(( ($(date +%s%N) - t0) / 1000000 ))
         if [ $rayon_code -eq 0 ] && grep -q 'par_sort ok = true' "$TMP/rayon.out" \
             && [ $rayon_ms -lt 5000 ]; then
@@ -48,7 +45,7 @@ if [ "$metrics_only" -eq 0 ]; then
         fib_ms=999999 fib_code=1 fib_out=""
         for _ in 1 2 3; do
             t0=$(date +%s%N)
-            fib_out=$("$MIRVM" run --vm-call 'fib(32)' demo/m4/pure.rs 2>"$TMP/fib32.err")
+            fib_out=$("$MIRVM" run --vm-call 'fib(32)' tests/scripts/vmcall_pure.rs 2>"$TMP/fib32.err")
             fib_code=$?
             ms=$(( ($(date +%s%N) - t0) / 1000000 ))
             [ $ms -lt $fib_ms ] && fib_ms=$ms

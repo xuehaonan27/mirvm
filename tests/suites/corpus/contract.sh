@@ -9,12 +9,7 @@
 #   a target dir over MIRVM_TARGET_BUDGET_GB (default 24G) triggers purge --target.
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-test_enter_repo
-MIRVM=${MIRVM:-$(pwd)/target/release/mirvm}
-CARGO=${CARGO:-$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo}
-RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+suite_init
 export CORPUS_TIMINGS_FILE="$TMP/corpus-timings"
 # gix needs a committer identity to write the reflog (corpus c_gix_pure; the commit
 # hash comes from a fixed in-driver signature, and this identity reaches only the
@@ -63,7 +58,7 @@ while IFS='|' read -r name _tier tmo mode envv needs args xfail_spec _groups; do
                 bad "c_$name (L2 warm rerun differs cold=$code warm=$warm_code)"
                 continue
             fi
-            proj="corpus/projects/$name"
+            proj="tests/projects/$name"
             ncode=0
             # Both legs use the project directory as cwd (mirvm project mode: guest cwd = cd proj
             # && cargo run); fixture paths are absolutized through {ROOT}, so cwd does not matter.

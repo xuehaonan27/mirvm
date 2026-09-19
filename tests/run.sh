@@ -71,6 +71,10 @@ Usage:
   ./tests/run.sh help
 
 fast is the daily commit check; smoke adds small real-world loads; gate is the full final gate.
+Every individual suite is reached through `suite <suite-id>`; `list` prints the available ids.
+Examples:
+  ./tests/run.sh suite corpus.run --tier smoke
+  ./tests/run.sh suite performance.limits
 EOF
 }
 
@@ -200,7 +204,7 @@ run_profile() {
             run_suite runtime.semantics runtime.semantics
             run_suite runtime.c-unwind runtime.c-unwind
             run_suite runtime.diagnostics runtime.diagnostics
-    run_suite runtime.telemetry runtime.telemetry
+            run_suite runtime.telemetry runtime.telemetry
             run_suite runtime.jit-stats runtime.jit-stats
             run_suite performance.limits performance.limits
             run_suite harness.truth harness.truth
@@ -233,16 +237,6 @@ case "$cmd" in
         ;;
     help|-h|--help)
         usage
-        ;;
-    corpus)
-        start_run
-        run_suite corpus.run corpus.run "$@"
-        suite_summary run.corpus
-        ;;
-    perf)
-        start_run
-        run_suite performance.limits performance.limits "$@"
-        suite_summary run.performance
         ;;
     *)
         echo "ERROR unknown command: $cmd" >&2
