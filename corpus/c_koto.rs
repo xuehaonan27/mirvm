@@ -1,43 +1,43 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# koto =0.15.3：0.15 线最新（2025-04-07；0.16.x 超出「最新 0.15」分工钉法）。
-# features = default（default = ["rc"]——Rc 内存管理；b 线内存策略 arc/rc 二选一
-# 冲突，保持 crate 默认）。依赖闭包约 30 crate：koto_bytecode/koto_parser/
-# koto_runtime/koto_lexer/koto_memory/koto_derive(proc-macro，仅编译期)/
-# indexmap/rustc-hash/smallvec/saturating_cast/downcast-rs/thiserror/
-# unicode-segmentation/chrono/instant/equivalent/hashbrown 等，无 C 依赖、无 SIMD。
+# koto =0.15.3: the newest on the 0.15 line (0.16.x is out of scope for the
+# newest-0.15 pinning rule). features = default (default = ["rc"] -- Rc memory
+# management; the arc/rc memory strategies conflict, so the crate default stands).
+# The closure is about 30 crates: koto_bytecode/koto_parser/koto_runtime/koto_lexer/
+# koto_memory/koto_derive (proc-macro, compile-time only)/indexmap/rustc-hash/smallvec/
+# saturating_cast/downcast-rs/thiserror/chrono/hashbrown and so on, with no C or SIMD.
 koto = "=0.15.3"
 ---
-// koto 0.15.3 脚本语言（VM-in-VM：字节码编译 + 树走 VM）三维差分 driver。
+// koto 0.15.3 script language (a VM inside the VM: bytecode compilation + tree-walking
+// VM) three-way differential driver.
 //
-// 测试面（分工条目 c_koto）：
-//   ① 脚本 A「map/filter 管道」：each/keep/sum/fold/zip/count/min_max/to_list/
-//      to_tuple 迭代器适配器与消费器链；宿主注入值 fbits 的浮点桩。
-//   ② 脚本 B「闭包与捕获」：koto 捕获=创建期拷贝（重绑外部变量不影响闭包），
-//      经捕获容器的可变状态（state.count）、闭包工厂（make_adder）、
-//      递归闭包 fib、脚本内回调宿主函数（host_mul_add / bump / mark）。
-//   ③ 脚本 C「for-while 循环」：for 区间+continue、for 列表、while+break 值、
-//      until、loop+break 值、嵌套 for、循环内宿主回调副作用（bump）。
-//   宿主注入：prelude 值（host_seed i64 / host_scale f64 / host_name str）
-//   与四个回调（bump 副作用计数、mark 日志、host_mul_add 纯函数、
-//   fbits f64.to_bits 十六进制）。
-//   输出 = 脚本内 print（单参数经 @display / 多参数打 tuple）+
-//          宿主侧 value_to_string(各脚本返回值) + 副作用计数与日志。
+// Coverage:
+//   1) Script A, the map/filter pipeline: the each/keep/sum/fold/zip/count/min_max/
+//      to_list/to_tuple iterator adapters and consumers, plus the host-injected fbits
+//      float stub.
+//   2) Script B, closures and capture: koto captures by value at creation time (rebinding
+//      an outer variable does not affect the closure), mutable state through a captured
+//      container (state.count), a closure factory (make_adder), recursive closure fib, and
+//      callbacks into host functions (host_mul_add / bump / mark).
+//   3) Script C, for/while loops: for over a range with continue, for over a list, while
+//      with a break value, until, loop with a break value, nested for, and host callback
+//      side effects (bump) inside loops.
+//   Host injection: prelude values (host_seed/host_scale/host_name) and four callbacks
+//   (bump, mark, host_mul_add, fbits). Output = in-script print plus host-side
+//   value_to_string of each return value plus the side-effect counter and log.
 //
-// 确定性依据：koto 的 ValueMap = IndexMap + FxHasher（固定种子，非
-// RandomState），map 遍历 = 插入序，跨进程确定；浮点一律经 fbits 打
-// to_bits()；不调任何时钟/os/io 输入函数；每脚本独立 Koto 实例，互不串
-// exports。stderr 真空依赖：依赖无编译期 warning，native 用 cargo run -q。
+// Determinism: koto's ValueMap is IndexMap + FxHasher (fixed seed, not RandomState), so map
+// traversal is insertion order and cross-process deterministic; floats always print to_bits()
+// via fbits; no clock/os/io input is called; each script gets its own Koto instance. stderr
+// is empty because the dependency emits no compile warnings and native uses cargo run -q.
 //
-// 三维复跑：
+// Three-way rerun:
 //   A: target/release/mirvm run corpus/c_koto.rs
 //   B: cd "$(grep -l 'name = "c_koto"' ~/.cache/mirvm/scripts/*/Cargo.toml \
 //        | xargs dirname)" && RUSTC=~/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc \
 //        ~/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo run -q
 //   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_koto.rs
-//
-// FRONTIER：无（纯 Rust 依赖闭包，无已知绕行）。
 use koto::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -45,8 +45,8 @@ use std::rc::Rc;
 type Counter = Rc<RefCell<i64>>;
 type Log = Rc<RefCell<Vec<String>>>;
 
-/// 在一个新 Koto 实例上注册宿主注入（值 + 回调）并运行脚本；
-/// 返回脚本结果，由调用方打印。
+/// Register host injections (values + callbacks) on a fresh Koto instance and run the
+/// script; returns the script result for the caller to print.
 fn run_script(
     label: &str,
     script: &str,
@@ -56,13 +56,13 @@ fn run_script(
     let mut koto = Koto::new();
     let prelude = koto.prelude();
 
-    // ---- 宿主注入值 ----
+    // ---- host-injected values ----
     prelude.insert("host_seed", 7);
     prelude.insert("host_scale", 2.5);
     prelude.insert("host_name", "koto-host");
 
-    // ---- 宿主注入回调 ----
-    // 副作用计数：bump(n) 累加并返回新累计值。
+    // ---- host-injected callbacks ----
+    // Side-effect counter: bump(n) accumulates and returns the new total.
     {
         let bump_count = Rc::clone(bump_count);
         prelude.add_fn("bump", move |ctx| match ctx.args() {
@@ -74,7 +74,7 @@ fn run_script(
             unexpected => unexpected_args("|Number|", unexpected),
         });
     }
-    // 日志：mark(tag) 记录并返回当前条数。
+    // Logging: mark(tag) records the tag and returns the current count.
     {
         let marks = Rc::clone(marks);
         prelude.add_fn("mark", move |ctx| match ctx.args() {
@@ -86,12 +86,12 @@ fn run_script(
             unexpected => unexpected_args("|String|", unexpected),
         });
     }
-    // 纯函数：host_mul_add(a, b, c) = a * b + c。
+    // Pure function: host_mul_add(a, b, c) = a * b + c.
     prelude.add_fn("host_mul_add", |ctx| match ctx.args() {
         [KValue::Number(a), KValue::Number(b), KValue::Number(c)] => Ok((*a * *b + *c).into()),
         unexpected => unexpected_args("|Number, Number, Number|", unexpected),
     });
-    // 浮点锁位：fbits(x) = f64.to_bits() 的十六进制串。
+    // Float bit lock: fbits(x) is the hex string of f64.to_bits().
     prelude.add_fn("fbits", |ctx| match ctx.args() {
         [KValue::Number(KNumber::F64(x))] => Ok(format!("0x{:016x}", x.to_bits()).into()),
         unexpected => unexpected_args("|Float|", unexpected),
@@ -105,7 +105,7 @@ fn run_script(
     }
 }
 
-// ---- 脚本 A：map/filter 迭代器管道 ----
+// ---- Script A: the map/filter iterator pipeline ----
 const SCRIPT_A: &str = r#"
 pipe1 = [1, 2, 3, 4, 5, 6, 7, 8, 9]
   .each |n| n * n
@@ -148,7 +148,7 @@ print 'neg float bits: {fbits(-1.5 / 7.0)}'
 host_seed * 2
 "#;
 
-// ---- 脚本 B：闭包与捕获（koto 捕获 = 创建期拷贝）----
+// ---- Script B: closures and capture (koto captures by value at creation) ----
 const SCRIPT_B: &str = r#"
 x = 5
 f = |n| n + x
@@ -186,7 +186,7 @@ print 'mark: {m1}, {m2}'
 'closures done'
 "#;
 
-// ---- 脚本 C：for-while 循环 ----
+// ---- Script C: for/while loops ----
 const SCRIPT_C: &str = r#"
 total = 0
 for i in 1..=15

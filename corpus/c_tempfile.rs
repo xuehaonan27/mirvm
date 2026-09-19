@@ -3,8 +3,8 @@
 [dependencies]
 tempfile = "3"
 ---
-// 真文件 IO：创建临时文件、写、元数据、重开读回、drop 删除。
-// 压 open/write/fstat/read/unlink 直通深度。
+// Real file IO: create a temporary file, write, stat, reopen and read back, delete on drop.
+// Exercises the passthrough depth of open/write/fstat/read/unlink.
 use std::io::{Read, Write};
 
 fn main() {

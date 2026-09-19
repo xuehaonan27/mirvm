@@ -3,37 +3,37 @@
 [dependencies]
 revm = { version = "19", default-features = false }
 ---
-// revm 19（解析为 19.7.0，1x 线最新；VM-in-VM 第三弹）：纯 Rust EVM 解释器
-// 在 mirvm 里解释执行固定字节码小合约。default-features=false 裁掉
-// c-kzg/secp256k1/blst 三个 C/cc 原生绑定（只服务 precompile，本 driver 不调），
-// 剩余依赖（ruint U256、tiny-keccak、hashbrown、bitvec、alloy-primitives）
-// 全为纯 Rust——无 FFI、无 x86 intrinsic。
+// revm 19 (resolves to 19.7.0, the newest on the 1x line; the third VM-in-VM case):
+// a pure-Rust EVM interpreter executing fixed bytecode contracts inside mirvm.
+// default-features=false cuts the three C/cc native bindings c-kzg/secp256k1/blst
+// (they only serve precompiles, unused here), leaving ruint U256, tiny-keccak,
+// hashbrown, bitvec and alloy-primitives -- all pure Rust, no FFI, no x86 intrinsic.
+// The reduced graph is what keeps this fixture runnable without a C toolchain.
 //
-// API 覆盖面：Evm::builder 链（with_db / modify_db 经由 insert_account_info /
-// with_spec_id / modify_block_env / modify_tx_env / build）、transact /
-// transact_commit、ExecutionResult 三态（Success{reason,gas,logs,output} /
-// Revert / Halt）、InMemoryDB、Database::basic 读回、Bytecode::new_raw +
-// hash_slow（tiny-keccak 全链路）、Output::Call/Create、Log topics。
+// API surface: the Evm::builder chain (with_db / modify_db via insert_account_info /
+// with_spec_id / modify_block_env / modify_tx_env / build), transact/transact_commit, the
+// three ExecutionResult states (Success{reason,gas,logs,output} / Revert / Halt), InMemoryDB,
+// Database::basic readback, Bytecode::new_raw + hash_slow (the tiny-keccak chain), Log topics.
 //
-// 七个固定字节码用例（地址/余额/gas limit/区块号/时间戳/gas price 全固定）：
-//   arith    PUSH1×2/ADD/PUSH0/MSTORE/RETURN → 32B 的 5
-//   storage  SSTORE×3（0→nz、0→nz、nz→0 触发 refund）+ SLOAD + RETURN
-//   revert   SSTORE 后 REVERT（存储回滚）+ 2B 输出 0xbeef
-//   logs     LOG1(32B, topic 0xdead) + LOG0(空) + STOP
-//   badjump  JUMP 到非 JUMPDEST → Halt(InvalidJump)，gas 全耗
-//   create   CREATE：initcode 先 SSTORE 7@0（挂在派生合约存储上）再 CODECOPY
-//            + RETURN 部署 5B runtime，caller+nonce 派生地址
-//   transfer 纯转账（transact_commit + Database::basic 读回验证落库）
-// 确定性：state（HashMap）按地址排序、slot 按键排序后打印；所有字节输出
-// len+hex+FNV-1a；无时间/随机/线程/地址随机化。
+// Seven fixed bytecode cases (address/balance/gas limit/block/timestamp/gas price fixed):
+//   arith    PUSH1 x2/ADD/PUSH0/MSTORE/RETURN -> 32B holding 5
+//   storage  SSTORE x3 (0->nz, 0->nz, nz->0 triggering refund) + SLOAD + RETURN
+//   revert   SSTORE then REVERT (storage rolled back) + a 2B output 0xbeef
+//   logs     LOG1(32B, topic 0xdead) + LOG0(empty) + STOP
+//   badjump  JUMP to a non-JUMPDEST -> Halt(InvalidJump), all gas consumed
+//   create   CREATE: initcode SSTOREs 7@0 (on the derived contract's storage) then
+//            CODECOPY + RETURN deploys a 5B runtime; address derived from caller+nonce
+//   transfer a plain transfer (transact_commit + Database::basic readback proves commit)
+// Determinism: state (a HashMap) is printed sorted by address and slots sorted by key;
+// every byte output is len+hex+FNV-1a; no time/random/thread/address randomization, and
+// the EVM reads no wall clock or environment.
 //
-// 已知 FRONTIER 绕行（语义不变）：const-hex 1.19 的 encode 在运行期检测
-// ssse3/avx2 后走 SIMD 路径 `_mm_lddqu_si128`——mirvm 未内建的 x86 intrinsic
-// （TRAP 原文：`TRAP: foreign `llvm.x86.sse3.ldu.dq`，触发 fn 为
-// core_arch::x86::sse3::__mm_lddqu_si128，单态化自 c_revm_evm）。alloy 的
-// FixedBytes LowerHex（B256/Address 的 {:#x}）会命中该路径。故所有 hex 输出
-// 改走本文件的逐字节 hex()（FixedBytes::as_slice / U256::to_be_bytes），
-// 打印内容等价，native/mirvm 逐字节对拍不受影响。
+// Known FRONTIER workaround (semantics unchanged): const-hex 1.19's encode probes
+// ssse3/avx2 at runtime and takes the SIMD `_mm_lddqu_si128` path, an x86 intrinsic mirvm
+// does not have (the trap reads `TRAP: foreign `llvm.x86.sse3.ldu.dq``). alloy's
+// FixedBytes LowerHex (B256/Address with {:#x}) hits it, so all hex output here goes
+// through this file's byte-wise hex() (FixedBytes::as_slice / U256::to_be_bytes); the
+// printed content is equivalent, so the native/mirvm byte comparison is unaffected.
 use revm::{
     primitives::{
         address, AccountInfo, Address, Bytecode, Bytes, EvmState, ExecutionResult, Output,
@@ -42,7 +42,7 @@ use revm::{
     Database, Evm, InMemoryDB,
 };
 
-/// FNV-1a 64：二进制输出的内联指纹。
+/// FNV-1a 64: the inline fingerprint for binary output.
 fn fnv1a(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for &b in data {
@@ -162,7 +162,7 @@ fn print_state(label: &str, state: &EvmState) {
     }
 }
 
-/// 公共 builder：固定 spec/区块环境/交易环境后执行一笔 Call 或 Create。
+/// Shared builder: fix the spec/block/tx environment, then run one Call or Create.
 fn build_evm(
     db: InMemoryDB,
     to: TxKind,
@@ -190,7 +190,7 @@ fn build_evm(
         .build()
 }
 
-/// 预置合约账户 → Call 交易 → 打印 result + state。
+/// Pre-seed the contract account -> Call transaction -> print result + state.
 fn run_call(label: &str, contract: Address, raw: &'static [u8], gas_limit: u64) {
     println!("== {label} ==");
     let code = Bytecode::new_raw(Bytes::from_static(raw));
@@ -212,7 +212,7 @@ fn run_call(label: &str, contract: Address, raw: &'static [u8], gas_limit: u64) 
     print_state(label, &out.state);
 }
 
-/// CREATE 交易：initcode 部署 runtime，打印派生地址 + 新合约存储。
+/// CREATE transaction: initcode deploys the runtime; print the derived address + new contract storage.
 fn run_create(label: &str, initcode: &'static [u8], gas_limit: u64) {
     println!("== {label} ==");
     show_bytes(&format!("{label} initcode"), initcode);
@@ -230,7 +230,7 @@ fn run_create(label: &str, initcode: &'static [u8], gas_limit: u64) {
     print_state(label, &out.state);
 }
 
-/// 纯转账：transact_commit 落库后用 Database::basic 读回验证。
+/// Plain transfer: transact_commit persists, then Database::basic reads it back to verify.
 fn run_transfer(label: &str, to: Address, value: u64, gas_limit: u64) {
     println!("== {label} ==");
     let mut db = InMemoryDB::default();
@@ -278,7 +278,7 @@ fn main() {
         1_000_000,
     );
 
-    // ③ SSTORE 0x42@7（回滚）; MSTORE 0xbeef@0; REVERT 2@30 → 输出 0xbeef
+    // ③ SSTORE 0x42@7 (rolled back); MSTORE 0xbeef@0; REVERT 2@30 -> output 0xbeef
     run_call(
         "revert",
         CONTRACT_REVERT,
@@ -289,7 +289,7 @@ fn main() {
         1_000_000,
     );
 
-    // ④ MSTORE 42@0; LOG1 topic=0xdead 32B@0; LOG0 空; STOP
+    // ④ MSTORE 42@0; LOG1 topic=0xdead 32B@0; LOG0 empty; STOP
     run_call(
         "logs",
         CONTRACT_LOGS,
@@ -300,7 +300,7 @@ fn main() {
         1_000_000,
     );
 
-    // ⑤ PUSH1 2; JUMP → 目标 0x56 非 JUMPDEST → Halt(InvalidJump)
+    // ⑤ PUSH1 2; JUMP -> target 0x56 is not a JUMPDEST -> Halt(InvalidJump)
     run_call(
         "badjump",
         CONTRACT_BADJUMP,
@@ -308,8 +308,8 @@ fn main() {
         1_000_000,
     );
 
-    // ⑥ initcode：SSTORE 7@0（挂在派生合约上）; CODECOPY 5B runtime; RETURN 部署。
-    //    runtime = PUSH1 7; PUSH0; SSTORE; STOP（部署时不执行，调用才跑）。
+    // ⑥ initcode: SSTORE 7@0 (on the derived contract); CODECOPY the 5B runtime; RETURN deploys.
+    //    The runtime is PUSH1 7; PUSH0; SSTORE; STOP (not run at deploy time, only on a call).
     run_create(
         "create",
         &[
@@ -319,6 +319,6 @@ fn main() {
         200_000,
     );
 
-    // ⑦ 纯转账 10^15 wei（无代码目标），21000 gas + commit 落库
+    // ⑦ plain transfer of 10^15 wei (a codeless target), 21000 gas + commit
     run_transfer("transfer", TRANSFER_TO, 1_000_000_000_000_000, 100_000);
 }

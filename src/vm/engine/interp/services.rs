@@ -1,10 +1,18 @@
-//! 运行期服务三族（自 interp.rs I10-I12 整搬）：signal handler
-//! 条目解析 / backtrace 混合帧与符号 IP（D8e/E3/E8）/
-//! atexit 家族（D8g，每 Engine 注册表 + LIFO 回调执行）。
+//! Interpreter runtime services: signal-handler entry resolution, backtrace frame
+//! merging with symbol IPs, and the atexit family (a per-Engine registry with LIFO
+//! callback execution).
 
 use super::call::call_fn_addr;
 use super::*;
 
+/// Resolves a guest signal-handler address to its AS-trampoline code address.
+///
+/// An asynchronous signal is safe to run to completion and reuses the thunk factory
+/// (attach + `interp_frame`, signature `(i32) -> void`). A guest handler for a synchronous
+/// fault signal (SEGV/BUS/FPE/ILL/TRAP) cannot be honoured -- a host fault is
+/// indistinguishable from a guest fault, so faking recovery would silently produce wrong
+/// values -- and the installer refuses it loudly. The handler must be a known guest fn entry;
+/// a non-guest address is not accepted.
 pub(super) fn resolve_signal_handler(
     ctx: *mut Ctx,
     handler: u64,
@@ -13,9 +21,10 @@ pub(super) fn resolve_signal_handler(
     crate::vm::engine::thunks::resolve_signal_handler(shared, handler)
 }
 
-// ===== backtrace 影子帧（D8e）=====
-/// ELF 符号镜像不可用时的保守后备 IP：高位在用户地址空间之上、非页对齐，
-/// 不与真实代码/数据地址撞；正常 Engine 装载会使用可符号化的 ELF 地址。
+// ===== backtrace shadow frames =====
+/// Conservative fallback IP when no ELF symbol image is available: high above the user
+/// address space and not page-aligned, so it cannot collide with a real code or data
+/// address. A normally loaded Engine uses a symbolizable ELF address instead.
 const FUNC_IP_BASE: u64 = 0x5f5f_0000_0000_0000;
 fn fallback_func_ip(func: u32) -> u64 {
     FUNC_IP_BASE + (func as u64) * 64
@@ -63,8 +72,10 @@ extern "C" fn collect_host_frame(ctx: *mut libc::c_void, arg: *mut libc::c_void)
     0
 }
 
-/// `_Unwind_Backtrace(trace_fn, arg)`：系统展开器读取活动 JIT 真机器帧，再按宿主栈
-/// 位置与解释影子帧合并。回调仍只拿到受控的 guest context，不会看到引擎宿主帧。
+/// `_Unwind_Backtrace(trace_fn, arg)`: the system unwinder reads the live JIT machine
+/// frames, which are then merged with the interpreter's shadow frames by host stack
+/// position. The callback still only ever sees a controlled guest context, never engine
+/// host frames.
 pub(super) fn unwind_backtrace(ctx: *mut Ctx, trace_fn: u64, arg: u64) -> u64 {
     let shared = unsafe { &*(*ctx).shared };
     let mut host: Vec<HostFrame> = Vec::new();
@@ -75,8 +86,9 @@ pub(super) fn unwind_backtrace(ctx: *mut Ctx, trace_fn: u64, arg: u64) -> u64 {
         );
     }
 
-    // 回调可能再入 guest 并改变活栈，所以先完整快照。x86_64 栈向低地址增长：
-    // CFA 小者在内层；同一 JIT 客体调用只登记 fast 本体，包装帧不会重复出现。
+    // The callback may re-enter the guest and change the live stack, so snapshot everything
+    // first. The x86_64 stack grows down, so a smaller CFA is an inner frame; a JIT guest
+    // call registers only its fast body, so wrapper frames never appear twice.
     let mut frames: Vec<GuestUnwindContext> = unsafe {
         (*ctx)
             .shadow
@@ -98,27 +110,30 @@ pub(super) fn unwind_backtrace(ctx: *mut Ctx, trace_fn: u64, arg: u64) -> u64 {
     }));
     frames.sort_unstable_by_key(|frame| frame.cfa);
 
-    // 当前正在调用 _Unwind_Backtrace 的 guest 帧由标准实现自身裁掉；我们的合成
-    // symbol address 无法与其入口指针直接比较，因此在这里等价跳过最内层客体帧。
+    // The standard implementation trims the guest frame that is currently calling
+    // _Unwind_Backtrace. Our synthetic symbol address cannot be compared directly with its
+    // entry pointer, so skip the innermost guest frame here instead.
     for frame in frames.into_iter().skip(1) {
         let frame_ptr = &frame as *const GuestUnwindContext as u64;
         let r = call_fn_addr(ctx, trace_fn, &[frame_ptr, arg], "_Unwind_Backtrace").0;
         if r != 0 {
-            break; // _URC_FOREIGN_EXCEPTION_CAUGHT / _URC_FAILURE 等 → 停
+            break; // _URC_FOREIGN_EXCEPTION_CAUGHT / _URC_FAILURE and friends: stop
         }
     }
     5 // _URC_END_OF_STACK
 }
 
-// ===== atexit 家族（D8g）=====
-// glibc 不导出 `atexit` 供 guest dlsym；引擎自持 LIFO 注册表 + 一个 native
-// trampoline（经引擎自身链接的 libc `atexit` 挂载，非 dlsym）。进程收尾时 libc
-// 在主线程调 trampoline，逐条 LIFO 解释执行 guest 回调（fresh Ctx attach）。
+// ===== atexit family =====
+// glibc does not export `atexit` for a guest dlsym, so the engine keeps its own LIFO
+// registry plus one native trampoline, mounted through the libc `atexit` the engine itself
+// links against (not through dlsym). At process teardown libc calls the trampoline on the
+// main thread, which interprets the guest callbacks one by one in LIFO order under a fresh
+// Ctx attach.
 #[derive(Clone, Copy)]
 pub(super) enum AtexitKind {
-    Plain,  // atexit：fn()
-    CxaArg, // __cxa_atexit：fn(arg)
-    OnExit, // on_exit：fn(status=0, arg)
+    Plain,  // atexit: fn()
+    CxaArg, // __cxa_atexit: fn(arg)
+    OnExit, // on_exit: fn(status=0, arg)
 }
 pub(super) struct AtexitEntry {
     func: u64,
@@ -152,11 +167,13 @@ pub(super) fn has_atexit_callbacks(engine_id: u64) -> bool {
 }
 
 pub(super) fn atexit_register(ctx: *mut Ctx, func: u64, kind: AtexitKind, arg: u64) -> u64 {
-    // fn 必须是已知 guest 条目（非 guest 回调不接——防静默）
+    // fn must be a known guest entry; a non-guest callback is refused, not silently dropped.
     let shared = unsafe { &*(*ctx).shared };
     let module: &Module = &shared.module;
     if !module.fn_addrs.contains_key(&func) {
-        engine_abort(&format!("atexit 回调 {func:#x} 不是已知 guest fn 条目"));
+        engine_abort(&format!(
+            "atexit callback {func:#x} is not a known guest fn entry"
+        ));
     }
     let mut reg = ATEXIT.lock().unwrap();
     reg.entry(shared.id as usize)
@@ -165,11 +182,11 @@ pub(super) fn atexit_register(ctx: *mut Ctx, func: u64, kind: AtexitKind, arg: u
     0
 }
 
-/// 本 Engine 的虚拟进程收尾：LIFO 解释执行自己的 guest 回调。
+/// Virtual process teardown for this Engine: runs its own guest callbacks in LIFO order.
 pub(super) fn run_atexit_callbacks(ctx: *mut Ctx, status: i32) {
     let shared = unsafe { &*(*ctx).shared };
     let key = shared.id as usize;
-    // LIFO：后注册先执行（C 语义）
+    // LIFO: the last registered callback runs first (C semantics).
     loop {
         let entry = {
             let mut reg = ATEXIT.lock().unwrap();
@@ -185,7 +202,7 @@ pub(super) fn run_atexit_callbacks(ctx: *mut Ctx, status: i32) {
             AtexitKind::CxaArg => &[entry.arg],
             AtexitKind::OnExit => &[status as u64, entry.arg],
         };
-        // guest 回调 panic 穿到 C 退出路径 = abort（与 native 一致）
+        // A guest callback panic escaping into the C exit path aborts, as under native.
         let _ = call_fn_addr(ctx, entry.func, args, "atexit");
     }
 }

@@ -1,16 +1,17 @@
-//! Spike 1 字节码：寄存器式、贴近 MIR（基本块 + 语句 + 终止子）。
+//! Spike 1 bytecode: a register machine close to MIR (basic blocks + statements +
+//! terminators).
 //!
-//! 手写（Spike 1 不做 MIR→字节码降低——降低是低风险机械活，后置）。
-//! 值为 u64 word（skeleton；真值需带类型/尺寸，见 spike1 文档教训）。
+//! Hand-written; spike 1 does no MIR-to-bytecode lowering (lowering is low-risk mechanical
+//! work, deferred). Values are u64 words (skeleton; real values need a type/size).
 //!
-//! 与 MIR 的对应：Operand≈Operand、Rvalue≈Rvalue、Stmt≈Statement、
-//! Terminator≈Terminator、Body≈mir::Body、Slot≈Local。
+//! Correspondence to MIR: Operand~Operand, Rvalue~Rvalue, Stmt~Statement,
+//! Terminator~Terminator, Body~mir::Body, Slot~Local.
 
 pub type Slot = u32;
 pub type BlockId = u32;
 pub type FuncId = u32;
 
-/// MIR `Operand::{Copy,Move,Constant}` 的骨架版。
+/// Skeleton version of MIR `Operand::{Copy,Move,Constant}`.
 #[derive(Clone, Copy, Debug)]
 pub enum Operand {
     Slot(Slot),
@@ -29,23 +30,24 @@ pub enum BinOp {
     Ge,
 }
 
-/// MIR `Rvalue` 的骨架版。`Alloc`/`Load` 为次要目标 1b（真地址内存）。
+/// Skeleton version of MIR `Rvalue`. `Alloc`/`Load` serve the real-address memory goal.
 #[derive(Clone, Debug)]
 pub enum Rvalue {
     Use(Operand),
     Binary(BinOp, Operand, Operand),
-    /// dst = 分配 `size` 字节，返回真地址（bump）
+    /// dst = allocate `size` bytes, returning a real address (bump)
     Alloc(Operand),
     /// dst = *(ptr as *const u64)
     Load(Operand),
-    /// dst = 原子 fetch_add(SeqCst) 的旧值（ptr, val）。
-    /// 注：真字节码中原子按 MIR 形状是 intrinsic **调用**而非 Rvalue，此为 spike 速记；
-    /// 耐久要点（Spike 4）：解释器执行 guest 原子必须发**真宿主原子指令**
-    /// （普通读写在真线程下 = 引擎自身的数据竞争）。
+    /// dst = previous value of an atomic fetch_add(SeqCst) at (ptr, val).
+    /// In real bytecode an atomic is an intrinsic **call** in MIR shape, not an Rvalue; this
+    /// is spike shorthand. The durable point: an interpreter executing a guest atomic must
+    /// issue a **real host atomic instruction** -- plain reads/writes under real threads
+    /// would be an engine data race.
     AtomicAdd(Operand, Operand),
 }
 
-/// MIR `Statement` 的骨架版。
+/// Skeleton version of MIR `Statement`.
 #[derive(Clone, Debug)]
 pub enum Stmt {
     /// slot = rvalue
@@ -54,22 +56,22 @@ pub enum Stmt {
     Store(Operand, Operand),
 }
 
-/// MIR `UnwindAction` 的骨架版（略 Terminate/Unreachable）。
+/// Skeleton version of MIR `UnwindAction` (omits Terminate/Unreachable).
 #[derive(Clone, Copy, Debug)]
 pub enum UnwindAction {
-    /// 本帧此处无清理，unwind 直接穿过
+    /// No cleanup at this point in the frame; unwind passes straight through
     Continue,
-    /// 先跑该 cleanup 块链（以 `Resume` 结束），再继续 unwind
+    /// Run that cleanup block chain first (ending in `Resume`), then keep unwinding
     Cleanup(BlockId),
 }
 
-/// MIR `Terminator` 的骨架版。
+/// Skeleton version of MIR `Terminator`.
 #[derive(Clone, Debug)]
 pub enum Terminator {
     Goto(BlockId),
     SwitchInt {
         discr: Operand,
-        /// (值, 目标块)；命中即跳
+        /// (value, target block); jump on match
         targets: Vec<(u64, BlockId)>,
         otherwise: BlockId,
     },
@@ -80,20 +82,24 @@ pub enum Terminator {
         target: BlockId,
         unwind: UnwindAction,
     },
-    /// 释放槽中的值（spike 语义：记入 drop 日志以验证顺序；真身 = drop glue 调用）
+    /// Drop the value in `slot` (spike semantics: record it in the drop log to verify order;
+    /// the real engine calls drop glue)
     Drop {
         slot: Slot,
         target: BlockId,
         unwind: UnwindAction,
     },
-    /// 发起 guest panic（≈ 调 panic 运行时的 diverging call；unwind 边覆盖本帧 live Drop）
+    /// Raise a guest panic (approximately a diverging call into the panic runtime; the
+    /// unwind edge covers this frame's live Drops)
     Panic {
         payload: Operand,
         unwind: UnwindAction,
     },
-    /// cleanup 块链尾：继续向外传播（≈ MIR UnwindResume）
+    /// Tail of a cleanup block chain: keep propagating outward (approximately MIR
+    /// UnwindResume)
     Resume,
-    /// ≈ `catch_unwind` intrinsic 的简化形：正常 → dst/target；guest panic → catch_dst/catch_target
+    /// Simplified `catch_unwind` intrinsic: normal -> dst/target; guest panic ->
+    /// catch_dst/catch_target
     CatchCall {
         func: FuncId,
         args: Vec<Operand>,
@@ -111,7 +117,8 @@ pub struct Block {
     pub term: Terminator,
 }
 
-/// 一个函数体。槽约定：slot 0 = 返回值，1..=num_args = 参数，其余 = 局部/临时。
+/// One function body. Slot convention: slot 0 = return value, 1..=num_args = params, the
+/// rest = locals/temporaries.
 #[derive(Clone, Debug)]
 pub struct Body {
     pub num_slots: u32,
@@ -119,7 +126,7 @@ pub struct Body {
     pub blocks: Vec<Block>,
 }
 
-/// 一个程序 = 一组函数，按 `FuncId`（下标）互相调用。
+/// A program: a set of functions calling each other by `FuncId` (index).
 #[derive(Clone, Debug)]
 pub struct Program {
     pub funcs: Vec<Body>,

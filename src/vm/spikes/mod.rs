@@ -1,14 +1,15 @@
-//! M4 前置 spike 的冻结工件（2026-07-07 全部验证通过，风险排除即封存）。
+//! Frozen pre-M4 spike artifacts, sealed once each corresponding risk was retired.
 //!
-//! - `spike1`：最小模型 A 骨架（tree-walking interp_frame + slaved 操作数区 + 真地址）
-//! - `spike2`：i2c/c2i 混合栈适配（raw-ptr vmctx 的由来）
-//! - `spike3`：混合栈 unwind（候选 A 坐实——M4.2 FrameGuard 协议的原型）
-//! - `spike4`：并发 TSan（引擎 Sync 判定；`runtime.tsan` 是门禁载体）
-//! - `spike5`：真 Cranelift 接入（P vs R 数据、eh_frame 自注册——M5 检查点）
-//! - `bytecode`/`frame`/`interp`/`memory`：spike 专用的冻结基础设施（非 M4 真身，
-//!   真身在 ../engine/）。
+//! - `spike1`: minimal model A skeleton (tree-walking interp_frame + slaved operand region +
+//!   real addresses)
+//! - `spike2`: i2c/c2i mixed-stack adapters (origin of the raw-ptr vmctx)
+//! - `spike3`: mixed-stack unwind (candidate A confirmed; prototype of the FrameGuard protocol)
+//! - `spike4`: concurrent TSan (engine Sync determination; `runtime.tsan` is the gate carrier)
+//! - `spike5`: real Cranelift integration (P vs R data, eh_frame self-registration)
+//! - `bytecode`/`frame`/`interp`/`memory`: spike-only frozen infrastructure; the real engine
+//!   lives in ../engine/.
 //!
-//! 仅作回归自检（`mirvm spike1..5`）与代码参考，不再扩展。
+//! Regression self-check (`mirvm spike1..5`) and code reference only; no further extension.
 
 pub mod bytecode;
 pub mod frame;

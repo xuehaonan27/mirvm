@@ -3,7 +3,7 @@
 [dependencies]
 indexmap = "2"
 ---
-// 插入序保持的 map/set（依赖 hashbrown + 确定性 hash 行为）。
+// Insertion-order-preserving map/set (relies on hashbrown plus deterministic hashing).
 use indexmap::{IndexMap, IndexSet};
 
 fn main() {
@@ -11,7 +11,7 @@ fn main() {
     for (i, w) in ["delta", "alpha", "gamma", "alpha", "beta"].iter().enumerate() {
         *m.entry(*w).or_insert(0) += i as i32;
     }
-    // 插入序应保持：delta, alpha, gamma, beta
+    // Insertion order must hold: delta, alpha, gamma, beta
     for (k, v) in &m {
         println!("{k} = {v}");
     }

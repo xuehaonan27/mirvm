@@ -95,9 +95,10 @@ pub fn current_stack_bounds() -> Option<(usize, usize)> {
     }
 }
 
-/// attr 的栈设置（pthread_attr_getstack 直通）：Some((lo, size))，失败 None。
-/// 注意 glibc 未设-stacksize 的假地址形态由 `stack_addr_is_unset` 判定，
-/// 调用方不得自行解释 lo。
+/// The attr's stack setting (a `pthread_attr_getstack` passthrough):
+/// Some((lo, size)), or None on failure. Note that the bogus address glibc
+/// produces when no stack size was set is recognized by `stack_addr_is_unset`;
+/// callers must not interpret `lo` themselves.
 pub fn attr_stack_bounds(attr: *mut c_void) -> Option<(usize, usize)> {
     let mut lo: *mut libc::c_void = std::ptr::null_mut();
     let mut size: libc::size_t = 0;
@@ -110,9 +111,11 @@ pub fn attr_stack_bounds(attr: *mut c_void) -> Option<(usize, usize)> {
     Some((lo as usize, size))
 }
 
-/// glibc 细节：未 setstack 的 attr 内部 stackaddr=NULL，getstack 返回
-/// `NULL - stacksize`（近 u64 顶的假地址）而非 NULL。x86_64 用户地址
-/// ≤ 47 位——超界即「未设」；真用户栈地址（guest 自供栈）落在界内。
+/// glibc detail: an attr that was never setstack'd holds stackaddr=NULL
+/// internally, so getstack returns `NULL - stacksize` (a bogus address near the
+/// top of u64) instead of NULL. x86_64 user addresses fit in 47 bits, so
+/// anything above that range means "unset"; a real user stack address (a
+/// guest-provided stack) falls inside it.
 pub fn stack_addr_is_unset(lo: usize) -> bool {
     lo == 0 || lo >= 1 << 48
 }

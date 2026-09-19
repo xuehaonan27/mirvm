@@ -1,4 +1,4 @@
 [toolchain]
-# D9: 锁定具体日期版本，每月 bump（rustc 1.98.0-nightly c397dae80）
+# Pin a dated version; bump monthly (rustc 1.98.0-nightly c397dae80).
 channel = "nightly-2026-07-02"
 components = ["rustc-dev", "rust-src", "llvm-tools", "rustfmt", "clippy"]

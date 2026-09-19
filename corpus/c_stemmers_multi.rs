@@ -3,23 +3,23 @@
 [dependencies]
 rust-stemmers = "1"
 ---
-// rust-stemmers 1.2（Snowball 词干算法，编译期生成的表驱动状态机）多语差分。
-// 纯计算 crate：静态 Among 表 + SnowballEnv 字符串游标，无 IO / 无随机 /
-// 无 HashMap 迭代序，输出天然确定。stem() 返回 Cow<str>——顺带探测
-// Cow 的 Borrowed/Owned 判别（输入未被修改时借用返回）。
+// rust-stemmers 1.2 (Snowball stemming, compile-time generated table-driven state machines)
+// across languages. A pure-computation crate: static Among tables plus a SnowballEnv string
+// cursor; no IO, randomness or HashMap iteration order, so output is deterministic. stem()
+// returns Cow<str>, which also probes Borrowed/Owned (borrowed when the input is unmodified).
 //
-// 覆盖：
-//  ① 全族 15 算法（en/fr/de/it/pt/ru/fi/nl/sv/es/da/no/hu/ro/tr）× 各自
-//     固定词表（拉丁/西里尔/芬兰-乌戈尔/突厥谱系，含变音符与长尾形态）；
-//  ② 英文不规则谱系 running/ran/better/geese/caresses 及 Porter 经典集；
-//  ③ 边界：空串 / 单字符 / 纯数字 / 纯标点 / 连字符 / 撇号 / 未 lowercase
-//     大写 / 200 字符长词 / 跨文字混入（西里尔词喂英文算法）；
-//  ④ 同词跨算法对照：4 个泛拉丁形态词 × 全 15 算法；
-//  ⑤ 全行内联 FNV-1a 聚合指纹 + 总词数收尾（任何一字节漂移即指纹变）。
+// Coverage:
+//  ① All 15 algorithms (en/fr/de/it/pt/ru/fi/nl/sv/es/da/no/hu/ro/tr) x their own fixed
+//     word lists (Latin/Cyrillic/Finno-Ugric/Turkic, with diacritics and long-tail forms);
+//  ② the English irregular set running/ran/better/geese/caresses plus the classic Porter set;
+//  ③ boundaries: empty string / single char / digits only / punctuation only / hyphen / apostrophe /
+//     uppercase (not lowercased) / 200-char word / cross-script input (Cyrillic words into English);
+//  ④ same word across algorithms: 4 pan-Latin inflected words x all 15 algorithms;
+//  ⑤ an inline FNV-1a aggregate over every line plus a total word count (any byte drift changes it).
 use rust_stemmers::{Algorithm, Stemmer};
 use std::borrow::Cow;
 
-/// (短码, 算法, 固定词表)。输入按 crate 文档要求预 lowercase。
+/// (short code, algorithm, fixed word list). Inputs are pre-lowercased as the crate docs require.
 const FAMILY: &[(&str, Algorithm, &[&str])] = &[
     ("en", Algorithm::English, &[
         "running", "caresses", "ponies", "agreed", "plastered",
@@ -83,8 +83,8 @@ const FAMILY: &[(&str, Algorithm, &[&str])] = &[
     ]),
 ];
 
-/// Porter 英文经典谱系：任务点名的不规则词 + 原论文分步变形样例 +
-/// A_1 撇号表的三条（' / 's' / 's）。
+/// Classic Porter English set: the irregular words, the paper's step-by-step examples, and
+/// three entries of the A_1 apostrophe table (' / 's' / 's).
 const EN_SUITE: &[&str] = &[
     "running", "ran", "better", "geese", "caresses",
     "ponies", "ties", "cats", "feed", "agreed",
@@ -94,7 +94,7 @@ const EN_SUITE: &[&str] = &[
     "o's", "o's'", "o'clock",
 ];
 
-/// 边界样例：空 / 单字符 / 非字母 / 混合符号 / 未 lowercase / 长词 / 跨文字。
+/// Boundary samples: empty / single char / non-letter / mixed symbols / not lowercased / long word / cross-script.
 const EDGE: &[&str] = &[
     "", "a", "x", "z",
     "123", "!!!", "---", "a-b", "it's",
@@ -109,8 +109,8 @@ fn fnv1a(h: &mut u64, data: &[u8]) {
     }
 }
 
-/// 打印 `word => stem (len, B|O)` 并喂入聚合 hasher。
-/// B = Cow::Borrowed（输入原样返回），O = Owned（发生了修改）。
+/// Print `word => stem (len, B|O)` and feed the print into the aggregate hasher.
+/// B = Cow::Borrowed (input returned unchanged), O = Cow::Owned (a modification happened).
 fn record(h: &mut u64, st: &Stemmer, word: &str) {
     let out: Cow<str> = st.stem(word);
     let tag = match out {
@@ -127,7 +127,7 @@ fn main() {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut total = 0u32;
 
-    // ① 全族 15 算法 × 各自固定词表
+    // ① all 15 algorithms x their own word lists
     println!("== family ==");
     fnv1a(&mut h, b"== family ==\n");
     for &(code, algo, words) in FAMILY {
@@ -142,7 +142,7 @@ fn main() {
         }
     }
 
-    // ② 英文不规则谱系 + Porter 经典集（单 stemmer 复用跨词）
+    // ② English irregular set + classic Porter set (one stemmer reused across words)
     println!("== english-suite ==");
     fnv1a(&mut h, b"== english-suite ==\n");
     let en = Stemmer::create(Algorithm::English);
@@ -151,7 +151,7 @@ fn main() {
         total += 1;
     }
 
-    // ③ 边界：同一边界词集喂 en/ru/fi/tr 四个谱系代表
+    // ③ boundaries: the same edge word set fed to the en/ru/fi/tr representatives
     println!("== edge ==");
     fnv1a(&mut h, b"== edge ==\n");
     const EDGE_ALGOS: &[(&str, Algorithm)] = &[
@@ -169,13 +169,13 @@ fn main() {
             record(&mut h, &st, w);
             total += 1;
         }
-        // 200 字符长词：'a' 重复 + 后缀，探测长缓冲区路径
+        // 200-char word: repeated 'a' plus a suffix, probing the long-buffer path
         let long = format!("{}{}", "a".repeat(200), w_long_suffix(code));
         record(&mut h, &st, &long);
         total += 1;
     }
 
-    // ④ 同词跨算法对照：泛拉丁形态词 × 全 15 算法
+    // ④ same word across algorithms: pan-Latin inflected words x all 15 algorithms
     println!("== cross ==");
     fnv1a(&mut h, b"== cross ==\n");
     let stemmers: Vec<(&str, Stemmer)> =
@@ -195,7 +195,7 @@ fn main() {
     println!("total={total} fnv={h:016x}");
 }
 
-/// 各谱系有代表性的长尾后缀（长词用例用）。
+/// A representative long-tail suffix per family (used by the long-word case).
 fn w_long_suffix(code: &str) -> &'static str {
     match code {
         "en" => "izations",

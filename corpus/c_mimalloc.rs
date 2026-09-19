@@ -1,42 +1,67 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# mimalloc 0.1.52（定稿时 0.1.x 最新；拉 libmimalloc-sys 0.1.49 = mimalloc C v3 系，
-# 与引擎自身堆后端 heap.rs 同源但异实例：进程内两台 mimalloc，guest 指针全部来自
-# guest 侧归档的竞技场）。extended 只为两个确定性锚点：mi_version()（C 库版本常量，
-# 证明 vendored C 库确实链入并在跑）与 mi_usable_size()（分配粒度由同一 size-class
-# 表决定，跨维逐位确定）。extended 的 stats_json() 不采用：其内容含启动期簿记与
-# 运行期竞技场状态，D8k 已证启动簿记分配次数跨维差异（ram-spec §2 unspecified），
-# 打印必炸差分。默认 feature（v1 系 API、非 secure、非 override）。
+# mimalloc 0.1.52 (newest 0.1.x) pulls libmimalloc-sys 0.1.49, the mimalloc C v3 line --
+# the same source as the engine's own heap backend heap.rs but a different instance: two
+# mimalloc allocators in one process, with guest pointers all coming from the guest arena.
+# `extended` is used only for two deterministic anchors: mi_version() (a C library version
+# constant, proving the vendored C library is linked and running) and mi_usable_size()
+# (allocation granularity from the same size-class table, bit-deterministic across
+# dimensions). stats_json() is not printed: it mixes startup bookkeeping with runtime arena state, whose allocation counts differ per dimension.
 mimalloc = { version = "=0.1.52", features = ["extended"] }
 ---
-// mimalloc 0.1 全局分配器替换边界探针（批7波2 最有意条目）：#[global_allocator]
-// = 计数薄包装 CountingMi（委托 MiMalloc）——guest 全部堆分配经 FFI 进 vendored
-// C mimalloc 的竞技场（mmap 原生内存，非引擎内建堆），引擎堆模型边界全面受压。
+// mimalloc 0.1 global-allocator replacement boundary probe: `#[global_allocator]` is set to
+// CountingMi, a thin counting wrapper that delegates to MiMalloc, so every guest heap
+// allocation crosses FFI into the vendored C mimalloc arena (mmap-backed native memory,
+// not the engine built-in heap) and the engine heap-model boundary is stressed throughout.
+// The point is pointer provenance: guest-side allocations must be released by the same
+// allocator instance that produced them, and the engine must never hand a mimalloc pointer
+// to its own heap (or vice versa), including when a value crosses a thread boundary.
 //
-// 测试面：
-//   P0 锚点  ：mi_version()（C 库版本常量）
-//   P1 vec   ：20k push 增长（realloc 路径）+ 64 槽 ×300 轮 vec![0;len] 磨损
-//              （alloc_zeroed + 新鲜 alloc + drop 交错）+ 零化语义检查
-//   P2 btree ：10_000 键 LCG 序列插入 BTreeMap<u64,u64>，删 key%3==0，遍历求和
-//   P3 string：push_str ×1536 片段（String 增长率）+ format! ×256 件 join +
-//              shrink_to_fit
-//   P4 对齐  ：repr(align(64)) 元素 Vec、repr(align(4096)) 页 Box（对齐断言
-//              必过）+ 五组 (size,align) 的 mi_usable_size() 粒度锚点
-//   P5 线程  ：std::thread::scope 4 worker：main 侧分配 payload 由 worker 释放
-//              （跨线程 remote-free）、worker 侧分配结果经 join 回 main 释放
-//              （反向 remote-free）+ 每 worker 定规格分配工作负载；checksum 按
-//              worker 序汇合（与调度交织无关的总量/和/xor 才打印，峰值水位只
-//              在单线程相位打印）
-//   计数层   ：仅在相位窗口内记账（ENABLED 闸）；calls/alloc_bytes/峰值/live
-//              增减 全为窗口差值——启动期簿记分配次数跨维差异（D8k，unspecified）
-//              被窗口隔离；每相位断言 live_delta==0（全部分配成对释放）。
-//   逻辑锚点 ：各相位数据 FNV-1a 与求和（u64 wrapping，跨维逐位确定）。
+// Test surface:
+//   P0 anchor  : mi_version() (the C library version constant; the vendored C library must
+//                actually be linked in and running, which the constant alone proves)
+//   P1 vec     : 20k pushes growing a Vec (the realloc path) plus a 64-slot x 300-round wear
+//                ring of vec![0; len] (alloc_zeroed, fresh alloc and interleaved drop) with a
+//                zeroing-semantics check
+//   P2 btree   : 10_000 keys from an LCG inserted into BTreeMap<u64, u64>, then key%3==0
+//                removed and the remainder traversed and summed (the doomed keys are
+//                collected before removal, so iteration order cannot affect the result)
+//   P3 string  : push_str of 1536 fragments (String growth rate) plus 256 format! items
+//                joined and shrink_to_fit
+//   P4 align   : a Vec of repr(align(64)) elements, eight repr(align(4096)) page Boxes (the
+//                alignment assertions must hold) and five (size, align) mi_usable_size()
+//                granularity anchors: (24,8), (1000,16), (17,64), (65536,4096) and
+//                (262144,32). Each is allocated through MiMalloc directly, so the counted
+//                window must stay balanced.
+//   P5 threads : std::thread::scope with 4 workers: payloads allocated on main are freed on
+//                a worker (cross-thread remote free) and worker-allocated results are joined
+//                back to main for deallocation (the reverse remote free), plus a fixed-size
+//                workload per worker; checksums are combined in worker order, and only
+//                interleaving-independent quantities (totals, sums, xor) are printed while
+//                the peak watermark is printed only in the single-threaded phases
+//   counting   : accounting happens only inside a phase window (the ENABLED gate), so
+//                calls/alloc_bytes/peak/live are all window deltas; that isolates the startup
+//                bookkeeping allocations, whose count differs across dimensions. Every phase
+//                asserts live_delta == 0, i.e. every allocation is matched by a free.
+//   remote     : a pointer allocated in one thread and freed in another is the operation the
+//                engine heap model is least likely to expect; P5 covers it in both directions
+//                and P3/P4 keep large objects alive across the window boundary.
+//   provenance : the window only sees allocations that go through CountingMi; memory the C
+//                library reserves for its own metadata is invisible and is not part of any
+//                reported delta.
+//   anchors    : per-phase FNV-1a and sums (u64 wrapping, bit-identical across dimensions)
+// The ENABLED gate is a plain AtomicBool, so the accounting itself allocates nothing, and
+// the startup allocation count (which depends on how the engine booted) is never part of any
+// reported number.
 //
-// 确定性：LCG 定种、BTreeMap 序、join 按 worker 序汇合、无时间/地址/HashMap；
-// 浮点零使用；stderr 真空（零 warning）。输出 ≈20 行。
+// Determinism: the LCG is seeded, BTreeMap order is used, joins are combined in worker
+// order, and there is no time, address or HashMap dependence. No floating point is used;
+// stderr is empty (zero warnings); the output is roughly 20 lines. The line count is
+// intentionally small: one report line per phase plus the mi_version line, the cumulative
+// counters and the mimalloc_ok marker.
 //
-// 三维复跑命令（仓库根）：
+// Three-way rerun commands (from the repository root):
 //   A: target/release/mirvm run corpus/c_mimalloc.rs
 //   B: cd $(grep -l 'name = "c_mimalloc"' ~/.cache/mirvm/scripts/*/Cargo.toml \
 //        | head -1 | xargs dirname) && \
@@ -44,15 +69,16 @@ mimalloc = { version = "=0.1.52", features = ["extended"] }
 //      "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
 //   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_mimalloc.rs
 //
-// 【FRONTIER 绕行①：native_archive constructor 卫士（2026-07-17 实测）】
-// libmimalloc.a（v3）的 prim.c 带 `__attribute__((constructor)) mi_process_attach`
-// （.init_array/.fini_array 各一项，readelf 实锤）；引擎 native_archive 对一切带
-// constructor/destructor section 的静态归档响亮拒绝（exit 101，
-// "dlopen 生命周期语义尚未定义"，有单测锁定此纪律）。绕行 = CFLAGS 注入
-// `-DMI_PRIM_HAS_PROCESS_ATTACH`（prim.c 的 ctor/dtor 被条件编译摘掉，mimalloc
-// 首次分配惰性初始化是上游保证的正确路径；两维同一 C 库构建，差分公平无损）。
-// 与 snow_noise 的 `--cfg poly1305_force_soft`、ed25519 的 serial-backend env
-// 注入同型先例（段内注入 + 头注记录）。因此三维实际命令为：
+// Constructor guard (why CFLAGS is set): libmimalloc.a (v3) has an
+// `__attribute__((constructor)) mi_process_attach` in prim.c, i.e. one .init_array and one
+// .fini_array entry. The engine native_archive rejects any static archive that carries
+// constructor/destructor sections, exiting 101 with the engine's literal message "dlopen 生命周期语义尚未定义"
+// test locks that discipline). The bypass injects `-DMI_PRIM_HAS_PROCESS_ATTACH` through
+// CFLAGS, which compiles the ctor/dtor out; mimalloc lazy-initialising on its first
+// allocation is the upstream-guaranteed path, and both dimensions build the same C library,
+// so the differential stays fair. Gate wiring must inject that CFLAGS through the existing
+// environment-injection channel; the default (no injection) refuses the archive by design,
+// it is not a missing configuration. The commands that are actually run are therefore:
 //   A: CFLAGS="-DMI_PRIM_HAS_PROCESS_ATTACH" target/release/mirvm run corpus/c_mimalloc.rs
 //   B: cd $(grep -l 'name = "c_mimalloc"' ~/.cache/mirvm/scripts/*/Cargo.toml \
 //        | head -1 | xargs dirname) && \
@@ -61,59 +87,33 @@ mimalloc = { version = "=0.1.52", features = ["extended"] }
 //      "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
 //   C: CFLAGS="-DMI_PRIM_HAS_PROCESS_ATTACH" MIRVM_JIT_THRESHOLD=1 \
 //      target/release/mirvm run corpus/c_mimalloc.rs
-// gate 接线需走既有 env 注入通道给本 driver 加该 CFLAGS（默认值即拒载，非漏配）。
 //
-// 【已修复（2026-07-17）｜custom #[global_allocator] 下 `__rust_*` 分配族
-//  跨堆撕裂 → 运行期统一路由 shim】
-// 修复前本 driver 死于 phase_string（A/C 同点上 SIGSEGV/错崩，B 维 oracle
-// 全绿）。两层根因与修法（decision-history §7.7）：
-//  ①分配系 builtin 的决定按【lower 会话】做出：base/deps image 在 Default
-//    会话把 __rust_* 烘成 CallBuiltin(Rust*)→引擎堆，而 delta/image 的同
-//    程序分配走 AST 展开器的 guest shim→用户分配器 ⇒ 两堆互穿 free。
-//    修：lower 在 kind=Global 时登记 HIR 展开器生成的四只 shim FuncId
-//    （Module.custom_alloc_shims），interp 的 CallBuiltin(Rust*) 臂在运行
-//    期统一路由到 shim（分配是程序级语义，与字节码的烘焙会话无关）。
-//  ②首次路由实现漏了 rebase：shim 的 FuncId 在 A2 split 收尾未随
-//    exports/fn_addrs/sites 同规则映射，运行期 call_guest 打到移位后的
-//    野 id，报"ABI 不匹配"错调 insert_entry/from_iter——补 rb.fn_id 后正。
-// 保留两枚最小复现备回归（彼时怒态）：/tmp/ga_p_only.rs（System 包装 +
-// println 即崩，退出段跨界 free）、/tmp/ga_vecstr.rs（注册表对账报
-// CROSS-FREE 6144B）。
+// Allocation-routing contract for a custom global allocator: with `#[global_allocator]` set,
+// the `__rust_*` allocation family must not be split across two heaps. The engine picks the
+// builtin per lower session: the base/deps image bakes `__rust_*` into CallBuiltin(Rust*) on
+// the engine heap in the Default session, while the delta/image program expands to the guest
+// shims generated by the HIR expander, which call the user allocator. Left alone, the two
+// heaps free each other pointers. The contract is that lowering registers the four shim
+// FuncIds generated for a kind=Global module (Module.custom_alloc_shims) and that the
+// interpreter CallBuiltin(Rust*) arm routes to them at run time, because allocation is
+// program-level semantics independent of the session that baked the bytecode. Rebasing must
+// remap those FuncIds by the same rule as exports/fn_addrs/sites; a missed remap calls a
+// shifted id and the engine reports its literal "ABI 不匹配" (ABI mismatch) error after being asked for insert_entry or
+// from_iter.
 //
-// <details><summary>原始 EXPECTED-RED 全记录（2026-07-17 定档文本）</summary>
-//
-// A 维：vec/btree 两相位 stdout 与 native 逐字节一致（窗口内分配计数
-// 316/1355 calls 全对）后，死于 phase_string（Vec<String> 增长段）。
-// C 维（JIT=1）：同一死点同形态 —— 与 JIT 无关，引擎共享层根因。
-// B 维 native：exit 0、stderr 真空、两跑输出逐字节一致（oracle 正常）。
-// 实例①最小复现（/tmp/ga_p_only.rs，System 薄包装，全量）：
-//     use std::alloc::{GlobalAlloc, Layout, System};
-//     struct A;
-//     unsafe impl GlobalAlloc for A {
-//         unsafe fn alloc(&self, l: Layout) -> *mut u8 { unsafe { System.alloc(l) } }
-//         unsafe fn dealloc(&self, p: *mut u8, l: Layout) { unsafe { System.dealloc(p, l) } }
-//     }
-//     #[global_allocator]
-//     static G: A = A;
-//     fn main() { println!("hello"); }        // → stdout 正常，退出段 SIGSEGV(139)
-// 取证链：LD_PRELOAD SA_SIGINFO si_addr=0x4000/0x8000，崩点符号化 =
-// engine::heap::dealloc(heap.rs:23) → mimalloc mi_validate_ptr_page 读野；
-// 1024B stdout 缓冲此前经 guest 分配器发出。
-// 实例②最小复现核心（/tmp/ga_vecstr.rs；静态指针注册表对账）：
-//     for i in 0..256 { v.push(format!(...)) } 后 drop →
-//     CROSS-FREE: unknown ptr=0x7f31bc090000 sz=6144 al=8 n=257 + SIGSEGV；
-// 6144B 末档缓冲从未经 guest 发出 → 出自引擎 mimalloc；drop 却走 guest 路由。
-// 嫌疑落点（umpire 记录）：resolve_call ①/②/③ 支路对 `__rust_*` 的归一、
-// engine_builtins 对 Global kind 的注册范围、A2 双 lower 会话对 allocator
-// shim 符号的可见性差。—— 两怀疑均被修法证实（①为根因、②为实现自伤）。
-//
-// </details>
+// Two minimal repros stay as regression sentinels: /tmp/ga_p_only.rs (a System wrapper whose
+// main only printed "hello": stdout was fine and the exit path segfaulted while freeing
+// across the two heaps) and /tmp/ga_vecstr.rs (a static pointer registry reported CROSS-FREE
+// with a 6144-byte size for a buffer that was never handed out through the guest allocator).
+// Both are expected to pass now. If a future change splits the allocation family again, the
+// earliest symptom is a SIGSEGV or an unknown-pointer report while a phase window is open,
+// not a wrong number.
 use mimalloc::MiMalloc;
 use std::alloc::{GlobalAlloc, Layout};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 
-// ===== 计数分配器（委托 MiMalloc；窗口内记账）=====
+// ===== counting allocator (delegates to MiMalloc; accounts inside a window) =====
 
 struct CountingMi;
 
@@ -187,7 +187,7 @@ unsafe impl GlobalAlloc for CountingMi {
     }
 }
 
-// ===== 确定性工具 =====
+// ===== determinism helpers =====
 
 fn fnv_mix(h: &mut u64, bytes: &[u8]) {
     for &b in bytes {
@@ -233,7 +233,7 @@ fn snap() -> Snap {
 
 fn report(name: &str, s0: Snap, s1: Snap, peak: Option<u64>, extra: &str) {
     let live_delta = s1.live as i64 - s0.live as i64;
-    assert_eq!(live_delta, 0, "{name}: 窗口内有未配对分配");
+    assert_eq!(live_delta, 0, "{name}: unpaired allocation inside the window");
     let peak_s = match peak {
         Some(p) => format!(" peak={p}"),
         None => String::new(),
@@ -245,13 +245,13 @@ fn report(name: &str, s0: Snap, s1: Snap, peak: Option<u64>, extra: &str) {
     );
 }
 
-// ===== 相位 P1：Vec 增长 + 磨损 =====
+// ===== phase P1: Vec growth plus wear =====
 
 fn phase_vec() {
     ENABLED.store(true, Relaxed);
     let s0 = snap();
 
-    // 增长链（realloc 主路）
+    // Growth chain (the realloc path)
     let mut vv: Vec<u64> = Vec::new();
     let mut l = Lcg(0x9e3779b97f4a7c15);
     for _ in 0..20_000 {
@@ -261,7 +261,7 @@ fn phase_vec() {
     let fnv_growth = fnv_u64s(&vv);
     drop(vv);
 
-    // 磨损环：64 槽 ×300 轮，vec![0;len]（alloc_zeroed）+ 定式回填 + 槽位 drop
+    // Wear ring: 64 slots x 300 rounds, vec![0;len] (alloc_zeroed) + fixed refill + slot drop
     let mut slots: Vec<Option<Vec<u8>>> = (0..64).map(|_| None).collect();
     let mut fnv_ring = 0xcbf29ce484222325u64;
     let mut sum_ring: u64 = 0;
@@ -277,10 +277,10 @@ fn phase_vec() {
     }
     drop(slots);
 
-    // 零化语义：vec![0u16; 512] 必须全零
+    // Zeroing semantics: vec![0u16; 512] must be all zeros
     let z = vec![0u16; 512];
-    assert_eq!(z.iter().map(|&x| x as u64).sum::<u64>(), 0, "zeroed 语义");
-    drop(z); // 窗口内配对释放（否则 live_delta 计上）
+    assert_eq!(z.iter().map(|&x| x as u64).sum::<u64>(), 0, "zeroed semantics");
+    drop(z); // freed in-window so it pairs up (otherwise live_delta counts it)
 
     let s1 = snap();
     ENABLED.store(false, Relaxed);
@@ -294,7 +294,7 @@ fn phase_vec() {
     );
 }
 
-// ===== 相位 P2：BTreeMap 10k 键 =====
+// ===== phase P2: BTreeMap with 10k keys =====
 
 fn phase_btree() {
     ENABLED.store(true, Relaxed);
@@ -306,12 +306,12 @@ fn phase_btree() {
         let k = l.next().wrapping_add(i << 1);
         m.insert(k, k.rotate_left(17) ^ i);
     }
-    assert_eq!(m.len(), 10_000, "插入数");
+    assert_eq!(m.len(), 10_000, "insert count");
     let hit = (0..1000u64)
         .filter(|&i| m.contains_key(&i))
         .count() as u64;
 
-    // 删除 key%3==0
+    // Remove key%3==0
     let doomed: Vec<u64> = m.keys().copied().filter(|k| k % 3 == 0).collect();
     let doomed_len = doomed.len();
     for k in doomed {
@@ -343,7 +343,7 @@ fn phase_btree() {
     );
 }
 
-// ===== 相位 P3：String 拼接 =====
+// ===== phase P3: String concatenation =====
 
 fn phase_string() {
     ENABLED.store(true, Relaxed);
@@ -388,7 +388,7 @@ fn phase_string() {
     );
 }
 
-// ===== 相位 P4：大对齐 + usable_size 锚点 =====
+// ===== phase P4: large alignments plus usable_size anchors =====
 
 #[repr(align(64))]
 struct A64(u64, u64);
@@ -405,7 +405,7 @@ fn phase_align() {
     for _ in 0..300 {
         av.push(A64(l.next(), l.next()));
     }
-    assert_eq!(av.as_ptr() as usize % 64, 0, "align(64) Vec 基址");
+    assert_eq!(av.as_ptr() as usize % 64, 0, "align(64) Vec base address");
     let mut sum_a: u64 = 0;
     for A64(x, y) in &av {
         sum_a = sum_a.wrapping_add(*x).wrapping_add(*y);
@@ -415,7 +415,7 @@ fn phase_align() {
     let mut pages: Vec<Box<Page>> = Vec::new();
     for p in 0..8u8 {
         let mut pg = Box::new(Page([0u8; 4096]));
-        assert_eq!(&*pg as *const Page as usize % 4096, 0, "align(4096) Box 基址");
+        assert_eq!(&*pg as *const Page as usize % 4096, 0, "align(4096) Box base address");
         for (i, b) in pg.0.iter_mut().enumerate() {
             *b = p ^ (i as u8);
         }
@@ -428,8 +428,8 @@ fn phase_align() {
         .sum();
     drop(pages);
 
-    // usable_size 粒度锚点（同一 vendored mimalloc size-class 表 → 跨维确定）；
-    // 直接入定长数组，不留存活容器跨 snap
+    // usable_size granularity anchors (the same vendored mimalloc size-class table, so
+    // deterministic across dimensions); stored into a fixed array, no live container across snap
     let mut usable = [0usize; 5];
     for (i, (sz, al)) in [(24usize, 8usize), (1000, 16), (17, 64), (65536, 4096), (262144, 32)]
         .into_iter()
@@ -437,7 +437,7 @@ fn phase_align() {
     {
         let layout = Layout::from_size_align(sz, al).unwrap();
         let p = unsafe { MiMalloc.alloc(layout) };
-        assert!(!p.is_null(), "alloc 失败");
+        assert!(!p.is_null(), "alloc failed");
         usable[i] = unsafe { MiMalloc.usable_size(p) };
         unsafe { MiMalloc.dealloc(p, layout) };
     }
@@ -459,16 +459,16 @@ fn phase_align() {
     );
 }
 
-// ===== 相位 P5：4 worker 跨线程分配/释放 =====
+// ===== phase P5: cross-thread alloc/free across 4 workers =====
 
 fn worker(w: u64, mut payload: Vec<u8>) -> (u64, u64) {
-    // payload 由 main 分配、在本 worker 释放（跨线程 remote-free）
+    // payload is allocated by main and freed in this worker (cross-thread remote free)
     let mut fnv = 0xcbf29ce484222325u64;
     fnv_mix(&mut fnv, &payload);
     payload.clear();
     drop(payload);
 
-    // 定规格工作负载：小 Vec/String/BTreeMap 混合（跨线程自身分配释放）
+    // Fixed-size workload: a mix of small Vec/String/BTreeMap (self-allocated and freed here)
     let mut sum: u64 = w;
     for it in 0..2000u64 {
         let mut v: Vec<u16> = Vec::new();
@@ -490,7 +490,7 @@ fn worker(w: u64, mut payload: Vec<u8>) -> (u64, u64) {
         }
     }
 
-    // 结果 payload 在本 worker 分配，回 main 释放（反向 remote-free）
+    // The result payload is allocated here and freed by main (the reverse remote free)
     let mut out: Vec<u8> = Vec::with_capacity(1024);
     let mut l = Lcg(0x100 + w);
     for _ in 0..1024 {
@@ -516,21 +516,21 @@ fn phase_threads() {
         }
         handles
             .into_iter()
-            .map(|h| h.join().expect("worker 正常返回"))
+            .map(|h| h.join().expect("worker returned normally"))
             .collect()
     });
 
     let mut fnv_all = 0u64;
     let mut sum_all = 0u64;
     for (f, s) in &outs {
-        fnv_all ^= f; // xor 满足交换律（汇聚与序无关）；此处 join 本已按序
+        fnv_all ^= f; // xor is commutative, so the combine is order-independent; join is already ordered
         sum_all = sum_all.wrapping_add(*s);
     }
-    drop(outs); // 窗口内配对释放（否则 live_delta 计上）
+    drop(outs); // freed in-window so it pairs up (otherwise live_delta counts it)
 
     let s1 = snap();
     ENABLED.store(false, Relaxed);
-    // 峰值水位受调度交织影响，多线程相位不打印；仅总量（与交织无关）。
+    // The peak watermark depends on the scheduling interleaving, so it is not printed for the multi-threaded phase; only interleaving-independent totals are.
     report(
         "threads",
         s0,

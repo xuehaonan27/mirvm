@@ -4,7 +4,7 @@
 num-bigint = "0.4"
 num-traits = "0.2"
 ---
-// 任意精度整数：阶乘、modpow。纯计算，压大 Vec<u64> 运算正确性。
+// Arbitrary-precision integers: factorial and modpow. Pure computation over large Vec<u64> values.
 use num_bigint::BigUint;
 use num_traits::One;
 
@@ -20,7 +20,7 @@ fn main() {
     let modulus = BigUint::from(1_000_000_007u32);
     println!("2^1000 mod 1e9+7 = {}", base.modpow(&exp, &modulus));
 
-    // 大数相等/比较
+    // Large-number equality/comparison
     let a = BigUint::parse_bytes(b"123456789012345678901234567890", 10).unwrap();
     let b = &a * &a;
     println!("a^2 = {b}");

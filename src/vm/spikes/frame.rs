@@ -1,14 +1,12 @@
-//! slaved 操作数区（Spike 1 原型，模型 A 的帧局部存储）。
+//! Slaved operand region: model A's frame-local storage (spike 1 prototype).
 //!
-//! 所有帧的局部槽切在一条连续 `Vec` 上；每帧 `reserve` 一段、返回时 `restore`。
-//! 生产实现后来改为带 guard page 的 mmap ByteRegion；2026-08-12 又撤销了 alloca
-//! 必迁承诺，slaved 正式保留。这里仍保持一个**窄接口**，且
-//! **不与安全模式（fast/checked）耦合**：Spike 1 是 fast，不做任何范围检查；
-//! checked 模式将来只在 `GuestMemory::contains` 处相遇（见账本 C13 解耦要求）。
+//! Every frame's local slots are cut from one contiguous `Vec`; a frame `reserve`s a run on
+//! entry and `restore`s it on return. The interface stays narrow and is deliberately *not*
+//! coupled to the fast/checked safety mode: spike 1 is fast and performs no range checks.
 
 pub type Word = u64;
 
-/// 一条连续的槽栈。帧按 reserve/restore 后进先出地使用。
+/// A contiguous slot stack. Frames use it LIFO through reserve/restore.
 #[derive(Default)]
 pub struct OperandRegion {
     slots: Vec<Word>,
@@ -19,14 +17,15 @@ impl OperandRegion {
         OperandRegion { slots: Vec::new() }
     }
 
-    /// 为一个新帧切出 `n` 个槽（清零），返回基址（切出前的区尾）。
+    /// Cut `n` zeroed slots for a new frame; returns the base (the region's end before the
+    /// cut).
     pub fn reserve(&mut self, n: u32) -> usize {
         let base = self.slots.len();
         self.slots.resize(base + n as usize, 0);
         base
     }
 
-    /// 弹出该帧的槽（截回 `base`）。与 `reserve` 严格配对。
+    /// Pop this frame's slots (truncate back to `base`). Strictly paired with `reserve`.
     pub fn restore(&mut self, base: usize) {
         self.slots.truncate(base);
     }

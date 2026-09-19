@@ -1,13 +1,15 @@
-//! 冻结区物化（自 lower/mod.rs M5 alloc 带整搬）：ensure_alloc（常量/
-//! static/vtable/函数字节 → FrozenArena 定域）+ frozen_alloc_bytes +
-//! record_addr/record_both（A2 split 双侧记账）。impl Linker 子块。
+//! Frozen-region materialization: `ensure_alloc` places constants, statics, vtables and
+//! function bytes into a `FrozenArena`; `frozen_alloc_bytes` allocates raw bytes;
+//! `record_addr` and `record_both` keep the dedup tables of the delta and image contexts.
+//! `impl Linker` sub-block.
 
 use super::*;
 use crate::lower::purity::arg_mentions_local;
 
 impl<'tcx> Linker<'tcx> {
-    /// 裸字节物化进冻结区（128 位常量等小常量的通用道）。
-    /// A2 split：纯字节无指针无 locality，按当前类定域即可。
+    /// Materializes raw bytes in the frozen region: the general path for small constants
+    /// such as 128-bit literals. Plain bytes carry no pointers and no locality, so the
+    /// current context decides the region.
     pub(crate) fn frozen_alloc_bytes(&mut self, bytes: &[u8]) -> u64 {
         let arena: &mut FrozenArena = match &mut self.split {
             Some(s) if s.current_image => &mut s.image_frozen,
@@ -18,13 +20,19 @@ impl<'tcx> Linker<'tcx> {
         p
     }
 
-    /// alloc → 冻结区真地址（按需递归物化；先分后填 ⇒ 指针环安全）。
-    /// A2 split 路由（s3b-a2-design §4.3）：
-    /// - image 上下文只接受 image 域地址（跨运行稳定域）；delta 上下文两域皆可
-    ///   （delta map 优先，image map 兜底复用——delta→image 向下稳定）。
-    /// - 身份必需通道（static/weak cell/fn 条目）按 krate/类定域并**双表登记**
-    ///   （防双份精神分裂）；Memory/vtable 身份 unspecified，按上下文定域，
-    ///   image 上下文对 delta 区已有者**提升**（双份物化，常量只读安全）。
+    /// Resolves an allocation to its real frozen-region address, materializing it
+    /// recursively on demand. Allocating before filling keeps pointer cycles safe.
+    ///
+    /// Context routing:
+    /// - an image context only accepts image-region addresses, which stay stable across
+    ///   runs; a delta context accepts either region (the delta map first, falling back to
+    ///   and reusing the image map, since delta -> image is stable in one direction);
+    /// - identity-bearing paths (statics, weak cells, fn entries) are placed by `krate` or
+    ///   class and recorded in **both** tables, so a single identity never splits into two
+    ///   addresses. `Memory` and vtables have unspecified identity, so the context decides
+    ///   their region; in an image context, an allocation already present in the delta
+    ///   region is **promoted** (materialized twice, which is safe because constants are
+    ///   read-only).
     pub(crate) fn ensure_alloc(&mut self, id: AllocId) -> Result<u64, String> {
         let ctx_image = self.split.as_ref().is_some_and(|s| s.current_image);
         if ctx_image {
@@ -50,27 +58,33 @@ impl<'tcx> Linker<'tcx> {
         match self.tcx.global_alloc(id) {
             GlobalAlloc::Memory(alloc) => self.materialize_in(id, alloc, ctx_image),
             GlobalAlloc::Static(def_id) => {
-                // extern static = 真符号（os:: 直通）：
-                // - weak（gettid 等 fn 符号判空模式）：判空 cell 写 0（缺席）——weak
-                //   **fn** 符号即便存在也不能给真地址（guest 拿去调用 = 跳 native 代码，
-                //   条目反查失败；M4.4 thunk 前统一走 fallback 路径）
-                // - 非 weak（environ 等数据符号）：alloc 基址 = dlsym 真地址
+                // An extern static is a real symbol reached through the os:: passthrough:
+                // - weak (the null-test pattern for fn symbols such as gettid): the cell
+                //   holds 0, meaning absent. A weak **fn** symbol must not expose its real
+                //   address even when it exists, because a guest call would jump into native
+                //   code and the entry lookup would fail; it takes the fallback path until a
+                //   thunk handles it.
+                // - non-weak (data symbols such as environ): the allocation base is the real
+                //   dlsym address.
                 if self.tcx.is_foreign_item(def_id) {
-                    // dlsym 用链接符号名（#[link_name] 前缀——ring 的 prefixed_extern
-                    // 静态量；item_name 会丢掉前缀）与 LLVM verbatim `\x01` 剥除
-                    // （aws-lc-sys 一族，canonical_link_name），与 resolve_call 的 fn 路径同源
+                    // dlsym uses the link symbol name: it keeps the `#[link_name]` prefix of
+                    // ring's prefixed extern statics, which `item_name` would drop, and it
+                    // strips the LLVM verbatim `\x01` marker used by aws-lc-sys.
+                    // `canonical_link_name` does both, as on `resolve_call`'s fn path.
                     let name = canonical_link_name(
                         self.tcx.symbol_name(Instance::mono(self.tcx, def_id)).name,
                     );
-                    // extern block 内 item 的 linkage 在 import_linkage 字段
+                    // An item inside an extern block carries its linkage in the
+                    // `import_linkage` field.
                     let weak = self.tcx.codegen_fn_attrs(def_id).import_linkage
                         == Some(rustc_hir::attrs::Linkage::ExternalWeak);
                     if weak {
-                        // native extern weak 语义（P2 GOT 启动相重填）：命中 = 真
-                        // 符号地址、缺席 = 0。例外 = 引擎接管语义的符号强制缺席
-                        // （M4 判空 cell 纪律延续）：非纯直通内建 / denylist /
-                        // 引擎模型符号（TLS-dtor 一族）——std 对它们走回退路径，
-                        // 引擎接管不被真符号绕开（E27 闭合契约，2026-07-18）。
+                        // Native extern-weak semantics (the slot is refilled by name at
+                        // startup): a hit yields the real symbol address, an absence yields
+                        // 0. Symbols whose semantics the engine owns are forced absent: a
+                        // builtin that is not a pure passthrough, a denylisted name, or an
+                        // engine-model symbol such as a TLS dtor. std then takes its fallback
+                        // path, so a real symbol cannot bypass the engine's takeover.
                         const FORCE_ABSENT_WEAK: &[&str] = &["__cxa_thread_atexit_impl"];
                         let engine_owned =
                             self.builtins.get(&Symbol::intern(name)).is_some_and(|b| {
@@ -85,7 +99,8 @@ impl<'tcx> Linker<'tcx> {
                                 || DENY_PREFIX.iter().any(|p| name.starts_with(p))
                                 || FORCE_ABSENT_WEAK.contains(&name);
                         let cell = if engine_owned {
-                            // 判空 cell = 符号缺席（krate 定域 + 双表登记同前）
+                            // Null-test cell: the symbol is absent (placed by krate and
+                            // recorded in both tables as above).
                             if let Some(s) = &mut self.split
                                 && def_id.krate != rustc_hir::def_id::LOCAL_CRATE
                             {
@@ -94,16 +109,19 @@ impl<'tcx> Linker<'tcx> {
                                 self.frozen.alloc(8, 8)
                             }
                         } else {
-                            // GOT 槽（初填 0；启动相按名重填命中值或 0）
+                            // GOT slot, initialized to 0; the startup phase refills it by
+                            // name with the resolved value or 0.
                             self.foreign_slot(name, 0, true)
                         };
                         self.record_both(id, cell);
                         return Ok(cell);
                     }
-                    // 解析序同 fn 取址④：hidden 兜底表 → 归档句柄（链接序）→
-                    // dlsym 全域（native 链接期绑定：归档内定义恒胜全局同名）
-                    let cname =
-                        std::ffi::CString::new(name).map_err(|_| "符号名含 NUL".to_string())?;
+                    // Resolution order matches the fn-address path: hidden fallback table,
+                    // then archive handles in link order, then global dlsym. This mirrors
+                    // native link-time binding, where a definition inside an archive always
+                    // beats a same-named global one.
+                    let cname = std::ffi::CString::new(name)
+                        .map_err(|_| "symbol name contains a NUL byte".to_string())?;
                     let mut p = 0u64;
                     for (bias, syms) in &self.archive_fallbacks {
                         if let Some(&v) = syms.get(name) {
@@ -124,19 +142,23 @@ impl<'tcx> Linker<'tcx> {
                     }
                     if p == 0 {
                         return Err(format!(
-                            "extern static `{name}` 未命中（归档兜底表 / dlsym 全域均无）"
+                            "extern static `{name}` not found (neither the archive fallback \
+                             table nor global dlsym has it)"
                         ));
                     }
-                    // P2 GOT（decision-history §7.5c）：值仍初填本进程解析（冷路径
-                    // 逐位不变），另登记槽位与 foreign 分配——常量发码改槽读、冻结
-                    // 字节重定位登记修补点，启动相按名重填。
+                    // The value is still initialized from this process's resolution, which
+                    // keeps the cold path bit-for-bit unchanged, and the slot is additionally
+                    // registered as a foreign allocation: constant emission reads the slot,
+                    // frozen byte relocation records a fixup, and the startup phase refills
+                    // both by name.
                     let _ = self.foreign_slot(name, p, false);
                     self.record_both(id, p);
                     self.foreign_alloc_sym.insert(id, (name.into(), false));
                     return Ok(p);
                 }
-                // S4 底座静态去重：同一 static 双份物化 = static mut/内部可变性的
-                // 精神分裂（两处地址各自演化），命中必须复用底座地址。
+                // Base-image static dedup: materializing one static twice would split the
+                // identity of a `static mut` or interior-mutable static into two addresses
+                // that evolve independently, so a base-image hit must reuse its address.
                 if !self.base_statics.is_empty() {
                     let sym = self.tcx.symbol_name(Instance::mono(self.tcx, def_id)).name;
                     if let Some(&addr) = self.base_statics.get(sym) {
@@ -144,13 +166,18 @@ impl<'tcx> Linker<'tcx> {
                         return Ok(addr);
                     }
                 }
-                // A2 split：static 身份必需（static mut/内部可变性/&static 相等性），
-                // 一律按 def_id.krate 定域（非本地 → image 区）；image 上下文遇本地
-                // static = purity 封闭被破坏（分类器 bug），响亮拒绝。
+                // A static's identity must be unique (`static mut`, interior mutability,
+                // `&static` equality), so it is always placed by `def_id.krate`: a non-local
+                // static goes to the image region. An image context that meets a local
+                // static means the purity closure is broken by a classifier bug, so fail
+                // loudly.
                 let to_image = if let Some(s) = &self.split {
                     if def_id.krate == rustc_hir::def_id::LOCAL_CRATE {
                         if s.current_image {
-                            panic!("A2 closure violation：image 实例引用本地 static（分类器漏判）");
+                            panic!(
+                                "A2 closure violation: image instance references a local static \
+                                 (classifier missed)"
+                            );
                         }
                         false
                     } else {
@@ -159,24 +186,26 @@ impl<'tcx> Linker<'tcx> {
                 } else {
                     false
                 };
-                // static 的字节 = 初始化器求值产物；可写（static mut/内部可变性）
+                // A static's bytes come from evaluating its initializer and may be writable
+                // (`static mut`, interior mutability).
                 let alloc = self
                     .tcx
                     .eval_static_initializer(def_id)
-                    .map_err(|e| format!("static 初始化器求值失败: {e:?}"))?;
+                    .map_err(|e| format!("static initializer evaluation failed: {e:?}"))?;
                 let addr = self.materialize_in(id, alloc, to_image)?;
                 if to_image {
                     self.record_both(id, addr);
                 }
-                self.static_defs.push((def_id, addr)); // 底座/image 导出素材
+                self.static_defs.push((def_id, addr)); // material for base-image/image export
                 Ok(addr)
             }
             GlobalAlloc::Function { instance } => {
                 let addr = self.fn_entry_addr(instance)?;
                 self.record_both(id, addr);
-                // P2：extern fn 取址（fn-ptr 值 = dlsym 宿主码址）登记 foreign
-                // 分配——常量发码经 foreign_const_operand 出槽读、冻结字节经
-                // materialize_in 重定位登记修补点（槽本体 bake 已开）。
+                // Taking an extern fn's address (its fn-pointer value is the host code
+                // address from dlsym) registers a foreign allocation: constant emission
+                // reads the slot through `foreign_const_operand`, and frozen bytes get a
+                // fixup through `materialize_in` relocation. Baking already created the slot.
                 if self.tcx.is_foreign_item(instance.def_id()) {
                     let name = canonical_link_name(self.tcx.symbol_name(instance).name);
                     let weak = self.tcx.codegen_fn_attrs(instance.def_id()).import_linkage
@@ -186,15 +215,20 @@ impl<'tcx> Linker<'tcx> {
                 Ok(addr)
             }
             GlobalAlloc::VTable(ty, dyn_ty) => {
-                // A2 split 护栏：image 上下文遇本地 Self 类型的 vtable = 封闭破坏。
-                // vtable 地址身份 unspecified（rustc 自身 per-CGU 复制）⇒ 按上下文
-                // 定域（提升双份合规），无需 krate 定域。
+                // Split guard: an image context that meets a vtable for a local `Self` type
+                // breaks the purity closure. Vtable address identity is unspecified, since
+                // rustc itself duplicates vtables per CGU, so the context decides the region
+                // (promoting to two copies is allowed) and `krate` plays no part.
                 if self.split.as_ref().is_some_and(|s| s.current_image)
                     && ty.walk().any(arg_mentions_local)
                 {
-                    panic!("A2 closure violation：image 实例引用本地类型 vtable（分类器漏判）");
+                    panic!(
+                        "A2 closure violation: image instance references a local type's vtable \
+                         (classifier missed)"
+                    );
                 }
-                // 现成的 vtable 分配（F5）——递归走 Memory 路径（含 fn 条目重定位）
+                // rustc already provides the vtable allocation; recurse through the Memory
+                // path, which relocates fn entries too.
                 let principal = dyn_ty
                     .principal()
                     .map(|b| self.tcx.instantiate_bound_regions_with_erased(b));
@@ -204,15 +238,17 @@ impl<'tcx> Linker<'tcx> {
                 Ok(addr)
             }
             GlobalAlloc::TypeId { .. } => {
-                // TypeId"分配"：基址 0——重定位 base+addend 后值 = 128 位类型哈希的
-                // 指针宽片段本身（tier-0 resolve_addr/Miri 同款）
+                // A TypeId "allocation" has base 0: after relocation, base + addend is the
+                // pointer-width piece of the 128-bit type hash itself, as in tier-0
+                // `resolve_addr` and Miri.
                 self.record_addr(id, 0, ctx_image);
                 Ok(0)
             }
         }
     }
 
-    /// 按上下文登记去重表（split；非 split 恒 delta 表）
+    /// Records the address in the dedup table of the context: the delta table unless
+    /// split mode selects the image table.
     pub(super) fn record_addr(&mut self, id: AllocId, addr: u64, ctx_image: bool) {
         match &mut self.split {
             Some(s) if ctx_image => {
@@ -224,7 +260,8 @@ impl<'tcx> Linker<'tcx> {
         }
     }
 
-    /// 身份必需通道的双表登记（split：两上下文都能以同一地址复现 = 单一身份）
+    /// Records an identity-bearing address in both tables, so either context reproduces
+    /// the same address and the identity stays single.
     pub(super) fn record_both(&mut self, id: AllocId, addr: u64) {
         self.alloc_addrs.insert(id, addr);
         if let Some(s) = &mut self.split {

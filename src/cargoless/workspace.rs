@@ -1,7 +1,8 @@
-//! Cargo workspace 的发现、成员展开与继承物化。
+//! Cargo workspace discovery, member expansion and inheritance materialization.
 //!
-//! 这一层只把 workspace 语义归约为若干完整 `PackageManifest`；版本求解和
-//! rustc 调度仍复用原有路径，避免 test/run 各自解释一遍 Cargo.toml。
+//! This layer only reduces workspace semantics to a set of complete `PackageManifest`s;
+//! version resolution and rustc scheduling reuse the existing paths, so `test` and `run`
+//! do not each re-interpret Cargo.toml.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -28,7 +29,12 @@ impl WorkspaceManifest {
     fn read_inner(input: &Path) -> Result<Self, String> {
         let input = std::fs::canonicalize(input)
             .or_else(|_| std::path::absolute(input))
-            .map_err(|e| format!("项目目录绝对化失败 {}: {e}", input.display()))?;
+            .map_err(|e| {
+                format!(
+                    "failed to make project directory absolute {}: {e}",
+                    input.display()
+                )
+            })?;
         let start = if input.file_name().is_some_and(|name| name == "Cargo.toml") {
             input.parent().unwrap_or(Path::new(".")).to_path_buf()
         } else {
@@ -36,9 +42,9 @@ impl WorkspaceManifest {
         };
         let root = find_workspace_root(&start)?.unwrap_or_else(|| start.clone());
         let root_text = std::fs::read_to_string(root.join("Cargo.toml"))
-            .map_err(|e| format!("读取 {}/Cargo.toml 失败: {e}", root.display()))?;
+            .map_err(|e| format!("failed to read {}/Cargo.toml: {e}", root.display()))?;
         let root_value: toml::Value = toml::from_str(&root_text)
-            .map_err(|e| format!("{}/Cargo.toml 解析失败: {e}", root.display()))?;
+            .map_err(|e| format!("failed to parse {}/Cargo.toml: {e}", root.display()))?;
         let Some(workspace) = root_value.get("workspace").and_then(toml::Value::as_table) else {
             let package = PackageManifest::parse(&root_text, &root)?;
             return Ok(Self {
@@ -83,21 +89,23 @@ impl WorkspaceManifest {
             member_dirs.insert(root.clone());
         }
         if member_dirs.is_empty() {
-            return Err("workspace 没有可用成员".into());
+            return Err("workspace has no usable members".into());
         }
 
-        // Cargo 会把 workspace 根目录内的 path 依赖自动纳入成员；exclude
-        // 显式阻断。用物化后的依赖表扫描，workspace.dependencies 继承路径也覆盖。
+        // Cargo automatically makes path dependencies inside the workspace root members;
+        // `exclude` blocks them explicitly. Scanning the materialized dependency tables also
+        // covers paths inherited through workspace.dependencies.
         loop {
             let mut discovered = BTreeSet::new();
             for dir in &member_dirs {
                 let text = std::fs::read_to_string(dir.join("Cargo.toml"))
-                    .map_err(|e| format!("读取 {}/Cargo.toml 失败: {e}", dir.display()))?;
+                    .map_err(|e| format!("failed to read {}/Cargo.toml: {e}", dir.display()))?;
                 let value: toml::Value = toml::from_str(&text)
-                    .map_err(|e| format!("{}/Cargo.toml 解析失败: {e}", dir.display()))?;
+                    .map_err(|e| format!("failed to parse {}/Cargo.toml: {e}", dir.display()))?;
                 if dir != &root && value.get("workspace").is_some() {
                     return Err(format!(
-                        "workspace 成员 {} 自己又声明了 [workspace]；嵌套 workspace 尚未实现",
+                        "workspace member {} declares [workspace] itself; nested workspaces are \
+                         not implemented",
                         dir.display()
                     ));
                 }
@@ -121,20 +129,25 @@ impl WorkspaceManifest {
         let mut members = Vec::new();
         for dir in &member_dirs {
             let text = std::fs::read_to_string(dir.join("Cargo.toml"))
-                .map_err(|e| format!("读取 {}/Cargo.toml 失败: {e}", dir.display()))?;
+                .map_err(|e| format!("failed to read {}/Cargo.toml: {e}", dir.display()))?;
             let value: toml::Value = toml::from_str(&text)
-                .map_err(|e| format!("{}/Cargo.toml 解析失败: {e}", dir.display()))?;
+                .map_err(|e| format!("failed to parse {}/Cargo.toml: {e}", dir.display()))?;
             if dir != &root && value.get("workspace").is_some() {
                 return Err(format!(
-                    "workspace 成员 {} 自己又声明了 [workspace]；嵌套 workspace 尚未实现",
+                    "workspace member {} declares [workspace] itself; nested workspaces are \
+                     not implemented",
                     dir.display()
                 ));
             }
             let materialized = materialize_member(value, &root_value, &root)?;
-            let encoded = toml::to_string(&materialized)
-                .map_err(|e| format!("物化 workspace 成员 {} 失败: {e}", dir.display()))?;
+            let encoded = toml::to_string(&materialized).map_err(|e| {
+                format!(
+                    "failed to materialize workspace member {}: {e}",
+                    dir.display()
+                )
+            })?;
             let mut package = PackageManifest::parse(&encoded, dir)?;
-            // Cargo 只使用顶层 workspace resolver；成员自己的 resolver 被忽略。
+            // Cargo uses only the top-level workspace resolver; a member's own resolver is ignored.
             package.resolver = resolver;
             package.lock_root = root.clone();
             members.push(package);
@@ -157,15 +170,16 @@ impl WorkspaceManifest {
         }
         if let Some(pair) = members.windows(2).find(|pair| pair[0].name == pair[1].name) {
             return Err(format!(
-                "workspace 有两个同名包 `{}`（{} 与 {}）；当前 package 选择不能可靠消歧",
+                "workspace has two packages named `{}` ({} and {}); package selection cannot \
+                 disambiguate them reliably",
                 pair[0].name,
                 pair[0].root.display(),
                 pair[1].root.display()
             ));
         }
-        // resolver 3 的 fallback 排序和新 lock 的格式选择都使用整个 workspace
-        // 的最低 MSRV。未声明 rust-version 的成员以当前 rustc 计入；这与
-        // Cargo 的混合 MSRV workspace 启发式一致。
+        // Both resolver 3's fallback ordering and the new lock's format choice use the lowest
+        // MSRV of the whole workspace. A member without rust-version counts as the current rustc,
+        // matching Cargo's mixed-MSRV workspace heuristic.
         let current_rust = current_rust_version()?;
         let workspace_rust = members
             .iter()
@@ -195,7 +209,7 @@ impl WorkspaceManifest {
             let dirs = expand_patterns(&root, &defaults, true, "workspace.default-members")?;
             if let Some(outside) = dirs.iter().find(|dir| !member_dirs.contains(*dir)) {
                 return Err(format!(
-                    "workspace.default-members 的 {} 不是 workspace 成员",
+                    "workspace.default-members {} is not a workspace member",
                     outside.display()
                 ));
             }
@@ -213,12 +227,13 @@ impl WorkspaceManifest {
                     continue;
                 }
                 let text = std::fs::read_to_string(&manifest)
-                    .map_err(|e| format!("读取 {} 失败: {e}", manifest.display()))?;
+                    .map_err(|e| format!("failed to read {}: {e}", manifest.display()))?;
                 let value: toml::Value = toml::from_str(&text)
-                    .map_err(|e| format!("{} 解析失败: {e}", manifest.display()))?;
+                    .map_err(|e| format!("failed to parse {}: {e}", manifest.display()))?;
                 if value.get("package").is_some() {
                     return Err(format!(
-                        "包 {} 位于 workspace 内，但既不是成员也未被 exclude；Cargo 会拒绝该形态",
+                        "package {} is inside the workspace but is neither a member nor excluded; \
+                         Cargo rejects this shape",
                         dir.display()
                     ));
                 }
@@ -233,8 +248,8 @@ impl WorkspaceManifest {
         })
     }
 
-    /// Cargo package ID spec 的 workspace 子集：包名、`name@version`，以及
-    /// `path+file:///...#name@version`。返回多项时也像 Cargo 一样要求消歧。
+    /// The workspace subset of Cargo package ID specs: bare name, `name@version`, and
+    /// `path+file:///...#name@version`. Like Cargo, multiple matches require disambiguation.
     pub fn member_by_spec(&self, spec: &str) -> Result<&PackageManifest, String> {
         let parsed = PackageSpec::parse(spec)?;
         let matches: Vec<_> = self
@@ -244,9 +259,11 @@ impl WorkspaceManifest {
             .collect();
         match matches.as_slice() {
             [member] => Ok(*member),
-            [] => Err(format!("workspace 中没有匹配 package spec `{spec}` 的包")),
+            [] => Err(format!(
+                "no workspace package matches package spec `{spec}`"
+            )),
             _ => Err(format!(
-                "package spec `{spec}` 匹配多个包，请补版本或完整 path package ID"
+                "package spec `{spec}` matches multiple packages; add a version or a full path package ID"
             )),
         }
     }
@@ -265,8 +282,10 @@ impl PackageSpec {
             .map_or((None, spec), |(source, fragment)| (Some(source), fragment));
         let (name, version) = match fragment.rsplit_once('@') {
             Some((name, version)) if !name.is_empty() && !version.is_empty() => {
-                let requirement = semver::VersionReq::parse(&format!("={version}"))
-                    .map_err(|error| format!("package spec `{spec}` 的版本非法: {error}"))?;
+                let requirement =
+                    semver::VersionReq::parse(&format!("={version}")).map_err(|error| {
+                        format!("invalid version in package spec `{spec}`: {error}")
+                    })?;
                 (Some(name.to_string()), Some(requirement))
             }
             _ if !fragment.is_empty() => (Some(fragment.to_string()), None),
@@ -278,7 +297,7 @@ impl PackageSpec {
                     .strip_prefix("path+file://")
                     .or_else(|| source.strip_prefix("file://"))
                     .ok_or_else(|| {
-                        format!("workspace package spec `{spec}` 的 source 不是 path+file")
+                        format!("workspace package spec `{spec}` source is not path+file")
                     })?;
                 percent_decode(encoded).map(PathBuf::from)
             })
@@ -312,11 +331,11 @@ fn percent_decode(input: &str) -> Result<String, String> {
         if bytes[at] == b'%' {
             let hex = bytes
                 .get(at + 1..at + 3)
-                .ok_or_else(|| format!("file URL 的百分号转义不完整: `{input}`"))?;
+                .ok_or_else(|| format!("incomplete percent escape in file URL: `{input}`"))?;
             let text = std::str::from_utf8(hex).map_err(|error| error.to_string())?;
             out.push(
                 u8::from_str_radix(text, 16)
-                    .map_err(|_| format!("file URL 的百分号转义非法: `%{text}`"))?,
+                    .map_err(|_| format!("invalid percent escape in file URL: `%{text}`"))?,
             );
             at += 3;
         } else {
@@ -324,7 +343,7 @@ fn percent_decode(input: &str) -> Result<String, String> {
             at += 1;
         }
     }
-    String::from_utf8(out).map_err(|error| format!("file URL 不是 UTF-8: {error}"))
+    String::from_utf8(out).map_err(|error| format!("file URL is not UTF-8: {error}"))
 }
 
 fn inferred_package_resolver(root: &toml::Value) -> Option<String> {
@@ -358,9 +377,9 @@ fn find_workspace_root(start: &Path) -> Result<Option<PathBuf>, String> {
             continue;
         }
         let text = std::fs::read_to_string(&file)
-            .map_err(|e| format!("读取 {} 失败: {e}", file.display()))?;
-        let value: toml::Value =
-            toml::from_str(&text).map_err(|e| format!("{} 解析失败: {e}", file.display()))?;
+            .map_err(|e| format!("failed to read {}: {e}", file.display()))?;
+        let value: toml::Value = toml::from_str(&text)
+            .map_err(|e| format!("failed to parse {}: {e}", file.display()))?;
         if value.get("workspace").is_some() {
             return Ok(Some(dir.to_path_buf()));
         }
@@ -374,12 +393,12 @@ fn string_array(value: Option<&toml::Value>, field: &str) -> Result<Vec<String>,
     };
     value
         .as_array()
-        .ok_or_else(|| format!("{field} 必须是字符串数组"))?
+        .ok_or_else(|| format!("{field} must be an array of strings"))?
         .iter()
         .map(|item| {
             item.as_str()
                 .map(str::to_string)
-                .ok_or_else(|| format!("{field} 包含非字符串成员"))
+                .ok_or_else(|| format!("{field} contains a non-string member"))
         })
         .collect()
 }
@@ -394,7 +413,7 @@ fn expand_patterns(
     for pattern in patterns {
         if Path::new(pattern).is_absolute() {
             return Err(format!(
-                "workspace 成员模式 `{pattern}` 必须相对 workspace 根"
+                "workspace member pattern `{pattern}` must be relative to the workspace root"
             ));
         }
         let parts: Vec<&str> = pattern.split('/').filter(|part| !part.is_empty()).collect();
@@ -402,7 +421,7 @@ fn expand_patterns(
         expand_pattern_at(root, &parts, 0, &mut matches)?;
         if require_match && matches.is_empty() {
             return Err(format!(
-                "{field} 的模式 `{pattern}` 没有匹配含 Cargo.toml 的包"
+                "{field} pattern `{pattern}` matches no package containing Cargo.toml"
             ));
         }
         out.extend(matches);
@@ -428,13 +447,14 @@ fn expand_pattern_at(
     }
     let part = parts[at];
     if part == "**" {
-        // `**` 可吃零段或任意多段。
+        // `**` may consume zero or any number of segments.
         expand_pattern_at(dir, parts, at + 1, out)?;
         let Ok(entries) = std::fs::read_dir(dir) else {
             return Ok(());
         };
         for entry in entries {
-            let entry = entry.map_err(|e| format!("读取 workspace 成员目录失败: {e}"))?;
+            let entry =
+                entry.map_err(|e| format!("failed to read workspace member directory: {e}"))?;
             if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
                 expand_pattern_at(&entry.path(), parts, at, out)?;
             }
@@ -444,10 +464,14 @@ fn expand_pattern_at(
     if !part.contains(['*', '?', '[', '\\']) {
         return expand_pattern_at(&dir.join(part), parts, at + 1, out);
     }
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| format!("展开 workspace 成员模式时读取 {} 失败: {e}", dir.display()))?;
+    let entries = std::fs::read_dir(dir).map_err(|e| {
+        format!(
+            "failed to read {} while expanding workspace member patterns: {e}",
+            dir.display()
+        )
+    })?;
     for entry in entries {
-        let entry = entry.map_err(|e| format!("读取 workspace 成员目录失败: {e}"))?;
+        let entry = entry.map_err(|e| format!("failed to read workspace member directory: {e}"))?;
         if entry.file_type().map_err(|e| e.to_string())?.is_dir()
             && wildcard_match(part, &entry.file_name().to_string_lossy())?
         {
@@ -484,7 +508,7 @@ fn wildcard_match_at(
         Some('\\') => {
             let literal = pattern
                 .get(pi + 1)
-                .ok_or_else(|| "workspace glob 末尾不能是反斜杠".to_string())?;
+                .ok_or_else(|| "workspace glob may not end with a backslash".to_string())?;
             ti < text.len()
                 && text[ti] == *literal
                 && wildcard_match_at(pattern, text, pi + 2, ti + 1, memo)?
@@ -521,9 +545,9 @@ fn match_character_class(
         }
         let (current, consumed) = if current == '\\' {
             (
-                *pattern
-                    .get(at + 1)
-                    .ok_or_else(|| "workspace glob 字符组转义不完整".to_string())?,
+                *pattern.get(at + 1).ok_or_else(|| {
+                    "incomplete escape in workspace glob character class".to_string()
+                })?,
                 2,
             )
         } else {
@@ -532,7 +556,7 @@ fn match_character_class(
         if pattern.get(at + consumed) == Some(&'-') {
             let end = *pattern
                 .get(at + consumed + 1)
-                .ok_or_else(|| "workspace glob 字符范围不完整".to_string())?;
+                .ok_or_else(|| "incomplete character range in workspace glob".to_string())?;
             matched |= candidate.is_some_and(|value| current <= value && value <= end);
             at += consumed + 2;
         } else {
@@ -540,7 +564,7 @@ fn match_character_class(
             at += consumed;
         }
     }
-    Err("workspace glob 字符组缺少 `]`".into())
+    Err("workspace glob character class is missing `]`".into())
 }
 
 fn materialize_member(
@@ -550,11 +574,11 @@ fn materialize_member(
 ) -> Result<toml::Value, String> {
     let member_table = member
         .as_table_mut()
-        .ok_or_else(|| "成员 Cargo.toml 顶层不是表".to_string())?;
+        .ok_or_else(|| "member Cargo.toml top level is not a table".to_string())?;
     let workspace = workspace_root
         .get("workspace")
         .and_then(toml::Value::as_table)
-        .ok_or_else(|| "workspace 根缺 [workspace]".to_string())?;
+        .ok_or_else(|| "workspace root is missing [workspace]".to_string())?;
 
     if let Some(package) = member_table
         .get_mut("package")
@@ -588,17 +612,21 @@ fn materialize_member(
                     "version",
                 ];
                 if !INHERITABLE.contains(&key.as_str()) {
-                    return Err(format!("package.{key} 不能从 workspace.package 继承"));
+                    return Err(format!(
+                        "package.{key} cannot be inherited from workspace.package"
+                    ));
                 }
                 if inherited_value.is_some_and(|table| table.len() != 1) {
                     return Err(format!(
-                        "package.{key}.workspace=true 不能与其他子键同时使用"
+                        "package.{key}.workspace=true cannot be combined with other sub-keys"
                     ));
                 }
                 let value = inherited
                     .and_then(|table| table.get(&key))
                     .cloned()
-                    .ok_or_else(|| format!("package.{key} 继承 workspace，但根没有该字段"))?;
+                    .ok_or_else(|| {
+                        format!("package.{key} inherits workspace but the root has no such field")
+                    })?;
                 package.insert(key, value);
             }
         }
@@ -615,12 +643,13 @@ fn materialize_member(
         })
     {
         if lints.len() != 1 {
-            return Err("[lints] workspace=true 不能与其他 lint 同时声明".into());
+            return Err(
+                "[lints] workspace=true cannot be declared together with other lints".into(),
+            );
         }
-        let inherited = workspace
-            .get("lints")
-            .cloned()
-            .ok_or_else(|| "[lints] 继承 workspace，但根没有 [workspace.lints]".to_string())?;
+        let inherited = workspace.get("lints").cloned().ok_or_else(|| {
+            "[lints] inherits workspace but the root has no [workspace.lints]".to_string()
+        })?;
         member_table.insert("lints".into(), inherited);
     }
 
@@ -656,13 +685,13 @@ fn materialize_member(
         }
     }
 
-    // Cargo 只读取 workspace 根的 profile；成员自己的 profile 不生效。
+    // Cargo reads only the workspace root's profile; a member's own profile has no effect.
     if let Some(profile) = workspace_root.get("profile").cloned() {
         member_table.insert("profile".into(), profile);
     } else {
         member_table.remove("profile");
     }
-    // Cargo 只读取 workspace 根的 patch/replace；成员中的同名表被忽略。
+    // Cargo reads only the workspace root's patch/replace; same-named tables in members are ignored.
     for key in ["patch", "replace"] {
         match workspace_root.get(key).cloned() {
             Some(mut value) => {
@@ -739,7 +768,9 @@ fn materialize_dependency_table(
             .and_then(toml::Value::as_table)
             .and_then(|table| table.get(&name))
             .cloned()
-            .ok_or_else(|| format!("{field}.{name} 继承 workspace，但根没有该依赖"))?;
+            .ok_or_else(|| {
+                format!("{field}.{name} inherits workspace but the root has no such dependency")
+            })?;
         deps.insert(name, merge_dependency(base, local, root)?);
     }
     Ok(())
@@ -796,10 +827,12 @@ fn merge_dependency(
             table
         }
         toml::Value::Table(table) => table,
-        _ => return Err("workspace dependency 必须是字符串或表".into()),
+        _ => return Err("workspace dependency must be a string or a table".into()),
     };
     if base.contains_key("optional") {
-        return Err("workspace.dependencies 不能声明 optional；应由成员依赖声明".into());
+        return Err(
+            "workspace.dependencies cannot declare optional; the member dependency must".into(),
+        );
     }
     if let Some(path) = base.get("path").and_then(toml::Value::as_str) {
         base.insert(
@@ -809,27 +842,27 @@ fn merge_dependency(
     }
     let local = local
         .as_table()
-        .ok_or_else(|| "workspace=true 依赖必须是表".to_string())?;
+        .ok_or_else(|| "a workspace=true dependency must be a table".to_string())?;
     if let Some(key) = local
         .keys()
         .find(|key| !matches!(key.as_str(), "workspace" | "features" | "optional"))
     {
         return Err(format!(
-            "继承的 workspace 依赖除 features/optional 外不能再声明 `{key}`"
+            "an inherited workspace dependency cannot declare `{key}` beyond features/optional"
         ));
     }
     let mut features = match base.remove("features") {
         Some(value) => value
             .as_array()
             .cloned()
-            .ok_or_else(|| "workspace dependency 的 features 必须是数组".to_string())?,
+            .ok_or_else(|| "workspace dependency features must be an array".to_string())?,
         None => Vec::new(),
     };
     if let Some(extra) = local.get("features") {
         features.extend(
             extra
                 .as_array()
-                .ok_or_else(|| "成员依赖的 features 必须是数组".to_string())?
+                .ok_or_else(|| "member dependency features must be an array".to_string())?
                 .iter()
                 .cloned(),
         );
@@ -1002,7 +1035,7 @@ mod tests {
         )
         .unwrap();
         let error = WorkspaceManifest::read(&unlisted).unwrap_err();
-        assert!(error.contains("既不是成员也未被 exclude"), "{error}");
+        assert!(error.contains("neither a member nor excluded"), "{error}");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1143,6 +1176,6 @@ mod tests {
         )
         .unwrap();
         let error = materialize_member(inherited, &invalid_root, &dir).unwrap_err();
-        assert!(error.contains("不能声明 optional"), "{error}");
+        assert!(error.contains("cannot declare optional"), "{error}");
     }
 }

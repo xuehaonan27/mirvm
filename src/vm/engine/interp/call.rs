@@ -1,7 +1,9 @@
-//! Call and incoming FFI (moved whole from interp.rs I13): call_fn_addr/cleanup_edge/
-//! call_guarding_terminate/run_cleanup + ret_abi_of/call_guest_ffi/
-//! interp_frame (model A: host recursion, real stack byte guard). call_guest (publish protocol
-//! reader anchor) stays in mod.rs — inseparable from jit/compiler worker writer-side comments.
+//! Call and incoming FFI: `call_fn_addr`, `cleanup_edge`, `call_guarding_terminate`,
+//! `run_cleanup`, `ret_abi_of`, `call_guest_ffi`, `exec_builtin` and `interp_frame`
+//! (model A: host recursion with a real stack byte guard).
+//!
+//! `call_guest` -- the reader anchor of the publish protocol -- stays in `mod.rs` because it
+//! is inseparable from the JIT/compiler worker's writer side.
 
 use super::*;
 use super::{
@@ -22,7 +24,7 @@ pub(super) fn call_fn_addr(ctx: *mut Ctx, addr: u64, args: &[u64], caller: &str)
     call_guest(ctx, fid, args)
 }
 
-/// unwind 边 → cleanup 目标块。
+/// The cleanup target block of an unwind edge, if it has one.
 #[inline]
 pub(super) fn cleanup_edge(u: &UnwindAction) -> Option<Bb> {
     match u {
@@ -31,7 +33,8 @@ pub(super) fn cleanup_edge(u: &UnwindAction) -> Option<Bb> {
     }
 }
 
-/// Terminate 边界的调用包装：panic 到此即 abort（double panic / extern "C" ABI 边界）。
+/// Call wrapper for a `Terminate` unwind edge: a panic reaching it aborts (double panic or an
+/// `extern "C"` ABI boundary).
 #[inline]
 pub(super) fn call_guarding_terminate<R>(unwind: &UnwindAction, f: impl FnOnce() -> R) -> R {
     if let UnwindAction::Terminate = unwind {
@@ -41,34 +44,32 @@ pub(super) fn call_guarding_terminate<R>(unwind: &UnwindAction, f: impl FnOnce()
     }
 }
 
-/// guard.drop 里的 cleanup 链执行（landing pad 的宿主 Rust 写法）：从 cleanup 块跑到
-/// `Resume`。链中 Call 可再入混合执行；链中再 panic：Terminate 边 abort，Continue 边
-/// 穿出 Drop = 宿主 double-panic abort（与 native 一致）。
+/// Runs a cleanup chain in `guard.drop` (the host-Rust form of a landing pad): from the
+/// cleanup block to `Resume`. A `Call` inside the chain may re-enter mixed execution; a panic
+/// inside the chain aborts on a `Terminate` edge, and on a `Continue` edge escapes through
+/// `Drop` as a host double-panic abort (matching native).
 pub(super) fn run_cleanup(ctx: *mut Ctx, func: u32, base: usize, entry: Bb) {
-    // cleanup 内无嵌套 cleanup（MIR 不变量）——独立哑 edge
+    // Cleanup blocks contain no nested cleanup (MIR invariant), so a dummy edge is enough.
     let edge = Cell::new(None);
     match run_blocks(ctx, func, base, &edge, entry) {
-        Exit::Resume => {} // 返回 guard，unwind 自动继续
-        Exit::Ret(..) => engine_abort("cleanup 链以 Return 结束（MIR 不变量破坏）"),
+        Exit::Resume => {} // return to the guard; the host unwinder continues on its own
+        Exit::Ret(..) => engine_abort("cleanup chain ended in Return (MIR invariant broken)"),
     }
 }
 
-/// J1 单一派发点（M5.3a，m5.3-design §2.2）：guest 函数调用的必经口，收拢六处
-/// 原 interp_frame 直调（Call/CallIndirect/CatchUnwind 回调/run_main/run_export/
-/// thunk 蹦床；tsan_mt 豁免——Q4，TSan 通道不编 cranelift，收拢无意义）。
-/// 槽非零 = 已发布编译码（M5.3b 起 i2c 直调 packed 入口）；零 = 计数 + 解释。
-/// 计数 Relaxed（丢计只影响触发时刻）；槽 Acquire 配编译线程 Release（D4 协议）。
 #[inline]
 pub(crate) fn ret_abi_of(ctx: *mut Ctx, func: u32) -> RetAbi {
     let module: &Module = unsafe { &(*(*ctx).shared).module };
     module.funcs[func as usize].ret
 }
 
-/// C1 FFI 入向封送：C 侧实参（marshal_args 产出——标量原样 / 聚合 = 聚合字节
-/// 真地址）按 callee ParamAbi 展开成 ABI 实参槽后 `call_guest`（thunk 工厂与
-/// P1 条目蹦床共用）。ret_addr = 按值聚合返回时 libffi 的结果缓冲地址——仅当
-/// callee RetAbi::Indirect 时作隐藏首实参槽（sret 直传）；小档由调用方对
-/// (lo,hi) 做 FfiAgg 重打包。
+/// C1 inbound FFI marshalling: expands the C-side arguments that `marshal_args` produced
+/// (scalars as-is, aggregates as the true address of their bytes) into ABI argument slots
+/// according to the callee's `ParamAbi`, then calls `call_guest`. Shared by the thunk factory
+/// and the P1 entry trampoline. `ret_addr` is libffi's result buffer for a by-value aggregate
+/// return; it becomes the hidden first argument slot only when the callee returns
+/// `RetAbi::Indirect` (sret passed through), while small forms are re-packed into `FfiAgg`
+/// from `(lo, hi)` by the caller.
 pub(crate) fn call_guest_ffi(
     ctx: *mut Ctx,
     func: u32,
@@ -80,7 +81,9 @@ pub(crate) fn call_guest_ffi(
     let body: &FuncBody = &module.funcs[func as usize];
     let mut av: Vec<u64> = Vec::with_capacity(vals.len() + body.params.len() + 1);
     if let RetAbi::Indirect { .. } = body.ret {
-        av.push(ret_addr.expect("C1：callee 按值聚合返回（RetAbi::Indirect）但无结果地址"));
+        av.push(ret_addr.expect(
+            "C1: callee returns an aggregate by value (RetAbi::Indirect) but has no result address",
+        ));
     }
     let mut ki = 0usize;
     for p in &body.params {
@@ -96,7 +99,7 @@ pub(crate) fn call_guest_ffi(
                     ki += 1;
                 }
                 None => engine_abort(&format!(
-                    "C1 封送缺参（callee fn {} params {:?}）",
+                    "C1 marshalling is missing an argument (callee fn {} params {:?})",
                     body.name, body.params
                 )),
             },
@@ -107,7 +110,7 @@ pub(crate) fn call_guest_ffi(
                     ki += 1;
                 }
                 _ => engine_abort(&format!(
-                    "C1 封送错配：callee `Pair` 参数遇到非标量 C 参（fn {} params {:?} kinds {:?}）",
+                    "C1 marshalling mismatch: a `Pair` callee parameter met a non-scalar C argument (fn {} params {:?} kinds {:?})",
                     body.name, body.params, kinds
                 )),
             },
@@ -117,7 +120,7 @@ pub(crate) fn call_guest_ffi(
                     ki += 1;
                 }
                 _ => engine_abort(&format!(
-                    "C1 封送错配：callee 按址参数遇到非标量 C 参（fn {} params {:?} kinds {:?}）",
+                    "C1 marshalling mismatch: a by-address callee parameter met a non-scalar C argument (fn {} params {:?} kinds {:?})",
                     body.name, body.params, kinds
                 )),
             },
@@ -125,7 +128,7 @@ pub(crate) fn call_guest_ffi(
     }
     if ki != vals.len() {
         engine_abort(&format!(
-            "C1 封送槽数错配：callee fn {} 消费 {ki}，marshal 供 {}",
+            "C1 marshalling slot count mismatch: callee fn {} consumes {ki}, marshal supplies {}",
             body.name,
             vals.len()
         ));
@@ -133,14 +136,15 @@ pub(crate) fn call_guest_ffi(
     call_guest(ctx, func, &av)
 }
 
-/// 读聚合声明序第 idx 个字段的值（Scalar 叶按宽度读；顶层嵌套叶与 Pair/Scalar
-/// 参数形态结构性互斥——同 rustc layout 推导，出现即引擎不变量破坏）。
+/// Reads field `idx` of `agg`, in declaration order, at its declared width for a scalar leaf.
+/// A top-level nested leaf is structurally exclusive with the Pair/Scalar parameter forms by
+/// the same rustc layout derivation, so encountering one breaks an engine invariant.
 pub(super) unsafe fn agg_leaf_at(addr: u64, agg: &FfiAgg, idx: usize) -> u64 {
     let Some(f) = agg.fields.get(idx) else {
-        engine_abort("C1 封送：Pair 参数遇单字段聚合");
+        engine_abort("C1 marshalling: a Pair parameter met a single-field aggregate");
     };
     let FfiLeaf::Scalar(k) = &f.leaf else {
-        engine_abort("C1 封送：顶层嵌套叶遇 Pair 参数");
+        engine_abort("C1 marshalling: a top-level nested leaf met a Pair parameter");
     };
     let p = addr.wrapping_add(f.off as u64) as *const u8;
     unsafe {
@@ -151,24 +155,30 @@ pub(super) unsafe fn agg_leaf_at(addr: u64, agg: &FfiAgg, idx: usize) -> u64 {
             FfiKind::I64 | FfiKind::U64 | FfiKind::F64 | FfiKind::Ptr => {
                 (p as *const u64).read_unaligned()
             }
-            FfiKind::Void | FfiKind::Agg(_) => engine_abort("C1 封送：非法叶类"),
+            FfiKind::Void | FfiKind::Agg(_) => engine_abort("C1 marshalling: illegal leaf kind"),
         }
     }
 }
 
-/// 模型 A：guest 调用 = 宿主递归（spike1/3 验证的形状）。
-/// 调用约定 v2：实参展平 `&[u64]`（pair 占 2 槽、indirect 传地址），返回 (lo, hi)。
-/// guest 栈溢出防护（M5.2 D8a）= **真栈字节守卫**：以本地变量地址近似宿主 SP，
-/// 低于 Ctx 冻结的安全下界（线程栈低端 + 边距）即诊断退出——帧数不设固定上限
-///（旧 8000 帧硬编码对 native 栈界严重失真：native 8MiB 主栈可容 ~10 万浅帧）。
-/// 随线程真实栈自适应；native 语义 = SIGSEGV→"has overflowed its stack"，此处
-/// 为诊断替身（ram-spec §7：溢出深度 unspecified，只承诺近似 native）。
+/// Model A: a guest call is host recursion.
+///
+/// Calling convention v2: arguments are flattened into `&[u64]` (a pair takes 2 slots, an
+/// indirect argument passes its address) and the result is `(lo, hi)`.
+///
+/// Guest stack overflow protection is a real stack byte guard: the address of a local
+/// approximates the host SP, and dropping below the safety floor frozen in the Ctx (thread
+/// stack low end plus margin) exits with a diagnostic. A fixed frame limit would be a poor
+/// proxy for the real bound -- a native 8 MiB main stack holds on the order of 100k shallow
+/// frames -- so the guard adapts to the thread's actual stack instead. Native semantics are
+/// SIGSEGV with "has overflowed its stack"; this guard is the diagnostic stand-in and only
+/// approximates native (the overflow depth is unspecified).
 pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
     let module: &Module = unsafe { &(*(*ctx).shared).module };
     let body: &FuncBody = &module.funcs[func as usize];
 
-    // 序言也会发生 EngineFault（栈守卫、参数 ABI、操作数区穷尽）。
-    // 从第一次修改 Ctx 状态起就建立分阶段守卫，只撤销已完成的步骤。
+    // The prologue can raise an EngineFault too (stack guard, argument ABI, exhausted operand
+    // region), so staged guards are armed from the first Ctx mutation and undo only the steps
+    // already completed.
     let mut guard = FrameGuard {
         ctx,
         depth_active: false,
@@ -177,21 +187,25 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
         unwind_edge: Cell::new(None),
     };
     let Some(depth) = (unsafe { (*ctx).depth.checked_add(1) }) else {
-        engine_abort(&format!("guest 解释深度计数溢出（fn {}）", body.name));
+        engine_abort(&format!(
+            "guest interpretation depth counter overflow (fn {})",
+            body.name
+        ));
     };
     unsafe { (*ctx).depth = depth };
     guard.depth_active = true;
     let sp_approx = &depth as *const u32 as usize;
     if unsafe { (*ctx).stack_floor } > sp_approx {
         engine_abort(&format!(
-            "guest 栈溢出（宿主执行栈触及安全边距；解释深度 {depth}；fn {}）",
+            "guest stack overflow (the host execution stack reached the safety margin; interpretation depth {depth}; fn {})",
             body.name
         ));
     }
 
     let base = region_reserve(ctx, body.frame_size, body.frame_align);
     guard.base = Some(base);
-    // prologue：按 ParamAbi 消费实参槽（槽数先验——不匹配给名字与期望，勿裸越界 panic）
+    // Prologue: consume the argument slots per ParamAbi. The count is checked up front so a
+    // mismatch names the function and the expectation rather than panicking out of bounds.
     let needed: usize = matches!(body.ret, RetAbi::Indirect { .. }) as usize
         + body
             .params
@@ -214,7 +228,8 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
         ));
     }
     let mut ai = 0usize;
-    // Indirect 返回：隐藏首实参 = 目的真地址，存入 sret 槽
+    // Indirect return: the hidden first argument is the true destination address, stored in
+    // the sret slot.
     if let RetAbi::Indirect { sret_off, .. } = body.ret {
         slot_write(
             ctx,
@@ -252,11 +267,11 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
             }
         }
     }
-    // #[track_caller]：&Location 隐藏尾实参
+    // #[track_caller]: the hidden trailing &Location argument
     if let Some(off) = body.caller_loc_off {
         let Some(&loc) = args.get(ai) else {
             engine_abort(&format!(
-                "ABI mismatch: track_caller fn `{}` expects location 尾实参（收到 {} 槽）",
+                "ABI mismatch: track_caller fn `{}` expects the location trailing argument (got {} slots)",
                 body.name,
                 args.len()
             ));
@@ -272,9 +287,10 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
         );
     }
 
-    // 帧守卫始终恢复操作数区；外围 raw catch 按实际异常身份选择 cleanup。
-    // 影子帧入栈（D8e）：合成 IP = FUNC_IP_BASE + func×64（每 FuncId 唯一、非零、
-    // 不可执行的 opaque token；作 backtrace 的 IP 恰好——从不解引用为代码）。
+    // The frame guard always restores the operand region; the surrounding raw catch picks the
+    // cleanup from the actual exception identity.
+    // Push the shadow frame with a synthetic IP for this FuncId: an opaque, non-executable
+    // token used only as a backtrace IP, never dereferenced as code.
     let shadow_marker = 0u8;
     unsafe {
         (*ctx).shadow.push(crate::vm::engine::ctx::ShadowFrame {
@@ -286,8 +302,11 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
     match crate::vm::engine::unwind::catch_raw(|| {
         run_blocks(ctx, func, base, &guard.unwind_edge, 0)
     }) {
-        Ok(Exit::Ret(lo, hi)) => (lo, hi), // guard drop → region 恢复
-        Ok(Exit::Resume) => engine_abort(&format!("Resume 出现在正常执行路径（fn {}）", body.name)),
+        Ok(Exit::Ret(lo, hi)) => (lo, hi), // guard drop restores the region
+        Ok(Exit::Resume) => engine_abort(&format!(
+            "Resume reached on the normal execution path (fn {})",
+            body.name
+        )),
         Err(exception) => {
             if !exception.is_engine_fault()
                 && let Some(cleanup) = guard.unwind_edge.get()
@@ -299,15 +318,17 @@ pub(crate) fn interp_frame(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64)
     }
 }
 
-/// T1-b（m5.4-design §3.2）：CallBuiltin 语义体（自 runblocks.rs 的 630 行臂
-/// 机械提取，零行为变化）——interp 薄臂与 JIT mirvm_call_builtin/mirvm_alloc
-/// 助手共享同一实现本体（蓝图铁律：helper 不复制逻辑）。av = 调用点已展平
-/// 实参（builtin 无 sret 前插）；ret_dst = RetDest::Indirect 的目的真地址
-/// （调用点已求值，x86 向量 lane 的 sret 落点）。返回 (lo, hi)：主标量
-/// lane = (r, 0)；addcarry/subborrow pair lane = (flag, result)；x86 向量
-/// lane 的 sret 字节已在本体内落盘、返 (0, 0)。ret 形态写回由调用点统一
-/// （Ignore/Indirect 不写、Scalar=lo、Pair=(lo,hi)——lower 只发匹配形态，
-/// 原臂内的形态诊断随统一写回退役）。edge 协议随体保留。
+/// Semantics of `CallBuiltin`, shared verbatim by the interpreter's thin arm and the JIT
+/// `mirvm_call_builtin`/`mirvm_alloc` helpers so the two backends cannot drift.
+///
+/// `av` holds the call site's already-flattened arguments (a builtin has no leading sret
+/// slot) and `ret_dst` is the true destination address of a `RetDest::Indirect` result
+/// (evaluated at the call site; the sret landing spot for an x86 vector lane). Returns
+/// `(lo, hi)`: a plain scalar lane returns `(r, 0)`, the addcarry/subborrow pair lane returns
+/// `(flag, result)`, and an x86 vector lane has already stored its sret bytes and returns
+/// `(0, 0)`. The call site performs the uniform write-back (nothing for Ignore/Indirect, `lo`
+/// for Scalar, `(lo, hi)` for Pair) and `lower` only emits matching forms. The `edge`
+/// protocol is owned by this body.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn exec_builtin(
     ctx: *mut Ctx,
@@ -323,19 +344,20 @@ pub(crate) fn exec_builtin(
     // Every host builtin in both backends funnels through here, so this is the
     // one ordinary boundary a `fork` child is guaranteed to reach. The rebuild
     // must not run earlier: `after_fork_child` is kernel-side and may only
-    // store, while this runs with the allocator and thread machinery available
-    // (design §6.3, L2).
+    // store, while this runs with the allocator and thread machinery available.
     crate::telemetry::capture::rebuild_on_boundary();
-    let _ = body; // 签名预留（两调用点诊断对称）；臂内不经 body（module 自 ctx 取）
+    // Reserved in the signature for call-site symmetry; the body reads the module from ctx.
+    let _ = body;
     let module: &Module = unsafe { &(*(*ctx).shared).module };
     let a = |i: usize| av[i];
-    edge.set(cleanup_edge(unwind)); // RaiseException 经此发起 unwind
-    // x86 向量 intrinsic：参数是 indirect 向量地址，返回落到 sret place。
-    // helper 本身带 target_feature，guest 的正常 CPUID 派发负责可达性。
+    edge.set(cleanup_edge(unwind)); // RaiseException starts its unwind through this edge
+    // x86 vector intrinsics take indirect vector addresses and write their result to the sret
+    // place. Each helper carries its own target_feature, so ordinary guest CPUID dispatch
+    // decides whether it is reached.
     let vector_done = match builtin {
         Builtin::X86Pshufb128 => {
             let Some(dst) = ret_dst else {
-                engine_abort("pshufb128 返回形态不是 indirect vector");
+                engine_abort("pshufb128 return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             unsafe { crate::arch::x86_64::pshufb128(dst, a(0) as *const u8, a(1) as *const u8) };
@@ -343,7 +365,7 @@ pub(crate) fn exec_builtin(
         }
         Builtin::X86Pshufb256 => {
             let Some(dst) = ret_dst else {
-                engine_abort("pshufb256 返回形态不是 indirect vector");
+                engine_abort("pshufb256 return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             unsafe { crate::arch::x86_64::pshufb256(dst, a(0) as *const u8, a(1) as *const u8) };
@@ -351,7 +373,7 @@ pub(crate) fn exec_builtin(
         }
         Builtin::X86Sha256Msg1 | Builtin::X86Sha256Msg2 => {
             let Some(dst) = ret_dst else {
-                engine_abort("sha256msg 返回形态不是 indirect vector");
+                engine_abort("sha256msg return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             unsafe {
@@ -365,7 +387,7 @@ pub(crate) fn exec_builtin(
         }
         Builtin::X86Sha256Rnds2 => {
             let Some(dst) = ret_dst else {
-                engine_abort("sha256rnds2 返回形态不是 indirect vector");
+                engine_abort("sha256rnds2 return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             unsafe {
@@ -380,7 +402,7 @@ pub(crate) fn exec_builtin(
         }
         Builtin::X86PsadBw128 | Builtin::X86PsadBw256 => {
             let Some(dst) = ret_dst else {
-                engine_abort("psad.bw 返回形态不是 indirect vector");
+                engine_abort("psad.bw return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             unsafe {
@@ -394,7 +416,7 @@ pub(crate) fn exec_builtin(
         }
         Builtin::X86Pclmulqdq => {
             let Some(dst) = ret_dst else {
-                engine_abort("pclmulqdq 返回形态不是 indirect vector");
+                engine_abort("pclmulqdq return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             unsafe {
@@ -407,7 +429,7 @@ pub(crate) fn exec_builtin(
         | Builtin::X86AesDec
         | Builtin::X86AesDecLast => {
             let Some(dst) = ret_dst else {
-                engine_abort("aesni 返回形态不是 indirect vector");
+                engine_abort("aesni return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             let (x, k) = (a(0) as *const u8, a(1) as *const u8);
@@ -423,7 +445,7 @@ pub(crate) fn exec_builtin(
         }
         Builtin::X86AesImc => {
             let Some(dst) = ret_dst else {
-                engine_abort("aesimc 返回形态不是 indirect vector");
+                engine_abort("aesimc return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             unsafe { crate::arch::x86_64::aesimc(dst, a(0) as *const u8) };
@@ -431,7 +453,7 @@ pub(crate) fn exec_builtin(
         }
         Builtin::X86AesKeygenAssist => {
             let Some(dst) = ret_dst else {
-                engine_abort("aeskeygenassist 返回形态不是 indirect vector");
+                engine_abort("aeskeygenassist return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             unsafe { crate::arch::x86_64::aeskeygenassist(dst, a(0) as *const u8, a(1)) };
@@ -439,7 +461,7 @@ pub(crate) fn exec_builtin(
         }
         Builtin::X86Permd256 => {
             let Some(dst) = ret_dst else {
-                engine_abort("permd 返回形态不是 indirect vector");
+                engine_abort("permd return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             unsafe { crate::arch::x86_64::permd256(dst, a(0) as *const u8, a(1) as *const u8) };
@@ -450,7 +472,7 @@ pub(crate) fn exec_builtin(
         | Builtin::X86PmaddWd128
         | Builtin::X86PmaddWd256 => {
             let Some(dst) = ret_dst else {
-                engine_abort("pmadd 返回形态不是 indirect vector");
+                engine_abort("pmadd return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             let (x, y) = (a(0) as *const u8, a(1) as *const u8);
@@ -466,10 +488,10 @@ pub(crate) fn exec_builtin(
         }
         Builtin::X86GatherQPd256 | Builtin::X86GatherDPd256 => {
             let Some(dst) = ret_dst else {
-                engine_abort("gather.pd.256 返回形态不是 indirect vector");
+                engine_abort("gather.pd.256 return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
-            // (src vec, base 标量指针, vindex vec, mask vec, scale imm)
+            // (src vec, base scalar pointer, vindex vec, mask vec, scale imm)
             unsafe {
                 if matches!(builtin, Builtin::X86GatherQPd256) {
                     crate::arch::x86_64::gather_q_pd_256(
@@ -500,7 +522,7 @@ pub(crate) fn exec_builtin(
         | Builtin::X86Pmadd52Lo512
         | Builtin::X86Pmadd52Hi512 => {
             let Some(dst) = ret_dst else {
-                engine_abort("vpmadd52 返回形态不是 indirect vector");
+                engine_abort("vpmadd52 return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             let (x, y, z) = (a(0) as *const u8, a(1) as *const u8, a(2) as *const u8);
@@ -531,7 +553,7 @@ pub(crate) fn exec_builtin(
         | Builtin::X86MaxPs256
         | Builtin::X86MinPs256 => {
             let Some(dst) = ret_dst else {
-                engine_abort("max/min.ps 返回形态不是 indirect vector");
+                engine_abort("max/min.ps return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             let (x, y) = (a(0) as *const u8, a(1) as *const u8);
@@ -547,7 +569,7 @@ pub(crate) fn exec_builtin(
         }
         Builtin::X86MaxSd | Builtin::X86MinSd => {
             let Some(dst) = ret_dst else {
-                engine_abort("max/min.sd 返回形态不是 indirect vector");
+                engine_abort("max/min.sd return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             let (x, y) = (a(0) as *const u8, a(1) as *const u8);
@@ -565,7 +587,7 @@ pub(crate) fn exec_builtin(
         | Builtin::X86MaxPd256
         | Builtin::X86MinPd256 => {
             let Some(dst) = ret_dst else {
-                engine_abort("max/min.pd 返回形态不是 indirect vector");
+                engine_abort("max/min.pd return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             let (x, y) = (a(0) as *const u8, a(1) as *const u8);
@@ -581,7 +603,7 @@ pub(crate) fn exec_builtin(
         }
         Builtin::X86CmpPs128 | Builtin::X86CmpPs256 => {
             let Some(dst) = ret_dst else {
-                engine_abort("cmp.ps 返回形态不是 indirect vector");
+                engine_abort("cmp.ps return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             let (x, y, imm) = (a(0) as *const u8, a(1) as *const u8, a(2));
@@ -596,7 +618,7 @@ pub(crate) fn exec_builtin(
         }
         Builtin::X86CmpPd128 | Builtin::X86CmpPd256 => {
             let Some(dst) = ret_dst else {
-                engine_abort("cmp.pd 返回形态不是 indirect vector");
+                engine_abort("cmp.pd return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             let (x, y, imm) = (a(0) as *const u8, a(1) as *const u8, a(2));
@@ -611,7 +633,7 @@ pub(crate) fn exec_builtin(
         }
         Builtin::X86RoundPs128 | Builtin::X86RoundPs256 => {
             let Some(dst) = ret_dst else {
-                engine_abort("round.ps 返回形态不是 indirect vector");
+                engine_abort("round.ps return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             let (x, imm) = (a(0) as *const u8, a(1));
@@ -629,7 +651,7 @@ pub(crate) fn exec_builtin(
         | Builtin::X86CvtPs2dq256
         | Builtin::X86CvttPs2dq256 => {
             let Some(dst) = ret_dst else {
-                engine_abort("cvt(t).ps2dq 返回形态不是 indirect vector");
+                engine_abort("cvt(t).ps2dq return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             let x = a(0) as *const u8;
@@ -645,7 +667,7 @@ pub(crate) fn exec_builtin(
         }
         Builtin::X86BlendvPs128 | Builtin::X86BlendvPs256 => {
             let Some(dst) = ret_dst else {
-                engine_abort("blendv.ps 返回形态不是 indirect vector");
+                engine_abort("blendv.ps return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             let (x, y, m) = (a(0) as *const u8, a(1) as *const u8, a(2) as *const u8);
@@ -660,7 +682,7 @@ pub(crate) fn exec_builtin(
         }
         Builtin::X86Lddqu128 | Builtin::X86Lddqu256 => {
             let Some(dst) = ret_dst else {
-                engine_abort("lddqu 返回形态不是 indirect vector");
+                engine_abort("lddqu return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             let src = a(0) as *const u8;
@@ -675,7 +697,7 @@ pub(crate) fn exec_builtin(
         }
         Builtin::X86Cvtps2ph128 | Builtin::X86Cvtps2ph256 => {
             let Some(dst) = ret_dst else {
-                engine_abort("vcvtps2ph 返回形态不是 indirect vector");
+                engine_abort("vcvtps2ph return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             let (x, imm) = (a(0) as *const u8, a(1));
@@ -690,7 +712,7 @@ pub(crate) fn exec_builtin(
         }
         Builtin::X86Cvtph2ps128 | Builtin::X86Cvtph2ps256 => {
             let Some(dst) = ret_dst else {
-                engine_abort("vcvtph2ps 返回形态不是 indirect vector");
+                engine_abort("vcvtph2ps return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             let x = a(0) as *const u8;
@@ -705,7 +727,7 @@ pub(crate) fn exec_builtin(
         }
         Builtin::X86PsllD128 | Builtin::X86PsrlD128 => {
             let Some(dst) = ret_dst else {
-                engine_abort("ps{l,r}l.d 返回形态不是 indirect vector");
+                engine_abort("ps{l,r}l.d return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
             let (x, c) = (a(0) as *const u8, a(1) as *const u8);
@@ -724,9 +746,10 @@ pub(crate) fn exec_builtin(
         edge.set(None);
         return (0, 0);
     }
-    // LLVM 的 addcarry/subborrow 返回 `(flag, result)` ScalarPair，而其他
-    // 现有 builtin 都是单标量。pair 专用道返回 (flag, result) = (lo, hi)，
-    // 保持字段顺序与冻结 ABI 一致；Pair 落点写回由调用点统一。
+    // LLVM's addcarry/subborrow return the ScalarPair `(flag, result)`, while every other
+    // builtin returns a single scalar. This dedicated pair lane returns `(flag, result)` =
+    // `(lo, hi)`, keeping field order consistent with the frozen ABI; the call site does the
+    // uniform Pair write-back.
     let carry_result = match builtin {
         Builtin::AddCarry64 => {
             let carry_in = u64::from(a(0) != 0);
@@ -747,13 +770,13 @@ pub(crate) fn exec_builtin(
         return (u64::from(flag), result);
     }
     let r = match builtin {
-        // 分配前哨兵：空操作
+        // Allocation sentinel: no-op.
         Builtin::NoAllocShim => 0,
-        // 托管 Rust Heap（D3：mimalloc 后端，真地址直出）。
-        // 自定义 #[global_allocator]（corpus 批7 c_mimalloc 实锤修）：
-        // 分配是**程序级**语义——本模块登记 shim 时，任何镜像来源的
-        // builtin 臂（含 base 按 Default 会话烘的）一律经 guest shim
-        // 走用户分配器，否则跨堆 free = mimalloc 元数据 SIGSEGV。
+        // Managed Rust heap (mimalloc backend; real addresses go straight out). Once a custom
+        // #[global_allocator] is registered in this module, allocation is a program-level
+        // semantic: every image's builtin arm routes through the guest shim to the user's
+        // allocator, because a cross-heap free otherwise corrupts mimalloc metadata
+        // (SIGSEGV).
         Builtin::RustAlloc => match module.custom_alloc_shims {
             Some(s) => {
                 let (lo, _) =
@@ -791,22 +814,25 @@ pub(crate) fn exec_builtin(
             }
             0
         }
-        // unwind 原语（spike3 的 raise）：宿主 unwinder 载 guest exception 指针
+        // Unwind primitive (raise): the host unwinder carries the guest exception pointer.
         Builtin::UnwindRaise => raise_guest(a(0)),
-        // os:: 最小直通（真实地址零编组；M4.3 正式注册表）
+        // Minimal `os::` passthroughs: real addresses, no marshalling.
         Builtin::HostGetenv => crate::os::process::getenv(a(0)),
         Builtin::HostWrite => crate::os::process::write_fd(a(0) as i32, a(1), a(2) as usize) as u64,
         Builtin::HostStrlen => crate::os::process::c_strlen(a(0)),
         Builtin::HostAbort => std::process::abort(),
-        // fork（D8f）：仅 guest 单线程放行（子进程=全进程拷贝，解释器状态
-        // 天然一致；无其他 guest 线程 ⇒ 无跨线程锁死锁面）。多线程 fork
-        // 响亮拒绝（native 下同为雷区）。exec 族走 foreign 直通，不经此。
+        // fork: allowed only when the guest is single-threaded (the child is a whole-process
+        // copy, so interpreter state is consistent by construction, and with no other guest
+        // threads there is no cross-thread lock to deadlock on). A multithreaded fork is
+        // rejected loudly -- it is just as much a minefield under native. The exec family goes
+        // through the foreign path, not here.
         Builtin::HostFork => {
             if unsafe { crate::vm::engine::ctx::guest_spawned_threads(ctx) } {
                 engine_abort(
-                    "fork() 时 guest 已派生额外线程：多线程 fork 后仅 forking \
-                     线程存活、其他线程持有的锁在子进程永久锁死（native 亦 UB）。\
-                     仅 guest 单线程时放行（D8f/D8l）",
+                    "fork() with guest-spawned threads: after a multithreaded fork only the \
+                     forking thread survives and locks held by other threads stay locked \
+                     forever in the child (UB under native too). Only a single-threaded guest \
+                     is allowed through",
                 );
             }
             let pid = crate::os::process::fork();
@@ -815,10 +841,11 @@ pub(crate) fn exec_builtin(
                 // the copied parent generation. This hook is store-only and
                 // runs before any JIT service is restarted.
                 crate::telemetry::capture::after_fork_child();
-                // 子进程：编译线程不随 fork 存活。SYNC 验证模式
-                //（MIRVM_JIT_SYNC）的发布等待依赖活的编译服务——重启
-                //（继承的已发布码页/槽表/eh_frames 仍有效；队列与 worker
-                // 换新。非 sync 子进程维持解释兜底语义不变）
+                // In the child the compiler thread does not survive fork. The publish wait of
+                // the SYNC verification mode (MIRVM_JIT_SYNC) depends on a live compilation
+                // service, so restart it: inherited published code pages, slot tables and
+                // eh_frames stay valid while the queue and worker are replaced. A non-sync
+                // child keeps the unchanged interpret-as-fallback semantics.
                 #[cfg(feature = "cranelift")]
                 if unsafe { &*(*ctx).shared }.jit.sync {
                     let shared = unsafe { (*ctx).shared_arc() };
@@ -827,9 +854,9 @@ pub(crate) fn exec_builtin(
             }
             pid as u64
         }
-        // atexit 家族（D8g）：登记 guest 回调，返回 0（成功）。
-        // __cxa_atexit(fn, arg, dso)：fn 收 arg；on_exit(fn, arg)：fn 收
-        //（status, arg）。atexit(fn)：无参。统一存 (fn, 形态, arg)。
+        // atexit family: registers a guest callback and returns 0 (success).
+        // __cxa_atexit(fn, arg, dso) calls fn(arg); on_exit(fn, arg) calls fn(status, arg);
+        // atexit(fn) calls fn with no arguments. All are stored uniformly as (fn, kind, arg).
         Builtin::HostAtexit => atexit_register(ctx, a(0), AtexitKind::Plain, 0),
         Builtin::HostCxaAtexit => atexit_register(ctx, a(0), AtexitKind::CxaArg, a(1)),
         Builtin::HostOnExit => atexit_register(ctx, a(0), AtexitKind::OnExit, a(1)),
@@ -885,9 +912,9 @@ pub(crate) fn exec_builtin(
         }
         Builtin::Unsupported(name) => engine_abort(&format!("unsupported builtin `{}`", name.0)),
         Builtin::UnwindDeleteException => {
-            // Itanium `_Unwind_Exception`：exception_class @0，cleanup fn @8。
-            // guest panic 的 cleanup 是冻结 fn 条目；foreign exception 也可能
-            // 带 native cleanup，因此按地址域选择解释调用或 native FFI。
+            // Itanium `_Unwind_Exception`: exception_class @0, cleanup fn @8. A guest panic's
+            // cleanup is a frozen fn entry, but a foreign exception may carry a native cleanup
+            // too, so the address domain picks interpretation or native FFI.
             let exc = a(0);
             let cleanup = mem_read(exc + 8, Width::W64);
             if cleanup != 0 {
@@ -907,27 +934,28 @@ pub(crate) fn exec_builtin(
             }
             0
         }
-        // backtrace 影子帧（D8e）
+        // backtrace shadow frames
         Builtin::UnwindBacktrace => unwind_backtrace(ctx, a(0), a(1)),
         Builtin::UnwindGetIp => mem_read(a(0), Width::W64),
         Builtin::UnwindGetIpInfo => {
-            // (ctx, *ip_before_insn) → IP；*ip_before_insn=0（合成帧无此区分）
+            // (ctx, *ip_before_insn) -> IP; *ip_before_insn = 0 (a synthetic frame has no
+            // such distinction)
             if a(1) != 0 {
                 mem_write(a(1), Width::W32, 0);
             }
             mem_read(a(0), Width::W64)
         }
         Builtin::UnwindGetCfa => mem_read(a(0) + 8, Width::W64),
-        // 合成 IP 即函数入口 → 返回 ip 自身（enclosing fn start）
+        // A synthetic IP is the function entry, so return ip itself (the enclosing fn start).
         Builtin::UnwindFindEnclosing => a(0),
         Builtin::CpuHintNop => 0,
         Builtin::Breakpoint => {
-            // 真 int3：未被跟踪时 = SIGTRAP 终止（native 同语义）
+            // Real int3: when not being traced this terminates with SIGTRAP (native semantics).
             crate::arch::x86_64::asmstub::int3();
             0
         }
-        Builtin::AddCarry64 => unreachable!("addcarry.64 已由 pair 通道处理"),
-        Builtin::SubBorrow64 => unreachable!("subborrow.64 已由 pair 通道处理"),
+        Builtin::AddCarry64 => unreachable!("addcarry.64 is handled by the pair lane"),
+        Builtin::SubBorrow64 => unreachable!("subborrow.64 is handled by the pair lane"),
         Builtin::Xgetbv => crate::arch::x86_64::asmstub::xgetbv(a(0) as u32),
         Builtin::X86Crc32U8 => unsafe {
             u64::from(crate::arch::x86_64::crc32_u8(a(0) as u32, a(1) as u8))
@@ -996,14 +1024,14 @@ pub(crate) fn exec_builtin(
         | Builtin::X86Lddqu256
         | Builtin::X86PsllD128
         | Builtin::X86PsrlD128 => {
-            unreachable!("x86 vector builtin 已由 indirect vector 通道处理")
+            unreachable!("x86 vector builtins are handled by the indirect vector lane")
         }
         Builtin::HostSyscall => crate::os::process::syscall(a(0) as i64, &av[1..]) as u64,
         Builtin::HostSyscallTrace => {
             crate::telemetry::capture::host_syscall(a(0) as i64, &av[1..]) as u64
         }
-        // rust_try：原始 unwinder catch；仅当前 Engine 的 guest panic
-        // 调 catch_fn(data, exc) 返 1，异主/宿主异常继续展开。
+        // rust_try: a raw unwinder catch. Only a guest panic owned by the current Engine
+        // calls catch_fn(data, exc) and returns 1; foreign or host exceptions keep unwinding.
         Builtin::CatchUnwind => {
             let (try_fn, data, catch_fn) = (a(0), a(1), a(2));
             let shared = unsafe { (*ctx).shared_arc() };

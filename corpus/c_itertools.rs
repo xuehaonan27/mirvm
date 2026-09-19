@@ -3,7 +3,7 @@
 [dependencies]
 itertools = "0.13"
 ---
-// 纯计算 crate：迭代器组合子。理论上应全部走通（无 OS 边界）。
+// A pure-compute crate: iterator combinators. No OS boundary, so all paths run.
 use itertools::Itertools;
 
 fn main() {

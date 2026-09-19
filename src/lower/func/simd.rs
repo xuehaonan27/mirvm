@@ -1,15 +1,15 @@
-//! SIMD intrinsic 一族（自 func.rs F15 独立 impl 块整搬）：expand_simd
-//! ~40 个 simd_* 臂 + lane 几何/元素类别（LaneKind 使「忘带类别」不可表示）。
-//! 唯一入口 = intrinsic.rs 的 simd_* 分派。
+//! SIMD intrinsic family: expand_simd with ~40 simd_* arms plus lane geometry
+//! and element kind (LaneKind makes "forgot the kind" unrepresentable).
+//! Sole entry = the simd_* dispatch in intrinsic.rs.
 
 use super::*;
 
 impl<'tcx> LowerCx<'tcx, '_> {
-    /// SIMD lane 几何 + 元素类别（M5.2 D8b）：LaneKind 使"忘带类别"不可表示——
-    /// M4.1 曾对全部 lane 按整数位运算，float lane 的 add/cmp 是静默错值（当时仅因
-    /// corpus 全为整数 lane 未爆雷）。f16/f128 lane 在此拒绝（D8c 接入点；f16 的
-    /// 放行口在 simd_geom_ext，仅 shuffle/cast 两族——位搬运与 lane 转换可精确，
-    /// 逐 lane 算术/比较/归约继续拒绝）。
+    /// SIMD lane geometry + element kind. LaneKind makes "forgot the kind"
+    /// unrepresentable: treating every lane as integer bits makes float lane add/cmp
+    /// silently wrong. f16/f128 lanes are rejected here; f16 is allowed only through
+    /// simd_geom_ext for the shuffle/cast families, where bit movement and lane
+    /// conversion are exact -- per-lane arithmetic/comparison/reduction stay rejected.
     pub(super) fn simd_geom(
         &mut self,
         ty: Ty<'tcx>,
@@ -17,9 +17,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
         self.simd_geom_ext(ty, false)
     }
 
-    /// simd_geom 的 f16 放行形态：allow_f16 时 Float::F16 lane 返回 Float + 2 字节。
-    /// 只有 simd_shuffle（纯位重排）与 simd_cast/simd_as（f16↔f32/f64 经宿主精确
-    /// 转换）调用放行——`_mm_cvtph_ps` 在晚近 stdarch 的 portable 展开正好是这两族。
+    /// f16-allowing form of simd_geom: with allow_f16 a Float::F16 lane returns Float
+    /// plus 2 bytes. Only simd_shuffle (pure bit permutation) and simd_cast/simd_as
+    /// (f16<->f32/f64 via exact host conversion) call it with the flag; stdarch's portable _mm_cvtph_ps expands to exactly these two families.
     pub(super) fn simd_geom_ext(
         &mut self,
         ty: Ty<'tcx>,
@@ -27,7 +27,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
     ) -> Result<(u16, u8, ir::LaneKind, u64), String> {
         let layout = self.layout_of(ty)?;
         let rustc_abi::BackendRepr::SimdVector { element, count } = layout.backend_repr else {
-            return Err(format!("simd intrinsic 非向量参（{ty}）"));
+            return Err(format!("simd intrinsic argument is not a vector ({ty})"));
         };
         let dl = self.tcx.data_layout();
         let lane_bytes = element.size(dl).bytes() as u8;
@@ -37,18 +37,18 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let ok = matches!(f, rustc_abi::Float::F32 | rustc_abi::Float::F64)
                     || (allow_f16 && matches!(f, rustc_abi::Float::F16));
                 if !ok {
-                    return Err(format!("simd 浮点 lane {f:?}（f16/f128，D8c）"));
+                    return Err(format!("simd float lane {f:?} (f16/f128)"));
                 }
                 ir::LaneKind::Float
             }
-            // 指针 lane：真实地址模型下按无符号整数位处置
+            // Pointer lane: under the real-address model, treat it as unsigned integer bits
             rustc_abi::Primitive::Pointer(_) => ir::LaneKind::Int { signed: false },
         };
         Ok((count as u16, lane_bytes, lane, layout.size.bytes()))
     }
 
-    /// SIMD 全家族展开（M5.2 D8b；每操作 = 逐 lane 宿主循环，语义按 LaneKind 分派）。
-    /// 未支持的 simd_* = Err（Trap 占位）。
+    /// Expands the whole SIMD family (each operation is a per-lane host loop, with
+    /// semantics dispatched by LaneKind). An unsupported simd_* returns Err (Trap placeholder).
     pub(super) fn expand_simd(
         &mut self,
         name: &str,
@@ -57,14 +57,14 @@ impl<'tcx> LowerCx<'tcx, '_> {
         destination: &mir::Place<'tcx>,
     ) -> Result<Vec<Stmt>, String> {
         use ir::{LaneKind, SimdBinOp as S, SimdReduceOp as R, SimdUnOp as U};
-        // 向量 operand → place 地址表达式（Bytes 通道；常量已物化进冻结区）
+        // Vector operand -> place address expression (Bytes channel; constants are already materialized in the frozen region)
         let vplace = |cx: &mut Self, op: &mir::Operand<'tcx>| -> Result<PlaceExpr, String> {
             match cx.lower_operand(op)? {
                 LoweredOp::Bytes { place, .. } => Ok(place.expr()),
-                _ => Err("simd 实参非向量（M4.1+）".into()),
+                _ => Err("simd argument is not a vector".into()),
             }
         };
-        // 异形臂前置：第一泛参不是向量（标量位掩码），几何取自数据向量
+        // Special-shaped arm first: the first generic arg is not a vector (a scalar bitmask), so geometry comes from the data vector
         if name == "simd_select_bitmask" {
             let (lanes, lane_bytes, _, _) = self.simd_geom(inst.args.type_at(1))?;
             let mask = self.lower_operand_scalar(&args[0].node)?;
@@ -80,9 +80,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 lane_bytes,
             }]);
         }
-        // 常规几何：T = 第一个泛型参（多数臂的数据向量；select/masked 的 mask 向量）
+        // Normal geometry: T = the first generic arg (the data vector for most arms; the mask vector for select/masked)
         let vec_ty = inst.args.type_at(0);
-        // f16 lane 放行仅限 shuffle/cast 两族（位搬运/lane 转换精确；算术族继续拒）
+        // f16 lanes are allowed only for the shuffle/cast families (bit movement / lane conversion are exact; arithmetic stays rejected)
         let f16_ok = matches!(name, "simd_shuffle" | "simd_cast" | "simd_as");
         let (lanes, lane_bytes, lane, vec_size) = self.simd_geom_ext(vec_ty, f16_ok)?;
         let count = lanes as u64;
@@ -100,7 +100,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 lane_bytes,
             }])
         };
-        // 单目（浮点族/位族的 lane 类别在此校验——执行器只留防御断言）
+        // Unary (the float/integer lane kind is validated here; the executor keeps only defensive asserts)
         let un = |cx: &mut Self, op: U, need: Option<LaneKind>| -> Result<Vec<Stmt>, String> {
             if let Some(need) = need {
                 let ok = match need {
@@ -108,7 +108,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     LaneKind::Int { .. } => matches!(lane, LaneKind::Int { .. }),
                 };
                 if !ok {
-                    return Err(format!("{name} 要求 {need:?} lane，实为 {lane:?}"));
+                    return Err(format!("{name} requires a {need:?} lane, found {lane:?}"));
                 }
             }
             let a = vplace(cx, &args[0].node)?;
@@ -157,7 +157,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             "simd_saturating_sub" => bin(self, S::SatSub),
             "simd_minimum_number_nsz" | "simd_maximum_number_nsz" => {
                 if lane != LaneKind::Float {
-                    return Err(format!("{name} 要求浮点 lane，实为 {lane:?}"));
+                    return Err(format!("{name} requires a float lane, found {lane:?}"));
                 }
                 bin(
                     self,
@@ -192,7 +192,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             "simd_bitreverse" => un(self, U::Bitreverse, INT),
             "simd_fma" | "simd_relaxed_fma" => {
                 if lane != LaneKind::Float {
-                    return Err(format!("{name} 要求浮点 lane，实为 {lane:?}"));
+                    return Err(format!("{name} requires a float lane, found {lane:?}"));
                 }
                 let a = vplace(self, &args[0].node)?;
                 let b = vplace(self, &args[1].node)?;
@@ -209,7 +209,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
             "simd_funnel_shl" | "simd_funnel_shr" => {
                 if !matches!(lane, LaneKind::Int { .. }) {
-                    return Err(format!("{name} 要求整数 lane，实为 {lane:?}"));
+                    return Err(format!("{name} requires an integer lane, found {lane:?}"));
                 }
                 let a = vplace(self, &args[0].node)?;
                 let b = vplace(self, &args[1].node)?;
@@ -230,14 +230,16 @@ impl<'tcx> LowerCx<'tcx, '_> {
             | "simd_cast_ptr"
             | "simd_expose_provenance"
             | "simd_with_exposed_provenance" => {
-                // <T, U>(x: T) -> U：目的几何从 destination place 取。
-                // 指针族强制整数视角（真实地址模型：provenance 即位透传）。
+                // <T, U>(x: T) -> U: destination geometry comes from the destination place.
+                // The pointer family forces the integer view (real-address model: provenance is the bits passed through).
                 let ptr_family = name != "simd_cast" && name != "simd_as";
                 let dst_p = self.resolve_place(destination)?;
-                // f16 lane 放行（D8c 向量形态：f16↔f32/f64 经宿主精确转换）
+                // f16 lanes allowed (vector form: f16<->f32/f64 via exact host conversion)
                 let (dst_lanes, dst_bytes, dst_lane, _) = self.simd_geom_ext(dst_p.ty, true)?;
                 if dst_lanes != lanes {
-                    return Err(format!("{name} 两侧 lanes 不等（{lanes} vs {dst_lanes}）"));
+                    return Err(format!(
+                        "{name} lane counts differ ({lanes} vs {dst_lanes})"
+                    ));
                 }
                 let (src_lane, dst_lane) = if ptr_family {
                     let i = LaneKind::Int { signed: false };
@@ -257,10 +259,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }])
             }
             "simd_select" => {
-                // <M, T>(mask: M, if_true: T, if_false: T)：几何主体是数据向量
+                // <M, T>(mask: M, if_true: T, if_false: T): the geometry comes from the data vector
                 let (d_lanes, d_bytes, _, _) = self.simd_geom(inst.args.type_at(1))?;
                 if d_lanes != lanes {
-                    return Err("simd_select mask/data lanes 不等".into());
+                    return Err("simd_select mask/data lane counts differ".into());
                 }
                 let mask = vplace(self, &args[0].node)?;
                 let a = vplace(self, &args[1].node)?;
@@ -277,13 +279,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }])
             }
             "simd_gather" | "simd_scatter" => {
-                // <T, U, V>(val: T, ptr: U, mask: V)：T=数据向量（gather 的 passthru /
-                // scatter 的 values），U=指针向量（lane 恒 8B），V=mask 向量
+                // <T, U, V>(val: T, ptr: U, mask: V): T = data vector (gather's passthru /
+                // scatter's values), U = pointer vector (lane is always 8B), V = mask vector
                 let (p_lanes, p_bytes, _, _) = self.simd_geom(inst.args.type_at(1))?;
                 let (m_lanes, m_bytes, _, _) = self.simd_geom(inst.args.type_at(2))?;
                 if p_lanes != lanes || m_lanes != lanes || p_bytes != 8 {
                     return Err(format!(
-                        "{name} 几何不一致（data={lanes} ptr={p_lanes}×{p_bytes}B mask={m_lanes}）"
+                        "{name} geometry mismatch (data={lanes} ptr={p_lanes}x{p_bytes}B mask={m_lanes})"
                     ));
                 }
                 let val = vplace(self, &args[0].node)?;
@@ -312,12 +314,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
             }
             "simd_masked_load" | "simd_masked_store" => {
-                // <V, U, T, ALIGN>(mask: V, ptr: U, val: T)：第一泛参是 mask 向量；
-                // ptr 是标量元素指针，lane i 地址 = ptr + i×lane。ALIGN 只影响 guest
-                // 的 UB 契约（引擎访存本就逐 lane 非对齐安全）。
+                // <V, U, T, ALIGN>(mask: V, ptr: U, val: T): the first generic arg is the mask
+                // vector; ptr is a scalar element pointer and lane i is at ptr + i x lane.
+                // ALIGN only affects the guest's UB contract (engine accesses are already unaligned-safe per lane).
                 let (d_lanes, d_bytes, _, _) = self.simd_geom(inst.args.type_at(2))?;
                 if d_lanes != lanes {
-                    return Err(format!("{name} mask/data lanes 不等"));
+                    return Err(format!("{name} mask/data lane counts differ"));
                 }
                 let mask = vplace(self, &args[0].node)?;
                 let base = self.lower_operand_scalar(&args[1].node)?;
@@ -350,7 +352,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let (dst_p, w) = self.place_scalar(destination)?;
                 if w.bytes() as u8 != lane_bytes {
                     return Err(format!(
-                        "simd_extract_dyn lane 宽不匹配（vector={lane_bytes}, result={}）",
+                        "simd_extract_dyn lane width mismatch (vector={lane_bytes}, result={})",
                         w.bytes()
                     ));
                 }
@@ -368,7 +370,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let val = self.lower_operand_scalar(&args[2].node)?;
                 if val.width().bytes() as u8 != lane_bytes {
                     return Err(format!(
-                        "simd_insert_dyn lane 宽不匹配（vector={lane_bytes}, value={}）",
+                        "simd_insert_dyn lane width mismatch (vector={lane_bytes}, value={})",
                         val.width().bytes()
                     ));
                 }
@@ -383,11 +385,11 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }])
             }
             "simd_arith_offset" => {
-                // <T, U>(ptr: T, offset: U)：stride = 指针 lane 的 pointee 尺寸
+                // <T, U>(ptr: T, offset: U): stride = the pointee size of the pointer lane
                 let (_, elem_ty) = vec_ty.simd_size_and_type(self.tcx);
-                let pointee = elem_ty
-                    .builtin_deref(true)
-                    .ok_or_else(|| format!("simd_arith_offset lane 非指针（{elem_ty}）"))?;
+                let pointee = elem_ty.builtin_deref(true).ok_or_else(|| {
+                    format!("simd_arith_offset lane is not a pointer ({elem_ty})")
+                })?;
                 let stride = self.layout_of(pointee)?.size.bytes();
                 let ptrs = vplace(self, &args[0].node)?;
                 let offsets = vplace(self, &args[1].node)?;
@@ -433,8 +435,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }])
             }
             "simd_insert" => {
-                // core::intrinsics::simd_insert 的索引契约是编译期常量且必须在界内。
-                // 动态索引由独立的 simd_insert_dyn 表示，不能在这里悄悄接受。
+                // core::intrinsics::simd_insert's index contract requires a compile-time
+                // constant that is in bounds. Dynamic indexing has its own simd_insert_dyn and must not be accepted here.
                 let src = vplace(self, &args[0].node)?;
                 let idx = match self.lower_operand_scalar(&args[1].node)? {
                     Operand::Imm {
@@ -443,38 +445,40 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     } => bits,
                     Operand::Imm { width, .. } => {
                         return Err(format!(
-                            "simd_insert 索引类型宽度应为 u32，实为 {} 字节",
+                            "simd_insert index type width should be u32, found {} bytes",
                             width.bytes()
                         ));
                     }
-                    _ => return Err("simd_insert 索引非常量".into()),
+                    _ => return Err("simd_insert index is not constant".into()),
                 };
                 if idx >= count {
-                    return Err(format!("simd_insert 索引 {idx} 越界（lanes={count}）"));
+                    return Err(format!(
+                        "simd_insert index {idx} out of bounds (lanes={count})"
+                    ));
                 }
                 let (_, lane_ty) = vec_ty.simd_size_and_type(self.tcx);
                 let val_ty = self.op_ty(&args[2].node)?;
                 if val_ty != lane_ty {
                     return Err(format!(
-                        "simd_insert lane 类型不匹配（vector={lane_ty}, value={val_ty}）"
+                        "simd_insert lane type mismatch (vector={lane_ty}, value={val_ty})"
                     ));
                 }
                 let lane_width = Width::from_bytes(lane_bytes as u64)
-                    .ok_or_else(|| format!("simd_insert lane 宽度 {lane_bytes} 未支持"))?;
+                    .ok_or_else(|| format!("simd_insert lane width {lane_bytes} unsupported"))?;
                 let val = self.lower_operand_scalar(&args[2].node)?;
                 if val.width() != lane_width {
                     return Err(format!(
-                        "simd_insert lane 类型宽度不匹配（vector={lane_bytes}, value={}）",
+                        "simd_insert lane type width mismatch (vector={lane_bytes}, value={})",
                         val.width().bytes()
                     ));
                 }
                 let dst = self.resolve_place(destination)?;
                 let size = u32::try_from(vec_size)
-                    .map_err(|_| "simd_insert 向量尺寸超过 u32".to_string())?;
+                    .map_err(|_| "simd_insert vector size exceeds u32".to_string())?;
                 let lane_offset = idx
                     .checked_mul(u64::from(lane_bytes))
                     .and_then(|offset| i32::try_from(offset).ok())
-                    .ok_or_else(|| "simd_insert lane 偏移超过 i32".to_string())?;
+                    .ok_or_else(|| "simd_insert lane offset exceeds i32".to_string())?;
                 Ok(vec![
                     Stmt::Copy {
                         dst: dst.expr(),
@@ -496,28 +500,30 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     } => bits,
                     Operand::Imm { width, .. } => {
                         return Err(format!(
-                            "simd_extract 索引类型宽度应为 u32，实为 {} 字节",
+                            "simd_extract index type width should be u32, found {} bytes",
                             width.bytes()
                         ));
                     }
-                    _ => return Err("simd_extract 索引非常量".into()),
+                    _ => return Err("simd_extract index is not constant".into()),
                 };
                 if idx >= count {
-                    return Err(format!("simd_extract 索引 {idx} 越界（lanes={count}）"));
+                    return Err(format!(
+                        "simd_extract index {idx} out of bounds (lanes={count})"
+                    ));
                 }
                 let (_, lane_ty) = vec_ty.simd_size_and_type(self.tcx);
                 let lane_width = Width::from_bytes(lane_bytes as u64)
-                    .ok_or_else(|| format!("simd_extract lane 宽度 {lane_bytes} 未支持"))?;
+                    .ok_or_else(|| format!("simd_extract lane width {lane_bytes} unsupported"))?;
                 let (dst, dst_width) = self.place_scalar(destination)?;
                 if dst.ty != lane_ty {
                     return Err(format!(
-                        "simd_extract lane 类型不匹配（vector={lane_ty}, result={}）",
+                        "simd_extract lane type mismatch (vector={lane_ty}, result={})",
                         dst.ty
                     ));
                 }
                 if dst_width != lane_width {
                     return Err(format!(
-                        "simd_extract lane 类型宽度不匹配（vector={lane_bytes}, result={}）",
+                        "simd_extract lane type width mismatch (vector={lane_bytes}, result={})",
                         dst_width.bytes()
                     ));
                 }
@@ -525,7 +531,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let lane_offset = idx
                     .checked_mul(u64::from(lane_bytes))
                     .and_then(|offset| i32::try_from(offset).ok())
-                    .ok_or_else(|| "simd_extract lane 偏移超过 i32".to_string())?;
+                    .ok_or_else(|| "simd_extract lane offset exceeds i32".to_string())?;
                 if lane_offset != 0 {
                     let mut steps = lane.steps.to_vec();
                     if let Some(PlaceStep::Offset(offset)) = steps.last_mut() {
@@ -544,20 +550,20 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }])
             }
             "simd_shuffle" => {
-                // (a, b, const idx 数组) -> 重排向量：索引 lower 期已知 → 展开为逐 lane 拷
+                // (a, b, const idx array) -> shuffled vector: indices are known at lowering time, so expand into per-lane copies
                 let mir::Operand::Constant(c) = &args[2].node else {
-                    return Err("simd_shuffle 索引非常量".into());
+                    return Err("simd_shuffle index is not constant".into());
                 };
                 let val = c
                     .const_
                     .eval(self.tcx, self.typing_env, c.span)
-                    .map_err(|e| format!("shuffle 索引求值失败: {e:?}"))?;
+                    .map_err(|e| format!("shuffle index evaluation failed: {e:?}"))?;
                 let mir::ConstValue::Indirect { alloc_id, offset } = val else {
-                    return Err(format!("shuffle 索引形态 {val:?}（M4.2+）"));
+                    return Err(format!("shuffle index shape {val:?}"));
                 };
                 let alloc = self.tcx.global_alloc(alloc_id).unwrap_memory();
                 let ai = alloc.inner();
-                // 索引元素是 u32（stdarch simd_shuffle! 宏产出 [u32; N]）
+                // Index elements are u32 (the stdarch simd_shuffle! macro emits [u32; N])
                 let n_out = (ai.size().bytes() - offset.bytes()) / 4;
                 let bytes = ai.inspect_with_uninit_and_ptr_outside_interpreter(
                     offset.bytes() as usize..ai.size().bytes() as usize,
@@ -565,7 +571,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let pa = vplace(self, &args[0].node)?;
                 let pb = vplace(self, &args[1].node)?;
                 let dst = self.resolve_place(destination)?;
-                let lw = Width::from_bytes(lane_bytes as u64).ok_or("lane 宽度")?;
+                let lw = Width::from_bytes(lane_bytes as u64).ok_or("lane width")?;
                 let mut stmts = Vec::new();
                 for i in 0..n_out as usize {
                     let idx = u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
@@ -599,13 +605,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 Ok(stmts)
             }
             "simd_splat" => {
-                // splat(val: E) -> T：几何从返回向量取（T 是第一个泛型参？splat 的
-                // 泛型序是 <T(向量), E>？——此处从 destination 的 layout 直接冻结，最稳）
+                // splat(val: E) -> T: geometry comes from the return vector. The generic
+                // order of splat is <T(vector), E>, so freezing it directly from the destination layout is safest.
                 let dst_p = self.resolve_place(destination)?;
                 let dst_layout = self.layout_of(dst_p.ty)?;
                 let rustc_abi::BackendRepr::SimdVector { element, count } = dst_layout.backend_repr
                 else {
-                    return Err("simd_splat 目标非向量".into());
+                    return Err("simd_splat target is not a vector".into());
                 };
                 let lb = element.size(self.tcx.data_layout()).bytes() as u8;
                 let val = self.lower_operand_scalar(&args[0].node)?;
@@ -616,7 +622,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     lane_bytes: lb,
                 }])
             }
-            other => Err(format!("intrinsic `{other}`（SIMD，M4.1+）")),
+            other => Err(format!("intrinsic `{other}` (SIMD)")),
         }
     }
 }

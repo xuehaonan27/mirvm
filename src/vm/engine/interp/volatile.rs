@@ -1,12 +1,14 @@
-//! volatile 族（自 interp.rs I3 整搬）：opaque 字节载体 + 分块分解的
-//! mem_read_volatile/mem_write_volatile（MaybeUninit<[u8;N]> 对齐纪律）。
-//! jit helpers 复用同一实现（pub(crate) 再出口在 mod.rs）。
+//! Volatile access: an opaque byte carrier plus the chunked decomposition used by
+//! `mem_read_volatile`/`mem_write_volatile`, which respect `MaybeUninit<[u8; N]>`
+//! alignment discipline. The JIT helpers reuse the same implementation through the
+//! `pub(crate)` re-export in `mod.rs`.
 
 use super::*;
 
-/// 把 guest 中的一个完整值作为 opaque 位型读入。`MaybeUninit<[u8; N]>`
-/// 的对齐是 1，因此不会把 `[u8; N]` 之类低对齐 guest 类型错误地
-/// 强化为宿主整数对齐；`MaybeUninit` 同时允许聚合值含未初始化 padding。
+/// Reads one whole guest value as an opaque bit pattern. `MaybeUninit<[u8; N]>` has
+/// alignment 1, so a low-alignment guest type such as `[u8; N]` is not wrongly
+/// strengthened to host integer alignment; `MaybeUninit` also permits an aggregate
+/// value with uninitialized padding.
 #[inline]
 pub(super) unsafe fn volatile_load_n<const N: usize>(src: *const u8, dst: *mut u8) {
     let value = unsafe { (src as *const MaybeUninit<[u8; N]>).read_volatile() };
@@ -15,8 +17,8 @@ pub(super) unsafe fn volatile_load_n<const N: usize>(src: *const u8, dst: *mut u
     };
 }
 
-/// 先按原始字节（包括可能未初始化的 padding）搬入 opaque 载体，
-/// 再发出一个等宽 volatile store。
+/// Copies the raw bytes (including possibly uninitialized padding) into the opaque
+/// carrier first, then issues one equally wide volatile store.
 #[inline]
 pub(super) unsafe fn volatile_store_n<const N: usize>(dst: *mut u8, src: *const u8) {
     let mut value = MaybeUninit::<[u8; N]>::uninit();
@@ -24,9 +26,9 @@ pub(super) unsafe fn volatile_store_n<const N: usize>(dst: *mut u8, src: *const 
     unsafe { (dst as *mut MaybeUninit<[u8; N]>).write_volatile(value) };
 }
 
-/// 宽 memory-repr volatile 值的后端分解。先/后端都只接触
-/// `MaybeUninit<[u8; N]>`，所以 padding 保持 opaque；16/8/4/2/1 的分块
-/// 对应目标最终必须完成的若干机器访问，不承诺原子性。
+/// Backend decomposition of a wide memory-repr volatile value. Both ends only touch
+/// `MaybeUninit<[u8; N]>`, so padding stays opaque. The 16/8/4/2/1 chunking mirrors
+/// the machine accesses the target must ultimately perform and promises no atomicity.
 #[inline]
 pub(super) unsafe fn volatile_load_chunks(mut src: *const u8, mut dst: *mut u8, mut size: usize) {
     while size >= 16 {

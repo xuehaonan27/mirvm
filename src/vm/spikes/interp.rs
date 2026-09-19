@@ -1,15 +1,17 @@
-//! `interp_frame`：tree-walking 解释器。
+//! `interp_frame`: tree-walking interpreter.
 //!
-//! **模型 A 的关键**：`Call` 处**宿主递归**——guest 调用一层，`interp_frame` 递归一层，
-//! guest 帧就落在 native（宿主）调用栈上（HotSpot/V8 式），而非独立 VM 帧栈（CPython/Lua 式）。
-//! 于是深 guest 递归 = 深 native 递归 = 天然继承 native 栈溢出语义（docs/designs/frame-stack-models.md 的
-//! "栈溢出忠实"）。局部数据放 slaved 操作数区（正交于控制流所在的 native 栈）。
+//! The key to model A: a `Call` recurses in the host -- one guest call, one `interp_frame`
+//! recursion -- so guest frames sit on the native (host) call stack (HotSpot/V8 style)
+//! rather than on a separate VM frame stack (CPython/Lua style). Deep guest recursion is
+//! therefore deep native recursion and inherits native stack-overflow semantics for free.
+//! Local data lives in the slaved operand region, orthogonal to the native stack that
+//! carries control flow.
 
 use super::bytecode::{BinOp, Operand, Program, Rvalue, Stmt, Terminator};
 use super::frame::{OperandRegion, Word};
 use super::memory::GuestMemory;
 
-/// 执行环境：只读程序 + slaved 操作数区 + guest 内存。
+/// Execution environment: read-only program + slaved operand region + guest memory.
 pub struct Vm<'p> {
     prog: &'p Program,
     region: OperandRegion,
@@ -25,7 +27,7 @@ impl<'p> Vm<'p> {
         }
     }
 
-    /// 从 `func` 入口跑到 `Return`，返回 slot 0。
+    /// Run from the `func` entry to `Return`; returns slot 0.
     pub fn run(&mut self, func: u32, args: &[Word]) -> Word {
         self.interp_frame(func, args)
     }
@@ -54,13 +56,14 @@ impl<'p> Vm<'p> {
                 let addr = self.eval(base, *ptr);
                 unsafe { self.mem.load(addr) }
             }
-            rv => unreachable!("spike1 字节码子集不含并发构造: {rv:?}"),
+            rv => unreachable!("spike1 bytecode subset has no concurrency constructors: {rv:?}"),
         }
     }
 
     fn interp_frame(&mut self, func: u32, args: &[Word]) -> Word {
-        // 关键：把 `&'p Program` 复制到局部，body/block/stmt 借的是 `'p`（程序活得比 Vm 久），
-        // 不是借 `self`——于是循环里对 self.region/self.mem 的可变访问不与之冲突。
+        // Copy `&'p Program` into a local so body/block/stmt borrow `'p` (the program
+        // outlives the Vm) rather than `self`; mutable access to self.region/self.mem in the
+        // loop then does not conflict with them.
         let prog = self.prog;
         let body = &prog.funcs[func as usize];
 
@@ -107,7 +110,8 @@ impl<'p> Vm<'p> {
                     ..
                 } => {
                     let av: Vec<Word> = aops.iter().map(|o| self.eval(base, *o)).collect();
-                    let r = self.interp_frame(*callee, &av); // ← 宿主递归 = guest 帧上 native 栈
+                    // Host recursion: a guest frame is a native stack frame.
+                    let r = self.interp_frame(*callee, &av);
                     self.region.write(base, *dst, r);
                     blk = *target as usize;
                 }
@@ -116,14 +120,14 @@ impl<'p> Vm<'p> {
                     self.region.restore(base);
                     return r;
                 }
-                t => unreachable!("spike1 字节码子集不含 unwind 构造: {t:?}"),
+                t => unreachable!("spike1 bytecode subset has no unwind constructors: {t:?}"),
             }
         }
     }
 }
 
 fn apply_binop(op: BinOp, a: Word, b: Word) -> Word {
-    // u64 语义（skeleton 的值都是无符号 word；wrapping 与 native u64 一致）。
+    // u64 semantics: skeleton values are all unsigned words; wrapping matches native u64.
     match op {
         BinOp::Add => a.wrapping_add(b),
         BinOp::Sub => a.wrapping_sub(b),

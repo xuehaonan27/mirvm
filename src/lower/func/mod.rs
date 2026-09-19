@@ -1,11 +1,13 @@
-//! 逐 instance 降低：单态化 MIR body → 引擎 FuncBody。
+//! Per-instance lowering: a monomorphized MIR body -> an engine FuncBody.
 //!
-//! 纪律（M4.0 设计 §3）：**Trap-stub 全覆盖**——语句/终止子/布局遇不认识的构造，
-//! 当前块降为 `Trap(诊断)`，绝不中止整个降低。诊断串标注"哪一期欠的账"。
+//! Discipline: **Trap stubs everywhere**. When a statement, terminator or layout
+//! hits an unrecognized construct, the current block lowers to `Trap(diagnostic)`
+//! instead of aborting the whole lowering.
 //!
-//! M4.1（m4.1-design §3.1）：place 编译（投影链 → 地址表达式，Field/Downcast 折叠为
-//! 常量偏移、Deref/Index 留运行期步骤）+ 值分类四路（Zst/Scalar/Pair/Bytes）+
-//! 调用约定 v2（pair 2 槽、聚合 indirect/sret）。
+//! Place compilation folds Field/Downcast projections into constant offsets and
+//! leaves Deref/Index as runtime steps, yielding an address expression. Values fall
+//! into four classes (Zst/Scalar/Pair/Bytes); calling convention v2 uses 2 slots for a
+//! pair and indirect/sret for aggregates.
 
 use rustc_abi::{HasDataLayout, TagEncoding, VariantIdx, Variants};
 use rustc_middle::mir::{self, Body};
@@ -28,7 +30,7 @@ mod unsize;
 
 use intrinsic::*;
 
-/// 整函数不可降低时的占位体（被调用即 Trap，诊断给出原因）。
+/// Placeholder body for a function that cannot be lowered (calling it Traps with the reason).
 pub fn trap_body(name: &str, reason: &str) -> ir::FuncBody {
     ir::FuncBody {
         frame_size: 0,
@@ -38,25 +40,25 @@ pub fn trap_body(name: &str, reason: &str) -> ir::FuncBody {
         caller_loc_off: None,
         blocks: vec![ir::Block {
             stmts: Vec::new(),
-            term: Terminator::Trap(format!("整函数未降低: {reason}").into_boxed_str()),
+            term: Terminator::Trap(format!("function not lowered: {reason}").into_boxed_str()),
         }],
         name: name.into(),
     }
 }
 
-/// place 编译的中间产物：地址表达式 + 当前类型（+胖指针 meta 来源）。
+/// Intermediate result of place compilation: address expression + current type (+ fat-pointer meta source).
 struct PlaceLow<'tcx> {
     base: PlaceBase,
     steps: Vec<PlaceStep>,
     ty: Ty<'tcx>,
-    /// 若 place 经 Deref 进入了 unsized pointee：meta（len/vtable ptr）的读取位置
-    /// ——deref 前胖指针本体的第二半（Ref unsized place 重组胖指针用）
+    /// When the place derefs into an unsized pointee: where the meta (len/vtable ptr)
+    /// is read from -- the second half of the fat pointer before the deref (used to rebuild a fat pointer for an unsized Ref place).
     meta: Option<Operand>,
 }
 
 impl<'tcx> PlaceLow<'tcx> {
     fn push_offset(&mut self, o: i64) {
-        // 连续常量偏移折叠（Field 链一个 Offset）
+        // Fold consecutive constant offsets (a Field chain becomes one Offset)
         if o == 0 {
             return;
         }
@@ -66,14 +68,14 @@ impl<'tcx> PlaceLow<'tcx> {
             && o >= 0
             && let PlaceBase::Local(off) = &mut self.base
         {
-            // 纯帧内非负：直接折进基址偏移（保住快路径）
+            // Purely in-frame and non-negative: fold directly into the base offset to keep the fast path
             *off += o as u32;
         } else {
             self.steps.push(PlaceStep::Offset(o as i32));
         }
     }
 
-    /// 纯帧内静态偏移（快路径槽）
+    /// Purely in-frame static offset (fast-path slot)
     fn frame_direct(&self) -> Option<u32> {
         match (&self.base, self.steps.is_empty()) {
             (PlaceBase::Local(off), true) => Some(*off),
@@ -88,7 +90,7 @@ impl<'tcx> PlaceLow<'tcx> {
         }
     }
 
-    /// 追加了常量偏移的表达式（pair 两半访问用；不破坏自身）
+    /// Expression with a constant offset appended (used to access either half of a pair; does not mutate self)
     fn expr_plus(&self, o: u32) -> PlaceExpr {
         let mut steps = self.steps.clone();
         if o != 0 {
@@ -104,7 +106,7 @@ impl<'tcx> PlaceLow<'tcx> {
         }
     }
 
-    /// 标量位置（快路径优先）
+    /// Scalar place (fast path preferred)
     fn scalar_place(&self, w: Width) -> ScalarPlace {
         match self.frame_direct() {
             Some(off) => ScalarPlace::Slot(Slot { off, width: w }),
@@ -115,7 +117,7 @@ impl<'tcx> PlaceLow<'tcx> {
         }
     }
 
-    /// 标量 operand（快路径优先）
+    /// Scalar operand (fast path preferred)
     fn scalar_operand(&self, w: Width) -> Operand {
         match self.frame_direct() {
             Some(off) => Operand::Slot(Slot { off, width: w }),
@@ -126,7 +128,7 @@ impl<'tcx> PlaceLow<'tcx> {
         }
     }
 
-    /// pair 半的标量位置
+    /// Scalar place of one pair half
     fn half_place(&self, half_off: u32, w: Width) -> ScalarPlace {
         match self.frame_direct() {
             Some(off) => ScalarPlace::Slot(Slot {
@@ -154,30 +156,30 @@ impl<'tcx> PlaceLow<'tcx> {
     }
 }
 
-/// 泛化 operand（值分类四路）。
+/// Generalized operand (the four value classes).
 enum LoweredOp<'tcx> {
     Zst,
     Scalar(Operand),
     Pair(Operand, Operand),
-    /// 聚合（memcpy 通道）：源 place + 尺寸
+    /// Aggregate (memcpy channel): source place + size
     Bytes {
         place: PlaceLow<'tcx>,
         size: u64,
     },
 }
 
-/// 调用目标三形态（finish_call 共用道）。
+/// Call target (shared by finish_call).
 enum CallTarget {
     Direct(Callee),
-    /// fn-ptr / vtable 槽：operand 求值 = D4 条目真地址。
-    /// Option = extern "C" 系 fn-ptr 的冻结签名（M4.4 FFI 反方向之二：
-    /// 反查未命中 → native 真码 libffi 直调；虚派发/Rust ABI 恒 None）
+    /// fn-ptr / vtable slot: evaluating the operand yields the real entry address.
+    /// The Option is the frozen signature for an extern "C" fn-ptr (on a resolution
+    /// miss, call the real native code directly via libffi; virtual dispatch / Rust ABI is always None)
     Indirect(Operand, Option<ir::ForeignSig>),
 }
 
-/// 枚举判别式的冻结编码（Direct 在 lower 期溶解为 Cast，niche 用 NicheDiscr rvalue）。
+/// Frozen encoding of an enum discriminant (Direct dissolves into a Cast at lowering time; a niche uses the NicheDiscr rvalue).
 enum TagInfo {
-    /// 单 variant / 无 variant：判别式是常量
+    /// Single variant / no variant: the discriminant is a constant
     Single { discr: u64 },
     Direct {
         tag_off: u32,
@@ -192,7 +194,7 @@ enum TagInfo {
         variants_len: u64,
         untagged: u64,
     },
-    /// 128 位 niche（大 niche_start，regex_automata 逼出）：tag 16 字节，u128 算术
+    /// 128-bit niche (a large niche_start): the tag is 16 bytes and uses u128 arithmetic
     Niche128 {
         tag_off: u32,
         niche_start: u128,
@@ -205,15 +207,15 @@ enum TagInfo {
 struct LowerCx<'tcx, 'a> {
     tcx: TyCtxt<'tcx>,
     typing_env: TypingEnv<'tcx>,
-    /// 当前正在降低的单态实例；用于精确标记标准 main 捕获调用点。
+    /// The monomorphic instance currently being lowered; used to tag the standard main catch call site precisely.
     instance: Instance<'tcx>,
-    /// 本函数的 def_id（asm_target_features 查询用，M5.0 inline asm 寄存器分配）
+    /// This function's def_id (used for asm_target_features queries during inline asm register allocation)
     def_id: rustc_hir::def_id::DefId,
     frame: FrameLayout<'tcx>,
     linker: &'a mut Linker<'tcx>,
-    /// 本函数 #[track_caller] 时的 &Location 槽（转发/caller_location intrinsic 读取）
+    /// &Location slot when this function is #[track_caller] (read by forwarding and the caller_location intrinsic)
     caller_loc_off: Option<u32>,
-    /// 追加的合成块（发散调用的落点等），最终接在 MIR 块之后
+    /// Appended synthesized blocks (landings of diverging calls etc.), finally appended after the MIR blocks
     extra_blocks: Vec<ir::Block>,
     mir_block_count: usize,
 }
@@ -230,7 +232,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         Ok(frame::classify(self.tcx, &self.layout_of(ty)?))
     }
 
-    /// place 编译：投影链 → 地址表达式（Field/Downcast 折偏移，Deref/Index 留步骤）。
+    /// Place compilation: projection chain -> address expression (Field/Downcast fold to offsets, Deref/Index stay as steps).
     fn resolve_place(&self, place: &mir::Place<'tcx>) -> Result<PlaceLow<'tcx>, String> {
         let info = &self.frame.locals[place.local.as_usize()];
         let mut p = PlaceLow {
@@ -239,7 +241,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             ty: info.ty,
             meta: None,
         };
-        // Downcast 状态：Some(v) 时下一个 Field 的偏移查 variant 布局
+        // Downcast state: when Some(v), the next Field's offset is looked up in the variant layout
         let mut variant: Option<VariantIdx> = None;
         for elem in place.projection {
             match elem {
@@ -252,19 +254,19 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     };
                     let offset = layout.fields.offset(f.as_usize()).bytes();
                     let field_layout = self.layout_of(fty)?;
-                    // unsized 字段在非零偏移的对齐处置（M5.2 D8k：嵌套 DST）：
-                    // - 尾是 slice/str → 字段对齐**静态已知**（元素对齐），rustc 给的
-                    //   offset 已按之对齐，直接用（含尾是 slice 的嵌套结构体，如
-                    //   Outer{Packet<[u16]>}）；
-                    // - 尾是 dyn → 字段对齐**运行期**（vtable），offset 是下界，须按
-                    //   vtable alignment 向上取整（VTableAlignOffset）。
+                    // Alignment handling for an unsized field at a non-zero offset:
+                    // - tail is slice/str -> the field alignment is **statically known** (the element
+                    //   alignment) and rustc's offset is already aligned to it, so use it directly
+                    //   (including a struct nested under a slice tail, e.g. Outer{Packet<[u16]>});
+                    // - tail is dyn -> the field alignment is **runtime** (vtable) and offset is a
+                    //   lower bound that must be rounded up to the vtable alignment (VTableAlignOffset).
                     let needs_vtable_align = field_layout.is_unsized() && offset != 0 && {
                         let tail = self.tcx.struct_tail_for_codegen(fty, self.typing_env);
                         matches!(tail.kind(), ty::Dynamic(..))
                     };
                     if needs_vtable_align {
                         let meta = p.meta.clone().ok_or_else(|| {
-                            format!("dyn 尾字段无 vtable meta（parent={parent_ty}, field={fty}）")
+                            format!("dyn tail field has no vtable meta (parent={parent_ty}, field={fty})")
                         })?;
                         let packed = match parent_ty.kind() {
                             ty::Adt(def, _) => def.repr().pack.map(|align| align.bytes()),
@@ -286,8 +288,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 mir::ProjectionElem::Deref => {
                     let pointee =
                         p.ty.builtin_deref(true)
-                            .ok_or_else(|| format!("Deref 非指针（ty={}）", p.ty))?;
-                    // 进入 unsized pointee：记录胖指针 meta 的读取位置（本体 +8）
+                            .ok_or_else(|| format!("Deref of a non-pointer (ty={})", p.ty))?;
+                    // Entering an unsized pointee: record where the fat pointer meta is read (body + 8)
                     let pointee_layout = self.layout_of(pointee);
                     let unsized_pointee = matches!(&pointee_layout, Ok(l) if l.is_unsized());
                     if unsized_pointee {
@@ -308,12 +310,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     p.ty = pointee;
                 }
                 mir::ProjectionElem::Index(idx_local) => {
-                    let elem_ty =
-                        elem_of(p.ty).ok_or_else(|| format!("Index 非序列（ty={}）", p.ty))?;
+                    let elem_ty = elem_of(p.ty)
+                        .ok_or_else(|| format!("Index of a non-sequence (ty={})", p.ty))?;
                     let stride = self.layout_of(elem_ty)?.size.bytes();
                     let idx_info = &self.frame.locals[idx_local.as_usize()];
                     let Some(w) = idx_info.kind.scalar() else {
-                        return Err("Index 下标非标量".into());
+                        return Err("Index subscript is not a scalar".into());
                     };
                     p.steps.push(PlaceStep::IndexScaled {
                         idx: Slot {
@@ -331,17 +333,21 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     from_end,
                 } => {
                     let elem_ty = elem_of(p.ty)
-                        .ok_or_else(|| format!("ConstantIndex 非序列（ty={}）", p.ty))?;
+                        .ok_or_else(|| format!("ConstantIndex of a non-sequence (ty={})", p.ty))?;
                     let stride = self.layout_of(elem_ty)?.size.bytes();
                     if from_end {
                         if let ty::Array(_, n) = p.ty.kind() {
-                            // 数组长度已知：折常量
-                            let n = n.try_to_target_usize(self.tcx).ok_or("数组长度非常量")?;
+                            // Array length is known: fold to a constant
+                            let n = n
+                                .try_to_target_usize(self.tcx)
+                                .ok_or("array length is not constant")?;
                             p.push_offset(((n - offset) * stride) as i64);
                         } else {
-                            // slice：addr += len×stride - offset×stride（len = meta 槽）
+                            // slice: addr += len x stride - offset x stride (len = the meta slot)
                             let Some(Operand::Slot(ms)) = p.meta else {
-                                return Err("ConstantIndex from_end：meta 非帧槽（M4.3+）".into());
+                                return Err(
+                                    "ConstantIndex from_end: meta is not a frame slot".into()
+                                );
                             };
                             p.steps.push(PlaceStep::IndexScaled { idx: ms, stride });
                             p.push_offset(-((offset * stride) as i64));
@@ -353,27 +359,30 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     p.meta = None;
                 }
                 mir::ProjectionElem::Subslice { from, to, from_end } => {
-                    // `rest @ ..` 型切片模式（M4.4 补，真线程把 std 内路径逼可达）
-                    let elem_ty =
-                        elem_of(p.ty).ok_or_else(|| format!("Subslice 非序列（ty={}）", p.ty))?;
+                    // `rest @ ..` slice pattern
+                    let elem_ty = elem_of(p.ty)
+                        .ok_or_else(|| format!("Subslice of a non-sequence (ty={})", p.ty))?;
                     let stride = self.layout_of(elem_ty)?.size.bytes();
                     if let ty::Array(_, n) = p.ty.kind() {
-                        // 数组：折常量——[from..to] / [from..N-to]，结果仍是定长数组
-                        let n = n.try_to_target_usize(self.tcx).ok_or("数组长度非常量")?;
+                        // Array: fold to a constant -- [from..to] / [from..N-to] still yields a fixed-length array
+                        let n = n
+                            .try_to_target_usize(self.tcx)
+                            .ok_or("array length is not constant")?;
                         let new_len = if from_end { n - from - to } else { to - from };
                         p.push_offset((from * stride) as i64);
                         p.ty = Ty::new_array(self.tcx, elem_ty, new_len);
                         p.meta = None;
                     } else {
-                        // slice（from_end 恒真，to 自尾计）：addr += from×stride；
-                        // len' = len − (from+to)（meta 值减常量，Operand::SubImm）
+                        // slice (from_end is always true; to counts from the tail): addr += from x stride;
+                        // len' = len − (from + to) (subtract a constant from the meta value, Operand::SubImm)
                         if !from_end {
-                            return Err("Subslice slice 而 from_end=false（MIR 不变量）".into());
+                            return Err(
+                                "Subslice of a slice with from_end=false (MIR invariant)".into()
+                            );
                         }
-                        let m = p
-                            .meta
-                            .clone()
-                            .ok_or_else(|| format!("Subslice slice 无 meta（ty={}）", p.ty))?;
+                        let m = p.meta.clone().ok_or_else(|| {
+                            format!("Subslice of a slice has no meta (ty={})", p.ty)
+                        })?;
                         p.push_offset((from * stride) as i64);
                         p.meta = Some(Operand::SubImm {
                             base: Box::new(m),
@@ -384,28 +393,26 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 mir::ProjectionElem::OpaqueCast(t) | mir::ProjectionElem::UnwrapUnsafeBinder(t) => {
                     p.ty = t;
                 }
-                // 当前全变体已覆盖；防未来 nightly 新增投影（Trap-stub 协议）
+                // All current variants are covered; guard against new projections in a future nightly (Trap-stub protocol)
                 #[allow(unreachable_patterns)]
-                other => return Err(format!("投影 {other:?}（M4.1+）")),
+                other => return Err(format!("projection {other:?}")),
             }
         }
-        if variant.is_some() {
-            // Downcast 结尾（无后续 Field）：place 类型仍是 enum，偏移不变——
-            // 作为整体读写时按 enum 布局（Aggregate/SetDiscriminant 语境处理）
-        }
+        // A trailing Downcast (with no following Field) leaves the place type as the enum
+        // and the offset unchanged; whole-value reads/writes use the enum layout.
         Ok(p)
     }
 
-    /// place → 标量槽（调用方确定是标量语境）。
+    /// Place -> scalar slot (the caller has established a scalar context).
     fn place_scalar(&self, place: &mir::Place<'tcx>) -> Result<(PlaceLow<'tcx>, Width), String> {
         let p = self.resolve_place(place)?;
         let ValKind::Scalar(w) = self.classify(p.ty)? else {
-            return Err(format!("非标量 place（ty={}，M4.1）", p.ty));
+            return Err(format!("non-scalar place (ty={})", p.ty));
         };
         Ok((p, w))
     }
 
-    /// 泛化操作数（四路值分类）。
+    /// Generalized operand (four-way value classification).
     fn lower_operand(&mut self, op: &mir::Operand<'tcx>) -> Result<LoweredOp<'tcx>, String> {
         match op {
             mir::Operand::Copy(pl) | mir::Operand::Move(pl) => {
@@ -429,10 +436,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let val = c
                     .const_
                     .eval(self.tcx, self.typing_env, c.span)
-                    .map_err(|e| format!("常量求值失败: {e:?}"))?;
+                    .map_err(|e| format!("constant evaluation failed: {e:?}"))?;
                 self.lower_const_value(val, ty, kind)
             }
-            // session 旗标查询（UbChecks 等）：lower 期折成 bool 立即数
+            // Session flag query (UbChecks etc.): folded to a bool immediate at lowering time
             mir::Operand::RuntimeChecks(rc) => {
                 use mir::RuntimeChecks as RC;
                 let v = match rc {
@@ -448,7 +455,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         }
     }
 
-    /// 常量值 → 泛化操作数（常量池/statics：物化进冻结区，重定位成真地址——F5）。
+    /// Constant value -> generalized operand (constant pool/statics are materialized into the frozen region and relocated to a real address).
     fn lower_const_value(
         &mut self,
         val: mir::ConstValue,
@@ -466,7 +473,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             width,
                         })
                     }
-                    // 128 位整数常量：物化 16 字节进冻结区，走 memcpy 通道
+                    // 128-bit integer constant: materialize 16 bytes into the frozen region and use the memcpy channel
                     ValKind::Other { size: 16 } => {
                         let p = self.linker.frozen_alloc_bytes(&bits.to_le_bytes());
                         LoweredOp::Bytes {
@@ -479,15 +486,15 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             size: 16,
                         }
                     }
-                    _ => return Err(format!("整数常量分类漂移（ty={ty}）")),
+                    _ => return Err(format!("integer constant class drift (ty={ty})")),
                 }
             }
             mir::ConstValue::Scalar(S::Ptr(ptr, _)) => {
-                // 指针常量（static 引用 / fn ptr / vtable）：物化目标 → 真地址立即数
+                // Pointer constant (static reference / fn ptr / vtable): materialize the target -> real address immediate
                 let (prov, off) = ptr.prov_and_relative_offset();
                 let base = self.linker.ensure_alloc(prov.alloc_id())?;
-                // P2：foreign 分配（extern static/fn 取址）→ GOT 槽读操作数
-                //（decision-history §7.5c；启动相重填槽内容，字节码不烤宿主地址）
+                // foreign allocation (taking the address of an extern static/fn) -> a GOT slot
+                // read operand (the slot is refilled at startup, so the bytecode never bakes in a host address)
                 if let Some(op) =
                     self.linker
                         .foreign_const_operand(prov.alloc_id(), base, off.bytes())
@@ -500,7 +507,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
             }
             mir::ConstValue::Slice { alloc_id, meta } => {
-                // &str/&[u8] 字面量：胖指针 pair =（数据真地址, meta）
+                // &str/&[u8] literal: fat-pointer pair = (data real address, meta)
                 let base = self.linker.ensure_alloc(alloc_id)?;
                 LoweredOp::Pair(
                     Operand::AddrImm(ir::LinkAddr(base)),
@@ -511,7 +518,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 )
             }
             mir::ConstValue::Indirect { alloc_id, offset } => {
-                // 内存常量（Layout/空表模板等）：物化后按分类经冻结区地址访问
+                // Memory constant (Layout/empty-table template etc.): after materialization, access through the frozen-region address by class
                 let base = self
                     .linker
                     .ensure_alloc(alloc_id)?
@@ -551,8 +558,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
         })
     }
 
-    /// 帧尾划一个 8 字节暂存槽（frame.size 在 lower_instance 收尾才冻结进 FuncBody
-    /// ——caller_loc/sret 同法）。size_of_val-dyn 等多值中间量用。
+    /// Carve an 8-byte scratch slot at the end of the frame (frame.size is frozen into
+    /// the FuncBody only at the end of lower_instance; caller_loc/sret do the same). Used for multi-value intermediates such as size_of_val-dyn.
     fn scratch64(&mut self) -> Slot {
         let off = (self.frame.size + 7) & !7;
         self.frame.size = off + 8;
@@ -563,25 +570,25 @@ impl<'tcx> LowerCx<'tcx, '_> {
         }
     }
 
-    /// 帧尾物化一个按 guest layout 对齐的临时 place。volatile store
-    /// 的常量/非 place 操作数先在这里保留为完整位型，再由执行器
-    /// 作 opaque 字节 volatile 写，避免把 padding 解释为整数。
+    /// Materialize a temporary place at the end of the frame, aligned to the guest
+    /// layout. A constant / non-place operand of a volatile store is staged here as a
+    /// full bit pattern so the executor can perform an opaque byte volatile write without interpreting padding as an integer.
     fn scratch_place(&mut self, ty: Ty<'tcx>) -> Result<PlaceLow<'tcx>, String> {
         let layout = self.layout_of(ty)?;
         let size = u32::try_from(layout.size.bytes())
-            .map_err(|_| format!("临时值 {ty} 大小超出 u32 帧偏移"))?;
+            .map_err(|_| format!("temporary value {ty} size exceeds a u32 frame offset"))?;
         let align = u32::try_from(layout.align.abi.bytes())
-            .map_err(|_| format!("临时值 {ty} 对齐超出 u32"))?
+            .map_err(|_| format!("temporary value {ty} alignment exceeds u32"))?
             .max(1);
         let off = self
             .frame
             .size
             .checked_add(align - 1)
             .map(|n| n & !(align - 1))
-            .ok_or_else(|| format!("临时值 {ty} 帧对齐溢出"))?;
+            .ok_or_else(|| format!("temporary value {ty} frame alignment overflow"))?;
         self.frame.size = off
             .checked_add(size)
-            .ok_or_else(|| format!("临时值 {ty} 帧大小溢出"))?;
+            .ok_or_else(|| format!("temporary value {ty} frame size overflow"))?;
         self.frame.align = self.frame.align.max(align);
         Ok(PlaceLow {
             base: PlaceBase::Local(off),
@@ -591,21 +598,21 @@ impl<'tcx> LowerCx<'tcx, '_> {
         })
     }
 
-    /// 标量操作数（标量语境；其他分类 = 语境错误诊断）。
+    /// Scalar operand (scalar context; any other class is a context error diagnostic).
     #[track_caller]
     fn lower_operand_scalar(&mut self, op: &mir::Operand<'tcx>) -> Result<Operand, String> {
         let loc = std::panic::Location::caller();
         match self.lower_operand(op)? {
             LoweredOp::Scalar(o) => Ok(o),
-            LoweredOp::Zst => Err("意外的 ZST 操作数".into()),
+            LoweredOp::Zst => Err("unexpected ZST operand".into()),
             LoweredOp::Pair(..) => Err(format!(
-                "非标量操作数（pair，ty={}，@{}:{}）",
+                "non-scalar operand (pair, ty={}, @{}:{})",
                 self.op_ty_str(op),
                 loc.file(),
                 loc.line()
             )),
             LoweredOp::Bytes { .. } => Err(format!(
-                "非标量操作数（聚合，ty={}，M4.1+）",
+                "non-scalar operand (aggregate, ty={})",
                 self.op_ty_str(op)
             )),
         }
@@ -625,12 +632,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
             .unwrap_or_else(|_| "?".into())
     }
 
-    /// span → &'static Location 常量（物化进冻结区）——Assert 展开 / track_caller
-    /// 实参合成 / caller_location intrinsic 共用（cg_ssa get_caller_location 同构）。
+    /// span -> &'static Location constant (materialized into the frozen region), shared
+    /// by Assert expansion, track_caller argument synthesis and the caller_location intrinsic.
     fn caller_location_imm(&mut self, span: rustc_span::Span) -> Result<Operand, String> {
         let cv = self.tcx.span_as_caller_location(span);
         let mir::ConstValue::Scalar(mir::interpret::Scalar::Ptr(ptr, _)) = cv else {
-            return Err("caller_location 常量形态异常".into());
+            return Err("caller_location constant has an unexpected shape".into());
         };
         let (prov, off) = ptr.prov_and_relative_offset();
         let base = self.linker.ensure_alloc(prov.alloc_id())?;
@@ -639,7 +646,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         )))
     }
 
-    /// 被调方 requires_caller_location 时的隐藏尾实参：本帧转发或按调用点合成。
+    /// Hidden trailing argument when the callee requires_caller_location: forward from this frame or synthesize at the call site.
     fn caller_loc_arg(
         &mut self,
         callee: &Instance<'tcx>,
@@ -652,20 +659,20 @@ impl<'tcx> LowerCx<'tcx, '_> {
             Some(off) => Operand::Slot(Slot {
                 off,
                 width: Width::W64,
-            }), // 转发
+            }), // forward
             None => self.caller_location_imm(span)?,
         }))
     }
 
-    /// 128 位操作数 → place 表达式（Bytes 通道；标量常量物化）。
+    /// 128-bit operand -> place expression (Bytes channel; scalar constants are materialized).
     fn wide_place(&mut self, op: &mir::Operand<'tcx>) -> Result<PlaceExpr, String> {
         match self.lower_operand(op)? {
             LoweredOp::Bytes { place, .. } => Ok(place.expr()),
-            _ => Err("128 位操作数非 place".into()),
+            _ => Err("128-bit operand is not a place".into()),
         }
     }
 
-    /// 128 位立即数 → 冻结区 16 字节 place（Neg 的 0 / Not 的全 1 常量边）。
+    /// 128-bit immediate -> a 16-byte place in the frozen region (the 0 of Neg / all-ones of Not).
     fn wide_const(&mut self, v: u128) -> PlaceExpr {
         let base = self.linker.frozen_alloc_bytes(&v.to_le_bytes());
         PlaceExpr {
@@ -674,7 +681,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         }
     }
 
-    /// 128 位双目（Bin128）：移位量右操作数可为 ≤64 标量。
+    /// 128-bit binary op (Bin128): the shift-amount right operand may be a <= 64-bit scalar.
     fn lower_bin128(
         &mut self,
         op: IntBinOp,
@@ -696,10 +703,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
             Bin128Rhs::Scalar(self.lower_operand_scalar(b)?)
         };
         if with_overflow {
-            // (u128, bool)：bool 必须在 +16（engine 写死）——布局核验
+            // (u128, bool): the bool must be at +16 (hard-coded by the engine) -- layout verification
             let l = self.layout_of(dst_p.ty)?;
             if l.fields.offset(1).bytes() != 16 {
-                return Err("128 位溢出对布局漂移".into());
+                return Err("128-bit overflow pair layout drift".into());
             }
         }
         Ok(vec![Stmt::Bin128 {
@@ -712,11 +719,11 @@ impl<'tcx> LowerCx<'tcx, '_> {
         }])
     }
 
-    /// 枚举 tag 编码冻结（Discriminant 读 / SetDiscriminant 写共用）。
+    /// Freeze the enum tag encoding (shared by Discriminant reads and SetDiscriminant writes).
     fn tag_info(&self, ty: Ty<'tcx>) -> Result<TagInfo, String> {
         let layout = self.layout_of(ty)?;
         Ok(match &layout.variants {
-            Variants::Empty => TagInfo::Single { discr: 0 }, // 不可及（读它 = guest UB）
+            Variants::Empty => TagInfo::Single { discr: 0 }, // unreachable (reading it is guest UB)
             Variants::Single { index } => {
                 let discr = ty
                     .discriminant_for_variant(self.tcx, *index)
@@ -735,12 +742,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let dl = self.tcx.data_layout();
                 let tag_off = layout.fields.offset(tag_field.as_usize()).bytes() as u32;
                 let tag_bytes = tag.size(dl).bytes();
-                // 128 位 tag（repr(u128) / 大 niche）：窄化读低 64 位——小端下值 ≤ u64
-                // 时正确。安全由值域检查保证（SetDiscr/SwitchInt 的编译期 discr 走
-                // u128_to_u64；Niche 的 niche_start 高位下面查）——绝不静默截断。
+                // 128-bit tag (repr(u128) / large niche): narrow to the low 64 bits, which is
+                // correct for values <= u64 on little-endian. Value-range checks guarantee safety
+                // (compile-time discr in SetDiscr/SwitchInt goes through u128_to_u64; the high
+                // bits of a Niche's niche_start are checked below) -- never truncate silently.
                 let tag_w = Width::from_bytes(tag_bytes)
                     .or_else(|| (tag_bytes == 16).then_some(Width::W64))
-                    .ok_or_else(|| format!("tag 宽 {tag_bytes} 字节（M4.5+）"))?;
+                    .ok_or_else(|| format!("tag width {tag_bytes} bytes"))?;
                 let tag_signed = matches!(tag.primitive(), rustc_abi::Primitive::Int(_, true));
                 match tag_encoding {
                     TagEncoding::Direct => TagInfo::Direct {
@@ -758,12 +766,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             as u64
                             + 1;
                         let untagged = untagged_variant.as_u32() as u64;
-                        // 128 位 niche【一律】走 u128 算术路径（cg_ssa operand.rs
-                        // 读判别式：rel=tag−niche_start 全宽 wrapping 后 ule 比较）。
-                        // 不能只按 niche_start 高位判——NonZero<u128> 的
-                        // niche_start=0，截断 W64 读会把 lo=0 的合法大值
-                        // （2^64/2^66/2^127…）误判进 niche（corpus 批5
-                        // fixed_point 的 U64F64::sqrt 静默产 0 即此实锤）。
+                        // A 128-bit niche **always** uses the u128 arithmetic path (cg_ssa operand.rs
+                        // reads the discriminant as rel = tag − niche_start with full-width wrapping and
+                        // then compares with ule). Testing only the high bits of niche_start is not
+                        // enough: NonZero<u128> has niche_start=0, so a truncated W64 read would
+                        // misclassify a legal large value whose low 64 bits are 0 (2^64/2^66/2^127...)
+                        // as the niche.
                         if tag_bytes == 16 {
                             return Ok(TagInfo::Niche128 {
                                 tag_off,
@@ -787,7 +795,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         })
     }
 
-    /// SetDiscriminant：lower 期溶解为对 tag 槽的常量写（niche 的 untagged = 无操作）。
+    /// SetDiscriminant: dissolves into a constant write to the tag slot at lowering time (an untagged niche is a no-op).
     fn set_discr_stmts(
         &self,
         dst_p: &PlaceLow<'tcx>,
@@ -800,10 +808,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let discr = enum_ty
                     .discriminant_for_variant(self.tcx, vidx)
                     .map(|d| d.val)
-                    .ok_or("Direct tag 无 discr")?;
-                // 128 位 tag 窄化前的值域守卫（防静默截断；tag_w ≤ W64 的判别式恒 fit）
+                    .ok_or("Direct tag has no discr")?;
+                // Value-range guard before narrowing a 128-bit tag (prevents silent truncation; a discr always fits when tag_w <= W64)
                 if tag_w == Width::W64 && discr > u64::MAX as u128 {
-                    return Err(format!("128 位判别式 {discr} 超 64 位（M4.5+）"));
+                    return Err(format!("128-bit discriminant {discr} exceeds 64 bits"));
                 }
                 let bits = (discr as u64) & tag_w.mask();
                 vec![Stmt::Assign {
@@ -831,7 +839,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }]
                 }
             }
-            // 128 位 niche 写：tag_val = (vi − start + niche_start) 的 u128，落 16 字节两半
+            // 128-bit niche write: tag_val = (vi − start + niche_start) as u128, written to the two 8-byte halves
             TagInfo::Niche128 {
                 tag_off,
                 niche_start,
@@ -867,7 +875,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         })
     }
 
-    /// 把一个 MIR operand 写到 dst place 的字节偏移 off 处（Aggregate 字段落位）。
+    /// Write a MIR operand at byte offset off of the dst place (Aggregate field placement).
     fn write_at(
         &mut self,
         dst_p: &PlaceLow<'tcx>,
@@ -885,7 +893,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
             LoweredOp::Pair(l, h) => {
                 let ValKind::Pair((ao, aw), (bo, bw)) = self.classify(self.op_ty(op)?)? else {
-                    return Err("pair operand 分类漂移".into());
+                    return Err("pair operand class drift".into());
                 };
                 vec![
                     Stmt::Assign {
@@ -908,7 +916,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         })
     }
 
-    /// 把 src 泛化操作数写进 dst place（同型位搬运——Use/Transmute/位拷 cast 的共用道）。
+    /// Write a generalized src operand into the dst place (a same-shape bit move, shared by Use/Transmute/bit-copy casts).
     fn assign_lowered(
         &self,
         dst: &PlaceLow<'tcx>,
@@ -941,7 +949,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     size: size as u32,
                 }]
             }
-            // 位拷语境的跨分类（Transmute pair↔聚合等）：src 是 place 时走字节拷
+            // Cross-class in a bit-copy context (Transmute pair<->aggregate etc.): a place src goes through a byte copy
             (ValKind::Pair(..) | ValKind::Scalar(_), LoweredOp::Bytes { place, size }) => {
                 vec![Stmt::Copy {
                     dst: dst.expr(),
@@ -949,7 +957,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     size: size as u32,
                 }]
             }
-            // 标量 → 同尺寸小聚合（transmute u32→[u8;4] 等）：按宽度裸写
+            // Scalar -> same-size small aggregate (transmute u32 -> [u8;4] etc.): write raw at the width
             (ValKind::Other { size }, LoweredOp::Scalar(o)) if o.width().bytes() as u64 == size => {
                 vec![Stmt::Assign {
                     dst: ScalarPlace::Mem {
@@ -959,16 +967,16 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     rv: Rvalue::Use(o),
                 }]
             }
-            (ValKind::Other { size }, LoweredOp::Pair(l, h)) => {
-                // pair 值写进聚合视图的 place：按半宽写两个标量（偏移 0 / align 后）
-                // ——出现于 Transmute；两半偏移取 src 布局无从得，这里按紧凑 0/宽度对齐近似
-                // 不可靠 → 诊断
-                let _ = (size, l, h);
-                return Err("Transmute pair→聚合（M4.1+）".into());
+            (ValKind::Other { .. }, LoweredOp::Pair(..)) => {
+                // Writing a pair value into a place viewed as an aggregate writes two half-width
+                // scalars (offset 0 / after alignment). This shows up in Transmute; the half
+                // offsets cannot be derived from the src layout, and a compact 0/width-aligned
+                // approximation is unreliable, so diagnose.
+                return Err("Transmute pair -> aggregate".into());
             }
             (k, s) => {
                 return Err(format!(
-                    "赋值分类不匹配（dst={k:?}, src={}，M4.1+）",
+                    "assignment class mismatch (dst={k:?}, src={})",
                     match s {
                         LoweredOp::Zst => "zst",
                         LoweredOp::Scalar(_) => "scalar",
@@ -980,7 +988,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         })
     }
 
-    /// Assign 语句 → ir 语句（可能多条）。
+    /// Assign statement -> ir statements (possibly several).
     fn lower_assign(
         &mut self,
         dst: &mir::Place<'tcx>,
@@ -989,7 +997,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         let dst_p = self.resolve_place(dst)?;
         let dst_kind = self.classify(dst_p.ty)?;
 
-        // *WithOverflow：写 (值, 旗标) 标量对
+        // *WithOverflow: write the (value, flag) scalar pair
         if let mir::Rvalue::BinaryOp(binop, box (a, b)) = rv {
             let ovf = match binop {
                 mir::BinOp::AddWithOverflow => Some(OvfOp::Add),
@@ -999,7 +1007,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             };
             if let Some(op) = ovf {
                 let a_ty = self.op_ty(a)?;
-                // 128 位 WithOverflow：(u128, bool) 聚合，旗标 @+16
+                // 128-bit WithOverflow: a (u128, bool) aggregate with the flag at +16
                 if matches!(
                     a_ty.kind(),
                     ty::Int(ty::IntTy::I128) | ty::Uint(ty::UintTy::U128)
@@ -1012,7 +1020,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     return self.lower_bin128(bop, frame::ty_signed(a_ty), a, b, &dst_p, true);
                 }
                 let ValKind::Pair((vo, vw), (fo, fw)) = dst_kind else {
-                    return Err("溢出算术目标非 pair".into());
+                    return Err("overflow arithmetic target is not a pair".into());
                 };
                 let a_ty = self.op_ty(a)?;
                 return Ok(vec![Stmt::AssignOverflow {
@@ -1027,12 +1035,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
         }
 
         if dst_kind.is_zst() {
-            return Ok(vec![Stmt::Nop]); // 本期 rvalue 集无副作用
+            return Ok(vec![Stmt::Nop]); // no rvalue in this set has side effects
         }
 
         match rv {
-            // WithRetag：Tree Borrows 的 retag 是检查器语义（P3 不检测）——fast machine 忽略。
-            // CopyForDeref = Use；Reborrow = 同型位拷（用户 ADT reborrow，layout 相同）。
+            // WithRetag: Tree Borrows retagging is checker semantics that the fast machine
+            // ignores. CopyForDeref = Use; Reborrow = a same-shape bit copy (a user ADT reborrow has the same layout).
             mir::Rvalue::Use(op, _retag) => {
                 let src = self.lower_operand(op)?;
                 self.assign_lowered(&dst_p, dst_kind, src)
@@ -1049,15 +1057,15 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let p = self.resolve_place(pl)?;
                 let pointee_layout = self.layout_of(p.ty)?;
                 if pointee_layout.is_unsized() {
-                    // 胖指针：dst pair = (place 地址, meta)
+                    // Fat pointer: dst pair = (place address, meta)
                     let ValKind::Pair((ao, aw), (bo, bw)) = dst_kind else {
-                        return Err("unsized Ref 目标非 pair".into());
+                        return Err("unsized Ref target is not a pair".into());
                     };
-                    // &[T;N] 经投影到 [T] 不会出现；meta 来自 deref 链。
+                    // &[T;N] projected to [T] does not occur; meta comes from the deref chain.
                     let meta = p
                         .meta
                         .clone()
-                        .ok_or_else(|| format!("unsized Ref 无 meta 来源（ty={}，M4.1+）", p.ty))?;
+                        .ok_or_else(|| format!("unsized Ref has no meta source (ty={})", p.ty))?;
                     Ok(vec![
                         Stmt::Assign {
                             dst: dst_p.half_place(ao, aw),
@@ -1070,7 +1078,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     ])
                 } else {
                     let ValKind::Scalar(w) = dst_kind else {
-                        return Err("Ref 目标非标量".into());
+                        return Err("Ref target is not a scalar".into());
                     };
                     Ok(vec![Stmt::Assign {
                         dst: dst_p.scalar_place(w),
@@ -1079,15 +1087,15 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
             }
             mir::Rvalue::BinaryOp(binop, box (a, b)) => {
-                // 指针算术
+                // Pointer arithmetic
                 if let mir::BinOp::Offset = binop {
                     let ptr_ty = self.op_ty(a)?;
                     let pointee = ptr_ty
                         .builtin_deref(true)
-                        .ok_or_else(|| format!("Offset 非指针（ty={ptr_ty}）"))?;
+                        .ok_or_else(|| format!("Offset of a non-pointer (ty={ptr_ty})"))?;
                     let stride = self.layout_of(pointee)?.size.bytes();
                     let ValKind::Scalar(w) = dst_kind else {
-                        return Err("Offset 目标非标量".into());
+                        return Err("Offset target is not a scalar".into());
                     };
                     return Ok(vec![Stmt::Assign {
                         dst: dst_p.scalar_place(w),
@@ -1100,18 +1108,18 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
                 let a_ty = self.op_ty(a)?;
                 use mir::BinOp::*;
-                // 胖指针比较（*const [T]/dyn 的 Eq/Ne：两半都比——裸指针 == 语义，
-                // Arc::ptr_eq 等逼出）：eq = (data==)&(meta==)；ne = (data!=)|(meta!=)。
-                // 两半宽度取自操作数自带（data 指针 + usize/vtable meta，均 W64）。
+                // Fat-pointer comparison (Eq/Ne of *const [T]/dyn compares both halves, which is
+                // the raw-pointer == semantics): eq = (data==)&(meta==); ne = (data!=)|(meta!=).
+                // Both half widths come from the operands (data pointer + usize/vtable meta, all W64).
                 if matches!(binop, Eq | Ne) && matches!(self.classify(a_ty)?, ValKind::Pair(..)) {
                     let LoweredOp::Pair(al, ah) = self.lower_operand(a)? else {
-                        return Err("胖指针比较左非 pair".into());
+                        return Err("fat-pointer comparison left side is not a pair".into());
                     };
                     let LoweredOp::Pair(bl, bh) = self.lower_operand(b)? else {
-                        return Err("胖指针比较右非 pair".into());
+                        return Err("fat-pointer comparison right side is not a pair".into());
                     };
                     let ValKind::Scalar(w) = dst_kind else {
-                        return Err("胖指针比较目标非标量".into());
+                        return Err("fat-pointer comparison target is not a scalar".into());
                     };
                     let (cc, comb) = if matches!(binop, Eq) {
                         (IntCc::Eq, IntBinOp::BitAnd)
@@ -1152,7 +1160,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         },
                     ]);
                 }
-                // 128 位整数：比较走 Cmp128；算术/位/移位走 Bin128（宿主 u128 直算）
+                // 128-bit integer: comparison uses Cmp128; arithmetic/bit/shift use Bin128 (computed directly on host u128)
                 if matches!(
                     a_ty.kind(),
                     ty::Int(ty::IntTy::I128) | ty::Uint(ty::UintTy::U128)
@@ -1171,7 +1179,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         let pa = self.wide_place(a)?;
                         let pb = self.wide_place(b)?;
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("128 位比较目标非标量".into());
+                            return Err("128-bit comparison target is not a scalar".into());
                         };
                         return Ok(vec![Stmt::Assign {
                             dst: dst_p.scalar_place(w),
@@ -1183,12 +1191,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             },
                         }]);
                     }
-                    // 三向比较（three_way_compare → Ord::cmp）：dst(i8 Ordering) = (a>b) − (a<b)
+                    // Three-way comparison (three_way_compare -> Ord::cmp): dst(i8 Ordering) = (a>b) − (a<b)
                     if matches!(binop, Cmp) {
                         let pa = self.wide_place(a)?;
                         let pb = self.wide_place(b)?;
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("128 位 Cmp 目标非标量".into());
+                            return Err("128-bit Cmp target is not a scalar".into());
                         };
                         let gt = Slot {
                             width: Width::W8,
@@ -1239,13 +1247,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         BitXor => IntBinOp::BitXor,
                         Shl | ShlUnchecked => IntBinOp::Shl,
                         Shr | ShrUnchecked => IntBinOp::Shr,
-                        other => return Err(format!("128 位 BinOp {other:?}（M4.3+）")),
+                        other => return Err(format!("128-bit BinOp {other:?}")),
                     };
                     return self.lower_bin128(bop, signed, a, b, &dst_p, false);
                 }
                 if a_ty.is_floating_point() {
                     use ir::FloatOp as F;
-                    // f128：16 字节宽通道（D8c）——place 操作数，比较产标量 bool
+                    // f128: 16-byte wide channel -- place operands, comparison produces a scalar bool
                     if matches!(a_ty.kind(), ty::Float(ty::FloatTy::F128)) {
                         let pa = self.wide_place(a)?;
                         let pb = self.wide_place(b)?;
@@ -1277,7 +1285,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             }
                         };
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("f128 比较目标非标量".into());
+                            return Err("f128 comparison target is not a scalar".into());
                         };
                         return Ok(vec![Stmt::Assign {
                             dst: dst_p.scalar_place(w),
@@ -1311,10 +1319,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         Le => fcmp(IntCc::Le),
                         Gt => fcmp(IntCc::Gt),
                         Ge => fcmp(IntCc::Ge),
-                        other => return Err(format!("浮点 BinOp {other:?}（M4.1+）")),
+                        other => return Err(format!("float BinOp {other:?}")),
                     };
                     let ValKind::Scalar(w) = dst_kind else {
-                        return Err("浮点运算目标非标量".into());
+                        return Err("float arithmetic target is not a scalar".into());
                     };
                     return Ok(vec![Stmt::Assign {
                         dst: dst_p.scalar_place(w),
@@ -1358,10 +1366,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         a: ao.clone(),
                         b: bo.clone(),
                     },
-                    other => return Err(format!("BinOp {other:?}（M4.1+）")),
+                    other => return Err(format!("BinOp {other:?}")),
                 };
                 let ValKind::Scalar(w) = dst_kind else {
-                    return Err("整数运算目标非标量".into());
+                    return Err("integer arithmetic target is not a scalar".into());
                 };
                 Ok(vec![Stmt::Assign {
                     dst: dst_p.scalar_place(w),
@@ -1372,24 +1380,24 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let a_ty = self.op_ty(a)?;
                 match unop {
                     mir::UnOp::PtrMetadata => {
-                        // 胖指针 → 取 meta 半；瘦指针 meta 是 ZST（dst_kind 已非 zst 才到这）
+                        // Fat pointer -> take the meta half; a thin pointer's meta is a ZST (we only get here when dst_kind is not zst)
                         match self.lower_operand(a)? {
                             LoweredOp::Pair(_, h) => {
                                 let ValKind::Scalar(w) = dst_kind else {
-                                    return Err("PtrMetadata 目标非标量".into());
+                                    return Err("PtrMetadata target is not a scalar".into());
                                 };
                                 Ok(vec![Stmt::Assign {
                                     dst: dst_p.scalar_place(w),
                                     rv: Rvalue::Use(h),
                                 }])
                             }
-                            _ => Err(format!("PtrMetadata 非胖指针（ty={a_ty}，M4.1+）")),
+                            _ => Err(format!("PtrMetadata of a non-fat-pointer (ty={a_ty})")),
                         }
                     }
                     mir::UnOp::Not if a_ty.is_bool() => {
                         let ao = self.lower_operand_scalar(a)?;
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("Not 目标非标量".into());
+                            return Err("Not target is not a scalar".into());
                         };
                         Ok(vec![Stmt::Assign {
                             dst: dst_p.scalar_place(w),
@@ -1397,7 +1405,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }])
                     }
                     mir::UnOp::Not => {
-                        // 128 位整数：x XOR 全 1（冻结区常量边，Bin128 通道）
+                        // 128-bit integer: x XOR all-ones (frozen-region constant edge, Bin128 channel)
                         if matches!(
                             a_ty.kind(),
                             ty::Int(ty::IntTy::I128) | ty::Uint(ty::UintTy::U128)
@@ -1414,7 +1422,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }
                         let ao = self.lower_operand_scalar(a)?;
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("Not 目标非标量".into());
+                            return Err("Not target is not a scalar".into());
                         };
                         Ok(vec![Stmt::Assign {
                             dst: dst_p.scalar_place(w),
@@ -1430,7 +1438,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                 dst: dst_p.expr(),
                             }]);
                         }
-                        // 128 位整数：0 − x（冻结区零常量；补码下 signed 与否同结果）
+                        // 128-bit integer: 0 − x (frozen-region zero constant; two's complement gives the same result either way)
                         if matches!(
                             a_ty.kind(),
                             ty::Int(ty::IntTy::I128) | ty::Uint(ty::UintTy::U128)
@@ -1447,7 +1455,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }
                         let ao = self.lower_operand_scalar(a)?;
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("Neg 目标非标量".into());
+                            return Err("Neg target is not a scalar".into());
                         };
                         let rv = if a_ty.is_floating_point() {
                             Rvalue::FloatNeg {
@@ -1468,7 +1476,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 self.lower_cast(&dst_p, dst_kind, *kind, a, *to_ty)
             }
             mir::Rvalue::Repeat(op, n) => {
-                let count = n.try_to_target_usize(self.tcx).ok_or("Repeat 长度非常量")?;
+                let count = n
+                    .try_to_target_usize(self.tcx)
+                    .ok_or("Repeat length is not constant")?;
                 match self.lower_operand(op)? {
                     LoweredOp::Scalar(val) => {
                         let elem_size = val.width().bytes();
@@ -1480,8 +1490,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }])
                     }
                     LoweredOp::Zst => Ok(vec![Stmt::Nop]),
-                    // 聚合元素（pair/bytes，M4.4 rayon 逼出）：写一份进 dst[0]，
-                    // 引擎从 dst[0] 字节复制铺满其余 count-1 份
+                    // Aggregate element (pair/bytes): write one copy into dst[0]; the engine then
+                    // replicates dst[0]'s bytes over the remaining count-1 copies.
                     _ if count == 0 => Ok(vec![Stmt::Nop]),
                     _ => {
                         let elem_size = self.layout_of(self.op_ty(op)?)?.size.bytes();
@@ -1498,7 +1508,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             mir::Rvalue::Discriminant(pl) => {
                 let p = self.resolve_place(pl)?;
                 let ValKind::Scalar(dw) = dst_kind else {
-                    return Err("Discriminant 目标非标量".into());
+                    return Err("Discriminant target is not a scalar".into());
                 };
                 let rv = match self.tag_info(p.ty)? {
                     TagInfo::Single { discr } => Rvalue::Use(Operand::Imm {
@@ -1528,7 +1538,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         variants_len,
                         untagged,
                     },
-                    // 128 位 niche：独立 stmt（读 16 字节 tag，u128 算术）
+                    // 128-bit niche: a separate stmt (read the 16-byte tag, u128 arithmetic)
                     TagInfo::Niche128 {
                         tag_off,
                         niche_start,
@@ -1563,16 +1573,16 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         Ok(stmts)
                     }
                     AK::RawPtr(..) => {
-                        // (data, meta) → 胖指针；meta ZST → 瘦指针
+                        // (data, meta) -> fat pointer; a ZST meta -> thin pointer
                         let mut ops = operands.iter();
                         let (data, meta) = (
-                            ops.next().ok_or("RawPtr 缺 data")?,
-                            ops.next().ok_or("RawPtr 缺 meta")?,
+                            ops.next().ok_or("RawPtr is missing data")?,
+                            ops.next().ok_or("RawPtr is missing meta")?,
                         );
                         match dst_kind {
                             ValKind::Scalar(w) => {
                                 let LoweredOp::Scalar(d) = self.lower_operand(data)? else {
-                                    return Err("RawPtr data 非标量".into());
+                                    return Err("RawPtr data is not a scalar".into());
                                 };
                                 Ok(vec![Stmt::Assign {
                                     dst: dst_p.scalar_place(w),
@@ -1581,10 +1591,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             }
                             ValKind::Pair((ao, aw), (bo, bw)) => {
                                 let LoweredOp::Scalar(d) = self.lower_operand(data)? else {
-                                    return Err("RawPtr data 非标量".into());
+                                    return Err("RawPtr data is not a scalar".into());
                                 };
                                 let LoweredOp::Scalar(m) = self.lower_operand(meta)? else {
-                                    return Err("RawPtr meta 非标量".into());
+                                    return Err("RawPtr meta is not a scalar".into());
                                 };
                                 Ok(vec![
                                     Stmt::Assign {
@@ -1597,7 +1607,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                     },
                                 ])
                             }
-                            _ => Err("RawPtr 目标分类异常".into()),
+                            _ => Err("RawPtr target has an unexpected class".into()),
                         }
                     }
                     AK::Adt(..)
@@ -1605,9 +1615,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     | AK::Closure(..)
                     | AK::Coroutine(..)
                     | AK::CoroutineClosure(..) => {
-                        // cg_ssa 同构：**仅 Adt 做 variant downcast**——Coroutine/Closure/
-                        // Tuple 的 operands（upvars）落顶层 fields（coroutine 的 variant
-                        // fields 是暂停点 saved locals，不是 upvars！）；随后写判别式。
+                        // Isomorphic to cg_ssa: **only Adt does a variant downcast** -- Coroutine/Closure/
+                        // Tuple operands (upvars) land in top-level fields (a coroutine's variant fields
+                        // are suspension-point saved locals, not upvars!); then write the discriminant.
                         let (vidx, active_field, use_variant) = match kind {
                             AK::Adt(_, v, _, _, af) => (*v, *af, true),
                             _ => (VariantIdx::ZERO, None, false),
@@ -1626,7 +1636,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             let off = field_layout.fields.offset(fi).bytes() as u32;
                             stmts.extend(self.write_at(&dst_p, off, op)?);
                         }
-                        // 判别式：enum 全部要写；coroutine 初始 variant（Unresumed=0）
+                        // Discriminant: write it for every enum, and for the coroutine initial variant (Unresumed=0)
                         if dst_p.ty.is_enum() || dst_p.ty.is_coroutine() {
                             stmts.extend(self.set_discr_stmts(&dst_p, dst_p.ty, vidx)?);
                         }
@@ -1635,11 +1645,11 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
             }
             mir::Rvalue::ThreadLocalRef(def_id) => {
-                // M4.4 D3：per-thread 实例——稠密 TlsId，执行期 Ctx.tls 惰性物化
-                // （heap 分配 + 冻结模板拷贝）。v1 记账：dtor 不跑（设计 D3）。
+                // Per-thread instance: a dense TlsId, lazily materialized into Ctx.tls at
+                // execution time (heap allocation + a copy of the frozen template). Accounting note: the dtor does not run.
                 let id = self.linker.tls_id(*def_id)?;
                 let ValKind::Scalar(w) = dst_kind else {
-                    return Err("ThreadLocalRef 目标非标量".into());
+                    return Err("ThreadLocalRef target is not a scalar".into());
                 };
                 Ok(vec![Stmt::Assign {
                     dst: dst_p.scalar_place(w),
@@ -1654,7 +1664,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
     }
 }
 
-/// 语句 → ir 语句（Ok(None) = 无操作）。
+/// Statement -> ir statements (an empty vec means no operation).
 fn lower_stmt<'tcx>(
     cx: &mut LowerCx<'tcx, '_>,
     stmt: &mir::Statement<'tcx>,
@@ -1673,7 +1683,7 @@ fn lower_stmt<'tcx>(
             let ptr_ty = cx.op_ty(&cp.src)?;
             let pointee = ptr_ty
                 .builtin_deref(true)
-                .ok_or("CopyNonOverlapping 源非指针")?;
+                .ok_or("CopyNonOverlapping source is not a pointer")?;
             let elem_size = cx.layout_of(pointee)?.size.bytes();
             Ok(vec![Stmt::MemCopy {
                 src: cx.lower_operand_scalar(&cp.src)?,
@@ -1691,30 +1701,30 @@ fn lower_stmt<'tcx>(
             let ty = p.ty;
             cx.set_discr_stmts(&p, ty, *variant_index)
         }
-        other => Err(format!("语句 {other:?}（M4.1+）")),
+        other => Err(format!("statement {other:?}")),
     }
 }
 
-/// 一个 instance 的降低。Err = 整函数 Trap（layout 失败等）；
-/// 语句级不支持 → 该块 Trap（细粒度）。
+/// Lower one instance. Err = the whole function Traps (layout failure etc.);
+/// an unsupported statement Traps only that block (finer-grained).
 pub(crate) fn lower_instance<'tcx>(
     tcx: TyCtxt<'tcx>,
     typing_env: TypingEnv<'tcx>,
     instance: Instance<'tcx>,
     linker: &mut Linker<'tcx>,
 ) -> Result<ir::FuncBody, String> {
-    // intrinsic 无普通 MIR（fallback-body 型由 Linker 以 new_raw 补收为 Item）
+    // An intrinsic has no ordinary MIR (the fallback-body form is re-collected as an Item by the Linker via new_raw)
     if let InstanceKind::Intrinsic(..) = instance.def {
-        return Err("intrinsic 实例（M4.x 内建）".into());
+        return Err("intrinsic instance (engine builtin)".into());
     }
-    // foreign item 无 MIR（instance_mir 即 rustc query panic）：fn-ptr 取址必须走
-    // Linker::foreign_fn_entry_addr；入队到这里 = 上游登记路径漏判，Err 落 Trap
-    // 体而非拖垮整个 rustc 进程。
+    // A foreign item has no MIR (instance_mir panics the rustc query): taking a fn-ptr
+    // must go through Linker::foreign_fn_entry_addr. Reaching this queue means an
+    // upstream registration path missed a case; Err becomes a Trap body instead of taking down the rustc process.
     if tcx.is_foreign_item(instance.def_id()) {
-        return Err("foreign 实例无 MIR 可降（fn-ptr 取址应走 foreign_fn_entry_addr）".into());
+        return Err("foreign instance has no MIR to lower (fn-ptr address-taking must go through foreign_fn_entry_addr)".into());
     }
     let body_ref: &Body<'tcx> = tcx.instance_mir(instance.def);
-    // 整体单态化（一次 clone + instantiate；Body: TypeFoldable）
+    // Monomorphize the whole body at once (one clone + instantiate; Body: TypeFoldable)
     let body: Body<'tcx> = instance.instantiate_mir_and_normalize_erasing_regions(
         tcx,
         typing_env,
@@ -1722,7 +1732,7 @@ pub(crate) fn lower_instance<'tcx>(
     );
     let mut frame = frame::freeze(tcx, typing_env, &body)?;
 
-    // 返回通道（_0，ABI v2）：聚合 = indirect + sret 槽（帧尾追加 8 字节）
+    // Return channel (_0, ABI v2): an aggregate uses indirect + an sret slot (8 bytes appended at the end of the frame)
     let ret = {
         let ret_info = &frame.locals[0];
         match ret_info.kind {
@@ -1755,20 +1765,20 @@ pub(crate) fn lower_instance<'tcx>(
         }
     };
 
-    // 参数落位（_1..=_argc，ABI v2）。
+    // Parameter placement (_1..=_argc, ABI v2).
     //
-    // rust-call ABI 的物理约定 = tuple **按字段展平**（cg_ssa/Miri 同构）：闭包本体的
-    // MIR 参数天然已拆开（env, a, b），调用点把 tuple operand 逐字段拆传
-    // （untuple_rust_call_arg）；shim body（ClosureOnce/VTable）的 spread_arg 标记
-    // tuple local——此处按字段展开为多个参数（落位 = tuple local 内部偏移，prologue
-    // 写入即重组）。单参闭包曾靠 (A,) 与 A 布局巧合蒙混（M4.1-4.3），双参闭包
-    // （thread spawn 链的 map_try_fold/LocalKey::set）逼出真协议。
+    // The physical contract of the rust-call ABI is a field-flattened tuple (isomorphic
+    // to cg_ssa/Miri): the closure body's MIR parameters are already split (env, a, b)
+    // and the call site passes tuple operands field by field (untuple_rust_call_arg).
+    // The shim body (ClosureOnce/VTable) marks the tuple local with spread_arg; here
+    // it expands into separate parameters (placement = the tuple local's internal
+    // offset, so the prologue write reassembles it).
     let mut params = Vec::new();
     for local in body.args_iter() {
         let info = &frame.locals[local.as_usize()];
         if body.spread_arg == Some(local) {
             let rustc_middle::ty::TyKind::Tuple(fields) = info.ty.kind() else {
-                return Err(format!("spread_arg 非 tuple（{}）", info.ty));
+                return Err(format!("spread_arg is not a tuple ({})", info.ty));
             };
             let layout = frame::layout_of(tcx, typing_env, info.ty)?;
             for (i, fty) in fields.iter().enumerate() {
@@ -1821,7 +1831,7 @@ pub(crate) fn lower_instance<'tcx>(
         });
     }
 
-    // #[track_caller]：帧尾 &Location 隐藏尾实参槽（cg_ssa ABI 同构）
+    // #[track_caller]: hidden trailing &Location argument slot at the end of the frame (isomorphic to the cg_ssa ABI)
     let caller_loc_off = if instance.def.requires_caller_location(tcx) {
         let off = (frame.size + 7) & !7;
         frame.size = off + 8;
@@ -1845,8 +1855,8 @@ pub(crate) fn lower_instance<'tcx>(
         mir_block_count,
     };
 
-    // rustc API 的 panic 面不可控（布局角例等）——按 Trap-stub 协议兜成占位，
-    // 绝不中止整个降低（诊断带 panic 消息，指认待修的构造）
+    // The panic surface of the rustc API is not controllable (layout corner cases
+    // etc.), so the Trap-stub protocol catches it as a placeholder instead of aborting the whole lowering (the diagnostic carries the panic message).
     fn catch_lower<T>(
         f: impl FnOnce() -> Result<T, String> + std::panic::UnwindSafe,
     ) -> Result<T, String> {
@@ -1858,7 +1868,7 @@ pub(crate) fn lower_instance<'tcx>(
                     .map(|s| s.as_str())
                     .or_else(|| e.downcast_ref::<&str>().copied())
                     .unwrap_or("?");
-                Err(format!("lower panic: {msg}（M4.x 待修）"))
+                Err(format!("lower panic: {msg}"))
             }
         }
     }
@@ -1871,7 +1881,7 @@ pub(crate) fn lower_instance<'tcx>(
             match r {
                 Ok(mut s) => stmts.append(&mut s),
                 Err(reason) => {
-                    // 语句级 Trap：执行到此即诊断退出；终止子照常降低（保 Call 边）
+                    // Statement-level Trap: execution stops with a diagnostic here; the terminator is still lowered (to preserve the Call edge)
                     stmts.push(Stmt::Trap(reason.into_boxed_str()));
                     break;
                 }

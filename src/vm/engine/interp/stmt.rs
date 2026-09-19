@@ -1,6 +1,6 @@
-//! exec_stmt (moved whole from interp.rs I8): 40+ Stmt arms -- atomics/memcpy-set/
-//! SIMD (moved whole to simd_exec.rs in T1-d, shared by interp/JIT)/128-bit f128/
-//! Fence/RepeatBytes. Caller = runblocks main loop.
+//! `exec_stmt`: the statement arms -- atomics, memcpy/memset, SIMD (delegated to
+//! `simd_exec`, which the JIT shares), 128-bit and f128 arithmetic, fences and
+//! RepeatBytes. Called from the `runblocks` main loop.
 
 use super::*;
 use super::{
@@ -653,7 +653,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let pd = eval_place_addr(ctx, base, dst);
             unsafe { (pd as *mut u128).write_unaligned(bits) };
         }
-        // ===== f128 wide path (D8c) =====
+        // ===== f128 wide path =====
         Stmt::F128Bin { op, a, b, dst } => {
             use crate::vm::engine::ir::FloatOp as F;
             let (x, y) = (
@@ -674,7 +674,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let x = f128_read(eval_place_addr(ctx, base, a));
             let r = match (op, b) {
                 (M::Powi, F128Rhs::Scalar(o)) => x.powi(eval_operand(ctx, base, o).0 as i32),
-                (M::Powi, F128Rhs::Wide(_)) => engine_abort("f128 powi rhs 形态"),
+                (M::Powi, F128Rhs::Wide(_)) => engine_abort("f128 powi rhs form"),
                 (op, F128Rhs::Wide(pb)) => {
                     let y = f128_read(eval_place_addr(ctx, base, pb));
                     match op {
@@ -685,7 +685,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                         M::Powi => unreachable!(),
                     }
                 }
-                (_, F128Rhs::Scalar(_)) => engine_abort("f128 math rhs 形态"),
+                (_, F128Rhs::Scalar(_)) => engine_abort("f128 math rhs form"),
             };
             f128_write(eval_place_addr(ctx, base, dst), r);
         }
@@ -738,7 +738,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                 K::F(FloatW::F16) => (x as f16).to_bits() as u64,
                 K::F(FloatW::F32) => (x as f32).to_bits() as u64,
                 K::F(FloatW::F64) => (x as f64).to_bits(),
-                // `as` 饱和语义（NaN→0、越界→边界）
+                // `as` saturation semantics (NaN -> 0, out of range -> boundary)
                 K::Int { signed: true } => match w {
                     Width::W8 => x as i8 as u64,
                     Width::W16 => x as i16 as u64,
@@ -776,7 +776,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
         }
         Stmt::Trap(reason) => engine_abort(&format!("TRAP: {reason}")),
         Stmt::Nop => {}
-        // `[expr; N]` 聚合元素：dst[0] 为模板铺满其余
+        // `[expr; N]` aggregate elements: dst[0] is the template that fills the rest.
         Stmt::RepeatBytes {
             first,
             count,
@@ -793,7 +793,8 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                 }
             }
         }
-        // 栅栏补真（M4.4 D4）：guest 任意序 → 宿主 SeqCst（最强序在 RAM non-det 包络内）
+        // Fence: the guest's requested order becomes the host ordering; a single-threaded
+        // fence needs only a compiler fence.
         Stmt::Fence {
             single_thread,
             order,

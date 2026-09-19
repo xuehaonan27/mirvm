@@ -1,24 +1,26 @@
-//! A2 deps-image (s3b-a2-design §3): cross-run cache for binary-independent instances — extension of the S4 std base
-//! to registry dependency closures. The lowering product of a dependency closure ("purified aggregate": only purity=Pure
-//! instances) is produced by split lower and written to disk during a binary's **first cold run**; editing the binary and rerunning loads
-//! it into the image stack `[std base, deps-image]`, and the runner lowers only delta (binary attachments).
+//! Cross-run cache for the lowering product of registry dependency closures: the binary-independent
+//! instances that sit below a program delta. Split lowering writes it to disk during a binary's first
+//! cold run. A later run, even of an edited binary, loads it into the image stack as
+//! `[std base, deps-image]` and lowers only the delta, i.e. the binary's own attachments. The cached
+//! instances are the "purified aggregate": only purity=Pure instances.
 //!
-//! Key (pre-key, **computable pre-compiler** — L2 hot path runs before the compiler session, cannot depend on tcx):
-//! `fnv(MIRVM_BUILD_ID, base key, sorted --extern artifact content stamps)`.
-//! --extern contains only direct dependencies (4 in the eco); the transitive closure is covered by **cargo rebuild propagation** (any changed transitive
-//! crate change ⇒ its direct dependencies on the reverse dependency chain are recompiled by cargo ⇒ direct rlib stamp changes);
-//! content digest catches same-size rewrites with restored mtime. **Does not include binary source or project
-//! identity** ⇒ binary edits always hit; same lockfile + same toolchain projects share (S3′c).
-//! **Enabled by default from A2-3**; `MIRVM_NO_DEPS_IMAGE=1` bypasses entirely (for two-state cross-checking).
-//! v1 boundary: empty --extern (pure-std program with no registry dependencies) does not produce/use image —
-//! that territory is already covered by the S4 base.
+//! The pre-key is computable before the compiler session (the hot path runs before it and has no tcx):
+//! `fnv(MIRVM_BUILD_ID, base key, sorted --extern artifact content stamps)`. `--extern` lists only direct
+//! dependencies, so the transitive closure is covered by cargo rebuild propagation: a changed transitive
+//! crate makes cargo recompile its direct dependents, which changes those rlib stamps. The content digest
+//! catches same-size rewrites with a restored mtime. The key includes neither binary source nor project
+//! identity, so binary edits always hit, and projects with the same lockfile and toolchain share an image.
+//! The cache is on by default; `MIRVM_NO_DEPS_IMAGE=1` bypasses it entirely for two-state cross-checking.
 //!
-//! Correctness red line (same as the chain era): image's absolute FuncId/addresses are valid only when "load stack below ==
-//! build stack below" (below always = [base], key includes base key); any validation mismatch = do not load
-//! (full lowering self-heals, never wrong-value). Layered lowering-fingerprint validation: image.fp == base.fp (at load time) +
-//! base.fp == session.fp (after_analysis fp_matches) ⇒ image.fp == session.fp.
-//! Byte determinism: **not guaranteed** (same rule as L2 entries — identity is carried by key/file name, no cmp consumer;
-//! base-file determinism contract is specific to "sharing bases across programs", see decision-history §7.3).
+//! A cached image is used only when it cannot be wrong: its absolute FuncIds and addresses are valid only
+//! if the load-time stack below it equals the build-time stack below it. Validation is layered: the image
+//! fingerprint must equal the base's at load time, and the base's must equal the session's fingerprint
+//! after analysis. Any mismatch means do not load, and full lowering self-heals rather than producing
+//! wrong values.
+//!
+//! The file is not required to be byte-deterministic: identity is carried by the key and file name, and
+//! nothing compares contents. v1 boundary: an empty `--extern` (a pure-std program with no registry
+//! dependencies) neither produces nor uses an image, since the std base already covers that territory.
 
 use std::path::PathBuf;
 
@@ -29,12 +31,13 @@ use crate::vm::engine::ir;
 /// --extern artifact stamp list (path, size, mtime_ns, BLAKE3; sorted and deduped)
 type ExternStamps = Vec<(String, u64, u128, [u8; 32])>;
 
-/// deps-image file (v1 = postcard whole package; module's exports/fn_addrs stay inside the module
-/// — no byte-determinism contract, avoiding BaseFile's sorted Vec extraction/reconstruction dance).
+/// deps-image file (v1 = the whole package as postcard). The module's exports and fn_addrs stay inside the
+/// module: this file has no byte-determinism contract, so it does not need BaseFile's sorted
+/// extraction/reconstruction.
 #[derive(Serialize, Deserialize)]
 struct DepsFile {
     build_id: String,
-    /// Exact identity of below = [base] (mismatched load = total wrong-value, must be exactly equal)
+    /// Exact identity of the stack below (= [base]); a mismatch is wrong at every value, so it must be equal
     base_key: String,
     lowering_fp: (bool, bool, bool),
     /// Pre-key material for comparison (hash-collision immune): sorted --extern artifact stamps
@@ -58,8 +61,8 @@ struct DepsFileRef<'a> {
     tls_syms: &'a [(Box<str>, ir::TlsId)],
 }
 
-/// Enablement check (default on from A2-3): only knob = bypass `MIRVM_NO_DEPS_IMAGE=1` (diagnostics / two-state
-/// cross-check). The A2-2 `MIRVM_DEPS_IMAGE=1` enable knob is retired (harmless if left over).
+/// Whether the deps-image cache is bypassed. The cache is on by default and the only knob is
+/// `MIRVM_NO_DEPS_IMAGE=1` (diagnostics / two-state cross-check).
 pub fn bypassed() -> bool {
     std::env::var_os("MIRVM_NO_DEPS_IMAGE").is_some_and(|v| !v.is_empty())
 }
@@ -68,9 +71,9 @@ fn deps_dir() -> PathBuf {
     crate::sysroot::cache_dir().join("deps")
 }
 
-/// Material for pre-key: in rustc_args, `--extern name=path` (two-arg form) and
-/// `--extern=name=path` (single-arg form) path lists (deduped and sorted).
-/// --extern without path (bare name) ⇒ None: v1 does not produce/use image (self-heal, prevent silent wrong-value).
+/// Pre-key material: the paths in `--extern name=path` (two-arg form) and `--extern=name=path` (single-arg
+/// form), deduped and sorted. A bare-name `--extern` without a path returns `None`, so v1 neither produces
+/// nor uses an image and full lowering self-heals instead of risking silently wrong values.
 fn extern_paths(rustc_args: &[String]) -> Option<Vec<String>> {
     let mut paths = Vec::new();
     let mut it = rustc_args.iter();
@@ -89,7 +92,7 @@ fn extern_paths(rustc_args: &[String]) -> Option<Vec<String>> {
     Some(paths)
 }
 
-/// Content stamping; any file not stably readable ⇒ None (do not produce/use image).
+/// Content stamping; a file that is not stably readable yields `None`, so no image is produced or used.
 fn stamp_externs(paths: &[String]) -> Option<ExternStamps> {
     paths
         .iter()
@@ -101,10 +104,10 @@ fn stamp_externs(paths: &[String]) -> Option<ExternStamps> {
         .collect()
 }
 
-/// pre-key = fnv(build_id, base key, sorted stamps). Returns (key, stamp list);
-/// any material unavailable ⇒ None (caller treats as "no image", full lowering self-heals).
-/// **Empty --extern ⇒ None** (v1 boundary: dependency-free pure-std programs go through S4 base domain,
-/// no "std residual shared image" is built for them — that territory is already covered by S4).
+/// pre-key = fnv(build_id, base key, sorted stamps), returned together with the stamp list. Any material
+/// that is unavailable yields `None`, which the caller treats as "no image"; full lowering then self-heals.
+/// An empty `--extern` also yields `None`: dependency-free pure-std programs are covered by the std base and
+/// get no shared image of their own.
 pub fn pre_key(rustc_args: &[String], base_key: &str) -> Option<(String, ExternStamps)> {
     let paths = extern_paths(rustc_args)?;
     if paths.is_empty() {
@@ -135,9 +138,10 @@ fn file_path(key: &str) -> PathBuf {
     deps_dir().join(format!("{key}.img"))
 }
 
-/// Load deps-image (pre-compiler call). `base` = already-present base (key and fp validated in layers);
-/// success = BaseImage to push onto stack (its key = pre-key, used for L2 key chain).
-/// any mismatch/failure = None (full lowering self-heals, main path stays silent — stderr participates in native diff).
+/// Load the deps-image; called before the compiler session. `base` is the already-present base, whose key
+/// and fingerprint are validated in layers. On success the returned `BaseImage` is pushed onto the stack,
+/// with its key set to the pre-key so the L2 key chain can use it. Any mismatch or failure yields `None`:
+/// full lowering self-heals and the main path stays silent, because stderr participates in native diffs.
 pub fn try_load(
     rustc_args: &[String],
     base: &crate::baseimage::BaseImage,
@@ -192,9 +196,10 @@ pub fn try_load(
     })
 }
 
-/// Persist and push split product (A2-2 pipeline): write to disk if cacheable (atomic publish), returning the
-/// BaseImage to push. Write failure / not cacheable / pre-key unavailable = no file for this run only (subsequent runs do full lowering
-/// self-heal), returned stack-layer key degrades to process-unique placeholder — L2 key chain naturally invalid across runs, never false-hit.
+/// Persist the split product and return the `BaseImage` to push. If it is cacheable the file is written
+/// atomically. A write failure, a non-cacheable product or an unavailable pre-key simply leaves no file for
+/// this run, so later runs do full lowering and self-heal; the returned stack-layer key degrades to a
+/// process-unique placeholder, which makes the L2 key chain invalid across runs rather than a false hit.
 pub fn store_and_wrap(
     rustc_args: &[String],
     base_key: &str,
@@ -202,10 +207,11 @@ pub fn store_and_wrap(
     image: crate::lower::SplitImage,
 ) -> crate::baseimage::BaseImage {
     let mut bi = image.into_base_image(fp);
-    // Cacheability criterion: frozen area must be in fixed spline k=0 domain (prerequisite for embedded absolute addresses in snapshot to remain stable across processes)
-    // Entry stub code area follows same rule (P1: fn-ptr value domain = stub code address). Foreign
-    // symbols from P2 onward go through GOT slots indirectly (decision-history §7.5c): image-side GOT table travels with
-    // the file and is refilled with this process's real values after loading during startup — no longer a write-to-disk obstacle.
+    // Cacheability: the frozen area must sit in the fixed spline k=0 domain, a prerequisite for the
+    // snapshot's embedded absolute addresses to stay stable across processes. The entry stub code area
+    // follows the same rule, since an fn-ptr value is a stub code address. Foreign symbols go through GOT
+    // slots: the image-side GOT table travels with the file and is refilled with this process's real values
+    // at startup, so it does not block writing the file.
     let cacheable = bi.module.frozen.as_ref().is_some_and(|fr| {
         fr.at_fixed_base() && fr.home() == crate::vm::engine::addrlayout::image_addr(0)
     }) && (bi.module.entry_stub_sites.is_empty()

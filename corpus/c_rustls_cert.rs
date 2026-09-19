@@ -1,31 +1,31 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# 只启官方 ring provider，不走默认 aws-lc-rs：aws-lc-sys 是巨型 C/C++ 归档
-# （编译十分钟级，且静态归档闭包有 rusqlite 式 libm FRONTIER 风险）；ring 是
-# rustls 0.23 官方双 provider 之一，其归档形状（C+asm 静态归档、
-# -fvisibility=hidden 符号）在 mirvm 已实证全绿（docs/corpus.md 的 ring bug②
-# 修复记录）。本 driver 覆盖的 rustls API 面与 provider 选择无关。
+# Only the official ring provider is enabled, not the default aws-lc-rs: aws-lc-sys is a huge
+# C/C++ archive (tens of minutes to compile, and its static-archive closure carries a
+# rusqlite-style libm FRONTIER risk). ring is one of rustls 0.23's two official providers,
+# and its archive shape (a C+asm static archive with -fvisibility=hidden symbols) is already
+# proven green under mirvm. The rustls API surface this driver covers is provider-independent.
 rustls = { version = "=0.23.42", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"
 ---
-// rustls 0.23 + rustls-pemfile 2：TLS 大物的无网络确定性面。不握手、不联网。
-// ① pemfile：certs 迭代器 / private_key 通用入口 / 三种私钥专用迭代器 /
-//    read_all Item 枚举 / 坏 base64 错误路径。
-// ② RootCertStore：empty / add（好+坏 DER）/ add_parsable_certificates 计数 /
-//    subjects / len / is_empty。
-// ③ CryptoProvider 枚举：ring cipher_suites、kx_groups；ALL/DEFAULT_VERSIONS。
-// ④ ServerConfig/ClientConfig 构建 + ALPN；两条构建错误路径（坏私钥 DER、
-//    私钥与证书 SPKI 不匹配）。
-// ⑤ WebPkiServerVerifier 全矩阵：正例（带/不带 intermediate、localhost SAN）
-//    + 反例（错名 / 错根 / 过期 / 未生效 / 篡改签名 / 垃圾 EE 证书）+
-//    空根 verifier 构建错误。
-// ⑥ ECDSA 签名 → verify_tls13/12_signature 正反例。注意 ring 0.17 的签名
-//    用随机 nonce（非 RFC6979，native 连跑两次签名即不同），签名本体不可
-//    打印，只打确定性的验签结果。（DigitallySignedStruct 经 internal Codec
-//    构造——rustls 自己的集成测试同款用法；internal 模块 semver-exempt，
-//    但 0.23.42 已钉在合同中）。
-// 证书材料（构建期 openssl CLI 生成，运行期全确定）：
+// rustls 0.23 + rustls-pemfile 2: the offline, deterministic, no-handshake no-network surface.
+// ① pemfile: the certs iterator / the generic private_key entry point / three key-specific
+//    iterators / the read_all Item enum / a bad-base64 error path.
+// ② RootCertStore: empty / add (good + bad DER) / add_parsable_certificates counts /
+//    subjects / len / is_empty.
+// ③ CryptoProvider contents: ring cipher_suites, kx_groups; ALL/DEFAULT_VERSIONS.
+// ④ ServerConfig/ClientConfig construction + ALPN; two construction error paths (corrupt
+//    private-key DER, private key whose SPKI does not match the certificate).
+// ⑤ the full WebPkiServerVerifier matrix: positive cases (with and without an intermediate,
+//    localhost SAN) + negative cases (wrong name / wrong root / expired / not yet valid /
+//    tampered signature / junk EE certificate) + the empty-root verifier construction error.
+// ⑥ ECDSA signing -> verify_tls13/12_signature positive and negative cases. Note that ring
+//    0.17 signs with a random nonce (not RFC6979, so two native runs differ), which makes the
+//    signature itself unprintable; only the deterministic verify result is printed.
+//    (DigitallySignedStruct is built through the internal Codec, the same route rustls's own
+//    integration tests use; the internal module is semver-exempt but 0.23.42 is pinned.)
+// Certificate material (generated at build time by the openssl CLI; deterministic at run time):
 //   openssl ecparam -genkey -name prime256v1 -out ca-key.pem
 //   openssl req -new -x509 -key ca-key.pem -out ca-cert.pem -days 7300 \
 //     -subj "/CN=mirvm-test-ca" -addext "basicConstraints=critical,CA:TRUE" \
@@ -36,9 +36,9 @@ rustls-pemfile = "2"
 //   # ext.cnf: basicConstraints=critical,CA:FALSE / keyUsage=critical,
 //   # digitalSignature / extendedKeyUsage=serverAuth,clientAuth /
 //   # subjectAltName=DNS:mirvm.test,DNS:localhost
-// 有效期 2026-07-16..2046-07-11；验证时刻硬编码：1811808000（2027-06-01，
-// 有效）/ 2524608000（2050-01-01，过期）/ 1577836800（2020-01-01，未生效）。
-// 确定性：无时间/地址/HashMap 序/线程序；二进制只打 长度+FNV-1a；stderr 为空。
+// Validity 2026-07-16..2046-07-11; verification instants are hard-coded: 1811808000 (2027-06-01,
+// valid) / 2524608000 (2050-01-01, expired) / 1577836800 (2020-01-01, not yet valid).
+// Determinism: no time/addresses/HashMap order/thread order; binary data prints only len+FNV-1a; stderr empty.
 use std::io::BufReader;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,9 +54,9 @@ use rustls::{
     ALL_VERSIONS, DEFAULT_VERSIONS,
 };
 
-const NOW_VALID: u64 = 1_811_808_000; // 2027-06-01T00:00:00Z（窗口内）
-const NOW_EXPIRED: u64 = 2_524_608_000; // 2050-01-01T00:00:00Z（过期后）
-const NOW_TOO_EARLY: u64 = 1_577_836_800; // 2020-01-01T00:00:00Z（生效前）
+const NOW_VALID: u64 = 1_811_808_000; // 2027-06-01T00:00:00Z (inside the validity window)
+const NOW_EXPIRED: u64 = 2_524_608_000; // 2050-01-01T00:00:00Z (after expiry)
+const NOW_TOO_EARLY: u64 = 1_577_836_800; // 2020-01-01T00:00:00Z (before validity)
 
 const CA_PEM: &str = "-----BEGIN CERTIFICATE-----
 MIIBlTCCATugAwIBAgIUORXYdf8V+fqWuWq/b+cv8khwAOUwCgYIKoZIzj0EAwIw
@@ -160,7 +160,7 @@ fn verify_case(
 }
 
 fn main() {
-    // ---- ① rustls-pemfile：证书/私钥解析全形态 ----
+    // ---- ① rustls-pemfile: every certificate/private-key parse form ----
     let certs_pem = [CA_PEM, SERVER_PEM, OTHER_PEM].concat();
     let mut rd = BufReader::new(certs_pem.as_bytes());
     let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut rd)
@@ -193,7 +193,7 @@ fn main() {
         .expect("ca key");
     println!("ca key kind={}", key_kind(&ca_key));
 
-    // 专用迭代器 × 匹配/不匹配标签
+    // key-specific iterators x matching and non-matching labels
     let n_pkcs8 = rustls_pemfile::pkcs8_private_keys(&mut BufReader::new(
         SERVER_KEY_PKCS8_PEM.as_bytes(),
     ))
@@ -218,7 +218,7 @@ fn main() {
     .expect("sec1 key");
     println!("sec1 key kind={}", key_kind(&sec1_key));
 
-    // read_all 混合流：Item 枚举形态
+    // read_all over a mixed stream: the Item enum forms
     let mixed = [
         CA_PEM,
         SERVER_KEY_PKCS8_PEM,
@@ -243,7 +243,7 @@ fn main() {
         println!("item {tag}");
     }
 
-    // 错误路径：坏 base64
+    // Error path: bad base64
     let garbage_pem = "-----BEGIN CERTIFICATE-----\nnot-valid-base64!!!\n-----END CERTIFICATE-----\n";
     match rustls_pemfile::certs(&mut BufReader::new(garbage_pem.as_bytes())).next() {
         Some(Err(e)) => println!("bad pem: err {e}"),
@@ -278,13 +278,13 @@ fn main() {
         });
     println!("store parsable ok={ok_cnt} bad={bad_cnt} len={} subjects_fnv={subj_fnv:016x}", store.len());
 
-    // 干净的两份信任库：好根 / 错根
+    // Two clean trust stores: good root / wrong root
     let mut store_good = RootCertStore::empty();
     store_good.add(ca_cert.clone()).unwrap();
     let mut store_wrong = RootCertStore::empty();
     store_wrong.add(other_cert.clone()).unwrap();
 
-    // ---- ③ provider 与协议版本枚举 ----
+    // ---- ③ provider and protocol-version enumeration ----
     let provider = ring::default_provider();
     println!("suites n={}", provider.cipher_suites.len());
     for s in &provider.cipher_suites {
@@ -300,7 +300,7 @@ fn main() {
     }
     println!("default vers n={}", DEFAULT_VERSIONS.len());
 
-    // ---- ④ ServerConfig / ClientConfig 构建 ----
+    // ---- ④ ServerConfig / ClientConfig construction ----
     let mut scfg = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(
@@ -311,7 +311,7 @@ fn main() {
     scfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     println!("server alpn n={} {}", scfg.alpn_protocols.len(), alpn_join(&scfg.alpn_protocols));
 
-    // 错误路径 A：私钥 DER 结构损坏（曲线 OID 区翻转）→ load 失败
+    // Error path A: corrupt private-key DER (a flipped byte in the curve OID region) -> load fails
     let mut bad_der = server_key.secret_der().to_vec();
     bad_der[20] ^= 0xff;
     match ServerConfig::builder().with_no_client_auth().with_single_cert(
@@ -321,7 +321,7 @@ fn main() {
         Ok(_) => println!("corrupt key: unexpected ok"),
         Err(e) => println!("corrupt key: err {e}"),
     }
-    // 错误路径 B：CA 私钥 vs 服务器证书 → SPKI 不匹配
+    // Error path B: CA private key vs server certificate -> SPKI mismatch
     match ServerConfig::builder().with_no_client_auth().with_single_cert(
         vec![server_cert.clone()],
         ca_key.clone_key(),
@@ -337,7 +337,7 @@ fn main() {
     println!("client alpn n={} {}", ccfg.alpn_protocols.len(), alpn_join(&ccfg.alpn_protocols));
     println!("provider default installed={}", CryptoProvider::get_default().is_some());
 
-    // ---- ⑤ WebPkiServerVerifier 矩阵 ----
+    // ---- ⑤ WebPkiServerVerifier matrix ----
     match WebPkiServerVerifier::builder(Arc::new(RootCertStore::empty())).build() {
         Ok(_) => println!("empty roots verifier: unexpected ok"),
         Err(e) => println!("empty roots verifier: err {e}"),
@@ -372,20 +372,20 @@ fn main() {
         .unwrap();
     verify_case("wrong-roots", &verifier_wrong, &server_cert, &ints, &name, NOW_VALID);
 
-    // 篡改签名尾字节 → 链签名校验必须失败
+    // Tamper with the certificate's last byte -> chain-signature verification must fail
     let mut t = server_cert.as_ref().to_vec();
     let last = t.len() - 1;
     t[last] ^= 0x01;
     let tampered = CertificateDer::from(t);
     verify_case("tampered-ee", &verifier, &tampered, &ints, &name, NOW_VALID);
-    // 垃圾 DER 当 EE → BadEncoding
+    // Junk DER as the EE certificate -> BadEncoding
     let junk = CertificateDer::from(vec![0x30, 0x03, 0x01, 0x01, 0xff]);
     verify_case("junk-ee", &verifier, &junk, &ints, &name, NOW_VALID);
 
-    // ---- ⑥ ECDSA 签名 → tls13/tls12 验签 ----
-    // 注意：ring 0.17 的 ECDSA 签名用随机 nonce（signing.rs 原文 "using a
-    // random nonce generated by rng"，native 连跑两次签名字节都不同），故
-    // 签名本体不可打印；确定的是验签结果（随机有效签名照样过、篡改照样拒）。
+    // ---- ⑥ ECDSA signing -> tls13/tls12 verification ----
+    // Note: ring 0.17's ECDSA signing uses a random nonce (signing.rs: "using a
+    // random nonce generated by rng", so two native runs differ), which makes the signature
+    // unprintable; the verify result is deterministic (valid passes, tampered is rejected).
     let sk = provider
         .key_provider
         .load_private_key(server_key.clone_key())
@@ -399,10 +399,10 @@ fn main() {
     let sig = signer.sign(msg).unwrap();
     println!("sign scheme {:?}", signer.scheme());
 
-    // DigitallySignedStruct::new 是 pub(crate)；走 rustls 集成测试同款的
-    // internal Codec 解码路径构造（scheme u16 BE + PayloadU16 长度前缀 + sig）。
+    // DigitallySignedStruct::new is pub(crate), so this builds through the internal Codec
+    // decode path like rustls's own integration tests (scheme u16 BE + PayloadU16 length + sig).
     let mut enc = Vec::with_capacity(sig.len() + 4);
-    enc.extend_from_slice(&0x0403u16.to_be_bytes()); // ECDSA_NISTP256_SHA256 的 IANA 值
+    enc.extend_from_slice(&0x0403u16.to_be_bytes()); // the IANA value of ECDSA_NISTP256_SHA256
     enc.extend_from_slice(&(sig.len() as u16).to_be_bytes());
     enc.extend_from_slice(&sig);
     let dss = DigitallySignedStruct::read(&mut Reader::init(&enc)).unwrap();
@@ -416,7 +416,7 @@ fn main() {
         Ok(_) => println!("tls12 sig: ok"),
         Err(e) => println!("tls12 sig: err {e}"),
     }
-    // 反例：消息被篡改 / 用错证书公钥
+    // Negative cases: tampered message / wrong certificate public key
     match verifier.verify_tls13_signature(b"tampered message", &server_cert, &dss) {
         Ok(_) => println!("tls13 sig tampered: unexpected ok"),
         Err(e) => println!("tls13 sig tampered: err {e}"),

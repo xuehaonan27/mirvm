@@ -5,10 +5,10 @@ syn = { version = "2", features = ["full", "parsing", "printing", "visit", "visi
 quote = "1"
 proc-macro2 = { version = "1", features = ["span-locations"] }
 ---
-// syn 2 运行期（非 proc-macro 展开期）：parse_file 一段内嵌的真实感源码
-// （fn/struct/enum/impl/trait/generics/where/async/const/static/macro_rules!/
-// 属性/文档注释），统计 Item 种类、Visit 计数（调用/生命周期/unsafe 块）、
-// ToTokens 回打、visit-mut 改写整数字面量、错误行列号。深递归 AST + 重 drop glue。
+// syn 2 at runtime (not proc-macro expansion): parse_file over an embedded realistic source
+// (fn/struct/enum/impl/trait/generics/where/async/const/static/macro_rules!/attributes/doc
+// comments); counts Item kinds and Visit hits (calls/lifetimes/unsafe blocks); re-prints via
+// ToTokens, rewrites integer literals with visit-mut, checks error positions; deep AST, heavy drop.
 use quote::ToTokens;
 use std::collections::BTreeMap;
 use syn::visit::{self, Visit};
@@ -277,7 +277,7 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     h
 }
 
-// 手写 hex：绕开 `{:x}`（LowerHex 经 core::fmt 间接 fn-ptr 调用的物化盲点）
+// Hand-written hex: avoids `{:x}` (LowerHex goes through an indirect fn-ptr in core::fmt)
 fn hex64(v: u64) -> String {
     let mut s = String::with_capacity(16);
     for i in (0..16).rev() {
@@ -341,7 +341,7 @@ impl VisitMut for BumpInts {
 }
 
 fn main() {
-    // ① parse_file + Item 种类统计（BTreeMap 定序）
+    // ① parse_file + Item kind counts (BTreeMap keeps order)
     let file = syn::parse_file(SRC).expect("fixture parses");
     let mut kinds: BTreeMap<&'static str, usize> = BTreeMap::new();
     for item in &file.items {
@@ -373,7 +373,7 @@ fn main() {
     println!("items total = {}", file.items.len());
     println!("file attrs = {}", file.attrs.len());
 
-    // ② Visit：调用表达式 / 方法调用 / 生命周期 / unsafe 块 / 属性 / 宏
+    // ② Visit: call expressions / method calls / lifetimes / unsafe blocks / attributes / macros
     let mut stats = Stats::default();
     stats.visit_file(&file);
     println!("== visit ==");
@@ -385,7 +385,7 @@ fn main() {
     println!("doc attributes = {}", stats.doc_attributes);
     println!("macros = {}", stats.macros);
 
-    // ③ ToTokens：整文件回打 + roundtrip；单个 item 回打看长度与前 80 字符
+    // ③ ToTokens: whole-file re-print + roundtrip; one item re-printed for length and first 80 chars
     let whole = file.to_token_stream().to_string();
     println!("== tokens ==");
     println!("whole tokens len = {}", whole.len());
@@ -406,7 +406,7 @@ fn main() {
     let head: String = pts.chars().take(80).collect();
     println!("Projector head80 = {head:?}");
 
-    // ④ visit-mut：所有整数字面量 +1，再回打做指纹
+    // ④ visit-mut: bump every integer literal by 1, then re-print and fingerprint
     let mut mutated = file.clone();
     let mut bump = BumpInts(0);
     bump.visit_file_mut(&mut mutated);
@@ -416,7 +416,7 @@ fn main() {
     println!("mutated tokens len = {}", mts.len());
     println!("mutated fnv1a64 = 0x{}", hex64(fnv1a64(mts.as_bytes())));
 
-    // ⑤ extra-traits Debug + 故意写错的代码：错误行列号
+    // ⑤ extra-traits Debug + deliberately broken source: error line/column
     let op: syn::BinOp = syn::parse_str("+").expect("binop parses");
     println!("== extra ==");
     println!("binop debug = {op:?}");

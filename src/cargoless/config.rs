@@ -1,9 +1,13 @@
-//! Cargo 配置发现与当前依赖来源切片需要的类型化读取。
+//! Cargo configuration discovery and typed reads of the current dependency
+//! source slice.
 //!
-//! Cargo 从 `$CARGO_HOME` 开始，再按调用目录祖先由浅到深叠加 `.cargo/config`
-//! 或 `config.toml`；`include` 先于包含它的文件。这里保留每一层及其来源路径，
-//! 让 directory/local-registry 的相对路径能按声明文件解释。只读取 resolver、
-//! registries、registry credential 和 source replacement；其他 Cargo 配置键不建模。
+//! Cargo starts at `$CARGO_HOME` and then stacks `.cargo/config` or
+//! `config.toml` from the calling directory's ancestors, shallowest first;
+//! an `include` is loaded before the file that includes it. Every layer and its
+//! source path are kept here so a relative directory/local-registry path can be
+//! interpreted against the file that declared it. Only `resolver`, `registries`,
+//! registry credentials and source replacement are read; other Cargo config keys
+//! are not modeled.
 
 use std::path::{Path, PathBuf};
 
@@ -70,7 +74,7 @@ impl CargoConfig {
             {
                 let value = value.as_str().ok_or_else(|| {
                     format!(
-                        "Cargo config {} 的 resolver.incompatible-rust-versions 必须是字符串",
+                        "resolver.incompatible-rust-versions in Cargo config {} must be a string",
                         layer.path.display()
                     )
                 })?;
@@ -90,7 +94,8 @@ impl CargoConfig {
         self.optional_registry(name)?.ok_or_else(|| {
             let env_name = registry_env_name(name);
             format!(
-                "Cargo registry `{name}` 未配置 index（需要 [registries.{name}] 或 CARGO_REGISTRIES_{env_name}_INDEX）"
+                "Cargo registry `{name}` has no configured index (needs [registries.{name}] or \
+                 CARGO_REGISTRIES_{env_name}_INDEX)"
             )
         })
     }
@@ -245,7 +250,7 @@ impl CargoConfig {
         .count();
         if kinds > 1 {
             return Err(format!(
-                "Cargo source `{name}` 同时声明 registry/local-registry/directory"
+                "Cargo source `{name}` declares registry/local-registry/directory at once"
             ));
         }
         Ok(found.then_some(selected))
@@ -263,7 +268,7 @@ impl CargoConfig {
             };
             let values = value.as_array().ok_or_else(|| {
                 format!(
-                    "Cargo config {} 的 registry.global-credential-providers 必须是数组",
+                    "registry.global-credential-providers in Cargo config {} must be an array",
                     layer.path.display()
                 )
             })?;
@@ -307,10 +312,16 @@ impl CargoConfig {
                 continue;
             }
             let text = std::fs::read_to_string(&file).map_err(|error| {
-                format!("读取 Cargo credentials {} 失败: {error}", file.display())
+                format!(
+                    "failed to read Cargo credentials {}: {error}",
+                    file.display()
+                )
             })?;
             let value: toml::Value = toml::from_str(&text).map_err(|error| {
-                format!("解析 Cargo credentials {} 失败: {error}", file.display())
+                format!(
+                    "failed to parse Cargo credentials {}: {error}",
+                    file.display()
+                )
             })?;
             let token = if name == "crates-io" {
                 value
@@ -360,17 +371,20 @@ fn config_file(directory: &Path) -> Option<PathBuf> {
 fn load_file(path: &Path, stack: &mut Vec<PathBuf>, layers: &mut Vec<Layer>) -> Result<(), String> {
     let identity = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if stack.contains(&identity) {
-        return Err(format!("Cargo config include 形成环: {}", path.display()));
+        return Err(format!("Cargo config include cycle: {}", path.display()));
     }
     stack.push(identity);
     let text = std::fs::read_to_string(path)
-        .map_err(|error| format!("读取 Cargo config {} 失败: {error}", path.display()))?;
+        .map_err(|error| format!("failed to read Cargo config {}: {error}", path.display()))?;
     let value: toml::Value = toml::from_str(&text)
-        .map_err(|error| format!("解析 Cargo config {} 失败: {error}", path.display()))?;
+        .map_err(|error| format!("failed to parse Cargo config {}: {error}", path.display()))?;
     if let Some(includes) = value.get("include") {
-        let includes = includes
-            .as_array()
-            .ok_or_else(|| format!("Cargo config {} 的 include 必须是数组", path.display()))?;
+        let includes = includes.as_array().ok_or_else(|| {
+            format!(
+                "include in Cargo config {} must be an array",
+                path.display()
+            )
+        })?;
         for include in includes {
             let (relative, optional) = include_value(include, path)?;
             let include_path = path.parent().unwrap_or(Path::new(".")).join(relative);
@@ -379,7 +393,7 @@ fn load_file(path: &Path, stack: &mut Vec<PathBuf>, layers: &mut Vec<Layer>) -> 
                     continue;
                 }
                 return Err(format!(
-                    "Cargo config {} include 的 {} 不存在",
+                    "Cargo config {} includes {}, which does not exist",
                     path.display(),
                     include_path.display()
                 ));
@@ -401,20 +415,25 @@ fn include_value(value: &toml::Value, source: &Path) -> Result<(PathBuf, bool), 
     }
     let table = value.as_table().ok_or_else(|| {
         format!(
-            "Cargo config {} 的 include 成员必须是路径或表",
+            "include member in Cargo config {} must be a path or a table",
             source.display()
         )
     })?;
     let path = table
         .get("path")
         .and_then(toml::Value::as_str)
-        .ok_or_else(|| format!("Cargo config {} include 表缺字符串 path", source.display()))?;
+        .ok_or_else(|| {
+            format!(
+                "include table in Cargo config {} lacks a string path",
+                source.display()
+            )
+        })?;
     let optional = table
         .get("optional")
         .map(|value| {
             value.as_bool().ok_or_else(|| {
                 format!(
-                    "Cargo config {} 的 include.optional 必须是布尔值",
+                    "include.optional in Cargo config {} must be a bool",
                     source.display()
                 )
             })
@@ -425,10 +444,12 @@ fn include_value(value: &toml::Value, source: &Path) -> Result<(PathBuf, bool), 
 }
 
 fn config_string(value: &toml::Value, source: &Path, field: &str) -> Result<String, String> {
-    value
-        .as_str()
-        .map(str::to_string)
-        .ok_or_else(|| format!("Cargo config {} 的 {field} 必须是字符串", source.display()))
+    value.as_str().map(str::to_string).ok_or_else(|| {
+        format!(
+            "{field} in Cargo config {} must be a string",
+            source.display()
+        )
+    })
 }
 
 fn config_command(value: &toml::Value, source: &Path, field: &str) -> Result<String, String> {
@@ -437,7 +458,7 @@ fn config_command(value: &toml::Value, source: &Path, field: &str) -> Result<Str
     }
     let array = value.as_array().ok_or_else(|| {
         format!(
-            "Cargo config {} 的 {field} 必须是字符串或数组",
+            "{field} in Cargo config {} must be a string or an array",
             source.display()
         )
     })?;
@@ -446,7 +467,7 @@ fn config_command(value: &toml::Value, source: &Path, field: &str) -> Result<Str
         .map(|part| {
             part.as_str().map(str::to_string).ok_or_else(|| {
                 format!(
-                    "Cargo config {} 的 {field} 数组成员必须是字符串",
+                    "array members of {field} in Cargo config {} must be strings",
                     source.display()
                 )
             })

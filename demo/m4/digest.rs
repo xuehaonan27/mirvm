@@ -1,4 +1,4 @@
-// M4.1 gate/survey: digest functions over values and memory (returns a u64 checksum, no println -- full differential from M4.3 onward).
+// Digest functions over values and memory: each returns a u64 checksum and prints nothing.
 // #[unsafe(no_mangle)] = mono collection root + stable --vm-call name.
 #![allow(dead_code)]
 
@@ -38,7 +38,7 @@ pub fn string_digest(reps: u64) -> u64 {
     acc
 }
 
-/// HashMap (deterministic hasher, no getrandom -- OS is M4.3's problem)
+/// HashMap (deterministic hasher, no getrandom -- the OS layer owns that)
 #[unsafe(no_mangle)]
 pub fn map_digest(n: u64) -> u64 {
     let mut m: HashMap<u64, u64, BuildHasherDefault<DefaultHasher>> = HashMap::default();
@@ -109,7 +109,7 @@ pub fn static_digest(idx: u64) -> u64 {
     t * 100 + m
 }
 
-/// Raw pointer arithmetic (real-address model §2.5 shape: pure-computation version of ptr_int demo)
+/// Raw pointer arithmetic (real-address model shape: pure-computation version of the ptr_int demo)
 #[unsafe(no_mangle)]
 pub fn rawptr_digest(n: u64) -> u64 {
     let mut buf = [0u64; 8];
@@ -121,7 +121,7 @@ pub fn rawptr_digest(n: u64) -> u64 {
     }
     let q = buf.as_ptr();
     let addr = q as usize; // ptr→int
-    let r = addr as *const u64; // int→ptr（exposed provenance，真实地址下平凡）
+    let r = addr as *const u64; // int->ptr (exposed provenance; trivial under real addresses)
     let mut s = 0u64;
     let mut j = 0u64;
     while j < 8 {
@@ -131,7 +131,7 @@ pub fn rawptr_digest(n: u64) -> u64 {
     s
 }
 
-/// 浮点（M4.1 可选块）：f64 运算 + to_bits 折 u64
+/// Floating point: f64 arithmetic + to_bits folded into a u64
 #[unsafe(no_mangle)]
 pub fn float_digest(n: u64) -> u64 {
     let mut x = 1.5f64;

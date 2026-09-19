@@ -56,8 +56,8 @@ fn main() {
         write_unaligned_volatile(unaligned, unaligned_value);
         let unaligned_got = read_unaligned_volatile(unaligned);
 
-        // `[u8; 16]` 的 guest 对齐只有 1；aligned volatile 不得暗中
-        // 把它强化为对齐 8 的宿主整数对。
+        // A guest `[u8; 16]` is only 1-byte aligned; an aligned volatile access must
+        // not silently strengthen it to an 8-aligned host integer pair.
         let base = low_align_16.as_mut_ptr() as usize;
         let offset = (9 - base % 8) % 8;
         let low_align = low_align_16.as_mut_ptr().add(offset).cast::<[u8; 16]>();
@@ -65,8 +65,8 @@ fn main() {
         write_volatile(low_align, low_align_value);
         assert_eq!(read_volatile(low_align), low_align_value);
 
-        // `Padded` 的 3 个 padding 字节可以未初始化；VM 只能作 opaque
-        // 位型搬运，不能将整个表示解释为 u64。
+        // The 3 padding bytes of `Padded` may be uninitialized; the VM must move only
+        // their opaque bit pattern, never read the whole representation as a u64.
         write_volatile(&mut padded, padded_value);
         assert_eq!(read_volatile(&padded), padded_value);
         (aligned_got, pair_got, unaligned_got)

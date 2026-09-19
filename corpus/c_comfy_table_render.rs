@@ -3,49 +3,49 @@
 [dependencies]
 comfy-table = "7"
 ---
-// comfy-table 7.2（unicode 表格渲染）差分：「显示宽度」计算是本 driver 核心锚点——
-// 单元格内容经 unicode-width 0.2（CJK/全角宽 2、半角宽 1、emoji/组合符按
-// Unicode 宽度表）+ unicode-segmentation 的 grapheme 切分（ZWJ 簇/变体选择符），
-// 对齐、折行、截断全部由显示宽度而非字节数驱动。渲染全文逐字节对拍
-// native/mirvm 的宽度表、grapheme 边界与布局算术语义一致性。
+// comfy-table 7.2 (unicode table rendering). The full render is compared
+// byte-for-byte with native, so the width table, grapheme boundaries and layout
+// arithmetic must agree. Cells are measured through unicode-width 0.2
+// (CJK/fullwidth = 2, halfwidth = 1, emoji and marks per the Unicode width table)
+// and split into graphemes by unicode-segmentation (ZWJ clusters, selectors).
+// (1) Cover the five border presets: UTF8_FULL / UTF8_BORDERS_ONLY / ASCII_FULL /
+//     ASCII_MARKDOWN / NOTHING (borderless), all over one mixed CJK content table.
+// (2) Cover alignment: per-cell Left/Center/Right plus a column-level
+//     set_cell_alignment default, showing the precedence cell > column > Left.
+// (3) Cover wrap: ContentArrangement::Dynamic + set_width x ColumnConstraint::
+//     {UpperBoundary, Absolute, LowerBoundary}(Width::Fixed), splitting long
+//     CJK/English at graphemes (split_long_word); DynamicFullWidth +
+//     Width::Percentage (clamped above 100) for surplus distribution.
+// (4) Anchor widths: CJK, half/fullwidth kana, emoji (single, ZWJ family cluster,
+//     skin tone, flag, rainbow flag, variation selector), combining marks
+//     (including enclosing), zero-width space, soft hyphen, three alignments; plus
+//     multi-line cells (\\n and a custom delimiter) and Row::max_height truncation.
+// (5) Force deterministic ANSI: force_no_tty + enforce_styling pin the crossterm
+//     sequences (Color::{named,Rgb,AnsiValue} x Attribute::{Bold,Underlined,
+//     Italic,Reverse}, fg/bg) with style_text_only on and off; ESC becomes a
+//     literal "\\e" before printing. Also checks the no_tty path (zero ESC).
+// (6) Edges: empty, header-only, single column, ragged rows, empty cells,
+//     add_row_if/add_rows_if, column_max_content_widths, load_preset roundtrip,
+//     apply_modifier, set_style/style/remove_style fallback; no rowspan/colspan.
+// Determinism: every render goes through lines().join("\n") via Display and
+// prints in full with bytes=/fnv1a anchors per table. main calls
+// remove_var("NO_COLOR") first; force_no_tty turns off tty detection.
 //
-// 覆盖：
-// ① preset 边框族五路：UTF8_FULL / UTF8_BORDERS_ONLY / ASCII_FULL /
-//    ASCII_MARKDOWN / NOTHING（无框），同一份 CJK 混合内容渲染全文打印。
-// ② 对齐：单元格级 Left/Center/Right + 列级 set_cell_alignment 默认，
-//    覆盖次序 cell > column > Left。
-// ③ 列宽约束 wrap：ContentArrangement::Dynamic + set_width ×
-//    ColumnConstraint::{UpperBoundary, Absolute, LowerBoundary}(Width::Fixed)，
-//    长中/英文按 grapheme 退刀折行（split_long_word）；DynamicFullWidth +
-//    Width::Percentage（含 >100 夹取）盈余分配。
-// ④ 宽度锚点表：CJK、全/半角假名、emoji（单字/ZWJ 家庭簇/肤调/旗帜/彩虹旗/
-//    变体选择符）、组合附加符（含圈符）、零宽空格、软连字符，三列三种对齐混排；
-//    另含多行单元格（\n 与自定义 delimiter）与 Row::max_height + 自定义截断
-//    指示符的 truncate_first_lines 路径。
-// ⑤ 条件样式：force_no_tty + enforce_styling 使 crossterm ANSI 序列确定生成
-//    （Color::{named,Rgb,AnsiValue} × Attribute::{Bold,Underlined,Italic,
-//    Reverse}，fg/bg），style_text_only 开/关两形态；打印前把 ESC
-//    替换为字面 "\\e"——输出保持可打印纯文本，ANSI 序列本身仍逐字节锚定。
-//    另验证 no_tty 抑制路径（同款表渲染零 ESC）。
-// ⑥ 边界：空表、仅表头、单列、参差行（短行占位填充 / 宽于表头自动扩列）、
-//    空字符串单元格、add_row_if/add_rows_if 谓词、column_max_content_widths、
-//    current_style_as_preset→load_preset roundtrip、apply_modifier
-//    （UTF8_ROUND_CORNERS）、set_style/style 查询/remove_style 回退空格。
 //
-// 无跨行/跨列：comfy-table 7.2 API 面无 rowspan/colspan（grep 源码零命中），
-// 本 driver 不涉及该维度。
 //
-// 确定性：全部渲染经 Display（lines().join("\n")）全文打印，每张表附
-// bytes= + fnv1a 锚；force_no_tty 关闭 tty 探测（渲染行为与环境无关）；
-// main 开头 remove_var("NO_COLOR")——crossterm 0.29 尊重 NO_COLOR 环境变量
-// （memoized 抑制彩色 SGR 序列），移除后 ANSI 颜色路径全展开、与环境无关；
-// 内部 style HashMap 在 crate 内只按键存取、无迭代序。
+//
+//
+//
+//
+//
+//
+//
 use comfy_table::{
     Attribute, Cell, CellAlignment, Color, ColumnConstraint, ContentArrangement, Row, Table,
     TableComponent, Width, modifiers::UTF8_ROUND_CORNERS, presets,
 };
 
-/// FNV-1a 锚定渲染字节流。
+/// FNV-1a anchor over the rendered byte stream.
 fn fnv1a(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for &b in data {
@@ -55,7 +55,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 打印标签、字节数/FNV 锚、渲染全文。
+/// Prints the label, the byte count/FNV anchor and the full render.
 fn show(label: &str, table: &Table) {
     let s = table.to_string();
     println!("== {label} bytes={} fnv={:016x} ==", s.len(), fnv1a(s.as_bytes()));
@@ -66,7 +66,7 @@ fn show(label: &str, table: &Table) {
     }
 }
 
-/// 各 preset 共用的混合内容基准表。
+/// Mixed-content base table shared by the preset cases.
 fn base_table() -> Table {
     let mut t = Table::new();
     t.force_no_tty();
@@ -78,11 +78,11 @@ fn base_table() -> Table {
 }
 
 fn main() {
-    // SAFETY: main 起点、单线程，且在 crossterm 的 NO_COLOR memoize（首次
-    // styled 渲染时经 parking_lot::Once 快照环境）之前执行；此后不再触碰环境。
+    // SAFETY: at the top of main, single-threaded, and before crossterm memoizes
+    // NO_COLOR through parking_lot::Once; the environment is untouched after this.
     unsafe { std::env::remove_var("NO_COLOR") };
 
-    // ① preset 边框族五路
+    // (1) the five border presets
     for (label, preset) in [
         ("utf8_full", presets::UTF8_FULL),
         ("utf8_borders_only", presets::UTF8_BORDERS_ONLY),
@@ -94,7 +94,7 @@ fn main() {
         t.load_preset(preset);
         show(&format!("preset/{label}"), &t);
     }
-    // 无框 preset 的 trim_fmt 变体（去行尾空格）
+    // trim_fmt variant of the borderless preset (strips trailing spaces)
     let mut t = base_table();
     t.load_preset(presets::NOTHING);
     let trimmed = t.trim_fmt();
@@ -105,7 +105,7 @@ fn main() {
     );
     println!("{trimmed}");
 
-    // ② 对齐：cell 级三态 + 列级默认，覆盖次序 cell > column
+    // (2) alignment: three cell-level states plus the column-level default
     let mut t = Table::new();
     t.force_no_tty();
     t.load_preset(presets::UTF8_FULL);
@@ -120,14 +120,14 @@ fn main() {
         Cell::new("宽宽宽").set_alignment(CellAlignment::Right),
         Cell::new("同样由列决定"),
     ]);
-    // 第 0/1 列列级右对齐：row0 col0 无 cell 级设置 → 生效；row1 col0 有 → 被覆盖。
-    // 第 2 列列级右对齐，两行都由列决定。
+    // Columns 0/1 are right/centre aligned at column level: row0 col0 has no
+    // cell-level setting, so the column wins; row1 col0 has one and overrides it.
     t.column_mut(0).unwrap().set_cell_alignment(CellAlignment::Right);
     t.column_mut(1).unwrap().set_cell_alignment(CellAlignment::Center);
     t.column_mut(2).unwrap().set_cell_alignment(CellAlignment::Right);
     show("align/precedence", &t);
 
-    // ③a Dynamic + Fixed 约束折行
+    // (3a) Dynamic + Fixed constraints, wrapping
     let mut t = Table::new();
     t.force_no_tty();
     t.load_preset(presets::UTF8_FULL);
@@ -147,7 +147,7 @@ fn main() {
     ]);
     show("wrap/dynamic-fixed", &t);
 
-    // ③b DynamicFullWidth + Percentage（120 夹取到 100）
+    // (3b) DynamicFullWidth + Percentage (120 clamped to 100)
     let mut t = Table::new();
     t.force_no_tty();
     t.load_preset(presets::UTF8_FULL);
@@ -165,7 +165,7 @@ fn main() {
     ]);
     show("wrap/fullwidth-pct", &t);
 
-    // ④ 宽度锚点：CJK/假名/emoji/组合符 × 左中右三列
+    // (4) width anchors: CJK/kana/emoji/combining marks across three alignments
     let mut t = Table::new();
     t.force_no_tty();
     t.load_preset(presets::UTF8_FULL);
@@ -191,7 +191,7 @@ fn main() {
     println!("widths colmax={:?}", t.column_max_content_widths());
     show("width/anchor", &t);
 
-    // ④b 多行单元格 + 自定义 delimiter + max_height 截断
+    // (4b) multi-line cells + a custom delimiter + max_height truncation
     let mut t = Table::new();
     t.force_no_tty();
     t.load_preset(presets::UTF8_FULL);
@@ -206,7 +206,7 @@ fn main() {
     t.row_mut(0).unwrap().max_height(3);
     show("multiline/truncate", &t);
 
-    // ⑤ 条件样式（enforce_styling 锁定 ANSI 生成，ESC → "\e" 可打印化）
+    // (5) conditional styling (enforce_styling locks ANSI; ESC becomes "\e")
     let mut t = Table::new();
     t.force_no_tty();
     t.enforce_styling();
@@ -241,7 +241,7 @@ fn main() {
         );
         println!("{}", s.replace('\u{1b}', "\\e"));
     }
-    // no_tty 抑制路径：同款样式表不 enforce → 渲染零 ESC
+    // no_tty suppression path: the same styled table without enforce renders no ESC
     let mut plain = Table::new();
     plain.force_no_tty();
     plain.load_preset(presets::UTF8_FULL);
@@ -251,7 +251,7 @@ fn main() {
     println!("styled/suppressed esc={}", s_plain.matches('\u{1b}').count());
     println!("{s_plain}");
 
-    // ⑥ 边界族
+    // (6) edge family
     let mut e = Table::new();
     e.force_no_tty();
     println!("empty is_empty={}", e.is_empty());
@@ -274,7 +274,7 @@ fn main() {
     s1.add_row(vec!["全角宽度二字符"]);
     show("edge/single-col", &s1);
 
-    // 参差行：短行占位填充、宽于表头自动扩列
+    // Ragged rows: short rows are padded, wide rows grow the table.
     let mut rg = Table::new();
     rg.force_no_tty();
     rg.load_preset(presets::UTF8_FULL);
@@ -285,7 +285,7 @@ fn main() {
     println!("ragged cols={} rows={}", rg.column_count(), rg.row_count());
     show("edge/ragged", &rg);
 
-    // 谓词 add_row_if / add_rows_if（谓词可见当前行数与被加行）
+    // Predicates add_row_if / add_rows_if (they see the current row count)
     let mut t = base_table();
     t.add_row_if(|n, row: &Vec<&str>| n < 4 && row[0].len() > 3, vec!["gate-pass", "谓词", "1"])
         .add_row_if(|n, _: &Vec<&str>| n >= 99, vec!["gate-fail", "谓词", "2"])
@@ -295,7 +295,7 @@ fn main() {
         );
     show("edge/predicates", &t);
 
-    // 样式 roundtrip：preset → modifier → 导出 → 重载 → 渲染等价
+    // Style roundtrip: preset -> modifier -> export -> reload -> same render
     let mut t = base_table();
     t.load_preset(presets::UTF8_FULL);
     t.apply_modifier(UTF8_ROUND_CORNERS);
@@ -307,7 +307,7 @@ fn main() {
     println!("preset roundtrip eq = {eq}");
     show("style/round-corners", &t2);
 
-    // set_style 单点覆盖 + style 查询 + remove_style 回退空格
+    // set_style single-point override + style query + remove_style fallback
     let mut t = base_table();
     t.load_preset(presets::ASCII_FULL);
     t.set_style(TableComponent::TopLeftCorner, '*');

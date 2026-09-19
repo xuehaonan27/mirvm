@@ -1,18 +1,20 @@
-//! `.mirvm` 包格式 + pack/run（mode B，designs/modeb-mirvmar-design.md）。
+//! `.mirvm` package format plus pack/run.
 //!
-//! 路线 = D9b：包 = L2 engine-IR 缓存的可移植化（版本头/校验/重定位段 +
-//! §7.22 机器码节预留）。单文件自包含：除 FFI 真外国库（glibc 类）外，运行期
-//! 不依赖预存缓存、源码与 rustc/cargo 痕迹；包内自产动态库会按内容哈希自动
-//! 物化。**格式当前不定死**
-//! （2026-07-23 用户裁定，fmt_ver 只作同代区分，对外冻结归 D4 评审）。
+//! A package is a portable form of the L2 engine-IR cache: version header, checksums, a
+//! relocation section, and a reserved machine-code section. It is self-contained: apart from
+//! genuine foreign libraries (glibc and friends) it depends at runtime on no pre-existing cache,
+//! no source, and no rustc/cargo traces, and the dynamic libraries it produces are materialized
+//! automatically by content hash. The format is not frozen yet (`fmt_ver` merely separates
+//! generations).
 //!
-//! 容器版式（小端）：
+//! Container layout (little-endian):
 //! ```text
 //! magic "MIRVMAR\0" | fmt_ver u32 | build_id_len u32 + bytes
-//! section_cnt u32 | 节表 ×N {tag u32, off u64, len u64, hash u128(fnv1a 双程)}
-//! 节内容 | whole_hash u128（除本字段外全文件）
+//! section_cnt u32 | section table ×N {tag u32, off u64, len u64, hash u128 (fnv1a, two passes)}
+//! section contents | whole_hash u128 (whole file except this field)
 //! ```
-//! 校验语义 = **refuse-loud，绝不静默重建**（包是分发物不是缓存）。
+//! Verification = **refuse-loud, never silently rebuild** (a package is a distribution artifact,
+//! not a cache).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -27,7 +29,7 @@ const WHOLE_HASH_LEN: usize = 16;
 
 const TAG_META: u32 = 1;
 const TAG_STAMPS: u32 = 2;
-#[allow(dead_code)] // BASE 节预留（当前恒全量模块，不产出）
+#[allow(dead_code)] // BASE section reserved; modules are always full, so it is never produced.
 const TAG_BASE: u32 = 3;
 const TAG_MODULE: u32 = 4;
 const TAG_NATIVELIBS: u32 = 5;
@@ -36,7 +38,7 @@ const TAG_MC: u32 = 7;
 const TAG_FUNCS: u32 = 8;
 const FUNC_ENTRY_LEN: usize = 32;
 
-/// fnv1a-128（双程异种子；校验强度与 L2 同族，格式演进时随评）。
+/// fnv1a-128: two passes with different seeds, the same checksum family as L2.
 fn hash128(data: &[u8]) -> u128 {
     let a = crate::lower::asm::fnv1a(data);
     let mut b = 0xcbf2_9ce4_8422_2325u64;
@@ -47,44 +49,48 @@ fn hash128(data: &[u8]) -> u128 {
     ((a as u128) << 64) | b as u128
 }
 
-/// META 节：L2 Header 元信息的包形态（build_id 提升进容器头）。
+/// META section: the package form of the L2 header metadata (build_id is promoted into the
+/// container header).
 #[derive(Serialize, Deserialize)]
 struct Meta {
     args: Vec<String>,
-    /// `env!`/`option_env!` 依赖（同 L2：(名, 编译时值；None = 编译时未设)）
+    /// `env!`/`option_env!` dependencies (as in L2: (name, compile-time value; None = unset at
+    /// compile time))
     envs: Vec<(String, Option<String>)>,
-    /// 当前恒 None（全量模块；delta+BASE 形态预留）
+    /// Always None today (full modules only; the delta+BASE form is reserved).
     base_key: Option<String>,
     target: String,
 }
 
-/// NATIVELIBS 节条目：自产库清单。`path` 只用于互证和诊断；执行所需字节
-/// 始终随包携带，不再从该旧路径读取。
+/// NATIVELIBS entry: a produced library. `path` serves only cross-checking and diagnostics; the
+/// bytes needed for execution always travel with the package and are never read from that path.
 #[derive(Clone, Serialize, Deserialize)]
 struct NativeLibEntry {
     path: String,
-    /// 0=static_archive 1=global_asm（bin/dep 同族，cache/global-asm 域）
+    /// 0=static_archive 1=global_asm (same family for bin/dep; cache/global-asm directory)
     role: u8,
     fnv: u128,
     bytes: Vec<u8>,
 }
 
-/// MC 节条目（片③）：自产 global_asm/dep_asm 族 `.so` 原始字节——装载时
-/// 进程内自装载（mcload），不经 dlopen；与 NATIVELIBS 按 fnv 互证。
+/// MC entry: raw bytes of a produced global_asm/dep_asm `.so`. At package load time it is loaded
+/// in-process (mcload) without dlopen, and cross-checked against NATIVELIBS by fnv.
 #[derive(Clone, Serialize, Deserialize)]
 struct McEntry {
     fnv: u128,
     bytes: Vec<u8>,
 }
 
-/// RELOC 节：固定基要求 + 入口符号（entry 语义锚在 Module.entry，本字段供人读）。
+/// RELOC section: fixed-base requirement plus entry symbol (entry semantics live in
+/// `Module.entry`; this field is informational).
 #[derive(Serialize, Deserialize)]
 struct Reloc {
     requires_fixed_base: bool,
     entry: Box<str>,
 }
 
-/// MODULE v4 只保存非函数元数据。借用写入形态避免复制冻结区和索引表。
+/// MODULE v4 stores only non-function metadata. A borrowed write form avoids copying the frozen
+/// region and index tables.
 #[derive(Serialize)]
 struct ModuleMetaRef<'a> {
     function_names: &'a [Box<str>],
@@ -547,8 +553,9 @@ fn materialize_native_blob_at(root: &Path, lib: &NativeLibEntry) -> Result<PathB
     Ok(path)
 }
 
-/// 打包入账（lower 刚完成、guest 未运行的洁净快照——与 L2 store 同一时机）。
-/// 拒绝 = 文案（固定基缺失/native 库无法读取），调用方响亮终止。
+/// Package entry: the clean snapshot right after lowering completes and before the guest runs, the
+/// same point as the L2 store. Rejection is a plain reason string (missing fixed base, unreadable
+/// native library); the caller aborts loudly.
 pub(crate) fn write_package(
     tcx: rustc_middle::ty::TyCtxt<'_>,
     rustc_args: &[String],
@@ -557,15 +564,20 @@ pub(crate) fn write_package(
 ) -> Result<(), String> {
     crate::vm::engine::verify::module(module)
         .map_err(|e| format!("refusing to package invalid bytecode: {e}"))?;
-    // 固定基要求（L2 同契约：非固定基 = 快照内嵌地址跨进程无效，不产包）
+    // Fixed-base requirement (same contract as L2): without a fixed base the snapshot's embedded
+    // addresses are invalid across processes, so no package is produced.
     if !module.frozen.as_ref().is_some_and(|f| f.at_fixed_base()) {
-        return Err("冻结区不在固定基址（并发抢占/ASLR 冲突）——重试打包".into());
+        return Err(
+            "frozen region is not at a fixed base (concurrent claim/ASLR conflict); retry packing"
+                .into(),
+        );
     }
     if !module.entry_stub_sites.is_empty() && !module.entry_stubs.at_fixed_base() {
-        return Err("条目 stub 域不在固定基址——重试打包".into());
+        return Err("entry stub region is not at a fixed base; retry packing".into());
     }
-    // 输入戳和 env! 清单只作来源记录。可执行语义已经冻结进 Module；分发包运行时
-    // 不应要求源码仍在原路径，也不应要求目标机器复刻编译环境。
+    // Input stamps and the env! list are provenance only. Executable semantics are already frozen
+    // into the Module, so running a distributed package must not require the source at its original
+    // path, nor a replica of the build environment on the target machine.
     let (stamps, envs) = crate::ircache::collect_input_stamps(tcx).unwrap_or_default();
     let meta = Meta {
         args: rustc_args.to_vec(),
@@ -577,15 +589,17 @@ pub(crate) fn write_package(
         requires_fixed_base: false,
         entry: "main".into(),
     };
-    // NATIVELIBS：所有自产库字节随包携带。global_asm 族另入 MC 节走进程内
-    // 装载；MIRVM_PACK_NO_MC=1 只切换装载方式，不再破坏包的自包含性。
+    // NATIVELIBS: every produced library's bytes travel with the package. The global_asm family
+    // also enters the MC section for in-process loading; MIRVM_PACK_NO_MC=1 only switches the load
+    // method and no longer breaks the package's self-containment.
     let ga_dir = crate::sysroot::cache_dir().join("global-asm");
     let ga_prefix = ga_dir.display().to_string();
     let no_mc = std::env::var_os("MIRVM_PACK_NO_MC").is_some();
     let mut libs = Vec::new();
     let mut mc_entries = Vec::new();
     for p in &module.required_native_libs {
-        let data = std::fs::read(&**p).map_err(|e| format!("自产库 `{p}` 读取失败: {e}"))?;
+        let data = std::fs::read(&**p)
+            .map_err(|e| format!("failed to read produced library `{p}`: {e}"))?;
         let fnv = hash128(&data);
         let role = u8::from(p.starts_with(&ga_prefix));
         if role == 1 && !no_mc && !mc_entries.iter().any(|m: &McEntry| m.fnv == fnv) {
@@ -619,7 +633,7 @@ pub(crate) fn write_package(
 
     let buf = build_container(&sections)?;
 
-    // 原子发布（全仓同款：临时名写全再 rename）
+    // Atomic publish: write the temp name fully, then rename.
     let dir = out.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).map_err(|e| format!("fail to create package directory: {e}"))?;
     let tmp = dir.join(format!(
@@ -632,7 +646,8 @@ pub(crate) fn write_package(
     Ok(())
 }
 
-/// 已校验的不可变包镜像。`instantiate` 每次创建独立的冻结内存和机器码镜像。
+/// A validated, immutable package image. Each `instantiate` creates independent frozen memory and
+/// machine-code images.
 pub(crate) struct LoadedPackage {
     raw: std::sync::Arc<[u8]>,
     module_meta: ModuleMeta,
@@ -712,7 +727,7 @@ impl LoadedPackage {
     }
 }
 
-/// 包嗅探：前 8 字节是 magic 即包（run 的岔路判据）。
+/// Package sniff: the first 8 bytes being the magic marks a package (run's branch criterion).
 pub(crate) fn is_package(path: &Path) -> bool {
     let mut b = [0u8; 8];
     std::fs::File::open(path)
@@ -723,8 +738,9 @@ pub(crate) fn is_package(path: &Path) -> bool {
         .is_ok_and(|()| &b == MAGIC)
 }
 
-/// 装载 + 全校验（refuse-loud）。输入戳和编译时环境只作来源记录；包内 Module
-/// 已冻结其语义，运行时不再要求源码或原编译环境在场。
+/// Load + full verification (refuse-loud). Input stamps and the compile-time environment are
+/// provenance only; the Module inside has its semantics frozen, so running it no longer requires the
+/// source or the original build environment.
 pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
     // `Package::load` is safe, so its result must not retain the filesystem's mutable inode.
     // Copy once, then validate and lazily decode exclusively from this immutable snapshot.
@@ -745,9 +761,9 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
         return Err("package BASE/delta form is not supported by this mirvm".into());
     }
     let _: Vec<crate::ircache::FileStamp> = postcard::from_bytes(package.section(TAG_STAMPS)?)
-        .map_err(|e| format!("STAMPS 节解析失败: {e}"))?;
+        .map_err(|e| format!("failed to resolve STAMPS section: {e}"))?;
     let libs: Vec<NativeLibEntry> = postcard::from_bytes(package.section(TAG_NATIVELIBS)?)
-        .map_err(|e| format!("NATIVELIBS 节解析失败: {e}"))?;
+        .map_err(|e| format!("failed to resolve NATIVELIBS section: {e}"))?;
     let mc_entries: Vec<McEntry> = if package.has_section(TAG_MC) {
         postcard::from_bytes(package.section(TAG_MC)?)
             .map_err(|e| format!("fail to resolve MC section: {e}"))?
@@ -756,7 +772,7 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
     };
 
     let reloc: Reloc = postcard::from_bytes(package.section(TAG_RELOC)?)
-        .map_err(|e| format!("RELOC 节解析失败: {e}"))?;
+        .map_err(|e| format!("failed to resolve RELOC section: {e}"))?;
     if &*reloc.entry != "main" {
         return Err(format!("unsupported package entry `{}`", reloc.entry));
     }
@@ -775,8 +791,9 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
     }
     crate::vm::engine::verify::module_header_with_count(&module, function_blobs.len())
         .map_err(|e| format!("MODULE bytecode verification failed: {e}"))?;
-    // E20 红线：任何 MC/native 物化前逐函数做完整语义验证。临时对象随轮释放，
-    // 运行阶段仍从 owned snapshot 按需解码，不把全函数常驻内存。
+    // Before any MC/native materialization, every function gets full semantic verification.
+    // Temporary objects are dropped each round; the run phase still decodes on demand from the owned
+    // snapshot instead of keeping every function resident.
     let mut main_boundaries = 0;
     let mut main_catchers = 0;
     for (index, blob) in function_blobs.iter().enumerate() {
@@ -827,7 +844,9 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
             return Err("package MC section contains a duplicate image".into());
         }
         let Some(_) = libs.iter().find(|l| l.role == 1 && l.fnv == mc.fnv) else {
-            return Err("包 MC 节含 NATIVELIBS 无互证条目（不符或多余）".into());
+            return Err(
+                "package MC section has no matching NATIVELIBS entry (missing or extra)".into(),
+            );
         };
     }
     let heat_key = format!("{:032x}", hash128(function_section));

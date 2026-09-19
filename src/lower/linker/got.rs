@@ -1,6 +1,6 @@
-//! GOT/foreign 槽（自 lower/mod.rs M5 got 带整搬）：got_intern/
-//! got_fixup_push/foreign_slot/foreign_const_operand/foreign_fn_slot/
-//! materialize_in（P2 启动相统一重填的素材生产）。impl Linker 子块。
+//! GOT / foreign slots: `got_intern`, `got_fixup_push`, `foreign_slot`,
+//! `foreign_const_operand`, `foreign_fn_slot` and `materialize_in` produce the material
+//! that the startup phase refills by name. `impl Linker` sub-block.
 
 use super::*;
 
@@ -17,18 +17,20 @@ impl<'tcx> Linker<'tcx> {
         }
     }
 
-    /// P2：本侧符号表 idx（名字首现才登记；image 侧在 Split 三表）
+    /// Index of `name` in this side's symbol table; registers it on first sight. The
+    /// image side keeps its own tables in `Split`.
     pub(super) fn got_intern(&mut self, name: &str, weak: bool, image: bool) -> u32 {
         let (syms, idx_map) = if image {
-            let s = self.split.as_mut().expect("image 侧 got 表必在 split");
+            let s = self.split.as_mut().expect("image got table requires split");
             (&mut s.image_got_syms, &mut s.image_got_idx)
         } else {
             (&mut self.got_syms, &mut self.got_idx)
         };
         if let Some(&i) = idx_map.get(name) {
-            // F-08：weak/strong 合并——任一引用为 strong，合并项即 strong
-            // （首现定强弱曾致 weak 先 strong 后时，缺符号被按 weak 写 NULL
-            // 而非按 native 语义链接/装载失败）
+            // Weak/strong merge: one strong reference makes the merged entry strong.
+            // Registering only the first reference's strength would write NULL for a
+            // missing symbol referenced weak-then-strong, instead of failing the
+            // link/load the way native linking does.
             if !weak {
                 syms[i as usize].weak = false;
             }
@@ -43,12 +45,12 @@ impl<'tcx> Linker<'tcx> {
         i
     }
 
-    /// P2：本侧修补点登记（image 侧入 Split 表）
+    /// Records a fixup site for this side; the image side stores it in `Split`.
     pub(super) fn got_fixup_push(&mut self, image: bool, f: ir::GotFixup) {
         if image {
             self.split
                 .as_mut()
-                .expect("image 侧 got 表必在 split")
+                .expect("image got table requires split")
                 .image_got_fixups
                 .push(f);
         } else {
@@ -56,13 +58,14 @@ impl<'tcx> Linker<'tcx> {
         }
     }
 
-    /// foreign 符号在当前上下文的 GOT 槽（P2，decision-history §7.5c）：槽 =
-    /// 本侧冻结区普通 8 字节格（固定基域 ⇒ 槽址可序列化，内容启动相重填）；
-    /// 无则开格、初填 init、以 addend=0 登记槽位修补点。
+    /// GOT slot of a foreign symbol in the current context: an ordinary 8-byte cell in
+    /// this side's frozen region. The fixed base region makes the slot address
+    /// serializable, while the startup phase refills its contents. Opens the cell on
+    /// first use, initializes it to `init`, and records a fixup at addend 0.
     pub(super) fn foreign_slot(&mut self, name: &str, init: u64, weak: bool) -> u64 {
         let ctx_image = self.split.as_ref().is_some_and(|s| s.current_image);
-        // F-08：合并语义先于缓存命中——后续 strong 引用即使命中既有槽
-        // 也必须升级合并项的 weak 标记
+        // Merge before the cache hit: a later strong reference must upgrade the merged
+        // entry's weak flag even when it reuses an existing slot.
         let idx = self.got_intern(name, weak, ctx_image);
         if let Some(&a) = self.foreign_slots.get(&(name.into(), ctx_image)) {
             return a;
@@ -70,7 +73,7 @@ impl<'tcx> Linker<'tcx> {
         let addr = if ctx_image {
             self.split
                 .as_mut()
-                .expect("image 上下文必在 split")
+                .expect("image context requires split")
                 .image_frozen
                 .alloc(8, 8)
         } else {
@@ -89,9 +92,10 @@ impl<'tcx> Linker<'tcx> {
         addr
     }
 
-    /// foreign 分配的常量操作数（P2）：值 = 本侧 GOT 槽内容；非零 addend 经
-    /// SubImm 精确等价改写（`(槽) − (0 − addend)` ≡ `(槽) + addend`，mod 2^64
-    /// 算术恒等）。非 foreign → None（调用方按原样发 Imm）。
+    /// Constant operand for a foreign allocation: its value is this side's GOT slot
+    /// contents. A non-zero addend becomes an exactly equivalent `SubImm` rewrite
+    /// (`(slot) - (0 - addend)` == `(slot) + addend` in mod-2^64 arithmetic). Returns
+    /// `None` for non-foreign allocations, and the caller emits a plain `Imm`.
     pub(crate) fn foreign_const_operand(
         &mut self,
         id: AllocId,
@@ -117,8 +121,9 @@ impl<'tcx> Linker<'tcx> {
         })
     }
 
-    /// extern fn 条目（fn-ptr）在当前上下文的 GOT 槽址（P2）：bake 已保证本
-    /// 上下文槽在场；非 foreign → None（func.rs Reify/Closure 发码点用）。
+    /// GOT slot address of an extern fn entry (fn pointer) in the current context. The
+    /// slot for this context has already been created by baking. Returns `None` for
+    /// non-foreign items; the Reify/Closure emission points in `func.rs` use this.
     pub(crate) fn foreign_fn_slot(&mut self, inst: Instance<'tcx>) -> Option<u64> {
         if !self.tcx.is_foreign_item(inst.def_id()) {
             return None;
@@ -128,8 +133,10 @@ impl<'tcx> Linker<'tcx> {
         self.foreign_slots.get(&(name.into(), ctx_image)).copied()
     }
 
-    /// 物化一个内存分配：分地址 → 拷字节 → 重定位（provenance 表逐项写真地址+addend）。
-    /// image=true 落 image 域并登记 image 表（split 专用）；false 落 delta 域（今日路径）。
+    /// Materializes a memory allocation: allocate an address, copy the bytes, then
+    /// relocate. Each provenance entry is rewritten to the target's real address plus its
+    /// addend. With `image`, the allocation lands in the image region and is recorded in
+    /// the image tables; otherwise it lands in the delta region.
     pub(super) fn materialize_in(
         &mut self,
         id: AllocId,
@@ -140,18 +147,23 @@ impl<'tcx> Linker<'tcx> {
         let size = a.size().bytes();
         let align = a.align.bytes();
         let base = if image {
-            let s = self.split.as_mut().expect("image 物化仅 split 模式");
+            let s = self
+                .split
+                .as_mut()
+                .expect("image materialization requires split");
             let base = s.image_frozen.alloc(size, align);
-            s.image_alloc_addrs.insert(id, base); // 先分后填（环安全）
+            s.image_alloc_addrs.insert(id, base); // allocate before filling (cycle-safe)
             base
         } else {
             let base = self.frozen.alloc(size, align);
-            self.alloc_addrs.insert(id, base); // 先分后填（环安全）
+            self.alloc_addrs.insert(id, base); // allocate before filling (cycle-safe)
             base
         };
         let bytes = a.inspect_with_uninit_and_ptr_outside_interpreter(0..size as usize);
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), base as *mut u8, size as usize) };
-        // 重定位：ptr 位置存的 8 字节 = 目标内偏移（addend）→ 换成目标真地址 + addend
+        // Relocation: the 8 bytes stored at a pointer position hold the offset of the
+        // target within itself (the addend), so replace them with the target's real
+        // address plus that addend.
         for (off, prov) in a.provenance().ptrs().iter() {
             // TypeId uses an AllocId-shaped provenance carrier for a plain integer hash:
             // ensure_alloc deliberately returns base zero, so its addend is already the final
@@ -168,8 +180,9 @@ impl<'tcx> Linker<'tcx> {
                 at.write_unaligned(target.wrapping_add(addend));
                 addend
             };
-            // P2：目标是 foreign 分配（非 weak extern static / extern fn 取址）⇒
-            // 本字节点登记修补点（启动相按名重填；初填 = 本进程解析，冷路径不变）
+            // A foreign allocation target (a weak extern static or the address of an
+            // extern fn) gets a fixup at this word: the startup phase refills it by name,
+            // while this process's resolution stays the cold-path initial value.
             if let Some((name, weak)) = self.foreign_alloc_sym.get(&prov.alloc_id()).cloned() {
                 let idx = self.got_intern(&name, weak, image);
                 self.got_fixup_push(

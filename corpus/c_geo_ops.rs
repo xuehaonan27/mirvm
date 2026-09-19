@@ -1,30 +1,30 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# default-features=false：默认 features 里的 multithreading 会把 rayon 拉进
-# i_overlay 的 BooleanOps 并行归并——差分要最小调度面（协作调度器上的浮点
-# 归并无额外信号），本 driver 全部目标 API 均在核心路径（area/centroid/
-# contains/coordinate_position/line_intersection/convex_hull/simplify/
-# BooleanOps/haversine/vincenty）。
+# default-features = false: the default multithreading feature pulls rayon into
+# i_overlay's parallel BooleanOps merge, and the differential wants the smallest
+# possible scheduling surface (float merges on the cooperative scheduler carry no
+# extra signal). Every API this fixture targets is on the core path: area/centroid/
+# contains/coordinate_position/line_intersection/convex_hull/simplify/BooleanOps.
 geo = { version = "0.29", default-features = false }
 ---
-// geo 0.29：地理几何浮点重差分。覆盖：
-// ① 多边形 unsigned/signed area、centroid（含空多边形 None 路径）、
-//    perimeter——geo 0.29 无 Perimeter trait，以 exterior+interiors 的
-//    Euclidean length 和手算；含带孔多边形。
-// ② point-in-polygon：contains 正反例 + CoordinatePosition 三态细分
-//    （内部/外部/孔内/边上/顶点）。
-// ③ line_intersection 四形态：proper SinglePoint / 端点非 proper /
-//    平行 None / 共线 Collinear。
-// ④ 定种 xorshift 点集 convex hull（quick_hull）+ 对角共线点。
-// ⑤ Douglas-Peucker simplify 固定 epsilon=0.1（抖动折线 + 尖刺）。
-// ⑥ BooleanOps：union/intersection/difference/xor 两个固定多边形，
-//    打印子多边形数 + 顶点总计数 + 结果面积 bits。
-// ⑦ Haversine（新 line_measures API：Haversine::distance——旧
-//    HaversineDistance trait 0.29 已 deprecated，零 warning 纪律绕行）
-//    与 Vincenty 距离两城市坐标对 + 近对跖点不收敛错误路径。
-// geo 0.29 无 buffer/offset API（全 crate 无 Buffer trait），跳过。
-// 确定性：浮点一律 to_bits hex 打印；点集定种；无 HashMap 迭代/时间/地址。
+// geo 0.29: heavy differential for floating-point geographic geometry. Coverage:
+// ① Polygon unsigned/signed area, centroid (including the empty-polygon None path) and
+//    perimeter. geo 0.29 has no Perimeter trait, so the perimeter is the hand-computed
+//    sum of the exterior and interior Euclidean lengths; holed polygons are included.
+// ② Point-in-polygon: positive and negative contains cases plus the three-way
+//    CoordinatePosition breakdown (inside/outside/in a hole/on an edge/at a vertex).
+// ③ The four line_intersection shapes: proper SinglePoint, endpoint non-proper,
+//    parallel None and collinear.
+// ④ Convex hull (quick_hull) over a seeded xorshift point set plus diagonal collinear points.
+// ⑤ Douglas-Peucker simplify with a fixed epsilon of 0.1 (jittered polyline and a spike).
+// ⑥ BooleanOps: union/intersection/difference/xor of two fixed polygons, printing the
+//    sub-polygon count, total vertex count and result area bits.
+// ⑦ Haversine (the line_measures API, Haversine::distance) and Vincenty distances for
+//    two city coordinate pairs plus the non-convergent near-antipodal error path.
+// geo 0.29 has no buffer/offset API, so that is skipped; deterministic throughout:
+// floats print as to_bits hex, the point set is seeded, and there is no HashMap
+// iteration, time or address dependence.
 use geo::coordinate_position::CoordPos;
 use geo::line_intersection::{line_intersection, LineIntersection};
 use geo::{
@@ -33,7 +33,7 @@ use geo::{
     Simplify, VincentyDistance,
 };
 
-/// 定种 xorshift64*（native/mirvm 同序列）。
+/// Seeded xorshift64*, the same sequence on native and mirvm.
 struct Rng(u64);
 
 impl Rng {
@@ -46,7 +46,7 @@ impl Rng {
         x.wrapping_mul(0x2545F4914F6CDD1D)
     }
 
-    /// [0,100) 内 1/16 网格伪随机坐标（整数取模，位级确定）。
+    /// Pseudo-random coordinate on a 1/16 grid in [0,100), by integer modulo, bit-exact.
     fn coord(&mut self) -> f64 {
         (self.next() % 1600) as f64 / 16.0
     }
@@ -60,7 +60,7 @@ fn pxy(p: &Point<f64>) -> String {
     format!("{}:{}", pb(p.x()), pb(p.y()))
 }
 
-/// perimeter = 外环 + 各内环的 Euclidean length 和（geo 0.29 无 Perimeter trait）。
+/// Perimeter = sum of the Euclidean lengths of the exterior and interiors (geo 0.29 has no Perimeter trait).
 fn perimeter(poly: &Polygon<f64>) -> f64 {
     let mut p = poly.exterior().length::<Euclidean>();
     for r in poly.interiors() {
@@ -83,7 +83,7 @@ fn dump_poly(label: &str, poly: &Polygon<f64>) {
 }
 
 fn main() {
-    // ① area/centroid/perimeter：简单五边形、带孔矩形、空多边形（None 路径）
+    // ① area/centroid/perimeter: a simple pentagon, a holed rectangle and an empty polygon (None path)
     let simple = polygon![
         (x: 0.0, y: 0.0), (x: 4.0, y: 0.5), (x: 3.5, y: 3.0),
         (x: 1.5, y: 4.0), (x: -0.5, y: 2.0),
@@ -103,7 +103,7 @@ fn main() {
     dump_poly("holed", &holed);
     dump_poly("empty", &empty);
 
-    // ② point-in-polygon：contains 正反例 + 三态位置细分
+    // ② point-in-polygon: positive and negative contains cases plus the three-way position breakdown
     for (label, q) in [
         ("inside", point!(x: 5.0, y: 2.0)),
         ("outside", point!(x: 20.0, y: 20.0)),
@@ -119,7 +119,7 @@ fn main() {
         println!("pip {label} contains={} pos={pos}", holed.contains(&q));
     }
 
-    // ③ line_intersection 四形态
+    // ③ the four line_intersection shapes
     let cases = [
         (
             "proper",
@@ -163,7 +163,7 @@ fn main() {
         }
     }
 
-    // ④ convex hull：定种 20 点 + 3 个对角共线点
+    // ④ convex hull: 20 seeded points plus 3 diagonal collinear points
     let mut rng = Rng(0x9E3779B97F4A7C15);
     let mut pts: Vec<Point<f64>> = (0..20)
         .map(|_| point!(x: rng.coord(), y: rng.coord()))
@@ -182,7 +182,7 @@ fn main() {
         println!("hull[{i}] {}:{}", pb(c.x), pb(c.y));
     }
 
-    // ⑤ simplify（Douglas-Peucker）：抖动近直折线 + 一个尖刺，eps=0.1
+    // ⑤ simplify (Douglas-Peucker): a jittered near-straight polyline plus one spike, eps=0.1
     let ls = LineString::from(vec![
         (0.0, 0.0), (1.0, 0.05), (2.0, -0.04), (3.0, 0.03), (4.0, 0.0),
         (4.0, 3.0), (5.0, 0.02), (6.0, -0.01), (7.0, 0.0),
@@ -193,7 +193,7 @@ fn main() {
         println!("simplify[{i}] {}:{}", pb(c.x), pb(c.y));
     }
 
-    // ⑥ BooleanOps：固定矩形 × 固定三角形，四 op
+    // ⑥ BooleanOps: a fixed rectangle x a fixed triangle, four operations
     let a = polygon![
         (x: 0.0, y: 0.0), (x: 4.0, y: 0.0), (x: 4.0, y: 4.0), (x: 0.0, y: 4.0),
     ];
@@ -221,8 +221,8 @@ fn main() {
         );
     }
 
-    // ⑦ Haversine / Vincenty：两城市坐标对 + 精确对跖点不收敛错误路径
-    //    （Vincenty 迭代对 antipodal 不收敛 → FailedToConvergeError，100 次上限）
+    // ⑦ Haversine / Vincenty: two city coordinate pairs plus the exactly antipodal
+    //    non-convergence error path (Vincenty's iteration fails to converge within 100 rounds).
     let beijing = point!(x: 116.4074, y: 39.9042);
     let shanghai = point!(x: 121.4737, y: 31.2304);
     let nyc = point!(x: -74.006, y: 40.7128);

@@ -3,13 +3,13 @@
 [dependencies]
 brotli = "8"
 ---
-// brotli 8（纯 Rust brotli）：一次性 BrotliCompress/BrotliDecompress 与流式
-// CompressorWriter/Decompressor/CompressorReader 三条 API 通路；质量 1/9 ×
-// 多档 lgwin 窗口 × 四种 payload 形状（结构化重复文本/全零/伪随机/混合）。
-// 编码器是大型状态机 + 熵编码（Huffman、上下文建模、静态字典、块切分），
-// 压缩流对同参数同输入逐字节确定——好压力。
-// 输出：原始/压缩长度 + FNV-1a checksum + roundtrip 布尔；错误路径只打印
-// is_err 与 out-len（不断言具体错误文本，两端一致即可）。
+// brotli 8 (pure Rust): the one-shot BrotliCompress/BrotliDecompress and the
+// streaming CompressorWriter/Decompressor/CompressorReader API paths; quality 1/9 x
+// several lgwin windows x payload shapes (structured repeats/zeros/pseudorandom/mixed).
+// The encoder is a large state machine plus entropy coding (Huffman, context modeling,
+// static dictionary, block splitting); output is byte-for-byte deterministic for the same
+// parameters and input. Printed: original/compressed length + FNV-1a checksum + roundtrip
+// bool; error paths print only is_err and out-len, never the concrete error text.
 use std::io::{Read, Write};
 
 fn fnv1a(data: &[u8]) -> u64 {
@@ -21,7 +21,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-// xorshift64 固定种子伪随机字节（不可压缩 payload 用）。
+// xorshift64 fixed-seed pseudorandom bytes (for the incompressible payload).
 fn prng_bytes(n: usize, mut s: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(n);
     while out.len() < n {
@@ -34,7 +34,7 @@ fn prng_bytes(n: usize, mut s: u64) -> Vec<u8> {
     out
 }
 
-// 结构化重复文本：定长记录号 + 小周期字段，保证质量 1 与 9 行为差异明显。
+// Structured repeating text: fixed-width record ids + small-period fields; q1 and q9 diverge.
 fn make_text() -> Vec<u8> {
     let mut d = Vec::new();
     let mut i = 0u32;
@@ -51,7 +51,7 @@ fn make_text() -> Vec<u8> {
     d
 }
 
-// 混合 payload：文本段与伪随机段交替，考验块切分/上下文切换。
+// Mixed payload: alternating text/pseudorandom segments to stress block splitting/context switches.
 fn make_mixed() -> Vec<u8> {
     let text = make_text();
     let rand = prng_bytes(12 * 1024, 0x9e3779b97f4a7c15);
@@ -68,7 +68,7 @@ fn make_mixed() -> Vec<u8> {
     d
 }
 
-// 一次性压缩：params 走 BrotliEncoderInitParams 改 quality/lgwin。
+// One-shot compression: params from BrotliEncoderInitParams, override quality/lgwin.
 fn oneshot_compress(data: &[u8], q: i32, lgwin: i32) -> (Vec<u8>, usize) {
     let mut params = brotli::enc::BrotliEncoderInitParams();
     params.quality = q;
@@ -84,7 +84,7 @@ fn oneshot_decompress(c: &[u8]) -> Vec<u8> {
     out
 }
 
-// 流式压缩：CompressorWriter 按 chunk 字节分块喂，into_inner 收尾（FINISH）。
+// Stream compression: feed CompressorWriter in chunks; into_inner flushes (FINISH).
 fn stream_compress(data: &[u8], chunk: usize, q: u32, lgwin: u32) -> Vec<u8> {
     let mut w = brotli::CompressorWriter::new(Vec::new(), 4096, q, lgwin);
     for c in data.chunks(chunk) {
@@ -93,7 +93,7 @@ fn stream_compress(data: &[u8], chunk: usize, q: u32, lgwin: u32) -> Vec<u8> {
     w.into_inner()
 }
 
-// 流式解压：Decompressor reader 手工按 read_chunk 字节小缓冲循环 read。
+// Stream decompression: read from a Decompressor in a small read_chunk-sized buffer.
 fn stream_decompress(c: &[u8], read_chunk: usize) -> Vec<u8> {
     let mut r = brotli::Decompressor::new(&c[..], 4096);
     let mut out = Vec::new();
@@ -136,7 +136,7 @@ fn main() {
         println!("payload {name} len={} fnv={:016x}", p.len(), fnv1a(p));
     }
 
-    // ① 一次性两路：text/mixed 跑 quality{1,9} × lgwin{10,24} 全矩阵
+    // ① One-shot: text/mixed over the full quality{1,9} x lgwin{10,24} matrix
     for (name, p) in [("text", &text), ("mixed", &mixed)] {
         for q in [1, 9] {
             for w in [10, 24] {
@@ -147,7 +147,7 @@ fn main() {
             }
         }
     }
-    // ② 其余 payload 形状各跑两档参数（低质量小窗 / 高质量大窗）
+    // ② Remaining payload shapes at two parameter sets (low quality/small window, high/large)
     for (name, p) in [("zeros", &zeros), ("rand", &rand), ("one", &one), ("empty", &empty)] {
         for (q, w) in [(1, 10), (9, 24)] {
             let (c, written) = oneshot_compress(p, q, w);
@@ -157,7 +157,7 @@ fn main() {
         }
     }
 
-    // ③ 流式 writer（7 字节小块跨元块边界）+ 流式 reader（13 字节小缓冲）
+    // ③ Streaming writer (7-byte chunks crossing metablock boundaries) + reader (13-byte buffer)
     for (name, p, q, w) in [
         ("text", &text, 1u32, 12u32),
         ("text", &text, 9, 22),
@@ -166,25 +166,25 @@ fn main() {
         let c = stream_compress(p, 7, q, w);
         let back = stream_decompress(&c, 13);
         report(&format!("stream-7B {name} q={q} lgwin={w}"), p, &c, "", &back);
-        // 同一压缩流的一次性解压也必须成立（容器格式互通）
+        // the same compressed stream must also decode one-shot (container format interop)
         let back2 = oneshot_decompress(&c);
         println!("stream-7B {name} q={q} lgwin={w} oneshot-decode roundtrip={}", back2 == *p);
     }
 
-    // ④ read 端压缩器（反向 API 面）：CompressorReader 从 reader 拉流压缩
+    // ④ Read-side compressor (the reverse API): CompressorReader pulls from a reader
     let mut cr = brotli::CompressorReader::new(&text[..], 4096, 9, 22);
     let mut c = Vec::new();
     cr.read_to_end(&mut c).unwrap();
     let back = oneshot_decompress(&c);
     report("readside text q=9 lgwin=22", &text, &c, "", &back);
 
-    // ⑤ 错误路径 a：伪随机垃圾输入 → 解压应失败（或产出短输出）
+    // ⑤ Error path a: pseudorandom junk input -> decompression must fail (or emit short output)
     let junk = prng_bytes(256, 0x123456789abcdef0);
     let mut sink = Vec::new();
     let r = brotli::Decompressor::new(&junk[..], 4096).read_to_end(&mut sink);
     println!("junk-decode ok={} out-len={}", r.is_ok(), sink.len());
 
-    // ⑥ 错误路径 b：截断的高质量压缩流 → 读提前结束
+    // ⑥ Error path b: truncated high-quality stream -> the read ends early
     let (full, _) = oneshot_compress(&text, 9, 22);
     let cut = &full[..full.len() / 3];
     let mut sink = Vec::new();

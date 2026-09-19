@@ -1,19 +1,19 @@
-// P1 永久负对照探针（debt-map §6 的缩微模型 / decision-history §7.6）：
-// native 代码从 **guest 结构体字段**里取 fn-ptr 并跳转——结构体内嵌逃逸，
-// 不走任何显式 fn-ptr 实参位（thunk 机制看不见的逃逸姿势）。
-// P1 前：cb 值 = guest 冻结区数据地址，native `jmp rax` 跳进 rw 非可执行域，
-// 静默 SIGSEGV（si_addr==rip）；P1 后：cb 值 = stub 码址，直落可执行入口。
+// Permanent negative-control probe: native code takes a fn-ptr out of a **guest struct field**
+// and jumps to it, so the escape is embedded in the struct and never passes through an explicit
+// fn-ptr argument slot (a shape the thunk mechanism cannot see). The cb value must be a stub
+// code address landing in an executable entry; a guest frozen-region data address would send
+// the native `jmp rax` into a read-write, non-executable region and fault silently (si_addr==rip).
 use std::arch::global_asm;
 
-// "native 侧"：真机器码（cc 汇编 + dlopen 物化，与 guest 无 shared 语义）。
-// SysV：rdi = *const Holder；cb = [rdi+8]，arg = [rdi]，尾调（返回值透传 rax）。
+// The "native side": real machine code (assembled by cc and materialized with dlopen, sharing no semantics with the guest).
+// SysV: rdi = *const Holder; cb = [rdi+8], arg = [rdi]; tail call (the return value passes through rax).
 global_asm!(
     ".globl mirvm_struct_cb_dispatch",
     ".type mirvm_struct_cb_dispatch, @function",
     "mirvm_struct_cb_dispatch:",
-    "    mov rax, [rdi + 8]", // cb = holder->cb（结构体内嵌 fn-ptr）
+    "    mov rax, [rdi + 8]", // cb = holder->cb (fn-ptr embedded in the struct)
     "    mov rdi, [rdi]",     // arg = holder->value
-    "    jmp rax",            // 尾调内嵌回调
+    "    jmp rax",            // tail-call the embedded callback
 );
 
 #[repr(C)]

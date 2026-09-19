@@ -1,4 +1,4 @@
-// M5.2 D8g：atexit LIFO 回调（Rust Drop-on-exit 惯用 + C 互操作）。
+// atexit LIFO callbacks: the Rust drop-on-exit idiom across the C boundary.
 use std::os::raw::c_int;
 use std::sync::atomic::{AtomicU32, Ordering};
 

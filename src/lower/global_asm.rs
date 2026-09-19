@@ -1,11 +1,14 @@
-//! `global_asm!` 与 naked fn 的物化（M5.2 D8h）：模块级/函数级 asm → 单个 `.s` →
-//! `cc -shared` → `.so` → 加入 required_native_libs（在任何 guest dlsym 前 RTLD_NOW
-//! 加载）。guest 引用 global_asm 定义的符号 / 调用 naked fn 都经 foreign dlsym 命中。
+//! Materialization of `global_asm!` and naked fns: module-level and function-level asm
+//! become one `.s`, then a `cc -shared` `.so` that joins `required_native_libs` and is
+//! loaded RTLD_NOW before any guest dlsym. A guest referencing a symbol defined by
+//! global_asm, or calling a naked fn, resolves it through a foreign dlsym.
 //!
-//! cg_clif `global_asm.rs` + cg_ssa `naked_asm.rs` 同构（外部汇编器路线一致）。naked
-//! fn 用 mangled 符号名 + `.globl`/`.type`/`.size` 包装（cg_ssa prefix_and_suffix 精简
-//! 版：只做 ELF/x86_64、Rust ABI/extern-C 的裸机器码函数）。exotic 面（Label、非
-//! Const/Sym 操作数、非 x86_64、link_section）响亮拒绝。
+//! This follows cg_clif's `global_asm.rs` and cg_ssa's `naked_asm.rs`, using the same
+//! external-assembler route. A naked fn is wrapped in its mangled symbol name with
+//! `.globl`/`.type`/`.size`, a trimmed cg_ssa `prefix_and_suffix` that only handles
+//! ELF/x86_64 raw machine-code functions with the Rust ABI or extern C. Exotic inputs
+//! (labels, operands other than const/sym, non-x86_64 targets, `link_section`) are
+//! rejected loudly.
 
 use std::fmt::Write as _;
 
@@ -13,13 +16,17 @@ use rustc_ast::ast::InlineAsmTemplatePiece;
 use rustc_middle::mono::MonoItem;
 use rustc_middle::ty::{Instance, TyCtxt, TypingEnv};
 
-/// 收集 + 渲染 + 汇编。返回 `.so` 路径（供 required_native_libs），无 asm 时 None。
-/// 失败 = Err（加载相响亮终止，不静默）。
+/// Collects, renders and assembles. Returns the `.so` path for `required_native_libs`, or
+/// `None` when there is no asm. Failure is an `Err`: the load phase aborts loudly rather
+/// than silently.
 ///
-/// `sym` 指向解释态 guest fn（C7，2026-07-18）：经 linker 预算 P1 可执行条目地址，
-/// 在 .s 头部发射 `.globl <名> + .set <名>, <址>`（ABS 符号）——机器码 call/jmp
-/// 直接落到启动相物化的条目 stub，蹦床回解释器（native 链接期绑定同构）。签名不可
-/// 派生（聚合/Rust ABI/变参）者响亮拒绝：机器码调此类 fn 本即 UB（残余边界）。
+/// A `sym` operand pointing at an interpreted guest fn has the linker pre-budget a P1
+/// executable entry address, and the `.s` header emits `.globl <name>` plus
+/// `.set <name>, <addr>`, an ABS symbol. Machine-code `call`/`jmp` then land directly on
+/// the entry stub materialized at startup, which trampolines back to the interpreter,
+/// mirroring native link-time binding. A signature that cannot be derived (aggregate, Rust
+/// ABI, variadic) is rejected loudly, because machine code calling such a fn is undefined
+/// behavior anyway.
 pub(crate) fn materialize<'tcx>(
     tcx: TyCtxt<'tcx>,
     linker: &mut super::Linker<'tcx>,
@@ -27,7 +34,7 @@ pub(crate) fn materialize<'tcx>(
     let mut asm = String::new();
     let mut abs_defs: Vec<(Box<str>, u64)> = Vec::new();
     let parts = tcx.collect_and_partition_mono_items(());
-    // 稳定序（跨 CGU）；重复 def 去一次
+    // Stable order across CGUs; dedup a repeated def once
     let mut seen = std::collections::HashSet::new();
     let absorb = &mut |tcx: TyCtxt<'tcx>, inst: Instance<'tcx>, defs: &mut Vec<(Box<str>, u64)>| {
         absorb_guest_symfn(tcx, linker, inst, defs)
@@ -52,8 +59,9 @@ pub(crate) fn materialize<'tcx>(
     if asm.trim().is_empty() {
         return Ok(None);
     }
-    // 可执行跳板统一前置。桥只烤入 RIP 相对的隐藏数据槽，不烤运行期 P1 地址；
-    // 每个 Engine 装载自己的机器码映像/共享库副本后，把自己的 closure 地址写槽。
+    // Executable trampolines all go up front. The bridge bakes in only a RIP-relative
+    // hidden data slot, never a runtime P1 address; each Engine loads its own copy of the
+    // machine-code image or shared library and then writes its closure address into the slot.
     let mut head = String::from(".intel_syntax noprefix\n");
     let mut dedup = std::collections::HashSet::new();
     let mut slots = std::collections::BTreeSet::new();
@@ -87,9 +95,10 @@ pub(crate) fn materialize<'tcx>(
     Ok(Some(assemble(&asm)?))
 }
 
-/// `sym` 指向解释态 guest fn（非 foreign、非 naked）时经 linker 预算 P1 条目 stub
-/// 并登记 ABS 定义；不可派生签名响亮拒绝。符号名仍照常回写占位——`.set` 行使
-/// 引用解析到 stub 码址。
+/// When a `sym` operand points at an interpreted guest fn (not foreign, not naked), the
+/// linker pre-budgets a P1 entry stub and an ABS definition is recorded. An underivable
+/// signature is rejected loudly. The symbol name is still written back as the placeholder
+/// value, and the `.set` line makes the reference resolve to the stub's code address.
 fn absorb_guest_symfn<'tcx>(
     tcx: TyCtxt<'tcx>,
     linker: &mut super::Linker<'tcx>,
@@ -101,15 +110,16 @@ fn absorb_guest_symfn<'tcx>(
     }
     if linker.entry_ffi_sig(inst).is_none() {
         return Err(format!(
-            "global_asm/naked 的 sym 指向签名不可派生的 guest fn `{}`（聚合/Rust \
-             ABI/变参）：机器码经 fn-ptr 调此类 fn 无 thunk ABI 可言（native 下同 \
-             形本即 UB）——C7 残余边界，如实响亮拒绝",
+            "global_asm/naked sym points at guest fn `{}` with an underivable signature \
+             (aggregate/Rust ABI/variadic): machine code calling such a fn through a fn \
+             pointer has no thunk ABI to speak of and is undefined behavior natively \
+             anyway, so reject it loudly",
             tcx.symbol_name(inst).name
         ));
     }
     let addr = linker
         .fn_entry_addr(inst)
-        .map_err(|e| format!("global_asm sym guest fn 条目预算失败: {e}"))?;
+        .map_err(|e| format!("global_asm sym guest fn entry budget failed: {e}"))?;
     abs_defs.push((tcx.symbol_name(inst).name.into(), addr));
     Ok(())
 }
@@ -121,7 +131,8 @@ fn is_naked(tcx: TyCtxt<'_>, inst: Instance<'_>) -> bool {
         .contains(CodegenFnAttrFlags::NAKED)
 }
 
-/// x86_64/Intel 语法头（asm 站点间独立；每站点自带 syntax 指令，避免相互污染）。
+/// x86_64/Intel syntax header. Each asm site is independent and carries its own syntax
+/// directive, so sites cannot contaminate one another.
 fn syntax_prefix(att: bool) -> &'static str {
     if att {
         "\n.att_syntax\n"
@@ -130,15 +141,17 @@ fn syntax_prefix(att: bool) -> &'static str {
     }
 }
 
-// ===== C4：dep crate global_asm 的编译期抽取（decision-history §7.22）=====
+// ===== Compile-time extraction of dependency-crate global_asm =====
 
-/// dep 侧 sym 拒绝的统一前缀（materialize_dep_text 据此区分「跳过清单」
-/// 与「真失败」两态；勿改文案而不同步分支判据）。
-const DEP_SYM_GUEST: &str = "dep global_asm/naked 的 sym 指向 guest fn";
+/// Shared prefix of the dependency-side sym rejection. `materialize_dep_text` uses it to
+/// tell a skipped manifest from a real failure, so its wording and that branch must stay
+/// in sync.
+const DEP_SYM_GUEST: &str = "dep global_asm/naked sym points at guest fn";
 
-/// dep 侧的 sym fn 处理：与 absorb_guest_symfn 同一早退规则（foreign/naked
-/// 无需跳板），其余响亮拒绝——C7 跨 crate 条目预算（trampoline 须在 bin
-/// 链接上下文做）是 C4 片②活，pulp 等真实形态零操作数。
+/// Dependency-side sym fn handling. It shares `absorb_guest_symfn`'s early return for
+/// foreign and naked fns, which need no trampoline, and rejects everything else loudly: a
+/// cross-crate entry budget must run in the bin link context, which is not implemented
+/// yet, and real dependency forms such as pulp use no operands.
 fn dep_absorb_symfn<'tcx>(
     tcx: TyCtxt<'tcx>,
     inst: Instance<'tcx>,
@@ -148,28 +161,31 @@ fn dep_absorb_symfn<'tcx>(
         return Ok(());
     }
     Err(format!(
-        "{DEP_SYM_GUEST} `{}`（聚合预算属 bin 链接上下文，C4 片②活）",
+        "{DEP_SYM_GUEST} `{}` (the aggregate budget belongs to the bin link context and is not \
+         implemented yet)",
         tcx.symbol_name(inst).name
     ))
 }
 
-/// dep 清单三态（C4 片①语义边界）：
-/// - Text：抽取成功，落清单装载；
-/// - None：本 crate 无 asm（99%）；
-/// - UnsupportedSym：含 sym 指向 dep 自身 guest fn 的站点（C7 跨 crate 条目
-///   预算属片②）——**跳过清单**（= C4 前状态：符号维持未解析，被使用时按
-///   既有 TRAP 响亮），绝不因「可能不用」而拖垮整个 dep 构建
-///   （wasmtime fiber_start 实锤：fiber 面不被 c_wasmtime_wat 触达）。
+/// Outcome of dependency-manifest extraction:
+/// - `Text`: extraction succeeded and the text joins the manifest load;
+/// - `None`: this crate has no asm (the common case);
+/// - `UnsupportedSym`: some site has a `sym` pointing at the dependency's own guest fn,
+///   whose cross-crate entry budget is not implemented yet. The manifest is **skipped**,
+///   leaving the symbol unresolved so that any use traps loudly, because a site that may
+///   never be reached must not sink the whole dependency build. wasmtime's fiber_start is
+///   the concrete case: the fiber surface is not reachable from c_wasmtime_wat.
 pub(crate) enum DepAsmText {
     Text(String),
     None,
     UnsupportedSym,
 }
 
-/// dep 编译期抽取：mono 收集（对本次编译的 crate 恒成立——mirvm 就是 dep
-/// crate 的编译器）→ 渲染全部 global_asm/naked 站点为 `.s` 文本。
-/// 文本由调用方落盘为 rlib 旁挂清单（`<rlib 主名>.mirasm.s`）；汇编动作
-/// 留给 bin 加载相的同一 assemble 通道（缓存自愈随之免费）。
+/// Compile-time extraction for a dependency: collect mono items, which always holds for
+/// the crate being compiled because mirvm is that dependency crate's compiler, then render
+/// every global_asm/naked site as `.s` text. The caller writes the text to a manifest
+/// sidecar next to the rlib (`<rlib stem>.mirasm.s`); assembly is left to the same
+/// `assemble` channel used by the bin load phase, which makes cache self-healing free.
 pub(crate) fn materialize_dep_text(tcx: TyCtxt<'_>) -> Result<DepAsmText, String> {
     let mut asm = String::new();
     let mut abs_defs: Vec<(Box<str>, u64)> = Vec::new();
@@ -227,14 +243,15 @@ fn ensure_x86(tcx: TyCtxt<'_>) -> Result<(), String> {
     match tcx.sess.asm_arch {
         Some(InlineAsmArch::X86_64) => Ok(()),
         other => Err(format!(
-            "global_asm/naked 仅支持 x86_64（arch={other:?}，D8l）"
+            "global_asm/naked support x86_64 only (arch={other:?})"
         )),
     }
 }
 
-/// `sym fn` 操作数的处理器（C4 参数化）：bin 侧 = absorb_guest_symfn
-///（P1 条目预算 + ABS 跳板）；dep 侧 = dep_absorb_symfn（跨 crate 预算未接，
-/// 响亮拒绝）。两渲染器只在这一臂耦合 Linker。
+/// Handler for a `sym fn` operand, parameterized per side: the bin side uses
+/// `absorb_guest_symfn` (P1 entry budget plus an ABS trampoline), the dependency side uses
+/// `dep_absorb_symfn` (cross-crate budget not wired up, so it rejects loudly). This arm is
+/// the only place either renderer couples to `Linker`.
 type SymFnAbsorb<'tcx, 'c> =
     dyn FnMut(TyCtxt<'tcx>, Instance<'tcx>, &mut Vec<(Box<str>, u64)>) -> Result<(), String> + 'c;
 
@@ -250,7 +267,7 @@ fn render_global_asm<'tcx>(
     ensure_x86(tcx)?;
     let item = tcx.hir_item(item_id);
     let ItemKind::GlobalAsm { asm, .. } = item.kind else {
-        return Err("GlobalAsm item 形态异常".into());
+        return Err("GlobalAsm item has an unexpected shape".into());
     };
     let att = asm.options.contains(InlineAsmOptions::ATT_SYNTAX);
     out.push_str(syntax_prefix(att));
@@ -264,7 +281,7 @@ fn render_global_asm<'tcx>(
                     InlineAsmOperand::Const { anon_const } => {
                         let cv = tcx
                             .const_eval_poly(anon_const.def_id.to_def_id())
-                            .map_err(|e| format!("global_asm const 求值失败: {e:?}"))?;
+                            .map_err(|e| format!("global_asm const evaluation failed: {e:?}"))?;
                         let ty = tcx
                             .typeck_body(anon_const.body)
                             .node_type(anon_const.hir_id);
@@ -278,7 +295,7 @@ fn render_global_asm<'tcx>(
                     InlineAsmOperand::SymFn { expr } => {
                         let ty = tcx.typeck(owner.def_id).expr_ty(expr);
                         let rustc_middle::ty::TyKind::FnDef(def_id, args) = ty.kind() else {
-                            return Err(format!("global_asm sym fn 非 FnDef（{ty}）"));
+                            return Err(format!("global_asm sym fn is not a FnDef ({ty})"));
                         };
                         let inst = Instance::expect_resolve(
                             tcx,
@@ -293,7 +310,7 @@ fn render_global_asm<'tcx>(
                     InlineAsmOperand::SymStatic { path: _, def_id } => {
                         out.push_str(tcx.symbol_name(Instance::mono(tcx, *def_id)).name);
                     }
-                    _ => return Err("global_asm 仅支持 const/sym 操作数（D8l）".into()),
+                    _ => return Err("global_asm supports only const/sym operands".into()),
                 }
             }
         }
@@ -314,7 +331,7 @@ fn render_naked<'tcx>(
     ensure_x86(tcx)?;
     let attrs = tcx.codegen_fn_attrs(inst.def_id());
     if attrs.link_section.is_some() {
-        return Err("naked fn 带 link_section（D8l）".into());
+        return Err("naked fn has a link_section".into());
     }
     let mir = tcx.instance_mir(inst.def);
     let TerminatorKind::InlineAsm {
@@ -324,11 +341,11 @@ fn render_naked<'tcx>(
         ..
     } = &mir.basic_blocks[START_BLOCK].terminator().kind
     else {
-        return Err("naked fn body 非单 InlineAsm（D8l）".into());
+        return Err("naked fn body is not a single InlineAsm".into());
     };
     let att = options.contains(InlineAsmOptions::ATT_SYNTAX);
     let name = tcx.symbol_name(inst).name;
-    // cg_ssa prefix_and_suffix 精简：ELF/x86_64 裸机器码函数
+    // A trimmed cg_ssa prefix_and_suffix: an ELF/x86_64 raw machine-code function
     out.push_str(syntax_prefix(att));
     let _ = writeln!(out, ".pushsection .text.{name},\"ax\", @progbits");
     let _ = writeln!(out, ".balign 16");
@@ -345,7 +362,7 @@ fn render_naked<'tcx>(
                     let cv = value
                         .const_
                         .eval(tcx, TypingEnv::fully_monomorphized(), value.span)
-                        .map_err(|e| format!("naked const 求值失败: {e:?}"))?;
+                        .map_err(|e| format!("naked const evaluation failed: {e:?}"))?;
                     let layout = tcx
                         .layout_of(
                             TypingEnv::fully_monomorphized().as_query_input(value.const_.ty()),
@@ -358,7 +375,7 @@ fn render_naked<'tcx>(
                 InlineAsmOperand::SymFn { value } => {
                     let rustc_middle::ty::TyKind::FnDef(def_id, args) = value.const_.ty().kind()
                     else {
-                        return Err("naked sym fn 非 FnDef".into());
+                        return Err("naked sym fn is not a FnDef".into());
                     };
                     let callee = Instance::expect_resolve(
                         tcx,
@@ -373,7 +390,7 @@ fn render_naked<'tcx>(
                 InlineAsmOperand::SymStatic { def_id } => {
                     out.push_str(tcx.symbol_name(Instance::mono(tcx, *def_id)).name);
                 }
-                _ => return Err("naked asm 仅支持 const/sym 操作数（D8l）".into()),
+                _ => return Err("naked asm supports only const/sym operands".into()),
             },
         }
     }
@@ -383,8 +400,9 @@ fn render_naked<'tcx>(
     Ok(())
 }
 
-/// `.so` 里第一个未定义的、名字像 Rust mangled（`_R`/`_ZN`）的符号——guest fn 引用
-/// 的信号。libc/系统符号（动态链接会解析）不算。用 `nm -D -u`。
+/// First undefined symbol in the `.so` whose name looks like a Rust mangled name
+/// (`_R`/`_ZN`), which is the signal of a guest fn reference. libc and system symbols,
+/// which the dynamic linker resolves, do not count. Uses `nm -D -u`.
 fn undefined_nonlib_symbols(so: &std::path::Path) -> Option<String> {
     let out = std::process::Command::new("nm")
         .args(["-D", "-u"])
@@ -400,10 +418,11 @@ fn undefined_nonlib_symbols(so: &std::path::Path) -> Option<String> {
     None
 }
 
-/// 剥 `//` 行注释（GAS/LIVE 语义差实锤：rustc 的目标汇编器 LLVM MC 把 `//`
-/// 当行注释起始，GNU as 把 `//` 当除法运算符——global_asm 文本是 LLVM 语义
-/// 域（wasmtime fiber 大量 `//` 注释实锤 cc 报 Error），馈 GAS 前必须剥除。
-/// 引号态跟踪：`"`/`'` 字符串内的 `//` 不剥。
+/// Strips `//` line comments. rustc's target assembler, LLVM MC, treats `//` as a line
+/// comment start while GNU as treats it as a division operator, and global_asm text comes
+/// from the LLVM world: wasmtime's fiber asm carries many `//` comments that make cc error
+/// out. They must be stripped before feeding GAS. Quoting is tracked, so `//` inside a
+/// `"`/`'` string survives.
 fn strip_slash_comments(asm: &mut String) {
     let mut out = String::with_capacity(asm.len());
     for line in asm.lines() {
@@ -434,14 +453,16 @@ fn strip_slash_comments(asm: &mut String) {
     *asm = out;
 }
 
-/// `.s` → `.so`（内容寻址缓存，与 asm-stub 工厂同款临时名+rename 原子发布）。
-/// naked fn 混入模块级 asm，可能引用 guest 符号 → 不能 `-nostdlib`；用 `-nostartfiles`
-/// 保留动态链接器解析（naked 内 sym 操作数指向的 guest fn 由 RTLD_GLOBAL 兜底）。
-/// C4：升为 pub(crate)——dep 清单文本经 bin 加载相同一通道物化。
+/// `.s` -> `.so`, with a content-addressed cache and the same temp-name plus rename atomic
+/// publish as the asm-stub factory. Naked fns are mixed into module-level asm and may
+/// reference guest symbols, so `-nostdlib` is not usable; `-nostartfiles` keeps
+/// dynamic-linker resolution, and RTLD_GLOBAL resolves guest fns named by naked `sym`
+/// operands. Also used by the bin load phase to materialize dependency manifest text.
 pub(crate) fn assemble(asm: &str) -> Result<Box<str>, String> {
-    // T5：与 asm-stub 同通道——global_asm/naked 内裸 `syscall` 指令 → 间接槽
-    // 调用（改写发生在内容哈希前，缓存键与最终字节一致；槽随 .so 物化，
-    // 装载 required_native_libs 时由 lower_inner 统一重填）
+    // Same channel as the asm-stub factory: a bare `syscall` instruction in
+    // global_asm/naked asm becomes an indirect slot call. The rewrite runs before content
+    // hashing, so the cache key matches the final bytes; the slot ships with the `.so` and
+    // `lower_inner` refills it when the `.so` joins required_native_libs.
     let mut asm = asm.to_string();
     strip_slash_comments(&mut asm);
     crate::lower::asm::rewrite_syscall_text(&mut asm);
@@ -451,13 +472,14 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, String> {
     hash_input.extend_from_slice(asm.as_bytes());
     let hash = crate::lower::asm::fnv1a(&hash_input);
     let dir = crate::sysroot::cache_dir().join("global-asm");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 global-asm 缓存目录失败: {e}"))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("failed to create the global-asm cache directory: {e}"))?;
     let so = dir.join(format!("{hash:016x}.so"));
     if so.exists() {
         return Ok(so.display().to_string().into());
     }
     let s_path = dir.join(format!("{hash:016x}.s"));
-    std::fs::write(&s_path, asm).map_err(|e| format!("写 global-asm .s 失败: {e}"))?;
+    std::fs::write(&s_path, asm).map_err(|e| format!("failed to write the global-asm .s: {e}"))?;
     let tmp = dir.join(format!("{hash:016x}.so.tmp{}", std::process::id()));
     let status = std::process::Command::new("cc")
         .args(["-shared", "-fPIC", "-nostartfiles", "-Wl,-Bsymbolic", "-o"])
@@ -465,22 +487,29 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, String> {
         .arg(&s_path)
         .args(crate::native_archive::NATIVE_RUNTIME_WRAP_FLAGS)
         .status()
-        .map_err(|e| format!("调用 cc 汇编 global-asm 失败（PATH 缺 cc？）: {e}"))?;
+        .map_err(|e| {
+            format!("failed to invoke cc to assemble global-asm (is cc missing from PATH?): {e}")
+        })?;
     if !status.success() {
-        return Err(format!("cc 汇编 global-asm 失败（status={status}）"));
+        return Err(format!(
+            "cc failed to assemble global-asm (status={status})"
+        ));
     }
-    // 未定义符号审计：global_asm/naked 里 `sym` 引用的符号必须自身是机器码
-    // （另一 naked/global_asm 符号、动态库导出，或经 C7 ABS 定义挂到 P1 条目
-    // stub 的 guest fn）。裸引用未定义 guest 符号会留下 dlopen 时才炸且诊断
-    // 误导的未解析项——此处提前响亮拒绝。
+    // Undefined-symbol audit: a symbol referenced by a global_asm/naked `sym` operand must
+    // itself be machine code: another naked/global_asm symbol, a dynamic-library export, or
+    // a guest fn reached through an ABS definition onto a P1 entry stub. A bare reference to
+    // an undefined guest symbol would leave an unresolved entry that only blows up at
+    // dlopen with a misleading diagnostic, so reject it loudly here.
     let undef = undefined_nonlib_symbols(&tmp);
     if let Some(sym) = undef {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!(
-            "global_asm/naked 引用未定义符号 `{sym}`：sym 操作数只能指向机器码符号\
-             （另一 naked/global_asm 或动态库），不能指向解释执行的 guest fn（JIT 期能力，D8l）"
+            "global_asm/naked references undefined symbol `{sym}`: a sym operand may only \
+             name a machine-code symbol (another naked/global_asm or a dynamic library), not \
+             an interpreted guest fn"
         ));
     }
-    std::fs::rename(&tmp, &so).map_err(|e| format!("global-asm .so 原子发布失败: {e}"))?;
+    std::fs::rename(&tmp, &so)
+        .map_err(|e| format!("failed to atomically publish the global-asm .so: {e}"))?;
     Ok(so.display().to_string().into())
 }

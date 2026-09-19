@@ -1,18 +1,20 @@
-//! cargo 集成三阶段（机制移植自 cargo-miri，MIT/Apache-2.0）：
+//! Cargo integration in three phases (mechanism ported from cargo-miri, MIT/Apache-2.0):
 //!
-//! 1. `phase_cargo`：以 `cargo run` 驱动整个依赖图构建，但把 Cargo 的
-//!    RUSTC 指向 mirvm，并注入 target.runner=["mirvm","runner"] + 独立 target dir。
-//!    Cargo 自己配置的 RUSTC_WRAPPER / RUSTC_WORKSPACE_WRAPPER 原样保留；因此
-//!    Cargo 仍负责决定普通依赖与 workspace 成员分别经过哪些 wrapper。
-//!    强制 `--target <host>`——这是区分 host crate（build script/proc-macro，
-//!    正常编译）与 target crate（要被解释，注入 MIR sysroot）的开关。
-//! 2. `phase_wrapper`：cargo 的每次 rustc 调用都经过这里。
-//!    - 信息查询/host crate → 透传真 rustc
-//!    - target 依赖 → 真 rustc + `--sysroot <MIR sysroot>` + `-Zalways-encode-mir`
-//!    - 最终可运行 bin → 不编译：写可执行启动器，完整 rustc 参数 + 环境放在
-//!      旁置 JSON（外加真实 .d 防 cargo 重建）
-//! 3. `phase_runner`：cargo "运行"启动器时回到我们手里——读旁置 JSON，
-//!    用 cargo 的原始参数驱动解释器。
+//! 1. `phase_cargo`: drive the whole dependency graph build with `cargo run`, but point
+//!    Cargo's RUSTC at mirvm and inject target.runner=["mirvm","runner"] plus a separate
+//!    target dir. Cargo-configured RUSTC_WRAPPER / RUSTC_WORKSPACE_WRAPPER are left as they
+//!    are, so Cargo still decides which wrappers ordinary dependencies and workspace members
+//!    each pass through. `--target <host>` is forced: it is the switch that separates host
+//!    crates (build scripts/proc-macros, compiled normally) from target crates (to be
+//!    interpreted, with the MIR sysroot injected).
+//! 2. `phase_wrapper`: every cargo rustc invocation goes through here.
+//!    - info query/host crate -> pass through to real rustc
+//!    - target dependency -> real rustc + `--sysroot <MIR sysroot>` + `-Zalways-encode-mir`
+//!    - final runnable bin -> do not compile: write an executable launcher with the full
+//!      rustc arguments + environment in a sidecar JSON (plus a real .d to stop cargo from
+//!      rebuilding)
+//! 3. `phase_runner`: when cargo "runs" the launcher, control returns to us -- read the
+//!    sidecar JSON and drive the interpreter with cargo's original arguments.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
@@ -48,11 +50,18 @@ pub(crate) fn ensure_self_symlink(self_exe: &Path, path: &Path) -> Result<(), St
         {
             return Ok(());
         }
-        let parent = path
-            .parent()
-            .ok_or_else(|| format!("内部工具路径没有父目录: {}", path.display()))?;
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("创建内部工具目录 {} 失败: {error}", parent.display()))?;
+        let parent = path.parent().ok_or_else(|| {
+            format!(
+                "internal tool path has no parent directory: {}",
+                path.display()
+            )
+        })?;
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create internal tool directory {}: {error}",
+                parent.display()
+            )
+        })?;
         let tmp = parent.join(format!(
             ".mirvm-tool-{}-{}.tmp",
             std::process::id(),
@@ -61,18 +70,28 @@ pub(crate) fn ensure_self_symlink(self_exe: &Path, path: &Path) -> Result<(), St
         match std::fs::remove_file(&tmp) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("清理内部工具 {} 失败: {error}", tmp.display())),
+            Err(error) => {
+                return Err(format!(
+                    "failed to clean up internal tool {}: {error}",
+                    tmp.display()
+                ));
+            }
         }
-        symlink(self_exe, &tmp)
-            .map_err(|error| format!("创建内部工具 {} 失败: {error}", tmp.display()))?;
-        std::fs::rename(&tmp, path)
-            .map_err(|error| format!("发布内部工具 {} 失败: {error}", path.display()))?;
+        symlink(self_exe, &tmp).map_err(|error| {
+            format!("failed to create internal tool {}: {error}", tmp.display())
+        })?;
+        std::fs::rename(&tmp, path).map_err(|error| {
+            format!(
+                "failed to publish internal tool {}: {error}",
+                path.display()
+            )
+        })?;
         Ok(())
     }
     #[cfg(not(unix))]
     {
         let _ = (self_exe, path);
-        Err("Cargo doctest 当前只支持 Unix 主机".into())
+        Err("Cargo doctest currently supports Unix hosts only".into())
     }
 }
 
@@ -91,7 +110,7 @@ fn arg_flag_value(args: &[String], flag: &str) -> Option<String> {
 
 fn exec(mut cmd: Command) -> ! {
     let status = cmd.status().unwrap_or_else(|e| {
-        eprintln!("mirvm: 无法执行 {cmd:?}: {e}");
+        eprintln!("mirvm: cannot execute {cmd:?}: {e}");
         exit(1);
     });
     exit(status.code().unwrap_or(1));
@@ -162,7 +181,7 @@ fn cargo_project_command(
     self_exe: &std::path::Path,
     locked: bool,
 ) -> Command {
-    let self_str = self_exe.to_str().expect("mirvm 路径非 UTF-8");
+    let self_str = self_exe.to_str().expect("mirvm path is not UTF-8");
     let mut cmd = Command::new(toolchain_cargo());
     cmd.current_dir(project_dir);
     cmd.arg(action.subcommand());
@@ -170,18 +189,21 @@ fn cargo_project_command(
         cmd.arg("--locked");
     }
     action.append_args(&mut cmd);
-    // 强制 host target：让 host/target crate 可区分，且激活 target.runner
+    // Force the host target: it makes host and target crates distinguishable and activates
+    // target.runner
     cmd.arg("--target").arg(env!("MIRVM_HOST"));
-    // 所有"运行二进制"的动作转给我们
+    // Every "run a binary" action is redirected to us
     cmd.arg("--config").arg(cargo_runner_config(
         self_exe,
         crate::cli::capture_directory(),
     ));
-    // 统一依赖存储（D14 近期片，2026-07-18 裁定）：所有脚本/项目的 mirvm 构建
-    // 共享同一 target dir——cargo fingerprint 即编译键（版本×features×依赖闭包
-    // ×flags×toolchain）内容寻址，同一 crate 编译单元全机唯一一份；最终产物
-    // 定位由 runner 协议供给（cargo 把假二进制路径传给 runner），不扫目录。
-    // MIRVM_TARGET_DIR 可整体改址（隔离/测试用；默认 $MIRVM_HOME/target/mirvm）。
+    // Shared dependency store: every script/project mirvm build uses the same target dir.
+    // The cargo fingerprint is a content-addressed compile key (version x features x
+    // dependency closure x flags x toolchain), so one crate compilation unit exists once per
+    // machine. The final artifact is located through the runner protocol (cargo passes the
+    // fake binary path to the runner), never by scanning directories.
+    // MIRVM_TARGET_DIR relocates the whole store (for isolation/tests; default
+    // $MIRVM_HOME/target/mirvm).
     let target_dir = cargo_target_dir();
     // These flags are appended inside our rustc wrapper, after Cargo has
     // computed its normal fingerprint.  Partition only this exceptional
@@ -224,8 +246,9 @@ fn cargo_project_command(
     cmd
 }
 
-/// Cargo 兼容轨的用户动作。两种动作共用同一 wrapper/runner 协议；区别只在
-/// Cargo 负责选择一个 run bin，还是选择并串行启动若干 test harness。
+/// A user action on the Cargo-compatible track. Both actions share one wrapper/runner
+/// protocol; they differ only in whether Cargo picks one run bin or picks and launches
+/// several test harnesses in sequence.
 #[derive(Clone, Copy)]
 enum CargoAction<'a> {
     Run {
@@ -271,7 +294,8 @@ impl CargoAction<'_> {
     }
 }
 
-/// 阶段 1：在 `project_dir` 里驱动 cargo。program_args 传给最终被解释的程序。
+/// Phase 1: drive cargo in `project_dir`. program_args go to the program that is finally
+/// interpreted.
 pub fn phase_cargo(
     project_dir: &std::path::Path,
     program_args: &[String],
@@ -279,22 +303,22 @@ pub fn phase_cargo(
     ignore_rust_version: bool,
 ) -> ! {
     let guest_cwd = std::env::current_dir().unwrap_or_else(|error| {
-        eprintln!("mirvm: 无法读取调用者当前目录: {error}");
+        eprintln!("mirvm: cannot read the caller's current directory: {error}");
         exit(1);
     });
-    // 绝对化：relative project_dir + current_dir + join(target/mirvm) 会把 target 目录
-    // 拼成 project/project/target 的重复嵌套（A2 gate 实测）——且使同一项目的 rlib 路径
-    // 随调用形态（相对/绝对）漂移，deps-image 键失稳。
+    // Absolutize: a relative project_dir plus current_dir plus join(target/mirvm) nests the
+    // target dir as project/project/target, and makes one project's rlib paths drift with the
+    // invocation form (relative vs absolute), destabilizing deps-image keys.
     let project_dir =
         &std::path::absolute(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
     let sysroot = match crate::sysroot::ensure_sysroot() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("mirvm: 构建 sysroot 失败: {e}");
+            eprintln!("mirvm: building the sysroot failed: {e}");
             exit(1);
         }
     };
-    let self_exe = std::env::current_exe().expect("current_exe 失败");
+    let self_exe = std::env::current_exe().expect("current_exe failed");
     let locked = std::env::var_os("MIRVM_CARGO_LOCKED").is_some();
     let cmd = cargo_project_command(
         project_dir,
@@ -311,8 +335,9 @@ pub fn phase_cargo(
     exec(cmd)
 }
 
-/// `mirvm test` 的 Cargo 兼容轨。`cargo_args` 是 `--lib/--test/.../TESTNAME`
-/// 等 Cargo 自己解释的选择参数；`harness_args` 是 `--` 后逐字透给 libtest 的参数。
+/// The Cargo-compatible track of `mirvm test`. `cargo_args` are selection arguments that
+/// Cargo interprets itself (`--lib/--test/.../TESTNAME`); `harness_args` are the arguments
+/// after `--`, passed verbatim to libtest.
 pub fn phase_cargo_test(
     project_dir: &std::path::Path,
     cargo_args: &[String],
@@ -323,11 +348,11 @@ pub fn phase_cargo_test(
     let sysroot = match crate::sysroot::ensure_sysroot() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("mirvm: 构建 sysroot 失败: {e}");
+            eprintln!("mirvm: building the sysroot failed: {e}");
             exit(1);
         }
     };
-    let self_exe = std::env::current_exe().expect("current_exe 失败");
+    let self_exe = std::env::current_exe().expect("current_exe failed");
     let locked = std::env::var_os("MIRVM_CARGO_LOCKED").is_some();
     let (rustdoc, doctest_builder) = ensure_cargo_doctest_tools(project_dir, &self_exe)
         .unwrap_or_else(|error| {
@@ -399,15 +424,16 @@ fn cargo_doctest_rustdoc_args(
     args
 }
 
-/// Cargo 仍负责选择 doctest target 和组织 rustdoc 参数；这里只保证 rustdoc
-/// 提取出的临时 crate 与 Cargo wrapper 产出的库使用同一套 MIR sysroot，并把
-/// 临时可执行文件交给 MIRVM。
+/// Cargo still selects doctest targets and assembles rustdoc arguments; this only ensures
+/// that the temporary crate extracted by rustdoc and the library produced by the Cargo
+/// wrapper use the same MIR sysroot, and hands the temporary executable to MIRVM.
 pub fn phase_cargo_rustdoc(argv: impl Iterator<Item = String>) -> ! {
     let mut args: Vec<String> = argv.collect();
     if args.iter().any(|arg| arg == "--test") {
-        let sysroot = std::env::var("MIRVM_SYSROOT").expect("Cargo rustdoc 阶段缺少 MIRVM_SYSROOT");
+        let sysroot =
+            std::env::var("MIRVM_SYSROOT").expect("Cargo rustdoc phase is missing MIRVM_SYSROOT");
         let builder = std::env::var("MIRVM_DOCTEST_BUILDER")
-            .expect("Cargo rustdoc 阶段缺少 MIRVM_DOCTEST_BUILDER");
+            .expect("Cargo rustdoc phase is missing MIRVM_DOCTEST_BUILDER");
         args = cargo_doctest_rustdoc_args(args, sysroot, builder);
     }
     let mut command = Command::new(toolchain_rustdoc());
@@ -415,16 +441,18 @@ pub fn phase_cargo_rustdoc(argv: impl Iterator<Item = String>) -> ! {
     exec(command)
 }
 
-/// Cargo 的 RUSTC 槽直接调用 mirvm 时没有 `<rustc 名字>` 参数；补上固定
-/// toolchain 的 rustc 后进入与传统 wrapper 相同的处理路径。
+/// When Cargo's RUSTC slot invokes mirvm directly there is no `<rustc name>` argument;
+/// prepend the pinned toolchain's rustc and continue on the same path as the traditional
+/// wrapper.
 pub fn phase_compiler(argv: impl Iterator<Item = String>) -> ! {
     phase_wrapper(std::iter::once(toolchain_rustc().display().to_string()).chain(argv))
 }
 
-/// 阶段 2：编译捕获。argv = [<rustc 名字>, <rustc 参数...>]。
-/// 注意：忽略 cargo 传来的 rustc 名字（裸 "rustc" 会被 rustup 按 cwd 解析到错误
-/// toolchain），一律用 pinned toolchain 的 rustc——proc-macro dylib 与 rlib 元数据
-/// 都必须和解释会话的编译器版本严格一致。
+/// Phase 2: compile capture. argv = [<rustc name>, <rustc args...>].
+/// The rustc name passed by cargo is ignored (a bare "rustc" would be resolved by rustup
+/// against the cwd to the wrong toolchain); the pinned toolchain's rustc is always used,
+/// because proc-macro dylibs and rlib metadata must match the interpreting session's compiler
+/// version exactly.
 pub fn phase_wrapper(mut argv: impl Iterator<Item = String>) -> ! {
     let _rustc_name = argv.next();
     let rustc = toolchain_rustc();
@@ -439,7 +467,7 @@ pub fn phase_wrapper(mut argv: impl Iterator<Item = String>) -> ! {
     let is_info_query =
         arg_flag_value(&args, "--print").is_some() || args.iter().any(|a| a == "-vV");
     let is_target = arg_flag_value(&args, "--target").is_some();
-    // crate-type 缺省即 bin（与 cargo-miri 的判定一致）；--test 是 test harness bin
+    // A missing crate-type means bin (matching cargo-miri); --test is a test harness bin
     let is_runnable = !is_info_query
         && (arg_flag_value(&args, "--crate-type")
             .as_deref()
@@ -448,19 +476,20 @@ pub fn phase_wrapper(mut argv: impl Iterator<Item = String>) -> ! {
             || args.iter().any(|a| a == "--test"));
 
     if is_info_query || !is_target {
-        // 版本查询 / host crate（build script、proc-macro）：原样编译
+        // Version query / host crate (build script, proc-macro): compile as is
         let mut cmd = Command::new(&rustc);
         cmd.args(&args);
         exec(cmd);
     }
 
-    // cargo 驱动之外的临时探测编译：build.rs 读 RUSTC_WRAPPER 后 spawn
-    // `$WRAPPER $RUSTC --crate-type=rlib --emit=metadata -o <f> -` 探测工具链
-    // 特性（rustix 1.1.4 实锤）。判据：无 --out-dir（cargo 的 dep 编译恒带）
-    // 或 stdin 源 `-`（cargo 恒为文件路径）。原样 exec 真 rustc——探针问的
-    // 是「这套工具链认不认 X」，只能由真 rustc 回答；劫持进 dep 通道则
-    // run_dep_compiler 缺 --out-dir 即 panic，与探针 writeln 竞态成 EPIPE
-    // （负载高时 build.rs 炸，空载时探针假否——两态都错）。
+    // Temporary probe compilations outside cargo's drive: build.rs reads RUSTC_WRAPPER and
+    // spawns `$WRAPPER $RUSTC --crate-type=rlib --emit=metadata -o <f> -` to probe toolchain
+    // features. The criterion is a missing --out-dir (cargo's dep compilations always pass
+    // one) or a `-` stdin source (cargo always uses a file path). Exec real rustc as is: the
+    // probe asks whether this toolchain accepts X, which only real rustc can answer. Routing
+    // it into the dep channel would panic in run_dep_compiler on the missing --out-dir and
+    // race the probe's writeln into EPIPE (build.rs explodes under load, and the probe
+    // falsely answers no when idle -- both states are wrong).
     if arg_flag_value(&args, "--out-dir").is_none() || args.iter().any(|a| a == "-") {
         let mut cmd = Command::new(&rustc);
         cmd.args(&args);
@@ -468,7 +497,7 @@ pub fn phase_wrapper(mut argv: impl Iterator<Item = String>) -> ! {
     }
 
     if is_runnable {
-        // 最终 bin：不编译，写可执行启动器 + JSON 配方 + 真实 .d
+        // Final bin: do not compile; write an executable launcher + JSON recipe + real .d
         let recorded_args = runner_args_with_stable_paths(&args);
         let info = CrateRunInfo {
             args: recorded_args,
@@ -478,14 +507,15 @@ pub fn phase_wrapper(mut argv: impl Iterator<Item = String>) -> ! {
         exit(0);
     }
 
-    // target 依赖：注入 MIR sysroot（保证与解释会话同一套 std）+ 全量 MIR。
-    // S2（D9d，coldstart-research §3/§4.1）：-Zno-codegen 剪掉 LLVM codegen+目标码
-    // ——runner 只消费 rmeta 里的 MIR，目标码纯白烧（实测 ecosystem 22 个 rlib 全带
-    // .rcgu.o 共 ~100MB）。metadata-only rlib 由 rustc 默认 link 路径照常产出；
-    // post-mono const-eval 错误面由 DepCallbacks 显式补齐（cli.rs）。
-    let sysroot = std::env::var("MIRVM_SYSROOT").expect("wrapper 阶段缺少 MIRVM_SYSROOT");
+    // Target dependency: inject the MIR sysroot (guaranteeing the same std as the interpreting
+    // session) plus full MIR. -Zno-codegen cuts LLVM codegen and object code: the runner
+    // consumes only the MIR in rmeta, so object code is pure waste (the ecosystem's 22 rlibs
+    // all carried .rcgu.o, ~100MB total). metadata-only rlibs are still produced through
+    // rustc's default link path, and DepCallbacks supplies the post-mono const-eval error
+    // surface explicitly (cli.rs).
+    let sysroot = std::env::var("MIRVM_SYSROOT").expect("wrapper phase is missing MIRVM_SYSROOT");
     let mut dep_args = Vec::with_capacity(args.len() + 5);
-    dep_args.push("mirvm-dep-rustc".to_string()); // argv[0] 占位（driver 跳过）
+    dep_args.push("mirvm-dep-rustc".to_string()); // argv[0] placeholder (the driver skips it)
     dep_args.extend(args);
     dep_args.push("--sysroot".into());
     dep_args.push(sysroot);
@@ -494,9 +524,10 @@ pub fn phase_wrapper(mut argv: impl Iterator<Item = String>) -> ! {
     crate::cli::run_dep_compiler(dep_args)
 }
 
-/// Cargo workspace 中 rustc 从 workspace 根接收 `member/src/lib.rs`，runner
-/// 却从成员目录启动。把 crate 根绝对化，并重映射回原相对拼写：编译不受 runner
-/// cwd 影响，诊断/file!() 仍与 Cargo 原调用一致。
+/// In a Cargo workspace, rustc receives `member/src/lib.rs` from the workspace root while the
+/// runner starts in the member directory. Absolutize the crate root and remap it back to the
+/// original relative spelling: compilation is then independent of the runner cwd, while
+/// diagnostics and file!() still match Cargo's original invocation.
 fn runner_args_with_stable_paths(args: &[String]) -> Vec<String> {
     let Ok(cwd) = std::env::current_dir() else {
         return args.to_vec();
@@ -533,13 +564,16 @@ fn write_fake_outputs(rustc: &std::path::Path, args: &[String], info: &CrateRunI
     let out_dir = arg_flag_value(args, "--out-dir").unwrap_or_default();
     let crate_name = arg_flag_value(args, "--crate-name").unwrap_or_default();
 
-    // P2（coldstart-research §5）：dep-info 必须**真实**。旧空 stub 让 cargo 没有 bin 的
-    // 源文件清单——cargo 在 rustc 调用结束时就把 dep-info 快照进 .fingerprint（事后补写
-    // 不可见，实测），于是源码编辑永不触发假二进制重录，录制 env/参数化石永生。这里用
-    // 真 rustc 只发 dep-info 拿精确清单（含 mod/include!/env! 追踪；deps rlib 此刻已就绪，
-    // 只在 bin 指纹脏时发生）。stderr 静默：诊断由 runner 会话响亮重演，保持与 native
-    // "单次告警"同口径。失败退回 crate 根单行清单（.d 只影响重录频率；运行语义永远由
-    // runner 现读源码保证，宁可少重录不可错语义）。
+    // dep-info must be **real**. An empty stub used to leave cargo without the bin's source
+    // file list, and cargo snapshots dep-info into .fingerprint when the rustc invocation
+    // ends (writing it afterwards is invisible), so a source edit never triggered
+    // re-recording of the fake binary and the recorded env/arguments fossilized. Real rustc
+    // emits only dep-info here to get the exact list (including mod/include!/env! tracking;
+    // deps rlibs are ready by now, and this only happens when the bin fingerprint is dirty).
+    // stderr is silenced: the runner session replays diagnostics loudly, keeping the same
+    // single-warning behavior as native. On failure, fall back to a one-line crate-root list
+    // (.d only affects re-record frequency; run semantics always come from the runner reading
+    // the source, so under-recording beats wrong semantics).
     if arg_flag_value(args, "--emit")
         .unwrap_or_default()
         .split(',')
@@ -557,7 +591,7 @@ fn write_fake_outputs(rustc: &std::path::Path, args: &[String], info: &CrateRunI
                 cmd.arg(a);
             }
         }
-        // 与 target 依赖同一套 MIR sysroot（use std::* 的解析必需）
+        // The same MIR sysroot as target dependencies (required to resolve use std::*)
         if let Ok(sysroot) = std::env::var("MIRVM_SYSROOT") {
             cmd.arg("--sysroot").arg(sysroot);
         }
@@ -575,7 +609,7 @@ fn write_fake_outputs(rustc: &std::path::Path, args: &[String], info: &CrateRunI
         }
     }
 
-    // 让 rustc 告诉我们产物文件名（依赖 target 的后缀规则）
+    // Let rustc tell us the artifact file names (they depend on the target's suffix rules)
     let out_files: Vec<PathBuf> = if let Some(o) = arg_flag_value(args, "-o") {
         vec![PathBuf::from(o)]
     } else {
@@ -590,10 +624,10 @@ fn write_fake_outputs(rustc: &std::path::Path, args: &[String], info: &CrateRunI
             cmd.arg("-C").arg(format!("extra-filename={extra}"));
         }
         cmd.arg("-");
-        let output = cmd.output().expect("rustc --print file-names 失败");
+        let output = cmd.output().expect("rustc --print file-names failed");
         assert!(
             output.status.success(),
-            "rustc --print file-names 失败: {output:?}"
+            "rustc --print file-names failed: {output:?}"
         );
         String::from_utf8(output.stdout)
             .unwrap()
@@ -607,13 +641,16 @@ fn write_fake_outputs(rustc: &std::path::Path, args: &[String], info: &CrateRunI
     for f in out_files {
         let info_path = fake_info_path(&f);
         std::fs::write(&info_path, &json).unwrap_or_else(|e| {
-            eprintln!("mirvm: 写假二进制配方 {} 失败: {e}", info_path.display());
+            eprintln!(
+                "mirvm: failed to write the fake binary recipe {}: {e}",
+                info_path.display()
+            );
             exit(1);
         });
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let self_exe = std::env::current_exe().expect("current_exe 失败");
+            let self_exe = std::env::current_exe().expect("current_exe failed");
             let quote =
                 |value: &Path| format!("'{}'", value.display().to_string().replace('\'', "'\\''"));
             let script = format!(
@@ -623,19 +660,28 @@ fn write_fake_outputs(rustc: &std::path::Path, args: &[String], info: &CrateRunI
                 quote(&f)
             );
             std::fs::write(&f, script).unwrap_or_else(|e| {
-                eprintln!("mirvm: 写假二进制启动器 {} 失败: {e}", f.display());
+                eprintln!(
+                    "mirvm: failed to write the fake binary launcher {}: {e}",
+                    f.display()
+                );
                 exit(1);
             });
             let mut permissions = std::fs::metadata(&f).unwrap().permissions();
             permissions.set_mode(0o755);
             std::fs::set_permissions(&f, permissions).unwrap_or_else(|e| {
-                eprintln!("mirvm: 设置假二进制权限 {} 失败: {e}", f.display());
+                eprintln!(
+                    "mirvm: failed to set fake binary permissions {}: {e}",
+                    f.display()
+                );
                 exit(1);
             });
         }
         #[cfg(not(unix))]
         std::fs::write(&f, &json).unwrap_or_else(|e| {
-            eprintln!("mirvm: 写假二进制 {} 失败: {e}", f.display());
+            eprintln!(
+                "mirvm: failed to write the fake binary {}: {e}",
+                f.display()
+            );
             exit(1);
         });
     }
@@ -657,40 +703,43 @@ fn read_fake_info(fake_bin: &Path) -> std::io::Result<String> {
         .lines()
         .find_map(|line| line.strip_prefix("# MIRVM_RUN_INFO "))
     else {
-        // 兼容更新前直接把 JSON 写在 artifact 本体里的缓存。
+        // Compatibility with caches written before the update, which stored the JSON in the
+        // artifact itself.
         return Ok(launcher);
     };
     let path: String = serde_json::from_str(encoded).map_err(std::io::Error::other)?;
     std::fs::read_to_string(path)
 }
 
-/// 阶段 3：runner。argv = [<假二进制路径>, <程序参数...>]。
-/// 返回 (解释会话的 rustc 参数, 程序 argv, 需设置的环境)。
+/// Phase 3: runner. argv = [<fake binary path>, <program args...>].
+/// Returns (the interpreting session's rustc args, the program argv, the environment to set).
 pub fn parse_runner_invocation(
     mut argv: impl Iterator<Item = String>,
 ) -> (Vec<String>, Vec<String>, Vec<(String, String)>) {
     let fake_bin = argv.next().unwrap_or_else(|| {
-        crate::diagnostics::control(format_args!("mirvm runner: 缺少二进制路径参数"));
+        crate::diagnostics::control(format_args!("mirvm runner: missing binary path argument"));
         exit(2);
     });
     let program_args: Vec<String> = argv.collect();
 
     let data = read_fake_info(Path::new(&fake_bin)).unwrap_or_else(|e| {
-        crate::diagnostics::control(format_args!("mirvm runner: 读取 {fake_bin} 失败: {e}"));
+        crate::diagnostics::control(format_args!("mirvm runner: failed to read {fake_bin}: {e}"));
         exit(1);
     });
     let info: CrateRunInfo = serde_json::from_str(&data).unwrap_or_else(|_| {
         crate::diagnostics::control(format_args!(
-            "mirvm runner: {fake_bin} 不是 mirvm 的假二进制（试试删掉 target/mirvm 重跑）"
+            "mirvm runner: {fake_bin} is not a mirvm fake binary (try deleting target/mirvm and rerunning)"
         ));
         exit(1);
     });
 
-    // 组装解释会话参数：argv[0] 占位 + cargo 的原始参数 + 我们的 sysroot。
-    // 剥掉 JSON 诊断/artifact 通知（那是给 cargo 消费的，现在 cargo 已退场）。
-    // Cargo 直接调用 runner 时环境里有内部 sysroot；CARGO_BIN_EXE_* 启动器却可能
-    // 被 guest 再次执行，此时用户运行环境已经按合同去掉了所有内部变量。旁置配方
-    // 保存了生成该启动器时的构建环境，因此它是两条路径共同、无需用户介入的后备。
+    // Assemble the interpreting session's arguments: argv[0] placeholder + cargo's original
+    // arguments + our sysroot. Strip JSON diagnostic/artifact notifications (they were for
+    // cargo, which has now exited). When Cargo invokes the runner directly, the internal
+    // sysroot is in the environment; a CARGO_BIN_EXE_* launcher, however, may be re-executed
+    // by the guest, at which point the user's environment has already dropped every internal
+    // variable by contract. The sidecar recipe recorded the build environment that produced
+    // the launcher, so it is the fallback both paths share without user intervention.
     let sysroot = std::env::var("MIRVM_SYSROOT")
         .ok()
         .or_else(|| {
@@ -700,7 +749,7 @@ pub fn parse_runner_invocation(
         })
         .unwrap_or_else(|| {
             crate::diagnostics::control(format_args!(
-                "mirvm runner: 启动器配方缺少 MIRVM_SYSROOT（请清理对应 target 后重建）"
+                "mirvm runner: the launcher recipe lacks MIRVM_SYSROOT (clean the matching target and rebuild)"
             ));
             exit(1);
         });
@@ -719,7 +768,7 @@ pub fn parse_runner_invocation(
     rustc_args.push("--sysroot".into());
     rustc_args.push(sysroot);
 
-    // 程序 argv：argv[0] 用假二进制路径（与 cargo run 一致）
+    // Program argv: argv[0] is the fake binary path (matching cargo run)
     let mut prog_argv = vec![fake_bin];
     prog_argv.extend(program_args);
 

@@ -1,11 +1,11 @@
-//! `vm` — 模型 A 执行相（**纯 Rust，零 rustc_private**——机械门禁 = tsan harness
-//! 以 `#[path]` 同源编译本模块，漏进 rustc 类型即编译失败）。
+//! `vm` -- model A execution phase (**pure Rust, zero rustc_private**: the tsan harness
+//! compiles this module via `#[path]`, so any rustc type leaking in fails the build).
 //!
-//! - `engine/`：M4 真引擎（类型化字节码 IR / place 求值 / FrameGuard unwind /
-//!   mimalloc 堆 / 冻结区 / dlsym+libffi 直通）。
-//! - `spikes/`：M4 前置验证的**冻结工件**（模型 A 骨架、i2c/c2i、混合栈 unwind、
-//!   并发 TSan、真 Cranelift）——回归自检用（`mirvm spike1..5`），勿动勿扩展；
-//!   经验见 docs/spike{1..5}-*.md。
+//! - `engine/`: the engine (typed bytecode IR / place evaluation / FrameGuard unwind /
+//!   mimalloc heap / frozen region / dlsym+libffi direct calls).
+//! - `spikes/`: frozen validation artifacts (model A skeleton, i2c/c2i, mixed-stack
+//!   unwind, concurrent TSan, real Cranelift). Regression self-check via
+//!   `mirvm spike1..5` only; do not modify or extend.
 
 pub mod engine;
 pub mod spikes;

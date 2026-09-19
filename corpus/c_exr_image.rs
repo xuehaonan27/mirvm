@@ -2,44 +2,44 @@
 ---
 [dependencies]
 exr = "1.74"
-# half 2.3+ 在 std 下对 f16c 做运行期无条件 CPUID 探测→ F16C 硬件路径；
-# mirvm 已内建 llvm.x86.vcvtps2ph/vcvtph2ps 全四宽（软件模型按单测
-# cvtps2ph_software_matches_f16c_hardware_bitwise 逐位对齐硬件），两侧同走
-# F16C 通道位型一致（sNaN 静默化两侧同发生），故 2026-07-18 摘 half=2.2.1 钉
-# （open-issues G4①，钉原文见 git 历史）。
+# half 2.3+ does an unconditional runtime CPUID probe for f16c on std and takes the
+# F16C hardware path; mirvm provides llvm.x86.vcvtps2ph/vcvtph2ps at all four widths
+# (its software model is bit-for-bit equal to the hardware, per the
+# cvtps2ph_software_matches_f16c_hardware_bitwise unit test), so both sides take the
+# same F16C path with identical bit patterns, sNaN quieting included. Pinned to =2.2.1.
 ---
-// exr 1.74.2（OpenEXR 纯 Rust 实现，无 unsafe/foreign code）三维差分。
-// 版本注记：任务书写作 `exr = "3"`，但 crates.io 上 exr 无 3.x 谱系——
-// `crates.io/api/v1/crates/exr` 报 max_version = 1.74.2（最新行即 1.74.2，
-// 次新 1.74.1），sparse index 同样止于 1.74.2 → 无 3.x 候选，`exr = "3"`
-// 在两侧均解析失败。本 driver 采用可用的最新 1.74.2。
+// exr 1.74.2 (pure-Rust OpenEXR implementation, no unsafe or foreign code), three-way
+// differential. exr has no 3.x line: crates.io reports max_version = 1.74.2 and the
+// sparse index ends there too, so neither the spec's `exr = "3"` nor a bare "3"
+// resolves on both sides. This fixture uses 1.74.2.
 //
-// 覆盖：
-// ① half::f16 直接 bits 谱（from_bits/from_f32/to_bits/to_f32 双向软浮点转换，
-//    含次正规/零/inf/NaN）。
-// ② 内存构建 64x48 单层 AnyChannels 图：A/B/G/R 四通道 f16 程序渐变 +
-//    R 通道注入 f16 特殊 bits 哨兵（次正规 0x0001/0x03FF、65504、±inf、qNaN、
-//    -0.0），Z 通道 f32 深度渐变，mask 通道 u32 混合位模式——三类 SampleType
-//    全覆盖。layer_name="main"、pixel_aspect=0.9375、screen_window_width=2.5
-//    进元数据。
-// ③ 八档 compression 写进 Vec（Cursor 内存，to_unbuffered）：Uncompressed/RLE/
-//    ZIP1/ZIP16/PXR24/PIZ/B44/B44A，各打印 len/FNV-1a；read builder 读回，
-//    逐 channel 校验 roundtrip：逐位 fnv 对拍 + mismatch 计数。
-//    有损矩阵（语义预期，两侧共同成立）：
-//      PXR24 → 仅 Z(f32) 有损（24 位截断），f16/u32 无损；
-//      B44/B44A → 仅 f16 有损（4x4 块量化），f32/u32 原样 raw copy 无损；
-//      其余六通道档全类型无损。
-// ④ Encoding 变体：RLE + 64x64 tiles（块坐标路径）、Uncompressed +
-//    LineOrder::Decreasing（乱序块路径）。
-// ⑤ SpecificChannels::rgba 闭包像素面（GetPixel 泛型通路）写+读 roundtrip。
-// ⑥ meta::MetaData::read_from_buffered（pedantic）重建元信息头：requirements、
-//    compression/line_order/chunk_count/layer_size/display_window/pixel_aspect
-//    bits/layer_name/逐 channel 描述。
-// ⑦ 错误路径：坏魔数（MetaData 读）、全读/头读两档截断、ZIP16 数据体字节腐蚀。
-//
-// 确定性：全部内存操作（std::io::Cursor），无文件/时间/线程/地址；浮点一律
-// 打印 to_bits()；HashMap 随机序只字不提（custom attribute 留空，写盘字节两侧
-// 逐位可比）；错误文本为库内静态/格式化 Cow，跨实现一致。无 rayon feature。
+// Coverage:
+// ① A direct half::f16 bit spectrum (from_bits/from_f32/to_bits/to_f32, both software
+//    float conversion directions, including subnormals, zero, inf and NaN).
+// ② An in-memory 64x48 single-layer AnyChannels image: A/B/G/R f16 channels carrying
+//    procedural gradients, with the R channel injected with f16 sentinel bit patterns
+//    (subnormal 0x0001/0x03FF, 65504, ±inf, qNaN, -0.0), a Z f32 depth gradient and a
+//    mask u32 mixed-bit channel, covering all three SampleTypes. layer_name="main",
+//    pixel_aspect=0.9375 and screen_window_width=2.5 go into the metadata.
+// ③ Eight compression levels written into a Vec (in-memory Cursor, to_unbuffered):
+//    Uncompressed/RLE/ZIP1/ZIP16/PXR24/PIZ/B44/B44A, each printing len/FNV-1a; the read
+//    builder reads them back and checks the roundtrip per channel: bitwise fnv
+//    comparison plus a mismatch count. Lossy matrix (semantic expectation, holds on
+//    both sides):
+//      PXR24 -> only Z(f32) is lossy (24-bit truncation), f16/u32 are lossless;
+//      B44/B44A -> only f16 is lossy (4x4 block quantization), f32/u32 are copied raw;
+//      the other six compression levels are lossless for every type.
+// ④ Encoding variants: RLE + 64x64 tiles (block-coordinate path) and Uncompressed +
+//    LineOrder::Decreasing (out-of-order chunk path).
+// ⑤ The SpecificChannels::rgba closure pixel surface (generic GetPixel path) roundtrips.
+// ⑥ meta::MetaData::read_from_buffered (pedantic) rebuilds the metadata header:
+//    requirements, compression/line_order/chunk_count/layer_size/display_window,
+//    pixel_aspect bits, layer_name and the per-channel descriptions.
+// ⑦ Error paths: bad magic (MetaData read), full-read and header-read truncation, and a
+//    one-byte corruption in the ZIP16 data body.
+// Deterministic: in-memory only (std::io::Cursor), no files/time/threads/addresses; floats
+// print as to_bits(), HashMap iteration order is never observed (custom attributes stay
+// empty, so written bytes are bitwise comparable); error text is the library's Cow; no rayon.
 use std::io::Cursor;
 
 use exr::prelude::*;
@@ -56,7 +56,7 @@ fn fnv1a(data: &[u8]) -> u64 {
 const W: usize = 64;
 const H: usize = 48;
 
-/// f16 RGBA 程序渐变 + R 通道 f16 bits 谱哨兵。各 Vec 按行优先。
+/// f16 RGBA procedural gradients plus the f16 bit-spectrum sentinels in R. Each Vec is row-major.
 struct Source {
     r: Vec<f16>,
     g: Vec<f16>,
@@ -79,12 +79,12 @@ fn make_source() -> Source {
             g.push(f16::from_f32(y as f32 / 47.0));
             b.push(f16::from_f32(((x * 3 + y * 7) % 97) as f32 / 96.0));
             a.push(f16::from_f32(if (x + y) % 11 == 0 { 0.25 } else { 1.0 }));
-            // 0.6/0.00274 低位尾数非零 → PXR24 的 f24 截断真实触发
+            // 0.6/0.00274 leave low mantissa bits set, so PXR24's f24 truncation actually fires
             z.push(128.0 + x as f32 * 0.6 + y as f32 * 0.00274);
             mask.push(((x as u32) << 16 ^ (y as u32) << 4) ^ 0xAA55_AA55);
         }
     }
-    // f16 bits 谱哨兵注入 R 通道首行
+    // Inject the f16 bit-spectrum sentinels into the first row of R
     let sentinels = [
         0x0001u16, // min subnormal
         0x03FF,    // max subnormal
@@ -133,7 +133,7 @@ fn hash_f32(v: &[f32]) -> u64 {
     h
 }
 
-/// 把 §② 的源数据组装成单层 exr Image（自选 encoding/压缩档）。
+/// Assembles the source data into a single-layer exr Image with the given encoding and compression.
 fn build_image(compression: Compression, blocks: Blocks, line_order: LineOrder) -> Image<Layer<AnyChannels<FlatSamples>>> {
     let src = make_source();
     let chans = AnyChannels::sort(SmallVec::from_vec(vec![
@@ -158,7 +158,7 @@ fn build_image(compression: Compression, blocks: Blocks, line_order: LineOrder) 
     Image::new(attrs, layer)
 }
 
-/// 通道读回逐位对拍。返回 (rt 布尔, mismatch 数, 读回 fnv)。
+/// Bitwise comparison of one read-back channel. Returns (roundtrip bool, mismatch count, read-back fnv).
 fn check_channel(name: &str, got: &FlatSamples, src: &Source) -> (bool, usize, u64) {
     match (name, got) {
         ("A", FlatSamples::F16(v)) => {
@@ -222,7 +222,7 @@ fn check_channel(name: &str, got: &FlatSamples, src: &Source) -> (bool, usize, u
     }
 }
 
-/// 写一个压缩档 → 打印文件 fnv → 读回逐 channel 对拍打印。
+/// Writes one compression level, prints the file fnv, reads it back and prints the per-channel comparison.
 fn run_codec(tag: &str, compression: Compression, blocks: Blocks, line_order: LineOrder) -> Vec<u8> {
     let image = build_image(compression, blocks, line_order);
     let mut cursor = Cursor::new(Vec::new());
@@ -248,7 +248,7 @@ fn run_codec(tag: &str, compression: Compression, blocks: Blocks, line_order: Li
 }
 
 fn main() {
-    // —— ① half::f16 直接 bits 谱（软浮点双向转换）——
+    // —— ① direct half::f16 bit spectrum (software float conversion both ways) ——
     println!(
         "half conv {:04x} {:04x} {:04x} {:04x}",
         f16::from_f32(1.0009765625).to_bits(),
@@ -269,7 +269,7 @@ fn main() {
         f16::from_f32(f16::from_bits(0xC001).to_f32()).to_bits()
     );
 
-    // —— ② 源数据锚（fnv 锁位）——
+    // —— ② source data anchors (fnv pins the bits) ——
     let src0 = make_source();
     println!(
         "src R={:016x} G={:016x} B={:016x} A={:016x} Z={:016x} mask={:016x}",
@@ -281,7 +281,7 @@ fn main() {
         hash_u32(&src0.mask)
     );
 
-    // —— ③ 八档 compression roundtrip ——
+    // —— ③ eight compression levels roundtrip ——
     run_codec("uc", Compression::Uncompressed, Blocks::ScanLines, LineOrder::Increasing);
     run_codec("rle", Compression::RLE, Blocks::ScanLines, LineOrder::Increasing);
     run_codec("zip1", Compression::ZIP1, Blocks::ScanLines, LineOrder::Increasing);
@@ -291,11 +291,11 @@ fn main() {
     run_codec("b44", Compression::B44, Blocks::ScanLines, LineOrder::Increasing);
     run_codec("b44a", Compression::B44A, Blocks::ScanLines, LineOrder::Increasing);
 
-    // —— ④ Encoding 变体：tiles 路径 + 乱序块 ——
+    // —— ④ Encoding variants: tiles path + out-of-order chunks ——
     run_codec("rle-tiles", Compression::RLE, Blocks::Tiles(Vec2(64, 64)), LineOrder::Increasing);
     run_codec("uc-dec", Compression::Uncompressed, Blocks::ScanLines, LineOrder::Decreasing);
 
-    // —— ⑤ SpecificChannels::rgba 闭包像素面 ——
+    // —— ⑤ SpecificChannels::rgba closure pixel surface ——
     {
         let image = Image::from_channels(
             (W, H),
@@ -330,7 +330,7 @@ fn main() {
         println!("spec-rgba chans={names:?} size=({}, {})", back.layer_data.size.0, back.layer_data.size.1);
     }
 
-    // —— ⑥ 元数据头字段（ZIP16 文件重建）——
+    // —— ⑥ metadata header fields (rebuilt from the ZIP16 file) ——
     {
         let meta = exr::meta::MetaData::read_from_buffered(Cursor::new(&zip16[..]), true).unwrap();
         println!("meta req {:?}", meta.requirements);
@@ -375,7 +375,7 @@ fn main() {
         }
     }
 
-    // —— ⑦ 错误路径 ——
+    // —— ⑦ error paths ——
     {
         let mut bad = zip16.clone();
         bad[..4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
@@ -400,7 +400,7 @@ fn main() {
             Ok(_) => println!("truncated-head unexpectedly ok"),
             Err(e) => println!("truncated-head err = {e}"),
         }
-        // ZIP16 数据体一字节腐蚀:期望 zlib adler32/流错误
+        // One-byte corruption in the ZIP16 data body: expect a zlib adler32/stream error
         let mut corrupt = zip16.clone();
         let off = corrupt.len() * 4 / 5;
         corrupt[off] ^= 0xFF;

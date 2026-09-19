@@ -1,4 +1,4 @@
-// M5.0 permanent differential probe for the asm-stub factory: three faces (div/syscall/cpuid, corpus §2.2)
+// Permanent differential probe for the asm-stub factory: three faces (div/syscall/cpuid)
 // + class allocation + explicit registers + inout/lateout clobber -- compared bit-for-bit with native on the same machine.
 // cpuid differential validity comes from "virtual CPU = real host CPU" (native on the same machine sees the same features).
 use std::arch::asm;
@@ -14,8 +14,8 @@ fn div_wide(hi: u64, lo: u64, d: u64) -> (u64, u64) {
     (q, r)
 }
 
-/// 面孔 2（裸 syscall）：write(2) 直发内核（rustix syscall3 同形）。
-/// 输出本身就是差分证据；绕过 std 缓冲，故在任何 println! 之前调用。
+/// Face 2 (raw syscall): write(2) goes straight to the kernel (same shape as rustix syscall3).
+/// The output is itself the differential evidence; it bypasses std buffering, so it must run before any println!.
 fn raw_write(buf: &[u8]) -> u64 {
     let mut nr: u64 = 1; // SYS_write
     unsafe {
@@ -26,7 +26,7 @@ fn raw_write(buf: &[u8]) -> u64 {
     nr
 }
 
-/// 面孔 1（cpuid 特性检测）：leaf 0 厂商串（std_detect __cpuid 的 rbx 保存惯用法）。
+/// Face 1 (cpuid feature detection): leaf 0 vendor string (the rbx-preserving idiom of std_detect __cpuid).
 fn cpuid_vendor() -> String {
     let mut leaf: u32 = 0;
     let (b, c, d): (u32, u32, u32);
@@ -43,7 +43,7 @@ fn cpuid_vendor() -> String {
     String::from_utf8(s).unwrap()
 }
 
-/// 类分配 + 立即数 + 默认 flags clobber（corpus §2.2 文档例句同形）。
+/// Register-class operand + immediate + default flags clobber.
 fn add5(x: u64) -> u64 {
     let mut v = x;
     unsafe {
@@ -54,7 +54,7 @@ fn add5(x: u64) -> u64 {
 
 fn main() {
     let n = raw_write(b"syscall-write: ok\n");
-    // (2^64 + 2^63) / 3 = 2^63 整除
+    // (2^64 + 2^63) / 3 = 2^63 exactly
     let (q, r) = div_wide(1, 0x8000_0000_0000_0000, 3);
     println!("div: q={q:#x} r={r} (wrote {n} bytes)");
     println!("cpuid vendor: {}", cpuid_vendor());

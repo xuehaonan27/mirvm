@@ -4,8 +4,8 @@
 tempfile = "3"
 walkdir = "2"
 ---
-// 目录遍历：建临时目录树，递归 walk，收集文件名。
-// 压 mkdir/opendir/readdir(getdents)/lstat 直通。
+// Directory traversal: build a temporary directory tree, walk it recursively, collect file names.
+// Exercises the mkdir/opendir/readdir(getdents)/lstat passthrough paths.
 use std::fs;
 use walkdir::WalkDir;
 

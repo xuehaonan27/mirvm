@@ -1,32 +1,38 @@
-//! `cargoless/manifest.rs` —— Cargo.toml 解析与模型（D15 P1，设计档 §3.1）。
+//! `cargoless/manifest.rs` -- Cargo.toml parsing and model.
 //!
-//! 子集边界（超出即响亮拒绝并记名，不静默吞掉）：
-//! - `[package]`（name/version/edition/autobins/default-run/links）
-//! - `[lib]` / `[[bin]]` / `[[test]]` / `[[example]]` 与 Cargo 自动发现
-//! - `[dependencies]` / `[build-dependencies]` / `[dev-dependencies]`：version req、features、
-//!   optional、default-features、path、git（默认分支/branch/tag/rev）；私有 registry
-//!   仍属 P5，响亮拒绝
-//! - `[features]` 三形态：`"foo"`（特性或隐式可选依赖）、`"dep:foo"`（显式
-//!   依赖激活）、`"foo?/bar"`（弱激活）
-//! - `[profile.*]`：只取 debug-assertions / overflow-checks / opt-level
-//!   （语义钉死：前两枚进 MIR 语义，设计档 §6 的 jiff 判例）
-//! - `target.'cfg()'.dependencies` 平台求值：目标平台原子（target_os/
+//! Supported subset; anything beyond it is rejected loudly by name rather than
+//! silently ignored:
+//! - `[package]` (name/version/edition/autobins/default-run/links)
+//! - `[lib]` / `[[bin]]` / `[[test]]` / `[[example]]` plus Cargo auto-discovery
+//! - `[dependencies]` / `[build-dependencies]` / `[dev-dependencies]`: version req,
+//!   features, optional, default-features, path, git (default branch/branch/tag/rev);
+//!   private registries are not supported yet and are rejected loudly
+//! - `[features]` in three forms: `"foo"` (a feature, or an implicit optional
+//!   dependency), `"dep:foo"` (explicit dependency activation), `"foo?/bar"` (weak
+//!   activation)
+//! - `[profile.*]`: only debug-assertions / overflow-checks / opt-level are read (the
+//!   first two feed MIR semantics)
+//! - `target.'cfg()'.dependencies` platform evaluation: target atoms (target_os/
 //!   target_arch/target_family/unix/target_vendor/target_env/target_abi/
-//!   target_pointer_width/target_endian）+ any/all/not 组合；
-//!   `cfg(feature=..)` 不属于平台求值（cargo 同）；`cfg(target_feature=..)`
-//!   响亮拒绝（归 P5）
-//! - `[workspace]`：`workspace.rs` 先发现 resolver=1/2/3 多包图并物化
-//!   workspace.package/workspace.dependencies/root profile；本文件只解析物化后的包
-//! - doctest 仍不做；测试与 bench 目标由 `mirvm test` 消费。
+//!   target_pointer_width/target_endian) combined with any/all/not;
+//!   `cfg(feature=..)` is not a platform evaluation (as in cargo), and
+//!   `cfg(target_feature=..)` is rejected loudly
+//! - `[workspace]`: `workspace.rs` first discovers the resolver=1/2/3 multi-package
+//!   graph and materializes workspace.package/workspace.dependencies/root profile;
+//!   this file only parses the materialized package
+//! - doctests are still not built; test and bench targets are consumed by
+//!   `mirvm test`.
 
-// 模型中仍有只被部分命令消费的字段，暂按模块边界保留。
+// Some model fields are consumed by only a subset of commands; they stay for now
+// because they belong to this module's boundary.
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-/// Cargo 的全局依赖求解规则版本。依赖包里自己的值会被顶层 package/workspace
-/// 覆盖，但仍需保存在 manifest 模型中，供单包作为顶层运行时使用。
+/// Cargo's global dependency resolution rule version. A dependency package's own
+/// value is overridden by the top-level package/workspace, but it is still kept in
+/// the manifest model for when that package is the top-level one itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResolverVersion {
     V1,
@@ -40,7 +46,7 @@ impl ResolverVersion {
             "1" => Ok(Self::V1),
             "2" => Ok(Self::V2),
             "3" => Ok(Self::V3),
-            other => Err(format!("resolver 必须是 1、2 或 3，实际为 `{other}`")),
+            other => Err(format!("resolver must be 1, 2 or 3, got `{other}`")),
         }
     }
 
@@ -53,12 +59,14 @@ impl ResolverVersion {
     }
 }
 
-/// Cargo 对依赖声明的最低 Rust 版本不兼容时采用的选择策略。
+/// How Cargo chooses when a dependency's declared minimum Rust version is
+/// incompatible.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IncompatibleRustVersions {
-    /// 不改变通常的“选择最高版本”顺序。
+    /// Keep the usual "highest version wins" order.
     Allow,
-    /// 优先选择兼容版本；一个都没有时仍退回最高的不兼容版本。
+    /// Prefer a compatible version; if there is none, still fall back to the highest
+    /// incompatible one.
     Fallback,
 }
 
@@ -68,14 +76,15 @@ impl IncompatibleRustVersions {
             "allow" => Ok(Self::Allow),
             "fallback" => Ok(Self::Fallback),
             other => Err(format!(
-                "resolver.incompatible-rust-versions 只接受 `allow` 或 `fallback`，实际为 `{other}`"
+                "resolver.incompatible-rust-versions accepts only `allow` or `fallback`, got `{other}`"
             )),
         }
     }
 }
 
-/// Cargo 的 rust-version 允许 1、2 或 3 段裸数字，不接受 semver 运算符、
-/// prerelease 或 build metadata。内部补齐到三段，便于稳定比较。
+/// Cargo's rust-version allows 1, 2 or 3 bare numeric segments and rejects semver
+/// operators, prerelease and build metadata. Internally it is padded to three
+/// segments so comparisons are stable.
 pub fn parse_rust_version(value: &str, field: &str) -> Result<semver::Version, String> {
     let parts: Vec<&str> = value.split('.').collect();
     if parts.is_empty()
@@ -85,7 +94,7 @@ pub fn parse_rust_version(value: &str, field: &str) -> Result<semver::Version, S
             .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
     {
         return Err(format!(
-            "{field} 必须是 1、2 或 3 段裸版本号，实际为 `{value}`"
+            "{field} must be 1, 2 or 3 bare version segments, got `{value}`"
         ));
     }
     let normalized = match parts.len() {
@@ -94,11 +103,12 @@ pub fn parse_rust_version(value: &str, field: &str) -> Result<semver::Version, S
         3 => value.to_string(),
         _ => unreachable!(),
     };
-    semver::Version::parse(&normalized).map_err(|error| format!("{field} 非法 `{value}`: {error}"))
+    semver::Version::parse(&normalized)
+        .map_err(|error| format!("invalid {field} `{value}`: {error}"))
 }
 
-/// mirvm 实际内嵌 rustc 对应的版本。使用构建时 sysroot 中的 rustc，避免 PATH
-/// 上另一个工具链影响依赖选择。
+/// The version of the rustc mirvm actually embeds. The sysroot rustc is used at
+/// build time so another toolchain on PATH cannot affect dependency selection.
 pub fn current_rust_version() -> Result<semver::Version, String> {
     static VERSION: std::sync::OnceLock<semver::Version> = std::sync::OnceLock::new();
     if let Some(version) = VERSION.get() {
@@ -107,7 +117,7 @@ pub fn current_rust_version() -> Result<semver::Version, String> {
     let rustc = PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT")).join("bin/rustc");
     let command = std::process::Command::new(&rustc);
     let mut version = rustc_version::VersionMeta::for_command(command)
-        .map_err(|error| format!("读取 {} 版本失败: {error}", rustc.display()))?
+        .map_err(|error| format!("failed to read version of {}: {error}", rustc.display()))?
         .semver;
     version.pre = semver::Prerelease::EMPTY;
     version.build = semver::BuildMetadata::EMPTY;
@@ -115,19 +125,21 @@ pub fn current_rust_version() -> Result<semver::Version, String> {
     Ok(version)
 }
 
-/// 依赖来源。
+/// Where a dependency comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DepSource {
-    /// registry 依赖：semver 需求与 manifest 中指定的仓库。
+    /// Registry dependency: a semver requirement plus the registry named in the manifest.
     Registry(semver::VersionReq, RegistryReference),
-    /// 本地路径依赖（已绝对化）。
+    /// Local path dependency (already made absolute).
     Path(PathBuf),
-    /// Git 仓库依赖；可变引用会在获取阶段解析成精确 commit，lock 只记录精确结果。
+    /// Git repository dependency; a movable reference is resolved to a precise commit
+    /// during fetch, and the lock records only the precise result.
     Git(GitSpec),
 }
 
-/// Manifest 中的 registry 写法。名称和显式 index 到依赖求解开始时才通过
-/// Cargo config 归约成 lock/source 使用的稳定 URL。
+/// How a registry is written in a manifest. The name and any explicit index are
+/// reduced through Cargo config into the stable URL used by lock/source only when
+/// dependency resolution starts.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RegistryReference {
     CratesIo,
@@ -151,7 +163,7 @@ pub struct GitSpec {
 }
 
 impl GitSpec {
-    /// Cargo.lock 中 `#<commit>` 之前的 source id。
+    /// The source id before the `#<commit>` in Cargo.lock.
     pub fn source_id(&self) -> String {
         let query = match &self.reference {
             GitReference::DefaultBranch => None,
@@ -178,29 +190,34 @@ fn percent_encode(value: &str) -> String {
     out
 }
 
-/// 依赖种类（dev-deps 不建）。
+/// Dependency kind (dev-deps are not built).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DepKind {
     Normal,
     Build,
-    /// 只在根包作为测试对象时进入构建图；不传播 path/registry 依赖自己的 dev 边。
+    /// Enters the build graph only when the root package is a test target; dev edges of
+    /// path/registry dependencies do not propagate.
     Dev,
 }
 
-/// 一条依赖声明（平台 cfg 表达式随行，不在解析期过滤——版本求解是
-/// 全平台并集（cargo lock 语义），过滤只在 host 构建图装配期发生）。
+/// One dependency declaration. The platform cfg expression travels with the row
+/// instead of being filtered at parse time: version resolution is the union over all
+/// platforms (cargo lock semantics), and filtering happens only when the host build
+/// graph is assembled.
 #[derive(Clone, Debug)]
 pub struct DepDecl {
-    /// manifest 里的键名（feature 引用、--extern 命名用它，除非 rename）。
+    /// Key as written in the manifest (used for feature references and `--extern`
+    /// naming unless renamed).
     pub key: String,
-    /// 真实 crate 名（`package = "real"` 改名时是 real，否则 == key）。
+    /// Real crate name (the `real` of `package = "real"`, otherwise equal to `key`).
     pub package: String,
     pub source: DepSource,
     pub features: Vec<String>,
     pub optional: bool,
     pub default_features: bool,
     pub kind: DepKind,
-    /// 来自 `target.'cfg(...)'` 表时的 cfg 表达式（普通表 = None）。
+    /// cfg expression when the entry came from a `target.'cfg(...)'` table
+    /// (`None` for a plain table).
     pub platform_cfg: Option<String>,
 }
 
@@ -219,26 +236,30 @@ pub struct ReplaceDecl {
 }
 
 impl DepDecl {
-    /// feature 引用名（cargo 语义：隐式 feature 名 = key）。
+    /// Feature reference name (cargo semantics: the implicit feature name is the key).
     pub fn feature_name(&self) -> &str {
         &self.key
     }
 }
 
-/// `[features]` 表一项的值形态。
+/// The value form of one `[features]` table entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FeatureValue {
-    /// `"foo"`：另一 feature，或同名可选依赖的隐式激活。
+    /// `"foo"`: another feature, or the implicit activation of an optional dependency
+    /// of that name.
     Simple(String),
-    /// `"dep:foo"`：显式激活可选依赖（不建同名 feature）。
+    /// `"dep:foo"`: explicitly activate an optional dependency (no feature of the same
+    /// name is created).
     DepActivation(String),
-    /// `"foo/bar"`：强激活——激活 foo 并开其 bar。
+    /// `"foo/bar"`: strong activation -- activate foo and turn on its bar.
     StrongDep { dep: String, feature: String },
-    /// `"foo?/bar"`：若 foo 被激活则开其 bar（弱激活，不激活 foo 本身）。
+    /// `"foo?/bar"`: turn on foo's bar if foo is activated (weak activation, does not
+    /// activate foo itself).
     WeakDep { dep: String, feature: String },
 }
 
-/// Cargo 目标种类。build script 仍由 package.build/links 单独建模。
+/// Cargo target kind. The build script is still modeled separately via
+/// package.build/links.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TargetKind {
     Lib,
@@ -248,16 +269,17 @@ pub enum TargetKind {
     Bench,
 }
 
-/// 一个可编译目标及其影响测试选择/编译方式的 manifest 属性。
+/// One buildable target and the manifest attributes that affect how tests select and
+/// compile it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
     pub kind: TargetKind,
     pub name: String,
     pub path: PathBuf,
     pub proc_macro: bool,
-    /// Cargo 默认 `test` 选择是否包含本目标。
+    /// Whether Cargo's default `test` selection includes this target.
     pub test: bool,
-    /// true = rustc `--test` 注入 libtest；false = 保留目标自己的 main。
+    /// true = rustc `--test` injects libtest; false = the target keeps its own main.
     pub harness: bool,
     pub doctest: bool,
     pub required_features: Vec<String>,
@@ -273,7 +295,8 @@ impl Target {
     }
 }
 
-/// profile 语义旗（只取影响 MIR 语义的 + 照传的 opt-level）。
+/// Profile semantic flags: the ones that affect MIR semantics, plus the opt-level
+/// that is passed through.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProfileFlags {
     pub debug_assertions: bool,
@@ -311,7 +334,7 @@ impl std::fmt::Display for OptLevel {
 }
 
 impl Default for ProfileFlags {
-    /// cargo dev profile 等价（设计档 §6 语义钉）。
+    /// Equivalent to cargo's dev profile.
     fn default() -> Self {
         Self {
             debug_assertions: true,
@@ -321,58 +344,68 @@ impl Default for ProfileFlags {
     }
 }
 
-/// 一个包的完整模型。
+/// The complete model of one package.
 #[derive(Clone, Debug)]
 pub struct PackageManifest {
     pub name: String,
     pub version: semver::Version,
     pub edition: String,
-    /// 顶层 package/workspace 采用的全局 resolver；path/registry 依赖自身的值不生效。
+    /// The global resolver adopted by the top-level package/workspace; the value on a
+    /// path/registry dependency itself does not take effect.
     pub resolver: ResolverVersion,
-    /// 本包声明的最低 Rust 版本。
+    /// Minimum Rust version declared by this package.
     pub rust_version: Option<semver::Version>,
-    /// resolver 3 的工作区比较基准。工作区会写入所有成员最低值；单包为自身
-    /// rust-version，缺席时由求解器使用当前 rustc。
+    /// The workspace comparison baseline for resolver 3. A workspace writes the lowest
+    /// member value; a single package uses its own rust-version, and when absent the
+    /// resolver uses the current rustc.
     pub resolver_rust_version: Option<semver::Version>,
-    /// `--ignore-rust-version` 同时关闭候选偏好与编译器版本拒绝。
+    /// `--ignore-rust-version` disables both candidate preference and compiler version
+    /// rejection.
     pub ignore_rust_version: bool,
     pub root: PathBuf,
-    /// Cargo.lock 所属目录。单包等于 root；workspace 成员指向 workspace 根。
+    /// Directory Cargo.lock belongs to. For a single package it equals root; a workspace
+    /// member points at the workspace root.
     pub lock_root: PathBuf,
     pub targets: Vec<Target>,
     pub deps: Vec<DepDecl>,
-    /// 只有顶层 package/workspace 根的覆盖生效；workspace 发现层会把根值物化给成员。
+    /// Only overrides at the top-level package/workspace root take effect; the workspace
+    /// discovery layer materializes the root values onto members.
     pub patches: Vec<PatchDecl>,
     pub replacements: Vec<ReplaceDecl>,
     pub features: BTreeMap<String, Vec<FeatureValue>>,
-    /// CLI 对这个测试根显式请求的 feature；依赖边的 feature 仍由 resolver 传播。
+    /// Features the CLI explicitly requests for this test root; dependency-edge features
+    /// are still propagated by the resolver.
     pub requested_features: BTreeSet<String>,
-    /// CLI 的 `dependency/feature` 请求；向依赖边传播，不是根包 cfg feature。
+    /// CLI `dependency/feature` requests; propagated to dependency edges, not root-package
+    /// cfg features.
     pub dependency_features: BTreeMap<String, BTreeSet<String>>,
     pub default_features_enabled: bool,
     pub profile: ProfileFlags,
     pub test_profile: ProfileFlags,
-    /// 有 build script（build 键 / links 键 / 根下 build.rs 实存）。
+    /// Has a build script (a `build` key, a `links` key, or a real build.rs under root).
     pub has_build_script: bool,
-    /// `[package] build = "custom.rs"` 的自定义 build script 路径；
-    /// None = 缺省 <root>/build.rs（切③ build.rs 调度用）。
+    /// Custom build script path from `[package] build = "custom.rs"`; `None` means the
+    /// default `<root>/build.rs` (used by build.rs scheduling).
     pub build_script_path: Option<PathBuf>,
-    /// `[package] links`（-sys 链接键；native 库名推导与 build.rs 调度用）。
+    /// `[package] links` (the -sys link key; used to derive the native library name and
+    /// to schedule build.rs).
     pub links: Option<String>,
     pub default_run: Option<String>,
-    /// CARGO_PKG_* 编译期 env 全集（缺键 = 空串，cargo 同契约；pkg_env_map 计算）。
+    /// The full set of compile-time CARGO_PKG_* env vars (a missing key is the empty
+    /// string, the same contract as cargo; computed by `pkg_env_map`).
     pub pkg_env: BTreeMap<String, String>,
-    /// Cargo `[lints]` 归约出的 rustc 参数。先放按 priority 排序的 level 参数，
-    /// 再放 `unexpected_cfgs` 的 `--check-cfg` 两槽参数。
+    /// rustc arguments reduced from Cargo `[lints]`: first the level arguments sorted by
+    /// priority, then the two `--check-cfg` slots for `unexpected_cfgs`.
     pub rustc_lint_flags: Vec<String>,
-    /// 非 registry 包在 Cargo.lock 中的 source。根/普通 path 为 None；Git 包为
-    /// `git+URL?...#commit`。
+    /// The source of a non-registry package in Cargo.lock. `None` for the root and plain
+    /// path packages; `git+URL?...#commit` for a Git package.
     pub lock_source: Option<String>,
-    /// Git checkout 根，用于让仓库内 path 依赖继承相同 Git source。
+    /// Git checkout root, so in-repo path dependencies inherit the same Git source.
     pub git_checkout_root: Option<PathBuf>,
 }
 
-// ---------- serde 原料（宽松，未知键忽略，已知不支持的键后置校验）----------
+// ---------- serde raw form (lenient: unknown keys ignored, known-unsupported keys
+// checked afterwards) ----------
 
 #[derive(serde::Deserialize, Default)]
 struct RawManifest {
@@ -410,7 +443,8 @@ struct RawPackage {
     build: Option<toml::Value>,
     #[serde(rename = "default-run")]
     default_run: Option<String>,
-    // 以下均为 CARGO_PKG_* env 原料（pkg_env_map 消费；缺键 = 空串，cargo 同）
+    // All of the following are CARGO_PKG_* env inputs (consumed by pkg_env_map; a
+    // missing key is the empty string, as in cargo)
     authors: Option<Vec<String>>,
     description: Option<String>,
     homepage: Option<String>,
@@ -442,8 +476,9 @@ struct RawWorkspacePackage {
 struct RawLib {
     name: Option<String>,
     path: Option<String>,
-    // 两种拼写都收：连字符是 cargo 文档形态（用户手写），下划线是新版
-    // cargo 归一化产物形态（derive_arbitrary 1.3.2 实锤；cargo 双侧受理）
+    // Both spellings are accepted: the hyphen is the cargo documentation form (written
+    // by hand) and the underscore is what newer cargo normalizes to (confirmed by
+    // derive_arbitrary 1.3.2; cargo accepts both).
     #[serde(rename = "proc-macro", alias = "proc_macro")]
     proc_macro: Option<bool>,
     test: Option<bool>,
@@ -499,66 +534,75 @@ struct RawTargetDeps {
     dev_dependencies: Option<BTreeMap<String, toml::Value>>,
 }
 
-// ---------- 错误 ----------
+// ---------- errors ----------
 
 type MErr = String;
 
 fn unsupported(what: impl Into<String>) -> MErr {
     format!(
-        "manifest 子集外构造（D15 P5 范畴，响亮拒绝）：{}",
+        "manifest construct outside the supported subset (rejected loudly): {}",
         what.into()
     )
 }
 
-// ---------- 公开入口 ----------
+// ---------- public entry points ----------
 
 impl PackageManifest {
-    /// 从项目目录读（目录/Cargo.toml）。
+    /// Read from a project directory (directory/Cargo.toml).
     pub fn read_dir(dir: &Path) -> Result<Self, MErr> {
         let dir = std::path::absolute(dir)
-            .map_err(|e| format!("项目目录绝对化失败 {}: {e}", dir.display()))?;
+            .map_err(|e| format!("failed to absolutize project dir {}: {e}", dir.display()))?;
         let file = dir.join("Cargo.toml");
         let text = std::fs::read_to_string(&file)
-            .map_err(|e| format!("读取 {} 失败: {e}", file.display()))?;
+            .map_err(|e| format!("failed to read {}: {e}", file.display()))?;
         Self::parse(&text, &dir)
     }
 
-    /// 从 manifest 文本解析（root = 包根目录）。
+    /// Parse from manifest text (root = package root directory).
     pub fn parse(text: &str, root: &Path) -> Result<Self, MErr> {
         let raw: RawManifest =
-            toml::from_str(text).map_err(|e| format!("Cargo.toml 解析失败: {e}"))?;
+            toml::from_str(text).map_err(|e| format!("failed to parse Cargo.toml: {e}"))?;
         let rustc_lint_flags = parse_lints(raw.lints.as_ref())?;
         if raw.package.is_none() && raw.workspace.is_some() {
-            return Err(unsupported("virtual manifest（[workspace] 无 [package]）"));
+            return Err(unsupported(
+                "virtual manifest ([workspace] without [package])",
+            ));
         }
         let pkg = raw
             .package
-            .ok_or_else(|| "manifest 缺 [package]".to_string())?;
-        let name = pkg.name.ok_or_else(|| "package.name 缺失".to_string())?;
+            .ok_or_else(|| "manifest has no [package]".to_string())?;
+        let name = pkg
+            .name
+            .ok_or_else(|| "package.name is missing".to_string())?;
 
-        // version/edition 支持 workspace 继承（workspace.package.*）
+        // version/edition support workspace inheritance (workspace.package.*)
         let ws_pkg = raw.workspace.as_ref().and_then(|w| w.package.as_ref());
         let version = match pkg.version {
-            Some(toml::Value::String(v)) => {
-                semver::Version::parse(&v).map_err(|e| format!("package.version 非法 {v}: {e}"))?
-            }
+            Some(toml::Value::String(v)) => semver::Version::parse(&v)
+                .map_err(|e| format!("invalid package.version {v}: {e}"))?,
             Some(toml::Value::Table(t)) if t.get("workspace").is_some() => ws_pkg
                 .and_then(|w| w.version.clone())
                 .and_then(|v| semver::Version::parse(&v).ok())
-                .ok_or_else(|| "package.version 继承 workspace 但根无 version".to_string())?,
-            Some(_) => return Err("package.version 形态不支持".into()),
+                .ok_or_else(|| {
+                    "package.version inherits from workspace but the root has no version"
+                        .to_string()
+                })?,
+            Some(_) => return Err("unsupported package.version form".into()),
             None => semver::Version::new(0, 0, 0),
         };
         let edition = match pkg.edition {
             Some(toml::Value::String(e)) => e,
-            Some(toml::Value::Table(t)) if t.get("workspace").is_some() => ws_pkg
-                .and_then(|w| w.edition.clone())
-                .ok_or_else(|| "package.edition 继承 workspace 但根无 edition".to_string())?,
-            Some(_) => return Err("package.edition 形态不支持".into()),
+            Some(toml::Value::Table(t)) if t.get("workspace").is_some() => {
+                ws_pkg.and_then(|w| w.edition.clone()).ok_or_else(|| {
+                    "package.edition inherits from workspace but the root has no edition"
+                        .to_string()
+                })?
+            }
+            Some(_) => return Err("unsupported package.edition form".into()),
             None => "2015".to_string(),
         };
         if !matches!(edition.as_str(), "2015" | "2018" | "2021" | "2024") {
-            return Err(format!("package.edition 不支持 `{edition}`"));
+            return Err(format!("package.edition `{edition}` is not supported"));
         }
         let resolver = raw
             .workspace
@@ -568,14 +612,19 @@ impl PackageManifest {
             .map(ResolverVersion::parse)
             .transpose()?
             .unwrap_or_else(|| ResolverVersion::inferred(&edition));
-        // CARGO_PKG_* env 全集（cargo 契约：编译期 env! 可读；缺键 = 空串）。
-        // readme = true 归约为 "README.md"（cargo 同）；license-file 只收字符串形。
+        // The full CARGO_PKG_* env set (cargo contract: readable via env! at compile
+        // time; a missing key is the empty string). `readme = true` reduces to
+        // "README.md" (as in cargo); license-file only accepts the string form.
         let rust_version_text = match pkg.rust_version {
             Some(toml::Value::String(v)) => Some(v),
             Some(toml::Value::Table(t)) if t.get("workspace").is_some() => {
                 ws_pkg.and_then(|w| w.rust_version.clone())
             }
-            Some(_) => return Err("package.rust-version 必须是字符串或 workspace 继承".into()),
+            Some(_) => {
+                return Err(
+                    "package.rust-version must be a string or a workspace inheritance".into(),
+                );
+            }
             None => None,
         };
         let rust_version = rust_version_text
@@ -592,7 +641,7 @@ impl PackageManifest {
             };
             if version < &minimum {
                 return Err(format!(
-                    "package.rust-version {} 与 edition {edition} 所需的 Rust {minimum} 不兼容",
+                    "package.rust-version {} is incompatible with Rust {minimum} required by edition {edition}",
                     rust_version_text.as_deref().unwrap_or("")
                 ));
             }
@@ -629,10 +678,12 @@ impl PackageManifest {
                 .and_then(|w| w.package.as_ref())
                 .is_none()
         {
-            // 有 members 而无 workspace.package：可能是多包根。单包自用 members 少见，
-            // P1 不分辨，响亮拒绝对多包图的解析承诺。
+            // members without workspace.package: this may be a multi-package root. A
+            // single package rarely uses members itself, and this file does not tell the
+            // cases apart, so the parse commitment for a multi-package graph is refused
+            // loudly.
             return Err(unsupported(
-                "workspace.members 多包图（P5；单包项目可移除此键）",
+                "workspace.members multi-package graph (a single-package project can drop the key)",
             ));
         }
 
@@ -646,9 +697,11 @@ impl PackageManifest {
             &mut deps,
         )?;
         parse_dep_table(&raw.dev_dependencies, DepKind::Dev, root, None, &mut deps)?;
-        // target.'cfg()'.dependencies：表达式随行进模型（全平台并集语义，不过滤）
+        // target.'cfg()'.dependencies: the expression travels with the row into the
+        // model (union over all platforms, no filtering)
         for (cfg_expr, tdeps) in raw.target.iter().flatten() {
-            // 表达式合法性在此校验（拼写错误要响亮；语义求值在使用期）
+            // The expression is validated here (a typo must be loud); semantic evaluation
+            // happens at use time
             validate_cfg_expr(cfg_expr).map_err(|e| format!("target.{cfg_expr}: {e}"))?;
             parse_dep_table(
                 &tdeps.dependencies,
@@ -709,8 +762,9 @@ impl PackageManifest {
             root,
         )?;
         let (profile, test_profile) = profiles_from(raw.profile)?;
-        // cargo 语义：`build = false` 是显式关闭 build script（cfg-if 实锤——
-        // 键在场 ≠ 有 build.rs）；字符串形 = 自定义路径；缺省 = 根下 build.rs 实存。
+        // cargo semantics: `build = false` explicitly disables the build script (the key
+        // being present is not the same as having build.rs -- confirmed by cfg-if); a
+        // string value is a custom path; absent means a real build.rs under root.
         let has_build_script = pkg.links.is_some()
             || match &pkg.build {
                 Some(toml::Value::Boolean(false)) => false,
@@ -753,8 +807,10 @@ impl PackageManifest {
         })
     }
 
-    /// frontmatter 伪包：脚本 stem 为包名，依赖段原文喂给同一解析。
-    /// bin 名带哈希短缀（与旧物化口径一致，消 target 目录碰撞，cli.rs 旧例）。
+    /// A frontmatter pseudo-package: the script stem is the package name and the
+    /// dependency section is fed verbatim to the same parser.
+    /// The bin name carries a short hash suffix so target directories do not collide
+    /// with the materialized script cache.
     pub fn from_frontmatter(
         stem: &str,
         manifest_text: &str,
@@ -764,11 +820,11 @@ impl PackageManifest {
         Self::from_frontmatter_at(stem, manifest_text, root, body_path)
     }
 
-    /// from_frontmatter 的 root 显式版（D15 P3 切⑤d）：脚本缓存布局与
-    /// cargo 腿物化项目同形（cli.rs materialize_script：Cargo.toml 在
-    /// <cache>、正文在 <cache>/src/main.rs）——root=<cache> 保证
-    /// CARGO_MANIFEST_DIR 与 cargo 腿一致，bin 路径 = <cache>/src/main.rs
-    /// 保证 remap 后 file!() = "src/main.rs"（redb_kv/gix_pure 实锤）。
+    /// Root-explicit form of `from_frontmatter`: the script cache layout matches the
+    /// project cargo materializes (`materialize_script` in cli.rs puts Cargo.toml in
+    /// `<cache>` and the body in `<cache>/src/main.rs`). root = `<cache>` keeps
+    /// CARGO_MANIFEST_DIR identical to the cargo path, and the bin path
+    /// `<cache>/src/main.rs` keeps `file!()` equal to "src/main.rs" after remapping.
     pub fn from_frontmatter_at(
         stem: &str,
         manifest_text: &str,
@@ -783,14 +839,16 @@ impl PackageManifest {
         Self::parse(&pseudo, root)
     }
 
-    /// 选定要跑的 bin（cargo run 语义子集）：default-run > 唯一 bin > 多 bin 响亮拒绝。
+    /// Pick the bin to run (the cargo run semantics subset): default-run > the only bin
+    /// > reject loudly when there are several.
     pub fn runnable_bin(&self) -> Result<(&str, &Path), MErr> {
         self.runnable_bin_opt(None)
     }
 
-    /// 带 `--bin` 选择的 bin 选定（D15 P4 切⑥b，cargo run --bin 语义）：
-    /// Some(name) = 按名精确选（不在 [[bin]] 中 = 响亮报错并列出可选名单，
-    /// cargo 同文案）；None = 走 runnable_bin 的 default-run > 唯一 > 拒绝链。
+    /// Bin selection with a `--bin` choice (cargo run --bin semantics):
+    /// `Some(name)` selects by exact name (not in [[bin]] = a loud error listing the
+    /// available names, with cargo's wording); `None` follows `runnable_bin`'s
+    /// default-run > only-one > reject chain.
     pub fn runnable_bin_opt(&self, sel: Option<&str>) -> Result<(&str, &Path), MErr> {
         let bins: Vec<_> = self
             .targets
@@ -803,7 +861,7 @@ impl PackageManifest {
                 return Ok(*b);
             }
             return Err(format!(
-                "没有名为 `{want}` 的 bin 目标（可用：{}）",
+                "no bin target named `{want}` (available: {})",
                 bins.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
             ));
         }
@@ -811,22 +869,23 @@ impl PackageManifest {
             if let Some(b) = bins.iter().find(|(n, _)| *n == dr) {
                 return Ok(*b);
             }
-            return Err(format!("default-run={dr} 在 [[bin]] 中不存在"));
+            return Err(format!("default-run={dr} does not exist in [[bin]]"));
         }
         match bins.len() {
-            0 => Err(format!("包 {} 没有 bin 目标", self.name)),
+            0 => Err(format!("package {} has no bin target", self.name)),
             1 => Ok(bins[0]),
             _ => Err(format!(
-                "多 bin 目标（{}）——请用 --bin 选定或 default-run 钉选",
+                "multiple bin targets ({}) -- choose one with --bin or pin it with default-run",
                 bins.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
             )),
         }
     }
 
-    /// `--check-cfg cfg(feature, values(...))` 的合法值表（cargo bin 侧同口径）：
-    /// [features] 表键 ∪ 隐式 optional 依赖键（optional dep 键未被任何 feature
-    /// 值里的 `dep:key` 点名时，存在同名隐式 feature——与 resolve.rs expand_node
-    /// 的 hidden 规则同一条）。
+    /// The legal value table for `--check-cfg cfg(feature, values(...))` (same criterion
+    /// as the cargo bin path): `[features]` table keys plus implicit optional dependency
+    /// keys. When an optional dep key is not named by any `dep:key` feature value, an
+    /// implicit feature of the same name exists -- the same rule as the `hidden` logic in
+    /// `expand_node` in resolve.rs.
     pub fn check_cfg_feature_values(&self) -> BTreeSet<String> {
         let mut out: BTreeSet<String> = self.features.keys().cloned().collect();
         let hidden: BTreeSet<String> = self
@@ -854,18 +913,19 @@ struct ParsedLint {
     check_cfg: Vec<String>,
 }
 
-/// Cargo `[lints]` 到 rustc argv 的归约。Cargo 保留同 priority 项的清单顺序；
-/// TOML map 启用 preserve_order，因此稳定排序只按 priority 即可复现。
+/// Reduction of Cargo `[lints]` into rustc argv. Cargo preserves list order for equal
+/// priorities; the TOML map enables preserve_order, so a stable sort by priority alone
+/// reproduces it.
 pub(super) fn parse_lints(value: Option<&toml::Value>) -> Result<Vec<String>, MErr> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
     let tools = value
         .as_table()
-        .ok_or_else(|| "[lints] 必须是表".to_string())?;
+        .ok_or_else(|| "[lints] must be a table".to_string())?;
     if tools.contains_key("workspace") {
         return Err(unsupported(
-            "[lints] workspace 继承（应先由 workspace 层物化）",
+            "[lints] workspace inheritance (the workspace layer must materialize it first)",
         ));
     }
 
@@ -873,7 +933,7 @@ pub(super) fn parse_lints(value: Option<&toml::Value>) -> Result<Vec<String>, ME
     for (tool, lints) in tools {
         let lints = lints
             .as_table()
-            .ok_or_else(|| format!("[lints.{tool}] 必须是表"))?;
+            .ok_or_else(|| format!("[lints.{tool}] must be a table"))?;
         for (name, spec) in lints {
             let (level, priority, check_cfg) = match spec {
                 toml::Value::String(level) => (level.as_str(), 0, Vec::new()),
@@ -882,35 +942,38 @@ pub(super) fn parse_lints(value: Option<&toml::Value>) -> Result<Vec<String>, ME
                         .keys()
                         .find(|key| !matches!(key.as_str(), "level" | "priority" | "check-cfg"))
                     {
-                        return Err(format!("lints.{tool}.{name} 含 Cargo 不认识的键 `{key}`"));
+                        return Err(format!(
+                            "lints.{tool}.{name} has a key `{key}` that Cargo does not know"
+                        ));
                     }
                     let level = table
                         .get("level")
                         .and_then(toml::Value::as_str)
-                        .ok_or_else(|| format!("lints.{tool}.{name}.level 必须是字符串"))?;
+                        .ok_or_else(|| format!("lints.{tool}.{name}.level must be a string"))?;
                     let priority = match table.get("priority") {
-                        Some(value) => value
-                            .as_integer()
-                            .ok_or_else(|| format!("lints.{tool}.{name}.priority 必须是整数"))?,
+                        Some(value) => value.as_integer().ok_or_else(|| {
+                            format!("lints.{tool}.{name}.priority must be an integer")
+                        })?,
                         None => 0,
                     };
                     let check_cfg = match table.get("check-cfg") {
                         Some(value) => {
                             if tool != "rust" || name != "unexpected_cfgs" {
                                 return Err(
-                                    "check-cfg 只允许写在 lints.rust.unexpected_cfgs".to_string()
+                                    "check-cfg is only allowed under lints.rust.unexpected_cfgs"
+                                        .to_string(),
                                 );
                             }
                             value
                                 .as_array()
                                 .ok_or_else(|| {
-                                    "lints.rust.unexpected_cfgs.check-cfg 必须是字符串数组"
+                                    "lints.rust.unexpected_cfgs.check-cfg must be an array of strings"
                                         .to_string()
                                 })?
                                 .iter()
                                 .map(|item| {
                                     item.as_str().map(str::to_string).ok_or_else(|| {
-                                        "lints.rust.unexpected_cfgs.check-cfg 包含非字符串成员"
+                                        "lints.rust.unexpected_cfgs.check-cfg contains a non-string member"
                                             .to_string()
                                     })
                                 })
@@ -921,12 +984,14 @@ pub(super) fn parse_lints(value: Option<&toml::Value>) -> Result<Vec<String>, ME
                     (level, priority, check_cfg)
                 }
                 _ => {
-                    return Err(format!("lints.{tool}.{name} 必须是 level 字符串或配置表"));
+                    return Err(format!(
+                        "lints.{tool}.{name} must be a level string or a config table"
+                    ));
                 }
             };
             if !matches!(level, "allow" | "warn" | "deny" | "forbid") {
                 return Err(format!(
-                    "lints.{tool}.{name}.level 只接受 allow/warn/deny/forbid，实际为 `{level}`"
+                    "lints.{tool}.{name}.level accepts only allow/warn/deny/forbid, got `{level}`"
                 ));
             }
             let qualified = if tool == "rust" {
@@ -953,12 +1018,14 @@ pub(super) fn parse_lints(value: Option<&toml::Value>) -> Result<Vec<String>, ME
     Ok(flags)
 }
 
-/// CARGO_PKG_* env 全集（cargo 编译期 env 契约，env!/option_env! 可读）。
-/// 缺键 = 空串（cargo 就是设空串）；VERSION_MAJOR/MINOR/PATCH/PRE 由 semver 拆开
-/// （PRE = pre 段字符串，无 pre = 空）；AUTHORS 数组以 ":" 连。
-/// manifest.rs（根/path 包）与 resolve.rs（registry 包最小读取）两边同调这一份。
-// 平铺参数 = cargo 的平铺 env 键集一一对应（D15 切① 简报钉死的签名）；
-// 包成 struct 反而失去与 manifest 键的目视对应
+/// The full CARGO_PKG_* env set (the cargo compile-time env contract, readable by
+/// env!/option_env!). A missing key is the empty string (that is what cargo sets);
+/// VERSION_MAJOR/MINOR/PATCH/PRE are split out of the semver (PRE is the prerelease
+/// string, empty when there is none); the AUTHORS array is joined with ":".
+/// manifest.rs (root/path packages) and resolve.rs (minimal read of registry packages)
+/// both key off this one function.
+// The flat parameter list mirrors cargo's flat env key set one for one; bundling it
+// into a struct would lose the visual correspondence with the manifest keys.
 #[allow(clippy::too_many_arguments)]
 pub fn pkg_env_map(
     name: &str,
@@ -993,7 +1060,7 @@ pub fn pkg_env_map(
     m
 }
 
-// ---------- 依赖表 ----------
+// ---------- dependency tables ----------
 
 fn parse_patches(value: Option<&toml::Value>, root: &Path) -> Result<Vec<PatchDecl>, MErr> {
     let Some(registries) = value else {
@@ -1001,12 +1068,12 @@ fn parse_patches(value: Option<&toml::Value>, root: &Path) -> Result<Vec<PatchDe
     };
     let registries = registries
         .as_table()
-        .ok_or_else(|| "[patch] 必须是 registry 表".to_string())?;
+        .ok_or_else(|| "[patch] must be a registry table".to_string())?;
     let mut out = Vec::new();
     for (registry, entries) in registries {
         let entries = entries
             .as_table()
-            .ok_or_else(|| format!("[patch.{registry}] 必须是依赖表"))?;
+            .ok_or_else(|| format!("[patch.{registry}] must be a dependency table"))?;
         let table = Some(
             entries
                 .iter()
@@ -1028,7 +1095,7 @@ fn parse_patches(value: Option<&toml::Value>, root: &Path) -> Result<Vec<PatchDe
                 DepSource::Registry(_, RegistryReference::CratesIo)
             ) {
                 return Err(format!(
-                    "[patch] 包 {} 没有声明 path/git/其他 registry 来源",
+                    "[patch] package {} declares no path/git/other-registry source",
                     dependency.package
                 ));
             }
@@ -1047,7 +1114,7 @@ fn parse_replacements(value: Option<&toml::Value>, root: &Path) -> Result<Vec<Re
     };
     let entries = entries
         .as_table()
-        .ok_or_else(|| "[replace] 必须是 package ID 表".to_string())?;
+        .ok_or_else(|| "[replace] must be a package ID table".to_string())?;
     let mut out = Vec::new();
     for (package_id, replacement) in entries {
         let (source, package, version) = parse_replace_package_id(package_id)?;
@@ -1060,7 +1127,7 @@ fn parse_replacements(value: Option<&toml::Value>, root: &Path) -> Result<Vec<Re
             DepSource::Registry(_, RegistryReference::CratesIo)
         ) {
             return Err(format!(
-                "[replace] `{package_id}` 没有声明 path/git/其他 registry 来源"
+                "[replace] `{package_id}` declares no path/git/other-registry source"
             ));
         }
         out.push(ReplaceDecl {
@@ -1078,15 +1145,18 @@ fn parse_replace_package_id(
 ) -> Result<(Option<String>, String, semver::Version), MErr> {
     let (head, version) = package_id
         .rsplit_once(':')
-        .ok_or_else(|| format!("[replace] package ID `{package_id}` 缺 `:version`"))?;
-    let version = semver::Version::parse(version)
-        .map_err(|error| format!("[replace] package ID `{package_id}` 版本非法: {error}"))?;
+        .ok_or_else(|| format!("[replace] package ID `{package_id}` lacks `:version`"))?;
+    let version = semver::Version::parse(version).map_err(|error| {
+        format!("invalid version in [replace] package ID `{package_id}`: {error}")
+    })?;
     let (source, package) = match head.rsplit_once('#') {
         Some((source, package)) => (Some(source.to_string()), package.to_string()),
         None => (None, head.to_string()),
     };
     if package.is_empty() {
-        return Err(format!("[replace] package ID `{package_id}` 包名为空"));
+        return Err(format!(
+            "[replace] package ID `{package_id}` has an empty package name"
+        ));
     }
     Ok((source, package, version))
 }
@@ -1115,87 +1185,113 @@ fn parse_dep_table(
             toml::Value::Table(t) => {
                 for (k, v) in t {
                     match k.as_str() {
-                        "version" => req_str = v.as_str().ok_or("version 非字符串")?.to_string(),
+                        "version" => {
+                            req_str = v.as_str().ok_or("version is not a string")?.to_string()
+                        }
                         "path" => {
-                            let p = v.as_str().ok_or("path 非字符串")?;
+                            let p = v.as_str().ok_or("path is not a string")?;
                             source = Some(DepSource::Path(root.join(p)));
                         }
-                        "package" => package = v.as_str().ok_or("package 非字符串")?.to_string(),
+                        "package" => {
+                            package = v.as_str().ok_or("package is not a string")?.to_string()
+                        }
                         "features" => {
                             features = v
                                 .as_array()
-                                .ok_or("features 非数组")?
+                                .ok_or("features is not an array")?
                                 .iter()
                                 .map(|f| {
                                     f.as_str()
                                         .map(str::to_string)
-                                        .ok_or("features 元素非字符串")
+                                        .ok_or("features has a non-string element")
                                 })
                                 .collect::<Result<_, _>>()?;
                         }
-                        "optional" => optional = v.as_bool().ok_or("optional 非布尔")?,
+                        "optional" => optional = v.as_bool().ok_or("optional is not a bool")?,
                         "default-features" => {
-                            default_features = v.as_bool().ok_or("default-features 非布尔")?
+                            default_features =
+                                v.as_bool().ok_or("default-features is not a bool")?
                         }
-                        "git" => git_url = Some(v.as_str().ok_or("git 非字符串")?.to_string()),
-                        "branch" => branch = Some(v.as_str().ok_or("branch 非字符串")?.to_string()),
-                        "tag" => tag = Some(v.as_str().ok_or("tag 非字符串")?.to_string()),
-                        "rev" => rev = Some(v.as_str().ok_or("rev 非字符串")?.to_string()),
+                        "git" => {
+                            git_url = Some(v.as_str().ok_or("git is not a string")?.to_string())
+                        }
+                        "branch" => {
+                            branch = Some(v.as_str().ok_or("branch is not a string")?.to_string())
+                        }
+                        "tag" => tag = Some(v.as_str().ok_or("tag is not a string")?.to_string()),
+                        "rev" => rev = Some(v.as_str().ok_or("rev is not a string")?.to_string()),
                         "registry" => {
                             registry = Some(RegistryReference::Named(
-                                v.as_str().ok_or("registry 非字符串")?.to_string(),
+                                v.as_str().ok_or("registry is not a string")?.to_string(),
                             ));
                         }
                         "registry-index" => {
                             registry = Some(RegistryReference::Index(
-                                v.as_str().ok_or("registry-index 非字符串")?.to_string(),
+                                v.as_str()
+                                    .ok_or("registry-index is not a string")?
+                                    .to_string(),
                             ));
                         }
-                        // 已知无害键：public/private（cargo 新键）、artifact、lib、
-                        // workspace（workspace.dependencies 继承——P5，见到响亮拒绝）
+                        // Known harmless keys: public/private (new cargo keys), artifact,
+                        // lib, workspace (workspace.dependencies inheritance, rejected
+                        // loudly when seen)
                         "workspace" => {
-                            return Err(unsupported(format!("依赖 {key} 的 workspace 继承（P5）")));
+                            return Err(unsupported(format!(
+                                "workspace inheritance of dependency {key}"
+                            )));
                         }
-                        _ => {} // 未知小键忽略（前向兼容）
+                        _ => {} // unknown minor keys are ignored (forward compatibility)
                     }
                 }
             }
-            _ => return Err(format!("依赖 {key} 形态不支持（非字符串非表）")),
+            _ => {
+                return Err(format!(
+                    "unsupported form of dependency {key} (neither string nor table)"
+                ));
+            }
         }
         let req = semver::VersionReq::parse(&req_str)
-            .map_err(|e| format!("依赖 {key} version req 非法 {req_str}: {e}"))?;
+            .map_err(|e| format!("invalid version req {req_str} for dependency {key}: {e}"))?;
         let selectors = [branch.is_some(), tag.is_some(), rev.is_some()]
             .into_iter()
             .filter(|present| *present)
             .count();
         if selectors > 1 {
-            return Err(format!("依赖 {key} 的 branch/tag/rev 只能指定一个"));
+            return Err(format!(
+                "dependency {key} may set only one of branch/tag/rev"
+            ));
         }
         if git_url.is_none() && selectors != 0 {
-            return Err(format!("依赖 {key} 指定 branch/tag/rev 但没有 git URL"));
+            return Err(format!(
+                "dependency {key} sets branch/tag/rev but has no git URL"
+            ));
         }
         if [branch.as_deref(), tag.as_deref(), rev.as_deref()]
             .into_iter()
             .flatten()
             .any(str::is_empty)
         {
-            return Err(format!("依赖 {key} 的 branch/tag/rev 不能为空"));
+            return Err(format!(
+                "branch/tag/rev of dependency {key} must not be empty"
+            ));
         }
         if git_url.is_some() && source.is_some() {
-            return Err(format!("依赖 {key} 不能同时指定 git 与 path"));
+            return Err(format!("dependency {key} may not set both git and path"));
         }
         if registry.is_some() && (git_url.is_some() || source.is_some()) {
-            return Err(format!("依赖 {key} 不能同时指定 registry 与 git/path"));
+            return Err(format!(
+                "dependency {key} may not set registry together with git/path"
+            ));
         }
         let source = match (source, git_url) {
             (Some(path), None) => path,
             (None, Some(url)) => {
                 if url.is_empty() || url.starts_with('-') {
-                    return Err(format!("依赖 {key} 的 git URL 非法：`{url}`"));
+                    return Err(format!("invalid git URL for dependency {key}: `{url}`"));
                 }
                 if url.contains('?') || url.contains('#') {
                     return Err(format!(
-                        "依赖 {key} 的 git URL 不能自带 query/fragment；请使用 branch/tag/rev"
+                        "the git URL of dependency {key} may not carry a query/fragment; use branch/tag/rev"
                     ));
                 }
                 let reference = if let Some(value) = branch {
@@ -1251,19 +1347,19 @@ pub(crate) fn parse_feature_value(v: &str) -> Result<FeatureValue, MErr> {
     Ok(FeatureValue::Simple(v.to_string()))
 }
 
-// ---------- cfg 表达式（解析 / 校验 / host 求值） ----------
+// ---------- cfg expressions (parse / validate / host evaluation) ----------
 
-/// cfg 表达式 AST。
+/// A cfg expression AST.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CfgExpr {
-    /// (key, value)；裸原子（unix/windows）的 value = 空串。
+    /// (key, value); a bare atom (unix/windows) has an empty value.
     Atom(String, String),
     Any(Vec<CfgExpr>),
     All(Vec<CfgExpr>),
     Not(Box<CfgExpr>),
 }
 
-/// 解析 `cfg(...)` 为 AST（`cfg(...)` 外壳或裸表达式均可）。
+/// Parse `cfg(...)` into an AST (either the `cfg(...)` wrapper or a bare expression).
 pub fn parse_cfg(expr: &str) -> Result<CfgExpr, MErr> {
     let e = expr.trim();
     let inner = e
@@ -1285,14 +1381,14 @@ fn parse_cfg_inner(s: &str) -> Result<CfgExpr, MErr> {
         if let Some(rest) = s.strip_prefix(op) {
             let rest = rest
                 .strip_suffix(')')
-                .ok_or_else(|| format!("cfg 表达式括号不配对: {s}"))?;
+                .ok_or_else(|| format!("unbalanced parentheses in cfg expression: {s}"))?;
             let parts = split_top_level(rest)?;
             let exprs = parts
                 .iter()
                 .map(|p| parse_cfg_inner(p.trim()))
                 .collect::<Result<Vec<_>, _>>()?;
             if op == "not(" && exprs.len() != 1 {
-                return Err(format!("cfg not() 只收一个参数: {s}"));
+                return Err(format!("cfg not() takes exactly one argument: {s}"));
             }
             return Ok(make(exprs));
         }
@@ -1302,18 +1398,18 @@ fn parse_cfg_inner(s: &str) -> Result<CfgExpr, MErr> {
         None => (s.trim().to_string(), String::new()),
     };
     if key.is_empty() {
-        return Err(format!("cfg 原子形态非法: {s}"));
+        return Err(format!("invalid cfg atom form: {s}"));
     }
     Ok(CfgExpr::Atom(key, val))
 }
 
-/// 解析期校验（拼写错误响亮；`cfg(feature=..)` 在 target 依赖表属 cargo
-/// 禁用面，响亮拒绝记名）。
+/// Parse-time validation (a typo must be loud; `cfg(feature=..)` in a target
+/// dependency table is a surface cargo forbids, so it is rejected loudly by name).
 fn validate_cfg_expr(expr: &str) -> Result<(), MErr> {
     fn walk(e: &CfgExpr) -> Result<(), MErr> {
         match e {
             CfgExpr::Atom(k, _) if k == "feature" => Err(unsupported(
-                "cfg(feature=..) 于 target 依赖表（cargo 禁用面）",
+                "cfg(feature=..) in a target dependency table (a surface cargo forbids)",
             )),
             CfgExpr::Atom(_, _) => Ok(()),
             CfgExpr::Any(vs) | CfgExpr::All(vs) => vs.iter().try_for_each(walk),
@@ -1323,21 +1419,23 @@ fn validate_cfg_expr(expr: &str) -> Result<(), MErr> {
     walk(&parse_cfg(expr)?)
 }
 
-/// host 平台原子集 = `rustc --print cfg --target <host>` 原样行集（cargo
-/// 平台匹配同源：未知/自定义键（rustix_use_libc 等）天然求 false；
-/// target_feature 由 rustc 列表精确覆盖）。进程内 OnceLock 缓存。
+/// Host platform atom set = the verbatim line set of
+/// `rustc --print cfg --target <host>` (the same source cargo matches platforms
+/// against, so an unknown/custom key such as rustix_use_libc naturally evaluates to
+/// false, and target_feature is covered exactly by rustc's list). Cached in-process
+/// with a OnceLock.
 static HOST_CFG_ATOMS: std::sync::OnceLock<std::collections::BTreeSet<String>> =
     std::sync::OnceLock::new();
 
-/// 暴露给 buildrs.rs 的 CARGO_CFG_* 映射（切③）。
+/// The CARGO_CFG_* mapping exposed to buildrs.rs.
 pub(crate) fn host_cfg_atoms() -> &'static std::collections::BTreeSet<String> {
     HOST_CFG_ATOMS.get_or_init(|| {
         let rustc = std::path::PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT")).join("bin/rustc");
         let out = std::process::Command::new(rustc)
             .args(["--print", "cfg", "--target", env!("MIRVM_HOST")])
             .output()
-            .expect("rustc --print cfg 失败");
-        let text = String::from_utf8(out.stdout).expect("rustc --print cfg 非 UTF-8");
+            .expect("rustc --print cfg failed");
+        let text = String::from_utf8(out.stdout).expect("rustc --print cfg output is not UTF-8");
         text.lines()
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
@@ -1345,7 +1443,8 @@ pub(crate) fn host_cfg_atoms() -> &'static std::collections::BTreeSet<String> {
     })
 }
 
-/// host 求值（host 构建图装配期用；版本求解期不得调用——那是全平台并集）。
+/// Host evaluation (used when the host build graph is assembled; must not be called
+/// during version resolution -- that is the union over all platforms).
 pub fn eval_cfg(expr: &str) -> Result<bool, MErr> {
     let ast = parse_cfg(expr)?;
     let atoms = host_cfg_atoms();
@@ -1381,7 +1480,7 @@ fn split_top_level(s: &str) -> Result<Vec<String>, MErr> {
             ')' => {
                 depth -= 1;
                 if depth < 0 {
-                    return Err(format!("cfg 表达式括号不配对: {s}"));
+                    return Err(format!("unbalanced parentheses in cfg expression: {s}"));
                 }
                 cur.push(c);
             }
@@ -1393,7 +1492,7 @@ fn split_top_level(s: &str) -> Result<Vec<String>, MErr> {
         }
     }
     if depth != 0 {
-        return Err(format!("cfg 表达式括号不配对: {s}"));
+        return Err(format!("unbalanced parentheses in cfg expression: {s}"));
     }
     if !cur.trim().is_empty() {
         out.push(cur.trim().to_string());
@@ -1401,7 +1500,7 @@ fn split_top_level(s: &str) -> Result<Vec<String>, MErr> {
     Ok(out)
 }
 
-// ---------- target 发现 ----------
+// ---------- target discovery ----------
 
 #[allow(clippy::too_many_arguments)]
 fn discover_targets(
@@ -1418,7 +1517,7 @@ fn discover_targets(
     root: &Path,
 ) -> Result<Vec<Target>, MErr> {
     let mut out = Vec::new();
-    // lib：显式 [lib] 或自动 src/lib.rs
+    // lib: an explicit [lib] or the automatic src/lib.rs
     let lib_path = lib
         .and_then(|l| l.path.clone())
         .map(|p| root.join(&p))
@@ -1445,7 +1544,8 @@ fn discover_targets(
                 .unwrap_or_default(),
         });
     }
-    // bin：显式条目覆盖同名自动目标；autobins=true 时其他目标仍自动发现。
+    // bin: an explicit entry overrides the automatic target of the same name; with
+    // autobins=true other targets are still discovered automatically.
     let explicit: Vec<Target> = bin
         .into_iter()
         .flatten()
@@ -1546,8 +1646,10 @@ fn discover_targets(
     Ok(out)
 }
 
-/// Cargo 的 tests/examples 自动发现：`dir/name.rs` 与 `dir/name/main.rs` 各是一目标；
-/// 子目录里的其他 `.rs` 是模块，不应被误当成独立目标。显式条目只覆盖同名自动目标。
+/// Cargo's tests/examples auto-discovery: `dir/name.rs` and `dir/name/main.rs` are each
+/// one target; other `.rs` files in a subdirectory are modules and must not be mistaken
+/// for separate targets. An explicit entry only overrides the automatic target of the
+/// same name.
 fn discover_file_targets(
     explicit: Option<&Vec<RawTarget>>,
     auto: bool,
@@ -1664,7 +1766,7 @@ fn apply_profile(
             toml::Value::String(v) if v == "z" => OptLevel::Oz,
             other => {
                 return Err(format!(
-                    "profile.{name}.opt-level 非 Cargo 支持值（只接受 0/1/2/3/\"s\"/\"z\"）：{other}"
+                    "profile.{name}.opt-level is not a Cargo-supported value (only 0/1/2/3/\"s\"/\"z\"): {other}"
                 ));
             }
         };
@@ -1749,7 +1851,7 @@ cc = "1"
                 .unwrap()
                 .source
             else {
-                panic!("{key} 应为 Git 依赖")
+                panic!("{key} should be a Git dependency")
             };
             spec.clone()
         };
@@ -1775,16 +1877,16 @@ cc = "1"
         for (dependency, needle) in [
             (
                 "foo = { git='https://x', branch='main', tag='v1' }",
-                "只能指定一个",
+                "only one of branch/tag/rev",
             ),
-            ("foo = { branch='main' }", "没有 git URL"),
+            ("foo = { branch='main' }", "no git URL"),
             (
                 "foo = { git='https://x', path='../x' }",
-                "同时指定 git 与 path",
+                "both git and path",
             ),
-            ("foo = { git='https://x', rev='' }", "不能为空"),
-            ("foo = { git='--upload-pack=bad' }", "git URL 非法"),
-            ("foo = { git='https://x?a=b' }", "不能自带 query/fragment"),
+            ("foo = { git='https://x', rev='' }", "must not be empty"),
+            ("foo = { git='--upload-pack=bad' }", "invalid git URL"),
+            ("foo = { git='https://x?a=b' }", "query/fragment"),
         ] {
             let err = PackageManifest::parse(
                 &format!("[package]\nname='d'\nversion='0.1.0'\n[dependencies]\n{dependency}\n"),
@@ -1798,7 +1900,7 @@ cc = "1"
             Path::new("/tmp/x"),
         )
         .unwrap_err();
-        assert!(err.contains("P5"), "{err}");
+        assert!(err.contains("workspace inheritance"), "{err}");
     }
 
     #[test]
@@ -1865,7 +1967,10 @@ cc = "1"
                 "unsafe_code={level='warn',check-cfg=['cfg(x)']}",
                 "unexpected_cfgs",
             ),
-            ("unsafe_code={level='warn',priority='high'}", "必须是整数"),
+            (
+                "unsafe_code={level='warn',priority='high'}",
+                "must be an integer",
+            ),
         ] {
             let error = PackageManifest::parse(
                 &format!("[package]\nname='d'\nversion='0.1.0'\n[lints.rust]\n{body}\n"),
@@ -1913,13 +2018,15 @@ cc = "1"
         assert!(eval_cfg("cfg(all(unix, target_arch=\"x86_64\"))").unwrap());
         assert!(eval_cfg("cfg(target_pointer_width=\"64\")").unwrap());
         assert!(eval_cfg("cfg(target_endian=\"little\")").unwrap());
-        // 自定义键（rustix 型）与未知键天然 false（rustc --print cfg 同源）
+        // Custom keys (rustix-style) and unknown keys are naturally false (same source
+        // as rustc --print cfg)
         assert!(!eval_cfg("cfg(rustix_use_libc)").unwrap());
         assert!(!eval_cfg("cfg(some_custom_key)").unwrap());
-        // target_feature 由 rustc 列表精确覆盖（x86_64 基线 = sse/sse2 真、avx2 假）
+        // target_feature is covered exactly by rustc's list (x86_64 baseline = sse/sse2
+        // true, avx2 false)
         assert!(eval_cfg("cfg(target_feature=\"sse2\")").unwrap());
         assert!(!eval_cfg("cfg(target_feature=\"avx512f\")").unwrap());
-        // 复杂嵌套（rustix 形态微缩版）
+        // Complex nesting (a miniature rustix form)
         assert!(eval_cfg(
             "cfg(all(not(rustix_use_libc), target_os=\"linux\", any(target_arch=\"x86_64\", target_arch=\"aarch64\")))"
         )
@@ -1928,7 +2035,8 @@ cc = "1"
 
     #[test]
     fn target_specific_dep_tables_carry_cfg_expr_unfiltered() {
-        // 全平台并集语义：解析期不过滤，cfg 表达式随行（cargo lock 同语）
+        // Union over all platforms: no filtering at parse time, the cfg expression
+        // travels with the row (same as cargo lock)
         let m = PackageManifest::parse(
             "[package]\nname=\"d\"\nversion=\"0.1.0\"\n\
              [target.'cfg(unix)'.dependencies]\nnix = \"0.29\"\n\
@@ -1940,9 +2048,9 @@ cc = "1"
         let winapi = m.deps.iter().find(|d| d.key == "winapi").unwrap();
         assert_eq!(nix.platform_cfg.as_deref(), Some("cfg(unix)"));
         assert_eq!(winapi.platform_cfg.as_deref(), Some("cfg(windows)"));
-        // 普通表无标记
+        // A plain table carries no marker
         assert!(nix.platform_cfg.is_some());
-        // host 求值在使用期：unix 真、windows 假
+        // Host evaluation happens at use time: unix true, windows false
         assert!(eval_cfg(nix.platform_cfg.as_ref().unwrap()).unwrap());
         assert!(!eval_cfg(winapi.platform_cfg.as_ref().unwrap()).unwrap());
     }
@@ -1963,8 +2071,8 @@ cc = "1"
             .collect();
         assert!(m.targets.iter().any(Target::is_lib));
         assert_eq!(bins, ["d", "extra"]);
-        // 多 bin 时 runnable_bin 响亮拒绝（可选 --bin 或 default-run 解；
-        // 切⑥b 起不再是 P5 文案）；default-run 钉选可解
+        // With several bins runnable_bin rejects loudly (resolve with an explicit --bin
+        // or default-run); default-run pins one and resolves it
         let err = m.runnable_bin().unwrap_err();
         assert!(err.contains("--bin"), "{err}");
         let m2 = PackageManifest::parse(
@@ -1973,7 +2081,8 @@ cc = "1"
         )
         .unwrap();
         assert_eq!(m2.runnable_bin().unwrap().0, "extra");
-        // 切⑥b：--bin 按名选定；不在名单 = 响亮报错并列出可选
+        // --bin selects by name; a name not on the list is a loud error listing the
+        // available ones
         assert_eq!(m.runnable_bin_opt(Some("extra")).unwrap().0, "extra");
         let err = m.runnable_bin_opt(Some("nope")).unwrap_err();
         assert!(err.contains("nope") && err.contains("extra"), "{err}");
@@ -1982,8 +2091,9 @@ cc = "1"
 
     #[test]
     fn lib_proc_macro_accepts_both_spellings() {
-        // 两种拼写都收（resolve.rs registry 最小读取同款纪律：连字符 =
-        // cargo 文档形态，下划线 = 新版归一化产物形态）
+        // Both spellings are accepted (the same discipline as the minimal registry read
+        // in resolve.rs: hyphen = the cargo documentation form, underscore = what newer
+        // cargo normalizes to)
         let d = tmpdir("libpm");
         std::fs::create_dir_all(d.join("src")).unwrap();
         std::fs::write(d.join("src/lib.rs"), "").unwrap();
@@ -1994,7 +2104,7 @@ cc = "1"
             )
             .unwrap();
             let pm = m.targets.iter().any(|t| t.is_lib() && t.proc_macro);
-            assert!(pm, "拼写 {key} 必须识别");
+            assert!(pm, "spelling {key} must be recognized");
         }
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -2067,8 +2177,9 @@ cc = "1"
 
     #[test]
     fn build_eq_false_disables_build_script_detection() {
-        // cargo 语义：`build = false` 显式关闭（cfg-if 实锤——键在场 ≠ 有 build.rs）；
-        // 即便根下躺着 build.rs 也不算（cargo 同）
+        // cargo semantics: `build = false` disables it explicitly (confirmed by cfg-if;
+        // the key being present is not the same as having build.rs); even with a build.rs
+        // sitting in the root it does not count (as in cargo)
         let d = tmpdir("buildfalse");
         std::fs::create_dir_all(d.join("src")).unwrap();
         std::fs::write(d.join("src/main.rs"), "fn main(){}").unwrap();
@@ -2108,9 +2219,9 @@ cc = "1"
 
     #[test]
     fn frontmatter_at_decouples_root_and_body_path() {
-        // cargo 腿物化布局同形（切⑤d redb_kv/gix_pure 实锤）：root=<cache>
-        // （CARGO_MANIFEST_DIR 口径）而正文在 <cache>/src/main.rs
-        // （remap 后 file!() = "src/main.rs"）。
+        // Same layout as the materialized cargo-side project: root=<cache> (the
+        // CARGO_MANIFEST_DIR convention) while the body lives in <cache>/src/main.rs
+        // (so file!() = "src/main.rs" after remapping).
         let d = tmpdir("frontmatterat");
         let body = d.join("src/main.rs");
         std::fs::create_dir_all(body.parent().unwrap()).unwrap();
@@ -2154,16 +2265,21 @@ license = "MIT"
         assert_eq!(e["CARGO_PKG_DESCRIPTION"], "演示包");
         assert_eq!(e["CARGO_PKG_README"], "README.md");
         assert_eq!(e["CARGO_PKG_LICENSE"], "MIT");
-        // 缺键 = 空串（cargo 同契约），但键必须在场
+        // A missing key is the empty string (the same cargo contract), but the key must
+        // be present
         for k in [
             "CARGO_PKG_HOMEPAGE",
             "CARGO_PKG_REPOSITORY",
             "CARGO_PKG_LICENSE_FILE",
             "CARGO_PKG_RUST_VERSION",
         ] {
-            assert_eq!(e.get(k).map(String::as_str), Some(""), "{k} 应为空串");
+            assert_eq!(
+                e.get(k).map(String::as_str),
+                Some(""),
+                "{k} should be empty"
+            );
         }
-        // 无 pre 段的版本 PRE = 空串
+        // A version without a prerelease segment has an empty PRE
         let e2 = pkg_env_map(
             "d",
             &semver::Version::new(0, 1, 0),
@@ -2192,14 +2308,14 @@ license = "MIT"
         )
         .unwrap();
         let vals = m.check_cfg_feature_values();
-        // [features] 表键在场
+        // [features] table keys are present
         assert!(vals.contains("default"));
         assert!(vals.contains("extra"));
-        // 未被 dep: 点名的 optional 依赖 → 同名隐式 feature
+        // An optional dependency not named by dep: -> an implicit feature of the same name
         assert!(vals.contains("itertools"));
-        // 被 dep:serde 遮蔽 → 无同名隐式 feature
+        // Shadowed by dep:serde -> no implicit feature of the same name
         assert!(!vals.contains("serde"));
-        // 非 optional 依赖永不进值表
+        // A non-optional dependency never enters the value table
         assert!(!vals.contains("plain"));
     }
 

@@ -1,25 +1,25 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# 任务规格写 midly = "0.10"，但 crates.io sparse index 与 docs.rs 一致表明
-# midly 最新版只有 0.5.3（2023-01 发布）——"0.10" 不存在，钉死真实最新版。
-# default-features 含 parallel（rayon 多线程写出），对差分无意义且引入并行
-# 维度；只留 std（提供 write_std / save）。此组合下 midly 零依赖纯 Rust。
+# The spec calls for midly = "0.10", but the crates.io sparse index and docs.rs agree that
+# the newest midly release is 0.5.3 (published 2023-01): there is no "0.10", so the real
+# newest version is pinned. The default `parallel` feature (rayon multi-threaded writing)
+# adds a parallelism dimension irrelevant to the differential, so only std is kept.
 midly = { version = "=0.5.3", default-features = false, features = ["std"] }
 ---
-// midly 0.5.3：SMF 全内存闭环差分。构建 format-1 三轨文件（conductor 元事件轨
-// + 多 channel 力度谱系 note on/off 轨 + SysEx/Escape/杂项 meta 轨）→ write_std
-// 写字节（len+FNV 锚定）→ Smf::parse 逐事件确定序回放（类型/abs tick/delta/
-// channel/键/力度）→ 再写出验证 roundtrip 逐字节不变量。
-// 覆盖：格式 0/1/2 × Metrical/Timecode 两种 Timing；u28 varlen delta 边界
-// （0/1/127/128/8191/8192/16383/16384/2^21±1/u28::MAX）；受限整数 try_from
-// 边界（u4/u7/u14/u15/u24/u28）；RIFF/RMID 解包；错误路径（空输入/坏魔数/
-// 非 RMID 的 RIFF/非法格式号 3/头后截断/轨中截断/尾截断——注意 midly 默认
-// lenient 模式，头后截断会以 0 轨解析成功，属规格行为两端正面对拍）；
-// live::LiveEvent 原始字节解析（Midi/Realtime/SysEx/空输入）；SmfBytemap
-// 事件-字节映射。
-// 确定性：Vec 顺序打印，无 HashMap 迭代/地址/时间/线程序；文本走
-// from_utf8_lossy；二进制只打 len+FNV；不打印浮点。
+// midly 0.5.3: an all-in-memory closed-loop SMF differential. A format-1 three-track file
+// (conductor meta-event track + multi-channel velocity-spectrum note on/off track +
+// SysEx/Escape/misc meta track) is written with write_std (len + FNV anchored), parsed
+// back with Smf::parse, replayed event by event in a deterministic order, then rewritten
+// to check the byte-for-byte roundtrip invariant.
+// Coverage: formats 0/1/2 x Metrical and Timecode timings; u28 varlen delta boundaries
+// (0/1/127/128/8191/8192/16383/16384/2^21+-1/u28::MAX); u4/u7/u14/u15/u24/u28 try_from
+// boundaries; RIFF/RMID unwrapping; error paths (empty input, bad magic, non-RMID RIFF,
+// illegal format 3, and header/mid-track/tail truncation -- midly is lenient by default,
+// so a header-only truncation parses as a 0-track file, a spec behaviour both sides
+// share); live::LiveEvent parsing (Midi/Realtime/SysEx/empty) and SmfBytemap mapping.
+// Deterministic: Vec order only, no HashMap iteration/addresses/time/thread order; text
+// via from_utf8_lossy; binary data prints len + FNV only; no floats.
 use midly::live::LiveEvent;
 use midly::num::{u14, u15, u24, u28, u4, u7};
 use midly::{
@@ -75,7 +75,7 @@ fn note_off(delta: u32, channel: u8, key: u8, vel: u8) -> TrackEvent<'static> {
     )
 }
 
-/// 把单个事件格式化成确定序文本行（abs 为调用方累加的绝对 tick）。
+/// Formats one event as a deterministic text line (abs is the absolute tick accumulated by the caller).
 fn describe_event(abs: u32, ev: &TrackEvent) -> String {
     let head = format!("abs={abs} dt={}", ev.delta.as_int());
     match &ev.kind {
@@ -175,9 +175,9 @@ fn dump_smf(label: &str, smf: &Smf) {
     }
 }
 
-/// ① 构建 format-1 三轨 SMF 并写出字节。
+/// ① Builds the format-1 three-track SMF and writes its bytes.
 fn build_main_smf() -> Smf<'static> {
-    // 轨 0：conductor 元事件轨
+    // Track 0: conductor meta-event track
     let track0 = vec![
         ev(0, TrackEventKind::Meta(MetaMessage::TrackName(b"mirvm differential suite"))),
         ev(0, TrackEventKind::Meta(MetaMessage::Copyright(b"(C) 2026 mirvm corpus"))),
@@ -192,27 +192,27 @@ fn build_main_smf() -> Smf<'static> {
             )),
         ),
         ev(480, TrackEventKind::Meta(MetaMessage::Tempo(u24::new(250_000)))),
-        // u24 最大值边界：16777215 us/beat
+        // u24 maximum boundary: 16777215 us/beat
         ev(480, TrackEventKind::Meta(MetaMessage::Tempo(u24::new(0xFF_FFFF)))),
         ev(0, TrackEventKind::Meta(MetaMessage::EndOfTrack)),
     ];
 
-    // 轨 1：多 channel 音符轨，力度谱系 + 控制器/弯音/触后
+    // Track 1: multi-channel note track with a velocity spectrum plus controllers/pitch bend/aftertouch
     let mut track1 = vec![
         ev(0, TrackEventKind::Meta(MetaMessage::TrackName(b"piano"))),
         midi(0, 0, MidiMessage::ProgramChange { program: u7::new(0) }),
         midi(0, 9, MidiMessage::ProgramChange { program: u7::new(40) }),
     ];
-    // 力度谱系：9 档 on/off（off 带释放力度），key 逐档上移
+    // Velocity spectrum: 9 on/off steps (off carries release velocity), key moving up one per step
     for (i, vel) in [1u8, 16, 32, 48, 64, 80, 96, 112, 127].iter().enumerate() {
         let key = 60 + i as u8;
         track1.push(note_on(24, 0, key, *vel));
         track1.push(note_off(24, 0, key, *vel));
     }
-    // NoteOn vel=0（等价 NoteOff 的惯例路径）
+    // NoteOn with vel=0 (the conventional NoteOff-equivalent path)
     track1.push(note_on(0, 0, 60, 0));
     track1.push(note_off(96, 0, 60, 64));
-    // 触后/通道触后/控制器/弯音（含 min/mid/max 与 from_int 夹取）
+    // Aftertouch/channel aftertouch/controller/pitch bend (including min/mid/max and from_int clamping)
     track1.push(midi(0, 0, MidiMessage::Aftertouch { key: u7::new(64), vel: u7::new(90) }));
     track1.push(midi(0, 0, MidiMessage::ChannelAftertouch { vel: u7::new(77) }));
     track1.push(midi(0, 0, MidiMessage::Controller { controller: u7::new(7), value: u7::new(100) }));
@@ -221,18 +221,18 @@ fn build_main_smf() -> Smf<'static> {
     track1.push(midi(12, 0, MidiMessage::PitchBend { bend: PitchBend::mid_raw_value() }));
     track1.push(midi(12, 0, MidiMessage::PitchBend { bend: PitchBend::max_raw_value() }));
     track1.push(midi(12, 0, MidiMessage::PitchBend { bend: PitchBend::from_int(-0x2000) }));
-    // channel 9 打击乐
+    // channel 9 percussion
     track1.push(note_on(0, 9, 35, 120));
     track1.push(note_off(48, 9, 35, 100));
     track1.push(note_on(0, 9, 38, 110));
     track1.push(note_off(48, 9, 38, 90));
     track1.push(ev(0, TrackEventKind::Meta(MetaMessage::EndOfTrack)));
 
-    // 轨 2：SysEx / Escape / 杂项 meta
+    // Track 2: SysEx / Escape / miscellaneous meta
     let track2 = vec![
         ev(0, TrackEventKind::Meta(MetaMessage::TrackName(b"synth fx"))),
         ev(0, TrackEventKind::SysEx(&[0x43, 0x12, 0x00, 0x00, 0x7F, 0x01])),
-        // 空 SysEx 边界
+        // Empty SysEx boundary
         ev(12, TrackEventKind::SysEx(&[])),
         ev(12, TrackEventKind::Escape(&[0xF3, 0x7F, 0x01])),
         ev(0, TrackEventKind::Meta(MetaMessage::SequencerSpecific(&[0x00, 0x41, 0x10, 0x42]))),
@@ -255,7 +255,7 @@ fn build_main_smf() -> Smf<'static> {
     }
 }
 
-/// ② 格式 0/1/2 × Timing 矩阵：小文件写出→解析→指纹。
+/// ② Format 0/1/2 x Timing matrix: write a small file, parse it back, print the fingerprint.
 fn format_matrix() {
     for (label, format, ntracks) in [
         ("fmt0", Format::SingleTrack, 1usize),
@@ -284,7 +284,7 @@ fn format_matrix() {
             events
         );
     }
-    // Timecode timing（SMPTE 29.97fps × 40 subframe）与 u15 最大值
+    // Timecode timing (SMPTE 29.97fps x 40 subframes) and the u15 maximum
     let mut tc = Smf::new(Header::new(
         Format::SingleTrack,
         Timing::Timecode(Fps::Fps29, 40),
@@ -317,7 +317,7 @@ fn format_matrix() {
     }
 }
 
-/// ③ varlen delta 边界：含 u28::MAX 的大 delta time 写出→解析逐值回放。
+/// ③ varlen delta boundaries: write large delta times up to u28::MAX, then replay every parsed value.
 fn varlen_boundary() {
     let deltas: [u32; 12] = [
         0, 1, 0x7F, 0x80, 0x1FFF, 0x2000, 0x3FFF, 0x4000, 0x1F_FFFF, 0x20_0000, 0x3FF_FFFF,
@@ -347,7 +347,7 @@ fn varlen_boundary() {
     for (i, g) in got.iter().enumerate() {
         println!("varlen[{i}] = {g}");
     }
-    // 受限整数构造边界：Some/None 两分支
+    // Restricted-integer construction boundaries: both the Some and the None branch
     println!(
         "u4 15={:?} 16={:?}",
         u4::try_from(15).map(|v| v.as_int()),
@@ -380,7 +380,7 @@ fn varlen_boundary() {
     );
 }
 
-/// ④ RIFF/RMID 容器解包（riff::unwrap 路径）。
+/// ④ RIFF/RMID container unwrapping (the riff::unwrap path).
 fn rmid_unwrap(smf_bytes: &[u8]) {
     let mut rmid = Vec::new();
     rmid.extend_from_slice(b"RIFF");
@@ -397,14 +397,14 @@ fn rmid_unwrap(smf_bytes: &[u8]) {
     );
 }
 
-/// ⑤ 错误路径：打印 Display 文本（midly 错误串为 &'static str，确定）。
+/// ⑤ Error paths: prints Display text (midly error strings are &'static str, deterministic).
 fn error_paths(smf_bytes: &[u8]) {
     for (label, input) in [
         ("empty", &b""[..]),
         ("badmagic", &b"XThd\x00\x00\x00\x06\x00\x01\x00\x01\x01\xE0"[..]),
-        // RIFF 头但 formtype 不是 RMID
+        // RIFF header but formtype is not RMID
         ("riff-not-rmid", &b"RIFF\x04\x00\x00\x00WAVE"[..]),
-        // 非法格式号 3
+        // Illegal format number 3
         ("fmt3", &b"MThd\x00\x00\x00\x06\x00\x03\x00\x01\x01\xE0"[..]),
     ] {
         match Smf::parse(input) {
@@ -412,7 +412,7 @@ fn error_paths(smf_bytes: &[u8]) {
             Err(e) => println!("{label}: err={e}"),
         }
     }
-    // 截断谱系：头后（lenient 下 0 轨解析成功）/轨中/末两字节
+    // Truncation spectrum: after the header (0 tracks under lenient mode), mid-track, last two bytes
     for (label, cut) in [
         ("trunc-head", 14usize),
         ("trunc-mid", smf_bytes.len() / 2),
@@ -425,7 +425,7 @@ fn error_paths(smf_bytes: &[u8]) {
     }
 }
 
-/// ⑥ live 流事件 + 事件-字节映射。
+/// ⑥ live stream events plus the event-to-byte mapping.
 fn live_and_bytemap(smf_bytes: &[u8]) {
     for (label, raw) in [
         ("noteon", &[0x93, 60, 100][..]),
@@ -477,7 +477,7 @@ fn live_and_bytemap(smf_bytes: &[u8]) {
 }
 
 fn main() {
-    // ① 构建 → 写出 → 解析回放 → 再写出 roundtrip 不变量
+    // ① Build -> write -> parse/replay -> rewrite roundtrip invariant
     let smf = build_main_smf();
     let mut bytes = Vec::new();
     smf.write_std(&mut bytes).unwrap();

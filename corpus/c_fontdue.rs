@@ -1,48 +1,48 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# 钉 =0.9.3：crates.io sparse index 当日查询 fontdue 现行最新稳定即 0.9.3。
-# 绕行记录（官方后端开关，非裁剪）：default-features=false 关掉默认 simd
-# feature → fontdue 走自带 simd_core 纯 f32 标量后备（fontdue 官方等价实现，
-# 其内部测试逐项断言与 f32 基础运算一致；两维用同一 feature 面，原生侧同样
-# 标量）。simd 路径在 x86_64 走 core::arch 的 _mm_add_ps/_mm_sqrt_ps/_mm_div_ps/
-# _mm_cvttps_epi32 等 14 个 SSE intrinsic（见 fontdue-0.9.3/src/platform/
-# simd_x86.rs），与 c_resvg 头注记录的 tiny-skia simd TRAP（mirvm 未内建
-# llvm.x86.sse 族外部符号）同族。可选 hashbrown/rayon 保持关闭（parallel
-# feature 引入线程调度序，且 cache 实现差异不影响输出文本）。
+# Pinned to =0.9.3: the fontdue latest stable in the crates.io sparse index.
+# Bypass note (official backend switch, not a trim): default-features=false disables
+# the default simd feature, so fontdue uses its built-in simd_core pure-f32 scalar
+# fallback (fontdue's own equivalent implementation, whose internal tests assert agreement
+# with basic f32 arithmetic; both oracles use the same feature set, scalar).
+# On x86_64 the simd path uses 14 core::arch SSE intrinsics such as _mm_add_ps/
+# _mm_sqrt_ps/_mm_div_ps/_mm_cvttps_epi32 (fontdue-0.9.3/src/platform/simd_x86.rs),
+# the same family as the tiny-skia SIMD TRAP (mirvm has no llvm.x86.sse externals).
+# Optional hashbrown/rayon stay off: parallel adds thread scheduling order; cache noise changes no output.
 fontdue = { version = "=0.9.3", default-features = false }
 ---
-// fontdue 0.9.3 字体光栅差分（标量后端，见上钉版注）。
-// 覆盖清单：
-// ① 字体装载：固定绝对路径 /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
-//    （本机 2016 版 DejaVuSans），文件缺席 → eprintln 固定文本 + exit(2)，
-//    不做条件跳过；解析失败 → exit(3)。读入字节打 len + FNV-1a 锁两侧同文件。
-// ② 字体级探针：name（Name ID 4）、units_per_em bits、glyph_count、
-//    chars 映射表条目数（只取 len，绝不迭代 HashMap）、scale_factor bits、
-//    水平/垂直 line metrics @24px 四分量 bits（DejaVu 无垂直 metrics → none）。
-// ③ 覆盖探测（确定性选择，非跳过）：CJK 三字（U+4E2D/6587/5B57，DejaVu
-//    不含 → probe miss 行）与连字 U+FB00..FB03（ﬀ/ﬁ/ﬂ/ﬃ，命中则纳入
-//    光栅集）——规格主串 = ASCII + Latin-1 Supplement + Latin Extended-A，
-//    字体覆盖到的探测段字符自动加入 rasterize 面。
-// ④ 主光栅：固定串 × 8 档尺寸 [6,9,12,15,18,24,36,60]px（fontdue 尺寸
-//    参数即 px），每 glyph 一行：gid、metrics 整型 xmin/ymin/width/height、
-//    advance_width/height 位型、OutlineBounds 四 f32 位型、bitmap 长度与
-//    FNV-1a。空格等零面积 glyph 照常打（bitmap len=0 边界）。
-// ⑤ kern：水平 kern 三对（A-V / T-o / f-i）@24px，None→none，Some→bits，
-//    覆盖 ttf-parser opentype-layout GPOS/kern 表路径。
-// ⑥ 合计行：全部 glyph 行文本逐字节滚入聚合 FNV-1a 一行收尾。
-// 确定性：全部固定常量；f32 一律 to_bits；循环序 = 两个显式数组序；无随机/
-// 时间/HashMap 迭代/地址；正常路径 stderr 为空。
+// fontdue 0.9.3 font rasterization differential (scalar backend; see the pin note above).
+// Coverage:
+// ① Font loading: hard-coded /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf (the local
+//    2016 DejaVuSans). A missing file prints fixed text to stderr and exits 2 with no
+//    conditional skip; a parse failure exits 3; raw bytes print len + FNV-1a to pin both oracles.
+// ② Font-level probes: name (Name ID 4), units_per_em bits, glyph_count, charmap entry count
+//    (length only, never a HashMap iteration), scale_factor bits, and the four components of
+//    the horizontal/vertical line metrics at 24px (DejaVu has no vertical metrics -> none).
+// ③ Coverage probes (deterministic selection, not skips): three CJK chars (U+4E2D/6587/5B57,
+//    absent from DejaVu -> probe miss) and the ligatures U+FB00..FB03 (ﬀ/ﬁ/ﬂ/ﬃ, rasterized when
+//    present). The main run is ASCII + Latin-1 Supplement + Latin Extended-A; any probe char
+//    the font covers joins the rasterize set.
+// ④ Main raster: fixed run x 8 sizes [6,9,12,15,18,24,36,60]px (the fontdue size argument is px),
+//    one line per glyph: gid, integer metrics xmin/ymin/width/height, advance_width/height bits,
+//    the four OutlineBounds f32 bit patterns, and bitmap length + FNV-1a. Zero-area glyphs such
+//    as the space still print (the bitmap len=0 boundary).
+// ⑤ kern: three horizontal pairs (A-V / T-o / f-i) at 24px, None -> none, Some -> bits, covering
+//    the ttf-parser opentype-layout GPOS/kern table paths.
+// ⑥ Total line: every glyph line's text rolls byte-by-byte into one aggregate FNV-1a.
+// Determinism: all inputs are fixed constants, every f32 prints via to_bits, and the loop order
+//    is the two explicit array orders; no randomness/time/HashMap iteration/addresses; stderr empty.
 use fontdue::{Font, FontSettings};
 
 const FONT_PATH: &str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
 const SIZES: [f32; 8] = [6.0, 9.0, 12.0, 15.0, 18.0, 24.0, 36.0, 60.0];
 
-// 主串：ASCII（含空格/标点/数字零面积与轮廓混合面）
+// Main run: ASCII (spaces, punctuation and digits mix zero-area and outline glyphs)
 const ASCII_RUN: &str = "Hello, World! 0123456789";
 // Latin-1 Supplement + Latin Extended-A
 const LATIN_RUN: &str = "ÀáÂäÇçÉèÑñÿĀāČčŒœŠšŽž";
-// 探测段：CJK（预计 miss，probe 行为锁定证据）与连字对（命中则光栅）
+// Probe segment: CJK (expected miss; pins probe behavior) and ligature pairs (rasterized on hit)
 const CJK_PROBE: &str = "中文字";
 const LIG_PROBE: &str = "\u{FB00}\u{FB01}\u{FB02}\u{FB03}";
 
@@ -77,7 +77,7 @@ fn main() {
         }
     };
 
-    // ---- 字体级探针 ----
+    // ---- font-level probes ----
     println!("font name={:?}", font.name());
     println!(
         "font upem_bits={:08x} glyphs={} charmap={} sf24_bits={:08x}",
@@ -107,7 +107,7 @@ fn main() {
         None => println!("vlm24 none"),
     }
 
-    // ---- kern 路径 ----
+    // ---- kern path ----
     for (l, r) in [('A', 'V'), ('T', 'o'), ('f', 'i')] {
         match font.horizontal_kern(l, r, 24.0) {
             Some(k) => println!("kern U+{:04X} U+{:04X} bits={:08x}", l as u32, r as u32, k.to_bits()),
@@ -115,7 +115,7 @@ fn main() {
         }
     }
 
-    // ---- 覆盖探测 + 光栅集装配（数组序显式固定）----
+    // ---- coverage probes + rasterize-set assembly (explicit array order) ----
     let mut run: Vec<char> = ASCII_RUN.chars().chain(LATIN_RUN.chars()).collect();
     for c in CJK_PROBE.chars() {
         let gid = font.lookup_glyph_index(c);
@@ -137,7 +137,7 @@ fn main() {
     }
     println!("rune count={}", run.len());
 
-    // ---- 主光栅循环：8 档 × 全 rune ----
+    // ---- main raster loop: 8 sizes x all runes ----
     let mut agg: u64 = 0xcbf29ce484222325;
     let mut n: u64 = 0;
     for &px in &SIZES {

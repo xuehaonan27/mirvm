@@ -1,15 +1,15 @@
-//! 类型化 interp_frame：M4 引擎解释器。
+//! Tree-walking interpreter for a typed Module. Owns place/operand evaluation against real
+//! addresses, the interpreter's half of calling convention v2 (scalar in 1 slot, pair in 2,
+//! large aggregates via indirect + sret), the shared integer helper semantics, and
+//! `run_main`/`run_export`.
 //!
-//! 结构与 spike3 同形（Call 宿主递归=模型 A、Return 拷回、restore、raw-ptr ctx +
-//! 字段级瞬态借用）。M4.1：place 求值（地址表达式 → 真地址裸读写，帧/堆/statics 统一）
-//! + 调用约定 v2（标量 1 槽 / pair 2 槽 / 大聚合 indirect+sret）。
-//!
-//! M4.2 unwind：guest panic 外包一层 MIRVM 自有异常，其中保留 guest 标准库
-//! 原始异常指针和所属 Engine。解释帧以 raw catch 取得实际穿帧的异常指针；
-//! `unwind_edge` 在每个可 unwind 终止子前设置，landing boundary 先按该异常的身份
-//! 决定是否跑 cleanup，再续传。`FrameGuard` 只负责恢复操作数区和影子帧。
-//! catch 点只消费本 Engine 的 guest panic；异主异常、EngineFault 和宿主异常
-//! 原样续传。
+//! Unwind: a guest panic is wrapped in a MIRVM-owned exception that keeps the guest standard
+//! library's original exception pointer and the owning Engine. An interpreted frame takes
+//! the actually escaping exception pointer from a raw catch; `unwind_edge` is set before each
+//! unwindable terminator, and the landing boundary decides from that exception's identity
+//! whether to run cleanup before propagating on. `FrameGuard` only restores the operand
+//! region and the shadow frame. A catch point consumes only its own Engine's guest panics;
+//! foreign-owned panics, EngineFaults and host exceptions propagate unchanged.
 
 use std::cell::Cell;
 use std::mem::MaybeUninit;
@@ -69,8 +69,9 @@ impl std::fmt::Display for RunError {
     }
 }
 
-/// 发起 guest panic：内层指针仍完全由 guest 标准库管理，外层只标记
-/// MIRVM 异常身份和所属 Engine。
+/// Raises a guest panic: the inner pointer stays entirely owned by the guest standard
+/// library, while the outer wrapper only tags the MIRVM exception identity and owning
+/// Engine.
 pub(crate) fn raise_guest(exception: u64) -> ! {
     let ctx = super::ctx::current();
     let shared = unsafe { (*ctx).shared_arc() };
@@ -98,7 +99,8 @@ pub(super) fn slot_write(ctx: *mut Ctx, base: usize, s: Slot, v: u64) {
     r.write(base, s, v);
 }
 
-/// 真地址裸读（fast：guest 合法假设，无范围检查——真实地址模型）。
+/// Raw read through a real address: the guest's validity assumption is taken as given, with
+/// no range check (the real-address model).
 #[inline]
 pub(super) fn mem_read(addr: u64, w: Width) -> u64 {
     let p = addr as *const u8;
@@ -112,7 +114,7 @@ pub(super) fn mem_read(addr: u64, w: Width) -> u64 {
     }
 }
 
-/// 真地址裸写。
+/// Raw write through a real address, with the same no-range-check fast model as `mem_read`.
 #[inline]
 pub(super) fn mem_write(addr: u64, w: Width, v: u64) {
     let p = addr as *mut u8;
@@ -160,8 +162,10 @@ pub(crate) fn engine_abort(what: &str) -> ! {
     super::unwind::raise_engine_fault(ctx, what.to_owned(), 70)
 }
 
-/// guest TLS 实例真地址（M4.4 D3）：首访惰性物化——heap 分配 + 冻结模板拷贝。
-/// 每线程一份（Ctx 是 thread-local）；guest dtor 与实例内存均在线程退出链收回。
+/// True address of a guest TLS instance, materialized lazily on first access (heap
+/// allocation plus a copy of the frozen template). One instance per thread because the Ctx
+/// is thread-local; the thread-exit chain reclaims both the guest destructors and the
+/// instance memory.
 pub(crate) fn tls_addr(ctx: *mut Ctx, id: u32) -> u64 {
     let tls: &Vec<u64> = unsafe { &(*ctx).tls };
     if let Some(&a) = tls.get(id as usize)
@@ -184,7 +188,8 @@ pub(crate) fn tls_addr(ctx: *mut Ctx, id: u32) -> u64 {
     addr
 }
 
-/// 地址表达式求值 → 真地址（place 求值核心；帧基址是真地址 ⇒ 全程裸地址算术）。
+/// Evaluates a place expression to a true address (the core of place evaluation; the frame
+/// base is already a true address, so all arithmetic is on raw addresses).
 pub(super) fn eval_place_addr(ctx: *mut Ctx, base: usize, expr: &PlaceExpr) -> u64 {
     let mut addr = match expr.base {
         PlaceBase::Local(off) => base as u64 + off as u64,
@@ -206,12 +211,12 @@ pub(super) fn eval_place_addr(ctx: *mut Ctx, base: usize, expr: &PlaceExpr) -> u
                 }
                 if align == 0 || !align.is_power_of_two() {
                     engine_abort(&format!(
-                        "dyn vtable alignment 非 2 的幂：{align}（vtable={vtable:#x}）"
+                        "dyn vtable alignment is not a power of two: {align} (vtable={vtable:#x})"
                     ));
                 }
                 let offset = unaligned.checked_add(align - 1).unwrap_or_else(|| {
                     engine_abort(&format!(
-                        "dyn 尾字段 offset 溢出：unaligned={unaligned} align={align}"
+                        "dyn trailing-field offset overflow: unaligned={unaligned} align={align}"
                     ))
                 }) & !(align - 1);
                 addr = addr.wrapping_add(offset);
@@ -225,7 +230,7 @@ pub(super) fn eval_place_addr(ctx: *mut Ctx, base: usize, expr: &PlaceExpr) -> u
     addr
 }
 
-/// 符号扩展到 i64（按宽度）。
+/// Sign-extends `bits` to i64 at its declared width.
 #[inline]
 pub(super) fn sext(bits: u64, w: Width) -> i64 {
     match w {
@@ -276,13 +281,13 @@ pub(super) fn int_bin(op: IntBinOp, signed: bool, a: u64, b: u64, w: Width) -> u
             IntBinOp::Mul => x.wrapping_mul(y) as u64,
             IntBinOp::Div => {
                 if y == 0 {
-                    engine_abort("guest 整除以零");
+                    engine_abort("guest integer division by zero");
                 }
                 x.wrapping_div(y) as u64
             }
             IntBinOp::Rem => {
                 if y == 0 {
-                    engine_abort("guest 取余以零");
+                    engine_abort("guest integer remainder by zero");
                 }
                 x.wrapping_rem(y) as u64
             }
@@ -290,7 +295,7 @@ pub(super) fn int_bin(op: IntBinOp, signed: bool, a: u64, b: u64, w: Width) -> u
             IntBinOp::BitOr => a | b,
             IntBinOp::BitXor => a ^ b,
             IntBinOp::Shl => (x as u64).wrapping_shl(b as u32),
-            IntBinOp::Shr => (x >> (b as u32 & 63)) as u64, // 算术右移
+            IntBinOp::Shr => (x >> (b as u32 & 63)) as u64, // arithmetic shift right
         }
     } else {
         match op {
@@ -299,13 +304,13 @@ pub(super) fn int_bin(op: IntBinOp, signed: bool, a: u64, b: u64, w: Width) -> u
             IntBinOp::Mul => a.wrapping_mul(b),
             IntBinOp::Div => {
                 if b == 0 {
-                    engine_abort("guest 整除以零");
+                    engine_abort("guest integer division by zero");
                 }
                 a / b
             }
             IntBinOp::Rem => {
                 if b == 0 {
-                    engine_abort("guest 取余以零");
+                    engine_abort("guest integer remainder by zero");
                 }
                 a % b
             }
@@ -313,13 +318,13 @@ pub(super) fn int_bin(op: IntBinOp, signed: bool, a: u64, b: u64, w: Width) -> u
             IntBinOp::BitOr => a | b,
             IntBinOp::BitXor => a ^ b,
             IntBinOp::Shl => a.wrapping_shl(b as u32),
-            IntBinOp::Shr => (a & m).wrapping_shr(b as u32), // 逻辑右移
+            IntBinOp::Shr => (a & m).wrapping_shr(b as u32), // logical shift right
         }
     };
     r & m
 }
 
-/// f128 place 位读/写（16 字节非对齐安全；D8c 宽通道公共小件）。
+/// f128 place bit read/write, safe for 16-byte unaligned access.
 pub(super) fn f128_read(p: u64) -> f128 {
     f128::from_bits(unsafe { (p as *const u128).read_unaligned() })
 }
@@ -327,7 +332,8 @@ pub(super) fn f128_write(p: u64, v: f128) {
     unsafe { (p as *mut u128).write_unaligned(v.to_bits()) }
 }
 
-/// 冻结 MemOrd → 宿主 Ordering（D8j：guest 请求什么序就执行什么序）。
+/// Frozen `MemOrd` to host `Ordering`: the guard order the guest asked for is the one
+/// executed.
 pub(super) fn host_ord(o: super::ir::MemOrd) -> std::sync::atomic::Ordering {
     use std::sync::atomic::Ordering as O;
     match o {
@@ -339,7 +345,7 @@ pub(super) fn host_ord(o: super::ir::MemOrd) -> std::sync::atomic::Ordering {
     }
 }
 
-/// 位单目（BitUn rvalue 与 SIMD lane 共用，D8b）。
+/// Bitwise unary ops, shared by the BitUn rvalue and SIMD lanes.
 pub(super) fn bit_un(op: super::ir::BitUnOp, v: u64, w: Width) -> u64 {
     use super::ir::BitUnOp as B;
     match (op, w) {
@@ -363,13 +369,14 @@ pub(super) fn bit_un(op: super::ir::BitUnOp, v: u64, w: Width) -> u64 {
     }
 }
 
-/// 饱和加/减/乘（IntSat rvalue 与 SIMD SatAdd/SatSub 共用，D8b）。
+/// Saturating add/sub/mul, shared by the IntSat rvalue and SIMD SatAdd/SatSub.
 pub(super) fn int_saturating(op: OvfOp, signed: bool, av: u64, bv: u64, w: Width) -> u64 {
     let (v, ovf) = int_ovf(op, signed, av, bv, w);
     if !ovf {
         v
     } else if signed {
-        // 方向：加正溢出→MAX，其余按符号推
+        // Direction: a positive add overflow saturates to MAX; the rest follow from the
+        // operand signs.
         let (x, y) = (sext(av, w), sext(bv, w));
         let toward_max = match op {
             OvfOp::Add => y > 0,
@@ -407,7 +414,8 @@ pub(super) fn int_cmp(cc: IntCc, signed: bool, a: u64, b: u64, w: Width) -> u64 
     t as u64
 }
 
-/// *WithOverflow：提升到 128 位算，按宽度/符号判溢出。
+/// `*WithOverflow`: computes at 128 bits and decides overflow from the width and
+/// signedness.
 pub(super) fn int_ovf(op: OvfOp, signed: bool, a: u64, b: u64, w: Width) -> (u64, bool) {
     if signed {
         let (x, y) = (sext(a, w) as i128, sext(b, w) as i128);
@@ -443,7 +451,8 @@ struct FrameGuard {
     depth_active: bool,
     base: Option<usize>,
     shadow_active: bool,
-    /// 动态 LSDA：当前可 unwind 终止子的 cleanup 边（Call 前设置、返回后清除）
+    /// Dynamic LSDA: the cleanup edge of the currently unwindable terminator (set before a
+    /// Call, cleared once it returns).
     unwind_edge: Cell<Option<Bb>>,
 }
 
@@ -451,7 +460,7 @@ impl Drop for FrameGuard {
     fn drop(&mut self) {
         unsafe {
             if self.shadow_active {
-                (*self.ctx).shadow.pop(); // D8e：影子帧出栈（与 depth 同生命周期）
+                (*self.ctx).shadow.pop(); // pop the shadow frame; it shares the depth's lifetime
             }
             if let Some(base) = self.base {
                 region_restore(self.ctx, base);
@@ -463,32 +472,36 @@ impl Drop for FrameGuard {
     }
 }
 
-/// 块序列执行的出口。
+/// Exit from a block-sequence run.
 enum Exit {
     Ret(u64, u64),
-    /// cleanup 链尾（Resume）：返回 guard.drop，宿主 unwind 自动继续
+    /// Tail of a cleanup chain (Resume): return to guard.drop and let the host unwinder
+    /// continue.
     Resume,
 }
 
-/// 按 D4 fn 条目真地址派发（CallIndirect / catch_unwind 的 try/catch fn 共用）。
-// ===== signal 异步窄化（D8d）=====
-/// guest 信号 handler → AS-trampoline 真码地址。async 信号（可安全 run-to-completion）
-/// 复用 M4.4 thunk 工厂（attach + interp_frame，签名 `(i32)->void`）；sync 故障信号
-/// （SEGV/BUS/FPE/ILL/TRAP）的 guest handler 响亮拒绝——宿主故障与 guest 故障不可分辨，
-/// 伪造恢复=静默错值。handler 必须是已知 guest fn 条目（非 guest 地址不接）。
+/// Single dispatch point for every guest function call: Call, CallIndirect, the
+/// catch_unwind try/catch fns, run_main, run_export and the thunk trampolines.
+///
+/// A non-zero published slot means compiled code (the packed i2c entry once published) and
+/// is called directly; a zero slot counts the call and interprets it. The counter uses
+/// Relaxed ordering because a lost count only moves the compilation trigger, while the slot
+/// load uses Acquire against the compiler thread's Release.
 pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
     let jit = unsafe { &(*(*ctx).shared).jit };
     if jit.enabled {
         let call_compiled = |entry: u64| -> (u64, u64) {
-            // i2c：packed 入口（M5.3b；发布序 fast→packed，Acquire 已见全部前置写）
+            // i2c: the packed entry (published fast -> packed, and the Acquire load has
+            // already seen every preceding write)
             type Packed = extern "C-unwind" fn(*const u64, *mut u64);
             let f: Packed = unsafe { std::mem::transmute(entry as usize) };
             let mut ret = [0u64; 2];
             f(args.as_ptr(), ret.as_mut_ptr());
             (ret[0], ret[1])
         };
-        // strict 失败哨兵（MIRVM_JIT_SYNC）：可准入编译失败在任何后续调用点
-        // 都响亮 abort——哨兵只在 sync 模式由 worker 写入（非 sync 永不出现）
+        // Strict failure sentinel (MIRVM_JIT_SYNC): an admissible function that failed to
+        // compile aborts loudly at every later call site. The worker writes the sentinel only
+        // in sync mode, so it never appears otherwise.
         let fail_abort = |ctx: *mut Ctx| -> ! {
             let shared = unsafe { &*(*ctx).shared };
             engine_abort(&format!(
@@ -547,9 +560,10 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
         {
             let _ = q.send(func);
         }
-        // SYNC 验证模式（audit F-05）：已投递（本次或更早）→ 等待发布/
-        // 失败哨兵。threshold=1 的语义由此从「首调请求编译」升为「首调
-        // 同步编译发布」——逢调即编的差分从此证明编译码真被执行
+        // SYNC verification mode: once submitted (now or earlier), wait for publication or
+        // the failure sentinel. With threshold = 1 this turns "request compilation on the
+        // first call" into "compile and publish synchronously on the first call", so the
+        // compile-on-every-call differential proves compiled code really ran.
         if jit.sync && prev + 1 >= jit.threshold {
             let mut spins = 0u32;
             loop {
@@ -609,7 +623,9 @@ pub(crate) fn dispose_guest_panic_during_startup(
     dispose_uncaught_guest_panic(activation.ctx(), payload);
 }
 
-/// C1：FnId 的返回通道（thunk 分流——Indirect sret 直传 vs 小档重打包的判定源）。
+/// Runs the module's `main` through the `lang_start` entry: resolves the entry, executes it
+/// under a raw catch, disposes of an uncaught guest panic, and runs the atexit callbacks
+/// before reporting the outcome.
 pub fn run_main(engine: &Engine) -> Result<RunOutcome<i32>, RunError> {
     let lease = engine.execution_lease().map_err(|_| RunError {
         kind: RunErrorKind::EngineClosed,
@@ -627,7 +643,7 @@ pub fn run_main(engine: &Engine) -> Result<RunOutcome<i32>, RunError> {
     let activation = super::ctx::activate(shared);
     let ctx_ptr = activation.ctx();
     let main_run = super::ctx::begin_main_run(ctx_ptr);
-    super::ctx::set_fork_baseline(shared); // D8f：钉住单 guest 线程的 fork 守卫基线
+    super::ctx::set_fork_baseline(shared); // pin the fork guard baseline for a single-threaded guest
     let args = [
         shared.module.resolve_link_addr(entry.main_addr),
         entry.argc,
@@ -677,9 +693,11 @@ pub fn run_main(engine: &Engine) -> Result<RunOutcome<i32>, RunError> {
     Ok(outcome)
 }
 
-/// dev 入口（M4.0 gate）：按导出名调一个函数。
-/// 顶层 catch：guest panic 穿出导出函数 = 未捕获 panic → 诊断 + 退出码 101
-/// （native lang_start 语义的近似；完整启动链 M4.3）。宿主 panic（VM bug）原样续传。
+/// Dev entry: calls an exported function by name.
+///
+/// Top-level catch: a guest panic escaping the export is an uncaught panic, reported as a
+/// diagnostic with exit code 101 (an approximation of native lang_start semantics). A host
+/// panic, i.e. a VM bug, propagates unchanged.
 ///
 /// # Safety
 ///
@@ -712,7 +730,7 @@ pub unsafe fn run_export(
     };
     let activation = super::ctx::activate(shared);
     let ctx_ptr = activation.ctx();
-    super::ctx::set_fork_baseline(shared); // D8f
+    super::ctx::set_fork_baseline(shared); // pin the fork guard baseline for a single-threaded guest
     match super::unwind::catch_raw(|| call_guest(ctx_ptr, id, args)) {
         Ok((lo, hi)) => {
             run_atexit_callbacks(ctx_ptr, 0);

@@ -6,11 +6,11 @@ unicode-segmentation = "1"
 unicode-bidi = "0.3"
 unicode-width = "0.2"
 ---
-// unicode 表驱动四门面：
-//   normalization —— NFC/NFD/NFKC/NFKD 对组合字符/Hangul 音节/连字的归一（码点 hex）
-//   segmentation  —— graphemes/words/sentences 切分（emoji+ZWJ、组合旗标、肤色修饰符）
-//   bidi          —— 英阿混排 per-char levels + visual reorder
-//   width         —— CJK/emoji/控制符宽度 + 大范围码点求和（大表查询压力）
+// unicode table-driven four-surface:
+//   normalization -- NFC/NFD/NFKC/NFKD over combining marks/Hangul syllables/ligatures (codepoint hex)
+//   segmentation  -- graphemes/words/sentences (emoji+ZWJ, flag pairs, skin-tone modifiers)
+//   bidi          -- English/Arabic mixed per-char levels + visual reorder
+//   width         -- CJK/emoji/control widths + large-range codepoint sums (big-table lookup pressure)
 use unicode_bidi::{BidiInfo, Level, get_base_direction};
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::{canonical_combining_class, compose, is_combining_mark};
@@ -27,26 +27,26 @@ fn hex(s: &str) -> String {
 fn main() {
     println!("unicode-version = {:?}", unicode_normalization::UNICODE_VERSION);
 
-    // ==== ① normalization：组合字符 / Hangul / 连字 / 兼容字符 ====
+    // ==== ① normalization: combining marks / Hangul / ligatures / compatibility chars ====
     let norm_cases: &[(&str, &str)] = &[
         ("comb-acute", "e\u{0301}"),               // e + COMBINING ACUTE
         ("precomposed", "\u{00E9}"),               // é
-        ("double-comb", "o\u{0302}\u{0301}"),      // ô + acute 叠加
-        ("reorder", "a\u{0315}\u{0300}"),          // ccc 232 在前 230 在后 → NFD 重排
+        ("double-comb", "o\u{0302}\u{0301}"),      // o-circumflex + acute stacked
+        ("reorder", "a\u{0315}\u{0300}"),          // ccc 232 before 230 -> NFD reorders
         ("hangul-jamo", "\u{1100}\u{1161}\u{11A8}"), // 각 → 각
         ("hangul-syll-trail", "\u{AC01}\u{11A8}"), // 각 + ᆨ → 갂
-        ("hangul-word", "한국어"),                 // 预组合音节词
-        ("fi-ligature", "\u{FB01}"),               // ﬁ → fi (仅兼容分解)
+        ("hangul-word", "한국어"),                 // precomposed syllable word
+        ("fi-ligature", "\u{FB01}"),               // fi ligature -> fi (compatibility only)
         ("circled-digits", "\u{2461}\u{2462}"),    // ②③ → 2 3
         ("superscript", "x\u{00B2}y\u{2075}"),     // x²y⁵ → x2y5
         ("square-kana", "\u{3300}"),               // ㌀ → カタカナ
         ("angstrom", "\u{212B}"),                  // Å(ANGSTROM) → 0041 030A
         ("fullwidth", "\u{FF21}\u{FF42}"),         // Ａｂ → Ab
-        ("compat-cjk", "\u{FA10}"),                // 塚 → 塚 (canonical)
-        ("arabic-lig", "\u{FDFA}"),                // ﷺ → 18 码点兼容展开
+        ("compat-cjk", "\u{FA10}"),                // CJK compatibility ideograph -> canonical
+        ("arabic-lig", "\u{FDFA}"),                // Arabic ligature -> 18-codepoint expansion
         ("devanagari", "\u{0915}\u{093C}\u{093F}"), // क + nukta + vowel sign
-        ("tibetan-vowel", "\u{0F40}\u{0F71}\u{0F72}"), // ccc 129/130 排序
-        ("emoji-untouched", "👍🏽\u{1F1E8}\u{1F1F3}"), // emoji/旗标不归一化
+        ("tibetan-vowel", "\u{0F40}\u{0F71}\u{0F72}"), // ccc 129/130 ordering
+        ("emoji-untouched", "👍🏽\u{1F1E8}\u{1F1F3}"), // emoji/flag pairs are not normalized
         ("mixed-line", "Cafe\u{0301} \u{AC00}\u{1100}\u{1161}\u{FB01}"),
     ];
     for &(name, input) in norm_cases {
@@ -59,7 +59,7 @@ fn main() {
         println!("  nfd  = {}", hex(&nfd));
         println!("  nfkc = {}", hex(&nfkc));
         println!("  nfkd = {}", hex(&nfkd));
-        // 不变量交给两侧机器各自计算，由 diff 裁决
+        // Invariants are computed independently on both sides and settled by the diff
         println!(
             "  inv nfc^2={} nfkc^2={} nfc(nfd)={} len={}/{}/{}/{}",
             input.nfc().nfc().collect::<String>() == nfc,
@@ -71,7 +71,7 @@ fn main() {
             nfkd.chars().count(),
         );
     }
-    // 低层 char API：组合类 / 合成表 / 组合标记判定
+    // Low-level char API: combining class / composition table / combining-mark predicate
     for c in ['\u{0301}', '\u{0315}', '\u{0300}', 'a', '\u{093C}', '\u{0F71}'] {
         println!(
             "ccc U+{:04X} = {} mark={}",
@@ -86,7 +86,7 @@ fn main() {
         "compose(hangul) = {:?}",
         compose('\u{1100}', '\u{1161}')
     );
-    // Hangul 批量：64 个音节的 NFD 总码点数 + NFC roundtrip 计数
+    // Hangul batch: total NFD codepoint count over 64 syllables + NFC roundtrip count
     let mut dcnt = 0usize;
     let mut rt = 0usize;
     for cp in 0xAC00u32..0xAC40 {
@@ -98,16 +98,16 @@ fn main() {
     }
     println!("hangul batch: nfd-total={dcnt} roundtrip={rt}/64");
 
-    // ==== ② segmentation：graphemes / words / sentences ====
+    // ==== ② segmentation: graphemes / words / sentences ====
     let seg_cases: &[&str] = &[
-        "👨‍👩‍👧‍👦",                      // ZWJ 家庭序列 = 1 grapheme
-        "\u{1F1E8}\u{1F1F3}\u{1F1FA}\u{1F1F8}", // 🇨🇳🇺🇸 组合旗标 = 2
-        "e\u{0301} cafe\u{0301} 日本語",       // 组合符 + CJK
+        "👨‍👩‍👧‍👦",                      // ZWJ family sequence = 1 grapheme
+        "\u{1F1E8}\u{1F1F3}\u{1F1FA}\u{1F1F8}", // flag pair = 2
+        "e\u{0301} cafe\u{0301} 日本語",       // combining mark + CJK
         "Hello, world! It's a test.",
         "The quick (brown) fox can't jump. Really?! Yes.",
         "中文没有空格。第二句在这里！第三句吗？",
-        "👍🏽👍 thumbs up",                    // 肤色修饰符
-        "क्‍ष test 123",                     // 梵文合字(ZWJ) + latin
+        "👍🏽👍 thumbs up",                    // skin-tone modifier
+        "क्‍ष test 123",                     // Devanagari conjunct (ZWJ) + latin
     ];
     for &t in seg_cases {
         let gs: Vec<&str> = t.graphemes(true).collect();
@@ -122,7 +122,7 @@ fn main() {
         println!("  sentences = {} {:?}", ss.len(), ss);
     }
 
-    // ==== ③ bidi：英阿/英希混排 levels + visual 序 ====
+    // ==== ③ bidi: English/Arabic and English/Hebrew mixed levels + visual order ====
     let bidi_cases: &[(&str, Option<Level>)] = &[
         ("hello مرحبا world", None),
         ("abc 123 تجربة DEF", None),
@@ -149,7 +149,7 @@ fn main() {
                 para.range.start,
                 para.range.end
             );
-            // per-char level（取每字符首字节的 level）
+            // per-char level (the level of each character's first byte)
             let per_char: Vec<u8> = text[para.range.clone()]
                 .char_indices()
                 .map(|(i, _)| info.levels[para.range.start + i].number())
@@ -167,15 +167,15 @@ fn main() {
         }
     }
 
-    // ==== ④ width：CJK / emoji / 控制符 / 组合符 ====
+    // ==== ④ width: CJK / emoji / control chars / combining marks ====
     let width_chars: &[char] = &[
         'a', 'Z', '7', ' ', '汉', '字', 'カ', 'ｱ', 'Ａ',
-        '😀', '👍', '\u{1F3FD}',           // emoji + 肤色修饰符
-        '\u{0301}', '\u{200D}',            // 组合符 / ZWJ
-        '\u{0}', '\u{7}', '\u{1B}', '\u{7F}', '\t', // 控制符
-        '·', '§', '±',                     // Ambiguous（CJK 语境变宽）
+        '😀', '👍', '\u{1F3FD}',           // emoji + skin-tone modifier
+        '\u{0301}', '\u{200D}',            // combining mark / ZWJ
+        '\u{0}', '\u{7}', '\u{1B}', '\u{7F}', '\t', // control chars
+        '·', '§', '±',                     // Ambiguous (wider in a CJK context)
         '\u{AD}', '·',                     // SOFT HYPHEN
-        '\u{2028}', '\u{3000}',            // LINE SEP / 表意空格
+        '\u{2028}', '\u{3000}',            // LINE SEP / ideographic space
     ];
     for &c in width_chars {
         println!(
@@ -204,14 +204,14 @@ fn main() {
             UnicodeWidthStr::width_cjk(s)
         );
     }
-    // 大范围码点扫描求和：大表二分/区间查询的覆盖压力
+    // Large-range codepoint sweep: coverage pressure for big-table binary/range lookups
     let ranges: &[(u32, u32)] = &[
         (0x20, 0x7F),       // ASCII printable
         (0x300, 0x370),     // combining marks
         (0x2E80, 0x3400),   // CJK radicals
-        (0x4E00, 0xA000),   // CJK 统一表意（约 20K 码点）
-        (0xAC00, 0xD800),   // Hangul 音节全表
-        (0x1F300, 0x1F650), // emoji 主块
+        (0x4E00, 0xA000),   // CJK unified ideographs (~20K codepoints)
+        (0xAC00, 0xD800),   // the full Hangul syllable table
+        (0x1F300, 0x1F650), // the main emoji block
     ];
     let mut grand = 0usize;
     let mut grand_cjk = 0usize;

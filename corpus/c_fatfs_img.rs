@@ -1,26 +1,26 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# crates.io 上 fatfs 最新发布即 0.3.6（上游从未发布 0.4）；钉死保证三维同一依赖图。
-# default-features=false 摘掉 chrono：默认 TimeProvider 取 chrono::Local::now() 壁钟，
-# 是确定性炸弹；改由自定义固定 TimeProvider 锚定全部时间戳（顺带覆盖该 API 面）。
+# fatfs's newest crates.io release is 0.3.6 (0.4 was never published), so pinning it
+# keeps all three dimensions on one dependency graph. default-features=false drops
+# chrono (the default TimeProvider uses the wall clock) for a fixed-time provider.
 fatfs = { version = "=0.3.6", default-features = false, features = ["std", "alloc"] }
 ---
-// fatfs 0.3.6（纯 Rust FAT 实现）：temp_dir 镜像文件作块设备 → format_volume mkfs
-// FAT16（钉 volume_id / volume_label / 4KB 簇）→ 固定时钟挂载 → 建多级目录树
-// （8.3 短名 / LFN 长名 / unicode 名，含 unicode 目录套 unicode 文件）→ 写读文件
-// （150KB 定种随机大文件跨 ~37 个 4KB 簇、追加、truncate、同目录 rename、跨目录
-// move）→ 按名排序递归列树（确定序）→ 删文件/空目录 → 再列树 → 校验剩余结构与
-// stats → unmount → boot 扇区 + FAT 首扇区 FNV 锚定 → 删镜像清理（多跑不累加）。
+// fatfs 0.3.6 (pure-Rust FAT): a temp_dir image file as the block device -> format_volume
+// mkfs FAT16 (pinned volume_id / volume_label / 4KB clusters) -> mount with a fixed clock
+// -> build a multi-level tree (8.3 short names / LFN long names / unicode names) -> write
+// and read files (a 150KB seeded file spanning ~37 clusters, append, truncate, rename,
+// cross-dir move) -> list recursively by name -> delete -> list again -> unmount -> anchor
+// boot + first FAT sector FNV -> delete the image (repeatable).
 //
-// 覆盖 API：format_volume / FormatVolumeOptions / FileSystem::new / fat_type /
+// API coverage: format_volume / FormatVolumeOptions / FileSystem::new / fat_type /
 // volume_id / read_volume_label_from_root_dir / cluster_size / stats / root_dir /
-// create_dir(嵌套路径) / create_file / open_file / open_dir / iter / remove /
-// rename(同目录+跨目录) / File 的 Read/Write/Seek/truncate / DirEntry 的 file_name /
-// short_file_name / is_dir / is_file / len / attributes / created / modified /
-// accessed / 自定义 TimeProvider / unmount。错误路径：开不存在文件、create_dir
-// 撞已存在文件、删非空目录、rename 撞已存在目标、open_dir 撞文件。
-// 确定性：只打印长度/排序条目/FNV/十六进制/布尔——无路径/壁钟/地址/HashMap 序。
+// create_dir (nested) / create_file / open_file / open_dir / iter / remove / rename /
+// File Read/Write/Seek/truncate / DirEntry name accessors and metadata / the custom
+// TimeProvider / unmount. Error paths: missing file, create_dir over a file, removing a
+// non-empty dir, rename onto an existing target, and open_dir on a file.
+// Determinism: only lengths/sorted entries/FNV/hex/bools are printed -- no paths, wall
+// clock, addresses or HashMap order.
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -29,12 +29,12 @@ use fatfs::{
     Time, TimeProvider,
 };
 
-/// 32MB 镜像：65536 扇区 / 4KB 簇 → ~8k 簇，落在 FAT16 簇数窗口 [4085, 65525)。
+/// 32MB image: 65536 sectors / 4KB clusters -> ~8k clusters, inside the FAT16 window [4085, 65525).
 const IMG_SIZE: u64 = 32 * 1024 * 1024;
-/// 150KB 大文件 ≈ 37 个 4KB 簇，强制跨簇链分配/读回。
+/// A 150KB file is ~37 4KB clusters, forcing cross-cluster chain allocation and readback.
 const BIG_LEN: usize = 150_000;
 
-/// 固定时钟：created/modified/accessed 全部锚定 2024-03-14 15:09:26.000。
+/// Fixed clock: created/modified/accessed are all anchored to 2024-03-14 15:09:26.000.
 #[derive(Debug)]
 struct FixedTime;
 
@@ -62,7 +62,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 定种 xorshift64* PRNG（native/mirvm 同序列）。
+/// Seeded xorshift64* PRNG (same sequence on native and mirvm).
 struct Rng(u64);
 
 impl Rng {
@@ -100,7 +100,7 @@ fn fmt_dt(dt: DateTime) -> String {
     )
 }
 
-/// 按 file_name 排序递归列树（确定序）；跳过 "." / ".."。
+/// Recursively list the tree sorted by file_name (deterministic order); skips "." / "..".
 fn dump_tree<T: ReadWriteSeek>(dir: &Dir<'_, T>, prefix: &str) {
     let mut entries: Vec<_> = dir.iter().map(|r| r.unwrap()).collect();
     entries.sort_by_key(|e| e.file_name());
@@ -131,7 +131,7 @@ fn dump_tree<T: ReadWriteSeek>(dir: &Dir<'_, T>, prefix: &str) {
 }
 
 fn main() {
-    // ---- ① 块设备：temp_dir 固定名镜像（先删后建，幂等起点）----
+    // ---- ① block device: fixed-name temp_dir image (delete then create, idempotent start) ----
     let img = std::env::temp_dir().join("mirvm_fatfs_img_driver.img");
     let _ = std::fs::remove_file(&img);
     let mut dev = OpenOptions::new()
@@ -143,7 +143,7 @@ fn main() {
         .unwrap();
     dev.set_len(IMG_SIZE).unwrap();
 
-    // ---- ② mkfs FAT16（钉卷 ID / 卷标 / 簇大小）----
+    // ---- ② mkfs FAT16 (pinned volume ID / label / cluster size) ----
     dev.seek(SeekFrom::Start(0)).unwrap();
     fatfs::format_volume(
         &mut dev,
@@ -156,7 +156,7 @@ fn main() {
     .unwrap();
     dev.seek(SeekFrom::Start(0)).unwrap();
 
-    // ---- ③ 挂载 + 卷信息 ----
+    // ---- ③ mount + volume info ----
     let fs = FileSystem::new(&mut dev, FsOptions::new().time_provider(&FIXED_TIME)).unwrap();
     println!("fat_type = {:?}", fs.fat_type());
     println!("volume_id = {:08x}", fs.volume_id());
@@ -165,7 +165,7 @@ fn main() {
     let st = fs.stats().unwrap();
     println!("fresh stats total={} free={}", st.total_clusters(), st.free_clusters());
 
-    // ---- ④ 建目录树（多级 / 短名 / LFN / unicode）----
+    // ---- ④ build the directory tree (multi-level / short names / LFN / unicode) ----
     let root = fs.root_dir();
     root.create_dir("DOCS").unwrap();
     root.create_dir("PICS").unwrap();
@@ -173,7 +173,7 @@ fn main() {
     root.create_dir("DOCS/WORK").unwrap();
     root.create_dir("DOCS/WORK/deep level 3").unwrap();
 
-    // 8.3 短名文件（后面做 truncate）
+    // 8.3 short-name file (truncated later)
     let mut readme = Vec::new();
     for i in 0..12u32 {
         readme.extend_from_slice(format!("readme line {i:02} 1234567890 abcdefghij\n").as_bytes());
@@ -182,27 +182,27 @@ fn main() {
         let mut f = root.create_file("README.TXT").unwrap();
         f.write_all(&readme).unwrap();
     }
-    // LFN 长名文件（后面做 rename/move）
+    // LFN long-name file (renamed/moved later)
     let lfn_body = "长文件名内容：汉字与 ASCII 混排。\n".as_bytes().to_vec();
     {
         let mut f = root.create_file("my long file name.txt").unwrap();
         f.write_all(&lfn_body).unwrap();
     }
-    // unicode 目录里的 unicode 文件
+    // unicode file inside a unicode directory
     let uni_body = "ユニコード名の中身\n".as_bytes().to_vec();
     {
         let uni_dir = root.open_dir("long directory 文档").unwrap();
         let mut f = uni_dir.create_file("日本語ファイル.txt").unwrap();
         f.write_all(&uni_body).unwrap();
     }
-    // 多级子目录里的 unicode 报告
+    // unicode report inside a multi-level subdirectory
     let report_body = "季度报告：数据 42，结论 OK。\n".as_bytes().to_vec();
     {
         let docs = root.open_dir("DOCS").unwrap();
         let mut f = docs.create_file("report 2024 数据.txt").unwrap();
         f.write_all(&report_body).unwrap();
     }
-    // 跨簇大文件（定种随机）
+    // cross-cluster large file (seeded random)
     let big = Rng(0x9E3779B97F4A7C15).bytes(BIG_LEN);
     let big_fnv = fnv1a(&big);
     {
@@ -210,7 +210,7 @@ fn main() {
         let mut f = pics.create_file("blob.bin").unwrap();
         f.write_all(&big).unwrap();
     }
-    // 深层叶文件（结构化日志，后面做追加）
+    // deep leaf file (structured log, appended later)
     {
         let deep = root.open_dir("DOCS/WORK/deep level 3").unwrap();
         let mut f = deep.create_file("leaf.log").unwrap();
@@ -219,7 +219,7 @@ fn main() {
         }
     }
 
-    // ---- ⑤ 追加 / truncate / rename ----
+    // ---- ⑤ append / truncate / rename ----
     {
         let mut f = root.open_file("DOCS/WORK/deep level 3/leaf.log").unwrap();
         let before = f.seek(SeekFrom::End(0)).unwrap();
@@ -236,17 +236,17 @@ fn main() {
         let end = f.seek(SeekFrom::End(0)).unwrap();
         println!("truncate README.TXT -> {end}");
     }
-    // 同目录 rename + 跨目录 move
+    // same-directory rename + cross-directory move
     let docs_dir = root.open_dir("DOCS").unwrap();
     root.rename("my long file name.txt", &root, "renamed final.txt").unwrap();
     root.rename("renamed final.txt", &docs_dir, "moved final.txt").unwrap();
     println!("rename + move ok");
 
-    // ---- ⑥ 列树（建后）----
+    // ---- ⑥ list the tree (after build) ----
     println!("-- tree after build --");
     dump_tree(&root, "");
 
-    // ---- ⑦ 读回校验 ----
+    // ---- ⑦ read-back verification ----
     let mut buf = Vec::new();
     root.open_file("PICS/blob.bin").unwrap().read_to_end(&mut buf).unwrap();
     println!(
@@ -274,7 +274,7 @@ fn main() {
     root.open_file("long directory 文档/日本語ファイル.txt").unwrap().read_to_end(&mut buf).unwrap();
     println!("unicode file len={} ok={}", buf.len(), buf == uni_body);
 
-    // ---- ⑧ 错误路径（消息为 crate 固定串，确定）----
+    // ---- ⑧ error paths (the messages are the crate's fixed strings, deterministic) ----
     match root.open_file("NOPE.TXT") {
         Ok(_) => println!("open-missing: unexpected ok"),
         Err(e) => println!("open-missing err kind={:?} msg={e}", e.kind()),
@@ -296,9 +296,9 @@ fn main() {
         Err(e) => println!("opendir-on-file err kind={:?} msg={e}", e.kind()),
     }
 
-    // ---- ⑨ 删除 + 再列 + stats ----
+    // ---- ⑨ delete + list again + stats ----
     root.remove("DOCS/WORK/deep level 3/leaf.log").unwrap();
-    root.remove("DOCS/WORK/deep level 3").unwrap(); // 已空
+    root.remove("DOCS/WORK/deep level 3").unwrap(); // now empty
     root.remove("PICS/blob.bin").unwrap();
     root.remove("PICS").unwrap();
     println!("-- tree after delete --");
@@ -306,8 +306,8 @@ fn main() {
     let st2 = fs.stats().unwrap();
     println!("final stats total={} free={}", st2.total_clusters(), st2.free_clusters());
 
-    // ---- ⑩ unmount + 镜像锚定 + 清理 ----
-    // Dir 带 drop glue，显式drop 释放对 fs/dev 的借用，才能 move fs 进 unmount。
+    // ---- ⑩ unmount + image anchors + cleanup ----
+    // Dir carries drop glue; an explicit drop releases the borrow of fs/dev so fs can move into unmount.
     drop(docs_dir);
     drop(root);
     fs.unmount().unwrap();

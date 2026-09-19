@@ -2,12 +2,12 @@
 ---
 [dependencies]
 datafusion = { version = "=54.0.0", default-features = false, features = ["sql"] }
-# 上游 semver 破洞（2026-07-27 实锤）：datafusion 54.0.0 对 internal crates
-# 全用 ^54.0.0，physical-plan 54.1.0 把 RecursiveQueryExec::try_new 从 4 参
-# 改成 5 参，54.0.0 的 lib 直接编不过（E0061；cargo 自家 fresh 解析同样
-# 选 54.1.0 同样炸——非 mirvm 分叉）。internal 家族又互以 ^54.x 串联
-# （catalog 54.1.0 → physical-plan ^54.1.0），单钉一个就撞下一个——
-# 全家 28 个 internal 一律钉 =54.0.0（driver 验收时代的自洽家族）。
+# Upstream semver hole: datafusion 54.0.0 uses ^54.0.0 for its internal crates,
+# but physical-plan 54.1.0 changed RecursiveQueryExec::try_new from 4 args to 5,
+# so the 54.0.0 lib fails to compile (E0061; cargo's own fresh resolution picks
+# 54.1.0 too -- not a mirvm fork). The internal family chains itself with ^54.x
+# (catalog 54.1.0 -> physical-plan ^54.1.0), so pinning one hits the next: all 28
+# internal crates are pinned to =54.0.0 as a self-consistent set.
 datafusion-catalog = "=54.0.0"
 datafusion-catalog-listing = "=54.0.0"
 datafusion-common = "=54.0.0"
@@ -39,36 +39,38 @@ datafusion-session = "=54.0.0"
 datafusion-sql = "=54.0.0"
 tokio = { version = "1", default-features = false, features = ["rt"] }
 ---
-// c_datafusion_sql —— Apache DataFusion 现行稳定大物：SessionContext + 内存
-// RecordBatch 三表 + SQL 全序列的三维差分驱动（批10 波1，arrow 已通的接棒）。
+// c_datafusion_sql -- Apache DataFusion on the current stable line: SessionContext
+// + three in-memory RecordBatch tables + a full SQL query sequence, three-way diff.
 //
-// 【FRONTIER · 锁定 expected-red：mirvm A/C 两维当前不可跑；B 维 native 已
-// 验证为绿（cargo run 两跑 stdout 95 行逐字节一致、stderr 真空、exit 0，
-// Q1–Q7 结果与 Q2/Q5 plan 指纹 fnv 全部产出）】
+// FRONTIER (expected-red): mirvm's two dimensions cannot run yet; the native one is
+// verified green (two cargo runs agree byte-for-byte on 95 stdout lines, empty
+// stderr, exit 0, Q1-Q7 and the Q2/Q5 plan fingerprints included).
 //
-// 红因③（引擎语义缺口）：Rust trait upcasting coercion（dyn SubTrait → dyn
-// SuperTrait，1.86 稳定化）的 vtable 上溯变换未实现。触发链（任一注册表
-// TableScan 物理化的必经之路，无官方开关可绕）：
-//   datafusion-54.0.0/src/physical_planner.rs:666  TableScan 物理化调
+// Root cause (engine semantic gap): the vtable upcast transformation for Rust trait
+// upcasting coercion (dyn SubTrait -> dyn SuperTrait, stabilized in 1.86) is not
+// implemented. The trigger chain -- the only route to physicalizing a registered
+// table's TableScan, with no official switch around it:
+//   datafusion-54.0.0/src/physical_planner.rs:666  TableScan physicalization calls
 //     source_as_provider(source)
-//   → datafusion-catalog-54.0.0/src/default_table_source.rs:94
+//   -> datafusion-catalog-54.0.0/src/default_table_source.rs:94
 //     source.as_ref().downcast_ref::<DefaultTableSource>()
-//   → datafusion-expr-54.0.0/src/table_source.rs:138  (self as &dyn Any)
-//     —— dyn 上溯 coercion 本体
-//   → mirvm src/lower/func.rs:1888  lowering 拒处理（源码自标 M4.2+ 里程碑）
-// A 维现场：构建全程通过（含 zstd-sys C 族），执行过 SessionContext 初始化、
-// 三表 register_batch、SQL 解析与逻辑计划，在 Q1 collect 的物理计划处：
-//   stdout 止于首行 "Q1 sql: SELECT ..."；stderr 单行 TRAP；exit=70；
-//   构建+跑到陷阱 real 6m13.8s（预算内）。
-// C 维现场（MIRVM_JIT_THRESHOLD=1，缓存热）：real 13.8s，stdout/stderr/exit
-// 与 A 维逐字节一致（同一 lowering 缺口，两维同点同文）。
-// 最小复现（无依赖 cargo-script，/tmp 现场实测闭环）：
+//   -> datafusion-expr-54.0.0/src/table_source.rs:138  (self as &dyn Any)
+//     -- the dyn upcast coercion itself
+//   -> mirvm src/lower/func.rs:1888  lowering refuses (the Unsize branch)
+// Mirvm's run: the build completes (including the zstd-sys C family), the
+// SessionContext initializes, all three tables register, SQL parses and the
+// logical plans build; the first Q1 physical plan then traps. stdout stops at
+// "Q1 sql: SELECT ...", stderr carries one TRAP line, exit=70; build plus run
+// takes real 6m13.8s, within budget. The JIT dimension (MIRVM_JIT_THRESHOLD=1,
+// warm cache) takes real 13.8s with stdout/stderr/exit byte-identical to the
+// interpreted run: the same lowering gap at the same point.
+// Minimal repro (no cargo-script dependency, measured in /tmp):
 //   use std::any::Any;
 //   trait Table: Any { fn rows(&self) -> i64; }
 //   struct Mem { n: i64 }
 //   impl Table for Mem { fn rows(&self) -> i64 { self.n } }
 //   fn inspect(t: &dyn Table) -> String {
-//       let any: &dyn Any = t;                    // ← 上溯 coercion
+//       let any: &dyn Any = t;                    // <- the upcast coercion
 //       match any.downcast_ref::<Mem>() {
 //           Some(m) => format!("downcast={}", m.rows()),
 //           None => "downcast=none".to_string(),
@@ -78,63 +80,61 @@ tokio = { version = "1", default-features = false, features = ["rt"] }
 //       let t: &dyn Table = &Mem { n: 7 };
 //       println!("up={} {}", t.rows(), inspect(t));
 //   }
-//   native 实际：up=7 downcast=7，exit 0（期望一致）；
-//   mirvm 实际：stderr "mirvm[m4-engine]: TRAP: dyn 上溯 vtable 变换
-//   （dyn Table → dyn std::any::Any，M4.2+）"，exit 70。
-// 接线建议：在 src/lower/func.rs:1888 的 Unsize 分支实现 dyn→dyn 上溯
-// vtable 变换（与 cg_ssa unsized_info 同判据；按 impl 生成/选取超 trait
-// vtable 即可解锁 datafusion 全系 TableScan 物理化）。
-//   red_code=70（mirvm 诊断 TRAP exit 码）
+//   native: up=7 downcast=7, exit 0 (as expected);
+//   mirvm: stderr "mirvm[m4-engine]: TRAP: dyn 上溯 vtable 变换
+//   （dyn Table → dyn std::any::Any，M4.2+）", exit 70.
+// Fix direction: in the Unsize branch at src/lower/func.rs:1888, implement the
+// dyn->dyn upcast vtable transformation (same criterion as cg_ssa's unsized_info);
+// generating/selecting the supertrait vtable per impl unlocks TableScan
+// physicalization for the whole datafusion family.
 //   red_pattern=「mirvm[m4-engine]: TRAP: dyn 上溯 vtable 变换（dyn 」
-//   （稳定特征前缀，空格收尾；本 driver 实例全串：`dyn datafusion::
-//   logical_expr::TableSource → dyn std::any::Any，M4.2+`）
-// 不可绕行论证：collect/create_physical_plan 必经上述 downcast（规格主干
-// SessionContext+SQL+collect 无法绕开物理化）；缺口在 lowering 无条件
-// Err，无后端开关/force-soft env 可切；降级 datafusion 旧版躲引擎缺口
-// 不属于「钉版本避上游破洞」，规格即现行稳定，故不钉旧。
+//   (a stable feature prefix ending in a space; this driver's instance is
+//   `dyn datafusion::logical_expr::TableSource → dyn std::any::Any，M4.2+`)
+// No detour: collect/create_physical_plan must go through that downcast and the
+// SessionContext+SQL+collect mainline cannot avoid physicalization; the gap is an
+// unconditional lowering Err with no backend switch or force-soft env to flip.
 //
-// 覆盖清单：
-//   1) 建表：emps(8 行: id/name/dept/salary/city_id，salary 含一个 NULL，
-//      city_id 含一个 NULL 键与一个悬挂引用 9) / depts(4 行，research 右表
-//      独有) / cities(4 行，guangzhou 左表独有)——join 键 null 谱系全。
-//   2) Q1 投影 + 算术 + WHERE 过滤（salary>=7000，NULL 行被滤除）。
-//   3) Q2 GROUP BY 五聚合 sum/count/min/max/avg：hr 组内 salary 有 NULL，
-//      COUNT(*) 计入行而 SUM/AVG 跳过 NULL，聚合 null 语义锚定。
-//   4) Q3 两表 INNER JOIN：depts 右表独有 research 不可见（结果 dept 集合
-//      只 eng/hr/ops）。
-//   5) Q4a/Q4b 两表 LEFT JOIN 双向：emps LEFT cities 出 NULL city（NULL 键
-//      id=5 与悬挂 id=7）；cities LEFT emps 出 NULL name/id（guangzhou）。
-//   6) Q5 窗口函数：ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary
-//      DESC, id ASC)（全序 tiebreak 锁死）与 RANK() OVER (PARTITION BY dept
-//      ORDER BY salary DESC)（ops 组 6200.25 双平局同秩、hr 组 NULL 参秩）。
-//   7) Q6 标量子查询：salary > (SELECT AVG(salary) FROM emps)。
-//   8) Q7 ORDER BY salary DESC NULLS LAST, id ASC LIMIT 3。
-//   9) plan 指纹：Q2（聚合）与 Q5（窗口）各打 logical plan（display_indent）
-//      与 physical plan（displayable().indent(false)）缩排全文 + len +
-//      FNV-1a 锚。
-//  10) 结果打印：DataFrame::collect 后逐 batch 逐行逐格自写打印——f64 一律
-//      to_bits() 十六进制，Utf8 自写转义加引号，NULL 打 "NULL"，schema 行
-//      带列名+DataType Debug。
+// Coverage:
+//   1) Tables: emps (8 rows: id/name/dept/salary/city_id, salary with one NULL,
+//      city_id with one NULL key and one dangling reference 9) / depts (4 rows,
+//      research is right-side-only) / cities (4 rows, guangzhou left-side-only)
+//      -- the full join-key null spectrum.
+//   2) Q1 projection + arithmetic + WHERE filter (salary>=7000, NULL row filtered).
+//   3) Q2 GROUP BY with five aggregates sum/count/min/max/avg: the hr group has a
+//      NULL salary, COUNT(*) counts the row while SUM/AVG skip NULL -- anchoring
+//      null aggregate semantics.
+//   4) Q3 two-table INNER JOIN: right-only research is not visible (result depts
+//      are eng/hr/ops only).
+//   5) Q4a/Q4b two-table LEFT JOIN both ways: emps LEFT cities yields a NULL city
+//      (NULL key id=5, dangling id=7); cities LEFT emps yields NULL name/id.
+//   6) Q5 window functions: ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary
+//      DESC, id ASC) (total-order tiebreak) and RANK() OVER (PARTITION BY dept
+//      ORDER BY salary DESC) (the ops 6200.25 tie shares a rank).
+//   7) Q6 scalar subquery: salary > (SELECT AVG(salary) FROM emps).
+//   8) Q7 ORDER BY salary DESC NULLS LAST, id ASC LIMIT 3.
+//   9) Plan fingerprints: Q2 (aggregate) and Q5 (window) each print the logical
+//      plan (display_indent) and physical plan (displayable().indent(false)) in
+//      full indented text plus len and an FNV-1a anchor.
+//  10) Result printing: after DataFrame::collect, batches/rows/cells are printed
+//      by hand -- f64 as to_bits() hex, Utf8 with escaping and quotes, NULL as
+//      "NULL", and a schema line with column names + DataType Debug.
 //
-// 确定性：SessionConfig::with_target_partitions(1) 灭并行分区序（MemTable
-//   单分区扫描+单分区聚合，累加序=插入序）；每条查询显式 ORDER BY 且排序键
-//   全序（唯一 id 收尾 / rank 平局同值不依赖组内序）；窗口 row_number 的
-//   ORDER BY 含 id tiebreak 成全序；无真随机/壁钟/HashMap 迭代序/裸地址/
-//   浮点 to_string；tokio current_thread 单线程运行时（c_tokio 先例）；
-//   stderr 面为空。
+// Determinism: SessionConfig::with_target_partitions(1) removes parallel-partition
+//   ordering (single-partition MemTable scans/aggregates, so accumulation order
+//   equals insertion order); every query has an explicit ORDER BY with a total-order
+//   key (a unique id breaks ties, and rank ties share a value); row_number's ORDER
+//   BY includes an id tiebreak; tokio's current_thread runtime; stderr is empty.
 //
-// 钉版本与绕行记录：
-//   datafusion =54.0.0（2026-07-18 快拍 crates.io max_stable=54.0.0，精确
-//   钉死；其自身锁定 arrow ^58.3.0 / sqlparser 0.62.0 / tokio ^1.52）。
-//   default-features=false 只开 "sql"（官方 feature 开关合法裁剪）：
-//   规格只测核心 SQL 语义面，默认面的 parquet/compression/regex/unicode/
-//   crypto/datetime/nested_expressions 与本规格无关且显著拉长构建预算；
-//   窗口/聚合函数在 v54 为非可选依赖（datafusion-functions-window /
-//   -aggregate 直挂），裁剪后窗口与五聚合照常在位。recursive_protection
-//   亦随默认面关闭，本驱动查询浅、无深递归表达式，语义面无差。
-//   tokio = 1（default-features=false + rt；registry 实解 1.53.0，
-//   c_tokio/c_sqlx_sqlite 先例）。未使用任何引擎绕行开关/force-soft env。
-
+// Version pins:
+//   datafusion =54.0.0 (pinned exactly; folds in arrow ^58.3.0 / sqlparser 0.62.0 / tokio ^1.52).
+//   default-features=false with only "sql" (a legitimate official feature cut):
+//   the spec covers core SQL semantics only, while the default surface's parquet/
+//   compression/regex/unicode/crypto/datetime/nested_expressions are unrelated and
+//   inflate the build budget; window and aggregate functions are non-optional
+//   dependencies in v54 (datafusion-functions-window / -aggregate), so they stay.
+//   recursive_protection is off with the default surface; these queries are shallow.
+//   tokio = 1 (default-features=false + rt; resolves 1.53.0).
+//
 use std::sync::Arc;
 
 use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray, UInt64Array};
@@ -261,8 +261,8 @@ async fn run() -> Result<()> {
     let config = SessionConfig::new().with_target_partitions(1);
     let ctx = SessionContext::new_with_config(config);
 
-    // 三表：emps（salary 一 NULL、city_id 一 NULL 键一悬挂 9）、
-    // depts（research 右表独有）、cities（guangzhou 左表独有）
+    // Three tables: emps (salary has one NULL, city_id has one NULL key and one dangling 9),
+    // depts (research is right-side-only), cities (guangzhou is left-side-only)
     let emps = RecordBatch::try_new(
         Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int64, false),
@@ -328,12 +328,12 @@ async fn run() -> Result<()> {
     )?;
     ctx.register_batch("cities", cities)?;
 
-    // Q1 投影 + 算术 + WHERE（NULL salary 被滤除）
+    // Q1 projection + arithmetic + WHERE (the NULL salary row is filtered out)
     let q1 = "SELECT id, name, salary * 2.0 AS dbl FROM emps WHERE salary >= 7000.0 ORDER BY id";
     println!("Q1 sql: {q1}");
     print_batches("Q1", &ctx.sql(q1).await?.collect().await?);
 
-    // Q2 GROUP BY 五聚合（hr 组带 NULL salary：COUNT(*)=2 而 SUM/AVG 只看 7000）
+    // Q2 GROUP BY five aggregates (hr has a NULL salary: COUNT(*)=2 while SUM/AVG see only 7000)
     let q2 = "SELECT dept, COUNT(*) AS n, SUM(salary) AS total, MIN(salary) AS lo, \
               MAX(salary) AS hi, AVG(salary) AS av FROM emps GROUP BY dept ORDER BY dept";
     println!("Q2 sql: {q2}");
@@ -341,26 +341,26 @@ async fn run() -> Result<()> {
     plan_fingerprint(&df2, "Q2").await?;
     print_batches("Q2", &df2.collect().await?);
 
-    // Q3 INNER JOIN：depts 右表独有 research 不可见
+    // Q3 INNER JOIN: the right-side-only research dept is not visible
     let q3 = "SELECT e.id, e.name, d.dept, d.budget FROM emps e INNER JOIN depts d \
               ON e.dept = d.dept ORDER BY e.id";
     println!("Q3 sql: {q3}");
     print_batches("Q3", &ctx.sql(q3).await?.collect().await?);
 
-    // Q4a LEFT JOIN：NULL 键(id=5)与悬挂键(id=7→9)出 NULL city
+    // Q4a LEFT JOIN: the NULL key (id=5) and the dangling key (id=7 -> 9) yield a NULL city
     let q4a = "SELECT e.id, e.name, c.city FROM emps e LEFT JOIN cities c \
                ON e.city_id = c.city_id ORDER BY e.id";
     println!("Q4a sql: {q4a}");
     print_batches("Q4a", &ctx.sql(q4a).await?.collect().await?);
 
-    // Q4b 反向 LEFT JOIN：guangzhou 出 NULL name/id
+    // Q4b reverse LEFT JOIN: guangzhou yields NULL name/id
     let q4b = "SELECT c.city, e.name, e.id FROM cities c LEFT JOIN emps e \
                ON c.city_id = e.city_id ORDER BY c.city_id, e.id NULLS FIRST";
     println!("Q4b sql: {q4b}");
     print_batches("Q4b", &ctx.sql(q4b).await?.collect().await?);
 
-    // Q5 窗口：row_number 全序 tiebreak + rank 平局同秩（ops 6200.25 双平局、
-    // hr 组 NULL salary 参秩）
+    // Q5 windows: row_number total-order tiebreak + rank ties sharing a rank (ops 6200.25
+    // ties twice; the hr NULL salary gets a rank)
     let q5 = "SELECT id, dept, salary, \
               ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC, id ASC) AS rn, \
               RANK() OVER (PARTITION BY dept ORDER BY salary DESC) AS rk \
@@ -370,13 +370,13 @@ async fn run() -> Result<()> {
     plan_fingerprint(&df5, "Q5").await?;
     print_batches("Q5", &df5.collect().await?);
 
-    // Q6 标量子查询
+    // Q6 scalar subquery
     let q6 = "SELECT id, name, salary FROM emps \
               WHERE salary > (SELECT AVG(salary) FROM emps) ORDER BY id";
     println!("Q6 sql: {q6}");
     print_batches("Q6", &ctx.sql(q6).await?.collect().await?);
 
-    // Q7 ORDER BY ... LIMIT（显式 NULLS LAST + id 全序 tiebreak）
+    // Q7 ORDER BY ... LIMIT (explicit NULLS LAST + id total-order tiebreak)
     let q7 = "SELECT name, salary FROM emps ORDER BY salary DESC NULLS LAST, id ASC LIMIT 3";
     println!("Q7 sql: {q7}");
     print_batches("Q7", &ctx.sql(q7).await?.collect().await?);

@@ -4,8 +4,10 @@ version = "0.0.1"
 edition = "2024"
 publish = false
 
-# 独立 crate（显式退出任何上层 workspace）：mirvm 主二进制链接 rustc_private 动态库
-# （未插桩 + 自带分配器），不能整体上 TSan；src/vm 是纯 Rust，经 #[path] 同源复用。
+# Standalone crate (explicitly opts out of any enclosing workspace): the mirvm
+# main binary links rustc_private dynamic libraries (uninstrumented, with its own
+# allocator), so it cannot be built under TSan as a whole; src/vm is pure Rust and
+# is reused source-for-source via #[path].
 [workspace]
 
 [dependencies]
@@ -13,11 +15,11 @@ blake3 = "1.8"
 libc = "0.2"
 libffi = "5.1.1"
 libmimalloc-sys = "0.1.49"
-# ir.rs 全类型带 serde derive（M6 片2 L2 缓存）；harness 经 #[path] 同源编译 src/vm，
-# 依赖面必须跟上（M5.2 f16/f128 feature 同教训）
+# Every type in ir.rs carries a serde derive (the L2 cache); the harness compiles
+# src/vm source-for-source via #[path], so its dependency surface must keep up.
 serde = { version = "1.0.228", features = ["derive"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 memmap2 = "0.2.3"
 
 [profile.release]
-debug = true # TSan 报告带符号
+debug = true # TSan reports carry symbols

@@ -3,48 +3,48 @@
 [dependencies]
 polars = { version = "0.44", default-features = false, features = ["lazy", "dtype-date", "dtype-datetime", "fmt_no_tty"] }
 ---
-// polars 0.44.2 差分：Arrow2 列式 DataFrame 全链路（eager 构造/过滤/group-by
-// 聚合 + lazy 表达式链/内连接 + 统计摘要 + null 谱系）。feature 面 = lazy
-// （query 引擎）+ dtype-date（Date 逻辑型，拉 temporal→chrono）+ dtype-datetime
-// + fmt_no_tty（DataFrame Display，绕开 tty 宽度探测走固定 fallback 宽度，
-// 管线下确定）。
+// polars 0.44.2 differential: the full Arrow2 columnar DataFrame chain (eager
+// construction/filter/group-by aggregation + lazy expression chains/inner join +
+// statistical summary + the null lineage). Feature set = lazy (query engine) +
+// dtype-date (Date logical type, pulling temporal -> chrono) + dtype-datetime +
+// fmt_no_tty (DataFrame Display, bypassing tty width probing for a fixed fallback
+// width, so pipelines are deterministic).
 //
-// 【FRONTIER · mirvm 两维当前不可跑，driver native 已验证为绿】
-// polars 依赖图必含 psm（非可选边 psm ← stacker ← polars-utils ← polars；
-// feature/版本/API 都无法摘除）。psm 0.1.31 编译 x86_64 汇编成 libpsm.a，
-// dynsym 可见导出 rust_psm_on_stack 等四符号；而 mirvm 进程的 RTLD_DEFAULT
-// 里已有同名定义——librustc_driver-*.so（mirvm 以 rustc as library 链接）
-// 导出自 rustc 查询系统递归保护所用的 stacker/psm（nm -D 实证）。native_archive 因此按设计拒绝
-// （dynsym 碰撞无法从 dlsym 优先级复现 native linker 顺序；hidden 碰撞才有
-// symtab 兜底）。归档物化发生在整个模块降低前，与 driver 调用路径无关。
-// 诊断原文（panic，exit 101）：
-//   thread 'rustc' panicked at src/lower/mod.rs:1646:38:
-//   Static native library 装载失败: 静态归档
-//   `/home/xuehaonan/.cache/mirvm/native-archives/38daa748a74132cfe2c177878f86f965.so`
-//   导出符号 `rust_psm_on_stack`，但 RTLD_DEFAULT 已有同名定义；mirvm 的
-//   dlsym 优先级无法无歧义复现 native linker 顺序
-// native 侧（原生链接只含 crate 自己的 psm）一切正常。
+// FRONTIER: mirvm's two dimensions cannot run yet; the native driver is verified green.
+// polars' dependency graph necessarily contains psm (non-optional psm <- stacker <-
+// polars-utils <- polars; no feature/version/API combination removes it). psm 0.1.31
+// compiles x86_64 assembly into libpsm.a, visibly exporting rust_psm_on_stack and
+// three more symbols in dynsym -- while the mirvm process's RTLD_DEFAULT already defines
+// the same name: librustc_driver-*.so (mirvm links rustc as a library) exports the
+// stacker/psm used by rustc's query-system recursion guard (nm -D). native_archive
+// therefore refuses by design (a dynsym collision cannot reproduce the native linker
+// order from dlsym priority; only hidden collisions have a symtab fallback). Archive
+// materialization happens before the whole module is lowered, independent of the driver.
+// The diagnostic (a panic, exit 101) reads:
+//   thread 'rustc' panicked at src/lower/mod.rs:1646:38: Static native library load failed:
+//   static archive .../native-archives/38daa748a74132cfe2c177878f86f965.so exports symbol
+//   `rust_psm_on_stack`, but RTLD_DEFAULT already defines it; mirvm's dlsym priority cannot
+//   unambiguously reproduce the native linker order
 //
-// 路线说明：
-// - 【上游 feature 破洞绕行】polars-io 0.44.2 的 csv/write datetime serializer
-//   无条件引用 chrono，而 chrono 依赖只由 dtype-datetime 挂上；lazy → polars-
-//   plan 又会无条件开 polars-io/csv。default-features=false + lazy + dtype-date
-//   组合因此直接 E0433 编不过（上游默认 feature 组合里 chrono 恰好在场没暴露）。
-//   加 dtype-datetime 把 chrono 拉回依赖图，语义覆盖不变。
-// - 【手写 describe】DataFrame::describe() 方法 0.45 才落地，0.44 只有空的
-//   "describe" feature 桩（polars-core/Cargo.toml 里 describe = []，源码无
-//   对应方法）——本 driver 用 Series 归约内核（mean/std/median/min/max +
-//   null_count）等效实现 describe 摘要，f64 结果一律 to_bits() 锁位。
-// - 【确定性】group-by 输出序依赖哈希表布局（polars 明确不保证次序）→ 三个
-//   聚合结果统一 sort 唯一键后打印；join 输出行序同理 sort 唯一 id。mean 只对
-//   Int64 列做（整数部分和精确，除法位确定），不向并行分区顺序让位。
-// - 【零随机/零环境】数据全内联固定；不碰 now()/随机采样/环境变量。
-// 覆盖：i64/f64/str/bool/date 五 dtype 的 Series 构造（含 Option 列）、schema
-// 迭代、BooleanChunked 掩码 eager filter（含长度失配错误路径）、lazy group_by
-// sum/mean/count（多键 dtype）、lazy sort、with_columns 表达式链（算术乘/
-// 标量混合/比较/alias × 三链）+ select、inner join（左右各丢一行）、to_string
-// FNV 锚、AnyValue 打印、null 谱系（null_count/is_null 计数/rechunk 后
-// validity 位图存在性/drop_nulls 长度/is_null 掩码过滤）。
+// Route notes:
+// - Upstream feature hole: polars-io 0.44.2's csv/write datetime serializer references
+//   chrono unconditionally, and chrono is only attached by dtype-datetime, while lazy ->
+//   polars-plan turns on polars-io/csv unconditionally, so default-features=false + lazy +
+//   dtype-date fails with E0433; adding dtype-datetime pulls chrono back in.
+// - Hand-written describe: DataFrame::describe() only landed in 0.45 (0.44 has an empty
+//   "describe" feature stub), so the summary comes from the Series reduction kernels
+//   (mean/std/median/min/max + null_count), with f64 locked by to_bits().
+// - Determinism: group-by output order depends on hash-table layout (polars does not
+//   guarantee it) -> aggregation results sort on the unique key before printing and join
+//   rows on the unique id; mean runs only on Int64 columns, so partition order is moot.
+// - Zero randomness/environment: all data is inline and fixed; no now()/random sampling.
+// Coverage: Series construction for the five dtypes i64/f64/str/bool/date (including
+// Option columns), schema iteration, BooleanChunked mask eager filter (including the
+// length-mismatch error path), lazy group_by sum/mean/count (multi-key dtypes), lazy
+// sort, with_columns expression chains (arithmetic multiply / scalar mixing / comparison
+// / alias x three chains) + select, inner join (one row dropped per side), the to_string
+// FNV anchor, AnyValue printing, and the null lineage (null_count/is_null, validity
+// bitmap after rechunk, drop_nulls length, is_null mask filtering).
 use polars::prelude::*;
 
 fn fnv1a(data: &[u8]) -> u64 {
@@ -68,7 +68,7 @@ fn bits(v: Option<f64>) -> String {
 }
 
 fn main() -> PolarsResult<()> {
-    // ① 五 dtype 建帧（date 经 Int32 物理型 cast，含一个 null）
+    // ① build the frame with five dtypes (date via an Int32 physical cast, with one null)
     let df = DataFrame::new(vec![
         Column::from(Series::new("id".into(), [1i64, 2, 3, 4, 5, 6])),
         Column::from(Series::new(
@@ -100,12 +100,12 @@ fn main() -> PolarsResult<()> {
         ),
     ])?;
 
-    // ② schema（IndexMap 插入序、dtype Display）
+    // ② schema (IndexMap insertion order, dtype Display)
     for (name, dtype) in df.schema().iter() {
         println!("schema {name}: {dtype}");
     }
 
-    // ③ 全帧 Display（comfy-table 固定 fallback 宽度）+ FNV 字节锚
+    // ③ full-frame Display (comfy-table fixed fallback width) + FNV byte anchor
     let tbl = df.to_string();
     println!("{tbl}");
     println!(
@@ -114,7 +114,7 @@ fn main() -> PolarsResult<()> {
         fnv1a(tbl.as_bytes())
     );
 
-    // ④ eager filter：布尔掩码 + 长度失配错误路径
+    // ④ eager filter: boolean mask + the length-mismatch error path
     let mask = df.column("qty")?.i64()?.gt_eq(8);
     let f = df.filter(&mask)?;
     println!("{f}");
@@ -124,7 +124,7 @@ fn main() -> PolarsResult<()> {
         .unwrap_err();
     println!("filter err: {bad}");
 
-    // ⑤ lazy group_by × (sum/mean/count)：哈希序 → sort 唯一键锁序
+    // ⑤ lazy group_by x (sum/mean/count): hash order -> sort on the unique key to lock it
     let gsum = df
         .clone()
         .lazy()
@@ -149,7 +149,7 @@ fn main() -> PolarsResult<()> {
         .sort(["city"], Default::default())
         .collect()?;
     println!("{gcnt}");
-    // bool 键 group-by（dtype 覆盖）
+    // bool-key group-by (dtype coverage)
     let gbool = df
         .clone()
         .lazy()
@@ -159,8 +159,8 @@ fn main() -> PolarsResult<()> {
         .collect()?;
     println!("{gbool}");
 
-    // ⑥ lazy with_columns 表达式链（qty*price → amount → taxed → 布尔标记
-    //    + 标量混合算术）+ select 收口
+    // ⑥ lazy with_columns expression chain (qty*price -> amount -> taxed -> boolean flag
+    //    plus scalar mixed arithmetic) closed out by select
     let df2 = df
         .clone()
         .lazy()
@@ -180,7 +180,7 @@ fn main() -> PolarsResult<()> {
         .collect()?;
     println!("{df2}");
 
-    // ⑦ inner join：hz（左独有）/gz（右独有）双方丢行；sort 唯一 id 锁序
+    // ⑦ inner join: hz (left-only) / gz (right-only) drop a row per side; sort on the unique id
     let geo = DataFrame::new(vec![
         Column::from(Series::new("city".into(), ["sz", "bj", "sh", "gz"])),
         Column::from(Series::new(
@@ -201,7 +201,7 @@ fn main() -> PolarsResult<()> {
         .collect()?;
     println!("{joined}");
 
-    // ⑧ describe 摘要（0.44 手写版）：均值/标准差/中位数 to_bits 锁位
+    // ⑧ describe summary (the hand-written 0.44 version): mean/std/median locked via to_bits
     for c in ["qty", "price"] {
         let s = df.column(c)?.as_materialized_series();
         let min = s.min_reduce()?.value().to_string();
@@ -218,7 +218,7 @@ fn main() -> PolarsResult<()> {
         );
     }
 
-    // ⑨ null 谱系：四种 dtype 的 Option 列
+    // ⑨ null lineage: Option columns across four dtypes
     let nn = DataFrame::new(vec![
         Column::from(Series::new(
             "a".into(),
@@ -252,7 +252,7 @@ fn main() -> PolarsResult<()> {
             s.drop_nulls().len()
         );
     }
-    // is_null 掩码作过滤（bool 表达式的 arrow 侧消费）
+    // is_null mask used as a filter (bool expressions consumed on the arrow side)
     let null_b = nn.filter(&nn.column("b")?.as_materialized_series().is_null())?;
     println!("null_b height={}", null_b.height());
 

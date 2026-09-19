@@ -5,110 +5,100 @@ risc0-zkvm = { version = "=3.0.6", default-features = false, features = ["prove"
 risc0-binfmt = "=3.0.5"
 risc0-zkos-v1compat = "=2.2.3"
 ---
-// 【expected-red】risc0-zkvm 3.0.6（crates.io 2026-07-18 最新稳定线；
-// 5.0.0-rc.1 仍是预发布）zkVM **execute-only** 差分：手写 rv32im guest 在
-// ExecutorEnv 里经 default_executor 执行，取 journal 字节打 FNV + 公开值
-// 断言。全程不证明。driver 完整可用（B 维 native 13 行 oracle 固定于文末），
-// A/C 两维撞同一引擎边界（见文末诊断链），边界闭合后应原样 XPASS 翻绿。
-//
-// 形态与钉版本（三条全有实勘证据）：
-//   * features=["prove"] 而非 execute-only 直觉的 ["std"]——3.0.6 起进程内
-//     执行器被 feature 门控成两级：default_executor() 在无 prove 时返回
-//     ExternalProver("ipc", r0vm 路径)（src/host/client/prove/mod.rs:230
-//     default_executor 函数体），即外发 r0vm 子进程；r0vm 二进制本机缺席
-//     （红因④形态），且子进程 IPC 非本 driver 语义面。prove 打开后
-//     default_executor → LocalProver::execute → ExecutorImpl::from_elf
-//     进程内执行。prover 从未被调用（无 Receipt、无证明、无 Fiat-Shamir
-//     随机通道），"execute-only 不证明"成立。依赖闭包：247 normal crate
-//     （cargo tree 实数）；三个 -sys crate 用 cc/g++ 编 C++ kernels（g++
-//     在场，无 cmake/bindgen/clang/nasm 需求）；native dev 冷构建 2m03s
-//     （8 核），预算内。
-//   * risc0-zkvm-methods（官方预构建 guest ELF crate）在 crates.io **未发布**
-//     （API 404 实勘），risc0-build 路径又需 cargo-risczero 工具链（缺席）。
-//     按批任务文本明确授权的"手写"路线：driver 内置 rv32im 迷你汇编器
-//     （定宽 li 两遍定址），现场汇编 guest 机器码并手工封最小 ELF32
-//     （EM_RISCV/ET_EXEC/单 PT_LOAD），无任何外部工具链。
-//   * 3.0.6 起 execute() 吃的不是裸 ELF 而是 ProgramBinary 容器（user ELF +
-//     kernel ELF；ExecutorImpl::from_elf → ProgramBinary::decode 校验
-//     AbiKind::V1Compat/^1.0.0）。kernel = risc0-zkos-v1compat 2.2.3 crate
-//     内嵌的预构建 V1COMPAT_ELF（include_bytes! 官方件，syscall v1 兼容
-//     层）。risc0-binfmt/risc0-zkos-v1compat 钉到 risc0-zkvm 3.0.6 依赖
-//     要求锁定的确切版本（^3.0.5/=3.0.5、^2.2.3/=2.2.3），ProgramBinary
-//     ::new().encode() 为公开 API。
-//
-// 测试面（单 driver 全覆盖）：
-//   ① ExecutorEnv 双写入通道：write(&u32)（risc0 serde to_vec → 1 word LE）
-//     ×2 + write_slice(32B digest)，stdin 流共 40B。
-//   ② guest sys_read(fd=STDIN) 三次：读输入 8B、读 digest 32B、EOF 探针
-//     （请求 4B 必须返回 0）——nread 返回值逐次校验，异常即跳 fail。
-//   ③ guest 内部乘法/断言：p = 37*41（M 扩展 mul），bne 断言 p==1517；
-//     q = p*7+13。失败路径：journal 写 0xDEADBEEF 标记 + exit code 1
-//     （区别于正常路径，三维 diff 必捕）。
-//   ④ env::commit 公开输出：sys_write(fd=JOURNAL, [a,b,p,q] 16B)。
-//   ⑤ sys_halt(user_exit=0, output_digest)：executor.rs:258 实证——halt
-//     digest 为零则 journal 被丢弃（SessionInfo.journal=None），故 digest
-//     必须非零且本 driver 做到逐比特正确：host 侧用 risc0 自身类型预算
-//     Output{journal: Pruned(SHA-256(journal)), assumptions: Pruned(ZERO)}
-//     .digest()（= guest env::exit 的 finalize 算式，ASSUMPTIONS_DIGEST
-//     初值 Pruned(Digest::ZERO)），经 stdin 交给 guest 透传。打印
-//     receipt_claim.output.digest() 验证回读一致——digest 真实流经
-//     guest halt 寄存器的确证。
-//   ⑥ 会话形状：segments=1、po2、user cycles、ProgramBinary 字节数全打印
-//     （纯执行器的确定函数，三维互锚）。
-//
-// 确定性纪律：输入全定值；guest 机器码由定值汇编器产出；无时间/随机/
-// 线程序（LocalProver::execute 单线程路径，rayon 只在证明面）/env 依赖；
-// 未注册 tracing subscriber（risc0 的 tracing 事件全静默丢弃）→ stderr
-// 真空；错误路径一律 panic 不打印。输出 13 行。
-//
-// 三维复跑：
-//   A: target/release/mirvm run corpus/c_risc0_run.rs
-//   B: d=$(grep -l 'name = "c_risc0_run"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname) && cd "$d" && RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
-//   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_risc0_run.rs
-//
-// 调研期记录在案的 ABI 事实源（driver 全部按此写就）：SOFTWARE ecall 寄存
-// 器约定 t0=2/t6=nr/a0=buf/a1=len/a2=名串/a3..=args（impl_syscall! 宏体）；
-// Syscall 编号 Read=12/Write=16；fileno STDIN=0/JOURNAL=3；sys_halt 的
-// a0=TERMINATE|(user_exit<<8)、a1=OutDigest 指针（kernel.s _ecall_halt 读
-// 8 words 进机器寄存器）；SyscallName = 指向 NUL 结尾名串的裸指针
-// （"risc0_zkvm_platform::syscall::nr::SYS_READ"/"..._WRITE" 内嵌进 guest
-// 数据段）；TEXT_START=0x0020_0800、KERNEL_START=0xC000_0000（user ELF
-// 装载上限）、user entry 经 0x0001_0000 槽由 kernel 跳转；ProgramBinary
-// 磁盘格式 = MAGIC+版本+postcard 头+user/kernel 长度前缀（encode() 包办）。
-//
-// 三维实测（2026-07-18）= **expected-red：B 绿 / A、C 同签名红**。
-//
-// 红因定类（② FFI/native-archive 符号边界的新姊妹形态，非 driver 问题）：
-// risc0-zkvm 的三个 REQUIRED circuit crate（rv32im/recursion/keccak）经
-// prove/default feature 各拉一个 `-sys` crate，其 build.rs **无条件**以 cc
-// 编译 kernels/cxx/*.cpp 成静态归档（只设 CUDA 开关，无"关 C++"官方开关）。
-// 三个 librisc0_{rv32im,recursion,keccak}_cpu.a 各导出同一 **weak** 符号
-// `_ZdlPvS_`（C++ sized-delete COMDAT，nm 实测每档 W×1）。mirvm 物化期把
-// 每档 .a 整体 .so 化并全量导出 → 两两 dynsym 可见同名 →
-// reject_symbol_ambiguity 按设计拒绝（src/lower/mod.rs:2162 panic）。
-// native 语义本无歧义：归档成员按需懒拉 + weak 符号首件胜出（B 维绿即
-// 实证）。即 C2（符号在 rlib，已闭合）的姊妹票：**符号跨两个 native 归档
-// 同名（weak/COMDAT）碰撞**——转正方向 = 物化期同名决议纳入 weak 语义
-// （首件胜出并记档）或归档成员级懒拉模型。
-//
-// 无合法绕行（逐条实勘排除）：① -sys C++ 编译无 feature/env 关断
-// （build.rs 唯一开关是 CUDA 叠加）；② risc0-zkvm 进程内执行器必走 prove
-// feature（无 prove → default_executor 外发 r0vm 子进程，本机无此二进制），
-// prove 又强带 circuit-*/prove（cargo 无负 feature）；③ 钉版本无逃逸——
-// 2.3.2 同样 REQUIRED 依赖三个 circuit crate（同 -sys 拓扑），且碰撞在
-// 引擎侧与上游版本无关，换旧 major 属裁剪 workload 非"避上游破洞"。
-//
-// 最小复现（/tmp 实证，同签名 exit 101）：cargo-script 仅依赖
-// risc0-circuit-rv32im-sys =4.0.3 + risc0-circuit-recursion-sys =4.0.3，
-// main 只打一行——物化期即撞同文 panic（`ecc02209….so` 哈希两跑一致，
-// 系内容寻址缓存）。
-//
-// 接线建议：red_code=101（rustc 线程 panic 的标准退出码）；red_pattern=
-// "静态归档导出符号 `_ZdlPvS_` 同时来自"（稳定子串；归档哈希随内容变、
-// panic 头括号内为线程号逐进程变，均不可做全串匹配）。三维 stderr 在
-// expected-red 下天然不逐字节（线程号），属锁定特征非失序。
-//
-// B 维 oracle（native，2m23s 冷构建，复跑 md5 自对拍稳定，13 行逐字节）：
+// risc0-zkvm execute-only differential, status expected-red. A hand-written
+// rv32im guest runs through default_executor inside an ExecutorEnv, at no point
+// proving anything; the journal bytes are hashed with FNV and the public values
+// are asserted. The driver is complete: the native oracle block below is the
+// fixed 13-line output, while mirvm default and JIT hit the same engine boundary
+// described further down.
+// Form and version pin (all three points were verified on the machine):
+//   * features=["prove"], not the ["std"] one would expect for execute-only.
+//     Since 3.0.6 the in-process executor is feature gated in two levels:
+//     without prove, default_executor() returns ExternalProver("ipc", r0vm path),
+//     which spawns an r0vm subprocess that this machine does not have, and that
+//     IPC channel is outside what this driver tests. With prove enabled,
+//     default_executor goes through LocalProver::execute and ExecutorImpl::from_elf
+//     in process. The prover itself is never called (no Receipt, no proof, no
+//     Fiat-Shamir randomness), so execute-only still holds. The dependency closure
+//     is 247 normal crates (cargo tree); three -sys crates compile C++ kernels
+//     with cc/g++, needing no cmake/bindgen/clang/nasm.
+//   * risc0-zkvm-methods (the official prebuilt guest ELF crate) is not published
+//     on crates.io (the API returns 404) and the risc0-build path would need the
+//     cargo-risczero toolchain, which is absent. So the driver hand-writes the
+//     guest: a built-in rv32im mini assembler (fixed-width li, two-pass
+//     addressing) assembles the machine code and wraps it in a minimal ELF32
+//     (EM_RISCV/ET_EXEC, a single PT_LOAD), with no external toolchain.
+//   * Since 3.0.6 execute() takes a ProgramBinary container rather than a bare
+//     ELF (user ELF + kernel ELF; ExecutorImpl::from_elf -> ProgramBinary::decode
+//     validates AbiKind::V1Compat/^1.0.0). The kernel is the prebuilt V1COMPAT_ELF
+//     embedded in the risc0-zkos-v1compat 2.2.3 crate (the syscall v1
+//     compatibility layer). risc0-binfmt and risc0-zkos-v1compat are pinned to the
+//     exact versions risc0-zkvm 3.0.6 requires (=3.0.5 and =2.2.3), and
+//     ProgramBinary::new().encode() is public API.
+// What the driver exercises:
+//   (1) Both ExecutorEnv write channels: write(&u32) twice (risc0 serde to_vec,
+//       one little-endian word each) plus write_slice of the 32-byte digest, 40
+//       bytes of stdin in total.
+//   (2) The guest's three sys_read(fd=STDIN) calls: 8 bytes of input, the 32-byte
+//       digest, then an EOF probe whose 4-byte request must return 0. Each nread
+//       return value is checked, and a mismatch jumps to fail.
+//   (3) Guest arithmetic and assertion: p = 37*41 through the M-extension mul,
+//       with a bne asserting p == 1517, then q = p*7+13. The failure path writes
+//       the 0xDEADBEEF marker to the journal and exits 1, which the differential
+//       comparison would catch.
+//   (4) env::commit public output: sys_write(fd=JOURNAL, [a,b,p,q]) as 16 bytes.
+//   (5) sys_halt(user_exit=0, output_digest): a zero halt digest discards the
+//       journal (SessionInfo.journal=None), so the digest must be non-zero and the
+//       driver gets it bit-exact. The host precomputes it with risc0's own types,
+//       Output{journal: Pruned(SHA-256(journal)), assumptions: Pruned(ZERO)}
+//       .digest(), which is the same finalize formula guest env::exit uses, and
+//       passes it in over stdin for the guest to forward. Printing
+//       receipt_claim.output.digest() then proves the digest really travelled
+//       through the guest halt register.
+//   (6) Session shape: segments=1, po2, user cycles and the ProgramBinary byte
+//       count are all printed as deterministic functions of the executor.
+// Determinism: fixed inputs, guest machine code from a fixed assembler, no time,
+// randomness, thread ordering (LocalProver::execute is single-threaded; rayon
+// only appears on the proving side) or environment dependence; no tracing
+// subscriber is registered, so risc0's tracing events are dropped and stderr
+// stays empty; error paths panic instead of printing. The output is 13 lines.
+// ABI facts the driver is written against: the SOFTWARE ecall register
+// convention is t0=2/t6=nr/a0=buf/a1=len/a2=name/a3..=args; syscall numbers are
+// Read=12 and Write=16; fileno STDIN=0 and JOURNAL=3; sys_halt takes
+// a0=TERMINATE|(user_exit<<8) and a1 as an OutDigest pointer; a SyscallName is a
+// raw pointer to a NUL-terminated name string in the guest data segment;
+// TEXT_START=0x0020_0800 and KERNEL_START=0xC000_0000 bound the user ELF, whose
+// entry is jumped to through the 0x0001_0000 slot; and the ProgramBinary on-disk
+// format is MAGIC + version + postcard header + user/kernel length prefixes,
+// which encode() handles.
+// Engine boundary (not a driver problem): through the prove/default features the
+// three REQUIRED risc0 circuit crates (rv32im, recursion, keccak) each pull a -sys
+// crate whose build.rs unconditionally compiles kernels/cxx/*.cpp into a static
+// archive with cc (the only switch is CUDA, there is no way to turn C++ off). All
+// three archives export the same weak C++ sized-delete COMDAT symbol _ZdlPvS_.
+// mirvm turns each whole archive into a shared object and exports everything, so
+// the name becomes visible in two dynsym tables and reject_symbol_ambiguity
+// refuses it by design. Native has no ambiguity: archive members are pulled
+// lazily and the first weak definition wins, which the green native run
+// demonstrates. The fix on the engine side is either resolving same-name weak
+// symbols during materialization (first wins, recorded) or a member-level lazy
+// pull model.
+// There is no legitimate workaround: the -sys C++ build has no feature or env
+// switch (the only build.rs knob is an extra CUDA toggle); risc0-zkvm's
+// in-process executor requires the prove feature (without it default_executor
+// spawns an r0vm subprocess that does not exist here) and prove drags in
+// circuit-*/prove (cargo has no negative features); and pinning older versions
+// does not escape, since 2.3.2 also REQUIRED the same three circuit crates.
+// Smallest reproduction: a cargo-script that depends only on
+// risc0-circuit-rv32im-sys =4.0.3 and risc0-circuit-recursion-sys =4.0.3 and
+// prints one line already hits the same panic during materialization (its
+// content-addressed .so hash is identical across runs).
+// Wiring: red_code=101 (rustc's standard exit code for a panicking thread);
+// red_pattern="静态归档导出符号 `_ZdlPvS_` 同时来自" is a stable substring, while
+// the archive hash and the thread number in the panic header vary per run, so no
+// full-string match is possible. Under expected-red the stderr of the three
+// dimensions is naturally not byte-identical because of the thread number.
+// Native oracle (cold build 2m23s, md5-stable across reruns, 13 lines):
 //   user elf bytes = 911
 //   program binary bytes = 33335
 //   exit = Halted(0)
@@ -122,22 +112,32 @@ risc0-zkos-v1compat = "=2.2.3"
 //   claim output digest = 346f1151e5248896285018e25bda148148eacadb1e540c53774c7c3bb5571d9c
 //   claim digest == host precompute = true
 //   risc0 execute-only ok
-// 引擎边界闭合后，A/C 应逐字节复现上列 13 行（XPASS 强制转绿）。
+// Once the engine boundary closes, the mirvm dimensions must reproduce these 13
+// lines byte-for-byte. The dependency closure is 247 normal crates (324
+// including build dependencies); the three -sys crates need cc/g++ but no
+// cmake/bindgen/clang/nasm.
 //
-// 各维耗时实测：A = 3m08s 冷（mirvm 降低 247-crate 闭包后于物化点红；
-// 终稿热复跑 0.76s 同签名）、B = 2m23s 冷 / ~10s 热、C = 0.75s（依赖镜像
-// 缓存热，同签名红）。
-// 依赖尺寸证据（预算铁律存档）：cargo tree normal 去重 247 crate、含
-// build 依赖全量去重 324；三个 -sys 用 cc/g++（在场），无 cmake/bindgen/
-// clang/nasm 需求；native dev 冷构建 2m03s（probe 同配置），构建量级在
-// 20min 预算内——非"判不可"，系引擎红。
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
 use risc0_zkvm::sha::{Digestible, Impl, Sha256};
 use risc0_zkvm::{default_executor, Digest, ExecutorEnv, ExitCode, MaybePruned, Output};
 
-// ---------------- rv32im 迷你汇编器（定宽 li，两遍定址） ----------------
+// ---------------- rv32im mini assembler (fixed-width li, two-pass) ----------------
 const TEXT_START: u32 = 0x0020_0800; // risc0-zkvm-platform memory::TEXT_START
 
-// 寄存器编号（risc0-zkvm-platform syscall::reg_abi）
+// register numbers (risc0-zkvm-platform syscall::reg_abi)
 const X0: u8 = 0;
 const T0: u8 = 5;
 const T1: u8 = 6;
@@ -188,7 +188,7 @@ fn enc_b(imm: i32, rs2: u8, rs1: u8, f3: u32) -> u32 {
         | 0x63
 }
 
-// 由于 finish 需要分支寄存器，简化：分支立即记录寄存器
+// finish needs a branch register, so branches record it immediately
 struct Asm2 {
     words: Vec<u32>,
     labels: Vec<(&'static str, usize)>,
@@ -254,20 +254,20 @@ impl Asm2 {
 const NAME_READ: &str = "risc0_zkvm_platform::syscall::nr::SYS_READ\0";
 const NAME_WRITE: &str = "risc0_zkvm_platform::syscall::nr::SYS_WRITE\0";
 
-// ecall 号（risc0-zkvm-platform syscall::ecall）
+// ecall numbers (risc0-zkvm-platform syscall::ecall)
 const EC_HALT: u32 = 0;
 const EC_SOFTWARE: u32 = 2;
-// syscall 编号（Syscall enum）
+// syscall numbers (the Syscall enum)
 const NR_READ: u32 = 12;
 const NR_WRITE: u32 = 16;
 // fd（fileno）
 const FD_STDIN: u32 = 0;
 const FD_JOURNAL: u32 = 3;
 
-/// 汇编 guest 程序体。resolve: 数据符号 → 绝对地址。
+/// Assembles the guest body. resolve maps a data symbol to its absolute address.
 fn assemble_body(resolve: &dyn Fn(&str) -> u32) -> Vec<u32> {
     let mut a = Asm2::new();
-    // ---- sys_read(fd=0, INBUF, 8)：两个 u32 输入 ----
+    // ---- sys_read(fd=0, INBUF, 8): the two u32 inputs ----
     a.li(T0, EC_SOFTWARE);
     a.li(T6, NR_READ);
     a.li_data(A0, "INBUF", resolve);
@@ -282,7 +282,7 @@ fn assemble_body(resolve: &dyn Fn(&str) -> u32) -> Vec<u32> {
     a.li_data(T2, "INBUF", resolve);
     a.lw(S0, 0, T2);
     a.lw(S1, 4, T2);
-    // ---- sys_read(fd=0, DIGBUF, 32)：host 预算的 Output digest 8 words ----
+    // ---- sys_read(fd=0, DIGBUF, 32): the host-computed Output digest, 8 words ----
     a.li(T0, EC_SOFTWARE);
     a.li(T6, NR_READ);
     a.li_data(A0, "DIGBUF", resolve);
@@ -293,7 +293,7 @@ fn assemble_body(resolve: &dyn Fn(&str) -> u32) -> Vec<u32> {
     a.emit(ECALL);
     a.li(T1, 32);
     a.bne(A0, T1, "fail");
-    // ---- EOF 探针：sys_read(fd=0, OUTBUF, 4) 必须返回 0 ----
+    // ---- EOF probe: sys_read(fd=0, OUTBUF, 4) must return 0 ----
     a.li(T0, EC_SOFTWARE);
     a.li(T6, NR_READ);
     a.li_data(A0, "OUTBUF", resolve);
@@ -303,7 +303,7 @@ fn assemble_body(resolve: &dyn Fn(&str) -> u32) -> Vec<u32> {
     a.li(A4, 4);
     a.emit(ECALL);
     a.bne(A0, X0, "fail");
-    // ---- p = a * b；断言 p == 1517 ----
+    // ---- p = a * b, asserting p == 1517 ----
     a.mul(S2, S0, S1);
     a.li(T1, 1517);
     a.bne(S2, T1, "fail");
@@ -317,7 +317,7 @@ fn assemble_body(resolve: &dyn Fn(&str) -> u32) -> Vec<u32> {
     a.sw(S1, 4, T2);
     a.sw(S2, 8, T2);
     a.sw(S3, 12, T2);
-    // ---- sys_write(fd=JOURNAL, OUTBUF, 16) = env::commit 公开输出 ----
+    // ---- sys_write(fd=JOURNAL, OUTBUF, 16), i.e. env::commit public output ----
     a.li(T0, EC_SOFTWARE);
     a.li(T6, NR_WRITE);
     a.li(A0, 0);
@@ -332,8 +332,8 @@ fn assemble_body(resolve: &dyn Fn(&str) -> u32) -> Vec<u32> {
     a.li(A0, 0); // halt::TERMINATE | (0 << 8)
     a.li_data(A1, "DIGBUF", resolve);
     a.emit(ECALL);
-    a.emit(0); // 非法指令兜底（不可达）
-    // ---- fail：journal 写 0xDEADBEEF 标记，exit code 1 ----
+    a.emit(0); // an illegal instruction as a floor (unreachable)
+    // ---- fail: write the 0xDEADBEEF marker to the journal and exit 1 ----
     a.label("fail");
     a.li(T1, 0xDEAD_BEEF);
     a.li_data(T2, "OUTBUF", resolve);
@@ -355,7 +355,7 @@ fn assemble_body(resolve: &dyn Fn(&str) -> u32) -> Vec<u32> {
     a.finish()
 }
 
-/// 两遍定址：先以 0 解析数据符号测代码长，再按布局重汇编。
+/// Two-pass addressing: resolve data symbols to 0 to learn the code length, then re-assemble.
 fn build_user_elf() -> Vec<u8> {
     let zero = |_: &str| 0u32;
     let code_len = assemble_body(&zero).len() * 4;
@@ -380,7 +380,7 @@ fn build_user_elf() -> Vec<u8> {
     };
     let words = assemble_body(&resolve);
 
-    // 段内容 = 代码 + 对齐填充 + 数据区（INBUF/OUTBUF/DIGBUF 初值 0）+ 名串
+    // Segment = code + alignment padding + data (INBUF/OUTBUF/DIGBUF zeroed) + names
     let mut seg = Vec::new();
     for w in &words {
         seg.extend_from_slice(&w.to_le_bytes());
@@ -393,7 +393,7 @@ fn build_user_elf() -> Vec<u8> {
     seg.extend_from_slice(NAME_WRITE.as_bytes());
     assert_eq!(seg.len() as u32, data_end - TEXT_START);
 
-    // 最小 ELF32（EM_RISCV / ET_EXEC / 单 PT_LOAD）
+    // Minimal ELF32 (EM_RISCV / ET_EXEC / a single PT_LOAD)
     let mut elf = Vec::new();
     elf.extend_from_slice(&[0x7f, b'E', b'L', b'F', 1, 1, 1, 0]); // ident: ELF32 LE
     elf.extend_from_slice(&[0; 8]);
@@ -403,7 +403,7 @@ fn build_user_elf() -> Vec<u8> {
     elf.extend_from_slice(&TEXT_START.to_le_bytes()); // e_entry
     elf.extend_from_slice(&52u32.to_le_bytes()); // e_phoff
     elf.extend_from_slice(&0u32.to_le_bytes()); // e_shoff
-    elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags（rv32im，无 RVC）
+    elf.extend_from_slice(&0u32.to_le_bytes()); // e_flags (rv32im, no RVC)
     elf.extend_from_slice(&52u16.to_le_bytes()); // e_ehsize
     elf.extend_from_slice(&32u16.to_le_bytes()); // e_phentsize
     elf.extend_from_slice(&1u16.to_le_bytes()); // e_phnum
@@ -427,7 +427,7 @@ fn build_user_elf() -> Vec<u8> {
     elf
 }
 
-// ---------------- host 侧 ----------------
+// ---------------- host side ----------------
 
 fn fnv1a(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -447,19 +447,19 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn main() {
-    // 定值输入与期望（guest 内部独立重算并断言）
+    // Fixed inputs and expectations (the guest recomputes and asserts them itself)
     let (a, b): (u32, u32) = (37, 41);
     let p: u32 = a * b; // 1517
     let q: u32 = p * 7 + 13; // 10632
 
-    // 期望 journal = 4 个 u32 LE
+    // expected journal = four little-endian u32s
     let mut journal_want = Vec::new();
     for w in [a, b, p, q] {
         journal_want.extend_from_slice(&w.to_le_bytes());
     }
 
-    // host 用 risc0 自身类型预算 env::exit 的 Output digest：
-    // journal_digest = SHA-256(journal)；assumptions 空 = Digest::ZERO。
+    // The host precomputes env::exit's Output digest with risc0's own types:
+    // journal_digest = SHA-256(journal); an empty assumptions list is Digest::ZERO.
     let journal_digest: Digest = *Impl::hash_bytes(&journal_want);
     let output = Output {
         journal: MaybePruned::Pruned(journal_digest),
@@ -472,14 +472,14 @@ fn main() {
         od_bytes.extend_from_slice(&w.to_le_bytes());
     }
 
-    // user ELF（手写 guest）+ 官方 v1compat kernel → ProgramBinary 容器
+    // user ELF (hand-written guest) + the official v1compat kernel -> ProgramBinary
     let user_elf = build_user_elf();
     let blob = risc0_binfmt::ProgramBinary::new(&user_elf, risc0_zkos_v1compat::V1COMPAT_ELF)
         .encode();
     println!("user elf bytes = {}", user_elf.len());
     println!("program binary bytes = {}", blob.len());
 
-    // ExecutorEnv：stdin = write(serde u32)×2 + write_slice(digest 32B) = 40B
+    // ExecutorEnv: stdin = write(serde u32) x2 + write_slice(digest 32B) = 40B
     let mut builder = ExecutorEnv::builder();
     builder.write(&a).unwrap();
     builder.write(&b).unwrap();

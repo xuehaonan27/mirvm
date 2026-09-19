@@ -1,27 +1,27 @@
-//! Spike 4: concurrency — N **real host threads** each run interp_frame, engine passes TSan
-//! (4-spike finale).
+//! Spike 4: concurrency -- N **real host threads** each run interp_frame; the engine passes
+//! TSan.
 //!
-//! Validates the three core claims of docs/designs/concurrency-arch.md (RFC acceptance = TSan clean):
+//! Validates three core claims (RFC acceptance = TSan clean):
 //! 1. **Engine is Sync, no GIL**: shared read-only program + per-thread execution state, zero
-//!    data races on VM-owned state. Cases are designed so the guest is race-free (C4 rules out
-//!    guest races), so any TSan report is an engine bug.
-//! 2. **Blocking syscall liveness** (corpus §2.1 closed): the socketpair scenario that deadlocks
-//!    on tier-0 cooperative scheduling (c_blocking_io) must pass on real threads — blocking only
-//!    stalls its own OS thread.
+//!    data races on VM-owned state. The cases keep the guest race-free (guest races are out
+//!    of contract), so any TSan report is an engine bug.
+//! 2. **Blocking syscall liveness**: the socketpair scenario that deadlocks under tier-0
+//!    cooperative scheduling must pass on real threads -- blocking stalls only its own OS
+//!    thread.
 //! 3. **Atomics = host atomics, cross-tier interoperable**: the interpreter executing a guest
-//!    atomic must issue a real host atomic (tier-0 may simulate with plain reads/writes, which is
-//!    legal single-threaded; on real threads that becomes an engine data race that TSan catches);
-//!    interpreter and compiler threads naturally interoperate on the same real address via atomic
-//!    RMW (real address model).
+//!    atomic must issue a real host atomic (tier-0 may simulate with plain reads/writes, which
+//!    is legal single-threaded; on real threads that becomes an engine data race that TSan
+//!    catches). Interpreter and compiler threads interoperate on the same real address through
+//!    atomic RMW (real address model).
 //!
-//! The RFC §2 three-part state is realized in the skeleton: `Shared` (read-only after
-//! publication) + `Ctx` (per-thread private cell). `Shared` is pure immutable data →
-//! Rust Sync → `&Shared` compiles across scoped threads, the type-level expression of
-//! "execution phase is tcx-free ⇒ engine Sync" (C8) (skeleton has no tcx = mode B runtime shape).
-//! `Ctx.shared` is a raw pointer (not &'s): avoids burdening CompiledFn with HRTB lifetimes and
-//! matches the vmctx discipline; lifetime is guaranteed by thread::scope.
+//! The three-part state is realized in the skeleton: `Shared` (read-only after publication) +
+//! `Ctx` (per-thread private cell). `Shared` is pure immutable data -> Rust Sync -> `&Shared`
+//! works across scoped threads, the type-level expression of "execution phase is tcx-free =>
+//! engine Sync" (the skeleton has no tcx, matching the mode B runtime shape). `Ctx.shared` is
+//! a raw pointer (not `&`): it avoids burdening CompiledFn with HRTB lifetimes and matches the
+//! vmctx discipline; `thread::scope` guarantees the lifetime.
 //!
-//! TSan entry point: `run_cases()` (the tsan/ harness reuses this source via #[path], see
+//! TSan entry point: `run_cases()` (the tsan harness reuses this source via `#[path]`, see
 //! `runtime.tsan`).
 
 use std::panic::{self, AssertUnwindSafe};
@@ -55,13 +55,13 @@ enum FuncKind {
 }
 
 /// Read-only after publication: built before spawn, threads only hold `&` references,
-/// lock-free reads. Pure immutable data → automatically Sync.
+/// lock-free reads. Pure immutable data -> automatically Sync.
 struct Shared {
     prog: Program,
     kinds: Vec<FuncKind>,
 }
 
-/// Per-thread execution state (vmctx, one per thread; docs/designs/vmctx-passing.md §1.2).
+/// Per-thread execution state (one vmctx per thread).
 struct Ctx {
     shared: *const Shared,
     region: OperandRegion,
@@ -308,7 +308,7 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> Word {
             // Engine obligation: the interpreter executing a guest atomic must issue a real host
             // atomic instruction.
             // (Implementing this with plain reads/writes would make TSan report an engine data race
-            // here under real threads — the deciding point of this spike.)
+            // here under real threads -- the deciding point of this spike.)
             let a = unsafe { AtomicU64::from_ptr(addr as *mut u64) };
             a.fetch_add(val, Ordering::SeqCst)
         }
@@ -337,7 +337,7 @@ extern "C-unwind" fn cc_fib_b(ctx: *mut Ctx, n: u64) -> u64 {
     call_guest(ctx, 0, &[n - 1]).wrapping_add(call_guest(ctx, 0, &[n - 2]))
 }
 
-// --- case B：编译侧原子循环（跨 tier 同址互操作）---
+// --- case B: compiled-side atomic loop (cross-tier interop on the same address) ---
 const ATOMIC_ITERS: u64 = 50_000;
 
 extern "C-unwind" fn cc_atomic_loop(_ctx: *mut Ctx, addr: u64) -> u64 {
@@ -348,29 +348,30 @@ extern "C-unwind" fn cc_atomic_loop(_ctx: *mut Ctx, addr: u64) -> u64 {
     0
 }
 
-// --- case C：阻塞 IO（corpus §2.1 收束）---
+// --- case C: blocking IO ---
 extern "C-unwind" fn cc_blocking_read(_ctx: *mut Ctx, fd: u64) -> u64 {
     let mut buf = [0u8; 1];
-    // 真阻塞 read(2)：只挡本条 OS 线程（协作 tier-0 上这一步冻结全部 guest 线程）
+    // Real blocking read(2): stalls only this OS thread (unlike tier-0 cooperative
+    // scheduling, where this step froze every guest thread).
     let n = unsafe { libc::read(fd as i32, buf.as_mut_ptr() as *mut libc::c_void, 1) };
-    assert!(n == 1, "read 失败: {n}");
+    assert!(n == 1, "read failed: {n}");
     buf[0] as u64
 }
 extern "C-unwind" fn cc_write_after_delay(_ctx: *mut Ctx, fd: u64) -> u64 {
     std::thread::sleep(std::time::Duration::from_millis(50));
     let b = [42u8];
     let n = unsafe { libc::write(fd as i32, b.as_ptr() as *const libc::c_void, 1) };
-    assert!(n == 1, "write 失败: {n}");
+    assert!(n == 1, "write failed: {n}");
     0
 }
 
-// --- case D：并发混合栈 unwind 的编译底帧 ---
+// --- case D: compiled bottom frame for concurrent mixed-stack unwind ---
 extern "C-unwind" fn cc_d_raise(ctx: *mut Ctx, _x: u64) -> u64 {
     let _g = CGuard { ctx, v: 102 };
     raise_guest(777)
 }
 
-// ===== 字节码 builder =====
+// ===== bytecode builders =====
 
 fn s(n: u32) -> Operand {
     Operand::Slot(n)
@@ -385,7 +386,7 @@ fn bin(op: BinOp, a: Operand, b: Operand) -> Rvalue {
     Rvalue::Binary(op, a, b)
 }
 
-/// 互递归 fib（同 spike2 形状）：fib(n)=n<2?n:callee(n-1)+callee(n-2)
+/// Mutually recursive fib (same shape as spike2): fib(n)=n<2?n:callee(n-1)+callee(n-2)
 fn fib_body(callee: u32) -> Body {
     use BinOp::*;
     use Rvalue::Use;
@@ -435,7 +436,8 @@ fn fib_body(callee: u32) -> Body {
     }
 }
 
-/// 原子计数循环：args = (cell_addr, iters)。槽：3=i 4=cond 5=旧值弃置
+/// Atomic counting loop: args = (cell_addr, iters). Slots: 3=i 4=cond 5=discarded previous
+/// value
 fn atomic_loop_body() -> Body {
     use BinOp::*;
     use Terminator::*;
@@ -475,7 +477,7 @@ fn atomic_loop_body() -> Body {
     }
 }
 
-/// 转发帧：ret = callee(x)（给阻塞 IO 用例造一层解释帧）
+/// Forwarding frame: ret = callee(x); gives the blocking-IO case one interpreted frame.
 fn wrap_body(callee: u32) -> Body {
     use Terminator::*;
     let blocks = vec![
@@ -501,7 +503,7 @@ fn wrap_body(callee: u32) -> Body {
     }
 }
 
-/// 中间帧（unwind 用，同 spike3 形状）：own=100+d；cleanup Drop → Resume
+/// Middle frame (for unwind, same shape as spike3): own=100+d; cleanup Drop -> Resume
 fn mid_body(d: u64, callee: u32) -> Body {
     use Terminator::*;
     let blocks = vec![
@@ -547,7 +549,7 @@ fn mid_body(d: u64, callee: u32) -> Body {
     }
 }
 
-/// 顶帧（catch，同 spike3 形状）
+/// Top frame (catch, same shape as spike3)
 fn top_catch_body(callee: u32) -> Body {
     use Terminator::*;
     let blocks = vec![
@@ -613,11 +615,12 @@ fn fib_ref(n: u64) -> u64 {
     }
 }
 
-// ===== 用例 =====
+// ===== cases =====
 
 const N_THREADS: usize = 8;
 
-/// A：8 线程并行跑混合 fib（i2c/c2i 并发发生；共享只读程序 lock-free 读）
+/// A: 8 threads run mixed fib in parallel (i2c/c2i happen concurrently; the shared read-only
+/// program is read lock-free).
 fn case_a() -> bool {
     let shared = Shared {
         prog: Program {
@@ -640,14 +643,17 @@ fn case_a() -> bool {
     });
     let pass = results.iter().all(|&r| r == want);
     if pass {
-        println!("PASS caseA 并行混合 fib（{N_THREADS} 线程 × fib(22)={want}，i2c/c2i 并发）");
+        println!(
+            "PASS caseA parallel mixed fib ({N_THREADS} threads x fib(22)={want}, i2c/c2i concurrent)"
+        );
     } else {
         println!("FAIL caseA: {results:?} != {want}");
     }
     pass
 }
 
-/// B：跨 tier 原子计数——4 解释线程（AtomicAdd 字节码）+ 4 编译线程（fetch_add）同址
+/// B: cross-tier atomic counting -- 4 interpreted threads (AtomicAdd bytecode) + 4 compiled
+/// threads (fetch_add) on the same address.
 fn case_b() -> bool {
     let mut mem = GuestMemory::new(4096);
     let cell = mem.alloc(8);
@@ -664,27 +670,30 @@ fn case_b() -> bool {
             let sh = &shared;
             sc.spawn(move || {
                 let mut ctx = Ctx::new(sh);
-                let func = (t % 2) as u32; // 偶=解释 AtomicAdd，奇=编译 fetch_add
+                let func = (t % 2) as u32; // even = interpreted AtomicAdd, odd = compiled fetch_add
                 call_guest(&mut ctx as *mut Ctx, func, &[cell, ATOMIC_ITERS]);
             });
         }
     });
-    let total = unsafe { mem.load(cell) }; // scope join 提供 happens-before
+    let total = unsafe { mem.load(cell) }; // scope join provides happens-before
     let want = N_THREADS as u64 * ATOMIC_ITERS;
     let pass = total == want;
     if pass {
-        println!("PASS caseB 跨 tier 原子计数（4 解释 + 4 编译线程同址，total={total}）");
+        println!(
+            "PASS caseB cross-tier atomic counting (4 interpreted + 4 compiled threads, same address, total={total})"
+        );
     } else {
         println!("FAIL caseB: total={total} != {want}");
     }
     pass
 }
 
-/// C：阻塞 syscall 活性（corpus §2.1 收束）——tier-0 协作调度上同构程序挂死（c_blocking_io）
+/// C: blocking syscall liveness -- the isomorphic program deadlocks under tier-0 cooperative
+/// scheduling.
 fn case_c() -> bool {
     let mut fds = [0i32; 2];
     let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
-    assert!(rc == 0, "socketpair 失败");
+    assert!(rc == 0, "socketpair failed");
     let (rfd, wfd) = (fds[0] as u64, fds[1] as u64);
 
     let shared = Shared {
@@ -700,12 +709,13 @@ fn case_c() -> bool {
     };
     let got = std::thread::scope(|sc| {
         let sh = &shared;
-        // guest 线程 A：解释帧 → 编译帧 → 真阻塞 read(2)（等 B 写）
+        // guest thread A: interpreted frame -> compiled frame -> real blocking read(2)
+        // (waits for B's write)
         let a = sc.spawn(move || {
             let mut ctx = Ctx::new(sh);
             call_guest(&mut ctx as *mut Ctx, 0, &[rfd])
         });
-        // guest 线程 B：延时后写——真线程下 A 的阻塞不挡 B
+        // guest thread B: write after a delay -- on real threads A's block does not stall B
         let sh = &shared;
         let b = sc.spawn(move || {
             let mut ctx = Ctx::new(sh);
@@ -720,14 +730,15 @@ fn case_c() -> bool {
     }
     let pass = got == 42;
     if pass {
-        println!("PASS caseC 阻塞 IO 活性（真 read(2) 只挡自己；tier-0 同构程序挂死 → 已收束）");
+        println!("PASS caseC blocking IO liveness (a real read(2) stalls only its own thread)");
     } else {
         println!("FAIL caseC: got {got} != 42");
     }
     pass
 }
 
-/// D：8 线程并发混合栈 unwind（per-thread panic→Drop→catch，unwind 机器每线程独立）
+/// D: 8 threads unwind concurrently on mixed stacks (per-thread panic -> Drop -> catch; the
+/// unwind machinery is per-thread).
 fn case_d() -> bool {
     let shared = Shared {
         prog: Program {
@@ -756,7 +767,7 @@ fn case_d() -> bool {
     let pass = results.iter().all(|r| *r == expect);
     if pass {
         println!(
-            "PASS caseD 并发混合栈 unwind（{N_THREADS} 线程 × panic+Drop+catch，逐线程日志正确）"
+            "PASS caseD concurrent mixed-stack unwind ({N_THREADS} threads x panic+Drop+catch, per-thread logs correct)"
         );
     } else {
         println!("FAIL caseD: {results:?} != {expect:?}");
@@ -764,9 +775,9 @@ fn case_d() -> bool {
     pass
 }
 
-// ===== 双入口 =====
+// ===== entry points =====
 
-/// TSan harness（tsan/）与 CLI 共用的用例入口。
+/// Case entry point shared by the TSan harness (tsan/) and the CLI.
 pub fn run_cases() -> bool {
     let mut ok = true;
     ok &= case_a();
@@ -778,10 +789,10 @@ pub fn run_cases() -> bool {
 
 pub fn run() -> ExitCode {
     if run_cases() {
-        println!("--- spike4: 全 PASS（真线程引擎并发验证通过，4-spike 收官）---");
+        println!("--- spike4: all PASS (real-thread engine concurrency verified) ---");
         ExitCode::SUCCESS
     } else {
-        println!("--- spike4: 有 FAIL ---");
+        println!("--- spike4: FAIL ---");
         ExitCode::from(1)
     }
 }

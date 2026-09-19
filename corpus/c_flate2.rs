@@ -3,12 +3,12 @@
 [dependencies]
 flate2 = "1"
 ---
-// flate2（默认 miniz_oxide 纯 Rust 后端）：Deflate × level 0/6/9 压缩 ~100KB
-// 结构化重复文本并 roundtrip；位打包与 32KB 滑动窗口匹配密集。
-// 2026-07-18（open-issues G4②）：ZlibEncoder/GzEncoder 原生容器恢复——
-// 容器校验和路径的 simd-adler32（llvm.x86.sse2.psad.bw）与 crc32fast 固定
-// pclmulqdq 路径均已内建，原先的手工容器等价覆盖（Deflate 载荷 + 软件
-// adler32/crc32 trailer）退役，原文见 git 历史。
+// flate2 (default miniz_oxide pure-Rust backend): Deflate at levels 0/6/9 over
+// ~100KB of structured repetitive text, roundtripped; exercises bit packing and
+// 32KB sliding-window matching heavily.
+// The zlib/gzip native container paths are exercised directly: the container
+// checksums (simd-adler32's psad.bw and crc32fast's pinned pclmulqdq path) are
+// both built in, so the manual container equivalent is not needed.
 use std::io::{Read, Write};
 
 use flate2::Compression;
@@ -24,9 +24,9 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-// 手工容器已随 G4② 退役（zlib/gzip 原生 API 恢复，软件 adler32/crc32 助手删除）。
+// No manual container construction is needed; the native zlib/gzip APIs cover it.
 
-// 结构化重复文本：定长记录号 + 小周期字段，保证三 level 压缩行为差异明显。
+// Structured repetitive text: fixed-width record + periodic fields, so the three levels differ.
 fn make_data() -> Vec<u8> {
     let mut d = Vec::new();
     let mut i = 0u32;
@@ -83,7 +83,7 @@ fn main() {
     let data = make_data();
     println!("data len={} fnv={:016x}", data.len(), fnv1a(&data));
 
-    // ① raw deflate × level 0/6/9：压缩长 / 压缩流 checksum / roundtrip 布尔
+    // ① raw deflate × level 0/6/9: compressed length / stream checksum / roundtrip bool
     for level in [0u32, 6, 9] {
         let c = deflate_compress(level, &data);
         let back = deflate_decompress(&c);
@@ -95,7 +95,7 @@ fn main() {
         );
     }
 
-    // ② zlib 原生容器（ZlibEncoder/ZlibDecoder，simd-adler32 校验和）× level 0/6/9
+    // ② native zlib container (ZlibEncoder/ZlibDecoder, simd-adler32 checksum) × level 0/6/9
     for level in [0u32, 6, 9] {
         let wrapped = zlib_compress(level, &data);
         let back = zlib_decompress(&wrapped);
@@ -107,7 +107,7 @@ fn main() {
         );
     }
 
-    // ③ gzip 原生容器（GzEncoder/GzDecoder，crc32fast 校验和）× level 0/6/9
+    // ③ native gzip container (GzEncoder/GzDecoder, crc32fast checksum) × level 0/6/9
     for level in [0u32, 6, 9] {
         let wrapped = gzip_compress(level, &data);
         let back = gzip_decompress(&wrapped);
@@ -119,7 +119,7 @@ fn main() {
         );
     }
 
-    // ④ 空输入边界：raw / zlib 容器 / gzip 容器各 roundtrip 一次
+    // ④ empty-input edge: one roundtrip each for raw / zlib container / gzip container
     let c = deflate_compress(6, b"");
     let back = deflate_decompress(&c);
     println!(
@@ -143,7 +143,7 @@ fn main() {
         back.is_empty()
     );
 
-    // ⑤ 流式分块写入（7 字节小块跨 deflate 块边界）+ flush
+    // ⑤ streaming chunked writes (7-byte chunks straddling deflate block boundaries) + flush
     let mut e = DeflateEncoder::new(Vec::new(), Compression::new(6));
     for chunk in data.chunks(7) {
         e.write_all(chunk).unwrap();
@@ -158,7 +158,7 @@ fn main() {
         back == data
     );
 
-    // ⑥ read 端编码器（反向 API 面）：read::DeflateEncoder 从 reader 拉流压缩
+    // ⑥ read-side encoder (the reverse API surface): read::DeflateEncoder pulls from a reader
     let mut re = flate2::read::DeflateEncoder::new(&data[..], Compression::new(9));
     let mut c = Vec::new();
     re.read_to_end(&mut c).unwrap();
@@ -170,7 +170,7 @@ fn main() {
         back == data
     );
 
-    // ⑦ 错误路径 a：reserved block type（BTYPE=0b11）→ inflate 立即报错
+    // ⑦ error path a: reserved block type (BTYPE=0b11) -> inflate fails immediately
     let junk = [0xffu8; 4];
     let mut sink = Vec::new();
     let err = DeflateDecoder::new(&junk[..])
@@ -178,7 +178,7 @@ fn main() {
         .unwrap_err();
     println!("bad-block kind={:?} msg={}", err.kind(), err);
 
-    // ⑧ 错误路径 b：截断的 deflate 流 → 输出短于原文（行为由库决定，确定性对拍）
+    // ⑧ error path b: truncated deflate stream -> output shorter than the input (library-defined; differential)
     let full = deflate_compress(6, &data);
     let cut = &full[..full.len() / 2];
     let mut sink = Vec::new();

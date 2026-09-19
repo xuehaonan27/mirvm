@@ -1,11 +1,11 @@
 #![feature(linkage)]
-// E27：extern weak 符号定向验收（地址模型 P2 GOT 启动相重填，open-issues E27 关账探针）。
-// 使用 rustc 唯一官方形态：「Option<extern fn> 类型的 #[linkage="extern_weak"] static」
-// （cg_llvm consts.rs check_and_apply_linkage——真符号按签名单 extern_weak 化，链接期
-// 无定义则内部格初始化为 0）。两路对拍 native：
-// ① 无定义 weak 符号 → static 值 = None（ELF 弱符号缺席语义）；不调用（native 调 = UB）。
-// ② weak 声明 + 强定义（libc getpid）→ Some，可调用；pid 进程相关，只验同进程
-//    两次一致且为正，不比具体值。
+// extern weak symbol checks: rustc's only official form is a `#[linkage="extern_weak"] static`
+// of type `Option<extern fn>` (cg_llvm consts.rs check_and_apply_linkage turns a real symbol into a single
+// extern_weak per signature; an undefined symbol at link time leaves the internal slot at 0). Compared with native:
+// 1. Undefined weak symbol -> the static value is None (ELF weak-symbol-absent semantics); it is not called,
+//    since calling it natively is UB.
+// 2. Weak declaration + strong definition (libc getpid) -> Some and callable; the pid is process-dependent,
+//    so only same-process consistency and positivity are checked, not the concrete value.
 unsafe extern "C" {
     #[linkage = "extern_weak"]
     static MIRVM_ABSENT_PROBE_SYMBOL_XYZ: Option<unsafe extern "C" fn() -> i32>;

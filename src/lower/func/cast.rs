@@ -1,6 +1,6 @@
-//! cast 家族（自 func.rs F9 整搬）：lower_cast 全族——IntToInt/PtrToPtr/
-//! PointerCoercion(Unsize/DynStar)/IntToFloat/FloatCast/Transmute 等。
-//! 唯一入口 = mod.rs lower_assign 的 Cast 臂；unsize 导航在 unsize.rs。
+//! cast family: the whole lower_cast family -- IntToInt/PtrToPtr/
+//! PointerCoercion(Unsize/DynStar)/IntToFloat/FloatCast/Transmute etc.
+//! Sole entry = the Cast arm of mod.rs lower_assign; unsize navigation lives in unsize.rs.
 
 use super::*;
 
@@ -19,9 +19,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let a_ty = self.op_ty(a)?;
                 let a_layout = self.layout_of(a_ty)?;
                 let signed = frame::ty_signed(a_ty);
-                // 128 位方向：→u128/i128 = 低半 cast + 高半符号扩；u128→小 = 取低半
+                // 128-bit direction: -> u128/i128 = cast the low half + sign-extend the high half; u128 -> smaller = take the low half
                 if let ValKind::Other { size: 16 } = dst_kind {
-                    // 128→128（i128↔u128 等宽 int cast，D8k）：位相同，16 字节整拷
+                    // 128 -> 128 (equal-width int cast such as i128<->u128): same bits, copy all 16 bytes
                     if a_layout.size.bytes() == 16 {
                         return Ok(vec![Stmt::Copy {
                             dst: dst_p.expr(),
@@ -29,7 +29,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             size: 16,
                         }]);
                     }
-                    let from_w = frame::scalar_width(&a_layout).ok_or("128 cast 源非标量")?;
+                    let from_w = frame::scalar_width(&a_layout)
+                        .ok_or("128-bit cast source is not a scalar")?;
                     let ao = self.lower_operand_scalar(a)?;
                     let lo = Stmt::Assign {
                         dst: dst_p.half_place(0, Width::W64),
@@ -40,7 +41,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         },
                     };
                     let hi_rv = if signed {
-                        // 算术右移 63 位复制符号
+                        // Arithmetic shift right by 63 copies the sign
                         Rvalue::IntBin {
                             op: IntBinOp::Shr,
                             signed: true,
@@ -63,15 +64,15 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     return Ok(vec![lo, hi]);
                 }
                 if a_layout.size.bytes() == 16 {
-                    // u128/i128 → ≤64：截断 = 取低半
+                    // u128/i128 -> <= 64: truncation = take the low half
                     let src_p = match a {
                         mir::Operand::Copy(pl) | mir::Operand::Move(pl) => {
                             self.resolve_place(pl)?
                         }
-                        _ => return Err("128 位常量 cast（M4.3+）".into()),
+                        _ => return Err("128-bit constant cast".into()),
                     };
                     let ValKind::Scalar(w) = dst_kind else {
-                        return Err("IntToInt 目标非标量".into());
+                        return Err("IntToInt target is not a scalar".into());
                     };
                     return Ok(vec![Stmt::Assign {
                         dst: dst_p.scalar_place(w),
@@ -82,11 +83,11 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         },
                     }]);
                 }
-                let from_w = frame::scalar_width(&a_layout).ok_or("cast 源非标量")?;
+                let from_w = frame::scalar_width(&a_layout).ok_or("cast source is not a scalar")?;
                 let to_layout = self.layout_of(to_ty)?;
-                let to_w = frame::scalar_width(&to_layout).ok_or("cast 目标非标量（M4.3+）")?;
+                let to_w = frame::scalar_width(&to_layout).ok_or("cast target is not a scalar")?;
                 let ValKind::Scalar(w) = dst_kind else {
-                    return Err("IntToInt 目标非标量".into());
+                    return Err("IntToInt target is not a scalar".into());
                 };
                 debug_assert_eq!(w.bytes(), to_w.bytes());
                 Ok(vec![Stmt::Assign {
@@ -98,13 +99,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     },
                 }])
             }
-            // 真实地址模型下的位拷 cast 家族
+            // Bit-copy cast family under the real-address model
             CK::PointerExposeProvenance | CK::PointerWithExposedProvenance | CK::FnPtrToPtr => {
                 let src = self.lower_operand(a)?;
                 self.assign_lowered(dst_p, dst_kind, src)
             }
             CK::PtrToPtr => {
-                // 胖→瘦 = 取 data 半；同类 = 位拷
+                // Fat -> thin = take the data half; same kind = bit copy
                 let src = self.lower_operand(a)?;
                 match (&dst_kind, src) {
                     (ValKind::Scalar(_), LoweredOp::Pair(l, _)) => {
@@ -114,8 +115,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
             }
             CK::Transmute => {
-                // 位重解释 = 字节搬运。同宽标量直通（快路径）；src 是 place 时
-                // 一律按字节拷（跨分类安全）；标量常量→同宽标量。
+                // Bit reinterpretation = byte movement. An equal-width scalar passes straight
+                // through (fast path); a place src is always byte-copied (cross-class safe); a
+                // scalar constant becomes an equal-width scalar.
                 match a {
                     mir::Operand::Copy(pl) | mir::Operand::Move(pl) => {
                         let src_p = self.resolve_place(pl)?;
@@ -138,11 +140,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }
                     }
                     _ => {
-                        // 常量：lower_const_value 已物化四路（Slice/Indirect 进冻结区），
-                        // transmute = 同尺寸位重解释 → 同型搬运即可（&str→&[u8] 同构 pair）
+                        // Constant: lower_const_value already materialized all four classes
+                        // (Slice/Indirect go to the frozen region); transmute is same-size bit
+                        // reinterpretation, so a same-shape move suffices (&str -> &[u8] is an isomorphic pair).
                         let src = self.lower_operand(a)?;
                         self.assign_lowered(dst_p, dst_kind, src)
-                            .map_err(|e| format!("Transmute 常量: {e}"))
+                            .map_err(|e| format!("Transmute constant: {e}"))
                     }
                 }
             }
@@ -150,12 +153,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 use ty::adjustment::PointerCoercion as PC;
                 match pc {
                     PC::Unsize => {
-                        // 胖化：data = 源瘦标量（一路 newtype 包着一个指针），
-                        // meta = 类型递归推导（unsize_meta_of）。
-                        // dyn 尾对（统一递归判据，dyn_unsize_tails——
-                        // builtin_deref 直达 / lockstep 直达 / Pat 壳 / Adt 唯一非
-                        // ZST 字段递归，Arc→NonNull→*const ArcInner→data 全链覆盖）：
-                        // 同 principal = pair 位拷（auto trait 差）；上溯 = C5 chase。
+                        // Unsizing: data = the source thin scalar (one newtype wrapping a pointer),
+                        // meta = derived by type recursion (unsize_meta_of).
+                        // dyn tail pair (unified recursive criterion, dyn_unsize_tails --
+                        // builtin_deref direct / lockstep direct / Pat shell / Adt single
+                        // non-ZST field recursion, covering the whole
+                        // Arc->NonNull->*const ArcInner->data chain). Same principal = pair bit copy
+                        // (auto-trait diff); upcast = chase.
                         let a_ty = self.op_ty(a)?;
                         let dyn_tails: Option<(Ty<'tcx>, Ty<'tcx>)> =
                             self.dyn_unsize_tails(a_ty, to_ty);
@@ -163,32 +167,31 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             let (ty::Dynamic(src_preds, _), ty::Dynamic(dst_preds, _)) =
                                 (dsp.kind(), ddp.kind())
                             else {
-                                unreachable!("dyn_tails 已筛")
+                                unreachable!("dyn_tails already filtered")
                             };
                             if src_preds.principal_def_id() == dst_preds.principal_def_id() {
-                                // vtable 不变（cg_ssa unsized_info 同判据）
+                                // vtable unchanged (same criterion as cg_ssa unsized_info)
                                 let src = self.lower_operand(a)?;
                                 return self.assign_lowered(dst_p, dst_kind, src);
                             }
-                            // C5 dyn 上溯（trait upcasting，批10 datafusion/typst
-                            // 双供养；cg_ssa base.rs unsized_info 同构）：目标
-                            // vtable = *(源 vtable + supertrait_vtable_slot×8)；
-                            // None = auto trait 差（vtable 不变，pair 位拷）
+                            // dyn upcasting (isomorphic to cg_ssa base.rs unsized_info): the target vtable =
+                            // *(source vtable + supertrait_vtable_slot x 8); None means an auto-trait
+                            // difference (vtable unchanged, pair bit copy).
                             let Some(slot_idx) = self.tcx.supertrait_vtable_slot((dsp, ddp)) else {
                                 let src = self.lower_operand(a)?;
                                 return self.assign_lowered(dst_p, dst_kind, src);
                             };
                             let byte_off = (slot_idx as u64 * 8) as i32;
                             let ValKind::Pair((ao, aw), (bo, bw)) = dst_kind else {
-                                return Err(format!("dyn 上溯目标非 pair（{to_ty}）"));
+                                return Err(format!("dyn upcast target is not a pair ({to_ty})"));
                             };
                             let ValKind::Pair((sao, saw), (sbo, _)) = self.classify(a_ty)? else {
                                 return Err(format!(
-                                    "dyn 上溯源非 pair（{a_ty}；嵌套尾对包装未接）"
+                                    "dyn upcast source is not a pair ({a_ty}; nested tail-pair wrapper not handled)"
                                 ));
                             };
-                            // 源 meta 半 chase：<源 meta 半地址> → Deref → +byte_off
-                            // → Mem 读 8B = 目标 vtable 指针
+                            // Chase the source meta half: <source meta half address> -> Deref -> +byte_off
+                            // -> Mem read 8B = the target vtable pointer
                             let chase_of = |base: ir::PlaceBase,
                                             steps: &mut Vec<ir::PlaceStep>|
                              -> ir::Operand {
@@ -218,15 +221,15 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                     },
                                 ]);
                             }
-                            // 非常量位（lower_operand 的 Slot meta 半）同型 chase
+                            // Non-constant case (lower_operand's Slot meta half): same chase
                             let LoweredOp::Pair(l, h) = self.lower_operand(a)? else {
                                 return Err(format!(
-                                    "dyn 上溯源非胖指针（{a_ty}；常量胖指针上溯未接）"
+                                    "dyn upcast source is not a fat pointer ({a_ty}; constant fat-pointer upcast not handled)"
                                 ));
                             };
                             let ir::Operand::Slot(meta_slot) = h else {
                                 return Err(format!(
-                                    "dyn 上溯源 meta 非槽（{a_ty}；非常量形态未接）"
+                                    "dyn upcast source meta is not a slot ({a_ty}; non-constant form not handled)"
                                 ));
                             };
                             let mut steps = vec![];
@@ -245,11 +248,11 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }
                         let meta = self.unsize_meta_of(a_ty, to_ty)?;
                         let ValKind::Pair((ao, aw), (bo, bw)) = dst_kind else {
-                            return Err(format!("Unsize 目标非 pair（{to_ty}）"));
+                            return Err(format!("Unsize target is not a pair ({to_ty})"));
                         };
                         let LoweredOp::Scalar(data) = self.lower_operand(a)? else {
                             return Err(format!(
-                                "Unsize 源非瘦标量（{a_ty}，多非 ZST 字段的自定义 CoerceUnsized？）"
+                                "Unsize source is not a thin scalar ({a_ty}); custom CoerceUnsized with multiple non-ZST fields?"
                             ));
                         };
                         Ok(vec![
@@ -264,7 +267,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         ])
                     }
                     PC::MutToConstPointer | PC::UnsafeFnPointer | PC::ArrayToPointer => {
-                        // 位拷（胖→瘦经 PtrToPtr，这里同类位拷）
+                        // Bit copy (fat -> thin goes through PtrToPtr; here it is a same-kind bit copy)
                         let src = self.lower_operand(a)?;
                         match (&dst_kind, src) {
                             (ValKind::Scalar(_), LoweredOp::Pair(l, _)) => {
@@ -274,23 +277,25 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }
                     }
                     PC::ReifyFnPointer(..) => {
-                        // FnDef（ZST）→ fn ptr：必须走 rustc 的 fn-ptr 专用解析。
-                        // #[track_caller] 不能编码进 fn-ptr ABI；resolve_for_fn_ptr 会为它
-                        // 选择 Reify shim，由 shim 以普通 fn-ptr ABI 接参并补 caller location。
+                        // FnDef (ZST) -> fn ptr: must go through rustc's dedicated fn-ptr resolution.
+                        // #[track_caller] cannot be encoded in the fn-ptr ABI; resolve_for_fn_ptr picks
+                        // a Reify shim for it that takes ordinary fn-ptr ABI args and supplies caller location.
                         let a_ty = self.op_ty(a)?;
                         let ty::FnDef(def_id, gargs) = a_ty.kind() else {
-                            return Err(format!("ReifyFnPointer 源非 FnDef（{a_ty}）"));
+                            return Err(format!("ReifyFnPointer source is not a FnDef ({a_ty})"));
                         };
                         let Some(inst) =
                             Instance::resolve_for_fn_ptr(self.tcx, self.typing_env, *def_id, gargs)
                         else {
-                            return Err(format!("ReifyFnPointer 实例解析失败（{a_ty}）"));
+                            return Err(format!(
+                                "ReifyFnPointer instance resolution failed ({a_ty})"
+                            ));
                         };
                         let addr = self.linker.fn_entry_addr(inst)?;
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("ReifyFnPointer 目标非标量".into());
+                            return Err("ReifyFnPointer target is not a scalar".into());
                         };
-                        // P2：extern fn 的 fn-ptr 值 = GOT 槽内容（宿主码址启动相重填）
+                        // extern fn's fn-ptr value = the GOT slot content (host code address refilled at startup)
                         let op = match self.linker.foreign_fn_slot(inst) {
                             Some(slot) => Operand::Mem {
                                 expr: PlaceExpr {
@@ -307,10 +312,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }])
                     }
                     PC::ClosureFnPointer(..) => {
-                        // 无捕获闭包 → fn ptr（cg_ssa 同构：resolve_closure FnOnce）
+                        // Captureless closure -> fn ptr (isomorphic to cg_ssa: resolve_closure FnOnce)
                         let a_ty = self.op_ty(a)?;
                         let ty::Closure(def_id, cargs) = a_ty.kind() else {
-                            return Err(format!("ClosureFnPointer 源非闭包（{a_ty}）"));
+                            return Err(format!(
+                                "ClosureFnPointer source is not a closure ({a_ty})"
+                            ));
                         };
                         let inst = Instance::resolve_closure(
                             self.tcx,
@@ -320,9 +327,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         );
                         let addr = self.linker.fn_entry_addr(inst)?;
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("ClosureFnPointer 目标非标量".into());
+                            return Err("ClosureFnPointer target is not a scalar".into());
                         };
-                        // P2：extern fn 的 fn-ptr 值 = GOT 槽内容（宿主码址启动相重填）
+                        // extern fn's fn-ptr value = the GOT slot content (host code address refilled at startup)
                         let op = match self.linker.foreign_fn_slot(inst) {
                             Some(slot) => Operand::Mem {
                                 expr: PlaceExpr {
@@ -344,7 +351,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let a_ty = self.op_ty(a)?;
                 let to_layout = self.layout_of(to_ty)?;
                 let to_signed = frame::ty_signed(to_ty);
-                // f128 源（宽通道）：→ ≤64 整数 F128ToScalar；→ i128/u128 F128ToWideInt
+                // f128 source (wide channel): -> <= 64-bit integer via F128ToScalar; -> i128/u128 via F128ToWideInt
                 if matches!(a_ty.kind(), ty::Float(ty::FloatTy::F128)) {
                     let pa = self.wide_place(a)?;
                     let Some(to_w) = frame::scalar_width(&to_layout) else {
@@ -355,7 +362,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }]);
                     };
                     let ValKind::Scalar(w) = dst_kind else {
-                        return Err("FloatToInt 目标非标量".into());
+                        return Err("FloatToInt target is not a scalar".into());
                     };
                     return Ok(vec![Stmt::F128ToScalar {
                         src: pa,
@@ -365,7 +372,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }]);
                 }
                 let from = float_w(a_ty)?;
-                // 标量浮点 → i128/u128（D8k）：16 字节宽目标走 FloatToWide128
+                // Scalar float -> i128/u128: a 16-byte-wide target goes through FloatToWide128
                 let Some(to_w) = frame::scalar_width(&to_layout) else {
                     return Ok(vec![Stmt::FloatToWide128 {
                         src: self.lower_operand_scalar(a)?,
@@ -375,7 +382,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }]);
                 };
                 let ValKind::Scalar(w) = dst_kind else {
-                    return Err("FloatToInt 目标非标量".into());
+                    return Err("FloatToInt target is not a scalar".into());
                 };
                 Ok(vec![Stmt::Assign {
                     dst: dst_p.scalar_place(w),
@@ -390,7 +397,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             CK::IntToFloat => {
                 let a_ty = self.op_ty(a)?;
                 let a_layout = self.layout_of(a_ty)?;
-                // f128 目标（宽通道）
+                // f128 target (wide channel)
                 if matches!(to_ty.kind(), ty::Float(ty::FloatTy::F128)) {
                     return Ok(match frame::scalar_width(&a_layout) {
                         Some(_) => vec![Stmt::F128FromScalar {
@@ -400,7 +407,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             },
                             dst: dst_p.expr(),
                         }],
-                        // i128/u128 → f128
+                        // i128/u128 -> f128
                         None => vec![Stmt::F128FromWideInt {
                             src: self.wide_place(a)?,
                             signed: frame::ty_signed(a_ty),
@@ -410,9 +417,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
                 let to = float_w(to_ty)?;
                 let ValKind::Scalar(w) = dst_kind else {
-                    return Err("IntToFloat 目标非标量".into());
+                    return Err("IntToFloat target is not a scalar".into());
                 };
-                // 128 位源（u128/i128 as f，tokio 定时器逼出）：读 16 字节宿主直转
+                // 128-bit source (u128/i128 as f): read 16 bytes and convert directly on the host
                 let Some(from_w) = frame::scalar_width(&a_layout) else {
                     return Ok(vec![Stmt::Wide128ToFloat {
                         src: self.wide_place(a)?,
@@ -435,7 +442,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let from128 = matches!(a_ty.kind(), ty::Float(ty::FloatTy::F128));
                 let to128 = matches!(to_ty.kind(), ty::Float(ty::FloatTy::F128));
                 match (from128, to128) {
-                    // f128 → f128（同宽位拷）
+                    // f128 -> f128 (equal-width bit copy)
                     (true, true) => {
                         let pa = self.wide_place(a)?;
                         Ok(vec![Stmt::Copy {
@@ -446,7 +453,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }
                     (true, false) => {
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("FloatToFloat 目标非标量".into());
+                            return Err("FloatToFloat target is not a scalar".into());
                         };
                         Ok(vec![Stmt::F128ToScalar {
                             src: self.wide_place(a)?,
@@ -462,7 +469,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }]),
                     (false, false) => {
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("FloatToFloat 目标非标量".into());
+                            return Err("FloatToFloat target is not a scalar".into());
                         };
                         Ok(vec![Stmt::Assign {
                             dst: dst_p.scalar_place(w),

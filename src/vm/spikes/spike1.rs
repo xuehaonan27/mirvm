@@ -1,9 +1,10 @@
-//! Spike 1 differential harness: three hand-written bytecode programs compared in-process with native Rust references.
+//! Spike 1 differential harness: three hand-written bytecode programs compared in-process
+//! with native Rust references.
 //!
-//! tier-0 is already bit-identical to native (diff 16/16), so "skeleton == native reference" ⇔ "skeleton == tier-0".
-//! - fib (recursive): verifies host-recursive Call + SwitchInt + BinOp (model A core)
-//! - loop-sum       : verifies Goto/SwitchInt loop (non-recursive control flow)
-//! - mem-array-sum  : verifies real-address bare memory (Alloc/Store/Load, honoring §2.5)
+//! Each program pins one core mechanism:
+//! - fib (recursive): host-recursive Call + SwitchInt + BinOp (model A core)
+//! - loop-sum       : Goto/SwitchInt loop (non-recursive control flow)
+//! - mem-array-sum  : real-address bare memory (Alloc/Store/Load)
 
 use std::process::ExitCode;
 
@@ -27,7 +28,7 @@ fn bin(op: BinOp, a: Operand, b: Operand) -> Rvalue {
 }
 
 /// fib(n) = n<2 ? n : fib(n-1)+fib(n-2)
-/// 槽：0=ret 1=n 2=cond 3=n-1 4=fib(n-1) 5=n-2 6=fib(n-2)
+/// Slots: 0=ret 1=n 2=cond 3=n-1 4=fib(n-1) 5=n-2 6=fib(n-2)
 fn build_fib() -> Program {
     use BinOp::*;
     use Rvalue::Use;
@@ -84,7 +85,7 @@ fn build_fib() -> Program {
     }
 }
 
-/// sum(n) = 1+2+...+n（迭代）。槽：0=acc/ret 1=n 2=i 3=cond
+/// sum(n) = 1+2+...+n (iterative). Slots: 0=acc/ret 1=n 2=i 3=cond
 fn build_loop_sum() -> Program {
     use BinOp::*;
     use Rvalue::Use;
@@ -124,8 +125,9 @@ fn build_loop_sum() -> Program {
     }
 }
 
-/// memsum(n) = 0+1+...+(n-1)，经真地址内存：alloc n*8，store i，再 load 求和。
-/// 槽：0=acc/ret 1=n 2=base 3=i 4=cond 5=addr 6=tmp
+/// memsum(n) = 0+1+...+(n-1) through real-address memory: alloc n*8, store i, then load
+/// and sum.
+/// Slots: 0=acc/ret 1=n 2=base 3=i 4=cond 5=addr 6=tmp
 fn build_mem_sum() -> Program {
     use BinOp::*;
     use Rvalue::{Alloc, Load, Use};
@@ -199,7 +201,7 @@ fn build_mem_sum() -> Program {
     }
 }
 
-// ---- native 参考实现 ----
+// ---- native reference implementations ----
 fn fib_ref(n: u64) -> u64 {
     if n < 2 {
         n
@@ -214,7 +216,7 @@ fn mem_sum_ref(n: u64) -> u64 {
     (0..n).sum()
 }
 
-/// 跑一个程序对一组输入，全部匹配参考才 PASS。
+/// Run a program over a set of inputs; PASS only if all match the reference.
 fn check(name: &str, prog: &Program, inputs: &[u64], reference: impl Fn(u64) -> u64) -> bool {
     for &n in inputs {
         let mut vm = Vm::new(prog);
@@ -225,7 +227,7 @@ fn check(name: &str, prog: &Program, inputs: &[u64], reference: impl Fn(u64) -> 
             return false;
         }
     }
-    println!("PASS {name} ({} 组输入)", inputs.len());
+    println!("PASS {name} ({} inputs)", inputs.len());
     true
 }
 
@@ -244,10 +246,10 @@ pub fn run() -> ExitCode {
     ok &= check("mem_sum", &mem, &n_mem, mem_sum_ref);
 
     if ok {
-        println!("--- spike1: 全 PASS（模型 A 骨架验证通过）---");
+        println!("--- spike1: all PASS (model A skeleton verified) ---");
         ExitCode::SUCCESS
     } else {
-        println!("--- spike1: 有 FAIL ---");
+        println!("--- spike1: FAIL ---");
         ExitCode::from(1)
     }
 }

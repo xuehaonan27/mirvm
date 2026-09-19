@@ -1,39 +1,39 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# gix 0.69.1（0.6x 最新），minimal features：index（index_or_load_from_head 需要）
-# + blob-diff（object::tree::diff 模块受它门控）。zlib 后端保持 gix 默认
-# （gix-features/zlib → flate2 rust_backend = miniz_oxide）。
+# gix 0.69.1 (latest 0.6x), minimal features: index (needed by index_or_load_from_head)
+# + blob-diff (it gates the object::tree::diff module). The zlib backend stays at gix's
+# default (gix-features/zlib -> flate2 rust_backend = miniz_oxide).
 gix = { version = "0.69", default-features = false, features = ["index", "blob-diff"] }
 ---
-// gix 0.69（纯 Rust git）端到端：init 仓库 → 固定内容写文件 → 固定 author/
-// committer/时间戳 commit 两次（第二次改一文件加一文件）→ HEAD/log/tree 遍历/
-// 两 commit tree diff 变更统计/blob 校验/refs+reflog/index 状态/错误路径。
-// 全程 gix API，不 spawn git 命令。commit id 由「内容+固定签名+固定时间」完全
-// 决定（sha1 内容寻址），打印全量 hex。native 侧输出全确定。
+// gix 0.69 (pure-Rust git) end to end: init a repository, write files with fixed content, and
+// make two commits with fixed author/committer/timestamps (the second modifies one file and adds
+// another), then exercise HEAD/log/tree walk, two-commit tree diff statistics, blob verification,
+// refs+reflog/index state, and error paths. All through the gix API, never spawning the git
+// command. The commit id is fully determined by content + fixed signature + fixed time (sha1
+// content addressing) and prints as full hex; the native side is fully deterministic.
 //
-// 已知 FRONTIER（未能绕行，原生/镜像对拍停在首个 loose object 写入）：
-// git loose object 是 zlib 容器，gix-odb 经 gix-features/zlib = flate2
-// rust_backend（miniz_oxide + simd-adler32）做 inflate/deflate；zlib 容器的
-// adler32 校验在单次 update ≥32B 时按运行期 CPUID 派发到 SIMD 实现的
-// _mm(256)_sad_epu8（llvm.x86.avx2/sse2.psad.bw，mirvm 均未内建；guest CPUID
-// 见 host feature 必命中，而 commit/tree 对象必然 ≥32B）。实测 trap 诊断：
-// `llvm.x86.sse2.psad.bw`（__mm_sad_epu8，avx2 实现的 128 位归约段）。备选
-// 后端同病或更糟：
-//   * flate2 1.1 的 zlib-rs：flate2 强制开其 std feature，adler32 同为运行期
-//     avx2 探测 + psad.bw；
-//   * C libz（libz-sys static/stock）：flate2 C 后端无条件把 Rust 的
-//     allocator::zalloc/zfree 两个 extern "C" fn 指针嵌进 z_stream 结构体传给
-//     libz，libz 在 deflateInit2_/inflateInit2_ 里回调——mirvm 的 thunk 机制
-//     只覆盖「显式 fn-ptr 实参」，结构体内嵌回调是盲区，宿主直接跳进 guest
-//     数据地址 → SIGSEGV（si_addr==rip，无诊断；已用 LD_PRELOAD 实锤：
-//     返回地址在 libz.so deflate 内）。C 路因此不可用。
-//   （2026-07-17 注：P1 条目可执行化（decision-history §7.6）后 C 路已通——
-//     extern "C" 回调的 fn-ptr 值本身即 stub 码址，内嵌逃逸直落可执行入口，
-//     负对照探针实测 zlib 往返完成。本 driver 仍走 rust_backend，仅沿用 gix
-//     默认后端，非再受盲区所限。）
-// sha1 走 gix-odb 默认的 sha1_smol（纯 Rust，无 SIMD）。crc32fast 只服务
-// pack/gzip 路径，本 driver 全程 loose object，不触达。
+// Known FRONTIER (not bypassed; the native/mirror differential stops at the first loose object
+// write): a git loose object is a zlib container, and gix-odb inflates/deflates through
+// gix-features/zlib = flate2 rust_backend (miniz_oxide + simd-adler32). When a single update
+// is >=32B, the zlib adler32 check dispatches at runtime on CPUID to a SIMD implementation
+// using _mm(256)_sad_epu8 (llvm.x86.avx2/sse2.psad.bw, neither built into mirvm; the guest
+// CPUID sees the host features and always hits, while commit/tree objects are >=32B). The
+// observed trap diagnostic is 'llvm.x86.sse2.psad.bw' (__mm_sad_epu8, the 128-bit reduction
+// leg of the avx2 implementation). The alternative backends are equally bad or worse:
+//   * flate2 1.1's zlib-rs: flate2 forces its std feature on, and its adler32 again does
+//     runtime avx2 detection plus psad.bw;
+//   * C libz (libz-sys static/stock): the flate2 C backend unconditionally embeds the two
+//     Rust extern "C" fn pointers allocator::zalloc/zfree into the z_stream struct it hands
+//     to libz, which calls them back from deflateInit2_/inflateInit2_. mirvm's thunk
+//     mechanism only covers explicit fn-ptr arguments, so a callback embedded in a struct is
+//     a blind spot and the host jumps straight to a guest data address -> SIGSEGV
+//     (si_addr == rip, no diagnostic; confirmed with LD_PRELOAD, the return address lies
+//     inside libz.so deflate). That extern "C" callback embedded in a struct is the hazard this
+//     driver avoids by using rust_backend, gix's default backend; the C path is not exercised here.
+// sha1 uses gix-odb's default sha1_smol (pure Rust, no SIMD). crc32fast only serves the
+// pack/gzip paths; this driver writes and reads loose objects throughout and never reaches
+// them, so neither participates in the differential.
 use std::convert::Infallible;
 use std::fs;
 use std::path::Path;
@@ -45,7 +45,7 @@ use gix::objs::tree::{EntryKind, EntryMode};
 use gix::refs::transaction::PreviousValue;
 use gix::Repository;
 
-/// 两个 commit 的固定时间戳（秒，UTC+01:00）。
+/// Fixed timestamps for the two commits (seconds, UTC+01:00).
 const T1: i64 = 1_700_000_000;
 const T2: i64 = 1_700_000_600;
 
@@ -64,7 +64,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 固定身份的签名（author=committer 同一人，时间由调用方给）。
+/// Fixed-identity signature (same author and committer; the caller supplies the time).
 fn sig(secs: i64) -> gix::actor::SignatureRef<'static> {
     gix::actor::SignatureRef {
         name: BStr::new("Mirvm Tester"),
@@ -81,7 +81,7 @@ fn blob(repo: &Repository, data: &[u8]) -> gix::ObjectId {
     repo.write_blob(data).unwrap().detach()
 }
 
-/// 手工构 tree（git 规范序：按名字节序，目录条目视同带尾随 '/'）并写库。
+/// Build a tree in git canonical order (name byte order; tree entries sort with a trailing '/').
 fn tree_of(repo: &Repository, entries: &[(EntryKind, &str, gix::ObjectId)]) -> gix::ObjectId {
     let mut entries: Vec<gix::objs::tree::Entry> = entries
         .iter()
@@ -106,7 +106,7 @@ fn tree_of(repo: &Repository, entries: &[(EntryKind, &str, gix::ObjectId)]) -> g
         .detach()
 }
 
-/// 递归收集 tree 遍历行（顺序 = tree 条目序，规范序 → 确定）。
+/// Collect tree-walk rows recursively (order = tree entry order, canonical and deterministic).
 fn walk_tree(repo: &Repository, tree: gix::ObjectId, prefix: &str, out: &mut Vec<String>) {
     let t = repo.find_tree(tree).unwrap();
     for e in t.decode().unwrap().entries.iter() {
@@ -124,7 +124,7 @@ fn walk_tree(repo: &Repository, tree: gix::ObjectId, prefix: &str, out: &mut Vec
     }
 }
 
-/// 递归列出 workdir 文件（跳过 .git），排序保证确定。
+/// List workdir files recursively, skipping .git; sorting keeps it deterministic.
 fn list_workdir(dir: &Path, prefix: &str, out: &mut Vec<String>) {
     let mut names: Vec<String> = fs::read_dir(dir)
         .unwrap()
@@ -145,7 +145,7 @@ fn list_workdir(dir: &Path, prefix: &str, out: &mut Vec<String>) {
     }
 }
 
-/// tree diff 并收集人类可读变更行；返回 (行, 增/删/改计数)。
+/// Diff two trees into human-readable change lines; returns (lines, (added, deleted, modified)).
 fn diff_trees(
     old: &gix::Tree<'_>,
     new: &gix::Tree<'_>,
@@ -201,19 +201,19 @@ fn diff_trees(
 }
 
 fn main() {
-    // 固定子目录：开头清一次再建，结尾删除——多跑不累加。
+    // Fixed subdirectory: wiped/recreated up front and removed at the end, so reruns do not accumulate.
     let root = std::env::temp_dir().join("mirvm_corpus_gix_pure");
     if root.exists() {
         fs::remove_dir_all(&root).unwrap();
     }
     fs::create_dir_all(&root).unwrap();
 
-    // ---- ① init + 写文件 + 两个固定时间戳的 commit ----
+    // ---- ① init + write files + two commits at fixed timestamps ----
     let repo = gix::init(&root).unwrap();
     println!("repo kind = {:?}", repo.kind());
     println!("head unborn = {}", repo.head().unwrap().is_unborn());
 
-    // data.bin：定种 xorshift 32 字节（二进制 blob 边界）。
+    // data.bin: 32 seeded xorshift bytes (a binary blob boundary case).
     let mut data = Vec::new();
     let mut x = 0x9E3779B97F4A7C15u64;
     while data.len() < 32 {
@@ -262,7 +262,7 @@ fn main() {
     println!("commit1 = {c1}");
     println!("tree1 = {t_root1}");
 
-    // 第二个 commit：改 README.md，加 src/lib.rs（workdir 同步更新）。
+    // Second commit: modify README.md, add src/lib.rs (the workdir is updated in step).
     fs::write(root.join("README.md"), README2).unwrap();
     fs::write(root.join("src/lib.rs"), LIB_RS).unwrap();
     let b_readme2 = blob(&repo, README2);
@@ -296,7 +296,7 @@ fn main() {
     println!("commit2 = {c2}");
     println!("tree2 = {t_root2}");
 
-    // 附一个 tag（annotated，固定 tagger 时间）充实 refs 列表。
+    // Add one annotated tag with a fixed tagger time to populate the refs list.
     let tag_ref = repo
         .tag(
             "v1.0",
@@ -340,7 +340,7 @@ fn main() {
     }
     println!("log count = {nlog}");
 
-    // ---- ③ tree 遍历 + 路径查找 ----
+    // ---- ③ tree walk + path lookup ----
     let mut rows = Vec::new();
     walk_tree(&repo, t_root2, "", &mut rows);
     println!("tree2 entries = {}", rows.len());
@@ -355,7 +355,7 @@ fn main() {
         t2.lookup_entry_by_path("nope.txt").unwrap().is_some()
     );
 
-    // ---- ④ blob 读取校验（kind/长度/fnv/逐字节比对原文）----
+    // ---- ④ blob read check (kind/length/fnv/byte-for-byte against the source) ----
     for (label, oid, expect) in [
         ("readme1", b_readme1, README1),
         ("readme2", b_readme2, README2),
@@ -373,7 +373,7 @@ fn main() {
         );
     }
 
-    // ---- ⑤ 两 commit 的 tree diff（变更统计，双向）----
+    // ---- ⑤ tree diff of the two commits (change stats, both directions) ----
     let ct1 = repo.find_commit(c1).unwrap().tree().unwrap();
     let ct2 = repo.find_commit(c2).unwrap().tree().unwrap();
     let (fwd, (a, d, m)) = diff_trees(&ct1, &ct2);
@@ -387,7 +387,7 @@ fn main() {
         println!("rdiff {l}");
     }
 
-    // ---- ⑥ refs 列表 + HEAD reflog ----
+    // ---- ⑥ refs list + HEAD reflog ----
     let mut nrefs = 0;
     for r in repo.references().unwrap().all().unwrap() {
         let r = r.unwrap();
@@ -428,7 +428,7 @@ fn main() {
         None => println!("reflog none"),
     }
 
-    // ---- ⑦ index 状态（从 HEAD tree 重建的内存 index）----
+    // ---- ⑦ index state (in-memory index rebuilt from the HEAD tree) ----
     let index = repo.index_or_load_from_head().unwrap();
     println!("index entries = {}", index.entries().len());
     for e in index.entries() {
@@ -440,12 +440,12 @@ fn main() {
         );
     }
 
-    // ---- ⑧ workdir 文件清单（递归、排序）----
+    // ---- ⑧ workdir file listing (recursive, sorted) ----
     let mut files = Vec::new();
     list_workdir(&root, "", &mut files);
     println!("workdir files = {files:?}");
 
-    // ---- ⑨ 错误路径：缺对象 / 缺引用 / 非仓库 / 父 commit 不匹配 ----
+    // ---- ⑨ error paths: missing object / missing ref / non-repo / parent-commit mismatch ----
     let null = gix::hash::ObjectId::null(gix::hash::Kind::Sha1);
     match repo.find_object(null) {
         Ok(_) => println!("null obj unexpected ok"),
@@ -459,7 +459,7 @@ fn main() {
         Ok(_) => println!("open non-repo unexpected ok"),
         Err(e) => println!("open non-repo err = {e}"),
     }
-    // 期望 PreviousValue 不匹配：写出一个 dangling commit 后 ref 更新失败，HEAD 不变。
+    // Expected PreviousValue mismatch: the dangling commit is written, the ref update fails, HEAD stays.
     match repo.commit_as(
         sig(T2),
         sig(T2),
@@ -476,7 +476,7 @@ fn main() {
         repo.head_id().unwrap().detach()
     );
 
-    // ---- ⑩ 清理 ----
+    // ---- ⑩ cleanup ----
     fs::remove_dir_all(&root).unwrap();
     println!("cleanup exists = {}", root.exists());
 }

@@ -1,65 +1,65 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# mlua 0.10.5（0.10 线最新 patch；上游已发 0.11/0.12，不占本槽位授权）；
-# 本 crate 无 default feature，显式 default-features=false 剥净辅助件
-# （不开 async/send/serialize/macros——闭包最小化）。features = vendored +
-# lua54：mlua-sys 0.6.8 经 lua-src 547.0.0（Lua 5.4.7 C 源码）走 cc 静态构建
-# 出 .a，由 mirvm 的 native-archive（.a→.so 闭包 + crate 图动态库链接行）通道
-# 加载——重 FFI（全 lua_* C API 面）+ VM-in-VM（C Lua VM 嵌在 Rust MIR VM 里）
-# 双重压力，即批8 波1 rocksdb 候补位（librocksdb-sys 因 libclang 缺席判不可）
-# 的本职负载。物化闭包 39 crate（mlua/mlua-sys/lua-src/cc/bstr/either/
-# num-traits/parking_lot 系/rustc-hash/rustversion 等）。
+# mlua 0.10.5, the newest patch on the 0.10 line (0.11/0.12 exist upstream but are not used
+# here). The crate has no default features, so default-features=false strips the helpers
+# (no async/send/serialize/macros, keeping the closure minimal). features = vendored + lua54:
+# mlua-sys 0.6.8 goes through lua-src 547.0.0 (the Lua 5.4.7 C sources), which cc builds
+# statically into a .a that mirvm native-archive loads (the .a -> .so closure plus the crate
+# graph dynamic-library link line). That gives heavy FFI over the whole lua_* C API surface
+# plus VM-in-VM (a C Lua VM inside the Rust MIR VM). The materialised dependency closure is
+# 39 crates (mlua/mlua-sys/lua-src/cc/bstr/either/num-traits/parking-lot/rustc-hash/
+# rustversion and others).
 mlua = { version = "=0.10.5", default-features = false, features = ["vendored", "lua54"] }
 ---
-// mlua 0.10（vendored Lua 5.4）三维差分：计算主体一半在 native C（Lua VM 执行
-// chunk、table/string 库）一半在被解释/JIT 的 Rust 绑定层（值转换、回调、错误包
-// 装）。FFI 签名全标量/指针（lua_State* / c_int / double / fn-ptr），不撞
-// open-issues C1 按值聚合墙。回调形态：create_function → mlua 存 CallbackUpvalue
-// userdata（带 __gc，lua_close 时 native→guest 销毁回调）+ lua_pushcclosure
-// 推入 monomorphic `unsafe extern "C-unwind" fn call_callback` 显式 fn-ptr——
-// P1 可执行化（decision-history §7.6）覆盖的 thunk 面。错误面前沿（本 driver
-// 刻意压到最后一节）：Rust 回调 Err → callback_error_ext 包 WrappedFailure
-// userdata → ffi::lua_error（C 侧 longjmp）跨 thunk/解释帧跳回 lua_pcall 的
-// setjmp——宿主 longjmp 遗弃中途 mirvm 解释调用的存活试探针。
+// mlua 0.10 (vendored Lua 5.4) three-way differential: half the computation lives in native
+// C (the Lua VM executing chunks, the table/string libraries) and half in the interpreted/
+// JIT-ed Rust binding layer (value conversion, callbacks, error wrapping). Every FFI
+// signature is scalar or pointer (lua_State* / c_int / double / fn-ptr), so no by-value
+// aggregate ABI is involved. Callback shape: create_function makes mlua store a
+// CallbackUpvalue userdata (with __gc, so lua_close destroys it from native into guest), and
+// lua_pushcclosure pushes the monomorphic explicit fn-ptr
+// `unsafe extern "C-unwind" fn call_callback`. The error frontier (deliberately last): a Rust
+// callback returning Err wraps WrappedFailure through callback_error_ext and calls
+// ffi::lua_error (a longjmp on the C side) that jumps across thunk and interpreter frames
+// back to lua_pcall's setjmp -- a probe for whether a host longjmp correctly abandons
+// in-flight mirvm interpreter calls.
 //
-// 测试面清单：
-//   ① _VERSION 锚（"Lua 5.4"）+ chunk1 算术与表：整数平方累加 / 10! /
-//      1<<40 六十四位整算 / 数组回读（eval::<Table> 按名取，五个 assert_eq）。
-//   ② chunk2 迭代与字符串库：gmatch 分割 / ipairs 拼接 table.concat /
-//      string.gsub 带计数 / reverse / string.format("%05d:%s:%.3f")。
-//   ③ chunk3 echo 与 pcall 错误面（纯 Lua 侧）：vararg echo 计数与
-//      tostring 拼接；pcall 捕获三类错误——普通串 error、结构化表错误
-//      {code=8317,msg}（Lua 侧拆字段拼回串，避开 userdata/table 地址）、
-//      nil 索引运行时错误（带 chunk 名与行号，同名同源两侧一致）。
-//   ④ Rust 侧注册函数喂 Lua 调：rust_feed（Rc<Cell> 跨调用计数 12 次 +
-//      逐次参数断言 s=="arg#"..i，返回值吃上次计数制造跨调用状态）与
-//      rust_add；Lua 循环调 12+6 次聚合回总值，Rust 侧回读 counter==12。
-//   ⑤ Lua 返回 table（stats 键刻意乱序 + tags 数组）经 Rust 端
-//      BTreeMap 字典序打印——避开 next 序（见确定性段）。
-//   ⑥ 长字符串往返 >1KB：Rust 建 seg00..seg63 定长段表（19B×64）设入
-//      globals，Lua table.concat（"|" 连接 = 1216+63 = 1279B）并算
-//      31-bit rolling hash（mod 1000000007，i64 精确），回 Rust 打
-//      len/lua_crc/fnv1a(hex)/头尾 16B。
-//   ⑦ 错码面（callback_error_ext→lua_error 跨 thunk longjmp 探针，压最后）：
-//      rust_boom(5) Err(RuntimeError "boom#5")——(a) Lua pcall 侧：
-//      ok=false + type(err)=="userdata"（不打 userdata 本体，含地址）；
-//      (b) 无 pcall 直传 Rust：exec 返回 Err(CallbackError)，打 Display
-//      首行（根因串 "runtime error: boom#5"，traceback 后续行不入输出）。
+// Test surface:
+//   ① _VERSION anchor ("Lua 5.4") plus chunk1 arithmetic and tables: integer square
+//      accumulation, 10!, a 64-bit 1<<40 computation, and array read-back (eval::<Table>
+//      reads by name; five assert_eq calls).
+//   ② chunk2 iteration and the string library: gmatch splitting, ipairs joining through
+//      table.concat, string.gsub with a count, reverse, and string.format("%05d:%s:%.3f").
+//   ③ chunk3 echo and the pcall error surface (pure Lua): vararg echo counting plus
+//      tostring joining; pcall catches a plain string error, a structured table error
+//      {code=8317,msg} (Lua splits the fields back into a string so no userdata/table
+//      address is exposed), and a nil-index error carrying the chunk name and line number.
+//   ④ Rust-registered functions called from Lua: rust_feed (Rc<Cell> counting 12 calls,
+//      per-call assertion s=="arg#"..i, return value consuming the previous count for
+//      cross-call state) and rust_add; Lua loops 12+6 calls, Rust reads back counter==12.
+//   ⑤ A Lua-returned table (stats keys out of order plus the tags array) is printed
+//      through a Rust BTreeMap in key order, avoiding next order.
+//   ⑥ A >1KB string roundtrip: Rust builds the fixed segment table seg00..seg63 (19B x 64)
+//      in globals, Lua table.concat's it with "|" (1216+63 = 1279B) and computes a 31-bit
+//      rolling hash (mod 1000000007); Rust prints len/lua_crc/fnv1a(hex) and head/tail 16B.
+//   ⑦ The error surface (callback_error_ext -> lua_error longjmp across the thunk, last):
+//      rust_boom(5) returns Err(RuntimeError "boom#5") -- under pcall, ok=false and
+//      type(err)=="userdata" (the body is not printed); with no pcall the error crosses
+//      into Rust as Err(CallbackError), printing only the first line "runtime error: boom#5".
 //
-// 确定性：全常量源串与硬编码期望值；Lua 侧 string 哈希种子（g->seed 由
-// time/地址混合）使 pairs 序跨进程不稳——本 driver 一律不用无序迭代：Lua 内
-// 只走 ipairs/数组，string 键表回 Rust 入 BTreeMap 再打印；不调
-// math.random/os.clock/os.time/print；地址经 tostring 的值一律不入输出；
-// B 维 native 实测 stderr 真空、exit 0。
+// Determinism: sources are constant strings and expectations are hardcoded. Lua's string
+// hash seed (g->seed mixes time and addresses) makes pairs order unstable across processes,
+// so this fixture never iterates unordered tables: Lua uses only ipairs/arrays; string-keyed
+// tables come back to Rust into a BTreeMap, values that stringify to an address never reach
+// the output, math.random/os.clock/os.time/print are never called, and stderr is empty.
+// No floating-point value is printed and the process exits 0.
+// Error-location anchors: chunk3 reports the `[string "chunk3"]:11` and `:19` line numbers and
+// chunk6 prints fnv=3658152a23cb81fb; all three runs must reproduce these byte-for-byte.
+// Section ⑦'s cross-thunk longjmp surface is covered the same way: callback_error_ext ->
+// lua_error, with the userdata caught inside pcall and the CallbackError Display line in Rust.
 //
-// 三维实测（2026-07-17，全绿）：A/C/B 三进程 stdout 逐字节一致（17 行 769B，
-// 含 [string \"chunk3\"]:11/:19 错误行号锚与 chunk6 fnv=3658152a23cb81fb），
-// stderr 全真空、exit 全 0。首次 A 维即通，无 FRONTIER、无绕行、无产品 bug。
-// 节⑦的 callback_error_ext→lua_error 跨 thunk longjmp 面（pcall 内截获
-// userdata + 直传 Rust 的 CallbackError Display 首行）三维同样逐字节一致。
-//
-// 三维复跑：
+// Three-way rerun:
 //   A: target/release/mirvm run corpus/c_mlua_lua.rs
 //   B: cd "$(grep -l 'name = "c_mlua_lua"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname)" && \
 //        RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \
@@ -177,11 +177,11 @@ fn main() -> mlua::Result<()> {
     let lua = Lua::new();
     let globals = lua.globals();
 
-    // ---- ⓪ 版本锚 ----
+    // ---- ⓪ version anchor ----
     let ver: String = lua.load("return _VERSION").set_name("chunk0").eval()?;
     println!("version = {ver}");
 
-    // ---- ① chunk1：算术与表 ----
+    // ---- ① chunk1: arithmetic and tables ----
     let t1: Table = lua.load(CHUNK1).set_name("chunk1").eval()?;
     let (sum, fact10, big, third, n) = (
         t1.get::<i64>("sum")?,
@@ -197,7 +197,7 @@ fn main() -> mlua::Result<()> {
     assert_eq!(n, 20);
     println!("chunk1 sum={sum} fact10={fact10} big={big} third={third} n={n}");
 
-    // ---- ② chunk2：迭代与字符串库 ----
+    // ---- ② chunk2: iteration and the string library ----
     let (joined, sub, nsub, rev, fmt): (String, String, i64, String, String) =
         lua.load(CHUNK2).set_name("chunk2").eval()?;
     assert_eq!(joined, "ALPHA#1|BETA#2|GAMMA#3|DELTA#4|EPSILON#5");
@@ -208,7 +208,7 @@ fn main() -> mlua::Result<()> {
     println!("chunk2 joined = {joined}");
     println!("chunk2 sub={sub} nsub={nsub} rev={rev} fmt={fmt}");
 
-    // ---- ③ chunk3：echo 与 pcall 错误面（纯 Lua 侧）----
+    // ---- ③ chunk3: echo and the pcall error surface (pure Lua) ----
     let t3: Table = lua.load(CHUNK3).set_name("chunk3").eval()?;
     let echo_n: i64 = t3.get("echo_n")?;
     let echo_s: String = t3.get("echo_s")?;
@@ -227,7 +227,7 @@ fn main() -> mlua::Result<()> {
     assert!(!ok3 && err3.contains("attempt to index a nil value"));
     println!("chunk3 pcall3 ok={ok3} err3={err3}");
 
-    // ---- ④ Rust 注册回调：计数 + 参数断言 ----
+    // ---- ④ Rust-registered callbacks: counting plus parameter assertions ----
     let counter = Rc::new(Cell::new(0i64));
     let counter_in_cb = Rc::clone(&counter);
     let feed = lua.create_function(move |_lua, (i, s): (i64, String)| {
@@ -247,7 +247,7 @@ fn main() -> mlua::Result<()> {
     assert_eq!(counter.get(), 12);
     println!("chunk4 total={total} addsum={addsum} counter={}", counter.get());
 
-    // ---- ⑤ Lua 返回 table 经 Rust 端 BTreeMap 序打印 ----
+    // ---- ⑤ a Lua-returned table printed in Rust BTreeMap order ----
     let t5: Table = lua.load(CHUNK5).set_name("chunk5").eval()?;
     let stats: Table = t5.get("stats")?;
     let mut map = BTreeMap::new();
@@ -264,7 +264,7 @@ fn main() -> mlua::Result<()> {
     assert_eq!(tags, ["x", "yy", "zzz"]);
     println!("chunk5 tags = {}", tags.join(","));
 
-    // ---- ⑥ 长字符串 >1KB 往返 ----
+    // ---- ⑥ >1KB string roundtrip ----
     let parts = lua.create_table()?;
     for i in 0..64i64 {
         let payload: String = std::iter::repeat((b'A' + (i as u8 % 13)) as char)
@@ -284,7 +284,7 @@ fn main() -> mlua::Result<()> {
         &joined6[joined6.len() - 16..]
     );
 
-    // ---- ⑦ 错码面：Rust 回调错误（跨 thunk longjmp 探针，压最后）----
+    // ---- ⑦ error surface: Rust callback error (cross-thunk longjmp probe, last) ----
     let boom = lua.create_function(|_lua, n: i64| -> mlua::Result<i64> {
         if n == 5 {
             Err(mlua::Error::RuntimeError("boom#5".to_string()))

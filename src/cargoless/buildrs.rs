@@ -1,28 +1,31 @@
-//! `cargoless/buildrs.rs` — build.rs full-lifecycle "instructions ↔ env ↔ validation" half
-//! (D15 P2 cut③, design doc §3 checklist 7; D15 P3 cut⑤b adds rerun decision). Compilation argument shapes
-//! are in schedule.rs (build_script_rustc_args), scheduling in driver.rs; this file only handles:
-//! instruction parsing (cargo::/cargo: two forms), CARGO_CFG_* mapping, execution env construction,
-//! DEP_* propagation key normalization, links mutual-exclusion validation, -L propagation collection, **rerun-if fine-grained incrementality**
-//! (record write/read + rerun decision, cargo-equivalent semantics).
+//! `cargoless/buildrs.rs` -- build script full lifecycle: instruction parsing (`cargo::`/`cargo:`
+//! two forms), CARGO_CFG_* mapping, execution env construction, DEP_* propagation key
+//! normalization, links mutual-exclusion validation, -L propagation collection, and rerun-if
+//! fine-grained incrementality (record write/read + rerun decision, cargo-equivalent semantics).
+//! Compilation argument shapes are in schedule.rs (`build_script_rustc_args`), scheduling in
+//! driver.rs.
 //!
-//! Propagation rules pinned by cut③ empirical evidence (/tmp/probe_link, cargo 1.98 verified line by line):
+//! Propagation rules (verified line by line against cargo 1.98):
 //! - `-l` (rustc-link-lib) enters only **this package**'s own compile line; `-L` (rustc-link-search)
-//!   enters this package + all transitive dependents; rustc-cfg/check-cfg/rustc-env/link-arg enter only this package.
+//!   enters this package + all transitive dependents; rustc-cfg/check-cfg/rustc-env/link-arg enter
+//!   only this package.
 //! - metadata (cargo::metadata=K=V) via `DEP_<LINKS>_<K>` env goes only to **direct dependents**
-//!   build scripts (transitive dependents cannot see); cargo does **not** auto-inject DEP_<LINKS>_ROOT
-//!   (that is the -sys crate convention of self-emitting metadata=root, not cargo behavior).
-//! - cargo does **not** auto-add --check-cfg for rustc-cfg (the serde family explicitly emits
-//!   rustc-check-cfg; the sysd line in probe empirically shows no auto-add).
-//! - build script warnings are shown only for path packages (registry packages swallow by default, visible only with -vv).
+//!   build scripts (transitive dependents cannot see it); cargo does **not** auto-inject
+//!   DEP_<LINKS>_ROOT (that is the -sys crate convention of self-emitting metadata=root, not cargo
+//!   behavior).
+//! - cargo does **not** auto-add --check-cfg for rustc-cfg: crates that need it emit
+//!   rustc-check-cfg themselves.
+//! - build script warnings are shown only for path packages; registry packages swallow them unless
+//!   -vv.
 //!
-//! Rerun decision (cut⑤b, cargo-equivalent semantics; details see should_rerun header comment): if rerun triggers are not met
-//! then skip execution, re-parse output.txt into BuildOutput
-//! — instruction stream has zero serialization distortion, all observable outputs like DEP_*/OUT_DIR/warning are byte-for-byte identical to a real rerun
-//! byte-for-byte identical. fp change (flags/dependencies/toolchain/source) ⇒ the new fp directory naturally lacks a record ⇒
-//! rerun — "source change ⇒ rerun" is already covered by the fingerprint, the real battleground of rerun records =
-//! **when fp is unchanged** (consecutive runs, env changes, out-of-package rerun-if-changed paths) for
-//! skip/run decisions; registry packages' default face (no rerun-if-changed emitted) never rerun
-//! (source is immutable by cksum) is the biggest win.
+//! Rerun decision (cargo-equivalent semantics; the full rule list is on should_rerun): when the
+//! rerun triggers are not met the script is skipped and output.txt is re-parsed into BuildOutput.
+//! The instruction stream needs no serialization format of its own, so DEP_*/OUT_DIR/warning
+//! playback is byte-for-byte identical to a real rerun. A fingerprint change (flags/dependencies/
+//! toolchain/source) lands in a fresh fp directory that naturally has no record and therefore
+//! reruns; what the record actually decides is the **fp-unchanged** case -- consecutive runs, env
+//! changes, out-of-package rerun-if-changed paths. Registry packages emit no rerun-if-changed and
+//! their sources are immutable by checksum, so they never rerun, which is the biggest win.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -51,8 +54,8 @@ pub struct BuildOutput {
     pub metadata: BTreeMap<String, String>,
     /// cargo::warning=MSG (driver gates display by from_registry, same standard as cargo).
     pub warnings: Vec<String>,
-    /// cargo::rerun-if-changed=PATH (cut⑤b: consumed by record and rerun decision; ≥1 instances replace
-    /// the default face — cargo-equivalent: once emitted, only watch these paths, no full-tree scan).
+    /// cargo::rerun-if-changed=PATH (consumed by the record and rerun decision; ≥1 instances replace
+    /// the default face -- cargo-equivalent: once emitted, only watch these paths, no full-tree scan).
     pub rerun_if_changed: Vec<String>,
     /// cargo::rerun-if-env-changed=VAR (added independently to the file face, applies to both faces).
     pub rerun_if_env_changed: Vec<String>,
@@ -62,7 +65,7 @@ pub struct BuildOutput {
 /// Unknown keys in new form are ignored (cargo forward-compatibility same standard); unknown legacy keys are taken as metadata
 /// (cargo-equivalent — old build.rs `cargo:KEY=VALUE` is the legacy form of links metadata).
 /// cargo::error → Err (driver appends crate name); rerun-if-* both forms are collected into
-/// BuildOutput (cut⑤b rerun decision consumes them, see should_rerun).
+/// BuildOutput, which the rerun decision consumes (see should_rerun).
 pub fn parse_instructions(stdout: &str) -> Result<BuildOutput, String> {
     let mut out = BuildOutput::default();
     for line in stdout.lines() {
@@ -114,7 +117,7 @@ fn apply(out: &mut BuildOutput, instr: &str, legacy: bool) -> Result<(), String>
         }
         "warning" => out.warnings.push(value.to_string()),
         "error" => return Err(format!("build script emitted cargo::error: {value}")),
-        // 切⑤b：两形都收（cargo 对 legacy rerun-if 同样认账）
+        // Both instruction forms are accepted; cargo honors legacy rerun-if too.
         "rerun-if-changed" => out.rerun_if_changed.push(value.to_string()),
         "rerun-if-env-changed" => out.rerun_if_env_changed.push(value.to_string()),
         _ => {
@@ -126,8 +129,8 @@ fn apply(out: &mut BuildOutput, instr: &str, legacy: bool) -> Result<(), String>
     Ok(())
 }
 
-/// DEP_* 键规范化（cargo envify 同）：ASCII 字母数字大写，其余一律 `_`
-/// (my-links.x → MY_LINKS_X).
+/// DEP_* key normalization (same as cargo envify): ASCII alphanumerics uppercased, everything else
+/// `_` (my-links.x -> MY_LINKS_X).
 pub fn envify(s: &str) -> String {
     s.chars()
         .map(|c| {
@@ -140,10 +143,10 @@ pub fn envify(s: &str) -> String {
         .collect()
 }
 
-/// Full CARGO_CFG_* env set (E2 empirical: cargo is the generic mapping of `rustc --print cfg`
-/// mapping — k="v" atoms grouped by key, multiple values joined with commas, bare flags → empty string values; then profile
-/// forces DEBUG_ASSERTIONS/PANIC; FEATURE = this package's enabled features joined with commas).
-/// 原子集来自 manifest.rs 的 host_cfg_atoms（与 cargo 平台匹配同源）。
+/// Full CARGO_CFG_* env set: the generic mapping of `rustc --print cfg` -- k="v" atoms grouped by
+/// key, multiple values joined with commas, bare flags mapped to empty string values; the profile
+/// then forces DEBUG_ASSERTIONS/PANIC; FEATURE = this package's enabled features comma-joined.
+/// The atom set comes from manifest.rs's host_cfg_atoms (same source as cargo platform matching).
 pub fn cargo_cfg_env(
     enabled_features: &BTreeSet<String>,
     profile: &ProfileFlags,
@@ -180,9 +183,9 @@ pub fn cargo_cfg_env(
     out
 }
 
-/// Direct-dependency links metadata → DEP_<LINKS>_<KEY> env (E1(d) empirical: **only given
-/// to direct dependents**, transitive dependents cannot see; both links and metadata keys pass through envify;
-/// no automatic ROOT — cargo does not inject DEP_<LINKS>_ROOT).
+/// Direct-dependency links metadata -> DEP_<LINKS>_<KEY> env: **only direct dependents** see it,
+/// transitive dependents cannot; both links and metadata keys pass through envify; there is no
+/// automatic ROOT -- cargo does not inject DEP_<LINKS>_ROOT.
 pub fn dep_metadata_env(
     plan: &ResolvePlan,
     dep_edges: &[UnitDep],
@@ -224,9 +227,9 @@ pub struct ExecCtx<'a> {
     pub ld_dirs: &'a [PathBuf],
 }
 
-/// Full build script execution env (E2 empirical checklist verified line by line, same toolchain as cargo 1.98
-/// real-machine dump). No CARGO_MAKEFLAGS: jobserver is absent — same handling as cli.rs runner section
-/// (serial scheduling has no token protocol to give).
+/// Full build script execution env (verified line by line against cargo 1.98). No CARGO_MAKEFLAGS:
+/// the jobserver is absent, same handling as the cli.rs runner (serial scheduling has no token
+/// protocol to hand out).
 pub fn build_script_env(ctx: &ExecCtx) -> BTreeMap<String, String> {
     let mut env = ctx.pkg_env.clone();
     env.extend(cargo_cfg_env(ctx.features, ctx.profile));
@@ -252,11 +255,11 @@ pub fn build_script_env(ctx: &ExecCtx) -> BTreeMap<String, String> {
     }
     put("HOST", env!("MIRVM_HOST").to_string());
     put("TARGET", env!("MIRVM_HOST").to_string());
-    // Cargo 的内建 dev/test profile 都把 PROFILE 暴露成 debug；具体差异由
-    // OPT_LEVEL/DEBUG 等变量表达。
+    // Cargo's built-in dev and test profiles both expose PROFILE as "debug"; the actual
+    // differences are carried by OPT_LEVEL/DEBUG and friends.
     put("PROFILE", "debug".into());
-    // Cargo 的 DEBUG 表示 profile 是否生成 debuginfo，不表示优化等级。本驱动
-    // 当前所有支持 profile 都固定 debuginfo=2，所以 O1/O2 也必须是 true。
+    // Cargo's DEBUG says whether the profile emits debuginfo, not the optimization level. Every
+    // profile this driver supports pins debuginfo=2, so it is true for O1/O2 as well.
     put("DEBUG", "true".into());
     put("OPT_LEVEL", ctx.profile.opt_level.to_string());
     put(
@@ -354,11 +357,10 @@ pub fn check_links_unique(
     Ok(())
 }
 
-/// -L propagation collection (E1(a)(b) empirical: rustc-link-search enters this package + all transitive
-/// dependents): starting from Normal-class edges in `edges`, BFS along Normal edges, collecting all
-/// executed BuildOutput link_searches. proc-macro unit collects its own but does not
-/// go deeper (its dependencies are host-world, unrelated to target linking — same boundary as target_units
-/// same boundary).
+/// -L propagation collection: rustc-link-search enters this package + all transitive dependents.
+/// Starting from Normal-class edges in `edges`, BFS along Normal edges, collecting all executed
+/// BuildOutput link_searches. A proc-macro unit collects its own but does not go deeper: its
+/// dependencies are host-world, unrelated to target linking (same boundary as target_units).
 pub fn aggregate_link_searches(
     plan: &ResolvePlan,
     edges: &[UnitDep],
@@ -392,28 +394,30 @@ pub fn aggregate_link_searches(
     out
 }
 
-// ---------- cut⑤b: rerun-if fine-grained incrementality (record ↔ rerun decision, cargo-equivalent semantics) ----------
+// ---------- rerun-if fine-grained incrementality (record <-> rerun decision, cargo-equivalent semantics) ----------
 //
 // Two records land in `build/<pkg>-<fp>/` (driver's record_dir):
-// - `output.txt`: **raw stdout** from last execution. When not rerunning, re-parse_instructions
-//   into BuildOutput — instruction stream has zero serialization distortion (DEP_*/OUT_DIR/warning playback fully equivalent),
-//   no separate serialization format.
+// - `output.txt`: **raw stdout** from the last execution. When not rerunning, re-parse it with
+//   parse_instructions into BuildOutput -- the instruction stream needs no serialization format of
+//   its own (DEP_*/OUT_DIR/warning playback fully equivalent).
 // - `rerun.txt`: rerun-condition record, hand-written line format (no serialization dependency):
-//     首行 `mirvm-bldrs-rerun-v1 changed` | `mirvm-bldrs-rerun-v1 default`
-//       — changed = emitted ≥1 rerun-if-changed (replaces default face); default = none emitted.
-//     changed 面逐路径一行：`P\t<len>\t<mtime_ns>\t<esc(原样路径)>`
-//       (stat failure at record time is logged as `P\t-\t-\t...`; current absence or record absence at decision time both count
-//       as change — conservative, cargo-equivalent).
-//     default face path/root-package tree snapshot one line: `T\t<folded string>` (same as source_stamp_dir
-//       (路径:len:mtime_ns) 排序 \u{1e} 折叠，占本行剩余全部不再分列）；
-//       registry package sources are immutable by cksum, no T line (decision directly skip).
-//     rerun-if-env-changed one variable per line, applies to both faces:
+//     first line `mirvm-bldrs-rerun-v1 changed` | `mirvm-bldrs-rerun-v1 default`
+//       -- changed = emitted ≥1 rerun-if-changed (replaces the default face); default = none emitted.
+//     changed face, one line per path: `P\t<len>\t<mtime_ns>\t<esc(original path)>`
+//       (a stat failure at record time is logged as `P\t-\t-\t...`; current absence or record
+//       absence at decision time both count as change -- conservative, cargo-equivalent).
+//     default face path/root-package tree snapshot as one line: `T\t<folded string>`, folded like
+//       source_stamp_dir ((path:len:mtime_ns) sorted and joined with \u{1e}, taking the rest of the
+//       line as a single column); registry package sources are immutable by checksum, so they get
+//       no T line and the decision skips directly.
+//     rerun-if-env-changed, one variable per line, applies to both faces:
 //       `E0\t<esc(var)>` (absent then) / `E1\t<esc(var)>\t<esc(value)>`.
-//   esc: `\`→`\\`, tab→`\t`, newline→`\n` (theoretical case of path/env value containing column separators is covered;
-//   non-UTF-8 paths go through display lossily — record and decision both use the display string, stat failure
-//   counts as change, conservative and won't miss).
-// Records are written **after successful execution** (on failure driver already exits loudly, no half-record); missing either file or
-// parse failure ⇒ decision run self-heals.
+//   esc: `\`->`\\`, tab->`\t`, newline->`\n` (covers the theoretical case of a path or env value
+//   containing a column separator; non-UTF-8 paths go through display lossily -- record and
+//   decision both use the display string, and a stat failure counts as change, conservative and
+//   unable to miss a rerun).
+// Records are written **after successful execution** (on failure the driver already exits loudly,
+// so no half record remains); a missing file or a parse failure makes the decision run, self-healing.
 
 /// Inline escaping (see format description above).
 fn esc(s: &str) -> String {
@@ -451,7 +455,7 @@ fn unesc(s: &str) -> Result<String, String> {
 /// (current absence/record absence at decision time both count as change — conservative, cargo-equivalent).
 type FileStamp = Option<(u64, u128)>;
 
-/// 解析后的 rerun.txt（should_rerun 的判定输入）。
+/// Parsed rerun.txt, the input to should_rerun's decision.
 struct RerunRecord {
     /// Some = changed face: (display-original path, record snapshot).
     changed_paths: Option<Vec<(String, FileStamp)>>,
@@ -479,17 +483,17 @@ fn parse_record(text: &str) -> Result<RerunRecord, String> {
             let (len, mtime, path) = (
                 f.next().unwrap_or(""),
                 f.next().unwrap_or(""),
-                f.next().ok_or("P 行缺路径列")?,
+                f.next().ok_or("P line missing path column")?,
             );
             let stamp = if len == "-" && mtime == "-" {
                 None
             } else {
                 Some((
                     len.parse::<u64>()
-                        .map_err(|_| format!("P 行 len 坏：{len}"))?,
+                        .map_err(|_| format!("bad P line len: {len}"))?,
                     mtime
                         .parse::<u128>()
-                        .map_err(|_| format!("P 行 mtime 坏：{mtime}"))?,
+                        .map_err(|_| format!("bad P line mtime: {mtime}"))?,
                 ))
             };
             rec.changed_paths
@@ -680,7 +684,7 @@ mod tests {
         assert_eq!(out.link_args, ["-Wl,--x", "-Wl,--y"]);
         assert_eq!(out.metadata.get("foo").map(String::as_str), Some("bar"));
         assert_eq!(out.warnings, ["be careful"]);
-        // cut⑤b: rerun-if keys collected into BuildOutput (consumed by rerun decision)
+        // rerun-if keys collected into BuildOutput (consumed by the rerun decision)
         assert_eq!(out.rerun_if_changed, ["build.rs"]);
         assert_eq!(out.rerun_if_env_changed, ["CC"]);
     }
@@ -725,9 +729,9 @@ mod tests {
 
     #[test]
     fn build_script_env_marks_each_enabled_feature() {
-        // cranelift-codegen 按 CARGO_FEATURE_PULLEY 决定生成 pulley_inst_gen.rs
-        // 实锤——逐启用 feature 的 CARGO_FEATURE_<NAME>=1 必须在场
-        // （缺了它 OUT_DIR 产物缺文件、include! 炸，corpus smoke 分诊实锤）。
+        // cranelift-codegen keys the generation of pulley_inst_gen.rs off CARGO_FEATURE_PULLEY,
+        // so CARGO_FEATURE_<NAME>=1 must be present for every enabled feature: without it the
+        // OUT_DIR output lacks files and include! blows up.
         let pkg_env = BTreeMap::new();
         let features: BTreeSet<String> = ["pulley", "std"].iter().map(|s| s.to_string()).collect();
         let env = build_script_env(&ExecCtx {
@@ -750,8 +754,8 @@ mod tests {
 
     #[test]
     fn build_script_env_sets_manifest_links_only_with_links() {
-        // ring 0.17.14 build.rs `env::var("CARGO_MANIFEST_LINKS").unwrap()`
-        // 实锤：有 links 键时必须设，无 links 键时不设（cargo 文档同款）。
+        // ring 0.17.14 build.rs `env::var("CARGO_MANIFEST_LINKS").unwrap()`: set when the manifest
+        // has a links key, absent without one (cargo-documented).
         let pkg_env = BTreeMap::new();
         let features = BTreeSet::new();
         let mk = |links: Option<&str>| {
@@ -779,7 +783,7 @@ mod tests {
     fn cargo_cfg_env_maps_atoms() {
         let feats: BTreeSet<String> = ["derive", "std"].iter().map(|s| s.to_string()).collect();
         let env = cargo_cfg_env(&feats, &ProfileFlags::default());
-        // 真机原子（nightly 工具链 x86_64-linux）：多值逗号连、裸旗空串
+        // Real x86_64-linux nightly atoms: multiple values comma-joined, bare flags empty strings.
         assert_eq!(
             env.get("CARGO_CFG_TARGET_ARCH").map(String::as_str),
             Some("x86_64")
@@ -808,7 +812,7 @@ mod tests {
             env.get("CARGO_CFG_PANIC").map(String::as_str),
             Some("unwind")
         );
-        // debug_assertions 跟 profile 走
+        // debug_assertions follows the profile
         let rel = ProfileFlags {
             debug_assertions: false,
             overflow_checks: false,
@@ -819,7 +823,7 @@ mod tests {
         assert_eq!(env2.get("CARGO_CFG_FEATURE").map(String::as_str), Some(""));
     }
 
-    // ---- 切⑤b：重跑判定矩阵 + 存档往返 ----
+    // ---- rerun decision matrix + record round-trip ----
 
     /// One independent temp directory per test (parallel-safe); returns (record_dir, pkg_root).
     fn rerun_tmp(tag: &str) -> (PathBuf, PathBuf) {

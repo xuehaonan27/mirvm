@@ -1,36 +1,36 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# smartcore 0.4.10（0.4.x 最新；钉 =patch 防漂移），default features——
-# 0.4.10 的 default 本身为空集（datasets/serde/std_rand 全关）：不开
-# std_rand 时 KMeans RNG 走 crate 经 rand 0.8 vendored 的 SmallRng，
-# 纯算法、无 OS 熵源，配 seed: Some(42) 完全确定。依赖闭包 14 个
-# crate（num 系 + rand 0.8 + approx + ordered-float），纯 Rust 数值码。
+# smartcore pinned to =0.4.10 (the latest 0.4.x) with default features, so patch
+# drift cannot move it. Those defaults are empty (datasets/serde/std_rand off):
+# without std_rand the KMeans RNG is the crate's vendored rand 0.8 SmallRng, a
+# pure algorithm with no OS entropy source, so seed: Some(42) is fully
+# deterministic. The closure is 14 crates (num, rand 0.8, approx, ordered-float).
 smartcore = "=0.4.10"
 ---
-// smartcore 0.4.10（纯 Rust ML）三维差分三件套：
-// ① LinearRegression 双 solver（SVD 默认 + QR）fit 6 样本 2 特征内嵌小数据集，
-//    intercept/coefficients/predict 全 to_bits 锚定 + 行列不匹配错误文案；
-// ② KMeans k=3、seed=Some(42) 定种拟合 9 个 well-separated 点，
-//    labels 序列 + 簇 size + 派生质心 to_bits 锚定 + k=1 错误文案——
-//    注：0.4.10 的 KMeans 字段全私有、无 centroids() 访问器（公开面只有
-//    fit/predict），质心按 predict 的 labels 求各簇均值派生（公式确定、
-//    两侧同码），labels 本身即模型输出锚点；
-// ③ metrics：r2 与 mean_squared_error 自由函数对两个 solver 的预测打分，
-//    to_bits 锚定（两 solver 末位 ulp 有别，恰好能多压一层数值分歧面）。
+// The "smartcore" crate is exercised in three parts, all compared with native:
+// (1) LinearRegression with both solvers (SVD by default, plus QR) fitted on a
+//     small embedded set of 6 samples x 2 features: intercept, coefficients and
+//     per-point predictions are anchored as to_bits, and a shape mismatch hits a
+//     deterministic error message.
+// (2) KMeans with k=3 and seed: Some(42) on 9 well-separated points: the label
+//     sequence, cluster sizes and derived centroids are anchored as to_bits, as
+//     is the k=1 error message. Note that in 0.4.10 the KMeans fields are private
+//     and there is no centroids() accessor (the public surface is fit/predict), so
+//     the centroid is derived by averaging each cluster's points per the predicted
+//     labels; the labels themselves are the model-output anchor.
+// (3) metrics: the r2 and mean_squared_error free functions score both solvers'
+//     predictions, anchored as to_bits (the two solvers differ in the last ulp,
+//     which puts one more layer of numeric divergence under test).
+// Deterministic: all data is embedded literals, the KMeans initialization follows
+// uniquely from SmallRng(seed=42), and there is no IO, time, thread or hash-order
+// input; floats are always to_bits and stderr stays empty. No frontier issues.
 //
-// 确定性：数据全内嵌字面量；KMeans 初值由 SmallRng(seed=42) 唯一决定；
-// 无 IO/时间/线程/哈希序；浮点一律 to_bits；stderr 真空（driver 零 warning）。
 //
-// 三维复跑命令（仓库根）：
-//   A: target/release/mirvm run corpus/c_smartcore.rs
-//   B: cd $(grep -l 'name = "c_smartcore"' ~/.cache/mirvm/scripts/*/Cargo.toml \
-//        | head -1 | xargs dirname) && \
-//      RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \
-//      "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
-//   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_smartcore.rs
 //
-// FRONTIER：无（期待全绿）。
+//
+//
+//
 use smartcore::cluster::kmeans::{KMeans, KMeansParameters};
 use smartcore::linalg::basic::arrays::Array;
 use smartcore::linalg::basic::matrix::DenseMatrix;
@@ -39,12 +39,12 @@ use smartcore::linear::linear_regression::{
 };
 use smartcore::metrics;
 
-/// f64 → 位型 hex（确定性锚点）。
+/// f64 -> bit-pattern hex (the deterministic anchor).
 fn b(x: f64) -> String {
     format!("{:016x}", x.to_bits())
 }
 
-/// LinearRegression：fit + 系数 + 逐点 predict + r2/mse，全 bits 锚定。
+/// LinearRegression: fit, coefficients, per-point predict and r2/mse, all as bits.
 fn lr_case(tag: &str, x: &DenseMatrix<f64>, y: &Vec<f64>, solver: LinearRegressionSolverName) {
     let lr = LinearRegression::fit(x, y, LinearRegressionParameters::default().with_solver(solver))
         .unwrap();
@@ -63,7 +63,7 @@ fn lr_case(tag: &str, x: &DenseMatrix<f64>, y: &Vec<f64>, solver: LinearRegressi
 }
 
 fn main() {
-    // ---- ① LinearRegression 小数据集（2 特征 × 6 样本）----
+    // ---- (1) LinearRegression on a small set (2 features x 6 samples) ----
     let x = DenseMatrix::from_2d_array(&[
         &[1.0, 2.0],
         &[2.0, 1.0],
@@ -79,7 +79,7 @@ fn main() {
     lr_case("lr-svd", &x, &y, LinearRegressionSolverName::SVD);
     lr_case("lr-qr", &x, &y, LinearRegressionSolverName::QR);
 
-    // 行列不匹配 → 确定性错误文案。
+    // A shape mismatch produces a deterministic error message.
     let y_short: Vec<f64> = vec![1.0, 2.0];
     match LinearRegression::<f64, f64, DenseMatrix<f64>, Vec<f64>>::fit(
         &x,
@@ -90,7 +90,7 @@ fn main() {
         Err(e) => println!("lr mismatch err={e}"),
     }
 
-    // ---- ② KMeans 定种拟合（k=3，3 簇 × 3 点，well-separated）----
+    // ---- (2) seeded KMeans (k=3, 3 clusters x 3 well-separated points) ----
     let data = DenseMatrix::from_2d_array(&[
         &[0.0, 0.5],
         &[0.5, 0.0],
@@ -116,7 +116,7 @@ fn main() {
     let seq: Vec<String> = labels.iter().map(|l| l.to_string()).collect();
     println!("km labels={}", seq.join(","));
 
-    // 质心 = 各簇均值（labels 派生，见头注）。
+    // Centroids are the per-cluster means derived from the labels (see the header).
     let mut sums = vec![[0f64; 2]; 3];
     let mut size = vec![0usize; 3];
     for (i, &l) in labels.iter().enumerate() {
@@ -131,7 +131,7 @@ fn main() {
         }
     }
 
-    // k=1 → 确定性错误文案。
+    // k=1 produces a deterministic error message.
     match KMeans::<f64, usize, DenseMatrix<f64>, Vec<usize>>::fit(
         &data,
         KMeansParameters {

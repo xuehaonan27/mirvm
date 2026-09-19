@@ -3,57 +3,57 @@
 [dependencies]
 zxcvbn = "3"
 ---
-// zxcvbn 3.1（Dropbox zxcvbn 的 Rust 移植，密码强度估计）差分：真正的表驱动
-// 语义——30k 密码词典 + 英文维基词表 + 美国人口普查姓名表（lazy_static 运行时
-// 构建 HashMap<&str, usize> 排名表）+ qwerty/dvorak/keypad 邻接图；8 个 matcher
-// （词典/反向词典/l33t 替换/键位/重复（fancy-regex)/Unicode 码位序列/regex/
-// 日期）→ omnimatch 全模式扫描 → 动态规划选最小猜测序列 → 时间估算分级。
-// 内部还有隐藏时钟面：DatePattern/recent_year 的 year_space 依赖 lib 内
-// REFERENCE_YEAR（lazy_static 取当前 UTC 年）——两侧同跑同年，diff 不受影响。
+// zxcvbn 3.1 (the Rust port of Dropbox's zxcvbn password strength estimator)
+// differential, exercising the table-driven semantics: a 30k password dictionary, an
+// English Wikipedia wordlist and US census name tables (built at runtime by lazy_static
+// into HashMap<&str, usize> rank tables) plus qwerty/dvorak/keypad adjacency graphs;
+// eight matchers (dictionary, reverse dictionary, l33t substitution, spatial, repeat via
+// fancy-regex, Unicode code-point sequence, regex, date) feed the omnimatch scan, then
+// dynamic programming picks the minimum-guess sequence and the time estimate is graded.
 //
-// 覆盖：Entropy 全 getter（score/guesses/guesses_log10/crack_times 四场景/
-// feedback/sequence）；MatchPattern 全部 7 变体（dictionary/spatial/repeat/
-// sequence/regex/date/bruteforce）及各自公有问题字段；feedback 的 warning 14
-// 档与 suggestions 13 档按集内密码尽量踩中；空串早退路径（guesses=0、
-// log10=-inf、默认 feedback）；chars().take(100) 截断边界（恰好 100 vs 107 超界
-// 截到 100）；saturating_mul 溢出路径（guesses=u64::MAX）；user_inputs 注入前后
-// 对照（UserInputs 词典 rank=1 命中顶掉 bruteforce、user input 小写化消毒、
-// 内置词典命中与注入词条并列 min-submatch-guesses 时的钳位语义）。
-// 密码集：空 / top-10 / top-100 / 反写 / passphrase / 键盘直行 / 键盘转弯 /
-// shift 键位 / keypad / 升降序列 / 单字符重复 / 单词重复 / 无分隔日期 / 带分隔
-// 日期 / unicode 日期（märz）/ 近年份 regex / l33t 三例 / crate 自测锚定值
-// （"TestMeNow!" guesses=372_010_000、"r0sebudmaelstrom11/20/91aaaa" score 4）/
-// 溢出饱和 / 单字符 / 中文混排 / 纯 CJK / 非 BMP（𐰊 古突厥文）/ 定种伪随机长串 /
-// 截断边界两例。
+// One hidden clock surface: DatePattern/recent_year's year_space depends on the library's
+// REFERENCE_YEAR (lazy_static, the current UTC year). Both sides run in the same year, so
+// the differential is unaffected.
 //
-// 确定性：一切 f64（guesses_log10、crack_times 的 Float 场景原值）打印
-// to_bits() 锁位型；crack_times 另打印 Display 文本分级（"5 hours" 族）；
-// calculation_time() 是墙钟 Duration，绝不打印；l33t 的 sub 表是
-// HashMap<char,char>，排序后打印，绝不打印 lib 预拼的 sub_display（HashMap
-// 迭代序拼接）；不对 Match/pattern 用 {:?}（Debug 含 sub_display）；词典名经
-// DictionaryType 的 derive(Debug) 打印（该类型在私有模块不可命名，只能 {:?}）；
-// 长随机密码由定种 xorshift64* 生成（两侧同序列）；stderr 为空（driver 零
-// warning）。
+// Coverage: every Entropy getter (score/guesses/guesses_log10/the four crack_times
+// scenarios/feedback/sequence); all seven MatchPattern variants (dictionary/spatial/
+// repeat/sequence/regex/date/bruteforce) with their public problem fields; the 14 warning
+// and 13 suggestion feedback grades; the empty string early exit (guesses=0, log10=-inf,
+// default feedback); the chars().take(100) truncation boundary (exactly 100 vs 107 clamped
+// to 100); the saturating_mul overflow path (guesses=u64::MAX); and the user_inputs
+// before/after comparison (a UserInputs dictionary hit at rank 1 displaces bruteforce,
+// user input is lowercased and sanitised, and a built-in dictionary hit ties an injected
+// entry at min-submatch-guesses, showing the clamping semantics).
+// Password set: empty / top-10 / top-100 / reversed / passphrase / keyboard row /
+// keyboard turns / shifted keys / keypad / ascending-descending sequence / single-char
+// repeat / word repeat / unseparated date / separated date / unicode date (märz) / recent
+// year regex / three l33t cases / the crate's own test anchors ("TestMeNow!"
+// guesses=372_010_000, "r0sebudmaelstrom11/20/91aaaa" score 4) / overflow saturation /
+// single char / mixed CJK / pure CJK / non-BMP (𐰊 Old Turkic) / seeded pseudo-random
+// long string / two truncation boundary cases.
 //
-// 确定性坑（上游 exact-tie nondeterminism，driver 输入侧躲开，非 mirvm 发现）：
-// 随机串原取 24 字符时，native 连跑 5 次第 2/3 次与首次不一致，翻转行：
-//   <   seq n=1 / m0 [0..23] tok=[…Osla] g=18446744073709551615 bruteforce
-//   >   seq n=2 / m0 [0..19] bruteforce(MAX) + m1 [20..23] tok=[Osla] g=88
-//   >   dict word=[also] rank=22 name=English rev=true …
-// 根因：尾 4 字符 "Osla" 反写命中 English 词典 "also"；bruteforce ≥19 字符时
-// 10^k saturating_mul 必撞 u64::MAX，len=1 全段（1×MAX）与 len=2 分解
-// （2×(MAX×88) sat）的序列猜测**精确并列 MAX**；scoring.rs 的 unwind 对
-// optimal.g[k]（HashMap<usize,u64>）迭代取严格最小，exact-tie 谁先生效取决于
-// 进程随机种子 → 输出抖动（native 对 native 不稳定；本 driver A/B/C 三维恰好
-// 三进程同种子才全绿）。语义改动为零的躲开方式：随机串取 18 字符
-// （bruteforce 上界 10^18 < u64::MAX，一切分解离开饱和区，并列在代数上不再
-// 成立），落地后经 native 10 连跑逐字节验证稳定。
+// Determinism: every f64 (guesses_log10 and the Float crack_times values) prints
+// to_bits() to pin the bit pattern; crack_times also prints its Display grading (the
+// "5 hours" family); calculation_time() is a wall-clock Duration and is never printed;
+// the l33t sub table is a HashMap<char,char> and is printed sorted, never the library's
+// pre-joined sub_display (HashMap iteration order); Match/pattern are never printed with
+// {:?} because Debug includes sub_display; dictionary names go through DictionaryType's
+// derived Debug (the type is private, so {:?} is the only option); the long random
+// password comes from a seeded xorshift64* (same sequence on both sides); stderr is empty.
+//
+// Exact-tie hazard avoided on the input side (upstream nondeterminism, not a mirvm
+// finding): the random password is 18 characters, not 24. At 24 the trailing "Osla"
+// reversed hits the English dictionary word "also"; and for brute force of 19 or more
+// characters 10^k saturating_mul always reaches u64::MAX, so the len=1 and len=2
+// decompositions tie exactly at MAX, leaving the scoring unwind's HashMap<usize,u64>
+// iteration order (process-random) to decide between equal optima. At 18 the bruteforce
+// bound 10^18 < u64::MAX, so no such tie can form.
 use zxcvbn::matching::patterns::MatchPattern;
 use zxcvbn::matching::Match;
 use zxcvbn::time_estimates::CrackTimeSeconds;
 use zxcvbn::{zxcvbn, Entropy};
 
-/// 定种 xorshift64*（native/mirvm 同序列）。
+/// Seeded xorshift64*, the same sequence on native and mirvm.
 struct Rng(u64);
 
 impl Rng {
@@ -71,7 +71,7 @@ impl Rng {
     }
 }
 
-/// CrackTimeSeconds：原值（整数原样 / 浮点锁位型）+ Display 文本分级双打印。
+/// CrackTimeSeconds: prints both the raw value (integer as-is, float pinned by bits) and the Display grading.
 fn fmt_secs(s: CrackTimeSeconds) -> String {
     match s {
         CrackTimeSeconds::Integer(v) => format!("i={v} t=[{s}]"),
@@ -87,7 +87,7 @@ fn fmt_match(m: &Match) -> String {
     let head = format!("[{}..{}] tok=[{}] g={}", m.i, m.j, m.token, g);
     match &m.pattern {
         MatchPattern::Dictionary(p) => {
-            // sub 是 HashMap<char,char>：排序后打印，不用 lib 的 sub_display（HashMap 序）。
+            // sub is a HashMap<char,char>: print it sorted, not the library's sub_display (HashMap order).
             let mut subs: Vec<(char, char)> = match &p.sub {
                 Some(h) => h.iter().map(|(&a, &b)| (a, b)).collect(),
                 None => Vec::new(),
@@ -175,14 +175,14 @@ fn dump(tag: &str, pw: &str, ui: &str, e: &Entropy) {
 }
 
 fn main() {
-    // 定种伪随机长密码（[a-zA-Z0-9]×18），两侧逐字节同串；18 = 全段 bruteforce
-    // 猜测上界 10^18 仍在 u64 内，躲开 ≥19 字符必撞 u64::MAX 的饱和并列（见头注）。
+    // Seeded pseudo-random long password ([a-zA-Z0-9]x18), the same bytes on both sides; 18
+    // keeps the whole-segment bruteforce bound 10^18 inside u64 (see the header note).
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     let alphabet: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let rand_pw: String = (0..18)
         .map(|_| alphabet[rng.below(alphabet.len() as u64) as usize] as char)
         .collect();
-    // chars().take(100) 截断边界：恰好 100（词全保留）vs 107（截到只剩 p）。
+    // chars().take(100) truncation boundary: exactly 100 (the word is kept whole) vs 107 (clamped).
     let trunc100 = format!("{}password", "b".repeat(92));
     let trunc107 = format!("{}password", "b".repeat(99));
 
@@ -224,12 +224,12 @@ fn main() {
         dump(tag, pw, "-", &e);
     }
 
-    // user_inputs 注入前后对照：u0 注入词不在任何内置词典 → post 可见
-    // name=UserInputs rank=1 的词典命中顶掉 bruteforce；u1 顺带验证 user input
-    // 的小写化消毒（注入 "XueHaoNan" 命中 "xuehaonan"）；u2 的内置词典命中
-    // （Surnames/Passwords）与注入词条并列 min-submatch-guesses=50，UserInputs
-    // 在 omnimatch 里恒被显式排在内置词典之后 push，update 的 ≤ 保留先见者——
-    // 注入不改 guesses，如实打印这一钳位语义。
+    // user_inputs before/after comparison: u0's injected word is in no built-in dictionary,
+    // so only post shows a name=UserInputs rank=1 hit displacing bruteforce; u1 also checks
+    // lowercasing/sanitising (injecting "XueHaoNan" hits "xuehaonan"); for u2 a built-in
+    // dictionary hit (Surnames/Passwords) ties the injected entry at min-submatch-guesses
+    // because UserInputs is always pushed after the built-in dictionaries in omnimatch and
+    // the update keeps the first-seen on <=, so injection does not change guesses.
     println!("== user_inputs ==");
     let ui_cases: Vec<(&str, &str, &[&str])> = vec![
         ("u0_haonanxue", "haonanxue88", &["haonanxue", "xueba"]),

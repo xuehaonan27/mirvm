@@ -1,15 +1,18 @@
-//! arch::x86_64::asmstub — x86_64 机器码字节发射与单发指令原语。
+//! x86_64 machine-code byte emission and single-instruction primitives.
 //!
-//! 归并：codearena 的条目 stub 字节工厂（`movabs rax, target; jmp rax`）
-//! 与 interp 的两条 asm!（int3 断点、xgetbv）。纯发射/执行——stub 的
-//! 地址域语义（addrlayout）、断点的终止语义（native 同）都留调用方。
+//! Holds the codearena entry-stub byte factory (`movabs rax, target; jmp rax`)
+//! and the interpreter's two `asm!` sites (int3 breakpoint, xgetbv). Emission
+//! and execution only: the stub's address-region semantics (addrlayout) and the
+//! breakpoint's termination semantics (same as native) stay with the caller.
 //!
-//! T5（decision-history §7.18）：`mirvm_syscall_trampoline`——asm-stub 内
-//! `syscall` 指令改写落点。保 syscall 全契约（真 syscall 只破坏 rcx/r11、
-//! 不动 flags 与向量态，wrapper 必须同纪律）后调 `mirvm_syscall_dispatch`。
+//! `mirvm_syscall_trampoline` is where a `syscall` instruction inside an asm
+//! stub is rewritten to land. It preserves the full syscall contract (a real
+//! syscall clobbers only rcx/r11, never flags or vector state, and the wrapper
+//! must keep the same discipline) before calling `mirvm_syscall_dispatch`.
 
-/// stub 字节：`movabs rax, target; jmp rax`（48 B8 <imm64> FF E0），12B 实长。
-/// （STUB_STRIDE=16 的由 12B 上对齐得来，常量在 vm/engine/codearena。）
+/// Stub bytes: `movabs rax, target; jmp rax` (48 B8 <imm64> FF E0), 12B long.
+/// (`STUB_STRIDE = 16` is this 12B rounded up; the constant lives in
+/// `vm/engine/codearena`.)
 pub fn emit_stub_bytes(target: u64) -> [u8; 12] {
     let mut b = [0u8; 12];
     b[0] = 0x48;
@@ -20,12 +23,12 @@ pub fn emit_stub_bytes(target: u64) -> [u8; 12] {
     b
 }
 
-/// 真 int3：未被跟踪时 = SIGTRAP 终止（native 同语义）。
+/// A real `int3`: terminates with SIGTRAP when not being traced (same as native).
 pub fn int3() {
     unsafe { std::arch::asm!("int3", options(nomem, nostack, preserves_flags)) };
 }
 
-/// xgetbv：XCR(xcr) → (edx:eax) 拼 u64。
+/// `xgetbv`: XCR(xcr) -> (edx:eax) assembled into a u64.
 pub fn xgetbv(xcr: u32) -> u64 {
     let (eax, edx): (u32, u32);
     unsafe {
@@ -40,18 +43,20 @@ pub fn xgetbv(xcr: u32) -> u64 {
     (u64::from(edx) << 32) | u64::from(eax)
 }
 
-// ===== T5：syscall 拦截 trampoline（decision-history §7.18）=====
+// ===== syscall interception trampoline =====
 //
-// 契约（与真 syscall 逐位一致）：
-// - 入：rax=nr、rdi/rsi/rdx/r10/r8/r9=a1..a6；出：rax=返回值。
-// - 真 syscall 只破坏 rcx/r11，不动 flags、不动 xmm/mxcsr——
-//   `call mirvm_syscall_dispatch`（普通 SysV fn）的破坏面大得多，
-//   故 trampoline 全量保全（dispatch 本体不碰向量态，TRACE 打印会碰，
-//   无条件保全是诚实纪律）。
-// - 栈：6 个参数槽兼作 dispatch 的 args 数组（*(rsp)=a1..*(rsp+40)=a6）。
+// Contract (bit-for-bit identical to a real syscall):
+// - In: rax=nr, rdi/rsi/rdx/r10/r8/r9=a1..a6; out: rax=return value.
+// - A real syscall clobbers only rcx/r11 and never touches flags or xmm/mxcsr.
+//   `call mirvm_syscall_dispatch` (an ordinary SysV function) clobbers far
+//   more, so the trampoline preserves everything. The dispatch body itself
+//   leaves vector state alone, but TRACE printing does not, and unconditional
+//   preservation is the honest discipline.
+// - Stack: the 6 argument slots double as dispatch's args array
+//   (*(rsp)=a1 .. *(rsp+40)=a6).
 //
-// 栈对齐核算：入口 rsp≡8（call 压过返回地址）；pushfq→0；sub 272→0；
-// 6 push→0（48≡0 mod 16）；`call` 时 rsp≡0 ✓。
+// Stack alignment accounting: on entry rsp≡8 (call pushed the return address);
+// pushfq -> 0; sub 272 -> 0; 6 pushes -> 0 (48 ≡ 0 mod 16); so rsp≡0 at `call`.
 
 unsafe extern "C" {
     fn mirvm_syscall_trampoline();

@@ -1,13 +1,17 @@
-//! foreign 直通（os:: P7 处置①的通用道）：dlsym + libffi 按冻结签名直调。
+//! Foreign direct call: dlsym + libffi, invoked directly under a frozen signature.
 //!
-//! 真实地址模型的直接收益（账本 C2）：guest 指针即宿主指针，**零编组**——
-//! 参数就是 u64 位，按 FfiKind 截取；native 写 guest 内存 = 写真内存，天然可见。
-//! tier-0 native.rs 的无 provenance 简化版。
+//! A direct benefit of the real-address model: a guest pointer *is* a host pointer, so
+//! marshalling is zero -- arguments are plain u64 bits truncated by FfiKind, and a native
+//! write to guest memory writes real memory, visible by construction.
 //!
-//! 库加载纪律：物化 archive 是必需库（RTLD_NOW，失败携 dlerror 终止）；普通 `-l`
-//! 名称是可选候选（best-effort）。解析序：归档 hidden 符号 .symtab 兜底表（链接
-//! 期绑定，恒胜全局）→ RTLD_DEFAULT → 各句柄（见 archive_fallbacks 字段注）。
-//! 变参函数用 Cif::new_variadic(尾参类别由调用点实参冻结，x86_64 AL 语义 libffi 负责)。
+//! Library-loading discipline: a materialized archive is a required library (RTLD_NOW;
+//! failure aborts carrying the dlerror detail); a plain `-l` name is an optional candidate
+//! (best-effort). Resolution order: the archive hidden-symbol `.symtab` fallback table
+//! (link-time binding always beats the global scope) -> RTLD_DEFAULT -> each handle (see the
+//! `archive_fallbacks` field note). Variadic functions use `Cif::new_variadic`; the trailing
+//! argument classes are frozen at the call site, and libffi handles x86_64 AL.
+//!
+//! A simplified, provenance-free version of tier-0's native.rs.
 
 use std::collections::HashMap;
 use std::ffi::{CString, c_void};
@@ -17,8 +21,9 @@ use libffi::middle::{Arg, Cif, CodePtr, Ret, Type as FfiType};
 
 use super::ir::{FfiKind, ForeignSig};
 
-// libffi-sys 把 ffi_call 声明成 plain C，Rust 因而不允许异常越过那次调用。
-// 同一原生符号另以 C-unwind 声明，只供 ForeignSig.unwind=true 的调用使用。
+// libffi-sys declares ffi_call as plain C, so Rust does not allow an exception to cross that
+// call. The same native symbol is declared again as C-unwind, used only when
+// ForeignSig.unwind is true.
 unsafe extern "C-unwind" {
     #[link_name = "ffi_call"]
     fn ffi_call_unwind(
@@ -29,31 +34,36 @@ unsafe extern "C-unwind" {
     );
 }
 
-/// 每线程 FFI 状态（dlsym 结果缓存 + dlopen 句柄；dlsym 幂等，M4.4 各线程独立缓存无碍）。
+/// Per-thread FFI state (dlsym result cache + dlopen handles). dlsym is idempotent, so an
+/// independent cache per thread is harmless.
 #[derive(Default)]
 pub struct FfiState {
     syms: HashMap<Box<str>, usize>,
-    /// 必需归档库的 dlopen 句柄（required_native_libs 序 = 链接序同构）：
-    /// 其 .dynsym 可见符号的解析 **先于 RTLD_DEFAULT**（native 链接期绑定——guest
-    /// 自己链进来的对象恒胜宿主进程同名库；psm 的 rust_psm_on_stack vs 宿主
-    /// librustc_driver 内嵌副本即此实锤，corpus c_polars_frame）。可选库句柄
-    /// 另列，全域之后再查。
+    /// dlopen handles of required archive libraries, in `required_native_libs` order (which
+    /// mirrors link order). Their `.dynsym`-visible symbols resolve **before RTLD_DEFAULT**:
+    /// native link-time binding means an object the guest linked in itself always beats a
+    /// same-named library in the host process. Optional-library handles are listed separately
+    /// and queried after the global scope.
     required_handles: Vec<usize>,
     handles: Vec<usize>,
-    /// 必需归档库的 hidden 符号兜底表（装载基址, 符号→st_value）：只收不进
-    /// .dynsym 的符号（-fvisibility=hidden 归档，ring/zstd-sys 一族）。解析序
-    /// = required_native_libs 序（与链接序同构），且**先于 dlsym 全域**——静态
-    /// 归档成员链进 guest 后其定义恒胜全局命名空间（native 链接期绑定；宿主
-    /// libLLVM 内嵌 ZSTD_* 一族同名库会静默截胡，corpus c_zstd_stream 实锤）。
+    /// Hidden-symbol fallback tables of required archive libraries: (load bias, symbol ->
+    /// st_value). They hold only symbols absent from `.dynsym` (from `-fvisibility=hidden`
+    /// archives such as the ring/zstd-sys family). Resolution order follows
+    /// `required_native_libs` (mirroring link order) and runs **before the global dlsym
+    /// scope**: once a static archive member is linked into the guest, its definition beats
+    /// the global namespace (native link-time binding). Otherwise a same-named library
+    /// embedded in the host (e.g. ZSTD_* inside libLLVM) silently intercepts the call.
     archive_fallbacks: Vec<(u64, HashMap<Box<str>, u64>)>,
     libs_loaded: bool,
 }
 
 impl FfiState {
-    /// 解析符号真地址（缓存，含缺席缓存）。None = 全部搜索域都没有。
+    /// Resolve a symbol's real address (cached, including misses). `None` means no search
+    /// scope had it.
     ///
-    /// 调用方拿到地址后必须先结束对 `FfiState` 的可变借用，再进入原生代码：
-    /// 原生函数可以同步回调 guest，而 guest 回调可以再次解析并调用 foreign 符号。
+    /// After obtaining an address the caller must end its mutable borrow of `FfiState` before
+    /// entering native code: a native function may synchronously call back into the guest, and
+    /// that guest callback may resolve and call foreign symbols again.
     pub(crate) fn resolve(
         &mut self,
         name: &str,
@@ -69,9 +79,10 @@ impl FfiState {
         let Ok(cname) = CString::new(name) else {
             return Ok(None);
         };
-        // ①归档 hidden 符号兜底表（先于全域）：native 链接期绑定语义——归档内
-        // 定义恒胜全局命名空间。dlsym 优先会把 guest 的 ZSTD_* 静默绑到宿主
-        // libLLVM 内嵌库（同 ABI、不同策略行，输出合法但错误的字节）。
+        // ① Archive hidden-symbol fallback table (before the global scope): native link-time
+        // binding -- an archive definition beats the global namespace. Resolving via dlsym
+        // first would silently bind the guest's ZSTD_* to the copy embedded in the host's
+        // libLLVM (same ABI, different policy setting -> valid but wrong bytes).
         let mut p = 0usize;
         for (bias, syms) in &self.archive_fallbacks {
             if let Some(&v) = syms.get(name) {
@@ -79,17 +90,18 @@ impl FfiState {
                 break;
             }
         }
-        // ①′MC 镜像（mode B 片③：包内自装载的自产 global_asm/dep_asm 族；
-        // 与②同一语义位——guest 自产对象恒胜宿主同名库）
+        // ①' MC images (self-loaded, guest-produced global_asm/dep_asm from the package; same
+        // semantic slot as ② -- a guest-produced object beats a same-named host library)
         if p == 0
             && let Some(addr) = super::mcload::resolve(mc_images, name)
         {
             p = addr;
         }
-        // ②必需归档句柄 dlsym（链接序）：归档 .dynsym 可见符号的 native 链接期
-        // 绑定——guest 自己的对象恒胜宿主同名库；句柄解析与装载序无关，可复现
-        // （①的 hidden 类同理；残余 = 归档【内部】跨引用碰撞符号仍走全局序，
-        // 已知记档，corpus 无此形态）。
+        // ② dlsym on required archive handles (link order): native link-time binding of
+        // `.dynsym`-visible archive symbols -- the guest's own object beats a same-named host
+        // library. Handle resolution is independent of load order and reproducible (same for
+        // ①'s hidden symbols). Residual: a symbol that collides across archive-internal
+        // references still goes through the global order; known and not observed in the corpus.
         if p == 0 {
             for &h in &self.required_handles {
                 p = crate::os::dll::sym(h, &cname);
@@ -98,8 +110,9 @@ impl FfiState {
                 }
             }
         }
-        // ③dlsym 全域（真系统库；归档的 dynsym 可见符号也经 RTLD_GLOBAL 装载
-        // 在此命中——但撞宿主同名库时 ②已先命中归档，无歧义）
+        // ③ global dlsym (real system libraries). `.dynsym`-visible archive symbols loaded
+        // with RTLD_GLOBAL also hit here, but when a same-named host library exists ② already
+        // hit the archive, so there is no ambiguity.
         if p == 0 {
             p = crate::os::dll::sym(0, &cname);
         }
@@ -165,11 +178,13 @@ impl FfiState {
     }
 }
 
-/// P2 启动相 GOT 重填（decision-history §7.5c）：以与运行期 foreign 调用同一
-/// 解析序重解析全部 foreign 符号，逐修补点写 `resolved + addend`。冷/热单一
-/// 路径——冷路径结果必与 lower 初填一致（幂等）；热路径（L2/image 回放）用它
-/// 把上进程陈旧宿主地址换成本进程真值。非 weak 未命中 = Err（响亮：陈旧地址
-/// 是 SIGSEGV 级静默错值源）；weak 未命中写 0（extern weak 缺席语义）。
+/// Startup GOT refill: resolve every foreign symbol with the same resolution order used by
+/// runtime foreign calls, then write `resolved + addend` at each fixup point. Cold and warm
+/// share one path -- the cold result must equal the address lowering filled in (idempotent),
+/// while the warm path (L2/image replay) uses it to replace a previous process's stale host
+/// addresses with this process's real ones. A non-weak miss is an Err, and loudly so: a stale
+/// address is a silent source of SIGSEGV-level wrong values. A weak miss writes 0, matching
+/// the absent-`extern weak` semantics.
 pub(crate) fn resolve_got_fixups(module: &mut super::ir::Module) -> Result<(), String> {
     if module.got_fixups.is_empty() {
         return Ok(());
@@ -196,14 +211,16 @@ pub(crate) fn resolve_got_fixups(module: &mut super::ir::Module) -> Result<(), S
             (None, true) => resolved.push(0),
             (None, false) => {
                 return Err(format!(
-                    "foreign 符号 `{}` 启动相未命中（GOT 重填；归档兜底表 / dlsym 全域均无）",
+                    "foreign symbol `{}` unresolved at startup GOT refill \
+                     (absent from the archive fallback tables and the global dlsym scope)",
                     s.name
                 ));
             }
         }
     }
     for f in &module.got_fixups {
-        // 修补点 addr 恒指冻结域内 8 字节格（lower 登记纪律）；冻结区映射终身 RW。
+        // A fixup addr always points at an 8-byte cell inside the frozen region (a lowering
+        // registration rule); the frozen-region mapping is RW for its whole lifetime.
         let addr = module.resolve_link_addr(f.addr);
         unsafe { *(addr as *mut u64) = resolved[f.sym as usize].wrapping_add(f.addend) };
     }
@@ -228,7 +245,8 @@ pub(super) fn ffi_type(k: &FfiKind) -> FfiType {
     }
 }
 
-/// C1：冻结聚合 → libffi 结构类型（递归嵌套；size/align 由 libffi 依字段自洽计算）。
+/// Frozen aggregate -> libffi struct type (recursively nested; libffi computes size/align
+/// from the fields).
 fn ffi_type_agg(agg: &super::ir::FfiAgg) -> FfiType {
     let fields: Vec<FfiType> = agg
         .fields
@@ -241,14 +259,17 @@ fn ffi_type_agg(agg: &super::ir::FfiAgg) -> FfiType {
     FfiType::structure(fields)
 }
 
-/// guest 线程栈放大（M5.2 D8a）：pthread_create 且显式 stacksize（std::thread 恒
-/// 显式）时临时放大 attr——解释帧宿主成本数十倍于 native 帧，原尺寸会在远浅于
-/// native 的 guest 深度打穿宿主栈。返回 Some((attr, 原尺寸)) 时调用方在 create 后
-/// 还原（guest 可能复用 attr）。guest 自供栈（pthread_attr_setstack，addr 非空）
-/// 不动；attr=NULL（glibc 默认）不动——该形态只出现在 native 代码自建线程，其
-/// thunk 再入由 stack_floor 真栈守卫兜底。放大后尺寸是虚拟保留，按需提交。
+/// Amplify a guest thread's stack: on pthread_create with an explicit stacksize
+/// (`std::thread` always sets one), temporarily grow the attr. An interpreted frame costs
+/// tens of times the host stack of a native frame, so the original size would blow the host
+/// stack at a guest depth far shallower than native. When it returns `Some((attr, original
+/// size))` the caller restores the attr after create (the guest may reuse it). A
+/// guest-supplied stack (pthread_attr_setstack with a non-null addr) is untouched, as is a
+/// null attr (glibc default): that form only appears for threads native code creates itself,
+/// where the stack_floor real-stack guard covers thunk re-entry. The enlarged size is a
+/// virtual reservation, committed on demand.
 pub fn amplify_pthread_stack(sym: &str, av: &[u64]) -> Option<(*mut std::ffi::c_void, usize)> {
-    /// 解释帧 / native 帧的宿主成本比的保守上界（~2KB vs ~64B）
+    /// Conservative upper bound on the interpreted/native host-stack cost ratio (~2KB vs ~64B)
     const AMPLIFY: usize = 32;
     const FLOOR: usize = 64 << 20;
     if sym != "pthread_create" || av.len() < 4 {
@@ -259,8 +280,9 @@ pub fn amplify_pthread_stack(sym: &str, av: &[u64]) -> Option<(*mut std::ffi::c_
         return None;
     }
     let (lo, size) = crate::os::thread::attr_stack_bounds(attr)?;
-    // 未设 stacksize 的 attr（glibc 假地址形态判定在 os::thread）不动；
-    // guest 自供栈（setstack，addr 落在用户地址界内）不动。
+    // An attr with no stacksize (glibc's fake-address form is detected in os::thread) is
+    // untouched, as is a guest-supplied stack (setstack with addr inside the user address
+    // range).
     if !crate::os::thread::stack_addr_is_unset(lo) {
         return None;
     }
@@ -271,13 +293,16 @@ pub fn amplify_pthread_stack(sym: &str, av: &[u64]) -> Option<(*mut std::ffi::c_
     Some((attr, size))
 }
 
-/// 按真码地址直调（CallForeign 的共用尾；也是 CallIndirect 反查未命中时的
-/// native fn-ptr 通道——guest 运行期 dlsym 所得真码，M4.4 FFI 反方向之二）。
+/// Call directly at a real code address: the shared tail of CallForeign, and the native
+/// fn-pointer channel used when a CallIndirect reverse lookup misses (real code the guest
+/// obtained from dlsym at runtime).
 pub fn call_addr(fnptr: usize, sig: &ForeignSig, args: &[u64], ret_dst: Option<u64>) -> u64 {
-    // F-07：实参/签名等长不变量——zip 静默截断曾吞掉变参真实尾参的类型
+    // Args and signature must be the same length; zip silently truncating once hid the
+    // types of a variadic call's real trailing arguments.
     if args.len() != sig.args.len() {
         crate::vm::engine::interp::engine_abort(&format!(
-            "FFI 实参与签名不等长（实参 {} / 签名 {}；签名漂移或变参冻结缺口）",
+            "FFI argument/signature length mismatch (args {} / signature {}; \
+             signature drift or a variadic freeze gap)",
             args.len(),
             sig.args.len()
         ));
@@ -288,8 +313,9 @@ pub fn call_addr(fnptr: usize, sig: &ForeignSig, args: &[u64], ret_dst: Option<u
         None => Cif::new(types, ffi_type(&sig.ret)),
     };
 
-    // 标量每参一个 8 字节小端缓冲（libffi 按类型宽度读前缀）；
-    // C1 聚合参数 avalue 直指 eval 出的聚合字节真地址（零拷贝）。
+    // One 8-byte little-endian buffer per scalar argument (libffi reads the prefix at the
+    // type's width); an aggregate argument's avalue points straight at the aggregate bytes the
+    // guest evaluated (zero copy).
     let bufs: Vec<[u8; 8]> = args.iter().map(|a| a.to_le_bytes()).collect();
     let ffi_args: Vec<Arg<'_>> = args
         .iter()
@@ -314,10 +340,12 @@ pub fn call_addr(fnptr: usize, sig: &ForeignSig, args: &[u64], ret_dst: Option<u
     });
 
     if let FfiKind::Agg(agg) = &sig.ret {
-        // C1 按值聚合返回：结果缓冲按 8 对齐桶分配（align>8 已在 freeze 边界拒），
-        // 调用后 memcpy size 字节至调用方目的地址（寄存器对档与 sret 档都由 libffi
-        // 依结构类型内建解释 rtype——语义不自证）。
-        let dst = ret_dst.expect("按值聚合返回的调用方目的地址（引擎不变量）");
+        // Aggregate returned by value: the result buffer is allocated in 8-byte-aligned
+        // buckets (align > 8 is rejected at the freeze boundary), and after the call `size`
+        // bytes are copied to the caller's destination. libffi interprets rtype from the
+        // struct type itself, covering both the register-pair and the sret form.
+        let dst = ret_dst
+            .expect("caller destination for an aggregate-by-value return (engine invariant)");
         let mut rbuf: Vec<u64> = vec![0; (agg.size as usize).div_ceil(8)];
         unsafe {
             call_return_into(
@@ -337,8 +365,9 @@ pub fn call_addr(fnptr: usize, sig: &ForeignSig, args: &[u64], ret_dst: Option<u
         return 0;
     }
     let mut ret = [0u8; 8];
-    // SAFETY: 地址来自 dlsym / guest 持有的真码指针；签名按 rustc fn sig layout 冻结；
-    // guest 缓冲即宿主缓冲。fast 立场（C4）：native 调用的正确性由 guest 程序负责。
+    // SAFETY: the address comes from dlsym or a real code pointer the guest holds; the
+    // signature is frozen from the rustc fn sig layout; the guest buffer is a host buffer.
+    // Fast-mode stance: correctness of a native call is the guest program's responsibility.
     unsafe {
         call_return_into(
             &cif,
@@ -352,8 +381,9 @@ pub fn call_addr(fnptr: usize, sig: &ForeignSig, args: &[u64], ret_dst: Option<u
     u64::from_le_bytes(ret)
 }
 
-/// 按冻结 ABI 选择 plain C / C-unwind ffi_call。C 路径保留 libffi crate 的
-/// 原声明；unwind 路径只改变 Rust 看见的边界属性，不改 CIF 与实参布局。
+/// Choose plain C or C-unwind ffi_call per the frozen ABI. The C path keeps the libffi
+/// crate's original declaration; the unwind path changes only the boundary attribute Rust
+/// sees, not the CIF or the argument layout.
 unsafe fn call_return_into<T: ?Sized>(
     cif: &Cif,
     fnptr: usize,
@@ -369,11 +399,11 @@ unsafe fn call_return_into<T: ?Sized>(
         return;
     }
 
-    let raw_args = raw_args.expect("C-unwind ffi_call 必须准备原始实参数组");
+    let raw_args = raw_args.expect("C-unwind ffi_call requires the raw argument array");
     assert_eq!(
         unsafe { (*cif.as_raw_ptr()).nargs as usize },
         raw_args.len(),
-        "C-unwind ffi_call 实参与 CIF 不等长"
+        "C-unwind ffi_call argument count differs from the CIF"
     );
     unsafe {
         call_return_into_unwind(
@@ -385,8 +415,9 @@ unsafe fn call_return_into<T: ?Sized>(
     }
 }
 
-/// libffi::low::call_return_into 的 C-unwind 等价实现。小整数返回时 libffi
-/// 会写满一个寄存器，必须先收进 usize 再只复制真实宽度，避免覆盖调用方缓冲。
+/// C-unwind equivalent of libffi::low::call_return_into. For a small integer return libffi
+/// writes a full register, so the value is first collected into a usize and only the real
+/// width is copied, avoiding overwriting the caller's buffer.
 unsafe fn call_return_into_unwind(
     cif: *mut libffi::raw::ffi_cif,
     fnptr: usize,
@@ -802,9 +833,10 @@ mod tests {
         );
     }
 
-    /// 归档 hidden 符号先于 RTLD_DEFAULT（native 链接期绑定：归档定义恒胜全局
-    /// 同名——宿主 libLLVM 内嵌 ZSTD_* 静默截胡 corpus c_zstd_stream 的修法）。
-    /// 探针：hidden `malloc`（进程全域恒有 libc 本尊）必须解到归档内定义。
+    /// An archive hidden symbol resolves before RTLD_DEFAULT (native link-time binding: an
+    /// archive definition beats a global same-name -- the fix for the host libLLVM's embedded
+    /// ZSTD_* silently intercepting). Probe: a hidden `malloc` must resolve to the archive
+    /// definition, even though the process global scope always has libc's.
     #[test]
     fn hidden_archive_symbol_wins_over_rtld_default() {
         let dir = std::env::temp_dir().join(format!("mirvm-ffi-order-test-{}", std::process::id()));
@@ -851,7 +883,8 @@ mod tests {
                 .unwrap()
                 .success()
         );
-        // 前提：hidden malloc 不进 .dynsym，进程全域只有 libc 本尊
+        // Precondition: hidden malloc is not in .dynsym, so the process global scope only has
+        // libc's.
         let libc_malloc = crate::os::dll::sym(0, c"malloc");
         assert!(libc_malloc != 0);
         let mut state = FfiState::default();
@@ -862,7 +895,7 @@ mod tests {
             .expect("malloc resolves");
         assert_ne!(
             resolved, libc_malloc,
-            "归档 hidden malloc 必须盖过 RTLD_DEFAULT 的 libc malloc"
+            "archive hidden malloc must beat RTLD_DEFAULT's libc malloc"
         );
         let f: unsafe extern "C" fn(u64) -> *mut std::ffi::c_void =
             unsafe { std::mem::transmute(resolved) };

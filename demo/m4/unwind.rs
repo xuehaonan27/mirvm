@@ -1,5 +1,5 @@
-// M4.2 gate：unwind——panic 发起/传播/Drop-in-unwind/catch/重抛（返回 u64 校验和，
-// 无 println——全量差分 M4.3 起）。#[unsafe(no_mangle)] = 收集根 + --vm-call 稳定名。
+// Unwind probe: panic raise / propagation / Drop-in-unwind / catch / rethrow, each returning
+// a u64 checksum instead of printing. #[unsafe(no_mangle)] = mono collection root + stable --vm-call name.
 #![allow(dead_code)]
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -61,7 +61,7 @@ fn normal_after_top_cleanup(value: u64) -> u64 {
     value + 2
 }
 
-/// Engine 顶层接住的 panic 必须交还 guest std 做计数复位和 payload 析构。
+/// A panic caught at the engine top level must be handed back to guest std to reset counters and drop the payload.
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn uncaught_payload_cleanup_probe() -> u64 {
     TOP_PAYLOAD_DROPS.store(0, Ordering::SeqCst);
@@ -69,7 +69,7 @@ pub extern "C-unwind" fn uncaught_payload_cleanup_probe() -> u64 {
     std::panic::panic_any(TopPayload)
 }
 
-/// catch_unwind 捕获 + Drop 在 unwind 中执行（奇数 panic：100·1000+10；偶数：7·1000+10）
+/// catch_unwind catches it and Drop runs during unwinding (odd panic: 100*1000+10; even: 7*1000+10)
 #[unsafe(no_mangle)]
 pub fn catch_digest(n: u64) -> u64 {
     DROPS.store(0, Ordering::SeqCst);
@@ -96,7 +96,7 @@ fn middle(n: u64) -> u64 {
     5
 }
 
-/// 跨多帧传播：中间帧 Drop 在 unwind 中逐帧执行（内层先）
+/// Propagation across frames: the middle frame's Drop runs frame by frame during unwinding (inner first)
 #[unsafe(no_mangle)]
 pub fn nested_digest(n: u64) -> u64 {
     DROPS.store(0, Ordering::SeqCst);
@@ -111,7 +111,7 @@ pub fn nested_digest(n: u64) -> u64 {
     caught * 1000 + DROPS.load(Ordering::SeqCst)
 }
 
-/// 越界 Assert → 真 panic_bounds_check → catch（Assert 展开的实证）
+/// Out-of-bounds Assert -> real panic_bounds_check -> catch (evidence that Assert expands)
 #[unsafe(no_mangle)]
 pub fn bounds_digest(n: u64) -> u64 {
     let v = [10u64, 20, 30];
@@ -122,7 +122,7 @@ pub fn bounds_digest(n: u64) -> u64 {
     }
 }
 
-/// panic 消息 payload 跨 unwind 存活（格式化 String → downcast → 长度）
+/// The panic message payload survives unwinding (formatted String -> downcast -> length)
 #[unsafe(no_mangle)]
 pub fn msg_digest(n: u64) -> u64 {
     let r = std::panic::catch_unwind(move || {
@@ -140,7 +140,7 @@ pub fn msg_digest(n: u64) -> u64 {
     }
 }
 
-/// 捕获后重抛（resume_unwind）→ 外层再捕获
+/// Rethrow after catching (resume_unwind) -> caught again by the outer frame
 #[unsafe(no_mangle)]
 pub fn rethrow_digest(n: u64) -> u64 {
     DROPS.store(0, Ordering::SeqCst);

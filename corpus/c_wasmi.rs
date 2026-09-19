@@ -4,12 +4,12 @@
 wasmi = "0.38"
 wat = "1"
 ---
-// wasmi 0.38：纯 Rust wasm 解释器（VM-in-VM）。wat 文本内嵌两个模块：
-// ① add/fib/fac/f32/f64/位运算纯函数（typed + untyped 两种调用面）；
-// ② memory 读写 + 可变 global + 多值返回 + 宿主函数（Caller 改宿主状态）。
-// 逐调用打印返回值（浮点打 to_bits）；trap 路径：除零 / int 溢出 /
-// unreachable / 内存越界，打印 TrapCode 类别；另有 grow 边界、缺失导出、
-// typed 签名不匹配、坏二进制、坏 wat 五类错误路径。全确定：无时间/随机。
+// wasmi 0.38: a pure-Rust wasm interpreter (VM-in-VM). Two wat-embedded modules: ① pure
+// functions (add/fib/fac/f32/f64/bitwise) over the typed and untyped call surfaces; ② memory
+// read/write, a mutable global, multiple return values and host functions whose Caller
+// mutates host state. Calls print return values (floats as to_bits); trap paths print the
+// TrapCode kind (div by zero, overflow, unreachable, OOB memory). Error paths also cover
+// grow boundaries, missing exports, signature mismatch, bad binary and bad wat. No time/random.
 use wasmi::{
     Caller, Engine, ExternType, FuncType, Instance, Linker, Module, Store, Val,
 };
@@ -79,7 +79,7 @@ fn trap_str(e: &wasmi::Error) -> String {
     }
 }
 
-/// untyped Func::call：Val 切片入参、动态结果缓冲，覆盖非泛型调用面。
+/// untyped Func::call: a Val slice of arguments and a dynamically sized result buffer.
 fn call_dynamic(store: &mut Store<HostState>, instance: &Instance, name: &str, args: &[Val]) {
     let f = instance.get_func(&*store, name).unwrap();
     let n_results = f.ty(&*store).results().len();
@@ -158,7 +158,7 @@ const WAT_HOST: &str = r#"
 fn main() {
     let engine = Engine::default();
 
-    // ---- 宿主函数：Caller 访问/修改宿主状态 ----
+    // ---- host functions: Caller reads and mutates host state ----
     let mut linker: Linker<HostState> = Linker::new(&engine);
     linker
         .func_wrap(
@@ -179,7 +179,7 @@ fn main() {
 
     let mut store = Store::new(&engine, HostState { host_add_calls: 0, ticks: 0 });
 
-    // ================= 模块①：纯函数 =================
+    // ================= module ①: pure functions =================
     let wasm1 = wat::parse_str(WAT_PURE).unwrap();
     println!("m1 wasm bytes len={} fnv={:016x}", wasm1.len(), fnv1a(&wasm1));
     let module1 = Module::new(&engine, &wasm1[..]).unwrap();
@@ -215,23 +215,23 @@ fn main() {
     let rotl_xor = inst1.get_typed_func::<(i32, i32), i32>(&store, "rotl_xor").unwrap();
     println!("m1 rotl_xor(0x12345678, 5) = {:#010x}", rotl_xor.call(&mut store, (0x12345678, 5)).unwrap());
 
-    // untyped 调用面：Val 数组
+    // untyped call surface: a Val array
     call_dynamic(&mut store, &inst1, "add", &[Val::I32(40), Val::I32(2)]);
     call_dynamic(&mut store, &inst1, "fib", &[Val::I32(9)]);
 
-    // trap 路径（模块①）：除零 / int 溢出 / unreachable
+    // trap paths (module ①): division by zero / integer overflow / unreachable
     call_dynamic(&mut store, &inst1, "div_s", &[Val::I32(1), Val::I32(0)]);
     call_dynamic(&mut store, &inst1, "div_s", &[Val::I32(i32::MIN), Val::I32(-1)]);
     call_dynamic(&mut store, &inst1, "boom", &[]);
 
-    // ================= 模块②：memory + global + 多值 + 宿主函数 =================
+    // ================= module ②: memory + global + multiple results + host functions =================
     let wasm2 = wat::parse_str(WAT_HOST).unwrap();
     println!("m2 wasm bytes len={} fnv={:016x}", wasm2.len(), fnv1a(&wasm2));
     let module2 = Module::new(&engine, &wasm2[..]).unwrap();
     dump_module("m2", &module2);
     let inst2 = linker.instantiate(&mut store, &module2).unwrap().start(&mut store).unwrap();
 
-    // memory：宿主侧读 data 段初值
+    // memory: host reads the initial data segment
     let memory = inst2.get_memory(&store, "memory").unwrap();
     println!("m2 memory pages={} bytes={}", memory.size(&store), memory.data(&store).len());
     let mut buf = [0u8; 19];
@@ -239,12 +239,12 @@ fn main() {
     println!("m2 data[64..83] hex={} fnv={:016x}", hex(&buf), fnv1a(&buf));
     println!("m2 data[72..83] utf8={:?}", std::str::from_utf8(&buf[8..]).unwrap());
 
-    // 宿主写 → wasm 读（sum_range）
+    // host write -> wasm read (sum_range)
     memory.write(&mut store, 128, b"mirvm-wasmi").unwrap();
     let sum_range = inst2.get_typed_func::<(i32, i32), i32>(&store, "sum_range").unwrap();
     println!("m2 sum_range(128, 11) = {}", sum_range.call(&mut store, (128, 11)).unwrap());
 
-    // wasm 写 → 宿主读
+    // wasm write -> host read
     let write8 = inst2.get_typed_func::<(i32, i32), ()>(&store, "write8").unwrap();
     write8.call(&mut store, (200, 0xAB)).unwrap();
     write8.call(&mut store, (201, 0xCD)).unwrap();
@@ -254,7 +254,7 @@ fn main() {
     memory.read(&store, 200, &mut pair).unwrap();
     println!("m2 host sees [200..202] = {}", hex(&pair));
 
-    // global：wasm 改 ↔ 宿主改
+    // global: wasm mutation <-> host mutation
     let g = inst2.get_global(&store, "g").unwrap();
     println!("m2 g initial = {}", val_str(&g.get(&store)));
     let bump_g = inst2.get_typed_func::<i32, i32>(&store, "bump_g").unwrap();
@@ -263,14 +263,14 @@ fn main() {
     println!("m2 bump_g(1) after host set = {}", bump_g.call(&mut store, 1).unwrap());
     println!("m2 g final = {}", val_str(&g.get(&store)));
 
-    // 多值返回
+    // multiple return values
     let divmod = inst2.get_typed_func::<(i32, i32), (i32, i32)>(&store, "divmod").unwrap();
     let (q, r) = divmod.call(&mut store, (17, 5)).unwrap();
     println!("m2 divmod(17, 5) = ({q}, {r})");
     let (q, r) = divmod.call(&mut store, (-17, 5)).unwrap();
     println!("m2 divmod(-17, 5) = ({q}, {r})");
 
-    // 宿主函数经 wasm 调用；Caller 改的宿主状态最后打印
+    // host functions called through wasm; the host state Caller changed is printed last
     let use_host = inst2.get_typed_func::<(i32, i32), i32>(&store, "use_host").unwrap();
     println!("m2 use_host(20, 22) = {}", use_host.call(&mut store, (20, 22)).unwrap());
     let tick_sum = inst2.get_typed_func::<(), i64>(&store, "tick_sum").unwrap();
@@ -281,7 +281,7 @@ fn main() {
         store.data().ticks
     );
 
-    // memory.grow：1→2 页成功，再 grow 超 max=2 失败
+    // memory.grow: 1 -> 2 pages succeeds, growing past max=2 fails
     let prev = memory.grow(&mut store, 1).unwrap();
     println!("m2 grow(1) prev_pages={prev} now_pages={}", memory.size(&store));
     println!("m2 read8(131071) post-grow = {}", read8.call(&mut store, 131071).unwrap());
@@ -289,10 +289,10 @@ fn main() {
         Ok(p) => println!("m2 grow past max: prev={p}"),
         Err(e) => println!("m2 grow past max => err {e}"),
     }
-    // 越界读 → MemoryOutOfBounds trap（2 页 = 131072 字节，地址 131072 越界）
+    // Out-of-bounds read -> MemoryOutOfBounds trap (2 pages = 131072 bytes, address 131072 is out)
     call_dynamic(&mut store, &inst2, "read8", &[Val::I32(131072)]);
 
-    // ================= 错误路径 =================
+    // ================= error paths =================
     println!("m1 missing export is_none = {}", inst1.get_func(&store, "nope").is_none());
     match inst1.get_typed_func::<(i64,), i64>(&store, "add") {
         Ok(_) => println!("m1 wrong-sig typed: unexpectedly ok"),

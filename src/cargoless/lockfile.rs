@@ -1,32 +1,37 @@
-//! `cargoless/lockfile.rs` —— Cargo.lock 读写（D15 P1，设计档 §3.2）。
+//! `cargoless/lockfile.rs` -- Cargo.lock read/write.
 //!
-//! 读：v3/v4 格式（`version = N` 头 + `[[package]]` 表列），path 包无
-//! source/checksum；dependency 行形态（`"name"` / `"name version"` /
-//! `"name version (source)"`）按字符串松散解析（只取 name 与可选 version）。
-//! 写：保留模型指定的 v3/v4 头，包行使用两者共通的 canonical 形态（自解落锁
-//! 供复现与 cargo --locked 反证，设计档 §5 P1）。
+//! Read: the v3/v4 format (`version = N` header plus `[[package]]` tables);
+//! a path package has no source/checksum. Dependency lines come in the forms
+//! `"name"` / `"name version"` / `"name version (source)"` and are parsed
+//! loosely as strings (only the name and the optional version are kept).
+//! Write: keep the v3/v4 header the model specifies, with package rows in the
+//! canonical form common to both (resolve writes the lock to support
+//! reproducibility and `cargo --locked` refutation).
 //!
-//! source 支持 crates.io registry 与精确 Git commit；Git 包没有 checksum。
+//! Supported sources are crates.io registry and an exact Git commit; a Git
+//! package has no checksum.
 
-// P1 逐切接入中：resolve/audit 后续切片接入后摘除本 allow（设计档 §5）。
 #![allow(dead_code)]
 
 use std::path::Path;
 
-/// 一条锁定包。
+/// One locked package.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LockedPkg {
     pub name: String,
     pub version: semver::Version,
-    /// `"registry+https://github.com/rust-lang/crates.io-index"`；path 包为 None。
+    /// `"registry+https://github.com/rust-lang/crates.io-index"`; `None` for a path package.
     pub source: Option<String>,
     pub checksum: Option<String>,
-    /// Cargo 旧式 `[replace]`：原 package 行指向同名同版本的替身 package 行。
+    /// Cargo's legacy `[replace]`: the original package row points at a replacement
+    /// package row with the same name and version.
     pub replace: Option<String>,
-    /// lock 行的依赖引用；同名包按 version，仍重名时再按 source 消歧。
+    /// This row's dependency references; packages sharing a name are distinguished by
+    /// version, and still-ambiguous ones by source.
     pub dependencies: Vec<LockedDep>,
 }
 
+/// One dependency reference on a locked package row.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LockedDep {
     pub name: String,
@@ -34,7 +39,7 @@ pub struct LockedDep {
     pub source: Option<String>,
 }
 
-/// Cargo 在 lock 中保留但没有进入解图的 `[patch]` 候选。
+/// A `[patch]` candidate Cargo keeps in the lock without using it in the graph.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnusedPatch {
     pub name: String,
@@ -55,7 +60,7 @@ type LErr = String;
 impl Lockfile {
     pub fn read(path: &Path) -> Result<Self, LErr> {
         let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
         Self::parse(&text)
     }
 
@@ -86,10 +91,13 @@ impl Lockfile {
             replace: Option<String>,
             dependencies: Option<Vec<String>>,
         }
-        let raw: RawLock = toml::from_str(text).map_err(|e| format!("Cargo.lock 解析失败: {e}"))?;
+        let raw: RawLock =
+            toml::from_str(text).map_err(|e| format!("failed to parse Cargo.lock: {e}"))?;
         let format_version = raw.version.unwrap_or(1);
         if !(1..=4).contains(&format_version) {
-            return Err(format!("Cargo.lock format version {format_version} 子集外"));
+            return Err(format!(
+                "Cargo.lock format version {format_version} is outside the supported subset"
+            ));
         }
         let mut packages = Vec::new();
         for p in raw.package.unwrap_or_default() {
@@ -98,7 +106,10 @@ impl Lockfile {
                 && !src.starts_with("sparse+")
                 && !src.starts_with("git+")
             {
-                return Err(format!("lock 包 {} 的 source 子集外: {src}", p.name));
+                return Err(format!(
+                    "source of lock package {} is outside the supported subset: {src}",
+                    p.name
+                ));
             }
             if p.source
                 .as_deref()
@@ -111,16 +122,23 @@ impl Lockfile {
                         && precise.bytes().all(|byte| byte.is_ascii_hexdigit())
                 }) {
                     return Err(format!(
-                        "lock Git 包 {} 的 source 缺少 40/64 位精确 commit: {source}",
+                        "source of lock Git package {} lacks a 40/64-digit precise commit: {source}",
                         p.name
                     ));
                 }
                 if p.checksum.is_some() {
-                    return Err(format!("lock Git 包 {} 不应带 checksum", p.name));
+                    return Err(format!(
+                        "lock Git package {} must not carry a checksum",
+                        p.name
+                    ));
                 }
             }
-            let version = semver::Version::parse(&p.version)
-                .map_err(|e| format!("lock 包 {} 版本非法 {}: {e}", p.name, p.version))?;
+            let version = semver::Version::parse(&p.version).map_err(|e| {
+                format!(
+                    "invalid version {} of lock package {}: {e}",
+                    p.version, p.name
+                )
+            })?;
             let dependencies = p
                 .dependencies
                 .unwrap_or_default()
@@ -144,8 +162,8 @@ impl Lockfile {
             .map(|patch| {
                 let version = semver::Version::parse(&patch.version).map_err(|error| {
                     format!(
-                        "lock 未使用 patch {} 版本非法 {}: {error}",
-                        patch.name, patch.version
+                        "invalid version {} of unused lock patch {}: {error}",
+                        patch.version, patch.name
                     )
                 })?;
                 Ok(UnusedPatch {
@@ -163,19 +181,20 @@ impl Lockfile {
         })
     }
 
-    /// 按名找全部锁定版本（同名多版本并存在 lock 中合法）。
+    /// All locked versions of a name (several versions of one name may coexist in a lock).
     pub fn find(&self, name: &str) -> Vec<&LockedPkg> {
         self.packages.iter().filter(|p| p.name == name).collect()
     }
 
-    /// 精确查找。
+    /// Exact lookup by name and version.
     pub fn get(&self, name: &str, version: &semver::Version) -> Option<&LockedPkg> {
         self.packages
             .iter()
             .find(|p| p.name == name && p.version == *version)
     }
 
-    /// canonical v3/v4 序列化（自解落锁用；包按 (name, version) 排序保证确定性）。
+    /// Canonical v3/v4 serialization, used to write resolve's own lock; packages are
+    /// sorted by (name, version) for determinism.
     pub fn serialize(&self) -> String {
         debug_assert!(matches!(self.format_version, 3 | 4));
         let mut out = format!(
@@ -204,8 +223,9 @@ impl Lockfile {
                 out.push_str(&format!("replace = \"{replace}\"\n"));
             }
             if !p.dependencies.is_empty() {
-                // cargo canonical：每行带尾逗号（含末行）——--locked 对非
-                // canonical lock 一律判"需重写"而拒（c_serde_json 实锤）
+                // cargo canonical form: every line carries a trailing comma, the last one
+                // included. `--locked` rejects a non-canonical lock as "needs rewrite"
+                // (confirmed against c_serde_json).
                 let mut lines: Vec<String> = p
                     .dependencies
                     .iter()
@@ -218,7 +238,9 @@ impl Lockfile {
                                 format!(" \"{} {}\",", dependency.name, version)
                             }
                             (None, None) => format!(" \"{}\",", dependency.name),
-                            (None, Some(_)) => unreachable!("source 消歧必须同时带 version"),
+                            (None, Some(_)) => {
+                                unreachable!("source disambiguation always carries a version")
+                            }
                         },
                     )
                     .collect();
@@ -248,7 +270,7 @@ impl Lockfile {
     }
 }
 
-/// lock 依赖行：`"name"` / `"name version"` / `"name version (source)"`。
+/// A lock dependency line: `"name"` / `"name version"` / `"name version (source)"`.
 fn parse_dep_line(line: &str) -> Result<LockedDep, LErr> {
     let line = line.trim();
     let (without_src, source) = line
@@ -259,26 +281,31 @@ fn parse_dep_line(line: &str) -> Result<LockedDep, LErr> {
     let mut it = without_src.split_whitespace();
     let name = it
         .next()
-        .ok_or_else(|| format!("lock 依赖行非法: {line}"))?;
+        .ok_or_else(|| format!("invalid lock dependency line: {line}"))?;
     let version = it
         .next()
         .map(|v| {
-            semver::Version::parse(v).map_err(|e| format!("lock 依赖行 {line} 版本非法 {v}: {e}"))
+            semver::Version::parse(v)
+                .map_err(|e| format!("invalid version {v} on lock dependency line {line}: {e}"))
         })
         .transpose()?;
     if source.is_some() && version.is_none() {
-        return Err(format!("lock 依赖行带 source 时必须带 version: {line}"));
+        return Err(format!(
+            "a lock dependency line with a source must carry a version: {line}"
+        ));
     }
     if let Some(source) = &source {
         if !source.starts_with("registry+")
             && !source.starts_with("sparse+")
             && !source.starts_with("git+")
         {
-            return Err(format!("lock 依赖行 source 子集外: {source}"));
+            return Err(format!(
+                "source of lock dependency line is outside the supported subset: {source}"
+            ));
         }
         if source.starts_with("git+") && source.contains('#') {
             return Err(format!(
-                "lock Git 依赖行 source 不应带精确 commit fragment: {source}"
+                "source of a lock Git dependency line must not carry a precise commit fragment: {source}"
             ));
         }
     }
@@ -380,7 +407,7 @@ version = "0.2.0"
              source='git+https://github.com/x/y?branch=main'\n",
         )
         .unwrap_err();
-        assert!(err.contains("精确 commit"), "{err}");
+        assert!(err.contains("precise commit"), "{err}");
     }
 
     #[test]
@@ -414,7 +441,7 @@ version = "0.2.0"
         let text = lf.serialize();
         let back = Lockfile::parse(&text).unwrap();
         assert_eq!(back.packages.len(), 2);
-        assert_eq!(back.packages[0].name, "a"); // 排序确定性
+        assert_eq!(back.packages[0].name, "a"); // sort determinism
         let mut sorted = lf.clone();
         sorted.packages.sort_by(|x, y| {
             x.name
@@ -423,7 +450,7 @@ version = "0.2.0"
                 .then(x.source.cmp(&y.source))
         });
         assert_eq!(back, sorted);
-        assert_eq!(lf.serialize(), text); // 幂等
+        assert_eq!(lf.serialize(), text); // idempotent
 
         let mut v3 = lf.clone();
         v3.format_version = 3;
@@ -434,7 +461,7 @@ version = "0.2.0"
 
     #[test]
     fn parses_repo_own_lockfile() {
-        // 仓内真 Cargo.lock（v4 + 数百包）必须能完整解析
+        // The repo's own Cargo.lock (v4, several hundred packages) must parse in full
         let lf = Lockfile::read(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("Cargo.lock")

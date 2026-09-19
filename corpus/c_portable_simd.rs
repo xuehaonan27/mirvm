@@ -1,5 +1,5 @@
-// M5.2 D8b：std::simd（portable SIMD）真实用法画像——点积/归一化/字节扫描/统计。
-// 断言全部内联（corpus oracle = exit 0 + 输出逐字对齐 gate 预期）。
+// std::simd (portable SIMD) in real use: dot product, normalization, byte
+// scanning, statistics. Assertions are inline; the oracle diffs native/interpreted/JIT stdout plus exit 0.
 #![feature(portable_simd)]
 
 use std::simd::StdFloat;

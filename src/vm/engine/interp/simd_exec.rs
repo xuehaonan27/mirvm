@@ -1,13 +1,16 @@
-//! SIMD 15 件 + Sat128 + SIMD rvalue 三件的执行本体（T1-d 自 stmt.rs/
-//! rvalue.rs 各对应臂整搬）：interp 薄壳（eval_place_addr/eval_operand 求值
-//! 后调用）与 JIT 助手（mirvm_simd_stmt/mirvm_simd_rv）共享同一实现——
-//! 零漂移纪律：循环体逐行保持 interp 臂原语义，engine_abort 文案逐字保留。
-//! 地址参数 = 已求值的真地址裸指针（体内部即转回 u64，与 interp 臂同形）。
+//! Execution bodies for the SIMD statements, Sat128, and the SIMD rvalues. The
+//! interpreter's thin shells (which evaluate with `eval_place_addr`/`eval_operand` before
+//! calling in) and the JIT helpers (`mirvm_simd_stmt`/`mirvm_simd_rv`) share these bodies, so
+//! the two backends cannot drift: the loops keep the interpreter arms' exact semantics and
+//! the `engine_abort` wording is shared byte for byte.
+//!
+//! Address parameters are already-evaluated raw true addresses; each body converts them back
+//! to u64, matching the interpreter arms.
 
 use super::*;
 use crate::vm::engine::ir::{LaneKind, SimdBinOp, SimdReduceOp, SimdUnOp};
 
-/// SimdBin 本体（interp stmt.rs SimdBin 臂整搬）。
+/// Body of the SimdBin statement.
 pub(crate) fn simd_bin_body(
     pd: *mut u8,
     pa: *const u8,
@@ -20,7 +23,7 @@ pub(crate) fn simd_bin_body(
     use crate::vm::engine::ir::{LaneKind, SimdBinOp as S};
     let (pd, pa, pb) = (pd as u64, pa as u64, pb as u64);
     let lb = lb as u64;
-    let lw = Width::from_bytes(lb).expect("lane 宽度");
+    let lw = Width::from_bytes(lb).expect("lane width");
     for i in 0..lanes as u64 {
         let x = mem_read(pa + i * lb, lw);
         let y = mem_read(pb + i * lb, lw);
@@ -42,7 +45,7 @@ pub(crate) fn simd_bin_body(
                     S::Mul => x.wrapping_mul(y) & lw.mask(),
                     S::Div | S::Rem => {
                         if y == 0 {
-                            engine_abort("simd 整除以零（guest UB）");
+                            engine_abort("simd integer division by zero (guest UB)");
                         }
                         let o = if matches!(op, S::Div) {
                             IntBinOp::Div
@@ -53,12 +56,12 @@ pub(crate) fn simd_bin_body(
                     }
                     S::SatAdd => int_saturating(OvfOp::Add, signed, x, y, lw),
                     S::SatSub => int_saturating(OvfOp::Sub, signed, x, y, lw),
-                    S::MinNum | S::MaxNum => {
-                        engine_abort(&format!("simd {op:?} 不适用于整数 lane（lower 校验缺口）"))
-                    }
+                    S::MinNum | S::MaxNum => engine_abort(&format!(
+                        "simd {op:?} does not apply to an integer lane (lowering validation gap)"
+                    )),
                     S::Shl | S::Shr => {
                         if y >= u64::from(lw.bytes() * 8) {
-                            engine_abort("simd 移位量超过 lane 位宽（guest UB）");
+                            engine_abort("simd shift amount exceeds the lane bit width (guest UB)");
                         }
                         let o = if matches!(op, S::Shl) {
                             IntBinOp::Shl
@@ -69,8 +72,9 @@ pub(crate) fn simd_bin_body(
                     }
                 }
             }
-            // 浮点 lane（D8b）：IEEE 语义直算——比较不是位比较
-            //（+0.0==−0.0、NaN 不自反），算术不是整数加。
+            // Float lanes compute IEEE semantics directly: a comparison is not a bit
+            // comparison (+0.0 == -0.0, NaN is not self-equal) and arithmetic is not integer
+            // addition.
             LaneKind::Float => {
                 macro_rules! fl {
                     ($t:ty, $xb:expr, $yb:expr) => {{
@@ -92,7 +96,7 @@ pub(crate) fn simd_bin_body(
                             S::MaxNum => fx.max(fy).to_bits() as u64,
                             S::And | S::Or | S::Xor | S::SatAdd | S::SatSub | S::Shl | S::Shr => {
                                 engine_abort(&format!(
-                                    "simd {op:?} 不适用于浮点 lane（lower 校验缺口）"
+                                    "simd {op:?} does not apply to a float lane (lowering validation gap)"
                                 ))
                             }
                         }
@@ -101,7 +105,7 @@ pub(crate) fn simd_bin_body(
                 match lw {
                     Width::W32 => fl!(f32, x, y),
                     Width::W64 => fl!(f64, x, y),
-                    _ => engine_abort("浮点 lane 宽度非 4/8（lower 校验缺口）"),
+                    _ => engine_abort("float lane width is not 4/8 (lowering validation gap)"),
                 }
             }
         };
@@ -109,7 +113,7 @@ pub(crate) fn simd_bin_body(
     }
 }
 
-/// SimdUn 本体（interp stmt.rs SimdUn 臂整搬）。
+/// Body of the SimdUn statement.
 pub(crate) fn simd_un_body(
     pd: *mut u8,
     pa: *const u8,
@@ -121,7 +125,7 @@ pub(crate) fn simd_un_body(
     use crate::vm::engine::ir::{BitUnOp, LaneKind, SimdUnOp as U};
     let (pd, pa) = (pd as u64, pa as u64);
     let lb = lb as u64;
-    let lw = Width::from_bytes(lb).expect("lane 宽度");
+    let lw = Width::from_bytes(lb).expect("lane width");
     for i in 0..lanes as u64 {
         let x = mem_read(pa + i * lb, lw);
         let r: u64 = match (lane, op) {
@@ -153,7 +157,7 @@ pub(crate) fn simd_un_body(
                             U::Flog10 => f.log10(),
                             U::Ctlz | U::Cttz | U::Ctpop | U::Bswap | U::Bitreverse => {
                                 engine_abort(&format!(
-                                    "simd {op:?} 不适用于浮点 lane（lower 校验缺口）"
+                                    "simd {op:?} does not apply to a float lane (lowering validation gap)"
                                 ))
                             }
                         })
@@ -163,18 +167,18 @@ pub(crate) fn simd_un_body(
                 match lw {
                     Width::W32 => fu!(f32),
                     Width::W64 => fu!(f64),
-                    _ => engine_abort("浮点 lane 宽度非 4/8（lower 校验缺口）"),
+                    _ => engine_abort("float lane width is not 4/8 (lowering validation gap)"),
                 }
             }
             (LaneKind::Int { .. }, other) => engine_abort(&format!(
-                "simd {other:?} 不适用于整数 lane（lower 校验缺口）"
+                "simd {other:?} does not apply to an integer lane (lowering validation gap)"
             )),
         };
         mem_write(pd + i * lb, lw, r);
     }
 }
 
-/// SimdFma 本体（interp stmt.rs SimdFma 臂整搬）。
+/// Body of the SimdFma statement.
 pub(crate) fn simd_fma_body(
     pd: *mut u8,
     pa: *const u8,
@@ -185,7 +189,7 @@ pub(crate) fn simd_fma_body(
 ) {
     let (pd, pa, pb, pc) = (pd as u64, pa as u64, pb as u64, pc as u64);
     let lb = lb as u64;
-    let lw = Width::from_bytes(lb).expect("lane 宽度");
+    let lw = Width::from_bytes(lb).expect("lane width");
     for i in 0..lanes as u64 {
         let (x, y, z) = (
             mem_read(pa + i * lb, lw),
@@ -199,13 +203,13 @@ pub(crate) fn simd_fma_body(
             Width::W64 => f64::from_bits(x)
                 .mul_add(f64::from_bits(y), f64::from_bits(z))
                 .to_bits(),
-            _ => engine_abort("simd_fma lane 宽度非 4/8（lower 校验缺口）"),
+            _ => engine_abort("simd_fma lane width is not 4/8 (lowering validation gap)"),
         };
         mem_write(pd + i * lb, lw, r);
     }
 }
 
-/// SimdFunnel 本体（interp stmt.rs SimdFunnel 臂整搬；ps = shift 向量地址）。
+/// Body of the SimdFunnel statement; `ps` is the shift vector address.
 pub(crate) fn simd_funnel_body(
     pd: *mut u8,
     pa: *const u8,
@@ -217,23 +221,23 @@ pub(crate) fn simd_funnel_body(
 ) {
     let (pd, pa, pb, ps) = (pd as u64, pa as u64, pb as u64, ps as u64);
     let lb = lb as u64;
-    let lw = Width::from_bytes(lb).expect("lane 宽度");
+    let lw = Width::from_bytes(lb).expect("lane width");
     let bits = u64::from(lw.bytes() * 8);
     for i in 0..lanes as u64 {
         let x = mem_read(pa + i * lb, lw) as u128;
         let y = mem_read(pb + i * lb, lw) as u128;
         let s = mem_read(ps + i * lb, lw);
         if s >= bits {
-            engine_abort("simd_funnel 移位量超过 lane 位宽（guest UB）");
+            engine_abort("simd_funnel shift amount exceeds the lane bit width (guest UB)");
         }
-        // 拼接 [a:b]（2W 位），窗口取高/低 W 位
+        // Concatenate to [a:b] (2W bits) and take the high or low W-bit window.
         let cat = (x << bits) | y;
         let r = if left { cat << s >> bits } else { cat >> s };
         mem_write(pd + i * lb, lw, r as u64 & lw.mask());
     }
 }
 
-/// SimdCast 本体（interp stmt.rs SimdCast 臂整搬；sb/db = 源/目的 lane 字节数）。
+/// Body of the SimdCast statement; `sb`/`db` are the source/destination lane byte counts.
 pub(crate) fn simd_cast_body(
     pd: *mut u8,
     ps: *const u8,
@@ -246,13 +250,13 @@ pub(crate) fn simd_cast_body(
     use crate::vm::engine::ir::LaneKind as L;
     let (pd, ps) = (pd as u64, ps as u64);
     let (sb, db) = (sb as u64, db as u64);
-    let sw = Width::from_bytes(sb).expect("src lane 宽度");
-    let dw = Width::from_bytes(db).expect("dst lane 宽度");
+    let sw = Width::from_bytes(sb).expect("src lane width");
+    let dw = Width::from_bytes(db).expect("dst lane width");
     for i in 0..lanes as u64 {
         let v = mem_read(ps + i * sb, sw);
         let r: u64 = match (src_lane, dst_lane) {
             (L::Int { signed }, L::Int { .. }) => {
-                // 窄化截断 / 加宽按源符号扩展
+                // Narrowing truncates; widening sign-extends from the source.
                 let x = if signed { sext(v, sw) as u64 } else { v };
                 x & dw.mask()
             }
@@ -275,19 +279,21 @@ pub(crate) fn simd_cast_body(
                     Width::W16 => f16b,
                     Width::W32 => f32b,
                     Width::W64 => f64b,
-                    _ => engine_abort("simd_cast 浮点 lane 宽度非 2/4/8"),
+                    _ => engine_abort("simd_cast float lane width is not 2/4/8"),
                 }
             }
             (L::Float, L::Int { signed }) => {
-                // f32/f16→f64 精确保值 ⇒ 统一经 f64；宿主 `as` 即饱和语义
-                //（simd_as；simd_cast 界外是 guest UB，饱和值在允许集合内）
+                // f16/f32 -> f64 preserves the value exactly, so unify through f64; the host
+                // `as` cast already has the saturation semantics simd_as needs (an
+                // out-of-range simd_cast is guest UB, and a saturated value stays inside the
+                // allowed set).
                 let x = match sw {
                     Width::W16 => {
                         f64::from(f32::from_bits(crate::arch::x86_64::f16_to_f32_sw(v as u16)))
                     }
                     Width::W32 => f32::from_bits(v as u32) as f64,
                     Width::W64 => f64::from_bits(v),
-                    _ => engine_abort("simd_cast 浮点 lane 宽度非 2/4/8"),
+                    _ => engine_abort("simd_cast float lane width is not 2/4/8"),
                 };
                 let out = if signed {
                     match dw {
@@ -309,10 +315,10 @@ pub(crate) fn simd_cast_body(
             (L::Float, L::Float) => match (sw, dw) {
                 (Width::W32, Width::W64) => (f32::from_bits(v as u32) as f64).to_bits(),
                 (Width::W64, Width::W32) => (f64::from_bits(v) as f32).to_bits() as u64,
-                // f16 lane（D8c 向量形态）：确定性软件模型——native 在
-                // target_feature(f16c) 函数内经 VCVTPH2PS/VCVTPS2PH 执行硬件
-                // 语义（sNaN qbit 强置等）；宿主 libcall 的 NaN 位行为随构建
-                // 目标漂移，不可依赖（half 探针 h0x7c01 实锤）
+                // f16 lanes use a deterministic software model: native executes hardware
+                // semantics (VCVTPH2PS/VCVTPS2PH, including forcing the sNaN quiet bit)
+                // inside a target_feature(f16c) function, while a host libcall's NaN bit
+                // behavior drifts with the build target and cannot be relied on.
                 (Width::W16, Width::W32) => u64::from(crate::arch::x86_64::f16_to_f32_sw(v as u16)),
                 (Width::W16, Width::W64) => {
                     f64::from(f32::from_bits(crate::arch::x86_64::f16_to_f32_sw(v as u16)))
@@ -323,14 +329,14 @@ pub(crate) fn simd_cast_body(
                     crate::arch::x86_64::HalfRound::Rne,
                 )),
                 (Width::W64, Width::W16) => (f64::from_bits(v) as f16).to_bits() as u64,
-                _ => v, // 同宽：位透传
+                _ => v, // same width: bitwise passthrough
             },
         };
         mem_write(pd + i * db, dw, r);
     }
 }
 
-/// SimdSelect 本体（interp stmt.rs SimdSelect 臂整搬；mb = mask_bytes）。
+/// Body of the SimdSelect statement; `mb` is `mask_bytes`.
 pub(crate) fn simd_select_body(
     pd: *mut u8,
     pm: *const u8,
@@ -342,16 +348,17 @@ pub(crate) fn simd_select_body(
 ) {
     let (pd, pm, pa, pb) = (pd as u64, pm as u64, pa as u64, pb as u64);
     let (mb, lb) = (mb as u64, lb as u64);
-    let lw = Width::from_bytes(lb).expect("lane 宽度");
+    let lw = Width::from_bytes(lb).expect("lane width");
     for i in 0..lanes as u64 {
-        // mask lane 全 1/全 0（类型不变量）：按符号位（末字节最高位）判
+        // A mask lane is all-ones or all-zeros (type invariant), so test its sign bit (the
+        // top bit of the last byte).
         let top = unsafe { *((pm + i * mb + mb - 1) as *const u8) };
         let src = if top >> 7 != 0 { pa } else { pb };
         mem_write(pd + i * lb, lw, mem_read(src + i * lb, lw));
     }
 }
 
-/// SimdSelectBitmask 本体（interp stmt.rs SimdSelectBitmask 臂整搬）。
+/// Body of the SimdSelectBitmask statement.
 pub(crate) fn simd_select_bitmask_body(
     pd: *mut u8,
     mask: u64,
@@ -360,18 +367,17 @@ pub(crate) fn simd_select_bitmask_body(
     lanes: u16,
     lb: u8,
 ) {
-    let m = mask;
     let (pd, pa, pb) = (pd as u64, pa as u64, pb as u64);
     let lb = lb as u64;
-    let lw = Width::from_bytes(lb).expect("lane 宽度");
+    let lw = Width::from_bytes(lb).expect("lane width");
     for i in 0..lanes as u64 {
-        let src = if m >> i & 1 != 0 { pa } else { pb };
+        let src = if mask >> i & 1 != 0 { pa } else { pb };
         mem_write(pd + i * lb, lw, mem_read(src + i * lb, lw));
     }
 }
 
-/// SimdGather 本体（interp stmt.rs SimdGather 臂整搬；ppass = passthru 地址，
-/// pp = ptrs 地址，pm = mask 地址）。
+/// Body of the SimdGather statement; `ppass` is the passthru address, `pp` the ptrs address
+/// and `pm` the mask address.
 pub(crate) fn simd_gather_body(
     pd: *mut u8,
     ppass: *const u8,
@@ -383,10 +389,11 @@ pub(crate) fn simd_gather_body(
 ) {
     let (pv, pp, pm, pd) = (ppass as u64, pp as u64, pm as u64, pd as u64);
     let (mb, lb) = (mb as u64, lb as u64);
-    let lw = Width::from_bytes(lb).expect("lane 宽度");
+    let lw = Width::from_bytes(lb).expect("lane width");
     for i in 0..lanes as u64 {
         let top = unsafe { *((pm + i * mb + mb - 1) as *const u8) };
-        // 假 lane 绝不佯读（指针可能无效——这正是 mask 的语义）
+        // A masked-off lane never even pretends to read, since the pointer may be invalid;
+        // that is exactly what the mask means.
         let v = if top >> 7 != 0 {
             mem_read(mem_read(pp + i * 8, Width::W64), lw)
         } else {
@@ -396,7 +403,7 @@ pub(crate) fn simd_gather_body(
     }
 }
 
-/// SimdScatter 本体（interp stmt.rs SimdScatter 臂整搬；pv = values 地址）。
+/// Body of the SimdScatter statement; `pv` is the values address.
 pub(crate) fn simd_scatter_body(
     pv: *const u8,
     pp: *const u8,
@@ -407,7 +414,7 @@ pub(crate) fn simd_scatter_body(
 ) {
     let (pv, pp, pm) = (pv as u64, pp as u64, pm as u64);
     let (mb, lb) = (mb as u64, lb as u64);
-    let lw = Width::from_bytes(lb).expect("lane 宽度");
+    let lw = Width::from_bytes(lb).expect("lane width");
     for i in 0..lanes as u64 {
         let top = unsafe { *((pm + i * mb + mb - 1) as *const u8) };
         if top >> 7 != 0 {
@@ -420,8 +427,8 @@ pub(crate) fn simd_scatter_body(
     }
 }
 
-/// SimdMaskedLoad 本体（interp stmt.rs SimdMaskedLoad 臂整搬；base = 已求值的
-/// 元素基址标量，ppass = passthru 地址）。
+/// Body of the SimdMaskedLoad statement; `base` is the already-evaluated element base scalar
+/// and `ppass` the passthru address.
 pub(crate) fn simd_masked_load_body(
     pd: *mut u8,
     pm: *const u8,
@@ -433,7 +440,7 @@ pub(crate) fn simd_masked_load_body(
 ) {
     let (pm, pbase, pv, pd) = (pm as u64, base, ppass as u64, pd as u64);
     let (mb, lb) = (mb as u64, lb as u64);
-    let lw = Width::from_bytes(lb).expect("lane 宽度");
+    let lw = Width::from_bytes(lb).expect("lane width");
     for i in 0..lanes as u64 {
         let top = unsafe { *((pm + i * mb + mb - 1) as *const u8) };
         let v = if top >> 7 != 0 {
@@ -445,7 +452,7 @@ pub(crate) fn simd_masked_load_body(
     }
 }
 
-/// SimdMaskedStore 本体（interp stmt.rs SimdMaskedStore 臂整搬）。
+/// Body of the SimdMaskedStore statement.
 pub(crate) fn simd_masked_store_body(
     pm: *const u8,
     mb: u8,
@@ -456,7 +463,7 @@ pub(crate) fn simd_masked_store_body(
 ) {
     let (pm, pbase, pv) = (pm as u64, base, pv as u64);
     let (mb, lb) = (mb as u64, lb as u64);
-    let lw = Width::from_bytes(lb).expect("lane 宽度");
+    let lw = Width::from_bytes(lb).expect("lane width");
     for i in 0..lanes as u64 {
         let top = unsafe { *((pm + i * mb + mb - 1) as *const u8) };
         if top >> 7 != 0 {
@@ -465,26 +472,27 @@ pub(crate) fn simd_masked_store_body(
     }
 }
 
-/// SimdExtractDyn 本体（interp stmt.rs SimdExtractDyn 臂整搬；返回抽出的
-/// lane 标量，落点写回由调用方做——interp 侧 place_write / JIT 侧
-/// write_scalar_place）。
+/// Body of the SimdExtractDyn statement; returns the extracted lane scalar. The caller writes
+/// it to the destination (the interpreter through `place_write`, the JIT through
+/// `write_scalar_place`).
 pub(crate) fn simd_extract_dyn_body(ps: *const u8, idx: u64, lanes: u16, lb: u8) -> u64 {
     let ps = ps as u64;
-    let i = idx;
-    if i >= u64::from(lanes) {
+    if idx >= u64::from(lanes) {
         engine_abort(&format!(
-            "simd_extract_dyn 索引 {i} 越界（lanes={lanes}，guest UB）"
+            "simd_extract_dyn index {idx} out of bounds (lanes={lanes}, guest UB)"
         ));
     }
     let lb = lb as u64;
-    let lw = Width::from_bytes(lb).expect("lane 宽度");
-    mem_read(ps + i * lb, lw)
+    let lw = Width::from_bytes(lb).expect("lane width");
+    mem_read(ps + idx * lb, lw)
 }
 
-/// SimdInsertDyn 本体（interp stmt.rs SimdInsertDyn 臂整搬；v = 已求值的
-/// 插入标量）。求值序注记：薄壳（interp/JIT 两侧同一本体）必然先求 val
-/// 再进本体做越界检查——原 interp 臂先检后求；仅当 idx 越界且 val 求值
-/// 本身 abort 时诊断先后不同（双重 UB 死角，两侧均 exit(70)）。
+/// Body of the SimdInsertDyn statement; `v` is the already-evaluated inserted scalar.
+///
+/// Evaluation-order note: the thin shells (this same body on both the interpreter and JIT
+/// sides) necessarily evaluate `val` before entering the body's bounds check, so only when
+/// `idx` is out of bounds *and* evaluating `val` itself aborts does the diagnostic order
+/// differ -- a double-UB corner in which both sides still exit 70.
 pub(crate) fn simd_insert_dyn_body(
     pd: *mut u8,
     ps: *const u8,
@@ -494,23 +502,22 @@ pub(crate) fn simd_insert_dyn_body(
     lb: u8,
 ) {
     let (pd, ps) = (pd as u64, ps as u64);
-    let i = idx;
-    if i >= u64::from(lanes) {
+    if idx >= u64::from(lanes) {
         engine_abort(&format!(
-            "simd_insert_dyn 索引 {i} 越界（lanes={lanes}，guest UB）"
+            "simd_insert_dyn index {idx} out of bounds (lanes={lanes}, guest UB)"
         ));
     }
     let lb = lb as u64;
-    let lw = Width::from_bytes(lb).expect("lane 宽度");
+    let lw = Width::from_bytes(lb).expect("lane width");
     let total = u64::from(lanes) * lb;
-    // dst 可能与 src 同址（x = insert_dyn(x,…)）：整体搬运用 memmove
+    // dst may alias src (x = insert_dyn(x, ...)), so the whole-vector copy must be a memmove.
     unsafe {
         std::ptr::copy(ps as *const u8, pd as *mut u8, total as usize);
     }
-    mem_write(pd + i * lb, lw, v);
+    mem_write(pd + idx * lb, lw, v);
 }
 
-/// SimdArithOffset 本体（interp stmt.rs SimdArithOffset 臂整搬；恒 lanes×8）。
+/// Body of the SimdArithOffset statement (always lanes x 8 bytes).
 pub(crate) fn simd_arith_offset_body(
     pd: *mut u8,
     pp: *const u8,
@@ -530,17 +537,17 @@ pub(crate) fn simd_arith_offset_body(
     }
 }
 
-/// SimdSplat 本体（interp stmt.rs SimdSplat 臂整搬）。
+/// Body of the SimdSplat statement.
 pub(crate) fn simd_splat_body(pd: *mut u8, v: u64, lanes: u16, lb: u8) {
     let pd = pd as u64;
     let lb = lb as u64;
-    let lw = Width::from_bytes(lb).expect("lane 宽度");
+    let lw = Width::from_bytes(lb).expect("lane width");
     for i in 0..lanes as u64 {
         mem_write(pd + i * lb, lw, v);
     }
 }
 
-/// Sat128 本体（interp stmt.rs Sat128 臂整搬）。
+/// Body of the Sat128 statement.
 pub(crate) fn sat128_body(pa: *const u8, pb: *const u8, pd: *mut u8, op: OvfOp, signed: bool) {
     let x = unsafe { (pa as *const u128).read_unaligned() };
     let y = unsafe { (pb as *const u128).read_unaligned() };
@@ -561,24 +568,24 @@ pub(crate) fn sat128_body(pa: *const u8, pb: *const u8, pd: *mut u8, op: OvfOp, 
     unsafe { (pd as *mut u128).write_unaligned(r) };
 }
 
-/// SimdBitmask 本体（interp rvalue.rs SimdBitmask 臂整搬）。
+/// Body of the SimdBitmask rvalue.
 pub(crate) fn simd_bitmask_body(pa: *const u8, lanes: u16, lb: u8) -> u64 {
     let pa = pa as u64;
     let lb = lb as u64;
     let mut mask = 0u64;
     for i in 0..lanes as u64 {
-        // 小端 lane 的符号位在末字节最高位
+        // On a little-endian lane the sign bit is the top bit of the last byte.
         let top = unsafe { *((pa + i * lb + lb - 1) as *const u8) };
         mask |= ((top >> 7) as u64) << i;
     }
     mask
 }
 
-/// SimdReduce 本体（interp rvalue.rs SimdReduce 臂整搬）。
+/// Body of the SimdReduce rvalue.
 pub(crate) fn simd_reduce_body(pa: *const u8, all: bool, lanes: u16, lb: u8) -> u64 {
     let pa = pa as u64;
     let lb = lb as u64;
-    let lw = Width::from_bytes(lb).expect("lane 宽度");
+    let lw = Width::from_bytes(lb).expect("lane width");
     let mut acc = all;
     for i in 0..lanes as u64 {
         let truthy = mem_read(pa + i * lb, lw) != 0;
@@ -591,7 +598,7 @@ pub(crate) fn simd_reduce_body(pa: *const u8, all: bool, lanes: u16, lb: u8) -> 
     acc as u64
 }
 
-/// SimdReduceArith 本体（interp rvalue.rs SimdReduceArith 臂整搬）。
+/// Body of the SimdReduceArith rvalue.
 pub(crate) fn simd_reduce_arith_body(
     pa: *const u8,
     op: SimdReduceOp,
@@ -602,7 +609,7 @@ pub(crate) fn simd_reduce_arith_body(
     use crate::vm::engine::ir::{LaneKind, SimdReduceOp as R};
     let pa = pa as u64;
     let lb = lb as u64;
-    let lw = Width::from_bytes(lb).expect("lane 宽度");
+    let lw = Width::from_bytes(lb).expect("lane width");
     let mut acc = mem_read(pa, lw);
     for i in 1..lanes as u64 {
         let x = mem_read(pa + i * lb, lw);
@@ -632,12 +639,12 @@ pub(crate) fn simd_reduce_arith_body(
                         (match op {
                             R::Add => fa + fx,
                             R::Mul => fa * fx,
-                            // minnum/maxnum 语义（与 LLVM reduce.fmin/fmax 一致）
+                            // minnum/maxnum semantics, matching LLVM reduce.fmin/fmax
                             R::Min => fa.min(fx),
                             R::Max => fa.max(fx),
-                            R::And | R::Or | R::Xor => {
-                                engine_abort(&format!("simd reduce {op:?} 不适用于浮点 lane"))
-                            }
+                            R::And | R::Or | R::Xor => engine_abort(&format!(
+                                "simd reduce {op:?} does not apply to a float lane"
+                            )),
                         })
                         .to_bits() as u64
                     }};
@@ -645,7 +652,7 @@ pub(crate) fn simd_reduce_arith_body(
                 match lw {
                     Width::W32 => fr!(f32),
                     Width::W64 => fr!(f64),
-                    _ => engine_abort("浮点 lane 宽度非 4/8（lower 校验缺口）"),
+                    _ => engine_abort("float lane width is not 4/8 (lowering validation gap)"),
                 }
             }
         };

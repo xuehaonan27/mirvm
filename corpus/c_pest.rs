@@ -1,52 +1,52 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# pest 2.8.7 + pest_derive 2.8.7 + pest_generator 2.8.7 + pest_meta 2.8.7
-# （同 train 四钉）。上游漂移实锤（2026-07-27）：pest_derive 2.8.7 对
-# pest_generator 用 ^2.8.7、pest_generator 对 pest_meta 用 ^2.8.7，2.8.8
-# 系列又要求 pest ^2.8.8——pest 钉 2.8.7 即逐级撞（cargo 自家 fresh 解析
-# 同撞，非 mirvm 分叉）。四钉对齐 train。
+# pest 2.8.7 + pest_derive 2.8.7 + pest_generator 2.8.7 + pest_meta 2.8.7.
+# Upstream drift: pest_derive 2.8.7 asks pest_generator for ^2.8.7 and
+# pest_generator asks pest_meta for ^2.8.7, while the 2.8.8 series demands
+# pest ^2.8.8. Pinning pest to 2.8.7 therefore breaks the chain at every level,
+# so all four crates are pinned to the same exact version.
 pest = "=2.8.7"
 pest_derive = "=2.8.7"
 pest_generator = "=2.8.7"
 pest_meta = "=2.8.7"
 ---
-// pest 2.8.7 PEG 解析器三维差分（批9：c_pest）。
+// pest PEG parser differential, compared byte-for-byte with native.
+// Two surfaces:
+// (1) Two grammars coexist in one file (grammar_inline literals in separate
+//     modules, so their generated Rule enums do not collide):
+//     (a) a JSON subset: obj/arr/str/num/bool/null fully recursive, four levels
+//         of container nesting, string escapes (\" \\), scientific-notation
+//         numbers and multi-line input containing \n;
+//     (b) a calculator: precedence (*/ above +-), nested parentheses, unary minus
+//         (double negation, minus glued to a parenthesis) and named operator
+//         rules (add/sub/mul/div/neg dispatched through as_rule, avoiding the
+//         trap of unnamed literals producing no pair);
+//     WHITESPACE _ silent rules are hit on both sides (a four-character JSON set
+//     and spaces plus tabs for calc).
+// (2) Valid input prints the flattened node-type sequence of the parse tree (a
+//     preorder walk of the Pair tree, rule names joined by spaces): two JSON
+//     samples and one calculator sample.
+// (3) The calculator prints i64 evaluation results anchored by assert_eq!
+//     (14/30/3/10, checkable by hand: integer division only, inputs chosen to
+//     divide evenly and avoid division by zero).
+// (4) Three invalid inputs (a doubled comma in JSON, a multi-line JSON literal
+//     truncated to tru with the error past line 1, and a missing operand inside
+//     calc parentheses): each prints line:col, the positives rule-name list and
+//     the full Error Display (including the --> l:c anchor and caret line), with
+//     the failing rule names all pinned.
+// Deterministic: pure string-cursor work, no IO/randomness/time/hash order; the
+// positives Vec order follows attempt order and is single-threaded; i64
+// evaluation has no floating point; assertions are silent. stderr stays empty
+// (module-level allow(non_camel_case_types, dead_code) suppresses the snake_case
+// variant warnings from the derived enums).
 //
-// 测试面：
-//   ① 两 grammar 同文件并存（grammar_inline 内联文法，各自独立模块隔离
-//      生成 Rule 枚举重名）：
-//      (a) JSON 子集：obj/arr/str/num/bool/null 全递归 + 四层容器嵌套 +
-//          字符串转义（\" \\）+ 科学计数数字 + 多行输入含 \n；
-//      (b) 计算器：优先级（*/ 高于 +-）+ 括号嵌套 + 一元负（含双重否定、
-//          负号贴括号）+ 具名算符 rule（add/sub/mul/div/neg，eval 靠
-//          as_rule 分派，未命名字面量不出 pair 的经典坑在此规避）；
-//      WHITESPACE _ 静默规则两侧都踩（JSON 四字符集、calc 空格+tab）。
-//   ② 合法输入解析树扁平节点类型序打印（先序遍历 Pair 树，规则名以空格
-//      连接，JSON 两样本 + 计算器一样本）。
-//   ③ 计算器 i64 求值结果打印 + assert_eq! 锚（14/30/3/10，手算可复核，
-//      除法取整除、输入选整除样本避 0 除）。
-//   ④ 3 个非法输入（JSON 双逗号、JSON 多行截断字面量 tru（错误落在
-//      line>1）、calc 括号内缺操作数）：打印 line:col + positives 规则名
-//      列表 + Error Display 全文（含 --> l:c 锚点与 caret 行），错误规则名
-//      一一锚定。
+// No frontier issues: the "c_pest" fixture is a "mirvm" frontmatter script; all cases pass, byte-for-byte.
 //
-// 确定性：全量字符串游标计算，无 IO/随机/时间/哈希序；positives Vec 序
-// 由尝试顺序决定、单线程确定；i64 求值无浮点；assert 锚静默（不炸则零
-// 输出）；stderr 真空（模块级 allow(non_camel_case_types, dead_code) 预
-// 消 pest 派生枚举 snake_case 变体告警）。
 //
-// 钉版本/绕行：双钉 =2.8.7（最新稳定，见上）。绕行：无。
 //
-// 三维复跑（仓库根）：
-//   A: target/release/mirvm run corpus/c_pest.rs
-//   B: cd $(grep -l 'name = "c_pest"' ~/.cache/mirvm/scripts/*/Cargo.toml \
-//        | head -1 | xargs dirname) && \
-//      RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \
-//      "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
-//   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_pest.rs
 //
-// FRONTIER：无（期待全绿）。
+//
 use std::collections::BTreeSet;
 
 use pest::error::{Error as PError, LineColLocation};
@@ -95,7 +95,7 @@ div    = { "/" }
 use calc_grammar::{CalcParser, Rule as CR};
 use json_grammar::{JsonParser, Rule as JR};
 
-/// 先序遍历把 Pair 树压平为规则名序列（跨 grammar 通用，RuleType 抽象）。
+/// Preorder walk flattening the Pair tree into a rule-name sequence (generic over RuleType).
 fn flatten<R: pest::RuleType>(p: Pair<'_, R>, out: &mut Vec<String>) {
     out.push(format!("{:?}", p.as_rule()));
     for c in p.into_inner() {
@@ -103,7 +103,7 @@ fn flatten<R: pest::RuleType>(p: Pair<'_, R>, out: &mut Vec<String>) {
     }
 }
 
-/// 合法样本：打印扁平节点类型序，返回序列供断言锚点。
+/// Valid sample: prints the flattened node-type sequence and returns it for assertion anchors.
 fn tree_line<R: pest::RuleType>(label: &str, root: Pair<'_, R>) -> Vec<String> {
     let mut names = Vec::new();
     flatten(root, &mut names);
@@ -112,7 +112,7 @@ fn tree_line<R: pest::RuleType>(label: &str, root: Pair<'_, R>) -> Vec<String> {
     names
 }
 
-/// 错误报告：line:col + expected 规则名 + Display 全文（文本锚定）。
+/// Error report: line:col + expected rule names + the full Display (text anchors).
 fn report_err<R: pest::RuleType>(label: &str, e: &PError<R>) {
     let (line, col) = match &e.line_col {
         LineColLocation::Pos(lc) => *lc,
@@ -120,7 +120,7 @@ fn report_err<R: pest::RuleType>(label: &str, e: &PError<R>) {
     };
     let expected = match &e.variant {
         pest::error::ErrorVariant::ParsingError { positives, .. } => {
-            // BTreeSet 拷贝仅统计去重数；正文按原 Vec 序打印（确定）。
+            // The BTreeSet copy only counts distinct names; the text keeps the original Vec order.
             let dedup: BTreeSet<_> = positives.iter().collect();
             let seq = positives
                 .iter()
@@ -138,7 +138,7 @@ fn report_err<R: pest::RuleType>(label: &str, e: &PError<R>) {
     println!("{label} render end ---");
 }
 
-// ---- 计算器求值（i64，除法须整除、输入已选定）----
+// ---- calculator evaluation (i64; division must be exact, inputs chosen so) ----
 fn eval_expr(p: Pair<'_, CR>) -> i64 {
     let mut it = p.into_inner();
     let mut acc = eval_term(it.next().unwrap());
@@ -189,7 +189,7 @@ fn eval_calc(src: &str) -> Result<i64, PError<CR>> {
 fn main() {
     println!("pest 2.8.7 PEG differential: JSON subset + calculator");
 
-    // ---- ① JSON 合法样本：全规则类型 + 转义 + 指数 + 八层嵌套 ----
+    // ---- (1) valid JSON sample: every rule type + escapes + exponents + nesting ----
     let s1 = r#"{"name": "mirvm", "data": [1, -2.5e3, "esc\"q\\z", true, false, null, {"k": []}]}"#;
     println!("json ok 01 src = {s1}");
     let t1 = match JsonParser::parse(JR::json, s1) {
@@ -200,7 +200,7 @@ fn main() {
         }
     };
 
-    // ---- ② JSON 多行合法样本（\n 空白 + line>1 记账）----
+    // ---- (2) valid multi-line JSON sample (\n whitespace, line>1 accounting) ----
     let s2 = "{\n  \"nested\": {\n    \"a\": [ true, null ]\n  },\n  \"n\": 42\n}";
     println!("json ok 02 src = {}", s2.escape_debug());
     let t2 = match JsonParser::parse(JR::json, s2) {
@@ -211,7 +211,7 @@ fn main() {
         }
     };
 
-    // ---- ③ 计算器：优先级 / 括号 / 一元负 / 双重否定 ----
+    // ---- (3) calculator: precedence / parentheses / unary minus / double negation ----
     for (i, src) in [
         "2 + 3 * 4",
         "(2 + 3) * (10 - 4)",
@@ -228,11 +228,11 @@ fn main() {
         }
     }
 
-    // ---- ④ 计算器扁平序一样本（含具名算符 pair）----
+    // ---- (4) one flattened-order calculator sample (with named operator pairs) ----
     let c1 = CalcParser::parse(CR::calc, "2 + 3 * 4").unwrap().next().unwrap();
     let tc = tree_line("calc 01", c1);
 
-    // ---- ⑤ 3 个非法输入：错误位置 + expected 规则名锚定 ----
+    // ---- (5) three invalid inputs: error position + expected rule-name anchors ----
     match JsonParser::parse(JR::json, r#"{"a": 1,, "b": 2}"#) {
         Ok(_) => println!("json err 01 UNEXPECTED ok"),
         Err(e) => report_err("json err 01", &e),
@@ -246,13 +246,13 @@ fn main() {
         Err(e) => report_err("calc err 01", &e),
     }
 
-    // ---- 断言锚点（静默，失败即炸出维度分叉）----
+    // ---- assertion anchors (silent unless a divergence appears) ----
     assert_eq!(t1.first().map(String::as_str), Some("json"), "j1 root");
     assert_eq!(t1.len(), 30, "j1 node count");
     assert_eq!(t1.iter().filter(|n| n.as_str() == "value").count(), 11, "j1 values");
     assert_eq!(t2.first().map(String::as_str), Some("json"), "j2 root");
     assert!(t2.contains(&"boolean".to_string()) && t2.contains(&"null".to_string()));
-    // 求值锚（手算）：2+12=14；5*6=30；-2* -(-1) - (-5) = -2+5=3；7+3=10。
+    // evaluation anchors (by hand): 2+12=14; 5*6=30; -2*-(-1)-(-5)=3; 7+3=10.
     assert_eq!(eval_calc("2 + 3 * 4").unwrap(), 14);
     assert_eq!(eval_calc("(2 + 3) * (10 - 4)").unwrap(), 30);
     assert_eq!(eval_calc("-2 * -(3 + -4) - -10 / 2").unwrap(), 3);

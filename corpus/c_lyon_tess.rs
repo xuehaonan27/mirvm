@@ -3,25 +3,25 @@
 [dependencies]
 lyon = "1"
 ---
-// lyon 1.0（lyon_tessellation 1.0.20 / lyon_path 1.0.19 / lyon_algorithms 1.0.19）
-// 2D 镶嵌浮点重差分。
-// 固定路径集：complex（三次+二次贝塞尔+SVG 端点弧 arc_to+自交 S 曲线，svg_builder）、
-// selfint（领结四边形 + 大环三次曲线闭合自交）、holed（外环 + 反向内环成孔 +
-// 第三环叠压，区分 EvenOdd/NonZero）、open（开放折线+二次贝塞尔，stroke 主体）、
-// sharp（≈3.8° 浅转角，miter limit 回退矩阵）。
-// Fill：EvenOdd/NonZero × complex/selfint/holed；tolerance 0.1/0.01；Vertical/
-// Horizontal 扫描向；handle_intersections=false 作用于自交路径；基本形状 fast
-// path tessellate_rectangle/circle/ellipse。
-// Stroke：width 0.5/2/8；join Miter/MiterClip/Round/Bevel + miter_limit 1.0；
-// cap Butt/Square/Round + 首尾异 cap；dash 两条（lyon 1.x StrokeOptions 已无内建
-// dash，用 walk_along_path+RepeatedPattern 手切虚线子路径再 stroke）；
-// variable_line_width 自定义属性路径；complex 闭环 Round join 大输出 fnv 锚。
-// 错误/退化：tolerance NaN 与 0.0（ToleranceIsNaN）、原始事件流带 NaN 坐标
-// （PositionIsNaN）、空路径、孤立点（fill 空 / stroke 三 cap：Butt 空、
-// Square 成方、Round 成圆）、零长线段、全重合点。
-// 输出：每次镶嵌 nv/ni/输出序 FNV-1a（顶点全字段 bits + 索引值）/三角形总面积
-// to_bits；nv≤24 按输出序逐顶点打印坐标 bits，否则打 v0..v2 与末顶点。
-// 确定性：全固定常量；f32 一律 to_bits；无 HashMap/时间/线程/地址。
+// lyon 1.0 2D tessellation differential over fixed paths and floating point.
+// Fixed path set: complex (cubic + quadratic bezier + SVG endpoint arc via arc_to
+// + a self-intersecting S curve, through svg_builder), selfint (bowtie quad plus a
+// closed self-intersecting large cubic), holed (outer ring + reverse inner ring
+// for a hole + an overlapping third ring, distinguishing EvenOdd/NonZero), open
+// (open polyline + quadratic bezier, the stroke workhorse) and sharp (~3.8 degrees,
+// the miter limit fallback matrix).
+// Fill: EvenOdd/NonZero x complex/selfint/holed; tolerance 0.1/0.01; Vertical and
+// Horizontal sweep; handle_intersections=false on self-intersecting paths; and the
+// basic-shape fast path tessellate_rectangle/circle/ellipse.
+// Stroke: width 0.5/2/8; join Miter/MiterClip/Round/Bevel with miter_limit 1.0;
+// cap Butt/Square/Round plus mismatched first/last caps; two dash cases (lyon 1.x
+// StrokeOptions has no built-in dash, so walk_along_path + RepeatedPattern cut the
+// dashed subpaths before stroking); a variable_line_width custom-attribute path;
+// and a closed complex path with Round joins for a large-output fnv anchor.
+// Deterministic: all constants fixed; f32 always as to_bits; no HashMap/time/thread.
+//
+//
+//
 use lyon::algorithms::walk::{walk_along_path, RepeatedPattern, WalkerEvent};
 use lyon::math::{point, vector, Angle, Box2D, Point};
 use lyon::path::builder::SvgPathBuilder;
@@ -45,13 +45,13 @@ fn mixp(h: &mut u64, p: Point) {
     mix32(h, p.y.to_bits());
 }
 
-/// 输出顶点抽象：把全字段混进 FNV-1a，并提供坐标供逐顶点 bits 打印。
+/// Vertex abstraction: mixes every field into FNV-1a and yields coordinates for per-vertex bit dumps.
 trait Out {
     fn mix(&self, h: &mut u64);
     fn xy(&self) -> (f32, f32);
 }
 
-/// fill 顶点：位置 + as_endpoint_id（自交点/曲线内部为 u32::MAX）。
+/// Fill vertex: position + as_endpoint_id (u32::MAX at self-intersections or curve interiors).
 #[derive(Copy, Clone)]
 struct FVert {
     x: f32,
@@ -70,7 +70,7 @@ impl Out for FVert {
     }
 }
 
-/// stroke 顶点：位置 + 法线 + advancement + 实际线宽 + side。
+/// Stroke vertex: position + normal + advancement + actual line width + side.
 #[derive(Copy, Clone)]
 struct SVert {
     x: f32,
@@ -125,7 +125,7 @@ impl StrokeVertexConstructor<SVert> for SCtor {
     }
 }
 
-/// 索引序三角形有向面积和（f32 坐标进 f64 累加，位型确定）。
+/// Signed triangle area sum in index order (f32 coords accumulated in f64).
 fn area<V: Out>(b: &VertexBuffers<V, u32>) -> f64 {
     let mut acc = 0.0f64;
     for t in b.indices.chunks_exact(3) {
@@ -180,8 +180,8 @@ fn fill(t: &mut FillTessellator, label: &str, path: &Path, options: &FillOptions
     out(label, r, &buffers);
 }
 
-/// 原始事件流直送（绕过 Path builder 的 debug_assert NaN 检查，测试 tessellator
-/// 自身的参数校验错误路径）。
+/// Feeds a raw event stream straight in, bypassing the Path builder's debug_assert
+/// NaN check so the tessellator's own validation error path is exercised.
 fn fill_events(t: &mut FillTessellator, label: &str, events: &[PathEvent], options: &FillOptions) {
     let mut buffers: VertexBuffers<FVert, u32> = VertexBuffers::new();
     let r = {
@@ -191,7 +191,7 @@ fn fill_events(t: &mut FillTessellator, label: &str, events: &[PathEvent], optio
     out(label, r, &buffers);
 }
 
-/// 基本形状 fast path（rectangle/circle/ellipse 不经 Path 数据结构）。
+/// Basic-shape fast path (rectangle/circle/ellipse skip the Path data structure).
 fn fill_shape<F>(t: &mut FillTessellator, label: &str, options: &FillOptions, f: F)
 where
     F: FnOnce(&mut FillTessellator, &FillOptions, &mut dyn FillGeometryBuilder) -> TessellationResult,
@@ -213,7 +213,7 @@ fn stroke(t: &mut StrokeTessellator, label: &str, path: &Path, options: &StrokeO
     out(label, r, &buffers);
 }
 
-/// 输出序事件流指纹（tag + 全部坐标 bits）。
+/// Fingerprint of the event stream in output order (tag + every coordinate's bits).
 fn path_fnv(path: &Path) -> u64 {
     let mut h = 0xcbf29ce484222325u64;
     for e in path.iter() {
@@ -261,7 +261,7 @@ fn count_sub(path: &Path) -> usize {
         .count()
 }
 
-/// 三次+二次贝塞尔+SVG 端点弧+自交 S 曲线的闭合路径（svg_builder 面）。
+/// Closed path with cubic + quadratic beziers, an SVG endpoint arc and a self-intersecting S curve.
 fn path_complex() -> Path {
     let mut b = Path::svg_builder();
     b.move_to(point(10.0, 30.0));
@@ -277,13 +277,13 @@ fn path_complex() -> Path {
         },
         point(28.0, 44.0),
     );
-    // 自交：一条横跨已有线段的 S 形三次曲线
+    // self-intersection: an S-shaped cubic crossing an existing segment
     b.cubic_bezier_to(point(-25.0, 95.0), point(140.0, 95.0), point(18.0, 20.0));
     b.close();
     b.build()
 }
 
-/// 领结四边形（必自交于 (20,20)）+ 大环三次曲线闭合自交。
+/// Bowtie quad (always self-intersecting at (20,20)) + a closed self-intersecting large cubic.
 fn path_selfint() -> Path {
     let mut b = Path::builder();
     b.begin(point(0.0, 0.0));
@@ -297,7 +297,7 @@ fn path_selfint() -> Path {
     b.build()
 }
 
-/// 外环 + 反向内环（NonZero 成孔）+ 与内环部分叠压的同向第三环。
+/// Outer ring + reverse inner ring (a NonZero hole) + a same-winding third ring overlapping it.
 fn path_holed() -> Path {
     let mut b = Path::builder();
     b.begin(point(0.0, 0.0));
@@ -318,7 +318,7 @@ fn path_holed() -> Path {
     b.build()
 }
 
-/// 开放折线 + 二次贝塞尔：stroke width/cap/dash 主体。
+/// Open polyline + quadratic bezier: the body of the stroke width/cap/dash cases.
 fn path_open() -> Path {
     let mut b = Path::builder();
     b.begin(point(0.0, 0.0));
@@ -330,7 +330,7 @@ fn path_open() -> Path {
     b.build()
 }
 
-/// ≈3.8° 浅转角：miter 长度过限，四种 join 回退路径全不同。
+/// ~3.8 degree shallow corner: the miter length exceeds the limit, so all four joins differ.
 fn path_sharp() -> Path {
     let mut b = Path::builder();
     b.begin(point(0.0, 10.0));
@@ -341,7 +341,7 @@ fn path_sharp() -> Path {
     b.build()
 }
 
-/// 孤立点零长子路径（stroke 空 cap 路径：Butt 空/Square 方/Round 圆）。
+/// Isolated-point zero-length subpath (stroke caps: Butt empty, Square a square, Round a circle).
 fn path_point(x: f32, y: f32) -> Path {
     let mut b = Path::builder();
     b.begin(point(x, y));
@@ -349,7 +349,7 @@ fn path_point(x: f32, y: f32) -> Path {
     b.build()
 }
 
-/// 零长线段串（退化边）。
+/// A run of zero-length segments (degenerate edges).
 fn path_zerolen() -> Path {
     let mut b = Path::builder();
     b.begin(point(20.0, 20.0));
@@ -359,7 +359,7 @@ fn path_zerolen() -> Path {
     b.build()
 }
 
-/// 全重合点的闭合"三角形"。
+/// A closed "三角形" whose points all coincide.
 fn path_coincident() -> Path {
     let mut b = Path::builder();
     b.begin(point(7.0, 7.0));
@@ -369,7 +369,7 @@ fn path_coincident() -> Path {
     b.build()
 }
 
-/// 自定义属性路径：attribute[0] = 每端点线宽因子（variable_line_width）。
+/// Custom-attribute path: attribute[0] is the per-endpoint line width factor.
 fn path_varwidth() -> Path {
     let mut b = Path::builder_with_attributes(1);
     b.begin(point(0.0, 0.0), &[1.0]);
@@ -380,8 +380,8 @@ fn path_varwidth() -> Path {
     b.build()
 }
 
-/// walk_along_path + RepeatedPattern 手切虚线：偶数段落笔 begin、奇数段
-/// 抬笔 line_to+end，生成只含直线段的子路径集合。
+/// walk_along_path + RepeatedPattern dash cutting: even segments begin a stroke,
+/// odd segments lift the pen with line_to+end, yielding straight-segment subpaths.
 fn dash_path(path: &Path, pattern: &[f32], start: f32, tolerance: f32) -> Path {
     let mut builder = Path::builder();
     let mut open = false;
@@ -431,7 +431,7 @@ fn main() {
         println!("path/{name} ne={} pfnv={:016x}", p.iter().count(), path_fnv(p));
     }
 
-    // ---- Fill：规则 × 路径矩阵 ----
+    // ---- Fill: fill rule x path matrix ----
     let fo = FillOptions::default();
     fill(
         &mut ft,
@@ -459,7 +459,7 @@ fn main() {
         &selfint,
         &fo.with_fill_rule(FillRule::NonZero),
     );
-    // 关相交检查作用于自交路径：Ok（错误几何）或 Err（ErrorCode(1)）皆确定。
+    // intersections off on a self-intersecting path: Ok (bad geometry) or Err, both fixed.
     fill(
         &mut ft,
         "fill/selfint/no-xcheck",
@@ -474,7 +474,7 @@ fn main() {
         &fo.with_fill_rule(FillRule::NonZero),
     );
 
-    // ---- 基本形状 fast path ----
+    // ---- basic-shape fast path ----
     fill_shape(&mut ft, "shape/rect", &fo, |t, o, gb| {
         t.tessellate_rectangle(
             &Box2D {
@@ -499,14 +499,14 @@ fn main() {
         )
     });
 
-    // ---- Fill 退化/错误 ----
+    // ---- Fill degenerate/error ----
     fill(&mut ft, "fill/degen/empty", &Path::new(), &fo);
     fill(&mut ft, "fill/degen/point", &path_point(5.0, 5.0), &fo);
     fill(&mut ft, "fill/degen/zerolen", &path_zerolen(), &fo);
     fill(&mut ft, "fill/degen/coincident", &path_coincident(), &fo);
-    // tolerance 错误用纯线段路径：带曲线时事件队列会先用该 tolerance 平化曲线，
-    // NaN/0.0 会在 lyon_geom 平化的 debug_assert 处 panic（dev profile），轮不到
-    // tessellate_impl 的参数校验返回 Err。
+    // Tolerance errors use a straight-segment path: with curves present the event
+    // queue flattens them first, so NaN/0.0 would panic at lyon_geom's flatten
+    // debug_assert (dev profile) before tessellate_impl could return Err.
     fill(
         &mut ft,
         "fill/err/tol-nan",
@@ -586,7 +586,7 @@ fn main() {
             .with_end_cap(LineCap::Square),
     );
 
-    // ---- Stroke：dash（walk+RepeatedPattern 切子路径）----
+    // ---- Stroke: dash (walk + RepeatedPattern subpath cutting) ----
     let d1 = dash_path(&open, &[12.0, 6.0], 0.0, 0.1);
     println!("dash/d12-6 sub={} pfnv={:016x}", count_sub(&d1), path_fnv(&d1));
     stroke(&mut st, "stroke/dash/d12-6-w2", &d1, &so.with_line_width(2.0));
@@ -603,7 +603,7 @@ fn main() {
         &so.with_line_width(1.5).with_line_cap(LineCap::Round),
     );
 
-    // ---- Stroke：闭环大输出 + variable line width ----
+    // ---- Stroke: closed-path large output + variable line width ----
     stroke(
         &mut st,
         "stroke/complex/closed",
@@ -618,7 +618,7 @@ fn main() {
         &so.with_line_width(6.0).with_variable_line_width(0),
     );
 
-    // ---- Stroke 退化 ----
+    // ---- Stroke degenerate ----
     stroke(&mut st, "stroke/degen/empty", &Path::new(), &so);
     for (label, cap) in [
         ("butt", LineCap::Butt),

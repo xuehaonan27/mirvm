@@ -1,7 +1,8 @@
-//! Linker (moved wholesale from lower/mod.rs M4-M5): lowering-phase linker — FuncId deduplication set and
-//! lowering queue, frozen-area materialization, P1 fn entries, P2 GOT/foreign slots, FFI signatures, A2
-//! split state. Struct and constructors are in mod.rs; impl sub-blocks are grouped by recon field: =
-//! entries(P1 entries + FFI signatures) / alloc(frozen-area materialization) / got(GOT·foreign slots) / calls(call resolution).
+//! The lowering-phase linker: the FuncId deduplication set and lowering queue, frozen-area
+//! materialization, fn entries, GOT/foreign slots, FFI signatures and split (image/delta) state.
+//! The struct and constructors live here; the `impl` sub-blocks are grouped by concern:
+//! entries (fn entries + FFI signatures) / alloc (frozen-area materialization) /
+//! got (GOT/foreign slots) / calls (call resolution).
 
 mod alloc;
 mod calls;
@@ -16,7 +17,7 @@ pub(crate) struct Linker<'tcx> {
     pub(crate) ids: FxHashMap<Instance<'tcx>, ir::FuncId>,
     /// Lowering queue (FuncId allocated, body not yet emitted) — in split mode this is the **delta-class** queue
     pub(crate) queue: VecDeque<(ir::FuncId, Instance<'tcx>)>,
-    /// A2 split state (None = non-split path, behavior identical to S4/S3′a)
+    /// Split (image/delta) state; `None` = single-domain lowering.
     pub(crate) split: Option<Split<'tcx>>,
     /// ① Engine primitive table: mangled symbol → Builtin
     pub(crate) builtins: FxHashMap<Symbol, ir::Builtin>,
@@ -26,57 +27,57 @@ pub(crate) struct Linker<'tcx> {
     pub(crate) frozen: FrozenArena,
     /// Already-materialized alloc → real frozen-area address (dedup + allocate-before-fill to break pointer cycles)
     pub(crate) alloc_addrs: FxHashMap<AllocId, u64>,
-    /// fn-ptr entry: instance → real entry address (D4: one real-address identity per instance)
+    /// fn-ptr entry: instance → real entry address (exactly one address identity per instance)
     pub(crate) fn_entries: FxHashMap<Instance<'tcx>, u64>,
     /// Reverse lookup: real entry address → FuncId (used for indirect-call dispatch, handed off to Module)
     pub(crate) fn_addrs: FxHashMap<u64, ir::FuncId>,
-    /// Guest TLS: `#[thread_local]` static → dense TlsId + slot table (M4.4 D3, handed off to Module)
+    /// Guest TLS: `#[thread_local]` static → dense TlsId + slot table (handed off to Module)
     pub(crate) tls_ids: FxHashMap<rustc_hir::def_id::DefId, ir::TlsId>,
     pub(crate) tls_slots: Vec<ir::TlsSlot>,
-    /// asm-stub wrapper text (M5.0): AsmStubId → symbol name + GAS source; materialized in batch at end of lowering
-    /// via cc+dlopen. From A2 onward names are decoupled from bit order (split mode final bit order known only at wrap-up).
+    /// asm-stub wrapper text: AsmStubId → symbol name + GAS source; materialized in one batch at the end of
+    /// lowering via cc+dlopen. In split mode names are decoupled from bit order, which is only known at wrap-up.
     pub(crate) asm_sites: Vec<ir::AsmSite>,
-    /// Entries for extern fn taken as a value address (fn-ptr): instance → dlsym real address (extension of D4 entry
-    /// semantics). Not entered in fn_addrs — a reverse lookup miss at runtime is exactly the trigger for CallIndirect's
-    /// native_sig libffi direct-call path (the second of M4.4 FFI's two directions).
+    /// Entries for extern fn taken as a value address (fn-ptr): instance → dlsym real address. Not entered in
+    /// `fn_addrs`: a reverse lookup miss at runtime is exactly what triggers `CallIndirect`'s `native_sig`
+    /// libffi direct-call path.
     pub(crate) foreign_fn_entries: FxHashMap<Instance<'tcx>, u64>,
-    /// P2 GOT (decision-history §7.5c) delta-side three tables (image side is in Split)
+    /// Delta-side GOT tables and frozen-area relocations (the image side lives in `Split`).
     pub(crate) got_syms: Vec<ir::GotSym>,
     pub(crate) got_idx: FxHashMap<Box<str>, u32>,
     pub(crate) got_fixups: Vec<ir::GotFixup>,
     pub(crate) frozen_relocs: Vec<ir::FrozenReloc>,
-    /// Foreign allocation → (symbol name, weak): covers non-weak extern statics and extern fn address-taking
-    /// (weak extern statics go through foreign_slot directly and are not recorded here — E27, 2026-07-18);
-    /// relocation / const emission uses it to turn a "baked value" into a "slot".
+    /// Foreign allocation → (symbol name, weak): covers non-weak extern statics and extern fn address-taking.
+    /// Weak extern statics go through `foreign_slot` directly and are not recorded here. Relocation and const
+    /// emission use this to turn a baked value into a slot.
     pub(crate) foreign_alloc_sym: FxHashMap<AllocId, (Box<str>, bool)>,
     /// (symbol name, image context) → GOT slot real address (slot = ordinary 8-byte cell in this side's frozen area)
     pub(crate) foreign_slots: std::collections::HashMap<(Box<str>, bool), u64>,
-    /// P1 entry executability (decision-history §7.6) local stub code area and recipe table (image
-    /// side is in Split): instance → stub idx (domain determined by instance class, same discipline as fn entries)
+    /// Entry-stub code arena and recipe table (the image side lives in `Split`): instance → stub idx. The
+    /// stub's domain is determined by the instance class, the same discipline as fn entries.
     pub(crate) code_arena: crate::vm::engine::codearena::StubArena,
     pub(crate) entry_stub_sites: Vec<ir::EntryStubSite>,
     pub(crate) entry_stub_ids: FxHashMap<Instance<'tcx>, u32>,
-    /// FFI derivability cache (freeze_c_fnptr_sig; None = keep as data-slot entry — Rust ABI /
-    /// aggregate by value / variadic have no valid native call surface, no loss in the blind zone)
+    /// FFI derivability cache (`freeze_c_fnptr_sig`). `None` = keep as a data-slot entry: Rust ABI,
+    /// by-value aggregates and variadic functions have no valid native call surface.
     pub(crate) entry_sig_cache: FxHashMap<Instance<'tcx>, Option<ir::ForeignSig>>,
-    /// Fallback table of hidden symbols from required archives (load base, symbol→st_value): only records symbols not in
-    /// .dynsym (archives with -fvisibility=hidden, e.g. ring/zstd-sys family); extern
-    /// static/fn address-taking is resolved during lowering **before dlsym global scope** — native link-time binding semantics
-    /// (archive-internal definitions always win over global namespace; proven by host libLLVM's embedded ZSTD_* silently shadowing
-    /// see elfsym module header). Built at the top of lower_inner together with dlopen.
+    /// Fallback table of hidden symbols from required archives (load base, symbol→st_value): only symbols
+    /// absent from .dynsym (archives built with -fvisibility=hidden, e.g. the ring/zstd-sys family). Extern
+    /// static/fn address-taking resolves through this during lowering, before global dlsym, matching native
+    /// link-time binding: archive-internal definitions always win over the global namespace. Built at the top
+    /// of `lower_inner` together with dlopen.
     pub(crate) archive_fallbacks: Vec<(u64, std::collections::HashMap<Box<str>, u64>)>,
-    /// dlopen handles for required archives / system libraries (required_native_libs + dylib_candidates order
-    /// = isomorphic to link order): their .dynsym-visible symbols are resolved during lowering **before dlsym global scope** —
-    /// native link-time binding (guest's own objects always win over host process libraries with the same name; proven by psm's
-    /// rust_psm_on_stack vs host librustc_driver embedded copy, corpus batch 6
-    /// c_polars_frame). Handles are not closed on process shutdown (same as runtime FfiState).
+    /// dlopen handles for required archives / system libraries, in `required_native_libs` +
+    /// `dylib_candidates` order (isomorphic to link order). Their .dynsym-visible symbols are resolved during
+    /// lowering before global dlsym, matching native link-time binding: the guest's own objects always win
+    /// over host process libraries of the same name. Handles are not closed on process shutdown, same as
+    /// runtime `FfiState`.
     pub(crate) archive_handles: Vec<usize>,
-    // ===== S4 base (s4-base-image-design; offset merge) =====
+    // ===== Base-image tables =====
     /// sym → base FuncId (reuse on hit, not enqueued). Empty table = no base / base-build mode.
     pub(crate) base_fns: FxHashMap<Box<str>, ir::FuncId>,
     /// sym → base fn-entry real address (only those whose address was taken)
     pub(crate) base_fn_entries: FxHashMap<Box<str>, u64>,
-    /// sym → base static real address (duplicate materialization = static mut schizophrenia, must dedup)
+    /// sym → base static real address (materializing twice would give one static two identities; must dedup)
     pub(crate) base_statics: FxHashMap<Box<str>, u64>,
     /// sym → base TlsId (thread-local identity likewise must be deduped)
     pub(crate) base_tls: FxHashMap<Box<str>, ir::TlsId>,
@@ -84,7 +85,7 @@ pub(crate) struct Linker<'tcx> {
     pub(crate) delta_first_fn: ir::FuncId,
     pub(crate) delta_first_tls: ir::TlsId,
     pub(crate) delta_first_asm: ir::AsmStubId,
-    /// Next FuncId to allocate (cannot use ids.len() anymore: base hits also occupy ids entries)
+    /// Next FuncId to allocate (not `ids.len()`: base hits also occupy `ids` entries)
     pub(crate) next_fn: ir::FuncId,
     /// Base exported material: non-foreign statics materialized in this session (DefId, frozen-area address)
     pub(crate) static_defs: Vec<(rustc_hir::def_id::DefId, u64)>,
@@ -101,9 +102,10 @@ pub(crate) struct MainCatchSite<'tcx> {
 }
 
 impl<'tcx> Linker<'tcx> {
-    /// S3′a: base-maps = union-find over image stack; delta start ids = stack cumulative. `frozen` is constructed by the caller
-    /// for the target domain (program delta = new(), base = new_base_image(), dependency image = new_image(k)).
-    /// code_arena = P1 local stub code area (§7.6, same k-domain as frozen, derived uniformly by lower_inner).
+    /// Base maps are a union-find over the image stack; delta start ids are the stack's cumulative counts.
+    /// `frozen` is constructed by the caller for the target domain (program delta = `new()`, base =
+    /// `new_base_image()`, dependency image = `new_image(k)`); `code_arena` is the local stub code area in
+    /// the same k-domain as `frozen`, derived uniformly by `lower_inner`.
     pub(super) fn new(
         tcx: TyCtxt<'tcx>,
         stack: &crate::baseimage::ImageStack,
@@ -160,8 +162,9 @@ impl<'tcx> Linker<'tcx> {
         }
     }
 
-    /// Activate A2 split (s3b-a2-design §4): image frozen area lands in spline k=0 domain.
-    /// If domain is occupied = fall back to dynamic base (semantics unchanged; A2-2 write phase refuses serialization and self-heals).
+    /// Activate split (image/delta) lowering: the image frozen area lands in the spline k=0 domain. If that
+    /// domain is occupied, fall back to a dynamic base; semantics are unchanged, but the write phase refuses
+    /// serialization and self-heals.
     pub(super) fn activate_split(&mut self) {
         self.split = Some(Split {
             image_frozen: FrozenArena::new_image(0),
@@ -183,11 +186,13 @@ impl<'tcx> Linker<'tcx> {
         });
     }
 
-    /// Reserve an asm-stub slot (M5.0), returning (AsmStubId, symbol name); text is filled in later via set_asm_stub.
-    /// Two-step because the wrapper name must be fixed before the text is generated (self-referential .size directive).
-    /// S4: ids start counting from the base (wrapper names are uniquely free across domains). A2 split splits by current class:
-    /// image class = tagged id + `mirvm_asm_xi{j}` name, delta class = original id space + `mirvm_asm_xd{k}`
-    /// name (final bit order known only at wrap-up, names decoupled from bit order); non-split path keeps bit-order names unchanged.
+    /// Reserve an asm-stub slot, returning (AsmStubId, symbol name); the text follows via `set_asm_stub`.
+    /// Two steps because the wrapper name must be fixed before the text is generated (the `.size` directive is
+    /// self-referential).
+    ///
+    /// Ids start at the base so wrapper names are unique across domains. In split mode the slot goes to the
+    /// current class's domain: image = tagged id + `mirvm_asm_xi{j}`, delta = original id space +
+    /// `mirvm_asm_xd{k}`. Delta names are decoupled from bit order because that order is only known at wrap-up.
     pub(super) fn reserve_asm_stub(&mut self) -> (ir::AsmStubId, Box<str>) {
         if let Some(s) = &mut self.split {
             if s.current_image {
@@ -227,14 +232,15 @@ impl<'tcx> Linker<'tcx> {
         }
     }
 
-    /// `#[thread_local]` static → dense TlsId (M4.4 D3). Template = initializer evaluation result
-    /// materialized into frozen area (reuses ensure_alloc, relocations come for free — runtime uses it only as a byte source, no writes).
+    /// `#[thread_local]` static → dense TlsId. The template is the initializer evaluation result
+    /// materialized into the frozen area via `ensure_alloc`, so relocations come for free; the runtime reads
+    /// it only as a byte source and never writes it.
     pub(crate) fn tls_id(&mut self, def_id: rustc_hir::def_id::DefId) -> Result<ir::TlsId, String> {
         if let Some(&id) = self.tls_ids.get(&def_id) {
             return Ok(id);
         }
-        // S4 base TLS dedup: TlsId is thread-local identity; two copies = one #[thread_local] appears as
-        // two different variables to base functions and delta functions (wrong-value level), so it must be reused.
+        // Base TLS dedup: TlsId is thread-local identity. Two copies would make one #[thread_local] appear as
+        // two different variables to base and delta functions (wrong values), so the base id must be reused.
         if !self.base_tls.is_empty() {
             let sym = self.tcx.symbol_name(Instance::mono(self.tcx, def_id)).name;
             if let Some(&id) = self.base_tls.get(sym) {
@@ -249,8 +255,9 @@ impl<'tcx> Linker<'tcx> {
         let (size, align) = (alloc.inner().size().bytes(), alloc.inner().align.bytes());
         let alloc_id = self.tcx.reserve_and_set_static_alloc(def_id);
         let template = self.ensure_alloc(alloc_id)?;
-        // A2 split: TLS identity domain is determined by def_id.krate (non-local → image slot area, single identity);
-        // image context encountering local TLS = purity downward closure violated (classifier bug), reject loudly.
+        // In split mode the TLS identity domain follows def_id.krate: non-local goes to the image slot area
+        // (a single identity). An image context encountering local TLS violates the purity downward closure
+        // (a classifier bug), so reject loudly.
         if let Some(s) = &mut self.split {
             if def_id.krate != rustc_hir::def_id::LOCAL_CRATE {
                 let j = s.image_tls_slots.len() as ir::TlsId;

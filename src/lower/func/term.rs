@@ -1,5 +1,5 @@
-//! terminator and unwind lowering (moved wholesale from func.rs F10): full lower_terminator family
-//! (Goto/SwitchInt/Assert→panic block synthesis/Call→call.rs/InlineAsm→asm.rs)
+//! Terminator and unwind lowering: the full lower_terminator family
+//! (Goto/SwitchInt/Assert->panic block synthesis/Call->call.rs/InlineAsm->asm.rs)
 //! + lower_unwind. Single entry point = mod.rs lower_instance.
 
 use super::*;
@@ -16,7 +16,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         }
     }
 
-    /// terminator → (extra statements, ir terminator).
+    /// terminator -> (extra statements, ir terminator).
     pub(super) fn lower_terminator(
         &mut self,
         term: &mir::Terminator<'tcx>,
@@ -53,7 +53,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
             TK::Return => (vec![], Terminator::Return),
             TK::Unreachable => (vec![], Terminator::Unreachable),
-            // cleanup chain tail: return guard.drop to let host unwind continue (spike3 protocol)
+            // cleanup chain tail: return guard.drop so host unwinding can continue
             TK::UnwindResume => (vec![], Terminator::Resume),
             TK::UnwindTerminate(_) => (vec![], Terminator::TerminateAbort),
             // analysis-only fake edges: codegen semantics = jump straight to real target
@@ -140,7 +140,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                 return Err("InvalidEnumConstruction arg is Zst".into());
                             }
                             LoweredOp::Pair(..) => {
-                                return Err("InvalidEnumConstruction arg is pair (M4.2+)".into());
+                                return Err("InvalidEnumConstruction arg is pair".into());
                             }
                         };
                         pargs.push(v);
@@ -157,7 +157,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 });
                 let def_id = self.tcx.require_lang_item(lang_item, term.source_info.span);
                 let callee = self.linker.func_id(Instance::mono(self.tcx, def_id));
-                // synthesize: panic block (diverging Call → Unreachable landing)
+                // synthesize: panic block (diverging Call -> Unreachable landing)
                 let unreach = (self.mir_block_count + self.extra_blocks.len()) as Bb;
                 self.extra_blocks.push(ir::Block {
                     stmts: vec![],
@@ -193,7 +193,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let p = self.resolve_place(place)?;
                 if p.ty.needs_drop(self.tcx, self.typing_env) {
                     // dyn place: virtual drop = indirect call via vtable slot 0 (isomorphic to cg_ssa;
-                    // resolve_drop_glue would resolve back to itself → infinite recursion)
+                    // resolve_drop_glue would resolve back to itself -> infinite recursion)
                     if let ty::Dynamic(..) = p.ty.kind() {
                         let meta = p
                             .meta
@@ -213,9 +213,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             },
                         ));
                     }
-                    // normal Drop path = ordinary Call (F2): drop_in_place synthesized shim,
+                    // normal Drop path = an ordinary Call: drop_in_place synthesized shim,
                     // arg = place real address (*mut T); unsized place (Box<[T]> contents, etc.)
-                    // glue argument is a fat pointer → add meta half (resolve_place meta tracking).
+                    // glue argument is a fat pointer -> add meta half (resolve_place meta tracking).
                     let glue = Instance::resolve_drop_glue(self.tcx, p.ty);
                     let callee = self.linker.func_id(glue);
                     let mut glue_args = vec![Operand::AddrOf(p.expr())];
@@ -249,13 +249,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 fn_span,
                 ..
             } => {
-                // callee resolution: constant FnDef → Instance; FnPtr → indirect call
+                // callee resolution: constant FnDef -> Instance; FnPtr -> indirect call
                 let fn_ty = self.op_ty(func)?;
                 let ty::FnDef(def_id, gargs) = fn_ty.kind() else {
                     if fn_ty.is_fn_ptr() {
-                        // fn-ptr indirect call: value = D4 entry real address, engine resolves and dispatches;
+                        // fn-ptr indirect call: value = the real entry address, engine resolves and dispatches;
                         // extern "C" family additionally freezes native signature (resolution miss = real code
-                        // obtained at runtime via dlsym → libffi direct call, second direction of M4.4 FFI)
+                        // obtained at runtime via dlsym -> libffi direct call)
                         let callee_op = self.lower_operand_scalar(func)?;
                         let native_sig =
                             crate::lower::freeze_c_fnptr_sig(self.tcx, self.typing_env, fn_ty);
@@ -271,7 +271,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             *unwind,
                         );
                     }
-                    return Err(format!("indirect call (ty={fn_ty}, M4.1+)"));
+                    return Err(format!("indirect call (ty={fn_ty})"));
                 };
                 let mut inst = Instance::expect_resolve(
                     self.tcx,
@@ -284,9 +284,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 // callee = *(vtable + idx*8), receiver arg replaced with data half.
                 // track_caller methods still pass location (vtable side receives via VTable shim).
                 if let InstanceKind::Virtual(_, idx) = inst.def {
-                    // #[track_caller] 的 Location 取 fn_span（被调名段）——
+                    // For #[track_caller], Location takes fn_span (the callee name segment);
                     // cg_ssa `SourceInfo { span: fn_span, ..terminator.source_info }`
-                    // 同构；用整个调用表达式 span 会让行列全偏（corpus 批3 redb 实锤）
+                    // isomorphic to cg_ssa; using the whole call expression span skews line/column.
                     let loc_arg = self.caller_loc_arg(&inst, *fn_span)?;
                     let rust_call = fn_ty.fn_sig(self.tcx).skip_binder().abi()
                         == rustc_abi::ExternAbi::RustCall;
@@ -300,7 +300,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         *unwind,
                     );
                 }
-                // 纯值 intrinsic：就地展开为 IR 语句（无调用开销；D5 内建的语句形态）
+                // Pure-value intrinsic: expanded in place into IR statements (no call overhead)
                 if let Some(res) = self.try_expand_intrinsic(
                     &inst,
                     args,
@@ -311,26 +311,26 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 )? {
                     return Ok(res);
                 }
-                // fallback-body intrinsic：调用点即换 new_raw（Item），caller ABI 与
-                // callee 一致——track_caller attr 生效（cg_ssa IntrinsicResult::Fallback 同构）
+                // fallback-body intrinsic: the call site swaps in new_raw (an Item), so the caller
+                // ABI matches the callee and the track_caller attr takes effect.
                 if let InstanceKind::Intrinsic(idef) = inst.def {
                     let intrinsic = self
                         .tcx
                         .intrinsic(idef)
-                        .expect("Intrinsic 必有 IntrinsicDef");
+                        .expect("an Intrinsic always has an IntrinsicDef");
                     if intrinsic.must_be_overridden {
                         return Err(format!(
-                            "intrinsic `{}` 无 fallback（引擎内建表，M4.2+）",
+                            "intrinsic `{}` has no fallback (engine builtin table)",
                             intrinsic.name
                         ));
                     }
                     inst = Instance::new_raw(idef, inst.args);
                 }
-                // #[track_caller] 的隐藏尾实参（转发或按调用点合成）；span 取
-                // fn_span（被调名段，cg_ssa 同构——见上方 Virtual 分支注）
+                // The hidden trailing argument for #[track_caller] (forwarded or synthesized at the
+                // call site); span takes fn_span (see the Virtual branch note above).
                 let loc_arg = self.caller_loc_arg(&inst, *fn_span)?;
-                // Linker 三路解析（debt-map §2-B）：普通函数/intrinsic fallback →
-                // worklist 扩集；foreign → ①引擎原语 ②链接仿真 ③Trap
+                // Linker triple resolution: an ordinary function / intrinsic fallback extends the
+                // worklist; a foreign item resolves to an engine primitive, a link stub, or a Trap.
                 let callee = self.linker.resolve_call(inst)?;
                 let rust_call =
                     fn_ty.fn_sig(self.tcx).skip_binder().abi() == rustc_abi::ExternAbi::RustCall;
@@ -355,7 +355,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             } => {
                 self.lower_inline_asm(*asm_macro, template, operands, *options, targets, *unwind)?
             }
-            other => return Err(format!("终止子 {other:?}（M4.1+）")),
+            other => return Err(format!("terminator {other:?}")),
         })
     }
 }

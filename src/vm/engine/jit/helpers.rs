@@ -1,6 +1,6 @@
-//! mirvm_* runtime helpers (moved whole from jit_compile.rs J3-J5): c2i universal wrapper /
-//! unreachable/div_zero/volatile + 128/f128/f16 host direct-eval 21 ops + libm
-//! symbol table. JIT code calls back into the engine via import symbols; registration point = compiler.rs.
+//! `mirvm_*` runtime helpers called by compiled code through import symbols: the c2i
+//! universal wrapper, the unreachable/trap/div_zero/volatile entries, host direct-eval of
+//! 128-bit/f128/f16 arithmetic, and the libm symbol table. `compiler.rs` registers them.
 
 use super::*;
 
@@ -56,11 +56,9 @@ pub(super) extern "C-unwind" fn mirvm_poll_signals() {
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
-// ===== T3 (M5.5 D5) helper frequency stats: grid-③ baseline for vmctx final arbiter retest =====
-// With MIRVM_JIT_STATS=1 each helper entry does one fetch_add(Relaxed); process exit dumps a
-// single line via libc atexit. Frequency answers the measured upper bound of "allocation / TLS
-// inlined compiled code sites per activated ctx"—input data for T vs R retests. When disabled,
-// only one relaxed load, zero observation cost.
+// ===== helper frequency stats (MIRVM_JIT_STATS=1) =====
+// Each helper entry does one fetch_add(Relaxed); at process exit a single line is dumped
+// through libc atexit. With the knob off the cost is one relaxed load per entry.
 pub(super) static STAT_ON: AtomicBool = AtomicBool::new(false);
 static STAT: [AtomicU64; 13] = [
     AtomicU64::new(0),
@@ -138,7 +136,8 @@ extern "C" fn stat_dump() {
     eprintln!("{line}");
 }
 
-/// Compiler::new 调用一次：按 env 开启频度统计并注册退出 dump。
+/// Called once from `Compiler::new`: enables the stats from the environment and registers
+/// the exit dump.
 pub(super) fn stat_init() {
     if std::env::var_os("MIRVM_JIT_STATS").is_some() {
         STAT_ON.store(true, Ordering::Relaxed);
@@ -157,8 +156,9 @@ pub(super) extern "C-unwind" fn mirvm_c2i(func: u64, args: *const u64, n: u64, r
     }
 }
 
-/// 固定 std 启动链中包住用户 main 的 catch 调用。签名与 c2i 相同，但在调用期间
-/// 建立 main 捕获作用域；被调函数及其内部 intrinsic 仍可各自进入 JIT。
+/// The catch call that wraps user `main` in the fixed std startup chain. Same signature
+/// as c2i, but it establishes the main panic scope around the call; the callee and the
+/// intrinsics inside it may still enter the JIT.
 pub(super) extern "C-unwind" fn mirvm_call_main_catch(
     func: u64,
     args: *const u64,
@@ -177,16 +177,18 @@ pub(super) extern "C-unwind" fn mirvm_call_main_catch(
     });
 }
 
-/// T1-c TerminateAbort 助手（interp runblocks TerminateAbort 臂同文案同码：
-/// UnwindTerminate（double panic/ABI 边界）→ abort）。
+/// TerminateAbort helper: same message and exit code as the interpreter's
+/// `TerminateAbort` arm -- an `UnwindTerminate` (double panic / ABI boundary) aborts.
 pub(super) extern "C-unwind" fn mirvm_jit_terminate_abort() -> ! {
-    eprintln!("mirvm[m4-engine]: UnwindTerminate（double panic/ABI 边界）——abort");
+    eprintln!("mirvm[m4-engine]: UnwindTerminate (double panic/ABI boundary) -- abort");
     std::process::abort()
 }
 
-/// T1-c Terminate 边界的直接调用助手。interp/JIT 共用 raw exception 分类：
-/// EngineFault 继续退到所属 Engine，其余 unwind 到达 guest Terminate 即 abort。
-/// c2i 形包装（callee, args, n, ret）——Terminate 边的 Call 不走 PLT，经此回本体。
+/// Direct-call helper for the Terminate boundary. Interpreter and JIT share the raw
+/// exception classification: an EngineFault unwinds on to its owning Engine, any other
+/// unwind reaching a guest Terminate aborts. The c2i-shaped (callee, args, n, ret)
+/// wrapper exists because a Call with a Terminate edge bypasses the PLT and re-enters the
+/// body here.
 pub(super) extern "C-unwind" fn mirvm_call_terminate(
     callee: u64,
     args: *const u64,
@@ -206,10 +208,11 @@ pub(super) extern "C-unwind" fn mirvm_call_terminate(
     }
 }
 
-/// T1-b CallIndirect 助手（m5.4-design §3.2；interp runblocks CallIndirect 臂
-/// 同一派发：fn_addrs 反查 → call_guest 本体；未命中 + native_sig →
-/// ffi::call_addr 本体；空槽 null_ok 空操作 / 空指针与未知目标的诊断同 interp）。
-/// terminate 旗（T1-c）：置位时由统一 raw classifier 处置异常。
+/// CallIndirect helper: the same dispatch as the interpreter's `CallIndirect` arm --
+/// reverse lookup in `fn_addrs` into `call_guest`; on a miss with `native_sig` set,
+/// `ffi::call_addr`; an empty slot with `null_ok` is a no-op. The null-pointer and
+/// unknown-target diagnostics match the interpreter. When `terminate` is set, exceptions
+/// go to the shared raw classifier instead.
 pub(super) extern "C-unwind" fn mirvm_call_indirect(
     addr: u64,
     args: *const u64,
@@ -230,20 +233,22 @@ pub(super) extern "C-unwind" fn mirvm_call_indirect(
     let (ctx, shared) = active();
     let module = &shared.module;
     if null_ok != 0 && addr == 0 {
-        return; // dyn 虚 drop 空槽：空操作（interp 同）
+        return; // empty slot for a dyn virtual drop: no-op (same as the interpreter)
     }
     let caller_name = &module.funcs[caller as usize].name;
     if addr == 0 {
         crate::vm::engine::interp::engine_abort(&format!(
-            "间接调用空 fn 指针（调用者 {caller_name}）"
+            "indirect call through a null fn pointer (caller {caller_name})"
         ));
     }
     let av = unsafe { std::slice::from_raw_parts(args, n as usize) };
     let (lo, hi) = if let Some(&fid) = module.fn_addrs.get(&addr) {
         crate::vm::engine::interp::call_guest(ctx, fid, av)
     } else if native_sig != 0 {
-        // guest 持 native 真码 fn ptr（运行期 dlsym 所得）→ 按冻结签名直调；
-        // Agg 返回时首槽即目的地址（libffi sret 不占参数位，剔除后直调）——interp 同
+        // The guest holds a native code pointer obtained from dlsym at run time: call it
+        // directly through the frozen signature. For an Agg return the first slot is the
+        // destination, since libffi's sret slot is not an argument slot; same as the
+        // interpreter.
         let nsig = unsafe { &*(native_sig as *const crate::vm::engine::ir::ForeignSig) };
         let (ret_dst, arg_slice) = if matches!(nsig.ret, crate::vm::engine::ir::FfiKind::Agg(_)) {
             (av.first().copied(), &av[1..])
@@ -256,7 +261,7 @@ pub(super) extern "C-unwind" fn mirvm_call_indirect(
         )
     } else {
         crate::vm::engine::interp::engine_abort(&format!(
-            "间接调用目标 {addr:#x} 不是已知 fn 条目（调用者 {caller_name}）"
+            "indirect call target {addr:#x} is not a known fn entry (caller {caller_name})"
         ));
     };
     unsafe {
@@ -265,16 +270,17 @@ pub(super) extern "C-unwind" fn mirvm_call_indirect(
     }
 }
 
-/// T1-b TlsRef 助手（同本体 interp::tls_addr 的惰性物化——每线程实例块）。
+/// TlsRef helper: lazily materializes the per-thread instance block through
+/// `interp::tls_addr`.
 pub(super) extern "C-unwind" fn mirvm_tls_ref(id: u64) -> u64 {
     stat(S_TLS);
     let (ctx, _shared) = active();
     crate::vm::engine::interp::tls_addr(ctx, id as u32)
 }
 
-/// T1-b CallForeign 助手（m5.4-design §3.2；interp CallForeign 臂同构——
-/// thunk_args 物化 / C1 Indirect 落点 / pthread 栈放大还原 / ffi::call 本体，
-/// 诊断文案同 interp）。
+/// CallForeign helper: the same shape as the interpreter's `CallForeign` arm --
+/// materialize the thunk args, take the C1 Indirect landing, grow and restore the pthread
+/// stack, then call `ffi::call`; the diagnostics match the interpreter.
 pub(super) extern "C-unwind" fn mirvm_call_foreign(
     sym_ptr: *const u8,
     sym_len: u64,
@@ -300,10 +306,12 @@ pub(super) extern "C-unwind" fn mirvm_call_foreign(
     let mut av: Vec<u64> = unsafe { std::slice::from_raw_parts(args, n as usize) }.to_vec();
     let callbacks = crate::vm::engine::thunks::prepare_foreign_callbacks(shared, sym, sig, &mut av);
     let ret_dst = (ret_dst != 0).then_some(ret_dst);
-    // D8a：guest 线程栈放大（显式 stacksize 临时放大、调用后还原；自供栈不动）
+    // Temporarily raise the pthread stack size for the call and restore it afterwards; a
+    // self-supplied stack is left alone.
     let stack_restore = crate::vm::engine::ffi::amplify_pthread_stack(sym, &av);
-    // native 可同步回调 guest，回调又可在同一 Ctx 中调用 foreign。只在符号
-    // 解析阶段借 FFI 缓存；取得函数地址后先结束借用，再把控制权交给 native。
+    // Native code may synchronously call back into the guest, and that callback may call
+    // foreign again in the same Ctx. The FFI cache is borrowed only for symbol resolution:
+    // end the borrow once the address is in hand, then hand control to native code.
     let resolved = {
         let ffi = unsafe { &mut (*ctx).ffi };
         ffi.resolve(
@@ -323,21 +331,22 @@ pub(super) extern "C-unwind" fn mirvm_call_foreign(
     let caller_name = &module.funcs[caller as usize].name;
     let r = r.unwrap_or_else(|reason| {
         crate::vm::engine::interp::engine_abort(&format!(
-            "foreign `{sym}` 的必需原生库装载失败（fn {caller_name}）: {reason}"
+            "failed to load a required native library for foreign `{sym}` (fn {caller_name}): {reason}"
         ))
     });
     let Some(r) = r else {
         crate::vm::engine::interp::engine_abort(&format!(
-            "foreign `{sym}` 符号不存在（归档兜底表 / dlsym 全域均未命中；fn {caller_name}）"
+            "foreign `{sym}` symbol not found (neither the archive fallback table nor a full-domain dlsym matched; fn {caller_name})"
         ));
     };
     callbacks.complete(r);
     r
 }
 
-/// T1-b CallBuiltin 助手（m5.4-design §3.2；interp::exec_builtin 同一实现
-/// 本体——x86 向量 sret/pair/主标量三 lane 与诊断全在本体内）。JIT 帧无
-/// edge 语义（T1-c 前穿透；unwind=Continue 时 edge 无读——哑 Cell 占位）。
+/// CallBuiltin helper: shares `interp::exec_builtin`'s body, which owns the x86 vector
+/// sret / pair / main-scalar lanes and their diagnostics. A JIT frame has no edge
+/// semantics, so the edge cell is a dummy: with `unwind` set to `Continue` nothing reads
+/// it.
 pub(super) extern "C-unwind" fn mirvm_call_builtin(
     builtin: u64, // *const ir::Builtin
     args: *const u64,
@@ -368,7 +377,7 @@ pub(super) extern "C-unwind" fn mirvm_call_builtin(
         match role {
             0 => ir::BuiltinCallRole::Normal,
             1 => ir::BuiltinCallRole::MainPanicCatcher,
-            _ => crate::vm::engine::interp::engine_abort("JIT builtin 调用职责编码非法"),
+            _ => crate::vm::engine::interp::engine_abort("invalid JIT builtin call role encoding"),
         },
     );
     unsafe {
@@ -377,10 +386,11 @@ pub(super) extern "C-unwind" fn mirvm_call_builtin(
     }
 }
 
-/// T1-b 分配系快路（m5.4-design §3.2：分配系 → 引擎堆同一入口）：tag 分派
-/// 四件到 exec_builtin 同一本体（自定义 #[global_allocator] shim 路由含在
-/// 本体内，不另写分配语义）。tag: 0=RustAlloc 1=RustAllocZeroed 2=RustRealloc
-/// 3=RustDealloc；实参定长四槽（realloc 用满，其余缺位补 0 不消费）。
+/// Fast path for the allocation family: dispatch by tag into the same `exec_builtin`
+/// body the interpreter uses, so the allocation semantics and the custom
+/// `#[global_allocator]` shim routing all live in one place. Tags: 0=RustAlloc,
+/// 1=RustAllocZeroed, 2=RustRealloc, 3=RustDealloc. Arguments occupy four fixed slots:
+/// realloc uses them all, and the missing slots of the others are 0 and never read.
 pub(super) extern "C-unwind" fn mirvm_alloc(
     tag: u64,
     a0: u64,
@@ -411,7 +421,7 @@ pub(super) extern "C-unwind" fn mirvm_alloc(
     lo
 }
 
-/// The trace code domain's `HostSyscall` site (design §5.2.3). Trace code reads
+/// The trace code domain's `HostSyscall` site. Trace code reads
 /// the recorder from the register the boundary pinned and passes it here, so the
 /// recording path below never loads thread-local state and never checks whether
 /// a session is running. `args` points at the call's operands minus the syscall
@@ -438,13 +448,14 @@ pub(super) extern "C" fn mirvm_host_syscall_trace(
     result
 }
 
-// T1-c Resume 终止子的宿主 unwinder 续传口（cg_clif Resume 同构）。
+// Host unwinder continuation point for the `Resume` terminator (cg_clif's Resume shape).
 unsafe extern "C" {
     pub fn _Unwind_Resume(ex: *mut u8) -> !;
 }
 
-/// Unreachable 终止子的诊断与解释器逐字节同口径。引擎错误退回执行边界，
-/// CLI 映射为 70；不用裸 trap 的 SIGILL，也不用 TerminateAbort 的 134。
+/// Diagnostics for the `Unreachable` terminator match the interpreter byte for byte.
+/// The engine fault returns to the execution boundary and the CLI maps it to 70; it is
+/// neither a bare trap's SIGILL nor TerminateAbort's 134.
 pub(super) extern "C-unwind" fn mirvm_jit_unreachable(func: u64) -> ! {
     let shared = active_shared();
     let name = shared
@@ -453,13 +464,15 @@ pub(super) extern "C-unwind" fn mirvm_jit_unreachable(func: u64) -> ! {
         .get(func as usize)
         .map(|f| &*f.name)
         .unwrap_or("?");
-    crate::vm::engine::interp::engine_abort(&format!("到达 Unreachable（fn {name}）"));
+    crate::vm::engine::interp::engine_abort(&format!("reached Unreachable (fn {name})"));
 }
 
-/// Trap 占位（T1-d：语句级/终止子同口）——诊断与退出码逐字节对齐 interp
-/// engine_abort：stmt 形 `TRAP: {reason}`；终止子形 `TRAP: {reason}（fn name）`
-/// （func == u64::MAX 为 stmt 形标记）。引擎错误退回执行边界，CLI 映射为 70；
-/// TerminateAbort 仍保持语义要求的 abort。
+/// Trap entry shared by statement-level traps and terminators: the diagnostic and exit
+/// code match the interpreter's `engine_abort` byte for byte -- `TRAP: {reason}` for the
+/// statement form and `TRAP: {reason} (fn name)` for the terminator form, where
+/// `func == u64::MAX` marks the statement form. The engine fault returns to the execution
+/// boundary and the CLI maps it to 70; TerminateAbort still aborts as its semantics
+/// require.
 pub(super) extern "C-unwind" fn mirvm_jit_trap(reason_ptr: u64, reason_len: u64, func: u64) -> ! {
     let reason = unsafe {
         std::str::from_utf8_unchecked(std::slice::from_raw_parts(
@@ -477,38 +490,39 @@ pub(super) extern "C-unwind" fn mirvm_jit_trap(reason_ptr: u64, reason_len: u64,
             .get(func as usize)
             .map(|f| &*f.name)
             .unwrap_or("?");
-        crate::vm::engine::interp::engine_abort(&format!("TRAP: {reason}（fn {name}）"));
+        crate::vm::engine::interp::engine_abort(&format!("TRAP: {reason} (fn {name})"));
     }
 }
 
-// ===== M5.4b 助手（与 interp 共享实现本体，不复制逻辑）=====
+// ===== helpers sharing the interpreter's implementation bodies (no copied logic) =====
 
-/// 除零诊断退出（M5.4b-1）：与 interp engine_abort 的文案/退出码逐位一致。
+/// Division-by-zero diagnostic exit: the same message text and exit code as the
+/// interpreter's `engine_abort`.
 pub(super) extern "C-unwind" fn mirvm_jit_div_zero(kind: u64) -> ! {
     let what = match kind {
-        0 => "guest 整除以零",
-        1 => "guest 取余以零",
-        2 => "guest 128 位整除以零",
-        _ => "guest 128 位取余以零",
+        0 => "guest integer division by zero",
+        1 => "guest integer remainder by zero",
+        2 => "guest 128-bit integer division by zero",
+        _ => "guest 128-bit integer remainder by zero",
     };
     crate::vm::engine::interp::engine_abort(what);
 }
 
-/// volatile 读（M5.4b-1）：走 interp 的 opaque 字节载体 + 分块分解同一实现。
+/// Volatile read: the interpreter's opaque byte carrier plus chunk decomposition.
 pub(super) extern "C-unwind" fn mirvm_volatile_load(addr: u64, dst: u64, size: u64) {
     stat(S_VLOAD);
     crate::vm::engine::interp::mem_read_volatile(addr, dst, size as u32);
 }
 
-/// volatile 写（同上）。
+/// Volatile write (same path).
 pub(super) extern "C-unwind" fn mirvm_volatile_store(addr: u64, src: u64, size: u64) {
     stat(S_VSTORE);
     crate::vm::engine::interp::mem_write_volatile(addr, src, size as u32);
 }
 
-// ===== M5.4b-3 助手（f16/f128/128 位族；interp 的宿主直算同一通道——
-// 助手用 Rust f16/f128/i128/u128 算术，rustc 降到与 interp/native 同一批
-// compiler-builtins/__*tf* 与 glibc *f128 libm 符号，同源即位同）=====
+// ===== f16/f128/128-bit helpers: the interpreter's host direct-eval channel. Rust
+// f16/f128/i128/u128 arithmetic lowers to the same compiler-builtins `__*tf*` and glibc
+// `*f128` libm symbols that interp/native use, so both paths are bit-identical. =====
 
 pub(super) fn lo_hi(lo: u64, hi: u64) -> u128 {
     (lo as u128) | ((hi as u128) << 64)
@@ -523,7 +537,8 @@ pub(super) fn pair_of(v: f128) -> (u64, u64) {
     hi_lo(v.to_bits())
 }
 
-/// i128/u128 overflowing_add/sub/mul（Bin128 with_overflow 的 flag；写结果对到 out）
+/// i128/u128 `overflowing_add/sub/mul` for `Bin128`: returns the overflow flag and
+/// writes the result pair to `out`.
 pub(super) extern "C-unwind" fn mirvm_bin128_ovf(
     op: u64,
     signed: bool,
@@ -543,11 +558,12 @@ pub(super) extern "C-unwind" fn mirvm_bin128_ovf(
         }
     } else {
         let (x, y) = (lo_hi(alo, ahi), lo_hi(blo, bhi));
-        match op {
-            0 => (x.overflowing_add(y).0 as i128, x.overflowing_add(y).1),
-            1 => (x.overflowing_sub(y).0 as i128, x.overflowing_sub(y).1),
-            _ => (x.overflowing_mul(y).0 as i128, x.overflowing_mul(y).1),
-        }
+        let (v, ovf) = match op {
+            0 => x.overflowing_add(y),
+            1 => x.overflowing_sub(y),
+            _ => x.overflowing_mul(y),
+        };
+        (v as i128, ovf)
     };
     let (lo, hi) = hi_lo(r as u128);
     unsafe {
@@ -557,9 +573,10 @@ pub(super) extern "C-unwind" fn mirvm_bin128_ovf(
     ovf as u64
 }
 
-/// Bin128 的 Div/Rem（cranelift ISLE 不支持 I128 除法——MIRVM_JIT_SYNC
-/// 实证：udiv.i128 "should be implemented in ISLE"，此前静默留解释）。
-/// 宿主 wrapping 系同 interp；零除 = div_zero 128 位文案（kind 2/3）。
+/// `Bin128` Div/Rem. Cranelift's ISLE has no I128 division (it reports
+/// `udiv.i128 "should be implemented in ISLE"`), so this cannot compile to CLIF. The host
+/// wrapping arithmetic matches the interpreter; a zero divisor takes the 128-bit div_zero
+/// diagnostic (kind 2/3).
 pub(super) extern "C-unwind" fn mirvm_bin128_divrem(
     is_rem: u64,
     signed: bool,
@@ -592,7 +609,7 @@ pub(super) extern "C-unwind" fn mirvm_bin128_divrem(
     }
 }
 
-/// f128 四则（op: 0=add 1=sub 2=mul 3=rem(fmodf128) 4=div）
+/// f128 arithmetic (op: 0=add, 1=sub, 2=mul, 3=rem (`fmodf128`), 4=div).
 pub(super) extern "C-unwind" fn mirvm_f128_bin(
     op: u64,
     alo: u64,
@@ -616,7 +633,8 @@ pub(super) extern "C-unwind" fn mirvm_f128_bin(
     }
 }
 
-/// f128 比较（cc: 0=Eq 1=Ne 2=Lt 3=Le 4=Gt 5=Ge；IEEE 语义 NaN 全 false 除 Ne）
+/// f128 comparison (cc: 0=Eq, 1=Ne, 2=Lt, 3=Le, 4=Gt, 5=Ge). IEEE semantics: NaN makes
+/// every predicate false except Ne.
 pub(super) extern "C-unwind" fn mirvm_f128_cmp(
     cc: u64,
     alo: u64,
@@ -635,7 +653,8 @@ pub(super) extern "C-unwind" fn mirvm_f128_cmp(
     }
 }
 
-/// f128 单目（op: 0=neg；其余为一元数学族——glibc *f128 libm 符号）
+/// f128 unary (op: 0=neg; the rest are the unary math family, glibc `*f128` libm
+/// symbols).
 pub(super) extern "C-unwind" fn mirvm_f128_un(op: u64, alo: u64, ahi: u64, out: *mut u64) {
     let a = f128_of(alo, ahi);
     let r = match op {
@@ -662,7 +681,8 @@ pub(super) extern "C-unwind" fn mirvm_f128_un(op: u64, alo: u64, ahi: u64, out: 
     }
 }
 
-/// f128 数学二元（op: 0=pow 1=powi 2=copysign 3=minnum 4=maxnum 5=fma(c 在 out[2..4]）
+/// f128 binary math (op: 0=pow, 1=powi, 2=copysign, 3=minnum, 4=maxnum, 5=fma with the
+/// addend in `clo`/`chi`).
 pub(super) extern "C-unwind" fn mirvm_f128_math(
     op: u64,
     alo: u64,
@@ -676,8 +696,9 @@ pub(super) extern "C-unwind" fn mirvm_f128_math(
     let (a, b, c) = (f128_of(alo, ahi), f128_of(blo, bhi), f128_of(clo, chi));
     let r = match op {
         0 => a.powf(b),
-        // F-03 实锤：powi 的 rhs 是 i32 标量（F128Rhs::Scalar 契约，interp
-        // stmt.rs 同臂直读标量）——blo 是原始整数位，绝不能过 f128_of
+        // powi's rhs is an i32 scalar (the F128Rhs::Scalar contract; the interpreter's
+        // stmt.rs reads it as a raw scalar too). `blo` holds the raw integer bits, so it
+        // must never go through `f128_of`.
         1 => a.powi(blo as i32),
         2 => a.copysign(b),
         3 => a.min(b),
@@ -691,8 +712,8 @@ pub(super) extern "C-unwind" fn mirvm_f128_math(
     }
 }
 
-/// 标量 → f128（kind: 0=f16 1=f32 2=f64 3..7=int(8/16/32/64 位, signed=kind-3 偶=signed?）
-/// kind: 0..2 = float 互转；3/4/5/6 = i8/u8..i64/u64 选（3=i8,4=u8,5=i16,6=u16,7=i32,8=u32,9=i64,10=u64）
+/// Scalar -> f128 (kind: 0=f16, 1=f32, 2=f64, then 3=i8, 4=u8, 5=i16, 6=u16, 7=i32,
+/// 8=u32, 9=i64, 10=u64; anything else is taken as u64).
 pub(super) extern "C-unwind" fn mirvm_f128_from_scalar(kind: u64, v: u64, out: *mut u64) {
     let r = match kind {
         0 => f128::from(f16::from_bits(v as u16)),
@@ -714,7 +735,8 @@ pub(super) extern "C-unwind" fn mirvm_f128_from_scalar(kind: u64, v: u64, out: *
     }
 }
 
-/// f128 → 标量（kind 同上；float 互转位型 / int `as` 饱和语义）
+/// f128 -> scalar (the same kind codes; float conversions preserve the bit pattern,
+/// integer conversions use `as` saturation semantics).
 pub(super) extern "C-unwind" fn mirvm_f128_to_scalar(kind: u64, alo: u64, ahi: u64) -> u64 {
     let a = f128_of(alo, ahi);
     match kind {
@@ -732,7 +754,8 @@ pub(super) extern "C-unwind" fn mirvm_f128_to_scalar(kind: u64, alo: u64, ahi: u
     }
 }
 
-/// i128/u128 ↔ f128（signed: 0=unsigned, 1=signed；方向 from: int→f128 / to: f128→int 饱和）
+/// i128/u128 -> f128 (signed: 0=unsigned, 1=signed). The reverse direction is
+/// `mirvm_f128_to_wide`, which saturates.
 pub(super) extern "C-unwind" fn mirvm_f128_from_wide(
     signed: bool,
     lo: u64,
@@ -769,7 +792,8 @@ pub(super) extern "C-unwind" fn mirvm_f128_to_wide(
     }
 }
 
-/// float → i128/u128 饱和（Wide128ToFloat 的对侧；kind: 0=f16 1=f32 2=f64）
+/// float -> i128/u128 with saturation, the reverse of `Wide128ToFloat`
+/// (kind: 0=f16, 1=f32, 2=f64).
 pub(super) extern "C-unwind" fn mirvm_float_to_wide(
     kind: u64,
     v: u64,
@@ -791,7 +815,7 @@ pub(super) extern "C-unwind" fn mirvm_float_to_wide(
     }
 }
 
-/// i128/u128 → f16（Wide128ToFloat 的 f16 目标）
+/// i128/u128 -> f16, the f16 target of `Wide128ToFloat`.
 pub(super) extern "C-unwind" fn mirvm_wide_to_f16(lo: u64, hi: u64, signed: bool) -> u64 {
     let v = if signed {
         (lo_hi(lo, hi) as i128) as f16
@@ -801,9 +825,10 @@ pub(super) extern "C-unwind" fn mirvm_wide_to_f16(lo: u64, hi: u64, signed: bool
     v.to_bits() as u64
 }
 
-/// i128/u128 → f32/f64（F-04b 实锤：原直调 compiler-builtins __float*ti*
-/// 经 call_helper1 按 I64/RAX 读返回，真实符号走 XMM0 = 读垃圾；改宿主
-/// `as` 直算（最近舍入，与 __float*ti* 同语义），位型 u64 返回零 ABI 歧义）
+/// i128/u128 -> f32/f64. Computed with a host `as` cast (round to nearest, the same
+/// semantics as compiler-builtins `__float*ti*`) rather than by calling those symbols:
+/// they return in XMM0 while the helper call ABI reads RAX, so the call would read
+/// garbage. Returning the bit pattern as u64 keeps the return lane unambiguous.
 pub(super) extern "C-unwind" fn mirvm_wide_to_f32(lo: u64, hi: u64, signed: bool) -> u64 {
     let v = if signed {
         (lo_hi(lo, hi) as i128) as f32
@@ -822,10 +847,11 @@ pub(super) extern "C-unwind" fn mirvm_wide_to_f64(lo: u64, hi: u64, signed: bool
     v.to_bits()
 }
 
-// ===== f16 助手（interp 的宿主直算通道）=====
+// ===== f16 helpers on the interpreter's host direct-eval channel =====
 
-/// f16 四则（op 同 mirvm_f128_bin：0=add 1=sub 2=mul 3=rem 4=div；参数/返回
-/// = f16 位型的 u64。F-02 实锤：Div(4) 曾落入通配臂按 % 算 = 静默错值）
+/// f16 arithmetic (op as in `mirvm_f128_bin`: 0=add, 1=sub, 2=mul, 3=rem, 4=div;
+/// arguments and result are f16 bit patterns in u64). Note that div is the fallback arm,
+/// so an op-4 Div is never answered with `%`.
 pub(super) extern "C-unwind" fn mirvm_f16_bin(op: u64, a: u64, b: u64) -> u64 {
     let (x, y) = (f16::from_bits(a as u16), f16::from_bits(b as u16));
     let r = match op {
@@ -852,9 +878,10 @@ pub(super) extern "C-unwind" fn mirvm_f16_neg(a: u64) -> u64 {
     (-f16::from_bits(a as u16)).to_bits() as u64
 }
 
-/// f16 数学一元（op 序同 interp MathUn 宏；宿主 f16 方法同一批 = 零漂移。
-/// strict 模式实证发现：MathUn/MathBin/MathFma 臂原无 F16 护栏，
-/// as_float(F16) 编译线程 panic = 可准入函数静默留解释的另一隐形坑）
+/// f16 unary math (op order matches the interpreter's `MathUn` macro; the same host f16
+/// methods, so there is no drift). These helpers exist so that MathUn/MathBin/MathFma
+/// never reach `as_float(F16)`: that panics on the compiler thread, which would silently
+/// leave a compressible function interpreted.
 pub(super) extern "C-unwind" fn mirvm_f16_math_un(op: u64, a: u64) -> u64 {
     let x = f16::from_bits(a as u16);
     let r = match op {
@@ -876,8 +903,9 @@ pub(super) extern "C-unwind" fn mirvm_f16_math_un(op: u64, a: u64) -> u64 {
     r.to_bits() as u64
 }
 
-/// f16 数学二元（op: 0=pow 1=powi(b = 原始 i32 位，勿过 from_bits)
-/// 2=copysign 3=minnum 4=maxnum；interp MathBin f16 同形）
+/// f16 binary math (op: 0=pow, 1=powi, 2=copysign, 3=minnum, 4=maxnum; the interpreter's
+/// MathBin f16 arm has the same shape). For powi, `b` is the raw i32 bits and must not go
+/// through `from_bits`.
 pub(super) extern "C-unwind" fn mirvm_f16_math_bin(op: u64, a: u64, b: u64) -> u64 {
     let (x, y) = (f16::from_bits(a as u16), f16::from_bits(b as u16));
     let r = match op {
@@ -890,13 +918,14 @@ pub(super) extern "C-unwind" fn mirvm_f16_math_bin(op: u64, a: u64, b: u64) -> u
     r.to_bits() as u64
 }
 
-/// f16 融合乘加（宿主 mul_add 单次舍入，interp MathFma f16 同形）
+/// f16 fused multiply-add (host `mul_add`, a single rounding; the interpreter's MathFma
+/// f16 arm has the same shape).
 pub(super) extern "C-unwind" fn mirvm_f16_fma(a: u64, b: u64, c: u64) -> u64 {
     f16::from_bits(a as u16)
         .mul_add(f16::from_bits(b as u16), f16::from_bits(c as u16))
         .to_bits() as u64
 }
-/// f16 互转（kind: 1=→f32 2=→f64 3=f32→ 4=f64→）
+/// f16 conversions (kind: 1=f16->f32, 2=f16->f64, 3=f32->f16, 4=f64->f16).
 pub(super) extern "C-unwind" fn mirvm_f16_cast(kind: u64, v: u64) -> u64 {
     match kind {
         1 => (f16::from_bits(v as u16) as f32).to_bits() as u64,
@@ -905,7 +934,8 @@ pub(super) extern "C-unwind" fn mirvm_f16_cast(kind: u64, v: u64) -> u64 {
         _ => (f64::from_bits(v) as f16).to_bits() as u64,
     }
 }
-/// f16 ↔ int（to: 0=i8 1=u8 2=i16 3=u16 4=i32 5=u32 6=i64 7=u64；from 同码）
+/// f16 <-> int (`to`: 0=i8, 1=u8, 2=i16, 3=u16, 4=i32, 5=u32, 6=i64, 7=u64; `from` uses
+/// the same codes).
 pub(super) extern "C-unwind" fn mirvm_f16_to_int(kind: u64, a: u64) -> u64 {
     let x = f16::from_bits(a as u16);
     match kind {
@@ -933,16 +963,17 @@ pub(super) extern "C-unwind" fn mirvm_f16_from_int(kind: u64, v: u64) -> u64 {
     r.to_bits() as u64
 }
 
-// M5.4b-2：powi 走 compiler-builtins（Rust 的 powi 降到同一批符号）
+// powi goes through compiler-builtins: Rust's `powi` lowers to the same symbols.
 unsafe extern "C" {
     fn __powidf2(x: f64, n: i32) -> f64;
     fn __powisf2(x: f32, n: i32) -> f32;
 }
 
-/// M5.4b-2 libm 符号表（注册进 JITBuilder；interp 的 libm 宿主直算同批符号。
-/// libc crate 已不带数学函数绑定 → 直接 extern 声明取地址（进程本就链 libm）。
+/// libm symbol table, registered into the JITBuilder and holding the same symbols the
+/// interpreter's host libm calls use. The libc crate no longer binds the math functions,
+/// so they are declared extern here to take their addresses (the process already links
+/// libm).
 mod libm_decls {
-    #![allow(dead_code)]
     unsafe extern "C" {
         pub fn sqrtf();
         pub fn sqrt();
@@ -1027,12 +1058,11 @@ pub(super) fn libm_syms() -> Vec<(&'static str, usize)> {
     ]
 }
 
-// ===== 准入（M5.3 v1 标量子集 + M5.4a 内存操作数；拒绝 = 永久维持解释）=====
+// ===== SIMD/wide-value helpers over the interpreter's shared `simd_exec` bodies =====
 
-// ===== T1-d SIMD/宽值统一助手（interp simd_exec 共享本体，零漂移）=====
-
-/// T1-d：SIMD/宽 stmt 统一助手——薄壳重匹配后调 interp 共享本体（零漂移）。
-/// 参数序 (stmt, a, b, c, dst, v0, v1)；无用槽位传 0；返回仅 SimdExtractDyn 用。
+/// SIMD/wide-statement helper: re-match the statement and call the interpreter's shared
+/// body, so no semantics are duplicated. Parameter order is (stmt, a, b, c, dst, v0, v1);
+/// unused slots are 0; only `SimdExtractDyn` uses the return value.
 pub(super) extern "C-unwind" fn mirvm_simd_stmt(
     stmt: u64,
     a: u64,
@@ -1212,12 +1242,12 @@ pub(super) extern "C-unwind" fn mirvm_simd_stmt(
         ir::Stmt::Sat128 { op, signed, .. } => {
             x::sat128_body(a as *const u8, b as *const u8, dst as *mut u8, *op, *signed)
         }
-        _ => unreachable!("admit 已排定"),
+        _ => unreachable!("excluded during admission"),
     }
     0
 }
 
-/// T1-d：SIMD rvalue 三件统一助手（Bitmask/Reduce/ReduceArith），pa = 向量 place 地址。
+/// SIMD rvalue helper for Bitmask/Reduce/ReduceArith; `pa` is the vector place address.
 pub(super) extern "C-unwind" fn mirvm_simd_rv(rv: u64, pa: u64) -> u64 {
     stat(S_SIMD_RV);
     use crate::vm::engine::interp::simd_exec as x;
@@ -1239,6 +1269,6 @@ pub(super) extern "C-unwind" fn mirvm_simd_rv(rv: u64, pa: u64) -> u64 {
             lane_bytes,
             ..
         } => x::simd_reduce_arith_body(pa as *const u8, *op, *lane, *lanes, *lane_bytes),
-        _ => unreachable!("admit 已排定"),
+        _ => unreachable!("excluded during admission"),
     }
 }

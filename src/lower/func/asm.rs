@@ -1,15 +1,15 @@
-//! inline asm 站点降低（自 func.rs F11 整搬）：MIR 操作数 ↔ asm-stub
-//! wrapper 槽偏移配对；寄存器分配与 GAS 生成委托 crate::lower::asm
-//! （cg_clif 同构）。唯一入口 = term.rs 的 InlineAsm 臂。
+//! Inline asm site lowering: pairs MIR operands with asm-stub wrapper slot
+//! offsets; register allocation and GAS generation are delegated to
+//! crate::lower::asm (isomorphic to cg_clif). Sole entry = term.rs's InlineAsm arm.
 
 use super::*;
 
 impl<'tcx> LowerCx<'tcx, '_> {
-    /// inline asm 站点降低（M5.0 asm-stub 工厂，corpus §2.2 三面孔归宿）。
-    /// 寄存器分配 + wrapper 文本经 `super::asm`（cg_clif 同构），值/落点在此配对槽偏移。
-    /// M5.0 支持面：in/out/inout × 显式寄存器/reg 类；noreturn 两面孔（C3：
-    /// resume/ud2，Unreachable 落点兜底违约）；sym/label/const/naked/may_unwind/
-    /// att_syntax/非 x86_64 保留 Trap-stub（诊断留痕；按需再补）。
+    /// Lowers one inline asm site. Register allocation and wrapper text come from
+    /// `super::asm` (isomorphic to cg_clif); values and destinations are paired with
+    /// wrapper slot offsets here. Supported surface: in/out/inout x explicit
+    /// register/reg class; noreturn has two faces (resume/ud2, with an Unreachable
+    /// landing that faults on violation). sym/label/const/naked/may_unwind/att_syntax/non-x86_64 stay Trap stubs.
     pub(super) fn lower_inline_asm(
         &mut self,
         asm_macro: mir::InlineAsmMacro,
@@ -23,43 +23,50 @@ impl<'tcx> LowerCx<'tcx, '_> {
         use rustc_target::asm::InlineAsmArch;
 
         if matches!(asm_macro, mir::InlineAsmMacro::NakedAsm) {
-            return Err("naked_asm!（M5.x）".into());
+            return Err("naked_asm!".into());
         }
         if options.contains(Opt::MAY_UNWIND) {
-            return Err("inline asm may_unwind（M5.x；三面孔无）".into());
+            return Err("inline asm may_unwind".into());
         }
-        // noreturn 两面孔（C3 定稿，2026-07-18）：ud2/int3 终止形 = 完全支持
-        // （asm 本体即机器码，进程以宿主信号死 = native 同）；resume/longjmp
-        // 转移形 = asm 本体忠实执行（c_wasmtime_wat 全 trap 面三维确定性绿——
-        // cranelift 发机器码 + trap 上抛链全通）。如实边界：解释帧在捕获与
-        // 恢复之间复用捕获帧宿主栈内存的合成协议可撞死（v2 spike 实锤，
-        // open-issues 引擎边界记档；消除 = JIT 真帧身份，不宣称全形态闭合）。
-        // rustc 强制 noreturn 无输出操作数（outs 恒空）；落点合成
-        // Unreachable（asm 若违约返回 = native UB，响亮诊断）。
+        // noreturn has two faces. ud2/int3 terminate: fully supported (the asm body is
+        // machine code, so the process dies on a host signal exactly as native does).
+        // resume/longjmp transfer: the asm body executes faithfully (cranelift emits
+        // machine code and trap propagation works). Known boundary: the synthesized
+        // protocol that reuses the captured frame's host stack memory between capture
+        // and resume can crash the interpreted frame; eliminating it needs real JIT
+        // frame identity. rustc forces noreturn asm to have no outputs (outs is always
+        // empty); the landing is Unreachable -- returning anyway is native UB.
         let noreturn = options.contains(Opt::NORETURN);
         if noreturn
             && operands
                 .iter()
                 .any(|op| !matches!(op, mir::InlineAsmOperand::In { .. }))
         {
-            return Err("inline asm noreturn 带非 In 操作数（rustc 不变量破坏）".into());
+            return Err(
+                "inline asm noreturn with a non-In operand (rustc invariant broken)".into(),
+            );
         }
         if options.contains(Opt::ATT_SYNTAX) {
-            // 防静默错值：wrapper 强制 intel 语法，att 语法模板会被误汇编
-            return Err("inline asm att_syntax（M5.x；三面孔无）".into());
+            // Guard against silently wrong values: the wrapper forces intel syntax, so an
+            // att-syntax template would be misassembled.
+            return Err("inline asm att_syntax".into());
         }
         if !matches!(
             unwind,
             mir::UnwindAction::Unreachable | mir::UnwindAction::Continue
         ) {
-            return Err("inline asm 带 cleanup unwind（M5.x）".into());
+            return Err("inline asm with cleanup unwind".into());
         }
-        let arch = self.tcx.sess.asm_arch.ok_or("目标不支持 asm")?;
+        let arch = self
+            .tcx
+            .sess
+            .asm_arch
+            .ok_or("target does not support asm")?;
         if !matches!(arch, InlineAsmArch::X86_64) {
-            return Err(format!("inline asm 非 x86_64（arch={arch:?}，M5.x）"));
+            return Err(format!("inline asm is not x86_64 (arch={arch:?})"));
         }
 
-        // MIR 操作数 → wrapper 约束（super::asm；只需 reg 约束 + 角色，不需值/落点）。
+        // MIR operands -> wrapper constraints (super::asm; only the reg constraint and role are needed, not values/destinations).
         let mut gen_ops: Vec<crate::lower::asm::AsmOperand> = Vec::with_capacity(operands.len());
         for op in operands {
             match op {
@@ -79,7 +86,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         has_out_place: out_place.is_some(),
                     });
                 }
-                // const/sym（D8h）：渲染成字面文本进模板（cg_clif 同构），无寄存器
+                // const/sym: render as literal text into the template (isomorphic to cg_clif), no register
                 mir::InlineAsmOperand::Const { value } => {
                     gen_ops.push(crate::lower::asm::AsmOperand::Inline {
                         text: self.asm_const_text(value)?,
@@ -88,7 +95,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 mir::InlineAsmOperand::SymFn { value } => {
                     let rustc_middle::ty::TyKind::FnDef(def_id, args) = value.const_.ty().kind()
                     else {
-                        return Err("inline asm sym fn 非 FnDef".into());
+                        return Err("inline asm sym fn is not a FnDef".into());
                     };
                     let callee = Instance::expect_resolve(
                         self.tcx,
@@ -111,7 +118,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     });
                 }
                 mir::InlineAsmOperand::Label { .. } => {
-                    return Err("inline asm label（asm goto，M5.x）".into());
+                    return Err("inline asm label (asm goto)".into());
                 }
             }
         }
@@ -120,10 +127,11 @@ impl<'tcx> LowerCx<'tcx, '_> {
         let g = crate::lower::asm::generate(self.tcx, self.def_id, arch, template, &gen_ops, &name);
         self.linker.set_asm_stub(stub_id, g.text);
 
-        // 配对已降低的值/落点与 wrapper 槽偏移（同源一致——正确性地基）。
-        // 第二遍重匹配 operands[i]（借的是参数非 self，与 lower_* 的 &mut self 不冲突）。
-        // 值通道双形态（批10，c_typst_pdf 供养）：layout ≤8B 走 8B 标量槽（今路径）；
-        // >8B（__m128i/__m256/__m512 向量）走向量字节通道（place 真地址拷全宽）。
+        // Pair the already-lowered values/destinations with wrapper slot offsets; both
+        // sides come from the same generation, which is the correctness basis. The second
+        // pass re-matches operands[i] (it borrows the parameter, not self). Two value
+        // channels: layout <= 8B uses an 8B scalar slot; > 8B (__m128i/__m256/__m512
+        // vectors) uses the vector byte channel (copy the full width from the place's real address).
         let mut ins: Vec<(u32, ir::AsmIoVal)> = Vec::new();
         let mut outs: Vec<(u32, ir::AsmIoDst)> = Vec::new();
         for (i, op) in operands.iter().enumerate() {
@@ -142,7 +150,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             LoweredOp::Bytes { place, .. } => {
                                 Ok(ir::AsmIoVal::VecBytes(place.expr(), size))
                             }
-                            _ => Err(format!("asm 向量输入非 place（ty={ty}，批10 xmm 通道）")),
+                            _ => Err(format!("asm vector input is not a place (ty={ty})")),
                         }
                     }
                 };
@@ -161,13 +169,16 @@ impl<'tcx> LowerCx<'tcx, '_> {
             match op {
                 mir::InlineAsmOperand::In { value, .. } => {
                     let v = val_of(self, value)?;
-                    ins.push((g.input_slot[i].expect("In 必有输入槽"), v));
+                    ins.push((g.input_slot[i].expect("In always has an input slot"), v));
                 }
                 mir::InlineAsmOperand::Out {
                     place: Some(place), ..
                 } => {
                     let d = dst_of(self, place)?;
-                    outs.push((g.output_slot[i].expect("Out 有 place 必有输出槽"), d));
+                    outs.push((
+                        g.output_slot[i].expect("Out with a place always has an output slot"),
+                        d,
+                    ));
                 }
                 mir::InlineAsmOperand::InOut {
                     in_value,
@@ -175,19 +186,23 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     ..
                 } => {
                     let v = val_of(self, in_value)?;
-                    ins.push((g.input_slot[i].expect("InOut 必有输入槽"), v));
+                    ins.push((g.input_slot[i].expect("InOut always has an input slot"), v));
                     if let Some(place) = out_place {
                         let d = dst_of(self, place)?;
-                        outs.push((g.output_slot[i].expect("InOut 有 out_place 必有输出槽"), d));
+                        outs.push((
+                            g.output_slot[i]
+                                .expect("InOut with an out_place always has an output slot"),
+                            d,
+                        ));
                     }
                 }
-                // Out{place:None} = clobber-only（无落点）；Const/Sym/Label 已在上拒
+                // Out{place:None} is clobber-only (no destination); Const/Sym/Label were rejected above
                 _ => {}
             }
         }
 
         let target = if noreturn {
-            // noreturn（C3 复验窗口）：合成 Unreachable 落点（stub 真返 = 违约）
+            // noreturn: synthesize an Unreachable landing (the stub actually returning is a violation)
             let idx = (self.mir_block_count + self.extra_blocks.len()) as Bb;
             self.extra_blocks.push(ir::Block {
                 stmts: vec![],
@@ -198,7 +213,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             targets
                 .first()
                 .map(|b| b.as_u32())
-                .ok_or("inline asm 无 fallthrough 目标")?
+                .ok_or("inline asm has no fallthrough target")?
         };
         Ok((
             vec![],
@@ -212,12 +227,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
         ))
     }
 
-    /// inline asm const 操作数 → 字面文本（cg_ssa asm_const_to_str 同构）。
+    /// Inline asm const operand -> literal text (isomorphic to cg_ssa asm_const_to_str).
     fn asm_const_text(&self, value: &mir::ConstOperand<'tcx>) -> Result<String, String> {
         let cv = value
             .const_
             .eval(self.tcx, self.typing_env, value.span)
-            .map_err(|e| format!("inline asm const 求值失败: {e:?}"))?;
+            .map_err(|e| format!("inline asm const evaluation failed: {e:?}"))?;
         let layout = self
             .tcx
             .layout_of(self.typing_env.as_query_input(value.const_.ty()))

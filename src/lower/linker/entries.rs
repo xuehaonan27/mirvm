@@ -1,24 +1,28 @@
-//! P1 fn entries + FFI signatures (carried over intact from lower/mod.rs M5 entries): fn_entry_addr
-//! (FFI-derivable entry executable = local stub code address) / entry_ffi_sig / alloc_entry_stub /
-//! foreign_fn_entry_addr. impl Linker sub-block; fields are in the Linker struct in mod.rs.
+//! Fn entries and FFI signatures: `fn_entry_addr` (an FFI-derivable entry is executable and its value is
+//! the local stub code address), `entry_ffi_sig`, `alloc_entry_stub` and `foreign_fn_entry_addr`.
+//! An `impl Linker` sub-block; the fields are in the Linker struct in mod.rs.
 
 use super::*;
 
 impl<'tcx> Linker<'tcx> {
-    /// fn-ptr entry address (D4): each instance has a real address identity.
-    /// P1 (decision-history §7.6): FFI-derivable entries **executable** — value = local stub
-    /// code address (any path flowing to native lands at the executable entry, structurally
-    /// eliminating the thunk blind spot); others remain data slots (containing FuncId, for
-    /// debugging; Rust ABI / aggregate / variadic have no legal native calling surface).
-    /// S4: reuse if the base function already has an entry (single address identity; base vtable
-    /// and delta addressing are consistent); if the base function has no entry (not address-taken
-    /// at build time), add one in the delta area — total still exactly one copy.
-    /// A2 split: entries are domain-assigned by instance class (image class → image area, single
-    /// address identity unchanged); image context encountering delta class = purity closure violated
-    /// (classifier bug), loudly rejected.
-    /// extern fn (kernel function declared in an extern block inside an fn body, used as fn-ptr,
-    /// ring dispatch pattern): no MIR to lower, go through foreign_fn_entry_addr — value = real
-    /// symbol address resolved by the native linker.
+    /// fn-ptr entry address: every instance has exactly one real address identity.
+    ///
+    /// An FFI-derivable entry is **executable**: its value is the local stub code address, so any path
+    /// flowing to native code lands at the executable entry and the thunk blind spot cannot arise. Other
+    /// entries stay data slots holding the FuncId (for debugging): Rust ABI, by-value aggregates and
+    /// variadic functions have no legal native calling surface.
+    ///
+    /// If the base function already has an entry, reuse it — one address identity keeps base vtables and
+    /// delta addressing consistent. If it has none (its address was not taken at build time), add one in
+    /// the delta area; there is still exactly one copy.
+    ///
+    /// In split mode the entry is domain-assigned by instance class (image class → image area, still a
+    /// single address identity). An image context reaching a delta-class entry violates the purity closure
+    /// (a classifier bug) and is loudly rejected.
+    ///
+    /// An extern fn — a kernel function declared in an extern block inside an fn body and used as an
+    /// fn-ptr, i.e. the ring dispatch pattern — has no MIR to lower and goes through
+    /// `foreign_fn_entry_addr`: its value is the real symbol address resolved by the native linker.
     pub(crate) fn fn_entry_addr(&mut self, inst: Instance<'tcx>) -> Result<u64, String> {
         if let Some(&a) = self.fn_entries.get(&inst) {
             return Ok(a);
@@ -33,7 +37,7 @@ impl<'tcx> Linker<'tcx> {
             self.fn_entries.insert(inst, a);
             return Ok(a);
         }
-        // P1: FFI-derivable ⇒ executable entry (value = local stub code address)
+        // FFI-derivable ⇒ executable entry (value = local stub code address)
         if let Some(sig) = self.entry_ffi_sig(inst) {
             let addr = self.alloc_entry_stub(inst, fid, sig);
             self.fn_entries.insert(inst, addr);
@@ -42,9 +46,9 @@ impl<'tcx> Linker<'tcx> {
         }
         let addr = if let Some(s) = &mut self.split {
             if fid & IMAGE_TAG != 0 || fid < self.delta_first_fn {
-                // image class, or base hit but base has no entry (split variant for S4 adding entries):
-                // image area — single address identity (delta referencing image domain is always
-                // stable; delta area is unstable across runs for image bytecode, must never be used).
+                // image class, or a base hit whose base has no entry: allocate in the image area for a single
+                // address identity. The delta area is unstable across runs for image bytecode, so it must
+                // never be used there.
                 let a = s.image_frozen.alloc(8, 16);
                 s.image_fn_entries.insert(inst, a);
                 a
@@ -66,10 +70,9 @@ impl<'tcx> Linker<'tcx> {
         Ok(addr)
     }
 
-    /// P1: instance's frozen cif signature (FnDef and freeze_c_fnptr_sig derivable);
-    /// result cached (including None — non-derivable always goes through data slot, no repeated
-    /// probing cost).
-    /// native_archive C2 rescue chain judges "rlib fn materializable entry" by the same criterion.
+    /// The instance's frozen cif signature, or `None` when it cannot be derived from a `FnDef`. The result
+    /// is cached including `None`, so a non-derivable instance goes through a data slot without repeated
+    /// probing. The native-archive rescue chain judges "rlib fn materializable entry" by this same criterion.
     pub(crate) fn entry_ffi_sig(&mut self, inst: Instance<'tcx>) -> Option<ir::ForeignSig> {
         if let Some(sig) = self.entry_sig_cache.get(&inst) {
             return sig.clone();
@@ -85,9 +88,9 @@ impl<'tcx> Linker<'tcx> {
         sig
     }
 
-    /// P1 executable entry allocation (§7.6): value = local stub code address (domain determined
-    /// by instance class — image class always image domain, stable across runs; layout order =
-    /// stub offset, startup phase materializes in the same order to reproduce).
+    /// Allocate an executable entry: its value is a local stub code address. The domain follows the instance
+    /// class — image class always lands in the image domain, which is stable across runs. Layout order is
+    /// stub offset, and the startup phase materializes in that same order to reproduce it.
     pub(super) fn alloc_entry_stub(
         &mut self,
         inst: Instance<'tcx>,
@@ -138,39 +141,39 @@ impl<'tcx> Linker<'tcx> {
         }
     }
 
-    /// extern fn entry address (fn-ptr address-taking): foreign items without MIR cannot enter
-    /// worklist (instance_mir = rustc query panic); its fn-ptr value semantics = real symbol
-    /// address resolved by the native linker. Resolution order is isomorphic to resolve_call:
-    /// ① engine built-ins ② exported-symbol simulation ③ denylist/llvm/rust-internal
-    /// ④ archive hidden fallback table → global dlsym.
-    /// Value still initially filled with host real code address, but consumers read through GOT
-    /// slots (P2, decision-history §7.5c): slots are serialized with the module and refilled by
-    /// name at startup, so the module is position-independent wrt. ASLR.
+    /// extern fn entry address for fn-ptr address-taking. A foreign item has no MIR and cannot enter the
+    /// worklist (the `instance_mir` query would panic); its fn-ptr value is the real symbol address resolved
+    /// by the native linker. Resolution order, isomorphic to `resolve_call`: ① engine built-ins
+    /// ② exported-symbol simulation ③ denylist/llvm/rust-internal ④ archive hidden fallback table, then
+    /// global dlsym.
+    ///
+    /// The value starts as this process's real code address, but consumers read it through GOT slots. Slots
+    /// are serialized with the module and refilled by name at startup, so the module is position-independent
+    /// with respect to ASLR.
     pub(super) fn foreign_fn_entry_addr(&mut self, inst: Instance<'tcx>) -> Result<u64, String> {
         let name = canonical_link_name(self.tcx.symbol_name(inst).name);
-        // extern weak absent address-taking = NULL (same semantics as native); weak flag tells
-        // GOT startup phase to write 0 on miss instead of aborting
+        // An absent weak extern taken as an address is NULL, as in native code; the weak flag tells the GOT
+        // startup phase to write 0 on a miss instead of aborting.
         let weak = self.tcx.codegen_fn_attrs(inst.def_id()).import_linkage
             == Some(rustc_hir::attrs::Linkage::ExternalWeak);
         if let Some(&a) = self.foreign_fn_entries.get(&inst) {
-            // P2: cache hit must also guarantee [current context] slot present (slots split by
-            // (name, context))
+            // A cache hit must still ensure the current context's slot exists (slots are split by
+            // (name, context)).
             let _ = self.foreign_slot(name, a, weak);
             return Ok(a);
         }
         let bake = |this: &mut Self, addr: u64| {
-            // P2 GOT: slots initially filled with this process's resolved value, refilled by name
-            // at startup
+            // GOT: slots start with this process's resolved value and are refilled by name at startup.
             let _ = this.foreign_slot(name, addr, weak);
             this.foreign_fn_entries.insert(inst, addr);
             addr
         };
         let link_name = Symbol::intern(name);
-        // ① Engine built-ins: pure passthrough fast path (semantics bit-identical to generic
-        // dlsym+libffi path) can give real address; other built-ins (alloc/unwind/fork/atexit/
-        // signal/backtrace families) are engine-taken-over semantics, no address to materialize —
-        // loudly Trap (host process also exports __rust/_Unwind symbols; directly taking punches
-        // through the engine's heap/panic/unwind model).
+        // ① Engine built-ins. A pure passthrough built-in (bit-identical semantics to the generic
+        // dlsym+libffi path) yields a real address; the others (alloc/unwind/fork/atexit/signal/backtrace
+        // families) are engine-taken-over semantics with no address to materialize, so abort loudly — the
+        // host process also exports __rust/_Unwind symbols, and taking them directly would punch through the
+        // engine's heap/panic/unwind model.
         if let Some(b) = self.builtins.get(&link_name).cloned() {
             use ir::Builtin as B;
             if !matches!(
@@ -184,9 +187,9 @@ impl<'tcx> Linker<'tcx> {
         }
         let rust_internal =
             name.starts_with("__rust") || name.starts_with("__rdl") || name.starts_with("rust_");
-        // ② Link simulation: symbol provided by exported definition of already-linked crate ⇒
-        // value = entry address defined by that guest; weak definition yields to dynamic library
-        // strong symbol (except Rust internal symbols — see note ①).
+        // ② Link simulation: the symbol is provided by an exported definition of an already-linked crate, so
+        // the value is the entry address that guest defines. A weak definition yields to a dynamic library's
+        // strong symbol, except for Rust internal symbols (see ①).
         let exported = self.exported_defs().get(&link_name).copied();
         if let Some((target, is_weak)) = exported {
             if is_weak && !rust_internal {
@@ -215,13 +218,11 @@ impl<'tcx> Linker<'tcx> {
                 "foreign `{name}` taken as value address (Rust internal ABI symbol, host process also exports it, cannot take directly)"
             ));
         }
-        // ④ Resolution order: hidden fallback table → archive handles (link order) → global
-        // dlsym (native link-time binding — objects linked in by guest, visible in hidden or
-        // dynsym, always beat host-process libraries of the same name: libLLVM's ZSTD_*
-        // (c_zstd_stream) and librustc_driver's rust_psm_on_stack (c_polars_frame) are two
-        // confirmed cases). Archive `.so` files are loaded with RTLD_NOW|RTLD_GLOBAL before
-        // draining the worklist (head of lower_inner); handles are in self.archive_handles;
-        // global fallback to real system libraries.
+        // ④ Resolution order: hidden fallback table → archive handles in link order → global dlsym.
+        // Objects the guest links in always beat host-process libraries of the same name, whether they are
+        // visible in .dynsym or only hidden. Archive `.so` files are loaded with RTLD_NOW|RTLD_GLOBAL at the
+        // head of `lower_inner`, before the worklist is drained; their handles live in `self.archive_handles`.
+        // Global dlsym is the last fallback to real system libraries.
         let cname =
             std::ffi::CString::new(name).map_err(|_| "symbol name contains NUL".to_string())?;
         let mut p = 0u64;
@@ -243,9 +244,9 @@ impl<'tcx> Linker<'tcx> {
             p = crate::os::dll::sym(0, &cname) as u64;
         }
         if p == 0 {
-            // weak symbol absent = NULL (native address-taking semantics for undefined weak symbol);
-            // indirect call through it loudly terminates at execution phase (CallIndirect null
-            // pointer diagnostics)
+            // An absent weak symbol is NULL, as in native address-taking of an undefined weak symbol. An
+            // indirect call through it terminates loudly at execution, via the CallIndirect null-pointer
+            // diagnostics.
             if weak {
                 return Ok(bake(self, 0));
             }

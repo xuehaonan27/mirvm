@@ -6,57 +6,57 @@ miden-processor = "=0.25.8"
 miden-prover = "=0.25.8"
 miden-verifier = "=0.25.8"
 ---
-// miden-vm 0.25.8 证明面（prove → verify → 篡改反锚）三维差分。与批8 c_miden_exec
-// 同族（同一 MASM fib 程序、同一 assembler/processor 底座），但本 driver 走完整
-// STARK 证明：miden-prover 出证明、miden-verifier 自验、篡改证明字节反向锚。
+// miden-vm 0.25.8 proof surface (prove -> verify -> tamper counter-anchor), three-way
+// differential. Like c_miden_exec it uses the same MASM fib program on the same
+// assembler/processor base, but drives the full STARK proof: miden-prover produces the
+// proof, miden-verifier verifies it, and flipping a proof byte must make verification fail.
 //
-// 版本钉（相容组合证据）：
-//   * miden-assembly / miden-processor / miden-prover / miden-verifier 全部钉
-//     =0.25.8：0.25.5 已于 2026-08-10 被 crates.io yanked，Cargo fresh 解析会
-//     正确拒绝；0.25.8 是同一 0.25 发布线的非 yanked 补丁版，四件同版。
-//   * miden-prover 0.25.8 的 STARK 后端是 Plonky3 系的
-//     miden-lifted-stark 0.28（经 miden-crypto 0.28 的 stark 模块 re-export），
-//     ProvingOptions 只选哈希函数（默认 Blake3_256），FRI/安全参数由
-//     miden-air::config 硬编码 96-bit——没有可调的证明参数面，默认即定值。
-//   * 0.25.5 为解决 wincode trait 分裂曾需要 Git `[patch]`；0.25.8 的 prover/
-//     verifier 已不再直接依赖旧 wincode，该补丁删除，恢复普通 crates.io fresh 图。
+// Version pins:
+//   * miden-assembly / miden-processor / miden-prover / miden-verifier are all pinned to
+//     =0.25.8. 0.25.5 was yanked from crates.io on 2026-08-10, so a fresh resolve correctly
+//     rejects it; 0.25.8 is a non-yanked patch on the same 0.25 release line, and all four
+//     crates share that version.
+//   * miden-prover 0.25.8's STARK backend is the Plonky3-family miden-lifted-stark 0.28
+//     (re-exported through miden-crypto 0.28's stark module). ProvingOptions only picks the
+//     hash function (Blake3_256 by default); the FRI and security parameters are hardcoded to
+//     96-bit in miden-air::config, so there is no tunable proving-parameter surface and the
+//     defaults are fixed values.
+//   * No Git [patch] is needed: the 0.25.8 prover and verifier no longer depend on the old
+//     wincode, so the dependency graph resolves normally from crates.io.
 //
-// 确定性说明（证明字节可复现的证据链）：
-//   * 证明器内部的 "randomness"（aux trace 随机挑战、FRI 挑战）全部来自
-//     Fiat-Shamir channel（channel.sample_algebra_element，种子 = 协议参数 +
-//     public values + main commitment），不触碰 OS 随机源；无 ZK 随机带。
-//     源码证据：miden-lifted-stark-0.28.0/src/prover/mod.rs:347
-//     `channel.sample_algebra_element::<EF>()`。
-//   * features 全默认（std），不开 `concurrent`：p3_maybe_rayon 退化为顺序
-//     迭代，证明构建单线程，字节级可复现。
-//   * 实证：native 同 driver 连跑两次，proof fnv 完全一致（见下「三维实测」）。
-//   * tracing::instrument 事件无 subscriber 全静默丢弃，stderr 真空。
+// Determinism (the evidence chain for reproducible proof bytes):
+//   * The prover's "randomness" (aux-trace random challenges and FRI challenges) all comes
+//     from the Fiat-Shamir channel (channel.sample_algebra_element, seeded with the protocol
+//     parameters, the public values and the main commitment); it never touches an OS random
+//     source and there is no ZK blinding band.
+//     (miden-lifted-stark 0.28 prover calls channel.sample_algebra_element::<EF>()).
+//     The proof is therefore a pure function of the program, inputs and protocol parameters.
+//   * Features stay at the default (std) with `concurrent` off, so p3_maybe_rayon degrades to
+//     sequential iteration and proof construction is single-threaded and byte-reproducible.
+//   * tracing::instrument events have no subscriber, so they are silently dropped and stderr
+//     stays empty.
 //
-// 覆盖清单：
-//   ① 定值 MASM fib(20)（repeat 定数循环，栈顶终值 [10946, 6765]）经
-//      miden_prover::prove_sync 执行 + 出证明：打印栈顶、证明字节长度、
-//      FNV-1a/64 指纹、security_level。
-//   ② 自验：miden_verifier::verify(ProgramInfo, StackInputs, StackOutputs,
-//      proof) 必须 Ok——打印 verify=true 与返回的安全位数。
-//   ③ 反向锚：把 STARK 证明体正中间一个字节 XOR 0x01（深度在 FRI/承诺数据
-//      区，改任何值都只会得到确定性的验证失败），verify 必须 Err——
-//      打印 verify_tampered=false。
+// Coverage:
+//   ① A fixed MASM fib(20) program (a repeat-count loop; final stack top [10946, 6765]) runs
+//      through miden_prover::prove_sync and produces a proof: the stack top, proof byte
+//      length, FNV-1a/64 fingerprint and security_level are printed.
+//   ② Self-verification: miden_verifier::verify(ProgramInfo, StackInputs, StackOutputs,
+//      proof) must be Ok; verify=true and the returned security level are printed.
+//   ③ Tamper counter-anchor: XOR one byte in the middle of the STARK proof body (inside the
+//      FRI/commitment data, where any change yields a deterministic verification failure) and
+//      verify must be Err; verify_tampered=false is printed.
 //
-// 三维复跑：
+// Three-way rerun:
 //   A: target/release/mirvm run corpus/c_miden_prove.rs
 //   B: d=$(grep -l 'name = "c_miden_prove"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname) && cd "$d" && RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
 //   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_miden_prove.rs
 //
-// 0.25.8 现行双轨复测（2026-08-10，全绿）：Cargo/cargoless stdout 逐字节一致，
-// 仍是以下 4 行且 stderr 全空；0.25.5 历史三维实测（2026-07-18）结果相同：
-// fib stack_top=[10946, 6765, 0, 0]；proof len=37599 fnv=449fe979d1395d47
-// security=96；verify=true security=96；verify_tampered=false），stderr 全真空
-// （0 字节）、exit 全 0。证明字节跨实现（mirvm 解释/JIT vs native）与跨进程
-// 复跑（A/A2、B/B2 各自双跑）指纹完全一致——Fiat-Shamir 全确定，无 ZK 随机带
-// 实证成立。时长：A 冷跑（含 245 crate 依赖闭包首次构建）6m19s、热跑 2m45s；
-// B 复跑 2.7s（运行本体）；C（JIT=1）2m44.7s（<180s 预算内，为最慢维）。
-// 当时依赖闭包 245 crate（miden 系 0.25.5 四件 + Plonky3 系 p3-* 15 件 + git
-// wincode 0.5.5）。当前 0.25.8 结果由标准 corpus 对拍重新记录。
+// The native oracle prints exactly these four lines (stderr empty, exit 0):
+//   fib stack_top=[10946, 6765, 0, 0]; proof len=37599 fnv=449fe979d1395d47
+//   security=96; verify=true security=96; verify_tampered=false
+// The proof bytes are bit-identical across implementations (mirvm interpreter/JIT vs native)
+// and across repeated runs of the same implementation, which is the Fiat-Shamir determinism
+// claimed above made concrete.
 
 use std::sync::Arc;
 
@@ -66,8 +66,8 @@ use miden_processor::{DefaultHost, ExecutionOptions, Program, StackInputs};
 use miden_prover::{AdviceInputs, ExecutionProof, ProvingOptions, prove_sync};
 use miden_verifier::{ProgramInfo, verify};
 
-/// fib(20)：repeat 定数循环。栈终 [fib(21), fib(20), 0×14] = [10946, 6765, …]。
-/// 与批8 c_miden_exec 同一定值程序（栈深配平已在批8验证）。
+/// fib(20): a repeat-count loop. The final stack is [fib(21), fib(20), 0x14] = [10946, 6765, ...].
+/// The same program as c_miden_exec; the loop leaves the stack balanced.
 const FIB_SRC: &str = r"
 begin
     push.1
@@ -78,7 +78,7 @@ begin
 end
 ";
 
-/// FNV-1a 64：证明字节指纹（无外部依赖，位确定）。
+/// FNV-1a 64 fingerprint of the proof bytes (no external dependency, bit-exact).
 fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {
@@ -101,7 +101,7 @@ fn main() {
     let program_info = ProgramInfo::from(program.clone());
     let stack_inputs = StackInputs::default();
 
-    // ① 执行 + 出证明（默认 ProvingOptions = Blake3_256，96-bit 参数硬编码）。
+    // ① Execute and prove (default ProvingOptions = Blake3_256, 96-bit parameters hardcoded).
     let mut host = DefaultHost::default();
     let (stack_outputs, proof) = prove_sync(
         &program,
@@ -114,7 +114,7 @@ fn main() {
     .unwrap_or_else(|e| panic!("prove fib: {e}"));
 
     let outs: Vec<u64> = stack_outputs.iter().map(|f| f.as_canonical_u64()).collect();
-    assert_eq!(&outs[..2], &[10946, 6765], "fib 栈顶终值不符");
+    assert_eq!(&outs[..2], &[10946, 6765], "fib stack top mismatch");
     let proof_bytes = proof.to_bytes();
     println!("fib stack_top={:?}", &outs[..4]);
     println!(
@@ -124,7 +124,7 @@ fn main() {
         proof.security_level()
     );
 
-    // ② 自验正锚。
+    // ② Positive self-verification anchor.
     let security = verify(
         program_info.clone(),
         stack_inputs.clone(),
@@ -134,11 +134,11 @@ fn main() {
     .unwrap_or_else(|e| panic!("verify good proof: {e}"));
     println!("verify=true security={security}");
 
-    // ③ 篡改反向锚：证明体正中字节 XOR 0x01，verify 必须 Err。
+    // ③ Tamper counter-anchor: XOR the middle byte of the proof body with 0x01; verify must be Err.
     let mut tampered: ExecutionProof = proof;
     let mid = tampered.proof.len() / 2;
     tampered.proof[mid] ^= 0x01;
     let ok = verify(program_info, stack_inputs, stack_outputs, tampered).is_ok();
-    assert!(!ok, "篡改后的证明不应通过验证");
+    assert!(!ok, "tampered proof must not verify");
     println!("verify_tampered={ok}");
 }

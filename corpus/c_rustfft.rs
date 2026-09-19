@@ -3,14 +3,14 @@
 [dependencies]
 rustfft = { version = "6", default-features = false }
 ---
-// rustfft 6：FftPlanner 规划 forward/inverse FFT。default-features=false 关
-// avx/sse 运行期探测，固定走 scalar 路径（默认 avx feature 下 mirvm 撞
-// FRONTIER：llvm.x86.avx2.gather.q.pd.256 未内建，native/mirvm 也无法保证
-// 同一代码路径，逐字节对拍无意义）。覆盖：2 的幂（8/64/256）与非 2 的幂
-// （63=9·7 GoodThomas、61 素数 Rader、100=4·25、120=8·3·5）长度，n=1 边界；
-// f64/f32 双精度族；delta/常数解析已知解；forward→inverse（不归一化，手动
-// ÷n）roundtrip 位差。输出：谱向量 bits 的 FNV-1a、前 4 项 bits、roundtrip
-// max ULP 差。随机序列用固定种子 xorshift64*（无外部随机 crate）。
+// rustfft 6: FftPlanner plans forward/inverse FFTs. default-features=false turns
+// off avx/sse runtime detection so the scalar path is always taken: with the
+// default avx feature mirvm traps on `llvm.x86.avx2.gather.q.pd.256`, so
+// native/mirvm could not be held to the same code path for a byte-for-byte
+// differential. Covers power-of-two (8/64/256) and non-power-of-two lengths
+// (63=9*7 GoodThomas, 61 Rader, 100, 120), the n=1 edge, f64/f32, delta/constant
+// analytic solutions, and unnormalized forward->inverse roundtrips reported as
+// FNV-1a over the spectrum bits plus the max ULP difference.
 use rustfft::num_complex::Complex;
 use rustfft::{FftDirection, FftPlanner};
 
@@ -25,7 +25,7 @@ impl Rng {
         self.0 = x;
         x.wrapping_mul(0x2545F4914F6CDD1D)
     }
-    // (-1, 1) 均匀，53 bit 精度
+    // uniform in (-1, 1) with 53-bit precision
     fn next_f64(&mut self) -> f64 {
         let u = (self.next_u64() >> 11) as f64 * (1.0 / 9007199254740992.0);
         u * 2.0 - 1.0
@@ -112,7 +112,7 @@ fn roundtrip_f64(n: usize, seed: u64) {
     }
     println!("f64 n={n} roundtrip bitexact={bitexact} max_ulp={max_ulp}");
 
-    // delta 序列 → 谱全 1（解析解，按位检查）
+    // delta sequence -> an all-ones spectrum (analytic solution, checked per bit)
     let mut d = vec![Complex { re: 0.0f64, im: 0.0f64 }; n];
     d[0] = Complex { re: 1.0, im: 0.0 };
     fwd.process(&mut d);
@@ -121,7 +121,7 @@ fn roundtrip_f64(n: usize, seed: u64) {
         .all(|c| c.re.to_bits() == 1.0f64.to_bits() && c.im.to_bits() == 0.0f64.to_bits());
     println!("f64 n={n} delta all-ones bitexact={all_one}");
 
-    // 常数序列 → X[0]=n，其余 ≈ 0
+    // constant sequence -> X[0]=n and the rest ~0
     let mut o = vec![Complex { re: 1.0f64, im: 0.0f64 }; n];
     fwd.process(&mut o);
     let mut tail_max = 0.0f64;
@@ -177,15 +177,15 @@ fn roundtrip_f32(n: usize, seed: u64) {
 }
 
 fn main() {
-    // 2 的幂
+    // powers of two
     for (n, seed) in [(1usize, 0x1234u64), (8, 0xBEEF), (64, 0xFEED), (256, 0xABCD)] {
         roundtrip_f64(n, seed);
     }
-    // 非 2 的幂：63=9·7（GoodThomas）、61（素数 Rader）、100=4·25、120=8·3·5
+    // non-powers of two: 63=9*7 (GoodThomas), 61 (prime, Rader), 100=4*25, 120=8*3*5
     for (n, seed) in [(63usize, 0x7777u64), (61, 0x9999), (100, 0x5555), (120, 0x3333)] {
         roundtrip_f64(n, seed);
     }
-    // f32 族：2 的幂 + 非 2 的幂 + 素数
+    // f32 family: powers of two + non-powers of two + a prime
     for (n, seed) in [(32usize, 0x4242u64), (50, 0x2424), (17, 0x1717)] {
         roundtrip_f32(n, seed);
     }

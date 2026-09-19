@@ -3,13 +3,13 @@
 [dependencies]
 comrak = { version = "0.29", default-features = false, features = ["shortcodes"] }
 ---
-// comrak 0.29（default-features off，避开 syntect/cli）：CommonMark/GFM 大解析器差分。
-// 内嵌混合 markdown（front matter/标题/嵌套列表/任务列表/rust 标注围栏代码块/
-// 表格/链接引用/脚注/删除线/下划线/剧透/智能标点/硬换行/自动链接/数学块/
-// wikilink/描述列表/多行引用/greentext/tagfilter），ComrakOptions 逐项全开
-// extension → parse_document → format_html 全文打印 + AST 遍历 39 种
-// NodeValue 计数 + 节点细节 + sourcepos + commonmark/xml 再序列化 +
-// Anchorizer 去重 + 默认配置边界探针。全固定输入，无随机/时间。
+// comrak 0.29 with default features off (avoids syntect/cli): differential for a large
+// CommonMark/GFM parser. One fixed mixed-markdown document (front matter, headings,
+// nested/task lists, a rust-tagged fence, table, link refs, footnotes, underline,
+// spoiler, smart punctuation, autolink, math, wikilink, greentext, tagfilter) is parsed
+// with every ComrakOptions extension enabled: parse_document -> format_html, AST
+// traversal counting 39 NodeValue kinds, node details, sourcepos, commonmark/xml
+// re-serialization, Anchorizer dedup, default-config probes. Inputs fixed; no time/random.
 use comrak::arena_tree::NodeEdge;
 use comrak::nodes::{AstNode, NodeValue};
 use comrak::{
@@ -112,7 +112,7 @@ fn kind_index(v: &NodeValue) -> usize {
     }
 }
 
-/// 收集子树内全部 Text 内容（文档序），用于 heading 摘要。
+/// Collects all Text content in the subtree (document order); used for heading summaries.
 fn collect_text<'a>(node: &'a AstNode<'a>) -> String {
     let mut out = String::new();
     for n in node.descendants() {
@@ -125,7 +125,7 @@ fn collect_text<'a>(node: &'a AstNode<'a>) -> String {
 
 fn make_options(escaped_spans: bool) -> ComrakOptions<'static> {
     let mut o = ComrakOptions::default();
-    // extension 逐项全开
+    // every extension enabled
     o.extension.strikethrough = true;
     o.extension.tagfilter = true;
     o.extension.table = true;
@@ -150,8 +150,8 @@ fn make_options(escaped_spans: bool) -> ComrakOptions<'static> {
     o.render.hardbreaks = true;
     o.render.unsafe_ = true;
     o.render.github_pre_lang = true;
-    // 注意：cm.rs 不认识 Escaped 节点（format_commonmark 会 panic），
-    // commonmark 再序列化段用 escaped_spans=false 的配置实例。
+    // NOTE: cm.rs does not know the Escaped node (format_commonmark panics on it), so the
+    // commonmark re-serialization section uses a config with escaped_spans = false.
     o.render.escaped_char_spans = escaped_spans;
     o
 }
@@ -288,12 +288,12 @@ fn main() {
     echo_options(&options);
     println!("doc bytes = {} fnv = {:016x}", DOC.len(), fnv1a(DOC.as_bytes()));
 
-    // ① 一键 API：markdown → html 全文
+    // ① One-shot API: markdown -> html, whole document
     let html = markdown_to_html(DOC, &options);
     println!("html len = {} fnv = {:016x}", html.len(), fnv1a(html.as_bytes()));
     print!("html begin\n{html}html end\n");
 
-    // ② parse_document → AST 遍历：39 种 NodeValue 计数 + 深度 + 文本字节
+    // ② parse_document -> AST traversal: 39 NodeValue counts, depth, text bytes
     let arena = Arena::new();
     let root = parse_document(&arena, DOC, &options);
     let mut counts = [0u64; 39];
@@ -322,7 +322,7 @@ fn main() {
         println!("ast {k} = {}", counts[i]);
     }
 
-    // ③ 节点细节（文档序）：代码块 / 链接 / 标题 / 脚注定义 / 表格 / 任务项 / front matter
+    // ③ Node details in document order: code block/link/heading/footnote definition/table/task item/front matter
     let (mut task_done, mut task_todo) = (0u64, 0u64);
     for n in root.descendants() {
         match &n.data.borrow().value {
@@ -371,19 +371,19 @@ fn main() {
     }
     println!("detail tasks done={task_done} todo={task_todo}");
 
-    // ④ sourcepos 抽样：前 8 个先序节点
+    // ④ sourcepos sample: the first 8 pre-order nodes
     for (i, n) in root.descendants().take(8).enumerate() {
         let ast = n.data.borrow();
         println!("pos[{i}] {} at {}", KINDS[kind_index(&ast.value)], ast.sourcepos);
     }
 
-    // ⑤ format_html（AST 路径）与 markdown_to_html（一键路径）逐字节一致性
+    // ⑤ Byte-for-byte agreement between format_html (AST path) and markdown_to_html (one-shot path)
     let mut buf: Vec<u8> = Vec::new();
     format_html(root, &options, &mut buf).unwrap();
     println!("format_html bytes = {} eq_markdown_to_html = {}", buf.len(), buf == html.as_bytes());
 
-    // ⑥ commonmark 再序列化：全文 + len + fnv；再解析渲染做 fixpoint 对比。
-    // escaped_char_spans 产生的 Escaped 节点会让 cm.rs panic，故本段用关闭项的配置。
+    // ⑥ commonmark re-serialization: whole document + len + fnv, then re-parse and render as a fixpoint check.
+    // Escaped nodes produced by escaped_char_spans make cm.rs panic, so this section disables it.
     let cm_options = make_options(false);
     let cm = markdown_to_commonmark(DOC, &cm_options);
     println!("cm len = {} fnv = {:016x}", cm.len(), fnv1a(cm.as_bytes()));
@@ -396,7 +396,7 @@ fn main() {
     let html_cm_opts = markdown_to_html(DOC, &cm_options);
     println!("cm->html len = {} fnv = {:016x} eq_orig = {}", html2.len(), fnv1a(html2.as_bytes()), html2 == html_cm_opts);
 
-    // ⑦ Anchorizer：GFM anchor 算法 + 去重后缀（覆盖 slug/regex 路径）
+    // ⑦ Anchorizer: GFM anchor algorithm plus dedup suffixes (covers the slug/regex path)
     let mut az = Anchorizer::new();
     for h in [
         "Hello World!",
@@ -408,7 +408,7 @@ fn main() {
         println!("anchor {h:?} => {:?}", az.anchorize(h.to_string()));
     }
 
-    // ⑧ 默认配置边界探针（extension 全关的对照行为）
+    // ⑧ Default-config boundary probes (control behaviour with every extension off)
     let def = ComrakOptions::default();
     for (label, src) in [
         ("empty", ""),
@@ -432,7 +432,7 @@ fn main() {
         print!("probe {label} begin\n{out}probe {label} end\n");
     }
 
-    // ⑨ xml 格式化器：小文档全文（第三个输出后端）
+    // ⑨ xml formatter: whole small document (the third output backend)
     let xml_doc = "# Hi *there*\n\npara with `code` and [l](https://x.y).\n";
     let xml_root = parse_document(&arena, xml_doc, &def);
     let mut xml: Vec<u8> = Vec::new();
@@ -441,7 +441,7 @@ fn main() {
     println!("xml len = {} fnv = {:016x}", xml_s.len(), fnv1a(xml_s.as_bytes()));
     print!("xml begin\n{xml_s}xml end\n");
 
-    // ⑩ smart 标点单点对照（parse.smart 开/关）
+    // ⑩ smart punctuation single-point comparison (parse.smart on/off)
     let smart_src = "\"quotes\" 'single' -- --- ... (c) (tm)\n";
     let mut smart_opts = ComrakOptions::default();
     smart_opts.parse.smart = true;

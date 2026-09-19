@@ -4,42 +4,42 @@
 html5ever = "0.29"
 markup5ever_rcdom = "=0.5.0-unofficial"
 ---
-// html5ever 0.29.1（servo 的 HTML5 规范级解析器）差分：parse_document →
-// RcDom → serialize 回写。任务钉 html5ever = "0.29"；crates.io 上 0.29.2
-// 于 2025-03-13 被 yank（发布仅三天），"0.29" 实际解析到 0.29.1（features
-// 按任务钉 default——0.29.1 的 feature 表只有 trace_tokenizer 调试开关，
-// default 为空集）。DOM 槽用 markup5ever_rcdom =0.5.0-unofficial：官方
-// 0.3.0 停在 html5ever 0.27 代际（markup5ever 0.12），与 0.29.x 的
-// markup5ever 0.14 不兼容；0.5.x-unofficial 是 Kornel 自 servo/html5ever
-// 仓库同源发布的 rcdom，其中 0.5.0-unofficial 的 html5ever ^0.29 +
-// markup5ever ^0.14 与 0.29.1 精确对齐（0.5.1-unofficial 要求 html5ever
-// ^0.29.2＝yanked 版本，不可解析，已实测拒绝）。xml5ever 作为 rcdom 非
-// 可选依赖被拉入但本 driver 不使用。依赖闭包全纯 Rust（string_cache/phf/
-// tendril/parking_lot 一族），无 C/asm。
+// html5ever (servo's spec-level HTML5 parser) differential: parse_document ->
+// RcDom -> serialize. The pin html5ever = "0.29" resolves to 0.29.1, because
+// 0.29.2 was yanked on 2025-03-13 after three days and "0.29" cannot reach it;
+// the feature set stays at default. The DOM slot uses
+// markup5ever_rcdom =0.5.0-unofficial: official 0.3.0 is stuck on the html5ever
+// 0.27 generation (markup5ever 0.12) and cannot work with 0.29.x (markup5ever
+// 0.14), while 0.5.0-unofficial is Kornel's rcdom published from the same
+// servo/html5ever repository with html5ever ^0.29 + markup5ever ^0.14, exactly
+// aligned with 0.29.1. (0.5.1-unofficial requires the yanked html5ever ^0.29.2
+// and does not resolve). The run harness pins it as html5ever = "c_html5ever".
+// xml5ever comes in as a non-optional rcdom dependency but is unused here. The
+// whole closure is pure Rust (string_cache/phf/tendril/parking_lot), no C/asm.
 //
-// 测试面（批7 波1：HTML 解析经典）：
-//   4 个内嵌片段 parse_document（默认 ParseOpts，DOCTYPE 保留）+ RcDom
-//   行走 + serialize（默认 SerializeOpts，ChildrenOnly）全文回写。
-//   ① entities：具名/十进制/十六进制字符引用（&amp; &lt; &#39; &#x41;
-//     &#X42; &notin; &nbsp;）、无分号遗留实体 &not（规范允许的 legacy
-//     解码 + 确定性 parse error）、属性值内实体解码后再规范化转义。
-//   ② deep48：程序化构造 48 层 div/span 交替深嵌套 + CJK 叶文本——压
-//     tree builder 栈与递归 serializer。
-//   ③ malformed：畸形容错闭合——p/li 隐式闭合、table 缺失 tbody 补建、
-//     表内裸文本 foster parenting、b/i 交叉 adoption agency、
-//     div>p 的 implied end tags、</br>→<br> 规范改写、尾注释。修复规则
-//     全部由 HTML5 规范钉定，输出天然确定。
-//   ④ cjk：中日文 title/p/属性值，UTF-8 多字节经 tokenizer/tendril。
-//   每片段锚点：quirks / parse-error 计数 / 树统计（nodes/elems/depth）/
-//   序列化全文 / FNV-1a；关键节点（tag/attr/text）存在性 assert+print。
-//   全固定输入，无 IO/时间/随机；stderr 真空。
+// Four embedded fragments are parsed with parse_document (default ParseOpts,
+// DOCTYPE preserved), walked through RcDom and written back by serialize
+// (default SerializeOpts, ChildrenOnly):
+// (1) entities: named/decimal/hex character references (&amp; &lt; &#39; &#x41;
+//     &#X42; &notin; &nbsp;), the semicolon-less legacy entity &not (allowed
+//     decoding plus a deterministic parse error), and entity decoding in
+//     attribute values followed by re-normalized escaping.
+// (2) deep48: a programmatically built 48-level div/span alternation with CJK
+//     leaf text, stressing the tree builder stack and the recursive serializer.
+// (3) malformed: error-tolerant recovery as defined by the HTML5 spec -- implicit
+//     p/li closing, a missing tbody created, foster parenting of bare table text,
+//     b/i adoption agency, implied end tags, </br> rewritten to <br>.
+// (4) cjk: Chinese/Japanese title, p and attribute values, multi-byte UTF-8.
+// Per fragment the anchors are quirks mode, parse-error count, tree stats
+// (nodes/elems/depth), the serialized text and an FNV-1a; key nodes (tag/attr/
+// text) get existence asserts and prints.
 //
-// 三维复跑：
-//   A: target/release/mirvm run corpus/c_html5ever.rs
-//   B: cd "$(grep -l 'name = "c_html5ever"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname)" && \
-//        RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \
-//        "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
-//   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_html5ever.rs
+//
+//
+//
+//
+//
+//
 use std::fmt::Write as _;
 
 use html5ever::driver::ParseOpts;

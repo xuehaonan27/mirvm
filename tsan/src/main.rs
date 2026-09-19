@@ -1,36 +1,38 @@
-//! Spike 4 的 TSan harness：同源复用 `src/vm`（纯 Rust，零 rustc_private），
-//! 在全量插桩（-Zsanitizer=thread + -Zbuild-std）下跑并发用例。
-//! 判定：退出码 0 且无 "WARNING: ThreadSanitizer"（见 `runtime.tsan`）。
-#![allow(dead_code)] // spike1-3 一并编入但只跑 spike4
-#![feature(cfg_sanitize)] // engine/ctx.rs：TSan 配置下 Ctx dtor 的处置分歧
-#![feature(f16)] // engine D8c：f16/f128 宿主直算（同源复用 src/vm 必须同 feature 集）
+//! TSan harness for the `vm::spikes::spike4` cases: reuses `src/vm`
+//! source-for-source (pure Rust, no rustc_private) and runs the concurrency cases
+//! under full instrumentation (`-Zsanitizer=thread -Zbuild-std`).
+//! Passes when the exit code is 0 and TSan prints no "WARNING: ThreadSanitizer"
+//! (see the `runtime.tsan` suite).
+#![allow(dead_code)] // the earlier spikes are compiled in but only spike4 runs
+#![feature(cfg_sanitize)] // engine/ctx.rs: Ctx dtor disposition differs under TSan
+#![feature(f16)] // engine: f16/f128 host arithmetic (sharing src/vm needs the same feature set)
 #![feature(f128)]
-#![feature(core_intrinsics)] // engine raw unwind catch 同源编译
-#![feature(rustc_attrs)] // engine raw catch callback 的 nounwind 契约
-#![feature(thread_local)] // engine deferred signal mailbox 使用无析构原生 TLS
+#![feature(core_intrinsics)] // engine raw unwind catch is compiled source-for-source
+#![feature(rustc_attrs)] // nounwind contract of the engine's raw catch callback
+#![feature(thread_local)] // the engine's deferred signal mailbox uses destructor-free native TLS
 #![allow(internal_features)]
 
 #[path = "../../src/arch/mod.rs"]
-mod arch; // arch 层（interp 的 x86 触点经 crate::arch::；同上纪律）
+mod arch; // arch layer (interp's x86 touch points go through crate::arch::)
 #[path = "../../src/utils/logs.rs"]
-mod logs; // os::process 的 mirvm_log! 同源依赖
+mod logs; // source-shared dependency of os::process's mirvm_log!
 #[path = "../../src/os/mod.rs"]
-mod os; // P7 os 层（engine 触点经 crate::os:: 原语；同源复用门禁随之扩展）
+mod os; // os layer (engine touch points go through crate::os:: primitives)
 mod product_adapters;
 pub(crate) use product_adapters::{lower, sysroot};
 #[path = "../../src/elfsym.rs"]
-mod elfsym; // ffi.rs 的归档 .symtab 兜底（纯 Rust，同源复用）
-mod telemetry; // capture/format 同源编译；另跑一条真实 arm session 生命周期
+mod elfsym; // archive .symtab fallback for ffi.rs (pure Rust, source-shared)
+mod telemetry; // capture/format source-shared; also runs one real arm session lifecycle
 #[path = "../../src/vm/mod.rs"]
 mod vm;
 
 fn main() -> std::process::ExitCode {
-    // spike4（冻结工件）+ M4 引擎多线程真身（M4.4：共享 Shared/每线程 Ctx/thunk 工厂）
+    // spike4 cases plus the real multithreaded engine (shared Shared, per-thread Ctx/thunk factory)
     if vm::spikes::spike4::run_cases()
         && vm::engine::tsan_mt::run()
         && telemetry::run_capture_lifecycle_case()
     {
-        println!("tsan-harness: 用例全 PASS（竞争判定看 TSan 输出）");
+        println!("tsan-harness: all cases PASS (read TSan output for race verdicts)");
         std::process::ExitCode::SUCCESS
     } else {
         std::process::ExitCode::from(1)

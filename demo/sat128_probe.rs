@@ -1,7 +1,7 @@
-//! T1-d 回归探针：Bin128 with_overflow 的旗标布局（(u128,bool) 旗标写
-//! dst+16）——frame 落帧区间必须覆盖 17 字节，欠覆盖时旗标槽 SSA 提升、
-//! JIT 写物理帧而读侧取 SSA 零值 = 溢出旗假阴性（saturating_mul 给包绕值）。
-//! 热循环越阈后以编译码执行，digest 与 native 逐字节一致。
+//! Regression probe for the Bin128 with_overflow flag layout (the (u128,bool) flag is written
+//! at dst+16): the frame slot range must cover 17 bytes. Under-covering promotes the flag slot
+//! to SSA, so the JIT writes the physical frame while the reader takes the SSA zero -- a false
+//! negative overflow flag (saturating_mul returns the wrapped value). The hot loop runs compiled.
 
 #[inline(never)]
 fn sat_u(a: u128, b: u128) -> (u128, u128, u128) {
@@ -15,7 +15,7 @@ fn sat_s(a: i128, b: i128) -> (i128, i128, i128) {
 
 #[inline(never)]
 fn cm_u(a: u128, b: u128) -> u128 {
-    // Option<u128> 判别位读写链（checked_mul → is_some/unwrap_or）
+    // Option<u128> discriminant read/write chain (checked_mul -> is_some/unwrap_or)
     a.checked_mul(b).unwrap_or(0xdead)
 }
 

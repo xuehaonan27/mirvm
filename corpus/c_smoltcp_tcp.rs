@@ -10,18 +10,18 @@ smoltcp = { version = "0.12", default-features = false, features = [
     "socket-icmp",
 ] }
 ---
-// smoltcp 0.12（纯 Rust TCP/IP 栈）差分。两条主线：
-// ① loopback 设备 + 手工 Instant 时钟：单接口内 client/server 两个 TCP socket
-//    自连 echo——Config.random_seed 钉死（ISN 由 iface 内部 xorshift Rand 推出）、
-//    显式本地端口、Instant::ZERO 起 1ms 步进 poll 循环。打印连接状态迁移对、
-//    每段收发 长度+FNV、流式 roundtrip 布尔、主动关闭（FIN 挥手）状态序列。
-//    全程无真实网卡/无系统时间/不打印时间戳与序号。
-// ② wire codec 面：手工 RFC1071 checksum 构造 IPv4/TCP/UDP/ICMPv4 包字节 →
-//    new_checked 与 Repr::parse 两层解析、打印全字段与 checksum 校验布尔，
-//    TCP 含 MSS 选项解析；畸形包错误路径覆盖截断/IHL>total_len/长度字段不符/
-//    坏 checksum/错版本号（packet 层放行、Repr 层拒绝）。
-// 确定性：时钟只走手工序列；输出仅状态名/长度/地址/端口/FNV/布尔——无系统
-// 时间、无指针、无 HashMap 迭代序。
+// smoltcp differential over two lines, compared byte-for-byte with native.
+// (1) A loopback device with a hand-driven Instant clock: two TCP sockets on one
+//     interface echo to each other, Config.random_seed pinned (the ISN comes from
+//     the iface's xorshift Rand), explicit local ports and a poll loop stepping
+//     1ms from Instant::ZERO. It prints the state transition pairs, each
+//     send/receive length and FNV, the roundtrip boolean and the FIN close
+//     sequence; no NIC and no printed timestamps or sequence numbers.
+// (2) The wire codec: IPv4/TCP/UDP/ICMPv4 packets are built byte by byte with a
+//     hand-rolled RFC 1071 checksum and parsed twice, through new_checked then
+//     Repr::parse, printing every field and the checksum boolean (TCP also parses
+//     MSS). Malformed packets cover truncation, bad lengths, a bad checksum and a
+//     wrong version (the packet layer accepts, Repr rejects).
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{ChecksumCapabilities, Loopback, Medium};
 use smoltcp::socket::tcp::{Socket as TcpSocket, SocketBuffer, State as TcpState};
@@ -40,8 +40,8 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// RFC 1071 网际校验和：对若干片段拼接后的 16 位大端字求反码和。
-/// 奇数长度片段的末字节与下一片段首字节配对；流末则补 0。
+/// RFC 1071 internet checksum: one's complement sum of 16-bit big-endian words.
+/// A trailing byte of an odd-length part pairs with the next part's first byte; padding at the end.
 fn inet_checksum(parts: &[&[u8]]) -> u16 {
     let mut sum: u32 = 0;
     let mut pending: Option<u8> = None;
@@ -79,7 +79,7 @@ fn inet_checksum(parts: &[&[u8]]) -> u16 {
 const SRC: [u8; 4] = [192, 0, 2, 1];
 const DST: [u8; 4] = [192, 0, 2, 2];
 
-/// 20 字节定长 IPv4 头 + payload，DF 置位，TTL=64，checksum 自算。
+/// Fixed 20-byte IPv4 header + payload, DF set, TTL=64, checksum computed here.
 fn build_ipv4(proto: u8, payload: &[u8], ident: u16) -> Vec<u8> {
     let total = (20 + payload.len()) as u16;
     let mut b = Vec::with_capacity(total as usize);
@@ -90,7 +90,7 @@ fn build_ipv4(proto: u8, payload: &[u8], ident: u16) -> Vec<u8> {
     b.extend_from_slice(&0x4000u16.to_be_bytes()); // DF, frag_off=0
     b.push(64); // TTL
     b.push(proto);
-    b.extend_from_slice(&[0, 0]); // checksum 占位
+    b.extend_from_slice(&[0, 0]); // checksum placeholder
     b.extend_from_slice(&SRC);
     b.extend_from_slice(&DST);
     let csum = inet_checksum(&[&b]);
@@ -99,7 +99,7 @@ fn build_ipv4(proto: u8, payload: &[u8], ident: u16) -> Vec<u8> {
     b
 }
 
-/// TCP 段：20 字节定长头 + options（须 4 字节对齐）+ payload，伪头 checksum 自算。
+/// TCP segment: 20-byte header + options (4-byte aligned) + payload, pseudo-header checksum.
 #[allow(clippy::too_many_arguments)]
 fn build_tcp(
     sport: u16,
@@ -121,7 +121,7 @@ fn build_tcp(
     s.push(doff << 4);
     s.push(flags);
     s.extend_from_slice(&window.to_be_bytes());
-    s.extend_from_slice(&[0, 0]); // checksum 占位
+    s.extend_from_slice(&[0, 0]); // checksum placeholder
     s.extend_from_slice(&[0, 0]); // urgent
     s.extend_from_slice(options);
     s.extend_from_slice(payload);
@@ -131,7 +131,7 @@ fn build_tcp(
     s
 }
 
-/// UDP 数据报：8 字节头 + payload，伪头 checksum 自算（csum_override 可强制 0）。
+/// UDP datagram: 8-byte header + payload, pseudo-header checksum (csum_override forces 0).
 fn build_udp(sport: u16, dport: u16, payload: &[u8], csum_override: Option<u16>) -> Vec<u8> {
     let len = (8 + payload.len()) as u16;
     let mut u = Vec::new();
@@ -151,12 +151,12 @@ fn build_udp(sport: u16, dport: u16, payload: &[u8], csum_override: Option<u16>)
     u
 }
 
-/// ICMPv4 echo request：type=8 code=0 + ident/seq + data，checksum 自算。
+/// ICMPv4 echo request: type=8 code=0 + ident/seq + data, checksum computed here.
 fn build_icmp_echo(ident: u16, seq: u16, data: &[u8]) -> Vec<u8> {
     let mut m = Vec::new();
     m.push(8); // echo request
     m.push(0); // code
-    m.extend_from_slice(&[0, 0]); // checksum 占位
+    m.extend_from_slice(&[0, 0]); // checksum placeholder
     m.extend_from_slice(&ident.to_be_bytes());
     m.extend_from_slice(&seq.to_be_bytes());
     m.extend_from_slice(data);
@@ -175,7 +175,7 @@ fn pseudo_header(proto: u8, len: u32) -> Vec<u8> {
     p
 }
 
-/// 重算 IPv4 头 checksum（变异后保持头校验合法，隔离变量）。
+/// Recomputes the IPv4 header checksum so a mutated header stays valid (isolating the variable).
 fn fix_ipv4_csum(b: &mut [u8]) {
     b[10] = 0;
     b[11] = 0;
@@ -192,7 +192,7 @@ fn dst_ip() -> IpAddress {
     IpAddress::Ipv4(Ipv4Address::new(DST[0], DST[1], DST[2], DST[3]))
 }
 
-/// ① loopback 内 TCP client/server 自连 echo，手工时钟驱动。
+/// (1) TCP client/server echo over loopback, driven by the hand-built clock.
 fn tcp_echo() {
     let mut device = Loopback::new(Medium::Ip);
     let mut config = Config::new(HardwareAddress::Ip);
@@ -316,11 +316,11 @@ fn tcp_echo() {
     );
 }
 
-/// ② wire codec：构造 → 解析 → 打印字段与校验布尔；畸形包错误路径。
+/// (2) wire codec: build -> parse -> print fields and checksum booleans; malformed paths.
 fn codec() {
     let caps = ChecksumCapabilities::default();
 
-    // A) IPv4/TCP SYN 带 MSS 选项
+    // A) IPv4/TCP SYN carrying the MSS option
     let tcp = build_tcp(
         49152,
         80,
@@ -376,7 +376,7 @@ fn codec() {
         tr.control, tr.max_seg_size, tr.sack_permitted, tr.window_scale, tr.window_len
     );
 
-    // B) IPv4/UDP 带文本 payload
+    // B) IPv4/UDP with a text payload
     let udp = build_udp(8080, 53, b"hello udp wire", None);
     let ip_b = build_ipv4(17, &udp, 0x1234);
     let pb = Ipv4Packet::new_checked(&ip_b).unwrap();
@@ -407,7 +407,7 @@ fn codec() {
         std::str::from_utf8(ic.data()).unwrap()
     );
 
-    // D) 畸形包错误路径（wire::Error Display 恒为 "wire::Error"）
+    // D) malformed packet error paths (wire::Error Display is always "wire::Error")
     match Ipv4Packet::new_checked(&ip_a[..10]) {
         Ok(_) => println!("D1 unexpected ok"),
         Err(e) => println!("D1 ipv4-truncated err = {e}"),
@@ -419,13 +419,13 @@ fn codec() {
         Err(e) => println!("D2 ipv4-ihl-gt-total err = {e}"),
     }
     let mut m3 = ip_a.clone();
-    m3[2..4].copy_from_slice(&60u16.to_be_bytes()); // total_len=60 但缓冲只有 48
+    m3[2..4].copy_from_slice(&60u16.to_be_bytes()); // total_len=60 but the buffer is only 48
     match Ipv4Packet::new_checked(&m3) {
         Ok(_) => println!("D3 unexpected ok"),
         Err(e) => println!("D3 ipv4-total-gt-buf err = {e}"),
     }
     let mut m4 = ip_a.clone();
-    m4[20] ^= 0xFF; // 腐化 TCP 首字节 → IP 头 checksum 仍合法
+    m4[20] ^= 0xFF; // corrupt the first TCP byte; the IP header checksum stays valid
     let p4 = Ipv4Packet::new_checked(&m4).unwrap();
     println!("D4 ipv4 csum_ok={} (腐化在 payload)", p4.verify_checksum());
     let t4 = TcpPacket::new_checked(p4.payload()).unwrap();
@@ -438,7 +438,7 @@ fn codec() {
         Err(e) => println!("D4 tcp-repr err = {e}"),
     }
     let mut m5 = ip_a.clone();
-    m5[10] ^= 0x01; // 腐化 IP 头 checksum 字段
+    m5[10] ^= 0x01; // corrupt the IP header checksum field
     let p5 = Ipv4Packet::new_checked(&m5).unwrap();
     println!("D5 ipv4 csum_ok={}", p5.verify_checksum());
     match Ipv4Repr::parse(&p5, &caps) {
@@ -446,7 +446,7 @@ fn codec() {
         Err(e) => println!("D5 ipv4-repr err = {e}"),
     }
     let mut m6 = ip_a.clone();
-    m6[0] = 0x65; // version=6（IHL 仍 5），重算 checksum 隔离变量
+    m6[0] = 0x65; // version=6 (IHL still 5), checksum recomputed to isolate the variable
     fix_ipv4_csum(&mut m6);
     let p6 = Ipv4Packet::new_checked(&m6).unwrap();
     println!(
@@ -475,7 +475,7 @@ fn codec() {
         Err(e) => println!("D9 udp-len-too-small err = {e}"),
     }
     let mut m10 = udp.clone();
-    m10[4..6].copy_from_slice(&64u16.to_be_bytes()); // length=64 > 缓冲 22
+    m10[4..6].copy_from_slice(&64u16.to_be_bytes()); // length=64 against a 22-byte buffer
     match UdpPacket::new_checked(&m10) {
         Ok(_) => println!("D10 unexpected ok"),
         Err(e) => println!("D10 udp-len-gt-buf err = {e}"),
@@ -491,7 +491,7 @@ fn codec() {
         Err(e) => println!("D12 icmp-truncated err = {e}"),
     }
     let mut m13 = icmp.clone();
-    m13[4] ^= 0xFF; // 腐化 ident → checksum 失配
+    m13[4] ^= 0xFF; // corrupt ident so the checksum no longer matches
     let ic13 = Icmpv4Packet::new_checked(&m13).unwrap();
     println!("D13 icmp csum_ok={}", ic13.verify_checksum());
 }

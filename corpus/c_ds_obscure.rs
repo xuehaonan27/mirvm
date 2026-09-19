@@ -4,20 +4,20 @@
 hyperloglog = "1"
 succinct = "0.5"
 ---
-// hyperloglog 1.0 + succinct 0.5：偏门概率/压缩数据结构差分对。
-// hyperloglog（SipHasher13 键控哈希 + 寄存器阵）：定种 xorshift 序列（含重复）
-//   插入 → cardinality 估计；new_deterministic 锁种子 → 估计位型确定，
-//   len().to_bits() 与 BTreeSet 精确计数并列。覆盖 insert(Hash) /
-//   insert_by_hash_value / is_empty / merge / new_from_template / clear，
-//   三种 error_rate（p=4 小寄存器阵 / p=7 / p=10），空、单元素、合并
-//   不变量、清空复位边界。
-// succinct（接口层级：root 重导出 + rank/select 子模块 trait；无 RSIndex，
-//   0.5 的对位结构是 Rank9）：BitVector（usize / u64 两种 Block）定种模式
-//   构造 → get_bit / get_bits（跨块）/ set_bit / push / pop / align_block /
-//   with_fill / block_with_fill / iter；JacobsonRank 与 Rank9 双 rank 全探针
-//   互校，BinSearchSelect 的 select1 / select0 / 泛型 select 正例 + 越界
-//   None 反例；SpaceUsage 指纹；into_inner 逐层拆解 roundtrip。
-// 确定性：无时间/地址/HashMap 迭代序；所有 f64 经 to_bits() 锁位型。
+// hyperloglog 1.0 + succinct 0.5: differential pair for two offbeat probabilistic and
+// compressed-data structures. hyperloglog (SipHasher13 keyed hash + register array):
+// a seeded xorshift sequence (with repeats) is inserted and its cardinality estimate is
+// compared against an exact BTreeSet count; new_deterministic fixes the seed so the
+// estimate's bit pattern is deterministic, pinned by len().to_bits(). Covers insert(Hash),
+// insert_by_hash_value / is_empty / merge / new_from_template / clear, three error rates
+// (p=4 / p=7 / p=10) and the empty, single-element, merge-invariant and clear-reset
+// boundaries.
+// succinct (interface level: root re-exports plus the rank/select module traits; there is
+// no RSIndex, the 0.5 counterpart is Rank9): BitVector over both usize and u64 blocks,
+// exercising get_bit / get_bits across blocks / set_bit / push / pop / align_block /
+// with_fill / block_with_fill / iter; JacobsonRank and Rank9 cross-check every probe,
+// BinSearchSelect covers select1 / select0 / generic select hits and out-of-range None
+// misses; SpaceUsage and into_inner roundtrip. No time/address/HashMap order; f64s by to_bits().
 use hyperloglog::HyperLogLog;
 use std::collections::BTreeSet;
 use succinct::rank::RankSupport;
@@ -27,7 +27,7 @@ use succinct::{
     Select1Support, SpaceUsage,
 };
 
-/// 定种 xorshift64* —— 两 crate 共用的内联序列源。
+/// Seeded xorshift64*, the inline sequence source shared by both crates.
 struct Xor(u64);
 
 impl Xor {
@@ -56,7 +56,7 @@ fn opt_bool(o: Option<bool>) -> String {
     }
 }
 
-/// 估计值位型 + 取整 + 精确计数 + 相对误差位型 并列打印。
+/// Prints the estimate bits, rounded estimate, exact count and relative-error bits side by side.
 fn show_len(tag: &str, hll: &HyperLogLog, exact: usize) {
     let est = hll.len();
     let rel = (est - exact as f64).abs() / exact as f64;
@@ -70,7 +70,7 @@ fn show_len(tag: &str, hll: &HyperLogLog, exact: usize) {
 }
 
 fn hll_part() {
-    // ① 空 / 单元素边界（线性计数 V>0 分支）
+    // ① Empty / single-element boundary (the linear-counting V>0 branch)
     let mut h0 = HyperLogLog::new_deterministic(0.05, 0x2f6e_2b1a_9c4d_8e7f);
     println!(
         "hll empty: is_empty={} len_bits={:016x}",
@@ -84,7 +84,7 @@ fn hll_part() {
         h0.len().to_bits()
     );
 
-    // ② 字符串序列（含重复）：20000 次插入、1500 个槽位 → 精确基数并列
+    // ② String sequence with repeats: 20000 inserts over 1500 keys, alongside the exact cardinality
     let mut rng = Xor(0x9e37_79b9_7f4a_7c15);
     let mut h_str = HyperLogLog::new_deterministic(0.05, 0x0123_4567_89ab_cdef);
     let mut exact_str = BTreeSet::new();
@@ -95,7 +95,7 @@ fn hll_part() {
     }
     show_len("hll str", &h_str, exact_str.len());
 
-    // ③ u64 值哈希 / 原始哈希值 两条插入路径（p=10）
+    // ③ Both insert paths, u64 value hashing and raw hash values (p=10)
     let mut h_num = HyperLogLog::new_deterministic(0.01, 0xfedc_ba98_7654_3210);
     let mut exact_num = BTreeSet::new();
     for _ in 0..8_000 {
@@ -114,7 +114,7 @@ fn hll_part() {
     }
     show_len("hll raw", &h_raw, exact_raw.len());
 
-    // ④ p=4 小寄存器阵：~60 distinct → 小范围估计档（bias 校正邻近排序区）
+    // ④ p=4 small register array: ~60 distinct, the small-range estimate band (bias correction)
     let mut h_bias = HyperLogLog::new_deterministic(0.2, 0x1111_2222_3333_4444);
     let mut exact_bias = BTreeSet::new();
     for _ in 0..500 {
@@ -124,7 +124,7 @@ fn hll_part() {
     }
     show_len("hll bias", &h_bias, exact_bias.len());
 
-    // ⑤ 同档大基数：5000 个全域 u64 → 超出 5m 的纯 ep() 估计路径
+    // ⑤ Same configuration, large cardinality: 5000 full-range u64s, the pure ep() path beyond 5m
     let mut h_big = HyperLogLog::new_deterministic(0.2, 0x5555_6666_7777_8888);
     let mut exact_big = BTreeSet::new();
     for _ in 0..5_000 {
@@ -134,7 +134,7 @@ fn hll_part() {
     }
     show_len("hll big", &h_big, exact_big.len());
 
-    // ⑥ merge：同源模板分裂插入再合并 == 一次性插入（寄存器逐位 max 不变量）
+    // ⑥ merge: split inserts on two template copies then merge == one-shot insert (per-register max invariant)
     let mut h_a = HyperLogLog::new_from_template(&h_str);
     let mut h_b = HyperLogLog::new_from_template(&h_str);
     let mut rng2 = Xor(0x9e37_79b9_7f4a_7c15);
@@ -154,7 +154,7 @@ fn hll_part() {
         h_a.len().to_bits() == h_str.len().to_bits()
     );
 
-    // ⑦ clear 复位
+    // ⑦ clear reset
     h_str.clear();
     println!(
         "hll cleared: is_empty={} len_bits={:016x}",
@@ -164,11 +164,11 @@ fn hll_part() {
 }
 
 fn succinct_part() {
-    // ① 257 位（跨 5 个 usize 块、尾块 1 位）定种模式
+    // ① 257 seeded bits (crossing five usize blocks, tail block holding 1 bit)
     let mut rng = Xor(0xdead_beef_cafe_f00d);
     let mut bv: BitVector = BitVector::new();
     for _ in 0..257 {
-        bv.push_bit(rng.next() % 4 != 0); // ~75% 置位
+        bv.push_bit(rng.next() % 4 != 0); // ~75% set
     }
     let ones = (0..bv.bit_len()).filter(|&i| bv.get_bit(i)).count() as u64;
     println!(
@@ -194,7 +194,7 @@ fn succinct_part() {
         bv.get_bits(60, 9)
     );
 
-    // ② JacobsonRank：rank1/rank0 探针 + 泛型 rank(pos, value) + limit
+    // ② JacobsonRank: rank1/rank0 probes, generic rank(pos, value), and limit
     let jac = JacobsonRank::new(bv.clone());
     let r1: Vec<String> = probe
         .iter()
@@ -215,7 +215,7 @@ fn succinct_part() {
         jac.rank1(256) == ones
     );
 
-    // ③ BinSearchSelect：select1/select0 正例 + 越界 None 反例 + 泛型 select
+    // ③ BinSearchSelect: select1/select0 hits, out-of-range None misses, generic select
     let sel = BinSearchSelect::new(jac);
     let total1 = sel.rank1(256);
     let total0 = sel.rank0(256);
@@ -251,7 +251,7 @@ fn succinct_part() {
         opt_u64(sel.select(3, false))
     );
 
-    // ④ Rank9（u64 块专属）同模式重建 → 与 JacobsonRank 全探针互校
+    // ④ Rank9 (u64 blocks only) rebuilt from the same pattern, cross-checked against JacobsonRank
     let mut rng9 = Xor(0xdead_beef_cafe_f00d);
     let mut bv9: BitVector<u64> = BitVector::new();
     for _ in 0..257 {
@@ -268,14 +268,14 @@ fn succinct_part() {
         .all(|&p| r9.rank1(p) == sel.rank1(p) && r9.rank0(p) == sel.rank0(p));
     println!("rank9: limit={} agrees_with_jacobson={}", r9.limit(), agree);
 
-    // ⑤ SpaceUsage 指纹（stack+heap 字节）
+    // ⑤ SpaceUsage fingerprints (stack + heap bytes)
     println!(
         "space: jacobson_total={} rank9_total={}",
         sel.total_bytes(),
         r9.total_bytes()
     );
 
-    // ⑥ 变异面：set_bit / pop_bit / align_block / iter
+    // ⑥ Mutation surface: set_bit / pop_bit / align_block / iter
     let mut mv = bv.clone();
     mv.set_bit(0, !mv.get_bit(0));
     mv.set_bit(256, false);
@@ -294,7 +294,7 @@ fn succinct_part() {
         iter_ones
     );
 
-    // ⑦ 构造器面：with_fill / block_with_fill / get_block
+    // ⑦ Constructor surface: with_fill / block_with_fill / get_block
     let fill: BitVector = BitVector::with_fill(100, true);
     let fill_ones = (0..fill.bit_len()).filter(|&i| fill.get_bit(i)).count();
     println!("fill: bit_len={} ones={}", fill.bit_len(), fill_ones);
@@ -308,7 +308,7 @@ fn succinct_part() {
         blk.bit_len()
     );
 
-    // ⑧ into_inner 逐层拆解 → 与原向量逐位相等
+    // ⑧ into_inner unwrapped layer by layer, compared bit-for-bit with the original vector
     let back = sel.into_inner().into_inner();
     println!(
         "roundtrip: bit_len={} eq_original={}",

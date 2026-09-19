@@ -1,66 +1,66 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# swc_ecma_parser =41.1.2（2026-07-17 时点最新；swc 已转 semver 大版本流：
-# parser 41.x / ast 25.x / common 23.x）。parser 41.1.2 硬性要求
-# swc_common ^23.0.2、swc_ecma_ast ^25.0.0、swc_atoms ^9.0.3，故三件套按
-# 兼容组钉死。default-features=false + typescript：default=["typescript",
-# "stacker"]——留 typescript（S2/S4 TS/TSX 语法面所需），裁 stacker（免
-# stacker→psm global_asm 的 native-archive 路径；本 driver 输入浅、无深
-# 递归需求，纯预算性裁剪）；flow/verify/debug/tracing-spans 全系不开。
-# swc_ecma_ast 开 serde-impl（AST 的 serde JSON 序列化，census 依据；
-# rkyv/encoding/plugin 系全裁）。swc_common 23.0.2 default=[]（tty-emitter
-# 即 termcolor、concurrent、parking_lot、sourcemap 均不开）——诊断走
-# kind().msg() 手格式化，不经 Handler/emitter。serde_json 沿用 corpus
-# 既有 "1" 钉法（批1 已绿）。依赖闭包 89 crates（num-bigint 0.4.8 在列
-# ——parser 拉 ^0.4.3 供 BigInt 字面量词法解析；本 driver 无任何 BigInt
-# 字面量，不经 div_wide asm；tracing 为空转 no-op；无一 C/FFI 件，全部
-# build.rs 都是 Rust 版本闸），远低于 200 上限。
+# swc_ecma_parser =41.1.2 (latest at the 2026-07-17 snapshot; swc has moved to a semver
+# major-version stream: parser 41.x / ast 25.x / common 23.x). parser 41.1.2 hard-requires
+# swc_common ^23.0.2, swc_ecma_ast ^25.0.0 and swc_atoms ^9.0.3, so the trio is pinned as a
+# compatible set. default-features=false + typescript: default=["typescript",
+# "stacker"] -- typescript is kept (needed for the S2/S4 TS/TSX syntax surface) and stacker is
+# cut to avoid the stacker->psm global_asm native-archive path; this driver's inputs are shallow
+# with no deep-recursion need, so the cut is purely budgetary. flow/verify/debug/tracing-spans
+# all stay off. swc_ecma_ast enables serde-impl (serde JSON serialization of the AST, the basis
+# for the census; rkyv/encoding/plugin all cut). swc_common 23.0.2 default=[] (tty-emitter, i.e.
+# termcolor, concurrent, parking_lot and sourcemap, all off), so diagnostics go through
+# kind().msg() hand-formatting rather than a Handler/emitter. serde_json keeps the corpus's
+# existing "1" pin. The dependency closure is 89 crates (num-bigint 0.4.8 included -- the
+# parser pulls ^0.4.3 for BigInt literal lexing, though this driver has no BigInt literals and
+# never reaches div_wide asm; tracing compiles to no-op; there is no C/FFI artifact and every
+# build.rs is a Rust version gate), far below the 200 limit.
 swc_ecma_parser = { version = "=41.1.2", default-features = false, features = ["typescript"] }
 swc_ecma_ast = { version = "=25.0.0", features = ["serde-impl"] }
 swc_common = "=23.0.2"
 serde_json = "1"
 ---
-// swc_ecma_parser 41.1.2（swc 手写递归下降解析器；Box 树 AST + BytePos 全局
-// span + take_errors 恢复模型）三维差分。批8 波2 VM/语言机槽，与 c_oxc_parse
-// 构成姊妹压强：S1/S2/S3 三个源与 c_oxc_parse 逐字节同文（同输入撞两套实现
-// 迥异的 lexer/visitor/AST ——swc 无 arena、节点另套 Ts*/JSX* 命名族），实测
-// 锚点 span 契合（swc BytePos 为 1 基绝对偏移：oxc(15,91)/(0,92)/(159,494)
-// ↔ swc(16,92)/(1,93)/(160,495)）而 census 命名/计数全异（90/122/116/74 vs
-// oxc 92/99/118/62）——正是压强意图。
-// 解析 4 个源：
-//   S1 ES 脚本（parse_script）：函数/递归、regex literal、模板串、
-//      destructuring+rest、spread、for-of、位运算；
-//   S2 TS module：generic interface、enum、class implements+parameter
-//      properties、satisfies、type alias、export default、never；
-//   S3 JSX module：hooks 解构、fragment、三元/箭头内 JSX、attributes、
-//      表达式容器；
-//   S4 TSX 含可恢复诊断（见下）：typed generic call（TSX 的 `<T>(` 消歧）、
-//      自闭合元素、legacy octal `042`、顶层 return。
-// 测试面：
-//   ① 每源解析 meta：ok/body 语句数/diagnostics 数；
-//   ② AST 节点 kind census——serde-impl JSON 重解析后按 "type" 字段全量计数
-//      进 BTreeMap 定序单行（JSON 仅中间物，ctxt 等字段不打印）；
-//   ③ typed AST 锚点 span：S1 FnDecl fib、S2 TsInterfaceDecl Shape、S3/S4
-//      首个 JSXElement（语句树下潜覆盖 Stmt/Decl/Expr/ModuleItem 枚举判别）；
-//   ④ S4 逐条诊断 span+消息。assert_eq! 锚定 4 源节点总数、锚点 span、
-//      诊断计数等关键常量（常量取自 native oracle 首跑，三维同源）。
-// 错误模型差异实锤（S4 选型依据）：oxc 对 JSX 闭合标签错配可恢复（保留 AST）；
-// swc 同一输入致命 Err（span=27..28 "Expected corresponding JSX closing tag
-// for <div>"，AST 全丢）——故 S4 不改抄 oxc，改用 swc 的可恢复类（emit_err
-// 系，parse Ok + take_errors 非空）诊断：严格 zone 的 legacy octal（一条
-// 字面量触发双诊断：targets-ES5+ 判定"Legacy octal literals are not
-// available when targeting ECMAScript 5 and higher" + 严格模式判定"Legacy
-// octal escape is not permitted in strict mode"，同 span）+ 顶层 return
-// ("Return statement is not allowed here")，AST 完整保留（census 74 节点
-// 照常出、JSX 锚点照常锚）。
-// 确定性：每源独立 fresh SourceMap → 首文件自 BytePos(1) 起，Span 全为数据
-// 派生绝对偏移（三维同源同值）；EsVersion::latest() 为 parser 内建常数（与
-// 版本同钉，无环境依赖）；诊断不经
-// emitter；BTreeMap census 定序；无 IO/时间/随机/线程；stderr 真空。
-// FRONTIER：无（stacker 裁除为预算性裁剪，非引擎阻塞实锤）。
+// swc_ecma_parser 41.1.2 (swc's hand-written recursive-descent parser; Box-tree AST + global
+// BytePos spans + the take_errors recovery model) differential. A sister pressure case to
+// c_oxc_parse: sources S1/S2/S3 are byte-for-byte the same text as that driver's, so one input
+// hits two very different lexer/visitor/AST implementations (swc has no arena and uses its own
+// Ts*/JSX* node-naming family). The measured anchor spans agree (swc BytePos is a 1-based
+// absolute offset: oxc (15,91)/(0,92)/(159,494) <-> swc (16,92)/(1,93)/(160,495)) while the
+// census names and counts differ entirely (90/122/116/74 vs oxc 92/99/118/62), which is the point.
+// Four sources are parsed:
+//   S1 ES script (parse_script): functions/recursion, regex literals, template strings,
+//      destructuring+rest, spread, for-of, bitwise operators;
+//   S2 TS module: generic interface, enum, class implements+parameter
+//      properties, satisfies, type alias, export default, never;
+//   S3 JSX module: hooks destructuring, fragments, JSX inside ternaries/arrows, attributes,
+//      expression containers;
+//   S4 TSX with recoverable diagnostics (below): typed generic call (TSX's `<T>(`
+//      disambiguation), self-closing elements, legacy octal `042`, top-level return.
+// Test surface:
+//   ① per-source parse meta: ok/body statement count/diagnostic count;
+//   ② AST node kind census -- after re-parsing the serde-impl JSON, every "type" field is
+//      counted into one BTreeMap-ordered line (JSON is only an intermediary; ctxt etc. omitted);
+//   ③ typed-AST anchor spans: S1 FnDecl fib, S2 TsInterfaceDecl Shape, S3/S4 the first
+//      JSXElement (descending the statement tree covers Stmt/Decl/Expr/ModuleItem discriminants);
+//   ④ S4 per-diagnostic span+message. assert_eq! anchors key constants: the four node totals,
+//      the anchor spans and the diagnostic count (taken from the first native oracle run).
+// Error-model difference (why S4 was chosen): oxc recovers from a mismatched JSX closing
+// tag, but swc fails fatally on the same input: span=27..28 "Expected corresponding JSX closing tag
+// for <div>", the whole AST lost. So S4 does not copy oxc; it uses swc's recoverable class
+// (the emit_err family, parse Ok + non-empty take_errors) for diagnostics: a strict-zone
+// legacy octal (one literal triggers two diagnostics: the targets-ES5+ verdict "Legacy octal literals are not
+// available when targeting ECMAScript 5 and higher" plus the strict-mode verdict "Legacy
+// octal escape is not permitted in strict mode", same span) and a top-level return
+// ("Return statement is not allowed here"), with the AST fully preserved (the census still
+// reports 74 nodes and the JSX anchor still resolves).
+// Determinism: each source gets a fresh SourceMap -> the first file starts at BytePos(1) and
+// every span is a data-derived absolute offset (same value in all three dimensions);
+// EsVersion::latest() is a parser built-in constant (pinned with the version, no environment
+// dependency); diagnostics bypass the emitter; BTreeMap census ordering; no IO/time/random/threads; stderr empty.
+// FRONTIER: none (the stacker cut is a budget trim, not a confirmed engine block).
 //
-// 三维复跑：
+// Three dimensions:
 //   A: target/release/mirvm run corpus/c_swc_parse.rs
 //   B: cd "$(grep -l 'name = "c_swc_parse"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname)" && \
 //        RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \
@@ -75,7 +75,7 @@ use swc_ecma_ast::*;
 use swc_ecma_parser::lexer::Lexer;
 use swc_ecma_parser::{EsSyntax, Parser, StringInput, Syntax, TsSyntax};
 
-// ① ES 脚本（parse_script，非 module）。与 c_oxc_parse S1 逐字节同文。
+// ① ES script (parse_script, not a module). Byte-for-byte the same text as c_oxc_parse S1.
 const SRC_ES: &str = r#"var total = 0;
 function fib(n) {
   if (n < 2) return n;
@@ -89,7 +89,7 @@ for (const x of arr) { total += x; }
 total = total ^ (total >> 1);
 "#;
 
-// ② TS module。与 c_oxc_parse S2 逐字节同文。
+// ② TS module. Byte-for-byte the same text as c_oxc_parse S2.
 const SRC_TS: &str = r#"interface Shape<T extends object = object> {
   kind: string;
   area(): number;
@@ -107,7 +107,7 @@ export default c;
 function assertNever(x: never): never { throw new Error("bad"); }
 "#;
 
-// ③ JSX module。与 c_oxc_parse S3 逐字节同文。
+// ③ JSX module. Byte-for-byte the same text as c_oxc_parse S3.
 const SRC_JSX: &str = r#"import { useState } from "react";
 const items = ["a", "b", "c"];
 export function List({ title, onPick }) {
@@ -128,9 +128,9 @@ export function List({ title, onPick }) {
 }
 "#;
 
-// ④ TSX 含可恢复诊断（parser.take_errors 系）：严格 zone 的 legacy octal
-// （双诊断同 span）+ 顶层 return，AST 完整保留。JSX 闭合错配在 swc 为致命
-// 型（见头注），故不沿用 oxc S4。
+// ④ TSX with recoverable diagnostics (the parser.take_errors family): a strict-zone legacy octal
+// (two diagnostics on the same span) plus a top-level return, with the AST fully preserved.
+// JSX closing mismatches are fatal in swc (see the header), so oxc's S4 is not reused.
 const SRC_TSX_BAD: &str = r#"export const App = (props: { name: string }) => {
   const [count, setCount] = useCount<number>(0);
   return (
@@ -145,7 +145,7 @@ const legacy = 042;
 return;
 "#;
 
-/// 遍历 JSON 值树，统计带 "type" 字符串字段的对象 = AST 节点 kind 计数。
+/// Walks the JSON value tree and counts objects with a "type" string field = AST node kinds.
 fn walk(v: &serde_json::Value, map: &mut BTreeMap<String, u64>, total: &mut u64) {
     match v {
         serde_json::Value::Object(m) => {
@@ -166,7 +166,7 @@ fn walk(v: &serde_json::Value, map: &mut BTreeMap<String, u64>, total: &mut u64)
     }
 }
 
-/// 返回 (总节点数, BTree 定序的 `kind:count|...` 单行)。
+/// Returns (total node count, one BTree-ordered `kind:count|...` line).
 fn census(json: &str) -> (u64, String) {
     let v: serde_json::Value = serde_json::from_str(json).unwrap();
     let mut map: BTreeMap<String, u64> = BTreeMap::new();
@@ -182,7 +182,7 @@ fn census(json: &str) -> (u64, String) {
     (total, line)
 }
 
-/// 解析单个源并打印 meta + census + 全量诊断；返回 (总节点数, 诊断数)。
+/// Parses one source, prints meta + census + all diagnostics; returns (node total, diagnostic count).
 fn report(label: &str, file: &str, src: &str, syntax: Syntax, is_module: bool) -> (u64, usize) {
     let cm = Lrc::new(SourceMap::new(FilePathMapping::empty()));
     let fm = cm.new_source_file(Lrc::new(FileName::Custom(file.into())), src.to_string());
@@ -226,7 +226,7 @@ fn report(label: &str, file: &str, src: &str, syntax: Syntax, is_module: bool) -
     }
 }
 
-/// 表达式树里找第一个 JSXElement（覆盖 Paren/Cond/Arrow 形态枚举判别）。
+/// Finds the first JSXElement in an expression tree (covering Paren/Cond/Arrow discriminant forms).
 fn jsx_of_expr<'a>(e: &'a Expr) -> Option<&'a JSXElement> {
     match e {
         Expr::JSXElement(el) => Some(el),
@@ -301,7 +301,7 @@ fn jsx_name(el: &JSXElement) -> &str {
 fn main() {
     println!("swc_ecma_parser 41.1.2 JS/TS/JSX differential");
 
-    // ---- ① ES 脚本 ----
+    // ---- ① ES script ----
     let (n1, d1) = report(
         "S1 es-script",
         "s1.js",
@@ -415,7 +415,7 @@ fn main() {
     assert_eq!(n3, 116, "S3 node total");
     assert_eq!(d3, 0);
 
-    // ---- ④ TSX 可恢复诊断 ----
+    // ---- ④ TSX recoverable diagnostics ----
     let (n4, d4) = report(
         "S4 tsx-recoverable",
         "s4.tsx",
@@ -450,7 +450,7 @@ fn main() {
         println!("recover ok = true");
     }
     assert_eq!(n4, 74, "S4 node total");
-    assert_eq!(d4, 3, "S4 octal 双诊断 + 顶层 return");
+    assert_eq!(d4, 3, "S4 octal double diagnostic + top-level return");
 
     println!("assert anchors OK");
 }

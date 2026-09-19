@@ -1,15 +1,19 @@
-//! Trap 债务统计（调研仪器，纯 IR 分析）：M4 各期开工前用它拿真实债务表，
-//! 防止凭直觉排工。`mirvm run --engine vm --vm-stats <file.rs>`。
+//! Trap-debt statistics (survey instrument; pure IR analysis).
+//! `mirvm run --engine vm --vm-stats <file.rs>`.
 //!
-//! 可达分析盲点修复（与 lower 配套）：语句失败 = `Stmt::Trap` 占位、终止子照常降低
-//! （Call 边保住）；非标量参函数 = 入口 Trap 语句、体照常降低——BFS 现在看得到全下游。
-//! 残余盲点：间接调用（fn ptr）与整函数 trap_body（layout 失败/intrinsic）仍无出边。
+//! Reachability blind spots the lowerer closes: a failed statement becomes a `Stmt::Trap`
+//! placeholder while its terminator still lowers (keeping Call edges), and a function with
+//! non-scalar params gets an entry Trap statement while its body still lowers -- so the BFS
+//! now sees the whole downstream cone.
+//! Remaining blind spots: indirect calls (fn pointers) and whole-function trap bodies
+//! (layout failure / intrinsic) still have no out-edges.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::ir::{Module, Stmt, Terminator};
 
-/// 聚合键：诊断串截断（Debug 载荷会让原因逐条唯一，按前缀归类）。
+/// Grouping key: truncate the diagnostic string. Debug payloads make every reason unique,
+/// so reasons are classified by prefix instead.
 fn group_key(reason: &str) -> String {
     let cut = reason
         .char_indices()
@@ -19,10 +23,10 @@ fn group_key(reason: &str) -> String {
     reason[..cut].to_string()
 }
 
-/// 分期归属（按诊断串标签）。
+/// Phase bucket of a diagnostic string, keyed by its embedded label.
 fn phase_of(reason: &str) -> &'static str {
     if reason.starts_with("foreign") {
-        "foreign(os::种子)"
+        "foreign(os::seed)"
     } else if reason.contains("M4.1+") {
         "M4.1+"
     } else if reason.contains("M4.1") {
@@ -36,11 +40,11 @@ fn phase_of(reason: &str) -> &'static str {
     } else if reason.contains("M4.x") {
         "M4.x"
     } else {
-        "未标注"
+        "unlabeled"
     }
 }
 
-/// 遍历一个函数体的全部 Trap 原因（语句级 + 终止子级）。
+/// All Trap reasons of one function body: statement-level plus terminator-level.
 fn traps_of(f: &super::ir::FuncBody) -> impl Iterator<Item = &str> {
     f.blocks.iter().flat_map(|b| {
         let stmt_traps = b.stmts.iter().filter_map(|s| match s {
@@ -75,11 +79,11 @@ pub fn report(module: &Module) -> String {
     }
 
     out.push_str(&format!(
-        "instance 总数 {total}，含 Trap 的 {funcs_with_trap}（{:.1}%）\n",
+        "instances {total}, with Trap {funcs_with_trap} ({:.1}%)\n",
         funcs_with_trap as f64 / total.max(1) as f64 * 100.0
     ));
 
-    out.push_str("\n== 分期债务余额（Trap 计数）==\n");
+    out.push_str("\n== Trap debt by phase (Trap count) ==\n");
     let mut ph: Vec<(&str, usize)> = phases.into_iter().collect();
     ph.sort_by_key(|a| std::cmp::Reverse(a.1));
     for (p, n) in &ph {
@@ -88,12 +92,13 @@ pub fn report(module: &Module) -> String {
 
     let mut hist: Vec<(String, usize)> = histogram.into_iter().collect();
     hist.sort_by_key(|a| std::cmp::Reverse(a.1));
-    out.push_str("\n== Trap 原因 TOP25 ==\n");
+    out.push_str("\n== Trap reasons TOP25 ==\n");
     for (reason, n) in hist.iter().take(25) {
         out.push_str(&format!("{n:6}  {reason}\n"));
     }
 
-    // foreign 全清单（os:: 注册表种子，M4.3 开工调研的直接输入；不截断、不进 TOP 竞争）
+    // Full foreign list (seeds for the os:: registry): untruncated, so it does not compete
+    // for the TOP25 cutoff.
     let mut fm: HashMap<&str, usize> = HashMap::new();
     for f in &module.funcs {
         for r in traps_of(f) {
@@ -105,14 +110,14 @@ pub fn report(module: &Module) -> String {
     if !fm.is_empty() {
         let mut foreigns: Vec<(&str, usize)> = fm.into_iter().collect();
         foreigns.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-        out.push_str("\n== foreign 符号全清单（os:: 种子）==\n");
+        out.push_str("\n== full foreign symbol list (os:: seeds) ==\n");
         for (reason, n) in &foreigns {
             out.push_str(&format!("{n:6}  {reason}\n"));
         }
     }
 
-    // 裸名导出（no_mangle / @entry）：可达 Trap 分析（BFS 经 Call 边）
-    out.push_str("\n== 各导出/入口的可达 Trap（BFS 经 Call 边）==\n");
+    // Unmangled exports (no_mangle / @entry): reachable Trap analysis, BFS over Call edges.
+    out.push_str("\n== reachable Traps per export/entry (BFS over Call edges) ==\n");
     let mut exports: Vec<(&str, u32)> = module
         .exports
         .iter()
@@ -142,7 +147,7 @@ pub fn report(module: &Module) -> String {
         }
         if reason_hist.is_empty() {
             out.push_str(&format!(
-                "  {name}: ✅ 可达路径 trap-free（{} fn 可达）\n",
+                "  {name}: ✅ reachable path trap-free ({} fns reachable)\n",
                 seen.len()
             ));
         } else {
@@ -150,7 +155,7 @@ pub fn report(module: &Module) -> String {
             ph.sort_by_key(|a| std::cmp::Reverse(a.1));
             let ph_str: Vec<String> = ph.iter().map(|(p, n)| format!("{p}:{n}")).collect();
             out.push_str(&format!(
-                "  {name}: {} 类可达 Trap，{} fn 可达 | {}\n",
+                "  {name}: {} kinds of reachable Trap, {} fns reachable | {}\n",
                 reason_hist.len(),
                 seen.len(),
                 ph_str.join(" ")

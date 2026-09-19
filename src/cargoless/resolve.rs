@@ -1,22 +1,26 @@
-//! `cargoless/resolve.rs` —— 版本求解 + feature 统一 → 编译单元图（D15 P1，设计档 §3.5）。
+//! `cargoless/resolve.rs` -- version resolution + feature unification -> compilation
+//! unit graph.
 //!
-//! 双模式（设计档 §5 P1 闭合契约）：
-//! - **lock 模式**（项目带 Cargo.lock）：版本全按 lock（yanked 照吃，cargo 同）；
-//!   附带完整性校验——manifest req 不被 locked 版本满足即响亮报错（lock 过期）。
-//! - **fresh 模式**（frontmatter 脚本/无 lock）：pubgrub 对 sparse index 求解
-//!   （yanked 跳过；prerelease 按 cargo 近似规则——任一依赖方 req 带 pre
-//!   comparator 才放行，比 cargo 的 per-major.minor.patch 规则宽一档，记账），
-//!   解出生成 canonical Cargo.lock（供复现与 cargo --locked 反证）。
+//! Two modes:
+//! - **lock mode** (the project has a Cargo.lock): every version comes from the lock
+//!   (yanked crates included, as in cargo), with an integrity check -- a manifest
+//!   requirement that the locked version does not satisfy is a loud error (the lock is
+//!   stale).
+//! - **fresh mode** (frontmatter script / no lock): pubgrub resolves against the sparse
+//!   index (yanked skipped; prereleases follow an approximation of cargo's rule -- a
+//!   prerelease is admitted only when some dependent's requirement carries a pre
+//!   comparator, one notch looser than cargo's per-major.minor.patch rule), and the
+//!   result is written out as a canonical Cargo.lock for reproducibility and for
+//!   `cargo --locked` refutation.
 //!
-//! feature 统一 = resolver v2 语义子集：**normal 边与 build 边分列**（同一 crate
-//! 两类 feature 集不同 = 两个编译单元）、dev 边整体不求、optional 三形态
-//! （隐式 feature / dep: 显式 / ?/ 弱 + / 强强弱规则）、default_features 边规则。
-//! registry crate 的 feature/dep 元数据取自 sparse index（cargo 同），
-//! lib 名/proc-macro/links/build.rs 实存从解包源的**最小 manifest 读取**拿
-//! （不跑全量子集解析——registry crate manifest 形态不设防）。
-
-// P1 逐切接入中：P2 切① 已接上 schedule/driver（设计档 §5）；个别字段的消费
-// 归后续切片（就地 #[allow(dead_code)] 点名），不再整文件豁免。
+//! Feature unification = the resolver v2 semantics subset: **normal and build edges are
+//! listed separately** (the same crate with different feature sets for the two classes
+//! is two compilation units), dev edges are not resolved at all, the three optional
+//! forms (implicit feature / explicit dep: / weak ?/ plus strong /), and the
+//! default_features edge rule. Feature/dependency metadata for registry crates comes
+//! from the sparse index (as in cargo); lib name/proc-macro/links/build.rs presence come
+//! from a **minimal manifest read** of the unpacked source (no full subset parse --
+//! registry crate manifests make no promises).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -31,7 +35,7 @@ use super::manifest::{
 use super::registry::{IndexEntry, IndexVersion, Registry};
 use pubgrub::Reporter as _;
 
-// ---------- 供给面抽象（生产 = Registry；测试 = 内存 fake） ----------
+// ---------- package source abstraction (production = Registry; tests = in-memory fake) ----------
 
 pub trait PkgSource {
     fn registry_source(&mut self, reference: &RegistryReference) -> Result<String, String>;
@@ -50,7 +54,7 @@ pub trait PkgSource {
         locked_source: Option<&str>,
     ) -> Result<PackageManifest, String> {
         let _ = (spec, package, locked_source);
-        Err("当前 package source 不支持 Git 依赖".into())
+        Err("the current package source does not support Git dependencies".into())
     }
 }
 
@@ -80,91 +84,104 @@ impl PkgSource for Registry {
     }
 }
 
-// ---------- 输出模型 ----------
+// ---------- output model ----------
 
-/// 编译单元类别（resolver v2 的 normal/build 分列）。
+/// Compilation unit class (the resolver v2 split between normal and build).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum UnitClass {
     Normal,
     Build,
 }
 
-/// 一条已解依赖边（指向 units 下标）。
+/// One resolved dependency edge (pointing at an index into `units`).
 #[derive(Clone, Debug)]
 pub struct UnitDep {
-    /// --extern 命名键：有 rename（`package = "..."`）用 rename key，否则用
-    /// dep 包的 lib target 名（extern_key 的 cargo 语义出处见该函数注释）。
+    /// The `--extern` naming key: the rename key when renamed (`package = "..."`),
+    /// otherwise the dep package's lib target name (see `extern_key` for the cargo
+    /// semantics behind it).
     pub key: String,
     pub unit: usize,
-    /// 边类（normal/build）；切③ 起按边类分列消费（extern 过滤、build
-    /// 闭包、build script --extern）。
+    /// Edge class (normal/build); consumers filter by it (extern filtering, build
+    /// closure, build script --extern).
     pub class: UnitClass,
     pub kind: DepKind,
 }
 
-/// 一个编译单元（包 × 类别 × feature 集）。
+/// One compilation unit (package x class x feature set).
 #[derive(Clone, Debug)]
 pub struct Unit {
     pub package: String,
-    /// lib 目标名（--extern 文件名端；无 lib 时同 package）。
+    /// Lib target name (the file-name side of --extern; equals package when there is no
+    /// lib).
     pub lib_name: String,
     pub version: Version,
     pub source_dir: PathBuf,
     pub from_registry: bool,
-    /// Git 等不可变、但仅靠 package/version 无法区分的精确来源身份。
-    /// registry 包由 version + checksum 约束，保持 None；path 包走源树快照。
+    /// A precise source identity that is immutable like Git but cannot be told apart by
+    /// package/version alone. A registry package is pinned by version + checksum and
+    /// keeps this `None`; a path package goes through source-tree snapshotting.
     pub immutable_source_id: Option<String>,
-    /// 本 unit 的类别（resolver v2 normal/build 分列的节点键成分；边类过滤
-    /// 走 UnitDep.class，本字段是审计/模型面留存）。
+    /// This unit's class (a node key component of the resolver v2 normal/build split;
+    /// edge class filtering uses `UnitDep.class`, so this field is kept for the audit
+    /// and model surface).
     #[allow(dead_code)]
     pub class: UnitClass,
     pub features: BTreeSet<String>,
-    /// Cargo 传给 rustc `--check-cfg cfg(feature, values(...))` 的声明全集；
-    /// 与上面的本次启用集合是两件事。
+    /// The full declaration set Cargo passes to rustc as
+    /// `--check-cfg cfg(feature, values(...))`; distinct from the enabled set above.
     pub declared_features: BTreeSet<String>,
     pub proc_macro: bool,
     pub has_build_script: bool,
-    /// `[package] build = "custom.rs"` 的自定义 build script 路径；
-    /// None = 缺省 <source_dir>/build.rs（切③ build.rs 调度用）。
+    /// Custom build script path from `[package] build = "custom.rs"`; `None` means the
+    /// default `<source_dir>/build.rs` (used by build.rs scheduling).
     pub build_script_path: Option<PathBuf>,
-    /// -sys 链接键（切③：DEP_* 传播键与 links 互斥校验消费）。
+    /// The -sys link key (used for DEP_* propagation keys and the links mutual-exclusion
+    /// check during build.rs scheduling).
     pub links: Option<String>,
     pub deps: Vec<UnitDep>,
-    /// package.edition（registry 包缺省 "2015"）——dep rustc 参数用。
+    /// package.edition ("2015" by default for registry packages) -- used for dep rustc
+    /// arguments.
     pub edition: String,
-    /// lib 根文件绝对路径（[lib] path 或缺省 src/lib.rs）——dep rustc 参数用。
+    /// Absolute path of the lib root file ([lib] path or the default src/lib.rs) -- used
+    /// for dep rustc arguments.
     pub lib_path: PathBuf,
-    /// CARGO_PKG_* env 全集（manifest::pkg_env_map 计算；dep 编译子进程 env）。
+    /// The full CARGO_PKG_* env set (computed by `manifest::pkg_env_map`; env for the dep
+    /// compilation subprocess).
     pub pkg_env: BTreeMap<String, String>,
-    /// 本包 `[lints]` 生成的 rustc 参数；每个 target（含 build.rs）都要消费。
+    /// rustc arguments generated from this package's `[lints]`; every target (build.rs
+    /// included) must consume them.
     pub rustc_lint_flags: Vec<String>,
 }
 
-/// 解析结果。
+/// Resolution result.
 #[derive(Clone, Debug)]
 pub struct ResolvePlan {
     pub root_name: String,
     pub root_version: Version,
-    /// 审计面字段（P1 对账工具留存；P2 driver 从 manifest 直取根目录）。
+    /// Audit-surface field kept for the reconciliation tool; the driver takes the root
+    /// directory from the manifest instead.
     #[allow(dead_code)]
     pub root_dir: PathBuf,
     pub root_features: BTreeSet<String>,
     pub units: Vec<Unit>,
-    /// 根（bin）的 --extern 边表：根本身不是 unit，但 bin 会话需要同一套
-    /// 依赖边（与 units 填边同一套门，assemble_units 产出）。
+    /// The root (bin) --extern edge table: the root is not a unit itself, but a bin
+    /// session needs the same dependency edges (through the same gates as the unit edges;
+    /// produced by assemble_units).
     pub root_deps: Vec<UnitDep>,
-    /// name → 已解版本集（审计面：与 Cargo.lock 对账用）。
+    /// name -> resolved version set (audit surface: used to reconcile against Cargo.lock).
     pub version_map: BTreeMap<String, Vec<Version>>,
-    /// fresh 模式 = 生成的 canonical lock；lock 模式 = 输入 lock 回显。
+    /// fresh mode = the generated canonical lock; lock mode = the input lock echoed back.
     pub lock: Lockfile,
 }
 
-/// 同一次 workspace 命令中，从其他根传播来的 resolver v2 feature 并集。
-/// 键包含版本与 normal/build 类别，避免把 Cargo 明确分开的编译单元揉在一起。
+/// The union of resolver v2 features propagated from other roots in the same workspace
+/// command. The key carries the version and the normal/build class so that compilation
+/// units Cargo deliberately keeps apart are not merged.
 pub type FeatureOverrides = BTreeMap<(String, Version, UnitClass), BTreeSet<String>>;
 
-/// 根包当前用途只改变 dev 依赖是否进入构建图；版本求解和 Cargo.lock 始终
-/// 看见根 dev 依赖，与 Cargo 在 `cargo build` 时也会锁定 dev 依赖的行为一致。
+/// The root package's current purpose only changes whether dev dependencies enter the
+/// build graph; version resolution and Cargo.lock always see the root dev dependencies,
+/// matching Cargo locking dev dependencies on `cargo build` too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResolvePurpose {
     Run,
@@ -177,7 +194,7 @@ impl ResolvePurpose {
     }
 }
 
-// ---------- 主入口 ----------
+// ---------- main entry points ----------
 
 pub fn resolve(root: &PackageManifest, src: &mut impl PkgSource) -> Result<ResolvePlan, String> {
     resolve_for(root, src, ResolvePurpose::Run)
@@ -191,8 +208,10 @@ pub fn resolve_for(
     resolve_for_known(root, src, purpose, &[])
 }
 
-/// Workspace 版入口：`known_paths` 是已经完成 workspace 继承物化的成员清单。
-/// path 边命中成员目录时必须复用它，不能重新读取仍含 `workspace = true` 的原文。
+/// Workspace entry point: `known_paths` are the members whose workspace inheritance has
+/// already been materialized. When a path edge lands on a member directory it must reuse
+/// that manifest rather than re-reading the original, which still says
+/// `workspace = true`.
 pub fn resolve_for_known(
     root: &PackageManifest,
     src: &mut impl PkgSource,
@@ -240,7 +259,7 @@ pub fn resolve_for_known_with_features(
         {
             if manifest.name != patch.dependency.package {
                 return Err(format!(
-                    "[patch] 键 {} 指向的 package.name 是 {}",
+                    "[patch] key {} points at package.name {}",
                     patch.dependency.package, manifest.name
                 ));
             }
@@ -268,7 +287,7 @@ pub fn resolve_for_known_with_features(
             }
             if !matched {
                 return Err(format!(
-                    "[patch] registry 来源没有 {} 的匹配版本 {}",
+                    "[patch] registry source has no version of {} matching {}",
                     patch.dependency.package, req
                 ));
             }
@@ -292,7 +311,7 @@ pub fn resolve_for_known_with_features(
         {
             if manifest.name != replacement.package || manifest.version != replacement.version {
                 return Err(format!(
-                    "[replace] {}:{} 必须替换为同名同版本 package，实际为 {}:{}",
+                    "[replace] {}:{} must be replaced by a package of the same name and version, got {}:{}",
                     replacement.package, replacement.version, manifest.name, manifest.version
                 ));
             }
@@ -310,7 +329,7 @@ pub fn resolve_for_known_with_features(
                     .any(|candidate| candidate.version == replacement.version)
             {
                 return Err(format!(
-                    "[replace] 来源没有 {} {}",
+                    "[replace] source has no {} {}",
                     replacement.package, replacement.version
                 ));
             }
@@ -324,14 +343,15 @@ pub fn resolve_for_known_with_features(
             .is_some()
         {
             return Err(format!(
-                "[replace] 重复指定 {} {}",
+                "[replace] {} {} is specified twice",
                 replacement.package, replacement.version
             ));
         }
     }
 
-    // path/Git 依赖 BFS。Git 的可变引用在这里解析成精确 commit；已有 lock
-    // 只按 lock source 取 commit，不重新解释 branch/tag/default HEAD。
+    // BFS over path/Git dependencies. A movable Git reference is resolved to a precise
+    // commit here; an existing lock only supplies the commit for the lock source and does
+    // not reinterpret branch/tag/default HEAD.
     let mut path_manifests: BTreeMap<String, PackageManifest> = BTreeMap::new();
     let mut queue: VecDeque<(PackageManifest, bool)> = VecDeque::new();
     for manifest in override_manifests {
@@ -354,12 +374,16 @@ pub fn resolve_for_known_with_features(
                         .map(Ok)
                         .unwrap_or_else(|| read_path_manifest(&absolute))
                         .map_err(|error| {
-                            format!("path 依赖 {}（{}）: {error}", d.package, absolute.display())
+                            format!(
+                                "path dependency {} ({}): {error}",
+                                d.package,
+                                absolute.display()
+                            )
                         })?;
                     if let Some(checkout) = &m.git_checkout_root {
                         if !absolute.starts_with(checkout) {
                             return Err(format!(
-                                "Git 包 {} 的 path 依赖 {} 逃出仓库 checkout；Cargo Git source 不允许引用仓库外路径",
+                                "path dependency {} of Git package {} escapes the repository checkout; a Cargo Git source may not reference a path outside the repository",
                                 m.name,
                                 absolute.display()
                             ));
@@ -384,7 +408,7 @@ pub fn resolve_for_known_with_features(
                 if let Some(existing) = path_manifests.get(&identity) {
                     if existing.root != manifest.root {
                         return Err(format!(
-                            "本地/Git package 身份碰撞 `{}`：{} 与 {}",
+                            "local/Git package identity collision on `{}`: {} and {}",
                             d.package,
                             existing.root.display(),
                             manifest.root.display()
@@ -401,8 +425,9 @@ pub fn resolve_for_known_with_features(
         }
     }
 
-    // 版本求解 + feature 统一（两遍：resolve 图 = 强 ∪ 弱引用（lock/求解门），
-    // 构建图 = 仅强边（units 的 feature 与可构建性，与 cargo build 图一致））
+    // Version resolution + feature unification (two passes: the resolve graph = strong
+    // and weak references together (the lock/resolution gate), the build graph = strong
+    // edges only (unit features and buildability, matching cargo's build graph))
     let (version_map, out_lock, _lock_nodes, build_nodes, edge_versions) = match &input_lock {
         Some(lf) => {
             let (vm, ev) = versions_from_lock(root, &path_manifests, lf)?;
@@ -427,9 +452,11 @@ pub fn resolve_for_known_with_features(
             (vm, lf.clone(), nodes, build_nodes, ev)
         }
         None => {
-            // 迭代不动点：optional 依赖只在被（父包, 依赖键）激活或弱引用时
-            // 进版本求解（cargo 语义——全局包名门会把 zerovec 的 yoke 误植到
-            // litemap）；激活集单调扩张 ⇒ 收敛。
+            // Iteration to a fixed point: an optional dependency enters version
+            // resolution only when activated by a (parent package, dependency key) pair
+            // or weakly referenced (cargo semantics -- a global package-name gate would
+            // misattribute zerovec's yoke to litemap). The activation set grows
+            // monotonically, so this converges.
             let mut activated: BTreeSet<(String, Version, String)> = BTreeSet::new();
             let mut preferred_exact_versions = BTreeMap::new();
             let fresh_context = FreshSolveContext {
@@ -457,9 +484,9 @@ pub fn resolve_for_known_with_features(
                 )?;
                 new_activated.extend(activated.iter().cloned());
                 if new_activated == activated {
-                    // 收敛后才补 lock 依赖行：optional 门按（父包, 依赖键）
-                    // 判定（全局集合会把 cipher 的 zeroize 误植到
-                    // generic-array——chacha 实锤）
+                    // Lock dependency lines are filled in only after convergence: the
+                    // optional gate is judged per (parent package, dependency key), since
+                    // a global set would misattribute cipher's zeroize to generic-array.
                     let mut lf = lf;
                     fill_lock_dependency_lines(
                         &mut lf,
@@ -487,7 +514,8 @@ pub fn resolve_for_known_with_features(
         }
     };
 
-    // 编译单元装配（构建图节点：仅强边激活面）+ 根的 --extern 边表
+    // Compilation unit assembly (build graph nodes: only the strong-edge activation
+    // surface) plus the root's --extern edge table
     let (units, root_deps) = assemble_units(
         root,
         &path_manifests,
@@ -546,9 +574,9 @@ fn registry_entry(src: &mut impl PkgSource, identity: &str) -> Result<IndexEntry
 
 #[derive(Clone, Debug, Default)]
 struct SourceOverrides {
-    /// (原 registry 身份, 版本) -> patch 来源身份。
+    /// (original registry identity, version) -> patch source identity.
     patches: BTreeMap<(String, Version), String>,
-    /// (被替换 registry 身份, 精确版本) -> replacement 来源身份。
+    /// (replaced registry identity, exact version) -> replacement source identity.
     replacements: BTreeMap<(String, Version), String>,
 }
 
@@ -581,7 +609,7 @@ impl SourceOverrides {
                     .cloned()
                     .ok_or_else(|| {
                         format!(
-                            "[patch] 来源 {} 没有 {} {version}",
+                            "[patch] source {} has no {} {version}",
                             selected,
                             identity_package_name(identity)
                         )
@@ -659,13 +687,13 @@ fn local_dep_identity(
     let first = matches.next().map(|(identity, _)| identity.clone());
     if matches.next().is_some() {
         return Err(format!(
-            "依赖 {} 匹配到多个相同来源的本地/Git package",
+            "dependency {} matches several local/Git packages with the same source",
             dependency.package
         ));
     }
     first.ok_or_else(|| {
         format!(
-            "依赖 {} 的本地/Git package 已获取但无法按来源定位",
+            "the local/Git package of dependency {} was fetched but cannot be located by source",
             dependency.package
         )
     })
@@ -686,7 +714,7 @@ fn read_path_manifest(path: &Path) -> Result<PackageManifest, String> {
                     .find(|member| member.root == canonical)
             })
         })
-        .ok_or_else(|| format!("{} 不是可解析的 Cargo package", path.display()))
+        .ok_or_else(|| format!("{} is not a resolvable Cargo package", path.display()))
 }
 
 fn locked_git_source(
@@ -706,18 +734,18 @@ fn locked_git_source(
     let first = matches.next().and_then(|package| package.source.clone());
     if matches.next().is_some() {
         return Err(format!(
-            "Cargo.lock 对 Git 依赖 {package} / {source_id} 有多个精确 commit，无法消歧"
+            "Cargo.lock has several precise commits for Git dependency {package} / {source_id}; cannot disambiguate"
         ));
     }
     if first.is_none() {
         return Err(format!(
-            "Cargo.lock 过期：Git 依赖 {package} 没有匹配 {source_id} 的 locked package"
+            "stale Cargo.lock: Git dependency {package} has no locked package matching {source_id}"
         ));
     }
     Ok(first)
 }
 
-// ---------- lock 模式 ----------
+// ---------- lock mode ----------
 
 fn versions_from_lock(
     root: &PackageManifest,
@@ -726,14 +754,14 @@ fn versions_from_lock(
 ) -> Result<(BTreeMap<String, Vec<Version>>, EdgeVersions), String> {
     let mut map: BTreeMap<String, Vec<Version>> = BTreeMap::new();
     let mut edges: EdgeVersions = BTreeMap::new();
-    // 从 root 的 lock 行出发走图（root 包本身必在 lock 中）
+    // Walk the graph from the root's lock row (the root package is always in the lock)
     let root_locked = lf
         .packages
         .iter()
         .find(|p| p.name == root.name && p.version == root.version)
         .ok_or_else(|| {
             format!(
-                "Cargo.lock 无根包 {} {}——lock 与 manifest 脱节（重新解析或删 lock）",
+                "Cargo.lock has no root package {} {} -- the lock and the manifest are out of sync (re-resolve or delete the lock)",
                 root.name, root.version
             )
         })?;
@@ -760,13 +788,13 @@ fn versions_from_lock(
                 [child] => *child,
                 [] => {
                     return Err(format!(
-                        "lock 图断链：{} {:?} {:?} 找不到包行",
+                        "broken lock graph: no package row for {} {:?} {:?}",
                         dependency.name, dependency.version, dependency.source
                     ));
                 }
                 _ => {
                     return Err(format!(
-                        "lock 图歧义：{} 匹配到 {} 个包行，依赖行缺少 version/source 消歧",
+                        "ambiguous lock graph: {} matches {} package rows and the dependency line lacks version/source disambiguation",
                         dependency.name,
                         candidates.len()
                     ));
@@ -774,9 +802,11 @@ fn versions_from_lock(
             };
             let effective_child = effective_locked_package(lf, child)?;
             let child_identity = locked_package_identity(effective_child, path_manifests)?;
-            // 边版本记录：lock 依赖行不带 kind 信息——Normal/Build 双键登记。
-            // 消歧器同时保留已选子包的 source 与版本：registry 同源多版本不能
-            // 相互覆盖，Git 包又必须保留 URL/commit 供 manifest source 匹配。
+            // Edge version record: lock dependency lines carry no kind information, so
+            // register under both Normal and Build. The disambiguator keeps both the
+            // chosen child's source and version: registry versions of one source must not
+            // overwrite each other, while a Git package must keep its URL/commit for
+            // manifest source matching.
             let disambiguator = child.source.as_ref().map_or_else(
                 || child.version.to_string(),
                 |source| format!("{source} {}", child.version),
@@ -805,7 +835,8 @@ fn versions_from_lock(
             vs.push(v);
         }
     }
-    // 完整性校验：manifest 的每个 registry req 必须被 locked 版本满足（lock 过期防线）
+    // Integrity check: every registry req in a manifest must be satisfied by a locked
+    // version (the guard against a stale lock)
     let check = |m: &PackageManifest, include_dev: bool| -> Result<(), String> {
         for d in m
             .deps
@@ -823,7 +854,7 @@ fn versions_from_lock(
                     .is_some_and(|versions| versions.iter().any(|version| req.matches(version)))
             {
                 return Err(format!(
-                    "Cargo.lock 过期：{} 的 locked 版本不满足 req {req}（manifest 变了，重解或删 lock）",
+                    "stale Cargo.lock: the locked version of {} does not satisfy req {req} (the manifest changed; re-resolve or delete the lock)",
                     d.package
                 ));
             }
@@ -847,12 +878,13 @@ fn effective_locked_package<'a>(
     let mut parts = replace.split_whitespace();
     let name = parts
         .next()
-        .ok_or_else(|| format!("Cargo.lock replace 行非法：{replace}"))?;
+        .ok_or_else(|| format!("invalid Cargo.lock replace line: {replace}"))?;
     let version = parts
         .next()
-        .ok_or_else(|| format!("Cargo.lock replace 行缺版本：{replace}"))
+        .ok_or_else(|| format!("Cargo.lock replace line lacks a version: {replace}"))
         .and_then(|version| {
-            Version::parse(version).map_err(|error| format!("Cargo.lock replace 版本非法：{error}"))
+            Version::parse(version)
+                .map_err(|error| format!("invalid version on Cargo.lock replace line: {error}"))
         })?;
     let candidates = lock
         .packages
@@ -866,10 +898,10 @@ fn effective_locked_package<'a>(
     match candidates.as_slice() {
         [replacement] => Ok(*replacement),
         [] => Err(format!(
-            "Cargo.lock replace `{replace}` 找不到替身 package 行"
+            "Cargo.lock replace `{replace}` has no replacement package row"
         )),
         _ => Err(format!(
-            "Cargo.lock replace `{replace}` 匹配多个替身 package 行"
+            "Cargo.lock replace `{replace}` matches several replacement package rows"
         )),
     }
 }
@@ -886,7 +918,7 @@ fn locked_package_identity(
     let first = matches.next().map(|(identity, _)| identity.clone());
     if matches.next().is_some() {
         return Err(format!(
-            "Cargo.lock package {} {} {:?} 匹配多个本地/Git package",
+            "Cargo.lock package {} {} {:?} matches several local/Git packages",
             package.name, package.version, package.source
         ));
     }
@@ -898,14 +930,15 @@ fn locked_package_identity(
     }))
 }
 
-// ---------- fresh 模式（pubgrub + lazy-bucket 多版本） ----------
+// ---------- fresh mode (pubgrub + lazy-bucket multi-version) ----------
 //
-// pubgrub 标准模型是"每包一个版本"；cargo 允许同名多版本并存
-// （hashbrown 0.14/0.15、syn 1/2/3 同图——boa/arkworks 实锤）。
-// 表达法 = lazy-bucket：包 id = (name, bucket)，dep 边到达时若与某既有
-// bucket 的累积区间存在共同候选（index 有版本同满足）则并入，否则开新
-// bucket——恰为 cargo 的"可统一则统一、不可统一则并存"语义；
-// 回退由 pubgrub 按 bucket 独立完成。
+// The standard pubgrub model is "one version per package", while cargo allows several
+// versions of one name to coexist (hashbrown 0.14/0.15, syn 1/2/3 in one graph).
+// Encoding: lazy-bucket -- a package id is (name, bucket). When a dep edge arrives and
+// its requirement shares a candidate with an existing bucket's accumulated range (some
+// index version satisfies both), it joins that bucket; otherwise it opens a new one.
+// That is exactly cargo's "unify when possible, otherwise coexist" semantics, and
+// pubgrub does backtracking per bucket independently.
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Pkg {
@@ -929,16 +962,20 @@ impl std::fmt::Display for Pkg {
     }
 }
 
-// pubgrub::Package 由 blanket impl（Clone+Eq+Hash+Debug+Display）自动满足。
+// pubgrub::Package is satisfied automatically by the blanket impl
+// (Clone+Eq+Hash+Debug+Display).
 
-/// 求解后每条 dep 边指向的版本：((父 lock 名, 父版本), 依赖键, 消歧器, 类别)
-/// → (包, 版本)。消歧器：fresh 模式 = req 串（同名多 req 条目必须分立，
-/// ruint 四个 ark-ff 系列实锤）；lock 模式 = 子版本串（dep 行 hint）。
+/// The version each dep edge points at after solving: ((parent lock name, parent
+/// version), dependency key, disambiguator, class) -> (package, version). The
+/// disambiguator is the req string in fresh mode (entries with several reqs for one name
+/// must stay separate, as in the four ark-ff crates of ruint) and the child version string
+/// in lock mode (the hint on the dep line).
 pub type EdgeVersions = BTreeMap<(String, Version, String, String, UnitClass), (String, Version)>;
 
-type RawDep = (String, String, VersionReq, UnitClass, bool); // (依赖键, 包名, req, 类别, 是否 registry)
+// (dependency key, package name, req, class, is-registry)
+type RawDep = (String, String, VersionReq, UnitClass, bool);
 
-/// (parent, dep key, class) → (pkg, bucket) 的边分派记录类型。
+/// Edge assignment record type: (parent, dep key, class) -> (pkg, bucket).
 type EdgeAssign = BTreeMap<(String, Version, String, String, UnitClass), (String, u32)>;
 
 fn dep_unit_class(kind: DepKind) -> UnitClass {
@@ -947,10 +984,11 @@ fn dep_unit_class(kind: DepKind) -> UnitClass {
         DepKind::Build => UnitClass::Build,
     }
 }
-/// get_dependencies 幂等 memo 值类型。
+
+/// Value type of the idempotent `get_dependencies` memo.
 type DepsRc = std::rc::Rc<Vec<(Pkg, pubgrub::Ranges<Version>)>>;
 
-/// pre comparator 记录类型（(major, minor, patch) 三元组列表）。
+/// pre comparator record type (a list of (major, minor, patch) triples).
 type PreComparators = Vec<(u64, Option<u64>, Option<u64>)>;
 
 struct CratesIo<'a, S: PkgSource> {
@@ -960,23 +998,27 @@ struct CratesIo<'a, S: PkgSource> {
     root: &'a PackageManifest,
     rust_version_policy: IncompatibleRustVersions,
     resolver_rust_version: &'a Version,
-    /// 第一遍求解发现同名包被精确钉子拆成多版时，第二遍优先复用最早
-    /// 建立的版本。整遍固定不变，不能依赖求解中的可变 bucket 状态。
+    /// When the first solving pass finds one name split into several versions by exact
+    /// pins, the second pass prefers the version established earliest. It is fixed for the
+    /// whole pass and must not depend on mutable bucket state during solving.
     preferred_exact_versions: &'a BTreeMap<String, Version>,
-    /// pre comparator 记录（cargo 精确规则：pre 版仅当被该包某 req 中
-    /// major/minor/patch 全同且带 pre 的 comparator 点名时才可选——
-    /// ark-ff-asm 0.5.0-alpha.0 误选实锤）。值 = (major, minor, patch)。
+    /// pre comparator records (cargo's exact rule: a prerelease is selectable only when
+    /// some req of that package names a comparator with the same major/minor/patch and a
+    /// pre). Value = (major, minor, patch).
     allow_pre: std::cell::RefCell<BTreeMap<String, PreComparators>>,
-    /// 本轮按（父包名, 依赖键）激活的 optional 依赖集（迭代不动点输入；
-    /// 全局包名集合会把 zerovec 的 yoke 误植到 litemap——boa 实锤）。
+    /// The optional dependencies activated by (parent package name, dependency key) in
+    /// this round (the fixed-point input; a global package-name set would misattribute
+    /// zerovec's yoke to litemap).
     activated: &'a BTreeSet<(String, Version, String)>,
-    /// name → 下一个 bucket 号（0 起）。
+    /// name -> next bucket number (starting at 0).
     buckets: std::cell::RefCell<BTreeMap<String, u32>>,
-    /// (name, bucket) → 截至目前的累积约束（合并判断用）。
+    /// (name, bucket) -> constraint accumulated so far (used for the merge decision).
     bucket_ranges: std::cell::RefCell<BTreeMap<(String, u32), pubgrub::Ranges<Version>>>,
-    /// (parent, dep key, class) → (pkg, bucket)：边分派记录（幂等依赖 memo 的副产）。
+    /// (parent, dep key, class) -> (pkg, bucket): the edge assignment record (a by-product
+    /// of the idempotent dependency memo).
     edge_assign: std::cell::RefCell<EdgeAssign>,
-    /// get_dependencies 幂等 memo（同一 (P,V) 多次调用必须返回同一份分派）。
+    /// Idempotent `get_dependencies` memo (repeated calls for one (P,V) must return the
+    /// same assignment).
     deps_memo: std::cell::RefCell<BTreeMap<(Pkg, Version), DepsRc>>,
     source_error: std::cell::RefCell<Option<String>>,
 }
@@ -1013,8 +1055,8 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
             .as_ref()
             .is_none_or(|required| required <= self.resolver_rust_version)
     }
-    /// pre 版放行判定（cargo 精确规则）：该包存在带 pre 且 major/minor/
-    /// patch 全同的 comparator 时才放行该 pre 版。
+    /// Whether a prerelease is admitted (cargo's exact rule): only when a comparator
+    /// with the same major/minor/patch and a pre names that version.
     fn pre_allowed(&self, name: &str, v: &Version) -> bool {
         if v.pre.is_empty() {
             return true;
@@ -1028,7 +1070,8 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
         })
     }
 
-    /// 候选判定：index 中存在非 yanked 版本满足 range（pre 规则同 choose_version）。
+    /// Candidate check: a non-yanked index version satisfies the range (the pre rule is
+    /// the same as in `choose_version`).
     fn any_candidate(
         &self,
         name: &str,
@@ -1040,7 +1083,8 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
             .any(|v| !v.yanked && range.contains(&v.version) && self.pre_allowed(name, &v.version)))
     }
 
-    /// 边分派：req 与既有 bucket 的累积区间有共同候选 → 并入；否则开新 bucket。
+    /// Edge assignment: if the req shares a candidate with an existing bucket's
+    /// accumulated range, join it; otherwise open a new bucket.
     fn assign_bucket(
         &self,
         name: &str,
@@ -1063,8 +1107,10 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
         Ok(next)
     }
 
-    /// 第二遍只惩罚会偏离既有精确版本的候选。第一遍没有偏好，因此仍是
-    /// 原来的最高版本优先；普通宽范围依赖也不参与排序。
+    /// The second pass only penalizes candidates that would deviate from an already
+    /// established exact version. The first pass has no preference, so plain
+    /// highest-version-first still applies; ordinary wide-range dependencies do not
+    /// participate in the ordering.
     fn dependency_split_cost(&self, candidate: &IndexVersion) -> usize {
         candidate
             .deps
@@ -1096,7 +1142,8 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
         }
     }
 
-    /// (P,V) 的原始依赖清单（幂等 memo + 边分派记录）。
+    /// The raw dependency list of one (P,V) (the idempotent memo plus the edge
+    /// assignment record).
     fn raw_deps(&self, package: &Pkg, version: &Version) -> Result<DepsRc, std::io::Error> {
         if let Some(hit) = self
             .deps_memo
@@ -1121,10 +1168,9 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
                 }
             }
             Pkg::Local(name) => {
-                let m = self
-                    .manifests
-                    .get(name)
-                    .ok_or_else(|| io_err(format!("path 包 {name} 的 manifest 未收编")))?;
+                let m = self.manifests.get(name).ok_or_else(|| {
+                    io_err(format!("manifest of path package {name} was not collected"))
+                })?;
                 for d in m.deps.iter().filter(|d| d.kind != DepKind::Dev) {
                     collect_decl(name, &m.version, d, self.activated, self, &mut raw)?;
                 }
@@ -1132,11 +1178,11 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
             Pkg::Registry(name, _) => {
                 let vs = self.index_entry(name)?;
                 let Some(iv) = vs.iter().find(|v| v.version == *version) else {
-                    return Err(io_err(format!("{name} {version} 不在 index")));
+                    return Err(io_err(format!("{name} {version} is not in the index")));
                 };
                 for d in &iv.deps {
                     if d.kind.as_deref() == Some("dev") {
-                        continue; // dev 边不求（事先明说）
+                        continue; // dev edges are not resolved (stated up front)
                     }
                     let package_name = d.package.clone().unwrap_or_else(|| d.name.clone());
                     let child_source = d
@@ -1155,7 +1201,9 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
                                 .to_string()
                         });
                     let pkg_name = registry_identity(&package_name, &child_source);
-                    // optional 未激活不求（按（父包名, 依赖键）门控；平台 cfg 不求值——并集语义）
+                    // An unactivated optional dependency is not resolved (gated by
+                    // (parent package name, dependency key); the platform cfg is not
+                    // evaluated -- union semantics)
                     if d.optional
                         && !self.activated.contains(&(
                             name.to_string(),
@@ -1207,7 +1255,8 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
                 );
                 out.push((Pkg::Registry(pkg_name, bucket), range));
             } else {
-                // path 依赖：bucket 0 同式登记（bucket_versions 由 solve 输出端补）
+                // path dependency: bucket 0 is registered the same way (bucket_versions
+                // is filled in by the solve output side)
                 self.edge_assign.borrow_mut().insert(
                     (
                         parent_name.clone(),
@@ -1229,7 +1278,8 @@ impl<'a, S: PkgSource> CratesIo<'a, S> {
     }
 }
 
-/// 单条 manifest 依赖进 raw（root 与 path 包共用；registry/path 以末位标记区分）。
+/// Put one manifest dependency into the raw list (shared by the root and path packages;
+/// registry vs path is distinguished by the last flag).
 fn collect_decl<'a, S: PkgSource>(
     parent_name: &str,
     parent_version: &Version,
@@ -1238,7 +1288,8 @@ fn collect_decl<'a, S: PkgSource>(
     provider: &CratesIo<'a, S>,
     raw: &mut Vec<RawDep>,
 ) -> Result<(), std::io::Error> {
-    // optional 未激活不求（按（父包名, 依赖键）门控；平台 cfg 同样不求值——并集语义）
+    // An unactivated optional dependency is not resolved (gated by (parent package name,
+    // dependency key); the platform cfg is likewise not evaluated -- union semantics)
     if d.optional
         && !activated.contains(&(
             parent_name.to_string(),
@@ -1395,7 +1446,7 @@ impl<'a, S: PkgSource> pubgrub::DependencyProvider for CratesIo<'a, S> {
             let vs = self.index_entry(name)?;
             if !vs.iter().any(|v| v.version == *version) {
                 return Ok(pubgrub::Dependencies::Unavailable(format!(
-                    "{name} {version} 不在 index"
+                    "{name} {version} is not in the index"
                 )));
             }
         }
@@ -1410,10 +1461,11 @@ fn io_err(e: impl Into<String>) -> std::io::Error {
     std::io::Error::other(e.into())
 }
 
-/// req → Ranges 转换（镜像 version_ranges::semver 算法，但**保留下界 pre**：
-/// `^0.6.0-rc.8` = [0.6.0-rc.8, 0.7.0)——from_req 丢 pre 得 [0.6.0, 0.7.0)，
-/// semver 序 0.6.0-rc.x < 0.6.0 ⇒ rc 族全被误杀（argon2 实锤）；
-/// 上界永不带 pre；pre comparator 之外的 comparator 与 from_req 等价）。
+/// req -> Ranges conversion (mirrors the version_ranges::semver algorithm but **keeps
+/// the lower bound pre**: `^0.6.0-rc.8` = [0.6.0-rc.8, 0.7.0). `from_req` drops the pre
+/// and yields [0.6.0, 0.7.0), and since 0.6.0-rc.x < 0.6.0 in semver order the whole rc
+/// family would be wrongly rejected. The upper bound never carries a pre, and every
+/// comparator other than a pre comparator is equivalent to `from_req`).
 fn req_to_ranges(req: &VersionReq) -> pubgrub::Ranges<Version> {
     use semver::Op;
     type R = pubgrub::Ranges<Version>;
@@ -1436,9 +1488,10 @@ fn req_to_ranges(req: &VersionReq) -> pubgrub::Ranges<Version> {
             (Some(m), None) => R::higher_than(hi(major, Some(m), Some(0)))
                 .intersection(&R::strictly_lower_than(hi(major, Some(m + 1), Some(0)))),
             (Some(m), Some(p)) => {
-                // "=M.m.p" = [M.m.p, M.m.(p+1))：build 元数据任意（libgit2-sys
-                // 0.18.5+1.9.4 实锤——singleton 按 semver crate Ord 会比 build，
-                // 空 build 的钉子把带 build 的候选全顶出去）
+                // "=M.m.p" = [M.m.p, M.m.(p+1)) with any build metadata. The semver
+                // crate's Ord compares build metadata, so a pin with an empty build
+                // would push out every candidate that carries one
+                // (e.g. 0.18.5+1.9.4).
                 R::higher_than(lo).intersection(&R::strictly_lower_than(hi(
                     major,
                     Some(m),
@@ -1502,7 +1555,8 @@ fn req_to_ranges(req: &VersionReq) -> pubgrub::Ranges<Version> {
                         .intersection(&R::strictly_lower_than(hi(major + 1, Some(0), Some(0)))),
                 },
                 _ => {
-                    // semver 新 op（本仓钉版未知）——退回 from_req（pre 会丢，响亮记账）
+                    // A new semver op (unknown to the version pinned in this repo): fall
+                    // back to from_req, which drops the pre (noted loudly in accounting)
                     return pubgrub::Ranges::from_req(req.clone());
                 }
             };
@@ -1511,11 +1565,11 @@ fn req_to_ranges(req: &VersionReq) -> pubgrub::Ranges<Version> {
     acc
 }
 
-/// fresh 求解产物。
+/// The output of a fresh solve.
 type Solved = (
-    BTreeMap<String, Vec<Version>>, // name → 版本集（多版本并存）
-    Lockfile,                       // 骨架（依赖行收敛后补）
-    EdgeVersions,                   // 每条 dep 边指向的版本
+    BTreeMap<String, Vec<Version>>, // name -> version set (several versions may coexist)
+    Lockfile,                       // skeleton (dependency lines are filled after convergence)
+    EdgeVersions,                   // the version each dep edge points at
 );
 
 struct FreshSolveContext<'a> {
@@ -1558,8 +1612,9 @@ fn solve_fresh(
     Ok(unified)
 }
 
-/// 单遍版本求解。返回值第二项只记录“精确依赖导致同名多版本”时最早建立
-/// 的版本，供稳定的第二遍候选排序使用。
+/// A single solving pass. The second return value records only the version established
+/// earliest when an exact dependency splits one name into several versions, so the second
+/// pass can order candidates stably.
 fn solve_fresh_pass(
     root: &PackageManifest,
     path_manifests: &BTreeMap<String, PackageManifest>,
@@ -1588,10 +1643,10 @@ fn solve_fresh_pass(
         Ok(selected) => selected,
         Err(error) => {
             if let Some(source_error) = provider.source_error.borrow().clone() {
-                return Err(format!("依赖来源读取失败: {source_error}"));
+                return Err(format!("failed to read dependency source: {source_error}"));
             }
             return Err(format!(
-                "依赖求解失败（pubgrub）: {}",
+                "dependency resolution failed (pubgrub): {}",
                 match error {
                     pubgrub::PubGrubError::NoSolution(derivation) => {
                         pubgrub::DefaultStringReporter::report(&derivation)
@@ -1601,7 +1656,7 @@ fn solve_fresh_pass(
             ));
         }
     };
-    // 出解集合（bucket → 版本）与全量边分派
+    // Solution set (bucket -> version) plus the full edge assignment
     let mut bucket_versions: BTreeMap<(String, u32), Version> = BTreeMap::new();
     for (pkg, version) in selected {
         match pkg {
@@ -1614,9 +1669,10 @@ fn solve_fresh_pass(
             }
         }
     }
-    // 可达集过滤：pubgrub 决定历史可能残留"父包已被回退换版"的孤儿 bucket
-    // （boa 的 yoke#1 实锤）——只收从根沿"父版本恰为出解版本"的边可达的
-    // bucket；孤儿不进 version_map/lock/edge_versions。
+    // Reachable-set filtering: pubgrub decision history can leave orphan buckets whose
+    // parent was backtracked to another version. Only buckets reachable from the root
+    // along edges whose parent version is exactly the selected version are kept; orphans
+    // enter neither version_map nor lock nor edge_versions.
     let edge_assign = provider.edge_assign.borrow();
     if std::env::var_os("MIRVM_DEBUG_UNIFY").is_some() {
         for ((pn, pver, key, _dis, class), (pkg, bucket)) in edge_assign.iter() {
@@ -1646,9 +1702,10 @@ fn solve_fresh_pass(
     }
     let mut version_map: BTreeMap<String, Vec<Version>> = BTreeMap::new();
     let mut lock = Lockfile {
-        // Cargo 1.83 起默认写 v4，但为 `rust-version <= 1.82` 的项目继续写
-        // 旧工具链可读取的 v3。这里用 workspace 最低 MSRV，同 resolver 3
-        // 候选偏好的基准一致；无声明时基准是当前 rustc。
+        // Cargo writes v4 by default since 1.83, but keeps writing v3 -- readable by old
+        // toolchains -- for projects with `rust-version <= 1.82`. The workspace's lowest
+        // MSRV is used here, matching the baseline of resolver 3 candidate preference;
+        // when it is undeclared the baseline is the current rustc.
         format_version: if context.resolver_rust_version >= &Version::new(1, 83, 0) {
             4
         } else {
@@ -1714,7 +1771,7 @@ fn solve_fresh_pass(
                 .map(|candidate| candidate.cksum.clone())
                 .ok_or_else(|| {
                     format!(
-                        "[replace] 原 package {} {version} 不在 registry index",
+                        "[replace] original package {} {version} is not in the registry index",
                         identity_package_name(name)
                     )
                 })?;
@@ -1736,8 +1793,10 @@ fn solve_fresh_pass(
         vs.sort();
         vs.dedup();
     }
-    // 边分派解析为具体版本（(父名, 父版本, 依赖键, 消歧器, 类别) → (包, 版本)）；
-    // 只收可达父 + 可达子的边（其余 = 回退剪枝副产，arkworks/boa 实锤）。
+    // Resolve the edge assignment into concrete versions: ((parent name, parent version,
+    // dependency key, disambiguator, class) -> (package, version)). Only edges with a
+    // reachable parent and a reachable child are kept; the rest are by-products of
+    // backtracking/pruning.
     let mut edge_versions: EdgeVersions = BTreeMap::new();
     for ((pname, pver, key, dis, class), (pkg, bucket)) in edge_assign.iter() {
         if !visited.contains(&(pname.clone(), pver.clone())) {
@@ -1794,8 +1853,9 @@ fn solve_fresh_pass(
             next_preferences.insert(identity_package_name(&name).to_string(), version.clone());
         }
     }
-    // lock 依赖行在 feature 统一收敛后补齐（见 resolve() 迭代循环——
-    // optional 门按（父包, 依赖键）判定，需要统一产物）
+    // Lock dependency lines are filled in only after feature unification converges (see
+    // the iteration loop in resolve()): the optional gate is judged per (parent package,
+    // dependency key) and needs the unification output.
     Ok(((version_map, lock, edge_versions), next_preferences))
 }
 
@@ -1837,8 +1897,9 @@ fn fill_unused_patches(
     Ok(())
 }
 
-/// 给生成的 lock 补 dependencies 行（按需追加 version/source 消歧）；
-/// optional 未激活不入（cargo lock 语义）。
+/// Fill the `dependencies` lines of the generated lock (appending version/source
+/// disambiguation as needed); an unactivated optional dependency is not listed (cargo
+/// lock semantics).
 fn fill_lock_dependency_lines(
     lock: &mut Lockfile,
     root: &PackageManifest,
@@ -1848,9 +1909,10 @@ fn fill_lock_dependency_lines(
     src: &mut impl PkgSource,
     overrides: &SourceOverrides,
 ) -> Result<(), String> {
-    // optional 门按（父包, 父版本, 依赖键）判定：全局集合会把 A 包激活的
-    // 同名依赖误植到 B 包（cipher/zeroize vs generic-array 实锤）；
-    // 弱形引用（?/）同样放行（cargo 语义：yoke/serde?/alloc 实锤）
+    // The optional gate is judged per (parent package, parent version, dependency key):
+    // a global set would misattribute a dependency activated by package A to package B
+    // (cipher/zeroize vs generic-array). A weak reference (?/) is admitted as well (cargo
+    // semantics: the yoke/serde?/alloc cascade).
     let activated_keys = |name: &str, version: &Version| -> BTreeSet<&str> {
         [UnitClass::Normal, UnitClass::Build]
             .iter()
@@ -1890,7 +1952,12 @@ fn fill_lock_dependency_lines(
             source_id,
         };
         let (child_identity, child_version) = edge_version(edge_versions, parent, &dep)
-            .ok_or_else(|| format!("{}@{} 的依赖 {key} 无精确 lock 边", parent.0, parent.1))?;
+            .ok_or_else(|| {
+                format!(
+                    "{}@{} has no exact lock edge for dependency {key}",
+                    parent.0, parent.1
+                )
+            })?;
         let replacement_original =
             overrides
                 .replacements
@@ -1945,7 +2012,7 @@ fn fill_lock_dependency_lines(
             .map(lock_dependency_source)
             .ok_or_else(|| {
                 format!(
-                    "lock 中同名同版本 path package {} {} 无 source，无法消歧",
+                    "the path package {} {} in the lock has no source to disambiguate by",
                     child_name, child_version
                 )
             })?;
@@ -2030,7 +2097,7 @@ fn fill_lock_dependency_lines(
         let iv = vs
             .iter()
             .find(|v| v.version == version)
-            .ok_or_else(|| format!("{name} {version} 不在 index"))?;
+            .ok_or_else(|| format!("{name} {version} is not in the index"))?;
         edges.insert(
             (name.clone(), version.clone(), Some(source)),
             iv.deps
@@ -2073,20 +2140,23 @@ fn lock_dependency_source(source: &str) -> String {
     .to_string()
 }
 
-// ---------- feature 统一 ----------
+// ---------- feature unification ----------
 
 #[derive(Clone, Debug, Default)]
 struct FeatNode {
     features: BTreeSet<String>,
-    /// 本包内被激活的 optional 依赖键。
+    /// Optional dependency keys activated inside this package.
     activated: BTreeSet<String>,
-    /// 被启用 feature 以 ?/ 弱形引用的依赖键（不激活，但进求解与 lock 行）。
+    /// Dependency keys weakly referenced (?/) by an enabled feature (not activated, but
+    /// they enter resolution and the lock lines).
     weak_refs: BTreeSet<String>,
 }
 
-/// 一条参与 feature 传播的依赖边。
-/// platform_cfg：平台 cfg 表达式——**解析/统一期不求值（全平台并集），
-/// 只在装配构建图（assemble_units）时按 host 求值**（cargo lock ∪ 构建图 分裂语义）。
+/// One dependency edge that takes part in feature propagation.
+/// platform_cfg is the platform cfg expression: **it is not evaluated while parsing or
+/// unifying (union over all platforms); it is evaluated against the host only when the
+/// build graph is assembled (`assemble_units`)** -- cargo's split between lock semantics
+/// and the build graph.
 #[derive(Clone, Debug)]
 struct FeatDep {
     key: String,
@@ -2098,19 +2168,23 @@ struct FeatDep {
     features: Vec<String>,
     registry: bool,
     platform_cfg: Option<String>,
-    /// req 串（同名多 req 条目的边消歧器；path 依赖为 None）
+    /// req string (the edge disambiguator for entries with several reqs for one name;
+    /// `None` for a path dependency)
     req: Option<String>,
-    /// Git manifest source id（不含精确 commit），供 lock 模式区分同名同版本来源。
+    /// Git manifest source id (without the precise commit), so lock mode can tell apart
+    /// same-name same-version sources.
     source_id: Option<String>,
 }
 
 type FeatTable = BTreeMap<String, Vec<FeatureValue>>;
-/// 统一节点键：(包, 版本, 类别)——多版本并存时 feature 表与边按精确版本区分。
+/// Unification node key: (package, version, class) -- with several versions in play the
+/// feature table and edges are distinguished by exact version.
 type NodeKey = (String, Version, UnitClass);
 type NodeTables = BTreeMap<NodeKey, (FeatTable, Vec<FeatDep>)>;
 
-/// 边版本查询：先精确类别命中，miss 时回退另一类别（lock 模式双键登记/
-/// fresh 模式按 kind 精确登记；root 与 path 的 manifest kind 总是精确）。
+/// Edge version lookup: an exact class hit first, falling back to the other class on a
+/// miss (lock mode registers under both keys, fresh mode registers exactly by kind; the
+/// kind from the root and path manifests is always exact).
 fn edge_version<'a>(
     ev: &'a EdgeVersions,
     parent: &NodeKey,
@@ -2120,7 +2194,8 @@ fn edge_version<'a>(
         UnitClass::Normal => UnitClass::Build,
         UnitClass::Build => UnitClass::Normal,
     };
-    // fresh：req 串精确键（同名多 req 条目按串分立）
+    // fresh mode: an exact key on the req string (entries with several reqs for one name
+    // stay separate by string)
     if let Some(req) = &dep.req {
         if let Some(hit) = ev.get(&(
             parent.0.clone(),
@@ -2141,9 +2216,10 @@ fn edge_version<'a>(
             return Some(hit);
         }
     }
-    // lock：扫描命中——子版本（消歧器串）落在 req 区间内即配；
-    // 名字按 依赖键 或 真包名 双路匹配（rename/下划线键实锤：
-    // rustix libc_errno → libc-errno、grep-searcher memmap → memmap2）
+    // lock mode: a scan hit -- a child version (the disambiguator string) falling inside
+    // the req range matches; the name is matched both as the dependency key and as the
+    // real package name (rename and underscore keys: rustix libc_errno -> libc-errno,
+    // grep-searcher memmap -> memmap2)
     let range = dep
         .req
         .as_deref()
@@ -2192,7 +2268,7 @@ fn ensure_registry_node(
     let iv = vs
         .iter()
         .find(|v| v.version == *version)
-        .ok_or_else(|| format!("{name} {version} 不在 index"))?;
+        .ok_or_else(|| format!("{name} {version} is not in the index"))?;
     let mut table = FeatTable::new();
     for (f, vals) in &iv.features {
         let parsed = vals
@@ -2206,7 +2282,8 @@ fn ensure_registry_node(
         if d.kind.as_deref() == Some("dev") {
             continue;
         }
-        // 平台 cfg 在此不求值（并集语义；target 表达式随行，装配期求值）
+        // The platform cfg is not evaluated here (union semantics; the target expression
+        // travels with the row and is evaluated at assembly time)
         deps.push(FeatDep {
             key: d.name.clone(),
             package: d.package.clone().unwrap_or_else(|| d.name.clone()),
@@ -2242,7 +2319,8 @@ fn ensure_registry_node(
     Ok(())
 }
 
-/// feature 统一产物：(节点表, 按（父包名, 依赖键）激活的 optional 依赖集)。
+/// The product of feature unification: (node table, the set of optional dependencies
+/// activated by (parent package name, dependency key)).
 type Unified = (
     BTreeMap<NodeKey, FeatNode>,
     BTreeSet<(String, Version, String)>,
@@ -2278,7 +2356,8 @@ fn unify_features(
         root.features.clone(),
         root_featdeps(&root.deps, include_root_dev)?,
     );
-    // 根 feature 来自 CLI 选择；未指定 --no-default-features 时才启用 default。
+    // Root features come from the CLI selection; `default` is enabled only when
+    // --no-default-features is absent.
     let root_node = nodes
         .get_mut(&(root.name.clone(), root.version.clone(), UnitClass::Normal))
         .unwrap();
@@ -2318,7 +2397,8 @@ fn unify_features(
         }
     }
 
-    // 全局不动点迭代（节点/边规模有界，单调收敛）
+    // Global fixed-point iteration (the node and edge counts are bounded and convergence
+    // is monotone)
     for _pass in 0..64 {
         let mut changed = false;
         let keys: Vec<NodeKey> = nodes.keys().cloned().collect();
@@ -2348,8 +2428,8 @@ fn unify_features(
                         .extend(requested.iter().cloned());
                 }
             }
-            // 三路产物任一变化都要落表——weak_refs 漏插会静悄悄地丢
-            // ?/ 弱引用（tracing-core 的 valuable?/std 实锤）
+            // A change in any of the three outputs must be recorded -- dropping a weak_ref
+            // insert would silently lose a ?/ weak reference.
             if features != node.features
                 || activated != node.activated
                 || weak_refs != node.weak_refs
@@ -2364,7 +2444,7 @@ fn unify_features(
                 );
                 changed = true;
             }
-            // 边传播
+            // Edge propagation
             if std::env::var_os("MIRVM_DEBUG_UNIFY").is_some() {
                 eprintln!(
                     "DBG-UNIFY expand {}@{} {:?} features={:?} activated={:?} deps={:?}",
@@ -2383,21 +2463,23 @@ fn unify_features(
                 {
                     continue;
                 }
-                // 子节点身份：边分派记录（多版本并存时按 (父,键,类) 精确到版本）
+                // Child identity comes from the edge assignment record (with several
+                // versions in play, (parent, key, class) pinpoints the version)
                 let Some((child_name, child_version)) = edge_version(edge_versions, &key, dep)
                 else {
-                    // optional 本轮新激活、下轮求解才进边分派——本轮跳过
-                    // （激活已记账进 activated_pkgs，迭代不动点会补）
+                    // An optional dependency newly activated this round only receives an
+                    // edge assignment in the next solve, so skip it now; the activation is
+                    // already recorded in activated_pkgs and the fixed point will fill it in.
                     if dep.optional {
                         continue;
                     }
                     return Err(format!(
-                        "{}@{} 的依赖 {} 无边分派记录（内部不一致）",
-                        key.0, key.1, dep.key
+                        "dependency {} of {}@{} has no edge assignment record (internal inconsistency)",
+                        dep.key, key.0, key.1
                     ));
                 };
                 let child_key = (child_name.clone(), child_version.clone(), dep.class);
-                // registry 子节点按需注册
+                // Register a registry child node on demand
                 if dep.registry && !tables.contains_key(&child_key) {
                     ensure_registry_node(
                         &mut tables,
@@ -2407,8 +2489,9 @@ fn unify_features(
                         child_version,
                         dep.class,
                     )?;
-                    // 新注册节点本身也是变化——否则 adds 为空时提前收敛，
-                    // 其子图永远不展开（syn/quote 实锤）
+                    // Registering a new node is itself a change; otherwise the loop would
+                    // converge early when adds is empty and its subgraph would never be
+                    // expanded.
                     changed = true;
                 }
                 if let Some(seed) =
@@ -2449,8 +2532,10 @@ fn unify_features(
             changed |= unify_resolver_one_classes(&mut nodes);
         }
         if !changed {
-            // 收敛后：按（父包名, 依赖键）激活的 optional 依赖集 ∪ 弱形引用集
-            // （迭代不动点输入；弱形引用同样进求解与 lock 行——cargo 语义）
+            // After convergence: the optional dependency set activated by (parent package
+            // name, dependency key) plus the weak-reference set (the fixed-point input;
+            // a weak reference likewise enters resolution and the lock lines, cargo
+            // semantics)
             let mut activated_parents: BTreeSet<(String, Version, String)> = BTreeSet::new();
             for (key, node) in &nodes {
                 for dep_key in &node.activated {
@@ -2463,12 +2548,13 @@ fn unify_features(
             return Ok((nodes, activated_parents));
         }
     }
-    Err("feature 统一 64 轮未收敛（图异常）".to_string())
+    Err("feature unification did not converge in 64 rounds (abnormal graph)".to_string())
 }
 
-/// resolver 1 在依赖用途之间统一 feature。编译产物仍按 Normal/Build
-/// 分开（host 与 target 不能混用），但决定 `cfg(feature)` 和可选依赖的
-/// 三组状态必须相同，并在下一轮沿两边各自的依赖图继续传播。
+/// Resolver 1 unifies features across dependency uses. Compiled artifacts are still kept
+/// apart by Normal/Build (host and target must not be mixed), but the three sets that
+/// determine `cfg(feature)` and optional dependencies must be identical, and propagation
+/// continues on the next round along each side's own dependency graph.
 fn unify_resolver_one_classes(nodes: &mut BTreeMap<NodeKey, FeatNode>) -> bool {
     let mut unified: BTreeMap<(String, Version), FeatNode> = BTreeMap::new();
     for ((name, version, _), node) in nodes.iter() {
@@ -2529,11 +2615,13 @@ fn featdeps(decls: &[super::manifest::DepDecl], include_dev: bool) -> Result<Vec
         .collect())
 }
 
-/// 包内 feature 展开（含隐式/显式激活与强弱边规则）。
-/// 返回 (features, activated, edge_adds[key → features], weak_refs[被启用
-/// feature 以 ?/ 弱形引用的依赖键])。weak_refs 不激活依赖，但该依赖进
-/// 版本求解与 lock 依赖行（cargo 语义：被启用 feature 的 ?/ 弱形引用会
-/// 把被引用包收进解析图与 lock 行——boa 的 yoke/serde?/alloc 实锤）。
+/// Feature expansion inside one package (implicit/explicit activation and the strong and
+/// weak edge rules).
+/// Returns (features, activated, edge_adds[key -> features], weak_refs[the dependency
+/// keys weakly referenced by an enabled feature via ?/]). A weak_ref does not activate the
+/// dependency, but that dependency enters version resolution and the lock dependency lines
+/// (cargo semantics: a ?/ weak reference from an enabled feature pulls the referenced
+/// package into the resolve graph and the lock lines).
 type Expanded = (
     BTreeSet<String>,
     BTreeSet<String>,
@@ -2546,7 +2634,8 @@ fn expand_node(
     deps: &[FeatDep],
     node: &FeatNode,
 ) -> Result<Expanded, String> {
-    // 隐式 feature 规则：optional 依赖键在任何 dep: 中出现则不再生成隐式 feature
+    // Implicit feature rule: an optional dependency key named by any dep: no longer
+    // produces an implicit feature
     let hidden: BTreeSet<String> = table
         .values()
         .flatten()
@@ -2566,7 +2655,9 @@ fn expand_node(
         .iter()
         .find(|feature| !table.contains_key(*feature) && !optional_keys.contains(*feature))
     {
-        return Err(format!("请求了不存在的 feature `{feature}`"));
+        return Err(format!(
+            "requested a feature that does not exist: `{feature}`"
+        ));
     }
     if let Some(feature) = node.features.iter().find(|feature| {
         !table.contains_key(*feature)
@@ -2574,7 +2665,7 @@ fn expand_node(
             && hidden.contains(*feature)
     }) {
         return Err(format!(
-            "feature `{feature}` 已被 dep:{feature} 隐藏，不能作为隐式 feature 启用"
+            "feature `{feature}` is hidden by dep:{feature} and cannot be enabled as an implicit feature"
         ));
     }
 
@@ -2600,17 +2691,18 @@ fn expand_node(
                             if activated.insert(g.clone()) {
                                 changed = true;
                             }
-                            // 隐式 feature 被引用 = 同名 feature 旗同时启用
-                            // （cargo 同——serde facade 的
-                            // #[cfg(feature = "serde_derive")] 实锤；dep:
-                            // 显式形只激活依赖、不加同名旗）
+                            // Referencing an implicit feature also turns on the feature
+                            // flag of the same name (as in cargo: the serde facade's
+                            // `#[cfg(feature = "serde_derive")]`; the explicit `dep:` form
+                            // only activates the dependency and sets no flag)
                             if features.insert(g.clone()) {
                                 changed = true;
                             }
                         } else {
-                            // cargo 同语义：feature 引用必须指向另一 feature 或可选依赖
+                            // Same semantics as cargo: a feature reference must point at
+                            // another feature or an optional dependency
                             return Err(format!(
-                                "feature 引用 {g} 既非 feature 亦非可选依赖（manifest/index 数据非法）"
+                                "feature reference {g} is neither a feature nor an optional dependency (invalid manifest/index data)"
                             ));
                         }
                     }
@@ -2623,18 +2715,19 @@ fn expand_node(
                         if activated.insert(dep.clone()) {
                             changed = true;
                         }
-                        // 强形 x/y 激活可选依赖 = 同名 feature 旗同时启用：
-                        // - x 有显式 feature 定义（table 键在场）→ 启用该显式
-                        //   feature，哪怕 x 已被 dep: 遮蔽——遮蔽只杀隐式
-                        //   feature，杀不了显式定义（zerotrie 0.2.4 实锤：
-                        //   serde = [dep:litemap, litemap/serde, …] 且
-                        //   litemap = [dep:litemap, alloc] 显式在场 ⇒ cargo
-                        //   实证 cfg feature="litemap" 置位，serde.rs 调的
-                        //   try_from_serde_litemap 所在
-                        //   #[cfg(feature = "litemap")] impl 块随之进场）；
-                        // - 无显式定义且未被 dep: 遮蔽 → 视同指定其同名隐式
-                        //   feature（cargo 同——k256 的 ecdsa-core/signing ⇒
-                        //   #[cfg(feature = "ecdsa-core")] 模块实锤）。
+                        // A strong x/y activates the optional dependency and also turns on
+                        // the feature flag of the same name:
+                        // - when x has an explicit feature definition (the table has the
+                        //   key), that explicit feature is enabled even if x is shadowed by
+                        //   dep: -- shadowing kills only the implicit feature, not an
+                        //   explicit definition (e.g. `serde = [dep:litemap, litemap/serde]`
+                        //   with `litemap = [dep:litemap, alloc]` present makes cargo set
+                        //   cfg(feature = "litemap") and pull in the
+                        //   `#[cfg(feature = "litemap")]` impl block holding
+                        //   try_from_serde_litemap);
+                        // - with no explicit definition and no dep: shadowing, this is the
+                        //   same as naming its implicit feature (as in cargo: k256's
+                        //   ecdsa-core/signing sets `#[cfg(feature = "ecdsa-core")]`).
                         if optional_keys.contains(dep)
                             && (table.contains_key(dep) || !hidden.contains(dep))
                             && features.insert(dep.clone())
@@ -2647,10 +2740,12 @@ fn expand_node(
                             .insert(feature.clone());
                     }
                     FeatureValue::WeakDep { dep, feature } => {
-                        // 弱形引用（?/）：包含 feature 已启用 ⇒ 被引用依赖进
-                        // 解析图（不激活），且其特征照常下发（rust_decimal
-                        // std → borsh?/std → bytes?/std 级联实锤——
-                        // cargo 的 resolve 图语义，与 build 图的"激活才下发"不同）
+                        // A weak reference (?/): the containing feature being enabled puts
+                        // the referenced dependency into the resolve graph (without
+                        // activating it) and its features are propagated as usual (the
+                        // rust_decimal std -> borsh?/std -> bytes?/std cascade -- cargo's
+                        // resolve-graph semantics, unlike the build graph's
+                        // "propagate only when activated")
                         weak_refs.insert(dep.clone());
                         edge_adds
                             .entry(dep.clone())
@@ -2664,9 +2759,10 @@ fn expand_node(
             break;
         }
     }
-    // 收尾清扫：feature 旗标从边/表任意来源到达后，若它本身不是表键而是
-    // 非隐藏的 optional 依赖键，即激活该依赖（rand_core 的 getrandom 实锤——
-    // 旗标经边到达且无表项可展开，缺这条规则时激活丢失）
+    // Final sweep: once a feature flag arrives from an edge or a table, if it is not
+    // itself a table key but an unshadowed optional dependency key, activate that
+    // dependency (e.g. rand_core's getrandom: the flag arrives along an edge with no table
+    // entry to expand, and without this rule the activation is lost).
     for f in features.iter() {
         if !table.contains_key(f) && optional_keys.contains(f) && !hidden.contains(f) {
             activated.insert(f.clone());
@@ -2675,12 +2771,12 @@ fn expand_node(
     Ok((features, activated, edge_adds, weak_refs))
 }
 
-// ---------- 单元装配 ----------
+// ---------- unit assembly ----------
 
-/// registry 包的最小 manifest 读取（lib 名/path/proc-macro/links/build.rs 实存/
-/// edition/CARGO_PKG_* 原料；不跑全量子集解析——registry crate 的 manifest
-/// 形态不设防；.crate 内的 Cargo.toml 是 cargo 归一化产物，edition 等继承键
-/// 已是具体值）。
+/// Minimal manifest read of a registry package (lib name/path/proc-macro/links/build.rs
+/// presence/edition/CARGO_PKG_* inputs; no full subset parse, because registry crate
+/// manifests make no promises. The Cargo.toml inside a .crate is cargo's normalized
+/// output, so inherited keys such as edition already hold concrete values).
 struct RegistryMinimal {
     lib_name: String,
     proc_macro: bool,
@@ -2700,10 +2796,10 @@ fn read_registry_minimal(
     version: &Version,
 ) -> Result<RegistryMinimal, String> {
     let file = dir.join("Cargo.toml");
-    let text =
-        std::fs::read_to_string(&file).map_err(|e| format!("读取 {} 失败: {e}", file.display()))?;
+    let text = std::fs::read_to_string(&file)
+        .map_err(|e| format!("failed to read {}: {e}", file.display()))?;
     let v: toml::Value =
-        toml::from_str(&text).map_err(|e| format!("{} 解析失败: {e}", file.display()))?;
+        toml::from_str(&text).map_err(|e| format!("failed to parse {}: {e}", file.display()))?;
     let pkg_table = v.get("package");
     let lib = v.get("lib");
     let name = lib
@@ -2713,7 +2809,7 @@ fn read_registry_minimal(
         .unwrap_or_else(|| package.replace('-', "_"));
     let proc_macro = lib
         .and_then(|l| l.get("proc-macro"))
-        .or_else(|| lib.and_then(|l| l.get("proc_macro"))) // 新归一化下划线形态（derive_arbitrary 实锤）
+        .or_else(|| lib.and_then(|l| l.get("proc_macro"))) // the newer normalized underscore form
         .and_then(|p| p.as_bool())
         .unwrap_or(false);
     let lib_path = dir.join(
@@ -2725,7 +2821,8 @@ fn read_registry_minimal(
         .and_then(|p| p.get("links"))
         .and_then(|l| l.as_str())
         .map(str::to_string);
-    // cargo 语义：`build = false` 是显式关闭（cfg-if 实锤——键在场 ≠ 有 build.rs）
+    // cargo semantics: `build = false` disables it explicitly (the key being present is
+    // not the same as having build.rs)
     let has_build = links.is_some()
         || match pkg_table.and_then(|p| p.get("build")) {
             Some(toml::Value::Boolean(false)) => false,
@@ -2741,7 +2838,8 @@ fn read_registry_minimal(
         .and_then(|e| e.as_str())
         .unwrap_or("2015")
         .to_string();
-    // CARGO_PKG_* 原料（与 manifest.rs 根/path 包同一 pkg_env_map 计算）
+    // CARGO_PKG_* inputs (computed by the same pkg_env_map as for root/path packages in
+    // manifest.rs)
     let str_field = |k: &str| {
         pkg_table
             .and_then(|p| p.get(k))
@@ -2791,10 +2889,11 @@ fn read_registry_minimal(
         .and_then(toml::Value::as_table)
         .map(|features| features.keys().cloned().collect())
         .unwrap_or_default();
-    // registry 中的 Cargo.toml 是 Cargo 发布时归一化后的清单，仍可能保留
-    // `[lints]`；只复用 lint 解析，不能让完整 manifest 子集限制 registry 包。
+    // The Cargo.toml inside a registry package is the manifest normalized at publish time
+    // and may still carry `[lints]`; reuse only the lint parsing here, so the full
+    // manifest subset does not constrain registry packages.
     let rustc_lint_flags = super::manifest::parse_lints(v.get("lints")).map_err(|error| {
-        format!("解析 registry 包 {package} {version} 的 [lints] 失败: {error}")
+        format!("failed to parse [lints] of registry package {package} {version}: {error}")
     })?;
     Ok(RegistryMinimal {
         lib_name: name,
@@ -2810,7 +2909,8 @@ fn read_registry_minimal(
     })
 }
 
-/// 节点的依赖边再取（path 用 manifest，registry 用 index 按精确版本重拉）。
+/// Re-fetch a node's dependency edges (manifest for a path package, index re-pulled by
+/// exact version for a registry package).
 fn node_featdeps(
     name: &str,
     version: &Version,
@@ -2824,7 +2924,7 @@ fn node_featdeps(
     let iv = vs
         .iter()
         .find(|v| v.version == *version)
-        .ok_or_else(|| format!("{name} {version} 不在 index"))?;
+        .ok_or_else(|| format!("{name} {version} is not in the index"))?;
     Ok(iv
         .deps
         .iter()
@@ -2853,7 +2953,8 @@ fn node_featdeps(
         .collect())
 }
 
-/// 该边是否进 host 构建图（platform_cfg 按 host 求值）。
+/// Whether this edge enters the host build graph (platform_cfg evaluated against the
+/// host).
 fn host_edge(dep: &FeatDep) -> Result<bool, String> {
     match &dep.platform_cfg {
         None => Ok(true),
@@ -2861,12 +2962,14 @@ fn host_edge(dep: &FeatDep) -> Result<bool, String> {
     }
 }
 
-/// --extern 命名键（cargo 语义）：有 rename（toml `package = "..."` / index
-/// `package` 键 ⇒ key ≠ package）用 rename key；无 rename 用 dep 包的
-/// **lib target 名**——lib 名 ≠ 包名时 extern 名跟 lib 名走
-/// （tendril → new_debug_unreachable（[lib] name = "debug_unreachable"）实锤：
-/// cargo -v 实证行拼 `--extern debug_unreachable=…/libdebug_unreachable-….rmeta`；
-/// new_debug_unreachable 整包存在意义即"lib 名叫 debug_unreachable 的再发布"）。
+/// The --extern naming key (cargo semantics): when there is a rename (toml
+/// `package = "..."` / the index `package` key, so key != package) the rename key is
+/// used; without a rename the dep package's **lib target name** is used, so when the lib
+/// name differs from the package name the extern name follows the lib name. For example
+/// tendril depends on new_debug_unreachable, whose `[lib] name = "debug_unreachable"`:
+/// `cargo -v` emits `--extern debug_unreachable=.../libdebug_unreachable-....rmeta`. The
+/// whole point of the new_debug_unreachable package is to republish under the lib name
+/// debug_unreachable.
 fn extern_key(d: &FeatDep, child: &Unit) -> String {
     if d.key != d.package {
         d.key.clone()
@@ -2883,9 +2986,11 @@ fn assemble_units(
     src: &mut impl PkgSource,
     include_root_dev: bool,
 ) -> Result<(Vec<Unit>, Vec<UnitDep>), String> {
-    // 可构建集：从根出发沿 host cfg 为真的边可达（cargo 构建图过滤——
-    // 版本/lock 是全平台并集，构建图按 host 求值；serde facade 系那种
-    // cfg(any()) 永假边引的子图只进 lock 不进构建图）。
+    // Buildable set: reachable from the root along edges whose host cfg is true (cargo's
+    // build-graph filter -- versions and the lock are the union over all platforms while
+    // the build graph is evaluated against the host; a subgraph reached only through a
+    // permanently false cfg(any()) edge, as in the serde facade family, enters the lock
+    // but not the build graph).
     let root_key = (root.name.clone(), root.version.clone(), UnitClass::Normal);
     let mut buildable: BTreeSet<NodeKey> = BTreeSet::new();
     let mut queue: VecDeque<NodeKey> = VecDeque::new();
@@ -2913,8 +3018,8 @@ fn assemble_units(
                     continue;
                 }
                 return Err(format!(
-                    "{}@{} 的依赖 {} 无边分派记录（内部不一致）",
-                    key.0, key.1, dep.key
+                    "dependency {} of {}@{} has no edge assignment record (internal inconsistency)",
+                    dep.key, key.0, key.1
                 ));
             };
             let child = (child_name.clone(), child_version.clone(), dep.class);
@@ -2928,7 +3033,7 @@ fn assemble_units(
     let mut index: BTreeMap<NodeKey, usize> = BTreeMap::new();
     for ((name, version, class), node) in nodes {
         if name == &root.name || !buildable.contains(&(name.clone(), version.clone(), *class)) {
-            continue; // 根本身不是 dep 单元；不可构建子图只进 lock
+            continue; // the root itself is not a dep unit; an unbuildable subgraph only enters the lock
         }
         if let Some(m) = path_manifests.get(name) {
             let (lib_name, lib_path) = m
@@ -2936,8 +3041,9 @@ fn assemble_units(
                 .iter()
                 .find(|t| t.is_lib())
                 .map(|t| (t.name.clone(), t.path.clone()))
-                // 无 lib 目标的 path 依赖是病理包（cargo 同拒）——回退缺省路径，
-                // dep 编译期 rustc 报文件不存在（响亮，不静默吞）
+                // A path dependency with no lib target is a pathological package (cargo
+                // rejects it too); fall back to the default path and let rustc report the
+                // missing file at dep compile time (loud, never silently swallowed)
                 .unwrap_or_else(|| (m.name.replace('-', "_"), m.root.join("src/lib.rs")));
             let proc_macro = m.targets.iter().any(|t| t.is_lib() && t.proc_macro);
             index.insert((name.clone(), version.clone(), *class), units.len());
@@ -2946,8 +3052,9 @@ fn assemble_units(
                 lib_name,
                 version: m.version.clone(),
                 source_dir: m.root.clone(),
-                // Cargo 会对 registry/Git 这类非 path 来源 cap lints；Git checkout
-                // 也按 commit 不可变处理，不参与 path 树增量扫描。
+                // Cargo caps lints for non-path sources such as registry/Git; a Git
+                // checkout is likewise treated as immutable by commit and takes no part in
+                // path-tree incremental scans.
                 from_registry: m.lock_source.is_some(),
                 immutable_source_id: m.lock_source.clone(),
                 class: *class,
@@ -2991,7 +3098,7 @@ fn assemble_units(
             rustc_lint_flags: rm.rustc_lint_flags,
         });
     }
-    // 依赖边填充（可构建节点 × host 为真边 × optional 激活门）
+    // Dependency edge filling (buildable node x host-true edge x optional activation gate)
     let mut edge_rows: Vec<(usize, UnitDep)> = Vec::new();
     for ((name, version, class), node) in nodes {
         if name == &root.name {
@@ -3014,13 +3121,13 @@ fn assemble_units(
                     continue;
                 }
                 return Err(format!(
-                    "{}@{} 的依赖 {} 无边分派记录（内部不一致）",
-                    key.0, key.1, d.key
+                    "dependency {} of {}@{} has no edge assignment record (internal inconsistency)",
+                    d.key, key.0, key.1
                 ));
             };
             let Some(&to_idx) = index.get(&(child_name.clone(), child_version.clone(), d.class))
             else {
-                continue; // 子节点不可构建（永假边子图）→ 边不存在
+                continue; // the child is not buildable (permanently false edge subgraph), so the edge does not exist
             };
             edge_rows.push((
                 from_idx,
@@ -3036,9 +3143,10 @@ fn assemble_units(
     for (from, edge) in edge_rows {
         units[from].deps.push(edge);
     }
-    // 根的 --extern 边表：根本身不是 unit（见上「根本身不是 dep 单元」注释），
-    // 但 bin 会话的 --extern 闭包要与 units 填边同一套门（optional 激活门 +
-    // host 平台求值 + 边分派版本）；只补边表，根不进 units。
+    // The root's --extern edge table: the root itself is not a unit (see the comment
+    // above), but a bin session's --extern closure must go through the same gates as the
+    // unit edges (optional activation gate + host platform evaluation + edge-assigned
+    // version); only the edge table is filled here, the root never becomes a unit.
     let mut root_deps: Vec<UnitDep> = Vec::new();
     {
         let root_node = nodes.get(&root_key).cloned().unwrap_or_default();
@@ -3055,13 +3163,13 @@ fn assemble_units(
                     continue;
                 }
                 return Err(format!(
-                    "{}@{} 的依赖 {} 无边分派记录（内部不一致）",
-                    root_key.0, root_key.1, d.key
+                    "dependency {} of {}@{} has no edge assignment record (internal inconsistency)",
+                    d.key, root_key.0, root_key.1
                 ));
             };
             let Some(&to_idx) = index.get(&(child_name.clone(), child_version.clone(), d.class))
             else {
-                continue; // 子节点不可构建（永假边子图）→ 边不存在
+                continue; // the child is not buildable (permanently false edge subgraph), so the edge does not exist
             };
             root_deps.push(UnitDep {
                 key: extern_key(&d, &units[to_idx]),
@@ -3074,9 +3182,11 @@ fn assemble_units(
     Ok((units, root_deps))
 }
 
-/// Cargo 的 fallback 只改变候选优先级，并不允许当前 rustc 编译一个明确要求
-/// 更高版本的包。这里只检查本次真正会编译的 unit；`cargo build` 不会因仅存在于
-/// lock 的 dev dependency 而失败，`mirvm test` 则会把其测试图 unit 纳入检查。
+/// Cargo's fallback only changes candidate preference; it does not allow the current rustc
+/// to compile a package that explicitly requires a higher version. Only units that will
+/// actually be compiled are checked here: `cargo build` does not fail because of a dev
+/// dependency that exists only in the lock, while `mirvm test` brings its test-graph units
+/// into the check.
 fn validate_compiler_rust_version(
     root: &PackageManifest,
     path_manifests: &BTreeMap<String, PackageManifest>,
@@ -3131,15 +3241,17 @@ fn validate_compiler_rust_version(
     }
     let packages = incompatible
         .into_iter()
-        .map(|(name, version, required)| format!("  {name}@{version} 要求 rustc {required} 或更高"))
+        .map(|(name, version, required)| {
+            format!("  {name}@{version} requires rustc {required} or newer")
+        })
         .collect::<Vec<_>>()
         .join("\n");
     Err(format!(
-        "当前 rustc {compiler} 不满足以下包的 rust-version:\n{packages}\n升级工具链，选择兼容依赖版本，或显式传 --ignore-rust-version"
+        "the current rustc {compiler} does not satisfy the rust-version of:\n{packages}\nupgrade the toolchain, choose compatible dependency versions, or pass --ignore-rust-version explicitly"
     ))
 }
 
-// ---------- 测试（离线；FakeSource 罐头 index + tempdir 源） ----------
+// ---------- tests (offline; FakeSource canned index + tempdir sources) ----------
 
 #[cfg(test)]
 mod tests {
@@ -3151,8 +3263,9 @@ mod tests {
         root: PathBuf,
         index: BTreeMap<String, Vec<IndexVersion>>,
         git: BTreeMap<(String, String), PackageManifest>,
-        /// 包名 → 显式 `[lib] name`（lib 名 ≠ 包名的 extern 命名场景罐头，
-        /// new_debug_unreachable 实锤形态）。
+        /// package name -> explicit `[lib] name` (canned for the case where the extern name
+        /// follows a lib name different from the package name, as with
+        /// new_debug_unreachable).
         lib_names: BTreeMap<String, String>,
     }
 
@@ -3224,7 +3337,7 @@ mod tests {
                 .git
                 .get(&(spec.source_id(), package.to_string()))
                 .cloned()
-                .ok_or_else(|| format!("test Git package 不存在: {package}"))?;
+                .ok_or_else(|| format!("test Git package does not exist: {package}"))?;
             manifest.lock_source = Some(
                 locked_source
                     .map(str::to_string)
@@ -3297,7 +3410,7 @@ mod tests {
         )
         .unwrap();
         let mut src = FakeSource::new(d.join("srcstore"));
-        // a@1.2.0 在 index 已 yanked——lock 模式照吃（cargo 同）
+        // a@1.2.0 is already yanked in the index -- lock mode accepts it anyway (as cargo does)
         let mut a12 = iv("a", "1.2.0");
         a12.yanked = true;
         a12.features.insert("default".into(), vec!["std".into()]);
@@ -3317,7 +3430,7 @@ mod tests {
             plan.version_map["b"],
             vec![Version::parse("0.3.1").unwrap()]
         );
-        // feature 统一：a 的 default → std 被启用
+        // Feature unification: a's default -> std gets enabled
         let a_unit = plan.units.iter().find(|u| u.package == "a").unwrap();
         assert!(a_unit.features.contains("default"));
         assert!(a_unit.features.contains("std"));
@@ -3448,7 +3561,7 @@ mod tests {
         assert_eq!(fallback.version_map["a"], vec![Version::new(1, 0, 0)]);
         assert_eq!(
             fallback.lock.format_version, 3,
-            "Cargo 为 rust-version 1.82 及更早项目保留 lock v3"
+            "Cargo keeps lock v3 for projects with rust-version 1.82 or earlier"
         );
 
         root.ignore_rust_version = true;
@@ -3467,7 +3580,7 @@ mod tests {
         assert_eq!(
             no_compatible.version_map["a"],
             vec![Version::new(1, 1, 0)],
-            "没有兼容候选时 Cargo fallback 仍选择通常的最高版本"
+            "with no compatible candidate, Cargo fallback still picks the usual highest version"
         );
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -3495,8 +3608,9 @@ mod tests {
 
     #[test]
     fn extern_key_prefers_rename_then_lib_name() {
-        // cargo 语义（tendril 0.5.1 → new_debug_unreachable 1.0.6 实锤）：
-        // --extern 名 = rename key（有 rename 时），否则 dep 包的 [lib] name。
+        // cargo semantics (tendril 0.5.1 -> new_debug_unreachable 1.0.6):
+        // the --extern name is the rename key when renamed, otherwise the dep package's
+        // [lib] name.
         let d = tmpdir("externkey");
         let root = root_project(
             &d,
@@ -3524,9 +3638,9 @@ mod tests {
                 .map(|e| e.key.clone())
                 .unwrap()
         };
-        // 无 rename：extern 名跟 lib 名走，不是包名
+        // without a rename the extern name follows the lib name, not the package name
         assert_eq!(key_of(ndu_ix), "debug_unreachable");
-        // 有 rename：rename key 优先
+        // with a rename the rename key wins
         assert_eq!(key_of(rp_ix), "renamed");
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -3549,7 +3663,7 @@ mod tests {
         let mut src = FakeSource::new(d.join("srcstore"));
         src.add("a", vec![iv("a", "1.0.0"), iv("a", "2.0.0")]);
         let err = resolve(&root, &mut src).unwrap_err();
-        assert!(err.contains("lock 过期") || err.contains("过期"), "{err}");
+        assert!(err.contains("stale Cargo.lock"), "{err}");
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -3581,7 +3695,7 @@ mod tests {
             ],
         );
         let plan = resolve(&root, &mut src).unwrap();
-        // [1.2,1.4) 区间 max = 1.3.5（1.4.0 yanked 跳过；1.5.0 不满足 <1.4）
+        // max of the [1.2,1.4) range is 1.3.5 (1.4.0 is yanked and skipped; 1.5.0 does not satisfy <1.4)
         assert_eq!(
             plan.version_map["z"],
             vec![Version::parse("1.3.5").unwrap()]
@@ -3592,7 +3706,7 @@ mod tests {
             .unwrap();
         assert!(z_lock.source.as_ref().unwrap().starts_with("registry+"));
         assert_eq!(z_lock.checksum.as_deref(), Some(&"0".repeat(64)[..]));
-        // lock 可被自家 parser 回读且依赖行存在
+        // the lock can be read back by our own parser and carries dependency lines
         let text = plan.lock.serialize();
         let back = Lockfile::parse(&text).unwrap();
         assert!(back.get("z", &Version::parse("1.3.5").unwrap()).is_some());
@@ -3609,7 +3723,7 @@ mod tests {
              [build-dependencies]\ns = { version = \"1\", features = [\"b\"] }\n",
         );
         let mut src = FakeSource::new(d.join("srcstore"));
-        // m：default 含 dep:opt 显式激活；opt 的 of → deep
+        // m: default contains an explicit dep:opt activation; opt's of -> deep
         let mut m = iv("m", "1.0.0");
         m.features.insert("default".into(), vec!["dep:opt".into()]);
         m.features.insert("opt".into(), vec![]);
@@ -3622,12 +3736,12 @@ mod tests {
         opt.features.insert("of".into(), vec!["deep".into()]);
         opt.features.insert("deep".into(), vec![]);
         src.add("opt", vec![opt]);
-        // s：normal 边（default）与 build 边（features=["b"]）分列
+        // s: the normal edge (default) and the build edge (features=["b"]) are separate
         let mut s = iv("s", "1.0.0");
         s.features.insert("default".into(), vec![]);
         s.features.insert("b".into(), vec![]);
         src.add("s", vec![s]);
-        // w：弱激活 opt2?/inner——opt2 未被激活 → opt2 单元缺席
+        // w: weak activation opt2?/inner -- opt2 is never activated, so no opt2 unit
         let mut w = iv("w", "1.0.0");
         w.features
             .insert("default".into(), vec!["opt2?/inner".into()]);
@@ -3642,11 +3756,11 @@ mod tests {
         let plan = resolve(&root, &mut src).unwrap();
         let m_unit = plan.units.iter().find(|u| u.package == "m").unwrap();
         assert!(m_unit.features.contains("default"));
-        // dep:opt 激活了 opt，且 opt 拿到边 features of → of/deep 展开
+        // dep:opt activated opt, and opt received the edge features of -> of/deep expand
         let opt_unit = plan.units.iter().find(|u| u.package == "opt").unwrap();
         assert!(opt_unit.features.contains("of"));
         assert!(opt_unit.features.contains("deep"));
-        // s 两列：Normal（default）与 Build（b）不同 feature 集 = 两个单元
+        // two s columns: Normal (default) and Build (b) with different feature sets = two units
         let s_units: Vec<_> = plan.units.iter().filter(|u| u.package == "s").collect();
         assert_eq!(s_units.len(), 2);
         let s_normal = s_units
@@ -3660,17 +3774,18 @@ mod tests {
         assert!(s_normal.features.contains("default"));
         assert!(!s_normal.features.contains("b"));
         assert!(s_build.features.contains("b"));
-        // 弱激活未触发：opt2 无单元
+        // the weak activation never fires: there is no opt2 unit
         assert!(!plan.units.iter().any(|u| u.package == "opt2"));
         std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn implicit_optional_feature_also_sets_cfg_flag() {
-        // serde facade 形状：feature derive = ["se_derive"]（裸名引用可选
-        // 依赖，无 dep: 形）——激活依赖的同时**同名 feature 旗启用**
-        // （cargo 同：serde 的 #[cfg(feature = "serde_derive")] 实锤）。
-        // 对照：dep: 显式形只激活依赖，不加同名旗。
+        // serde facade shape: feature derive = ["se_derive"] (a bare-name reference to an
+        // optional dependency, no dep: form) activates the dependency and **also sets the
+        // feature flag of the same name** (as in cargo: serde's
+        // `#[cfg(feature = "serde_derive")]`). By contrast the explicit dep: form only
+        // activates the dependency and sets no flag of the same name.
         let d = tmpdir("implicitfeat");
         let root = root_project(
             &d,
@@ -3692,7 +3807,7 @@ mod tests {
         assert!(se_unit.features.contains("derive"));
         assert!(
             se_unit.features.contains("se_derive"),
-            "隐式 feature 旗必须进 cfg 集: {:?}",
+            "the implicit feature flag must enter the cfg set: {:?}",
             se_unit.features
         );
         assert!(plan.units.iter().any(|u| u.package == "se_derive"));
@@ -3701,11 +3816,11 @@ mod tests {
 
     #[test]
     fn strong_dep_feature_also_sets_implicit_cfg_flag() {
-        // k256 形状：feature ecdsa = ["ecdsa-core/signing"]（强形引用可选
-        // 依赖）——激活依赖并下发 signing 的同时，同名隐式 feature 旗
-        // ecdsa-core 启用（cargo 同：k256 的
-        // #[cfg(feature = "ecdsa-core")] pub mod ecdsa 实锤；缺旗 =
-        // E0433 cannot find ecdsa in k256，corpus smoke 分诊实锤）。
+        // k256 shape: feature ecdsa = ["ecdsa-core/signing"] (a strong reference to an
+        // optional dependency) activates the dependency and propagates signing, while the
+        // implicit feature flag of the same name, ecdsa-core, is set as well (as in cargo:
+        // k256's `#[cfg(feature = "ecdsa-core")] pub mod ecdsa`; missing the flag gives
+        // E0433 cannot find ecdsa in k256).
         let d = tmpdir("strongimplicit");
         let root = root_project(
             &d,
@@ -3729,7 +3844,7 @@ mod tests {
         assert!(k2_unit.features.contains("ecdsa"));
         assert!(
             k2_unit.features.contains("ecdsa-core"),
-            "强形激活的可选依赖其隐式 feature 旗必须进 cfg 集: {:?}",
+            "the implicit feature flag of a strongly activated optional dependency must enter the cfg set: {:?}",
             k2_unit.features
         );
         let ec_unit = plan
@@ -3737,19 +3852,23 @@ mod tests {
             .iter()
             .find(|u| u.package == "ecdsa-core")
             .unwrap();
-        assert!(ec_unit.features.contains("signing"), "x/y 的 y 照常下发");
+        assert!(
+            ec_unit.features.contains("signing"),
+            "the y of x/y propagates as usual"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn strong_dep_enables_same_named_explicit_feature_even_when_dep_hidden() {
-        // zerotrie 0.2.4 形状：optional 依赖 litemap 被 dep: 遮蔽（隐式
-        // feature 不生成），但同名显式 feature litemap = [dep:litemap, alloc]
-        // 在场；serde = [dep:serde_core, dep:litemap, alloc, litemap/serde]。
-        // cargo 实证（zerotrie features=["serde"]）：cfg 集含 litemap——强形
-        // litemap/serde 把同名**显式** feature 一并启用（dep: 遮蔽只杀隐式
-        // feature）；缺旗 = E0599 try_from_serde_litemap 不在
-        // #[cfg(feature = "litemap")] impl 块里（typst_pdf 分诊实锤）。
+        // zerotrie 0.2.4 shape: the optional dependency litemap is shadowed by dep: (so no
+        // implicit feature is generated), but an explicit feature of the same name,
+        // litemap = [dep:litemap, alloc], is present; and
+        // serde = [dep:serde_core, dep:litemap, alloc, litemap/serde]. With
+        // features=["serde"] the cfg set must contain litemap -- the strong litemap/serde
+        // also enables the same-named **explicit** feature (dep: shadowing kills only the
+        // implicit feature); missing the flag gives E0599 because
+        // try_from_serde_litemap lives in a `#[cfg(feature = "litemap")]` impl block.
         let d = tmpdir("strongexplicit");
         let root = root_project(
             &d,
@@ -3787,17 +3906,17 @@ mod tests {
         assert!(zt_unit.features.contains("serde"));
         assert!(
             zt_unit.features.contains("litemap"),
-            "强形 x/y 必须启用同名显式 feature（dep: 遮蔽只杀隐式）: {:?}",
+            "a strong x/y must enable the same-named explicit feature (dep: shadowing kills only the implicit one): {:?}",
             zt_unit.features
         );
         assert!(
             zt_unit.features.contains("alloc"),
-            "显式 litemap feature 展开带 alloc: {:?}",
+            "expanding the explicit litemap feature carries alloc: {:?}",
             zt_unit.features
         );
         assert!(
             plan.units.iter().any(|u| u.package == "litemap"),
-            "litemap 依赖本体被激活进 units"
+            "the litemap dependency itself is activated into units"
         );
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -3829,7 +3948,7 @@ mod tests {
             plan.version_map["r"],
             vec![Version::parse("1.0.0").unwrap()]
         );
-        // lock 生成：sib 无 source 行
+        // generated lock: sib has no source line
         let sib_lock = plan
             .lock
             .get("sib", &Version::parse("0.2.0").unwrap())
@@ -3851,7 +3970,7 @@ mod tests {
                 .unwrap()
                 .features
                 .contains("app-side"),
-            "工作区公开包名 feature 必须映射到带来源的本地节点"
+            "a workspace public package-name feature must map to the local node carrying that source"
         );
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -3901,7 +4020,10 @@ mod tests {
                 .iter()
                 .find(|unit| unit.package == package)
                 .unwrap();
-            assert!(unit.from_registry, "Git 包按不可变依赖处理");
+            assert!(
+                unit.from_registry,
+                "a Git package is treated as an immutable dependency"
+            );
             assert_eq!(unit.immutable_source_id.as_deref(), Some(precise.as_str()));
             assert_eq!(
                 plan.lock
@@ -3944,7 +4066,10 @@ mod tests {
         let mut src = FakeSource::new(d.join("srcstore"));
         src.add_git("git+https://example.invalid/repo", git_core);
         let error = resolve(&root, &mut src).unwrap_err();
-        assert!(error.contains("git-core@1.2.3 要求 rustc 999.0"), "{error}");
+        assert!(
+            error.contains("git-core@1.2.3 requires rustc 999.0"),
+            "{error}"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -4043,9 +4168,9 @@ mod tests {
 
     #[test]
     fn fresh_solve_downgrades_parent_to_avoid_compatible_duplicate() {
-        // Cargo 会优先统一同名包：wide@1.1 虽然较新，但它钉 core@1.0.1；
-        // 图中 pinned 已钉 core@1.0.0，而 wide@1.0 也满足 ^1，因此应回退，
-        // 不能仅为选择最新补丁版而保留两份 core。
+        // Cargo prefers unifying one name: wide@1.1 is newer but pins core@1.0.1, while the
+        // graph already pins core@1.0.0 and wide@1.0 also satisfies ^1, so it must backtrack
+        // rather than keep two copies of core just to take the newest patch version.
         let d = tmpdir("compatible-duplicate");
         let root = root_project(
             &d,
@@ -4077,8 +4202,9 @@ mod tests {
 
     #[test]
     fn multi_version_fork_coexists_with_per_bucket_features() {
-        // cargo 多版本语义：a→h ^0.14、b→h ^0.15 无共同候选 ⇒ 两版并存
-        // （hashbrown 0.14/0.15 实锤）；各自 feature 表按 bucket 独立展开
+        // cargo multi-version semantics: a->h ^0.14 and b->h ^0.15 share no candidate, so
+        // both versions coexist (hashbrown 0.14/0.15); each feature table expands
+        // independently per bucket
         let d = tmpdir("fork");
         let root = root_project(
             &d,
@@ -4119,7 +4245,7 @@ mod tests {
             .unwrap();
         assert!(u14.features.contains("x") && !u14.features.contains("y"));
         assert!(u15.features.contains("y") && !u15.features.contains("x"));
-        // lock：两版皆在；a/b 依赖行带消歧 hint
+        // the lock holds both versions; the a/b dependency lines carry a disambiguation hint
         assert!(
             plan.lock
                 .get("h", &Version::parse("0.14.5").unwrap())
@@ -4146,7 +4272,7 @@ mod tests {
                 version: Some(Version::parse("0.14.5").unwrap()),
                 source: None,
             }),
-            "a 行: {a_line:?}"
+            "a line: {a_line:?}"
         );
         assert!(
             b_line.contains(&LockedDep {
@@ -4154,9 +4280,9 @@ mod tests {
                 version: Some(Version::parse("0.15.2").unwrap()),
                 source: None,
             }),
-            "b 行: {b_line:?}"
+            "b line: {b_line:?}"
         );
-        // lock 可被自家 parser 回读
+        // the lock can be read back by our own parser
         let back = Lockfile::parse(&plan.lock.serialize()).unwrap();
         assert_eq!(back.packages.len(), plan.lock.packages.len());
         std::fs::remove_dir_all(&d).unwrap();
@@ -4164,8 +4290,9 @@ mod tests {
 
     #[test]
     fn prerelease_req_allows_pre_candidates() {
-        // req 带 pre comparator ⇒ 该包的 pre 版进候选（cargo 近似规则；
-        // argon2 = "0.6.0-rc.8" 实锤——rc 族全被 pre 过滤器误杀过）
+        // A req carrying a pre comparator admits that package's prereleases (cargo's
+        // approximate rule; e.g. argon2 = "0.6.0-rc.8", where the rc family used to be
+        // rejected wholesale by the pre filter)
         let d = tmpdir("pre");
         let root = root_project(
             &d,
@@ -4187,8 +4314,8 @@ mod tests {
 
     #[test]
     fn syn_features2_shape_activates_optional_quote_into_lock_lines() {
-        // 复刻 syn 3.0.3 的真实 index 形状（features2 的 dep:quote）
-        // + serde_derive 的 dep 形状：quote 必须进 syn 的 lock 依赖行
+        // Reproduces the real index shape of syn 3.0.3 (dep:quote inside features2) plus
+        // the serde_derive dep shape: quote must appear on syn's lock dependency line
         let d = tmpdir("synshape");
         let root = root_project(
             &d,
@@ -4253,14 +4380,14 @@ mod tests {
             .collect();
         assert!(
             line.contains(&"quote".to_string()),
-            "syn 依赖行缺 quote: {line:?}"
+            "syn dependency line is missing quote: {line:?}"
         );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn req_to_ranges_less_bound_is_exact() {
-        // ">=2.0.4, <3" = [2.0.4, 3.0.0)——Less 臂曾错给 <4.0.0（brotli 实锤）
+        // ">=2.0.4, <3" = [2.0.4, 3.0.0) -- the Less arm used to be wrong and give <4.0.0
         let req = VersionReq::parse(">=2.0.4, <3").unwrap();
         let r = req_to_ranges(&req);
         assert!(r.contains(&Version::parse("2.0.4").unwrap()));
@@ -4274,8 +4401,8 @@ mod tests {
 
     #[test]
     fn exact_pin_matches_build_metadata_variants() {
-        // "=0.18.5" 必须匹配 0.18.5+1.9.4（build 任意；semver crate 的 Ord
-        // 会比 build，singleton 会误杀——libgit2-sys 实锤）
+        // "=0.18.5" must match 0.18.5+1.9.4 (any build metadata; the semver crate's Ord
+        // compares build metadata, so a singleton set would wrongly reject it)
         let req = VersionReq::parse("=0.18.5").unwrap();
         let r = req_to_ranges(&req);
         assert!(r.contains(&Version::parse("0.18.5").unwrap()));
@@ -4285,9 +4412,10 @@ mod tests {
 
     #[test]
     fn registry_minimal_accepts_both_proc_macro_spellings() {
-        // crates.io 归一化产物两种拼写并存：连字符（serde_derive 1.0.228，
-        // 老归一化）与下划线（derive_arbitrary 1.3.2，新归一化）——cargo
-        // 双侧受理，漏一种 = proc-macro 误当 target dep 编（tokei 实锤）
+        // Both spellings coexist in crates.io normalized output: the hyphen (serde_derive
+        // 1.0.228, older normalization) and the underscore (derive_arbitrary 1.3.2, newer
+        // normalization). Cargo accepts both; missing one compiles a proc-macro crate as a
+        // target dependency.
         let d = tmpdir("proc-macro-spelling");
         for (key, want) in [("proc-macro", true), ("proc_macro", true)] {
             let dir = d.join(key);
@@ -4298,9 +4426,9 @@ mod tests {
             )
             .unwrap();
             let rm = read_registry_minimal(&dir, "pm", &Version::parse("1.0.0").unwrap()).unwrap();
-            assert_eq!(rm.proc_macro, want, "拼写 {key} 必须识别");
+            assert_eq!(rm.proc_macro, want, "spelling {key} must be recognized");
         }
-        // 缺席 = false（普通 lib）
+        // absent = false (a plain lib)
         let dir = d.join("absent");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
