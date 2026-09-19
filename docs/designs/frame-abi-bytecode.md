@@ -4,9 +4,9 @@
 > Model A tree-walking、slaved ByteRegion、冻结元数据、真线程和 M4 unwind 已落地；
 > 方法级 Cranelift 与 i2c/c2i 产品适配器已由 M5.3–M5.5 兑现；`.mirvm` mode B 分发
 > 已经实现。解释态局部正式保留 slaved ByteRegion，`alloca` 只在
-> 真实负载证明性能收益时重开（decision-history §7.49）。实际状态见
+> 真实负载证明性能收益时重开。实际状态见
 > [current-status.md](../current-status.md)，A/B 与局部存储两轴的演变见
-> [decision-history.md](../decision-history.md)。下文保留原始方案，不能把未来段落当成现状。
+> git 历史。下文保留原始方案，不能把未来段落当成现状。
 >
 > **2026-08-12 unwind 勘误**：下文历史段落把“跨 FFI”一概写成 abort，范围过宽。
 > 现行规则是普通 C 边界终止，C-unwind 边界允许原异常穿过并跑 cleanup；出向
@@ -31,7 +31,7 @@ interp↔compiled 调用是 native call、unwind 走一条栈。有两类 native
 **为什么 tree-walking（宿主递归）而非 HotSpot 的汇编模板解释器**：后者显式操作 native SP 压/弹解释帧
 （汇编级），太重；tree-walking 用安全 Rust 就把 guest 调用映射成 native 调用，同样达成模型 A 的 JIT
 互操作。代价是每个解释帧背一个宿主 `interp_frame` 开销——但**解释器是冷层**（热代码走编译帧），可接受。
-汇编/alloca 方案只保留为证据触发的性能候选（§10、decision-history §7.49）。
+汇编/alloca 方案只保留为证据触发的性能候选（§10、git 历史）。
 
 ---
 
@@ -86,7 +86,7 @@ guest 帧大小是**动态的**（取决于函数的 locals 数与类型），Ru
 > **2026-08-12 终裁（替代 2026-07-05 的迁移承诺）**：slaved ByteRegion 是解释器的
 > 正式帧局部方案，不再要求换成 alloca。热函数已经由 Cranelift 使用 native 帧与 SSA；
 > alloca 只改变冷解释器，而且必须额外承担栈探测、清零、unwind 和 checked 地址追踪。
-> 只有真实解释器负载证明端到端收益时才重开（decision-history §7.49）。
+> 只有真实解释器负载证明端到端收益时才重开。
 >
 > **仍有效的解耦要求**：帧局部存储与安全模式（fast/checked，轴 S）是
 > 两根【正交轴】，实现上【不得耦合】。** 二者只在一个抽象处相遇：`GuestMemory::contains(addr)->bool`
@@ -257,7 +257,7 @@ fn interp_frame(body: &BytecodeBody, args: Args, region: &mut OperandRegion) -> 
 混合栈上 guest 异常的传播 + Drop 顺序 + catch_unwind"。**这是 M4 前置 spike 的头号项。** 候选 B（自研
 栈行走）作为兜底保留。
 
-**Spike 3 验证通过（2026-07-07，history/spike3-mixed-stack-unwind.md）**：宿主 panic 机制（= 同一平台
+**Spike 3 验证通过（2026-07-07）**：宿主 panic 机制（= 同一平台
 unwinder + Rust personality，候选 A 的具象）在混合栈上传播 + Drop 顺序（内层先）+ catch_unwind +
 当时探针覆盖的普通 C 跨界 abort 全部与 native 逐位一致，含 landing pad 内再入混合执行（cleanup 链调编译 helper）。
 **候选 A 坐实，候选 B 退役为纸面兜底。** 帧 ABI unwind 维度封版雏形：解释帧 = CleanupGuard + 动态
@@ -265,7 +265,7 @@ unwind_edge（动态 LSDA）+ region 恢复；编译帧 = 静态 LSDA + landing 
 天然逐帧内层先，VM 侧零协调。残余：真 Cranelift LSDA 发射留 M4 复核（与 vmctx 内部约定同一检查点）；
 JIT 调用约定必须 unwind-capable（plain "C" = abort shim，给普通 C abort 兜底）。
 
-**Spike 5 收窄残余（2026-07-07，history/spike5-cranelift-adapters.md）**：**CFI 传播已用真 Cranelift
+**Spike 5 收窄残余（2026-07-07）**：**CFI 传播已用真 Cranelift
 验证**——`create_unwind_info` → gimli .eh_frame → `__register_frame` 自注册后，guest panic 正确
 穿过真 JIT 帧（裸跑如预期 SIGABRT：cranelift-jit 不注册系统 eh_frame；其 wasmtime-unwinder 异常
 路线与宿主 unwinder 不互操作，**正式不采**）。M4 仅剩 **landing pad/LSDA**（JIT 帧内跑 drop glue
@@ -353,7 +353,7 @@ Java 能是因为它无编译期 target cfg、layout 由 JVM load 时定、基�
 1. **Unwind 机制（§7）**：候选 A（复用 Cranelift landing pad + Rust personality）vs B（自研栈行走）。**头号 spike**：
    混合栈 guest 异常传播 + Drop 顺序 + catch_unwind + 普通 C abort / C-unwind 传播。
 2. **帧局部存储（已裁决）**：解释器正式使用 slaved ByteRegion；alloca 不预设更快，只有
-   真实解释器负载证明端到端收益时重开（decision-history §7.49）。
+   真实解释器负载证明端到端收益时重开。
 3. **调用约定细节**：基于平台 C ABI 还是自定义 Cranelift CC；聚合传参与 rustc ABI 对齐的具体做法。
 4. **JIT tiering 策略**（M5）：何时编译、OSR 要不要（先不做，调用边界处编译整方法）、去优化。本草图只保证"编译后可无缝接入"，不定策略。
 5. **thunk/closure 生成**：libffi closure 还是自生成小桩；与 c2i 适配器合并。

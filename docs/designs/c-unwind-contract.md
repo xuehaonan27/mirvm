@@ -157,7 +157,7 @@ API 的结果类别。
 真实嵌入入口并不需要等“稳定嵌入 API”发布后才出现：当前 library API、P1 可执行入口和
 libffi callback 已经能让一个 Engine 的异常穿过另一个 Engine。实测因此推翻 §7.50 的
 降级结论；后续严格审查又推翻 §7.51 的线程级 cleanup 判据。完整证据和决策演变保留在
-decision-history §7.50–§7.52。
+git 历史。
 
 现行选择是：**采用 MIRVM 独立异常类，但不自研独立 personality。** 自有异常只负责给
 系统展开器中的对象标明“guest panic 或 EngineFault、属于哪个 Engine”；每一帧如何执行
@@ -189,7 +189,7 @@ pthread start 与线程私有析构回调用延迟持有覆盖“已登记但尚
 让长期宿主线程不再钉住 Shared，逐实例 native constructor/finalizer 也纳入 Closing。
 constructor 的受控失败转成 `Result` 并完成关闭；finalizer 是不可展开边界，任何异常
 逃出都固定诊断后 `abort`，不返回嵌入方。
-完整合同见 decision-history §7.53。
+完整合同见 git 历史。
 
 公开面仍不能误写成全 safe API。`Package::load` 是 safe 的 owned snapshot 校验；
 `Package::instantiate` 是 `unsafe`，因为字节码验证不能证明包内 native 库、宿主符号和 FFI

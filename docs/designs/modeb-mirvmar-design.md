@@ -3,7 +3,7 @@
 > 状态：**已实现；2026-08-13 完成可重复实例化与真实嵌入闭环**。母案：
 > [distribution-design.md](distribution-design.md)
 > D9b（包 = L2 engine-IR 缓存的可移植化：版本头/校验/重定位段）；
-> 新增输入：[decision-history §7.22](../decision-history.md)（机器码节 = 第三类
+> 新增输入：git 历史（机器码节 = 第三类
 > 内容物的干净归宿）与 §7.23（C4 片①数据源——dep global_asm 清单 .so 已入
 > required_native_libs 链）。**包必须 honestly 自包含**：除 FFI 真外国库
 > （glibc 类）外，运行期不读任何 `$HOME/.mirvm` 与 rustc/cargo 痕迹。
@@ -249,4 +249,4 @@ mirvm run <x.mirvm> [-- <guest args>]
   同步 `raise` 与 close-time 停用/等待/排空；自产 archive 的三符号 owner 槽由
   `native_instance.rs` 填入；
 - `src/cli.rs`：pack 子命令和 run 的 magic 分流；
-- 后续档案直接验证与格式冻结计划见 [product-capabilities-plan.md](product-capabilities-plan.md) P5。
+- 后续档案直接验证与格式冻结计划见 open-issues D3/D4。

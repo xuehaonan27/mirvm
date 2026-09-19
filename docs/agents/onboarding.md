@@ -49,17 +49,14 @@
 - Cranelift 0.133.1：同一 `FrameTable` 生成的 `.eh_frame` 含共享 CIE，必须把完整、
   零结尾的节一次交给 `__register_frame`；逐 FDE 注册会在多层 JIT unwind 时失败。
   Cranelift 原子无弱序（JIT 统一 SeqCst，记账在案）。
-- MIR API 逐期漂移实录：`../history/m4-log.md` 与 `../history/m5-log.md` 是唯一档案。
 
-## 三条铁律
+## 铁律
 
 1. **Miri 是代码参考，不是心智模型来源**（DESIGN.md P1）。心智模型 = RAM + JVM 式
    VM 作者视角；遇抉择问「一台 JVM 类系统软件会怎么做」。
 2. **绿必须核可观察输出/不变式**；预期红锁定失败原因；「已批准/已实现/测试通过」
    是三种断言，不可混写。都失败 ≠ PASS。
-3. 里程碑完成 = **代码 + 可复现 gate + 施工日志 + current-status 更新**四件套；
-   推翻旧设计时旧文档保留，decision-history 追加时间与证据，不静默改历史。
-4. **被 TSan harness 用 `#[path]` 逐文件共享的产品源码，不得有隐式的兄弟子模块**
+3. **被 TSan harness 用 `#[path]` 逐文件共享的产品源码，不得有隐式的兄弟子模块**
    （`tsan/src/main.rs`、`tsan/src/telemetry.rs` 是 `#[path = "../../src/…"]` 逐文件引入）。
    实测：`#[path]` 引入的文件里裸 `mod child;` 找不到；给子模块加显式 `#[path]` 时，基准
    目录是**包含该 `mod` 的文件**所在目录，因此同一个属性无法同时服务主 crate 与 harness。
@@ -71,8 +68,7 @@
 1. [../current-status.md](../current-status.md)（阶段事实唯一入口）
 2. [../open-issues.md](../open-issues.md)（未解决债务唯一入口）
 3. [../../DESIGN.md](../../DESIGN.md) + [../designs/ram-spec.md](../designs/ram-spec.md)（契约）
-4. [../decision-history.md](../decision-history.md)（可逆决策与重开条件）
-5. 按题进 [../designs/](../designs/) 与 [../history/](../history/)，再 git log。
+4. 按题进 [../designs/](../designs/)，再 git log。
 
 ## 三维验收食谱（新建/修改 corpus driver 必过）
 
@@ -100,11 +96,10 @@ stdout/stderr/exit 三维全部逐字节一致才算绿。唯一入口是 `./tes
 - 重负载下 `MIRVM_JIT_THRESHOLD` 与 fib 硬门可 flake：判非语义，安静期复跑为准。
 - 自伤纪律：新增 FuncId 字段必过 rebase 消费面五处清单（exports/fn_addrs/ids/
   entry_stub_sites/custom_alloc_shims；dc6e30c 前车之鉴）。
-- 债务登记在 `../open-issues.md`；决策推翻在 `../decision-history.md`；
-  阶段账目进 `../history/` 对应日志。
+- 新债务登记在 `../open-issues.md`。
 - `MIRVM_SEGV_DUMP` / `MIRVM_JIT_DEBUG` 是刻意的诊断旋钮，勿删。
-- **提交会自动推送到 `origin main`**（实测：commit 后约 20 秒即以 `update by push` 落到
-  GitHub；`git ls-remote origin main` 可核实）。因此**不要改写已经存在的提交**
+- **提交可能被自动推送到 `origin main`**：实测有时约 20 秒内落地，有时不触发，别假设它一定会发生——
+  用 `git ls-remote origin main` 核实，没落地就手动 `git push origin main`（本机到 GitHub 直连常失败，
+  可借用容器 `~/.profile` 里的 `withproxy`）。因此**不要改写已经存在的提交**
   （`commit --amend`、`rebase`、`filter-branch` 都会换 SHA）——那会让本地 `main` 与
-  `origin/main` 分叉成两条历史，需要 force-push 才能收拾。要改提交信息就**在其上追加一个
-  新提交**；确实必须改写时，先停下来问维护者。这条取代旧记录里的"远程暂停"。
+  `origin/main` 分叉成两条历史，需要 force-push 才能收拾。要改提交信息就**在其上追加一个新提交**。
