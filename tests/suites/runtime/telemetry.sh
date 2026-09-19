@@ -53,6 +53,15 @@ else
     bad "parent produced no capture file"
 fi
 
+# The guest thread is a separate pthread, so it must show up as its own producer
+# and its own thread rather than being folded into the main thread's stream.
+if [ -n "${parent_file:-}" ] \
+    && [ "$(file_field "$parent_file" producers)" -ge 2 ] 2>/dev/null; then
+    ok "parent file carries a producer per guest thread ($(file_field "$parent_file" producers))"
+else
+    bad "parent producers=$(file_field "${parent_file:-}" producers), want >= 2"
+fi
+
 if [ -n "${child_file:-}" ]; then
     ok "fork child produced its own capture file ($(basename "$child_file"))"
 else

@@ -2873,8 +2873,10 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
     `syscall_trace` 频度桶断言（该助手只有 trace 编译码会调），把"编译身体真的走了钉住站点"
     和"记录字节与解释一致"分开证。
   - `runtime.telemetry` 8 → **13 断言**：新增一段 `MIRVM_JIT_THRESHOLD=1 MIRVM_JIT_SYNC=1`
-    真机纵切，断言子代文件记录数与解释跑一致、代际仍为 1、且 `syscall_trace` 非零。这正是
-    上面那个 fork 子代缺陷的回归门（修前子代 0 记录）。
+    真机纵切，断言子代文件记录数与解释跑一致、代际仍为 1、且 `syscall_trace` 非零。**反向
+    对照实做两次**：把 PLT 槽改回读 plain 数组 → 该段以 **SIGSEGV(139)** 失败（trace 身体
+    的 PLT 载入 0 地址），3 项断言红；把 fork 子代的钉寄存器修复去掉 → 子代文件记录数从 4
+    掉到 0。所以这一个门同时钉住本片修掉的两个真 bug，不是装饰。
   - `cargo test` **397/397**；`cargo fmt --check`（本机权威）干净；完整 CI clippy 命令干净。
 - **本片未兑现（仍是 L3 主体）**：raw site 的"页内内联写"（当前仍是助手本体内写，站点只有
   `get_pinned_reg`；1B/§5.9 的 64B+24B 内联形状未做）；解释器**单独一条 trace 循环**（现在
