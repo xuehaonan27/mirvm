@@ -1,114 +1,78 @@
-# `mirvm test` 的 cargoless 合同
+# The cargoless contract for `mirvm test`
 
-> 生效日期：2026-08-11。这里的 “cargoless” 指 mirvm 自己解析清单、安排编译，
-> 运行过程中不启动 Cargo。实现事实以代码和
-> `tests/suites/contracts/cargoless_test.sh`、
-> `tests/suites/contracts/cargoless_workspace.sh` 为准。
+> Status: Contract · Scope: `mirvm test` for single packages and resolver 1/2/3 workspaces, no Cargo process at run time · Effective 2026-08-11.
+> Implementation facts are the code plus `tests/suites/contracts/cargoless_test.sh` and `tests/suites/contracts/cargoless_workspace.sh`.
 
-## 1. 谁决定正确行为
+## 1. Contract
 
-当前仓库锁定的 `nightly-2026-07-02` Cargo 和 rustdoc 是权威。mirvm 不复制它们的
-内部实现，也不把自己的旧输出当标准；遇到不确定行为时，先让固定工具链对最小项目执行
-`cargo test -vv`，再按实际传给 rustc/rustdoc 的参数、环境和可观察结果实现。
+- **C1.** The pinned `nightly-2026-07-02` Cargo and rustdoc decide correct behaviour; mirvm must never copy their internals nor treat its own earlier output as the standard. For uncertain behaviour, first run `cargo test -vv` with the pinned toolchain on a minimal project, then implement the actual rustc/rustdoc arguments, environment and observable results.
+- **C2.** Every behaviour in section 2 must align with Cargo; everything outside section 3's scope must produce an explicit error.
+- **C3.** An out-of-scope input must never be silently ignored so that execution continues.
+- **C4.** Inputs Cargo itself rejects — nested workspaces, duplicate member names — must error as Cargo does; mirvm adds no permissive rule.
+- **C5.** Edition 2024 implies resolver 3; a virtual or old-edition workspace with no `resolver` key implies resolver 1.
+- **C6.** A doctest must never masquerade as a normal test target: pinned rustdoc keeps owning code-block extraction, source line numbers and diagnostics, and mirvm only compiles and runs the temporary crate rustdoc generates.
 
-合同承诺下面列出的单包与 resolver 1/2/3 工作区范围。范围内必须对齐；范围外必须明确
-报错，不能忽略参数后继续运行。当前明确不在范围内的是交叉 target，以及
-D15 尚未实现的 Git source replacement、Git URL 目标 patch 和完整 Cargo config 余面。
-嵌套 workspace、同名成员等 Cargo 自己拒绝的输入也按 Cargo 报错，不另造 mirvm 放行规则。
-edition 2024 隐含 resolver 3；虚拟或旧 edition 工作区没写 resolver 时隐含 resolver 1。
-doctest 不冒充普通 test target：固定 rustdoc 继续负责代码块提取、源行号和诊断，MIRVM
-只接管 rustdoc 生成的临时 crate 的编译与执行。
+## 2. Model
 
-## 2. 当前范围内的行为
+### 2.1 Target selection and compilation shape
+lib, bin, integration test, example and bench targets are read, honouring `test`, `harness`, `required-features` and auto-discovery. Root lib/bin see normal dependencies only; test units additionally see dev-dependencies, which enter the lockfile but are not built by `mirvm run`. Tests use `[profile.test]`; libtest targets carry `--test`; `harness=false` targets keep the user `main` and set `cfg(test)`. An example is compiled by default but not run, while explicit `--example` runs it as a test target. A bench uses dev-dependencies, `cfg(test)` and the libtest shape, and `--bench`, `--benches`, `--all-targets` are supported. When an integration test exists, normal bins are additionally compiled. Integration tests get `CARGO_TARGET_TMPDIR` and an executable `CARGO_BIN_EXE_<name>`, which still starts the in-VM target program.
 
-- 读取 lib、bin、integration test、example 和 bench 目标；遵守 `test`、`harness`、
-  `required-features` 与自动发现规则。
-- 普通根 lib/bin 只看普通依赖；测试单元额外看开发依赖。开发依赖进入锁文件，但
-  `mirvm run` 不构建它们。
-- 测试使用 `[profile.test]`；libtest 目标带 `--test`，`harness=false` 目标保留用户
-  `main` 并设置 `cfg(test)`。
-- 默认编译 examples 但不运行；显式 `--example` 按测试目标运行。bench 使用开发依赖、
-  `cfg(test)` 和 libtest 形状；支持 `--bench`、`--benches`、`--all-targets`。存在 integration
-  test 时额外编译普通 bins。
-- integration test 获得 `CARGO_TARGET_TMPDIR` 和可执行的
-  `CARGO_BIN_EXE_<name>`；后者启动的仍是 VM 内目标程序。
-- 支持 lib/bin/test/example/bench 选择、单个过滤串、`--no-run`、`--no-fail-fast`、
-  `--quiet`、`--locked`、`--offline`，并逐字透传 `--` 后的 harness 参数。
-- 默认选择和显式 `--doc` 会运行启用 `doctest` 的根 lib；与 Cargo 一样拒绝
-  `--doc --no-run` 和 `--doc` 混用其他 target 选择。rustdoc 负责 edition、cfg、源码行号、
-  `no_run`、`ignore`、`compile_fail`/错误码和 `should_panic(expected)`；临时 crate 使用同一
-  MIR sysroot、根库、普通/开发依赖和 build.rs 输出，成功测试由 VM 执行。
-- 每个测试 artifact 在独立 mirvm 子进程运行；失败退出码与 Cargo 一样为 101。
-- 根包是 proc-macro 时，普通根库和普通依赖在宿主侧编译成动态库；根库自己的 unit test
-  仍按 `--test` 进入 VM，integration test 通过 `--extern` 使用宿主 proc-macro 展开结果。
-  根 proc-macro 的普通宿主依赖与测试的开发依赖保持各自 Cargo 依赖用途。
-- 从工作区根或成员目录发现最近的工作区；支持 virtual/root-package manifest、
-  `members`、`exclude`、`default-members`、`*`/`**`/`?`/`[]` glob，以及工作区内 path
-  依赖自动入成员。
-  从被 `exclude` 的包启动时按独立包处理。缺失成员和无匹配成员模式必须报错。
-- 物化 `[workspace.package]`、`[workspace.dependencies]`、`[workspace.lints]`、目标条件依赖
-  和根 `[profile]`；workspace lint 按 Cargo 的 level/priority/check-cfg 形状传给 rustc。
-  工作区依赖的特性相加，路径始终以工作区根解释。
-- 支持默认成员、当前成员、`--workspace`/`--all`、重复的 `-p`/`--package` 和 `--exclude`。
-  package spec 可以是包名、`name@version` 或 `path+file:///...#name@version`；版本和路径用于
-  消歧。选中多个包时先完成全部编译，再按 Cargo 的 fail-fast 规则执行。
-- 支持 `--features`/`-F`、`--all-features`、`--no-default-features`、
-  `package/feature` 与直接依赖的 `dependency/feature`；resolver 2/3 下相同包、相同依赖
-  类别的特性统一，build 依赖仍与 normal/dev 分开。resolver 1 则像 Cargo 一样跨
-  normal/dev/build 用途统一 feature；宿主和目标编译产物仍按用途分别生成。
-- 读取 package、workspace 继承和 registry index 中的 `rust-version`。resolver 3 默认
-  优先选择与工作区最低 Rust 版本兼容的候选；Cargo 配置可显式设为 `allow`，
-  `--ignore-rust-version` 同时关闭候选偏好和编译前版本拒绝。最低版本不高于 1.82 时
-  fresh lock 写 v3，1.83 起写 v4。
-- 所有成员共用工作区根 `Cargo.lock`。无锁时按 Cargo 规则，以全成员的全部特性可达依赖
-  一次求解并原子写入统一 lock；实际编译仍只启用用户选择的特性。`--locked` 缺锁直接
-  失败，生成结果还必须被固定 Cargo 的 `--locked --offline` 接受。
+\#\#\#\ 2\.2\ Diagnostics\,\ output\,\ exit\ codes
+lib/bin/test/example/bench selection, a single filter string, `--no-run`, `--no-fail-fast`, `--quiet`, `--locked`, `--offline` are supported, and harness arguments after `--` pass through verbatim. Default selection and explicit `--doc` run a root lib with `doctest` enabled; as in Cargo, `--doc --no-run` and `--doc` mixed with another target selection are rejected. rustdoc owns edition, cfg, source line numbers, `no_run`, `ignore`, `compile_fail`/error codes and `should_panic(expected)`; the temporary crate uses the same MIR sysroot, root library, normal/dev dependencies and build.rs output, and successful tests are executed by the VM. Each test artifact runs in a separate mirvm subprocess, and failure exit code is 101, as in Cargo.
 
-## 3. 怎么判定没有漂移
+### 2.3 Root proc-macro packages
+With a proc-macro root package, the normal root library and normal dependencies compile host-side into dynamic libraries. The root library's own unit tests still enter the VM under `--test`; integration tests consume the host proc-macro expansion through `--extern`. Normal host dependencies of the root proc-macro and dev-dependencies of the test keep their separate Cargo dependency purposes.
 
-单包夹具 `tests/fixtures/cless_test_contract` 覆盖库测试、bin 测试、integration test、
-普通 example、bench、自定义 harness、build script、path 开发依赖、panic、ignored、失败传播、
-bin 子进程和 test profile；`cless_proc_macro_test_contract` 覆盖根 proc-macro 的普通依赖、
-开发依赖、unit test 和 integration 展开；`cless_doctest_contract` 覆盖普通、`no_run`、
-`ignore`、`compile_fail`、`should_panic` 文档测试，以及根库、开发依赖、build.rs cfg/env、
-默认/显式选择、失败和 Cargo 参数冲突。工作区夹具 `tests/fixtures/cless_workspace_contract` 采用
-resolver 3，并覆盖
-virtual manifest、四成员、排除包、继承、目标条件 Dev 依赖、默认/显式/依赖特性、
-跨根传递依赖汇合、特性激活的可选依赖、自动 integration test、统一构建和统一锁文件；
-`cless_workspace_remaining_contract` 用未写 resolver 的旧式工作区覆盖 resolver 1 默认、
-用途间 feature 统一、复杂 glob、workspace lint 和完整路径 package spec。
+### 2.4 Workspace discovery and resolution
+The nearest workspace is found from the workspace root or a member directory. Virtual/root-package manifests, `members`, `exclude`, `default-members`, `*`/`**`/`?`/`[]` globs, and path dependencies inside the workspace joining members automatically are supported; starting from an `exclude`d package treats it as standalone, while a missing member and a pattern matching no member must error.
+`[workspace.package]`, `[workspace.dependencies]`, `[workspace.lints]`, target-conditional dependencies and the root `[profile]` are materialized. Workspace lints reach rustc in Cargo's level/priority/check-cfg shape; workspace dependency features sum; paths always resolve against the workspace root.
+Default members, the current member, `--workspace`/`--all`, repeated `-p`/`--package` and `--exclude` are supported. A package spec may be a package name, `name@version` or `path+file:///...#name@version`, where version and path disambiguate; with several packages selected, all compilation finishes before execution follows Cargo's fail-fast rule.
 
-当前固定合同结果是单包/test/bench/doctest 脚本 **34/34**、工作区脚本 **31/31**。
+### 2.5 Features
+`--features`/`-F`, `--all-features`, `--no-default-features`, `package/feature` and a direct dependency's `dependency/feature` are supported. Resolver 2/3 unify features for the same package and dependency category while keeping build dependencies separate from normal/dev; resolver 1 unifies across normal/dev/build purposes as Cargo does. Host and target artifacts are still produced separately per purpose.
 
-两个合同脚本只保留三层判定：
+### 2.6 Version and lockfile
+`rust-version` is read from the package, workspace inheritance and the registry index. Resolver 3 prefers candidates compatible with the workspace's lowest Rust version; Cargo configuration may explicitly set `allow`, and `--ignore-rust-version` disables both candidate preference and the pre-compile version rejection. A fresh lock writes v3 when the lowest version is at or below 1.82, and v4 from 1.83. All members share the workspace-root `Cargo.lock`; without one, Cargo's rules apply — solve once over all features reachable from all members, then write the unified lock atomically — while actual compilation still enables only the user's selected features. `--locked` with no lock fails immediately, and the produced result must also be accepted by the pinned Cargo under `--locked --offline`.
 
-1. **结构层**：读取固定 Cargo 的 `-vv` rustc/rustdoc 行，钉住 `--test`、`cfg(test)`、依赖
-   种类、example/bench、根 proc-macro 动态库、resolver 1 feature 合并、workspace lint、
-   `CARGO_BIN_EXE`、doctest 根库/开发依赖和 build.rs cfg 的落点。
-2. **结果层**：native Cargo、`MIRVM_DEPS=cargo` 和 `MIRVM_DEPS=self` 三腿比较
-   stdout、stderr、退出码；只归一化线程号、耗时和 Cargo 自身的构建进度行。
-3. **机制层**：self 腿把 PATH 中的 `cargo` 替换成必失败哨兵，并在 Linux 基线上用
-   `strace` 审计全部 `execve`，同时抓绝对路径调用；热复跑检查 build script 的实际
-   执行次数仍为 1，防止“结果相同但偷偷退回 Cargo”或增量失效。工作区合同还删除
-   lock 后由 self 重建，再交给固定 Cargo 以 `--locked --offline` 复核。
+## 3. Boundaries
 
-参数形状的纯函数断言留在 `resolve.rs`、`schedule.rs` 单测。合同脚本能判断当前真实
-工作负载后即冻结；不为未来 Cargo 字段增加清单、快照格式或来源元数据。
+- Cross-compilation targets: not in the committed scope, so they must error explicitly (C2, C3).
+- Git source replacement, Git URL target patches, and the remaining full Cargo config surface: D15 has not implemented them.
+- Inputs Cargo rejects, e.g. nested workspaces and duplicate member names: follow Cargo's error instead of adding a permissive mirvm rule.
+- Resolver scope is 1/2/3 only.
 
-## 4. Cargo 升级规程
+## 4. Verification
 
-升级 `rust-toolchain.toml` 时不得直接刷新期望值：
+Suites run through `./tests/run.sh`:
 
-1. 用旧、新两个 Cargo 分别对固定夹具跑 `test -vv --no-run`、bench/proc-macro 结构探针
-   和合同脚本的 native 腿。
-2. 人工解释每一条 rustc 参数、环境、目标选择或输出差异，区分 Cargo 行为变化与纯
-   诊断文字变化。
-3. 行为变化先改 manifest/resolve/schedule/driver 和对应单测，再改合同断言；不允许
-   仅放宽归一化规则让测试变绿。
-4. 依次运行 `./tests/run.sh suite quality.rust`、两个合同、
-   `./tests/run.sh suite differential.cargoless`，最后跑 `./tests/run.sh fast`。
-   三轨全部通过后，新的 pinned Cargo 才成为权威；工作区合同的
-   Cargo `-vv` 结构检查也必须重新人工核对。
+| Suite ID | Behavioural authority | Fixtures |
+|---|---|---|
+| `contracts.cargoless-test` | Fixed Cargo/rustdoc selection of test/bench/doctest, compilation shape, diagnostics, output, exit code | `tests/fixtures/cless_test_contract`, `cless_proc_macro_test_contract`, `cless_doctest_contract` |
+| `contracts.cargoless-workspace` | Fixed Cargo resolver 1/2/3, complex member globs, workspace lint, package spec, features, failure propagation | `tests/fixtures/cless_workspace_contract`, `cless_workspace_remaining_contract` |
+| `differential.cargoless` | Cargo path and cargoless path must match byte-for-byte | `tests/fixtures/cless_*` |
+| `quality.rust` | fmt, clippy, Rust unit tests | `src/` |
 
-Cargo 主线继续迭代不会自动改变已发布 mirvm 的行为：每个 mirvm 版本绑定一个明确
-toolchain；升级通过上述审核把合同整体前移，而不是运行时猜测 Cargo 版本。
+`cless_test_contract` covers library tests, bin tests, integration tests, a plain example, bench, custom harness, build script, path dev-dependency, panic, ignored, failure propagation, bin subprocess and test profile; `cless_proc_macro_test_contract` covers root proc-macro normal dependencies, dev-dependencies, unit test and integration expansion; `cless_doctest_contract` covers plain, `no_run`, `ignore`, `compile_fail` and `should_panic` doctests plus root library, dev-dependencies, build.rs cfg/env, default/explicit selection, failure and Cargo argument conflicts. `cless_workspace_contract` uses resolver 3 and covers virtual manifest, four members, excluded package, inheritance, target-conditional dev-dependencies, default/explicit/dependency features, cross-root transitive dependency convergence, optional dependencies activated by features, automatic integration tests, unified build and unified lockfile; `cless_workspace_remaining_contract` uses an old-style workspace with no `resolver` key and covers the resolver 1 default, feature unification across purposes, complex globs, workspace lints and full-path package specs.
+
+Current fixed contract result: single-package/test/bench/doctest scripts **34/34**, workspace scripts **31/31**.
+
+Both contract scripts keep three judgment layers only: (1) **structure** — read the pinned Cargo `-vv` rustc/rustdoc lines and pin `--test`, `cfg(test)`, dependency kinds, example/bench, the root proc-macro dynamic library, resolver 1 feature merging, workspace lints, `CARGO_BIN_EXE`, the doctest root library/dev-dependencies and build.rs cfg placement; (2) **result** — compare stdout, stderr and exit codes across native Cargo, `MIRVM_DEPS=cargo` and `MIRVM_DEPS=self`, normalizing only thread ids, durations and Cargo's own build progress lines; (3) **mechanism** — the self leg replaces `cargo` on `PATH` with a must-fail sentinel and audits every `execve` with `strace` on the Linux baseline, also catching absolute-path invocations, and a hot re-run checks that build scripts still execute exactly 1 time, preventing "same result but quietly fell back to Cargo" and increment invalidation. The workspace contract additionally deletes the lock, has self rebuild it, then hands it to the pinned Cargo for `--locked --offline` review.
+
+Pure-function assertions about argument shapes stay as unit tests in `resolve/` and `schedule.rs`. A contract script freezes once it can judge the real current workload; no manifest entries, snapshot formats or provenance metadata are added for future Cargo fields.
+
+### 4.1 Cargo upgrade procedure
+
+Raising `rust-toolchain.toml` must not simply refresh expected values:
+
+1. With both the old and the new Cargo, run `test -vv --no-run`, the bench/proc-macro structure probes and the contract scripts' native legs against the fixed fixtures.
+2. Explain every difference in rustc arguments, environment, target selection or output by hand, separating a Cargo behaviour change from a pure diagnostic-text change.
+3. For a behaviour change, first fix manifest/resolve/schedule/driver and their unit tests, then the contract assertions; loosening normalization rules to make tests green is not allowed.
+4. Run `./tests/run.sh suite quality.rust`, both contract suites, then `./tests/run.sh suite differential.cargoless`, and finally `./tests/run.sh fast`. Only after all three tracks pass does the new pinned Cargo become authoritative, and the workspace contract's Cargo `-vv` structure checks must also be re-reviewed by hand.
+
+Cargo's mainline continuing to evolve never changes a released mirvm automatically: every mirvm version binds one explicit toolchain, and an upgrade moves the whole contract forward through the review above rather than guessing the Cargo version at run time.
+
+## 5. Open items
+
+- Cross-compilation targets, Git source replacement, Git URL target patches and the remaining Cargo config surface stay unimplemented; reopen this contract when D15 implements them, and until then a request must fail loudly rather than silently ignore the argument.
+- The full Cargo compatibility track grows, but this contract's boundary does not move with it: a new field is implemented before it is asserted.
+- The resolver scope stays at 1/2/3; a new resolver number is a reopen trigger.

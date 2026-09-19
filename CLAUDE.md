@@ -127,8 +127,10 @@ implementation rather than after mistakes.
 - Use Rust 2024, existing style, and tracing initialized only in binaries:
   `info` for lifecycle, `debug` for internals, `warn` for recoverable issues,
   `error` for unrecoverable failures. Update schemas/config/docs with contract changes.
-- Write code, comments, doc comments and user-visible messages in English. Design
-  documents under `docs/` stay Chinese.
+- Language: everything is English — code, comments, doc comments, user-visible
+  messages, and the design contracts under `docs/designs/`. The remaining docs
+  (`README.md`, `DESIGN.md`, `docs/current-status.md`, `docs/open-issues.md`) are
+  still Chinese; convert them only when asked.
 - A code comment describes the code in front of it: say what it does and why the
   non-obvious parts are that way (invariants, preconditions, hazards, units,
   ownership). No milestone/slice/design-document citations, no "was X, now Y"

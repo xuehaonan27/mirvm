@@ -1,231 +1,131 @@
-# D15 设计：砍掉 cargo——自有依赖解析与编译调度
+# D15: Dropping cargo — own dependency resolution and compilation scheduling
 
-## 8. P1 施工实录：求解语义定稿（2026-07-27）
+> Status: Implemented · Scope: mirvm resolves manifests, versions, topology, build.rs and proc-macros itself, so `mirvm run` spawns zero cargo processes end to end; the Cargo compat track is retained as an explicit dual-track judge.
 
-P1 的闭合过程把 cargo 的解析语义逐条实证出来（每条都有对拍实锤，
-证据链在 git 历史）。定稿规则如下，即 `resolve.rs` 的
-当前实现口径：
+## 1. Contract
 
-1. **resolve 图 vs build 图分裂**：Cargo.lock 的解析图是全平台并集
-   （`cfg(any())` 永假边照进；windows-sys 在 Linux 机入锁），build 图按
-   host `rustc --print cfg` 求值过滤。版本求解、feature 激活、lock 依赖行
-   用 resolve 图；编译单元（units）用 build 图（`unify_features` 的
-   `include_weak` 双态）。
-2. **多版本 fork（lazy-bucket）**：同名 crate 允许 semver 不兼容的多版本
-   并存（hashbrown 0.14/0.15、syn 1/2/3 同图）。包 id = (name, bucket)：
-   dep 边到达时与既有 bucket 的累积区间有共同候选（index 有版本同满足）
-   即并入，否则开新 bucket；pubgrub 按 bucket 独立回退。可达集过滤清掉
-   pubgrub 回退留下的孤儿 bucket。
-3. **optional 依赖的门**：进版本求解与 lock 依赖行当且仅当
-   ① 被（父包, 依赖键）激活（强形：dep:/隐式/x/y 三形态），或
-   ② 被**已启用 feature 以 ?/ 弱形引用**——引用即入图（resolve 图语义），
-   特征照常下发（可与强激活级联：rust_decimal std → borsh?/std →
-   borsh std → bytes?/std → bytes 入锁）。build 图仅 ①。
-   **门按（父包, 依赖键）判定**——全局包名门会把 A 包激活的同名依赖
-   误植到 B 包（zerovec 的 yoke → litemap 的 yoke ^0.8 实锤）。
-4. **feature 统一**：resolver v2/v3 的 normal/build 边分列（同 crate 两类
-   feature 集不同 = 两个编译单元）；feature 引用必须指向 feature 或
-   optional 依赖，否则响亮报错；边到达的 feature 旗标若无表项可展开，
-   其本身若是非隐藏 optional 依赖键即激活该依赖（收尾清扫规则）。
-5. **pre 精确规则**：pre 版仅当被该包某 req 中 major/minor/patch 全同
-   且带 pre 的 comparator 点名时才可选（req_to_ranges 自写保留下界 pre；
-   ark-ff-asm 0.5.0-alpha.0 误选实锤）。
-6. **yanked**：lock 在照吃（cargo 同）；fresh 求解跳过（no-solution 响亮）。
-7. **lock 形态**：canonical v3/v4——依赖行每行尾逗号（cargo `--locked` 对
-   非 canonical lock 一律判"需重写"而拒）；同名多版本时依赖行写
-   `name version` 消歧 hint。Cargo 为最低 Rust 版本不高于 1.82 的项目写 v3，
-   1.83 起写 v4。
-8. **已明说的 P1 边界（记账，不冒充闭合）**：
-   - rust-version-aware 版本偏好原为本期边界，已于 2026-08-10 完成：
-     resolver 3、fallback/allow、workspace 最低版本、`--ignore-rust-version`
-     与 lock v3/v4 均按固定 Cargo 实证实现，见 git 历史。
-   - req 遇本仓钉版未知的 semver 新 op 时退回 `Ranges::from_req`
-     （pre 会丢，代码内响亮记账）。
-   - resolver 1/2/3 常见 workspace、复杂成员 glob/package spec、workspace lints、Git、替代 registry、registry/local/directory
-     source replacement、patch/replace 与 pack self 已补齐，见 git 历史
-     §7.35/§7.36/§7.38-§7.44；Git source replacement 等剩余边界
-     继续响亮拒绝。
+mirvm is the compilation scheduler for every dep crate: it parses manifests itself, solves versions itself, orders the topology itself, runs build.rs itself and compiles proc-macros itself. Bin crates still lower through the existing `MirvmCallbacks` channel; `mirvm run` spawns zero cargo processes end to end.
 
+Solve semantics were finalized 2026-07-27 (P1) and are implemented in `resolve.rs`. Every rule below was established empirically against the pinned Cargo; the evidence chain is in git history.
 
-> 状态：2026-07-23 调研定稿（四决策点当日裁定）；**P1 已收口（2026-07-27，
-> §8 求解语义定稿）；P2 已收口（2026-07-27，
-> corpus smoke 24 双腿逐字节 24/24）；P3 已收口
-> （2026-07-28，corpus full 138 pass 1 p5 0 fail + gate DEPS=self 双轨绿，
-> git 历史）；P4 已收口（2026-07-29，sysroot 自管 + 默认
-> 翻转 self + compat 双轨定案）**；resolver 2/3
-> 常见 workspace、rust-version-aware 选择与 Git 依赖已于 2026-08-08 至
-> 08-10 补齐（§7.35/§7.36/§7.38）。替代 registry/Cargo config、常见 source
-> replacement/patch/replace 与 pack self 也已完成（§7.39-§7.41）；resolver 1、复杂成员
-> glob/package spec 与 workspace lints 已随 D17 余项完成（§7.44）。P5 剩余复杂语义
-> 按实需逐项立项（Git source replacement 等响亮拒绝在案）。Cargo compat 已于
-> 2026-08-10 裁定长期保留，默认 self 与显式 Cargo 回退持续双轨对拍（§7.37）。
-> 立项记录：[open-issues.md D15](../open-issues.md)；动机源头：git 历史
-> （C4 两轮绕行被否——"吃 cargo 产物就得绕"的处境要制度性消除）。
-> 本文遵循"闭合契约"纪律：每期写明闭合到哪条可观察边界；原理上不能闭合的
-> 事先明说，不许绕行冒充闭合。
+- **C1 resolve graph vs build graph.** Cargo.lock's resolve graph is the union across all platforms (never-true `cfg(any())` edges included; windows-sys enters the lock on a Linux host). The build graph is filtered by evaluating the host `rustc --print cfg`. Version solving, feature activation and lock dependency lines use the resolve graph; compilation units use the build graph (`unify_features`'s `include_weak` two-state).
+- **C2 multi-version fork (lazy-bucket).** Same-named crates may coexist at semver-incompatible versions (hashbrown 0.14/0.15, syn 1/2/3 in one graph). Package id = (name, bucket): when a dep edge arrives and a common candidate exists within an existing bucket's accumulated interval (the index has a version satisfying both), it merges; otherwise a new bucket opens. pubgrub backtracks independently per bucket. A reachable-set filter clears orphan buckets left by pubgrub backtracking.
+- **C3 optional dependency gate.** An optional dependency enters version solving and lock dependency lines iff ① it is activated by (parent package, dependency key) (strong forms: `dep:` / implicit / `x/y`), or ② it is referenced by an enabled feature in weak `?/` form — reference alone puts it in the graph (resolve graph semantics) and features propagate as usual (it cascades with strong activation: rust_decimal std → borsh?/std → borsh std → bytes?/std → bytes enters the lock). The build graph keeps only ①. The gate is keyed on (parent package, dependency key); a global package-name gate would misattribute a same-named dependency activated by package A to package B (zerovec's yoke → litemap's yoke ^0.8).
+- **C4 feature unification.** resolver v2/v3 keep normal and build edges separate (one crate carrying different feature sets on the two edges is two compilation units). A feature reference must point at a feature or an optional dependency, otherwise reject loudly. When a feature flag arriving on an edge has no table entry to expand and is itself a non-hidden optional dependency key, it activates that dependency (final cleanup sweep).
+- **C5 pre-release exact rule.** A pre-release version is selectable only when named by a comparator in some req of that package whose major/minor/patch are all equal and which carries a pre (`req_to_ranges` is self-written and preserves the lower-bound pre; ark-ff-asm 0.5.0-alpha.0 mis-selection is the evidence).
+- **C6 yanked.** The lock accepts yanked versions (same as cargo). A fresh solve skips them and a no-solution is loud.
+- **C7 lock shape.** Canonical v3/v4: every dependency line ends with a trailing comma (cargo `--locked` declares any non-canonical lock "needs rewrite" and refuses it). With multiple versions of one name, dependency lines carry a `name version` disambiguation hint. Cargo writes v3 for projects whose minimum Rust version is not above 1.82, and v4 from 1.83.
+- **C8 no silent fallback.** Constructs outside the implemented scope are rejected loudly with the construct named; mirvm never silently falls back to cargo.
+- **C9 dev-deps are never solved.** mirvm never runs test, stated up front.
+- **C10 profile semantics are pinned.** Profile semantics replicate the cargo dev profile: debug-assertions=on, overflow-checks=on. jiff's debug_assert is the precedent — these two flags enter MIR semantics, and a mismatch is differential drift.
+- **C11 fingerprint v1.** hash(manifest subtree + lock version set + features + rustflags + build.rs rerun-if output + rustc version + source-tree dep-info). No cargo fingerprint compatibility is needed, but the profile semantics above is pinned.
+- **C12 accounted boundaries are not closure.** Approximations and deferrals are declared up front (see §3, §5) and may not be passed off as closed.
 
-## 0. 一句话
+## 2. Model
 
-mirvm 自己当每个 dep crate 的编译调度者：自解析 manifest、自解版本、自排
-拓扑序、自跑 build.rs、自编 proc-macro，bin crate 仍走既有的
-`MirvmCallbacks` 降低通道——`mirvm run` 全程零 cargo 进程。
+### 2.1 Why drop cargo
 
-## 1. 为什么砍（三句话讲清动机）
+1. **Runtime de-toolchaining.** `mirvm run` implicitly depends on a complete cargo plus an online registry, which conflicts with the mode B (`.mirvm` self-contained package distribution) worldview. The three package-format slices have landed; the production-side cargo dependency is the next stake to pull.
+2. **Scheduling autonomy.** cargo's fingerprints, scheduling and artifact naming are a black box; mirvm's L2 cache, deps-image and D14 store all read cargo artifacts and reverse-infer intent, and every reverse-inference layer is a potential drift surface (the batch-11 double-manifest drift is the isomorphic lesson).
+3. **Institutional removal of detours.** C4's precedent: dep global_asm needed an intervention point during dep compilation, and only a `RUSTC_WRAPPER` bypass provided it; two rounds of detour were rejected. Any design where wanting a hook means parasitizing someone else's scheduling is led by cargo's shape. Own scheduler = hooks for free.
 
-1. **运行期去工具链化**：`mirvm run` 目前隐含依赖完整 cargo + registry 在线，
-   这与 mode B（`.mirvm` 包自包含分发）的世界观冲突——包格式三片已落，
-   生产侧的 cargo 依赖是下一个要拔的桩。
-2. **调度自主权**：cargo 的指纹/排程/产物命名是黑盒，mirvm 的 L2 cache、
-   deps-image、D14 store 都在"读 cargo 的产物反推意图"，每一层反推都是
-   潜在漂移面（批11 实锤的双名单漂移是同构教训）。
-3. **制度性消除绕行**：C4 的判例——dep global_asm 需要 dep 编译期的
-   介入点，挂 RUSTC_WRAPPER 旁路才拿到；凡"想要一个钩子就得寄生在别人
-   的调度里"的设计，都是被 cargo 的形态牵着走。自己的调度器 = 钩子免费。
+### 2.2 What cargo does for mirvm today
 
-## 2. cargo 今天替 mirvm 干什么（调研实锤清单）
-
-| 职责 | 今天谁算 | 证据 |
+| Responsibility | Who computes it today | Evidence |
 |---|---|---|
-| manifest 解析（package/deps/features/targets/workspace/profile） | cargo | mirvm 零 TOML 解析调用 |
-| 版本解析（semver req → 具体版本；lock 读写） | cargo（无 lock 时每次重解，G7 在案） | `MIRVM_CARGO_LOCKED` 是唯一钉版机制（cargo_shim.rs:107-115） |
-| registry 获取（sparse index、.crate 下载/校验/解包） | cargo 全委托 | 源码零处读 registry |
-| feature 统一（resolver v2：normal/build 边分离） | cargo | — |
-| build.rs 全生命周期（host 编译→执行→指令解析→传播） | cargo | mirvm 零行读 OUT_DIR（§7.22 明令绕行禁区） |
-| proc-macro host dylib 编译 | cargo（host 不带 --target，wrapper 透传） | cargo_shim.rs:198,207-212 |
-| 每 crate rustc 参数（--extern 闭包/-L/-l/--cfg/edition/metadata 哈希/profile 旗） | cargo | bin 侧全量透传（agent-178 清单） |
-| 指纹与增量（mtime/dep-info/flags 哈希） | cargo（D14 共享 target 依赖它） | cargo_shim.rs:123-131 |
-| bin 产物定位与运行协议 | cargo runner + 假二进制 JSON | cargo_shim.rs:214-222,340-383 |
+| manifest parsing (package/deps/features/targets/workspace/profile) | cargo | mirvm makes zero TOML parsing calls |
+| version resolution (semver req → concrete version; lock read/write) | cargo (re-solves every time without a lock, G7 on record) | `MIRVM_CARGO_LOCKED` is the only pinning mechanism (cargo_shim.rs:107-115) |
+| registry fetching (sparse index, .crate download/verify/unpack) | fully delegated to cargo | zero places in source read the registry |
+| feature unification (resolver v2: normal/build edge separation) | cargo | — |
+| build.rs full lifecycle (host compile → execute → directive parse → propagate) | cargo | mirvm reads zero lines of OUT_DIR (§7.22 explicitly forbids detours) |
+| proc-macro host dylib compilation | cargo (host without `--target`, wrapper passes through) | cargo_shim.rs:198,207-212 |
+| per-crate rustc args (--extern closure/-L/-l/--cfg/edition/metadata hash/profile flags) | cargo | bin side passes through in full (agent-178 checklist) |
+| fingerprints and incrementality (mtime/dep-info/flags hash) | cargo (the D14 shared target depends on it) | cargo_shim.rs:123-131 |
+| bin artifact location and run protocol | cargo runner + fake-binary JSON | cargo_shim.rs:214-222,340-383 |
 
-**mirvm 已有资产（"已有其半"，不重建）**：`run_dep_compiler`（in-process
-rustc_driver，`-Zno-codegen` + MIR sysroot + DepCallbacks global_asm 抽取，
-cli.rs:493-517）；`MirvmCallbacks` bin 降低通道；ircache L2（输入盖戳 =
-sess.file_depinfo + used_crate_source，自算内容寻址）；baseimage/depsimage；
-D14 统一 target store；sysroot 自产（rustc-build-sysroot，可自管化见 §6 P4）。
+### 2.3 Existing assets (half already there; not rebuilt)
 
-## 3. 自写清单（按依赖序）
+`run_dep_compiler` (in-process rustc_driver, `-Zno-codegen` + MIR sysroot + DepCallbacks global_asm extraction, cli.rs:493-517); the `MirvmCallbacks` bin lowering channel; ircache L2 (input stamp = sess.file_depinfo + used_crate_source, content-addressed and self-computed); baseimage/depsimage; the D14 unified target store; the self-built sysroot (rustc-build-sysroot, self-managed from P4).
 
-1. **manifest 模型**：`Cargo.toml` 解析（package/lib/[[bin]]/[dependencies]/
-   [build-dependencies]/[features]/[profile]/[workspace] 基本继承/
-   target.'cfg()'.dependencies 的平台求值——mirvm target 恒 = host triple，
-   cfg 求值面因此有限）；frontmatter 脚本物化沿用现有 parse_frontmatter
-   （cli.rs:1039-1074）但改喂给自有模型，不再物化成 cargo 项目。
-2. **lock 读写**：读（v3/v4 格式）优先；写（自解出图后落 lock，供复现）。
-3. **版本解析**：lock 在 → 按 lock（闭合）；lock 不在 → semver 求解
-   （决策点 ④，见 §7）。
-4. **registry 访问层**：sparse index 读取（HTTP）+ .crate 下载/sha256 校验/
-   解包 → 自有 store `~/.mirvm/registry/{cache,src}`（决策点 ①②）。
-5. **feature 统一**：resolver v2 语义子集——normal deps vs build deps 边分离、
-   optional/dep:/weak(?)、default-features；**dev-deps 整体不求**（mirvm
-   永不跑 test，事先明说）。
-6. **拓扑调度 + 每 crate rustc 参数**：edition/--cfg features/--extern 全闭包
-   （含 proc-macro `.so`）/-L/-l/crate-name；产物命名哈希**自定方案**
-   （cargo 的 -C metadata 算法不稳定不追，反正 cargo 已退场——内部一致即可）；
-   参数直接喂既有 `run_dep_compiler`（deps）与 `MirvmCallbacks` 会话（bin），
-   **假二进制与 runner 协议整体退役**（E36 cwd 语义顺带在新路径闭合：
-   guest cwd = 调用者 cwd，与 cargo run 一致）。
-7. **build.rs 全生命周期**（最大新增职责，151 个 crate 实锤普遍性）：
-   host 真编译（codegen）→ 以 cargo 兼容 env 执行（CARGO_PKG_*/OUT_DIR/
-   TARGET/HOST/PROFILE/CARGO_CFG_*）→ 解析 `cargo::rustc-link-lib/-search/
-   -cfg/-flags/metadata` 指令 → 传播（-l/-L/--cfg 进依赖者 rustc 参数；
-   OUT_DIR/CARGO_PKG_* 进 bin 会话 env；DEP_* 进下游 build.rs env）。
-   build.rs 是任意代码——语义就是"执行它"，我们同样执行（cc/pkg-config
-   等外部工具依赖照旧，与现状同口径）。
-8. **proc-macro**：host 编译为 dylib（真 codegen），--extern 进依赖者；
-   机制直白（host/target 二分判据 wrapper 已有雏形）。
-9. **指纹**：自定粗粒度 v1 = hash(manifest 子树 + lock 版本集 + features +
-   rustflags + build.rs  rerun-if 输出 + rustc 版本 + 源树 dep-info)；
-   不需要 cargo 指纹兼容（cargo 已退场），但**语叉钉死**：profile 语义按
-   cargo dev profile 复刻（debug-assertions=on、overflow-checks=on——
-   jiff debug_assert 判例：这两枚旗进 MIR 语义，错配 = 对拍漂移）。
-10. **配置子集**：`.cargo/config.toml` 的 build.rustflags/target.*.rustflags；
-    source replacement/alt registry 归 P5 按实需。
+### 2.4 Hand-written scope list (dependency order)
 
-## 4. 模块形态
+| # | Item | Content |
+|---|---|---|
+| 1 | manifest model | `Cargo.toml` parsing (package/lib/`[[bin]]`/`[dependencies]`/`[build-dependencies]`/`[features]`/`[profile]`/`[workspace]` basic inheritance/target.'cfg()'.dependencies platform evaluation — mirvm's target is always the host triple, so the cfg evaluation surface is limited); frontmatter scripts keep the existing parse_frontmatter (cli.rs:1039-1074) but feed the own model instead of materializing a cargo project |
+| 2 | lock read/write | read (v3/v4 format) preferred; write (drop a lock from the self-solved graph for reproducibility) |
+| 3 | version resolution | lock present → follow the lock (closed); lock absent → semver solve (decision point ④) |
+| 4 | registry access layer | sparse index read (HTTP) + .crate download/sha256 verify/unpack → own store `~/.mirvm/registry/{cache,src}` (decision points ①②) |
+| 5 | feature unification | resolver v2 semantics subset — normal deps vs build deps edge separation, optional/`dep:`/weak(`?`), default-features; dev-deps are not solved at all |
+| 6 | topological scheduling + per-crate rustc args | edition / `--cfg` features / `--extern` full closure (including proc-macro `.so`) / `-L` / `-l` / crate-name; artifact naming hash uses an own scheme (cargo's `-C metadata` algorithm is unstable and is not chased — cargo has left, internal consistency suffices); args feed the existing `run_dep_compiler` (deps) and the `MirvmCallbacks` session (bin); the fake binary and runner protocol are retired wholesale (E36 cwd semantics is closed on the new path along the way: guest cwd = caller cwd, same as cargo run) |
+| 7 | build.rs full lifecycle | largest new responsibility, 151 crates evidence of universality: host real compile (codegen) → execute with cargo-compatible env (CARGO_PKG_*/OUT_DIR/TARGET/HOST/PROFILE/CARGO_CFG_*) → parse `cargo::rustc-link-lib/-search/-cfg/-flags/metadata` directives → propagate (`-l`/`-L`/`--cfg` into dependent rustc args; OUT_DIR/CARGO_PKG_* into the bin session env; DEP_* into downstream build.rs env). build.rs is arbitrary code: its semantics is "execute it", and mirvm executes it too (external tool dependencies such as cc/pkg-config remain, same terms as today) |
+| 8 | proc-macro | host compile to dylib (real codegen), `--extern` into dependents; the mechanism is straightforward (the host/target criterion already has a wrapper prototype) |
+| 9 | fingerprint | own coarse-grained v1 (C11); no cargo fingerprint compatibility is needed, but profile semantics are pinned to the cargo dev-profile equivalent (C10); opt-level has no semantic effect on `-Zno-codegen` deps (pass it through without misjudging) |
+| 10 | config subset | `.cargo/config.toml`'s build.rustflags/target.*.rustflags; source replacement and alternative registry go to P5 as needed |
 
-新命名空间 `src/cargoless/`（直说：无 cargo 构建）：
+### 2.5 Module shape
+
+New namespace `src/cargoless/` (plainly: build without cargo):
 
 ```
 src/cargoless/
-  manifest.rs   # Cargo.toml 模型 + frontmatter 接入 + cfg 平台求值
-  lockfile.rs   # Cargo.lock 读写
-  registry.rs   # sparse index + .crate 下载/校验/解包 + 自有 store
-  resolve.rs    # 版本求解 + feature 统一 → 编译单元图
-  schedule.rs   # 拓扑排序 + 指纹 + 每 crate rustc 参数计算
-  buildrs.rs    # build.rs 编译/执行/指令解析/传播
-  proc_macro.rs # host dylib 调度
-  driver.rs     # mirvm run 新路径（替代 phase_cargo；compat 路径保留）
+  manifest/     # Cargo.toml model + frontmatter integration + cfg platform evaluation
+  lockfile.rs   # Cargo.lock read/write
+  registry.rs   # sparse index + .crate download/verify/unpack + own store
+  resolve/      # version solving + feature unification -> compilation unit graph
+  schedule/     # topological sort + fingerprint + per-crate rustc arg computation
+  buildrs.rs    # build.rs compile/execute/directive parse/propagate; host proc-macro dylib scheduling
+  driver.rs     # mirvm run new path (replaces phase_cargo; compat path retained)
 ```
 
-新直接依赖：`toml`（锁内已有 1.1.2）、`semver`（锁内已有 1.0.28）；
-HTTP/tar 见决策点 ①。
+New direct dependencies: `toml` (already in the lock at 1.1.2), `semver` (already in the lock at 1.0.28); HTTP/tar per decision point ①.
 
-## 5. 分期与闭合契约
+### 2.6 Decisions (ruled 2026-07-23)
 
-### P1 地基：解析库 + 审计工具（不接 run 路径）
+1. **HTTP/unpack** → **pure Rust crates** (ureq + flate2(miniz_oxide) + tar; self-containment takes priority over a minimal dependency tree; the TLS backend lands as ureq's default rustls).
+2. **registry store** → **own `~/.mirvm/registry` + read-through reuse of `~/.cargo/registry`** (read-only, no pollution; read-through order = own src → own cache → cargo src → cargo cache → HTTP).
+3. **phasing axis** → P1→P5 as in §2.7.
+4. **lock-absent solver** → the **`pubgrub` crate** (0.4; principled closure with manageable engineering).
 
-- 范围：§3 的 1-5（manifest/lock/registry/resolve/feature 图）。
-- 闭合契约：对仓内全部 corpus 条目（164 + projects）——lock 在场者，
-  自解版本集 **== lock 版本集**（审计工具逐条对账）；lock 缺席者
-  （frontmatter 脚本），自解落 lock 后 `cargo build --locked --offline`
-  能原样接受（兼容性反证）。build.rs/proc-macro 不在本期。
-- 验收：审计工具全绿；单测覆盖 manifest/feature 形态矩阵。
+### 2.7 Phase plan and closure contracts
 
-### P2 机制全：调度 + build.rs + proc-macro（粗指纹 v1）
+Each phase states the observable boundary it closes to. Things that cannot be closed in principle are stated up front; a detour may not impersonate closure.
 
-- 范围：§3 的 6-10；指纹粗粒度（build.rs 每次重跑，rerun-if 精细化归 P3）。
-- 闭合契约：**corpus smoke 层 24 条目全量**（含 blake3/crossbeam/mimalloc/
-  libgit2/rusqlite/mlua/tree_sitter 等 build.rs 重灾户）以零 cargo 进程
-  跑通，stdout/stderr/exit 与 cargo 路径逐字节一致（新增对拍轴：
-  self 路径 vs cargo 路径自一致 + 原三维判绿照常）。子集外构造
-  （workspace 复杂形态/alt registry）**响亮拒绝点名构造**，
-  不静默回退 cargo。
-- 验收：`MIRVM_DEPS=self ./tests/run.sh suite corpus.run --tier smoke` 24/24。
+| Phase | Scope | Closure contract | Acceptance | Closed |
+|---|---|---|---|---|
+| P1 groundwork: parsing library + audit tool (not wired into the run path) | scope items 1-5 (manifest/lock/registry/resolve/feature graph) | for all in-repo corpus entries (164 + projects): where a lock is present, the self-solved version set **== lock version set** (the audit tool reconciles item by item); where the lock is absent (frontmatter scripts), after the self-solve writes a lock, `cargo build --locked --offline` accepts it as-is (compatibility counter-proof). build.rs/proc-macro are not in this phase | audit tool all green; unit tests cover the manifest/feature shape matrix | 2026-07-27 |
+| P2 full mechanism: scheduling + build.rs + proc-macro (coarse fingerprint v1) | scope items 6-10; coarse fingerprint (build.rs reruns every time, rerun-if refinement belongs to P3) | **corpus smoke tier, all 24 entries** (including build.rs heavy hitters blake3/crossbeam/mimalloc/libgit2/rusqlite/mlua/tree_sitter) run with zero cargo processes, stdout/stderr/exit byte-identical to the cargo path (new differential axis: self path vs cargo path self-consistency + the original three-dimension check green as usual). Constructs outside the subset (complex workspace shapes/alt registry) are **rejected loudly with the construct named**, never silently falling back to cargo | `MIRVM_DEPS=self ./tests/run.sh suite corpus.run --tier smoke` 24/24 | 2026-07-27 (corpus smoke 24 dual-track byte-identical 24/24) |
+| P3 migration: fingerprint refinement + full corpus + dual-track gate | rerun-if fine-grained incrementality (build.rs not-rerun semantics aligned); full corpus tier migration; gate gains a DEPS axis (self full run + cargo compat path retained for smoke) | `MIRVM_DEPS=self ./tests/run.sh gate` all green; every entry's self path byte-identical to its cargo path | gate DEPS=self all green; cold/hot L2 behavior invariants green as usual | 2026-07-28 (corpus full 138 pass 1 p5 0 fail + gate DEPS=self dual-track green, git history) |
+| P4 sysroot self-management + cargo exit (default flip) | the sysroot build switches to D15 self-managed scheduling (rust-src fully local sources + a fixed ~27 crate graph; incidentally cutting an accidental crates.io dependency — agent-177 evidence: `.d` referenced `~/.cargo/registry`, changed to rust-src `library/vendor/`); `MIRVM_DEPS` default flips to self, the cargo path is retained as explicit compat (`MIRVM_DEPS=cargo`) and kept long-term per §7.37 (explicit user fallback and behavior differential, not silent rescue) | sysroot build zero cargo processes; `mirvm run` (project/script) default path zero cargo throughout; compat path gate smoke retained | after purge --sysroot, cold build all green; gate dual-track green | 2026-07-29 (sysroot self-managed + default flipped to self + compat dual-track decided) |
+| P5 complex semantics as needed (resolver 2/3 workspace done) | resolver 1, complex member glob/nested workspace/workspace lints, [patch]/[replace], alt registry, source replacement — **filed item by item as corpus expansion demands**; no commitment to "cargo full semantics" (an up-front non-closure surface; on encounter reject loudly, register, and expand as needed) | on encounter, reject loudly with the construct named; no silent fallback (C8) | filed item by item as needed | resolver 2/3 common workspace, rust-version-aware selection and Git dependencies completed 2026-08-08 to 08-10 (§7.35/§7.36/§7.38); alternative registry/Cargo config, common source replacement/patch/replace and pack self also completed (§7.39-§7.41); resolver 1, complex member glob/package spec and workspace lints completed with D17 remaining items (§7.44); remaining items filed per actual need |
 
-### P3 迁移：指纹精细化 + corpus 全量 + 双轨 gate
+## 3. Boundaries
 
-- 范围：rerun-if 精细增量（build.rs 不重跑语义对齐）；corpus full 层
-  全量迁移；gate 增 DEPS 轴（self 全量一轮 + cargo compat 路径保留冒烟）。
-- 闭合契约：`MIRVM_DEPS=self ./tests/run.sh gate` 全绿；
-  每条目 self 路径与 cargo 路径逐字节一致。
-- 验收：gate DEPS=self 全绿；冷/热 L2 行为不变式照绿。
+- **semver solving** — lock present = closed (read the lock); lock absent is decision point ④.
+- **feature resolver v2 corners** (union rules when one crate has different feature sets on normal/build edges) — implemented per cargo book semantics with full-corpus empirical backing; exotic shapes (weak dep feature chains) are covered by a unit test matrix, not claimed exhaustive.
+- **build.rs arbitrariness** — it can reach the network and write arbitrary paths; same terms as cargo (no sandbox, the semantics is execution). Sandboxing belongs to the D10 product surface and is not mixed into D15.
+- **profile semantics** — debug-assertions/overflow-checks enter MIR semantics (jiff precedent) and are hard-pinned to the dev-profile equivalent flags from P2 onward; opt-level has no semantic effect on `-Zno-codegen` deps and is passed through without misjudging.
+- **cargo version behavior differences** — the compat dual track only backs the pinned toolchain's cargo, same as today.
+- **rust-version-aware version preference** was originally a P1-period boundary and was completed 2026-08-10: resolver 3, fallback/allow, workspace minimum version, `--ignore-rust-version` and lock v3/v4 are all implemented against fixed-Cargo evidence (git history).
+- **req meets a new semver operator** unknown to this repo's pinned version → falls back to `Ranges::from_req` (the pre is lost; loudly accounted in code).
+- **Git source replacement and similar remaining boundaries** are rejected loudly (see §5).
+- **dev-deps and test targets** are never solved, and mirvm never runs test; cross-target and full Cargo config coverage are not claimed here.
 
-### P4 sysroot 自管 + cargo 退场（默认翻转）
+## 4. Verification
 
-- 范围：sysroot 构建改用 D15 自管调度（rust-src 全本地源码 + 固定
-  ~27 crate 图；顺手砍掉意外 crates.io 依赖——agent-177 实锤 .d 引用
-  ~/.cargo/registry，改走 rust-src `library/vendor/`）；`MIRVM_DEPS` 默认
-  翻为 self，cargo 路径保留为显式 compat（`MIRVM_DEPS=cargo`），
-  Cargo 路径按 §7.37 长期保留（用户显式回退和行为对拍；不是静默救援）。
-- 闭合契约：sysroot 构建零 cargo 进程；`mirvm run`（项目/脚本）默认路径
-  全程零 cargo；compat 路径 gate 冒烟保留。
-- 验收：purge --sysroot 后冷建全绿；gate 双轨绿。
+Every finalized solve rule was established empirically against the pinned Cargo; the evidence chain is in git history. The differential tracks are:
 
-### P5 复杂语义按实需（resolver 2/3 workspace 已完成）
+- **P1 audit chain.** The audit tool walks all in-repo corpus entries (164 + projects). Where a lock is present: the self-solved version set must equal the lock version set, reconciled item by item. Where the lock is absent (frontmatter scripts): after the self-solve writes a lock, `cargo build --locked --offline` must accept it as-is. Unit tests cover the manifest/feature shape matrix.
+- **P2 track.** `MIRVM_DEPS=self ./tests/run.sh suite corpus.run --tier smoke` → 24/24; stdout/stderr/exit byte-identical to the cargo path; the new axis (self path vs cargo path self-consistency) plus the original three-dimension byte-equality check stay green.
+- **P3 track.** `MIRVM_DEPS=self ./tests/run.sh gate` all green; every entry's self path byte-identical to its cargo path; cold/hot L2 behavior invariants unchanged. The gate DEPS axis = self full run + cargo compat smoke. Recorded result: corpus full 138 pass 1 p5 0 fail + gate DEPS=self dual-track green.
+- **P4 track.** `mirvm run` (project/script) default path zero cargo processes; sysroot build zero cargo processes; after `purge --sysroot`, cold build all green; gate dual-track green; the compat path stays under its own smoke with `MIRVM_DEPS=cargo`.
+- **Long-term dual track.** Cargo compat was ruled on 2026-08-10 to be retained long-term; default self and explicit Cargo fallback keep running the dual-track differential (§7.37).
 
-- resolver 1、复杂成员 glob/嵌套 workspace/workspace lints、[patch]/[replace]、
-  alt registry、source replacement——**按 corpus 扩编实需逐项立项**；不承诺
-  "cargo 全语义"（事先明说的不闭合面；遇到即响亮拒绝并登记，按实需扩）。
+## 5. Open items
 
-## 6. 风险与诚实边界
-
-- **semver 求解**：lock 在 = 闭合（读锁）；lock 不在见决策点 ④。
-- **feature resolver v2 边角**（同一 crate normal/build 边不同 feature 集
-  的并集规则）：按 cargo book 语义实现 + corpus 全量实证背书；
-   exotic 形态（weak dep features 链式激活）单测矩阵覆盖。
-- **build.rs 任意性**：它能联网/写任意路径——与 cargo 同口径（不沙箱，
-  语义即执行；沙箱化归 D10 产品面，不在 D15 掺和）。
-- **profile 语叉**：debug-assertions/overflow-checks 进 MIR 语义
-  （jiff 判例），P2 起硬钉 dev profile 等价旗；opt-level 对
-  -Zno-codegen deps 无语义影响（照传不误判）。
-- **cargo 新旧版本行为差**：compat 双轨只对 pinned toolchain 的 cargo
-  背书（与现状同）。
-
-## 7. 决策点（**2026-07-23 已裁定**）
-
-1. **HTTP/解包** → **纯 Rust crate**（ureq + flate2(miniz_oxide) + tar；
-   自包含优先于依赖树最小；TLS 后端以 ureq 默认 rustls 落地）。
-2. **registry store** → **自有 `~/.mirvm/registry` + 读穿复用
-   `~/.cargo/registry`**（只读不污染；读穿顺序 = 自有 src → 自有 cache →
-   cargo src → cargo cache → HTTP）。
-3. **分期轴** → 照 §5 的 P1→P5。
-4. **lock 缺席求解器** → **`pubgrub` crate**（0.4；原理闭合 + 工程量可控）。
+- **P5 residual semantics** are filed item by item only when corpus expansion demands; the up-front non-closure surface is resolver 1, complex member glob/nested workspace/workspace lints, [patch]/[replace], alt registry and source replacement. Reopen trigger: a corpus entry needs one of them. On encounter: reject loudly, register, expand as needed.
+- **Already closed on this surface** (kept for traceability, no further work): resolver 2/3 common workspace, rust-version-aware selection and Git dependencies (2026-08-08 to 08-10, §7.35/§7.36/§7.38); alternative registry/Cargo config, common source replacement (including registry/local/directory), patch/replace and pack self (§7.39-§7.41); resolver 1, complex member glob/package spec and workspace lints (§7.44, with D17 remaining items).
+- **Undetermined semver operator fallback.** When a req hits a semver operator unknown to this repo's pinned version, `Ranges::from_req` is used and the pre is lost. Reopen trigger: the pinned version gains that operator; until then the loss is loudly accounted in code.
+- **Fresh-solve skips yanked versions** and a no-solution is loud (C6); the lock path keeps accepting them like cargo. Reopen trigger: a corpus entry requires selecting a yanked version during a fresh solve.
+- **Git source replacement** and similar remaining boundaries are rejected loudly. Reopen trigger: corpus expansion demands them.
+- **Fingerprint v1 is coarse** (build.rs reruns every time; rerun-if refinement lands with P3's semantics). Reopen trigger: a differential shows a stale artifact that cargo would have rebuilt, or a rebuild cost that P3's incrementality was meant to remove.
+- **Project record:** [open-issues.md D15](../open-issues.md). The motivating precedent is C4 (two rounds of detour rejected — the situation "eating cargo's artifacts forces a detour" is to be eliminated institutionally).
