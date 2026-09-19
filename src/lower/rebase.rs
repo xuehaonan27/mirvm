@@ -1,11 +1,12 @@
-//! Rebase（自 lower/mod.rs M10 整搬）：A2 id 重映射（编译期穷尽枚举——
-//! fn/TLS/asm 同构 TAG|j → first+j、untagged d → d+image_count、底座 id
-//! 不动），absorb 时装配 image 模块进 delta 命名空间。
+//! Rebase: remap the ids a dependency image contributes into the delta namespace while
+//! the image module is absorbed. Function/TLS/asm ids share one shape: a tagged
+//! `TAG|j` becomes `first + j`, an untagged `d >= first` becomes `d + image_count`, and
+//! a base-image id below `first` is left alone.
 
 use super::*;
 
-/// fn/TLS/asm 同构：`TAG|j` → `first + j`；untagged d（≥ first）→ `d + image_count`；
-/// 底座 id（< first）不动。触及字段 = 设计 §9 盘点的 6 处 + ids/tls_ids 两表。
+/// Function/TLS/asm ids are remapped the same way: `TAG|j` -> `first + j`, an untagged
+/// `d >= first` -> `d + image_count`, and a base-image id below `first` stays put.
 pub(super) struct Rebase {
     pub(super) first_fn: u32,
     pub(super) image_fns: u32,
@@ -49,9 +50,10 @@ impl Rebase {
         plan.drop_payload = self.fn_id(plan.drop_payload);
     }
 
-    /// 单函数体重映射。op 级字段只有 3 处（设计 §9 实证）：Call.callee /
-    /// InlineAsm.stub / Rvalue::TlsRef。**编译期穷尽**（or-pattern 全枚举，新变体
-    /// = 非穷尽编译错误——防"新增携带 id 的 op 被遗忘"的静默错值）。
+    /// Remap one function body. Only three places carry an id: `Call.callee`,
+    /// `InlineAsm.stub` and `Rvalue::TlsRef`. Both matches below are exhaustive on
+    /// purpose: a new statement or terminator variant must fail to compile rather than
+    /// silently keep an unremapped id.
     pub(super) fn body(&self, b: &mut ir::FuncBody) {
         for block in &mut b.blocks {
             for stmt in &mut block.stmts {

@@ -2,23 +2,23 @@
 ---
 [dependencies]
 hound = "3"
-# 任务给定 features = ["wav"]，但该特性只开 symphonia-format-riff（容器探测），
-# 不含解码器：probe 成功后 get_codecs().make() 对 PCM_S16LE 报
-# Unsupported("core (codec):unsupported codec")（symphonia-codec-pcm 不在锁文件，
-# 实证见 Cargo.lock）。闭环的「解码」半环必须加 "pcm"（symphonia-codec-pcm，
-# 纯 Rust，无 C 依赖）——探测面仍只由 wav 特性提供。
+# The feature set here is ["wav"], but that only enables symphonia-format-riff (container
+# probing) and carries no decoder: after a successful probe, get_codecs().make() reports
+# Unsupported("core (codec):unsupported codec") for PCM_S16LE, because symphonia-codec-pcm is
+# not in the lockfile. The decode half of the loop therefore needs "pcm" as well
+# (symphonia-codec-pcm, pure Rust with no C dependency); probing still comes from wav alone.
 symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm"] }
 ---
-// hound 3 + symphonia 0.5(wav 容器 + pcm 解码) 音频闭环差分。
-// hound 定参数合成并写 16bit PCM wav 落 temp_dir 固定子名（8kHz 单声道 2s：
-// 0–1s 为 440Hz 正弦，1–2s 为 200→2000Hz 线性 chirp，振幅常量）→ hound 自读
-// 回交叉校验 → symphonia Hint+wav probe 探测格式、打印 CodecParameters 面 →
-// 解码全部包逐样本与源比对（计数 / 前 24 样本值 / 全流 i16-bits FNV / 失配数）→
-// 全新打开后 seek(Accurate, 1.5s) 解码下一包校验时间戳与样本 → 元数据面
-// （PCM wav 无 LIST INFO，current 应为 None）→ 坏文件两条错误路径（垃圾字节
-// probe 拒绝、截断文件 decode 中途 EOF）。结尾清理临时文件。
-// 确定性：合成参数全常量；只打印计数/布尔/整数（无浮点文本）；不打印路径/
-// 时间/地址；stderr 为空（driver 零 warning）。
+// hound 3 + symphonia 0.5 (wav container + pcm decode) audio loop differential. hound
+// synthesizes at fixed parameters and writes a 16-bit PCM wav to a fixed temp_dir name
+// (8 kHz mono, 2 s: 0-1 s a 440 Hz sine, 1-2 s a 200->2000 Hz linear chirp, constant
+// amplitude); hound reads it back to cross-check; symphonia probes with a Hint + wav and
+// prints the CodecParameters surface; all packets are decoded and compared sample by
+// sample against the source (counts, first 24 values, whole-stream i16-bits FNV, mismatch
+// count); a fresh open then seeks to 1.5 s (Accurate) and decodes the next packet; the
+// metadata must report current = None (a PCM wav has no LIST INFO); and two bad-file error
+// paths (junk bytes rejected by probe, a truncated file hitting EOF mid-decode).
+// Deterministic: only counts, booleans and integers; no paths, time or addresses; empty stderr.
 use std::f64::consts::PI;
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -33,7 +33,7 @@ use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
 use symphonia::default::{get_codecs, get_probe};
 
-/// 采样率 / 总样本数（8kHz × 2s）。
+/// Sample rate and total sample count (8 kHz × 2 s).
 const SR: u32 = 8000;
 const N: usize = 16000;
 
@@ -46,7 +46,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 样本流的 bits 谱锚：全部 i16 转 LE 字节喂 FNV-1a。
+/// Bit-level anchor for a sample stream: every i16 as LE bytes fed to FNV-1a.
 fn samples_fnv(s: &[i16]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for &v in s {
@@ -58,8 +58,8 @@ fn samples_fnv(s: &[i16]) -> u64 {
     h
 }
 
-/// 定参数合成：0–1s 440Hz 正弦(0.45 振幅)，1–2s 200→2000Hz 线性 chirp(0.30)。
-/// chirp 相位为频率的积分（二次项），全程 f64，精确舍入到 i16。
+/// Fixed-parameter synthesis: 0-1 s at 440 Hz sine (0.45), 1-2 s at 200->2000 Hz linear
+/// chirp (0.30). The chirp phase integrates frequency (quadratic); f64 throughout, rounded to i16.
 fn synth() -> Vec<i16> {
     let mut v = Vec::with_capacity(N);
     for i in 0..N {
@@ -92,8 +92,8 @@ fn codec_name(t: CodecType) -> &'static str {
     }
 }
 
-/// 把解码端 AudioBufferRef 逐帧交错展平成 i16 追加到 out；返回帧数，
-/// 非 S16 缓冲返回 None（本闭环只应出现 S16）。
+/// Interleaves the decoder's AudioBufferRef frame by frame into i16 and appends to out,
+/// returning the frame count; a non-S16 buffer gives None (only S16 should appear here).
 fn drain_i16(b: &AudioBufferRef<'_>, out: &mut Vec<i16>) -> Option<usize> {
     match b {
         AudioBufferRef::S16(buf) => {
@@ -110,7 +110,7 @@ fn drain_i16(b: &AudioBufferRef<'_>, out: &mut Vec<i16>) -> Option<usize> {
     }
 }
 
-/// 打开流并 probe（Hint 固定带 wav 扩展名）。
+/// Open a stream and probe it (the Hint always carries the wav extension).
 fn probe_mss(mss: MediaSourceStream) -> Result<symphonia::core::probe::ProbeResult, Error> {
     let mut hint = Hint::new();
     hint.with_extension("wav");
@@ -123,7 +123,7 @@ fn probe_mss(mss: MediaSourceStream) -> Result<symphonia::core::probe::ProbeResu
 }
 
 fn main() {
-    // ---- ⓪ 定参数合成（先清临时残留，结尾再清） ----
+    // ---- ⓪ Fixed-parameter synthesis (clear temp leftovers first, clean up at the end) ----
     let path: PathBuf = std::env::temp_dir().join("mirvm_corpus_symphonia_wav.wav");
     let _ = std::fs::remove_file(&path);
 
@@ -137,7 +137,7 @@ fn main() {
         src.iter().copied().max().unwrap()
     );
 
-    // ---- ① hound 写 wav（16bit PCM，逐样本写） ----
+    // ---- ① hound writes the wav (16-bit PCM, sample by sample) ----
     {
         let mut w = hound::WavWriter::create(&path, spec16()).unwrap();
         for &v in &src {
@@ -153,7 +153,7 @@ fn main() {
         fnv1a(&file_bytes)
     );
 
-    // ---- ② hound 自读回：spec 字段 + 逐样本等价 ----
+    // ---- ② hound reads it back: spec fields + per-sample equality ----
     let mut rd = hound::WavReader::open(&path).unwrap();
     let sp = rd.spec();
     println!(
@@ -168,7 +168,7 @@ fn main() {
     let back: Vec<i16> = rd.samples::<i16>().collect::<Result<_, _>>().unwrap();
     println!("hound roundtrip n={} eq={}", back.len(), back == src);
 
-    // ---- ③ symphonia：probe 格式 + CodecParameters 面 ----
+    // ---- ③ symphonia: probe the format + the CodecParameters surface ----
     let file = std::fs::File::open(&path).unwrap();
     let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
     let mut probed = probe_mss(mss).unwrap();
@@ -188,7 +188,7 @@ fn main() {
         cp.n_frames
     );
 
-    // ---- ④ 解码全部包：逐样本与源比对 + bits 谱锚 ----
+    // ---- ④ Decode all packets: per-sample comparison against the source + bit-level anchor ----
     let mut dec = get_codecs()
         .make(&track.codec_params, &DecoderOptions { verify: false })
         .unwrap();
@@ -235,7 +235,7 @@ fn main() {
     }
     println!("decode first24={:?}", &got[..24]);
 
-    // ---- ⑤ seek(Accurate, t=1.5s) → 解码下一包校验 ----
+    // ---- ⑤ seek(Accurate, t=1.5 s) -> decode the next packet to check ----
     let file2 = std::fs::File::open(&path).unwrap();
     let mss2 = MediaSourceStream::new(Box::new(file2), MediaSourceStreamOptions::default());
     let mut probed2 = probe_mss(mss2).unwrap();
@@ -272,7 +272,7 @@ fn main() {
         seg[..4] == *expect
     );
 
-    // ---- ⑥ 元数据面：PCM wav 无 LIST INFO → current 应为 None ----
+    // ---- ⑥ Metadata surface: a PCM wav has no LIST INFO, so current must be None ----
     match probed2.format.metadata().current() {
         Some(rev) => println!(
             "metadata tags={} visuals={}",
@@ -282,14 +282,14 @@ fn main() {
         None => println!("metadata current=None"),
     }
 
-    // ---- ⑦ 错误路径 ×2 ----
-    // (a) 垃圾字节：probe 必须拒绝。
+    // ---- ⑦ Error paths, two of them ----
+    // (a) Junk bytes: probe must reject them.
     let junk = Cursor::new(b"this is definitely not a RIFF/WAVE file.........".to_vec());
     match probe_mss(MediaSourceStream::new(Box::new(junk), Default::default())) {
         Ok(_) => println!("junk probe: unexpected ok"),
         Err(e) => println!("junk probe err: {e}"),
     }
-    // (b) 截断文件（保留合法头、砍掉大部分 data）：probe 过、decode 中途 EOF。
+    // (b) Truncated file (valid header kept, most of data cut): probe succeeds, decode hits EOF mid-stream.
     let cut_len = 128usize;
     let cut = Cursor::new(file_bytes[..cut_len].to_vec());
     let mut probed3 = probe_mss(MediaSourceStream::new(Box::new(cut), Default::default()))
@@ -314,7 +314,7 @@ fn main() {
         }
     }());
 
-    // ---- ⑧ 清理临时文件 ----
+    // ---- ⑧ Clean up the temporary file ----
     std::fs::remove_file(&path).unwrap();
     println!("cleanup exists={}", path.exists());
 }

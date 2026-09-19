@@ -3,33 +3,33 @@
 [dependencies]
 libflate = "2"
 ---
-// libflate 2.3（纯 Rust DEFLATE + zlib/gzip 容器——jieba 词典同款解压器）：
-// 三容器压缩/解压 roundtrip + 流式分块 + 头字段内省 + 错误路径。
-// 覆盖：zlib::{Encoder, Decoder, EncodeOptions, Header, Lz77WindowSize,
-// FlushMode}（默认 / no_compression / fixed_huffman_codes / block_size /
-// flush_mode(Sync) 五变体）、gzip::{Encoder, Decoder, MultiDecoder,
-// EncodeOptions, HeaderBuilder, Header, Os, ExtraField, ExtraSubField}
-// （钉死 mtime/filename/comment/extra/verify 的完整头，解码端逐字段读回）、
-// deflate::{Encoder, Decoder}；输入三档：结构化重复文本 / 定种 xorshift
-// 随机 / 空；流式：7B 分块写 + 13B 分块读；MultiDecoder 拼接双 member 与
-// 单 member Decoder 行为对比；错误路径：zlib 坏 FLG 校验位 / 截断 / adler
-// 篡改，gzip 坏魔数 / 截断 / crc 篡改，deflate 保留块型。
+// libflate 2.3 differential (pure-Rust DEFLATE plus zlib/gzip containers -- the same
+// decompressor jieba's dictionary uses): roundtrips for all three containers, streaming
+// in chunks, header field introspection and error paths. Covers zlib::{Encoder, Decoder,
+// EncodeOptions, Header, Lz77WindowSize, FlushMode} (default / no_compression /
+// fixed_huffman_codes / block_size / flush_mode(Sync)), gzip::{Encoder, Decoder,
+// MultiDecoder, EncodeOptions, HeaderBuilder, Header, Os, ExtraField, ExtraSubField}
+// (mtime/filename/comment/extra/verify pinned, read back field by field on decode),
+// and deflate::{Encoder, Decoder}. Three input shapes: structured repetitive text /
+// seeded xorshift random / empty. Streaming: 7-byte writes, 13-byte reads. MultiDecoder
+// over concatenated members vs a single-member Decoder. Error paths: zlib bad FLG check
+// bits / truncation / tampered adler; gzip bad magic / truncation / tampered crc;
+// deflate reserved block type.
 //
-// 确定性：gzip HeaderBuilder 默认 mtime 取墙钟（UNIX_EPOCH.elapsed()）——
-// 所有 gzip 编码一律 EncodeOptions::new().header(钉死 mtime 的头)；只打印
-// 长度 / FNV-1a / 布尔 / 固定头字段；无时间 / 地址 / 线程序 / HashMap 序。
+// Deterministic: HeaderBuilder defaults mtime to the wall clock (UNIX_EPOCH.elapsed()),
+// so every gzip encode uses EncodeOptions::new().header(a header with a pinned mtime).
+// Only lengths, FNV-1a, booleans and fixed header fields are printed -- no time,
+// addresses, thread ids or HashMap order.
 //
-// 绕行记录（上游 libflate 行为，native 已验证同现，语义不变仅拆用例）：
-// F_TEXT 与 F_HCRC 同置的 gzip 头在上游即无法解码——gzip::Header::read_from
-// 不把 FLG 的 F_TEXT 位回填到 is_text，FHCRC 校验时 this.crc16() 重算的
-// flags 缺 F_TEXT 位，crc16 必不匹配（报 "CRC16 of GZIP header mismatched"
-// 的 InvalidData）。故 verify() 与 text() 拆到两个独立头分别覆盖：
-// ④⑤ 全字段头不带 text，⑤b 单独验证 text() 编码落盘 / 解码端 is_text
-// 读回（上游同样不回填，解出为 false——两侧一致对拍）。
-// 另注：mirvm 未内建 dyn Error+Send+Sync → dyn Debug 的上溯 vtable 变换
-// （M4.2+ 债务）——io::Error 的 Debug fmt 会 TRAP；本 driver 错误路径一律
-// match + 只打印 kind({:?} 于 ErrorKind) 与 msg({} Display，已验证可用)，
-// 不 {:?} 打印 io::Error 本体。
+// Upstream behavior (native reproduces it; semantics unchanged, cases just split): a
+// gzip header with both F_TEXT and F_HCRC set cannot be decoded -- Header::read_from
+// does not copy the FLG F_TEXT bit into is_text, so the flags this.crc16() recomputes
+// during the FHCRC check lack it and the crc16 never matches ("CRC16 of GZIP header
+// mismatched", InvalidData). verify() and text() therefore use two separate headers:
+// ④⑤ take the full-field header without text, ⑤b checks text() encoding and is_text
+// readback (also not copied back upstream, so it decodes as false -- both sides agree).
+// NOTE: mirvm has no dyn Error+Send+Sync -> dyn Debug vtable upcast, so Debug-formatting
+// an io::Error TRAPs; these error paths only match and print kind and the Display msg.
 use std::ffi::CString;
 use std::io::{self, Read, Write};
 
@@ -40,7 +40,7 @@ use libflate::gzip::{
 use libflate::zlib::{EncodeOptions as ZlibEncodeOptions, FlushMode, Lz77WindowSize};
 use libflate::{deflate, gzip, zlib};
 
-/// 钉死的 gzip mtime（HeaderBuilder 默认取 UNIX_EPOCH.elapsed()，必须覆盖）。
+/// Pinned gzip mtime (HeaderBuilder defaults to UNIX_EPOCH.elapsed(), so it must be overridden).
 const MTIME: u32 = 0x0DDC_0FFE;
 
 fn fnv1a(data: &[u8]) -> u64 {
@@ -52,7 +52,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 定种 xorshift64* PRNG（native/mirvm 同序列）。
+/// Seeded xorshift64* PRNG with the same sequence on native and mirvm.
 struct Rng(u64);
 
 impl Rng {
@@ -75,7 +75,7 @@ impl Rng {
     }
 }
 
-/// 结构化重复日志（高压缩率；定长记录号保证确定性）。
+/// Structured repetitive log (highly compressible; fixed-width record numbers keep it deterministic).
 fn make_log() -> Vec<u8> {
     let mut d = Vec::new();
     let mut i = 0u32;
@@ -118,8 +118,8 @@ fn deflate_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// 钉死全部字段的 gzip 头（mtime/os/verify/filename/comment/extra；
-/// 不带 text——见文件头绕行记录）。
+/// Gzip header with every field pinned (mtime/os/verify/filename/comment/extra;
+/// no text -- see the file header note).
 fn pinned_gzip_header() -> gzip::Header {
     HeaderBuilder::new()
         .modification_time(MTIME)
@@ -150,7 +150,7 @@ fn gzip_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// 分 chunk 字节块读到 EOF（流式读路径）。
+/// Read chunk-sized byte blocks until EOF (the streaming read path).
 fn chunked_read_all<R: Read>(mut r: R, chunk: usize) -> io::Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut buf = vec![0u8; chunk];
@@ -164,8 +164,8 @@ fn chunked_read_all<R: Read>(mut r: R, chunk: usize) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// 错误路径统一报告：只打印 kind 与 Display msg（不 {:?} io::Error 本体，
-/// 见文件头 dyn 上溯注）。
+/// Uniform error-path report: prints only kind and the Display msg (never {:?} on
+/// io::Error itself; see the file header note).
 fn report_err(label: &str, r: io::Result<Vec<u8>>) {
     match r {
         Ok(v) => println!("{label} unexpectedly ok out-len={}", v.len()),
@@ -182,7 +182,7 @@ fn main() {
         println!("input {label} len={} fnv={:016x}", data.len(), fnv1a(data));
     }
 
-    // ① zlib 容器 × 三档输入：压缩流 checksum + roundtrip 布尔
+    // ① zlib container × three inputs: compressed-stream checksum + roundtrip boolean
     for (label, data) in inputs {
         let c = zlib_compress(data);
         let back = zlib_decompress(&c).unwrap();
@@ -194,7 +194,7 @@ fn main() {
         );
     }
 
-    // ② zlib 头内省：window_size / compression_level / Lz77WindowSize 换算梯
+    // ② zlib header introspection: window_size / compression_level / Lz77WindowSize ladder
     let c = zlib_compress(&log);
     let d = zlib::Decoder::new(&c[..]).unwrap();
     println!(
@@ -207,7 +207,7 @@ fn main() {
         println!("win from_u16({size}) = {:?}", Lz77WindowSize::from_u16(size));
     }
 
-    // ③ raw deflate 容器 × 三档输入
+    // ③ raw deflate container × three inputs
     for (label, data) in inputs {
         let c = deflate_compress(data);
         let back = deflate_decompress(&c).unwrap();
@@ -219,7 +219,7 @@ fn main() {
         );
     }
 
-    // ④ gzip 容器 × 三档输入（钉死的全字段头，无 text——见绕行记录）
+    // ④ gzip container × three inputs (full-field pinned header, no text -- see the note above)
     for (label, data) in inputs {
         let c = gzip_compress(data);
         let back = gzip_decompress(&c).unwrap();
@@ -231,7 +231,7 @@ fn main() {
         );
     }
 
-    // ⑤ gzip 头解码端逐字段读回（含 extra subfield 与 FHCRC 校验通过）
+    // ⑤ Decode-side field-by-field header readback (including extra subfields and a passing FHCRC)
     let c = gzip_compress(&log);
     let d = gzip::Decoder::new(&c[..]).unwrap();
     let h = d.header();
@@ -252,8 +252,8 @@ fn main() {
         ef.subfields[0].data
     );
 
-    // ⑤b F_TEXT 单独覆盖（与 verify 互斥，见绕行记录）：编码端 text=true，
-    // 解码端上游不回填 is_text → false（native 已验证同值，对拍一致）。
+    // ⑤b F_TEXT on its own (mutually exclusive with verify; see the note above): the encoder
+    // sets text=true, the upstream decoder does not copy is_text back -> false (both sides agree).
     let text_header = HeaderBuilder::new()
         .modification_time(MTIME)
         .os(Os::Ntfs)
@@ -274,7 +274,7 @@ fn main() {
         d.header().os()
     );
 
-    // ⑥ zlib EncodeOptions 变体 × log roundtrip（每 1KiB 块写后 flush）
+    // ⑥ zlib EncodeOptions variants × log roundtrip (flush after each 1 KiB block write)
     let variants: [(&str, ZlibEncodeOptions<libflate::lz77::DefaultLz77Encoder>); 4] = [
         ("no-comp", ZlibEncodeOptions::new().no_compression()),
         ("fixed-huffman", ZlibEncodeOptions::new().fixed_huffman_codes()),
@@ -297,7 +297,7 @@ fn main() {
         );
     }
 
-    // ⑦ 流式：7B 分块写 + 13B 分块读（跨 deflate 块边界），zlib 与 gzip 各一
+    // ⑦ Streaming: 7-byte writes + 13-byte reads across deflate block boundaries, for zlib and gzip
     let mut e = zlib::Encoder::new(Vec::new()).unwrap();
     for chunk in log.chunks(7) {
         e.write_all(chunk).unwrap();
@@ -324,7 +324,7 @@ fn main() {
         back == rand
     );
 
-    // ⑧ MultiDecoder：拼接双 member 一次读尽；单 member Decoder 只读第一个
+    // ⑧ MultiDecoder: both concatenated members in one read; a single-member Decoder reads only the first
     let ma = gzip_compress(b"Hello, ");
     let mb = gzip_compress(b"multi-member world!");
     let mut cat = ma.clone();
@@ -342,34 +342,34 @@ fn main() {
     d1.read_to_end(&mut first).unwrap();
     println!("gzip single-decoder out={:?}", String::from_utf8_lossy(&first));
 
-    // ⑨ 错误路径 a：zlib 坏 FLG 校验位（CMF*256+FLG 非 31 倍数）
+    // ⑨ Error path a: zlib bad FLG check bits (CMF*256+FLG not a multiple of 31)
     match zlib::Decoder::new(&b"jk"[..]) {
         Ok(_) => println!("zlib-bad-hdr unexpectedly ok"),
         Err(e) => println!("zlib-bad-hdr kind={:?} msg={}", e.kind(), e),
     }
-    // 错误路径 b：zlib 截断（trailer read_exact → UnexpectedEof）
+    // Error path b: zlib truncation (trailer read_exact -> UnexpectedEof)
     let c = zlib_compress(&log);
     report_err("zlib-truncated", zlib_decompress(&c[..c.len() * 3 / 5]));
-    // 错误路径 c：zlib adler32 trailer 篡改 → EOF 校验报错
+    // Error path c: tampered zlib adler32 trailer -> EOF checksum error
     let mut bad = c.clone();
     let n = bad.len();
     bad[n - 1] ^= 0xFF;
     report_err("zlib-bad-adler", zlib_decompress(&bad));
 
-    // 错误路径 d：gzip 坏魔数
+    // Error path d: gzip bad magic
     match gzip::Decoder::new(&b"not a gzip stream"[..]) {
         Ok(_) => println!("gzip-bad-magic unexpectedly ok"),
         Err(e) => println!("gzip-bad-magic kind={:?} msg={}", e.kind(), e),
     }
-    // 错误路径 e：gzip 截断
+    // Error path e: gzip truncation
     let g = gzip_compress(&log);
     report_err("gzip-truncated", gzip_decompress(&g[..g.len() * 3 / 5]));
-    // 错误路径 f：gzip crc32 trailer 篡改 → EOF CRC 校验报错
+    // Error path f: tampered gzip crc32 trailer -> EOF CRC check error
     let mut badg = g.clone();
     let n = badg.len();
-    badg[n - 6] ^= 0xFF; // trailer = crc32(4B LE) + isize(4B LE)，落在 crc 字段内
+    badg[n - 6] ^= 0xFF; // trailer = crc32(4B LE) + isize(4B LE); this lands inside the crc field
     report_err("gzip-bad-crc", gzip_decompress(&badg));
 
-    // 错误路径 g：deflate 保留块型（BTYPE=0b11）→ inflate 立即报错
+    // Error path g: deflate reserved block type (BTYPE=0b11) -> inflate errors immediately
     report_err("deflate-bad-block", deflate_decompress(&[0xff; 4]));
 }

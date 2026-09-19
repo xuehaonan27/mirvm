@@ -3,15 +3,15 @@
 [dependencies]
 roaring = "0.10"
 ---
-// roaring 0.10：RoaringBitmap（u32 分段压缩位图，array/bitmap/run 三种 container）
-// 与 RoaringTreemap（u64）差分。
-// 覆盖：插入谱系（空/稀疏跨 container/稠密跨 65536 边界/重复插入）、push 与
-// append 有序快路径 + 非单调错误路径、insert_range/remove_range/contains_range/
-// range_cardinality、集合代数（and/or/xor/sub + *_len 族 + 子集关系）对拍
-// BTreeSet 参考实现、native 序列化 roundtrip（尺寸 + FNV-1a checksum + 截断/
-// 坏 cookie 错误路径）、迭代器抽样（take/rev/step_by/range/advance_to/rank/
-// select）、container 统计。数据全部固定种子（xorshift32），无时间/线程/地址/
-// HashMap 序。
+// roaring 0.10 differential: RoaringBitmap (u32 sharded compressed bitmaps with array,
+// bitmap and run containers) and RoaringTreemap (u64).
+// Covers an insertion spectrum (empty / sparse across containers / dense across the 65536
+// boundary / duplicate inserts); the ordered push and append fast paths plus the
+// non-monotonic error path; insert_range/remove_range/contains_range/range_cardinality;
+// set algebra (and/or/xor/sub plus the *_len family and subset relations) compared against
+// a BTreeSet reference; serialization roundtrips in the native format (size + FNV-1a
+// checksum + truncated / bad-cookie error paths); iterator sampling (take/rev/step_by/range/
+// advance_to/rank/select); container statistics. Data is fixed-seed (xorshift32); no time/HashMap order.
 use roaring::{RoaringBitmap, RoaringTreemap};
 use std::collections::BTreeSet;
 
@@ -24,7 +24,7 @@ fn fnv1a(b: &[u8]) -> u64 {
     h
 }
 
-/// 固定种子 xorshift32：确定性伪随机源。
+/// Fixed-seed xorshift32: a deterministic pseudorandom source.
 struct XorShift32(u32);
 
 impl XorShift32 {
@@ -37,7 +37,7 @@ impl XorShift32 {
         x
     }
 
-    /// [0, n) 均匀取数（拒绝采样去模偏置，确定性）。
+    /// Uniform draw from [0, n) (rejection sampling removes modulo bias, deterministically).
     fn below(&mut self, n: u32) -> u32 {
         let zone = u32::MAX - (u32::MAX % n);
         loop {
@@ -61,7 +61,7 @@ fn stats_line(tag: &str, rb: &RoaringBitmap) {
     );
 }
 
-/// 序列化 → 尺寸/checksum → 解回 → 相等布尔。
+/// Serialize -> size/checksum -> deserialize -> equality boolean.
 fn ser_roundtrip(tag: &str, rb: &RoaringBitmap) {
     let mut bytes = Vec::new();
     rb.serialize_into(&mut bytes).unwrap();
@@ -77,7 +77,7 @@ fn ser_roundtrip(tag: &str, rb: &RoaringBitmap) {
 }
 
 fn main() {
-    // ① 插入谱系：空 → 稀疏跨 container → 稠密跨 65536 边界
+    // ① Insertion spectrum: empty -> sparse across containers -> dense across the 65536 boundary
     let empty = RoaringBitmap::new();
     println!(
         "1 empty len={} is_empty={} min={:?} max={:?}",
@@ -104,8 +104,8 @@ fn main() {
     println!("1 sparse debug = {sparse:?}");
     stats_line("1 sparse", &sparse);
 
-    // 稠密 0..=70000：container 0 填满 65536，跨边界进 container 1；
-    // array container 超 4096 元素转 bitmap container。
+    // Dense 0..=70000: container 0 fills all 65536 slots and the range spills into container 1;
+    // an array container converts to a bitmap container past 4096 elements.
     let mut dense = RoaringBitmap::new();
     for v in 0..=70_000u32 {
         dense.insert(v);
@@ -121,7 +121,7 @@ fn main() {
     );
     stats_line("1 dense", &dense);
 
-    // ② push / append / from_sorted_iter：有序快路径与错误路径
+    // ② push / append / from_sorted_iter: ordered fast paths and error paths
     let mut pushed = RoaringBitmap::new();
     println!(
         "2 push 1={} 3={} dup3={} 5={} back2={}",
@@ -135,21 +135,21 @@ fn main() {
 
     let mut app = RoaringBitmap::new();
     println!("2 append 0..10 => {:?}", app.append(0..10).map_err(|e| e.valid_until()));
-    // 起点不大于现有 max（7 <= 9）：立即报错，valid_until=0
+    // The start is not greater than the current max (7 <= 9): an immediate error, valid_until=0
     let err0 = app.append([7, 65536]).map_err(|e| e.valid_until());
     println!("2 append not-greater-than-max => {err0:?}");
-    // 中途非单调：10/65536/65537 入集合后，重复的 65537 报错，valid_until=3
+    // Non-monotonic in the middle: after 10/65536/65537 are added, the repeated 65537 errors with valid_until=3
     let err1 = app.append([10, 65536, 65537, 65537, 70000]).map_err(|e| e.valid_until());
     println!("2 append mid-unsorted => {err1:?}");
     println!("2 app len={} max={:?}", app.len(), app.max());
     let fs_err = RoaringBitmap::from_sorted_iter((0..10u32).rev()).map(|_| ()).map_err(|e| e.valid_until());
     println!("2 from_sorted_iter rev => {fs_err:?}");
 
-    // ③ 区间添加：insert_range 跨边界、重叠去重、contains_range、remove_range
+    // ③ Range insertion: insert_range across boundaries, overlap dedup, contains_range, remove_range
     let mut ranged = RoaringBitmap::new();
     println!("3 insert_range 100..200 => {}", ranged.insert_range(100..200));
     println!("3 insert_range 150..300 (overlap) => {}", ranged.insert_range(150..300));
-    println!("3 insert_range 65530..=65540 (跨 65536) => {}", ranged.insert_range(65_530..=65_540));
+    println!("3 insert_range 65530..=65540 (crosses 65536) => {}", ranged.insert_range(65_530..=65_540));
     println!(
         "3 contains_range 65530..=65540={} 65530..=65541={} 100..300={}",
         ranged.contains_range(65_530..=65_540),
@@ -157,7 +157,7 @@ fn main() {
         ranged.contains_range(100..300)
     );
     println!("3 len={} range_cardinality[0..100000]={}", ranged.len(), ranged.range_cardinality(0..100_000));
-    // 百万级连续区间：触发 run container 的批量构建（每 container 一次调用）
+    // A million-element contiguous range: triggers bulk run-container construction (one call per container)
     let mut big = RoaringBitmap::new();
     let added = big.insert_range(1_000_000..2_000_000);
     println!("3 big insert_range 1M..2M => {added} len={} full_container={}", big.len(), big.contains_range(1_000_000..2_000_000));
@@ -166,7 +166,7 @@ fn main() {
     println!("3 big remove_range 1500000..1600000 => {removed} len={}", big.len());
     println!("3 big contains 1499999={} 1500000={}", big.contains(1_499_999), big.contains(1_500_000));
 
-    // ④ 集合代数 vs BTreeSet 参考：and/or/xor/sub + len 族 + 子集关系
+    // ④ Set algebra vs a BTreeSet reference: and/or/xor/sub + the len family + subset relations
     let mut rng_a = XorShift32(0x1234_5678);
     let mut rng_b = XorShift32(0x9abc_def0);
     let vals_a: Vec<u32> = (0..20_000).map(|_| rng_a.below(1_000_000)).collect();
@@ -220,7 +220,7 @@ fn main() {
             && a.difference_len(&b) == sub_ref.len() as u64
             && a.symmetric_difference_len(&b) == xor_ref.len() as u64
     );
-    // 子集/超集/不相交：构造 a 的真子集（每第 3 个元素）
+    // Subset/superset/disjoint: build a proper subset of a (every third element)
     let every3: RoaringBitmap = a.iter().step_by(3).collect();
     let ref_every3: BTreeSet<u32> = ref_a.iter().step_by(3).copied().collect();
     println!(
@@ -232,7 +232,7 @@ fn main() {
         a.is_disjoint(&(&a ^ &a))
     );
 
-    // ⑤ 序列化 roundtrip（native portable 格式）+ 错误路径
+    // ⑤ Serialization roundtrips (native portable format) + error paths
     ser_roundtrip("5 sparse", &sparse);
     ser_roundtrip("5 dense", &dense);
     ser_roundtrip("5 a", &a);
@@ -245,7 +245,7 @@ fn main() {
     let bad_cookie = RoaringBitmap::deserialize_from(&bogus[..]).unwrap_err();
     println!("5 deser bogus-cookie err kind = {:?}", bad_cookie.kind());
 
-    // ⑥ 迭代器抽样：take / rev / step_by / range / advance_to / rank / select
+    // ⑥ Iterator sampling: take / rev / step_by / range / advance_to / rank / select
     let first5: Vec<u32> = a.iter().take(5).collect();
     let last5: Vec<u32> = a.iter().rev().take(5).collect();
     println!("6 a first5={first5:?} last5={last5:?}");
@@ -268,7 +268,7 @@ fn main() {
         println!("6 a select({n}) = {:?}", a.select(n));
     }
 
-    // ⑦ RoaringTreemap：u64 多类型面，跨 u32 边界
+    // ⑦ RoaringTreemap: the u64 surface, across the u32 boundary
     let mut tm = RoaringTreemap::new();
     let tm_vals = [
         0u64,

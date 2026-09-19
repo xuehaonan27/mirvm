@@ -1,52 +1,52 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# parquet2 0.17.2（0.17.x 最新 patch 也是 parquet2 全线的最后发布，
-# 2023-04-13 发布于 jorgecarleitao/parquet2，此后生态由 arrow2 系接棒，
-# 故 =0.17.2 钉死即到顶，无后续漂移风险）。
-# feature 钉选理由：默认 default = snappy+gzip+lz4+zstd+brotli+bloom_filter，
-# 其中 lz4 feature 拉的是 C FFI 的 lz4/1.24 crate（lz4-sys）、zstd 同理 C FFI，
-# 任务口径要求纯 Rust 压缩面 → default-features=false 只留 snappy。
-# parquet SNAPPY 编解码是 raw snappy 块（parquet2 内部走 snap::raw::Encoder/
-# Decoder），不经 snap 的 frame 层 → 不触 c_lz4_snap 记录过的 frame 层掩码
-# crc32c SSE4.2 运行期派发（且该 intrinsic 族 2026-07-15 已内建，双保险）。
-# thrift 系核查结论：parquet2 全系无 thrift runtime 依赖——元数据走
-# parquet-format-safe 0.2（官方 generated safe bindings，零 mandatory 依赖、
-# 自带 compact protocol 读写），无需裁剪。
-# 闭包清单（5 crate、全纯 Rust、无 build.rs C 编译）：parquet2 0.17.2 /
-# parquet-format-safe 0.2.x / seq-macro 0.3 / snap 1.x / streaming-decompression 0.1。
+# parquet2 is pinned at the last release of its line: =0.17.2 is terminal, so the
+# dependency cannot drift to a later version.
+# The default feature set is snappy+gzip+lz4+zstd+brotli+bloom_filter; the lz4
+# feature pulls the C FFI lz4 crate (lz4-sys) and zstd likewise uses C FFI, so
+# default-features=false keeps only snappy to hold the compression surface pure Rust.
+# parquet SNAPPY encodes and decodes raw snappy blocks (parquet2 uses
+# snap::raw::Encoder/Decoder internally) and never enters snap's frame layer, so it
+# does not reach frame-level crc32c SSE4.2 runtime dispatch.
+# parquet2 has no thrift runtime dependency: metadata goes through the
+# parquet-format-safe 0.2 official generated safe bindings (zero mandatory
+# dependencies, bundled compact-protocol read/write), so nothing needs trimming.
+# The dependency closure is 5 crates, all pure Rust, none compiling C in build.rs:
+# parquet2 0.17.2 / parquet-format-safe 0.2.x / seq-macro 0.3 / snap 1.x /
+# streaming-decompression 0.1.
 parquet2 = { version = "=0.17.2", default-features = false, features = ["snappy"] }
 ---
-// parquet2 0.17.2 三维差分：向内存 Vec<u8>（Cursor）写一张小表、按
-// Uncompressed 与 Snappy 两档各写一遍 → 字节长度 + FNV-1a 锚定 → 内存读回
-// 断言行数/schema/逐值（含 nullable def-level 解码）→ 打印 meta 关键统计。
+// parquet2 0.17.2 three-way differential: write a small table into an in-memory
+// Vec<u8> (Cursor) as Uncompressed and Snappy -> byte length + FNV-1a anchor -> read
+// back, assert rows/schema/values (nullable def-level) -> print key meta stats.
 //
-// 覆盖测试面：
-//   schema  ：4 个 nullable 基元列 i32_col(Int32) / i64_col(Int64) /
-//             f64_col(Double) / utf8_col(ByteArray + logical String)，
-//             由元数据读回并逐列断言名字/物理类型/Repetition/logical_type
-//   行组    ：3 个 row group，行数 8/6/7 不等（总 21），每列单页
-//   编码    ：全 Plain 编码 + RLE def-level（全部 Optional 列，每列至少
-//             一个 null；特定行组 nulls=0 / nulls=2 两档覆盖）
-//   数据    ：i32 含 MIN/MAX 极值；i64 含 MIN/MAX、±1<<40 大数；
-//             f64 含 2^53 外大数/负零与零并存（f64 值断言按 to_bits 比，
-//             打印按 bits 锁位型）；utf8 含空串/None/重复串（可压缩）
-//   压缩    ：Uncompressed 与 Snappy 两份完整文件，印刷 codec/未压缩/
-//             压缩尺寸，两文件逻辑内容完全相同（值断言与统计相等断言
-//             双路复核）
-//   统计    ：write_statistics=true → 页头 min/max/null_count（thrift
-//             序列化）+ FileWriter::end 写 column index/offset index；
-//             读回 downcast PrimitiveStatistics<i32|i64|f64> /
-//             BinaryStatistics 打印并按 PartialEq 跨两份文件断言相等
-//   元数据  ：created_by 固定串与 key_value_metadata 固定 kv（thrift 回调
-//             读）；format version=1(V1)；read_metadata 走
-//             parquet-format-safe compact protocol（纯 Rust）
+// Coverage:
+//   schema  : 4 nullable primitive columns i32_col(Int32) / i64_col(Int64) /
+//             f64_col(Double) / utf8_col(ByteArray + logical String), read back
+//             from metadata, asserting name/physical type/Repetition/logical_type
+//   row groups: 3 row groups with 8/6/7 rows (21 total), one page per column
+//   encoding: all Plain encoding + RLE def-level (every column Optional, each with
+//             at least one null; specific row groups cover nulls=0 and nulls=2)
+//   data    : i32 holds MIN/MAX extremes; i64 holds MIN/MAX and ±1<<40 magnitudes;
+//             f64 holds values beyond 2^53 and negative zero alongside zero (assert by
+//             to_bits, print the bits); utf8 holds empty/None/repeated strings (compressible)
+//   compression: two complete files, Uncompressed and Snappy, printing codec/
+//             uncompressed/compressed sizes; both files hold identical logical content,
+//             checked twice over (value assertions and statistics-equality assertions)
+//   statistics: write_statistics=true -> page-header min/max/null_count (thrift
+//             serialized) + FileWriter::end writes column index/offset index; read back,
+//             downcast PrimitiveStatistics<i32|i64|f64> / BinaryStatistics, print, and
+//             assert equality across both files via PartialEq
+//   metadata: fixed created_by string and fixed key_value_metadata kv (read via the
+//             thrift callback); format version=1(V1); read_metadata goes through the
+//             parquet-format-safe compact protocol (pure Rust)
 //
-// 确定性：全部值为字面量常量，无随机/时间/地址/HashMap 序/线程；压缩器对
-// 同输入逐字节确定，FNV 锚定全文件字节；浮点永不直打，一律 to_bits。
-// 断言失败走 panic（stderr 正常路径真空）。
+// Determinism: all values are literal constants; no randomness/time/address/HashMap
+// order/threads. The compressor is deterministic per input, FNV anchors whole-file bytes;
+// floats never print raw, always to_bits. Assertion failures panic (stderr silent when green).
 //
-// 三维复跑命令（仓库根）：
+// Three-way re-run commands (repo root):
 //   A: target/release/mirvm run corpus/c_parquet2_rw.rs
 //   B: cd $(grep -l 'name = "c_parquet2_rw"' ~/.cache/mirvm/scripts/*/Cargo.toml \
 //        | head -1 | xargs dirname) && \
@@ -54,8 +54,8 @@ parquet2 = { version = "=0.17.2", default-features = false, features = ["snappy"
 //      "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
 //   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_parquet2_rw.rs
 //
-// FRONTIER：无（预期）。thrift compact 元数据/RLE 位打包/snap raw 块压缩
-// 均为纯 Rust 无 SIMD 面。
+// FRONTIER: none (expected). thrift compact metadata / RLE bit packing / snap raw block
+// compression are all pure Rust with no SIMD surface.
 use std::io::Cursor;
 
 use parquet2::compression::CompressionOptions;
@@ -82,7 +82,7 @@ use parquet2::write::{
 use parquet2::FallibleStreamingIterator;
 
 // ---------------------------------------------------------------------------
-// 定值数据：3 行组（8/6/7 行），4 nullable 列同源供两档压缩各写一次。
+// Fixed data: 3 row groups (8/6/7 rows); 4 nullable columns source both compression modes.
 // ---------------------------------------------------------------------------
 
 struct Data {
@@ -195,10 +195,10 @@ const PHYSICALS: [PhysicalType; 4] = [
 ];
 
 // ---------------------------------------------------------------------------
-// 写侧：schema → Plain 编码页（V1 头 + RLE def-level + 页统计）→ FileWriter。
+// Write side: schema -> Plain-encoded pages (V1 header + RLE def-level + page stats) -> FileWriter.
 // ---------------------------------------------------------------------------
 
-/// 4 个全部 Optional 的基元列；utf8_col 挂 logical String。
+/// 4 primitive columns, all Optional; utf8_col carries logical String.
 fn build_schema() -> Result<SchemaDescriptor> {
     Ok(SchemaDescriptor::new(
         "schema".to_string(),
@@ -218,7 +218,7 @@ fn build_schema() -> Result<SchemaDescriptor> {
     ))
 }
 
-/// 定值序列 → (values LE 字节, 4B 长度头 + RLE def-level 位图)。
+/// Fixed sequence -> (values as LE bytes, 4-byte length header + RLE def-level bitmap).
 fn unzip_option<T: NativeType>(array: &[Option<T>]) -> Result<(Vec<u8>, Vec<u8>)> {
     let mut validity = std::io::Cursor::new(vec![0; 4]);
     validity.set_position(4);
@@ -262,7 +262,7 @@ fn unzip_option_binary(array: &[Option<Vec<u8>>]) -> Result<(Vec<u8>, Vec<u8>)> 
     Ok((values, validity))
 }
 
-/// 基元列定值数组 → V1 数据页（Plain 值区 + RLE def-level + min/max/null_count）。
+/// Primitive fixed array -> V1 data page (Plain value area + RLE def-level + min/max/null_count).
 fn primitive_page<T: NativeType>(
     array: &[Option<T>],
     options: &WriteOptions,
@@ -300,7 +300,7 @@ fn primitive_page<T: NativeType>(
     )))
 }
 
-/// 二进制列定值数组 → V1 数据页（Plain「len LE + bytes」值区 + 统计）。
+/// Binary fixed array -> V1 data page (Plain "len LE + bytes" value area + statistics).
 fn binary_page(
     array: &[Option<Vec<u8>>],
     options: &WriteOptions,
@@ -346,7 +346,7 @@ fn binary_page(
     )))
 }
 
-/// 整表写进内存 Vec：3 个 row group，固定 created_by 与 kv 元数据。
+/// Write the whole table into an in-memory Vec: 3 row groups, fixed created_by and kv metadata.
 fn write_table(data: &Data, compression: CompressionOptions) -> Result<Vec<u8>> {
     let options = WriteOptions {
         write_statistics: true,
@@ -416,10 +416,10 @@ fn write_table(data: &Data, compression: CompressionOptions) -> Result<Vec<u8>> 
 }
 
 // ---------------------------------------------------------------------------
-// 读侧：元数据 → 行组/列块 → 解压 → 解码 V1 页（Plain + def-level）。
+// Read: metadata -> row groups/column chunks -> decompress -> decode V1 pages (Plain + def-level).
 // ---------------------------------------------------------------------------
 
-/// def-level 驱动解码：合法的巷值流（复制自 parquet2 官方 it/read/utils.rs）。
+/// def-level driven decode: the legal value stream (copied from parquet2's it/read/utils.rs).
 fn deserialize_optional<C: Clone, I: Iterator<Item = Result<C>>>(
     validity: DefLevelsDecoder,
     values: I,
@@ -481,7 +481,7 @@ fn deserialize_levels<C: Clone, I: Iterator<Item = Result<C>>>(
         .collect()
 }
 
-/// 本 driver 只写 Plain 编码，字典页永不出险；P 取占位类型，字典臂不可达。
+/// Plain encoding only: no dictionary page appears; P is a placeholder, so that arm is unreachable.
 enum NoDict {}
 
 fn primitive_page_to_vec<T: NativeType>(page: &DataPage) -> Result<Vec<Option<T>>> {
@@ -547,7 +547,7 @@ fn read_binary_column(
 }
 
 // ---------------------------------------------------------------------------
-// 打印与断言
+// Printing and assertions
 // ---------------------------------------------------------------------------
 
 fn fnv1a(data: &[u8]) -> u64 {
@@ -612,8 +612,8 @@ fn stats_line(st: &dyn Statistics, col: &ColumnChunkMetaData) -> String {
     )
 }
 
-/// 断言元数据与 schema（行组数/列数/字段名/物理类型/可空性/逻辑类型），
-/// full=true 时额外打行组尺寸与 12 条列块统计行。
+/// Assert metadata and schema: row-group/column counts, field names, physical types,
+/// nullability, logical types; full=true also prints row-group sizes and 12 stats lines.
 fn inspect_meta(md: &FileMetaData, label: &str, full: bool) {
     assert_eq!(md.num_rows, TOTAL_ROWS);
     assert_eq!(md.row_groups.len(), 3);
@@ -669,7 +669,7 @@ fn inspect_meta(md: &FileMetaData, label: &str, full: bool) {
     }
 }
 
-/// 逐行组读回四列并与定值源数组逐值断言（f64 经 to_bits 比位型）。
+/// Read back the four columns per row group and value-assert the fixed source (f64 by to_bits).
 fn inspect_values(bytes: &[u8], data: &Data, label: &str, md: &FileMetaData) {
     let mut reader = Cursor::new(bytes.to_vec());
     for (rg, group) in md.row_groups.iter().enumerate() {
@@ -705,8 +705,8 @@ fn main() {
     let md_snappy = read_metadata(&mut Cursor::new(snappy.clone())).unwrap();
     inspect_meta(&md_snappy, "snappy", false);
 
-    // 两文件逻辑内容须完全相同：1) 列块统计逐一相等（按 dyn Statistics 的
-    // PartialEq 走 downcast 结构比）→ 打印布尔；2) 逐值断言在下一节。
+    // Both files must hold identical logical content: 1) column-chunk statistics compare
+    // equal one by one (dyn Statistics PartialEq via downcast) -> print bool; 2) values next.
     let mut stats_same = true;
     for rg in 0..3 {
         for c in 0..4 {

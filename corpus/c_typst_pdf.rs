@@ -47,7 +47,7 @@ typst-assets = { version = "=0.15.1", features = ["fonts"] }
 // fail on the same instruction. No official switch disables atomic128 (the
 // fallback features cover aarch64/riscv outline atomics only), cargo-script
 // frontmatter cannot inject RUSTFLAGS and typst-utils cannot be removed.
-// Wiring: red_code=70; red_pattern="TRAP: 非标量 place（ty=std::arch::x86_64::__m128i".
+// Wiring: red_code=70; red_pattern="TRAP: non-scalar place (ty=std::arch::x86_64::__m128i".
 //
 //
 //

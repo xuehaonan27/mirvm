@@ -2,31 +2,31 @@
 ---
 [dependencies]
 k256 = { version = "0.13", features = ["ecdh"] }
-# sha3 仅为复现 k256 内嵌的 ethereum RFC6979 定向量（Keccak256 摘要 +
-# HMAC-DRBG-Keccak256 nonce）——该向量是 k256 src/ecdsa.rs 文档与测试
-# 共同锚定的公开高层确定性签名向量。
+# sha3 exists only to reproduce the ethereum RFC6979 vector embedded in k256 (a
+# Keccak256 digest plus an HMAC-DRBG-Keccak256 nonce): the public high-level
+# deterministic signing vector that k256's docs and tests both anchor.
 sha3 = "0.10"
 ---
-// k256 0.13（secp256k1，u128 域/标量算术 + precomputed-tables）差分：
-// 固定标量 → SecretKey → 公钥 SEC1 压缩/非压缩；RFC6979 确定性 ECDSA
-// 签名/正反 verify；ECDH 双固定密钥两路 shared；BIP340 schnorr 定向量。
+// k256 0.13 (secp256k1, u128 field/scalar arithmetic + precomputed tables) differential:
+// fixed scalars → SecretKey → SEC1 compressed/uncompressed public keys; RFC6979
+// deterministic ECDSA sign and both verify ways; ECDH shared both ways; BIP340 vectors.
 //
-// 定向量自查（全部来自 k256 0.13.4 内嵌测试/文档与 BIP340 官方 CSV，
-// 常量逐字节抄录、大小写归一）：
-// - src/test_vectors/ecdsa.rs：(d, q_x, q_y, k, m, r, s) —— 公钥坐标锚定
-//   ①；hazmat SignPrimitive::try_sign_prehashed 显式 nonce 复现 r/s ④。
-//   （注：嵌入 k 并非 RFC6979-SHA256(d, m) 的 nonce，故 ③ 的 sign_prehash
-//   输出与之不同路径——两条路径各自独立锚定。）
-// - src/ecdsa.rs 文档 ethereum 向量：sign_digest_recoverable(Keccak256)
-//   复现已知签名 + recid=0 + recover roundtrip ③。
-// - src/ecdsa.rs RECOVERY_TEST_VECTORS ×2：recover_from_digest(Sha256)
-//   恢复压缩公钥逐字节比对 ③。
-// - src/ecdsa.rs normalize 向量对：s_high.normalize_s() == s_low ④。
-// - k256 特有：VerifyPrimitive 拒绝 high-s 签名（bitcoin 约定）④。
-// - BIP340 CSV index 0-3 签名+验签 TRUE、index 5 公钥不在曲线上（解析
-//   错误路径）、index 6 has_even_y(R)=false 验签 FALSE ⑥。
-// 确定性：全部输入为固定字节；ECDSA 走 RFC6979、schnorr 用显式 aux_rand，
-// 不碰 RNG；只打印 hex/布尔/计数。
+// Vector self-checks (all copied byte-for-byte, case-normalized, from the tests and
+// docs embedded in k256 0.13.4 and the official BIP340 CSV):
+// - src/test_vectors/ecdsa.rs: (d, q_x, q_y, k, m, r, s) anchors the public key
+//   coordinates ①; hazmat SignPrimitive::try_sign_prehashed with an explicit nonce
+//   reproduces r/s ④. (Note: the embedded k is not the RFC6979-SHA256(d, m) nonce,
+//   so sign_prehash ③ takes a different path; the two are anchored independently.)
+// - src/ecdsa.rs doc ethereum vector: sign_digest_recoverable(Keccak256)
+//   reproduces the known signature, recid=0 and the recovery roundtrip ③.
+// - src/ecdsa.rs RECOVERY_TEST_VECTORS ×2: recover_from_digest(Sha256)
+//   recovers the compressed public key and compares it byte-for-byte ③.
+// - src/ecdsa.rs normalize vector pair: s_high.normalize_s() == s_low ④.
+// - k256-specific: VerifyPrimitive rejects high-s signatures (bitcoin convention) ④.
+// - BIP340 CSV index 0-3 sign+verify TRUE, index 5 public key not on the curve
+//   (parse error path), index 6 has_even_y(R)=false verify FALSE ⑥.
+// Determinism: every input is fixed bytes; ECDSA uses RFC6979 and schnorr an explicit
+// aux_rand, never the RNG; only hex/boolean/count lines are printed.
 use k256::{
     ecdh::diffie_hellman,
     ecdsa::{
@@ -61,7 +61,7 @@ fn unhex(s: &str) -> Vec<u8> {
         .collect()
 }
 
-/// k256 内嵌 ECDSA 测试向量（src/test_vectors/ecdsa.rs）。
+/// ECDSA test vector embedded in k256 (src/test_vectors/ecdsa.rs).
 struct EmbeddedVec;
 impl EmbeddedVec {
     const D: &'static str = "ebb2c082fd7727890a28ac82f6bdf97bad8de9f5d7c9028692de1a255cad3e0f";
@@ -73,8 +73,8 @@ impl EmbeddedVec {
     const S: &'static str = "021006b7838609339e8b415a7f9acb1b661828131aef1ecbc7955dfb01f3ca0e";
 }
 
-/// BIP340 官方 CSV 向量（index 0-3 签名/验签 TRUE；5 公钥不在曲线上；
-/// 6 has_even_y(R)=false 验签 FALSE）。
+/// Official BIP340 CSV vectors (index 0-3 sign/verify TRUE; 5 public key not on the
+/// curve; 6 has_even_y(R)=false verify FALSE).
 struct Bip340 {
     sk: &'static str,
     pk: &'static str,
@@ -105,7 +105,7 @@ const BIP340_SIGN: &[Bip340] = &[
         msg: "7e2d58d8b3bcdf1abadec7829054f90dda9805aab56c77333024b9d0a508b75c",
         sig: "5831aaeed7b44bb74e5eab94ba9d4294c49bcf2a60728d8b4c200f50dd313c1bab745879a5ad954a72c45a91c3a51d3c7adea98d82f8481e0e1e03674a6f3fb7",
     },
-    // index 3：msg/aux 全 0xff——若实现把 msg 模 p/n 约减则复现不出此签名
+    // index 3: msg/aux all 0xff; reducing msg mod p/n cannot reproduce this signature
     Bip340 {
         sk: "0b432b2677937381aef05bb02a66ecd012773062cf3fa2549e44f58ed2401710",
         pk: "25d1dff95105f5253c4022f628a996ad3a0d95fbf21d468a1b33f8c160d8f517",
@@ -116,7 +116,7 @@ const BIP340_SIGN: &[Bip340] = &[
 ];
 
 fn main() {
-    // ---- ① 固定标量 → SecretKey → SEC1（嵌入向量 d 锚定公钥坐标）----
+    // ---- ① fixed scalars → SecretKey → SEC1 (the embedded d anchors the public key) ----
     let k1 = unhex(EmbeddedVec::D);
     let mut k2 = [0u8; 32];
     for (i, b) in k2.iter_mut().enumerate() {
@@ -127,7 +127,7 @@ fn main() {
     let sk2 = SecretKey::from_slice(&k2).unwrap();
     println!("sk1 scalar roundtrip = {}", sk1.to_bytes()[..] == k1[..]);
     println!("sk2 scalar = {}", hex(&sk2.to_bytes()));
-    // 错误路径：零标量 / >= n 的标量必须被拒绝
+    // Error paths: a zero scalar and a scalar >= n must both be rejected
     println!("zero scalar err = {}", SecretKey::from_slice(&[0u8; 32]).is_err());
     println!("ff..ff scalar err = {}", SecretKey::from_slice(&[0xffu8; 32]).is_err());
 
@@ -142,12 +142,12 @@ fn main() {
     println!("pk1 sec1 parse roundtrip = {}", pk1 == pk1_back);
     println!("pk1 x match embedded q_x = {}", hex(ep1u.x().unwrap()) == EmbeddedVec::QX);
     println!("pk1 y match embedded q_y = {}", hex(ep1u.y().unwrap()) == EmbeddedVec::QY);
-    // 错误路径：非法 SEC1 前缀
+    // Error path: an illegal SEC1 prefix
     let mut bad_ep = [0u8; 65];
     bad_ep[0] = 0x05;
     println!("bad sec1 prefix err = {}", PublicKey::from_sec1_bytes(&bad_ep).is_err());
 
-    // ---- ② RFC6979 高层 sign/verify 正反例 ----
+    // ---- ② RFC6979 high-level sign/verify positives and negatives ----
     let signing1 = SigningKey::from_slice(&k1).unwrap();
     let verifying1 = VerifyingKey::from(&signing1);
     let msgs: [&[u8]; 3] = [
@@ -166,12 +166,12 @@ fn main() {
         println!("sig[{i}] deterministic = {}", sig == sig_again);
         println!("sig[{i}] der = {}", hex(sig.to_der().as_bytes()));
         println!("sig[{i}] verify ok = {}", verifying1.verify(msg, &sig).is_ok());
-        // 反例 A：消息错
+        // Negative A: wrong message
         println!(
             "sig[{i}] verify wrong-msg ok = {}",
             verifying1.verify(b"wrong message", &sig).is_ok()
         );
-        // 反例 B：签名被篡改（翻转 s 末字节）
+        // Negative B: tampered signature (flip the last byte of s)
         let mut bad = sig.to_bytes();
         let n = bad.len();
         bad[n - 1] ^= 0x01;
@@ -183,7 +183,7 @@ fn main() {
             Err(_) => println!("sig[{i}] tampered sig rejected at parse"),
         }
     }
-    // 反例 C：别的公钥
+    // Negative C: a different public key
     let signing2 = SigningKey::from_slice(&k2).unwrap();
     let verifying2 = VerifyingKey::from(&signing2);
     let sig1: Signature = signing1.sign(b"sample");
@@ -194,9 +194,9 @@ fn main() {
     let vk1_back = VerifyingKey::from_sec1_bytes(ep1c.as_bytes()).unwrap();
     println!("vk1 sec1 roundtrip = {}", verifying1 == vk1_back);
 
-    // ---- ③ RFC6979 定向量自查（k256 内嵌）----
-    // ethereum 端到端向量（src/ecdsa.rs 文档+测试）：Keccak256 摘要，
-    // RFC6979 HMAC-DRBG-Keccak256 nonce → 已知签名 + recid 0。
+    // ---- ③ RFC6979 vector self-check (embedded in k256) ----
+    // Ethereum end-to-end vector (src/ecdsa.rs docs+tests): Keccak256 digest,
+    // RFC6979 HMAC-DRBG-Keccak256 nonce → known signature + recid 0.
     let eth_sk = SigningKey::from_slice(&unhex(
         "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
     ))
@@ -217,7 +217,7 @@ fn main() {
     println!("eth vec recover eq = {}", &eth_vk == eth_sk.verifying_key());
     println!("eth vec verify_digest = {}", eth_vk.verify_digest(eth_digest, &eth_sig).is_ok());
 
-    // RECOVERY_TEST_VECTORS ×2（src/ecdsa.rs 内嵌，Sha256 摘要）
+    // RECOVERY_TEST_VECTORS ×2 (embedded in src/ecdsa.rs, Sha256 digest)
     for (i, (pk_hex, msg, sig_hex, recid_byte)) in [
         (
             "021a7a569e91dbf60581509c7fc946d1003b60c7dee85299538db6353538d59574",
@@ -248,7 +248,7 @@ fn main() {
         );
     }
 
-    // RFC6979-SHA256 prehash 路径（独立锚定；与 ④ 的显式 nonce 不同路径）
+    // RFC6979-SHA256 prehash path (anchored independently; a different path from ④)
     let m = unhex(EmbeddedVec::M);
     let prehash_sig: Signature = signing1.sign_prehash(&m).unwrap();
     println!("rfc6979 prehash r = {}", hex(&prehash_sig.r().to_bytes()));
@@ -257,7 +257,7 @@ fn main() {
         "rfc6979 prehash verify ok = {}",
         verifying1.verify_prehash(&m, &prehash_sig).is_ok()
     );
-    // DigestSigner 路径（RFC6979 HMAC-DRBG-SHA256 over Sha256(msg)）
+    // DigestSigner path (RFC6979 HMAC-DRBG-SHA256 over Sha256(msg))
     let dsig: Signature = signing1.sign_digest(Sha256::new_with_prefix(b"digest-signing"));
     println!("digest-sign r = {}", hex(&dsig.r().to_bytes()));
     println!(
@@ -267,7 +267,7 @@ fn main() {
             .is_ok()
     );
 
-    // ---- ④ hazmat 复现 k256 内嵌向量（显式 nonce）+ high-s 谱系 ----
+    // ---- ④ hazmat reproduces the embedded k256 vector (explicit nonce) + high-s lineage ----
     let fb = |b: &[u8]| {
         let mut z = FieldBytes::default();
         z.copy_from_slice(b);
@@ -286,8 +286,8 @@ fn main() {
         "hazmat vec verify ok = {}",
         verifying1.verify_prehash(&m, &hz_sig).is_ok()
     );
-    // k256 特有：VerifyPrimitive 拒绝 high-s（bitcoin 约定）。取上例签名
-    // 的 s 取负（s' = n - s）得 high-s 签名——同一 (r, z) 下必须验签失败。
+    // k256-specific: VerifyPrimitive rejects high-s (bitcoin convention). Negating the
+    // s of the signature above (s' = n - s) gives a high-s signature: same (r, z), must fail.
     let hi_sig = Signature::from_scalars(hz_sig.r(), -hz_sig.s()).unwrap();
     println!("orig s is_high = {}", bool::from(hz_sig.s().is_high()));
     println!("negated s is_high = {}", bool::from(hi_sig.s().is_high()));
@@ -297,7 +297,7 @@ fn main() {
     );
     println!("high-s normalize eq orig = {}", hi_sig.normalize_s().unwrap() == hz_sig);
     println!("low-s normalize none = {}", hz_sig.normalize_s().is_none());
-    // 内嵌 normalize 向量对（src/ecdsa.rs，rust-secp256k1 生成）
+    // Embedded normalize vector pair (src/ecdsa.rs, generated by rust-secp256k1)
     let emb_hi = Signature::from_slice(&unhex(
         "20c01a910ebb2610af2d763fa09b3b30923c8e408b11df2c61ad76d970a2f1bc\
          ee2f11ef8cb00a49617d1357f4d55641090a48f201e9b959c48f6f6bec6f938f",
@@ -312,7 +312,7 @@ fn main() {
     println!("embedded s_lo.is_high = {}", bool::from(emb_lo.s().is_high()));
     println!("embedded normalize eq = {}", emb_hi.normalize_s().unwrap() == emb_lo);
 
-    // ---- ⑤ ECDH：双固定密钥两路 shared 相等 ----
+    // ---- ⑤ ECDH: two fixed keys, both shared secrets equal ----
     let ab = diffie_hellman(sk1.to_nonzero_scalar(), pk2.as_affine());
     let ba = diffie_hellman(sk2.to_nonzero_scalar(), pk1.as_affine());
     println!("ecdh ab = {}", hex(ab.raw_secret_bytes()));
@@ -321,7 +321,7 @@ fn main() {
     println!("ecdh self = {}", hex(aa.raw_secret_bytes()));
     println!("ecdh self != ab = {}", aa.raw_secret_bytes() != ab.raw_secret_bytes());
 
-    // ---- ⑥ Schnorr BIP340 定向量 ----
+    // ---- ⑥ Schnorr BIP340 vectors ----
     for (i, v) in BIP340_SIGN.iter().enumerate() {
         let sk = k256::schnorr::SigningKey::from_bytes(&unhex(v.sk)).unwrap();
         let aux: [u8; 32] = unhex(v.aux).try_into().unwrap();
@@ -335,14 +335,14 @@ fn main() {
         println!("bip340[{i}] sig match = {}", hex(&sig.to_bytes()) == v.sig);
         let vk = k256::schnorr::VerifyingKey::from_bytes(&unhex(v.pk)).unwrap();
         println!("bip340[{i}] verify ok = {}", vk.verify_raw(&msg, &sig).is_ok());
-        // 官方 CSV 验签 TRUE 也覆盖「签名者私钥与验签公钥分离解析」路径
+        // The official CSV verify TRUE case also covers resolving signer and verifier keys apart
         let expected_sig = k256::schnorr::Signature::try_from(unhex(v.sig).as_slice()).unwrap();
         println!(
             "bip340[{i}] verify expected-sig ok = {}",
             vk.verify_raw(&msg, &expected_sig).is_ok()
         );
     }
-    // index 5：公钥不在曲线上 → 解析即失败
+    // index 5: public key not on the curve → parsing fails immediately
     println!(
         "bip340[5] bad pubkey parse err = {}",
         k256::schnorr::VerifyingKey::from_bytes(&unhex(
@@ -350,7 +350,7 @@ fn main() {
         ))
         .is_err()
     );
-    // index 6：has_even_y(R)=false → 验签 FALSE
+    // index 6: has_even_y(R)=false → verify FALSE
     let vk6 = k256::schnorr::VerifyingKey::from_bytes(&unhex(
         "dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
     ))
@@ -368,7 +368,7 @@ fn main() {
         vk6.verify_raw(&unhex("243f6a8885a308d313198a2e03707344a4093822299f31d0082efa98ec4e6c89"), &sig6)
             .is_ok()
     );
-    // 篡改负例：翻转 bip340[0] 签名 s 末字节
+    // Tamper negative: flip the last byte of the bip340[0] signature s
     let mut bad_schnorr = unhex(BIP340_SIGN[0].sig);
     let n = bad_schnorr.len();
     bad_schnorr[n - 1] ^= 0x01;

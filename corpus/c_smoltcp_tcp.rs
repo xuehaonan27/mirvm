@@ -427,7 +427,7 @@ fn codec() {
     let mut m4 = ip_a.clone();
     m4[20] ^= 0xFF; // corrupt the first TCP byte; the IP header checksum stays valid
     let p4 = Ipv4Packet::new_checked(&m4).unwrap();
-    println!("D4 ipv4 csum_ok={} (腐化在 payload)", p4.verify_checksum());
+    println!("D4 ipv4 csum_ok={} (corruption is in the payload)", p4.verify_checksum());
     let t4 = TcpPacket::new_checked(p4.payload()).unwrap();
     println!(
         "D4 tcp csum_ok={}",
@@ -450,7 +450,7 @@ fn codec() {
     fix_ipv4_csum(&mut m6);
     let p6 = Ipv4Packet::new_checked(&m6).unwrap();
     println!(
-        "D6 ver={} csum_ok={} (packet 层不查版本)",
+        "D6 ver={} csum_ok={} (packet layer does not check the version)",
         p6.version(),
         p6.verify_checksum()
     );
@@ -483,7 +483,7 @@ fn codec() {
     let u_zero = build_udp(8080, 53, b"hello udp wire", Some(0));
     let uz = UdpPacket::new_checked(&u_zero).unwrap();
     println!(
-        "D11 udp csum=0 → verify={}（IPv4 下免校验语义）",
+        "D11 udp csum=0 → verify={} (zero UDP checksum is exempt from verification under IPv4)",
         uz.verify_checksum(&src_ip(), &dst_ip())
     );
     match Icmpv4Packet::new_checked(&icmp[..4]) {

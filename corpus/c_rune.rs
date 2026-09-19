@@ -1,54 +1,54 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# rune 0.13.4（pin 最新 0.13 线；0.13.4 是 crates.io 上 rune 的最后一个发布版，
-# 0.14 系列从未发布）。feature 按任务钉 default（emit/std/codespan-reporting/
-# alloc/anyhow 五件套）：全部纯 Rust、无 C 绑定、无显式 SIMD/x86 intrinsic
-# （rune-macros 走 syn 前端宏，编译期展开，运行期不碰 proc-macro）。
+# rune 0.13.4 (pin of the latest 0.13 line; 0.13.4 is the last rune release on
+# crates.io, and no 0.14 series was ever published). Features pinned to default
+# (emit/std/codespan-reporting/alloc/anyhow): all pure Rust, no C bindings, no
+# explicit SIMD/x86 intrinsics (rune-macros is a compile-time syn front-end macro).
 rune = "=0.13.4"
 ---
-// rune 0.13.4：Rune 脚本 VM（VM-in-VM，批7 波1）。三段 Rune 脚本经
-// rune::prepare().build() + Vm::call(["main"], ()) 编译求值；宿主经
-// Module::function 注册 Rust 回调供脚本调用；打印各脚本返回值、宿主回调
-// 调用次数与折叠态。
+// rune 0.13.4: Rune script VM (VM-in-VM). Three Rune scripts are compiled and
+// evaluated through rune::prepare().build() + Vm::call(["main"], ()); the host
+// registers Rust callbacks for the scripts with Module::function, and the driver
+// prints each script's return value, the host callback call counts and the final
+// fold state.
 //
-// API 适应记录（非引擎问题，不是 FRONTIER）：任务书测试面写「经 rune::run
-// 求值」；rune::run 顶层 helper 存在于 0.12 线，0.13 线已移除（0.13.4 的
-// lib.rs 无 pub fn run，docs.rs fn.run.html 404）。0.13 官方等价管线即
-// docs.rs 首页示例：rune::prepare(&mut sources).with_context(&ctx)
-//   .with_diagnostics(&mut diag).build() → Vm::new(Arc::new(
-//   context.runtime()), Arc::new(unit)) → vm.call(["main"], ())。
-// 本 driver 使用的就是这条 0.13 标准管线，语义覆盖面不变。
+// API fact about the pinned version: the rune::run top-level helper exists in the
+// 0.12 line and was removed in the 0.13 line (0.13.4's lib.rs has no pub fn run;
+// docs.rs fn.run.html is a 404). The 0.13 pipeline -- the one used here -- is
+// rune::prepare(&mut sources).with_context(&ctx).with_diagnostics(&mut diag)
+//   .build() → Vm::new(Arc::new(context.runtime()), Arc::new(unit))
+//   → vm.call(["main"], ()).
 //
-// 测试面：
-//   S1 算术与字符串：整数混合/位运算/取模、while 循环、浮点乘法/除法
-//     （位型经宿主 fbits() 以 to_bits 十六进制内嵌回文本，不经 Rune 浮点
-//     格式化路径）、字符串数组 for 迭代 + 模板内插（${}）+ += 累加。
-//   S2 结构体与迭代：struct Point/Acc + impl 动态实例函数（字段读写、
-//     self 方法链）、结构体数组 while 索引迭代、inclusive range for
-//     （1..=10）+ 条件累加、m% n 归零判定、最值搜索回读坐标。
-//   S3 模式匹配：自定义 enum 带数据变体（tuple 变体构造与解构）、match 作
-//     表达式、守卫（a > 0 / a == b）、向量 rest 模式（[1, ..]/[_, 2, ..]/
-//     []）、tuple 模式、字符串字面量模式、`is i64` 类型守卫、兜底 `_`。
-//   宿主回调：host_mix(x) 每次调用计数 +1、状态按 state*31+(x+0x9E3779B9)
-//     wrapping 折叠、返回折叠态 rem_euclid 9973——脚本把返回值混回计算
-//     （跨边界值交互双向验证）；三脚本合计调用次数与终态折叠值打印锚定。
+// Test surface:
+//   S1 arithmetic and strings: mixed integers / bit ops / modulo, while loop,
+//     float multiply / divide (bit patterns pinned through the host fbits()
+//     embedding to_bits as hex back into the text, bypassing Rune's float
+//     formatting path), string array for iteration + template interpolation
+//     (${}) + += accumulation.
+//   S2 structs and iteration: struct Point/Acc + impl dynamic instance functions
+//     (field read/write, self method chaining), struct array while-index
+//     iteration, inclusive range for (1..=10) + conditional accumulation,
+//     m % n zero test, max search reading back the coordinates.
+//   S3 pattern matching: custom enum with data variants (tuple variant
+//     construction and destructuring), match as an expression, guards
+//     (a > 0 / a == b), vector rest patterns ([1, ..] / [_, 2, ..] / []),
+//     tuple patterns, string literal patterns, `is i64` type guard, fallback `_`.
+//   Host callback: host_mix(x) counts each call +1 and folds state as
+//     state*31 + (x + 0x9E3779B9) wrapping, returning the fold state
+//     rem_euclid 9973 -- the scripts mix the return value back into their
+//     computation (cross-boundary value interaction verified both ways); the
+//     three-script total call count and the final fold value are printed anchors.
 //
-// 确定性：打印量只含 i64/定值字符串/浮点 bits；脚本不返回 object/map
-// （无哈希序进输出）；无时间/随机/环境/TLS 序；单线程顺序执行，回调计数
-// 序唯一。stderr 真空。
-//
-// 三维复跑：
-//   A: target/release/mirvm run corpus/c_rune.rs
-//   B: cd "$(grep -l 'name = "c_rune"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname)" && \
-//        RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \
-//        "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
-//   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_rune.rs
+// Determinism: printed values contain only i64 / fixed strings / float bits; the
+// scripts return no object/map (so no hash order reaches the output); no
+// time/random/environment/TLS ordering; single-threaded sequential execution
+// makes the callback count order unique. stderr is empty.
 use rune::{Context, Diagnostics, Module, Source, Sources, Vm};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
-/// S1：算术与字符串。
+/// S1: arithmetic and strings.
 const SCRIPT1: &str = r#"
 pub fn main() {
     // 整数混合运算 + 位运算 + 取模；host_mix 回调混进累加器
@@ -73,7 +73,7 @@ pub fn main() {
 }
 "#;
 
-/// S2：结构体与迭代。
+/// S2: structs and iteration.
 const SCRIPT2: &str = r#"
 struct Point { x, y }
 
@@ -123,7 +123,7 @@ pub fn main() {
 }
 "#;
 
-/// S3：模式匹配。
+/// S3: pattern matching.
 const SCRIPT3: &str = r#"
 enum Op {
     Add(a, b),
@@ -179,7 +179,7 @@ pub fn main() {
 "#;
 
 fn main() {
-    // ---- 宿主回调（Module::function 闭包）----
+    // ---- host callbacks (Module::function closures) ----
     let calls = Arc::new(AtomicI64::new(0));
     let state = Arc::new(AtomicI64::new(0));
     let mut m = Module::new();
@@ -206,7 +206,7 @@ fn main() {
     context.install(m).unwrap();
     let runtime = Arc::new(context.runtime().unwrap());
 
-    // 0.13 标准管线：prepare → build Unit → Vm::call（rune::run 已不存在）。
+    // 0.13 pipeline: prepare → build Unit → Vm::call (rune::run no longer exists).
     let run = |script: &str| -> String {
         let mut sources = Sources::new();
         sources.insert(Source::memory(script).unwrap()).unwrap();
@@ -241,6 +241,6 @@ fn main() {
     println!("host.calls-total = {c3}");
     println!("host.state-final = {}", state.load(Ordering::SeqCst));
 
-    // ---- 锚点 ----
-    assert_eq!(c3, 14, "host_mix 总调用次数（4 + 8 + 2）");
+    // ---- anchors ----
+    assert_eq!(c3, 14, "host_mix total call count (4 + 8 + 2)");
 }

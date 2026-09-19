@@ -2,8 +2,8 @@
 ---
 [dependencies]
 ---
-// 单线程 loopback UDP：send-before-recv，数据报在 recv 前已入队，recv 不阻塞。
-// 压 socket(SOCK_DGRAM)/bind/sendto/recvfrom。
+// Single-threaded loopback UDP: send before recv, so the datagram is already queued and recv
+// does not block. Exercises socket(SOCK_DGRAM)/bind/sendto/recvfrom.
 use std::net::UdpSocket;
 
 fn main() {
@@ -12,7 +12,7 @@ fn main() {
     let a_addr = a.local_addr().unwrap();
     let b_addr = b.local_addr().unwrap();
 
-    b.send_to(b"hello udp", a_addr).unwrap(); // 先发，数据报入 a 的接收队列
+    b.send_to(b"hello udp", a_addr).unwrap(); // send first so the datagram queues on a
 
     let mut buf = [0u8; 32];
     let (n, from) = a.recv_from(&mut buf).unwrap();

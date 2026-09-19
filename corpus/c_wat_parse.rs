@@ -1,48 +1,48 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# wasm-tools 253 车同钉精确补丁：wat 错误文案/fancy 渲染与 wasmprinter 的
-# 打印排版（决定往返再编码字节）都是版本敏感面，钉死三者才保证跨机逐字节。
-wat = "=1.253.0"           # 被测 crate；特征按任务钉 default（component-model）
-wasmprinter = "=0.253.0"   # binary→text 打印（wat 本身不带 printer；同车配套）
-wast = "=253.0.0"          # wat::Error 包住 wast::Error 不暴露 span，直行引入
-                           # 拿语法错误的 offset（同车，本就在传递闭包内）
+# wasm-tools 253 is pinned as one exact set: wat error text/fancy rendering and wasmprinter's
+# print layout (which determines the round-trip re-encode bytes) are version-sensitive, so all three pin together.
+wat = "=1.253.0"           # crate under test; features pinned to default (component-model)
+wasmprinter = "=0.253.0"   # binary -> text printing (wat has no printer of its own; same set)
+wast = "=253.0.0"          # wat::Error wraps wast::Error without exposing a span, so it is pulled
+                           # to get the syntax-error offset (same set, already in the transitive closure)
 ---
 
-// wat 1.253.0（WebAssembly 文本格式 WAT ↔ 二进制）三维差分。依赖闭包约 10 个
-// crate（wat→wast{leb128fmt,unicode-width,memchr}，wasmprinter→wasmparser/
-// anyhow/termcolor），纯解析/编码/打印，无 IO/时间/随机，stderr 真空。
+// wat 1.253.0 (WebAssembly text format WAT <-> binary) three-way differential. Dependency
+// closure is ~10 crates (wat->wast{leb128fmt,unicode-width,memchr}, wasmprinter->wasmparser/
+// anyhow/termcolor); pure parsing/encoding/printing, no IO/time/randomness, stderr empty.
 //
-// 测试面：
-//   ① 三个代表性模块 文本→binary（wat::parse_str）：
-//      m1 = memory(min/max+data 段含 \00\ff 转义)/global(immut+mut，i32/i64
-//           /f64 十六进制浮点)/table+elem/start 段；
-//      m2 = type 复用 + import + 三个 @custom 自定义段（before first /
-//           before code / after last 三种放置位）；
-//      m3 = f32/f64 极值十六进制字面量（max/-0/subnormal）+ select +
-//           reinterpret 位转换，多导出。
-//      每模块同时测 wat::parse_bytes 的 Cow 双路径（文本→Owned、已是二进
-//      制→Borrowed 原样返回）与 wat::Detect 识别（WasmText/WasmBinary/
-//      Unknown 垃圾输入）。
-//   ② binary→重新打印文本的往返一致性（wasmprinter::print_bytes）：对每模块
-//      printed = print(bin)，再 rebin = parse_str(printed)、
-//      reprinted = print(rebin)，断言 rebin == bin（逐字节）且
-//      reprinted == printed（native 实测成立；name 段由标识符名重生成，
-//      本组输入下字节级还原）。打印文本只报告 len/行数/FNV，不全量铺出。
-//   ③ 语法错误诊断固定打印：同一错误输入（i32.const 缺操作数）经
-//      wat::parse_str 打印 wat::Error Display 全文（fancy gutter 五行：
-//      消息/--> <anon>:行:列/源码行/caret），再经 wast::parser 取
-//      span.offset()，自行折算行/列打印（line=4 col=14 offset=61）。
-//   输出锚点（bin_len/FNV/诊断行）native 实测校准并 assert_eq! 锁定。
+// Test surface:
+//   ① Three representative modules, text -> binary (wat::parse_str):
+//      m1 = memory (min/max + data segment with \00\ff escapes)/global (immut+mut, i32/i64
+//           /f64 hex float)/table+elem/start section;
+//      m2 = type reuse + import + three @custom sections (placed before first /
+//           before code / after last);
+//      m3 = f32/f64 extreme hex literals (max/-0/subnormal) + select +
+//           reinterpret bit casts, multiple exports.
+//      Each module also tests both Cow paths of wat::parse_bytes (text -> Owned, already
+//      binary -> Borrowed returned as-is) and wat::Detect recognition (WasmText/WasmBinary/
+//      Unknown garbage input).
+//   ② Round-trip consistency for binary -> reprinted text (wasmprinter::print_bytes): per
+//      module printed = print(bin), then rebin = parse_str(printed), reprinted = print(rebin);
+//      asserts rebin == bin (byte-for-byte) and reprinted == printed (holds natively; name
+//      sections are regenerated from identifier names, byte-restored for this input set).
+//      Only len/line count/FNV of the printed text are reported, not the full text.
+//   ③ Fixed syntax-error diagnostics: the same bad input (i32.const missing operand) via
+//      wat::parse_str prints the full wat::Error Display (fancy gutter, five lines:
+//      message/--> <anon>:line:col/source line/caret), then wast::parser is used to get
+//      span.offset() and compute line/col independently (line=4 col=14 offset=61).
+// Output anchors (bin_len/FNV/diagnostic lines) are calibrated against native and locked by assert_eq!.
 //
-// 三维复跑：
+// Three-way rerun:
 //   A: target/release/mirvm run corpus/c_wat_parse.rs
 //   B: cd "$(grep -l 'name = "c_wat_parse"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname)" && \
 //        RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \
 //        "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
 //   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_wat_parse.rs
 //
-// FRONTIER：无（纯 Rust 解析/打印，无 SIMD/FFI/IO 边界）。
+// No known limitation: pure Rust parsing/printing, no SIMD/FFI/IO boundary.
 use std::borrow::Cow;
 
 const M1: &str = r#"
@@ -100,7 +100,7 @@ const M3: &str = r#"
 
 const BAD: &str = "(module\n  (func $f (result i32)\n    i32.const 1\n    i32.const)\n)\n";
 
-/// 自算 FNV-1a64（定值，无外部随机性）。
+/// Self-computed FNV-1a64 (fixed value, no external randomness).
 fn fnv1a(b: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for &x in b {
@@ -110,7 +110,7 @@ fn fnv1a(b: &[u8]) -> u64 {
     h
 }
 
-/// 单模块：文本→binary→打印文本→再编码，全链往返。
+/// One module: text -> binary -> printed text -> re-encoded, full roundtrip.
 fn roundtrip(name: &str, src: &str, expect_bin_len: usize, expect_bin_fnv: u64) {
     let bin = wat::parse_str(src).unwrap();
     println!("{name} text_len={}", src.len());
@@ -118,7 +118,7 @@ fn roundtrip(name: &str, src: &str, expect_bin_len: usize, expect_bin_fnv: u64) 
     assert_eq!(bin.len(), expect_bin_len);
     assert_eq!(fnv1a(&bin), expect_bin_fnv);
 
-    // parse_bytes 双路径：文本输入 → Owned；已是二进制 → Borrowed 原样返回。
+    // Both parse_bytes paths: text input -> Owned; already-binary -> Borrowed returned as-is.
     let via_text = wat::parse_bytes(src.as_bytes()).unwrap();
     let via_bin = wat::parse_bytes(&bin).unwrap();
     assert_eq!(via_text[..], bin[..]);
@@ -156,12 +156,12 @@ fn roundtrip(name: &str, src: &str, expect_bin_len: usize, expect_bin_fnv: u64) 
 }
 
 fn main() {
-    // ① + ②：三模块文本→binary→打印往返（锚点为 native 实测值，版本已钉死）。
+    // ① + ②: three modules text -> binary -> print roundtrip (anchors from native, versions pinned).
     roundtrip("m1", M1, 223, 0x225e68cec1885875);
     roundtrip("m2", M2, 147, 0xa34e004ab147b432);
     roundtrip("m3", M3, 181, 0xe94aaa52680f6313);
 
-    // ③ 语法错误诊断：wat 层 Display 全文（含 fancy gutter 行/列渲染）。
+    // ③ syntax-error diagnostics: full wat-level Display (with fancy gutter line/col rendering).
     match wat::parse_str(BAD) {
         Ok(_) => println!("bad-wat unexpectedly ok"),
         Err(e) => {
@@ -170,7 +170,7 @@ fn main() {
             println!("wat-error-display end");
         }
     }
-    // wast 层结构化诊断：span.offset → 自算行/列（固定算术，无环境依赖）。
+    // Structured wast-level diagnostic: span.offset -> independent line/col (fixed arithmetic, no environment).
     let buf = wast::parser::ParseBuffer::new(BAD).unwrap();
     match wast::parser::parse::<wast::Wat>(&buf) {
         Ok(_) => println!("bad-wat wast unexpectedly ok"),

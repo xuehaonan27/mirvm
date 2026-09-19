@@ -3,41 +3,41 @@
 [dependencies]
 scraper = "0.27"
 ---
-// scraper 0.27.0（crates.io 最新稳定，发布于 2026-05-11；html5ever 0.39 /
-// selectors 0.38 / ego-tree 0.11 代际，依赖闭包全纯 Rust，无 C/asm）DOM 差分。
-// 钉版记录：任务钉 scraper = "0.27"，crates.io 实测 newest=0.27.0（2026-07-17
-// 查询 API），无 yank/破洞，直接解析即该版本，无绕行。
+// scraper 0.27.0 differential (latest stable on crates.io, released 2026-05-11; the
+// html5ever 0.39 / selectors 0.38 / ego-tree 0.11 generation, all-pure-Rust dependency
+// closure with no C or asm). Pin: scraper = "0.27"; crates.io reports newest = 0.27.0, so
+// the requirement resolves straight to it with no yank, gap or workaround.
 //
-// 测试面（批9：DOM 选择器 / 属性 / 序列化）：
-//   两段内嵌常量串：DOC = 嵌套 div(id/class/data-* 混布) + table(thead/tbody、
-//   row 奇偶类、cell key/val 类) + ul/li 列表(含嵌套子 ul) + h1/h2 + CJK/实体
-//   (&amp; &lt; &#x41; &#8212;) + 重复属性(<p class="a" class="b"> 规范保首个)；
-//   FRAG = 两个 <li> 裸片段走 parse_fragment。
-//   ① 多档选择器命中序：tag(table/li/td/h1) / class(.row/.item/.cell/.note) /
-//     id(#main/#data/#toc) / 后代(#main div p a、"table#data tbody tr td"、
-//     ul.sub li) / 带属性([data-cat]、li[data-cat="veg"]、a[href][target="_blank"]、
-//     td.cell[data-v]) / 复合(h1, h2 逗号、div:has(> ul#toc)、
-//     ul#toc > li:nth-child(2))。每命中打印 tag#id.cls 速写 + text() 串联
-//     （{:?} 转义单行），selector 级打印命中数 + 链 FNV。
-//   ② text() 串联：逐命中打印分片数 + '|' join（暴露分片边界）与无边界直接串联。
-//   ③ 属性提取：a 的 href/target、tr 的 data-n、td 的 data-v 定点取；全部命中
-//     attrs() 按源码序全量 name=value 打印；id()/classes() 走 Element API。
-//   ④ outer-html 序列化 FNV 锚定：#main / table#data / 首命中 .row / 文档全长
-//     outer 各打 len+fnv；最短的 .row[0] 与 FRAG inner_html 全文原文打印。
-//   ⑤ 其他 API 面：ElementRef::select 作用域内选择、child_elements /
-//     descendent_elements 计数、Selector::matches、has_class 大小写两档、
-//     Selector::parse 错误路径（err Debug 单行）。
-// 确定性：全固定输入；选择命中序 = ego-tree 先序树序（确定）；attrs() 与
-//   classes() 在 scraper 默认特性下内部 sort_unstable + dedup（属性按 QualName
-//   序、类名按字典序，均确定）；无 HashMap 迭代/时间/随机/浮点 to_string；
-//   CJK 与新行一律经 {:?} 转义为单行确定文本；stderr 真空；纯真渲染，零 IO。
+// Test surface (DOM selectors / attributes / serialization):
+//   Two embedded constant strings. DOC = nested divs (mixed id/class/data-*) + a table
+//   (thead/tbody, odd/even row classes, cell key/val classes) + a ul/li list with a nested
+//   ul + h1/h2 + CJK and entities (&amp; &lt; &#x41; &#8212;) + a duplicate attribute
+//   (<p class="a" class="b">, normalized to keep the first). FRAG = two bare <li> elements
+//   parsed through parse_fragment.
+//   ① Multi-tier selector hit order: tag (table/li/td/h1); class (.row/.item/.cell/.note);
+//     id (#main/#data/#toc); descendant (#main div p a, "table#data tbody tr td", ul.sub li);
+//     attribute ([data-cat], li[data-cat="veg"], a[href][target="_blank"], td.cell[data-v]);
+//     compound (h1, h2 comma list; div:has(> ul#toc); ul#toc > li:nth-child(2)). Each hit
+//     prints a tag#id.cls brief plus its text() concatenation ({:?}-escaped onto one line);
+//     the selector level prints the hit count and a chain FNV.
+//   ② text() concatenation: per hit, the piece count plus a '|' join (which exposes the
+//     piece boundaries) and the boundary-free concatenation.
+//   ③ Attribute extraction: fixed picks for a's href/target, tr's data-n and td's data-v;
+//     for every hit, attrs() printed in full source order as name=value; id()/classes()
+//     through the Element API.
+//   ④ outer-html serialization anchored by FNV: #main, table#data, the first .row and the
+//     whole document each print len+fnv; the shortest one (.row[0]) and the FRAG inner_html
+//     are printed verbatim.
+//   ⑤ Other API surface: scoped ElementRef::select, child_elements / descendent_elements
+//     counts, Selector::matches, has_class in both case modes, and the Selector::parse
+//     error path (err Debug on one line).
+// Deterministic: fixed inputs throughout; hit order is ego-tree pre-order (deterministic);
+//   attrs() and classes() sort_unstable + dedup internally under scraper's default features
+//   (attributes by QualName, class names lexicographically -- both deterministic); no
+//   HashMap iteration, time, randomness or float to_string; CJK and newlines always go
+//   through {:?} into deterministic one-line text; empty stderr; pure rendering, zero IO.
 //
-// 三维复跑：
-//   A: target/release/mirvm run corpus/c_scraper_dom.rs
-//   B: cd "$(grep -l 'name = "c_scraper_dom"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname)" && \
-//        RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \
-//        "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
-//   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_scraper_dom.rs
+// Run: target/release/mirvm run corpus/c_scraper_dom.rs
 use scraper::{CaseSensitivity, ElementRef, Html, Selector};
 
 fn fnv1a(data: &[u8]) -> u64 {
@@ -88,7 +88,7 @@ const DOC: &str = r##"<!DOCTYPE html>
 
 const FRAG: &str = r##"<li class="fitem" data-cat="x">frag-α &lt;i&gt;</li><li class="fitem">frag-β &#x3B2;</li>tail"##;
 
-/// 命中速写：tag#id.cls1.cls2（id/classes 均来源序，确定）。
+/// Hit brief: tag#id.cls1.cls2 (id and classes both come out in source order, deterministically).
 fn brief(e: &ElementRef) -> String {
     let v = e.value();
     let mut s = String::from(v.name());
@@ -103,7 +103,7 @@ fn brief(e: &ElementRef) -> String {
     s
 }
 
-/// 一档选择器：逐命中打印 速写 + text() 串联（{:?} 单行），末尾打命中数与链 FNV。
+/// Per selector: each hit's brief + text() join ({:?}, one line); then hit count and chain FNV.
 fn dump_select(doc: &Html, sel_str: &str) {
     let sel = Selector::parse(sel_str).unwrap();
     let hits: Vec<ElementRef> = doc.select(&sel).collect();
@@ -121,7 +121,7 @@ fn dump_select(doc: &Html, sel_str: &str) {
     );
 }
 
-/// attrs() 源码序全量打印：name=value; ...
+/// Full attrs() dump in source order: name=value; ...
 fn dump_all_attrs(e: &ElementRef) {
     let parts: Vec<String> = e
         .value()
@@ -134,7 +134,7 @@ fn dump_all_attrs(e: &ElementRef) {
 fn main() {
     let doc = Html::parse_document(DOC);
 
-    // ---- 文档级锚点 ----
+    // ---- Document-level anchors ----
     println!("== doc ==");
     let all = Selector::parse("*").unwrap();
     println!("elems = {}", doc.select(&all).collect::<Vec<_>>().len());
@@ -144,7 +144,7 @@ fn main() {
     let title = doc.select(&title_sel).next().unwrap();
     println!("title text={:?}", title.text().collect::<String>());
 
-    // ---- ① 多档选择器命中序 ----
+    // ---- ① Multi-tier selector hit order ----
     println!("== tier:tag ==");
     for s in ["table", "li", "td", "h1"] {
         dump_select(&doc, s);
@@ -176,7 +176,7 @@ fn main() {
         dump_select(&doc, s);
     }
 
-    // ---- ② text() 串联：分片边界 vs 直接串联 ----
+    // ---- ② text() concatenation: piece boundaries vs direct concatenation ----
     println!("== text pieces ==");
     let li_sel = Selector::parse("li.item").unwrap();
     let mut cat_chain = String::new();
@@ -192,7 +192,7 @@ fn main() {
     }
     println!("li flat_fnv={:016x}", fnv1a(cat_chain.as_bytes()));
 
-    // ---- ③ 属性提取 ----
+    // ---- ③ Attribute extraction ----
     println!("== attrs ==");
     let a_sel = Selector::parse("a").unwrap();
     for (i, e) in doc.select(&a_sel).enumerate() {
@@ -237,7 +237,7 @@ fn main() {
         th.value().has_class("KEY", CaseSensitivity::AsciiCaseInsensitive)
     );
 
-    // ---- ④ outer-html 序列化 FNV 锚定 ----
+    // ---- ④ outer-html serialization anchored by FNV ----
     println!("== outer html ==");
     for s in ["#main", "table#data", "#toc"] {
         let sel = Selector::parse(s).unwrap();
@@ -252,7 +252,7 @@ fn main() {
     let ih = inner_toc.inner_html();
     println!("toc inner len={} fnv={:016x}", ih.len(), fnv1a(ih.as_bytes()));
 
-    // ---- ⑤ 其他 API 面 ----
+    // ---- ⑤ Other API surface ----
     println!("== api ==");
     let main_el = doc.select(&Selector::parse("#main").unwrap()).next().unwrap();
     println!(
@@ -260,7 +260,7 @@ fn main() {
         main_el.child_elements().count(),
         main_el.descendent_elements().count()
     );
-    // 作用域内选择：先在 tbody 里再选 td.val
+    // Scoped selection: pick tbody first, then td.val inside it
     let tbody = doc
         .select(&Selector::parse("tbody").unwrap())
         .next()
@@ -276,7 +276,7 @@ fn main() {
     for (i, e) in doc.select(&Selector::parse("li").unwrap()).enumerate() {
         println!("li[{i}] matches tr.odd={} .star={}", odd.matches(&e), star.matches(&e));
     }
-    // 选择器错误路径（Debug 派生输出，确定文本）
+    // Selector error paths (derived Debug output, deterministic text)
     for bad in ["li > > a", "[[", "p:nth-child()"] {
         match Selector::parse(bad) {
             Ok(_) => println!("badsel {bad:?} = unexpected-ok"),

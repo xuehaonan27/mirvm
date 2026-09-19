@@ -6,33 +6,33 @@ jaq-std = "2"
 jaq-json = { version = "1", features = ["serde_json"] }
 serde_json = "1"
 ---
-// jaq-core 2 / jaq-std 2 / jaq-json 1（纯 Rust jq 解释器，meta 查询语言）差分。
-// 链路：Loader(jaq_std::defs + jaq_json::defs 作 prelude) parse →
-// Compiler(with_funs std+json natives) compile → Filter::run 逐值输出。
-// jaq-json 的 Val 用 IndexMap 存对象——插入序确定（keys 经 sort，
-// keys_unsorted 经 hifijson/fromjson 保源序），数组序即 jq 语义序；
-// 无 HashMap 随机序、无时间/地址/线程序。
+// jaq-core 2 / jaq-std 2 / jaq-json 1 differential (pure-Rust jq interpreter, meta query language).
+// Chain: Loader(jaq_std::defs + jaq_json::defs as prelude) parse ->
+// Compiler(with_funs std+json natives) compile -> Filter::run emits one value at a time.
+// jaq-json stores object entries in a Val as an IndexMap -- insertion order is deterministic
+// (keys sorts, keys_unsorted keeps source order via hifijson/fromjson), array order is jq
+// semantic order; no HashMap random order, no time/address/thread order.
 //
-// 覆盖：路径/索引/切片/迭代/替代（.a.b[1]、.[]、[0:2]、//）、map(select(.x>2))、
-// sort/sort_by/group_by/unique/unique_by/min/max、reduce/foreach/$var 绑定、
-// keys 与 keys_unsorted、to_entries/from_entries、paths/path_values、
-// type 谱系与 is* 选择器、字符串（explode/implode/split/join/ltrimstr/
-// startswith/contains/indices）、regex-lite（test/capture/gsub/splits）、
-// 格式化（@csv/@tsv/@sh/@html/@uri/@base64 往返）、tojson/fromjson
-// （hifijson 解析器：大整数保串、插入序保持）、libm 数学（sqrt/pow/log/exp/
-// floor/ceil/round）与 0/0、±1/0 的 nan/inf 位型（浮点一律附 to_bits 锁位）、
-// 时间（gmtime/mktime/strftime/strptime/fromdate/todate 固定历元，纯 chrono
-// UTC 日期算术，不碰 now/localtime/env）、更新（|=、del、getpath）、
-// walk/flatten/transpose/recurse、limit/range/inputs 空流、try/catch；
-// 错误路径三类：parse/lex 错（期望 vs 实见 token 文本）、compile 错
-// （未定义 filter/变量）、运行期错（类型算术错/error() 值载荷/has 非容器/
-// 数组用字符串索引）。附 identity roundtrip（Val ⇄ serde_json::Value 等值）。
+// Covers: path/index/slice/iteration/alternative (.a.b[1], .[], [0:2], //), map(select(.x>2)),
+// sort/sort_by/group_by/unique/unique_by/min/max, reduce/foreach/$var binding,
+// keys and keys_unsorted, to_entries/from_entries, paths/path_values,
+// type lineage and is* selectors, strings (explode/implode/split/join/ltrimstr/
+// startswith/contains/indices), regex-lite (test/capture/gsub/splits),
+// formatting (@csv/@tsv/@sh/@html/@uri/@base64 roundtrip), tojson/fromjson
+// (hifijson: big integers stay strings, insertion order preserved), libm math (sqrt/pow/log/
+// exp/floor/ceil/round) and the nan/inf bit patterns of 0/0 and ±1/0 (floats carry to_bits),
+// time (gmtime/mktime/strftime/strptime/fromdate/todate at a fixed epoch, pure chrono
+// UTC date arithmetic, never touching now/localtime/env), updates (|=, del, getpath),
+// walk/flatten/transpose/recurse, empty limit/range/inputs streams, try/catch;
+// three error paths: parse/lex errors (expected vs actual token text), compile errors
+// (undefined filter/variable), runtime errors (bad type arithmetic, error() payload, has on a
+// non-container, bad string index). Plus an identity roundtrip: Val <-> serde_json::Value.
 use jaq_core::load::{Arena, Error as LoadError, File, Loader};
 use jaq_core::{Compiler, Ctx, Filter, Native, RcIter};
 use jaq_json::Val;
 use serde_json::{json, Value};
 
-/// parse + compile；失败时逐条打印诊断文本（错误形状本身是差分对象）。
+/// Parse and compile; on failure prints each diagnostic (the error shape is the differential).
 fn compile(src: &str) -> Option<Filter<Native<Val>>> {
     let program = File { code: src, path: () };
     let loader = Loader::new(jaq_std::defs().chain(jaq_json::defs()));
@@ -49,7 +49,7 @@ fn compile(src: &str) -> Option<Filter<Native<Val>>> {
                     }
                     LoadError::Parse(es) => {
                         for (exp, found) in es {
-                            // opt_as_str 在 EOF 时返回空串
+                            // opt_as_str returns an empty string at EOF
                             let f: &str = if found.is_empty() { "<eof>" } else { found };
                             println!("  parse-err: expected {}, found {f:?}", exp.as_str());
                         }
@@ -80,7 +80,7 @@ fn compile(src: &str) -> Option<Filter<Native<Val>>> {
     }
 }
 
-/// 运行单个 filter，逐条打印输出值（浮点附 to_bits 锁位）或运行期错误。
+/// Runs one filter, printing each output value (floats carry to_bits) or its runtime error.
 fn run(doc: &Value, src: &str) {
     println!("== {src}");
     let Some(filter) = compile(src) else { return };
@@ -116,7 +116,7 @@ fn main() {
         "empty_arr": []
     });
 
-    // ① 路径 / 索引 / 切片 / 迭代 / 替代
+    // ① path / index / slice / iteration / alternative
     for f in [
         ".a.b[1]",
         ".a.b[]",
@@ -130,7 +130,7 @@ fn main() {
         run(&doc, f);
     }
 
-    // ② map / select / 比较 / 布尔聚合
+    // ② map / select / comparison / boolean aggregation
     for f in [
         ".items | map(select(.x > 2)) | map(.name)",
         ".nums | map(select(. >= 2 and . <= 6))",
@@ -155,7 +155,7 @@ fn main() {
         run(&doc, f);
     }
 
-    // ④ reduce / foreach / 变量绑定
+    // ④ reduce / foreach / variable binding
     for f in [
         ".nums | reduce .[] as $x (0; . + $x)",
         ".nums | reduce .[] as $x (1; . * $x)",
@@ -178,7 +178,7 @@ fn main() {
         run(&doc, f);
     }
 
-    // ⑥ type 谱系 + is* 选择器
+    // ⑥ type lineage + is* selectors
     for f in [
         ".mixed | map(type)",
         "[.mixed[] | numbers]",
@@ -192,7 +192,7 @@ fn main() {
         run(&doc, f);
     }
 
-    // ⑦ 字符串 / 正则（regex-lite）
+    // ⑦ strings / regex (regex-lite)
     for f in [
         ".unicode | length",
         ".unicode | explode | length",
@@ -211,7 +211,7 @@ fn main() {
         run(&doc, f);
     }
 
-    // ⑧ 格式化 @*（aho-corasick / base64 / urlencoding）
+    // ⑧ formatting @* (aho-corasick / base64 / urlencoding)
     for f in [
         "[\"a,b\", \"c\\\"d\", null, 3] | @csv",
         "[\"x\ty\", 1, true, null] | @tsv",
@@ -225,7 +225,7 @@ fn main() {
         run(&doc, f);
     }
 
-    // ⑨ tojson/fromjson roundtrip（hifijson 解析：大整数保串、键序保源序）
+    // ⑨ tojson/fromjson roundtrip (hifijson: big integers stay strings, key order preserved)
     for f in [
         ".nums as $n | ($n | tojson | fromjson) == $n",
         "\"123456789012345678901234567890\" | fromjson",
@@ -236,7 +236,7 @@ fn main() {
         run(&doc, f);
     }
 
-    // ⑩ 数学 / 浮点位型（libm 精确位型 + nan/inf）
+    // ⑩ math / float bit patterns (libm exact bit patterns + nan/inf)
     for f in [
         "10 / 3",
         "7 % 3",
@@ -254,7 +254,7 @@ fn main() {
         run(&doc, f);
     }
 
-    // ⑪ 时间（固定历元，chrono 纯 UTC 日期算术）
+    // ⑪ time (fixed epoch, chrono pure UTC date arithmetic)
     for f in [
         "0 | gmtime",
         "1234567890 | gmtime | mktime",
@@ -266,7 +266,7 @@ fn main() {
         run(&doc, f);
     }
 
-    // ⑫ 更新 / 递归 / 发生器 / try-catch
+    // ⑫ updates / recursion / generators / try-catch
     for f in [
         ".a.b[0] |= (. + 100) | .a.b",
         "del(.items[0]) | .items | length",
@@ -287,7 +287,7 @@ fn main() {
         run(&doc, f);
     }
 
-    // ⑬ 错误路径：parse / compile / 运行期
+    // ⑬ error paths: parse / compile / runtime
     for f in [
         ".a |",
         "(.",
@@ -302,7 +302,7 @@ fn main() {
         run(&doc, f);
     }
 
-    // ⑭ identity roundtrip：Val ⇄ serde_json::Value 等值不变量
+    // ⑭ identity roundtrip: Val <-> serde_json::Value equality invariant
     println!("== roundtrip");
     if let Some(filter) = compile(".") {
         let inputs = RcIter::new(core::iter::empty());

@@ -174,9 +174,9 @@ if [[ "$shared_line" == *'feature="app-side"'* ]] \
     && [[ "$app_test" == *'CARGO_PKG_AUTHORS='* ]] \
     && [[ "$app_test" == *'--extern test_helper='* ]] \
     && [[ "$tool_test" == *'--extern workspace_bridge='* ]]; then
-    ok "pinned Cargo workspace rustc 结构"
+    ok "pinned Cargo workspace rustc layout"
 else
-    bad "pinned Cargo workspace rustc 结构漂移"
+    bad "pinned Cargo workspace rustc layout drifted"
     tail -30 "$oracle"
 fi
 

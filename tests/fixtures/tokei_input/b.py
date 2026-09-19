@@ -1,5 +1,5 @@
-# 注释
+# comment
 
 
 def f(x):
-    return x * 2  # 行尾注释
+    return x * 2  # trailing comment

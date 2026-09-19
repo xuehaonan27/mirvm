@@ -998,7 +998,7 @@ fn packed_ps_lane_models_match_hardware_bitwise() {
         use std::arch::x86_64::{_mm_blendv_ps, _mm_loadu_ps, _mm_storeu_ps};
         let a = [1.5f32, -2.25, 0.0, f32::NAN];
         let b = [7.0f32, -0.0, f32::INFINITY, -9.5];
-        let m = [-1.0f32, 0.0, -0.0, 1.0]; // lane0/2 → b；lane1/3 → a
+        let m = [-1.0f32, 0.0, -0.0, 1.0]; // lane0/2 -> b; lane1/3 -> a
         unsafe {
             let r = _mm_blendv_ps(
                 _mm_loadu_ps(a.as_ptr()),

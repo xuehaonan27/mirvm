@@ -1,46 +1,46 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# 钉 organic =0.1.16：org-mode 解析一族中当前唯一活跃维护、且纯 Rust
-# 零 SIMD 依赖的解析器（nom+memchr+minimal-lexical 热路径，手工状态机）。
-# 一族其余成员排除理由：
-#   * orgize 0.9.0 / 0.10.0-alpha.10：强制依赖 jetscii（运行期 cpuid 派发
-#     _mm_shuffle_epi8/cmpeq 一族）+ bytecount（历史 psad.bw FRONTIER），
-#     徒增 x86 intrinsic 暴露面而 API 面无收益；
-#   * org-rs：从未发布 crates.io（candidates 单上的「org-rs 偏门」即它，
-#     不可用）；org-parser 0.0.0 停更于 2018。
-# organic 0.1.16 自身用 nightly feature gate（exit_status_error /
-# trait_alias / test / iter_intersperse 等），在钉选的
-# nightly-2026-07-02 上编译零告警（三维同 toolchain，无问题）。
-# feature 全空（crate 默认 default=[]，compare/tracing/wasm 均 opt-in 不启）；
-# 强制依赖闭包 ~22 crate：nom 解析三件套 + gloo-utils 家族
-# （wasm-bindgen/js-sys/web-sys 在 Linux x86-64 上仅编译不执行，
-# 本 driver 不触及）。
+# Pin organic =0.1.16: the only actively maintained parser in the org-mode
+# family, and pure Rust with no SIMD dependency.
+# Its hot path is nom+memchr+minimal-lexical with a hand-written state machine,
+# so no runtime CPU dispatch and no x86 intrinsic surface beyond std.
+# It uses nightly feature gates (exit_status_error / trait_alias / test /
+# iter_intersperse, ...) and compiles with zero warnings on the pinned
+# nightly-2026-07-02 toolchain.
+# All features off (the crate defaults to default=[], so the compare, tracing and
+# wasm features stay opt-in and disabled).
+# The mandatory dependency closure is ~22 crates: the nom parsing trio plus the
+# gloo-utils family. wasm-bindgen, js-sys and web-sys only compile on Linux
+# x86-64 and never execute, and this driver never touches them.
+# It is pinned rather than floated, so the AST shape, the variant set and the
+# dependency closure stay fixed across runs of this fixture and of the jit path.
+# No optional feature is enabled, so the compiled surface is the parser alone.
 organic = "=0.1.16"
 ---
-// organic 0.1.16：org-mode 文本差分。
-// 内嵌定文文档（#+TITLE/#+OPTIONS 关键字；三级标题层级（TODO/DONE/tags/
-// SCHEDULED/CLOCK）；段落行内标记 bold/italic/code/verbatim；regular 链接
-// [[proto://path][desc]] 与 plain 链接；脚注引用+定义；Unordered/Ordered
-// 混排列表（含复选框）；rust 标注 + switch/参数源码块；含 rule 行表格；
-// Active 定期时间戳）→ organic::parse 单次解析，手工递归遍历
-// （v0.1.16 的 iter 模块私有未导出）：
-//   ① Element/Object 各变体 + Document/Heading/Section/PlainListItem/
-//      TableRow/TableCell/Timestamp 计数入 BTreeMap 定序打印；
-//   ② 锚点文档序打印：#+关键字、outline（level/todo/tags/raw title）、
-//      首个源码块 lang/switches/params/行数/首行、表格逐行单元文本
-//      （rule 行识别）、首列表类型+bullet+checkbox、regular/plain 链接、
-//      bold/italic/code/verbatim 内容、CLOCK 状态/时长/时间戳类型、
-//      脚注 label。
-// 确定性：BTreeMap 序 + 文档序；无浮点/哈希迭代/时间/地址；stderr 真空。
-// （native 自验：双跑逐字节一致，exit=0，stderr 0 字节。）
-// 三维复跑命令：
-//   A: target/release/mirvm run corpus/c_orgmode.rs
-//   B: grep -l 'name = "c_orgmode"' ~/.cache/mirvm/scripts/*/Cargo.toml
-//      找到目录后 cd 进去：
-//      RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \
-//      "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
-//   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_orgmode.rs
+// organic 0.1.16: org-mode text differential.
+// One embedded fixed org document is parsed once by organic and then walked
+// manually, because the iter module is private in v0.1.16. The document covers:
+//   * #+TITLE and #+OPTIONS keywords;
+//   * three heading levels carrying TODO/DONE, tags, SCHEDULED and CLOCK;
+//   * inline bold / italic / code / verbatim markup;
+//   * regular [[proto://path][desc]] links and plain links;
+//   * a footnote reference plus its definition;
+//   * mixed unordered/ordered lists with a checkbox item;
+//   * a rust source block with switches and parameters;
+//   * a table with a rule row;
+//   * an active recurring timestamp.
+// Every Element/Object variant plus Document, Heading, Section, PlainListItem,
+// TableRow, TableCell and Timestamp is tallied into a BTreeMap in key order.
+// Anchors are printed in document order: #+ keywords; the outline with level,
+// todo keyword, tags and raw title; the first source block's language, switches,
+// parameters, line count and first line; the table's cell text per row, with the
+// rule row recognized; the first list's type, bullet and checkbox; the first
+// regular and plain link; the first bold, italic, code and verbatim contents;
+// the first CLOCK's status, duration and timestamp type; the footnote label.
+// Determinism: BTreeMap key order plus document order; no floating point, hash
+// iteration, time or address; stderr is empty, and two native runs are
+// byte-for-byte identical.
 use std::collections::BTreeMap;
 
 use organic::parser::parse;

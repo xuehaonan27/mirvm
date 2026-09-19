@@ -5,12 +5,12 @@
 #   pure    nine pure-function cases — real rustc MIR lowered then engine-executed == mathematical constant;
 #           compile standalone harness at end as execution-phase purity gate (vm/ missing rustc type causes compile failure;
 #           compile only, TSan execution belongs solely to threads segment, so SKIP_TSAN can fully skip).
-#   digest  nine value-and-memory function digests == native (expected values embedded, from same-source rustc -O direct run,
-#           generated 2026-07-08 — changes to demo/m4/digest.rs must be regenerated in sync) + vm-stats M4.1 debt cleared.
-#   unwind  nine panic/catch/rethrow cases == native (same-source rustc -O, generated 2026-07-09)
+#   digest  nine value-and-memory function digests == native (expected values embedded, from same-source rustc -O direct run;
+#           changes to demo/m4/digest.rs must be regenerated in sync) + vm-stats M4.1 debt cleared.
+#   unwind  nine panic/catch/rethrow cases == native (same-source rustc -O)
 #           + real lang_start distinguishes main panic from normal Termination 101
 #           + vm-stats M4.1/M4.2 debt cleared.
-#   threads five real-thread differential cases == native + two tier-0-era hang scenarios + rayon sub-second
+#   threads five real-thread differential cases == native + two blocking-syscall hang scenarios + rayon sub-second
 #           + JIT stack-overflow diagnosis + vm-stats reachable trap-free
 #           + TSan multi-thread cases (skipped with SKIP_TSAN=1).
 #
@@ -22,7 +22,7 @@ MIRVM=${MIRVM:-$(pwd)/target/release/mirvm}
 TOOLCHAIN=${TOOLCHAIN:-nightly-2026-07-02}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-# ---- pure (formerly m4_gate0) ----
+# ---- pure ----
 run_pure() {
     local SRC=demo/m4/pure.rs pass=0 pfail=0
     pcheck() {
@@ -59,7 +59,7 @@ run_pure() {
     fi
 }
 
-# ---- digest (formerly m4_gate1) ----
+# ---- digest ----
 run_digest() {
     local SRC=demo/m4/digest.rs pass=0 pfail=0
     dcheck() {
@@ -88,7 +88,7 @@ run_digest() {
 
     echo "--- vm-stats recheck (M4.1 in-scope debt cleared) ---"
     local stats
-    stats=$("$MIRVM" run --engine vm --vm-stats "$SRC" 2>/dev/null | sed -n '/各导出\/入口的可达 Trap/,$p')
+    stats=$("$MIRVM" run --engine vm --vm-stats "$SRC" 2>/dev/null | sed -n '/reachable Traps per export\/entry/,$p')
     if echo "$stats" | grep -E '_digest.*\| .*M4\.1:' >/dev/null; then
         echo "FAIL: reachable set still has M4.1 in-scope debt:"
         echo "$stats" | grep -E '_digest.*M4\.1:'
@@ -97,7 +97,7 @@ run_digest() {
     echo "M4.1 in-scope debt cleared PASS"
 }
 
-# ---- unwind (formerly m4_gate2) ----
+# ---- unwind ----
 run_unwind() {
     local SRC=demo/m4/unwind.rs pass=0 pfail=0
     ucheck() {
@@ -206,7 +206,7 @@ run_unwind() {
 
     echo "--- vm-stats recheck (M4.1/M4.2 in-scope debt cleared) ---"
     local stats
-    stats=$("$MIRVM" run --engine vm --vm-stats "$SRC" 2>/dev/null | sed -n '/各导出\/入口的可达 Trap/,$p')
+    stats=$("$MIRVM" run --engine vm --vm-stats "$SRC" 2>/dev/null | sed -n '/reachable Traps per export\/entry/,$p')
     if echo "$stats" | grep -E '_digest.*\| .*M4\.[12]:' >/dev/null; then
         echo "FAIL: reachable set still has M4.1/M4.2 in-scope debt:"
         echo "$stats" | grep -E '_digest.*M4\.[12]:'
@@ -215,7 +215,7 @@ run_unwind() {
     echo "M4.1/M4.2 in-scope debt cleared PASS"
 }
 
-# ---- threads (formerly m4_gate4) ----
+# ---- threads ----
 run_threads() {
     local pass=0 pfail=0
     tok() { pass=$((pass + 1)); echo "PASS $*"; }
@@ -233,48 +233,48 @@ run_threads() {
         if diff -q "$TMP/$name.n.out" "$TMP/$name.m.out" >/dev/null \
             && [ "$ncode" = "$mcode" ] \
             && diff -q "$TMP/$name.n.err.x" "$TMP/$name.m.err.x" >/dev/null; then
-            tok "$name（差分 == native）"
+            tok "$name (differential == native)"
         else
-            tbad "$name（native=$ncode mirvm=$mcode）"
+            tbad "$name (native=$ncode mirvm=$mcode)"
             diff "$TMP/$name.n.out" "$TMP/$name.m.out" | head -5
         fi
     done
 
-    # ② two tier-0-era hang scenarios (real blocking syscall + real threads; must finish in seconds)
+    # ② two blocking-syscall hang scenarios (real blocking syscall + real threads; must finish in seconds)
     local out code dt t0
     out=$(timeout 60 "$MIRVM" run corpus/c_blocking_io.rs 2>&1); code=$?
     [ $code -eq 0 ] && [ "$out" = 'got: [104, 105]' ] \
-        && tok "c_blocking_io（阻塞 read 只挡自己）" || tbad "c_blocking_io（exit=$code: $out）"
+        && tok "c_blocking_io (a blocking read blocks only itself)" || tbad "c_blocking_io (exit=$code: $out)"
     out=$(timeout 60 "$MIRVM" run corpus/c_net_echo_threaded.rs 2>&1); code=$?
     [ $code -eq 0 ] && [ "$out" = 'echo = "echo"' ] \
-        && tok "c_net_echo_threaded（线程化回环服务器）" || tbad "c_net_echo_threaded（exit=$code: $out）"
+        && tok "c_net_echo_threaded (threaded loopback server)" || tbad "c_net_echo_threaded (exit=$code: $out)"
 
-    # ③ rayon sub-second (tier-0 28s; work-stealing pool + par_iter/par_sort)
+    # ③ rayon sub-second (work-stealing pool + par_iter/par_sort)
     t0=$(date +%s%N)
     out=$(timeout 120 "$MIRVM" run corpus/c_rayon.rs 2>&1); code=$?
     dt=$(( ($(date +%s%N) - t0) / 1000000 ))
     if [ $code -eq 0 ] && echo "$out" | grep -q "par_sort ok = true" && [ $dt -lt 20000 ]; then
-        tok "c_rayon（${dt}ms，< 20s 硬门）"
+        tok "c_rayon (${dt}ms, < 20s hard gate)"
     else
-        tbad "c_rayon（exit=$code ${dt}ms）"
+        tbad "c_rayon (exit=$code ${dt}ms)"
     fi
 
     # ④ small stack + threshold=1 forces compiled code: must give clear diagnosis before large-frame prologue,
     # must not exit as SIGSEGV. recursion_deep is the existing permanent deep-recursion probe.
     out=$(env MIRVM_STACK_SIZE=1m MIRVM_JIT_THRESHOLD=1 MIRVM_JIT_SYNC=1 \
         timeout 60 "$MIRVM" run demo/recursion_deep.rs 2>&1); code=$?
-    if [ $code -eq 70 ] && echo "$out" | grep -q 'guest 栈溢出（JIT 编译帧进入前'; then
+    if [ $code -eq 70 ] && echo "$out" | grep -q 'guest stack overflow (JIT compiled frame hit safety margin before entry'; then
         tok "JIT stack overflow clearly diagnosed before frame prologue"
     else
-        tbad "JIT 栈溢出诊断（exit=$code: $out）"
+        tbad "JIT stack overflow diagnosis (exit=$code: $out)"
     fi
 
     # ⑤ --vm-stats recheck: threads demo reachable path trap-free
     for name in threads_spawn threads_panic; do
-        if "$MIRVM" run --vm-stats demo/$name.rs 2>/dev/null | grep -q "@entry: ✅ 可达路径 trap-free"; then
-            tok "$name 可达 trap-free"
+        if "$MIRVM" run --vm-stats demo/$name.rs 2>/dev/null | grep -q "@entry: ✅ reachable path trap-free"; then
+            tok "$name reachable trap-free"
         else
-            tbad "$name 可达集有 Trap（vm-stats）"
+            tbad "$name reachable set has a Trap (vm-stats)"
         fi
     done
 
@@ -287,7 +287,7 @@ run_threads() {
             tail -10 "$TMP/tsan.out"
         fi
     else
-        skip "TSan（SKIP_TSAN=1）"
+        skip "TSan (SKIP_TSAN=1)"
     fi
 
     echo "gate-threads: $pass pass, $pfail fail"

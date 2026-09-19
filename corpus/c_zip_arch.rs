@@ -3,25 +3,25 @@
 [dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"] }
 ---
-// zip 2.4（Stored 为主体 + flate2 后端 deflate）：内存 Cursor 建档 → 整档字节
-// fnv 锚定 → ZipArchive 读回逐 entry 校验（名/目录位/CRC32/尺寸/mtime/mode/
-// 内容 checksum）。覆盖：目录、空文件、UTF-8 文本（CJK+emoji）、定种随机二进制、
-// 结构化大文本、unicode 文件名、unix 权限、固定 mtime、archive comment、
-// by_index/by_name/file_names/name_for_index/by_index_raw/finish_into_readable，
-// 坏档/截断/数据损坏三条错误路径，deflate level 6/9/默认三档 roundtrip。
+// zip 2.4 (Stored main body + flate2 backend deflate): build an in-memory Cursor
+// archive, fnv-anchor the whole-archive bytes, read it back through ZipArchive and
+// verify each entry (name/dir bit/CRC32/size/mtime/mode/content checksum). Covers
+// directories, empty files, UTF-8 text (CJK+emoji), seeded random binary, structured
+// large text, unicode file names, unix permissions, fixed mtime, archive comment, all
+// reader accessors, the three error paths, and deflate level 6/9/default roundtrips.
 //
-// 已知 FRONTIER 绕行（语义不变）：crc32fast 单次 update ≥128B 会切 pclmulqdq
-// 硬件路径（llvm.x86.pclmulqdq 未内建，执行到即 TRAP 进程退出）。全程以 64B
-// 块写/读（<128B 阈值 → 可移植表路径）；算出的 CRC32 与产出的 zip 字节与
-// 整块写法完全一致，native/mirvm 逐字节对拍不受影响。deflate 用 flate2 raw
-// deflate 后端（miniz_oxide 只在 zlib 容器才算 adler32，raw 路径不碰
-// simd-adler32 → 无 psad.bw）。
+// Known workaround (semantics unchanged): a crc32fast update of >= 128B takes the
+// pclmulqdq hardware path, which is not built in, so reaching it TRAPs the process.
+// All reads/writes use 64B chunks (< the 128B threshold, portable table path); the
+// CRC32 and zip bytes match the whole-block form exactly, so native/mirvm byte-for-
+// byte differential comparison is unaffected. deflate uses the flate2 raw deflate
+// backend (miniz_oxide computes adler32 only for zlib; raw never reaches psad.bw).
 use std::io::{self, Cursor, Read, Write};
 
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
-/// crc32fast 硬件路径阈值是单次 update 128B；64B 块保持可移植表路径。
+/// crc32fast's hardware path threshold is 128B per update; 64B chunks stay on the portable table path.
 const CHUNK: usize = 64;
 
 fn fnv1a(data: &[u8]) -> u64 {
@@ -33,7 +33,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 软件 CRC32（IEEE，表驱动）——独立交叉校验 entry 头里的 CRC32 字段。
+/// Software CRC32 (IEEE, table-driven) -- independent cross-check of the CRC32 field in an entry header.
 fn crc32_sw(data: &[u8]) -> u32 {
     let mut table = [0u32; 256];
     for (i, e) in table.iter_mut().enumerate() {
@@ -50,7 +50,7 @@ fn crc32_sw(data: &[u8]) -> u32 {
     crc ^ 0xffff_ffff
 }
 
-/// 定种 xorshift64* PRNG（native/mirvm 同序列）。
+/// Seeded xorshift64* PRNG (same sequence under native and mirvm).
 struct Rng(u64);
 
 impl Rng {
@@ -73,7 +73,7 @@ impl Rng {
     }
 }
 
-/// 分 64B 块写入（见文件头 FRONTIER 注）。
+/// Write in 64B chunks (see the header note).
 fn chunked_write<W: Write>(w: &mut W, data: &[u8]) -> io::Result<()> {
     for c in data.chunks(CHUNK) {
         w.write_all(c)?;
@@ -81,8 +81,8 @@ fn chunked_write<W: Write>(w: &mut W, data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// 分 64B 块读到 EOF（读空才触发 Crc32Reader 的 CRC 校验），避开
-/// read_to_end 的单次大 update（≥128B 会切硬件路径）。
+/// Read in 64B chunks to EOF (the CRC check in Crc32Reader only fires once the reader
+/// is drained), avoiding read_to_end's single large update (>=128B would switch to the hardware path).
 fn chunked_read_all<R: Read>(r: &mut R) -> io::Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut buf = [0u8; CHUNK];
@@ -102,7 +102,7 @@ fn stored_opts() -> SimpleFileOptions {
         .last_modified_time(DateTime::from_date_and_time(2024, 3, 14, 15, 9, 26).unwrap())
 }
 
-/// 结构化重复日志（deflate 下高压缩率；定长记录号保证确定性）。
+/// Structured repetitive log (compresses well under deflate; fixed-width record numbers keep it deterministic).
 fn make_big_log() -> Vec<u8> {
     let mut d = Vec::new();
     let mut i = 0u32;
@@ -119,7 +119,7 @@ fn make_big_log() -> Vec<u8> {
     d
 }
 
-/// 逐 entry 读回并打印全字段校验行；返回是否与期望完全一致。
+/// Read every entry back and print all decoded fields, the software-CRC cross-check, and the content comparison.
 fn dump_archive<R: Read + io::Seek>(ar: &mut ZipArchive<R>, expected: &[(String, Vec<u8>)]) {
     println!("entries = {} is_empty = {}", ar.len(), ar.is_empty());
     let names: Vec<&str> = ar.file_names().collect();
@@ -157,7 +157,7 @@ fn dump_archive<R: Read + io::Seek>(ar: &mut ZipArchive<R>, expected: &[(String,
 }
 
 fn main() {
-    // ---- ① Stored 主体：建档 ----
+    // ---- ① Stored main body: build the archive ----
     let readme = "# mirvm zip_arch\n\nUTF-8 文本：汉字、假名（かな）、emoji \u{1f4e6}\n\
                   第二行：tab\t分隔 与 \"引号\" 反斜杠\\\n重复行 padding padding padding\n"
         .as_bytes()
@@ -193,7 +193,7 @@ fn main() {
     let bytes = w.finish().unwrap().into_inner();
     println!("archive len={} fnv={:016x}", bytes.len(), fnv1a(&bytes));
 
-    // ---- ② 读回：逐 entry 校验 + by_name 命中/未命中 ----
+    // ---- ② Read back: per-entry verification + by_name hit/miss ----
     let mut ar = ZipArchive::new(Cursor::new(bytes.clone())).unwrap();
     println!("comment = {}", std::str::from_utf8(ar.comment()).unwrap());
     dump_archive(&mut ar, &expected);
@@ -207,7 +207,7 @@ fn main() {
         Err(e) => println!("by_name nope.txt err = {e}"),
     }
 
-    // ---- ③ 错误路径：坏档 / 截断 / 数据字节损坏（CRC 在 EOF 报错）----
+    // ---- ③ Error paths: junk archive / truncation / corrupt data byte (CRC error at EOF) ----
     match ZipArchive::new(Cursor::new(b"definitely not a zip archive".to_vec())) {
         Ok(_) => println!("junk archive unexpectedly ok"),
         Err(e) => println!("junk archive err = {e}"),
@@ -230,7 +230,7 @@ fn main() {
         Err(e) => println!("corrupt read kind={:?} msg={}", e.kind(), e),
     }
 
-    // ---- ④ deflate（flate2 raw deflate 后端）× level 6/9/默认 ----
+    // ---- ④ deflate (flate2 raw deflate backend) × level 6/9/default ----
     let defl_opts = |level: Option<i64>| {
         SimpleFileOptions::default()
             .compression_method(CompressionMethod::Deflated)
@@ -252,11 +252,11 @@ fn main() {
     chunked_write(&mut dw, &rand2).unwrap();
     dw.start_file("defl/tiny.txt", defl_opts(None)).unwrap();
     chunked_write(&mut dw, &tiny).unwrap();
-    // finish_into_readable：finish + ZipArchive 一步完成（另一 API 面）。
+    // finish_into_readable: finish + ZipArchive in one step (another API surface).
     let mut dar = dw.finish_into_readable().unwrap();
     println!("deflate archive comment = {:?}", std::str::from_utf8(dar.comment()).unwrap());
     dump_archive(&mut dar, &dexpected);
-    // by_index_raw：不解压读回压缩流原文（raw 字节亦须逐位一致）。
+    // by_index_raw: read back the raw compressed stream without decompressing (raw bytes must match too).
     for i in 0..dar.len() {
         let mut f = dar.by_index_raw(i).unwrap();
         let raw = chunked_read_all(&mut f).unwrap();

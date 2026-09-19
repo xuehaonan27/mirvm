@@ -1,7 +1,9 @@
-//! 帧布局冻结（M4.0 设计 §2）：逐 local 取单态化类型的 layout，对齐 bump 分配帧内偏移。
-//! 产物只含 (offset, size, align, 值分类)——执行相零 tcx。
+//! Frame layout freezing: lay out each local's monomorphized type and bump-allocate its
+//! frame offset with alignment. The result carries only (offset, size, align, value
+//! class), so the execution phase needs no `tcx`.
 //!
-//! M4.1：`ValKind` 值分类（ABI v2 与 place 求值共用）——Zst / 标量 / 标量对 / 聚合。
+//! `ValKind` classifies a value for the call ABI and for place evaluation:
+//! Zst / scalar / scalar pair / aggregate.
 
 use rustc_abi::{BackendRepr, HasDataLayout};
 use rustc_middle::mir::Body;
@@ -9,15 +11,17 @@ use rustc_middle::ty::{Ty, TyCtxt, TypingEnv};
 
 use crate::vm::engine::ir::Width;
 
-/// 值分类：决定访问路径与调用约定（frame-abi §3 / m4.1-design F3）。
+/// Value class: decides the access path and the calling convention.
 #[derive(Clone, Copy, Debug)]
 pub enum ValKind {
     Zst,
-    /// ≤64 位标量（int/ptr/bool/char/float——float 位搬运当标量，算术另有通道）
+    /// Scalar of at most 64 bits (int/ptr/bool/char/float). A float travels as bits here;
+    /// float arithmetic has its own lane.
     Scalar(Width),
-    /// 标量对：两半的（相对本值起始的偏移，宽度）
+    /// Scalar pair: each half's (offset from the value start, width).
     Pair((u32, Width), (u32, Width)),
-    /// 聚合/大标量（u128、SIMD 向量、struct…）：memcpy 通道，带尺寸
+    /// Aggregate or oversized scalar (u128, SIMD vector, struct, ...): the memcpy lane,
+    /// carrying its size.
     Other {
         size: u64,
     },
@@ -35,7 +39,7 @@ impl ValKind {
     }
 }
 
-/// 一个 local 的冻结信息。
+/// One local's frozen layout.
 pub struct LocalInfo<'tcx> {
     pub off: u32,
     pub ty: Ty<'tcx>,
@@ -55,11 +59,11 @@ pub fn layout_of<'tcx>(
     ty: Ty<'tcx>,
 ) -> Result<rustc_middle::ty::layout::TyAndLayout<'tcx>, String> {
     tcx.layout_of(typing_env.as_query_input(ty))
-        .map_err(|e| format!("layout 失败: {e}"))
+        .map_err(|e| format!("layout failed: {e}"))
 }
 
-/// layout → 值分类。ScalarPair 两半偏移按 codegen 同款公式
-/// （b_off = a.size.align_to(b.align)，rustc_codegen_ssa operand.rs）。
+/// Derive the value class from a layout. The scalar-pair half offset uses the same
+/// formula as codegen: `b_off = a.size.align_to(b.align)`.
 pub fn classify(tcx: TyCtxt<'_>, layout: &rustc_middle::ty::layout::TyAndLayout<'_>) -> ValKind {
     if layout.is_zst() {
         return ValKind::Zst;
@@ -67,7 +71,7 @@ pub fn classify(tcx: TyCtxt<'_>, layout: &rustc_middle::ty::layout::TyAndLayout<
     match layout.backend_repr {
         BackendRepr::Scalar(_) => match Width::from_bytes(layout.size.bytes()) {
             Some(w) => ValKind::Scalar(w),
-            // u128/i128：memcpy 通道位搬运；算术是第 3 步
+            // u128/i128: moved as bits through the memcpy lane; arithmetic is separate
             None => ValKind::Other {
                 size: layout.size.bytes(),
             },
@@ -92,7 +96,7 @@ pub fn classify(tcx: TyCtxt<'_>, layout: &rustc_middle::ty::layout::TyAndLayout<
     }
 }
 
-/// 类型的标量宽度（若是 ≤64 位标量）。
+/// The type's scalar width, when it is a scalar of at most 64 bits.
 pub fn scalar_width(layout: &rustc_middle::ty::layout::TyAndLayout<'_>) -> Option<Width> {
     if !matches!(layout.backend_repr, BackendRepr::Scalar(_)) {
         return None;
@@ -104,7 +108,8 @@ pub fn ty_signed(ty: Ty<'_>) -> bool {
     matches!(ty.kind(), rustc_middle::ty::Int(_))
 }
 
-/// 冻结整个函数帧。任一 local 无法布局（不应发生于单态化后）→ 整函数 Trap。
+/// Freeze the whole function frame. A local that cannot be laid out (which should not
+/// happen after monomorphization) traps the whole function.
 pub fn freeze<'tcx>(
     tcx: TyCtxt<'tcx>,
     typing_env: TypingEnv<'tcx>,

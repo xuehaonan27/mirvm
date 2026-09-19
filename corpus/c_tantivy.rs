@@ -1,57 +1,57 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# tantivy 钉 exact 0.26.1：sparse index 实测 crates.io 当前最新即 0.26.1
-# （任务书「pin 最新 0.22/0.24」系旧情报，0.24/0.25/0.26 相继已发，按
-# 「pin 最新」本义取 0.26.1）。特性保持 crate default（全量：
-# mmap/stopwords/lz4-compression/columnar-zstd-compression/stemmer）——
-# 任务明示 default，且 mmap（经 memmap2 走 MmapDirectory）正是本批有意
-# 施压面；columnar-zstd-compression 带 zstd 0.13 C FFI（docstore 默认
-# 压缩器，c_zstd_stream/c_zstd_long 已实证的 native-archive 绿家族）。
+# tantivy pinned to exact 0.26.1: at the time of writing 0.26.1 is the newest release on
+# crates.io (0.24, 0.25 and 0.26 have all shipped, so "pin the newest" means 0.26.1).
+# Features keep the crate defaults (mmap/stopwords/lz4-compression/
+# columnar-zstd-compression/stemmer): defaults are deliberate, and mmap (memmap2 through
+# MmapDirectory) is exactly the surface this fixture means to stress;
+# columnar-zstd-compression pulls in the zstd 0.13 C FFI (the docstore's default
+# compressor, already proven by c_zstd_stream/c_zstd_long).
 tantivy = "=0.26.1"
 ---
-// tantivy 0.26.1 真搜索引擎三维差分（批8 波1 重 FFI/C 条目）。
+// tantivy 0.26.1 differential over a real search engine, heavy on C FFI.
 //
-// 测试面：三字段 schema（title 文本+STORED / body 文本 / num u64
-// INDEXED+FAST+STORED）→ 程序生成 20 份定值文档 add_document → commit →
-// drop Index 后 Index::open_in_dir 整载（重读 meta + mmap 段文件）→ 重建
-// reader → 三类查询各打印命中标题 BTree 序 + 计数：
-//   ① term(body:cherry)    —— 倒排 TermQuery（WithFreqs）
-//   ② range(num∈[12,30))   —— InvertedIndexRangeQuery 倒排版（绕行理由见头注尾部 FRONTIER 条）
-//   ③ phrase(title:"hello world") —— 位置索引 PhraseQuery
-// 再 delete_term(doc07) + commit（update = delete+commit 形态）→ 重开 reader
-// 检查 segment 状态后 num_docs(19) 与 term/range 重查计数；收尾显式 schema
-// 元数据断言（字段名集合、每字段 field_type/is_indexed/is_stored）。
+// Test surface: a three-field schema (title text + STORED / body text / num u64
+// INDEXED+FAST+STORED); 20 fixed documents added via add_document; commit; drop the Index
+// and reload the whole directory with Index::open_in_dir (re-reading meta and mmap'ing the
+// segment files); rebuild the reader; then three queries, each printing its hit titles in
+// BTree order plus a count:
+//   ① term(body:cherry)             -- inverted TermQuery (WithFreqs)
+//   ② range(num ∈ [12,30))          -- InvertedIndexRangeQuery (see the known limitation below)
+//   ③ phrase(title:"hello world")   -- positional PhraseQuery
+// Then delete_term(doc07) + commit (the update = delete + commit shape); reopen the reader,
+// check the segment state and num_docs(19), re-run the term/range counts; finish with
+// explicit schema metadata assertions (field-name set, and each field's
+// field_type/is_indexed/is_stored).
 //
-// 索引落盘走系统 tmp 固定子目录 mirvm_c_tantivy_idx（路径不打印；首清尾删，
-// 复跑必为冷态）。全程 MmapDirectory——读侧 mmap 是本条目有意施压面（写侧
-// 目录 atomic_write = tmp+rename；meta.json 内含 uuid v4 与时间戳，均不进
-// 输出）。writer 按 available_parallelism 开多索引线程（本机 ≤3 worker），
-// 段内语义结果与线程数无关。
+// The index lives in the fixed system tmp subdirectory mirvm_c_tantivy_idx (the path is
+// never printed; it is cleared first and deleted last, so every run starts cold). All IO
+// goes through MmapDirectory -- read-side mmap is a surface this fixture means to stress
+// (the write side uses atomic_write = tmp + rename; meta.json contains a uuid v4 and a
+// timestamp, neither of which reaches the output). The writer opens one indexing thread per
+// available_parallelism (≤3 workers here), and the per-segment semantic results do not
+// depend on the thread count.
 //
-// 确定性：文档内容由下标完全决定（title=docNN+四短语轮转、
-// body=3水果×2甜点轮转、num=3i）；只打印语义结果——命中文档标题集合
-// （BTree 序）、命中计数、断言通过行；BM25 score(f32)/DocAddress/段布局/
-// 线程数/绝对路径一律不进输出。native 侧三连跑逐字节一致、stderr 真空。
+// Deterministic: document contents are fully determined by the index (title = docNN plus a
+// rotation of four phrases, body = a rotation over 3 fruits × 2 desserts, num = 3i). Only
+// semantic results are printed: hit title sets (BTree order), hit counts and assertion
+// lines. BM25 score (f32), DocAddress, segment layout, thread count and absolute paths
+// never reach the output. Three consecutive native runs are byte-identical and stderr is
+// empty.
 //
-// 成本声明：冷构建 ~120 crate 图 + zstd-sys 的 vendored C 构建，B 维实测
-// ~61s（源已在本机 registry 缓存）；单维运行秒级。
+// Cost: a cold build of ~120 crates plus zstd-sys' vendored C build; one dimension takes
+// seconds to run once built.
 //
-// 三维复跑（A 首跑后 B 才有脚本目录）：
-//   A: target/release/mirvm run corpus/c_tantivy.rs
-//   B: cd "$(dirname "$(grep -l 'name = "c_tantivy"' ~/.cache/mirvm/scripts/*/Cargo.toml)")" && \
-//      RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \
-//      "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
-//   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_tantivy.rs
-//
-// FRONTIER 绕行：fastfield 列值读取（FAST range / 聚合面）经
-// tantivy-columnar → bitpacking-0.9.3 bitpacker8x AVX2 的
-// `_mm256_lddqu_si256`（llvm.x86.avx.ldu.dq.256，LDDQU 族）——mirvm 未内建，
-// M5.x intrinsic 欠账队列新面孔（12 行无依赖探针 native ok / mirvm TRAP
-// exit 70 同文实录；128 位兄弟 llvm.x86.sse3.ldu.dq 同族同缺）。本 driver
-// 的 range 查询显式改 InvertedIndexRangeQuery（tantivy 公开的倒排等价
-// 变体）绕行；num 的 FAST 声明保留（schema/列物化/元数据面不降级）。
-// 欠账内建后可将查询 2/5 还原为 RangeQuery（走 FastFieldRangeWeight）。
+// Known limitation: fast-field column reads (the FAST range / aggregation surface) go
+// through tantivy-columnar -> bitpacking-0.9.3 bitpacker8x AVX2, which uses
+// `_mm256_lddqu_si256` (llvm.x86.avx.ldu.dq.256, the LDDQU family) -- mirvm has not built
+// that in (a 12-line dependency-free probe reproduces it: native ok, mirvm TRAP exit 70;
+// its 128-bit sibling llvm.x86.sse3.ldu.dq is missing too). This driver therefore uses the
+// inverted InvertedIndexRangeQuery variant for the range query, while keeping the num FAST
+// declaration intact (so the schema, column materialization and metadata surfaces are not
+// downgraded). Once the intrinsic exists, the range query can go back to RangeQuery
+// (FastFieldRangeWeight).
 use std::collections::BTreeSet;
 use std::fs;
 use std::ops::Bound;
@@ -73,13 +73,13 @@ const PHRASES: [&str; 4] = [
 const FRUITS: [&str; 3] = ["apple", "cherry", "banana"];
 const DESSERTS: [&str; 2] = ["tart", "split"];
 
-/// 第 i 份文档的标题：`%4` 轮转短语，前缀 docNN 保证标题字典序 == 写入序。
+/// Title of document i: a rotating phrase (%4), with the docNN prefix making title order == write order.
 fn title_of(i: usize) -> String {
     format!("doc{:02} {}", i, PHRASES[i % PHRASES.len()])
 }
 
-/// 跑出全部命中（limit 远大于文档总数），标题去重进 BTreeSet 后按字典序返回。
-/// 只取语义结果（标题集合）；score/DocAddress/段布局一律不进输出。
+/// Runs the query with a limit far above the document count and returns the deduplicated
+/// titles in lexicographic order. Only the semantic result (the title set) reaches the output.
 fn hit_titles(
     searcher: &Searcher,
     query: &dyn Query,
@@ -100,14 +100,14 @@ fn hit_titles(
 }
 
 fn main() -> tantivy::Result<()> {
-    // 索引落在系统 tmp 的固定子目录（路径不打印）；先清空保证可复跑。
+    // The index goes in a fixed system-tmp subdirectory (path never printed); clear it first for repeatability.
     let dir: PathBuf = std::env::temp_dir().join("mirvm_c_tantivy_idx");
     if dir.exists() {
-        fs::remove_dir_all(&dir).expect("清空旧索引目录失败");
+        fs::remove_dir_all(&dir).expect("failed to clear the old index directory");
     }
-    fs::create_dir_all(&dir).expect("创建索引目录失败");
+    fs::create_dir_all(&dir).expect("failed to create the index directory");
 
-    // 三字段 schema：title(文本,存)/body(文本,不存)/num(u64,索引+快列+存)。
+    // Three-field schema: title (text, stored) / body (text, not stored) / num (u64, indexed + fast + stored).
     let mut sb = Schema::builder();
     let title = sb.add_text_field("title", TEXT | STORED);
     let body = sb.add_text_field("body", TEXT);
@@ -127,7 +127,7 @@ fn main() -> tantivy::Result<()> {
     drop(writer);
     println!("[c_tantivy] wrote 20 docs, committed");
 
-    // 重开：先 drop 旧 Index，再从目录整载（重读 meta + mmap 段），重建 reader。
+    // Reopen: drop the old Index, reload the whole directory (re-read meta, mmap segments), rebuild the reader.
     drop(index);
     let index = Index::open_in_dir(&dir)?;
     let reader = index.reader()?;
@@ -135,7 +135,7 @@ fn main() -> tantivy::Result<()> {
     assert_eq!(searcher.num_docs(), 20);
     println!("[c_tantivy] reopened, num_docs={}", searcher.num_docs());
 
-    // 查询 1：term（body:cherry → i%3==1，期望 {01,04,07,10,13,16,19}）。
+    // Query 1: term (body:cherry -> i%3==1, expected {01,04,07,10,13,16,19}).
     let q1 = TermQuery::new(
         Term::from_field_text(body, "cherry"),
         IndexRecordOption::WithFreqs,
@@ -148,17 +148,17 @@ fn main() -> tantivy::Result<()> {
         h1.join(" ")
     );
 
-    // 查询 2：range（num∈[12,30) → i∈[4,10)，期望 {04..09}）。
-    // FRONTIER 绕行：num 字段虽声明 FAST，但查询显式用
-    // InvertedIndexRangeQuery（tantivy 公开的倒排版 range，语义与
-    // RangeQuery 等价而只走倒排）——FAST 列值读取会经
-    // tantivy-columnar → bitpacking-0.9.3 bitpacker8x 的 AVX2 实现，
-    // 其 `_mm256_lddqu_si256`（llvm.x86.avx.ldu.dq.256）mirvm 未内建
-    // （M5.x intrinsic 欠账新面孔，LDDQU 族；无 tantivy 的 12 行探针
-    // 实测同 trap 同 exit 70，128 位兄弟 llvm.x86.sse3.ldu.dq 同缺）。
-    // FAST 声明保留在 schema/列物化/元数据断言（构建侧对小列不触发 256
-    // 块压缩，已实证 commit 安然）；fastfield 值读取面待 intrinsic
-    // 内建后转正。
+    // Query 2: range (num ∈ [12,30) -> i ∈ [4,10), expected {04..09}).
+    // Known limitation: num is declared FAST, but the query deliberately uses
+    // InvertedIndexRangeQuery (tantivy's public inverted equivalent, same semantics as
+    // RangeQuery but touching only the inverted index) because a FAST column read goes
+    // through tantivy-columnar -> bitpacking-0.9.3 bitpacker8x AVX2, whose
+    // `_mm256_lddqu_si256` (llvm.x86.avx.ldu.dq.256) mirvm has not built in (a 12-line probe
+    // without tantivy reproduces the same trap and exit 70; its 128-bit sibling
+    // llvm.x86.sse3.ldu.dq is missing too). The FAST declaration stays for the schema, column
+    // materialization and metadata assertions (the build side does not trigger 256-block
+    // compression for a small column, so commit is safe); the fast-field read surface can be
+    // restored once the intrinsic exists.
     let q2 = InvertedIndexRangeQuery::new(
         Bound::Included(Term::from_field_u64(num, 12)),
         Bound::Excluded(Term::from_field_u64(num, 30)),
@@ -171,7 +171,7 @@ fn main() -> tantivy::Result<()> {
         h2.join(" ")
     );
 
-    // 查询 3：phrase（title:"hello world" → i%4==0，期望 {00,04,08,12,16}）。
+    // Query 3: phrase (title:"hello world" -> i%4==0, expected {00,04,08,12,16}).
     let q3 = PhraseQuery::new(vec![
         Term::from_field_text(title, "hello"),
         Term::from_field_text(title, "world"),
@@ -184,7 +184,7 @@ fn main() -> tantivy::Result<()> {
         h3.join(" ")
     );
 
-    // update：delete_term(doc07) + commit；重开 reader 检查合并后计数。
+    // Update: delete_term(doc07) + commit; reopen the reader and check the post-merge counts.
     let mut writer: IndexWriter<TantivyDocument> = index.writer(15_000_000)?;
     writer.delete_term(Term::from_field_text(title, "doc07"));
     writer.commit()?;
@@ -198,7 +198,7 @@ fn main() -> tantivy::Result<()> {
         searcher.num_docs()
     );
 
-    // 删除应同时作用于两类查询：term 去 07 → 6 命中；range 去 07 → 5 命中。
+    // The delete must affect both query kinds: term loses 07 -> 6 hits; range loses 07 -> 5 hits.
     let h4 = hit_titles(&searcher, &q1, title)?;
     assert_eq!(h4.len(), 6);
     println!(
@@ -214,7 +214,7 @@ fn main() -> tantivy::Result<()> {
         h5.join(" ")
     );
 
-    // schema 元数据断言：字段名集合 + 每字段类型/索引/存储标志。
+    // Schema metadata assertions: field-name set + each field's type/indexed/stored flags.
     let meta = index.schema();
     let names: BTreeSet<String> = meta.fields().map(|(_, e)| e.name().to_string()).collect();
     let expect: BTreeSet<String> = ["body", "num", "title"]
@@ -230,10 +230,10 @@ fn main() -> tantivy::Result<()> {
     assert!(matches!(num_entry.field_type(), FieldType::U64(_)));
     println!("[c_tantivy] schema metadata ok (3 fields)");
 
-    // 清理：不留索引，保证下次冷启动状态一致。
+    // Cleanup: leave no index behind so the next cold start sees the same state.
     drop(reader);
     drop(index);
-    fs::remove_dir_all(&dir).expect("最终清理失败");
+    fs::remove_dir_all(&dir).expect("final cleanup failed");
     println!("[c_tantivy] all green");
     Ok(())
 }

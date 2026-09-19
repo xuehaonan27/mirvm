@@ -97,6 +97,13 @@ implementation rather than after mistakes.
 - Use Rust 2024, existing style, and tracing initialized only in binaries:
   `info` for lifecycle, `debug` for internals, `warn` for recoverable issues,
   `error` for unrecoverable failures. Update schemas/config/docs with contract changes.
+- Write code, comments, doc comments and user-visible messages in English. Design and
+  history documents under `docs/` stay Chinese.
+- A code comment describes the code in front of it: say what it does and why the
+  non-obvious parts are that way (invariants, preconditions, hazards, units,
+  ownership). No milestone/slice/design-document citations, no "was X, now Y"
+  narration, no restating the identifier. Keep `TODO`/`FIXME`/`NOTE`/`SAFETY` for
+  open work and hazards.
 - Use Conventional Commit prefixes (`feat:`, `fix:`, `refactor:`, `ci:`, `chore:`).
 
 ## Code Map

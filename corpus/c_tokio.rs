@@ -3,8 +3,8 @@
 [dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
 ---
-// async 运行时：current_thread 调度器 + 定时器 + 任务。
-// 压 os:: 边界（reactor 起 epoll/eventfd）与 async 引擎故事。
+// Async runtime: current_thread scheduler + timers + tasks. Exercises the os:: boundary
+// (the reactor starts epoll/eventfd) and async execution.
 use tokio::sync::mpsc;
 
 async fn worker(id: u32, tx: mpsc::Sender<u32>) {

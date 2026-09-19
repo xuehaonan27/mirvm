@@ -3,13 +3,13 @@
 [dependencies]
 nom = "7"
 ---
-// nom 7 组合子算术表达式解析器：括号 / 优先级 / 一元负号 / 空格容忍。
-// 覆盖 bytes::complete::tag、character::complete::{char,digit1,multispace0}、
-// multi::{many0,many1}、branch::alt、combinator::{map,map_res,opt,recognize}、
-// sequence::{pair,preceded,delimited,terminated}。运算符表用 Box<dyn Fn>
-// 构造器——闭包 / 高阶组合子 / trait 对象动态派发密集压力。
-// 输出：固定表达式集的 AST（derive Debug，字段序确定）、checked 求值
-// （错误文案固定）、nom Err 的 Debug 文本、trailing 输入诊断。全确定，无 IO。
+// nom 7 combinator arithmetic parser: parentheses / precedence / unary minus / whitespace.
+// Exercises bytes::complete::tag, character::complete::{char,digit1,multispace0},
+// multi::{many0,many1}, branch::alt, combinator::{map,map_res,opt,recognize},
+// sequence::{pair,preceded,delimited,terminated}. The operator table is built from Box<dyn Fn>
+// constructors -- dense pressure on closures, higher-order combinators, trait-object dispatch.
+// Output: the AST of a fixed expression set (derive Debug, deterministic field order), checked
+// evaluation with fixed error text, Debug text of nom Err, trailing-input diagnostics. No IO.
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::{char, digit1, multispace0};
@@ -30,7 +30,7 @@ enum Expr {
     Pow(Box<Expr>, Box<Expr>),
 }
 
-// ===== 运算符表：char → Box<dyn Fn> 二元构造器（trait 对象调用压力）=====
+// ===== operator table: char -> Box<dyn Fn> binary constructor (trait-object call pressure) =====
 type BinCtor = Box<dyn Fn(Expr, Expr) -> Expr>;
 
 fn add_ops() -> Vec<(char, BinCtor)> {
@@ -57,8 +57,8 @@ fn apply(ops: &[(char, BinCtor)], c: char, a: Expr, b: Expr) -> Expr {
     panic!("unknown op {c}");
 }
 
-// ===== 文法（优先级低→高）：expr(+-) / term(*//%) / unary(-) / power(**) / primary =====
-// 记号两侧容忍空白：ws(f) = multispace0 · f · multispace0。
+// ===== grammar (low to high precedence): expr(+-) / term(*//%) / unary(-) / power(**) / primary =====
+// Whitespace is tolerated around tokens: ws(f) = multispace0 · f · multispace0.
 fn ws<'a, F, O>(mut f: F) -> impl FnMut(&'a str) -> IResult<&'a str, O>
 where
     F: FnMut(&'a str) -> IResult<&'a str, O>,
@@ -71,7 +71,7 @@ where
     }
 }
 
-// 十进制整数字面量（允许 '_' 分隔），map_res 做 strip + i64 解析。
+// Decimal integer literal (allows '_' separators); map_res strips them and parses i64.
 fn number(i: &str) -> IResult<&str, Expr> {
     map(
         map_res(recognize(many1(alt((digit1, tag("_"))))), |s: &str| {
@@ -89,7 +89,7 @@ fn primary(i: &str) -> IResult<&str, Expr> {
     preceded(multispace0, alt((number, paren)))(i)
 }
 
-// 幂：右结合（2 ** 3 ** 2 = 2 ** (3 ** 2)），右操作数允许一元负号（2 ** -3）。
+// Power: right-associative (2 ** 3 ** 2 = 2 ** (3 ** 2)); right operand allows unary minus (2 ** -3).
 fn power(i: &str) -> IResult<&str, Expr> {
     map(
         pair(primary, opt(preceded(ws(tag("**")), unary))),
@@ -100,7 +100,7 @@ fn power(i: &str) -> IResult<&str, Expr> {
     )(i)
 }
 
-// 一元负号：可叠层（- - 5），绑定比 ** 松（-2 ** 2 = -(2 ** 2)）。
+// Unary minus: stacks (- - 5) and binds looser than ** (-2 ** 2 = -(2 ** 2)).
 fn unary(i: &str) -> IResult<&str, Expr> {
     alt((
         map(preceded(ws(char('-')), unary), |e| {
@@ -132,12 +132,12 @@ fn expr(i: &str) -> IResult<&str, Expr> {
     Ok((i, acc))
 }
 
-// 顶层：表达式 + 尾部空白；剩余输入由调用方判 trailing。
+// Top level: expression + trailing whitespace; the caller checks the remaining input.
 fn parse_full(i: &str) -> IResult<&str, Expr> {
     terminated(expr, multispace0)(i)
 }
 
-// ===== checked 求值：错误文案为固定 &str（两边确定性一致）=====
+// ===== checked evaluation: error text is a fixed &str (same and deterministic on both sides) =====
 fn eval(e: &Expr) -> Result<i64, &'static str> {
     match e {
         Expr::Num(n) => Ok(*n),
@@ -167,7 +167,7 @@ fn eval(e: &Expr) -> Result<i64, &'static str> {
     }
 }
 
-// ===== AST 递归统计（生成形态用，避免巨型 Debug 行）=====
+// ===== recursive AST statistics (used for generated forms, avoids huge Debug lines) =====
 fn nodes(e: &Expr) -> u64 {
     1 + match e {
         Expr::Num(_) => 0,
@@ -219,8 +219,8 @@ fn report(label: &str, disp: &str, input: &str, full_ast: bool) {
 fn main() {
     println!("nom 7 arithmetic parser differential");
 
-    // ① 合法 / 求值错误路径：优先级、括号、一元负号、幂结合性、空白容忍、
-    //    '_' 分隔、i64 边界、checked 溢出、除零、负指数。
+    // ① valid / evaluation-error paths: precedence, parentheses, unary minus, power assoc,
+    //    whitespace, '_' separators, i64 bounds, checked overflow, div-by-zero, negative exponents.
     const CASES: &[&str] = &[
         "1+2*3",
         "(1+2)*3",
@@ -254,7 +254,7 @@ fn main() {
         report(&format!("case {i:02}"), &format!("{c:?}"), c, true);
     }
 
-    // ② 解析错误路径：nom Err 的 Debug 文本 + trailing 输入诊断。
+    // ② parse-error paths: Debug text of nom Err + trailing-input diagnostics.
     const ERRS: &[&str] = &[
         "abc",
         "2 ** * 3",
@@ -271,7 +271,7 @@ fn main() {
         report(&format!("err {i:02}"), &format!("{c:?}"), c, true);
     }
 
-    // ③ 内存生成形态：深括号递归、长左折叠链、叠层负号（递归 + drop glue 压力）。
+    // ③ generated forms: deep parens, long left-fold chain, stacked negations (drop-glue pressure).
     let deep = format!("{}7{}", "(".repeat(120), ")".repeat(120));
     report(
         "gen 00",

@@ -3,12 +3,12 @@
 [dependencies]
 rust_decimal = "1"
 ---
-// rust_decimal：96 位十进制定点（lo/mid/hi 三个 u32 + scale/符号）——M5.4b
-// 128 位族压力：乘除内部走 96/192 位中间运算与归一化。
-// 覆盖：字符串解析谱系（尾零/科学计数/负数/极限/错误）/ 四则运算链 /
-// round/trunc/floor/ceil/rescale/normalize / from_f64 边界 /
-// checked_* 溢出路径（MAX+1、除零）/ Ord / Hash（固定种子 hasher）。
-// 输出全为 Display 文本与布尔/hex，确定；无 serde feature。
+// rust_decimal: 96-bit decimal fixed point (lo/mid/hi u32 + scale/sign); the
+// 128-bit family stress, since mul/div use 96/192-bit intermediates + normalization.
+// Covers: string parsing (trailing zeros, scientific, negative, limit, error),
+// arithmetic chains, round/trunc/floor/ceil/rescale/normalize, from_f64 bounds,
+// checked_* overflow (MAX+1, divide by zero), Ord, Hash (fixed-seed hasher). Output
+// is Display text + bools/hex, deterministic, no serde feature; the oracle compares bytes.
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use std::collections::hash_map::DefaultHasher;
@@ -20,7 +20,7 @@ fn show(label: &str, x: Decimal) {
 }
 
 fn main() {
-    // ① 字符串解析谱系：尾零 / 前导零 / 科学计数 / 负数 / 96 位极限 / 错误
+    // ① string parses: trailing/leading zeros / scientific / negative / 96-bit max / error
     for s in [
         "0",
         "-0",
@@ -43,7 +43,7 @@ fn main() {
         .unwrap_err();
     println!("overflow err: {huge}");
 
-    // ② 四则运算链：scale 传播 + 除法 28 位舍入
+    // ② arithmetic chain: scale propagation + 28-digit rounding on division
     let a = Decimal::from_str("1.20").unwrap();
     let b = Decimal::from_str("3.4").unwrap();
     println!("{a} + {b} = {}", a + b);
@@ -96,7 +96,7 @@ fn main() {
         Decimal::from_str("1.000").unwrap().normalize()
     );
 
-    // ④ from_f64 边界：常规 / 超范围 / 非有限
+    // ④ from_f64 boundaries: normal / out of range / non-finite
     for f in [0.1f64, 0.2, 1.0 / 3.0, 1.5e300, -273.15] {
         match Decimal::from_f64(f) {
             Some(d) => println!("from_f64({f:?}) = {d}"),
@@ -109,7 +109,7 @@ fn main() {
     let rt = Decimal::from_f64_retain(0.1).unwrap();
     println!("from_f64_retain(0.1) = {rt} scale={}", rt.scale());
 
-    // ⑤ checked_* 溢出路径：MAX±1 / MAX*2 / 除零 / 模零；对照可行情形
+    // ⑤ checked_* overflow: MAX+/-1 / MAX*2 / div by zero / rem by zero; working cases too
     let max = Decimal::MAX;
     let min = Decimal::MIN;
     println!("MAX = {max}");
@@ -128,7 +128,7 @@ fn main() {
     println!("tiny / 3 = {}", tiny / three);
     println!("tiny checked_div 3 = {}", tiny.checked_div(three).unwrap());
 
-    // ⑥ Ord / Hash（DefaultHasher::new() 固定种子，确定）
+    // ⑥ Ord / Hash (DefaultHasher::new() uses a fixed seed, deterministic)
     let mut vals = [
         Decimal::from_str("2.5").unwrap(),
         Decimal::from_str("-0.5").unwrap(),
@@ -158,7 +158,7 @@ fn main() {
     println!("hash(MAX) = {:016x}", h(max));
     println!("hash(MIN) = {:016x}", h(min));
 
-    // ⑦ 杂项确定性 API
+    // ⑦ miscellaneous deterministic APIs
     let neg0 = Decimal::from_str("-0").unwrap();
     println!("is_sign_negative(-0) = {}", neg0.is_sign_negative());
     println!("abs(-2.5) = {}", Decimal::from_str("-2.5").unwrap().abs());

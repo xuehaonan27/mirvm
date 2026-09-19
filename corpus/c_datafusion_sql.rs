@@ -42,28 +42,22 @@ tokio = { version = "1", default-features = false, features = ["rt"] }
 // c_datafusion_sql -- Apache DataFusion on the current stable line: SessionContext
 // + three in-memory RecordBatch tables + a full SQL query sequence, three-way diff.
 //
-// FRONTIER (expected-red): mirvm's two dimensions cannot run yet; the native one is
-// verified green (two cargo runs agree byte-for-byte on 95 stdout lines, empty
-// stderr, exit 0, Q1-Q7 and the Q2/Q5 plan fingerprints included).
+// mirvm runs all three dimensions: the build completes (including the zstd-sys C
+// family), SessionContext initializes, all three tables register, SQL parses, the
+// logical plans build, and 95 stdout lines (Q1-Q7 plus the Q2/Q5 plan fingerprints)
+// match native (empty stderr, exit 0).
 //
-// Root cause (engine semantic gap): the vtable upcast transformation for Rust trait
-// upcasting coercion (dyn SubTrait -> dyn SuperTrait, stabilized in 1.86) is not
-// implemented. The trigger chain -- the only route to physicalizing a registered
-// table's TableScan, with no official switch around it:
+// Dynamic-dispatch path exercised: TableScan physicalization cannot skip the
+// trait-object upcast that `downcast_ref` performs; the chain is
 //   datafusion-54.0.0/src/physical_planner.rs:666  TableScan physicalization calls
 //     source_as_provider(source)
 //   -> datafusion-catalog-54.0.0/src/default_table_source.rs:94
 //     source.as_ref().downcast_ref::<DefaultTableSource>()
 //   -> datafusion-expr-54.0.0/src/table_source.rs:138  (self as &dyn Any)
-//     -- the dyn upcast coercion itself
-//   -> mirvm src/lower/func.rs:1888  lowering refuses (the Unsize branch)
-// Mirvm's run: the build completes (including the zstd-sys C family), the
-// SessionContext initializes, all three tables register, SQL parses and the
-// logical plans build; the first Q1 physical plan then traps. stdout stops at
-// "Q1 sql: SELECT ...", stderr carries one TRAP line, exit=70; build plus run
-// takes real 6m13.8s, within budget. The JIT dimension (MIRVM_JIT_THRESHOLD=1,
-// warm cache) takes real 13.8s with stdout/stderr/exit byte-identical to the
-// interpreted run: the same lowering gap at the same point.
+//     -- the dyn upcast coercion itself, lowered by the PC::Unsize arm of
+//   -> src/lower/func/cast.rs  (target vtable = *(source vtable +
+//     supertrait_vtable_slot x 8), the same criterion as cg_ssa unsized_info).
+//
 // Minimal repro (no cargo-script dependency, measured in /tmp):
 //   use std::any::Any;
 //   trait Table: Any { fn rows(&self) -> i64; }
@@ -80,19 +74,25 @@ tokio = { version = "1", default-features = false, features = ["rt"] }
 //       let t: &dyn Table = &Mem { n: 7 };
 //       println!("up={} {}", t.rows(), inspect(t));
 //   }
-//   native: up=7 downcast=7, exit 0 (as expected);
-//   mirvm: stderr "mirvm[m4-engine]: TRAP: dyn 上溯 vtable 变换
-//   （dyn Table → dyn std::any::Any，M4.2+）", exit 70.
-// Fix direction: in the Unsize branch at src/lower/func.rs:1888, implement the
-// dyn->dyn upcast vtable transformation (same criterion as cg_ssa's unsized_info);
-// generating/selecting the supertrait vtable per impl unlocks TableScan
-// physicalization for the whole datafusion family.
-//   red_pattern=「mirvm[m4-engine]: TRAP: dyn 上溯 vtable 变换（dyn 」
-//   (a stable feature prefix ending in a space; this driver's instance is
-//   `dyn datafusion::logical_expr::TableSource → dyn std::any::Any，M4.2+`)
-// No detour: collect/create_physical_plan must go through that downcast and the
-// SessionContext+SQL+collect mainline cannot avoid physicalization; the gap is an
-// unconditional lowering Err with no backend switch or force-soft env to flip.
+//   native and mirvm both print up=7 downcast=7 and exit 0.
+// The chase covers both fat-pointer forms this driver reaches: `&dyn` and `Arc<dyn>`
+// are both scalar pairs (an Arc's metadata lives in the Arc pointer, not the allocation).
+// A shape the arm cannot derive a vtable for is rejected with an English diagnostic
+// rather than lowered to a wrong vtable, e.g.
+//   "dyn upcast target is not a pair (...)",
+//   "dyn upcast source is not a pair (...; nested tail-pair wrapper not handled)",
+//   "dyn upcast source is not a fat pointer (...; constant fat-pointer upcast not handled)",
+//   "dyn upcast source meta is not a slot (...; non-constant form not handled)".
+// No red_pattern applies: the shape this driver hits takes the chase path, so stderr
+// stays empty and exit is 0; a rejected shape would carry one of those messages and
+// exit 70.
+// The path is unavoidable: collect/create_physical_plan must go through that downcast,
+// so the SessionContext+SQL+collect mainline cannot skip physicalization; the cast is a
+// real MIR `PointerCoercion(Unsize)`, not something a driver-side switch can avoid.
+// Build plus run takes about 6m14s (well within the 400 s registered timeout); the JIT
+// dimension (MIRVM_JIT_THRESHOLD=1, warm cache) takes about 14 s and reproduces the
+// interpreted stdout, stderr and exit code exactly.
+//
 //
 // Coverage:
 //   1) Tables: emps (8 rows: id/name/dept/salary/city_id, salary with one NULL,

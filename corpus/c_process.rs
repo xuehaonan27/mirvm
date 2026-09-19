@@ -2,8 +2,8 @@
 ---
 [dependencies]
 ---
-// 子进程：std::process::Command。std 在 Unix 上按情况走 posix_spawn（不在 denylist）
-// 或 fork+exec（denylist）。压"子进程 = 真 OS 进程 passthrough"的处置。
+// Subprocesses via std::process::Command: on Unix std uses posix_spawn when it can (not
+// on the foreign denylist) and fork+exec otherwise, so this pins the passthrough down.
 use std::process::Command;
 
 fn main() {

@@ -4,21 +4,21 @@
 zopfli = "0.8"
 flate2 = "1"
 ---
-// zopfli 0.8（纯 Rust 高压缩率 deflate；重计算 = JIT 压力）：三档输入
-// （768B 结构化重复文本 / 384B 定种随机 / 768B 混合）× 三容器格式
-// （Zlib/Gzip/Deflate）compress() 全矩阵，iterations 钉 2；zopfli 输出对同
-// 参数同输入逐字节确定，压缩流以长度+FNV-1a 锚定。roundtrip 用 flate2 真容器
-// 解码（ZlibDecoder/GzDecoder/DeflateDecoder 走 crc32fast/simd-adler32 硬件
-// 路径——pclmulqdq/psad.bw 均已内建，无损校验）。覆盖：顶层 compress 三
-// Format、Options 三字段变体（iteration_count / maximum_block_splits /
-// iterations_without_improvement）、BlockType::Fixed/Uncompressed 直驱
-// DeflateEncoder、流式 7 字节小块写（buffered 与非 buffered 两条通路）、
-// get_ref/get_mut、empty/单字节边界、截断/垃圾/格式交叉三条解码错误路径。
-// 确定性：定种 xorshift64*；不打印时间/地址/路径；二进制只印 len+fnv+布尔。
-// 尺寸/iterations 按 MIRVM_JIT_THRESHOLD=1 <8 分钟预算钉（实测 C 维 ≈4.6
-// 分钟）：zopfli 单次压缩在 mirvm 下约 10-50s（rand 形状最贵），任务建议的
-// 50KB/20KB/100KB+iter5 仅 native debug 运行就需 ~3.5 分钟，mirvm 必超时，
-// 故按规则先减输入尺寸。
+// zopfli 0.8 (pure-Rust high-ratio deflate; recomputation pressure on the JIT): three
+// inputs (768B structured text / 384B seeded random / 768B mixed) × three container
+// formats (Zlib/Gzip/Deflate) through the full compress() matrix, iterations pinned
+// to 2; output is byte-for-byte deterministic for the same input+options, and each
+// stream is anchored by length + FNV-1a. roundtrip decodes with the flate2 real
+// containers (ZlibDecoder/GzDecoder/DeflateDecoder go through the crc32fast/simd-
+// adler32 hardware paths, all built in). Covers the three compress() Formats, the
+// three Options field variants (iteration_count / maximum_block_splits /
+// iterations_without_improvement), BlockType::Fixed/Uncompressed driving
+// DeflateEncoder directly, streaming 7-byte writes (buffered/unbuffered),
+// get_ref/get_mut, empty/single-byte boundaries, and the three decode error paths
+// (truncated/junk/format cross). Determinism: seeded xorshift64*, no time/address/path
+// printed, binary output only len+fnv+bool. Sizes and iterations are pinned to fit
+// the MIRVM_JIT_THRESHOLD=1 < 8 minute budget: one zopfli compress under mirvm takes
+// ~10-50s (random shape worst), so inputs are smaller than the suggested 50KB/20KB/100KB.
 use std::io::{Read, Write};
 use std::num::NonZeroU64;
 
@@ -33,7 +33,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 定种 xorshift64*（native/mirvm 同序列）。
+/// Seeded xorshift64* (same sequence under native and mirvm).
 struct Rng(u64);
 
 impl Rng {
@@ -56,14 +56,14 @@ impl Rng {
     }
 }
 
-// 结构化重复文本：定长记录号 + 小周期字段（高可压性，squeeze 迭代收益大）。
-// 尺寸按 MIRVM_JIT_THRESHOLD=1 <8 分钟预算钉（超时先减输入，见任务约束）。
+// Structured repetitive text: fixed-width record numbers + small-cycle fields (highly compressible, so squeeze pays off).
+// Size pinned to fit the MIRVM_JIT_THRESHOLD=1 < 8 minute budget (reduce the input first if it times out).
 const TEXT_LEN: usize = 768;
-// 定种随机（不可压形状，zopfli 仍全量跑 LZ77/squeeze 代价——mirvm 下最贵形状）。
+// Seeded random (incompressible shape; zopfli still pays the full LZ77/squeeze cost -- the priciest shape under mirvm).
 const RAND_LEN: usize = 384;
-// 混合：文本段与随机段交替（考验 block splitting 与块类型切换）。
+// Mixed: alternating text and random segments (exercises block splitting and block-type switching).
 const MIXED_LEN: usize = 768;
-// 随机段原料池（须 ≥ 最长 rl 片段，见 make_mixed）。
+// Random-segment source pool (must be >= the longest rl segment; see make_mixed).
 const RAND_POOL: usize = 768;
 
 fn make_text() -> Vec<u8> {
@@ -100,8 +100,8 @@ fn make_mixed() -> Vec<u8> {
     d
 }
 
-/// 主 options：iterations 钉 2（时长预算内最小多轮 squeeze；默认 15 时
-/// MIRVM_JIT_THRESHOLD=1 超 8 分钟），其余默认（block splitting 开）。
+/// Main options: iterations pinned to 2 (the smallest multi-pass squeeze that fits the
+/// time budget; the default 15 exceeds 8 minutes at MIRVM_JIT_THRESHOLD=1), rest default.
 fn zopts() -> Options {
     Options {
         iteration_count: NonZeroU64::new(2).unwrap(),
@@ -109,7 +109,7 @@ fn zopts() -> Options {
     }
 }
 
-/// flate2 真容器解码（错误路径返回 Err 由调用方打印）。
+/// Decode with the flate2 real containers (the error path returns Err, which the caller prints).
 fn inflate(fmt: &Format, c: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut out = Vec::new();
     match fmt {
@@ -126,7 +126,7 @@ fn inflate(fmt: &Format, c: &[u8]) -> std::io::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// 顶层 compress() 一次压缩 + flate2 解码 roundtrip，打印锚定行。
+/// One top-level compress() plus a flate2 decode roundtrip; prints the anchor line.
 fn run_compress(tag: &str, opts: Options, fmt: &Format, data: &[u8]) -> Vec<u8> {
     let mut c = Vec::new();
     zopfli::compress(opts, *fmt, &data[..], &mut c).unwrap();
@@ -148,7 +148,7 @@ fn main() {
         println!("payload {name} len={} fnv={:016x}", p.len(), fnv1a(p));
     }
 
-    // ① 主矩阵：3 payload × Format::{Zlib,Gzip,Deflate}，iterations=5
+    // ① Main matrix: 3 payloads × Format::{Zlib,Gzip,Deflate}, iterations=2
     for (name, p) in [("text", &text), ("rand", &rand), ("mixed", &mixed)] {
         for fmt in [Format::Zlib, Format::Gzip, Format::Deflate] {
             let fname = match fmt {
@@ -160,8 +160,8 @@ fn main() {
         }
     }
 
-    // ② Options 字段变体（text/deflate）：iteration 8 更优但同口径确定；
-    //    maximum_block_splits=0 禁块切分；iterations_without_improvement=1 早停。
+    // ② Options field variants (text/deflate): iteration 8 is better but deterministic on the same terms;
+    //    maximum_block_splits=0 disables block splitting; iterations_without_improvement=1 stops early.
     let mut o8 = zopts();
     o8.iteration_count = NonZeroU64::new(8).unwrap();
     run_compress("opts iter=8", o8, &Format::Deflate, &text);
@@ -172,7 +172,7 @@ fn main() {
     oi1.iterations_without_improvement = NonZeroU64::new(1).unwrap();
     run_compress("opts no-imp=1", oi1, &Format::Deflate, &text);
 
-    // ③ BlockType 直驱 DeflateEncoder（绕开 zopfli squeeze 的两条非动态路径）
+    // ③ BlockType driving DeflateEncoder directly (the two non-dynamic paths that bypass zopfli squeeze)
     for (bt, btname) in [(BlockType::Fixed, "fixed"), (BlockType::Uncompressed, "uncompressed")] {
         let mut e = DeflateEncoder::new(zopts(), bt, Vec::new());
         e.write_all(&text).unwrap();
@@ -186,10 +186,10 @@ fn main() {
         );
     }
 
-    // ④ 流式小块写：非 buffered DeflateEncoder 按 7B 写——非 buffered 的 Write
-    //    语义是每 chunk 一次完整 compress_chunk（LZ77+squeeze 全路径），故只取
-    //    前 280B（40 次全路径调用），时长可控且压力形状独特。
-    //    buffered GzipEncoder 按 7B 写（走 BufWriter 聚合通路，同 compress 内部）。
+    // ④ Streaming small writes: the unbuffered DeflateEncoder writes 7B at a time -- its
+    //    Write semantics run a full compress_chunk per chunk (the whole LZ77+squeeze path),
+    //    so only the first 280B is used (40 full-path calls): bounded time, distinct shape.
+    //    The buffered GzipEncoder also writes 7B at a time (BufWriter aggregation, as compress).
     let stream_in = &text[..280];
     let mut e = DeflateEncoder::new(zopts(), BlockType::Dynamic, Vec::new());
     for chunk in stream_in.chunks(7) {
@@ -204,7 +204,7 @@ fn main() {
         fnv1a(&c),
         back == stream_in
     );
-    // buffered 通路：new_buffered 返回 BufWriter<GzipEncoder>，小块经聚合后喂入。
+    // Buffered path: new_buffered returns BufWriter<GzipEncoder>, so small chunks are aggregated before feeding.
     let mut bw = GzipEncoder::new_buffered(zopts(), BlockType::Dynamic, Vec::new()).unwrap();
     for chunk in text.chunks(7) {
         bw.write_all(chunk).unwrap();
@@ -221,7 +221,7 @@ fn main() {
         fnv1a(&gz),
         back == text
     );
-    // ZlibEncoder::new（非 buffered）单调用通路 + get_mut 探针。
+    // ZlibEncoder::new (unbuffered) single-call path + a get_mut probe.
     let kib = &text[..512];
     let mut ze = ZlibEncoder::new(zopts(), BlockType::Dynamic, Vec::new()).unwrap();
     ze.get_mut().reserve(64);
@@ -235,7 +235,7 @@ fn main() {
         back == kib
     );
 
-    // ⑤ 边界：empty × 3 格式 + 单字节 deflate
+    // ⑤ Boundaries: empty × 3 formats + single-byte deflate
     let empty: Vec<u8> = Vec::new();
     for fmt in [Format::Zlib, Format::Gzip, Format::Deflate] {
         let fname = match fmt {
@@ -248,7 +248,7 @@ fn main() {
     let one = b"x".to_vec();
     run_compress("one-byte deflate", zopts(), &Format::Deflate, &one);
 
-    // ⑥ 错误路径（flate2 解码端，文本为库内固定字符串）：截断 / 垃圾 / 格式交叉
+    // ⑥ Error paths (flate2 decode side; the text is a fixed library string): truncated / junk / format cross
     let full_gz = run_compress("errbase text/gzip", zopts(), &Format::Gzip, &text[..512]);
     let cut = &full_gz[..full_gz.len() / 2];
     let err = inflate(&Format::Gzip, cut).unwrap_err();

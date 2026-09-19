@@ -115,7 +115,7 @@ run_logged() { # <title> <command...>
     case "$code" in
         0)  ok "suite $title" ;;
         77) skip "suite $title (host capability insufficient)" ;;
-        *)  bad "suite $title（exit=$code）" ;;
+        *)  bad "suite $title (exit=$code)" ;;
     esac
     section_end
     return 0

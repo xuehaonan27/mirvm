@@ -3,38 +3,38 @@
 [dependencies]
 snow = "0.9"
 ---
-// snow 0.9（Noise 协议框架）差分：Noise_XX 双向认证握手（3 消息）+ Noise_NKpsk0
-// （psk 位置 0 + 预置对端静态公钥）。静态密钥固定字节；ephemeral 用
-// Builder::fixed_ephemeral_key_for_testing_only 锁定（设后握手状态机不再触碰
-// OsRng）→ 全部 handshake transcript 逐字节确定。
-// 覆盖：XX 三消息交换（payload 逐跳加密状态 was_write_payload_encrypted）、
-// handshake hash 双侧一致、远端静态公钥互见、into_transport_mode 双向加密消息
-// roundtrip、篡改密文/tag 错误路径、rekey 对（rekey_outgoing/incoming）、
-// NKpsk0 的 psk 正/误两例、乱序 write_message 与未完成握手转 transport 的
-// StateProblem 错误路径。
+// snow 0.9 (Noise protocol framework) differential: Noise_XX mutual-auth handshake (3
+// messages) + Noise_NKpsk0 (psk at index 0 + pre-shared peer static public key). Static keys
+// are fixed bytes; the ephemeral is pinned with Builder::fixed_ephemeral_key_for_testing_only,
+// after which the handshake state machine never touches OsRng -> every handshake transcript is
+// byte-exact. Covers: XX three-message exchange (per-hop payload encryption via
+// was_write_payload_encrypted), matching handshake hash on both sides, mutual remote static
+// public key, into_transport_mode round-trip of encrypted messages both ways, tampered
+// ciphertext/tag errors, the rekey pair (rekey_outgoing/incoming), NKpsk0 psk correct/wrong,
+// out-of-order write_message, and unfinished-handshake StateProblem error paths.
 //
-// 已知 FRONTIER 绕行记录（语义不变，换 cipher 特性）：
-// 原定套件 Noise_XX_25519_AESGCM_SHA256 在 mirvm 下于 XX 第二跳（响应方首次
-// AEAD 加密静态公钥）撞 aes 族运行期 cpuid 探测选中的 AES-NI 硬件路径，
-// 诊断原文（exit 70）：
-//   mirvm[m4-engine]: TRAP: foreign `llvm.x86.aesni.aeskeygenassist`（LLVM 内部
-//   符号，按需内建）（fn _RINvNtNtNtCs…_4core9core_arch3x863aes25__mm_aeskeygenassist_si128…）
-// 即 docs/corpus.md 欠账队列中的 `llvm.x86.aesni.*`（aes-gcm 无 force-soft 退路，
-// c_aes_gcm 同款 expected-red）。绕行 = 换 Noise 自带的 ChaChaPoly cipher
-// （chacha20poly1305 纯软件路径），协议状态机/DH/哈希覆盖面不变。
-// chacha20poly1305 0.10 传递依赖的 poly1305 0.8 其 avx2 backend 撞
-// `llvm.x86.avx2.permd`，诊断原文（exit 70）：
-//   mirvm[m4-engine]: TRAP: foreign `llvm.x86.avx2.permd`（LLVM 内部符号，按需
-//   内建）（fn _RNvNtNtNtCs…_4core9core_arch3x864avx227__mm256_permutevar8x32_epi32…）
-// 绕行 = poly1305 0.8 自带的 `--cfg poly1305_force_soft` 开关（只换后端实现，
-// Poly1305 为精确整数算术，输出逐比特相同）。故 mirvm 两维需带：
+// Known FRONTIER workaround (same semantics, different cipher feature):
+// The suite Noise_XX_25519_AESGCM_SHA256 hits the AES-NI hardware path selected by the aes
+// family's runtime cpuid probe on the second XX hop (the responder's first AEAD encryption of
+// a static public key); diagnostic text (exit 70):
+//   mirvm[m4-engine]: TRAP: foreign `llvm.x86.aesni.aeskeygenassist` (LLVM internal
+//   symbol, built on demand) (fn _RINvNtNtNtCs…_4core9core_arch3x863aes25__mm_aeskeygenassist_si128…)
+// The `llvm.x86.aesni.*` hazard: aes-gcm has no force-soft fallback; the workaround is Noise's
+// ChaChaPoly cipher (pure-software chacha20poly1305) -- protocol/DH/hash coverage unchanged.
+// chacha20poly1305 0.10's transitive poly1305 0.8 has an avx2 backend that hits
+// `llvm.x86.avx2.permd`; diagnostic text (exit 70):
+//   mirvm[m4-engine]: TRAP: foreign `llvm.x86.avx2.permd` (LLVM internal symbol, built
+//   on demand) (fn _RNvNtNtNtCs…_4core9core_arch3x864avx227__mm256_permutevar8x32_epi32…)
+// Workaround: the `--cfg poly1305_force_soft` switch built into poly1305 0.8 swaps only the
+// backend implementation; Poly1305 is exact integer arithmetic, so the output is
+// bit-identical. Both mirvm dimensions therefore need:
 //   RUSTFLAGS='--cfg poly1305_force_soft'
-// （cargo 指纹跟踪 RUSTFLAGS，加/去 flag 自动重编；native 维可裸跑——宿主
-// 真 CPU 吃得下 avx2，两 backend 输出逐字节一致。）
-// 附记：curve25519-dalek 4.1 默认 simd backend 本例全程（XX/NK 共 8 次 X25519）
-// 在 mirvm 下安然通过——其 avx2 向量域算术全走普通 IR 内建（_mm256_mul_epu32
-// 等），未撞 c_ed25519 的 vpmadd52 FRONTIER（ifma 需编译期 target_feature，
-// 本工具链未开）——故本 driver 无需 ed25519 的 serial-backend env。
+// (cargo fingerprints RUSTFLAGS, so toggling the flag rebuilds automatically; the native
+// dimension runs bare -- the host CPU handles avx2 and both backends agree byte-for-byte.)
+// Note: curve25519-dalek 4.1's default simd backend passes the whole run (8 X25519 ops across
+// XX/NK) under mirvm: its avx2 vector field arithmetic uses plain IR intrinsics
+// (_mm256_mul_epu32 etc.), never the vpmadd52 FRONTIER (ifma needs a compile-time
+// target_feature the toolchain lacks), so no ed25519 serial-backend env is needed.
 use snow::params::NoiseParams;
 use snow::{Builder, HandshakeState, TransportState};
 
@@ -58,7 +58,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 固定字节派生 32B 密钥材料（x25519 内部 clamp，任意 32B 均合法）。
+/// Derive 32B key material from fixed bytes (x25519 clamps internally; any 32B is valid).
 fn key(seed: u8) -> [u8; 32] {
     let mut k = [0u8; 32];
     for (i, b) in k.iter_mut().enumerate() {
@@ -67,8 +67,8 @@ fn key(seed: u8) -> [u8; 32] {
     k
 }
 
-/// 一跳握手消息：写方 write_message → 读方 read_message，打印 transcript
-/// hex / 写方 payload 是否加密 / payload 内容，累计进 fnv sink。
+/// One handshake hop: writer's write_message -> reader's read_message, printing the transcript
+/// hex / writer payload-encrypted flag / payload, accumulated into an fnv sink.
 fn hop(
     label: &str,
     w: &mut HandshakeState,
@@ -93,7 +93,7 @@ fn hop(
     );
 }
 
-/// transport 一跳：加密 → 对端解密 roundtrip，打印密文 hex。
+/// One transport hop: encrypt -> peer decrypt round-trip, printing the ciphertext hex.
 fn thop(label: &str, w: &mut TransportState, r: &mut TransportState, payload: &[u8]) {
     let mut tx = [0u8; 512];
     let mut rx = [0u8; 512];
@@ -110,7 +110,7 @@ fn main() {
     let re = key(0x44); // responder ephemeral
     let prologue = b"mirvm-snow-prologue-v1";
 
-    // ---- ① Noise_XX 双向认证握手（双方互不知道对方静态公钥）----
+    // ---- (1) Noise_XX mutual-auth handshake (neither side knows the other's static public key) ----
     let params: NoiseParams = SUITE.parse().unwrap();
     let mut init = Builder::new(params.clone())
         .local_private_key(&is)
@@ -140,7 +140,7 @@ fn main() {
     println!("xx hh i = {}", hex(&hh_i));
     println!("xx hh r = {}", hex(&hh_r));
     println!("xx hh eq = {}", hh_i == hh_r);
-    // XX 之后双方互见对方静态公钥；存下供 NKpsk0 当 remote_public_key 用
+    // After XX both sides see the other's static public key; keep them as NKpsk0's remote_public_key
     let mut is_pub = [0u8; 32];
     let mut rs_pub = [0u8; 32];
     is_pub.copy_from_slice(resp.get_remote_static().unwrap());
@@ -148,7 +148,7 @@ fn main() {
     println!("xx r sees is_pub = {}", hex(&is_pub));
     println!("xx i sees rs_pub = {}", hex(&rs_pub));
 
-    // ---- ② transport：双向加密消息 + 篡改 + rekey ----
+    // ---- (2) transport: encrypted messages both ways + tampering + rekey ----
     let mut it = init.into_transport_mode().unwrap();
     let mut rt = resp.into_transport_mode().unwrap();
     thop("tx i->r #0", &mut it, &mut rt, b"transport msg zero");
@@ -156,9 +156,9 @@ fn main() {
     thop("tx r->i #0", &mut rt, &mut it, "reply with unicode 汉字 🎉".as_bytes());
     thop("tx r->i #1", &mut rt, &mut it, &[0xde, 0xad, 0xbe, 0xef]);
 
-    // 篡改密文一字节 → AEAD 必须失败。snow 语义：失败的解密不自增接收方
-    // nonce（cipherstate.rs 的 `decrypt(...)?` 提前返回），但发送方 nonce 已 +1
-    // → 应用层必须用 receiving_nonce/set_receiving_nonce 显式对齐才能继续会话。
+    // Tampering one ciphertext byte -> AEAD must fail. snow semantics: a failed decrypt does not
+    // advance the receiver nonce (`decrypt(...)?` in cipherstate.rs returns early), but the sender
+    // nonce already advanced -> realign with receiving_nonce/set_receiving_nonce to continue the session.
     let mut tx = [0u8; 512];
     let mut rx = [0u8; 512];
     let n = it.write_message(b"will be tampered", &mut tx).unwrap();
@@ -172,7 +172,7 @@ fn main() {
     rt.set_receiving_nonce(desync + 1);
     println!("tx recv nonce resynced = {}", rt.receiving_nonce());
 
-    // rekey 对：一端 rekey_outgoing ↔ 对端 rekey_incoming，之后继续 roundtrip
+    // rekey pair: one side's rekey_outgoing <-> the peer's rekey_incoming, then keep round-tripping
     it.rekey_outgoing();
     rt.rekey_incoming();
     thop("tx post-rekey i->r", &mut it, &mut rt, b"after rekey one");
@@ -180,7 +180,7 @@ fn main() {
     it.rekey_incoming();
     thop("tx post-rekey r->i", &mut rt, &mut it, b"after rekey two");
 
-    // ---- ③ 错误路径：乱序写 / 未完成握手转 transport / 篡改握手消息 ----
+    // ---- (3) error paths: out-of-order write, unfinished handshake, tampered handshake msg ----
     let params: NoiseParams = SUITE.parse().unwrap();
     let mut early_i = Builder::new(params.clone())
         .local_private_key(&is)
@@ -192,13 +192,13 @@ fn main() {
         .fixed_ephemeral_key_for_testing_only(&re)
         .build_responder()
         .unwrap();
-    // 响应方第一跳只能读：乱序 write 必须 err
+    // The responder's first hop can only read: an out-of-order write must err
     let mut tmp = [0u8; 512];
     match early_r.write_message(b"out of turn", &mut tmp) {
         Ok(_) => println!("xx out-of-turn write unexpectedly ok"),
         Err(e) => println!("xx out-of-turn write err = {e}"),
     }
-    // 未完成握手 into_transport_mode 必须 err
+    // into_transport_mode on an unfinished handshake must err
     let early_i2 = Builder::new(SUITE.parse().unwrap())
         .local_private_key(&is)
         .fixed_ephemeral_key_for_testing_only(&ie)
@@ -208,7 +208,7 @@ fn main() {
         Ok(_) => println!("xx early transport unexpectedly ok"),
         Err(e) => println!("xx early transport err = {e}"),
     }
-    // 篡改握手第二跳（含加密静态公钥）→ 读方 AEAD err
+    // Tamper the second handshake hop (it carries the encrypted static public key) -> reader AEAD err
     let n = early_i.write_message(b"m1", &mut tmp).unwrap();
     let mut rbuf = [0u8; 512];
     let _ = early_r.read_message(&tmp[..n], &mut rbuf).unwrap();
@@ -219,7 +219,7 @@ fn main() {
         Err(e) => println!("xx tamper hs-m2 err = {e}"),
     }
 
-    // ---- ④ Noise_NKpsk0：预置对端静态公钥 + psk(0) ----
+    // ---- (4) Noise_NKpsk0: pre-shared peer static public key + psk(0) ----
     let psk = key(0x5a);
     let params_nk: NoiseParams = SUITE_NK.parse().unwrap();
     let mut nk_i = Builder::new(params_nk.clone())
@@ -244,7 +244,7 @@ fn main() {
     let mut nrt = nk_r.into_transport_mode().unwrap();
     thop("nk tx i->r", &mut nit, &mut nrt, b"nk transport");
 
-    // psk 错误 → 第一跳解密即失败
+    // Wrong psk -> the first hop already fails to decrypt
     let bad_psk = key(0xa5);
     let mut bi = Builder::new(params_nk.clone())
         .remote_public_key(&rs_pub)

@@ -78,9 +78,9 @@ const CONTRACT_LOGS: Address = address!("200000000000000000000000000000000000000
 const CONTRACT_BADJUMP: Address = address!("2000000000000000000000000000000000000005");
 const TRANSFER_TO: Address = address!("3000000000000000000000000000000000000001");
 
-/// 10^18 wei。
+/// 10^18 wei.
 const CALLER_BALANCE: u64 = 1_000_000_000_000_000_000;
-/// 10 wei/gas。
+/// 10 wei/gas.
 const GAS_PRICE: u64 = 10;
 
 fn seed_caller(db: &mut InMemoryDB) {
@@ -267,7 +267,7 @@ fn main() {
         1_000_000,
     );
 
-    // ② SSTORE 42@5; SSTORE 7@6; SSTORE 0@6（refund）; SLOAD 5; MSTORE; RETURN → 42
+    // ② SSTORE 42@5; SSTORE 7@6; SSTORE 0@6 (refund); SLOAD 5; MSTORE; RETURN → 42
     run_call(
         "storage",
         CONTRACT_STORAGE,

@@ -1,15 +1,15 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# plotters 0.3.7 精简 feature 集（浮点重图表渲染差分）。裁剪理由：
-# 1) 默认 ttf = font-kit + ttf-parser + lazy_static + pathfinder_geometry；
-#    font-kit 在 Linux 走系统 fontconfig/字体扫描（环境重依赖，违单文件纪律）。
-#    关 ttf 后 plotters 用内置 naive 等宽字量度（src/style/font/naive.rs：
-#    estimate_layout 为 size/1.24/1.24 等纯 f64 算术），SVG 侧 <text> 坐标
-#    两侧同码、位型确定，可差分。
-# 2) 默认 bitmap_encoder/bitmap_gif 拖 image/gif/jpeg 大依赖树；纯内存 RGB
-#    buffer 差分只需 bitmap_backend（零额外依赖）。
-# 最终 dep tree 仅 5 件：plotters + plotters-{backend,svg,bitmap} + num-traits。
+# plotters 0.3.7 trimmed feature set (heavy-float chart rendering differential). Why:
+# 1) the default ttf = font-kit + ttf-parser + lazy_static + pathfinder_geometry;
+#    font-kit uses the system fontconfig/font scan on Linux (heavy env dependency,
+#    violating single-file discipline). With ttf off plotters uses its built-in naive
+#    monospace metric (src/style/font/naive.rs: estimate_layout is pure f64 like
+#    size/1.24/1.24), so SVG <text> coords match and bit patterns are deterministic.
+# 2) the default bitmap_encoder/bitmap_gif drag in a large image/gif/jpeg tree; an
+#    in-memory RGB buffer differential needs only bitmap_backend (zero extra deps).
+# Final dep tree is just 5 crates: plotters + plotters-{backend,svg,bitmap} + num-traits.
 plotters = { version = "=0.3.7", default-features = false, features = [
     "svg_backend",
     "bitmap_backend",
@@ -19,40 +19,40 @@ plotters = { version = "=0.3.7", default-features = false, features = [
     "histogram",
 ] }
 ---
-// plotters 0.3.7 图表渲染差分：SVG backend（文本即输出，自打印便对拍）+
-// BitMap backend（320x240 RGB 内存帧缓冲，像素 FNV）。固定数据序列，全程
-// 重浮点：坐标映射 f64→i32、key_points 的 powf/log10/floor 循环、log_scale
-// 轴的 ln/exp、area/histogram 几何。
+// plotters 0.3.7 chart rendering differential: SVG backend (text is the output, so
+// it prints itself for comparison) + BitMap backend (320x240 RGB in-memory frame
+// buffer, pixel FNV). Fixed data series, heavy float throughout: coordinate mapping
+// f64->i32, key_points powf/log10/floor loop, log_scale axis ln/exp, area/histogram.
 //
-// 覆盖：
-// ① SVG 折线×2 + 散点（Circle filled / Cross）+ 网格 + caption + legend +
-//    轴 desc/labels（naive 字量度路径）+ backend_coord 锚点；
-// ② SVG 柱状：分段整数轴 (into_segmented) × 三样式 fill + style_func（按
-//    SegmentValue::Exact/CenterOf 分色描边）+ baseline + margin 双档；
-// ③ SVG 双区 split：左 log_scale y 轴折线+TriangleMarker（ln/exp 路径），
-//    右 AreaSeries mix(0.35) 半透明填充 + border_style；
-// ④ 边界：空 LineSeries/PointSeries（f64 轴）、空 Histogram（i32 离散轴；
-//    float range 无 DiscreteRanged 实现）、零宽 range（1.0..1.0，map 走
-//    corner-case 早退）、反转 range（4..0）；
-// ⑤ BitMap 320x240：网格线 + 逐柱 Histogram + AreaSeries + LineSeries +
-//    Circle 点的复合场景，像素 FNV/非白像素数/抽样像素 hex；
-// ⑥ 错误路径：with_buffer_and_format 小缓冲 Err；bitmap 后端画文字。
+// Coverage:
+// ① SVG polyline x2 + scatter (Circle filled / Cross) + mesh + caption + legend +
+//    axis desc/labels (naive font metric path) + backend_coord anchors;
+// ② SVG bars: segmented integer axis (into_segmented) x three fill styles + style_func
+//    (per SegmentValue::Exact/CenterOf colored stroke) + baseline + two margin tiers;
+// ③ SVG two-area split: left log_scale y-axis polyline + TriangleMarker (ln/exp path),
+//    right AreaSeries mix(0.35) translucent fill + border_style;
+// ④ boundaries: empty LineSeries/PointSeries (f64 axis), empty Histogram (i32 discrete
+//    axis; float range has no DiscreteRanged impl), zero-width range (1.0..1.0, map
+//    takes the corner-case early return), reversed range (4..0);
+// ⑤ BitMap 320x240: mesh lines + per-bar Histogram + AreaSeries + LineSeries +
+//    Circle points composite scene, pixel FNV/non-white pixel count/sampled pixel hex;
+// ⑥ error paths: with_buffer_and_format small buffer Err; bitmap backend draws text.
 //
-// 已知绕行记录（语义覆盖不变，绕的是 plotters 自身的非确定源）：
-// A) Histogram::data 内部以 std HashMap<usize, A> 聚合、into_iter() 桶序出
-//    结果——多桶时绘制顺序依赖 RandomState（进程间随机；12 键小例实测三次
-//    三序）。绕行 = 多柱图按柱逐次 draw_series（每个 Histogram 数据塌缩为单
-//    子键，迭代序平凡确定），聚合语义由同一子键喂多项 [(x,0),(x,v),(x,1)]
-//    覆盖；SVG/像素输出两侧逐字节一致。
-// B) 无 ttf 时 BitMap 后端的 draw_text 落 FontData::draw 默认实现——无条件
-//    panic("The font implementation is unable to draw text")。故 bitmap 图
-//    不设 label area（label area 为 None 时 draw_axis_and_labels 直接早退，
-//    零 draw_text）、不画 caption/legend/desc；末尾以静默 hook + catch_unwind
-//    显式断言该 panic 两侧一致发生（成功路径 stderr 仍为空）。
+// Known workarounds (coverage unchanged; each avoids a plotters-internal nondeterminism source):
+// A) Histogram::data aggregates in a std HashMap<usize, A>, so into_iter() bucket
+//    order (hence multi-bucket draw order) depends on RandomState; workaround = draw
+//    multi-bar charts bar by bar via draw_series (one subkey per Histogram,
+//    trivially deterministic iteration order), feeding one subkey several items to
+//    cover aggregation. SVG/pixel output is byte-identical on both sides.
+// B) Without ttf, BitMap draw_text falls back to FontData::draw's default impl,
+//    which panics unconditionally ("The font implementation is unable to draw
+//    text"). So bitmap charts set no label area (None -> draw_axis_and_labels
+//    early-returns, zero draw_text) and draw no caption/legend/desc; a silent hook +
+//    catch_unwind at the end asserts that panic on both sides (stderr empty on success).
 //
-// 确定性：数据为整数×2^-k（二进制精确，任何正确 FP 实现两侧位型一致）/
-// 定种 xorshift64*；无时间/地址/HashMap 序；二进制输出打印 长度+FNV-1a；
-// 浮点一律 to_bits() 锁位。
+// Determinism: data is integer x 2^-k (exact in binary, so any correct FP
+// implementation gives identical bit patterns on both sides) / seeded xorshift64*;
+// no time/address/HashMap order; binary output is length + FNV-1a; floats always to_bits().
 use plotters::backend::RGBPixel;
 use plotters::prelude::*;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -66,7 +66,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 定种 xorshift64*（native/mirvm 同序列）。
+/// Seeded xorshift64* (same sequence on native/mirvm).
 struct Rng(u64);
 
 impl Rng {
@@ -80,7 +80,7 @@ impl Rng {
     }
 }
 
-/// 折线数据：n 点，x = i/4（2^-2 精确），y = 整数×2^-3。
+/// Polyline data: n points, x = i/4 (exact, 2^-2), y = integer x 2^-3.
 fn line_data(seed: u64, n: u64, center: i64) -> Vec<(f64, f64)> {
     let mut r = Rng(seed);
     (0..n)
@@ -92,7 +92,7 @@ fn line_data(seed: u64, n: u64, center: i64) -> Vec<(f64, f64)> {
         .collect()
 }
 
-/// 散点数据：x ∈ [0,6] 步进 1/4，y ∈ [-2.5, 3.5] 步进 1/8。
+/// Scatter data: x in [0,6] step 1/4, y in [-2.5, 3.5] step 1/8.
 fn scatter_data(seed: u64, n: u64) -> Vec<(f64, f64)> {
     let mut r = Rng(seed);
     (0..n)
@@ -104,7 +104,7 @@ fn scatter_data(seed: u64, n: u64) -> Vec<(f64, f64)> {
         .collect()
 }
 
-/// 柱数据：i ∈ [0,n)，x = 2i，value ∈ [2,36)（i32 离散轴用）。
+/// Bar data: i in [0,n), x = 2i, value in [2,36) (for the i32 discrete axis).
 fn bars_data(seed: u64, n: i32) -> Vec<(i32, i32)> {
     let mut r = Rng(seed);
     (0..n).map(|i| (i * 2, 2 + (r.next() % 34) as i32)).collect()
@@ -119,7 +119,7 @@ fn print_svg(tag: &str, svg: &str) {
     println!("--/{tag}--");
 }
 
-/// 描边样式速构（ShapeStyle 非 Color，不能走 Into<ShapeStyle> 引用路径）。
+/// Quick stroke-style constructor (ShapeStyle is not Color, so the Into<ShapeStyle> path is unavailable).
 fn sw(color: RGBAColor, width: u32) -> ShapeStyle {
     ShapeStyle {
         color,
@@ -146,7 +146,7 @@ fn main() {
         bars.iter().map(|b| b.1).sum::<i32>()
     );
 
-    // ① SVG 折线+散点+网格+caption+legend（全要素）
+    // ① SVG polyline+scatter+mesh+caption+legend (all elements)
     let mut svg1 = String::new();
     {
         let root = SVGBackend::with_string(&mut svg1, (480, 300)).into_drawing_area();
@@ -213,7 +213,7 @@ fn main() {
     }
     print_svg("svg1", &svg1);
 
-    // ② SVG 柱状（分段整数 x 轴，三档样式 + style_func/baseline/margin）
+    // ② SVG bars (segmented integer x axis, three styles + style_func/baseline/margin)
     let mut svg2 = String::new();
     {
         let root = SVGBackend::with_string(&mut svg2, (420, 260)).into_drawing_area();
@@ -232,7 +232,7 @@ fn main() {
             .y_desc("cnt")
             .draw()
             .unwrap();
-        // 逐柱 draw_series：单 Histogram 塌缩单子键（HashMap 序绕行，见头注 A）
+        // Per-bar draw_series: one Histogram collapses to a single subkey (HashMap-order workaround, note A)
         for (i, &(x, v)) in bars.iter().enumerate() {
             let st = match i % 3 {
                 0 => ShapeStyle {
@@ -279,13 +279,13 @@ fn main() {
     }
     print_svg("svg2", &svg2);
 
-    // ③ SVG 双区：log_scale y 轴折线 + AreaSeries 半透明
+    // ③ SVG two areas: log_scale y-axis polyline + translucent AreaSeries
     let mut svg3 = String::new();
     {
         let root = SVGBackend::with_string(&mut svg3, (520, 220)).into_drawing_area();
         root.fill(&WHITE).unwrap();
         let subs = root.split_evenly((1, 2));
-        // y = 1.25^i + frac（ln/exp 与浮点累加压力；值 > log 轴 zero_point 0.8）
+        // y = 1.25^i + frac (ln/exp and float-accumulation pressure; values > log axis zero_point 0.8)
         let log_pts: Vec<(f32, f64)> = {
             let mut r = Rng(0x0123_4567_89AB_CDEF);
             (0..9)
@@ -354,11 +354,11 @@ fn main() {
     }
     print_svg("svg3", &svg3);
 
-    // ④ 边界：空 series / 零宽 range / 反转 range
+    // ④ boundaries: empty series / zero-width range / reversed range
     let mut svge = String::new();
     {
-        // 每张子图独立成段：ChartContext/DrawingArea 均持 &mut svge 且实现 Drop，
-        // 需显式 drop 释放借用再开下一张。
+        // Each subplot is its own block: ChartContext/DrawingArea both hold &mut svge and
+        // implement Drop, so the borrow must be released with an explicit drop before the next.
         let root = SVGBackend::with_string(&mut svge, (300, 200)).into_drawing_area();
         root.fill(&WHITE).unwrap();
         let mut chart = ChartBuilder::on(&root)
@@ -387,7 +387,7 @@ fn main() {
         drop(chart);
         drop(root);
 
-        // 空 Histogram 需离散 x 轴（float range 无 DiscreteRanged 实现）
+        // Empty Histogram needs a discrete x axis (float range has no DiscreteRanged impl)
         let root_h = SVGBackend::with_string(&mut svge, (200, 160)).into_drawing_area();
         root_h.fill(&WHITE).unwrap();
         let mut ch = ChartBuilder::on(&root_h)
@@ -408,7 +408,7 @@ fn main() {
         drop(ch);
         drop(root_h);
 
-        // 零宽 range：Ranged::map 走 `self.1 == self.0` corner-case 早退（中点）
+        // Zero-width range: Ranged::map takes the `self.1 == self.0` corner-case early return (midpoint)
         let root2 = SVGBackend::with_string(&mut svge, (200, 160)).into_drawing_area();
         root2.fill(&WHITE).unwrap();
         let mut cz = ChartBuilder::on(&root2)
@@ -431,7 +431,7 @@ fn main() {
         drop(cz);
         drop(root2);
 
-        // 反转 range：双轴均递减（map 走 actual_length < 0 的 ceil 分支）
+        // Reversed range: both axes decrease (map takes the actual_length < 0 ceil branch)
         let root3 = SVGBackend::with_string(&mut svge, (200, 160)).into_drawing_area();
         root3.fill(&WHITE).unwrap();
         let mut cr = ChartBuilder::on(&root3)
@@ -454,7 +454,7 @@ fn main() {
     }
     print_svg("svge", &svge);
 
-    // ⑤ BitMap 320x240 RGB 帧缓冲（全程零文字：label area 未设 → None → 早退）
+    // ⑤ BitMap 320x240 RGB frame buffer (zero text throughout: label area unset -> None -> early return)
     {
         let (w, h) = (320u32, 240u32);
         let mut buf = vec![0u8; (w * h * 3) as usize];
@@ -533,7 +533,7 @@ fn main() {
         }
     }
 
-    // ⑥ 错误路径：小缓冲 Err（InvalidBuffer）；bitmap 画文字必 panic（见头注 B）
+    // ⑥ error paths: small buffer Err (InvalidBuffer); bitmap draw_text must panic (see header note B)
     let mut small = vec![0u8; 64];
     match BitMapBackend::<RGBPixel>::with_buffer_and_format(&mut small, (320, 240)) {
         Ok(_) => println!("small-buf unexpected ok"),

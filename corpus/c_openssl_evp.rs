@@ -2,76 +2,76 @@
 ---
 [dependencies]
 openssl = "0.10"
-# 仅用于 FRONTIER 绕行里的显式 dlopen 预载（见下方 ★ 记录）；不碰其它 API。
+# Used only for the explicit dlopen preload in the workaround documented below; no other API is touched.
 libc = "0.2"
 ---
-// openssl 0.10（FFI 大物：系统 libssl/libcrypto；pkg-config --modversion openssl =
-// 3.0.2 实证存在，头文件 /usr/include/openssl 齐）。openssl-sys 为动态链接
-// （-l ssl -l crypto），全程无 guest 回调传入 libcrypto（不触 thunk 盲区）。
-// Rng::bytes 非确定，不用（任务指定）。
+// openssl 0.10 differential (heavy FFI over the system libssl/libcrypto; pkg-config
+// --modversion openssl reports 3.0.2 and /usr/include/openssl is complete). openssl-sys
+// links dynamically (-l ssl -l crypto), and no guest callback ever enters libcrypto (so the
+// thunk blind spot is never touched). Rng::bytes is non-deterministic and unused.
 //
-// ★ FRONTIER 记录（2026-07-16，同根两撞，新类别：rlib 元数据 `-l` 传播缺口）：
-//   ① 裸跑撞（exit 70，首次 foreign 调用即失败）——可绕：
-//     mirvm[m4-engine]: foreign `OpenSSL_version` 符号不存在（归档兜底表 /
-//     dlsym 全域均未命中；fn _RNvNtCslFQvgr53rew_7openssl7version7version）
-//   根因（已实证定位）：cargo（nightly-2026-07-02）对 build-script 的
-//   `cargo:rustc-link-lib=ssl/crypto` 只把 `-l` 传给 openssl-sys 自己的 rlib
-//   编译（落 rlib 元数据 native_libraries），**最终 bin 的 rustc 命令行不带
-//   `-l`/`-L native`**（native 构建无碍：rustc 链接期自行从 rlib 元数据补
-//   flag——已用 `cargo build -vv` 对照实证）。而 mirvm 的 dylib dlopen 候选
-//   只收集 `sess.opts.libs`（src/lower/mod.rs 的 `-l` 循环）→
-//   module.native_libs 为空 → libssl/libcrypto 从未进全局命名空间 → 全域
-//   dlsym 未命中。Static 归档路径（native_archive.rs）走的是 tcx.native_
-//   libraries 不受影响。
-//   绕行 = guest 侧 main 开头显式 `libc::dlopen(libcrypto.so.3 / libssl.so.3,
-//   RTLD_NOW|RTLD_GLOBAL)` 预载——与 native 链接器 DT_NEEDED 加载的是
-//   同一宿主同一版本系统库，native 下为幂等 no-op，语义/输出逐字节不变；
-//   纯 driver 源码层、无 env、无 harness 状态篡改（同 c_zip_arch 分块绕行类）。
-//   ② 绕行后推进到第二撞（exit 70）——**driver 层无可绕**：
-//     mirvm[m4-engine]: TRAP: extern fn `EVP_EncryptInit_ex` 被当作值取址，
-//     但符号未命中（归档兜底表 / dlsym 全域均无）
-//   openssl 0.10.81 src/cipher_ctx.rs:133 把 `ffi::EVP_EncryptInit_ex`/
-//   `EVP_DecryptInit_ex` 当**值**传给通用 cipher_init（f: unsafe extern "C"
-//   fn 形参）→ extern fn fn-ptr 取址的解析发生在 **lower 期**（src/lower/
-//   mod.rs 的 foreign_fn_entry，经 dlsym(RTLD_DEFAULT) 烘焙真址），彼时
-//   libcrypto 未进 mirvm 进程（guest 预载是运行期代码，够不着）→ 烘焙
-//   TRAP 于执行到首个 cipher_init 时终止。所有 EVP cipher 路径（Crypter/
-//   encrypt/decrypt）必经 cipher_init，此段在 mirvm 下必红。
-//   mirvm 侧修法（产品票据，留给主线）：lower 把 used_crates 的
-//   tcx.native_libraries 里 Dylib/RawDylib 项（连带 `-L native`/`sess.opts.
-//   libs`）收成候选，并在排干 worklist **前** RTLD_GLOBAL 预载（与
-//   required_native_libs 同点）——①②同源同修。修复后摘 dlopen 预载绕行，
-//   本 driver 应三维全绿（解锁探针）。
+// Known limitation: two failures with one root cause -- rlib metadata does not propagate -l to the final binary.
+//   ① A bare run traps on the first foreign call (exit 70): mirvm[m4-engine]: foreign
+//     `OpenSSL_version` symbol not found (neither the archive fallback table nor a full-domain dlsym matched; fn <caller>).
+//   Root cause: cargo (nightly-2026-07-02) passes the build script's
+//   `cargo:rustc-link-lib=ssl/crypto` only to the compilation of openssl-sys' own rlib
+//   (recorded in the rlib metadata's native_libraries); the final bin's rustc command line
+//   carries no `-l`/`-L native` (a native build does not care, because rustc adds the flags
+//   from the rlib metadata at link time -- verified against `cargo build -vv`). mirvm's
+//   dylib dlopen candidates, however, are collected only from `sess.opts.libs` (the `-l`
+//   loop in src/lower/mod.rs), so module.native_libs stays empty, libssl/libcrypto never
+//   enter the global namespace and a global dlsym misses. The static-archive path
+//   (native_archive.rs) reads tcx.native_libraries and is unaffected.
+//   Workaround: the guest main explicitly preloads `libc::dlopen(libcrypto.so.3 /
+//   libssl.so.3, RTLD_NOW|RTLD_GLOBAL)`. That loads the same host and system library
+//   version the native linker's DT_NEEDED would, so under native it is an idempotent no-op
+//   and the semantics and output stay byte-identical.
+//   ② With the preload in place the next call traps (exit 70) and there is no driver-level
+//   workaround: mirvm[m4-engine]: TRAP: extern fn `EVP_EncryptInit_ex` taken as value address,
+//   but symbol not found (neither archive fallback table nor global dlsym).
+//   openssl 0.10.81 src/cipher_ctx.rs:133 passes `ffi::EVP_EncryptInit_ex` /
+//   `EVP_DecryptInit_ex` as *values* to a generic cipher_init (whose parameter is an
+//   `unsafe extern "C" fn`), so resolving a value-taken extern-fn pointer happens at
+//   lowering time (foreign_fn_entry in src/lower/mod.rs, baked through dlsym(RTLD_DEFAULT))
+//   -- when libcrypto is not yet in the mirvm process, because the guest preload is runtime
+//   code. The baked TRAP aborts at the first cipher_init, and every EVP cipher path
+//   (Crypter/encrypt/decrypt) goes through it, so this section is always red under mirvm.
+//   The fix belongs on the mirvm side: lowering should collect the Dylib/RawDylib entries of
+//   used_crates' tcx.native_libraries (plus `-L native` and `sess.opts.libs`) and preload
+//   them with RTLD_GLOBAL before draining the worklist, exactly as required_native_libs does.
 //
-// 覆盖（①②③ 段 mirvm 下已执行差分；④ cipher 段 native 全绿、mirvm 于
-// 段内首个 cipher_init 响亮终止——谱系见上 ★②）：
-// ① EVP digest 六定向量对拍内嵌已知答案（sha256×3 / sha512 / sha1 / md5，已用
-//    宿主 openssl CLI 交叉核验——md5("abc") 末段是 e17f72 不是 e17e72）+
-//    openssl::sha one-shot 三型 + Hasher 分片流式（含空 update）+ from_name
-//    命中/拒绝 + size()；
-// ② RSA-2048 从**固定 DER** 导入（不自生成）：private_key_from_der（PKCS#1）/
-//    public_key_from_der_pkcs1（PKCS#1）/ Rsa::public_key_from_der（SPKI）/
-//    PKey::public_key_from_der（SPKI）/ from_public_components(BigNum) 五条
-//    路径（0.10.81 命名陷阱实证：public_key_from_der 吃 SPKI，_pkcs1 后缀
-//    才吃 RSAPublicKey——喂错即 asn1 wrong tag）→ Signer/Verifier
-//    PKCS1v15+SHA-256（确定性填充）签名与已知答案逐字节对拍；正例四公钥面 +
-//    私钥验签面；反例：改消息 / 改签名末字节 / 他消息签名；
-//    Rsa Padding::NONE 原始私加密/公解密
-//    roundtrip（256B 块，msb=0 保证 < n）+ 短输入错误；check_key；DER 垃圾
-//    两条错误路径；
-// ③ pbkdf2-hmac-sha256 定向量（4096 iter，python3 hashlib 交叉核验）、
-//    base64 encode/decode roundtrip、memcmp::eq 正反例、库版本面；
-// ④ EVP aes-128-cbc/ecb NIST SP800-38A F.2/F.1 定向量（Crypter pad(false)
-//    整块 vs 13B 分片流式；CLI openssl enc -nopad 核验）+ pkcs7 默认 padding
-//    roundtrip + key 长度错误（过短 IV 是 crate 级 assert 而非 Err，不作
-//    用例）+ 篡改密文 padding 错误 + from_nid 命中/
-//    raw(-1) 拒绝（cipher 的名称查找走 Nid，from_name 只存在于 MessageDigest）。
+// Coverage (① ② ③ already run their differential under mirvm; ④ is green on native and
+// aborts loudly under mirvm at its first cipher_init -- see limitation ② above):
+// ① Six fixed EVP digest vectors against embedded known answers (sha256 x3 / sha512 / sha1
+//    / md5, cross-checked with the host openssl CLI -- md5("abc") ends in e17f72, not
+//    e17e72), plus the three openssl::sha one-shots, Hasher streaming with a split (and an
+//    empty update), from_name hit/reject and size();
+// ② RSA-2048 imported from fixed DER (never self-generated): private_key_from_der
+//    (PKCS#1) / public_key_from_der_pkcs1 (PKCS#1) / Rsa::public_key_from_der (SPKI) /
+//    PKey::public_key_from_der (SPKI) / from_public_components(BigNum) -- five paths (the
+//    0.10.81 naming trap: public_key_from_der takes SPKI and only the _pkcs1 suffix takes
+//    RSAPublicKey; feeding the wrong one is an asn1 wrong-tag error) -> Signer/Verifier
+//    PKCS1v15+SHA-256 (deterministic padding) compared byte for byte against the known
+//    answer; four public-key verify surfaces plus verification through the private key;
+//    negative cases (changed message / changed last signature byte / another message's
+//    signature); an Rsa Padding::NONE raw private-encrypt/public-decrypt roundtrip (256 B
+//    block, msb=0 so the value is below n) with a short-input error; check_key; two DER
+//    junk error paths;
+// ③ pbkdf2-hmac-sha256 against a fixed vector (4096 iterations, cross-checked with python3
+//    hashlib), base64 encode/decode roundtrip, memcmp::eq positive and negative, and the
+//    library version surface;
+// ④ EVP AES-128-CBC/ECB NIST SP800-38A F.2/F.1 vectors (Crypter pad(false) whole-block vs
+//    13-byte split streaming, verified with openssl enc -nopad) plus the default pkcs7
+//    padding roundtrip, a wrong key length, tampered ciphertext (padding error), and
+//    from_nid hit / raw(-1) reject (cipher name lookup goes through Nid; from_name exists
+//    only for MessageDigest).
 //
-// 确定性：全部密钥/向量/签名 hex 常量内嵌（签名为 PKCS1v15，逐字节确定）；
-// 无 HashMap 序/时间/地址/线程/RNG；临时文件零（全内存）；错误路径打印
-// ErrorStack Display（错误码 + library/function/reason + file:line + data），
-// 全部为 libcrypto 构建内固定字符串——native/mirvm 同宿主同库，三维实测
-// 逐字节一致；成功维度 stderr 为空（driver 零 warning）。
+// Deterministic: every key, vector and signature is an embedded hex constant (PKCS1v15
+// signing is byte-deterministic); no HashMap order, time, addresses, threads or RNG; no temp
+// files (everything is in memory); error paths print ErrorStack Display (error code +
+// library/function/reason + file:line + data), all fixed strings inside the libcrypto build
+// and therefore identical on native and mirvm, which share host and library; successful
+// dimensions keep stderr empty (the driver emits no warnings).
 use openssl::base64::{decode_block, encode_block};
 use openssl::error::ErrorStack;
 use openssl::hash::{Hasher, MessageDigest, hash};
@@ -85,19 +85,19 @@ use openssl::sign::{Signer, Verifier};
 use openssl::symm::{Cipher, Crypter, Mode, decrypt, encrypt};
 use openssl::version;
 
-/// 固定 RSA-2048 私钥（PKCS#1 DER，1190B；生成一次后冻结，永不重roll）。
+/// Fixed RSA-2048 private key (PKCS#1 DER, 1190 B; generated once, frozen, never regenerated).
 const RSA_PRIV_PKCS1: &str = "308204a20201000282010100d8e1da9a60da804c7dc8f66c5fe408e6074e71e8ca110071057062ab38cd23c37ab31b2d7cbcdadaa4530cb3731b0d0bb4357183a5610598b85058e97c27ef07b95933b3a3b0e349c7f1182e4ed4de988045da7e3dbad1784e5efbb47ff61ace8be4f1c0f2286cf150628b0f1ebc087784f8663a8cd305d12af1dcafc1f14ccf81e176ae752c64ce8b350fd319cd5b4bd4a517c01306fcfb57d61df3986c10b480b73712b15116e55135f266eb272ed652738b8488f78ae1c09a025951273cbb8b898a0d2a05fb568f02d38ac7e35c36c2358d29d45bab960eab7c44110759dcdae902f1b5d3494c90e0754ca17cdbe654351472469f973d155939cf64efcdbb0203010001028201000100b2510a67983642529e890bbc732a151890c041c6e8589d6cd297f61044bd0fa12a5c007aa30c65bc188fefd54d2f23ab2796333a8a9b152711f22a67c8dc21483f4bf252cc0a38496e1230bd1d36594979642206ee16ff4dc31e27854cc46db32646fd17a0c150dcd3c5c31f9d6e6807f9f90553a8703a219a2299e3f2b5f4b6bca23a60ba3ce85d080a4c9c1f2e79df5dec2d73203f923451c75f9bf326dc3495fae4343f0d69f6ad563a45f14c61592746c46d6bddd6f5746ca070bfb668a28207edef49701b0368c8bc78843fb2a6c3bfdd2b5f7a45c12ecba0a49232c2eee1315b41baf900d1b6ca3532ec6a77f8170c84931995a3720798d33f143902818100f2ceac161130c427c18709a98ab0b801f9851b42207f73bb90677a012ad196474f44b97e378f58573f5d478adbf7f5dd0a766ba6a8bcdfe678e7bc4c708cebcd918c6979836b446fd5e93402ad8a441a1c2e6ec1aca93e15008ec51422fd180e5c1501a0877a517260bc4f27510ca00b1e68e494903e0aad1b08c430e4be852702818100e4aa93b51b5c44de0ac99071ab7b70ef685a74d9b9aa6e7800fa0f81bb0f463448ba262754772d859b7c523a2bc448c0f8f6aeb81b3631f149fb747338ff92b28a88d0c9c09cef2d4fe641a063a3ae51f5e6aca9479a396bbc9e5cf1e20b3c74d39eabc8c65a76cf616227e6cd5ed111cd67a1696fbbd13815a188544882d74d0281801ba18d4fcd9101218d1272f50a45660b437bf448282e98db0569e12674daf90110723fb1af5ceeaeaf154c68eef35ed552b57b36b2091c69bbe4933717afd1bdc90c738c527a488579905a4cdbb6da5d264bda6acbdd4ea55134ee14868ecac8078e946ad2400738beed6f0c885aa973da78115b1eb710bbf6519f11f955fd0d0281805de9c0a84d0864305d75d3211c30a27d70fa55ab66199d2d24198f6cd48abd6693c8000b7f21434cf042eaf2812f284238fdf75c1db0f06a0cdc7d432551b1ca2a236ebcada2c688719c3bafc7bc5dc7c39a6da748850ab838cb419906215f3f0bfacacab6cc48a77b7378b7cdf8f71cbca3a7234a8474b4f80d53946a0372b10281804e636e6eea9deebf9d2a9425a6cff6e8ce318c64b4e51f044030678bff4bbef6da8c832399ba0ad63f174b8701e12b412a02ac5875258b2cd95fead0e909f0288f446a025fda3ac5fbdbefa0d28e2412f1e331331a9d9bda9a250bf94209cf0aac768667a9de8f901e20001d124892a7557b8bf60be1473de710ef19c0c8e9ea";
-/// 同钥公钥（PKCS#1 DER，270B）。
+/// Matching public key (PKCS#1 DER, 270 B).
 const RSA_PUB_PKCS1: &str = "3082010a0282010100d8e1da9a60da804c7dc8f66c5fe408e6074e71e8ca110071057062ab38cd23c37ab31b2d7cbcdadaa4530cb3731b0d0bb4357183a5610598b85058e97c27ef07b95933b3a3b0e349c7f1182e4ed4de988045da7e3dbad1784e5efbb47ff61ace8be4f1c0f2286cf150628b0f1ebc087784f8663a8cd305d12af1dcafc1f14ccf81e176ae752c64ce8b350fd319cd5b4bd4a517c01306fcfb57d61df3986c10b480b73712b15116e55135f266eb272ed652738b8488f78ae1c09a025951273cbb8b898a0d2a05fb568f02d38ac7e35c36c2358d29d45bab960eab7c44110759dcdae902f1b5d3494c90e0754ca17cdbe654351472469f973d155939cf64efcdbb0203010001";
-/// 同钥公钥（X.509 SPKI DER，294B）。
+/// Matching public key (X.509 SPKI DER, 294 B).
 const RSA_PUB_SPKI: &str = "30820122300d06092a864886f70d01010105000382010f003082010a0282010100d8e1da9a60da804c7dc8f66c5fe408e6074e71e8ca110071057062ab38cd23c37ab31b2d7cbcdadaa4530cb3731b0d0bb4357183a5610598b85058e97c27ef07b95933b3a3b0e349c7f1182e4ed4de988045da7e3dbad1784e5efbb47ff61ace8be4f1c0f2286cf150628b0f1ebc087784f8663a8cd305d12af1dcafc1f14ccf81e176ae752c64ce8b350fd319cd5b4bd4a517c01306fcfb57d61df3986c10b480b73712b15116e55135f266eb272ed652738b8488f78ae1c09a025951273cbb8b898a0d2a05fb568f02d38ac7e35c36c2358d29d45bab960eab7c44110759dcdae902f1b5d3494c90e0754ca17cdbe654351472469f973d155939cf64efcdbb0203010001";
-/// SIGN_MSG 的 PKCS1v15+SHA-256 签名已知答案（宿主 openssl dgst 计算后冻结）。
+/// Known-answer PKCS1v15+SHA-256 signature over SIGN_MSG (computed with the host openssl dgst, then frozen).
 const RSA_SIG: &str = "3925ff092d2e623951611a5d36249246a631becd3f4a47dbfc29a4b01c19e2fc87ebf51222d39b1f3895242c440c63dd60147761a49aacd0a51a0eec8fc5a2ca4bccdd243379ca2566ecb0bd75bf43917667adea254ca1637c5e77f0e2de4aa6a0da5dbca74f6bd19c3dde631ff2bb8d3f760d809ca9e11fe00e9e394ba9b38bb5b74441060a4f54d99fbe8cdda0616e3683304c58f974d85ef8a843d2fc236ed9a68e1ca7b94783796e1f04758205357c1b5d691983d23a9ee9ebb1bbd0b7de7f1e1a7cd35ae8c5624beb6a76318ec865334eade33740738ced2c95bda34717dc6df91c8b610da9c34eb4908bf093c54d45fbb24a3c1f474a4b22603afcd673";
 
-/// 签名/验签固定消息（与已知答案绑定，改动即换答案）。
+/// Fixed message for signing/verification (bound to the known answer; changing it changes the answer).
 const SIGN_MSG: &[u8] = b"mirvm openssl_evp fixed message v1";
 
-// NIST SP800-38A AES-128 定向量。
+// NIST SP800-38A AES-128 fixed vectors.
 const KEY128: &str = "2b7e151628aed2a6abf7158809cf4f3c";
 const IV128: &str = "000102030405060708090a0b0c0d0e0f";
 const PT_38A: &str = "6bc1bee22e409f96e93d7e117393172a\
@@ -123,7 +123,7 @@ fn unhex(s: &str) -> Vec<u8> {
         }
     }
     let b = s.as_bytes();
-    assert!(b.len() % 2 == 0, "hex 常量长度必须为偶");
+    assert!(b.len() % 2 == 0, "hex constant must have even length");
     b.chunks(2).map(|p| (nib(p[0]) << 4) | nib(p[1])).collect()
 }
 
@@ -135,7 +135,7 @@ fn hex(data: &[u8]) -> String {
     s
 }
 
-/// 内联 FNV-1a（二进制块锚定）。
+/// Inlined FNV-1a (anchors a binary blob).
 fn fnv1a(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for &b in data {
@@ -145,7 +145,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// ErrorStack → 单行（lib::reason 是 libcrypto 内固定字符串，宿主两侧一致）。
+/// ErrorStack -> one line (lib::reason is a fixed string inside libcrypto, identical on both hosts).
 fn fmt_stack(e: &ErrorStack) -> String {
     e.errors()
         .iter()
@@ -158,7 +158,7 @@ fn perr(label: &str, e: &ErrorStack) {
     println!("{label} err count={} {}", e.errors().len(), fmt_stack(e));
 }
 
-/// Crypter 按给定格点分片流式喂入（pad 一律 false，适配整块定向量）。
+/// Feeds the Crypter in the given split sizes (pad always false, to match whole-block vectors).
 fn crypter_run(
     cipher: Cipher,
     mode: Mode,
@@ -178,14 +178,14 @@ fn crypter_run(
         out.extend_from_slice(&buf[..n]);
         off += sz;
     }
-    assert_eq!(off, input.len(), "splits 必须恰好耗尽输入");
+    assert_eq!(off, input.len(), "splits must consume the input exactly");
     let mut tail = vec![0u8; cipher.block_size()];
     let n = c.finalize(&mut tail).unwrap();
     out.extend_from_slice(&tail[..n]);
     out
 }
 
-/// 验签正反例统一形状：Ok(bool) 或错误栈单行（同宿主同库，两侧逐字节一致）。
+/// Uniform shape for verify hits and misses: Ok(bool) or one error-stack line (same host and library).
 fn verify_with<T: HasPublic>(pk: &PKeyRef<T>, msg: &[u8], sig: &[u8]) -> String {
     let mut v = Verifier::new(MessageDigest::sha256(), pk).unwrap();
     v.update(msg).unwrap();
@@ -196,13 +196,13 @@ fn verify_with<T: HasPublic>(pk: &PKeyRef<T>, msg: &[u8], sig: &[u8]) -> String 
 }
 
 fn main() {
-    // ★ FRONTIER 绕行（根因与诊断原文见文件头）：显式预载系统库进全局命名
-    // 空间，补偿 mirvm lower 未收集 rlib 元数据 `-l` 的缺口。先 crypto 后
-    // ssl（依赖序）；native 下是同一系统库上的幂等 no-op。
+    // Workaround (root cause in the file header): explicitly preload the system libraries into
+    // the global namespace, compensating for mirvm's lowering not collecting `-l` from rlib
+    // metadata. crypto before ssl (dependency order); a native no-op on the same libraries.
     unsafe {
         for lib in ["libcrypto.so.3\0", "libssl.so.3\0"] {
             let h = libc::dlopen(lib.as_ptr().cast(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
-            assert!(!h.is_null(), "dlopen {lib} 失败");
+            assert!(!h.is_null(), "dlopen {lib} failed");
         }
     }
 
@@ -212,7 +212,7 @@ fn main() {
         version::number()
     );
 
-    // ---- ① EVP digest：定向量 + 流式 + one-shot + from_name ----
+    // ---- ① EVP digest: fixed vectors + streaming + one-shot + from_name ----
     println!("== evp digest ==");
     let cases: &[(&str, &str, MessageDigest, &[u8], &str)] = &[
         ("sha256", "abc", MessageDigest::sha256(), b"abc",
@@ -260,7 +260,7 @@ fn main() {
         MessageDigest::md5().size()
     );
 
-    // ---- ② RSA：固定 DER 导入 → sign/verify 正反例 + NONE 原始加解密 ----
+    // ---- ② RSA: import fixed DER -> sign/verify hits and misses + NONE raw encryption ----
     println!("== rsa ==");
     let rsa = Rsa::private_key_from_der(&unhex(RSA_PRIV_PKCS1)).unwrap();
     println!(
@@ -290,8 +290,8 @@ fn main() {
         sig1 == sig_expect
     );
 
-    // 四条公钥导入路径（0.10.81 API 名义：public_key_from_der = SPKI，
-    // _pkcs1 后缀才是 RSAPublicKey）+ from_public_components
+    // Four public-key import paths (0.10.81 naming: public_key_from_der = SPKI, only the
+    // _pkcs1 suffix takes RSAPublicKey) + from_public_components
     let rsa_pub1 = Rsa::public_key_from_der_pkcs1(&unhex(RSA_PUB_PKCS1)).unwrap();
     println!(
         "pub-pkcs1 bits={} n == priv n: {}",
@@ -314,7 +314,7 @@ fn main() {
     println!("verify pkey-spki  = {}", verify_with(&pkey_pub2b, SIGN_MSG, &sig1));
     println!("verify pub-comp   = {}", verify_with(&pkey_pub3, SIGN_MSG, &sig1));
     println!("verify via-priv   = {}", verify_with(&pkey, SIGN_MSG, &sig1));
-    // 反例三连：改消息 / 改签名末字节 / 他消息签名充数
+    // Three negative cases: changed message / changed last signature byte / another message's signature
     let mut tmsg = SIGN_MSG.to_vec();
     tmsg[3] ^= 0x01;
     println!("verify tampered-msg = {}", verify_with(&pkey_pub1, &tmsg, &sig1));
@@ -328,8 +328,8 @@ fn main() {
     println!("verify wrong-msg-sig = {}", verify_with(&pkey_pub2, SIGN_MSG, &sig3));
     println!("verify wrong-msg-sig own-msg = {}", verify_with(&pkey_pub2, other, &sig3));
 
-    // Rsa 原始 RSA op（Padding::NONE，确定性）：私加密 → 公解密 roundtrip。
-    // 256B 块首字节恒 0 → 值 < 2^2040 < n。
+    // Raw RSA op (Padding::NONE, deterministic): private-encrypt -> public-decrypt roundtrip.
+    // The 256 B block's first byte is always 0, so the value stays below 2^2040 < n.
     let rsa_back = pkey.rsa().unwrap();
     let mut blk = [0u8; 256];
     for (i, b) in blk.iter_mut().enumerate().skip(1) {
@@ -357,7 +357,7 @@ fn main() {
         Err(e) => perr("pub-junk-der", &e),
     }
 
-    // ---- ③ misc：pbkdf2 / base64 / memcmp ----
+    // ---- ③ misc: pbkdf2 / base64 / memcmp ----
     println!("== misc ==");
     let b64 = encode_block(b"hello, mirvm!");
     println!(
@@ -380,12 +380,12 @@ fn main() {
         pbk == "249313468e55625e35421824db264715c64d7b4ec2d29adb3589a88f6cbe966f"
     );
 
-    // ---- ④ EVP cipher：AES-128 CBC/ECB 定向量 + padding + 错误路径 ----
-    // ★ FRONTIER 段（文件头 ★②）：openssl 的 CipherContext 通用初始化把
-    // `ffi::EVP_EncryptInit_ex`/`EVP_DecryptInit_ex` 当**值**传参 → extern fn
-    // fn-ptr 取址在 lower 期 dlsym（libcrypto 未进 mirvm 进程）→ 烘焙 TRAP，
-    // mirvm 在执行到首个 Crypter/encrypt 时响亮终止（exit 70）。guest 侧无
-    // 语义不变的绕行——故置末段，前 ①②③ 段先行完成差分。
+    // ---- ④ EVP cipher: AES-128 CBC/ECB fixed vectors + padding + error paths ----
+    // This section hits the limitation from the file header: openssl's generic CipherContext
+    // init passes `ffi::EVP_EncryptInit_ex`/`EVP_DecryptInit_ex` as *values*, so the extern-fn
+    // pointer is resolved at lowering time (libcrypto not yet in the mirvm process) and the
+    // TRAP aborts mirvm at the first Crypter/encrypt (exit 70). No guest-side workaround
+    // preserves semantics, so this section comes last and ① ② ③ run first.
     println!("== evp cipher ==");
     let key = unhex(KEY128);
     let iv = unhex(IV128);
@@ -415,7 +415,7 @@ fn main() {
     let eb = crypter_run(ecb, Mode::Decrypt, &key, None, &e1, &[e1.len()]);
     println!("ecb dec roundtrip={}", eb == pt);
 
-    // pkcs7 默认 padding（11B → 16B）one-shot encrypt/decrypt
+    // Default pkcs7 padding (11 B -> 16 B) with one-shot encrypt/decrypt
     let msg11 = b"hello world";
     let padded = encrypt(cbc, &key, Some(&iv), msg11).unwrap();
     let plain = decrypt(cbc, &key, Some(&iv), &padded).unwrap();
@@ -425,7 +425,7 @@ fn main() {
         fnv1a(&padded),
         plain == msg11
     );
-    // 名称查找面：cipher 走 Nid（from_name 只存在于 MessageDigest）
+    // Name lookup: ciphers go through Nid (from_name exists only for MessageDigest)
     let by_nid = Cipher::from_nid(Nid::AES_128_CBC).unwrap();
     println!(
         "cipher from_nid sn={:?} hit={} raw(-1)={}",
@@ -437,9 +437,9 @@ fn main() {
         Ok(_) => println!("bad key len unexpectedly ok"),
         Err(e) => perr("bad-keylen", &e),
     }
-    // 注：过短 IV 不走 Err——openssl 0.10.81 cipher_ctx.rs 断言
-    // `iv_len <= iv.len()`（crate 设计为 panic 而非 Err），故不作错误路径
-    // 用例；过长 IV 被 libcrypto 静默截断亦无 Err 可验。
+    // NOTE: a too-short IV is not an Err -- openssl 0.10.81 cipher_ctx.rs asserts
+    // `iv_len <= iv.len()` (the crate panics by design), so it is not used as an error case;
+    // an over-long IV is silently truncated by libcrypto, giving no Err to check either.
     let mut tampered = padded.clone();
     *tampered.last_mut().unwrap() ^= 0x01;
     match decrypt(cbc, &key, Some(&iv), &tampered) {

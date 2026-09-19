@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# real-project suite 自身的行为回归。fixture 全在本地生成，不访问网络。
+# Regression for the real-project suite itself. Fixtures are all generated locally; no network access.
 set -u
 cd "$(dirname "$0")/.."
 
@@ -145,7 +145,7 @@ else
         && grep -Fq 'reason=stdout_mismatch' "$TMP/bench.stderr" \
         && grep -Fq 'correctness_not_passed' "$TMP/bench.stderr" \
         && [ ! -s "$ARTIFACTS/mismatch/bench/samples.jsonl" ]; then
-        ok 'stdout 不一致时拒绝 correctness 与 benchmark'
+        ok 'rejects correctness and benchmark when stdout differs'
     else
         bad "stdout mismatch gate (check=$check_code bench=$bench_code)"
         echo "--- check ---"
@@ -173,7 +173,7 @@ invalid_out=$(env "${common_env[@]}" bash tests/real_projects.sh \
 invalid_code=$?
 if [ "$invalid_code" -ne 0 ] \
     && echo "$invalid_out" | grep -Fq 'invalid_case: rev must be a full 40-hex commit'; then
-    ok '非法 case 传播失败状态'
+    ok 'an invalid case propagates failure status'
 else
     bad "invalid case status (exit=$invalid_code)"
     echo "$invalid_out"
@@ -186,7 +186,7 @@ run_path_code=$?
 if [ "$run_path_code" -eq 69 ] \
     && echo "$run_path_out" | grep -Fq \
         'host_path_hidden_by_run_tmpfs: project_suite_root=/run/mirvm-project-suite'; then
-    ok '/run 下的 host 路径在 namespace 覆盖前 fail-fast'
+    ok 'host paths under /run fail fast before the namespace override'
 else
     bad "host path under /run (exit=$run_path_code)"
     echo "$run_path_out"
@@ -206,7 +206,7 @@ unknown_root_code=$?
 if [ "$unknown_root_code" -eq 65 ] \
     && echo "$unknown_root_out" | grep -Fq \
         'invalid_case: unknown key: timeout_second'; then
-    ok 'case 拒绝未知顶层字段'
+    ok 'a case rejects an unknown top-level field'
 else
     bad "unknown root case key (exit=$unknown_root_code)"
     echo "$unknown_root_out"
@@ -228,7 +228,7 @@ unknown_bench_code=$?
 if [ "$unknown_bench_code" -eq 65 ] \
     && echo "$unknown_bench_out" | grep -Fq \
         'invalid_case: unknown key: bench.sample'; then
-    ok 'case 拒绝未知 bench 字段'
+    ok 'a case rejects an unknown bench field'
 else
     bad "unknown bench case key (exit=$unknown_bench_code)"
     echo "$unknown_bench_out"
@@ -252,7 +252,7 @@ unknown_xfail_code=$?
 if [ "$unknown_xfail_code" -eq 65 ] \
     && echo "$unknown_xfail_out" | grep -Fq \
         'invalid_case: unknown key: xfail.diagnostics'; then
-    ok 'case 拒绝未知 xfail 字段'
+    ok 'a case rejects an unknown xfail field'
 else
     bad "unknown xfail case key (exit=$unknown_xfail_code)"
     echo "$unknown_xfail_out"
@@ -275,7 +275,7 @@ invalid_xfail_diagnostic_code=$?
 if [ "$invalid_xfail_diagnostic_code" -eq 65 ] \
     && echo "$invalid_xfail_diagnostic_out" | grep -Fq \
         'invalid_case: xfail.diagnostic must be one canonical mirvm line'; then
-    ok 'XFAIL 清单只接受单行 canonical mirvm 诊断'
+    ok 'the XFAIL list accepts only a single-line canonical mirvm diagnostic'
 else
     bad "invalid XFAIL diagnostic (exit=$invalid_xfail_diagnostic_code)"
     echo "$invalid_xfail_diagnostic_out"
@@ -297,7 +297,7 @@ encoded_rustflags_code=$?
 if [ "$encoded_rustflags_code" -eq 65 ] \
     && echo "$encoded_rustflags_out" | grep -Fq \
         'invalid_case: env.CARGO_ENCODED_RUSTFLAGS is controlled by project-suite'; then
-    ok 'case 不能绕过 harness 管理的 rustc flags'
+    ok 'a case cannot bypass harness-managed rustc flags'
 else
     bad "encoded rustflags env (exit=$encoded_rustflags_code)"
     echo "$encoded_rustflags_out"
@@ -338,7 +338,7 @@ xfail_out=$(env "${xfail_env[@]}" bash tests/real_projects.sh \
 xfail_code=$?
 if [ "$xfail_prepare_code" -eq 0 ] && [ "$xfail_code" -eq 0 ] \
     && echo "$xfail_out" | grep -Fq 'XFAIL known-red reason=mirvm trap: known.frontier'; then
-    ok '精确诊断命中时记录 XFAIL'
+    ok 'records XFAIL when the exact diagnostic matches'
 else
     bad "known-red XFAIL (prepare=$xfail_prepare_code check=$xfail_code)"
     echo "$xfail_prepare"
@@ -420,7 +420,7 @@ assert current["case"]["args"] == ["beta"]
 assert (root / "check").is_symlink()
 PY
 then
-    ok '同名不同语义使用独立的不可变 correctness 证据'
+    ok 'same name, different semantics use independent immutable correctness evidence'
 else
     bad "semantic identity (prepare=$identity_prepare_code a=$identity_a_code b=$identity_b_code)"
     echo "$identity_prepare"
@@ -474,7 +474,7 @@ assert current["execution"]["tools"]["mirvm"]["sha256"] \
     == hashlib.sha256(changed_tool.read_bytes()).hexdigest()
 PY
 then
-    ok '工具内容而非物理路径参与 correctness 身份'
+    ok 'tool content, not physical path, participates in correctness identity'
 else
     bad "tool identity (same=$identity_same_tool_code changed=$identity_changed_tool_code)"
     echo "$identity_same_tool_out"
@@ -561,7 +561,7 @@ assert current["execution"]["workload_tools"]["identity-sidecar"] == {
 }
 PY
 then
-    ok 'workload external tool 内容参与 CheckID 且路径只作 provenance'
+    ok 'workload external tool content participates in CheckID; the path is provenance only'
 else
     bad "workload tool identity (prepare=$workload_tool_prepare_code a=$workload_tool_a_code b=$workload_tool_b_code)"
     echo "$workload_tool_prepare_out"
@@ -592,7 +592,7 @@ assert summary["identity"]["check_id"] == check["identity"]["check_id"]
 assert summary["identity"]["check_evidence_id"] == check["identity"]["evidence_id"]
 PY
 then
-    ok 'schema-4 benchmark 复制并验证 exact-check workload tool provenance'
+    ok 'schema-4 benchmark copies and verifies exact-check workload tool provenance'
 else
     bad "workload tool benchmark provenance (exit=$workload_tool_bench_code)"
     echo "$workload_tool_bench_out"
@@ -681,7 +681,7 @@ assert sysroot_hashes == {
 }
 PY
 then
-    ok 'Python controller 与 MIRVM sysroot marker 参与 correctness 身份'
+    ok 'Python controller and MIRVM sysroot marker participate in correctness identity'
 else
     bad "runtime identity (prepare=$runtime_prepare_code python-a=$runtime_python_a_code python-b=$runtime_python_b_code sysroot-b=$runtime_sysroot_b_code)"
     echo "$runtime_prepare_out"
@@ -701,7 +701,7 @@ if [ "$runtime_missing_marker_code" -ne 0 ] \
         "mirvm_sysroot_marker_unavailable: $RUNTIME_SYSROOT_MARKER" \
     && [ ! -e "$ARTIFACTS/runtime-identity/check" ] \
     && [ ! -L "$ARTIFACTS/runtime-identity/check" ]; then
-    ok 'MIRVM sysroot marker 缺失时 fail-closed 并撤销 current'
+    ok 'a missing MIRVM sysroot marker fails closed and withdraws current'
 else
     bad "missing sysroot marker (exit=$runtime_missing_marker_code)"
     echo "$runtime_missing_marker_out"
@@ -751,7 +751,7 @@ assert {
 }
 PY
 then
-    ok '受控 Git controller 内容参与 correctness 身份'
+    ok 'controlled Git controller content participates in correctness identity'
 else
     bad "Git identity (a=$runtime_git_a_code b=$runtime_git_b_code)"
     echo "$runtime_git_a_out"
@@ -823,7 +823,7 @@ fi
 if [ "$control_fd_prepare_code" -eq 0 ] && [ "$control_fd_code" -eq 0 ] \
     && [ "$control_fd_retry_code" -eq 0 ] \
     && [ "$control_fd_leaked" -eq 0 ]; then
-    ok 'Python 控制进程不能把 workflow locks 泄漏给后台子进程'
+    ok 'the Python controller must not leak workflow locks to background child processes'
 else
     bad "Python control lock FD isolation (prepare=$control_fd_prepare_code first=$control_fd_code retry=$control_fd_retry_code leaked=$control_fd_leaked)"
     echo "$control_fd_prepare_out"
@@ -879,7 +879,7 @@ if [ "$prepare_recovery_code" -eq 0 ] \
     && [ ! -L "$ARTIFACTS/control-fd/.check.111.tmp" ] \
     && [ ! -e "$ARTIFACTS/control-fd/.bench.222.tmp" ] \
     && [ ! -L "$ARTIFACTS/control-fd/.bench.222.tmp" ]; then
-    ok 'prepare 也回收 staging/临时 current 链接且不撤销 current evidence'
+    ok 'prepare also reclaims staging/transient current links without withdrawing current evidence'
 else
     bad "prepare evidence recovery (exit=$prepare_recovery_code)"
     echo "$prepare_recovery_out"
@@ -900,7 +900,7 @@ if [ "$phase_recovery_fixture_ready" -eq 1 ] \
     && grep -Fxq 'historical object' "$CONTROL_BENCH_HISTORY/marker" \
     && [ ! -e "$CONTROL_CHECK_HIDDEN_STAGE" ] \
     && [ ! -e "$CONTROL_BENCH_HIDDEN_STAGE" ]; then
-    ok 'prepare 回收 check/bench phase-ID parent 下的只读 hidden staging'
+    ok 'prepare reclaims read-only hidden staging under a check/bench phase-ID parent'
 else
     bad "prepare phase-ID hidden staging recovery (fixture=$phase_recovery_fixture_ready exit=$prepare_recovery_code)"
     echo "$prepare_recovery_out"
@@ -958,7 +958,7 @@ forget_background "$control_subshell_root"
 if [ "$control_subshell_seen" -eq 1 ] \
     && [ "$control_subshell_code" -eq 137 ] \
     && [ "$control_subshell_retry_code" -eq 0 ]; then
-    ok 'controller command-substitution 子壳不继承 workflow locks'
+    ok 'a controller command-substitution subshell does not inherit workflow locks'
 else
     bad "controller subshell lock isolation (seen=$control_subshell_seen crash=$control_subshell_code retry=$control_subshell_retry_code)"
     cat "$TMP/control-subshell.stdout"
@@ -1051,7 +1051,7 @@ if [ "$cache_lock_entered" -eq 1 ] && [ "$cache_lock_a_code" -eq 0 ] \
     && echo "$cache_lock_b_busy_out" | grep -Fxq 'cache_busy: prepare' \
     && [ ! -e "$CACHE_LOCK_LEAK" ] \
     && [ "$cache_lock_b_retry_code" -eq 0 ]; then
-    ok '不同名称的 prepare 以 suite-global 独占锁保护共享缓存'
+    ok 'prepares with different names protect the shared cache with a suite-global exclusive lock'
 else
     bad "global cache prepare lock (entered=$cache_lock_entered first=$cache_lock_a_code busy=$cache_lock_b_busy_code retry=$cache_lock_b_retry_code)"
     echo "$cache_lock_b_busy_out"
@@ -1112,7 +1112,7 @@ cache_shared_a_code=$?
 forget_background "$cache_shared_a_pid"
 if [ "$cache_shared_staging" -eq 1 ] && [ "$cache_shared_a_code" -eq 0 ] \
     && [ "$cache_shared_b_code" -eq 0 ] && [ ! -e "$CACHE_LOCK_LEAK" ]; then
-    ok '不同名称的 check 并发持有 suite-global 共享缓存锁'
+    ok 'checks with different names concurrently hold the suite-global shared-cache lock'
 else
     bad "global cache shared lock (staging=$cache_shared_staging first=$cache_shared_a_code second=$cache_shared_b_code)"
     echo "$cache_shared_b_out"
@@ -1146,7 +1146,7 @@ if [ "$blocking_staging_seen" -eq 1 ] && [ "$blocking_code" -eq 0 ] \
     && [ -L "$ARTIFACTS/semantic-identity/check" ] \
     && ! find "$ARTIFACTS/semantic-identity/.staging" \
         -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
-    ok '同名 workflow 并发时 fail-fast 且不暴露 staging'
+    ok 'concurrent same-name workflows fail fast and expose no staging'
 else
     bad "evidence lock (first=$blocking_code second=$busy_code)"
     echo "$busy_out"
@@ -1204,7 +1204,7 @@ if [ "$bench_toctou_prepare_code" -eq 0 ] \
     && grep -Fq 'reason=check_evidence_changed' "$TMP/bench-toctou.stderr" \
     && [ ! -e "$ARTIFACTS/bench-evidence-toctou/bench" ] \
     && [ ! -L "$ARTIFACTS/bench-evidence-toctou/bench" ]; then
-    ok 'benchmark 发布前重新验证 exact check evidence'
+    ok 're-verifies exact check evidence before publishing a benchmark'
 else
     bad "benchmark check-evidence TOCTOU (prepare=$bench_toctou_prepare_code bench=$bench_toctou_code)"
     echo "$bench_toctou_prepare_out"
@@ -1263,7 +1263,7 @@ if [ "$crash_runner_seen" -eq 1 ] && [ "$crash_code" -eq 137 ] \
     && [ -L "$ARTIFACTS/semantic-identity/check" ] \
     && ! find "$ARTIFACTS/semantic-identity/.staging" \
         -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
-    ok 'runner grouping 子壳不继承锁，崩溃后可立即回收 staging'
+    ok 'a runner-grouping subshell does not inherit the lock; staging is reclaimable immediately after a crash'
 else
     bad "evidence crash recovery (runner=$crash_runner_seen crash=$crash_code view_absent=$crash_view_absent recovery=$recovery_code)"
     echo "$recovery_out"
@@ -1310,7 +1310,7 @@ for filename, expected in document["payload"].items():
 assert (root / "mirvm.stdout").read_text() == "same-A\n"
 PY
 then
-    ok 'workload 后代不能改写 committed evidence 或继承 workflow lock'
+    ok 'workload descendants cannot rewrite committed evidence or inherit the workflow lock'
 else
     bad "background descendant isolation (first=$background_code retry=$background_retry_code)"
     echo "$background_out"
@@ -1338,7 +1338,7 @@ corrupt_code=$?
 if [ "$corrupt_code" -eq 69 ] \
     && echo "$corrupt_out" | grep -Fxq \
         'evidence_corrupt: payload.native.stdout.sha256'; then
-    ok 'evidence consumer 会重算 payload 与内容地址'
+    ok 'the evidence consumer recomputes payload and content address'
 else
     bad "evidence validator (exit=$corrupt_code)"
     echo "$corrupt_out"
@@ -1391,7 +1391,7 @@ toctou_recovery_code=$?
 if [ -e "$TOCTOU_STARTED" ] && [ "$toctou_code" -ne 0 ] \
     && echo "$toctou_out" | grep -Fq 'reason=check_identity_changed' \
     && [ "$toctou_recovery_code" -eq 0 ]; then
-    ok '执行上下文变化时拒绝向旧 check identity 发布'
+    ok 'refuses to publish to an old check identity when the execution context changed'
 else
     bad "check identity TOCTOU (run=$toctou_code recovery=$toctou_recovery_code)"
     echo "$toctou_out"
@@ -1404,7 +1404,7 @@ xpass_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
 xpass_code=$?
 if [ "$xpass_code" -ne 0 ] \
     && echo "$xpass_out" | grep -Fq 'XPASS known-red reason=expected_failure_disappeared'; then
-    ok '已转绿的 expected-red 报告 XPASS'
+    ok 'an expected-red that turned green reports XPASS'
 else
     bad "known-red XPASS (exit=$xpass_code)"
     echo "$xpass_out"
@@ -1446,7 +1446,7 @@ collision_b_out=$(env "${common_env[@]}" bash tests/real_projects.sh \
 collision_b_code=$?
 if [ "$collision_a_code" -eq 0 ] && [ "$collision_b_code" -ne 0 ] \
     && echo "$collision_b_out" | grep -Fq 'revision_not_found'; then
-    ok 'repo 身份参与 revision provenance'
+    ok 'repo identity participates in revision provenance'
 else
     bad "repo collision provenance (first=$collision_a_code second=$collision_b_code)"
     echo "$collision_a_out"
@@ -1553,7 +1553,7 @@ assert bench_dir.name == result["identity"]["evidence_id"]
 assert (bench_dir / "COMMITTED").read_text() == "committed\n"
 PY
 then
-    ok '正确性通过后原子发布绑定 exact check 的 benchmark evidence'
+    ok 'atomically publishes benchmark evidence bound to the exact check after correctness passes'
 else
     bad "green benchmark (prepare=$green_prepare_code bench=$green_bench_code)"
     echo "$green_prepare"
@@ -1583,7 +1583,7 @@ for phase in ("check", "bench"):
         assert stat.S_IMODE(entry.stat().st_mode) == 0o444
 PY
 then
-    ok 'published evidence 以只读 regular-file 目录封存'
+    ok 'published evidence is sealed in a read-only regular-file directory'
 else
     bad 'published evidence sealing'
     find "$ARTIFACTS/bench-green" -maxdepth 6 -printf '%m %y %p\n' \
@@ -1618,7 +1618,7 @@ if "$PYTHON" tests/project_suite_evidence.py verify-check \
         "$ARTIFACTS/bench-green/check/result.json" "$current_case_id" \
         "$current_check_id" "$current_check_evidence_id" \
         "$current_bench_id" "$current_bench_evidence_id" pass; then
-    ok 'evidence validator 接受并严格解析 current symlink view'
+    ok 'the evidence validator accepts and strictly parses the current symlink view'
 else
     bad 'current evidence view validation'
 fi
@@ -1855,7 +1855,7 @@ if [ "$tampered_check_code" -eq 69 ] \
     && echo "$extra_sidecar_out" | grep -Fxq \
         'evidence_corrupt: directory.entries' \
     && [ "$legacy_code" -eq 0 ]; then
-    ok 'consumer 重推语义、拒绝 sidecar 并保留 schema-2 历史分派'
+    ok 'the consumer re-derives semantics, rejects sidecars and keeps schema-2 historical dispatch'
 else
     bad "derived semantic validation (check=$tampered_check_code bench=$tampered_bench_code stats=$tampered_stats_code oracle=$tampered_oracle_code provenance=$tampered_provenance_code sidecar=$extra_sidecar_code legacy=$legacy_code)"
     echo "$tampered_check_out"
@@ -1909,7 +1909,7 @@ current = json.loads((root / "bench" / "summary.json").read_text())
 assert current["benchmark"] == {"warmup": 0, "samples": 1}
 PY
 then
-    ok 'bench 配置只派生新 bench identity 并复用 exact check evidence'
+    ok 'a bench config derives only a new bench identity and reuses exact check evidence'
 else
     bad "benchmark identity layering (exit=$green_bench_alt_code)"
     cat "$TMP/green-bench-alt.stdout"
@@ -1932,7 +1932,7 @@ if [ "$stale_artifact_code" -ne 0 ] \
     && [ ! -L "$ARTIFACTS/bench-green/bench" ] \
     && find "$ARTIFACTS/bench-green/objects/bench" \
         -name summary.json -type f -print -quit | grep -q .; then
-    ok 'check 前置失败撤销 current views 但保留不可变历史证据'
+    ok 'an earlier check failure withdraws current views but keeps immutable historical evidence'
 else
     bad "stale check artifact (exit=$stale_artifact_code)"
     echo "$stale_artifact_out"
@@ -1990,7 +1990,7 @@ if [ "$sync_prepare_code" -eq 0 ] && [ "$sync_bench_code" -ne 0 ] \
     && [ ! -s "$TMP/sync-bench.stdout" ] \
     && grep -Fq 'reason=benchmark_warmup_oracle_mismatch' "$TMP/sync-bench.stderr" \
     && [ ! -s "$sync_samples" ]; then
-    ok 'benchmark 每次观测都固定到 correctness oracle'
+    ok 'every benchmark observation is pinned to the correctness oracle'
 else
     bad "benchmark synchronized drift (prepare=$sync_prepare_code bench=$sync_bench_code)"
     echo "$sync_prepare"
@@ -2026,7 +2026,7 @@ if [ "$sync_sample_prepare_code" -eq 0 ] && [ "$sync_sample_code" -ne 0 ] \
     && grep -Fq 'reason=benchmark_sample_oracle_mismatch index=1' \
         "$TMP/sync-sample.stderr" \
     && [ ! -s "$ARTIFACTS/sync-sample-drift/bench/samples.jsonl" ]; then
-    ok 'warmup=0 时 sample 仍固定到 correctness oracle'
+    ok 'with warmup=0 the sample is still pinned to the correctness oracle'
 else
     bad "benchmark sample drift (prepare=$sync_sample_prepare_code bench=$sync_sample_code)"
     echo "$sync_sample_prepare"
@@ -2061,7 +2061,7 @@ if [ "$stale_bench_code" -ne 0 ] \
         'reason=benchmark_runner_infrastructure_failed side=native phase=sample index=1' \
         "$TMP/stale-bench.stderr" \
     && [ ! -s "$stale_samples" ]; then
-    ok 'benchmark 隔离器失败不能复用旧样本'
+    ok 'a benchmark isolator failure cannot reuse old samples'
 else
     bad "benchmark stale sample (exit=$stale_bench_code)"
     echo "--- stdout ---"
@@ -2082,7 +2082,7 @@ if [ "$xfail_bench_code" -ne 0 ] \
     && grep -Fq 'XFAIL known-red reason=mirvm trap: known.frontier' "$TMP/xfail-bench.stderr" \
     && grep -Fq 'reason=expected_red_not_benchmarkable' "$TMP/xfail-bench.stderr" \
     && [ ! -s "$xfail_bench_samples" ]; then
-    ok 'XFAIL 不具备 benchmark 准入资格'
+    ok 'XFAIL is not eligible for benchmark admission'
 else
     bad "XFAIL benchmark eligibility (exit=$xfail_bench_code)"
     echo "--- stdout ---"
@@ -2175,7 +2175,7 @@ SERVER_PID=
 if [ "$offline_prepare_code" -eq 0 ] && [ "$offline_code" -eq 0 ] \
     && echo "$offline_out" | grep -Fq 'PASS offline correctness' \
     && [ ! -e "$NETWORK_MARKER" ]; then
-    ok 'check 在断网命名空间中运行'
+    ok 'check runs in a network-isolated namespace'
 else
     bad "offline sandbox (prepare=$offline_prepare_code check=$offline_code)"
     echo "$offline_prepare"
@@ -2229,7 +2229,7 @@ protected_check_code=$?
 if [ "$protected_prepare_code" -eq 0 ] && [ "$protected_check_code" -eq 0 ] \
     && echo "$protected_check" | grep -Fq 'PASS protected-suite correctness' \
     && printf 'original\n' | cmp -s - "$PROTECTED_PATH"; then
-    ok 'guest 不能写共享 project-suite 状态'
+    ok 'guest cannot write shared project-suite state'
 else
     bad "project-suite write isolation (prepare=$protected_prepare_code check=$protected_check_code)"
     echo "$protected_prepare"
@@ -2278,7 +2278,7 @@ runtime_cache_check_code=$?
 if [ "$runtime_cache_prepare_code" -eq 0 ] && [ "$runtime_cache_check_code" -eq 0 ] \
     && echo "$runtime_cache_check" | grep -Fq \
         'PASS private-runtime-cache correctness'; then
-    ok 'native 与 mirvm 各自使用可写的私有 runtime cache'
+    ok 'native and mirvm each use a writable private runtime cache'
 else
     bad "private runtime cache (prepare=$runtime_cache_prepare_code check=$runtime_cache_check_code)"
     echo "$runtime_cache_prepare"
@@ -2337,7 +2337,7 @@ cwd_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
 cwd_code=$?
 if [ "$cwd_prepare_code" -eq 0 ] && [ "$cwd_code" -eq 0 ] \
     && echo "$cwd_out" | grep -Fq 'PASS logical-cwd correctness'; then
-    ok 'native 与 mirvm 使用相同逻辑 cwd'
+    ok 'native and mirvm use the same logical cwd'
 else
     bad "logical cwd (prepare=$cwd_prepare_code check=$cwd_code)"
     echo "$cwd_prepare"
@@ -2390,7 +2390,7 @@ if [ "$stdin_prepare_code" -eq 0 ] && [ "$stdin_check_code" -eq 0 ] \
     && echo "$stdin_check" | grep -Fq 'PASS deterministic-stdin correctness' \
     && printf 'stdin:eof\n' | cmp -s - \
         "$ARTIFACTS/deterministic-stdin/check/native.stdout"; then
-    ok '未声明 stdin 时两侧固定使用 EOF'
+    ok 'without a declared stdin both sides use EOF'
 else
     bad "deterministic stdin (prepare=$stdin_prepare_code check=$stdin_check_code)"
     echo "$stdin_prepare"
@@ -2459,7 +2459,7 @@ prepare_isolation_code=$?
 if [ "$prepare_isolation_code" -eq 0 ] \
     && printf 'original\n' | cmp -s - "$PREPARE_PROTECTED_PATH" \
     && [ ! -e "$PREPARE_CACHE_POISON" ]; then
-    ok 'prepare build.rs 不能写宿主工作区或共享 Cargo cache'
+    ok 'a prepare build.rs cannot write the host workspace or shared Cargo cache'
 else
     bad "prepare build isolation (exit=$prepare_isolation_code)"
     echo "$prepare_isolation_out"
@@ -2487,7 +2487,7 @@ target_prepare=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
     bash tests/real_projects.sh prepare "$TARGET_CASE" 2>&1)
 target_prepare_code=$?
 if [ "$target_prepare_code" -eq 0 ]; then
-    ok 'prepare 只构建当前 host 的运行依赖图'
+    ok "prepare builds only the current host's runtime dependency graph"
 else
     bad "target-scoped cargo prepare (exit=$target_prepare_code)"
     echo "$target_prepare"
@@ -2530,7 +2530,7 @@ if [ "$target_override_prepare_code" -eq 0 ] \
     && [ "$target_override_check_code" -eq 0 ] \
     && echo "$target_override_check" | grep -Fq \
         'PASS explicit-host-target correctness'; then
-    ok 'correctness 显式固定 native host target'
+    ok 'correctness explicitly pins the native host target'
 else
     bad "correctness host target (prepare=$target_override_prepare_code check=$target_override_check_code)"
     echo "$target_override_prepare"
@@ -2543,7 +2543,7 @@ target_override_bench_code=$?
 target_override_samples="$ARTIFACTS/explicit-host-target/bench/samples.jsonl"
 if [ "$target_override_bench_code" -eq 0 ] \
     && [ "$(wc -l <"$target_override_samples" 2>/dev/null || echo 0)" -eq 1 ]; then
-    ok 'benchmark 显式固定 native host target'
+    ok 'benchmark explicitly pins the native host target'
 else
     bad "benchmark host target (exit=$target_override_bench_code)"
     cat "$TMP/target-override-bench.stdout"
@@ -2586,7 +2586,7 @@ cache_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
 cache_code=$?
 if [ "$cache_prepare_code" -eq 0 ] && [ "$cache_code" -eq 0 ] \
     && echo "$cache_out" | grep -Fq 'PASS persistent-cache correctness'; then
-    ok 'mirvm 使用持久的已准备 XDG cache'
+    ok 'mirvm uses a persistent prepared XDG cache'
 else
     bad "persistent mirvm cache (prepare=$cache_prepare_code check=$cache_code)"
     echo "$cache_prepare"
@@ -2632,7 +2632,7 @@ prepared_check_code=$?
 if [ "$prepare_cache_code" -eq 0 ] && [ -s "$PREPARED_MARKER" ] \
     && [ "$prepared_check_code" -eq 0 ] \
     && echo "$prepared_check_out" | grep -Fq 'PASS prepare-cache correctness'; then
-    ok 'prepare 建立持久 mirvm sysroot cache'
+    ok 'prepare establishes a persistent mirvm sysroot cache'
 else
     bad "prepare mirvm cache (prepare=$prepare_cache_code check=$prepared_check_code)"
     echo "$prepare_cache_out"
@@ -2653,7 +2653,7 @@ drift_code=$?
 if [ "$drift_code" -ne 0 ] \
     && echo "$drift_out" | grep -Fq \
         'FAIL known-red reason=xfail_diagnostic_mismatch expected=mirvm trap: known.frontier'; then
-    ok 'expected-red 诊断漂移会失败'
+    ok 'expected-red diagnostic drift fails'
 else
     bad "XFAIL diagnostic drift (exit=$drift_code)"
     echo "$drift_out"
@@ -2673,7 +2673,7 @@ context_drift_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
 context_drift_code=$?
 if [ "$context_drift_code" -ne 0 ] \
     && echo "$context_drift_out" | grep -Fq 'reason=xfail_diagnostic_mismatch'; then
-    ok '旧诊断只作上下文时不能命中 XFAIL'
+    ok 'an old diagnostic in context alone must not hit XFAIL'
 else
     bad "XFAIL contextual diagnostic (exit=$context_drift_code)"
     echo "$context_drift_out"
@@ -2693,7 +2693,7 @@ reverse_context_out=$(env PROJECT_SUITE_ROOT="$SUITE_ROOT" \
 reverse_context_code=$?
 if [ "$reverse_context_code" -ne 0 ] \
     && echo "$reverse_context_out" | grep -Fq 'reason=xfail_diagnostic_mismatch'; then
-    ok '旧诊断位于末行也不能遮住新主故障'
+    ok 'an old diagnostic on the last line must not hide the new primary failure'
 else
     bad "XFAIL reverse contextual diagnostic (exit=$reverse_context_code)"
     echo "$reverse_context_out"
@@ -2714,7 +2714,7 @@ cargo_trailer_code=$?
 if [ "$cargo_trailer_code" -eq 0 ] \
     && echo "$cargo_trailer_out" | grep -Fq \
         'XFAIL known-red reason=mirvm trap: known.frontier'; then
-    ok 'canonical XFAIL 允许非 mirvm Cargo trailer'
+    ok 'canonical XFAIL allows a non-mirvm Cargo trailer'
 else
     bad "XFAIL Cargo trailer (exit=$cargo_trailer_code)"
     echo "$cargo_trailer_out"
@@ -2775,7 +2775,7 @@ mutate_code=$?
 if [ "$mutate_prepare_code" -eq 0 ] && [ "$mutate_code" -ne 0 ] \
     && echo "$mutate_out" | grep -Fq \
         'FAIL tracked-mutation reason=source_tree_mutated side=native'; then
-    ok '运行后拒绝 tracked source mutation'
+    ok 'rejects tracked source mutation after the run'
 else
     bad "tracked source mutation (prepare=$mutate_prepare_code check=$mutate_code)"
     echo "$mutate_prepare"
@@ -2831,7 +2831,7 @@ if [ "$bench_mutate_prepare_code" -eq 0 ] && [ "$bench_mutate_code" -ne 0 ] \
     && grep -Fq 'reason=source_tree_mutated side=native' \
         "$TMP/bench-mutation.stderr" \
     && [ ! -s "$ARTIFACTS/benchmark-mutation/bench/samples.jsonl" ]; then
-    ok 'benchmark 每轮拒绝 tracked source mutation'
+    ok 'benchmark rejects tracked source mutation every round'
 else
     bad "benchmark tracked mutation (prepare=$bench_mutate_prepare_code bench=$bench_mutate_code)"
     echo "$bench_mutate_prepare"
@@ -2870,7 +2870,7 @@ if [ "$native_fail_prepare_code" -eq 0 ] && [ "$native_fail_code" -ne 0 ] \
     && echo "$native_fail_out" | grep -Fq \
         'FAIL native-baseline native_baseline_failed exit=0 expected=7' \
     && [ ! -e "$NATIVE_FAIL_MARKER" ]; then
-    ok 'native baseline 失败时不调用 mirvm'
+    ok 'does not invoke mirvm when the native baseline fails'
 else
     bad "native baseline oracle (prepare=$native_fail_prepare_code check=$native_fail_code)"
     echo "$native_fail_prepare"
@@ -2942,7 +2942,7 @@ toolchain_out=$(env -u CARGO -u RUSTC PATH="$TOOL_DIR:$PATH" \
 toolchain_code=$?
 if [ "$toolchain_prepare_code" -eq 0 ] && [ "$toolchain_code" -eq 0 ] \
     && echo "$toolchain_out" | grep -Fq 'PASS pinned-toolchain correctness'; then
-    ok '启动时冻结 rustup toolchain 二进制路径'
+    ok 'freezes the rustup toolchain binary path at startup'
 else
     bad "pinned toolchain (prepare=$toolchain_prepare_code check=$toolchain_code)"
     echo "$toolchain_prepare"
@@ -3002,7 +3002,7 @@ env_code=$?
 if [ "$env_prepare_code" -eq 0 ] && [ "$env_code" -eq 0 ] \
     && echo "$env_out" | grep -Fq 'PASS clean-environment correctness' \
     && printf 'unset\n' | cmp -s - "$ARTIFACTS/clean-environment/check/native.stdout"; then
-    ok '未声明的 ambient env 不进入 guest'
+    ok 'undeclared ambient env does not reach the guest'
 else
     bad "clean environment (prepare=$env_prepare_code check=$env_code)"
     echo "$env_prepare"
@@ -3055,7 +3055,7 @@ if [ "$path_remap_prepare_code" -eq 0 ] && [ "$path_remap_code" -eq 0 ] \
         'cwd=/run/mirvm-project-side/source home=/run/mirvm-project-side/env/home xdg=/run/mirvm-project-side/env/xdg' \
         "$ARTIFACTS/path-remap/check/native.stdout" \
     && grep -Fq 'rustflags=unset' "$ARTIFACTS/path-remap/check/native.stdout"; then
-    ok '两侧 cwd/HOME/XDG/build diagnostics 使用稳定逻辑路径'
+    ok 'both sides use stable logical paths for cwd/HOME/XDG/build diagnostics'
 else
     bad "logical path remap (prepare=$path_remap_prepare_code check=$path_remap_code)"
     echo "$path_remap_prepare"
@@ -3126,7 +3126,7 @@ if [ "$config_prepare_code" -eq 0 ] && [ "$config_code" -eq 0 ] \
     && echo "$config_out" | grep -Fq 'PASS config-rustflags correctness' \
     && printf 'config-preserved\n' \
         | cmp -s - "$ARTIFACTS/config-rustflags/check/native.stdout"; then
-    ok '保留项目 .cargo/config.toml rustflags'
+    ok "preserves the project's .cargo/config.toml rustflags"
 else
     bad "project config rustflags (prepare=$config_prepare_code check=$config_code)"
     echo "$config_prepare"
@@ -3181,7 +3181,7 @@ env PROJECT_SUITE_ROOT="$SUITE_ROOT" PROJECT_SUITE_ARTIFACTS="$ARTIFACTS" \
 guest_env_bench_code=$?
 if [ "$guest_env_prepare_code" -eq 0 ] && [ "$guest_env_bench_code" -eq 0 ] \
     && [ -s "$ARTIFACTS/guest-env-only/bench/summary.json" ]; then
-    ok 'case env 只进入 workload、不进入 benchmark controller'
+    ok 'case env reaches only the workload, not the benchmark controller'
 else
     bad "guest-only benchmark env (prepare=$guest_env_prepare_code bench=$guest_env_bench_code)"
     echo "$guest_env_prepare"
@@ -3219,7 +3219,7 @@ if [ "$infra_prepare_code" -eq 0 ] && [ "$infra_code" -ne 0 ] \
     && echo "$infra_out" | grep -Fq \
         'FAIL infra-exit reason=runner_infrastructure_failed side=native' \
     && [ ! -e "$INFRA_MARKER" ]; then
-    ok '隔离器失败不能冒充 guest 退出码'
+    ok 'an isolator failure must not impersonate a guest exit code'
 else
     bad "runner infrastructure status (prepare=$infra_prepare_code check=$infra_code)"
     echo "$infra_prepare"
@@ -3240,7 +3240,7 @@ reserved_out=$(env "${common_env[@]}" bash tests/real_projects.sh \
 reserved_code=$?
 if [ "$reserved_code" -ne 0 ] \
     && echo "$reserved_out" | grep -Fq 'invalid_case: expected_exit 124 is reserved by project-suite'; then
-    ok 'timeout/runner 退出码不能声明为 guest 结果'
+    ok 'timeout/runner exit codes must not be declared a guest result'
 else
     bad "reserved harness exit (exit=$reserved_code)"
     echo "$reserved_out"

@@ -4,41 +4,41 @@
 h3o = { version = "0.8", features = ["geo"] }
 geo = "0.30"
 ---
-// h3o 0.8（Uber H3 六边形网格索引纯 Rust 实现）差分。h3o 的 lat/lng→cell 转换是
-// 重度三角函数路径（gnomonic 投影 + face 旋转 + IJK 量化），cell boundary/edge
-// length 同理——全链路 f64 sin/cos/atan2/asin/acos/tan/mul_add 逐位对拍，
-// 任何 native/mirvm 输出差异即 miscompile 候选。
-// 依赖树（default+geo）：h3o-bit / either / float_eq / libm / ahash(std,
-// compile-time-rng——编译期定钥，无运行期 OS 熵源) / geo 0.30 纯 Rust。
-// Tiler 内部 ahash::HashSet 只做 dedup（insert 语义与哈希无关），coverage 输出
-// 序为 Vec 遍历序——确定性不依赖哈希种子。grid_disk 走 VecDeque BFS，HashSet 亦
-// 只做成员判断，输出序即 API 遍历序，直接按 API 序打印。
+// h3o 0.8 differential (pure-Rust Uber H3 hexagonal grid index). lat/lng->cell is a
+// heavily trigonometric path (gnomonic projection + face rotation + IJK
+// quantization), and boundary/edge length likewise; the whole chain is compared bit
+// for bit through f64 sin/cos/atan2/asin/acos/tan/mul_add. The oracle runs this
+// fixture natively and under mirvm and requires byte-identical stdout with empty
+// stderr, so any difference is a miscompile candidate.
+// Dependency tree (default+geo): h3o-bit / either / float_eq / libm / ahash (std,
+// compile-time-rng -- the key is fixed at compile time, so there is no runtime OS
+// entropy source) / geo 0.30, pure Rust. Tiler's ahash::HashSet only dedups (insert
+// semantics are hash-independent), grid_disk's only tests membership, so output
+// order is Vec/API traversal order and determinism never depends on the hash seed.
 //
-// 覆盖：
-// ① 固定坐标集 8 点（含近极点/对蹼子午线两侧）× res 0/5/9/15 → to_cell，
-//    打印 index u64 bits / hex Display / pentagon 位；res9 追加 area_km2、
-//    boundary 逐顶点 lat/lng、icosahedron_faces、direction_at 全谱。
-// ② 邻接：hex 与 pentagon 两种 cell 的 grid_disk k=1/2（API 序 join）、
-//    grid_disk_distances(k=2)、pentagon 的 grid_disk_fast/grid_ring_fast
-//    （Option 空洞形态）。
-// ③ 层级：parent 链 / parent(过细 res)=None / parent(同 res)=self /
-//    children + children_count（hex 与 pentagon 两族）/ center_child /
-//    child_position / child_at 正反解 / children(更粗 res)=空迭代。
-// ④ 距离与 line：grid_distance 双向 / grid_path_cells_size / grid_path_cells
-//    全路径 / to_local_ij + TryFrom<LocalIJ> 反解 / is_neighbor_with 三态 /
-//    edges×6（DirectedEdgeIndex bits + length_km + destination roundtrip）/
-//    vertexes×6（VertexIndex bits + owner）。
-// ⑤ polygon containment（geo feature）：TilerBuilder × 四种 ContainmentMode
-//    固定凸多边形 res8 coverage（排序后 fnv+全 join）、coverage_size_hint；
-//    NaN 顶点 → InvalidGeometry 错误路径。
-// ⑥ 错误路径：NaN/Inf 坐标、非法 u64/hex 串 cell index、Resolution=16、
-//    Direction=7、Edge=0、Vertex=6、compact 重复/混分辨率、grid_distance
-//    与 grid_path_cells 的 ResolutionMismatch。
-// ⑦ compact/uncompact roundtrip：res2 cell 的 49 个 res4 子 cell 压实回
-//    单个 res2 parent 再展开计数。
+// Coverage:
+// 1. Fixed 8-point coordinate set (near-pole and both sides of the antimeridian) x
+//    res 0/5/9/15 -> to_cell, printing index u64 bits / hex Display / pentagon flag;
+//    res9 additionally covers area_km2, per-vertex boundary lat/lng, icosahedron_faces.
+// 2. Adjacency: grid_disk k=1/2 for hex and pentagon cells (API-order join),
+//    grid_disk_distances(k=2), and pentagon grid_disk_fast/grid_ring_fast (Option holes).
+// 3. Hierarchy: parent chain / parent(too-fine res)=None / parent(same res)=self /
+//    children + children_count (hex and pentagon families) / center_child /
+//    child_position / child_at roundtrip / children(coarser res)=empty iterator.
+// 4. Distance and line: grid_distance both ways / grid_path_cells_size / full
+//    grid_path_cells / to_local_ij + TryFrom<LocalIJ> inverse / is_neighbor_with
+//    three-state / edges x6 and vertexes x6 (bits + length_km + owner roundtrip).
+// 5. Polygon containment (geo feature): TilerBuilder x four ContainmentModes over a
+//    fixed convex polygon -> sorted res8 coverage (fnv + full join) and
+//    coverage_size_hint; a NaN vertex takes the InvalidGeometry error path.
+// 6. Error paths: NaN/Inf coordinates, invalid u64/hex cell index strings,
+//    Resolution=16, Direction=7, Edge=0, Vertex=6, compact duplicates/mixed
+//    resolutions, and ResolutionMismatch from grid_distance/grid_path_cells.
+// 7. compact/uncompact roundtrip: the 49 res4 children of a res2 cell compact back
+//    to one res2 parent, then expand again for a count check.
 //
-// 确定性：坐标/多边形全部常量；无随机；浮点一律 to_bits() 锁位型打印；
-// 无 HashMap 迭代、无地址/时间/线程序；成功路径 stderr 为空。
+// Determinism: coordinates/polygons are constants, no randomness, every float prints
+// via to_bits() to pin bits, no HashMap/address/time/thread order, stderr empty on success.
 use std::str::FromStr;
 
 use geo::{LineString, Polygon};
@@ -54,7 +54,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 一组 cell 的 u64 bits 流指纹。
+/// Fingerprint of a cell set's stream of u64 bits.
 fn cells_fnv(cells: &[CellIndex]) -> u64 {
     let mut bytes = Vec::with_capacity(cells.len() * 8);
     for c in cells {
@@ -71,27 +71,27 @@ fn join_cells(cells: &[CellIndex]) -> String {
         .join(",")
 }
 
-/// f64 → 锁位十六进制。
+/// f64 -> bit-pinned hex.
 fn b(x: f64) -> String {
     format!("{:016x}", x.to_bits())
 }
 
-/// Option<cell>（fast 族空洞）→ hex 或 "-"。
+/// Option<cell> (fast-family hole) -> hex or "-".
 fn opt(cell: Option<CellIndex>) -> String {
     cell.map(|c| format!("{c:x}")).unwrap_or_else(|| "-".to_string())
 }
 
 fn main() {
-    // ===== ① 固定坐标集 × res 0/5/9/15 → cell =====
+    // ===== (1) Fixed coordinate set x res 0/5/9/15 -> cell =====
     let coords: [(f64, f64); 8] = [
-        (48.864716, 2.349014),      // 巴黎
-        (31.230416, 121.473701),    // 上海
-        (30.243684, 120.149963),    // 西湖
-        (-33.868820, 151.209296),   // 悉尼（南半球）
-        (89.9, 45.0),               // 近北极点
-        (-89.9, -120.0),            // 近南极点
-        (0.0, 179.9999),            // 对蹼子午线东侧
-        (0.0, -179.9999),           // 对蹼子午线西侧
+        (48.864716, 2.349014),      // Paris
+        (31.230416, 121.473701),    // Shanghai
+        (30.243684, 120.149963),    // West Lake
+        (-33.868820, 151.209296),   // Sydney (southern hemisphere)
+        (89.9, 45.0),               // near North Pole
+        (-89.9, -120.0),            // near South Pole
+        (0.0, 179.9999),            // east of the antimeridian
+        (0.0, -179.9999),           // west of the antimeridian
     ];
     let mut at9 = Vec::new();
     for (i, &(lat, lng)) in coords.iter().enumerate() {
@@ -110,7 +110,7 @@ fn main() {
             }
         }
     }
-    // res9 浮点重路径：面积 + boundary 逐顶点 + 所属二十面体面 + 方向谱
+    // res9 heavy float paths: area + per-vertex boundary + icosahedron faces + directions
     let p9 = at9[0];
     let s9 = at9[1];
     println!(
@@ -138,7 +138,7 @@ fn main() {
         u8::from(p9.base_cell()),
         CellIndex::base_cells().count()
     );
-    // pentagon 谱（res9 共 12 个）+ 其 boundary（5 顶点）
+    // pentagon spectrum (12 at res9) + its boundary (5 vertices)
     let mut pents9: Vec<CellIndex> = Resolution::Nine.pentagons().collect();
     pents9.sort();
     println!("pentagons9 n={} {}", pents9.len(), join_cells(&pents9));
@@ -156,7 +156,7 @@ fn main() {
         )
     );
 
-    // ===== ② 邻接 k-ring =====
+    // ===== (2) Adjacency k-ring =====
     let ring1: Vec<CellIndex> = p9.grid_disk(1);
     println!("p9 disk1 n={} {}", ring1.len(), join_cells(&ring1));
     let ring2: Vec<CellIndex> = p9.grid_disk(2);
@@ -171,13 +171,13 @@ fn main() {
             .collect::<Vec<_>>()
             .join(",")
     );
-    // pentagon：k=1 磁盘缺 1 邻（6 cell），k=2 缺 2（17 cell）
+    // pentagon: the k=1 disk is missing 1 neighbor (6 cells), k=2 is missing 2 (17 cells)
     let pdisk1: Vec<CellIndex> = pent9.grid_disk(1);
     println!("pent9 disk1 n={} {}", pdisk1.len(), join_cells(&pdisk1));
     let pdisk2: Vec<CellIndex> = pent9.grid_disk(2);
     println!("pent9 disk2 n={} fnv={:016x}", pdisk2.len(), cells_fnv(&pdisk2));
     println!("pent9 disk2 {}", join_cells(&pdisk2));
-    // fast 族：Option 空洞（Class III / pentagon 越界位置）
+    // fast family: Option holes (Class III / out-of-range pentagon positions)
     let pfast1: Vec<Option<CellIndex>> = pent9.grid_disk_fast(1).collect();
     println!(
         "pent9 disk_fast1 n={} {}",
@@ -202,7 +202,7 @@ fn main() {
         h3o::max_grid_disk_size(2)
     );
 
-    // ===== ③ 层级 parent/children =====
+    // ===== (3) Hierarchy parent/children =====
     for res in [
         Resolution::Eight,
         Resolution::Five,
@@ -243,7 +243,7 @@ fn main() {
         "p9 children@3 n={}",
         p9.children(Resolution::Three).count()
     );
-    // child_position / child_at 正反解（doc 用例原值）
+    // child_position / child_at roundtrip (values from the doc example)
     let doccell = CellIndex::try_from(0x8a1fb46622dffff).unwrap();
     println!(
         "doc child_position@8={:?} @12={:?}",
@@ -260,7 +260,7 @@ fn main() {
             .map(|c| format!("{c:x}"))
     );
 
-    // ===== ④ 距离与 line =====
+    // ===== (4) Distance and line =====
     let paris = LatLng::new(48.864716, 2.349014).unwrap();
     let london = LatLng::new(51.507222, -0.1275).unwrap();
     println!(
@@ -293,7 +293,7 @@ fn main() {
         r.reverse();
         r == path
     });
-    // local IJ + 反解
+    // local IJ + inverse
     let lij = b9.to_local_ij(p9).unwrap();
     println!(
         "local_ij anchor={} i={} j={} roundtrip={}",
@@ -302,7 +302,7 @@ fn main() {
         lij.coord.j,
         CellIndex::try_from(lij) == Ok(b9)
     );
-    // is_neighbor_with 三态
+    // is_neighbor_with three-state
     let nb1: Vec<CellIndex> = p9.grid_disk(1);
     println!(
         "neighbor direct={} far={} ",
@@ -339,7 +339,7 @@ fn main() {
         pent9.vertexes().count()
     );
 
-    // ===== ⑤ polygon containment（Tiler × 4 mode）=====
+    // ===== (5) Polygon containment (Tiler x 4 modes) =====
     let poly = Polygon::new(
         LineString::from(vec![
             (2.300000, 48.840000),
@@ -371,7 +371,7 @@ fn main() {
         );
         println!("coverage {mode:?} {}", join_cells(&cov));
     }
-    // 错误路径：NaN 顶点 → InvalidGeometry
+    // error path: NaN vertex -> InvalidGeometry
     let bad_poly = Polygon::new(
         LineString::from(vec![
             (f64::NAN, 0.0),
@@ -387,7 +387,7 @@ fn main() {
         Err(e) => println!("bad_poly err: {e}"),
     }
 
-    // ===== ⑥ 无效坐标 / 非法 index / 错误路径 =====
+    // ===== (6) Invalid coordinates / bad index / error paths =====
     println!(
         "latlng nan={:?} inf={:?}",
         LatLng::new(f64::NAN, 10.0).map(|_| "ok"),
@@ -417,7 +417,7 @@ fn main() {
         Ok(_) => println!("grid_path mismatch unexpectedly ok"),
         Err(e) => println!("grid_path mismatch err: {e}"),
     }
-    // compact 错误面：重复 cell / 混分辨率
+    // compact error surface: duplicate cell / mixed resolutions
     let dup = vec![ring1[0], ring1[0]];
     match CellIndex::compact(&mut dup.clone()) {
         Ok(()) => println!("compact dup unexpectedly ok"),
@@ -429,7 +429,7 @@ fn main() {
         Err(e) => println!("compact mixed err: {e:?}"),
     }
 
-    // ===== ⑦ compact / uncompact roundtrip =====
+    // ===== (7) compact / uncompact roundtrip =====
     let p2 = p9.parent(Resolution::Two).unwrap();
     let mut full: Vec<CellIndex> = p2.children(Resolution::Four).collect();
     let n_before = full.len();
@@ -445,7 +445,7 @@ fn main() {
         CellIndex::uncompact(full.iter().copied(), Resolution::Four).count(),
         CellIndex::uncompact(full.iter().copied(), Resolution::Four).eq(kids.iter().copied())
     );
-    // 上海/悉尼 cell 的超远距离：跨 base cell「cannot unfold」为 H3 正常错误路径
+    // Long Shanghai/Sydney distance: cross-base-cell "cannot unfold" is a normal H3 error path
     let y9 = at9[3];
     println!(
         "grid_distance p9→s9={:?} p9→y9={:?}",

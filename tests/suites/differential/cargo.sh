@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# cargo 模式差分：frontmatter 脚本 / cargo 项目，native cargo run vs mirvm 对拍。
-# native 是 oracle，必须先达到各 fixture 明示的退出码；“双方同样构建失败”不是 PASS。
-# M5.1 后 ecosystem/ffi_zlib/project 均须与 native 一致；真实项目 TDD 又加入
-# ripgrep_regex 与 warning_return。保留可注入的 expected-red 模式只用于门禁自身
-# 回归，以及未来滚动前沿时锁定原因/XPASS 行为。
+# Cargo-mode differential: frontmatter scripts / cargo projects, native cargo run vs mirvm.
+# native is the oracle and must first reach the exit code each fixture declares; "both failed to build" is not a PASS.
+# ecosystem/ffi_zlib/project must match native; ripgrep_regex and warning_return cover
+# real-world projects. The injectable expected-red mode serves this suite's own
+# regression and locks the reason/XPASS behavior when the frontier rolls forward.
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
 test_enter_repo
@@ -13,9 +13,9 @@ RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
 RUSTC_APPEND_PROXY=${RUSTC_APPEND_PROXY:-$(pwd)/tests/fixtures/rustc_proxy.sh}
 RUSTC_WRAPPER_PROBE=${RUSTC_WRAPPER_PROBE:-$(pwd)/tests/fixtures/rustc_wrapper_probe.sh}
 SCRIPT_CACHE=${SCRIPT_CACHE:-${MIRVM_HOME:-$HOME/.mirvm}/scripts}
-# 本套件是「cargo 模式差分」专轨（D15 P3 双轨纪律）：恒走 cargo 三阶段
-# compat 路径——即便外层（如 gate DEPS=self 全量轮）置了 MIRVM_DEPS=self，
-# 也不能让本轨静默翻成 self 路径（那等于 cargo 腿零覆盖）。
+# This suite is the dedicated cargo-mode differential track: it always takes the cargo
+# three-phase compat path. Even when an outer layer (e.g. a gate DEPS=self full run)
+# sets MIRVM_DEPS=self, it must not silently switch to the self path and leave the cargo leg with zero coverage.
 export MIRVM_DEPS=cargo
 show_diff() {
     local native_out="$1" mirvm_out="$2"
@@ -56,7 +56,7 @@ check_expected_red() {
         fail=$((fail+1))
     elif [ "$mirvm_code" = "$expected_mirvm_code" ] \
         && grep -Fq "$diagnostic" "$mirvm_err"; then
-        echo "XFAIL $name ($diagnostic; M5.1 expected red)"
+        echo "XFAIL $name ($diagnostic; expected red)"
         xfail=$((xfail+1))
     else
         echo "FAIL $name (expected mirvm exit=$expected_mirvm_code + '$diagnostic', native=$native_code mirvm=$mirvm_code)"
@@ -66,11 +66,11 @@ check_expected_red() {
     fi
 }
 
-# P3（M6 片3 调研）：L2 warm 复跑一致性。第二跑应命中 IR 缓存，其 stdout/stderr/
-# 退出码必须与首跑（随后对 native 判绿）逐字节一致——防"缓存回放旧语义/快照损伤"
-# 假绿；告警类项目（诚实不入缓存）第二跑=冷重演，同样必须一致。程序差分套件的 M6 片2
-# 通道在 cargo 形态的对位；此前 runner 缓存路径零 gate 覆盖（环境化石化事故任何
-# gate 都抓不到），本维度补上。
+# L2 warm rerun consistency: the second run should hit the IR cache, and its stdout/stderr/
+# exit code must be byte-identical to the first run (which is then judged against native),
+# guarding against a "cache replays stale semantics / damaged snapshot" false green.
+# Warning-producing projects stay out of the cache, so their second run replays cold and
+# must still match. This dimension gives the runner cache path the gate coverage it lacked.
 check_warm() {
     local name="$1" cold_out="$2" cold_err="$3" cold_code="$4"
     local warm_out="$5" warm_err="$6" warm_code="$7"
@@ -79,7 +79,7 @@ check_warm() {
         && diff -q "$cold_err" "$warm_err" >/dev/null; then
         return 0
     fi
-    echo "FAIL $name (L2 warm 复跑不一致 cold=$cold_code warm=$warm_code)"
+    echo "FAIL $name (L2 warm rerun differs cold=$cold_code warm=$warm_code)"
     show_diff "$cold_out" "$warm_out"
     if ! diff -q "$cold_err" "$warm_err" >/dev/null; then
         echo "warm stderr mismatch:"
@@ -91,25 +91,25 @@ check_warm() {
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
-# 定位 frontmatter 脚本物化出的项目目录（按 Cargo.toml 里的 crate 名匹配）
+# Locate the project directory a frontmatter script materialized (match the crate name in Cargo.toml)
 script_dir() {
     local stem="$1"
     grep -l "name = \"$stem\"" "$SCRIPT_CACHE"/*/Cargo.toml 2>/dev/null |
         head -1 | xargs -r dirname
 }
 
-# frontmatter 脚本：mirvm 物化的项目目录直接给 native cargo 用
+# Frontmatter script: the project directory mirvm materialized is handed directly to native cargo
 diff_script() {
     local name="$1" src="$2" stem="$3" mode="$4" expected_native_code="$5"
     local expected_mirvm_code="${6:-}" diagnostic="${7:-}"
     "$MIRVM" run "$src" >"$TMP/$name.mirvm" 2>"$TMP/$name.mirvm.err"; local mc=$?
     local mc2=0
     if [ "$mode" != xfail ]; then
-        # warm 复跑（P3）：判绿前先要求第二跑与首跑一致
+        # Warm rerun: require the second run to match the first before judging green
         "$MIRVM" run "$src" >"$TMP/$name.mirvm2" 2>"$TMP/$name.mirvm2.err"; mc2=$?
     fi
     local D; D=$(script_dir "$stem")
-    if [ -z "$D" ]; then echo "FAIL $name (未找到物化目录)"; fail=$((fail+1)); return; fi
+    if [ -z "$D" ]; then echo "FAIL $name (materialized directory not found)"; fail=$((fail+1)); return; fi
     (cd "$D" && RUSTC="$RUSTC" "$CARGO" run -q \
         >"$TMP/$name.native" 2>"$TMP/$name.native.err"); local nc=$?
     if [ "$mode" = xfail ]; then
@@ -135,7 +135,7 @@ diff_script ffi_zlib demo/ffi_zlib.rs ffi_zlib green 0
 diff_script ripgrep_regex tests/fixtures/real_ripgrep_regex.rs real_ripgrep_regex green 0
 diff_script warning_return tests/fixtures/cargo_warning_return.rs cargo_warning_return green 0
 
-# 2) cargo 项目模式
+# 2) cargo project mode
 PROJ="$TMP/proj"; mkdir -p "$PROJ/.cargo" "$PROJ/src"
 cat > "$PROJ/Cargo.toml" <<'EOF'
 [package]
@@ -205,8 +205,8 @@ check_green project-cold "$TMP/proj.native" "$TMP/proj.mirvm" "$nc" "$mc" 7 \
 check_green project-warm-runtime-env "$TMP/proj.native2" "$TMP/proj.mirvm2" \
     "$nc2" "$mc2" 7 "$TMP/proj.native2.err" "$TMP/proj.mirvm2.err"
 
-# Cargo fingerprint 合同：固定 Cargo 能看见的 rustflags 改变后必须重编；
-# compat 轨追加在 wrapper 内的 flags 也必须进入等价的 Cargo 新鲜度判断。
+# Cargo fingerprint contract: a change to the rustflags Cargo can see must force a rebuild,
+# and flags the compat track appends inside the wrapper must enter Cargo's freshness check equivalently.
 FP_PROJ="$TMP/fingerprint"; mkdir -p "$FP_PROJ/src"
 cat > "$FP_PROJ/Cargo.toml" <<'EOF'
 [package]
@@ -244,9 +244,9 @@ check_green rustflags-fingerprint-cold "$TMP/fp-one.native" "$TMP/fp-one.mirvm" 
 check_green rustflags-fingerprint-change "$TMP/fp-two.native" "$TMP/fp-two.mirvm" \
     "$fpn2" "$fpm2" 0 "$TMP/fp-two.native.err" "$TMP/fp-two.mirvm.err"
 
-# Cargo wrapper 合同：固定 Cargo 决定普通 wrapper 在外、workspace wrapper 在内，
-# 且后者只用于 workspace 成员。MIRVM 必须占据最内层编译器位置，不能拒绝、吞掉
-# 或自己重排 Cargo 通过环境变量/config 得出的 wrapper 链。
+# Cargo wrapper contract: pinned Cargo puts the ordinary wrapper outside and the workspace
+# wrapper inside (members only). MIRVM must occupy the innermost compiler position and must
+# not reject, swallow, or reorder the wrapper chain Cargo derives from env/config.
 WRAP_DEP="$TMP/wrapper-dep"; mkdir -p "$WRAP_DEP/src"
 cat > "$WRAP_DEP/Cargo.toml" <<'EOF'
 [package]
@@ -281,7 +281,7 @@ check_wrapper_chain() {
     for log in "$native_log.$ordinary" "$native_log.$workspace" \
         "$mirvm_log.$ordinary" "$mirvm_log.$workspace"; do
         if [ ! -s "$log" ]; then
-            echo "FAIL $name (wrapper 未执行: $log)"; bad=1
+            echo "FAIL $name (wrapper did not run: $log)"; bad=1
         fi
     done
     if [ "$bad" = 0 ] \
@@ -296,7 +296,7 @@ check_wrapper_chain() {
         echo "PASS $name"; pass=$((pass+1))
     else
         if [ "$bad" = 0 ]; then
-            echo "FAIL $name (wrapper 顺序或适用范围与固定 Cargo 不一致)"
+            echo "FAIL $name (wrapper order or scope differs from pinned Cargo)"
             tail -20 "$native_log.$ordinary" "$native_log.$workspace" \
                 "$mirvm_log.$ordinary" "$mirvm_log.$workspace"
         fi

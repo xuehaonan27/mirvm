@@ -359,7 +359,7 @@ fn path_zerolen() -> Path {
     b.build()
 }
 
-/// A closed "三角形" whose points all coincide.
+/// A closed "triangle" whose points all coincide.
 fn path_coincident() -> Path {
     let mut b = Path::builder();
     b.begin(point(7.0, 7.0));
@@ -534,7 +534,7 @@ fn main() {
     ];
     fill_events(&mut ft, "fill/err/pos-nan", &nan_events, &fo);
 
-    // ---- Stroke：width / join / cap ----
+    // ---- Stroke: width / join / cap ----
     let so = StrokeOptions::default();
     for (label, w) in [("w0.5", 0.5f32), ("w2", 2.0), ("w8", 8.0)] {
         stroke(

@@ -3,8 +3,8 @@
 [dependencies]
 blake3 = "1"
 ---
-// SIMD 密集哈希：压 simd_* / 平台 intrinsic 家族。
-// blake3 会按 target-feature 走 SSE/AVX 路径。
+// SIMD-heavy hashing: exercises the simd_* / platform intrinsic family.
+// blake3 selects its SSE/AVX path from the target features.
 fn main() {
     let mut hasher = blake3::Hasher::new();
     for i in 0..1000u32 {
@@ -13,11 +13,11 @@ fn main() {
     let hash = hasher.finalize();
     println!("blake3(0..1000 le) = {}", hash.to_hex());
 
-    // 已知向量：空输入
+    // Known vector: empty input
     let empty = blake3::hash(b"");
     println!("blake3(\"\") = {}", empty.to_hex());
 
-    // 已知向量："hello"
+    // Known vector: "hello"
     let h = blake3::hash(b"hello");
     println!("blake3(\"hello\") = {}", h.to_hex());
 }

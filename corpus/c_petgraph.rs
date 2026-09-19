@@ -3,7 +3,7 @@
 [dependencies]
 petgraph = "0.6"
 ---
-// 图数据结构 + Dijkstra。纯计算，ownership 复杂（arena 式节点/边索引）。
+// Graph data structure + Dijkstra. Pure computation with complex ownership (arena-style indices).
 use petgraph::algo::dijkstra;
 use petgraph::graph::Graph;
 

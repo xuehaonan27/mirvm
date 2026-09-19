@@ -19,7 +19,7 @@ fn float_lanes() {
     let s = z + y;
     println!("f add nan/inf = {:?} {}", s.is_nan().to_array(), s[3]);
     let d = f64x2::from_array([1.0, -7.5]) / f64x2::from_array([0.0, 2.5]);
-    println!("f div = {} {}", d[0], d[1]); // inf、-3
+    println!("f div = {} {}", d[0], d[1]); // inf, -3
     let m = f64x2::from_array([5.0, f64::NAN]);
     let n = f64x2::from_array([3.0, 2.0]);
     println!("f min/max = {:?} {:?}", m.simd_min(n).to_array(), m.simd_max(n).to_array());
