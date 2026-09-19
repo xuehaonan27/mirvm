@@ -2872,8 +2872,10 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   - `capture_session_records_automatic_host_syscall_rewrite`：新增
     `syscall_trace` 频度桶断言（该助手只有 trace 编译码会调），把"编译身体真的走了钉住站点"
     和"记录字节与解释一致"分开证。
-  - `runtime.telemetry` 8 → **13 断言**：新增一段 `MIRVM_JIT_THRESHOLD=1 MIRVM_JIT_SYNC=1`
-    真机纵切，断言子代文件记录数与解释跑一致、代际仍为 1、且 `syscall_trace` 非零。**反向
+  - `runtime.telemetry` 8 → **14 断言**：新增一段 `MIRVM_JIT_THRESHOLD=1 MIRVM_JIT_SYNC=1`
+    真机纵切，断言子代文件记录数与解释跑一致、代际仍为 1、且 `syscall_trace` 非零；fixture
+    另加一条 guest 线程（3 次 syscall），断言父文件"每 guest 线程一个 producer"——钉寄存器
+    是每线程的，这条覆盖面本片之前完全没有。**反向
     对照实做两次**：把 PLT 槽改回读 plain 数组 → 该段以 **SIGSEGV(139)** 失败（trace 身体
     的 PLT 载入 0 地址），3 项断言红；把 fork 子代的钉寄存器修复去掉 → 子代文件记录数从 4
     掉到 0。所以这一个门同时钉住本片修掉的两个真 bug，不是装饰。
@@ -2881,10 +2883,22 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
 - **本片未兑现（仍是 L3 主体）**：raw site 的"页内内联写"（当前仍是助手本体内写，站点只有
   `get_pinned_reg`；1B/§5.9 的 64B+24B 内联形状未做）；解释器**单独一条 trace 循环**（现在
   仍是入口按域选择、解释器本体不分叉）；4→64 KiB 自适应页类与 P2 profile。
-- **如实记录的设计偏离**：设计说"代码域只在最外层 guest activation 入口选择一次"，当前实现
-  是**Engine 构造时（`try_from_module` 读 `capture::is_armed()`）冻结一次**。对
-  `mirvm capture`（会话先于 Engine）语义等价；对"先建 Engine、后开会话"的嵌入用法则不等价
-  ——该 Engine 永远是 plain。这条是 L3 收口前必须裁决的偏差，不是已完成能力。
+- **为下一片留下的判定材料（本片查过、尚未动）**：
+  - **逐记录冷 sequence**：`cold.next_sequence` 既是页头 `first_sequence..next_sequence` 区间
+    的右端，也是 producer-end 账本的 `attempted`（`encoded = next_sequence − drops`）。把它
+    从热路移走不是删两行：页内记录数无法由 `used_bytes` 反推（64B Enter 与 24B Exit 混合），
+    所以要么在**页头**加一个 producer 自写的记录计数、并把每页 drop 数留在 cold 路径，seal 时
+    由 `first_sequence + 记录数 + 本页 drop` 合成；要么承认这条冷行本就是 producer 独占、
+    writer 在活跃期不读它。两条路的**每次记录写次数相同**（换一条 cache line 而已），差别只在
+    所有权叙事与 retire 时刻的 cache line 归属。这是 v0 文件/sequence 合同的决定，须与
+    §12.1 第 5/6 条一起裁，不能顺手改。
+  - **代码域选择点**：设计要"最外层 activation 入口选一次"，当前是 Engine 构造时
+    （`try_from_module` 读 `capture::is_armed()`）冻结一次。对 `mirvm capture`（会话先于
+    Engine）语义等价；对"先建 Engine、后开会话"的嵌入用法不等价——该 Engine 永远是 plain。
+    补齐的**充分条件**是同一 Engine 同时能物化 plain/trace 两套代码（两个 ISA/module、两个
+    Compiler、请求带域），并且解释器按域选 syscall 语义——因为默认代码不许携带 recorder 参数
+    或采集分支（§5.2.3），所以不能靠"trace 代码 + 空 pin"冒充 plain。这不是尾部改动，须单独
+    立项；在那之前 `open-issues` T8 的偏离记录保持有效，L3 不得宣称完成。
 - **另一条如实记录**：钉寄存器只在 syscall 站点自愈。子代在 fork 之后、第一个 syscall 之前
   若一直不碰 syscall 站点，寄存器里仍是父进程 recorder；这无害（除 syscall 站点外没有人读
   它），但不是"任何进入 trace 域的路径都重设"的完整形态，1B 重开此项。
