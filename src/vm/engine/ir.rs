@@ -8,9 +8,9 @@
 //! Purely frame-local scalar accesses with a static offset keep the `Slot` fast path, which needs no
 //! evaluation at all.
 //!
-//! This IR is the real engine body, kept separate from the bytecode the spikes used (those are frozen
-//! validation artifacts). The instruction families and the module tables they populate live in
-//! `program`; this module owns the operand/width/operation vocabulary they are built from.
+//! This IR is the real engine body. The instruction families and the module tables they
+//! populate live in `program`; this module owns the operand/width/operation vocabulary they
+//! are built from.
 
 mod program;
 

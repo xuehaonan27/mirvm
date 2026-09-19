@@ -3,6 +3,9 @@
 > 状态：**通过**（2026-07-07）。`mirvm spike4` 4 用例全 PASS；**TSan 全量插桩下零竞争警告**
 > （designs/concurrency-arch.md 的 RFC 验收标准）；spike1-3 + tier-0 diff 16/16 无回归。
 > **4-spike 计划就此收官：模型 A 地基（骨架 / 互操作 / unwind / 并发）全部验证，可进 M4。**
+> **2026-09-19 归档**：spike 代码已从 `src/vm/spikes/` 删除（裁决见 decision-history §7.65）。
+> 用例本身没有丢——它现在是 TSan harness 自己的并发负载（`tsan/src/spike4/`），由
+> `runtime.tsan` 套件继续跑；下文的 `mirvm spike4` 命令已不可跑。
 
 ## 1. 建了什么
 

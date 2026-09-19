@@ -3,9 +3,10 @@
 //!
 //! - `engine/`: the engine (typed bytecode IR / place evaluation / FrameGuard unwind /
 //!   mimalloc heap / frozen region / dlsym+libffi direct calls).
-//! - `spikes/`: frozen validation artifacts (model A skeleton, i2c/c2i, mixed-stack
-//!   unwind, concurrent TSan, real Cranelift). Regression self-check via
-//!   `mirvm spike1..5` only; do not modify or extend.
+//!
+//! The pre-M4 spike tree that used to live here was archived: its conclusions are in
+//! `docs/history/spike*.md`, and the one case set still worth running under TSan (engine
+//! Sync, blocking-syscall liveness, host-atomic interop) now lives in the harness itself
+//! (`tsan/src/spike4/`), so nothing in the product depends on it.
 
 pub mod engine;
-pub mod spikes;

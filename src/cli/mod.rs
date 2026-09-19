@@ -83,7 +83,6 @@ ENV:
     MIRVM_NO_BASE_IMAGE =1 bypasses std pre-lowered base image (full cold lowering; diagnostic/differential)
 
 DEV:
-    mirvm spike1..5   run the frozen M4 precursor spikes (regression self-check; see docs/history/spike*.md)
     MIRVM_JIT_DEBUG   =1 logs JIT compiler thread receive/publish flow (deliberate diagnostic knob)
     MIRVM_JIT_DEBUG_DUMP =1 dumps CLIF for functions that fail compilation (stacked on MIRVM_JIT_DEBUG)
     MIRVM_SEGV_DUMP   =1 prints fault RIP on SIGSEGV (JIT code crash site location)
@@ -151,12 +150,6 @@ pub fn main() -> ExitCode {
         "log" => crate::telemetry::tool::main(argv),
         "cache" => entry::cache_main(argv),
         "deps" => entry::deps_main(argv),
-        "spike1" => crate::vm::spikes::spike1::run(),
-        "spike2" => crate::vm::spikes::spike2::run(),
-        "spike3" => crate::vm::spikes::spike3::run(argv),
-        "spike4" => crate::vm::spikes::spike4::run(),
-        #[cfg(feature = "cranelift")]
-        "spike5" => crate::vm::spikes::spike5::run(argv),
         _ => {
             eprint!("{USAGE}");
             ExitCode::from(2)

@@ -2,6 +2,8 @@
 
 > 状态：**通过**（2026-07-05）。`mirvm spike1` 全 PASS，tier-0 差分 16/16 无回归。
 > 目的：验证模型 A 的基本执行形状成不成立，脱离 rustc InterpCx 写第一段真·自研 VM 代码。
+> **2026-09-19 归档**：spike 代码已从 `src/vm/spikes/` 删除（裁决见 decision-history §7.65）。
+> 本文是结论与证据的留档；文中 `mirvm spikeN` 命令已不可跑。
 
 ## 1. 建了什么
 

@@ -1,9 +1,9 @@
-//! TSan harness for the `vm::spikes::spike4` cases: reuses `src/vm`
-//! source-for-source (pure Rust, no rustc_private) and runs the concurrency cases
-//! under full instrumentation (`-Zsanitizer=thread -Zbuild-std`).
+//! TSan harness: runs the concurrency cases under full instrumentation
+//! (`-Zsanitizer=thread -Zbuild-std`) and reuses `src/vm` source-for-source (pure Rust,
+//! no rustc_private) so the real engine is what gets instrumented.
 //! Passes when the exit code is 0 and TSan prints no "WARNING: ThreadSanitizer"
 //! (see the `runtime.tsan` suite).
-#![allow(dead_code)] // the earlier spikes are compiled in but only spike4 runs
+#![allow(dead_code)] // the engine's spike-era modules are compiled in but only tsan_mt runs
 #![feature(cfg_sanitize)] // engine/ctx.rs: Ctx dtor disposition differs under TSan
 #![feature(f16)] // engine: f16/f128 host arithmetic (sharing src/vm needs the same feature set)
 #![feature(f128)]
@@ -22,13 +22,15 @@ mod product_adapters;
 pub(crate) use product_adapters::{lower, sysroot};
 #[path = "../../src/elfsym.rs"]
 mod elfsym; // archive .symtab fallback for ffi.rs (pure Rust, source-shared)
+mod spike4; // concurrency cases owned by this harness (archived spike 4)
 mod telemetry; // capture/format source-shared; also runs one real arm session lifecycle
 #[path = "../../src/vm/mod.rs"]
 mod vm;
 
 fn main() -> std::process::ExitCode {
-    // spike4 cases plus the real multithreaded engine (shared Shared, per-thread Ctx/thunk factory)
-    if vm::spikes::spike4::run_cases()
+    // harness-owned concurrency cases, the real multithreaded engine (shared Shared,
+    // per-thread Ctx/thunk factory), and one real capture session lifecycle
+    if spike4::run_cases()
         && vm::engine::tsan_mt::run()
         && telemetry::run_capture_lifecycle_case()
     {
