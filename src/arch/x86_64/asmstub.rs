@@ -12,7 +12,7 @@
 
 /// Stub bytes: `movabs rax, target; jmp rax` (48 B8 <imm64> FF E0), 12B long.
 /// (`STUB_STRIDE = 16` is this 12B rounded up; the constant lives in
-/// `vm/engine/codearena`.)
+/// `vm/codearena`.)
 pub fn emit_stub_bytes(target: u64) -> [u8; 12] {
     let mut b = [0u8; 12];
     b[0] = 0x48;

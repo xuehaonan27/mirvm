@@ -694,8 +694,7 @@ fn rescue_with_rlib_symbols(
     let mut slots = std::collections::BTreeSet::new();
     for (name, addr) in &pairs {
         use std::fmt::Write as _;
-        let slot =
-            crate::vm::engine::ir::native_entry_slot_name(crate::vm::engine::ir::LinkAddr(*addr));
+        let slot = crate::vm::ir::native_entry_slot_name(crate::vm::ir::LinkAddr(*addr));
         let _ = writeln!(asm, ".globl {name}");
         let _ = writeln!(asm, ".hidden {name}");
         let _ = writeln!(asm, ".type {name},@function");

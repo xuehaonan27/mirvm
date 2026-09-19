@@ -54,7 +54,7 @@ pub(crate) struct Linker<'tcx> {
     pub(crate) foreign_slots: std::collections::HashMap<(Box<str>, bool), u64>,
     /// Entry-stub code arena and recipe table (the image side lives in `Split`): instance → stub idx. The
     /// stub's domain is determined by the instance class, the same discipline as fn entries.
-    pub(crate) code_arena: crate::vm::engine::codearena::StubArena,
+    pub(crate) code_arena: crate::vm::codearena::StubArena,
     pub(crate) entry_stub_sites: Vec<ir::EntryStubSite>,
     pub(crate) entry_stub_ids: FxHashMap<Instance<'tcx>, u32>,
     /// FFI derivability cache (`freeze_c_fnptr_sig`). `None` = keep as a data-slot entry: Rust ABI,
@@ -110,7 +110,7 @@ impl<'tcx> Linker<'tcx> {
         tcx: TyCtxt<'tcx>,
         stack: &crate::baseimage::ImageStack,
         frozen: FrozenArena,
-        code_arena: crate::vm::engine::codearena::StubArena,
+        code_arena: crate::vm::codearena::StubArena,
     ) -> Self {
         fn clone_map<V: Copy>(
             m: &std::collections::HashMap<Box<str>, V>,
@@ -181,7 +181,7 @@ impl<'tcx> Linker<'tcx> {
             image_got_idx: FxHashMap::default(),
             image_got_fixups: Vec::new(),
             image_frozen_relocs: Vec::new(),
-            image_code_arena: crate::vm::engine::codearena::StubArena::new_image(0),
+            image_code_arena: crate::vm::codearena::StubArena::new_image(0),
             image_stub_sites: Vec::new(),
         });
     }

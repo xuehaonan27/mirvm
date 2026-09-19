@@ -2,16 +2,16 @@ use super::*;
 
 static NEXT_PACKAGE_TEST: AtomicU64 = AtomicU64::new(0);
 
-fn test_body(name: &str) -> crate::vm::engine::ir::FuncBody {
-    crate::vm::engine::ir::FuncBody {
+fn test_body(name: &str) -> crate::vm::ir::FuncBody {
+    crate::vm::ir::FuncBody {
         frame_size: 8,
         frame_align: 8,
-        ret: crate::vm::engine::ir::RetAbi::Zst,
+        ret: crate::vm::ir::RetAbi::Zst,
         params: Vec::new(),
         caller_loc_off: None,
-        blocks: vec![crate::vm::engine::ir::Block {
+        blocks: vec![crate::vm::ir::Block {
             stmts: Vec::new(),
-            term: crate::vm::engine::ir::Terminator::Return,
+            term: crate::vm::ir::Terminator::Return,
         }],
         name: name.into(),
     }
@@ -38,7 +38,7 @@ fn table_start() -> usize {
     MAGIC.len() + 4 + 4 + crate::options::build::BUILD_ID.len() + 4
 }
 
-fn package_bytes_for_module(module: &crate::vm::engine::ir::Module) -> Vec<u8> {
+fn package_bytes_for_module(module: &crate::vm::ir::Module) -> Vec<u8> {
     build_container(&[
         (
             TAG_META,
@@ -97,8 +97,8 @@ fn parser_accepts_writer_output() {
 
 #[test]
 fn module_section_preserves_guest_panic_cleanup_plan() {
-    let mut module = crate::vm::engine::ir::Module::default();
-    let plan = crate::vm::engine::ir::GuestPanicCleanup {
+    let mut module = crate::vm::ir::Module::default();
+    let plan = crate::vm::ir::GuestPanicCleanup {
         cleanup: 12,
         drop_payload: 34,
     };
@@ -114,13 +114,12 @@ fn module_section_preserves_guest_panic_cleanup_plan() {
 
 #[test]
 fn function_section_indexes_independent_verified_blobs() {
-    let funcs =
-        crate::vm::engine::ir::FuncTable::from(vec![test_body("first"), test_body("second")]);
+    let funcs = crate::vm::ir::FuncTable::from(vec![test_body("first"), test_body("second")]);
     let section = build_function_section(&funcs).unwrap();
     let blobs = parse_function_section(&section, 0).unwrap();
     assert_eq!(blobs.len(), 2);
     for (index, blob) in blobs.iter().enumerate() {
-        let body: crate::vm::engine::ir::FuncBody =
+        let body: crate::vm::ir::FuncBody =
             postcard::from_bytes(&section[blob.start..blob.end]).unwrap();
         assert_eq!(&*body.name, ["first", "second"][index]);
     }
@@ -202,7 +201,7 @@ fn parser_checks_every_section_hash() {
 
 #[test]
 fn malformed_p1_tables_are_rejected_by_safe_load_without_panicking() {
-    use crate::vm::engine::ir::{EntryStubSite, FfiKind, ForeignSig, LinkAddr};
+    use crate::vm::ir::{EntryStubSite, FfiKind, ForeignSig, LinkAddr};
 
     let addr = LinkAddr(0x6c00_0000_1000);
     let sig = ForeignSig {
@@ -212,7 +211,7 @@ fn malformed_p1_tables_are_rejected_by_safe_load_without_panicking() {
         thunk_args: Vec::new(),
         unwind: true,
     };
-    let mut missing = crate::vm::engine::ir::Module::default();
+    let mut missing = crate::vm::ir::Module::default();
     missing.funcs.push(test_body("callback"));
     missing.ensure_function_names();
     missing.link_fn_addrs.insert(addr, 0);
@@ -242,9 +241,9 @@ fn malformed_p1_tables_are_rejected_by_safe_load_without_panicking() {
 
 #[test]
 fn entry_without_frozen_memory_is_rejected_by_safe_load_without_panicking() {
-    use crate::vm::engine::ir::{EntryPlan, LinkAddr};
+    use crate::vm::ir::{EntryPlan, LinkAddr};
 
-    let mut module = crate::vm::engine::ir::Module::default();
+    let mut module = crate::vm::ir::Module::default();
     module.funcs.push(test_body("lang_start"));
     module.ensure_function_names();
     module.entry = Some(EntryPlan {
@@ -290,24 +289,22 @@ fn native_blob_materialization_uses_embedded_bytes() {
 
 #[test]
 fn one_loaded_package_instantiates_isolated_frozen_memory_twice() {
-    use crate::vm::engine::ir::{
+    use crate::vm::ir::{
         Block, FuncBody, IntBinOp, LinkAddr, Operand, PlaceBase, PlaceExpr, RetAbi, Rvalue,
         ScalarPlace, Slot, Stmt, Terminator, Width,
     };
 
-    let mut module = crate::vm::engine::ir::Module::default();
-    let mut frozen = crate::vm::engine::frozen::FrozenArena::new();
+    let mut module = crate::vm::ir::Module::default();
+    let mut frozen = crate::vm::frozen::FrozenArena::new();
     let link_cell = frozen.alloc(8, 8);
     unsafe { (link_cell as *mut u64).write(41) };
     let link_pointer = frozen.alloc(8, 8);
     unsafe { (link_pointer as *mut u64).write(link_cell) };
     module.frozen = Some(frozen);
-    module
-        .frozen_relocs
-        .push(crate::vm::engine::ir::FrozenReloc {
-            at: LinkAddr(link_pointer),
-            target: crate::vm::engine::ir::FrozenRelocTarget::Frozen(LinkAddr(link_cell)),
-        });
+    module.frozen_relocs.push(crate::vm::ir::FrozenReloc {
+        at: LinkAddr(link_pointer),
+        target: crate::vm::ir::FrozenRelocTarget::Frozen(LinkAddr(link_cell)),
+    });
     let ret = Slot {
         off: 0,
         width: Width::W64,
@@ -370,7 +367,7 @@ fn one_loaded_package_instantiates_isolated_frozen_memory_twice() {
         off: 8,
         width: Width::W64,
     };
-    module.tls.push(crate::vm::engine::ir::TlsSlot {
+    module.tls.push(crate::vm::ir::TlsSlot {
         template: LinkAddr(link_cell),
         size: 8,
         align: 8,
@@ -392,7 +389,7 @@ fn one_loaded_package_instantiates_isolated_frozen_memory_twice() {
                     rv: Rvalue::Use(Operand::Mem {
                         expr: PlaceExpr {
                             base: PlaceBase::Local(tls_ptr.off),
-                            steps: vec![crate::vm::engine::ir::PlaceStep::Deref].into_boxed_slice(),
+                            steps: vec![crate::vm::ir::PlaceStep::Deref].into_boxed_slice(),
                         },
                         width: Width::W64,
                     }),
@@ -454,11 +451,10 @@ fn one_loaded_package_instantiates_isolated_frozen_memory_twice() {
     // inode after load must not affect later lazy decoding or instantiation.
     std::fs::write(&path, b"replaced after Package::load").unwrap();
     std::fs::remove_file(&path).unwrap();
-    let first =
-        unsafe { crate::vm::engine::Engine::from_module_unchecked(package.instantiate().unwrap()) }
-            .unwrap();
+    let first = unsafe { crate::vm::Engine::from_module_unchecked(package.instantiate().unwrap()) }
+        .unwrap();
     let second =
-        unsafe { crate::vm::engine::Engine::from_module_unchecked(package.instantiate().unwrap()) }
+        unsafe { crate::vm::Engine::from_module_unchecked(package.instantiate().unwrap()) }
             .unwrap();
 
     let first_cell = first.shared().module.resolve_link_addr(LinkAddr(link_cell));
@@ -485,49 +481,49 @@ fn one_loaded_package_instantiates_isolated_frozen_memory_twice() {
     );
 
     assert_eq!(
-        unsafe { crate::vm::engine::raw::run_export_raw(&first, "address", &[]) }
+        unsafe { crate::vm::raw::run_export_raw(&first, "address", &[]) }
             .unwrap()
             .into_returned()
             .map(|value| value.lo),
         Some(first_cell)
     );
     assert_eq!(
-        unsafe { crate::vm::engine::raw::run_export_raw(&second, "address", &[]) }
+        unsafe { crate::vm::raw::run_export_raw(&second, "address", &[]) }
             .unwrap()
             .into_returned()
             .map(|value| value.lo),
         Some(second_cell)
     );
     assert_eq!(
-        unsafe { crate::vm::engine::raw::run_export_raw(&first, "tls", &[]) }
+        unsafe { crate::vm::raw::run_export_raw(&first, "tls", &[]) }
             .unwrap()
             .into_returned()
             .map(|value| value.lo),
         Some(41)
     );
     assert_eq!(
-        unsafe { crate::vm::engine::raw::run_export_raw(&second, "tls", &[]) }
+        unsafe { crate::vm::raw::run_export_raw(&second, "tls", &[]) }
             .unwrap()
             .into_returned()
             .map(|value| value.lo),
         Some(41)
     );
     assert_eq!(
-        unsafe { crate::vm::engine::raw::run_export_raw(&first, "bump", &[]) }
+        unsafe { crate::vm::raw::run_export_raw(&first, "bump", &[]) }
             .unwrap()
             .into_returned()
             .map(|value| value.lo),
         Some(42)
     );
     assert_eq!(
-        unsafe { crate::vm::engine::raw::run_export_raw(&second, "bump", &[]) }
+        unsafe { crate::vm::raw::run_export_raw(&second, "bump", &[]) }
             .unwrap()
             .into_returned()
             .map(|value| value.lo),
         Some(42)
     );
     assert_eq!(
-        unsafe { crate::vm::engine::raw::run_export_raw(&first, "bump", &[]) }
+        unsafe { crate::vm::raw::run_export_raw(&first, "bump", &[]) }
             .unwrap()
             .into_returned()
             .map(|value| value.lo),

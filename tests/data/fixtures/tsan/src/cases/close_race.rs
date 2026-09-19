@@ -19,12 +19,12 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 
-use crate::vm::engine::ctx::{
+use crate::vm::ctx::{
     DeferredHold, Engine, EngineState, ExecutionLease, Shared, control_for_engine,
 };
-use crate::vm::engine::deferred::{TsdRegistration, prepare_pthread_operation};
-use crate::vm::engine::interp::{self, RawReturn, RunError, RunErrorKind, RunOutcome};
-use crate::vm::engine::ir::{
+use crate::vm::deferred::{TsdRegistration, prepare_pthread_operation};
+use crate::vm::interp::{self, RawReturn, RunError, RunErrorKind, RunOutcome};
+use crate::vm::ir::{
     Block, FuncBody, Module, Operand, RetAbi, Rvalue, ScalarPlace, Slot, Stmt, Terminator, Width,
 };
 

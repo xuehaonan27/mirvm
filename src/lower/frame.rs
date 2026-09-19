@@ -9,7 +9,7 @@ use rustc_abi::{BackendRepr, HasDataLayout};
 use rustc_middle::mir::Body;
 use rustc_middle::ty::{Ty, TyCtxt, TypingEnv};
 
-use crate::vm::engine::ir::Width;
+use crate::vm::ir::Width;
 
 /// Value class: decides the access path and the calling convention.
 #[derive(Clone, Copy, Debug)]

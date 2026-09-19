@@ -1,0 +1,8 @@
+# The harness compiles src/options.rs source-for-source, and that module's build constants are
+# env!() reads. These are compile-time values only: nothing here needs a real sysroot at run time.
+# An explicit environment variable still wins over this table, so the tsan mode keeps setting
+# MIRVM_BUILD_ID itself.
+[env]
+MIRVM_BUILD_ID = "0000000000000000"
+MIRVM_DEFAULT_SYSROOT = ""
+MIRVM_HOST = "x86_64-unknown-linux-gnu"

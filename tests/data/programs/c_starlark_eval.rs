@@ -45,7 +45,7 @@ allocative = "=0.3.4"
 // With MIRVM_JIT_THRESHOLD=1 the jit worker thread panics while compiling starlark's
 // ChunkChain::drop (unavoidable heap teardown on any starlark evaluation) with an
 // address-offset-must-land-in-frame message (full analyze_frame set) from
-// src/vm/engine/jit_compile.rs:1276. The worker dies, later functions fall back to the
+// src/vm/jit_compile.rs:1276. The worker dies, later functions fall back to the
 // interpreter, and stdout/exit code stay byte-identical to A/B; only stderr is polluted
 // by the panic text (which embeds the pid), on three of three runs. Mechanism chain:
 //   ChunkChain::drop's MIR has a &mut ZST local as a generic argument; that ZST is the

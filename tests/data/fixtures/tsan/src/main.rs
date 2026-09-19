@@ -37,18 +37,20 @@
 
 // ---- adapters: the product leaves `src/vm` expects at these crate paths ----
 
-#[path = "../../../src/arch/mod.rs"]
+#[path = "../../../../../src/arch/mod.rs"]
 mod arch; // arch layer (interp's x86 touch points go through crate::arch::)
-#[path = "../../../src/utils/logs.rs"]
+#[path = "../../../../../src/utils/logs.rs"]
 mod logs; // source-shared dependency of os::process's mirvm_log!
-#[path = "../../../src/os/mod.rs"]
+#[path = "../../../../../src/os/mod.rs"]
 mod os; // os layer (engine touch points go through crate::os:: primitives)
 mod product_adapters; // stubs for the rustc-dependent leaves (lower::asm, sysroot)
 pub(crate) use product_adapters::{lower, sysroot};
-#[path = "../../../src/elfsym.rs"]
+#[path = "../../../../../src/elfsym.rs"]
 mod elfsym; // archive .symtab fallback for ffi.rs (pure Rust, source-shared)
+#[path = "../../../../../src/options.rs"]
+mod options; // the MIRVM_* register the engine reads its knobs through (pure Rust, source-shared)
 mod telemetry; // capture/format source-shared (name fixed: src/vm says crate::telemetry)
-#[path = "../../../src/vm/mod.rs"]
+#[path = "../../../../../src/vm/mod.rs"]
 mod vm; // the execution phase under test
 
 // ---- cases ----

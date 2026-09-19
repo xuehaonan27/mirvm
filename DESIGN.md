@@ -298,7 +298,7 @@ zlib 这类 C 库 FFI 进去后是真机器码，其内部的 malloc/memcpy 打�
   系统库的东西都经 `src/os/` 原语层——**非 os 域的 `libc::` 触点已机械清零**
   （grep 门禁，仅剩注释；spikes 冻结原型不在门禁内）。草图中的多数文件
   （fs/time/net/rand/math/ffi）从未成为独立触点——全 syscall 族经
-  `os::process::syscall` 变参单点直通、FFI 在 `vm/engine/ffi.rs`（业务）调
+  `os::process::syscall` 变参单点直通、FFI 在 `vm/ffi.rs`（业务）调
   `os::dll`（原语）——故落地形态比草图小，按实收口如下：
 
 ```
@@ -315,7 +315,7 @@ src/os/
 
   guest 语义裁决（fork 守卫、信号白名单、sigaction 改拷贝文案）仍在引擎业务侧，
   os:: 只供原语——OpenJDK `os::` 同款纪律。固定基址数值另提升为
-  `vm/engine/addrlayout.rs` 共享常量层（frozen/codearena/ir 白名单三方共享）。
+  `vm/addrlayout.rs` 共享常量层（frozen/codearena/ir 白名单三方共享）。
 
 ### 工程决策
 
@@ -325,7 +325,7 @@ src/os/
   建 Engine 的 `Package::instantiate` 仍是 `unsafe`。既有 Engine 上的 `run_main`、状态、
   `close`/`wait_closed` 是 safe，执行出口用 `RunOutcome`/`RunErrorKind` 区分正常返回、guest
   panic、关闭和引擎错误。内部 `Shared` 不公开；手工 Module 与无类型 raw export 收在
-  `vm::engine::raw` 的 unsafe 面。完整 safe typed export API 仍未建立。
+  `vm::raw` 的 unsafe 面。完整 safe typed export API 仍未建立。
 - **借鉴 Miri 代码**（MIT/Apache-2.0，保留 attribution）：shim 结构、intrinsic 清单、native-lib 机制是最佳代码参考——但**仅代码，不是心智模型**（P1）。
 
 ---

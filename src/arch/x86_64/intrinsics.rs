@@ -3,7 +3,7 @@
 //! These functions execute real host instructions behind the `llvm.x86.*` boundary; guest and host are the same
 //! virtual CPU, and callers reach them only through the guest's normal CPUID dispatch. They touch only raw pointers/ints —
 //! no engine types, no OS dependencies (arch/ leaf-layer discipline, same as os/).
-//! (Moved wholesale from vm/engine/x86.rs; visibility changed pub(super)→pub(crate), zero logic diff.)
+//! (Moved wholesale from vm/x86.rs; visibility changed pub(super)→pub(crate), zero logic diff.)
 
 //! after the guest's normal CPUID dispatch selected it.
 

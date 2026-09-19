@@ -2,11 +2,11 @@
 
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use mirvm::vm::engine::raw::{
+use mirvm::vm::raw::{
     Block, Builtin, FfiKind, ForeignSig, FuncBody, Module, Operand, ParamAbi, RetAbi, RetDest,
     ScalarPlace, Slot, Terminator, UnwindAction, Width, run_export_raw,
 };
-use mirvm::vm::engine::{Engine, RunOutcome};
+use mirvm::vm::{Engine, RunOutcome};
 
 unsafe extern "C-unwind" {
     fn cpp_reset_caught();
@@ -103,7 +103,7 @@ fn guest_catch_module() -> Module {
                     ret: RetDest::Scalar(ScalarPlace::Slot(result)),
                     target: 1,
                     unwind: UnwindAction::Continue,
-                    role: mirvm::vm::engine::raw::BuiltinCallRole::Normal,
+                    role: mirvm::vm::raw::BuiltinCallRole::Normal,
                 },
             },
             Block {

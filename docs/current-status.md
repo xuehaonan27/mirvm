@@ -78,8 +78,8 @@ executed in a VM. `DESIGN.md` is the contract; `docs/designs/` holds the per-top
        -> Ctx/Shared reclaimed; published closure/JIT/MC/native addresses leave tombstones only
 ```
 
-Hot spots are `src/lower/func/` (call and calling-convention lowering), `src/vm/engine/interp/`
-(interpreter main loop) and `src/vm/engine/jit/translate/` (translator). The implementation is
+Hot spots are `src/lower/func/` (call and calling-convention lowering), `src/vm/interp/`
+(interpreter main loop) and `src/vm/jit/translate/` (translator). The implementation is
 Linux/ELF/x86_64 first — it depends on pthread, `dlopen`, GNU link behaviour and x86 asm wrappers —
 and that is the only platform baseline that may be claimed.
 

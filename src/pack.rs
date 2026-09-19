@@ -94,28 +94,25 @@ struct Reloc {
 #[derive(Serialize)]
 struct ModuleMetaRef<'a> {
     function_names: &'a [Box<str>],
-    exports: &'a std::collections::HashMap<Box<str>, crate::vm::engine::ir::FuncId>,
-    frozen: Option<crate::vm::engine::frozen::FrozenSnapshot>,
-    link_fn_addrs: &'a std::collections::HashMap<
-        crate::vm::engine::ir::LinkAddr,
-        crate::vm::engine::ir::FuncId,
-    >,
+    exports: &'a std::collections::HashMap<Box<str>, crate::vm::ir::FuncId>,
+    frozen: Option<crate::vm::frozen::FrozenSnapshot>,
+    link_fn_addrs: &'a std::collections::HashMap<crate::vm::ir::LinkAddr, crate::vm::ir::FuncId>,
     native_libs: &'a [Box<str>],
     required_native_libs: &'a [Box<str>],
-    tls: &'a [crate::vm::engine::ir::TlsSlot],
+    tls: &'a [crate::vm::ir::TlsSlot],
     asm_stub_addrs: &'a [u64],
-    asm_sites: &'a [crate::vm::engine::ir::AsmSite],
-    foreign_syms: &'a [crate::vm::engine::ir::GotSym],
-    got_fixups: &'a [crate::vm::engine::ir::GotFixup],
-    frozen_relocs: &'a [crate::vm::engine::ir::FrozenReloc],
-    entry_stub_sites: Vec<crate::vm::engine::ir::EntryStubSite>,
-    custom_alloc_shims: Option<crate::vm::engine::ir::AllocShims>,
-    guest_panic_cleanup: Option<crate::vm::engine::ir::GuestPanicCleanup>,
-    entry: Option<crate::vm::engine::ir::EntryPlan>,
+    asm_sites: &'a [crate::vm::ir::AsmSite],
+    foreign_syms: &'a [crate::vm::ir::GotSym],
+    got_fixups: &'a [crate::vm::ir::GotFixup],
+    frozen_relocs: &'a [crate::vm::ir::FrozenReloc],
+    entry_stub_sites: Vec<crate::vm::ir::EntryStubSite>,
+    custom_alloc_shims: Option<crate::vm::ir::AllocShims>,
+    guest_panic_cleanup: Option<crate::vm::ir::GuestPanicCleanup>,
+    entry: Option<crate::vm::ir::EntryPlan>,
 }
 
-impl<'a> From<&'a crate::vm::engine::ir::Module> for ModuleMetaRef<'a> {
-    fn from(module: &'a crate::vm::engine::ir::Module) -> Self {
+impl<'a> From<&'a crate::vm::ir::Module> for ModuleMetaRef<'a> {
+    fn from(module: &'a crate::vm::ir::Module) -> Self {
         Self {
             function_names: &module.function_names,
             exports: &module.exports,
@@ -154,32 +151,31 @@ impl<'a> From<&'a crate::vm::engine::ir::Module> for ModuleMetaRef<'a> {
 #[derive(Clone, Deserialize)]
 struct ModuleMeta {
     function_names: Vec<Box<str>>,
-    exports: std::collections::HashMap<Box<str>, crate::vm::engine::ir::FuncId>,
-    frozen: Option<crate::vm::engine::frozen::FrozenSnapshot>,
-    link_fn_addrs:
-        std::collections::HashMap<crate::vm::engine::ir::LinkAddr, crate::vm::engine::ir::FuncId>,
+    exports: std::collections::HashMap<Box<str>, crate::vm::ir::FuncId>,
+    frozen: Option<crate::vm::frozen::FrozenSnapshot>,
+    link_fn_addrs: std::collections::HashMap<crate::vm::ir::LinkAddr, crate::vm::ir::FuncId>,
     native_libs: Vec<Box<str>>,
     required_native_libs: Vec<Box<str>>,
-    tls: Vec<crate::vm::engine::ir::TlsSlot>,
+    tls: Vec<crate::vm::ir::TlsSlot>,
     asm_stub_addrs: Vec<u64>,
-    asm_sites: Vec<crate::vm::engine::ir::AsmSite>,
-    foreign_syms: Vec<crate::vm::engine::ir::GotSym>,
-    got_fixups: Vec<crate::vm::engine::ir::GotFixup>,
-    frozen_relocs: Vec<crate::vm::engine::ir::FrozenReloc>,
-    entry_stub_sites: Vec<crate::vm::engine::ir::EntryStubSite>,
-    custom_alloc_shims: Option<crate::vm::engine::ir::AllocShims>,
-    guest_panic_cleanup: Option<crate::vm::engine::ir::GuestPanicCleanup>,
-    entry: Option<crate::vm::engine::ir::EntryPlan>,
+    asm_sites: Vec<crate::vm::ir::AsmSite>,
+    foreign_syms: Vec<crate::vm::ir::GotSym>,
+    got_fixups: Vec<crate::vm::ir::GotFixup>,
+    frozen_relocs: Vec<crate::vm::ir::FrozenReloc>,
+    entry_stub_sites: Vec<crate::vm::ir::EntryStubSite>,
+    custom_alloc_shims: Option<crate::vm::ir::AllocShims>,
+    guest_panic_cleanup: Option<crate::vm::ir::GuestPanicCleanup>,
+    entry: Option<crate::vm::ir::EntryPlan>,
 }
 
 impl ModuleMeta {
-    fn instantiate(&self) -> Result<crate::vm::engine::ir::Module, String> {
+    fn instantiate(&self) -> Result<crate::vm::ir::Module, String> {
         let frozen = self
             .frozen
             .as_ref()
-            .map(crate::vm::engine::frozen::FrozenArena::restore_dynamic)
+            .map(crate::vm::frozen::FrozenArena::restore_dynamic)
             .transpose()?;
-        let mut module = crate::vm::engine::ir::Module {
+        let mut module = crate::vm::ir::Module {
             funcs: Default::default(),
             function_names: self.function_names.clone(),
             exports: self.exports.clone(),
@@ -223,7 +219,7 @@ fn postcard_bytes<T: Serialize>(v: &T) -> Result<Vec<u8>, String> {
     postcard::to_stdvec(v).map_err(|e| format!("fail to format package: {e}"))
 }
 
-fn build_function_section(funcs: &crate::vm::engine::ir::FuncTable) -> Result<Vec<u8>, String> {
+fn build_function_section(funcs: &crate::vm::ir::FuncTable) -> Result<Vec<u8>, String> {
     let count = u32::try_from(funcs.len()).map_err(|_| "too many functions in package")?;
     let table_len = funcs
         .len()
@@ -264,7 +260,7 @@ fn build_function_section(funcs: &crate::vm::engine::ir::FuncTable) -> Result<Ve
 fn parse_function_section(
     section: &[u8],
     mapped_offset: usize,
-) -> Result<Vec<crate::vm::engine::ir::FuncBlob>, String> {
+) -> Result<Vec<crate::vm::ir::FuncBlob>, String> {
     let mut cursor = Cursor {
         data: section,
         pos: 0,
@@ -310,7 +306,7 @@ fn parse_function_section(
     entries
         .into_iter()
         .map(|(_, start, end, expected_hash)| {
-            Ok(crate::vm::engine::ir::FuncBlob {
+            Ok(crate::vm::ir::FuncBlob {
                 start: mapped_offset
                     .checked_add(start)
                     .ok_or("mapped function offset overflow")?,
@@ -559,10 +555,10 @@ fn materialize_native_blob_at(root: &Path, lib: &NativeLibEntry) -> Result<PathB
 pub(crate) fn write_package(
     tcx: rustc_middle::ty::TyCtxt<'_>,
     rustc_args: &[String],
-    module: &crate::vm::engine::ir::Module,
+    module: &crate::vm::ir::Module,
     out: &Path,
 ) -> Result<(), String> {
-    crate::vm::engine::verify::module(module)
+    crate::vm::verify::module(module)
         .map_err(|e| format!("refusing to package invalid bytecode: {e}"))?;
     // Fixed-base requirement (same contract as L2): without a fixed base the snapshot's embedded
     // addresses are invalid across processes, so no package is produced.
@@ -651,7 +647,7 @@ pub(crate) fn write_package(
 pub(crate) struct LoadedPackage {
     raw: std::sync::Arc<[u8]>,
     module_meta: ModuleMeta,
-    function_blobs: Vec<crate::vm::engine::ir::FuncBlob>,
+    function_blobs: Vec<crate::vm::ir::FuncBlob>,
     libs: Vec<NativeLibEntry>,
     mc_entries: Vec<McEntry>,
     heat_path: PathBuf,
@@ -675,16 +671,16 @@ impl Package {
     /// Package verification proves the container and VM bytecode shape, but cannot prove that
     /// embedded native libraries, foreign symbol declarations, and FFI signatures agree with
     /// the host process. The caller must trust those package inputs and ABI declarations.
-    pub unsafe fn instantiate(&self) -> Result<crate::vm::engine::Engine, String> {
+    pub unsafe fn instantiate(&self) -> Result<crate::vm::Engine, String> {
         let mut module = self.loaded.instantiate()?;
         module.asm_stub_addrs = crate::lower::asm::try_materialize(&module.asm_sites)?;
         module.finalize_entry_argv(&[])?;
-        unsafe { crate::vm::engine::Engine::from_module_unchecked(module) }
+        unsafe { crate::vm::Engine::from_module_unchecked(module) }
     }
 }
 
 impl LoadedPackage {
-    pub(crate) fn instantiate(&self) -> Result<crate::vm::engine::ir::Module, String> {
+    pub(crate) fn instantiate(&self) -> Result<crate::vm::ir::Module, String> {
         let mut module = self.module_meta.instantiate()?;
         let mut covered_hashes = HashSet::with_capacity(self.mc_entries.len());
         let mut images = Vec::with_capacity(self.mc_entries.len());
@@ -700,7 +696,7 @@ impl LoadedPackage {
                         mc.fnv
                     )
                 })?;
-            let image = crate::vm::engine::mcload::load(&mc.bytes)
+            let image = crate::vm::mcload::load(&mc.bytes)
                 .map_err(|e| format!("fail to load MC image ({}): {e}", lib.path))?;
             images.push(image);
         }
@@ -718,7 +714,7 @@ impl LoadedPackage {
         }
         module.required_native_libs = required_native_libs;
         module.required_native_hashes = required_native_hashes;
-        module.funcs = crate::vm::engine::ir::FuncTable::from_bytes(
+        module.funcs = crate::vm::ir::FuncTable::from_bytes(
             self.raw.clone(),
             self.function_blobs.clone(),
             self.heat_path.clone(),
@@ -789,7 +785,7 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
             function_blobs.len()
         ));
     }
-    crate::vm::engine::verify::module_header_with_count(&module, function_blobs.len())
+    crate::vm::verify::module_header_with_count(&module, function_blobs.len())
         .map_err(|e| format!("MODULE bytecode verification failed: {e}"))?;
     // Before any MC/native materialization, every function gets full semantic verification.
     // Temporary objects are dropped each round; the run phase still decodes on demand from the owned
@@ -797,16 +793,15 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
     let mut main_boundaries = 0;
     let mut main_catchers = 0;
     for (index, blob) in function_blobs.iter().enumerate() {
-        let body: crate::vm::engine::ir::FuncBody =
-            postcard::from_bytes(&raw[blob.start..blob.end])
-                .map_err(|e| format!("function {index} decode failed during verification: {e}"))?;
-        crate::vm::engine::verify::function_with_count(&module, function_blobs.len(), index, &body)
+        let body: crate::vm::ir::FuncBody = postcard::from_bytes(&raw[blob.start..blob.end])
+            .map_err(|e| format!("function {index} decode failed during verification: {e}"))?;
+        crate::vm::verify::function_with_count(&module, function_blobs.len(), index, &body)
             .map_err(|e| format!("MODULE bytecode verification failed: {e}"))?;
-        let (boundaries, catchers) = crate::vm::engine::verify::body_main_role_counts(&body);
+        let (boundaries, catchers) = crate::vm::verify::body_main_role_counts(&body);
         main_boundaries += boundaries;
         main_catchers += catchers;
     }
-    crate::vm::engine::verify::main_role_counts(&module, main_boundaries, main_catchers)
+    crate::vm::verify::main_role_counts(&module, main_boundaries, main_catchers)
         .map_err(|e| format!("MODULE bytecode verification failed: {e}"))?;
     if reloc.requires_fixed_base {
         return Err("package v4 cannot require a fixed runtime base".into());

@@ -39,9 +39,9 @@ use std::sync::mpsc;
 use std::thread;
 
 use crate::telemetry::capture;
-use crate::vm::engine::ctx::{self, Engine, Shared, attach};
-use crate::vm::engine::interp;
-use crate::vm::engine::ir::{
+use crate::vm::ctx::{self, Engine, Shared, attach};
+use crate::vm::interp;
+use crate::vm::ir::{
     Block, FuncBody, MemOrd, Module, Operand, ParamAbi, RetAbi, RmwOp, ScalarPlace, Slot, Stmt,
     Terminator, Width,
 };

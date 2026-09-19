@@ -141,7 +141,7 @@ pub fn os_thread_count() -> usize {
 /// and later the profile/services family). These are invisible to the guest, so
 /// they must not be attributed to guest `pthread_create` when the fork guard
 /// compares `/proc/self/task` against its baseline (see
-/// `crate::vm::engine::ctx::guest_spawned_threads`).
+/// `crate::vm::ctx::guest_spawned_threads`).
 static SERVICE_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Mark the calling thread as a MIRVM service thread for as long as the guard

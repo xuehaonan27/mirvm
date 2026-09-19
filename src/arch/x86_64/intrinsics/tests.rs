@@ -1,5 +1,5 @@
 //! Hardware cross-check for arch::x86_64::intrinsics (stdarch known vectors + real machine comparison).
-//! (Moved whole from vm/engine/x86.rs test cluster, zero logic diff.)
+//! (Moved whole from vm/x86.rs test cluster, zero logic diff.)
 
 use super::{
     aesdec, aesdeclast, aesenc, aesenclast, aesimc, aeskeygenassist, crc32_u8, crc32_u16,

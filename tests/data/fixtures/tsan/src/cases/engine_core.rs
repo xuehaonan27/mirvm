@@ -11,12 +11,12 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::vm::engine::ctx::{Engine, Shared, attach};
-use crate::vm::engine::ir::{
+use crate::vm::ctx::{Engine, Shared, attach};
+use crate::vm::ir::{
     Block, FfiKind, ForeignSig, FuncBody, IntBinOp, MemOrd, Module, Operand, ParamAbi, RetAbi,
     RmwOp, Rvalue, ScalarPlace, Slot, Stmt, Terminator, Width,
 };
-use crate::vm::engine::{interp, thunks};
+use crate::vm::{interp, thunks};
 
 /// Hand-built Module: fn0 `bump(addr) -> previous value` (atomic +1); fn1
 /// `add3(x) -> x+3` (the thunk target).
