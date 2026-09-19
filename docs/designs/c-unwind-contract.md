@@ -1,118 +1,239 @@
 # C and C-unwind Cross-Language Exception Contract
 
-> Status: Implemented (2026-08-12, in `fast`; 2026-08-13 added embed close, signal-safepoint activation and the native-fini no-unwind boundary; the E13 ruling is in §3) · Scope: how mirvm handles Rust panic and C++ exceptions on Linux/ELF/x86_64, and which exception flows each foreign ABI may carry.
+> Status: Implemented · Scope: how mirvm handles Rust panic and C++ exceptions on Linux/ELF/x86_64,
+> and which exception flows each foreign ABI may carry.
 
 ## 1. Contract
 
-Per-boundary ABI classification. Every row is a rule; the "stable observation" column is what tests may lock.
+Per-boundary rules. The observation column is what tests may lock.
 
-| Boundary / flow | Legal ABI | mirvm must | Stable observation | Not promised |
-|---|---|---|---|---|
-| Exception-free outbound call | `C` or `C-unwind` | return by the original signature; a JIT call with cleanup recovers the return value correctly | return value, Drop count | none |
-| C++ exception through guest back to C++ | `C-unwind` end to end | preserve the original exception object and type; interpreter and JIT frames run cleanup | typed catch value, Drop count | that Rust `catch_unwind` catches it |
-| guest panic through C++ back to guest | `C-unwind` end to end, C++ rethrows only | preserve the original Rust panic payload; run cleanup | payload, C++ rethrow marker, Drop count | that C++ may swallow the Rust panic and continue |
-| C++ swallows a Rust panic | `C-unwind` | terminate as native does | non-zero exit, termination reason | normal return |
-| C++ exception reaches guest `catch_unwind` | `C-unwind` | terminate as the pinned rustc does; the guest catch function must not run | non-zero exit, explicit foreign-exception reason | disguising a C++ exception as a guest panic |
-| Rust panic crosses a plain C callback | `C` | terminate at that ABI boundary | non-zero exit, termination reason | byte-identical stderr |
-| C++ exception tries to cross a guest plain C wrapper | `C` wrapper calling `C-unwind` | terminate at rustc's `Terminate` edge; the outer C++ catch must not receive it | non-zero exit, the outer frame must not return normally | the exact signal and text of the UB case |
-| C++ exception reaches the top of the Engine | `C-unwind` end to end | do not consume it, do not rewrite it; hand it back to the outer system unwinder | outer C++ still catches the original type and value | that Rust `catch_unwind` catches it |
-| guest panic escapes an unsafe raw export | guest Rust unwind | first decrement the panic count in guest std, drop and release the payload, then report `RunOutcome::GuestPanic` | payload dropped exactly once, Engine still callable | host guessing guest std private layout |
-| `main` panic caught by `lang_start` | guest std internal catch | lowering marks the call wrapping user `main` exactly; that `run_main` records its catch result separately | `GuestPanic` distinct from a normal `Termination` return of 101 | inferring panic from the numeric value 101 |
-| asynchronous signal to a guest handler | conventional process-directed or `SI_TKILL` thread-directed signal | the kernel frame only registers atomically; process events go to the owner inbox, thread events to the target pthread's stable slot; an ordinary safepoint runs the handler under a fresh lease and fresh activation | the handler belongs to the Engine that registered it; thread events still run on the target pthread; the outer main catcher is not polluted | entering libffi/guest/unwind from the signal frame; promising prompt latency for process-directed external events |
-| native fini during Engine close | non-unwindable teardown boundary | catch any MIRVM, foreign or host Rust exception, emit the fixed diagnostic, then `abort` | non-zero exit, `native finalizer unwound during Engine teardown` | continuing to propagate `EngineFault` to the embedder; continuing to close after an exception escapes |
+- **Exception-free outbound call** (`C` or `C-unwind`) — return by the original signature; a JIT call
+  with cleanup recovers the return value correctly. Observable: the return value and Drop count.
+- **C++ exception through guest back to C++** (`C-unwind` end to end) — preserve the original
+  exception object and type; interpreter and JIT frames run cleanup. Observable: the typed catch value
+  and Drop count. Not promised: that Rust `catch_unwind` catches it.
+- **Guest panic through C++ back to guest** (`C-unwind` end to end, C++ rethrows only) — preserve the
+  original Rust panic payload and run cleanup. Observable: the payload, the C++ rethrow marker and the
+  Drop count. Not promised: that C++ may swallow the panic and continue.
+- **C++ swallows a Rust panic** (`C-unwind`) — terminate as native does. Observable: non-zero exit and
+  termination reason.
+- **C++ exception reaches a guest `catch_unwind`** (`C-unwind`) — terminate as the pinned rustc does,
+  and the guest catch function must not run. Observable: non-zero exit and an explicit
+  foreign-exception reason. Not promised: disguising a C++ exception as a guest panic.
+- **Rust panic crosses a plain C callback** (`C`) — terminate at that ABI boundary. Observable:
+  non-zero exit and termination reason. Not promised: byte-identical stderr.
+- **C++ exception tries to cross a guest plain C wrapper** (`C` wrapper calling `C-unwind`) — terminate
+  at rustc's `Terminate` edge, and the outer C++ catch must not receive it. Observable: non-zero exit
+  and the outer frame not returning normally.
+- **C++ exception reaches the top of the Engine** (`C-unwind` end to end) — do not consume or rewrite
+  it; hand it back to the outer system unwinder. Observable: the outer C++ still catches the original
+  type and value.
+- **Guest panic escapes an unsafe raw export** — first decrement the panic count in guest std, drop and
+  release the payload, then report `RunOutcome::GuestPanic`. Observable: the payload is dropped exactly
+  once and the Engine stays callable.
+- **`main` panic caught by `lang_start`** — lowering marks the call wrapping user `main` exactly, and
+  that `run_main` records its catch result separately. Observable: `GuestPanic` distinct from a normal
+  `Termination` return of 101. Not promised: inferring a panic from the numeric value 101.
+- **Asynchronous signal to a guest handler** — the kernel frame only registers atomically; process
+  events go to the owner inbox, thread events to the target pthread's stable slot, and an ordinary
+  safepoint runs the handler under a fresh lease and activation. Observable: the handler belongs to the
+  Engine that registered it, thread events still run on the target pthread, and the outer main catcher
+  is not polluted. Not promised: entering libffi, guest code or unwind from the signal frame; prompt
+  latency for process-directed external events.
+- **Native fini during Engine close** — a non-unwindable teardown boundary: catch any MIRVM, foreign or
+  host Rust exception, emit the fixed diagnostic `native finalizer unwound during Engine teardown`,
+  then abort. Not promised: continuing to propagate `EngineFault` to the embedder, or continuing to
+  close after an exception escapes.
 
 Numbered rules:
 
-C1. lowering freezes the unwind bit from rustc `ExternAbi::C/System { unwind }` and must never default it to false. Other ABIs must not masquerade as plain C; they must be rejected explicitly before entering libffi.
-C2. A plain C direct foreign call keeps libffi's plain C declaration. Only `unwind=true` calls the same `ffi_call` symbol through a local `extern "C-unwind"` declaration.
-C3. The callback thunk and the P1 executable entry select a plain C or C-unwind wrapper from `ForeignSig.unwind`; both share one argument-moving and execution body.
-C4. MIR `UnwindAction::Terminate` outranks the callee's ABI. Both direct foreign calls and native fn pointers must pass the terminate guard; no exception may cross a guest plain C wrapper.
-C5. JIT `try_call` is a terminatory instruction; its return value comes from the `TryCallRet` block parameter on the normal branch, never from `inst_results(try_call)`.
-C6. cleanup treats every exception source alike. It must not skip Drop under a C++ exception just to recognize guest panics only.
-C7. guest panic and engine fault use MIRVM-owned exception classes; catch sites take the raw exception pointer the system unwinder delivers and classify it. MIRVM does not write its own personality (the function that decides how each frame unwinds); interpreter frames and JIT frames keep using the existing Rust personality/LSDA for cleanup.
-C8. Classifying an owned exception must check the exception class, the ABI cookie, an in-process canary, and whether the `Arc<Shared>` inside the exception points at the same object as the current Engine. The class alone or the numeric Engine id is not sufficient ownership evidence; another Engine's guest panic must keep unwinding.
-C9. `EngineFault` is an engine fault, not a guest panic. Every interpreter raw catch and JIT landing pad must inspect the exception pointer it actually received and skip guest cleanup only when that object really is an `EngineFault`. It must not substitute "this thread still has some unsettled fault": a native catch can suspend an outer fault and then re-enter a guest panic on the same thread that needs normal cleanup.
-C10. MIRVM's outer exception stores only the original guest std exception pointer. On a guest catch, that pointer goes back to the guest catch function; when uncaught, the pinned toolchain's guest `std::panicking::catch_unwind::cleanup` and the matching drop glue run. The engine moves two opaque machine words only and does not read std's private exception, Box or vtable layout.
-C11. Host-thread TLS holds a nonce-carrying LIFO stack of `EngineFault` tokens; it validates owner and consumption order only, and does not decide whether a frame cleans up. An outer fault suspended by a native catch may be followed by a re-entered guest panic, or by an inner fault pushed and settled first; the outer owner settles last, in stack order.
-C12. A real `main` panic is already consumed by guest `lang_start_internal`, so it must not be classified after it leaves the Engine. lowering locates, uniquely from the pinned std's real MIR call graph, the catch wrapping user `main`, and freezes it as `CallRole::MainPanicBoundary`; interpreter and JIT both claim the immediately following first-level `catch_unwind` during that call and write it into this `run_main`'s LIFO state. An executable module must have exactly one such boundary and its unwind action must be `Continue`; IR serialization, image merging and per-function Package owned snapshot verification all preserve and re-check this contract. If the pinned std changes shape, lowering/verification must fail loudly and never fall back to function names or guessing 101.
-C13. A native constructor is still a fallible startup boundary, so a controlled MIRVM exception may be classified as a `Result` failure and then follow the close protocol. native fini has entered non-rollback teardown, so a dedicated raw guard must diagnose guest panic, `EngineFault`, `EngineClosed`, foreign exception and host Rust panic uniformly and then `abort`. It must not reuse the guest `Terminate` guard's `EngineFault` continuation special case.
-C14. The fixed 22-byte signal stub and adapter may only read fixed TLS and atomically register events: a process-directed event writes the owner inbox, `SI_TKILL` writes the stable cell the target pthread established for this registration. They cannot attach `Ctx`, take locks, allocate, call libffi/guest or unwind. Ordinary safepoint delivery must build a brand-new activation; a thread event may only be delivered on the target pthread. Activation nonces and `run_main` state must not reuse the interrupted execution, so a handler's catch cannot claim the outer `MainPanicBoundary`. A handler exception terminates at the non-unwindable boundary of a plain C signal callback.
-C15. The public surface is not an all-safe API. `Package::load` is a safe owned-snapshot check; `Package::instantiate` is `unsafe`, because bytecode verification cannot prove that an in-package native library, host symbols and FFI signatures agree. `run_main` is safe on an existing Engine; a hand-built Module and untyped raw exports are the unsafe surface in `vm::engine::raw`, and the internal `Shared` is not public. Published callback/JIT/MC/native addresses may be saved by arbitrary native code; after close they stay valid as process-lifetime code plus small owner tombstones, and mirvm does not claim to actively revoke every raw pointer held by a third-party library.
+- **C1** Lowering freezes the unwind bit from rustc `ExternAbi::C/System { unwind }` and never defaults
+  it to false. Other ABIs must not masquerade as plain C and are rejected before entering libffi.
+- **C2** A plain C direct foreign call keeps libffi's plain C declaration. Only `unwind=true` calls the
+  same `ffi_call` symbol through a local `extern "C-unwind"` declaration.
+- **C3** The callback thunk and the P1 executable entry select a plain C or C-unwind wrapper from
+  `ForeignSig.unwind`; both share one argument-moving and execution body.
+- **C4** MIR `UnwindAction::Terminate` outranks the callee's ABI. Direct foreign calls and native
+  function pointers must both pass the terminate guard, and no exception may cross a guest plain C
+  wrapper.
+- **C5** JIT `try_call` is terminatory; its return value comes from the `TryCallRet` block parameter on
+  the normal branch, never from the instruction's results.
+- **C6** Cleanup treats every exception source alike and must not skip Drop under a C++ exception just
+  to recognize guest panics only.
+- **C7** Guest panic and engine fault use MIRVM-owned exception classes, and catch sites classify the
+  raw exception pointer the system unwinder delivers. MIRVM does not write its own personality;
+  interpreter and JIT frames keep using the existing Rust personality and LSDA for cleanup.
+- **C8** Classifying an owned exception must check the exception class, the ABI cookie, an in-process
+  canary, and whether the `Arc<Shared>` inside the exception points at the same object as the current
+  Engine. The class alone or a numeric Engine id is not sufficient ownership evidence, because another
+  Engine's guest panic must keep unwinding.
+- **C9** `EngineFault` is an engine fault, not a guest panic. Every interpreter raw catch and JIT
+  landing pad must inspect the pointer it actually received and skip guest cleanup only when that
+  object really is an `EngineFault` — never substitute "this thread still has some unsettled fault",
+  since a native catch can suspend an outer fault and then re-enter a guest panic that needs cleanup.
+- **C10** The outer MIRVM exception stores only the original guest std exception pointer. On a guest
+  catch that pointer goes back to the guest catch function; when uncaught, the pinned toolchain's
+  `catch_unwind::cleanup` and matching drop glue run. The engine moves two opaque machine words and
+  never reads std's private exception, Box or vtable layout.
+- **C11** Host-thread TLS holds a nonce-carrying LIFO stack of `EngineFault` tokens that validates
+  owner and consumption order only and does not decide frame cleanup. An outer fault suspended by a
+  native catch may be followed by a re-entered guest panic, or by an inner fault pushed and settled
+  first; the outer owner settles last, in stack order.
+- **C12** A real `main` panic is consumed by guest `lang_start_internal`, so it must not be classified
+  after leaving the Engine. Lowering locates the catch wrapping user `main` uniquely from the pinned
+  std's MIR call graph and freezes it as `CallRole::MainPanicBoundary`; interpreter and JIT both claim
+  the immediately following first-level `catch_unwind` and write it into this `run_main`'s LIFO state.
+  An executable module must have exactly one such boundary whose unwind action is `Continue`, and IR
+  serialization, image merging and per-function package verification all preserve and re-check it. If
+  the pinned std changes shape, lowering and verification must fail loudly rather than fall back to
+  function names or guessing 101.
+- **C13** A native constructor is a fallible startup boundary, so a controlled MIRVM exception may be
+  classified as a `Result` failure and then follow the close protocol. Native fini has entered
+  non-rollback teardown, so a dedicated raw guard diagnoses guest panic, `EngineFault`, `EngineClosed`,
+  foreign exception and host Rust panic uniformly and then aborts; it must not reuse the guest
+  terminate guard's `EngineFault` continuation.
+- **C14** The fixed 22-byte signal stub may only read fixed TLS and atomically register events: a
+  process-directed event writes the owner inbox, and `SI_TKILL` writes the stable cell the target
+  pthread established for this registration. It cannot attach a context, take locks, allocate, call
+  libffi or guest code, or unwind. Safepoint delivery builds a brand-new activation, and a thread event
+  may only be delivered on the target pthread. Activation nonces and `run_main` state must not reuse
+  the interrupted execution, so a handler's catch cannot claim the outer `MainPanicBoundary`; a handler
+  exception terminates at the plain C signal-callback boundary.
+- **C15** The public surface is not an all-safe API. `Package::load` is a safe owned-snapshot check and
+  `Package::instantiate` is `unsafe`, because bytecode verification cannot prove that an in-package
+  native library, host symbols and FFI signatures agree. `run_main` is safe on an existing Engine; a
+  hand-built Module and untyped raw exports are the unsafe surface, and the internal `Shared` is not
+  public. Published callback, JIT, MC and native addresses may be saved by arbitrary native code and
+  stay valid after close as process-lifetime code plus small owner tombstones; mirvm does not claim to
+  revoke every raw pointer held by a third-party library.
 
 ## 2. Model
 
-`extern "C"` and `extern "C-unwind"` pass machine arguments identically but differ in exception rules, so the two ABIs must be distinguished at every boundary:
+`extern "C"` and `extern "C-unwind"` pass machine arguments identically and differ only in exception
+rules, so the two ABIs are distinguished at every boundary. A plain `C` boundary refuses exceptions: a
+Rust panic escaping through it terminates the process, and a foreign exception entering Rust in the
+reverse direction is undefined behaviour with no success semantics. `C-unwind` permits exceptions to
+pass, so mirvm runs Rust `Drop` along the way and keeps the exception object intact, letting an outer
+C++ frame catch it by its original C++ type. `std::panic::catch_unwind` only guarantees catching Rust
+panic, not C++ exceptions, and the pinned toolchain terminating on a C++ exception is not a reason to
+convert it into a Rust panic.
 
-- A plain `C` boundary refuses exceptions. A Rust panic escaping through it terminates the process; a foreign exception entering Rust in the reverse direction is undefined behaviour and mirvm builds no success semantics for it.
-- `C-unwind` permits exceptions to pass. mirvm must run Rust `Drop` along the way and keep the exception object intact, so an outer C++ frame still catches it by its original C++ type.
-- `std::panic::catch_unwind` only guarantees catching Rust panic, not C++ exceptions. The pinned toolchain currently terminates when a C++ exception reaches it; that is not a reason to convert a C++ exception into a Rust panic.
+mirvm therefore must not convert arbitrary C++ exceptions into a `RunError` or a guest panic: that
+would lose the C++ type, object identity and destructor responsibility, and diverge from native.
+Instead, MIRVM-owned exception classes ride the existing system unwinder. Each frame's cleanup stays
+with the existing Rust personality and JIT LSDA: the interpreter classifies per frame in a raw catch
+of the current object, the JIT landing pad classifies the pointer the unwinder hands over, and the
+frame guard only restores the operand area, shadow frames and depth. The original guest panic object
+keeps belonging to guest std, which the engine neither copies nor parses, and after a guest catch or
+Engine-top consumption the inner pointer goes back to the guest side for capture or release.
 
-mirvm therefore must not convert arbitrary C++ exceptions into `RunError` or a guest panic: that would lose the C++ type, object identity and destructor responsibility, and diverge from native. Mechanism: MIRVM-owned exception classes ride the existing system unwinder (C1–C7). Each frame's cleanup stays with the existing Rust personality and JIT LSDA; the interpreter classifies per frame in a raw catch of the current object, the JIT landing pad classifies the pointer the unwinder hands over, and FrameGuard only restores the operand area, shadow frames and depth. The original guest panic object keeps belonging to guest std, which the engine neither copies nor parses, and after a guest catch or Engine-top consumption the inner pointer must go back to the guest side for capture or release (C10).
+Exception identity is the cleanup criterion, never TLS global state. Ownership needs the class, the ABI
+cookie, the canary and the `Arc<Shared>` identity test together, because an exception from another
+Engine must keep unwinding and a native catch may suspend an outer fault and then re-enter a guest
+panic that does need cleanup. An exception also participates in Engine lifetime: a MIRVM exception may
+be suspended by a native catch with no active Engine call stack and later rethrown to its original
+owner, so the exception shell holds a `DeferredHold` and Engine close waits for it to leave rather than
+freeing `Shared` inside the suspended window. That hold decides object lifetime only, not frame
+cleanup.
 
-Exception identity is the cleanup criterion, never TLS global state (C8, C9, C11). Ownership needs the class, the ABI cookie, the canary and the `Arc<Shared>` identity test together, because an exception from another Engine must keep unwinding, and a native catch may suspend an outer fault and then re-enter a guest panic that does need cleanup. Owner and target-thread safety points: process-directed signals land in the owner inbox of the Engine that registered the handler, `SI_TKILL` events land in the target pthread's stable cell, ordinary safepoints deliver under a fresh activation and cannot reuse the interrupted `run_main` state (C14). The nonce-carrying TLS token stack guarantees only that an `EngineFault` is consumed by its correct owner in LIFO order. An exception also participates in Engine lifetime: a MIRVM exception may be suspended by a native catch with no active Engine call stack, yet it can later be rethrown to its original owner, so the exception shell holds a `DeferredHold` (a count credential for "work that has happened and is not yet consumed or deleted"); Engine close must wait for it to leave and must not free `Shared` inside the suspended window. That hold decides object lifetime only, not frame cleanup. The 2026-08-13 lifecycle closure covers the rest of E22: the Engine uses an execution lease for concurrent close and execution, pthread start and thread-private destructor callbacks are covered by a delayed hold for the window in which a registration has happened but has not yet started or been revoked, `CtxSlot` keeps a long-lived host thread from pinning `Shared`, and the per-instance native constructor/finalizer are included in `Closing`. A controlled constructor failure becomes a `Result` and completes the close; the finalizer is the non-unwindable boundary where any escaping exception is diagnosed and then aborts without returning to the embedder.
-
-Engine execution exits are structured: `RunOutcome::Returned(value)` for a normal return, `RunOutcome::GuestPanic` for an uncaught guest panic, and a `RunError` carrying `RunErrorKind` for a missing entry/export or an engine fault. A real `main` panic never leaves guest std, which is why `MainPanicBoundary` marks the exact catch in the pinned startup chain and each `run_main` records it in its own state stack; the CLI still maps `GuestPanic` to 101, but a normal `main` returning 101 is no longer the same library API result. Host Rust panic and C++ foreign exception are both kept distinct from those two: the former continues unchanged, the latter may cross the whole `C-unwind` Engine and be caught by an outer C++ typed catch.
+Engine execution exits are structured: `RunOutcome::Returned(value)` for a normal return,
+`RunOutcome::GuestPanic` for an uncaught guest panic, and a `RunError` carrying `RunErrorKind` for a
+missing entry or export, or an engine fault. A real `main` panic never leaves guest std, which is why
+`MainPanicBoundary` marks the exact catch in the pinned startup chain and each `run_main` records it in
+its own state stack; the CLI still maps `GuestPanic` to 101, but a normal `main` returning 101 is no
+longer the same library API result. Host Rust panic and a C++ foreign exception stay distinct from
+both: the former continues unchanged, the latter may cross the whole `C-unwind` Engine and be caught by
+an outer C++ typed catch.
 
 ## 3. Boundaries
 
-- a non-C/System ABI, on a direct foreign declaration or a foreign callback parameter: lowering rejects it explicitly. Native does not execute such a declaration either, because calling it, or invoking it as a callback, is an ABI mismatch; such a scenario never reaches the JIT.
-- exception crossing plain `C`: no propagation contract exists. Rust panic terminates; C++ exception entering Rust in reverse is UB. A Rust panic inside a plain C callback terminates at that ABI boundary.
-- C++ exception or Rust panic inside a plain C wrapper, via a direct or function-pointer `C-unwind` call out of a `C` wrapper: the engine's `Terminate` guard terminates it, because MIR `UnwindAction::Terminate` outranks the callee ABI, and the outer C++ catch must not return normally.
-- C++ exception reaching guest `catch_unwind`: terminates with an explicit foreign-exception reason and the guest catch function must not run, matching the pinned rustc rather than disguising the exception as a guest panic.
-- C++ exception through direct `C-unwind` to a Rust thread root or catch: Drop then terminate, reporting a foreign exception; it is not promised that a Rust catch receives it (identical to native).
-- C++ swallowing a Rust panic: must terminate, as native does, because the rethrow is required.
-- native constructor and native fini: a controlled MIRVM exception during the fallible startup boundary becomes a `Result` failure and follows the close protocol; an unwinding attempt must not cross fini. The dedicated raw guard catches guest panic, `EngineFault`, `EngineClosed`, foreign exception and host Rust panic, emits the fixed diagnostic `native finalizer unwound during Engine teardown`, then `abort`; teardown is not rollbackable, so it neither propagates `EngineFault` back to the embedder nor continues closing.
-- signal frame: it cannot unwind through, and cannot attach `Ctx`, take locks, allocate, or call libffi/guest; a handler exception terminates at the plain C signal-callback boundary.
-- termination diagnostics are not a stable part of the Rust ABI, so negative tests do not compare native and mirvm stderr byte for byte. They lock a non-zero exit, an explicit termination reason, and the rule that a C++ handler must not swallow the exception and return normally.
+- A non-C/System ABI, on a direct foreign declaration or a foreign callback parameter, is rejected
+  explicitly at lowering. Native does not execute such a declaration either, because calling it or
+  invoking it as a callback is an ABI mismatch.
+- An exception crossing plain `C` has no propagation contract: a Rust panic terminates, and a C++
+  exception entering Rust in reverse is UB. A Rust panic inside a plain C callback terminates at that
+  ABI boundary.
+- A C++ exception or Rust panic inside a plain C wrapper — through a direct or function-pointer
+  `C-unwind` call out of it — is terminated by the engine's terminate guard, because
+  `UnwindAction::Terminate` outranks the callee ABI, and the outer C++ catch must not return normally.
+- A C++ exception reaching a guest `catch_unwind` terminates with an explicit foreign-exception reason
+  and the guest catch function must not run, matching the pinned rustc rather than disguising it.
+- A C++ exception through a direct `C-unwind` call to a Rust thread root or catch runs Drop and then
+  terminates, reporting a foreign exception; it is not promised that a Rust catch receives it,
+  identical to native.
+- C++ swallowing a Rust panic must terminate, as native does, because the rethrow is required.
+- A native constructor and native fini: a controlled MIRVM exception during the fallible startup
+  boundary becomes a `Result` failure and follows the close protocol, and an unwinding attempt must not
+  cross fini. The dedicated raw guard catches guest panic, `EngineFault`, `EngineClosed`, foreign
+  exception and host Rust panic, emits the fixed diagnostic and aborts; teardown is not rollbackable,
+  so it neither propagates `EngineFault` back to the embedder nor continues closing.
+- A signal frame cannot unwind through and cannot attach a context, take locks, allocate or call libffi
+  or guest code; a handler exception terminates at the plain C signal-callback boundary.
+- Termination diagnostics are not a stable part of the Rust ABI, so negative tests never compare native
+  and mirvm stderr byte for byte. They lock a non-zero exit, an explicit termination reason, and the
+  rule that a C++ handler must not swallow the exception and return normally.
 
-E13 ruling: **use MIRVM-owned exception classes, but do not write an independent personality.** The owned exception only tells the system unwinder that an object is a guest panic or an `EngineFault`, and which Engine it belongs to; how each frame runs cleanup stays with the existing Rust personality and JIT LSDA. The original guest panic object still belongs to guest std, and MIRVM neither copies nor parses it. Cleanup is decided from the current exception object rather than thread-local global state: the interpreter raw-catches the current object per frame, the JIT landing pad classifies the pointer the unwinder hands over, and FrameGuard only restores the operand area, shadow frames and depth. The nonce-carrying TLS token stack only guarantees that `EngineFault` is consumed by the correct owner in LIFO order, so an outer fault suspended by a native catch cannot pollute a subsequently re-entered guest panic or inner fault. Real measurements overturned the earlier §7.50 downgrade and later strict review overturned the §7.51 thread-level cleanup criterion; the real embedding entry point did not wait for a stable embedding API, since the library API, the P1 executable entry and libffi callbacks already let one Engine's exception cross another, which is why ownership is checked per object (C8). Full evidence and the decision history remain in git history.
+The exception-class ruling: **use MIRVM-owned exception classes, but do not write an independent
+personality.** The owned exception only tells the system unwinder that an object is a guest panic or
+an `EngineFault` and which Engine it belongs to; how each frame runs cleanup stays with the existing
+Rust personality and JIT LSDA, and the original guest panic object stays with guest std. Cleanup is
+decided from the current exception object rather than thread-local state, and the nonce-carrying token
+stack only guarantees that an `EngineFault` is consumed by its correct owner in LIFO order, so an
+outer fault suspended by a native catch cannot pollute a subsequently re-entered guest panic or inner
+fault.
 
 ## 4. Verification
 
 ```bash
-./tests/run.sh suite runtime.c-unwind
+make suite S=runtime.c-unwind
 ```
 
-Before-fix measured matrix. Environment: rustc `nightly-2026-07-02`, g++ 13.3, in-project libffi 5.1.1 (bundling libffi 3.6.0), Linux x86_64. "Default" means the default configuration only; a short call that does not cross the hot threshold may still be completed by the interpreter and is not evidence of JIT machine code.
+The fixture `tests/fixtures/c_unwind_contract/` first generates the native oracle with pinned Cargo,
+rustc and C++, then runs the pure interpreter and the forced-sync JIT (`MIRVM_JIT=on`,
+`MIRVM_JIT_SYNC=1`, `MIRVM_JIT_THRESHOLD=1`) under default cargoless. A scenario that needs published
+guest machine code requires the JIT log to show `release=true` on the target function's release line
+with no `release=false`, which prevents a false green where "it is called JIT but is interpreted
+throughout". The thirteen items, each matching native:
 
-| Scenario | native | MIRVM `MIRVM_JIT=off` | MIRVM default | MIRVM `MIRVM_JIT_SYNC=1`, `MIRVM_JIT_THRESHOLD=1` (before fix) | Verdict at the time |
-|---|---|---|---|---|---|
-| `C-unwind` returns without an exception, call site has cleanup | returns 42, Drop | returns 42, Drop | returns 42, Drop | JIT compilation panics at the `try_call` result read | JIT real RED |
-| C++ `Marker{73}` crosses a guest callback, outer C++ typed catch | caught by original type, Drop | terminates in the `extern C` callback wrapper | same | blocked by both the JIT RED and the wrapper | callback real RED |
-| Rust panic crosses C++ `catch(...); throw;` back to a guest catch | original payload, Drop | terminates in the `extern C` callback wrapper | same | same | callback real RED |
-| C++ exception through direct `C-unwind` to the Rust thread root/catch | Drop then terminate, foreign exception reported | same as native | same as native | JIT RED | not promised to be caught by Rust catch |
-| C++ swallows a Rust panic | terminate, rethrow required | callback wrapper terminates earlier | same | same | must terminate |
-| exception crosses plain `C` | Rust panic terminates; C++ exception crossing in reverse is UB | terminates | terminates | terminates | no propagation contract established |
-| standalone libffi closure, real callback compiled as `C-unwind` | exceptions pass in both directions | the same host probe passes | same | not involved | overthrows "libffi closures inherently cannot unwind" |
+- `C-unwind` exception-free return with call-site cleanup, 30,000 times: `value=42 drops=30000`.
+- C++ typed exception round trip: `result=1073 caught=73 drops=1`.
+- Rust panic rethrown through C++: `payload=51 caught=888 drops=1`.
+- C++ typed exception out of the whole Engine: the outer C++ catches `Marker{73}`, value 73.
+- C++ exception reaching a guest `catch_unwind`: it reports that it cannot catch a foreign exception,
+  then terminates, and the guest catch function does not run.
+- C++ swallowing a Rust panic: terminates.
+- Rust panic in a plain C callback: terminates.
+- A C++ throw through a direct `C-unwind` call inside a plain C wrapper: terminates, outer catch does
+  not return.
+- A C++ throw through a function-pointer `C-unwind` call inside a plain C wrapper: terminates.
+- A Rust panic through a direct `C-unwind` call inside a plain C wrapper: explicitly terminates.
+- A Rust panic through a function-pointer `C-unwind` call inside a plain C wrapper: explicitly
+  terminates.
+- A direct foreign call using a non-C/System ABI: rejected explicitly at lowering.
+- A foreign callback parameter using a non-C/System ABI: rejected explicitly at lowering.
 
-The last row also checked the bundled libffi x86_64 assembly: closure frames carry stack information the system unwinder can use. The old problem was not inherent libffi blocking but mirvm itself compiling the Rust wrapper as plain `extern "C"`.
+The fixture is part of `fast` and deliberately does not grow into a generic FFI harness.
 
-After-fix measured results. The formal fixture uses the same native oracle and runs the pure interpreter and the forced-sync JIT with `MIRVM_JIT=on`, `MIRVM_JIT_SYNC=1`, `MIRVM_JIT_THRESHOLD=1`. A scenario that needs published guest machine code requires the JIT log to show `release=true` on the same release line for the target function name and no `release=false`, which prevents fake green where "it is called JIT but is interpreted throughout"; the two unsupported-ABI scenarios are rejected at lowering and never reach the JIT.
-
-| Scenario | native | interpreter | forced-sync JIT |
-|---|---|---|---|
-| `C-unwind` exception-free return + cleanup, 30,000 times | `value=42 drops=30000` | same | same, machine code published |
-| C++ typed exception round trip | `result=1073 caught=73 drops=1` | same | same, machine code published |
-| Rust panic rethrown through C++ | `payload=51 caught=888 drops=1` | same | same, machine code published |
-| C++ typed exception out of the whole Engine | outer C++ catches `Marker{73}` | same, the value is still 73 | same, machine code published |
-| C++ exception reaching guest `catch_unwind` | reports that it cannot catch a foreign exception, then terminates | same, the guest catch function does not run | same, machine code published |
-| C++ swallows a Rust panic | terminates | terminates | terminates |
-| Rust panic in a plain C callback | terminates | terminates | terminates |
-| direct `C-unwind` C++ throw inside a plain C wrapper | terminates, outer catch does not return | engine `Terminate` guard terminates | same |
-| fn-ptr `C-unwind` C++ throw inside a plain C wrapper | terminates, outer catch does not return | engine `Terminate` guard terminates | same |
-| direct `C-unwind` Rust panic inside a plain C wrapper | terminates | engine `Terminate` guard explicitly terminates | same |
-| fn-ptr `C-unwind` Rust panic inside a plain C wrapper | terminates | engine `Terminate` guard explicitly terminates | same |
-| direct foreign using a non-C/System ABI | not executed (calling that declaration is an ABI mismatch) | lowering explicitly rejects | same |
-| foreign callback parameter using a non-C/System ABI | not executed (invoking that declaration as a callback is an ABI mismatch) | lowering explicitly rejects | same |
-
-The fixture `tests/fixtures/c_unwind_contract/` first generates the native oracle with pinned Cargo + rustc + C++, then runs the pure interpreter and the forced-sync JIT under default cargoless. Thirteen items cover a normal return, the typed C++ exception round trip, the Rust panic rethrow, C++ typed passthrough of the whole Engine, termination when a guest catch meets a C++ exception, swallowing a panic, a plain C callback panic, foreign exception and Rust panic on the direct and function-pointer `Terminate` edges, and explicit rejection of a non-C/System ABI for both the outer call and a callback parameter. It is already part of `fast` and will not be expanded into a generic FFI harness.
-
-Uncaught guest panic resource return and the real `main` result are locked separately by the standard `runtime.semantics unwind` segment: interpreter and forced-sync JIT each run once a normal guest call inside payload Drop followed by a second panic, and each run once a real lowering + `lang_start_internal` main panic / normal 101 contrast, which together with the nine pre-existing unwind semantics cases gives **13/13**. This proves that the panic count is reset on the guest side, that both payloads are destructed exactly once, that the same Engine can keep executing after cleanup, and that an identical OS exit code does not erase the library API result class.
+Uncaught guest panic resource return and the real `main` result are locked separately by the standard
+`runtime.semantics` unwind segment: interpreter and forced-sync JIT each run once a normal guest call
+inside payload Drop followed by a second panic, and each runs once a real lowering plus
+`lang_start_internal` main-panic/normal-101 contrast, which together with nine pre-existing unwind
+semantics cases gives 13/13. That proves the panic count is reset on the guest side, both payloads are
+destructed exactly once, the same Engine keeps executing after cleanup, and an identical OS exit code
+does not erase the library API result class.
 
 ## 5. Open items
 
-- Reopen trigger: a shape change in the pinned std must make lowering and verification fail loudly rather than fall back to function names or 101 guessing (C12). The `MainPanicBoundary` contract is re-checked by IR serialization, image merging and per-function Package owned snapshot verification, and those checks are the evidence to extend.
-- The `runtime.c-unwind` fixture deliberately stays scoped to this contract and is not grown into a general FFI harness; new foreign-boundary behaviour needs its own cases rather than more rows here.
-- A C++ exception entering Rust in reverse through a plain `C` boundary remains UB with no success semantics; mirvm gives it no propagation contract and no reopen plan.
-- Explicitly not promised: prompt latency for process-directed external signal delivery, since the signal frame never enters libffi/guest/unwind and only ordinary safepoints deliver handlers, under a fresh activation (C14); and active revocation of every raw pointer held by third-party code, since published callback/JIT/MC/native addresses are stabilized by process-lifetime code and small owner tombstones.
-- Ambiguity left visible: "default" MIRVM results never prove JIT machine code on their own, because short calls below the hot threshold may stay interpreted.
+- A shape change in the pinned std must make lowering and verification fail loudly rather than fall
+  back to function names or 101 guessing. The `MainPanicBoundary` contract is re-checked by IR
+  serialization, image merging and per-function package verification, and those checks are what to
+  extend.
+- The `runtime.c-unwind` fixture stays scoped to this contract; new foreign-boundary behaviour needs
+  its own cases rather than more rows here.
+- A C++ exception entering Rust in reverse through a plain `C` boundary remains UB with no success
+  semantics and no reopen plan.
+- Explicitly not promised: prompt latency for process-directed external signal delivery, since the
+  signal frame never enters libffi, guest code or unwind and only ordinary safepoints deliver handlers
+  under a fresh activation; and active revocation of every raw pointer held by third-party code.
+- "Default" MIRVM results never prove JIT machine code on their own, because short calls below the hot
+  threshold may stay interpreted.

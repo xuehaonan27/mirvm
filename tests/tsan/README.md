@@ -49,22 +49,34 @@ are **not** a style choice: `src/vm` is compiled verbatim and refers to exactly 
 
 ## Cases
 
-| id | what it pins |
-| --- | --- |
-| `mixed-stack-fib` | 8 threads run interpreted + compiled frames in parallel on one native stack; the shared read-only program is read lock-free |
-| `atomic-cross-tier` | interpreted `AtomicRmw` and compiled `fetch_add` hammer the same real address; the interpreter must issue a real host atomic |
-| `blocking-io-liveness` | a real blocking `read(2)` stalls only its own OS thread (the isomorphic program deadlocks under cooperative scheduling) |
-| `mixed-stack-unwind` | 8 threads unwind mixed stacks concurrently: per-thread panic -> `Drop` in guest order -> catch, with per-thread logs |
-| `engine-atomics-thunk-cache` | the product engine: 8 threads attach, run guest atomics, and race the thunk factory's `Mutex` cache (same key must yield the same code) |
-| `capture-session-lifecycle` | two live producers, page publish/return/rescue, and a committed capture ledger |
-| `engine-close-race` | `close()` racing 8 threads that are inside `run_export`: every result is a value or a structured `EngineClosed`, the seal rejects everything later, the engine leaves the registry, and both deferred windows (hold, in-flight TSD op) survive the close |
-| `guest-threads` | 6 rounds x 8 threads attaching, interpreting and retiring, with tracked `pthread_setspecific` set/clear through the deferred TSD registry; the thread count reads back to the baseline after the joins |
-| `signal-delivery` | cross-thread `pthread_kill` into a per-thread inbox: handler runs once per raise on the owning pthread, a neighbour's inbox stays empty, and a blocked raise stays pending until unblocked |
-| `fork-guard` | `fork()` with guest threads live: the child's generation advances once, its fork baseline is repaired to the child, the recording syscall returns the child's pid, and the parent's engine keeps interpreting afterwards |
+- `mixed-stack-fib`: 8 threads run interpreted and compiled frames in parallel on one native stack,
+  and the shared read-only program is read lock-free.
+- `atomic-cross-tier`: interpreted `AtomicRmw` and compiled `fetch_add` hammer the same real address,
+  so the interpreter must issue a real host atomic.
+- `blocking-io-liveness`: a real blocking `read(2)` stalls only its own OS thread (the isomorphic
+  program deadlocks under cooperative scheduling).
+- `mixed-stack-unwind`: 8 threads unwind mixed stacks concurrently — per-thread panic, `Drop` in guest
+  order, catch — with per-thread logs.
+- `engine-atomics-thunk-cache`: the product engine: 8 threads attach, run guest atomics, and race the
+  thunk factory's `Mutex` cache (the same key must yield the same code).
+- `capture-session-lifecycle`: two live producers, page publish/return/rescue, and a committed capture
+  ledger.
+- `engine-close-race`: `close()` racing 8 threads inside `run_export`: every result is a value or a
+  structured `EngineClosed`, the seal rejects everything later, the engine leaves the registry, and
+  both deferred windows (hold, in-flight TSD op) survive the close.
+- `guest-threads`: 6 rounds × 8 threads attaching, interpreting and retiring, with tracked
+  `pthread_setspecific` set/clear through the deferred TSD registry; the thread count reads back to
+  the baseline after the joins.
+- `signal-delivery`: cross-thread `pthread_kill` into a per-thread inbox — the handler runs once per
+  raise on the owning pthread, a neighbour's inbox stays empty, and a blocked raise stays pending until
+  unblocked.
+- `fork-guard`: `fork()` with guest threads live — the child's generation advances once, its fork
+  baseline is repaired to the child, the recording syscall returns the child's pid, and the parent's
+  engine keeps interpreting afterwards.
 
 Every case prints exactly one `PASS <id> ...` / `FAIL <id> ...` line. `tests/suites/runtime/tsan.sh`
-holds the list of ids that must appear, so a case that stops running or gets renamed fails the
-suite instead of quietly looking like a pass.
+holds the list of ids that must appear, so a case that stops running or gets renamed fails the suite
+instead of quietly looking like a pass.
 
 ## What this does not cover
 
@@ -95,7 +107,7 @@ suite instead of quietly looking like a pass.
 ## Running it
 
 ```bash
-bash tests/suites/runtime/tsan.sh          # the gate; runtime.semantics calls it
+make suite S=runtime.tsan     # the gate; runtime.semantics calls it too
 ```
 
 Formatting: this crate is outside the root workspace, so `cargo fmt` at the repository root

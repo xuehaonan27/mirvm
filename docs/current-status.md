@@ -1,8 +1,8 @@
 # mirvm — current status
 
-> Snapshot of the present: what mirvm does today, how a run flows, what is verified, what is not
-> claimed, and what comes next. Current code and reproducible tests win over any plan.
-> Open debt, open questions and refusal boundaries live only in [open-issues.md](open-issues.md).
+> What mirvm does today, how a run flows, what has been measured, what is not claimed, and what comes
+> next. Current code and reproducible tests win over any plan; open debt and refusal boundaries live
+> only in [open-issues.md](open-issues.md).
 
 ## 1. Implemented today
 
@@ -10,46 +10,45 @@ mirvm runs whole Rust programs built for the pinned toolchain `nightly-2026-07-0
 Linux/ELF/x86_64 baseline: rustc MIR is lowered into mirvm's own typed bytecode and that bytecode is
 executed in a VM. `DESIGN.md` is the contract; `docs/designs/` holds the per-topic contracts.
 
-- **Interpreter** — tcx-free tree walk over the typed bytecode: scalar and SIMD intrinsics, true
+- **Interpreter** — a tcx-free tree walk over the typed bytecode: scalar and SIMD intrinsics, true
   stack depth, `f16`/`f128`, atomic ordering, 128-bit forms, nested DSTs, `volatile`, `dyn` tail
   fields. An exhaustive verifier runs at the pack, image, L2 and final-execution entries.
-- **JIT** — method-level Cranelift, on by default (`MIRVM_JIT=off` falls back to pure
-  interpretation). The translator is exhaustive over the statement, rvalue and terminator tables:
-  frame model v2 with memory operands, the full scalar set, 128-bit and atomics, all ABI shapes,
-  the five call helpers, productized unwind with a full LSDA over both CIEs. `MIRVM_JIT_SYNC`
-  publishes synchronously, so `MIRVM_JIT_THRESHOLD=1` differentials prove compiled code really ran.
-- **FFI and unwind** — guest to native through `dlsym` + libffi with the source ABI (C or
-  C-unwind); native to guest through libffi closures plus TLS attach; aggregates marshalled by
-  value (frozen layout, libffi struct grouping, sret). Exceptions keep their source ABI: plain C
-  aborts, C-unwind carries C++ typed exceptions or Rust panic payloads through interpreter and JIT
-  frames and runs cleanup, non-C/System ABIs are refused.
+- **JIT** — method-level Cranelift, on by default (`MIRVM_JIT=off` falls back to pure interpretation).
+  The translator is exhaustive over the statement, rvalue and terminator tables: frame model v2 with
+  memory operands, the full scalar set, 128-bit and atomics, all ABI shapes, the five call helpers,
+  and productized unwind with a full LSDA over both CIEs. `MIRVM_JIT_SYNC` publishes synchronously, so
+  `MIRVM_JIT_THRESHOLD=1` differentials prove compiled code really ran.
+- **FFI and unwind** — guest to native through `dlsym` + libffi with the source ABI (C or C-unwind);
+  native to guest through libffi closures plus TLS attach; aggregates marshalled by value (frozen
+  layout, libffi struct grouping, sret). Exceptions keep their source ABI: plain C aborts, C-unwind
+  carries C++ typed exceptions or Rust panic payloads through interpreter and JIT frames and runs
+  cleanup, and non-C/System ABIs are refused.
 - **Threads, TLS, signals** — real guest threads and TLS, one signal inbox per owning Engine,
   pthread-exit TSD teardown, and a fork guard that admits `fork` only while the guest is
   single-threaded. `exec` passes through.
-- **Cargo** — the compat track occupies Cargo's `RUSTC` slot, so ordinary and workspace wrappers
-  keep Cargo's own composition and ordering. `MIRVM_DEPS` defaults to `self`: `mirvm run` and
-  `mirvm test` resolve, schedule and build with no cargo in the process, using the in-tree
-  `src/cargoless/` stack. `MIRVM_DEPS=cargo` remains the user fallback and behaviour referee, and
-  both tracks are compared continuously. `mirvm test` covers lib/bin/test/bench/example with libtest
-  or a custom harness; a rustdoc front end adds doctests without pretending they are ordinary tests.
+- **Cargo** — the compat track occupies Cargo's `RUSTC` slot, so ordinary and workspace wrappers keep
+  Cargo's own composition and ordering. `MIRVM_DEPS` defaults to `self`: `mirvm run` and `mirvm test`
+  resolve, schedule and build with no cargo in the process, using the in-tree `src/cargoless/` stack.
+  `MIRVM_DEPS=cargo` remains the user fallback and behaviour referee, and both tracks are compared
+  continuously. `mirvm test` covers lib/bin/test/bench/example with libtest or a custom harness, and a
+  rustdoc front end adds doctests without pretending they are ordinary tests.
 - **Images and caches** — a byte-deterministic std base image plus a deps image make warm runs load
   instead of re-lower. An image stack of `[std base, deps…]` carries multi-source lookup, cumulative
-  offsets and a key chain. An L2 post-mono engine-IR cache serializes a whole frozen region at fixed
-  logical addresses. `MIRVM_TIMING` prints a phase ledger.
+  offsets and a key chain, and an L2 post-mono engine-IR cache serializes a whole frozen region at
+  fixed logical addresses. `MIRVM_TIMING` prints a phase ledger.
 - **Packaging** — `.mirvm` packages (mode B) are validated program images: `Package::load` copies the
-  source into a process-owned immutable snapshot, and each `unsafe instantiate` builds an independent
+  source into a process-owned immutable snapshot and each `unsafe instantiate` builds an independent
   Engine, so one package instantiates repeatedly and concurrently. Artifacts use logical `LinkAddr`
   values with per-Engine mapping of frozen/TLS/native/MC images and callback entry closures.
 - **Test and capture tooling** — `make` is the interface (`test`/`smoke`/`gate`, `list`,
-  `suite S=<id>`, `projects`, `clean`) and `tests/run.sh` is the implementation it forwards to;
-  suites are grouped `quality`, `differential`, `contracts`, `corpus`,
-  `runtime`, `performance`, `harness`, with `tests/support/harness.sh` providing the bootstrap,
-  PASS/FAIL/SKIP/XFAIL, summaries, manifests, comparison primitives, caching and disk protection.
-  Every test asset lives under `tests/` — guest programs in `tests/scripts/` (one namespace, three
-  kinds: `c_*` corpus drivers, `vmcall_*` exported-entry probes, the rest differential programs),
-  real Cargo projects as pinned submodules in `tests/projects/`, contract fixtures and oracles in
-  `tests/fixtures/`, the TSan crate in `tests/tsan/` — so no test script sits at the repository root
-  and no third-party source is vendored into it.
+  `suite S=<id>`, `projects`, `clean`) and `tests/run.sh` is the implementation it forwards to; suites
+  are grouped `quality`, `differential`, `contracts`, `corpus`, `runtime`, `performance`, `harness`,
+  with `tests/support/harness.sh` providing the bootstrap, PASS/FAIL/SKIP/XFAIL, summaries, manifests,
+  comparison primitives, caching and disk protection. Every test asset lives under `tests/` — guest
+  programs in `tests/scripts/` (one namespace, three kinds: `c_*` corpus drivers, `vmcall_*`
+  exported-entry probes, the rest differential programs), real Cargo projects as pinned submodules in
+  `tests/projects/`, fixtures and oracles in `tests/fixtures/`, the TSan crate in `tests/tsan/` — so
+  no test script sits at the repository root and no third-party source is vendored into it.
   `tests/suites/corpus/cases.manifest` is the only corpus list. Telemetry captures internal syscall
   events, decodes and inspects them offline, keeps a process-wide page pool and registers JIT address
   ranges for perf-maps only at an explicit stop.
@@ -91,89 +90,109 @@ and that is the only platform baseline that may be claimed.
 
 Measured on the current tree; `tests/README.md` documents the suites.
 
-| Check | Result |
-|---|---|
-| `cargo check --locked --all-targets --all-features` | clean |
-| `cargo test --locked --all-features` | **404 pass** |
-| Clippy `-D warnings`, `cargo fmt --check` | clean |
-| `./tests/run.sh fast` | **13 pass / 2 fail** |
-| `runtime.semantics` (drives TSan) | 3 pass / 1 fail; TSan cases **10/10**, zero warnings |
-| `runtime.telemetry` | **14/14** |
-| corpus smoke tier | **17 pass / 7 fail** |
-| base image byte-determinism | 6 builds (3 at `MIRVM_THREADS=1`, 3 at `=8`) → **one hash** |
+- `cargo check --locked --all-targets --all-features`, Clippy `-D warnings`, `cargo fmt --check`:
+  clean.
+- `cargo test --locked --all-features`: 404 pass.
+- `make test` (fast tier): 13 pass / 2 fail.
+- `runtime.semantics` (drives TSan): 3 pass / 1 fail; TSan cases 10/10 with zero warnings.
+- `runtime.telemetry`: 14/14.
+- Corpus smoke tier: 17 pass / 7 fail.
+- Base image byte-determinism: 6 builds (3 at `MIRVM_THREADS=1`, 3 at `=8`) produce one hash.
 
-- **The two `fast` failures are the only registered REDs**: `contracts.cargoless-workspace` (a
-  `full_package_id` compatibility assertion against non-English test data) and
-  `contracts.cargoless-sources` (two diagnosis texts). Both are known and loud.
-- **The corpus smoke tier has 7 pre-existing failures on this host**, unchanged by the parallel
-  frontend: four rayon-family 90 s timeouts (`rayon`, `flate2`, `brotli`, `tiny_skia`), two aborts
-  (`mlua_lua`, `wasmtime_wat`) and one genuine trap (`png_round`:
-  `foreign llvm.x86.pclmulqdq.512`, the open intrinsic queue). `tokei` is worse: it prints its full
-  table and then never exits.
-- **`performance.limits` is RED**: best `fib(32)` is about 97 ms against the 80 ms gate. Output is
-  correct and the JIT is effective, so the gate is not relaxed — a completely green `gate` must not
-  be claimed.
-- **A full `gate` has not been re-run since the documentation cleanup**; the numbers above were
-  verified suite by suite.
-- **Build**: debug and release both build; always execute the release binary. Under the pinned
-  LLVM 22 the release profile must keep `debug=2` together with `strip="debuginfo"`, or the release
-  cleanup chain miscompiles.
-- **Oracle discipline**: an oracle must be observable output or an invariant; "both sides failed" or
-  "exit codes match" is never success. Deferred cases are refused loudly as a separate `p5` bucket
-  instead of counted as failures.
-- **CI** (`.github/workflows/ci.yml`) runs fmt, Clippy, Rust tests, the gate harness, the release
-  build and separately visible TSan and runtime gates. GitHub-side operation is paused; the local
-  equivalent is authoritative.
+The two `fast` failures are the only registered REDs: `contracts.cargoless-workspace` (a
+`full_package_id` compatibility assertion against non-English test data) and `contracts.cargoless-sources`
+(two diagnosis texts). Both are known and loud.
+
+The corpus smoke tier has 7 pre-existing failures on this host, unchanged by the parallel frontend:
+four rayon-family 90s timeouts (`rayon`, `flate2`, `brotli`, `tiny_skia`), two aborts (`mlua_lua`,
+`wasmtime_wat`) and one genuine trap (`png_round`: `foreign llvm.x86.pclmulqdq.512`, the open intrinsic
+queue). `tokei` is worse: it prints its full table and then never exits.
+
+`performance.limits` is RED: the best `fib(32)` is about 97ms against the 80ms gate. Output is correct
+and the JIT is effective, so the gate is not relaxed — a completely green `gate` must not be claimed.
+
+A full `gate` has not been re-run since the documentation cleanup; the numbers above were verified
+suite by suite.
+
+Build notes: debug and release both build, and only the release binary is executed — under the pinned
+LLVM 22 the release profile must keep `debug=2` together with `strip="debuginfo"`, or the release
+cleanup chain miscompiles.
+
+Oracle discipline: an oracle must be observable output or an invariant; "both sides failed" or "exit
+codes match" is never success. Deferred cases are refused loudly as a separate `p5` bucket instead of
+counted as failures.
+
+CI (`.github/workflows/ci.yml`) installs the pinned toolchain plus `strace` and `ripgrep`, then runs
+`make test` and `make suite S=runtime.tsan`. It stops there on purpose: `smoke` and `gate` add the
+corpus and the timing gates, which need a machine larger than a shared runner. GitHub-side operation is
+paused; the local equivalent is authoritative.
 
 ## 4. Gaps and honest limits
 
 What is refused or not yet claimed — not what is planned.
 
-| Area | Limit |
-|---|---|
-| Platform | Linux/ELF/x86_64 only. |
-| Arbitrary Rust | Not supported. The harness holds two real projects and a small workload set; those cases are Git-ignored, are not a continuous gate and do not generalize. |
-| JIT | No OSR, no deopt, no production tiering. Close stops and joins compile workers and releases `Shared`, but published JIT code and its `.eh_frame` live to process end. |
-| Signals | Synchronous faults in a guest handler, realtime signals and `SA_SIGINFO`/`SA_ONSTACK`/`SA_NODEFER`/`SA_RESETHAND` are refused. Process-directed external signals are promised only at the owner Engine's next safe point. |
-| backtrace | The `_Unwind_Set/GetGR/SetIP/Resume` and beyond-CFA context family stays `Unsupported`. `atexit` is a builtin; `dl_iterate_phdr` still goes through native FFI. |
-| fork / exec | `fork` is admitted only while the guest is single-threaded; multithreaded fork and the `vfork`/`clone`/`setjmp` families are loud refusals. |
-| IR / ABI | `volatile` uses alignment=1 opaque `MaybeUninit` carriers and promises no atomicity beyond 16 bytes. Slices and `str` keep static formulas, other nested DSTs are refused. Not every 128-bit ABI shape is scalarized. `track_caller` `ReifyFnPointer` works; other adjustments are not extrapolated from it. |
-| Static archives | Non-PIC, thin archives, cross-archive dependency/ordering/duplicate exports and export-symbols are refused. There is no multi-archive link plan and this is not a general linker. |
-| Logging / profile | No 1-byte raw syscall site, no profile command, no separate trace interpreter loop, no 4→64 KiB adaptation; the trace code domain is frozen at Engine construction rather than chosen at the outermost activation. |
-| Embedding | `instantiate` stays `unsafe`: the native/FFI ABI, hand-written Modules and raw two-machine-word exports must be trusted, `Shared` is not public, and no safe typed export bindings are generated. Third-party callbacks have no universal revocation, so published closure/JIT/MC/native code lives to process end. |
-| Distribution | `.mirvm` is at unstable format v4; first load still decodes every function, and archive-direct verification, cross-build_id/target compatibility, fat artifacts and format freeze are unfinished. No daemon, REPL, checked mode, resource governance or real sandbox. |
-| Cargo config | Git source replacement, patches targeting a Git URL, and parts of the Cargo config surface such as `paths`/`HOST_RUSTFLAGS` are not implemented. |
-| `mirvm doc` | Doctests work through a fixed rustdoc front end; independent `mirvm doc`/HTML generation is not claimed. |
+- **Platform**: Linux/ELF/x86_64 only.
+- **Arbitrary Rust**: not supported. The corpus holds real projects and a small workload set; those
+  are not a continuous gate and do not generalize.
+- **JIT**: no OSR, no deopt, no production tiering. Close stops and joins compile workers and releases
+  `Shared`, but published JIT code and its `.eh_frame` live to process end.
+- **Signals**: synchronous faults in a guest handler, realtime signals and
+  `SA_SIGINFO`/`SA_ONSTACK`/`SA_NODEFER`/`SA_RESETHAND` are refused. Process-directed external signals
+  are promised only at the owner Engine's next safe point.
+- **backtrace**: the `_Unwind_Set/GetGR/SetIP/Resume` and beyond-CFA context family stays
+  `Unsupported`. `atexit` is a builtin; `dl_iterate_phdr` still goes through native FFI.
+- **fork / exec**: `fork` is admitted only while the guest is single-threaded; multithreaded fork and
+  the `vfork`/`clone`/`setjmp` families are loud refusals.
+- **IR / ABI**: `volatile` uses alignment=1 opaque `MaybeUninit` carriers and promises no atomicity
+  beyond 16 bytes. Slices and `str` keep static formulas, other nested DSTs are refused, and not every
+  128-bit ABI shape is scalarized. `track_caller` `ReifyFnPointer` works; other adjustments are not
+  extrapolated from it.
+- **Static archives**: non-PIC, thin archives, cross-archive dependency/ordering/duplicate exports and
+  export-symbols are refused. There is no multi-archive link plan and this is not a general linker.
+- **Logging / profile**: no 1-byte raw syscall site, no profile command, no separate trace interpreter
+  loop, no 4→64 KiB adaptation; the trace code domain is frozen at Engine construction rather than
+  chosen at the outermost activation.
+- **Embedding**: `instantiate` stays `unsafe` — the native/FFI ABI, hand-written Modules and raw
+  two-machine-word exports must be trusted, `Shared` is not public, and no safe typed export bindings
+  are generated. Third-party callbacks have no universal revocation, so published closure/JIT/MC/native
+  code lives to process end.
+- **Distribution**: `.mirvm` is at unstable format v4; first load still decodes every function, and
+  archive-direct verification, cross-build_id/target compatibility, fat artifacts and format freeze
+  are unfinished. No daemon, REPL, checked mode, resource governance or real sandbox.
+- **Cargo config**: Git source replacement, patches targeting a Git URL, and parts of the Cargo config
+  surface such as `paths`/`HOST_RUSTFLAGS` are not implemented.
+- **`mirvm doc`**: doctests work through a fixed rustdoc front end; independent `mirvm doc`/HTML
+  generation is not claimed.
 
 Architectural ambition is not qualification. "A reference implementation that runs in RAM" is a
-long-term semantic contract; while the gaps above and a limited corpus remain, mirvm is not a
-finished product covering all of Rust.
+long-term semantic contract; while the gaps above and a limited corpus remain, mirvm is not a finished
+product covering all of Rust.
 
 ## 5. Development order
 
 1. **Performance (D16).** Close the `fib(32)` RED by making it faster, never by relaxing the gate.
-   `MIRVM_TIMING` and profile data decide JIT code persistence, direct archive
-   verification/loading, background service threads and `-Cincremental`. Starting facts: lowering
-   costs about `0.10 ms/instance` and behaves as a near-constant std tax (the executed set is only
-   7–29% of the lowered set, and 75% of the phase is rustc query/decoding machinery); the std base
-   image takes a pure-cold script from 385 ms to 104 ms, a deps image takes an ecosystem cold run
-   from 924 ms to 66 ms, and an L2 hit takes the warm load phase 11–15×.
+   `MIRVM_TIMING` and profile data decide JIT code persistence, direct archive verification/loading,
+   background service threads and `-Cincremental`. Starting facts: lowering costs about
+   `0.10 ms/instance` and behaves as a near-constant std tax (the executed set is only 7–29% of the
+   lowered set, and 75% of the phase is rustc query/decoding machinery); the std base image takes a
+   pure-cold script from 385ms to 104ms, a deps image takes an ecosystem cold run from 924ms to 66ms,
+   and an L2 hit takes the warm load phase 11–15×.
 2. **Logging and telemetry.** Fork generations are closed. Next: the remaining direct hot path, the
    trace interpreter loop, then stateless inline-asm raw syscall sites — the first internal syscall
-   slice must not be claimed complete before those raw sites land. Only variadic `libc::syscall`
-   forms are recorded today; `std::fs` and `Command` go through their own builtins.
+   slice must not be claimed complete before those raw sites land. Only variadic `libc::syscall` forms
+   are recorded today; `std::fs` and `Command` go through their own builtins.
 3. **Profile (parallel).** JIT address ranges and perf-map are done. Linux perf capture may run
-   alongside the logging work, must report permissions, lost samples and missing mappings loudly,
-   and must not switch the trace code domain.
-4. **Data rulings.** Rule on 4/16/64 KiB page sizes, hard-pool numbers, writer batching and
-   checksums under one memory budget, then implement 4→64 KiB auto-scaling.
-5. **Diagnostics.** The default `run` keeps compiler, frontend, lower, MIRVM control and guest
-   stderr physically merged on fd2 in unchanged byte order; capture tees compiler/control
-   byte-for-byte into `diagnostics.log` from the command boundary, and guest fd2 enters neither the
-   router nor the event ring. Perf capture reuses that boundary.
+   alongside the logging work, must report permissions, lost samples and missing mappings loudly, and
+   must not switch the trace code domain.
+4. **Data rulings.** Rule on 4/16/64 KiB page sizes, hard-pool numbers, writer batching and checksums
+   under one memory budget, then implement 4→64 KiB auto-scaling.
+5. **Diagnostics.** The default `run` keeps compiler, frontend, lower, MIRVM control and guest stderr
+   physically merged on fd2 in unchanged byte order; capture tees compiler/control byte-for-byte into
+   `diagnostics.log` from the command boundary, and guest fd2 enters neither the router nor the event
+   ring. Perf capture reuses that boundary.
 6. **Product capability.** Direct archive semantic verification needs a new offset-based read-only
-   representation before a format freeze can be reviewed. OS-level sandboxing is deliberately
-   paused. Remaining stage boundaries and acceptance criteria are in `open-issues.md`.
+   representation before a format freeze can be reviewed. OS-level sandboxing is deliberately paused.
+   Remaining stage boundaries and acceptance criteria are in `open-issues.md`.
 7. **Harness budget.** Touch the harness only when a current RED cannot be reproduced or judged, and
    never harden it for a hypothetical future.
 8. **Remote work stays paused** until the maintainer explicitly resumes it (`open-issues.md` G1).
