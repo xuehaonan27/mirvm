@@ -41,18 +41,14 @@ executed in a VM. `DESIGN.md` is the contract; `docs/designs/` holds the per-top
   Engine, so one package instantiates repeatedly and concurrently. Artifacts use logical `LinkAddr`
   values with per-Engine mapping of frozen/TLS/native/MC images and callback entry closures.
 - **Test and capture tooling** — `make` is the interface (`test`/`smoke`/`gate`, `list`,
-  `suite S=<id>`, `projects`, `clean`) and `tests/run.sh` is the implementation it forwards to; suites
-  are grouped `quality`, `differential`, `contracts`, `corpus`, `runtime`, `performance`, `harness`,
-  with `tests/support/harness.sh` providing the bootstrap, PASS/FAIL/SKIP/XFAIL, summaries, manifests,
-  comparison primitives, caching and disk protection. Every test asset lives under `tests/` — guest
-  programs in `tests/scripts/` (one namespace, three kinds: `c_*` corpus drivers, `vmcall_*`
-  exported-entry probes, the rest differential programs), real Cargo projects as pinned submodules in
-  `tests/projects/`, each suite category's own assets in `tests/suites/<category>/fixtures/`, the TSan
-  crate in `tests/tsan/` — so
-  no test script sits at the repository root and no third-party source is vendored into it.
-  `tests/suites/corpus/cases.manifest` is the only corpus list. Telemetry captures internal syscall
-  events, decodes and inspects them offline, keeps a process-wide page pool and registers JIT address
-  ranges for perf-maps only at an explicit stop.
+  `case C=<id>`, `mode M=<mode>`, `inventory`, `projects`, `clean`) and `tests/run.sh` is the
+  implementation it forwards to. `tests/` holds exactly three things: `manifest` (one line per case:
+  name, mode, tier, timeout, and the metadata the runner needs), `lib/` (the dispatcher, the shared
+  library, and one file per run method) and `data/` (guest programs, fixture crates, oracles, inputs,
+  and the external projects as pinned submodules). No script lives under `data/`, no asset path is
+  spelled out under `lib/`, and `make inventory` checks both, plus that every data file is referenced
+  by some case. Telemetry captures internal syscall events, decodes and inspects them offline, keeps
+  a process-wide page pool and registers JIT address ranges for perf-maps only at an explicit stop.
 
 ## 2. Implementation path
 
@@ -124,7 +120,7 @@ codes match" is never success. Deferred cases are refused loudly as a separate `
 counted as failures.
 
 CI (`.github/workflows/ci.yml`) installs the pinned toolchain plus `strace` and `ripgrep`, then runs
-`make test` and `make suite S=runtime.tsan`. It stops there on purpose: `smoke` and `gate` add the
+`make test` and `make case C=tsan`. It stops there on purpose: `smoke` and `gate` add the
 corpus and the timing gates, which need a machine larger than a shared runner. GitHub-side operation is
 paused; the local equivalent is authoritative.
 

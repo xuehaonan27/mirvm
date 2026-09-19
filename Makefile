@@ -1,57 +1,63 @@
-# mirvm — standard entry point for building and testing.
+# mirvm — the standard entry point for building and testing.
 #
-# These targets are the interface; tests/run.sh is the implementation, so the tier logic exists in
-# exactly one place. Every target is a thin forwarder, and no target needs GNU make extensions.
-#
-#   make test          daily commit check (same as fast)
-#   make smoke         test + small real workloads + runtime semantics
-#   make gate          the full final gate: strict corpus, dependency image, performance limits
-#   make list          every suite id, discovered from tests/suites/
-#   make suite S=<id> [ARGS="..."]
-#   make projects      fetch the tests/projects/ submodules
-#   make clean         drop disposable caches (keeps the shared dependency store)
+# These targets are the interface; tests/run.sh is the implementation, so the case inventory, the
+# tiers and the run methods each exist in exactly one place. Every target is a thin forwarder.
 
 SHELL := /bin/bash
 RUN := ./tests/run.sh
 
-# S = suite id (make list), ARGS = suite arguments, passed through verbatim.
-S ?=
+# C = case id (make list), M = mode (make modes), ARGS = extra arguments for it.
+C ?=
+M ?=
 ARGS ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help test fast smoke gate list suite projects clean
+.PHONY: help test fast smoke gate list modes case mode inventory projects clean
 
 help:
-	@echo 'make test                 daily commit check (same as fast)'
-	@echo 'make smoke                test + small real workloads + runtime semantics'
-	@echo 'make gate                 the full final gate: corpus, deps image, perf limits'
-	@echo 'make list                 list every suite id'
-	@echo 'make suite S=<id> [ARGS="..."]   run one suite'
-	@echo 'make projects             fetch the tests/projects/ submodules'
+	@echo 'make test                 daily commit check (the fast tier)'
+	@echo 'make smoke                fast + smoke tiers'
+	@echo 'make gate                 every tier except manual: the full gate'
+	@echo 'make list                 every case, with its mode and tier'
+	@echo 'make modes                the available run methods'
+	@echo 'make case C=<id> [ARGS="..."]'
+	@echo 'make mode M=<mode> [ARGS="..."]'
+	@echo 'make inventory            manifest <-> data/ cross-check'
+	@echo 'make projects             fetch the data/projects submodules'
 	@echo 'make clean                drop disposable caches'
 	@echo
 	@echo 'examples:'
-	@echo '  make suite S=corpus.run ARGS="--tier smoke"'
-	@echo '  make suite S=runtime.semantics ARGS=unwind'
-	@echo '  make suite S=corpus.contract ARGS=hexyl'
+	@echo '  make case C=blake3'
+	@echo '  make case C=c-unwind'
+	@echo '  make mode M=pair'
 
 test fast:
-	$(RUN) fast
+	$(RUN) tier fast
 
 smoke:
-	$(RUN) smoke
+	$(RUN) tier smoke
 
 gate:
-	$(RUN) gate
+	$(RUN) tier gate
 
 list:
 	$(RUN) list
 
-suite:
-	@test -n "$(S)" || { echo 'make suite S=<suite-id>  (make list shows them)' >&2; exit 64; }
-	$(RUN) suite $(S) $(ARGS)
+modes:
+	$(RUN) modes
 
-# Real projects are submodules: a checkout without them SKIPs the mode=diff corpus entries.
+case:
+	@test -n "$(C)" || { echo 'make case C=<id>  (make list shows them)' >&2; exit 64; }
+	$(RUN) case $(C) $(ARGS)
+
+mode:
+	@test -n "$(M)" || { echo 'make mode M=<mode>  (make modes shows them)' >&2; exit 64; }
+	$(RUN) mode $(M) $(ARGS)
+
+inventory:
+	$(RUN) inventory
+
+# Real projects are submodules: a checkout without them SKIPs the project cases.
 projects:
 	git submodule update --init --recursive
 

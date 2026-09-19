@@ -1,0 +1,5 @@
+top-payload-drop=1 panicking=false
+normal-after-top-cleanup=42
+second-panic-caught=true panicking=false
+second-payload-drop=1 panicking=false
+payload-drop-counts=1:1 panicking=false

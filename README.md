@@ -23,8 +23,8 @@ Baseline: Linux/ELF/x86_64, toolchain pinned to `nightly-2026-07-02`.
 ```bash
 cargo build --release --locked
 
-./target/release/mirvm run tests/scripts/fib.rs             # single file
-./target/release/mirvm run tests/scripts/ecosystem.rs       # single file with dependencies
+./target/release/mirvm run tests/data/programs/fib.rs             # single file
+./target/release/mirvm run tests/data/programs/ecosystem.rs       # single file with dependencies
 ./target/release/mirvm run path/to/project -- arg1 arg2     # Cargo project
 ./target/release/mirvm test path/to/project -- --nocapture  # cargo test, without Cargo
 ./target/release/mirvm pack path/to/project -o app.mirvm    # self-contained package
@@ -48,16 +48,18 @@ large rustc and sysroot cache.
 ## Test
 
 ```bash
-make test       # daily check
-make smoke      # + small real workloads and runtime semantics
-make gate       # full gate: strict corpus, dependency image, performance limits
-make list       # suite ids, with each suite's one-line purpose
-make suite S=<id> ARGS="..."
-make projects   # fetch the tests/projects submodules
+make test       # daily check (the fast tier)
+make smoke      # fast + smoke tiers
+make gate       # every tier except manual: the full gate
+make list       # every case, with its mode and tier
+make case C=<id> [ARGS="..."]
+make inventory  # manifest <-> data/ cross-check
+make projects   # fetch the data/projects submodules
 ```
 
 `make` is the interface and `tests/run.sh` is the implementation; nothing else is invoked directly.
-All test assets live under `tests/` — see [tests/README.md](tests/README.md).
+`tests/` holds a manifest (one line per case), the run logic under `lib/`, and the assets under
+`data/` — see [tests/README.md](tests/README.md).
 
 ## Status of the project itself
 

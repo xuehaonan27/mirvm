@@ -275,13 +275,13 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
   two nearly identical ELF64 traversals in `src/elfsym.rs`; a stale `#[allow(dead_code)]` in
   `src/telemetry/capture/session.rs` and a duplicated `#[cfg(test)] #[cfg(test)]` in `thread_ctx.rs`.
   Each was left because reading without changing cannot prove it.
-- **G10** `UNSCHEDULED`: two TSan harness blind spots. (a) JIT is outside the net: `tests/tsan/Cargo.toml`
+- **G10** `UNSCHEDULED`: two TSan harness blind spots. (a) JIT is outside the net: `tests/data/fixtures/tsan/Cargo.toml`
   omits cranelift and `src/vm/engine/jit/**` is cfg'd out behind `feature = "cranelift"`, so JIT worker
   slot/`trace_enter` publication and the trace domain's pinned-register path are uninstrumented;
   covering them costs a cranelift dependency and slows the build. (b) Fork-child capture rebuild is
   structurally untestable — TSan refuses to create a thread after a multithreaded fork (exit 66), and
   the only thread the engine creates in a child is the `rebuild_session_from_recipe` writer. Both are
-  documented in `tests/tsan/README.md`.
+  documented in `tests/data/fixtures/tsan/README.md`.
 
 ## F. Reopen triggers
 

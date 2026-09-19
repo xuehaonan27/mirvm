@@ -101,7 +101,7 @@ Every case must be byte-exact on all three dimensions — mirvm default, native 
 
 - **MRE promoted**: rebuild the minimal reproducer as a corpus probe — a helper `.a` trampoline plus
   an `#[export_name]` Rust definition writing back an observation value — and register it in
-  `tests/suites/corpus/cases.manifest`.
+  `tests/manifest`.
 - **bzip2 C backend green again**: add or restore a driver using the vendored C backend, verifying both
   the symbol rescue of the BZ_NO_STDIO assertion stub through rlib injection and normal
   compress/decompress. The workload's normal path never triggers the assertion callback, so this case

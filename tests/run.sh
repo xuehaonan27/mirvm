@@ -1,241 +1,320 @@
 #!/usr/bin/env bash
-# mirvm standard test entry point. Users and CI run tests only through here.
+# tests/run.sh -- the only test entry point. It reads tests/manifest, selects cases, dispatches each
+# to its mode in tests/lib/modes/, and summarizes. It contains no case-specific knowledge: paths,
+# timeouts, tiers, env, args, expectations and verdicts all come from the manifest.
+#
+#   ./tests/run.sh tier fast|smoke|gate     every case at that tier or below (manual excluded)
+#   ./tests/run.sh case <name> [args...]    one case; extra args reach the mode
+#   ./tests/run.sh mode <mode> [args...]    every case using that mode
+#   ./tests/run.sh list [--mode M] [--tier T]
+#   ./tests/run.sh modes                    the available modes and their purpose
+#   ./tests/run.sh inventory                manifest <-> data/ cross-check, no orphans, no scripts
+#   ./tests/run.sh help
+#
+# Makefile is the interface (`make test|smoke|gate`); this script is its implementation.
 set -u
-. "$(dirname "${BASH_SOURCE[0]}")/support/harness.sh"
-test_enter_repo
 
-TEST_STATE_DIR=${MIRVM_TEST_STATE_DIR:-$REPO_ROOT/target/test-state}
-mkdir -p "$TEST_STATE_DIR"
-MIRVM_CONTRACT_HOME=${MIRVM_CONTRACT_HOME:-${TMPDIR:-/tmp}/mirvm-contract-home}
-mkdir -p "$MIRVM_CONTRACT_HOME"
-export MIRVM_CONTRACT_HOME
-if [ -z "${CARGO_HOME:-}" ] && { [ ! -d "$HOME/.cargo" ] || [ ! -w "$HOME/.cargo" ]; }; then
-    export CARGO_HOME="$TEST_STATE_DIR/cargo-home"
-    mkdir -p "$CARGO_HOME"
-fi
-if [ -z "${MIRVM_HOME:-}" ] && [ -d "$HOME/.mirvm" ] && [ ! -w "$HOME/.mirvm" ]; then
-    export MIRVM_HOME="$MIRVM_CONTRACT_HOME"
-    mkdir -p "$MIRVM_HOME"
-fi
+TESTS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+LIB_DIR=$TESTS_DIR/lib
+DATA_DIR=$TESTS_DIR/data
+REPO_ROOT=$(cd "$TESTS_DIR/.." && pwd)
+MANIFEST=$TESTS_DIR/manifest
+export TESTS_DIR LIB_DIR DATA_DIR REPO_ROOT
 
-TOOLCHAIN=${TOOLCHAIN:-$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)}
-if [ -z "${CARGO:-}" ] || [ -z "${RUSTC:-}" ]; then
-    TOOLCHAIN_ROOT=$(rustc +"$TOOLCHAIN" --print sysroot 2>/dev/null) || {
-        echo "ERROR pinned Rust toolchain unavailable: $TOOLCHAIN" >&2
-        exit 69
-    }
-    CARGO=${CARGO:-$TOOLCHAIN_ROOT/bin/cargo}
-    RUSTC=${RUSTC:-$TOOLCHAIN_ROOT/bin/rustc}
-fi
-export TOOLCHAIN CARGO RUSTC
+# The shared library defines the field decoders and helpers the dispatcher also uses.
+# shellcheck source=/dev/null
+. "$LIB_DIR/harness.sh"
 
-suite_record() { # <suite-id>; output: repo-relative script path|purpose
-    local id=$1 category name path description
-    [[ "$id" =~ ^[a-z0-9]+\.[a-z0-9][a-z0-9-]*$ ]] || return 1
-    category=${id%%.*}
-    name=${id#*.}
-    path="$TESTS_DIR/suites/$category/${name//-/_}.sh"
-    [ -f "$path" ] || return 1
-    description=$(sed -n '2{s/^#[[:space:]]*//;p;q;}' "$path")
-    [ -n "$description" ] || {
-        echo "ERROR suite second line missing purpose description: ${path#"$REPO_ROOT"/}" >&2
-        return 1
-    }
-    printf '%s|%s\n' "${path#"$REPO_ROOT"/}" "$description"
-}
-
-suite_ids() {
-    local path relative id
-    while IFS= read -r -d '' path; do
-        relative=${path#"$TESTS_DIR/suites/"}
-        id=${relative%.sh}
-        id=${id//\//.}
-        printf '%s\n' "${id//_/-}"
-    done < <(find "$TESTS_DIR/suites" -mindepth 2 -maxdepth 2 -type f -name '*.sh' -print0 | sort -z)
-}
-
-list_suites() {
-    local id record
-    while IFS= read -r id; do
-        record=$(suite_record "$id") || return 1
-        printf '  %-34s %s\n' "$id" "${record#*|}"
-    done < <(suite_ids)
-}
-
+TIERS="fast smoke gate manual"
 usage() {
-    cat <<'EOF'
-Usage:
-  ./tests/run.sh fast|smoke|gate
-  ./tests/run.sh suite <suite-id> [suite args...]
-  ./tests/run.sh list
-  ./tests/run.sh help
-
-fast is the daily commit check; smoke adds small real-world loads; gate is the full final gate.
-Every individual suite is reached through `suite <suite-id>`; `list` prints the available ids.
-Examples:
-  ./tests/run.sh suite corpus.run --tier smoke
-  ./tests/run.sh suite performance.limits
-EOF
+    sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
-MIRVM_EXPLICIT=0
-[ -n "${MIRVM:-}" ] && MIRVM_EXPLICIT=1
+# ---- manifest parsing ----
+# Format: <name> <mode> <tier> <timeout> [key=value ...]. Comments (#) and blank lines are ignored.
+# Returns normalized rows: name|mode|tier|timeout|fields.
+manifest_rows() {
+    awk '
+        /^[[:space:]]*(#|$)/ { next }
+        {
+            name = $1; mode = $2; tier = $3; tmo = $4
+            if (name in seen) { printf "manifest: duplicate case %s\n", name > "/dev/stderr"; bad = 1 }
+            seen[name] = 1
+            if (mode == "") { printf "manifest: %s has no mode\n", name > "/dev/stderr"; bad = 1 }
+            if (tier !~ /^(fast|smoke|gate|manual)$/) {
+                printf "manifest: %s invalid tier %s\n", name, tier > "/dev/stderr"; bad = 1
+            }
+            if (tmo !~ /^[0-9]+$/) {
+                printf "manifest: %s invalid timeout %s\n", name, tmo > "/dev/stderr"; bad = 1
+            }
+            fields = ""
+            for (i = 5; i <= NF; i++) {
+                if ($i !~ /^[a-z_]+=/) { printf "manifest: %s bad field %s\n", name, $i > "/dev/stderr"; bad = 1 }
+                fields = fields (fields == "" ? "" : " ") $i
+            }
+            printf "%s|%s|%s|%s|%s\n", name, mode, tier, tmo, fields
+        }
+        END { exit bad }
+    ' "$MANIFEST"
+}
+
+# mode_meta <mode> -> "<declared fields>|<required fields>|<product>" ; also validates the mode exists
+mode_meta() {
+    local mode=$1 path=$LIB_DIR/modes/$mode.sh
+    [ -f "$path" ] || { echo "ERROR unknown mode: $mode ($path)" >&2; return 69; }
+    (
+        set -u
+        . "$LIB_DIR/harness.sh"
+        # shellcheck source=/dev/null
+        . "$path"
+        printf '%s|%s|%s\n' "${MODE_FIELDS:-}" "${MODE_REQUIRED:-}" "${MODE_PRODUCT:-yes}"
+    ) || return 69
+}
+
+mode_purpose() {
+    sed -n '2{s/^#[[:space:]]*//;p;q;}' "$LIB_DIR/modes/$1.sh"
+}
+
+mode_needs_product() {
+    local meta
+    meta=$(mode_meta "$1") || return 0
+    [ "${meta##*|}" = "no" ] && return 1
+    return 0
+}
+
+# ---- selection ----
+declare -a SELECTED=()
+select_rows() { # <filter kind> <value> [extra args ignored]
+    local kind=$1 value=$2 row name mode tier
+    while IFS='|' read -r name mode tier _tmo _fields; do
+        [ -n "$name" ] || continue
+        case "$kind" in
+            all) SELECTED+=("$name") ;;
+            tier)
+                case "$tier" in
+                    manual) [ "$value" = manual ] && SELECTED+=("$name") ;;
+                    fast) [ "$value" = fast ] && SELECTED+=("$name") ;;
+                    smoke) case "$value" in fast | smoke) SELECTED+=("$name") ;; esac ;;
+                    gate) case "$value" in fast | smoke | gate) SELECTED+=("$name") ;; esac ;;
+                esac ;;
+            case) [ "$name" = "$value" ] && SELECTED+=("$name") ;;
+            mode) [ "$mode" = "$value" ] && SELECTED+=("$name") ;;
+        esac
+    done < <(manifest_rows) || exit $?
+}
+
+row_of() { # <name> -> the manifest row, non-zero when absent
+    manifest_rows | awk -F'|' -v n="$1" '$1 == n { print; found = 1 } END { exit !found }'
+}
+
+# ---- execution ----
 PRODUCT_READY=0
 ensure_product() {
     [ "$PRODUCT_READY" -eq 0 ] || return 0
-    if [ "$MIRVM_EXPLICIT" -eq 0 ]; then
+    if [ -z "${MIRVM:-}" ]; then
         echo "== build mirvm release =="
-        "$CARGO" build --release --locked || return 1
-        MIRVM="$REPO_ROOT/target/release/mirvm"
+        "${CARGO:-cargo}" build --release --locked || return 1
+        MIRVM=$REPO_ROOT/target/release/mirvm
     fi
-    require_executable MIRVM "$MIRVM" || return $?
+    [ -x "$MIRVM" ] || { echo "ERROR product binary unavailable: $MIRVM" >&2; return 69; }
     MIRVM=$(realpath "$MIRVM")
     export MIRVM
     PRODUCT_READY=1
 }
 
-suite_needs_product() {
-    local record path
-    record=$(suite_record "$1") || return 0
-    path="$REPO_ROOT/${record%%|*}"
-    ! grep -Fxq '# product: no' "$path"
-}
-
-TMPDIR_RUN=""
+RUN_TMP=""
 start_run() {
-    [ -n "$TMPDIR_RUN" ] && return 0
-    TMPDIR_RUN=$(mktemp -d)
-    trap 'rm -rf "$TMPDIR_RUN"' EXIT
+    [ -n "$RUN_TMP" ] && return 0
+    RUN_TMP=$(mktemp -d)
+    trap 'rm -rf "$RUN_TMP"' EXIT
 }
 
-run_logged() { # <title> <command...>
-    local title=$1 code=0 log_name
+CASE_PASS=0 CASE_FAIL=0 CASE_SKIP=0
+
+run_case() { # <name> [extra mode args...]
+    local name=$1
     shift
+    local row mode tier timeout fields meta declared required
+    row=$(row_of "$name") || { echo "ERROR unknown case: $name" >&2; return 64; }
+    IFS='|' read -r _ mode tier timeout fields <<<"$row"
+    meta=$(mode_meta "$mode") || return 69
+    IFS='|' read -r declared required _ <<<"$meta"
+
+    local field key
+    for field in $fields; do
+        key=${field%%=*}
+        case " $declared " in
+            *" $key "*) ;;
+            *) echo "ERROR manifest: case $name sets $key, which mode $mode does not declare" >&2; return 69 ;;
+        esac
+    done
+    for key in $required; do
+        case " $fields " in
+            *" $key"=*) ;;
+            *) echo "ERROR manifest: case $name is missing required field $key" >&2; return 69 ;;
+        esac
+    done
+
+    if mode_needs_product "$mode"; then
+        ensure_product || { echo "FAIL $name (product build failed)"; CASE_FAIL=$((CASE_FAIL + 1)); return 0; }
+    fi
+
     start_run
-    log_name=${title//[^a-zA-Z0-9_.-]/_}
-    section_start "$title"
-    "$@" >"$TMPDIR_RUN/$log_name.log" 2>&1 || code=$?
-    cat "$TMPDIR_RUN/$log_name.log"
-    case "$code" in
-        0)  ok "suite $title" ;;
-        77) skip "suite $title (host capability insufficient)" ;;
-        *)  bad "suite $title (exit=$code)" ;;
-    esac
+    local log=$RUN_TMP/$name.log code=0
+    section_start "$name"
+    CASE_NAME=$name CASE_MODE=$mode CASE_TIER=$tier CASE_TIMEOUT=$timeout \
+        bash -c '
+            set -u
+            . "$LIB_DIR/harness.sh"
+            # shellcheck source=/dev/null
+            . "$LIB_DIR/modes/$CASE_MODE.sh"
+            CASE_FIELDS=("$@")
+            mode_run
+        ' _ $fields "$@" >"$log" 2>&1 || code=$?
+    cat "$log"
     section_end
+    case "$code" in
+        0)  ok "case $name"; CASE_PASS=$((CASE_PASS + 1)) ;;
+        77) skip "case $name (host capability insufficient)"; CASE_SKIP=$((CASE_SKIP + 1)) ;;
+        *)  bad "case $name (exit=$code)"; CASE_FAIL=$((CASE_FAIL + 1)) ;;
+    esac
     return 0
 }
 
-run_suite() { # <display-title> <suite-id> [args...]
-    local title=$1 id=$2 record path
-    shift 2
-    record=$(suite_record "$id") || {
-        echo "ERROR unknown suite: $id" >&2
-        return 64
-    }
-    path=${record%%|*}
-    if suite_needs_product "$id"; then
-        ensure_product || {
-            bad "suite $title (product build or MIRVM check failed)"
-            return 0
-        }
-    fi
-    run_logged "$title" bash "$path" "$@"
-}
-
-run_program_variant() { # <title> [env vars...]
-    local title=$1 record path
-    shift
-    ensure_product || { bad "suite $title (product build failed)"; return 0; }
-    record=$(suite_record differential.programs)
-    path=${record%%|*}
-    run_logged "$title" env "$@" bash "$path"
-}
-
-run_fast_obligations() {
-    run_suite quality.rust quality.rust
-    run_program_variant differential.programs
-    run_program_variant differential.programs.jit-sync MIRVM_JIT_SYNC=1 MIRVM_JIT_THRESHOLD=1
-    run_suite differential.cargo differential.cargo
-    run_suite differential.cargoless differential.cargoless
-    run_suite contracts.cargoless-test contracts.cargoless-test
-    run_suite contracts.cargoless-workspace contracts.cargoless-workspace
-    run_suite contracts.cargoless-git contracts.cargoless-git
-    run_suite contracts.cargoless-sources contracts.cargoless-sources
-    run_suite contracts.pack contracts.pack
-    run_suite contracts.build-script-rerun contracts.build-script-rerun
-    run_suite runtime.c-unwind runtime.c-unwind
-    run_suite runtime.diagnostics runtime.diagnostics
-    run_suite runtime.telemetry runtime.telemetry
-    run_suite harness.truth harness.truth
-}
-
-run_profile() {
-    local profile=$1
+run_selected() {
+    local name
     start_run
-    cache_snapshot "profile $profile before start"
-    disk_guard
-    case "$profile" in
-        fast)
-            run_fast_obligations
-            ;;
-        smoke)
-            run_fast_obligations
-            run_suite corpus.run.smoke corpus.run --tier smoke
-            run_suite runtime.x86-features runtime.x86-features
-            run_suite runtime.semantics runtime.semantics
-            ;;
-        gate)
-            run_suite quality.rust quality.rust
-            run_program_variant differential.programs
-            run_program_variant differential.programs.no-base MIRVM_NO_BASE_IMAGE=1 MIRVM_NO_IR_CACHE=1 ONLY=fib
-            run_program_variant differential.programs.jit-sync MIRVM_JIT_SYNC=1 MIRVM_JIT_THRESHOLD=1
-            run_program_variant differential.programs.jit-off MIRVM_JIT=off MIRVM_NO_IR_CACHE=1 ONLY=fib
-            run_suite differential.cargo differential.cargo
-            run_suite differential.cargoless differential.cargoless
-            run_suite contracts.cargoless-test contracts.cargoless-test
-            run_suite contracts.cargoless-workspace contracts.cargoless-workspace
-            run_suite contracts.cargoless-git contracts.cargoless-git
-            run_suite contracts.cargoless-sources contracts.cargoless-sources
-            run_suite contracts.pack contracts.pack
-            run_suite contracts.build-script-rerun contracts.build-script-rerun
-            run_suite contracts.deps-image contracts.deps-image
-            run_suite corpus.contract corpus.contract
-            run_suite runtime.x86-features runtime.x86-features
-            run_suite runtime.semantics runtime.semantics
-            run_suite runtime.c-unwind runtime.c-unwind
-            run_suite runtime.diagnostics runtime.diagnostics
-            run_suite runtime.telemetry runtime.telemetry
-            run_suite runtime.jit-stats runtime.jit-stats
-            run_suite performance.limits performance.limits
-            run_suite harness.truth harness.truth
-            ;;
-    esac
-    target_budget_check
-    cache_snapshot "profile $profile after finish"
+    for name in "${SELECTED[@]}"; do
+        run_case "$name" "$@"
+    done
     print_section_report
-    suite_summary "profile.$profile"
+    echo "== ${SELECTED[*]:-nothing selected}: $CASE_PASS passed, $CASE_SKIP skipped, $CASE_FAIL failed =="
+    [ "$CASE_FAIL" -eq 0 ] || return 1
+    [ "$CASE_PASS" -eq 0 ] && [ "$CASE_SKIP" -gt 0 ] && return 77
+    return 0
 }
 
+# ---- inventory ----
+# Cross-checks the manifest against data/: every referenced path exists, every file under data/ is
+# covered by some reference, and no control script hides inside data/.
+cmd_inventory() {
+    local bad=0 row name mode tier timeout fields field key value
+    local -a refs=()
+    while IFS='|' read -r name mode tier _timeout fields; do
+        [ -n "$name" ] || continue
+        for field in $fields; do
+            key=${field%%=*}
+            value=${field#*=}
+            case "$key" in
+                input | crate)
+                    case "$value" in
+                        /*) continue ;;
+                    esac
+                    refs+=("$DATA_DIR/$value")
+                    [ -e "$DATA_DIR/$value" ] || { echo "MISSING (case $name): data/$value"; bad=1; } ;;
+                needs)
+                    case "$value" in
+                        /*) continue ;;
+                    esac
+                    local need=${value//\{DATA\}/$DATA_DIR}
+                    need=${need//\{ROOT\}/$REPO_ROOT}
+                    [ -e "$need" ] || { echo "MISSING (case $name): $value"; bad=1; } ;;
+                fixture)
+                    local one
+                    local -a parts=()
+                    expand_list "$value" parts
+                    for one in ${parts[@]+"${parts[@]}"}; do
+                        refs+=("$DATA_DIR/$one")
+                        [ -e "$DATA_DIR/$one" ] || { echo "MISSING (case $name): data/$one"; bad=1; }
+                    done ;;
+                args)
+                    local a
+                    local -a argv=()
+                    expand_list "$value" argv
+                    for a in ${argv[@]+"${argv[@]}"}; do
+                        case "$a" in
+                            "$DATA_DIR"/*) refs+=("$a"); [ -e "$a" ] || { echo "MISSING (case $name): ${a#"$DATA_DIR"/}"; bad=1; } ;;
+                        esac
+                    done ;;
+                verdict)
+                    case "$value" in
+                        oracle:*)
+                            refs+=("$DATA_DIR/fixtures/oracles/${value#oracle:}.txt")
+                            [ -f "$DATA_DIR/fixtures/oracles/${value#oracle:}.txt" ] ||
+                                { echo "MISSING (case $name): oracles/${value#oracle:}.txt"; bad=1; } ;;
+                    esac ;;
+            esac
+        done
+    done < <(manifest_rows) || exit $?
+
+    local file covered ref
+    while IFS= read -r file; do
+        covered=0
+        for ref in ${refs[@]+"${refs[@]}"}; do
+            case "$file" in "$ref" | "$ref"/*) covered=1; break ;; esac
+        done
+        [ "$covered" -eq 1 ] || { echo "ORPHAN (no manifest case references it): ${file#"$TESTS_DIR"/}"; bad=1; }
+    done < <(find "$DATA_DIR" -type f ! -name '.*')
+
+    while IFS= read -r file; do
+        echo "CONTROL IN DATA (no script may live under data/): ${file#"$TESTS_DIR"/}"
+        bad=1
+    done < <(find "$DATA_DIR" -type f \( -name '*.sh' -o -name '*.bash' \))
+
+    [ "$bad" -eq 0 ] && echo "inventory: manifest and data/ agree"
+    return "$bad"
+}
+
+# ---- commands ----
 cmd=${1:-help}
 [ $# -gt 0 ] && shift
 case "$cmd" in
-    fast|smoke|gate)
-        [ $# -eq 0 ] || { usage >&2; exit 64; }
-        run_profile "$cmd"
-        ;;
-    suite)
+    tier)
         [ $# -ge 1 ] || { usage >&2; exit 64; }
-        id=$1; shift
-        start_run
-        run_suite "$id" "$id" "$@" || exit $?
-        print_section_report
-        suite_summary "run.$id"
+        select_rows tier "$1"
+        run_selected
+        ;;
+    case)
+        [ $# -ge 1 ] || { usage >&2; exit 64; }
+        name=$1; shift
+        select_rows case "$name"
+        [ ${#SELECTED[@]} -gt 0 ] || { echo "ERROR unknown case: $name" >&2; exit 64; }
+        run_selected "$@"
+        ;;
+    mode)
+        [ $# -ge 1 ] || { usage >&2; exit 64; }
+        mode=$1; shift
+        select_rows mode "$mode"
+        [ ${#SELECTED[@]} -gt 0 ] || { echo "ERROR no case uses mode: $mode" >&2; exit 64; }
+        run_selected "$@"
         ;;
     list)
-        [ $# -eq 0 ] || { usage >&2; exit 64; }
-        list_suites
+        filter_mode=""; filter_tier=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --mode) filter_mode=$2; shift 2 ;;
+                --tier) filter_tier=$2; shift 2 ;;
+                *) usage >&2; exit 64 ;;
+            esac
+        done
+        printf '%-34s %-20s %-7s %s\n' NAME MODE TIER TIMEOUT
+        while IFS='|' read -r name mode tier timeout _fields; do
+            [ -n "$name" ] || continue
+            [ -n "$filter_mode" ] && [ "$mode" != "$filter_mode" ] && continue
+            [ -n "$filter_tier" ] && [ "$tier" != "$filter_tier" ] && continue
+            printf '%-34s %-20s %-7s %s\n' "$name" "$mode" "$tier" "$timeout"
+        done < <(manifest_rows) || exit $?
         ;;
-    help|-h|--help)
+    modes)
+        for path in "$LIB_DIR"/modes/*.sh; do
+            mode=$(basename "$path" .sh)
+            printf '%-20s %s\n' "$mode" "$(mode_purpose "$mode")"
+        done
+        ;;
+    inventory)
+        cmd_inventory
+        ;;
+    help | -h | --help | "")
         usage
         ;;
     *)

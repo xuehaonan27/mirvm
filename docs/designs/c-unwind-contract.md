@@ -185,10 +185,10 @@ fault.
 ## 4. Verification
 
 ```bash
-make suite S=runtime.c-unwind
+make case C=c-unwind
 ```
 
-The fixture `tests/suites/runtime/fixtures/c-unwind-contract/` first generates the native oracle with pinned Cargo,
+The fixture `tests/data/fixtures/c-unwind-contract/` first generates the native oracle with pinned Cargo,
 rustc and C++, then runs the pure interpreter and the forced-sync JIT (`MIRVM_JIT=on`,
 `MIRVM_JIT_SYNC=1`, `MIRVM_JIT_THRESHOLD=1`) under default cargoless. A scenario that needs published
 guest machine code requires the JIT log to show `release=true` on the target function's release line

@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [features]
-# cranelift: the real JIT backend. The tests/tsan/ harness does not enable this feature,
+# cranelift: the real JIT backend. The tests/data/fixtures/tsan/ harness does not enable this feature,
 # so it stays off the heavy dependency and the TSan channel is unaffected (an
 # extension of the engine-core isolation discipline).
 default = ["cranelift"]

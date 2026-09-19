@@ -2,7 +2,7 @@
 
 > Status: Contract · Scope: `mirvm test` for single packages and resolver 1/2/3 workspaces, with no
 > Cargo process at run time. Implementation facts are the code plus
-> `tests/suites/contracts/cargoless_test.sh` and `tests/suites/contracts/cargoless_workspace.sh`.
+> `tests/lib/modes/cargoless-test.sh` and `tests/lib/modes/cargoless-workspace.sh`.
 
 ## 1. Contract
 
@@ -100,13 +100,13 @@ the produced result must also be accepted by the pinned Cargo under `--locked --
 
 ## 4. Verification
 
-- `make suite S=contracts.cargoless-test`: fixed Cargo/rustdoc selection of test, bench and doctest,
-  compilation shape, diagnostics, output and exit code, against `tests/suites/contracts/fixtures/cargoless/test-contract`,
+- `make case C=cargoless-test`: fixed Cargo/rustdoc selection of test, bench and doctest,
+  compilation shape, diagnostics, output and exit code, against `tests/data/fixtures/cargoless/test-contract`,
   `cless_proc_macro_test_contract` and `cless_doctest_contract`.
-- `make suite S=contracts.cargoless-workspace`: fixed Cargo resolver 1/2/3, complex member globs,
+- `make case C=cargoless-workspace`: fixed Cargo resolver 1/2/3, complex member globs,
   workspace lints, package specs, features and failure propagation, against
-  `tests/suites/contracts/fixtures/cargoless/workspace-contract` and `cless_workspace_remaining_contract`.
-- `make suite S=differential.cargoless`: the Cargo path and the cargoless path must match
+  `tests/data/fixtures/cargoless/workspace-contract` and `cless_workspace_remaining_contract`.
+- `make mode M=pair`: the Cargo path and the cargoless path must match
   byte-for-byte.
 
 The fixtures cover: library, bin and integration tests, a plain example, bench, custom harness, build
@@ -148,7 +148,7 @@ Raising `rust-toolchain.toml` must not simply refresh expected values.
    separating a Cargo behaviour change from a pure diagnostic-text change. For a behaviour change, fix
    manifest/resolve/schedule/driver and their unit tests first, then the contract assertions;
    loosening a normalization rule to make tests green is not allowed.
-3. Run `make suite S=quality.rust`, both contract suites, `make suite S=differential.cargoless` and
+3. Run `make case C=quality`, both contract suites, `make mode M=pair` and
    finally `make test`. Only after all three tracks pass does the new pinned Cargo become
    authoritative, and the workspace contract's `-vv` structure checks must be re-reviewed by hand.
 
