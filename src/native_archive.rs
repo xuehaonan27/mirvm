@@ -19,13 +19,13 @@ const LINK_PREFIX: &[&str] = &[
     "-Wl,-Bsymbolic",
     "-Wl,--whole-archive",
 ];
-/// Closure baseline = the set of system libraries that std brings to the guest's final link via `#[link]`
-/// (glibc: m/dl/pthread/rt/util/gcc_s; these are always present in native semantics, so rustc C static archives
-/// can reference their symbols directly—e.g. libsqlite3's FTS5 references libm `log`, and the pthread family,
-/// proven by corpus batch 3 rusqlite).
-/// They become DT_NEEDED entries of the produced .so and are resolved by the host environment at dlopen time;
-/// `-z defs` continues to loudly reject undefined references outside this set (cross-archive / guest symbols),
-/// so closure discipline is not relaxed.
+/// Closure baseline: the system libraries that std contributes to the guest's final link via
+/// `#[link]` (glibc: m/dl/pthread/rt/util/gcc_s). They are always present in native semantics, so a
+/// C static archive may reference their symbols directly -- libsqlite3's FTS5 references libm `log`
+/// and the pthread family, for instance.
+/// They become DT_NEEDED entries of the produced .so and are resolved by the host environment at
+/// dlopen time; `-z defs` still loudly rejects undefined references outside this set (cross-archive
+/// and guest symbols), so the closure requirement is not relaxed.
 const LINK_SUFFIX: &[&str] = &[
     "-Wl,--no-whole-archive",
     "-lm",
@@ -175,13 +175,14 @@ __mirvm_raise_target:
 "#;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
-/// Collect system dynamic library names propagated through the crate graph (proven by corpus batch 7 c_libgit2):
-/// `-sys` crates' `cargo:rustc-link-lib` only writes rlib metadata—the native final link command line has these `-l`
-/// entries, while the metadata driver (the bin command line) does not. When C objects in a static archive reference
-/// these libraries (e.g. libgit2.a's crc32/deflate → libz-sys's `z`), the closure link line must also include them—
-/// same collection scope as `system_dylib_preload` (lower's RTLD_GLOBAL preload), consumed in both places.
-/// Static { bundle: None | Some(true) } are true static archives that go entirely into the rlib (handled by the
-/// archive path in the loop above, skipped here); Framework / LinkArg / wasm are out of scope for this slice.
+/// Collect the system dynamic library names the crate graph propagates.
+/// A `-sys` crate's `cargo:rustc-link-lib` only writes rlib metadata: the native final link
+/// command line carries these `-l` entries, while the metadata driver (the bin command line) does
+/// not. When C objects in a static archive reference such a library (libgit2.a's crc32/deflate ->
+/// libz-sys's `z`, for instance), the closure link line must include it too. Same collection scope
+/// as lower's RTLD_GLOBAL preload, consumed in both places.
+/// Static { bundle: None | Some(true) } are true static archives that go entirely into the rlib
+/// (handled by the archive path above, skipped here); Framework / LinkArg / wasm are not handled.
 pub(crate) fn system_dylibs(tcx: TyCtxt<'_>) -> Vec<Box<str>> {
     let sess = tcx.sess;
     let mut names: Vec<Box<str>> = Vec::new();
@@ -244,12 +245,14 @@ pub(crate) fn materialize_in(archive: &Path, cache_dir: &Path) -> Result<PathBuf
     )
 }
 
-/// Collect the current crate graph's Static native libraries and convert each independent archive into a `.so`.
+/// Collect the current crate graph's Static native libraries and convert each independent archive
+/// into a `.so`.
 ///
-/// Only a constrained vertical slice for Linux/ELF is implemented. Each archive is linked independently with `-z defs`,
-/// so cross-archive dependencies, dependency ordering, and non-PIC relocations fail loudly; no generic native link plan is guessed.
-/// C2: on conversion failure, enter the "symbols in rlib" rescue chain
-/// (undefined ∩ crate-graph rlib exported fn ⇒ inject hidden P1-entry trampolines and relink;
+/// Only Linux/ELF is handled. Each archive is linked independently with `-z defs`, so cross-archive
+/// dependencies, dependency ordering and non-PIC relocations fail loudly; no generic native link
+/// plan is guessed.
+/// On conversion failure, fall back to the "symbols in rlib" rescue chain
+/// (undefined ∩ crate-graph rlib exported fn => inject hidden P1-entry trampolines and relink;
 /// unit tests with `linker = None` take the original error path directly).
 pub(crate) fn materialize_static_libraries<'tcx>(
     tcx: TyCtxt<'tcx>,
@@ -264,9 +267,9 @@ pub(crate) fn materialize_static_libraries<'tcx>(
     let target = sess.opts.target_triple.tuple();
     let cache = crate::sysroot::cache_dir().join("native-archives");
     let mut shared_objects = Vec::<PathBuf>::new();
-    // Crate-graph system dynamic libraries (proven by c_libgit2: when a static archive's C objects reference
-    // `-l` library symbols propagated via metadata, the closure link line must also include them;
-    // same list as lower's RTLD_GLOBAL preload)
+    // Crate-graph system dynamic libraries: when a static archive's C objects reference `-l`
+    // library symbols propagated via metadata, the closure link line must include them; same list
+    // as lower's RTLD_GLOBAL preload.
     let extra_libs = system_dylibs(tcx);
 
     for cnum in std::iter::once(LOCAL_CRATE).chain(tcx.used_crates(()).iter().copied()) {
@@ -342,26 +345,30 @@ pub(crate) fn materialize_static_libraries<'tcx>(
 }
 
 /// Reject ambiguity at materialization time: archive **.dynsym-visible** exported symbols must not
-/// **share names across archives** (resolution would depend on load order; M5.1 refuses to guess native linker order).
+/// **share names across archives**, because resolution would then depend on load order and we
+/// refuse to guess native linker order.
 ///
-/// Weak-semantic correction (2026-07-18, proven by corpus batch 10 c_risc0_run): duplicate symbols are handled
-/// according to native link semantics—**all-weak definitions are allowed** (weak/COMDAT first-wins; load order
-/// is isomorphic to crate-graph order and native link order; the three risc0 `-sys` crates each export the
-/// C++ sized-delete `_ZdlPvS_` COMDAT, which belongs to this family); **exactly one strong definition is allowed**
-/// (strong wins over weak, same silent resolution as native); **≥2 strong definitions remain rejected**
+/// Duplicate symbols follow native link semantics: **all-weak definitions are allowed**
+/// (weak/COMDAT first-wins; load order is isomorphic to crate-graph order and native link
+/// order -- the three risc0 `-sys` crates each export the C++ sized-delete `_ZdlPvS_` COMDAT, which
+/// belongs to this family); **exactly one strong definition is allowed** (strong wins over weak,
+/// the same silent resolution native gives); **two or more strong definitions are rejected**
 /// (native would already be a link error, so we also reject loudly).
 ///
-/// Collisions with **existing RTLD_DEFAULT definitions** used to be rejected alongside (1); since dynsym archive handles
-/// now take priority, they are no longer rejected: resolution order is ① hidden fallback table → ② archive handle
-/// (link order) → ③ global dlsym. Objects linked by the guest (hidden or dynsym-visible) always beat host-process
-/// libraries of the same name—native link-time binding semantics (psm's `rust_psm_on_stack` vs the embedded copy
-/// in the host `librustc_driver`, proven by corpus batch 6 c_polars_frame; zstd-sys's ZSTD_* vs libLLVM's embedded
-/// library are the same family). Known residual: **intra-archive** cross-references to colliding symbols still go through
-/// the dynamic linker's global order (cannot be mirrored; no such shape exists in the corpus—the four psm symbols are
-/// only called from the Rust side with no internal cross-references).
+/// A name that also exists in the **RTLD_DEFAULT scope** is not rejected as a collision: the
+/// resolution order is ① hidden fallback table → ② archive handle (link order) → ③ global
+/// dlsym.
+/// Objects linked by the guest (hidden or dynsym-visible) always beat host-process libraries of the
+/// same name, which is native link-time binding. psm's `rust_psm_on_stack` versus the embedded copy
+/// in the host `librustc_driver` is one example; zstd-sys's ZSTD_* versus libLLVM's embedded
+/// library is the same shape. Known residual: **intra-archive** cross-references to colliding
+/// symbols still go through the dynamic linker's global order (cannot be mirrored; no such shape is
+/// known -- the four psm symbols are only called from the Rust side with no internal
+/// cross-references).
 ///
-/// Hidden symbols that do not enter .dynsym (carried by the .symtab fallback table) deliberately skip all collision checks:
-/// in resolution order they always precede the global scope, so collisions already resolve to the archive, leaving no ambiguity to reject.
+/// Hidden symbols that do not enter .dynsym (carried by the .symtab fallback table) deliberately
+/// skip all collision checks: in resolution order they always precede the global scope, so
+/// collisions already resolve to the archive, leaving no ambiguity to reject.
 fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), String> {
     let mut owners = HashMap::<String, (PathBuf, bool)>::new();
     for shared_object in shared_objects {
@@ -466,18 +473,19 @@ fn materialize_for_target_in(
             archive.display()
         ));
     }
-    // Lifecycle-section partition (§7.8): .init_array/.fini_array family **allowed**—loader
-    // DT_INIT_ARRAY semantics = native process-startup constructor (proven by aws-lc do_library_init /
-    // mimalloc mi_process_attach; mirvm never dlcloses, so fini has no observable side);
-    // legacy `.init`/`.fini` sections remain **rejected**—that is the old gcc trick of injecting
-    // bare function bodies into the init frame, with no frame discipline and fragile cross-toolchain
-    // execution semantics (measured in-repo as SIGSEGV during dlopen);
-    // real workloads (recent C libraries all use constructor attributes) do not need it,
-    // so we prefer a loud rejection with a clear diagnosis over falsely claiming support.
+    // Lifecycle-section partition: the .init_array/.fini_array family is **allowed** -- loader
+    // DT_INIT_ARRAY semantics are a native process-startup constructor, as used by aws-lc's
+    // do_library_init and mimalloc's mi_process_attach. mirvm never dlcloses, so fini has no
+    // observable side.
+    // Legacy `.init`/`.fini` sections are still **rejected**: that is the old gcc trick of
+    // injecting bare function bodies into the init frame, with no frame discipline and fragile
+    // cross-toolchain execution semantics (measured in-repo as SIGSEGV during dlopen). Real
+    // workloads do not need it (recent C libraries all use constructor attributes), so a loud
+    // rejection with a clear diagnosis beats falsely claiming support.
     reject_legacy_init_sections(archive)?;
     let cc_identity = compiler_identity(cc)?;
-    // extra_libs (crate-graph system dynamic libraries `-l<name>`) enter both the cache key and the cc link line—
-    // list changes must change cache slots, so old closures cannot be falsely reused (the key discipline fixed by c_libgit2)
+    // extra_libs (crate-graph system dynamic libraries `-l<name>`) enter both the cache key and the
+    // cc link line: a changed list must change the cache slot, so an old closure cannot be reused.
     let extra_flags: Vec<String> = extra_libs.iter().map(|n| format!("-l{n}")).collect();
     let link_flags = LINK_PREFIX
         .iter()
@@ -528,9 +536,10 @@ fn materialize_for_target_in(
         })?;
     if !output.status.success() {
         let _ = std::fs::remove_file(&tmp);
-        // C2: "symbols in rlib" rescue chain (designs/c2-rlib-symbols-design.md §2)—
-        // undefined ∩ crate-graph rlib exported fn ⇒ inject hidden P1-entry trampolines and relink;
-        // if rescue fails (no intersection / non-derivable signature / relink still fails), take the original error path with byte-identical diagnostics
+        // "Symbols in rlib" rescue chain: undefined ∩ crate-graph rlib exported fn => inject
+        // hidden P1-entry trampolines and relink. If the rescue fails (no intersection /
+        // non-derivable signature / relink still fails), take the original error path with
+        // identical diagnostics.
         if let Some(linker) = linker
             && let Some(so) = rescue_with_rlib_symbols(
                 archive,
@@ -623,12 +632,14 @@ fn native_runtime_bridge_object(
     Ok(object)
 }
 
-/// C2 "symbols in rlib" rescue chain (designs/c2-rlib-symbols-design.md §2):
-/// After the first link fails, statically enumerate the archive's SHN_UNDEF symbols ∩ crate-graph rlib exported-fn set
-/// (`Linker::exported_defs`, same source as the native final-link symbol set)—for fn in the intersection,
-/// budget P1 executable entries, emit `.hidden` trampolines, and merge them into the relink. Returns None if rescue fails
-/// (no intersection / non-derivable signature / relink still fails); caller takes the original error path.
-/// Err = materialization-time diagnosis (enumeration / trampoline assembly failed—same loud-rejection discipline as `-z defs`).
+/// "Symbols in rlib" rescue chain for a first link that failed on undefined symbols:
+/// statically enumerate the archive's SHN_UNDEF symbols ∩ crate-graph rlib exported-fn set
+/// (`Linker::exported_defs`, the same source as the native final-link symbol set). For each
+/// function in the intersection, budget P1 executable entries, emit `.hidden` trampolines, and
+/// merge them into the relink. Returns None if the rescue cannot apply (no intersection /
+/// non-derivable signature / relink still fails); the caller then takes the original error path.
+/// Err is a materialization-time diagnosis (enumeration or trampoline assembly failed), under the
+/// same loud-rejection discipline as `-z defs`.
 #[allow(clippy::too_many_arguments)]
 fn rescue_with_rlib_symbols(
     archive: &Path,
@@ -676,8 +687,9 @@ fn rescue_with_rlib_symbols(
         pairs.push((name, addr));
     }
     pairs.sort();
-    // Hidden trampoline .s (same shape as C7). The bridge only references hidden data slots; each Engine writes
-    // its own P1 closure address into its copy of the .so, so the artifact no longer bakes in a fixed runtime address.
+    // Hidden trampoline assembly. The bridge only references hidden data slots; each Engine writes
+    // its own P1 closure address into its copy of the .so, so the artifact does not bake in a fixed
+    // runtime address.
     let mut asm = String::from(".intel_syntax noprefix\n");
     let mut slots = std::collections::BTreeSet::new();
     for (name, addr) in &pairs {

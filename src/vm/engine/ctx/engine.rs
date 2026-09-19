@@ -17,24 +17,23 @@ use super::signals::{
 };
 use super::thread_ctx::{CTX_KEY, CloseSignalDrainGuard, CtxSlot, ThreadContexts};
 
-/// Read-only after publication: built during load phase, lock-free shared reads during execution
-/// phase (foundation of Engine Sync, spike4). Exception = thunks (M4.4 D1): thunk cache
-/// materialized on demand during execution—Mutex provides explicit synchronization, the third
-/// cell of the three-way state split (concurrency-arch §2), legitimate.
+/// Read-only after publication: built during the load phase, then read lock-free by every thread
+/// during execution. `thunks` is the one exception -- its entries are materialized on demand
+/// during execution, so that cache carries its own `Mutex`.
 pub struct Shared {
     pub id: u64,
     pub module: Module,
     pub thunks: super::super::thunks::ThunkCache,
-    /// Code domain this Engine's activations use (design §5.2.3). Chosen once,
+    /// Code domain this Engine's activations use. Chosen once,
     /// when the Engine is created, and then held for every activation of this
     /// Engine: guest calls native and native callbacks back into guest stay in
     /// the chain they entered from, so a running activation never migrates.
     /// Plain must stay the default and must not reserve a register or carry
     /// collection state.
     pub(crate) domain: super::super::jit::CodeDomain,
-    /// J1 tiering base (M5.3a): PLT slots + counters, built over the merged FuncId space.
-    /// Slot writers are M5.3b compiler threads (published via single atomic swap); otherwise the
-    /// read-only-after-publication discipline holds.
+    /// JIT tiering state: PLT slots and call counters over the merged FuncId space.
+    /// Compiler threads are the only writers, publishing a slot with a single
+    /// atomic swap; readers keep the read-only-after-publication discipline.
     pub jit: super::super::jit::JitState,
     pub(crate) control: Arc<EngineControl>,
     /// Every host thread owns its slot; Shared keeps only weak discovery links

@@ -1,9 +1,9 @@
 //! Capture session lifecycle: one process-wide session, its per-thread
 //! activation, the fork rebuild, and the process generation it claims.
 //!
-//! The producer primitives and the process-wide state live in the parent
-//! module; this module owns everything that starts, activates, retires or
-//! rebuilds a session.
+//! The producer primitives and the process-wide state live in the sibling
+//! `capture` module; this module owns everything that starts, activates, retires
+//! or rebuilds a session.
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -14,13 +14,13 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize,
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use super::writer::{partial_path, write_file_header, writer_main};
-use super::{
+use super::capture::{
     ACTIVE, CaptureSummary, EnterDisposition, HotEnter, PHASE_ARMED, PHASE_FINISHED,
     PHASE_STOPPING, PagePool, Producer, START_LOCK, SessionCore, TLS_ACTIVATION_DEPTH,
     TLS_ACTIVE_PRODUCER, TLS_CACHED_PRODUCER, TLS_CACHED_SESSION, WRITER_AWAKE, open_page,
     record_syscall_enter, record_syscall_enter_inline, record_syscall_exit, seal_page, set_engine,
 };
+use super::capture_writer::{partial_path, write_file_header, writer_main};
 
 /// Internal construction options. The byte cap is a hard process budget, not
 /// a correctness switch; a producer that cannot obtain pages remains attached
@@ -154,8 +154,8 @@ impl Drop for CaptureSession {
             return;
         }
         // Nobody will call `finish` for a forked child's session; arrange for the
-        // process's exit hook to drain and publish it instead (design §6.2: no
-        // reliance on TLS destructors or on a caller remembering to finish).
+        // process's exit hook to drain and publish it instead, without relying on TLS
+        // destructors or on a caller remembering to finish.
         arm_lingering_writer(self.core);
     }
 }
@@ -184,7 +184,7 @@ extern "C" fn drain_lingering_writer() {
     // A fork child has no owner that will call `finish`, so nobody has sealed
     // its producers' active pages. Without this the writer sees no published
     // page and the child's file keeps its records in memory instead of writing
-    // chunks (L2). `seal_page` publishes and wakes the writer itself.
+    // chunks. `seal_page` publishes and wakes the writer itself.
     let producers: Vec<usize> = core
         .active_producers
         .lock()
@@ -254,7 +254,7 @@ pub(crate) fn rebuild_on_boundary() {
 }
 
 /// Build the session a `fork` child owes itself, from the parent's published
-/// recipe (L2, design §6.3). Runs only on an ordinary boundary: it opens files
+/// recipe. Runs only on an ordinary boundary: it opens files
 /// and spawns a thread, which the kernel-side fork hook may never do.
 ///
 /// The child's first claim advances the generation it inherited, and that same
@@ -350,7 +350,7 @@ fn build_session_core(
     }));
     let core_addr = core as *const SessionCore as usize;
     // A fork child must be able to rebuild this session on its own, so the
-    // recipe is published before the session becomes visible (L2).
+    // recipe is published before the session becomes visible.
     publish_rebuild_recipe(&final_path, page_budget_bytes);
     let partial = partial.to_path_buf();
     let writer = match std::thread::Builder::new()
@@ -490,7 +490,7 @@ pub(crate) fn host_syscall(nr: i64, args: &[u64]) -> i64 {
     unsafe { run_libc_syscall(producer, nr, args, SyscallEnterPath::Cold).0 }
 }
 
-/// The trace code domain's syscall entry (design §5.2.3). The producer is the
+/// The trace code domain's syscall entry. The producer is the
 /// one the activation boundary pinned, read from the register rather than from
 /// thread-local storage, so recording performs no TLS lookup and no global
 /// session check. Everything else -- the syscall itself, the fork guard, the
@@ -544,8 +544,8 @@ unsafe fn run_libc_syscall(
         }
     }
     // A real rt_sigreturn site belongs to the kernel signal frame and may not
-    // touch the ordinary per-pthread page. The raw-site implementation in 1B
-    // enforces the same bypass before it reaches this libc-oriented helper.
+    // touch the ordinary per-pthread page. The raw-site implementation enforces
+    // the same bypass before it reaches this libc-oriented helper.
     if nr == libc::SYS_rt_sigreturn {
         return (crate::os::process::syscall(nr, args), producer);
     }
@@ -586,7 +586,7 @@ unsafe fn run_libc_syscall(
 
 /// The calling thread's recorder, or null when this thread is not recording.
 /// The activation boundary reads it once per entry to pin the trace domain's
-/// register; no per-event path may call it (design §5.2.3).
+/// register; no per-event path may call it.
 pub(crate) fn current_producer() -> *mut Producer {
     TLS_ACTIVE_PRODUCER.load(Ordering::Relaxed)
 }
@@ -644,8 +644,8 @@ pub(crate) fn retire_current_thread() {
 /// unreachable until an ordinary boundary creates a new process generation.
 /// Post-syscall hook for every path that can return in a `fork` child. The
 /// generic `SYS_fork` (raw inline-asm syscall through `mirvm_syscall_dispatch`)
-/// and the interpreter's HostFork builtin both end up here, which is what design
-/// §6.3 requires: coverage may not depend on which spelling the guest used.
+/// and the interpreter's HostFork builtin both end up here, so capture coverage
+/// cannot depend on which spelling the guest used.
 pub(crate) fn fork_child_guard(nr: i64, result: i64) {
     if nr == libc::SYS_fork && result == 0 {
         after_fork_child();
@@ -721,8 +721,7 @@ pub(super) static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 /// parent's value and must not reuse it: the first session started after the
 /// fork takes the next number (`reset_generation_after_fork` marks that). The
 /// header value identifies which process's records a file holds, so a parent and
-/// child writing concurrently cannot be mistaken for one stream
-/// (design §5.5/§6.3, L2).
+/// child writing concurrently cannot be mistaken for one stream.
 static PROCESS_GENERATION: AtomicU64 = AtomicU64::new(0);
 static GENERATION_PENDING: AtomicBool = AtomicBool::new(false);
 
@@ -742,7 +741,7 @@ fn reset_generation_after_fork() {
 }
 
 /// Everything a `fork` child needs to build **its own** capture session, in a
-/// form that survives `fork` unchanged (L2, design §5.5/§6.3).
+/// form that survives `fork` unchanged.
 ///
 /// The child cannot use the parent's session, page pool, writer or file
 /// descriptors: none of them may be touched after a fork. It can only read
@@ -750,8 +749,7 @@ fn reset_generation_after_fork() {
 /// lifetime of the process and stores its address in an atomic; the pointer is
 /// already there when the child's address space is duplicated, and reading it
 /// needs neither the allocator nor a lock.
-// The consumer (the fork child's rebuild) lands in the next L2 slice; until
-// then only the publication and the tests read these.
+// NOTE: the parent publishes one of these and only the fork child's rebuild reads it back.
 #[allow(dead_code)]
 pub(super) struct RebuildRecipe {
     pub(super) directory: PathBuf,
@@ -786,7 +784,7 @@ pub(super) fn clear_rebuild_recipe() {
 }
 
 /// The recipe a `fork` child must rebuild from, if one is published.
-#[allow(dead_code)] // consumed by the fork child's rebuild (next L2 slice)
+#[allow(dead_code)] // consumed by the fork child's rebuild
 pub(super) fn pending_rebuild_recipe() -> Option<&'static RebuildRecipe> {
     let address = REBUILD_RECIPE.load(Ordering::Acquire);
     if address == 0 {

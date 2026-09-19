@@ -220,8 +220,8 @@ pub fn lower_for_base_build(tcx: TyCtxt<'_>) -> (ir::Module, BaseExports) {
 /// Its symbol names must be stable across programs (same dependency version means the same symbol
 /// name), which is what makes reuse possible.
 ///
-/// Reserved hook: the dependency-image build side is not wired up yet, so this has no callers in
-/// the repo. Keep it for the dependency-image build line; do not delete it for lack of callers.
+/// NOTE: the dependency-image build side is not wired up yet, so this has no callers in the repo.
+/// It is the reserved entry point for that line; do not delete it for lack of callers.
 pub fn lower_for_image_build(
     tcx: TyCtxt<'_>,
     stack: &crate::baseimage::ImageStack,

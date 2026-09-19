@@ -1,15 +1,15 @@
 //! Capture tests: page-ring accounting, fork generations, the pinned/inline hot
 //! paths, and the committed wire format as read back by the decoder.
 
-use super::session::{
+use super::*;
+use crate::telemetry::capture_session::{
     REBUILD_RECIPE, RebuildRecipe, clear_rebuild_recipe, pending_rebuild_recipe,
     publish_rebuild_recipe,
 };
-use super::writer::{
+use crate::telemetry::capture_writer::{
     partial_path, reclaim_session_pages, sealed_page_bytes, write_file_header, writer_main,
     writer_offer_starter, writer_reap_retired,
 };
-use super::*;
 use crate::telemetry::decode::{DecodedKind, Health, decode_file};
 use crate::telemetry::format::{EngineContext, PageHeader};
 use std::ffi::c_void;

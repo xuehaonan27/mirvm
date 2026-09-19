@@ -51,6 +51,12 @@
    是三种断言，不可混写。都失败 ≠ PASS。
 3. 里程碑完成 = **代码 + 可复现 gate + 施工日志 + current-status 更新**四件套；
    推翻旧设计时旧文档保留，decision-history 追加时间与证据，不静默改历史。
+4. **被 TSan harness 用 `#[path]` 逐文件共享的产品源码，不得有隐式的兄弟子模块**
+   （`tsan/src/main.rs`、`tsan/src/telemetry.rs` 是 `#[path = "../../src/…"]` 逐文件引入）。
+   实测：`#[path]` 引入的文件里裸 `mod child;` 找不到；给子模块加显式 `#[path]` 时，基准
+   目录是**包含该 `mod` 的文件**所在目录，因此同一个属性无法同时服务主 crate 与 harness。
+   拆这类文件时把子模块做成**同级文件**（如 `capture_session.rs`），不要用 `cfg` 开关绕。
+   注意 `cargo check --all-targets` **不会**构建 `tsan/`，只有 `runtime.tsan` 套件会。
 
 ## 阅读顺序
 
