@@ -17,25 +17,14 @@ run_check() {
     section_end
 }
 
-# Every external input mirvm defines is registered in src/options.rs. Product code must read an
-# option through its accessor rather than naming the variable itself, or the register stops being a
-# source of truth. Test modules are out of scope: their child-process fixtures select a branch in
-# the test binary and are not product inputs.
+# An MIRVM_* name may be spelled out only in src/options.rs. Everywhere else it is a register field
+# name passed to an accessor, so a rename cannot leave a stale copy behind and no call site can
+# introduce a variable the register does not know about.
 check_option_register() {
     local offenders
-    offenders=$(
-        while IFS= read -r file; do
-            grep -HnE 'env::(var|var_os|set_var|remove_var)\(|\.env(_remove)?\(' "$file" \
-                | grep -E '"MIRVM_[A-Z0-9_]+"' \
-                | sed "s|^|${file}:|"
-        done < <(find src -name '*.rs' \
-            ! -name 'options.rs' \
-            ! -name 'tests.rs' \
-            ! -path '*/tests/*' \
-            ! -path '*/embed_tests/*')
-    )
+    offenders=$(grep -rnE '"MIRVM_[A-Z0-9_]+"' src --include='*.rs' --exclude='options.rs')
     if [ -n "$offenders" ]; then
-        echo "unregistered MIRVM_* access outside src/options.rs:" >&2
+        echo "MIRVM_* names must be declared in src/options.rs, not spelled out here:" >&2
         printf '%s\n' "$offenders" >&2
         return 1
     fi

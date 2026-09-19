@@ -7,7 +7,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
 suite_init --no-product
 
-FIX=$REPO_ROOT/tests/fixtures/gate_truth
+FIX=$REPO_ROOT/tests/suites/harness/fixtures/fake-runners
 run_diff_case() {
     local scenario="$1" want_code="$2" want_line="$3"
     local diagnostic="${4:-}" out code

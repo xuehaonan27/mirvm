@@ -102,11 +102,11 @@ while IFS='|' read -r name _tier tmo mode envv needs args xfail_spec _groups; do
         bad "c_$name (exit=$code): $(tail -1 "$TMP/$name.err" | head -c 100)"
     elif [[ "$mode" == oracle:* ]]; then
         oname=${mode#oracle:}
-        oracle=$(cat "tests/fixtures/oracles/$oname.txt")
+        oracle=$(cat "tests/suites/corpus/fixtures/oracles/$oname.txt")
         if [ "$stdout" = "$oracle" ]; then
             ok "c_$name"
         else
-            bad "c_$name oracle mismatch (see tests/fixtures/oracles/$oname.txt)"
+            bad "c_$name oracle mismatch (see tests/suites/corpus/fixtures/oracles/$oname.txt)"
         fi
     else
         ok "c_$name"

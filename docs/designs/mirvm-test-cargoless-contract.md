@@ -101,11 +101,11 @@ the produced result must also be accepted by the pinned Cargo under `--locked --
 ## 4. Verification
 
 - `make suite S=contracts.cargoless-test`: fixed Cargo/rustdoc selection of test, bench and doctest,
-  compilation shape, diagnostics, output and exit code, against `tests/fixtures/cless_test_contract`,
+  compilation shape, diagnostics, output and exit code, against `tests/suites/contracts/fixtures/cargoless/test-contract`,
   `cless_proc_macro_test_contract` and `cless_doctest_contract`.
 - `make suite S=contracts.cargoless-workspace`: fixed Cargo resolver 1/2/3, complex member globs,
   workspace lints, package specs, features and failure propagation, against
-  `tests/fixtures/cless_workspace_contract` and `cless_workspace_remaining_contract`.
+  `tests/suites/contracts/fixtures/cargoless/workspace-contract` and `cless_workspace_remaining_contract`.
 - `make suite S=differential.cargoless`: the Cargo path and the cargoless path must match
   byte-for-byte.
 

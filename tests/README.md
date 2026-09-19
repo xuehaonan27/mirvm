@@ -12,9 +12,12 @@ tests/
   scripts/                guest programs mirvm runs, one namespace:
                             c_<name>.rs       corpus driver, registered in cases.manifest
                             vmcall_<name>.rs  --vm-call exported-entry probe
+                            probe_<name>.rs   a program exactly one suite owns
                             <name>.rs         differential program
   projects/               real Cargo projects as git submodules, pinned to one upstream commit
-  fixtures/               committed fixture crates, oracles and input data
+  suites/<category>/fixtures/
+                          the non-program assets a category owns: fixture crates, oracles,
+                          input data, the fake runners harness.truth drives
   tsan/                   standalone crate compiling src/vm under ThreadSanitizer
 ```
 
@@ -82,7 +85,7 @@ comparator would need an option per contract.
 - Suites run standalone and serially, must not depend on state another suite left behind, and must
   not use `set -e`: expected non-zero exits are part of the contract, so every external command's
   exit code is captured and judged explicitly.
-- A new guest program goes in `tests/scripts/` as one of the three kinds above. A new corpus driver
+- A new guest program goes in `tests/scripts/` as one of the four kinds above. A new corpus driver
   is registered in `cases.manifest` in the same change; a driver nobody registers silently never
   runs, and a registered name without a driver fails the batch loudly.
 - A new real project becomes a pinned submodule under `tests/projects/`, never vendored, with

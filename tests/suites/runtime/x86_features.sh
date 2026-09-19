@@ -10,7 +10,7 @@ suite_init
 # Shared skeleton: compile and run natively -> mirvm run (extra vm-calls append output) -> byte diff.
 # Prints one PASS|SKIP|FAIL x86_<name>(: reason) line; returns 0 for PASS/SKIP, 1 for FAIL.
 probe_diff() {
-    local name="$1" src="tests/fixtures/$2" unavail="$3"
+    local name="$1" src="tests/scripts/probe_$2" unavail="$3"
     shift 3
     "$RUSTC" --edition 2024 -o "$TMP/$name.native" "$src" 2>"$TMP/$name.rustc.err" || {
         echo "FAIL x86_$name: rustc build failed"; cat "$TMP/$name.rustc.err"; return 1; }
@@ -55,7 +55,7 @@ probe_diff() {
 # x86_vectors: feature-gated stdarch; the native output carries pshuf=/sha= status
 # lines; once the diff matches, each sub-capability is PASSed or SKIPped separately.
 probe_x86_vectors() {
-    local name=x86_vectors src=tests/fixtures/x86_vectors.rs
+    local name=x86_vectors src=tests/scripts/probe_x86_vectors.rs
     "$RUSTC" --edition 2024 -o "$TMP/$name.native" "$src" 2>"$TMP/$name.rustc.err" || {
         echo "FAIL x86_vectors: rustc build failed"; cat "$TMP/$name.rustc.err"; return 1; }
     "$TMP/$name.native" >"$TMP/$name.native.out" 2>"$TMP/$name.native.err"

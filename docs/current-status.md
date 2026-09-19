@@ -47,7 +47,8 @@ executed in a VM. `DESIGN.md` is the contract; `docs/designs/` holds the per-top
   comparison primitives, caching and disk protection. Every test asset lives under `tests/` — guest
   programs in `tests/scripts/` (one namespace, three kinds: `c_*` corpus drivers, `vmcall_*`
   exported-entry probes, the rest differential programs), real Cargo projects as pinned submodules in
-  `tests/projects/`, fixtures and oracles in `tests/fixtures/`, the TSan crate in `tests/tsan/` — so
+  `tests/projects/`, each suite category's own assets in `tests/suites/<category>/fixtures/`, the TSan
+  crate in `tests/tsan/` — so
   no test script sits at the repository root and no third-party source is vendored into it.
   `tests/suites/corpus/cases.manifest` is the only corpus list. Telemetry captures internal syscall
   events, decodes and inspects them offline, keeps a process-wide page pool and registers JIT address

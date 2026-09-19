@@ -10,7 +10,7 @@
 #        entries without group= belong to the implicit light group. Routine cadence: fast -> smoke ->
 #        --group heavy on demand; the full set only at the end of a campaign (run.sh gate).
 # mode: exit = green on exit code (the driver was already three-way compared when created, so the gate
-#       pays no native cold build); oracle:<name> = stdout must equal tests/fixtures/oracles/<name>.txt byte-for-byte;
+#       pays no native cold build); oracle:<name> = stdout must equal tests/suites/corpus/fixtures/oracles/<name>.txt byte-for-byte;
 #       diff = three-way comparison against native cargo run (for real projects under tests/projects/<name>/):
 #       the cold mirvm run only asserts exit 0 (its stderr replays dependency-build warnings, not program
 #       behavior); the warm rerun must match native in all three and its stdout must equal the cold stdout.
@@ -195,5 +195,5 @@ ugrep_bin              manual 90   exit             needs=/tmp/ugrep-local/bin/u
 # so an uninitialized checkout records SKIP instead of FAIL; run `make projects` to fetch them.
 # {ROOT} = repo root absolute path (expanded by the shared harness; a relative path cannot name one
 # file for both legs, whose cwd is the project dir).
-hexyl                   full   180  diff             needs=tests/projects/hexyl/Cargo.toml env=RUSTFLAGS=--cap-lints%20allow args=--color;never;-n;256;{ROOT}/tests/fixtures/hexyl_input.bin
-tokei                   full   300  diff             needs=tests/projects/tokei/Cargo.toml env=RUSTFLAGS=--cap-lints%20allow args={ROOT}/tests/fixtures/tokei_input
+hexyl                   full   180  diff             needs=tests/projects/hexyl/Cargo.toml env=RUSTFLAGS=--cap-lints%20allow args=--color;never;-n;256;{ROOT}/tests/suites/corpus/fixtures/hexyl-input.bin
+tokei                   full   300  diff             needs=tests/projects/tokei/Cargo.toml env=RUSTFLAGS=--cap-lints%20allow args={ROOT}/tests/suites/corpus/fixtures/tokei-input

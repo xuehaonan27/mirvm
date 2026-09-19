@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # build.rs rerun-if fine-grained incremental contract.
 # (MIRVM_DEBUG_BLDRS=1 logs `bldrs run|skip <pkg> <reason>` lines).
-# Scenarios (fixture tests/fixtures/cless_br: the root build.rs reads DEP_MYLINKS_FOO and
+# Scenarios (fixture tests/suites/contracts/fixtures/cargoless/path-build-script: the root build.rs reads DEP_MYLINKS_FOO and
 # emits rerun-if-env-changed=BR_TOGGLE; bdep has links=mylinks and emits metadata):
 #   ① first pass: everything runs (no-record -- cp -r refreshes mtime, so the fingerprint is new and the archive misses)
 #   ② second pass: bdep and the root package both skip (default-face tree snapshot identical + env unchanged),
@@ -18,7 +18,7 @@
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
 suite_init
-cp -r tests/fixtures/cless_br "$TMP/br"
+cp -r tests/suites/contracts/fixtures/cargoless/path-build-script "$TMP/br"
 
 # <description> <pattern> <file>: grep -F fixed-point assertion
 expect() {
@@ -91,7 +91,7 @@ expect_cmp "⑤ output byte-identical to ④ (archive replay equivalent)" "$TMP/
 #    existing archive may already cover it; env -u clears BR_TOGGLE so faces cannot bleed together)
 for i in 1 2; do
     env -u RUST_BACKTRACE -u BR_TOGGLE MIRVM_DEPS=self MIRVM_DEBUG_BLDRS=1 "$MIRVM" run \
-        tests/fixtures/cless_libc.rs >"$TMP/libc$i.out" 2>"$TMP/libc$i.err"
+        tests/suites/contracts/fixtures/cargoless/libc.rs >"$TMP/libc$i.out" 2>"$TMP/libc$i.err"
     code=$?
     if [ "$code" != 6 ]; then
         echo "FAIL libc pass $i: exit $code (want 6)"; tail -20 "$TMP/libc$i.err"

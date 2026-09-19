@@ -66,31 +66,31 @@ diff_cless() {
 }
 
 # 1) Frontmatter script fixture (fresh resolution; guest exit 4)
-diff_cless cless_script tests/fixtures/cless_script.rs 4
+diff_cless cless_script tests/suites/contracts/fixtures/cargoless/script.rs 4
 
 # 2) Cargo project fixture (with lock; copy first to keep the repo clean; cargo leg --locked; guest exit 3)
-cp -r tests/fixtures/cless_proj "$TMP/proj"
+cp -r tests/suites/contracts/fixtures/cargoless/project "$TMP/proj"
 diff_cless cless_proj "$TMP/proj" 3 MIRVM_CARGO_LOCKED=1
 
 # 3) Path proc-macro project fixture (with lock; cargo leg --locked; guest exit 5)
-cp -r tests/fixtures/cless_pm "$TMP/pm"
+cp -r tests/suites/contracts/fixtures/cargoless/path-proc-macro "$TMP/pm"
 diff_cless cless_pm "$TMP/pm" 5 MIRVM_CARGO_LOCKED=1
 
 # 4) Registry build.rs script fixture (libc's full build.rs chain; guest exit 6)
-diff_cless cless_libc tests/fixtures/cless_libc.rs 6
+diff_cless cless_libc tests/suites/contracts/fixtures/cargoless/libc.rs 6
 
 # 5) Path build.rs project fixture (OUT_DIR/rustc-cfg/rustc-env/DEP_* propagation;
 #    with lock; cargo leg --locked; guest exit 7)
-cp -r tests/fixtures/cless_br "$TMP/br"
+cp -r tests/suites/contracts/fixtures/cargoless/path-build-script "$TMP/br"
 diff_cless cless_br "$TMP/br" 7 MIRVM_CARGO_LOCKED=1
 
 # 6) Serde derive full-chain script fixture (proc-macro2/serde_core build.rs +
 #    both host/target sides + facade re-exporting a proc-macro; guest exit 8)
-diff_cless cless_serde tests/fixtures/cless_serde.rs 8
+diff_cless cless_serde tests/suites/contracts/fixtures/cargoless/serde.rs 8
 
 # 7) --bin multi-target selection (a2_ws has two bins + default-run; both legs
 #    compare cargo run --bin semantics byte-for-byte). diff_cless() takes no extra mirvm flags, so this case is separate.
-cp -r tests/fixtures/a2_ws "$TMP/a2ws"
+cp -r tests/suites/contracts/fixtures/cargoless/two-bin-workspace "$TMP/a2ws"
 for leg in cargo self; do
     if [ "$leg" = cargo ]; then
         env -u RUST_BACKTRACE MIRVM_DEPS=cargo MIRVM_CARGO_LOCKED=1 \
