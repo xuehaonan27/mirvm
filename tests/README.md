@@ -36,10 +36,12 @@ run `MIRVM_DEPS=cargo make gate`.
 
 ## Verdicts
 
-An item is `PASS` (ran and met the requirement), `FAIL` (product, authority or harness does not
-meet it — fails the suite), `SKIP` (the host genuinely lacks the capability; never a missing tool,
-fixture or manifest), `XFAIL` (a registered gap failing with an exact exit code and diagnostic), or
-`XPASS` (a registered gap turned green, so the contract must be updated — fails the suite).
+An item is:
+- `PASS`: ran and met the requirement.
+- `FAIL`: product, authority or harness does not meet it (fails the suite).
+- `SKIP`: the host genuinely lacks the capability, never a missing tool, fixture or manifest.
+- `XFAIL`: a registered gap failing with an exact exit code and diagnostic
+- `XPASS`: a registered gap turned green, so the contract must be updated (fails the suite).
 
 Suite exit codes: `0` clean, `1` FAIL or XPASS, `64` usage error, `69` environment unavailable,
 `77` the whole suite skipped for lack of host capability. Every leaf suite ends with

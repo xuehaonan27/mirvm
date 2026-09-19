@@ -21,10 +21,10 @@ submodules are fetched. That is also why the pins must stay in sync with `needs=
 
 ## Pins
 
-| Project | Version | Upstream | Pinned commit |
-|---|---|---|---|
-| hexyl | 0.17.0 | https://github.com/sharkdp/hexyl | `8eb6d4771ce1ec7af65d06bd335457783b77d557` |
-| tokei | 14.0.0 | https://github.com/XAMPPRocky/tokei | `8cdd6fa3a54f8cd69442d2f00effb29aa3110353` |
+- hexyl 0.17.0 — <https://github.com/sharkdp/hexyl> at
+  `8eb6d4771ce1ec7af65d06bd335457783b77d557`.
+- tokei 14.0.0 — <https://github.com/XAMPPRocky/tokei> at
+  `8cdd6fa3a54f8cd69442d2f00effb29aa3110353`.
 
 The pins are the commits the published crates were built from, taken from each package's own
 `.cargo_vcs_info.json` (`sha1`). They are the same revisions that were previously vendored here, so

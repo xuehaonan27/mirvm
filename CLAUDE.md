@@ -37,6 +37,10 @@ Before implementing:
 Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes,
 simplify.
 
+Write documentation accurate and precise. 
+Do not pile up sentences or charts. 
+Modify wrong or out-dated statements instead of appending things.
+
 ### 3. Surgical Changes
 
 **Touch only what you must. Clean up only your own mess.**
@@ -84,6 +88,10 @@ hardware, permissions, dependencies, or credentials.
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer
 rewrites due to overcomplication, and clarifying questions come before
 implementation rather than after mistakes.
+
+### 5. Do not repeat tests
+Do not run tests again and again during developing. Run once after a batch of
+modifications.
 
 ## Core Concepts
 [TBD].

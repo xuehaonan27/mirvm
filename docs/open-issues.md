@@ -1,144 +1,326 @@
 # mirvm Open Issues Register
 
-This file is the project's only register of unresolved items: construction debt,
-corpus-driven product debt, engine and architecture debt, distribution/product
-direction, current refusal boundaries, maintenance work, and condition-triggered
-reopens. Every entry below is OPEN; nothing is recorded here once it is resolved
-(see [current-status.md](current-status.md) for current facts). New debt is
-registered here and removed from here when it closes.
+The only register of unresolved work: construction debt, corpus-driven product debt, engine and
+architecture debt, distribution and product direction, refusal boundaries, maintenance work, and
+condition-triggered reopens. Every entry here is open; an item is deleted from this file in the same
+change that closes it. What is currently true lives in [current-status.md](current-status.md).
 
-Status words: `APPROVED` (blueprint accepted, construction only remains);
-`UNSCHEDULED` (diagnosis and a repair path exist, work not yet approved);
-`WORKAROUND` (a legitimate workaround is in service); `ACCEPTED` (a known,
-knowingly accepted limitation); `REFUSED` (a finalized boundary; reopening needs
-hard evidence).
+Status words:
 
-Design references: [ram-spec.md](designs/ram-spec.md),
-[concurrency-arch.md](designs/concurrency-arch.md),
+- `APPROVED`: the blueprint is accepted, only construction remains.
+- `UNSCHEDULED`: diagnosis and a repair path exist, the work is not approved yet.
+- `WORKAROUND`: a legitimate workaround is in service.
+- `ACCEPTED`: a known, knowingly accepted limitation.
+- `REFUSED`: a finalized boundary; reopening needs hard evidence.
+
+Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](designs/concurrency-arch.md),
 [modeb-mirvmar-design.md](designs/modeb-mirvmar-design.md),
-[d15-cargoless-design.md](designs/d15-cargoless-design.md),
-[c-unwind-contract.md](designs/c-unwind-contract.md),
+[d15-cargoless-design.md](designs/d15-cargoless-design.md), [c-unwind-contract.md](designs/c-unwind-contract.md),
 [frame-abi-bytecode.md](designs/frame-abi-bytecode.md),
 [distribution-design.md](designs/distribution-design.md),
 [mirvm-test-cargoless-contract.md](designs/mirvm-test-cargoless-contract.md).
 
 ## T. Approved, awaiting construction
 
-| ID | Missing / status | What closes it |
-|---|---|---|
-| T7 | Fork-child capture generation: the child must build its own generation, files, page pool, writer, producer, and errno pointer at an ordinary boundary. `APPROVED` | Regression proving parent generation 0 and child generation 1 each carry their own pid and records. |
-| T8 | HostSyscall direct hot path. Trace domain, trampoline, pinned-register syscall sites, and fork-child register pinning exist. `APPROVED` | Three remain: (1) per-record cold-sequence update on the healthy pair must go — `next_sequence` is also the producer-end ledger's `attempted`, and deriving it in-page changes the v0 file/sequence contract, so it needs a separate ruling; (2) code-domain selection at the outermost activation entry (today frozen at Engine construction) requires one Engine materializing both plain and trace code plus both interpreter loops; (3) the in-page inline 64B Enter + 24B Exit writes. |
-| T9 | 1B stateless raw syscall site, double-materialized inline-asm raw sites. `APPROVED` | Depends on T8. Differential agreement on RFLAGS, GPRs, red zone, stack, full vector state, and raw return semantics. Only then may the first internal syscall vertical be called complete. |
-| T11 | Linux perf capture: a profile command and a thin script, first version user-space/IP-only/inherit. `APPROVED` | Permissions, lost samples, and missing maps must fail loudly or be marked incomplete; rerun fib and the D16 real workloads; fork registry/map reset closes with T7. |
-| T12 | Adaptive page pool and writer parameters. `APPROVED` | Under one memory budget, measure 4/16/64 KiB pages, 24/32B Exit, return gap, drop, guest cycles, RSS, and writer CPU; then implement 4→64 KiB auto-scaling and rule on batch/checksum. No pre-filled numbers. |
+- **T7** `APPROVED`: fork-child capture generation — the child must build its own generation, files,
+  page pool, writer, producer and errno pointer at an ordinary boundary. Closes with a regression
+  proving parent generation 0 and child generation 1 each carry their own pid and records.
+- **T8** `APPROVED`: HostSyscall direct hot path. Three pieces remain — dropping the per-record cold
+  sequence update on the healthy pair (needs a separate ruling, since `next_sequence` is also the
+  producer-end ledger's `attempted` and deriving it in-page changes the v0 file/sequence contract);
+  code-domain selection at the outermost activation entry, which needs one Engine materializing both
+  plain and trace code plus both interpreter loops; and the in-page inline 64B Enter + 24B Exit writes.
+- **T9** `APPROVED`: the 1B stateless raw syscall site and the double-materialized inline-asm raw
+  sites. Depends on T8; closes with differential agreement on RFLAGS, GPRs, red zone, stack, full
+  vector state and raw return semantics.
+- **T11** `APPROVED`: Linux perf capture — a profile command and a thin script, first version
+  user-space/IP-only/inherit. Permissions, lost samples and missing maps must fail loudly or be marked
+  incomplete; rerun fib and the D16 real workloads; fork registry/map reset closes with T7.
+- **T12** `APPROVED`: adaptive page pool and writer parameters. Under one memory budget, measure
+  4/16/64 KiB pages, 24/32B Exit, return gap, drop, guest cycles, RSS and writer CPU, then implement
+  4→64 KiB auto-scaling and rule on batch/checksum. No pre-filled numbers.
 
 ## C. Corpus-driven product debt
 
-| ID | Missing / status | What closes it |
-|---|---|---|
-| C6 | M5.x intrinsic queue residual: `pclmulqdq.256/.512`, `vaes`, remaining gather forms, the avx512.pmadd family. `UNSCHEDULED` | Add on real workload demand via the existing four-contact-point method. Untriggered forms such as AES keep a loud Trap. |
-| C8 | Rust-side ctor / `.init_array` (linkme family) has never entered the corpus. `UNSCHEDULED` | C archive constructors (DT_INIT) are already allowed by partition; bare `.init`/`.fini` stay refused. Project Rust-side ctor/linkme on demand; nothing is pre-funded. |
+- **C6** `UNSCHEDULED`: M5.x intrinsic queue residual — `pclmulqdq.256/.512`, `vaes`, the remaining
+  gather forms, the avx512.pmadd family. Add on real workload demand through the existing
+  four-contact-point method; untriggered forms such as AES keep a loud Trap.
+- **C8** `UNSCHEDULED`: Rust-side ctor / `.init_array` (linkme family) has never entered the corpus.
+  Project Rust-side ctor/linkme on demand; nothing is pre-funded. C archive constructors (DT_INIT) are
+  allowed by partition, while bare `.init`/`.fini` stay refused.
 
 ## E. Engine and architecture debt
 
-| ID | Missing / status | What closes it |
-|---|---|---|
-| E14 | Hand-rolled TLAB. `WORKAROUND` | v1 uses the mimalloc crate backend; chunk, size-class, and remote-free queue details are absent. Related to E6. |
-| E15 | `--vm-stats` fn-pointer out-edge blind spot. `WORKAROUND` | Indirect fn-pointer calls report no out-edges, so the debt reading is permanently "at least this much". Needs an out-edge discovery mechanism beyond incremental hits. |
-| E16 | io_uring pass-through is unproven. `UNSCHEDULED` | The optional tokio-uring path is mentioned only in old design text and has no corpus comparison. |
-| E17 | Two L2 cache gaps. `UNSCHEDULED` | (1) Sessions with warnings/errors are refused admission and diagnostic replay is not done, so warning programs never get cache hits. (2) Entries have no eviction: manual `mirvm cache purge` (default: stale generations) covers the manual GC face; automatic LRU/capacity limits are not scheduled. |
-| E19 | rustix raw syscalls vs the os:: funnel. `ACCEPTED` | "mirvm intercepts every syscall" holds in the real ecosystem: FFI libc wrappers, `libc::syscall` varargs, guest inline-asm raw syscalls, `global_asm`/naked, and JIT all share interception points. Honest residual: the rare vendored-C form that writes the `syscall` instruction itself in inline asm, and adversarial self-modifying `.byte 0x0f,0x05` — only OS-level seccomp covers those. Virtualized semantics (unified fd space, fake FS, accounting) belong to D10. |
-| E22 | Embedding's public trust surface and process-lifetime function addresses. `ACCEPTED + UNSCHEDULED` | Instancing, per-Engine isolation, lifetime states, TSD destructors, per-instance ctor/fini, close/wait_closed, signal owner inbox, and thread cells are all in place; stale stubs after close fail explicitly with status 70 and never reach a new owner. Two gaps remain. (1) Not a fully safe typed API: `Package::load` is safe, but `instantiate` must be `unsafe` because the verifier cannot prove that packaged native libraries, host symbols, and FFI signatures agree; manual Module and raw two-word exports are likewise unsafe. Closing it requires generating and verifying typed bindings for concrete export signatures, not pushing the burden back onto user configuration. (2) Raw addresses have no general revocation protocol: any third-party library may hold a callback indefinitely, so published closures, JIT code/unwind tables, and committed images live to process end. Strict in-process resource bounds require a completion/revocation contract for the specific native registration API hit, or subprocess isolation; a general FFI scheme cannot recover every raw pointer. Process-level fault isolation belongs to D10/E23 and is not simulated by lifetime counts. |
-| E23 | Checked mode (L3) is unbuilt. `UNSCHEDULED` | Double-ended `PROT_NONE` operand guards and pre-entry JIT stack checks are done. Pointer provenance is still missing: IR Deref does not distinguish raw from reference, nor know frame/frozen/allocator/FFI/mmap ownership, so mapping checks alone would wrongly admit VM metadata and asking users to register is a workaround. Closure requires lowering/IR to preserve provenance and the runtime to maintain ownership ranges automatically. The binding limit is the declared raw-dereference check, not complete UB defense and not a sandbox; a real sandbox stays with the P3 OS worker. |
-| E26 | Platform support is Linux/ELF/x86_64 only. `ACCEPTED` | Depends on pthread, dlopen, GNU linking, and x86 asm wrappers; "painless unwinding across platforms" is unverified per platform. macOS is deferred. |
-| E32 | Inline-asm setjmp/longjmp captured-frame memory reuse hazard (the C3 finalized boundary). `ACCEPTED` | Under the asm-stub model the setjmp capture point sits in the stub wrapper frame, and the interpreter frame's synthetic protocol can collide when that host stack memory is reused between capture and restore (confirmed by a v2 spike, landing inside `Channel::send`). Real workloads (the full wasmtime trap surface) do not hit this shape. It disappears once JIT frames have true native frame identity (compiled guest fn = native frame semantics); full-shape closure is not claimed. JIT frames are true native frames with real unwinder penetration and landing pads, so once such a function is published it leaves the hazard surface; the interpreter-frame path keeps the accepted limitation. |
-| E33 | Unsafe trust-boundary audit not prioritized. `UNSCHEDULED` | ~475 unsafe blocks with explicit SAFETY comments on only 5. The real address model, FFI, ELF, asm stubs, and unwinding make much unsafe unavoidable; the correct strategy is not mechanical commenting but auditing five trust boundaries — FFI, global `Shared`, ELF parsing, fixed-address mapping, thunks, and unwinding — adding a minimal proof or test per actual invariant. ASan/fuzz-class guarantees are unscheduled without hard evidence. |
-| E34 | JIT translator big-match governance. `ACCEPTED` | `jit/translate.rs` is a ~2,939-line single file with three matches and is a maintenance hotspot. The benefit/disturbance ratio of splitting by family is unevaluated; the structural-refactor battle pattern is reusable. Evaluate before the next large change. |
+- **E14** `WORKAROUND`: allocation goes through the mimalloc crate instead of a hand-rolled TLAB, so
+  chunk, size-class and remote-free-queue details are absent. Related to E6.
+- **E15** `WORKAROUND`: `--vm-stats` cannot see indirect fn-pointer out-edges, so its debt reading is
+  permanently "at least this much". Closes with an out-edge discovery mechanism beyond incremental hits.
+- **E16** `UNSCHEDULED`: io_uring pass-through is unproven; the optional tokio-uring path appears only
+  in old design text and has no corpus comparison.
+- **E17** `UNSCHEDULED`: two L2 cache gaps — sessions carrying warnings or errors are refused admission
+  and diagnostics are never replayed, so warning programs get no cache hits; and entries have no
+  eviction, only manual `mirvm cache purge`.
+- **E19** `ACCEPTED`: syscall interception covers FFI libc wrappers, `libc::syscall` varargs, guest
+  inline-asm raw syscalls, `global_asm`/naked and JIT. The residual is a vendored-C form that writes the
+  `syscall` instruction itself, plus adversarial self-modifying `.byte 0x0f,0x05`; only OS-level
+  seccomp covers those. Virtualized semantics belong to D10.
+- **E22** `ACCEPTED + UNSCHEDULED`: two gaps in embedding's trust surface. (1) Not a fully safe typed
+  API: `Package::load` is safe but `instantiate` must be `unsafe`, because the verifier cannot prove
+  that packaged native libraries, host symbols and FFI signatures agree, and manual Module and raw
+  two-word exports are unsafe as well; closing it needs generated, verified typed bindings for concrete
+  export signatures. (2) Raw addresses have no general revocation protocol — any third-party library
+  may hold a callback indefinitely, so published closures, JIT code and unwind tables, and committed
+  images live to process end; strict in-process bounds need a completion or revocation contract for the
+  specific native registration API hit, or subprocess isolation.
+- **E23** `UNSCHEDULED`: checked mode (L3) is unbuilt. Double-ended `PROT_NONE` operand guards and
+  pre-entry JIT stack checks exist, but pointer provenance does not: IR Deref distinguishes neither raw
+  from reference nor frame/frozen/allocator/FFI/mmap ownership, so mapping checks alone would wrongly
+  admit VM metadata. Closes when lowering and IR preserve provenance and the runtime maintains
+  ownership ranges automatically. The limit is the declared raw-dereference check, not a sandbox.
+- **E26** `ACCEPTED`: Linux/ELF/x86_64 only — depends on pthread, dlopen, GNU linking and x86 asm
+  wrappers. macOS is deferred and per-platform unwinding is unverified.
+- **E32** `ACCEPTED`: inline-asm setjmp/longjmp captured-frame memory reuse hazard. The capture point
+  sits in the asm-stub wrapper frame, and the interpreter frame's synthetic protocol can collide when
+  that host stack memory is reused between capture and restore (confirmed by a v2 spike inside
+  `Channel::send`). Real workloads, including the full wasmtime trap surface, do not hit it, and it
+  disappears for a function with true native frame identity; the interpreter-frame path keeps the
+  limitation.
+- **E33** `UNSCHEDULED`: the unsafe trust-boundary audit is not prioritized — roughly 475 unsafe blocks
+  with SAFETY comments on only 5. Closes by auditing five boundaries (FFI, global `Shared`, ELF
+  parsing, fixed-address mapping, thunks, unwinding) with a minimal proof or test per real invariant,
+  not by mechanical commenting. ASan/fuzz-class guarantees are unscheduled without hard evidence.
+- **E34** `ACCEPTED`: `jit/translate.rs` is a single ~2,939-line file with three large matches and is a
+  maintenance hotspot. Evaluate the benefit/disturbance ratio of splitting it by family before the next
+  large change.
 
 ## D. Distribution and product
 
-| ID | Missing / status | What closes it |
-|---|---|---|
-| D2 | Release form and naming. `UNSCHEDULED` | miri-style first, JDK-style self-contained tarball later. Kit naming candidates: MDK/mirvm toolkit (MRsDK is rejected). |
-| D3 | Per-function lazy loading; archive direct verification and whole-package copy residual. `UNSCHEDULED` | Core is done: MODULE holds metadata, FUNCS index independent bodies with per-body hashes, and only actually accessed or prefetched `FuncBody`s stay resident, with real access order driving background prefetch. v4 copies once into an owned snapshot so safe `Package::load` keeps the same verified object after the source is rewritten or deleted, so whole-package zero-copy is no longer claimed. Residual: postcard is sequential, so E20 still forces per-function temporary decoding at load. A future offset-based read-only archive must let verifier and executor walk the same bounds-checked immutable bytes and must state snapshot ownership, without reintroducing a verify-then-swap window on a mutable inode. No next format number is reserved; do not start D4 before this closes. |
-| D4 | Public format freeze re-evaluation. `UNSCHEDULED` | Unstable format v4 added logical link addresses and repeatable instantiation, but first load still decodes per function for E20 and the safe owned snapshot copies the whole package. Close D3's archive verification/ownership contract first, then review compatibility windows, capability bits, migration tooling, and corruption/signature policy. Do not call the format frozen just because the version reads 4. |
-| D5 | L3 JIT machine-code cache. `UNSCHEDULED` | Judged the largest single dev-loop lever: re-burning hot functions every process is pure waste. The MC machine-code section and in-process ELF loader already prove JIT output can be serialized and reloaded. Candidate under D16. |
-| D6 | Full S3′c form (cross-project sharing). `UNSCHEDULED` | Path-independent content-hash keys (~50ms each) plus tainted-layer and multi-layer image merging. Schedule on real need; only same-workspace cross-bin smoke is delivered. |
-| D7 | Frontend-phase cost has no lever owner; V5 `-Zthreads` parallel lowering is unscheduled. `UNSCHEDULED` | eco ~143ms and ripgrep ~730–800ms are unowned; V5 (tcx DynSync plus rayon worklist) has not been restarted since V3 was dropped. An upstream-progress survey and change-surface assessment exist (axis A `-Zthreads` injection, axis B parallel prefetch, axis C full form, with a bump-pin checklist); awaiting a scheduling ruling. |
-| D8 | Eight correctness cases have no benchmark. `UNSCHEDULED` | ripgrep_gzip, parallel_nomatch, mmap_binary, parallel_match, multiline_replace, tokei_sort_code, streaming_json, rust_files. |
-| D9 | Registry dependency crate base-image work: base-imaging, adaptive base, and AOT machine code in the base. `UNSCHEDULED` | Three unscheduled S4 directions. The third conflicts with "machine code never enters the cache" and must be checked before scheduling. |
-| D10 | M3 product surface. `UNSCHEDULED` | daemon, agent API, resource governance, a real sandbox, and virtualization hooks (fake FS, path redirection, accounting — distinguishing guest `open` from interpreter-internal cache reads). |
-| D11 | REPL/Notebook plus safe typed embedding bindings (M7+). `UNSCHEDULED` | The Package/Engine close protocol is done, so embedding itself is no longer a future need. The remaining public trust surface is precisely E22: build typed bindings for concrete exports rather than dressing the raw ABI as safe. A persistent heap makes REPL natural, but it is unscheduled. |
-| D12 | `-Cincremental` script path. `UNSCHEDULED` | Not a current lever; restarts on trigger (the "large user crate edit-rerun" shape). The `finalize_session_directory` pitfall is on record. |
-| D13 | Address-model P5 increment (domain expansion and reclamation). `UNSCHEDULED` | Keep the current fixed-base-address spline engineering. Incremental capability is recorded for M7+. |
-| D14 | Native content-addressed dependency store (unified dependency-cache end state). `UNSCHEDULED` | Dedup unit = the full compile key (crate version × features × dependency closure × cfg/flags × toolchain), so X@V has one machine-unique build product across scripts and projects. Near-term piece delivered: shared cargo target dir with fingerprint-as-content-addressed compile key. End state = a native mirvm store (`~/.mirvm/store/<compile-key-hash>/`, self-managed build plan and extern injection) designed together with `.mirvm` local resolution; P5 dependency sources and env/GC are reviewed jointly at kickoff. Concurrency is ruled: publish once, then read-only hits with no resident big lock; coarse cleanup granularity is acceptable. |
-| D15 | Drop the default path's hard Cargo dependency (own dependency resolution and build scheduling). `UNSCHEDULED` | Own resolution/build scheduling, workspace/resolver 2/3, and Git dependencies are done, along with the Cargo config layering, alternate sparse/Git registries and credential providers, registry/local-registry/directory source replacement, path/Git/registry `[patch]` on registry targets, and legacy `[replace]` that dependency sources need; `mirvm pack` reuses the cargoless path by default. Still open: Git source replacement, patches targeting Git URLs, and the remaining Cargo config surface such as `paths`/HOST_RUSTFLAGS. Cargo compatibility is never removed: it stays the explicit user fallback, the behavior judge, and the continuous differential path, while cargoless stays the default. Nested workspaces and duplicate member names are rejected by Cargo's own rules, not a mirvm-private boundary. |
-| D16 | Unified performance campaign. `UNSCHEDULED` | Logging L1, P1 address registration, and D0 diagnostic layering are in place; the mainline is L2 fork → L3 direct hot path → L4 raw site, with P2 profiling in parallel, then the data ruling. Do not freeze performance contracts on the current fixed-double-page/generic-helper numbers. After P2, real workloads plus `MIRVM_TIMING` must rule on D5/L3 JIT code persistence, D3 archive direct verification/loading, background service threads, and D12 `-Cincremental`, and re-measure allocation/guest TLS, the JIT candidates, and the old C7 regex target. Known RED: hot-cache `fib(32)` at ~97ms against an 80ms threshold; the threshold must not be relaxed to close the account. Full-process syscall/duration still needs an independent kernel raw-syscall stream; the old `MIRVM_SYSCALL_TRACE` is only a debt baseline. |
-| D17 | `mirvm test`. `UNSCHEDULED` | Cargo test/bench parity is done, with D19 doctest folded into the same command: bench, root proc-macro, resolver 1, complex member globs, workspace lints, and full package specs all close. Single package/test/bench/doctest contracts are 34/34 and workspace contracts 31/31; the self leg proves zero Cargo via PATH sentinels and execve auditing, with fixed Cargo/rustdoc `-vv` as the behavior judge. |
-| D18 | env/GC management surface. `UNSCHEDULED` | uv-style environments: a global store (D14) plus an environment as a lock-materialized reference set, with `~/.mirvm/envs/` registered as roots. GC = registered roots plus mark-sweep; raw reference counting is rejected because a crash mid-persist leaves permanent inconsistency, while sweep is crash-safe with no counter consensus. Purging an environment unroots it and reclaims what is unreachable from the root set. Missing packages auto-fetch by default (logged explicitly); `--offline`/`--locked` must fail loudly and print the fetch instruction. Review together with the D14 native-store end state. |
-| D19 | doctest / rustdoc frontend. `UNSCHEDULED` | The `mirvm test` scope is done: default and `--doc` selection, argument conflicts, root-library and dev dependencies, build.rs cfg/env, source line numbers, `no_run`, `ignore`, `compile_fail`/error codes, `should_panic(expected)`, filter arguments, status text, and exit codes all agree against fixed Cargo/rustdoc on three tracks. rustdoc keeps extracting and judging code blocks; MIRVM's test builder only turns a temporary crate into a library with MIR plus a VM launcher, and the self execve audit shows zero Cargo. Standalone HTML documentation generation is not a `mirvm test` capability, so this item does not claim `mirvm doc` exists. |
+- **D2** `UNSCHEDULED`: release form and naming — miri-style first, JDK-style self-contained tarball
+  later. Kit naming candidates are MDK/mirvm toolkit; MRsDK is rejected.
+- **D3** `UNSCHEDULED`: per-function lazy loading works, but the archive is not directly verified and
+  the whole package is copied; postcard is sequential, so E20 still forces per-function temporary
+  decoding at load. Closes with an offset-based read-only archive that lets verifier and executor walk
+  the same bounds-checked immutable bytes, stating snapshot ownership and adding no verify-then-swap
+  window on a mutable inode. Do not start D4 before this closes.
+- **D4** `UNSCHEDULED`: public format freeze. Format v4 is unstable; close D3's archive
+  verification/ownership contract first, then review compatibility windows, capability bits, migration
+  tooling and corruption/signature policy. The version reading 4 is not a freeze.
+- **D5** `UNSCHEDULED`: L3 JIT machine-code cache — the largest single dev-loop lever, since re-burning
+  hot functions every process is pure waste. The MC section and in-process ELF loader already prove JIT
+  output can be serialized and reloaded. Candidate under D16.
+- **D6** `UNSCHEDULED`: the full S3′c form, cross-project sharing — path-independent content-hash keys
+  (~50ms each) plus tainted-layer and multi-layer image merging. Only same-workspace cross-bin smoke is
+  delivered; schedule on real need.
+- **D7** `UNSCHEDULED`: frontend-phase cost has no lever owner. eco ~143ms and ripgrep ~730–800ms are
+  unowned, and V5 `-Zthreads` parallel lowering has not been restarted since V3 was dropped. An
+  upstream-progress survey and change-surface assessment exist (axis A `-Zthreads` injection, axis B
+  parallel prefetch, axis C full form, with a bump-pin checklist); awaiting a scheduling ruling.
+- **D8** `UNSCHEDULED`: eight correctness cases have no benchmark — ripgrep_gzip, parallel_nomatch,
+  mmap_binary, parallel_match, multiline_replace, tokei_sort_code, streaming_json, rust_files.
+- **D9** `UNSCHEDULED`: three S4 base-image directions — base-imaging, adaptive base, and AOT machine
+  code in the base. The third conflicts with "machine code never enters the cache" and must be checked
+  before scheduling.
+- **D10** `UNSCHEDULED`: the M3 product surface — daemon, agent API, resource governance, a real
+  sandbox, and virtualization hooks (fake FS, path redirection, accounting that distinguishes guest
+  `open` from interpreter-internal cache reads).
+- **D11** `UNSCHEDULED`: REPL/Notebook plus safe typed embedding bindings (M7+). The remaining public
+  trust surface is exactly E22: build typed bindings for concrete exports rather than dressing the raw
+  ABI as safe. A persistent heap would make a REPL natural.
+- **D12** `UNSCHEDULED`: the `-Cincremental` script path — not a current lever, restarts on the "large
+  user crate edit-rerun" trigger. The `finalize_session_directory` pitfall is on record.
+- **D13** `UNSCHEDULED`: address-model P5 increment (domain expansion and reclamation), keeping the
+  current fixed-base-address spline engineering. Capability is recorded for M7+.
+- **D14** `UNSCHEDULED`: a native content-addressed dependency store. The dedup unit is the full compile
+  key (crate version × features × dependency closure × cfg/flags × toolchain), so X@V has one
+  machine-unique build product across scripts and projects. Near-term piece delivered: a shared cargo
+  target dir with a fingerprint-as-content-addressed compile key. End state is
+  `~/.mirvm/store/<compile-key-hash>/` with a self-managed build plan and extern injection, designed
+  together with `.mirvm` local resolution. Concurrency is ruled: publish once, then read-only hits with
+  no resident big lock; coarse cleanup granularity is acceptable.
+- **D15** `UNSCHEDULED`: dropping the default path's hard Cargo dependency. Own resolution and build
+  scheduling, workspace resolver 2/3, Git dependencies, config layering, alternate sparse/Git
+  registries, credential providers, source replacement, and path/Git/registry `[patch]` and `[replace]`
+  are done. Still open: Git source replacement, patches targeting Git URLs, and remaining config
+  surface such as `paths`/HOST_RUSTFLAGS. Cargo is never removed — it stays the explicit user fallback,
+  the behavior judge and the continuous differential path, while cargoless stays the default.
+- **D16** `UNSCHEDULED`: the unified performance campaign. The mainline is L2 fork → L3 direct hot path
+  → L4 raw site, with P2 profiling in parallel, then the data ruling. Performance contracts must not be
+  frozen on current fixed-double-page/generic-helper numbers. Known RED: hot-cache `fib(32)` at ~97ms
+  against an 80ms threshold, which must not be relaxed to close the account. Full-process
+  syscall/duration still needs an independent kernel raw-syscall stream; the old `MIRVM_SYSCALL_TRACE`
+  is only a debt baseline.
+- **D17** `UNSCHEDULED`: `mirvm test` as a product command. Cargo test/bench/doctest parity is
+  implemented — bench, root proc-macro, resolver 1, complex member globs, workspace lints and full
+  package specs, with single-package contracts 34/34 and workspace contracts 31/31 and the self leg
+  proving zero Cargo through PATH sentinels and execve auditing. What remains open is the command's own
+  surface and scheduling.
+- **D18** `UNSCHEDULED`: the env/GC management surface — uv-style environments: a global store (D14)
+  plus an environment as a lock-materialized reference set, with `~/.mirvm/envs/` registered as roots.
+  GC is registered roots plus mark-sweep; raw reference counting is rejected because a crash mid-persist
+  leaves permanent inconsistency. Purge unroots an environment and reclaims what is unreachable from
+  the root set. Missing packages auto-fetch by default (logged explicitly), and `--offline`/`--locked`
+  must fail loudly with the fetch instruction. Review together with the D14 native-store end state.
+- **D19** `UNSCHEDULED`: the rustdoc/doctest frontend. The `mirvm test` scope is implemented — default
+  and `--doc` selection, argument conflicts, root-library and dev dependencies, build.rs cfg/env, source
+  line numbers, `no_run`, `ignore`, `compile_fail`/error codes, `should_panic(expected)`, filters,
+  status text and exit codes, agreed against fixed Cargo/rustdoc on three tracks. rustdoc keeps
+  extracting and judging code blocks; standalone HTML documentation generation is not claimed.
 
-## R. Refusal boundaries (current; reopening needs hard evidence)
+## R. Refusal boundaries (reopening needs hard evidence)
 
-| ID | Boundary / status | Reopen condition |
-|---|---|---|
-| R1 | Synchronous fault signals (SEGV/BUS/FPE/ILL/TRAP) refuse guest handlers. `REFUSED` | What is refused is execution of guest handler code, for three hard reasons: host and guest faults are indistinguishable, interpreter depth is non-reentrant (running interpreted code inside a signal frame is fundamentally not async-signal-safe), and returning from a handler re-executes the faulting instruction forever. Crash-time exit semantics are already faithful: a real guest fault dies with the same signal as native, and stack overflow dies with the same SIGABRT as native. The closeable face is crash diagnostics (fault-site ownership: guest frozen domain / code domain / frame area → guest-ized crash line → terminate with the same signal), which is the T4 generalization plus a productized `MIRVM_SEGV_DUMP`. |
-| R2 | vfork/clone/clone3/setjmp/longjmp family, `pthread_exit`, `pthread_atfork`, and multithreaded fork are refused. `REFUSED` | Fork-alone in a single thread is allowed behind the `/proc/self/task` guard. The rest would need frame-model-level engineering or non-local control flow through interpreter frames. Reopening the multithreaded fork/vfork/atfork face requires hard evidence and can only go to native parity, where "best effort, may break" is native's own wording. |
-| R3 | Eleven guest-visible unwinder context/state symbols are Unsupported (`_Unwind_Set/GetGR/SetIP/Resume/ForcedUnwind/LSDA…`). `REFUSED` | JIT's internal MIR `Resume` already continues the host unwinder through the try_call pad's `TryCallExn(0)`, which is not permission for a guest to call `_Unwind_Resume` directly. That symbol and the other ten stay refused because they would see host interpreter frames, not guest frames. Closure needs a guest frame/IP/LSDA translation layer plus differential probes (`Backtrace`/`GetIP`/`FindEnclosingFunction`/`GetCFA` are already honored via shadow frames). |
-| R4 | General nested DSTs and other metadata forms are refused. `REFUSED` | Freeze an evaluation of a general DST layout expression. Slice/str static formulas and direct dyn tail-vtable runtime alignment are already supported. |
-| R5 | Cold 128-bit forms Trap (`Transmute pair→aggregate`, tag width >8B `InvalidEnumConstruction`). `REFUSED` | No real workload has hit them; add on demand. |
-| R6 | Residual static-archive refusal surface. `REFUSED` | Non-PIC/thin archives, cross-archive dependencies and ordering, duplicate exports, RTLD_DEFAULT collisions, export-symbols, non-Linux-ELF, and bare `.init`/`.fini`. `.init_array` is allowed; RTLD_DEFAULT same-name collisions already prefer the archive. Multi-archive link plans and modifier-equivalent semantics are unscheduled and must be scheduled before any relaxation. |
-| R7 | Weak memory-order specialization is not done. `REFUSED` | Mapping host atomics already stays inside the RAM nondeterminism envelope; revisit on real workload demand. |
-| R8 | asm refusal surface. `REFUSED` | `att_syntax`, `sym`, `label` (asm goto), `may_unwind`, non-x86_64; asm-stub xmm/vector value operands have no slot expansion (bypassed by the stdarch helper route, no triggering workload). `noreturn` was upgraded to hard debt. On asm goto/label: goto transfers control out of the asm block to an arbitrary label in the function, which is not a call boundary, while the asm-stub form is a standalone native subroutine with call-return/noreturn faces and no representable shape; supporting it means native-compiling the whole host function with control flow crossing the boundary, i.e. a single-function AOT escape hatch that is unproven. Cranelift supports no inline asm at all (cg_clif is fatal on all of it), so an issue requires inline-asm support to exist first, with goto a shape problem on top. A self-built JIT would let asm goto degrade to ordinary inter-BB branches plus inline native sequences. |
-| R9 | `type_id`/`type_name`/`offset_of`/`field_offset` Trap. `REFUSED` | Add when a real program hits them. |
-| R10 | Five intrinsics: `va_arg`, `carryless_mul`, `autodiff`, `rustc_peek`, SVE. `REFUSED` | The first two keep a Trap for lacking real use cases; the last three have no ecosystem meaning (experimental, debugging, ARM). |
-| R11 | `intrinsics::abort` SIGABRT vs native SIGILL difference. `REFUSED` | Authorized difference with a workaround; align signals if a differential ever starts comparing them. |
-| R12 | TSan cannot run guest TSD destructor scenarios. `REFUSED` | TSan thread state is destructed before the TSD phase, a persistent boundary; under TSan the Ctx leaks permanently and tests avoid the scenario. |
-| R13 | Virtual address model (including the linear-memory compromise) is rejected as a direction. `REFUSED` | The FFI axis has fundamental obstacles. The real address model stays: P1/P2 fixed, P3 frozen, P4 ruled a non-issue, P5 → D13. |
-| R14 | tokei parallel JSON report ordering is unstable. `REFUSED` | Upstream behavior, not mirvm debt; work around it with a stable compact aggregate. JSON cannot serve as an oracle until deterministic ordering is solved. |
-| R15 | `ClosureFnPointer` and other track_caller-era adjustments are unsupported. `REFUSED` | `ReifyFnPointer` only follows rustc's `resolve_for_fn_ptr`; nothing can be inferred beyond that. |
-| R16 | Residual `global_asm` `sym` refusals. `REFUSED` | (1) `sym` fn pointing at a guest fn whose signature cannot be derived (aggregate/Rust ABI/varargs) — machine code calling such a form is UB anyway, so refuse loudly. (2) `sym` static pointing at a guest static is unwired (the mangled-static audit still hits it); schedule on workload. (3) In dependency crates, `sym` pointing at the dep's own guest fn needs the entry budget in bin-link context. Real forms such as pulp take zero operands and are unblocked. |
-| R17 | Residual FFI by-value marshalling boundaries. `REFUSED` | Five forms freeze with loud `Err` (red-classifiable text): by-value unions (SysV union classification differs), by-value SIMD vectors, vararg trailing aggregate positions, aggregates with align>8, and by-value multi-variant enums. `{i128}`/f128/long-double/`_Complex` keep their existing scalar boundaries. A sixth form: packed/align(N) unnatural-layout aggregates — libffi's type system can only express natural layout, and `validate_agg_natural` now turns these from silent miscalls into a loud freeze. Full padding expression is scheduled only on real workload demand. All forms share an expandable helper. |
-| R19 | `#![no_main]` / `#[start]` entry forms are refused. `REFUSED` | Any entry type other than `EntryFnType::Main` is refused loudly (exit 1 plus diagnostics). Embedded/bootloader-style entries have no corpus evidence; reopening needs a real workload. |
-| R20 | libffi foreign/callback supports only the C/System ABI. `REFUSED` | Plain and unwind forms of C/System both close. Other ABIs are no longer silently squashed into plain C but rejected explicitly during lowering. Reopening requires a real adapter and native differential for the target ABI; it is not enough that the current platform's machine shapes look identical. |
-| R21 | Async signal support surface. `REFUSED` | Covered: traditional process-directed and thread-directed handlers on Linux/ELF/x86_64 with no advanced guest flags. Process-directed events enter the callback owner's inbox (the registered Engine's pending-signal box). `SI_TKILL` from `pthread_kill` or a real libc `raise` enters a stable per-installation cell for the target pthread, and only that thread may run it, at a safe point or on exit. An unblocked `HostRaise` completes before returning; a blocked one stays in the kernel, where `sigwaitinfo` still observes the real `SI_TKILL`. `close` waits for already-received events of the target thread and cannot hand them to another thread; if the current thread still has events, `wait_closed` returns `ActiveOnCurrentThread`. pthread exit interleaves TSD and signal teardown in glibc's original global-last-round key order, only then physically blocking catchable signals to recheck and close the inbox. Fixed stubs, registrations, and thread cells are retained for process lifetime; if a stub is reinstalled after its owner closed, bare kernel delivery calls `_exit(70)` and `HostRaise` reports `EngineFault(70)`. Still refused: synchronous-fault guest handlers; realtime signals (needs per-event queueing and `siginfo` retention); `SA_SIGINFO` (needs a three-argument guest ABI); `SA_ONSTACK` (needs alternate-stack lifetime); `SA_NODEFER`/`SA_RESETHAND` (would change the mask/registration state machine). Process-directed external signals are only promised at the owner Engine's next ordinary safe point, not at native-handler latency, and the interpreter must never run guest code directly in a signal frame. |
+- **R1** `REFUSED`: synchronous fault signals (SEGV/BUS/FPE/ILL/TRAP) refuse guest handlers — host and
+  guest faults are indistinguishable, interpreter depth is not reentrant, and returning from a handler
+  would re-execute the faulting instruction forever. Crash-time exit semantics are already faithful
+  (same signal as native, same SIGABRT on stack overflow). The closeable face is crash diagnostics:
+  fault-site ownership, a guest-ized crash line, then termination with the same signal, i.e. the T4
+  generalization plus a productized `MIRVM_SEGV_DUMP`.
+- **R2** `REFUSED`: the vfork/clone/clone3/setjmp/longjmp family, `pthread_exit`, `pthread_atfork` and
+  multithreaded fork. Fork-alone in a single thread is allowed behind the `/proc/self/task` guard; the
+  rest needs frame-model-level engineering or non-local control flow through interpreter frames.
+  Reopening the multithreaded fork/vfork/atfork face can only go to native parity, where "best effort,
+  may break" is native's own wording.
+- **R3** `REFUSED`: eleven guest-visible unwinder context/state symbols
+  (`_Unwind_Set/GetGR/SetIP/Resume/ForcedUnwind/LSDA…`). They would see host interpreter frames, not
+  guest frames. Closure needs a guest frame/IP/LSDA translation layer plus differential probes;
+  `Backtrace`/`GetIP`/`FindEnclosingFunction`/`GetCFA` are already honored through shadow frames.
+- **R4** `REFUSED`: general nested DSTs and other metadata forms. Freeze an evaluation of a general DST
+  layout expression first; slice/str static formulas and direct dyn tail-vtable runtime alignment are
+  already supported.
+- **R5** `REFUSED`: cold 128-bit forms Trap (`Transmute pair→aggregate`, tag width >8B
+  `InvalidEnumConstruction`). No real workload has hit them; add on demand.
+- **R6** `REFUSED`: the residual static-archive surface — non-PIC/thin archives, cross-archive
+  dependencies and ordering, duplicate exports, RTLD_DEFAULT collisions, export-symbols, non-Linux-ELF
+  and bare `.init`/`.fini`. `.init_array` is allowed and RTLD_DEFAULT same-name collisions already
+  prefer the archive. Multi-archive link plans must be scheduled before any relaxation.
+- **R7** `REFUSED`: weak memory-order specialization. Mapping host atomics already stays inside the RAM
+  nondeterminism envelope; revisit on real workload demand.
+- **R8** `REFUSED`: the asm refusal surface — `att_syntax`, `sym`, `label` (asm goto), `may_unwind`,
+  non-x86_64, and asm-stub xmm/vector value operands with no slot expansion (bypassed by the stdarch
+  helper route, no triggering workload). `noreturn` was upgraded to hard debt. asm goto needs
+  native-compiling the whole host function with control flow crossing the boundary, and Cranelift
+  supports no inline asm at all.
+- **R9** `REFUSED`: `type_id`/`type_name`/`offset_of`/`field_offset` Trap. Add when a real program hits
+  them.
+- **R10** `REFUSED`: five intrinsics — `va_arg`, `carryless_mul`, `autodiff`, `rustc_peek`, SVE. The
+  first two keep a Trap for lack of real use cases; the last three have no ecosystem meaning.
+- **R11** `REFUSED`: `intrinsics::abort` yields SIGABRT where native yields SIGILL. Authorized
+  difference with a workaround; align if a differential ever compares them.
+- **R12** `REFUSED`: TSan cannot run guest TSD destructor scenarios — TSan thread state is destructed
+  before the TSD phase, so under TSan the Ctx leaks permanently and tests avoid the scenario.
+- **R13** `REFUSED`: the virtual address model, including the linear-memory compromise. The FFI axis has
+  fundamental obstacles; the real address model stays (P1/P2 fixed, P3 frozen, P4 a non-issue,
+  P5 → D13).
+- **R14** `REFUSED`: tokei parallel JSON report ordering is unstable — upstream behavior, not mirvm
+  debt. JSON cannot serve as an oracle until deterministic ordering exists; work around it with a stable
+  compact aggregate.
+- **R15** `REFUSED`: `ClosureFnPointer` and other track_caller-era adjustments. `ReifyFnPointer` only
+  follows rustc's `resolve_for_fn_ptr`; nothing can be inferred beyond that.
+- **R16** `REFUSED`: residual `global_asm` `sym` refusals — a `sym` fn whose signature cannot be derived
+  (aggregate/Rust ABI/varargs), a `sym` static pointing at a guest static (still hit by the
+  mangled-static audit), and in dependency crates a `sym` pointing at the dep's own guest fn needing the
+  entry budget in bin-link context. Real forms such as pulp take zero operands and are unblocked.
+- **R17** `REFUSED`: residual FFI by-value marshalling boundaries — by-value unions, by-value SIMD
+  vectors, vararg trailing aggregate positions, aggregates with align>8, and by-value multi-variant
+  enums (all a loud `Err`), plus packed/align(N) unnatural-layout aggregates, which
+  `validate_agg_natural` turns from silent miscalls into a loud freeze. `{i128}`/f128/long-double/
+  `_Complex` keep their existing scalar boundaries. Full padding expression is scheduled only on real
+  workload demand.
+- **R19** `REFUSED`: `#![no_main]` / `#[start]` entry forms — any entry type other than
+  `EntryFnType::Main` is refused loudly with exit 1 plus diagnostics. Reopening needs a real workload.
+- **R20** `REFUSED`: libffi foreign/callback supports only the C/System ABI; other ABIs are rejected
+  during lowering rather than squashed into plain C. Reopening needs a real adapter and a native
+  differential for the target ABI.
+- **R21** `REFUSED`: the async signal support surface. Covered: traditional process- and thread-directed
+  handlers on Linux/ELF/x86_64 with no advanced guest flags; `SI_TKILL` from `pthread_kill` or a real
+  libc `raise` entering a stable per-installation cell for the target pthread; glibc's
+  global-last-round TSD teardown ordering; `_exit(70)` for a stub reinstalled after its owner closed;
+  and `EngineFault(70)` from `HostRaise`. Still refused: synchronous-fault guest handlers, realtime
+  signals (needs per-event queueing and `siginfo` retention), `SA_SIGINFO` (needs a three-argument guest
+  ABI), `SA_ONSTACK` (needs alternate-stack lifetime), and `SA_NODEFER`/`SA_RESETHAND` (would change the
+  mask/registration state machine). Process-directed external signals are promised only at the owner
+  Engine's next ordinary safe point.
 
 ## G. Maintenance and infrastructure
 
-| ID | Missing / status | What closes it |
-|---|---|---|
-| G1 | GitHub/remote work is fully paused. `ACCEPTED` | Issues, PRDs, PRs, and all `gh` operations are frozen until the maintainer resumes. Pending on resume: land the corpus manifest, re-review sources/revs/locks/licenses, continuous remote gating, and restored triage. |
-| G2 | Corpus and real-project evidence are Git-ignored and not a continuous gate. `ACCEPTED` | Deferred harness set: suite inventory, object GC/retention, cross-host cache, NFS/object-store durability, remote gate. CheckIDs are a bounded closure, extended when Cargo fingerprints or a full sysroot Merkle becomes the divergence source. |
-| G3 | jieba_cut and opencc are fully green but not wired into an automatic gate. `UNSCHEDULED` | jieba runs in 77–89s, close to the timeout, and stays in corpus.sh; opencc needs a `/tmp/opencc-local` prefix, so it stays a manual batch with gating in corpus.sh. |
-| G5 | Three post-A2 evaluation triggers plus the purity-ledger re-review are undone. `UNSCHEDULED` | (1) clap-derive-style tainted macros → project-local tainted images; (2) no real need for cross-project sharing → simplify back to a single-project key; (3) ripgrep/tokei purity-ledger re-review. |
-| G6 | zxcvbn upstream exact-tie nondeterminism (logged to prevent misdiagnosis). `ACCEPTED` | scoring.rs picks from HashMap iteration order on u64::MAX-saturated ties, so even native self-comparison is unstable. It is now out of the saturation region and is not mirvm debt. |
-| G7 | Real-workload decidability must improve. `UNSCHEDULED` | Current honest state: the corpus's byte-exact three-way differential runs only when the driver is created; the continuous gate is exit-code/oracle level for a default mirvm run. Frontmatter dependencies use `--locked` only when `MIRVM_CARGO_LOCKED` is set, so an unset CI clean runner can re-resolve. Before release acceptance: pick a small fixed representative crate set, pin dependency locks, and make the three-way (interpreter / JIT compiled-entry / native) differential continuously reproducible, without turning the corpus into an expensive universal gate. |
-| G8 | Cleanup residual: milestone labels remain in user-visible text. `UNSCHEDULED` | (a) `src/cli.rs` `USAGE` still says `mode B slice 2`, `M5.3-M5.5`, `D15 ... P4 default flip`, `M4 precursor spikes`, and a git-history spike path — no test depends on any of them; the change is wording-only and still deferred. (b) Two error strings in `src/native_archive.rs` still contain `M5.1` (the `+/-export-symbols` modifier and two strong definitions). (c) Panic strings in `src/lower/linker/{mod,entries}.rs` still contain `A2` and `M4.4` labels, and one error string in `src/cargoless/driver.rs` still says `(P5 boundary)`. |
-| G9 | Compiler-required deletion candidates. `UNSCHEDULED` | (a) Module-level `#![allow(dead_code)]` in `src/cargoless/{lockfile,manifest}.rs` may hide real dead code, since only the compiler knows which model fields are unused. (b) `src/cargoless/resolver_config.rs` is entirely `#![cfg(test)]`, has no consumer, and duplicates resolver policy/include/cycle-detection logic from `config.rs` — candidate for whole-module deletion. (c) In `src/vm/engine/jit/helpers.rs`, the `(lo,hi)` out-store is duplicated ~10 times, `trap_if`'s `_msg` parameter is never read, and `STAT` initialization could be a const-block array; `src/vm/engine/jit/translate.rs` has a single-use `addr_of_local` wrapper. (d) `src/baseimage.rs` `ImageStack::from_images`/`push` duplicate union merging, and `src/elfsym.rs` has two nearly identical ELF64 traversals. (e) `src/telemetry/capture/session.rs`'s `#[allow(dead_code)]` is stale (`pending_rebuild_recipe` has live callers) and `src/vm/engine/ctx/thread_ctx.rs` has a duplicated `#[cfg(test)] #[cfg(test)]`. Each was left because "reading without changing cannot prove it". |
-| G10 | Two TSan harness blind spots. `UNSCHEDULED` | (a) JIT is outside the net: `tests/tsan/Cargo.toml` omits cranelift and `src/vm/engine/jit/**` is cfg'd out behind `feature = "cranelift"`, so JIT worker slot/`trace_enter` publication and the trace domain's pinned-register path are uninstrumented. Covering them needs a cranelift dependency plus a same-named feature in that crate and slows the build, so it is decided separately. Trigger: claiming the JIT publication path is race-free, or changing that path again. (b) Fork-child capture rebuild is structurally untestable: TSan refuses to create a thread after a multithreaded fork (exit 66), and the only thread the engine creates in a child is the `rebuild_session_from_recipe` writer; there is no fix unless the mechanism changes, for example a child rebuild that creates no thread. Both are documented in `tests/tsan/README.md` under "What this does not cover". |
+- **G1** `ACCEPTED`: GitHub and remote work are fully paused. Pending on resume: land the corpus
+  manifest, re-review sources/revs/locks/licenses, continuous remote gating, restored triage.
+- **G2** `ACCEPTED`: corpus and real-project evidence are Git-ignored and not a continuous gate. The
+  deferred harness set is suite inventory, object GC/retention, cross-host cache, NFS/object-store
+  durability and a remote gate. CheckIDs are a bounded closure, extended when Cargo fingerprints or a
+  full sysroot Merkle becomes the divergence source.
+- **G3** `UNSCHEDULED`: jieba_cut and opencc are fully green but not wired into an automatic gate —
+  jieba runs in 77–89s, close to the timeout, and opencc needs a `/tmp/opencc-local` prefix.
+- **G5** `UNSCHEDULED`: three post-A2 evaluation triggers plus the purity-ledger re-review:
+  clap-derive-style tainted macros → project-local tainted images; no real need for cross-project
+  sharing → simplify back to a single-project key; ripgrep/tokei purity-ledger re-review.
+- **G6** `ACCEPTED`: zxcvbn upstream exact-tie nondeterminism, logged to prevent misdiagnosis —
+  `scoring.rs` picks from HashMap iteration order on u64::MAX-saturated ties, so even native
+  self-comparison is unstable. It is now out of the saturation region and is not mirvm debt.
+- **G7** `UNSCHEDULED`: real-workload decidability. The corpus's byte-exact three-way differential runs
+  only when a driver is created, and the continuous gate is exit-code/oracle level; frontmatter
+  dependencies use `--locked` only when `MIRVM_CARGO_LOCKED` is set, so an unset clean runner can
+  re-resolve. Before release acceptance: pick a small fixed representative crate set, pin dependency
+  locks, and make the interpreter/JIT/native differential continuously reproducible without turning the
+  corpus into a universal gate.
+- **G8** `UNSCHEDULED`: milestone labels remain in user-visible text — `src/cli.rs` `USAGE` (`mode B
+  slice 2`, `M5.3-M5.5`, `D15 ... P4 default flip`, `M4 precursor spikes`, a git-history spike path),
+  two error strings in `src/native_archive.rs` containing `M5.1`, panic strings in
+  `src/lower/linker/{mod,entries}.rs` containing `A2` and `M4.4`, and one error string in
+  `src/cargoless/driver.rs` saying `(P5 boundary)`. Wording-only.
+- **G9** `UNSCHEDULED`: compiler-required deletion candidates — module-level `#![allow(dead_code)]` in
+  `src/cargoless/{lockfile,manifest}.rs` may hide real dead code; `src/cargoless/resolver_config.rs` is
+  entirely `#![cfg(test)]`, has no consumer and duplicates resolver policy from `config.rs`; the
+  duplicated `(lo,hi)` out-store and the unread `trap_if` `_msg` in `src/vm/engine/jit/helpers.rs`; a
+  single-use `addr_of_local` in `jit/translate.rs`; duplicated union merging in `src/baseimage.rs` and
+  two nearly identical ELF64 traversals in `src/elfsym.rs`; a stale `#[allow(dead_code)]` in
+  `src/telemetry/capture/session.rs` and a duplicated `#[cfg(test)] #[cfg(test)]` in `thread_ctx.rs`.
+  Each was left because reading without changing cannot prove it.
+- **G10** `UNSCHEDULED`: two TSan harness blind spots. (a) JIT is outside the net: `tests/tsan/Cargo.toml`
+  omits cranelift and `src/vm/engine/jit/**` is cfg'd out behind `feature = "cranelift"`, so JIT worker
+  slot/`trace_enter` publication and the trace domain's pinned-register path are uninstrumented;
+  covering them costs a cranelift dependency and slows the build. (b) Fork-child capture rebuild is
+  structurally untestable — TSan refuses to create a thread after a multithreaded fork (exit 66), and
+  the only thread the engine creates in a child is the `rebuild_session_from_recipe` writer. Both are
+  documented in `tests/tsan/README.md`.
 
 ## F. Reopen triggers
 
-Each row is a condition and what it reopens.
+Each item is a condition and what it reopens.
 
-| Trigger | Reopens |
-|---|---|
-| Stackful coroutines/continuations, or a proven win from a separate VM stack | Frame model B re-evaluation |
-| D16 chooses inline allocation/guest-TLS fast paths, **or** multi-Engine embedding is scheduled (two gates, first to land rules) | vmctx R cache layer re-measurement |
-| A real workload proves a guest activation stays in the host for a long time, and the timeline must be started/stopped while it runs | OSR / rebuildable code-domain migration; default JIT per-block polling is not an acceptable workaround |
-| A long-lived activation already in the trace domain demands a concrete maximum event-visibility latency that page-full/natural-return publishing cannot meet | active-page publish policy, with real load comparing per-K watermark against a deadline; no per-event low-latency switch may be added first |
-| A v0 file must first be read by a second-generation producer/consumer, or a stable format is about to be promised | log schema compatibility, extensions, dictionary, and migration tooling |
-| After L4, a real diagnostic requires observing libc internals, opaque archives, or whole-process syscall duration | build an independent kernel raw-syscall stream with unambiguous correlation; do not stretch the internal stream to impersonate it |
-| P2 can only show interpreter host hotspots and cannot attribute guest logical positions | logical sampling at safe points first; enter signal sampling only if measured bias is unacceptable |
-| The first long capture imposes a disk bound or power-loss recovery requirement | implement the relevant part of rotation, byte cap, final fsync, or a persistent black box |
-| Dynamic capture sessions, or trace code/producer descriptors, can grow unboundedly with process lifetime | full epoch reclamation; until then only bounded tombstones |
-| T12 proves stable scanning, `pwritev`, or scheduling is the main bottleneck | challenge ready-page MPSC, staging/io_uring/mmap/compression, or scheduling parameters respectively |
-| A real interpreter load proves frame-local storage is the end-to-end bottleneck, and a native-stack scheme still wins after charging zeroing, stack probing, unwinding, and checked costs | alloca frame-local storage candidate |
-| The pinned rustc changes the summary structure or ships a formal diagnostic protocol | runner diagnostic hook moves to a guard/formal interface (→E22) |
-| The pinned toolchain is upgraded | D9e emit-pruning re-measurement |
-| A "single run, huge delta, cannot pre-lower" workload shape is measured (REPL/macro-expansion style) | lazy-lowering candidate A restarts (prerequisites: L2 statics/const domain split plus a session-lifetime redesign, each scheduled separately) |
-| The fixed stdarch helper count grows significantly, or an instruction has no stdarch/CLIF expression | D7b general asm-stub vector ABI |
-| Cross-project S3′c sharing becomes a hard requirement | Plan B (chain + build barrier) revives as an alternative |
-| The "large user crate edit-rerun" scenario appears | `-Cincremental` script path (→D12) |
-| A real MMIO/device-register workload appears | wide volatile chunking's "no atomicity promised" boundary |
-| suite inventory/set identity sees real demand | deferred harness set (→G2) |
+- Stackful coroutines/continuations, or a proven win from a separate VM stack → frame model B
+  re-evaluation.
+- D16 chooses inline allocation/guest-TLS fast paths, or multi-Engine embedding is scheduled (two gates,
+  first to land rules) → vmctx R cache layer re-measurement.
+- A real workload proves a guest activation stays in the host for a long time and the timeline must be
+  started/stopped while it runs → OSR / rebuildable code-domain migration; per-block polling is not an
+  acceptable workaround.
+- A long-lived activation already in the trace domain demands a concrete maximum event-visibility
+  latency that page-full/natural-return publishing cannot meet → active-page publish policy, compared
+  per-K watermark against a deadline under real load; no per-event low-latency switch may be added first.
+- A v0 file must first be read by a second-generation producer/consumer, or a stable format is about to
+  be promised → log schema compatibility, extensions, dictionary and migration tooling.
+- After L4, a real diagnostic requires observing libc internals, opaque archives, or whole-process
+  syscall duration → an independent kernel raw-syscall stream with unambiguous correlation.
+- P2 can only show interpreter host hotspots and cannot attribute guest logical positions → logical
+  sampling at safe points first; enter signal sampling only if measured bias is unacceptable.
+- The first long capture imposes a disk bound or power-loss recovery requirement → rotation, byte cap,
+  final fsync, or a persistent black box.
+- Dynamic capture sessions, or trace code/producer descriptors, can grow unboundedly with process
+  lifetime → full epoch reclamation; until then only bounded tombstones.
+- T12 proves stable scanning, `pwritev`, or scheduling is the main bottleneck → challenge ready-page
+  MPSC, staging/io_uring/mmap/compression, or scheduling parameters respectively.
+- A real interpreter load proves frame-local storage is the end-to-end bottleneck and a native-stack
+  scheme still wins after charging zeroing, stack probing, unwinding and checked costs → alloca
+  frame-local storage candidate.
+- The pinned rustc changes the summary structure or ships a formal diagnostic protocol → the runner
+  diagnostic hook moves to a guard/formal interface (→E22).
+- The pinned toolchain is upgraded → D9e emit-pruning re-measurement.
+- A "single run, huge delta, cannot pre-lower" workload shape is measured (REPL/macro-expansion style)
+  → lazy-lowering candidate A restarts.
+- The fixed stdarch helper count grows significantly, or an instruction has no stdarch/CLIF expression
+  → D7b general asm-stub vector ABI.
+- Cross-project S3′c sharing becomes a hard requirement → plan B (chain + build barrier) revives.
+- The "large user crate edit-rerun" scenario appears → `-Cincremental` script path (→D12).
+- A real MMIO/device-register workload appears → wide volatile chunking's "no atomicity promised"
+  boundary.
+- Suite inventory/set identity sees real demand → deferred harness set (→G2).
