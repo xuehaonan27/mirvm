@@ -41,10 +41,10 @@ impl GitStore {
         };
         if locked_source.is_some() && !git_object_exists(&db, &precise)? {
             if self.offline {
-                return Err(format!(
-                    "MIRVM_OFFLINE: locked commit {precise} of Git dependency {package} \
+                return Err(crate::options::offline_error(format!(
+                    "locked commit {precise} of Git dependency {package} \
                      is not in the local cache"
-                ));
+                )));
             }
             self.ensure_db(spec, &db)?;
             if !git_object_exists(&db, &precise)? {
@@ -84,11 +84,11 @@ impl GitStore {
     fn resolve_fresh(&self, spec: &GitSpec, db: &Path) -> Result<String, String> {
         if !db.is_dir() {
             if self.offline {
-                return Err(format!(
-                    "MIRVM_OFFLINE: no local cache for Git repository {} \
+                return Err(crate::options::offline_error(format!(
+                    "no local cache for Git repository {} \
                      (resolve it once online first)",
                     spec.url
-                ));
+                )));
             }
             self.ensure_db(spec, db)?;
         } else {
@@ -257,8 +257,9 @@ fn resolve_cached_reference(db: &Path, reference: &GitReference) -> Result<Strin
         GitReference::Tag(tag) => format!("refs/tags/{tag}^{{commit}}"),
         GitReference::Rev(rev) => format!("{rev}^{{commit}}"),
     };
-    rev_parse(db, &rev)
-        .map_err(|error| format!("MIRVM_OFFLINE: Git reference {rev} is not in the cache: {error}"))
+    rev_parse(db, &rev).map_err(|error| {
+        crate::options::offline_error(format!("Git reference {rev} is not in the cache: {error}"))
+    })
 }
 
 fn fetch_precise(db: &Path, url: &str, precise: &str) -> Result<(), String> {
@@ -314,14 +315,12 @@ fn update_submodules(checkout: &Path, offline: bool) -> Result<(), String> {
     if offline {
         command.arg("--no-fetch");
     }
-    git_ok(
-        &mut command,
-        if offline {
-            "MIRVM_OFFLINE: initialize Git submodules from the existing cache"
-        } else {
-            "initialize Git submodules"
-        },
-    )
+    let action = if offline {
+        crate::options::offline_error("initialize Git submodules from the existing cache")
+    } else {
+        "initialize Git submodules".to_string()
+    };
+    git_ok(&mut command, &action)
 }
 
 fn validate_checkout(dir: &Path, precise: &str) -> Result<(), String> {

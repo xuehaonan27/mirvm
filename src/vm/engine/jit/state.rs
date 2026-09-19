@@ -498,15 +498,8 @@ pub struct JitState {
 
 impl JitState {
     pub fn new(fn_count: usize) -> Self {
-        let enabled = match std::env::var("MIRVM_JIT") {
-            Ok(v) => !(v == "off" || v == "0"),
-            Err(_) => true, // Default on.
-        };
-        let threshold = std::env::var("MIRVM_JIT_THRESHOLD")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|&t| t > 0)
-            .unwrap_or(1000);
+        let enabled = crate::options::get().jit();
+        let threshold = crate::options::get().jit_threshold;
         JitState {
             slots: (0..fn_count).map(|_| AtomicU64::new(0)).collect(),
             slots_fast: (0..fn_count).map(|_| AtomicU64::new(0)).collect(),
@@ -515,7 +508,7 @@ impl JitState {
             counters: (0..fn_count).map(|_| AtomicU32::new(0)).collect(),
             enabled,
             threshold,
-            sync: std::env::var_os("MIRVM_JIT_SYNC").is_some(),
+            sync: crate::options::get().jit_sync,
             queue: std::sync::Mutex::new(None),
             worker: std::sync::Mutex::new(None),
             stopping: AtomicBool::new(false),

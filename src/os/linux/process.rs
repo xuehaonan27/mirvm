@@ -90,7 +90,7 @@ pub fn memcmp_addr() -> *const u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn mirvm_syscall_dispatch(nr: i64, args: *const u64) -> i64 {
     let args: &[u64] = unsafe { std::slice::from_raw_parts(args, 6) };
-    if std::env::var_os("MIRVM_SYSCALL_TRACE").is_some() {
+    if crate::options::get().syscall_trace {
         mirvm_log!(
             stderr,
             "mirvm-syscall: nr={nr} a1={:#x} a2={:#x} a3={:#x} a4={:#x} a5={:#x} a6={:#x}",

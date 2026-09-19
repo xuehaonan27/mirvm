@@ -184,7 +184,7 @@ struct MirvmCallbacks {
     /// Image stack: checked against the lowering fingerprint in `after_analysis`, then consulted
     /// by lower for the union; absorbed at the end of `run_driver`.
     stack: crate::baseimage::ImageStack,
-    /// Split image produced by `lower_program` when `MIRVM_DEPS_IMAGE=1` and a base image is
+    /// Split image produced by `lower_program` when the deps image is enabled and a base image is
     /// present; pushed onto the stack and absorbed at the end of `run_driver`.
     split_image: Option<crate::lower::SplitImage>,
     /// Lowering fingerprint of this session (recorded in `after_analysis`; used when `split_image`
@@ -219,7 +219,7 @@ fn print_phase_timing(
     total: std::time::Duration,
     force: bool,
 ) {
-    if !force && std::env::var_os("MIRVM_TIMING").is_none() {
+    if !force && !crate::options::get().timing {
         return;
     }
     let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
@@ -570,12 +570,12 @@ struct GuestStackStartError {
 fn on_guest_stack<R: Send + 'static>(
     f: impl FnOnce() -> R + Send + 'static,
 ) -> Result<R, GuestStackStartError> {
-    let reserve = match std::env::var("MIRVM_STACK_SIZE") {
-        Ok(s) => parse_stack_size(&s).map_err(|message| GuestStackStartError {
+    let reserve = match crate::options::get().stack_size() {
+        Some(s) => parse_stack_size(&s).map_err(|message| GuestStackStartError {
             message,
             exit_code: 2,
         })?,
-        Err(_) => 1 << 30,
+        None => 1 << 30,
     };
     let spawned = std::thread::Builder::new()
         .name("mirvm-guest".into())

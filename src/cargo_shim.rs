@@ -28,15 +28,15 @@ pub struct CrateRunInfo {
 }
 
 fn toolchain_rustc() -> PathBuf {
-    PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT")).join("bin/rustc")
+    PathBuf::from(crate::options::build::DEFAULT_SYSROOT).join("bin/rustc")
 }
 
 fn toolchain_cargo() -> PathBuf {
-    PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT")).join("bin/cargo")
+    PathBuf::from(crate::options::build::DEFAULT_SYSROOT).join("bin/cargo")
 }
 
 fn toolchain_rustdoc() -> PathBuf {
-    PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT")).join("bin/rustdoc")
+    PathBuf::from(crate::options::build::DEFAULT_SYSROOT).join("bin/rustdoc")
 }
 
 pub(crate) fn ensure_self_symlink(self_exe: &Path, path: &Path) -> Result<(), String> {
@@ -117,13 +117,9 @@ fn exec(mut cmd: Command) -> ! {
 }
 
 fn cargo_target_dir() -> PathBuf {
-    let mut target_dir = std::env::var_os("MIRVM_TARGET_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| crate::sysroot::cache_dir().join("target/mirvm"));
-    if let Some(encoded) =
-        std::env::var_os("MIRVM_ENCODED_RUSTFLAGS_APPEND").filter(|value| !value.is_empty())
-    {
-        let hash = crate::lower::asm::fnv1a(encoded.as_encoded_bytes());
+    let mut target_dir = crate::options::get().target_dir.clone();
+    if let Some(encoded) = crate::options::get().encoded_rustflags_append.as_deref() {
+        let hash = crate::lower::asm::fnv1a(encoded.as_bytes());
         target_dir = target_dir
             .join("mirvm-append-rustflags")
             .join(format!("{hash:016x}"));
@@ -191,7 +187,7 @@ fn cargo_project_command(
     action.append_args(&mut cmd);
     // Force the host target: it makes host and target crates distinguishable and activates
     // target.runner
-    cmd.arg("--target").arg(env!("MIRVM_HOST"));
+    cmd.arg("--target").arg(crate::options::build::HOST);
     // Every "run a binary" action is redirected to us
     cmd.arg("--config").arg(cargo_runner_config(
         self_exe,
@@ -225,22 +221,22 @@ fn cargo_project_command(
     // config files and the CARGO_BUILD_* environment aliases. MIRVM remains
     // innermost and sees the final argument vector after both wrappers.
     cmd.env("RUSTC", self_str);
-    cmd.env("MIRVM_CARGO_SESSION", "1");
-    cmd.env("MIRVM_CARGO_COMPILER", "1");
-    cmd.env("MIRVM_SYSROOT", sysroot);
+    crate::options::protocol::set_cargo_session(&mut cmd);
+    crate::options::protocol::set_cargo_compiler(&mut cmd);
+    cmd.env(crate::options::env_var_name("sysroot"), sysroot);
     // Cargo run keeps the directory from which the user invoked Cargo even
     // when --manifest-path points elsewhere.  We drive Cargo from project_dir
     // for config/workspace discovery, so carry the original directory to the
     // runner and apply it only when guest execution begins.
-    cmd.env("MIRVM_GUEST_CWD", guest_cwd);
-    match std::env::var_os("MIRVM_SYSROOT") {
+    crate::options::protocol::set_guest_cwd(&mut cmd, guest_cwd);
+    match crate::options::get().sysroot.as_deref() {
         Some(value) => {
-            cmd.env("MIRVM_CALLER_SYSROOT_PRESENT", "1");
-            cmd.env("MIRVM_CALLER_SYSROOT", value);
+            crate::options::protocol::set_caller_sysroot_present(&mut cmd, true);
+            crate::options::protocol::set_caller_sysroot(&mut cmd, value);
         }
         None => {
-            cmd.env("MIRVM_CALLER_SYSROOT_PRESENT", "0");
-            cmd.env_remove("MIRVM_CALLER_SYSROOT");
+            crate::options::protocol::set_caller_sysroot_present(&mut cmd, false);
+            crate::options::protocol::clear_caller_sysroot(&mut cmd);
         }
     }
     cmd
@@ -319,7 +315,7 @@ pub fn phase_cargo(
         }
     };
     let self_exe = std::env::current_exe().expect("current_exe failed");
-    let locked = std::env::var_os("MIRVM_CARGO_LOCKED").is_some();
+    let locked = crate::options::get().cargo_locked;
     let cmd = cargo_project_command(
         project_dir,
         &guest_cwd,
@@ -353,7 +349,7 @@ pub fn phase_cargo_test(
         }
     };
     let self_exe = std::env::current_exe().expect("current_exe failed");
-    let locked = std::env::var_os("MIRVM_CARGO_LOCKED").is_some();
+    let locked = crate::options::get().cargo_locked;
     let (rustdoc, doctest_builder) = ensure_cargo_doctest_tools(project_dir, &self_exe)
         .unwrap_or_else(|error| {
             eprintln!("mirvm: {error}");
@@ -369,8 +365,8 @@ pub fn phase_cargo_test(
         locked,
     );
     cmd.env("RUSTDOC", rustdoc);
-    cmd.env("MIRVM_DOCTEST_BUILDER", doctest_builder);
-    cmd.env("MIRVM_DOCTEST_RUN_DIR", project_dir);
+    crate::options::protocol::set_doctest_builder(&mut cmd, &doctest_builder);
+    crate::options::protocol::set_doctest_run_dir(&mut cmd, project_dir);
     exec(cmd)
 }
 
@@ -430,10 +426,14 @@ fn cargo_doctest_rustdoc_args(
 pub fn phase_cargo_rustdoc(argv: impl Iterator<Item = String>) -> ! {
     let mut args: Vec<String> = argv.collect();
     if args.iter().any(|arg| arg == "--test") {
-        let sysroot =
-            std::env::var("MIRVM_SYSROOT").expect("Cargo rustdoc phase is missing MIRVM_SYSROOT");
-        let builder = std::env::var("MIRVM_DOCTEST_BUILDER")
-            .expect("Cargo rustdoc phase is missing MIRVM_DOCTEST_BUILDER");
+        let sysroot = crate::options::get()
+            .sysroot
+            .as_deref()
+            .expect("Cargo rustdoc phase is missing the sysroot option")
+            .display()
+            .to_string();
+        let builder = crate::options::protocol::doctest_builder()
+            .expect("Cargo rustdoc phase is missing the doctest builder option");
         args = cargo_doctest_rustdoc_args(args, sysroot, builder);
     }
     let mut command = Command::new(toolchain_rustdoc());
@@ -459,9 +459,7 @@ pub fn phase_wrapper(mut argv: impl Iterator<Item = String>) -> ! {
     let mut args: Vec<String> = argv.collect();
     append_encoded_rustflags(
         &mut args,
-        std::env::var("MIRVM_ENCODED_RUSTFLAGS_APPEND")
-            .ok()
-            .as_deref(),
+        crate::options::get().encoded_rustflags_append.as_deref(),
     );
 
     let is_info_query =
@@ -513,7 +511,12 @@ pub fn phase_wrapper(mut argv: impl Iterator<Item = String>) -> ! {
     // all carried .rcgu.o, ~100MB total). metadata-only rlibs are still produced through
     // rustc's default link path, and DepCallbacks supplies the post-mono const-eval error
     // surface explicitly (cli.rs).
-    let sysroot = std::env::var("MIRVM_SYSROOT").expect("wrapper phase is missing MIRVM_SYSROOT");
+    let sysroot = crate::options::get()
+        .sysroot
+        .as_deref()
+        .expect("wrapper phase is missing the sysroot option")
+        .display()
+        .to_string();
     let mut dep_args = Vec::with_capacity(args.len() + 5);
     dep_args.push("mirvm-dep-rustc".to_string()); // argv[0] placeholder (the driver skips it)
     dep_args.extend(args);
@@ -592,7 +595,7 @@ fn write_fake_outputs(rustc: &std::path::Path, args: &[String], info: &CrateRunI
             }
         }
         // The same MIR sysroot as target dependencies (required to resolve use std::*)
-        if let Ok(sysroot) = std::env::var("MIRVM_SYSROOT") {
+        if let Some(sysroot) = crate::options::get().sysroot.as_deref() {
             cmd.arg("--sysroot").arg(sysroot);
         }
         cmd.stdout(std::process::Stdio::null());
@@ -740,12 +743,14 @@ pub fn parse_runner_invocation(
     // by the guest, at which point the user's environment has already dropped every internal
     // variable by contract. The sidecar recipe recorded the build environment that produced
     // the launcher, so it is the fallback both paths share without user intervention.
-    let sysroot = std::env::var("MIRVM_SYSROOT")
-        .ok()
+    let sysroot = crate::options::get()
+        .sysroot
+        .as_deref()
+        .map(|path| path.display().to_string())
         .or_else(|| {
-            info.env
-                .iter()
-                .find_map(|(key, value)| (key == "MIRVM_SYSROOT").then(|| value.clone()))
+            info.env.iter().find_map(|(key, value)| {
+                (key == crate::options::env_var_name("sysroot")).then(|| value.clone())
+            })
         })
         .unwrap_or_else(|| {
             crate::diagnostics::control(format_args!(
@@ -908,7 +913,8 @@ mod tests {
             key == OsStr::new("RUSTC") && value == Some(OsStr::new("/tmp/mirvm"))
         }));
         assert!(command.get_envs().any(|(key, value)| {
-            key == OsStr::new("MIRVM_CARGO_COMPILER") && value == Some(OsStr::new("1"))
+            key == OsStr::new(crate::options::protocol::CARGO_COMPILER)
+                && value == Some(OsStr::new("1"))
         }));
         for key in [
             "RUSTC_WRAPPER",

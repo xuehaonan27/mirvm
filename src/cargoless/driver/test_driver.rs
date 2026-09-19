@@ -44,8 +44,9 @@ pub fn test_project(dir: &Path, cargo_args: &[String], harness_args: &[String]) 
         }
     };
     if request.offline {
-        // SAFETY: CLI startup phase; worker/rustc/guest threads have not started yet.
-        unsafe { std::env::set_var("MIRVM_OFFLINE", "1") };
+        // `--offline` outranks the environment, and child processes must see the same decision.
+        crate::options::note_cli("offline");
+        crate::options::export_to_process("offline", "1");
     }
     if request.ignore_rust_version {
         for member in &mut workspace.members {
@@ -264,8 +265,8 @@ fn prepare_test_package(
         _ => None,
     };
 
-    let sysroot = match std::env::var_os("MIRVM_SYSROOT") {
-        Some(p) => PathBuf::from(p),
+    let sysroot = match crate::options::get().sysroot.clone() {
+        Some(p) => p,
         None => match crate::sysroot::ensure_sysroot() {
             Ok(p) => p,
             Err(e) => {
@@ -1328,10 +1329,10 @@ fn run_doctest_task(task: &DoctestTask, sysroot: &Path, test_args: &[String], qu
     }
     command
         .current_dir(&task.cwd)
-        .envs(task.env.iter().cloned())
-        .env("MIRVM_SYSROOT", sysroot)
-        .env("MIRVM_DOCTEST_RUN_DIR", &task.cwd)
-        .env("MIRVM_NO_IR_CACHE", "1");
+        .envs(task.env.iter().cloned());
+    command.env(crate::options::env_var_name("sysroot"), sysroot);
+    crate::options::protocol::set_doctest_run_dir(&mut command, &task.cwd);
+    command.env(crate::options::env_var_name("no_ir_cache"), "1");
     let code = command
         .status()
         .ok()
@@ -1461,9 +1462,7 @@ fn run_recipe_child(
     let mut cmd = std::process::Command::new(self_exe);
     cmd.arg("__cless-run-root");
     append_capture_directory_arg(&mut cmd, crate::cli::capture_directory());
-    cmd.arg(recipe)
-        .args(args)
-        .current_dir(cwd)
-        .env("MIRVM_SYSROOT", sysroot);
+    cmd.arg(recipe).args(args).current_dir(cwd);
+    cmd.env(crate::options::env_var_name("sysroot"), sysroot);
     cmd.status().ok().and_then(|s| s.code()).unwrap_or(1)
 }

@@ -86,7 +86,7 @@ extern "C" fn stat_dump() {
 /// Called once from `Compiler::new`: enables the stats from the environment and registers
 /// the exit dump.
 pub(crate) fn stat_init() {
-    if std::env::var_os("MIRVM_JIT_STATS").is_some() {
+    if crate::options::get().jit_stats {
         STAT_ON.store(true, Ordering::Relaxed);
         crate::os::process::atexit_native(stat_dump);
     }

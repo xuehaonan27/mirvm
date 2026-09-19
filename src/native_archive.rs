@@ -238,7 +238,7 @@ pub(crate) fn materialize_in(archive: &Path, cache_dir: &Path) -> Result<PathBuf
     materialize_for_target_in(
         archive,
         cache_dir,
-        env!("MIRVM_HOST"),
+        crate::options::build::HOST,
         Path::new("cc"),
         &[],
         None,
@@ -286,7 +286,7 @@ pub(crate) fn materialize_static_libraries<'tcx>(
             {
                 continue;
             }
-            if target != env!("MIRVM_HOST")
+            if target != crate::options::build::HOST
                 || sess.target.os != Os::Linux
                 || sess.target.binary_format != BinaryFormat::Elf
             {
@@ -294,7 +294,7 @@ pub(crate) fn materialize_static_libraries<'tcx>(
                     "crate `{crate_name}`'s Static native library `{}` can only be handled by the current host \
                      Linux/ELF archive-loading slice (host: {}, current target: {target})",
                     lib.name,
-                    env!("MIRVM_HOST")
+                    crate::options::build::HOST
                 ));
             }
             if export_symbols.is_some() {
@@ -669,7 +669,7 @@ fn rescue_with_rlib_symbols(
             }
         }
     }
-    if std::env::var_os("MIRVM_C2_DEBUG").is_some() {
+    if crate::options::get().c2_debug {
         eprintln!("c2-debug: undefs={undefs:?} hit={}", hit.len());
     }
     if hit.is_empty() {

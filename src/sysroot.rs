@@ -33,7 +33,7 @@ use crate::cargoless::{buildrs, resolve};
 
 /// Toolchain sysroot baked at compile time (see build.rs); rustc takes it from here.
 fn toolchain_root() -> &'static Path {
-    Path::new(env!("MIRVM_DEFAULT_SYSROOT"))
+    Path::new(crate::options::build::DEFAULT_SYSROOT)
 }
 
 /// The rust-src library/ tree (home of the std workspace crates and vendor/).
@@ -47,18 +47,14 @@ fn library_dir() -> PathBuf {
 /// run time. It lives in `$HOME/.mirvm`; `MIRVM_HOME` relocates it wholesale (for
 /// tests/isolation). Every component self-heals, and the whole tree may be deleted by hand.
 pub fn cache_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("MIRVM_HOME") {
-        return PathBuf::from(d);
-    }
-    let home = std::env::var_os("HOME").expect("HOME is not set");
-    PathBuf::from(home).join(".mirvm")
+    crate::options::get().home.clone()
 }
 
 /// Location of the stamp file (the content key) inside the sysroot.
 fn stamp_file(sysroot_dir: &Path) -> PathBuf {
     sysroot_dir
         .join("lib/rustlib")
-        .join(env!("MIRVM_HOST"))
+        .join(crate::options::build::HOST)
         .join(".mirvm-sysroot-hash")
 }
 
@@ -70,7 +66,7 @@ fn stamp_file(sysroot_dir: &Path) -> PathBuf {
 /// stays usable until the moment it is swapped out. A crash mid-build leaves tmp/old
 /// directories behind, and the missing stamp self-heals on the next run.
 pub fn ensure_sysroot() -> anyhow::Result<PathBuf> {
-    let target = env!("MIRVM_HOST");
+    let target = crate::options::build::HOST;
     let sysroot_dir = cache_dir().join(format!("sysroot-{target}"));
     if let Some(want) = stamp_value()
         && std::fs::read_to_string(stamp_file(&sysroot_dir)).is_ok_and(|have| have == want)
@@ -84,7 +80,7 @@ pub fn ensure_sysroot() -> anyhow::Result<PathBuf> {
 /// Stamp value of the currently built sysroot (reused in the base-image key); `None` when
 /// the sysroot is not built.
 pub(crate) fn current_stamp_value() -> Option<String> {
-    let target = env!("MIRVM_HOST");
+    let target = crate::options::build::HOST;
     std::fs::read_to_string(stamp_file(&cache_dir().join(format!("sysroot-{target}")))).ok()
 }
 
@@ -200,10 +196,10 @@ fn library_sentinel() -> Result<String, String> {
 /// is otherwise reused across rebuilds.
 fn toolchain_stamp() -> String {
     match rustc_stat() {
-        Some(stat) => format!("{}\n{}", env!("MIRVM_BUILD_ID"), stat),
+        Some(stat) => format!("{}\n{}", crate::options::build::BUILD_ID, stat),
         // Missing is not fatal: the fingerprint is coarser (BUILD_ID remains) and no new
         // error path appears
-        None => format!("{}\nrustc-stat-missing", env!("MIRVM_BUILD_ID")),
+        None => format!("{}\nrustc-stat-missing", crate::options::build::BUILD_ID),
     }
 }
 
@@ -271,7 +267,7 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 /// toolchain as the compile base) -> write the stamp into tmp -> publish with an atomic
 /// rename.
 fn build_sysroot(sysroot_dir: &Path) -> anyhow::Result<()> {
-    let target = env!("MIRVM_HOST");
+    let target = crate::options::build::HOST;
     let library = library_dir();
     if !library.join("std/Cargo.toml").is_file() {
         anyhow::bail!(
@@ -454,7 +450,7 @@ mod tests {
         let v = stamp_value().expect("with rust-src present the stamp must exist");
         // The content key excludes MIRVM_BUILD_ID (a new mirvm version does not rebuild the
         // sysroot; the axes are rustc/rust-src/recipe -- see the note on stamp_value)
-        assert!(!v.starts_with(env!("MIRVM_BUILD_ID")));
+        assert!(!v.starts_with(crate::options::build::BUILD_ID));
         assert!(v.contains("da0 oc1 opt0"));
         assert!(v.contains("-Zforce-unstable-if-unmarked"));
         // Same source and tree, so the value is deterministic

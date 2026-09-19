@@ -96,7 +96,7 @@ fn parse_config(path: &Path) -> Result<Vec<String>, String> {
             .and_then(|t| t.get(key))
             .and_then(|t| t.get("rustflags"))
     };
-    if let Some(f) = target_hit(env!("MIRVM_HOST")) {
+    if let Some(f) = target_hit(crate::options::build::HOST) {
         return flags_value(f, path);
     }
     if let Some(f) = target_hit("cfg(all())") {
@@ -258,7 +258,7 @@ mod tests {
     fn config_precedence_triple_then_cfg_all_then_build() {
         let dir = tmpdir("cfgprio");
         std::fs::create_dir_all(dir.join(".cargo")).unwrap();
-        let triple = env!("MIRVM_HOST");
+        let triple = crate::options::build::HOST;
         // All three present: triple wins
         std::fs::write(
             dir.join(".cargo/config.toml"),

@@ -41,6 +41,7 @@ pub(crate) mod elfsym;
 pub mod ircache;
 pub mod lower;
 pub(crate) mod native_archive;
+pub mod options;
 pub(crate) mod os;
 pub mod pack;
 pub mod sysroot;

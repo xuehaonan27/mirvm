@@ -71,7 +71,7 @@ pub struct BaseImage {
 }
 
 fn disabled() -> bool {
-    std::env::var_os("MIRVM_NO_BASE_IMAGE").is_some_and(|v| !v.is_empty())
+    crate::options::get().no_base_image
 }
 
 fn base_dir() -> PathBuf {
@@ -82,7 +82,7 @@ fn base_dir() -> PathBuf {
 /// built yet, etc.), i.e. no base image.
 fn locate() -> Option<(PathBuf, String)> {
     let stamp = crate::sysroot::current_stamp_value()?;
-    let mut key = String::from(env!("MIRVM_BUILD_ID"));
+    let mut key = String::from(crate::options::build::BUILD_ID);
     key.push('\u{1f}');
     key.push_str(&stamp);
     let h = crate::lower::asm::fnv1a(key.as_bytes());
@@ -92,7 +92,7 @@ fn locate() -> Option<(PathBuf, String)> {
 fn load(path: &std::path::Path, want_stamp: &str) -> Option<BaseImage> {
     let data = std::fs::read(path).ok()?;
     let f: BaseFile = postcard::from_bytes(&data).ok()?; // restores the frozen region at its fixed base; a taken region means a miss
-    if f.build_id != env!("MIRVM_BUILD_ID") || f.sysroot_stamp != want_stamp {
+    if f.build_id != crate::options::build::BUILD_ID || f.sysroot_stamp != want_stamp {
         return None;
     }
     // The frozen region must really land in the base-image domain (rejects a swapped file
@@ -104,7 +104,7 @@ fn load(path: &std::path::Path, want_stamp: &str) -> Option<BaseImage> {
         return None;
     }
     let fp = f.lowering_fp;
-    let mut key = String::from(env!("MIRVM_BUILD_ID"));
+    let mut key = String::from(crate::options::build::BUILD_ID);
     key.push('\u{1f}');
     key.push_str(want_stamp);
     key.push('\u{1f}');
@@ -456,7 +456,7 @@ impl Callbacks for BaseBuildCallbacks {
         let mut tls_syms = exports.tls_syms;
         tls_syms.sort_unstable();
         let file = BaseFile {
-            build_id: env!("MIRVM_BUILD_ID").to_string(),
+            build_id: crate::options::build::BUILD_ID.to_string(),
             sysroot_stamp,
             lowering_fp: (
                 sess.ub_checks(),

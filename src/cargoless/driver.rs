@@ -144,7 +144,7 @@ fn remove_output_arg(args: &[String]) -> Vec<String> {
 pub fn run_doctest_builder(argv: impl Iterator<Item = String>) -> ExitCode {
     let args: Vec<String> = argv.collect();
     let crate_type = doctest_crate_type(&args).unwrap_or_default();
-    let rustc = PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT")).join("bin/rustc");
+    let rustc = PathBuf::from(crate::options::build::DEFAULT_SYSROOT).join("bin/rustc");
     if crate_type == "lib" {
         let status = std::process::Command::new(&rustc)
             .args(&args)
@@ -198,8 +198,7 @@ pub fn run_doctest_builder(argv: impl Iterator<Item = String>) -> ExitCode {
         }
     }
 
-    let cwd = std::env::var_os("MIRVM_DOCTEST_RUN_DIR")
-        .map(PathBuf::from)
+    let cwd = crate::options::protocol::doctest_run_dir()
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     let recipe = RootRunRecipe {
@@ -457,9 +456,9 @@ fn drive(
         std::process::exit(1);
     }
 
-    // 3. sysroot: MIRVM_SYSROOT env takes priority, otherwise self-built (same measure as cli.rs run path)
-    let sysroot = match std::env::var_os("MIRVM_SYSROOT") {
-        Some(p) => PathBuf::from(p),
+    // 3. sysroot: the option takes priority, otherwise self-built (same measure as the CLI run path)
+    let sysroot = match crate::options::get().sysroot.clone() {
+        Some(p) => p,
         None => match crate::sysroot::ensure_sysroot() {
             Ok(p) => p,
             Err(e) => {

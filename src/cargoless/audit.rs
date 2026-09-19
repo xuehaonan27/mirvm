@@ -60,7 +60,7 @@ pub fn audit_project(dir: &Path) -> Result<AuditReport, String> {
 /// `cargo fetch --locked` (fetching online) then a `--offline` build; a mismatch
 /// against a historically materialized lock is only an informational note, since
 /// time drift is not a fork).
-/// Tied to `tests/suites/corpus/cases.manifest`: an entry carrying `needs=` whose
+/// Tied to `tests/manifest`: an entry carrying `needs=` whose
 /// path is absent is recorded as SKIP (same criterion as the gate, not a failure).
 pub fn audit_script(file: &Path) -> Result<AuditReport, String> {
     let text = std::fs::read_to_string(file)
@@ -73,7 +73,7 @@ pub fn audit_script(file: &Path) -> Result<AuditReport, String> {
         }
         None => return Err(format!("{} has no valid file name", file.display())),
     };
-    // needs=/env= linkage (corpus cases.manifest is the single source of truth)
+    // needs=/env= linkage (tests/manifest is the single source of truth)
     let (needs, manifest_env) = manifest_fields(stem);
     if let Some(needs) = needs
         && !std::path::Path::new(&needs).exists()
@@ -159,7 +159,7 @@ fn cargo_accepts_lock(
     std::fs::write(dir.join("src/main.rs"), body).unwrap();
     std::fs::write(dir.join("Cargo.lock"), lock.serialize()).unwrap();
 
-    let toolchain_root = std::path::PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT"));
+    let toolchain_root = std::path::PathBuf::from(crate::options::build::DEFAULT_SYSROOT);
     let cargo = toolchain_root.join("bin/cargo");
     let rustc = toolchain_root.join("bin/rustc");
     let target = crate::sysroot::cache_dir().join("target/native");
@@ -187,7 +187,7 @@ fn cargo_accepts_lock(
     if !fetch.status.success() {
         let tail = String::from_utf8_lossy(&fetch.stderr);
         let tail = tail.lines().last().unwrap_or("").to_string();
-        if std::env::var_os("MIRVM_DEPS_AUDIT_KEEP").is_some() {
+        if crate::options::get().deps_audit_keep {
             eprintln!("audit scratch dir kept: {}", dir.display());
         } else {
             let _ = std::fs::remove_dir_all(&dir);
@@ -207,7 +207,7 @@ fn cargo_accepts_lock(
             tail.lines().last().unwrap_or("")
         )
     };
-    if std::env::var_os("MIRVM_DEPS_AUDIT_KEEP").is_some() {
+    if crate::options::get().deps_audit_keep {
         eprintln!("audit scratch dir kept: {}", dir.display());
     } else {
         let _ = std::fs::remove_dir_all(&dir);
@@ -247,11 +247,11 @@ fn empty_plan(file: &Path) -> ResolvePlan {
 }
 
 /// The `needs=` path and `env=` string for this entry in corpus
-/// `cases.manifest` (no registration = `(None, None)`).
+/// `tests/manifest` (no registration = `(None, None)`).
 /// Script files are named `c_<name>.rs` while manifest rows use `<name>`, so
 /// both keys are looked up.
 fn manifest_fields(stem: &str) -> (Option<String>, Option<String>) {
-    let Ok(text) = std::fs::read_to_string("tests/suites/corpus/cases.manifest") else {
+    let Ok(text) = std::fs::read_to_string("tests/manifest") else {
         return (None, None);
     };
     let bare = stem.strip_prefix("c_").unwrap_or(stem);

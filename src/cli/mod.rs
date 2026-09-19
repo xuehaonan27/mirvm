@@ -59,28 +59,9 @@ static PARALLEL_FRONTEND_ARG: std::sync::OnceLock<String> = std::sync::OnceLock:
 /// subprocess, whose stderr is captured into `build.log` and whose failure the parent deliberately
 /// treats as "no base image, lower cold" — a rejection there would be silent.
 pub(crate) fn validate_parallel_frontend_arg() -> Result<(), String> {
-    let arg = threads_arg(std::env::var("MIRVM_THREADS").ok().as_deref())?;
+    let arg = crate::options::get().threads_arg()?;
     let _ = PARALLEL_FRONTEND_ARG.set(arg);
     Ok(())
-}
-
-fn threads_arg(raw: Option<&str>) -> Result<String, String> {
-    match raw.map(str::trim) {
-        None | Some("") | Some("off") => Ok(SEQUENTIAL_FRONTEND_ARG.to_string()),
-        // rustc's own spelling for "one thread, but keep the compiler thread-safe": it enables the
-        // dynamic-sync machinery with a single pool thread. Passed through because it is the only
-        // way to exercise query-pool code without parallel analysis. The default stays plain `1`,
-        // which creates no pool at all.
-        Some("sync") => Ok("-Zthreads=sync".to_string()),
-        Some(value) => match value.parse::<usize>() {
-            // `0` keeps rustc's own meaning (one thread per available core). 256 is rustc's
-            // ceiling; a larger value would be clamped there silently, so reject it here instead.
-            Ok(n) if n <= 256 => Ok(format!("-Zthreads={n}")),
-            _ => Err(format!(
-                "mirvm: MIRVM_THREADS only accepts `off`, `sync` or an integer in 0..=256 (got `{value}`)"
-            )),
-        },
-    }
 }
 
 const USAGE: &str = "\
@@ -93,6 +74,7 @@ USAGE:
     mirvm run <dir | Cargo.toml> [-- <program args>]     # cargo project (deps auto-built as MIR rlibs)
     mirvm test [dir | Cargo.toml] [OPTIONS] [TESTNAME] [-- <libtest args>]
     mirvm capture [-o DIR] -- run <input> [OPTIONS]      # record one real guest execution
+    mirvm options [--json]                               # every external input mirvm defines, with value and source
     mirvm log inspect <file | session-dir>              # validate v0 event stream and final ledger
     mirvm log export <file | session-dir> [FILTERS]     # export attested record as JSONL
     mirvm cache status                                   # local store component sizes + stale-generation size
@@ -101,54 +83,22 @@ USAGE:
     mirvm cache purge --scripts                          # purge scripts/ (materialized project list)
     mirvm cache purge --target                           # purge unified target dir (shared dep store, largest)
     mirvm cache purge --all [--sysroot]                  # purge everything except sysroot; with flag, also sysroot (full cold start)
-
-OPTIONS:
-    --dump-mir        print entry fn MIR and exit (single-file passthrough mode only)
-    --edition <ED>    default 2024 (single-file passthrough mode only)
-    --sysroot <PATH>  use the given sysroot (default: auto-build cached sysroot with full MIR)
-    --vm-call <SPEC>  call an exported function directly (gate/debug entry), e.g. 'fib(25)'; default runs the main startup chain
-    --vm-stats        print Trap-debt statistics (pre-flight survey instrument) and exit
-    --stack-size <N>  guest main execution stack virtual reservation (default 1g; accepts k/m/g suffix, same seat as JVM -Xss)
-    --jit <on|off>    method-level JIT (M5.3-M5.5, default on; off = pure interpreter differential benchmark)
-    --ignore-rust-version  ignore package.rust-version (project/dep scripts, same semantics as Cargo)
-
-ENV:
-    MIRVM_HOME        local store root (default $HOME/.mirvm; houses sysroot/scripts/target/cache families)
-    MIRVM_TARGET_DIR  relocate mirvm's unified target dir (default $MIRVM_HOME/target/mirvm)
-    MIRVM_SYSROOT     equivalent to --sysroot
-    MIRVM_STACK_SIZE  equivalent to --stack-size (passed via env to runner in cargo-project form)
-    MIRVM_JIT         equivalent to --jit (off/0 = pure interpreter differential benchmark)
-    MIRVM_JIT_THRESHOLD  compilation trigger threshold (default 1000; diagnostic)
-    MIRVM_JIT_SYNC    =1 enables JIT verify mode: enqueue and wait for publish/failure, allowing
-                      compile failures to terminate loudly (gate use; proves threshold=1 differential really runs machine code)
-    MIRVM_JIT_STATS   =1 prints JIT helper frequency stats at process exit via atexit (diagnostic)
-    MIRVM_CARGO_LOCKED when set, frontmatter/script projects build with --locked (dep lock;
-                      unset = clean env may re-resolve, see open-issues G7)
-    MIRVM_DEPS        =cargo routes project/script through the long-term cargo three-phase compat track
-                      (user fallback + behavioral differential); **default/=self uses zero-cargo own
-                      scheduling** (D15 cargoless driver, P4 default flip: dep resolution/compilation
-                      scheduling/build.rs/proc-macro/rustflags/rerun-if incremental/parallel scheduling
-                      full lifecycle; mirvm test already supports resolver=1/2/3 workspace,
-                      alternate registry, common source replacement/patch/replace, and
-                      pack shares this path; resolver 1/2/3 all follow Cargo's unified feature rules)
-    MIRVM_CLESS_JOBS  =N sets cargoless compilation scheduling concurrency (default = core count; =1 falls back to
-                      topological serial order, for differential debugging)
-    MIRVM_THREADS     rustc frontend threads for the compile session: unset/`off` = 1 (sequential,
-                      the default), `sync` = one thread but thread-safe, `2`-`256`, `0` = one per
-                      available core. Dependency compilation units stay sequential regardless
-    MIRVM_TIMING      =1 writes phase ledger to stderr (frontend/lower/engine/total)
-    MIRVM_NO_IR_CACHE =1 bypasses L2 engine-IR cache (read/write disabled; diagnostic/differential)
-    MIRVM_NO_BASE_IMAGE =1 bypasses std pre-lowered base image (full cold lowering; diagnostic/differential)
-
-DEV:
-    MIRVM_JIT_DEBUG   =1 logs JIT compiler thread receive/publish flow (deliberate diagnostic knob)
-    MIRVM_JIT_DEBUG_DUMP =1 dumps CLIF for functions that fail compilation (stacked on MIRVM_JIT_DEBUG)
-    MIRVM_SEGV_DUMP   =1 prints fault RIP on SIGSEGV (JIT code crash site location)
 ";
+
+/// The full help text: the command summary plus the option, environment and diagnostic blocks,
+/// which are generated from [`crate::options::entries`] so help cannot drift from the code.
+pub(crate) fn usage() -> String {
+    format!(
+        "{USAGE}\n{}{}{}",
+        crate::options::usage_options_section(crate::options::Scope::Run),
+        crate::options::usage_env_section(),
+        crate::options::usage_dev_section(),
+    )
+}
 
 pub fn main() -> ExitCode {
     // Troubleshooting knob: print fault RIP on SIGSEGV to locate JIT code crash site.
-    if std::env::var_os("MIRVM_SEGV_DUMP").is_some() {
+    if crate::options::get().segv_dump {
         crate::os::signal::install_segv_dump();
     }
     // Rejected before any dispatch: the flag reaches every compiler session, and one injection
@@ -176,7 +126,7 @@ pub fn main() -> ExitCode {
         );
     }
     let Some(first) = argv.next() else {
-        eprint!("{USAGE}");
+        eprint!("{}", usage());
         return ExitCode::from(2);
     };
 
@@ -197,8 +147,8 @@ pub fn main() -> ExitCode {
     if first == "__cless-run-root" {
         return crate::cargoless::driver::run_root_recipe(argv);
     }
-    if std::env::var_os("MIRVM_CARGO_SESSION").is_some() {
-        if std::env::var_os("MIRVM_CARGO_COMPILER").is_some() {
+    if crate::options::protocol::cargo_session() {
+        if crate::options::protocol::cargo_compiler() {
             // Cargo's RUSTC slot: first is already the first real rustc argument.
             cargo_shim::phase_compiler(std::iter::once(first).chain(argv));
         }
@@ -214,11 +164,37 @@ pub fn main() -> ExitCode {
         "log" => crate::telemetry::tool::main(argv),
         "cache" => entry::cache_main(argv),
         "deps" => entry::deps_main(argv),
+        "options" => options_main(argv),
         _ => {
-            eprint!("{USAGE}");
+            eprint!("{}", usage());
             ExitCode::from(2)
         }
     }
+}
+
+/// `mirvm options [--json]`: print every external input mirvm defines, its current value and where
+/// that value came from. This is the executable form of `src/options.rs`.
+fn options_main(args: impl Iterator<Item = String>) -> ExitCode {
+    let mut json = false;
+    for arg in args {
+        match arg.as_str() {
+            "--json" => {
+                json = true;
+                crate::options::note_cli("options_json");
+            }
+            other => {
+                eprintln!("mirvm options: unknown argument `{other}`\n{}", usage());
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if json {
+        println!("{}", crate::options::render_json());
+    } else {
+        println!("{}", crate::options::version());
+        print!("{}", crate::options::render());
+    }
+    ExitCode::SUCCESS
 }
 
 pub(crate) const INTERNAL_CAPTURE_DIRECTORY_ARG: &str = "--mirvm-capture-directory";
@@ -279,7 +255,10 @@ fn capture_main(mut args: impl Iterator<Item = String>) -> ExitCode {
                 break;
             }
             _ => {
-                eprintln!("mirvm capture: expected `--` before the MIRVM command\n{USAGE}");
+                eprintln!(
+                    "mirvm capture: expected `--` before the MIRVM command\n{}",
+                    usage()
+                );
                 return ExitCode::from(2);
             }
         }
@@ -360,11 +339,15 @@ fn test_main(argv: impl Iterator<Item = String>) -> ExitCode {
         project.parent().unwrap_or(Path::new(".")).to_path_buf()
     };
 
-    match std::env::var("MIRVM_DEPS").as_deref() {
-        Ok("cargo") => cargo_shim::phase_cargo_test(&dir, &before, &harness_args),
-        Err(_) | Ok("self") => crate::cargoless::driver::test_project(&dir, &before, &harness_args),
-        Ok(other) => {
-            eprintln!("mirvm: MIRVM_DEPS only accepts `cargo` or `self` (got `{other}`)");
+    match crate::options::get().deps() {
+        Ok(crate::options::DepsTrack::Cargo) => {
+            cargo_shim::phase_cargo_test(&dir, &before, &harness_args)
+        }
+        Ok(crate::options::DepsTrack::Own) => {
+            crate::cargoless::driver::test_project(&dir, &before, &harness_args)
+        }
+        Err(message) => {
+            eprintln!("{message}");
             ExitCode::from(2)
         }
     }
@@ -395,30 +378,6 @@ mod tests {
             argv.collect::<Vec<_>>(),
             ["/tmp/fake-bin", "guest-argument"]
         );
-    }
-
-    #[test]
-    fn threads_argument_maps_knob_values_and_rejects_typos() {
-        for (raw, expected) in [
-            (None, "-Zthreads=1"),
-            (Some(""), "-Zthreads=1"),
-            (Some("   "), "-Zthreads=1"),
-            (Some("off"), "-Zthreads=1"),
-            (Some("1"), "-Zthreads=1"),
-            (Some(" 2 "), "-Zthreads=2"),
-            (Some("8"), "-Zthreads=8"),
-            (Some("256"), "-Zthreads=256"),
-            (Some("0"), "-Zthreads=0"),
-            (Some("sync"), "-Zthreads=sync"),
-        ] {
-            assert_eq!(super::threads_arg(raw).unwrap(), expected, "raw={raw:?}");
-        }
-        for raw in ["257", "-1", "abc", "2.5", "8x", "on", "true", "Off"] {
-            assert!(
-                super::threads_arg(Some(raw)).is_err(),
-                "raw={raw:?} must be rejected"
-            );
-        }
     }
 
     #[test]

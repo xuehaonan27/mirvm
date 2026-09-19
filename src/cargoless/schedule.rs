@@ -36,7 +36,7 @@ impl Layout {
     pub fn new() -> Self {
         let base = crate::sysroot::cache_dir()
             .join("target/cargoless")
-            .join(env!("MIRVM_HOST"))
+            .join(crate::options::build::HOST)
             .join("debug");
         Self {
             deps: base.join("deps"),
@@ -379,7 +379,7 @@ pub fn fingerprints(
             .collect();
         dep_fps.sort();
         let src_stamp = source_stamp(u)?;
-        let mut key = String::from(env!("MIRVM_BUILD_ID"));
+        let mut key = String::from(crate::options::build::BUILD_ID);
         let mut put = |s: &str| {
             key.push('\u{1f}');
             key.push_str(s);
@@ -508,7 +508,7 @@ pub fn root_fingerprint(
     rustflags: &[String],
 ) -> Result<String, String> {
     let src_stamp = source_stamp_dir(false, &manifest.root, &manifest.name)?;
-    let mut key = String::from(env!("MIRVM_BUILD_ID"));
+    let mut key = String::from(crate::options::build::BUILD_ID);
     let mut put = |s: &str| {
         key.push('\u{1f}');
         key.push_str(s);

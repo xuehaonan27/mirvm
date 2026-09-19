@@ -5,9 +5,9 @@ use std::process::{ExitCode, exit};
 
 use crate::cargo_shim;
 
-use super::USAGE;
 use super::driver::{pack_driver, parse_stack_size, run_driver, run_vm_engine};
 use super::frontmatter::{materialize_script, parse_frontmatter};
+use super::usage;
 
 // ===== user entry points =====
 
@@ -56,11 +56,11 @@ pub(super) fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
     let out = out.unwrap_or_else(default_out);
     let out_abs = std::path::absolute(&out).unwrap_or(out);
 
-    let deps_self = match std::env::var("MIRVM_DEPS").as_deref() {
-        Err(_) | Ok("self") => true,
-        Ok("cargo") => false,
-        Ok(other) => {
-            eprintln!("mirvm: MIRVM_DEPS only accepts `cargo` or `self` (got `{other}`)");
+    let deps_self = match crate::options::get().deps() {
+        Ok(crate::options::DepsTrack::Own) => true,
+        Ok(crate::options::DepsTrack::Cargo) => false,
+        Err(message) => {
+            eprintln!("{message}");
             exit(2);
         }
     };
@@ -77,8 +77,8 @@ pub(super) fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
         if deps_self {
             return crate::cargoless::driver::pack_project(dir, &out_abs);
         }
-        // SAFETY: single-threaded startup phase.
-        unsafe { set_cargo_pack_env(&out_abs) };
+        // The pack route crosses a process boundary; see set_cargo_pack_env.
+        set_cargo_pack_env(&out_abs);
         cargo_shim::phase_cargo(dir, &[], None, false);
     }
     let src = std::fs::read_to_string(&input_path).unwrap_or_else(|e| {
@@ -90,20 +90,22 @@ pub(super) fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
             return crate::cargoless::driver::pack_script(&input_path, &out_abs);
         }
         let dir = materialize_script(&input_path, &manifest, &body);
-        // SAFETY: single-threaded startup phase.
-        unsafe { set_cargo_pack_env(&out_abs) };
+        // The pack route crosses a process boundary; see set_cargo_pack_env.
+        set_cargo_pack_env(&out_abs);
         cargo_shim::phase_cargo(&dir, &[], None, false);
     }
 
     // Plain single file: pack_driver directly (same args as run form 3)
-    let sysroot =
-        std::env::var("MIRVM_SYSROOT").unwrap_or_else(|_| match crate::sysroot::ensure_sysroot() {
+    let sysroot = match crate::options::get().sysroot.clone() {
+        Some(path) => path.display().to_string(),
+        None => match crate::sysroot::ensure_sysroot() {
             Ok(p) => p.display().to_string(),
             Err(e) => {
                 eprintln!("mirvm: fail to build sysroot: {e}");
                 exit(1);
             }
-        });
+        },
+    };
     let rustc_args = vec![
         "mirvm".to_string(),
         input.clone(),
@@ -116,13 +118,13 @@ pub(super) fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
     pack_driver(rustc_args, program_argv, out_abs)
 }
 
-unsafe fn set_cargo_pack_env(out: &Path) {
-    // SAFETY: caller guarantees we are still in the CLI single-threaded startup phase.
-    unsafe {
-        std::env::set_var("MIRVM_PACK", out);
-        std::env::set_var("MIRVM_NO_BASE_IMAGE", "1");
-        std::env::set_var("MIRVM_NO_DEPS_IMAGE", "1");
-    }
+/// Prepare the `cargo` phase of `mirvm pack`. The route crosses a process boundary (mirvm -> cargo
+/// -> the mirvm wrapper), so the values are exported through the environment, and the two cache
+/// bypasses force the full cold route that keeps the package self-contained.
+fn set_cargo_pack_env(out: &Path) {
+    crate::options::export_os_to_process("pack", out.as_os_str());
+    crate::options::export_to_process("no_base_image", "1");
+    crate::options::export_to_process("no_deps_image", "1");
 }
 
 /// `mirvm cache status|purge ...`: manage the local store ($HOME/.mirvm, relocatable via MIRVM_HOME).
@@ -142,7 +144,7 @@ pub(super) fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
             "--all" => plan.all = true,
             "--sysroot" => plan.sysroot = true,
             _ => {
-                eprintln!("mirvm cache: unknown argument `{a}`\n{USAGE}");
+                eprintln!("mirvm cache: unknown argument `{a}`\n{}", usage());
                 return ExitCode::from(2);
             }
         }
@@ -161,7 +163,7 @@ pub(super) fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
             ExitCode::SUCCESS
         }
         _ => {
-            eprint!("{USAGE}");
+            eprint!("{}", usage());
             ExitCode::from(2)
         }
     }
@@ -335,9 +337,10 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
                     crate::diagnostics::control(format_args!("{message}"));
                     exit(2);
                 }
-                // Set env so the cargo form (wrapper -> runner subprocess) uses the same knob.
-                // We are still in the single-threaded startup phase (rustc session has not begun).
-                unsafe { std::env::set_var("MIRVM_STACK_SIZE", v) };
+                // Export so the Cargo form (wrapper -> runner subprocess) sees the same value; the
+                // command line outranks the environment, so record the source as well.
+                crate::options::note_cli("stack_size");
+                crate::options::export_to_process("stack_size", &v);
             }
             "--jit" => {
                 let v = next("--jit");
@@ -348,20 +351,22 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
                     ));
                     exit(2);
                 }
-                // Same as --stack-size: set env so the cargo form takes effect via runner
-                unsafe { std::env::set_var("MIRVM_JIT", v) };
+                // Same as --stack-size: export so the Cargo form takes effect through the runner.
+                crate::options::note_cli("jit");
+                crate::options::export_to_process("jit", &v);
             }
             _ if input.is_none() && !arg.starts_with('-') => input = Some(arg),
             _ => {
                 crate::diagnostics::control(format_args!(
-                    "mirvm: unknown argument `{arg}`\n{USAGE}"
+                    "mirvm: unknown argument `{arg}`\n{}",
+                    crate::cli::usage()
                 ));
                 exit(2);
             }
         }
     }
     let Some(input) = input else {
-        crate::diagnostics::control_raw(format_args!("{USAGE}"));
+        crate::diagnostics::control_raw(format_args!("{}", usage()));
         exit(2);
     };
     let input_path = PathBuf::from(&input);
@@ -369,13 +374,11 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     // Default = self zero-cargo own scheduling (cargoless::driver); =cargo uses the long-term
     // cargo three-phase compat track (user fallback + behavioral differential); any other value
     // is rejected loudly
-    let deps_self = match std::env::var("MIRVM_DEPS").as_deref() {
-        Err(_) | Ok("self") => true,
-        Ok("cargo") => false,
-        Ok(other) => {
-            crate::diagnostics::control(format_args!(
-                "mirvm: MIRVM_DEPS only accepts `cargo` or `self` (got `{other}`)"
-            ));
+    let deps_self = match crate::options::get().deps() {
+        Ok(crate::options::DepsTrack::Own) => true,
+        Ok(crate::options::DepsTrack::Cargo) => false,
+        Err(message) => {
+            crate::diagnostics::control(format_args!("{message}"));
             exit(2);
         }
     };
@@ -460,7 +463,12 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
 
     // Form 3: plain single file, zero-cargo fast path
     let sysroot = sysroot
-        .or_else(|| std::env::var("MIRVM_SYSROOT").ok())
+        .or_else(|| {
+            crate::options::get()
+                .sysroot
+                .as_deref()
+                .map(|path| path.display().to_string())
+        })
         .unwrap_or_else(|| match crate::sysroot::ensure_sysroot() {
             Ok(p) => p.display().to_string(),
             Err(e) => {
