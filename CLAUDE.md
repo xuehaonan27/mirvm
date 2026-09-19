@@ -94,7 +94,10 @@ implementation rather than after mistakes.
 
 ## Configuration and Conventions
 
-[TBD].
+- Use Rust 2024, existing style, and tracing initialized only in binaries:
+  `info` for lifecycle, `debug` for internals, `warn` for recoverable issues,
+  `error` for unrecoverable failures. Update schemas/config/docs with contract changes.
+- Use Conventional Commit prefixes (`feat:`, `fix:`, `refactor:`, `ci:`, `chore:`).
 
 ## Code Map
 
