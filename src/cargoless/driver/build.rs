@@ -113,17 +113,12 @@ pub fn compile_plan(
 /// (fallback to 1 if unavailable). **=1 dispatch order matches the serial topo order bit-for-bit — differential debugging anchor,
 /// pinned**. Illegal values (non-positive integers) are loudly rejected and exit.
 fn cless_jobs() -> usize {
-    match std::env::var("MIRVM_CLESS_JOBS") {
-        Ok(raw) => match raw.parse::<usize>() {
-            Ok(n) if n >= 1 => n,
-            _ => {
-                eprintln!("mirvm: MIRVM_CLESS_JOBS={raw} invalid (must be a positive integer)");
-                std::process::exit(1);
-            }
-        },
-        Err(_) => std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1),
+    match crate::options::get().cless_jobs() {
+        Ok(jobs) => jobs,
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -510,7 +505,7 @@ fn rerun_gate(
         dep_links_reran,
         &env_get,
     );
-    if std::env::var_os("MIRVM_DEBUG_BLDRS").is_some() {
+    if crate::options::get().debug_bldrs {
         eprintln!("bldrs {} {pkg} {why}", if rerun { "run" } else { "skip" });
     }
     if !rerun {

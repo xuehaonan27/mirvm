@@ -129,7 +129,7 @@ pub fn current_rust_version() -> Result<semver::Version, String> {
     if let Some(version) = VERSION.get() {
         return Ok(version.clone());
     }
-    let rustc = PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT")).join("bin/rustc");
+    let rustc = PathBuf::from(crate::options::build::DEFAULT_SYSROOT).join("bin/rustc");
     let command = std::process::Command::new(&rustc);
     let mut version = rustc_version::VersionMeta::for_command(command)
         .map_err(|error| format!("failed to read version of {}: {error}", rustc.display()))?

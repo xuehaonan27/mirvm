@@ -56,8 +56,8 @@ pub(super) fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
     // Pack session (mirvm pack passes the output path via MIRVM_PACK through phase_cargo): force
     // the full cold route so the package stays self-contained -- empty image stack plus L2/
     // deps-image bypass. mirvm pack sets both via MIRVM_NO_BASE_IMAGE and MIRVM_NO_DEPS_IMAGE.
-    if let Ok(out) = std::env::var("MIRVM_PACK") {
-        return pack_driver(rustc_args, program_argv, std::path::PathBuf::from(out));
+    if let Some(out) = crate::options::protocol::pack() {
+        return pack_driver(rustc_args, program_argv, out);
     }
     run_driver(
         rustc_args,
@@ -77,26 +77,27 @@ pub(crate) struct GuestProcessState {
 
 impl GuestProcessState {
     fn from_cargo_runner() -> Self {
-        let cwd = std::env::var_os("MIRVM_GUEST_CWD").map(std::path::PathBuf::from);
-        let caller_sysroot = std::env::var_os("MIRVM_CALLER_SYSROOT");
-        let caller_had_sysroot =
-            std::env::var_os("MIRVM_CALLER_SYSROOT_PRESENT").is_some_and(|value| value == "1");
+        let cwd = crate::options::protocol::guest_cwd();
+        let caller_sysroot = crate::options::protocol::caller_sysroot();
+        let caller_had_sysroot = crate::options::protocol::caller_sysroot_present();
         let mut env: std::collections::BTreeMap<_, _> = std::env::vars_os().collect();
         for key in [
-            "MIRVM_CARGO_SESSION",
-            "MIRVM_GUEST_CWD",
-            "MIRVM_CALLER_SYSROOT",
-            "MIRVM_CALLER_SYSROOT_PRESENT",
+            crate::options::protocol::CARGO_SESSION,
+            crate::options::protocol::GUEST_CWD,
+            crate::options::protocol::CALLER_SYSROOT,
+            crate::options::protocol::CALLER_SYSROOT_PRESENT,
             "RUSTC_WRAPPER",
         ] {
             env.remove(std::ffi::OsStr::new(key));
         }
         if caller_had_sysroot {
             if let Some(value) = caller_sysroot {
-                env.insert("MIRVM_SYSROOT".into(), value);
+                env.insert(crate::options::env_var_name("sysroot").into(), value);
             }
         } else {
-            env.remove(std::ffi::OsStr::new("MIRVM_SYSROOT"));
+            env.remove(std::ffi::OsStr::new(crate::options::env_var_name(
+                "sysroot",
+            )));
         }
         Self {
             cwd,

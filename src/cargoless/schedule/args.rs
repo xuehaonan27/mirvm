@@ -27,14 +27,14 @@ fn push_profile_flags(a: &mut Vec<String>, p: &ProfileFlags) {
 /// rustc on PATH may belong to another toolchain, and the proc-macro dylib's compiler version
 /// must match the interpreter session's exactly (same discipline as cargo_shim's wrapper).
 fn real_rustc() -> String {
-    PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT"))
+    PathBuf::from(crate::options::build::DEFAULT_SYSROOT)
         .join("bin/rustc")
         .display()
         .to_string()
 }
 
 fn real_rustdoc() -> String {
-    PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT"))
+    PathBuf::from(crate::options::build::DEFAULT_SYSROOT)
         .join("bin/rustdoc")
         .display()
         .to_string()

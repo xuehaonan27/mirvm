@@ -64,7 +64,7 @@ struct DepsFileRef<'a> {
 /// Whether the deps-image cache is bypassed. The cache is on by default and the only knob is
 /// `MIRVM_NO_DEPS_IMAGE=1` (diagnostics / two-state cross-check).
 pub fn bypassed() -> bool {
-    std::env::var_os("MIRVM_NO_DEPS_IMAGE").is_some_and(|v| !v.is_empty())
+    crate::options::get().no_deps_image
 }
 
 fn deps_dir() -> PathBuf {
@@ -114,7 +114,7 @@ pub fn pre_key(rustc_args: &[String], base_key: &str) -> Option<(String, ExternS
         return None;
     }
     let stamps = stamp_externs(&paths)?;
-    let mut key = String::from(env!("MIRVM_BUILD_ID"));
+    let mut key = String::from(crate::options::build::BUILD_ID);
     key.push('\u{1f}');
     key.push_str(base_key);
     for (p, size, mt, digest) in &stamps {
@@ -128,7 +128,7 @@ pub fn pre_key(rustc_args: &[String], base_key: &str) -> Option<(String, ExternS
         key.push_str(&crate::utils::content::digest_hex(digest));
     }
     let h = crate::lower::asm::fnv1a(key.as_bytes());
-    if std::env::var_os("MIRVM_A2_DEBUG").is_some() {
+    if crate::options::get().a2_debug {
         eprintln!("[a2-debug] pre-key={h:016x} externs={paths:?}");
     }
     Some((format!("{h:016x}"), stamps))
@@ -152,7 +152,7 @@ pub fn try_load(
     f.module.rebuild_load_map();
     f.module.rebuild_fn_addrs();
     // Exact-equality validation: build id, base key, stamp list (collision immune), layered lowering fingerprint
-    if f.build_id != env!("MIRVM_BUILD_ID")
+    if f.build_id != crate::options::build::BUILD_ID
         || f.base_key != base.key
         || f.extern_stamps != stamps
         || f.lowering_fp != base.lowering_fp
@@ -237,7 +237,7 @@ pub fn store_and_wrap(
             .collect::<Vec<_>>();
         tls_syms.sort_unstable();
         let file = DepsFileRef {
-            build_id: env!("MIRVM_BUILD_ID"),
+            build_id: crate::options::build::BUILD_ID,
             base_key,
             lowering_fp: fp,
             extern_stamps: &stamps,

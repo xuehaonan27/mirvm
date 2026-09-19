@@ -240,7 +240,7 @@ pub fn build_script_env(ctx: &ExecCtx) -> BTreeMap<String, String> {
     for f in ctx.features {
         env.insert(format!("CARGO_FEATURE_{}", envify(f)), "1".to_string());
     }
-    let sysroot = PathBuf::from(env!("MIRVM_DEFAULT_SYSROOT"));
+    let sysroot = PathBuf::from(crate::options::build::DEFAULT_SYSROOT);
     let mut put = |k: &str, v: String| {
         env.insert(k.to_string(), v);
     };
@@ -253,8 +253,8 @@ pub fn build_script_env(ctx: &ExecCtx) -> BTreeMap<String, String> {
     if let Some(links) = ctx.links {
         put("CARGO_MANIFEST_LINKS", links.to_string());
     }
-    put("HOST", env!("MIRVM_HOST").to_string());
-    put("TARGET", env!("MIRVM_HOST").to_string());
+    put("HOST", crate::options::build::HOST.to_string());
+    put("TARGET", crate::options::build::HOST.to_string());
     // Cargo's built-in dev and test profiles both expose PROFILE as "debug"; the actual
     // differences are carried by OPT_LEVEL/DEBUG and friends.
     put("PROFILE", "debug".into());
@@ -292,7 +292,7 @@ pub fn build_script_env(ctx: &ExecCtx) -> BTreeMap<String, String> {
         .collect();
     ld.push(
         sysroot
-            .join(format!("lib/rustlib/{}/lib", env!("MIRVM_HOST")))
+            .join(format!("lib/rustlib/{}/lib", crate::options::build::HOST))
             .display()
             .to_string(),
     );

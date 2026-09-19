@@ -182,7 +182,7 @@ fn ensure_registry_node(
         table,
         deps,
     );
-    if std::env::var_os("MIRVM_DEBUG_UNIFY").is_some() {
+    if crate::options::get().debug_unify {
         eprintln!("DBG-UNIFY register {name} {class:?} v{version}");
     }
     Ok(())
@@ -314,7 +314,7 @@ pub(super) fn unify_features(
                 changed = true;
             }
             // Edge propagation
-            if std::env::var_os("MIRVM_DEBUG_UNIFY").is_some() {
+            if crate::options::get().debug_unify {
                 eprintln!(
                     "DBG-UNIFY expand {}@{} {:?} features={:?} activated={:?} deps={:?}",
                     key.0,

@@ -138,7 +138,10 @@ fn offline_mode_refuses_http_loudly() {
     let err = reg
         .index_entry(CRATES_IO_LOCK_SOURCE, "no-such-crate-mirvm-test")
         .unwrap_err();
-    assert!(err.contains("MIRVM_OFFLINE"), "{err}");
+    assert!(
+        err.contains(crate::options::env_var_name("offline")),
+        "{err}"
+    );
     let err = reg
         .ensure_source(
             CRATES_IO_LOCK_SOURCE,
@@ -147,6 +150,9 @@ fn offline_mode_refuses_http_loudly() {
             None,
         )
         .unwrap_err();
-    assert!(err.contains("MIRVM_OFFLINE"), "{err}");
+    assert!(
+        err.contains(crate::options::env_var_name("offline")),
+        "{err}"
+    );
     std::fs::remove_dir_all(&d).unwrap();
 }

@@ -70,7 +70,7 @@ pub fn stop(shared: &Shared) {
 }
 
 fn worker(shared: std::sync::Arc<Shared>, rx: Receiver<u32>, domain: CodeDomain) {
-    let dbg = std::env::var_os("MIRVM_JIT_DEBUG").is_some();
+    let dbg = crate::options::get().jit_debug;
     let mut c = Compiler::with_domain(&shared, domain);
     while let Ok(func) = rx.recv() {
         if shared.jit.stopping.load(Ordering::Acquire) {
@@ -547,7 +547,7 @@ impl<'a> Compiler<'a> {
             b.finalize();
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
-            if std::env::var_os("MIRVM_JIT_DEBUG").is_some() {
+            if crate::options::get().jit_debug {
                 eprintln!("mirvm-jit-debug: trace boundary define failed: {e:#?}");
             }
             return None;
@@ -591,7 +591,7 @@ impl<'a> Compiler<'a> {
         if !admit(self.shared, body) {
             // Staying interpreted is the intended outcome for a non-admitted function,
             // not a failure; strict mode only records the set. Gated by MIRVM_JIT_DEBUG.
-            if jit.sync && std::env::var_os("MIRVM_JIT_DEBUG").is_some() {
+            if jit.sync && crate::options::get().jit_debug {
                 eprintln!(
                     "mirvm-jit-strict: f{func} not admitted ({})",
                     self.shared.module.funcs[func as usize].name
@@ -713,7 +713,7 @@ impl<'a> Compiler<'a> {
             b.finalize();
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
-            if std::env::var_os("MIRVM_JIT_DEBUG").is_some() {
+            if crate::options::get().jit_debug {
                 eprintln!("mirvm-jit-debug: guarded entry define failed: {e:#?}");
             }
             return None;
@@ -808,7 +808,7 @@ impl<'a> Compiler<'a> {
             b.finalize();
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
-            if std::env::var_os("MIRVM_JIT_DEBUG").is_some() {
+            if crate::options::get().jit_debug {
                 eprintln!("mirvm-jit-debug: define_function failed: {e:#?}");
             }
             return None;
@@ -920,10 +920,10 @@ impl<'a> Compiler<'a> {
             b.finalize();
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
-            if std::env::var_os("MIRVM_JIT_DEBUG").is_some() {
+            if crate::options::get().jit_debug {
                 eprintln!("mirvm-jit-debug: define_function failed: {e:#?}");
             }
-            if std::env::var_os("MIRVM_JIT_DEBUG_DUMP").is_some() {
+            if crate::options::get().jit_debug_dump {
                 eprintln!(
                     "mirvm-jit-debug: CLIF dump of failed function f{func}:\n{}",
                     cctx.func.display()
@@ -1010,7 +1010,7 @@ impl<'a> Compiler<'a> {
             b.finalize();
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
-            if std::env::var_os("MIRVM_JIT_DEBUG").is_some() {
+            if crate::options::get().jit_debug {
                 eprintln!("mirvm-jit-debug: define_function failed: {e:#?}");
             }
             return None;

@@ -758,7 +758,7 @@ fn solve_fresh_pass(
     // along edges whose parent version is exactly the selected version are kept; orphans
     // enter neither version_map nor lock nor edge_versions.
     let edge_assign = provider.edge_assign.borrow();
-    if std::env::var_os("MIRVM_DEBUG_UNIFY").is_some() {
+    if crate::options::get().debug_unify {
         for ((pn, pver, key, _dis, class), (pkg, bucket)) in edge_assign.iter() {
             if pkg.starts_with("yoke") {
                 eprintln!("DBG-ASSIGN ({pn}@{pver}, {key}, {class:?}) -> {pkg}#{bucket}");

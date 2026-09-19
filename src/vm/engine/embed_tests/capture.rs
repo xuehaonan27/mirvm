@@ -220,7 +220,7 @@ fn capture_session_records_automatic_host_syscall_rewrite() {
         .env(CHILD_ENV, &output)
         // The child must count helper entries: the assertion that the trace
         // domain reached its pinned syscall site reads that counter.
-        .env("MIRVM_JIT_STATS", "1")
+        .env(crate::options::env_var_name("jit_stats"), "1")
         .spawn()
         .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

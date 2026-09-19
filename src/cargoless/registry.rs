@@ -1,6 +1,6 @@
 //! `cargoless/registry.rs` — Cargo registry and source replacement access layer.
 //!
-//! Own store layout (root = `~/.mirvm/registry`, `MIRVM_REGISTRY_DIR` overrides):
+//! Own store layout (root = `$MIRVM_HOME/registry`; `MIRVM_HOME` is the only relocation knob):
 //! ```text
 //! index/<reg-key>/<sparse path>     # sparse index cache (JSON line files)
 //! cache/<reg-key>/<name>-<version>.crate
@@ -114,7 +114,7 @@ impl Registry {
         let current = std::env::current_dir().map_err(|error| error.to_string())?;
         Self::open_for_at(
             crate::sysroot::cache_dir().join("registry"),
-            std::env::var_os("MIRVM_OFFLINE").is_some(),
+            crate::options::get().offline(),
             &current,
         )
     }
@@ -122,7 +122,7 @@ impl Registry {
     pub fn open_for(project: &Path) -> Result<Self, RErr> {
         Self::open_for_at(
             crate::sysroot::cache_dir().join("registry"),
-            std::env::var_os("MIRVM_OFFLINE").is_some(),
+            crate::options::get().offline(),
             project,
         )
     }
@@ -326,9 +326,9 @@ impl Registry {
                         .map_err(|e| format!("index cache read failed {}: {e}", file.display()))?
                 } else {
                     if self.offline {
-                        return Err(format!(
-                            "MIRVM_OFFLINE: {source} index has no local cache for {name}"
-                        ));
+                        return Err(crate::options::offline_error(format!(
+                            "{source} index has no local cache for {name}"
+                        )));
                     }
                     let url = format!(
                         "{}{}",
@@ -423,9 +423,9 @@ impl Registry {
             if found.is_empty() {
                 // ⑤ HTTP
                 if self.offline {
-                    return Err(format!(
-                        "MIRVM_OFFLINE: {dir_name} has no local cache (neither own nor read-through)",
-                    ));
+                    return Err(crate::options::offline_error(format!(
+                        "{dir_name} has no local cache (neither own nor read-through)"
+                    )));
                 }
                 let bytes = match &endpoint.backend {
                     Backend::LocalRegistry { path } => {
@@ -475,10 +475,10 @@ impl Registry {
                         .map_err(|e| format!("registry config read failed: {e}"))?
                 } else {
                     if self.offline {
-                        return Err(format!(
-                            "MIRVM_OFFLINE: registry {} missing config.json cache,",
+                        return Err(crate::options::offline_error(format!(
+                            "registry {} missing config.json cache,",
                             endpoint.index_url
-                        ));
+                        )));
                     }
                     let text = self.http_text(&url, endpoint_token(endpoint, &self.config)?)?;
                     write_cache(&cache, text.as_bytes(), "registry config")?;
@@ -708,9 +708,9 @@ fn ensure_git_index(checkout: &Path, url: &str, offline: bool) -> Result<(), Str
         return Ok(());
     }
     if offline {
-        return Err(format!(
-            "MIRVM_OFFLINE: registry Git index {url} has no local cache"
-        ));
+        return Err(crate::options::offline_error(format!(
+            "registry Git index {url} has no local cache"
+        )));
     }
     if let Some(parent) = checkout.parent() {
         std::fs::create_dir_all(parent)

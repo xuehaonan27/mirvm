@@ -23,7 +23,7 @@ fn replace_whole_hash(raw: &mut Vec<u8>) {
 }
 
 fn header_with_count(count: u32) -> Vec<u8> {
-    let bid = env!("MIRVM_BUILD_ID").as_bytes();
+    let bid = crate::options::build::BUILD_ID.as_bytes();
     let mut body = Vec::new();
     body.extend_from_slice(MAGIC);
     body.extend_from_slice(&FMT_VER.to_le_bytes());
@@ -35,7 +35,7 @@ fn header_with_count(count: u32) -> Vec<u8> {
 }
 
 fn table_start() -> usize {
-    MAGIC.len() + 4 + 4 + env!("MIRVM_BUILD_ID").len() + 4
+    MAGIC.len() + 4 + 4 + crate::options::build::BUILD_ID.len() + 4
 }
 
 fn package_bytes_for_module(module: &crate::vm::engine::ir::Module) -> Vec<u8> {

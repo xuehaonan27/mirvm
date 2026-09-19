@@ -47,11 +47,11 @@ struct Header {
 }
 
 fn disabled() -> bool {
-    std::env::var_os("MIRVM_NO_IR_CACHE").is_some_and(|v| !v.is_empty())
+    crate::options::get().no_ir_cache
 }
 
 fn entry_path(rustc_args: &[String]) -> PathBuf {
-    let mut key = String::from(env!("MIRVM_BUILD_ID"));
+    let mut key = String::from(crate::options::build::BUILD_ID);
     for a in rustc_args {
         key.push('\u{1f}');
         key.push_str(a);
@@ -77,7 +77,7 @@ fn stamp(path: &str) -> Option<FileStamp> {
 /// base replacement or presence change makes a mismatched load globally wrong; None side must also
 /// match exactly, a no-base session must not consume a base delta).
 fn header_matches(header: &Header, rustc_args: &[String], base_key: Option<&str>) -> bool {
-    header.build_id == env!("MIRVM_BUILD_ID")
+    header.build_id == crate::options::build::BUILD_ID
         && header.args == rustc_args
         && header.base_key.as_deref() == base_key
 }
@@ -236,7 +236,7 @@ pub fn store(
     };
 
     let header = Header {
-        build_id: env!("MIRVM_BUILD_ID").to_string(),
+        build_id: crate::options::build::BUILD_ID.to_string(),
         args: rustc_args.to_vec(),
         files: stamps,
         envs,
@@ -366,7 +366,7 @@ mod tests {
     fn base_key_must_match_exactly_including_absence() {
         let args = vec!["mirvm".to_string(), "x.rs".to_string()];
         let mk = |base_key: Option<&str>| super::Header {
-            build_id: env!("MIRVM_BUILD_ID").to_string(),
+            build_id: crate::options::build::BUILD_ID.to_string(),
             args: args.clone(),
             files: Vec::new(),
             envs: Vec::new(),

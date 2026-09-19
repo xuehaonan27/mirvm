@@ -41,7 +41,7 @@ struct Family {
 }
 
 fn families() -> Vec<Family> {
-    let host = env!("MIRVM_HOST");
+    let host = crate::options::build::HOST;
     [
         (format!("sysroot-{host}"), ""),
         ("scripts".into(), ""),
@@ -149,7 +149,7 @@ fn classify(path: &Path) -> Staleness {
         return Staleness::Garbage;
     }
     match file_build_id(path) {
-        Some(id) if id == env!("MIRVM_BUILD_ID") => Staleness::Current,
+        Some(id) if id == crate::options::build::BUILD_ID => Staleness::Current,
         Some(_) => Staleness::Stale,
         None => Staleness::Garbage,
     }
@@ -196,7 +196,7 @@ pub fn status(root: &Path) -> String {
     let mut out = format!(
         "mirvm local cache {} (build {})\n",
         root.display(),
-        env!("MIRVM_BUILD_ID")
+        crate::options::build::BUILD_ID
     );
     let (mut total, mut total_stale) = (0u64, 0u64);
     let mut known = Vec::new();
@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn classify_covers_current_stale_and_garbage() {
         let root = temp_root("classify");
-        let cur = fake_entry(&root, "cur.bin", env!("MIRVM_BUILD_ID"));
+        let cur = fake_entry(&root, "cur.bin", crate::options::build::BUILD_ID);
         let old = fake_entry(&root, "old.bin", "0000000000000000");
         let tmp = root.join(".cur.bin.tmp-123");
         std::fs::write(&tmp, b"orphan").unwrap();
@@ -399,7 +399,7 @@ mod tests {
     fn purge_stale_keeps_current_and_dry_run_touches_nothing() {
         let root = temp_root("purge");
         let deps = root.join("deps");
-        let cur = fake_entry(&deps, "cur.img", env!("MIRVM_BUILD_ID"));
+        let cur = fake_entry(&deps, "cur.img", crate::options::build::BUILD_ID);
         let old = fake_entry(&deps, "old.img", "0000000000000000");
         // non-entry files (build byproducts) do not enter classification, are left untouched and unreported
         let log = deps.join("build.log");
@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn purge_all_leaves_sysroot_unless_flagged() {
         let root = temp_root("purge-all");
-        let sysroot = root.join(format!("sysroot-{}", env!("MIRVM_HOST")));
+        let sysroot = root.join(format!("sysroot-{}", crate::options::build::HOST));
         std::fs::create_dir_all(sysroot.join("lib")).unwrap();
         std::fs::write(sysroot.join("lib/x.rlib"), b"x").unwrap();
         fake_entry(&root.join("ir"), "a.bin", "0000000000000000");

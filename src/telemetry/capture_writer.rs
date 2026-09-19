@@ -388,7 +388,7 @@ pub(super) fn write_file_header(
     let mut session_id = [0_u8; 16];
     session_id[..8].copy_from_slice(&(pid as u64).to_le_bytes());
     session_id[8..].copy_from_slice(&sequence.to_le_bytes());
-    let build_id = u64::from_str_radix(env!("MIRVM_BUILD_ID"), 16)
+    let build_id = u64::from_str_radix(crate::options::build::BUILD_ID, 16)
         .map_err(|error| io::Error::other(format!("invalid MIRVM_BUILD_ID: {error}")))?;
     let bytes = FileHeader {
         pointer_width: std::mem::size_of::<usize>() as u8,

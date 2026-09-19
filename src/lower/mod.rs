@@ -529,8 +529,8 @@ fn lower_inner(
     // Delta-module bodies are stored by local ordinal; after the base and delta vectors are
     // concatenated during absorb, position `delta_first_fn + ordinal` is the absolute FuncId.
     let first = linker.delta_first_fn;
-    let mut purity = std::env::var_os("MIRVM_PURITY_STATS")
-        .is_some_and(|v| !v.is_empty())
+    let mut purity = crate::options::get()
+        .purity_stats
         .then(PurityStats::default);
     if linker.split.is_some() {
         // Split mode: drain both queues alternately until neither produces work. Image-class bodies

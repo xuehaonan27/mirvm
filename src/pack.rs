@@ -324,7 +324,7 @@ fn parse_function_section(
 }
 
 fn build_container(sections: &[(u32, Vec<u8>)]) -> Result<Vec<u8>, String> {
-    let bid = env!("MIRVM_BUILD_ID").as_bytes();
+    let bid = crate::options::build::BUILD_ID.as_bytes();
     let bid_len = u32::try_from(bid.len()).map_err(|_| "package build_id too long")?;
     let section_count =
         u32::try_from(sections.len()).map_err(|_| "too many sections in package")?;
@@ -448,7 +448,7 @@ fn parse_container(raw: &[u8]) -> Result<ParsedPackage<'_>, String> {
         .map_err(|_| "package build_id length does not fit this host")?;
     let bid = std::str::from_utf8(cur.take(bid_len, "build_id")?)
         .map_err(|e| format!("invalid package build_id: {e}"))?;
-    if bid != env!("MIRVM_BUILD_ID") {
+    if bid != crate::options::build::BUILD_ID {
         return Err("package build_id mismatch with current mirvm".into());
     }
 
@@ -594,7 +594,7 @@ pub(crate) fn write_package(
     // method and no longer breaks the package's self-containment.
     let ga_dir = crate::sysroot::cache_dir().join("global-asm");
     let ga_prefix = ga_dir.display().to_string();
-    let no_mc = std::env::var_os("MIRVM_PACK_NO_MC").is_some();
+    let no_mc = crate::options::get().pack_no_mc;
     let mut libs = Vec::new();
     let mut mc_entries = Vec::new();
     for p in &module.required_native_libs {
