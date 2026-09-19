@@ -45,7 +45,12 @@ pub use engine::{Engine, EngineClosed, EngineState, Shared, WaitClosedError};
 pub(crate) use engine::{PHASE_CLOSING, PHASE_FINALIZING};
 pub(crate) use signals::drain_current_thread_signal_deliveries_after_fault;
 pub(crate) use signals::{drain_pending_signals, raise_signal};
-pub use thread_ctx::{Ctx, ShadowFrame, attach};
+/// Attaches the current host thread and returns its `Ctx` -- the boundary every entry point
+/// goes through. Live product code reaches it inside `interp::run_export`, so the callers
+/// visible from here are the TSan harness cases (`tsan/src/cases`), which compile this tree.
+#[allow(unused_imports)]
+pub(crate) use thread_ctx::attach;
+pub use thread_ctx::{Ctx, ShadowFrame};
 pub(crate) use thread_ctx::{
     EngineFaultToken, begin_engine_fault, current_code_domain, finish_engine_fault,
 };

@@ -3056,6 +3056,60 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   那份另注用例已转入 harness）；`designs/m5.4-design.md` 指向 `src/vm/spikes/spike5.rs` 的那处
   改为指向留档。
 
+### 7.66 2026-09-19：TSan harness 整治——从"躺着的 crate"到 10 个并发用例
+
+- **触发**：一次"`tsan/` 是干什么的、还有必要留着吗"的盘点。结论是**留着**，但理由必须说清：
+  ①它是全仓**唯一**能看见数据竞争的检查（其他门都在比 stdout/stderr/exit，对竞争结构上是瞎的），
+  而"无 GIL、1:1 真线程、引擎 Sync"正是这套架构的核心主张；②它是**唯一**强制 `src/vm` 零
+  `rustc_private` 的东西（`cargo check --all-features` 永远拦不住，根 crate 本来就有
+  rustc_private）。同时确认它**自 2026-07 起没有再长过**：跑的是 spike 时代的四条原型用例 +
+  一个 139 行的 `tsan_mt`（只做原子自增与 thunk 缓存互斥）+ 一次 capture 会话，而引擎在
+  2026-08/09 新增了几个真并发面（guest 线程与 TLS、信号 inbox 与延迟 finalizer、执行租约与
+  close、fork 守卫）。**留与补**：不删，整治成正经 crate 并把负载补到今天的并发面。
+- **结构整治**：`src/cases/` 一件一模块，`cases/mod.rs` 是注册表（id + 函数指针，`run_all(Some(id))`
+  只跑一个 case）；`src/vm/engine/tsan_mt.rs` 从**产品树**搬进 harness（它本来就是 harness-only，
+  却编进产品二进制，且要为它维护一条产品侧 re-export）；`spike4/` 正名为 `cases/mixed_stack/`；
+  每个 case 统一打印一行 `PASS <id> ...` / `FAIL <id> ...`；新增 `tsan/README.md`（作用、用例表、
+  明确不覆盖什么、怎么加用例）；crate 编译 **0 warning**（此前 33 条：28 条
+  `unexpected cfg cranelift` 与 5 条产品侧 re-export 未用，均已定位并注明）。
+- **补的四个用例**（都用手搭 Module + 真线程，harness 不能 lowering）：
+  | id | 钉住 |
+  |---|---|
+  | `engine-close-race` | `close()` 与 8 个正在 `run_export` 的线程竞速：每个结果是值或结构化 `EngineClosed`，封盘后一切入口被拒，引擎离开注册表；另两个 deferred 窗口（`DeferredHold`、在飞的 TSD 操作）跨 close 存活 |
+  | `guest-threads` | 6 轮 × 8 线程 attach/解释/retire，叠加被追踪的 `pthread_setspecific` set/clear（走 deferred TSD 注册表）；join 后线程计数回到基线 |
+  | `signal-delivery` | 跨线程 `pthread_kill` 进每线程 inbox：每次 raise 恰好跑一次 handler 且落在属主 pthread，邻居 inbox 保持空；blocked 的 raise 在解除阻塞前保持 pending |
+  | `fork-guard` | 有 guest 线程在场时 `fork()`：子代代际只前进一次、fork 基线被修到子代、记录性 syscall 返回子代 pid，父进程引擎随后仍能解释 |
+- **套件契约**：`tests/suites/runtime/tsan.sh` 现在持有 10 个 id 的期望表，**每个 id 必须打出
+  `PASS` 行**；少了或改名了就判失败——不再出现"用例悄悄不跑了但门照绿"。
+- **闭合证据**：`runtime.tsan` **10/10 PASS、零 `WARNING: ThreadSanitizer`**（容器上实跑）。
+  **反向对照五次**（每个新用例一次 + 门本身一次，全部实做后还原）：关掉封盘拒绝 → `FAIL
+  engine-close-race ... seal=false`；多留一个活线程跨基线检查 → `FAIL guest-threads ...
+  spawned_after_joins=true`；去掉属主第一次 safe-point drain → `FAIL signal-delivery ...`；
+  去掉 `fork_child_guard` → `FAIL fork-guard ... code=3`；把 harness 过滤到单 case → 套件的
+  id 表报 9 个 `missing`。用例与门都有区分力。
+- **顺带修掉一个既有红门**：`runtime.semantics` 的**纯度门从来没通过**——它的 harness 编译
+  没给 `MIRVM_BUILD_ID`，而 `src/telemetry/capture.rs` 早在基线 `c8ed1ae` 就用 `env!` 读它
+  （产品侧由 `build.rs` 提供，harness 没有 build.rs）。此前 `runtime.semantics` 的"2 failed"
+  里有一个就是它，只是被埋在分段输出里没被注意到。修法 = 与 `tsan.sh` 同值
+  `MIRVM_BUILD_ID=0000000000000000`。修后该套件 **3 passed / 1 failed**，唯一失败是
+  `c_rayon` 120s 超时（与本次无关的既有项）。
+- **如实记录的边界（三条，都是实测不是推测）**：
+  1. **JIT 不在网内**：`tsan/Cargo.toml` 不带 cranelift，`src/vm/engine/jit/**` 被
+     `feature = "cranelift"` 整个 cfg 掉，所以 JIT worker 的槽/`trace_enter` 发布与
+     trace 域钉寄存器路径**没有仪器化**。要覆盖需给该 crate 加 cranelift 依赖 + 同名 feature，
+     构建变慢，单独决定（记入 open-issues）。
+  2. **TSD teardown 轮次在 sanitizer 下不可达**：`ctx` 在 `cfg(sanitize = "thread")` 下把 `Ctx`
+     的 pthread-key 析构器设为 `None`，`ctx_key_dtor` 的再挂轮次永不进入；用例改为
+     attach/run/retire churn + 并发 TSD 注册表。轮次本身由非 sanitizer 的 `threads_panic` 覆盖。
+  3. **fork 子代的 capture 重建在 TSan 下结构上不可测**：TSan 拒绝"多线程 fork 后新建线程"
+     （`ThreadSanitizer: starting new threads after multi-threaded fork is not supported. Dying`，
+     实测 exit 66，`clang -fsanitize=thread` 探针与 harness 内各复现一次）。引擎在 fork 子代里
+     唯一会建线程的地方就是 `rebuild_session_from_recipe` 起 capture writer，因此 `fork-guard`
+     刻意不 arm 会话、并在 `fork_child_guard` 置位前停下；其余子代行为（代际、服务线程重置、
+     基线修复）都断言。**没有伪造这条通过。**
+- **仍未做**：JIT 入网；`sync.sh` 用 rename 传播（本轮已顺手修：`git mv` 在这之前不会删掉容器上
+  的旧文件，导致 `src/vm/engine/tsan_mt.rs` 残留过一次）。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT

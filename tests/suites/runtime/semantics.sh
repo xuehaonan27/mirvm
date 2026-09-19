@@ -49,7 +49,11 @@ run_pure() {
     [ "$pfail" -eq 0 ] || return 1
 
     echo "--- purity gate (standalone harness compile) ---"
-    if cargo +"$TOOLCHAIN" build --manifest-path tsan/Cargo.toml --release --locked \
+    # The harness has no build.rs, so the compile-time build id the shared capture module
+    # reads with `env!` must be supplied here (the product gets it from build.rs; the TSan
+    # execution gate uses the same zero value).
+    if MIRVM_BUILD_ID=0000000000000000 \
+        cargo +"$TOOLCHAIN" build --manifest-path tsan/Cargo.toml --release --locked \
         >"$TMP/purity.out" 2>&1; then
         echo "purity gate PASS (vm/ zero rustc_private)"
     else
@@ -281,7 +285,7 @@ run_threads() {
     # ⑥ TSan multi-thread cases (8 threads share Shared / per-thread Ctx / thunk factory concurrently; engine Sync)
     if [ -z "${SKIP_TSAN:-}" ]; then
         if bash tests/suites/runtime/tsan.sh >"$TMP/tsan.out" 2>&1; then
-            tok "TSan (includes tsan_mt multi-thread real body, zero warnings)"
+            tok "TSan (all concurrency cases PASS, zero warnings)"
         else
             tbad "TSan"
             tail -10 "$TMP/tsan.out"
