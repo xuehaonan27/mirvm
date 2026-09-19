@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use super::engine::Shared;
 use super::signals::start_pending_signal_finalizers;
-use super::thread_ctx::{CTX_KEY, Ctx, THREAD_CONTEXT_EXITING, ThreadContexts, ctx_key_dtor};
+use super::thread_ctx::{CTX_KEY, Ctx, THREAD_CONTEXT_EXITING, ThreadContexts};
 
 pub struct ActivationGuard {
     pub(super) contexts: *mut ThreadContexts,
@@ -83,7 +83,8 @@ pub fn activate(shared: &Arc<Shared>) -> ActivationGuard {
         #[cfg(sanitize = "thread")]
         let dtor: Option<unsafe extern "C" fn(*mut std::ffi::c_void)> = None;
         #[cfg(not(sanitize = "thread"))]
-        let dtor = Some(ctx_key_dtor as unsafe extern "C" fn(*mut std::ffi::c_void));
+        let dtor =
+            Some(super::thread_ctx::ctx_key_dtor as unsafe extern "C" fn(*mut std::ffi::c_void));
         crate::os::thread::tls_key_create(dtor)
     });
     unsafe {

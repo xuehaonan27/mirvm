@@ -30,8 +30,8 @@ mod thread_ctx;
 #[cfg(test)]
 mod tests;
 
-// Re-exports keep every pre-split path and its visibility: `pub use` for what was `pub`, `pub(crate)
-// use` for what was `pub(crate)`.
+// Re-exports keep every `crate::vm::engine::ctx::` path with its original visibility:
+// `pub use` for what was `pub`, `pub(crate) use` for what was `pub(crate)`.
 pub(crate) use activation::activate;
 #[cfg(test)]
 pub(crate) use engine::engine;

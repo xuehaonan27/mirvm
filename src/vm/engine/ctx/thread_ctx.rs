@@ -13,29 +13,29 @@ use super::signals::{
     start_pending_signal_finalizers,
 };
 
-/// Per-thread execution state (vmctx). Since M4.4 one per guest thread, lifetime = host thread_local.
+/// Per-thread execution state (vmctx): one per guest thread, with the lifetime of that host
+/// thread's thread-local storage.
 pub struct Ctx {
     pub shared: *const Shared,
     shared_owner: Arc<Shared>,
     pub region: ByteRegion,
-    /// Interpreted-frame recursion depth (diagnostic count; overflow detection now uses the real
-    /// stack guard `stack_floor`, M5.2 D8a).
+    /// Interpreted-frame recursion depth, kept for diagnostics only: guest stack overflow is
+    /// detected from the real `stack_floor` guard below, not from this count.
     pub depth: u32,
     /// Ordinary execution state is delivering mailbox messages; nested safepoints traversed inside
     /// a handler must not recursively drain.
     pub(crate) signal_draining: bool,
-    /// Host execution stack safety floor (M5.2 D8a): low end of this thread's stack + safety margin.
+    /// Host execution stack safety floor: the low end of this thread's stack plus a safety margin.
     /// When an interp_frame stack pointer approximation falls below this, it is a guest stack
-    /// overflow (diagnostic exit rather than host SIGSEGV). The real byte guard replaces the old
-    /// fixed frame limit (8000): it adapts to the thread's real stack (main execution thread 1 GiB,
-    /// amplified guest thread stacks, and foreign native thread thunk re-entry all work). 0 means
-    /// probe failed and no guard is applied (equivalent to the old unguarded world; getattr_np is
-    /// available for all threads including the main thread on glibc).
+    /// overflow (diagnostic exit rather than host SIGSEGV). Because the guard is derived from the
+    /// thread's real stack bounds, the main thread's 1 GiB stack, amplified guest thread stacks and
+    /// foreign native thread thunk re-entry all work. 0 means the probe failed and no guard is
+    /// applied; getattr_np is available for all threads including the main thread on glibc.
     pub stack_floor: usize,
     /// Foreign passthrough state (dlsym cache + dlopen handles; dlsym is idempotent, per-thread
     /// independent caches are harmless).
     pub ffi: FfiState,
-    /// Guest TLS instance table (M4.4 D3): TlsId → real address of this thread's instance
+    /// Guest TLS instance table: TlsId -> real address of this thread's instance
     /// (0 = not materialized; first visit heap-allocates + copies the template). Guest dtors run
     /// first via the pthread-key thunk; instance memory is freed only in Ctx's final teardown round.
     pub tls: Vec<u64>,
@@ -365,7 +365,7 @@ pub(super) struct ThreadContexts {
     /// Code domain of the innermost activation on this thread, saved and restored
     /// like `current_activation`. Dispatch reads it to pick the domain's slot set,
     /// so a guest -> native -> guest chain keeps the domain it entered from and
-    /// never mixes slot sets mid-chain (design §5.2.3).
+    /// never mixes slot sets mid-chain.
     pub(super) domain: super::super::jit::CodeDomain,
     /// Engine ids for every active entry on this host thread. Looking only at
     /// `current` loses an outer Engine across A -> native -> B nesting, which
@@ -487,7 +487,7 @@ pub(crate) fn current_thread_is_in_final_tsd_pass(key: libc::pthread_key_t) -> b
 
 /// Code domain of the innermost activation on this host thread. Dispatch uses it
 /// to select the publish slots, which is the single point where a trace run stops
-/// consulting plain entries (design §5.2.3). Plain is the answer outside any
+/// consulting plain entries. Plain is the answer outside any
 /// activation, so the default path never reserves a register.
 pub(crate) fn current_code_domain() -> super::super::jit::CodeDomain {
     let Some(ctx_key) = CTX_KEY.get().copied() else {
@@ -513,13 +513,13 @@ pub(crate) fn test_ctx_key() -> libc::pthread_key_t {
     CTX_KEY.get().copied().unwrap().as_raw()
 }
 
-/// Fork guard baseline (M5.2 D8f): count of threads attributable to the guest when guest main
+/// Fork guard baseline: count of threads attributable to the guest when guest main
 /// starts. At this moment = mirvm internal threads (main-in-join, guest-exec, allocator) plus any
 /// MIRVM service thread already running (capture writer), and 0 guest-spawned threads.
 /// **Use the real OS thread count, not the Ctx count**: after pthread_create returns the new thread
 /// already exists, but its Ctx is not created until trampoline attach—Ctx counting has a TOCTOU
 /// window and would miss it. MIRVM's own service threads are subtracted because the guest can never
-/// have created them (design: mirvm_high_performance_log.md §5.5/§6.3).
+/// have created them.
 /// Fork is allowed only when the current guest-attributable count equals the baseline.
 /// Called at the guest main start point (run_main/run_export): pins the baseline for a single
 /// guest thread.
@@ -728,10 +728,10 @@ pub(super) unsafe extern "C" fn ctx_key_dtor(p: *mut std::ffi::c_void) {
 /// Boundary TLS attach: creates the Ctx on this thread's first entry into the engine (birth point
 /// of a new guest thread's execution state), then idempotently returns the same instance on later
 /// entries—re-entries (guest→native→thunk→guest) naturally get the same vmctx, and the operand
-/// region continues nesting on the disciplined stack (spike2 shape).
+/// region continues nesting on the disciplined stack.
 ///
-/// Returns a raw pointer (Box pins the address; raw-ptr vmctx is passed across native stacks—
-/// borrow discipline §9). The main thread's Ctx is reclaimed together with process exit (glibc exit
+/// Returns a raw pointer (Box pins the address, and the raw-ptr vmctx is passed across native
+/// stacks). The main thread's Ctx is reclaimed together with process exit (glibc exit
 /// does not go through the TSD phase, same as native).
 // Used by the separately compiled TSan harness; product entries go through
 // `activate`, which also establishes an activation identity.

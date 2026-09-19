@@ -5,8 +5,8 @@
 //! kernel. No writer field shares a cache line with [`ProducerFast`].
 //!
 //! This module holds the shared process state and the per-thread producer
-//! primitives; `session` owns the session lifecycle and `writer` the file
-//! writer.
+//! primitives; `capture_session` owns the session lifecycle and `capture_writer`
+//! the file writer.
 
 use std::cell::UnsafeCell;
 use std::ptr;
@@ -21,10 +21,7 @@ use super::format::{
     SyscallSemantics,
 };
 
-mod session;
-mod writer;
-
-pub(crate) use session::{
+pub(crate) use super::capture_session::{
     ActivationToken, CaptureSession, FinishStatus, StartOptions, activation_enter, activation_exit,
     after_fork_child, claim_process_generation, current_producer, fork_child_guard, host_syscall,
     host_syscall_pinned, is_armed, rebuild_on_boundary, retire_current_thread,
@@ -33,25 +30,25 @@ pub(crate) use session::{
 const PAGE_BYTES: usize = PAGE_BYTES_4K as usize;
 pub(crate) const STARTER_BYTES: usize = PAGE_BYTES * 2;
 
-const PHASE_ARMED: u8 = 1;
-const PHASE_STOPPING: u8 = 2;
-const PHASE_SINK_FAILED: u8 = 3;
-const PHASE_FINISHED: u8 = 4;
+pub(super) const PHASE_ARMED: u8 = 1;
+pub(super) const PHASE_STOPPING: u8 = 2;
+pub(super) const PHASE_SINK_FAILED: u8 = 3;
+pub(super) const PHASE_FINISHED: u8 = 4;
 
-const WRITER_AWAKE: u32 = 0;
-const WRITER_SLEEPING: u32 = 1;
+pub(super) const WRITER_AWAKE: u32 = 0;
+pub(super) const WRITER_SLEEPING: u32 = 1;
 
-static ACTIVE: AtomicPtr<SessionCore> = AtomicPtr::new(ptr::null_mut());
-static START_LOCK: Mutex<()> = Mutex::new(());
+pub(super) static ACTIVE: AtomicPtr<SessionCore> = AtomicPtr::new(ptr::null_mut());
+pub(super) static START_LOCK: Mutex<()> = Mutex::new(());
 
 #[thread_local]
-static TLS_ACTIVE_PRODUCER: AtomicPtr<Producer> = AtomicPtr::new(ptr::null_mut());
+pub(super) static TLS_ACTIVE_PRODUCER: AtomicPtr<Producer> = AtomicPtr::new(ptr::null_mut());
 #[thread_local]
-static TLS_CACHED_PRODUCER: AtomicPtr<Producer> = AtomicPtr::new(ptr::null_mut());
+pub(super) static TLS_CACHED_PRODUCER: AtomicPtr<Producer> = AtomicPtr::new(ptr::null_mut());
 #[thread_local]
-static TLS_CACHED_SESSION: AtomicPtr<SessionCore> = AtomicPtr::new(ptr::null_mut());
+pub(super) static TLS_CACHED_SESSION: AtomicPtr<SessionCore> = AtomicPtr::new(ptr::null_mut());
 #[thread_local]
-static TLS_ACTIVATION_DEPTH: AtomicU32 = AtomicU32::new(0);
+pub(super) static TLS_ACTIVATION_DEPTH: AtomicU32 = AtomicU32::new(0);
 
 /// Stable first cache line consumed by future raw trace sites.
 #[repr(C, align(64))]
@@ -69,8 +66,8 @@ const _: () = assert!(std::mem::offset_of!(ProducerFast, pair_budget) == 8);
 const _: () = assert!(std::mem::offset_of!(ProducerFast, errno_ptr) == 16);
 
 #[repr(C, align(4096))]
-struct Page {
-    bytes: UnsafeCell<[u8; PAGE_BYTES]>,
+pub(super) struct Page {
+    pub(super) bytes: UnsafeCell<[u8; PAGE_BYTES]>,
 }
 
 impl Page {
@@ -83,7 +80,7 @@ impl Page {
 
 unsafe impl Sync for Page {}
 
-struct PagePair {
+pub(super) struct PagePair {
     pages: [Page; 2],
 }
 
@@ -95,14 +92,14 @@ impl PagePair {
     }
 }
 
-struct PagePool {
+pub(super) struct PagePool {
     budget_bytes: usize,
     allocated_bytes: AtomicUsize,
     free: Mutex<Vec<usize>>,
 }
 
 impl PagePool {
-    fn new(budget_bytes: usize) -> Self {
+    pub(super) fn new(budget_bytes: usize) -> Self {
         Self {
             budget_bytes,
             allocated_bytes: AtomicUsize::new(0),
@@ -110,7 +107,7 @@ impl PagePool {
         }
     }
 
-    fn take_starter(&self) -> *mut PagePair {
+    pub(super) fn take_starter(&self) -> *mut PagePair {
         if let Some(addr) = self.free.lock().unwrap_or_else(|e| e.into_inner()).pop() {
             return addr as *mut PagePair;
         }
@@ -127,7 +124,7 @@ impl PagePool {
         Box::into_raw(Box::new(PagePair::new()))
     }
 
-    fn return_starter(&self, pages: *mut PagePair) {
+    pub(super) fn return_starter(&self, pages: *mut PagePair) {
         if pages.is_null() {
             return;
         }
@@ -135,7 +132,7 @@ impl PagePool {
         free.push(pages as usize);
     }
 
-    unsafe fn release_all(&self) {
+    pub(super) unsafe fn release_all(&self) {
         let pages = std::mem::take(&mut *self.free.lock().unwrap_or_else(|e| e.into_inner()));
         let allocated = self.allocated_bytes.swap(0, Ordering::AcqRel);
         debug_assert_eq!(allocated, pages.len().saturating_mul(STARTER_BYTES));
@@ -146,62 +143,62 @@ impl PagePool {
 }
 
 #[repr(C, align(64))]
-struct ProducerCold {
-    has_active: bool,
+pub(super) struct ProducerCold {
+    pub(super) has_active: bool,
     context_unsynced: bool,
     _pad0: [u8; 6],
     active_page: *mut Page,
     next_publish: u64,
-    next_sequence: u64,
+    pub(super) next_sequence: u64,
     page_first_sequence: u64,
-    page_ordinal: u64,
-    current_engine: u64,
+    pub(super) page_ordinal: u64,
+    pub(super) current_engine: u64,
     initial_engine: u64,
     marker_count: u32,
     _pad1: u32,
-    capacity_drops: u64,
-    context_drops: u64,
-    recursive_drops: u64,
+    pub(super) capacity_drops: u64,
+    pub(super) context_drops: u64,
+    pub(super) recursive_drops: u64,
 }
 
 #[repr(C, align(64))]
-struct PublishedLine {
-    tail: AtomicU64,
+pub(super) struct PublishedLine {
+    pub(super) tail: AtomicU64,
     _pad: [u8; 56],
 }
 
 #[repr(C, align(64))]
-struct ReturnedLine {
-    head: AtomicU64,
+pub(super) struct ReturnedLine {
+    pub(super) head: AtomicU64,
     _pad: [u8; 56],
 }
 
 #[repr(C, align(64))]
-struct WriterLine {
-    head: UnsafeCell<u64>,
-    committed_records: UnsafeCell<u64>,
-    sink_loss: UnsafeCell<u64>,
+pub(super) struct WriterLine {
+    pub(super) head: UnsafeCell<u64>,
+    pub(super) committed_records: UnsafeCell<u64>,
+    pub(super) sink_loss: UnsafeCell<u64>,
     _pad: [u8; 40],
 }
 
 #[repr(C, align(64))]
-struct RetiredLine {
-    retired: AtomicBool,
+pub(super) struct RetiredLine {
+    pub(super) retired: AtomicBool,
     _pad: [u8; 63],
 }
 
 pub(crate) struct Producer {
     fast: UnsafeCell<ProducerFast>,
-    cold: UnsafeCell<ProducerCold>,
-    published: PublishedLine,
-    returned: ReturnedLine,
-    writer: WriterLine,
-    retired: RetiredLine,
-    session: *const SessionCore,
-    pages: AtomicPtr<PagePair>,
-    producer_id: u64,
-    thread_generation: u32,
-    tid: u32,
+    pub(super) cold: UnsafeCell<ProducerCold>,
+    pub(super) published: PublishedLine,
+    pub(super) returned: ReturnedLine,
+    pub(super) writer: WriterLine,
+    pub(super) retired: RetiredLine,
+    pub(super) session: *const SessionCore,
+    pub(super) pages: AtomicPtr<PagePair>,
+    pub(super) producer_id: u64,
+    pub(super) thread_generation: u32,
+    pub(super) tid: u32,
 }
 
 // Producer and writer access disjoint fields/pages according to the two SPSC
@@ -210,7 +207,7 @@ unsafe impl Sync for Producer {}
 unsafe impl Send for Producer {}
 
 impl Producer {
-    fn new(
+    pub(super) fn new(
         session: *const SessionCore,
         pages: *mut PagePair,
         producer_id: u64,
@@ -270,17 +267,17 @@ impl Producer {
     }
 
     #[inline]
-    fn cold_ptr(&self) -> *mut ProducerCold {
+    pub(super) fn cold_ptr(&self) -> *mut ProducerCold {
         self.cold.get()
     }
 
     #[inline]
-    fn fast_ptr(&self) -> *mut ProducerFast {
+    pub(super) fn fast_ptr(&self) -> *mut ProducerFast {
         self.fast.get()
     }
 
     #[inline]
-    unsafe fn page(&self, slot: usize) -> &Page {
+    pub(super) unsafe fn page(&self, slot: usize) -> &Page {
         let pages = self.pages.load(Ordering::Relaxed);
         debug_assert!(!pages.is_null());
         unsafe { &(*pages).pages[slot] }
@@ -294,28 +291,28 @@ impl Producer {
     }
 }
 
-struct SessionCore {
-    phase: AtomicU8,
-    active_roots: AtomicUsize,
-    writer_state: AtomicU32,
-    writer_done: AtomicBool,
-    producers: Mutex<Vec<usize>>,
-    active_producers: Mutex<Vec<usize>>,
-    next_producer: AtomicU64,
-    next_thread_generation: AtomicU32,
-    page_pool: PagePool,
-    sink_loss: AtomicU64,
-    owner_tid: u32,
+pub(super) struct SessionCore {
+    pub(super) phase: AtomicU8,
+    pub(super) active_roots: AtomicUsize,
+    pub(super) writer_state: AtomicU32,
+    pub(super) writer_done: AtomicBool,
+    pub(super) producers: Mutex<Vec<usize>>,
+    pub(super) active_producers: Mutex<Vec<usize>>,
+    pub(super) next_producer: AtomicU64,
+    pub(super) next_thread_generation: AtomicU32,
+    pub(super) page_pool: PagePool,
+    pub(super) sink_loss: AtomicU64,
+    pub(super) owner_tid: u32,
 }
 
 impl SessionCore {
-    fn wake_writer(&self) {
+    pub(super) fn wake_writer(&self) {
         if self.writer_state.swap(WRITER_AWAKE, Ordering::AcqRel) == WRITER_SLEEPING {
             let _ = crate::os::thread::futex_wake_one_raw(self.writer_state.as_ptr());
         }
     }
 
-    fn try_enter_root(&self) -> bool {
+    pub(super) fn try_enter_root(&self) -> bool {
         if self.phase.load(Ordering::Acquire) != PHASE_ARMED {
             return false;
         }
@@ -338,7 +335,7 @@ pub(crate) struct CaptureSummary {
     pub(crate) producers: u64,
 }
 
-unsafe fn open_page(producer: &Producer) -> bool {
+pub(super) unsafe fn open_page(producer: &Producer) -> bool {
     if producer.pages.load(Ordering::Acquire).is_null() {
         return false;
     }
@@ -365,7 +362,7 @@ unsafe fn open_page(producer: &Producer) -> bool {
     true
 }
 
-unsafe fn seal_page(producer: &Producer) {
+pub(super) unsafe fn seal_page(producer: &Producer) {
     let cold = unsafe { &mut *producer.cold_ptr() };
     if !cold.has_active {
         return;
@@ -417,7 +414,7 @@ unsafe fn seal_page(producer: &Producer) {
     unsafe { (&*producer.session).wake_writer() };
 }
 
-unsafe fn set_engine(producer: &Producer, engine_id: u64) {
+pub(super) unsafe fn set_engine(producer: &Producer, engine_id: u64) {
     {
         let cold = unsafe { &mut *producer.cold_ptr() };
         if cold.current_engine == engine_id && !cold.context_unsynced {
@@ -466,7 +463,7 @@ unsafe fn mark_context_drop(producer: &Producer) {
 }
 
 #[derive(Clone, Copy)]
-enum EnterDisposition {
+pub(super) enum EnterDisposition {
     Recorded,
     DropCapacity,
     DropContext,
@@ -482,7 +479,7 @@ pub(crate) enum HotEnter {
     NeedsColdPath,
 }
 
-/// Syscall-entry hot path for the trace code domain (design §5.2.3).
+/// Syscall-entry hot path for the trace code domain.
 ///
 /// This is the body a trace JIT reaches through the pinned `r15`
 /// `ProducerHot*`: it touches only the one-cache-line [`ProducerFast`] (cursor,
@@ -538,7 +535,11 @@ pub(crate) unsafe fn record_syscall_enter_inline(
     HotEnter::Recorded
 }
 
-unsafe fn record_syscall_enter(producer: &Producer, nr: i64, args: &[u64]) -> EnterDisposition {
+pub(super) unsafe fn record_syscall_enter(
+    producer: &Producer,
+    nr: i64,
+    args: &[u64],
+) -> EnterDisposition {
     let was_context_unsynced = unsafe { (&*producer.cold.get()).context_unsynced };
     let needs_page = {
         let cold = unsafe { &mut *producer.cold_ptr() };
@@ -600,7 +601,7 @@ unsafe fn record_syscall_enter(producer: &Producer, nr: i64, args: &[u64]) -> En
     EnterDisposition::Recorded
 }
 
-unsafe fn record_syscall_exit(
+pub(super) unsafe fn record_syscall_exit(
     producer: &Producer,
     disposition: EnterDisposition,
     result: i64,

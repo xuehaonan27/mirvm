@@ -1,27 +1,27 @@
-//! Spike 3: mixed-stack unwind (**the hardest bone**, frame-abi-bytecode.md §7 candidate A
-//! validation).
+//! Spike 3: mixed-stack unwind -- can a guest panic unwind a native stack that mixes interpreted
+//! frames with compiled frames?
 //!
-//! Validation: on a native stack mixing interp frames + compiled frames, guest panic unwinds
-//! frames along the stack, runs Drop in guest order, is caught by catch_unwind (or crossing a
-//! plain-C frame = abort).
+//! What was proven: on such a stack the guest panic unwinds frame by frame, runs Drop in guest
+//! order, and is caught by `catch_unwind`; crossing a plain C frame aborts instead, as it does
+//! native.
 //!
-//! Mechanism selection (see docs/spike3-mixed-stack-unwind.md):
-//! - **guest exception = host Rust panic carrying `GuestPanic`** — this is the concrete form of
-//!   candidate A, not a replacement: Rust panic itself is "platform unwinder (_Unwind_RaiseException)
-//!   + Rust personality + landing pad". Raise uses `resume_unwind` (does not trigger panic hook,
-//!     no noise). The catch point downcasts to distinguish: GuestPanic is handled per guest
-//!     semantics; host panic (VM bug) is re-raised as-is, never swallowed.
-//! - **interp frame's unwind participation = `CleanupGuard`** (host Rust spelling of landing pad):
-//!   when unwind crosses the frame, the guard's Drop runs → runs this frame's cleanup chain along
-//!   the current unwind edge → restores the operand region → returns (unwind continues
-//!   automatically). The dynamic `unwind_edge` inside the guard is the interp frame's **dynamic
-//!   LSDA** (in compiled frames this is the static call-site → landing pad table).
+//! Mechanism:
+//! - **guest exception = host Rust panic carrying `GuestPanic`**: the exception rides the platform
+//!   unwinder (`_Unwind_RaiseException` plus the Rust personality and landing pads) rather than
+//!   replacing it. Raising uses `resume_unwind`, which does not trigger the panic hook, so a guest
+//!   panic produces no noise. The catch point downcasts to distinguish: `GuestPanic` is handled per
+//!   guest semantics, while a host panic (a VM bug) is re-raised as-is and never swallowed.
+//! - **interp frame's unwind participation = `CleanupGuard`** (the host Rust spelling of a landing
+//!   pad): when an unwind crosses the frame, the guard's Drop runs, which runs this frame's
+//!   cleanup chain along the current unwind edge and restores the operand region, then returns so
+//!   the unwind continues automatically. The dynamic `unwind_edge` inside the guard is the interp
+//!   frame's **dynamic LSDA**; in compiled frames the static call-site -> landing pad table plays
+//!   that role.
 //! - **compiled-frame stand-in = `extern "C-unwind" fn` + drop guard**: rustc compiles the guard's
-//!   Drop into that frame's landing pad, literally the same mechanism as Cranelift emitting a
-//!   landing pad for compiled frames to run drop glue. Must use `"C-unwind"` ABI — plain
-//!   `extern "C"` aborts when unwind crosses (Rust 1.81+), which is the first deliverable of
-//!   "JIT calling convention must be unwind-capable", and also gives a free test mechanism for
-//!   cross-FFI abort.
+//!   Drop into that frame's landing pad, the same mechanism Cranelift uses when it emits a landing
+//!   pad for compiled frames to run drop glue. The ABI must be `"C-unwind"`: plain `extern "C"`
+//!   aborts when an unwind crosses it (Rust 1.81+), which is also the test mechanism for cross-FFI
+//!   abort.
 
 use std::cell::Cell;
 use std::panic::{self, AssertUnwindSafe};
@@ -34,17 +34,19 @@ use super::frame::{OperandRegion, Word};
 
 // ===== guest exception object =====
 
-/// guest panic payload. Carried by host Rust panic mechanism (candidate A: same unwinder + personality).
+/// Guest panic payload, carried by the host Rust panic mechanism so that it rides the same
+/// unwinder and personality as a host panic.
 struct GuestPanic {
     payload: Word,
 }
 
-/// Initiate guest panic. `resume_unwind` does not trigger panic hook → no noise output.
+/// Initiate a guest panic. `resume_unwind` does not trigger the panic hook, so there is no noise
+/// output.
 fn raise_guest(payload: Word) -> ! {
     panic::resume_unwind(Box::new(GuestPanic { payload }))
 }
 
-// ===== execution context (vmctx, same discipline as spike2 / docs/designs/vmctx-passing.md) =====
+// ===== execution context (vmctx) =====
 
 type CompiledFn = extern "C-unwind" fn(*mut Ctx, u64) -> u64;
 
@@ -74,8 +76,8 @@ impl Ctx {
     }
 }
 
-// Field-level transient borrow helpers (do not take a whole &mut *ctx — conflicts with long-lived
-// &prog; see spike2 lessons)
+// Field-level transient borrow helpers: taking a whole `&mut *ctx` would conflict with the
+// long-lived `&prog` borrow the frame loop holds.
 #[inline]
 fn reg_reserve(ctx: *mut Ctx, n: u32) -> usize {
     let r: &mut OperandRegion = unsafe { &mut (*ctx).region };
@@ -102,7 +104,7 @@ fn log_drop(ctx: *mut Ctx, v: Word) {
     l.push(v);
 }
 
-/// Unified dispatch (same as spike2: both i2c and c2i).
+/// Unified dispatch for both directions: interpreter -> compiled and compiled -> interpreter.
 fn call_guest(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
     let kinds: &Vec<FuncKind> = unsafe { &(*ctx).kinds };
     match kinds[func as usize] {
@@ -114,8 +116,8 @@ fn call_guest(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
 // ===== interp frame's unwind participation =====
 
 /// Frame guard = interp frame's landing pad. Forgotten on normal return; when guest panic crosses
-/// the frame, its Drop runs during unwind: runs cleanup chain (if there is an edge) → restores the
-/// operand region (§2.2 "unwind: restore region SP").
+/// the frame, its Drop runs during unwind: runs cleanup chain (if there is an edge) then restores
+/// the operand region to the frame's base.
 ///
 /// `unwind_edge` is updated before each unwindable terminator (Call/Panic) executes — it is the
 /// interp frame's **dynamic LSDA** (the static equivalent in compiled frames: call-site → landing
@@ -181,7 +183,7 @@ fn edge(u: &UnwindAction) -> Option<u32> {
     }
 }
 
-// ===== interpreter main loop (unwind evolution of spike2) =====
+// ===== interpreter main loop =====
 
 fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
     let prog: &Program = unsafe { &(*ctx).prog };

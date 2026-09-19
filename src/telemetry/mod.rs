@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub(crate) mod capture;
+pub(crate) mod capture_session;
+pub(crate) mod capture_writer;
 pub(crate) mod decode;
 pub(crate) mod format;
 pub(crate) mod tool;

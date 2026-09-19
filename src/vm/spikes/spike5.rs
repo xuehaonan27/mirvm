@@ -1,19 +1,24 @@
-//! Spike 5: real Cranelift integration — practical test of compiled code ↔ VM execution state transition.
+//! Spike 5: real Cranelift integration -- practical test of compiled code ↔ VM execution
+//! state transitions.
 //!
-//! Settle pending M4 checkpoints (spike2 "can Cranelift emit this convention", vmctx-passing "real data for internal conventions",
-//! spike3 "real Cranelift CFI/LSDA left for review"). Kill five unknowns:
-//! 1. **i2c to real JIT code**: interp takes the finalized code ptr and directly calls Cranelift machine code;
-//! 2. **c2i from real JIT code**: JIT code calls back into the interpreter via the imported `mirvm_call_guest` shim;
+//! Five unknowns this spike settled:
+//! 1. **i2c to real JIT code**: interp takes the finalized code ptr and directly calls Cranelift
+//!    machine code;
+//! 2. **c2i from real JIT code**: JIT code calls back into the interpreter via the imported
+//!    `mirvm_call_guest` shim;
 //! 3. **cc→cc direct call**: direct call inside two JIT fib modules (FuncRef), not via dispatch;
-//! 4. **vmctx internal convention P vs R**: P = explicit ctx first arg (Wasmtime style), R = pinned r15
-//!    (HotSpot style: boundary entry set_pinned_reg, internal get_pinned_reg, multi-entry structure) —
-//!    feasibility of both variants + vcode + micro-benchmark;
-//! 5. **unwind through real JIT frames (probe)**: bare run expected to abort (cranelift-jit does not register system eh_frame,
-//!    its exception path is wasmtime-unwinder = own two-phase unwinder, not interoperable with host Rust unwinder
-//!    — we do not adopt it); stretch = self-emit SystemV unwind info → gimli assembles .eh_frame →
-//!    `__register_frame` registration (same as cg_clif JIT mode) → propagation should succeed.
+//! 4. **vmctx internal convention P vs R**: P = explicit ctx first arg (Wasmtime style), R =
+//!    pinned r15 (HotSpot style: boundary entry set_pinned_reg, internal get_pinned_reg,
+//!    multi-entry structure) -- both variants are feasible; vcode and micro-benchmark are
+//!    produced below;
+//! 5. **unwind through real JIT frames (probe)**: a bare run aborts, because cranelift-jit does
+//!    not register system eh_frame and its own exception path (the wasmtime two-phase unwinder)
+//!    is not interoperable with the host Rust unwinder -- so we do not adopt it. Self-emitting
+//!    SystemV unwind info, assembling it into .eh_frame and registering it via
+//!    `__register_frame`, makes propagation succeed.
 //!
-//! Interpreter core follows the spike3 protocol (CleanupGuard/field-level transient borrowing), self-contained.
+//! The interpreter core is self-contained and uses `CleanupGuard` with field-level transient
+//! borrowing.
 
 use std::mem;
 use std::process::ExitCode;
@@ -35,7 +40,7 @@ use super::bytecode::{
 };
 use super::frame::{OperandRegion, Word};
 
-// ===== interpreter core (spike3 shape, self-contained) =====
+// ===== interpreter core (self-contained) =====
 
 struct GuestPanic {
     payload: Word,
@@ -303,7 +308,7 @@ fn bin(op: BinOp, a: Operand, b: Operand) -> Rvalue {
     Rvalue::Binary(op, a, b)
 }
 
-/// mutually recursive fib (same shape as spike2)
+/// Mutually recursive fib over the two functions 0 and 1.
 fn fib_body(callee: u32) -> Body {
     use BinOp::*;
     use Rvalue::Use;
@@ -452,7 +457,7 @@ fn fib_ref(n: u64) -> u64 {
 
 // ===== Cranelift assembly =====
 
-/// two variants of the vmctx internal convention (practical target of docs/designs/vmctx-passing.md §5.2)
+/// The two variants of the vmctx internal convention.
 #[derive(Clone, Copy, PartialEq)]
 enum Conv {
     /// P: explicit ctx first arg, passed through every internal call (Wasmtime style)
@@ -515,7 +520,7 @@ fn emit_call(
         }
         Callee::Shim { shim, partner } => {
             let fref = module.declare_func_in_func(*shim, b.func);
-            // moment ctx is needed: P uses parameter, R uses pinned reg (the get_pinned_reg moment in vmctx doc §5)
+            // the moment ctx is needed: P uses the parameter, R uses the pinned register
             let c = match ctxv {
                 Some(c) => c,
                 None => b.ins().get_pinned_reg(types::I64),
@@ -574,7 +579,7 @@ fn define_fib(
     finish_define(module, id, &mut cctx, out);
 }
 
-/// R variant boundary entry (= f_boundary in vmctx doc §5):
+/// R variant boundary entry:
 /// save into r15 → set_pinned_reg(ctx) → call fast(n) → restore r15 → return.
 /// save/restore keeps r15 callee-saved semantics for the host caller (host rustc code may freely use r15).
 fn define_entry_r(
@@ -830,10 +835,11 @@ fn build_jit(conv: Conv) -> Jitted {
     }
 }
 
-// ===== eh_frame self-registration (stretch; same as cg_clif JIT mode) =====
+// ===== eh_frame self-registration =====
 
 /// Assemble each JIT function's SystemV unwind info into .eh_frame and register it with the system unwinder,
 /// so host Rust panic propagation can walk through JIT frames (CFI-only, no personality/landing pad).
+/// This is the same approach cg_clif's JIT mode takes.
 fn register_eh_frames(jit: &Jitted) {
     use gimli::RunTimeEndian;
     use gimli::write::{Address, EhFrame, EndianVec, FrameTable};
@@ -923,7 +929,7 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
 
     let mut ok = true;
 
-    // —— two variants × 4 config matrix ——
+    // -- two variants x 4 config matrix --
     for (vname, conv) in [
         ("P explicit-ctx arg", Conv::ExplicitCtx),
         ("R pinned-r15", Conv::PinnedReg),
@@ -966,7 +972,7 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
             FuncKind::Interp,
         );
 
-        // —— micro-benchmark (fib(30), direct-call config) ——
+        // -- micro-benchmark (fib(30), direct-call config) --
         if ok {
             let want = fib_ref(30);
             println!("bench [{vname}] fib(30):");
@@ -998,7 +1004,7 @@ pub fn run(mut argv: impl Iterator<Item = String>) -> ExitCode {
         drop(jit);
     }
 
-    // —— unwind through real JIT frames (subprocess probe) ——
+    // -- unwind through real JIT frames (subprocess probe) --
     let exe = std::env::current_exe().expect("current_exe");
     use std::os::unix::process::ExitStatusExt as _;
     let bare = std::process::Command::new(&exe)

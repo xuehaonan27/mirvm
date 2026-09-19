@@ -2903,6 +2903,122 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   若一直不碰 syscall 站点，寄存器里仍是父进程 recorder；这无害（除 syscall 站点外没有人读
   它），但不是"任何进入 trace 域的路径都重设"的完整形态，1B 重开此项。
 
+### 7.64 2026-09-19：代码英文化、注释重写、精简与模块拆分（一次仓库级卫生清扫）
+
+- **动机**：仓库长期中英混排（同一份 `src/` 里既有中文注释的旧模块，也有英文的新模块）；
+  注释大量引用 `decision-history §x` / `M5.3 切②` / `D15 P4` 这类账本引用，并叙述"哪一批
+  交付了什么"，读代码必须先开文档；`src/` 里 ≥1200 行的文件有 20 个，最大的 6119 行。
+- **范围裁定（本片唯一需要人裁的边界）**：**代码全部英文**——`src/`、`tests/`、`corpus/`
+  夹具、`demo/`、`scripts/`、构建文件；**`docs/` 与所有 `*.md` 保持中文**，因为设计与历史
+  文档是叙事载体，代码注释不该复述它们。`corpus/projects/` 是 vendored 上游，一字不动。
+- **规则与术语表**：施工以 `.sweep/SPEC.md` 为准（含 44 条中英术语对照，以及三类禁改：
+  测试数据、夹具输入/期望值、oracle 打印载荷）。工具链（`.sweep/`）不入库。
+- **规模**：在范围文件内，中文字符 **120024 → 1979**（279 → 41 个文件，98.4%）。
+  剩余中文**全部**是测试数据（多语言样本、嵌入的 HTML/JSON/YAML/org-mode/Rune/SVG、
+  `exit` 模式下作为 oracle 的打印载荷）与两条已记录的 RED 断言模式；逐字面量核对过：
+  18 个文件的字面量中文有变化，全部是 `assert!/expect/panic!` 消息或打印标签，
+  数据型夹具（opencc/jieba/unicode/tables/xlsxwriter/whatlang/fatfs/html5ever/
+  tokenizers/zip/serde/simd_json/deunicode/compact_str/comfy/scraper/qr）**保真**。
+- **注释政策**：删除里程碑/切片/工作项/设计档/章节引用、日期与"何时修好"的叙事、
+  以及复述标识符的注释；保留不变量、前置条件、`# Safety`、所有权/生命周期/单位等类型
+  看不出来的事实、非显然的 why，以及 `TODO/FIXME/NOTE`。这条政策同时写进了 `AGENTS.md`
+  /`CLAUDE.md` 的 Configuration and Conventions，防止回流。
+- **精简（代表项）**：删掉已失效的 `#[allow(dead_code)]`；`trace_domain_isa()` 改为委托
+  `domain_isa(CodeDomain::Trace)`；`mirvm_bin128_ovf` 无符号分支只算一次溢出；删除空
+  `if` 体与只为消警告的 `let _ = (…)`；删除重复的局部 `extern "C"` 声明与单用别名；
+  删除指向别处内容的悬挂 banner。**未删但记录的候选**（需要编译器或 owner 判断）写进
+  `open-issues`。
+- **拆分（20 个文件，纯搬运）**：
+
+  | 原文件 | 行数 | 去向 |
+  | --- | --- | --- |
+  | `src/vm/engine/embed_tests.rs` | 6119 | `embed_tests/{mod 626, engine_lifecycle 1472, signal_delivery 1422, signal_lifecycle 1262, signal_close 1130, capture 240}` |
+  | `src/cargoless/resolve.rs` | 4443 | `resolve/{mod 945, fresh 944, lockfill 294, features 646, units 493, tests 1191}` |
+  | `src/vm/engine/jit/translate.rs` | 3341 | `translate/{mod 411, walk 2250, place 206, value 122, call 217, numeric 185}` |
+  | `src/vm/engine/signal.rs` | 3211 | `signal.rs 1170` + `signal/{inbox 695, tests 1356}` |
+  | `src/telemetry/capture.rs` | 2888 | `capture.rs 643` + `capture/{session 798, writer 515, tests 989}` |
+  | `src/cargoless/driver.rs` | 2762 | `driver.rs 708` + `driver/{build 616, test_driver 1469}` |
+  | `src/cargoless/schedule.rs` | 2666 | `schedule.rs 554` + `schedule/{args 994, tests 1128}` |
+  | `src/vm/engine/ctx.rs` | 2588 | `ctx/{mod 60, engine 930, thread_ctx 856, activation 145, signals 310, tests 408}` |
+  | `src/cargoless/manifest.rs` | 2359 | `manifest/{mod 1076, deps 300, cfg 154, targets 283, tests 577}` |
+  | `src/vm/engine/ir.rs` | 2361 | `ir.rs 1133` + `ir/program.rs 1247` |
+  | `src/cli.rs` | 1975 | `cli/{mod 362, entry 490, cargo 234, driver 820, frontmatter 114}` |
+  | `src/vm/engine/deferred.rs` | 1725 | `deferred.rs 666` + `deferred/tests.rs 1061` |
+  | `src/vm/engine/jit/compiler.rs` | 1565 | `compiler.rs 1115` + `compiler/{isa 56, lsda 64, tests 343}` |
+  | `src/cargoless/registry.rs` | 1562 | `registry.rs 1409` + `registry/tests.rs 152` |
+  | `src/vm/engine/verify.rs` | 1471 | `verify.rs 1165` + `verify/tests.rs 305` |
+  | `src/native_archive.rs` | 1453 | `native_archive.rs 881` + `native_archive/tests.rs 569` |
+  | `src/pack.rs` | 1408 | `pack.rs 868` + `pack/tests.rs 536` |
+  | `src/telemetry/decode.rs` | 1369 | `decode.rs 980` + `decode/tests.rs 389` |
+  | `src/lower/mod.rs` | 1346 | `lower/mod.rs 1017` + `lower/main_catch.rs 334` |
+  | `src/vm/engine/jit/helpers.rs` | 1274 | `helpers.rs 742` + `helpers/{floats 454, stats 93}` |
+
+  `src/lower/func/mod.rs`（1912 行）**如实不拆**：它是一个 1443 行的 `impl LowerCx`，
+  七个兄弟子模块各自持有该 impl 的片段并频繁互相调用；唯一可分离的入口尾段只占 13%，
+  拆完仍超 1500 行，且 `PlaceLow` 的字段会被迫 `pub(super)`。按"没有干净接缝就保持整文件"
+  的判据留下。
+- **验证**（全部在 `dev-cpu-hg` 实跑）：`cargo check --locked --all-targets --all-features`
+  0 错；CI clippy 命令（`-D warnings`）干净；`cargo test --locked` **397/397**；
+  `cargo fmt --check` 干净；`./tests/run.sh fast` = **13 passed / 2 failed，与改动前
+  `c8ed1ae74` 基线逐条相同**（失败项就是两条已记录的 `contracts.cargoless-*` RED：
+  `cargoless-workspace` 的 `full_package_id` 与 `cargoless-sources` 的两条诊断文案）。
+  `runtime.semantics` 单跑：**过时的 JIT 栈溢出断言按预期转绿**（基线 FAIL → PASS），
+  该套件失败数 2 → 1（剩下 `c_rayon` 120s 超时，与本次无关）。另做一次**不变量检查**：
+  拆分前后整个 `src/` 的代码 token 袋（屏蔽注释/字符串/`use` 行）只差 228 个 token，
+  且全部是路径与可见性脚手架（`super` +262、`pub` +259、`crate` +95、`mod` +37、
+  `use` +29），**没有任何代码 token 丢失或重复**——即证明这次是纯结构搬运。
+- **拆分撞出的两个真问题（同一类，值得记）**：
+  1. **私有子模块里的 `pub` 项不会通过父路径可达**。`ir.rs → ir/program.rs` 那一步以为
+     "program 是 ir 的子模块，所以 `crate::vm::engine::ir::X` 照旧"，实际不成立；同时
+     `program.rs` 漏了一个 `Stmt` import。未解析类型让 rustc 把 `Block.stmts` 的元素类型
+     当成错误类型，于是 `for st in &blk.stmts { match st { … } }` 的绑定按值解析，
+     在 `frame.rs`/`admit.rs`/`translate/*` 里炸出 **276 个假的** `expected &X, found X`
+     与 `cannot be dereferenced`。一次修 import 全部消失——**错误数不等于缺陷数**，
+     这是本片最贵的一课。
+  2. **拆分会悄悄改 `super::` 的层深**，且"私有项跨兄弟模块"必须显式 `pub(super)`。
+     `ctx/*`（76 处）与 `cargoless/driver/test_driver.rs`、`translate/*` 都属于这一类；
+     另有 `ctx/tests.rs`、`deferred/tests.rs` 把原 `mod tests { … }` 外层一起搬了过去，
+     造成 `ctx::tests::tests`，所有 `super::` 全部错位一格。
+- **同时修掉的既有缺陷（不是本片引入）**：
+  1. `tests/suites/runtime/semantics.sh:266` 一直 grep `guest 栈溢出（JIT 编译帧进入前`，
+     而 JIT 路早已输出英文——**在 `c8ed1ae74` 基线就是红的**。改为匹配真实文案后该组
+     从 2 个失败降到 1 个（剩下的是 `c_rayon` 120s 超时，另一件事）。
+  2. `tests/suites/contracts/cargoless_sources.sh:316/:381` 的两条诊断模式在基线也早已
+     无法匹配（产品侧当时已是英文）——这是 `open-issues` 里记录的两条
+     `contracts.cargoless-sources` 诊断文案 RED，**按要求原样保留**，没有用"改成产品恰好
+     打印的字符串"去掩盖。
+  3. `.translate_schedule_tmp.py`（3568 字的临时翻译脚本，`faa349c` 误入库且从未被使用）
+     删除。
+  4. `docs/agents/onboarding.md` 记录的 `contracts.cargoless-sources`/`-git` 本机 fixture
+     registry 被代理拦截问题，由 `tests/support/harness.sh` 统一追加 `no_proxy` 解决
+     （本片之前的切片已完成，此处只登记）。
+  5. **TSan 同源编译门被拆分裂开**（拆分引入，`cargo check --all-targets` **抓不到**，
+     因为 `tsan/` 是独立 crate、只在套件里构建）：`tsan/src/telemetry.rs` 以
+     `#[path = "../../src/telemetry/capture.rs"]` **逐文件**共享产品源码，而拆出来的
+     `capture.rs` 新增了隐式子模块 `mod session; / mod writer;`。实测规则（最小实验）：
+     `#[path]` 引入的文件里，隐式 `mod child;` **找不到**；给子模块加显式 `#[path]` 时
+     基准目录是**包含它的那个文件**所在目录，因此同一个属性不可能同时服务主 crate
+     （`src/telemetry/`）与 harness（`tsan/src/`）。修法**不加 `cfg` 开关**（仓库纪律禁止
+     特例开关）：把 `capture/{session,writer}.rs` 改成 `capture_session.rs` /
+     `capture_writer.rs` 两个**同级**文件（在 `telemetry/mod.rs` 声明），被共享文件从此没有
+     隐式子模块，harness 照旧逐文件 `#[path]` 引入即可。**教训**：凡是被 TSan harness
+     `#[path]` 共享的产品文件，都不得有隐式兄弟子模块；这条写进了 `docs/agents/onboarding.md`。
+- **记录偏离**：
+  - 一次 corpus 夹具切片的主 agent 中途失败且**没有报告**（结束消息为空），它负责的 20 个
+    文件只完成 5 个。是"按文件清点残留中文"这一步发现的，不是靠 agent 自述。之后改为
+    逐个 agent 的产物都要独立复核。
+  - 该失败 agent 在 3 个已完成文件里**改变了行数**（`c_process.rs`、`c_tokio_mt.rs`、
+    `c_ed25519.rs`），已全部回滚按"一行换一行"重做。另发现 `c_opencc.rs` 的表头注释被
+    合并过行（净行数与代码序列不变，且该条目是 `exit` 模式、无行号依赖），保留现状并在此
+    记录。
+  - corpus/demo 的检查器自身修了三处判据（frontmatter 行尾注释、raw string 与字符字面量
+    扫描、按条目模式判定），否则会把合法翻译误报为数据篡改。
+- **本片未兑现**：`src/cli.rs` 的 `USAGE` 文本仍带 `mode B slice 2`、`M5.3-M5.5`、
+  `D15 … P4 default flip`、`docs/history/spike*.md` 这类里程碑字串（无测试依赖，候选）；
+  几条需要编译器的精简候选（模块级 `#![allow(dead_code)]`、`helpers.rs` 的重复
+  out-store、`resolver_config.rs` 整模块 `#![cfg(test)]` 且无消费者）记在 `open-issues`；
+  **`docs/` 的中文没有翻**——这是本片的范围裁定，不是遗漏。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT

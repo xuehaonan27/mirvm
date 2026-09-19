@@ -11,11 +11,11 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::Ordering;
 
-use super::session::NEXT_SESSION_ID;
-use super::{
+use super::capture::{
     ACTIVE, CaptureSummary, PHASE_ARMED, PHASE_FINISHED, PHASE_SINK_FAILED, Page, Producer,
     SessionCore, WRITER_AWAKE, WRITER_SLEEPING,
 };
+use super::capture_session::NEXT_SESSION_ID;
 use crate::telemetry::format::{
     CHUNK_FOOTER_BYTES, CHUNK_HEADER_BYTES, CLOCK_NONE, ChunkFooter, ChunkHeader, FileHeader,
     PAGE_HEADER_BYTES, PRODUCER_END_BYTES, ProducerEnd, SESSION_END_BYTES, SessionEnd, WireError,
@@ -29,7 +29,7 @@ pub(super) fn writer_main(
     final_path: &Path,
 ) -> io::Result<CaptureSummary> {
     // The guest cannot have created this thread, so the fork guard must not
-    // count it as a guest pthread (design §5.5/§6.3). Registration happens
+    // count it as a guest pthread. Registration happens
     // before the thread is reachable, and the guard rebuilds the baseline after
     // fork.
     let _service = crate::os::thread::ServiceThreadGuard::register();
