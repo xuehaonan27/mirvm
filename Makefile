@@ -12,7 +12,7 @@ M ?=
 ARGS ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help test fast smoke gate list modes case mode inventory projects clean
+.PHONY: help test fast smoke gate list modes case mode validate inventory projects clean
 
 help:
 	@echo 'make test                 daily commit check (the fast tier)'
@@ -22,6 +22,7 @@ help:
 	@echo 'make modes                the available run methods'
 	@echo 'make case C=<id> [ARGS="..."]'
 	@echo 'make mode M=<mode> [ARGS="..."]'
+	@echo 'make validate             manifest: every case names a mode that declares its fields'
 	@echo 'make inventory            manifest <-> data/ cross-check'
 	@echo 'make projects             fetch the data/projects submodules'
 	@echo 'make clean                drop disposable caches'
@@ -53,6 +54,9 @@ case:
 mode:
 	@test -n "$(M)" || { echo 'make mode M=<mode>  (make modes shows them)' >&2; exit 64; }
 	$(RUN) mode $(M) $(ARGS)
+
+validate:
+	$(RUN) validate
 
 inventory:
 	$(RUN) inventory

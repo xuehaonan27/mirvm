@@ -16,8 +16,10 @@ mode_run() {
     apply_env "$(field env "")"
 
     local -a pre=() guest=()
-    expand_list "$(field args "")" pre
-    expand_list "$(field guest "")" guest
+    expand_list "$(field args "")"
+    pre=(${EXPANDED[@]+"${EXPANDED[@]}"})
+    expand_list "$(field guest "")"
+    guest=(${EXPANDED[@]+"${EXPANDED[@]}"})
     local -a cmd=(env -u RUST_BACKTRACE "$MIRVM" run "${pre[@]}")
     cmd+=("$DATA_DIR/$input")
     [ ${#guest[@]} -gt 0 ] && cmd+=(-- "${guest[@]}")
@@ -31,7 +33,7 @@ mode_run() {
     local stdout_spec; stdout_spec=$(field stdout "")
     case "$stdout_spec" in
         oracle:*)
-            local oracle=$DATA_DIR/fixtures/oracles/${stdout_spec#oracle:}
+            local oracle=$DATA_DIR/fixtures/oracles/${stdout_spec#oracle:}.txt
             [ -f "$oracle" ] || { bad "$name (oracle missing: ${stdout_spec#oracle:})"; return 1; }
             cmp -s "$oracle" "$TMP/run.out" || problems+=("stdout != oracle ${stdout_spec#oracle:}") ;;
         "") ;;

@@ -18,7 +18,8 @@ mode_run() {
     cd "$DATA_DIR/$crate" || { bad "cannot enter $crate"; return 1; }
 
     local -a ids=()
-    expand_list "$expect" ids
+    expand_list "$expect"
+    ids=(${EXPANDED[@]+"${EXPANDED[@]}"})
 
     local out code=0
     out=$(MIRVM_BUILD_ID=0000000000000000 \

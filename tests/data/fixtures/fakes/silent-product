@@ -1,0 +1,4 @@
+#!/bin/sh
+# A product that succeeds and produces nothing. framework-self-test uses it as the false-green probe:
+# a case compared against a real authority must FAIL against this, never pass.
+exit 0

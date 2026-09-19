@@ -16,7 +16,8 @@ mode_run() {
     apply_env "$(field env "")"
 
     local -a specs=()
-    expand_list "$calls" specs
+    expand_list "$calls"
+    specs=(${EXPANDED[@]+"${EXPANDED[@]}"})
     local spec wanted got code failures=0
     for spec in "${specs[@]}"; do
         wanted=${spec##*:}

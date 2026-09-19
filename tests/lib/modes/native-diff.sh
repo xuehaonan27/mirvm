@@ -12,7 +12,7 @@ MODE_REQUIRED="input"
 run_subject() {
     local src=$1 prefix=$2 calls=$3
     local -a specs=()
-    [ -n "$calls" ] && expand_list "$calls" specs
+    [ -n "$calls" ] && { expand_list "$calls"; specs=(${EXPANDED[@]+"${EXPANDED[@]}"}); }
     : >"$prefix.out"
     : >"$prefix.err"
     local code=0 spec
@@ -75,7 +75,8 @@ mode_run() {
     sub_caps=$(field sub_caps "")
     if [ -n "$sub_caps" ]; then
         local -a caps=()
-        expand_list "$sub_caps" caps
+        expand_list "$sub_caps"
+        caps=(${EXPANDED[@]+"${EXPANDED[@]}"})
         local cap status
         for cap in "${caps[@]}"; do
             status=$(grep -E "^${cap}=([0-9a-f]+|unavailable)$" "$base.native.out" || true)

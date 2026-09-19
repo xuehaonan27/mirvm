@@ -47,8 +47,9 @@ case "$target" in
             exit 0
         fi
         ;;
-    tests/data/programs/ecosystem.rs)
-        case "${SCENARIO:-xfail}" in
+    */programs/ecosystem.rs)
+        case "${SCENARIO:-green}" in
+            green) echo 'ecosystem-ok' ;;
             false_positive) exit 101 ;;
             xfail)
                 echo 'TRAP: synthetic.frontier' >&2
@@ -65,26 +66,26 @@ case "$target" in
                 ;;
         esac
         ;;
-    tests/data/programs/ffi_zlib.rs)
+    */programs/ffi_zlib.rs)
         echo 'ffi-ok'
         ;;
-    tests/data/programs/probe_real_ripgrep_regex.rs)
+    */programs/probe_real_ripgrep_regex.rs)
         echo 'regex-ok'
         ;;
-    tests/data/programs/probe_cargo_warning_return.rs)
+    */programs/probe_cargo_warning_return.rs)
         echo 'warning-return-ok'
         ;;
-    tests/data/programs/c_signal.rs)
+    */programs/c_signal.rs)
         echo 'mirvm: unsupported builtin `signal`' >&2
         exit 70
         ;;
-    tests/data/programs/c_rayon.rs)
+    */programs/c_rayon.rs)
         echo 'par_sort ok = true'
         ;;
-    tests/data/programs/c_volatile.rs)
+    */programs/c_volatile.rs)
         echo 'volatile aligned=0x0123456789abcdef unaligned=0x89abcdef pair=0x90a0b0c0d0e0f000:0x1020304050607080'
         ;;
-    tests/data/programs/jit_unwind_probe.rs)
+    */programs/jit_unwind_probe.rs)
         echo 'mirvm-jit-stats: c2i=7 c2i_slow=0 i2c=0 alloc=0 tls_ref=0' >&2
         ;;
     */proj)
