@@ -97,8 +97,8 @@ implementation rather than after mistakes.
 - Use Rust 2024, existing style, and tracing initialized only in binaries:
   `info` for lifecycle, `debug` for internals, `warn` for recoverable issues,
   `error` for unrecoverable failures. Update schemas/config/docs with contract changes.
-- Write code, comments, doc comments, user-visible messages and everything under
-  `docs/` in English. `README.md` and `DESIGN.md` are still Chinese; convert them
+- Write code, comments, doc comments, user-visible messages, `README.md` and
+  everything under `docs/` in English. `DESIGN.md` is still Chinese; convert it
   only when asked.
 - A code comment describes the code in front of it: say what it does and why the
   non-obvious parts are that way (invariants, preconditions, hazards, units,
