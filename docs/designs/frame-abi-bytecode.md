@@ -1,222 +1,142 @@
-# 帧布局 · 调用约定 · 字节码格式 —— M4 设计草图（模型 A）
+# Frame Layout, Calling Convention, and Bytecode Format — M4 Design Baseline (Model A)
 
-> **状态：M4 的历史设计基线，主体已实现；`.mirvm` 分发已实现，alloca 必迁承诺已撤销。**
-> Model A tree-walking、slaved ByteRegion、冻结元数据、真线程和 M4 unwind 已落地；
-> 方法级 Cranelift 与 i2c/c2i 产品适配器已由 M5.3–M5.5 兑现；`.mirvm` mode B 分发
-> 已经实现。解释态局部正式保留 slaved ByteRegion，`alloca` 只在
-> 真实负载证明性能收益时重开。实际状态见
-> [current-status.md](../current-status.md)，A/B 与局部存储两轴的演变见
-> git 历史。下文保留原始方案，不能把未来段落当成现状。
+> Status: Implemented · Scope: Model A native frame kinds, interpreted-frame layout and guest local storage, frame descriptors, calling convention and the four interp↔compiled transitions, and the register-based bytecode format.
 >
-> **2026-08-12 unwind 勘误**：下文历史段落把“跨 FFI”一概写成 abort，范围过宽。
-> 现行规则是普通 C 边界终止，C-unwind 边界允许原异常穿过并跑 cleanup；出向
-> `ffi_call`、callback/P1 wrapper、解释器与 JIT 均已按此实现。规范见
-> [c-unwind-contract.md](c-unwind-contract.md)。
+> M4 historical baseline; the main body is implemented. Tree-walking Model A, the slaved ByteRegion, frozen metadata, real threads and M4 unwind have landed; method-level Cranelift and the i2c/c2i product adapters were delivered by M5.3–M5.5; `.mirvm` mode B distribution is implemented. Interpreted locals formally keep the slaved ByteRegion. Current rollout state lives in [`../current-status.md`](../current-status.md); the A/B and local-storage two-axis evolution lives in git history. **2026-08-12 unwind erratum:** earlier text wrote "across FFI" as an unconditional abort, which is too broad. The current rule is that an ordinary C boundary terminates while a `C-unwind` boundary lets the original exception pass through and run cleanup; outbound `ffi_call`, callback/P1 wrapper, interpreter and JIT are all implemented to this rule. Normative contract: [`c-unwind-contract.md`](c-unwind-contract.md).
 
----
+## 1. Contract
+1. **One activation, one native frame.** Every guest function call activation maps to exactly one native stack frame, so interp↔compiled calls are native calls and unwind walks a single stack. This is the Model A property the JIT depends on.
+2. **Guest locals are orthogonal to JIT interop.** JIT interop requires only that call activity (control flow + unwind) sit on the native stack. It never requires guest local data to be inlined there: compiled code never reads an interpreted frame's locals, and cross-function traffic uses only the calling convention.
+3. **Interpreted-frame locals live in the slaved operand region.** Each thread owns one operand region, slaved to `interp_frame` recursion (LIFO, in step with entry and exit). It must never be suspended independently — mirvm has no coroutines (§async). Control flow stays on the native stack.
+4. **Region SP discipline.** Entering `interp_frame` bumps the region SP by the frame's `total_frame_size` to reserve that frame's register slots; leaving it, and unwind, restore the region SP.
+5. **Register slot = MIR local.** `r0..rn` correspond to MIR `_0.._n`; each slot is sized and aligned by its type's frozen layout. Slots are real addresses, so `&local` handed to C is natural.
+6. **Frame storage must not be coupled to the safety mode.** Frame local storage and the safety mode (`fast`/`checked`, axis S) are two orthogonal axes and must stay uncoupled in the implementation. They meet at exactly one abstraction, `GuestMemory::contains(addr)->bool`, the "is this legal guest memory" predicate: `fast` never calls it, `checked` calls it before any raw dereference, and `FrameStorage` provides it. The current slaved region can answer it with a cheap range compare; any future storage reopened on performance evidence must not change `checked`'s semantic contract.
+7. **No `alloca` for interpreted locals (2026-08-12 final ruling, replacing the 2026-07-05 migration promise).** Hot functions already use native frames and SSA under Cranelift; `alloca` would change only the cold interpreter while additionally carrying stack probing, zeroing, unwind and checked address tracking. It reopens only when real interpreter load proves end-to-end benefit.
+8. **Freeze metadata at lowering; never touch tcx at runtime (C8).** Layout, call targets, vtable slots, drop glue and constants resolve into concrete numbers during lowering. The product is an immutable `BytecodeBody`, read-only and thread-shared after publication, with lock-free reads. Lowering runs on the compilation service thread or under a lazy lock (≈ HotSpot resolved constant pool / class loading).
+9. **Adapters only move arguments.** i2c/c2i move guest arguments between operand-region slots and convention registers; compiled→compiled is a direct native call with zero adaptation.
+10. **The JIT calling convention must be unwind-capable.** Plain `"C"` is an abort shim and is kept only as a fallback for ordinary C abort.
+11. **Exception partition.** Across an ordinary C boundary a guest exception ends (abort); across a `C-unwind` boundary the original exception passes through and cleanup runs. The normative contract is [`c-unwind-contract.md`](c-unwind-contract.md).
+12. **The engine is `Sync` with no GIL (VM tier), one guest thread per OS thread.** `BytecodeBody` and frozen metadata are read-only shared after publication; the operand region is per-thread private; Rust heap allocation goes through a per-thread arena (C8); each guest thread's interpreted frames use that OS thread's native stack.
+13. **JIT backend and distribution are fixed.** Cranelift sits behind the `JITBackend` trait and the VM core talks only to the trait. Distribution is a multi-target fat `.mirvm` artifact; a single artifact that runs on any target is rejected (§3), and a missing triple must be reported as "unsupported platform".
 
-## 0. "模型 A for mirvm"具体是什么
-
-模型 A 的 JIT 关键性质 = **每个 guest 函数活动记录（call activation）对应一个 native 栈帧**，于是
-interp↔compiled 调用是 native call、unwind 走一条栈。有两类 native 帧：
-
-- **解释帧**：一次 `interp_frame(instance)` 的 Rust 调用（tree-walking 控制流：guest 调用 = 宿主递归调用）。
-- **编译帧**：Cranelift 生成的 native 帧（纯 guest，无解释器开销）。
-
-> **澄清（重要）**：JIT 互操作只要求**调用活动**在 native 栈上（控制流 + unwind），**不要求 guest 局部数据
-> 也内联在 native 栈**——编译代码从不读解释帧的局部，跨函数只按调用约定传参/返回。所以"局部数据放哪"
-> 与 JIT 互操作**正交**（见 §2）。模型 B 之所以 JIT 难，是因为它的 guest 调用**不递归 native 栈**
-> （flat loop + Vec<Frame>），编译帧的解释态 caller 不在 native 栈上，unwind 走不过去。
-
-**为什么 tree-walking（宿主递归）而非 HotSpot 的汇编模板解释器**：后者显式操作 native SP 压/弹解释帧
-（汇编级），太重；tree-walking 用安全 Rust 就把 guest 调用映射成 native 调用，同样达成模型 A 的 JIT
-互操作。代价是每个解释帧背一个宿主 `interp_frame` 开销——但**解释器是冷层**（热代码走编译帧），可接受。
-汇编/alloca 方案只保留为证据触发的性能候选（§10、git 历史）。
-
----
-
-## 1. 两类 native 帧
+## 2. Model
+### 2.1 Frame kinds
+A call activation is on the native stack even when its locals are not:
 
 ```
- 一条 OS 线程的 native 栈（向下增长）：
- ┌─────────────────────────────────────┐
- │ interp_frame(main)   [解释帧]         │  Rust 帧: 含 dispatch 状态 + 指向 main 的操作数区
- ├─────────────────────────────────────┤
- │ <compiled> foo       [编译帧]         │  Cranelift 帧: foo 的 locals/spill，纯 native
- ├─────────────────────────────────────┤
- │ interp_frame(bar)    [解释帧]         │  ← 当前
- └─────────────────────────────────────┘
- 调用链: main(解释) → foo(编译) → bar(解释)，全在一条 native 栈；
- 每次跨越是 i2c/c2i 适配器（§3）。unwind 走这一条栈（§7）。
+ one OS thread's native stack (grows downward):
+   interp_frame(main)   [interpreted]  Rust frame: dispatch state + main's operand region
+   <compiled> foo       [compiled]     Cranelift frame: foo's locals/spills, pure native
+   interp_frame(bar)    [interpreted]  ← current
+ main(interp) → foo(compiled) → bar(interp): one native stack, each crossing an i2c/c2i adapter (§2.4); unwind walks this stack (§2.8).
 ```
 
-- 解释帧 = `interp_frame` 的一次 Rust 调用；guest 调用 → 宿主递归。
-- 编译帧 = Cranelift 帧；guest 调用 → 直接 native call。
-- 两者混在一条 native 栈，通过适配器相连——这就是模型 A。
+- Interpreted frame = one Rust call to `interp_frame`; a guest call becomes host recursion.
+- Compiled frame = a Cranelift-generated native frame; a guest call is a direct native call.
+- Both kinds share one native stack, joined by adapters. That is Model A.
+- Why tree-walking (host recursion) rather than a HotSpot-style assembly template interpreter: the latter manipulates the native SP explicitly to push and pop interpreted frames at assembly level, which is too heavy; tree-walking maps guest calls to native calls in safe Rust and reaches the same Model A JIT interop. Its cost is one host `interp_frame` overhead per interpreted frame, acceptable because the interpreter is the cold tier (hot code runs in compiled frames). The assembly/`alloca` route survives only as an evidence-triggered performance candidate (§5, git history).
 
----
+### 2.2 In-frame layout and guest local storage
+**Compiled frame.** Cranelift manages it (locals, spill slots, callee-saved registers). This contract defines only its calling convention (§2.4) and unwind info (§2.8); mirvm places no layout for it.
 
-## 2. 帧内布局与 guest 局部存储
-
-### 2.1 编译帧
-
-Cranelift 自管（locals、spill 槽、callee-saved），我们只定**它的调用约定**（§3）和 **unwind info**（§7）。
-无需我们摆布局。
-
-### 2.2 解释帧的 guest 局部：slaved 操作数区（Rust 可行，避 alloca）
-
-guest 帧大小是**动态的**（取决于函数的 locals 数与类型），Rust 局部是定长——不能直接内联到 native 栈。
-方案：**每线程一块"解释器操作数区"，slaved 于 `interp_frame` 递归**：
+**Interpreted frame.** A guest frame's size is dynamic (it depends on the function's local count and types) while Rust locals are fixed-size, so guest locals cannot be inlined directly into the native stack. Scheme: one interpreter operand region per thread, slaved to `interp_frame` recursion.
 
 ```
- 每线程操作数区 (连续 buffer, SP slaved 于 interp_frame 递归):
- ┌──────────────────────────────────────────────────┐
- │ [main 的寄存器槽 r0..rn][bar 的寄存器槽 r0..rm]... │  ← 区 SP
- └──────────────────────────────────────────────────┘
-   进 interp_frame: 按帧描述符 bump 区 SP 预留本帧寄存器槽
-   出 interp_frame / unwind: 恢复区 SP
+ per-thread operand region (contiguous buffer; SP slaved to interp_frame recursion):
+   [main's register slots r0..rn][bar's slots r0..rm]...   ← region SP
+   enter interp_frame: bump region SP per the frame descriptor to reserve this frame's slots; exit/unwind: restore region SP.
 ```
 
-- **不是模型 B**：这块区 slaved 于 native 递归（LIFO，与 interp_frame 进出同步），**不可独立挂起**
-  （我们不要协程，§async）。控制流仍在 native 栈上（模型 A）。
-- **寄存器槽 = MIR 局部**：`r0..rn` 对应 MIR 的 `_0.._n`，每槽按其类型的冻结 layout 定大小/对齐。
-- **`&local` → C 天然**：槽在区里是真地址（§4 真实地址）。
-- 编译帧不用这块区（用自己的 Cranelift 帧）。
+Compiled frames never use this region; they use their own Cranelift frame.
 
-> **2026-08-12 终裁（替代 2026-07-05 的迁移承诺）**：slaved ByteRegion 是解释器的
-> 正式帧局部方案，不再要求换成 alloca。热函数已经由 Cranelift 使用 native 帧与 SSA；
-> alloca 只改变冷解释器，而且必须额外承担栈探测、清零、unwind 和 checked 地址追踪。
-> 只有真实解释器负载证明端到端收益时才重开。
->
-> **仍有效的解耦要求**：帧局部存储与安全模式（fast/checked，轴 S）是
-> 两根【正交轴】，实现上【不得耦合】。** 二者只在一个抽象处相遇：`GuestMemory::contains(addr)->bool`
-> （"是否合法 guest 内存"谓词）。fast 从不调它；checked 在 raw 解引用前调它；FrameStorage 提供它。
-> 当前 slaved 区可用廉价范围比较；未来若以性能证据重开其他存储，也不得改变 checked 的语义合同。
-
-### 2.3 帧描述符（lowering 时算好，冻结）
-
-每个函数一份，供 interp_frame 建帧用：
+### 2.3 Frame descriptors
+One per function, computed at lowering and frozen, consumed by `interp_frame` to build a frame:
 
 ```
 FrameDescriptor {
-    reg_count,                       // 寄存器(=MIR 局部)数
-    reg_slots: [{offset, size, align, ty_layout_id}],  // 每寄存器在操作数区的槽
-    total_frame_size,                // 区里预留多少
-    drops: [{reg, drop_glue_instance, cond}],          // 需 Drop 的寄存器 + drop glue（冻结）
-    cleanup_edges,                   // unwind 目标（catch/cleanup 块），冻结自 MIR
+    reg_count,                                        // number of registers (= MIR locals)
+    reg_slots: [{offset, size, align, ty_layout_id}], // each register's slot in the operand region
+    total_frame_size,                                 // how much is reserved in the region
+    drops: [{reg, drop_glue_instance, cond}],         // registers needing Drop + drop glue (frozen)
+    cleanup_edges,                                    // unwind targets (catch/cleanup), frozen from MIR
 }
 ```
 
----
-
-## 3. 调用约定 + i2c/c2i 适配器
-
-目标：compiled↔compiled 是纯 native call；interp↔compiled 廉价适配。
-
-### 3.1 编译代码的调用约定
-
-Cranelift 编译的 guest 函数用一个**定义好的 mirvm 调用约定**（可基于平台 C ABI 或自定义 Cranelift
-calling convention）。标量/指针按寄存器传（真实地址下指针就是真址）；聚合按 rustc 的 ABI（复用 rustc
-layout，与 native 一致）。**函数身份 = 单态化 Instance**（惰性单态化）→ 编译后是一个 code ptr。
-
-### 3.2 四种转移
+### 2.4 Calling convention and the four transitions
+Goal: compiled↔compiled is a pure native call, and interp↔compiled is cheap to adapt. Cranelift-compiled guest functions use one defined mirvm calling convention (based on the platform C ABI or a custom Cranelift calling convention). Scalars and pointers pass in registers (under real addresses a pointer is a real address); aggregates follow the rustc ABI, reusing rustc layout and staying consistent with native. Function identity is the monomorphized `Instance` (lazy monomorphization) → one code ptr after compilation.
 
 ```
-compiled → compiled : 直接 native call（Cranelift 按约定）。零适配。
-interp   → compiled : i2c 适配——interp_frame 把 guest 实参从操作数区槽搬进约定寄存器, native call code ptr。
-compiled → interp   : c2i 适配——编译码 call 一个桩 c2i(instance, args...); 桩把参数搬进新解释帧的
-                       操作数区槽, 调 interp_frame(instance)。
-interp   → interp   : interp_frame 直接递归调 interp_frame(callee)（宿主递归）。
+compiled → compiled : direct native call (Cranelift per the convention). Zero adaptation.
+interp   → compiled : i2c adapter — interp_frame moves guest arguments from operand-region slots into convention registers, then native-calls the code ptr.
+compiled → interp   : c2i adapter — compiled code calls a stub c2i(instance, args...); the stub moves the arguments into the new interpreted frame's operand-region slots and calls interp_frame(instance).
+interp   → interp   : interp_frame recursively calls interp_frame(callee) (host recursion).
 ```
 
-- 适配器只是**参数搬运**（槽 ↔ 寄存器），因同在 native 栈，便宜。HotSpot i2c/c2i 同构。
-- **未编译的热 Instance**：interp 调它时，要么继续解释，要么请求编译（编译服务线程，C8）——tiering
-  策略本草图**不定**（M5 事），此处只保证"编译后可无缝接入"。
+- Adapters only move arguments (slots ↔ registers); they are cheap because both sides are on the same native stack. Structurally identical to HotSpot i2c/c2i.
+- An uncompiled hot `Instance`: when interp calls it, it either keeps interpreting or requests compilation (compilation service thread, C8). This design fixes no tiering policy (M5); it guarantees only that a compiled callee plugs in seamlessly.
 
----
+### 2.5 Bytecode format and MIR correspondence
+The bytecode is register-based (not stack-based) with registers ≈ MIR locals. Rationale: MIR is already register/place-based (`_0.._n` + projections), so register form lowers almost mechanically from MIR and uses fewer, faster instructions (Lua and Dalvik made the same choice). The bytecode is "MIR after metadata resolution and flattening".
 
-## 4. 字节码格式：寄存器式，MIR 派生
-
-**寄存器式**（非栈式），寄存器 ≈ MIR 局部。理由：MIR 本就是寄存器/place 式（`_0.._n` + projection），
-寄存器式**从 MIR 近乎机械降低**、指令更少更快（Lua/Dalvik 同选）。字节码 = "**MIR 把元数据解析/展平后的形态**"。
-
-### 4.1 与 MIR 的对应
-
-| MIR | mirvm 字节码 |
+| MIR | mirvm bytecode |
 |---|---|
-| 局部 `_i` | 寄存器 `ri`（操作数区一个槽） |
-| place projection `_3.2`、`(*_4)[i]` | 解析成**具体偏移算术**（layout 冻结 → 编译期算好偏移） |
-| rvalue（BinaryOp/Ref/Cast/Aggregate…） | 对应字节码指令，写入目标寄存器 |
-| `SwitchInt`（match/判别式/**async 状态机**） | `switch ri -> [值:目标]` |
+| local `_i` | register `ri` (one slot in the operand region) |
+| place projection `_3.2`, `(*_4)[i]` | resolved to concrete offset arithmetic (layout frozen → offset computed at compile time) |
+| rvalue (BinaryOp/Ref/Cast/Aggregate…) | corresponding bytecode instruction, writing the destination register |
+| `SwitchInt` (match/discriminant/**async state machine**) | `switch ri -> [value:target]` |
 | `Call(f, args, dest, unwind)` | `call <InstanceId/code ptr>, [arg regs], dest reg, unwind blk` |
-| `Drop(place, unwind)` | `drop ri`（用冻结的 drop glue instance） |
+| `Drop(place, unwind)` | `drop ri` (using the frozen drop glue instance) |
 | `Return` | `ret r0` |
-| foreign call | `call_foreign <os::handler id>` 或经 §os 边界 |
+| foreign call | `call_foreign <os::handler id>` or through the §os boundary |
 
-### 4.2 指令集草图（示意，非全集）
+Instruction-set sketch (illustrative, not the full set):
 
 ```
-# 算术/逻辑
-bin  <op> rd, ra, rb          # op: add/sub/mul/... 带 overflow 语义(冻结 overflow-checks)
-un   <op> rd, ra
-# 内存（真实地址，§4；无 AllocId 元数据，裸访问）
-load  rd, [rbase + off]       # off 编译期算好
-store [rbase + off], rs
-ref   rd, rplace              # 取址(真址)
-# 聚合/投影
-field rd, rbase, off          # 已解析偏移
-index rd, rbase, ridx, elem_sz
-discr rd, rbase, disc_enc     # 读判别式(冻结编码/niche)
-setdiscr rbase, variant, disc_enc
-# 控制流
-jump   blk
-switch ri -> [v0:blk0, v1:blk1, ...]   # ← async 状态机派发就是这个
-call   <target>, [args], rd, unwind=blk # target: 直接 InstanceId / dyn: vtable slot
-ret    ri
-# 内建
-intrinsic <id>, [args], rd    # 引擎实现或转 os::
+# arithmetic/logic: bin <op> rd, ra, rb / un <op> rd, ra   # add/sub/mul/... with overflow semantics (frozen overflow-checks)
+# memory (real addresses; no AllocId metadata, raw access)
+load rd, [rbase + off] / store [rbase + off], rs / ref rd, rplace   # off computed at compile time
+# aggregates/projections, with off already resolved
+field rd, rbase, off / index rd, rbase, ridx, elem_sz
+discr rd, rbase, disc_enc / setdiscr rbase, variant, disc_enc      # frozen encoding/niche
+# control flow
+jump blk
+switch ri -> [v0:blk0, v1:blk1, ...]     # async state machine dispatch is exactly this
+call <target>, [args], rd, unwind=blk    # target: direct InstanceId / dyn: vtable slot
+ret ri
+# builtins: engine-implemented or forwarded to os::
+intrinsic <id>, [args], rd
 ```
 
-- **投影/判别式全是冻结偏移**——运行期不查 tcx（C8）。
-- `switch` 直接服务 async（§async 已证：状态机就是 discr + switch，无特殊支持）。
+Projections and discriminants are all frozen offsets, so the runtime never queries tcx (C8). `switch` directly serves async (§async): the state machine is discr + switch and needs no special support.
 
----
+### 2.6 Metadata freezing
+Lowering MIR to bytecode for one monomorphized `Instance` resolves and freezes:
 
-## 5. 元数据冻结（lowering 时解析，运行期不触 tcx —— C8 核心）
+- **layout** — per-type size/align/field offsets/discriminant & niche encoding → concrete numbers.
+- **call targets** — direct call → the monomorphized `Instance`'s `BytecodeBodyId` / code ptr; dyn call → vtable slot number.
+- **vtable** — dyn type vtable layout (method slots).
+- **drop glue** — every position needing Drop → a concrete drop instance.
+- **constants** — interned into this function's constant pool.
+- **intrinsic** — marked as a builtin op or resolved.
 
-MIR → 字节码（针对一个单态化 Instance）时解析并冻结：
-
-- **layout**：每类型的 size/align/字段偏移/判别式&niche 编码 → 具体数字。
-- **调用目标**：直接调 → 单态化 Instance 的 BytecodeBodyId / code ptr；dyn 调 → vtable slot 号。
-- **vtable**：dyn 类型的 vtable 布局（方法槽）。
-- **drop glue**：每个要 Drop 的位置 → 具体 drop instance。
-- **常量**：intern 进本函数常量池。
-- **intrinsic**：标记为内建 op 或解析。
-
-产物 = 不可变的 `BytecodeBody`。**发布后只读、线程共享**（C8：降低时冻结）。降低本身在编译服务线程或惰性
-加锁下做（≈ HotSpot 的 resolved constant pool / class loading），发布后各线程 lock-free 读。
-
----
-
-## 6. 执行：interp_frame 与转移
-
+### 2.7 Execution: `interp_frame` and transitions
 ```rust
-// 一次调用 = 一个解释帧（native 栈上）
+// one call = one interpreted frame (on the native stack)
 fn interp_frame(body: &BytecodeBody, args: Args, region: &mut OperandRegion) -> Value {
     let base = region.reserve(body.desc.total_frame_size); // slaved bump
     load_args_into_slots(region, base, args, &body.desc);
     let mut blk = 0; let mut ip = 0;
     loop {
         match body.code[blk][ip] {
-            Bin(op, rd, ra, rb) => { /* 读写 region[base+slot] */ }
-            Field(rd, rb, off)  => { /* 已冻结偏移 */ }
+            Bin(op, rd, ra, rb) => { /* read/write region[base+slot] */ }
+            Field(rd, rb, off)  => { /* already-frozen offset */ }
             Switch(ri, targets) => { blk = targets[read(ri)]; ip = 0; continue; }
             Call(target, aregs, rd, unwind) => {
                 let a = gather(region, base, aregs);
                 let r = match target {
-                    Interp(callee) => interp_frame(callee, a, region),   // 宿主递归(模型 A)
-                    Compiled(ptr)  => i2c_call(ptr, a),                  // native call + 适配
-                    Foreign(h)     => os::dispatch(h, a),               // §os 边界
+                    Interp(callee) => interp_frame(callee, a, region),   // host recursion (Model A)
+                    Compiled(ptr)  => i2c_call(ptr, a),                  // native call + adaptation
+                    Foreign(h)     => os::dispatch(h, a),               // §os boundary
                 };
                 write(region, base, rd, r);
             }
@@ -228,152 +148,80 @@ fn interp_frame(body: &BytecodeBody, args: Args, region: &mut OperandRegion) -> 
     }
 }
 ```
+Pure Rust, tree-walking: `region.reserve`/`region.restore` implement the slaved operand region, a compiled callee goes through a native call, an interpreted callee through recursion, and a foreign callee through the `os::` boundary.
 
-- 纯 Rust、tree-walking；guest 调用 → 宿主递归（模型 A）。
-- `region.reserve/restore` = slaved 操作数区。
-- 编译 callee 走 native call；解释 callee 走递归；foreign 走 os:: 边界。
+### 2.8 Unwind
+Model A's price: guest frames sit on the native stack, so unwind must walk a native stack mixing interpreted and compiled frames and run each frame's guest Drop. That is harder than tier-0 (Model B pops its own `Vec<Frame>`), and it is the bill for Model A's seamless JIT. Requirement: a guest panic unwinds the native stack frame by frame, runs guest Drops in guest order, and is either caught by a `catch_unwind` frame or leaves `main` (exit 101).
 
----
+- **Candidate A — reuse the platform unwinder (libunwind + personality).** Compiled frames: Cranelift emits landing pads (supported by 2025) and runs guest Drop, the same way natively compiled Rust does. Interpreted frames: `interp_frame` is a Rust function and participates through landing pads / catch, captures the unwind, runs this frame's guest Drop, then rethrows. Upside: naturally consistent with Cranelift, and it gives ordinary-C abort semantics for free (crossing C = abort). Difficulty: guest unwind and host Rust unwind must share one personality, which requires designing the guest exception object and personality routine.
+- **Candidate B — a self-built stack walker (HotSpot style).** Walk the native stack from frame metadata and run Drop ourselves. Upside: full control. Difficulty: it must recognize and step over Cranelift frames by reading their unwind info, which is a large amount of work.
 
-## 7. Unwind（**最硬的部分，spike**）
+**Candidate A chosen (2026-07-05, because the JIT was fixed on Cranelift, §2.9):** reuse Cranelift's existing landing-pad machinery instead of building one; cg_clif has already blazed MIR→Cranelift+unwinding for all of Rust, which lowers the risk. A spike is still required for guest exception propagation on a mixed interpreted+compiled stack, Drop order, and `catch_unwind`. This is the number-one M4 pre-spike, and candidate B is retained as a fallback.
 
-模型 A 的代价：guest 帧在 native 栈上，unwind 要**走一条混着解释帧 + 编译帧的 native 栈**，逐帧跑 guest Drop。
-这比 tier-0（模型 B，我们自己 pop Vec<Frame>）难。老实说这是模型 A 换 JIT 无缝的账。
+**Spike 3 passed (2026-07-07):** the host panic mechanism (the same platform unwinder + Rust personality, the concrete form of candidate A) matched native bit-for-bit on a mixed stack for propagation, Drop order (inner first), `catch_unwind`, and the ordinary-C cross-boundary abort covered by the probe, including re-entry into mixed execution from inside a landing pad (a cleanup chain calling a compiled helper). **Candidate A is seated; candidate B is retired to a paper fallback.** The frame-ABI unwind dimension took shape: interpreted frame = `CleanupGuard` + dynamic `unwind_edge` (dynamic LSDA) + region restore; compiled frame = static LSDA + landing pad; a single native stack means the unwinder is naturally inner-first per frame with zero VM-side coordination. Residuals: real Cranelift LSDA emission is left for an M4 re-check (the same checkpoint as the vmctx internal convention), and the JIT calling convention must be unwind-capable (plain `"C"` = abort shim, the fallback for ordinary C abort).
 
-需求：guest panic → 沿 native 栈退帧、按 guest 顺序跑 Drop、被 catch_unwind 帧接住或穿出 main（退 101）。
+**Spike 5 narrowed the residuals (2026-07-07):** CFI propagation was verified with real Cranelift — `create_unwind_info` → gimli `.eh_frame` → self-registration via `__register_frame`, after which a guest panic correctly passes through a real JIT frame (running bare gives the expected SIGABRT because cranelift-jit does not register system `.eh_frame`; its wasmtime-unwinder exception path does not interoperate with the host unwinder and is formally not adopted). The only M4 residual is landing pad/LSDA, i.e. running drop glue and catch inside a JIT frame, with the cg_clif personality/exception-table precedent. i2c/c2i/cc→cc direct calls were also confirmed with real Cranelift, so the §2.4 adapter model is empirical rather than a stand-in.
 
-### 候选机制（待 spike 定）
+### 2.9 JIT backend and bytecode distribution (decided 2026-07-05)
+**Backend = Cranelift, hidden behind `JITBackend`.** Cranelift is built for JIT (≈10× faster compilation than LLVM; code quality ≈2% slower than V8 and ~14% slower than LLVM), which fits the target of JIT ≈ debug build where compile latency matters and peak quality does not. cg_clif already maps MIR→Cranelift for all Rust (Rust ABI, layout, 2025 unwinding), so its knowledge is reused; Wasmtime/Wasmer/SpiderMonkey baseline are production validation.
 
-- **A. 复用平台 unwinder（libunwind + personality）**：
-  - 编译帧：Cranelift 发 landing pad（2025 已支持），跑 guest Drop——**和 native Rust 编译码同款**。
-  - 解释帧：`interp_frame` 是 Rust 函数，用 landing pad / catch 参与，捕获 unwind → 跑本帧 guest Drop → 重抛。
-  - 优点：与 Cranelift 天然一致、普通 C 的 abort 语义天然（穿 C = abort）。难点：guest unwind 与"宿主 Rust
-    unwind"要共用一套 personality，得设计 guest 异常对象 + personality routine。
-- **B. 自研栈行走器（HotSpot 式）**：我们按帧元数据自己走 native 栈、自己跑 Drop。
-  - 优点：完全掌控。难点：要能识别并走过 Cranelift 帧（读它的 unwind info），工作量大。
+- **`JITBackend` trait:** `compile(BytecodeInstance) -> (code ptr, unwind info, ...)`; the VM core talks only to the trait and Cranelift is the first impl (the same discipline as os::, P7). copy-and-patch (CPython 3.13 style; no runtime backend dependency and more portable, but worse code and memory bloat) is recorded as an alternative to evaluate if less runtime dependency is wanted later.
+- **Coupling is controllable:** only (1) the calling convention and (2) the unwind model cannot be abstracted away, and neither is Cranelift-specific — (1) we already use the Rust ABI (tier-0 `fn_abi`) and cg_clif does too, so the shared convention is "Rust ABI" and co-design cost is low; (2) landing-pad unwind is Rust's native way, so binding it ≈ binding "how Rust unwinds", which is unavoidable. Nothing is sacrificed to Cranelift in the memory, thread, metadata or real-address model.
 
-**定为候选 A（2026-07-05，因 JIT 已定 Cranelift，见 §7.5）**：借 Cranelift 已有的 landing-pad 机制，
-少造轮子——cg_clif 对全 Rust 已趟通 MIR→Cranelift+unwinding，风险大降。仍需 spike 验证"解释帧 + 编译帧
-混合栈上 guest 异常的传播 + Drop 顺序 + catch_unwind"。**这是 M4 前置 spike 的头号项。** 候选 B（自研
-栈行走）作为兜底保留。
-
-**Spike 3 验证通过（2026-07-07）**：宿主 panic 机制（= 同一平台
-unwinder + Rust personality，候选 A 的具象）在混合栈上传播 + Drop 顺序（内层先）+ catch_unwind +
-当时探针覆盖的普通 C 跨界 abort 全部与 native 逐位一致，含 landing pad 内再入混合执行（cleanup 链调编译 helper）。
-**候选 A 坐实，候选 B 退役为纸面兜底。** 帧 ABI unwind 维度封版雏形：解释帧 = CleanupGuard + 动态
-unwind_edge（动态 LSDA）+ region 恢复；编译帧 = 静态 LSDA + landing pad；单条 native 栈 ⇒ unwinder
-天然逐帧内层先，VM 侧零协调。残余：真 Cranelift LSDA 发射留 M4 复核（与 vmctx 内部约定同一检查点）；
-JIT 调用约定必须 unwind-capable（plain "C" = abort shim，给普通 C abort 兜底）。
-
-**Spike 5 收窄残余（2026-07-07）**：**CFI 传播已用真 Cranelift
-验证**——`create_unwind_info` → gimli .eh_frame → `__register_frame` 自注册后，guest panic 正确
-穿过真 JIT 帧（裸跑如预期 SIGABRT：cranelift-jit 不注册系统 eh_frame；其 wasmtime-unwinder 异常
-路线与宿主 unwinder 不互操作，**正式不采**）。M4 仅剩 **landing pad/LSDA**（JIT 帧内跑 drop glue
-+ catch，cg_clif personality/异常表先例）。i2c/c2i/cc→cc 直调也已真 Cranelift 坐实（§3 适配器
-模型从替身升级为实证）。
-
-跨普通 C 边界：**abort**；跨 `C-unwind` 边界则允许传播并跑 cleanup。现行分治合同
-见 [c-unwind-contract.md](c-unwind-contract.md)。
-
----
-
-## 7.5 JIT 后端与字节码分发（2026-07-05 定）
-
-### JIT 后端 = Cranelift，藏在 `JITBackend` trait 后
-
-- **选 Cranelift**：为 JIT 而生（≈10× 快于 LLVM 的编译，代码质量 ≈V8 慢 2%/比 LLVM 慢 ~14%），正合我们
-  目标（JIT ≈ debug build，编译延迟重要、峰值不重要）。**cg_clif 已把 MIR→Cranelift 全 Rust 映射好**
-  （Rust ABI、layout、2025 unwinding），复用其知识。Wasmtime/Wasmer/SpiderMonkey baseline 生产验证。
-- **`JITBackend` trait 抽象**：`compile(BytecodeInstance) -> (code ptr, unwind info, ...)`；VM 核心只对
-  trait 说话，Cranelift 是第一个 impl（os:: 同一纪律 P7）。copy-and-patch（CPython 3.13 式，运行期无后端
-  依赖、更可移植但代码较差/内存膨胀）记为**备选**，将来想更少运行期依赖再评估。
-- **耦合可控**：真正抽不掉的只有①调用约定②unwind 模型，且**都不是 Cranelift 特有**——①我们本就用
-  Rust ABI（tier-0 fn_abi），cg_clif 也用 → 共享约定 = "Rust ABI"，co-design 负担小；②landing-pad unwind
-  就是 Rust 原生方式，绑它 ≈ 绑"Rust 怎么 unwind"，逃不掉。**不为 Cranelift 牺牲**内存/线程/元数据/真实地址模型。
-
-### 字节码贴近 MIR + 两级结构
-
-字节码贴近 MIR（不下沉到 CLIF 级），让解释器与 Cranelift JIT **共享同一 MIR 级真理源**、复用 cg_clif 的
-MIR→Cranelift。分发与运行两级：
+**Bytecode stays close to MIR, in a two-level structure.** Keeping the bytecode near MIR (not sinking to CLIF level) lets the interpreter and the Cranelift JIT share one MIR-level source of truth and reuse cg_clif's MIR→Cranelift. Distribution and execution are two levels:
 
 ```
-mirvmc:   rustc 前端(全 check) → Stable MIR(rustc_public + serde) → 序列化为 .mirvm 分发件
-                                （版本化，= .class/.jar 类比；建在 Stable MIR 而非裸内部 MIR，有稳定性故事）
-mirvm 运行期"class loading":  .mirvm → 按 target 冻结 layout(C8) → 降低为
-                    ├─ 解释器的已解析寄存器字节码（偏移/调用/vtable 全解析，§4/§5）
-                    └─ 喂 Cranelift 的 JIT 输入（复用 cg_clif MIR→CLIF）
-                    （每平台一次，缓存；≈ Java classfile→verify→interpret/JIT、CPython .pyc→specialize→JIT）
+mirvmc:  rustc front end (all checks) → Stable MIR (rustc_public + serde) → serialize into a .mirvm artifact (versioned, ≈ .class/.jar; built on Stable MIR rather than raw internal MIR, so there is a stability story)
+mirvm runtime "class loading":  .mirvm → freeze layout per target (C8) → lower to
+                    ├─ the interpreter's resolved register bytecode (offsets/calls/vtable fully resolved, §2.5/§2.6)
+                    └─ the JIT input fed to Cranelift (reuse cg_clif MIR→CLIF) (once per platform, cached; ≈ Java classfile→verify→interpret/JIT, CPython .pyc→specialize→JIT)
 ```
 
-- **基座 = Stable MIR / `rustc_public`**：跑 rustc 全分析（所有 check），serde 序列化"单态化体 + 带 layout
-  的类型元数据 + 符号名"成自包含文件，消费端**不链接 rustc**。它专门解决"MIR 版本绑定"（SemVer 转换层）。
-- **版本绑定诚实**：mirvm 字节码像"classfile 有版本号"——runtime 要匹配或转换（可管理，非"任意 mirvm 跑
-  任意字节码到永远"）。
+- **Base = Stable MIR / `rustc_public`:** it runs the full rustc analysis (all checks) and serde-serializes monomorphized bodies plus layout-bearing type metadata plus symbol names into a self-contained file; the consumer does not link rustc. It specifically solves MIR version binding (a SemVer conversion layer).
+- **Version binding is honest:** mirvm bytecode is like a classfile with a version number — the runtime must match or convert (manageable; not "any mirvm runs any bytecode forever").
+- **Distribution format = multi-target packaging (fat artifact), decided 2026-07-05 with user confirmation.** A single artifact that runs on any target is rejected for full Rust (§3). mirvmc instead runs the front end once per selected triple (rustc cross-compilation) and packages N target-specific Stable-MIR sections; the runtime picks the matching section to load. This gives the consumer zero toolchain and one file covering common platforms (the real value of .jar), reuses the front end, skips codegen/linking (fast), and can still JIT at runtime. The cost is N cross-compilations by mirvmc and an artifact ×N (metadata only, compressible and downloadable per section). os:: is selected per platform at build time (Linux/macOS impl) and is independent of the distribution format.
+- **Section format:** `.mirvm` is one container with a target index header (triple → section offset); each section is that triple's Stable-MIR serialization plus frozen metadata. The runtime looks up its own triple; on a hit it loads, on a miss it reports "unsupported platform".
+- **On demand:** sections can be compressed individually and the format can support downloading only the matching section (network distribution).
+- **Default triple set:** common combinations of x86_64/aarch64 × linux(gnu/musl)/darwin/windows; mirvmc is configurable.
 
-### 分发格式：多 target 打包（**定，2026-07-05 用户确认**）
+### 2.10 Real OS threads (C8)
+Each guest thread is one OS thread: its interpreted frames use that OS thread's native stack, its slaved operand region is a private block on that thread, and compiled frames likewise run on each OS thread's native stack. **Thunk re-entry (native→interp, C8):** a pthread thread_start or C callback thunk is a native stub equivalent to c2i: on the current OS thread it calls `interp_frame(thread_start_instance, args, thread_local_region)`. Because the operand region and the native stack are both per-thread, this is naturally concurrency-safe. **Sync requirements:** `BytecodeBody` / frozen metadata are read-only shared after publication (C8); the operand region is per-thread private; Rust heap allocation goes through a per-thread arena (C8). Therefore the engine is `Sync` and there is no GIL (VM tier).
 
-**单产物"跑任意 target"对完整 Rust 理论上不可能**：根本障碍是 `cfg`——rustc 编译期按 `--target` 剪枝
-cfg，不同 target 是**字面不同的程序**，rustc 无 target 无关 MIR 输出（叠加 usize/可观测 layout/const-eval）。
-Java 能是因为它无编译期 target cfg、layout 由 JVM load 时定、基本类型定长——Rust 三条全违反，是语言固有性质。
+### 2.11 Deep recursion and stack overflow
+- Guest deep recursion becomes host `interp_frame` deep recursion plus operand-region growth, bounded by the native stack limit (≈ native Rust, faithful, §3.5); compiled frames are smaller than interpreted frames, so hot recursion goes deeper once compiled. Graceful capture: `interp_frame` may check the remaining native stack at entry (guard page / stack pointer threshold) and raise a guest stack overflow at the boundary (≈ native abort).
 
-**分发格式 = 多 target 打包（fat artifact）**：mirvmc 对一组选定 triple 各跑一次前端（rustc 交叉），
-打包 N 份 target 特定 Stable-MIR 段；运行期挑匹配段 load。**消费端零工具链、一文件覆盖常见平台**（.jar 的
-实际价值），复用前端 + 跳 codegen/链接（快）+ 运行期还能上 JIT。代价：mirvmc 交叉编译 N 次、artifact ×N
-（仅元数据，可压缩/按需下载段）。os:: 是**每平台 build 时选定**（Linux/macOS impl），与分发格式无关。
+## 3. Boundaries
+- **Model B is not supported.** Its guest calls do not recurse the native stack (flat loop + `Vec<Frame>`), so a compiled frame's interpreted caller is not on the native stack and unwind cannot pass through. Adopting a flat-frame model reopens the JIT interop contract.
+- **Independent suspension of interpreted frames is rejected.** The slaved operand region is LIFO; mirvm has no coroutines (§async).
+- **`alloca` for interpreted locals is rejected unless evidence reopens it.** Hot functions already use native frames and SSA; `alloca` changes only the cold interpreter and adds stack probing, zeroing, unwind and checked address tracking. Reopen trigger: real interpreter load proves an end-to-end benefit (2026-08-12 ruling replacing the 2026-07-05 migration promise).
+- **A HotSpot-style assembly template interpreter is rejected.** It manipulates the native SP explicitly at assembly level, which is too heavy; tree-walking in safe Rust achieves the same Model A interop. It survives only as an evidence-triggered performance candidate.
+- **Unwind candidate B (self-built stack walker) is retired to a paper fallback.** Candidate A reuses the platform unwinder, and cg_clif already blazed MIR→Cranelift+unwinding. Reopen trigger: candidate A fails on a mixed stack.
+- **Bare `cranelift-jit` execution and the wasmtime-unwinder exception path are rejected.** Bare cranelift-jit does not register system `.eh_frame`, so a guest panic crosses a JIT frame with no handler (bare run = expected SIGABRT), and mirvm therefore self-registers the `.eh_frame` via `__register_frame`; the wasmtime-unwinder path does not interoperate with the host unwinder and is not adopted.
+- **Plain `"C"` as the JIT calling convention is rejected** because it is not unwind-capable. It is kept only as the abort shim for the ordinary-C boundary.
+- **Ordinary C boundary:** a guest exception terminates (abort); a `C-unwind` boundary propagates and runs cleanup (see [`c-unwind-contract.md`](c-unwind-contract.md)).
+- **A single-artifact "run any target" distribution is rejected** as theoretically impossible for full Rust. The root obstacle is `cfg`: rustc prunes cfg per `--target`, so different targets are literally different programs and rustc has no target-independent MIR output (compounded by usize, observable layout and const-eval). Java can do it because it has no compile-time target cfg, layout is fixed at JVM load time, and primitives are fixed-size; Rust violates all three, which is an inherent property of the language.
+- **A missing triple must be refused, not guessed.** When the fat artifact carries no matching section, the runtime reports "unsupported platform".
+- **Tiering policy is not fixed here.** When to compile, whether to OSR (not first: compile whole methods at call boundaries), and deoptimization are M5 decisions; this design guarantees only seamless plug-in after compilation.
 
-- **段格式**：`.mirvm` = 一个容器，头部 target 索引（triple → 段偏移），各段 = 该 triple 的 Stable-MIR
-  序列化 + 冻结元数据。运行期按自身 triple 查索引，命中则 load，未命中报"不支持的平台"。
-- **按需**：段可各自压缩、可支持"只下载匹配段"（网络分发时）。
-- **默认 triple 集**：x86_64/aarch64 × linux(gnu/musl)/darwin/windows 的常见组合；mirvmc 可配。
+## 4. Verification
+Runtime behavior is judged against fixed native output: the interpreter is the reference and the JIT must agree byte-for-byte.
 
----
+| Evidence | Proves |
+|---|---|
+| `./tests/run.sh suite runtime.semantics` — unwind section, 13 items: 9 existing unwind/recovery semantics, plus an uncaught guest payload dropping exactly once for interpreter and JIT, cleanup then continuing to call and a second panic, plus interpreter and JIT distinguishing a real `lang_start` main panic from normal `Termination` 101 | mixed interpreted+compiled unwind, Drop order, `catch_unwind`, exit 101 |
+| `./tests/run.sh suite runtime.c-unwind` — 13 items: interpreter and forced-sync JIT preserve exception identity, Drop, and the ordinary-C termination boundary; a C++ typed exception passes through the whole Engine; a C++ exception terminates at a guest catch; rejection of non-C/System ABIs | the ordinary-C / `C-unwind` partition |
+| `./tests/run.sh suite runtime.tsan` — TSan exit code 0, no data-race warnings | per-thread region/arena with shared read-only bytecode (C8) |
+| `./tests/run.sh suite runtime.jit-stats` — `demo/jit_unwind_probe.rs` | JIT publication path (`JITBackend`, i2c/c2i) |
+| Three-dimension byte-equality: mirvm default / native `cargo run` / `MIRVM_JIT_THRESHOLD=1` | the four transitions agree with native |
+| TSan single case: `cd tsan && MIRVM_BUILD_ID=0000000000000000 RUSTFLAGS="-Zsanitizer=thread" cargo +nightly-2026-07-02 run -Zbuild-std --target x86_64-unknown-linux-gnu --release -- <case-id>` | the same, outside the bundled suite |
 
-## 8. 真 OS 线程集成（C8）
+Historical evidence: Spike 3 (2026-07-07, passed) and Spike 5 (2026-07-07) are recorded in §2.8. Foundation spikes: (1) minimal skeleton — `interp_frame` tree-walking + slaved operand region + register bytecode, run on pure computation (fib) and differentially compared against the tier-0 `InterpCx` oracle; (2) interp↔compiled adapter spike with one or two functions hand-written or minimally Cranelift-compiled; (3) the unwind spike (top item); (4) concurrency spike — N host threads each running `interp_frame` over shared read-only bytecode and per-thread region/arena, passing TSan.
 
-- 每 guest 线程 = 一 OS 线程；其解释帧用**该 OS 线程的 native 栈**，其 slaved 操作数区是**该线程私有**的一块。
-- **thunk 重入（native→解释，C8）**：pthread thread_start / C 回调的 thunk = 一个 native 桩，等价于 c2i：
-  在**当前 OS 线程**上 `interp_frame(thread_start_instance, args, thread_local_region)`。因操作数区每线程私有、
-  native 栈每线程私有，天然并发安全。
-- 编译帧同理跑在各自 OS 线程 native 栈上。
-- **Sync 要求**：BytecodeBody / 冻结元数据发布后只读共享（C8）；操作数区每线程私有；Rust Heap 分配走 per-thread
-  arena（C8）。→ 引擎 Sync，无 GIL（VM tier）。
-
----
-
-## 9. 深递归 / 栈溢出
-
-- guest 深递归 → 宿主 interp_frame 深递归 + 操作数区增长 → **native 栈界**（≈ native Rust，忠实，§3.5）。
-- 编译帧比解释帧小 → 热递归编译后能更深。
-- 优雅捕获：可在 interp_frame 入口查 native 栈剩余（guard page / 栈指针阈值），到界抛 guest 栈溢出（≈ native abort）。
-
----
-
-## 10. 开放问题 / spike 清单
-
-1. **Unwind 机制（§7）**：候选 A（复用 Cranelift landing pad + Rust personality）vs B（自研栈行走）。**头号 spike**：
-   混合栈 guest 异常传播 + Drop 顺序 + catch_unwind + 普通 C abort / C-unwind 传播。
-2. **帧局部存储（已裁决）**：解释器正式使用 slaved ByteRegion；alloca 不预设更快，只有
-   真实解释器负载证明端到端收益时重开。
-3. **调用约定细节**：基于平台 C ABI 还是自定义 Cranelift CC；聚合传参与 rustc ABI 对齐的具体做法。
-4. **JIT tiering 策略**（M5）：何时编译、OSR 要不要（先不做，调用边界处编译整方法）、去优化。本草图只保证"编译后可无缝接入"，不定策略。
-5. **thunk/closure 生成**：libffi closure 还是自生成小桩；与 c2i 适配器合并。
-6. **字节码验证/降低管线**：MIR→字节码 pass、冻结元数据的缓存与内容寻址（与 sysroot 缓存呼应）。
-7. **vmctx 传递机制**（→ docs/designs/vmctx-passing.md，2026-07-07）：**边界已被逼定**——FFI 逃逸指针/回调/
-   信号的入口必须 TLS 按当前线程查找执行态 + 惰性 attach（JNI AttachCurrentThread 同款，归 os::thread）；
-   被三条约束逼死：plain-C 逃逸（签名不能带隐藏参）、ctx 每线程一份（捕获式 thunk 跨线程原理错）、
-   信号在任意线程跑。**内部约定待 M4 定**：显式 vmctx 首参 vs Cranelift pinned reg（r15），配多入口
-   （f_boundary 读 TLS → tail-call f_fast(ctx,…)，HotSpot verified/adapter entry 同构）。红利：thunk
-   收窄回本职（仅解释态逃逸需要）。spike 阶段暂用显式参。
-
----
-
-## 11. 建议的 spike 顺序（M4 前，验证地基）
-
-1. **最小模型 A 骨架**：`interp_frame` tree-walking + slaved 操作数区 + 寄存器式字节码，跑通纯计算（fib）。
-   与 tier-0（InterpCx）差分对拍（tier-0 转 oracle）。
-2. **interp↔compiled 适配 spike**：手编一两个函数为 native code（先手写/或最小 Cranelift），验证 i2c/c2i +
-   混合栈调用跑通。
-3. **Unwind spike（头号）**：混合栈上 guest panic + Drop + catch_unwind + 普通 C abort / C-unwind 传播，选定机制 A/B。
-4. **并发 spike**（并入并发 RFC）：N 宿主线程各跑 interp_frame，共享只读字节码 + per-thread 区/arena，**过 TSan**。
-
-过了这 4 个 spike，模型 A 的地基就验证了，可进 M4 正式实现。
+## 5. Open items
+1. **Unwind mechanism:** candidate A vs B is decided (A seated, B retired), but real Cranelift landing-pad/LSDA emission remains an M4 re-check, at the same checkpoint as the vmctx internal convention. Reopen trigger: a mixed-stack failure.
+2. **Frame local storage (decided):** the interpreter formally uses the slaved ByteRegion; `alloca` is not presumed faster and reopens only when real interpreter load proves an end-to-end benefit.
+3. **Calling-convention details:** whether to base the convention on the platform C ABI or a custom Cranelift calling convention, and the concrete treatment of aggregate passing aligned with the rustc ABI.
+4. **JIT tiering policy (M5):** when to compile, whether to OSR (not first: compile whole methods at call boundaries), and deoptimization. This design guarantees only seamless plug-in after compilation.
+5. **thunk/closure generation:** libffi closures or self-generated small stubs, merged with the c2i adapter.
+6. **Bytecode verification/lowering pipeline:** the MIR→bytecode pass and the caching plus content addressing of frozen metadata (echoing the sysroot cache).
+7. **vmctx passing mechanism** (→ [`vmctx-passing.md`](vmctx-passing.md), 2026-07-07): the boundary is already forced — FFI escape pointers, callbacks and signal entry points must look up the execution state for the current thread through TLS plus lazy attach (the `AttachCurrentThread` analogue, owned by `os::thread`). Three constraints force it: a plain-C escape cannot carry a hidden parameter in its signature, the ctx is one per thread so a capturing thunk is wrong across threads, and signals run on arbitrary threads. The internal convention is still to be fixed in M4: an explicit vmctx first parameter versus a Cranelift pinned register (`r15`), paired with multiple entries (`f_boundary` reads TLS → tail-calls `f_fast(ctx,…)`, the HotSpot verified/adapter entry analogue). Bonus: thunks narrow back to their own job (only interpreted-state escape needs one). Spikes currently use an explicit parameter.

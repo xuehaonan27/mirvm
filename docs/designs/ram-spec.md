@@ -1,234 +1,140 @@
-# RAM-SPEC —— Rust 抽象机器规格（mirvm 的语义契约）
+# RAM-SPEC — Rust Abstract Machine Specification (mirvm's semantic contract)
 
-> **状态：长期语义契约。** 本文定义 mirvm 目标实现的 Rust 抽象机器（Rust Abstract Machine,
-> RAM），但不证明当前代码已经覆盖全部条款。当前实现缺口见 [current-status.md](../current-status.md)；
-> 历史 tier-0 偏差已不再是现状。
->
-> **本文不是**：Rust 官方形式规范（不存在）；不是从零重造一套操作语义（那是 opsem 团队十年工程 + Miri 的
-> 代码）。**本文是**：把"事实 RAM"（MIR 操作语义 + opsem 团队内存模型 + provenance + rustc layout）
-> 以**契约形式**钉清，引用权威来源、明确 mirvm 的边界/UB 立场/自由/偏差。实现细节见 §4 内存、
-> concurrency-arch.md、frame-abi-bytecode.md——那些说 HOW，本文说 WHAT。
+> Status: Contract · Scope: the Rust abstract machine (RAM) that mirvm targets — correctness contract, the four degrees of definition, boundaries, as-if freedom, UB stance, declared deviations.
 
----
+## 1. Contract
 
-## 0. 定位：一台机器，三个实现
+> **For any program P with defined behavior under RAM, mirvm's observable behavior when executing P conforms to the set of behaviors RAM permits P to produce.**
 
-Rust 无官方形式规范，但存在一台**事实上的抽象机器**。它有三个实现，实现同一台 RAM：
+Three points, none of them optional:
 
-| 实现 | 立场 | 用途 |
-|---|---|---|
-| **native codegen**（rustc+LLVM/cranelift） | 生产执行 | 编译成机器码跑 |
-| **Miri** | *检查*实现（宁慢勿漏 UB，开满 provenance/aliasing 检查） | UB 检测 |
-| **mirvm** | *运行/标准*实现（假设合法、追求快，关检查） | 快速运行 / 事实标准 |
+1. **Only observable behavior is constrained** (as-if, §2.3): I/O, syscall effects, volatile accesses, process exit code, panic messages. Everything internal (allocation placement, execution tier, scheduling) is free.
+2. **Only defined behavior is promised**: mirvm promises nothing for UB programs (§1.1 UB level, §2.4 stance).
+3. **Conformance is to a behavior set, not to a single value**: RAM constrains many things only to a **set** (unspecified / non-deterministic, §1.1). Producing any member of that set is conformant; mirvm **need not** be byte-identical to native (examples: address values, HashMap iteration order, repr(Rust) layout, thread scheduling).
 
-**核心推论**：三者实现同一台 RAM，所以 **"mirvm 输出 == native 输出" 是同源的必然，不是巧合**——
-这是 mirvm 差分对拍 native 为何有效的**理论依据**（§8）。mirvm 与 Miri 的差别不在语义，在**质量取向**
-（检测 vs 运行）；UB 检测对 mirvm 是可选 QoI，不是身份。
+**Rule**: mirvm must never accept producing, for a legal program, a result outside the well-defined behavior set.
 
----
+### 1.1 The four degrees of definition (strict core)
 
-## 1. 正确性契约
+RAM partitions program behavior into four levels; mirvm's obligation differs per level:
 
-> **对任何在 RAM 下有已定义行为的程序 P，mirvm 执行 P 的【可观测行为】符合 RAM 允许 P 产生的行为集合。**
-
-三个要点，缺一不可：
-
-1. **只管【可观测行为】**（as-if，§5）：I/O、syscall 效果、volatile、进程退出码、panic 消息。其余内部
-   （分配位置、执行 tier、调度）自由。
-2. **【有已定义行为】才承诺**：UB 程序 mirvm 不作承诺（§2 UB 级、§6 立场）。
-3. **符合【行为集合】而非单一值**：RAM 对很多东西只约束一个**集合**（unspecified / 非确定，§2）；mirvm 产出
-   集合中任一即合规，**不必与 native 逐字节相同**（例：地址值、HashMap 迭代序、repr(Rust) 布局、线程调度）。
-
----
-
-## 2. 定义度四级（"符合"到底是什么意思——本节是契约的严格核心）
-
-RAM 把程序行为分四级，mirvm 对每级的义务不同：
-
-| 级别 | RAM 说什么 | mirvm 义务 | 例 |
+| Level | What RAM says | mirvm obligation | Example |
 |---|---|---|---|
-| **well-defined** | 唯一确定的行为 | **必须**产出该行为 | `2+2==4`、`Vec::push` 后 len+1 |
-| **unspecified** | 允许的**集合**，实现挑一个 | 产出集合中**任一**即可（**不必同 native**） | repr(Rust) 字段顺序、HashMap 迭代序、`&x as usize` 的具体地址值、未初始化 padding 字节 |
-| **non-deterministic** | 允许**多个执行** | 产出**任一合法执行**即可 | 线程调度交错、弱内存序可见性、`thread_rng`、`HashMap` 随机种子 |
-| **UB** | **无定义** | **无约束**（假设不发生，不检测；§6） | 数据竞争、越界、use-after-free、读未初始化、违反别名 |
+| **well-defined** | uniquely determined behavior | **must** produce that behavior | `2+2==4`; len+1 after `Vec::push` |
+| **unspecified** | an allowed **set**; the implementation picks one | producing **any** member is conformant (**not necessarily the same as native**) | repr(Rust) field order, HashMap iteration order, the concrete address value of `&x as usize`, uninitialized padding bytes |
+| **non-deterministic** | **multiple executions** are allowed | producing **any legal execution** is enough | thread scheduling interleavings, weak-memory visibility, `thread_rng`, `HashMap` random seed |
+| **UB** | **no definition** | **no constraint** (assumed not to happen; not detected, §2.4) | data race, out-of-bounds, use-after-free, reading uninitialized memory, aliasing violation |
 
-**推论（对差分测试至关重要，§8）**：只有 **well-defined 的可观测输出**能与 native **逐字节对拍**；
-unspecified/non-det 输出只能靠**不变式**（如"和为 25"而非"顺序为 …"）或**归一化**（如线程名）比较；
-UB 程序**不对拍**（两边都可任意）。
+**Corollary (critical for differential testing, §4)**: only **well-defined observable output** can be compared byte-for-byte against native. unspecified / non-deterministic output can only be compared by **invariant** (e.g. "the sum is 25", not "the order is …") or by **normalization** (e.g. thread names). UB programs are **never** paired; both sides may do anything.
 
----
+### 1.2 Versioning and consistency
 
-## 3. RAM 的组成（五部分 + UB）
+- mirvm **locks** the rustc version (D9, currently nightly-2026-07-02), so this RAM-SPEC corresponds to exactly **one** rustc version.
+- Bytecode and distribution artifacts are versioned (C12): a `.mirvm` is like a classfile with a version number, and the runtime must either match it or convert it.
+- Consistency statement: mirvm vX is consistent, under the §1 contract, with the RAM defined by rustc vY; deviations follow the registration rules in §5.
 
-每部分给 RAM 的定义 + mirvm 的实现指针。
+## 2. Model
 
-### 3.1 存储（Storage）
+Rust has no official formal specification, but a **de facto abstract machine** exists: rustc's MIR operational semantics plus the opsem team's memory model (borrowed from C++20) plus the provenance model plus rustc's layout algorithm. This document pins that factual RAM down in **contract form**, citing authoritative sources and stating mirvm's boundaries, UB stance, freedoms and deviations. It is **not** an official formal specification (none exists) and **not** a from-scratch operational semantics (that would be the opsem team's decade-long project plus Miri's code). The implementation documents (§2.5) say HOW; this document says WHAT.
 
-- **分配（allocation）**：互异、对齐、有大小、有生死（live/dead）。分配返回互异、对齐、非空的地址。
-- **字节**：每字节有**初始化状态**（init/uninit）；指针大小的字节可携带 **provenance**。
-- **指针 = 地址 + provenance**。int→ptr、ptr→int、exposed provenance（Strict Provenance）。
-- **别名模型**（Tree Borrows，opsem 团队仍在定）：**定义 UB**（违反别名 = UB），合法程序不违反。
-- *mirvm 实现*：**真实地址**（分配基址 = 宿主真址，§4）；**不追踪 per-allocation 元数据**（init mask/
-  provenance/bounds 是检查器 overlay，fast machine 不需要，§4）；别名不强制（§6/§7）。
+### 2.1 One machine, three implementations
 
-### 3.2 值与布局（Values & Layout）
+| Implementation | Stance | Use |
+|---|---|---|
+| **native codegen** (rustc+LLVM/cranelift) | production execution | compile to machine code and run |
+| **Miri** | *checking* implementation (prefer slowness over missing UB; full provenance/aliasing checking) | UB detection |
+| **mirvm** | *running / standard* implementation (assumes legality, aims for speed, checks off) | fast execution / de facto standard |
 
-- 类型如何 **realize 成字节**：size / align / 字段偏移 / 判别式编码 / niche 优化。由 **rustc layout 算法**
-  固定，**target-specific**（指针宽度/对齐随平台）。repr(C) 遵 C ABI；repr(Rust) 布局 **unspecified**（§2）。
-- 值形态：标量（scalar）、标量对（scalar pair，如 &[T]/胖指针）、聚合（aggregate）。
-- *mirvm 实现*：**复用 rustc layout**（target==host / 冻结进字节码，C8/C12）——与 native 逐位一致。
+**Core corollary**: all three implement the same RAM, so **"mirvm output == native output" follows necessarily from shared provenance, it is not a coincidence** — this is the theoretical basis for why differential pairing against native is valid (§4). mirvm and Miri differ not in semantics but in **quality orientation** (detection vs execution); UB detection is an optional QoI for mirvm, not its identity.
 
-### 3.3 计算（Computation）
+### 2.2 Composition: five parts plus UB
 
-- **MIR 操作语义**：place（含 projection）、rvalue、statement、terminator。函数调用、参数传递、返回。
-  **unwinding**（panic 沿栈退帧跑 Drop）、**Drop**（含 drop glue、drop 顺序）。
-- **const eval**：编译期子集，**同一台机器**（const 求值 = 编译期跑 RAM）。
-- *mirvm 实现*：解释 MIR/字节码（tier-0/M4）；**unwind 自实现**（VM 拥有栈帧；模型 A 下走 native 栈 +
-  Cranelift landing pad，frame-abi §7）。
+| Part | RAM definition | mirvm implementation |
+|---|---|---|
+| **Storage** | allocation is distinct, aligned, sized, live/dead, and returns a distinct, aligned, non-null address; every byte carries an **initialization state** (init/uninit) and pointer-sized bytes may carry **provenance**; **pointer = address + provenance** (int→ptr, ptr→int, exposed provenance, Strict Provenance); the **aliasing model** (Tree Borrows; the opsem team is still settling it) **defines UB** when violated, and legal programs never violate it | **real addresses** (an allocation's base address is the host's real address, §3); **no per-allocation metadata is tracked** (init mask, provenance and bounds are checker overlays that a fast machine does not need); aliasing is not enforced (§2.4, §3) |
+| **Values and layout** | how a type is **realized as bytes**: size / align / field offsets / discriminant encoding / niche optimization, fixed by the **rustc layout algorithm** and **target-specific** (pointer width and alignment follow the platform); repr(C) follows the C ABI, repr(Rust) layout is **unspecified** (§1.1); value shapes are scalar, scalar pair (e.g. `&[T]`, a fat pointer), aggregate | **reuses rustc layout** (target==host / frozen into the bytecode, C8/C12) — bit-identical to native |
+| **Computation** | **MIR operational semantics**: place (including projection), rvalue, statement, terminator; function calls, argument passing, returns; **unwinding** (a panic unwinds frames and runs Drop) and **Drop** (including drop glue and drop order); **const eval** is a compile-time subset of the **same machine** (const evaluation runs RAM at compile time) | interprets MIR/bytecode (tier-0/M4); **unwinding is self-implemented** (the VM owns its stack frames; under Model A it uses the native stack plus Cranelift landing pads, frame-abi-bytecode.md §7) |
+| **Concurrency** | **memory model derived from C++20**: atomic operations plus orderings (SeqCst/Acquire/Release/AcqRel/Relaxed), happens-before, synchronizes-with; **a data race is UB**; threads follow `std::thread` semantics (spawn/join/lifetime); **TLS** (thread_local) | **real 1:1 OS threads** (C8); guest atomics → **host atomic instructions** (real addresses, i.e. native-codegen behavior; weak memory ordering recovers naturally, C2/C3); the engine does not interpose in guest synchronization (concurrency-arch.md §4) |
+| **Observable behavior** | **I/O, syscall effects, volatile accesses, process exit code, panic output** — what the as-if rule must preserve | **true OS passthrough** (read/write/epoll/… against real kernel fds); a panic becomes exit code 101, etc. |
+| **UB** | program states RAM leaves **undefined**; a conformant implementation is **unconstrained** on UB, a *checking* implementation (Miri) reports it, and a *standard* implementation (mirvm fast) **assumes it does not happen** | **assume legality, do not detect** (P3); guest UB (race / out-of-bounds / UAF) under real addresses is **host UB**, consistent with native (C4) |
 
-### 3.4 并发（Concurrency）
+### 2.3 As-if freedom
 
-- **内存模型 = C++20 派生**：原子操作 + 序（SeqCst/Acquire/Release/AcqRel/Relaxed）、happens-before、
-  synchronizes-with；**数据竞争 = UB**。
-- **线程**：`std::thread` 语义（spawn/join/生命周期）；**TLS**（thread_local）。
-- *mirvm 实现*：**真 1:1 OS 线程**（C8）；guest 原子 → **宿主原子指令**（真地址，= native codegen 行为，
-  弱内存序自然恢复，C2/C3）；引擎不介入 guest 同步（concurrency-arch §4）。
+As long as the observable-behavior contract of §1 holds, mirvm is **free** in the following respects (and already uses that freedom in its design):
 
-### 3.5 可观测行为（Observable behavior）
+- **Execution tier**: interpreter / bytecode VM / JIT (C11/C12) — different implementations of the same RAM.
+- **Managed heap allocator**: arena/TLAB, real addresses — RAM only requires allocations to be distinct, aligned and non-null; where the memory comes from is free.
+- **Thread implementation**: real OS threads / (tier-0) GIL over real threads — as long as both implement the §2.2 concurrency semantics and produce legal executions.
+- **Scheduling**: any schedule that produces a **legal execution** (§1.1 non-deterministic) is conformant.
+- **Concrete values of unspecified items**: addresses, repr(Rust) layout, HashMap order — pick any (§1.1).
 
-- **I/O、syscall 的效果、volatile 访问、进程退出码、panic 输出**——as-if 规则要保持的东西。
-- *mirvm 实现*：**真 OS 直通**（read/write/epoll/…真内核 fd，§7/async-stackless.md）；panic→退出码 101 等。
+**Not free**: well-defined observable behavior, which must be preserved. The test is always: **did observable behavior change? If not, it is free.**
 
-### 3.6 未定义行为（UB）
+### 2.4 UB stance
 
-- RAM **未定义**的程序状态。**符合规范的实现对 UB 不受约束**；*检查*实现（Miri）在此陷入报错；
-  *标准*实现（mirvm fast）**假设它不发生**。
-- *mirvm 立场*（§6）：**假设合法、不检测**（P3）；guest 的 UB（竞争/越界/UAF）在真实地址下 = **宿主 UB**，
-  与 native 一致（C4）。
+- **Not detecting UB is a design choice, not a deviation.** mirvm **assumes programs are legal and does not detect UB** (P3). A deviation would be a discrepancy from RAM on a legal program; this is a **quality-orientation choice** that leaves UB detection to Miri. On **legal programs** mirvm conforms to RAM fully.
+- **When RAM is undecided, mirvm is naturally neutral.** The factual RAM is still undecided in places (the opsem team is still debating, e.g. the exact aliasing rules of Tree Borrows vs Stacked Borrows). Because mirvm does not detect UB, it is **naturally neutral** about those details: they differ only when **deciding** UB, and mirvm does not decide UB, so **whatever opsem eventually settles, mirvm keeps running legal programs unchanged**. This is a side benefit of turning checking off.
+- **Guest UB = host UB.** Under real addresses, guest unsafe UB (data race / out-of-bounds / UAF) is host UB inside the mirvm process, consistent with native behavior (C4). Consequently guest UB, FFI defects and inline asm can break through the VM's own memory (a shared address space) and crash. **Safe guest code provably cannot** (C3); only UB or native defects can trigger it. Protection designs compared L0 type system / L1 structural isolation / L2 MPK / L3 checked / L4 process containment; the later scope decision dropped in-project L2/L4 product work, keeping L1 plus optional L3 as the long-term direction, and **checked mode is not implemented today**. There is no free lunch (real addresses vs Wasm-style cheap enclosure); see concurrency-arch.md §6 and ledger C13.
 
----
+### 2.5 Implementation pointers
 
-## 4. RAM 的边界（哪里不再是 RAM）
-
-**FFI = 抽象机器的边界。** 这条给"什么在语义内、什么在语义外"一个原则性定义：
-
-- **界内**（解释/编译的 Rust）：实现 RAM 语义。
-- **界外**（native 代码：libc、C 库、裸机器码）：**RAM 不建模其内部**，mirvm 只**移交控制权**（FFI 出）
-  或**接收控制权**（thunk 入）。native 的内存分配（Native Heap）、native 内部行为**在 RAM 之外**。
-- **inline asm**：RAM 内一段**不透明机器码效果**——不是 RAM 计算的一部分，mirvm 只能模拟其效果或函数级
-  拦截（§7/C10）。
-- **跨边界异常**：普通 `extern "C"` 不允许 unwind；Rust panic 从该边界逃出会终止，
-  foreign exception 反向穿入 Rust 属于 UB。`extern "C-unwind"` 明确允许系统展开器穿过，
-  mirvm 必须跑沿途 cleanup 并保留异常对象。Rust `catch_unwind` 不保证捕获 foreign
-  exception；固定工具链当前在它到达时终止。详见 [c-unwind-contract.md](c-unwind-contract.md)。
-
-含义：**"能在 mirvm 跑 ≈ 能通过 rustc 编译并在 native 跑"**，边界处两实现同样"移交给 native"——一致性在
-边界处由"双方都调真 native"保证。
-
----
-
-## 5. mirvm 的自由（as-if 授权了什么）
-
-只要 §1 的可观测行为契约成立，mirvm 在以下方面**自由**（且已用于设计）：
-
-- **执行 tier**：解释 / 字节码 VM / JIT（C11/C12）——同一 RAM 的不同实现。
-- **托管堆分配器**：arena/TLAB、真实地址（§4）——RAM 只要求分配互异/对齐/非空，钱从哪来自由。
-- **线程实现**：真 OS 线程 / （tier-0）GIL-over-真线程——只要都实现 §3.4 的并发语义、产出合法执行。
-- **调度**：任何产出**合法执行**（§2 non-det）的调度都合规。
-- **unspecified 的具体取值**：地址、repr(Rust) 布局、HashMap 序——任挑（§2）。
-
-**不自由的**：well-defined 的可观测行为（必须保持）。判据永远是"**可观测行为变了吗？没变即自由**"。
-
----
-
-## 6. mirvm 对 UB 与"未定"的立场
-
-### 6.1 不检测 UB（设计选择，非偏差）
-
-mirvm **假设程序合法、不检测 UB**（P3）。这不是"偏差"（偏差是"合法程序上与 RAM 有出入"），而是
-**质量取向选择**：把 UB 检测留给 Miri。对**合法程序**，mirvm 完全符合 RAM。
-
-### 6.2 RAM 处于"未定"时，mirvm 天然中立
-
-事实 RAM 在若干处仍**未定**（opsem 团队仍在议，如 Tree Borrows vs Stacked Borrows 的确切别名规则）。
-**mirvm 因"不检测"而对这些未定细节天然中立**——那些细节只在**判定 UB** 时才有区别，而 mirvm 不判 UB，
-所以**无论 opsem 最终怎么定，mirvm 照跑合法程序不变**。这是"关检查"的一个副产物优点。
-
-### 6.3 guest UB = 宿主 UB
-
-真实地址下，guest 的 unsafe UB（数据竞争/越界/UAF）= mirvm 进程内的宿主 UB，与 native 行为一致（C4）。
-**含义**：guest UB / FFI 缺陷 / inline asm 能打穿 VM 自有内存（共享地址空间）→ 崩。但 **safe guest 代码
-证明上做不到**（C3），只有 UB/native 缺陷能触发。防护设计曾比较 L0 类型系统 / L1 结构隔离 /
-L2 MPK / L3 checked / L4 进程 containment；后续范围裁决放弃项目内的 L2/L4 产品建设，保留
-L1 + 可选 L3 作为长期方向，且当前 checked 模式尚未实现。无免费午餐（真实地址 vs Wasm 式
-封闭二选一）详见 concurrency-arch.md §6 与账本 C13。
-
----
-
-## 7. 偏差登记规则与当前实现差距
-
-旧版此节列出的弱内存序、确定调度、主线程名等均属于已删除 InterpCx tier-0，不再描述 M4。
-当前采用以下规则：
-
-- 落在 unspecified/non-det 合法集合内的选择可登记为“实现选择”；
-- 对 well-defined 行为尚未覆盖的项目是**实现缺口**，不能用“偏差”弱化；
-- 未实现路径必须明确 Trap，不能以成功返回值制造集合外可观察行为；
-- 当前缺口集中列在 [current-status.md](../current-status.md)，随代码和回归同步更新；
-- 栈溢出具体深度仍属 unspecified，但 Model A 只承诺近似 native，不承诺逐帧相同。
-
-**不接受**“合法程序上产出 well-defined 行为集合之外的结果”。2026-07-12 已把 guest signal
-handler 从静默成功改为明确不支持，并为 volatile 建立独立 IR 与 alignment=1
-opaque `MaybeUninit` 字节载体，避免低对齐/padding 的宿主 UB。同理，在 guest frame/IP
-映射存在前，backtrace 与 unwinder context API 必须明确拒绝，不得返回宿主解释器栈。
-
-> 2026-08-13 更新：上述两条“缺口”随后均已兑现——async signal handler 已从 M5.2 的
-> 信号帧 AS-trampoline 直执行重构为固定原子登记桩 + 普通安全点派送；进程定向事件进入
-> owner Engine inbox，`SI_TKILL` 线程定向事件进入目标 pthread 按注册代际建立的稳定槽。
-> M5.2 D8e 已实现 guest 影子帧 backtrace，宽 volatile 也已使用快照分块。当前残余边界（同步
-> 故障 signal、realtime/高级 flags、进程定向外部事件的安全点延迟、unwinder context 家族等）集中登记在
-> [open-issues.md](../open-issues.md) R1/R21/R3，属于实现缺口而非 RAM 允许的偏差。
-
----
-
-## 8. 与其他 RAM 实现的关系（差分测试的理论）
-
-- **native codegen**：同一 RAM 的另一实现 → **差分对拍的理论依据**。但只能拍 **well-defined 可观测输出**
-  （§2）；unspecified/non-det 靠不变式/归一化；UB 程序不拍。
-- **Miri**：同一 RAM 的检查实现 → 可作 mirvm 的**第二 oracle**（尤其查 mirvm 自身 bug）；且 mirvm 借鉴其
-  shim/intrinsic **代码**（非心智模型，P1）。
-- **rustc const-eval**：编译期同一台机器 → const 求值与运行期求值应一致（§3.3）。
-- **历史 tier-0（InterpCx）**：曾用于 bootstrap，2026-07-09 已删除；当前 M4 的差分 oracle 是
-  同源 native 编译执行，旧 tier-0 不再是可运行 oracle。
-
----
-
-## 9. 版本与一致性
-
-- **RAM 随 Rust 演进**（新特性、opsem 决议）。mirvm **锁 rustc 版本**（D9，当前 nightly-2026-07-02），
-  故本 RAM-SPEC **对应一个 rustc 版本**；bump rustc 时复审本文。
-- **字节码/分发件版本化**（C12）：.mirvm 像"classfile 有版本号"，runtime 匹配或转换。
-- **一致性声明**：mirvm vX 对 rustc vY 定义的 RAM，在 §1 契约下一致（偏差见 §7）。
-
----
-
-## 10. 权威来源（事实 RAM 的出处）
-
-- **MIR 操作语义**：[rustc-dev-guide: MIR](https://rustc-dev-guide.rust-lang.org/mir/index.html)、rustc `rustc_const_eval::interpret`（Miri/mirvm 共用的解释核心）
-- **内存模型 / 别名模型 / provenance**：[opsem team / unsafe-code-guidelines](https://github.com/rust-lang/unsafe-code-guidelines)、Tree Borrows、Strict Provenance
-- **布局**：`rustc_abi` layout 算法（target-specific）
-- **并发内存模型**：C++20（Rust 借用）
-- **可执行检查参考**：[Miri](https://github.com/rust-lang/miri)
-- **抽象机器 / as-if 概念**：C++ abstract machine（脊柱思想来源）
-
----
-
-## 附：本文与实现文档的关系
-
-| 层 | 文档 |
+| Layer | Document |
 |---|---|
-| **语义（WHAT）** | 本文 RAM-SPEC |
-| 内存实现（HOW） | DESIGN.md §4 |
-| 并发实现（HOW） | docs/designs/concurrency-arch.md |
-| 帧/字节码/JIT（HOW） | docs/designs/frame-abi-bytecode.md、git 历史 |
-| async（HOW） | git 历史 |
-| 边界/os（HOW） | DESIGN.md §7、P7 os:: |
+| **Semantics (WHAT)** | this RAM-SPEC |
+| Memory implementation (HOW) | DESIGN.md §4 |
+| Concurrency implementation (HOW) | docs/designs/concurrency-arch.md |
+| Frame / bytecode / JIT / async (HOW) | docs/designs/frame-abi-bytecode.md, git history |
+| Boundary / os (HOW) | DESIGN.md §7, P7 os:: |
+
+## 3. Boundaries
+
+**FFI is the boundary of the abstract machine**, which gives a principled definition of what is inside and outside the semantics:
+
+- **Inside** (interpreted/compiled Rust): implements RAM semantics.
+- **Outside** (native code: libc, C libraries, raw machine code): **RAM does not model its interior**; mirvm only **hands over control** (FFI out) or **receives control** (thunk in). Native memory allocation (the Native Heap) and native internal behavior are **outside RAM**.
+- **inline asm**: an **opaque machine-code effect** inside RAM — not part of RAM computation; mirvm can only model its effect or intercept it at function level (§3.1, C10).
+- **Cross-boundary exceptions**: plain `extern "C"` must never unwind; a Rust panic escaping that boundary terminates, and a foreign exception unwinding back into Rust is UB. `extern "C-unwind"` explicitly allows the system unwinder to traverse; mirvm **must** run cleanups along the way and preserve the exception object. Rust `catch_unwind` does not guarantee catching a foreign exception; the pinned toolchain currently terminates when one arrives. See [c-unwind-contract.md](c-unwind-contract.md).
+
+Meaning: **"can run under mirvm ≈ can be compiled by rustc and run natively"**; at the boundary both implementations equally "hand over to native", so consistency at the boundary is guaranteed by both sides calling real native code.
+
+### 3.1 Rejected paths and residual boundaries
+
+- **Unimplemented paths must trap explicitly** and must never manufacture observable behavior outside the legal set through a success return value.
+- **Stack overflow depth** stays unspecified; Model A promises only approximate native behavior, not frame-for-frame identity.
+- **Volatile**: an independent IR plus an `alignment=1` opaque `MaybeUninit` byte carrier, to avoid host UB from low alignment/padding.
+- **Backtrace and the unwinder context API**: before guest frame/IP mapping exists, these must be explicitly rejected and must never return the host interpreter stack.
+- **Guest signal handlers**: on 2026-07-12 changed from silent success to explicitly unsupported. On 2026-08-13 the async signal handler was refactored from the M5.2 signal-frame AS-trampoline direct execution into a fixed atomic registration stub plus dispatch at ordinary safe points: process-directed events enter the owner Engine inbox, and `SI_TKILL` thread-directed events enter the target pthread's stable slot established per registration generation. M5.2 D8e implements a guest shadow-frame backtrace, and wide volatile now uses snapshot chunking.
+- **Residual boundaries** (registered in [open-issues.md](../open-issues.md) R1/R21/R3): guest handlers for synchronous fault signals; realtime and advanced `sigaction` flags; safe-point latency for process-directed external events; the unwinder context family. These are **implementation gaps, not deviations RAM permits**.
+
+## 4. Verification
+
+- **Differential pairing against native codegen** is valid only for **well-defined observable output**; unspecified / non-deterministic output is compared by invariant or normalization; UB programs are never paired (§1.1). This is the whole theory behind the method.
+- **Miri**: a checking implementation of the same RAM → usable as mirvm's **second oracle** (especially for finding mirvm's own bugs); mirvm also borrows its shim/intrinsic **code** (not its mental model, P1).
+- **rustc const-eval**: compile time is the same machine → const evaluation and runtime evaluation must agree (§2.2 Computation).
+- **Historical tier-0 (InterpCx)** was used for bootstrap and deleted 2026-07-09; M4's differential oracle today is same-source native compiling and executing, and old tier-0 is no longer a runnable oracle. Current gaps and residual boundaries are tracked in [current-status.md](../current-status.md) and [open-issues.md](../open-issues.md), updated together with code and regressions.
+
+**Authoritative sources for the factual RAM:**
+
+- **MIR operational semantics**: [rustc-dev-guide: MIR](https://rustc-dev-guide.rust-lang.org/mir/index.html), rustc `rustc_const_eval::interpret` (the interpretation core shared by Miri and mirvm).
+- **Memory model / aliasing model / provenance**: [opsem team / unsafe-code-guidelines](https://github.com/rust-lang/unsafe-code-guidelines), Tree Borrows, Strict Provenance.
+- **Layout**: the `rustc_abi` layout algorithm (target-specific).
+- **Concurrent memory model**: C++20 (borrowed by Rust).
+- **Executable checking reference**: [Miri](https://github.com/rust-lang/miri).
+- **Abstract machine / as-if concept**: the C++ abstract machine (the origin of the core idea).
+
+## 5. Open items
+
+Deviation registration rules:
+
+- A choice that falls inside the legal unspecified/non-deterministic set may be registered as an **implementation choice**.
+- An item where well-defined behavior is not yet covered is an **implementation gap** and must not be softened into a "deviation".
+- Unimplemented paths must trap explicitly (§3.1); they must never return success in a way that produces out-of-set observable behavior.
+- The deviations listed by older versions of this section (weak memory ordering, deterministic scheduling, main-thread name) belonged to the deleted InterpCx tier-0 and no longer describe M4.
+- Current gaps are listed centrally in [current-status.md](../current-status.md) and kept in sync with code and regressions.
+
+Open items and reopen triggers:
+
+- **rustc version bump**: RAM evolves with Rust (new features, opsem decisions), and mirvm locks the rustc version (D9, currently nightly-2026-07-02); a bump requires re-reviewing this document.
+- **opsem settles an undecided rule** (Tree Borrows vs Stacked Borrows): mirvm is neutral because it does not detect UB, so legal programs keep running unchanged; the resolution still triggers a review of §2.4.
+- **Residual boundaries** in [open-issues.md](../open-issues.md) R1/R21/R3 remain implementation gaps, not RAM-permitted deviations, and reopen when their mechanisms land.
+- **checked mode** is not implemented; L1 structural isolation plus optional L3 checked mode remain the long-term direction (ledger C13, concurrency-arch.md §6).

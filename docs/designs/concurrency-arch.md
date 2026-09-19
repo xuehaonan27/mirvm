@@ -1,354 +1,212 @@
-# 并发架构 RFC —— M4 生而并发引擎（历史 RFC）
+# Concurrency Architecture
 
-> 文档状态：**M4 的历史架构 RFC**。tcx-free 执行相、状态三分、1:1 真线程、宿主原子、TSan
-> gate 与独立 `os::` 层（2026-07-18/19 E21 闭合）已落地；mode B、hand-rolled TLAB
-> （v1 = mimalloc crate 后端，E14）与 checked 模式（E23）仍未实现。实际状态见
-> [current-status.md](../current-status.md)，不要把本文所有未来形态当成当前目录结构。
-
-> **原始状态（2026-07-07）：草稿，待评审。** 依据：C1（生而并发，VM tier=N 真 OS 线程无 GIL；tier-0=GIL 过渡）、
-> C2（并发内存模型、状态三分）、C3（Rust 三红利）、C4（guest UB 立场）、C8（三招）、
-> C11/C12（模型 A、Cranelift、贴近 MIR 的字节码、多 target 打包）。
-> 目标：定清 VM tier 如何真并行、哪些状态怎么同步、C8 三招的具体形态、spike 验收（过 TSan）。
-> 与 frame-abi-bytecode.md 配套（帧/字节码那半），本文管"并发那半"，两者需共同成立（C11）。
+> Status: Decided RFC · Scope: the M4 born-concurrent engine — how guest threads map to OS threads, why the execution phase must never hold a `tcx`, and how every piece of engine state is synchronized.
 >
-> **Spike 4 验收通过（2026-07-07）**：8 真宿主线程并行混合
-> 执行（i2c/c2i 并发）+ 跨 tier 同址原子 + 阻塞 syscall 活性（corpus §2.1 场景收束）+ 并发混合栈
-> unwind，**TSan 全量插桩零竞争警告**。状态三分以 Shared（发布后只读）/Ctx（每线程私有）落地，
-> 引擎执行路径零锁。新增引擎义务：**解释器执行 guest 原子必须发真宿主原子指令**（tier-0 的普通
-> 读写模拟在真线程下 = 引擎自身数据竞争）。TSan 通道依赖"引擎核心零 rustc_private"（tsan/ harness）。
+> Landed: the tcx-free execution phase, the three-way state split, 1:1 true threads, host atomics, the TSan gate and the independent `os::` layer (2026-07-18/19, E21 closed). Open when this RFC closed: mode B, the hand-rolled TLAB (v1 = `mimalloc` crate backend, E14) and checked mode (E23). [current-status.md](../current-status.md) is the authority on the present state; do not read every future shape here as current directory structure.
 
----
+## 1. Contract
 
-## 0. 命题与唯一的敌人
+These rules bind every engine change. Ledger ids are given in parentheses where the original RFC cited them.
 
-**命题**：N 个 guest 线程 = N 个真 OS 线程，各自跑解释器（interp_frame 于自己的 native 栈）+ 编译码，
-**无 GIL**（VM tier），真并行。
+1. **Born concurrent (C1).** VM tier maps N guest threads to N real OS threads, each running `interp_frame` on its own native stack plus compiled code, with no GIL. tier-0 (GIL) is a transition only. Passing the TSan gate is the hard gate before removing the GIL.
+2. **Concurrent memory model (C2).** Every piece of engine state belongs to exactly one cell of §2.3 and is synchronized per that cell. The engine exposes the concurrent memory model; it does not arbitrate guest synchronization.
+3. **Rust dividends (C3).** No GC, so no concurrent GC and no safepoints. The C++20 memory model is ready-made and maps atomics directly to hardware. Safe Rust's type system rules out data races, so mirvm protects only the implementation's own state; a guest race is the guest's problem.
+4. **Guest UB stance (C4).** An unsafe guest race must behave as native. The engine must not lock on the guest's behalf.
+5. **The three moves (C8).** The engine keeps `tcx` out of the execution path by three measures: `tcx`-derived metadata is frozen into `BytecodeBody` during lowering; lowering is confined to the single-threaded load phase and JIT compilation runs on a background service thread; the Rust Heap gets a thread-local allocator.
+6. **Model A (C11).** Guest activations live on the per-thread native stack. This document is the concurrency half and `frame-abi-bytecode.md` is the frame/bytecode half; the two hold together or not at all.
+7. **Cranelift and packaging (C12).** The JIT is Cranelift over tcx-free bytecode that stays close to MIR; `.mirvm` is a multi-target artifact.
+8. **Isolation (C13).** Guest and engine share one real address space, so structural isolation is mandatory (`L1`) and checked mode is the design reserve (§3.2).
+9. **Never hold `tcx` in the execution phase.** A `tcx` in the execution phase is the tier-0 disease recurring. `tcx`'s only user is mode A's load phase. `TyCtxt` is `!Sync` (arena, interner are not thread-safe) and `InterpCx` queries `tcx` on every step (`layout`/`instance_mir`/…), which is why tier-0 could only run one host thread.
+10. **Guest atomics must become real host atomics.** The interpreter must issue host atomic instructions for `atomic_*` ops; simulating them with ordinary reads/writes under real threads is a data race in the engine itself. Compiled code emits atomic instructions and fences through Cranelift.
+11. **`Sync` engine, lock-free execution path.** No global lock in VM tier; threads meet only in the explicit-sync cell. New state that fits neither "private" nor "read-only" must be explicitly synchronized and preferably insert-once/published.
 
-**Rust 白送的简化（C3）**：无 GC（不需并发 GC/safepoint）；内存模型现成（C++20，原子直映硬件）；
-**safe 代码类型系统保证无数据竞争** → 我们**只需保护【实现自身】的状态**，不需为 guest 的竞争兜底
-（guest 的 unsafe 竞争是 guest 责任，C4，= native 行为）。
+## 2. Model
 
-**唯一的敌人：`tcx` 不 Sync。** 这是 tier-0 只能单宿主线程的**根本原因**——InterpCx 执行每步都查 tcx
-（layout/instance_mir/…），而 rustc 的 `TyCtxt` 是 `!Sync`（arena、interner 非线程安全）。**整个 RFC 的
-核心就是把 tcx 赶出并行执行路径。** 靠两件事：①执行期不碰 tcx（元数据冻结，§3.1）；②残余 tcx 访问
-confine 到单线程（降低服务，§3.2）。分发模式（run .mirvm）**根本没有 tcx**，最干净（§1.2）。
+### 2.1 Two run modes
 
----
+Both modes share one runtime (execution engine, memory, threads, JIT) and differ only in the first half: how source or an artifact becomes bytecode + frozen metadata. The lifecycle therefore splits into two phases.
 
-## 1. 执行模型
-
-### 1.1 结构
-
-```
-                 VmShared (发布后只读 + 显式同步部分)
-   ┌──────────────────────────────────────────────────────────┐
-   │ 冻结字节码 BytecodeBody / layout表 / vtable / 常量池        │ ← 发布后只读, lock-free 读
-   │ instance→字节码缓存 / instance→编译码缓存 / 线程注册表      │ ← 显式同步
-   │ Rust Heap 全局块池                                          │ ← 显式同步
-   └──────────────────────────────────────────────────────────┘
-      ▲ 各线程共享
-  ┌───┴────┐   ┌────────┐   ┌────────┐
-  │OS 线程0│   │OS 线程1│   │OS 线程2│  各自私有: native 栈(guest 帧) + 操作数区 +
-  │interp/ │   │interp/ │   │interp/ │            TLS + errno + unwind payload + Rust Heap arena
-  │compiled│   │compiled│   │compiled│
-  └────────┘   └────────┘   └────────┘
-```
-
-- 每 guest 线程 = 一 OS 线程，跑 interp_frame（模型 A，帧在其 native 栈）或编译码。
-- 无全局锁（VM tier）；线程间只在"显式同步"那格相遇（§2）。
-
-### 1.2 两种运行模式：区别只在"加载"，执行完全相同
-
-**关键框架**：两种模式**共享同一个运行时**（执行引擎、内存、线程、JIT）；区别**只在前半段——如何把源码/产物
-变成"字节码 + 冻结元数据"**。之后的执行一模一样。所以把生命周期切成两相：
-
-```
- 加载相 (单线程, 在 spawn guest 线程之前)：产出【完整】字节码集 + 冻结元数据
- 执行相 (多线程, 【永远无 tcx】)：N 个真 OS 线程跑字节码 + 编译码
-```
-
-#### 模式 A：run from source（`mirvm run x.rs`，dev 内循环）
-
-```
- rustc_private 前端(parse/宏/typeck/borrowck/MIR) → tcx
-   → 单态化收集器(mono collector, 找全部可达单态化 instance, 与 codegen 同款) [用 tcx]
-   → 降低 MIR→字节码 + 冻结 layout/偏移/vtable/drop/调用目标 [用 tcx]
-   → 【完整字节码集】→ (可丢弃 tcx) → spawn 线程, 执行
-```
-- **tcx 存在，但被关在加载相**（单线程，spawn 前）。执行相不碰 tcx，可在加载后**丢弃 tcx**
-  （daemon 模式可保留供改代码后增量重降低）。
-- 启动成本 = rustc 前端（数秒）——dev 可接受，仍远快于全编译（省 codegen/LLVM/链接）。
-
-#### 模式 B：run .mirvm（`mirvm run app.mirvm`，分发）
-
-```
- (mirvmc 已【离线】做完前端+单态化+Stable MIR 抽取, 序列化进 .mirvm 多 target 产物)
- 运行期: 挑匹配 target 段 → 反序列化 Stable MIR → 降低 Stable-MIR→字节码 + 冻结 [无 tcx]
-   → 【完整字节码集】→ spawn 线程, 执行
-```
-- **根本无 tcx**、无 rustc。Stable MIR **自包含**（预单态化体 + layout + 符号），降低不需 tcx。
-- 启动 = 反序列化匹配段，快（无前端）。
-
-#### mirvmc 与模式 A 的关系
-
-**mirvmc = 模式 A 加载相的前半段**（前端 + 单态化 + Stable MIR 抽取），只是**不执行、而是序列化成 .mirvm**。
-同一套前端/单态化代码两用：跑 → 执行（模式 A），或序列化 → 分发（供模式 B）。
-
-#### 为什么"执行相永远无 tcx"（这条是 Sync 引擎能干净的根本）
-
-**Rust 单态化是静态的**——所有 instance 编译期即可定（mono collector 遍历可达；dyn/函数指针用**固定** vtable/
-指针，运行期不产生新单态化，无反射式运行期实例化）。所以能在执行前把**全部可达字节码降完**。**tcx 是加载相
-工具，并行执行相永不触碰**。于是"唯一敌人 tcx"（§0）被关进单线程加载相（模式 A）或根本不存在（模式 B）——
-**并行执行永远见不到 tcx**，这就是引擎能 Sync 的地基。
-
-**JIT 编译服务（后台、惰性）也无需 tcx**：它把热**字节码**→native（Cranelift），字节码已是 tcx-free 的，
-所以连后台编译线程都不碰 tcx。**tcx 的唯一用户 = 模式 A 的加载相。**
-
-#### 对照
-
-| | 模式 A：from source | 模式 B：.mirvm |
+| Phase | Threads | Produces / does |
 |---|---|---|
-| 前端 / tcx | 有（关在加载相） | **无** |
-| 单态化 | 加载相 eager（用 tcx） | 离线（mirvmc 已做） |
-| 降低输入 | 内部 MIR（查 tcx） | 序列化 Stable MIR（自包含） |
-| 启动成本 | rustc 前端（数秒） | 反序列化（快） |
-| 执行相并发 | tcx-free，与 B 相同 | tcx-free |
-| 用途 | dev 内循环 | 分发（消费端零工具链） |
-| 类比 | `java Main.java`（源启动器：编译再跑）/ CPython 跑 .py | `java -jar app.jar` / 跑 .pyc |
+| Load | single, before any guest thread spawns | the complete bytecode set + frozen metadata |
+| Execution | N real OS threads | runs bytecode + compiled code; never holds a `tcx` |
 
-#### 一个策略选择（eager vs lazy 降低）
+**Mode A — run from source** (`mirvm run x.rs`, dev inner loop):
 
-上面默认 **eager 降低**（执行前把字节码全降完）→ 执行相 tcx-free，两模式并发相同。**推荐 eager**：字节码降低
-很便宜（只是解析偏移/调用，非 JIT 编译；且模式 A 里 rustc 前端成本已占大头）。
-- 备选 **lazy 降低**（首次调用某函数才降它，启动更快）：模式 B 无妨（无 tcx，只是并发缓存）；但**模式 A 的
-  lazy 降低会把 tcx 拖进执行相** → 需服务线程 confine tcx（§3.2 旧顾虑）。**为避免这个，模式 A 用 eager。**
+```
+rustc_private frontend (parse / macros / typeck / borrowck / MIR) → tcx
+  → mono collector (all reachable monomorphized instances, as codegen does)   [uses tcx]
+  → lower MIR → bytecode + freeze layout / offsets / vtable / drop / call targets [uses tcx] → complete bytecode set → (tcx may be dropped) → spawn threads, execute
+```
 
-> 结论：**tcx 是加载相的事，不是执行相的事。** eager 降低把 tcx 彻底关在 spawn 之前；执行永远干净。
-> 只有 JIT（昂贵）是惰性/后台的，而它不需要 tcx。
+`tcx` exists but is confined to the load phase (single-threaded, before spawn); it may be dropped after loading (daemon mode may retain it for incremental re-lowering after a code change). Startup cost = rustc frontend (seconds) — acceptable for dev, and far below a full compile because codegen/LLVM/link are skipped.
 
-#### 加载相的并行度：from-source 骑 rustc，.mirvm 我们自己控
+**Mode B — run `.mirvm`** (`mirvm run app.mirvm`, distribution):
 
-- **from-source**：加载相走 rustc 前端。rustc 前端并行化仍 nightly 实验（#113349，未 stable）：typeck/
-  borrowck/MIR-opt 可并行，但 **parse/宏展开/HIR lowering 仍串行**（当前 -Z threads 省 20-30%）。**mirvm
-  免费吃到 rustc 前端的并行度，无论它是多少**——我们不控制、只骑它。
-- **.mirvm**：加载相 = Stable-MIR→字节码，**tcx-free**，**这段并行由我们自己控**（不受 rustc 前端串行拖累）。
-- **这正是"加载/执行分离"的价值**：执行相并行是**我们设计的**（N 真线程全并行），与 rustc 前端并行度**解耦**；
-  rustc 前端并行与否只影响 from-source 加载相快慢，不影响执行相。
+```
+mirvmc (offline): frontend + monomorphization + Stable MIR extraction → multi-target .mirvm
+runtime: pick matching target segment → deserialize Stable MIR → lower Stable-MIR → bytecode + freeze   [no tcx]
+  → complete bytecode set → spawn threads, execute
+```
 
-#### 平滑过渡原则（借 JVM JEP 330）
+There is no `tcx` and no rustc at all. Stable MIR is self-contained (pre-monomorphized bodies + layout + symbols), so lowering needs no `tcx`. Startup = deserialize the matching segment.
 
-`mirvm run x.rs`（from-source）与 `mirvm run app.mirvm`（分发）必须**同程序、同入口、同行为**，无缝切换
-——正如 JEP 330 让"源直跑"与"javac 编译后跑"的 launch-class 一致，程序长大切换时同入口照跑。
-**注**：mirvm from-source **先跑完整个 rustc 前端**（所有 check 上前）再执行，故**无 JEP 458 那种"错误延迟到
-执行期"的缺点**——错误全在执行前暴露。
+**`mirvmc` vs mode A.** `mirvmc` is the first half of mode A's load phase (frontend + monomorphization + Stable MIR extraction) that serializes instead of executing. One frontend/mono implementation serves both: run → execute (mode A), or serialize → distribute (mode B).
 
----
-
-## 2. 状态三分（RFC 的心脏）
-
-每一份引擎状态，**必须**归入三格之一，并按格施加同步：
-
-| 归属 | 内容 | 同步策略 |
+| | Mode A: from source | Mode B: `.mirvm` |
 |---|---|---|
-| **每线程私有** | native 栈（guest 帧）/ slaved 操作数区 / TLS 实例 / errno / unwind payload 栈 / **Rust Heap 线程 arena** | **无同步**（天然私有） |
-| **发布后只读** | 冻结字节码 BytecodeBody / layout 表 / vtable / 常量池 / 已解析 instance 元数据 / 加载的 .mirvm 程序 | **发布屏障**（release 建好 → acquire 读），之后 **lock-free 读**；永不改 |
-| **显式同步** | instance→字节码缓存（惰性降低）/ instance→编译码缓存（JIT）/ 线程注册表 / Rust Heap 全局块池 | **锁 / 并发结构 / 原子发布**（写少读多） |
+| Frontend / tcx | yes, confined to load phase | none |
+| Monomorphization | load phase, eager (uses `tcx`) | offline (`mirvmc` already did it) |
+| Lowering input | internal MIR (queries `tcx`) | serialized Stable MIR (self-contained) |
+| Startup cost | rustc frontend (seconds) | deserialization (fast) |
+| Execution-phase concurrency | tcx-free, same as B | tcx-free |
+| Use | dev inner loop | distribution (consumer needs no toolchain) |
+| Analogy | `java Main.java` (source launcher: compile then run) / CPython running `.py` | `java -jar app.jar` / running `.pyc` |
 
-**设计准则（M4 每个数据结构都要过这张表）**：新增任何引擎状态，先问它属哪格。放不进"私有"或"只读"的，
-必须显式同步且**尽量做成 insert-once/发布式**（写一次、读多次），避免热路径锁。
+### 2.2 Why execution is identical, and why it must never hold a `tcx`
 
-**guest 的状态不在此表**：guest 的 `static`、堆对象、原子量都在 Rust Heap（真地址），**由 guest 代码自己
-同步**（safe Rust 的 static 受 Sync 约束或藏在 Mutex 后；unsafe 竞争是 guest 责任 C4）。引擎只提供内存
-（真地址）+ 执行原子指令（§4），**不替 guest 加锁**。
+Both modes converge before any guest thread spawns: the same complete bytecode set, the same frozen metadata, the same runtime from spawn onward. `mirvm run x.rs` and `mirvm run app.mirvm` must be the same program, same entry, same behavior, swappable when a program grows — the JVM JEP 330 property. From-source runs the whole rustc frontend before executing, so it does not share JEP 458's "error delayed to execution time" drawback: every error surfaces before execution.
 
----
+Rust monomorphization is static. The mono collector walks reachability at compile time, and `dyn`/function pointers use fixed vtables/pointers, so no new monomorphization and no reflective run-time instantiation occurs. All reachable bytecode can therefore be lowered before execution. `tcx` is a load-phase tool, and the parallel execution phase never touches it; that is the foundation of a `Sync` engine. The JIT compile service is background and lazy, but it translates hot bytecode — already tcx-free — to native with Cranelift, so it needs no `tcx` either. `tcx`'s only user is mode A's load phase.
 
-## 3. C8 三招落地
+**Eager vs lazy lowering.** Eager lowering (lower everything before execution) is the default and the recommendation: lowering is cheap (resolving offsets and calls, not JIT compilation) and in mode A the rustc frontend already dominates the cost. Lazy lowering (lower a function on first call, for faster startup) is harmless in mode B (no `tcx`, only a concurrent cache), but in mode A it would drag `tcx` into the execution phase and require a service thread to confine it. Mode A therefore uses eager. The conclusion: `tcx` is a load-phase matter, never an execution-phase matter; only the JIT is lazy/background, and it needs no `tcx`.
 
-### 3.1 招一：降低时元数据冻结（消灭执行期 tcx）
+**Load-phase parallelism.** In from-source mode the load phase runs through rustc's frontend: rustc frontend parallelization is still nightly-experimental (#113349, not stable); typeck/borrowck/MIR-opt parallelize, but parse/macro expansion/HIR lowering stay serial (currently `-Z threads` saves 20-30%). mirvm rides whatever parallelism rustc gives, free. In `.mirvm` mode the load phase is Stable-MIR→bytecode, tcx-free, and that parallelism is ours to control. Execution parallelism (N real threads, fully parallel) is therefore our design and is decoupled from rustc's frontend: rustc's frontend parallelism affects only from-source load-phase speed.
 
-MIR/Stable-MIR → 字节码时，把**一切 tcx 派生数据**解析进 `BytecodeBody`（frame-abi-bytecode.md §5）：
-layout/字段偏移/判别式编码/vtable 布局/drop glue instance/调用目标。**执行只读 BytecodeBody，永不触 tcx。**
+### 2.3 The three-way state split
 
-- 效果：执行路径**线程安全**（无 !Sync 的 tcx）+ **快**（无 per-op 查询，≈ HotSpot resolved constant pool）。
-- BytecodeBody 属"发布后只读"格 → 各线程 lock-free 共享读。
+Every piece of engine state must fall into exactly one cell, with the sync strategy of that cell. Landed names: `Shared` for published read-only, `Ctx` for per-thread private.
 
-### 3.2 招二：降低在加载相 + JIT 编译后台服务线程
-
-**分两件事，都不让 tcx 进执行相**（详见 §1.2）：
-
-- **字节码降低 = 加载相 eager**（spawn guest 线程前）。模式 A 用 tcx（单线程加载相）；模式 B 无 tcx
-  （Stable MIR 自包含）。执行相拿到完整字节码集，**永不碰 tcx**。
-- **JIT 编译 = 后台服务线程（HotSpot compiler-thread 同构）**。把热**字节码**→native（Cranelift，C12），
-  **不需 tcx**（字节码已 tcx-free）。执行线程遇未编译热函数 → 请求编译 / 继续解释，编完原子发布到"编译码
-  缓存"（显式同步格）。**同一后台服务机制即 M5 的后台 JIT。**
-
-> 关键不变式（比旧版更强）：**tcx 只出现在模式 A 的单线程加载相；并行执行相与后台 JIT 服务都不碰 tcx。**
-> 违反 = tier-0 的病复发。（旧版设想"服务线程在执行相 confine tcx"——现改为 eager 降低把 tcx 关在加载相，
-> 更干净；仅当选 lazy 降低才需回到 confine，故模式 A 选 eager，§1.2。）
-
-### 3.3 招三：Rust Heap 线程本地分配器（借 TLAB 概念，结构用 mimalloc 式）
-
-**决定（2026-07-05 用户定）：直接上线程本地分配器（不走"系统 malloc v0"退路）。**
-
-**关键：借 JVM TLAB 的"线程本地 lock-free 快路径"概念，但结构是 mimalloc/snmalloc 式，不是纯 bump。**
-原因——**JVM 纯 TLAB-bump 只在有 GC 时成立**（GC 批量回收、从不单独 free，TLAB 只是 bump 指针）；
-**我们有 individual free**（每个 Box/Vec drop 都 dealloc），纯 bump 撑不住（会无限涨）。故需 **size-class
-free list**（alloc 从 free list 弹 / 新页 bump；free 推回）+ **remote-free 队列**（跨线程 free）。
-
-- **快路径 lock-free**：每 guest 线程从**自己的线程堆**（size-class free list / 新页 bump）分配。
-  `__rust_alloc`/`alloc_zeroed` 落这。无锁、无 libc round-trip。
-- **跨线程 free**（Arc/Box 跨线程送后异线程 drop——常见）：**remote-free 队列**（mimalloc/snmalloc 式），
-  释放交回原线程堆。非热路径。
-- **大对象**：超阈值直接走全局块池 / mmap（绕过线程堆）。
-- **refill / 全局块池**：线程堆缺页 → 向全局块池要（显式同步，低频）；后端 = mmap 大块。
-- **真实地址 / 隔离 / 对齐**：块按 guest 对齐切片；真实地址天然（§4）；guest 内存与引擎元数据分池（§6）。
-
-**落地选择**：可 hand-roll，也可**直接用 `mimalloc` / `snmalloc-rs` 作 Rust Heap 后端**（它们就是这套、
-久经考验，snmalloc 尤擅跨线程 free），我们只加薄的真实地址/隔离包装——符合"别重造轮子"。
-
-**从 JVM TLAB 借什么、不借什么**：
-
-| JVM TLAB 经验 | 借？ | 说明 |
+| Cell | Contents | Sync |
 |---|---|---|
-| 线程本地 lock-free 快路径 | ✅ 核心 | 现代并发 malloc 也是这个 |
-| refill-waste 启发式（尾部剩太多→大对象走共享区，不退休大半满 buffer） | ✅ | 避免浪费尾巴，waste limit 自适应 |
-| 自适应大小（按线程分配率、目标 refill 次数） | ✅ 借思想 | JVM 绑 GC epoch 重算；我们无 GC → 换触发（周期/refill 计数） |
-| 大对象绕过快路径 | ✅ | 已有 |
-| filler/dummy 保堆可解析 | ❌ 无 GC→不需要 | **省掉** |
-| 预清零（ZeroTLAB） | ❌ 不需要 | Rust `alloc` 返未初始化，只 `alloc_zeroed` 清零 → **比 JVM 快** |
-| 分代/晋升/Eden/safepoint retire | ❌ 无 GC | 不需要 |
-| **individual free** | ⚠️ JVM 无此问题 | 我们必须处理 → 用 size-class free list（mimalloc），非纯 bump |
+| **Per-thread private** | native stack (guest frames) / slaved operand area / TLS instance / errno / unwind payload stack / **Rust Heap thread arena** | none (naturally private) |
+| **Published read-only** | frozen `BytecodeBody` / layout tables / vtable / constant pool / resolved instance metadata / loaded `.mirvm` program | release barrier (release publish → acquire read), then lock-free reads; never modified |
+| **Explicit sync** | instance→bytecode cache (lazy lowering) / instance→compiled code cache (JIT) / thread registry / Rust Heap global block pool | lock / concurrent structure / atomic publish (write-rare, read-many) |
 
----
+Design guideline: every M4 data structure must pass this table. Classify every new engine state first. Anything that fits neither "private" nor "read-only" must be explicitly synchronized and preferably made insert-once/published (write once, read many) so locks stay off hot paths.
 
-## 4. 原子与内存模型（C2/C3）—— 引擎不介入
+Guest state is not in this table. Guest `static`s, heap objects and atomics live in the Rust Heap at real addresses and are synchronized by guest code (a safe `static` is `Sync`-constrained or behind a `Mutex`; an unsafe race is the guest's under C4). The engine provides memory (real addresses) and executes atomic instructions; it never adds a lock for the guest.
 
-guest 的原子操作**由 guest 负责语义，引擎只执行硬件原子指令**：
-
-- 解释器：`atomic_*` op 用**宿主原子指令**读写**真地址**（host `AtomicU*` / 内联原子）。
-- 编译码：Cranelift 发原子指令 + fence。
-- 两者都在真地址上 → 跨真 OS 线程**天然正确**（= native 行为）。Rust 的 C++20 内存模型现成，直映硬件（C3）。
-
-引擎**不同步 guest 原子访问**（那是 guest 级同步）；引擎只保证"原子 op 编译/解释成真原子指令"。
-
----
-
-## 5. 线程生命周期与注册表
-
-- **create**：只拦 pthread_create 插蹦床（C8）；`Thread.id` 真 pthread_t → join/futex/into_pthread_t
-  全走真 libc（frame-abi §8）。新线程 = 真 OS 线程，分配其私有状态（arena/操作数区/TLS）。
-- **线程注册表**（显式同步格）：登记活 guest 线程（ID 分配、shutdown、诊断）。建/销加锁。
-- **attach（JNI AttachCurrentThread 类比）**：**C 库自己创建的线程回调 guest** 时，thunk 发现该 OS 线程
-  不在注册表 → 先 **attach**（为它分配每线程状态、登记），再 interp_frame。detach 时清理。
-- **shutdown**：main 线程返回 = **进程退出**（native 语义）；detached 线程随进程消亡。
-
----
-
-## 6. 隔离 / VM 鲁棒性（C4/C13）——guest UB / FFI / asm 会不会打穿 VM？
-
-**威胁**：真实地址模式下 guest 与 VM 共享一个地址空间（§4），故 guest 的 **unsafe UB**（野指针/UAF/越界）、
-**FFI/C 库缺陷**、**inline asm** 能写到 **VM 自有内存**（元数据/解释器/字节码/别的线程栈）→ 崩或静默损坏。
-**但 guest 的 safe 代码【证明上】做不到**（Rust 类型系统 C3）——只有 UB 或 native 缺陷能触发，这是绝大多数
-代码的非威胁。
-
-**根本张力**：真实地址（为 FFI 零编组 + native 保真而选）与 Wasm 式廉价内存封闭**不兼容**——Wasm 每次访问
-bounds-check 到一块线性内存，而 Rust guest 用真指针=真地址。**二者得其一，无免费午餐**。
-
-**分层防御**（2026-07-05 用户定：砍 L2/L4，聚焦 L1+L3）：
-
-| 层 | 防什么 | 状态 |
+| Region | Contents | Sharing |
 |---|---|---|
-| **L0 类型系统**（白送） | safe guest 代码碰不到 VM 内存 | ✅ 天然，覆盖绝大多数 |
-| **L1 结构隔离**（做） | VM 内存 vs guest 内存分池、放已知地址区 + guard page | ✅ 做；且让 L3 的 region check 退化成单次范围比较 |
-| **L3 checked 模式**（opt-in，不可信/LLM 用） | 每 raw 解引用前 region check → 野写在损坏前拦 | 见下 |
-| ~~L2 MPK/PKU~~ | — | ❌ 太 arch-specific（x86 专属），降级为 L3 的可选加速器 |
-| ~~L4 进程沙箱~~ | — | ❌ out of scope（用户定，不管沙箱） |
+| `VmShared` | frozen bytecode / layout tables / vtable / constant pool (read-only); instance→bytecode and instance→compiled caches, thread registry, Rust Heap global block pool (explicit sync) | all OS threads |
+| Per thread | native stack (guest frames) + operand area + TLS + errno + unwind payload + Rust Heap arena | one OS thread |
 
-**L3 checked 模式详解**（核心：Rust 类型系统让它比 Wasm 便宜得多）：
+Each guest thread is one OS thread running `interp_frame` (Model A: frames on its native stack) or compiled code. VM tier has no global lock; threads meet only in the explicit-sync cell.
 
-- **JIT 能插检查**：**我们做 MIR/字节码→CLIF 降低，Cranelift 只编译我们给的 CLIF** → checked 模式在降低时
-  往 CLIF 插 region-check（load/store 前 compare+branch）；fast 模式不插（= native codegen）。机器码**不脱离
-  掌控**。
-- **只查 raw 解引用**：safe 引用访问（`*r`, `r:&T`）无 UB 时**证明上有效 → 不查**；**只有 raw 指针解引用
-  （unsafe）可能野 → 只查这些**（MIR 按指针类型区分）。良好代码绝大多数是安全引用 → 检查点极少。**Wasm
-  查一切，我们只查 raw 解引用**——总开销靠此压下。
-- **检查 = region check**（`addr ∈ guest 内存区`）：compare+branch、predicted-taken、只在 raw 解引用、几乎总
-  通过（仅真野指针 fail）。L1 让它成单次范围比较。
-- **借 JVM**（[implicit null check](https://shipilev.net/jvm/anatomy-quarks/25-implicit-null-checks/)、[uncommon trap](https://shipilev.net/jvm/anatomy-quarks/29-uncommon-traps/)）：静态检查消除（证明 raw 指针来自已知分配+有界偏移→删检查，BCE 同理）；deopt/投机+profile
-  驱动（M5）；implicit-trap（guard page）**对我们较难**——guest 内存散（堆 arena+native 栈+statics），非
-  有界区，正是 [Wasm Memory64](https://github.com/WebAssembly/memory64/issues/3) 的问题（64 位真指针下 guard-page 招失效），故主用显式 region check。
-- **Wasm 界**：guard-page 消除近零成本但**仅对 32 位 offset guest**；mirvm 真 64 位指针比 Memory64 还糟，
-  guard-page 用不上——但 Rust safe/unsafe 区分让检查点本就少，靠此而非 guard-page 压开销。
-- **诚实界**：只查 raw 解引用会漏"unsafe 把野地址洗进 &T 再解"（要引用级校验=Miri 全量，慢）；但野写几乎
-  都走 raw 指针，故性价比高。checked 是个谱：lite（raw 解引用，便宜，抓大多数）→ full Miri（全量，慢）。
-- **Model-A 相互作用（记）**：**slaved 操作数区**让 guest 局部在已知区、与 VM native-栈帧分开，
-  region check 便宜；alloca 会与 VM 状态交错并要求逐帧追踪。2026-08-12 已撤销 alloca 必迁承诺，
-  解释器正式保留 slaved；alloca 只在真实性能证据出现时重开。**解耦要求仍有效**：帧局部存储与
-  fast/checked 安全模式不得耦合，只在 `GuestMemory::contains(addr)->bool` 谓词处相遇。
-- **Profile**：checked 做成 **opt-in**（fast 模式无检查 ≈ native 速度；checked 供不可信/LLM）；解释器/JIT
-  加不加检查的速度 delta 是明确的 profile + 优化目标（BCE/deopt 压）。
+### 2.4 What makes the engine Sync
 
-**关键不对称**：编译码只碰 guest 内存 → 检查可插进其 CLIF；解释器替 guest 执行访问 → 检查插进解释器的
-raw-deref 处理。两 tier 都能查，只是插入点不同。
+**Metadata frozen at lowering.** Lowering MIR/Stable-MIR → bytecode resolves all tcx-derived data into `BytecodeBody` (`frame-abi-bytecode.md` §5): layout, field offsets, discriminant encoding, vtable layout, drop glue instances, call targets. Execution reads only `BytecodeBody` and never touches `tcx`. The execution path is therefore thread-safe (no `!Sync` value) and fast (no per-op query, ≈ HotSpot's resolved constant pool). `BytecodeBody` is published read-only, so all threads share it lock-free.
 
-**按用途**：可信 dev/自己项目 = **fast 模式 + L1**（guest UB 自己 bug，= native）；不可信/LLM/agent（P0）=
-**checked 模式（L3）+ L1**。**底线**：真实地址与"Wasm 式廉价封闭"不兼容、无免费午餐，但 Rust 类型系统让
-checked 模式的开销远低于 Wasm（只查 raw 解引用）。与 §7 "OS 级沙箱管安全"同源（那防伤宿主，这防伤 VM 自身）。
+**Lowering in the load phase; JIT as a background service.** Bytecode lowering is eager and happens before guest threads spawn. Mode A uses `tcx` there (single-threaded); mode B has none (Stable MIR is self-contained). The execution phase receives the complete bytecode set and never touches `tcx`. JIT compilation is a background service thread, isomorphic to HotSpot's compiler threads: hot bytecode → native via Cranelift, no `tcx`. An execution thread that meets an uncompiled hot function requests compilation or keeps interpreting; the finished body is atomically published into the compiled-code cache (explicit-sync cell). That same background service is M5's background JIT. Invariant, stronger than the earlier draft: `tcx` appears only in mode A's single-threaded load phase; the parallel execution phase and the background JIT service never touch it. Violation is the tier-0 disease recurring. (An earlier draft had a service thread confining `tcx` inside the execution phase; eager lowering replaces that. Only lazy lowering would need to return to confinement, which is why mode A chooses eager, §2.2.)
 
----
+**Thread-local Rust Heap allocator.** Decision (2026-07-05): go directly to a thread-local allocator; do not take the "system malloc v0" fallback. Borrow the JVM TLAB concept — a thread-local lock-free fast path — but use mimalloc/snmalloc structure, not a pure bump pointer. A pure TLAB bump holds only with a GC (bulk reclamation, never an individual free); mirvm has individual free (every `Box`/`Vec` drop deallocs), so it needs a size-class free list plus a remote-free queue.
 
-## 7. tier-0 → VM tier 迁移
+- Fast path is lock-free: each guest thread allocates from its own thread heap (size-class free list / new-page bump). `__rust_alloc`/`alloc_zeroed` land here; no lock, no libc round-trip.
+- Cross-thread free (common when an `Arc`/`Box` is sent across threads and dropped on another): a remote-free queue (mimalloc/snmalloc style) returns the block to the owning thread heap. Not a hot path.
+- Large objects: above a threshold they go straight to the global block pool / `mmap`, bypassing the thread heap.
+- Refill / global block pool: a thread heap short of pages asks the global block pool (explicit sync, low frequency); the backend is large `mmap` blocks.
+- Real addresses, isolation and alignment: blocks are sliced to guest alignment; real addresses are natural; guest memory and engine metadata use separate pools.
+- Implementation choice: hand-roll, or use `mimalloc` / `snmalloc-rs` as the Rust Heap backend (they are exactly this, battle-tested, snmalloc especially good at cross-thread free) and add only a thin real-address/isolation wrapper. Do not reinvent the wheel.
 
-| | tier-0（过渡，待建） | VM tier（目标） |
+| JVM TLAB experience | Borrow? | Note |
 |---|---|---|
-| 线程 | 真 pthread + 蹦床（真 pthread_t、into_pthread_t 成立） | 同 |
-| 执行 | **GIL-over-真线程**：解释执行加全局锁串行化，阻塞前（futex/join/FFI/降低）放锁 | **无 GIL**，真并行 |
-| tcx | GIL 下单线程访问 tcx（安全） | 不碰 tcx（§3.1/3.2） |
-| 结构 | 与 VM tier **同构**（去掉 GIL 即并行） | — |
+| thread-local lock-free fast path | yes, core | modern concurrent malloc does the same |
+| refill-waste heuristic (tail too large → large objects go to the shared area; a mostly-full buffer is not retired) | yes | avoids wasting the tail; the waste limit adapts |
+| adaptive sizing (by thread allocation rate and target refill count) | idea only | JVM recomputes per GC epoch; with no GC, trigger on period/refill count instead |
+| large objects bypass the fast path | yes | already covered |
+| filler/dummy to keep the heap parseable | no | no GC, not needed |
+| pre-zeroing (`ZeroTLAB`) | no | Rust `alloc` returns uninitialized and only `alloc_zeroed` zeroes — cheaper than JVM |
+| generational/promotion/Eden/safepoint retire | no | no GC |
+| individual free | special case | JVM has no such problem; mirvm must handle it, hence the size-class free list (mimalloc), not a pure bump |
 
-- **GIL 是踏脚石不是终态**：它让 into_pthread_t 等在 tier-0 也成立（真 pthread_t），且结构同 VM tier；
-  **协作式调度是要扔的 emulation**（用户判定：into_pthread_t 证明其跑错）。
-- 去 GIL 的前提：状态三分（§2）落实、tcx 赶出执行路径（§3.1/3.2）、Rust Heap 并发化（§3.3）。
+**True OS threads.** Creation intercepts only `pthread_create`, inserting a trampoline (C8); `Thread.id` is a real `pthread_t`, so `join`/`futex`/`into_pthread_t` go through real libc (`frame-abi-bytecode.md` §8). A new thread is a real OS thread and allocates its private state (arena/operand area/TLS). The thread registry (explicit-sync cell) registers live guest threads for id allocation, shutdown and diagnostics; create/destroy take the lock. Attach (the JNI `AttachCurrentThread` analogy): when a C library-created thread calls back into the guest, the thunk finds the OS thread absent from the registry, attaches it (allocates per-thread state, registers it), and then runs `interp_frame`; detach cleans up. Returning from the main thread is process exit (native semantics); detached threads die with the process.
 
----
+**Atomics: the engine does not intervene.** Guest atomic ops carry guest semantics; the engine only executes hardware atomic instructions. The interpreter implements `atomic_*` ops with host atomic instructions (host `AtomicU*` / inline atomics) on real addresses; compiled code emits atomic instructions and fences via Cranelift. Both operate on real addresses, so they are naturally correct across real OS threads (= native behavior). Rust's C++20 memory model is ready-made and maps directly to hardware (C3). The engine does not synchronize guest atomic accesses — that is guest-level synchronization — it only guarantees that an atomic op becomes a real atomic instruction.
 
-## 8. Spike 验收（C8 gate，M4 前置）
+### 2.5 Interface with `frame-abi-bytecode.md` (co-hold, C11)
 
-**目标**：证明"N 真 OS 线程各跑 interp_frame，共享发布后只读字节码 + per-thread arena + 显式同步缓存"
-**在引擎自身层面无数据竞争**。
+- Per-thread native stack holding guest frames (Model A) + per-thread slaved operand area = the per-thread-private cell.
+- `BytecodeBody` (frozen metadata) = the published-read-only cell; lowering (§2.4) produces it.
+- `JITBackend`/Cranelift compiled-code cache = the explicit-sync cell; the JIT service thread (§2.4) produces it.
+- Unwind (`frame-abi-bytecode.md` §7 candidate A, Cranelift landing pad) proceeds independently on each per-thread native stack, with no cross-thread sync.
+- Trampoline/thunk (`frame-abi-bytecode.md` §8) = create/attach (§2.4). Together the two documents are the complete foundation of the M4 engine: frames/bytecode/JIT (frame-abi) plus concurrency/state/lifecycle (this document).
 
-- **负载**（guest 程序，跑在真线程上）：原子计数器、mpsc 生产消费、Mutex 8×N 争用、Arc 共享求和、
-  scoped threads。
-- **通过标准**：**引擎自身**（VmShared、缓存、注册表、arena/块池、发布协议）**过 ThreadSanitizer**。
-  - **明确排除**：guest 程序自身的 unsafe 数据竞争**不在** TSan-clean 承诺内（那是 guest 责任 C4，且合法
-    guest 程序 safe 代码无竞争 C3）。TSan 只针对**引擎实现自身的状态**。
-- **同时**：输出与单线程/tier-0 差分一致（对输出确定的负载逐字节；时序敏感的靠不变式）。
+## 3. Boundaries
 
-这是 §5.3 账本里"引擎过 TSan"的具体化，也是 C1"去 GIL 前的硬关卡"。
+### 3.1 Deliberate refusals
 
----
+| Not done | Reason |
+|---|---|
+| `L2` MPK/PKU | too arch-specific (x86-only); demoted to an optional accelerator for `L3` |
+| `L4` process sandbox | out of scope (user decision, 2026-07-05: no sandbox) |
+| Pure TLAB bump | invalid with individual free (unbounded growth) |
+| `filler`/dummy heap parseability | no GC, not needed |
+| TLAB pre-zeroing (`ZeroTLAB`) | not needed; Rust `alloc` returns uninitialized and only `alloc_zeroed` zeroes |
+| Generational/promotion/Eden/safepoint retire | no GC |
+| Adding locks for the guest | guest synchronization is the guest's responsibility (C4) |
+| Cooperative scheduling as an end state | GIL/cooperative scheduling is a stepping stone; `into_pthread_t` proved cooperative scheduling runs wrong |
+| Alloca migration away from the slaved operand area | revoked 2026-08-12; the interpreter formally keeps slaved; alloca reopens only on real performance evidence |
+| Guard-page / implicit-trap check elimination as the main checked-mode mechanism | guest memory is scattered (heap arena + native stack + statics), not a bounded region — the Wasm Memory64 problem; guard pages only help 32-bit-offset guests |
+| Reference-level validation (full Miri) as the default checked mode | too slow; checked mode is a spectrum, lite → full Miri |
+| Lazy lowering in mode A | would drag `tcx` into the execution phase; mode A uses eager (§2.2) |
 
-## 9. 开放问题 / spike 清单
+### 3.2 Isolation and the checked-mode design reserve (C4/C13)
 
-1. **发布协议**：instance→字节码/编译码缓存的 insert-once + 无撕裂发布。并发 HashMap（如 dashmap 式）+
-   原子发布 vs RwLock（正确优先）。先 RwLock，profile 再优化。
-2. **TLAB 分配器细节（已定上 TLAB，§3.3）**：arena chunk 大小/大小类、remote-free 队列的具体结构、
-   大对象阈值、arena 在线程退出时的回收。照搬 mimalloc/jemalloc 结构。
-3. **thunk attach 的每线程状态分配**：C 创建线程首次回调时 attach 的开销与生命周期（detach 时机）。
-4. **隔离强度**：Rust Heap 与引擎元数据分池的具体布局；要不要 guard page / 单独 mmap 区。
-5. **GIL 放锁点**：tier-0 GIL 在哪些点放锁（futex_wait/join/阻塞 FFI），避免"持锁阻塞"死锁。
-6. **模式 A 的 eager 降低成本**：若"全量降字节码"在大程序上启动偏慢，再评估 lazy+tcx-confine（§1.2/§3.2），
-   但优先保 eager（执行相 tcx-free）。
+Threat: in real-address mode guest and VM share one address space, so guest unsafe UB (wild pointer/UAF/out-of-bounds), FFI/C-library defects and inline asm can write into VM-owned memory (metadata, interpreter, bytecode, other threads' stacks) → crash or silent corruption. Guest safe code provably cannot (Rust type system, C3); only UB or native defects can, so this is not a threat for the vast majority of code.
 
----
+Fundamental tension: real addresses (chosen for zero-marshalling FFI and native fidelity) are incompatible with Wasm-style cheap memory enclosure. Wasm bounds-checks every access into one linear memory; a Rust guest uses real pointers = real addresses. Pick one; there is no free lunch.
 
-## 10. 与 frame-abi-bytecode.md 的接口（共同成立，C11）
+Layered defense (user decision, 2026-07-05: cut `L2`/`L4`, focus on `L1`+`L3`):
 
-- 每线程 native 栈放 guest 帧（模型 A）+ 每线程 slaved 操作数区 = §2"每线程私有"格。
-- BytecodeBody（冻结元数据）= §2"发布后只读"格；lowering（§3.1）产出它。
-- JITBackend/Cranelift 编译码缓存 = §2"显式同步"格；JIT 服务线程（§3.2）产出。
-- unwind（frame-abi §7 候选 A，Cranelift landing pad）在**每线程 native 栈**独立进行，无跨线程同步。
-- 蹦床/thunk（frame-abi §8）= §5 create/attach。
+| Layer | Blocks | Status |
+|---|---|---|
+| `L0` type system (free) | safe guest code cannot reach VM memory | natural, covers the vast majority |
+| `L1` structural isolation | VM memory vs guest memory in separate pools, in a known address region + guard page | do it; also reduces the `L3` region check to one range comparison |
+| `L3` checked mode (opt-in, untrusted/LLM) | region check before every raw dereference → a wild write is caught before corruption | design reserve, below |
+| ~~`L2` MPK/PKU~~ | — | rejected: too arch-specific (x86-only); optional `L3` accelerator |
+| ~~`L4` process sandbox~~ | — | rejected: out of scope |
 
-两文档合起来 = M4 引擎的完整地基：帧/字节码/JIT（frame-abi）+ 并发/状态/生命周期（本文）。
+Checked mode (the reserve; the Rust type system makes it far cheaper than Wasm):
+
+- The JIT can insert checks: mirvm lowers MIR/bytecode → CLIF and Cranelift compiles only the CLIF it is given, so checked mode inserts region checks (compare + branch before load/store) at lowering; fast mode inserts none (= native codegen). Machine code never escapes our control.
+- Only raw dereferences are checked: a safe reference access (`*r`, `r: &T`) is provably valid absent UB and is not checked; only raw pointer dereferences (unsafe) can go wild and are checked (MIR distinguishes by pointer type). Good code is overwhelmingly safe references, so check points are few — Wasm checks everything, mirvm checks only raw dereferences, and total overhead is pressed down by that.
+- The check is a region check (`addr ∈ guest memory region`): compare + branch, predicted-taken, only at raw dereferences, almost always passing (only a true wild pointer fails). `L1` reduces it to a single range comparison.
+- Borrowed from the JVM ([implicit null check](https://shipilev.net/jvm/anatomy-quarks/25-implicit-null-checks/), [uncommon trap](https://shipilev.net/jvm/anatomy-quarks/29-uncommon-traps/)): static check elimination (a raw pointer proven to come from a known allocation with a bounded offset drops the check; the same idea as BCE); deopt/speculation + profile-driven (M5). Implicit trap (guard page) is harder for us — guest memory is scattered, not a bounded region, exactly the [Wasm Memory64](https://github.com/WebAssembly/memory64/issues/3) problem — so explicit region checks are the main mechanism.
+- Wasm boundary: guard-page elimination is near-zero cost, but only for 32-bit-offset guests; mirvm's real 64-bit pointers are worse than Memory64 and guard pages are unusable. The Rust safe/unsafe distinction keeps check points few, and overhead is pressed there rather than with guard pages.
+- Honest boundary: checking only raw dereferences misses the case where unsafe code launders a wild address into a `&T` and then dereferences it (that needs reference-level validation = full Miri, slow); wild writes almost always go through raw pointers, so the cost/benefit is good. Checked mode is a spectrum: lite (raw dereference, cheap, catches most) → full Miri (everything, slow).
+- Model-A interaction: the slaved operand area keeps guest locals in a known region, separate from VM native stack frames, so the region check is cheap; alloca would interleave with VM state and need per-frame tracking. The alloca-must-migrate promise was revoked on 2026-08-12; the interpreter formally keeps slaved, and alloca reopens only on real performance evidence. The decoupling requirement stands: frame-local storage and fast/checked mode must not be coupled; they meet only at the `GuestMemory::contains(addr) -> bool` predicate.
+- Profile: checked mode is opt-in (fast mode has no checks ≈ native speed; checked serves untrusted/LLM). The interpreter/JIT speed delta from checks is an explicit profile and optimization target (pressed by BCE/deopt).
+- Key asymmetry: compiled code touches only guest memory, so checks go into its CLIF; the interpreter performs guest accesses, so checks go into its raw-deref handling. Both tiers can check; only the insertion point differs.
+- By use: trusted dev/own project = fast mode + `L1` (guest UB is the guest's own bug, = native); untrusted/LLM/agent (P0) = checked mode (`L3`) + `L1`. Bottom line: real addresses and Wasm-style cheap enclosure are incompatible, no free lunch, but the Rust type system makes checked mode far cheaper than Wasm (only raw dereferences are checked). Same source as "OS-level isolation handles safety": that protects the host, this protects the VM from the guest.
+
+### 3.3 tier-0 → VM tier (transition)
+
+| | tier-0 (transition) | VM tier (target) |
+|---|---|---|
+| Threads | real pthread + trampoline (real `pthread_t`, `into_pthread_t` holds) | same |
+| Execution | GIL over real threads: interp execution serialized by a global lock, released before blocking (futex/join/FFI/lowering) | no GIL, true parallel |
+| `tcx` | single-threaded access under the GIL (safe) | never touched (§2.4) |
+| Structure | isomorphic to VM tier (drop the GIL and it is parallel) | — |
+
+The GIL is a stepping stone, not an end state: it lets `into_pthread_t` and friends hold in tier-0 too, with the same structure as VM tier. Cooperative scheduling is emulation to throw away (user judgement: `into_pthread_t` proved it runs wrong). Removing the GIL requires the three-way state split (§2.3) in place, `tcx` out of the execution path (§2.4), and a concurrent Rust Heap (§2.4).
+
+## 4. Verification
+
+- `./tests/run.sh suite runtime.tsan` — the TSan verdict (`tests/suites/runtime/tsan.sh`): `src/vm` is compiled source-for-source under `-Zsanitizer=thread` with `TSAN_OPTIONS=halt_on_error=1`, and every id in the suite's `EXPECTED` list must print `PASS`: `mixed-stack-fib`, `atomic-cross-tier`, `blocking-io-liveness`, `mixed-stack-unwind`, `engine-atomics-thunk-cache`, `capture-session-lifecycle`, `engine-close-race`, `guest-threads`, `signal-delivery`, `fork-guard`. One case: `cd tsan && MIRVM_BUILD_ID=0000000000000000 RUSTFLAGS="-Zsanitizer=thread" cargo +nightly-2026-07-02 run -Zbuild-std --target x86_64-unknown-linux-gnu --release -- <case-id>`. TSan targets only the engine's own state (`VmShared`, caches, registry, arena/block pool, the publish protocol); guest unsafe races are explicitly not covered (C4), and cases keep guest memory race-free by construction so any warning is an engine bug. The channel depends on the engine core staying free of `rustc_private` (the `tsan/` harness shares `src/vm`).
+- `./tests/run.sh suite runtime.semantics` — the threads section: the five `demo/threads_{spawn,channel,sync,time,panic}.rs` differentials against native (stdout + exit code + normalized stderr); `corpus/c_blocking_io.rs` must print `got: [104, 105]` and `corpus/c_net_echo_threaded.rs` must print `echo = "echo"` (a blocking syscall blocks only itself); `corpus/c_rayon.rs` must print `par_sort ok = true` inside the 20 s hard gate; `demo/recursion_deep.rs` under `MIRVM_STACK_SIZE=1m MIRVM_JIT_THRESHOLD=1 MIRVM_JIT_SYNC=1` must exit 70 with the JIT stack-overflow diagnosis; this section also runs `runtime.tsan` unless `SKIP_TSAN=1`.
+- Spike 4 acceptance (2026-07-07): 8 real host threads in parallel mixed execution (i2c/c2i concurrent) + cross-tier same-address atomics + blocking syscall liveness (corpus §2.1 scenario closed) + concurrent mixed-stack unwind, with TSan full instrumentation and zero race warnings. The Spike 4 workload is atomic counter, mpsc producer/consumer, Mutex 8×N contention, Arc shared sum and scoped threads. Output must also agree with the single-thread/tier-0 differential (byte-for-byte on deterministic loads; timing-sensitive loads rely on invariants). This is the concretization of "the engine passes TSan" in ledger §5.3 and C1's hard gate before removing the GIL.
+- `./tests/run.sh fast` (daily), `./tests/run.sh smoke` (adds small real-world/corpus loads) and `./tests/run.sh gate` (full gate) are the repository entries; `runtime.tsan` is the suite that proves this document.
+
+## 5. Open items
+
+Unimplemented when this RFC closed: mode B, the hand-rolled TLAB (v1 = `mimalloc` crate backend, E14) and checked mode (E23).
+
+1. **Publish protocol.** Insert-once and tear-free publication for the instance→bytecode and instance→compiled-code caches. Concurrent `HashMap` (dashmap-style) + atomic publish vs `RwLock` (correctness first). Start with `RwLock`; profile before optimizing.
+2. **TLAB allocator details.** Arena chunk size and size classes, the concrete remote-free queue, the large-object threshold, and arena reclamation at thread exit. Copy mimalloc/jemalloc structure.
+3. **Thunk attach.** Cost and lifetime of per-thread state allocation (detach timing) when a C-created thread first calls back.
+4. **Isolation strength.** The concrete layout of the Rust Heap vs engine metadata pools; whether to add guard pages / a separate `mmap` region.
+5. **GIL release points.** Where tier-0 releases the lock (`futex_wait`/`join`/blocking FFI) to avoid deadlock from holding the lock while blocking.
+6. **Mode A eager lowering cost.** If lowering all bytecode makes startup slow on large programs, re-evaluate lazy + tcx-confine (§2.2/§2.4), but prefer eager to keep the execution phase tcx-free.
+
+Reopen triggers: alloca reopens only on real performance evidence (2026-08-12 revocation); checked mode (`L3`) activates for untrusted/LLM/agent workloads (P0); mode A lazy lowering reopens only with a proven eager-lowering startup cost; the hand-rolled-vs-crate TLAB choice is E14.
