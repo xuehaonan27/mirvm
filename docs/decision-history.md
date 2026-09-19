@@ -3019,6 +3019,43 @@ corpus 批7 c_mimalloc（波2，自定义分配器边界探针本意）撞出的
   out-store、`resolver_config.rs` 整模块 `#![cfg(test)]` 且无消费者）记在 `open-issues`；
   **`docs/` 的中文没有翻**——这是本片的范围裁定，不是遗漏。
 
+### 7.65 2026-09-19：spike 归档——代码删除，证据留档，TSan 用例搬进 harness
+
+- **触发**：一次"这 5 个 spike 还有用吗"的盘点。先在容器上把五个真跑了一遍（release）：
+  spike1/2/4 PASS，**spike3 `Aborted (core dumped)`（exit 134，零输出）**，
+  **spike5 的 `__register_frame` 自注册探针 FAIL（abort）**——而 spike5 打印 FAIL 后仍返回 0，
+  所以即使有人跑也未必当回事。同时确认：**没有任何套件跑它们**（`grep -rn spike tests/` 零命中），
+  唯一的自动消费者是 TSan harness 调了一次 `spike4::run_cases()`。即"手动回归自检"从未发生过，
+  两个已经坏了也没人知道——这本身就是判据。
+- **spike3 的 abort 不是引擎回归**：生产侧混合栈 unwind 的门是 `runtime.c-unwind`，最近两轮
+  `fast` 均 **13/13 绿**；spike3 那套替身帧（手写 `extern "C-unwind"` 帧 + spike-only 基建）
+  贴着 ABI/edition 细节走，本来就是消耗品。
+- **删除理由**（不是"没用了"这种含糊话）：①每个 spike 守的机制，生产端都有真实现 + 自动门——
+  spike1（模型 A 骨架）→ 真解释器 + 397 单测 + `differential.programs`；spike2（i2c/c2i 适配器）
+  → 真 JIT c2i + `differential.programs.jit-sync`；spike3（FrameGuard 协议）→ 生产 FrameGuard +
+  LSDA + `runtime.c-unwind`；spike4（引擎 Sync）→ `runtime.tsan` 里真引擎的 `tsan_mt` + telemetry
+  用例；spike5（Cranelift P/R、eh_frame 自注册）→ 生产 JIT 已定型，其中 eh_frame 那条路正好被
+  §7.33 的"整段 `.eh_frame` 一次注册"取代。②它是 **3811 行无条件编进 release 的活代码**
+  （spike5 在 `cranelift` 后面，其余无条件），贴着 rustc_private/edition 走，**每次 toolchain
+  bump 都可能被上游顺手打坏**——正是 §7.64 刚要制度化的那件事，留着只会让下次 bump 的人追假失败。
+  ③证据不依赖代码：五份 `docs/history/spike*.md` + 本档。
+- **搬了什么、没搬什么**：spike4 的四条 case（并行混合 fib、跨层原子计数、阻塞 syscall 活性、
+  并发混合栈 unwind）**没有丢**——连它自带的 `bytecode`/`frame`/`memory` 三个 spike-only 基建
+  一起搬进 `tsan/src/spike4/`（这三个文件本来就零 `crate::` 引用，是自包含孤岛），改由 harness
+  自己拥有，`runtime.tsan` 继续跑同一批负载。spike1/2/3/5 与 `interp.rs` 删除。
+- **产品面变化**：`mirvm spike1..5` 子命令与 USAGE 的 DEV 行删除（无测试依赖）；`src/vm/mod.rs`
+  不再声明 `spikes`，`vm` 只剩 `engine`（TSan harness 仍以 `#[path]` 共享它）。
+- **验证**：`cargo check --locked --all-targets --all-features` 0 错、CI clippy 干净、
+  `cargo test --locked` **397/397**（spike 里本来没有 `#[test]`，计数不变）、
+  **`runtime.tsan` 通过**——搬过去的 caseA–D 在插桩下全 PASS、`tsan_mt` 与 telemetry caseE 照旧、
+  零 `WARNING: ThreadSanitizer`；`cargo fmt --check` 干净。
+- **如实记录的偏差**：spike5 的 P 约定（显式 ctx 首参）实现随文件一起消失；P-vs-R 的决策数据
+  在 [designs/vmctx-passing.md](designs/vmctx-passing.md) 与 spike5 留档里，需要时从 git 历史取回。
+  open-issues 里"vmctx R 缓存层复测"的触发器不受影响。
+- **五份 spike 留档的头部加了归档行**，指明代码已删、文中 `mirvm spikeN` 命令不再可跑（spike4
+  那份另注用例已转入 harness）；`designs/m5.4-design.md` 指向 `src/vm/spikes/spike5.rs` 的那处
+  改为指向留档。
+
 ## 8. 尚未兑现或需要重新验证的架构承诺
 
 > **2026-07-22 收束**：本清单多条已被后续兑现或推翻——方法级 JIT

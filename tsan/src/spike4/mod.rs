@@ -1,7 +1,7 @@
-//! Spike 4: concurrency -- N **real host threads** each run interp_frame; the engine passes
-//! TSan.
+//! Concurrency workload for the TSan harness: N **real host threads** each run `interp_frame`,
+//! and the verdict is TSan-clean (gate: `tests/suites/runtime/tsan.sh`).
 //!
-//! Validates three core claims (RFC acceptance = TSan clean):
+//! Three claims the cases pin:
 //! 1. **Engine is Sync, no GIL**: shared read-only program + per-thread execution state, zero
 //!    data races on VM-owned state. The cases keep the guest race-free (guest races are out
 //!    of contract), so any TSan report is an engine bug.
@@ -21,18 +21,22 @@
 //! a raw pointer (not `&`): it avoids burdening CompiledFn with HRTB lifetimes and matches the
 //! vmctx discipline; `thread::scope` guarantees the lifetime.
 //!
-//! TSan entry point: `run_cases()` (the tsan harness reuses this source via `#[path]`, see
-//! `runtime.tsan`).
+//! These cases were written as spike 4 and moved here when the spike tree was archived; the
+//! harness owns them now, so `bytecode`/`frame`/`memory` below are private to this module
+//! rather than shared product sources.
+
+mod bytecode;
+mod frame;
+mod memory;
 
 use std::panic::{self, AssertUnwindSafe};
-use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::bytecode::{
+use self::bytecode::{
     BinOp, Block, Body, Operand, Program, Rvalue, Stmt, Terminator, UnwindAction,
 };
-use super::frame::{OperandRegion, Word};
-use super::memory::GuestMemory;
+use self::frame::{OperandRegion, Word};
+use self::memory::GuestMemory;
 
 // ===== guest exceptions (same mechanism as spike3, self-contained) =====
 
@@ -775,9 +779,9 @@ fn case_d() -> bool {
     pass
 }
 
-// ===== entry points =====
+// ===== entry point =====
 
-/// Case entry point shared by the TSan harness (tsan/) and the CLI.
+/// Run all four cases; `false` means at least one failed (the harness then exits non-zero).
 pub fn run_cases() -> bool {
     let mut ok = true;
     ok &= case_a();
@@ -785,14 +789,4 @@ pub fn run_cases() -> bool {
     ok &= case_c();
     ok &= case_d();
     ok
-}
-
-pub fn run() -> ExitCode {
-    if run_cases() {
-        println!("--- spike4: all PASS (real-thread engine concurrency verified) ---");
-        ExitCode::SUCCESS
-    } else {
-        println!("--- spike4: FAIL ---");
-        ExitCode::from(1)
-    }
 }

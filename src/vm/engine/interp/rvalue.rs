@@ -292,7 +292,8 @@ pub(super) fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
             use std::sync::atomic::*;
             let (p, _) = eval_operand(ctx, base, addr);
             let o = host_ord(*order);
-            // Real host atomic instructions (spike4 obligation); ordering as guest requested (D8j)
+            // A guest atomic must become a real host atomic (the TSan harness's atomic-interop
+            // case pins this); ordering as the guest requested (D8j)
             unsafe {
                 match width {
                     Width::W8 => AtomicU8::from_ptr(p as *mut u8).load(o) as u64,

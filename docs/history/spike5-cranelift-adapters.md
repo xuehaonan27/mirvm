@@ -4,6 +4,8 @@
 > 微基准、**unwind 穿真 JIT 帧（eh_frame 自注册后传播成功）**。spike1-4 + diff 16/16 + TSan 无回归。
 > 目的：兑现挂起的 M4 检查点——spike2"Cranelift 能否发此约定"、vmctx-passing"内部约定等真数据"、
 > spike3"真 Cranelift CFI 留复核"，一次收三个。
+> **2026-09-19 归档**：spike 代码已从 `src/vm/spikes/` 删除（裁决见 decision-history §7.65）。
+> 本文是结论与证据的留档；文中 `mirvm spikeN` 命令已不可跑。
 
 ## 1. 建了什么
 
