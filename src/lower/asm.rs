@@ -1,18 +1,23 @@
-//! inline asm 站点 → GAS wrapper 文本生成（M5.0 asm-stub 工厂，轨 A）。
+//! Inline-asm site -> GAS wrapper text generation.
 //!
-//! cg_clif `rustc_codegen_cranelift/src/inline_asm.rs` 逐段同构移植：Cranelift 本身
-//! 无 asm 能力，cg_clif 的做法是**自做寄存器分配** + 渲染一个 `fn(*mut u8)` 的 GAS
-//! wrapper（单指针指向槽缓冲：clobber 保存 → 从缓冲装输入寄存器 → asm 模板本体 →
-//! 回存输出寄存器 → 恢复 clobber → ret），交外部汇编器（步 2 的 cc）汇编成机器码。
+//! This follows cg_clif's `rustc_codegen_cranelift/src/inline_asm.rs` closely. Cranelift
+//! has no asm support, so cg_clif does its **own register allocation** and renders a
+//! `fn(*mut u8)` GAS wrapper around a single pointer to a slot buffer: save clobbers, load
+//! input registers from the buffer, run the asm template body, store output registers back,
+//! restore clobbers, return. An external assembler (the `cc` step) then assembles it into
+//! machine code.
 //!
-//! wrapper ABI 的承重不变量（照抄，勿创新）：
-//! - `rbx` = 缓冲基址（`push rbx; mov rbx,rdi`）；所有槽访问 `[rbx+off]`。
-//! - rustc **保留 rbx**（LLVM 基址寄存器），永不分配给 `reg` 类操作数 → 缓冲基址
-//!   在 asm 本体执行期间安全。cpuid 惯用法 `mov {0:r},rbx; cpuid; xchg {0:r},rbx`
-//!   自己保存/恢复 rbx 跨 cpuid（cpuid 写 ebx）——正因此该 wrapper 方案对 cpuid 成立。
-//! - `.intel_syntax noprefix` 包裹（末尾 `.att_syntax` 复原）。
+//! Load-bearing wrapper ABI invariants:
+//! - `rbx` holds the buffer base (`push rbx; mov rbx,rdi`); every slot access is
+//!   `[rbx+off]`.
+//! - rustc **reserves rbx** as the LLVM base register and never allocates it to a `reg`
+//!   operand, so the buffer base stays safe while the asm body runs. The cpuid idiom
+//!   `mov {0:r},rbx; cpuid; xchg {0:r},rbx` saves and restores rbx around cpuid itself
+//!   (cpuid writes ebx), which is exactly what makes this wrapper scheme work for cpuid.
+//! - `.intel_syntax noprefix` wraps the body, restored by `.att_syntax` at the end.
 //!
-//! M5.0 仅 x86_64（func.rs 边界已拒非 x86_64/naked/may_unwind/sym/label/const）。
+//! Only x86_64 is supported; the `func.rs` boundary already rejects non-x86_64, naked,
+//! may_unwind, sym, label and const operands.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -32,14 +37,8 @@ use crate::vm::engine::ir;
 
 static NEXT_MATERIALIZE_TEMP: AtomicU64 = AtomicU64::new(0);
 
-/// asm-stub 批量物化（M5.0 步 2）：全部 wrapper 文本拼一个 .s → cc 汇编成 .so →
-/// dlopen → 逐站点**自带符号名** dlsym → 真地址表（AsmStubId = 位序 → u64）。
-/// 符号名与位序解耦（A2 split：最终位序收尾才知，名字在 lower 期已烤进文本）。
-///
-/// 内容哈希缓存 `~/.cache/mirvm/asm-stubs/<hash>.so`——热缓存零 cc 调用。dlopen 句柄
-/// 泄漏（进程生命周期常驻，代码地址随之有效）。物化在加载相（OS 交互合法域）；返回
-/// 的 u64 表移交 Module，执行相只读直调、纯度不破。空站点集 = 空表（零开销）。
-/// FNV-1a 64 位内容哈希（asm-stub 与 global-asm 缓存键共用）。
+/// FNV-1a 64-bit content hash, shared as the cache key by the asm-stub and global-asm
+/// factories.
 pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in bytes {
@@ -49,31 +48,38 @@ pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     h
 }
 
-// ===== T5 syscall 拦截（decision-history §7.18，E19③④）=====
+// ===== syscall interception =====
 //
-// guest inline-asm 与 global_asm 内的裸 `syscall` 指令：mirvm 本就持有全部 GAS
-// 文本（生成点在手，无需扫二进制）。文本改写 `syscall` → 经间接槽的
-// `call QWORD PTR [rip+mirvm_syscall_slot]`；槽随 .so 物化、dlopen 后重填为
-// arch::x86_64::asmstub 的 trampoline 真地址（P2 启动相重填同款纪律）；
-// trampoline 保 syscall 全契约（整数/flags/xmm/mxcsr）后落
-// os::process::mirvm_syscall_dispatch（v1 直通 + TRACE）。
-// 覆盖边界（如实，无真实形态）：`sysenter`/`int $0x80`、`.byte 0x0f,0x05` 对抗
-// 书写、行内多语句/标签前缀花式——不接；重开需实锤 crate。
+// A bare `syscall` instruction in guest inline asm or global_asm is rewritten at the text
+// level, since mirvm already holds all the GAS text at its generation point and never has to
+// scan a binary. The rewrite turns `syscall` into an indirect-slot
+// `call QWORD PTR [rip+mirvm_syscall_slot]`. The slot ships with the `.so` and is refilled
+// after dlopen with the real address of the `arch::x86_64::asmstub` trampoline, under the
+// same discipline as the startup-phase refill. The trampoline preserves the full syscall
+// contract (integer, flags, xmm, mxcsr) and lands in `os::process::mirvm_syscall_dispatch`,
+// which passes through and traces.
+//
+// Not covered, and none of these forms is known to occur in practice: `sysenter`,
+// `int $0x80`, `.byte 0x0f,0x05` written to evade the rewrite, and multiple statements or
+// label prefixes on one line. Supporting them needs a concrete crate that hits them.
 
-/// 间接槽定义（命中即随 .s 附带一次；`%rip` 相对寻址，.so 自洽无需外部符号）。
+/// Indirect slot definition, appended once to the `.s` when a rewrite hits. Addressing is
+/// `%rip`-relative, so the `.so` is self-contained and needs no external symbol.
 const SYSCALL_SLOT_DEF: &str =
     ".data\n.globl mirvm_syscall_slot\n.p2align 3\nmirvm_syscall_slot: .quad 0\n.text\n";
 
-/// `syscall` 指令的替换体（RIP 相对间接调用；asm-stub 全区为 `.intel_syntax
-/// noprefix` 包裹——必须用 Intel 形式，AT&T 的 `*(%rip)` 会被 GAS 拒）。
-/// 两级间接（PIC 纪律）：GOT 项（动态链接器装载期填）→ 命名 .data 槽
-/// （mirvm dlopen 后重填 trampoline 真址）；r11 恰为 syscall 契约的可坏
-/// 寄存器，作跳板不违约。
+/// Replacement body for a `syscall` instruction: a RIP-relative indirect call. The asm-stub
+/// region is wrapped in `.intel_syntax noprefix`, so the Intel form is required; GAS rejects
+/// AT&T's `*(%rip)`. The two-level indirection follows PIC discipline: a GOT entry filled by
+/// the dynamic linker at load time, then the named `.data` slot that mirvm refills with the
+/// trampoline's real address after dlopen. r11 is exactly the scratch register the syscall
+/// contract allows to be clobbered, so using it as the springboard breaks nothing.
 const SYSCALL_CALL: &str =
     "    mov r11, QWORD PTR [rip+mirvm_syscall_slot@GOTPCREL]\n    call [r11]\n";
 
-/// 行级助记符匹配：前导空白已剥；`syscall` 后只容许行尾/空白/注释（# 或 ;）。
-/// 多语句同行与标签前缀形态不接（覆盖边界，见上）。
+/// Line-level mnemonic match with leading whitespace already stripped: after `syscall` only
+/// end of line, whitespace or a comment (`#` or `;`) is allowed. Multi-statement lines and
+/// label prefixes are not covered.
 fn is_syscall_insn_line(trimmed: &str) -> bool {
     let Some(rest) = trimmed.strip_prefix("syscall") else {
         return false;
@@ -85,8 +91,9 @@ fn is_syscall_insn_line(trimmed: &str) -> bool {
     }
 }
 
-/// 改写 src 中全部 `syscall` 指令行为间接槽调用。返回是否有改写（决定是否
-/// 附带槽定义与 dlopen 后重填）。
+/// Rewrites every `syscall` instruction line in `src` into an indirect slot call. Returns
+/// whether anything was rewritten, which decides whether the slot definition is appended and
+/// whether the slot is refilled after dlopen.
 pub(crate) fn rewrite_syscall_text(src: &mut String) -> bool {
     let mut hit = false;
     let mut out = String::with_capacity(src.len() + 64);
@@ -105,7 +112,8 @@ pub(crate) fn rewrite_syscall_text(src: &mut String) -> bool {
     hit
 }
 
-/// dlopen 后重填 syscall 间接槽（在场才填——系统库无此符号，静默跳过）。
+/// Refills the syscall indirect slot after dlopen. A system library has no such symbol, so an
+/// absent slot is skipped silently.
 pub(crate) fn refill_syscall_slot(handle: usize) {
     let slot = crate::os::dll::sym(handle, c"mirvm_syscall_slot");
     if slot != 0 {
@@ -115,51 +123,80 @@ pub(crate) fn refill_syscall_slot(handle: usize) {
     }
 }
 
+/// Materializes asm stubs in one batch: concatenate every wrapper text into one `.s`,
+/// assemble it to a `.so` with `cc`, `dlopen` it, then `dlsym` each site by its own symbol
+/// name to build the address table (bit position -> u64). Names are decoupled from bit
+/// positions because the final order is only known at the end, while the name is already
+/// baked into the text during lowering.
+///
+/// The content hash addresses the cache at `~/.cache/mirvm/asm-stubs/<hash>.so`, so a warm
+/// cache makes no `cc` call at all. The `dlopen` handle is intentionally leaked: it stays
+/// resident for the process lifetime, which keeps the code addresses valid. Materialization
+/// happens in the load phase, where OS interaction is allowed; the returned u64 table moves
+/// to the `Module` and the execution phase only reads and calls directly, preserving purity.
+/// An empty site set yields an empty table at zero cost.
 pub(crate) fn materialize(sites: &[ir::AsmSite]) -> Vec<u64> {
-    try_materialize(sites).unwrap_or_else(|error| panic!("asm-stub 物化失败: {error}"))
+    try_materialize(sites)
+        .unwrap_or_else(|error| panic!("asm-stub materialization failed: {error}"))
 }
 
+/// Fallible counterpart of [`materialize`]: reports an assembly, caching or symbol failure as
+/// an `Err` instead of panicking.
 pub(crate) fn try_materialize(sites: &[ir::AsmSite]) -> Result<Vec<u64>, String> {
     if sites.is_empty() {
         return Ok(Vec::new());
     }
     let mut src = String::new();
-    src.push_str("# mirvm asm-stub 工厂产物（M5.0）——请勿手改\n");
+    src.push_str("# Generated by the mirvm asm-stub factory -- do not edit by hand\n");
     for site in sites {
         src.push_str(&site.text);
     }
-    // T5：裸 `syscall` 指令 → 间接槽调用（改写发生在内容哈希前，缓存键与
-    // 最终字节一致）
+    // Bare `syscall` instructions become indirect slot calls. The rewrite runs before content
+    // hashing, so the cache key matches the final bytes.
     rewrite_syscall_text(&mut src);
 
-    // FNV-1a 内容哈希（稳定、跨运行可复用缓存键）
+    // FNV-1a content hash: stable, so runs reuse the same cache key
     let h = fnv1a(src.as_bytes());
 
     let dir = crate::sysroot::cache_dir().join("asm-stubs");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("创建 asm-stub 缓存目录 `{}` 失败: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        format!(
+            "failed to create the asm-stub cache directory `{}`: {e}",
+            dir.display()
+        )
+    })?;
     let so: PathBuf = dir.join(format!("{h:016x}.so"));
 
     if !so.exists() {
         let serial = NEXT_MATERIALIZE_TEMP.fetch_add(1, Ordering::Relaxed);
         let suffix = format!("{}.{}", std::process::id(), serial);
         let s_path = dir.join(format!("{h:016x}.tmp.{suffix}.s"));
-        std::fs::write(&s_path, &src)
-            .map_err(|e| format!("写 asm-stub 临时汇编 `{}` 失败: {e}", s_path.display()))?;
-        // -shared -fPIC：wrapper 自包含（无外部符号），dlopen 后 dlsym 各站点即得真址。
-        // 源与产物都用进程+序号唯一临时名；同进程并发实例化不会相互截断。
+        std::fs::write(&s_path, &src).map_err(|e| {
+            format!(
+                "failed to write the asm-stub temporary assembly `{}`: {e}",
+                s_path.display()
+            )
+        })?;
+        // -shared -fPIC keeps the wrapper self-contained with no external symbols, so dlsym
+        // yields each site's real address after dlopen. Both the source and the product use a
+        // process-and-serial unique temporary name, so concurrent instantiation in one process
+        // cannot truncate another's file.
         let tmp = dir.join(format!("{h:016x}.so.tmp.{suffix}"));
         let output = std::process::Command::new("cc")
             .args(["-shared", "-fPIC", "-nostdlib", "-o"])
             .arg(&tmp)
             .arg(&s_path)
             .output()
-            .map_err(|e| format!("调用 cc 汇编 asm-stub 失败（PATH 缺 cc？）: {e}"))?;
+            .map_err(|e| {
+                format!(
+                    "failed to invoke cc to assemble the asm-stub (is cc missing from PATH?): {e}"
+                )
+            })?;
         let _ = std::fs::remove_file(&s_path);
         if !output.status.success() {
             let _ = std::fs::remove_file(&tmp);
             return Err(format!(
-                "cc 汇编 asm-stub 失败（status={}）:\n{}{}",
+                "cc failed to assemble the asm-stub (status={}):\n{}{}",
                 output.status,
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
@@ -167,36 +204,47 @@ pub(crate) fn try_materialize(sites: &[ir::AsmSite]) -> Result<Vec<u64>, String>
         }
         std::fs::rename(&tmp, &so).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
-            format!("asm-stub .so 原子发布 `{}` 失败: {e}", so.display())
+            format!(
+                "failed to atomically publish the asm-stub .so `{}`: {e}",
+                so.display()
+            )
         })?;
     }
 
     let c_so = std::ffi::CString::new(so.as_os_str().as_encoded_bytes())
-        .map_err(|_| format!("asm-stub 路径含 NUL: {}", so.display()))?;
+        .map_err(|_| format!("asm-stub path contains a NUL byte: {}", so.display()))?;
     let handle = crate::os::dll::open_with_flags(
         &c_so,
         crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL,
     )
-    .map_err(|detail| format!("dlopen asm-stub .so `{}` 失败: {detail}", so.display()))?;
+    .map_err(|detail| {
+        format!(
+            "failed to dlopen the asm-stub .so `{}`: {detail}",
+            so.display()
+        )
+    })?;
     refill_syscall_slot(handle);
 
     sites
         .iter()
         .map(|site| -> Result<u64, String> {
-            let name = std::ffi::CString::new(&*site.name)
-                .map_err(|_| format!("asm-stub 符号名含 NUL: {:?}", site.name))?;
+            let name = std::ffi::CString::new(&*site.name).map_err(|_| {
+                format!("asm-stub symbol name contains a NUL byte: {:?}", site.name)
+            })?;
             let addr = crate::os::dll::sym(handle, &name);
             if addr == 0 {
-                return Err(format!("dlsym asm-stub `{}` 失败", site.name));
+                return Err(format!("failed to dlsym asm-stub `{}`", site.name));
             }
             Ok(addr as u64)
         })
         .collect()
 }
 
-/// 一个 asm 操作数供 wrapper 生成用的约束（值/落点由 func.rs 另配，不进本模块）。
-/// `late` 决定类操作数分配相位（非 late 输出先分配，与输入互斥；late 输出后分配、
-/// 可与输入共寄存器）——cg_clif allocate_registers 的语义。M5.x 补 Const/sym 操作数。
+/// Constraint of one asm operand for wrapper generation. The value and destination are
+/// carried separately by `func.rs` and never enter this module. `late` selects the class
+/// operand's allocation phase: a non-late output is allocated first and is exclusive with
+/// inputs, while a late output is allocated afterwards and may share a register with an
+/// input. This matches cg_clif's `allocate_registers` semantics.
 pub(crate) enum AsmOperand {
     In {
         reg: InlineAsmRegOrRegClass,
@@ -206,20 +254,24 @@ pub(crate) enum AsmOperand {
         late: bool,
         has_place: bool,
     },
-    // inout 无 late 相区分（恒在相 0 分配，与 cg_clif `_late` 同——故此处不带）
+    // An inout has no late distinction: it always allocates in phase 0, matching cg_clif's
+    // `_late`, hence no field here.
     InOut {
         reg: InlineAsmRegOrRegClass,
         has_out_place: bool,
     },
-    /// const/sym 操作数（M5.2 D8h）：无寄存器，值/符号名在 lower 期渲染成字面文本，
-    /// 占位符直接展开为该文本（cg_clif 同样把 const 格式化进模板）。寄存器分配跳过。
+    /// A const/sym operand: it has no register, its value or symbol name is rendered as
+    /// literal text during lowering, and the placeholder expands to that text directly, as
+    /// cg_clif also formats consts into the template. Register allocation skips it.
     Inline {
         text: String,
     },
 }
 
-/// wrapper 生成产物：文本 + 缓冲大小 + 每操作数的输入/输出槽偏移（供 func.rs 配对
-/// 已降低的值/落点，缓冲偏移与 wrapper 内 `[rbx+off]` 同源一致——正确性的地基）。
+/// Output of wrapper generation: the text, the buffer size, and each operand's input and
+/// output slot offset. `func.rs` pairs those offsets with the lowered values and
+/// destinations. The buffer offsets share one source with the wrapper's `[rbx+off]` accesses,
+/// which is the basis of correctness.
 pub(crate) struct GeneratedAsm {
     pub text: String,
     pub buf_size: u32,
@@ -227,8 +279,8 @@ pub(crate) struct GeneratedAsm {
     pub output_slot: Vec<Option<u32>>,
 }
 
-/// asm 站点降低入口（cg_clif codegen_inline_asm_inner 同构）。
-/// `name` = 该 stub 的全局唯一符号（步 2 dlsym 用）。
+/// Lowering entry point for an asm site, following cg_clif's `codegen_inline_asm_inner`.
+/// `name` is the stub's globally unique symbol, used by dlsym.
 pub(crate) fn generate<'tcx>(
     tcx: TyCtxt<'tcx>,
     enclosing_def_id: DefId,
@@ -237,8 +289,8 @@ pub(crate) fn generate<'tcx>(
     operands: &[AsmOperand],
     name: &str,
 ) -> GeneratedAsm {
-    // 语法/相位选项（noreturn/may_unwind/att_syntax）已在 func.rs 边界处置，此处只生成
-    // intel 语法非发散 wrapper。
+    // The syntax and divergence options (noreturn, may_unwind, att_syntax) are handled at the
+    // func.rs boundary, so this only generates a non-divergent Intel-syntax wrapper.
     let mut g = Gen {
         tcx,
         arch,
@@ -284,11 +336,13 @@ struct Gen<'a, 'tcx> {
 }
 
 impl<'tcx> Gen<'_, 'tcx> {
-    /// cg_clif allocate_registers 的**保守变体**：显式寄存器入已分配集 → out/inout
-    /// 类先分配（约束更紧）→ in/lateout 类后分配。**与 cg_clif 的一处已知分歧**：
-    /// cg_clif 按 (in用,out用) 位分别判冲突（允许 in↔lateout 共享一个寄存器），此处
-    /// contains_key 全冲突不共享——分配结果恒为合法子集，代价是极端密集操作数时可能
-    /// 提前分配不出（panic → catch_lower → Trap 诊断，响亮不静默）。按需再对齐。
+    /// **Conservative variant** of cg_clif's `allocate_registers`: explicit registers enter
+    /// the allocated set, then out/inout classes allocate (they are more constrained), then
+    /// in/lateout classes. One known divergence from cg_clif: cg_clif tests conflicts per
+    /// (in-use, out-use) bit and so allows an in and a lateout to share a register, while this
+    /// treats any `contains_key` as a conflict and shares nothing. The result is always a
+    /// legal subset, at the cost of possibly failing to allocate for extremely dense operands,
+    /// which panics into a Trap diagnostic rather than silently miscompiling.
     fn allocate_registers(&mut self) {
         let sess = self.tcx.sess;
         let map = allocatable_registers(
@@ -301,7 +355,7 @@ impl<'tcx> Gen<'_, 'tcx> {
             rustc_data_structures::fx::FxHashMap::<InlineAsmReg, (bool, bool)>::default();
         let mut regs = vec![None; self.operands.len()];
 
-        // 显式寄存器入已分配集
+        // Explicit registers enter the allocated set
         for (i, op) in self.operands.iter().enumerate() {
             let (reg, is_in, is_out) = match op {
                 AsmOperand::In {
@@ -328,9 +382,10 @@ impl<'tcx> Gen<'_, 'tcx> {
             e.1 |= is_out;
         }
 
-        // 类操作数分两相（cg_clif 顺序）：相 0 = out(非 late)/inout（约束更紧，与输入
-        // 互斥）先分配；相 1 = in/lateout（可与相 0 之外的寄存器共用）。`late` 决定
-        // Out 落哪一相。
+        // Class operands allocate in two phases, in cg_clif's order: phase 0 allocates
+        // non-late outs and inouts, which are more constrained and exclusive with inputs;
+        // phase 1 allocates ins and lateouts, which may share registers other than phase 0's.
+        // `late` selects which phase an Out lands in.
         for phase_late in [false, true] {
             for (i, op) in self.operands.iter().enumerate() {
                 let class = match op {
@@ -376,11 +431,12 @@ impl<'tcx> Gen<'_, 'tcx> {
                 return reg;
             }
         }
-        panic!("inline asm: 无法为寄存器类 {class:?} 分配寄存器")
+        panic!("inline asm: cannot allocate a register for register class {class:?}")
     }
 
-    /// cg_clif allocate_stack_slots 同构：clobber（非 C-clobber 覆盖者）→ inout（输入/
-    /// 输出共槽）→ input → output（与 input 重叠复用省内存）。
+    /// Follows cg_clif's `allocate_stack_slots`: clobbers that the C clobber ABI does not
+    /// already cover, then inouts, which share one input/output slot, then inputs, then
+    /// outputs. Output slots reuse the input range to save memory.
     fn allocate_stack_slots(&mut self) {
         let mut slot_size = Size::ZERO;
         let arch = self.arch;
@@ -397,8 +453,9 @@ impl<'tcx> Gen<'_, 'tcx> {
             offset
         };
 
-        // clobber 槽：保存 wrapper 要保留但 asm 会破坏的寄存器（C-clobber ABI 覆盖者
-        // 免存——调用约定本就允许破坏）。
+        // Clobber slots hold registers the wrapper must preserve but the asm would destroy.
+        // Registers the C clobber ABI already covers need no save, since the calling
+        // convention permits clobbering them.
         let abi_clobber = InlineAsmClobberAbi::parse(
             self.arch,
             &self.tcx.sess.target,
@@ -429,7 +486,7 @@ impl<'tcx> Gen<'_, 'tcx> {
             }
         }
 
-        // inout：输入输出共槽
+        // inout: one slot shared by input and output
         for (i, op) in self.operands.iter().enumerate() {
             if let AsmOperand::InOut {
                 reg,
@@ -444,7 +501,7 @@ impl<'tcx> Gen<'_, 'tcx> {
         }
 
         let slot_size_before_input = slot_size;
-        // input
+        // inputs
         for (i, op) in self.operands.iter().enumerate() {
             match op {
                 AsmOperand::In { reg }
@@ -458,7 +515,7 @@ impl<'tcx> Gen<'_, 'tcx> {
                 _ => {}
             }
         }
-        // output 与 input 区间重叠复用（省内存；照抄 cg_clif）
+        // Outputs reuse the input range to save memory, as cg_clif does.
         let slot_size_after_input = slot_size;
         slot_size = slot_size_before_input;
         for (i, op) in self.operands.iter().enumerate() {
@@ -476,7 +533,7 @@ impl<'tcx> Gen<'_, 'tcx> {
         self.slot_size = slot_size;
     }
 
-    /// cg_clif generate_asm_wrapper 同构（ELF/x86_64 分支；intel 语法）。
+    /// Follows cg_clif's `generate_asm_wrapper`: the ELF/x86_64 branch with Intel syntax.
     fn generate_asm_wrapper(&self, name: &str) -> String {
         let mut s = String::new();
         writeln!(s, ".globl {name}").unwrap();
@@ -487,16 +544,16 @@ impl<'tcx> Gen<'_, 'tcx> {
 
         Self::prologue(&mut s);
 
-        // 保存 clobber 寄存器
+        // Save clobber registers
         for (reg, slot) in self.iter_reg_slot(&self.slots_clobber) {
             Self::save_register(&mut s, reg, slot);
         }
-        // 装入输入寄存器
+        // Load input registers
         for (reg, slot) in self.iter_reg_slot(&self.slots_input) {
             Self::restore_register(&mut s, reg, slot);
         }
 
-        // asm 模板本体
+        // The asm template body
         for piece in self.template {
             match piece {
                 InlineAsmTemplatePiece::String(text) => s.push_str(text),
@@ -505,7 +562,8 @@ impl<'tcx> Gen<'_, 'tcx> {
                     modifier,
                     ..
                 } => {
-                    // const/sym：字面文本；其余：分配到的寄存器名
+                    // const/sym expands to its literal text; everything else to the allocated
+                    // register name
                     if let AsmOperand::Inline { text } = &self.operands[*operand_idx] {
                         s.push_str(text);
                     } else {
@@ -517,7 +575,7 @@ impl<'tcx> Gen<'_, 'tcx> {
         }
         s.push('\n');
 
-        // 存输出寄存器 → 恢复 clobber → 收尾
+        // Store output registers, restore clobbers, then finish
         for (reg, slot) in self.iter_reg_slot(&self.slots_output) {
             Self::save_register(&mut s, reg, slot);
         }
@@ -542,7 +600,8 @@ impl<'tcx> Gen<'_, 'tcx> {
             .filter_map(|(r, s)| r.zip(s))
     }
 
-    /// 占位符 → 寄存器名（intel 语法；xmm/ymm/zmm 特殊命名照抄 cg_clif）。
+    /// Placeholder -> register name in Intel syntax, with cg_clif's special naming for xmm,
+    /// ymm and zmm.
     fn emit_reg(s: &mut String, reg: InlineAsmReg, modifier: Option<char>) {
         if let InlineAsmReg::X86(r) = reg
             && matches!(
@@ -565,7 +624,8 @@ impl<'tcx> Gen<'_, 'tcx> {
     fn prologue(s: &mut String) {
         s.push_str("    push rbp\n");
         s.push_str("    mov rbp,rsp\n");
-        s.push_str("    push rbx\n"); // rbx callee-saved 且被 LLVM 保留为基址
+        // rbx is callee-saved and reserved by LLVM as the base register
+        s.push_str("    push rbx\n");
         s.push_str("    mov rbx,rdi\n");
     }
 
@@ -692,8 +752,8 @@ mirvm_asm_0:
 
     #[test]
     fn rewritten_syscall_stub_passthrough_and_register_discipline() {
-        // SYS_getpid 裸 syscall：直通应得真 pid（非 0）；rbx 约定不被 syscall
-        // 破坏，trampoline 必须同纪律保全
+        // A bare SYS_getpid syscall must pass through and return the real pid (non-zero). The
+        // syscall leaves rbx intact, and the trampoline must preserve it the same way.
         let site = ir::AsmSite {
             name: "mirvm_asm_sc".into(),
             text: r#"
@@ -719,8 +779,14 @@ mirvm_asm_sc:
         let mut pair = [0u64; 2];
         let stub: unsafe extern "C" fn(*mut u8) = unsafe { std::mem::transmute(addrs[0]) };
         unsafe { stub((&mut pair as *mut u64).cast()) };
-        assert_ne!(pair[0], 0, "SYS_getpid 直通应得真 pid");
+        assert_ne!(
+            pair[0], 0,
+            "SYS_getpid passthrough must return the real pid"
+        );
         assert_eq!(pair[0] as i32, unsafe { libc::getpid() });
-        assert_eq!(pair[1], 0x0123_4567_89ab_cdef, "rbx 未按 syscall 纪律保全");
+        assert_eq!(
+            pair[1], 0x0123_4567_89ab_cdef,
+            "rbx was not preserved under syscall discipline"
+        );
     }
 }

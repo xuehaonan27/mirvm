@@ -65,16 +65,18 @@ pub const SIGFPE: i32 = libc::SIGFPE;
 pub const SIGILL: i32 = libc::SIGILL;
 pub const SIGTRAP: i32 = libc::SIGTRAP;
 
-/// Linux 的传统（非 realtime）信号编号上界。实时信号携带排队与 siginfo
-/// 语义，不能塞进只按 signal number 合并的 VM mailbox。
+/// Upper bound on Linux's traditional (non-realtime) signal numbers. Realtime
+/// signals carry queueing and siginfo semantics and cannot be folded into a VM
+/// mailbox that merges only by signal number.
 pub const STANDARD_SIGNAL_MAX: i32 = 31;
 
 pub fn is_realtime(signum: i32) -> bool {
     signum >= libc::SIGRTMIN() && signum <= libc::SIGRTMAX()
 }
 
-/// sigaction 结构体（布局知识封装；引擎以副本改 handler 后回写内核，
-/// 原 guest 结构不动——guest 可能复用/读回）。
+/// A sigaction structure (layout knowledge encapsulated). The engine edits a
+/// copy's handler and writes it back to the kernel; the original guest structure
+/// stays untouched because the guest may reuse or read it back.
 #[derive(Clone, Copy)]
 pub struct Sigaction(libc::sigaction);
 
@@ -107,10 +109,12 @@ impl Sigaction {
             })
     }
 
-    /// 从 guest 侧 act 指针复制一份（指针为 0 → None，与内核 act=NULL 语义对应）。
+    /// Copies from a guest-side `act` pointer (pointer 0 -> None, matching the
+    /// kernel's act=NULL semantics).
     ///
     /// # Safety
-    /// ptr 非 0 时必须指向 guest 地址空间中一个完整 sigaction 结构（真实地址模型）。
+    /// When `ptr` is non-zero it must point to a complete sigaction structure in
+    /// the guest address space (true address model).
     pub unsafe fn copy_from(ptr: u64) -> Option<Self> {
         if ptr == 0 {
             return None;
@@ -437,10 +441,11 @@ impl Sigaction {
     }
 }
 
-/// MIRVM_SEGV_DUMP 排障钩：安装 SA_SIGINFO 处理器——打印 fault RIP
-/// （ucontext RIP 字段，x86_64 = gregs[REG_RIP=16]）、fault 地址（CR2=gregs[22]）
-/// 与两者的 /proc/self/maps 归属，并把所属可执行段整段落 /tmp/mirvm-jitdump.bin
-/// （可 objdump 反汇编找崩点），随后退出。
+/// MIRVM_SEGV_DUMP troubleshooting hook: installs an SA_SIGINFO handler that
+/// prints the fault RIP (the ucontext RIP field, x86_64 = gregs[REG_RIP=16]), the
+/// fault address (CR2 = gregs[22]) and their /proc/self/maps owners, dumps the
+/// owning executable segment to /tmp/mirvm-jitdump.bin (objdump it to find the
+/// crash site), and then exits.
 pub fn install_segv_dump() {
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
@@ -459,7 +464,7 @@ unsafe extern "C" fn segv_dump_handler(
     unsafe {
         let uc = ctx as *mut libc::ucontext_t;
         let rip = (*uc).uc_mcontext.gregs[16] as usize; // RIP
-        let addr = (*uc).uc_mcontext.gregs[22] as usize; // CR2（真 fault 地址）
+        let addr = (*uc).uc_mcontext.gregs[22] as usize; // CR2 (the real fault address)
         eprintln!("mirvm-segv-dump: fault addr(CR2)={addr:#x} rip={rip:#x}");
         if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
             for line in maps.lines() {
@@ -476,15 +481,15 @@ unsafe extern "C" fn segv_dump_handler(
                 )
                 .unwrap_or(0);
                 if addr >= start && addr < end {
-                    eprintln!("mirvm-segv-dump: fault 归属: {line}");
+                    eprintln!("mirvm-segv-dump: fault owner: {line}");
                 }
                 if rip >= start && rip < end {
-                    eprintln!("mirvm-segv-dump: rip 归属: {line}");
+                    eprintln!("mirvm-segv-dump: rip owner: {line}");
                     if line.contains("xp") {
                         let bytes = std::slice::from_raw_parts(start as *const u8, end - start);
                         let _ = std::fs::write("/tmp/mirvm-jitdump.bin", bytes);
                         eprintln!(
-                            "mirvm-segv-dump: 可执行段已落 /tmp/mirvm-jitdump.bin（基址 {start:#x}）"
+                            "mirvm-segv-dump: executable segment dumped to /tmp/mirvm-jitdump.bin (base {start:#x})"
                         );
                     }
                 }

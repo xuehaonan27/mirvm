@@ -1,10 +1,10 @@
-//! T1-b CallBuiltin JIT 探针（m5.4-design §3.2）：
-//! 分配系快路（Vec push 扩容 / Box::new 大数组 / String 拼接 / vec! 清零
-//! → RustAlloc/RustRealloc/RustDealloc/RustAllocZeroed，mirvm_alloc 引擎堆
-//! 同一入口）+ CatchUnwind 臂（catch_unwind 捕获 panic 并 downcast 载荷）
-//! + HostWrite 臂（libc write 直通）。
-//! 三维（native / JIT-off / JIT=1）逐字节一致 + MIRVM_JIT_DEBUG 发布实证。
-//! （循环给异步编译线程时间，先例 jit_call_probe.rs。）
+//! CallBuiltin JIT probe:
+//! allocation fast paths (Vec push growth / Box::new large array / String concatenation /
+//! vec! zeroing -> RustAlloc/RustRealloc/RustDealloc/RustAllocZeroed, all entering the same
+//! mirvm_alloc engine heap entry) + the CatchUnwind arm (catch_unwind catches a panic and
+//! downcasts the payload) + the HostWrite arm (libc write straight through).
+//! Must be byte-for-byte identical across native / JIT-off / JIT=1, with MIRVM_JIT_DEBUG
+//! proving publication. The loops give the asynchronous compile thread time to run.
 
 use std::panic;
 
@@ -66,8 +66,8 @@ fn raw_write(msg: &str) -> isize {
 }
 
 fn main() {
-    // 静默 panic hook：catch 路径只看载荷，避免 3 万行 hook 输出拖慢比对
-    //（默认 hook 的 stderr 形态已由 catch.rs 覆盖）。
+    // Silent panic hook: the catch path only inspects the payload, avoiding 30k lines of hook
+    // output that would slow the comparison (catch.rs already covers the default hook's stderr).
     panic::set_hook(Box::new(|_| {}));
     let mut acc = 0u64;
     for i in 0..30000u64 {

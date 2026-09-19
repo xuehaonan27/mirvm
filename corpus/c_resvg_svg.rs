@@ -1,143 +1,143 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# 钉 =0.47.0（2026-07-18 cargo search 实勘 crates.io max stable；resvg/usvg/
-# tiny-skia 同仓 linebender/resvg 0.47 release train）。default-features=false
-# + features=["text"]：text 拉 fontdb 0.23.0 / rustybuzz 0.20.1 / ttf-parser
-# 0.25.1(gvar-alloc) / unicode-bidi / unicode-script / unicode-vo；
-# system-fonts 与 memmap-fonts 保持关 → 不扫系统字体目录、不 mmap 字体文件。
+# Pinned to =0.47.0 (crates.io max stable as searched on 2026-07-18; resvg/usvg/tiny-skia
+# share the linebender/resvg 0.47 release train). default-features=false +
+# features=["text"]: text pulls fontdb 0.23.0 / rustybuzz 0.20.1 / ttf-parser
+# 0.25.1(gvar-alloc) / unicode-bidi / unicode-script / unicode-vo;
+# system-fonts and memmap-fonts stay off, so no system font directory is scanned and no font file is mmapped.
 usvg = { version = "=0.47.0", default-features = false, features = ["text"] }
-# tiny-skia 标量后端（与 usvg 的 tiny-skia-path 0.12.0 依赖边同源配对）。
-# 绕行记录（语义不变，批6 同型退路的 0.47 复核）：resvg 0.47 依赖
-# `tiny-skia = "0.12.0"` 且 dep 边带默认特性（simd 开），其 f32x4/f32x8
-# 光栅管线在本 nightly core_arch 下走外链 LLVM 内部符号（`_mm_max_ps` →
-# `llvm.x86.sse.max.ps` 同族），mirvm 未内建 → TRAP（批6 头注探针实证 0.44
-# 同构；resvg-0.47.0/Cargo.toml 的 tiny-skia dep 边复核仍无
-# default-features=false）。cargo features 向下不可减——resvg 对 tiny-skia
-# 的 dep 边下游关不掉。按批6 同款退路改 usvg+tiny-skia 直连：tiny-skia
-# scalar（c_tiny_skia 路线三维已绿）。渲染语义由下方 mini 渲染器对齐
-# resvg 0.47 的 src/{render,path,clip,geom}.rs 逐行移植（含 render.rs 的
-# Node::Text(text) => render_group(text.flattened()) 分派——usvg 解析期已
-# 完成塑形/布局/字形轮廓化，flattened 即普通 group/path 树）；
-# filters/masks/images/patterns 不实现，本文档集不含。
+# tiny-skia scalar backend (paired with usvg's tiny-skia-path 0.12.0 dependency edge).
+# Bypass note (semantics unchanged; a recheck of the same fallback at 0.47):
+# resvg 0.47 depends on `tiny-skia = "0.12.0"` with the dep edge carrying default features (simd
+# on), and its f32x4/f32x8 raster pipeline reaches external LLVM intrinsics under this nightly
+# core_arch (`_mm_max_ps` -> the `llvm.x86.sse.max.ps` family) that mirvm does not build, so it
+# TRAPs; the resvg-0.47.0/Cargo.toml edge was rechecked and still does not set
+# default-features=false. Cargo features cannot be subtracted downstream, so the resvg ->
+# tiny-skia edge cannot be turned off from below. The driver therefore depends on usvg plus a
+# direct tiny-skia with the scalar backend (the c_tiny_skia route, green in all three
+# dimensions). Rendering semantics come from the mini renderer below, ported line by
+# line from resvg 0.47's src/{render,path,clip,geom}.rs (including the render.rs dispatch
+# Node::Text(text) => render_group(text.flattened()): usvg has already shaped, laid out and
+# outlined the glyphs, so flattened is a plain tree). filters/masks/images/patterns are absent here.
 tiny-skia = { version = "=0.12.0", default-features = false, features = ["std"] }
-# fontdb 定值字源：17 个 include_bytes! 内嵌字体（Libertinus Serif×6 /
-# NewCM Math×3 / NewCM10×4 / DejaVu Sans Mono×4），不触系统字体——
-# c_typst_pdf（批10 波1）同款字体源先例。
+# fontdb deterministic font source: 17 include_bytes! embedded fonts (Libertinus Serif x6 /
+# NewCM Math x3 / NewCM10 x4 / DejaVu Sans Mono x4), never touching system fonts -- the same
+# font-source approach as c_typst_pdf.
 typst-assets = { version = "=0.15.1", features = ["fonts"] }
 ---
-// c_resvg_svg —— resvg/usvg 0.47 完整 SVG 渲染三维差分（批10 波2，规格
-// docs/corpus.md §7）：路径/渐变/文本（内嵌 fontdb 定值字体）光栅像素
-// FNV，tiny-skia/fontdue 已通的上层接棒。批6 shapes-only 同名 driver 升级：
-// 依赖线 0.44→0.47，新增文本塑形/布局/装饰/textPath/bidi/回退面。
+// c_resvg_svg -- a full SVG rendering differential for resvg/usvg 0.47: paths, gradients and
+// text (embedded fontdb fonts) rasterize to pixel FNV on top of the already-passing
+// tiny-skia/fontdue layer. The dependency lines are all pinned on 0.47 and the text surface
+// covers shaping/layout/decoration/textPath/bidi/fallback.
 //
-// 【状态：expected-red（C 维引擎红）】A（mirvm 默认）/ B（native）两维全绿
-// 且 stdout 141 行逐字节一致、stderr 真空（0 字节）、exit 全 0——driver
-// 本体确定性经 A==B 逐字节验证无虞；C（MIRVM_JIT_THRESHOLD=1）在
-// text-style 文档 def 渲染处 panic（exit 101），诊断链如下。
-//
-// 红因（JIT 误编译，供养侧判定）：JIT 生成代码在 hairline 描边渲染路径上
-// 产出与解释器/native 分叉的值，使 tiny-skia 定点斜率越界触发断言：
+// [Status: expected-red under the C (JIT) dimension] A (mirvm default) and B (native) are both
+// green with 141 stdout lines byte-identical, empty stderr (0 bytes) and exit 0, so the driver's
+// determinism is confirmed by A==B. C (MIRVM_JIT_THRESHOLD=1) panics while rendering the
+// text-style document's def configuration (exit 101); the diagnostic chain follows.
+// Cause (a JIT miscompile, judged from the supply side): JIT-generated code produces a value
+// that diverges from the interpreter/native on the hairline-stroke rendering path, pushing
+// tiny-skia's fixed-point slope out of range and tripping an assertion:
 //   tiny-skia-0.12.0/src/scan/hairline_aa.rs:473:13
 //   assertion failed: slope <= fdot16::ONE && slope >= -fdot16::ONE
-// （381 行 "mostly horizontal" 分支为对称同族断言，算子序相反；最小复现
-// 热跑站点漂移至 381，全量 driver 冷热两跑均稳定 473）。
-// 判定证据链：
-//   1) 解释器输出与 native 逐位一致——含同一 hairline 描边文本的像素
-//      FNV 相同（A==B 141 行逐字节），故输入数据与算法无分叉；
-//   2) fast_div 为纯整数运算（left_shift(a,16)/b），断言越界的唯一可能
-//      是 f32→fdot6 定点转换链的输入值在 JIT 下分叉（|slope|≤1 由分支
-//      条件 |dx|≥|dy|/|dy|>|dx| 数学保证，native dev profile 断言开与
-//      解释器均不触发）；
-//   3) 踩雷与否随被 JIT 编译的函数集合/序漂移：最小化中 t6（首行三
-//      tspan）中而 t7（t6+一行无关文本）不中；同字形同坐标的单 glyph
-//      'o' 渲染不中——提示编译序敏感的末位 ulp/聚合值差异在定点转换
-//      边界被放大为 ±1 fdot6。
-//   触发链：text-style 首行 Libertinus Serif Bold 24px、stroke-width=0.6
-//   （hairline stroker → hairline AA 填充）、串 "GradItaBo" 第 9 glyph
-//   'o'（x≈108.688）处。最小复现 /tmp/repro_resvg_svg.rs（8 轮 23 变体
-//   二分；其 native/解释器 fnv=417be013020ecd27 一致，JIT=1 exit=101）。
-//   red_code=101（Rust panic 退出码）
-//   red_pattern=「panicked at .*tiny-skia-0.12.0/src/scan/hairline_aa.rs:」
-//   +「assertion failed: slope」（站点号 381/473 随 JIT 缓存态漂移，同族）
-// C 维现场：stdout 止于 "doc text-style size ..." 行（def 渲染 panic，
-// 95 行），两跑 stdout 逐字节稳定，stderr 4 行 panic 文，exit=101。
+// The "mostly horizontal" branch at line 381 is the same assertion family with the operands
+// reversed; the minimal repro's hot site moves to 381 while the full driver sits stably at 473
+// on both cold and warm runs.
+// Evidence chain:
+//   1) the interpreter output matches native bit for bit, including identical pixel FNV for the
+//      same hairline-stroked text (A==B over 141 lines), so neither the input data nor the
+//      algorithm diverges;
+//   2) fast_div is pure integer arithmetic (left_shift(a,16)/b), so the assertion can only go
+//      out of range if the input to the f32->fdot6 fixed-point conversion chain diverges under
+//      JIT (|slope|<=1 follows mathematically from the branch conditions |dx|>=|dy|/|dy|>|dx|,
+//      and neither the native dev profile with assertions on nor the interpreter trips it);
+//   3) whether it trips drifts with the set and order of JIT-compiled functions: in the
+//      minimization t6 (three tspans on the first line) trips while t7 (t6 plus one unrelated
+//      line) does not, and a single glyph 'o' at the same glyph and coordinates does not --
+//      suggesting a compile-order-sensitive last-ulp/aggregate difference amplified at the
+//      fixed-point conversion boundary into +/-1 fdot6.
+// Trigger chain: the first line of text-style, Libertinus Serif Bold 24px, stroke-width=0.6
+//   (hairline stroker -> hairline AA fill), at the 9th glyph 'o' of the string "GradItaBo"
+//   (x~108.688). Minimal repro /tmp/repro_resvg_svg.rs (23 variants over 8 rounds of
+//   bisection; its native/interpreter fnv=417be013020ecd27 agree while JIT=1 exits 101).
+//   red_code=101 (the Rust panic exit code); red_pattern matches `panicked at`
+//   .*tiny-skia-0.12.0/src/scan/hairline_aa.rs: plus `assertion failed: slope` (the site
+//   number drifts between 381 and 473 with the JIT cache state, same family).
+// C-dimension scene: stdout stops at the "doc text-style size ..." line (the def render panics,
+// 95 lines); both runs are byte-stable on stdout, stderr carries 4 panic lines and exit=101.
 //
-// 版本钉（相容组合证据）：见 frontmatter 行内注。三直挂依赖全 = 钉死；
-// usvg 0.47.0 自身锁定 fontdb "0.23.0"/rustybuzz "0.20.1"/ttf-parser
-// "0.25.1"/tiny-skia-path "0.12.0"/kurbo "0.13.0" 等传递约束，与直挂
-// tiny-skia 0.12.0（path 0.12.0）同源无跨线错配；rustybuzz 的 wasmi
-// （wasm-shaper）为可选依赖且默认关。
+// Version pins (compatibility evidence): see the frontmatter comments. All three direct
+// dependencies are pinned exactly; usvg 0.47.0 itself locks transitive constraints on fontdb
+// "0.23.0", rustybuzz "0.20.1", ttf-parser "0.25.1", tiny-skia-path "0.12.0" and kurbo
+// "0.13.0", matching the direct tiny-skia 0.12.0 (path 0.12.0) with no cross-line mismatch.
+// rustybuzz's wasmi (wasm-shaper) is optional and off by default.
 //
-// 确定性说明：
-//   * 字体字节：typst_assets::fonts() 17 个定值资产，逐文件 len+FNV-1a
-//     锚定；装载序=数组序（fontdb faces 为 Vec 插入序，face 转储逐行锚）。
-//   * 塑形/布局：rustybuzz 0.20.1（default features=["std"]）对固定字体
-//     字节+固定字符串为纯函数；unicode-bidi 重排、ttf-parser/kurbo 轮廓
-//     均为位确定计算；无 OS 随机/壁钟/时区/网络。
-//   * 回退链：text-fallback 文档求不存在的族 → usvg 固定回退（Options
-//     默认 font_family="Times New Roman" 不在库 → fontdb 通用回退），库
-//     定值故结果定值；nofonts 文档空 fontdb → 文本元素整颗丢弃
-//     （found=false/children 锚定）。
-//   * 两处原生实测即确定的事实锚（三维跑同一代码，值本体即锚，不要求
-//     语义"正确"）：① text-deco 的 roundtrip eq=false——usvg 0.47 writer
-//     不保 text-decoration（装饰信息在 to_string 丢失，重解析渲染不同）；
-//     ② text-basic/style/transform/bidi/deco/fallback 六文档 def fnv ==
-//     crisp fnv——字形 AA 由 text-rendering 决定（Options.shape_rendering
-//     不影响 glyph 路径），且底色 rect 全像素对齐（AA 不变量）；text-path
-//     因含形状描边 def!=crisp，与形状面九文档同证 crisp 配置真实生效。
-//   * 渲染：tiny-skia 标量后端逐位 IEEE；每文档整图 FNV-1a + 8 固定坐标
-//     抽样像素 RGBA hex；浮点打印一律 to_bits；探针全走 Vec/切片，无
-//     HashMap 迭代序出口。
-//   * usvg/tiny-skia/rustybuzz 经 log crate 打警告，无 subscriber →
-//     stderr 真空。
+// Determinism:
+//   * font bytes: typst_assets::fonts() yields 17 fixed assets, each anchored by per-file
+//     len+FNV-1a; load order is array order (fontdb faces are a Vec in insertion order, and the
+//     face dump is anchored line by line).
+//   * shaping/layout: rustybuzz 0.20.1 (default features=["std"]) is a pure function of fixed
+//     font bytes plus fixed strings; unicode-bidi reordering and ttf-parser/kurbo outlines are
+//     all bit-deterministic; no OS randomness, wall clock, time zone or network.
+//   * fallback chain: the text-fallback document asks for a family that does not exist, so usvg's
+//     fixed fallback applies (Options' default font_family="Times New Roman" is absent from the
+//     DB, hence fontdb's generic fallback) and the library is fixed, so the result is; the
+//     nofonts document has an empty fontdb, so the whole text element is dropped (anchored by
+//     found=false/children).
+//   * two facts observed natively are themselves the anchors (all three dimensions run the same
+//     code, so the value is the anchor and semantic correctness is not required): (1) text-deco's
+//     roundtrip eq=false -- the usvg 0.47 writer does not preserve text-decoration (the
+//     decoration is lost in to_string and re-parsing renders differently); (2) the six documents
+//     text-basic/style/transform/bidi/deco/fallback have def fnv == crisp fnv -- glyph AA is
+//     decided by text-rendering (Options.shape_rendering does not affect glyph paths) and the
+//     background rect is pixel-aligned (an AA invariant); text-path has shape strokes, so
+//     def != crisp and it joins the nine shape documents in proving the crisp config is real.
+//   * rendering: the tiny-skia scalar backend is bit-exact IEEE; each document's whole image is
+//     FNV-1a plus 8 fixed-coordinate sample pixels as RGBA hex; floats always print to_bits;
+//     probes go through Vec/slices only, so no HashMap iteration order escapes.
+//   * usvg/tiny-skia/rustybuzz log warnings through the log crate with no subscriber, so stderr
+//     stays empty.
 //
-// 覆盖清单：
-//   形状面（批6 继承，0.47 移植）：prim（linear+radial 渐变
-//   userSpaceOnUse/三停点/stop-opacity/reflect spread、rounded rect、
-//   evenodd 自交贝塞尔、dash 描边奇数段、transform 组、opacity 组、
-//   clipPath 组、mix-blend-mode 组、visibility=hidden、fill=none）、
-//   vb50（viewBox 0.5 倍缩放、polygon、objectBoundingBox 渐变）、par×4
-//   （竖幅 viewBox × xMidYMid meet/slice/none/xMinYMax）、novh（无
-//   width/height 仅 viewBox）、crisp-attr（元素级 shape-rendering=
-//   crispEdges/optimizeSpeed）、use-style（use x/y/opacity、style 展示
-//   属性、polyline）、empty-svg（100% 默认尺寸）、gzsvg（gzip from_data）。
-//   文本面（波2 新增，全内嵌字体）：text-basic（start/middle/end 三
-//   anchor、kerning 串 "AV To Kern"、text-rendering=optimizeSpeed、
-//   衬线/等宽两族）、text-style（tspan 渐变 fill/italic/bold+stroke、
-//   letter/word-spacing、textLength spacingAndGlyphs）、text-transform
-//   （dx/dy/rotate 逐字数组、组 rotate、small-caps、baseline-shift
-//   super/sub）、text-path（textPath 曲线排布 startOffset）、text-bidi
-//   （direction=rtl 希伯来混排重排、writing-mode=tb 竖排含缺字 CJK
-//   探测）、text-deco（underline/overline/line-through 装饰路径）、
-//   text-fallback（缺字族回退链）、nofonts（空 fontdb 文本元素丢弃锚）。
-//   探针：字体文件字节锚 ×17、fontdb faces 全量转储、树 API 位级（p1
-//   path 与 tp1 text 的 bbox/abs_transform bits、chunks/spans/layouted
-//   字形 id+文本+font id、flattened 子节点数、tree.fontdb 面数）、错误
-//   路径六条（坏 XML / width=0 / 空属性 / 坏 gzip / 非 UTF-8 / 非 svg 根）。
-//   每文档三配置渲染 160x120：默认（AA 开）/ 无 AA（Options::
-//   shape_rendering=CrispEdges）/ to_string 重解析 roundtrip（渲染 FNV
-//   与默认比对，eq 值本体即锚）。
-//
-// 复红定因参照（三维复跑）：
+// Coverage:
+//   shape surface (inherited, ported to 0.47): prim (linear+radial gradients, userSpaceOnUse/
+//   three stops/stop-opacity/reflect spread, rounded rect, an evenodd self-intersecting bezier,
+//   a dash stroke with an odd segment count, a transform group, an opacity group, a clipPath
+//   group, a mix-blend-mode group, visibility=hidden, fill=none), vb50 (viewBox at 0.5 scale,
+//   polygon, objectBoundingBox gradient), par x4 (a tall viewBox with xMidYMid
+//   meet/slice/none/xMinYMax), novh (no width/height, viewBox only), crisp-attr (element-level
+//   shape-rendering=crispEdges/optimizeSpeed), use-style (use x/y/opacity, style presentation
+//   attributes, polyline), empty-svg (the 100% default size) and gzsvg (gzip from_data).
+//   text surface (all with embedded fonts): text-basic (start/middle/end anchors, the kerning
+//   string "AV To Kern", text-rendering=optimizeSpeed, a serif and a mono family), text-style
+//   (tspan gradient fill/italic/bold+stroke, letter/word-spacing, textLength spacingAndGlyphs),
+//   text-transform (dx/dy/rotate per-character arrays, group rotate, small-caps, baseline-shift
+//   super/sub), text-path (textPath along a curve with startOffset), text-bidi (direction=rtl
+//   Hebrew reordering, writing-mode=tb vertical text with a missing-glyph CJK probe), text-deco
+//   (underline/overline/line-through decoration paths) and text-fallback (a fallback chain for a
+//   missing family), nofonts (an empty fontdb, text elements dropped).
+//   probes: font-file byte anchors x17, a full fontdb faces dump, tree-API bit-level values
+//   (bbox/abs_transform bits of the p1 path and tp1 text, chunks/spans/layouted glyph id+text+
+//   font id, flattened child count, tree.fontdb face count) and six error paths (bad XML,
+//   width=0, empty attributes, bad gzip, non-UTF-8, non-svg root).
+//   Each document renders in three configurations at 160x120: default (AA on) / no AA
+//   (Options::shape_rendering=CrispEdges) / to_string re-parse roundtrip (render FNV compared
+//   against the default, where the eq value itself is the anchor).
+// Re-run commands (three dimensions):
 //   A: target/release/mirvm run corpus/c_resvg_svg.rs
 //   B: d=$(grep -l 'name = "c_resvg_svg"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname) && cd "$d" && cargo +nightly-2026-07-02 run -q
 //   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_resvg_svg.rs
-// 三维实测（2026-07-18，同机）：
-//   A（mirvm 默认）：exit 0，stdout 141 行，stderr 0 字节，real ~36s
-//     （deps 共享缓存热跑）。
-//   B（cargo +nightly-2026-07-02 run -q，script dir 内）：exit 0，
-//     stdout 141 行，stderr 0 字节，real ~8.5s。
-//   A==B 逐字节一致。锚点摘抄：faces len=17；prim def fnv=
-//     7412fbca454bcd60；text-basic def fnv=ce49adf0e33fcbc0；probe tp1
-//     layouted spans=3 glyphs=11（g0 id=40 'G' font=LibertinusSerif-
-//     Regular）；text-deco rt eq=false（usvg writer 丢 text-decoration
-//     的确定性事实锚）；nofonts found=false children=1。
-//   C（MIRVM_JIT_THRESHOLD=1）：exit 101（JIT 误编译 panic，见上红因），
-//     stdout 95 行止于 text-style def，两跑逐字节稳定，real ~13s。
-//   依赖闭包 49 crate（usvg 0.47.0 / rustybuzz 0.20.1 / fontdb 0.23.0 /
-//   ttf-parser 0.25.1 / unicode-* / kurbo 0.13.0 / tiny-skia 0.12.0 标量 /
-//   typst-assets 0.15.1 等；script dir Cargo.lock 实数）。
+// Measured on the same machine (2026-07-18):
+//   A (mirvm default): exit 0, 141 stdout lines, 0 stderr bytes, real ~36s (deps cache warm).
+//   B (cargo +nightly-2026-07-02 run -q in the script dir): exit 0, 141 stdout lines, 0 stderr
+//     bytes, real ~8.5s; A==B byte-identical.
+//   Sampled anchors: faces len=17; prim def fnv=7412fbca454bcd60; text-basic def
+//     fnv=ce49adf0e33fcbc0; probe tp1 layouted spans=3 glyphs=11 (g0 id=40 'G'
+//     font=LibertinusSerif-Regular); text-deco rt eq=false (the usvg writer drops
+//     text-decoration); nofonts found=false children=1.
+//   C (MIRVM_JIT_THRESHOLD=1): exit 101, stdout's 95 lines stop at text-style def, both runs
+//     byte-stable, real ~13s.
+//   Dependency closure 49 crates (usvg, rustybuzz, fontdb, ttf-parser, unicode-*, kurbo,
+//   tiny-skia, typst-assets; the real count comes from the script dir's Cargo.lock).
 use tiny_skia::{
     BlendMode, Color, FilterQuality, IntRect, Mask, MaskType, Paint, Pixmap, PixmapMut,
     PixmapPaint, Shader, SpreadMode, Transform,
@@ -156,8 +156,8 @@ fn fnv1a(b: &[u8]) -> u64 {
     h
 }
 
-/// 定值 Options：空 fontdb + typst-assets 内嵌 17 字体（装载序=数组序）。
-/// 每次解析新建（Options 不可 Clone），同一固定输入 → 同一 DB 状态。
+/// Fixed Options: an empty fontdb plus the 17 fonts embedded in typst-assets (load order = array order).
+/// Rebuilt for every parse (Options is not Clone); the same fixed input gives the same DB state.
 fn make_opt() -> usvg::Options<'static> {
     let mut opt = usvg::Options::default();
     for f in typst_assets::fonts() {
@@ -166,9 +166,9 @@ fn make_opt() -> usvg::Options<'static> {
     opt
 }
 
-// ===== mini 渲染器：resvg 0.47 shapes/text 子集移植 =====
+// ===== mini renderer: a port of the resvg 0.47 shapes/text subset =====
 
-/// resvg geom::fit_to_rect 原样。
+/// resvg geom::fit_to_rect, verbatim.
 fn fit_to_rect(r: IntRect, bounds: IntRect) -> Option<IntRect> {
     let mut left = r.left();
     if left < bounds.left() {
@@ -189,7 +189,7 @@ fn fit_to_rect(r: IntRect, bounds: IntRect) -> Option<IntRect> {
     IntRect::from_ltrb(left, top, right, bottom)
 }
 
-/// resvg::render 的 max_bbox（按顶层画布推导的常量）。
+/// resvg::render's max_bbox (a constant derived from the top-level canvas).
 fn max_bbox() -> IntRect {
     IntRect::from_xywh(-(W as i32) * 2, -(H as i32) * 2, W * 5, H * 5).unwrap()
 }
@@ -204,7 +204,7 @@ fn render_nodes(parent: &usvg::Group, ts: Transform, pm: &mut PixmapMut) {
     }
 }
 
-/// resvg 0.47 render::render_node（Image 臂跳过：本文档集不含 raster）。
+/// resvg 0.47 render::render_node (the Image arm is skipped: this document set has no raster).
 fn render_node(node: &Node, ts: Transform, pm: &mut PixmapMut) {
     match node {
         Node::Group(group) => {
@@ -218,7 +218,7 @@ fn render_node(node: &Node, ts: Transform, pm: &mut PixmapMut) {
     }
 }
 
-/// resvg 0.47 render::render_group 的 filters/mask 恒空分支。
+/// The always-empty filters/mask branch of resvg 0.47 render::render_group.
 fn render_group(group: &usvg::Group, ts: Transform, pm: &mut PixmapMut) -> Option<()> {
     let ts = ts.pre_concat(group.transform());
     if !group.should_isolate() {
@@ -226,7 +226,7 @@ fn render_group(group: &usvg::Group, ts: Transform, pm: &mut PixmapMut) -> Optio
         return Some(());
     }
     let bbox = group.layer_bounding_box().transform(ts)?;
-    // filters 恒空 → 外扩 2px 分支 + fit_to_rect（同 resvg）
+    // filters are always empty -> the expand-by-2px branch + fit_to_rect (as in resvg)
     let ibbox = IntRect::from_xywh(
         (bbox.x().floor() as i32).checked_sub(2)?,
         (bbox.y().floor() as i32).checked_sub(2)?,
@@ -244,7 +244,7 @@ fn render_group(group: &usvg::Group, ts: Transform, pm: &mut PixmapMut) -> Optio
     let ts = shift_ts.pre_concat(ts);
     let mut sub = Pixmap::new(ibbox.width(), ibbox.height())?;
     render_nodes(group, ts, &mut sub.as_mut());
-    // filters 恒空 → 无 filter 应用；mask 恒 None → 跳过
+    // filters are always empty -> no filter is applied; mask is always None -> skipped
     if let Some(clip_path) = group.clip_path() {
         clip_apply(clip_path, ts, &mut sub);
     }
@@ -264,7 +264,7 @@ fn render_group(group: &usvg::Group, ts: Transform, pm: &mut PixmapMut) -> Optio
     Some(())
 }
 
-/// resvg 0.47 render::convert_blend_mode 原样（16 arm 全映射）。
+/// resvg 0.47 render::convert_blend_mode, verbatim (all 16 arms mapped).
 fn convert_blend_mode(mode: usvg::BlendMode) -> BlendMode {
     match mode {
         usvg::BlendMode::Normal => BlendMode::SourceOver,
@@ -286,7 +286,7 @@ fn convert_blend_mode(mode: usvg::BlendMode) -> BlendMode {
     }
 }
 
-/// resvg 0.47 path::render 的 paint_order 分派。
+/// The paint_order dispatch of resvg 0.47 path::render.
 fn render_path(path: &usvg::Path, ts: Transform, pm: &mut PixmapMut) {
     if !path.is_visible() {
         return;
@@ -300,10 +300,10 @@ fn render_path(path: &usvg::Path, ts: Transform, pm: &mut PixmapMut) {
     }
 }
 
-/// resvg 0.47 path::fill_path 的 shapes 子集（pattern arm 简化为跳过）。
+/// The shapes subset of resvg 0.47 path::fill_path (the pattern arm is simplified to a skip).
 fn fill_path(path: &usvg::Path, mode: BlendMode, ts: Transform, pm: &mut PixmapMut) -> Option<()> {
     let fill = path.fill()?;
-    // 水平/垂直线不可填充（同 resvg 提前返回）
+    // Horizontal/vertical lines cannot be filled (an early return as in resvg)
     if path.data().bounds().width() == 0.0 || path.data().bounds().height() == 0.0 {
         return None;
     }
@@ -322,7 +322,7 @@ fn fill_path(path: &usvg::Path, mode: BlendMode, ts: Transform, pm: &mut PixmapM
         usvg::Paint::RadialGradient(rg) => {
             paint.shader = convert_radial_gradient(rg, fill.opacity())?;
         }
-        usvg::Paint::Pattern(_) => return None, // 本文档集不含 pattern
+        usvg::Paint::Pattern(_) => return None, // this document set contains no pattern
     }
     paint.anti_alias = path.rendering_mode().use_shape_antialiasing();
     paint.blend_mode = mode;
@@ -330,7 +330,7 @@ fn fill_path(path: &usvg::Path, mode: BlendMode, ts: Transform, pm: &mut PixmapM
     Some(())
 }
 
-/// resvg 0.47 path::stroke_path 的 shapes 子集。
+/// The shapes subset of resvg 0.47 path::stroke_path.
 fn stroke_path(path: &usvg::Path, ts: Transform, pm: &mut PixmapMut) -> Option<()> {
     let stroke = path.stroke()?;
     let mut paint = Paint::default();
@@ -352,7 +352,7 @@ fn stroke_path(path: &usvg::Path, ts: Transform, pm: &mut PixmapMut) -> Option<(
     Some(())
 }
 
-/// resvg 0.47 的 convert_linear_gradient / convert_radial_gradient。
+/// resvg 0.47's convert_linear_gradient / convert_radial_gradient.
 fn convert_linear_gradient(lg: &usvg::LinearGradient, opacity: usvg::Opacity) -> Option<Shader<'_>> {
     let (mode, stops) = convert_base_gradient(lg, opacity);
     tiny_skia::LinearGradient::new(
@@ -377,7 +377,7 @@ fn convert_radial_gradient(rg: &usvg::RadialGradient, opacity: usvg::Opacity) ->
     )
 }
 
-/// resvg 0.47 convert_base_gradient：stops 透明度 = stop.opacity × fill/stroke opacity。
+/// resvg 0.47 convert_base_gradient: stop alpha = stop.opacity x fill/stroke opacity.
 fn convert_base_gradient(
     gradient: &usvg::BaseGradient,
     opacity: usvg::Opacity,
@@ -403,7 +403,7 @@ fn convert_base_gradient(
     (mode, stops)
 }
 
-/// resvg 0.47 clip::apply 原样（Clear 画子形状 → 反相 → apply_mask）。
+/// resvg 0.47 clip::apply, verbatim (Clear draws the child shapes -> invert -> apply_mask).
 fn clip_apply(clip: &usvg::ClipPath, ts: Transform, pm: &mut Pixmap) {
     let mut clip_pm = Pixmap::new(pm.width(), pm.height()).unwrap();
     clip_pm.fill(Color::BLACK);
@@ -421,7 +421,7 @@ fn clip_apply(clip: &usvg::ClipPath, ts: Transform, pm: &mut Pixmap) {
     pm.apply_mask(&mask);
 }
 
-/// resvg 0.47 clip::draw_children 原样（Path / Text flattened / Group 三臂）。
+/// resvg 0.47 clip::draw_children, verbatim (the Path / Text flattened / Group arms).
 fn clip_draw_children(parent: &usvg::Group, mode: BlendMode, ts: Transform, pm: &mut PixmapMut) {
     for child in parent.children() {
         match child {
@@ -446,7 +446,7 @@ fn clip_draw_children(parent: &usvg::Group, mode: BlendMode, ts: Transform, pm: 
     }
 }
 
-/// resvg 0.47 clip::clip_group 原样（SourceOver 画组 → 裁剪 → Xor 合成）。
+/// resvg 0.47 clip::clip_group, verbatim (SourceOver draws the group -> clip -> Xor composite).
 fn clip_group(children: &usvg::Group, clip: &usvg::ClipPath, ts: Transform, pm: &mut PixmapMut) -> Option<()> {
     let mut clip_pm = Pixmap::new(pm.width(), pm.height())?;
     clip_draw_children(children, BlendMode::SourceOver, ts, &mut clip_pm.as_mut());
@@ -464,7 +464,7 @@ fn clip_group(children: &usvg::Group, clip: &usvg::ClipPath, ts: Transform, pm: 
     Some(())
 }
 
-// ===== 文档集 A：shapes（批6 继承）=====
+// ===== document set A: shapes =====
 
 const PRIM: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120">
   <defs>
@@ -519,7 +519,7 @@ const VB50: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" heigh
   </g>
 </svg>"##;
 
-/// 竖幅内容（viewBox 120x240）× preserveAspectRatio 谱系。
+/// Tall content (viewBox 120x240) across the preserveAspectRatio lineage.
 fn par_doc(par: &str) -> String {
     const BODY: &str = r##"<defs><linearGradient id="lgp" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#20c8a0" stop-opacity="0.4"/></linearGradient></defs><rect x="0" y="0" width="120" height="240" fill="#181c24"/><rect x="6" y="6" width="24" height="24" fill="#ff5030"/><circle cx="96" cy="216" r="18" fill="#3090ff"/><path d="M60 100 l30 60 h-60 z" fill="none" stroke="#e8e050" stroke-width="6" stroke-linejoin="round"/><rect x="30" y="100" width="60" height="40" fill="url(#lgp)" fill-opacity="0.8"/>"##;
     format!(
@@ -554,7 +554,7 @@ const USE_STYLE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" 
 
 const EMPTY_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg"/>"##;
 
-// ===== 文档集 B：text（波2 新增，内嵌字体族：Libertinus Serif / DejaVu Sans Mono）=====
+// ===== document set B: text (embedded families: Libertinus Serif / DejaVu Sans Mono) =====
 
 const TEXT_BASIC: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120">
   <rect x="0" y="0" width="160" height="120" fill="#14181e"/>
@@ -611,7 +611,7 @@ const TEXT_FALLBACK: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="1
   <text x="10" y="84" font-family="'NoSuch Family', 'DejaVu Sans Mono'" font-size="14" fill="#a0c0e0">second listed 3</text>
 </svg>"##;
 
-/// gzip(deflate, mtime=0) 预压缩的小 SVG：from_data 的 gunzip 路径。
+/// A small SVG pre-compressed with gzip (deflate, mtime=0): the from_data gunzip path.
 const GZ_SVG: &[u8] = &[
     31, 139, 8, 0, 0, 0, 0, 0, 2, 3, 77, 141, 193, 14, 194, 32, 16, 68, 127, 101, 179, 158, 133,
     181, 88, 15, 6, 248, 23, 163, 20, 136, 104, 13, 108, 220, 250, 247, 162, 73, 141, 151, 201,
@@ -622,7 +622,7 @@ const GZ_SVG: &[u8] = &[
     183, 159, 107, 255, 6, 251, 62, 160, 209, 162, 0, 0, 0,
 ];
 
-/// 全局抽样坐标（每文档同一组）。
+/// Global sample coordinates (the same set for every document).
 const SAMPLES: [(u32, u32); 8] = [
     (2, 2),
     (40, 30),
@@ -634,7 +634,7 @@ const SAMPLES: [(u32, u32); 8] = [
     (130, 84),
 ];
 
-/// 解析 → 两配置渲染 → to_string roundtrip 渲染对比 → 抽样像素。
+/// Parse -> render in two configurations -> compare the to_string roundtrip render -> sample pixels.
 fn run_doc(name: &str, svg: &str) {
     let opt = make_opt();
     let tree = match usvg::Tree::from_str(svg, &opt) {
@@ -659,7 +659,7 @@ fn run_doc(name: &str, svg: &str) {
     let fnv_def = fnv1a(pm.data());
     println!("doc {name} def   fnv={fnv_def:016x}");
 
-    // 无 AA 配置：Options::shape_rendering = CrispEdges（resvg 同款 AA 决策来源）
+    // No-AA configuration: Options::shape_rendering = CrispEdges (the same AA source as resvg)
     let mut opt2 = make_opt();
     opt2.shape_rendering = usvg::ShapeRendering::CrispEdges;
     let tree2 = match usvg::Tree::from_str(svg, &opt2) {
@@ -673,7 +673,7 @@ fn run_doc(name: &str, svg: &str) {
     render_tree(&tree2, ts, &mut pm2.as_mut());
     println!("doc {name} crisp fnv={:016x}", fnv1a(pm2.data()));
 
-    // to_string → 重解析 → 重渲染，渲染 FNV 与默认比对（eq 值本体即锚）
+    // to_string -> re-parse -> re-render, comparing render FNV against the default (the eq value is the anchor)
     let s = tree.to_string(&usvg::WriteOptions::default());
     let eq = match usvg::Tree::from_str(&s, &make_opt()) {
         Ok(t3) => {
@@ -708,7 +708,7 @@ fn print_samples(name: &str, pm: &Pixmap) {
     println!("{line}");
 }
 
-/// text 节点的树 API 位级探针：chunks/spans/layouted 字形/flattened/bbox bits。
+/// Bit-level tree-API probes for a text node: chunks/spans/layouted glyphs/flattened/bbox bits.
 fn probe_text(id: &str, svg: &str) {
     let opt = make_opt();
     let tree = usvg::Tree::from_str(svg, &opt).unwrap();
@@ -776,7 +776,7 @@ fn probe_text(id: &str, svg: &str) {
 }
 
 fn main() {
-    // ---- ① 字体字节锚：内嵌资产（装载序 = 数组序）----
+    // ---- ① font byte anchors: embedded assets (load order = array order) ----
     let mut total = 0usize;
     let mut count = 0usize;
     for (i, f) in typst_assets::fonts().enumerate() {
@@ -786,7 +786,7 @@ fn main() {
     }
     println!("font total files={count} bytes={total}");
 
-    // ---- ② fontdb 面：faces 全量转储（Vec 插入序）----
+    // ---- ② fontdb surface: full faces dump (Vec insertion order) ----
     let opt0 = make_opt();
     println!("faces len={}", opt0.fontdb.len());
     for (i, face) in opt0.fontdb.faces().enumerate() {
@@ -802,10 +802,10 @@ fn main() {
         );
     }
 
-    // ---- ③ 形状面（批6 继承）----
+    // ---- ③ shape surface ----
     run_doc("prim", PRIM);
 
-    // prim 的树 API 位级探针：id 查找 / abs_transform / abs_bounding_box
+    // bit-level tree-API probes for prim: id lookup / abs_transform / abs_bounding_box
     let opt = make_opt();
     let tree = usvg::Tree::from_str(PRIM, &opt).unwrap();
     let p1 = tree.node_by_id("p1").unwrap();
@@ -842,7 +842,7 @@ fn main() {
     run_doc("use-style", USE_STYLE);
     run_doc("empty-svg", EMPTY_SVG);
 
-    // ---- ④ 文本面（内嵌 fontdb 定值字体）----
+    // ---- ④ text surface (embedded fixed fontdb fonts) ----
     run_doc("text-basic", TEXT_BASIC);
     run_doc("text-style", TEXT_STYLE);
     probe_text("tp1", TEXT_STYLE);
@@ -852,14 +852,14 @@ fn main() {
     run_doc("text-deco", TEXT_DECO);
     run_doc("text-fallback", TEXT_FALLBACK);
 
-    // 空 fontdb：无字体可解析 → 文本零字形（仅底色矩形渲染）
+    // Empty fontdb: no font to resolve -> zero text glyphs (only the background rect renders)
     let optnf = usvg::Options::default();
     let tnf = usvg::Tree::from_str(TEXT_BASIC, &optnf).unwrap();
     let size_nf = tnf.size();
     let mut pmnf = Pixmap::new(W, H).unwrap();
     let ts_nf = Transform::from_scale(W as f32 / size_nf.width(), H as f32 / size_nf.height());
     render_tree(&tnf, ts_nf, &mut pmnf.as_mut());
-    // 空 fontdb：无字体可解析 → 文本元素整颗丢弃（found=false 锚），仅底色渲染
+    // Empty fontdb: no font to resolve -> the whole text element is dropped (found=false), only the base
     let optnf = usvg::Options::default();
     let tnf = usvg::Tree::from_str(TEXT_BASIC, &optnf).unwrap();
     let size_nf = tnf.size();
@@ -881,7 +881,7 @@ fn main() {
         fnv1a(pmnf.data())
     );
 
-    // ---- ⑤ gzip 字节路径：合法 .svgz ----
+    // ---- ⑤ gzip byte path: a valid .svgz ----
     match usvg::Tree::from_data(GZ_SVG, &opt) {
         Ok(t) => {
             let mut pm = Pixmap::new(W, H).unwrap();
@@ -898,10 +898,10 @@ fn main() {
         Err(e) => println!("gzsvg parse-err {e:?}"),
     }
 
-    // ---- ⑥ 错误路径六条（全部确定性 Debug 文本）----
+    // ---- ⑥ six error paths (all deterministic Debug text) ----
     let bad_xml = r##"<svg xmlns="http://www.w3.org/2000/svg" width="10"><rect x="1"/</svg>"##;
     let zero_w = r##"<svg xmlns="http://www.w3.org/2000/svg" width="0" height="10"/>"##;
-    let no_attrs = EMPTY_SVG; // 无 width/height/viewBox：100% × default_size → 合法空树
+    let no_attrs = EMPTY_SVG; // no width/height/viewBox: 100% x default_size -> a valid empty tree
     let bad_gzip: &[u8] = &[0x1f, 0x8b, 0x08, 0xde, 0xad, 0xbe, 0xef, 0x00, 0x01];
     let non_utf8: &[u8] = &[0xff, 0xfe, 0x3c, 0x73, 0x76, 0x67];
     let not_svg = "<html><body>not svg</body></html>";

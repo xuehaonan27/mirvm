@@ -1,12 +1,13 @@
 #![cfg(test)]
 
-//! Cargo 配置中只与当前依赖求解批次有关的一项：
-//! `resolver.incompatible-rust-versions`。
+//! The one Cargo config key that affects dependency resolution:
+//! `resolver.incompatible-rust-versions`.
 //!
-//! 发现和合并遵循 Cargo 层级：`$CARGO_HOME` 最低，当前目录的祖先从浅到深
-//! 逐层覆盖；同目录同时存在时 `.cargo/config` 优先于 `config.toml`。本模块
-//! 也处理 Cargo 的 `include`，避免配置中已有该机制时静默漏掉 resolver 策略。
-//! 其余配置键留给各自产品切片消费，不在这里建设通用配置对象。
+//! Discovery and merging follow Cargo's layering: `$CARGO_HOME` is lowest, then
+//! each ancestor of the current directory from shallow to deep; when both files
+//! exist in one directory, `.cargo/config` wins over `config.toml`. Cargo's
+//! `include` is honored so a policy reached through it is not silently missed.
+//! Other config keys belong to their own consumers; no generic config object here.
 
 use std::path::{Path, PathBuf};
 
@@ -46,7 +47,8 @@ fn resolve(
     Ok(selected.unwrap_or_else(|| default_policy(resolver)))
 }
 
-/// Cargo 为兼容旧项目，在两个文件同时存在时选择无扩展名的 `config`。
+/// For backwards compatibility Cargo picks the extensionless `config` when both
+/// files exist in one directory.
 fn config_file(directory: &Path) -> Option<PathBuf> {
     let legacy = directory.join("config");
     if legacy.is_file() {
@@ -62,18 +64,21 @@ fn load_file(
 ) -> Result<Option<IncompatibleRustVersions>, String> {
     let identity = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if stack.contains(&identity) {
-        return Err(format!("Cargo config include 形成环: {}", path.display()));
+        return Err(format!(
+            "Cargo config include forms a cycle: {}",
+            path.display()
+        ));
     }
     stack.push(identity.clone());
     let text = std::fs::read_to_string(path)
-        .map_err(|error| format!("读取 Cargo config {} 失败: {error}", path.display()))?;
+        .map_err(|error| format!("failed to read Cargo config {}: {error}", path.display()))?;
     let value: toml::Value = toml::from_str(&text)
-        .map_err(|error| format!("解析 Cargo config {} 失败: {error}", path.display()))?;
+        .map_err(|error| format!("failed to parse Cargo config {}: {error}", path.display()))?;
     let mut selected = None;
     if let Some(includes) = value.get("include") {
         let includes = includes
             .as_array()
-            .ok_or_else(|| format!("Cargo config {} 的 include 必须是数组", path.display()))?;
+            .ok_or_else(|| format!("Cargo config {} include must be an array", path.display()))?;
         for include in includes {
             let (relative, optional) = include_value(include, path)?;
             let include_path = path.parent().unwrap_or(Path::new(".")).join(relative);
@@ -82,7 +87,7 @@ fn load_file(
                     continue;
                 }
                 return Err(format!(
-                    "Cargo config {} include 的 {} 不存在",
+                    "Cargo config {} include {} does not exist",
                     path.display(),
                     include_path.display()
                 ));
@@ -96,7 +101,7 @@ fn load_file(
     {
         let policy = policy.as_str().ok_or_else(|| {
             format!(
-                "Cargo config {} 的 resolver.incompatible-rust-versions 必须是字符串",
+                "Cargo config {} resolver.incompatible-rust-versions must be a string",
                 path.display()
             )
         })?;
@@ -112,7 +117,7 @@ fn include_value(value: &toml::Value, source: &Path) -> Result<(PathBuf, bool), 
     }
     let table = value.as_table().ok_or_else(|| {
         format!(
-            "Cargo config {} 的 include 成员必须是路径或表",
+            "Cargo config {} include member must be a path or a table",
             source.display()
         )
     })?;
@@ -121,7 +126,7 @@ fn include_value(value: &toml::Value, source: &Path) -> Result<(PathBuf, bool), 
         .and_then(toml::Value::as_str)
         .ok_or_else(|| {
             format!(
-                "Cargo config {} 的 include 表缺字符串 path",
+                "Cargo config {} include table is missing a string `path`",
                 source.display()
             )
         })?;
@@ -130,7 +135,7 @@ fn include_value(value: &toml::Value, source: &Path) -> Result<(PathBuf, bool), 
         .map(|value| {
             value.as_bool().ok_or_else(|| {
                 format!(
-                    "Cargo config {} 的 include.optional 必须是布尔值",
+                    "Cargo config {} include.optional must be a boolean",
                     source.display()
                 )
             })

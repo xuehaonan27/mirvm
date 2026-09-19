@@ -3,25 +3,25 @@
 [dependencies]
 whatlang = "0.18"
 ---
-// whatlang 0.18 语言检测差分：无外部数据文件的纯静态模型——字母模型
-// （每语言字母串 → LazyLock 反查表 → 字符打分）+ 三元模型（hashbrown
-// SwissTable 计 trigram 频次 → (count,trigram) 全序排序转位次表 → 与静态
-// 语言档案算 Manhattan 距离），combined 按字母权重合并两路 f64 分数，
-// confidence 为双曲函数。全部 f64 计数->分数->confidence 链是 MIR 逐条
-// 浮点运算 + 128 位/向量无关的标量路径；输出一律 conf.to_bits() 锁位型。
-// 覆盖：detect/detect_lang/detect_script 自由函数三件套；Info 的
-// lang/script/confidence/is_reliable；Detector::{new,with_allowlist,
-// with_denylist,detect,detect_lang,detect_script}（含名单过滤出 None 的
-// 边界、Mandarin/Japanese 判别的 allow/deny 两支）；Lang::{all,from_code,
-// code,name,eng_name} 全量 roundtrip + FromStr 错误路径；Script::{all,name,
-// langs} + FromStr 错误路径；Info::new 手工重建与 PartialEq/Debug。
-// 样本：en/fr/de/ru/zh/ja/ko/es/ar/hi 十语长句 + 多语混排 + 四类短串 +
-// 四类单字 + 空/纯空格/纯标点/纯数字/纯空白/纯 emoji 六条边界。
-// 确定性：静态表与 Vec 序全固定；hashbrown 迭代只喂 (count,trigram) 全序
-// sort 与 u32 交换律求和，输出与哈希序无关；无时间/线程/地址输出。
+// whatlang 0.18 language detection differential: a purely static model with no
+// external data files -- a letter model (per-language letter strings -> LazyLock
+// reverse table -> per-character scoring) plus a trigram model (hashbrown
+// SwissTable counts -> total (count,trigram) sort into a rank table -> Manhattan
+// distance against static profiles). combined merges both f64 paths by letter
+// weight; confidence is a hyperbolic function. The f64 count->score->confidence
+// chain is per-instruction MIR math on a scalar path independent of 128-bit/vector
+// lowering; output always locks conf.to_bits().
+// Coverage: detect/detect_lang/detect_script; Info's lang/script/confidence/
+// is_reliable; Detector::{new,with_allowlist,with_denylist,detect,detect_lang,
+// detect_script}; Lang::{all,from_code,code,name,eng_name} roundtrip + FromStr
+// error; Script::{all,name,langs} + FromStr error; Info::new with PartialEq/Debug.
+// Samples: ten-language long sentences, mixed scripts, four short strings, four
+// single characters, and six edge inputs (empty/whitespace/punctuation/emoji).
+// Determinism: static tables and Vec order are fixed; hashbrown iteration only
+// feeds a total sort and a commutative u32 sum, so output ignores hash order.
 use whatlang::{Detector, Info, Lang, Script, detect, detect_lang, detect_script};
 
-/// 单样本全量 dump：detect 全信息 + detect_lang 对照 + detect_script。
+/// Full dump for one sample: all detect info + the detect_lang cross-check + detect_script.
 fn dump(tag: &str, label: &str, text: &str) {
     println!(
         "[{tag}/{label}] bytes={} chars={}",
@@ -58,7 +58,7 @@ fn dump(tag: &str, label: &str, text: &str) {
     }
 }
 
-/// Detector 维度：detect + detect_lang 两行。
+/// The Detector dimension: detect + detect_lang, two lines.
 fn dump_det(tag: &str, det: &Detector, text: &str) {
     let info = det.detect(text);
     match &info {
@@ -78,7 +78,7 @@ fn dump_det(tag: &str, det: &Detector, text: &str) {
 }
 
 fn main() {
-    // ① 十语长句（同义「棕狐」句）+ 混排：detect 全信息 + 三件套对照。
+    // ① ten-language long sentences (the "brown fox" equivalent) + mixed text: full info.
     let longs: &[(&str, &str)] = &[
         ("en", "The quick brown fox jumps over the lazy dog near the river bank every single morning."),
         ("fr", "Le renard brun rapide saute par-dessus le chien paresseux près de la rive du fleuve chaque matin."),
@@ -96,7 +96,7 @@ fn main() {
         dump("long", label, text);
     }
 
-    // ② 短串与单字：信心/脚本模型的退化路径。
+    // ② short strings and single characters: degenerate paths of the confidence/script model.
     let shorts: &[(&str, &str)] = &[
         ("hello", "Hello!"),
         ("bonjour", "Bonjour"),
@@ -119,8 +119,8 @@ fn main() {
         dump("char", label, text);
     }
 
-    // ③ 边界：空/空格/ASCII 标点/CJK 标点/数字/空白控制符/纯 emoji →
-    //    脚本计数全零 → detect/detect_lang/detect_script 全 None（期望）。
+    // ③ edges: empty/spaces/ASCII punctuation/CJK punctuation/digits/blank controls/emoji ->
+    //    all script counts zero -> detect/detect_lang/detect_script all None (expected).
     for (label, text) in [
         ("empty", ""),
         ("spaces", "   "),
@@ -133,22 +133,22 @@ fn main() {
         dump("edge", label, text);
     }
 
-    // ④ Detector：allowlist / denylist / 全过滤 → None / Mandarin 特殊两支。
+    // ④ Detector: allowlist / denylist / everything filtered -> None / the two Mandarin cases.
     let en_txt = longs[0].1;
     let fr_txt = longs[1].1;
     let ru_txt = longs[3].1;
     let allow = Detector::with_allowlist(vec![Lang::Eng, Lang::Fra, Lang::Deu]);
     dump_det("allow/eng", &allow, en_txt);
     dump_det("allow/fra", &allow, fr_txt);
-    // 俄文落到 Cyrillic 脚本组，三语言全不在组内 → 全过滤 → None。
+    // Russian falls in the Cyrillic script group while none of the three allowed languages does.
     dump_det("allow/rus", &allow, ru_txt);
     let deny = Detector::with_denylist(vec![Lang::Eng, Lang::Ita]);
     dump_det("deny/eng", &deny, en_txt);
     dump_det("deny/fra", &deny, fr_txt);
-    // Mandarin↔Japanese 判别被 allow/deny 支配的两支（单汉字）。
+    // The two branches where allow/deny governs the Mandarin vs Japanese call (a single han char).
     dump_det("han/allow-jpn", &Detector::with_allowlist(vec![Lang::Jpn]), "水");
     dump_det("han/deny-jpn", &Detector::with_denylist(vec![Lang::Jpn]), "水");
-    // 希伯来脚本两语言全 deny → None（脚本组内零候选）。
+    // Both Hebrew script languages denied -> None (zero candidates in the group).
     let hebrew = "האקדמיה ללשון העברית";
     dump_det(
         "heb/deny-all",
@@ -156,7 +156,7 @@ fn main() {
         hebrew,
     );
     dump("heb", "baseline", hebrew);
-    // Detector::new 裸路径 + detect_script 方法面（对照自由函数）。
+    // The bare Detector::new path + the detect_script method surface (against the free function).
     let bare = Detector::new();
     dump_det("bare/deu", &bare, longs[2].1);
     match bare.detect_script("Кириллица") {
@@ -164,7 +164,7 @@ fn main() {
         None => println!("[bare] detect_script(Кириллица): none"),
     }
 
-    // ⑤ Lang 静态面：all() 全量 code roundtrip + 点查 + from_code/FromStr。
+    // ⑤ The static Lang surface: full code roundtrip over all() + point lookups + from_code/FromStr.
     let all = Lang::all();
     let ok = all
         .iter()
@@ -189,7 +189,7 @@ fn main() {
         Err(e) => println!("parse(zzz) err {e:?}"),
     }
 
-    // ⑥ Script 静态面：all()/name()/langs() + FromStr。
+    // ⑥ The static Script surface: all()/name()/langs() + FromStr.
     let scripts = Script::all();
     let names: Vec<&str> = scripts.iter().map(|s| s.name()).collect();
     println!("script: all={} names={}", scripts.len(), names.join(","));
@@ -212,7 +212,7 @@ fn main() {
         Err(e) => println!("parse(klingon) err {e:?}"),
     }
 
-    // ⑦ Info::new 手工重建 + PartialEq + Debug（与 detect 结果逐字段同值）。
+    // ⑦ Info::new rebuilt by hand + PartialEq + Debug (field-identical to the detect result).
     let info = detect(en_txt).unwrap();
     let rebuilt = Info::new(info.script(), info.lang(), info.confidence());
     println!("info: rebuilt-eq={} debug={rebuilt:?}", rebuilt == info);

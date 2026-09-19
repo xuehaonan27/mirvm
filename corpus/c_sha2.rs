@@ -4,8 +4,8 @@
 sha2 = "0.10"
 hex = "0.4"
 ---
-// SHA-256 哈希。RustCrypto 系用 cpufeatures 做 SHA-NI 运行时检测 →
-// 预期与 blake3 同样撞 __cpuid 内联汇编（验证 §2.2 是一整类）。
+// SHA-256 hashing. The RustCrypto crates use cpufeatures for SHA-NI runtime
+// detection, which is expected to hit __cpuid inline asm just like blake3.
 use sha2::{Digest, Sha256};
 
 fn main() {
@@ -14,6 +14,6 @@ fn main() {
     let out = h.finalize();
     println!("sha256(hello world) = {}", hex::encode(out));
 
-    // 已知向量：空输入
+    // Known-answer vector: empty input
     println!("sha256() = {}", hex::encode(Sha256::digest(b"")));
 }

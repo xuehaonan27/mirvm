@@ -3,7 +3,7 @@
 [dependencies]
 anyhow = "1"
 ---
-// 错误处理机制：Context / bail / ? 链 / trait object 错误。
+// Error handling: `Context` / `bail!` / the `?` chain / trait-object errors.
 use anyhow::{bail, Context, Result};
 
 fn parse(s: &str) -> Result<i32> {
@@ -22,7 +22,7 @@ fn run() -> Result<()> {
         Ok(_) => bail!("unexpected ok"),
         Err(e) => {
             println!("caught: {e}");
-            // 错误链遍历
+            // Walk the error chain
             for (i, cause) in e.chain().enumerate() {
                 println!("  cause[{i}]: {cause}");
             }

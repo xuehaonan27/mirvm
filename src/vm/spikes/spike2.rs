@@ -1,19 +1,24 @@
-//! Spike 2：interp↔compiled 适配（i2c/c2i）+ 混合栈。
+//! Spike 2: interp<->compiled adapters (i2c/c2i) on a mixed stack.
 //!
-//! 验证模型 A 的**核心赌注**：解释帧与编译帧同在一条 native 栈上、靠薄适配器廉价互操作。
+//! Validates model A's **core bet**: interpreted and compiled frames share one native stack
+//! and interoperate cheaply through a thin adapter.
 //!
-//! - 编译帧 = **手写 `extern "C" fn`**（非 Cranelift）。对"适配器形状 + 混合栈"的验证，
-//!   rustc 编译的 extern C 函数与 Cranelift-JIT 的码在适配器层等价（都是遵循约定、在
-//!   native 栈上、经 ctx 指针回调的真 native 码）。"Cranelift 能否发此约定"是另一问题（后置）。
-//! - **ctx 传递 = 显式 `*mut Ctx` 首参**（= Cranelift/Wasmtime 的 vmctx 参数）。
-//! - **再入迫使 ctx 为裸指针而非 Rust `&mut`**：c2i 会再入 interp_frame（又要 &mut 操作数区），
-//!   `&mut` 无法表达再入式共享可变。故 ctx 全程 `*mut`，对字段做**瞬态、字段级**的显式借用、
-//!   绝不跨 call_guest 持有。安全性来自：操作数区是纪律化的栈（caller 槽在下、callee 槽在上，
-//!   切片不相交）+ 单线程顺序执行。注意必须**字段级** `&mut (*ctx).region`（非整体 `&mut *ctx`），
-//!   否则与长活的 `&(*ctx).prog` 冲突（Stacked/Tree Borrows）。裸指针方法调用的显式借用还规避了
-//!   edition 2024 的 `dangerous_implicit_autorefs`——封进下面几个 helper。
-//!
-//! 详见 docs/spike2-interp-compiled-adapters.md。
+//! - A compiled frame is a **hand-written `extern "C" fn`** (not Cranelift). For validating
+//!   "adapter shape + mixed stack", a rustc-compiled extern C function is equivalent at the
+//!   adapter layer to Cranelift-JIT code: both follow the convention, run on the native
+//!   stack, and call back through a ctx pointer. Whether Cranelift can emit this convention
+//!   is a separate question, deferred.
+//! - **ctx is passed as an explicit first `*mut Ctx` argument** (Cranelift/Wasmtime's vmctx).
+//! - **Re-entry forces ctx to be a raw pointer rather than a Rust `&mut`**: c2i re-enters
+//!   interp_frame (needing `&mut` on the operand region again), and `&mut` cannot express
+//!   re-entrant shared mutability. So ctx is `*mut` throughout and fields are borrowed
+//!   transiently and field-by-field, never held across call_guest. Safety rests on the
+//!   operand region being a disciplined stack (caller slots below, callee slots above,
+//!   disjoint slices) plus single-threaded sequential execution. The borrow must be
+//!   field-level (`&mut (*ctx).region`, not `&mut *ctx`), otherwise it conflicts with the
+//!   long-lived `&(*ctx).prog` (Stacked/Tree Borrows). The explicit borrows on raw-pointer
+//!   method calls also sidestep edition 2024's `dangerous_implicit_autorefs`; they are
+//!   wrapped in the helpers below.
 
 use std::process::ExitCode;
 
@@ -26,17 +31,19 @@ use super::memory::GuestMemory;
 const FIB_A: u32 = 0;
 const FIB_B: u32 = 1;
 
-/// 编译帧的调用约定：`(vmctx, 单 u64 参) -> u64`（skeleton；真 Rust ABI 见文档教训）。
+/// Compiled-frame calling convention: `(vmctx, single u64 arg) -> u64` (skeleton; the real
+/// Rust ABI differs).
 type CompiledFn = extern "C" fn(*mut Ctx, u64) -> u64;
 
-/// 每个 guest 函数的实现形态。fn 指针 Copy → FuncKind Copy。
+/// Implementation form of each guest function. The fn pointer is Copy, so FuncKind is Copy.
 #[derive(Clone, Copy)]
 enum FuncKind {
     Interp,
     Compiled(CompiledFn),
 }
 
-/// 执行上下文（= vmctx）。拥有 Program（无生命周期参，避开 fn 指针的生命周期耦合）。
+/// Execution context (= vmctx). Owns the Program, with no lifetime parameter, so it does not
+/// couple to the fn pointer's lifetime.
 struct Ctx {
     prog: Program,
     kinds: Vec<FuncKind>,
@@ -55,9 +62,9 @@ impl Ctx {
     }
 }
 
-// ---- 裸指针 ctx 的字段级瞬态访问 helper ----
-// 每个 helper 内做**显式、字段级**借用（规避 dangerous_implicit_autorefs；不与 &prog 整体冲突），
-// 借用不跨调用外泄，容许 c2i 再入。
+// ---- field-level transient access helpers for the raw-pointer ctx ----
+// Each helper borrows explicitly and field-level (avoiding dangerous_implicit_autorefs and
+// any conflict with `&prog`); the borrow never escapes the helper, so c2i re-entry is fine.
 
 #[inline]
 fn reg_reserve(ctx: *mut Ctx, n: u32) -> usize {
@@ -95,22 +102,27 @@ fn mem_store(ctx: *mut Ctx, addr: u64, v: u64) {
     unsafe { m.store(addr, v) };
 }
 
-/// 统一 dispatch：既是 **i2c**（解释帧调编译帧：路由到 Compiled 分支）也是 **c2i**（编译帧
-/// 调它、路由回 Interp 分支）。适配器就这么薄——单 u64 参直接进/出寄存器，无 VM 帧编组。
+/// Unified dispatch: both **i2c** (an interpreted frame calls a compiled one, routed to the
+/// Compiled arm) and **c2i** (a compiled frame calls it, routed back to the Interp arm). The
+/// adapter is this thin: a single u64 arg moves straight in/out of registers, with no VM
+/// frame marshalling.
 fn call_guest(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
     let kinds: &Vec<FuncKind> = unsafe { &(*ctx).kinds };
     match kinds[func as usize] {
         FuncKind::Interp => interp_frame(ctx, func, args),
-        FuncKind::Compiled(f) => f(ctx, args[0]), // i2c：单 u64 直进寄存器
+        FuncKind::Compiled(f) => f(ctx, args[0]), // i2c: single u64 straight into a register
     }
 }
 
-/// tree-walking 解释器（Spike 1 逻辑的 dispatch 化演进）。ctx 为裸指针；一切区/内存访问经
-/// helper 做瞬态、字段级借用，绝不把借用跨 `call_guest` 持有——这样 c2i 再入时对操作数区的
-/// `&mut` 与本帧不重叠（栈切片不相交，时序也不重叠）。
+/// Tree-walking interpreter (spike 1's logic routed through dispatch). ctx is a raw pointer;
+/// all region/memory access goes through helpers that borrow transiently and field-level and
+/// never hold a borrow across `call_guest`, so on c2i re-entry the operand region's `&mut`
+/// does not overlap this frame's (the stack slices are disjoint and the times do not overlap
+/// either).
 fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
-    // prog 不可变，重建一个覆盖整循环的 &Program 供 body/block/stmt 借用；只读它的 .prog 字段，
-    // 与 helper 里对 .region/.mem 字段的 &mut 互不重叠。
+    // prog is immutable; rebuild a `&Program` covering the whole loop for body/block/stmt to
+    // borrow. Only its `.prog` field is read, disjoint from the `&mut` on `.region`/`.mem` in
+    // the helpers.
     let prog: &Program = unsafe { &(*ctx).prog };
     let body: &Body = &prog.funcs[func as usize];
 
@@ -157,7 +169,7 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
                 ..
             } => {
                 let av: Vec<Word> = aops.iter().map(|o| eval_operand(ctx, base, *o)).collect();
-                let r = call_guest(ctx, *callee, &av); // 再入点：不持任何借用
+                let r = call_guest(ctx, *callee, &av); // re-entry point: no borrow held
                 reg_write(ctx, base, *dst, r);
                 blk = *target as usize;
             }
@@ -166,7 +178,7 @@ fn interp_frame(ctx: *mut Ctx, func: u32, args: &[Word]) -> Word {
                 reg_restore(ctx, base);
                 return r;
             }
-            t => unreachable!("spike2 字节码子集不含 unwind 构造: {t:?}"),
+            t => unreachable!("spike2 bytecode subset has no unwind constructors: {t:?}"),
         }
     }
 }
@@ -194,7 +206,7 @@ fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> Word {
             let addr = eval_operand(ctx, base, *ptr);
             mem_load(ctx, addr)
         }
-        rv => unreachable!("spike2 字节码子集不含并发构造: {rv:?}"),
+        rv => unreachable!("spike2 bytecode subset has no concurrency constructors: {rv:?}"),
     }
 }
 
@@ -211,7 +223,8 @@ fn apply_binop(op: BinOp, a: Word, b: Word) -> Word {
     }
 }
 
-// ---- 手写编译帧：遵循 vmctx 约定，经 call_guest 调对方（动态路由到 interp 或 compiled）----
+// ---- hand-written compiled frames: follow the vmctx convention and call the other side
+// through call_guest (dynamically routed to interp or compiled) ----
 
 extern "C" fn compiled_fib_a(ctx: *mut Ctx, n: u64) -> u64 {
     if n < 2 {
@@ -227,7 +240,7 @@ extern "C" fn compiled_fib_b(ctx: *mut Ctx, n: u64) -> u64 {
     call_guest(ctx, FIB_A, &[n - 1]).wrapping_add(call_guest(ctx, FIB_A, &[n - 2]))
 }
 
-// ---- 字节码版：两个互递归 fib（fib_a 调 FIB_B、fib_b 调 FIB_A）----
+// ---- bytecode version: two mutually recursive fibs (fib_a calls FIB_B, fib_b calls FIB_A) ----
 
 fn s(n: u32) -> Operand {
     Operand::Slot(n)
@@ -242,7 +255,7 @@ fn bin(op: BinOp, a: Operand, b: Operand) -> Rvalue {
     Rvalue::Binary(op, a, b)
 }
 
-/// fib(n)=n<2?n:callee(n-1)+callee(n-2)。槽：0=ret 1=n 2=cond 3=n-1 4=r1 5=n-2 6=r2
+/// fib(n)=n<2?n:callee(n-1)+callee(n-2). Slots: 0=ret 1=n 2=cond 3=n-1 4=r1 5=n-2 6=r2
 fn fib_body(callee: u32) -> Body {
     use BinOp::*;
     use Rvalue::Use;
@@ -308,16 +321,16 @@ fn fib_ref(n: u64) -> u64 {
 
 pub fn run() -> ExitCode {
     use FuncKind::{Compiled, Interp};
-    // (名称, fib_a 形态, fib_b 形态) —— 4 配置覆盖四种转移
+    // (name, fib_a form, fib_b form) -- four configs covering all four transitions
     let configs: [(&str, FuncKind, FuncKind); 4] = [
-        ("interp  / interp  ", Interp, Interp), // interp→interp
+        ("interp  / interp  ", Interp, Interp), // interp->interp
         (
             "compiled/ compiled",
             Compiled(compiled_fib_a),
             Compiled(compiled_fib_b),
-        ), // cc→cc
-        ("interp  / compiled", Interp, Compiled(compiled_fib_b)), // i2c + c2i 交替（混合栈）
-        ("compiled/ interp  ", Compiled(compiled_fib_a), Interp), // 镜像
+        ), // cc->cc
+        ("interp  / compiled", Interp, Compiled(compiled_fib_b)), // i2c + c2i alternating
+        ("compiled/ interp  ", Compiled(compiled_fib_a), Interp), // mirror
     ];
 
     let mut ok = true;
@@ -341,10 +354,12 @@ pub fn run() -> ExitCode {
     }
 
     if ok {
-        println!("--- spike2: 全 PASS（i2c/c2i + 混合栈验证通过，模型 A 核心赌注成立）---");
+        println!(
+            "--- spike2: all PASS (i2c/c2i + mixed stack verified; model A core bet holds) ---"
+        );
         ExitCode::SUCCESS
     } else {
-        println!("--- spike2: 有 FAIL ---");
+        println!("--- spike2: FAIL ---");
         ExitCode::from(1)
     }
 }

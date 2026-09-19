@@ -1,7 +1,7 @@
-//! intrinsic 就地展开（自 func.rs F13+F14+F16 整搬）：try_expand_intrinsic
-//! ~60 名分派（atomic/volatile/copy/ct*/math/fma/fast-float/ptr/size_of/
-//! saturating/caller_location/compare_bytes 族）+ float 路由/atomic_ord +
-//! F16 自由小件（elem_of/float_w/LayoutCxAt 等，pub(super) 供全树）。
+//! In-place intrinsic expansion: try_expand_intrinsic dispatches ~60 names
+//! (atomic/volatile/copy/ct*/math/fma/fast-float/ptr/size_of/saturating/
+//! caller_location/compare_bytes families) plus float routing / atomic_ord and
+//! free helpers (elem_of/float_w/LayoutCxAt etc., pub(super) for the whole tree).
 
 use super::*;
 
@@ -21,7 +21,11 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     ty::Float(ty::FloatTy::F32) => FloatSuffix::F32,
                     ty::Float(ty::FloatTy::F64) => FloatSuffix::F64,
                     ty::Float(ty::FloatTy::F128) => FloatSuffix::F128,
-                    _ => return Err(format!("intrinsic `{n}` 泛型参数非浮点（{t}）")),
+                    _ => {
+                        return Err(format!(
+                            "intrinsic `{n}` generic argument is not a float ({t})"
+                        ));
+                    }
                 }
             }
         };
@@ -33,10 +37,11 @@ impl<'tcx> LowerCx<'tcx, '_> {
         })
     }
 
-    /// atomic intrinsic 的 const 泛型序 → 冻结 MemOrd（cg_ssa parse_atomic_ordering
-    /// 同构：valtree 分支[0] 是判别式叶；D8j）。**按位置收集全部 const 泛参**而非
-    /// 硬编码下标——本 nightly 各 atomic intrinsic 的类型参数量异构（xadd<T,U,ORD>
-    /// vs load<T,ORD>），序参数是其中唯一的 const（cxchg 两个：succ, fail）。
+    /// atomic intrinsic const generic ordering -> frozen MemOrd (isomorphic to cg_ssa
+    /// parse_atomic_ordering: valtree branch[0] is the discriminant leaf). Collect
+    /// **all** const generic args by position rather than hard-coding an index: the
+    /// type-arg counts differ per atomic intrinsic (xadd<T,U,ORD> vs load<T,ORD>), and
+    /// the ordering arg is the only const among them (cxchg has two: succ, fail).
     pub(super) fn atomic_ord(
         &self,
         inst: &Instance<'tcx>,
@@ -48,7 +53,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             .iter()
             .filter_map(|a| a.as_const())
             .nth(nth)
-            .ok_or_else(|| format!("atomic intrinsic 缺第 {nth} 个 const 序参数"))?;
+            .ok_or_else(|| format!("atomic intrinsic is missing const ordering arg #{nth}"))?;
         let discr = c.to_value().to_branch()[0].to_leaf();
         Ok(match discr.to_atomic_ordering() {
             A::Relaxed => ir::MemOrd::Relaxed,
@@ -72,10 +77,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
             return Ok(None);
         };
         let name = self.tcx.item_name(def_id);
-        // 引擎级 intrinsic（非纯值展开）：catch_unwind 走 Builtin 通道
+        // Engine-level intrinsic (not a pure-value expansion): catch_unwind goes through the Builtin channel
         if name.as_str() == "catch_unwind" {
             let (dst_p, w) = self.place_scalar(destination)?;
-            let tgt = target.ok_or("catch_unwind 发散？")?.as_u32();
+            let tgt = target.ok_or("catch_unwind diverges?")?.as_u32();
             let role = self
                 .linker
                 .main_catch_site
@@ -101,7 +106,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 },
             )));
         }
-        // 泛型元素尺寸（copy/write_bytes/offset 的 T）
+        // Generic element size (T of copy/write_bytes/offset)
         let elem_size = |cx: &Self| -> Result<u64, String> {
             let t = inst.args.type_at(0);
             Ok(cx.layout_of(t)?.size.bytes())
@@ -112,7 +117,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let ptr_ty = self.op_ty(&args[0].node)?;
                 let pointee = ptr_ty
                     .builtin_deref(true)
-                    .ok_or_else(|| format!("offset 非指针（ty={ptr_ty}）"))?;
+                    .ok_or_else(|| format!("offset is not a pointer (ty={ptr_ty})"))?;
                 let stride = self.layout_of(pointee)?.size.bytes();
                 let (dst_p, w) = self.place_scalar(destination)?;
                 vec![Stmt::Assign {
@@ -134,8 +139,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     "bswap" => B::Bswap,
                     _ => B::Bitreverse,
                 };
-                // 128 位（D8k）：ctpop/ctlz/cttz 结果是 u32（≤128 装 u32）；bswap/
-                // bitreverse 结果仍是 128 位。走宽通道 Bit128（源 16 字节 place）。
+                // 128-bit: ctpop/ctlz/cttz results are u32 (<= 128 fits u32); bswap/
+                // bitreverse results remain 128-bit. Both use the wide Bit128 channel (a 16-byte source place).
                 let a_ty = self.op_ty(&args[0].node)?;
                 if self.layout_of(a_ty)?.size.bytes() == 16 {
                     let src = self.wide_place(&args[0].node)?;
@@ -147,7 +152,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                 dst: self.resolve_place(destination)?.expr(),
                             }]
                         } else {
-                            // 计数类：结果标量（u32），走 Bit128Count
+                            // Counting: the result is a scalar (u32), so use Bit128Count
                             let (dst_p, w) = self.place_scalar(destination)?;
                             vec![Stmt::Bit128Count {
                                 op,
@@ -155,7 +160,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                 dst: dst_p.scalar_place(w),
                             }]
                         },
-                        Terminator::Goto(target.ok_or("bit intrinsic 发散？")?.as_u32()),
+                        Terminator::Goto(target.ok_or("bit intrinsic diverges?")?.as_u32()),
                     )));
                 }
                 let (dst_p, w) = self.place_scalar(destination)?;
@@ -183,7 +188,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             "atomic_load" => {
                 let order = self.atomic_ord(inst, 0)?;
                 if matches!(order, ir::MemOrd::Release | ir::MemOrd::AcqRel) {
-                    return Err(format!("atomic_load 非法序 {order:?}"));
+                    return Err(format!("atomic_load has an invalid ordering {order:?}"));
                 }
                 let (dst_p, w) = self.place_scalar(destination)?;
                 vec![Stmt::Assign {
@@ -198,7 +203,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             "atomic_store" => {
                 let order = self.atomic_ord(inst, 0)?;
                 if matches!(order, ir::MemOrd::Acquire | ir::MemOrd::AcqRel) {
-                    return Err(format!("atomic_store 非法序 {order:?}"));
+                    return Err(format!("atomic_store has an invalid ordering {order:?}"));
                 }
                 vec![Stmt::AtomicStore {
                     addr: self.lower_operand_scalar(&args[0].node)?,
@@ -210,12 +215,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 // (ptr, expected, new) -> (T, bool)
                 let dst_p = self.resolve_place(destination)?;
                 let ValKind::Pair((vo, vw), (fo, fw)) = self.classify(dst_p.ty)? else {
-                    return Err("cxchg 目标非 pair".into());
+                    return Err("cxchg target is not a pair".into());
                 };
                 let succ = self.atomic_ord(inst, 0)?;
                 let fail = self.atomic_ord(inst, 1)?;
                 if matches!(fail, ir::MemOrd::Release | ir::MemOrd::AcqRel) {
-                    return Err(format!("cxchg 失败序非法 {fail:?}"));
+                    return Err(format!("cxchg has an invalid failure ordering {fail:?}"));
                 }
                 vec![Stmt::AtomicCxchg {
                     addr: self.lower_operand_scalar(&args[0].node)?,
@@ -239,7 +244,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     "atomic_and" => R::And,
                     "atomic_or" => R::Or,
                     "atomic_xor" => R::Xor,
-                    // fetch_max/min（D8i）：有符号性由 intrinsic 名冻结进变体
+                    // fetch_max/min: signedness is frozen into the variant by the intrinsic name
                     "atomic_max" => R::Max,
                     "atomic_min" => R::Min,
                     "atomic_umax" => R::UMax,
@@ -255,7 +260,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     order: self.atomic_ord(inst, 0)?,
                 }]
             }
-            // fence（M4.4 D4 补真；D8j 序贯通）
+            // fence
             "atomic_fence" => vec![Stmt::Fence {
                 single_thread: false,
                 order: self.atomic_ord(inst, 0)?,
@@ -264,15 +269,16 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 single_thread: true,
                 order: self.atomic_ord(inst, 0)?,
             }],
-            // volatile 是 RAM 可观察行为，必须一路保留到执行器。值始终使用
-            // alignment=1 的 opaque MaybeUninit 字节载体：既不对 `[u8; N]`
-            // 施加错误的整数对齐，也不把聚合值的未初始化 padding 读成宿主值。
-            // rustc 对 memory-repr store 本身会发 volatile memcpy；宽值由执行器
-            // 按后端可承载的块分解，标量常用宽度仍保持一个 volatile 事件。
+            // volatile is RAM-observable behavior and must be preserved all the way to
+            // the executor. The value always uses an alignment=1 opaque MaybeUninit byte
+            // carrier: this neither imposes a wrong integer alignment on `[u8; N]` nor
+            // reads an aggregate's uninitialized padding as a host value. rustc emits a
+            // volatile memcpy for memory-repr stores; the executor splits wide values into
+            // backend-supported blocks, while common scalar widths stay one volatile event.
             "volatile_load" | "unaligned_volatile_load" => {
                 let t = inst.args.type_at(0);
                 let size = u32::try_from(self.layout_of(t)?.size.bytes())
-                    .map_err(|_| format!("{name} 类型 {t} 大小超出 u32"))?;
+                    .map_err(|_| format!("{name} type {t} size exceeds u32"))?;
                 if size == 0 {
                     vec![Stmt::Nop]
                 } else {
@@ -286,7 +292,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             "volatile_store" | "unaligned_volatile_store" => {
                 let t = inst.args.type_at(0);
                 let size = u32::try_from(self.layout_of(t)?.size.bytes())
-                    .map_err(|_| format!("{name} 类型 {t} 大小超出 u32"))?;
+                    .map_err(|_| format!("{name} type {t} size exceeds u32"))?;
                 if size == 0 {
                     vec![Stmt::Nop]
                 } else {
@@ -306,7 +312,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
             }
             "copy_nonoverlapping" | "copy" => {
-                // (src, dst, count)——注意顺序与 C memcpy 相反
+                // (src, dst, count) -- note the order is the reverse of C memcpy
                 vec![Stmt::MemCopy {
                     src: self.lower_operand_scalar(&args[0].node)?,
                     dst: self.lower_operand_scalar(&args[1].node)?,
@@ -315,10 +321,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     overlap: name.as_str() == "copy",
                 }]
             }
-            // volatile 批量访存（D8i）：LLVM volatile memcpy/memset 对访问宽度/次数
-            // 本就无承诺，volatile 只保证"不可省略/不可重排合并"——解释器逐条执行
-            // 从不省略，故与 copy/write_bytes 同一执行通道即为忠实实现。
-            // 注意实参顺序：这族是 (dst, src, count)，与 copy 的 (src, dst, count) 相反。
+            // Volatile bulk memory access: LLVM volatile memcpy/memset make no promise
+            // about access width or count; volatile only guarantees "not omitted, not
+            // reordered/merged". The interpreter executes every statement and never
+            // omits one, so sharing the copy/write_bytes channel is a faithful
+            // implementation. Note the argument order: this family is (dst, src, count),
+            // the reverse of copy's (src, dst, count).
             "volatile_copy_memory" | "volatile_copy_nonoverlapping_memory" => {
                 vec![Stmt::MemCopy {
                     dst: self.lower_operand_scalar(&args[0].node)?,
@@ -336,13 +344,14 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     elem_size: elem_size(self)?,
                 }]
             }
-            // 非临时 store（D8i，stdarch _mm_stream_* 汇入）：NT 是绕缓存的性能 hint，
-            // 值语义 = 普通 store；其与 fence 的弱序注意事项是 guest 的既有义务。
-            // 走 volatile store 通道（防省略的超集保证，宽值分块规则一致）。
+            // Nontemporal store (stdarch _mm_stream_* funnels here): NT is a cache-bypassing
+            // performance hint whose value semantics are an ordinary store; its weak-ordering
+            // obligations relative to fence belong to the guest. Use the volatile store
+            // channel (a superset guarantee against omission; wide-value blocking rules match).
             "nontemporal_store" => {
                 let t = inst.args.type_at(0);
                 let size = u32::try_from(self.layout_of(t)?.size.bytes())
-                    .map_err(|_| format!("{name} 类型 {t} 大小超出 u32"))?;
+                    .map_err(|_| format!("{name} type {t} size exceeds u32"))?;
                 if size == 0 {
                     vec![Stmt::Nop]
                 } else {
@@ -361,7 +370,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     stmts
                 }
             }
-            // ptr.mask(m)（D8i）：地址位与，provenance 不变（真实地址下位与即语义）。
+            // ptr.mask(m): address bitwise-AND; provenance is unchanged (under real addresses the AND is the semantics)
             "ptr_mask" => {
                 let (dst_p, w) = self.place_scalar(destination)?;
                 vec![Stmt::Assign {
@@ -374,8 +383,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     },
                 }]
             }
-            // vtable 槽直读（D8i）：实参是裸 vtable 指针（DynMetadata::size_of/align_of）。
-            // 槽布局 [drop, size, align, ...] 与 size_of_val 的 dyn 臂同一来源。
+            // Direct vtable slot read: the argument is a bare vtable pointer (DynMetadata::size_of/align_of).
+            // The slot layout [drop, size, align, ...] comes from the same source as size_of_val's dyn arm.
             "vtable_size" | "vtable_align" => {
                 let vt = self.lower_operand_scalar(&args[0].node)?;
                 let slot_off = if name.as_str() == "vtable_size" {
@@ -389,11 +398,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     rv: Rvalue::Use(operand_deref_at(vt, slot_off)?),
                 }]
             }
-            // nullary 类型查询保险臂（D8i）：正常被 GVN 常量折叠消解，残留时在
-            // lower 期以 tcx 折成常量（与 rustc eval_nullary_intrinsic 同构）。
-            // type_id/type_name/offset_of/field_offset 不在此列：TypeId 本 nightly 是
-            // vtable 身份结构、type_name 需字符串物化——残留仍响亮 Trap（重开条件：
-            // 真实程序在非默认 mir-opt 下撞到）。
+            // Nullary type query safety arm: normally GVN constant-folds it away; when it
+            // survives, fold it at lowering time via tcx (isomorphic to rustc
+            // eval_nullary_intrinsic). type_id/type_name/offset_of/field_offset are not
+            // included: on this nightly TypeId is a vtable identity struct and type_name
+            // needs string materialization, so a survivor still Traps loudly. Reopen this if a
+            // real program hits it under non-default mir-opt.
             "size_of" | "align_of" | "min_align_of" => {
                 let t = inst.args.type_at(0);
                 let l = self.layout_of(t)?;
@@ -409,8 +419,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }]
             }
             "variant_count" => {
-                // rustc eval_nullary_intrinsic 同构：Pat 剥到 base；Adt=变体数；
-                // 其余具体类型=0
+                // Isomorphic to rustc eval_nullary_intrinsic: peel Pat down to the base;
+                // an Adt yields the variant count and any other concrete type yields 0
                 let mut t = inst.args.type_at(0);
                 while let ty::Pat(base, _) = t.kind() {
                     t = *base;
@@ -443,7 +453,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }]
             }
             "black_box" | "transmute" => {
-                // 值透传（transmute 调用形态 = 位重解释；black_box = copy）
+                // Value pass-through (the transmute call form is a bit reinterpretation; black_box is a copy)
                 let dst_p = self.resolve_place(destination)?;
                 let dst_kind = self.classify(dst_p.ty)?;
                 let src = self.lower_operand(&args[0].node)?;
@@ -451,8 +461,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
             "assume" => vec![Stmt::Nop],
             "abort" => {
-                // core::intrinsics::abort：进程级中止（native=SIGILL trap，引擎=SIGABRT
-                // ——信号差异记 m4-log，差分若较信号级再对齐）
+                // core::intrinsics::abort: process-level abort (native = SIGILL trap,
+                // engine = SIGABRT; the signal difference is recorded and aligned later if differentials compare signals)
                 let tgt = (self.mir_block_count + self.extra_blocks.len()) as Bb;
                 self.extra_blocks.push(ir::Block {
                     stmts: vec![],
@@ -471,8 +481,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 )));
             }
             "breakpoint" => {
-                // 真 int3（D8i）：与 native 同为 SIGTRAP 可观测行为；正常续行到 target
-                let tgt = target.ok_or("breakpoint 发散？")?.as_u32();
+                // Real int3: observably SIGTRAP as in native; normally continues to target
+                let tgt = target.ok_or("breakpoint diverges?")?.as_u32();
                 return Ok(Some((
                     vec![],
                     Terminator::CallBuiltin {
@@ -486,20 +496,21 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 )));
             }
             "assert_inhabited" | "assert_zero_valid" | "assert_mem_uninitialized_valid" => {
-                // lower 期判定（collector 同构）：合法 → nop；违反 → 占位
-                //（native 展开为 panic_nounwind；此路径本就是防御性死路）
+                // Decided at lowering time (isomorphic to the collector): valid -> nop;
+                // violated -> placeholder (native expands to panic_nounwind; this path is a defensive dead end)
                 let req = rustc_middle::ty::layout::ValidityRequirement::from_intrinsic(name)
-                    .expect("validity intrinsic 名");
+                    .expect("validity intrinsic name");
                 let t = inst.args.type_at(0);
                 let ok = self
                     .tcx
                     .check_validity_requirement((req, self.typing_env.as_query_input(t)))
-                    .map_err(|e| format!("validity 判定失败: {e}"))?;
+                    .map_err(|e| format!("validity check failed: {e}"))?;
                 if ok {
                     vec![Stmt::Nop]
                 } else {
                     vec![Stmt::Trap(
-                        format!("{name} 违反（ty={t}——native panic_nounwind）").into_boxed_str(),
+                        format!("{name} violated (ty={t} -- native panic_nounwind)")
+                            .into_boxed_str(),
                     )]
                 }
             }
@@ -510,7 +521,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 } else {
                     OvfOp::Sub
                 };
-                // 128 位：宽形态走 Sat128（宿主 u128/i128 直算；标量 IntSat 只到 64 位）
+                // 128-bit: the wide form uses Sat128 (computed on host u128/i128; scalar IntSat only reaches 64 bits)
                 if matches!(
                     a_ty.kind(),
                     ty::Int(ty::IntTy::I128) | ty::Uint(ty::UintTy::U128)
@@ -536,8 +547,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
             }
             "caller_location" => {
-                // Location::caller()：本函数 track_caller → 读隐藏尾实参槽；
-                // 否则按 intrinsic 调用点合成（罕见——caller 链通常 track 到底）
+                // Location::caller(): when this function is track_caller, read the hidden
+                // trailing arg slot; otherwise synthesize from the intrinsic call site (rare; the caller chain usually tracks to the bottom)
                 let (dst_p, w) = self.place_scalar(destination)?;
                 let op = match self.caller_loc_off {
                     Some(off) => Operand::Slot(Slot {
@@ -562,7 +573,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     },
                 }]
             }
-            // 字节级相等（<[u8;N]>::eq 的 spec 路径，csv 逼出）：memcmp == 0
+            // Byte-level equality (the spec path of <[u8;N]>::eq): memcmp == 0
             "raw_eq" => {
                 let t = inst.args.type_at(0);
                 let size = self.layout_of(t)?.size.bytes();
@@ -598,12 +609,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     },
                 ]
             }
-            // 不检查的浮点→整数（fast 不检 UB：与 `as` 同一实现，numbigint 逼出）
+            // Unchecked float -> integer (fast mode does not check UB; same implementation as `as`)
             "float_to_int_unchecked" => {
                 let fty = inst.args.type_at(0);
                 let ity = inst.args.type_at(1);
                 let signed = frame::ty_signed(ity);
-                // f128 源：≤64 整数经 F128ToScalar；i128/u128 经 F128ToWideInt
+                // f128 source: <= 64-bit integer via F128ToScalar; i128/u128 via F128ToWideInt
                 if matches!(fty.kind(), ty::Float(ty::FloatTy::F128)) {
                     let pa = self.wide_place(&args[0].node)?;
                     let dst = self.resolve_place(destination)?;
@@ -634,7 +645,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         },
                     }]
                 } else {
-                    // 标量浮点 → i128/u128（D8k）
+                    // Scalar float -> i128/u128
                     vec![Stmt::FloatToWide128 {
                         src: self.lower_operand_scalar(&args[0].node)?,
                         from: float_w(fty)?,
@@ -643,8 +654,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }]
                 }
             }
-            // 数学面（must_be_overridden float intrinsic）：宿主直算（合成处置，P7）。
-            // 宽度：后缀名（sqrtf64）定死；裸泛型名（fabs<T>，本 nightly 漂移）看类型参数。
+            // Math surface (must_be_overridden float intrinsics): computed directly on the
+            // host. Width comes from the suffix (sqrtf64) when present; a bare generic name
+            // such as fabs<T> takes its width from the type argument.
             n if math_un_of(n).is_some() => {
                 let (op, sfx) = math_un_of(n).unwrap();
                 match self.resolve_float_route(sfx, inst, n)? {
@@ -682,7 +694,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }]
                     }
                     FloatRoute::Wide128 => {
-                        // powi 的 rhs 是 i32 标量，其余 f128 wide
+                        // powi's rhs is an i32 scalar; every other f128 rhs is wide
                         let b = if matches!(op, ir::MathBinOp::Powi) {
                             ir::F128Rhs::Scalar(self.lower_operand_scalar(&args[1].node)?)
                         } else {
@@ -697,8 +709,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }
                 }
             }
-            // 融合乘加（D8i/D8c）：a*b+c 单次舍入。fmuladd 允许融合/不融合，融合恒在
-            // 允许集合内。f16 经宿主 f16::mul_add（数学上正确舍入）。
+            // Fused multiply-add: a*b+c with a single rounding. fmuladd permits both
+            // fused and unfused, and fusion is always in the allowed set. f16 goes through host f16::mul_add (mathematically correct rounding).
             "fmaf16" | "fmaf32" | "fmaf64" | "fmuladdf16" | "fmuladdf32" | "fmuladdf64" => {
                 let fw = match split_float_suffix(name.as_str()).1 {
                     Some(FloatSuffix::F16) => ir::FloatW::F16,
@@ -722,8 +734,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 c: self.wide_place(&args[2].node)?,
                 dst: self.resolve_place(destination)?.expr(),
             }],
-            // fast/algebraic 浮点（D8i）：fast-math 标记是"允许重结合/收缩"的自由授权，
-            // 按精确 IEEE 语义执行的结果恒在允许集合内（与关掉 fast-math 的 native 同值）。
+            // fast/algebraic float: the fast-math flag licenses reassociation/contraction,
+            // so a result computed with exact IEEE semantics is always in the allowed set (same value as native without fast-math).
             "fadd_fast" | "fsub_fast" | "fmul_fast" | "fdiv_fast" | "frem_fast"
             | "fadd_algebraic" | "fsub_algebraic" | "fmul_algebraic" | "fdiv_algebraic"
             | "frem_algebraic" => {
@@ -759,7 +771,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
             n if n.starts_with("simd_") => self.expand_simd(n, inst, args, destination)?,
             "ptr_offset_from" | "ptr_offset_from_unsigned" => {
                 let ptr_ty = self.op_ty(&args[0].node)?;
-                let pointee = ptr_ty.builtin_deref(true).ok_or("ptr_offset_from 非指针")?;
+                let pointee = ptr_ty
+                    .builtin_deref(true)
+                    .ok_or("ptr_offset_from is not a pointer")?;
                 let stride = self.layout_of(pointee)?.size.bytes().max(1);
                 let (dst_p, w) = self.place_scalar(destination)?;
                 vec![Stmt::Assign {
@@ -772,7 +786,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }]
             }
             "size_of_val" | "min_align_of_val" | "align_of_val" => {
-                // *const T 实参；T sized → 常量；[E]/str → meta 折算；dyn → vtable（M4.1+）
+                // *const T argument; a sized T is a constant; [E]/str folds through meta; dyn reads the vtable
                 let t = inst.args.type_at(0);
                 let (dst_p, w) = self.place_scalar(destination)?;
                 let is_size = name.as_str() == "size_of_val";
@@ -792,10 +806,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         ty::Slice(e) | ty::Array(e, _) => {
                             let el = self.layout_of(*e)?;
                             if is_size {
-                                // meta（元素数）× elem size
+                                // meta (element count) x elem size
                                 let LoweredOp::Pair(_, meta) = self.lower_operand(&args[0].node)?
                                 else {
-                                    return Err("size_of_val 实参非胖指针".into());
+                                    return Err("size_of_val argument is not a fat pointer".into());
                                 };
                                 vec![Stmt::Assign {
                                     dst: dst_p.scalar_place(w),
@@ -823,7 +837,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             if is_size {
                                 let LoweredOp::Pair(_, meta) = self.lower_operand(&args[0].node)?
                                 else {
-                                    return Err("size_of_val 实参非胖指针".into());
+                                    return Err("size_of_val argument is not a fat pointer".into());
                                 };
                                 vec![Stmt::Assign {
                                     dst: dst_p.scalar_place(w),
@@ -837,9 +851,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             }
                         }
                         ty::Dynamic(..) => {
-                            // vtable 布局：[drop, size, align, ...]（COMMON_VTABLE_ENTRIES）
+                            // vtable layout: [drop, size, align, ...] (COMMON_VTABLE_ENTRIES)
                             let LoweredOp::Pair(_, vt) = self.lower_operand(&args[0].node)? else {
-                                return Err(format!("{name} 实参非 dyn 胖指针"));
+                                return Err(format!("{name} argument is not a dyn fat pointer"));
                             };
                             let slot_off = if is_size { 8 } else { 16 };
                             vec![Stmt::Assign {
@@ -847,14 +861,14 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                 rv: Rvalue::Use(operand_deref_at(vt, slot_off)?),
                             }]
                         }
-                        // unsized 尾字段结构体（Path/OsStr/RcInner<dyn>，M4.5）：
-                        // cg_ssa glue size_and_align_of_dst 同构——
-                        // full_align = max(sized_align, tail_align)；
-                        // full_size = align_to(sized_size + tail_size, full_align)。
+                        // Struct with an unsized tail field (Path/OsStr/RcInner<dyn>):
+                        // isomorphic to cg_ssa glue size_and_align_of_dst --
+                        // full_align = max(sized_align, tail_align);
+                        // full_size = align_to(sized_size + tail_size, full_align).
                         ty::Adt(..) | ty::Tuple(..) => {
                             let LoweredOp::Pair(_, meta) = self.lower_operand(&args[0].node)?
                             else {
-                                return Err(format!("{name} 实参非胖指针"));
+                                return Err(format!("{name} argument is not a fat pointer"));
                             };
                             let tail = self.tcx.struct_tail_for_codegen(t, self.typing_env);
                             let sized_size = t_layout.size.bytes();
@@ -878,7 +892,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                         }
                                         _ => (1, 1),
                                     };
-                                    let fa = sized_align.max(eal); // 编译期常量
+                                    let fa = sized_align.max(eal); // compile-time constant
                                     if !is_size {
                                         vec![assign(Rvalue::Use(imm(fa)))]
                                     } else {
@@ -914,10 +928,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                     }
                                 }
                                 ty::Dynamic(..) => {
-                                    // meta = vtable：tail size@+8 / align@+16（运行时读）。
-                                    // full_align = max(sized_align, tail_align)；
-                                    // full_size  = align_to(sized_size + tail_size, full_align)
-                                    //            = (s + a − 1) & !(a − 1)（cg_ssa 同式）。
+                                    // meta = vtable: tail size@+8 / align@+16 (read at runtime).
+                                    // full_align = max(sized_align, tail_align);
+                                    // full_size = align_to(sized_size + tail_size, full_align)
+                                    //          = (s + a − 1) & !(a − 1) (same formula as cg_ssa).
                                     let sl = |s: Slot| Operand::Slot(s);
                                     let sp = |s: Slot| ScalarPlace::Slot(s);
                                     let umax_align = Rvalue::UMax {
@@ -974,17 +988,19 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                     }
                                 }
                                 _ => {
-                                    return Err(format!("{name} 尾类型 {tail} 未支持（M4.5+）"));
+                                    return Err(format!("{name} tail type {tail} unsupported"));
                                 }
                             }
                         }
-                        _ => return Err(format!("{name} on unsized {t}（M4.1+）")),
+                        _ => return Err(format!("{name} on unsized {t}")),
                     }
                 }
             }
             _ => return Ok(None),
         };
-        let tgt = target.ok_or("intrinsic 展开：发散 intrinsic？")?.as_u32();
+        let tgt = target
+            .ok_or("intrinsic expansion: diverging intrinsic?")?
+            .as_u32();
         Ok(Some((stmts, Terminator::Goto(tgt))))
     }
 }
@@ -997,13 +1013,15 @@ pub(super) fn elem_of(ty: Ty<'_>) -> Option<Ty<'_>> {
 }
 
 pub(super) fn u128_to_u64(v: u128) -> Result<u64, String> {
-    u64::try_from(v).map_err(|_| "128 位判别式（M4.1+）".to_string())
+    u64::try_from(v).map_err(|_| "128-bit discriminant".to_string())
 }
 
-/// 数学 intrinsic 名 → (op, 宽度)。宽度 `Some(is64)` 来自 f32/f64 后缀；`None` =
-/// 裸泛型名（本 nightly `fabs<T: FloatPrimitive>` 已去后缀——M5.2 D8i 实证漂移），
-/// 由调用点按类型参数解析。**全表都做泛型兜底**：后缀剥离对 nightly 漂移脆弱，
-/// 任一名字将来去后缀化时走同一条泛型道而不是 Trap。f16/f128 由调用点按 D8c 处置。
+/// Math intrinsic name -> (op, width). Width `Some(is64)` comes from the f32/f64
+/// suffix; `None` means a bare generic name (on this nightly `fabs<T: FloatPrimitive>`
+/// has dropped the suffix), resolved at the call site from type arguments. **Every
+/// entry has a generic fallback**: suffix stripping is fragile against nightly drift,
+/// so a name that loses its suffix takes the generic path instead of Trapping. f16/f128
+/// are handled at the call site.
 pub(super) fn math_un_of(n: &str) -> Option<(ir::MathUnOp, Option<FloatSuffix>)> {
     let (stem, sfx) = split_float_suffix(n);
     math_un_stem(stem).map(|op| (op, sfx))
@@ -1046,7 +1064,7 @@ pub(super) fn math_bin_of(n: &str) -> Option<(ir::MathBinOp, Option<FloatSuffix>
     ))
 }
 
-/// 浮点 intrinsic 名后缀（sqrtf16/f32/f64/f128）。
+/// Float intrinsic name suffixes (sqrtf16/f32/f64/f128).
 #[derive(Clone, Copy)]
 pub(super) enum FloatSuffix {
     F16,
@@ -1055,24 +1073,24 @@ pub(super) enum FloatSuffix {
     F128,
 }
 
-/// 标量/宽通道路由。
+/// Scalar/wide-channel routing.
 #[derive(Clone, Copy)]
 pub(super) enum FloatRoute {
     Scalar(ir::FloatW),
     Wide128,
 }
 
-/// 标量浮点宽度（f128 不在此——16 字节走宽通道，调用点先分流）。
+/// Scalar float width (f128 is excluded: 16 bytes use the wide channel and the call site routes first).
 pub(super) fn float_w(t: Ty<'_>) -> Result<ir::FloatW, String> {
     match t.kind() {
         ty::Float(ty::FloatTy::F16) => Ok(ir::FloatW::F16),
         ty::Float(ty::FloatTy::F32) => Ok(ir::FloatW::F32),
         ty::Float(ty::FloatTy::F64) => Ok(ir::FloatW::F64),
-        _ => Err(format!("非标量浮点宽度 {t}")),
+        _ => Err(format!("non-scalar float width {t}")),
     }
 }
 
-/// 剥 f16/f32/f64/f128 后缀；无后缀返回原名 + None（泛型 intrinsic，宽度看类型参数）。
+/// Strip the f16/f32/f64/f128 suffix; without one, return the original name + None (generic intrinsic, width from type args).
 pub(super) fn split_float_suffix(n: &str) -> (&str, Option<FloatSuffix>) {
     for (sfx, tag) in [
         ("f128", FloatSuffix::F128),
@@ -1087,7 +1105,7 @@ pub(super) fn split_float_suffix(n: &str) -> (&str, Option<FloatSuffix>) {
     (n, None)
 }
 
-/// 在 operand 的值（指针）上再间接一层：*(op + off)。vtable 槽读取用。
+/// Add one more indirection on the operand's value (a pointer): *(op + off). Used to read vtable slots.
 pub(super) fn operand_deref_at(op: Operand, off: u32) -> Result<Operand, String> {
     let deref_steps = |mut steps: Vec<PlaceStep>| {
         steps.push(PlaceStep::Deref);
@@ -1111,7 +1129,7 @@ pub(super) fn operand_deref_at(op: Operand, off: u32) -> Result<Operand, String>
             },
             width: Width::W64,
         },
-        // 常量 vtable 地址（常量 dyn 引用）：运行期从冻结区读槽
+        // Constant vtable address (a constant dyn reference): read the slot from the frozen region at run time
         Operand::Imm { bits, .. } => Operand::Mem {
             expr: PlaceExpr {
                 base: PlaceBase::Static(ir::LinkAddr(bits.wrapping_add(off as u64))),
@@ -1127,12 +1145,12 @@ pub(super) fn operand_deref_at(op: Operand, off: u32) -> Result<Operand, String>
             width: Width::W64,
         },
         Operand::AddrOf(_) | Operand::SubImm { .. } => {
-            return Err("vtable operand 形态异常".into());
+            return Err("vtable operand has an unexpected shape".into());
         }
     })
 }
 
-/// `TyAndLayout::for_variant` 需要一个 LayoutCx；用 (tcx, typing_env) 现造一个。
+/// `TyAndLayout::for_variant` needs a LayoutCx; build one on the spot from (tcx, typing_env).
 pub(super) struct LayoutCxAt<'tcx>(pub(super) TyCtxt<'tcx>, pub(super) TypingEnv<'tcx>);
 
 impl<'tcx> rustc_abi::HasDataLayout for LayoutCxAt<'tcx> {

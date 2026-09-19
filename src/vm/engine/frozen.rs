@@ -1,11 +1,18 @@
-//! Frozen arena: true-address storage for statics / const pools / fn-ptr entries (M4.1 step 4).
+//! Frozen arena: true-address storage for statics, const pools and fn-ptr entries.
 //!
-//! Materialized in the load phase (two-pass: allocate first, then fill to break pointer cycles; see lower), then shared read-only with Module after publish—
-//! except for static mut / interior mutability: guest-writable (raw writes to real addresses, engine does not mediate).
-//! mmap RW with fixed capacity (same as GuestMemory/ByteRegion): addresses are stable for life; relocation becomes real once.
+//! Materialized during loading in two passes (allocate first, then fill, which breaks pointer cycles; see
+//! lower), then shared read-only with the Module after publish. The exception is `static mut` and interior
+//! mutability, which stay guest-writable through raw writes to real addresses that the engine does not
+//! mediate. The arena is an RW mmap with fixed capacity (like GuestMemory/ByteRegion), so addresses are
+//! stable for its whole life and relocation happens for real exactly once.
 //!
-//! M6 slice 2 (D9b/D9c, L2 cache): **fixed base**. Absolute addresses inside the frozen arena (fn entries, statics pointing at each other, bytecode-inlined consts, fn_addrs keys) are stable across processes only if the arena base is stable—same idea as JVM CDS: map to the preferred address; if occupied, fall back loudly to a dynamic base (this process still runs, just not cacheable).
-//! Snapshot = the used-prefix bytes; restore = remap at fixed base + memcpy (must happen before guest runs; snapshot semantics = the clean state right after lower; runtime inputs such as argv are not in the snapshot; see Module::finalize_entry_argv).
+//! **Fixed base.** Absolute addresses inside the arena (fn entries, statics pointing at each other,
+//! bytecode-inlined consts, `fn_addrs` keys) are stable across processes only if the arena base is stable.
+//! The arena is therefore mapped at a preferred address, the same idea as JVM CDS. If that address is
+//! occupied, it falls back loudly to a dynamic base: the process still runs, it is just not cacheable.
+//! A snapshot is the used-prefix bytes; restoring remaps at the fixed base and memcpys. Restore must happen
+//! before the guest runs, and the snapshot is the clean state right after lowering -- runtime inputs such
+//! as argv are not in it (see `Module::finalize_entry_argv`).
 
 /// Frozen arena capacity (virtually reserved; physical pages are allocated on touch).
 const FROZEN_CAP: usize = 256 << 20;
@@ -67,12 +74,12 @@ impl FrozenArena {
         Self::new_at(DELTA_FIXED_ADDR)
     }
 
-    /// For base-image build sessions only (S4).
+    /// For base-image build sessions only.
     pub fn new_base_image() -> Self {
         Self::new_at(BASE_IMAGE_FIXED_ADDR)
     }
 
-    /// For dependency-image build sessions only (S3'): placed in the k-th spline domain.
+    /// For dependency-image build sessions only; placed in the k-th spline domain.
     pub fn new_image(k: usize) -> Self {
         Self::new_at(image_addr(k))
     }
@@ -138,7 +145,8 @@ impl FrozenArena {
         self.at_fixed_base
     }
 
-    /// The fixed base of this arena's home domain (S4: loader checks that the base image really is in the base-image domain).
+    /// The fixed base of this arena's home domain (the loader checks that the base image really is in the
+    /// base-image domain).
     pub fn home(&self) -> usize {
         self.home
     }
@@ -204,10 +212,11 @@ impl std::fmt::Debug for FrozenArena {
     }
 }
 
-// L2/base serialization: an arena not at fixed base contains cross-process-unstable addresses—serialization must fail
-// (the upper layer treats this as "not cacheable this time"), never producing a snapshot with silently wrong values.
-// Since S4 it is **self-describing**: (home, bytes) tuple—deserialize restores to the domain carried in the snapshot,
-// and the domain whitelist is asserted in restore (forged snapshots cannot place the arena at arbitrary addresses).
+// Serialization: an arena not at its fixed base holds addresses that are unstable across processes, so
+// serialization must fail -- the upper layer reads that as "not cacheable this time" -- rather than emit a
+// snapshot with silently wrong values. The encoding is self-describing as a (home, bytes) tuple: deserialize
+// restores into the domain carried in the snapshot, and `restore` asserts the domain whitelist, so a forged
+// snapshot cannot place the arena at an arbitrary address.
 impl serde::Serialize for FrozenArena {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         if !self.at_fixed_base {
@@ -282,8 +291,8 @@ mod serde_bytes_shim {
     }
 }
 
-// SAFETY: read-only after publish (static mut writes go through raw addresses, not &self);
-// the arena is shared across execution threads for the Module's lifetime (C8 post-publish read-only discipline).
+// SAFETY: the arena is read-only after publish — `static mut` writes go through raw addresses, not `&self` —
+// and it is shared across execution threads for the Module's lifetime.
 unsafe impl Send for FrozenArena {}
 unsafe impl Sync for FrozenArena {}
 
@@ -299,7 +308,8 @@ mod tests {
 
     static FIXED_ADDRESS_TEST: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-    /// S3' spline-domain whitelist: base image / delta / aligned splines are valid; out-of-bounds / unaligned / stray addresses are invalid.
+    /// Spline-domain whitelist: base image, delta and aligned splines are valid; unaligned, out-of-bounds and
+    /// stray addresses are invalid.
     #[test]
     fn image_spline_home_validation() {
         assert!(is_valid_home(BASE_IMAGE_FIXED_ADDR));
@@ -368,7 +378,8 @@ mod tests {
         );
     }
 
-    /// S4 dual-domain: base-image and delta arenas coexist; cross-domain absolute pointers (delta→base direction, the common shape after a base lookup hits) are bit-stable after restore.
+    /// Dual-domain: base-image and delta arenas coexist, and cross-domain absolute pointers (delta→base, the
+    /// common shape after a base lookup hits) are bit-stable after restore.
     #[test]
     fn dual_domain_arenas_coexist_and_cross_references_survive_restore() {
         let _fixed_address = FIXED_ADDRESS_TEST.lock().unwrap();

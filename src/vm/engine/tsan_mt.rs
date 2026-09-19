@@ -1,10 +1,13 @@
-//! M4 引擎多线程 TSan 用例（spike4 义务的 M4 真身；`runtime.tsan` 载体）。
+//! Multi-threaded TSan case for the engine (carried by the `runtime.tsan` gate).
 //!
-//! 8 宿主线程共享一个 `Shared`，各自边界 attach 拿每线程 Ctx：
-//! ① 解释执行 guest 原子自增（AtomicRmw——引擎必须发真宿主原子指令，spike4 义务）；
-//! ② thunk 工厂并发 get_or_create（Mutex 缓存，同键必得同一真码）+ 跨线程调 thunk
-//!   （trampoline → attach → interp_frame 再入）。
-//! TSan 零警告 = 执行相状态三分（每线程私有 / 发布后只读 / 显式同步）成立。
+//! 8 host threads share one `Shared`; each attaches at the boundary to get its per-thread Ctx:
+//! ① interpret a guest atomic increment (AtomicRmw -- the engine must issue a real host
+//!   atomic instruction);
+//! ② hit the thunk factory concurrently via get_or_create (Mutex cache, same key always
+//!   yields the same real code) and call the thunk across threads
+//!   (trampoline -> attach -> re-enter interp_frame).
+//! Zero TSan warnings = the execution-phase three-way state split holds (per-thread private /
+//! read-only after publication / explicitly synchronized).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -15,8 +18,9 @@ use super::ir::{
 };
 use super::{interp, thunks};
 
-/// 手构 Module：fn0 `bump(addr)->旧值`（原子 +1）；fn1 `add3(x)->x+3`（thunk 目标）。
-/// 帧布局（两函数同形）：_0 ret @0、_1 参 @8。
+/// Hand-built Module: fn0 `bump(addr) -> previous value` (atomic +1); fn1
+/// `add3(x) -> x+3` (the thunk target).
+/// Frame layout (identical for both): _0 ret @0, _1 arg @8.
 fn build_module() -> Module {
     let ret_slot = Slot {
         off: 0,
@@ -94,11 +98,12 @@ pub fn run() -> bool {
                 let ctx = attach(&shared);
                 let addr = CELL.as_ptr() as u64;
                 for _ in 0..N {
-                    // M5.3a Q4 豁免：TSan harness 自用入口不经 call_guest 收拢
-                    //（TSan 通道不编 cranelift，分层派发在此无意义）
+                    // TSan-harness-only entry that bypasses call_guest: this channel never
+                    // compiles cranelift, so layered dispatch is meaningless here.
                     interp::interp_frame(ctx, 0, &[addr]);
                 }
-                // thunk 工厂并发（同键）+ 跨线程真码调用（再入 attach）
+                // Concurrent thunk factory (same key) + cross-thread call into real code
+                // (re-enters attach).
                 let code = thunks::get_or_create(&shared, 0x1000, 1, &sig);
                 let f: unsafe extern "C" fn(u64) -> u64 =
                     unsafe { std::mem::transmute(code as usize) };
@@ -114,7 +119,7 @@ pub fn run() -> bool {
     let mut codes = Vec::new();
     let mut accs = Vec::new();
     for h in handles {
-        let (c, a) = h.join().expect("tsan_mt 线程 panic");
+        let (c, a) = h.join().expect("tsan_mt thread panicked");
         codes.push(c);
         accs.push(a);
     }
@@ -127,7 +132,7 @@ pub fn run() -> bool {
         .all(|(t, &a)| a == 64 * t as u64 + 2208);
     let ok = total == THREADS * N && same_thunk && accs_ok;
     println!(
-        "tsan_mt: total={total}（期望 {}）same_thunk={same_thunk} accs_ok={accs_ok}",
+        "tsan_mt: total={total} (want {}) same_thunk={same_thunk} accs_ok={accs_ok}",
         THREADS * N
     );
     ok

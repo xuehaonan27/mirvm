@@ -1,48 +1,48 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# phonenumber 钉 =0.3.10（最新 0.3.x，实际版本串 0.3.10+9.0.33，2026-07-02 发布；
-# 版本需求里的 build metadata 被忽略，"=0.3.10" 即锁定该版本）。0.3.10 无
-# feature 定义（crate 声明 features={}），default 即最小且唯一闭包。纯 Rust
-# crate：运行期依赖 nom 7（natural/RFC3966 双语法 parser）、regex+regex-cache
-# （元数据模式）、postcard+serde（编译期把 libphonenumber XML 元数据 build.rs
-# 序列化成 database.bin，运行期 include_bytes! 后 postcard 反序列化进
-# once_cell Lazy<Database>）、fnv（确定性 hasher）。闭包约 60 crate，全纯 Rust，
-# 无 C/SIMD/asm 面；regex/nom/serde 族在本 corpus 均已验证。
+# phonenumber pinned to =0.3.10, the latest 0.3.x; its version string is actually
+# 0.3.10+9.0.33 and the build metadata is ignored, so "=0.3.10" locks that
+# release. 0.3.10 declares no features (features={}), so the default set is the
+# minimal and only closure. Pure Rust: the crate itself uses nom 7 at
+# runtime (natural/RFC3966 parsers), regex+regex-cache (metadata patterns),
+# postcard+serde (build.rs serializes the libphonenumber XML metadata into
+# database.bin, read back by include_bytes! into a once_cell Lazy<Database>),
+# fnv (a deterministic hasher). Roughly 60 crates, all pure Rust, no C/SIMD/asm.
 phonenumber = "=0.3.10"
 ---
-// rust-phonenumber 0.3.10（libphonenumber 移植，元数据快照 9.0.33）三维差分。
-// 测试面：
-//  ① 跨 6 地区（US/GB/DE/FR/CN/JP）号码 parse → country 推断 → is_valid →
-//     number_type → format 三形态（E164/International/National）逐条打印。
-//     US/GB/FR 输入取 crate 自带测试锚定串，DE 取官方 doc 例（national 形态
-//     "301/23456" 配地区 hint，走 nom natural parser 的装饰符/斜杠容忍路径），
-//     CN/JP 输入由运行期元数据 fixed_line 示例构造（"+{cc} {example}"——示例
-//     号码按定义合法，且 0.3.10 钉死后内容固定）；两例另走无 hint 的国家码
-//     推断路径。crate 测试锚定的输出值用 assert_eq! 硬断言（US (650) 253-0000
-//     三形态、GB/FR 锚、DE national "030 123456"），其余靠三维对拍。
-//  ② 错误类型打印：3 个不可分析输入分别命中 thiserror Debug/Display——
-//     ""→NoNumber("not a number")、"+999 12345"→InvalidCountryCode
-//     ("invalid country code")、"+1"+18 位→TooLong("the number is too long"，
-//     MAX_LENGTH_FOR_NSN=17)。
-//  ③ 元数据查询：6 个国家码（1/44/49/33/86/81）→ region 列表（BTree 序）/
-//     主区域 id/有示例号码的类型计数（17 个 Type 槽位逐一查 example()）；
-//     附全库聚合：条目数/含通用示例区域数/全库示例总数（纯计数，与 FNV 哈希
-//     表迭代序无关）。
-// 确定性：全内嵌常量 + 钉死版本的内置元数据快照；无时间/随机/环境/地址打印；
-// 输出 ~25 行全 ASCII。stderr 真空。
-// FRONTIER 记录：无（预期直通）。
+// rust-phonenumber 0.3.10 (libphonenumber port, metadata snapshot 9.0.33)
+// differential, compared byte-for-byte with native.
+// (1) Six regions (US/GB/DE/FR/CN/JP): each number is parsed, the country is
+//     inferred, then is_valid, number_type and the three format modes
+//     (E164/International/National) are printed per case. The US/GB/FR inputs
+//     are the crate's own test anchors; DE is the official doc example "301/23456"
+//     with a region hint, which goes through the nom natural parser's tolerance
+//     for separators and slashes; the CN/JP inputs are built from the runtime
+//     fixed_line examples ("+{cc} {example}", legal by definition and fixed
+//     because 0.3.10 is pinned) and additionally exercise country-code inference
+//     without a hint. Values anchored by the crate's tests are asserted with
+//     assert_eq! (US (650) 253-0000 in all three modes, the GB/FR anchors and the
+//     DE national "030 123456"); the rest are compared with native.
+// (2) Error types: three unparsable inputs hit distinct thiserror Debug/Display
+//     values -- "" -> NoNumber("not a number"), "+999 12345" ->
+//     InvalidCountryCode("invalid country code"), and "+1" plus 18 digits ->
+//     TooLong("the number is too long", with MAX_LENGTH_FOR_NSN=17).
+// (3) Metadata queries: six country codes (1/44/49/33/86/81) map to a sorted
+//     region list, the primary region id and a count of types that have an
+//     example number (all 17 Type slots probed individually), plus whole-database
+//     aggregates (entry count, regions with a general example, total examples).
+// Everything is embedded constants plus the pinned metadata snapshot: no time,
+// randomness, environment or addresses are printed, the output is about 25 ASCII
+// lines and stderr stays empty. No known frontier issues.
 //
-// 三维复跑：
-//   A: target/release/mirvm run corpus/c_phonenumber.rs
-//   B: sd=$(grep -rl 'name = "c_phonenumber"' ~/.cache/mirvm/scripts/*/Cargo.toml -m1 | xargs dirname)
-//      && cd "$sd" && RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \
-//         "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
-//   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_phonenumber.rs
+// All of the above is what the differential oracle covers; the fixture is fully
+// deterministic.
+//
 use phonenumber::metadata::{Database, DATABASE};
 use phonenumber::{country, Mode, Type};
 
-/// 17 个 Type 槽位（Descriptors::get 的完整分支集，含 Unknown→general）。
+/// The 17 Type slots (the full Descriptors::get branch set, Unknown -> general).
 const TYPES: [Type; 17] = [
     Type::FixedLine,
     Type::Mobile,
@@ -63,7 +63,7 @@ const TYPES: [Type; 17] = [
     Type::Unknown,
 ];
 
-/// 有示例号码的类型槽位数。
+/// Number of type slots that have an example number.
 fn example_type_count(db: &Database, region_id: &str) -> usize {
     let meta = db.by_id(region_id).unwrap();
     TYPES
@@ -75,8 +75,8 @@ fn example_type_count(db: &Database, region_id: &str) -> usize {
 fn main() {
     let db: &Database = &DATABASE;
 
-    // ---- ① 跨 6 地区 parse/validate/format ----
-    // (label, hint, input)；CN/JP 输入由元数据示例构造，后补。
+    // ---- (1) parse/validate/format across six regions ----
+    // (label, hint, input); the CN/JP inputs are appended from metadata examples.
     let mut cases: Vec<(&'static str, Option<country::Id>, String)> = vec![
         ("US", Some(country::US), "+1 (650) 253-0000".to_string()),
         ("GB", Some(country::GB), "+44 20 7031 3000".to_string()),
@@ -113,7 +113,7 @@ fn main() {
         );
         println!("  e164={e164} intl={intl:?} natl={natl:?}");
 
-        // crate 自带测试/doc 锚定的期望值（与版本无关的 API 行为）。
+        // Expected values anchored by the crate's tests/doc (version-independent API behavior).
         match *label {
             "US" => {
                 assert_eq!(e164, "+16502530000");
@@ -139,7 +139,7 @@ fn main() {
         }
     }
 
-    // ---- ② 错误类型打印（3 个 distinct 变体）----
+    // ---- (2) error types (three distinct variants) ----
     for input in ["", "+999 12345", "+1 650253000012345678"] {
         match phonenumber::parse(None, input) {
             Ok(n) => println!("err-case {input:?}: unexpected ok {n}"),
@@ -147,7 +147,7 @@ fn main() {
         }
     }
 
-    // ---- ③ 元数据查询：国家码 → 区域/主区域/示例类型计数 ----
+    // ---- (3) metadata queries: country code -> regions/main region/example counts ----
     for cc in [1u16, 44, 49, 33, 86, 81] {
         let mut regions: Vec<&str> = db.region(&cc).unwrap_or_default();
         regions.sort();
@@ -160,7 +160,7 @@ fn main() {
         );
     }
 
-    // 全库聚合（纯计数，与哈希表迭代序无关）。
+    // Whole-database aggregates (counts only, independent of hash order).
     let entries = db.iter().count();
     let general_examples = db
         .iter()

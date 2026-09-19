@@ -1,38 +1,38 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# markdown-it 0.6.1（最新 0.x，2024-07 发布，rust 版 markdown-it）。default
-# features = ["linkify", "syntect"]；syntect 拖 ~60 crate 重资产（plist/flate2/
-# fancy-regex/语法+主题静态资产）且只服务代码块高亮这一非测试面 →
-# default-features=false 仅留 linkify（裸 URL/www/email 自动链接的扩展面）。
-# 闭包 ≈24 crate（regex/once_cell/stacker+psm/entities/mdurl 等）。
+# markdown-it 0.6.1, the newest 0.x release (published 2024-07), is the Rust port of
+# markdown-it. Its default features are ["linkify", "syntect"]; syntect pulls in ~60
+# crates of heavy assets (plist/flate2/fancy-regex plus static syntax and theme data)
+# and only serves code-block highlighting, which is not under test, so this fixture
+# disables default features and keeps linkify (bare URL/www/email autolinking).
 markdown-it = { version = "=0.6.1", default-features = false, features = ["linkify"] }
 ---
-// markdown-it 0.6.1（CommonMark 兼容，插件全开）三维差分：5 个 CommonMark spec
-// 选段 + 4 个扩展片段，逐段 parse().render()，全部 HTML 逐行打印（段头带
-// FNV-1a 与行数锚点。输出 57 行），结尾 4 条硬断言：总行数 + 全连接 FNV
-// （锚定 9 段全部字节）+ typographer/linkify 两段精确 HTML（UTF-8 按 \u{} 写）。
+// markdown-it 0.6.1 (CommonMark-compatible, all plugins enabled), three-way
+// differential: five CommonMark spec fragments plus four extension fragments, each run
+// through parse().render(), printing every HTML line with a per-fragment FNV-1a and
+// line count, then four hard assertions: total line count, the concatenated FNV (pins
+// the bytes of all nine fragments), and the exact HTML of the typographer and linkify
+// fragments (UTF-8 written as \u{}).
 //
-// 插件面（本 crate 全部插件；无 footnote/tasklists 插件——那是 markdown-it JS
-// 生态的独立扩展，Rust 版未内置，用 in-crate 扩展全集替代）：
-//   cmark（CommonMark 全集）+ extra（strikethrough/tables/linkify[feature]/
-//   beautify_links/smartquotes/typographer）+ extra::heading_anchors（slug id）+
-//   html（原始 html inline/block 透传）+ sourcepos（data-sourcepos 源码映射
-//   属性，行：列定位天然嵌入全部块级标签 → 位置敏感覆盖）。
-// 测试面 9 段：cm1 ATX 标题+em/strong/code 行内；cm2 带 info 的围栏代码块+
-// 实体转义；cm3 有序列表嵌套无序子表（tight）；cm4 引用块+链接引用定义；
-// cm5 setext 标题+硬换行（行尾两空格）+水平线；ext1 GFM 表格（左右对齐列）；
-// ext2 删除线+smartquotes+typographer（--/.../(c)替换）；ext3 linkify 裸 https
-// URL + beautify_links 链接文本美化（www 裸输入在 Rust 版默认不链接化，作为
-// 不命中面保留）；ext4 heading_anchors 标题 slug id + html 原始块透传。
-//
-// 确定性：输入全为内嵌字面量；输出为纯渲染文本+计数+FNV，无时间/随机/哈希序/
-// 路径/地址。引擎触点备注：markdown-it 每次 parse/render 经 stacker::maybe_grow
-// 读 psm 汇编的 rust_psm_stack_pointer（宿主 SP extern thunk）+ 首访 TLS 时
-// pthread_getattr_np 测栈界——浅输入下 remaining≥64KB 恒成立、走直调分支不切换
-// 栈，三维同分支同输出；非 ASCII 引号/替换字符按 UTF-8 字面量打印。
-//
-// 三维复跑命令（仓库根）：
+// Plugin surface (every plugin this crate ships; there is no footnote or tasklists
+// plugin, as those are separate JS-ecosystem extensions not built into the Rust port):
+//   cmark + extra (strikethrough/tables/linkify[feature]/beautify_links/smartquotes/
+//   typographer) + extra::heading_anchors (slug ids) + html (raw inline/block
+//   passthrough) + sourcepos (data-sourcepos attributes on every block tag, so this is
+//   position-sensitive coverage).
+// Nine fragments: cm1 ATX heading and inline em/strong/code; cm2 fenced code block; cm3
+// ordered list nesting a tight unordered sublist; cm4 blockquote and link reference; cm5
+// setext heading, hard break and horizontal rule; ext1 GFM table; ext2 strikethrough and
+// smartquotes/typographer (--/.../(c) replacements); ext3 linkify of a bare https URL
+// plus beautify_links (a bare www input stays unlinked in the Rust port); ext4
+// heading_anchors slug ids and raw html passthrough.
+// Deterministic: embedded literal inputs only; output is rendered text plus counts and
+// FNV, with no time, randomness, hash order, paths or addresses. stacker::maybe_grow reads
+// the psm rust_psm_stack_pointer assembly symbol (host-SP extern thunk) and measures the
+// stack bound via pthread_getattr_np on the first TLS access; shallow input keeps
+// remaining >= 64KB, so the direct-call branch runs and the stack is never switched.
+// Three-way rerun commands (from the repository root):
 //   A: target/release/mirvm run corpus/c_markdown_it.rs
 //   B: cd $(grep -l 'name = "c_markdown_it"' ~/.cache/mirvm/scripts/*/Cargo.toml \
 //        | head -1 | xargs dirname) && \
@@ -40,7 +40,7 @@ markdown-it = { version = "=0.6.1", default-features = false, features = ["linki
 //      "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
 //   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_markdown_it.rs
 //
-// FRONTIER：无（三维实测全绿，57 行输出 md5 三相一致）。
+// Non-ASCII quotes and replacement characters print as UTF-8 literals.
 use markdown_it::MarkdownIt;
 
 fn fnv1a(b: &[u8]) -> u64 {
@@ -52,7 +52,7 @@ fn fnv1a(b: &[u8]) -> u64 {
     h
 }
 
-/// 5 个 CommonMark spec 选段 + 4 个扩展片段：(标签, markdown 源)。
+/// Five CommonMark spec fragments plus four extension fragments: (tag, markdown source).
 const CASES: [(&str, &str); 9] = [
     (
         "cm1-heading-inline",
@@ -93,8 +93,8 @@ const CASES: [(&str, &str); 9] = [
 ];
 
 fn main() {
-    // 插件全开：cmark + extra（strikethrough/beautify_links/linkify/tables/
-    // typographer/smartquotes）+ heading_anchors + html + sourcepos。
+    // All plugins enabled: cmark + extra (strikethrough/beautify_links/linkify/tables/
+    // typographer/smartquotes) + heading_anchors + html + sourcepos.
     let md = &mut MarkdownIt::new();
     markdown_it::plugins::cmark::add(md);
     markdown_it::plugins::extra::add(md);
@@ -129,7 +129,7 @@ fn main() {
         fnv1a(concat.as_bytes())
     );
 
-    // 硬断言（数值锚定全部 9 段字节；两条精确 HTML 覆盖 typographer/linkify）。
+    // Hard assertions: the numbers pin all nine fragments' bytes; two exact HTML strings cover typographer/linkify.
     assert_eq!(total_lines, 47);
     assert_eq!(fnv1a(concat.as_bytes()), 0xd7d07124f9b0b7de);
     assert_eq!(

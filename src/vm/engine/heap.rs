@@ -1,9 +1,10 @@
-//! 托管 Rust Heap（D3 v1）：mimalloc 后端 + 薄真地址包装。
+//! Managed Rust heap: mimalloc backend behind a thin real-address wrapper.
 //!
-//! `__rust_alloc` 系引擎原语的实现（lower 在 std 声明的 extern 边界改写为
-//! CallBuiltin，libc::malloc 直通不动——内存三分，DESIGN §4）。真地址直出：
-//! guest 指针 = mimalloc 返回的宿主地址，FFI 零编组。
-//! hand-rolled TLAB 后置（mimalloc 本身已 per-thread heap，M4.4 真线程直接受益）。
+//! Implements the `__rust_alloc` family of engine primitives; lowering rewrites the
+//! std-declared extern boundary into a CallBuiltin, while `libc::malloc` passes straight
+//! through. Real addresses are handed out directly: a guest pointer *is* the host address
+//! mimalloc returned, so FFI needs zero marshalling.
+//! A hand-rolled TLAB is deferred -- mimalloc already has a per-thread heap.
 
 use libmimalloc_sys as mi;
 

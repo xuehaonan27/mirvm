@@ -3,32 +3,32 @@
 [dependencies]
 statrs = { version = "=0.18.0", default-features = false }
 ---
-// statrs 0.18（统计浮点重）差分：描述统计 + 9 个分布族 pdf/pmf/cdf/sf/
-// inverse_cdf 位型锚定 + 参数错误路径 + 假设检验 p 值 + 特殊函数。
-// default-features=false 去掉默认的 nalgebra/rand：rand 采样非确定、
-// nalgebra 只支撑多元分布（不在覆盖清单），描述统计/单变量分布/特殊
-// 函数都不依赖它们。钉 =0.18.0 锁版本。
+// statrs 0.18 (statistics-heavy float) differential: descriptive statistics + 9 distribution
+// families with pdf/pmf/cdf/sf/inverse_cdf bit-pattern anchors + parameter error paths +
+// hypothesis-test p-values + special functions. default-features=false drops the default
+// nalgebra/rand: rand sampling is nondeterministic and nalgebra serves only multivariate
+// distributions (not covered here); none of it is needed. statrs is pinned to =0.18.0.
 //
-// 覆盖面：
-// ① 描述统计：Statistics trait（min/max/abs_min/abs_max/mean/variance/
-//    std_dev/population_*/geometric_mean/harmonic_mean/quadratic_mean/
-//    covariance）+ Data/OrderStatistics（median/quartile/percentile/
-//    quantile/order_statistic/ranks 四策略）+ 越界 → f64::NAN 边界。
-//    注：statrs 0.18 已删数据级 skewness/kurtosis（0.16 的 Data::skewness
-//    移除，只剩分布级），此处按定义手算样本中心矩 g1/超额峰度。
-// ② 分布族：Normal/Gamma/Beta/StudentsT/ChiSquared/Exp/Uniform（连续）
-//    + Binomial/Poisson（离散，u64 支撑），固定点 pdf/ln_pdf/pmf/cdf/sf/
-//    inverse_cdf 全 to_bits；分布矩（mean/variance/std_dev/entropy/
-//    skewness Option）+ Mode/Median/Min/Max trait。
-// ③ 参数错误路径：每个分布至少一条（负 sigma/零 rate/越界概率/NaN 参数/
-//    max<min 等），打印 Display 静态串。
-// ④ 检验：z 检验、t 检验（手工统计量 + 分布 sf 求双侧 p）、卡方拟合
-//    优度（Poisson 期望 + ChiSquared sf）、crate 自带 fisher 精确检验
-//    三种 alternative + odds ratio + 零行边界。
-// ⑤ 特殊函数：gamma/beta/erf/factorial 族 + checked_beta 错误路径。
+// Coverage:
+// ① descriptive statistics: the Statistics trait (min/max/abs_min/abs_max/mean/variance/
+//    std_dev/population_*/geometric_mean/harmonic_mean/quadratic_mean/covariance) +
+//    Data/OrderStatistics (median/quartile/percentile/quantile/order_statistic/ranks, four
+//    tie-break strategies) + out-of-range -> f64::NAN boundaries. Note: statrs 0.18 removed
+//    data-level skewness/kurtosis (0.16's Data::skewness is gone, only distribution-level
+//    remains), so sample central moment g1 and excess kurtosis are computed by hand here.
+// ② distribution families: Normal/Gamma/Beta/StudentsT/ChiSquared/Exp/Uniform (continuous)
+//    + Binomial/Poisson (discrete, u64 support), fixed points for pdf/ln_pdf/pmf/cdf/sf/
+//    inverse_cdf all as to_bits; distribution moments (mean/variance/std_dev/entropy/
+//    skewness Option) + the Mode/Median/Min/Max traits.
+// ③ parameter error paths: at least one per distribution (negative sigma/zero rate/out-of-range
+//    probability/NaN parameter/max<min, etc.), printing the static Display string.
+// ④ tests: z-test, t-test (hand-computed statistic + distribution sf for a two-sided p),
+//    chi-squared goodness of fit (Poisson expectation + ChiSquared sf), and the crate's own
+//    fisher exact test with three alternatives + odds ratio + zero-row boundary.
+// ⑤ special functions: the gamma/beta/erf/factorial families + the checked_beta error path.
 //
-// 确定性：全固定数据/固定求值点；无随机/时间/线程/哈希序；浮点一律
-// to_bits 锁位型。
+// Determinism: fixed data and evaluation points; no randomness/time/threads/hash order;
+// every float is pinned by to_bits.
 use statrs::distribution::{
     Beta, Binomial, ChiSquared, Continuous, ContinuousCDF, Discrete, DiscreteCDF, Exp, Gamma,
     Normal, Poisson, StudentsT, Uniform,
@@ -39,12 +39,12 @@ use statrs::statistics::{
 };
 use statrs::stats_tests::{self, Alternative};
 
-/// f64 → 位型 hex（确定性锚点）。
+/// f64 -> bit-pattern hex (a deterministic anchor).
 fn b(x: f64) -> String {
     format!("{:016x}", x.to_bits())
 }
 
-/// Option<f64> → 位型 hex 或 None。
+/// Option<f64> -> bit-pattern hex or None.
 fn ob(x: Option<f64>) -> String {
     match x {
         Some(v) => b(v),
@@ -52,7 +52,7 @@ fn ob(x: Option<f64>) -> String {
     }
 }
 
-/// Option<u64> → 十进制或 None（离散分布 mode）。
+/// Option<u64> -> decimal or None (the discrete distribution mode).
 fn ou(x: Option<u64>) -> String {
     match x {
         Some(v) => v.to_string(),
@@ -60,7 +60,7 @@ fn ou(x: Option<u64>) -> String {
     }
 }
 
-/// 分布矩五件套（mean/variance/std_dev/entropy/skewness）。
+/// The five distribution moments (mean/variance/std_dev/entropy/skewness).
 fn moments<D: Distribution<f64>>(label: &str, d: &D) {
     println!(
         "{label} moments mean={} var={} std={} entropy={} skew={}",
@@ -72,7 +72,7 @@ fn moments<D: Distribution<f64>>(label: &str, d: &D) {
     );
 }
 
-/// 连续分布固定点评估：pdf/ln_pdf/cdf/sf × xs，inverse_cdf × ps。
+/// Continuous distribution fixed-point evaluation: pdf/ln_pdf/cdf/sf over xs, inverse_cdf over ps.
 fn probe_cont<D>(label: &str, d: &D, xs: &[f64], ps: &[f64])
 where
     D: Continuous<f64, f64> + ContinuousCDF<f64, f64>,
@@ -91,7 +91,7 @@ where
     }
 }
 
-/// 离散分布固定点评估（u64 支撑）：pmf/ln_pmf/cdf/sf × ks，inverse_cdf × ps。
+/// Discrete distribution fixed-point evaluation (u64 support): pmf/ln_pmf/cdf/sf over ks, inverse_cdf over ps.
 fn probe_disc<D>(label: &str, d: &D, ks: &[u64], ps: &[f64])
 where
     D: Discrete<u64, f64> + DiscreteCDF<u64, f64>,
@@ -111,7 +111,7 @@ where
 }
 
 fn main() {
-    // ===== ① 描述统计 =====
+    // ===== ① descriptive statistics =====
     let d1: [f64; 16] = [
         4.5, -2.25, 7.0, 0.5, 3.75, -1.0, 9.5, 2.25, 5.0, -3.5, 6.25, 1.5, 8.0, -0.75, 4.0, 2.75,
     ];
@@ -151,7 +151,7 @@ fn main() {
         b(d1.population_covariance(d2))
     );
 
-    // statrs 0.18 已删数据级 skewness/kurtosis → 按定义手算样本中心矩
+    // statrs 0.18 removed data-level skewness/kurtosis -> compute the sample central moments by hand
     let n1 = d1.len() as f64;
     let m = d1.mean();
     let (mut c2, mut c3, mut c4) = (0.0f64, 0.0f64, 0.0f64);
@@ -170,7 +170,7 @@ fn main() {
         b(c4 / (c2 * c2) - 3.0)
     );
 
-    // OrderStatistics（Data 包装，原地选择；median 与 Median trait 重名 → UFCS）
+    // OrderStatistics (Data wrapper, in-place selection; median clashes with the Median trait -> UFCS)
     let mut od = Data::new(d1);
     println!(
         "ord median={} q1={} q3={} iqr={}",
@@ -190,7 +190,7 @@ fn main() {
         b(od.order_statistic(1)),
         b(od.order_statistic(16))
     );
-    // 边界：越界 → statrs 显式返回 f64::NAN 常量（非运算产生的 NaN）
+    // Boundary: out of range -> statrs explicitly returns the f64::NAN constant (not a computed NaN)
     println!(
         "ord edge os(0)={} os(17)={} pct(105)={} quantile(-0.5)={}",
         b(od.order_statistic(0)),
@@ -213,7 +213,7 @@ fn main() {
         println!("ord ranks {tb:?} = [{}]", rs.join(" "));
     }
 
-    // ===== ② 分布族 =====
+    // ===== ② distribution families =====
     let nrm = Normal::new(1.0, 2.0).unwrap();
     moments("normal", &nrm);
     probe_cont("normal", &nrm, &[-3.0, 1.0, 4.5], &[0.025, 0.5, 0.975]);
@@ -265,7 +265,7 @@ fn main() {
     probe_disc("poisson", &po, &[0, 4, 9], &[0.05, 0.5, 0.95]);
     println!("poisson median={} mode={}", b(po.median()), ou(po.mode()));
 
-    // ===== ③ 参数错误路径（Display 静态串） =====
+    // ===== ③ parameter error paths (static Display strings) =====
     println!("err normal(nan_mean) = {}", Normal::new(f64::NAN, 1.0).unwrap_err());
     println!("err normal(neg_sigma) = {}", Normal::new(0.0, -1.0).unwrap_err());
     println!("err normal(zero_sigma) = {}", Normal::new(0.0, 0.0).unwrap_err());
@@ -298,15 +298,15 @@ fn main() {
         Uniform::new(0.0, f64::INFINITY).unwrap_err()
     );
 
-    // ===== ④ 假设检验 =====
-    // z 检验：手工统计量 + 标准正态 sf（双侧 p）
+    // ===== ④ hypothesis tests =====
+    // z-test: hand-computed statistic + standard normal sf (two-sided p)
     let stdn = Normal::new(0.0, 1.0).unwrap();
     let mu0 = 2.0;
     let sigma = 3.5;
     let z = (d1.mean() - mu0) / (sigma / n1.sqrt());
     println!("ztest z={} p_two_sided={}", b(z), b(2.0 * stdn.sf(z.abs())));
 
-    // t 检验：样本 std_dev + StudentsT(n-1) sf（双侧 p）
+    // t-test: sample std_dev + StudentsT(n-1) sf (two-sided p)
     let t = (d1.mean() - mu0) / (d1.std_dev() / n1.sqrt());
     let tdist = StudentsT::new(0.0, 1.0, n1 - 1.0).unwrap();
     println!(
@@ -316,8 +316,8 @@ fn main() {
         b(2.0 * tdist.sf(t.abs()))
     );
 
-    // 卡方拟合优度：观测频数 vs Poisson(2.5) 期望（末桶并尾 P(K>=7)），
-    // df = bins-1，p = ChiSquared(df).sf(χ²)
+    // Chi-squared goodness of fit: observed counts vs Poisson(2.5) expectations (the last bucket
+    // pools the tail P(K>=7)), df = bins-1, p = ChiSquared(df).sf(chi2)
     let observed = [6u64, 10, 9, 7, 4, 2, 1, 1];
     let total: u64 = observed.iter().sum();
     let poi2 = Poisson::new(2.5).unwrap();
@@ -340,7 +340,7 @@ fn main() {
         b(gof.sf(chi2))
     );
 
-    // crate 自带 fisher 精确检验（Hypergeometric 内核）+ odds ratio + 零行边界
+    // The crate's own fisher exact test (Hypergeometric kernel) + odds ratio + zero-row boundary
     let table = [3u64, 5, 4, 50];
     for alt in [Alternative::Less, Alternative::Greater, Alternative::TwoSided] {
         let p = stats_tests::fishers_exact(&table, alt).unwrap();
@@ -353,7 +353,7 @@ fn main() {
         stats_tests::fishers_exact_with_odds_ratio(&[0, 5, 0, 50], Alternative::TwoSided).unwrap();
     println!("fisher zero_row odds={} p={}", b(z_odds), b(z_p));
 
-    // ===== ⑤ 特殊函数 =====
+    // ===== ⑤ special functions =====
     println!(
         "fn gamma(5.5)={} ln_gamma(10.25)={} digamma(2.5)={}",
         b(gamma::gamma(5.5)),

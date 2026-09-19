@@ -3,9 +3,8 @@
 //! - `mirvm <rustc> <args...>` (under MIRVM_CARGO_SESSION): cargo's RUSTC_WRAPPER
 //! - `mirvm runner <fake-binary> <args...>`: cargo's target runner, the real interpreter entry
 //!
-//! Engine = M4 bytecode VM (loading phase lower + execution phase engine). tier-0 (rustc InterpCx)
-//! was removed on 2026-07-09 — code is in git history (before tag prefix feat: M4.3); the
-//! differential oracle has always been native compile-and-run (`differential.programs`).
+//! Engine = M4 bytecode VM (loading phase lower + execution phase engine). The differential
+//! oracle is native compile-and-run (`differential.programs`).
 
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, exit};
@@ -88,7 +87,7 @@ DEV:
 ";
 
 pub fn main() -> ExitCode {
-    // Troubleshooting knob (M5.4b): print fault RIP on SIGSEGV to locate JIT code crash site.
+    // Troubleshooting knob: print fault RIP on SIGSEGV to locate JIT code crash site.
     if std::env::var_os("MIRVM_SEGV_DUMP").is_some() {
         crate::os::signal::install_segv_dump();
     }
@@ -119,12 +118,12 @@ pub fn main() -> ExitCode {
     if first == "runner" {
         return runner_main(argv);
     }
-    // S4 base-image build subprocess (must precede MIRVM_CARGO_SESSION dispatch: builds triggered
+    // Base-image build subprocess (must precede MIRVM_CARGO_SESSION dispatch: builds triggered
     // inside runner carry the cargo session env and must not be misrouted into phase_wrapper)
     if first == "__build-base-image" {
         return crate::baseimage::build_main(argv);
     }
-    // D15: cargoless dep compilation subprocess (landing point for cargoless::driver scheduling;
+    // Cargoless dep compilation subprocess (landing point for cargoless::driver scheduling;
     // also must precede MIRVM_CARGO_SESSION dispatch)
     if first == "__cless-dep" {
         return run_cless_dep(argv.collect());
@@ -313,10 +312,10 @@ fn test_main(argv: impl Iterator<Item = String>) -> ExitCode {
 
 // ===== user entry points =====
 
-/// `mirvm pack <target> [-o out.mirvm]` (mode B slice 2, designs/modeb-mirvmar-design.md):
-/// cargo project (directory/Cargo.toml), frontmatter script, or plain single file -> .mirvm package.
-/// Projects/frontmatter default to cargoless; `MIRVM_DEPS=cargo` is passed into runner via MIRVM_PACK.
-/// Both paths force the full cold route so the package is self-contained.
+/// `mirvm pack <target> [-o out.mirvm]`: cargo project (directory/Cargo.toml), frontmatter
+/// script, or plain single file -> .mirvm package. Projects/frontmatter default to cargoless;
+/// `MIRVM_DEPS=cargo` is passed into runner via MIRVM_PACK. Both paths force the full cold
+/// route so the package is self-contained.
 fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
     let mut input = None;
     let mut out: Option<std::path::PathBuf> = None;
@@ -469,9 +468,9 @@ fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
     }
 }
 
-/// `mirvm deps audit <target...>` (D15 P1 audit tool): target = project directory (containing
-/// Cargo.toml) or frontmatter script; resolve per target and reconcile against the reference lock,
-/// exiting non-zero if any target fails to resolve or the reconciliation mismatches.
+/// `mirvm deps audit <target...>`: target = project directory (containing Cargo.toml) or
+/// frontmatter script; resolve per target and reconcile against the reference lock, exiting
+/// non-zero if any target fails to resolve or the reconciliation mismatches.
 fn deps_main(args: impl Iterator<Item = String>) -> ExitCode {
     let mut sub = None;
     let mut targets: Vec<String> = Vec::new();
@@ -628,7 +627,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
             }
             "--vm-call" => vm_call = Some(next("--vm-call")),
             "--vm-stats" => vm_stats = true,
-            // D15 P4 cut 6b: cargo run --bin semantics (project form only; no meaning for script/single-file)
+            // cargo run --bin semantics (project form only; no meaning for script/single-file)
             "--bin" => bin_sel = Some(next("--bin")),
             "--ignore-rust-version" => ignore_rust_version = true,
             "--stack-size" => {
@@ -668,9 +667,9 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     };
     let input_path = PathBuf::from(&input);
 
-    // D15 P4 default flip: default = self zero-cargo own scheduling (cargoless::driver);
-    // =cargo explicitly uses the long-term cargo three-phase compat track (user fallback + behavioral differential);
-    // both tracks are complete, other values are rejected loudly
+    // Default = self zero-cargo own scheduling (cargoless::driver); =cargo uses the long-term
+    // cargo three-phase compat track (user fallback + behavioral differential); any other value
+    // is rejected loudly
     let deps_self = match std::env::var("MIRVM_DEPS").as_deref() {
         Err(_) | Ok("self") => true,
         Ok("cargo") => false,
@@ -719,7 +718,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         exit(2);
     }
 
-    // mode B slice 2: sniff .mirvm package (before text read — package is binary)
+    // Sniff for a .mirvm package (before the text read -- a package is binary)
     if crate::pack::is_package(&input_path) {
         let module = match crate::pack::load_package(&input_path)
             .and_then(|package| package.instantiate())
@@ -760,7 +759,7 @@ fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         cargo_shim::phase_cargo(&dir, &program_args, None, ignore_rust_version);
     }
 
-    // Form 3: plain single file, zero-cargo fast path (same as M1)
+    // Form 3: plain single file, zero-cargo fast path
     let sysroot = sysroot
         .or_else(|| std::env::var("MIRVM_SYSROOT").ok())
         .unwrap_or_else(|| match crate::sysroot::ensure_sysroot() {
@@ -826,11 +825,12 @@ fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
     // execution the runner's initial runtime environment is fully restored, so this layer must not
     // leak into the guest.
     install_recorded_build_environment(env);
-    // 构建期环境优先（env!() 展开、CARGO_* 等在编译会话里要可见）。
-    // CARGO_MAKEFLAGS 指向已消亡的 jobserver，透传会招警告（cargo-miri 同款处理）。
-    // mode B 片②：pack 会话（mirvm pack 经 phase_cargo 以 MIRVM_PACK 传入
-    // 输出路径）——强制全量冷路径保包自包含（空 image 栈 + 旁路 L2/deps-image
-    // 由 mirvm pack 以 MIRVM_NO_BASE_IMAGE/MIRVM_NO_DEPS_IMAGE 同进 env）
+    // The build-time environment takes precedence (env!() expansion and CARGO_* must be visible
+    // in the compiler session). CARGO_MAKEFLAGS points at a dead jobserver; passing it through
+    // would only earn warnings (same handling as cargo-miri).
+    // Pack session (mirvm pack passes the output path via MIRVM_PACK through phase_cargo): force
+    // the full cold route so the package stays self-contained -- empty image stack plus L2/
+    // deps-image bypass. mirvm pack sets both via MIRVM_NO_BASE_IMAGE and MIRVM_NO_DEPS_IMAGE.
     if let Ok(out) = std::env::var("MIRVM_PACK") {
         return pack_driver(rustc_args, program_argv, std::path::PathBuf::from(out));
     }
@@ -894,7 +894,7 @@ impl GuestProcessState {
             && let Err(error) = std::env::set_current_dir(cwd)
         {
             return Err(format!(
-                "mirvm: 无法进入 Cargo 调用者目录 {}: {error}",
+                "mirvm: cannot enter the Cargo caller directory {}: {error}",
                 cwd.display()
             ));
         }
@@ -920,8 +920,9 @@ fn install_recorded_build_environment(env: Vec<(String, String)>) {
     }
 }
 
-/// mode B 片②：pack 驱动——run_driver 冷半的同构（空 image 栈、无 L2 查询），
-/// 岔口在 callbacks.pack_out：after_analysis 末尾落 .mirvm 包代替执行。
+/// Pack driver: the cold half of `run_driver` with an empty image stack and no L2 lookup. The
+/// fork is `callbacks.pack_out`: at the end of `after_analysis` it writes the `.mirvm` package
+/// instead of executing.
 pub(crate) fn pack_driver(
     rustc_args: Vec<String>,
     program_argv: Vec<String>,
@@ -963,22 +964,24 @@ pub(crate) fn pack_driver(
     ExitCode::SUCCESS
 }
 
-// ===== cargo wrapper：target 依赖的 in-process 编译（S2 / D9d）=====
+// ===== cargo wrapper: in-process compilation of target dependencies =====
 
-/// 依赖编译回调：分析后显式跑 mono 收集再放行。native 构建在 codegen 期做
-/// post-mono const-eval（собирает时求值 required consts），`-Zno-codegen` 跳过 codegen
-/// 会连这层构建期错误一起漏掉（依赖里死代码的 const 恐慌等，native cargo build 会红）
-/// ——cargo-miri 的 dummy backend 同款显式补齐，保住"依赖构建错误面与 native 一致"。
+/// Dependency compilation callback: run mono collection explicitly after analysis, then let the
+/// build continue. A native build performs post-mono const-eval during codegen (required consts
+/// are evaluated when mono items are collected); `-Zno-codegen` skips codegen and would swallow
+/// those build-time errors too (const panics in dead dependency code and the like, which a native
+/// cargo build reports). cargo-miri's dummy backend fills in the same step explicitly, keeping
+/// the dependency build error surface identical to native.
 ///
-/// C4（decision-history §7.22）：同一次 mono 收集顺带抽取 dep crate 的
-/// global_asm/naked 文本落 rlib 旁挂清单（`<rlib 主名>.mirasm.s`）——mirvm
-/// 就是 dep crate 的编译器（after_analysis 的 HIR 在手），无需从 rmeta/rlib
-/// 抠模板；汇编动作留 bin 加载相同一 assemble 通道（缓存自愈随之免费）。
-/// 无 asm 的 crate（99%）纯 mono 扫描，边际零成本。
+/// The same mono collection also extracts the dep crate's global_asm/naked text into a side file
+/// next to the rlib (`<rlib stem>.mirasm.s`): mirvm is the dep crate's compiler (it holds the HIR
+/// in `after_analysis`), so no template has to be recovered from rmeta/rlib. Assembly actions
+/// then take the same assemble channel as bin loading, and cache self-heal comes for free.
+/// Crates without asm (the vast majority) just pay a mono scan.
 struct DepCallbacks {
-    /// `<out-dir>`（rlib 所在目录）
+    /// `<out-dir>` (directory holding the rlib)
     out_dir: String,
-    /// rlib 主名 = `lib<crate_name><extra-filename>`（extra-filename 含前导 `-`）
+    /// rlib stem = `lib<crate_name><extra-filename>` (extra-filename includes its leading `-`)
     rlib_stem: String,
 }
 
@@ -988,15 +991,15 @@ impl Callbacks for DepCallbacks {
         match crate::lower::global_asm::materialize_dep_text(tcx) {
             Ok(crate::lower::global_asm::DepAsmText::Text(text)) => {
                 let path = format!("{}/{}.mirasm.s", self.out_dir, self.rlib_stem);
-                // 原子发布（全仓同款纪律）
+                // Atomic publish: write the temp name fully, then rename.
                 let tmp = format!("{path}.tmp{}", std::process::id());
                 std::fs::write(&tmp, text)
                     .unwrap_or_else(|e| panic!("fail to write dep global_asm list: {e}"));
                 std::fs::rename(&tmp, &path)
                     .unwrap_or_else(|e| panic!("fail to release dep global_asm list: {e}"));
             }
-            // UnsupportedSym：跳过清单（C4 片①语义边界，见 global_asm.rs
-            // DepAsmText 文档——不因「可能不用」拖垮整个 dep 构建）
+            // UnsupportedSym: skip the side file (see the DepAsmText docs in global_asm.rs) --
+            // do not drag down an entire dependency build over a symbol that may go unused.
             Ok(crate::lower::global_asm::DepAsmText::UnsupportedSym)
             | Ok(crate::lower::global_asm::DepAsmText::None) => {}
             Err(reason) => panic!("fail to extract dep global_asm: {reason}"),
@@ -1005,10 +1008,11 @@ impl Callbacks for DepCallbacks {
     }
 }
 
-/// target 依赖：真 rustc 语义 + `-Zno-codegen`。rustc_interface::start_codegen 对
-/// no-codegen 有树内现成空转（空 CompiledModules；rmeta 编码在 backend 之外不受影响；
-/// Linker::link 照走默认 link_binary 产出 metadata-only rlib，cargo 与下游 --extern
-/// 无感）。in-process 驱动（进程本就链着 librustc_driver）顺带省一次 rustc exec。
+/// Target dependencies: real rustc semantics + `-Zno-codegen`. rustc_interface::start_codegen
+/// already no-ops for no-codegen (empty CompiledModules; rmeta encoding happens outside the
+/// backend, so it is unaffected; `Linker::link` still runs the default link_binary and produces a
+/// metadata-only rlib that cargo and downstream `--extern` accept). Driving it in-process (the
+/// process is already linked against librustc_driver) also saves one rustc exec.
 pub(crate) fn run_dep_compiler(rustc_args: Vec<String>) -> ! {
     let find = |flag: &str| -> Option<String> {
         rustc_args
@@ -1037,9 +1041,10 @@ pub(crate) fn run_dep_compiler(rustc_args: Vec<String>) -> ! {
     exit(if code == ExitCode::SUCCESS { 0 } else { 1 })
 }
 
-/// D15：cargoless dep 编译子进程入口——补回 argv0 后喂 run_dep_compiler
-/// （参数由 cargoless::schedule::dep_rustc_args 计算，cargoless::driver 调度；
-/// 与 cargo_shim wrapper 段共用同一 DepCallbacks/global_asm 抽取通道）。
+/// Cargoless dep compilation subprocess entry: restore argv0, then feed the rest to
+/// `run_dep_compiler`. Arguments are computed by `cargoless::schedule::dep_rustc_args` and
+/// scheduled by `cargoless::driver`; shares the DepCallbacks/global_asm extraction channel with
+/// the cargo_shim wrapper.
 fn run_cless_dep(rest: Vec<String>) -> ExitCode {
     let mut args = Vec::with_capacity(rest.len() + 1);
     args.push("mirvm-cless-rustc".to_string());
@@ -1047,7 +1052,7 @@ fn run_cless_dep(rest: Vec<String>) -> ExitCode {
     run_dep_compiler(args)
 }
 
-// ===== 共享驱动 =====
+// ===== shared driver =====
 
 type TrackDiagnostic =
     fn(DiagInner, &mut dyn FnMut(DiagInner) -> Option<ErrorGuaranteed>) -> Option<ErrorGuaranteed>;
@@ -1108,13 +1113,16 @@ fn install_runner_finalization_filter() {
     rustc_errors::TRACK_DIAGNOSTIC.swap(&(track_runner_finalization_diagnostic as TrackDiagnostic));
 }
 
-/// 会话 guest 可见告警计数（M6 片2）：**有告警的编译不入 L2 缓存**。warm 路径跳过
-/// rustc 会话，无法重演诊断——静默吞告警违反 run-from-source 语义（native 差分 benchmark
-/// = 每次新鲜编译必发告警）。告警程序每跑冷路径重演；零告警程序才享受缓存。
+/// Count of diagnostics visible to the guest in this session: **a compilation with warnings is
+/// never written to the L2 cache**. The warm path skips the rustc session and cannot replay
+/// diagnostics; silently swallowing warnings would violate run-from-source semantics (a native
+/// differential benchmark emits warnings on every fresh compile). Programs with warnings replay
+/// the cold path every time; only warning-free programs get the cache.
 ///
-/// 安装时机 = `psess_created`（Session 建成、任何解析之前）：rustc_interface 的
-/// setup_callbacks 会覆写 TRACK_DIAGNOSTIC 喂增量查询系统，psess_created 在其后触发，
-/// 此处链式保存并委派前钩（与 runner 收尾过滤器同一机制，三钩可叠）。
+/// Installed at `psess_created` (after the Session exists, before any parsing):
+/// rustc_interface's setup_callbacks overwrites TRACK_DIAGNOSTIC to feed the incremental query
+/// system, and psess_created fires after that, so the previous hook is chained and delegated here
+/// (the same mechanism as the runner finalization filter; the hooks stack).
 static SESSION_WARNINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 static PREVIOUS_FOR_COUNTER: AtomicRef<TrackDiagnostic> =
@@ -1159,29 +1167,32 @@ struct MirvmCallbacks {
     suppress_runner_warning_summary: bool,
     runner_finalization_filter_installed: bool,
     route_compiler_diagnostics: bool,
-    /// 相位计时（M6 片1，D9f①）：t_start = run_driver 进入时刻
+    /// Phase timing: `t_start` = the instant `run_driver` was entered.
     t_start: std::time::Instant,
     timing: PhaseTiming,
-    /// L2 缓存键素材（M6 片2）：与 run_compiler 所见完全一致的参数
+    /// L2 cache key material: exactly the arguments `run_compiler` sees.
     rustc_args: Vec<String>,
-    /// S4/S3′ image 栈：after_analysis 验降低指纹后供 lower 并集查找；run_driver 尾部 absorb。
+    /// Image stack: checked against the lowering fingerprint in `after_analysis`, then consulted
+    /// by lower for the union; absorbed at the end of `run_driver`.
     stack: crate::baseimage::ImageStack,
-    /// A2 split 产物（s3b-a2-design；`MIRVM_DEPS_IMAGE=1` 且底座在场时由 lower_program 产出）；
-    /// run_driver 尾部 push 上栈再 absorb。
+    /// Split image produced by `lower_program` when `MIRVM_DEPS_IMAGE=1` and a base image is
+    /// present; pushed onto the stack and absorbed at the end of `run_driver`.
     split_image: Option<crate::lower::SplitImage>,
-    /// 本会话降低指纹（after_analysis 记录；split_image 包装栈层时用）
+    /// Lowering fingerprint of this session (recorded in `after_analysis`; used when `split_image`
+    /// wraps a stack layer).
     session_fp: Option<(bool, bool, bool)>,
-    /// A2：本会话起手是否已装载 deps-image（已装载 ⇒ 不再 split 重建）
+    /// Whether a deps-image was already loaded at session start (loaded => do not split again).
     deps_image_loaded: bool,
-    /// mode B 片②：pack 输出路径（Some ⇒ after_analysis 末尾落 .mirvm 包
-    /// 代替执行；None = 常规 run 语义）
+    /// Pack output path (Some => write the `.mirvm` package at the end of `after_analysis` instead
+    /// of executing; None = ordinary run semantics).
     pack_out: Option<std::path::PathBuf>,
 }
 
-/// 加载相计时账本（M6 片1）。frontend = 驱动进入→analysis 完成（含依赖 metadata 加载），
-/// lower = mono 收集+降低+冻结物化。engine 段由 run_driver 在解释结束后补记。
-/// M6 片2：cache_load = L2 命中反序列化+校验（热路径整体替代 frontend+lower）；
-/// cache_store = 冷路径洁净快照入账。
+/// Loading-phase timing ledger. `frontend` = driver entry through analysis completion (including
+/// dependency metadata loading); `lower` = mono collection + lowering + frozen materialization.
+/// `run_driver` records the engine phase after interpretation ends. `cache_load` = L2 hit
+/// deserialization + verification (the warm path replaces frontend+lower entirely);
+/// `cache_store` = clean-snapshot entry on the cold path.
 #[derive(Default)]
 struct PhaseTiming {
     frontend: Option<std::time::Duration>,
@@ -1190,8 +1201,9 @@ struct PhaseTiming {
     cache_store: Option<std::time::Duration>,
 }
 
-/// `MIRVM_TIMING=1`（或 --vm-stats 仪器）时输出单行相位账本到 stderr。
-/// 默认关闭——stderr 参与 native 差分逐字节比对，不能引入噪声。
+/// With `MIRVM_TIMING=1` (or the --vm-stats instrument) prints a one-line phase ledger to
+/// stderr. Off by default: stderr takes part in byte-for-byte native differential comparison, so
+/// it must not carry noise.
 fn print_phase_timing(
     timing: &PhaseTiming,
     engine: Option<std::time::Duration>,
@@ -1224,8 +1236,9 @@ fn print_phase_timing(
 
 impl Callbacks for MirvmCallbacks {
     fn config(&mut self, config: &mut rustc_interface::interface::Config) {
-        // 告警计数钩（L2 入账前提）：psess_created 在 interface 覆写 TRACK_DIAGNOSTIC
-        // 之后、首次解析之前触发——全会话诊断零缺口。
+        // Warning-counting hook (precondition for L2 entry): psess_created fires after the
+        // interface overwrites TRACK_DIAGNOSTIC and before the first parse, so no session
+        // diagnostic is missed.
         let emitter = crate::diagnostics::CompilerEmitterSpec::for_capture(
             &config.opts,
             self.route_compiler_diagnostics,
@@ -1241,13 +1254,15 @@ impl Callbacks for MirvmCallbacks {
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         self.timing.frontend = Some(self.t_start.elapsed());
         let Some((def_id, entry_ty)) = tcx.entry_fn(()) else {
-            crate::diagnostics::control(format_args!("mirvm: 未找到 entry fn（需要 `fn main`）"));
+            crate::diagnostics::control(format_args!(
+                "mirvm: entry fn not found (needs `fn main`)"
+            ));
             self.exit_code = Some(1);
             return Compilation::Stop;
         };
         if !matches!(entry_ty, rustc_session::config::EntryFnType::Main { .. }) {
             crate::diagnostics::control(format_args!(
-                "mirvm: 暂不支持 #![no_main]/start 类型的入口"
+                "mirvm: #![no_main]/start entry points are not supported yet"
             ));
             self.exit_code = Some(1);
             return Compilation::Stop;
@@ -1261,9 +1276,10 @@ impl Callbacks for MirvmCallbacks {
                 .expect("write_mir_fn failed");
             print!("{}", String::from_utf8_lossy(&buf));
         } else {
-            // S4/S3′ 降低指纹会话内验证：image 栈烤入构建会话的 (ub/overflow/contract)
-            // checks，本会话不一致（cargo runner 自定义 profile 旗标等）即弃整栈走全量
-            // 降低——错指纹复用 = image 函数带着另一套检查语义（错值级）。
+            // Verify the lowering fingerprint inside the session: the image stack bakes in the
+            // (ub/overflow/contract) checks of its build session. On a mismatch (cargo runner
+            // custom profile flags, say) drop the whole stack and lower from scratch -- reusing a
+            // wrong fingerprint would give image functions another set of check semantics.
             let sess = tcx.sess;
             let fp = (
                 sess.ub_checks(),
@@ -1274,14 +1290,17 @@ impl Callbacks for MirvmCallbacks {
             if !self.stack.fp_matches(fp) {
                 self.stack = crate::baseimage::ImageStack::empty();
             }
-            // callback 只做加载相；执行相必须等 tcx.finish、诊断收尾和 compiler drop 全部完成。
+            // The callback performs only the loading phase; execution must wait until tcx.finish,
+            // diagnostic finalization and compiler drop have all completed.
             let t_lower = std::time::Instant::now();
-            // A2 split 判定（s3b-a2-design）：非旁路 + 本会话未装载 image +
-            // 底座在场（fp 截断后栈可能已空——无底座不 split，Q2）。
-            // 无 --extern（纯 std 程序）⇒ deps pre_key 恒 None（v1 边界：std 残余
-            // 归 S4 底座地盘，不建共享 image）——此时 split 只会产写不了盘的内存
-            // image（键退化进程占位），把 L2 键链永久打断；不 split 全量入 delta，
-            // 语义不变（单 id 空间 = 经典非 split 路），L2 对纯 std 程序转活。
+            // Split decision: not bypassed + no image loaded in this session + a base image is
+            // present (the stack can be empty after the fingerprint check -- no base, no split).
+            // Without --extern (a pure-std program) the deps pre_key is always None: std residue
+            // belongs to the base image, so no shared image is built. Splitting would then only
+            // produce an in-memory image that cannot be written to disk (its key degrades to a
+            // process placeholder), permanently breaking the L2 key chain. Lowering everything
+            // into the delta keeps semantics unchanged (one id space, the classic non-split path)
+            // and keeps L2 usable for pure-std programs.
             let want_split = !crate::depsimage::bypassed()
                 && !self.deps_image_loaded
                 && !self.stack.is_empty()
@@ -1293,44 +1312,53 @@ impl Callbacks for MirvmCallbacks {
             self.module = Some(module);
             self.split_image = split_image;
             self.timing.lower = Some(t_lower.elapsed());
-            // mode B 片②：pack 岔口——落 .mirvm 包代替执行（与 L2 store 同一
-            // 洁净快照时机；失败 = 响亮终止，不静默退化）
+            // Pack fork: write the `.mirvm` package instead of executing, at the same clean
+            // snapshot point as the L2 store; a failure aborts loudly instead of degrading silently.
             if let Some(out) = &self.pack_out {
                 match crate::pack::write_package(
                     tcx,
                     &self.rustc_args,
-                    self.module.as_ref().expect("刚设置"),
+                    self.module.as_ref().expect("just set"),
                     out,
                 ) {
                     Ok(()) => {
                         crate::diagnostics::control(format_args!(
-                            "mirvm: 包已写出 {}",
+                            "mirvm: package written to {}",
                             out.display()
                         ));
                     }
                     Err(reason) => {
-                        crate::diagnostics::control(format_args!("mirvm: 打包失败: {reason}"));
+                        crate::diagnostics::control(format_args!(
+                            "mirvm: packing failed: {reason}"
+                        ));
                         self.exit_code = Some(1);
                     }
                 }
             }
-            // A2：split 产物先写盘再上栈——栈键链自此含 image 键，L2 delta 条目带
-            // 完整链（delta 内嵌 image 绝对量，错链入账 = 后续错配装载）。
+            // The split artifact is written to disk before it is pushed onto the stack: the key
+            // chain then contains the image key, so L2 delta entries carry the complete chain (a
+            // delta embeds the image absolutely; recording under a wrong chain would mean
+            // mismatched loads later).
             if let Some(img) = self.split_image.take() {
-                let base_key = self.stack.key().expect("split 必在底座在场时").to_string();
+                let base_key = self
+                    .stack
+                    .key()
+                    .expect("split implies a base image is present")
+                    .to_string();
                 let bi = crate::depsimage::store_and_wrap(&self.rustc_args, &base_key, fp, img);
                 self.stack.push(bi);
             }
-            // L2 入账：guest 运行前的洁净快照（argv 尚未终结化）。
-            // 会话有任何告警/错误即不入账——warm 路径无法重演诊断（见 SESSION_WARNINGS）。
-            // S4/S3′：delta 条目携带键链（装载时双验证，防错配 image 栈）。
+            // L2 entry: the clean snapshot before the guest runs (argv is not finalized yet). Any
+            // warning or error in the session blocks entry -- the warm path cannot replay
+            // diagnostics (see SESSION_WARNINGS). Delta entries carry the key chain, which is
+            // verified again on load to prevent a mismatched image stack.
             let t_store = std::time::Instant::now();
             if session_diagnostics_clean()
                 && tcx.sess.dcx().has_errors().is_none()
                 && crate::ircache::store(
                     tcx,
                     &self.rustc_args,
-                    self.module.as_ref().expect("刚设置"),
+                    self.module.as_ref().expect("just set"),
                     self.stack.key(),
                     crate::vm::engine::verify::Prefix {
                         funcs: self.stack.total_fns(),
@@ -1351,9 +1379,9 @@ impl Callbacks for MirvmCallbacks {
     }
 }
 
-/// 引擎入口：缺省跑 main 启动链；`--vm-call 'name(args…)'` 直调导出函数（gate 入口）；
-/// `--vm-stats` = Trap 债务统计（各期开工前的调研仪器）。
-/// `--stack-size` / `MIRVM_STACK_SIZE` 解析：字节数，可带 k/m/g 后缀。
+/// Engine entry: by default runs the main startup chain; `--vm-call 'name(args…)'` calls an
+/// exported function directly (gate entry); `--vm-stats` prints Trap-debt statistics.
+/// `--stack-size` / `MIRVM_STACK_SIZE` parse a byte count with an optional k/m/g suffix.
 fn parse_stack_size(s: &str) -> Result<usize, String> {
     let t = s.trim();
     let (num, mult): (&str, usize) = match t.as_bytes().last() {
@@ -1365,11 +1393,14 @@ fn parse_stack_size(s: &str) -> Result<usize, String> {
     let n = num
         .trim()
         .parse::<usize>()
-        .map_err(|_| format!("mirvm: 无法解析栈尺寸 `{s}`（例：8m、1g、67108864）"))?;
+        .map_err(|_| format!("mirvm: cannot parse stack size `{s}` (e.g. 8m, 1g, 67108864)"))?;
     let bytes = n.saturating_mul(mult);
-    // 下限护住引擎自身序言 + 边距；上限防笔误（虚拟保留也别要 128T）
+    // The lower bound protects the engine's own prologue plus margin; the upper bound catches
+    // typos (even a virtual reservation should not ask for 128T).
     if !(1 << 20..=1 << 40).contains(&bytes) {
-        return Err(format!("mirvm: 栈尺寸 {s} 超出 [1m, 1t] 合理区间"));
+        return Err(format!(
+            "mirvm: stack size {s} is outside the [1m, 1t] valid range"
+        ));
     }
     Ok(bytes)
 }
@@ -1389,7 +1420,7 @@ fn run_vm_engine(
         print!("{}", crate::vm::engine::stats::report(&module));
         return 0;
     }
-    // argv 终结化（M6 片2）：运行期输入在快照语义之后布置，冷/热单一路径
+    // Finalize argv: runtime input is placed after snapshot semantics; one path for cold and warm.
     if let Err(e) = module.finalize_entry_argv(program_argv) {
         crate::diagnostics::control(format_args!("mirvm: {e}"));
         return 70;
@@ -1439,8 +1470,8 @@ fn run_vm_engine(
 
 fn run_vm_engine_loaded(module: crate::vm::engine::ir::Module, vm_call: Option<&str>) -> i32 {
     let shared = crate::vm::engine::ctx::Shared::new(module);
-    // P1 条目可执行化（decision-history §7.6）：配方 → closure → stub 字节 →
-    // 整域 RX（与上两道并列的全相工序；域被占 = 装载失败）
+    // Make entry stubs executable: recipe -> closure -> stub bytes -> whole-region RX (a
+    // full-phase step alongside the two above; an occupied region means load failure).
     let engine = match crate::vm::engine::ctx::Engine::try_new(shared) {
         Ok(engine) => engine,
         Err(e) => {
@@ -1449,7 +1480,7 @@ fn run_vm_engine_loaded(module: crate::vm::engine::ir::Module, vm_call: Option<&
         }
     };
     let Some(spec) = vm_call else {
-        // main 启动链：lang_start 照常解释，退出码 = Termination 产物
+        // main startup chain: interpret lang_start as usual; the exit code is Termination's product.
         let execution = engine.clone();
         let result = match on_guest_stack(move || crate::vm::engine::interp::run_main(&execution)) {
             Ok(result) => result,
@@ -1517,10 +1548,11 @@ fn run_vm_engine_loaded(module: crate::vm::engine::ir::Module, vm_call: Option<&
     }
 }
 
-/// D8a：guest 主执行迁到专用大栈线程（默认 1 GiB 虚拟保留，Linux 按需提交）。
-/// 解释帧宿主成本数十倍于 native 帧，借调用方线程的 8–16 MiB 栈只能容 ~8k 帧，
-/// 对 native 栈界严重失真。guest panic 已在 run_main/run_export 内消化；穿出
-/// join 的是宿主 panic（VM bug）——原样续传，绝不吞。
+/// Guest main execution runs on a dedicated large-stack thread (1 GiB of virtual reservation by
+/// default, committed on demand on Linux). An interpreted frame costs the host tens of times more
+/// than a native frame; borrowing the caller's 8-16 MiB stack holds only ~8k frames, badly
+/// distorting the native stack limit. Guest panics are already absorbed inside run_main/run_export;
+/// anything escaping the join is a host panic (a VM bug) and is resumed unchanged, never swallowed.
 struct GuestStackStartError {
     message: String,
     exit_code: i32,
@@ -1546,12 +1578,13 @@ fn on_guest_stack<R: Send + 'static>(
             Err(host_panic) => std::panic::resume_unwind(host_panic),
         },
         Err(error) => {
-            // 不静默降级到调用方小栈（栈语义会悄悄变差）——响亮退出并给旋钮。
-            // 典型触发：vm.overcommit_memory=2 的严格提交环境。
+            // Do not silently fall back to the caller's small stack (stack semantics would quietly
+            // get worse); exit loudly and offer the knob. A typical trigger is a strict commit
+            // environment with vm.overcommit_memory=2.
             Err(GuestStackStartError {
                 message: format!(
-                    "mirvm: guest 执行线程创建失败（stack 保留 {reserve} 字节）：{error}；\
-                     请用 --stack-size / MIRVM_STACK_SIZE 调小后重试"
+                    "mirvm: failed to create the guest execution thread ({reserve} bytes of stack \
+                     reserved): {error}; retry with a smaller --stack-size / MIRVM_STACK_SIZE"
                 ),
                 exit_code: 70,
             })
@@ -1559,21 +1592,26 @@ fn on_guest_stack<R: Send + 'static>(
     }
 }
 
-/// 解析 `name(1,2,…)`（或裸 `name` = 无参）。
+/// Parse `name(1,2,…)` (or a bare `name`, which means no arguments).
 fn parse_vm_call(spec: &str) -> Result<(String, Vec<u64>), String> {
     let spec = spec.trim();
     let Some(open) = spec.find('(') else {
         return Ok((spec.to_string(), Vec::new()));
     };
     let name = spec[..open].trim().to_string();
-    let inner = spec[open + 1..].strip_suffix(')').ok_or("缺少右括号")?;
+    let inner = spec[open + 1..]
+        .strip_suffix(')')
+        .ok_or("missing closing parenthesis")?;
     let mut args = Vec::new();
     for part in inner.split(',') {
         let p = part.trim();
         if p.is_empty() {
             continue;
         }
-        args.push(p.parse::<u64>().map_err(|e| format!("参数 `{p}`: {e}"))?);
+        args.push(
+            p.parse::<u64>()
+                .map_err(|e| format!("argument `{p}`: {e}"))?,
+        );
     }
     Ok((name, args))
 }
@@ -1600,15 +1638,17 @@ pub(crate) fn run_driver(
         }
     };
     let t_start = std::time::Instant::now();
-    // S4/S3′ image 栈：装载底座 + 依赖 image 链（失败/旁路 = 空栈，全量冷路径自愈）。
-    // 降低指纹（ub/overflow/contract checks）要到会话内才能验证——after_analysis 复核。
+    // Image stack: load the base image plus the dependency image chain (failure or bypass = empty
+    // stack, which self-heals onto the full cold path). The lowering fingerprint
+    // (ub/overflow/contract checks) can only be verified inside the session; after_analysis does.
     let mut stack = if dump_mir {
         crate::baseimage::ImageStack::empty()
     } else {
         crate::baseimage::ensure()
     };
-    // A2 deps-image 装载（pre-compiler，s3b-a2-design §3）：非旁路 + 底座在场。
-    // 命中即 push 上栈——栈键链自此含 image 键，L2 delta 条目可恢复入账。
+    // Deps-image load before the compiler runs: not bypassed + a base image is present. On a hit
+    // it is pushed onto the stack, so the key chain then contains the image key and L2 delta
+    // entries can be recorded again.
     let mut deps_image_loaded = false;
     if !dump_mir
         && !crate::depsimage::bypassed()
@@ -1619,8 +1659,9 @@ pub(crate) fn run_driver(
         stack.push(bi);
     }
     let base_key = stack.key().map(str::to_owned);
-    // L2 热路径（M6 片2）：命中即跳过整个 rustc 会话（前端+metadata+mono+lower）。
-    // dump-mir 需要 tcx，强制冷路径。S4/S3′：delta 条目与键链双验证（ircache）。
+    // L2 warm path: a hit skips the entire rustc session (frontend + metadata + mono + lower).
+    // dump-mir needs the tcx and therefore forces the cold path. ircache verifies delta entries
+    // against the key chain.
     if !dump_mir
         && let Some(mut module) = crate::ircache::lookup(
             &rustc_args,
@@ -1640,10 +1681,11 @@ pub(crate) fn run_driver(
             ..PhaseTiming::default()
         };
         if stack.is_empty() {
-            // asm-stub 真地址是进程级活体：以配方幂等重物化覆写陈旧地址
+            // asm-stub real addresses are process-lifetime state: re-materialize idempotently from
+            // the recipe to overwrite stale addresses.
             module.asm_stub_addrs = crate::lower::asm::materialize(&module.asm_sites);
         } else {
-            crate::baseimage::absorb_stack(&mut module, stack); // 内含 asm 合并重物化
+            crate::baseimage::absorb_stack(&mut module, stack); // asm merged and re-materialized
         }
         if let Some(guest) = &guest_process
             && let Err(message) = guest.enter()
@@ -1717,9 +1759,10 @@ pub(crate) fn run_driver(
         exit(code);
     }
     if let Some(mut module) = callbacks.module.take() {
-        // S4/S3′ 冷路径合并（store 已在 after_analysis 落盘 delta；引擎吃合并模块）。
-        // 空栈（无 image）跳过——module 的 asm_stub_addrs 已在 lower 会话内物化。
-        // A2：split 产物已在 after_analysis 写盘并 push 上栈，此处统一 absorb。
+        // Cold-path merge (the store already wrote the delta in after_analysis; the engine consumes
+        // the merged module). An empty stack (no image) skips it: the module's asm_stub_addrs were
+        // already materialized inside the lower session. The split artifact was written to disk and
+        // pushed onto the stack in after_analysis, so it is absorbed here like any other layer.
         let stack = std::mem::replace(&mut callbacks.stack, crate::baseimage::ImageStack::empty());
         if !stack.is_empty() {
             crate::baseimage::absorb_stack(&mut module, stack);
@@ -1744,7 +1787,8 @@ pub(crate) fn run_driver(
             callbacks.vm_stats,
             false,
         );
-        // vm-stats 分支不跑 guest，engine 段无意义则不报
+        // The vm-stats branch does not run the guest, so an engine phase would be meaningless and
+        // is not reported.
         let engine = (!callbacks.vm_stats).then(|| t_engine.elapsed());
         print_phase_timing(
             &callbacks.timing,
@@ -1769,21 +1813,22 @@ pub(crate) fn run_driver(
     compiler_code
 }
 
-// ===== frontmatter（cargo script RFC 3424 语法）=====
+// ===== frontmatter (cargo script RFC 3424 syntax) =====
 
-/// 解析 `---` 围栏的内嵌 manifest。返回 (manifest, 替换为空行保持行号的正文)。
-/// cargoless::audit 的脚本入口（D15 P1）——本体保持私有。
+/// Parse the manifest embedded in a `---` fence. Returns (manifest, body with the manifest lines
+/// blanked so line numbers are preserved). Script entry for cargoless::audit; the core stays
+/// private.
 pub(crate) fn parse_frontmatter_pub(src: &str) -> Option<(String, String)> {
     parse_frontmatter(src)
 }
 
 fn parse_frontmatter(src: &str) -> Option<(String, String)> {
     let mut lines = src.lines().enumerate().peekable();
-    // 跳过 shebang
+    // Skip shebang
     if lines.peek().is_some_and(|(_, l)| l.starts_with("#!")) {
         lines.next();
     }
-    // 跳过空行
+    // Skip blank lines
     while lines.peek().is_some_and(|(_, l)| l.trim().is_empty()) {
         lines.next();
     }
@@ -1792,7 +1837,7 @@ fn parse_frontmatter(src: &str) -> Option<(String, String)> {
     if !fence.starts_with("---") {
         return None;
     }
-    // infostring（如 `---cargo`）允许，忽略内容
+    // An infostring (such as `---cargo`) is allowed; its content is ignored.
     let mut manifest = String::new();
     let mut close_idx = None;
     for (i, l) in lines {
@@ -1803,8 +1848,9 @@ fn parse_frontmatter(src: &str) -> Option<(String, String)> {
         manifest.push_str(l);
         manifest.push('\n');
     }
-    let close_idx = close_idx?; // 没有闭合围栏 → 不是 frontmatter
-    // 正文 = 原文件，但 [0, close_idx] 行替换为空行（保持诊断行号）
+    let close_idx = close_idx?; // no closing fence => not frontmatter
+    // Body = the original file with lines [0, close_idx] replaced by blanks (keeps diagnostic
+    // line numbers).
     let body: String = src
         .lines()
         .enumerate()
@@ -1814,7 +1860,7 @@ fn parse_frontmatter(src: &str) -> Option<(String, String)> {
     Some((manifest, body))
 }
 
-/// 把脚本物化成缓存里的 cargo 项目，返回项目目录。
+/// Materialize a script as a cargo project in the cache and return the project directory.
 fn materialize_script(script: &Path, manifest: &str, body: &str) -> PathBuf {
     use std::hash::{Hash, Hasher};
 
@@ -1823,8 +1869,9 @@ fn materialize_script(script: &Path, manifest: &str, body: &str) -> PathBuf {
     abs.hash(&mut hasher);
     let hash = format!("{:016x}", hasher.finish());
     let dir = crate::sysroot::cache_dir().join("scripts").join(&hash);
-    std::fs::create_dir_all(dir.join("src")).expect("创建脚本缓存目录失败");
-    std::fs::create_dir_all(dir.join(".cargo")).expect("创建脚本 .cargo 目录失败");
+    std::fs::create_dir_all(dir.join("src")).expect("failed to create the script cache directory");
+    std::fs::create_dir_all(dir.join(".cargo"))
+        .expect("failed to create the script .cargo directory");
 
     let stem = script
         .file_stem()
@@ -1844,20 +1891,23 @@ fn materialize_script(script: &Path, manifest: &str, body: &str) -> PathBuf {
         name = format!("s{name}");
     }
 
-    // bin 名带路径哈希短缀：共享 target dir（D14）下最终二进制落在无指纹的
-    // debug/<binname>——同 stem 不同路径的脚本（/tmp 草变体等）不互相覆盖；
-    // package 名保持 stem（onboarding 的 grep recipe 按名找 script dir）。
+    // The bin name carries a short path-hash suffix: in the shared target dir the final binary
+    // lands in the fingerprint-free debug/<binname>, so scripts sharing a stem but not a path
+    // (scratch variants under /tmp) do not overwrite each other. The package name keeps the stem
+    // so recipes can find the script dir by name.
     let bin_name = format!("{name}-{}", &hash[..8]);
     let cargo_toml = format!(
         "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n\
          [[bin]]\nname = \"{bin_name}\"\npath = \"src/main.rs\"\n\n{manifest}"
     );
-    // 幂等物化：内容未变不落盘——mtime 稳定是 L2 IR 缓存清单与 cargo 指纹共同的前提
+    // Idempotent materialization: unchanged content is not rewritten. Stable mtime is a
+    // precondition for both the L2 IR cache manifest and cargo fingerprints.
     write_if_changed(&dir.join("Cargo.toml"), &cargo_toml);
     write_if_changed(&dir.join("src/main.rs"), body);
-    // B 维 native 对拍构建同样进统一存储（D14）：shim 构建走显式 --target-dir
-    // 覆盖本键，native cargo run 吃文件配置——两族分目录（sysroot/rustflags
-    // 不同，fingerprint 本也互斥，分目录只为 purge 语义清晰）。
+    // The native differential build also uses the unified store: the shim build overrides this key
+    // with an explicit --target-dir, while native cargo run uses the file config. The two families
+    // get separate directories (their sysroots and rustflags differ, so fingerprints would not
+    // collide anyway; separate directories only make purge semantics clearer).
     let native_target = crate::sysroot::cache_dir().join("target/native");
     write_if_changed(
         &dir.join(".cargo/config.toml"),
@@ -1870,7 +1920,8 @@ fn write_if_changed(path: &Path, contents: &str) {
     if std::fs::read(path).is_ok_and(|old| old == contents.as_bytes()) {
         return;
     }
-    std::fs::write(path, contents).unwrap_or_else(|e| panic!("写 {} 失败: {e}", path.display()));
+    std::fs::write(path, contents)
+        .unwrap_or_else(|e| panic!("failed to write {}: {e}", path.display()));
 }
 
 #[cfg(test)]

@@ -1,54 +1,54 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# 钉特性组合：default-features=false 去 u64_digit/pem（保 std + sha2 隐式
-# feature——Pkcs1v15Sign::new::<Sha256> 的 OID 关联需要它）。见下方绕行记录。
+# Pinned feature set: default-features=false drops u64_digit/pem (keeping std + the implicit
+# sha2 feature that Pkcs1v15Sign::new::<Sha256>'s OID association needs). The FRONTIER note below covers it.
 rsa = { version = "0.9", default-features = false, features = ["std", "sha2"] }
 ---
-// rsa 0.9（纯 Rust 大数 RSA，num-bigint-dig 后端）差分。不自生成密钥（生成
-// 要 rng）：从固定 p/q/n/d 组件 RsaPrivateKey::from_components 重建。组件由
-// 确定性脚本离线派生（xorshift 流候选 + 32 基 Miller-Rabin，openssl 复核
-// 两素数均为真），e=65537，d=e⁻¹ mod lcm(p-1,q-1)。
+// rsa 0.9 (pure-Rust big-integer RSA on a num-bigint-dig backend) differential. Keys are not
+// generated (that needs an rng): the fixed p/q/n/d components are rebuilt through
+// RsaPrivateKey::from_components. The components were derived offline by a deterministic script
+// (xorshift candidates + 32-base Miller-Rabin, openssl-confirmed primes), e=65537, d=e^-1 mod lcm(p-1,q-1).
 //
-// 覆盖：from_components/from_p_q/空 primes 的 SP800-56B recover/坏组件错误
-// 路径；traits 面（PublicKeyParts/PrivateKeyParts 的 n/e/d/primes/dp/dq/qinv/
-// crt_coefficient）+ CRT 同余数学校验；公钥导出（PKCS#1 DER、SPKI DER）与
-// 私钥 PKCS#8/PKCS#1 DER roundtrip、篡改 DER 错误路径；PKCS1v15 签名/验签
-// 定向量（Sha256×2 消息含空消息、Sha384、Sha512、new_unprefixed、确定性
-// 复签，反例：错消息/篡改签名/错公钥/摘要长度 InputNotHashed）；加解密
-// 定向量（离线手工 EME-PKCS1v15 编码的固定密文 CT_VEC 解密、固定种子
-// ChaCha rng 注入重加密两次逐字节一致、decrypt_blinded 一致、篡改密文与
-// 过长消息错误路径、空明文边界）；PSS（见下）；OAEP（Sha256 定种子加密
-// 逐字节一致 + roundtrip、label 正/误、篡改错误路径）。
+// Coverage: from_components/from_p_q/the empty-primes SP800-56B recovery/bad-component error
+// paths; the traits surface (PublicKeyParts/PrivateKeyParts n/e/d/primes/dp/dq/qinv/
+// crt_coefficient) + CRT congruence checks; public-key export (PKCS#1 DER, SPKI DER) and
+// private-key PKCS#8/PKCS#1 DER roundtrips plus a tampered-DER error path; PKCS1v15
+// sign/verify vectors (Sha256 x2 incl. the empty message, Sha384, Sha512, new_unprefixed,
+// deterministic re-signing; counterexamples: wrong message/tampered signature/wrong public
+// key/digest length InputNotHashed); encryption vectors (offline hand EME-PKCS1v15 fixed
+// ciphertext CT_VEC decrypted, seeded-ChaCha re-encryption byte-identical twice,
+// decrypt_blinded agreement, tampered-ciphertext/over-long-message errors, empty plaintext);
+// PSS (below); OAEP (seeded Sha256 encryption byte-identical + roundtrip, label, tamper).
 //
-// ── PSS 随机盐：rsa API 支持注入 rng（本 driver 的核心探测结论）──
-// RsaPrivateKey::sign_with_rng(&mut rng, Pss::new::<D>(), digest) 接受任意
-// R: CryptoRngCore（rand_core 0.6 的 RngCore+CryptoRng）；Pss 的
-// SignatureScheme::sign 对 None rng 直接 Error::InvalidPaddingScheme
-// （driver 里实测打印）。pss::SigningKey/VerifyingKey 另经
-// signature::RandomizedSigner/Verifier 提供同一条注入通道。故注入固定种子
-// 手写 ChaCha20（RFC 8439 块函数，实现 rand_core 0.6 RngCore+CryptoRng，
-// 经 rsa::rand_core re-export 保证版本严格一致）→ 同种子签名逐字节复现、
-// 异种子盐不同但均可验、零盐（new_with_salt(0)）与种子无关。
+// -- PSS random salt: the rsa API accepts an injected rng (the core probe result here) --
+// RsaPrivateKey::sign_with_rng(&mut rng, Pss::new::<D>(), digest) accepts any
+// R: CryptoRngCore (rand_core 0.6's RngCore+CryptoRng); Pss's SignatureScheme::sign
+// returns Error::InvalidPaddingScheme outright for a None rng (printed by this driver).
+// pss::SigningKey/VerifyingKey offer the same injection channel through
+// signature::RandomizedSigner/Verifier. So a fixed-seed hand-written ChaCha20 (RFC 8439
+// block function implementing rand_core 0.6 RngCore+CryptoRng through the rsa::rand_core
+// re-export, so the version matches exactly) is injected: the same seed gives byte-identical
+// signatures, different seeds give valid but distinct salts, and zero salt ignores the seed.
 //
-// ── 已知 FRONTIER 绕行记录（语义不变，换 crate 特性）──
-// rsa 0.9 的 default features = ["std", "pem", "u64_digit"]；u64_digit 使
-// num-bigint-dig 0.8.6 以 u64 为 limb（其 build.rs 无条件 has_i128）：
-// DoubleBigDigit=u128、SignedDoubleBigDigit=i128。RSA 公/私钥的一切
-// modpow（模 n/p/q 恒为奇数）走 monty_modpow → MontyReducer::new →
-// inv_mod_alt，其收尾 `-k0 as BigDigit`（k0: i128）是一元 Neg on i128——
-// mirvm 的 128 位整族已有 Bin128/Cmp128/IntToInt 双向 cast/SwitchInt 宽
-// 通道（sbb 的 i128 +=/-/as u64/>>=64 实测全通），但 UnOp::Neg/Not 的
-// 128 位形态未接（lower_operand_scalar 遇 Bytes 聚合即 Err），lower 期
-// 降级为 Stmt::Trap，执行到 inv_mod_alt 即 exit 70，诊断原文：
-//   mirvm[m4-engine]: TRAP: 非标量操作数（聚合，ty=i128，M4.1+）
-// 最小复现（纯 std 单文件）：`fn f(x: i128) -> i128 { -x }` 调用即触；
-// `-k0 as u64` 与 `(k0 as u64).wrapping_neg()` 位级等价。绕行 =
-// default-features=false（去 u64_digit；pem 本就不需要——用 DER）：limb
-// 退回 u32、SignedDoubleBigDigit=i64（i64 Neg 是标量，全支持）。BigUint
-// 值语义与 limb 宽无关（from_bytes_be/to_bytes_be/算术结果逐字节一致），
-// 已用 native 双 feature 构建实测：u64_digit 开/关两版 driver stdout
-// 逐字节相同。native 维与本 frontmatter 同构，对拍不受影响。
+// -- Known FRONTIER bypass (semantics unchanged, only the crate feature set changes) --
+// rsa 0.9's default features = ["std", "pem", "u64_digit"]; u64_digit makes num-bigint-dig
+// 0.8.6 use u64 limbs (its build.rs sets has_i128 unconditionally): DoubleBigDigit=u128,
+// SignedDoubleBigDigit=i128. Every modpow of the RSA keys (moduli n/p/q are always odd)
+// goes monty_modpow -> MontyReducer::new -> inv_mod_alt, whose trailing `-k0 as BigDigit`
+// (k0: i128) is a unary Neg on i128. mirvm's 128-bit integer family already has
+// Bin128/Cmp128, bidirectional IntToInt casts and SwitchInt widening (sbb's i128 +=/-/as
+// u64/>>=64 all pass), but the 128-bit UnOp::Neg/Not forms are not wired
+// (lower_operand_scalar errors on a Bytes aggregate), so lowering degrades to Stmt::Trap
+// and execution reaching inv_mod_alt exits 70 with the diagnostic:
+//   mirvm[m4-engine]: TRAP: non-scalar operand (aggregate, ty=i128, M4.1+)
+// Minimal repro (single pure-std file): calling `fn f(x: i128) -> i128 { -x }` triggers it;
+// `-k0 as u64` and `(k0 as u64).wrapping_neg()` are bit-identical. The bypass is
+// default-features=false (drop u64_digit; pem was never needed since this uses DER), so
+// limbs fall back to u32 and SignedDoubleBigDigit=i64, where i64 Neg is scalar and fully
+// supported. BigUint value semantics do not depend on limb width (from_bytes_be/to_bytes_be/
+// arithmetic byte-identical), confirmed by a native dual-feature build whose u64_digit on/off
+// versions print byte-identical stdout; the native dimension matches this frontmatter exactly.
 use rsa::pkcs1::{
     DecodeRsaPrivateKey, DecodeRsaPublicKey, EncodeRsaPrivateKey, EncodeRsaPublicKey,
 };
@@ -115,8 +115,8 @@ const D: [u8; 256] = [
     0x64, 0x90, 0x33, 0x7b, 0xa3, 0xaa, 0xc7, 0xef, 0x89, 0x4b, 0x3b, 0x60, 0x2b, 0x37, 0x02, 0x8b,
     0x39, 0x0c, 0x10, 0x89, 0x2a, 0xdc, 0x28, 0xa3, 0x3c, 0xfc, 0xd8, 0xe9, 0xf4, 0x05, 0x1b, 0x25,
 ];
-/// 离线手工 EME-PKCS1v15 编码（00 02 <固定非零 PS> 00 <01..20>）后 c=m^e mod n
-/// 的固定密文定向量（Python oracle 预构，私钥路径独立复核可还原）。
+/// Fixed ciphertext vector for the offline hand-built EME-PKCS1v15 encoding
+/// (00 02 <fixed nonzero PS> 00 <01..20>) with c = m^e mod n; the private-key path recovers it.
 const CT_VEC: [u8; 256] = [
     0x1f, 0x52, 0xb1, 0x65, 0x3d, 0xa7, 0xa0, 0xd0, 0x07, 0xb2, 0x73, 0x2f, 0xdf, 0x57, 0x3b, 0x38,
     0x50, 0x58, 0x1e, 0x73, 0x9d, 0x50, 0x03, 0x8b, 0xcd, 0x61, 0x48, 0x0c, 0xa7, 0x33, 0xa9, 0x41,
@@ -160,7 +160,7 @@ fn big(bytes: &[u8]) -> BigUint {
     BigUint::from_bytes_be(bytes)
 }
 
-/// 定种字节流种子（tag 互异 → 各注入点流独立）。
+/// Seeded byte-stream seed (distinct tags keep each injection point's stream independent).
 fn seed(tag: u8) -> [u8; 32] {
     let mut s = [0u8; 32];
     for (i, b) in s.iter_mut().enumerate() {
@@ -169,9 +169,9 @@ fn seed(tag: u8) -> [u8; 32] {
     s
 }
 
-/// RFC 8439 ChaCha20 块函数手写实现，rand_core 0.6 RngCore+CryptoRng
-/// （CryptoRngCore 自动 blanket）→ 注入 rsa 一切 rng 形参。nonce 固定
-/// "mirvm-rsa-pss"，计数器从 0 起，输出流完全确定。
+/// Hand-written RFC 8439 ChaCha20 block function implementing rand_core 0.6 RngCore+CryptoRng
+/// (CryptoRngCore comes from the blanket impl), injected into every rng parameter rsa takes:
+/// nonce fixed at "mirvm-rsa-pss", counter from 0, so the output stream is fully deterministic.
 struct ChaCha20 {
     state: [u32; 16],
     buf: [u8; 64],
@@ -186,7 +186,7 @@ impl ChaCha20 {
             state[4 + i] = u32::from_le_bytes(seed[4 * i..4 * i + 4].try_into().unwrap());
         }
         state[12] = 0;
-        let nonce = *b"mirvm-rsapss"; // 12B 固定 nonce
+        let nonce = *b"mirvm-rsapss"; // 12-byte fixed nonce
         for i in 0..3 {
             state[13 + i] = u32::from_le_bytes(nonce[4 * i..4 * i + 4].try_into().unwrap());
         }
@@ -265,7 +265,7 @@ fn main() {
     let q = big(&Q);
     let one = BigUint::from(1u32);
 
-    // ---- ① 组件重建 + traits 面 + CRT 数学校验 ----
+    // ---- ① component rebuild + traits surface + CRT math checks ----
     let priv_key =
         RsaPrivateKey::from_components(n.clone(), e.clone(), d.clone(), vec![p.clone(), q.clone()])
             .unwrap();
@@ -294,12 +294,12 @@ fn main() {
     let primes = priv_key.primes();
     println!("primes[0]==p primes[1]==q = {}", primes.len() == 2 && primes[0] == p && primes[1] == q);
 
-    // ---- ② 重建路径变体 + 错误路径 ----
+    // ---- ② rebuild-path variants + error paths ----
     let priv_pq = RsaPrivateKey::from_p_q(p.clone(), q.clone(), e.clone()).unwrap();
     println!("from_p_q d eq = {}", priv_pq.d() == priv_key.d());
     let priv_rec = RsaPrivateKey::from_components(n.clone(), e.clone(), d.clone(), vec![]).unwrap();
     println!("recover primes eq = {}", priv_rec.primes() == priv_key.primes());
-    // primes 乱序 [q, p]：CRT 内部不同，但 RSA 数学等价——同消息签名必须逐字节相同
+    // primes out of order [q, p]: CRT internals differ but RSA math is equivalent, so the signature must match
     let priv_sw =
         RsaPrivateKey::from_components(n.clone(), e.clone(), d.clone(), vec![q.clone(), p.clone()])
             .unwrap();
@@ -321,7 +321,7 @@ fn main() {
         Err(err) => println!("even-e err = {err}"),
     }
 
-    // ---- ③ 公钥/私钥 DER 导出 + 解析 roundtrip + 篡改 ----
+    // ---- ③ public/private DER export + parse roundtrip + tamper ----
     let pkcs1_pub = pub_key.to_pkcs1_der().unwrap();
     println!("pkcs1 pub der len={} fnv={:016x}", pkcs1_pub.as_bytes().len(), fnv1a(pkcs1_pub.as_bytes()));
     let pub_rt = RsaPublicKey::from_pkcs1_der(pkcs1_pub.as_bytes()).unwrap();
@@ -344,7 +344,7 @@ fn main() {
         "pkcs1 priv roundtrip = {}",
         priv_rt2.n() == priv_key.n() && priv_rt2.d() == priv_key.d() && priv_rt2.primes() == priv_key.primes()
     );
-    // 破坏 DER 顶层 SEQUENCE tag（0x30 → 0xcf）→ 解析必败，与 key 内容无关
+    // Break the DER outer SEQUENCE tag (0x30 -> 0xcf): parsing must fail regardless of key content
     let mut bad_der = spki.as_bytes().to_vec();
     bad_der[0] ^= 0xff;
     match RsaPublicKey::from_public_key_der(&bad_der) {
@@ -352,7 +352,7 @@ fn main() {
         Err(err) => println!("spki tamper err = {err}"),
     }
 
-    // ---- ④ PKCS1v15 签名/验签定向量（sha2 摘要）----
+    // ---- ④ PKCS1v15 sign/verify vectors (sha2 digests) ----
     let msgs: [&[u8]; 2] = [
         b"mirvm rsa differential: pkcs1v15 sign vector #1",
         b"",
@@ -378,7 +378,7 @@ fn main() {
     let d512 = Sha512::digest(msgs[0]);
     let sig512 = priv_key.sign(Pkcs1v15Sign::new::<Sha512>(), &d512).unwrap();
     println!("v15 sha512 fnv={:016x} verify={}", fnv1a(&sig512), pub_key.verify(Pkcs1v15Sign::new::<Sha512>(), &d512, &sig512).is_ok());
-    // new_unprefixed：无 DigestInfo 前缀、不限摘要长——签 3 字节裸输入
+    // new_unprefixed: no DigestInfo prefix and no digest-length limit -- signs 3 raw bytes
     let sig_unp = priv_key.sign(Pkcs1v15Sign::new_unprefixed(), b"\x01\x02\x03").unwrap();
     println!("v15 unprefixed fnv={:016x} verify={}", fnv1a(&sig_unp), pub_key.verify(Pkcs1v15Sign::new_unprefixed(), b"\x01\x02\x03", &sig_unp).is_ok());
     match priv_key.sign(Pkcs1v15Sign::new::<Sha256>(), b"short") {
@@ -386,7 +386,7 @@ fn main() {
         Err(err) => println!("v15 unhashed err = {err}"),
     }
 
-    // ---- ⑤ 加解密定向量 + 重加密逐字节一致 ----
+    // ---- ⑤ encryption vectors + byte-identical re-encryption ----
     let msg_enc: Vec<u8> = (1u8..=32).collect();
     let pt = priv_key.decrypt(Pkcs1v15Encrypt, &CT_VEC).unwrap();
     println!("dec vec ok = {}", pt == msg_enc);
@@ -406,7 +406,7 @@ fn main() {
         Ok(_) => println!("dec tamper unexpectedly ok"),
         Err(err) => println!("dec tamper err = {err}"),
     }
-    let long_msg = vec![0x55u8; 246]; // k-11 = 245 上限之外
+    let long_msg = vec![0x55u8; 246]; // beyond the k-11 = 245 limit
     match pub_key.encrypt(&mut ChaCha20::new(seed(0xe2)), Pkcs1v15Encrypt, &long_msg) {
         Ok(_) => println!("enc too-long unexpectedly ok"),
         Err(err) => println!("enc too-long err = {err}"),
@@ -414,7 +414,7 @@ fn main() {
     let ct_empty = pub_key.encrypt(&mut ChaCha20::new(seed(0xe3)), Pkcs1v15Encrypt, b"").unwrap();
     println!("enc empty roundtrip = {}", priv_key.decrypt(Pkcs1v15Encrypt, &ct_empty).unwrap().is_empty());
 
-    // ---- ⑥ PSS：固定种子 ChaCha rng 注入 ----
+    // ---- ⑥ PSS: fixed-seed ChaCha rng injection ----
     let sig_p1 = priv_key.sign_with_rng(&mut ChaCha20::new(seed(0x51)), Pss::new::<Sha256>(), &d_probe).unwrap();
     println!("pss sig1 = {}", hex(&sig_p1));
     let sig_p1b = priv_key.sign_with_rng(&mut ChaCha20::new(seed(0x51)), Pss::new::<Sha256>(), &d_probe).unwrap();
@@ -429,7 +429,7 @@ fn main() {
     bad_ps[200] ^= 0x80;
     println!("pss tamper = {}", pub_key.verify(Pss::new::<Sha256>(), &d_probe, &bad_ps).is_ok());
     println!("pss saltlen-mismatch = {}", pub_key.verify(Pss::new_with_salt::<Sha256>(20), &d_probe, &sig_p1).is_ok());
-    // 零盐：PSS 退化为完全确定——异种子也必须逐字节一致
+    // Zero salt: PSS becomes fully deterministic, so different seeds must still match byte for byte
     let z1 = priv_key.sign_with_rng(&mut ChaCha20::new(seed(0x51)), Pss::new_with_salt::<Sha256>(0), &d_probe).unwrap();
     let z2 = priv_key.sign_with_rng(&mut ChaCha20::new(seed(0x99)), Pss::new_with_salt::<Sha256>(0), &d_probe).unwrap();
     println!("pss zero-salt seed-independent = {}", z1 == z2);
@@ -437,12 +437,12 @@ fn main() {
     let d384b = Sha384::digest(msgs[0]);
     let s384 = priv_key.sign_with_rng(&mut ChaCha20::new(seed(0x51)), Pss::new::<Sha384>(), &d384b).unwrap();
     println!("pss sha384 fnv={:016x} verify={}", fnv1a(&s384), pub_key.verify(Pss::new::<Sha384>(), &d384b, &s384).is_ok());
-    // Pss 无 rng → InvalidPaddingScheme（注入点存在性的反证）
+    // Pss with no rng -> InvalidPaddingScheme (the counter-proof that the injection point exists)
     match priv_key.sign(Pss::new::<Sha256>(), &d_probe) {
         Ok(_) => println!("pss no-rng unexpectedly ok"),
         Err(err) => println!("pss no-rng err = {err}"),
     }
-    // pss::SigningKey/VerifyingKey：signature trait 面的同一注入通道
+    // pss::SigningKey/VerifyingKey: the same injection channel through the signature traits
     let sk = rsa::pss::SigningKey::<Sha256>::new_with_salt_len(priv_key.clone(), 16);
     let sig_t: rsa::pss::Signature = sk.sign_with_rng(&mut ChaCha20::new(seed(0x53)), msgs[0]);
     println!("pss trait sig = {}", hex(&sig_t.to_bytes()));

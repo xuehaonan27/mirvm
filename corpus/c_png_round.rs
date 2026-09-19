@@ -3,9 +3,9 @@
 [dependencies]
 png = "0.17"
 ---
-// png 0.17 真实二进制 roundtrip：程序化 96x64 RGBA（x*y 正弦/异或图案）→
-// Encoder（含两个 tEXt chunk，Best 压缩）→ Vec<u8> → Decoder 读回逐像素对拍。
-// 覆盖：IHDR 字段、tEXt 写入/读回、deflate 压缩字节、OutputInfo、坏签名/截断两条错误路径。
+// png 0.17 roundtrip: a programmatic 96x64 RGBA image (x*y sine / xor pattern)
+// encoded with two tEXt chunks and Best compression, then decoded per-pixel.
+// Covers IHDR fields, tEXt, the deflate bytes, OutputInfo, and two error paths.
 use png::{BitDepth, ColorType, Compression, Decoder, Encoder};
 
 const W: usize = 96;
@@ -20,7 +20,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-// r = x*y 正弦，g = x^(3y) 异或，b = 二者混合，a = 高位固定 + 低位异或。
+// r = x*y sine, g = x^(3y) xor, b = mix of the two, a = fixed high bits + xor'd low bits.
 fn gen_image() -> Vec<u8> {
     let mut px = vec![0u8; W * H * 4];
     for y in 0..H {
@@ -64,7 +64,7 @@ fn main() {
     println!("png fnv1a = {:016x}", fnv1a(&png));
     println!("png magic = {:02x?}", &png[..8]);
 
-    // ---- decode + 逐像素比对 ----
+    // ---- decode + per-pixel comparison ----
     let mut reader = Decoder::new(&png[..]).read_info().unwrap();
     let cap = reader.output_buffer_size();
     println!("decoder buffer size = {cap}");
@@ -98,7 +98,7 @@ fn main() {
         );
     }
 
-    // ---- 错误路径 ①：坏 PNG 签名 ----
+    // ---- error path ①: bad PNG signature ----
     let mut bad = png.clone();
     bad[1] = b'X';
     match Decoder::new(&bad[..]).read_info() {
@@ -106,7 +106,7 @@ fn main() {
         Err(e) => println!("bad magic err = {e}"),
     }
 
-    // ---- 错误路径 ②：截断的 IDAT ----
+    // ---- error path ②: truncated IDAT ----
     let cut = &png[..png.len() - 40];
     let r: Result<(), png::DecodingError> = (|| {
         let mut reader = Decoder::new(cut).read_info()?;

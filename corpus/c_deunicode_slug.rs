@@ -3,39 +3,39 @@
 [dependencies]
 deunicode = "1"
 slug = "0.1"
-# 注意包名大写：crates.io 上注册名为 `Inflector`（cargo 对 `inflector` 报
-# "no matching package found, perhaps you meant: Inflector"）；其 [lib] 名仍是
-# 小写 `inflector`，Rust 代码照常 `use inflector::...`。
+# Package name is capitalized: crates.io registers it as `Inflector` (cargo
+# reports "no matching package found, perhaps you meant: Inflector" for
+# `inflector`); its [lib] name is lowercase, so code uses `use inflector::...`.
 Inflector = "0.11"
 ---
-// deunicode 1.6 + slug 0.1 + Inflector 0.11（转写表偏门族）差分。
-// deunicode：mapping.txt + pointers.bin 双静态表查表；ASCII 快路径 +
-// Cow 借还；未知字符走 tofu 占位。slug：逐 char deunicode_char 查表，
-// 非 [a-z0-9] 折叠为单个 '-'，去首尾 '-'。Inflector 0.11.4：case 族为
-// 纯 Rust 字符扫描；pluralize/singularize 走 lazy_static + regex 规则表
-// （24 条，rev 序首命中返回）+ special_cases 静态 match + UNACCONTABLE
-// 202 词静态数组——本条同时压 lazy_static 初始化与 regex DFA 编译。
-//
-// 用户命名映射（crate 无 Rails 原名 API，取语义对应物）：
-//   camelize  → to_camel_case / to_pascal_case
-//   underscore→ to_snake_case（另覆盖 screaming_snake/kebab/train）
-//   pluralize → to_plural；singularize → to_singular
-//   humanize  → to_sentence_case（Inflector 无 humanize；sentence case 为
-//               Rails humanize 的去分隔符 + 首字母大写语义子集，另附 title）
-// 覆盖：deunicode/deunicode_with_tofu/deunicode_char 三 API ×12 串（拉丁
-// 扩展/组合符/西里尔/西里尔扩展/希腊古稿/日汉假名/emoji/符号/全角/制表/
-// 谚文/私用区未知）；slugify 全批 + 空串/全分隔/前缀虚线等边界；Inflector
-// camelize、underscore 4 变体、sentence(humanize)/title、pluralize 50 词、
-// singularize 50 词（含 ox/man/woman/die/foot/goose/quiz 不规则族、
-// person~people、mouse~mice、-us→-i、-um/-on→-a、-ix→-ices、-f(e)→-ves、
-// uncountable 谱系）、ordinalize/deordinalize、to_foreign_key、demodulize/
-// deconstantize、class/table case、is_* 判定与 trait Inflector/
-// InflectorNumbers 方法调用面；结尾全结果字节 fnv 指纹。
-// 确定性：全表查询，无时间/地址/随机源；转写结果可能内嵌 \n（deunicode
-// 明示），一律 {:?} 转义打印；不建临时文件；stderr 为空（零 warning）。
+// deunicode 1.6 + slug 0.1 + Inflector 0.11 (the transliteration-table backwater) differential.
+// deunicode: table lookup over mapping.txt + pointers.bin; an ASCII fast path and
+// Cow borrow/return; unknown characters become a tofu placeholder. slug: per-char
+// deunicode_char lookup, folds anything outside [a-z0-9] into a single '-', then
+// trims leading/trailing '-'. Inflector 0.11.4: the case family is a pure Rust
+// char scan; pluralize/singularize go through a lazy_static + regex rule table
+// (24 rules, first hit in reverse order wins) plus a special_cases static match
+// and a 202-word UNACCONTABLE static array, so this case also exercises
+// lazy_static initialization and regex DFA compilation.
+// User-facing name mapping (the crate has no Rails-named API): camelize ->
+// to_camel_case/to_pascal_case, underscore -> to_snake_case, pluralize -> to_plural,
+// singularize -> to_singular, humanize -> to_sentence_case (Rails humanize's
+// separator stripping + first-letter uppercasing), and title case too.
+// Coverage: deunicode/deunicode_with_tofu/deunicode_char, three APIs x 12 strings
+// (Latin extended / combining marks / Cyrillic / Greek / Japanese + kana / emoji /
+// symbols / fullwidth / box drawing / Hangul / private-use unknowns); the slugify
+// batch plus empty/all-separator/leading-dash edges; Inflector camelize, the 4
+// underscore variants, sentence(humanize)/title, pluralize and singularize over 50
+// words each (irregular families ox/man/woman/die/foot/goose/quiz, person~people,
+// mouse~mice, -us->-i, -um/-on->-a, -ix->-ices, -f(e)->-ves, uncountables);
+// ordinalize/deordinalize, to_foreign_key, demodulize/deconstantize, class/table
+// case, the is_* predicates, and the trait method surface.
+// Determinism: all table lookups, no time/address/random source; transliterations
+// can embed \n, so everything prints via {:?}; no temp files; stderr is empty, and
+// the run ends with an FNV fingerprint over all result bytes.
 use deunicode::{deunicode, deunicode_char, deunicode_with_tofu};
-// Inflector 0.11 顶层不 re-export 函数（lib.rs 内为私有 use），公开面是
-// 模块路径函数 + Inflector/InflectorNumbers 两 trait。
+// Inflector 0.11 does not re-export functions at the top level, so the public
+// surface is module-path functions plus the Inflector/InflectorNumbers traits.
 use inflector::cases::camelcase::to_camel_case;
 use inflector::cases::kebabcase::to_kebab_case;
 use inflector::cases::pascalcase::to_pascal_case;
@@ -53,7 +53,7 @@ use inflector::suffix::foreignkey::to_foreign_key;
 use inflector::{Inflector, InflectorNumbers};
 use slug::slugify;
 
-/// 内联 FNV-1a（全结果字节锚定，不依赖打印逐字节比对之外的任何总表）。
+/// Inline FNV-1a (anchors every result byte; no table beyond the printed byte comparison).
 struct Sink(u64);
 
 impl Sink {
@@ -68,20 +68,20 @@ impl Sink {
 fn main() {
     let mut sink = Sink(0xcbf29ce484222325);
 
-    // ① deunicode 三 API：12 批 unicode 串
+    // ① the three deunicode APIs over 12 unicode strings
     let texts = [
-        "Æsop Études Straße HŒLLO Čapek Ñandú Björk Þór", // 拉丁扩展
-        "Déjà Vu: na\u{0303}o, fac\u{0327}ade, a\u{0301}gia", // 组合符叠加
-        "Хрущёв пил квасъ в Москве",                     // 西里尔
-        "Љубав Ґруши Њујорк Џеп",                        // 西里尔扩展
-        "Ἰλιὰς Ὁμήρου, θάλασσα ποντίζεται",              // 希腊（古稿多调符）
-        "日本語のテスト東京ひらがなカタカナ",            // 日汉假名
-        "한국어 시험 서울",                              // 谚文
+        "Æsop Études Straße HŒLLO Čapek Ñandú Björk Þór", // Latin extended
+        "Déjà Vu: na\u{0303}o, fac\u{0327}ade, a\u{0301}gia", // stacked combining marks
+        "Хрущёв пил квасъ в Москве",                     // Cyrillic
+        "Љубав Ґруши Њујорк Џеп",                        // Cyrillic extended
+        "Ἰλιὰς Ὁμήρου, θάλασσα ποντίζεται",              // Greek (polytonic)
+        "日本語のテスト東京ひらがなカタカナ",            // Japanese + kana
+        "한국어 시험 서울",                              // Hangul
         "crab 🦀 party 🎉 rocket 🚀 bulb 💡",            // emoji
-        "€5 £3 ¥100 ©2026 ®™ §4 µm ½×¾÷√∑",              // 符号/数学
-        "ＦＵＬＬＷＩＤＴＨ　ｆｕｌｌ１２３ＡＢＣ",      // 全角（含全角空格）
-        "┌─┐│═╗║╔╝ box drawing ─│┌┐",                    // 制表符
-        "\u{F8FF}\u{E000}\u{10FFFF}\u{0378} priv use",   // 私用区/未分配 → tofu
+        "€5 £3 ¥100 ©2026 ®™ §4 µm ½×¾÷√∑",              // symbols / math
+        "ＦＵＬＬＷＩＤＴＨ　ｆｕｌｌ１２３ＡＢＣ",      // fullwidth (incl. ideographic space)
+        "┌─┐│═╗║╔╝ box drawing ─│┌┐",                    // box drawing
+        "\u{F8FF}\u{E000}\u{10FFFF}\u{0378} priv use",   // private use / unassigned -> tofu
     ];
     for (i, s) in texts.iter().enumerate() {
         let out = deunicode(s);
@@ -91,11 +91,11 @@ fn main() {
         println!("slug[{i}] = {sl:?}");
         sink.feed(&sl);
     }
-    // tofu 自定义占位 + Cow 借还路径（纯 ASCII 输入应原样借还）
+    // Custom tofu placeholder + the Cow borrow/return path (pure ASCII should be borrowed as-is)
     println!("tofu = {:?}", deunicode_with_tofu("private \u{F8FF} use", "{?}"));
     println!("tofu-empty = {:?}", deunicode_with_tofu("\u{F8FF}x", ""));
     println!("ascii-cow = {:?}", deunicode("plain ascii stays"));
-    // deunicode_char：Some/None 双路径
+    // deunicode_char: the Some/None paths
     for ch in ['Æ', 'ß', 'š', '北', 'Ж', 'Ω', '🦀', 'A', '\u{0378}'] {
         println!(
             "char {:?} U+{:04X} => {:?}",
@@ -108,7 +108,7 @@ fn main() {
         );
     }
 
-    // ② slugify 边界：空串 / 全分隔符 / 已有虚线 / 大小写 / 换行制表
+    // ② slugify edges: empty string / all separators / existing dashes / case / newline+tab
     for (i, s) in [
         "",
         "  --__  ",
@@ -127,7 +127,7 @@ fn main() {
         sink.feed(&sl);
     }
 
-    // ③ camelize 谱系：snake/kebab/已驼峰/全大写/双分隔/首尾下划线
+    // ③ camelize family: snake/kebab/already-camel/ALLCAPS/double separator/leading+trailing underscore
     let case_words = [
         "active_record",
         "ActiveRecord",
@@ -162,7 +162,7 @@ fn main() {
         "camelCase".is_pascal_case()
     );
 
-    // ④ underscore 谱系：驼峰/缩写连排/数字夹心 + 三分隔变体
+    // ④ underscore family: camelCase/acronym runs/digits in between + the three separator variants
     for w in [
         "ActiveRecord",
         "XMLHttpRequest",
@@ -197,7 +197,7 @@ fn main() {
         "SCREAMING".is_snake_case()
     );
 
-    // ⑤ humanize 谱系：sentence case 承担 + title case 旁证（见头注映射）
+    // ⑤ humanize family: sentence case carries it, with title case as corroboration (see the header mapping)
     for w in [
         "employee_salary",
         "author_id",
@@ -219,14 +219,14 @@ fn main() {
         "employee_salary".is_sentence_case()
     );
 
-    // ⑥ pluralize：不规则 special 族 + 各正则规则族 + uncountable
+    // ⑥ pluralize: the irregular special family + each regex rule family + uncountable
     #[rustfmt::skip]
     let singulars = [
-        // special_cases 直查表
+        // special_cases direct lookup table
         "ox", "man", "woman", "die", "yes", "foot", "eave", "goose", "tooth", "quiz",
-        // person~people / child~children 正则族
+        // person~people / child~children regex family
         "person", "child",
-        // 常规 -s / -y→-ies / -ey 系
+        // regular -s / -y->-ies / -ey family
         "cat", "book", "toy", "day", "key", "baby", "story", "hobby", "money", "valley",
         // -ch/-sh/-ss/-x/-zz → -es
         "church", "dish", "class", "box", "buzz",
@@ -240,7 +240,7 @@ fn main() {
         "octopus", "virus", "syllabus", "cactus", "alumnus", "locus",
         // -um/-on → -a；-a → -ae；-im
         "datum", "bacterium", "criterion", "phenomenon", "alumna", "vertebra", "seraph", "cherub",
-        // -ix/-ex → -ices；mice/louse 族
+        // -ix/-ex -> -ices; the mice/louse family
         "matrix", "vertex", "index", "appendix", "mouse", "louse",
         // -alias/-us/-gas/-ris → -es
         "bus", "gas", "alias", "status",
@@ -250,14 +250,14 @@ fn main() {
         println!("plural {w} => {p}");
         sink.feed(&p);
     }
-    // uncountable 直通
+    // uncountable passthrough
     for w in ["fish", "sheep", "deer", "information", "species", "series", "aircraft", "rice", "equipment"] {
         let p = to_plural(w);
         println!("plural-un {w} => {p}");
         sink.feed(&p);
     }
 
-    // ⑦ singularize：上面各族的复数形 + 常见规则形 + uncountable
+    // ⑦ singularize: the plural forms of the families above + common regular forms + uncountable
     #[rustfmt::skip]
     let plurals = [
         "oxen", "men", "women", "dice", "yeses", "feet", "eaves", "geese", "teeth", "quizzes",
@@ -302,7 +302,7 @@ fn main() {
         sink.feed(&dc);
     }
 
-    // ⑨ class/table case（heavyweight：内部走 singular/plural + case 组合）
+    // ⑨ class/table case (heavyweight: singular/plural + case composition inside)
     for w in ["posts", "line_items", "people", "data"] {
         let k = w.to_class_case();
         println!("class {w:?} => {k:?} (is_class={})", k.is_class_case());
@@ -314,7 +314,7 @@ fn main() {
         sink.feed(&t);
     }
 
-    // ⑩ trait 方法面：Inflector（&str/String）+ InflectorNumbers（整数）
+    // ⑩ trait method surface: Inflector (&str/String) + InflectorNumbers (integers)
     let t1 = "active_record".to_pascal_case();
     let t2 = String::from("XMLHttp_request").to_snake_case();
     let t3 = "shoes".to_singular();

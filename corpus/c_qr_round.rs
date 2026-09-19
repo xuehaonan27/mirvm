@@ -1,38 +1,38 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# 核心编码器零依赖；image/svg/pic renderer 是可选 feature，本 driver 只用
-# 内建 string/unicode renderer 与 to_colors 矩阵——default-features=false 砍掉
-# image crate 依赖，API 面不变。
+# The core encoder has no dependencies; the image/svg/pic renderers are optional features,
+# and this driver uses only the built-in string/unicode renderer and the to_colors matrix.
+# default-features=false drops the image crate dependency without changing the API surface.
 qrcode = { version = "0.14", default-features = false }
-# rqrr 的 img feature 拉 image crate（不需要）；PreparedImage::prepare_from_greyscale
-# 直接吃闭包灰度图。default-features=false 后只剩 g2p + lru 两个纯 Rust 依赖。
+# rqrr's img feature pulls in the image crate, which is not needed: PreparedImage::
+# prepare_from_greyscale takes a closure grayscale image. default-features=false leaves g2p + lru.
 rqrr = { version = "0.9", default-features = false }
 ---
-// qrcode 0.14 生成 + rqrr 0.9 检测解码的 QR 闭环差分。
-// 覆盖：
-//  ① 固定文本 × (版本,纠错级) 四档（v1L/v2M/v4Q/v5H，v5H 含 CJK UTF-8）：
-//     qrcode::with_version 编码 → width/dark 计数/01 谱 FNV → 自渲染灰度图 →
-//     rqrr prepare_from_greyscale → detect_grids → decode → 与原文逐字节相等
-//     + MetaData(version/ecc/mask)。
-//  ② QrCode::new 自动版本 + optimize.rs 模式分段（Numeric/Alphanumeric/Byte/
-//     Kanji/混合五种文本）+ with_error_correction_level。
-//  ③ renderer 三面：&str ██ 块渲染（含 quiet zone）、char 渲染（关 quiet zone，
-//     21×21 矩阵原文打出）、unicode::Dense1x2、min_dimensions 放大。
-//  ④ rqrr 图像路径：中心 5×5 模块翻转仍解码（Reed-Solomon 纠错深路径）、
-//     反色图/空白图 detect 0 grid、双码同框 detect 2 grid 解码排序输出、
-//     decode_to(writer) 字节级比对。
-//  ⑤ 错误路径：DataTooLong、InvalidVersion（Normal 0 / Normal 41 / Micro1+H /
-//     Micro4+H）；Micro QR 正常档（micro1L/micro2M/micro3M）编码。
+// QR closed-loop differential: qrcode 0.14 generates, rqrr 0.9 detects and decodes.
+// Coverage:
+//  ① fixed text x four (version, EC level) pairs (v1L/v2M/v4Q/v5H, v5H with CJK UTF-8):
+//     qrcode::with_version encodes -> width/dark count/01-spectrum FNV -> self-rendered gray
+//     image -> rqrr prepare_from_greyscale -> detect_grids -> decode -> byte-for-byte equal
+//     to the source text + MetaData(version/ecc/mask).
+//  ② QrCode::new auto version + optimize.rs mode segmentation (Numeric/Alphanumeric/Byte/
+//     Kanji/mixed text) + with_error_correction_level.
+//  ③ three renderer surfaces: &str ██ block render (with quiet zone), char render (quiet zone
+//     off, the 21x21 matrix printed verbatim), unicode::Dense1x2, min_dimensions scaling.
+//  ④ rqrr image paths: a centered 5x5 module flip still decodes (deep Reed-Solomon correction),
+//     inverted/blank images detect 0 grids, two codes in one frame detect 2 grids and decode in
+//     sorted order, decode_to(writer) compares bytes.
+//  ⑤ error paths: DataTooLong, InvalidVersion (Normal 0 / Normal 41 / Micro1+H / Micro4+H);
+//     Micro QR normal modes (micro1L/micro2M/micro3M) encode.
 //
-// 已知坑（上游限制，语义绕行）：
-//  - rqrr 0.9 检测要求模块 ≥2px：scale=1（模块=1px）会在 rqrr 内部
-//    identify/grid.rs `assertion failed: scan >= 1` panic——全程 scale=2 渲染。
-//  - qrcode 的 Version::Micro(0) 在上游 cast.rs 直接 panic（非 QrError），
-//    不作为错误路径用例。
-//  - rqrr MetaData.ecc_level 是 QR 格式信息原始 2bit（M=0/L=1/H=2/Q=3），
-//    与 qrcode EcLevel 编号不同——只按原值打印，不做映射。
-// 确定性：纯计算无时间/线程/哈希序；输出为计数/布尔/定值字符串/FNV hex。
+// Known pitfalls (upstream limits, semantically bypassed):
+//  - rqrr 0.9 needs modules >=2px: scale=1 (1px modules) panics inside rqrr's
+//    identify/grid.rs with `assertion failed: scan >= 1`, so everything renders at scale=2.
+//  - qrcode's Version::Micro(0) panics directly in upstream cast.rs (not a QrError), so it is
+//    not used as an error-path case.
+//  - rqrr MetaData.ecc_level is the raw 2-bit QR format value (M=0/L=1/H=2/Q=3), numbered
+//    differently from qrcode EcLevel, so it prints as-is with no mapping.
+// Determinism: pure computation, no time/threads/hash order; counts, bools, fixed strings, FNV hex.
 use qrcode::render::unicode;
 use qrcode::{Color, EcLevel, QrCode, QrResult, Version};
 use rqrr::PreparedImage;
@@ -46,7 +46,7 @@ fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// 矩阵 01 谱（行主序，暗=1）+ 暗模块计数。
+/// Row-major 01 spectrum of the matrix (dark=1) plus the dark-module count.
 fn spectrum(code: &QrCode) -> (usize, String) {
     let colors = code.to_colors();
     let mut dark = 0usize;
@@ -62,8 +62,8 @@ fn spectrum(code: &QrCode) -> (usize, String) {
     (dark, s)
 }
 
-/// 自渲染灰度位图：暗模块=0 / 亮=255，每模块 scale×scale 像素，四周 qz 模块宽
-/// quiet zone。返回 (像素缓冲, 边长)。
+/// Self-rendered grayscale bitmap: dark modules 0 / light 255, each module scale x scale
+/// pixels, surrounded by a qz-module quiet zone. Returns (pixel buffer, side length).
 fn render_gray(code: &QrCode, scale: usize, qz: usize) -> (Vec<u8>, usize) {
     let n = code.width();
     let colors = code.to_colors();
@@ -82,7 +82,7 @@ fn render_gray(code: &QrCode, scale: usize, qz: usize) -> (Vec<u8>, usize) {
     (img, w)
 }
 
-/// 单图检测 + 解码的摘要行。`expect` 为期望解出的原文（None = 只报 grid 数）。
+/// Detect + decode summary line. `expect` is the text to decode (None = report the grid count only).
 fn probe(img: &[u8], w: usize, h: usize, expect: Option<&str>) -> String {
     let mut prep = PreparedImage::prepare_from_greyscale(w, h, |x, y| img[y * w + x]);
     let grids = prep.detect_grids();
@@ -102,7 +102,7 @@ fn probe(img: &[u8], w: usize, h: usize, expect: Option<&str>) -> String {
     out
 }
 
-/// QrResult 的错误文本（QrCode 不实现 Debug，不能 unwrap_err）。
+/// Error text for a QrResult (QrCode does not implement Debug, so unwrap_err is unavailable).
 fn es(r: QrResult<QrCode>) -> String {
     match r {
         Ok(_) => "unexpected-ok".to_string(),
@@ -111,7 +111,7 @@ fn es(r: QrResult<QrCode>) -> String {
 }
 
 fn main() {
-    // ---- ① 编码 × 闭环解码套件 ----
+    // ---- ① encode x closed-loop decode suite ----
     let cases: [(&str, &str, Version, EcLevel); 4] = [
         ("v1L", "MIRVM-QR-01", Version::Normal(1), EcLevel::L),
         ("v2M", "mirvm qr round v2M", Version::Normal(2), EcLevel::M),
@@ -141,7 +141,7 @@ fn main() {
         );
     }
 
-    // ---- ② 自动版本 + 模式分段 ----
+    // ---- ② auto version + mode segmentation ----
     let modes: [(&str, &str); 5] = [
         ("numeric", "0123456789012345678901234567890123456789"),
         ("alnum", "HELLO WORLD $%*+-./: MIRVM 42"),
@@ -168,7 +168,7 @@ fn main() {
         fnv1a(spec.as_bytes())
     );
 
-    // ---- ③ renderer 三面（v1L 小码）----
+    // ---- ③ three renderer surfaces (small v1L code) ----
     let r1 = QrCode::with_version("MIRVM-QR-01", Version::Normal(1), EcLevel::L).unwrap();
     let s_block = r1.render::<&str>().dark_color("██").light_color("  ").build();
     println!(
@@ -206,10 +206,10 @@ fn main() {
         fnv1a(s_min.as_bytes())
     );
 
-    // ---- ④ rqrr 图像路径（v5H 底图）----
+    // ---- ④ rqrr image paths (v5H base image) ----
     let ecc_text = "mirvm 闭环 QR emoji-free 汉字 混合";
     let ecc_code = QrCode::with_version(ecc_text, Version::Normal(5), EcLevel::H).unwrap();
-    // 中心 5×5 模块翻转（H 级 30% 纠错余量内）→ 仍应解码出原文
+    // Centered 5x5 module flip (within H-level 30% correction budget) -> must still decode
     let (mut dmg, w) = render_gray(&ecc_code, 2, 4);
     for my in 10..15 {
         for mx in 10..15 {
@@ -222,14 +222,14 @@ fn main() {
         }
     }
     println!("damaged {}", probe(&dmg, w, w, Some(ecc_text)));
-    // 反色图：finder 图形反转 → 检不出 grid
+    // Inverted image: finder patterns reversed -> no grid detected
     let (img, w) = render_gray(&ecc_code, 2, 4);
     let inv: Vec<u8> = img.iter().map(|&b| 255 - b).collect();
     println!("inverted {}", probe(&inv, w, w, None));
-    // 空白图
+    // Blank image
     let blank = vec![255u8; 64 * 64];
     println!("blank {}", probe(&blank, 64, 64, None));
-    // 双码同框：v1M + v2M 水平拼接，检测 2 个 grid，解码结果排序后输出
+    // Two codes in one frame: v1M + v2M side by side, 2 grids detected, decoded output sorted
     let g1 = QrCode::with_version("FIRST-GRID", Version::Normal(1), EcLevel::M).unwrap();
     let g2 = QrCode::with_version("SECOND GRID 22", Version::Normal(2), EcLevel::M).unwrap();
     let (i1, w1) = render_gray(&g1, 2, 4);
@@ -259,7 +259,7 @@ fn main() {
         .collect();
     decoded.sort();
     println!("two-grid n={} decoded={decoded:?}", grids.len());
-    // decode_to(writer) 字节级比对 + into_colors 消费 API
+    // decode_to(writer) byte comparison + the consuming into_colors API
     let mut prep = PreparedImage::prepare_from_greyscale(w, w, |x, y| img[y * w + x]);
     let grids = prep.detect_grids();
     let mut out = Vec::new();
@@ -273,7 +273,7 @@ fn main() {
         colors.len()
     );
 
-    // ---- ⑤ 错误路径 + Micro QR ----
+    // ---- ⑤ error paths + Micro QR ----
     println!(
         "err/toolong {}",
         es(QrCode::with_version(

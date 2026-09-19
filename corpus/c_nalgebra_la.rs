@@ -3,20 +3,20 @@
 [dependencies]
 nalgebra = "0.33"
 ---
-// nalgebra 0.33 线性代数浮点重差分。固定字面量矩阵（无随机源）：
-//   spd3  = 3x3 对称正定（对角占优）
-//   indef = 3x3 对称不定（cholesky 失败路径）
-//   psd3  = 3x3 rank-1 半正定（精确奇异，try_inverse/solve 失败路径）
-//   gen4  = 4x4 一般（非对称，复特征值路径）
-//   hilb4 = 4x4 Hilbert 病态/近奇异（A[i][j]=1/(i+j+1)）
-//   spd3f = 3x3 f32 对称正定（f32 路径）
-// 覆盖：cholesky(L bits 与不定 None) / LU(solve b 固定 + is_invertible) /
-// QR(Q、R 全元素 bits) / SVD(singular_values bits + rank) /
-// SymmetricEigen(eigenvalues bits + eigenvectors bits) / 非对称 Complex
-// eigenvalues / determinant / try_inverse(Some/None) / 矩阵-向量乘 /
-// 范数族(norm/norm_squared/lp1/lp3/normalize/dot/metric_distance/frobenius/
-// trace/amax)。全部 f64 打印 to_bits() 锁位型，外加每矩阵 FNV-1a 汇总行。
-// 确定性：输出只由字面量与 IEEE 754 基本运算决定；无 HashMap/时间/地址。
+// nalgebra 0.33 floating-point linear-algebra differential, over fixed literal matrices:
+//   spd3  = 3x3 symmetric positive definite (diagonally dominant)
+//   indef = 3x3 symmetric indefinite (cholesky failure path)
+//   psd3  = 3x3 rank-1 positive semidefinite (exactly singular, try_inverse/solve failure)
+//   gen4  = 4x4 general (non-symmetric, complex eigenvalue path)
+//   hilb4 = 4x4 Hilbert ill-conditioned/near-singular (A[i][j]=1/(i+j+1))
+//   spd3f = 3x3 f32 symmetric positive definite (f32 path)
+// Coverage: cholesky (L bits and the indefinite None) / LU (solve with a fixed b plus
+// is_invertible) / QR (every element of Q and R as bits) / SVD (singular_values bits and
+// rank) / SymmetricEigen (eigenvalue and eigenvector bits) / non-symmetric complex
+// eigenvalues / determinant / try_inverse (Some/None) / matrix-vector product / the norm
+// family (norm/norm_squared/lp1/lp3/normalize/dot/metric_distance/frobenius/trace/amax).
+// Every f64 prints to_bits() to pin the bit pattern, plus an FNV-1a summary line per
+// matrix. Deterministic: output depends only on the literals and IEEE 754 primitives.
 use nalgebra::{Matrix3, Matrix4, SMatrix, SVector, SymmetricEigen, Vector3, Vector4};
 
 fn fnv_mix(h: &mut u64, bytes: &[u8]) {
@@ -99,7 +99,7 @@ fn main() {
     let b3 = Vector3::new(1.0, -2.0, 3.5);
     let b4 = Vector4::new(2.0, 0.5, -1.0, 4.0);
 
-    // —— cholesky：SPD 出 L；不定/psd-rank1 失败路径 ——
+    // —— cholesky: SPD yields L; indefinite and psd-rank1 take the failure path ——
     match spd3.cholesky() {
         Some(ch) => dumpm("spd3.chol.L", &ch.unpack()),
         None => println!("spd3.chol none"),
@@ -107,7 +107,7 @@ fn main() {
     println!("indef.chol.is_none={}", indef.cholesky().is_none());
     println!("psd3.chol.is_none={}", psd3.cholesky().is_none());
 
-    // —— LU：solve 固定 b；精确奇异 → None ——
+    // —— LU: solve with fixed b; exactly singular -> None ——
     let lu = spd3.lu();
     println!("spd3.lu.invertible={}", lu.is_invertible());
     match lu.solve(&b3) {
@@ -130,13 +130,13 @@ fn main() {
         psd3.lu().solve(&b3).is_none()
     );
 
-    // —— 行列式（含病态 ~1.65e-7 与精确 0）——
+    // —— determinant (including the ill-conditioned ~1.65e-7 and exact 0) ——
     println!("spd3.det={}", b64(spd3.determinant()));
     println!("gen4.det={}", b64(gen4.determinant()));
     println!("hilb4.det={}", b64(hilb4.determinant()));
     println!("psd3.det={}", b64(psd3.determinant()));
 
-    // —— 逆：Some/None 双路径 ——
+    // —— inverse: both the Some and None paths ——
     match spd3.try_inverse() {
         Some(m) => dumpm("spd3.inv", &m),
         None => println!("spd3.inv none"),
@@ -151,7 +151,7 @@ fn main() {
     }
     println!("psd3.inv.is_none={}", psd3.try_inverse().is_none());
 
-    // —— QR：Q、R 全元素 bits 谱（一般矩阵 + 病态矩阵）——
+    // —— QR: bits for every element of Q and R (general and ill-conditioned matrices) ——
     let (q, r) = gen4.qr().unpack();
     dumpm("gen4.qr.Q", &q);
     dumpm("gen4.qr.R", &r);
@@ -159,7 +159,7 @@ fn main() {
     dumpm("hilb4.qr.Q", &qh);
     dumpm("hilb4.qr.R", &rh);
 
-    // —— SVD：奇异值 bits + rank（病态 σ min 与 rank-1 σ 谱）——
+    // —— SVD: singular value bits plus rank (ill-conditioned sigma min and rank-1) ——
     let svd4 = gen4.svd(true, true);
     dumpv("gen4.svd.s", &svd4.singular_values);
     println!("gen4.svd.rank@1e-10={}", svd4.rank(1e-10));
@@ -170,7 +170,7 @@ fn main() {
     dumpv("psd3.svd.s", &svdp.singular_values);
     println!("psd3.svd.rank@1e-10={}", svdp.rank(1e-10));
 
-    // —— SymmetricEigen：SPD / 不定 / rank-1 半正定 ——
+    // —— SymmetricEigen: SPD / indefinite / rank-1 positive semidefinite ——
     let se = SymmetricEigen::new(spd3);
     dumpv("spd3.eig.vals", &se.eigenvalues);
     dumpm("spd3.eig.vecs", &se.eigenvectors);
@@ -179,7 +179,7 @@ fn main() {
     let sep = SymmetricEigen::new(psd3);
     dumpv("psd3.eig.vals", &sep.eigenvalues);
 
-    // —— 实 Schur 分解的复特征值（含 2x2 块 → 共轭对路径）——
+    // —— complex eigenvalues from the real Schur decomposition (2x2 blocks) ——
     let ces = gen4.schur().complex_eigenvalues();
     for (i, e) in ces.iter().enumerate() {
         println!(
@@ -189,11 +189,11 @@ fn main() {
         );
     }
 
-    // —— 矩阵-向量乘 ——
+    // —— matrix-vector product ——
     dumpv("gen4*vb", &(gen4 * b4));
     dumpv("spd3*v3", &(spd3 * b3));
 
-    // —— 范数族 ——
+    // —— norm family ——
     let v = Vector3::new(3.0, -4.0, 1.5);
     let w = Vector3::new(-1.0, 2.0, 0.5);
     println!("v.norm={}", b64(v.norm()));
@@ -207,7 +207,7 @@ fn main() {
     println!("gen4.trace={}", b64(gen4.trace()));
     println!("gen4.amax={}", b64(gen4.amax()));
 
-    // —— f32 路径：3x3 SPD 全链条 ——
+    // —— f32 path: the whole 3x3 SPD chain ——
     let spd3f = Matrix3::<f32>::new(3.0, 0.5, 0.25, 0.5, 2.0, 1.0, 0.25, 1.0, 4.0);
     let b3f = Vector3::<f32>::new(1.0, 2.0, 3.0);
     println!("spd3f.det={}", b32(spd3f.determinant()));

@@ -5,8 +5,9 @@ edition = "2024"
 publish = false
 
 [features]
-# cranelift：真 JIT 接入（spike5 起）。tsan/ harness 不开此 feature → spike5 被排除，
-# TSan 通道不受重依赖影响（引擎核心隔离纪律的延伸）。
+# cranelift: the real JIT backend. The tsan/ harness does not enable this feature,
+# so it stays off the heavy dependency and the TSan channel is unaffected (an
+# extension of the engine-core isolation discipline).
 default = ["cranelift"]
 cranelift = [
     "dep:cranelift-codegen",
@@ -20,7 +21,8 @@ cranelift = [
 [dependencies]
 anyhow = "1.0.103"
 blake3 = "1.8"
-# cranelift 家族版本锁一致；gimli 与 cranelift-codegen 内部所用对齐（类型互通）
+# Keep the cranelift family on one version; gimli is aligned with the one
+# cranelift-codegen uses internally (the types interop).
 cranelift-codegen = { version = "0.133.1", optional = true, features = ["unwind"] }
 cranelift-frontend = { version = "0.133.1", optional = true }
 cranelift-jit = { version = "0.133.1", optional = true }
@@ -35,12 +37,12 @@ rustc-build-sysroot = "0.5.13"
 rustc_version = "0.4.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-# D15（砍 cargo，src/cargoless/）：自有依赖解析与编译调度
+# Dependency resolution and build scheduling for the cargoless path (src/cargoless/).
 toml = { version = "1.1", features = ["serde", "preserve_order"] }
 semver = { version = "1.0.28", features = ["serde"] }
 pubgrub = "0.4"
-# version-ranges 的 semver 模块（Ranges::from_req）默认不编，显式开 feature
-# （与 pubgrub 的传递依赖做 feature 统一）
+# version-ranges' semver module (Ranges::from_req) is not compiled by default;
+# enable the feature explicitly to feature-unify with pubgrub's transitive dependency.
 version-ranges = { version = "0.1.3", features = ["semver"] }
 ureq = "3.3"
 flate2 = "1.1"
@@ -49,13 +51,15 @@ log = "0.4"
 phf = "0.14.0"
 memmap2 = "0.2.3"
 
-# 让 rust-analyzer 认识 rustc_private crates（需在 IDE 端开启 rust-analyzer.rustc.source = "discover"）
+# Lets rust-analyzer see the rustc_private crates (enable
+# rust-analyzer.rustc.source = "discover" on the IDE side).
 [package.metadata.rust-analyzer]
 rustc_private = true
 
-# nightly-2026-07-02 / LLVM 22 在无完整 DWARF 的 release 构建中会误编译
-# 解释器递归 panic 的清理链；tests/run.sh fast 的 catch/panic 用例可稳定复现。
-# 让 DWARF 参与代码生成后再剥离，既保留正确的 unwind 控制流，也不放大交付物。
+# nightly-2026-07-02 / LLVM 22 miscompiles the cleanup chain of a recursive
+# interpreter panic in release builds without full DWARF; the catch/panic cases in
+# tests/run.sh fast reproduce it reliably. Generating code with DWARF and stripping
+# it afterwards keeps the unwind control flow correct without growing the artifact.
 [profile.release]
 debug = 2
 strip = "debuginfo"

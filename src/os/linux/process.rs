@@ -18,24 +18,27 @@ pub fn getenv(name_addr: u64) -> u64 {
     unsafe { libc::getenv(name_addr as *const libc::c_char) as u64 }
 }
 
-/// write(2)：返回已写字节数或 -1（errno 语义留给调用方）。
+/// write(2): returns the byte count written or -1 (errno semantics stay with the
+/// caller).
 pub fn write_fd(fd: i32, buf_addr: u64, len: usize) -> i64 {
     unsafe { libc::write(fd, buf_addr as *const libc::c_void, len) as i64 }
 }
 
-/// strlen(3)（guest 侧 NUL 结尾字符串真地址）。
+/// strlen(3) on a guest-side NUL-terminated string's true address.
 pub fn c_strlen(s_addr: u64) -> u64 {
     unsafe { libc::strlen(s_addr as *const libc::c_char) as u64 }
 }
 
-/// fork(2)：父进程返回子 pid，子进程返回 0，失败 -1。
-/// 守卫（单线程放行）在引擎侧；exec 族走 foreign 直通，不经此。
+/// fork(2): the parent returns the child pid, the child returns 0, failure -1.
+/// The single-thread guard lives in the engine; the exec family goes through the
+/// foreign passthrough instead of this entry.
 pub fn fork() -> i64 {
     unsafe { libc::fork() as i64 }
 }
 
-/// raise(3)：向当前宿主线程同步投递信号。Engine 对 guest handler 的同步
-/// 执行顺序在上层裁决；本层只保留 libc 返回值/errno 语义。
+/// raise(3): synchronously delivers a signal to the current host thread. The
+/// engine decides the ordering of synchronous guest handler execution upstairs;
+/// this layer only preserves libc's return value and errno semantics.
 pub fn raise(signum: i32) -> i32 {
     unsafe { libc::raise(signum) }
 }
@@ -51,33 +54,39 @@ pub fn set_errno(value: i32) {
     unsafe { *libc::__errno_location() = value };
 }
 
-/// atexit(3)：挂 native trampoline（引擎链接的 libc atexit，非 guest dlsym）。
+/// atexit(3): registers a native trampoline through the libc `atexit` the engine
+/// links, not a guest `dlsym`.
 pub fn atexit_native(cb: extern "C" fn()) -> i32 {
     unsafe { libc::atexit(cb) }
 }
 
-/// JIT 编译码 libcall 符号地址（cranelift `jb.symbol` 注册用——编译码直接
-/// call 真 libc 函数，地址解析属 OS 符号面）。
+/// libcall symbol address for JIT-compiled code (registered with cranelift
+/// `jb.symbol`): compiled code calls the real libc function directly, so address
+/// resolution belongs to the OS symbol surface.
 pub fn memmove_addr() -> *const u8 {
     libc::memmove as *const u8
 }
-/// 同上（memset）。
+/// Same as above (memset).
 pub fn memset_addr() -> *const u8 {
     libc::memset as *const u8
 }
-/// 同上（memcmp）。
+/// Same as above (memcmp).
 pub fn memcmp_addr() -> *const u8 {
     libc::memcmp as *const u8
 }
 
-/// T5 asm-stub syscall 拦截 dispatch（decision-history §7.18）：asm-stub 内
-/// `syscall` 指令被改写为经间接槽调 `mirvm_syscall_trampoline`（arch::
-/// x86_64::asmstub，整数/flags/xmm/mxcsr 已按真 syscall 纪律保全），落此。
-/// v1 = 直通 + `MIRVM_SYSCALL_TRACE` 旋钮；**D10 虚拟化语义的钩子挂载点**——
-/// 统一 fd 空间/假 FS/计费进来时在本函数分诊，调用方零改动。
+/// Dispatch entry for `syscall` instructions that asm stubs rewrote to call
+/// `mirvm_syscall_trampoline` through an indirect slot (arch::x86_64::asmstub;
+/// integer/flags/xmm/mxcsr state is already preserved under the real syscall
+/// discipline).
+///
+/// Currently a passthrough plus the `MIRVM_SYSCALL_TRACE` knob. This is also the
+/// hook point for virtualization semantics: a unified fd space, a fake FS, or
+/// accounting would triage here, with no change at the call sites.
 ///
 /// # Safety
-/// 仅由 trampoline 以 syscall 契约调起：args 指向 6 个 u64（a1..a6）。
+/// Called only by the trampoline under the syscall contract: `args` points to 6
+/// u64s (a1..a6).
 #[unsafe(no_mangle)]
 pub extern "C" fn mirvm_syscall_dispatch(nr: i64, args: *const u64) -> i64 {
     let args: &[u64] = unsafe { std::slice::from_raw_parts(args, 6) };
@@ -96,12 +105,13 @@ pub extern "C" fn mirvm_syscall_dispatch(nr: i64, args: *const u64) -> i64 {
     let result = syscall(nr, args);
     // A generic `SYS_fork` that returns here is a fork child. The interpreter's
     // HostFork builtin notifies separately; both converge on the same hook so
-    // coverage does not depend on how the guest spelled the fork (design §6.3).
+    // coverage does not depend on how the guest spelled the fork.
     crate::telemetry::capture::fork_child_guard(nr, result);
     result
 }
-/// syscall(2) 变参直通：全未列举 syscall 族的唯一通道。args 取前 6 参
-/// （x86_64 寄存器上限），超出忽略——与归并前 HostSyscall 臂的界一致。
+/// syscall(2) varargs passthrough: the only channel for syscall families not
+/// listed above. Takes the first 6 args (the x86_64 register limit); the rest are
+/// ignored.
 pub fn syscall(n: i64, args: &[u64]) -> i64 {
     let a = |i: usize| args.get(i).copied().unwrap_or(0);
     unsafe {

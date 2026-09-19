@@ -1,29 +1,28 @@
-//! M5.3b: bytecode → Cranelift translator (scalar subset) + compiler service thread
-//! (m5.3-design §4, D3/D4/D5).
+//! Bytecode -> Cranelift translator (scalar subset) + compiler service thread.
 //!
-//! Input = frozen `ir::FuncBody` (D3: JIT consumes bytecode, not MIR; tcx does not enter the
-//! execution phase).
-//! Semantic contract = **bit-identical to the interpreter** (JIT-on/off differential is the
+//! Input = frozen `ir::FuncBody`: the JIT consumes bytecode, not MIR, and `tcx` does not enter
+//! the execution phase.
+//! Semantic contract = **bit-identical to the interpreter** (the JIT-on/off differential is the
 //! first oracle): all values preserve the "I64 zero-extended to width" slot invariant; operations
 //! mirror interp's int_bin/int_cmp/int_ovf identities; results are masked back by width band.
-//! Frame locals are all promoted to Cranelift SSA variables (v1 admission excludes address-of /
-//! memory operands ⇒ no stack frame memory); entry uniformly defs 0 (valid MIR has no
-//! read-before-write paths, this makes it deterministic).
+//! Frame locals are all promoted to Cranelift SSA variables (admission excludes address-of /
+//! memory operands => no stack frame memory); entry uniformly defs 0 (valid MIR has no
+//! read-before-write paths, which makes this deterministic).
 //!
-//! Calls (D5 two entries + PLT):
-//! - **fast**: pure guest signature (n×I64 → 0/1×I64). Compiled code calls via `slots_fast[callee]`
-//!   memory indirection (load + call_indirect, call site has constant shape); slots of not-yet-
-//!   compiled callees first receive a **c2i trampoline** (fast shape, internally packs arguments
-//!   and calls `mirvm_c2i` back to the interpreter).
-//! - **packed**: `extern "C-unwind" fn(*const u64, *mut u64)` — one interp i2c hop
+//! Calls (two entries + PLT):
+//! - **fast**: pure guest signature (n x I64 -> 0/1 x I64). Compiled code calls via
+//!   `slots_fast[callee]` memory indirection (load + call_indirect, call site has constant
+//!   shape); slots of not-yet-compiled callees first receive a **c2i trampoline** (fast
+//!   shape, internally packs arguments and calls `mirvm_c2i` back to the interpreter).
+//! - **packed**: `extern "C-unwind" fn(*const u64, *mut u64)` -- one interp i2c hop
 //!   (call_guest reads `slots[f]`).
 //!
-//! Publish order = fast first, then packed (Release); call_guest Acquire read ⇒ any thread
+//! Publish order = fast first, then packed (Release); call_guest Acquire read => any thread
 //! entering compiled code must see its callee trampoline/entry (happens-before chain).
 //!
-//! unwind (D6 v1 = CFI-only): spike5 pipeline — create_unwind_info → gimli FrameTable
-//! → whole `.eh_frame` section registered at once. Admission already excludes cleanup edges
-//! (unwind-transparent: panic only passes through, does not land).
+//! unwind (CFI-only): create_unwind_info -> gimli FrameTable -> whole `.eh_frame` section
+//! registered at once. Admission already excludes cleanup edges (unwind-transparent: panic
+//! only passes through, does not land).
 //!
 //! Single worker thread holds the JITModule (code memory lives for the process lifetime;
 //! cranelift-jit has no per-function release).
@@ -35,7 +34,8 @@ use super::helpers::*;
 use super::translate::Translator;
 use super::*;
 
-/// Start the compiler service (called by run_vm_engine after Shared is finalized; not started when --jit off).
+/// Start the compiler service (called by run_vm_engine after Shared is finalized;
+/// not started when --jit off).
 pub fn start(shared: &std::sync::Arc<Shared>) {
     if !shared.jit.enabled {
         return;
@@ -43,7 +43,8 @@ pub fn start(shared: &std::sync::Arc<Shared>) {
     shared.jit.stopping.store(false, Ordering::Release);
     let (tx, rx): (Sender<u32>, Receiver<u32>) = std::sync::mpsc::channel();
     *shared.jit.queue.lock().unwrap() = Some(tx);
-    // 编译失败/线程死亡 = 静默维持解释（语义面零依赖 JIT）
+    // A failed compilation or a dead worker just stays interpreted; no semantic
+    // path depends on the JIT.
     let worker_shared = std::sync::Arc::clone(shared);
     // The worker compiles for the Engine's frozen domain, so the code it
     // publishes lands in the slot set dispatch will read for that domain.
@@ -54,8 +55,9 @@ pub fn start(shared: &std::sync::Arc<Shared>) {
     *shared.jit.worker.lock().unwrap() = worker.ok();
 }
 
-/// 结束本 Engine 的编译服务。已发布机器码继续有效；尚未发布的请求回到解释器
-/// 兜底。每个 Engine 自己 join，不能让一个进程全局指针替最后启动者收尾。
+/// Stop this Engine's compiler service. Already-published machine code stays valid;
+/// requests not yet published fall back to the interpreter. Each Engine joins its own
+/// worker, so no process-global pointer can let the last starter reap an earlier one.
 pub fn stop(shared: &Shared) {
     shared.jit.stopping.store(true, Ordering::Release);
     shared.jit.queue.lock().unwrap().take();
@@ -93,64 +95,72 @@ fn worker(shared: std::sync::Arc<Shared>, rx: Receiver<u32>, domain: CodeDomain)
             }
         }
     }
-    // JIT 代码一经发布就可能仍在进程级线程池的休眠栈上。退出收尾必须
-    // join 编译线程，不能让它与 libc 清理并发；但也不能析构 JITModule
-    // 并解除已发布代码映射。地址空间由随后的进程退出一次性回收。
+    // Published JIT code may still be live on a sleeping stack in the process-wide
+    // thread pool. Teardown has to join the compile thread rather than race libc
+    // cleanup, and it must not destruct the JITModule either, since that would unmap
+    // published code. The address space is reclaimed in one go at process exit.
     std::mem::forget(c);
 }
 
-// ===== 运行期助手（JIT 码经 import symbol 调回引擎）=====
+// ===== Runtime helpers (compiled code calls back into the engine through imported symbols) =====
 
-/// c2i 万能壳：编译码调未编译 guest 函数（经蹦床打包）→ 回解释器。
-/// ctx 恢复 = 边界 TLS attach（thunk 工厂同款，幂等）。
+/// Compiler for one code domain: owns the Cranelift module, the ids of every imported
+/// helper, and the unwind records accumulated for the batch being defined.
 struct Compiler<'a> {
     shared: &'a Shared,
-    /// Which domain's ISA this compiler builds with and which slot set it
-    /// publishes into. Plain borrows the historical slots, so its shape and cost
-    /// are unchanged.
+    /// Which domain's ISA this compiler builds with and which slot set it publishes
+    /// into. Plain publishes into `Jit::slots`/`slots_fast`, Trace into its own pair.
     domain: CodeDomain,
     module: JITModule,
     fbc: FunctionBuilderContext,
+    /// `mirvm_c2i`: compiled code reaches an uncompiled guest function through it and
+    /// lands back in the interpreter. `ctx` restoration is the boundary TLS attach,
+    /// shared with the thunk factory and idempotent.
     c2i: ClifFuncId,
     call_main_catch: ClifFuncId,
     unreachable: ClifFuncId,
-    /// M5.4a：Copy/帧清零的宿主 memmove/memset 通道
+    /// Host memmove/memset channel used by Copy and frame zeroing.
     memmove: ClifFuncId,
     memset: ClifFuncId,
-    /// M5.4b-1：MemCmp（compare_bytes intrinsic）
+    /// MemCmp (the `compare_bytes` intrinsic).
     memcmp: ClifFuncId,
-    /// M5.4b-1：除零诊断退出（interp engine_abort 同文案同码）
+    /// Divide-by-zero diagnostic exit; same message and exit code as interp's
+    /// `engine_abort`.
     div_zero: ClifFuncId,
-    /// M5.4b-1：volatile 读/写（interp opaque 字节载体同一实现）
+    /// Volatile read/write, sharing the interpreter's opaque-byte carrier.
     volatile_load: ClifFuncId,
     volatile_store: ClifFuncId,
-    /// T1-b：CallIndirect/TlsRef 助手（helpers.rs 同本体）
+    /// CallIndirect/TlsRef helpers; same bodies as `helpers.rs`.
     call_indirect: ClifFuncId,
     tls_ref: ClifFuncId,
     call_foreign: ClifFuncId,
-    /// T1-b：CallBuiltin/分配系快路助手（helpers.rs 同 exec_builtin 本体）
+    /// CallBuiltin and the allocation fast path; same `exec_builtin` bodies as
+    /// `helpers.rs`.
     call_builtin: ClifFuncId,
     alloc: ClifFuncId,
-    /// T1-c unwind 产品化：TerminateAbort 纯助手 / Terminate 边界直接调用 /
-    /// _Unwind_Resume 导入
+    /// TerminateAbort pure helper, the Terminate boundary called directly, and the
+    /// `_Unwind_Resume` import.
     terminate_abort: ClifFuncId,
     call_terminate: ClifFuncId,
     unwind_resume: ClifFuncId,
-    /// JIT cleanup pad 按实际接住的异常指针识别 EngineFault。
+    /// Lets a JIT cleanup pad tell an EngineFault from any other exception pointer it
+    /// catches.
     exception_is_engine_fault: ClifFuncId,
-    /// T1-d：Trap 占位助手（interp engine_abort 同文案同退出码）
+    /// Trap placeholder helper; same message and exit code as interp's `engine_abort`.
     trap: ClifFuncId,
-    /// T1-d：SIMD/宽 stmt 与 SIMD rvalue 三件的统一助手（interp simd_exec 共享本体）
+    /// Unified SIMD/wide statement helper and the SIMD rvalue helper; thin shells that
+    /// re-match and call interp's shared `simd_exec` body.
     simd_stmt: ClifFuncId,
     simd_rv: ClifFuncId,
     /// Checks stack headroom before a compiled body allocates its frame.
     stack_guard: ClifFuncId,
     /// Deferred async-signal delivery at compiled block boundaries.
     poll_signals: ClifFuncId,
-    /// The trace domain's syscall site helper (design §5.2.3). The caller passes
-    /// the recorder it read from the pinned register.
+    /// The trace domain's syscall site helper. The caller passes the recorder it read
+    /// from the pinned register.
     host_syscall_trace: ClifFuncId,
-    /// 本批 (clif id, unwind info, try_call 函数的 LSDA 字节)——finalize 后统一注册
+    /// (clif id, unwind info, LSDA bytes of a try_call function) accumulated for this
+    /// batch; all of it is registered together after finalize.
     pending_unwind: Vec<(ClifFuncId, UnwindInfo, Option<Vec<u8>>)>,
     #[cfg(test)]
     fail_after_symbol: Option<JitSymbolRole>,
@@ -163,9 +173,8 @@ struct PendingJitSymbol {
     size: u64,
 }
 
-/// Flags for the plain domain: byte-for-byte the configuration the compiler
-/// has always used. Extracted so the two domains are visibly the same except for
-/// the one setting the trace domain adds.
+/// Flags for the plain domain. Kept separate from [`trace_domain_flags`] so the two
+/// domains are visibly identical apart from the one setting the trace domain adds.
 fn plain_domain_flags() -> settings::Flags {
     let mut fb = settings::builder();
     fb.set("opt_level", "speed").unwrap();
@@ -174,21 +183,18 @@ fn plain_domain_flags() -> settings::Flags {
     settings::Flags::new(fb)
 }
 
-/// ISA for the trace code domain (design §5.2.3).
+/// ISA flags for the trace code domain.
 ///
 /// The trace domain is a separate Cranelift ISA/module from the plain domain:
 /// it enables the pinned register so trace code can hold the current thread's
 /// recorder state in `r15` and reach the inline syscall path without a TLS
 /// lookup or a global session check. On x86-64 Cranelift's pinned register is
 /// exactly `r15` (`isa/x64/inst/regs.rs`, documented there as matching
-/// Spidermonkey's HeapReg), so enabling it is what the design asks for rather
-/// than an approximation.
+/// Spidermonkey's HeapReg).
 ///
 /// The setting is ISA-wide, so the trace domain cannot be a flag on the plain
 /// ISA: plain code must keep `r15` allocatable and carry no collection state.
-/// This constructor exists so that separation has a single, testable home; the
-/// compiler module split that consumes it lands in the next L3 slice.
-#[allow(dead_code)] // consumed by the trace compiler module (next L3 slice)
+/// This constructor is the single home for that separation.
 pub(crate) fn trace_domain_flags() -> settings::Flags {
     let mut fb = settings::builder();
     fb.set("opt_level", "speed").unwrap();
@@ -201,8 +207,7 @@ pub(crate) fn trace_domain_flags() -> settings::Flags {
     settings::Flags::new(fb)
 }
 
-/// ISA for a domain. The plain arm is the historical configuration; the trace arm
-/// is the same flags plus the pinned register.
+/// ISA for a domain: the plain flags, or the same flags plus the pinned register.
 fn domain_isa(domain: CodeDomain) -> cranelift_codegen::isa::OwnedTargetIsa {
     let flags = match domain {
         CodeDomain::Plain => plain_domain_flags(),
@@ -214,21 +219,19 @@ fn domain_isa(domain: CodeDomain) -> cranelift_codegen::isa::OwnedTargetIsa {
         .expect("native ISA accepts the domain flags")
 }
 
-/// Build the trace domain's ISA from [`trace_domain_flags`].
-#[allow(dead_code)] // consumed by the trace compiler module (next L3 slice)
+/// Build the trace domain's ISA. Only tests call this today, hence the `dead_code`
+/// allowance.
+#[allow(dead_code)]
 pub(crate) fn trace_domain_isa() -> cranelift_codegen::isa::OwnedTargetIsa {
-    cranelift_native::builder()
-        .expect("native ISA builder")
-        .finish(trace_domain_flags())
-        .expect("native ISA accepts the trace domain flags")
+    domain_isa(CodeDomain::Trace)
 }
 
 impl<'a> Compiler<'a> {
-    /// Build a compiler for an explicit code domain. The plain domain is what
-    /// every production path uses today; the trace domain exists so the
-    /// domain's semantics can be tested before it is wired to activation entry.
+    /// Build a compiler for an explicit code domain. The plain domain is what every
+    /// production path uses; the trace domain's semantics are exercised by tests
+    /// before it is wired to activation entry.
     fn with_domain(shared: &'a Shared, domain: CodeDomain) -> Self {
-        // T3（M5.5）：MIRVM_JIT_STATS=1 时开启助手频度统计（进程级一次）
+        // MIRVM_JIT_STATS=1 turns on helper call-frequency counters; process-wide, once.
         stat_init();
         let isa = domain_isa(domain);
         let mut jb = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
@@ -262,7 +265,7 @@ impl<'a> Compiler<'a> {
             "mirvm_host_syscall_trace",
             mirvm_host_syscall_trace as *const u8,
         );
-        // M5.4b-3 助手注册表
+        // Wide-float (f128/f16) helper symbols.
         jb.symbol("mirvm_bin128_ovf", mirvm_bin128_ovf as *const u8);
         jb.symbol("mirvm_bin128_divrem", mirvm_bin128_divrem as *const u8);
         jb.symbol("mirvm_f128_bin", mirvm_f128_bin as *const u8);
@@ -312,7 +315,7 @@ impl<'a> Compiler<'a> {
         let unreachable = module
             .declare_function("mirvm_jit_unreachable", Linkage::Import, &sig_unr)
             .unwrap();
-        // memmove(d, s, n) -> d；memset(d, c, n) -> d（M5.4a Copy/帧清零通道）
+        // memmove(d, s, n) -> d; memset(d, c, n) -> d (the Copy/frame-zeroing channel).
         let mut sig_mm = module.make_signature();
         for _ in 0..3 {
             sig_mm.params.push(AbiParam::new(types::I64));
@@ -324,8 +327,9 @@ impl<'a> Compiler<'a> {
         let memset = module
             .declare_function("memset", Linkage::Import, &sig_mm)
             .unwrap();
-        // memcmp(s1, s2, n) -> c_int（i32！I64 返回声明会把 sextend.i64 喂给
-        // verifier——diff_cargo ecosystem 实测抓获）
+        // memcmp(s1, s2, n) -> c_int, so the return must be declared i32: an I64
+        // return makes Cranelift feed a sextend.i64 to the verifier and reject the
+        // function.
         let mut sig_memcmp = module.make_signature();
         for _ in 0..3 {
             sig_memcmp.params.push(AbiParam::new(types::I64));
@@ -343,7 +347,8 @@ impl<'a> Compiler<'a> {
         let volatile_store = module
             .declare_function("mirvm_volatile_store", Linkage::Import, &sig_mm)
             .unwrap();
-        // T1-b 调用助手（helpers.rs 本体 = interp 派发/惰性物化同构）
+        // Call helpers; the bodies in helpers.rs mirror interp's dispatch and lazy
+        // materialization.
         let mut sig_ci = module.make_signature();
         for _ in 0..8 {
             sig_ci.params.push(AbiParam::new(types::I64));
@@ -357,8 +362,9 @@ impl<'a> Compiler<'a> {
         let tls_ref = module
             .declare_function("mirvm_tls_ref", Linkage::Import, &sig_tls)
             .unwrap();
-        // mirvm_call_foreign 八参：sp/sl/sg/ap/nv/ret_dst/fv + terminate 旗
-        //（T1-c 加旗时漏改本签名，verifier 拒收致含 CallForeign 函数静默留解释）
+        // mirvm_call_foreign takes eight params: sp/sl/sg/ap/nv/ret_dst/fv plus the
+        // terminate flag. This declaration must match the helper exactly: a mismatch
+        // makes the verifier reject every function containing a CallForeign.
         let mut sig_cf = module.make_signature();
         for _ in 0..8 {
             sig_cf.params.push(AbiParam::new(types::I64));
@@ -367,8 +373,9 @@ impl<'a> Compiler<'a> {
         let call_foreign = module
             .declare_function("mirvm_call_foreign", Linkage::Import, &sig_cf)
             .unwrap();
-        // T1-b CallBuiltin 助手（builtin 指针 + av 数组 + n + ret_dst + caller +
-        // (lo,hi) 写出指针 + terminate 旗（T1-c）+ 调用职责）；分配系快路六参直返 u64
+        // CallBuiltin helper: builtin pointer + av array + n + ret_dst + caller +
+        // (lo,hi) out pointers + terminate flag + the call duty. The allocation fast
+        // path takes six params and returns u64 directly.
         let mut sig_cb = module.make_signature();
         for _ in 0..8 {
             sig_cb.params.push(AbiParam::new(types::I64));
@@ -384,8 +391,8 @@ impl<'a> Compiler<'a> {
         let alloc = module
             .declare_function("mirvm_alloc", Linkage::Import, &sig_alloc)
             .unwrap();
-        // T1-c unwind 产品化：TerminateAbort 纯助手 / Terminate 边界直接调用 /
-        // _Unwind_Resume（Resume 终止子经 exception_slot 直调）
+        // TerminateAbort pure helper, the Terminate boundary called directly, and
+        // _Unwind_Resume (the Resume terminator reaches it through exception_slot).
         let sig_ta = module.make_signature();
         let terminate_abort = module
             .declare_function("mirvm_jit_terminate_abort", Linkage::Import, &sig_ta)
@@ -408,7 +415,7 @@ impl<'a> Compiler<'a> {
         let exception_is_engine_fault = module
             .declare_function("mirvm_exception_is_engine_fault", Linkage::Import, &sig_efi)
             .unwrap();
-        // T1-d：Trap 助手（reason 指针/长度 + func（u64::MAX = stmt 形））
+        // Trap helper: reason pointer/length + func (u64::MAX marks the statement form).
         let mut sig_tr = module.make_signature();
         for _ in 0..3 {
             sig_tr.params.push(AbiParam::new(types::I64));
@@ -416,8 +423,9 @@ impl<'a> Compiler<'a> {
         let trap = module
             .declare_function("mirvm_jit_trap", Linkage::Import, &sig_tr)
             .unwrap();
-        // T1-d：SIMD/宽 stmt 统一助手（7 参 1 返）与 SIMD rvalue 三件助手
-        // （2 参 1 返）——薄壳重匹配后调 interp simd_exec 共享本体
+        // Unified SIMD/wide statement helper (7 params, 1 return) and SIMD rvalue
+        // helper (2 params, 1 return): thin shells that re-match and call interp's
+        // shared simd_exec body.
         let mut sig_ss = module.make_signature();
         for _ in 0..7 {
             sig_ss.params.push(AbiParam::new(types::I64));
@@ -447,9 +455,9 @@ impl<'a> Compiler<'a> {
                 &module.make_signature(),
             )
             .unwrap();
-        // L3：trace 域 syscall 站点助手
-        // （producer / nr / args / n / 实际使用的 producer 出参 → 结果）。
-        // 只由 trace 域的身体调用；plain 域从不发这条 import。
+        // Trace domain syscall site helper: producer / nr / args / n, plus an out
+        // param returning the producer actually used, to a result. Only trace bodies
+        // call it; the plain domain never emits this import.
         let mut sig_hst = module.make_signature();
         for _ in 0..5 {
             sig_hst.params.push(AbiParam::new(types::I64));
@@ -502,7 +510,7 @@ impl<'a> Compiler<'a> {
         compiler
     }
 
-    /// Define and publish the trace domain's boundary entry (design §5.2.3).
+    /// Define and publish the trace domain's boundary entry.
     ///
     /// Trace bodies address the recorder through the pinned register, which is
     /// not callee-saved under that convention, so `r15` must be installed on the
@@ -614,7 +622,8 @@ impl<'a> Compiler<'a> {
         sig
     }
 
-    /// 编译一个函数（过阈值请求）。拒绝/失败 = 静默维持解释。
+    /// Compile one function that crossed the threshold. A rejected or failed request
+    /// stays interpreted, silently.
     fn compile(&mut self, func: u32) {
         let jit = &self.shared.jit;
         if self.domain == CodeDomain::Trace && jit.trace_enter.load(Ordering::Acquire) == 0 {
@@ -624,25 +633,28 @@ impl<'a> Compiler<'a> {
             return;
         }
         if jit.slots_for(self.domain).slots[func as usize].load(Ordering::Acquire) != 0 {
-            return; // 已编译（本域）
+            return; // already compiled in this domain
         }
         let Some(body) = self.shared.module.funcs.get(func as usize) else {
             return;
         };
         if !admit(self.shared, body) {
-            // strict 记录：不准入集合（设计上的留解释，非失败；MIRVM_JIT_DEBUG 门）
+            // Staying interpreted is the intended outcome for a non-admitted function,
+            // not a failure; strict mode only records the set. Gated by MIRVM_JIT_DEBUG.
             if jit.sync && std::env::var_os("MIRVM_JIT_DEBUG").is_some() {
                 eprintln!(
-                    "mirvm-jit-strict: f{func} 不准入（{}）",
+                    "mirvm-jit-strict: f{func} not admitted ({})",
                     self.shared.module.funcs[func as usize].name
                 );
             }
             return;
         }
-        let abi = callee_abi(body).expect("admit 已验");
+        let abi = callee_abi(body).expect("admit already checked the shape");
 
-        // PLT 快路 callee 的槽预热：未编译者发 c2i 蹦床（fast 形状，调用点形状恒定）。
-        // 形态不合的 callee 不在此列——其调用点直接 c2i（cold path）。
+        // Pre-warm the fast slots of PLT-visible callees: an uncompiled one gets a c2i
+        // trampoline (fast shape, so its call sites keep a constant shape). Callees that
+        // do not fit the fast shape are excluded; their call sites go straight to c2i
+        // (cold path).
         let mut callees: Vec<(u32, CalleeAbi)> = Vec::new();
         for blk in &body.blocks {
             if let Terminator::Call {
@@ -664,10 +676,11 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        // 静默失败纪律（m5.3-design D4 / 防静默错值：编译失败 = 维持解释，绝不向
-        // stderr 吐 panic——差分 oracle 的 stderr 逐字节比对会被线程 id 污染，实测抓获）；
-        // MIRVM_JIT_SYNC 验证模式例外：可准入失败 = FAIL 哨兵响亮记（audit F-05）
-        // TODO: 加入 log 系统之后应该向 log 系统输出错误
+        // Silent-failure discipline: a compile failure keeps the function interpreted
+        // and never writes a panic to stderr, because the differential oracle compares
+        // stderr byte-for-byte and thread ids would pollute it. MIRVM_JIT_SYNC is the
+        // exception: an admitted function that fails records the FAIL sentinel loudly.
+        // TODO: report these errors through the log system once one exists.
         let Some((fast_id, fast_symbol)) = self.define_fast(func, body, abi) else {
             self.strict_fail(func);
             return;
@@ -706,8 +719,10 @@ impl<'a> Compiler<'a> {
 
         let fast = self.module.get_finalized_function(guarded_id) as u64;
         let packed = self.module.get_finalized_function(packed_id) as u64;
-        // 发布序：先 fast（自递归/他人调我）后 packed（interp 才可能进入编译码）
-        // 所有内存范围在这两个 Release store 前完成；perf-map 只由显式 stop 写出。
+        // Publish order: fast first (self-recursion and other compiled callers reach
+        // it), then packed (only the interpreter can enter compiled code through it).
+        // Every memory range is complete before these two Release stores; the perf map
+        // is written only by an explicit stop.
         jit.publish_compiled_entries_for(self.domain, func, fast, packed, ranges);
     }
 
@@ -772,9 +787,9 @@ impl<'a> Compiler<'a> {
         ))
     }
 
-    /// strict 验证模式（MIRVM_JIT_SYNC，audit F-05）：可准入函数编译失败 =
-    /// 响亮记 FAIL 哨兵（SYNC 等待方据此 abort）。非 strict 模式绝不调用
-    /// 本路径——静默维持解释纪律不变。
+    /// Strict verification mode (MIRVM_JIT_SYNC): an admitted function that fails to
+    /// compile records the FAIL sentinel loudly, and the SYNC waiter aborts on it. The
+    /// non-strict path never reaches here, so the silent-failure discipline holds.
     fn strict_fail(&self, func: u32) {
         let jit = &self.shared.jit;
         if jit.sync {
@@ -786,8 +801,9 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    /// c2i 蹦床：fast 签名，打包实参进栈上数组，调 mirvm_c2i 回解释器。
-    /// 任何编译失败 = None（调用方跳过本槽预热，静默维持解释）。
+    /// c2i trampoline: fast signature, packs the arguments into a stack array, calls
+    /// `mirvm_c2i` back into the interpreter. Any compile failure returns `None`; the
+    /// caller then skips pre-warming this slot and stays interpreted, silently.
     fn define_c2i_trampoline(
         &mut self,
         target: u32,
@@ -822,7 +838,8 @@ impl<'a> Compiler<'a> {
             let nv = b.ins().iconst(types::I64, abi.nparams as i64);
             let rp = b.ins().stack_addr(types::I64, ret_ss, 0);
             b.ins().call(fref, &[fv, ap, nv, rp]);
-            // mirvm_c2i 恒写 (lo,hi) 两槽（helpers.rs:8-17），按形态取回
+            // mirvm_c2i always writes both the (lo, hi) slots (helpers.rs); read back
+            // according to this callee's return shape.
             match abi.nrets {
                 0 => {
                     b.ins().return_(&[]);
@@ -869,8 +886,9 @@ impl<'a> Compiler<'a> {
         Some((entry, ranges))
     }
 
-    /// fast 本体：字节码块 → CLIF；槽 → SSA 变量（I64 零扩到宽不变量）。
-    /// 任何编译失败 = None（静默维持解释——绝不 panic 污染 stderr 差分）。
+    /// Fast body: bytecode blocks -> CLIF, slots -> SSA variables under the "I64
+    /// zero-extended to width" invariant. Any compile failure returns `None` and keeps
+    /// the function interpreted: a panic must never pollute the stderr differential.
     fn define_fast(
         &mut self,
         func: u32,
@@ -884,7 +902,8 @@ impl<'a> Compiler<'a> {
             .unwrap();
         let mut cctx = self.module.make_context();
         cctx.func.signature = sig;
-        // T1-c：has_try_call 由 Translator 在 build 期间置位（块外读以生成 LSDA）
+        // The Translator sets `has_try_call` while building; it is read outside the
+        // builder to decide whether an LSDA is needed.
         let has_try_call;
         {
             let mut b = FunctionBuilder::new(&mut cctx.func, &mut self.fbc);
@@ -894,11 +913,14 @@ impl<'a> Compiler<'a> {
             } else {
                 Some(b.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
-                    // 0 字节强征档（force）以 1 字节物化；off 仍以 0 计，语义不变。
-                    // frame_align > 16：cranelift x86_64 栈基只保证 16 对齐（无
-                    // 动态重排机制），槽内补 (align-16) 字节余量，入口由翻译器
-                    // 用 (addr+align-1)&-align 代码级对齐兜底（nano-gemm 的
-                    // __m256d 局部经 mem::zeroed 的 32 字节 precondition 实证）
+                    // A forced 0-byte frame materializes as 1 byte; the offset is still
+                    // counted as 0, so nothing changes semantically.
+                    // frame_align > 16: cranelift's x86_64 stack base only guarantees
+                    // 16-byte alignment and there is no dynamic realignment, so the slot
+                    // carries (align - 16) extra bytes and the translator aligns the
+                    // entry in code as (addr + align - 1) & -align. A `__m256d` local
+                    // reaching the 32-byte precondition of `mem::zeroed` is the case
+                    // that motivates this.
                     if body.frame_align > 16 {
                         body.frame_size + (body.frame_align - 16)
                     } else {
@@ -949,11 +971,11 @@ impl<'a> Compiler<'a> {
         }
         if let Err(e) = self.module.define_function(id, &mut cctx) {
             if std::env::var_os("MIRVM_JIT_DEBUG").is_some() {
-                eprintln!("mirvm-jit-debug: define_function 失败: {e:#?}");
+                eprintln!("mirvm-jit-debug: define_function failed: {e:#?}");
             }
             if std::env::var_os("MIRVM_JIT_DEBUG_DUMP").is_some() {
                 eprintln!(
-                    "mirvm-jit-debug: 失败函数 CLIF 转储 f{func}:\n{}",
+                    "mirvm-jit-debug: CLIF dump of failed function f{func}:\n{}",
                     cctx.func.display()
                 );
             }
@@ -963,8 +985,8 @@ impl<'a> Compiler<'a> {
             .compiled_code()
             .and_then(|cc| cc.create_unwind_info(self.module.isa()).ok().flatten())
         {
-            // T1-c：有 try_call 的函数收集全调用点并生成 LSDA（全覆盖准则：
-            // 无 handler 站点同样发 lpad=0 项，rust personality 无项 = Terminate）
+            // A function with a try_call gets an LSDA, and it must list every call site,
+            // handler-less ones included; build_lsda explains why.
             let lsda = if has_try_call {
                 Some(build_lsda(&collect_call_sites(&cctx)))
             } else {
@@ -985,7 +1007,7 @@ impl<'a> Compiler<'a> {
         ))
     }
 
-    /// packed 入口：`(args: *const u64, ret: *mut u64)`——interp i2c 一跳。
+    /// Packed entry `(args: *const u64, ret: *mut u64)`: one interp i2c hop.
     fn define_packed(
         &mut self,
         func: u32,
@@ -1019,7 +1041,8 @@ impl<'a> Compiler<'a> {
             }
             let fref = self.module.declare_func_in_func(fast, b.func);
             let call = b.ins().call(fref, &args);
-            // (lo,hi) 两槽恒写（T1-a 补 hi 现役语义洞）：sret/nrets=0 形态写零
+            // Both (lo, hi) slots are always written, so shapes with sret/nrets = 0
+            // store zero.
             let r0 = if abi.nrets >= 1 {
                 b.inst_results(call)[0]
             } else {
@@ -1061,8 +1084,9 @@ impl<'a> Compiler<'a> {
         ))
     }
 
-    /// spike5 管线：FrameTable → eh_frame 字节 → 整段注册。字节由注册入口保留到
-    /// 进程结束，因为 unwinder 后续仍会读取其中共享的 CIE 和各函数的 FDE。
+    /// FrameTable -> eh_frame bytes -> one whole-section registration. The registration
+    /// entry keeps the bytes alive for the process lifetime, because the unwinder reads
+    /// the shared CIE and each function's FDE out of them later.
     fn register_pending_eh_frames(&mut self) {
         if self.pending_unwind.is_empty() {
             return;
@@ -1072,9 +1096,10 @@ impl<'a> Compiler<'a> {
         unsafe extern "C" {
             fn rust_eh_personality();
         }
-        // T1-c 双 CIE：无 try_call 的函数走 plain CIE（今日管线不变）；有者走
-        // personality CIE = DW.ref 间接 rust_eh_personality（lsda_encoding=absptr；
-        // absptr 直嵌已被 lsda_probe 证伪）+ fde.lsda 挂接。
+        // Two CIEs: functions without a try_call use the plain CIE; the others use a
+        // personality CIE whose personality is rust_eh_personality reached indirectly
+        // through a DW.ref (lsda_encoding = absptr; embedding an absptr directly does
+        // not work) with fde.lsda attached.
         PERS_REF.store(rust_eh_personality as *const u8 as u64, Ordering::SeqCst);
         let isa = self.module.isa();
         let mut table = FrameTable::default();
@@ -1092,7 +1117,7 @@ impl<'a> Compiler<'a> {
                 match lsda {
                     Some(bytes) => {
                         let lsda_addr = bytes.as_ptr() as u64;
-                        std::mem::forget(bytes); // FDE.lsda 终身有效（leaked Vec v2）
+                        std::mem::forget(bytes); // the FDE's lsda pointer must outlive this call
                         let mut fde = info.to_fde(Address::Constant(addr));
                         fde.lsda = Some(Address::Constant(lsda_addr));
                         table.add_fde(cie_pers_id, fde);
@@ -1127,19 +1152,23 @@ impl<'a> Compiler<'a> {
     }
 }
 
-/// personality CIE 的 DW.ref 间接单元（单格全表共享；T1-c，lsda_probe 同款形态）。
+/// DW.ref indirection cell for the personality CIE: one cell shared by every FDE in
+/// the table.
 static PERS_REF: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-// ===== LSDA 生成（lsda_probe 配方的产品化，版式逐行照抄勿创新）=====
+// ===== LSDA generation (layout copied line for line from the ABI; do not invent) =====
 
-/// 手工 GccExceptTable（cleanup-only，无 type_info；cg_clif 版式 + **全覆盖**）：
-/// - 无 handler 的调用点：(ret_addr-1, len=1, lpad=0, action=0) —— 命中即
-///   EHAction::None（rust find_eh_action 的 cs_lpad==0 分支）
-/// - cleanup handler 调用点：(ret_addr-1, len=1, pad, action=0)
-///   **rust 版 find_eh_action 对"ip 不在表中"返回 EHAction::Terminate（= _URC_FATAL），
-///   与 libgcc 的 __gcc_personality_v0（no-entry = None）不同——call-site 表必须覆盖
-///   函数内全部调用点**（cg_clif 对无 handler 站点同样发 lpad=0 项的原因）。
-///   项按 buffer.call_sites() 序（= 指令序，满足 rust 解析器的有序表假设）。
+/// Hand-built GccExceptTable (cleanup-only, no type_info; cg_clif layout, **full
+/// coverage**):
+/// - call site with no handler: (ret_addr-1, len=1, lpad=0, action=0) -- matching it
+///   yields EHAction::None (rust's find_eh_action `cs_lpad == 0` branch)
+/// - call site with a cleanup handler: (ret_addr-1, len=1, pad, action=0)
+///   rust's find_eh_action returns EHAction::Terminate (= _URC_FATAL) for an ip that is
+///   absent from the table, unlike libgcc's __gcc_personality_v0 (no entry = None), so
+///   the call-site table must cover every call in the function. This is also why cg_clif
+///   emits lpad=0 entries for handler-less sites.
+///   Entries follow buffer.call_sites() order (= instruction order), which matches
+///   rust's assumption that the table is sorted.
 fn build_lsda(call_sites: &[(u64, Option<u64>)]) -> Vec<u8> {
     fn uleb(out: &mut Vec<u8>, mut v: u64) {
         loop {
@@ -1170,10 +1199,13 @@ fn build_lsda(call_sites: &[(u64, Option<u64>)]) -> Vec<u8> {
     out
 }
 
-/// 定义后取全调用点（cg_clif add_function 同数据源同口径：无 handler → None
-/// （lpad=0 项）；cleanup tag → Some(landing pad 地址)）。
+/// Collect every call site after the function was defined; same data source and
+/// reading as cg_clif's add_function (no handler -> None, i.e. an lpad=0 entry;
+/// cleanup tag -> Some(landing pad address)).
 fn collect_call_sites(cctx: &cranelift_codegen::Context) -> Vec<(u64, Option<u64>)> {
-    let cc = cctx.compiled_code().expect("call_sites 须在 define 后收集");
+    let cc = cctx
+        .compiled_code()
+        .expect("call sites can only be collected after define");
     let mut cs = Vec::new();
     for site in cc.buffer.call_sites() {
         if site.exception_handlers.is_empty() {
@@ -1181,7 +1213,7 @@ fn collect_call_sites(cctx: &cranelift_codegen::Context) -> Vec<(u64, Option<u64
         }
         for h in site.exception_handlers {
             if let cranelift_codegen::FinalizedMachExceptionHandler::Tag(tag, lp) = h {
-                assert_eq!(tag.as_u32(), 0, "本管线只发 cleanup tag");
+                assert_eq!(tag.as_u32(), 0, "this pipeline only emits the cleanup tag");
                 cs.push((u64::from(site.ret_addr), Some(u64::from(*lp))));
             }
         }
@@ -1193,7 +1225,7 @@ fn collect_call_sites(cctx: &cranelift_codegen::Context) -> Vec<(u64, Option<u64
 mod tests {
     use super::*;
 
-    /// L3: the trace domain must compile the same guest IR as the plain domain.
+    /// The trace domain must compile the same guest IR as the plain domain.
     /// The domain may only change how recorder state is addressed (the pinned
     /// register); if it changed guest codegen, the trace and plain runs of one
     /// program would diverge, which no gate would catch until the domain is
@@ -1230,9 +1262,9 @@ mod tests {
         }
     }
 
-    /// L3: the trace domain is a separate ISA because pinning a register is an
-    /// ISA-wide decision.  Plain code must keep `r15` allocatable and carry no
-    /// recorder state, so the two domains cannot share one `Flags`.
+    /// The trace domain is a separate ISA because pinning a register is an ISA-wide
+    /// decision. Plain code must keep `r15` allocatable and carry no recorder state,
+    /// so the two domains cannot share one `Flags`.
     #[test]
     fn trace_domain_enables_the_pinned_register_and_plain_does_not() {
         let trace = trace_domain_flags();
@@ -1256,8 +1288,7 @@ mod tests {
         );
 
         // The trace ISA must build on this host. On x86-64 Cranelift's pinned
-        // register is r15, which is what the design asks trace code to hold the
-        // current producer in.
+        // register is r15, the register trace code holds the current producer in.
         let isa = trace_domain_isa();
         assert!(
             format!("{}", isa.triple()).contains("x86_64"),
@@ -1306,8 +1337,8 @@ mod tests {
         panic!("trace boundary unwind probe");
     }
 
-    /// L3: the trace domain's boundary is the one place the pinned register is
-    /// installed and the one place it is restored. A body that reads the pin
+    /// The trace domain's boundary is the one place the pinned register is installed
+    /// and the one place it is restored. A body that reads the pin
     /// proves the install; reading the *host's* register before and after a call
     /// proves the restore, on the normal path and on the unwinding path alike --
     /// the latter is why the boundary carries an LSDA instead of being a plain
@@ -1383,8 +1414,8 @@ mod tests {
         );
     }
 
-    /// L3: the trace domain's own syscall site must actually compile. If the
-    /// pinned lowering were rejected, the body would silently stay interpreted
+    /// The trace domain's own syscall site must actually compile. If the pinned
+    /// lowering were rejected, the body would silently stay interpreted
     /// and the differential gates would still pass while the feature did
     /// nothing -- so the published trace entry is the assertion.
     #[test]
@@ -1532,5 +1563,3 @@ mod tests {
         std::mem::forget(compiler);
     }
 }
-
-// ===== 函数体翻译 =====

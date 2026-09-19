@@ -4,7 +4,7 @@
 csv = "1"
 serde = { version = "1", features = ["derive"] }
 ---
-// CSV 解析 + serde 反序列化（内存字符串，不碰真实文件）。
+// CSV parsing + serde deserialization over an in-memory string; no real file.
 use serde::Deserialize;
 
 #[derive(Deserialize, Debug)]

@@ -3,15 +3,15 @@
 [dependencies]
 compact_str = "=0.9.0"
 ---
-// compact_str 0.9.0：niche 内联字符串差分。CompactString 固定 24B（= size_of::<String>()），
-// 长度 ≤24B 时整体内联，最后字节同时充当 len 标记与 inline/heap/static 三态判别式，
-// Option<CompactString> 借 niche 仍为 24B——对 mirvm 的 ABI、枚举判别式、union 布局是精准压力。
-// 覆盖：临界长度谱系 0/1/11/12/13/23/24/25/64/200 字节（ASCII + 多字节恰好 24B）、
-// niche 尺寸、const_new(StaticStr)、push_str/push 跨界增长、pop 多字节、truncate/insert_str
-// 的 UTF-8 边界 panic（catch_unwind 打印 payload）、大小写扩展（ß→SS、İ→i+组合符）、
-// from_utf8/from_utf16 错误路径、format_compact!、ToCompactString(itoa/ryu 特化)、
-// FromIterator/concat_compact/join_compact、跨表示 roundtrip 相等性。
-// 无随机/时间/地址输出；panic hook 置静默，成功路径 stderr 为空。
+// compact_str 0.9.0: niche inline-string differential. CompactString is a fixed
+// 24B (= size_of::<String>()); at len <= 24B it is fully inlined and the last
+// byte doubles as the len marker and the inline/heap/static discriminant, so
+// Option<CompactString> stays 24B via that niche, stressing mirvm's ABI and layout.
+// Covers the critical-length spectrum 0/1/11/12/13/23/24/25/64/200 bytes (ASCII
+// and multi-byte exactly 24B), niche size, const_new(StaticStr), growth, pop,
+// truncate/insert_str UTF-8 boundary panics, case expansion, from_utf8/from_utf16
+// errors, format_compact!, ToCompactString and the collection traits. No
+// random/time/address output; the panic hook is silenced, so stderr is empty.
 use compact_str::{format_compact, CompactString, CompactStringExt, ToCompactString};
 use std::panic;
 
@@ -47,18 +47,18 @@ fn show(tag: &str, c: &CompactString) {
 fn main() {
     panic::set_hook(Box::new(|_| {}));
 
-    // ① 临界长度谱系：inline 上限 = size_of::<String>() = 24B（64 位）
+    // ① critical-length spectrum: inline capacity = size_of::<String>() = 24B (64-bit)
     let pat: String = (0..200u32).map(|i| (b'a' + (i % 26) as u8) as char).collect();
     for n in [0usize, 1, 11, 12, 13, 23, 24, 25, 64, 200] {
         show(&format!("spectrum {n:>3}"), &CompactString::new(&pat[..n]));
     }
-    // 多字节恰好压线：24B 内联 / 25B 上堆
+    // multi-byte exactly on the boundary: 24B inline / 25B heap
     show("cjk24", &CompactString::new("汉".repeat(8)));
     show("emoji24", &CompactString::new("🦀".repeat(6)));
     show("e-acute24", &CompactString::new("é".repeat(12)));
     show("mix25", &CompactString::new(format!("{}汉", "a".repeat(22))));
 
-    // ② niche 布局：尺寸断言 + Option 匹配
+    // ② niche layout: size assertions + Option matching
     println!(
         "size: CompactString={} String={} Option<CS>={} Option<Option<CS>>={}",
         std::mem::size_of::<CompactString>(),
@@ -88,14 +88,14 @@ fn main() {
         show("sorted", c);
     }
 
-    // ③ const_new：短的内联，长的走 StaticStr 变体
+    // ③ const_new: short values inline, long ones take the StaticStr variant
     const SHORT: CompactString = CompactString::const_new("untitled");
     const LONG: CompactString = CompactString::const_new("That is not dead which can eternal lie.");
     show("const short", &SHORT);
     show("const long", &LONG);
     println!("static: short as_static={:?}", SHORT.as_static_str());
     println!("static: long as_static={:?}", LONG.as_static_str());
-    // 跨表示相等性：static 变体 vs heap 变体，内容相同
+    // cross-representation equality: static variant vs heap variant, same contents
     let long_heap = CompactString::new("That is not dead which can eternal lie.");
     println!(
         "static==heap: eq={} static.heap={} heap.heap={}",
@@ -104,7 +104,7 @@ fn main() {
         long_heap.is_heap_allocated()
     );
 
-    // ④ 拼接增长：反复 push_str 跨越 inline→heap 边界
+    // ④ concatenation growth: repeated push_str crossing the inline->heap boundary
     let mut g = CompactString::new("abc");
     show("grow0", &g);
     for i in 1..=6 {
@@ -117,7 +117,7 @@ fn main() {
         );
     }
     println!("grow tail: {:?}", &g.as_str()[g.len() - 7..]);
-    // push 多字节字符 + pop 谱系（含空串 pop）
+    // push multi-byte chars + the pop spectrum (including popping an empty string)
     let mut p = CompactString::new("ab");
     p.push('汉');
     p.push('🦀');
@@ -127,7 +127,7 @@ fn main() {
     let mut empty = CompactString::new("");
     println!("pop empty: {:?}", empty.pop());
 
-    // ⑤ truncate / insert_str：正常路径 + UTF-8 边界 panic（catch 打印 payload）
+    // ⑤ truncate / insert_str: happy path + UTF-8 boundary panic (payload via catch)
     // "Hello, 世界!" 字节布局：7B ASCII + 世(7..10) + 界(10..13) + !(13..14)
     let mut t = CompactString::new("Hello, 世界!");
     t.truncate(10);
@@ -135,11 +135,11 @@ fn main() {
     t.truncate(0);
     show("trunc0", &t);
     let mut noop = CompactString::new("unchanged");
-    noop.truncate(100); // new_len >= len：无操作
+    noop.truncate(100); // new_len >= len: no-op
     show("trunc-noop", &noop);
     let r = panic::catch_unwind(|| {
         let mut bad = CompactString::new("Hello, 世界!");
-        bad.truncate(8); // 落在「世」中间
+        bad.truncate(8); // lands inside the first multi-byte char
     });
     match r {
         Ok(()) => println!("trunc-panic: no panic??"),
@@ -152,14 +152,14 @@ fn main() {
     show("insert-ch", &ins);
     let r = panic::catch_unwind(|| {
         let mut bad = CompactString::new("Hello, 世界!");
-        bad.insert_str(8, "x"); // 落在「世」中间
+        bad.insert_str(8, "x"); // lands inside the first multi-byte char
     });
     match r {
         Ok(()) => println!("insert-panic: no panic??"),
         Err(e) => println!("insert-panic: {}", payload_msg(e)),
     }
 
-    // ⑥ 大小写：ß→SS、ſ→S、ﬁ→FI 扩展；İ 小写为 i+U+0307（两标量）
+    // ⑥ case mapping: ss->SS, long s->S, fi ligature->FI; dotted I lowercases to i+U+0307
     let u = CompactString::new("Hello, Wörld! ß ſ ﬁ");
     let up = u.to_uppercase();
     show("upper", &up);
@@ -176,7 +176,7 @@ fn main() {
         big_up == "LOREM IPSUM DOLOR SIT AMET, CONSECTETUR ADIPISCING ELIT 汉字"
     );
 
-    // ⑦ UTF-8/UTF-16 构造：错误路径 + lossy 替换
+    // ⑦ UTF-8/UTF-16 construction: error paths + lossy replacement
     let e = CompactString::from_utf8(vec![b'a', b'b', 0xFF, b'c']).unwrap_err();
     println!("utf8-err: {e}");
     show("utf8-ok", &CompactString::from_utf8(vec![240, 159, 146, 150]).unwrap());
@@ -186,7 +186,7 @@ fn main() {
     let u16: Vec<u16> = "héllo 汉".encode_utf16().collect();
     show("utf16-ok", &CompactString::from_utf16(u16).unwrap());
 
-    // ⑧ format_compact! 宏：内插 / 填充 / 进制 / 定精度浮点 / 超长上堆
+    // ⑧ format_compact!: interpolation / padding / radix / fixed precision / heap spill
     show("fmt1", &format_compact!("{}+{}={}", 2, 3, 5));
     show("fmt2", &format_compact!("{:.3}|{:>8}|{:#x}", 1.0f64 / 3.0, "xy", 48879u32));
     let long = "x".repeat(100);
@@ -198,7 +198,7 @@ fn main() {
         fnv1a(f3.as_bytes())
     );
 
-    // ⑨ ToCompactString：castaway 特化走 itoa/ryu
+    // ⑨ ToCompactString: the castaway specialization goes through itoa/ryu
     show("tcs u8", &255u8.to_compact_string());
     show("tcs i64min", &i64::MIN.to_compact_string());
     show("tcs u64max", &u64::MAX.to_compact_string());
@@ -208,7 +208,7 @@ fn main() {
     show("tcs bool", &true.to_compact_string());
     show("tcs char", &'汉'.to_compact_string());
 
-    // ⑩ 收集器：FromIterator<char> / concat_compact / join_compact
+    // ⑩ collectors: FromIterator<char> / concat_compact / join_compact
     show("from-chars", &"collect me 汉 🦀".chars().collect::<CompactString>());
     let fruits = ["apples", "oranges", "bananas"];
     show("join", &fruits.join_compact(", "));
@@ -222,7 +222,7 @@ fn main() {
         fnv1a(joined.as_bytes())
     );
 
-    // ⑪ roundtrip 相等性：CompactString → String → CompactString（eager inline 语义）
+    // ⑪ roundtrip equality: CompactString -> String -> CompactString (eager inline semantics)
     for n in [0usize, 12, 24, 25, 100] {
         let c = CompactString::new(&pat[..n]);
         let s: String = c.clone().into();
@@ -235,7 +235,7 @@ fn main() {
             back.as_str()
         );
     }
-    // Box<str> 往返 + 全量大串 checksum roundtrip
+    // Box<str> roundtrip + checksum roundtrip over a large concatenated string
     let c = CompactString::new("box me up 汉字");
     let b: Box<str> = c.clone().into();
     let back = CompactString::from(b);

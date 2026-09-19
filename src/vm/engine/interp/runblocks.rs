@@ -1,8 +1,9 @@
-//! run_blocks 主执行循环（自 interp.rs I14 整搬）：块序列解释（主执行与
-//! cleanup 链共用）——Goto/SwitchInt/Call/CallForeign/CallIndirect/
-//! CallBuiltin（T1-b 起薄臂：语义体提取至 call::exec_builtin，JIT 助手
-//! 共享同一本体）/InlineAsm/Return/Resume/Terminate。
-//! edge: Cell<Option<Bb>> 把当前 cleanup 目标交给 interp_frame 的 raw catch 边界。
+//! The `run_blocks` execution loop, shared by normal execution and cleanup chains:
+//! Goto/SwitchInt/Call/CallForeign/CallIndirect/CallBuiltin/InlineAsm/Return/Resume/
+//! Terminate. CallBuiltin is a thin arm here; its semantics live in `call::exec_builtin`,
+//! which the JIT helpers share so the two backends cannot drift.
+//!
+//! `edge` hands the current cleanup target to `interp_frame`'s raw catch boundary.
 
 use super::*;
 use super::{
@@ -61,7 +62,8 @@ pub(super) fn run_blocks(
                     av.push(eval_place_addr(ctx, base, dst));
                 }
                 av.extend(aops.iter().map(|o| eval_operand(ctx, base, o).0));
-                edge.set(cleanup_edge(unwind)); // callee 若 panic，本帧从这条边清理
+                // If the callee panics, this frame cleans up along this edge.
+                edge.set(cleanup_edge(unwind));
                 let call = || call_guarding_terminate(unwind, || call_guest(ctx, *callee, &av));
                 let (lo, hi) = match role {
                     CallRole::Normal => call(),
@@ -93,20 +95,24 @@ pub(super) fn run_blocks(
                 let callbacks =
                     crate::vm::engine::thunks::prepare_foreign_callbacks(shared, sym, sig, &mut av);
                 edge.set(cleanup_edge(unwind));
-                // C1：按值聚合返回 = Indirect 落点（调用点强制），ffi 层 memcpy 至
-                // 目的真地址；标量返回照旧走 u64 通道
+                // C1: a by-value aggregate return uses the Indirect destination (enforced at
+                // the call site) and the FFI layer memcpys to that true address, while a
+                // scalar return keeps the u64 channel.
                 let ret_dst = if let RetDest::Indirect(dst) = ret {
                     Some(eval_place_addr(ctx, base, dst))
                 } else {
                     None
                 };
-                // D8a：guest 线程栈放大。解释帧宿主成本数十倍于 native 帧，按 guest
-                // attr 原样创建的线程会在远浅于 native 的深度打穿宿主栈（SIGSEGV 而非
-                // 诊断）。显式 stacksize（std::thread 恒显式）临时放大，调用后还原；
-                // guest 自供栈（setstack）不动。栈尺寸属 unspecified（ram-spec §2）。
+                // Guest thread stack amplification: an interpreted frame costs the host tens
+                // of times what a native frame does, so a thread created from the guest attr
+                // as-is would blow through the host stack at a far shallower depth than
+                // native, giving SIGSEGV instead of a diagnostic. Enlarge the explicit
+                // stacksize temporarily around the call and restore it afterwards; a
+                // guest-owned stack (setstack) is left alone. The stack size is unspecified.
                 let stack_restore = crate::vm::engine::ffi::amplify_pthread_stack(sym, &av);
-                // 符号解析会改每线程 FFI 缓存；必须在进入 native 前结束这次可变
-                // 借用。native 可同步回调 guest，回调又可在同一 Ctx 中调用 foreign。
+                // Symbol resolution mutates the per-thread FFI cache, so this mutable borrow
+                // must end before entering native: native can synchronously call back into the
+                // guest, and that callback can call foreign again on the same Ctx.
                 let resolved = call_guarding_terminate(unwind, || {
                     let ffi = unsafe { &mut (*ctx).ffi };
                     ffi.resolve(
@@ -130,13 +136,13 @@ pub(super) fn run_blocks(
                 edge.set(None);
                 let r = r.unwrap_or_else(|reason| {
                     engine_abort(&format!(
-                        "foreign `{sym}` 的必需原生库装载失败（fn {}）: {reason}",
+                        "failed to load a required native library for foreign `{sym}` (fn {}): {reason}",
                         body.name
                     ))
                 });
                 let Some(r) = r else {
                     engine_abort(&format!(
-                        "foreign `{sym}` 符号不存在（归档兜底表 / dlsym 全域均未命中；fn {}）",
+                        "foreign `{sym}` symbol not found (neither the archive fallback table nor a full-domain dlsym matched; fn {})",
                         body.name
                     ));
                 };
@@ -144,9 +150,9 @@ pub(super) fn run_blocks(
                 match ret {
                     RetDest::Ignore => {}
                     RetDest::Scalar(p) => place_write(ctx, base, p, r),
-                    // C1：按值聚合字节已由 ffi 层 memcpy 至 dst
+                    // C1: the by-value aggregate bytes were already memcpy'd to dst by the FFI layer.
                     RetDest::Indirect(_) => {}
-                    other => engine_abort(&format!("foreign 返回形态 {other:?} 未支持")),
+                    other => engine_abort(&format!("unsupported foreign return form {other:?}")),
                 }
                 blk = *target as usize;
             }
@@ -161,14 +167,18 @@ pub(super) fn run_blocks(
             } => {
                 let (addr, _) = eval_operand(ctx, base, callee);
                 if *null_ok && addr == 0 {
-                    // dyn 虚 drop 空槽：无 Drop 的类型 = 空操作
+                    // Empty slot of a dyn virtual drop: a type without Drop is a no-op.
                     blk = *target as usize;
                     continue;
                 }
                 if addr == 0 {
-                    // extern weak 符号缺席取址 = NULL（native 同语义）；调用空
-                    // fn-ptr 在 native 是 UB/SIGSEGV——VM 响亮诊断而非宿主崩溃。
-                    engine_abort(&format!("间接调用空 fn 指针（调用者 {}）", body.name));
+                    // Taking the address of an absent extern weak symbol yields NULL, as under
+                    // native; calling a null fn pointer is UB/SIGSEGV under native, so the VM
+                    // diagnoses loudly instead of crashing the host.
+                    engine_abort(&format!(
+                        "indirect call through a null fn pointer (caller {})",
+                        body.name
+                    ));
                 }
                 let mut av: Vec<u64> = Vec::with_capacity(aops.len() + 1);
                 if let RetDest::Indirect(dst) = ret {
@@ -179,10 +189,12 @@ pub(super) fn run_blocks(
                 let (lo, hi) = if let Some(&fid) = module.fn_addrs.get(&addr) {
                     call_guarding_terminate(unwind, || call_guest(ctx, fid, &av))
                 } else if let Some(nsig) = native_sig {
-                    // FFI 反方向之二（M4.4）：guest 持 native 真码 fn ptr（运行期
-                    // dlsym 所得，如 __pthread_get_minstack）→ 按冻结签名直调。
-                    // C1：native_sig 聚合返回时首槽即目的地址（调用点已按
-                    // RetDest::Indirect 压栈；libffi sret 不占参数位，剔除后直调）
+                    // The reverse FFI direction: the guest holds a native fn pointer to real
+                    // code (obtained at runtime through dlsym, e.g. __pthread_get_minstack), so
+                    // call it directly with the frozen signature. C1: for an aggregate return
+                    // the first slot is the destination (the call site pushed it for
+                    // RetDest::Indirect); libffi's sret takes no argument slot, so drop it
+                    // before the direct call.
                     let (ret_dst, arg_slice) = if matches!(nsig.ret, FfiKind::Agg(_)) {
                         (av.first().copied(), &av[1..])
                     } else {
@@ -201,7 +213,7 @@ pub(super) fn run_blocks(
                     )
                 } else {
                     engine_abort(&format!(
-                        "间接调用目标 {addr:#x} 不是已知 fn 条目（调用者 {}）",
+                        "indirect call target {addr:#x} is not a known fn entry (caller {})",
                         body.name
                     ));
                 };
@@ -224,10 +236,11 @@ pub(super) fn run_blocks(
                 unwind,
                 role,
             } => {
-                // T1-b：语义体提取至 exec_builtin（call.rs；JIT mirvm_call_builtin/
-                // mirvm_alloc 助手共享同一本体）——本臂只余实参/ret_dst 求值与
-                // 写回。builtin 无 sret 前插：RetDest::Indirect 落点独立求值
-                //（x86 向量 lane 的 sret 真地址），edge 协议在本体内随体保留。
+                // Thin arm: the semantics live in exec_builtin (shared with the JIT
+                // mirvm_call_builtin/mirvm_alloc helpers), leaving only argument and ret_dst
+                // evaluation plus write-back here. A builtin has no leading sret slot, so a
+                // RetDest::Indirect destination (the sret true address of an x86 vector lane)
+                // is evaluated separately. The edge protocol stays inside the body.
                 let av: Vec<u64> = args.iter().map(|o| eval_operand(ctx, base, o).0).collect();
                 let ret_dst = if let RetDest::Indirect(dst) = ret {
                     Some(eval_place_addr(ctx, base, dst))
@@ -252,14 +265,15 @@ pub(super) fn run_blocks(
                 outs,
                 target,
             } => {
-                // asm-stub（M5.0 corpus §2.2 三面孔）：栈开 buf、按 ins 装槽、call
-                // wrapper（fn(*mut u8)，rbx=buf 基址）、按 outs 取槽。三面孔无 unwind。
+                // asm stub: open a buffer on the stack, store the `ins` slots, call the wrapper
+                // (fn(*mut u8), rbx = buffer base), then read the `outs` slots. The stub never
+                // unwinds.
                 #[repr(align(16))]
                 struct AsmBuf([u8; 256]);
                 let mut buf = AsmBuf([0u8; 256]);
                 if *buf_size as usize > buf.0.len() {
                     engine_abort(&format!(
-                        "asm 缓冲 {buf_size} 超上限 {}（fn {}）",
+                        "asm buffer {buf_size} exceeds the limit {} (fn {})",
                         buf.0.len(),
                         body.name
                     ));
@@ -273,7 +287,7 @@ pub(super) fn run_blocks(
                                 std::ptr::write_unaligned(bufp.add(*off as usize) as *mut u64, v)
                             };
                         }
-                        // 批10：向量字节通道（xmm/ymm/zmm 16/32/64B 全宽拷贝）
+                        // Vector byte channel: a full-width 16/32/64 B copy for xmm/ymm/zmm.
                         AsmIoVal::VecBytes(pe, size) => {
                             let src = eval_place_addr(ctx, base, pe);
                             unsafe {
@@ -341,20 +355,18 @@ pub(super) fn run_blocks(
                         (0, 0)
                     }
                 };
-                // region 恢复由 FrameGuard 统一（正常/unwind 两路径一致）
+                // FrameGuard restores the region uniformly on both the normal and unwind paths.
                 return Exit::Ret(r.0, r.1);
             }
             Terminator::Resume => return Exit::Resume,
             Terminator::TerminateAbort => {
-                eprintln!("mirvm[m4-engine]: UnwindTerminate（double panic/ABI 边界）——abort");
+                eprintln!("mirvm[m4-engine]: UnwindTerminate (double panic/ABI boundary) -- abort");
                 std::process::abort()
             }
             Terminator::Unreachable => {
-                engine_abort(&format!("到达 Unreachable（fn {}）", body.name))
+                engine_abort(&format!("reached Unreachable (fn {})", body.name))
             }
-            Terminator::Trap(reason) => {
-                engine_abort(&format!("TRAP: {reason}（fn {}）", body.name))
-            }
+            Terminator::Trap(reason) => engine_abort(&format!("TRAP: {reason} (fn {})", body.name)),
         }
     }
 }

@@ -1,23 +1,31 @@
-//! FrameMap/analyze_frame（自 jit_compile.rs J9 整搬）：取址分析保守
-//! 全集区间模型——任何被 place 通道【字节区间】触及的 frame offset 一律
-//! 落栈帧内存（误提升 = 错值级，多落帧只是慢）。scan_* 五函数随族。
+//! Address-taken analysis for one function body: which frame offsets must stay in
+//! stack-frame memory instead of being promoted to SSA slots.
+//!
+//! The model is conservative and interval-based: any frame offset that a place
+//! channel's byte interval can touch stays on the frame. Over-approximating only
+//! costs speed; a missed offset would be promoted to an SSA slot while the JIT
+//! writes the physical frame, so readers would see a stale zero -- a wrong-value
+//! miscompile.
 
 use super::*;
 
-/// M5.4a 取址分析（保守全集，m5.4-design §3.1/Q1）：收集必须落栈帧内存的 frame
-/// offset——任何被 PlaceExpr::Local/Mem/AddrOf/Ref/Copy/Repeat/Indirect-ABI 触及者。
-/// 判据 = 宁多勿漏：误提升（地址被取的槽错放 SSA）是错值级，多落帧只是慢一点。
-/// or-pattern 全枚举 Stmt/Terminator——新增 place 通道变体 = 非穷尽编译错误。
-/// 落帧集：区间模型（m5.4-design §3.1「触及即落帧」保守全集的完整实现）。
-/// 任何被 Ref/AddrOf/Copy/Repeat/Volatile/128 位·SIMD place 通道的【字节区间】触及的
-/// 槽一律落帧。只记基址会把区间内槽误提升为 SSA：标量写进变量、place 通道读物理帧
-/// （恒 0/旧值）= 错值级 miscompile——M5.4b regex SIGSEGV 的实锤根因正是 Copy src
-/// 区间 [96,112) 内的槽 104 漏落帧（Weak::drop 读空指针 +0x10）。
+/// Set of frame offsets that must be materialized in stack-frame memory.
+///
+/// Criterion: over-approximate rather than miss. A wrongly promoted slot -- one
+/// whose address is taken but which stayed in SSA -- is a wrong-value miscompile,
+/// while an extra frame slot only costs speed. Each place channel (Ref/AddrOf/
+/// Copy/Repeat/Volatile, ...) therefore contributes its whole byte interval, not
+/// just its base: a scalar stored through a place channel and read back would
+/// otherwise read the physical frame (0 or stale) instead of the SSA value.
+///
+/// The Stmt/Terminator matches below enumerate every place channel, so adding a
+/// variant is a non-exhaustive-match compile error rather than a silent miss.
 #[derive(Default)]
 pub(super) struct FrameMap {
     ranges: Vec<(u32, u32)>,
-    /// 0 字节帧的 ZST 活地址需求（fsz=0 时 `&Local(0)` 的合法 one-past/ZST 地址，
-    /// corpus c_rustpython_mini 实锤）：区间模型无法表达，强制以 1 字节尺寸物化帧。
+    /// A live ZST address in a zero-byte frame: with `fsz == 0`, `&Local(0)` is a
+    /// legal one-past-the-end ZST address that the interval model cannot express,
+    /// so the frame is forced to materialize at size 1.
     force: bool,
 }
 
@@ -30,26 +38,31 @@ impl FrameMap {
     pub(super) fn contains(&self, off: u32) -> bool {
         self.ranges.iter().any(|&(a, b)| a <= off && off < b)
     }
-    /// 是否需要物化帧（含 0 字节强征档）
+    /// Whether the frame needs a stack slot; a zero-byte frame still does when
+    /// `force` is set.
     pub(super) fn needs_frame(&self) -> bool {
         !self.ranges.is_empty() || self.force
     }
 }
 
-/// scan_place 的触及范围：Bytes = 从基址起 n 字节；Escape = 地址逃逸
-/// （Ref/AddrOf/Indirect 返回落点），本地不可知 → 保守到帧尾。
+/// How far a place reaches from its base: `Bytes(n)` covers `n` bytes from the
+/// base; `Escape` means the address escapes (Ref/AddrOf/Indirect return the
+/// location) so the extent is locally unknown and covers to the end of the frame.
 #[derive(Clone, Copy)]
-pub(super) enum Extent {
+enum Extent {
     Bytes(u32),
     Escape,
 }
 
 pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
     let fsz = body.frame_size;
-    /// 帧相关段 = 首 Deref/动态步之前。Offset 累加后：
-    /// - 遇 Deref：指针槽本体 8 字节落帧即止（之后是 pointee，与帧无关）；
-    /// - 遇动态步（IndexScaled/VTableAlignOffset）：运行期地址，保守 [pos, 帧尾)；
-    /// - 步序耗尽：按 extent 落 [pos, pos+n) 或 [pos, 帧尾)。
+    /// Only the frame-relative prefix before the first Deref or dynamic step is
+    /// scanned. With each Offset step added to `pos`:
+    /// - Deref: the 8-byte pointer slot itself lands on the frame; the pointee is
+    ///   not frame-relative, so scanning stops there;
+    /// - dynamic step (IndexScaled/VTableAlignOffset): the address is only known at
+    ///   run time, so conservatively cover `[pos, fsz)`;
+    /// - steps exhausted: cover `[pos, pos+n)` or `[pos, fsz)` per the extent.
     fn scan_place(out: &mut FrameMap, pe: &ir::PlaceExpr, extent: Extent, fsz: u32) {
         let ir::PlaceBase::Local(base) = pe.base else {
             return;
@@ -75,14 +88,14 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
             Extent::Bytes(n) => p.saturating_add(n).min(fsz),
             Extent::Escape => fsz,
         };
-        // 帧末 ZST 取址（corpus 批8 c_starlark_eval 实锤）：落在帧尾（p==fsz）的
-        // Escape/空 Bytes 产生退化区间 `(fsz,fsz)`，被 FrameMap::add 的 `a<b` 静默
-        // 丢弃——落帧集整个为空时 frame_ss 缺席，Ref 的 addr_of_local expect 炸
-        // 「必落帧」。语义上该地址是合法的"帧末+1"（ZST 永不解引用），与 interp
-        // 的 base+off 口径一致：补一个帧内 1 字节活口锚强制帧物化。
-        // 0 字节帧形态（corpus 批9 c_rustpython_mini 实锤，f3679
-        // mem::drop::<ZST 自定义 Drop>）：fsz.checked_sub(1) 无处落锚，
-        // 记 force——define_fast 以 1 字节尺寸物化帧（地址仍 base+0）。
+        // An address taken at the very end of the frame (`p == fsz`) produces the
+        // degenerate interval `(fsz, fsz)`, which `FrameMap::add` drops through its
+        // `a < b` guard. If that empties the set, no frame slot is created and
+        // `addr_of_local` trips its "must land on the frame" expect. The address is
+        // legal one-past-the-end and a ZST is never dereferenced, so anchor one live
+        // byte inside the frame to force materialization. A zero-byte frame has no
+        // such byte, so record `force` instead: the frame materializes at size 1
+        // with the address still `base + 0`.
         if p == end {
             if let Some(anchor) = fsz.checked_sub(1) {
                 out.add(anchor, fsz);
@@ -116,7 +129,8 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
                 scan_sp(out, a, fsz);
                 scan_sp(out, b, fsz);
             }
-            // 被调方经 sret 写整个返回聚合，尺寸本地不可知 → Escape
+            // The callee writes a whole return aggregate through sret, so the size
+            // is locally unknown and the place escapes.
             RetDest::Indirect(pe) => scan_place(out, pe, Extent::Escape, fsz),
         }
     }
@@ -188,18 +202,19 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
             R::TlsRef(_) => {}
         }
     }
-    /// SIMD place 的字节宽（lanes × lane_bytes 全向量）。
+    /// Byte width of a SIMD place: the whole vector, `lanes * lane_bytes`.
     fn simd_ext(lanes: &u16, lane_bytes: &u8) -> Extent {
         Extent::Bytes(*lanes as u32 * *lane_bytes as u32)
     }
-    /// Repeat 系的字节宽（count × elem_size，饱和；scan_place 内再收帧尾）。
+    /// Byte width of the Repeat family: `count * elem_size`, saturating. The clamp
+    /// to the frame end happens inside `scan_place`.
     fn rep_ext(count: &u64, elem_size: &u64) -> Extent {
         Extent::Bytes(count.saturating_mul(*elem_size).min(u32::MAX as u64) as u32)
     }
     let mut out = FrameMap::default();
-    // T1-a：ABI v2 展平带来的帧责任——Indirect 参数字节区间（prologue memmove
-    // 目的地）与 RetAbi::Indirect 的 ret_off 区间（Return 的 memmove 源）
-    // 必落帧（帧模型 v2「触及即落帧」的 ABI 展平面）。
+    // ABI flattening puts two ranges on the frame: each Indirect parameter's byte
+    // interval, which is the prologue memmove destination, and an indirect
+    // return's ret_off interval, which is the Return memmove source.
     for p in &body.params {
         if let ParamAbi::Indirect { off, size } = p {
             out.add(*off, off.saturating_add(*size).min(fsz));
@@ -227,8 +242,9 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
                     scan_sp(&mut out, dst_val, fsz);
                     scan_sp(&mut out, dst_flag, fsz);
                 }
-                // Copy/Repeat/Volatile：place 通道按【整个字节区间】落帧（m5.4-design
-                // §3.1「触及即落帧」）——只记基址 = 区间内槽误提升 = 错值级（实锤根因）
+                // Copy/Repeat/Volatile place channels land their whole byte
+                // interval on the frame; recording only the base would promote the
+                // slots inside the interval to SSA and miscompile.
                 Stmt::Copy { dst, src, size } => {
                     scan_place(&mut out, dst, Extent::Bytes(*size), fsz);
                     scan_place(&mut out, src, Extent::Bytes(*size), fsz);
@@ -376,7 +392,8 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
                     lanes,
                     ..
                 } => {
-                    // 地址向量：lanes × 8 字节（指针/偏移均按机器字宽）
+                    // Address vector: `lanes * 8` bytes, since pointers and offsets
+                    // are machine-word sized.
                     let ext = Extent::Bytes(*lanes as u32 * 8);
                     scan_place(&mut out, ptrs, ext, fsz);
                     scan_place(&mut out, offsets, ext, fsz);
@@ -405,7 +422,8 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
                     lanes,
                     lane_bytes,
                 } => {
-                    // mask lane 宽 = mask_bytes（可与数据 lane 异宽，interp 同口径）
+                    // Mask lanes are `mask_bytes` wide, possibly a different width
+                    // than the data lanes, matching the interpreter.
                     scan_place(&mut out, mask, simd_ext(lanes, mask_bytes), fsz);
                     scan_place(&mut out, a, simd_ext(lanes, lane_bytes), fsz);
                     scan_place(&mut out, b, simd_ext(lanes, lane_bytes), fsz);
@@ -421,7 +439,8 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
                     lane_bytes,
                 } => {
                     scan_place(&mut out, passthru, simd_ext(lanes, lane_bytes), fsz);
-                    // 指针 lane 恒 8 字节（interp 同口径），与数据 lane 宽无关
+                    // Pointer lanes are always 8 bytes, independent of the data
+                    // lane width, matching the interpreter.
                     scan_place(&mut out, ptrs, Extent::Bytes(*lanes as u32 * 8), fsz);
                     scan_place(&mut out, mask, simd_ext(lanes, mask_bytes), fsz);
                     scan_place(&mut out, dst, simd_ext(lanes, lane_bytes), fsz);
@@ -488,9 +507,11 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
                     scan_place(&mut out, dst, simd_ext(lanes, lane_bytes), fsz);
                     scan_op(&mut out, val, fsz);
                 }
-                // 128 位族：place 通道恒 16 字节；with_overflow 的 dst 是
-                // (u128, bool) 布局——旗标写 dst+16，足迹 17 字节（欠覆盖会让
-                // 旗标槽 SSA 提升，JIT 写物理帧而读侧取 SSA 零值 = 假阴性）
+                // 128-bit family: place channels are 16 bytes wide, except an
+                // overflow-producing dst, which is a (u128, bool) layout with the
+                // flag at dst+16, i.e. 17 bytes of footprint. Under-covering it
+                // would promote the flag slot to SSA, so the JIT would write the
+                // physical frame while readers take the SSA zero.
                 Stmt::Bin128 {
                     a,
                     b,
@@ -578,7 +599,8 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
                 }
                 scan_ret(&mut out, ret, fsz);
             }
-            // callee 操作数同扫（fn-ptr 可能经 Mem/Deref 链读帧槽——同类潜在漏项）
+            // Scan the callee operand too: a fn-ptr can read a frame slot through a
+            // Mem/Deref chain.
             Terminator::CallIndirect {
                 callee, args, ret, ..
             } => {
@@ -609,7 +631,8 @@ pub(super) fn analyze_frame(body: &ir::FuncBody) -> FrameMap {
             Terminator::Resume | Terminator::TerminateAbort | Terminator::Trap(_) => {}
         }
     }
-    // Indirect ABI（M5.4c 准入；保守纳入——取址性最强）：槽本体 = sret/参数指针 8 字节
+    // Indirect ABI, conservatively included because it is the most address-taken
+    // case: the slot itself holds an sret or parameter pointer, 8 bytes.
     if let RetAbi::Indirect {
         ret_off, sret_off, ..
     } = &body.ret

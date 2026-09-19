@@ -1,40 +1,40 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# jsonschema 0.48.0（2026-07-16 发布，0.x 最新 minor；"锁死" = 钉到补丁号）。
-# default-features = false：0.48 的 default = resolve-http + resolve-file +
-# tls-aws-lc-rs，会拉 reqwest/hyper/rustls + aws-lc-sys（cmake 构建的 C 巨物，
-# 全图 198 crate）——超出纯 Rust 定位与 ~80 crate 闭包预算，且本测试面清单
-# 不含远程 $ref 拉取。裁掉后闭包 100 crate，纯 Rust、无 C/cmake。
-# serde_json 为 driver 直接依赖（json! 构造用例），与 jsonschema 同源钉补丁。
+# jsonschema pinned to the exact patch, "锁死" meaning =0.48.0.
+# default-features = false: 0.48's defaults are resolve-http + resolve-file +
+# tls-aws-lc-rs, which pull reqwest/hyper/rustls and the cmake-built C library
+# aws-lc-sys (198 crates in the graph). That breaks the pure-Rust target and no
+# case here fetches a remote $ref anyway, so trimming leaves a 100-crate closure.
+# serde_json is a direct dependency (json! builds the cases) and is pinned too.
 jsonschema = { version = "=0.48.0", default-features = false }
 serde_json = "=1.0.150"
 ---
-// jsonschema 0.48（JSON Schema 校验）三维差分用例。
+// jsonschema JSON Schema validation differential, compared byte-for-byte with
+// native. Twelve cases per draft, half valid and half invalid:
+// - draft7: object properties with type/minimum/required, array items, a JSON
+//   pointer segment holding a unicode property name, pattern (the ECMA-262 to
+//   Rust regex translation path) and the anyOf first-error text.
+// - draft 2019-09: dependentRequired, contains+minContains, recursive $defs+$ref,
+//   unevaluatedProperties, if/then/else, and multipleOf 0.1 through the exact
+//   fraction path rather than f64 approximation.
+// - draft 2020-12: prefixItems+items:false, sibling keywords next to $ref,
+//   $dynamicRef/$dynamicAnchor, a \p{Lu} unicode property regex, and a 40-level
+//   child chain (valid plus a deep failure with a long pointer).
+// - format assertions (should_validate_formats, 6 cases): hostname (idna plus the
+//   unicode-general-category table), uuid (uuid-simd runtime SIMD detection) and
+//   email.
+// - meta-schema self-check: all 16 driver schemas through meta::is_valid (the
+//   crate's embedded LazyLock<Validator>); explicit $schema in the draft7 /
+//   2019-09 / 2020-12 cases triggers the matching meta validator, and two bad
+//   schemas have a fixed first-error pointer.
+// - stable compile diagnostics: an unknown type name ("flump") and a missing
+//   $ref pointer, each printing instance_path plus the full Display.
+// Each case prints valid plus, on failure, the first error's instance_path (JSON
+// pointer, empty at the root), schema_path and Display. Inputs are fixed, so the
+// text is fixed; properties iterate through serde_json::Map (BTreeMap order); no
+// time, RNG or environment enters. Valid counts are pinned with assert_eq!.
 //
-// 测试面：
-// - draft7（12 例，正反各半）：object properties+type/minimum/required、
-//   array items、unicode 属性名的 JSON pointer 段（汉字）、pattern（ECMA-262
-//   → Rust regex 翻译路径）、anyOf 首错误文案。
-// - draft 2019-09（12 例）：dependentRequired、contains+minContains、$defs+$ref
-//   递归、unevaluatedProperties、if/then/else、multipleOf 0.1（fraction 精确
-//   有理数判别面，不踩 f64 近似）。
-// - draft 2020-12（12 例）：prefixItems+items:false、$ref 兄弟 keyword 生效、
-//   $dynamicRef/$dynamicAnchor、\p{Lu} unicode property 正则、40 层 child 链
-//   深递归（valid + 深层失败长 pointer）。
-// - format 断言面（should_validate_formats，6 例）：hostname（idna +
-//   unicode-general-category 大表）、uuid（uuid-simd 运行期 SIMD detect）、
-//   email。
-// - meta-schema 自校验：16 个 driver schema 全 meta::is_valid（走 crate 内嵌
-//   LazyLock<Validator> meta validator），draft7/2019-09/2020-12 三份显式
-//   $schema 各自触发对应 meta validator；两组坏 schema 的首错误固定 pointer。
-// - compile 错误稳定诊断：未知 type 名（"flump"）与不存在的 $ref pointer，
-//   各打 instance_path + Display 全文。
-//
-// 确定性设计：每例打 valid | 首错误 instance_path（JSON pointer，root 为空串）
-// + schema_path + Display 全文，固定输入 → 固定文案；properties 迭代走
-// serde_json::Map（默认 BTreeMap 序）；无时间/rng/环境量；stderr 真空。
-// valid 计数用 assert_eq! 镇压，文案面交给三维逐字节比对。
 //
 // 三维复跑：
 //   A: target/release/mirvm run corpus/c_jsonschema.rs
@@ -45,7 +45,7 @@ serde_json = "=1.0.150"
 use jsonschema::Validator;
 use serde_json::{json, Value};
 
-/// 单 case：is_valid + 首错误的 instance_path/schema_path/Display。
+/// One case: is_valid plus the first error's instance_path/schema_path/Display.
 fn probe(v: &Validator, inst: &Value) -> (bool, String, String, String) {
     if v.is_valid(inst) {
         (true, String::new(), String::new(), String::new())
@@ -101,14 +101,14 @@ fn main() {
     d7 += line("d7.arr.ok", probe(&v2, &json!([1, 2, 3]))) as usize;
     d7 += line("d7.arr.item", probe(&v2, &json!([1, "x"]))) as usize;
 
-    // unicode 属性名 pointer 段
+    // JSON pointer segment for a unicode property name
     let s3 = json!({"type": "object", "properties": {"汉字": {"type": "string"}}, "required": ["汉字"]});
     check_meta(&s3);
     let v3 = jsonschema::draft7::new(&s3).unwrap();
     d7 += line("d7.uni.ok", probe(&v3, &json!({"汉字": "值"}))) as usize;
     d7 += line("d7.uni.ptr", probe(&v3, &json!({"汉字": 7}))) as usize;
 
-    // pattern：ECMA-262 → Rust regex 翻译路径
+    // pattern: the ECMA-262 -> Rust regex translation path
     let s4 = json!({"pattern": "^[a-z]+[0-9]$"});
     check_meta(&s4);
     let v4 = jsonschema::draft7::new(&s4).unwrap();
@@ -137,7 +137,7 @@ fn main() {
     d19 += line("d19.cont.ok", probe(&v7, &json!([1, 2, 3]))) as usize;
     d19 += line("d19.cont.no", probe(&v7, &json!([1]))) as usize;
 
-    // $defs + $ref 递归
+    // recursive $defs + $ref
     let s8 = json!({
         "type": "object",
         "properties": {"child": {"$ref": "#/$defs/node"}},
@@ -168,7 +168,7 @@ fn main() {
     d19 += line("d19.ifthen.ok", probe(&v10, &json!({"t": "a", "x": 1}))) as usize;
     d19 += line("d19.ifthen.no", probe(&v10, &json!({"t": "b"}))) as usize;
 
-    // multipleOf 走 fraction 精确有理数面（0.1 的二进制近似不参与判别）
+    // multipleOf through exact fractions (0.1's binary approximation is unused)
     let s11 = json!({"type": "number", "multipleOf": 0.1});
     check_meta(&s11);
     let v11 = jsonschema::draft201909::new(&s11).unwrap();
@@ -186,7 +186,7 @@ fn main() {
     d20 += line("d20.prefix.extra", probe(&v12, &json!([true, "x", 9]))) as usize;
     d20 += line("d20.prefix.type", probe(&v12, &json!([true, 7]))) as usize;
 
-    // 2020-12：$ref 兄弟 keyword 生效
+    // 2020-12: sibling keywords next to $ref take effect
     let s13 = json!({
         "$defs": {"pos": {"type": "integer", "exclusiveMinimum": 0}},
         "$ref": "#/$defs/pos",
@@ -211,14 +211,14 @@ fn main() {
     d20 += line("d20.dyn.ok", probe(&v14, &json!({"items": ["a", "b"]}))) as usize;
     d20 += line("d20.dyn.no", probe(&v14, &json!({"items": ["a", 2]}))) as usize;
 
-    // unicode property 正则类 \p{Lu}
+    // unicode property regex class \p{Lu}
     let s15 = json!({"pattern": "\\p{Lu}"});
     check_meta(&s15);
     let v15 = jsonschema::draft202012::new(&s15).unwrap();
     d20 += line("d20.unip.ok", probe(&v15, &json!("abcDEF"))) as usize;
     d20 += line("d20.unip.no", probe(&v15, &json!("abc"))) as usize;
 
-    // 深递归面：40 层 child 链
+    // deep recursion: a 40-level child chain
     let s16 = json!({
         "type": "object",
         "required": ["v"],
@@ -238,7 +238,7 @@ fn main() {
     println!("d20 valid_count={d20}/12");
     assert_eq!(d20, 5);
 
-    // ============ format 断言面（should_validate_formats）============
+    // ============ format assertions (should_validate_formats) ============
     let s17 = json!({"format": "hostname"});
     let f1 = jsonschema::draft202012::options()
         .should_validate_formats(true)
@@ -266,7 +266,7 @@ fn main() {
     println!("fmt valid_count={fmt}/6");
     assert_eq!(fmt, 3);
 
-    // ============ meta-schema 自校验 ============
+    // ============ meta-schema self-check ============
     println!("meta core_valid={meta_ok}/{meta_n}");
     assert_eq!(meta_ok, meta_n);
     let m7 = json!({"$schema": "http://json-schema.org/draft-07/schema#", "type": "string"});
@@ -295,7 +295,7 @@ fn main() {
         Err(e) => println!(" ptr=[{}] err={e}", e.instance_path()),
     }
 
-    // ============ compile 错误稳定诊断 ============
+    // ============ stable compile diagnostics ============
     match jsonschema::draft202012::new(&json!({"type": "flump"})) {
         Ok(_) => println!("compile flump unexpected-ok"),
         Err(e) => println!("compile flump ptr=[{}] err={e}", e.instance_path()),

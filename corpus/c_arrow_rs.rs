@@ -3,29 +3,29 @@
 [dependencies]
 arrow = { version = "=59.1.0", default-features = false, features = ["ipc"] }
 ---
-// c_arrow_rs —— Apache Arrow 现行稳定版：小负载、宽类型面三维差分驱动。
+// c_arrow_rs -- Apache Arrow current stable: a small-payload, wide-type differential driver.
 //
-// 覆盖清单：
-//   1) 手工构建 RecordBatch，五类型列：Int64 / Utf8 / Float64 / List<i32> /
-//      Struct{Int32, Utf8}；可空面覆盖 Int64/Float64 槽位 null、List 整槽 null、
-//      Struct 子列 null。
-//   2) compute 内核：filter_record_batch（boolean mask）、take（UInt32 索引）、
-//      sort_to_indices（Float64 含 null）、sum/min/max 聚合（Int64 与 Float64 各一组）。
-//   3) IPC 往返：StreamWriter 写内存缓冲 → 字节 FNV-1a 摘要 → StreamReader 读回，
-//      与原 batch 做 RecordBatch == 与逐列 == 对拍。
-//   4) 打印：schema 摘要（字段序/名/类型 Debug/nullable）、全部列原始值、
-//      全部内核结果、IPC 字节长度与 FNV-1a、读回相等布尔。
+// Coverage:
+//   1) Hand-built RecordBatch with five column types: Int64 / Utf8 / Float64 / List<i32> /
+//      Struct{Int32, Utf8}; nullability covers Int64/Float64 slots, whole List slots, and
+//      Struct sub-columns.
+//   2) compute kernels: filter_record_batch (boolean mask), take (UInt32 indices),
+//      sort_to_indices (Float64 with nulls), sum/min/max aggregates (one each for Int64 and Float64).
+//   3) IPC roundtrip: StreamWriter into an in-memory buffer -> byte FNV-1a digest -> StreamReader
+//      reads it back and compares RecordBatch == and per-column == against the original.
+//   4) Printed: schema summary (field order/name/type Debug/nullable), all raw column values,
+//      all kernel results, IPC byte length and FNV-1a, and the read-back equality bool.
 //
-// 确定性：所有 f64 一律以 to_bits() 打印，无浮点 to_string；无随机/壁钟/
-//   HashMap 迭代序/裸地址；输出序 = 显式行序、字段序、固定 take/filter 索引；
-//   stderr 面为空。
+// Determinism: every f64 prints via to_bits(), never float to_string; no randomness, wall clock,
+//   HashMap iteration order, or raw addresses; output order = explicit row order, field order,
+//   fixed take/filter indices; stderr is empty.
 //
-// 钉版本与绕行记录：
-//   arrow = 59.1.0（2026-07-17 快拍 crates.io max_stable 版本，精确钉死）。
-//   default-features = false 仅开 "ipc"：default 特性 = ["csv","ipc","json"]，
-//   本驱动不触 csv/json 面，剔除以缩减依赖树；"ipc" 不带 ipc_compression，
-//   arrow-ipc 默认特性为空，依赖树纯 Rust（无 -sys C 库）。
-//   未使用任何引擎绕行开关/force-soft env。
+// Version pin and bypass notes:
+//   arrow = 59.1.0, pinned exactly to the crates.io max_stable version as of 2026-07-17.
+//   default-features = false with only "ipc": the default set is ["csv","ipc","json"]; this driver
+//   uses no csv/json surface, so they are dropped to shrink the tree. "ipc" omits ipc_compression
+//   and arrow-ipc's default features are empty, so the dependency tree is pure Rust (no -sys C lib).
+//   No engine bypass switch or force-soft env var is used.
 
 use std::io::Cursor;
 use std::sync::Arc;

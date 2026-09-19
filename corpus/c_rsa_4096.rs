@@ -1,49 +1,49 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# rsa 钉 patch =0.9.10（与 c_rsa_pss lock 同版）。default-features=false 去默认
-# 三元组 [std, pem, u64_digit] 中的 u64_digit（i128 Neg 绕行，见下），显式回开
-# std + sha2（Pkcs1v15Sign::new::<Sha256> 的 OID 关联）+ pem（本 driver 要 PEM
-# 解析路径：pkcs1/pem + pkcs8/pem；pem 不拉 u64_digit，bitmap 与 c_rsa_pss 同构）。
+# rsa is pinned to patch =0.9.10 (same version as the c_rsa_pss lock).
+# default-features=false drops u64_digit from the default [std, pem, u64_digit]
+# triple (the i128 Neg detour, see below) and re-enables std + sha2 (the OID
+# association for Pkcs1v15Sign::new::<Sha256>) + pem for the PKCS#1/#8 parse path.
 rsa = { version = "=0.9.10", default-features = false, features = ["std", "sha2", "pem"] }
 ---
-// rsa 0.9 @4096 位（纯 Rust 大数，num-bigint-dig 后端）差分。批7 波2「rsa 大
-// 位宽加测」：c_rsa_pss 是 2048 位固定组件重建面，本 driver 走另一条输入形态
-// ——内嵌一份 openssl genpkey 一次性生成的 4096 位 PKCS#8 PEM 私钥常量（生成后
-// 固化，无 keygen rng），测 PEM 解析 + CRT 组件位长/同余校验 + v1.5 确定性签名
-// 在 4096 位（CRT 两支 2048 位 modpow）下三维是否逐字节一致。
+// rsa 0.9 at 4096 bits (pure-Rust bignums, num-bigint-dig backend) differential. This
+// driver takes a different input shape from c_rsa_pss (the 2048-bit component-rebuild
+// surface): it embeds a 4096-bit PKCS#8 PEM private key constant generated once with
+// openssl genpkey and then frozen (no keygen RNG), and checks PEM parsing, CRT component
+// bit lengths/congruences, and a deterministic v1.5 signature at 4096 bits (two 2048-bit
+// CRT modpows) across the three dimensions. A second 4096-bit private-key operation would
+// double the cost, so the driver deliberately stops at one.
 //
-// 测试面：
-//   ① RsaPrivateKey::from_pkcs8_pem 解析（PEM→base64→PKCS#8 DER→CRT 组件装载）
-//      + 位长锚：size()=512B、n.bits()=4096、p/q.bits()=2048、e=65537（openssl
-//      genpkey 硬保证）；d/dp/dq/qinv 实测位长打印；
-//   ② CRT 数学校验：p*q==n、e*dp≡1 (mod p-1)、e*dq≡1 (mod q-1)、
-//      qinv*crt*q≡1 (mod p)（crt_coefficient 语义）；
-//   ③ v1.5 **确定性**签名（PKCS1v15Sign::new::<Sha256>，无 rng 通道）一次，
-//      len=512 + FNV-1a64 锚；
-//   ④ verify 双向：私钥就地 verify + 拆公钥（to_public_key）verify；
-//   ⑤ 公钥导出/回灌：to_pkcs1_der（len+FNV）→ from_pkcs1_der == 原公钥 →
-//      回灌公钥同步 verify 同一签名；
-//   ⑥ 反例：篡改签名 1bit 拒验、错消息摘要拒验；
-//   ⑦ PEM 错误路径：base64 字母表外字符注入 → from_pkcs8_pem 静态错误文案。
-// 有意不做：keygen/OAEP/v1.5 加密——都带 rng 通道，违反 driver 确定性纪律；
-// 不重签第二次——「v1.5 无盐随机」本身就是确定性方案，三维对拍即是确定性 oracle，
-// 且 4096 位私钥 op 成本翻倍不划算（大数槽见下）。
+// Coverage:
+//   1) RsaPrivateKey::from_pkcs8_pem parsing (PEM -> base64 -> PKCS#8 DER -> CRT loading)
+//      with bit-length anchors: size()=512B, n.bits()=4096, p/q.bits()=2048, e=65537
+//      (all guaranteed by openssl genpkey); d/dp/dq/qinv bit lengths are printed.
+//   2) CRT math checks: p*q==n, e*dp == 1 (mod p-1), e*dq == 1 (mod q-1), qinv*q == 1 (mod p).
+//   3) One deterministic v1.5 signature (PKCS1v15Sign::new::<Sha256>, no RNG channel),
+//      anchored by len=512 + FNV-1a64, verified in place and with the split-out key.
+//   4) Public-key export/reimport: to_pkcs1_der -> from_pkcs1_der equals the original,
+//      and the reimported key verifies the same signature.
+//   5) Negative cases: a 1-bit signature tamper and a wrong message digest are both rejected.
+//   6) The PEM error path: a non-base64 character makes from_pkcs8_pem return static error text.
+// Deliberately omitted: keygen/OAEP/v1.5 encryption all carry an RNG channel, which breaks
+// this driver's determinism discipline, and the signature is not repeated because v1.5
+// without salt randomization is already deterministic, so the differential is the oracle.
 //
-// ── u64_digit 绕行（沿用 c_rsa_pss 头注记录）──
-// rsa 默认 feature u64_digit 使 num-bigint-dig 以 u64 为 limb（SignedDoubleBigDigit
-// =i128），modpow 必走的 inv_mod_alt 收尾 `-k0 as BigDigit` 是 i128 一元 Neg——
-// M4 的 128 位族欠账（lower 期降 Trap exit 70）。default-features=false 退回
-// u32 limb（SDouble=i64，标量全支持）。BigUint 值语义与 limb 宽无关，native
-// 双 feature 构建实测 stdout 逐字节相同（c_rsa_pss 实证），对拍不受影响。
+// u64_digit workaround: the rsa default feature u64_digit makes num-bigint-dig use u64
+// limbs (SignedDoubleBigDigit = i128), and the i128 unary Neg in inv_mod_alt's closing
+// `-k0 as BigDigit` (which modpow always reaches) traps during lowering (exit 70). Setting
+// default-features=false falls back to u32 limbs (SDouble = i64, fully supported scalars).
+// BigUint value semantics do not depend on limb width, and native builds with either feature
+// print byte-identical stdout, so the differential is unaffected.
 //
-// ── 大数性能槽 ──
-// 判4 rsa_pss（2048 位，十余次私钥 op）JIT=1 维 335s、tmo=400 先例。本 driver
-// 只留一次 4096 位私钥 CRT sign（≈两支 2048 位 modpow）+ 三次公钥 verify（公钥
-// op 极廉），解释器/JIT 运行时间预计数倍于 rsa_pss 单 op 量级，属既定大数槽，
-// 非引擎 bug 信号；三维超时应按 rsa_pss 同级放宽。
+// Big-number performance note: a 2048-bit rsa_pss driver with a dozen private-key operations
+// took 335s in the JIT dimension against a 400s timeout. This driver keeps one 4096-bit CRT
+// sign (about two 2048-bit modpows) plus three cheap verifications, so its runtime is a known
+// big-number cost, not an engine bug signal; relax the timeout to the rsa_pss level if needed.
+// No FRONTIER: the only trap on this path is the i128 Neg avoided by the feature choice.
 //
-// 三维复跑（A 首跑后按 name 定位 script 目录跑 B）：
+// Three-way rerun (locate the B script dir by name after A's first run):
 //   A: target/release/mirvm run corpus/c_rsa_4096.rs
 //   B: d=$(grep -l 'name = "c_rsa_4096"' ~/.cache/mirvm/scripts/*/Cargo.toml);
 //      cd $(dirname $d) && RUSTC=$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc \
@@ -55,8 +55,8 @@ use rsa::sha2::{Digest, Sha256};
 use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 use rsa::{BigUint, Pkcs1v15Sign, RsaPrivateKey, RsaPublicKey};
 
-/// openssl `genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096` 一次性生成后
-/// `pkcs8 -topk8 -nocrypt` 固化的 PKCS#8 PEM（52 行）；此后即为常量，无 rng。
+/// A PKCS#8 PEM (52 lines) frozen from a one-off `openssl genpkey -algorithm RSA
+/// -pkeyopt rsa_keygen_bits:4096` + `pkcs8 -topk8 -nocrypt`; constant, no RNG.
 const PRIV_PKCS8_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
 MIIJQgIBADANBgkqhkiG9w0BAQEFAASCCSwwggkoAgEAAoICAQDqaEftSwouALlH
 gzOqyB1FrLyc+RWmOWZfCLowCN4Mwec8hV1op4FoPZKT6xnnZ/MdWm2Q3MXUtnMs
@@ -110,7 +110,7 @@ ZA30yE1V/D5XmPMEbdwKIt9qA+PLwVC9jkzwoWgFAk9/Sj8M86aJWD9/mfBqkzJq
 63oi9Ntb8YmkN81A7LpP56dI43lZ8w==
 -----END PRIVATE KEY-----"#;
 
-/// 被签固定消息（内容任意但固定；只进摘要，不进输出）。
+/// The fixed signed message (arbitrary content, fixed; only enters the digest, never output).
 const MSG: &[u8] = b"mirvm corpus rsa-4096 deterministic pkcs1v15 sign/verify probe";
 
 fn fnv1a(data: &[u8]) -> u64 {
@@ -123,7 +123,7 @@ fn fnv1a(data: &[u8]) -> u64 {
 }
 
 fn main() {
-    // ---- ① PKCS#8 PEM 解析 + 位长锚 ----
+    // ---- ① PKCS#8 PEM parsing + bit-length anchors ----
     let priv_key = RsaPrivateKey::from_pkcs8_pem(PRIV_PKCS8_PEM).unwrap();
     let pub_key = priv_key.to_public_key();
     assert_eq!(priv_key.size(), 512);
@@ -148,13 +148,13 @@ fn main() {
     println!("dq bits = {}", dq.bits());
     println!("qinv bits = {}", qinv.bits());
 
-    // ---- ② CRT 数学同余校验（2048 位乘+模，无 modpow）----
+    // ---- ② CRT math congruence checks (2048-bit multiply+mod, no modpow) ----
     println!("p*q == n = {}", p * q == *pub_key.n());
     println!("e*dp mod (p-1) == 1 = {}", (pub_key.e() * dp) % (p - &one) == one);
     println!("e*dq mod (q-1) == 1 = {}", (pub_key.e() * dq) % (q - &one) == one);
     println!("qinv*q mod p == 1 = {}", (qinv * q) % p == one);
 
-    // ---- ③ v1.5 确定性签名（唯一一次 4096 位私钥 op）----
+    // ---- ③ deterministic v1.5 signature (the only 4096-bit private-key op) ----
     let digest = Sha256::digest(MSG);
     println!("digest fnv = {:016x}", fnv1a(&digest));
     let sig = priv_key.sign(Pkcs1v15Sign::new::<Sha256>(), &digest).unwrap();
@@ -162,13 +162,13 @@ fn main() {
     println!("sig len = {}", sig.len());
     println!("sig fnv = {:016x}", fnv1a(&sig));
 
-    // ---- ④ verify 双向（私钥部件就地验 + 拆出的公钥验）----
+    // ---- ④ verification both ways (private-key parts in place + the split-out public key) ----
     println!(
         "verify pub-from-priv = {}",
         pub_key.verify(Pkcs1v15Sign::new::<Sha256>(), &digest, &sig).is_ok()
     );
 
-    // ---- ⑤ 公钥导出/回灌后同步 verify ----
+    // ---- ⑤ public-key export/reimport then verify again ----
     let pub_der = pub_key.to_pkcs1_der().unwrap();
     println!("pub der len={} fnv={:016x}", pub_der.as_bytes().len(), fnv1a(pub_der.as_bytes()));
     let pub_rt = RsaPublicKey::from_pkcs1_der(pub_der.as_bytes()).unwrap();
@@ -178,7 +178,7 @@ fn main() {
         pub_rt.verify(Pkcs1v15Sign::new::<Sha256>(), &digest, &sig).is_ok()
     );
 
-    // ---- ⑥ 反例：篡改签名 / 错消息 ----
+    // ---- ⑥ negative cases: tampered signature / wrong message ----
     let mut bad_sig = sig.clone();
     bad_sig[10] ^= 0x01;
     println!(
@@ -191,7 +191,7 @@ fn main() {
         pub_rt.verify(Pkcs1v15Sign::new::<Sha256>(), &wrong, &sig).is_err()
     );
 
-    // ---- ⑦ PEM 错误路径（base64 字母表外字符注入）----
+    // ---- ⑦ PEM error path (injecting a non-base64 character) ----
     let bad_pem = PRIV_PKCS8_PEM.replace("MIIJ", "M!IJ");
     match RsaPrivateKey::from_pkcs8_pem(&bad_pem) {
         Ok(_) => println!("bad-pem unexpectedly ok"),

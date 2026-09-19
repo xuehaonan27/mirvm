@@ -1,18 +1,18 @@
-//! T1-a JIT ABI 泛化探针（m5.4-design §3.3，镜像 interp ABI v2）：
-//! Pair 参数 / Pair 返回 / 大聚合按值传参（ParamAbi::Indirect）/
-//! 大聚合按值返回（RetAbi::Indirect = sret 前插首参 + Return memcpy）/
-//! track_caller 幻影尾参。三维（native / JIT-off / JIT=1）逐字节一致 +
-//! MIRVM_JIT_DEBUG=1 实证发布（真被编译，非解释兜底）。
+//! JIT ABI generalization probe (mirrors interpreter ABI v2):
+//! pair argument / pair return / large aggregate by-value argument (ParamAbi::Indirect) /
+//! large aggregate by-value return (RetAbi::Indirect = sret prepended first argument +
+//! Return memcpy) / track_caller phantom trailing argument. Must be byte-for-byte identical
+//! across native / JIT-off / JIT=1, and MIRVM_JIT_DEBUG=1 must show real compilation.
 use std::panic::Location;
 
-// 64 字节聚合：按值传参 = Indirect（src 真地址 + prologue memcpy），
-// 按值返回 = sret（隐藏首参直传）。
+// 64-byte aggregate: by-value argument = Indirect (real src address + prologue memcpy),
+// by-value return = sret (hidden first argument passed straight through).
 #[derive(Clone, Copy)]
 struct Big {
     a: [u64; 8],
 }
 
-// u128 参数/返回 = Pair(lo, hi) 双槽通道。
+// u128 argument/return = Pair(lo, hi) two-slot channel.
 #[inline(never)]
 fn pair_add(a: u128, b: u128) -> u128 {
     a + b
@@ -26,8 +26,8 @@ fn big_sum(b: Big) -> u64 {
 #[inline(never)]
 fn make_big(seed: u64) -> Big {
     let mut a = [0u64; 8];
-    // iter_mut/enumerate 的 Option niche 判别（NicheDiscr）——T1-d 准入
-    // 放开前是 rvalue_ok 盲区（曾绕行为下标循环），现作在位回归
+    // Option niche discrimination (NicheDiscr) from iter_mut/enumerate: this was an rvalue_ok
+    // blind spot, so the loop stays as an in-place regression.
     for (i, x) in a.iter_mut().enumerate() {
         *x = seed + i as u64;
     }

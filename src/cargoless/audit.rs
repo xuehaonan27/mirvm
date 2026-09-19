@@ -1,10 +1,13 @@
-//! `cargoless/audit.rs` —— P1 闭合契约的审计工具（设计档 §5 P1）：
-//! 对给定目标（项目目录 / frontmatter 脚本）跑完整 resolve，并与对照
-//! Cargo.lock 逐条对账（项目自带 lock；脚本取 `~/.mirvm/scripts/<hash>/`
-//! 下 cargo 时代物化的 lock——哈希口径与 materialize_script 一致）。
+//! `cargoless/audit.rs` -- audit tool for the closed cargoless contract:
+//! run a full resolve for a target (project directory or frontmatter script)
+//! and reconcile it entry by entry against a reference Cargo.lock (the project's
+//! own lock; for a script, the lock materialized by cargo under
+//! `~/.mirvm/scripts/<hash>/`, hashed the same way `materialize_script` does).
 //!
-//! 对账语义：lock 中每个非根包（registry 与 path）的 (name, version)
-//! 必须与自解 version_map 精确互含（自解 == lock；多版本并存在集合级对账）。
+//! Reconciliation semantics: for every non-root package in the lock (registry
+//! and path alike), the set of (name, version) pairs must equal the one derived
+//! from resolve's `version_map`; coexisting multiple versions are compared at
+//! the set level.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,14 +24,15 @@ pub struct AuditReport {
     pub mode: &'static str,
     pub units: usize,
     pub plan: ResolvePlan,
-    /// (对照 lock 描述, 失配清单)；无对照 = None。
-    /// 项目 = 等值判据（失败计 FAIL）；脚本 = 信息级（时间漂移，不判负）。
+    /// (reference lock description, mismatch list); `None` when there is no reference.
+    /// A project uses the equality criterion (a mismatch counts as FAIL); a script
+    /// uses the informational one (time drift, not a failure).
     pub lock_check: Option<(String, Vec<String>)>,
-    /// 脚本验收：生成的 lock 被 cargo --locked --offline 接受与否。
+    /// Script acceptance: whether cargo `--locked --offline` accepts the generated lock.
     pub acceptance: Option<Result<(), String>>,
 }
 
-/// 项目目录（含 Cargo.toml）审计。
+/// Audit a project directory (containing Cargo.toml).
 pub fn audit_project(dir: &Path) -> Result<AuditReport, String> {
     let manifest = PackageManifest::read_dir(dir)?;
     let mut registry = Registry::open_for(&manifest.lock_root)?;
@@ -51,23 +55,25 @@ pub fn audit_project(dir: &Path) -> Result<AuditReport, String> {
     })
 }
 
-/// frontmatter 脚本审计（fresh 求解；验收 = 生成的 lock 被 cargo
-/// `--locked --offline` 原样接受——先 `cargo fetch --locked`（在线补取）
-/// 再 `--offline` 构建；历史物化 lock 的失配只作信息备注（时间漂移非分叉）。
-/// 与 tests/suites/corpus/cases.manifest 联动：条目带 needs= 且路径缺席时记 SKIP
-/// （与 gate 同口径，不算失败）。
+/// Audit a frontmatter script (fresh resolve; acceptance means cargo
+/// `--locked --offline` accepts the generated lock verbatim -- first
+/// `cargo fetch --locked` (fetching online) then a `--offline` build; a mismatch
+/// against a historically materialized lock is only an informational note, since
+/// time drift is not a fork).
+/// Tied to `tests/suites/corpus/cases.manifest`: an entry carrying `needs=` whose
+/// path is absent is recorded as SKIP (same criterion as the gate, not a failure).
 pub fn audit_script(file: &Path) -> Result<AuditReport, String> {
     let text = std::fs::read_to_string(file)
-        .map_err(|e| format!("读取脚本 {} 失败: {e}", file.display()))?;
+        .map_err(|e| format!("failed to read script {}: {e}", file.display()))?;
     let stem_owned;
     let stem = match file.file_stem().and_then(|s| s.to_str()) {
         Some(s) => {
             stem_owned = s.to_string();
             stem_owned.as_str()
         }
-        None => return Err(format!("{} 文件名非法", file.display())),
+        None => return Err(format!("{} has no valid file name", file.display())),
     };
-    // needs=/env= 联动（corpus cases.manifest 唯一真源）
+    // needs=/env= linkage (corpus cases.manifest is the single source of truth)
     let (needs, manifest_env) = manifest_fields(stem);
     if let Some(needs) = needs
         && !std::path::Path::new(&needs).exists()
@@ -82,7 +88,8 @@ pub fn audit_script(file: &Path) -> Result<AuditReport, String> {
         });
     }
     let Some((manifest_text, body)) = crate::cli::parse_frontmatter_pub(&text) else {
-        // 无 frontmatter = 零依赖单文件——平凡通过（diff.sh 族，不属 cargo 形态）
+        // No frontmatter means a zero-dependency single file: trivially accepted
+        // (the diff.sh family, which is not a cargo-shaped target).
         return Ok(AuditReport {
             name: stem.to_string(),
             mode: "fresh",
@@ -96,7 +103,7 @@ pub fn audit_script(file: &Path) -> Result<AuditReport, String> {
     let mut registry = Registry::open_for(&manifest.lock_root)?;
     let plan = resolve(&manifest, &mut registry)?;
 
-    // 历史对照（信息级）：materialize_script 同口径哈希定位
+    // Historical reference (informational): located with materialize_script's hash
     let lock_dir = script_cache_dir(file);
     let lock_path = lock_dir.join("Cargo.lock");
     let lock_check = lock_path
@@ -107,7 +114,7 @@ pub fn audit_script(file: &Path) -> Result<AuditReport, String> {
         })
         .transpose()?;
 
-    // 验收：生成的 lock 被 cargo --locked --offline 原样接受
+    // Acceptance: cargo --locked --offline accepts the generated lock verbatim
     let acceptance = cargo_accepts_lock(
         &manifest,
         &manifest_text,
@@ -126,8 +133,8 @@ pub fn audit_script(file: &Path) -> Result<AuditReport, String> {
     })
 }
 
-/// 物化伪项目并跑 cargo 验收链（fetch 在线 + build 离线）。
-/// 返回 Ok(()) 或 Err(失败诊断)。
+/// Materialize a pseudo-project and run the cargo acceptance chain (fetch online
+/// + build offline). Returns Ok(()) or Err(failure diagnostic).
 fn cargo_accepts_lock(
     manifest: &PackageManifest,
     manifest_text: &str,
@@ -141,7 +148,8 @@ fn cargo_accepts_lock(
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("src")).map_err(|e| format!("审计目录创建失败: {e}"))?;
+    std::fs::create_dir_all(dir.join("src"))
+        .map_err(|e| format!("failed to create audit dir: {e}"))?;
     let cargo_toml = format!(
         "[package]\nname = \"{}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n\
          [[bin]]\nname = \"{}\"\npath = \"src/main.rs\"\n\n{manifest_text}",
@@ -162,7 +170,8 @@ fn cargo_accepts_lock(
             .arg("--quiet")
             .env("RUSTC", &rustc)
             .env("CARGO_TARGET_DIR", &target);
-        // manifest env= 列（K=V;K=V，%20 解码空格；opencc 类机侧前缀依赖）
+        // manifest env= list (K=V;K=V, %20 decodes to a space); machine-side prefix
+        // dependencies such as opencc rely on it
         if let Some(envs) = manifest_env {
             for pair in envs.split(';') {
                 if let Some((k, v)) = pair.split_once('=') {
@@ -172,41 +181,43 @@ fn cargo_accepts_lock(
         }
         cmd.output()
     };
-    // ① fetch --locked（在线补取；lock 完整性 + 可得性验证）
-    let fetch = run(&["fetch", "--locked"]).map_err(|e| format!("cargo fetch 执行失败: {e}"))?;
+    // (1) fetch --locked (fetches online; verifies lock integrity and availability)
+    let fetch =
+        run(&["fetch", "--locked"]).map_err(|e| format!("failed to run cargo fetch: {e}"))?;
     if !fetch.status.success() {
         let tail = String::from_utf8_lossy(&fetch.stderr);
         let tail = tail.lines().last().unwrap_or("").to_string();
         if std::env::var_os("MIRVM_DEPS_AUDIT_KEEP").is_some() {
-            eprintln!("audit 现场保留: {}", dir.display());
+            eprintln!("audit scratch dir kept: {}", dir.display());
         } else {
             let _ = std::fs::remove_dir_all(&dir);
         }
-        return Ok(Err(format!("cargo fetch --locked 拒绝: {tail}")));
+        return Ok(Err(format!("cargo fetch --locked rejected: {tail}")));
     }
-    // ② build --locked --offline（离线可复现验证）
+    // (2) build --locked --offline (verifies offline reproducibility)
     let build = run(&["build", "--locked", "--offline"])
-        .map_err(|e| format!("cargo build 执行失败: {e}"))?;
+        .map_err(|e| format!("failed to run cargo build: {e}"))?;
     let ok = build.status.success();
     let diag = if ok {
         String::new()
     } else {
         let tail = String::from_utf8_lossy(&build.stderr);
         format!(
-            "cargo build --locked --offline 拒绝: {}",
+            "cargo build --locked --offline rejected: {}",
             tail.lines().last().unwrap_or("")
         )
     };
     if std::env::var_os("MIRVM_DEPS_AUDIT_KEEP").is_some() {
-        eprintln!("audit 现场保留: {}", dir.display());
+        eprintln!("audit scratch dir kept: {}", dir.display());
     } else {
         let _ = std::fs::remove_dir_all(&dir);
     }
     if ok { Ok(Ok(())) } else { Ok(Err(diag)) }
 }
 
-/// materialize_script 同口径：DefaultHasher(脚本绝对路径) → scripts/<16hex>。
-/// P2 切①：cargoless::driver 的脚本物化目录同用此键。
+/// Same key as `materialize_script`: DefaultHasher(absolute script path) ->
+/// `scripts/<16hex>`. The script materialization directory in `cargoless::driver`
+/// uses this key too.
 pub(crate) fn script_cache_dir(script: &Path) -> PathBuf {
     use std::hash::{Hash, Hasher};
     let abs = std::path::absolute(script).unwrap_or_else(|_| script.to_path_buf());
@@ -217,7 +228,7 @@ pub(crate) fn script_cache_dir(script: &Path) -> PathBuf {
         .join(format!("{:016x}", hasher.finish()))
 }
 
-/// 零依赖脚本的平凡 plan（无 frontmatter 形态）。
+/// Trivial plan for a zero-dependency script (no frontmatter).
 fn empty_plan(file: &Path) -> ResolvePlan {
     ResolvePlan {
         root_name: file
@@ -235,8 +246,10 @@ fn empty_plan(file: &Path) -> ResolvePlan {
     }
 }
 
-/// corpus cases.manifest 里该条目的 needs= 路径与 env= 串（无登记 = (None, None)）。
-/// 脚本文件是 c_<name>.rs 而 manifest 行名是 <name>——双键查询。
+/// The `needs=` path and `env=` string for this entry in corpus
+/// `cases.manifest` (no registration = `(None, None)`).
+/// Script files are named `c_<name>.rs` while manifest rows use `<name>`, so
+/// both keys are looked up.
 fn manifest_fields(stem: &str) -> (Option<String>, Option<String>) {
     let Ok(text) = std::fs::read_to_string("tests/suites/corpus/cases.manifest") else {
         return (None, None);
@@ -266,7 +279,8 @@ fn manifest_fields(stem: &str) -> (Option<String>, Option<String>) {
     (None, None)
 }
 
-/// 对账：lock 非根包集合 vs 自解 version_map（互含性）。
+/// Reconcile the lock's non-root package set against resolve's `version_map`
+/// (mutual containment).
 fn diff_versions(plan: &ResolvePlan, lf: &Lockfile) -> Vec<String> {
     let mut mismatches = Vec::new();
     let mut locked: BTreeMap<String, Vec<Version>> = BTreeMap::new();
@@ -301,7 +315,7 @@ fn diff_versions(plan: &ResolvePlan, lf: &Lockfile) -> Vec<String> {
     }
     for name in plan.version_map.keys() {
         if !locked.contains_key(name) {
-            mismatches.push(format!("{name}: lock 缺席，ours 有"));
+            mismatches.push(format!("{name}: absent from lock, present in ours"));
         }
     }
     mismatches

@@ -1,15 +1,19 @@
-//! 调用解析（自 lower/mod.rs M5 calls 带整搬）：func_id（去重+入队）/
-//! resolve_call（Callee 三形态）/freeze_foreign_sig/exported_defs（C2
-//! 救援链的 rlib 符号集供给）。impl Linker 子块。
+//! Call resolution: `func_id` dedups an instance and enqueues it for lowering,
+//! `resolve_call` classifies a callee, `freeze_foreign_sig` freezes a foreign signature,
+//! and `exported_defs` supplies the rlib symbol set for the native-archive rescue chain.
+//! `impl Linker` sub-block.
 
 use super::*;
 
 impl<'tcx> Linker<'tcx> {
-    /// instance → FuncId；首见分配 id 并入待降低队列（worklist 扩集的入口）。
-    /// S4：首见先查底座（v0 symbol_name 键）——命中即复用底座 id，不入队；
-    /// symbol_name 只在首见且有底座时计算一次（无底座路径零额外成本）。
-    /// A2 split：非底座实例按 purity 分轨——image 类（Pure）得标签 id 入 image
-    /// 队列，delta 类（Local/Tainted）走今日 untagged 空间入 delta 队列。
+    /// Maps an instance to a `FuncId`, assigning a new id and enqueuing it for lowering on
+    /// first sight. On first sight the base image is consulted by `symbol_name`: a hit
+    /// reuses the base id without enqueuing, and `symbol_name` is only computed when a base
+    /// image exists, so the base-less path pays nothing.
+    ///
+    /// Split mode routes non-base instances by purity: an image-class (pure) instance gets
+    /// a tagged id and joins the image queue, while a delta-class (local or tainted)
+    /// instance takes an untagged id and joins the delta queue.
     pub(crate) fn func_id(&mut self, inst: Instance<'tcx>) -> ir::FuncId {
         if let Some(&id) = self.ids.get(&inst) {
             return id;
@@ -47,19 +51,21 @@ impl<'tcx> Linker<'tcx> {
         id
     }
 
-    /// 调用点的 callee 解析（Call 终止子用）。Err = 该块 Trap（带分期诊断）。
+    /// Resolves the callee at a call site (for the `Call` terminator). An `Err` traps the
+    /// block with a phrased diagnostic.
     pub(crate) fn resolve_call(&mut self, inst: Instance<'tcx>) -> Result<Callee, String> {
-        // intrinsic（D5）：fallback body 按普通函数补收（collector 因 backend
-        // replaced_intrinsics 跳过收集，解释视角必须自己收——构造同 collector 源码：
-        // Instance::new_raw）；must_be_overridden 的等引擎内建表（M4.1 第 5 步）。
+        // An intrinsic with a fallback body is collected like an ordinary function: the
+        // collector skips replaced_intrinsics, so the interpreted view must collect it
+        // itself, constructing the instance the same way (Instance::new_raw). One that
+        // must_be_overridden belongs to the engine builtin table.
         if let InstanceKind::Intrinsic(def_id) = inst.def {
             let intrinsic = self
                 .tcx
                 .intrinsic(def_id)
-                .expect("InstanceKind::Intrinsic 必有 IntrinsicDef");
+                .expect("InstanceKind::Intrinsic always has an IntrinsicDef");
             if intrinsic.must_be_overridden {
                 return Err(format!(
-                    "intrinsic `{}` 无 fallback（引擎内建表，M4.1）",
+                    "intrinsic `{}` has no fallback body (engine builtin table)",
                     intrinsic.name
                 ));
             }
@@ -67,22 +73,24 @@ impl<'tcx> Linker<'tcx> {
             return Ok(Callee::Func(self.func_id(item)));
         }
         if let InstanceKind::Virtual(..) = inst.def {
-            return Err("dyn 虚调用派发（M4.1+）".into());
+            return Err("dyn virtual call dispatch is not supported".into());
         }
         if self.tcx.is_foreign_item(inst.def_id()) {
             let link_name = Symbol::intern(canonical_link_name(self.tcx.symbol_name(inst).name));
-            // ①引擎原语（alloc/unwind/stub/快路径直通）
+            // (1) Engine primitives: allocation, unwinding, stubs and fast-path passthrough.
             if let Some(b) = self.builtins.get(&link_name).cloned() {
                 return Ok(Callee::Builtin(b));
             }
-            // ②链接仿真：按符号名在已链接 crate 的导出定义里找（tier-0
-            // find_exported_symbol 同构；panic_impl→rust_begin_unwind、__rdl_* 走此路）
+            // (2) Link simulation: look the symbol name up among the exported definitions of
+            // the linked crates, mirroring tier-0 `find_exported_symbol`. panic_impl ->
+            // rust_begin_unwind and __rdl_* take this path.
             let target = self.exported_defs().get(&link_name).copied();
             if let Some((target, is_weak)) = target {
-                // native 链接器语义：weak 定义让位于动态库强符号（compiler-builtins
-                // 的 weak sqrt/memcmp vs libc/libm）。Rust 内部 ABI 符号（__rust/
-                // __rdl/rust_ 前缀）除外——宿主进程（librustc_driver）也导出它们，
-                // 直通会打穿引擎的堆/panic 模型。
+                // Native linker semantics: a weak definition yields to a strong symbol in a
+                // dynamic library (compiler-builtins' weak sqrt/memcmp versus libc/libm).
+                // Rust-internal ABI symbols are the exception: the host process
+                // (librustc_driver) exports them too, and passing them through would break
+                // the engine's heap and panic model.
                 let name = link_name.as_str();
                 let rust_internal = name.starts_with("__rust")
                     || name.starts_with("__rdl")
@@ -96,20 +104,24 @@ impl<'tcx> Linker<'tcx> {
                 }
                 return Ok(Callee::Func(self.func_id(target)));
             }
-            // ③os:: 直通（P7）：denylist 拒 → 其余 dlsym+libffi 按冻结签名直调
+            // (3) os:: passthrough: the denylist is rejected; everything else goes through
+            // dlsym and libffi using the frozen signature.
             let name = link_name.as_str();
             if DENY_EXACT.contains(&name) || DENY_PREFIX.iter().any(|p| name.starts_with(p)) {
                 return Err(format!(
-                    "foreign `{name}`（denylist：线程 M4.4 / 进程模型不直通）"
+                    "foreign `{name}` (denylisted: thread and process model are not passed through)"
                 ));
             }
             if name.starts_with("llvm.") {
-                return Err(format!("foreign `{name}`（LLVM 内部符号，按需内建）"));
+                return Err(format!(
+                    "foreign `{name}` (LLVM-internal symbol, built in on demand)"
+                ));
             }
             return self.freeze_foreign_sig(inst, name);
         }
-        // naked fn（D8h）：函数体是裸机器码，无常规 MIR body。物化进 global-asm
-        // `.so`（收集阶段已做），调用点按真 ABI 走 foreign 直调其 mangled 符号。
+        // A naked fn's body is raw machine code with no ordinary MIR body. It is
+        // materialized into the global-asm `.so` during collection, and the call site
+        // passes through as a foreign call to its mangled symbol under the real ABI.
         if self
             .tcx
             .codegen_fn_attrs(inst.def_id())
@@ -119,13 +131,16 @@ impl<'tcx> Linker<'tcx> {
             let name = canonical_link_name(self.tcx.symbol_name(inst).name);
             return self.freeze_foreign_sig(inst, name);
         }
-        // 普通函数：worklist 闭包扩集（跨 crate 非泛型函数不在 collector 种子集）
+        // An ordinary function: extend the worklist closure, since cross-crate non-generic
+        // functions are not in the collector's seed set.
         Ok(Callee::Func(self.func_id(inst)))
     }
 
-    /// os:: 直通签名冻结：foreign fn sig → FfiKind 列表（tier-0 ty_to_ffitype 同构）。
-    /// fn-ptr 类型的参数（pthread_create 的 thread_start 等）额外冻结**内层签名**
-    /// （M4.4 D1）：执行期该位若收到 fn 条目地址，thunk 工厂物化真机器码后再直传。
+    /// Freezes an os:: passthrough signature: a foreign fn signature becomes a list of
+    /// `FfiKind`s, mirroring tier-0 `ty_to_ffitype`. An fn-pointer parameter (such as
+    /// pthread_create's thread_start) additionally freezes its **inner signature**: if that
+    /// slot receives an fn entry address at execution time, the thunk factory materializes
+    /// real machine code before passing it through.
     pub(super) fn freeze_foreign_sig(
         &mut self,
         inst: Instance<'tcx>,
@@ -138,7 +153,8 @@ impl<'tcx> Linker<'tcx> {
             .skip_binder();
         let unwind = crate::lower::ffi_sig::c_abi_unwind(sig.abi()).ok_or_else(|| {
             format!(
-                "foreign `{name}` ABI {:?} 不支持 libffi 直通（仅支持 C/System 及其 unwind 形式）",
+                "foreign `{name}` ABI {:?} is not supported for libffi passthrough (only C/System \
+                 and their unwind forms)",
                 sig.abi()
             )
         })?;
@@ -147,11 +163,16 @@ impl<'tcx> Linker<'tcx> {
         let mut thunk_args = Vec::new();
         for (i, &t) in sig.inputs().iter().enumerate() {
             args.push(ffi_kind_of(self.tcx, env, t).map_err(|e| {
-                format!("foreign `{name}` 参数 {t}: {e}（libffi 直通仅标量/指针）")
+                format!(
+                    "foreign `{name}` argument {t}: {e} (libffi passthrough accepts only scalars \
+                     and pointers)"
+                )
             })?);
-            // fn ptr 参数位：裸 fn ptr + `Option<fn>`（可空回调——pthread_key_create 的
-            // dtor 等；niche 布局下 None=0 原样直传）。内层签名不可冻结 = 整调用点
-            // Trap（防静默错值：条目地址直传给 native 是静默崩溃）。
+            // fn-pointer parameter slot: a bare fn pointer or `Option<fn>` (a nullable
+            // callback such as pthread_key_create's dtor, where the niche layout makes None
+            // zero and it passes through unchanged). An unfreezable inner signature traps
+            // the whole call site, because passing an entry address straight to native code
+            // is a silent crash.
             let fnptr_ty = if t.is_fn_ptr() {
                 Some(t)
             } else if let rustc_middle::ty::TyKind::Adt(def, sub) = t.kind()
@@ -167,32 +188,38 @@ impl<'tcx> Linker<'tcx> {
             if let Some(t) = fnptr_ty {
                 let inner = t.fn_sig(self.tcx).skip_binder();
                 if inner.c_variadic() {
-                    return Err(format!("foreign `{name}` 参数 {t}: 变参回调不支持 thunk"));
+                    return Err(format!(
+                        "foreign `{name}` argument {t}: variadic callbacks do not support a thunk"
+                    ));
                 }
-                // F-09/R18：C-unwind 回调的 unwind 属性保全进内层签名，
-                // thunk/P1 工厂据此选择可展开入口。
-                let inner_unwind = crate::lower::ffi_sig::c_abi_unwind(inner.abi()).ok_or_else(
-                    || {
+                // The C-unwind callback's unwind property is preserved in the inner
+                // signature, so the thunk/P1 factory can pick an unwindable entry.
+                let inner_unwind =
+                    crate::lower::ffi_sig::c_abi_unwind(inner.abi()).ok_or_else(|| {
                         format!(
-                            "foreign `{name}` 回调 `{t}` 的 ABI {:?} 不支持 thunk（仅支持 C/System 及其 unwind 形式）",
+                            "foreign `{name}` callback `{t}` ABI {:?} is not supported for a thunk \
+                             (only C/System and their unwind forms)",
                             inner.abi()
                         )
-                    },
-                )?;
+                    })?;
                 let mut in_args = Vec::with_capacity(inner.inputs().len());
                 for &it in inner.inputs() {
                     let k = ffi_kind_of(self.tcx, env, it).map_err(|e| {
-                        format!("foreign `{name}` 回调参数 {it}: {e}（thunk 仅标量/指针）")
+                        format!(
+                            "foreign `{name}` callback argument {it}: {e} (a thunk accepts only \
+                             scalars and pointers)"
+                        )
                     })?;
                     if k == ir::FfiKind::Void {
                         return Err(format!(
-                            "foreign `{name}` 回调参数 {it}: ZST 不可作 cif 参数"
+                            "foreign `{name}` callback argument {it}: ZST cannot be a cif argument"
                         ));
                     }
                     in_args.push(k);
                 }
-                let in_ret = ffi_kind_of(self.tcx, env, inner.output())
-                    .map_err(|e| format!("foreign `{name}` 回调返回 {}: {e}", inner.output()))?;
+                let in_ret = ffi_kind_of(self.tcx, env, inner.output()).map_err(|e| {
+                    format!("foreign `{name}` callback return {}: {e}", inner.output())
+                })?;
                 thunk_args.push((
                     i,
                     ir::ForeignSig {
@@ -206,7 +233,7 @@ impl<'tcx> Linker<'tcx> {
             }
         }
         let ret = ffi_kind_of(self.tcx, env, sig.output())
-            .map_err(|e| format!("foreign `{name}` 返回 {}: {e}", sig.output()))?;
+            .map_err(|e| format!("foreign `{name}` return {}: {e}", sig.output()))?;
         Ok(Callee::Foreign {
             sym: name.into(),
             args,
@@ -217,12 +244,14 @@ impl<'tcx> Linker<'tcx> {
         })
     }
 
-    /// 导出符号表（②），惰性一次构建：遍历"最终二进制会链接到"的全部非泛型导出 def
-    /// （tier-0 `for_each_linked_def` 同构），符号名 → mono instance，strong 覆盖 weak。
-    /// guest 导出符号（`#[no_mangle]`/`#[export_name]`/`#[used]` 非泛型）→
-    /// （定义 Instance, is_weak）：② 链接仿真的权威表（与 native final link
-    /// 的 `exported_non_generic_symbols` 集符集同源）；C2 native-archive
-    /// 「符号在 rlib」闭包判定同表（名称 → 可物化 P1 条目）。
+    /// Lazily built, once: the exported-symbol table used by link simulation. It walks
+    /// every non-generic exported def that the final binary would link to, mirroring tier-0
+    /// `for_each_linked_def`, and maps symbol name -> mono instance, with strong beating
+    /// weak. A guest export (`#[no_mangle]`, `#[export_name]` or `#[used]`, non-generic)
+    /// becomes `(defining instance, is_weak)`. This is the authoritative table for link
+    /// simulation, drawn from the same symbol set as the native final link's
+    /// `exported_non_generic_symbols`. The native-archive "is the symbol in an rlib" closure
+    /// test reads the same table, mapping a name to a materializable P1 entry.
     pub(crate) fn exported_defs(&mut self) -> &FxHashMap<Symbol, (Instance<'tcx>, bool)> {
         let tcx = self.tcx;
         self.exports.get_or_insert_with(|| {
@@ -231,7 +260,7 @@ impl<'tcx> Linker<'tcx> {
             use rustc_middle::middle::exported_symbols::ExportedSymbol;
             use rustc_session::config::CrateType;
 
-            // (instance, is_weak)：非 weak 覆盖 weak
+            // (instance, is_weak): a non-weak entry overrides a weak one
             let mut map: FxHashMap<Symbol, (Instance<'tcx>, bool)> = FxHashMap::default();
             let mut add = |def_id: rustc_hir::def_id::DefId| {
                 if tcx.is_foreign_item(def_id)
@@ -255,7 +284,7 @@ impl<'tcx> Linker<'tcx> {
                 }
             };
 
-            // 本地 crate：遍历 HIR（exported_symbols 会漏 #[used]）
+            // Local crate: walk the HIR, because exported_symbols misses #[used]
             for def_id in tcx.hir_crate_items(()).definitions() {
                 if !tcx.def_kind(def_id).has_codegen_attrs() {
                     continue;
@@ -269,7 +298,7 @@ impl<'tcx> Linker<'tcx> {
                 }
                 add(def_id.into());
             }
-            // 依赖 crate 的非泛型导出符号
+            // Non-generic exported symbols of dependency crates
             let dependency_formats = tcx.dependency_formats(());
             if let Some(format) = dependency_formats.get(&CrateType::Executable) {
                 for (cnum, &linkage) in format.iter_enumerated() {

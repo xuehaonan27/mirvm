@@ -1,12 +1,13 @@
-//! `cargoless/driver.rs` — the cargo-less new path for `mirvm run` (D15 P2 cuts ①/②/③, design §3.6/§5 P2), replacing the three phases of cargo_shim::phase_cargo (cargo run +
-//! RUSTC_WRAPPER + runner protocol):
+//! `cargoless/driver.rs` — the cargo-less counterpart of `cargo_shim`'s cargo +
+//! RUSTC_WRAPPER + runner protocol: `mirvm run`, `mirvm test`, `mirvm pack` and the
+//! `__cless-run-root` / `__cless-doctest-builder` child entry points.
 //!
 //! ```text
-//! resolve (P1 resolver) → links mutex check → unit-level Kahn ready-queue parallel scheduling
-//! (P3 cut ⑤c: N workers, MIRVM_CLESS_JOBS override, default available_parallelism;
-//! =1 matches the old serial topo order bit-for-bit — differential debugging anchor. A unit is ready once all its deps finish,
-//! stages inside a unit remain serial):
-//!   build.rs full lifecycle (cut ③ + P3 cut ⑤b fine-grained incrementality): host really compiles the build script
+//! resolve → links mutex check → unit-level Kahn ready-queue parallel scheduling
+//! (N workers, MIRVM_CLESS_JOBS override, default available_parallelism;
+//! =1 reproduces the serial topological order bit-for-bit — differential-debugging anchor.
+//! A unit is ready once all its deps finish; stages inside a unit remain serial):
+//!   build.rs full lifecycle: host really compiles the build script
 //!     (skip on fp hit) → rerun decision (buildrs::should_rerun, same semantics as cargo —
 //!     stored in build/<pkg>-<fp>/{output.txt,rerun.txt}; when skipped, reparse output.txt
 //!     to replay BuildOutput, same warning gate) → execute with cargo-compatible env →
@@ -23,8 +24,8 @@
 //! ```
 //!
 //! Propagation rules (-l only enters this package, -L enters transitive dependents, metadata only goes to direct dependents'
-//! build script, no automatic DEP_*_ROOT, no automatic check-cfg patch) are all cut ③ empirical
-//! conclusions; details are in the buildrs.rs file header.
+//! build script, no automatic DEP_*_ROOT, no automatic check-cfg patch) are documented in the
+//! buildrs.rs file header.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -42,7 +43,7 @@ use super::schedule::{self, Layout};
 use super::workspace::WorkspaceManifest;
 
 /// `mirvm run <dir|Cargo.toml> [--bin <name>]` (MIRVM_DEPS=self).
-/// bin_sel = the bin name selected by --bin (D15 P4 cut ⑥b, cargo run --bin semantics).
+/// `bin_sel` is the bin name selected by `--bin` (`cargo run --bin` semantics).
 pub fn run_project(
     dir: &Path,
     program_args: &[String],
@@ -986,8 +987,9 @@ impl TestRequest {
             return Err("no testable targets".into());
         }
 
-        // 选中 integration test 时，Cargo 还编译所有可用普通 bin，为
-        // CARGO_BIN_EXE_* 提供进程入口；bin unit-test 与普通 bin 是两单元。
+        // When an integration test is selected, Cargo also compiles every available normal bin to
+        // provide a process entry point for CARGO_BIN_EXE_*; the bin unit-test and the normal bin
+        // are two units.
         let has_integration = selected
             .iter()
             .any(|s| matches!(s.target.kind, TargetKind::Test | TargetKind::Bench));
@@ -1845,8 +1847,8 @@ fn script_manifest(file: &Path) -> PackageManifest {
         }
     };
     let Some((manifest_text, body)) = crate::cli::parse_frontmatter_pub(&text) else {
-        // 路由层（cli.rs run_main）保证只在有 frontmatter 时进来；
-        // 裸单文件是形态 3 快路径，不经此
+        // The router (cli.rs run_main) only enters here when frontmatter is present; a bare single
+        // file is the single-file fast path and never reaches this.
         eprintln!(
             "mirvm: {} has no frontmatter (internal routing error)",
             file.display()
@@ -1899,7 +1901,7 @@ fn drive(
     bin_sel: Option<&str>,
     pack_out: Option<&Path>,
 ) -> ExitCode {
-    // 1. P1 resolver: lock present use lock (closed), lock absent pubgrub fresh solve
+    // 1. resolver: use the lock when it is present, otherwise a fresh pubgrub solve
     let mut registry = match Registry::open_for(&manifest.lock_root) {
         Ok(r) => r,
         Err(e) => {
@@ -1942,7 +1944,7 @@ fn drive(
         },
     };
 
-    // 4. fingerprint + compile segment (compile_plan extracted component, D15 P4 cut ⑥a — drive and
+    // 4. fingerprint + compile segment (compiled by compile_plan — drive and
     // sysroot self-build share the same pipeline; sources of this segment's stamp/sysroot/rustflags
     // inputs on the drive side are annotated in the following segments)
     let layout = Layout::new();
@@ -1950,9 +1952,9 @@ fn drive(
     // fallback literal on absence is non-fatal (only makes fp coarser, no new error path)
     let stamp = crate::sysroot::current_stamp_value()
         .unwrap_or_else(|| "sysroot-stamp-unknown".to_string());
-    // rustflags (D15 P3 cut ⑤a) parsed once and threaded through: only enter target-side args
-    // (appended at end of dep/bin), fingerprint consumed uniformly for whole unit (host side following stale is harmless,
-    // v1 simplified; parsing/priority/boundaries see rustflags.rs header)
+    // rustflags parsed once and threaded through: only enter target-side args
+    // (appended at end of dep/bin), fingerprint consumed uniformly for whole unit (host side following stale is harmless;
+    // parsing/priority/boundaries see rustflags.rs header)
     let rustflags = match super::rustflags::from_env_and_disk(&manifest.root) {
         Ok(f) => f,
         Err(e) => {
@@ -1987,7 +1989,7 @@ fn drive(
 
     // 5. root build.rs same lifecycle (root is not a unit: edge table uses plan.root_deps,
     // fp computed separately; OUT_DIR/rustc-env/cfg corrections enter bin session)
-    // root lib target (cut ⑤a full-layer migration surface, hexyl proven): when [lib]+[[bin]] dual
+    // root lib target: when [lib]+[[bin]] dual
     // targets, bin implicitly depends on the same-name lib — cargo first compiles root lib into target rlib
     // then lets bin --extern it. fp shares root_fingerprint with root build.rs (same package same recipe),
     // so fp computation condition = has_build_script || has lib target.
@@ -2145,7 +2147,7 @@ fn drive(
     // produces zero artifacts, use deps/<bin> as placeholder — guest only sees argv string, does not read file)
     let mut program_argv = vec![layout.deps.join(bin_name).display().to_string()];
     program_argv.extend(program_args.iter().cloned());
-    // no chdir throughout: guest cwd = caller cwd, consistent with cargo run semantics (E36 closed)
+    // no chdir throughout: guest cwd = caller cwd, consistent with cargo run semantics
     if let Some(out) = pack_out {
         crate::cli::pack_driver(args, program_argv, out.to_path_buf())
     } else {
@@ -2160,7 +2162,7 @@ pub struct CompiledPlan {
     pub fps: Vec<String>,
 }
 
-/// unit compile segment (drive original segment 4, D15 P4 cut ⑥a extracted shared component): fingerprints +
+/// unit compile segment: fingerprints +
 /// host/target/build sets + unit-level Kahn ready-queue parallel scheduling (run_scheduler)
 /// runs all unit pipelines. Shared by drive and sysroot self-build:
 ///
@@ -2168,8 +2170,7 @@ pub struct CompiledPlan {
 /// - sysroot build passes **toolchain sysroot** and its stamp — outputs cannot be their own
 ///   compile input (the --sysroot for compiling std can only be the distro toolchain, chicken-and-egg).
 ///
-/// Failure = first compile error original text (caller prepends `mirvm: ` prefix and exits loudly,
-/// byte-identical to before extraction).
+/// Failure = first compile error original text (caller prepends `mirvm: ` prefix and exits loudly).
 #[allow(clippy::too_many_arguments)]
 pub fn compile_plan(
     plan: &ResolvePlan,
@@ -2182,7 +2183,7 @@ pub fn compile_plan(
     root_proc_macro: bool,
     quiet_build_warnings: bool,
 ) -> Result<CompiledPlan, String> {
-    // unit-level Kahn ready-queue parallel scheduling (D15 P3 cut ⑤c): a unit is ready when all its deps are 'done'
+    // unit-level Kahn ready-queue parallel scheduling: a unit is ready when all its deps are 'done'
     // (build.rs lifecycle + host/target compilation all finished according to set membership);
     // N workers each run the full pipeline of assigned units (build.rs decision/
     // execution → compilation), completion table is only gathered on the main thread.
@@ -2197,8 +2198,9 @@ pub fn compile_plan(
     let self_exe = std::env::current_exe().expect("current_exe failed");
     let jobs = cless_jobs();
     let (dependents, mut indeg) = schedule::dep_graph(plan);
-    // Worker shared read-only context (borrowed via thread::scope, immutable for the whole scheduling phase — completion
-    // table is not cross-thread, no lock needed). Thread-safety check (cut ⑤c design pin):
+    // Shared read-only worker context (borrowed via thread::scope, immutable for the whole
+    // scheduling phase; the completion table stays on the main thread, so no lock is needed).
+    // Thread-safety argument:
     // - no rustc session inside the driver process — compilation is entirely in __cless-dep/real-rustc
     //   child processes, no compiler global state between workers;
     // - all env writes are on Command instances (per-child, thread-safe); std::env::set_var is forbidden
@@ -2253,8 +2255,8 @@ pub fn compile_plan(
     Ok(CompiledPlan { tables, fps })
 }
 
-/// Concurrency (cut ⑤c): MIRVM_CLESS_JOBS override, default available_parallelism
-/// (fallback to 1 if unavailable). **=1 dispatch order matches old serial topo order bit-for-bit — differential debugging anchor,
+/// Concurrency: MIRVM_CLESS_JOBS override, default available_parallelism
+/// (fallback to 1 if unavailable). **=1 dispatch order matches the serial topo order bit-for-bit — differential debugging anchor,
 /// pinned**. Illegal values (non-positive integers) are loudly rejected and exit.
 fn cless_jobs() -> usize {
     match std::env::var("MIRVM_CLESS_JOBS") {
@@ -2271,8 +2273,8 @@ fn cless_jobs() -> usize {
     }
 }
 
-/// Worker shared read-only context (borrowed via thread::scope; immutable for the whole scheduling phase — completion table
-/// is not cross-thread, no lock needed). Thread-safety check details see drive() segment 4 header note.
+/// Worker shared read-only context (borrowed via thread::scope; immutable for the whole scheduling
+/// phase — the completion table stays on the main thread, so no lock is needed here).
 struct SharedCtx<'a> {
     plan: &'a ResolvePlan,
     profile: &'a super::manifest::ProfileFlags,
@@ -2285,7 +2287,7 @@ struct SharedCtx<'a> {
     target_set: &'a BTreeSet<usize>,
     build_set: &'a BTreeSet<usize>,
     quiet_build_warnings: bool,
-    /// Pipeline mutex lock table for same-fp duplicate units (drive() header note item 3).
+    /// Pipeline mutex lock table for same-fp duplicate units.
     fp_locks: FpLocks,
 }
 
@@ -2311,14 +2313,14 @@ impl FpLocks {
 /// Completion table (owned only by main thread: dependency-side inputs needed by workers — DEP_* env,
 /// transitive -L aggregation, links rerun list — are computed from this table by the main thread at **dispatch** time
 /// and carried along with WorkMsg; at that moment all deps must be done, values are bit-identical
-/// to the serial version computed at unit start). compile_plan return value (pub since D15 P4 cut ⑥a —
-/// consumed by drive's root package phase; sysroot build takes Ok and does not read fields).
+/// to the serial version computed at unit start). Returned by compile_plan: the drive's root
+/// package phase consumes it, the sysroot build takes Ok without reading fields.
 #[derive(Default)]
 pub struct UnitTables {
     /// unit index → executed BuildOutput (consumed in three places: this unit's compilation corrections, dependents' -L
     /// aggregation, direct dependents' build script DEP_*).
     pub outputs: BTreeMap<usize, BuildOutput>,
-    /// Units whose build.rs was actually rerun in this session (cut ⑤b condition 4 links propagation:
+    /// Units whose build.rs was actually rerun in this session (links propagation:
     /// a package with links in direct dependencies being in re_ran ⇒ dependent also reruns, DEP_* input may change).
     pub re_ran: BTreeSet<usize>,
 }
@@ -2451,7 +2453,7 @@ fn run_unit_pipeline(msg: WorkMsg, ctx: &SharedCtx) -> Result<PerUnitDone, Strin
             run_compile(&mut cmd, u, what)?;
         }
     }
-    // target side: same as before __cless-dep (-Zno-codegen rlib)
+    // target side: the __cless-dep child (-Zno-codegen rlib)
     if ctx.target_set.contains(&ix) {
         // fingerprint hit: content-addressed, same-name artifact means same content, skip
         let hit = ctx.layout.deps.join(format!("{stem}.rmeta")).is_file()
@@ -2479,7 +2481,7 @@ fn run_unit_pipeline(msg: WorkMsg, ctx: &SharedCtx) -> Result<PerUnitDone, Strin
 }
 
 /// A unit's build.rs full lifecycle: build script compilation (skip on fp hit) →
-/// rerun decision (cut ⑤b: buildrs::should_rerun, same semantics as cargo) — if skipped, read
+/// rerun decision (buildrs::should_rerun, same semantics as cargo) — if skipped, read
 /// output.txt and reparse to replay BuildOutput; if run, execute with cargo-compatible env and write archive
 /// (only after successful execution — failure already returned by this function, no partial archive) → (BuildOutput, whether it actually ran).
 /// `dep_env`/`dep_links_reran` are computed and carried by the main thread at dispatch time (see WorkMsg note).
@@ -2625,11 +2627,11 @@ fn run_build_lifecycle_root(
     }
 }
 
-/// rerun gate (cut ⑤b): decision (buildrs::should_rerun) → if skip, read archive
+/// rerun gate: decision (buildrs::should_rerun) → if skip, read archive
 /// output.txt and reparse to replay (instruction stream zero serialization distortion, warnings replayed from cache
 /// under same gate — same as cargo); if run, execute + write both output.txt and rerun.txt archives.
 /// When MIRVM_DEBUG_BLDRS=1, print `bldrs run|skip <pkg> <reason>` observation line to stderr
-/// (cut ⑤c: observation lines from workers may interleave when jobs>1 — debug knob, not differential surface).
+/// (observation lines from workers may interleave when jobs>1 — debug knob, not differential surface).
 /// Returns (BuildOutput, whether this run actually ran); failure returns original error text (caller prepends `mirvm: `
 /// prefix and exits loudly — root path on main thread prepends in place, worker path prepends after convergence).
 // flat parameter precedent same as run_build_lifecycle
@@ -2681,8 +2683,9 @@ fn rerun_gate(
     Ok((bo, true))
 }
 
-/// build script warning 回吐门控（cargo 同格式同口径：`warning: <pkg>@<ver>:
-/// <msg>`；registry 包默认吞，path 包显示；执行与存档回放两路同款）。
+/// Build script warning replay gate (same format and criterion as cargo: `warning: <pkg>@<ver>:
+/// <msg>`; registry packages swallow by default, path packages show; identical on the execution and
+/// archive-replay paths).
 fn show_warnings(pkg: &str, ver: &str, from_registry: bool, bo: &BuildOutput, quiet: bool) {
     if !from_registry && !quiet {
         for w in &bo.warnings {

@@ -3,18 +3,18 @@
 [dependencies]
 crc32fast = "1"
 ---
-// crc32fast 1.x 差分：`llvm.x86.pclmulqdq` 内建（2026-07-15）首战。
-// 机理：std 特性下 Hasher::new 运行期 cpuid 探测（guest 直通宿主特性位）选中
-// specialized/pclmulqdq.rs；单次 update 的 buf ≥128B 走硬件 CRC 折叠路径，
-// <128B 落 baseline update_fast_16 —— 127/128/129 三尺寸正卡在阈值两侧，
-// 混合分块则压两条路径间的状态接力。此前 ≥128B 单块必 trap（FRONTIER 队列
-// 已核销），本 driver 逐字节对拍验证全通。
-// 覆盖：已知向量（"123456789"→cbf43926）；0/1/127/128/129/8K/1M 一次性 hash；
-// 跨阈值分块（1/64/127/128/129/251/mix，1M 另加 4096/65536/7777）；
-// combine（amount 正常跟踪、new_with_initial_len 预置、len2=0 特例、四段链）；
-// new_with_initial 自定义初值 + 空 finalize 恒等 + 链式接续语义；
-// reset/clone/Debug/Default；core::hash::Hasher 适配器（write/finish/derive Hash）。
-// 确定性：xorshift64 固定种子造数据，只打印 hex/bool/计数。
+// crc32fast differential; every byte is compared with native. With the std feature
+// on, Hasher::new probes cpuid at runtime (guest passthrough of host feature bits)
+// and selects specialized/pclmulqdq.rs: a single update of >=128B takes the
+// hardware CRC fold path while <128B falls back to baseline update_fast_16, so
+// 127/128/129 straddle the threshold and mixed chunking exercises the hand-off.
+// Covers the known vector ("123456789" -> cbf43926); one-shot hashes of
+// 0/1/127/128/129/8K/1M; cross-threshold chunking (1/64/127/128/129/251/mix, plus
+// 4096/65536/7777 for 1M); combine (amount tracking, new_with_initial_len, len2=0,
+// four-segment chain); new_with_initial custom seeds, empty-finalize identity and
+// chain continuation; reset/clone/Debug/Default; and the core::hash::Hasher adapter.
+// Deterministic: an xorshift64 with a fixed seed makes the data; only hex, bools
+// and counts are printed.
 use crc32fast::Hasher;
 use std::hash::Hash;
 
@@ -53,7 +53,7 @@ fn make_data(len: usize, seed: u64) -> Vec<u8> {
     v
 }
 
-/// 按循环块长模式分块喂 Hasher。
+/// Feeds the Hasher in chunks following a repeating block-length pattern.
 fn chunked(data: &[u8], pat: &[usize]) -> u32 {
     let mut h = Hasher::new();
     let mut off = 0usize;
@@ -76,7 +76,7 @@ struct Rec {
 }
 
 fn main() {
-    // ① 已知向量（zlib check 值）
+    // (1) known vectors (zlib check values)
     println!("known empty       = {:08x}", crc32fast::hash(b""));
     let check = crc32fast::hash(b"123456789");
     println!("known 123456789   = {check:08x} ok={}", check == 0xcbf4_3926);
@@ -88,14 +88,14 @@ fn main() {
     d.update(b"123456789");
     println!("known default     = {:08x}", d.finalize());
 
-    // ② 主数据（1M，xorshift 定种）+ 各尺寸一次性 hash（127/128/129 卡阈值）
+    // (2) master data (1M, seeded xorshift) + one-shot hashes (127/128/129 edge)
     let master = make_data(MIB, 0x9E37_79B9_7F4A_7C15);
     println!("master len={} fnv={:016x}", master.len(), fnv1a(&master));
     for n in [0usize, 1, 127, 128, 129, KIB8, MIB] {
         println!("one len={n:<8} crc={:08x}", crc32fast::hash(&master[..n]));
     }
 
-    // ③ 跨阈值分块：小块长全 baseline，128+ 单块全 pclmulqdq，mix 混排接力
+    // (3) cross-threshold chunking: small blocks baseline, 128+ pclmulqdq, mix both
     let pats: [(&str, &[usize]); 7] = [
         ("1", &[1]),
         ("64", &[64]),
@@ -125,7 +125,7 @@ fn main() {
         println!("chk len={MIB} pat={name:<6} crc={got:08x} ok={}", got == want);
     }
 
-    // ④ combine：crc(a‖b) 由 crc(a)+crc(b)+len(b) 拼出
+    // (4) combine: crc(a||b) assembled from crc(a) + crc(b) + len(b)
     let data8k = &master[..KIB8];
     let want8k = crc32fast::hash(data8k);
     for cut in [0usize, 1, 127, 128, 129, 4096, 8191, 8192] {
@@ -138,7 +138,7 @@ fn main() {
         let got = h1.finalize();
         println!("comb cut={cut:<5} crc={got:08x} ok={}", got == want8k);
     }
-    // new_with_initial_len：crc/长度均已知时免 update 预置后段
+    // new_with_initial_len: preset the tail when crc and length are both known
     let (a, b) = (&master[..300], &master[300..1000]);
     let mut h1 = Hasher::new();
     h1.update(a);
@@ -149,7 +149,7 @@ fn main() {
         "comb known-len  crc={got:08x} ok={}",
         got == crc32fast::hash(&master[..1000])
     );
-    // 四段链
+    // four-segment chain
     let cuts = [100usize, 300, 301, 2048];
     let mut acc = Hasher::new();
     acc.update(&master[..cuts[0]]);
@@ -164,7 +164,7 @@ fn main() {
         got == crc32fast::hash(&master[..2048])
     );
 
-    // ⑤ new_with_initial 自定义初值
+    // (5) new_with_initial with a custom seed
     let d1000 = &master[..1000];
     let base = crc32fast::hash(d1000);
     for init in [0u32, 1, 0xdead_beef, 0xffff_ffff] {
@@ -173,17 +173,17 @@ fn main() {
         let got = h.finalize();
         println!("init init={init:08x} crc={got:08x} eq_hash={}", got == base);
     }
-    // 空 finalize 恒等：不 update 时原样返回初值
+    // empty finalize is the identity: with no update it returns the seed
     let bare = Hasher::new_with_initial(0xdead_beef).finalize();
     println!("init bare       = {bare:08x} ok={}", bare == 0xdead_beef);
-    // 链式接续：new_with_initial(crc(a)) + update(b) == crc(a‖b)（137 跨阈值）
+    // chain continuation: new_with_initial(crc(a)) + update(b) == crc(a||b)
     let crc_a = crc32fast::hash(&master[..137]);
     let mut h = Hasher::new_with_initial(crc_a);
     h.update(&master[137..1000]);
     let got = h.finalize();
     println!("init chain      = {got:08x} ok={}", got == base);
 
-    // ⑥ 状态机周边：clone 分流 / reset 复用 / 空 update / Debug / hash 适配器
+    // (6) state machine: clone fork / reset reuse / empty update / Debug / adapter
     let mut h = Hasher::new();
     h.update(&master[..200]);
     let h2 = h.clone();

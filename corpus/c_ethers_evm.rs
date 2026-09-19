@@ -8,79 +8,79 @@ alloy-eips = { version = "=2.2.0", default-features = false }
 alloy-rlp = "=0.3.16"
 k256 = "=0.13.4"
 ---
-// c_ethers_evm —— alloy 无网面（ethers-core 语义面的现行 alloy 接棒；批10 波2）：
-// ABI encode/decode 矩阵、交易 RLP 签名（legacy EIP-155 + EIP-1559 type-2，k256
-// RFC6979 定签 + 恢复回环）、区块头解析与 keccak 哈希指纹的三维差分。
+// c_ethers_evm -- alloy's no-network surface: a three-way differential over the ABI
+// encode/decode matrix, transaction RLP signing (legacy EIP-155 + EIP-1559 type-2,
+// k256 RFC6979 deterministic signing with recover roundtrip), block-header parsing
+// and keccak hash fingerprints.
 //
-// 版本钉（相容组合证据）：
-//   * alloy-consensus =2.2.0、alloy-sol-types =1.6.1、alloy-primitives =1.6.1、
-//     alloy-rlp =0.3.16、alloy-eips =2.2.0、k256 =0.13.4（2026-07-18 crates.io
-//     sparse index 各线顶）。相容性：consensus 2.2.0 声明 alloy-primitives ^1.6.0
-//     与 alloy-eips ^2.2.0（同 release train）、alloy-rlp ^0.3.14；sol-types
-//     1.6.1 声明 alloy-primitives ^1.6.1——primitives 1.x 线顶即 1.6.1（无 2.x），
-//     =1.6.1 使全图单版本无错配。k256 =0.13.4 与 c_k256_ecdsa 已绿同版，且正是
-//     consensus `k256` feature 的 ^0.13 约束顶。
-//   * features 裁剪：consensus 默认仅 std；c-kzg/blst/secp256k1-sys/sha3-asm
-//     虽在 lock 图但不进构建图（cargo tree -e normal,build 实证 96 包、零 C/FFI/
-//     零汇编），keccak 走 sha3 纯 Rust 路径。`k256` feature 只为 Signed 的
-//     recover_signer（纯 Rust k256 恢复），不引 secp256k1 C 绑定。
+// Version pins (compatible-combination evidence):
+//   * alloy-consensus =2.2.0, alloy-sol-types =1.6.1, alloy-primitives =1.6.1,
+//     alloy-rlp =0.3.16, alloy-eips =2.2.0, k256 =0.13.4 (the latest on each line).
+//     consensus 2.2.0 declares alloy-primitives ^1.6.0 and alloy-eips ^2.2.0 (same
+//     release train) plus alloy-rlp ^0.3.14; sol-types 1.6.1 declares
+//     alloy-primitives ^1.6.1, and since the primitives 1.x top is 1.6.1 (no 2.x),
+//     pinning =1.6.1 keeps the whole graph single-versioned; k256 =0.13.4 matches the
+//     green c_k256_ecdsa version and is the top of consensus's ^0.13 k256 feature.
+//   * Feature cut: consensus defaults to std only; c-kzg/blst/secp256k1-sys/sha3-asm
+//     stay in the lock graph but not the build graph (cargo tree -e normal,build shows
+//     96 packages, zero C/FFI/assembly), and keccak uses the pure-Rust sha3 path. The
+//     `k256` feature only enables Signed's recover_signer (pure-Rust k256 recovery).
 //
-// 确定性说明：
-//   * 全部输入为文件内常量；签名走 k256 RFC6979 HMAC-DRBG
-//     （sign_prehash_recoverable）零 RNG；keccak/RLP/ABI/recover 全为纯函数；
-//     无时间/线程/HashMap 迭代/网络/TTY/系统环境面。
-//   * 外部公开定值锚（与实现无关的第三者证据）：ERC20 transfer 选择子
-//     0xa9059cbb；EIP-155 规范例交易字段（nonce 9 / 20gwei / 21000 /
-//     to=0x3535…3535 / 1ETH / chain 1 → v=37 形态）；以太坊主网 genesis 头
-//     keccak = 0xd4e56740f876aef8…1cb8fa3；RLP 串长 55/56 边界头字节 b7/b8。
-//   * B 维 native 同 driver 连跑两次 stdout 逐字节一致（见下「三维实测」）。
+// Determinism:
+//   * Every input is a file constant; signing uses k256's RFC6979 HMAC-DRBG
+//     (sign_prehash_recoverable) with zero RNG; keccak/RLP/ABI/recover are pure
+//     functions; no time/thread/HashMap iteration/network/TTY/environment surface.
+//   * External public anchors (third-party evidence independent of the
+//     implementation): the ERC20 transfer selector 0xa9059cbb; the EIP-155 spec
+//     example transaction fields (nonce 9 / 20gwei / 21000 / to=0x3535...3535 /
+//     1ETH / chain 1 -> v=37); the Ethereum mainnet genesis header keccak
+//     0xd4e56740f876aef8...1cb8fa3; and the RLP string-length 55/56 head bytes b7/b8.
 //
-// 已知 FRONTIER 绕行（语义不变，与 c_revm_evm 同一坑）：const-hex 1.x 运行期
-// 探测 ssse3/avx2 后走 SIMD `_mm_lddqu_si128`——mirvm 未内建该 x86 intrinsic
-// （TRAP 原文：`foreign `llvm.x86.sse3.ldu.dq``）。alloy-primitives 的 hex 模块、
-// FixedBytes/B256/Address 的 LowerHex/Display 均会命中。故本 driver 所有运行时
-// hex 走自写逐字节 hex()/unhex()；address!/b256! 宏为编译期 const 解析（宿主
-// rustc 求值，不进 mirvm 运行面）。打印内容等价，三维对拍不受影响。
+// Known FRONTIER workaround (semantics unchanged, same trap as c_revm_evm): const-hex
+// 1.x probes ssse3/avx2 at runtime and takes the SIMD `_mm_lddqu_si128` path, an x86
+// intrinsic mirvm does not have (the trap reads `foreign `llvm.x86.sse3.ldu.dq``).
+// alloy-primitives' hex module and FixedBytes/B256/Address LowerHex/Display all hit
+// it. Every runtime hex operation here therefore uses hand-written byte-wise
+// hex()/unhex(); address!/b256! are compile-time const parses (evaluated by the host
+// rustc, outside mirvm's runtime). The printed content is equivalent, so the
+// three-way comparison is unaffected.
 //
-// 覆盖清单：
-//   ① ABI 静态矩阵：(U256,bool,i64,Address,FixedBytes<32>,[u16;4]) 编码 +
-//      validate 解码回环。
-//   ② ABI 动态矩阵：(String[含多字节 UTF-8],Bytes,Vec<u64>) 编码 + 回环。
-//   ③ ABI 嵌套矩阵：((u64,String),Vec<(u16,bool)>,(Address,U256)) 嵌套 tuple +
-//      tuple 动态数组。（上游 alloy-sol-types 有意不为 u8 实现 SolValue——
-//      Vec<u8>/[u8;N] 已特化为 Bytes/FixedBytes，故数组元素用 u16。）
-//   ④ abi_encode_packed 非标准打包面。
-//   ⑤ 解码负路径：截断半包必 Err、错型解码必 Err。
-//   ⑥ 手写函数选择子：keccak("transfer(address,uint256)")[..4] + 参数编码
-//      = 完整 calldata 锚。
-//   ⑦ 签名面：固定私钥（k256 内嵌测试向量 D）→ 地址锚；TxLegacy(EIP-155
-//      chain 1) 与 TxEip1559(type-2，36B input) 各走 sighash → RFC6979 定签
-//      → Signed → eip2718 编码（len+hex 全锚）→ recover_signer == 地址 →
-//      TxEnvelope 解码重编码回环。
-//   ⑧ 区块头：主网 genesis 头 15 字段 RLP（len+fnv+head96）+ hash_slow ==
-//      公开 genesis 哈希外部锚 + decode 回环；London 风格头（base_fee=Some，
-//      全非空字段）RLP/哈希/回环。
-//   ⑨ 裸 RLP 边界：空串(0x80)、55/56B 串长边界(b7/b8)、单字节原样(0x7f)、
-//      嵌套 list、截断解码必 Err。
+// Coverage:
+//   1) Static ABI matrix: (U256,bool,i64,Address,FixedBytes<32>,[u16;4]) encode plus
+//      the validate decode roundtrip.
+//   2) Dynamic ABI matrix: (String with multi-byte UTF-8, Bytes, Vec<u64>) encode
+//      plus the decode roundtrip.
+//   3) Nested ABI matrix: ((u64,String),Vec<(u16,bool)>,(Address,U256)) nested tuple
+//      plus a dynamic tuple array. (Upstream alloy-sol-types deliberately does not
+//      implement SolValue for u8 -- Vec<u8>/[u8;N] specialize to Bytes/FixedBytes --
+//      so the array elements use u16.)
+//   4) The non-standard abi_encode_packed surface.
+//   5) Decode negative paths: a truncated half-packet and a wrong-typed decode must Err.
+//   6) Hand-written function selector: keccak("transfer(address,uint256)")[..4] plus
+//      the argument encoding gives the full calldata anchor.
+//   7) Signing: a fixed private key (k256's embedded test vector D) -> address anchor;
+//      TxLegacy (EIP-155 chain 1) and TxEip1559 (type-2, 36B input) each go through
+//      sighash -> RFC6979 deterministic signing -> Signed -> eip2718 encoding (len+hex
+//      anchors) -> recover_signer == address -> TxEnvelope decode/re-encode roundtrip.
+//   8) Block headers: the mainnet genesis header's 15-field RLP (len+fnv+head96) with
+//      hash_slow == the public genesis hash anchor and a decode roundtrip; a London-style
+//      header (base_fee=Some, all fields non-empty) with RLP/hash/roundtrip.
+//   9) Raw RLP edges: empty string (0x80), the 55/56B length boundary (b7/b8), a single
+//      byte as-is (0x7f), a nested list, and a truncated decode that must Err.
 //
-// 三维复跑：
+// Three-way rerun:
 //   A: target/release/mirvm run corpus/c_ethers_evm.rs
-//   B: d=$(grep -l 'name = "c_ethers_evm"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname) && cd "$d" && cargo +nightly-2026-07-02 run -q
+//   B: d=$(grep -l 'name = "c_ethers_evm"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname)
+//      && cd "$d" && cargo +nightly-2026-07-02 run -q
 //   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_ethers_evm.rs
 //
-// 三维实测（2026-07-19，全绿）：A/B/C 三进程 stdout 逐字节一致（36 行，md5
-// 9c56d7fd2b7a0e0f31ff878ce02887ab），exit 全 0；A/C stderr 真空（0 字节），
-// B stderr 仅 cargo 构建行。关键锚：abi1.static.enc len=288 fnv=f5af2825935bf254；
-// abi6.selector=0xa9059cbb（ERC20 transfer 规范选择子）；signer=
-// 0xdf4abd97183d56aa7fdf00e349a2aa633a2bb86f；legacy.signed len=110（v=0x25=37
-// 的 EIP-155 形态）；eip1559.signed len=158 ty=2；genesis.rlp len=535
-// fnv=69e31c2d5fa07df1；genesis.hash=0xd4e56740f876aef8c010b86a40d5f567
-// 45a118d0906a34e69aec8c0db1cb8fa3（主网 genesis 外部锚，hash_ok=true）；
-// rlp.s55_head=b7 rlp.s56_head=b8。时长：A（含 script 首次构建，依赖共享缓存
-// 已热）real 17.2s；B（script dir 原生构建+跑）13.2s、B 复跑 <1s（B 维双跑
-// stdout 逐字节一致）；C（JIT=1，缓存热）0.68s。依赖：lock 265 条，实际编译
-// 图 96 包（cargo tree -e normal,build），零 C/FFI/零汇编。无 FRONTIER、无
-// 引擎 bug 信号。
+// The measured green baseline: A/B/C agree byte-for-byte on 36 stdout lines with exit 0;
+// A/C stderr is empty and B's stderr carries only cargo build lines. Key anchors:
+// abi1.static.enc len=288 fnv=f5af2825935bf254; abi6.selector=0xa9059cbb;
+// signer=0xdf4abd97183d56aa7fdf00e349a2aa633a2bb86f; legacy.signed len=110 (EIP-155
+// v=0x25=37); eip1559.signed len=158 ty=2; genesis.rlp len=535 fnv=69e31c2d5fa07df1;
+// genesis.hash matches the mainnet anchor; rlp.s55_head=b7 rlp.s56_head=b8.
+//
 
 use alloy_consensus::{
     Header as EthHeader, SignableTransaction, TxEip1559, TxEnvelope, TxLegacy,
@@ -92,7 +92,7 @@ use alloy_primitives::{
 use alloy_sol_types::SolValue;
 use k256::ecdsa::SigningKey;
 
-/// FNV-1a 64：二进制输出的内联指纹。
+/// FNV-1a 64: the inline fingerprint for binary output.
 fn fnv1a(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for &b in data {
@@ -127,7 +127,7 @@ fn hex_bytes32(s: &str) -> [u8; 32] {
     out
 }
 
-/// 打印字节锚：<=160B 全 hex，否则 len+fnv+前 96hex。
+/// Print a byte anchor: full hex up to 160B, otherwise len+fnv+the first 96 hex chars.
 fn show_bytes(tag: &str, data: &[u8]) {
     if data.len() <= 160 {
         println!("{tag} len={} hex={}", data.len(), hex(data));
@@ -150,7 +150,7 @@ fn abi_matrix() {
     let f32b: FixedBytes<32> =
         b256!("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
 
-    // ① 纯静态矩阵
+    // ① purely static matrix
     let t1 = (
         U256::from(0xdeadbeefu64),
         true,
@@ -165,7 +165,7 @@ fn abi_matrix() {
         <(U256, bool, i64, Address, FixedBytes<32>, [u16; 4])>::abi_decode_validate(&e1).unwrap();
     println!("abi1.static.roundtrip={}", t1 == d1);
 
-    // ② 动态矩阵：String（多字节 UTF-8）/Bytes/Vec<u64>
+    // ② dynamic matrix: String (multi-byte UTF-8) / Bytes / Vec<u64>
     let t2 = (
         "hello 以太坊".to_string(),
         Bytes::from(vec![0xcau8, 0xfe, 0xba, 0xbe, 0x00, 0x11]),
@@ -176,7 +176,7 @@ fn abi_matrix() {
     let d2 = <(String, Bytes, Vec<u64>)>::abi_decode_validate(&e2).unwrap();
     println!("abi2.dynamic.roundtrip={}", t2 == d2);
 
-    // ③ 嵌套 tuple + tuple 动态数组
+    // ③ nested tuple + dynamic tuple array
     let t3 = (
         (1u64, "nested".to_string()),
         vec![(2u16, true), (3u16, false)],
@@ -188,18 +188,18 @@ fn abi_matrix() {
         .unwrap();
     println!("abi3.nested.roundtrip={}", t3 == d3);
 
-    // ④ packed 编码（非标准但确定的 ABI 面）
+    // ④ packed encoding (a non-standard but deterministic ABI surface)
     let p = (U256::from(123456789u64), "packed".to_string(), vec![5u16, 6u16]);
     let ep = p.abi_encode_packed();
     show_bytes("abi4.packed.enc", &ep);
 
-    // ⑤ 负路径：截断与错型必须 Err
+    // ⑤ negative paths: truncation and wrong-type decoding must Err
     let bad = <(String, Bytes, Vec<u64>)>::abi_decode(&e2[..e2.len() / 2]);
     println!("abi5.trunc_err={}", bad.is_err());
     let wrong = <(U256, bool, i64, Address, FixedBytes<32>, [u16; 4])>::abi_decode(&e2);
     println!("abi5.wrongtype_err={}", wrong.is_err());
 
-    // ⑥ 手写函数选择子 + calldata（无 sol! 宏面）
+    // ⑥ hand-written function selector + calldata (no sol! macro surface)
     let selector = &keccak256(b"transfer(address,uint256)")[..4];
     let args = (addr, U256::from(1000000000000000000u128));
     let mut calldata = selector.to_vec();
@@ -208,7 +208,7 @@ fn abi_matrix() {
     show_bytes("abi6.calldata", &calldata);
 }
 
-/// 固定私钥（k256 内嵌测试向量 D）→ 地址锚 + legacy/eip1559 签名恢复回环。
+/// Fixed private key (k256's embedded test vector D) -> address anchor + legacy/eip1559 sign/recover.
 fn sign_txs() {
     let d = hex_bytes32("ebb2c082fd7727890a28ac82f6bdf97bad8de9f5d7c9028692de1a255cad3e0f");
     let sk = SigningKey::from_slice(&d).unwrap();
@@ -216,7 +216,7 @@ fn sign_txs() {
     let addr = Address::from_raw_public_key(&ep.as_bytes()[1..]);
     println!("signer=0x{}", hex(addr.as_slice()));
 
-    // ① legacy：EIP-155 chain_id=1（规范例交易字段）
+    // ① legacy: EIP-155 chain_id=1 (the spec example transaction fields)
     let legacy = TxLegacy {
         chain_id: Some(1),
         nonce: 9,
@@ -245,7 +245,7 @@ fn sign_txs() {
     env.encode_2718(&mut enc2);
     println!("legacy.env_roundtrip={}", enc == enc2);
 
-    // ② eip1559：type-2，36B input（选择子 + 定值参数）
+    // ② eip1559: type-2, 36B input (selector + fixed arguments)
     let mut input =
         unhex("a9059cbb0000000000000000000000004646464646464646464646464646464646464646");
     input.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
@@ -282,7 +282,7 @@ fn sign_txs() {
 }
 
 fn headers() {
-    // ① 以太坊主网 genesis：全字段公开定值，keccak 外部锚。
+    // ① Ethereum mainnet genesis: every field a public constant, keccak as the external anchor.
     let genesis = EthHeader {
         parent_hash: B256::ZERO,
         ommers_hash: b256!("1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"),
@@ -325,7 +325,7 @@ fn headers() {
     let back: EthHeader = alloy_rlp::decode_exact(&rlp1).unwrap();
     println!("genesis.rlp_roundtrip={}", back == genesis);
 
-    // ② London 风格头：base_fee_per_gas=Some + 全非空字段，解析/回编/指纹。
+    // ② London-style header: base_fee_per_gas=Some + all fields non-empty, parse/re-encode/fingerprint.
     let london = EthHeader {
         parent_hash: b256!("aa36a7f9f8e59c9b77f4b28bdab8e1c9b02a13b6b8b05e1b7f06b81e7f23a2c3"),
         ommers_hash: b256!("1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"),
@@ -362,7 +362,7 @@ fn headers() {
     let back2: EthHeader = alloy_rlp::decode_exact(&rlp2).unwrap();
     println!("london.rlp_roundtrip={}", back2 == london);
 
-    // ③ 裸 RLP 边界小矩阵：空串 / 55/56B 串长边界 / 单字节 / list / 截断负路径。
+    // ③ raw RLP edge matrix: empty string / 55/56B length boundary / single byte / list / truncated negative path.
     let e0 = alloy_rlp::encode(&Bytes::new());
     show_bytes("rlp.empty", &e0);
     let e55 = alloy_rlp::encode(&Bytes::from(vec![0x61u8; 55]));

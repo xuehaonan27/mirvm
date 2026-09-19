@@ -1,9 +1,9 @@
 use std::arch::global_asm;
 
-// C7：global_asm 的 `sym` 指向解释态 guest fn（open-issues C7 转正验收）。
-// 机器码（.so 内的 probe_native_chain）经 `call {guest}` 调 guest fn——该符号在
-// mirvm 侧经 P1 条目 stub 预算成 ABS 定义，call 直接落到条目 stub、蹦床回解释器；
-// native 侧则是普通直接调用。两侧可观察行为（返回值 + 指针回写）须逐位一致。
+// global_asm `sym` pointing at an interpreted guest fn: the machine code (probe_native_chain)
+// calls the guest fn via `call {guest}`. On the mirvm side the symbol is pre-allocated as an
+// ABS definition through the P1 entry stub, so the call lands there and trampolines back to
+// the interpreter; natively it is a plain direct call. Return value + pointer write-back must match.
 #[unsafe(no_mangle)]
 pub extern "C" fn probe_guest(x: u64, slot: *mut u64) -> u64 {
     unsafe {
@@ -36,6 +36,6 @@ unsafe extern "C" {
 fn main() {
     let mut slot: u64 = 40;
     let y = unsafe { probe_native_chain(7, &mut slot) };
-    // 预期：guest(7, &slot) = slot 41、ret 22；chain = 7 + 22 = 29
+    // Expected: guest(7, &slot) leaves slot 41 and returns 22; chain = 7 + 22 = 29
     println!("chain={y} slot={slot}");
 }

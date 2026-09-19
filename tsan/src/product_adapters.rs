@@ -7,7 +7,7 @@ pub(crate) mod sysroot {
         if let Some(path) = std::env::var_os("MIRVM_HOME") {
             return PathBuf::from(path);
         }
-        let home = std::env::var_os("HOME").expect("HOME 未设置");
+        let home = std::env::var_os("HOME").expect("HOME is not set");
         PathBuf::from(home).join(".mirvm")
     }
 }

@@ -3,38 +3,38 @@
 [dependencies]
 rusqlite = { version = "0.32", features = ["bundled"] }
 ---
-// rusqlite 0.32 + bundled sqlite3（libsqlite3-sys 0.30.1 编译 C 静态归档）。
-//
-// ★ FRONTIER（2026-07-15，新类别：静态原生归档闭包）：mirvm 无法装载，
-//   native 全绿。诊断原文（lower 期 panic，exit 101）：
-//     Static native library 装载失败: 静态原生归档 `…/libsqlite3.a` 无法安全
-//     转换为共享库（要求 ELF PIC、依赖在本归档内闭合）: /usr/bin/ld:
-//     …sqlite3.c:235126: undefined reference to `log'
-//   根因：src/native_archive.rs 的 .a→.so 转换以
-//   `cc -shared -Wl,-z,defs --whole-archive` 独立链接每个归档，符号必须在
-//   归档 + cc 默认库（libc/libgcc）内闭合；libsqlite3-sys build.rs 硬编码
-//   -DSQLITE_ENABLE_FTS5（无特性可关），fts5Bm25GetData 引用 libm 的 `log`
-//   ——全归档唯一闭包外符号（已用同一链接行手工复现确认）。native 不受影响
-//   （rustc linux-gnu 最终链接自带 -lm）；运行期本也无碍（ldd 实证 mirvm
-//   进程自身 DT_NEEDED 含 libm.so.6，无 -z defs 时 dlopen 可经全局域解析）。
-//   绕行穷举：rusqlite 0.32 / libsqlite3-sys 0.30.x 全 feature 无
-//   SQLITE_OMIT_FTS5 开关；版本钉死（任务给定）；CFLAGS/env 不属于单文件
-//   driver（验收命令固定，不可复现）；手工预填 native-archives 缓存等于
-//   篡改 harness 状态，拒绝采用。→ 按纪律报 FRONTIER，driver 保留为
-//   native 验证过的解锁探针（mirvm 侧放行归档的 libm 依赖后即应转绿）。
-// 覆盖：文件库 open / PRAGMA / DDL 四表（PK、FK ON DELETE CASCADE、UNIQUE、
-// CHECK、两个二级索引）/ 命名参数 + 位置参数 prepared statement 批量插入
-// （INTEGER / REAL / TEXT / BLOB / NULL 全类型）/ 事务提交与回滚各一 /
-// INSERT...RETURNING / JOIN + 聚合（GROUP BY / HAVING / 确定 ORDER BY）/
-// last_insert_rowid / changes / query_row + OptionalExtension + 按名列取 /
-// 列元数据 / UNIQUE、FK、NOT NULL、CHECK、坏表名、列型错六条错误路径 /
-// FK 级联删除 / BLOB fnv 锚定 + roundtrip 布尔 / 结尾清理临时库文件。
-// 确定性：定种 xorshift64* 生成数据；REAL 一律 to_bits() 打印；不打印路径 /
-// 时间 / 地址 / HashMap 序；sqlite 错误文本为库内固定字符串；stderr 为空
-// （driver 零 warning）。
+// rusqlite 0.32 with bundled sqlite3 (libsqlite3-sys 0.30.1 compiles SQLite's C
+// sources into a static archive).
+// FRONTIER: mirvm cannot load it while native is fully green. The loader fails
+// during lowering with exit 101, reporting that the static archive
+// `libsqlite3.a` cannot be converted into a shared library because it needs ELF
+// PIC and all its dependencies inside the archive; the linker then cannot
+// resolve the symbol `log`. The cause: the .a -> .so conversion links each
+// archive on its own with `cc -shared -Wl,-z,defs --whole-archive`, so every
+// symbol must close inside the archive plus libc/libgcc. But libsqlite3-sys's
+// build.rs hardcodes -DSQLITE_ENABLE_FTS5 with no feature to disable it, and
+// fts5Bm25GetData references `log` from libm, the only symbol outside that
+// closure. Native is unaffected because rustc's linux-gnu link brings -lm, and
+// mirvm's own process already has libm.so.6 in DT_NEEDED, so without -z defs
+// dlopen would resolve it globally.
+// There is no workaround: those versions expose no SQLITE_OMIT_FTS5 feature, the
+// versions are pinned, CFLAGS or env variables are not part of a single-file
+// driver, and pre-filling the native-archives cache would tamper with state. So
+// the driver stays a probe that turns green once mirvm lets an archive use libm.
+// Coverage: open a file database; PRAGMA; DDL for four tables (PK, FK, UNIQUE,
+// CHECK, two secondary indexes); batched inserts through prepared
+// statements with named and positional parameters (all of INTEGER / REAL / TEXT /
+// BLOB / NULL); one committed and one rolled-back transaction;
+// INSERT...RETURNING; JOIN with aggregates (GROUP BY / HAVING / fixed ORDER BY);
+// last_insert_rowid; changes; query_row with OptionalExtension and by-name column
+// access; column metadata; six error paths (UNIQUE, FK, NOT NULL, CHECK, a bad
+// table name and a column type error); FK cascade delete; BLOB fnv anchoring with
+// a roundtrip boolean; and cleanup of the temporary database files.
+// Deterministic: a seeded xorshift64* generates the data; REAL values always
+// print through to_bits(); no path, time, address or HashMap order is printed;
 use rusqlite::{named_params, params, Connection, OptionalExtension};
 
-/// 定种 xorshift64*（native/mirvm 同序列）。
+/// Seeded xorshift64* (the same sequence on native and mirvm).
 struct Rng(u64);
 
 impl Rng {
@@ -61,7 +61,7 @@ impl Rng {
     }
 }
 
-/// 内联 FNV-1a（二进制内容锚定，不打印原始字节）。
+/// Inline FNV-1a anchoring binary content (raw bytes are never printed).
 fn fnv1a(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for &b in data {
@@ -76,7 +76,7 @@ fn count(conn: &Connection, sql: &str) -> i64 {
 }
 
 fn main() {
-    // ---- ⓪ 固定名字的临时库（多跑不累加：先清残留，结尾再清） ----
+    // ---- (0) fixed-name temp database (cleared before and after each run) ----
     let db = std::env::temp_dir().join("mirvm_corpus_rusqlite_db.sqlite3");
     for suffix in ["", "-journal", "-wal", "-shm"] {
         let mut p = db.clone().into_os_string();
@@ -87,7 +87,7 @@ fn main() {
     println!("sqlite version {}", rusqlite::version());
     let mut conn = Connection::open(&db).unwrap();
 
-    // ---- ① PRAGMA + DDL：四表两索引 ----
+    // ---- (1) PRAGMA + DDL: four tables and two indexes ----
     conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
     let fk_on: i64 = conn
         .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
@@ -123,7 +123,7 @@ fn main() {
     .unwrap();
     println!("ddl done");
 
-    // ---- ② authors：命名参数 prepared statement + last_insert_rowid ----
+    // ---- (2) authors: named-parameter prepared statement + last_insert_rowid ----
     let authors = [
         ("Ada", 1815i64),
         ("Grace", 1906),
@@ -131,7 +131,7 @@ fn main() {
         ("Donald", 1938),
         ("Barbara", 1939),
         ("Kernighan", 1942),
-        ("Solo", 1950), // 无书作者：聚合 LEFT JOIN 的 NULL 路径
+        ("Solo", 1950), // an author with no books: the LEFT JOIN NULL path
     ];
     {
         let mut st = conn
@@ -148,7 +148,7 @@ fn main() {
         }
     }
 
-    // ---- ③ tags：INSERT ... RETURNING ----
+    // ---- (3) tags: INSERT ... RETURNING ----
     for label in ["rust", "db", "ffi", "math"] {
         let id: i64 = conn
             .query_row(
@@ -160,7 +160,7 @@ fn main() {
         println!("tag {label} id={id}");
     }
 
-    // ---- ④ 事务提交：books + book_tags 批量插入（定种数据，全类型） ----
+    // ---- (4) committed transaction: batched books + book_tags (seeded, all types) ----
     let words = [
         "alpha", "beta", "gamma", "delta", "omega", "sigma", "theta", "zeta",
     ];
@@ -207,7 +207,7 @@ fn main() {
     tx.commit().unwrap();
     println!("commit books = {}", count(&conn, "SELECT COUNT(*) FROM books"));
 
-    // ---- ⑤ BLOB roundtrip：读回逐条比对 + 总 fnv 锚 ----
+    // ---- (5) BLOB roundtrip: compare row by row and anchor the total fnv ----
     let mut st = conn.prepare("SELECT id, digest FROM books ORDER BY id").unwrap();
     let back = st
         .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
@@ -226,9 +226,9 @@ fn main() {
         all.len(),
         fnv1a(&all)
     );
-    drop(st); // Statement 带 Drop，借用延至作用域尾，须显式收尾
+    drop(st); // Statement implements Drop; the borrow lasts to scope end, so close it
 
-    // ---- ⑥ 事务回滚：内见 3 行，回滚后恢复原计数 ----
+    // ---- (6) rolled-back transaction: 3 rows visible inside, original count after ----
     let before = count(&conn, "SELECT COUNT(*) FROM books");
     let tx = conn.transaction().unwrap();
     for i in 0..3 {
@@ -243,7 +243,7 @@ fn main() {
     let after = count(&conn, "SELECT COUNT(*) FROM books");
     println!("rollback before={before} inside={inside} after={after}");
 
-    // ---- ⑦ changes：UPDATE / 空 DELETE / 真 DELETE ----
+    // ---- (7) changes: UPDATE / empty DELETE / real DELETE ----
     let n = conn
         .execute("UPDATE books SET price = price * 2.0 WHERE author_id = 1", [])
         .unwrap();
@@ -255,7 +255,7 @@ fn main() {
         .unwrap();
     println!("delete-tag4 changes={n}");
 
-    // ---- ⑧ JOIN（确定序）打印结果集 ----
+    // ---- (8) JOIN (fixed order) printing the result set ----
     let mut st = conn
         .prepare(
             "SELECT a.name, b.title, b.price FROM books b \
@@ -281,7 +281,7 @@ fn main() {
     println!("join rows={n}");
     drop(st);
 
-    // ---- ⑨ FK 级联：删 author 6 → books/book_tags 级联消失 ----
+    // ---- (9) FK cascade: deleting author 6 removes its books/book_tags ----
     let n = conn.execute("DELETE FROM authors WHERE id = 6", []).unwrap();
     println!(
         "cascade authors changes={n} books6={} links={}",
@@ -289,7 +289,7 @@ fn main() {
         count(&conn, "SELECT COUNT(*) FROM book_tags")
     );
 
-    // ---- ⑩ 聚合：GROUP BY / HAVING / 整数计数确定序（含 LEFT JOIN NULL 路径） ----
+    // ---- (10) aggregates: GROUP BY / HAVING / fixed integer-count order ----
     let mut st = conn
         .prepare(
             "SELECT a.name, COUNT(b.id), SUM(b.price), MIN(b.price), MAX(b.price) \
@@ -325,7 +325,7 @@ fn main() {
         .unwrap();
     println!("books total={total} noted={noted} avg_bits={:016x}", avg.to_bits());
 
-    // ---- ⑪ query_row / OptionalExtension / 按名列取 / 列元数据 ----
+    // ---- (11) query_row / OptionalExtension / by-name access / column metadata ----
     let one: String = conn
         .query_row("SELECT title FROM books WHERE id = 1", [], |r| r.get(0))
         .unwrap();
@@ -345,7 +345,7 @@ fn main() {
         conn.prepare("SELECT * FROM books").unwrap().column_names()
     );
 
-    // ---- ⑫ 错误路径 ×6：UNIQUE / FK / NOT NULL / CHECK / 坏表名 / 列型错 ----
+    // ---- (12) six error paths: UNIQUE / FK / NOT NULL / CHECK / bad table / bad type ----
     let (dup_a, dup_t): (i64, String) = conn
         .query_row("SELECT author_id, title FROM books WHERE id = 1", [], |r| {
             Ok((r.get(0)?, r.get(1)?))
@@ -385,7 +385,7 @@ fn main() {
         Err(e) => println!("type err: {e}"),
     }
 
-    // ---- ⑬ 清理临时库文件 ----
+    // ---- (13) clean up the temporary database files ----
     drop(conn);
     for suffix in ["", "-journal", "-wal", "-shm"] {
         let mut p = db.clone().into_os_string();

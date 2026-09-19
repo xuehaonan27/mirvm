@@ -1,12 +1,14 @@
-//! unsize 一族（自 func.rs F8 整搬）：unsize_meta_of/dyn_unsize_tails/
-//! fresh_unsize_meta 三函数闭环——胖化 meta 推导与 dyn 上溯 vtable 变换
-//! （C5，cg_ssa unsized_info 同构）。唯一入口 = cast.rs 的 CoerceUnsized 臂。
+//! Unsize family: unsize_meta_of/dyn_unsize_tails/fresh_unsize_meta derive the
+//! fat-pointer meta and transform the vtable on dyn upcasting (isomorphic to
+//! cg_ssa unsized_info). Sole entry = cast.rs's CoerceUnsized arm.
 
 use super::*;
 
-/// Unsize 胖化的 meta 推导（类型递归，cg_ssa coerce_unsized_into/unsize_ptr 同构）：
-/// 指针（含 Box）→ pointee 对取 meta；同 def 结构体 → 唯一类型不同的字段对递归
-/// （Arc/Rc/Pin 等自定义 CoerceUnsized：Arc{NonNull{*const ArcInner<T>}} 一路下钻）。
+/// Meta derivation for an unsizing coercion: recurse on types (isomorphic to
+/// cg_ssa coerce_unsized_into/unsize_ptr). Pointer (including Box) -> take the
+/// pointee pair's meta; same-def struct -> recurse into the one field whose type
+/// differs (custom CoerceUnsized such as Arc/Rc/Pin drills down the
+/// Arc{NonNull{*const ArcInner<T>}} chain).
 impl<'tcx> LowerCx<'tcx, '_> {
     pub(super) fn unsize_meta_of(
         &mut self,
@@ -16,7 +18,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         if let (Some(sp), Some(dp)) = (src.builtin_deref(true), dst.builtin_deref(true)) {
             return self.fresh_unsize_meta(sp, dp);
         }
-        // pattern type（本 nightly NonNull 内部 = `*const T is !null`）：剥壳递归 base
+        // pattern type (on this nightly NonNull is internally `*const T is !null`): peel and recurse into base
         if let (ty::Pat(ba, _), ty::Pat(bb, _)) = (src.kind(), dst.kind()) {
             return self.unsize_meta_of(*ba, *bb);
         }
@@ -24,12 +26,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
             && da.did() == db.did()
             && da.is_struct()
         {
-            // cg_ssa unsize_ptr 的 Adt 臂同构：跳过 1-ZST 字段（PhantomData/Global
-            // ——类型可不同但无载荷），递归**唯一**非 ZST 字段。
+            // Isomorphic to cg_ssa unsize_ptr's Adt arm: skip 1-ZST fields (PhantomData/
+            // Global -- type may differ but carry no payload), recurse into the **only** non-ZST field.
             let mut found = None;
             for f in &da.non_enum_variant().fields {
-                // 本 nightly：FieldDef::ty 返回 Unnormalized 包装——
-                // normalize_erasing_regions 直接吃包装（单态化环境下规范化）
+                // On this nightly FieldDef::ty returns an Unnormalized wrapper;
+                // normalize_erasing_regions accepts it directly (normalization under monomorphization)
                 let norm = |t: rustc_middle::ty::Unnormalized<'tcx, Ty<'tcx>>| {
                     self.tcx.normalize_erasing_regions(self.typing_env, t)
                 };
@@ -38,24 +40,26 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     continue;
                 }
                 if found.is_some() {
-                    return Err(format!("CoerceUnsized 多非 ZST 字段（{src}）"));
+                    return Err(format!("CoerceUnsized has multiple non-ZST fields ({src})"));
                 }
                 found = Some((fa, fb));
             }
             let Some((fa, fb)) = found else {
-                return Err(format!("CoerceUnsized 无非 ZST 字段（{src} → {dst}）"));
+                return Err(format!(
+                    "CoerceUnsized has no non-ZST field ({src} -> {dst})"
+                ));
             };
             return self.unsize_meta_of(fa, fb);
         }
-        Err(format!("Unsize 形态未知（{src} → {dst}）"))
+        Err(format!("unknown Unsize shape ({src} -> {dst})"))
     }
 
-    /// C5 dyn 尾对统一递归判据（批10，datafusion/typst 双供养）：
-    /// 每级四路——① builtin_deref 直达双 Dynamic（Ref/RawPtr/Box/DerefPure）；
-    /// ② struct_lockstep 直达双 Dynamic（嵌套尾对）；③ Pat 壳（NonNull =
-    /// `*const T is !null`）剥壳递归；④ Adt 同构结构体唯一非 ZST 字段递归
-    /// （Arc → NonNull → `*const ArcInner` → data 的 Arc-wrapped dyn 全链）。
-    /// 命中 = 双 Dynamic 的（source tail, target tail）。
+    /// Unified recursive criterion for a dyn tail pair. Four routes per level: (1)
+    /// builtin_deref straight to a Dynamic pair (Ref/RawPtr/Box/DerefPure); (2)
+    /// struct_lockstep straight to a Dynamic pair (nested tail pair); (3) Pat shell
+    /// (NonNull = `*const T is !null`) peeled and recursed; (4) Adt same-def struct
+    /// recursed into its only non-ZST field (the whole Arc -> NonNull -> `*const`
+    /// ArcInner` -> data Arc-wrapped dyn chain). A hit is a (source tail, target tail).
     pub(super) fn dyn_unsize_tails(
         &mut self,
         src: Ty<'tcx>,
@@ -68,8 +72,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
             if both_dyn(sp, dp) {
                 return Some((sp, dp));
             }
-            // 解引用落点再判（`*const ArcInner` → ArcInner → struct_lockstep →
-            // data 的 Arc-wrapped dyn 链；ArcInner 是 Adt，继续走 Adt 臂）
+            // Re-check at the dereferenced pointee (`*const ArcInner` -> ArcInner ->
+            // struct_lockstep -> data Arc-wrapped dyn chain; ArcInner is an Adt, so take the Adt arm)
             let (lst, ldt) = self
                 .tcx
                 .struct_lockstep_tails_for_codegen(sp, dp, self.typing_env);
@@ -100,7 +104,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             let norm = move |t: rustc_middle::ty::Unnormalized<'tcx, Ty<'tcx>>| {
                 tcx.normalize_erasing_regions(env, t)
             };
-            // ① 唯一非 ZST 字段递归（包装下钻：Arc → NonNull<ArcInner>）
+            // (1) Recurse into the only non-ZST field (wrapper drill-down: Arc -> NonNull<ArcInner>)
             let mut found = None;
             let mut multi = false;
             for f in &da.non_enum_variant().fields {
@@ -120,8 +124,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
             {
                 return Some(r);
             }
-            // ② tail_opt 尾字段递归（ArcInner → data 的 dyn 尾对路径——
-            // 多非 ZST 结构（strong/weak/data）唯一可下钻向）
+            // (2) Recurse into the tail_opt field (the ArcInner -> data dyn tail pair path --
+            // the only drill-down direction in a multi-non-ZST struct such as strong/weak/data)
             if let Some(f) = da.non_enum_variant().tail_opt()
                 && let Some(r) =
                     self.dyn_unsize_tails(norm(f.ty(self.tcx, sa)), norm(f.ty(self.tcx, sb)))
@@ -132,9 +136,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
         None
     }
 
-    /// pointee 对 → 新造 meta：lockstep 尾对为 Array→Slice = 长度立即数、
-    /// sized→dyn = 物化 vtable 真地址（cg_ssa unsized_info 同构）。
-    /// dyn→dyn（meta 沿用源第二半）不在此路——调用方（Unsize 臂）特例处理。
+    /// Synthesize meta for a pointee pair: an Array->Slice lockstep tail pair yields the
+    /// length immediate; sized->dyn materializes the real vtable address. dyn->dyn
+    /// (reuse the source's second half) is left to the caller (Unsize arm).
     pub(super) fn fresh_unsize_meta(
         &mut self,
         src_pointee: Ty<'tcx>,
@@ -145,7 +149,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 .struct_lockstep_tails_for_codegen(src_pointee, dst_pointee, self.typing_env);
         match (st.kind(), dt.kind()) {
             (ty::Array(_, n), ty::Slice(_)) => {
-                let n = n.try_to_target_usize(self.tcx).ok_or("数组长度非常量")?;
+                let n = n
+                    .try_to_target_usize(self.tcx)
+                    .ok_or("array length is not constant")?;
                 Ok(Operand::Imm {
                     bits: n,
                     width: Width::W64,
@@ -153,7 +159,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
             (_, ty::Dynamic(preds, _)) if !matches!(st.kind(), ty::Dynamic(..)) => {
                 if self.layout_of(st)?.is_unsized() {
-                    return Err(format!("unsized→dyn（{st} → {dt}，M4.1+）"));
+                    return Err(format!("unsized->dyn ({st} -> {dt})"));
                 }
                 let principal = preds
                     .principal()
@@ -163,7 +169,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     self.linker.ensure_alloc(vt_id)?,
                 )))
             }
-            _ => Err(format!("unsize 尾对 {st} → {dt}（M4.4+）")),
+            _ => Err(format!("unsize tail pair {st} -> {dt}")),
         }
     }
 }

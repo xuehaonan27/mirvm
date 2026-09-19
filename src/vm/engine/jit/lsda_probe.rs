@@ -1,10 +1,11 @@
-//! M5.4 前置 probe：LSDA 管线最小验证（cg_clif GccExceptTable 同构；自 jit_compile.rs 整搬）。
+//! Minimal validation of the LSDA pipeline, mirroring cg_clif's GccExceptTable.
 //!
-//! 验证链（任一环失败即 M5.4 LSDA 方案需要重评）：try_call（tag0=cleanup，
-//! `BlockArg::TryCallExn(0)` 传异常指针）→ 从 `buffer.call_sites()` 手工构建
-//! GccExceptTable（ret_addr-1 单字节 call-site 项）→ CIE(rust_eh_personality,
-//! absptr) + FDE.lsda → `__register_frame` → 宿主 panic 载荷（resume_unwind）→
-//! cleanup pad 执行 → `_Unwind_Resume(exn)` 续传至宿主 catch_unwind。
+//! The chain under test -- if any link fails, the LSDA approach must be re-evaluated:
+//! try_call (tag 0 = cleanup, the exception pointer arrives via `BlockArg::TryCallExn(0)`)
+//! -> build a GccExceptTable by hand from `buffer.call_sites()` (a one-byte call-site entry
+//! at ret_addr - 1) -> CIE (rust_eh_personality, absptr) plus FDE.lsda -> `__register_frame`
+//! -> host panic payload (resume_unwind) -> the cleanup pad runs -> `_Unwind_Resume(exn)`
+//! continues unwinding into the host catch_unwind.
 
 use cranelift_codegen::ir::{
     AbiParam, BlockArg, BlockCall, ExceptionTableData, ExceptionTableItem, ExceptionTag,
@@ -20,10 +21,11 @@ use gimli::RunTimeEndian;
 use gimli::write::{Address, EhFrame, EndianVec, FrameTable};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// pad 执行标记（0=未走, 1=pad 已走, 2=正常返回）；宿主侧断言用
+/// Pad-execution marker for host-side assertions (0 = not reached, 1 = pad ran,
+/// 2 = normal return).
 static PAD_MARK: AtomicU64 = AtomicU64::new(0);
 
-/// 宿主 panic 载荷源（spike3/M4.2 同形态：resume_unwind 携带 Rust payload）
+/// Host panic source: `resume_unwind` carrying a Rust payload.
 extern "C-unwind" fn probe_raise() {
     std::panic::resume_unwind(Box::new(0x2a_i32));
 }
@@ -35,14 +37,17 @@ unsafe extern "C" {
     fn rust_eh_personality();
 }
 
-/// 手工 GccExceptTable（cleanup-only，无 type_info；cg_clif 版式 + **全覆盖**）：
-/// - 无 handler 的调用点：(ret_addr-1, len=1, lpad=0, action=0) —— 命中即
-///   EHAction::None（rust find_eh_action 的 cs_lpad==0 分支）
-/// - cleanup handler 调用点：(ret_addr-1, len=1, pad, action=0)
-///   **rust 版 find_eh_action 对"ip 不在表中"返回 EHAction::Terminate（= _URC_FATAL），
-///   与 libgcc 的 __gcc_personality_v0（no-entry = None）不同——call-site 表必须覆盖
-///   函数内全部调用点**（cg_clif 对无 handler 站点同样发 lpad=0 项的原因）。
-///   项按 buffer.call_sites() 序（= 指令序，满足 rust 解析器的有序表假设）。
+/// Hand-built GccExceptTable in cg_clif's layout, cleanup-only and without type_info, but
+/// covering every call site:
+/// - a call site with no handler becomes (ret_addr - 1, len = 1, lpad = 0, action = 0),
+///   which rust's find_eh_action maps to EHAction::None via its cs_lpad == 0 branch;
+/// - a call site with a cleanup handler becomes (ret_addr - 1, len = 1, pad, action = 0).
+///
+/// Full coverage is required: rust's find_eh_action returns EHAction::Terminate
+/// (= _URC_FATAL) for an ip that has no table entry, unlike libgcc's
+/// __gcc_personality_v0, which treats a missing entry as None. That is also why cg_clif
+/// emits an lpad = 0 item for handler-less sites. Items follow `buffer.call_sites()` order
+/// (= instruction order), which satisfies the rust parser's ordered-table assumption.
 fn build_lsda(call_sites: &[(u64, Option<u64>)]) -> Vec<u8> {
     fn uleb(out: &mut Vec<u8>, mut v: u64) {
         loop {
@@ -73,8 +78,9 @@ fn build_lsda(call_sites: &[(u64, Option<u64>)]) -> Vec<u8> {
     out
 }
 
-/// 定义后取 (UnwindInfo, [(ret_addr, Option<landing_pad>)])——全调用点
-/// （cg_clif add_function 同数据源同口径：无 handler → None（lpad=0 项））
+/// After defining a function, returns (UnwindInfo, [(ret_addr, Option<landing_pad>)]) over
+/// all call sites; a site without a handler yields None (the lpad = 0 item), matching
+/// cg_clif's add_function.
 fn unwind_and_sites(
     isa: &dyn TargetIsa,
     cctx: &cranelift_codegen::Context,
@@ -88,7 +94,7 @@ fn unwind_and_sites(
         }
         for h in site.exception_handlers {
             if let cranelift_codegen::FinalizedMachExceptionHandler::Tag(tag, lp) = h {
-                assert_eq!(tag.as_u32(), 0, "probe 只发 cleanup tag");
+                assert_eq!(tag.as_u32(), 0, "the probe emits cleanup tags only");
                 cs.push((u64::from(site.ret_addr), Some(u64::from(*lp))));
             }
         }
@@ -96,16 +102,16 @@ fn unwind_and_sites(
     (ui, cs)
 }
 
-/// 二分定位（分支 -1）：纯宿主基线——catch_unwind(probe_raise) 无 JIT 参与。
-/// 此分支若挂 = 测试二进制的 unwind 基线本身坏了，与 JIT 无关。
+/// Host-only baseline: catch_unwind(probe_raise) with no JIT involved. If this fails, the
+/// test binary's unwinding baseline itself is broken and the JIT is not at fault.
 #[test]
 fn host_baseline_catch() {
     let r = std::panic::catch_unwind(|| probe_raise());
-    let p = r.expect_err("宿主基线应收到 payload");
+    let p = r.expect_err("the host baseline should receive the payload");
     assert_eq!(*p.downcast::<i32>().unwrap(), 0x2a);
 }
 
-/// 二分定位（probe 分支 0）：导入符号直调——probe_mark 可见即 import 调用链好。
+/// Direct call of an imported symbol: if probe_mark is reached, the import call chain works.
 #[test]
 fn import_call_works() {
     PAD_MARK.store(0, Ordering::SeqCst);
@@ -150,10 +156,15 @@ fn import_call_works() {
     let addr = module.get_finalized_function(caller_id) as u64;
     let f: unsafe extern "C-unwind" fn(u64) = unsafe { std::mem::transmute(addr) };
     unsafe { f(0) };
-    assert_eq!(PAD_MARK.load(Ordering::SeqCst), 7, "import 直调未生效");
+    assert_eq!(
+        PAD_MARK.load(Ordering::SeqCst),
+        7,
+        "direct import call did not run"
+    );
 }
 
-/// 二分定位（分支 A0）：单 JIT 帧穿越（caller 直调 probe_raise，无中间帧）
+/// Single JIT frame passthrough: caller calls probe_raise directly, with no intermediate
+/// frame.
 #[test]
 fn cfi_single_frame() {
     let mut fb = settings::builder();
@@ -199,7 +210,7 @@ fn cfi_single_frame() {
     if let UnwindInfo::SystemV(info) = ui_caller {
         table.add_fde(cie, info.to_fde(Address::Constant(caller_addr)));
     } else {
-        panic!("无 SystemV UnwindInfo");
+        panic!("no SystemV UnwindInfo");
     }
     let mut eh = EhFrame(EndianVec::new(RunTimeEndian::Little));
     table.write_eh_frame(&mut eh).unwrap();
@@ -207,15 +218,15 @@ fn cfi_single_frame() {
     let caller_fn: unsafe extern "C-unwind" fn() = unsafe { std::mem::transmute(caller_addr) };
     let result = std::panic::catch_unwind(|| unsafe { caller_fn() });
     let payload = result
-        .expect_err("单帧分支应收到 payload")
+        .expect_err("the single-frame case should receive the payload")
         .downcast::<i32>()
-        .expect("载荷类型错");
+        .expect("wrong payload type");
     assert_eq!(*payload, 0x2a);
 }
 
-/// 二分定位（probe 分支 A）：纯 CFI 穿越——无 personality/LSDA，宿主 panic 经
-/// 两个 JIT 帧（普通 call）传回宿主 catch_unwind。此分支不过 = 基础注册坏；
-/// 过 = 问题在 LSDA/personality/pad 半区。
+/// CFI-only passthrough: no personality and no LSDA; a host panic crosses two JIT frames
+/// (plain calls) back to the host catch_unwind. If this fails, basic registration is
+/// broken; if it passes, the problem lies in the LSDA/personality/pad half.
 #[test]
 fn cfi_only_passthrough() {
     let mut fb = settings::builder();
@@ -285,7 +296,7 @@ fn cfi_only_passthrough() {
         if let UnwindInfo::SystemV(info) = ui {
             table.add_fde(cie, info.to_fde(Address::Constant(addr)));
         } else {
-            panic!("无 SystemV UnwindInfo");
+            panic!("no SystemV UnwindInfo");
         }
     }
     let mut eh = EhFrame(EndianVec::new(RunTimeEndian::Little));
@@ -295,9 +306,9 @@ fn cfi_only_passthrough() {
     let caller_fn: unsafe extern "C-unwind" fn() = unsafe { std::mem::transmute(caller_addr) };
     let result = std::panic::catch_unwind(|| unsafe { caller_fn() });
     let payload = result
-        .expect_err("CFI-only 分支应收到宿主 payload（基础注册疑似坏）")
+        .expect_err("the CFI-only case should receive the host payload (registration looks broken)")
         .downcast::<i32>()
-        .expect("载荷类型错");
+        .expect("wrong payload type");
     assert_eq!(*payload, 0x2a);
 }
 
@@ -316,12 +327,7 @@ fn lsda_cleanup_pad_executes_and_resume_continues() {
     let mut jb = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     jb.symbol("probe_raise", probe_raise as *const u8);
     jb.symbol("probe_mark", probe_mark as *const u8);
-    jb.symbol("_Unwind_Resume", {
-        unsafe extern "C" {
-            fn _Unwind_Resume(ex: *mut u8) -> !;
-        }
-        _Unwind_Resume as *const u8
-    });
+    jb.symbol("_Unwind_Resume", _Unwind_Resume as *const u8);
     let mut module = JITModule::new(jb);
     let mut fbc = FunctionBuilderContext::new();
 
@@ -346,7 +352,7 @@ fn lsda_cleanup_pad_executes_and_resume_continues() {
         .declare_function("_Unwind_Resume", Linkage::Import, &resume_sig)
         .unwrap();
 
-    // raiser：调 probe_raise（宿主 resume_unwind 载荷经其帧穿过）
+    // raiser: calls probe_raise; the host resume_unwind payload unwinds through its frame.
     let raiser_id = module
         .declare_function("raiser", Linkage::Local, &empty_sig)
         .unwrap();
@@ -368,7 +374,7 @@ fn lsda_cleanup_pad_executes_and_resume_continues() {
         module.clear_context(&mut cctx);
     }
 
-    // caller：try_call(raiser)；normal → ok(mark 2)；tag0 pad(mark 1 → _Unwind_Resume(exn))
+    // caller: try_call(raiser); normal -> ok (mark 2); tag-0 pad (mark 1 -> _Unwind_Resume(exn)).
     let caller_id = module
         .declare_function("caller", Linkage::Local, &empty_sig)
         .unwrap();
@@ -380,7 +386,7 @@ fn lsda_cleanup_pad_executes_and_resume_continues() {
         let entry = b.create_block();
         let ok = b.create_block();
         let pad = b.create_block();
-        b.append_block_param(pad, types::I64); // TryCallExn(0) 的落点块参
+        b.append_block_param(pad, types::I64); // block parameter receiving TryCallExn(0)
         b.switch_to_block(entry);
 
         let rref = module.declare_func_in_func(raiser_id, b.func);
@@ -423,13 +429,15 @@ fn lsda_cleanup_pad_executes_and_resume_continues() {
     }
     assert!(
         call_sites.len() >= 2,
-        "caller 应有多个 call-site（try_call + 其余调用点全覆盖）"
+        "caller must have several call sites (try_call plus full coverage of the rest)"
     );
     module.finalize_definitions().unwrap();
 
-    // eh_frame：CIE0 无 personality（raiser）；CIE1 = rust_eh_personality + lsda（caller）。
-    // personality 走 DW.ref 间接（cg_clif 形态）：CIE 的 personality 指针指向一个
-    // 持有真 personality 地址的静态 u64——absptr 直嵌在本环境被证伪（空 LSDA 也 abort）。
+    // eh_frame: CIE0 has no personality (raiser); CIE1 is rust_eh_personality plus the LSDA
+    // (caller). The personality goes through DW.ref indirection, as in cg_clif: the CIE
+    // personality pointer targets a static u64 holding the real address. Embedding the
+    // address directly as absptr was disproved in this environment -- even an empty LSDA
+    // aborted.
     static PERS_REF: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     PERS_REF.store(rust_eh_personality as *const u8 as u64, Ordering::SeqCst);
     let mut table = FrameTable::default();
@@ -447,37 +455,42 @@ fn lsda_cleanup_pad_executes_and_resume_continues() {
     if let UnwindInfo::SystemV(info) = ui_raiser {
         table.add_fde(cie_plain, info.to_fde(Address::Constant(raiser_addr)));
     } else {
-        panic!("raiser 无 SystemV UnwindInfo");
+        panic!("raiser has no SystemV UnwindInfo");
     }
     let lsda_bytes = build_lsda(&call_sites);
     let lsda_addr = lsda_bytes.as_ptr() as u64;
-    std::mem::forget(lsda_bytes); // FDE/LSDA 终身有效（probe 进程期）
+    std::mem::forget(lsda_bytes); // The FDE/LSDA must stay valid for the probe process' life.
     if let UnwindInfo::SystemV(info) = ui_caller {
         let mut fde = info.to_fde(Address::Constant(caller_addr));
         fde.lsda = Some(Address::Constant(lsda_addr));
         table.add_fde(cie_pers_id, fde);
     } else {
-        panic!("caller 无 SystemV UnwindInfo");
+        panic!("caller has no SystemV UnwindInfo");
     }
 
-    // spike5 同款注册：FrameTable → 完整、零结尾的 eh_frame 段一次注册。
+    // One complete, zero-terminated eh_frame section registered from the FrameTable.
     let mut eh = EhFrame(EndianVec::new(RunTimeEndian::Little));
     table.write_eh_frame(&mut eh).unwrap();
     super::register_eh_frame_section(eh.0.into_vec());
 
-    // 全链点火：宿主 catch_unwind 应收到 42；pad 应已走（mark=1，而非 2）
+    // Fire the whole chain: the host catch_unwind must receive 42, and the pad must have
+    // run (mark = 1, not 2).
     let caller_fn: unsafe extern "C-unwind" fn() = unsafe { std::mem::transmute(caller_addr) };
     let result = std::panic::catch_unwind(|| unsafe { caller_fn() });
     assert!(
         result.is_err(),
-        "caller 未抛出（pad/unwind 链断裂；PAD_MARK={}）",
+        "caller did not unwind (pad/unwind chain broken; PAD_MARK={})",
         PAD_MARK.load(Ordering::SeqCst)
     );
     let payload = result.unwrap_err();
-    assert_eq!(payload.downcast_ref::<i32>(), Some(&0x2a), "载荷丢失/替换");
+    assert_eq!(
+        payload.downcast_ref::<i32>(),
+        Some(&0x2a),
+        "payload lost or replaced"
+    );
     assert_eq!(
         PAD_MARK.load(Ordering::SeqCst),
         1,
-        "cleanup pad 未执行（LSDA/personality 未命中）"
+        "cleanup pad did not run (LSDA/personality missed)"
     );
 }

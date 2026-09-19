@@ -1,67 +1,67 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# sqlx 钉 =0.8.6（0.8 系最新，crates.io 实测 2026-07-17；0.9.0 已发布，超出本槽位
-# 「最新 0.8.x」授权）。default-features=false 全关后只开 runtime-tokio（sqlite 本地
-# 库无 TLS 需求，不开任何 tls）+ sqlite（经 sqlx-sqlite → libsqlite3-sys bundled 现场
-# cc 编 C sqlite3.c——与 c_rusqlite_db 同一家族；该家族曾撞 native-archive 闭包缺
-# -lm 缺口，已由 LINK_SUFFIX 恒带系统库修复翻绿，本 driver 求同通道复核 + 压异步
-# 执行器通道）。tokio 钉 1（rt+time：current_thread runtime inside main 的当前最小
-# 面，c_tokio 先例；sqlx-core 自身 runtime-tokio 也会并特性并集）。
+# sqlx is pinned to =0.8.6, the newest 0.8 release on crates.io (0.9.0 exists but is outside
+# the newest-0.8.x scope required here). With default features off, only runtime-tokio (the local
+# sqlite library needs no TLS, so no tls feature) and sqlite are enabled; sqlite goes through
+# sqlx-sqlite -> libsqlite3-sys bundled, which cc-compiles C sqlite3.c in place, the same
+# family as c_rusqlite_db. That family once hit a missing -lm in the native-archive closure,
+# now fixed by always appending system libraries via LINK_SUFFIX. tokio is pinned to 1 with
+# only rt+time, the smallest current_thread runtime surface inside main (as in c_tokio).
 sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
 tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 ---
-// sqlx 0.8.6 + bundled C sqlite：异步执行器面与 C FFI 通道的三维压测（批8 波1）。
+// sqlx 0.8.6 plus bundled C sqlite: a three-way stress of the async executor surface and the
+// C FFI channel.
 //
-// 压力点（本批「重 FFI/C」定位）：
-//   ① sqlx-sqlite 的 worker 线程通道：每个连接 spawn 一条 std 线程，命令经
-//      std::sync::mpsc 送入、结果经 futures_channel oneshot 取回——guest 线程间
-//      park/unpark 全走模拟 futex，current_thread 运行时 block_on 与 worker 互喂，
-//      压协作调度 + async 无栈状态机 + SC 交错确定性（c_crossbeam/c_tokio 先例的
-//      sqlx 形态）。
-//   ② C sqlite FFI 全通道：prepare/step/column_* /errmsg 等 extern fn 直落
-//      .a→.so 闭包产物；参数/返回值全标量封送（无按值聚合——open-issues C1 既定
-//      边界不涉及）。
-//   ③ pool + 显式事务状态机（begin/commit/rollback）。
+// Pressure points:
+//   ① sqlx-sqlite's worker-thread channel: every connection spawns a std thread, commands go
+//      in over std::sync::mpsc and results come back over a futures_channel oneshot, so guest
+//      thread park/unpark all goes through the simulated futex; the current_thread runtime's
+//      block_on and the worker feed each other, stressing cooperative scheduling, the async
+//      stackless state machine and deterministic SC interleaving.
+//   ② The full C sqlite FFI channel: extern fns such as prepare/step/column_*/errmsg land in
+//      the .a -> .so closure artifact; arguments and returns are all scalar marshalling, with
+//      no by-value aggregates.
+//   ③ A connection pool plus an explicit transaction state machine (begin/commit/rollback).
 //
-// 测试面清单：
-//   tokio current_thread runtime inside main 手建并 block_on；
-//   memory sqlite（sqlite::memory:，纯内存零落盘）open + sqlite_version 锚；
-//   CREATE TABLE（PK / UNIQUE / CHECK / REAL / 可空 TEXT）；
-//   1000 行单事务批量插入（commit 路径），客户端同序累计 sum_val/name fnv 与
-//     服务端 COUNT/SUM 口径核对；
-//   聚合查询：COUNT/SUM/AVG(f64 to_bits) + GROUP BY 16 桶 ORDER BY 定序；
-//   显式事务 rollback 路径（tx 内 1003 行、回滚后 1000 行断言）；
-//   error 路径锁定错误串：UNIQUE 违反 / CHECK 违反 / no such table / fetch_optional
-//     miss(None)；NULL 读路径（COUNT(note IS NULL) 服务端/客户端口径核对 + 真读
-//     一个 NULL 列进 Option<String>）；
-//   type info 反射断言：六列 Column::name + TypeInfo::name 打印，按名列取；
-//   全表 1000 行 ORDER BY id 回读 fnv 锚与客户端序列比对。
+// Test surface:
+//   a tokio current_thread runtime built inside main, driven by block_on;
+//   an in-memory sqlite database (sqlite::memory:, no file IO) opened with a sqlite_version
+//     anchor;
+//   CREATE TABLE with PRIMARY KEY / UNIQUE / CHECK / REAL / nullable TEXT;
+//   a 1000-row batch insert in a single transaction (the commit path), cross-checking the
+//     client-side running sum_val and name fnv against server-side COUNT and SUM;
+//   aggregate queries: COUNT/SUM/AVG (f64 to_bits) plus GROUP BY into 16 buckets with a fixed
+//     ORDER BY;
+//   the explicit rollback path (1003 rows visible inside the transaction, 1000 after rollback);
+//   error paths with fixed strings: UNIQUE violation, CHECK violation, no such table, and a
+//     fetch_optional miss (None);
+//   the NULL read path (server COUNT(note IS NULL) cross-checked against the client count, and
+//     one NULL column really read into an Option<String>);
+//   type-info reflection: the six columns print Column::name and TypeInfo::name and are read
+//     by name;
+//   the full table re-read in ORDER BY id order, its fnv compared with the client sequence.
 //
-// 确定性：定种 xorshift64*；零文件 IO/零时间/零随机源；不用 HashMap 序输出；
-// f64 一律 to_bits；错误串为 sqlite 库内定串；行内断言用 assert_eq! 但关键口径
-// 全部 println 锁定；stderr 真空（driver 零 warning）。1000 行批量仅打印聚合计，
-// 输出 ~40 行。
+// Determinism: a seeded xorshift64*; no file IO, time or randomness; no HashMap-ordered
+// output; f64 values printed as to_bits; error strings are sqlite's own fixed strings; rows
+// use assert_eq! but every key figure is also pinned by a println; stderr is empty (the driver
+// has zero warnings). The 1000-row batch prints only its aggregate counts; the output is
+// about 40 lines.
 //
-// 三维复跑：
+// Three-way rerun:
 //   A: target/release/mirvm run corpus/c_sqlx_sqlite.rs
 //   B: cd "$(grep -l 'name = "c_sqlx_sqlite"' ~/.cache/mirvm/scripts/*/Cargo.toml | xargs dirname)" && \
 //        RUSTC="$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/rustc" \
 //        "$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo" run -q
 //   C: MIRVM_JIT_THRESHOLD=1 target/release/mirvm run corpus/c_sqlx_sqlite.rs
 //
-// 构建预算备注：sqlx+tokio+futures 全图 + bundled sqlite3.c 现场 cc 编制。实测
-// 未触发放宽（A 冷 26.9s 含全图物化、A 热 7.4s、B 增量原生构建+跑 17s、C 1.2s，
-// wall；机器另有同波 c_aws_lc 并发构建）。
-// FRONTIER 绕行：无。2026-07-17 首跑三维逐字节一致、exit 全 0、stderr 全空：
-// ① worker 线程通道（std::sync::mpsc 命令 + futures oneshot 回包）在协作调度下
-// 与 native 行为逐字节一致；② bundled C sqlite 全 FFI 通道（prepare/step/
-// column_*/errmsg 与错误码 2067/275/1）三维同文；③ JIT 阈 1 与解释器无分歧。
-// 引擎疑似问题：未发现。
+// Build budget: the whole sqlx+tokio+futures graph plus bundled sqlite3.c compiled by cc in
+// place; see the three-way rerun above.
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Column, Row, TypeInfo};
 
-/// 定种 xorshift64*（native/mirvm/JIT 三维同序列）。
+/// Seeded xorshift64*, the same sequence on native, mirvm and JIT.
 struct Rng(u64);
 
 impl Rng {
@@ -79,7 +79,7 @@ impl Rng {
     }
 }
 
-/// 内联 FNV-1a（二进制内容锚定，不打印原始字节）。
+/// Inline FNV-1a, anchoring binary content without printing raw bytes.
 fn fnv1a(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for &b in data {
@@ -98,8 +98,8 @@ fn main() {
 }
 
 async fn run() {
-    // 内存库单连接池：max_connections(1) 保证事务与后续查询恒走同一连接
-    // （sqlite::memory: 的开库即空库，多连接会是多张互不相见的库）。
+    // Single-connection in-memory pool: max_connections(1) keeps transactions and later queries
+    // on one connection (sqlite::memory: opens an empty database; more would be invisible to each other).
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -127,7 +127,7 @@ async fn run() {
     .unwrap();
     println!("ddl done");
 
-    // ① 单事务批量插入 1000 行 = commit 路径；客户端同序累计校验锚。
+    // ① Single-transaction batch insert of 1000 rows (the commit path); client-side running checksum anchor.
     let mut rng = Rng(0x9E3779B97F4A7C15);
     let mut sum_val: i64 = 0;
     let mut name_concat: Vec<u8> = Vec::new();
@@ -160,7 +160,7 @@ async fn run() {
     let client_fnv = fnv1a(&name_concat);
     println!("batch commit rows=1000 sum_val={sum_val} null_notes={null_notes} fnv={client_fnv:016x}");
 
-    // ② 服务端聚合口径核对（COUNT/SUM + AVG f64 bits）。
+    // ② Server-side aggregate cross-check (COUNT/SUM plus AVG f64 bits).
     let (n, s): (i64, i64) = sqlx::query_as("SELECT COUNT(*), SUM(val) FROM items")
         .fetch_one(&pool)
         .await
@@ -174,7 +174,7 @@ async fn run() {
         .unwrap();
     println!("avg_val_bits={:016x}", avg.to_bits());
 
-    // ③ GROUP BY 16 桶、定序输出。
+    // ③ GROUP BY into 16 buckets, printed in fixed order.
     let groups: Vec<(i64, i64, i64)> =
         sqlx::query_as("SELECT grp, COUNT(*), SUM(val) FROM items GROUP BY grp ORDER BY grp")
             .fetch_all(&pool)
@@ -185,7 +185,7 @@ async fn run() {
         println!("grp {g:02} n={c} sum={s}");
     }
 
-    // 主键点查（后段错误路径要复用 first_name 做 UNIQUE 触发）。
+    // Primary-key point query (the later error path reuses first_name to trigger UNIQUE).
     let (first_name, first_val): (String, i64) =
         sqlx::query_as("SELECT name, val FROM items WHERE id = 1")
             .fetch_one(&pool)
@@ -193,7 +193,7 @@ async fn run() {
             .unwrap();
     println!("first id=1 name={first_name:?} val={first_val}");
 
-    // ④ 显式事务 rollback 路径：tx 内见 1003 行，回滚后恒 1000。
+    // ④ Explicit rollback path: 1003 rows are visible inside the transaction, always 1000 after.
     {
         let mut tx = pool.begin().await.unwrap();
         for i in 0..3u64 {
@@ -223,7 +223,7 @@ async fn run() {
         println!("rollback inside={inside} after={after}");
     }
 
-    // ⑤ error 路径：UNIQUE / CHECK / 缺表 / fetch_optional miss。
+    // ⑤ Error paths: UNIQUE / CHECK / missing table / fetch_optional miss.
     match sqlx::query("INSERT INTO items(grp, name, val, score, note) VALUES (?1, ?2, ?3, ?4, ?5)")
         .bind(1)
         .bind(&first_name)
@@ -258,7 +258,7 @@ async fn run() {
         .unwrap();
     println!("miss none = {}", miss.is_none());
 
-    // NULL 读路径：服务端 NULL 计数与客户端口径核对 + 真读一个 NULL 列。
+    // NULL read path: server-side NULL count cross-checked with the client, plus one real NULL column read.
     let (null_cnt,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM items WHERE note IS NULL")
         .fetch_one(&pool)
         .await
@@ -271,7 +271,7 @@ async fn run() {
     let null_note: Option<String> = null_row.get(0);
     println!("null note read none = {}", null_note.is_none());
 
-    // ⑥ type info 反射：六列的 name/type 全打印 + 按名列取。
+    // ⑥ Type-info reflection: all six columns print name/type, then are read by name.
     let row = sqlx::query("SELECT id, grp, name, val, score, note FROM items WHERE id = 1")
         .fetch_one(&pool)
         .await
@@ -291,7 +291,7 @@ async fn run() {
         note.is_none()
     );
 
-    // ⑦ 全表回读（ORDER BY id 定序扫描 1000 行）与客户端序列 fnv 比对。
+    // ⑦ Full-table re-read (ORDER BY id, 1000 rows) with its fnv compared against the client sequence.
     let rows: Vec<(String,)> = sqlx::query_as("SELECT name FROM items ORDER BY id")
         .fetch_all(&pool)
         .await

@@ -362,7 +362,7 @@ fn gather_d_pd_256_sign_extends_i32_indexes_and_respects_mask() {
 
 #[test]
 fn vpmadd52_matches_stdarch_vectors_and_hw_cross_check() {
-    // stdarch known answer（128/256/512 同值广播）：a=10<<40, b=(11<<40)+4, c=(12<<40)+3
+    // stdarch known answer (same broadcast value for 128/256/512): a=10<<40, b=(11<<40)+4, c=(12<<40)+3
     let a = [10u64 << 40; 8];
     let b = [(11u64 << 40) + 4; 8];
     let c = [(12u64 << 40) + 3; 8];

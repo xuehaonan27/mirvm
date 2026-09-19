@@ -1,8 +1,10 @@
-//! Git 依赖获取与精确 commit checkout。
+//! Git dependency fetching and exact-commit checkout.
 //!
-//! 可变 branch/tag/default HEAD 只在 fresh 求解时解析；已有 lock 一律直接使用
-//! `#<commit>`，不会联网重解。获取走系统 Git，沿用用户现有 credential helper、SSH
-//! agent 与 known_hosts；mirvm 不维护第二套凭据名单。
+//! Mutable branch/tag/default-HEAD references are resolved only during fresh
+//! resolution; an existing lock always uses its `#<commit>` directly and never
+//! re-resolves over the network. Fetching shells out to the system Git and reuses
+//! the user's credential helper, SSH agent and known_hosts; mirvm keeps no second
+//! credential list.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -18,9 +20,9 @@ pub struct GitStore {
 impl GitStore {
     pub fn open(root: PathBuf, offline: bool) -> Result<Self, String> {
         std::fs::create_dir_all(root.join("db"))
-            .map_err(|error| format!("Git store 创建失败 {}: {error}", root.display()))?;
+            .map_err(|error| format!("failed to create Git store {}: {error}", root.display()))?;
         std::fs::create_dir_all(root.join("checkouts"))
-            .map_err(|error| format!("Git store 创建失败 {}: {error}", root.display()))?;
+            .map_err(|error| format!("failed to create Git store {}: {error}", root.display()))?;
         Ok(Self { root, offline })
     }
 
@@ -40,7 +42,8 @@ impl GitStore {
         if locked_source.is_some() && !git_object_exists(&db, &precise)? {
             if self.offline {
                 return Err(format!(
-                    "MIRVM_OFFLINE：Git 依赖 {package} 的 locked commit {precise} 不在本地缓存"
+                    "MIRVM_OFFLINE: locked commit {precise} of Git dependency {package} \
+                     is not in the local cache"
                 ));
             }
             self.ensure_db(spec, &db)?;
@@ -52,7 +55,7 @@ impl GitStore {
         let package_dir = find_package_dir(&checkout, package)?;
         let workspace = WorkspaceManifest::read(&package_dir).map_err(|error| {
             format!(
-                "Git 依赖 {package}（{}#{precise}）工作区解析失败: {error}",
+                "failed to resolve workspace of Git dependency {package} ({}#{precise}): {error}",
                 spec.url
             )
         })?;
@@ -60,10 +63,16 @@ impl GitStore {
             .members
             .into_iter()
             .find(|member| member.name == package && member.root == package_dir)
-            .ok_or_else(|| format!("Git 仓库中找到 {package}，但工作区物化后没有该包"))?;
+            .ok_or_else(|| {
+                format!(
+                    "found {package} in the Git repository but not in the \
+                                    materialized workspace"
+                )
+            })?;
         if !spec.version.matches(&manifest.version) {
             return Err(format!(
-                "Git 依赖 {package} 的 package.version={} 不满足 manifest version 要求 {}",
+                "package.version={} of Git dependency {package} does not satisfy the \
+                 manifest version requirement {}",
                 manifest.version, spec.version
             ));
         }
@@ -76,7 +85,8 @@ impl GitStore {
         if !db.is_dir() {
             if self.offline {
                 return Err(format!(
-                    "MIRVM_OFFLINE：Git 仓库 {} 无本地缓存（先在线解析一次）",
+                    "MIRVM_OFFLINE: no local cache for Git repository {} \
+                     (resolve it once online first)",
                     spec.url
                 ));
             }
@@ -91,12 +101,17 @@ impl GitStore {
             GitReference::DefaultBranch => {
                 let output = git_output(
                     Command::new("git").args(["ls-remote", "--symref", &spec.url, "HEAD"]),
-                    "读取 Git 默认分支",
+                    "read Git default branch",
                 )?;
                 output
                     .lines()
                     .find_map(|line| line.strip_prefix("ref: ")?.strip_suffix("\tHEAD"))
-                    .ok_or_else(|| format!("Git 仓库 {} 没有可解析的默认分支", spec.url))?
+                    .ok_or_else(|| {
+                        format!(
+                            "Git repository {} has no resolvable default branch",
+                            spec.url
+                        )
+                    })?
                     .to_string()
             }
             GitReference::Branch(branch) => format!("refs/heads/{branch}"),
@@ -110,7 +125,7 @@ impl GitStore {
                         "+refs/heads/*:refs/heads/*",
                         "+refs/tags/*:refs/tags/*",
                     ]),
-                    "更新 Git 分支与标签",
+                    "update Git branches and tags",
                 )?;
                 if let Ok(precise) = rev_parse(db, &format!("{rev}^{{commit}}")) {
                     return Ok(precise);
@@ -120,7 +135,7 @@ impl GitStore {
                         .arg("-C")
                         .arg(db)
                         .args(["fetch", "--force", "origin", rev]),
-                    &format!("获取 Git rev {rev}"),
+                    &format!("fetch Git rev {rev}"),
                 )?;
                 return rev_parse(db, "FETCH_HEAD^{commit}");
             }
@@ -131,7 +146,7 @@ impl GitStore {
                 .arg("-C")
                 .arg(db)
                 .args(["fetch", "--force", "origin", &refspec]),
-            &format!("更新 Git 引用 {reference}"),
+            &format!("update Git reference {reference}"),
         )?;
         if matches!(&spec.reference, GitReference::DefaultBranch) {
             git_ok(
@@ -139,7 +154,7 @@ impl GitStore {
                     .arg("-C")
                     .arg(db)
                     .args(["symbolic-ref", "HEAD", &reference]),
-                "更新 Git cache 默认分支",
+                "update Git cache default branch",
             )?;
         }
         rev_parse(db, &format!("{reference}^{{commit}}"))
@@ -151,13 +166,13 @@ impl GitStore {
         }
         let parent = db
             .parent()
-            .ok_or_else(|| "Git db 路径无父目录".to_string())?;
+            .ok_or_else(|| "Git db path has no parent directory".to_string())?;
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         git_ok(
             Command::new("git")
                 .args(["clone", "--mirror", "--no-checkout", &spec.url])
                 .arg(db),
-            &format!("克隆 Git 仓库 {}", spec.url),
+            &format!("clone Git repository {}", spec.url),
         )?;
         validate_db_origin(db, &spec.url)
     }
@@ -170,12 +185,12 @@ impl GitStore {
         }
         let parent = dir
             .parent()
-            .ok_or_else(|| "Git checkout 路径无父目录".to_string())?;
+            .ok_or_else(|| "Git checkout path has no parent directory".to_string())?;
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         let temp = parent.join(format!(".tmp-{}-{}", std::process::id(), precise));
         if temp.exists() {
             std::fs::remove_dir_all(&temp)
-                .map_err(|error| format!("清理 Git 临时 checkout 失败: {error}"))?;
+                .map_err(|error| format!("failed to clean up temporary Git checkout: {error}"))?;
         }
         let result = (|| {
             git_ok(
@@ -183,7 +198,7 @@ impl GitStore {
                     .args(["clone", "--no-checkout", "--shared"])
                     .arg(db)
                     .arg(&temp),
-                "创建 Git checkout",
+                "create Git checkout",
             )?;
             git_ok(
                 Command::new("git")
@@ -193,8 +208,9 @@ impl GitStore {
                 &format!("checkout Git commit {precise}"),
             )?;
             update_submodules(&temp, self.offline)?;
-            std::fs::rename(&temp, &dir)
-                .map_err(|error| format!("发布 Git checkout 失败 {}: {error}", dir.display()))?;
+            std::fs::rename(&temp, &dir).map_err(|error| {
+                format!("failed to publish Git checkout {}: {error}", dir.display())
+            })?;
             validate_checkout(&dir, precise)
         })();
         if result.is_err() && temp.exists() {
@@ -224,11 +240,12 @@ fn parse_locked_source(source: &str, source_id: &str) -> Result<String, String> 
         .and_then(|rest| rest.strip_prefix('#'))
         .ok_or_else(|| {
             format!(
-                "Cargo.lock Git source 与 manifest 不一致：期望 {source_id}#<commit>，实际 {source}"
+                "Cargo.lock Git source does not match the manifest: \
+                 expected {source_id}#<commit>, got {source}"
             )
         })?;
     if precise.len() < 40 || !precise.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(format!("Cargo.lock Git commit 非法：{precise}"));
+        return Err(format!("invalid Cargo.lock Git commit: {precise}"));
     }
     Ok(precise.to_ascii_lowercase())
 }
@@ -241,7 +258,7 @@ fn resolve_cached_reference(db: &Path, reference: &GitReference) -> Result<Strin
         GitReference::Rev(rev) => format!("{rev}^{{commit}}"),
     };
     rev_parse(db, &rev)
-        .map_err(|error| format!("MIRVM_OFFLINE：缓存中没有 Git 引用 {rev}: {error}"))
+        .map_err(|error| format!("MIRVM_OFFLINE: Git reference {rev} is not in the cache: {error}"))
 }
 
 fn fetch_precise(db: &Path, url: &str, precise: &str) -> Result<(), String> {
@@ -250,7 +267,7 @@ fn fetch_precise(db: &Path, url: &str, precise: &str) -> Result<(), String> {
             .arg("-C")
             .arg(db)
             .args(["fetch", "--force", url, precise]),
-        &format!("获取 locked Git commit {precise}"),
+        &format!("fetch locked Git commit {precise}"),
     )
 }
 
@@ -264,7 +281,7 @@ fn git_object_exists(db: &Path, precise: &str) -> Result<bool, String> {
         .args(["cat-file", "-e", &format!("{precise}^{{commit}}")])
         .env("GIT_TERMINAL_PROMPT", "0")
         .status()
-        .map_err(|error| format!("启动 git cat-file 失败: {error}"))?
+        .map_err(|error| format!("failed to run git cat-file: {error}"))?
         .success())
 }
 
@@ -274,11 +291,11 @@ fn validate_db_origin(db: &Path, expected: &str) -> Result<(), String> {
             .arg("-C")
             .arg(db)
             .args(["config", "--get", "remote.origin.url"]),
-        "读取 Git cache origin",
+        "read Git cache origin",
     )?;
     if actual != expected {
         return Err(format!(
-            "Git cache 身份不一致 {}：期望 origin {expected}，实际 {actual}",
+            "Git cache identity mismatch {}: expected origin {expected}, got {actual}",
             db.display()
         ));
     }
@@ -300,9 +317,9 @@ fn update_submodules(checkout: &Path, offline: bool) -> Result<(), String> {
     git_ok(
         &mut command,
         if offline {
-            "MIRVM_OFFLINE：从现有缓存初始化 Git submodule"
+            "MIRVM_OFFLINE: initialize Git submodules from the existing cache"
         } else {
-            "初始化 Git submodule"
+            "initialize Git submodules"
         },
     )
 }
@@ -311,7 +328,7 @@ fn validate_checkout(dir: &Path, precise: &str) -> Result<(), String> {
     let actual = rev_parse(dir, "HEAD^{commit}")?;
     if actual != precise {
         return Err(format!(
-            "Git checkout 身份损坏 {}：期望 {precise}，实际 {actual}",
+            "Git checkout identity corrupt {}: expected {precise}, got {actual}",
             dir.display()
         ));
     }
@@ -321,11 +338,11 @@ fn validate_checkout(dir: &Path, precise: &str) -> Result<(), String> {
             "--porcelain",
             "--untracked-files=all",
         ]),
-        "检查 Git checkout 完整性",
+        "check Git checkout integrity",
     )?;
     if !status.is_empty() {
         return Err(format!(
-            "Git checkout 内容被修改 {}：\n{}",
+            "Git checkout content was modified {}:\n{}",
             dir.display(),
             status
         ));
@@ -336,14 +353,14 @@ fn validate_checkout(dir: &Path, precise: &str) -> Result<(), String> {
                 .arg("-C")
                 .arg(dir)
                 .args(["submodule", "status", "--recursive"]),
-            "检查 Git submodule 完整性",
+            "check Git submodule integrity",
         )?;
         if submodules
             .lines()
             .any(|line| line.starts_with(['-', '+', 'U']))
         {
             return Err(format!(
-                "Git checkout 的 submodule 未初始化或提交不符 {}：\n{submodules}",
+                "Git checkout has uninitialized or mismatched submodules {}:\n{submodules}",
                 dir.display()
             ));
         }
@@ -357,7 +374,7 @@ fn rev_parse(repo: &Path, rev: &str) -> Result<String, String> {
             .arg("-C")
             .arg(repo)
             .args(["rev-parse", "--verify", rev]),
-        &format!("解析 Git revision {rev}"),
+        &format!("resolve Git revision {rev}"),
     )
 }
 
@@ -365,12 +382,12 @@ fn git_ok(command: &mut Command, action: &str) -> Result<(), String> {
     let output = command
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
-        .map_err(|error| format!("{action}：启动 git 失败: {error}"))?;
+        .map_err(|error| format!("{action}: failed to start git: {error}"))?;
     if output.status.success() {
         return Ok(());
     }
     Err(format!(
-        "{action}失败（exit={}）：{}",
+        "{action} failed (exit={}): {}",
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     ))
@@ -380,10 +397,10 @@ fn git_output(command: &mut Command, action: &str) -> Result<String, String> {
     let output = command
         .env("GIT_TERMINAL_PROMPT", "0")
         .output()
-        .map_err(|error| format!("{action}：启动 git 失败: {error}"))?;
+        .map_err(|error| format!("{action}: failed to start git: {error}"))?;
     if !output.status.success() {
         return Err(format!(
-            "{action}失败（exit={}）：{}",
+            "{action} failed (exit={}): {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         ));
@@ -396,7 +413,7 @@ fn find_package_dir(checkout: &Path, package: &str) -> Result<PathBuf, String> {
     let mut stack = vec![checkout.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries = std::fs::read_dir(&dir)
-            .map_err(|error| format!("扫描 Git checkout {} 失败: {error}", dir.display()))?;
+            .map_err(|error| format!("failed to scan Git checkout {}: {error}", dir.display()))?;
         for entry in entries {
             let entry = entry.map_err(|error| error.to_string())?;
             let path = entry.path();
@@ -415,9 +432,9 @@ fn find_package_dir(checkout: &Path, package: &str) -> Result<PathBuf, String> {
                 continue;
             }
             let text = std::fs::read_to_string(&path)
-                .map_err(|error| format!("读取 {} 失败: {error}", path.display()))?;
+                .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
             let value: toml::Value = toml::from_str(&text)
-                .map_err(|error| format!("解析 {} 失败: {error}", path.display()))?;
+                .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
             if value
                 .get("package")
                 .and_then(|package| package.get("name"))
@@ -430,12 +447,12 @@ fn find_package_dir(checkout: &Path, package: &str) -> Result<PathBuf, String> {
     }
     match matches.len() {
         0 => Err(format!(
-            "Git 仓库 {} 中找不到 package `{package}`",
+            "package `{package}` not found in Git repository {}",
             checkout.display()
         )),
         1 => std::fs::canonicalize(&matches[0]).map_err(|error| error.to_string()),
         _ => Err(format!(
-            "Git 仓库中有多个名为 `{package}` 的包：{}",
+            "multiple packages named `{package}` in the Git repository: {}",
             matches
                 .iter()
                 .map(|path| path.display().to_string())
@@ -487,7 +504,7 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         git_ok(
             Command::new("git").args(["init", "-b", "main"]).arg(&repo),
-            "初始化 test Git 仓库",
+            "init test Git repository",
         )
         .unwrap();
         git(&repo, &["config", "user.name", "mirvm test"]);
@@ -525,7 +542,10 @@ mod tests {
         let locked_manifest = store.ensure_package(&branch, "git-core", None).unwrap();
         let locked_source = locked_manifest.lock_source.clone().unwrap();
         assert!(locked_source.ends_with(&first));
-        assert_eq!(locked_manifest.edition, "2021", "workspace 继承必须物化");
+        assert_eq!(
+            locked_manifest.edition, "2021",
+            "workspace inheritance must be materialized"
+        );
 
         write(
             repo.join("helper/src/lib.rs"),
@@ -578,7 +598,7 @@ mod tests {
         let error = cold
             .ensure_package(&branch, "git-core", Some(&locked_source))
             .unwrap_err();
-        assert!(error.contains("不在本地缓存"), "{error}");
+        assert!(error.contains("not in the local cache"), "{error}");
 
         write(
             locked_manifest.root.join("src/lib.rs"),
@@ -587,7 +607,7 @@ mod tests {
         let error = store
             .ensure_package(&branch, "git-core", Some(&locked_source))
             .unwrap_err();
-        assert!(error.contains("内容被修改"), "{error}");
+        assert!(error.contains("content was modified"), "{error}");
         let _ = std::fs::remove_dir_all(root);
     }
 }

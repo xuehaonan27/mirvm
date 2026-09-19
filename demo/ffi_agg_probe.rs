@@ -1,10 +1,10 @@
 #![allow(non_snake_case, clippy::missing_transmute_annotations)]
-// C1 按值聚合封送合成矩阵探针（open-issues C1 验收面，designs/c1-ffi-agg-design.md §3 片 C）。
-// 出向（CallIndirect native_sig 道）：S2 8B pair 档 / S3 24B 含 fn-ptr 成员（TSInput 形）
-// 按值参数。入向（thunk 工厂/P1 条目）：mk_pt = Pair 返回重打包、mk_node = 32B sret
-// 直传、cb_point = 聚合参数经 P1 条目蹦床（TSInput.read 同形）。两维同构：
-// C 源在 driver 内经 Command+cc 现编 .so，双维 dlopen 真 native 依次调用，
-// 常量全程自定，无路径/地址/时间输出。
+// Composite matrix probe for by-value aggregate marshalling.
+// Outbound (CallIndirect native_sig path): S2 8B pair case / S3 24B with an embedded
+// fn-ptr member (TSInput shape) by-value parameter. Inbound (thunk factory / P1 entry):
+// mk_pt = pair return repacking, mk_node = 32B sret direct, cb_point = aggregate parameter
+// through the P1 entry trampoline (TSInput.read shape). The C source is compiled on the spot
+// into a .so and dlopen'd; all constants are self-determined -- no path/address/time output.
 use std::ffi::c_void;
 use std::process::Command;
 
@@ -86,7 +86,7 @@ fn main() {
         .arg(&c_path)
         .status()
         .unwrap();
-    assert!(st.success(), "cc 编译探针库失败");
+    assert!(st.success(), "cc failed to compile the probe library");
 
     unsafe {
         let so_c = format!("{}\0", so_path.display());
@@ -94,7 +94,7 @@ fn main() {
         if h.is_null() {
             let e = dlerror();
             let m = if e.is_null() { "?" } else { "dlerror" };
-            panic!("dlopen 探针库失败: {m}");
+            panic!("dlopen of the probe library failed: {m}");
         }
         macro_rules! sym {
             ($n:literal) => {{
@@ -111,11 +111,11 @@ fn main() {
         let p_drive_node: extern "C" fn(u64, extern "C" fn(u64) -> S4) -> u64 =
             sym!("probe_drive_node");
 
-        // 出向：8B 单字段（S1=标量近亲）与 8B pair（S2）
+        // Outbound: 8B single field (S1, a scalar next of kin) and 8B pair (S2)
         println!("out sum1={}", p_sum1(S1 { a: 10 })); // 10+7=17
         println!("out sum2={}", p_sum2(S2 { r: 12, c: 5 })); // 12*100+5=1205
 
-        // 出向：24B 聚合内嵌 fn-ptr 成员（TSInput 形）→ native 回调经 P1 条目回解释器
+        // Outbound: 24B aggregate with an embedded fn-ptr member (TSInput shape) -> native callback returns via the P1 entry
         let s3 = S3 {
             payload: 30,
             cb: cb_point,
@@ -123,13 +123,13 @@ fn main() {
         };
         println!("cb via agg={}", p_drive(s3)); // cb(30,{5,7})=42; 42+9=51
 
-        // 入向：顶层 fn-ptr 回调返回 8B 聚合（thunk 重打包含义档）
+        // Inbound: top-level fn-ptr callback returning an 8B aggregate (thunk repacking case)
         println!("cb pair-ret={}", p_drive_pt(40, mk_pt)); // (41,42) → 41*1000+42=41042
 
-        // 入向：顶层 fn-ptr 回调返回 32B 聚合（RetAbi::Indirect sret 直传档）
+        // Inbound: top-level fn-ptr callback returning a 32B aggregate (RetAbi::Indirect sret direct case)
         println!("cb node-ret={}", p_drive_node(10, mk_node)); // 11+12+13+4+5+6=51
 
-        // 出向：32B MEMORY 档按值参数（libffi avalue 读全尺寸字节）
+        // Outbound: 32B MEMORY-case by-value parameter (libffi avalue reads the full-size bytes)
         let p_sum4: extern "C" fn(S4) -> u64 = sym!("probe_sum4");
         let s4 = S4 {
             a: 10,
@@ -138,12 +138,12 @@ fn main() {
         };
         println!("out sum4={}", p_sum4(s4)); // 10+11+12+13+14+15=75
 
-        // 出向：native 返回 8B 聚合（RetDest::Indirect + ffi memcpy 档）
+        // Outbound: native returns an 8B aggregate (RetDest::Indirect + ffi memcpy case)
         let p_mk2: extern "C" fn(u32) -> S2 = sym!("probe_mk2");
         let p = p_mk2(40); // (43, 44)
         println!("out ret2={},{}", p.r, p.c);
 
-        // 出向：native 返回 32B 聚合（sret 档）
+        // Outbound: native returns a 32B aggregate (sret case)
         let p_mk4: extern "C" fn(u64) -> S4 = sym!("probe_mk4");
         let n = p_mk4(10); // (15, 16, [7,8,9,10])
         println!(

@@ -1,46 +1,46 @@
 #!/usr/bin/env mirvm
 ---
 [dependencies]
-# wrapper 0.16 的 default features 拖 sled/parquet/redis/… 整簇重存储；只需要
-# 纯 Rust memory storage（gluesql-core 0.16.3：sqlparser 0.46 + 纯 Rust 执行层，
-# 行存 BTreeMap<Key, DataRow>，扫描序 = 键序，天然确定）。
+# wrapper 0.16's default features drag in sled/parquet/redis and the whole heavy storage
+# cluster; only pure-Rust memory storage is needed (gluesql-core 0.16.3: sqlparser 0.46
+# + a pure-Rust executor, rows in BTreeMap<Key, DataRow>, scan order = key order).
 gluesql = { version = "0.16", default-features = false, features = ["gluesql_memory_storage"] }
 futures = "0.3"
-# gluesql-core 0.16.3 的 data/literal.rs 里 `*r.as_ref() == 0.into()` 靠"当时只有
-# 一个满足的 PartialEq 实现"做类型推断；bigdecimal 0.4.6+ 给 BigDecimal 加了成批
-# PartialEq<int> impl 后推断变歧义（E0283，上游 semver 破洞，c_jieba_cut 同款）。
-# 上游 gluesql 0.16.0 自带 Cargo.lock 钉的就是 0.4.5——对齐钉死。
+# gluesql-core 0.16.3's data/literal.rs infers the type of `*r.as_ref() == 0.into()` from
+# the single satisfying "PartialEq implementation" in scope; bigdecimal 0.4.6+ added a
+# batch of PartialEq<int> impls for BigDecimal, making that inference ambiguous (E0283,
+# an upstream semver hole). gluesql 0.16.0's Cargo.lock already pins 0.4.5.
 bigdecimal = "=0.4.5"
 ---
-// gluesql 0.16（memory storage）SQL 引擎差分。
-// 覆盖：
-//  ① DDL：users（INT PRIMARY KEY / TEXT NOT NULL / UNIQUE / DEFAULT / BOOLEAN /
-//     FLOAT64 / DECIMAL / DATE / UUID / 可空 TEXT）、orders（INT PK / INT NOT NULL /
-//     DECIMAL / TIMESTAMP / BOOLEAN）、typezoo（INT8~INT128 / UINT8~UINT128 /
-//     FLOAT32 / TIMESTAMP / TIME / INTERVAL / BYTEA / INET，min/max/±0.0 边界）；
-//     SHOW COLUMNS 回读列定义。
-//  ② 定种批量插入：内联 xorshift64* 生成 40 用户（含省略 age 走 DEFAULT 的批）
-//     + 80 订单（故意 1..=45 的 user_id，留出 INNER/LEFT JOIN 差异）+ 12 行
-//     全类型边界。
-//  ③ SELECT：WHERE+ORDER BY+LIMIT；表达式投影（UPPER/CONCAT/LEFT/LPAD/ROUND/
-//     IFNULL 纯标量函数）；全局聚合 COUNT/SUM/AVG/VARIANCE/STDEV/MIN/MAX；
-//     GROUP BY+HAVING+ORDER BY+LIMIT；DISTINCT；IN 子查询。
-//  ④ JOIN：INNER JOIN（悬空 user_id 行被滤）+ LEFT JOIN+GROUP 计数。
-//  ⑤ UPDATE（表达式 SET+谓词）/DELETE（复合谓词），改前改后聚合校验。
-//  ⑥ 事务：START TRANSACTION → MemoryStorage 报不支持（确定性错误串）；
-//     ROLLBACK/COMMIT 在无事务上下文下仍 Ok（原样打印引擎真实行为）。
-//  ⑦ 错误路径：语法错（sqlparser）、类型错（'yes'→BOOLEAN）、表不存在、
-//     UNIQUE 冲突、PK 冲突、NOT NULL 违约、I8 算术溢出。
-//  ⑧ DROP TABLE 后复读同表 → 表不存在。
-// 确定性：所有 SELECT 带总序 ORDER BY；F32/F64 打印 to_bits()；聚合求和序 =
-// BTreeMap 键序（两侧相同）；无时间/随机源/HashMap 迭代序外泄（GROUP BY 内部
-// 哈希一律经 ORDER BY 收口）。
+// gluesql 0.16 (memory storage) SQL engine differential.
+// Coverage:
+//   1) DDL: users (INT PRIMARY KEY / TEXT NOT NULL / UNIQUE / DEFAULT / BOOLEAN /
+//      FLOAT64 / DECIMAL / DATE / UUID / nullable TEXT), orders (INT PK / INT NOT NULL /
+//      DECIMAL / TIMESTAMP / BOOLEAN), typezoo (INT8..INT128 / UINT8..UINT128 /
+//      FLOAT32 / TIMESTAMP / TIME / INTERVAL / BYTEA / INET, min/max/+-0.0 edges);
+//      SHOW COLUMNS reads the column definitions back.
+//   2) Seeded bulk insert: an inline xorshift64* generates 40 users (including a batch
+//      that omits age so DEFAULT applies) + 80 orders (user_id in 1..=45, leaving room
+//      for INNER/LEFT JOIN differences) + 12 fully-typed boundary rows.
+//   3) SELECT: WHERE+ORDER BY+LIMIT; expression projections (UPPER/CONCAT/LEFT/LPAD/
+//      ROUND/IFNULL); global aggregates COUNT/SUM/AVG/VARIANCE/STDEV/MIN/MAX;
+//      GROUP BY+HAVING+ORDER BY+LIMIT; DISTINCT; IN subquery.
+//   4) JOIN: INNER JOIN (dangling user_id rows filtered out) + LEFT JOIN with GROUP counts.
+//   5) UPDATE (expression SET + predicate) / DELETE (compound predicate) with aggregate
+//      checks before and after.
+//   6) Transactions: START TRANSACTION -> MemoryStorage reports unsupported (a deterministic
+//      error string); ROLLBACK/COMMIT still return Ok outside a transaction.
+//   7) Error paths: syntax error (sqlparser), type error ('yes' -> BOOLEAN), missing
+//      table, UNIQUE conflict, PK conflict, NOT NULL violation, and I8 overflow.
+//   8) Re-reading a table after DROP TABLE -> table not found.
+// Determinism: every SELECT has a total-order ORDER BY; F32/F64 print to_bits(); aggregate
+// summation order = BTreeMap key order; no HashMap iteration order escapes (ORDER BY closes it).
 use futures::executor::block_on;
 use gluesql::core::data::Value;
 use gluesql::core::executor::Payload;
 use gluesql::prelude::{Glue, MemoryStorage};
 
-// ---- 定种 RNG（xorshift64*，与 c_zip_arch 同款）----
+// ---- seeded RNG (xorshift64*, same as c_zip_arch) ----
 struct Rng(u64);
 
 impl Rng {
@@ -65,7 +65,7 @@ fn hex(b: &[u8]) -> String {
     s
 }
 
-// ---- Value 确定性文本化：浮点只打 bits，NULL/空串显式标记 ----
+// ---- deterministic Value rendering: floats as bits, NULL/empty string marked explicitly ----
 fn fmt_value(v: &Value) -> String {
     match v {
         Value::Bool(b) => format!("{b}"),
@@ -216,10 +216,10 @@ fn main() {
     );
     run(&mut g, "show columns users", "SHOW COLUMNS FROM users");
 
-    // ===== ② 定种批量插入 =====
+    // ===== ② seeded bulk insert =====
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
 
-    // users：i%5==0 的行省略 age 列走 DEFAULT 18
+    // users: rows with i%5==0 omit the age column so DEFAULT 18 applies
     let mut full_cols: Vec<String> = Vec::new();
     let mut default_age: Vec<String> = Vec::new();
     for i in 0..40u64 {
@@ -268,7 +268,7 @@ fn main() {
         ),
     );
 
-    // orders：80 行单语句；user_id ∈ 1..=45（41..=45 悬空）
+    // orders: 80 rows in one statement; user_id in 1..=45 (41..=45 dangling)
     let mut order_tuples: Vec<String> = Vec::new();
     for i in 0..80u64 {
         let id = i + 1;
@@ -291,9 +291,9 @@ fn main() {
         ),
     );
 
-    // typezoo：全类型边界（min/max、±0.0、空 bytea、v4/v6 inet、跨年 interval）。
-    // INET 'x' typed-string 语法 sqlparser 0.46 不吃（自定义类型只认 DATE/TIME/…
-    // 标准前缀），INET 一律走 CAST('x' AS INET)。
+    // typezoo: all-type boundaries (min/max, +-0.0, empty bytea, v4/v6 inet, multi-year interval).
+    // sqlparser 0.46 does not accept the INET 'x' typed-string syntax (custom types only take the
+    // DATE/TIME/... standard prefixes), so INET always goes through CAST('x' AS INET).
     run(
         &mut g,
         "insert typezoo",
@@ -408,7 +408,7 @@ fn main() {
         "SELECT id, f64v + 1.5, i32v / 2, i128v / 2 FROM typezoo ORDER BY id DESC LIMIT 4",
     );
 
-    // ===== ④ UPDATE / DELETE（前后聚合校验）=====
+    // ===== ④ UPDATE / DELETE (aggregate checks before and after) =====
     run(
         &mut g,
         "pre-update sums",
@@ -441,12 +441,12 @@ fn main() {
         "SELECT paid, COUNT(*) AS c FROM orders GROUP BY paid ORDER BY paid",
     );
 
-    // ===== ⑤ 事务（MemoryStorage 不支持 → 确定性错误）=====
+    // ===== ⑤ transactions (MemoryStorage does not support them -> a deterministic error) =====
     run(&mut g, "tx start", "START TRANSACTION");
     run(&mut g, "tx rollback", "ROLLBACK");
     run(&mut g, "tx commit", "COMMIT");
 
-    // ===== ⑥ 错误路径 =====
+    // ===== ⑥ error paths =====
     run(&mut g, "err syntax", "SELEC id FROM users");
     run(
         &mut g,
@@ -475,7 +475,7 @@ fn main() {
         "SELECT i8v + 1 FROM typezoo WHERE id = 2",
     );
 
-    // ===== ⑦ DROP + 复读 =====
+    // ===== ⑦ DROP + re-read =====
     run(&mut g, "drop typezoo", "DROP TABLE typezoo");
     run(
         &mut g,
@@ -483,7 +483,7 @@ fn main() {
         "SELECT id FROM typezoo ORDER BY id",
     );
 
-    // 收尾计数（DROP 不影响 users/orders）
+    // closing counts (DROP does not affect users/orders)
     run(
         &mut g,
         "final counts",

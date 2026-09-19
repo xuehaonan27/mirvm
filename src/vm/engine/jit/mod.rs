@@ -1,17 +1,21 @@
-//! jit 模块（M5.3+）：per-fn 分层的状态基座 + cranelift 编译管线。
+//! Per-function tier-up state and the cranelift compilation pipeline.
 //!
-//! - `state`（feature-free，TSan harness 同源编译）：JitState = PLT 槽表 +
-//!   调用计数 + 编译请求通道；发布协议 = 编译线程 Release 写 / call_guest
-//!   Acquire 读（m5.3-design D4）。
-//! - 编译管线（`#[cfg(feature = "cranelift")]`；语义契约 = 与解释器逐位一致）：
-//!   `compiler`（逐 Engine start/stop/worker + Compiler/JITModule + eh_frames 注册）、
-//!   `admit`（准入族：拒绝 = 永留解释）、`helpers`（mirvm_* 运行期助手 +
-//!   libm 符号表）、`translate`（Translator：槽 SSA + place 求值 + 三个大
-//!   match）、`frame`（FrameMap/analyze_frame 取址分析保守全集）、
-//!   `lsda_probe`（M5.4 前置 LSDA 管线验证，cfg(test)）。
+//! - `state` (feature-free, so the TSan harness can compile it as well):
+//!   `JitState` holds the PLT slot table, the call counters and the
+//!   compile-request channel. The publication protocol is Release stores by the
+//!   compile thread and Acquire loads in `interp::call_guest`.
+//! - The pipeline (`#[cfg(feature = "cranelift")]`; its semantic contract is
+//!   bit-for-bit agreement with the interpreter): `compiler` (per-Engine
+//!   start/stop/worker plus Compiler/JITModule and eh_frame registration),
+//!   `admit` (admission; a rejection means the function stays interpreted
+//!   forever), `helpers` (mirvm_* runtime helpers and the libm symbol table),
+//!   `translate` (slot SSA, place evaluation, three large matches), `frame`
+//!   (conservative whole-set address-taken analysis) and `lsda_probe` (a
+//!   cfg(test) check of the LSDA pipeline).
 //!
-//! 与 `interp` 的共享状态耦合：interp::call_guest 是发布协议读侧锚点，
-//! 本模块 worker 是写侧——两侧函数的语义注释不可分离（结构重构战役片5）。
+//! The `state` publication protocol spans `interp::call_guest` (the read side)
+//! and the compile workers here (the write side), so both sides must be read
+//! together when either changes.
 
 mod state;
 pub use state::*;
@@ -113,7 +117,8 @@ pub(crate) unsafe fn call_trace_body(
     (ret[0], ret[1])
 }
 
-// 编译管线的共享 imports（feature 门内；子模块经 `use super::*` 继承）。
+// Shared imports for the compilation pipeline, behind the feature gate; child
+// modules inherit them through `use super::*`.
 #[cfg(feature = "cranelift")]
 use crate::vm::engine::ctx::Shared;
 #[cfg(feature = "cranelift")]

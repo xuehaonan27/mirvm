@@ -1,12 +1,15 @@
-//! J1 共享基座（M5.3a，m5.3-design §2）：per-fn 分层状态 = PLT 槽表 + 调用计数。
+//! Shared per-function JIT state: the PLT slot table plus the call counters.
 //!
-//! 状态格 = Bytecode →（计数过阈值，M5.3b 编译）→ Machine：槽 0 = 解释执行；
-//! 非零 = packed 入口机器地址（i2c 直调）。发布协议只有一次原子指针交换——
-//! 编译线程 Release 写、call_guest Acquire 读（D4）。
+//! A function's state moves through Bytecode -> (counter crosses the threshold, compile)
+//! -> Machine: a slot value of 0 means "interpret", non-zero is the packed entry machine
+//! address called directly by i2c. Publication is a single atomic pointer swap: the
+//! compiler worker stores with Release, `interp::call_guest` loads with Acquire.
 //!
-//! 本模块不依赖 Cranelift：guest 调用面仍只读原子槽；机器码范围和 perf-map 的锁与
-//! 文件写入只在编译/工具冷路发生。TSan harness 经 #[path] 同源编译 src/vm；表按 S4
-//! 合并后 FuncId 空间建（base 函数同等 tier-up，m5.3-design §4）。
+//! This module does not depend on Cranelift: the guest call path only reads the atomic
+//! slots, and machine-code range registration plus perf-map locking and file writes happen
+//! only on the compiler/tooling cold path. The TSan harness compiles `src/vm` from these
+//! same sources through `#[path]`, so the tables are sized to the merged FuncId space and
+//! base functions tier up like any other.
 
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -14,13 +17,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
 
-/// Which code domain a compiled body belongs to (design §5.2.3).
+/// Which code domain a compiled body belongs to.
 ///
 /// The domain is chosen once, at the outermost guest activation entry, and stays
 /// fixed for that whole call chain. It decides two things: which ISA the module
 /// was built with (the trace domain pins a register), and which publish slots
-/// the body lands in. Plain code must stay exactly as it is today: no pinned
-/// register, no collection state, zero cost for a session that is not running.
+/// the body lands in. Plain code has no pinned register and no recorder state,
+/// and costs nothing for a session that is not running.
 ///
 /// Defined here rather than beside the compiler because the guest dispatch path
 /// reads the domain even in builds without the code generator.
@@ -30,9 +33,10 @@ pub(crate) enum CodeDomain {
     Trace,
 }
 
-/// strict 失败哨兵（MIRVM_JIT_SYNC 验证模式）：可准入函数编译失败时
-/// worker 写入 slots——SYNC 等待方据此响亮 abort（区别于 0 = 未编译/
-/// 维持解释的正常值域；非 strict 模式绝不写入）。
+/// Failure sentinel for `MIRVM_JIT_SYNC` verification mode: when compilation of an
+/// eligible function fails, the worker stores this into the slots and the sync waiter
+/// aborts loudly on it. It lies outside the normal value range (0 = not compiled, keep
+/// interpreting), and non-strict mode never writes it.
 pub const FAIL_SENTINEL: u64 = u64::MAX;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,8 +46,8 @@ pub struct JitCodeRange {
     pub func: u32,
 }
 
-/// profiler 可见的机器码范围。它比 `guest_code` 宽：包装层要能在 perf 里显示，
-/// 但不能冒充额外的 MIRVM guest 回溯帧。
+/// A machine-code range visible to a profiler. Wider than `guest_code`: wrappers must show
+/// up in perf output, but they must not pose as an extra MIRVM guest backtrace frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JitSymbolRole {
     FastBody,
@@ -82,7 +86,8 @@ impl JitSymbolRange {
         size: u64,
         guest_name: &str,
     ) -> Self {
-        // perf-map 每个符号占一行；转义保证控制字符和非 ASCII 名称也只有一种写法。
+        // One perf-map line per symbol; escaping keeps control characters and non-ASCII
+        // names unambiguous.
         let guest_name: String = guest_name.chars().flat_map(char::escape_default).collect();
         let display_name = format!(
             "mirvm::engine-{engine_id}::func-{func_id}::{}::{guest_name}",
@@ -262,8 +267,10 @@ fn install_registry(registry: &Mutex<PerfMapRegistry>, path: &Path) -> io::Resul
         }
     };
 
-    // 文件系统操作不能占着 range 锁，否则 JIT worker 的纯内存登记仍会被输出卡住。
-    // 一个文件只属于一次 profile；旧文件重名必须报错，不能截断后混入另一代进程。
+    // Filesystem work must not hold the range lock, or buffered output would still stall
+    // the JIT worker's in-memory registration. A file belongs to one profile only: an
+    // existing path must fail to open instead of being truncated and mixed with another
+    // process generation.
     let opened = OpenOptions::new().write(true).create_new(true).open(path);
     let finishing = std::sync::Arc::clone(&operation);
     let (status, error) = with_registry(registry, move |registry| {
@@ -323,7 +330,8 @@ fn stop_registry(registry: &Mutex<PerfMapRegistry>) -> PerfMapStatus {
             } else {
                 let operation = std::sync::Arc::new(ControlOperation::new(ControlKind::Stop));
                 registry.control = Some(std::sync::Arc::clone(&operation));
-                // 这个锁点就是 session 的结束：其后才登记/发布的范围属于下一次 session。
+                // This lock point is the end of the session: ranges registered or published
+                // after it belong to the next session.
                 registry.health = PerfMapHealth::Inactive;
                 let sink = registry
                     .sink
@@ -350,7 +358,8 @@ fn stop_registry(registry: &Mutex<PerfMapRegistry>) -> PerfMapStatus {
         }
     };
 
-    // `stop` 的调用线程承担全部输出；JIT worker 从不持有 sink，也从不调用 Write。
+    // The thread calling `stop` performs all output; a JIT worker never owns the sink and
+    // never calls `Write`.
     let mut written = 0;
     let result = (|| -> io::Result<()> {
         for range in &ranges {
@@ -383,8 +392,9 @@ fn stop_registry(registry: &Mutex<PerfMapRegistry>) -> PerfMapStatus {
     status
 }
 
-/// 启动进程级 perf-map，只创建本次会话的空文件；范围由 `stop_perf_map` 在控制线程写出。
-// P1 先交冷路 API，下一片 P2 再接 CLI。
+/// Start the process-level perf-map, creating only the empty file for this session; the
+/// ranges are written by `stop_perf_map` on the controlling thread.
+// TODO: wire this into the CLI.
 #[allow(dead_code)]
 pub fn install_perf_map(path: impl AsRef<Path>) -> io::Result<PerfMapStatus> {
     install_registry(perf_registry(), path.as_ref())
@@ -405,12 +415,12 @@ pub fn jit_symbol_ranges() -> Vec<JitSymbolRange> {
     with_perf_registry(|registry| registry.ranges.clone())
 }
 
-/// TODO: multiple guest threads may access to this structure, optimize
-/// access to this structure, e.g. take care of cache locality, or should
-/// it be made volatile.
-/// One code domain's publish slots (design §5.2.3). Plain and trace code must
-/// never share slots: a trace body assumes recorder state the plain domain does
-/// not have, so a slot written by one domain must be invisible to the other.
+/// One code domain's publish slots. Plain and trace code must never share slots: a trace
+/// body assumes recorder state the plain domain does not have, so a slot written by one
+/// domain must be invisible to the other.
+///
+/// TODO: multiple guest threads may access this structure; optimize access, e.g. cache
+/// locality, or make it volatile.
 pub(crate) struct DomainSlots {
     /// interp i2c face: FuncId -> packed entry address (0 = not compiled).
     pub(crate) slots: Vec<AtomicU64>,
@@ -429,8 +439,8 @@ impl DomainSlots {
 
 /// The slot set dispatch serves for a domain. Exactly one place decides this, so
 /// plain and trace runs cannot accidentally read each other's entries. It borrows
-/// rather than copies: the plain side stays the historical `slots`/`slots_fast`
-/// fields instead of gaining a duplicate.
+/// rather than copies, so the plain domain keeps using the `slots`/`slots_fast`
+/// fields instead of gaining duplicates.
 #[derive(Clone, Copy)]
 pub(crate) struct DomainSlotSet<'a> {
     pub(crate) slots: &'a [AtomicU64],
@@ -438,42 +448,51 @@ pub(crate) struct DomainSlotSet<'a> {
 }
 
 pub struct JitState {
-    /// PLT 槽（interp i2c 面）：FuncId → packed 入口机器地址（0 = 未编译，走解释）。
+    /// PLT slots for the interpreter's i2c face: FuncId -> packed entry machine address
+    /// (0 = not compiled, interpret instead).
     pub slots: Vec<AtomicU64>,
-    /// PLT 槽（编译码 cc→cc 面）：FuncId → fast 入口 / c2i 蹦床地址（0 = 尚无）。
-    /// 只有编译码的调用点读它（load + call_indirect）；interp 不消费。
+    /// PLT slots for the compiled-code cc->cc face: FuncId -> fast entry / c2i trampoline
+    /// address (0 = none yet). Only compiled call sites read it (load plus
+    /// `call_indirect`); the interpreter does not consume it.
     pub slots_fast: Vec<AtomicU64>,
     /// The trace domain's own slot set. Kept beside the plain one so dispatch has
     /// exactly one selection point; a trace activation does not consult the plain
     /// slots and vice versa.
     pub(crate) trace: DomainSlots,
-    /// The trace domain's boundary entry (design §5.2.3): pins the calling
+    /// The trace domain's boundary entry: pins the calling
     /// thread's recorder in `r15`, calls one packed trace body, and restores the
     /// register on both the normal and the unwinding path. Zero means the trace
     /// domain has no legal way in, so no trace body is compiled -- a pinned
     /// register is not an optimization a body may run without.
     pub(crate) trace_enter: AtomicU64,
-    /// 调用计数（Relaxed；竞态丢计无害——只影响触发时刻，不影响语义）
+    /// Call counters (Relaxed; a lost increment under a race is harmless -- it only shifts
+    /// the trigger moment, not program semantics).
     pub counters: Vec<AtomicU32>,
-    /// `--jit off` / `MIRVM_JIT=off` ⇒ false：纯解释，计数也不做（对拍口径）
+    /// False under `--jit off` / `MIRVM_JIT=off`: pure interpretation, not even counters
+    /// are bumped (the differential-comparison baseline).
     pub enabled: bool,
-    /// 过阈值投递编译队列（Q3 裁定 1000）
+    /// Requests compilation once a function's counter crosses this.
     pub threshold: u32,
-    /// `MIRVM_JIT_SYNC=1` 验证模式（audit F-05）：投递后等待发布/失败哨兵
-    /// ——threshold=1 的语义从「首调请求编译」升为「首调同步编译发布」，
-    /// 可准入函数的编译失败从静默留解释升为响亮 abort（gate 显形）
+    /// `MIRVM_JIT_SYNC=1` verification mode: after queueing, wait for publication or the
+    /// failure sentinel. With threshold 1 this turns "first call requests compilation"
+    /// into "first call compiles and publishes synchronously", and a compilation failure
+    /// of an eligible function becomes a loud abort instead of silently staying
+    /// interpreted, so a gate can observe it.
     pub sync: bool,
-    /// 编译请求通道（M5.3b：jit_compile::start 装填；cranelift feature 关 = 恒 None）
+    /// Compilation-request channel (`jit_compile::start` fills it; always None without the
+    /// cranelift feature).
     pub queue: std::sync::Mutex<Option<std::sync::mpsc::Sender<u32>>>,
-    /// worker 必须在进程退出的分配器清理前 join；丢弃句柄会让 Cranelift
-    /// 与 libc/Rust 退出清理并发，造成跨 workload 漂移的堆破坏。
+    /// The worker must be joined before process exit runs allocator cleanup; dropping the
+    /// handle instead lets Cranelift race libc/Rust teardown and corrupt the heap in ways
+    /// that drift across workloads.
     pub worker: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
-    /// 退出收尾置位后，worker 完成当前函数即丢弃尚未消费的编译请求。
+    /// Once set during teardown, the worker drops unconsumed compile requests after it
+    /// finishes the current function.
     pub stopping: AtomicBool,
-    /// 已发布的客体 fast 函数体机器码范围。guarded/packed/c2i 包装不登记；
-    /// backtrace 因此每个客体调用只看到一个函数帧。
+    /// Machine-code ranges of published guest fast bodies. guarded/packed/c2i wrappers are
+    /// not registered, so a backtrace shows exactly one function frame per guest call.
     pub guest_code: RwLock<Vec<JitCodeRange>>,
-    /// 本 Engine 的所有 Cranelift 执行范围，供 profile 和完整性检查使用。
+    /// All Cranelift code ranges of this engine, for profiling and integrity checks.
     symbol_ranges: RwLock<Vec<JitSymbolRange>>,
 }
 
@@ -481,7 +500,7 @@ impl JitState {
     pub fn new(fn_count: usize) -> Self {
         let enabled = match std::env::var("MIRVM_JIT") {
             Ok(v) => !(v == "off" || v == "0"),
-            Err(_) => true, // D4：默认 on
+            Err(_) => true, // Default on.
         };
         let threshold = std::env::var("MIRVM_JIT_THRESHOLD")
             .ok()
@@ -505,7 +524,7 @@ impl JitState {
         }
     }
 
-    /// Publish slots for a code domain. The plain arm returns the historical
+    /// Publish slots for a code domain. The plain arm returns the `slots`/`slots_fast`
     /// fields, so the plain path keeps its exact shape and cost.
     pub(crate) fn slots_for(&self, domain: CodeDomain) -> DomainSlotSet<'_> {
         match domain {
@@ -629,7 +648,7 @@ impl JitState {
         self.publish_c2i_entry_with(domain, func, entry, ranges, perf_registry());
     }
 
-    // P2 会把这个 per-Engine 视图与进程级快照一并接出。
+    // TODO: export this per-engine view alongside the process-level snapshot.
     #[allow(dead_code)]
     pub fn symbol_ranges(&self) -> Vec<JitSymbolRange> {
         self.symbol_ranges
@@ -1143,11 +1162,11 @@ mod tests {
                 .is_some_and(|error| error.contains("injected perf-map write failure"))
         );
     }
-    /// L3: plain and trace publish slots must be fully independent. A trace body
+    /// Plain and trace publish slots must be fully independent. A trace body
     /// assumes recorder state the plain domain does not have, so an address
     /// published for one domain must never become visible to the other -- and the
-    /// selection itself must be a view, not a copy, so the plain path keeps the
-    /// exact fields it had before the domain split.
+    /// selection itself must be a view, not a copy, so the plain path keeps using
+    /// the `slots`/`slots_fast` fields.
     #[test]
     fn plain_and_trace_publish_slots_are_independent() {
         let jit = super::JitState::new(3);
@@ -1165,7 +1184,7 @@ mod tests {
         assert_eq!(jit.slots[1].load(Ordering::Acquire), 0);
         assert_eq!(jit.trace.slots[1].load(Ordering::Acquire), 0xabcd);
 
-        // And the plain view still borrows the historical fields.
+        // And the plain view still borrows those same fields.
         plain.slots[2].store(0x1234, Ordering::Release);
         assert_eq!(jit.slots[2].load(Ordering::Acquire), 0x1234);
     }

@@ -805,7 +805,7 @@ fn ensure_directory_source(
     let text = std::fs::read_to_string(&checksum_file)
         .map_err(|error| format!("read {} failed: {error}", checksum_file.display()))?;
     let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|error| format!("{} 非法: {error}", checksum_file.display()))?;
+        .map_err(|error| format!("{} is invalid: {error}", checksum_file.display()))?;
     if let (Some(expected), Some(actual)) = (
         expected_package_checksum,
         value.get("package").and_then(serde_json::Value::as_str),
@@ -860,7 +860,7 @@ fn find_directory_package(root: &Path, name: &str, version: &Version) -> Result<
         }
     }
     Err(format!(
-        "Cargo directory source {} 缺 package {name} {version}",
+        "Cargo directory source {} is missing package {name} {version}",
         root.display()
     ))
 }
@@ -1172,8 +1172,8 @@ fn parse_index_version(v: &serde_json::Value) -> Result<IndexVersion, RErr> {
 
 // ---------- cksum and unpack ----------
 
-/// Registry protocol only accepts sha256 (64 hex) — skip verification when cksum is absent (used only
-/// for synthetic tests; real registry paths always have cksum, design doc §3.4 verification discipline unchanged).
+/// Registry protocol only accepts sha256 (64 hex) — an absent cksum skips verification, which only
+/// synthetic tests rely on; real registry paths always carry one.
 fn verify_cksum(bytes: &[u8], cksum: Option<&str>, dir_name: &str) -> Result<(), RErr> {
     let Some(want) = cksum else { return Ok(()) };
     if want.len() != 64 || !want.bytes().all(|b| b.is_ascii_hexdigit()) {

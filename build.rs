@@ -2,7 +2,8 @@ use std::env;
 use std::path::Path;
 use std::process::Command;
 
-/// FNV-1a（与 src/lower/asm.rs 同参；build.rs 独立编译单元，无法复用）。
+/// FNV-1a (same parameters as src/lower/asm.rs; build.rs is a separate
+/// compilation unit and cannot reuse it).
 fn fnv1a(h: &mut u64, bytes: &[u8]) {
     for b in bytes {
         *h ^= *b as u64;
@@ -10,10 +11,10 @@ fn fnv1a(h: &mut u64, bytes: &[u8]) {
     }
 }
 
-/// 按路径序稳定遍历 dir 下全部文件，哈希（路径+内容）。
+/// Walks every file under dir in stable path order, hashing (path + content).
 fn hash_tree(h: &mut u64, dir: &Path) {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .unwrap_or_else(|e| panic!("read_dir {} 失败: {e}", dir.display()))
+        .unwrap_or_else(|e| panic!("read_dir {} failed: {e}", dir.display()))
         .map(|e| e.expect("read_dir entry").path())
         .collect();
     entries.sort();
@@ -24,15 +25,16 @@ fn hash_tree(h: &mut u64, dir: &Path) {
             fnv1a(h, p.display().to_string().as_bytes());
             fnv1a(
                 h,
-                &std::fs::read(&p).unwrap_or_else(|e| panic!("读 {} 失败: {e}", p.display())),
+                &std::fs::read(&p).unwrap_or_else(|e| panic!("read {} failed: {e}", p.display())),
             );
         }
     }
 }
 
 fn main() {
-    // MIRVM_BUILD_ID（M6 片2，D9c）：src 树 + Cargo.lock + build.rs 内容哈希。
-    // 任何引擎/lower 源变更 ⇒ id 变 ⇒ L2 IR 缓存整体失配重建（脆性无害，正确性优先）。
+    // MIRVM_BUILD_ID: a hash of the src tree + Cargo.lock + build.rs contents.
+    // Any engine/lower source change changes the id, so the whole L2 IR cache
+    // misses and is rebuilt (brittle but harmless; correctness first).
     let mut id: u64 = 0xcbf2_9ce4_8422_2325;
     hash_tree(&mut id, Path::new("src"));
     for extra in ["Cargo.lock", "build.rs"] {
@@ -41,9 +43,11 @@ fn main() {
     println!("cargo:rustc-env=MIRVM_BUILD_ID={id:016x}");
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=Cargo.lock");
-    // 用构建时的 toolchain 解析 sysroot：
-    // 1) 烘焙进二进制，运行期作为默认 --sysroot（rustc 前端需要它找到 core/std）
-    // 2) rpath 指向 sysroot/lib，让二进制免 LD_LIBRARY_PATH 找到 librustc_driver.so
+    // Resolve the sysroot with the build-time toolchain:
+    // 1) bake it into the binary as the runtime default --sysroot (the rustc
+    //    frontend needs it to find core/std)
+    // 2) set rpath to sysroot/lib so the binary finds librustc_driver.so without
+    //    LD_LIBRARY_PATH
     let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
     let out = Command::new(rustc)
         .args(["--print", "sysroot"])

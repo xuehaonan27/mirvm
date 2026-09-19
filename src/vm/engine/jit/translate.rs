@@ -1,6 +1,8 @@
-//! Translator（自 jit_compile.rs J8+J10 整搬）：槽 SSA（I64 零扩到宽
-//! 不变量）+ place 求值 + stmt/rvalue/term 三个大 match + 调用助手族 +
-//! clif_rmw_op/collect_ssa_offs。语义 = 与 interp 逐位一致（恒等式镜像）。
+//! Lowering from `ir::FuncBody` to Cranelift IR: slot SSA (the invariant that a
+//! slot value is always I64, zero-extended up to the slot's declared width) +
+//! place evaluation + the three large stmt/rvalue/terminator matches + the
+//! call-helper family + `clif_rmw_op`/`collect_ssa_offs`. Semantics must be
+//! bit-for-bit identical to the interpreter (an identity mirror).
 
 use super::admit::callee_abi;
 use super::frame::FrameMap;
@@ -15,12 +17,14 @@ pub(super) struct Translator<'a, 'b> {
     pub(super) module: &'a mut JITModule,
     pub(super) b: &'a mut FunctionBuilder<'b>,
     pub(super) vars: std::collections::HashMap<u32, Variable>,
-    /// 落帧 offset 集（analyze_frame 产出，区间模型）
+    /// Offsets that live in frame memory, from `analyze_frame` (interval model).
     pub(super) frame_offs: FrameMap,
-    /// guest 帧栈槽（frame_offs 非空时创建；frame_size 字节、frame_align 对齐）
+    /// Stack slot for the guest frame; created when `frame_offs` is non-empty, with
+    /// `frame_size` bytes at `frame_align` alignment.
     pub(super) frame_ss: Option<StackSlot>,
-    /// frame_align > 16 时的代码级对齐基址变量（槽基只保 16，(addr+align-1)
-    /// &-align 抬到 frame_align；frame_addr 三分支的第三态）
+    /// Code-level alignment base, set when `frame_align` > 16: the stack slot base
+    /// is only guaranteed 16-aligned, so `(addr + align - 1) & -align` rounds it up
+    /// to `frame_align`. This is the third branch of `frame_addr`.
     pub(super) frame_base_var: Option<Variable>,
     pub(super) unreachable: ClifFuncId,
     pub(super) c2i: ClifFuncId,
@@ -36,27 +40,30 @@ pub(super) struct Translator<'a, 'b> {
     pub(super) call_foreign: ClifFuncId,
     pub(super) call_builtin: ClifFuncId,
     pub(super) alloc: ClifFuncId,
-    /// T1-c unwind 产品化：TerminateAbort 纯助手 / Terminate 边界直接调用 /
-    /// _Unwind_Resume 导入 / try_call pad 的异常指针槽 / 本函数是否含 try_call
-    /// （LSDA 注册判定用）
+    /// Unwinding support: the pure `TerminateAbort` helper, `Terminate` called
+    /// directly at the boundary, the `_Unwind_Resume` import, and the engine-fault
+    /// classifier. `has_try_call` below decides whether the function needs an LSDA.
     pub(super) terminate_abort: ClifFuncId,
     pub(super) call_terminate: ClifFuncId,
     pub(super) unwind_resume: ClifFuncId,
     pub(super) exception_is_engine_fault: ClifFuncId,
-    /// T1-d：Trap 占位助手（语句级/终止子同口）
+    /// Trap helper shared by statement-level traps and the terminator form.
     pub(super) trap: ClifFuncId,
-    /// T1-d：SIMD/宽 stmt 与 SIMD rvalue 三件的统一助手（interp simd_exec 共享本体）
+    /// Helpers for SIMD/wide statements and the three SIMD rvalues; they share
+    /// their body with the interpreter's `simd_exec`.
     pub(super) simd_stmt: ClifFuncId,
     pub(super) simd_rv: ClifFuncId,
     pub(super) poll_signals: ClifFuncId,
-    /// L3：trace 域 syscall 站点助手（首个参数 = 钉在寄存器里的 recorder）。
+    /// Trace-domain syscall site helper; its first argument is the recorder pinned
+    /// in a register.
     pub(super) host_syscall_trace: ClifFuncId,
     pub(super) exception_var: Option<Variable>,
     pub(super) has_try_call: bool,
 }
 
 impl Translator<'_, '_> {
-    /// T1-c：try_call pad 的异常指针槽（TryCallExn(0) 落点；Resume 从本槽读）。
+    /// Exception-pointer slot for a `try_call` pad: where `TryCallExn(0)` lands and
+    /// what `Resume` reads.
     fn exception_var(&mut self) -> Variable {
         if let Some(v) = self.exception_var {
             return v;
@@ -82,7 +89,8 @@ impl Translator<'_, '_> {
         self.b.ins().band_imm(v, w.mask() as i64)
     }
 
-    /// 槽不变量下的符号扩展视图（i64）：w=64 原样；否则 ireduce→sextend。
+    /// Sign-extended I64 view of a slot value: W64 passes through, any narrower
+    /// width is ireduced to its own type and then sextended.
     fn sext_val(&mut self, v: Value, w: Width) -> Value {
         let t = match w {
             Width::W8 => types::I8,
@@ -103,8 +111,9 @@ impl Translator<'_, '_> {
         }
     }
 
-    /// 帧内 offset 的真地址（三分支：frame_base_var（>16 对齐兜底）→
-    /// base+off；否则栈槽 stack_addr）
+    /// Real address of an in-frame offset: with `frame_base_var` set (the
+    /// over-16-alignment case) it is `base + off`, otherwise the stack slot's
+    /// `stack_addr`.
     fn frame_addr(&mut self, off: u32) -> Value {
         if let Some(v) = self.frame_base_var {
             let base = self.b.use_var(v);
@@ -112,12 +121,13 @@ impl Translator<'_, '_> {
         } else {
             let ss = self
                 .frame_ss
-                .expect("取址 offset 必落帧（analyze_frame 全集）");
+                .expect("an address-taken offset must be in frame memory");
             self.b.ins().stack_addr(types::I64, ss, off as i32)
         }
     }
 
-    /// 读槽（分派：落帧 → 帧内存 load + 零扩；SSA → use_var）
+    /// Read a slot. A frame-memory slot is loaded and zero-extended to I64; an SSA
+    /// slot reads its variable.
     fn read_slot(&mut self, s: Slot) -> Value {
         if self.frame_offs.contains(s.off) {
             let v = if let Some(fbv) = self.frame_base_var {
@@ -127,7 +137,9 @@ impl Translator<'_, '_> {
                     .ins()
                     .load(Self::narrow_ty(s.width), MemFlagsData::trusted(), a, 0)
             } else {
-                let ss = self.frame_ss.expect("落帧 offset 必有帧槽");
+                let ss = self
+                    .frame_ss
+                    .expect("a frame offset must have a stack slot");
                 self.b
                     .ins()
                     .stack_load(Self::narrow_ty(s.width), ss, s.off as i32)
@@ -143,7 +155,8 @@ impl Translator<'_, '_> {
         }
     }
 
-    /// 写槽（分派：落帧 → 掩宽 + 窄化 + 帧内存 store；SSA → 掩宽 def_var）
+    /// Write a slot. A frame-memory slot is masked, narrowed and stored; an SSA slot
+    /// is masked and defined.
     fn write_slot(&mut self, s: Slot, v: Value) {
         let masked = self.mask_val(v, s.width);
         if self.frame_offs.contains(s.off) {
@@ -157,7 +170,9 @@ impl Translator<'_, '_> {
                 let a = self.b.ins().iadd_imm(base, i64::from(s.off));
                 self.b.ins().store(MemFlagsData::trusted(), n, a, 0);
             } else {
-                let ss = self.frame_ss.expect("落帧 offset 必有帧槽");
+                let ss = self
+                    .frame_ss
+                    .expect("a frame offset must have a stack slot");
                 self.b.ins().stack_store(n, ss, s.off as i32);
             }
         } else {
@@ -166,12 +181,14 @@ impl Translator<'_, '_> {
         }
     }
 
-    /// 取帧内 offset 的真地址（取址分析已保证其落帧）
+    /// Real address of an in-frame offset; address-taken analysis guarantees it is
+    /// in frame memory.
     fn addr_of_local(&mut self, off: u32) -> Value {
         self.frame_addr(off)
     }
 
-    /// PlaceExpr 求值（interp::eval_place_addr 逐位镜像；Deref/Offset 为 wrapping 语义）
+    /// Evaluate a `PlaceExpr`, bit-for-bit mirroring `interp::eval_place_addr`.
+    /// Deref and Offset use wrapping semantics.
     fn place_addr(&mut self, pe: &ir::PlaceExpr) -> Value {
         let mut addr = match pe.base {
             ir::PlaceBase::Local(off) => self.addr_of_local(off),
@@ -199,8 +216,10 @@ impl Translator<'_, '_> {
                     unaligned,
                     packed,
                 } => {
-                    // interp 恒等式：align = *(vtable+16)；packed 取 min；非 2 幂/溢出即
-                    // abort（JIT 侧 = mirvm_jit_trap 诊断退出，与 interp engine_abort 同口径）
+                    // Interpreter identity: align = *(vtable + 16), `packed` takes the
+                    // min, and a non-power-of-two or overflowing alignment aborts --
+                    // on the JIT side through mirvm_jit_trap, the same diagnostic exit
+                    // the interpreter's engine_abort takes.
                     let (vtable, _) = self.operand(meta);
                     let mut align =
                         self.b
@@ -210,14 +229,16 @@ impl Translator<'_, '_> {
                         let p = self.b.ins().iconst(types::I64, *p as i64);
                         align = self.b.ins().umin(align, p);
                     }
-                    // 2 幂检查：align != 0 && (align & (align-1)) == 0，否则 trap
+                    // Power-of-two check: align != 0 && (align & (align - 1)) == 0,
+                    // otherwise trap.
                     let is_zero = self.b.ins().icmp_imm(IntCC::Equal, align, 0);
                     let am1 = self.b.ins().iadd_imm(align, -1);
                     let pow2 = self.b.ins().band(align, am1);
                     let not_pow2 = self.b.ins().icmp_imm(IntCC::NotEqual, pow2, 0);
                     let bad = self.b.ins().bor(is_zero, not_pow2);
-                    self.trap_if(bad, "dyn vtable alignment 非 2 的幂");
-                    // (unaligned + align-1) & !(align-1)；checked_add 溢出 → trap
+                    self.trap_if(bad, "dyn vtable alignment is not a power of two");
+                    // (unaligned + align - 1) & !(align - 1); an overflowing
+                    // checked_add traps.
                     let uv = self.b.ins().iconst(types::I64, *unaligned as i64);
                     let sum = self
                         .b
@@ -231,7 +252,7 @@ impl Translator<'_, '_> {
         addr
     }
 
-    /// 条件即诊断退出（与 interp engine_abort 同口径的 JIT 形态）。
+    /// Trap when `cond` holds -- the JIT form of the interpreter's `engine_abort`.
     fn trap_if(&mut self, cond: Value, _msg: &'static str) {
         let t_blk = self.b.create_block();
         let f_blk = self.b.create_block();
@@ -246,8 +267,9 @@ impl Translator<'_, '_> {
         self.b.switch_to_block(f_blk);
     }
 
-    /// M5.4b-1 除零分支：cond 真 → 调 mirvm_jit_div_zero（interp 同文案同码退出）。
-    /// wide=false 64 位（kind 0/1），wide=true 128 位（kind 2/3）。
+    /// Division-by-zero branch: when `cond` holds, call `mirvm_jit_div_zero`, which
+    /// exits with the interpreter's message and code. `wide` picks the 128-bit kinds
+    /// (2/3) over the 64-bit ones (0/1).
     fn div_zero_if(&mut self, cond: Value, is_rem: bool, wide: bool) {
         let t_blk = self.b.create_block();
         let f_blk = self.b.create_block();
@@ -266,7 +288,8 @@ impl Translator<'_, '_> {
         self.b.switch_to_block(f_blk);
     }
 
-    /// 标量落点写（Slot → write_slot；Mem → 掩宽窄化 store）。
+    /// Write a scalar destination: a `Slot` goes through `write_slot`, a `Mem` is
+    /// masked, narrowed and stored.
     fn write_scalar_place(&mut self, sp: &ScalarPlace, v: Value) {
         match sp {
             ScalarPlace::Slot(s) => {
@@ -286,17 +309,18 @@ impl Translator<'_, '_> {
         }
     }
 
-    // ===== M5.4b-2 浮点通道（值 = I64 槽里的位型，与 interp 同一表示）=====
+    // ===== Float channel: a value is the bit pattern in an I64 slot, the same
+    // representation the interpreter uses =====
 
     fn float_ty(w: ir::FloatW) -> cranelift_codegen::ir::Type {
         match w {
             ir::FloatW::F32 => types::F32,
             ir::FloatW::F64 => types::F64,
-            ir::FloatW::F16 => unreachable!("f16 走助手（M5.4b-3）"),
+            ir::FloatW::F16 => unreachable!("f16 goes through a helper"),
         }
     }
 
-    /// 槽位型 → 浮点寄存器值（bitcast；F32 先 ireduce）
+    /// Slot bits to a float register value: a bitcast, with F32 ireduced first.
     fn as_float(&mut self, v: Value, w: ir::FloatW) -> Value {
         match w {
             ir::FloatW::F32 => {
@@ -304,11 +328,12 @@ impl Translator<'_, '_> {
                 self.b.ins().bitcast(types::F32, MemFlagsData::new(), n)
             }
             ir::FloatW::F64 => self.b.ins().bitcast(types::F64, MemFlagsData::new(), v),
-            ir::FloatW::F16 => unreachable!("f16 走助手（M5.4b-3）"),
+            ir::FloatW::F16 => unreachable!("f16 goes through a helper"),
         }
     }
 
-    /// 浮点寄存器值 → 槽位型（bitcast 回来；F32 再 uextend）
+    /// Float register value back to slot bits: a bitcast back, with F32 uextended
+    /// afterwards.
     fn as_bits(&mut self, v: Value, w: ir::FloatW) -> Value {
         match w {
             ir::FloatW::F32 => {
@@ -316,11 +341,12 @@ impl Translator<'_, '_> {
                 self.b.ins().uextend(types::I64, n)
             }
             ir::FloatW::F64 => self.b.ins().bitcast(types::I64, MemFlagsData::new(), v),
-            ir::FloatW::F16 => unreachable!("f16 走助手（M5.4b-3）"),
+            ir::FloatW::F16 => unreachable!("f16 goes through a helper"),
         }
     }
 
-    /// 一元/二元 libm 调用（按宽选 f32/f64 后缀符号；interp 的 libm 通道同源）
+    /// Unary libm call; the width picks the f32/f64 symbol suffix, matching the
+    /// interpreter's libm channel.
     fn call_libm_un(&mut self, name: &str, a: Value, w: ir::FloatW) -> Value {
         let t = Self::float_ty(w);
         let fname = format!("{}{}", name, if t == types::F32 { "f" } else { "" });
@@ -330,7 +356,7 @@ impl Translator<'_, '_> {
         let fid = self
             .module
             .declare_function(&fname, Linkage::Import, &sig)
-            .unwrap_or_else(|_| panic!("libm 符号缺失: {fname}"));
+            .unwrap_or_else(|_| panic!("missing libm symbol: {fname}"));
         let fref = self.module.declare_func_in_func(fid, self.b.func);
         let call = self.b.ins().call(fref, &[a]);
         self.b.inst_results(call)[0]
@@ -346,7 +372,7 @@ impl Translator<'_, '_> {
         let fid = self
             .module
             .declare_function(&fname, Linkage::Import, &sig)
-            .unwrap_or_else(|_| panic!("libm 符号缺失: {fname}"));
+            .unwrap_or_else(|_| panic!("missing libm symbol: {fname}"));
         let fref = self.module.declare_func_in_func(fid, self.b.func);
         let call = self.b.ins().call(fref, &[a, b]);
         self.b.inst_results(call)[0]
@@ -366,13 +392,13 @@ impl Translator<'_, '_> {
         let fid = self
             .module
             .declare_function(fname, Linkage::Import, &sig)
-            .expect("compiler-builtins powi 符号缺失");
+            .expect("missing compiler-builtins powi symbol");
         let fref = self.module.declare_func_in_func(fid, self.b.func);
         let call = self.b.ins().call(fref, &[a, n_i32]);
         self.b.inst_results(call)[0]
     }
 
-    // ===== M5.4b-3 宽值通道（16 字节 place ↔ (lo,hi) 对/I128）=====
+    // ===== Wide-value channel: a 16-byte place as a (lo, hi) pair / I128 =====
 
     fn read_wide(&mut self, pe: &ir::PlaceExpr) -> (Value, Value) {
         let a = self.place_addr(pe);
@@ -397,7 +423,8 @@ impl Translator<'_, '_> {
         self.b.ins().iconcat(lo, hi)
     }
 
-    /// 16 字节 out 型助手调用：栈槽接 (lo,hi) 结果并写回 place。
+    /// Call a helper whose `out` parameter is 16 bytes: capture `(lo, hi)` in a
+    /// stack slot and store it back into `dst`.
     fn call_out128(&mut self, name: &str, args: &[Value], dst: &ir::PlaceExpr) {
         let ss =
             self.b
@@ -412,7 +439,7 @@ impl Translator<'_, '_> {
         let fid = self
             .module
             .declare_function(name, Linkage::Import, &sig)
-            .unwrap_or_else(|_| panic!("助手符号缺失: {name}"));
+            .unwrap_or_else(|_| panic!("missing helper symbol: {name}"));
         let fref = self.module.declare_func_in_func(fid, self.b.func);
         self.b.ins().call(fref, &a);
         let lo = self.b.ins().stack_load(types::I64, ss, 0);
@@ -420,7 +447,7 @@ impl Translator<'_, '_> {
         self.write_wide(dst, lo, hi);
     }
 
-    /// 单返回 u64 的助手调用。
+    /// Call a helper that returns a single u64.
     fn call_helper1(&mut self, name: &str, args: &[Value]) -> Value {
         let mut sig = self.module.make_signature();
         for _ in args {
@@ -430,7 +457,7 @@ impl Translator<'_, '_> {
         let fid = self
             .module
             .declare_function(name, Linkage::Import, &sig)
-            .unwrap_or_else(|_| panic!("助手符号缺失: {name}"));
+            .unwrap_or_else(|_| panic!("missing helper symbol: {name}"));
         let fref = self.module.declare_func_in_func(fid, self.b.func);
         let call = self.b.ins().call(fref, args);
         self.b.inst_results(call)[0]
@@ -493,8 +520,11 @@ impl Translator<'_, '_> {
             .collect();
 
         self.b.switch_to_block(entry);
-        // 槽变量 def 0（确定化；interp 帧不清零，但有效 MIR 无读前未写路径）。
-        // 帧内存同步清零（v1 确定化纪律的延伸：JIT-on/off 差分对任何 MIR 形状确定）。
+        // Define every SSA slot variable to 0 so the generated code is
+        // deterministic. The interpreter does not zero its frame, but valid MIR has
+        // no read-before-write path.
+        // Frame memory is zeroed for the same reason: a JIT-on/off differential must
+        // be deterministic for any MIR shape.
         let mut offs: Vec<u32> = Vec::new();
         collect_ssa_offs(body, &self.frame_offs, &mut offs);
         let zero = self.b.ins().iconst(types::I64, 0);
@@ -503,10 +533,11 @@ impl Translator<'_, '_> {
             self.b.def_var(var, zero);
         }
         if let Some(ss) = self.frame_ss {
-            // frame_align > 16：cranelift x86_64 栈基只保证 16 对齐（无动态
-            // 重排），槽内已补 (align-16) 字节余量（compiler.rs）——此处代码级
-            // 对齐兜底：frame_base = (addr + align-1) & -align，之后帧内寻址
-            // 全走 frame_addr 的第三态（read_slot/write_slot/addr_of_local）
+            // frame_align > 16: a Cranelift x86_64 stack base is only 16-aligned and
+            // cannot be re-aligned dynamically, so compiler.rs adds (align - 16)
+            // bytes of margin to the slot and the base is rounded up here:
+            // frame_base = (addr + align - 1) & -align. Every later in-frame address
+            // then goes through frame_addr's third branch.
             if body.frame_align > 16 {
                 let addr = self.b.ins().stack_addr(types::I64, ss, 0);
                 let padded = self.b.ins().iadd_imm(addr, i64::from(body.frame_align) - 1);
@@ -521,9 +552,11 @@ impl Translator<'_, '_> {
             let n = self.b.ins().iconst(types::I64, i64::from(body.frame_size));
             self.b.ins().call(fref, &[dst, c0, n]);
         }
-        // T1-c：Resume 是 cleanup 链尾，经链内正常边落入（f156 实证：bb 序可
-        // 先于其 pad）——exception_var 在入口预声明并 def 0 兜底，pad 的 def
-        // 经支配关系覆盖真用点（cranelift 变量要求 use 时可解析到 def）。
+        // Resume is the tail of a cleanup chain and is reached through the chain's
+        // normal edges, so its block may precede its pad. Declaring exception_var at
+        // the entry and defining it to 0 gives every use a definition; the pad's
+        // definition dominates the real uses, and Cranelift requires a variable's
+        // def to be resolvable at each use.
         if body
             .blocks
             .iter()
@@ -532,8 +565,10 @@ impl Translator<'_, '_> {
             let ev = self.exception_var();
             self.b.def_var(ev, zero);
         }
-        // 参数落槽（T1-a：interp ABI v2 展平序全形态——sret 前插 / Scalar /
-        // Pair / Indirect(memmove) / track_caller 幻影尾参，packed/interp 同序）
+        // Spill the parameters into slots in the interpreter ABI's flattened order:
+        // sret first, then Scalar / Pair / Indirect (memmove) parameters, then the
+        // phantom `track_caller` tail argument. Packed and interpreted bodies agree
+        // on this order.
         let params = self.b.block_params(entry).to_vec();
         let mut pi = 0usize;
         if let RetAbi::Indirect { sret_off, .. } = body.ret {
@@ -559,7 +594,8 @@ impl Translator<'_, '_> {
                     pi += 2;
                 }
                 ParamAbi::Indirect { off, size } => {
-                    // 帧内 off 必落帧（analyze_frame 的 ABI 展平面已强制）
+                    // An in-frame offset must be in frame memory; analyze_frame's ABI
+                    // flattening forces it.
                     let dst = self.addr_of_local(*off);
                     let fref = self.module.declare_func_in_func(self.memmove, self.b.func);
                     let n = self.b.ins().iconst(types::I64, i64::from(*size));
@@ -599,7 +635,8 @@ impl Translator<'_, '_> {
                         self.def_slot(s, v);
                     }
                     ScalarPlace::Mem { expr, width } => {
-                        // 内存落点：掩宽 + 窄化 + store（与 interp mem_write 同口径）
+                        // Memory destination: mask, narrow, store -- the same as the
+                        // interpreter's mem_write.
                         let a = self.place_addr(expr);
                         let masked = self.mask_val(v, *width);
                         let n = if *width == Width::W64 {
@@ -624,14 +661,15 @@ impl Translator<'_, '_> {
                 let (val, flag) = self.int_ovf(*op, *signed, av, bv, w);
                 let (sv, sf) = match (dst_val, dst_flag) {
                     (ScalarPlace::Slot(v), ScalarPlace::Slot(f)) => (*v, *f),
-                    _ => unreachable!("admit 已排除"),
+                    _ => unreachable!("admit rejects this shape"),
                 };
                 self.def_slot(sv, val);
                 self.def_slot(sf, flag);
             }
             Stmt::Copy { dst, src, size } => {
-                // memmove 语义（interp std::ptr::copy 同源：guest 侧重叠是 UB，
-                // 引擎不因此崩——防御性一致）
+                // memmove semantics, matching the interpreter's std::ptr::copy:
+                // overlap is UB on the guest side, but the engine must not crash over
+                // it, and both sides stay defensive in the same way.
                 let d = self.place_addr(dst);
                 let s = self.place_addr(src);
                 let n = self.b.ins().iconst(types::I64, i64::from(*size));
@@ -644,7 +682,7 @@ impl Translator<'_, '_> {
                 count,
                 elem_size,
             } => {
-                // interp 循环镜像：for i in 0..count { mem_write(d + i*elem, w, v) }
+                // Interpreter loop mirror: for i in 0..count { mem_write(d + i*elem, w, v) }
                 let d = self.place_addr(dst);
                 let (v, w) = self.operand(val);
                 debug_assert_eq!(w.bytes(), *elem_size);
@@ -661,12 +699,13 @@ impl Translator<'_, '_> {
                 count,
                 elem_size,
             } => {
-                // interp 镜像：for i in 1..count { 逐元素 memmove（元素 0 不变 ⇒
-                // 与 interp 的 copy_nonoverlapping 逐元素结果一致） }
+                // Interpreter mirror: for i in 1..count { memmove one element },
+                // leaving element 0 in place -- element-wise the same result as the
+                // interpreter's copy_nonoverlapping.
                 let src = self.place_addr(first);
                 self.repeat_loop(src, src, *count, *elem_size, true);
             }
-            // ===== M5.4b-1 内存/原子补面 =====
+            // ===== Memory / atomic statements =====
             Stmt::MemCopy {
                 dst,
                 src,
@@ -674,8 +713,9 @@ impl Translator<'_, '_> {
                 elem_size,
                 overlap,
             } => {
-                // intrinsic copy/copy_nonoverlapping：memmove 通道（overlap 为真时
-                // 与 interp 的 ptr::copy 同义；非重叠场景 memcpy 结果相同）
+                // The copy/copy_nonoverlapping intrinsics go through memmove: with
+                // overlap that means the same as the interpreter's ptr::copy, and
+                // without overlap the result equals memcpy.
                 let _ = overlap;
                 let (d, _) = self.operand(dst);
                 let (s, _) = self.operand(src);
@@ -726,7 +766,7 @@ impl Translator<'_, '_> {
                 } else {
                     self.b.ins().ireduce(Self::narrow_ty(w), masked)
                 };
-                let _ = order; // CLIF 原子恒 SeqCst（合规强化，见 R::AtomicLoad 注）
+                let _ = order; // CLIF atomics are always SeqCst; see the R::AtomicLoad note.
                 self.b.ins().atomic_store(MemFlagsData::trusted(), n, p);
             }
             Stmt::AtomicRmw {
@@ -769,8 +809,9 @@ impl Translator<'_, '_> {
                 succ,
                 fail,
             } => {
-                // CLIF atomic_cas = strong CAS（weak 用 strong 合规：weak 允许假失败
-                // 但不禁止成功）；succ/fail 序 → SeqCst（合规强化）
+                // CLIF atomic_cas is a strong CAS, and using it for a weak CAS is
+                // conforming: weak permits spurious failure but does not require it.
+                // The succ/fail orderings are ignored in favour of SeqCst.
                 let (p, _) = self.operand(addr);
                 let (e, w) = self.operand(expected);
                 let (n, _) = self.operand(new);
@@ -794,7 +835,8 @@ impl Translator<'_, '_> {
                 } else {
                     self.b.ins().uextend(types::I64, old)
                 };
-                // ok = (old == expected)（按宽掩后比较，与 interp 的 compare_exchange 同口径）
+                // ok = (old == expected), compared after masking to the width, the
+                // same as the interpreter's compare_exchange.
                 let ok8 = self.b.ins().icmp(IntCC::Equal, old_ext, e_masked);
                 let ok = self.b.ins().uextend(types::I64, ok8);
                 self.write_scalar_place(dst_val, old_ext);
@@ -809,9 +851,10 @@ impl Translator<'_, '_> {
                     let _ = order;
                     self.b.ins().fence();
                 }
-                // single_thread = compiler fence（无指令，编译屏障在 JIT 码内天然成立）
+                // A single-thread fence is a compiler fence and emits no instruction;
+                // the compiler barrier already holds inside JIT-generated code.
             }
-            // ===== M5.4b-3 128 位整族 =====
+            // ===== 128-bit integer family =====
             Stmt::Bin128 {
                 op,
                 signed,
@@ -829,7 +872,8 @@ impl Translator<'_, '_> {
                         (v, z)
                     }
                 };
-                // with_overflow 的 Add/Sub/Mul：helper（Rust overflowing_* 精确语义）
+                // Add/Sub/Mul with overflow go to a helper so the result matches
+                // Rust's overflowing_* exactly.
                 if *with_overflow && matches!(op, IntBinOp::Add | IntBinOp::Sub | IntBinOp::Mul) {
                     let op_idx = match op {
                         IntBinOp::Add => 0,
@@ -849,7 +893,8 @@ impl Translator<'_, '_> {
                     let lo = self.b.ins().stack_load(types::I64, ss, 0);
                     let hi = self.b.ins().stack_load(types::I64, ss, 8);
                     self.write_wide(dst, lo, hi);
-                    // 旗标写 dst+16（interp 同布局：(u128, bool) 旗标在 +16）
+                    // The flag goes at dst + 16: the interpreter lays out a
+                    // (u128, bool) with the flag at +16.
                     let da = self.place_addr(dst);
                     let f8 = self.b.ins().ireduce(types::I8, flag);
                     self.b.ins().store(MemFlagsData::trusted(), f8, da, 16);
@@ -873,9 +918,10 @@ impl Translator<'_, '_> {
                         }
                     }
                     IntBinOp::Div | IntBinOp::Rem => {
-                        // cranelift ISLE 不支持 I128 除法（MIRVM_JIT_SYNC 实证：
-                        // udiv.i128 unimplemented）→ mirvm_bin128_divrem 助手
-                        //（宿主 wrapping 系 + 零除 div_zero 同文案，interp 同形）
+                        // Cranelift's ISLE has no I128 division (udiv.i128 is
+                        // unimplemented), so this goes to the mirvm_bin128_divrem
+                        // helper: host wrapping operators, and division by zero exits
+                        // with div_zero's message, as the interpreter does.
                         let ir_ = self
                             .b
                             .ins()
@@ -896,18 +942,18 @@ impl Translator<'_, '_> {
                 let (lo, hi) = self.read_wide(src);
                 let (rlo, rhi) = match op {
                     B::Bswap => {
-                        // u128::swap_bytes = 半字互换 + 各自 bswap
+                        // u128::swap_bytes = swap the halves, then bswap each.
                         let a = self.b.ins().bswap(hi);
                         let b = self.b.ins().bswap(lo);
                         (a, b)
                     }
                     B::Bitreverse => {
-                        // u128::reverse_bits = 半字互换 + 各自 bitrev
+                        // u128::reverse_bits = swap the halves, then bitrev each.
                         let a = self.b.ins().bitrev(hi);
                         let b = self.b.ins().bitrev(lo);
                         (a, b)
                     }
-                    _ => unreachable!("Bit128 只 bswap/bitreverse"),
+                    _ => unreachable!("Bit128 only carries bswap/bitreverse"),
                 };
                 self.write_wide(dst, rlo, rhi);
             }
@@ -934,7 +980,7 @@ impl Translator<'_, '_> {
                         let c_lo = self.b.ins().ctz(lo);
                         self.b.ins().select(lz, c64, c_lo)
                     }
-                    _ => unreachable!("Bit128Count 只 popcount/ctlz/cttz"),
+                    _ => unreachable!("Bit128Count only carries popcount/ctlz/cttz"),
                 };
                 self.write_scalar_place(dst, r);
             }
@@ -946,8 +992,9 @@ impl Translator<'_, '_> {
                 untagged,
                 dst,
             } => {
-                // interp 恒等式：rel = tag - niche_start（u128 wrapping）；rel < len →
-                // variants_start + rel，否则 untagged
+                // Interpreter identity: rel = tag - niche_start with wrapping u128
+                // arithmetic; rel < len gives variants_start + rel, otherwise
+                // untagged.
                 let (tlo, thi) = self.read_wide(tag);
                 let t = self.i128_of(tlo, thi);
                 let ns = self.iconst128(*niche_start);
@@ -970,9 +1017,11 @@ impl Translator<'_, '_> {
                 to,
                 dst,
             } => {
-                // i128/u128 → f16/f32/f64：全走宿主 `as` 直算助手（最近舍入，
-                // 与 compiler-builtins __float*ti* 同语义；F-04b 实锤：直调
-                // compiler-builtins 按 I64/RAX 读 XMM0 返回 = 读垃圾）
+                // i128/u128 -> f16/f32/f64 always goes through a helper that uses the
+                // host `as` cast: round to nearest, the same semantics as
+                // compiler-builtins __float*ti*. Calling compiler-builtins directly is
+                // wrong -- it returns the value in XMM0 while reading the argument
+                // from I64/RAX.
                 let (lo, hi) = self.read_wide(src);
                 let s = self.b.ins().iconst(types::I64, *signed as i64);
                 let f = match to {
@@ -985,7 +1034,8 @@ impl Translator<'_, '_> {
                         self.mask_val(bits, Width::W32)
                     }
                     ir::FloatW::F64 => {
-                        // f64 位型 = 槽不变量本身，零转换
+                        // The f64 bit pattern is the slot value itself, so there is
+                        // nothing to convert.
                         self.call_helper1("mirvm_wide_to_f64", &[lo, hi, s])
                     }
                 };
@@ -1012,10 +1062,10 @@ impl Translator<'_, '_> {
                     },
                 );
                 let s = self.b.ins().iconst(types::I64, *signed as i64);
-                // F-04a 实锤：helper 签名 (kind, v, signed, out)——kind 在前
+                // The helper signature is (kind, v, signed, out): kind comes first.
                 self.call_out128("mirvm_float_to_wide", &[kind, bits, s], dst);
             }
-            // ===== M5.4b-3 f128 宽通道（全走助手）=====
+            // ===== f128 wide channel: everything goes through helpers =====
             Stmt::F128Bin { op, a, b, dst } => {
                 let (alo, ahi) = self.read_wide(a);
                 let (blo, bhi) = self.read_wide(b);
@@ -1127,8 +1177,10 @@ impl Translator<'_, '_> {
                 let s = self.b.ins().iconst(types::I64, *signed as i64);
                 self.call_out128("mirvm_f128_to_wide", &[s, alo, ahi], dst);
             }
-            // ===== T1-d SIMD 15 件 + Sat128（mirvm_simd_stmt 助手，interp
-            // simd_exec 共享本体；参数序 (stmt, a, b, c, dst, v0, v1)，缺位补 0）=====
+            // ===== The 15 SIMD statements plus Sat128, all through the
+            // mirvm_simd_stmt helper, which shares its body with the interpreter's
+            // simd_exec. Argument order is (stmt, a, b, c, dst, v0, v1) and unused
+            // operands are passed as 0. =====
             Stmt::SimdBin { dst, a, b, .. } => {
                 let pd = self.place_addr(dst);
                 let pa = self.place_addr(a);
@@ -1384,8 +1436,9 @@ impl Translator<'_, '_> {
                     .declare_func_in_func(self.simd_stmt, self.b.func);
                 self.b.ins().call(fref, &[sp, pa, pb, z, pd, z, z]);
             }
-            // T1-d：Trap/Nop（语句级 Trap = mirvm_jit_trap stmt 形，interp
-            // engine_abort 同文案同错误码 70；call 后补 trap 保底——助手不返回）
+            // Trap/Nop. A statement-level Trap is the stmt form of mirvm_jit_trap,
+            // which exits with engine_abort's message and error code 70. The trailing
+            // trap is a fallback, because the helper does not return.
             Stmt::Trap(reason) => {
                 let fref = self.module.declare_func_in_func(self.trap, self.b.func);
                 let p = self.b.ins().iconst(types::I64, reason.as_ptr() as i64);
@@ -1398,8 +1451,9 @@ impl Translator<'_, '_> {
         }
     }
 
-    /// Repeat 两族的共用循环骨架：memmove_elem=true 时逐元素 memmove（RepeatBytes，
-    /// 起始 i=1）；否则按标量存（RepeatScalar，起始 i=0）。
+    /// Shared loop skeleton for both Repeat families: with `memmove_elem` each
+    /// element is memmoved (RepeatBytes, starting at i = 1), otherwise a scalar is
+    /// stored (RepeatScalar, starting at i = 0).
     fn repeat_loop(
         &mut self,
         base: Value,
@@ -1460,7 +1514,7 @@ impl Translator<'_, '_> {
                 let (x, y) = if *signed {
                     (self.sext_val(av, w), self.sext_val(bv, w))
                 } else {
-                    (av, bv) // 槽不变量已 zext
+                    (av, bv) // The slot invariant already zero-extended these.
                 };
                 let c = match (cc, signed) {
                     (IntCc::Eq, _) => IntCC::Equal,
@@ -1478,8 +1532,9 @@ impl Translator<'_, '_> {
                 self.b.ins().uextend(types::I64, b1)
             }
             R::IntCmp3 { signed, a, b } => {
-                // interp rvalue IntCmp3 镜像：三路比较 → Ordering i8 位型
-                //（-1 = 0xFF；dst W8 截断同值）
+                // Mirror of the interpreter's IntCmp3 rvalue: a three-way compare
+                // yields the Ordering i8 bit pattern (-1 = 0xFF, which truncates to
+                // the same value at W8).
                 let (av, w) = self.operand(a);
                 let (bv, _) = self.operand(b);
                 let (x, y) = if *signed {
@@ -1507,8 +1562,9 @@ impl Translator<'_, '_> {
                 variants_len,
                 untagged,
             } => {
-                // interp rvalue NicheDiscr 镜像：rel = (tag - niche_start) 按 tag
-                // 宽 wrapping；rel < len → variants_start+rel，否则 untagged
+                // Mirror of the interpreter's NicheDiscr rvalue: rel = tag -
+                // niche_start wraps at the tag's width; rel < len gives
+                // variants_start + rel, otherwise untagged.
                 let (tv, w) = self.operand(tag);
                 let ns = self.b.ins().iconst(types::I64, *niche_start as i64);
                 let rel = self.b.ins().isub(tv, ns);
@@ -1540,24 +1596,26 @@ impl Translator<'_, '_> {
                 let (v, _) = self.operand(a);
                 let x = if from.1 {
                     let s = self.sext_val(v, from.0);
-                    // sext 后按 64 位视图，再掩到目标宽
+                    // The I64 view after sextending; masked to the target width below.
                     s
                 } else {
                     self.mask_val(v, from.0)
                 };
                 self.mask_val(x, *to)
             }
-            // ===== M5.4a 内存/地址族 =====
+            // ===== Memory / address family =====
             R::Ref(expr) => self.place_addr(expr),
             R::PtrOffset { ptr, count, stride } => {
-                // 真实地址模型位透传（wrapping；与 interp 同）
+                // The true-address model passes the bit pattern through with wrapping, as the
+                // interpreter does.
                 let (p, _) = self.operand(ptr);
                 let (c, _) = self.operand(count);
                 let scaled = self.b.ins().imul_imm(c, *stride as i64);
                 self.b.ins().iadd(p, scaled)
             }
             R::PtrDiff { a, b, stride } => {
-                // (a - b) / stride（i64 除法；stride 为冻结常量，admit 已拒 0）
+                // (a - b) / stride as i64 division; stride is a frozen constant and admit
+                // rejects 0.
                 let (av, _) = self.operand(a);
                 let (bv, _) = self.operand(b);
                 let d = self.b.ins().isub(av, bv);
@@ -1569,9 +1627,10 @@ impl Translator<'_, '_> {
                 let (bv, _) = self.operand(b);
                 self.b.ins().umax(av, bv)
             }
-            // ===== M5.4b-1 标量补面 =====
+            // ===== Scalar additions =====
             R::IntSat { op, signed, a, b } => {
-                // interp int_saturating 镜像：int_ovf 判方向后取 clamp
+                // Mirror of the interpreter's int_saturating: int_ovf picks the direction,
+                // then clamp.
                 let (av, w) = self.operand(a);
                 let (bv, _) = self.operand(b);
                 let (val, ovf) = self.int_ovf(*op, *signed, av, bv, w);
@@ -1626,7 +1685,7 @@ impl Translator<'_, '_> {
                     }
                     B::Bswap => {
                         if w == Width::W8 {
-                            // interp：W8 恒等（v & 0xff）
+                            // Interpreter: W8 is the identity (v & 0xff).
                             self.mask_val(v, w)
                         } else {
                             let n = self.b.ins().ireduce(Self::narrow_ty(w), v);
@@ -1650,7 +1709,8 @@ impl Translator<'_, '_> {
                 }
             }
             R::MemCmp { a, b, n } => {
-                // 宿主 memcmp import（i32 结果符号扩展；interp 同通道）
+                // Host memcmp import; the i32 result is sign-extended, the same channel the
+                // interpreter uses.
                 let (pa, _) = self.operand(a);
                 let (pb, _) = self.operand(b);
                 let (nv, _) = self.operand(n);
@@ -1660,8 +1720,10 @@ impl Translator<'_, '_> {
                 self.b.ins().sextend(types::I64, r32)
             }
             R::AtomicLoad { addr, width, order } => {
-                // CLIF 原子 = SeqCst（0.133 无弱序；合规强化——D8j 弱序恢复目前只在
-                // interp，JIT 侧统一最强序，RAM non-det 包络内，记账 m5-log）
+                // CLIF atomics are always SeqCst: Cranelift 0.133 offers no weaker ordering,
+                // so the JIT side uniformly uses the strongest one. Weaker orderings exist
+                // only on the interpreted path, and the stronger ordering here stays inside
+                // the nondeterminism envelope the RAM model allows.
                 let (p, _) = self.operand(addr);
                 let _ = order;
                 let v =
@@ -1674,12 +1736,13 @@ impl Translator<'_, '_> {
                     self.b.ins().uextend(types::I64, v)
                 }
             }
-            // ===== M5.4b-2 浮点 f32/f64 + Math 系 =====
+            // ===== f32/f64 floats and the Math family =====
             R::FloatBin { op, fw, a, b } => {
                 let (av, _) = self.operand(a);
                 let (bv, _) = self.operand(b);
                 if matches!(fw, ir::FloatW::F16) {
-                    // f16 走助手（interp 宿主直算通道；op 码表同 f128_bin）
+                    // f16 goes through a helper, matching the interpreter's direct host
+                    // computation; the op codes are f128_bin's.
                     let oi = self.b.ins().iconst(
                         types::I64,
                         match op {
@@ -1700,14 +1763,16 @@ impl Translator<'_, '_> {
                         ir::FloatOp::Sub => self.b.ins().fsub(fa, fb),
                         ir::FloatOp::Mul => self.b.ins().fmul(fa, fb),
                         ir::FloatOp::Div => self.b.ins().fdiv(fa, fb),
-                        // IEEE fmod（Rust % 浮点语义）：libm fmod 通道（interp 同源）
+                        // IEEE fmod, Rust's `%` on floats: the libm fmod channel, as in the
+                        // interpreter.
                         ir::FloatOp::Rem => self.call_libm_bin("fmod", fa, fb, *fw),
                     };
                     self.as_bits(r, *fw)
                 }
             }
             R::FloatCmp { cc, fw, a, b } => {
-                // IEEE 偏序语义（NaN 全 false 除 Ne）：CLIF ordered 族 + Ne=NotEqual
+                // IEEE partial-order semantics (every comparison is false for NaN except Ne):
+                // the CLIF ordered family, with Ne mapped to NotEqual.
                 use cranelift_codegen::ir::condcodes::FloatCC;
                 let (av, _) = self.operand(a);
                 let (bv, _) = self.operand(b);
@@ -1753,7 +1818,8 @@ impl Translator<'_, '_> {
             R::FloatCast { from, to, a } => {
                 let (av, _) = self.operand(a);
                 if matches!(from, ir::FloatW::F16) || matches!(to, ir::FloatW::F16) {
-                    // f16 参与的互转走助手（kind: 1=f16→f32 2=f16→f64 3=f32→f16 4=f64→f16）
+                    // Any conversion touching f16 goes through a helper (kind: 1 = f16->f32,
+                    // 2 = f16->f64, 3 = f32->f16, 4 = f64->f16).
                     let k = self.b.ins().iconst(
                         types::I64,
                         match (from, to) {
@@ -1761,7 +1827,7 @@ impl Translator<'_, '_> {
                             (ir::FloatW::F16, ir::FloatW::F64) => 2,
                             (ir::FloatW::F32, ir::FloatW::F16) => 3,
                             (ir::FloatW::F64, ir::FloatW::F16) => 4,
-                            _ => unreachable!("f16 互转组合外无此类"),
+                            _ => unreachable!("no other pair involves f16"),
                         },
                     );
                     let r = self.call_helper1("mirvm_f16_cast", &[k, av]);
@@ -1785,7 +1851,7 @@ impl Translator<'_, '_> {
                     let r = match (from, to) {
                         (ir::FloatW::F32, ir::FloatW::F64) => self.b.ins().fpromote(types::F64, fa),
                         (ir::FloatW::F64, ir::FloatW::F32) => self.b.ins().fdemote(types::F32, fa),
-                        _ => unreachable!("f16 互转走助手"),
+                        _ => unreachable!("f16 conversions go through a helper"),
                     };
                     self.as_bits(r, *to)
                 }
@@ -1796,13 +1862,14 @@ impl Translator<'_, '_> {
                 signed,
                 a,
             } => {
-                // Rust `as` 饱和语义（NaN→0、越界→边界）：
-                // signed W32/64 = fcvt_to_sint_sat 直达；signed W8/16 = I32 饱和后
-                // 再按目标域钳；unsigned = fcvt_to_uint_sat(I64) 后按 mask 钳（u32
-                // 域 ⊂ u64，须先钳到 u32::MAX 再掩，Rust 语义）
+                // Rust `as` saturation semantics (NaN -> 0, out of range -> the boundary):
+                // signed W32/64 uses fcvt_to_sint_sat directly; signed W8/16 saturates to I32
+                // and is then clamped to the target range; unsigned uses fcvt_to_uint_sat to
+                // I64 and then an unsigned min against the width mask.
                 let (av, _) = self.operand(a);
                 if matches!(from, ir::FloatW::F16) {
-                    // f16 → int：助手（kind: 0=i8 1=u8 2=i16 3=u16 4=i32 5=u32 6=i64 7=u64）
+                    // f16 -> int through a helper (kind: 0 = i8, 1 = u8, 2 = i16, 3 = u16,
+                    // 4 = i32, 5 = u32, 6 = i64, 7 = u64).
                     let k = self.b.ins().iconst(
                         types::I64,
                         match (to, signed) {
@@ -1832,7 +1899,7 @@ impl Translator<'_, '_> {
                             Width::W64 => i64v,
                             Width::W32 => self.mask_val(i64v, *to),
                             _ => {
-                                // W8/16：I32 饱和值再钳到 [iN::MIN, iN::MAX]
+                                // W8/16: the I32 saturation is clamped again to [iN::MIN, iN::MAX].
                                 let (lo, hi) = match to {
                                     Width::W8 => (i8::MIN as i64, i8::MAX as i64),
                                     Width::W16 => (i16::MIN as i64, i16::MAX as i64),
@@ -1855,7 +1922,7 @@ impl Translator<'_, '_> {
             R::IntToFloat { from, to, a } => {
                 let (av, _) = self.operand(a);
                 if matches!(to, ir::FloatW::F16) {
-                    // int → f16：助手（kind 同 to_int 码表）
+                    // int -> f16 through a helper, with the same kind codes as to_int.
                     let (fw, signed) = *from;
                     let k = self.b.ins().iconst(
                         types::I64,
@@ -1897,8 +1964,9 @@ impl Translator<'_, '_> {
                 use crate::vm::engine::ir::MathUnOp as M;
                 let (av, _) = self.operand(a);
                 if matches!(fw, ir::FloatW::F16) {
-                    // f16 数学走助手（interp 宿主 f16 方法同一批；strict 模式
-                    // 实证补上的护栏——as_float(F16) 是 unreachable panic）
+                    // f16 math goes through helpers, the same host f16 methods the interpreter
+                    // calls. This branch is also a guard: as_float(F16) cannot be represented and
+                    // would panic.
                     let oi = self.b.ins().iconst(
                         types::I64,
                         match op {
@@ -1936,7 +2004,7 @@ impl Translator<'_, '_> {
                         M::Ceil => self.call_libm_un("ceil", fa, *fw),
                         M::Trunc => self.call_libm_un("trunc", fa, *fw),
                         M::Round => self.call_libm_un("round", fa, *fw),
-                        // round_ties_even = C99 rint（与 interp/Rust 同源）
+                        // round_ties_even is C99 rint, which the interpreter and Rust both use.
                         M::RoundTiesEven => self.call_libm_un("rint", fa, *fw),
                     };
                     self.as_bits(r, *fw)
@@ -1947,7 +2015,7 @@ impl Translator<'_, '_> {
                 let (av, _) = self.operand(a);
                 let (bv, _) = self.operand(b);
                 if matches!(fw, ir::FloatW::F16) {
-                    // f16 数学二元走助手（powi 的 b 传原始 i32 位）
+                    // Binary f16 math goes through a helper; powi passes the raw i32 bits of b.
                     let oi = self.b.ins().iconst(
                         types::I64,
                         match op {
@@ -1977,8 +2045,9 @@ impl Translator<'_, '_> {
                 }
             }
             R::MathFma { fw, a, b, c } => {
-                // fma 单次舍入（宿主 mul_add 同源；fmuladd 允许融合/不融合两结果，
-                // 融合恒在允许集合内——与 interp 取融合同侧）
+                // fma rounds once, like the host mul_add. The fmuladd instruction may or may
+                // not fuse, but fusing is always allowed, so this stays on the same side of the
+                // allowed set as the interpreter's fused result.
                 let (av, _) = self.operand(a);
                 let (bv, _) = self.operand(b);
                 let (cv, _) = self.operand(c);
@@ -1993,7 +2062,7 @@ impl Translator<'_, '_> {
                     self.as_bits(r, *fw)
                 }
             }
-            // ===== M5.4b-3 f128 比较（Rvalue 侧的宽通道）=====
+            // ===== f128 comparison in the rvalue wide channel =====
             R::F128Cmp { cc, a, b } => {
                 let (alo, ahi) = self.read_wide(a);
                 let (blo, bhi) = self.read_wide(b);
@@ -2010,7 +2079,7 @@ impl Translator<'_, '_> {
                 );
                 self.call_helper1("mirvm_f128_cmp", &[ci, alo, ahi, blo, bhi])
             }
-            // ===== M5.4b-3 128 位整数比较（Rvalue 侧）=====
+            // ===== 128-bit integer comparison on the rvalue side =====
             R::Cmp128 { cc, signed, a, b } => {
                 let (alo, ahi) = self.read_wide(a);
                 let (blo, bhi) = self.read_wide(b);
@@ -2032,17 +2101,19 @@ impl Translator<'_, '_> {
                 self.b.ins().uextend(types::I64, b1)
             }
             R::TlsRef(id) => {
-                // T1-b：mirvm_tls_ref 助手（interp::tls_addr 同本体——每线程
-                // 实例块惰性物化）
+                // The mirvm_tls_ref helper shares its body with interp::tls_addr: the
+                // per-thread instance block is materialized lazily.
                 let fref = self.module.declare_func_in_func(self.tls_ref, self.b.func);
                 let i = self.b.ins().iconst(types::I64, i64::from(*id));
                 let call = self.b.ins().call(fref, &[i]);
                 self.b.inst_results(call)[0]
             }
-            // ===== T1-d SIMD rvalue 三件（mirvm_simd_rv 助手，interp simd_exec
-            // 共享本体；rv 真地址 + 向量 place 地址两参）=====
+            // ===== The three SIMD rvalues, through the mirvm_simd_rv helper, which shares
+            // its body with the interpreter's simd_exec. It takes the rvalue's real address
+            // and the vector place's address. =====
             R::SimdBitmask { a, .. } => {
-                // lanes 位掩码（≤64 位 u64 无需 mask——interp 本体同口径）
+                // Lane bitmask; at 64 bits or fewer no masking is needed, as in the interpreter
+                // body.
                 let pa = self.place_addr(a);
                 let rp = self
                     .b
@@ -2053,7 +2124,7 @@ impl Translator<'_, '_> {
                 self.b.inst_results(call)[0]
             }
             R::SimdReduce { a, .. } => {
-                // bool 0/1（interp 本体 acc as u64 同口径）
+                // bool 0/1, the same as the interpreter body's `acc as u64`.
                 let pa = self.place_addr(a);
                 let rp = self
                     .b
@@ -2064,7 +2135,8 @@ impl Translator<'_, '_> {
                 self.b.inst_results(call)[0]
             }
             R::SimdReduceArith { a, lane_bytes, .. } => {
-                // lane 宽标量位型（interp 本体各 op 已按 lw 掩回，此处同宽掩齐）
+                // Scalar bit pattern at the lane width; the interpreter body already masks each
+                // op back to lw, and this masks to the same width.
                 let pa = self.place_addr(a);
                 let rp = self
                     .b
@@ -2075,14 +2147,16 @@ impl Translator<'_, '_> {
                 let r = self.b.inst_results(call)[0];
                 self.mask_val(
                     r,
-                    Width::from_bytes(u64::from(*lane_bytes)).expect("lane 宽度"),
+                    Width::from_bytes(u64::from(*lane_bytes)).expect("lane width"),
                 )
             }
         }
     }
 
-    /// interp::int_bin 的逐位镜像（Add/Sub/Mul 掩后签名无关；移位 mod-64 同
-    /// wrapping_shl/shr；符号 Shr 用 sext 视图算术右移，b&63 与 CLIF mod-64 一致）。
+    /// Bit-for-bit mirror of `interp::int_bin`. Add/Sub/Mul are signature-agnostic
+    /// once masked; shifts use the same mod-64 amount as `wrapping_shl` and
+    /// `wrapping_shr`; a signed Shr shifts the sextended view arithmetically, and
+    /// `b & 63` agrees with CLIF's mod-64 shift amount.
     fn int_bin(&mut self, op: IntBinOp, signed: bool, a: Value, b: Value, w: Width) -> Value {
         let r = match op {
             IntBinOp::Add => self.b.ins().iadd(a, b),
@@ -2092,7 +2166,8 @@ impl Translator<'_, '_> {
             IntBinOp::BitOr => return self.b.ins().bor(a, b),
             IntBinOp::BitXor => return self.b.ins().bxor(a, b),
             IntBinOp::Shl => {
-                // signed 分支的 sext 高位左移后必然溢出掩区（见 interp 注释），同型
+                // In the signed case the sextended high bits shift out of the masked region, so
+                // the shape matches the interpreter's.
                 let s = self.b.ins().ishl(a, b);
                 return self.mask_val(s, w);
             }
@@ -2106,14 +2181,16 @@ impl Translator<'_, '_> {
                 return self.mask_val(s, w);
             }
             IntBinOp::Div | IntBinOp::Rem => {
-                // M5.4b-1：零检 → mirvm_jit_div_zero（interp 同文案同码）；
-                // signed 的 MIN/-1 用分支特判（x86 idiv #DE，CLIF sdiv 直接发 idiv）。
+                // A zero check goes to mirvm_jit_div_zero, with the interpreter's message and
+                // code. The signed MIN/-1 case is special-cased per branch: x86 idiv faults
+                // with #DE and CLIF sdiv emits idiv directly.
                 let is_rem = matches!(op, IntBinOp::Rem);
                 let zero = self.b.ins().icmp_imm(IntCC::Equal, b, 0);
                 self.div_zero_if(zero, is_rem, false);
                 if signed {
-                    // 槽不变量为零扩到宽：signed 语义先 sext 到 64 位（interp
-                    // int_bin: sext 后 wrapping_div/rem；否则负值被当大正数除）。
+                    // The slot invariant is a zero-extended I64, so signed semantics must sext
+                    // to 64 bits first, matching int_bin's wrapping_div/rem; otherwise a negative
+                    // value would be divided as a large positive.
                     let x = self.sext_val(a, w);
                     let y = self.sext_val(b, w);
                     let neg1 = self.b.ins().icmp_imm(IntCC::Equal, y, -1);
@@ -2125,7 +2202,7 @@ impl Translator<'_, '_> {
                     let tv = if is_rem {
                         self.b.ins().iconst(types::I64, 0)
                     } else {
-                        // wrapping_div(x, -1) = -x（MIN 回绕，ineg 同形）
+                        // wrapping_div(x, -1) = -x: MIN wraps around, and ineg has the same shape.
                         self.b.ins().ineg(x)
                     };
                     self.b.ins().jump(join_blk, &[tv.into()]);
@@ -2152,11 +2229,14 @@ impl Translator<'_, '_> {
         self.mask_val(r, w)
     }
 
-    /// interp::int_ovf 的逐位镜像（128 位提升的 64 位恒等式）：
-    /// - unsigned w<64：和/积在 64 位内精确 ⇒ ovf = 精确值 > mask；Sub ovf = a<b。
-    /// - unsigned W64：Add ovf = 回绕（r<a）；Mul ovf = umulhi≠0；Sub 同上。
-    /// - signed w<64：sext 后 64 位精确 ⇒ 与 [lo,hi] 比界。
-    /// - signed W64：Add/Sub 标准符号恒等式；Mul ovf = smulhi ≠ (r>>63)。
+    /// Bit-for-bit mirror of `interp::int_ovf`, as 64-bit identities lifted to 128
+    /// bits:
+    /// - unsigned w<64: the sum/product is exact in 64 bits, so ovf = exact > mask;
+    ///   Sub ovf = a < b.
+    /// - unsigned W64: Add ovf = wrapped (r < a); Mul ovf = umulhi != 0; Sub as above.
+    /// - signed w<64: exact in 64 bits after sextending, so compare against [lo, hi].
+    /// - signed W64: the standard sign identities for Add/Sub; Mul ovf is
+    ///   smulhi != (r >> 63).
     fn int_ovf(&mut self, op: OvfOp, signed: bool, a: Value, b: Value, w: Width) -> (Value, Value) {
         let bb = &mut *self.b;
         if !signed {
@@ -2184,7 +2264,7 @@ impl Translator<'_, '_> {
                     OvfOp::Sub => unreachable!(),
                 },
                 (_, _) => {
-                    // w<64：64 位内精确
+                    // w<64: exact within 64 bits.
                     let exact = match op {
                         OvfOp::Add => bb.ins().iadd(a, b),
                         OvfOp::Mul => bb.ins().imul(a, b),
@@ -2208,7 +2288,8 @@ impl Translator<'_, '_> {
                     OvfOp::Mul => bb.ins().imul(x, y),
                 };
                 let f8 = match op {
-                    // add：符号同入异出；sub：入异且出与被减数异
+                    // add overflows when both inputs share a sign and the result does not; sub when
+                    // the inputs differ and the result differs from the minuend.
                     OvfOp::Add => {
                         let t1 = bb.ins().bxor(r, x);
                         let t2 = bb.ins().bxor(r, y);
@@ -2250,16 +2331,24 @@ impl Translator<'_, '_> {
         }
     }
 
-    /// T1-c：try_call 的异常表发射器——异常表 tag0 → pad 块（TryCallExn(0)
-    /// 块参 = 异常指针落点，def exception_var 后跳 IR cleanup 块）；normal
-    /// 指向新建 ok 块（调用方在其上做 ret 写回再跳 IR target）。
-    /// 返回 (异常表, ok 块, pad 块)；被调签名的返回值经 `TryCallRet` 传给
-    /// ok 块参数。调用方必须先在当前延续块发 try_call，再调用
-    /// `enter_cleanup_continuation` 填 pad 并进入 ok 块。Cranelift 不允许在
-    /// try_call 终结当前块之前临时切去 pad。
-    ///（try_call 必须发在进入时的**当前块**而非 blocks[bi]——同一 IR 块内
-    /// 前置 stmt 可能已把延续移进辅助块（div_zero_if/repeat_loop 等），
-    /// 回 blocks[bi] 会在 brif 后追加指令 = verifier 拒收，strict 实证）
+    /// Emit the exception table for a `try_call`: tag 0 goes to a pad block whose
+    /// `TryCallExn(0)` parameter is the exception pointer -- the pad defines
+    /// `exception_var` and jumps to the IR cleanup block -- while `normal` points at
+    /// a fresh ok block where the caller writes the return value back and jumps to
+    /// the IR target.
+    ///
+    /// Returns `(exception table, ok block, pad block)`. The callee's return values
+    /// reach the ok block's parameters through `TryCallRet`. The caller must emit
+    /// the `try_call` from the current continuation block and then call
+    /// `enter_cleanup_continuation` to fill in the pad and enter the ok block;
+    /// Cranelift forbids switching to the pad before the `try_call` terminates the
+    /// current block.
+    ///
+    /// The `try_call` must be emitted from the *current* block, not from `blocks[bi]`:
+    /// an earlier statement in the same IR block may already have moved the
+    /// continuation into a helper block (div_zero_if, repeat_loop, ...), and
+    /// returning to `blocks[bi]` would append instructions after a brif, which the
+    /// verifier rejects.
     fn prepare_cleanup(
         &mut self,
         sig: cranelift_codegen::ir::Signature,
@@ -2311,9 +2400,10 @@ impl Translator<'_, '_> {
         let ev = self.exception_var();
         self.b.def_var(ev, exn);
 
-        // EngineFault 表示引擎自身已失去继续执行 guest cleanup 的能力。按 pad
-        // 实际接住的异常指针分类；线程上可能另有被 native catch 暂停的 fault，
-        // 它不能影响这次独立 unwind。
+        // An EngineFault means the engine itself can no longer run guest cleanup.
+        // Classification uses the exception pointer the pad actually caught; another
+        // fault may be parked on the thread by a native catch, but it must not affect
+        // this independent unwind.
         let fault_query = self
             .module
             .declare_func_in_func(self.exception_is_engine_fault, self.b.func);
@@ -2334,9 +2424,10 @@ impl Translator<'_, '_> {
         self.b.switch_to_block(ok);
     }
 
-    /// L3：trace 域 syscall 站点（设计 §5.2.3）。操作数里 `0` 是 syscall 号，
-    /// 其余是参数；recorder 从边界钉住的寄存器读，助手负责真正的 syscall 与
-    /// Enter/Exit 一对记录。
+    /// Trace-domain syscall site. The first operand is the syscall number and the
+    /// rest are its arguments. The recorder comes from the register the boundary
+    /// pinned, and the helper performs the real syscall plus the paired Enter/Exit
+    /// records.
     fn trace_syscall_site(
         &mut self,
         args: &[ir::Operand],
@@ -2383,7 +2474,8 @@ impl Translator<'_, '_> {
         self.b.ins().jump(blocks[target as usize], &[]);
     }
 
-    /// 调用写回（interp 同形：Ignore/Indirect 不写，Scalar=lo，Pair=(lo,hi)）。
+    /// Write a call's result back, as the interpreter does: Ignore/Indirect write
+    /// nothing, Scalar takes `lo`, Pair takes `(lo, hi)`.
     fn write_ret(&mut self, ret: &RetDest, lo: Value, hi: Value) {
         match ret {
             RetDest::Ignore | RetDest::Indirect(_) => {}
@@ -2396,7 +2488,7 @@ impl Translator<'_, '_> {
                 self.def_slot(pl, lo);
                 self.def_slot(ph, hi);
             }
-            _ => unreachable!("admit 已筛 ret 形态"),
+            _ => unreachable!("admit screens the ret shapes"),
         }
     }
 
@@ -2418,7 +2510,8 @@ impl Translator<'_, '_> {
             } => match discr {
                 SwitchDiscr::Scalar(op) => {
                     let (v, _) = self.operand(op);
-                    // icmp+brif 链（v1；值稀疏，br_table 留优化项）
+                    // An icmp+brif chain; the values are sparse, so a br_table is left as a
+                    // possible optimization.
                     for (val, bb) in targets {
                         let hit = self.b.ins().icmp_imm(IntCC::Equal, v, *val as u64 as i64);
                         let next = self.b.create_block();
@@ -2428,8 +2521,9 @@ impl Translator<'_, '_> {
                     self.b.ins().jump(blocks[*otherwise as usize], &[]);
                 }
                 SwitchDiscr::Wide(pe) => {
-                    // M5.4b-3：128 位判别——place 一次读全 128 位（iconcat），逐目标
-                    // I128 常量比较（D8k：targets 与 discriminator 都保完整 128 位）
+                    // 128-bit discriminant: read the whole place at once (iconcat) and compare
+                    // against each target as an I128 constant, so both the targets and the
+                    // discriminant keep their full 128 bits.
                     let (lo, hi) = self.read_wide(pe);
                     let v = self.i128_of(lo, hi);
                     for (val, bb) in targets {
@@ -2450,8 +2544,10 @@ impl Translator<'_, '_> {
                 unwind,
                 role,
             } => {
-                // 展平 av（interp Call 臂同序：RetDest::Indirect 前插目的真地址 +
-                // 逐实参；lower 已把 Pair 实参展开为两槽、幻影尾参附加在末）
+                // Flatten the arguments in the interpreter's Call order: for RetDest::Indirect
+                // the destination's real address comes first, then each argument. Lowering has
+                // already split Pair arguments into two slots and appended the phantom tail
+                // argument.
                 let mut av: Vec<Value> = Vec::with_capacity(args.len() + 1);
                 if let RetDest::Indirect(dst) = ret {
                     let a = self.place_addr(dst);
@@ -2460,7 +2556,7 @@ impl Translator<'_, '_> {
                 for a in args {
                     av.push(self.operand(a).0);
                 }
-                // 写回模板（PLT 结果/c2i ret_ss 同形）
+                // Write-back template, the same shape for PLT results and the c2i ret_ss.
                 macro_rules! write_back {
                     ($lo:expr, $hi:expr) => {
                         match ret {
@@ -2472,15 +2568,16 @@ impl Translator<'_, '_> {
                                 self.def_slot(*pl, $lo);
                                 self.def_slot(*ph, $hi);
                             }
-                            _ => unreachable!("admit 已筛 ret 形态"),
+                            _ => unreachable!("admit screens the ret shapes"),
                         }
                     };
                 }
                 match unwind {
                     UnwindAction::Cleanup(bb) => {
-                        // T1-c：try_call（normal=ok 块（写回后进 target），异常表
-                        // tag0→pad(TryCallExn(0))；v1 统一走 c2i-try_call——语义唯一
-                        // 权威，PLT try_call_indirect 留优化项）
+                        // try_call: `normal` is the ok block (write back, then jump to target) and
+                        // exception-table tag 0 goes to pad(TryCallExn(0)). Every case goes through
+                        // c2i-try_call because that is the one authoritative implementation; a PLT
+                        // try_call_indirect is left as a possible optimization.
                         let args_ss = self.b.create_sized_stack_slot(StackSlotData::new(
                             StackSlotKind::ExplicitSlot,
                             (av.len().max(1) * 8) as u32,
@@ -2512,8 +2609,8 @@ impl Translator<'_, '_> {
                         self.b.ins().jump(blocks[*target as usize], &[]);
                     }
                     UnwindAction::Terminate => {
-                        // T1-c：Terminate 边界 = mirvm_call_terminate（c2i 形包装，
-                        // interp call_guarding_terminate 同语义）
+                        // The Terminate boundary is mirvm_call_terminate, a c2i-shaped wrapper with
+                        // the same semantics as the interpreter's call_guarding_terminate.
                         let args_ss = self.b.create_sized_stack_slot(StackSlotData::new(
                             StackSlotKind::ExplicitSlot,
                             (av.len().max(1) * 8) as u32,
@@ -2570,9 +2667,12 @@ impl Translator<'_, '_> {
                             let cb = &self.shared.module.funcs[*callee as usize];
                             let plt = callee_abi(cb).filter(|cabi| cabi.nparams == av.len());
                             if let Some(cabi) = plt {
-                                // 热路：PLT 内存间接——load slots_fast[callee] + call_indirect
-                                //（恒定形状；蹦床→fast 的升级对调用点透明）。槽数组按本域选：
-                                //trace 体只认 trace 槽，plain 体只认 plain 槽。
+                                // Hot path: indirect through the PLT's memory -- load
+                                // slots_fast[callee], then call_indirect. The shape is
+                                // constant, and the trampoline-to-fast upgrade is invisible to
+                                // the call site. The slot array is the one for this body's
+                                // domain: a trace body only ever resolves trace slots, a plain
+                                // body only plain slots.
                                 let slot_addr = &self.shared.jit.slots_for(self.domain).slots_fast
                                     [*callee as usize]
                                     as *const std::sync::atomic::AtomicU64
@@ -2606,8 +2706,10 @@ impl Translator<'_, '_> {
                                 };
                                 write_back!(lo, hi);
                             } else {
-                                // 冷路：调用点直接 c2i（打包展平实参回解释器——interp 本就吃
-                                // 展平 av，callee 任意 ABI 语义一致；panic 类分支的归宿）
+                                // Cold path: call c2i directly from the call site, packing the
+                                // flattened arguments back to the interpreter. The interpreter
+                                // already consumes a flattened argument vector, so any callee
+                                // ABI agrees; this is also where panic-like branches end up.
                                 let args_ss = self.b.create_sized_stack_slot(StackSlotData::new(
                                     StackSlotKind::ExplicitSlot,
                                     (av.len().max(1) * 8) as u32,
@@ -2656,8 +2758,9 @@ impl Translator<'_, '_> {
                         size,
                         sret_off,
                     } => {
-                        // interp Return 同语义：从 sret 槽读目的地址，
-                        // memcpy(_0 → dst, size)，(lo,hi) 返回 (0,0)
+                        // The same semantics as the interpreter's Return: read the destination
+                        // address from the sret slot, memcpy _0 -> dst for `size` bytes, and
+                        // return no values.
                         let dst = self.read_slot(Slot {
                             off: sret_off,
                             width: Width::W64,
@@ -2679,10 +2782,12 @@ impl Translator<'_, '_> {
                 null_ok,
                 native_sig,
             } => {
-                // T1-b：mirvm_call_indirect 助手（interp CallIndirect 臂同派发：
-                // fn_addrs 反查 → call_guest；未命中 + native_sig → ffi::call_addr）
+                // The mirvm_call_indirect helper dispatches as the interpreter's CallIndirect
+                // arm does: look the address up in fn_addrs and call_guest, or on a miss with a
+                // native_sig, ffi::call_addr.
                 let (addr, _) = self.operand(callee);
-                // 展平 av（RetDest::Indirect 前插目的地址 + 逐实参，interp 同序）
+                // Flatten the arguments in the interpreter's order: for RetDest::Indirect the
+                // destination address first, then each argument.
                 let mut av: Vec<Value> = Vec::with_capacity(args.len() + 1);
                 if let RetDest::Indirect(dst) = ret {
                     let a = self.place_addr(dst);
@@ -2719,7 +2824,8 @@ impl Translator<'_, '_> {
                 );
                 let fv = self.b.ins().iconst(types::I64, func as i64);
                 if let UnwindAction::Cleanup(bb) = unwind {
-                    // T1-c：try_call（ok 块写回后先进 target；pad 跳 IR cleanup）
+                    // try_call: the ok block writes back and then jumps to target; the pad jumps to
+                    // the IR cleanup block.
                     let mut sig0 = self.module.make_signature();
                     for _ in 0..8 {
                         sig0.params.push(AbiParam::new(types::I64));
@@ -2735,8 +2841,9 @@ impl Translator<'_, '_> {
                     self.write_ret(ret, lo, hi);
                     self.b.ins().jump(blocks[*target as usize], &[]);
                 } else {
-                    // Continue / Terminate：旗标区分（Terminate 旗 = 外包
-                    // catch_unwind+abort，call_guarding_terminate 同语义）
+                    // Continue / Terminate are distinguished by a flag; the Terminate flag means
+                    // the call is wrapped in catch_unwind + abort, the same semantics as
+                    // call_guarding_terminate.
                     let term = self.b.ins().iconst(
                         types::I64,
                         i64::from(matches!(unwind, UnwindAction::Terminate)),
@@ -2757,9 +2864,10 @@ impl Translator<'_, '_> {
                 outs,
                 target,
             } => {
-                // T1-b：asm-stub 真地址直调（interp InlineAsm 臂同槽 ABI：
-                // 栈缓冲、ins 标量 8B 槽低位/VecBytes 全宽拷、call fn(*mut u8)、
-                // outs 读回）
+                // Call the asm stub's real address directly, using the same slot ABI as the
+                // interpreter's InlineAsm arm: a stack buffer; scalar `ins` occupy the low 8
+                // bytes of a slot while VecBytes are copied at full width; call fn(*mut u8);
+                // then read `outs` back.
                 let buf = self.b.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
                     (*buf_size).max(1),
@@ -2814,13 +2922,15 @@ impl Translator<'_, '_> {
                 target,
                 unwind,
             } => {
-                // T1-b：mirvm_call_foreign 助手（interp CallForeign 臂同构——
-                // thunk_args 物化/C1 Indirect 落点/pthread 栈放大还原/ffi::call 本体）
+                // The mirvm_call_foreign helper mirrors the interpreter's CallForeign arm:
+                // materialize thunk_args, resolve the C1 Indirect destination, restore the
+                // enlarged pthread stack, and call ffi::call itself.
                 let mut av: Vec<Value> = Vec::with_capacity(args.len());
                 for a in args {
                     av.push(self.operand(a).0);
                 }
-                // C1：按值聚合返回 = Indirect 落点（ffi 层 memcpy 至目的真地址）
+                // An aggregate returned by value uses the Indirect destination: the ffi layer
+                // memcpys to the destination's real address.
                 let ret_dst = if let RetDest::Indirect(dst) = ret {
                     self.place_addr(dst)
                 } else {
@@ -2854,15 +2964,17 @@ impl Translator<'_, '_> {
                             RetDest::Scalar(p) => {
                                 self.write_scalar_place(p, r);
                             }
-                            // C1：按值聚合字节已由 ffi 层 memcpy 至 dst
+                            // The by-value aggregate bytes have already been memcpy'd to dst by the
+                            // ffi layer.
                             RetDest::Indirect(_) => {}
-                            _ => unreachable!("admit 已筛 foreign 返回形态"),
+                            _ => unreachable!("admit screens the foreign return shapes"),
                         }
                     };
                 }
                 if let UnwindAction::Cleanup(bb) = unwind {
-                    // T1-c：try_call（ok 块写回后先进 target；pad 跳 IR cleanup）
-                    //（签名八参同 mirvm_call_foreign 实传：七槽 + terminate 旗）
+                    // try_call: the ok block writes back and then jumps to target; the pad jumps to
+                    // the IR cleanup block. The eight-parameter signature matches
+                    // mirvm_call_foreign's actual arguments: seven slots plus the terminate flag.
                     let mut sig0 = self.module.make_signature();
                     for _ in 0..8 {
                         sig0.params.push(AbiParam::new(types::I64));
@@ -2897,9 +3009,10 @@ impl Translator<'_, '_> {
                 unwind,
                 role,
             } => {
-                // L3：trace 域的自有 syscall 站点（设计 §5.2.3）。recorder 从
-                // activation 边界钉住的寄存器读出，站点本身不查 TLS、不查
-                // session；syscall 与 Enter/Exit 一对记录都在助手本体内。
+                // The trace domain has its own syscall site. The recorder is read from the
+                // register the activation boundary pinned; the site itself consults neither TLS
+                // nor the session, and the syscall plus its paired Enter/Exit records all happen
+                // inside the helper.
                 if self.domain == CodeDomain::Trace
                     && matches!(builtin, ir::Builtin::HostSyscallTrace)
                     && matches!(unwind, UnwindAction::Continue)
@@ -2907,8 +3020,9 @@ impl Translator<'_, '_> {
                     self.trace_syscall_site(args, ret, *target, blocks);
                     return;
                 }
-                // T1-b：分配系四件走 mirvm_alloc 快路（引擎堆同一入口，tag
-                // 分派）；其余走 mirvm_call_builtin（exec_builtin 同一本体）
+                // The four allocation builtins take the mirvm_alloc fast path -- the engine
+                // heap's single entry point, dispatched by tag. Everything else goes through
+                // mirvm_call_builtin, which shares its body with exec_builtin.
                 let alloc_tag = match builtin {
                     ir::Builtin::RustAlloc => Some(0i64),
                     ir::Builtin::RustAllocZeroed => Some(1),
@@ -2917,8 +3031,9 @@ impl Translator<'_, '_> {
                     _ => None,
                 };
                 if let UnwindAction::Cleanup(bb) = unwind {
-                    // T1-c：统一走 mirvm_call_builtin 通用路 + try_call（分配系
-                    // 同在本体内，勿快路绕行异常表）
+                    // Everything goes through the generic mirvm_call_builtin path with try_call;
+                    // the allocation builtins live in that same body, so they must not be routed
+                    // around the exception table via the fast path.
                     let mut av: Vec<Value> = Vec::with_capacity(args.len());
                     for a in args {
                         av.push(self.operand(a).0);
@@ -2971,8 +3086,9 @@ impl Translator<'_, '_> {
                     && let Some(tag) = alloc_tag
                     && matches!(ret, RetDest::Ignore | RetDest::Scalar(ScalarPlace::Slot(_)))
                 {
-                    // 实参定长四槽（realloc 用满；alloc/dealloc 缺位补 0，助手
-                    // 按 tag 消费——exec_builtin 本体内 a(i) 只取所需）
+                    // A fixed four-slot argument vector: realloc uses all four, while
+                    // alloc/dealloc pad with 0 and the helper consumes them by tag, since
+                    // exec_builtin's body only reads the a(i) it needs.
                     let mut av: Vec<Value> = Vec::with_capacity(4);
                     for i in 0..4 {
                         av.push(match args.get(i) {
@@ -2991,12 +3107,13 @@ impl Translator<'_, '_> {
                     match ret {
                         RetDest::Ignore => {}
                         RetDest::Scalar(ScalarPlace::Slot(s)) => self.def_slot(*s, r),
-                        _ => unreachable!("本支已筛 ret 形态"),
+                        _ => unreachable!("this branch screens the ret shapes"),
                     }
                     self.b.ins().jump(blocks[*target as usize], &[]);
                 } else {
-                    // 展平 av（无 sret 前插——builtin 的 Indirect 落点独立求值，
-                    // interp 薄臂同序）；ret_dst = Indirect 目的真地址否则 0
+                    // Flatten the arguments with no sret prepended -- a builtin's Indirect
+                    // destination is evaluated separately, in the interpreter's thin-arm order.
+                    // ret_dst is the Indirect destination's real address, otherwise 0.
                     let mut av: Vec<Value> = Vec::with_capacity(args.len());
                     for a in args {
                         av.push(self.operand(a).0);
@@ -3030,7 +3147,8 @@ impl Translator<'_, '_> {
                     let nv = self.b.ins().iconst(types::I64, av.len() as i64);
                     let rp = self.b.ins().stack_addr(types::I64, ret_ss, 0);
                     let fv = self.b.ins().iconst(types::I64, func as i64);
-                    // Terminate 旗（T1-c：外包 catch_unwind+abort 同语义）
+                    // The Terminate flag, with the same catch_unwind + abort semantics as
+                    // elsewhere.
                     let term = self.b.ins().iconst(
                         types::I64,
                         i64::from(matches!(unwind, UnwindAction::Terminate)),
@@ -3046,9 +3164,10 @@ impl Translator<'_, '_> {
                 }
             }
             Terminator::Resume => {
-                // T1-c：从 exception_var（pad 的 TryCallExn(0) def；入口预 def 0
-                // 兜底，build 已按函数含 Resume 预声明）读异常指针 →
-                // call _Unwind_Resume 续传（cg_clif Resume 同构）
+                // Read the exception pointer from exception_var -- defined by the pad's
+                // TryCallExn(0), or 0 from the entry when no pad reached it, since build
+                // pre-declares it for any function containing Resume -- and call _Unwind_Resume
+                // to continue unwinding, as cg_clif's Resume does.
                 let ev = self.exception_var();
                 let exn = self.b.use_var(ev);
                 let fref = self
@@ -3058,8 +3177,8 @@ impl Translator<'_, '_> {
                 self.b.ins().trap(TrapCode::user(1).unwrap());
             }
             Terminator::TerminateAbort => {
-                // T1-c：mirvm_jit_terminate_abort（interp TerminateAbort 臂同
-                // 文案同码：UnwindTerminate（double panic/ABI 边界）→ abort）
+                // mirvm_jit_terminate_abort, with the message and code of the interpreter's
+                // TerminateAbort arm: an UnwindTerminate (double panic or ABI boundary) aborts.
                 let fref = self
                     .module
                     .declare_func_in_func(self.terminate_abort, self.b.func);
@@ -3074,8 +3193,9 @@ impl Translator<'_, '_> {
                 self.b.ins().call(fref, &[fv]);
                 self.b.ins().trap(TrapCode::user(1).unwrap());
             }
-            // T1-d：Trap-stub 终止子（mirvm_jit_trap 终止子形带 fn 名，interp
-            // runblocks 臂同文案同错误码 70）
+            // The Trap-stub terminator: the terminator form of mirvm_jit_trap, which takes
+            // the function name and exits with the interpreter's runblocks-arm message and
+            // error code 70.
             Terminator::Trap(reason) => {
                 let fref = self.module.declare_func_in_func(self.trap, self.b.func);
                 let p = self.b.ins().iconst(types::I64, reason.as_ptr() as i64);
@@ -3105,7 +3225,8 @@ pub(super) fn clif_rmw_op(op: ir::RmwOp) -> cranelift_codegen::ir::AtomicRmwOp {
     }
 }
 
-/// 收集 SSA 候选槽偏移（def 0 初始化用）= 全部 Slot 引用减去落帧集。
+/// Collect the SSA candidate slot offsets used for 0-definition: every referenced
+/// Slot minus the frame set.
 pub(super) fn collect_ssa_offs(body: &ir::FuncBody, frame_offs: &FrameMap, out: &mut Vec<u32>) {
     let mut push = |s: &Slot| {
         if !frame_offs.contains(s.off) && !out.contains(&s.off) {
@@ -3181,7 +3302,8 @@ pub(super) fn collect_ssa_offs(body: &ir::FuncBody, frame_offs: &FrameMap, out: 
                         push(s);
                     }
                 }
-                // T1-d：SIMD 族的标量 Operand 槽（向量 place 走帧，不在此列）
+                // Scalar Operand slots of the SIMD family; vector places live in frame memory and
+                // are not listed here.
                 Stmt::SimdSplat { val, .. } => op(val, &mut push),
                 Stmt::SimdExtractDyn { idx, dst, .. } => {
                     op(idx, &mut push);
