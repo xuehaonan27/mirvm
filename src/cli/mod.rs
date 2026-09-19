@@ -28,6 +28,61 @@ pub(crate) fn compiler_session_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// `-Zthreads=N` for one compiler session, from `MIRVM_THREADS` (validated once at entry, see
+/// [`validate_parallel_frontend_arg`]).
+///
+/// Injected even for the default `1`: on the pinned toolchain `-Zthreads=1` parses back to "no
+/// thread pool" (`rustc_session`'s `parse_threads` maps `n <= 1` to `None`), so it is a no-op
+/// today, but it fixes this session's thread count regardless of rustc's own default — upstream is
+/// moving that default to 2 frontend threads on nightly.
+///
+/// This is the session's *view* of the arguments, never key material: callers append it to a copy
+/// taken after the L2 key, package header and cargoless unit fingerprint were snapshotted. Letting
+/// the flag into a key would make enabling it re-key (or worse, silently mismatch) cached images.
+pub(crate) fn parallel_frontend_arg() -> &'static str {
+    PARALLEL_FRONTEND_ARG
+        .get()
+        .map(String::as_str)
+        .unwrap_or(SEQUENTIAL_FRONTEND_ARG)
+}
+
+/// Dependency compilation units deliberately do not consult `MIRVM_THREADS`: the cargoless
+/// scheduler already runs crates as parallel subprocesses, and the pinned toolchain has neither a
+/// jobserver nor `--jobs` to bound a per-unit pool. Spelled out rather than omitted so a future
+/// rustc default cannot quietly raise it.
+pub(crate) const SEQUENTIAL_FRONTEND_ARG: &str = "-Zthreads=1";
+
+static PARALLEL_FRONTEND_ARG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Parse `MIRVM_THREADS` before any command runs. A bad value is a usage error, and it has to be
+/// caught here rather than at the injection sites: one of those is the `__build-base-image`
+/// subprocess, whose stderr is captured into `build.log` and whose failure the parent deliberately
+/// treats as "no base image, lower cold" — a rejection there would be silent.
+pub(crate) fn validate_parallel_frontend_arg() -> Result<(), String> {
+    let arg = threads_arg(std::env::var("MIRVM_THREADS").ok().as_deref())?;
+    let _ = PARALLEL_FRONTEND_ARG.set(arg);
+    Ok(())
+}
+
+fn threads_arg(raw: Option<&str>) -> Result<String, String> {
+    match raw.map(str::trim) {
+        None | Some("") | Some("off") => Ok(SEQUENTIAL_FRONTEND_ARG.to_string()),
+        // rustc's own spelling for "one thread, but keep the compiler thread-safe": it enables the
+        // dynamic-sync machinery with a single pool thread. Passed through because it is the only
+        // way to exercise query-pool code without parallel analysis. The default stays plain `1`,
+        // which creates no pool at all.
+        Some("sync") => Ok("-Zthreads=sync".to_string()),
+        Some(value) => match value.parse::<usize>() {
+            // `0` keeps rustc's own meaning (one thread per available core). 256 is rustc's
+            // ceiling; a larger value would be clamped there silently, so reject it here instead.
+            Ok(n) if n <= 256 => Ok(format!("-Zthreads={n}")),
+            _ => Err(format!(
+                "mirvm: MIRVM_THREADS only accepts `off`, `sync` or an integer in 0..=256 (got `{value}`)"
+            )),
+        },
+    }
+}
+
 const USAGE: &str = "\
 mirvm — a Rust runtime with its own execution engine
 
@@ -78,6 +133,9 @@ ENV:
                       pack shares this path; resolver 1/2/3 all follow Cargo's unified feature rules)
     MIRVM_CLESS_JOBS  =N sets cargoless compilation scheduling concurrency (default = core count; =1 falls back to
                       topological serial order, for differential debugging)
+    MIRVM_THREADS     rustc frontend threads for the compile session: unset/`off` = 1 (sequential,
+                      the default), `sync` = one thread but thread-safe, `2`-`256`, `0` = one per
+                      available core. Dependency compilation units stay sequential regardless
     MIRVM_TIMING      =1 writes phase ledger to stderr (frontend/lower/engine/total)
     MIRVM_NO_IR_CACHE =1 bypasses L2 engine-IR cache (read/write disabled; diagnostic/differential)
     MIRVM_NO_BASE_IMAGE =1 bypasses std pre-lowered base image (full cold lowering; diagnostic/differential)
@@ -92,6 +150,12 @@ pub fn main() -> ExitCode {
     // Troubleshooting knob: print fault RIP on SIGSEGV to locate JIT code crash site.
     if std::env::var_os("MIRVM_SEGV_DUMP").is_some() {
         crate::os::signal::install_segv_dump();
+    }
+    // Rejected before any dispatch: the flag reaches every compiler session, and one injection
+    // site (the base-image subprocess) has no way to report a rejection loudly.
+    if let Err(message) = validate_parallel_frontend_arg() {
+        eprintln!("{message}");
+        return ExitCode::from(2);
     }
     let mut argv = std::env::args();
     let argv0 = argv.next().unwrap_or_default();
@@ -331,6 +395,30 @@ mod tests {
             argv.collect::<Vec<_>>(),
             ["/tmp/fake-bin", "guest-argument"]
         );
+    }
+
+    #[test]
+    fn threads_argument_maps_knob_values_and_rejects_typos() {
+        for (raw, expected) in [
+            (None, "-Zthreads=1"),
+            (Some(""), "-Zthreads=1"),
+            (Some("   "), "-Zthreads=1"),
+            (Some("off"), "-Zthreads=1"),
+            (Some("1"), "-Zthreads=1"),
+            (Some(" 2 "), "-Zthreads=2"),
+            (Some("8"), "-Zthreads=8"),
+            (Some("256"), "-Zthreads=256"),
+            (Some("0"), "-Zthreads=0"),
+            (Some("sync"), "-Zthreads=sync"),
+        ] {
+            assert_eq!(super::threads_arg(raw).unwrap(), expected, "raw={raw:?}");
+        }
+        for raw in ["257", "-1", "abc", "2.5", "8x", "on", "true", "Off"] {
+            assert!(
+                super::threads_arg(Some(raw)).is_err(),
+                "raw={raw:?} must be rejected"
+            );
+        }
     }
 
     #[test]

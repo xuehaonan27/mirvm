@@ -216,8 +216,12 @@ pub(crate) fn run_dep_compiler(rustc_args: Vec<String>) -> ! {
         rlib_stem: format!("lib{crate_name}{extra}"),
     };
     let _compiler_session = compiler_session_guard();
+    // Arguments the scheduler already consumed for its unit fingerprint; the flag below only shapes
+    // this session, and stays out of that fingerprint by being appended here rather than upstream.
+    let mut session_args = rustc_args;
+    session_args.push(crate::cli::SEQUENTIAL_FRONTEND_ARG.to_string());
     let code = rustc_driver::catch_with_exit_code(|| {
-        rustc_driver::run_compiler(&rustc_args, &mut callbacks)
+        rustc_driver::run_compiler(&session_args, &mut callbacks)
     });
     exit(if code == ExitCode::SUCCESS { 0 } else { 1 })
 }
