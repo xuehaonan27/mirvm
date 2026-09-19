@@ -116,9 +116,9 @@ L2 design points:
 
 Release build, warm cache, on an EPYC 7773X:
 
-- `tests/scripts/args_env.rs`, std-only: **0.40s** — front end, monomorphization, lowering and run over
+- `tests/data/programs/args_env.rs`, std-only: **0.40s** — front end, monomorphization, lowering and run over
   a std-only graph.
-- `tests/scripts/ecosystem.rs`, serde + serde_json + rand + regex: **3.07s**, reproducible, with all
+- `tests/data/programs/ecosystem.rs`, serde + serde_json + rand + regex: **3.07s**, reproducible, with all
   dependency rmeta cached. Those 3s are **paid on every run**: leaf front end, pulling dependency MIR,
   whole-graph monomorphization, lowering and run.
 
@@ -141,7 +141,7 @@ design.
 
 - **L2 acceptance**: one workload run cold and warm must be byte-identical through the existing gate's
   diff channel, which catches a cache hit returning stale semantics.
-- **Gate**: `make test` / `make smoke` / `make gate`, plus `make suite S=<id>`; L2 adds an acceptance
+- **Gate**: `make test` / `make smoke` / `make gate`, plus `make case C=<id>`; L2 adds an acceptance
   dimension to this gate rather than a parallel harness.
 - **Phase timing**: a time dimension on the existing `--vm-stats` instrumentation, producing the
   per-phase numbers §2.6 lacks.

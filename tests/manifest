@@ -1,0 +1,480 @@
+# tests/manifest -- one line per case. Columns 1-4 are fixed; the rest are key=value metadata.
+#
+#   <name>  <mode>  <tier>  <timeout>  [key=value ...]
+#
+# name     unique case id, also the display name
+# mode     which tests/lib/modes/<mode>.sh runs it -- the only place a run method is named
+# tier     fast | smoke | gate | manual   (fast < smoke < gate; manual only when named)
+# timeout  seconds, applied by the harness to each product invocation
+# fields   mode metadata; the runner refuses a field the mode does not declare
+#
+# Values cannot contain spaces: write %20. {DATA} is the data root, {ROOT} the repository root.
+# A needs= path that is absent makes the case SKIP, never FAIL.
+#
+# Case owners: corpus and project rows come from the corpus batch; programs/ holds every guest
+# program; fixtures/ the crates and data a mode needs.
+
+# Corpus batch: one line per real-crate driver. tier: smoke runs daily, gate is the full
+# defense line, manual only when named. group= is the budget key (heavy entries stack with
+# --group). needs= absent makes the case SKIP. verdict=oracle:<name> compares stdout with
+# data/fixtures/oracles/<name>.txt; xfail=<code>:<pattern> registers a known red.
+itertools  corpus  smoke  90  input=programs/c_itertools.rs
+anyhow  corpus  gate  90  input=programs/c_anyhow.rs
+rayon  corpus  smoke  90  input=programs/c_rayon.rs
+chrono  corpus  smoke  90  input=programs/c_chrono.rs
+indexmap  corpus  gate  90  input=programs/c_indexmap.rs
+clap  corpus  gate  90  input=programs/c_clap.rs
+csv  corpus  gate  90  input=programs/c_csv.rs
+crossbeam  corpus  gate  90  input=programs/c_crossbeam.rs
+tokio  corpus  smoke  90  input=programs/c_tokio.rs
+blake3  corpus  smoke  90  input=programs/c_blake3.rs  verdict=oracle:blake3
+tempfile  corpus  gate  90  input=programs/c_tempfile.rs
+walkdir  corpus  gate  90  input=programs/c_walkdir.rs
+numbigint  corpus  smoke  90  input=programs/c_numbigint.rs  verdict=oracle:numbigint
+smallvec  corpus  gate  90  input=programs/c_smallvec.rs
+bytes  corpus  gate  90  input=programs/c_bytes.rs
+sha2  corpus  smoke  90  input=programs/c_sha2.rs  verdict=oracle:sha2
+petgraph  corpus  gate  90  input=programs/c_petgraph.rs
+net_tcp  corpus  smoke  90  input=programs/c_net_tcp.rs
+net_udp  corpus  gate  90  input=programs/c_net_udp.rs
+process  corpus  gate  90  input=programs/c_process.rs
+tokio_mt  corpus  gate  90  input=programs/c_tokio_mt.rs
+mmap  corpus  gate  90  input=programs/c_mmap.rs
+blocking_io  corpus  gate  90  input=programs/c_blocking_io.rs
+net_echo_threaded  corpus  gate  90  input=programs/c_net_echo_threaded.rs
+signal  corpus  gate  90  input=programs/c_signal.rs  verdict=oracle:signal
+backtrace  corpus  gate  90  input=programs/c_backtrace.rs  verdict=oracle:backtrace
+volatile  corpus  gate  90  input=programs/c_volatile.rs  verdict=oracle:volatile
+fork_exec  corpus  gate  90  input=programs/c_fork_exec.rs
+portable_simd  corpus  smoke  90  input=programs/c_portable_simd.rs
+float_wide  corpus  gate  90  input=programs/c_float_wide.rs
+atexit  corpus  gate  90  input=programs/c_atexit.rs
+serde_json  corpus  smoke  90  input=programs/c_serde_json.rs
+serde_yaml  corpus  gate  90  input=programs/c_serde_yaml.rs
+rand_det  corpus  gate  90  input=programs/c_rand_det.rs
+flate2  corpus  smoke  90  input=programs/c_flate2.rs
+brotli  corpus  smoke  90  input=programs/c_brotli.rs
+argon2  corpus  gate  90  input=programs/c_argon2.rs
+ed25519  corpus  gate  90  input=programs/c_ed25519.rs  env=CARGO_CFG_CURVE25519_DALEK_BACKEND=serial
+p256  corpus  gate  90  input=programs/c_p256.rs
+syn_parse  corpus  smoke  90  input=programs/c_syn_parse.rs
+hickory  corpus  gate  90  input=programs/c_hickory.rs
+unicode_tables  corpus  gate  90  input=programs/c_unicode_tables.rs
+wasmi  corpus  smoke  90  input=programs/c_wasmi.rs  group=heavy
+boa_js  corpus  gate  90  input=programs/c_boa_js.rs
+tiny_skia  corpus  smoke  90  input=programs/c_tiny_skia.rs
+zip_arch  corpus  gate  90  input=programs/c_zip_arch.rs
+rust_decimal  corpus  gate  90  input=programs/c_rust_decimal.rs
+rustfft  corpus  gate  90  input=programs/c_rustfft.rs
+roaring  corpus  gate  90  input=programs/c_roaring.rs
+bitvec  corpus  gate  90  input=programs/c_bitvec.rs
+compact_str  corpus  gate  90  input=programs/c_compact_str.rs
+nom_parse  corpus  smoke  90  input=programs/c_nom_parse.rs
+comrak_md  corpus  gate  90  input=programs/c_comrak_md.rs
+fst_build  corpus  gate  90  input=programs/c_fst_build.rs
+spade_delaunay  corpus  gate  90  input=programs/c_spade_delaunay.rs
+aes_gcm  corpus  gate  90  input=programs/c_aes_gcm.rs
+png_round  corpus  smoke  90  input=programs/c_png_round.rs
+smoltcp_tcp  corpus  gate  90  input=programs/c_smoltcp_tcp.rs
+snow_noise  corpus  gate  90  input=programs/c_snow_noise.rs
+statrs_stats  corpus  gate  90  input=programs/c_statrs_stats.rs
+rkyv_zero  corpus  gate  90  input=programs/c_rkyv_zero.rs
+qr_round  corpus  gate  90  input=programs/c_qr_round.rs
+fatfs_img  corpus  gate  90  input=programs/c_fatfs_img.rs
+geo_ops  corpus  gate  90  input=programs/c_geo_ops.rs
+rhai_script  corpus  gate  90  input=programs/c_rhai_script.rs
+redb_kv  corpus  gate  90  input=programs/c_redb_kv.rs
+gix_pure  corpus  gate  300  input=programs/c_gix_pure.rs
+lz4_snap  corpus  gate  90  input=programs/c_lz4_snap.rs
+calamine_xlsx  corpus  gate  180  input=programs/c_calamine_xlsx.rs
+rusqlite_db  corpus  smoke  300  input=programs/c_rusqlite_db.rs
+crc32fast  corpus  gate  90  input=programs/c_crc32fast.rs
+chacha_poly  corpus  gate  90  input=programs/c_chacha_poly.rs
+k256_ecdsa  corpus  smoke  90  input=programs/c_k256_ecdsa.rs
+rsa_pss  corpus  gate  400  input=programs/c_rsa_pss.rs
+libflate_zlib  corpus  gate  90  input=programs/c_libflate_zlib.rs
+revm_evm  corpus  gate  300  input=programs/c_revm_evm.rs
+rustls_cert  corpus  gate  180  input=programs/c_rustls_cert.rs
+lyon_tess  corpus  gate  90  input=programs/c_lyon_tess.rs
+midly_midi  corpus  gate  90  input=programs/c_midly_midi.rs
+jaq_jq  corpus  gate  90  input=programs/c_jaq_jq.rs
+kdl_doc  corpus  gate  90  input=programs/c_kdl_doc.rs
+ds_obscure  corpus  gate  90  input=programs/c_ds_obscure.rs
+qoi_img  corpus  gate  90  input=programs/c_qoi_img.rs
+pgp_packet  corpus  gate  90  input=programs/c_pgp_packet.rs
+zopfli_deep  corpus  gate  300  input=programs/c_zopfli_deep.rs
+simd_json  corpus  gate  90  input=programs/c_simd_json.rs
+symphonia_wav  corpus  gate  90  input=programs/c_symphonia_wav.rs
+pdf_pair  corpus  gate  90  input=programs/c_pdf_pair.rs
+deunicode_slug  corpus  gate  90  input=programs/c_deunicode_slug.rs
+malachite_big  corpus  gate  90  input=programs/c_malachite_big.rs
+arkworks_ff  corpus  gate  90  input=programs/c_arkworks_ff.rs
+im_persistent  corpus  gate  90  input=programs/c_im_persistent.rs
+zxcvbn_pass  corpus  gate  90  input=programs/c_zxcvbn_pass.rs
+barcoders_gen  corpus  gate  90  input=programs/c_barcoders_gen.rs
+bzip2_pure  corpus  gate  90  input=programs/c_bzip2_pure.rs
+fixed_point  corpus  gate  90  input=programs/c_fixed_point.rs
+openssl_evp  corpus  gate  90  input=programs/c_openssl_evp.rs
+wat_parse  corpus  gate  90  input=programs/c_wat_parse.rs
+jsonschema  corpus  gate  90  input=programs/c_jsonschema.rs
+html5ever  corpus  gate  90  input=programs/c_html5ever.rs
+xml_rs  corpus  gate  90  input=programs/c_xml_rs.rs
+markdown_it  corpus  gate  90  input=programs/c_markdown_it.rs
+logos_lex  corpus  gate  90  input=programs/c_logos_lex.rs
+chumsky_parse  corpus  gate  90  input=programs/c_chumsky_parse.rs
+ndarray  corpus  gate  90  input=programs/c_ndarray.rs
+smartcore  corpus  gate  90  input=programs/c_smartcore.rs
+rune  corpus  gate  90  input=programs/c_rune.rs  group=heavy
+koto  corpus  gate  90  input=programs/c_koto.rs
+parquet2_rw  corpus  gate  90  input=programs/c_parquet2_rw.rs
+syntect_fancy  corpus  gate  90  input=programs/c_syntect_fancy.rs
+phonenumber  corpus  gate  180  input=programs/c_phonenumber.rs
+orgmode  corpus  gate  90  input=programs/c_orgmode.rs
+oxc_parse  corpus  gate  90  input=programs/c_oxc_parse.rs
+rsa_4096  corpus  gate  400  input=programs/c_rsa_4096.rs
+ed25519_default  corpus  gate  90  input=programs/c_ed25519_default.rs
+mimalloc  corpus  smoke  300  input=programs/c_mimalloc.rs  env=CFLAGS=-DMI_PRIM_HAS_PROCESS_ATTACH
+libgit2  corpus  smoke  300  input=programs/c_libgit2.rs  group=heavy
+rustls_shake  corpus  gate  90  input=programs/c_rustls_shake.rs
+zstd_long  corpus  gate  90  input=programs/c_zstd_long.rs
+aws_lc  corpus  gate  300  input=programs/c_aws_lc.rs
+mlua_lua  corpus  smoke  180  input=programs/c_mlua_lua.rs
+tantivy  corpus  gate  300  input=programs/c_tantivy.rs
+sequoia_pgp  corpus  gate  300  input=programs/c_sequoia_pgp.rs
+sqlx_sqlite  corpus  gate  90  input=programs/c_sqlx_sqlite.rs
+swc_parse  corpus  gate  90  input=programs/c_swc_parse.rs  group=heavy
+miden_exec  corpus  gate  180  input=programs/c_miden_exec.rs
+polodb  corpus  gate  90  input=programs/c_polodb.rs
+starlark_eval  corpus  gate  300  input=programs/c_starlark_eval.rs  group=heavy
+zune_jpeg  corpus  gate  90  input=programs/c_zune_jpeg.rs
+candle_mlp  corpus  gate  180  input=programs/c_candle_mlp.rs
+pest  corpus  gate  90  input=programs/c_pest.rs
+scraper_dom  corpus  gate  90  input=programs/c_scraper_dom.rs
+arrow_rs  corpus  gate  300  input=programs/c_arrow_rs.rs
+fontdue  corpus  gate  90  input=programs/c_fontdue.rs
+unicode_rs  corpus  gate  90  input=programs/c_unicode_rs.rs
+rustpython_mini  corpus  gate  300  input=programs/c_rustpython_mini.rs  needs=/usr/lib/x86_64-linux-gnu/libffi.so  group=heavy
+tree_sitter  corpus  smoke  90  input=programs/c_tree_sitter.rs
+bzip2_csys  corpus  gate  90  input=programs/c_bzip2_csys.rs
+wasmtime_wat  corpus  smoke  300  input=programs/c_wasmtime_wat.rs  group=heavy
+risc0_run  corpus  gate  300  input=programs/c_risc0_run.rs  group=heavy
+typst_pdf  corpus  gate  300  input=programs/c_typst_pdf.rs  group=heavy
+datafusion_sql  corpus  gate  400  input=programs/c_datafusion_sql.rs  group=heavy
+miden_prove  corpus  gate  400  input=programs/c_miden_prove.rs  group=heavy
+ethers_evm  corpus  gate  90  input=programs/c_ethers_evm.rs  group=heavy
+polars_lazy  corpus  gate  180  input=programs/c_polars_lazy.rs  group=heavy
+xlsxwriter_rw  corpus  gate  180  input=programs/c_xlsxwriter_rw.rs
+resvg_svg  corpus  gate  180  input=programs/c_resvg_svg.rs
+#
+# ---- further full-tier entries ----
+comfy_table_render  corpus  gate  90  input=programs/c_comfy_table_render.rs
+exr_image  corpus  gate  180  input=programs/c_exr_image.rs
+faer_lu  corpus  gate  180  input=programs/c_faer_lu.rs  group=heavy
+fastfloat_ryu  corpus  gate  90  input=programs/c_fastfloat_ryu.rs
+gluesql_db  corpus  gate  180  input=programs/c_gluesql_db.rs
+h3_hex  corpus  gate  90  input=programs/c_h3_hex.rs
+jiff_time  corpus  gate  90  input=programs/c_jiff_time.rs
+nalgebra_la  corpus  gate  90  input=programs/c_nalgebra_la.rs
+plotters_chart  corpus  gate  90  input=programs/c_plotters_chart.rs
+polars_frame  corpus  gate  300  input=programs/c_polars_frame.rs  group=heavy
+stemmers_multi  corpus  gate  90  input=programs/c_stemmers_multi.rs
+tokenizers_hf  corpus  gate  180  input=programs/c_tokenizers_hf.rs  group=heavy
+whatlang_detect  corpus  gate  90  input=programs/c_whatlang_detect.rs
+#
+# ---- manual-batch entries (not part of the default gate) ----
+jieba_cut  corpus  manual  180  input=programs/c_jieba_cut.rs
+zstd_stream  corpus  gate  90  input=programs/c_zstd_stream.rs
+opencc  corpus  manual  90  input=programs/c_opencc.rs  needs=/tmp/opencc-local  env=OPENCC_DIR=/tmp/opencc-local;OPENCC_LIBS=opencc;LD_LIBRARY_PATH=/tmp/opencc-local/lib
+ugrep_bin  corpus  manual  90  input=programs/c_ugrep_bin.rs  needs=/tmp/ugrep-local/bin/ugrep
+#
+# ---- real Cargo projects, three-way against native `cargo run` ----
+# Each is a git submodule pinned to the upstream commit its crate was published from
+# (pins: data/projects/README.md). needs= names the submodule's own manifest, so an
+# uninitialized checkout records SKIP instead of FAIL; run `make projects` to fetch them.
+hexyl  project-diff  gate  180  input=projects/hexyl  needs={DATA}/projects/hexyl/Cargo.toml  env=RUSTFLAGS=--cap-lints%20allow  args=--color;never;-n;256;{DATA}/fixtures/inputs/hexyl-input.bin
+tokei  project-diff  gate  300  input=projects/tokei  needs={DATA}/projects/tokei/Cargo.toml  env=RUSTFLAGS=--cap-lints%20allow  args={DATA}/fixtures/inputs/tokei-input
+
+# guest programs: compiled by the pinned rustc and by mirvm, compared three ways
+alloc_error_handler  native-diff  fast  120  input=programs/alloc_error_handler.rs
+args_env  native-diff  fast  120  input=programs/args_env.rs
+asm_extras_probe  native-diff  fast  120  input=programs/asm_extras_probe.rs
+asm_probe  native-diff  fast  120  input=programs/asm_probe.rs
+asm_syscall_probe  native-diff  fast  120  input=programs/asm_syscall_probe.rs
+async_hand  native-diff  fast  120  input=programs/async_hand.rs
+async_suspend  native-diff  fast  120  input=programs/async_suspend.rs
+atomic_order_probe  native-diff  fast  120  input=programs/atomic_order_probe.rs
+catch  native-diff  fast  120  input=programs/catch.rs
+dl_iterate_phdr_probe  native-diff  fast  120  input=programs/dl_iterate_phdr_probe.rs
+dyn_upcast_probe  native-diff  fast  120  input=programs/dyn_upcast_probe.rs
+ffi_agg_probe  native-diff  fast  120  input=programs/ffi_agg_probe.rs
+ffi_libc  native-diff  fast  120  input=programs/ffi_libc.rs
+fib  native-diff  fast  120  input=programs/fib.rs
+float_wide_probe  native-diff  fast  120  input=programs/float_wide_probe.rs
+fork_exec_probe  native-diff  fast  120  input=programs/fork_exec_probe.rs
+global_asm_guest_fn  native-diff  fast  120  input=programs/global_asm_guest_fn.rs
+hashmap  native-diff  fast  120  input=programs/hashmap.rs
+intrinsic_probe  native-diff  fast  120  input=programs/intrinsic_probe.rs
+jit_abi_probe  native-diff  fast  120  input=programs/jit_abi_probe.rs
+jit_builtin_probe  native-diff  fast  120  input=programs/jit_builtin_probe.rs
+jit_call_probe  native-diff  fast  120  input=programs/jit_call_probe.rs
+jit_foreign_probe  native-diff  fast  120  input=programs/jit_foreign_probe.rs
+jit_unwind_probe  native-diff  fast  120  input=programs/jit_unwind_probe.rs
+main_outcome_probe  native-diff  fast  120  input=programs/main_outcome_probe.rs
+nested_dst_probe  native-diff  fast  120  input=programs/nested_dst_probe.rs
+noreturn_ud2  native-diff  fast  120  input=programs/noreturn_ud2.rs
+panic_exit  native-diff  fast  120  input=programs/panic_exit.rs
+ptr_int  native-diff  fast  120  input=programs/ptr_int.rs
+recursion_deep  native-diff  fast  120  input=programs/recursion_deep.rs
+sat128_probe  native-diff  fast  120  input=programs/sat128_probe.rs
+signal_probe  native-diff  fast  120  input=programs/signal_probe.rs
+signed_div_probe  native-diff  fast  120  input=programs/signed_div_probe.rs
+simd_probe  native-diff  fast  120  input=programs/simd_probe.rs
+strings  native-diff  fast  120  input=programs/strings.rs
+struct_fnptr_escape  native-diff  fast  120  input=programs/struct_fnptr_escape.rs
+threads_channel  native-diff  fast  120  input=programs/threads_channel.rs
+threads_panic  native-diff  fast  120  input=programs/threads_panic.rs
+threads_spawn  native-diff  fast  120  input=programs/threads_spawn.rs
+threads_sync  native-diff  fast  120  input=programs/threads_sync.rs
+threads_time  native-diff  fast  120  input=programs/threads_time.rs
+time_fs  native-diff  fast  120  input=programs/time_fs.rs
+track_caller_fn_ptr  native-diff  fast  120  input=programs/track_caller_fn_ptr.rs
+u128_switch  native-diff  fast  120  input=programs/u128_switch.rs
+volatile_wide  native-diff  fast  120  input=programs/volatile_wide.rs
+weak_extern  native-diff  fast  120  input=programs/weak_extern.rs
+wide_int_probe  native-diff  fast  120  input=programs/wide_int_probe.rs
+zst_drop  native-diff  fast  120  input=programs/zst_drop.rs
+
+# Cargo-mode scripts: materialized into a project and compared against native `cargo run`
+ecosystem       cargo-diff  fast  300  input=programs/ecosystem.rs stem=ecosystem expect_native=0
+ffi_zlib        cargo-diff  fast  300  input=programs/ffi_zlib.rs stem=ffi_zlib expect_native=0
+ripgrep_regex   cargo-diff  fast  300  input=programs/probe_real_ripgrep_regex.rs stem=real_ripgrep_regex expect_native=0
+warning_return  cargo-diff  fast  300  input=programs/probe_cargo_warning_return.rs stem=cargo_warning_return expect_native=0
+
+# exported entry points through --vm-call: the mathematical answer is the authority
+vmcall-pure    vmcall  smoke  120  input=programs/vmcall_pure.rs calls=fib(10):55;fib(25):75025;gcd(1071,462):21;gcd(17,5):1;sum_to(1000):500500;collatz_steps(27):111;popcount_manual(12297829382473034410):32;mix_signed(3,10):13;mix_signed(10,3):13
+vmcall-digest  vmcall  smoke  120  input=programs/vmcall_digest.rs calls=vec_digest(10):155;string_digest(5):14655057013503867354;map_digest(20):2490;box_digest(6):43;enum_digest(7):805;slice_digest(7):284;static_digest(5):913;rawptr_digest(3):84;float_digest(4):4619054945356742656
+vmcall-unwind  vmcall  smoke  120  input=programs/vmcall_unwind.rs calls=catch_digest(3):100010;catch_digest(2):7010;nested_digest(1):77110;nested_digest(2):5110;bounds_digest(1):20;bounds_digest(9):999;msg_digest(42):71;rethrow_digest(1):5503;rethrow_digest(2):1102
+
+# x86 sub-capabilities: the host's own native result is the authority, a missing feature is a SKIP
+x86-addcarry     native-diff  smoke  60  input=programs/probe_x86_addcarry.rs calls=add_checksum();sub_checksum()
+x86-xgetbv       native-diff  smoke  60  input=programs/probe_x86_xgetbv.rs skip_if=xgetbv%20unavailable skip_reason=host%20CPUID%20lacks%20XSAVE/OSXSAVE
+x86-simd-insert  native-diff  smoke  60  input=programs/probe_x86_simd_insert.rs skip_if=sse4.1%20unavailable skip_reason=host%20lacks%20SSE4.1
+x86-simd-shift   native-diff  smoke  60  input=programs/probe_x86_simd_shift.rs skip_if=avx2%20unavailable skip_reason=host%20lacks%20AVX2
+x86-vzeroupper   native-diff  smoke  60  input=programs/probe_x86_vzeroupper.rs skip_if=avx%20unavailable skip_reason=host%20lacks%20AVX
+x86-vectors      native-diff  smoke  60  input=programs/probe_x86_vectors.rs sub_caps=pshuf;sha
+
+# unwind, outcomes and statistics: declared facts, checked against the run
+uncaught-payload-interp  run-expect  smoke  120  input=programs/vmcall_unwind.rs args=--engine;vm;--vm-call;uncaught_payload_cleanup_probe env=MIRVM_JIT=off exit=101 stdout=oracle:uncaught-payload.txt stderr=guest%20panic%20not%20caught
+uncaught-payload-jit     run-expect  smoke  120  input=programs/vmcall_unwind.rs args=--engine;vm;--vm-call;uncaught_payload_cleanup_probe env=MIRVM_JIT=on;MIRVM_JIT_SYNC=1;MIRVM_JIT_THRESHOLD=1 exit=101 stdout=oracle:uncaught-payload.txt stderr=guest%20panic%20not%20caught
+main-panic-interp  run-expect  smoke  120  input=programs/main_outcome_probe.rs guest=panic env=MIRVM_JIT=off exit=101 stderr=main%20outcome%20probe stderr_absent=guest%20panic%20not%20caught|release=false
+main-panic-jit     run-expect  smoke  120  input=programs/main_outcome_probe.rs guest=panic env=MIRVM_JIT=on;MIRVM_JIT_SYNC=1;MIRVM_JIT_THRESHOLD=1 exit=101 stderr=release=true.*_3std2rt19lang_start_internal0C stderr_absent=guest%20panic%20not%20caught
+main-101-interp    run-expect  smoke  120  input=programs/main_outcome_probe.rs env=MIRVM_JIT=off exit=101 stderr_absent=main%20outcome%20probe|guest%20panic%20not%20caught
+main-101-jit       run-expect  smoke  120  input=programs/main_outcome_probe.rs env=MIRVM_JIT=on;MIRVM_JIT_SYNC=1;MIRVM_JIT_THRESHOLD=1 exit=101 stderr_absent=main%20outcome%20probe|guest%20panic%20not%20caught
+recursion-stack-overflow  run-expect  smoke  60  input=programs/recursion_deep.rs env=MIRVM_STACK_SIZE=1m;MIRVM_JIT_THRESHOLD=1;MIRVM_JIT_SYNC=1 exit=70 stderr=guest%20stack%20overflow%20\(JIT%20compiled%20frame%20hit%20safety%20margin%20before%20entry
+jit-stats          run-expect  smoke  60  input=programs/jit_unwind_probe.rs env=MIRVM_JIT_STATS=1 exit=0 stderr=mirvm-jit-stats:%20c2i=[1-9]
+vmstats-threads-spawn  run-expect  smoke  60  input=programs/threads_spawn.rs args=--vm-stats stdout_match=@entry:%20✅%20reachable%20path%20trap-free
+vmstats-threads-panic  run-expect  smoke  60  input=programs/threads_panic.rs args=--vm-stats stdout_match=@entry:%20✅%20reachable%20path%20trap-free
+vmstats-digest-debt    run-expect  smoke  120  input=programs/vmcall_digest.rs args=--engine;vm;--vm-stats stdout_absent=_digest.*M4\.[12]:
+vmstats-unwind-debt    run-expect  smoke  120  input=programs/vmcall_unwind.rs args=--engine;vm;--vm-stats stdout_absent=_digest.*M4\.[12]:
+
+# the execution phase under ThreadSanitizer, and the fence that keeps it tcx-free
+tsan          tsan           smoke  900  fixture=fixtures/tsan expect=mixed-stack-fib;atomic-cross-tier;blocking-io-liveness;mixed-stack-unwind;engine-atomics-thunk-cache;capture-session-lifecycle;engine-close-race;guest-threads;signal-delivery;fork-guard
+purity-fence  compile-crate  fast   300  crate=fixtures/tsan
+
+# timing ceilings and resource metering
+load       timed-run  gate  60  input=programs/empty.rs max_ms=1000 runs=1
+rayon-gate timed-run  gate  60  input=programs/c_rayon.rs max_ms=5000 runs=1 expect_stdout=par_sort%20ok%20=%20true
+fib32      timed-run  gate  60  input=programs/vmcall_pure.rs args=--vm-call;fib(32) max_ms=80 runs=3 expect_stdout=2178309
+resources  metering   gate  60
+
+# the repository's own source checks
+quality  repo-quality  fast  900
+
+# bespoke procedures: machinery that a declarative mode cannot express (see each mode's header)
+cargoless-test       cargoless-test       fast  900   fixture=fixtures/cargoless/test-contract;fixtures/cargoless/proc-macro-test-contract;fixtures/cargoless/doctest-contract
+cargoless-workspace  cargoless-workspace  fast  900   fixture=fixtures/cargoless/workspace-contract;fixtures/cargoless/workspace-legacy-contract
+cargoless-git        cargoless-git        fast  900
+cargoless-sources    cargoless-sources    fast  1200
+pack                 pack                 fast  900   fixture=fixtures/package-embed.rs
+build-script-rerun   build-script-rerun   fast  600   fixture=fixtures/cargoless/path-build-script;fixtures/cargoless/libc.rs
+deps-image           deps-image           gate  900   fixture=fixtures/cargoless/two-bin-workspace
+c-unwind             c-unwind             fast  900   fixture=fixtures/c-unwind-contract
+diagnostics          diagnostics          fast  300   fixture=programs/probe_diagnostic_router_direct.rs;programs/probe_diagnostic_router_script.rs
+telemetry            telemetry            fast  300   fixture=programs/probe_telemetry_fork_child.rs
+cargo-contract       cargo-contract       fast  900
+framework-self-test  framework-self-test  fast  300   fixture=fixtures/fakes
+
+# The two dependency paths must agree byte-for-byte on the same source; MIRVM_DEPS picks the path.
+cargoless-script            pair  fast  300  input=fixtures/cargoless/script.rs
+cargoless-serde             pair  fast  300  input=fixtures/cargoless/serde.rs
+cargoless-libc              pair  fast  300  input=fixtures/cargoless/libc.rs
+cargoless-project           pair  fast  300  input=fixtures/cargoless/project
+cargoless-path-proc-macro   pair  fast  300  input=fixtures/cargoless/path-proc-macro
+cargoless-path-build-script pair  fast  300  input=fixtures/cargoless/path-build-script
+cargoless-two-bin-workspace pair  fast  300  input=fixtures/cargoless/two-bin-workspace
+
+# Manual batch: every corpus driver through both dependency paths (opt in by name).
+itertools-pair  pair  manual  90  input=programs/c_itertools.rs
+anyhow-pair  pair  manual  90  input=programs/c_anyhow.rs
+rayon-pair  pair  manual  90  input=programs/c_rayon.rs
+chrono-pair  pair  manual  90  input=programs/c_chrono.rs
+indexmap-pair  pair  manual  90  input=programs/c_indexmap.rs
+clap-pair  pair  manual  90  input=programs/c_clap.rs
+csv-pair  pair  manual  90  input=programs/c_csv.rs
+crossbeam-pair  pair  manual  90  input=programs/c_crossbeam.rs
+tokio-pair  pair  manual  90  input=programs/c_tokio.rs
+blake3-pair  pair  manual  90  input=programs/c_blake3.rs
+tempfile-pair  pair  manual  90  input=programs/c_tempfile.rs
+walkdir-pair  pair  manual  90  input=programs/c_walkdir.rs
+numbigint-pair  pair  manual  90  input=programs/c_numbigint.rs
+smallvec-pair  pair  manual  90  input=programs/c_smallvec.rs
+bytes-pair  pair  manual  90  input=programs/c_bytes.rs
+sha2-pair  pair  manual  90  input=programs/c_sha2.rs
+petgraph-pair  pair  manual  90  input=programs/c_petgraph.rs
+net_tcp-pair  pair  manual  90  input=programs/c_net_tcp.rs
+net_udp-pair  pair  manual  90  input=programs/c_net_udp.rs
+process-pair  pair  manual  90  input=programs/c_process.rs
+tokio_mt-pair  pair  manual  90  input=programs/c_tokio_mt.rs
+mmap-pair  pair  manual  90  input=programs/c_mmap.rs
+blocking_io-pair  pair  manual  90  input=programs/c_blocking_io.rs
+net_echo_threaded-pair  pair  manual  90  input=programs/c_net_echo_threaded.rs
+signal-pair  pair  manual  90  input=programs/c_signal.rs
+backtrace-pair  pair  manual  90  input=programs/c_backtrace.rs
+volatile-pair  pair  manual  90  input=programs/c_volatile.rs
+fork_exec-pair  pair  manual  90  input=programs/c_fork_exec.rs
+portable_simd-pair  pair  manual  90  input=programs/c_portable_simd.rs
+float_wide-pair  pair  manual  90  input=programs/c_float_wide.rs
+atexit-pair  pair  manual  90  input=programs/c_atexit.rs
+serde_json-pair  pair  manual  90  input=programs/c_serde_json.rs
+serde_yaml-pair  pair  manual  90  input=programs/c_serde_yaml.rs
+rand_det-pair  pair  manual  90  input=programs/c_rand_det.rs
+flate2-pair  pair  manual  90  input=programs/c_flate2.rs
+brotli-pair  pair  manual  90  input=programs/c_brotli.rs
+argon2-pair  pair  manual  90  input=programs/c_argon2.rs
+ed25519-pair  pair  manual  90  input=programs/c_ed25519.rs  env=CARGO_CFG_CURVE25519_DALEK_BACKEND=serial
+p256-pair  pair  manual  90  input=programs/c_p256.rs
+syn_parse-pair  pair  manual  90  input=programs/c_syn_parse.rs
+hickory-pair  pair  manual  90  input=programs/c_hickory.rs
+unicode_tables-pair  pair  manual  90  input=programs/c_unicode_tables.rs
+wasmi-pair  pair  manual  90  input=programs/c_wasmi.rs
+boa_js-pair  pair  manual  90  input=programs/c_boa_js.rs
+tiny_skia-pair  pair  manual  90  input=programs/c_tiny_skia.rs
+zip_arch-pair  pair  manual  90  input=programs/c_zip_arch.rs
+rust_decimal-pair  pair  manual  90  input=programs/c_rust_decimal.rs
+rustfft-pair  pair  manual  90  input=programs/c_rustfft.rs
+roaring-pair  pair  manual  90  input=programs/c_roaring.rs
+bitvec-pair  pair  manual  90  input=programs/c_bitvec.rs
+compact_str-pair  pair  manual  90  input=programs/c_compact_str.rs
+nom_parse-pair  pair  manual  90  input=programs/c_nom_parse.rs
+comrak_md-pair  pair  manual  90  input=programs/c_comrak_md.rs
+fst_build-pair  pair  manual  90  input=programs/c_fst_build.rs
+spade_delaunay-pair  pair  manual  90  input=programs/c_spade_delaunay.rs
+aes_gcm-pair  pair  manual  90  input=programs/c_aes_gcm.rs
+png_round-pair  pair  manual  90  input=programs/c_png_round.rs
+smoltcp_tcp-pair  pair  manual  90  input=programs/c_smoltcp_tcp.rs
+snow_noise-pair  pair  manual  90  input=programs/c_snow_noise.rs
+statrs_stats-pair  pair  manual  90  input=programs/c_statrs_stats.rs
+rkyv_zero-pair  pair  manual  90  input=programs/c_rkyv_zero.rs
+qr_round-pair  pair  manual  90  input=programs/c_qr_round.rs
+fatfs_img-pair  pair  manual  90  input=programs/c_fatfs_img.rs
+geo_ops-pair  pair  manual  90  input=programs/c_geo_ops.rs
+rhai_script-pair  pair  manual  90  input=programs/c_rhai_script.rs
+redb_kv-pair  pair  manual  90  input=programs/c_redb_kv.rs
+gix_pure-pair  pair  manual  300  input=programs/c_gix_pure.rs
+lz4_snap-pair  pair  manual  90  input=programs/c_lz4_snap.rs
+calamine_xlsx-pair  pair  manual  180  input=programs/c_calamine_xlsx.rs
+rusqlite_db-pair  pair  manual  300  input=programs/c_rusqlite_db.rs
+crc32fast-pair  pair  manual  90  input=programs/c_crc32fast.rs
+chacha_poly-pair  pair  manual  90  input=programs/c_chacha_poly.rs
+k256_ecdsa-pair  pair  manual  90  input=programs/c_k256_ecdsa.rs
+rsa_pss-pair  pair  manual  400  input=programs/c_rsa_pss.rs
+libflate_zlib-pair  pair  manual  90  input=programs/c_libflate_zlib.rs
+revm_evm-pair  pair  manual  300  input=programs/c_revm_evm.rs
+rustls_cert-pair  pair  manual  180  input=programs/c_rustls_cert.rs
+lyon_tess-pair  pair  manual  90  input=programs/c_lyon_tess.rs
+midly_midi-pair  pair  manual  90  input=programs/c_midly_midi.rs
+jaq_jq-pair  pair  manual  90  input=programs/c_jaq_jq.rs
+kdl_doc-pair  pair  manual  90  input=programs/c_kdl_doc.rs
+ds_obscure-pair  pair  manual  90  input=programs/c_ds_obscure.rs
+qoi_img-pair  pair  manual  90  input=programs/c_qoi_img.rs
+pgp_packet-pair  pair  manual  90  input=programs/c_pgp_packet.rs
+zopfli_deep-pair  pair  manual  300  input=programs/c_zopfli_deep.rs
+simd_json-pair  pair  manual  90  input=programs/c_simd_json.rs
+symphonia_wav-pair  pair  manual  90  input=programs/c_symphonia_wav.rs
+pdf_pair-pair  pair  manual  90  input=programs/c_pdf_pair.rs
+deunicode_slug-pair  pair  manual  90  input=programs/c_deunicode_slug.rs
+malachite_big-pair  pair  manual  90  input=programs/c_malachite_big.rs
+arkworks_ff-pair  pair  manual  90  input=programs/c_arkworks_ff.rs
+im_persistent-pair  pair  manual  90  input=programs/c_im_persistent.rs
+zxcvbn_pass-pair  pair  manual  90  input=programs/c_zxcvbn_pass.rs
+barcoders_gen-pair  pair  manual  90  input=programs/c_barcoders_gen.rs
+bzip2_pure-pair  pair  manual  90  input=programs/c_bzip2_pure.rs
+fixed_point-pair  pair  manual  90  input=programs/c_fixed_point.rs
+openssl_evp-pair  pair  manual  90  input=programs/c_openssl_evp.rs
+wat_parse-pair  pair  manual  90  input=programs/c_wat_parse.rs
+jsonschema-pair  pair  manual  90  input=programs/c_jsonschema.rs
+html5ever-pair  pair  manual  90  input=programs/c_html5ever.rs
+xml_rs-pair  pair  manual  90  input=programs/c_xml_rs.rs
+markdown_it-pair  pair  manual  90  input=programs/c_markdown_it.rs
+logos_lex-pair  pair  manual  90  input=programs/c_logos_lex.rs
+chumsky_parse-pair  pair  manual  90  input=programs/c_chumsky_parse.rs
+ndarray-pair  pair  manual  90  input=programs/c_ndarray.rs
+smartcore-pair  pair  manual  90  input=programs/c_smartcore.rs
+rune-pair  pair  manual  90  input=programs/c_rune.rs
+koto-pair  pair  manual  90  input=programs/c_koto.rs
+parquet2_rw-pair  pair  manual  90  input=programs/c_parquet2_rw.rs
+syntect_fancy-pair  pair  manual  90  input=programs/c_syntect_fancy.rs
+phonenumber-pair  pair  manual  180  input=programs/c_phonenumber.rs
+orgmode-pair  pair  manual  90  input=programs/c_orgmode.rs
+oxc_parse-pair  pair  manual  90  input=programs/c_oxc_parse.rs
+rsa_4096-pair  pair  manual  400  input=programs/c_rsa_4096.rs
+ed25519_default-pair  pair  manual  90  input=programs/c_ed25519_default.rs
+mimalloc-pair  pair  manual  300  input=programs/c_mimalloc.rs  env=CFLAGS=-DMI_PRIM_HAS_PROCESS_ATTACH
+libgit2-pair  pair  manual  300  input=programs/c_libgit2.rs
+rustls_shake-pair  pair  manual  90  input=programs/c_rustls_shake.rs
+zstd_long-pair  pair  manual  90  input=programs/c_zstd_long.rs
+aws_lc-pair  pair  manual  300  input=programs/c_aws_lc.rs
+mlua_lua-pair  pair  manual  180  input=programs/c_mlua_lua.rs
+tantivy-pair  pair  manual  300  input=programs/c_tantivy.rs
+sequoia_pgp-pair  pair  manual  300  input=programs/c_sequoia_pgp.rs
+sqlx_sqlite-pair  pair  manual  90  input=programs/c_sqlx_sqlite.rs
+swc_parse-pair  pair  manual  90  input=programs/c_swc_parse.rs
+miden_exec-pair  pair  manual  180  input=programs/c_miden_exec.rs
+polodb-pair  pair  manual  90  input=programs/c_polodb.rs
+starlark_eval-pair  pair  manual  300  input=programs/c_starlark_eval.rs
+zune_jpeg-pair  pair  manual  90  input=programs/c_zune_jpeg.rs
+candle_mlp-pair  pair  manual  180  input=programs/c_candle_mlp.rs
+pest-pair  pair  manual  90  input=programs/c_pest.rs
+scraper_dom-pair  pair  manual  90  input=programs/c_scraper_dom.rs
+arrow_rs-pair  pair  manual  300  input=programs/c_arrow_rs.rs
+fontdue-pair  pair  manual  90  input=programs/c_fontdue.rs
+unicode_rs-pair  pair  manual  90  input=programs/c_unicode_rs.rs
+rustpython_mini-pair  pair  manual  300  input=programs/c_rustpython_mini.rs  needs=/usr/lib/x86_64-linux-gnu/libffi.so
+tree_sitter-pair  pair  manual  90  input=programs/c_tree_sitter.rs
+bzip2_csys-pair  pair  manual  90  input=programs/c_bzip2_csys.rs
+wasmtime_wat-pair  pair  manual  300  input=programs/c_wasmtime_wat.rs
+risc0_run-pair  pair  manual  300  input=programs/c_risc0_run.rs
+typst_pdf-pair  pair  manual  300  input=programs/c_typst_pdf.rs
+datafusion_sql-pair  pair  manual  400  input=programs/c_datafusion_sql.rs
+miden_prove-pair  pair  manual  400  input=programs/c_miden_prove.rs
+ethers_evm-pair  pair  manual  90  input=programs/c_ethers_evm.rs
+polars_lazy-pair  pair  manual  180  input=programs/c_polars_lazy.rs
+xlsxwriter_rw-pair  pair  manual  180  input=programs/c_xlsxwriter_rw.rs
+resvg_svg-pair  pair  manual  180  input=programs/c_resvg_svg.rs
+comfy_table_render-pair  pair  manual  90  input=programs/c_comfy_table_render.rs
+exr_image-pair  pair  manual  180  input=programs/c_exr_image.rs
+faer_lu-pair  pair  manual  180  input=programs/c_faer_lu.rs
+fastfloat_ryu-pair  pair  manual  90  input=programs/c_fastfloat_ryu.rs
+gluesql_db-pair  pair  manual  180  input=programs/c_gluesql_db.rs
+h3_hex-pair  pair  manual  90  input=programs/c_h3_hex.rs
+jiff_time-pair  pair  manual  90  input=programs/c_jiff_time.rs
+nalgebra_la-pair  pair  manual  90  input=programs/c_nalgebra_la.rs
+plotters_chart-pair  pair  manual  90  input=programs/c_plotters_chart.rs
+polars_frame-pair  pair  manual  300  input=programs/c_polars_frame.rs
+stemmers_multi-pair  pair  manual  90  input=programs/c_stemmers_multi.rs
+tokenizers_hf-pair  pair  manual  180  input=programs/c_tokenizers_hf.rs
+whatlang_detect-pair  pair  manual  90  input=programs/c_whatlang_detect.rs
+jieba_cut-pair  pair  manual  180  input=programs/c_jieba_cut.rs
+zstd_stream-pair  pair  manual  90  input=programs/c_zstd_stream.rs
+opencc-pair  pair  manual  90  input=programs/c_opencc.rs  needs=/tmp/opencc-local  env=OPENCC_DIR=/tmp/opencc-local;OPENCC_LIBS=opencc;LD_LIBRARY_PATH=/tmp/opencc-local/lib
+ugrep_bin-pair  pair  manual  90  input=programs/c_ugrep_bin.rs  needs=/tmp/ugrep-local/bin/ugrep

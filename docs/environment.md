@@ -23,7 +23,7 @@ Host, toolchain and network facts that cost real time when rediscovered.
   a warm cargo. A whole suite run without the proxy fails with
   `HTTP fetch failed ... Network is unreachable`.
 - The local HTTP fixture registries used by `contracts.cargoless-sources` and `contracts.cargoless-git`
-  must bypass the proxy: `tests/support/harness.sh` appends `127.0.0.1,localhost` to `no_proxy`. A
+  must bypass the proxy: `tests/lib/harness.sh` appends `127.0.0.1,localhost` to `no_proxy`. A
   hand-run suite must do the same or those cases go red.
 - `tests/projects/` holds real Cargo projects as submodules. `make projects`
   (`git submodule update --init --recursive`) fetches them and needs the proxy from the macOS

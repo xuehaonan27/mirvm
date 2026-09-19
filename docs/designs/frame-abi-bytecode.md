@@ -289,16 +289,16 @@ the boundary rather than faulting.
 Runtime behavior is judged against fixed native output: the interpreter is the reference and the JIT
 must agree byte-for-byte.
 
-- `make suite S=runtime.semantics`, unwind section (13 items): mixed interpreted and compiled unwind,
+- `make mode M=vmcall  # the exported-entry cases`, unwind section (13 items): mixed interpreted and compiled unwind,
   Drop order, `catch_unwind` and exit 101, including an uncaught guest payload dropping exactly once
   in both tiers and a real `lang_start` main panic being distinguished from a normal
   `Termination` 101.
-- `make suite S=runtime.c-unwind` (13 items): exception identity, Drop and the ordinary-C termination
+- `make case C=c-unwind` (13 items): exception identity, Drop and the ordinary-C termination
   boundary across interpreter and forced-sync JIT, a C++ typed exception passing through the whole
   Engine, a C++ exception terminating at a guest catch, and rejection of non-C/System ABIs.
-- `make suite S=runtime.tsan`: TSan exit code 0 with no data-race warnings, proving the per-thread
+- `make case C=tsan`: TSan exit code 0 with no data-race warnings, proving the per-thread
   region and arena with shared read-only bytecode.
-- `make suite S=runtime.jit-stats` (`tests/scripts/jit_unwind_probe.rs`): the JIT publication path
+- `make case C=jit-stats` (`data/programs/jit_unwind_probe.rs`): the JIT publication path
   through `JITBackend` and the i2c/c2i adapters.
 - Three-dimension byte-equality (mirvm default, native `cargo run`, `MIRVM_JIT_THRESHOLD=1`): the
   four transitions agree with native.

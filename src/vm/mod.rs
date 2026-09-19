@@ -6,7 +6,7 @@
 //!
 //! The pre-M4 spike tree that used to live here was archived (see git history); the one case
 //! set still worth running under TSan (engine Sync, blocking-syscall liveness, host-atomic
-//! interop) now lives in the harness itself (`tests/tsan/src/cases/mixed_stack/`), so nothing in the
+//! interop) now lives in the harness itself (`tests/data/fixtures/tsan/src/cases/mixed_stack/`), so nothing in the
 //! product depends on it.
 
 pub mod engine;

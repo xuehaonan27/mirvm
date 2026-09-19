@@ -76,10 +76,10 @@ Out of scope: JIT admission for `CallForeign`/`CallIndirect`, and the separate i
 Three-dimension byte equality (mirvm default, native `cargo run`, `MIRVM_JIT_THRESHOLD=1`) is the
 requirement, and every shape is exercised as both a parameter and a return, in both directions.
 
-- `tests/scripts/ffi_agg_probe.rs` builds the synthetic matrix — single-field, multi-field, nested and
+- `tests/data/programs/ffi_agg_probe.rs` builds the synthetic matrix — single-field, multi-field, nested and
   array, one to three eightbytes each — and compiles a small `.so` at runtime through `Command` and
   `dlopen`.
-- `make suite S=corpus.run ARGS=tree_sitter`: `tests/scripts/c_tree_sitter.rs` is green in three
+- `make case C=tree_sitter`: `data/programs/c_tree_sitter.rs` is green in three
   dimensions with a fixed 15-line inbound oracle.
 - `make gate` closes the full defense line.
 

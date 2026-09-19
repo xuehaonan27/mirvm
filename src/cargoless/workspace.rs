@@ -944,7 +944,7 @@ mod tests {
     #[test]
     fn reads_contract_workspace_from_root_and_member() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/suites/contracts/fixtures/cargoless/workspace-contract");
+            .join("tests/data/fixtures/cargoless/workspace-contract");
         let workspace = WorkspaceManifest::read(&root).unwrap();
         assert_eq!(
             workspace.members.len(),

@@ -18,7 +18,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       # Shared runners are too small for the full corpus and the shared target dir must stay
-      # bounded: the budget gate clears it past 12G (see tests/support/harness.sh).
+      # bounded: the budget gate clears it past 12G (see tests/lib/harness.sh).
       MIRVM_TARGET_BUDGET_GB: "12"
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +43,7 @@ jobs:
         run: make test
 
       - name: ThreadSanitizer
-        run: make suite S=runtime.tsan
+        run: make case C=tsan
 
       # CI stops here on purpose. `smoke` and `gate` add the corpus (real dependency
       # trees that cost minutes each, with 300-400s per-driver timeouts) and the

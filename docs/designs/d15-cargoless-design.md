@@ -194,7 +194,7 @@ The differential tracks, all run through `make`:
   self-solved version set must equal the lock version set, reconciled item by item. Where it is absent
   (frontmatter scripts), the self-solved lock must be accepted as-is by
   `cargo build --locked --offline`. Unit tests cover the manifest and feature shape matrix.
-- **P2 track** — `MIRVM_DEPS=self make suite S=corpus.run ARGS="--tier smoke"`: 24/24 with stdout,
+- **P2 track** — `MIRVM_DEPS=self make smoke`: 24/24 with stdout,
   stderr and exit code byte-identical to the cargo path, keeping both the self-versus-cargo
   self-consistency axis and the original three-dimension byte equality.
 - **P3 track** — `MIRVM_DEPS=self make gate`: all green, every entry's self path byte-identical to its

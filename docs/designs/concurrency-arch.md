@@ -224,7 +224,7 @@ How `L3` works, and why it is far cheaper than Wasm:
 
 ## 4. Verification
 
-- `make suite S=runtime.tsan` is the verdict for this document: `src/vm` is compiled source-for-source
+- `make case C=tsan` is the verdict for this document: `src/vm` is compiled source-for-source
   under `-Zsanitizer=thread` with `TSAN_OPTIONS=halt_on_error=1`, and every id in the suite's
   `EXPECTED` list must print `PASS` — `mixed-stack-fib`, `atomic-cross-tier`, `blocking-io-liveness`,
   `mixed-stack-unwind`, `engine-atomics-thunk-cache`, `capture-session-lifecycle`,
@@ -234,7 +234,7 @@ How `L3` works, and why it is far cheaper than Wasm:
   TSan covers only the engine's own state (`VmShared`, caches, registry, arena and block pool, the
   publish protocol); guest races are explicitly out of contract, and cases keep guest memory race-free
   so any warning is an engine bug.
-- `make suite S=runtime.semantics`, threads section: the five `tests/scripts/threads_{spawn,channel,sync,time,panic}.rs`
+- `make mode M=vmcall  # the exported-entry cases`, threads section: the five `data/programs/threads_{spawn,channel,sync,time,panic}.rs`
   differentials against native (stdout, exit code, normalized stderr); `c_blocking_io.rs` prints
   `got: [104, 105]` and `c_net_echo_threaded.rs` prints `echo = "echo"`, proving a blocking syscall
   blocks only itself; `c_rayon.rs` prints `par_sort ok = true` inside the 20s hard gate; and
