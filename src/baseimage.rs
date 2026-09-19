@@ -505,7 +505,7 @@ pub fn build_main(mut argv: impl Iterator<Item = String>) -> ExitCode {
         return ExitCode::from(1);
     }
 
-    let rustc_args = vec![
+    let mut rustc_args = vec![
         "mirvm-base-build".to_string(),
         src.display().to_string(),
         "--edition=2024".to_string(),
@@ -513,6 +513,11 @@ pub fn build_main(mut argv: impl Iterator<Item = String>) -> ExitCode {
         "--sysroot".to_string(),
         sysroot,
     ];
+    // The base image key is fnv(build_id, sysroot stamp) and never sees these arguments, so the
+    // frontend flag can go straight in. Applying it here matters as much as in the runner: a
+    // parallel frontend that reordered emitted functions would change the image bytes while the
+    // key stayed the same.
+    rustc_args.push(crate::cli::parallel_frontend_arg().to_string());
     let mut callbacks = BaseBuildCallbacks {
         out: PathBuf::from(out),
         ok: false,

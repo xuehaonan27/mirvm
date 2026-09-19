@@ -43,8 +43,11 @@ pub(crate) fn pack_driver(
         pack_out: Some(out),
     };
     let _compiler_session = compiler_session_guard();
+    // Session view only: the package header keeps the clean snapshot in `callbacks.rustc_args`.
+    let mut session_args = rustc_args.clone();
+    session_args.push(super::parallel_frontend_arg().to_string());
     let compiler_code = rustc_driver::catch_with_exit_code(|| {
-        rustc_driver::run_compiler(&rustc_args, &mut callbacks)
+        rustc_driver::run_compiler(&session_args, &mut callbacks)
     });
     if callbacks.runner_finalization_filter_installed {
         restore_runner_finalization_filter();
@@ -737,8 +740,12 @@ pub(crate) fn run_driver(
         pack_out: None,
     };
     let _compiler_session = compiler_session_guard();
+    // Session view only: `callbacks.rustc_args` is the snapshot the L2 key, the header replay and
+    // the deps-image wrap read, so the frontend flag goes on a separate copy.
+    let mut session_args = rustc_args.clone();
+    session_args.push(super::parallel_frontend_arg().to_string());
     let compiler_code = rustc_driver::catch_with_exit_code(|| {
-        rustc_driver::run_compiler(&rustc_args, &mut callbacks)
+        rustc_driver::run_compiler(&session_args, &mut callbacks)
     });
     if callbacks.runner_finalization_filter_installed {
         restore_runner_finalization_filter();
