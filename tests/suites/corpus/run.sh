@@ -14,41 +14,13 @@
 #   MIRVM_DISK_MIN_GB / MIRVM_TARGET_BUDGET_GB (disk guardrails see shared harness).
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-test_enter_repo
-MIRVM=${MIRVM:-$(pwd)/target/release/mirvm}
+suite_init
 OUT=${OUT:-/tmp/corpus-out}
 mkdir -p "$OUT"
-CORPUS_TIMINGS_FILE=$(mktemp)
+CORPUS_TIMINGS_FILE="$TMP/corpus-timings"
 export CORPUS_TIMINGS_FILE
-trap 'rm -f "$CORPUS_TIMINGS_FILE"' EXIT
 
-tier=all
-group=""
-names=()
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --tier) tier=$2; shift 2 ;;
-        --tier=*) tier=${1#--tier=}; shift ;;
-        --group) group=$2; shift 2 ;;
-        --group=*) group=${1#--group=}; shift ;;
-        *) names+=("$1"); shift ;;
-    esac
-done
-case "$tier" in smoke|full|manual|all) ;; *)
-    echo "corpus.run: invalid tier '$tier' (smoke|full|manual|all)" >&2; exit 64 ;; esac
-
-if [ ${#names[@]} -gt 0 ]; then
-    rows=$(
-        for n in "${names[@]}"; do
-            manifest_lookup "$n" || { echo "corpus.run: $n not registered in cases.manifest" >&2; exit 2; }
-        done
-    ) || exit 2
-elif [ -n "$group" ]; then
-    rows=$(manifest_group_rows "$group" "$tier") || exit 2
-    [ -n "$rows" ] || { echo "corpus.run: group '$group' (tier=$tier) has no entries" >&2; exit 64; }
-else
-    rows=$(manifest_rows "$tier") || exit 2
-fi
+rows=$(corpus_select corpus.run all "$@") || exit $?
 
 cache_snapshot "corpus before start"
 while IFS='|' read -r name _tier tmo mode envv needs args xfail_spec _groups; do

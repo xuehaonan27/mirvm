@@ -211,7 +211,7 @@ Runtime behavior is judged against fixed native output: the interpreter is the r
 | `./tests/run.sh suite runtime.semantics` — unwind section, 13 items: 9 existing unwind/recovery semantics, plus an uncaught guest payload dropping exactly once for interpreter and JIT, cleanup then continuing to call and a second panic, plus interpreter and JIT distinguishing a real `lang_start` main panic from normal `Termination` 101 | mixed interpreted+compiled unwind, Drop order, `catch_unwind`, exit 101 |
 | `./tests/run.sh suite runtime.c-unwind` — 13 items: interpreter and forced-sync JIT preserve exception identity, Drop, and the ordinary-C termination boundary; a C++ typed exception passes through the whole Engine; a C++ exception terminates at a guest catch; rejection of non-C/System ABIs | the ordinary-C / `C-unwind` partition |
 | `./tests/run.sh suite runtime.tsan` — TSan exit code 0, no data-race warnings | per-thread region/arena with shared read-only bytecode (C8) |
-| `./tests/run.sh suite runtime.jit-stats` — `demo/jit_unwind_probe.rs` | JIT publication path (`JITBackend`, i2c/c2i) |
+| `./tests/run.sh suite runtime.jit-stats` — `tests/scripts/jit_unwind_probe.rs` | JIT publication path (`JITBackend`, i2c/c2i) |
 | Three-dimension byte-equality: mirvm default / native `cargo run` / `MIRVM_JIT_THRESHOLD=1` | the four transitions agree with native |
 | TSan single case: `cd tsan && MIRVM_BUILD_ID=0000000000000000 RUSTFLAGS="-Zsanitizer=thread" cargo +nightly-2026-07-02 run -Zbuild-std --target x86_64-unknown-linux-gnu --release -- <case-id>` | the same, outside the bundled suite |
 

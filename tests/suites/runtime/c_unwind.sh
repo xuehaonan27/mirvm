@@ -4,24 +4,16 @@
 # and reject non-C/System ABIs before entering libffi.
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-test_enter_repo
-
-MIRVM=${MIRVM:-$(pwd)/target/release/mirvm}
-CARGO=${CARGO:-$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo}
-RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
-FIXTURE=$(pwd)/tests/fixtures/c_unwind_contract
+suite_init
+FIXTURE=$REPO_ROOT/tests/fixtures/c_unwind_contract
 CONTRACT_HOME=${MIRVM_CONTRACT_HOME:-${MIRVM_HOME:-$HOME/.mirvm}}
 
-[ -x "$MIRVM" ] || { echo "c_unwind: $MIRVM not found" >&2; exit 69; }
-[ -x "$CARGO" ] || { echo "c_unwind: pinned Cargo not found: $CARGO" >&2; exit 69; }
-[ -x "$RUSTC" ] || { echo "c_unwind: pinned rustc not found: $RUSTC" >&2; exit 69; }
+require_executable cargo "$CARGO" || exit $?
+require_executable rustc "$RUSTC" || exit $?
 command -v "${CXX:-c++}" >/dev/null 2>&1 || { echo "c_unwind: C++ compiler unavailable" >&2; exit 69; }
 command -v "${AR:-ar}" >/dev/null 2>&1 || { echo "c_unwind: ar unavailable" >&2; exit 69; }
 ensure_test_sysroot "$MIRVM" "$CONTRACT_HOME" "$RUSTC" || exit $?
 CONTRACT_SYSROOT=$TEST_SYSROOT
-
-TMP=$(mktemp -d) || { echo "c_unwind: cannot create temporary directory" >&2; exit 69; }
-trap 'rm -rf "$TMP"' EXIT
 
 # Pinned Cargo only generates the native oracle. The MIRVM product leg still uses default cargoless,
 # with a separate target directory so one leg's build artifacts cannot answer for the other.

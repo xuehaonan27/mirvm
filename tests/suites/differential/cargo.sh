@@ -6,12 +6,9 @@
 # regression and locks the reason/XPASS behavior when the frontier rolls forward.
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-test_enter_repo
-MIRVM=${MIRVM:-$(pwd)/target/debug/mirvm}
-CARGO=${CARGO:-$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo}
-RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
-RUSTC_APPEND_PROXY=${RUSTC_APPEND_PROXY:-$(pwd)/tests/fixtures/rustc_proxy.sh}
-RUSTC_WRAPPER_PROBE=${RUSTC_WRAPPER_PROBE:-$(pwd)/tests/fixtures/rustc_wrapper_probe.sh}
+suite_init
+RUSTC_APPEND_PROXY=${RUSTC_APPEND_PROXY:-$REPO_ROOT/tests/fixtures/rustc_proxy.sh}
+RUSTC_WRAPPER_PROBE=${RUSTC_WRAPPER_PROBE:-$REPO_ROOT/tests/fixtures/rustc_wrapper_probe.sh}
 SCRIPT_CACHE=${SCRIPT_CACHE:-${MIRVM_HOME:-$HOME/.mirvm}/scripts}
 # This suite is the dedicated cargo-mode differential track: it always takes the cargo
 # three-phase compat path. Even when an outer layer (e.g. a gate DEPS=self full run)
@@ -89,7 +86,6 @@ check_warm() {
     return 1
 }
 
-TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
 # Locate the project directory a frontmatter script materialized (match the crate name in Cargo.toml)
 script_dir() {
@@ -126,12 +122,12 @@ diff_script() {
 }
 
 if [ -n "${ECOSYSTEM_XFAIL_DIAGNOSTIC:-}" ]; then
-    diff_script ecosystem demo/ecosystem.rs ecosystem xfail 0 70 \
+    diff_script ecosystem tests/scripts/ecosystem.rs ecosystem xfail 0 70 \
         "$ECOSYSTEM_XFAIL_DIAGNOSTIC"
 else
-    diff_script ecosystem demo/ecosystem.rs ecosystem green 0
+    diff_script ecosystem tests/scripts/ecosystem.rs ecosystem green 0
 fi
-diff_script ffi_zlib demo/ffi_zlib.rs ffi_zlib green 0
+diff_script ffi_zlib tests/scripts/ffi_zlib.rs ffi_zlib green 0
 diff_script ripgrep_regex tests/fixtures/real_ripgrep_regex.rs real_ripgrep_regex green 0
 diff_script warning_return tests/fixtures/cargo_warning_return.rs cargo_warning_return green 0
 

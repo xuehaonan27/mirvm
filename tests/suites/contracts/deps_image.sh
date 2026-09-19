@@ -10,10 +10,7 @@
 # (deps/*.img cleared at start of this gate — content-addressable and regeneratable, self-heal guaranteed by design; sysroot/base unchanged).
 set -uo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-test_enter_repo
-
-MIRVM=${MIRVM:-target/release/mirvm}
-RUSTC=${RUSTC:-rustc}
+suite_init
 # This gate always takes the cargo compat track: the cross-bin shared deps-image
 # key = fnv(base key, --extern artifact stamp) is content-addressed per track, so
 # the self track (target/cargoless) and the cargo track (target/mirvm), which have
@@ -21,19 +18,14 @@ RUSTC=${RUSTC:-rustc}
 # bare cargo manually, because the self path has no --bin multi-bin selection.
 # Self-track deps-image behavior is covered implicitly by the gate's corpus segment (DEPS=self full run).
 export MIRVM_DEPS=cargo
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
 cp -r tests/fixtures/a2_ws "$TMP/a2_ws"
 WS="$TMP/a2_ws"
-HOST=$($RUSTC -vV | sed -n 's/^host: //p')
+HOST=$(rustc_host)
 DEPS=${MIRVM_HOME:-$HOME/.mirvm}/deps
 SYSROOT=${MIRVM_HOME:-$HOME/.mirvm}/sysroot-$HOST
 # Unified dependency storage: mirvm run (steps 1-5) goes through cargo_project_command into shared
 # target dir; bin2 manually driven by this script must use same location, otherwise extern stamps differ and image is not shared
 TARGET_MIRVM=${MIRVM_TARGET_DIR:-${MIRVM_HOME:-$HOME/.mirvm}/target/mirvm}
-CHANNEL=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
-CARGO=${CARGO:-$HOME/.rustup/toolchains/$CHANNEL-$HOST/bin/cargo}
-MIRVM_ABS=$(cd "$(dirname "$MIRVM")" && pwd)/$(basename "$MIRVM")
 
 abort_test() {
     bad "$*"
@@ -41,7 +33,6 @@ abort_test() {
     exit 1
 }
 
-[ -x "$MIRVM" ] || abort_test "mirvm not found: $MIRVM"
 [ -d "$SYSROOT" ] || abort_test "sysroot not found: $SYSROOT"
 [ -x "$CARGO" ] || abort_test "pinned-toolchain Cargo not found: $CARGO"
 mkdir -p "$DEPS"
@@ -99,10 +90,10 @@ imgs_before_s3c=$(ls "$DEPS" | wc -l)
     cd "$WS"
     env -u RUSTC_WORKSPACE_WRAPPER -u CARGO_BUILD_RUSTC_WRAPPER \
         -u CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER \
-        MIRVM_CARGO_SESSION=1 MIRVM_SYSROOT="$SYSROOT" RUSTC_WRAPPER="$MIRVM_ABS" \
+        MIRVM_CARGO_SESSION=1 MIRVM_SYSROOT="$SYSROOT" RUSTC_WRAPPER="$MIRVM" \
         MIRVM_TIMING=1 MIRVM_NO_IR_CACHE=1 \
         "$CARGO" run --target "$HOST" \
-        --config "target.'cfg(all())'.runner=['$MIRVM_ABS','runner']" \
+        --config "target.'cfg(all())'.runner=['$MIRVM','runner']" \
         --target-dir "$TARGET_MIRVM" --quiet --bin a2_two \
         >"$TMP/s3c.out" 2>"$TMP/s3c.timing"
 ) || abort_test "second-bin run exited non-zero"

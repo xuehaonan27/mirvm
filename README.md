@@ -101,10 +101,10 @@ C++ 异常转换成 Rust panic。完整合同见
 cargo build --release --locked
 
 # 纯单文件
-./target/release/mirvm run demo/fib.rs
+./target/release/mirvm run tests/scripts/fib.rs
 
 # 带 cargo-script frontmatter 的单文件或 Cargo 项目
-./target/release/mirvm run demo/ecosystem.rs
+./target/release/mirvm run tests/scripts/ecosystem.rs
 ./target/release/mirvm run path/to/project -- arg1 arg2
 
 # 单包或 resolver 1/2/3 工作区测试；-- 后参数逐字传给 libtest
@@ -116,14 +116,21 @@ cargo build --release --locked
 ./target/release/mirvm run app.mirvm
 
 # 标准测试入口；完整套件说明见 tests/README.md
-./tests/run.sh fast
-./tests/run.sh smoke
-./tests/run.sh gate
-./tests/run.sh suite corpus.run --tier smoke
+make test                              # 每日提交检查（fast）
+make smoke                             # 加上小型真实负载与运行时语义
+make gate                              # 完整终局门（严格 corpus、deps image、性能上限）
+make suite S=corpus.run ARGS="--tier smoke"
+make list                              # 全部 suite id
 ```
 
-真实 Cargo 项目的对拍走 `corpus/projects/`（vendor 真项目 + manifest `mode=diff` 三维
-逐字节，provenance 钉见其 README）。目前不能宣称支持
+`make` 是对外接口，`tests/run.sh` 是它转发的实现；两者之外不要直接调用任何测试脚本。
+测试素材全部在 `tests/` 下：guest 程序一个目录（`tests/scripts/`，按前缀分 `c_` corpus driver、
+`vmcall_` 导出入口探针、其余差分程序），真实 Cargo 项目一个目录（`tests/projects/`，全部是
+pin 到上游某个 commit 的 submodule，不 vendor 进本仓，先 `make projects` 拉取），夹具/预言值
+在 `tests/fixtures/`，TSan crate 在 `tests/tsan/`。
+
+真实 Cargo 项目的对拍走 `tests/projects/` + manifest `mode=diff` 三维逐字节；未初始化
+submodule 时该条目记 SKIP 而不是 FAIL（pin 与 provenance 见其 README）。目前不能宣称支持
 “任意 Rust 程序”。远程仓库和 GitHub Issues/PRD/PR 操作当前暂停，维护者明确恢复前不要执行。
 
 单文件可使用 cargo script / RFC 3424 风格 frontmatter 声明依赖：

@@ -1,6 +1,2 @@
-/target
-tsan/target/
-/artifacts/real-projects/
-**/__pycache__/
 target/
 /mir_dump/

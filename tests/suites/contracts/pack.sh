@@ -2,21 +2,12 @@
 # pack dual-track contract: default is cargoless zero-Cargo, explicit fallback still driven by pinned Cargo.
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-test_enter_repo
-
-MIRVM=${MIRVM:-$(pwd)/target/debug/mirvm}
-CARGO=${CARGO:-$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo}
-RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
+suite_init
 STRACE=${STRACE:-$(command -v strace)}
 CONTRACT_HOME=${MIRVM_CONTRACT_HOME:-${MIRVM_HOME:-$HOME/.mirvm}}
-[ -x "$MIRVM" ] || { echo "pack_contract: $MIRVM does not exist" >&2; exit 69; }
-[ -x "$CARGO" ] || { echo "pack_contract: pinned Cargo does not exist" >&2; exit 69; }
-[ -x "$STRACE" ] || { echo "pack_contract: strace does not exist" >&2; exit 69; }
+require_executable strace "$STRACE" || exit $?
 ensure_test_sysroot "$MIRVM" "$CONTRACT_HOME" "$RUSTC" || exit $?
 CONTRACT_SYSROOT=$TEST_SYSROOT
-
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
 APP="$TMP/app"
 DEP="$TMP/dep"
 NO_CARGO="$TMP/no-cargo"

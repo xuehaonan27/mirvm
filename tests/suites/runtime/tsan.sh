@@ -6,8 +6,8 @@
 # product: no
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-cd "$REPO_ROOT/tsan"
-TOOLCHAIN=${TOOLCHAIN:-nightly-2026-07-02}
+suite_init --no-product
+cd "$REPO_ROOT/tests/tsan"
 
 # Contract: every id here must print a PASS line. A case that stops running, or is renamed
 # without updating this list, fails the suite instead of silently looking like a pass.

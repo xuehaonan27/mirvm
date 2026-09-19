@@ -5,11 +5,9 @@
 # product: no
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-test_enter_repo
+suite_init --no-product
 
-FIX=$(pwd)/tests/fixtures/gate_truth
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+FIX=$REPO_ROOT/tests/fixtures/gate_truth
 run_diff_case() {
     local scenario="$1" want_code="$2" want_line="$3"
     local diagnostic="${4:-}" out code
@@ -84,7 +82,7 @@ if MIRVM="$FIX/fake_mirvm.sh" TOOLCHAIN=gate-truth-nightly \
     GATE_CALL_LOG="$purity_log" PATH="$FIX:$PATH" \
     /bin/bash tests/suites/runtime/semantics.sh pure >"$TMP/pure.out" 2>&1 \
     && grep -Fxq \
-        'cargo +gate-truth-nightly build --manifest-path tsan/Cargo.toml --release --locked' \
+        'cargo +gate-truth-nightly build --manifest-path tests/tsan/Cargo.toml --release --locked' \
         "$purity_log" \
     && ! grep -Fq 'tests/suites/runtime/tsan.sh' "$purity_log"; then
     ok 'runtime.semantics pure compiles only the purity harness, not TSan again'
@@ -161,21 +159,21 @@ else
     bad 'gate passes off the TSan SKIP as PASS'
 fi
 
-if run_fake_gate "$TMP/gate-probe-skip.out" M51_SKIP_PROBE=simd_shift \
-    && grep -Fq 'SKIP m51_simd_shift: host lacks required CPU feature' \
+if run_fake_gate "$TMP/gate-probe-skip.out" X86_SKIP_PROBE=simd_shift \
+    && grep -Fq 'SKIP x86_simd_shift: host lacks required CPU feature' \
         "$TMP/gate-probe-skip.out" \
-    && ! grep -Fq 'PASS m51_simd_shift' "$TMP/gate-probe-skip.out"; then
+    && ! grep -Fq 'PASS x86_simd_shift' "$TMP/gate-probe-skip.out"; then
     ok 'gate records a missing probe feature as its own SKIP'
 else
     bad 'gate passes off the missing probe feature as PASS'
     cat "$TMP/gate-probe-skip.out"
 fi
 
-if run_fake_gate "$TMP/gate-vector-partial.out" M51_SKIP_VECTOR_FEATURE=sha \
-    && grep -Fq 'PASS m51_x86_vectors/pshufb' "$TMP/gate-vector-partial.out" \
-    && grep -Fq 'SKIP m51_x86_vectors/sha: host lacks sha' \
+if run_fake_gate "$TMP/gate-vector-partial.out" X86_SKIP_VECTOR_FEATURE=sha \
+    && grep -Fq 'PASS x86_vectors/pshufb' "$TMP/gate-vector-partial.out" \
+    && grep -Fq 'SKIP x86_vectors/sha: host lacks sha' \
         "$TMP/gate-vector-partial.out" \
-    && ! grep -Fxq 'PASS m51_x86_vectors' "$TMP/gate-vector-partial.out"; then
+    && ! grep -Fxq 'PASS x86_vectors' "$TMP/gate-vector-partial.out"; then
     ok 'gate records x86 vector sub-features as separate PASS/SKIP'
 else
     bad 'gate passes off the unrun SHA helper as a whole-vector PASS'

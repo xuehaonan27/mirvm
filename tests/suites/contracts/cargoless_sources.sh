@@ -2,28 +2,17 @@
 # Cargo source contract: pinned Cargo is the referee for configuration, alternate registries, source replacement, patch, and replace.
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-test_enter_repo
-
 # This suite uses only a local temporary registry; Cargo acts as the behavioral authority and never touches the public network.
-MIRVM=${MIRVM:-$(pwd)/target/debug/mirvm}
-CARGO=${CARGO:-$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo}
-RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
+suite_init
 STRACE=${STRACE:-$(command -v strace)}
 PYTHON=${PYTHON:-$(command -v python3)}
 CONTRACT_HOME=${MIRVM_CONTRACT_HOME:-${MIRVM_HOME:-$HOME/.mirvm}}
-
-[ -x "$MIRVM" ] || { echo "cargoless_sources_contract: $MIRVM not found" >&2; exit 69; }
-[ -x "$CARGO" ] || { echo "cargoless_sources_contract: pinned Cargo not found" >&2; exit 69; }
-[ -x "$STRACE" ] || { echo "cargoless_sources_contract: strace not found" >&2; exit 69; }
-[ -x "$PYTHON" ] || { echo "cargoless_sources_contract: python3 not found" >&2; exit 69; }
-case "$($CARGO --version)" in
-    "cargo 1.98.0-nightly "*) ;;
-    *) echo "ERROR cargoless_sources: Cargo version not in contract" >&2; exit 69 ;;
-esac
+require_executable strace "$STRACE" || exit $?
+require_executable python3 "$PYTHON" || exit $?
+require_pinned_cargo || exit $?
 ensure_test_sysroot "$MIRVM" "$CONTRACT_HOME" "$RUSTC" || exit $?
 CONTRACT_SYSROOT=$TEST_SYSROOT
 
-TMP=$(mktemp -d)
 SERVER_PID=""
 cleanup() {
     if [ -n "$SERVER_PID" ]; then

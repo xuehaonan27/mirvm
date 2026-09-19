@@ -1,11 +1,14 @@
 # shellcheck shell=bash
 # tests/support/harness.sh -- shared library for the test suites (sourced, never executed directly).
 #
-# Provides four groups of helpers:
-#   1) unified PASS/FAIL/SKIP/XFAIL accounting (ok/bad/skip/red + the summary trailer)
-#   2) cases.manifest parsing (manifest_rows: single source of truth -> normalized rows)
-#   3) the corpus driver runner (corpus_run: env/needs/timeout/timing/disk guard in one place)
-#   4) disk and cache management (disk_guard / target_budget_check / cache_snapshot)
+# Provides:
+#   1) suite_init: the bootstrap every leaf suite starts with (paths, toolchain, product binary,
+#      private temporary directory)
+#   2) unified PASS/FAIL/SKIP/XFAIL accounting (ok/bad/skip/red + the summary trailer) and timing
+#   3) cases.manifest parsing (manifest_rows: single source of truth -> normalized rows)
+#   4) the corpus driver runner (corpus_run: env/needs/timeout/timing/disk guard in one place)
+#   5) comparison primitives (normalize_stderr)
+#   6) disk and cache management (disk_guard / target_budget_check / cache_snapshot)
 #
 # Convention: sourcing scripts run their own set -u; counters start at 0 when this file is sourced.
 
@@ -32,7 +35,7 @@ require_executable() { # <description> <path>
 
 ensure_test_sysroot() { # <mirvm> <test-home> <rustc>; result exported as TEST_SYSROOT
     local mirvm=$1 test_home=$2 rustc=$3 host tmp code=0 shared_sysroot
-    host=$($rustc -vV | sed -n 's/^host: //p') || return 69
+    host=$(rustc_host "$rustc") || return 69
     TEST_SYSROOT=${MIRVM_SYSROOT:-$test_home/sysroot-$host}
     if [ -d "$TEST_SYSROOT/lib/rustlib/$host/lib" ]; then
         export TEST_SYSROOT
@@ -57,6 +60,72 @@ ensure_test_sysroot() { # <mirvm> <test-home> <rustc>; result exported as TEST_S
     fi
     rm -rf "$tmp"
     export TEST_SYSROOT
+}
+
+# ---- ⓪ bootstrap ----
+# suite_init [--no-product]: the first executable statement of every leaf suite. Enters the
+# repository root, resolves the pinned toolchain, resolves and validates the product binary, and
+# hands the suite a private temporary directory whose cleanup is already armed on EXIT.
+#
+#   - TOOLCHAIN comes from rust-toolchain.toml. CARGO/RUSTC are taken from the environment when it
+#     already provides them (tests/run.sh exports both, and harness.truth drives suites with fake
+#     runners), and are otherwise resolved through that toolchain's sysroot, falling back to
+#     whatever is on PATH. No suite records a host triple or an absolute toolchain path.
+#   - MIRVM defaults to the release build; an explicitly exported MIRVM always wins. --no-product
+#     skips it for suites that never execute a guest program and declare `# product: no`.
+#   - A suite that needs a pinned Cargo version contract or a test sysroot still checks that itself.
+#   - Failure here is an environment error, never a verdict: the suite exits 69.
+# Exports: TOOLCHAIN CARGO RUSTC TMP, plus MIRVM unless --no-product. TMP is removed on exit, so a
+# suite that replaces the EXIT trap must also remove "$TMP" (or keep its own files under it).
+suite_init() {
+    local want_product=1 sysroot
+    [ "${1:-}" = "--no-product" ] && want_product=0
+    test_enter_repo
+
+    TOOLCHAIN=${TOOLCHAIN:-$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)}
+    if [ -z "${CARGO:-}" ] || [ -z "${RUSTC:-}" ]; then
+        sysroot=$(rustc +"$TOOLCHAIN" --print sysroot 2>/dev/null)
+        CARGO=${CARGO:-${sysroot:+$sysroot/bin/cargo}}
+        RUSTC=${RUSTC:-${sysroot:+$sysroot/bin/rustc}}
+        CARGO=${CARGO:-cargo}
+        RUSTC=${RUSTC:-rustc}
+    fi
+    export TOOLCHAIN CARGO RUSTC
+
+    TMP=$(mktemp -d) || { echo "ERROR cannot create a temporary directory" >&2; exit 69; }
+    trap 'rm -rf "$TMP"' EXIT
+    export TMP
+
+    [ "$want_product" -eq 1 ] || return 0
+    MIRVM=${MIRVM:-$REPO_ROOT/target/release/mirvm}
+    require_executable MIRVM "$MIRVM" || exit $?
+    MIRVM=$(realpath "$MIRVM")
+    export MIRVM
+}
+
+# rustc_host [rustc]: the host triple of a rustc. It names the local store's sysroot-<host>
+# directory, and both the tests and the product must agree on it.
+rustc_host() {
+    "${1:-${RUSTC:-rustc}}" -vV | sed -n 's/^host: //p'
+}
+
+# The Cargo the contract suites judge against must be the pinned nightly, not whatever `cargo` is
+# first on PATH. The version string below is the one paired with the channel in rust-toolchain.toml;
+# bump the two together.
+PINNED_CARGO_VERSION=${PINNED_CARGO_VERSION:-cargo 1.98.0-nightly}
+require_pinned_cargo() {
+    local got
+    got=$("${CARGO:-cargo}" --version 2>/dev/null) || {
+        echo "ERROR cannot run Cargo: ${CARGO:-cargo}" >&2
+        return 69
+    }
+    case "$got" in
+        "$PINNED_CARGO_VERSION "*) return 0 ;;
+        *)
+            echo "ERROR Cargo is not the pinned ${PINNED_CARGO_VERSION}: $got" >&2
+            return 69
+            ;;
+    esac
 }
 
 # ---- ① accounting ----
@@ -161,10 +230,57 @@ manifest_lookup() {
     printf '%s\n' "$row"
 }
 
+# corpus_select <caller> <default-tier> [suite args...] -- normalize the shared selection of a
+# corpus batch and print the manifest rows (manifest_rows field order). Selection is by name,
+# otherwise by --group, otherwise by tier; an explicit name ignores the group filter. Diagnostics
+# carry the <caller> prefix: 64 for a usage error (bad tier, empty group, missing option value),
+# 2 for an unregistered name or an unreadable manifest. Callers must propagate the exact status
+# (`rows=$(corpus_select ...) || exit $?`), because 64 and 2 mean different things.
+corpus_select() {
+    local caller=$1 default_tier=$2
+    shift 2
+    local tier=$default_tier group="" rows n
+    local -a names=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --tier|--group)
+                [ $# -ge 2 ] || { echo "$caller: $1 needs a value" >&2; return 64; }
+                if [ "$1" = --tier ]; then tier=$2; else group=$2; fi
+                shift 2 ;;
+            --tier=*) tier=${1#--tier=}; shift ;;
+            --group=*) group=${1#--group=}; shift ;;
+            *) names+=("$1"); shift ;;
+        esac
+    done
+    case "$tier" in
+        smoke|full|manual|all) ;;
+        *) echo "$caller: invalid tier '$tier' (smoke|full|manual|all)" >&2; return 64 ;;
+    esac
+    if [ ${#names[@]} -gt 0 ]; then
+        for n in "${names[@]}"; do
+            manifest_lookup "$n" || {
+                echo "$caller: $n is not registered in cases.manifest" >&2
+                return 2
+            }
+        done
+        return 0
+    fi
+    if [ -n "$group" ]; then
+        rows=$(manifest_group_rows "$group" "$tier") || return 2
+        [ -n "$rows" ] || {
+            echo "$caller: group '$group' (tier=$tier) has no entries" >&2
+            return 64
+        }
+        printf '%s\n' "$rows"
+        return 0
+    fi
+    manifest_rows "$tier" || return 2
+}
+
 # ---- ④ corpus driver runner ----
 # corpus_run <outdir> <name> <tmo> <env> <needs> [args...]
 # Behavior:
-#   - driver location: corpus/c_<name>.rs (script) or corpus/projects/<name>/ (project,
+#   - driver location: tests/scripts/c_<name>.rs (script) or tests/projects/<name>/ (project,
 #     mirvm run <directory>); neither exists -> return 2 (registration error, caller records FAIL)
 #   - needs absent -> return 77 (caller records SKIP)
 #   - export each K=V in the env string item by item, unset after the run
@@ -177,14 +293,14 @@ corpus_run() {
     local outdir="$1" name="$2" tmo="$3" envv="$4" needs="$5"
     shift 5
     local mirvm=${MIRVM:-$(pwd)/target/release/mirvm}
-    local src="corpus/c_$name.rs" proj="corpus/projects/$name"
+    local src="tests/scripts/c_$name.rs" proj="tests/projects/$name"
     local target=""
     if [ -f "$src" ]; then
         target="$src"
     elif [ -d "$proj" ]; then
         target="$proj"
     else
-        echo "corpus_run: $name is registered in the manifest but has no driver under corpus/" >&2
+        echo "corpus_run: $name is registered in the manifest but has no driver under tests/scripts/ or tests/projects/" >&2
         return 2
     fi
     if [ -n "$needs" ] && [ ! -e "$needs" ]; then
@@ -254,7 +370,15 @@ parse_args() {
     IFS=$_oldifs
 }
 
-# ---- ⑤ disk and cache management ----
+# ---- ⑤ comparison primitives ----
+# normalize_stderr <file> <out>: the only normalization the differential contracts allow by
+# default. A guest panic header carries the thread name and TID, and those drift per process; every
+# other byte must match, so a filter that hides anything else has to be justified in the suite.
+normalize_stderr() {
+    sed -E "s/thread '[^']*' \([0-9]+\)/thread 'T'/" "$1" >"$2"
+}
+
+# ---- ⑥ disk and cache management ----
 _mirvm_home() { printf '%s' "${MIRVM_HOME:-$HOME/.mirvm}"; }
 
 _avail_gb() {  # <path> -> available GiB (integer)

@@ -11,47 +11,18 @@
 # (deps/ir cleared per run, cargoless/cargo target stores kept for reuse).
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-test_enter_repo
-MIRVM=${MIRVM:-$(pwd)/target/release/mirvm}
-[ -x "$MIRVM" ] || { echo "corpus_deps_pair: $MIRVM does not exist (run cargo build --release first)" >&2; exit 69; }
-CORPUS_TIMINGS_FILE=$(mktemp); export CORPUS_TIMINGS_FILE
-trap 'rm -f "$CORPUS_TIMINGS_FILE"' EXIT
+suite_init
+CORPUS_TIMINGS_FILE="$TMP/corpus-timings"; export CORPUS_TIMINGS_FILE
 
-tier=smoke
-group=""
-names=()
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --tier) tier=$2; shift 2 ;;
-        --tier=*) tier=${1#--tier=}; shift ;;
-        --group) group=$2; shift 2 ;;
-        --group=*) group=${1#--group=}; shift ;;
-        *) names+=("$1"); shift ;;
-    esac
-done
-case "$tier" in smoke|full|manual|all) ;; *)
-    echo "corpus_deps_pair: invalid tier '$tier'" >&2; exit 64 ;; esac
-
-if [ ${#names[@]} -gt 0 ]; then
-    rows=$(
-        for n in "${names[@]}"; do
-            manifest_lookup "$n" || { echo "corpus_deps_pair: $n not registered" >&2; exit 2; }
-        done
-    ) || exit 2
-elif [ -n "$group" ]; then
-    rows=$(manifest_group_rows "$group" "$tier") || exit 2
-    [ -n "$rows" ] || { echo "corpus_deps_pair: group '$group' (tier=$tier) has no entries" >&2; exit 64; }
-else
-    rows=$(manifest_rows "$tier") || exit 2
-fi
+rows=$(corpus_select corpus.deps-pair smoke "$@") || exit $?
 
 OUT_C=$(mktemp -d /tmp/corpair-cargo-XXXXXX)
 OUT_S=$(mktemp -d /tmp/corpair-self-XXXXXX)
 # KEEP_OUT=1: preserve both legs' output scenes (for triage); default removes on exit.
 if [ "${KEEP_OUT:-0}" = 1 ]; then
-    trap 'rm -f "$CORPUS_TIMINGS_FILE"; echo "corpair scene preserved: $OUT_C $OUT_S" >&2' EXIT
+    trap 'rm -rf "$TMP"; echo "corpair scene preserved: $OUT_C $OUT_S" >&2' EXIT
 else
-    trap 'rm -rf "$OUT_C" "$OUT_S" "$CORPUS_TIMINGS_FILE"' EXIT
+    trap 'rm -rf "$TMP" "$OUT_C" "$OUT_S"' EXIT
 fi
 
 while IFS='|' read -r name _tier tmo mode envv needs args _xfail _groups; do
@@ -71,8 +42,8 @@ while IFS='|' read -r name _tier tmo mode envv needs args _xfail _groups; do
     ok=1 why=""
     # Before comparing stderr, normalize panic-header thread names/TIDs (the differential suite already has the same precedent:
     # TID drifts naturally per process and is not byte-comparable; only normalize the inherently unstable part, other differences stay red).
-    sed -E "s/thread '[^']*' \([0-9]+\)/thread 'T'/" "$OUT_C/$name.err" >"$OUT_C/$name.err.n"
-    sed -E "s/thread '[^']*' \([0-9]+\)/thread 'T'/" "$OUT_S/$name.err" >"$OUT_S/$name.err.n"
+    normalize_stderr "$OUT_C/$name.err" "$OUT_C/$name.err.n"
+    normalize_stderr "$OUT_S/$name.err" "$OUT_S/$name.err.n"
     if [ "$cc" != "$sc" ]; then ok=0; why="exit codes cargo=$cc self=$sc"
     elif ! diff -q "$OUT_C/$name.out" "$OUT_S/$name.out" >/dev/null; then ok=0; why="stdout differs"
     elif ! diff -q "$OUT_C/$name.err.n" "$OUT_S/$name.err.n" >/dev/null; then ok=0; why="stderr differs"

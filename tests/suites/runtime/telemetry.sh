@@ -10,13 +10,8 @@
 # under any circumstance.
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-test_enter_repo
+suite_init
 
-MIRVM=${MIRVM:-$REPO_ROOT/target/release/mirvm}
-require_executable MIRVM "$MIRVM" || exit $?
-
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
 HOME_DIR="$TMP/home"
 mkdir -p "$HOME_DIR"
 ensure_test_sysroot "$MIRVM" "$HOME_DIR" "$RUSTC" || exit $?

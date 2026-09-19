@@ -3,29 +3,17 @@
 # must produce identical test results, and the self leg must hold when Cargo is unavailable.
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-test_enter_repo
-
-MIRVM=${MIRVM:-$(pwd)/target/debug/mirvm}
-CARGO=${CARGO:-$HOME/.rustup/toolchains/nightly-2026-07-02-x86_64-unknown-linux-gnu/bin/cargo}
-RUSTC=${RUSTC:-$(dirname "$CARGO")/rustc}
+suite_init
 STRACE=${STRACE:-$(command -v strace)}
-FIXTURE=$(pwd)/tests/fixtures/cless_test_contract
-PROC_FIXTURE=$(pwd)/tests/fixtures/cless_proc_macro_test_contract
-DOC_FIXTURE=$(pwd)/tests/fixtures/cless_doctest_contract
+FIXTURE=$REPO_ROOT/tests/fixtures/cless_test_contract
+PROC_FIXTURE=$REPO_ROOT/tests/fixtures/cless_proc_macro_test_contract
+DOC_FIXTURE=$REPO_ROOT/tests/fixtures/cless_doctest_contract
 CONTRACT_HOME=${MIRVM_CONTRACT_HOME:-${MIRVM_HOME:-$HOME/.mirvm}}
-HOST=$($RUSTC -vV | sed -n 's/^host: //p')
-[ -x "$MIRVM" ] || { echo "cargoless_test_contract: $MIRVM does not exist" >&2; exit 69; }
-[ -x "$CARGO" ] || { echo "cargoless_test_contract: pinned Cargo $CARGO does not exist" >&2; exit 69; }
-[ -x "$STRACE" ] || { echo "cargoless_test_contract: strace does not exist" >&2; exit 69; }
+HOST=$(rustc_host)
+require_executable strace "$STRACE" || exit $?
 ensure_test_sysroot "$MIRVM" "$CONTRACT_HOME" "$RUSTC" || exit $?
 CONTRACT_SYSROOT=$TEST_SYSROOT
-case "$($CARGO --version)" in
-    "cargo 1.98.0-nightly "*) ;;
-    *) echo "ERROR cargoless_test: Cargo version not in contract: $($CARGO --version)" >&2; exit 69 ;;
-esac
-
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+require_pinned_cargo || exit $?
 mkdir -p "$TMP/no-cargo"
 cat >"$TMP/no-cargo/cargo" <<'EOF'
 #!/bin/sh

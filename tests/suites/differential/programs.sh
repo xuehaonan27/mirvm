@@ -1,31 +1,26 @@
 #!/usr/bin/env bash
-# Full differential (sole engine = M4 bytecode VM; tier-0 removed, oracle always native):
-# demo/*.rs native compile+run vs mirvm main startup-chain run, compare stdout, stderr + exit code.
-# Historical all-green baseline grew step by step (M4.4+ includes threads_*; M5.0+ includes asm_probe;
-# real-project TDD added track_caller_fn_ptr/u128_switch/volatile_wide; M5.2+ includes intrinsic_probe/
-# recursion_deep/simd_probe/atomic_order_probe/float_wide_probe/asm_extras_probe/signal_probe/fork_exec_probe/nested_dst_probe/wide_int_probe).
-# P1+ includes struct_fnptr_escape (struct-embedded fn-ptr escape negative control, 31/31).
-# Step 0+ includes weak_extern/global_asm_guest_fn; batch 9+ includes zst_drop; C1+ includes
-# ffi_agg_probe (by-value aggregate FfiAgg synthetic matrix); C3+ includes noreturn_ud2 (asm noreturn
-# terminal shape, exit=132 both sides same); E9+ includes dl_iterate_phdr_probe (native callback differential).
-# ecosystem/ffi_zlib has Cargo frontmatter and is covered by differential.cargo; this suite explicitly skips it.
+# Program differential: every freestanding program in tests/scripts/ is compiled by the pinned
+# rustc and by mirvm, then both runs must agree on stdout, stderr and exit code (native is the
+# authority). The comparison is repeated on a warm run, so a cache replay cannot fake a green.
+# Two kinds of file are not part of this batch: `c_*.rs` are corpus drivers (exit-code/oracle
+# contract, judged by corpus.run and corpus.contract), and ecosystem/ffi_zlib carry Cargo
+# frontmatter (judged by differential.cargo).
+# ONLY=<name> restricts the batch to one program (fib always runs).
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-test_enter_repo
-
-MIRVM=${MIRVM:-target/debug/mirvm}
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
-for src in demo/*.rs; do
+suite_init
+for src in tests/scripts/*.rs; do
     name=$(basename "$src" .rs)
     [ "$name" = "fib" ] || [ -z "${ONLY:-}" ] || [ "$name" = "$ONLY" ] || continue
 
-    # These two files carry Cargo frontmatter and must be compiled by differential.cargo; any other
-    # rustc failure is a real regression and must not be swallowed by SKIP.
-    if [ "$name" = ecosystem ] || [ "$name" = ffi_zlib ]; then
-        skip "$name (Cargo frontmatter; see differential.cargo)"
-        continue
-    fi
+    case "$name" in
+        c_*) continue ;; # corpus driver
+        vmcall_*) continue ;; # --vm-call probe: driven by runtime.semantics
+        ecosystem | ffi_zlib)
+            skip "$name (Cargo frontmatter; see differential.cargo)"
+            continue
+            ;;
+    esac
 
     # native (same pinned toolchain; suppress environment interference)
     rustc --edition 2024 -o "$TMP/$name" "$src" 2>"$TMP/$name.rustc.err" || {
@@ -51,8 +46,8 @@ for src in demo/*.rs; do
 
     # stderr comparison: only normalize thread names and TIDs that are inherently unstable; any extra diagnostic on either side fails.
     if [ $ok = 1 ]; then
-        sed -E "s/thread '[^']*' \([0-9]+\)/thread 'T'/" "$TMP/$name.native.err" >"$TMP/$name.native.err.n"
-        sed -E "s/thread '[^']*' \([0-9]+\)/thread 'T'/" "$TMP/$name.mirvm.err" >"$TMP/$name.mirvm.err.n"
+        normalize_stderr "$TMP/$name.native.err" "$TMP/$name.native.err.n"
+        normalize_stderr "$TMP/$name.mirvm.err" "$TMP/$name.mirvm.err.n"
         if ! diff -q "$TMP/$name.native.err.n" "$TMP/$name.mirvm.err.n" >/dev/null; then
             ok=0; why="stderr differs"
         fi
@@ -64,7 +59,7 @@ for src in demo/*.rs; do
     if [ $ok = 1 ]; then
         env -u RUST_BACKTRACE "$MIRVM" run "$src" >"$TMP/$name.mirvm2.out" 2>"$TMP/$name.mirvm2.err"
         mirvm2_code=$?
-        sed -E "s/thread '[^']*' \([0-9]+\)/thread 'T'/" "$TMP/$name.mirvm2.err" >"$TMP/$name.mirvm2.err.n"
+        normalize_stderr "$TMP/$name.mirvm2.err" "$TMP/$name.mirvm2.err.n"
         if ! diff -q "$TMP/$name.native.out" "$TMP/$name.mirvm2.out" >/dev/null; then
             ok=0; why="L2 warm rerun stdout differs"
         elif [ "$native_code" != "$mirvm2_code" ]; then

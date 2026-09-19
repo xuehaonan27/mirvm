@@ -30,17 +30,17 @@ case "$script" in
         ;;
     tests/suites/runtime/x86_features.sh)
         for probe in addcarry xgetbv simd_insert simd_shift vzeroupper; do
-            if [ "${M51_SKIP_PROBE:-}" = "$probe" ]; then
-                echo "SKIP m51_$probe: host lacks required CPU feature"
+            if [ "${X86_SKIP_PROBE:-}" = "$probe" ]; then
+                echo "SKIP x86_$probe: host lacks required CPU feature"
             else
-                echo "PASS m51_$probe"
+                echo "PASS x86_$probe"
             fi
         done
         for feature in pshufb sha; do
-            if [ "${M51_SKIP_VECTOR_FEATURE:-}" = "$feature" ]; then
-                echo "SKIP m51_x86_vectors/$feature: host lacks $feature"
+            if [ "${X86_SKIP_VECTOR_FEATURE:-}" = "$feature" ]; then
+                echo "SKIP x86_vectors/$feature: host lacks $feature"
             else
-                echo "PASS m51_x86_vectors/$feature"
+                echo "PASS x86_vectors/$feature"
             fi
         done
         ;;

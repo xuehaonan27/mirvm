@@ -13,11 +13,7 @@
 # index/src cache. The cargo leg of a script case may use the network for fresh resolution.
 set -u
 . "$(dirname "${BASH_SOURCE[0]}")/../../support/harness.sh"
-test_enter_repo
-MIRVM=${MIRVM:-$(pwd)/target/debug/mirvm}
-[ -x "$MIRVM" ] || { echo "diff_cless: $MIRVM not found (build it first)" >&2; exit 69; }
-MIRVM=$(realpath "$MIRVM")
-TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+suite_init
 
 # Self-leg environment: PATH holds only mirvm (neither cargo nor rustc is on PATH)
 mkdir -p "$TMP/bin"

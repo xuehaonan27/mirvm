@@ -79,8 +79,8 @@ L2 design points (pre-research checklist for construction ②):
 
 | Workload | Wall clock | Meaning |
 |---|---|---|
-| `demo/args_env.rs` (std-only fast path) | **0.40s** | front end + monomorphization + lowering + run, std-only graph |
-| `demo/ecosystem.rs` (serde+serde_json+rand+regex) | **3.07s** (reproducible) | dependency rmeta all cached; these 3s are **paid on every run**: leaf front end + pulling dependency MIR + whole-graph monomorphization + lowering + run |
+| `tests/scripts/args_env.rs` (std-only fast path) | **0.40s** | front end + monomorphization + lowering + run, std-only graph |
+| `tests/scripts/ecosystem.rs` (serde+serde_json+rand+regex) | **3.07s** (reproducible) | dependency rmeta all cached; these 3s are **paid on every run**: leaf front end + pulling dependency MIR + whole-graph monomorphization + lowering + run |
 
 Conclusion: the cold-start pain is **not** in dependency resolution (one-time), nor mainly in dependency compilation (one-time, parallel, incremental), but in the load phase paid on every run. The ripgrep tier at 3.7–4.7s (historical real-project measurements) behaves the same. The split inside that phase (front end / metadata / mono / lowering / guest) is **unmeasured** — the task of construction ①; the ledger comes before cache design (research-first discipline).
 
@@ -108,7 +108,7 @@ Conclusion: the cold-start pain is **not** in dependency resolution (one-time), 
 - **Gate:** `./tests/run.sh` (`fast` / `smoke` / `gate`, plus `suite <id>` and `list`), suites under `tests/suites/`; L2 adds an acceptance dimension to this gate, not a parallel harness.
 - **Construction ① ledger:** a time dimension on the existing `--vm-stats` instrumentation; it produces the per-phase numbers section 2.6 lacks.
 - **Cache management:** `mirvm cache status|purge` (stale-generation GC / whole family / scripts / full clear); the root is `$HOME/.mirvm`, relocated by `MIRVM_HOME`. `MIRVM_BUILD_ID` keys every layer, so a rebuild invalidates base/deps/L2 images by design.
-- **Baseline reproduction:** release build (a debug build distorts every timing gate), warm cache, EPYC 7773X, `demo/args_env.rs` 0.40s and `demo/ecosystem.rs` 3.07s.
+- **Baseline reproduction:** release build (a debug build distorts every timing gate), warm cache, EPYC 7773X, `tests/scripts/args_env.rs` 0.40s and `tests/scripts/ecosystem.rs` 3.07s.
 
 ## 5. Open items
 
