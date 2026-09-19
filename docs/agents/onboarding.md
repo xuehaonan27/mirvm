@@ -29,6 +29,14 @@
 - **`rg` 是 7 个套件的断言工具**（`tests/suites/contracts/*`、`runtime/*`），容器与 CI
   都没有预装；缺它不是 SKIP 而是大量 `rg: command not found` 假红。装到 PATH 上即可
   （无免密 sudo 时用官方 musl 静态二进制放 `~/.cargo/bin`）。
+- **`tsan/` 是独立 crate**（不在根 workspace 里）：把 `src/vm` 逐文件 `#[path]` 重编一份，在
+  `-Zsanitizer=thread -Zbuild-std` 下跑并发用例——它是全仓唯一的竞争检测器，也是唯一强制
+  `src/vm` 零 `rustc_private` 的栅栏（`cargo check --all-features` 拦不住）。门是
+  `bash tests/suites/runtime/tsan.sh`，由 `runtime.semantics` 在 smoke/gate 里驱动（`fast` 不含）；
+  单跑一个用例：`cd tsan && MIRVM_BUILD_ID=0000000000000000 RUSTFLAGS="-Zsanitizer=thread"
+  cargo +nightly-2026-07-02 run -Zbuild-std --target x86_64-unknown-linux-gnu --release -- <case-id>`。
+  覆盖与不覆盖的面见 `tsan/README.md`（JIT 不在网内；TSD teardown 轮次与 fork 子代的 capture
+  重建在 TSan 下不可达）。
 - `contracts.cargoless-sources` 与 `contracts.cargoless-git` 里有一批**本机 HTTP fixture
   registry**（`127.0.0.1:<临时端口>` 的 sparse index / config.json）。整轮跑在 `withproxy`
   下时，代理会去连这些本机地址并返回 "empty reply from server"，于是 alternate registry、

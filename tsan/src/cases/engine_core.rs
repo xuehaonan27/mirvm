@@ -1,4 +1,4 @@
-//! Multi-threaded TSan case for the engine (carried by the `runtime.tsan` gate).
+//! The product engine on N real threads: per-thread attach + guest atomics + the thunk cache.
 //!
 //! 8 host threads share one `Shared`; each attaches at the boundary to get its per-thread Ctx:
 //! ① interpret a guest atomic increment (AtomicRmw -- the engine must issue a real host
@@ -11,12 +11,12 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::ctx::{Engine, Shared, attach};
-use super::ir::{
+use crate::vm::engine::ctx::{Engine, Shared, attach};
+use crate::vm::engine::ir::{
     Block, FfiKind, ForeignSig, FuncBody, IntBinOp, MemOrd, Module, Operand, ParamAbi, RetAbi,
     RmwOp, Rvalue, ScalarPlace, Slot, Stmt, Terminator, Width,
 };
-use super::{interp, thunks};
+use crate::vm::engine::{interp, thunks};
 
 /// Hand-built Module: fn0 `bump(addr) -> previous value` (atomic +1); fn1
 /// `add3(x) -> x+3` (the thunk target).
@@ -76,7 +76,7 @@ fn build_module() -> Module {
     }
 }
 
-pub fn run() -> bool {
+pub(crate) fn run_engine_atomics_thunk_cache() -> bool {
     let engine = Engine::new(Shared::new(build_module()));
     let shared = std::sync::Arc::clone(engine.shared());
     static CELL: AtomicU64 = AtomicU64::new(0);
@@ -131,8 +131,9 @@ pub fn run() -> bool {
         .enumerate()
         .all(|(t, &a)| a == 64 * t as u64 + 2208);
     let ok = total == THREADS * N && same_thunk && accs_ok;
+    let verdict = if ok { "PASS" } else { "FAIL" };
     println!(
-        "tsan_mt: total={total} (want {}) same_thunk={same_thunk} accs_ok={accs_ok}",
+        "{verdict} engine-atomics-thunk-cache total={total} (want {}) same_thunk={same_thunk} accs_ok={accs_ok}",
         THREADS * N
     );
     ok

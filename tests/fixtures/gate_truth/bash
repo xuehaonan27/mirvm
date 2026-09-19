@@ -24,7 +24,7 @@ case "$script" in
         if [ -n "${SKIP_TSAN:-}" ]; then
             echo 'SKIP TSan (SKIP_TSAN=1)'
         else
-            echo 'PASS TSan (includes the real tsan_mt multi-threaded body; zero warnings)'
+            echo 'PASS TSan (all concurrency cases run, zero warnings)'
         fi
         echo '== runtime.semantics: 1 passed, 0 skipped, 0 expected-failed, 0 failed =='
         ;;

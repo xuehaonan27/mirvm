@@ -19,8 +19,6 @@ pub(crate) mod native_instance;
 pub(crate) mod signal;
 pub(crate) mod stats;
 pub(crate) mod thunks;
-#[allow(dead_code)]
-pub(crate) mod tsan_mt;
 pub(crate) mod unwind;
 pub(crate) mod verify;
 

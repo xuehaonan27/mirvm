@@ -1,29 +1,13 @@
-//! Concurrency workload for the TSan harness: N **real host threads** each run `interp_frame`,
-//! and the verdict is TSan-clean (gate: `tests/suites/runtime/tsan.sh`).
+//! Mixed-stack cases: interpreted frames, compiled stand-ins and unwind sharing one native
+//! stack, run on N real threads under TSan.
 //!
-//! Three claims the cases pin:
-//! 1. **Engine is Sync, no GIL**: shared read-only program + per-thread execution state, zero
-//!    data races on VM-owned state. The cases keep the guest race-free (guest races are out
-//!    of contract), so any TSan report is an engine bug.
-//! 2. **Blocking syscall liveness**: the socketpair scenario that deadlocks under tier-0
-//!    cooperative scheduling must pass on real threads -- blocking stalls only its own OS
-//!    thread.
-//! 3. **Atomics = host atomics, cross-tier interoperable**: the interpreter executing a guest
-//!    atomic must issue a real host atomic (tier-0 may simulate with plain reads/writes, which
-//!    is legal single-threaded; on real threads that becomes an engine data race that TSan
-//!    catches). Interpreter and compiler threads interoperate on the same real address through
-//!    atomic RMW (real address model).
+//! These four were spike 4 (with spike 3's unwind protocol) and moved here when the spike
+//! tree was archived. They exercise the *skeleton* interpreter in this file, not the product
+//! engine: the product engine's cases live in `engine_core`, and the engine's newer
+//! concurrency surfaces have their own cases next to this one.
 //!
-//! The three-part state is realized in the skeleton: `Shared` (read-only after publication) +
-//! `Ctx` (per-thread private cell). `Shared` is pure immutable data -> Rust Sync -> `&Shared`
-//! works across scoped threads, the type-level expression of "execution phase is tcx-free =>
-//! engine Sync" (the skeleton has no tcx, matching the mode B runtime shape). `Ctx.shared` is
-//! a raw pointer (not `&`): it avoids burdening CompiledFn with HRTB lifetimes and matches the
-//! vmctx discipline; `thread::scope` guarantees the lifetime.
-//!
-//! These cases were written as spike 4 and moved here when the spike tree was archived; the
-//! harness owns them now, so `bytecode`/`frame`/`memory` below are private to this module
-//! rather than shared product sources.
+//! Each `run_*` prints exactly one `PASS <id> ...` or `FAIL <id> ...` line and returns
+//! whether it passed.
 
 mod bytecode;
 mod frame;
@@ -623,9 +607,9 @@ fn fib_ref(n: u64) -> u64 {
 
 const N_THREADS: usize = 8;
 
-/// A: 8 threads run mixed fib in parallel (i2c/c2i happen concurrently; the shared read-only
+/// 8 threads run mixed fib in parallel (i2c/c2i happen concurrently; the shared read-only
 /// program is read lock-free).
-fn case_a() -> bool {
+pub(crate) fn run_mixed_stack_fib() -> bool {
     let shared = Shared {
         prog: Program {
             funcs: vec![fib_body(1), dummy_body()],
@@ -647,18 +631,16 @@ fn case_a() -> bool {
     });
     let pass = results.iter().all(|&r| r == want);
     if pass {
-        println!(
-            "PASS caseA parallel mixed fib ({N_THREADS} threads x fib(22)={want}, i2c/c2i concurrent)"
-        );
+        println!("PASS mixed-stack-fib {N_THREADS} threads x fib(22)={want}, i2c/c2i concurrent");
     } else {
-        println!("FAIL caseA: {results:?} != {want}");
+        println!("FAIL mixed-stack-fib: {results:?} != {want}");
     }
     pass
 }
 
-/// B: cross-tier atomic counting -- 4 interpreted threads (AtomicAdd bytecode) + 4 compiled
+/// Cross-tier atomic counting -- 4 interpreted threads (AtomicAdd bytecode) + 4 compiled
 /// threads (fetch_add) on the same address.
-fn case_b() -> bool {
+pub(crate) fn run_atomic_cross_tier() -> bool {
     let mut mem = GuestMemory::new(4096);
     let cell = mem.alloc(8);
     unsafe { mem.store(cell, 0) };
@@ -684,17 +666,17 @@ fn case_b() -> bool {
     let pass = total == want;
     if pass {
         println!(
-            "PASS caseB cross-tier atomic counting (4 interpreted + 4 compiled threads, same address, total={total})"
+            "PASS atomic-cross-tier 4 interpreted + 4 compiled threads, same address, total={total}"
         );
     } else {
-        println!("FAIL caseB: total={total} != {want}");
+        println!("FAIL atomic-cross-tier: total={total} != {want}");
     }
     pass
 }
 
-/// C: blocking syscall liveness -- the isomorphic program deadlocks under tier-0 cooperative
+/// Blocking syscall liveness -- the isomorphic program deadlocks under tier-0 cooperative
 /// scheduling.
-fn case_c() -> bool {
+pub(crate) fn run_blocking_io_liveness() -> bool {
     let mut fds = [0i32; 2];
     let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
     assert!(rc == 0, "socketpair failed");
@@ -734,16 +716,16 @@ fn case_c() -> bool {
     }
     let pass = got == 42;
     if pass {
-        println!("PASS caseC blocking IO liveness (a real read(2) stalls only its own thread)");
+        println!("PASS blocking-io-liveness a real read(2) stalls only its own thread");
     } else {
-        println!("FAIL caseC: got {got} != 42");
+        println!("FAIL blocking-io-liveness: got {got} != 42");
     }
     pass
 }
 
-/// D: 8 threads unwind concurrently on mixed stacks (per-thread panic -> Drop -> catch; the
+/// 8 threads unwind concurrently on mixed stacks (per-thread panic -> Drop -> catch; the
 /// unwind machinery is per-thread).
-fn case_d() -> bool {
+pub(crate) fn run_mixed_stack_unwind() -> bool {
     let shared = Shared {
         prog: Program {
             funcs: vec![top_catch_body(1), mid_body(1, 2), dummy_body()],
@@ -771,22 +753,10 @@ fn case_d() -> bool {
     let pass = results.iter().all(|r| *r == expect);
     if pass {
         println!(
-            "PASS caseD concurrent mixed-stack unwind ({N_THREADS} threads x panic+Drop+catch, per-thread logs correct)"
+            "PASS mixed-stack-unwind {N_THREADS} threads x panic+Drop+catch, per-thread logs correct"
         );
     } else {
-        println!("FAIL caseD: {results:?} != {expect:?}");
+        println!("FAIL mixed-stack-unwind: {results:?} != {expect:?}");
     }
     pass
-}
-
-// ===== entry point =====
-
-/// Run all four cases; `false` means at least one failed (the harness then exits non-zero).
-pub fn run_cases() -> bool {
-    let mut ok = true;
-    ok &= case_a();
-    ok &= case_b();
-    ok &= case_c();
-    ok &= case_d();
-    ok
 }
