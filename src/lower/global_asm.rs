@@ -469,7 +469,7 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, String> {
     let mut hash_input = b"mirvm-global-asm-v3\0".to_vec();
     hash_input.extend_from_slice(asm.as_bytes());
     let hash = crate::utils::content::fnv1a(&hash_input);
-    let dir = crate::options::get().home.join("global-asm");
+    let dir = crate::options::get().cache_root().join("global-asm");
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("failed to create the global-asm cache directory: {e}"))?;
     let so = dir.join(format!("{hash:016x}.so"));

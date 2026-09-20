@@ -148,7 +148,7 @@ pub(crate) fn try_materialize(sites: &[ir::AsmSite]) -> Result<Vec<u64>, String>
     // FNV-1a content hash: stable, so runs reuse the same cache key
     let h = fnv1a(src.as_bytes());
 
-    let dir = crate::options::get().home.join("asm-stubs");
+    let dir = crate::options::get().cache_root().join("asm-stubs");
     std::fs::create_dir_all(&dir).map_err(|e| {
         format!(
             "failed to create the asm-stub cache directory `{}`: {e}",

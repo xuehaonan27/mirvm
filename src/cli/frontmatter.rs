@@ -53,7 +53,7 @@ pub(super) fn parse_frontmatter(src: &str) -> Option<(String, String)> {
     Some((manifest, body))
 }
 
-/// Where a script's materialized package lives: `$MIRVM_HOME/scripts/<hash(absolute path)>`.
+/// Where a script's materialized package lives: `$MIRVM_HOME/build/scripts/<hash(absolute path)>`.
 ///
 /// The path hash (not the content) is the key, so editing a script keeps its directory, its
 /// `Cargo.lock` and its warm fingerprints.
@@ -64,7 +64,7 @@ pub(crate) fn script_cache_dir(script: &Path) -> PathBuf {
     let mut hasher = std::hash::DefaultHasher::new();
     abs.hash(&mut hasher);
     crate::options::get()
-        .home
+        .build_root()
         .join("scripts")
         .join(format!("{:016x}", hasher.finish()))
 }
@@ -169,7 +169,10 @@ pub(crate) fn effective_manifest(
     // the script declared.
     let mut out = toml::Table::new();
     out.insert("package".to_string(), toml::Value::Table(package_table));
-    out.insert("bin".to_string(), toml::Value::Array(vec![toml::Value::Table(bin)]));
+    out.insert(
+        "bin".to_string(),
+        toml::Value::Array(vec![toml::Value::Table(bin)]),
+    );
     for (key, value) in root {
         out.insert(key, value);
     }
@@ -232,12 +235,15 @@ pub(crate) fn materialize_script(
     // with an explicit --target-dir, while native cargo run uses the file config. The two families
     // get separate directories (their sysroots and rustflags differ, so fingerprints would not
     // collide anyway; separate directories only make purge semantics clearer).
-    let native_target = crate::options::get().home.join("target/native");
+    let native_target = crate::options::get().build_root().join("target/native");
     write_if_changed(
         &dir.join(".cargo/config.toml"),
-        &format!("[build]
+        &format!(
+            "[build]
 target-dir = \"{}\"
-", native_target.display()),
+",
+            native_target.display()
+        ),
     );
     Ok(dir)
 }

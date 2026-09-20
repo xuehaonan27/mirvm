@@ -235,7 +235,7 @@ print_section_report() {
 }
 
 # ---- ⑤ tools and environment ----
-rustc_host() { # [rustc]: the host triple, which names the local store's sysroot-<host> directory
+rustc_host() { # [rustc]: the host triple, which names the store's data/sysroot-<host> directory
     "${1:-${RUSTC:-rustc}}" -vV | sed -n 's/^host: //p'
 }
 
@@ -260,12 +260,12 @@ require_pinned_cargo() {
 ensure_test_sysroot() { # <mirvm> <test-home> <rustc>; result exported as TEST_SYSROOT
     local mirvm=$1 test_home=$2 rustc=$3 host tmp code=0 shared_sysroot
     host=$(rustc_host "$rustc") || return 69
-    TEST_SYSROOT=${MIRVM_SYSROOT:-$test_home/sysroot-$host}
+    TEST_SYSROOT=${MIRVM_SYSROOT:-$test_home/data/sysroot-$host}
     if [ -d "$TEST_SYSROOT/lib/rustlib/$host/lib" ]; then
         export TEST_SYSROOT
         return 0
     fi
-    shared_sysroot=${MIRVM_SHARED_SYSROOT:-$HOME/.mirvm/sysroot-$host}
+    shared_sysroot=${MIRVM_SHARED_SYSROOT:-$HOME/.mirvm/data/sysroot-$host}
     if [ -d "$shared_sysroot/lib/rustlib/$host/lib" ]; then
         TEST_SYSROOT=$shared_sysroot
         export TEST_SYSROOT
@@ -323,7 +323,7 @@ disk_guard() {
 target_budget_check() {
     local budget=${MIRVM_TARGET_BUDGET_GB:-24} home_dir mb t
     home_dir=$(_mirvm_home)
-    t="$home_dir/target"
+    t="$home_dir/build/target"
     [ -d "$t" ] || return 0
     mb=$(du -sm "$t" 2>/dev/null | cut -f1)
     [ -n "$mb" ] || return 0

@@ -58,7 +58,7 @@ fn entry_path(rustc_args: &[String]) -> PathBuf {
     }
     let h = crate::utils::content::fnv1a(key.as_bytes());
     crate::options::get()
-        .home
+        .cache_root()
         .join("ir")
         .join(format!("{h:016x}.bin"))
 }

@@ -75,7 +75,7 @@ fn disabled() -> bool {
 }
 
 fn base_dir() -> PathBuf {
-    crate::options::get().home.join("base")
+    crate::options::get().cache_root().join("base")
 }
 
 /// (base image path, sysroot stamp). `None` when the stamp is unavailable (sysroot not

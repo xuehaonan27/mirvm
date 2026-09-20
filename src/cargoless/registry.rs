@@ -1,6 +1,6 @@
 //! `cargoless/registry.rs` — Cargo registry and source replacement access layer.
 //!
-//! Own store layout (root = `$MIRVM_HOME/registry`; `MIRVM_HOME` is the only relocation knob):
+//! Own store layout (root = `$MIRVM_HOME/data/registry`; `MIRVM_HOME` is the only relocation knob):
 //! ```text
 //! index/<reg-key>/<sparse path>     # sparse index cache (JSON line files)
 //! cache/<reg-key>/<name>-<version>.crate
@@ -113,7 +113,7 @@ impl Registry {
     pub fn open() -> Result<Self, RErr> {
         let current = std::env::current_dir().map_err(|error| error.to_string())?;
         Self::open_for_at(
-            crate::options::get().home.join("registry"),
+            crate::options::get().data_root().join("registry"),
             crate::options::get().offline(),
             &current,
         )
@@ -121,7 +121,7 @@ impl Registry {
 
     pub fn open_for(project: &Path) -> Result<Self, RErr> {
         Self::open_for_at(
-            crate::options::get().home.join("registry"),
+            crate::options::get().data_root().join("registry"),
             crate::options::get().offline(),
             project,
         )

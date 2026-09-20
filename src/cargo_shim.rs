@@ -199,7 +199,7 @@ fn cargo_project_command(
     // machine. The final artifact is located through the runner protocol (cargo passes the
     // fake binary path to the runner), never by scanning directories.
     // MIRVM_TARGET_DIR relocates the whole store (for isolation/tests; default
-    // $MIRVM_HOME/target/mirvm).
+    // $MIRVM_HOME/build/target/mirvm).
     let target_dir = cargo_target_dir();
     // These flags are appended inside our rustc wrapper, after Cargo has
     // computed its normal fingerprint.  Partition only this exceptional

@@ -10,7 +10,7 @@ MODE_FIELDS="input stem verdict expect_native expect_mirvm diagnostic env args"
 MODE_REQUIRED="input stem"
 
 script_dir() { # <crate name>: the project directory mirvm materialized for this frontmatter script
-    local stem=$1 cache=${SCRIPT_CACHE:-${MIRVM_HOME:-$HOME/.mirvm}/scripts}
+    local stem=$1 cache=${SCRIPT_CACHE:-${MIRVM_HOME:-$HOME/.mirvm}/build/scripts}
     grep -l "name = \"$stem\"" "$cache"/*/Cargo.toml 2>/dev/null | head -1 | xargs -r dirname
 }
 

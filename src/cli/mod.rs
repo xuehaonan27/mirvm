@@ -80,11 +80,12 @@ USAGE:
     mirvm log inspect <file | session-dir>              # validate v0 event stream and final ledger
     mirvm log export <file | session-dir> [FILTERS]     # export attested record as JSONL
     mirvm cache status                                   # local store component sizes + stale-generation size
-    mirvm cache purge [--dry-run]                        # default = remove stale generations (deps/base/ir not of current build)
-    mirvm cache purge --deps|--base|--ir                 # purge entire family (all generations)
-    mirvm cache purge --scripts                          # purge scripts/ (materialized project list)
-    mirvm cache purge --target                           # purge unified target dir (shared dep store, largest)
-    mirvm cache purge --all [--sysroot]                  # purge everything except sysroot; with flag, also sysroot (full cold start)
+    mirvm cache purge [--dry-run]                        # default = remove stale generations (cache/base|deps|ir not of this build)
+    mirvm cache purge --deps|--base|--ir                 # purge one generational cache family (all generations)
+    mirvm cache purge --scripts                          # purge build/scripts (materialized project list)
+    mirvm cache purge --target                           # purge build/target (shared dep store + native builds, largest)
+    mirvm cache purge --all                              # purge cache/ + build/ + run/: everything that needs no network
+    mirvm cache purge --all --data                       # also data/ (crate store + sysroot): full cold start
 ";
 
 /// The full help text: the command summary plus the option, environment and diagnostic blocks,
