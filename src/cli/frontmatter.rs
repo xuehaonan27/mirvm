@@ -93,7 +93,7 @@ pub(crate) struct ScriptPackage<'a> {
 pub(crate) fn effective_manifest(
     package: ScriptPackage<'_>,
     manifest: &str,
-) -> Result<String, String> {
+) -> Result<String, super::Error> {
     const DEFAULT_EDITION: &str = "2024";
     const DISALLOWED_TABLES: [&str; 6] = ["workspace", "lib", "bin", "example", "test", "bench"];
     const DISALLOWED_PACKAGE: [&str; 8] = [
@@ -108,25 +108,35 @@ pub(crate) fn effective_manifest(
     ];
 
     let mut root: toml::Table =
-        toml::from_str(manifest).map_err(|e| format!("invalid embedded manifest: {e}"))?;
+        toml::from_str(manifest).map_err(|e| super::Error::Frontmatter {
+            detail: format!("invalid embedded manifest: {e}"),
+        })?;
     for key in DISALLOWED_TABLES {
         if root.contains_key(key) {
-            return Err(format!(
-                "`[{key}]` is not allowed in a single-file package (RFC 3502): a script is bin-only, \
-                 so move this into a Cargo.toml package"
-            ));
+            return Err(super::Error::Frontmatter {
+                detail: format!(
+                    "`[{key}]` is not allowed in a single-file package (RFC 3502): a script is \
+                     bin-only, so move this into a Cargo.toml package"
+                ),
+            });
         }
     }
     let mut embedded = match root.remove("package") {
         None => toml::Table::new(),
         Some(toml::Value::Table(table)) => table,
-        Some(_) => return Err("`package` must be a table".to_string()),
+        Some(_) => {
+            return Err(super::Error::Frontmatter {
+                detail: "`package` must be a table".to_string(),
+            });
+        }
     };
     for key in DISALLOWED_PACKAGE {
         if embedded.contains_key(key) {
-            return Err(format!(
-                "`package.{key}` is not allowed in a single-file package (RFC 3502)"
-            ));
+            return Err(super::Error::Frontmatter {
+                detail: format!(
+                    "`package.{key}` is not allowed in a single-file package (RFC 3502)"
+                ),
+            });
         }
     }
 
@@ -175,7 +185,9 @@ pub(crate) fn effective_manifest(
     for (key, value) in root {
         out.insert(key, value);
     }
-    toml::to_string(&out).map_err(|e| format!("cannot render the effective manifest: {e}"))
+    toml::to_string(&out).map_err(|e| super::Error::Frontmatter {
+        detail: format!("cannot render the effective manifest: {e}"),
+    })
 }
 
 /// Materialize a script as a cargo project in the cache and return the project directory.
@@ -183,7 +195,7 @@ pub(crate) fn materialize_script(
     script: &Path,
     manifest: &str,
     body: &str,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, super::Error> {
     let dir = script_cache_dir(script);
     std::fs::create_dir_all(dir.join("src")).expect("failed to create the script cache directory");
     std::fs::create_dir_all(dir.join(".cargo"))
@@ -224,7 +236,11 @@ pub(crate) fn materialize_script(
             bin_path: Path::new("src/main.rs"),
         },
         manifest,
-    )?;
+    )
+    .map_err(|error| super::Error::Script {
+        path: script.to_path_buf(),
+        detail: error.to_string(),
+    })?;
 
     // Idempotent materialization: unchanged content is not rewritten. Stable mtime is a
     // precondition for both the L2 IR cache manifest and cargo fingerprints.
@@ -259,7 +275,7 @@ fn write_if_changed(path: &Path, contents: &str) {
 mod tests {
     use super::*;
 
-    fn manifest(embedded: &str) -> Result<toml::Table, String> {
+    fn manifest(embedded: &str) -> Result<toml::Table, crate::cli::Error> {
         let text = effective_manifest(
             ScriptPackage {
                 name: "demo",
@@ -268,7 +284,9 @@ mod tests {
             },
             embedded,
         )?;
-        toml::from_str(&text).map_err(|e| e.to_string())
+        toml::from_str(&text).map_err(|e| crate::cli::Error::Frontmatter {
+            detail: e.to_string(),
+        })
     }
 
     #[test]
@@ -282,7 +300,10 @@ mod tests {
             "[[bench]]\nname = \"b\"\npath = \"b.rs\"\n",
         ] {
             let error = manifest(embedded).unwrap_err();
-            assert!(error.contains("is not allowed"), "{embedded:?} -> {error}");
+            assert!(
+                error.to_string().contains("is not allowed"),
+                "{embedded:?} -> {error}"
+            );
         }
     }
 
@@ -297,8 +318,14 @@ mod tests {
         ] {
             let embedded = format!("[package]\n{field}\n");
             let error = manifest(&embedded).unwrap_err();
-            assert!(error.contains("package."), "{field:?} -> {error}");
-            assert!(error.contains("is not allowed"), "{field:?} -> {error}");
+            assert!(
+                error.to_string().contains("package."),
+                "{field:?} -> {error}"
+            );
+            assert!(
+                error.to_string().contains("is not allowed"),
+                "{field:?} -> {error}"
+            );
         }
     }
 

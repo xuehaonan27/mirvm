@@ -20,7 +20,7 @@ pub enum Mode {
 /// - Success: handle(usize, non-zero).
 /// - Failure: Err with dlerror details. Message string is cleared and copied
 ///   within this function, the caller gets owned failure message.
-pub fn open(path: &CStr, mode: Mode) -> Result<usize, String> {
+pub fn open(path: &CStr, mode: Mode) -> Result<usize, crate::os::Error> {
     let flag = match mode {
         Mode::Now => libc::RTLD_NOW,
         Mode::Lazy => libc::RTLD_LAZY,
@@ -30,11 +30,13 @@ pub fn open(path: &CStr, mode: Mode) -> Result<usize, String> {
 
 /// `dlopen` with explicit flag form.
 /// Used for testing/partial visibility; use [`open`] for product paths.
-pub fn open_with_flags(path: &CStr, flag: i32) -> Result<usize, String> {
+pub fn open_with_flags(path: &CStr, flag: i32) -> Result<usize, crate::os::Error> {
     unsafe { libc::dlerror() }; // clear dlerror.
     let h = unsafe { libc::dlopen(path.as_ptr(), flag) };
     if h.is_null() {
-        return Err(error_string());
+        return Err(crate::os::Error::Dlopen {
+            detail: error_string(),
+        });
     }
     Ok(h as usize)
 }

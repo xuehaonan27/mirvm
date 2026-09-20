@@ -99,15 +99,7 @@ pub(super) fn pack_main(
         if deps_self {
             return Ok(crate::cargoless::driver::pack_script(&input_path, &out_abs));
         }
-        let dir = match materialize_script(&input_path, &manifest, &body) {
-            Ok(dir) => dir,
-            Err(message) => {
-                return Err(crate::error::Error::usage(
-                    Component::Pack,
-                    format!("{}: {message}", input_path.display()),
-                ));
-            }
-        };
+        let dir = materialize_script(&input_path, &manifest, &body)?;
         // The pack route crosses a process boundary; see set_cargo_pack_env.
         set_cargo_pack_env(&out_abs);
         cargo_shim::phase_cargo(&dir, &[], None, false);
@@ -420,9 +412,7 @@ pub(super) fn run_main(
             "--ignore-rust-version" => ignore_rust_version = true,
             "--stack-size" => {
                 let v = next("--stack-size")?;
-                if let Err(message) = parse_stack_size(&v) {
-                    return Err(crate::error::Error::usage(Component::Run, message));
-                }
+                parse_stack_size(&v)?;
                 // Export so the Cargo form (wrapper -> runner subprocess) sees the same value; the
                 // command line outranks the environment, so record the source as well.
                 crate::options::note_cli("stack_size");
@@ -538,15 +528,7 @@ pub(super) fn run_main(
                 ignore_rust_version,
             ));
         }
-        let dir = match materialize_script(&input_path, &manifest, &body) {
-            Ok(dir) => dir,
-            Err(message) => {
-                return Err(crate::error::Error::usage(
-                    Component::Run,
-                    format!("{}: {message}", input_path.display()),
-                ));
-            }
-        };
+        let dir = materialize_script(&input_path, &manifest, &body)?;
         cargo_shim::phase_cargo(&dir, &program_args, None, ignore_rust_version);
     }
 

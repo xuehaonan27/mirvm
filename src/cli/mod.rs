@@ -24,6 +24,34 @@ pub(crate) use self::frontmatter::{
     ScriptPackage, effective_manifest, parse_frontmatter_pub, script_cache_dir,
 };
 
+/// Why a CLI-side step failed.
+///
+/// Neither variant names a component: the process scope is the command the user ran, so a failure
+/// raised under `pack` must not claim to be `run`'s. `Script` carries the path, because the reader
+/// of the message needs to know which file's frontmatter is wrong.
+#[derive(Debug, thiserror::Error, serde::Serialize)]
+pub enum Error {
+    /// The embedded manifest is not valid TOML, or declares a table a script package may not have.
+    #[error("{detail}")]
+    Frontmatter { detail: String },
+
+    /// [`Error::Frontmatter`] with the script it was read from.
+    #[error("{}: {detail}", path.display())]
+    Script { path: PathBuf, detail: String },
+
+    /// Entering the directory cargo was invoked from failed.
+    #[error("{detail}")]
+    Enter { detail: String },
+}
+
+crate::diag_codes! {
+    Error => {
+        Frontmatter => "cli.frontmatter",
+        Script => "cli.script",
+        Enter => "cli.enter",
+    }
+}
+
 static COMPILER_SESSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(crate) fn compiler_session_guard() -> std::sync::MutexGuard<'static, ()> {

@@ -19,6 +19,12 @@ libmimalloc-sys = "0.1.49"
 # src/vm source-for-source via #[path], so its dependency surface must keep up.
 serde = { version = "1.0.228", features = ["derive"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
+# The shared error vocabulary (src/diag is std-only, but every typed error enum derives thiserror,
+# and the harness compiles src/os and src/vm source-for-source).
+thiserror = "2"
+# `diag_codes!` derives the structured `details` field from the enum with serde_json at the
+# expansion site, so the harness needs it wherever a registered error enum is compiled.
+serde_json = "1.0"
 memmap2 = "0.2.3"
 
 [profile.release]

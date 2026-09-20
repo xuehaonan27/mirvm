@@ -106,7 +106,7 @@ impl GuestProcessState {
         }
     }
 
-    pub(super) fn enter(&self) -> Result<(), String> {
+    pub(super) fn enter(&self) -> Result<(), super::Error> {
         let current_keys: Vec<_> = std::env::vars_os().map(|(key, _)| key).collect();
         // SAFETY: rustc has returned and the guest/JIT threads have not started.
         unsafe {
@@ -120,10 +120,12 @@ impl GuestProcessState {
         if let Some(cwd) = &self.cwd
             && let Err(error) = std::env::set_current_dir(cwd)
         {
-            return Err(format!(
-                "mirvm: cannot enter the Cargo caller directory {}: {error}",
-                cwd.display()
-            ));
+            return Err(super::Error::Enter {
+                detail: format!(
+                    "cannot enter the Cargo caller directory {}: {error}",
+                    cwd.display()
+                ),
+            });
         }
         Ok(())
     }

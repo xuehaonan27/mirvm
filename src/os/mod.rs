@@ -32,6 +32,29 @@ pub(crate) mod linux;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::*;
 
+/// Why a host primitive did not do what it was asked.
+///
+/// This layer only posts what the kernel or libc said, so the classes are the calls themselves: the
+/// loader refusing a library (with libc's own message as the detail) and `mprotect` refusing a
+/// protection change (whose operands travel as fields, because a caller that has to act on this
+/// needs the address and the return code, not the sentence). The layer's boundary contract holds:
+/// no guest concept appears here.
+#[derive(Debug, thiserror::Error, serde::Serialize)]
+pub enum Error {
+    #[error("{detail}")]
+    Dlopen { detail: String },
+
+    #[error("mprotect({addr:#x}, {size:#x}) failed rc={rc}")]
+    Mprotect { addr: usize, size: usize, rc: i32 },
+}
+
+crate::diag_codes! {
+    Error: Os => {
+        Dlopen => "os.dlopen",
+        Mprotect => "os.mprotect",
+    }
+}
+
 #[cfg(not(target_os = "linux"))]
 compile_error!(
     "The OS module currently only implements Linux (with the same prerequisites as the x86_64 hard gate of global_asm/asm-stub)."
