@@ -18,11 +18,11 @@ export MIRVM_DEPS=cargo
 cp -r ${FIXTURES[0]} "$TMP/a2_ws"
 WS="$TMP/a2_ws"
 HOST=$(rustc_host)
-DEPS=${MIRVM_HOME:-$HOME/.mirvm}/deps
-SYSROOT=${MIRVM_HOME:-$HOME/.mirvm}/sysroot-$HOST
+DEPS=${MIRVM_HOME:-$HOME/.mirvm}/cache/deps
+SYSROOT=${MIRVM_HOME:-$HOME/.mirvm}/data/sysroot-$HOST
 # Unified dependency storage: mirvm run (steps 1-5) goes through cargo_project_command into shared
 # target dir; bin2 manually driven by this script must use same location, otherwise extern stamps differ and image is not shared
-TARGET_MIRVM=${MIRVM_TARGET_DIR:-${MIRVM_HOME:-$HOME/.mirvm}/target/mirvm}
+TARGET_MIRVM=${MIRVM_TARGET_DIR:-${MIRVM_HOME:-$HOME/.mirvm}/build/target/mirvm}
 
 abort_test() {
     bad "$*"

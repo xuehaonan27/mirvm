@@ -157,7 +157,7 @@ else
     bad "self package run failed: output=$self_output"
     tail -20 "$TMP/self-run.err"
 fi
-mapfile -t heat_files < <(find "$TMP/fresh-run-home/package-heat" -type f -name '*.order' 2>/dev/null)
+mapfile -t heat_files < <(find "$TMP/fresh-run-home/cache/package-heat" -type f -name '*.order' 2>/dev/null)
 if [ "${#heat_files[@]}" = 1 ] && [ -s "${heat_files[0]}" ]; then
     ok "package recorded real function heat order on first run"
 else

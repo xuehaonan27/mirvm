@@ -9,7 +9,7 @@ mode_run() {
     apply_env "$(field env "")"
 RUSTC_APPEND_PROXY=${RUSTC_APPEND_PROXY:-$LIB_DIR/helpers/rustc_proxy.sh}
 RUSTC_WRAPPER_PROBE=${RUSTC_WRAPPER_PROBE:-$LIB_DIR/helpers/rustc_wrapper_probe.sh}
-SCRIPT_CACHE=${SCRIPT_CACHE:-${MIRVM_HOME:-$HOME/.mirvm}/scripts}
+SCRIPT_CACHE=${SCRIPT_CACHE:-${MIRVM_HOME:-$HOME/.mirvm}/build/scripts}
 # This suite is the dedicated cargo-mode differential track: it always takes the cargo
 # three-phase compat path. Even when an outer layer (e.g. a gate DEPS=self full run)
 # sets MIRVM_DEPS=self, it must not silently switch to the self path and leave the cargo leg with zero coverage.
