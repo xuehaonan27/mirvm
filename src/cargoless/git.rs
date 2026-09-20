@@ -231,7 +231,10 @@ fn repo_key(url: &str) -> String {
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
         .collect();
-    format!("{stem}-{:016x}", crate::lower::asm::fnv1a(url.as_bytes()))
+    format!(
+        "{stem}-{:016x}",
+        crate::utils::content::fnv1a(url.as_bytes())
+    )
 }
 
 fn parse_locked_source(source: &str, source_id: &str) -> Result<String, String> {

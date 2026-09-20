@@ -34,7 +34,8 @@ pub struct Layout {
 
 impl Layout {
     pub fn new() -> Self {
-        let base = crate::sysroot::cache_dir()
+        let base = crate::options::get()
+            .home
             .join("target/cargoless")
             .join(crate::options::build::HOST)
             .join("debug");
@@ -412,7 +413,10 @@ pub fn fingerprints(
         for d in &dep_fps {
             put(d);
         }
-        fps[ix] = Some(format!("{:016x}", crate::lower::asm::fnv1a(key.as_bytes())));
+        fps[ix] = Some(format!(
+            "{:016x}",
+            crate::utils::content::fnv1a(key.as_bytes())
+        ));
     }
     Ok(fps
         .into_iter()
@@ -547,7 +551,10 @@ pub fn root_fingerprint(
     for d in dep_fps {
         put(d);
     }
-    Ok(format!("{:016x}", crate::lower::asm::fnv1a(key.as_bytes())))
+    Ok(format!(
+        "{:016x}",
+        crate::utils::content::fnv1a(key.as_bytes())
+    ))
 }
 
 #[cfg(test)]

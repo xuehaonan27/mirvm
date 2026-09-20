@@ -40,7 +40,7 @@ const FUNC_ENTRY_LEN: usize = 32;
 
 /// fnv1a-128: two passes with different seeds, the same checksum family as L2.
 fn hash128(data: &[u8]) -> u128 {
-    let a = crate::lower::asm::fnv1a(data);
+    let a = crate::utils::content::fnv1a(data);
     let mut b = 0xcbf2_9ce4_8422_2325u64;
     for byte in b"\x01mirvmar".iter().chain(data) {
         b ^= u64::from(*byte);
@@ -588,7 +588,7 @@ pub(crate) fn write_package(
     // NATIVELIBS: every produced library's bytes travel with the package. The global_asm family
     // also enters the MC section for in-process loading; MIRVM_PACK_NO_MC=1 only switches the load
     // method and no longer breaks the package's self-containment.
-    let ga_dir = crate::sysroot::cache_dir().join("global-asm");
+    let ga_dir = crate::options::get().home.join("global-asm");
     let ga_prefix = ga_dir.display().to_string();
     let no_mc = crate::options::get().pack_no_mc;
     let mut libs = Vec::new();
@@ -708,7 +708,7 @@ impl LoadedPackage {
             if lib.role == 1 && covered_hashes.contains(&lib.fnv) {
                 continue;
             }
-            let path = materialize_native_blob_at(&crate::sysroot::cache_dir(), lib)?;
+            let path = materialize_native_blob_at(&crate::options::get().home, lib)?;
             required_native_libs.push(path.to_string_lossy().into_owned().into_boxed_str());
             required_native_hashes.push(lib.fnv);
         }
@@ -845,7 +845,8 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
         };
     }
     let heat_key = format!("{:032x}", hash128(function_section));
-    let heat_path = crate::sysroot::cache_dir()
+    let heat_path = crate::options::get()
+        .home
         .join("package-heat")
         .join(format!("{heat_key}.order"));
     drop(module);

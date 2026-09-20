@@ -129,7 +129,7 @@ fn set_cargo_pack_env(out: &Path) {
 
 /// `mirvm cache status|purge ...`: manage the local store ($HOME/.mirvm, relocatable via MIRVM_HOME).
 pub(super) fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
-    let root = crate::sysroot::cache_dir();
+    let root = crate::options::get().home.clone();
     let mut plan = crate::cachectl::Purge::default();
     let mut sub = None;
     for a in args {

@@ -33,20 +33,10 @@ use rustc_target::asm::{
     X86InlineAsmRegClass, allocatable_registers,
 };
 
+use crate::utils::content::fnv1a;
 use crate::vm::ir;
 
 static NEXT_MATERIALIZE_TEMP: AtomicU64 = AtomicU64::new(0);
-
-/// FNV-1a 64-bit content hash, shared as the cache key by the asm-stub and global-asm
-/// factories.
-pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in bytes {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
-}
 
 // ===== syscall interception =====
 //
@@ -158,7 +148,7 @@ pub(crate) fn try_materialize(sites: &[ir::AsmSite]) -> Result<Vec<u64>, String>
     // FNV-1a content hash: stable, so runs reuse the same cache key
     let h = fnv1a(src.as_bytes());
 
-    let dir = crate::sysroot::cache_dir().join("asm-stubs");
+    let dir = crate::options::get().home.join("asm-stubs");
     std::fs::create_dir_all(&dir).map_err(|e| {
         format!(
             "failed to create the asm-stub cache directory `{}`: {e}",
