@@ -156,18 +156,22 @@ pub(crate) fn store(
     mut module: ir::Module,
     exports: crate::lower::BaseExports,
     fp: (bool, bool, bool),
-) -> Result<(), String> {
+) -> Result<(), crate::image::Error> {
     // A base image is shared across programs, so the fixed-domain contract is stricter than for a
     // delta: the layer above expects the base exactly where it says it is.
     if !entry::snapshot_is_publishable(&module, Some(crate::vm::addrlayout::BASE_IMAGE_FIXED_ADDR))
     {
-        return Err("frozen region is not in the base-image fixed domain".into());
+        return Err(crate::image::Error::Contract {
+            detail: "frozen region is not in the base-image fixed domain".to_string(),
+        });
     }
     // "@entry" is the program-entry alias for --vm-stats; the base image is used as a library, so it
     // does not export the synthetic entry
     module.exports.remove("@entry");
     let sysroot_stamp =
-        crate::sysroot::current_stamp_value().ok_or("sysroot stamp unavailable".to_string())?;
+        crate::sysroot::current_stamp_value().ok_or_else(|| crate::image::Error::Unavailable {
+            detail: "sysroot stamp unavailable".to_string(),
+        })?;
     // Byte determinism: extract the HashMaps (RandomState gives a random iteration order) into
     // sorted Vecs for disk, and drop the derived address table.
     //
@@ -200,8 +204,11 @@ pub(crate) fn store(
         static_syms,
         tls_syms,
     };
-    let bytes =
-        postcard::to_stdvec(&file).map_err(|error| format!("serialization failed: {error}"))?;
-    crate::store::publish_bytes(out, &bytes)
-        .map_err(|error| format!("writing the file failed: {error}"))
+    let bytes = postcard::to_stdvec(&file).map_err(|error| crate::image::Error::Encode {
+        detail: error.to_string(),
+    })?;
+    crate::store::publish_bytes(out, &bytes).map_err(|source| crate::image::Error::Io {
+        detail: "cannot write the base image".to_string(),
+        source,
+    })
 }

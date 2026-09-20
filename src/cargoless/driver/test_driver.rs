@@ -1314,7 +1314,8 @@ fn write_doctest_builder(
 ) -> Result<PathBuf, String> {
     let dir = layout.build_dir(&manifest.name, root_fp).join("doctest");
     let builder = dir.join("mirvm-doctest-builder");
-    crate::cargo_shim::ensure_self_symlink(self_exe, &builder)?;
+    crate::cargo_shim::ensure_self_symlink(self_exe, &builder)
+        .map_err(|error| error.to_string())?;
     Ok(builder)
 }
 

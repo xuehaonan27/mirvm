@@ -26,6 +26,41 @@ mod fake;
 
 pub use fake::parse_runner_invocation;
 
+/// Why the self launchers cargo needs could not be published.
+///
+/// Publishing one is a symlink into the shared target directory, so the two classes are "the path
+/// cannot hold a file at all" (a programming error) and "a step of publishing failed" (a filesystem
+/// failure whose `detail` names the step).
+#[derive(Debug, thiserror::Error, serde::Serialize)]
+pub enum Error {
+    #[error("internal tool path has no parent directory: {}", path.display())]
+    NoParent { path: PathBuf },
+
+    #[error("{detail}: {source}")]
+    Io {
+        detail: String,
+        #[serde(skip)]
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+crate::diag_codes! {
+    Error: Runner => {
+        NoParent => "cargo_shim.no_parent",
+        Io => "cargo_shim.io",
+    }
+}
+
+impl Error {
+    fn io(detail: impl Into<String>, source: std::io::Error) -> Self {
+        Error::Io {
+            detail: detail.into(),
+            source,
+        }
+    }
+}
+
 fn toolchain_rustc() -> PathBuf {
     PathBuf::from(crate::options::build::DEFAULT_SYSROOT).join("bin/rustc")
 }
@@ -38,7 +73,7 @@ fn toolchain_rustdoc() -> PathBuf {
     PathBuf::from(crate::options::build::DEFAULT_SYSROOT).join("bin/rustdoc")
 }
 
-pub(crate) fn ensure_self_symlink(self_exe: &Path, path: &Path) -> Result<(), String> {
+pub(crate) fn ensure_self_symlink(self_exe: &Path, path: &Path) -> Result<(), Error> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;
@@ -49,27 +84,30 @@ pub(crate) fn ensure_self_symlink(self_exe: &Path, path: &Path) -> Result<(), St
         {
             return Ok(());
         }
-        let parent = path.parent().ok_or_else(|| {
-            format!(
-                "internal tool path has no parent directory: {}",
-                path.display()
-            )
+        let parent = path.parent().ok_or_else(|| Error::NoParent {
+            path: path.to_path_buf(),
         })?;
         std::fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "failed to create internal tool directory {}: {error}",
-                parent.display()
+            Error::io(
+                format!(
+                    "cannot create the internal tool directory {}",
+                    parent.display()
+                ),
+                error,
             )
         })?;
         // A link is published the same way an artifact is: fill a staging name, then rename.
         let tmp = crate::store::staging_path(path);
         symlink(self_exe, &tmp).map_err(|error| {
-            format!("failed to create internal tool {}: {error}", tmp.display())
+            Error::io(
+                format!("cannot create the internal tool {}", tmp.display()),
+                error,
+            )
         })?;
         crate::store::publish(path, &tmp).map_err(|error| {
-            format!(
-                "failed to publish internal tool {}: {error}",
-                path.display()
+            Error::io(
+                format!("cannot publish the internal tool {}", path.display()),
+                error,
             )
         })?;
         Ok(())
@@ -139,7 +177,7 @@ fn cargo_runner_config(self_exe: &Path, capture_directory: Option<&Path>) -> Str
 fn ensure_cargo_doctest_tools(
     project_dir: &Path,
     self_exe: &Path,
-) -> Result<(PathBuf, PathBuf), String> {
+) -> Result<(PathBuf, PathBuf), Error> {
     let target_dir = cargo_target_dir();
     let tools_root = if target_dir.is_absolute() {
         target_dir

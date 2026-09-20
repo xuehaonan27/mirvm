@@ -23,6 +23,44 @@ pub(crate) mod ir;
 
 use crate::vm::ir::{FuncId, Module, TlsId};
 
+/// Why a persisted image layer could not be produced.
+///
+/// A layer is a cache entry other processes depend on, so the classes are a violated publication
+/// rule (`Contract`), a missing input (`Unavailable`), and the two steps that write the file
+/// (`Encode`, `Io`).
+#[derive(Debug, thiserror::Error, serde::Serialize)]
+pub enum Error {
+    /// The module does not satisfy this layer's publication rules.
+    #[error("{detail}")]
+    Contract { detail: String },
+
+    /// An input the layer is built from does not exist yet.
+    #[error("{detail}")]
+    Unavailable { detail: String },
+
+    /// Serializing the layer failed.
+    #[error("serialization failed: {detail}")]
+    Encode { detail: String },
+
+    /// Publishing the layer failed.
+    #[error("{detail}: {source}")]
+    Io {
+        detail: String,
+        #[serde(skip)]
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+crate::diag_codes! {
+    Error: Image => {
+        Contract => "image.contract",
+        Unavailable => "image.unavailable",
+        Encode => "image.encode",
+        Io => "image.io",
+    }
+}
+
 /// A loaded layer, ready for a program session to use.
 pub struct BaseImage {
     pub module: Module,
