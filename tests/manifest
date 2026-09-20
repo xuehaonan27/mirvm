@@ -272,8 +272,8 @@ main-101-interp    run-expect  smoke  120  input=programs/main_outcome_probe.rs 
 main-101-jit       run-expect  smoke  120  input=programs/main_outcome_probe.rs env=MIRVM_JIT=on;MIRVM_JIT_SYNC=1;MIRVM_JIT_THRESHOLD=1 exit=101 stderr_absent=main%20outcome%20probe|guest%20panic%20not%20caught
 recursion-stack-overflow  run-expect  smoke  60  input=programs/recursion_deep.rs env=MIRVM_STACK_SIZE=1m;MIRVM_JIT_THRESHOLD=1;MIRVM_JIT_SYNC=1 exit=70 stderr=guest%20stack%20overflow%20\(JIT%20compiled%20frame%20hit%20safety%20margin%20before%20entry
 jit-stats          run-expect  smoke  60  input=programs/jit_unwind_probe.rs env=MIRVM_JIT_STATS=1 exit=0 stderr=mirvm-jit-stats:%20c2i=[1-9]
-vmstats-threads-spawn  run-expect  smoke  60  input=programs/threads_spawn.rs args=--vm-stats stdout_match=@entry:%20✅%20reachable%20path%20trap-free
-vmstats-threads-panic  run-expect  smoke  60  input=programs/threads_panic.rs args=--vm-stats stdout_match=@entry:%20✅%20reachable%20path%20trap-free
+vmstats-threads-spawn  run-expect  smoke  60  input=programs/threads_spawn.rs args=--vm-stats stdout_match=@entry:%20trap-free
+vmstats-threads-panic  run-expect  smoke  60  input=programs/threads_panic.rs args=--vm-stats stdout_match=@entry:%20trap-free
 vmstats-digest-debt    run-expect  smoke  120  input=programs/vmcall_digest.rs args=--engine;vm;--vm-stats stdout_absent=_digest.*M4\.[12]:
 vmstats-unwind-debt    run-expect  smoke  120  input=programs/vmcall_unwind.rs args=--engine;vm;--vm-stats stdout_absent=_digest.*M4\.[12]:
 
