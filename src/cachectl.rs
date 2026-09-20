@@ -1,62 +1,125 @@
-//! Inventory and cleanup of the mirvm local repository (`$HOME/.mirvm`, address changeable via `MIRVM_HOME`):
-//! `mirvm cache status` / `mirvm cache purge` (decision-history §7.14).
+//! Inventory and cleanup of the mirvm local store (`$HOME/.mirvm`, relocatable through
+//! `MIRVM_HOME`): `mirvm cache status` / `mirvm cache purge`.
 //!
-//! Family tree and generational semantics:
-//! - sysroot-<host>: MIR-rich std (content-keyed stable; cleared only by --sysroot)
-//! - scripts/: frontmatter materialized projects + two cargo targets (local dependency libraries without packaging the world +
-//!   B-dimensional native cross-build; largest; cleared by --scripts/--all)
-//! - registry/: cargoless crates.io and Git source/checkouts (cleared by --all)
-//! - deps/ base/ ir/: lowering accelerators, filenames = fnv(build_id, …) opaque hash —
-//!   generational staleness checks read the first field build_id from files (first field of all three families,
-//!   postcard varint encoding, peek zero-decode has no side effects; full module decode would trigger frozen-region base mmap, disabled)
-//! - native-archives/ global-asm/ asm-stubs/: content-keyed .so (runtime dlopen objects)
+//! The store is split by **lifetime**, and this module is where that split is visible:
 //!
-//! All components self-heal: purging any family only affects next-run speed, not correctness.
+//! - `cache/` — derived from inputs mirvm already has. Deleting it costs recomputation and nothing
+//!   else, so it is the one tree a user may clear at any time. Three of its families (`base/deps/ir`)
+//!   are generational: the first field of every entry is `build_id`, so a stale generation can be
+//!   recognised and removed on its own. Reading it is a zero-decode peek (postcard varint string,
+//!   no side effects — a full decode would trigger the frozen-region base mmap).
+//! - `data/` — fetched or built once at real cost: the crate store and the MIR-rich sysroot.
+//! - `build/` — project and session space: materialized scripts and every target directory.
+//! - `run/` — per-process scratch for mappings that must not outlive the process.
+//!
+//! Every family self-heals: purging one only affects the next run's speed, never correctness.
 
 use std::path::{Path, PathBuf};
 
 /// Cleanup plan (product of CLI flag parsing).
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Purge {
-    /// Three generational families (files in deps/base/ir whose build_id ≠ current build + tmp orphans/junk)
+    /// Remove stale generations and garbage (tmp orphans, junk) from the generational families. This
+    /// is the default when no family flag is given, and the only thing that is ever partial.
     pub stale: bool,
     pub deps: bool,
     pub base: bool,
     pub ir: bool,
     pub scripts: bool,
-    /// Unified target dir (D14 shared dependency storage; one of the largest)
+    /// The target directories (shared dependency storage and the native differential builds).
     pub target: bool,
-    /// Clear everything except sysroot (all generations of three families + scripts + three .so families)
+    /// Every `cache/`, `build/` and `run/` family: everything that costs no network to rebuild.
     pub all: bool,
-    /// Clear sysroot too (full cold start; only stacked on --all semantics)
-    pub sysroot: bool,
+    /// Also `data/`: the crate store must be fetched again and the sysroot rebuilt. With `--all`
+    /// this is a full cold start.
+    pub data: bool,
     pub dry_run: bool,
 }
 
+/// What a family holds. The class is what decides how `purge` may treat it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Class {
+    Cache,
+    Data,
+    Build,
+    Run,
+}
+
+impl Class {
+    /// Directory under the store root, and the heading `status` groups by.
+    fn path(self) -> &'static str {
+        match self {
+            Class::Cache => "cache",
+            Class::Data => "data",
+            Class::Build => "build",
+            Class::Run => "run",
+        }
+    }
+
+    /// The lifetime contract, printed by `status` so the classification is not folklore.
+    fn contract(self) -> &'static str {
+        match self {
+            Class::Cache => "derived; safe to delete at any time",
+            Class::Data => "fetched or built once; expensive to lose",
+            Class::Build => "project and session space",
+            Class::Run => "process scratch",
+        }
+    }
+
+    fn all() -> [Class; 4] {
+        [Class::Cache, Class::Data, Class::Build, Class::Run]
+    }
+}
+
 struct Family {
-    /// Display name (= directory name)
-    name: String,
-    /// Generational semantics (build_id first field determines generation) family entry extension; empty = non-generational family
+    class: Class,
+    /// Path under the store root; doubles as the display name.
+    path: String,
+    /// Generational entry extension (`build_id` first field); empty = one indivisible directory.
     entry_ext: &'static str,
 }
 
 fn families() -> Vec<Family> {
     let host = crate::options::build::HOST;
-    [
-        (format!("sysroot-{host}"), ""),
-        ("scripts".into(), ""),
-        ("target".into(), ""),
-        ("registry".into(), ""),
-        ("deps".into(), "img"),
-        ("base".into(), "img"),
-        ("ir".into(), "bin"),
-        ("native-archives".into(), ""),
-        ("global-asm".into(), ""),
-        ("asm-stubs".into(), ""),
+    let fam = |class, path: String, entry_ext| Family {
+        class,
+        path,
+        entry_ext,
+    };
+    vec![
+        fam(Class::Data, "data/registry".into(), ""),
+        fam(Class::Data, format!("data/sysroot-{host}"), ""),
+        fam(Class::Build, "build/scripts".into(), ""),
+        fam(Class::Build, "build/target".into(), ""),
+        fam(Class::Cache, "cache/base".into(), "img"),
+        fam(Class::Cache, "cache/deps".into(), "img"),
+        fam(Class::Cache, "cache/ir".into(), "bin"),
+        fam(Class::Cache, "cache/native-archives".into(), ""),
+        fam(Class::Cache, "cache/global-asm".into(), ""),
+        fam(Class::Cache, "cache/asm-stubs".into(), ""),
+        fam(Class::Cache, "cache/package-native".into(), ""),
+        fam(Class::Cache, "cache/package-heat".into(), ""),
+        fam(Class::Run, "run".into(), ""),
     ]
-    .into_iter()
-    .map(|(name, entry_ext)| Family { name, entry_ext })
-    .collect()
+}
+
+/// The `--deps/--base/--ir` flag that names a generational family, if any.
+fn named_cache_flag(path: &str, plan: &Purge) -> bool {
+    match path {
+        "cache/deps" => plan.deps,
+        "cache/base" => plan.base,
+        "cache/ir" => plan.ir,
+        _ => false,
+    }
+}
+
+/// The `--scripts/--target` flag that names a build family, if any.
+fn named_build_flag(path: &str, plan: &Purge) -> bool {
+    match path {
+        "build/scripts" => plan.scripts,
+        "build/target" => plan.target,
+        _ => false,
+    }
 }
 
 /// Recursively accumulate directory size and file count; nonexistent ⇒ (0, 0).
@@ -193,50 +256,76 @@ fn size_of(paths: &[PathBuf]) -> u64 {
 
 /// Full text of `mirvm cache status`.
 pub fn status(root: &Path) -> String {
+    // The first line is parsed by the test harness for the build id; keep its shape.
     let mut out = format!(
         "mirvm local cache {} (build {})\n",
         root.display(),
         crate::options::build::BUILD_ID
     );
     let (mut total, mut total_stale) = (0u64, 0u64);
-    let mut known = Vec::new();
-    for fam in families() {
-        let dir = root.join(&fam.name);
-        known.push(fam.name.clone());
-        if !fam.entry_ext.is_empty() {
-            let (cur, stale, garb) = split_generational(&dir, fam.entry_ext);
-            let (cs, ss, gs) = (size_of(&cur), size_of(&stale), size_of(&garb));
-            let sum = cs + ss + gs;
-            total += sum;
-            total_stale += ss + gs;
-            let n = cur.len() + stale.len() + garb.len();
-            out += &format!(
-                "  {:<36} {:>9}  ({n} items; stale {}, garbage {})\n",
-                fam.name,
-                human(sum),
-                human(ss),
-                human(gs)
-            );
-        } else {
-            let (bytes, files) = du(&dir);
-            total += bytes;
-            out += &format!("  {:<36} {:>9}  ({files} items)\n", fam.name, human(bytes));
+    let mut claimed: Vec<String> = Vec::new();
+    for class in Class::all() {
+        out += &format!("  {}/  ({})\n", class.path(), class.contract());
+        for fam in families().iter().filter(|f| f.class == class) {
+            claimed.push(fam.path.clone());
+            let dir = root.join(&fam.path);
+            if !fam.entry_ext.is_empty() {
+                let (cur, stale, garb) = split_generational(&dir, fam.entry_ext);
+                let (cs, ss, gs) = (size_of(&cur), size_of(&stale), size_of(&garb));
+                total += cs + ss + gs;
+                total_stale += ss + gs;
+                let n = cur.len() + stale.len() + garb.len();
+                out += &format!(
+                    "    {:<32} {:>9}  ({n} items; stale {}, garbage {})\n",
+                    fam.path,
+                    human(cs + ss + gs),
+                    human(ss),
+                    human(gs)
+                );
+            } else {
+                let (bytes, files) = du(&dir);
+                total += bytes;
+                out += &format!(
+                    "    {:<32} {:>9}  ({files} items)\n",
+                    fam.path,
+                    human(bytes)
+                );
+            }
         }
     }
-    // non-family miscellaneous items (e.g. tests project-suite)
+    // Nothing in the store may be invisible: report what no family claims, both at the root (which
+    // is where a store written by an older layout shows up) and inside each class root.
+    let mut unclaimed: Vec<PathBuf> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(root) {
-        for e in rd.flatten() {
-            let p = e.path();
-            let name = p
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            if !known.iter().any(|k| k == &name) && !name.ends_with(".stamp") {
-                let (bytes, files) = du(&p);
-                total += bytes;
-                out += &format!("  {:<36} {:>9}  ({files} items)\n", name, human(bytes));
+            if Class::all().iter().any(|c| c.path() == name) {
+                if let Ok(inner) = std::fs::read_dir(&path) {
+                    for child in inner.flatten() {
+                        let child_path = child.path();
+                        let rel = format!("{name}/{}", child.file_name().to_string_lossy());
+                        if !claimed.contains(&rel) {
+                            unclaimed.push(child_path);
+                        }
+                    }
+                }
+            } else if !name.ends_with(".stamp") {
+                unclaimed.push(path);
             }
         }
+    }
+    for path in &unclaimed {
+        let (bytes, files) = du(path);
+        total += bytes;
+        out += &format!(
+            "  {:<36} {:>9}  ({files} items, unclaimed)\n",
+            path.strip_prefix(root).unwrap_or(path).display(),
+            human(bytes)
+        );
     }
     out += &format!("  {:<36} {:>9}\n", "total", human(total));
     if total_stale > 0 {
@@ -280,55 +369,69 @@ pub fn purge(root: &Path, plan: Purge) -> String {
         bytes
     };
 
-    // whole-family flag union semantics with --all
-    let whole = |name: &str, flag: bool| flag || (plan.all && name != "sysroot");
     for fam in families() {
-        let name = fam.name.as_str();
-        let dir = root.join(name);
-        if !fam.entry_ext.is_empty() {
-            let (cur, stale, garb) = split_generational(&dir, fam.entry_ext);
-            if whole(
-                name,
-                matches!(name, "deps" if plan.deps)
-                    || matches!(name, "base" if plan.base)
-                    || matches!(name, "ir" if plan.ir),
-            ) {
-                freed += rm_dir(&dir, "all cleared", dry, &mut out);
-                acted += 1;
-                continue;
-            }
-            if plan.stale || plan.all {
-                for p in stale.iter().chain(&garb) {
-                    rm_file(p, "stale/garbage", &mut freed, &mut acted, &mut out);
+        let dir = root.join(&fam.path);
+        match fam.class {
+            // Generational cache: a stale generation is individually removable, which is what
+            // `purge` does by default.
+            Class::Cache if !fam.entry_ext.is_empty() => {
+                if named_cache_flag(&fam.path, &plan) {
+                    freed += rm_dir(&dir, "all generations cleared", dry, &mut out);
+                    acted += 1;
+                    continue;
                 }
-                let _ = cur;
+                if plan.stale || plan.all {
+                    let (_, stale, garb) = split_generational(&dir, fam.entry_ext);
+                    for p in stale.iter().chain(&garb) {
+                        rm_file(p, "stale/garbage", &mut freed, &mut acted, &mut out);
+                    }
+                }
             }
-        } else if name == "scripts" && whole(name, plan.scripts) {
-            freed += rm_dir(&dir, "scripts caches all cleared", dry, &mut out);
-            acted += 1;
-        } else if name == "target" && whole(name, plan.target) {
-            freed += rm_dir(&dir, "target cache all cleared", dry, &mut out);
-            acted += 1;
-        } else if name == "registry" && plan.all {
-            freed += rm_dir(&dir, "registry/Git caches all cleared", dry, &mut out);
-            acted += 1;
-        } else if name.starts_with("sysroot-") && plan.all && plan.sysroot {
-            freed += rm_dir(
-                &dir,
-                "sysroot all cleared (next run will be cold start)",
-                dry,
-                &mut out,
-            );
-            acted += 1;
-        } else if plan.all && matches!(name, "native-archives" | "global-asm" | "asm-stubs") {
-            freed += rm_dir(&dir, ".so all cleared", dry, &mut out);
-            acted += 1;
+            // Content-keyed cache: no generations to tell apart, so it is all or nothing.
+            Class::Cache => {
+                if plan.all {
+                    freed += rm_dir(&dir, "content-keyed cache all cleared", dry, &mut out);
+                    acted += 1;
+                }
+            }
+            Class::Build => {
+                if named_build_flag(&fam.path, &plan) || plan.all {
+                    freed += rm_dir(&dir, "build space all cleared", dry, &mut out);
+                    acted += 1;
+                }
+            }
+            // Only --data reaches these: the crate store must be fetched again and the sysroot
+            // rebuilt, so no other flag may take them as a side effect.
+            Class::Data => {
+                if plan.data {
+                    freed += rm_dir(
+                        &dir,
+                        "data cleared (refetch/rebuild next run)",
+                        dry,
+                        &mut out,
+                    );
+                    acted += 1;
+                }
+            }
+            Class::Run => {
+                if plan.all {
+                    freed += rm_dir(&dir, "process scratch cleared", dry, &mut out);
+                    acted += 1;
+                }
+            }
         }
     }
-    // empty directory sweep (leaving empty family directory shells after purge is harmless, keeps repo root enumerable)
+    // Empty directory sweep: leaving shells behind is harmless, but an enumerable store reads
+    // better, and it keeps a purged store from looking like a used one.
     if !dry {
         for fam in families() {
-            let d = root.join(&fam.name);
+            let d = root.join(&fam.path);
+            if d.is_dir() && std::fs::read_dir(&d).is_ok_and(|mut r| r.next().is_none()) {
+                let _ = std::fs::remove_dir(&d);
+            }
+        }
+        for class in Class::all() {
+            let d = root.join(class.path());
             if d.is_dir() && std::fs::read_dir(&d).is_ok_and(|mut r| r.next().is_none()) {
                 let _ = std::fs::remove_dir(&d);
             }
@@ -398,7 +501,7 @@ mod tests {
     #[test]
     fn purge_stale_keeps_current_and_dry_run_touches_nothing() {
         let root = temp_root("purge");
-        let deps = root.join("deps");
+        let deps = root.join("cache/deps");
         let cur = fake_entry(&deps, "cur.img", crate::options::build::BUILD_ID);
         let old = fake_entry(&deps, "old.img", "0000000000000000");
         // non-entry files (build byproducts) do not enter classification, are left untouched and unreported
@@ -430,15 +533,20 @@ mod tests {
     }
 
     #[test]
-    fn purge_all_leaves_sysroot_unless_flagged() {
+    /// `--all` may take everything that needs no network: cache/, build/ and run/. `data/` is
+    /// reachable only through `--data`, because losing it costs a re-fetch and a sysroot rebuild.
+    fn purge_all_reaches_cache_build_and_run_but_not_data() {
         let root = temp_root("purge-all");
-        let sysroot = root.join(format!("sysroot-{}", crate::options::build::HOST));
+        let sysroot = root.join(format!("data/sysroot-{}", crate::options::build::HOST));
         std::fs::create_dir_all(sysroot.join("lib")).unwrap();
         std::fs::write(sysroot.join("lib/x.rlib"), b"x").unwrap();
-        fake_entry(&root.join("ir"), "a.bin", "0000000000000000");
-        std::fs::create_dir_all(root.join("scripts/h/target")).unwrap();
-        std::fs::create_dir_all(root.join("registry/git/db")).unwrap();
-        std::fs::write(root.join("registry/git/db/object"), b"git").unwrap();
+        fake_entry(&root.join("cache/ir"), "a.bin", "0000000000000000");
+        std::fs::create_dir_all(root.join("build/scripts/h/target")).unwrap();
+        std::fs::create_dir_all(root.join("run/engine")).unwrap();
+        std::fs::write(root.join("run/engine/scratch"), b"x").unwrap();
+        std::fs::create_dir_all(root.join("data/registry/git/db")).unwrap();
+        std::fs::write(root.join("data/registry/git/db/object"), b"git").unwrap();
+
         purge(
             &root,
             Purge {
@@ -446,15 +554,20 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(sysroot.exists());
-        assert!(!root.join("scripts").exists());
-        assert!(!root.join("ir").exists());
-        assert!(!root.join("registry").exists());
+        assert!(!root.join("cache/ir").exists());
+        assert!(!root.join("build/scripts").exists());
+        assert!(!root.join("run").exists());
+        assert!(sysroot.exists(), "--all must not take data/");
+        assert!(
+            root.join("data/registry").exists(),
+            "--all must not take data/"
+        );
+
         purge(
             &root,
             Purge {
                 all: true,
-                sysroot: true,
+                data: true,
                 ..Default::default()
             },
         );

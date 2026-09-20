@@ -132,7 +132,7 @@ New dependencies: `toml` and `semver`, already in the lock, plus an HTTP and tar
 
 - **HTTP and unpack**: pure-Rust crates (`ureq` + `flate2`/miniz_oxide + `tar`), with self-containment
   taking priority over a minimal dependency tree; TLS is ureq's default rustls backend.
-- **Registry store**: an own `~/.mirvm/registry` with read-through reuse of `~/.cargo/registry`,
+- **Registry store**: an own `~/.mirvm/data/registry` with read-through reuse of `~/.cargo/registry`,
   read-only and non-polluting. Read-through order is own src, own cache, Cargo src, Cargo cache, HTTP.
 - **Lock-absent solver**: `pubgrub`.
 - **Phasing**: P1 to P5 as below.

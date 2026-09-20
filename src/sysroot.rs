@@ -6,7 +6,7 @@
 //! cargo processes and zero crates.io / `~/.cargo` dependencies (std's backtrace closure
 //! resolves through `library/vendor/`).
 //!
-//! - Pseudo-root package: a synthetic manifest materialized at `$MIRVM_HOME/sysroot-build/root/`
+//! - Pseudo-root package: a synthetic manifest materialized at `$MIRVM_HOME/build/sysroot-build/root/`
 //!   (path edges point to `library/{std,test,proc_macro}`, std with panic-unwind+backtrace
 //!   features) plus an augmented library/Cargo.lock (original text + pseudo-root row);
 //!   resolve uses lock mode with all versions pinned;
@@ -58,7 +58,9 @@ fn stamp_file(sysroot_dir: &Path) -> PathBuf {
 /// directories behind, and the missing stamp self-heals on the next run.
 pub fn ensure_sysroot() -> anyhow::Result<PathBuf> {
     let target = crate::options::build::HOST;
-    let sysroot_dir = crate::options::get().home.join(format!("sysroot-{target}"));
+    let sysroot_dir = crate::options::get()
+        .data_root()
+        .join(format!("sysroot-{target}"));
     if let Some(want) = stamp_value()
         && std::fs::read_to_string(stamp_file(&sysroot_dir)).is_ok_and(|have| have == want)
     {
@@ -73,7 +75,9 @@ pub fn ensure_sysroot() -> anyhow::Result<PathBuf> {
 pub(crate) fn current_stamp_value() -> Option<String> {
     let target = crate::options::build::HOST;
     std::fs::read_to_string(stamp_file(
-        &crate::options::get().home.join(format!("sysroot-{target}")),
+        &crate::options::get()
+            .data_root()
+            .join(format!("sysroot-{target}")),
     ))
     .ok()
 }
@@ -274,7 +278,7 @@ fn build_sysroot(sysroot_dir: &Path) -> anyhow::Result<()> {
 
     // staging (persistent; reuses host artifacts / build-script cache across rebuilds) and
     // the pseudo-root
-    let staging = crate::options::get().home.join("sysroot-build");
+    let staging = crate::options::get().build_root().join("sysroot-build");
     let root_dir = staging.join("root");
     materialize_pseudo_root(&library, &root_dir)?;
     let manifest = PackageManifest::read_dir(&root_dir)
@@ -342,7 +346,7 @@ fn build_sysroot(sysroot_dir: &Path) -> anyhow::Result<()> {
     // The cargoless track and each image key carry the stamp/BUILD_ID component themselves
     // and need no action. A failed purge is treated as an FS fault and fails loudly: keeping
     // the cache is certain to break later compilations, so name it now.
-    let cargo_deps = crate::options::get().home.join("target/mirvm");
+    let cargo_deps = crate::options::get().build_root().join("target/mirvm");
     if cargo_deps.exists() {
         std::fs::remove_dir_all(&cargo_deps).map_err(|e| {
             anyhow::anyhow!(
@@ -352,13 +356,6 @@ fn build_sysroot(sysroot_dir: &Path) -> anyhow::Result<()> {
             )
         })?;
     }
-    // Remove the legacy top-level stamp file; the current stamp lives inside the sysroot and
-    // nothing reads the old one
-    let _ = std::fs::remove_file(
-        crate::options::get()
-            .home
-            .join(format!("sysroot-{target}.stamp")),
-    );
     eprintln!("mirvm: sysroot build complete: {}", sysroot_dir.display());
     Ok(())
 }

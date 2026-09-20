@@ -54,7 +54,7 @@
 ### 2.2 The Cargo three-phase mechanism
 
 - **phase_cargo** drives a real `cargo run` and injects `RUSTC_WRAPPER=mirvm`,
-  `target.runner=["mirvm","runner"]` and the unified `$MIRVM_HOME/target/mirvm`. It forces
+  `target.runner=["mirvm","runner"]` and the unified `$MIRVM_HOME/build/target/mirvm`. It forces
   `--target <host>` as the host/target crate separation switch. Resolution, download and fail-fast are
   native Cargo behaviour, so `Cargo.lock` and the `~/.cargo` registry cache are free-ridden.
 - **phase_wrapper**: host crates (`build.rs`, proc-macros) compile with the real rustc and really
@@ -71,30 +71,34 @@ run, driven on demand by monomorphization. The guest runtime compiles no depende
 ### 2.3 Sysroot and toolchain pinning
 
 `src/sysroot.rs` rebuilds std from rust-src with the Miri arrangement and `-Zalways-encode-mir`,
-cached at `~/.mirvm/sysroot-<target>` and keyed by content hash. `build.rs` bakes
+cached at `~/.mirvm/data/sysroot-<target>` and keyed by content hash. `build.rs` bakes
 `MIRVM_DEFAULT_SYSROOT` and an rpath to that sysroot's `librustc_driver.so`, so the binary is
 ABI-locked to the nightly that built it. The wrapper phase ignores the rustc name Cargo passes and
 always uses the pinned rustc, because proc-macro dylibs and rmeta must be the same compiler version as
 the interpreting session.
 
-### 2.4 Caches
+### 2.4 Store layout
 
-- `~/.cargo` — registry and git sources, cross-project, keyed natively by Cargo.
-- `~/.mirvm/target/{mirvm,native}` — dependency rlib and MIR-rlib plus fingerprints, machine-wide
-  shared, keyed by Cargo fingerprints (the D14 near-term slice).
-- `~/.mirvm/sysroot-<target>` — MIR-rich std, keyed by content hash.
-- `~/.mirvm/native-archives`, `~/.mirvm/asm-stubs`, `~/.mirvm/global-asm` — `.a`→`.so` products and asm
-  factory `.so`, keyed by content hash.
-- `~/.mirvm/scripts` — frontmatter script materialization projects, keyed by path plus content hash.
+The store root is `$HOME/.mirvm`, relocatable through `MIRVM_HOME`. It is split by **lifetime**,
+because that is what decides whether a tree may be deleted:
 
-The cache root is `$HOME/.mirvm`, relocatable through `MIRVM_HOME`, with `mirvm cache
-status|purge` for stale-generation GC, whole-family purge, scripts and full clear. Stale generations
-are decided by the first field of the build id.
+| sub-root | contract | contents |
+|---|---|---|
+| `cache/` | derived; safe to delete at any time | `base/`, `deps/`, `ir/` (generational: `build_id` is the first field of every entry), `asm-stubs/`, `global-asm/`, `native-archives/`, `package-native/`, `package-heat/` |
+| `data/` | fetched or built once; expensive to lose | `registry/` (crate and git sources, read-through to `~/.cargo`), `sysroot-<host>/` (MIR-rich std) |
+| `build/` | project and session space | `scripts/` (frontmatter materialization, keyed by path), `target/mirvm` (Cargo track), `target/cargoless/` (own scheduler), `target/native` (differential builds), `sysroot-build/` |
+| `run/` | process scratch | per-Engine isolated native copies and lowering-time mappings |
+
+`mirvm cache status` groups by these four classes and reports anything no family claims, so a store
+written by an older layout is visible rather than silently ignored. `mirvm cache purge` defaults to
+stale generations of `cache/`; `--deps/--base/--ir` take one generational family, `--scripts` and
+`--target` one build family, `--all` everything that needs no network (all of `cache/`, `build/` and
+`run/`), and `--data` adds `data/` — `--all --data` is a full cold start.
 
 ### 2.5 Cache layers
 
 - **L0** — registry and git sources (`~/.cargo`), cross-project, free-ridden from Cargo.
-- **L1** — dependency rlib and MIR-rlib plus fingerprints (`~/.mirvm/target/...`), machine-wide shared.
+- **L1** — dependency rlib and MIR-rlib plus fingerprints (`~/.mirvm/build/target/...`), machine-wide shared.
 - **L1.5** — sysroot, native `.so`, asm stubs, script materialization; all content-hash keyed.
 - **L2** — the post-mono engine-IR whole-package cache. This is the highest-value gap: it turns the
   load cost paid on every run into "deserialize and run".

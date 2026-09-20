@@ -175,10 +175,10 @@ macro_rules! entries {
 }
 
 entries! {
-    /// Local store root: sysroot, registry, scripts, target and lowering caches.
+    /// Local store root: cache/ (deletable), data/ (expensive to lose), build/ (project space), run/ (process scratch).
     user     home                     env("MIRVM_HOME") default("$HOME/.mirvm");
-    /// Relocate mirvm's unified Cargo target directory (the shared dependency store).
-    user     target_dir               env("MIRVM_TARGET_DIR") default("$MIRVM_HOME/target/mirvm");
+    /// Relocate the Cargo track's target directory (the shared dependency store) out of `build/`.
+    user     target_dir               env("MIRVM_TARGET_DIR") default("$MIRVM_HOME/build/target/mirvm");
     /// MIR-rich sysroot; equivalent to --sysroot. Default: build and cache one.
     user     sysroot                  env("MIRVM_SYSROOT") cli("--sysroot", "Run") default("auto-built");
     /// Guest main execution stack reservation; accepts a k/m/g suffix, range 1m..=1t.
@@ -281,10 +281,10 @@ entries! {
     user     cache_scripts            cli("--scripts", "Cache") default("off");
     /// Purge the unified target directory (the shared dependency store).
     user     cache_target             cli("--target", "Cache") default("off");
-    /// Purge every family except the sysroot.
+    /// Purge all of cache/, build/ and run/: everything that costs no network to rebuild.
     user     cache_all                cli("--all", "Cache") default("off");
-    /// With --all, also purge the sysroot (full cold start).
-    user     cache_sysroot            cli("--sysroot", "Cache") default("off");
+    /// Also purge data/ (crate store and sysroot); with --all this is a full cold start.
+    user     cache_data               cli("--data", "Cache") default("off");
     /// `log export` filter: engine id, or `unknown`.
     user     log_engine               cli("--engine", "Log") default("unset");
     /// `log export` filter: producer id.
@@ -491,7 +491,7 @@ impl Options {
         let target_dir = raw("target_dir")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|| home.join("target/mirvm"));
+            .unwrap_or_else(|| home.join("build/target/mirvm"));
         Self {
             home,
             target_dir,
@@ -542,6 +542,29 @@ impl Options {
     /// `MIRVM_OFFLINE`.
     pub fn offline(&self) -> bool {
         flag("offline")
+    }
+
+    /// `$MIRVM_HOME/cache`: artifacts mirvm derived. Deleting this tree costs recomputation and
+    /// nothing else, so it is the one place a user may clear at any time.
+    pub fn cache_root(&self) -> PathBuf {
+        self.home.join("cache")
+    }
+
+    /// `$MIRVM_HOME/data`: fetched or built once and expensive to lose — the crate store and the
+    /// MIR-rich sysroot.
+    pub fn data_root(&self) -> PathBuf {
+        self.home.join("data")
+    }
+
+    /// `$MIRVM_HOME/build`: project and session space — materialized scripts and every target
+    /// directory.
+    pub fn build_root(&self) -> PathBuf {
+        self.home.join("build")
+    }
+
+    /// `$MIRVM_HOME/run`: per-process scratch for mappings that must not outlive the process.
+    pub fn run_root(&self) -> PathBuf {
+        self.home.join("run")
     }
 
     /// `MIRVM_DEPS`.

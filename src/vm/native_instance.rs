@@ -205,7 +205,7 @@ pub(crate) fn isolate_required_libraries(
     if module.required_native_libs.is_empty() {
         return Ok(());
     }
-    let dir = crate::options::get().home.join("runtime-native");
+    let dir = crate::options::get().run_root().join("runtime-native");
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("fail to create per-Engine native directory: {e}"))?;
     if !module.required_native_hashes.is_empty()
@@ -289,7 +289,7 @@ fn copy_unique(source: &Path, dir: &Path, owner: &str) -> Result<PathBuf, String
 /// belong to Engine startup, not compilation. Load a private copy with its
 /// lifecycle deferred and intentionally keep that mapping for the process.
 pub(crate) fn open_for_lower(path: &Path) -> Result<NativeImage, String> {
-    let dir = crate::options::get().home.join("lower-native");
+    let dir = crate::options::get().run_root().join("lower-native");
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("fail to create lower native directory: {e}"))?;
     let private = copy_unique(path, &dir, "lower")?;

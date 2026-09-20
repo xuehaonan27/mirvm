@@ -148,7 +148,7 @@ pub(super) fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
             "--scripts" => plan.scripts = true,
             "--target" => plan.target = true,
             "--all" => plan.all = true,
-            "--sysroot" => plan.sysroot = true,
+            "--data" => plan.data = true,
             _ => {
                 eprintln!("mirvm cache: unknown argument `{a}`\n{}", usage());
                 return ExitCode::from(2);
@@ -161,8 +161,16 @@ pub(super) fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("purge") => {
-            // No flags by default = remove stale generations (conservative); any target flag present follows the flag
-            if !(plan.deps || plan.base || plan.ir || plan.scripts || plan.target || plan.all) {
+            // No flag at all means the conservative default: drop stale generations only. Naming
+            // any family means the user asked for that family, so do not also sweep.
+            if !(plan.deps
+                || plan.base
+                || plan.ir
+                || plan.scripts
+                || plan.target
+                || plan.all
+                || plan.data)
+            {
                 plan.stale = true;
             }
             print!("{}", crate::cachectl::purge(&root, plan));
