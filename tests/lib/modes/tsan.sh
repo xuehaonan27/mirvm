@@ -21,10 +21,20 @@ mode_run() {
     expand_list "$expect"
     ids=(${EXPANDED[@]+"${EXPANDED[@]}"})
 
+    # The harness resolves CARGO to the toolchain's own binary when a sysroot is configured, and the
+    # `+toolchain` directive only exists on the rustup proxy: ask rustup explicitly when it sits next
+    # to CARGO, otherwise the binary is already the one we want.
+    local -a cargo_cmd
+    if [ -x "$(dirname "${CARGO:-cargo}")/rustup" ]; then
+        cargo_cmd=("$(dirname "${CARGO:-cargo}")/rustup" run "$TOOLCHAIN" cargo)
+    else
+        cargo_cmd=("${CARGO:-cargo}")
+    fi
+
     local out code=0
     out=$(MIRVM_BUILD_ID=0000000000000000 \
         RUSTFLAGS="-Zsanitizer=thread" TSAN_OPTIONS="halt_on_error=1" \
-        "${CARGO:-cargo}" +"$TOOLCHAIN" run -Zbuild-std --target x86_64-unknown-linux-gnu --release 2>&1) || code=$?
+        "${cargo_cmd[@]}" run -Zbuild-std --target x86_64-unknown-linux-gnu --release 2>&1) || code=$?
     printf '%s\n' "$out" | tail -12
 
     if printf '%s\n' "$out" | grep -q "WARNING: ThreadSanitizer"; then
