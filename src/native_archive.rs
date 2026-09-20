@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use rustc_hir::attrs::NativeLibKind;
 use rustc_hir::def_id::LOCAL_CRATE;
@@ -173,7 +172,6 @@ __mirvm_raise_target:
 .popsection
 .section .note.GNU-stack,"",@progbits
 "#;
-static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 /// Collect the system dynamic library names the crate graph propagates.
 /// A `-sys` crate's `cargo:rustc-link-lib` only writes rlib metadata: the native final link
@@ -515,8 +513,7 @@ fn materialize_for_target_in(
     }
     let native_runtime_bridge = native_runtime_bridge_object(cache_dir, target, cc, &cc_identity)?;
 
-    let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-    let tmp = cache_dir.join(format!("{hash}.so.tmp.{}.{serial}", std::process::id()));
+    let tmp = crate::store::staging_path(&so);
     let output = Command::new(cc)
         .args(LINK_PREFIX)
         .arg(archive)
@@ -563,7 +560,7 @@ fn materialize_for_target_in(
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    std::fs::rename(&tmp, &so).map_err(|e| {
+    crate::store::publish(&so, &tmp).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!(
             "Atomic publish of native archive cache `{}` failed: {e}",
@@ -591,15 +588,10 @@ fn native_runtime_bridge_object(
         return Ok(object);
     }
 
-    let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-    let source = cache_dir.join(format!(
-        "{hash}.native-runtime.s.tmp.{}.{serial}",
-        std::process::id()
-    ));
-    let temporary = cache_dir.join(format!(
-        "{hash}.native-runtime.o.tmp.{}.{serial}",
-        std::process::id()
-    ));
+    let temporary = crate::store::staging_path(&object);
+    let mut source = temporary.clone().into_os_string();
+    source.push(".s");
+    let source = PathBuf::from(source);
     std::fs::write(&source, NATIVE_RUNTIME_BRIDGE_ASM).map_err(|e| {
         format!(
             "Writing native runtime bridge assembly `{}` failed: {e}",
@@ -622,7 +614,7 @@ fn native_runtime_bridge_object(
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    std::fs::rename(&temporary, &object).map_err(|e| {
+    crate::store::publish(&object, &temporary).map_err(|e| {
         let _ = std::fs::remove_file(&temporary);
         format!(
             "Atomic publish of native runtime bridge `{}` failed: {e}",
@@ -757,8 +749,7 @@ fn rescue_with_rlib_symbols(
         ));
     }
     // Relink: trampoline object placed after archive so its defined symbols bind unresolved references inside the archive
-    let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-    let tmp = cache_dir.join(format!("{hash}.so.tmp.{}.{serial}", std::process::id()));
+    let tmp = crate::store::staging_path(&so);
     let output = Command::new(cc)
         .args(LINK_PREFIX)
         .arg(archive)
@@ -781,7 +772,7 @@ fn rescue_with_rlib_symbols(
         let _ = std::fs::remove_file(&tmp);
         return Ok(None);
     }
-    std::fs::rename(&tmp, &so).map_err(|e| {
+    crate::store::publish(&so, &tmp).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!(
             "Atomic publish of native archive cache `{}` failed: {e}",

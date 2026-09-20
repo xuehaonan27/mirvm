@@ -481,13 +481,7 @@ impl Callbacks for BaseBuildCallbacks {
             return Compilation::Stop;
         };
         let _ = std::fs::create_dir_all(dir);
-        let tmp = dir.join(format!(
-            ".{}.tmp-{}",
-            self.out.file_name().unwrap_or_default().to_string_lossy(),
-            std::process::id()
-        ));
-        if std::fs::write(&tmp, &bytes).is_err() || std::fs::rename(&tmp, &self.out).is_err() {
-            let _ = std::fs::remove_file(&tmp);
+        if crate::store::publish_bytes(&self.out, &bytes).is_err() {
             eprintln!("base-image: writing the file failed, giving up");
             return Compilation::Stop;
         }

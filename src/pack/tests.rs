@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_PACKAGE_TEST: AtomicU64 = AtomicU64::new(0);
 
@@ -52,7 +53,7 @@ fn package_bytes_for_module(module: &crate::vm::ir::Module) -> Vec<u8> {
         ),
         (
             TAG_STAMPS,
-            postcard_bytes(&Vec::<crate::ircache::FileStamp>::new()).unwrap(),
+            postcard_bytes(&Vec::<crate::utils::content::FileStamp>::new()).unwrap(),
         ),
         (
             TAG_MODULE,
@@ -267,7 +268,7 @@ fn native_blob_materialization_uses_embedded_bytes() {
     let root = std::env::temp_dir().join(format!(
         "mirvm-pack-test-{}-{}",
         std::process::id(),
-        NEXT_NATIVE_TEMP.fetch_add(1, Ordering::Relaxed)
+        NEXT_PACKAGE_TEST.fetch_add(1, Ordering::Relaxed)
     ));
     let bytes = b"embedded native image".to_vec();
     let lib = NativeLibEntry {
@@ -417,7 +418,7 @@ fn one_loaded_package_instantiates_isolated_frozen_memory_twice() {
         ),
         (
             TAG_STAMPS,
-            postcard_bytes(&Vec::<crate::ircache::FileStamp>::new()).unwrap(),
+            postcard_bytes(&Vec::<crate::utils::content::FileStamp>::new()).unwrap(),
         ),
         (
             TAG_MODULE,

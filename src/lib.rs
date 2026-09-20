@@ -44,6 +44,7 @@ pub(crate) mod native_archive;
 pub mod options;
 pub(crate) mod os;
 pub mod pack;
+pub(crate) mod store;
 pub mod sysroot;
 pub mod telemetry;
 pub mod utils;
