@@ -1,7 +1,7 @@
 //! `mirvm` user entry points: the `pack`, `cache`, `deps` and `run` subcommands.
 
 use std::path::{Path, PathBuf};
-use std::process::{ExitCode, exit};
+use std::process::ExitCode;
 
 use crate::cargo_shim;
 
@@ -15,27 +15,42 @@ use super::usage;
 /// script, or plain single file -> .mirvm package. Projects/frontmatter default to cargoless;
 /// `MIRVM_DEPS=cargo` is passed into runner via MIRVM_PACK. Both paths force the full cold
 /// route so the package is self-contained.
-pub(super) fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
+pub(super) fn pack_main(
+    argv: impl Iterator<Item = String>,
+) -> Result<ExitCode, crate::error::Error> {
+    use crate::diag::Component;
+    let usage = || super::usage();
     let mut input = None;
     let mut out: Option<std::path::PathBuf> = None;
     let mut it = argv.peekable();
     while let Some(arg) = it.next() {
         if arg == "-o" || arg == "--output" {
             let Some(v) = it.next() else {
-                eprintln!("mirvm: `pack -o` needs argument");
-                exit(2);
+                return Err(crate::error::Error::usage_with(
+                    Component::Pack,
+                    "`-o` needs an argument",
+                    usage(),
+                ));
             };
             out = Some(std::path::PathBuf::from(v));
+        } else if arg == "--json" {
+            super::note_json_output();
         } else if input.is_none() && !arg.starts_with('-') {
             input = Some(arg);
         } else {
-            eprintln!("mirvm: pack unknown argument `{arg}`");
-            exit(2);
+            return Err(crate::error::Error::usage_with(
+                Component::Pack,
+                format!("unknown argument `{arg}`"),
+                usage(),
+            ));
         }
     }
     let Some(input) = input else {
-        eprintln!("mirvm: `pack` needs target (cargo project directory / Cargo.toml / script)");
-        exit(2);
+        return Err(crate::error::Error::usage_with(
+            Component::Pack,
+            "`pack` needs a target (cargo project directory / Cargo.toml / script)",
+            usage(),
+        ));
     };
     let input_path = PathBuf::from(&input);
     let default_out = || -> std::path::PathBuf {
@@ -56,13 +71,9 @@ pub(super) fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
     let out = out.unwrap_or_else(default_out);
     let out_abs = std::path::absolute(&out).unwrap_or(out);
 
-    let deps_self = match crate::options::get().deps() {
-        Ok(crate::options::DepsTrack::Own) => true,
-        Ok(crate::options::DepsTrack::Cargo) => false,
-        Err(message) => {
-            eprintln!("{message}");
-            exit(2);
-        }
+    let deps_self = match crate::options::get().deps()? {
+        crate::options::DepsTrack::Own => true,
+        crate::options::DepsTrack::Cargo => false,
     };
 
     // Project form: default to own scheduling; Cargo track enters runner only on explicit fallback.
@@ -75,25 +86,26 @@ pub(super) fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
             input_path.parent().unwrap_or(Path::new("."))
         };
         if deps_self {
-            return crate::cargoless::driver::pack_project(dir, &out_abs);
+            return Ok(crate::cargoless::driver::pack_project(dir, &out_abs));
         }
         // The pack route crosses a process boundary; see set_cargo_pack_env.
         set_cargo_pack_env(&out_abs);
         cargo_shim::phase_cargo(dir, &[], None, false);
     }
-    let src = std::fs::read_to_string(&input_path).unwrap_or_else(|e| {
-        eprintln!("mirvm: fail to read {input}: {e}");
-        exit(1);
-    });
+    let src = std::fs::read_to_string(&input_path).map_err(|e| {
+        crate::error::Error::failure(Component::Pack, format!("cannot read {input}: {e}"))
+    })?;
     if let Some((manifest, body)) = parse_frontmatter(&src) {
         if deps_self {
-            return crate::cargoless::driver::pack_script(&input_path, &out_abs);
+            return Ok(crate::cargoless::driver::pack_script(&input_path, &out_abs));
         }
         let dir = match materialize_script(&input_path, &manifest, &body) {
             Ok(dir) => dir,
             Err(message) => {
-                eprintln!("mirvm: {}: {message}", input_path.display());
-                exit(2);
+                return Err(crate::error::Error::usage(
+                    Component::Pack,
+                    format!("{}: {message}", input_path.display()),
+                ));
             }
         };
         // The pack route crosses a process boundary; see set_cargo_pack_env.
@@ -104,13 +116,7 @@ pub(super) fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
     // Plain single file: pack_driver directly (same args as run form 3)
     let sysroot = match crate::options::get().sysroot.clone() {
         Some(path) => path.display().to_string(),
-        None => match crate::sysroot::ensure_sysroot() {
-            Ok(p) => p.display().to_string(),
-            Err(e) => {
-                eprintln!("mirvm: fail to build sysroot: {e}");
-                exit(1);
-            }
-        },
+        None => crate::sysroot::ensure_sysroot()?.display().to_string(),
     };
     let rustc_args = vec![
         "mirvm".to_string(),
@@ -121,7 +127,7 @@ pub(super) fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
         sysroot,
     ];
     let program_argv = vec![input];
-    pack_driver(rustc_args, program_argv, out_abs)
+    Ok(pack_driver(rustc_args, program_argv, out_abs))
 }
 
 /// Prepare the `cargo` phase of `mirvm pack`. The route crosses a process boundary (mirvm -> cargo
@@ -134,7 +140,10 @@ fn set_cargo_pack_env(out: &Path) {
 }
 
 /// `mirvm cache status|purge ...`: manage the local store ($HOME/.mirvm, relocatable via MIRVM_HOME).
-pub(super) fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
+pub(super) fn cache_main(
+    args: impl Iterator<Item = String>,
+) -> Result<ExitCode, crate::error::Error> {
+    use crate::diag::Component;
     let root = crate::options::get().home.clone();
     let mut plan = crate::store::report::Purge::default();
     let mut sub = None;
@@ -150,15 +159,18 @@ pub(super) fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
             "--all" => plan.all = true,
             "--data" => plan.data = true,
             _ => {
-                eprintln!("mirvm cache: unknown argument `{a}`\n{}", usage());
-                return ExitCode::from(2);
+                return Err(crate::error::Error::usage_with(
+                    Component::Cache,
+                    format!("unknown argument `{a}`"),
+                    usage(),
+                ));
             }
         }
     }
     match sub.as_deref() {
         Some("status") => {
             print!("{}", crate::store::report::status(&root));
-            ExitCode::SUCCESS
+            Ok(ExitCode::SUCCESS)
         }
         Some("purge") => {
             // No flag at all means the conservative default: drop stale generations only. Naming
@@ -174,19 +186,24 @@ pub(super) fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
                 plan.stale = true;
             }
             print!("{}", crate::store::report::purge(&root, plan));
-            ExitCode::SUCCESS
+            Ok(ExitCode::SUCCESS)
         }
-        _ => {
-            eprint!("{}", usage());
-            ExitCode::from(2)
-        }
+        _ => Err(crate::error::Error::usage_with(
+            Component::Cache,
+            "`cache` needs `status` or `purge`",
+            usage(),
+        )),
     }
 }
 
 /// `mirvm deps audit <target...>`: target = project directory (containing Cargo.toml) or
 /// frontmatter script; resolve per target and reconcile against the reference lock, exiting
 /// non-zero if any target fails to resolve or the reconciliation mismatches.
-pub(super) fn deps_main(args: impl Iterator<Item = String>) -> ExitCode {
+pub(super) fn deps_main(
+    args: impl Iterator<Item = String>,
+) -> Result<ExitCode, crate::error::Error> {
+    use crate::diag::Component;
+    const HINT: &str = "usage: mirvm deps audit <project dir|script.rs>...\n";
     let mut sub = None;
     let mut targets: Vec<String> = Vec::new();
     for a in args {
@@ -194,16 +211,20 @@ pub(super) fn deps_main(args: impl Iterator<Item = String>) -> ExitCode {
             "audit" if sub.is_none() => sub = Some(a),
             _ if sub.is_some() => targets.push(a),
             _ => {
-                eprintln!(
-                    "mirvm deps: unknown argument `{a}`\nusage: mirvm deps audit <project dir|script.rs>..."
-                );
-                return ExitCode::from(2);
+                return Err(crate::error::Error::usage_with(
+                    Component::Deps,
+                    format!("unknown argument `{a}`"),
+                    HINT.to_string(),
+                ));
             }
         }
     }
     if sub.is_none() || targets.is_empty() {
-        eprintln!("usage: mirvm deps audit <project dir|script.rs>...");
-        return ExitCode::from(2);
+        return Err(crate::error::Error::usage_with(
+            Component::Deps,
+            "`deps` needs `audit` and at least one target",
+            HINT.to_string(),
+        ));
     }
     let mut failures = 0usize;
     for t in &targets {
@@ -297,13 +318,16 @@ pub(super) fn deps_main(args: impl Iterator<Item = String>) -> ExitCode {
         failures
     );
     if failures == 0 {
-        ExitCode::SUCCESS
+        Ok(ExitCode::SUCCESS)
     } else {
-        ExitCode::from(1)
+        Ok(ExitCode::from(crate::diag::exit::FAILURE))
     }
 }
 
-pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
+pub(super) fn run_main(
+    args: impl Iterator<Item = String>,
+) -> Result<ExitCode, crate::error::Error> {
+    use crate::diag::Component;
     let mut args = args.peekable();
     let mut input = None;
     let mut dump_mir = false;
@@ -316,10 +340,9 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     let mut program_args: Vec<String> = Vec::new();
 
     while let Some(arg) = args.next() {
-        let mut next = |name: &str| {
-            args.next().unwrap_or_else(|| {
-                crate::cli::diagnostics::control(format_args!("mirvm: {name} needs argument(s)"));
-                exit(2);
+        let mut next = |name: &str| -> Result<String, crate::error::Error> {
+            args.next().ok_or_else(|| {
+                crate::error::Error::usage(Component::Run, format!("{name} needs argument(s)"))
             })
         };
         match arg.as_str() {
@@ -328,28 +351,30 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
                 break;
             }
             "--dump-mir" => dump_mir = true,
-            "--edition" => edition = next("--edition"),
-            "--sysroot" => sysroot = Some(next("--sysroot")),
+            "--json" => super::note_json_output(),
+            "--edition" => edition = next("--edition")?,
+            "--sysroot" => sysroot = Some(next("--sysroot")?),
             // Backward compat for old gate scripts: --engine vm is the only engine, just consume it
             "--engine" => {
-                let e = next("--engine");
+                let e = next("--engine")?;
                 if e != "vm" {
-                    crate::cli::diagnostics::control(format_args!(
-                        "mirvm: engine `{e}` no longer exists (tier-0 removed; the only engine is vm)"
+                    return Err(crate::error::Error::usage(
+                        Component::Run,
+                        format!(
+                            "engine `{e}` no longer exists (tier-0 removed; the only engine is vm)"
+                        ),
                     ));
-                    exit(2);
                 }
             }
-            "--vm-call" => vm_call = Some(next("--vm-call")),
+            "--vm-call" => vm_call = Some(next("--vm-call")?),
             "--vm-stats" => vm_stats = true,
             // cargo run --bin semantics (project form only; no meaning for script/single-file)
-            "--bin" => bin_sel = Some(next("--bin")),
+            "--bin" => bin_sel = Some(next("--bin")?),
             "--ignore-rust-version" => ignore_rust_version = true,
             "--stack-size" => {
-                let v = next("--stack-size");
+                let v = next("--stack-size")?;
                 if let Err(message) = parse_stack_size(&v) {
-                    crate::cli::diagnostics::control(format_args!("{message}"));
-                    exit(2);
+                    return Err(crate::error::Error::usage(Component::Run, message));
                 }
                 // Export so the Cargo form (wrapper -> runner subprocess) sees the same value; the
                 // command line outranks the environment, so record the source as well.
@@ -357,13 +382,13 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
                 crate::options::export_to_process("stack_size", &v);
             }
             "--jit" => {
-                let v = next("--jit");
+                let v = next("--jit")?;
                 if v != "on" && v != "off" {
                     // TODO: tiered JIT?
-                    crate::cli::diagnostics::control(format_args!(
-                        "mirvm: --jit only accepts on|off (got `{v}`)"
+                    return Err(crate::error::Error::usage(
+                        Component::Run,
+                        format!("`--jit` only accepts on|off (got `{v}`)"),
                     ));
-                    exit(2);
                 }
                 // Same as --stack-size: export so the Cargo form takes effect through the runner.
                 crate::options::note_cli("jit");
@@ -371,41 +396,40 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
             }
             _ if input.is_none() && !arg.starts_with('-') => input = Some(arg),
             _ => {
-                crate::cli::diagnostics::control(format_args!(
-                    "mirvm: unknown argument `{arg}`\n{}",
-                    crate::cli::usage()
+                return Err(crate::error::Error::usage_with(
+                    Component::Run,
+                    format!("unknown argument `{arg}`"),
+                    crate::cli::usage(),
                 ));
-                exit(2);
             }
         }
     }
     let Some(input) = input else {
-        crate::cli::diagnostics::control_raw(format_args!("{}", usage()));
-        exit(2);
+        return Err(crate::error::Error::usage_with(
+            Component::Run,
+            "`run` needs an input",
+            crate::cli::usage(),
+        ));
     };
     let input_path = PathBuf::from(&input);
 
     // Default = self zero-cargo own scheduling (cargoless::driver); =cargo uses the long-term
     // cargo three-phase compat track (user fallback + behavioral differential); any other value
     // is rejected loudly
-    let deps_self = match crate::options::get().deps() {
-        Ok(crate::options::DepsTrack::Own) => true,
-        Ok(crate::options::DepsTrack::Cargo) => false,
-        Err(message) => {
-            crate::cli::diagnostics::control(format_args!("{message}"));
-            exit(2);
-        }
+    let deps_self = match crate::options::get().deps()? {
+        crate::options::DepsTrack::Own => true,
+        crate::options::DepsTrack::Cargo => false,
     };
 
     // Form 1: cargo project (directory or Cargo.toml)
     if input_path.is_dir() {
         if deps_self {
-            return crate::cargoless::driver::run_project(
+            return Ok(crate::cargoless::driver::run_project(
                 &input_path,
                 &program_args,
                 bin_sel.as_deref(),
                 ignore_rust_version,
-            );
+            ));
         }
         cargo_shim::phase_cargo(
             &input_path,
@@ -417,88 +441,78 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     if input_path.file_name().is_some_and(|f| f == "Cargo.toml") {
         let dir = input_path.parent().unwrap_or(Path::new("."));
         if deps_self {
-            return crate::cargoless::driver::run_project(
+            return Ok(crate::cargoless::driver::run_project(
                 dir,
                 &program_args,
                 bin_sel.as_deref(),
                 ignore_rust_version,
-            );
+            ));
         }
         cargo_shim::phase_cargo(dir, &program_args, bin_sel.as_deref(), ignore_rust_version);
     }
     if let Some(b) = &bin_sel {
         // Script/single-file/package forms have no --bin concept (same as cargo script) — reject loudly, do not silently swallow
-        crate::cli::diagnostics::control(format_args!(
-            "mirvm: --bin {b} is only valid for cargo project form (directory/Cargo.toml)"
+        return Err(crate::error::Error::usage(
+            Component::Run,
+            format!("`--bin {b}` is only valid for the cargo project form (directory/Cargo.toml)"),
         ));
-        exit(2);
     }
 
     // Sniff for a .mirvm package (before the text read -- a package is binary)
     if crate::pack::is_package(&input_path) {
-        let module = match crate::pack::load_package(&input_path)
+        let module = crate::pack::load_package(&input_path)
             .and_then(|package| package.instantiate())
-        {
-            Ok(module) => module,
-            Err(reason) => {
-                crate::cli::diagnostics::control(format_args!(
-                    "mirvm: fail to load {}: {reason}",
-                    input_path.display()
-                ));
-                exit(70);
-            }
-        };
+            .map_err(|reason| {
+                crate::error::Error::software(
+                    Component::Run,
+                    format!("cannot load {}: {reason}", input_path.display()),
+                )
+            })?;
         // warm second half mirrors run_driver hot path (empty image stack: asm recipes idempotently rematerialized)
         let mut module = module;
         module.asm_stub_addrs = crate::lower::asm::materialize(&module.asm_sites);
         let mut program_argv = vec![input];
         program_argv.extend(program_args);
         let code = run_vm_engine(module, &program_argv, vm_call.as_deref(), vm_stats, true);
-        exit(code);
+        // The guest's own status: not mirvm's to classify.
+        return Ok(ExitCode::from(code as u8));
     }
 
-    let src = std::fs::read_to_string(&input_path).unwrap_or_else(|e| {
-        crate::cli::diagnostics::control(format_args!("mirvm: fail to read {input}: {e}"));
-        exit(1);
-    });
+    let src = std::fs::read_to_string(&input_path).map_err(|e| {
+        crate::error::Error::failure(Component::Run, format!("cannot read {input}: {e}"))
+    })?;
 
     // Form 2: single-file script with frontmatter dependency declaration -> materialize into cargo project
     if let Some((manifest, body)) = parse_frontmatter(&src) {
         if deps_self {
-            return crate::cargoless::driver::run_script(
+            return Ok(crate::cargoless::driver::run_script(
                 &input_path,
                 &program_args,
                 ignore_rust_version,
-            );
+            ));
         }
         let dir = match materialize_script(&input_path, &manifest, &body) {
             Ok(dir) => dir,
             Err(message) => {
-                crate::cli::diagnostics::control(format_args!(
-                    "mirvm: {}: {message}",
-                    input_path.display()
+                return Err(crate::error::Error::usage(
+                    Component::Run,
+                    format!("{}: {message}", input_path.display()),
                 ));
-                exit(2);
             }
         };
         cargo_shim::phase_cargo(&dir, &program_args, None, ignore_rust_version);
     }
 
     // Form 3: plain single file, zero-cargo fast path
-    let sysroot = sysroot
-        .or_else(|| {
-            crate::options::get()
-                .sysroot
-                .as_deref()
-                .map(|path| path.display().to_string())
-        })
-        .unwrap_or_else(|| match crate::sysroot::ensure_sysroot() {
-            Ok(p) => p.display().to_string(),
-            Err(e) => {
-                crate::cli::diagnostics::control(format_args!("mirvm: fail to build sysroot: {e}"));
-                exit(1);
-            }
-        });
+    let sysroot = match sysroot.or_else(|| {
+        crate::options::get()
+            .sysroot
+            .as_deref()
+            .map(|path| path.display().to_string())
+    }) {
+        Some(sysroot) => sysroot,
+        None => crate::sysroot::ensure_sysroot()?.display().to_string(),
+    };
     let rustc_args = vec![
         "mirvm".to_string(),
         input.clone(),
@@ -509,7 +523,7 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     ];
     let mut program_argv = vec![input];
     program_argv.extend(program_args);
-    run_driver(
+    Ok(run_driver(
         rustc_args,
         program_argv,
         dump_mir,
@@ -517,5 +531,5 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         vm_stats,
         false,
         None,
-    )
+    ))
 }
