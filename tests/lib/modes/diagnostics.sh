@@ -13,7 +13,7 @@ HOME_DIR="$TMP/home"
 mkdir -p "$HOME_DIR"
 ensure_test_sysroot "$MIRVM" "$HOME_DIR" "$RUSTC" || exit $?
 host=$(rustc_host)
-home_sysroot="$HOME_DIR/sysroot-$host"
+home_sysroot="$HOME_DIR/data/sysroot-$host"
 if [ "$TEST_SYSROOT" != "$home_sysroot" ] && [ ! -e "$home_sysroot" ]; then
     ln -s "$TEST_SYSROOT" "$home_sysroot"
 fi

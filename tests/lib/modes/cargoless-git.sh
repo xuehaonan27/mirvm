@@ -156,7 +156,7 @@ else
     ok "self Git path execve zero Cargo"
 fi
 
-CHECKOUT=$(find "$SELF_HOME/registry/git/checkouts" -path "*/$MIDDLE/core/src/lib.rs" -print -quit)
+CHECKOUT=$(find "$SELF_HOME/data/registry/git/checkouts" -path "*/$MIDDLE/core/src/lib.rs" -print -quit)
 printf 'pub fn value() -> usize { 99 }\n' >"$CHECKOUT"
 if run_self "$APP" >"$TMP/tamper.out" 2>"$TMP/tamper.err"; then
     bad "Git checkout tampering unexpectedly succeeded"

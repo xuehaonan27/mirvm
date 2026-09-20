@@ -118,7 +118,7 @@ fork changes, writing to disk instead of executing.
 5. Start at `RELOC.entry`, the main startup chain, forwarding argv.
 
 Function access records the real order of the run. On release, that order is written atomically to
-`$MIRVM_HOME/package-heat/<hash>.order`, keyed by the FUNCS content hash; the next load prefetches in
+`$MIRVM_HOME/cache/package-heat/<hash>.order`, keyed by the FUNCS content hash; the next load prefetches in
 that order in the background from one decode worker. Demand tasks always precede predicted ones, and a
 predicted function that is suddenly demanded moves to the demand queue. The wait bound is the item
 currently decoding plus that demand, so a wrong prediction costs speed only and never changes
@@ -137,7 +137,7 @@ semantics.
   closures are never reclaimed or reused, so a stale pointer after close cannot land in a new Engine
   through address reuse.
 - With MC absent or `MIRVM_PACK_NO_MC=1`, the same embedded bytes materialize to
-  `$MIRVM_HOME/package-native/<hash>.so` and are dlopen'd. That is a loading strategy, not a dependency
+  `$MIRVM_HOME/cache/package-native/<hash>.so` and are dlopen'd. That is a loading strategy, not a dependency
   on a preexisting cache.
 
 ### 2.6 Embedding surface
