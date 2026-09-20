@@ -20,7 +20,11 @@
 //!   as garbage.
 //! - **Record the generation**: a [`Shape::Generation`] entry's first serialized field is the
 //!   `build_id` of the mirvm that wrote it. A stale generation is therefore recognisable with a
-//!   zero-decode peek — a full decode would restore the entry's frozen region and map memory.
+//!   zero-decode peek — a full decode would restore the entry's frozen region and map memory. The
+//!   rest of what a generational entry needs — its key, and the guards a snapshot must pass before
+//!   it is published or used — is [`entry`].
+
+pub(crate) mod entry;
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -272,7 +276,7 @@ fn classify(path: &Path) -> Staleness {
         return Staleness::Garbage;
     }
     match entry_build_id(path) {
-        Some(id) if id == crate::options::build::BUILD_ID => Staleness::Current,
+        Some(id) if entry::is_current_generation(&id) => Staleness::Current,
         Some(_) => Staleness::Stale,
         None => Staleness::Garbage,
     }

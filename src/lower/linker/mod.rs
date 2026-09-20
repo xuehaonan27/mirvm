@@ -108,7 +108,7 @@ impl<'tcx> Linker<'tcx> {
     /// the same k-domain as `frozen`, derived uniformly by `lower_inner`.
     pub(super) fn new(
         tcx: TyCtxt<'tcx>,
-        stack: &crate::baseimage::ImageStack,
+        stack: &crate::lower::image::ImageStack,
         frozen: FrozenArena,
         code_arena: crate::vm::codearena::StubArena,
     ) -> Self {

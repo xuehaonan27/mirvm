@@ -15,6 +15,7 @@ pub mod collect;
 pub mod frame;
 pub mod func;
 pub mod global_asm;
+pub mod image;
 
 use std::collections::VecDeque;
 
@@ -130,8 +131,8 @@ impl SplitImage {
     /// Wrap into a stack layer usable before the image is written to disk.
     /// `fp` is the build-session lowering fingerprint; a same-session build is always consistent
     /// with the stack it is about to join.
-    pub fn into_base_image(self, fp: (bool, bool, bool)) -> crate::baseimage::BaseImage {
-        crate::baseimage::BaseImage {
+    pub fn into_base_image(self, fp: (bool, bool, bool)) -> crate::lower::image::BaseImage {
+        crate::lower::image::BaseImage {
             fn_by_sym: self
                 .module
                 .exports
@@ -183,7 +184,7 @@ pub struct BaseExports {
 /// (`SplitImage`, spline k=0 domain) and the delta module keeps only the binary's own attachments.
 pub fn lower_program(
     tcx: TyCtxt<'_>,
-    stack: &crate::baseimage::ImageStack,
+    stack: &crate::lower::image::ImageStack,
     split: bool,
 ) -> (ir::Module, Option<SplitImage>) {
     // The split decision (enabled, bypassed, already loaded this session, base present) is made by
@@ -198,7 +199,7 @@ pub fn lower_program(
 /// disambiguator in their symbol names, do not belong to the "sysroot face", and cannot collide
 /// with a real program.
 pub fn lower_for_base_build(tcx: TyCtxt<'_>) -> (ir::Module, BaseExports) {
-    let empty = crate::baseimage::ImageStack::empty();
+    let empty = crate::lower::image::ImageStack::empty();
     let (module, exports, _) = lower_inner(
         tcx,
         &empty,
@@ -224,7 +225,7 @@ pub fn lower_for_base_build(tcx: TyCtxt<'_>) -> (ir::Module, BaseExports) {
 /// It is the reserved entry point for that line; do not delete it for lack of callers.
 pub fn lower_for_image_build(
     tcx: TyCtxt<'_>,
-    stack: &crate::baseimage::ImageStack,
+    stack: &crate::lower::image::ImageStack,
     k: usize,
 ) -> (ir::Module, BaseExports) {
     let (module, exports, _) =
@@ -305,7 +306,7 @@ fn register_guest_panic_cleanup<'tcx>(
 
 fn lower_inner(
     tcx: TyCtxt<'_>,
-    stack: &crate::baseimage::ImageStack,
+    stack: &crate::lower::image::ImageStack,
     frozen: FrozenArena,
     emit_exports: bool,
     exclude_local: bool,

@@ -11,6 +11,7 @@ use std::process::ExitCode;
 
 use crate::cargo_shim;
 
+mod base_image;
 mod cargo;
 mod driver;
 mod entry;
@@ -140,7 +141,7 @@ pub fn main() -> ExitCode {
     // Base-image build subprocess (must precede MIRVM_CARGO_SESSION dispatch: builds triggered
     // inside runner carry the cargo session env and must not be misrouted into phase_wrapper)
     if first == "__build-base-image" {
-        return crate::baseimage::build_main(argv);
+        return base_image::build_main(argv);
     }
     // Cargoless dep compilation subprocess (landing point for cargoless::driver scheduling;
     // also must precede MIRVM_CARGO_SESSION dispatch)

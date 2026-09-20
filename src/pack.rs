@@ -560,10 +560,10 @@ pub(crate) fn write_package(
     // Input stamps and the env! list are provenance only. Executable semantics are already frozen
     // into the Module, so running a distributed package must not require the source at its original
     // path, nor a replica of the build environment on the target machine.
-    let (stamps, envs) = crate::ircache::collect_input_stamps(tcx).unwrap_or_default();
+    let inputs = crate::inputs::InputManifest::collect(tcx).unwrap_or_default();
     let meta = Meta {
         args: rustc_args.to_vec(),
-        envs,
+        envs: inputs.envs,
         base_key: None,
         target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
     };
@@ -603,7 +603,7 @@ pub(crate) fn write_package(
 
     let mut sections: Vec<(u32, Vec<u8>)> = vec![
         (TAG_META, postcard_bytes(&meta)?),
-        (TAG_STAMPS, postcard_bytes(&stamps)?),
+        (TAG_STAMPS, postcard_bytes(&inputs.files)?),
         (TAG_MODULE, module_bytes),
         (TAG_NATIVELIBS, postcard_bytes(&libs)?),
         (TAG_RELOC, postcard_bytes(&reloc)?),

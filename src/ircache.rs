@@ -5,34 +5,28 @@
 //! Hot path (hit): **lookup** → asm-stub rematerialization → argv finalization → run — the entire
 //! rustc session (frontend + metadata + mono + lower) is skipped.
 //!
-//! Key = fnv(MIRVM_BUILD_ID, rustc_args); entry header = full args replay (hash-collision proof) +
-//! input manifest validation. Manifest scope is isomorphic to rustc's own dep-info
-//! (rustc_interface::passes): local source files (source_map non-imported) + `include!` tracked
-//! files (sess.file_depinfo) + all upstream crate artifacts (used_crate_source: includes sysroot
-//! std rlib, so sysroot changes naturally mismatch) + `env!` dependencies (sess.env_depinfo). Files
-//! are validated by content digest; size/mtime are also stored for diagnostics but are no longer
-//! treated as content identity.
+//! Key = digest(MIRVM_BUILD_ID, rustc_args); entry header = full args replay (hash-collision proof)
+//! + the input manifest ([`crate::inputs`]).
 //!
 //! Guard against silent wrong values: any validation mismatch is a miss (cold path rebuilds and
 //! overwrites); frozen area not at fixed base is rejected for serialization/restore (see
 //! frozen.rs); missing required .so is a miss (self-heal rather than runtime error).
 //! `MIRVM_NO_IR_CACHE=1` bypasses the cache entirely.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use rustc_middle::ty::TyCtxt;
 use serde::{Deserialize, Serialize};
 
-use crate::utils::content::FileStamp;
+use crate::inputs::InputManifest;
 use crate::vm::ir;
 
 #[derive(Serialize, Deserialize)]
 struct Header {
     build_id: String,
     args: Vec<String>,
-    files: Vec<FileStamp>,
-    /// `env!`/`option_env!` dependencies: (name, value at compile time; None = not set at compile time)
-    envs: Vec<(String, Option<String>)>,
+    /// The compilation's input manifest (files + `env!` dependencies), replayed on lookup.
+    inputs: crate::inputs::InputManifest,
     /// S4 layering: base key referenced by the delta module (None = full module with no base).
     /// Delta bytecode/frozen area embeds base absolutes (FuncId offset, base addresses) — a
     /// mismatched base load is globally wrong, so keys must match exactly.
@@ -44,16 +38,14 @@ fn disabled() -> bool {
 }
 
 fn entry_path(rustc_args: &[String]) -> PathBuf {
-    let mut key = String::from(crate::options::build::BUILD_ID);
-    for a in rustc_args {
-        key.push('\u{1f}');
-        key.push_str(a);
+    let mut key = crate::store::entry::Key::new();
+    for arg in rustc_args {
+        key.part(arg);
     }
-    let h = crate::utils::content::fnv1a(key.as_bytes());
     crate::options::get()
         .cache_root()
         .join("ir")
-        .join(format!("{h:016x}.bin"))
+        .join(format!("{}.bin", key.digest()))
 }
 
 /// Header triple equality: build id (stale across builds) + full args replay (hash-collision proof) +
@@ -61,87 +53,9 @@ fn entry_path(rustc_args: &[String]) -> PathBuf {
 /// base replacement or presence change makes a mismatched load globally wrong; None side must also
 /// match exactly, a no-base session must not consume a base delta).
 fn header_matches(header: &Header, rustc_args: &[String], base_key: Option<&str>) -> bool {
-    header.build_id == crate::options::build::BUILD_ID
+    crate::store::entry::is_current_generation(&header.build_id)
         && header.args == rustc_args
         && header.base_key.as_deref() == base_key
-}
-
-fn env_matches(name: &str, recorded: &Option<String>) -> bool {
-    match (std::env::var(name), recorded) {
-        (Ok(cur), Some(rec)) => cur == *rec,
-        (Err(std::env::VarError::NotPresent), None) => true,
-        _ => false,
-    }
-}
-
-/// Stamp collection result: (file stamp manifest, `env!` dependency manifest).
-pub(crate) type InputStamps = (Vec<FileStamp>, Vec<(String, Option<String>)>);
-
-/// Input manifest collection (isomorphic to rustc dep-info scope; shared by mode B packaging and
-/// L2): local source files (source_map non-imported) + `include!` tracked files + all upstream
-/// crate artifacts (used_crate_source: includes sysroot std rlib) + `env!` dependencies. If any
-/// file cannot be stamped (missing/unusual) = None (prefer not to cache/package).
-pub(crate) fn collect_input_stamps(tcx: TyCtxt<'_>) -> Option<InputStamps> {
-    let sess = tcx.sess;
-    let mut files: Vec<String> = sess
-        .source_map()
-        .files()
-        .iter()
-        .filter(|f| !f.is_imported())
-        .filter_map(|f| match &f.name {
-            rustc_span::FileName::Real(real) => real.local_path().map(|p| p.display().to_string()),
-            _ => None,
-        })
-        .collect();
-    files.extend(
-        sess.file_depinfo
-            .borrow()
-            .iter()
-            .map(|sym| sym.as_str().to_string()),
-    );
-    for &cnum in tcx.crates(()) {
-        files.extend(
-            tcx.used_crate_source(cnum)
-                .paths()
-                .map(|p| p.display().to_string()),
-        );
-    }
-    files.sort();
-    files.dedup();
-    // Make absolute (mode B evidence: cargo gives local crate relative paths (src/main.rs), but the
-    // package may be loaded from any cwd; keep original path if canonicalize fails, stamp check
-    // covers it)
-    let files: Vec<String> = files
-        .iter()
-        .map(|p| {
-            std::fs::canonicalize(p)
-                .map(|c| c.display().to_string())
-                .unwrap_or_else(|_| p.clone())
-        })
-        .collect();
-    let stamps = files
-        .iter()
-        .map(|p| FileStamp::of(Path::new(p)))
-        .collect::<Result<Vec<FileStamp>, _>>()
-        .ok()?;
-    let envs: Vec<(String, Option<String>)> = sess
-        .env_depinfo
-        .borrow()
-        .iter()
-        .map(|(k, v)| (k.as_str().to_string(), v.map(|s| s.as_str().to_string())))
-        .collect();
-    Some((stamps, envs))
-}
-
-/// Replay each stamp against the current local file state (shared by mode B package load validation
-/// and L2 lookup).
-pub(crate) fn stamps_current(files: &[FileStamp]) -> bool {
-    files.iter().all(FileStamp::is_current)
-}
-
-/// Replay each env dependency against the current environment (shared as above).
-pub(crate) fn envs_current(envs: &[(String, Option<String>)]) -> bool {
-    envs.iter().all(|(k, v)| env_matches(k, v))
 }
 
 /// Hot-path lookup. The returned Module already has its frozen area restored to a fixed base;
@@ -160,26 +74,20 @@ pub fn lookup(
     if !header_matches(&header, rustc_args, base_key) {
         return None;
     }
-    if !stamps_current(&header.files) {
-        return None;
-    }
-    if !envs_current(&header.envs) {
+    // Every recorded input must still hold its recorded value (content digest, not mtime).
+    if !header.inputs.is_current() {
         return None;
     }
     // Module deserialization includes frozen-area fixed-base restoration; failure (base occupied
     // etc.) → miss
     let mut module: ir::Module = postcard::from_bytes(module_bytes).ok()?;
-    module.rebuild_load_map();
-    module.rebuild_fn_addrs();
-    // Correct shape does not guarantee index and frame range safety. Bad cache is treated as miss
-    // and self-healed by the cold path.
-    crate::vm::verify::module_with_prefix(&module, prefix).ok()?;
-    // Materialized .so files (native archive / global_asm) removed → miss, self-healed by cold path
-    if !module
-        .required_native_libs
-        .iter()
-        .all(|p| Path::new(&**p).is_file())
-    {
+    // Correct shape does not guarantee index and frame range safety, so a bad cache is a miss that
+    // the cold path self-heals. Materialized .so files (native archive / global_asm) that were
+    // removed are a miss for the same reason.
+    if !crate::store::entry::revive(&mut module, prefix) {
+        return None;
+    }
+    if !crate::store::entry::native_libs_present(&module) {
         return None;
     }
     Some(module)
@@ -200,31 +108,23 @@ pub fn store(
     if crate::vm::verify::module_with_prefix(module, prefix).is_err() {
         return false;
     }
-    // Frozen area not at fixed base (concurrent preempt / ASLR conflict) ⇒ embedded addresses in
-    // snapshot are cross-process invalid, do not cache
-    if !module.frozen.as_ref().is_some_and(|f| f.at_fixed_base()) {
-        return false;
-    }
-    // P1 entry stub domain not at fixed base ⇒ fn-ptr value domain is cross-process unstable, do
-    // not cache (same rule)
-    if !module.entry_stub_sites.is_empty() && !module.entry_stubs.at_fixed_base() {
-        return false;
-    }
+    // The frozen area must be at a fixed base (a concurrent preempt or an ASLR conflict leaves
+    // embedded addresses cross-process invalid); a delta may sit at any fixed base, since the file
+    // records its own domain.
     // Foreign symbols (environ-like extern static / extern fn address-taking) are indirected
-    // through GOT slots since P2 (decision-history §7.5c): GOT table travels with snapshot and is
-    // refilled by this process's real values at startup — no longer a cache blocker, the old
-    // "embedded host address rejects cache" criterion (M6 slice 2) is retired.
-
-    // Input manifest (isomorphic to rustc dep-info scope, shared collector with mode B packaging)
-    let Some((stamps, envs)) = collect_input_stamps(tcx) else {
-        return false; // some input file could not be stamped (missing/unusual) — prefer not to cache
+    // through GOT slots since P2 (decision-history §7.5c): the GOT table travels with the snapshot
+    // and is refilled with this process's real values at startup, so it is not a cache blocker.
+    if !crate::store::entry::snapshot_is_publishable(module, None) {
+        return false;
+    }
+    let Some(inputs) = InputManifest::collect(tcx) else {
+        return false; // some input could not be stamped (missing/unusual) — prefer not to cache
     };
 
     let header = Header {
         build_id: crate::options::build::BUILD_ID.to_string(),
         args: rustc_args.to_vec(),
-        files: stamps,
-        envs,
+        inputs,
         base_key: base_key.map(str::to_owned),
     };
     let Ok(mut buf) = postcard::to_stdvec(&header) else {
@@ -248,30 +148,13 @@ pub fn store(
 
 #[cfg(test)]
 mod tests {
-    use super::env_matches;
-
-    #[test]
-    fn env_dep_matching_covers_set_unset_and_drift() {
-        let name = "MIRVM_IRCACHE_TEST_ENV";
-        // SAFETY: test-only variable within this single test process
-        unsafe { std::env::remove_var(name) };
-        assert!(env_matches(name, &None));
-        assert!(!env_matches(name, &Some("x".into())));
-        unsafe { std::env::set_var(name, "x") };
-        assert!(env_matches(name, &Some("x".into())));
-        assert!(!env_matches(name, &Some("y".into())));
-        assert!(!env_matches(name, &None));
-        unsafe { std::env::remove_var(name) };
-    }
-
     #[test]
     fn base_key_must_match_exactly_including_absence() {
         let args = vec!["mirvm".to_string(), "x.rs".to_string()];
         let mk = |base_key: Option<&str>| super::Header {
             build_id: crate::options::build::BUILD_ID.to_string(),
             args: args.clone(),
-            files: Vec::new(),
-            envs: Vec::new(),
+            inputs: crate::inputs::InputManifest::default(),
             base_key: base_key.map(str::to_owned),
         };
         // same key ✓; replacement ✗; presence change (some→none / none→some) both ways ✗

@@ -26,6 +26,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::store::entry;
 use crate::utils::content::{FileStamp, digest_hex};
 use crate::vm::ir;
 
@@ -98,34 +99,34 @@ fn stamp_externs(paths: &[String]) -> Option<Vec<FileStamp>> {
         .collect()
 }
 
-/// pre-key = fnv(build_id, base key, sorted stamps), returned together with the stamp list. Any material
-/// that is unavailable yields `None`, which the caller treats as "no image"; full lowering then self-heals.
-/// An empty `--extern` also yields `None`: dependency-free pure-std programs are covered by the std base and
-/// get no shared image of their own.
+/// pre-key = digest(build_id, base key, sorted stamps), returned together with the stamp list. Any
+/// material that is unavailable yields `None`, which the caller treats as "no image"; full lowering
+/// then self-heals. An empty `--extern` also yields `None`: dependency-free pure-std programs are
+/// covered by the std base and get no shared image of their own.
 pub(crate) fn pre_key(rustc_args: &[String], base_key: &str) -> Option<(String, Vec<FileStamp>)> {
     let paths = extern_paths(rustc_args)?;
     if paths.is_empty() {
         return None;
     }
     let stamps = stamp_externs(&paths)?;
-    let mut key = String::from(crate::options::build::BUILD_ID);
-    key.push('\u{1f}');
-    key.push_str(base_key);
+    let mut key = entry::Key::new();
+    key.part(base_key);
     for stamp in &stamps {
-        key.push('\u{1f}');
-        key.push_str(&stamp.path);
-        key.push('\u{1e}');
-        key.push_str(&stamp.size.to_string());
-        key.push('\u{1e}');
-        key.push_str(&stamp.mtime_ns.to_string());
-        key.push('\u{1e}');
-        key.push_str(&digest_hex(&stamp.digest));
+        // One part per artifact: its four fields are separated inside the part, so a path cannot
+        // impersonate a field boundary.
+        key.part(&format!(
+            "{}\u{1e}{}\u{1e}{}\u{1e}{}",
+            stamp.path,
+            stamp.size,
+            stamp.mtime_ns,
+            digest_hex(&stamp.digest)
+        ));
     }
-    let h = crate::utils::content::fnv1a(key.as_bytes());
+    let key = key.digest();
     if crate::options::get().a2_debug {
-        eprintln!("[a2-debug] pre-key={h:016x} externs={paths:?}");
+        eprintln!("[a2-debug] pre-key={key} externs={paths:?}");
     }
-    Some((format!("{h:016x}"), stamps))
+    Some((key, stamps))
 }
 
 fn file_path(key: &str) -> PathBuf {
@@ -138,49 +139,39 @@ fn file_path(key: &str) -> PathBuf {
 /// full lowering self-heals and the main path stays silent, because stderr participates in native diffs.
 pub fn try_load(
     rustc_args: &[String],
-    base: &crate::baseimage::BaseImage,
-) -> Option<crate::baseimage::BaseImage> {
+    base: &crate::lower::image::BaseImage,
+) -> Option<crate::lower::image::BaseImage> {
     let (key, stamps) = pre_key(rustc_args, &base.key)?;
     let data = std::fs::read(file_path(&key)).ok()?;
     let mut f: DepsFile = postcard::from_bytes(&data).ok()?;
-    f.module.rebuild_load_map();
-    f.module.rebuild_fn_addrs();
     // Exact-equality validation: build id, base key, stamp list (collision immune), layered lowering fingerprint
-    if f.build_id != crate::options::build::BUILD_ID
+    if !entry::is_current_generation(&f.build_id)
         || f.base_key != base.key
         || f.extern_stamps != stamps
         || f.lowering_fp != base.lowering_fp
     {
         return None;
     }
-    // Frozen area must actually land in spline k=0 domain (defense: reject if file swapped or domain stolen)
-    let frozen_ok =
-        f.module.frozen.as_ref().is_some_and(|fr| {
-            fr.at_fixed_base() && fr.home() == crate::vm::addrlayout::image_addr(0)
-        });
-    if !frozen_ok {
+    // The frozen area must actually land in the spline k=0 domain the layer below expects: this
+    // rejects a swapped file and a stolen domain alike.
+    if !entry::frozen_at(&f.module, Some(crate::vm::addrlayout::image_addr(0))) {
         return None;
     }
-    crate::vm::verify::module_with_prefix(
-        &f.module,
-        crate::vm::verify::Prefix {
-            funcs: base.module.funcs.len(),
-            tls: base.module.tls.len(),
-            asm: base.module.asm_sites.len(),
-        },
-    )
-    .ok()?;
-    // required .so removed ⇒ miss falls back to cold-path self-heal (same contract as ircache)
-    if !f
-        .module
-        .required_native_libs
-        .iter()
-        .all(|p| std::path::Path::new(&**p).is_file())
-    {
+    let prefix = crate::vm::verify::Prefix {
+        funcs: base.module.funcs.len(),
+        tls: base.module.tls.len(),
+        asm: base.module.asm_sites.len(),
+    };
+    if !entry::revive(&mut f.module, prefix) {
+        return None;
+    }
+    // A removed required .so is a miss that falls back to the cold-path self-heal (same contract as
+    // the L2 cache)
+    if !entry::native_libs_present(&f.module) {
         return None;
     }
     let module = f.module;
-    Some(crate::baseimage::BaseImage {
+    Some(crate::lower::image::BaseImage {
         fn_by_sym: module.exports.clone(),
         entry_by_sym: f.fn_entry_syms.into_iter().collect(),
         static_by_sym: f.static_syms.into_iter().collect(),
@@ -200,17 +191,14 @@ pub fn store_and_wrap(
     base_key: &str,
     fp: (bool, bool, bool),
     image: crate::lower::SplitImage,
-) -> crate::baseimage::BaseImage {
+) -> crate::lower::image::BaseImage {
     let mut bi = image.into_base_image(fp);
-    // Cacheability: the frozen area must sit in the fixed spline k=0 domain, a prerequisite for the
-    // snapshot's embedded absolute addresses to stay stable across processes. The entry stub code area
-    // follows the same rule, since an fn-ptr value is a stub code address. Foreign symbols go through GOT
-    // slots: the image-side GOT table travels with the file and is refilled with this process's real values
-    // at startup, so it does not block writing the file.
+    // Cacheability: the frozen area must sit in the fixed spline k=0 domain the layer below expects,
+    // a prerequisite for the snapshot's embedded absolute addresses to stay stable across processes.
+    // Foreign symbols go through GOT slots: the image-side GOT table travels with the file and is
+    // refilled with this process's real values at startup, so it does not block writing the file.
     let cacheable =
-        bi.module.frozen.as_ref().is_some_and(|fr| {
-            fr.at_fixed_base() && fr.home() == crate::vm::addrlayout::image_addr(0)
-        }) && (bi.module.entry_stub_sites.is_empty() || bi.module.entry_stubs.at_fixed_base());
+        entry::snapshot_is_publishable(&bi.module, Some(crate::vm::addrlayout::image_addr(0)));
     let keyed = pre_key(rustc_args, base_key);
     if let (true, Some((key, stamps))) = (cacheable, keyed) {
         let mut fn_entry_syms = bi
