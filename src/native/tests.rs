@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{materialize_for_target_in, materialize_in, reject_symbol_ambiguity};
+use super::archive::{materialize_for_target_in, materialize_in, reject_symbol_ambiguity};
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
 static SIGNAL_SIGNUM: AtomicU64 = AtomicU64::new(0);
@@ -197,7 +197,7 @@ fn native_signal_calls_receive_the_engine_owner() {
     )
     .unwrap_or_else(|e| panic!("dlopen {} failed: {e}", so.display()));
     let bias = crate::os::dll::load_bias(handle).expect("native bridge load bias") as u64;
-    let hidden = crate::elfsym::hidden_symtab_values(so.to_str().unwrap()).unwrap();
+    let hidden = crate::native::symtab::hidden_symtab_values(so.to_str().unwrap()).unwrap();
     let patch = |name: &str, value: u64| {
         let offset = hidden
             .get(name)

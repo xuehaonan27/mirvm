@@ -250,7 +250,7 @@ fn fingerprint_propagates_transitive_dep_change() {
     let plan = diamond_plan();
     let fps0 = fingerprints(&plan, &ProfileFlags::default(), "stamp0", &[]).unwrap();
     // b's own fields are untouched; only its transitive dep a's feature set changes => b's
-    // fp must change (the depsimage pre-key invariant "a transitive closure change changes
+    // fp must change (the dependency-image pre-key invariant "a transitive closure change changes
     // every direct dependency's artifact stamp")
     let mut plan2 = diamond_plan();
     plan2.units[0].features.insert("alloc".to_string());

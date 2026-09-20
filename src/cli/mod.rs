@@ -13,6 +13,7 @@ use crate::cargo_shim;
 
 mod base_image;
 mod cargo;
+pub(crate) mod diagnostics;
 mod driver;
 mod entry;
 mod frontmatter;
@@ -296,13 +297,13 @@ fn capture_main(mut args: impl Iterator<Item = String>) -> ExitCode {
         eprintln!("mirvm capture: a capture request is already configured in this process");
         return ExitCode::from(2);
     }
-    let _diagnostic_router = match crate::diagnostics::DiagnosticRouter::start(
+    let _diagnostic_router = match diagnostics::DiagnosticRouter::start(
         capture_directory(),
         capture_directory_is_forwarded(),
     ) {
         Ok(router) => router,
         Err(error) => {
-            crate::diagnostics::control(format_args!(
+            diagnostics::control(format_args!(
                 "mirvm capture: cannot start diagnostics stream: {error}"
             ));
             return ExitCode::from(70);

@@ -45,8 +45,9 @@ mod product_adapters; // stub for the one rustc-dependent leaf the engine still 
 pub(crate) use product_adapters::lower;
 #[path = "../../../../../src/utils/mod.rs"]
 mod utils; // content hash + the mirvm_log! macro, pure Rust (source-shared)
-#[path = "../../../../../src/elfsym.rs"]
-mod elfsym; // archive .symtab fallback for ffi.rs (pure Rust, source-shared)
+mod native; // native layer: only symtab is pure Rust (see src/native.rs)
+#[path = "../../../../../src/store/mod.rs"]
+mod store; // the family register the engine reads its scratch dirs from (pure Rust, source-shared)
 #[path = "../../../../../src/options.rs"]
 mod options; // the MIRVM_* register the engine reads its knobs through (pure Rust, source-shared)
 mod telemetry; // capture/format source-shared (name fixed: src/vm says crate::telemetry)

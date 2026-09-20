@@ -3,7 +3,7 @@
 //! The layer itself is a synthetic "empty main" session (lang_start chain / panic / fmt / alloc
 //! machinery, ~3000 instances) whose frozen region sits in the `BASE_IMAGE_FIXED_ADDR` domain. The
 //! stack that consumes it, and the offset merge that folds it under a program delta, are
-//! [`crate::lower::image`]; this module is the file: where it lives, when it is valid, and what the
+//! [`crate::image`]; this module is the file: where it lives, when it is valid, and what the
 //! build subprocess (`crate::cli::base_image`) writes.
 //!
 //! Key and invalidation: the file name is `digest(build_id, sysroot stamp)`, and loading re-checks
@@ -69,7 +69,7 @@ fn locate() -> Option<(PathBuf, String)> {
     Some((base_dir().join(format!("{}.img", key.digest())), stamp))
 }
 
-fn load(path: &Path, want_stamp: &str) -> Option<crate::lower::image::BaseImage> {
+fn load(path: &Path, want_stamp: &str) -> Option<crate::image::BaseImage> {
     let data = std::fs::read(path).ok()?;
     let f: BaseFile = postcard::from_bytes(&data).ok()?; // restores the frozen region at its fixed base; a taken region means a miss
     if !entry::is_current_generation(&f.build_id) || f.sysroot_stamp != want_stamp {
@@ -97,7 +97,7 @@ fn load(path: &Path, want_stamp: &str) -> Option<crate::lower::image::BaseImage>
     if !entry::revive(&mut module, crate::vm::verify::Prefix::default()) {
         return None;
     }
-    Some(crate::lower::image::BaseImage {
+    Some(crate::image::BaseImage {
         fn_by_sym: f.export_syms.into_iter().collect(),
         entry_by_sym: f.fn_entry_syms.into_iter().collect(),
         static_by_sym: f.static_syms.into_iter().collect(),
@@ -111,7 +111,7 @@ fn load(path: &Path, want_stamp: &str) -> Option<crate::lower::image::BaseImage>
 /// Load the base image, or build it in a subprocess. Failure yields `None` (full cold
 /// lowering, silent self-heal); the build log goes to base/build.log because stderr
 /// participates in native differential comparison, so the main path must stay quiet.
-fn ensure_base() -> Option<crate::lower::image::BaseImage> {
+fn ensure_base() -> Option<crate::image::BaseImage> {
     if disabled() {
         return None;
     }
@@ -140,12 +140,12 @@ fn ensure_base() -> Option<crate::lower::image::BaseImage> {
 
 /// Load the image stack: the base image plus its dependency chain. Only the base image is
 /// loaded here.
-pub fn ensure() -> crate::lower::image::ImageStack {
+pub fn ensure() -> crate::image::ImageStack {
     let mut images = Vec::new();
     if let Some(base) = ensure_base() {
         images.push(base);
     }
-    crate::lower::image::ImageStack::from_images(images)
+    crate::image::ImageStack::from_images(images)
 }
 
 /// Serialize and publish one base image: the publishability rules, the byte-determinism extraction

@@ -12,18 +12,26 @@
 //! spline `image_addr(k)` — so cross-domain absolute addresses are mutually stable and a layer file
 //! stays valid in another process. An empty stack (no base image / bypassed) means full cold
 //! lowering.
+//!
+//! The three persisted layers a session can reuse live beside the stack: [`base`] (the pre-lowered
+//! std image), [`deps`] (a registry dependency closure) and [`ir`] (one program's post-mono engine
+//! IR). Each is a keyed file in the store; [`crate::store::entry`] owns the mechanism they share.
 
-use crate::vm::ir;
+pub(crate) mod base;
+pub(crate) mod deps;
+pub(crate) mod ir;
+
+use crate::vm::ir::{FuncId, Module, TlsId};
 
 /// A loaded layer, ready for a program session to use.
 pub struct BaseImage {
-    pub module: ir::Module,
-    pub fn_by_sym: std::collections::HashMap<Box<str>, ir::FuncId>,
+    pub module: Module,
+    pub fn_by_sym: std::collections::HashMap<Box<str>, FuncId>,
     pub entry_by_sym: std::collections::HashMap<Box<str>, u64>,
     pub static_by_sym: std::collections::HashMap<Box<str>, u64>,
-    pub tls_by_sym: std::collections::HashMap<Box<str>, ir::TlsId>,
+    pub tls_by_sym: std::collections::HashMap<Box<str>, TlsId>,
     pub lowering_fp: (bool, bool, bool),
-    /// Layered cache key (referenced by ircache delta entries; includes the lowering fingerprint)
+    /// Layered cache key (referenced by the L2 entry; includes the lowering fingerprint)
     pub key: String,
 }
 
@@ -31,10 +39,10 @@ pub struct BaseImage {
 pub struct ImageStack {
     images: Vec<BaseImage>,
     /// Union lookups (sym -> absolute id/address; image id domains are disjoint, so the union is unambiguous)
-    fn_by_sym: std::collections::HashMap<Box<str>, ir::FuncId>,
+    fn_by_sym: std::collections::HashMap<Box<str>, FuncId>,
     entry_by_sym: std::collections::HashMap<Box<str>, u64>,
     static_by_sym: std::collections::HashMap<Box<str>, u64>,
-    tls_by_sym: std::collections::HashMap<Box<str>, ir::TlsId>,
+    tls_by_sym: std::collections::HashMap<Box<str>, TlsId>,
     /// Delta id offset = the stack's cumulative counts
     total_fns: usize,
     total_tls: usize,
@@ -102,7 +110,7 @@ impl ImageStack {
     pub fn total_asm(&self) -> usize {
         self.total_asm
     }
-    pub fn fn_by_sym(&self) -> &std::collections::HashMap<Box<str>, ir::FuncId> {
+    pub fn fn_by_sym(&self) -> &std::collections::HashMap<Box<str>, FuncId> {
         &self.fn_by_sym
     }
     pub fn entry_by_sym(&self) -> &std::collections::HashMap<Box<str>, u64> {
@@ -111,7 +119,7 @@ impl ImageStack {
     pub fn static_by_sym(&self) -> &std::collections::HashMap<Box<str>, u64> {
         &self.static_by_sym
     }
-    pub fn tls_by_sym(&self) -> &std::collections::HashMap<Box<str>, ir::TlsId> {
+    pub fn tls_by_sym(&self) -> &std::collections::HashMap<Box<str>, TlsId> {
         &self.tls_by_sym
     }
     pub fn key(&self) -> Option<&str> {
@@ -170,7 +178,7 @@ impl ImageStack {
     /// re-materialized: the stub addresses in an image file are live only in the build process, so
     /// they must be idempotently re-materialized here from the recipe (the same contract as a warm L2
     /// load). Each image's frozen region moves into `delta.image_frozens` to keep it alive.
-    pub fn absorb_into(self, delta: &mut ir::Module) {
+    pub fn absorb_into(self, delta: &mut Module) {
         let mut funcs = Vec::with_capacity(self.total_fns);
         let mut function_names = Vec::with_capacity(self.total_fns + delta.funcs.len());
         let mut tls = Vec::with_capacity(self.total_tls);

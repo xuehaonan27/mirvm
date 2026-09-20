@@ -291,24 +291,28 @@ pub fn run_root_recipe(argv: impl Iterator<Item = String>) -> ExitCode {
         }
         Ok(None) => {}
     }
-    let _diagnostic_router =
-        match crate::diagnostics::DiagnosticRouter::start(crate::cli::capture_directory(), true) {
-            Ok(router) => router,
-            Err(error) => {
-                crate::diagnostics::control(format_args!(
-                    "mirvm capture: cannot start diagnostics stream: {error}"
-                ));
-                return ExitCode::from(70);
-            }
-        };
+    let _diagnostic_router = match crate::cli::diagnostics::DiagnosticRouter::start(
+        crate::cli::capture_directory(),
+        true,
+    ) {
+        Ok(router) => router,
+        Err(error) => {
+            crate::cli::diagnostics::control(format_args!(
+                "mirvm capture: cannot start diagnostics stream: {error}"
+            ));
+            return ExitCode::from(70);
+        }
+    };
     let Some(path) = argv.next() else {
-        crate::diagnostics::control(format_args!("mirvm: __cless-run-root missing recipe path"));
+        crate::cli::diagnostics::control(format_args!(
+            "mirvm: __cless-run-root missing recipe path"
+        ));
         return ExitCode::from(2);
     };
     let data = match std::fs::read(&path) {
         Ok(d) => d,
         Err(e) => {
-            crate::diagnostics::control(format_args!(
+            crate::cli::diagnostics::control(format_args!(
                 "mirvm: failed to read test recipe {path}: {e}"
             ));
             return ExitCode::from(1);
@@ -317,12 +321,14 @@ pub fn run_root_recipe(argv: impl Iterator<Item = String>) -> ExitCode {
     let recipe: RootRunRecipe = match serde_json::from_slice(&data) {
         Ok(r) => r,
         Err(e) => {
-            crate::diagnostics::control(format_args!("mirvm: test recipe {path} corrupted: {e}"));
+            crate::cli::diagnostics::control(format_args!(
+                "mirvm: test recipe {path} corrupted: {e}"
+            ));
             return ExitCode::from(1);
         }
     };
     if let Err(e) = std::env::set_current_dir(&recipe.cwd) {
-        crate::diagnostics::control(format_args!(
+        crate::cli::diagnostics::control(format_args!(
             "mirvm: test working directory {} is not accessible: {e}",
             recipe.cwd.display()
         ));

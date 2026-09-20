@@ -298,7 +298,7 @@ callback:
         String::from_utf8_lossy(&output.stderr)
     );
     let library =
-        crate::native_archive::materialize_in(&archive, &directory.path().join("materialized"))
+        crate::native::archive::materialize_in(&archive, &directory.path().join("materialized"))
             .unwrap();
     (directory, library)
 }

@@ -385,7 +385,7 @@ fn build_native_key_delete_archive() -> (std::path::PathBuf, std::path::PathBuf)
             .unwrap()
             .success()
     );
-    let library = crate::native_archive::materialize_in(&archive, &dir.join("cache")).unwrap();
+    let library = crate::native::archive::materialize_in(&archive, &dir.join("cache")).unwrap();
     (dir, library)
 }
 

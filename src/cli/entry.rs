@@ -136,7 +136,7 @@ fn set_cargo_pack_env(out: &Path) {
 /// `mirvm cache status|purge ...`: manage the local store ($HOME/.mirvm, relocatable via MIRVM_HOME).
 pub(super) fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
     let root = crate::options::get().home.clone();
-    let mut plan = crate::cachectl::Purge::default();
+    let mut plan = crate::store::report::Purge::default();
     let mut sub = None;
     for a in args {
         match a.as_str() {
@@ -157,7 +157,7 @@ pub(super) fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
     }
     match sub.as_deref() {
         Some("status") => {
-            print!("{}", crate::cachectl::status(&root));
+            print!("{}", crate::store::report::status(&root));
             ExitCode::SUCCESS
         }
         Some("purge") => {
@@ -173,7 +173,7 @@ pub(super) fn cache_main(args: impl Iterator<Item = String>) -> ExitCode {
             {
                 plan.stale = true;
             }
-            print!("{}", crate::cachectl::purge(&root, plan));
+            print!("{}", crate::store::report::purge(&root, plan));
             ExitCode::SUCCESS
         }
         _ => {
@@ -318,7 +318,7 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     while let Some(arg) = args.next() {
         let mut next = |name: &str| {
             args.next().unwrap_or_else(|| {
-                crate::diagnostics::control(format_args!("mirvm: {name} needs argument(s)"));
+                crate::cli::diagnostics::control(format_args!("mirvm: {name} needs argument(s)"));
                 exit(2);
             })
         };
@@ -334,7 +334,7 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
             "--engine" => {
                 let e = next("--engine");
                 if e != "vm" {
-                    crate::diagnostics::control(format_args!(
+                    crate::cli::diagnostics::control(format_args!(
                         "mirvm: engine `{e}` no longer exists (tier-0 removed; the only engine is vm)"
                     ));
                     exit(2);
@@ -348,7 +348,7 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
             "--stack-size" => {
                 let v = next("--stack-size");
                 if let Err(message) = parse_stack_size(&v) {
-                    crate::diagnostics::control(format_args!("{message}"));
+                    crate::cli::diagnostics::control(format_args!("{message}"));
                     exit(2);
                 }
                 // Export so the Cargo form (wrapper -> runner subprocess) sees the same value; the
@@ -360,7 +360,7 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
                 let v = next("--jit");
                 if v != "on" && v != "off" {
                     // TODO: tiered JIT?
-                    crate::diagnostics::control(format_args!(
+                    crate::cli::diagnostics::control(format_args!(
                         "mirvm: --jit only accepts on|off (got `{v}`)"
                     ));
                     exit(2);
@@ -371,7 +371,7 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
             }
             _ if input.is_none() && !arg.starts_with('-') => input = Some(arg),
             _ => {
-                crate::diagnostics::control(format_args!(
+                crate::cli::diagnostics::control(format_args!(
                     "mirvm: unknown argument `{arg}`\n{}",
                     crate::cli::usage()
                 ));
@@ -380,7 +380,7 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         }
     }
     let Some(input) = input else {
-        crate::diagnostics::control_raw(format_args!("{}", usage()));
+        crate::cli::diagnostics::control_raw(format_args!("{}", usage()));
         exit(2);
     };
     let input_path = PathBuf::from(&input);
@@ -392,7 +392,7 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         Ok(crate::options::DepsTrack::Own) => true,
         Ok(crate::options::DepsTrack::Cargo) => false,
         Err(message) => {
-            crate::diagnostics::control(format_args!("{message}"));
+            crate::cli::diagnostics::control(format_args!("{message}"));
             exit(2);
         }
     };
@@ -428,7 +428,7 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     }
     if let Some(b) = &bin_sel {
         // Script/single-file/package forms have no --bin concept (same as cargo script) — reject loudly, do not silently swallow
-        crate::diagnostics::control(format_args!(
+        crate::cli::diagnostics::control(format_args!(
             "mirvm: --bin {b} is only valid for cargo project form (directory/Cargo.toml)"
         ));
         exit(2);
@@ -441,7 +441,7 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         {
             Ok(module) => module,
             Err(reason) => {
-                crate::diagnostics::control(format_args!(
+                crate::cli::diagnostics::control(format_args!(
                     "mirvm: fail to load {}: {reason}",
                     input_path.display()
                 ));
@@ -458,7 +458,7 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
     }
 
     let src = std::fs::read_to_string(&input_path).unwrap_or_else(|e| {
-        crate::diagnostics::control(format_args!("mirvm: fail to read {input}: {e}"));
+        crate::cli::diagnostics::control(format_args!("mirvm: fail to read {input}: {e}"));
         exit(1);
     });
 
@@ -474,7 +474,7 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         let dir = match materialize_script(&input_path, &manifest, &body) {
             Ok(dir) => dir,
             Err(message) => {
-                crate::diagnostics::control(format_args!(
+                crate::cli::diagnostics::control(format_args!(
                     "mirvm: {}: {message}",
                     input_path.display()
                 ));
@@ -495,7 +495,7 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
         .unwrap_or_else(|| match crate::sysroot::ensure_sysroot() {
             Ok(p) => p.display().to_string(),
             Err(e) => {
-                crate::diagnostics::control(format_args!("mirvm: fail to build sysroot: {e}"));
+                crate::cli::diagnostics::control(format_args!("mirvm: fail to build sysroot: {e}"));
                 exit(1);
             }
         });

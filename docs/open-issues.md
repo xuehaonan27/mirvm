@@ -264,7 +264,7 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
   corpus into a universal gate.
 - **G8** `UNSCHEDULED`: milestone labels remain in user-visible text — `src/cli.rs` `USAGE` (`mode B
   slice 2`, `M5.3-M5.5`, `D15 ... P4 default flip`, `M4 precursor spikes`, a git-history spike path),
-  two error strings in `src/native_archive.rs` containing `M5.1`, panic strings in
+  two error strings in `src/native/archive.rs` containing `M5.1`, panic strings in
   `src/lower/linker/{mod,entries}.rs` containing `A2` and `M4.4`, and one error string in
   `src/cargoless/driver.rs` saying `(P5 boundary)`. Wording-only.
 - **G9** `UNSCHEDULED`: compiler-required deletion candidates — module-level `#![allow(dead_code)]` in
@@ -272,7 +272,7 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
   entirely `#![cfg(test)]`, has no consumer and duplicates resolver policy from `config.rs`; the
   duplicated `(lo,hi)` out-store and the unread `trap_if` `_msg` in `src/vm/jit/helpers.rs`; a
   single-use `addr_of_local` in `jit/translate.rs`; two nearly identical ELF64 traversals in
-  `src/elfsym.rs`; a stale `#[allow(dead_code)]` in
+  `src/native/symtab.rs`; a stale `#[allow(dead_code)]` in
   `src/telemetry/capture/session.rs` and a duplicated `#[cfg(test)] #[cfg(test)]` in `thread_ctx.rs`.
   Each was left because reading without changing cannot prove it.
 - **G10** `UNSCHEDULED`: two TSan harness blind spots. (a) JIT is outside the net: `tests/data/fixtures/tsan/Cargo.toml`

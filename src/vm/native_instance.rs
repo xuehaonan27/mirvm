@@ -345,7 +345,7 @@ fn open_deferred(path: &Path, remove_private_file: bool) -> Result<NativeImage, 
     crate::lower::asm::refill_syscall_slot(handle);
     let bias = crate::os::dll::load_bias(handle)
         .ok_or_else(|| format!("fail to find load base for `{}`", path.display()))?;
-    let hidden_symbols = crate::elfsym::hidden_symtab_values(&path.to_string_lossy())?;
+    let hidden_symbols = crate::native::symtab::hidden_symtab_values(&path.to_string_lossy())?;
     let executable_ranges = tags.executable_ranges(bias)?;
     let lifecycle = tags.materialize(bias)?;
     handle_guard.0 = None;

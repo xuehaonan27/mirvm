@@ -119,6 +119,12 @@ adds `data/` — `--all --data` is a full cold start.
   load cost paid on every run into "deserialize and run".
 - **L3** — the JIT code cache, forbidden until the CFI/PLT/relocation work lands.
 
+L2 and the two layers below it that mirror the runtime stack are one module tree: `src/image` holds
+the stack itself (`mod.rs`) beside the three persisted layers (`base.rs`, `deps.rs`, `ir.rs`), and the
+entry mechanism all three share — key, generation, fixed-domain guards — is `src/store/entry.rs`.
+Everything else in the store belongs to `src/store`: the family register, publication, and the
+`cache status`/`purge` report.
+
 L2 design points:
 
 - Serializability follows from the founding property that the execution phase is tcx-free and the

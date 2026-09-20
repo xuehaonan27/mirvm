@@ -1,9 +1,9 @@
 //! The `mirvm __build-base-image <path>` subprocess.
 //!
 //! The base image is built by a compiler session of its own, because one process cannot start a
-//! second rustc session (see `crate::baseimage`). This module is the driver only: it stages the
+//! second rustc session (see `crate::image::base`). This module is the driver only: it stages the
 //! synthetic seed source, runs the session, and hands the lowering product to
-//! [`crate::baseimage::store`], which owns the file format and the publishability rules.
+//! [`crate::image::base::store`], which owns the file format and the publishability rules.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -12,7 +12,7 @@ use rustc_driver::{Callbacks, Compilation};
 use rustc_interface::interface::Compiler;
 use rustc_middle::ty::TyCtxt;
 
-use crate::baseimage;
+use crate::image::base;
 
 struct BaseBuildCallbacks {
     out: PathBuf,
@@ -28,7 +28,7 @@ impl Callbacks for BaseBuildCallbacks {
             sess.overflow_checks(),
             sess.contract_checks(),
         );
-        match baseimage::store(&self.out, module, exports, fp) {
+        match base::store(&self.out, module, exports, fp) {
             Ok(()) => self.ok = true,
             Err(reason) => eprintln!("base-image: {reason}, giving up"),
         }
