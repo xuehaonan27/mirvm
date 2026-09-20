@@ -89,7 +89,13 @@ pub(super) fn pack_main(argv: impl Iterator<Item = String>) -> ExitCode {
         if deps_self {
             return crate::cargoless::driver::pack_script(&input_path, &out_abs);
         }
-        let dir = materialize_script(&input_path, &manifest, &body);
+        let dir = match materialize_script(&input_path, &manifest, &body) {
+            Ok(dir) => dir,
+            Err(message) => {
+                eprintln!("mirvm: {}: {message}", input_path.display());
+                exit(2);
+            }
+        };
         // The pack route crosses a process boundary; see set_cargo_pack_env.
         set_cargo_pack_env(&out_abs);
         cargo_shim::phase_cargo(&dir, &[], None, false);
@@ -457,7 +463,16 @@ pub(super) fn run_main(args: impl Iterator<Item = String>) -> ExitCode {
                 ignore_rust_version,
             );
         }
-        let dir = materialize_script(&input_path, &manifest, &body);
+        let dir = match materialize_script(&input_path, &manifest, &body) {
+            Ok(dir) => dir,
+            Err(message) => {
+                crate::diagnostics::control(format_args!(
+                    "mirvm: {}: {message}",
+                    input_path.display()
+                ));
+                exit(2);
+            }
+        };
         cargo_shim::phase_cargo(&dir, &program_args, None, ignore_rust_version);
     }
 

@@ -349,7 +349,7 @@ pub fn run_root_recipe(argv: impl Iterator<Item = String>) -> ExitCode {
 }
 
 /// `mirvm run <frontmatter script>` (MIRVM_DEPS=self): the body is materialized into the script cache directory
-/// (same key as audit::script_cache_dir), and the pseudo-package manifest goes through the same drive.
+/// (the same key cli::script_cache_dir hands the cargo track), and the pseudo-package manifest goes through the same drive.
 pub fn run_script(file: &Path, program_args: &[String], ignore_rust_version: bool) -> ExitCode {
     let mut manifest = script_manifest(file);
     manifest.ignore_rust_version = ignore_rust_version;
@@ -383,7 +383,7 @@ fn script_manifest(file: &Path) -> PackageManifest {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("script");
-    let cache = super::audit::script_cache_dir(file);
+    let cache = crate::cli::script_cache_dir(file);
     let src_dir = cache.join("src");
     if let Err(e) = std::fs::create_dir_all(&src_dir) {
         eprintln!(

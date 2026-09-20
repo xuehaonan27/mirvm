@@ -846,12 +846,17 @@ impl PackageManifest {
         root: &Path,
         body_path: &Path,
     ) -> Result<Self, MErr> {
-        let pseudo = format!(
-            "[package]\nname = \"{stem}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\
-             [[bin]]\nname = \"{stem}\"\npath = \"{}\"\n{manifest_text}",
-            body_path.display()
-        );
-        Self::parse(&pseudo, root)
+        // The same effective manifest the cargo track materializes: RFC 3502's rules live in
+        // cli::frontmatter, so the two tracks cannot disagree about what a script package is.
+        let effective = crate::cli::effective_manifest(
+            crate::cli::ScriptPackage {
+                name: stem,
+                bin_name: stem,
+                bin_path: body_path,
+            },
+            manifest_text,
+        )?;
+        Self::parse(&effective, root)
     }
 
     /// Pick the bin to run (the cargo run semantics subset): default-run > the only bin
