@@ -1,7 +1,7 @@
 //! Inventory and cleanup of the mirvm local store: `mirvm cache status` / `mirvm cache purge`.
 //!
 //! The store itself — its lifetime classes, its families and the publication rules — is
-//! `crate::store`. This module is the report over `store::families()`: it sizes each family, groups
+//! `crate::store`. This module is the report over `store::FAMILIES`: it sizes each family, groups
 //! it by lifetime, and removes what the plan selects. No directory is named here, so a family added
 //! to the register is reported and cleanable without a second edit.
 
@@ -108,10 +108,10 @@ pub fn status(root: &Path) -> String {
     let mut claimed: Vec<String> = Vec::new();
     for class in Class::ALL {
         out += &format!("  {}/  ({})\n", class.name(), class.contract());
-        for family in store::families().iter().filter(|f| f.class == class) {
+        for family in store::FAMILIES.iter().filter(|f| f.class == class) {
             let name = family.path();
             claimed.push(name.clone());
-            let dir = family.dir(root);
+            let dir = family.dir_in(root);
             if let Shape::Generation { ext } = family.shape {
                 let (current, stale, garbage) = store::split_generational(&dir, ext);
                 let (cs, ss, gs) = (size_of(&current), size_of(&stale), size_of(&garbage));
@@ -215,8 +215,8 @@ pub fn purge(root: &Path, plan: Purge) -> String {
         bytes
     };
 
-    for family in store::families() {
-        let dir = family.dir(root);
+    for family in store::FAMILIES {
+        let dir = family.dir_in(root);
         match family.shape {
             // Generational cache: a stale generation is individually removable, which is what
             // `purge` does by default. Naming the family is the user asking for all of it; `--all`
@@ -245,8 +245,8 @@ pub fn purge(root: &Path, plan: Purge) -> String {
     // Empty directory sweep: leaving shells behind is harmless, but an enumerable store reads
     // better, and it keeps a purged store from looking like a used one.
     if !dry {
-        for family in store::families() {
-            let dir = family.dir(root);
+        for family in store::FAMILIES {
+            let dir = family.dir_in(root);
             if dir.is_dir() && std::fs::read_dir(&dir).is_ok_and(|mut r| r.next().is_none()) {
                 let _ = std::fs::remove_dir(&dir);
             }
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn purge_stale_keeps_current_and_dry_run_touches_nothing() {
         let root = temp_root("purge");
-        let deps = root.join("cache/deps");
+        let deps = store::DEPS.dir_in(&root);
         let current = fake_entry(&deps, "cur.img", crate::options::build::BUILD_ID);
         let old = fake_entry(&deps, "old.img", "0000000000000000");
         // non-entry files (build byproducts) do not enter classification, are left untouched and unreported
@@ -333,20 +333,22 @@ mod tests {
     /// reachable only through `--data`, because losing it costs a re-fetch and a sysroot rebuild.
     fn purge_all_reaches_cache_build_and_run_but_not_data() {
         let root = temp_root("purge-all");
-        let sysroot = root.join(format!("data/sysroot-{}", crate::options::build::HOST));
+        let sysroot = store::SYSROOT.dir_in(&root);
         std::fs::create_dir_all(sysroot.join("lib")).unwrap();
         std::fs::write(sysroot.join("lib/x.rlib"), b"x").unwrap();
         fake_entry(
-            &root.join("cache/ir"),
+            &store::IR.dir_in(&root),
             "a.bin",
             crate::options::build::BUILD_ID,
         );
-        std::fs::create_dir_all(root.join("build/scripts/h/target")).unwrap();
-        std::fs::create_dir_all(root.join("build/sysroot-build/root")).unwrap();
-        std::fs::create_dir_all(root.join("run/runtime-native")).unwrap();
-        std::fs::write(root.join("run/runtime-native/scratch"), b"x").unwrap();
-        std::fs::create_dir_all(root.join("data/registry/git/db")).unwrap();
-        std::fs::write(root.join("data/registry/git/db/object"), b"git").unwrap();
+        std::fs::create_dir_all(store::SCRIPTS.dir_in(&root).join("h/target")).unwrap();
+        std::fs::create_dir_all(store::SYSROOT_BUILD.dir_in(&root).join("root")).unwrap();
+        let native = store::RUNTIME_NATIVE.dir_in(&root);
+        std::fs::create_dir_all(&native).unwrap();
+        std::fs::write(native.join("scratch"), b"x").unwrap();
+        let registry = store::REGISTRY.dir_in(&root).join("git/db");
+        std::fs::create_dir_all(&registry).unwrap();
+        std::fs::write(registry.join("object"), b"git").unwrap();
 
         purge(
             &root,
@@ -355,16 +357,16 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(!root.join("build/scripts").exists());
-        assert!(!root.join("build/sysroot-build").exists());
+        assert!(!store::SCRIPTS.dir_in(&root).exists());
+        assert!(!store::SYSROOT_BUILD.dir_in(&root).exists());
         assert!(!root.join("run").exists());
         assert!(sysroot.exists(), "--all must not take data/");
         assert!(
-            root.join("data/registry").exists(),
+            store::REGISTRY.dir_in(&root).exists(),
             "--all must not take data/"
         );
         // The current generation is what makes the next run fast, so `--all` keeps it.
-        assert!(root.join("cache/ir/a.bin").exists());
+        assert!(store::IR.dir_in(&root).join("a.bin").exists());
 
         purge(
             &root,
@@ -383,12 +385,12 @@ mod tests {
     fn named_family_flag_takes_exactly_that_family() {
         let root = temp_root("purge-named");
         let current = fake_entry(
-            &root.join("cache/deps"),
+            &store::DEPS.dir_in(&root),
             "cur.img",
             crate::options::build::BUILD_ID,
         );
         let other = fake_entry(
-            &root.join("cache/ir"),
+            &store::IR.dir_in(&root),
             "cur.bin",
             crate::options::build::BUILD_ID,
         );

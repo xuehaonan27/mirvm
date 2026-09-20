@@ -67,7 +67,7 @@ pub fn bypassed() -> bool {
 }
 
 fn deps_dir() -> PathBuf {
-    crate::options::get().cache_root().join("deps")
+    crate::store::DEPS.dir()
 }
 
 /// Pre-key material: the paths in `--extern name=path` (two-arg form) and `--extern=name=path` (single-arg

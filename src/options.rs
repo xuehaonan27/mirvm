@@ -491,7 +491,7 @@ impl Options {
         let target_dir = raw("target_dir")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|| home.join("build/target/mirvm"));
+            .unwrap_or_else(|| crate::store::TARGET.dir_in(&home).join("mirvm"));
         Self {
             home,
             target_dir,
@@ -542,29 +542,6 @@ impl Options {
     /// `MIRVM_OFFLINE`.
     pub fn offline(&self) -> bool {
         flag("offline")
-    }
-
-    /// `$MIRVM_HOME/cache`: artifacts mirvm derived. Deleting this tree costs recomputation and
-    /// nothing else, so it is the one place a user may clear at any time.
-    pub fn cache_root(&self) -> PathBuf {
-        self.home.join(crate::store::Class::Cache.name())
-    }
-
-    /// `$MIRVM_HOME/data`: fetched or built once and expensive to lose — the crate store and the
-    /// MIR-rich sysroot.
-    pub fn data_root(&self) -> PathBuf {
-        self.home.join(crate::store::Class::Data.name())
-    }
-
-    /// `$MIRVM_HOME/build`: project and session space — materialized scripts and every target
-    /// directory.
-    pub fn build_root(&self) -> PathBuf {
-        self.home.join(crate::store::Class::Build.name())
-    }
-
-    /// `$MIRVM_HOME/run`: per-process scratch for mappings that must not outlive the process.
-    pub fn run_root(&self) -> PathBuf {
-        self.home.join(crate::store::Class::Run.name())
     }
 
     /// `MIRVM_DEPS`.

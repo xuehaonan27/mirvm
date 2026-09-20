@@ -265,7 +265,8 @@ fn entry_without_frozen_memory_is_rejected_by_safe_load_without_panicking() {
 
 #[test]
 fn native_blob_materialization_uses_embedded_bytes() {
-    let root = std::env::temp_dir().join(format!(
+    // The family directory, as the caller hands it over.
+    let dir = std::env::temp_dir().join(format!(
         "mirvm-pack-test-{}-{}",
         std::process::id(),
         NEXT_PACKAGE_TEST.fetch_add(1, Ordering::Relaxed)
@@ -277,15 +278,15 @@ fn native_blob_materialization_uses_embedded_bytes() {
         fnv: hash128(&bytes),
         bytes: bytes.clone(),
     };
-    let path = materialize_native_blob_at(&root, &lib).unwrap();
+    let path = materialize_native_blob_at(&dir, &lib).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
 
     std::fs::write(&path, b"corrupt").unwrap();
     assert_eq!(
-        std::fs::read(materialize_native_blob_at(&root, &lib).unwrap()).unwrap(),
+        std::fs::read(materialize_native_blob_at(&dir, &lib).unwrap()).unwrap(),
         lib.bytes
     );
-    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]

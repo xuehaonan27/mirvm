@@ -34,9 +34,9 @@ pub struct Layout {
 
 impl Layout {
     pub fn new() -> Self {
-        let base = crate::options::get()
-            .build_root()
-            .join("target/cargoless")
+        let base = crate::store::TARGET
+            .dir()
+            .join("cargoless")
             .join(crate::options::build::HOST)
             .join("debug");
         Self {

@@ -513,15 +513,14 @@ fn parse_container(raw: &[u8]) -> Result<ParsedPackage<'_>, String> {
     Ok(ParsedPackage { sections })
 }
 
-fn materialize_native_blob_at(root: &Path, lib: &NativeLibEntry) -> Result<PathBuf, String> {
+fn materialize_native_blob_at(dir: &Path, lib: &NativeLibEntry) -> Result<PathBuf, String> {
     if hash128(&lib.bytes) != lib.fnv {
         return Err(format!(
             "package native library `{}` has wrong hash",
             lib.path
         ));
     }
-    let dir = root.join("package-native");
-    std::fs::create_dir_all(&dir)
+    std::fs::create_dir_all(dir)
         .map_err(|e| format!("fail to create package native directory: {e}"))?;
     let path = dir.join(format!("{:032x}.so", lib.fnv));
     if std::fs::read(&path)
@@ -574,8 +573,7 @@ pub(crate) fn write_package(
     // NATIVELIBS: every produced library's bytes travel with the package. The global_asm family
     // also enters the MC section for in-process loading; MIRVM_PACK_NO_MC=1 only switches the load
     // method and no longer breaks the package's self-containment.
-    let ga_dir = crate::options::get().cache_root().join("global-asm");
-    let ga_prefix = ga_dir.display().to_string();
+    let ga_prefix = crate::store::GLOBAL_ASM.dir().display().to_string();
     let no_mc = crate::options::get().pack_no_mc;
     let mut libs = Vec::new();
     let mut mc_entries = Vec::new();
@@ -689,7 +687,7 @@ impl LoadedPackage {
             if lib.role == 1 && covered_hashes.contains(&lib.fnv) {
                 continue;
             }
-            let path = materialize_native_blob_at(&crate::options::get().cache_root(), lib)?;
+            let path = materialize_native_blob_at(&crate::store::PACKAGE_NATIVE.dir(), lib)?;
             required_native_libs.push(path.to_string_lossy().into_owned().into_boxed_str());
             required_native_hashes.push(lib.fnv);
         }
@@ -827,9 +825,8 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
         };
     }
     let heat_key = format!("{:032x}", hash128(function_section));
-    let heat_path = crate::options::get()
-        .cache_root()
-        .join("package-heat")
+    let heat_path = crate::store::PACKAGE_HEAT
+        .dir()
         .join(format!("{heat_key}.order"));
     drop(module);
     Ok(LoadedPackage {
