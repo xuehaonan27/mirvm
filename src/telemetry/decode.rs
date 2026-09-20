@@ -68,6 +68,26 @@ pub(crate) struct DecodeOutcome {
     pub(crate) report: FileReport,
 }
 
+/// A stream that violates the v0 contract, before the path that identifies it is attached.
+///
+/// The decoder has exactly one way to fail — the bytes do not satisfy the format — so the
+/// class is the reason: [`DecodeError`] adds the path at the boundary that knows it.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct Malformed(String);
+
+impl Malformed {
+    fn new(detail: impl Into<String>) -> Self {
+        Self(detail.into())
+    }
+}
+
+impl From<Malformed> for String {
+    fn from(reason: Malformed) -> Self {
+        reason.0
+    }
+}
+
 /// Why one event stream could not be decoded, with the path that identifies it.
 #[derive(Debug, thiserror::Error)]
 #[error("{}: {message}", path.display())]
@@ -377,14 +397,14 @@ pub(crate) fn decode_file(
             );
         }
         if saw_session_end
-            && let Err(message) = validate_session_end(
+            && let Err(reason) = validate_session_end(
                 &outcome.report,
                 &producers,
                 &producer_ends,
                 expected_chunk + 1,
             )
         {
-            add_issue(&mut outcome, Health::Corrupt, chunk_offset, message);
+            add_issue(&mut outcome, Health::Corrupt, chunk_offset, reason);
             break;
         }
         expected_chunk += 1;
@@ -810,20 +830,22 @@ fn validate_session_end(
     producers: &BTreeMap<u64, ProducerState>,
     producer_ends: &BTreeMap<u64, ProducerEnd>,
     committed_chunks: u64,
-) -> Result<(), String> {
+) -> Result<(), Malformed> {
     let end = report
         .session_end
         .as_ref()
-        .ok_or_else(|| "SessionEnd marker was not retained".to_string())?;
+        .ok_or_else(|| Malformed::new("SessionEnd marker was not retained"))?;
     if producers.values().any(|producer| !producer.ended) {
-        return Err("SessionEnd appears before every observed producer has ProducerEnd".into());
+        return Err(Malformed::new(
+            "SessionEnd appears before every observed producer has ProducerEnd",
+        ));
     }
     if end.producer_count != producer_ends.len() as u64 {
-        return Err(format!(
+        return Err(Malformed::new(format!(
             "SessionEnd producer_count={} but {} ProducerEnd blocks were committed",
             end.producer_count,
             producer_ends.len()
-        ));
+        )));
     }
     let mut attempted = 0_u64;
     let mut encoded = 0_u64;
@@ -851,41 +873,41 @@ fn validate_session_end(
         ("sink_loss", end.sink_loss, sink_loss),
     ] {
         if declared != observed {
-            return Err(format!(
+            return Err(Malformed::new(format!(
                 "SessionEnd {name}={declared}, ProducerEnd sum is {observed}"
-            ));
+            )));
         }
     }
     if end.committed != report.records {
-        return Err(format!(
+        return Err(Malformed::new(format!(
             "SessionEnd committed={} but decoder observed {} records",
             end.committed, report.records
-        ));
+        )));
     }
     if end.chunks_committed != committed_chunks {
-        return Err(format!(
+        return Err(Malformed::new(format!(
             "SessionEnd chunks_committed={} but decoder observed {committed_chunks}",
             end.chunks_committed
-        ));
+        )));
     }
     if end.pages_committed != report.committed_pages {
-        return Err(format!(
+        return Err(Malformed::new(format!(
             "SessionEnd pages_committed={} but decoder observed {}",
             end.pages_committed, report.committed_pages
-        ));
+        )));
     }
     if end.bytes_committed != report.committed_bytes {
-        return Err(format!(
+        return Err(Malformed::new(format!(
             "SessionEnd bytes_committed={} but decoder observed {}",
             end.bytes_committed, report.committed_bytes
-        ));
+        )));
     }
     Ok(())
 }
 
-fn checked_sum(left: u64, right: u64, what: &str) -> Result<u64, String> {
+fn checked_sum(left: u64, right: u64, what: &str) -> Result<u64, Malformed> {
     left.checked_add(right)
-        .ok_or_else(|| format!("SessionEnd {what} sum overflow"))
+        .ok_or_else(|| Malformed::new(format!("SessionEnd {what} sum overflow")))
 }
 
 fn merge_report_delta(report: &mut FileReport, delta: FileReport) -> Result<(), ParseFailure> {
