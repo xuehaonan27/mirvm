@@ -18,7 +18,9 @@ mod frontmatter;
 
 pub(crate) use self::cargo::{GuestProcessState, run_dep_compiler};
 pub(crate) use self::driver::{pack_driver, run_driver};
-pub(crate) use self::frontmatter::parse_frontmatter_pub;
+pub(crate) use self::frontmatter::{
+    ScriptPackage, effective_manifest, parse_frontmatter_pub, script_cache_dir,
+};
 
 static COMPILER_SESSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

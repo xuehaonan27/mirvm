@@ -10,7 +10,7 @@
 //! the set level.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use semver::Version;
 
@@ -104,7 +104,7 @@ pub fn audit_script(file: &Path) -> Result<AuditReport, String> {
     let plan = resolve(&manifest, &mut registry)?;
 
     // Historical reference (informational): located with materialize_script's hash
-    let lock_dir = script_cache_dir(file);
+    let lock_dir = crate::cli::script_cache_dir(file);
     let lock_path = lock_dir.join("Cargo.lock");
     let lock_check = lock_path
         .is_file()
@@ -218,17 +218,6 @@ fn cargo_accepts_lock(
 /// Same key as `materialize_script`: DefaultHasher(absolute script path) ->
 /// `scripts/<16hex>`. The script materialization directory in `cargoless::driver`
 /// uses this key too.
-pub(crate) fn script_cache_dir(script: &Path) -> PathBuf {
-    use std::hash::{Hash, Hasher};
-    let abs = std::path::absolute(script).unwrap_or_else(|_| script.to_path_buf());
-    let mut hasher = std::hash::DefaultHasher::new();
-    abs.hash(&mut hasher);
-    crate::options::get()
-        .home
-        .join("scripts")
-        .join(format!("{:016x}", hasher.finish()))
-}
-
 /// Trivial plan for a zero-dependency script (no frontmatter).
 fn empty_plan(file: &Path) -> ResolvePlan {
     ResolvePlan {
