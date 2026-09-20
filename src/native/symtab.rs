@@ -23,6 +23,47 @@
 //!
 //! The dlopen handle -> load base mapping (dlinfo) lives in `os::dll::load_bias`.
 
+/// Why an ELF symbol table could not be read.
+///
+/// The enum lives in this file rather than in the tree root because this is the one file of the
+/// native layer the TSan harness compiles: the rest of the tree needs the lowering layer, which the
+/// harness stubs. `Malformed` is the shape (or truncation), `Io` is the read.
+#[derive(Debug, thiserror::Error, serde::Serialize)]
+pub(crate) enum Error {
+    #[error("{detail}")]
+    Malformed { detail: String },
+
+    #[error("{detail}: {source}")]
+    Io {
+        detail: String,
+        #[serde(skip)]
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+crate::diag_codes! {
+    Error: Native => {
+        Malformed => "symtab.malformed",
+        Io => "symtab.io",
+    }
+}
+
+impl Error {
+    fn malformed(detail: impl Into<String>) -> Self {
+        Error::Malformed {
+            detail: detail.into(),
+        }
+    }
+
+    fn io(detail: impl Into<String>, source: std::io::Error) -> Self {
+        Error::Io {
+            detail: detail.into(),
+            source,
+        }
+    }
+}
+
 use std::collections::HashMap;
 
 const SHT_DYNSYM: u32 = 11;
@@ -34,7 +75,7 @@ const SHT_SYMTAB: u32 = 2;
 /// code only uses hidden_symtab_values; this raw view exists for unit-test comparison (visible
 /// symbols must have the same address on both paths).
 #[cfg(test)]
-pub(crate) fn symtab_values(so_path: &str) -> Result<HashMap<Box<str>, u64>, String> {
+pub(crate) fn symtab_values(so_path: &str) -> Result<HashMap<Box<str>, u64>, Error> {
     symbol_table_values(so_path, SHT_SYMTAB)
 }
 
@@ -44,7 +85,7 @@ pub(crate) fn symtab_values(so_path: &str) -> Result<HashMap<Box<str>, u64>, Str
 /// symbols, unreachable by dlsym, take the "archive before global" link-time binding semantics
 /// (see the module header). A parse failure is propagated as Err and every caller degrades to
 /// no table.
-pub fn hidden_symtab_values(so_path: &str) -> Result<HashMap<Box<str>, u64>, String> {
+pub fn hidden_symtab_values(so_path: &str) -> Result<HashMap<Box<str>, u64>, Error> {
     let mut syms = symbol_table_values(so_path, SHT_SYMTAB)?;
     for name in symbol_table_values(so_path, SHT_DYNSYM)?.keys() {
         syms.remove(&**name);
@@ -54,9 +95,9 @@ pub fn hidden_symtab_values(so_path: &str) -> Result<HashMap<Box<str>, u64>, Str
 
 /// Resolve the given symbol table section (SHT_SYMTAB / SHT_DYNSYM; entries have the same
 /// format): defined symbol name -> st_value (file virtual address, relative to the load base).
-fn symbol_table_values(so_path: &str, want_sht: u32) -> Result<HashMap<Box<str>, u64>, String> {
+fn symbol_table_values(so_path: &str, want_sht: u32) -> Result<HashMap<Box<str>, u64>, Error> {
     let bytes = std::fs::read(so_path)
-        .map_err(|e| format!("failed to read archive shared library `{so_path}`: {e}"))?;
+        .map_err(|e| Error::io(format!("cannot read the shared library `{so_path}`"), e))?;
     let u16_at = |off: usize| -> Option<u16> {
         Some(u16::from_le_bytes(
             bytes.get(off..off + 2)?.try_into().ok()?,
@@ -73,7 +114,9 @@ fn symbol_table_values(so_path: &str, want_sht: u32) -> Result<HashMap<Box<str>,
         ))
     };
     let bad = || {
-        format!("archive shared library `{so_path}` is not the expected ELF64 LE (or is corrupted)")
+        Error::malformed(format!(
+            "archive shared library `{so_path}` is not the expected ELF64 LE (or is corrupted)"
+        ))
     };
     if bytes.len() < 64 || bytes[0..4] != [0x7f, b'E', b'L', b'F'] {
         return Err(bad());
@@ -155,38 +198,44 @@ fn symbol_table_values(so_path: &str, want_sht: u32) -> Result<HashMap<Box<str>,
 /// (skipping the ar symbol table and long-name table members), read each ELF64 member's
 /// `.symtab`, and collect the names of GLOBAL/WEAK symbols with `SHN_UNDEF`. This parses bytes
 /// (the same structural walk as `symbol_table_values`) and never parses tool text output.
-pub fn archive_undefined_symbols(archive_path: &str) -> Result<Vec<Box<str>>, String> {
-    let bytes = std::fs::read(archive_path)
-        .map_err(|e| format!("failed to read static native archive `{archive_path}`: {e}"))?;
-    archive_undefined_symbols_in(&bytes).map_err(|why| {
-        format!(
-            "undefined-symbol enumeration failed for static native archive `{archive_path}`: {why}"
+pub fn archive_undefined_symbols(archive_path: &str) -> Result<Vec<Box<str>>, Error> {
+    let bytes = std::fs::read(archive_path).map_err(|e| {
+        Error::io(
+            format!("cannot read the native archive `{archive_path}`"),
+            e,
         )
+    })?;
+    archive_undefined_symbols_in(&bytes).map_err(|why| {
+        Error::malformed(format!(
+            "undefined-symbol enumeration failed for static native archive `{archive_path}`: {why}"
+        ))
     })
 }
 
 /// Byte-level implementation (the member header chain is a fixed 60B record: name[16]
 /// date[12] uid[6] gid[6] mode[8] size[10] "`\n"; member bodies are aligned to 2 after size).
-fn archive_undefined_symbols_in(bytes: &[u8]) -> Result<Vec<Box<str>>, String> {
+fn archive_undefined_symbols_in(bytes: &[u8]) -> Result<Vec<Box<str>>, Error> {
     if !bytes.starts_with(b"!<arch>\n") {
-        return Err("not a Unix ar archive".into());
+        return Err(Error::malformed("not a Unix ar archive"));
     }
     let mut out: Vec<Box<str>> = Vec::new();
     let mut pos = 8usize;
     while pos + 60 <= bytes.len() {
         let hdr = &bytes[pos..pos + 60];
         if &hdr[58..60] != b"`\n" {
-            return Err(format!("ar member header magic misplaced @{pos:#x}"));
+            return Err(Error::malformed(format!(
+                "ar member header magic misplaced @{pos:#x}"
+            )));
         }
-        let size_txt =
-            std::str::from_utf8(&hdr[48..58]).map_err(|_| "ar member size is not ASCII")?;
+        let size_txt = std::str::from_utf8(&hdr[48..58])
+            .map_err(|_| Error::malformed("ar member size is not ASCII"))?;
         let size: usize = size_txt
             .trim()
             .parse()
-            .map_err(|_| format!("ar member size is unparsable `{size_txt}`"))?;
+            .map_err(|_| Error::malformed(format!("ar member size is unparsable `{size_txt}`")))?;
         let body_end = pos + 60 + size;
         if body_end > bytes.len() {
-            return Err("ar member body out of bounds".into());
+            return Err(Error::malformed("ar member body out of bounds"));
         }
         // Classifying ar member metadata must be exact: GNU ar references names longer than 15
         // characters through the string table as `/N` (e.g. `/0`), so a leading '/' does
@@ -224,7 +273,7 @@ fn archive_undefined_symbols_in(bytes: &[u8]) -> Result<Vec<Box<str>>, String> {
 
 /// SHN_UNDEF enumeration over a single ELF64 LE byte slice (GLOBAL/WEAK bindings; the same
 /// structural walk as symbol_table_values, but selecting shndx == 0 with no filtering).
-fn elf_undefined_symbols(bytes: &[u8]) -> Result<Vec<Box<str>>, String> {
+fn elf_undefined_symbols(bytes: &[u8]) -> Result<Vec<Box<str>>, Error> {
     let u16_at = |off: usize| -> Option<u16> {
         Some(u16::from_le_bytes(
             bytes.get(off..off + 2)?.try_into().ok()?,
@@ -240,7 +289,7 @@ fn elf_undefined_symbols(bytes: &[u8]) -> Result<Vec<Box<str>>, String> {
             bytes.get(off..off + 8)?.try_into().ok()?,
         ))
     };
-    let bad = || "not the expected ELF64 LE (or corrupted)".to_string();
+    let bad = || Error::malformed("not the expected ELF64 LE (or corrupted)");
     if bytes.len() < 64 || bytes[0..4] != [0x7f, b'E', b'L', b'F'] || bytes[4] != 2 || bytes[5] != 1
     {
         return Err(bad());

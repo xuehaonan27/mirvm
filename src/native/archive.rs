@@ -646,7 +646,8 @@ fn rescue_with_rlib_symbols(
     linker: &mut crate::lower::linker::Linker<'_>,
 ) -> Result<Option<PathBuf>, String> {
     use rustc_span::Symbol;
-    let undefs = crate::native::symtab::archive_undefined_symbols(&archive.display().to_string())?;
+    let undefs = crate::native::symtab::archive_undefined_symbols(&archive.display().to_string())
+        .map_err(|error| error.to_string())?;
     if undefs.is_empty() {
         return Ok(None);
     }
