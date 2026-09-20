@@ -14,6 +14,9 @@ use std::path::Path;
 
 use semver::Version;
 
+use crate::diag::json::{self, Writer};
+use crate::diag::table::{Cell, Table};
+
 use super::lockfile::Lockfile;
 use super::manifest::PackageManifest;
 use super::registry::Registry;
@@ -309,4 +312,111 @@ fn diff_versions(plan: &ResolvePlan, lf: &Lockfile) -> Vec<String> {
         }
     }
     mismatches
+}
+
+// ===== the `mirvm deps audit` report =====
+
+/// One target's verdict.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Verdict {
+    Ok,
+    Fail,
+    Skip,
+    /// A stated boundary, not an ordinary failure: the construct was rejected loudly and up front.
+    Boundary,
+}
+
+impl Verdict {
+    /// The column word, in one place because a consumer matches on it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Verdict::Ok => "OK",
+            Verdict::Fail => "FAIL",
+            Verdict::Skip => "SKIP",
+            Verdict::Boundary => "P5",
+        }
+    }
+}
+
+/// One rendered verdict row.
+pub struct AuditRow {
+    pub verdict: Verdict,
+    /// The target as the user spelled it, when it never resolved; otherwise the resolved name.
+    pub target: String,
+    /// The one-line description of what was audited.
+    pub head: String,
+    /// Informational tails: `reconciliation == …`, `cargo --locked --offline accepted`.
+    pub notes: Vec<String>,
+    /// Why it failed, or the boundary a rejection names.
+    pub detail: Option<String>,
+    /// Reconciliation mismatches, at most the first five, printed under the verdict.
+    pub mismatches: Vec<String>,
+}
+
+/// The whole run.
+pub struct AuditSummary {
+    pub rows: Vec<AuditRow>,
+    pub targets: usize,
+    /// Targets whose verdict was [`Verdict::Fail`]; a [`Verdict::Boundary`] is not one of them.
+    pub failures: usize,
+}
+
+impl AuditSummary {
+    pub fn text(&self) -> String {
+        let mut table = Table::new(0);
+        for row in &self.rows {
+            let mut payload = row.head.clone();
+            if let Some(detail) = &row.detail {
+                payload.push_str(": ");
+                payload.push_str(detail);
+            }
+            for note in &row.notes {
+                payload.push_str("; ");
+                payload.push_str(note);
+            }
+            table.row(vec![Cell::left(row.verdict.word()), Cell::left(payload)]);
+            for mismatch in &row.mismatches {
+                table.row(vec![Cell::left(format!("     {mismatch}"))]);
+            }
+        }
+        let mut out = table.render();
+        out.push_str("---\n");
+        out.push_str(&format!(
+            "deps audit: {} targets, {} failures\n",
+            self.targets, self.failures
+        ));
+        out
+    }
+
+    pub fn json(&self) -> String {
+        let rows: Vec<String> = self
+            .rows
+            .iter()
+            .map(|row| {
+                let notes: Vec<String> = row.notes.iter().map(|note| literal(note)).collect();
+                let mismatches: Vec<String> = row.mismatches.iter().map(|m| literal(m)).collect();
+                let mut out = Writer::new();
+                out.string("verdict", row.verdict.word());
+                out.string("target", &row.target);
+                out.string("head", &row.head);
+                out.raw("notes", &json::array(&notes));
+                match &row.detail {
+                    Some(detail) => out.string("detail", detail),
+                    None => out.null("detail"),
+                };
+                out.raw("mismatches", &json::array(&mismatches));
+                out.finish()
+            })
+            .collect();
+        let mut out = Writer::document();
+        out.number("targets", self.targets as u64);
+        out.number("failures", self.failures as u64);
+        out.raw("rows", &json::array(&rows));
+        out.finish()
+    }
+}
+
+/// One JSON string literal, for the note and mismatch arrays.
+fn literal(value: &str) -> String {
+    json::literal(value)
 }

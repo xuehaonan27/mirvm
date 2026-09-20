@@ -44,14 +44,13 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
   (component, severity, `codes!` register, two sinks, `src/diag/table.rs` as the one report renderer,
   `MIRVM_OUTPUT=text|json`), `src/error.rs` is the failure root that composes module enums and turns
   one into the process status, `src/sysroot.rs` and `src/options.rs` are typed, the CLI and entry
-  layer speak the grammar with named exit codes, and `cache status`/`cache purge` are data structures
-  with text and versioned JSON renderings. The `mirvm_log!` macro plus the `log` and `anyhow`
-  dependencies are gone. Remaining: the `Result<_, String>` tail per module tree (vm, lower,
-  cargoless, pack, telemetry, native, cargo_shim, image) and the raw print sites that go with it,
-  text/JSON renderings for `deps audit` and `--vm-stats`, rustc `--error-format=json`, and the
-  repo-quality gates (no `Result<_, String>`, no bare exit code, no raw print, unique codes, no
-  duplicated prose, diag purity). The `#![allow(dead_code)]` in `src/diag/mod.rs` is deleted by the
-  last print conversion.
+  layer speak the grammar with named exit codes, and `cache status`, `cache purge`, `deps audit` and
+  `--vm-stats` are data structures with text and versioned JSON renderings. The `mirvm_log!` macro
+  plus the `log` and `anyhow` dependencies are gone. Remaining: the `Result<_, String>` tail per module
+  tree (vm, lower, cargoless, pack, telemetry, native, cargo_shim, image) and the raw print sites that
+  go with it, rustc `--error-format=json`, and the repo-quality gates (no `Result<_, String>`, no bare
+  exit code, no raw print, unique codes, no duplicated prose, diag purity). The `#![allow(dead_code)]`
+  in `src/diag/mod.rs` is deleted by the last print conversion.
 
 ## C. Corpus-driven product debt
 
@@ -105,6 +104,14 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
 - **E34** `ACCEPTED`: `jit/translate.rs` is a single ~2,939-line file with three large matches and is a
   maintenance hotspot. Evaluate the benefit/disturbance ratio of splitting it by family before the next
   large change.
+- **E35** `WORKAROUND`: the pinned toolchain's release-build miscompile of the interpreter's cleanup
+  chain is more sensitive than the `[profile.release] debug = 2, strip = "debuginfo"` workaround in
+  `Cargo.toml` implies: a guest panic stays at the native-matching 101 only for some code shapes of
+  `run_vm_engine`. Evidence: with the same toolchain and profile, an equivalent `--vm-stats` rendering
+  written inline in that function aborts with SIGABRT (134) while the same rendering behind one call
+  into `vm::stats::print` exits 101; `tests/run.sh case panic_exit` and `threads_panic` are the fast-tier
+  canaries. The current shape is held by the comment on that branch; a real close needs the miscompiled
+  construct identified (LLVM 22 / nightly-2026-07-02), not another layout coincidence.
 
 ## D. Distribution and product
 

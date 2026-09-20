@@ -423,7 +423,12 @@ pub(super) fn run_vm_engine(
         return 70;
     }
     if vm_stats {
-        print!("{}", crate::vm::stats::report(&module));
+        // One call, and it must stay one call: growing this branch's body changes the codegen of the
+        // enclosing function enough to flip the pinned toolchain's release-build miscompile of the
+        // interpreter's cleanup chain, which turns a guest panic into SIGABRT instead of the
+        // native-matching 101 (`open-issues.md` E35, with the bisect evidence). The report owner
+        // renders; this frame only dispatches.
+        crate::vm::stats::print(&module);
         return 0;
     }
     // Finalize argv: runtime input is placed after snapshot semantics; one path for cold and warm.

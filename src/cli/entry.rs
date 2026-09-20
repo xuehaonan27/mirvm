@@ -210,10 +210,17 @@ pub(super) fn deps_main(
     const HINT: &str = "usage: mirvm deps audit <project dir|script.rs>...\n";
     let mut sub = None;
     let mut targets: Vec<String> = Vec::new();
+    let mut json_output = false;
     for a in args {
         match a.as_str() {
             "audit" if sub.is_none() => sub = Some(a),
-            _ if sub.is_some() => targets.push(a),
+            "--json" => {
+                super::note_json_output();
+                json_output = true;
+            }
+            // Anything after `audit` is a target, but a flag is not a path: an unrecognized one is a
+            // rejected command line rather than a target that mysteriously fails to resolve.
+            _ if sub.is_some() && !a.starts_with('-') => targets.push(a),
             _ => {
                 return Err(crate::error::Error::usage_with(
                     Component::Deps,
@@ -230,7 +237,11 @@ pub(super) fn deps_main(
             HINT.to_string(),
         ));
     }
-    let mut failures = 0usize;
+    let mut summary = crate::cargoless::audit::AuditSummary {
+        rows: Vec::new(),
+        targets: targets.len(),
+        failures: 0,
+    };
     for t in &targets {
         let path = std::path::Path::new(t);
         let result = if path.is_dir() || path.file_name().is_some_and(|f| f == "Cargo.toml") {
@@ -245,13 +256,21 @@ pub(super) fn deps_main(
         } else {
             crate::cargoless::audit::audit_script(path)
         };
-        match result {
+        use crate::cargoless::audit::{AuditRow, Verdict};
+        let row = match result {
             Ok(report) => {
                 if report.mode == "skip" {
-                    println!(
-                        "SKIP {} (needs absent, not counted as failure per the same gate standard)",
-                        report.name
-                    );
+                    summary.rows.push(AuditRow {
+                        verdict: Verdict::Skip,
+                        target: report.name.clone(),
+                        head: format!(
+                            "{} (needs absent, not counted as failure per the same gate standard)",
+                            report.name
+                        ),
+                        notes: Vec::new(),
+                        detail: None,
+                        mismatches: Vec::new(),
+                    });
                     continue;
                 }
                 let head = format!(
@@ -263,65 +282,89 @@ pub(super) fn deps_main(
                 );
                 // Failure conditions: project = lock reconciliation equality; script = cargo acceptance chain
                 let mut fail: Option<String> = None;
+                let mut mismatches: Vec<String> = Vec::new();
+                let mut notes: Vec<String> = Vec::new();
                 if report.mode == "lock"
-                    && let Some((lock_desc, mismatches)) = &report.lock_check
-                    && !mismatches.is_empty()
+                    && let Some((lock_desc, found)) = &report.lock_check
+                    && !found.is_empty()
                 {
                     fail = Some(format!(
                         "reconciliation mismatch: {} entries vs {lock_desc}",
-                        mismatches.len()
+                        found.len()
                     ));
-                    for m in mismatches.iter().take(5) {
-                        println!("     {m}");
-                    }
+                    mismatches.extend(found.iter().take(5).cloned());
                 }
                 if let Some(acc) = &report.acceptance
                     && let Err(diag) = acc
                 {
                     fail = Some(diag.clone());
                 }
-                match fail {
-                    Some(why) => {
-                        println!("FAIL {head}: {why}");
-                        failures += 1;
-                    }
-                    None => {
-                        print!("OK   {head}");
-                        if let Some((lock_desc, mismatches)) = &report.lock_check {
-                            if mismatches.is_empty() {
-                                print!("; reconciliation == {lock_desc}");
-                            } else if report.mode == "fresh" {
-                                print!(
-                                    "; {} timestamp-drift entries in historical reference (informational, not a failure)",
-                                    mismatches.len()
-                                );
-                            }
+                if fail.is_none() {
+                    if let Some((lock_desc, found)) = &report.lock_check {
+                        if found.is_empty() {
+                            notes.push(format!("reconciliation == {lock_desc}"));
+                        } else if report.mode == "fresh" {
+                            notes.push(format!(
+                                "{} timestamp-drift entries in historical reference (informational, not a failure)",
+                                found.len()
+                            ));
                         }
-                        if report.acceptance.is_some() {
-                            print!("; cargo --locked --offline accepted");
-                        }
-                        println!();
                     }
+                    if report.acceptance.is_some() {
+                        notes.push("cargo --locked --offline accepted".to_string());
+                    }
+                }
+                if fail.is_some() {
+                    summary.failures += 1;
+                }
+                AuditRow {
+                    verdict: if fail.is_some() {
+                        Verdict::Fail
+                    } else {
+                        Verdict::Ok
+                    },
+                    target: report.name,
+                    head,
+                    notes,
+                    detail: fail,
+                    mismatches,
                 }
             }
             Err(e) => {
                 // P5 loud rejections are an upfront-stated boundary and not ordinary resolution failures.
                 if e.contains("P5") {
-                    println!("P5   {t}: {e}");
+                    AuditRow {
+                        verdict: Verdict::Boundary,
+                        target: t.clone(),
+                        head: String::new(),
+                        notes: Vec::new(),
+                        detail: Some(e),
+                        mismatches: Vec::new(),
+                    }
                 } else {
-                    println!("FAIL {t}: {e}");
-                    failures += 1;
+                    summary.failures += 1;
+                    AuditRow {
+                        verdict: Verdict::Fail,
+                        target: t.clone(),
+                        head: String::new(),
+                        notes: Vec::new(),
+                        detail: Some(e),
+                        mismatches: Vec::new(),
+                    }
                 }
             }
-        }
+        };
+        summary.rows.push(row);
     }
-    println!("---");
-    println!(
-        "deps audit: {} targets, {} failures",
-        targets.len(),
-        failures
+    print!(
+        "{}",
+        if json_output {
+            summary.json()
+        } else {
+            summary.text()
+        }
     );
-    if failures == 0 {
+    if summary.failures == 0 {
         Ok(ExitCode::SUCCESS)
     } else {
         Ok(ExitCode::from(crate::diag::exit::FAILURE))
