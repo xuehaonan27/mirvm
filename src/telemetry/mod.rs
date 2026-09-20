@@ -9,6 +9,76 @@ pub(crate) mod decode;
 pub(crate) mod format;
 pub(crate) mod tool;
 
+/// Why a `mirvm log` command could not produce its report.
+///
+/// The command reads a stream somebody else wrote, so the classes separate a rejected filter
+/// (`Usage`), an input that is not an event stream at all (`Input`), inputs that do not belong to
+/// one session (`Session`), a stream that violates the v0 contract (`Decode`, which carries the
+/// path-bearing decoder error as its source) and a filesystem step that failed (`Io`).
+#[derive(Debug, thiserror::Error, serde::Serialize)]
+pub(crate) enum Error {
+    #[error("{detail}")]
+    Usage { detail: String },
+
+    #[error("{detail}")]
+    Input { detail: String },
+
+    #[error("{source}")]
+    Decode {
+        #[from]
+        #[serde(skip)]
+        source: decode::DecodeError,
+    },
+
+    #[error("{detail}")]
+    Session { detail: String },
+
+    #[error("{detail}: {source}")]
+    Io {
+        detail: String,
+        #[serde(skip)]
+        #[source]
+        source: io::Error,
+    },
+}
+
+crate::diag_codes! {
+    Error: Log => {
+        Usage => "log.usage" Usage,
+        Input => "log.input",
+        Decode => "log.decode",
+        Session => "log.session",
+        Io => "log.io",
+    }
+}
+
+impl Error {
+    fn usage(detail: impl Into<String>) -> Self {
+        Error::Usage {
+            detail: detail.into(),
+        }
+    }
+
+    fn input(detail: impl Into<String>) -> Self {
+        Error::Input {
+            detail: detail.into(),
+        }
+    }
+
+    fn session(detail: impl Into<String>) -> Self {
+        Error::Session {
+            detail: detail.into(),
+        }
+    }
+
+    fn io(detail: impl Into<String>, source: io::Error) -> Self {
+        Error::Io {
+            detail: detail.into(),
+            source,
+        }
+    }
+}
+
 // This is an implementation default for the first measured slice, not a
 // frozen product limit. The syscall workload benchmark decides the eventual
 // automatic memory budget.

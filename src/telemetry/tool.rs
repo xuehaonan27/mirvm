@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use serde_json::{Map, Value, json};
 
+use super::Error;
 use super::decode::{
     DecodeOutcome, DecodedEvent, DecodedKind, EventContext, FileReport, Health, decode_file,
 };
@@ -28,50 +29,51 @@ pub(crate) fn main(args: impl Iterator<Item = String>) -> ExitCode {
 fn run(args: Vec<String>, stdout: &mut dyn Write, stderr: &mut dyn Write) -> ExitCode {
     let Some(command) = args.first().map(String::as_str) else {
         let _ = stderr.write_all(USAGE.as_bytes());
-        return ExitCode::from(2);
+        return ExitCode::from(crate::diag::exit::USAGE);
     };
     match command {
         "inspect" if args.len() == 2 => match inspect(Path::new(&args[1]), stdout) {
             Ok(Health::Clean) => ExitCode::SUCCESS,
-            Ok(_) => ExitCode::from(1),
-            Err(error) => {
-                let _ = writeln!(stderr, "mirvm log inspect: {error}");
-                ExitCode::from(1)
-            }
+            Ok(_) => ExitCode::from(crate::diag::exit::FAILURE),
+            Err(error) => ExitCode::from(report(&error, stderr)),
         },
         "export" if args.len() >= 2 => {
             let filter = match Filter::parse(&args[2..]) {
                 Ok(filter) => filter,
                 Err(error) => {
-                    let _ = writeln!(stderr, "mirvm log export: {error}\n{USAGE}");
-                    return ExitCode::from(2);
+                    let code = report(&error, stderr);
+                    let _ = stderr.write_all(USAGE.as_bytes());
+                    return ExitCode::from(code);
                 }
             };
             match export(Path::new(&args[1]), &filter, stdout) {
                 Ok(Health::Clean) => ExitCode::SUCCESS,
-                Ok(_) => ExitCode::from(1),
-                Err(error) => {
-                    let _ = writeln!(stderr, "mirvm log export: {error}");
-                    ExitCode::from(1)
-                }
+                Ok(_) => ExitCode::from(crate::diag::exit::FAILURE),
+                Err(error) => ExitCode::from(report(&error, stderr)),
             }
         }
         "inspect" | "export" => {
             let _ = stderr.write_all(USAGE.as_bytes());
-            ExitCode::from(2)
+            ExitCode::from(crate::diag::exit::USAGE)
         }
         _ => {
             let _ = stderr.write_all(USAGE.as_bytes());
-            ExitCode::from(2)
+            ExitCode::from(crate::diag::exit::USAGE)
         }
     }
 }
 
-fn inspect(path: &Path, output: &mut dyn Write) -> Result<Health, String> {
+/// Write one failure through the shared renderer and return the status its class asks for.
+fn report(error: &Error, stderr: &mut dyn Write) -> u8 {
+    let _ = stderr.write_all(crate::diag::render_line(error).as_bytes());
+    crate::diag::Diagnostic::kind(error).code()
+}
+
+fn inspect(path: &Path, output: &mut dyn Write) -> Result<Health, Error> {
     let files = event_files(path)?;
     let mut outcomes = Vec::with_capacity(files.len());
     for file in files {
-        outcomes.push(decode_file(&file, &mut |_| Ok(())).map_err(|error| error.to_string())?);
+        outcomes.push(decode_file(&file, &mut |_| Ok(()))?);
     }
     require_same_session(&outcomes)?;
     let health = outcomes
@@ -81,12 +83,12 @@ fn inspect(path: &Path, output: &mut dyn Write) -> Result<Health, String> {
         .unwrap_or(Health::Corrupt);
     let value = inspection_json(path, health, &outcomes);
     serde_json::to_writer_pretty(&mut *output, &value)
-        .map_err(|error| format!("cannot write inspection JSON: {error}"))?;
-    writeln!(output).map_err(|error| format!("cannot finish inspection JSON: {error}"))?;
+        .map_err(|error| Error::io("cannot write the inspection JSON", io::Error::other(error)))?;
+    writeln!(output).map_err(|error| Error::io("cannot finish the inspection JSON", error))?;
     Ok(health)
 }
 
-fn export(path: &Path, filter: &Filter, output: &mut dyn Write) -> Result<Health, String> {
+fn export(path: &Path, filter: &Filter, output: &mut dyn Write) -> Result<Health, Error> {
     let files = event_files(path)?;
     let mut expected_session = None;
     let mut health = Health::Clean;
@@ -99,13 +101,13 @@ fn export(path: &Path, filter: &Filter, output: &mut dyn Write) -> Result<Health
             }
             Ok(())
         };
-        let outcome = decode_file(&file, &mut emit).map_err(|error| error.to_string())?;
+        let outcome = decode_file(&file, &mut emit)?;
         if let Some(session) = expected_session {
             if outcome.header.session_id != session {
-                return Err(format!(
+                return Err(Error::session(format!(
                     "{} belongs to a different capture session",
                     file.display()
-                ));
+                )));
             }
         } else {
             expected_session = Some(outcome.header.session_id);
@@ -115,43 +117,53 @@ fn export(path: &Path, filter: &Filter, output: &mut dyn Write) -> Result<Health
     Ok(health)
 }
 
-fn event_files(path: &Path) -> Result<Vec<PathBuf>, String> {
+fn event_files(path: &Path) -> Result<Vec<PathBuf>, Error> {
     let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+        .map_err(|error| Error::io(format!("cannot inspect {}", path.display()), error))?;
     if metadata.file_type().is_symlink() {
-        return Err(format!("refusing symlink input {}", path.display()));
+        return Err(Error::input(format!(
+            "refusing symlink input {}",
+            path.display()
+        )));
     }
     if metadata.is_file() {
         return Ok(vec![path.to_path_buf()]);
     }
     if !metadata.is_dir() {
-        return Err(format!(
+        return Err(Error::input(format!(
             "{} is neither a file nor a directory",
             path.display()
-        ));
+        )));
     }
     let mut files = Vec::new();
-    let entries = std::fs::read_dir(path)
-        .map_err(|error| format!("cannot read session directory {}: {error}", path.display()))?;
+    let entries = std::fs::read_dir(path).map_err(|error| {
+        Error::io(
+            format!("cannot read the session directory {}", path.display()),
+            error,
+        )
+    })?;
     for entry in entries {
         let entry = entry.map_err(|error| {
-            format!(
-                "cannot read entry in session directory {}: {error}",
-                path.display()
+            Error::io(
+                format!(
+                    "cannot read an entry in the session directory {}",
+                    path.display()
+                ),
+                error,
             )
         })?;
         let name = entry.file_name();
         if !is_event_name(&name) {
             continue;
         }
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("cannot inspect {}: {error}", entry.path().display()))?;
+        let file_type = entry.file_type().map_err(|error| {
+            Error::io(format!("cannot inspect {}", entry.path().display()), error)
+        })?;
         if file_type.is_symlink() {
-            return Err(format!(
+            return Err(Error::input(format!(
                 "refusing event-file symlink {}",
                 entry.path().display()
-            ));
+            )));
         }
         if file_type.is_file() {
             files.push(entry.path());
@@ -159,10 +171,10 @@ fn event_files(path: &Path) -> Result<Vec<PathBuf>, String> {
     }
     files.sort();
     if files.is_empty() {
-        return Err(format!(
+        return Err(Error::session(format!(
             "session directory {} contains no events-*.mlog files",
             path.display()
-        ));
+        )));
     }
     Ok(files)
 }
@@ -172,16 +184,16 @@ fn is_event_name(name: &OsStr) -> bool {
     name.starts_with("events-") && (name.ends_with(".mlog") || name.ends_with(".mlog.partial"))
 }
 
-fn require_same_session(outcomes: &[DecodeOutcome]) -> Result<(), String> {
+fn require_same_session(outcomes: &[DecodeOutcome]) -> Result<(), Error> {
     let Some(first) = outcomes.first() else {
-        return Err("no event files were decoded".into());
+        return Err(Error::session("no event files were decoded"));
     };
     for outcome in &outcomes[1..] {
         if outcome.header.session_id != first.header.session_id {
-            return Err(format!(
+            return Err(Error::session(format!(
                 "{} belongs to a different capture session",
                 outcome.path.display()
-            ));
+            )));
         }
     }
     Ok(())
@@ -305,14 +317,14 @@ struct Filter {
 }
 
 impl Filter {
-    fn parse(args: &[String]) -> Result<Self, String> {
+    fn parse(args: &[String]) -> Result<Self, Error> {
         let mut filter = Self::default();
         let mut index = 0;
         while index < args.len() {
             let option = args[index].as_str();
             let value = args
                 .get(index + 1)
-                .ok_or_else(|| format!("{option} needs an argument"))?;
+                .ok_or_else(|| Error::usage(format!("{option} needs an argument")))?;
             match option {
                 "--engine" if filter.engine.is_none() => {
                     filter.engine = Some(if value == "unknown" {
@@ -328,7 +340,7 @@ impl Filter {
                     filter.tid = Some(
                         value
                             .parse::<u32>()
-                            .map_err(|_| format!("invalid OS tid `{value}`"))?,
+                            .map_err(|_| Error::usage(format!("invalid OS tid `{value}`")))?,
                     );
                 }
                 "--kind" if filter.kind.is_none() => {
@@ -338,9 +350,11 @@ impl Filter {
                     filter.sequence = Some(parse_sequence(value)?);
                 }
                 _ if option.starts_with('-') => {
-                    return Err(format!("unknown or repeated option `{option}`"));
+                    return Err(Error::usage(format!(
+                        "unknown or repeated option `{option}`"
+                    )));
                 }
-                _ => return Err(format!("unexpected argument `{option}`")),
+                _ => return Err(Error::usage(format!("unexpected argument `{option}`"))),
             }
             index += 2;
         }
@@ -378,28 +392,30 @@ impl Filter {
     }
 }
 
-fn parse_u64(value: &str, what: &str) -> Result<u64, String> {
+fn parse_u64(value: &str, what: &str) -> Result<u64, Error> {
     value
         .parse()
-        .map_err(|_| format!("invalid {what} `{value}`"))
+        .map_err(|_| Error::usage(format!("invalid {what} `{value}`")))
 }
 
-fn parse_kind(value: &str) -> Result<KindFilter, String> {
+fn parse_kind(value: &str) -> Result<KindFilter, Error> {
     match value {
         "syscall-enter" | "syscall_enter" => Ok(KindFilter::Id(KIND_SYSCALL_ENTER)),
         "syscall-exit" | "syscall_exit" => Ok(KindFilter::Id(KIND_SYSCALL_EXIT)),
         "engine-context" | "engine_context" => Ok(KindFilter::Id(KIND_ENGINE_CONTEXT)),
         "unknown" => Ok(KindFilter::Unknown),
-        _ => Err(format!("unknown event kind `{value}`")),
+        _ => Err(Error::usage(format!("unknown event kind `{value}`"))),
     }
 }
 
-fn parse_sequence(value: &str) -> Result<(u64, u64), String> {
+fn parse_sequence(value: &str) -> Result<(u64, u64), Error> {
     if let Some((start, end)) = value.split_once(':') {
         let start = parse_u64(start, "sequence start")?;
         let end = parse_u64(end, "sequence end")?;
         if start >= end {
-            return Err("sequence range must be non-empty and end-exclusive".into());
+            return Err(Error::usage(
+                "sequence range must be non-empty and end-exclusive",
+            ));
         }
         Ok((start, end))
     } else {
@@ -408,7 +424,7 @@ fn parse_sequence(value: &str) -> Result<(u64, u64), String> {
             sequence,
             sequence
                 .checked_add(1)
-                .ok_or_else(|| "sequence value has no exclusive upper bound".to_string())?,
+                .ok_or_else(|| Error::usage("sequence value has no exclusive upper bound"))?,
         ))
     }
 }

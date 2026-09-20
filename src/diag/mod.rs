@@ -266,6 +266,15 @@ pub fn emit_direct(diagnostic: &dyn Diagnostic) {
     }
 }
 
+/// Render one diagnostic exactly as [`emit`] would, without writing it.
+///
+/// For the one command that owns its output writers (`mirvm log` takes them so its report can be
+/// asserted in a unit test): the rendering, the mode and the grammar still come from here, so a
+/// diagnostic cannot look different because of where it is written.
+pub fn render_line(diagnostic: &dyn Diagnostic) -> String {
+    render(diagnostic)
+}
+
 /// Render one diagnostic in the mode `MIRVM_OUTPUT` selects.
 fn render(diagnostic: &dyn Diagnostic) -> String {
     if json::enabled() {
