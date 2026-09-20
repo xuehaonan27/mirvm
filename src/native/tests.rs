@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::archive::{materialize_for_target_in, materialize_in, reject_symbol_ambiguity};
 
+use crate::diag::Diagnostic as _;
+
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
 static SIGNAL_SIGNUM: AtomicU64 = AtomicU64::new(0);
 static SIGNAL_HANDLER: AtomicU64 = AtomicU64::new(0);
@@ -251,7 +253,11 @@ fn thin_archive_is_rejected_because_its_content_hash_is_incomplete() {
     );
 
     let error = materialize_in(&archive, &temp.path().join("cache")).unwrap_err();
-    assert!(error.contains("thin"), "unexpected diagnostic: {error}");
+    assert_eq!(error.code(), Some("archive.unsupported"));
+    assert!(
+        error.to_string().contains("thin"),
+        "unexpected diagnostic: {error}"
+    );
 }
 
 #[test]
@@ -304,8 +310,9 @@ fn legacy_elf_init_and_fini_sections_are_rejected() {
         );
 
         let error = materialize_in(&archive, &dir.join("cache")).unwrap_err();
+        assert_eq!(error.code(), Some("archive.unsupported"));
         assert!(
-            error.contains("`.init`/`.fini`"),
+            error.to_string().contains("`.init`/`.fini`"),
             "section {section} was not rejected: {error}"
         );
     }
@@ -365,12 +372,15 @@ fn unresolved_archive_dependency_fails_during_materialization() {
     );
 
     let error = materialize_in(&archive, &temp.path().join("cache")).unwrap_err();
+    // The conversion refusal covers every reason a member cannot join a shared library (non-PIC and
+    // an open dependency alike); the linker's own output is the detail.
+    assert_eq!(error.code(), Some("archive.unsupported"));
     assert!(
-        error.contains("dependency"),
+        error.to_string().contains("dependency"),
         "unexpected diagnostic: {error}"
     );
     assert!(
-        error.contains("mirvm_missing_dependency"),
+        error.to_string().contains("mirvm_missing_dependency"),
         "linker detail lost: {error}"
     );
 }
@@ -385,8 +395,15 @@ fn non_pic_archive_fails_during_materialization() {
     );
 
     let error = materialize_in(&archive, &temp.path().join("cache")).unwrap_err();
-    assert!(error.contains("PIC"), "unexpected diagnostic: {error}");
-    assert!(error.contains("relocation"), "linker detail lost: {error}");
+    assert_eq!(error.code(), Some("archive.unsupported"));
+    assert!(
+        error.to_string().contains("PIC"),
+        "unexpected diagnostic: {error}"
+    );
+    assert!(
+        error.to_string().contains("relocation"),
+        "linker detail lost: {error}"
+    );
 }
 
 #[test]
@@ -494,11 +511,15 @@ fn duplicate_symbols_across_archives_are_rejected_as_link_order_ambiguity() {
     .unwrap();
 
     let error = reject_symbol_ambiguity(&[first, second]).unwrap_err();
+    assert_eq!(error.code(), Some("archive.ambiguous"));
     assert!(
-        error.contains("mirvm_duplicate_symbol"),
+        error.to_string().contains("mirvm_duplicate_symbol"),
         "unexpected diagnostic: {error}"
     );
-    assert!(error.contains("order"), "unexpected diagnostic: {error}");
+    assert!(
+        error.to_string().contains("order"),
+        "unexpected diagnostic: {error}"
+    );
 }
 
 /// weak/COMDAT semantics (proven by c_risc0_run): duplicate symbols across archives—

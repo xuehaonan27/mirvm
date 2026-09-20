@@ -1,5 +1,95 @@
 //! Linux/ELF static native archive loader: materialize a constraint-checked PIC `.a` into a dlopen-able `.so`.
 
+/// Why a native archive could not be turned into something the engine can load.
+///
+/// The classes follow what a caller can do: `Missing` (the crate's library is not in the search
+/// path), `Malformed` (the bytes are not the shape, or the symbol names are unusable),
+/// `Unsupported` (well formed but outside what mirvm handles: another host's slice, a thin archive,
+/// an `+/-export-symbols` modifier, a non-PIC member, legacy `.init`/`.fini`), `Tool` (an external
+/// `cc`/`nm`/`readelf` ran and failed, with its output as the detail), `Ambiguous` (two strong
+/// definitions of one symbol, where resolution would depend on native link order and mirvm refuses
+/// to guess), and `Io` (a filesystem or exec step failed, carrying the `io::Error` as its source).
+#[derive(Debug, thiserror::Error, serde::Serialize)]
+pub(crate) enum Error {
+    #[error("{detail}")]
+    Missing { detail: String },
+
+    #[error("{detail}")]
+    Malformed { detail: String },
+
+    #[error("{detail}")]
+    Unsupported { detail: String },
+
+    #[error("{detail}")]
+    Tool { detail: String },
+
+    #[error("{detail}")]
+    Ambiguous { detail: String },
+
+    /// The archive's symbol table could not be read.
+    #[error(transparent)]
+    Symtab(#[from] super::symtab::Error),
+
+    #[error("{detail}: {source}")]
+    Io {
+        detail: String,
+        #[serde(skip)]
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+crate::diag_codes! {
+    Error: Native => {
+        Missing => "archive.missing",
+        Malformed => "archive.malformed",
+        Unsupported => "archive.unsupported",
+        Tool => "archive.tool",
+        Ambiguous => "archive.ambiguous",
+        Symtab => "archive.symtab",
+        Io => "archive.io",
+    }
+}
+
+impl Error {
+    fn missing(detail: impl Into<String>) -> Self {
+        Error::Missing {
+            detail: detail.into(),
+        }
+    }
+
+    fn malformed(detail: impl Into<String>) -> Self {
+        Error::Malformed {
+            detail: detail.into(),
+        }
+    }
+
+    fn unsupported(detail: impl Into<String>) -> Self {
+        Error::Unsupported {
+            detail: detail.into(),
+        }
+    }
+
+    fn tool(detail: impl Into<String>) -> Self {
+        Error::Tool {
+            detail: detail.into(),
+        }
+    }
+
+    fn ambiguous(detail: impl Into<String>) -> Self {
+        Error::Ambiguous {
+            detail: detail.into(),
+        }
+    }
+
+    fn io(detail: impl Into<String>, source: std::io::Error) -> Self {
+        Error::Io {
+            detail: detail.into(),
+            source,
+        }
+    }
+}
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -232,7 +322,7 @@ pub(crate) fn system_dylibs(tcx: TyCtxt<'_>) -> Vec<Box<str>> {
 }
 
 #[cfg(test)]
-pub(crate) fn materialize_in(archive: &Path, cache_dir: &Path) -> Result<PathBuf, String> {
+pub(crate) fn materialize_in(archive: &Path, cache_dir: &Path) -> Result<PathBuf, Error> {
     materialize_for_target_in(
         archive,
         cache_dir,
@@ -255,7 +345,7 @@ pub(crate) fn materialize_in(archive: &Path, cache_dir: &Path) -> Result<PathBuf
 pub(crate) fn materialize_static_libraries<'tcx>(
     tcx: TyCtxt<'tcx>,
     linker: &mut crate::lower::linker::Linker<'tcx>,
-) -> Result<Vec<Box<str>>, String> {
+) -> Result<Vec<Box<str>>, Error> {
     let sess = tcx.sess;
     let search_dirs: Vec<_> = sess
         .target_filesearch()
@@ -288,19 +378,19 @@ pub(crate) fn materialize_static_libraries<'tcx>(
                 || sess.target.os != Os::Linux
                 || sess.target.binary_format != BinaryFormat::Elf
             {
-                return Err(format!(
+                return Err(Error::unsupported(format!(
                     "crate `{crate_name}`'s Static native library `{}` can only be handled by the current host \
                      Linux/ELF archive-loading slice (host: {}, current target: {target})",
                     lib.name,
                     crate::options::build::HOST
-                ));
+                )));
             }
             if export_symbols.is_some() {
-                return Err(format!(
+                return Err(Error::unsupported(format!(
                     "crate `{crate_name}`'s Static native library `{}` uses the \
                      `+/-export-symbols` modifier; M5.1 archive loading has not defined its `.so` equivalent semantics",
                     lib.name
-                ));
+                )));
             }
 
             let verbatim = lib.verbatim.unwrap_or(false);
@@ -316,11 +406,11 @@ pub(crate) fn materialize_static_libraries<'tcx>(
                     .map(|dir| dir.join(&filename).display().to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!(
+                Error::missing(format!(
                     "Cannot find crate `{crate_name}`'s Static native library `{}` (file `{filename}`); \
                      rustc native search paths: [{}]",
                     lib.name, searched
-                )
+                ))
             })?;
             let so = materialize_for_target_in(
                 &archive,
@@ -367,7 +457,7 @@ pub(crate) fn materialize_static_libraries<'tcx>(
 /// Hidden symbols that do not enter .dynsym (carried by the .symtab fallback table) deliberately
 /// skip all collision checks: in resolution order they always precede the global scope, so
 /// collisions already resolve to the archive, leaving no ambiguity to reject.
-pub(super) fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), String> {
+pub(super) fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), Error> {
     let mut owners = HashMap::<String, (PathBuf, bool)>::new();
     for shared_object in shared_objects {
         let output = Command::new("nm")
@@ -375,24 +465,27 @@ pub(super) fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), 
             .arg(shared_object)
             .output()
             .map_err(|e| {
-                format!(
-                    "Cannot inspect exported symbols of archive shared library `{}` (failed to launch nm): {e}",
-                    shared_object.display()
+                Error::io(
+                    format!(
+                        "cannot run nm for the shared library `{}`",
+                        shared_object.display()
+                    ),
+                    e,
                 )
             })?;
         if !output.status.success() {
-            return Err(format!(
+            return Err(Error::tool(format!(
                 "Cannot inspect exported symbols of archive shared library `{}` (nm failed):\n{}{}",
                 shared_object.display(),
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
-            ));
+            )));
         }
         let symbols = String::from_utf8(output.stdout).map_err(|e| {
-            format!(
+            Error::tool(format!(
                 "nm output for archive shared library `{}` is not UTF-8: {e}",
                 shared_object.display()
-            )
+            ))
         })?;
         for line in symbols.lines() {
             let mut it = line.split_ascii_whitespace();
@@ -405,10 +498,10 @@ pub(super) fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), 
                 .next()
                 .is_some_and(|t| t.starts_with(['W', 'w', 'V', 'v', 'u']));
             std::ffi::CString::new(symbol).map_err(|_| {
-                format!(
+                Error::malformed(format!(
                     "Archive shared library `{}` exports an illegal symbol name containing NUL",
                     shared_object.display()
-                )
+                ))
             })?;
             match owners.entry(symbol.to_owned()) {
                 std::collections::hash_map::Entry::Vacant(e) => {
@@ -418,13 +511,13 @@ pub(super) fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), 
                     let (prev_path, prev_weak) = e.get().clone();
                     let strongs = usize::from(!prev_weak) + usize::from(!weak);
                     if strongs >= 2 {
-                        return Err(format!(
+                        return Err(Error::ambiguous(format!(
                             "Static archive exported symbol `{symbol}` is defined by both `{}` and `{}` \
                              (two strong definitions); runtime dlsym resolution would depend on load order; \
                              M5.1 refuses to guess native linker order",
                             prev_path.display(),
                             shared_object.display()
-                        ));
+                        )));
                     }
                     // All-weak (first wins) or exactly one strong (strong wins over weak): native
                     // link semantics silently resolve the same way—the strong definition enters the owner table
@@ -452,24 +545,27 @@ pub(super) fn materialize_for_target_in(
     cc: &Path,
     extra_libs: &[Box<str>],
     linker: Option<&mut crate::lower::linker::Linker<'_>>,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, Error> {
     let bytes = std::fs::read(archive).map_err(|e| {
-        format!(
-            "Failed to read static native archive `{}`: {e}",
-            archive.display()
+        Error::io(
+            format!(
+                "cannot read the static native archive `{}`",
+                archive.display()
+            ),
+            e,
         )
     })?;
     if bytes.starts_with(b"!<thin>\n") {
-        return Err(format!(
+        return Err(Error::unsupported(format!(
             "Rejecting thin static archive `{}`: archive bytes do not contain member objects, so it cannot be used as a complete-content hash cache key",
             archive.display()
-        ));
+        )));
     }
     if !bytes.starts_with(b"!<arch>\n") {
-        return Err(format!(
+        return Err(Error::malformed(format!(
             "`{}` is not a supported Unix ar archive",
             archive.display()
-        ));
+        )));
     }
     // Lifecycle-section partition: the .init_array/.fini_array family is **allowed** -- loader
     // DT_INIT_ARRAY semantics are a native process-startup constructor, as used by aws-lc's
@@ -502,9 +598,12 @@ pub(super) fn materialize_for_target_in(
         &bytes,
     ]);
     std::fs::create_dir_all(cache_dir).map_err(|e| {
-        format!(
-            "Failed to create native archive cache directory `{}`: {e}",
-            cache_dir.display()
+        Error::io(
+            format!(
+                "cannot create the native archive cache directory `{}`",
+                cache_dir.display()
+            ),
+            e,
         )
     })?;
     let so = cache_dir.join(format!("{hash}.so"));
@@ -526,9 +625,9 @@ pub(super) fn materialize_for_target_in(
         .arg(&tmp)
         .output()
         .map_err(|e| {
-            format!(
-                "Failed to launch cc to convert `{}`: {e}",
-                archive.display()
+            Error::io(
+                format!("cannot launch cc to convert `{}`", archive.display()),
+                e,
             )
         })?;
     if !output.status.success() {
@@ -553,18 +652,18 @@ pub(super) fn materialize_for_target_in(
         {
             return Ok(so);
         }
-        return Err(format!(
+        return Err(Error::unsupported(format!(
             "Static native archive `{}` cannot be safely converted to a shared library (requires ELF PIC, dependencies closed within this archive):\n{}{}",
             archive.display(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
-        ));
+        )));
     }
     crate::store::publish(&so, &tmp).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
-        format!(
-            "Atomic publish of native archive cache `{}` failed: {e}",
-            so.display()
+        Error::io(
+            format!("cannot publish the native archive cache `{}`", so.display()),
+            e,
         )
     })?;
     Ok(so)
@@ -575,7 +674,7 @@ fn native_runtime_bridge_object(
     target: &str,
     cc: &Path,
     cc_identity: &[u8],
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, Error> {
     let hash = content_hash([
         CACHE_FORMAT_VERSION,
         b"native-runtime-bridge",
@@ -593,9 +692,12 @@ fn native_runtime_bridge_object(
     source.push(".s");
     let source = PathBuf::from(source);
     std::fs::write(&source, NATIVE_RUNTIME_BRIDGE_ASM).map_err(|e| {
-        format!(
-            "Writing native runtime bridge assembly `{}` failed: {e}",
-            source.display()
+        Error::io(
+            format!(
+                "cannot write the native runtime bridge assembly `{}`",
+                source.display()
+            ),
+            e,
         )
     })?;
     let output = Command::new(cc)
@@ -604,21 +706,24 @@ fn native_runtime_bridge_object(
         .arg("-o")
         .arg(&temporary)
         .output()
-        .map_err(|e| format!("Failed to launch cc to assemble native runtime bridge: {e}"))?;
+        .map_err(|e| Error::io("cannot launch cc to assemble the native runtime bridge", e))?;
     let _ = std::fs::remove_file(&source);
     if !output.status.success() {
         let _ = std::fs::remove_file(&temporary);
-        return Err(format!(
+        return Err(Error::tool(format!(
             "cc assembly of native runtime bridge failed:\n{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
-        ));
+        )));
     }
     crate::store::publish(&object, &temporary).map_err(|e| {
         let _ = std::fs::remove_file(&temporary);
-        format!(
-            "Atomic publish of native runtime bridge `{}` failed: {e}",
-            object.display()
+        Error::io(
+            format!(
+                "cannot publish the native runtime bridge `{}`",
+                object.display()
+            ),
+            e,
         )
     })?;
     Ok(object)
@@ -644,10 +749,9 @@ fn rescue_with_rlib_symbols(
     link_flags: &str,
     native_runtime_bridge: &Path,
     linker: &mut crate::lower::linker::Linker<'_>,
-) -> Result<Option<PathBuf>, String> {
+) -> Result<Option<PathBuf>, Error> {
     use rustc_span::Symbol;
-    let undefs = crate::native::symtab::archive_undefined_symbols(&archive.display().to_string())
-        .map_err(|error| error.to_string())?;
+    let undefs = crate::native::symtab::archive_undefined_symbols(&archive.display().to_string())?;
     if undefs.is_empty() {
         return Ok(None);
     }
@@ -674,9 +778,11 @@ fn rescue_with_rlib_symbols(
         if linker.entry_ffi_sig(inst).is_none() {
             return Ok(None);
         }
-        let addr = linker
-            .fn_entry_addr(inst)
-            .map_err(|e| format!("Budgeting P1 entry for rlib symbol `{name}` failed: {e}"))?;
+        let addr = linker.fn_entry_addr(inst).map_err(|e| {
+            Error::malformed(format!(
+                "Budgeting P1 entry for rlib symbol `{name}` failed: {e}"
+            ))
+        })?;
         pairs.push((name, addr));
     }
     pairs.sort();
@@ -730,8 +836,12 @@ fn rescue_with_rlib_symbols(
     }
     // Assemble trampoline object (same cc path as the archive conversion)
     let s_path = cache_dir.join(format!("{hash}.s"));
-    std::fs::write(&s_path, &asm)
-        .map_err(|e| format!("Writing rlib trampoline assembly `{s_path:?}` failed: {e}"))?;
+    std::fs::write(&s_path, &asm).map_err(|e| {
+        Error::io(
+            format!("cannot write the rlib trampoline assembly `{s_path:?}`"),
+            e,
+        )
+    })?;
     let o_path = cache_dir.join(format!("{hash}.tramp.o"));
     let st = Command::new(cc)
         .arg("-c")
@@ -740,14 +850,15 @@ fn rescue_with_rlib_symbols(
         .arg(&s_path)
         .status()
         .map_err(|e| {
-            format!(
-                "Failed to launch cc to assemble rlib trampoline (is cc missing from PATH?): {e}"
+            Error::io(
+                "cannot launch cc to assemble the rlib trampoline (is cc missing from PATH?)",
+                e,
             )
         })?;
     if !st.success() {
-        return Err(format!(
+        return Err(Error::tool(format!(
             "cc assembly of rlib trampoline failed (status={st})"
-        ));
+        )));
     }
     // Relink: trampoline object placed after archive so its defined symbols bind unresolved references inside the archive
     let tmp = crate::store::staging_path(&so);
@@ -764,9 +875,9 @@ fn rescue_with_rlib_symbols(
         .arg(&tmp)
         .output()
         .map_err(|e| {
-            format!(
-                "Failed to launch cc for relink `{}`: {e}",
-                archive.display()
+            Error::io(
+                format!("cannot launch cc for the relink of `{}`", archive.display()),
+                e,
             )
         })?;
     if !output.status.success() {
@@ -775,36 +886,46 @@ fn rescue_with_rlib_symbols(
     }
     crate::store::publish(&so, &tmp).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
-        format!(
-            "Atomic publish of native archive cache `{}` failed: {e}",
-            so.display()
+        Error::io(
+            format!("cannot publish the native archive cache `{}`", so.display()),
+            e,
         )
     })?;
     Ok(Some(so))
 }
 
-fn compiler_identity(cc: &Path) -> Result<Vec<u8>, String> {
-    let version = Command::new(cc)
-        .arg("--version")
-        .output()
-        .map_err(|e| format!("Cannot query C compiler `{}` version: {e}", cc.display()))?;
+fn compiler_identity(cc: &Path) -> Result<Vec<u8>, Error> {
+    let version = Command::new(cc).arg("--version").output().map_err(|e| {
+        Error::io(
+            format!(
+                "cannot run the C compiler `{}` for its version",
+                cc.display()
+            ),
+            e,
+        )
+    })?;
     if !version.status.success() {
-        return Err(format!(
+        return Err(Error::tool(format!(
             "Querying C compiler `{}` version failed: {}",
             cc.display(),
             String::from_utf8_lossy(&version.stderr)
-        ));
+        )));
     }
-    let machine = Command::new(cc)
-        .arg("-dumpmachine")
-        .output()
-        .map_err(|e| format!("Cannot query C compiler `{}` target: {e}", cc.display()))?;
+    let machine = Command::new(cc).arg("-dumpmachine").output().map_err(|e| {
+        Error::io(
+            format!(
+                "cannot run the C compiler `{}` for its target",
+                cc.display()
+            ),
+            e,
+        )
+    })?;
     if !machine.status.success() {
-        return Err(format!(
+        return Err(Error::tool(format!(
             "Querying C compiler `{}` target failed: {}",
             cc.display(),
             String::from_utf8_lossy(&machine.stderr)
-        ));
+        )));
     }
     let first_line = version
         .stdout
@@ -817,24 +938,27 @@ fn compiler_identity(cc: &Path) -> Result<Vec<u8>, String> {
     Ok(identity)
 }
 
-fn reject_legacy_init_sections(archive: &Path) -> Result<(), String> {
+fn reject_legacy_init_sections(archive: &Path) -> Result<(), Error> {
     let output = Command::new("readelf")
         .args(["--section-headers", "--wide"])
         .arg(archive)
         .output()
         .map_err(|e| {
-            format!(
-                "Cannot inspect legacy init sections of static native archive `{}` (failed to launch readelf): {e}",
-                archive.display()
+            Error::io(
+                format!(
+                    "cannot run readelf for the static native archive `{}`",
+                    archive.display()
+                ),
+                e,
             )
         })?;
     if !output.status.success() {
-        return Err(format!(
+        return Err(Error::tool(format!(
             "Cannot inspect legacy init sections of static native archive `{}` (readelf failed):\n{}{}",
             archive.display(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
-        ));
+        )));
     }
     let sections = String::from_utf8_lossy(&output.stdout);
     let has_legacy = sections.lines().filter_map(readelf_section_name).any(|n| {
@@ -846,11 +970,11 @@ fn reject_legacy_init_sections(archive: &Path) -> Result<(), String> {
                 .is_some_and(|s| s.chars().next().is_some_and(|c| c.is_ascii_digit()))
     });
     if has_legacy {
-        return Err(format!(
+        return Err(Error::unsupported(format!(
             "Rejecting static native archive `{}` with legacy `.init`/`.fini` sections: \
              the old gcc trick of injecting bare function bodies has unreliable execution semantics (.init_array family is allowed)",
             archive.display()
-        ));
+        )));
     }
     Ok(())
 }
