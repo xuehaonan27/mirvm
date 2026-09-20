@@ -1,6 +1,8 @@
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::diag::Diagnostic as _;
+
 static NEXT_PACKAGE_TEST: AtomicU64 = AtomicU64::new(0);
 
 fn test_body(name: &str) -> crate::vm::ir::FuncBody {
@@ -76,7 +78,7 @@ fn package_bytes_for_module(module: &crate::vm::ir::Module) -> Vec<u8> {
     .unwrap()
 }
 
-fn load_test_package(bytes: &[u8]) -> Result<Package, String> {
+fn load_test_package(bytes: &[u8]) -> Result<Package, Error> {
     let path = std::env::temp_dir().join(format!(
         "mirvm-package-verify-{}-{}.mirvm",
         std::process::id(),
@@ -127,11 +129,9 @@ fn function_section_indexes_independent_verified_blobs() {
 
     let mut corrupt = section;
     *corrupt.last_mut().unwrap() ^= 1;
-    assert!(
-        parse_function_section(&corrupt, 0)
-            .unwrap_err()
-            .contains("wrong hash")
-    );
+    let error = parse_function_section(&corrupt, 0).unwrap_err();
+    assert_eq!(error.code(), Some("pack.corrupt"));
+    assert!(error.to_string().contains("wrong hash"), "{error}");
 }
 
 #[test]
@@ -143,14 +143,16 @@ fn parser_rejects_truncated_build_id_without_panicking() {
     body.extend_from_slice(&0u32.to_le_bytes());
     body.extend_from_slice(&hash128(&body).to_le_bytes());
     let err = parse_container(&body).err().unwrap();
-    assert!(err.contains("build_id"), "{err}");
+    assert_eq!(err.code(), Some("pack.corrupt"));
+    assert!(err.to_string().contains("build_id"), "{err}");
 }
 
 #[test]
 fn parser_bounds_section_count_before_allocating() {
     let raw = header_with_count(u32::MAX);
     let err = parse_container(&raw).err().unwrap();
-    assert!(err.contains("section table"), "{err}");
+    assert_eq!(err.code(), Some("pack.corrupt"));
+    assert!(err.to_string().contains("section table"), "{err}");
 }
 
 #[test]
@@ -160,8 +162,9 @@ fn parser_rejects_overflowing_section_range() {
     raw[offset_pos..offset_pos + 8].copy_from_slice(&u64::MAX.to_le_bytes());
     replace_whole_hash(&mut raw);
     let err = parse_container(&raw).err().unwrap();
+    assert_eq!(err.code(), Some("pack.corrupt"));
     assert!(
-        err.contains("boundary") || err.contains("overflow"),
+        err.to_string().contains("boundary") || err.to_string().contains("overflow"),
         "{err}"
     );
 }
@@ -174,12 +177,9 @@ fn parser_rejects_duplicate_tags_and_overlapping_sections() {
     let second_tag = table_start() + SECTION_ENTRY_LEN;
     duplicate[second_tag..second_tag + 4].copy_from_slice(&TAG_META.to_le_bytes());
     replace_whole_hash(&mut duplicate);
-    assert!(
-        parse_container(&duplicate)
-            .err()
-            .unwrap()
-            .contains("duplicate")
-    );
+    let error = parse_container(&duplicate).err().unwrap();
+    assert_eq!(error.code(), Some("pack.corrupt"));
+    assert!(error.to_string().contains("duplicate"), "{error}");
 
     let mut overlap = original;
     let first_offset = table_start() + 4;
@@ -187,7 +187,9 @@ fn parser_rejects_duplicate_tags_and_overlapping_sections() {
     let second_offset = table_start() + SECTION_ENTRY_LEN + 4;
     overlap[second_offset..second_offset + 8].copy_from_slice(&first);
     replace_whole_hash(&mut overlap);
-    assert!(parse_container(&overlap).err().unwrap().contains("overlap"));
+    let error = parse_container(&overlap).err().unwrap();
+    assert_eq!(error.code(), Some("pack.corrupt"));
+    assert!(error.to_string().contains("overlap"), "{error}");
 }
 
 #[test]
@@ -197,7 +199,8 @@ fn parser_checks_every_section_hash() {
     raw[hash_pos] ^= 1;
     replace_whole_hash(&mut raw);
     let err = parse_container(&raw).err().unwrap();
-    assert!(err.contains("wrong hash"), "{err}");
+    assert_eq!(err.code(), Some("pack.corrupt"));
+    assert!(err.to_string().contains("wrong hash"), "{err}");
 }
 
 #[test]
@@ -222,7 +225,11 @@ fn malformed_p1_tables_are_rejected_by_safe_load_without_panicking() {
         .expect("safe Package::load panicked")
         .err()
         .expect("malformed package was accepted");
-    assert!(error.contains("no matching entry stub"), "{error}");
+    assert_eq!(error.code(), Some("pack.reject"));
+    assert!(
+        error.to_string().contains("no matching entry stub"),
+        "{error}"
+    );
 
     let mut duplicate = missing;
     let site = EntryStubSite {
@@ -237,7 +244,11 @@ fn malformed_p1_tables_are_rejected_by_safe_load_without_panicking() {
         .expect("safe Package::load panicked")
         .err()
         .expect("malformed package was accepted");
-    assert!(error.contains("duplicates entry link address"), "{error}");
+    assert_eq!(error.code(), Some("pack.reject"));
+    assert!(
+        error.to_string().contains("duplicates entry link address"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -260,7 +271,11 @@ fn entry_without_frozen_memory_is_rejected_by_safe_load_without_panicking() {
         .expect("safe Package::load panicked")
         .err()
         .expect("entry without frozen memory was accepted");
-    assert!(error.contains("no frozen memory for argv"), "{error}");
+    assert_eq!(error.code(), Some("pack.reject"));
+    assert!(
+        error.to_string().contains("no frozen memory for argv"),
+        "{error}"
+    );
 }
 
 #[test]

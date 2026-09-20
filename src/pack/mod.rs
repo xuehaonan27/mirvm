@@ -21,6 +21,98 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Why a `.mirvm` package could not be produced or consumed.
+///
+/// One variant per failure class a caller can act on, not per message: `NotAPackage` means "treat
+/// the input as something else", `Incompatible` means "re-pack with this build", `Corrupt` means the
+/// artifact is unusable, `Reject` means the container is intact but its contents are refused, and
+/// the two write classes name the path. The specific reason stays in `detail`, which is what a
+/// reader reports and what the JSON `details` field carries.
+#[derive(Debug, thiserror::Error, serde::Serialize)]
+pub enum Error {
+    /// The input's magic says it is not a package at all.
+    #[error("{detail}")]
+    NotAPackage { detail: String },
+
+    /// The container is damaged: truncation, a checksum that does not match, an offset out of
+    /// bounds, a duplicate or missing section, or a function table that disagrees with the module.
+    #[error("{detail}")]
+    Corrupt { detail: String },
+
+    /// The container parsed, but the contents were refused: bytecode verification, a requirement
+    /// this host cannot satisfy, or an embedded image that will not load.
+    #[error("{detail}")]
+    Reject { detail: String },
+
+    /// The package was produced by a different mirvm build or format version.
+    #[error("{detail}")]
+    Incompatible { detail: String },
+
+    /// Writing a package from a module failed before touching the filesystem.
+    #[error("{detail}")]
+    Build { detail: String },
+
+    /// A filesystem operation on a package or one of its artifacts failed. `detail` names the
+    /// operation, because the same `io::Error` kind means different things at each step.
+    #[error("{detail}: {source}")]
+    Io {
+        detail: String,
+        #[serde(skip)]
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+crate::diag_codes! {
+    Error: Pack => {
+        NotAPackage => "pack.not_a_package",
+        Corrupt => "pack.corrupt",
+        Reject => "pack.reject",
+        Incompatible => "pack.incompatible",
+        Build => "pack.build",
+        Io => "pack.io",
+    }
+}
+
+impl Error {
+    fn not_a_package(detail: impl Into<String>) -> Self {
+        Error::NotAPackage {
+            detail: detail.into(),
+        }
+    }
+
+    fn corrupt(detail: impl Into<String>) -> Self {
+        Error::Corrupt {
+            detail: detail.into(),
+        }
+    }
+
+    fn reject(detail: impl Into<String>) -> Self {
+        Error::Reject {
+            detail: detail.into(),
+        }
+    }
+
+    fn incompatible(detail: impl Into<String>) -> Self {
+        Error::Incompatible {
+            detail: detail.into(),
+        }
+    }
+
+    fn build(detail: impl Into<String>) -> Self {
+        Error::Build {
+            detail: detail.into(),
+        }
+    }
+
+    fn io(detail: impl Into<String>, source: std::io::Error) -> Self {
+        Error::Io {
+            detail: detail.into(),
+            source,
+        }
+    }
+}
+
 const MAGIC: &[u8; 8] = b"MIRVMAR\0";
 const FMT_VER: u32 = 4;
 const SECTION_ENTRY_LEN: usize = 36;
@@ -168,12 +260,13 @@ struct ModuleMeta {
 }
 
 impl ModuleMeta {
-    fn instantiate(&self) -> Result<crate::vm::ir::Module, String> {
+    fn instantiate(&self) -> Result<crate::vm::ir::Module, Error> {
         let frozen = self
             .frozen
             .as_ref()
             .map(crate::vm::frozen::FrozenArena::restore_dynamic)
-            .transpose()?;
+            .transpose()
+            .map_err(Error::reject)?;
         let mut module = crate::vm::ir::Module {
             funcs: Default::default(),
             function_names: self.function_names.clone(),
@@ -214,24 +307,25 @@ impl ModuleMeta {
     }
 }
 
-fn postcard_bytes<T: Serialize>(v: &T) -> Result<Vec<u8>, String> {
-    postcard::to_stdvec(v).map_err(|e| format!("fail to format package: {e}"))
+fn postcard_bytes<T: Serialize>(v: &T) -> Result<Vec<u8>, Error> {
+    postcard::to_stdvec(v).map_err(|e| Error::build(format!("cannot format the package: {e}")))
 }
 
-fn build_function_section(funcs: &crate::vm::ir::FuncTable) -> Result<Vec<u8>, String> {
-    let count = u32::try_from(funcs.len()).map_err(|_| "too many functions in package")?;
+fn build_function_section(funcs: &crate::vm::ir::FuncTable) -> Result<Vec<u8>, Error> {
+    let count =
+        u32::try_from(funcs.len()).map_err(|_| Error::build("too many functions in package"))?;
     let table_len = funcs
         .len()
         .checked_mul(FUNC_ENTRY_LEN)
         .and_then(|len| len.checked_add(4))
-        .ok_or("package function table is too large")?;
+        .ok_or_else(|| Error::build("package function table is too large"))?;
     let mut encoded = Vec::with_capacity(funcs.len());
     let mut offset = table_len;
     for body in funcs {
         let bytes = postcard_bytes(body)?;
         let end = offset
             .checked_add(bytes.len())
-            .ok_or("package function data is too large")?;
+            .ok_or_else(|| Error::build("package function data is too large"))?;
         encoded.push((offset, bytes));
         offset = end;
     }
@@ -240,12 +334,12 @@ fn build_function_section(funcs: &crate::vm::ir::FuncTable) -> Result<Vec<u8>, S
     for (offset, bytes) in &encoded {
         out.extend_from_slice(
             &u64::try_from(*offset)
-                .map_err(|_| "package function offset is too large")?
+                .map_err(|_| Error::build("package function offset is too large"))?
                 .to_le_bytes(),
         );
         out.extend_from_slice(
             &u64::try_from(bytes.len())
-                .map_err(|_| "package function is too large")?
+                .map_err(|_| Error::build("package function is too large"))?
                 .to_le_bytes(),
         );
         out.extend_from_slice(&hash128(bytes).to_le_bytes());
@@ -259,48 +353,54 @@ fn build_function_section(funcs: &crate::vm::ir::FuncTable) -> Result<Vec<u8>, S
 fn parse_function_section(
     section: &[u8],
     mapped_offset: usize,
-) -> Result<Vec<crate::vm::ir::FuncBlob>, String> {
+) -> Result<Vec<crate::vm::ir::FuncBlob>, Error> {
     let mut cursor = Cursor {
         data: section,
         pos: 0,
     };
     let count = usize::try_from(cursor.u32("function count")?)
-        .map_err(|_| "package function count does not fit this host")?;
+        .map_err(|_| Error::corrupt("package function count does not fit this host"))?;
     let table_end = count
         .checked_mul(FUNC_ENTRY_LEN)
         .and_then(|len| len.checked_add(4))
-        .ok_or("package function table length overflow")?;
+        .ok_or_else(|| Error::corrupt("package function table length overflow"))?;
     if table_end > section.len() {
-        return Err("package function table is truncated or too large".into());
+        return Err(Error::corrupt(
+            "package function table is truncated or too large",
+        ));
     }
     let mut entries = Vec::new();
     entries
         .try_reserve_exact(count)
-        .map_err(|_| "package function index is too large for available memory")?;
+        .map_err(|_| Error::corrupt("package function index is too large for available memory"))?;
     for index in 0..count {
-        let start = usize::try_from(cursor.u64("function offset")?)
-            .map_err(|_| format!("function {index} offset does not fit this host"))?;
-        let len = usize::try_from(cursor.u64("function length")?)
-            .map_err(|_| format!("function {index} length does not fit this host"))?;
+        let start = usize::try_from(cursor.u64("function offset")?).map_err(|_| {
+            Error::corrupt(format!("function {index} offset does not fit this host"))
+        })?;
+        let len = usize::try_from(cursor.u64("function length")?).map_err(|_| {
+            Error::corrupt(format!("function {index} length does not fit this host"))
+        })?;
         let expected = cursor.u128("function hash")?;
         let end = start
             .checked_add(len)
-            .ok_or_else(|| format!("function {index} range overflow"))?;
+            .ok_or_else(|| Error::corrupt(format!("function {index} range overflow")))?;
         if start < table_end || end > section.len() {
-            return Err(format!("function {index} crossed FUNCS section boundary"));
+            return Err(Error::corrupt(format!(
+                "function {index} crossed FUNCS section boundary"
+            )));
         }
         if hash128(&section[start..end]) != expected {
-            return Err(format!("function {index} has wrong hash"));
+            return Err(Error::corrupt(format!("function {index} has wrong hash")));
         }
         entries.push((index, start, end, expected));
     }
     let mut sorted = entries.clone();
     sorted.sort_unstable_by_key(|entry| entry.1);
     if let Some(pair) = sorted.windows(2).find(|pair| pair[1].1 < pair[0].2) {
-        return Err(format!(
+        return Err(Error::corrupt(format!(
             "functions {} and {} overlap in FUNCS section",
             pair[0].0, pair[1].0
-        ));
+        )));
     }
     entries
         .into_iter()
@@ -308,32 +408,33 @@ fn parse_function_section(
             Ok(crate::vm::ir::FuncBlob {
                 start: mapped_offset
                     .checked_add(start)
-                    .ok_or("mapped function offset overflow")?,
+                    .ok_or_else(|| Error::build("mapped function offset overflow"))?,
                 end: mapped_offset
                     .checked_add(end)
-                    .ok_or("mapped function end overflow")?,
+                    .ok_or_else(|| Error::build("mapped function end overflow"))?,
                 expected_hash,
             })
         })
         .collect()
 }
 
-fn build_container(sections: &[(u32, Vec<u8>)]) -> Result<Vec<u8>, String> {
+fn build_container(sections: &[(u32, Vec<u8>)]) -> Result<Vec<u8>, Error> {
     let bid = crate::options::build::BUILD_ID.as_bytes();
-    let bid_len = u32::try_from(bid.len()).map_err(|_| "package build_id too long")?;
+    let bid_len =
+        u32::try_from(bid.len()).map_err(|_| Error::build("package build_id too long"))?;
     let section_count =
-        u32::try_from(sections.len()).map_err(|_| "too many sections in package")?;
+        u32::try_from(sections.len()).map_err(|_| Error::build("too many sections in package"))?;
     let table_len = sections
         .len()
         .checked_mul(SECTION_ENTRY_LEN)
-        .ok_or("package section table is too large")?;
+        .ok_or_else(|| Error::build("package section table is too large"))?;
     let data_start = MAGIC
         .len()
         .checked_add(4 + 4)
         .and_then(|n| n.checked_add(bid.len()))
         .and_then(|n| n.checked_add(4))
         .and_then(|n| n.checked_add(table_len))
-        .ok_or("package size overflow")?;
+        .ok_or_else(|| Error::build("package size overflow"))?;
 
     let mut buf = Vec::new();
     buf.extend_from_slice(MAGIC);
@@ -342,14 +443,17 @@ fn build_container(sections: &[(u32, Vec<u8>)]) -> Result<Vec<u8>, String> {
     buf.extend_from_slice(bid);
     buf.extend_from_slice(&section_count.to_le_bytes());
 
-    let mut off = u64::try_from(data_start).map_err(|_| "package offset overflow")?;
+    let mut off = u64::try_from(data_start).map_err(|_| Error::build("package offset overflow"))?;
     for (tag, data) in sections {
-        let len = u64::try_from(data.len()).map_err(|_| "package section is too large")?;
+        let len =
+            u64::try_from(data.len()).map_err(|_| Error::build("package section is too large"))?;
         buf.extend_from_slice(&tag.to_le_bytes());
         buf.extend_from_slice(&off.to_le_bytes());
         buf.extend_from_slice(&len.to_le_bytes());
         buf.extend_from_slice(&hash128(data).to_le_bytes());
-        off = off.checked_add(len).ok_or("package size overflow")?;
+        off = off
+            .checked_add(len)
+            .ok_or_else(|| Error::build("package size overflow"))?;
     }
     for (_, data) in sections {
         buf.extend_from_slice(data);
@@ -365,32 +469,32 @@ struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
-    fn take(&mut self, len: usize, what: &str) -> Result<&'a [u8], String> {
+    fn take(&mut self, len: usize, what: &str) -> Result<&'a [u8], Error> {
         let end = self
             .pos
             .checked_add(len)
-            .ok_or_else(|| format!("package {what} length overflow"))?;
+            .ok_or_else(|| Error::corrupt(format!("package {what} length overflow")))?;
         let value = self
             .data
             .get(self.pos..end)
-            .ok_or_else(|| format!("package truncated while reading {what}"))?;
+            .ok_or_else(|| Error::corrupt(format!("package truncated while reading {what}")))?;
         self.pos = end;
         Ok(value)
     }
 
-    fn u32(&mut self, what: &str) -> Result<u32, String> {
+    fn u32(&mut self, what: &str) -> Result<u32, Error> {
         Ok(u32::from_le_bytes(
             self.take(4, what)?.try_into().expect("four bytes"),
         ))
     }
 
-    fn u64(&mut self, what: &str) -> Result<u64, String> {
+    fn u64(&mut self, what: &str) -> Result<u64, Error> {
         Ok(u64::from_le_bytes(
             self.take(8, what)?.try_into().expect("eight bytes"),
         ))
     }
 
-    fn u128(&mut self, what: &str) -> Result<u128, String> {
+    fn u128(&mut self, what: &str) -> Result<u128, Error> {
         Ok(u128::from_le_bytes(
             self.take(16, what)?.try_into().expect("sixteen bytes"),
         ))
@@ -402,11 +506,11 @@ struct ParsedPackage<'a> {
 }
 
 impl<'a> ParsedPackage<'a> {
-    fn section(&self, tag: u32) -> Result<&'a [u8], String> {
+    fn section(&self, tag: u32) -> Result<&'a [u8], Error> {
         self.sections
             .iter()
             .find_map(|(found, data)| (*found == tag).then_some(*data))
-            .ok_or_else(|| format!("package must have section with tag={tag}"))
+            .ok_or_else(|| Error::corrupt(format!("package must have section with tag={tag}")))
     }
 
     fn has_section(&self, tag: u32) -> bool {
@@ -414,19 +518,23 @@ impl<'a> ParsedPackage<'a> {
     }
 }
 
-fn parse_container(raw: &[u8]) -> Result<ParsedPackage<'_>, String> {
+fn parse_container(raw: &[u8]) -> Result<ParsedPackage<'_>, Error> {
     const MIN_LEN: usize = 8 + 4 + 4 + 4 + WHOLE_HASH_LEN;
     if raw.len() < MIN_LEN || raw.get(..MAGIC.len()) != Some(MAGIC) {
-        return Err("not .mirvm package (mismatched or truncated magic header)".into());
+        return Err(Error::not_a_package(
+            "not .mirvm package (mismatched or truncated magic header)",
+        ));
     }
     let body_len = raw
         .len()
         .checked_sub(WHOLE_HASH_LEN)
-        .ok_or("package is shorter than its hash trailer")?;
+        .ok_or_else(|| Error::corrupt("package is shorter than its hash trailer"))?;
     let (body, whole) = raw.split_at(body_len);
     let recorded_hash = u128::from_le_bytes(whole.try_into().expect("sixteen-byte trailer"));
     if recorded_hash != hash128(body) {
-        return Err("package content hash mismatched (broken or truncated)".into());
+        return Err(Error::corrupt(
+            "package content hash mismatched (broken or truncated)",
+        ));
     }
 
     let mut cur = Cursor {
@@ -435,53 +543,64 @@ fn parse_container(raw: &[u8]) -> Result<ParsedPackage<'_>, String> {
     };
     let package_ver = cur.u32("format version")?;
     if package_ver != FMT_VER {
-        return Err(format!(
+        return Err(Error::incompatible(format!(
             "wrong package format version (package={package_ver}, mirvm={FMT_VER})"
-        ));
+        )));
     }
     let bid_len = usize::try_from(cur.u32("build_id length")?)
-        .map_err(|_| "package build_id length does not fit this host")?;
+        .map_err(|_| Error::corrupt("package build_id length does not fit this host"))?;
     let bid = std::str::from_utf8(cur.take(bid_len, "build_id")?)
-        .map_err(|e| format!("invalid package build_id: {e}"))?;
+        .map_err(|e| Error::corrupt(format!("invalid package build_id: {e}")))?;
     if bid != crate::options::build::BUILD_ID {
-        return Err("package build_id mismatch with current mirvm".into());
+        return Err(Error::incompatible(
+            "package build_id mismatch with current mirvm",
+        ));
     }
 
     let count = usize::try_from(cur.u32("section count")?)
-        .map_err(|_| "package section count does not fit this host")?;
+        .map_err(|_| Error::corrupt("package section count does not fit this host"))?;
     let table_len = count
         .checked_mul(SECTION_ENTRY_LEN)
-        .ok_or("package section table length overflow")?;
+        .ok_or_else(|| Error::corrupt("package section table length overflow"))?;
     let data_start = cur
         .pos
         .checked_add(table_len)
         .filter(|end| *end <= body.len())
-        .ok_or("package section table is truncated or too large")?;
+        .ok_or_else(|| Error::corrupt("package section table is truncated or too large"))?;
 
     let mut entries = Vec::new();
     entries
         .try_reserve_exact(count)
-        .map_err(|_| "package section table is too large for available memory")?;
+        .map_err(|_| Error::corrupt("package section table is too large for available memory"))?;
     let mut tags = HashSet::new();
-    tags.try_reserve(count)
-        .map_err(|_| "package section tag table is too large for available memory")?;
+    tags.try_reserve(count).map_err(|_| {
+        Error::corrupt("package section tag table is too large for available memory")
+    })?;
     for index in 0..count {
         let tag = cur.u32("section tag")?;
         if !tags.insert(tag) {
-            return Err(format!("package has duplicate section tag={tag}"));
+            return Err(Error::corrupt(format!(
+                "package has duplicate section tag={tag}"
+            )));
         }
-        let off = usize::try_from(cur.u64("section offset")?)
-            .map_err(|_| format!("package section {index} offset does not fit this host"))?;
-        let len = usize::try_from(cur.u64("section length")?)
-            .map_err(|_| format!("package section {index} length does not fit this host"))?;
+        let off = usize::try_from(cur.u64("section offset")?).map_err(|_| {
+            Error::corrupt(format!(
+                "package section {index} offset does not fit this host"
+            ))
+        })?;
+        let len = usize::try_from(cur.u64("section length")?).map_err(|_| {
+            Error::corrupt(format!(
+                "package section {index} length does not fit this host"
+            ))
+        })?;
         let expected_hash = cur.u128("section hash")?;
-        let end = off
-            .checked_add(len)
-            .ok_or_else(|| format!("package section with tag={tag} range overflow"))?;
+        let end = off.checked_add(len).ok_or_else(|| {
+            Error::corrupt(format!("package section with tag={tag} range overflow"))
+        })?;
         if off < data_start || end > body.len() {
-            return Err(format!(
+            return Err(Error::corrupt(format!(
                 "package section with tag={tag} crossed its boundary"
-            ));
+            )));
         }
         entries.push((tag, off, end, expected_hash));
     }
@@ -490,38 +609,38 @@ fn parse_container(raw: &[u8]) -> Result<ParsedPackage<'_>, String> {
     entries.sort_unstable_by_key(|(_, start, _, _)| *start);
     for pair in entries.windows(2) {
         if pair[1].1 < pair[0].2 {
-            return Err(format!(
+            return Err(Error::corrupt(format!(
                 "package sections with tag={} and tag={} overlap",
                 pair[0].0, pair[1].0
-            ));
+            )));
         }
     }
 
     let mut sections = Vec::new();
     sections
         .try_reserve_exact(entries.len())
-        .map_err(|_| "package section index is too large for available memory")?;
+        .map_err(|_| Error::corrupt("package section index is too large for available memory"))?;
     for (tag, start, end, expected_hash) in entries {
         let data = &body[start..end];
         if hash128(data) != expected_hash {
-            return Err(format!(
+            return Err(Error::corrupt(format!(
                 "package section with tag={tag} has wrong hash value"
-            ));
+            )));
         }
         sections.push((tag, data));
     }
     Ok(ParsedPackage { sections })
 }
 
-fn materialize_native_blob_at(dir: &Path, lib: &NativeLibEntry) -> Result<PathBuf, String> {
+fn materialize_native_blob_at(dir: &Path, lib: &NativeLibEntry) -> Result<PathBuf, Error> {
     if hash128(&lib.bytes) != lib.fnv {
-        return Err(format!(
+        return Err(Error::corrupt(format!(
             "package native library `{}` has wrong hash",
             lib.path
-        ));
+        )));
     }
     std::fs::create_dir_all(dir)
-        .map_err(|e| format!("fail to create package native directory: {e}"))?;
+        .map_err(|e| Error::io("cannot create the package native directory", e))?;
     let path = dir.join(format!("{:032x}.so", lib.fnv));
     if std::fs::read(&path)
         .ok()
@@ -530,7 +649,7 @@ fn materialize_native_blob_at(dir: &Path, lib: &NativeLibEntry) -> Result<PathBu
         return Ok(path);
     }
     crate::store::publish_bytes(&path, &lib.bytes)
-        .map_err(|e| format!("fail to publish package native library: {e}"))?;
+        .map_err(|e| Error::io("cannot publish the package native library", e))?;
     Ok(path)
 }
 
@@ -542,19 +661,20 @@ pub(crate) fn write_package(
     rustc_args: &[String],
     module: &crate::vm::ir::Module,
     out: &Path,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     crate::vm::verify::module(module)
-        .map_err(|e| format!("refusing to package invalid bytecode: {e}"))?;
+        .map_err(|e| Error::reject(format!("refusing to package invalid bytecode: {e}")))?;
     // Fixed-base requirement (same contract as L2): without a fixed base the snapshot's embedded
     // addresses are invalid across processes, so no package is produced.
     if !module.frozen.as_ref().is_some_and(|f| f.at_fixed_base()) {
-        return Err(
-            "frozen region is not at a fixed base (concurrent claim/ASLR conflict); retry packing"
-                .into(),
-        );
+        return Err(Error::reject(
+            "frozen region is not at a fixed base (concurrent claim/ASLR conflict); retry packing",
+        ));
     }
     if !module.entry_stub_sites.is_empty() && !module.entry_stubs.at_fixed_base() {
-        return Err("entry stub region is not at a fixed base; retry packing".into());
+        return Err(Error::reject(
+            "entry stub region is not at a fixed base; retry packing",
+        ));
     }
     // Input stamps and the env! list are provenance only. Executable semantics are already frozen
     // into the Module, so running a distributed package must not require the source at its original
@@ -579,7 +699,7 @@ pub(crate) fn write_package(
     let mut mc_entries = Vec::new();
     for p in &module.required_native_libs {
         let data = std::fs::read(&**p)
-            .map_err(|e| format!("failed to read produced library `{p}`: {e}"))?;
+            .map_err(|e| Error::io(format!("cannot read the produced library `{p}`"), e))?;
         let fnv = hash128(&data);
         let role = u8::from(p.starts_with(&ga_prefix));
         if role == 1 && !no_mc && !mc_entries.iter().any(|m: &McEntry| m.fnv == fnv) {
@@ -596,7 +716,7 @@ pub(crate) fn write_package(
         });
     }
     let module_bytes = postcard_bytes(&ModuleMetaRef::from(module))
-        .map_err(|e| format!("fail to serialize module metadata: {e}"))?;
+        .map_err(|e| Error::build(format!("cannot serialize module metadata: {e}")))?;
     let function_bytes = build_function_section(&module.funcs)?;
 
     let mut sections: Vec<(u32, Vec<u8>)> = vec![
@@ -616,8 +736,10 @@ pub(crate) fn write_package(
     // Atomic publish: a reader sees either the previous package or this one, never a half-written
     // file. The output path is the user's, so the staging file lands next to it.
     let dir = out.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir).map_err(|e| format!("fail to create package directory: {e}"))?;
-    crate::store::publish_bytes(out, &buf).map_err(|e| format!("fail to release package: {e}"))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| Error::io("cannot create the package directory", e))?;
+    crate::store::publish_bytes(out, &buf)
+        .map_err(|e| Error::io("cannot release the package", e))?;
     Ok(())
 }
 
@@ -639,7 +761,7 @@ pub struct Package {
 
 impl Package {
     /// Copy and fully validate a package without allocating an Engine or executing guest code.
-    pub fn load(path: impl AsRef<Path>) -> Result<Self, String> {
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, Error> {
         load_package(path.as_ref()).map(|loaded| Self { loaded })
     }
 
@@ -650,16 +772,17 @@ impl Package {
     /// Package verification proves the container and VM bytecode shape, but cannot prove that
     /// embedded native libraries, foreign symbol declarations, and FFI signatures agree with
     /// the host process. The caller must trust those package inputs and ABI declarations.
-    pub unsafe fn instantiate(&self) -> Result<crate::vm::Engine, String> {
+    pub unsafe fn instantiate(&self) -> Result<crate::vm::Engine, Error> {
         let mut module = self.loaded.instantiate()?;
-        module.asm_stub_addrs = crate::lower::asm::try_materialize(&module.asm_sites)?;
-        module.finalize_entry_argv(&[])?;
-        unsafe { crate::vm::Engine::from_module_unchecked(module) }
+        module.asm_stub_addrs =
+            crate::lower::asm::try_materialize(&module.asm_sites).map_err(Error::reject)?;
+        module.finalize_entry_argv(&[]).map_err(Error::reject)?;
+        unsafe { crate::vm::Engine::from_module_unchecked(module) }.map_err(Error::reject)
     }
 }
 
 impl LoadedPackage {
-    pub(crate) fn instantiate(&self) -> Result<crate::vm::ir::Module, String> {
+    pub(crate) fn instantiate(&self) -> Result<crate::vm::ir::Module, Error> {
         let mut module = self.module_meta.instantiate()?;
         let mut covered_hashes = HashSet::with_capacity(self.mc_entries.len());
         let mut images = Vec::with_capacity(self.mc_entries.len());
@@ -670,13 +793,14 @@ impl LoadedPackage {
                 .iter()
                 .find(|lib| lib.role == 1 && lib.fnv == mc.fnv)
                 .ok_or_else(|| {
-                    format!(
+                    Error::corrupt(format!(
                         "validated package lost the native entry for MC image {:032x}",
                         mc.fnv
-                    )
+                    ))
                 })?;
-            let image = crate::vm::mcload::load(&mc.bytes)
-                .map_err(|e| format!("fail to load MC image ({}): {e}", lib.path))?;
+            let image = crate::vm::mcload::load(&mc.bytes).map_err(|e| {
+                Error::reject(format!("cannot load the MC image ({}): {e}", lib.path))
+            })?;
             images.push(image);
         }
         module.mc_images = images;
@@ -716,57 +840,62 @@ pub(crate) fn is_package(path: &Path) -> bool {
 /// Load + full verification (refuse-loud). Input stamps and the compile-time environment are
 /// provenance only; the Module inside has its semantics frozen, so running it no longer requires the
 /// source or the original build environment.
-pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
+pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, Error> {
     // `Package::load` is safe, so its result must not retain the filesystem's mutable inode.
     // Copy once, then validate and lazily decode exclusively from this immutable snapshot.
     let raw: std::sync::Arc<[u8]> = std::fs::read(path)
-        .map_err(|e| format!("fail to read package: {e}"))?
+        .map_err(|e| Error::io("cannot read the package", e))?
         .into();
     let package = parse_container(&raw)?;
     let meta: Meta = postcard::from_bytes(package.section(TAG_META)?)
-        .map_err(|e| format!("fail to resolve META section: {e}"))?;
+        .map_err(|e| Error::corrupt(format!("cannot resolve the META section: {e}")))?;
     let current_target = format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS);
     if meta.target != current_target {
-        return Err(format!(
+        return Err(Error::incompatible(format!(
             "package target mismatch (package={}, current={current_target})",
             meta.target
-        ));
+        )));
     }
     if meta.base_key.is_some() || package.has_section(TAG_BASE) {
-        return Err("package BASE/delta form is not supported by this mirvm".into());
+        return Err(Error::incompatible(
+            "package BASE/delta form is not supported by this mirvm",
+        ));
     }
     let _: Vec<crate::utils::content::FileStamp> =
         postcard::from_bytes(package.section(TAG_STAMPS)?)
-            .map_err(|e| format!("failed to resolve STAMPS section: {e}"))?;
+            .map_err(|e| Error::corrupt(format!("cannot resolve the STAMPS section: {e}")))?;
     let libs: Vec<NativeLibEntry> = postcard::from_bytes(package.section(TAG_NATIVELIBS)?)
-        .map_err(|e| format!("failed to resolve NATIVELIBS section: {e}"))?;
+        .map_err(|e| Error::corrupt(format!("cannot resolve the NATIVELIBS section: {e}")))?;
     let mc_entries: Vec<McEntry> = if package.has_section(TAG_MC) {
         postcard::from_bytes(package.section(TAG_MC)?)
-            .map_err(|e| format!("fail to resolve MC section: {e}"))?
+            .map_err(|e| Error::corrupt(format!("cannot resolve the MC section: {e}")))?
     } else {
         Vec::new()
     };
 
     let reloc: Reloc = postcard::from_bytes(package.section(TAG_RELOC)?)
-        .map_err(|e| format!("failed to resolve RELOC section: {e}"))?;
+        .map_err(|e| Error::corrupt(format!("cannot resolve the RELOC section: {e}")))?;
     if &*reloc.entry != "main" {
-        return Err(format!("unsupported package entry `{}`", reloc.entry));
+        return Err(Error::reject(format!(
+            "unsupported package entry `{}`",
+            reloc.entry
+        )));
     }
     let module_meta: ModuleMeta = postcard::from_bytes(package.section(TAG_MODULE)?)
-        .map_err(|e| format!("fail to resolve MODULE section: {e}"))?;
+        .map_err(|e| Error::corrupt(format!("cannot resolve the MODULE section: {e}")))?;
     let module = module_meta.instantiate()?;
     let function_section = package.section(TAG_FUNCS)?;
     let mapped_offset = function_section.as_ptr() as usize - raw.as_ptr() as usize;
     let function_blobs = parse_function_section(function_section, mapped_offset)?;
     if module.function_names.len() != function_blobs.len() {
-        return Err(format!(
+        return Err(Error::corrupt(format!(
             "MODULE function name table has {} entries, expected {}",
             module.function_names.len(),
             function_blobs.len()
-        ));
+        )));
     }
     crate::vm::verify::module_header_with_count(&module, function_blobs.len())
-        .map_err(|e| format!("MODULE bytecode verification failed: {e}"))?;
+        .map_err(|e| Error::reject(format!("MODULE bytecode verification failed: {e}")))?;
     // Before any MC/native materialization, every function gets full semantic verification.
     // Temporary objects are dropped each round; the run phase still decodes on demand from the owned
     // snapshot instead of keeping every function resident.
@@ -774,17 +903,23 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
     let mut main_catchers = 0;
     for (index, blob) in function_blobs.iter().enumerate() {
         let body: crate::vm::ir::FuncBody = postcard::from_bytes(&raw[blob.start..blob.end])
-            .map_err(|e| format!("function {index} decode failed during verification: {e}"))?;
+            .map_err(|e| {
+                Error::corrupt(format!(
+                    "function {index} decode failed during verification: {e}"
+                ))
+            })?;
         crate::vm::verify::function_with_count(&module, function_blobs.len(), index, &body)
-            .map_err(|e| format!("MODULE bytecode verification failed: {e}"))?;
+            .map_err(|e| Error::reject(format!("MODULE bytecode verification failed: {e}")))?;
         let (boundaries, catchers) = crate::vm::verify::body_main_role_counts(&body);
         main_boundaries += boundaries;
         main_catchers += catchers;
     }
     crate::vm::verify::main_role_counts(&module, main_boundaries, main_catchers)
-        .map_err(|e| format!("MODULE bytecode verification failed: {e}"))?;
+        .map_err(|e| Error::reject(format!("MODULE bytecode verification failed: {e}")))?;
     if reloc.requires_fixed_base {
-        return Err("package v4 cannot require a fixed runtime base".into());
+        return Err(Error::reject(
+            "package v4 cannot require a fixed runtime base",
+        ));
     }
     if module.required_native_libs.len() != libs.len()
         || module
@@ -793,35 +928,39 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
             .zip(&libs)
             .any(|(path, lib)| path.as_ref() != lib.path.as_str())
     {
-        return Err("package NATIVELIBS does not match MODULE native library order".into());
+        return Err(Error::corrupt(
+            "package NATIVELIBS does not match MODULE native library order",
+        ));
     }
     for lib in &libs {
         if lib.role > 1 {
-            return Err(format!(
+            return Err(Error::corrupt(format!(
                 "package native library `{}` has unknown role {}",
                 lib.path, lib.role
-            ));
+            )));
         }
         if hash128(&lib.bytes) != lib.fnv {
-            return Err(format!(
+            return Err(Error::corrupt(format!(
                 "package native library `{}` has wrong hash",
                 lib.path
-            ));
+            )));
         }
     }
 
     let mut covered_hashes = HashSet::with_capacity(mc_entries.len());
     for mc in &mc_entries {
         if hash128(&mc.bytes) != mc.fnv {
-            return Err("package MC entry has wrong content hash".into());
+            return Err(Error::corrupt("package MC entry has wrong content hash"));
         }
         if !covered_hashes.insert(mc.fnv) {
-            return Err("package MC section contains a duplicate image".into());
+            return Err(Error::corrupt(
+                "package MC section contains a duplicate image",
+            ));
         }
         let Some(_) = libs.iter().find(|l| l.role == 1 && l.fnv == mc.fnv) else {
-            return Err(
-                "package MC section has no matching NATIVELIBS entry (missing or extra)".into(),
-            );
+            return Err(Error::corrupt(
+                "package MC section has no matching NATIVELIBS entry (missing or extra)",
+            ));
         };
     }
     let heat_key = format!("{:032x}", hash128(function_section));

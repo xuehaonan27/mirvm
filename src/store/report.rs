@@ -667,16 +667,20 @@ mod tests {
                 family.path()
             );
         }
-        // A store written by an older layout is visible rather than silently dropped.
+        // Nothing in the store may be invisible: an unclaimed child of a class root is reported by
+        // its relative path, and a stranger at the root by its own name (it has no class root to
+        // hang from).
+        std::fs::create_dir_all(root.join("cache/leftover")).unwrap();
+        std::fs::write(root.join("cache/leftover/old.img"), b"old").unwrap();
         std::fs::create_dir_all(root.join("base")).unwrap();
         std::fs::write(root.join("base/stale.img"), b"old").unwrap();
         let report = status(&root);
-        assert!(report.text().contains("base/stale.img") && report.text().contains("unclaimed"));
-        assert!(
-            report
-                .json()
-                .contains("\"unclaimed\":[{\"path\":\"base/stale.img\"")
-        );
+        let text = report.text();
+        let json = report.json();
+        assert!(text.contains("cache/leftover"), "{text}");
+        assert!(text.contains("unclaimed"), "{text}");
+        assert!(json.contains("\"path\":\"cache/leftover\""), "{json}");
+        assert!(json.contains("\"path\":\"base\""), "{json}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
