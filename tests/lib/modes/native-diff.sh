@@ -34,10 +34,11 @@ mode_run() {
     local input name base src calls unavail reason sub_caps variant
     input=$(field_required input)
     name=$CASE_NAME
-    base=$TMP/$name
     src=$DATA_DIR/$input
     calls=$(field calls "")
     case_init
+    # TMP exists only after case_init, and the mode runs under `set -u`.
+    base=$TMP/$name
     apply_env "$(field env "")"
 
     # The native leg's compiler diagnostics are part of the compared stderr: mirvm emits the same

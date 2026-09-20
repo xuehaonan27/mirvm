@@ -78,10 +78,17 @@ case_init() {
 # The dispatcher passes each case's key=value fields as arguments. A mode declares MODE_FIELDS; the
 # dispatcher refuses a field the mode does not declare, so a typo in tests/manifest fails loudly.
 field() { # <key> [default] -> value on stdout, non-zero when absent and no default
-    local key=$1 arg
+    local key=$1 arg value
     for arg in ${CASE_FIELDS[@]+"${CASE_FIELDS[@]}"}; do
         case "$arg" in
-            "$key"=*) printf '%s\n' "${arg#*=}"; return 0 ;;
+            "$key"=*)
+                # %20 is the manifest's encoding for a space. Decoding it here is what makes the
+                # header's rule true for every field, including the patterns a mode greps with; a
+                # field that wants a literal %20 therefore has no way to spell one, which is the
+                # trade the encoding already made for the list fields.
+                value=${arg#*=}
+                printf '%s\n' "${value//%20/ }"
+                return 0 ;;
         esac
     done
     [ $# -ge 2 ] && { printf '%s\n' "$2"; return 0; }
