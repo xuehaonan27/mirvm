@@ -1,4 +1,4 @@
-# tests/projects/ — real Cargo projects under differential
+# tests/data/projects/ — real Cargo projects under differential
 
 This directory holds **real-world Cargo projects** (the kind that produce a binary), registered in
 `tests/manifest` with `mode=diff`. `make gate` compares `mirvm run <project>`
@@ -40,7 +40,7 @@ the differential keeps comparing the same code; only the storage changed.
 
 ## Adding or bumping a project
 
-1. Add it as a submodule under `tests/projects/<name>`, pinned to a commit whose output for a fixed
+1. Add it as a submodule under `tests/data/projects/<name>`, pinned to a commit whose output for a fixed
    input is byte-deterministic. A project that is nondeterministic, needs the network at run time,
    or depends on an absolute machine-local prefix is not accepted; text normalization must never
    hide nondeterminism.
