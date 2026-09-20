@@ -36,7 +36,7 @@ pub(crate) fn pack_driver(
         t_start,
         timing: PhaseTiming::default(),
         rustc_args: rustc_args.clone(),
-        stack: crate::baseimage::ImageStack::empty(),
+        stack: crate::lower::image::ImageStack::empty(),
         split_image: None,
         session_fp: None,
         deps_image_loaded: false,
@@ -183,7 +183,7 @@ struct MirvmCallbacks {
     rustc_args: Vec<String>,
     /// Image stack: checked against the lowering fingerprint in `after_analysis`, then consulted
     /// by lower for the union; absorbed at the end of `run_driver`.
-    stack: crate::baseimage::ImageStack,
+    stack: crate::lower::image::ImageStack,
     /// Split image produced by `lower_program` when the deps image is enabled and a base image is
     /// present; pushed onto the stack and absorbed at the end of `run_driver`.
     split_image: Option<crate::lower::SplitImage>,
@@ -297,7 +297,7 @@ impl Callbacks for MirvmCallbacks {
             );
             self.session_fp = Some(fp);
             if !self.stack.fp_matches(fp) {
-                self.stack = crate::baseimage::ImageStack::empty();
+                self.stack = crate::lower::image::ImageStack::empty();
             }
             // The callback performs only the loading phase; execution must wait until tcx.finish,
             // diagnostic finalization and compiler drop have all completed.
@@ -651,7 +651,7 @@ pub(crate) fn run_driver(
     // stack, which self-heals onto the full cold path). The lowering fingerprint
     // (ub/overflow/contract checks) can only be verified inside the session; after_analysis does.
     let mut stack = if dump_mir {
-        crate::baseimage::ImageStack::empty()
+        crate::lower::image::ImageStack::empty()
     } else {
         crate::baseimage::ensure()
     };
@@ -694,7 +694,7 @@ pub(crate) fn run_driver(
             // the recipe to overwrite stale addresses.
             module.asm_stub_addrs = crate::lower::asm::materialize(&module.asm_sites);
         } else {
-            crate::baseimage::absorb_stack(&mut module, stack); // asm merged and re-materialized
+            stack.absorb_into(&mut module); // asm merged and re-materialized
         }
         if let Some(guest) = &guest_process
             && let Err(message) = guest.enter()
@@ -776,9 +776,12 @@ pub(crate) fn run_driver(
         // the merged module). An empty stack (no image) skips it: the module's asm_stub_addrs were
         // already materialized inside the lower session. The split artifact was written to disk and
         // pushed onto the stack in after_analysis, so it is absorbed here like any other layer.
-        let stack = std::mem::replace(&mut callbacks.stack, crate::baseimage::ImageStack::empty());
+        let stack = std::mem::replace(
+            &mut callbacks.stack,
+            crate::lower::image::ImageStack::empty(),
+        );
         if !stack.is_empty() {
-            crate::baseimage::absorb_stack(&mut module, stack);
+            stack.absorb_into(&mut module);
         }
         if let Some(guest) = &guest_process
             && let Err(message) = guest.enter()

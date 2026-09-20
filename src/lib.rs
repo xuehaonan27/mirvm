@@ -38,6 +38,7 @@ pub mod cli;
 pub mod depsimage;
 pub(crate) mod diagnostics;
 pub(crate) mod elfsym;
+pub mod inputs;
 pub mod ircache;
 pub mod lower;
 pub(crate) mod native_archive;

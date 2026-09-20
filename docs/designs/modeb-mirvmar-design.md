@@ -69,8 +69,8 @@ tail       whole_hash   u128 fnv1a (the whole file except this field)
 An unknown tag is skipped for forward compatibility; a missing required tag is a rejection.
 
 - **META** (required) — postcard: arguments, envs, base key, target triple, whether BASE is included.
-- **STAMPS** (required) — postcard: `Vec<(path, size, mtime_ns)>`, a build-provenance record only,
-  never a run-time permission input.
+- **STAMPS** (required) — postcard: `Vec<FileStamp>` (path, size, mtime_ns, content digest), a
+  build-provenance record only, never a run-time permission input.
 - **BASE** (reserved) — the writer produces none, and the loader rejects the BASE/delta shape; a
   reserved tag is never treated as supported.
 - **MODULE** (required) — postcard module metadata: exports, the frozen snapshot, `link_fn_addrs`,
