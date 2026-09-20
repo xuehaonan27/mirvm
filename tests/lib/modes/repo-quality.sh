@@ -59,6 +59,36 @@ check_no_anyhow() {
     fi
 }
 
+# Every failure code is registered once, in the `diag_codes!` block of the enum that owns it, and a
+# code is what a structured consumer matches on: two variants sharing one identity would make that
+# match ambiguous while still looking registered.
+check_error_codes() {
+    local codes dupes
+    codes=$(grep -rh -A100 'diag_codes! {' src --include='*.rs' \
+        | grep -oE '\=> "[a-z0-9_.]+"' | sed 's/=> "//; s/"//' | sort)
+    dupes=$(printf '%s\n' "$codes" | uniq -d)
+    if [ -n "$dupes" ]; then
+        echo "error codes registered more than once under src/:" >&2
+        printf '%s\n' "$dupes" >&2
+        return 1
+    fi
+}
+
+# src/diag is the vocabulary every tree emits through, and the TSan harness compiles it
+# source-for-source next to the engine: it must not acquire a dependency. `diag_codes!` is the one
+# exception and it needs none in this module — the macro expands to `serde_json` in the caller, and
+# the harness build is what proves a fully-qualified use could not have slipped in.
+check_diag_purity() {
+    local bad
+    bad=$(grep -rnE '^[[:space:]]*(pub(\([a-z]+\))? )?use (serde|serde_json|thiserror|toml|semver|postcard|libc|blake3|memmap2|libffi|pubgrub|ureq|flate2|tar|log)[^a-zA-Z_]' \
+        src/diag --include='*.rs')
+    if [ -n "$bad" ]; then
+        echo "src/diag must stay std-only (the TSan harness shares it source-for-source):" >&2
+        printf '%s\n' "$bad" >&2
+        return 1
+    fi
+}
+
 mode_run() {
     case_init --no-product
     run_check "cargo fmt" "${CARGO:-cargo}" fmt --all -- --check
@@ -67,5 +97,7 @@ mode_run() {
     run_check "options register" check_option_register
     run_check "store families" check_store_families
     run_check "no anyhow" check_no_anyhow
+    run_check "error codes" check_error_codes
+    run_check "diag purity" check_diag_purity
     print_section_report
 }
