@@ -481,72 +481,40 @@ version = "0.2.0"
     ///
     /// This is the precondition for mirvm writing one into a project at all: the file it leaves
     /// behind has to be the file cargo would have left, byte for byte, or the two tools fight over
-    /// the same path. The samples are real cargo output covering a registry graph, workspaces and
-    /// path packages.
+    /// the same path. The samples are real cargo output: a registry graph, workspaces, path
+    /// packages, a git-source row, and `[[patch.unused]]` with a path, a git and a sparse-registry
+    /// source.
+    ///
+    /// No sample carries a checksum inside `[[patch.unused]]`, and none can: cargo records a
+    /// checksum only for packages that are in the resolve, while an unused patch is by definition
+    /// absent from it. Probed both ways — patching crates-io with a package from a fixture registry,
+    /// and then with that same package also present as a direct dependency, in which case cargo
+    /// omits the unused entry altogether. The serializer keeps the field because cargo's schema has
+    /// it.
+    /// One line per sample so the list stays reviewable; rustfmt would expand every `include_str!`
+    /// to four lines otherwise.
+    #[rustfmt::skip]
+    const CARGO_LOCK_SAMPLES: &[(&str, &str)] = &[
+        ("c-unwind-contract", include_str!("../../tests/data/fixtures/c-unwind-contract/Cargo.lock")),
+        ("cargoless/doctest-contract", include_str!("../../tests/data/fixtures/cargoless/doctest-contract/Cargo.lock")),
+        ("cargoless/path-build-script", include_str!("../../tests/data/fixtures/cargoless/path-build-script/Cargo.lock")),
+        ("cargoless/path-proc-macro", include_str!("../../tests/data/fixtures/cargoless/path-proc-macro/Cargo.lock")),
+        ("cargoless/proc-macro-test-contract", include_str!("../../tests/data/fixtures/cargoless/proc-macro-test-contract/Cargo.lock")),
+        ("cargoless/project", include_str!("../../tests/data/fixtures/cargoless/project/Cargo.lock")),
+        ("cargoless/test-contract", include_str!("../../tests/data/fixtures/cargoless/test-contract/Cargo.lock")),
+        ("cargoless/two-bin-workspace", include_str!("../../tests/data/fixtures/cargoless/two-bin-workspace/Cargo.lock")),
+        ("cargoless/workspace-contract", include_str!("../../tests/data/fixtures/cargoless/workspace-contract/Cargo.lock")),
+        ("cargoless/workspace-legacy-contract", include_str!("../../tests/data/fixtures/cargoless/workspace-legacy-contract/Cargo.lock")),
+        ("lock-shapes/git-source", include_str!("../../tests/data/fixtures/lock-shapes/git-source/Cargo.lock")),
+        ("lock-shapes/patch-unused-git", include_str!("../../tests/data/fixtures/lock-shapes/patch-unused-git/Cargo.lock")),
+        ("lock-shapes/patch-unused-path", include_str!("../../tests/data/fixtures/lock-shapes/patch-unused-path/Cargo.lock")),
+        ("lock-shapes/patch-unused-sparse-registry", include_str!("../../tests/data/fixtures/lock-shapes/patch-unused-sparse-registry/Cargo.lock")),
+        ("tsan", include_str!("../../tests/data/fixtures/tsan/Cargo.lock")),
+    ];
+
     #[test]
     fn cargo_written_locks_round_trip_byte_for_byte() {
-        for (name, text) in [
-            (
-                "c-unwind-contract",
-                include_str!("../../tests/data/fixtures/c-unwind-contract/Cargo.lock"),
-            ),
-            (
-                "cargoless/doctest-contract",
-                include_str!("../../tests/data/fixtures/cargoless/doctest-contract/Cargo.lock"),
-            ),
-            (
-                "cargoless/path-build-script",
-                include_str!("../../tests/data/fixtures/cargoless/path-build-script/Cargo.lock"),
-            ),
-            (
-                "cargoless/path-proc-macro",
-                include_str!("../../tests/data/fixtures/cargoless/path-proc-macro/Cargo.lock"),
-            ),
-            (
-                "cargoless/proc-macro-test-contract",
-                include_str!(
-                    "../../tests/data/fixtures/cargoless/proc-macro-test-contract/Cargo.lock"
-                ),
-            ),
-            (
-                "cargoless/project",
-                include_str!("../../tests/data/fixtures/cargoless/project/Cargo.lock"),
-            ),
-            (
-                "cargoless/test-contract",
-                include_str!("../../tests/data/fixtures/cargoless/test-contract/Cargo.lock"),
-            ),
-            (
-                "cargoless/two-bin-workspace",
-                include_str!("../../tests/data/fixtures/cargoless/two-bin-workspace/Cargo.lock"),
-            ),
-            (
-                "cargoless/workspace-contract",
-                include_str!("../../tests/data/fixtures/cargoless/workspace-contract/Cargo.lock"),
-            ),
-            (
-                "cargoless/workspace-legacy-contract",
-                include_str!(
-                    "../../tests/data/fixtures/cargoless/workspace-legacy-contract/Cargo.lock"
-                ),
-            ),
-            (
-                "lock-shapes/git-source",
-                include_str!("../../tests/data/fixtures/lock-shapes/git-source/Cargo.lock"),
-            ),
-            (
-                "lock-shapes/patch-unused-git",
-                include_str!("../../tests/data/fixtures/lock-shapes/patch-unused-git/Cargo.lock"),
-            ),
-            (
-                "lock-shapes/patch-unused-path",
-                include_str!("../../tests/data/fixtures/lock-shapes/patch-unused-path/Cargo.lock"),
-            ),
-            (
-                "tsan",
-                include_str!("../../tests/data/fixtures/tsan/Cargo.lock"),
-            ),
-        ] {
+        for &(name, text) in CARGO_LOCK_SAMPLES {
             let parsed = Lockfile::parse(text).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(parsed.serialize(), text, "{name} does not round-trip");
         }
