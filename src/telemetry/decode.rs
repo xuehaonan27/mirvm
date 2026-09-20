@@ -1,7 +1,6 @@
 //! Streaming verifier and decoder for committed v0 event chunks.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 use std::fs::File;
 use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -69,7 +68,9 @@ pub(crate) struct DecodeOutcome {
     pub(crate) report: FileReport,
 }
 
-#[derive(Debug)]
+/// Why one event stream could not be decoded, with the path that identifies it.
+#[derive(Debug, thiserror::Error)]
+#[error("{}: {message}", path.display())]
 pub(crate) struct DecodeError {
     path: PathBuf,
     message: String,
@@ -83,14 +84,6 @@ impl DecodeError {
         }
     }
 }
-
-impl fmt::Display for DecodeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.path.display(), self.message)
-    }
-}
-
-impl std::error::Error for DecodeError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct EventContext {

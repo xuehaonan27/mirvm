@@ -3,8 +3,6 @@
 //! Wire bytes are always encoded explicitly as little endian. Rust struct layout is
 //! deliberately not part of the file contract.
 
-use std::fmt;
-
 pub(crate) const FORMAT_MAJOR: u16 = 0;
 pub(crate) const FORMAT_MINOR: u16 = 0;
 pub(crate) const SCHEMA_MAJOR: u16 = 0;
@@ -48,7 +46,9 @@ pub(crate) const STATUS_ERRNO_VALID: u64 = 1 << 32;
 const STATUS_ERRNO_MASK: u64 = u32::MAX as u64;
 const STATUS_KNOWN_MASK: u64 = STATUS_ERRNO_MASK | STATUS_ERRNO_VALID;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A record that does not match the v0 wire contract. The message names the field and the reason.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("{0}")]
 pub(crate) struct WireError(String);
 
 impl WireError {
@@ -56,14 +56,6 @@ impl WireError {
         Self(message.into())
     }
 }
-
-impl fmt::Display for WireError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for WireError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Control {
