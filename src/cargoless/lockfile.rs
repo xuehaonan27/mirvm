@@ -476,4 +476,67 @@ version = "0.2.0"
                 .all(|p| { p.source.as_ref().is_none_or(|s| s.starts_with("registry+")) })
         );
     }
+
+    /// A `Cargo.lock` cargo wrote must survive mirvm's parse and serialize unchanged.
+    ///
+    /// This is the precondition for mirvm writing one into a project at all: the file it leaves
+    /// behind has to be the file cargo would have left, byte for byte, or the two tools fight over
+    /// the same path. The samples are real cargo output covering a registry graph, workspaces and
+    /// path packages.
+    #[test]
+    fn cargo_written_locks_round_trip_byte_for_byte() {
+        for (name, text) in [
+            (
+                "c-unwind-contract",
+                include_str!("../../tests/data/fixtures/c-unwind-contract/Cargo.lock"),
+            ),
+            (
+                "cargoless/doctest-contract",
+                include_str!("../../tests/data/fixtures/cargoless/doctest-contract/Cargo.lock"),
+            ),
+            (
+                "cargoless/path-build-script",
+                include_str!("../../tests/data/fixtures/cargoless/path-build-script/Cargo.lock"),
+            ),
+            (
+                "cargoless/path-proc-macro",
+                include_str!("../../tests/data/fixtures/cargoless/path-proc-macro/Cargo.lock"),
+            ),
+            (
+                "cargoless/proc-macro-test-contract",
+                include_str!(
+                    "../../tests/data/fixtures/cargoless/proc-macro-test-contract/Cargo.lock"
+                ),
+            ),
+            (
+                "cargoless/project",
+                include_str!("../../tests/data/fixtures/cargoless/project/Cargo.lock"),
+            ),
+            (
+                "cargoless/test-contract",
+                include_str!("../../tests/data/fixtures/cargoless/test-contract/Cargo.lock"),
+            ),
+            (
+                "cargoless/two-bin-workspace",
+                include_str!("../../tests/data/fixtures/cargoless/two-bin-workspace/Cargo.lock"),
+            ),
+            (
+                "cargoless/workspace-contract",
+                include_str!("../../tests/data/fixtures/cargoless/workspace-contract/Cargo.lock"),
+            ),
+            (
+                "cargoless/workspace-legacy-contract",
+                include_str!(
+                    "../../tests/data/fixtures/cargoless/workspace-legacy-contract/Cargo.lock"
+                ),
+            ),
+            (
+                "tsan",
+                include_str!("../../tests/data/fixtures/tsan/Cargo.lock"),
+            ),
+        ] {
+            let parsed = Lockfile::parse(text).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(parsed.serialize(), text, "{name} does not round-trip");
+        }
+    }
 }
