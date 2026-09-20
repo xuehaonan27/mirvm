@@ -388,7 +388,7 @@ impl Callbacks for MirvmCallbacks {
 /// Engine entry: by default runs the main startup chain; `--vm-call 'name(args…)'` calls an
 /// exported function directly (gate entry); `--vm-stats` prints Trap-debt statistics.
 /// `--stack-size` / `MIRVM_STACK_SIZE` parse a byte count with an optional k/m/g suffix.
-pub(super) fn parse_stack_size(s: &str) -> Result<usize, String> {
+pub(super) fn parse_stack_size(s: &str) -> Result<usize, crate::error::Error> {
     let t = s.trim();
     let (num, mult): (&str, usize) = match t.as_bytes().last() {
         Some(b'k' | b'K') => (&t[..t.len() - 1], 1 << 10),
@@ -396,16 +396,20 @@ pub(super) fn parse_stack_size(s: &str) -> Result<usize, String> {
         Some(b'g' | b'G') => (&t[..t.len() - 1], 1 << 30),
         _ => (t, 1),
     };
-    let n = num
-        .trim()
-        .parse::<usize>()
-        .map_err(|_| format!("mirvm: cannot parse stack size `{s}` (e.g. 8m, 1g, 67108864)"))?;
+    let n = num.trim().parse::<usize>().map_err(|_| {
+        // The register scopes `--stack-size` to `run`, so that is the component this names.
+        crate::error::Error::usage(
+            crate::diag::Component::Run,
+            format!("cannot parse stack size `{s}` (e.g. 8m, 1g, 67108864)"),
+        )
+    })?;
     let bytes = n.saturating_mul(mult);
     // The lower bound protects the engine's own prologue plus margin; the upper bound catches
     // typos (even a virtual reservation should not ask for 128T).
     if !(1 << 20..=1 << 40).contains(&bytes) {
-        return Err(format!(
-            "mirvm: stack size {s} is outside the [1m, 1t] valid range"
+        return Err(crate::error::Error::usage(
+            crate::diag::Component::Run,
+            format!("stack size {s} is outside the [1m, 1t] valid range"),
         ));
     }
     Ok(bytes)
@@ -573,9 +577,9 @@ fn on_guest_stack<R: Send + 'static>(
     f: impl FnOnce() -> R + Send + 'static,
 ) -> Result<R, GuestStackStartError> {
     let reserve = match crate::options::get().stack_size() {
-        Some(s) => parse_stack_size(&s).map_err(|message| GuestStackStartError {
-            message,
-            exit_code: 2,
+        Some(s) => parse_stack_size(&s).map_err(|error| GuestStackStartError {
+            message: error.to_string(),
+            exit_code: i32::from(error.exit_code()),
         })?,
         None => 1 << 30,
     };
@@ -699,9 +703,9 @@ pub(crate) fn run_driver(
             stack.absorb_into(&mut module); // asm merged and re-materialized
         }
         if let Some(guest) = &guest_process
-            && let Err(message) = guest.enter()
+            && let Err(error) = guest.enter()
         {
-            diagnostics::control(format_args!("{message}"));
+            crate::diag::emit(&crate::error::Error::from(error));
             if let Err(error) = diagnostic_router.finish() {
                 diagnostics::control(format_args!(
                     "mirvm capture: cannot finish diagnostics stream: {error}"
@@ -783,9 +787,9 @@ pub(crate) fn run_driver(
             stack.absorb_into(&mut module);
         }
         if let Some(guest) = &guest_process
-            && let Err(message) = guest.enter()
+            && let Err(error) = guest.enter()
         {
-            diagnostics::control(format_args!("{message}"));
+            crate::diag::emit(&crate::error::Error::from(error));
             if let Err(error) = diagnostic_router.finish() {
                 diagnostics::control(format_args!(
                     "mirvm capture: cannot finish diagnostics stream: {error}"

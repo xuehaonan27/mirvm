@@ -56,6 +56,7 @@ pub enum Component {
     Store,
     Sysroot,
     Image,
+    Os,
     Syscall,
 }
 
@@ -83,6 +84,7 @@ impl Component {
             Component::Store => "store",
             Component::Sysroot => "sysroot",
             Component::Image => "image",
+            Component::Os => "os",
             Component::Syscall => "syscall",
         }
     }
@@ -142,7 +144,8 @@ impl Kind {
 /// fields — this module splices it verbatim and never inspects it.
 pub trait Diagnostic: fmt::Display {
     fn severity(&self) -> Severity;
-    /// `None` when no component owns the line (an embedded use with no command scope).
+    /// The component this line belongs to, or `None` to inherit the process scope (the command the
+    /// user ran). A failure raised inside a command does not have to name the command.
     fn component(&self) -> Option<Component>;
     /// The stable failure identity; `None` for events and for the unregistered tail.
     fn code(&self) -> Option<&'static str> {
@@ -291,11 +294,12 @@ pub(crate) fn render_for_test(diagnostic: &dyn Diagnostic) -> String {
     text(diagnostic)
 }
 
-/// `mirvm[component]: severity: message`, or `mirvm: severity: message` with no component.
+/// `mirvm[component]: severity: message`, or `mirvm: severity: message` when the line names no
+/// component and no command scope is set (an embedded use, or a failure raised before dispatch).
 fn text(diagnostic: &dyn Diagnostic) -> String {
     let mut line = String::with_capacity(128);
     line.push_str("mirvm");
-    if let Some(component) = diagnostic.component() {
+    if let Some(component) = diagnostic.component().or_else(current) {
         line.push('[');
         line.push_str(component.name());
         line.push(']');
@@ -388,14 +392,20 @@ macro_rules! diag_direct {
 /// reported through `causes` instead.
 #[macro_export]
 macro_rules! diag_codes {
+    ($ty:ty => { $( $variant:ident => $code:literal $($kind:ident)? ),* $(,)? }) => {
+        $crate::diag_codes! { $ty: @scope inherit => { $( $variant => $code $($kind)? ),* } }
+    };
     ($ty:ty: $component:ident => { $( $variant:ident => $code:literal $($kind:ident)? ),* $(,)? }) => {
+        $crate::diag_codes! { $ty: @scope fixed $component => { $( $variant => $code $($kind)? ),* } }
+    };
+    ($ty:ty: @scope $scope:ident $($component:ident)? => { $( $variant:ident => $code:literal $($kind:ident)? ),* $(,)? }) => {
         impl $crate::diag::Diagnostic for $ty {
             fn severity(&self) -> $crate::diag::Severity {
                 $crate::diag::Severity::Error
             }
 
             fn component(&self) -> ::core::option::Option<$crate::diag::Component> {
-                ::core::option::Option::Some($crate::diag::Component::$component)
+                $crate::diag_codes!(@component $scope $($component)?)
             }
 
             fn code(&self) -> ::core::option::Option<&'static str> {
@@ -426,6 +436,10 @@ macro_rules! diag_codes {
             }
         }
     };
+    (@component fixed $component:ident) => {
+        ::core::option::Option::Some($crate::diag::Component::$component)
+    };
+    (@component inherit) => { ::core::option::Option::None };
     (@kind) => { $crate::diag::Kind::Failure };
     (@kind $kind:ident) => { $crate::diag::Kind::$kind };
 }

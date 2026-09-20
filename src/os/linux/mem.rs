@@ -71,10 +71,14 @@ pub fn map_fixed_preferred(addr: usize, size: usize, prot: Prot) -> Option<*mut 
 
 /// Thin wrapper of `mprotect`.
 /// Codearena fills the W^X shape of the sealed RX.
-pub fn protect(addr: *mut u8, size: usize, prot: Prot) -> Result<(), String> {
+pub fn protect(addr: *mut u8, size: usize, prot: Prot) -> Result<(), crate::os::Error> {
     let rc = unsafe { libc::mprotect(addr as *mut libc::c_void, size, prot.0) };
     if rc != 0 {
-        return Err(format!("mprotect({addr:p}, {size:#x}) failed rc={rc}"));
+        return Err(crate::os::Error::Mprotect {
+            addr: addr as usize,
+            size,
+            rc,
+        });
     }
     Ok(())
 }

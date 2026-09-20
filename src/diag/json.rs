@@ -113,7 +113,7 @@ pub(crate) fn literal(value: &str) -> String {
 pub(super) fn line(diagnostic: &dyn Diagnostic) -> String {
     let mut out = Writer::document();
     out.string("severity", diagnostic.severity().name());
-    match diagnostic.component() {
+    match diagnostic.component().or_else(super::current) {
         Some(component) => out.string("component", component.name()),
         None => out.null("component"),
     };

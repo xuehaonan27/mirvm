@@ -190,6 +190,12 @@ impl From<crate::image::Error> for Error {
     }
 }
 
+impl From<crate::cli::Error> for Error {
+    fn from(error: crate::cli::Error) -> Self {
+        Error::Owned(Box::new(error))
+    }
+}
+
 impl From<crate::cargo_shim::Error> for Error {
     fn from(error: crate::cargo_shim::Error) -> Self {
         Error::Owned(Box::new(error))

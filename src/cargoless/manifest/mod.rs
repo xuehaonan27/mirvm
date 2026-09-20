@@ -855,7 +855,8 @@ impl PackageManifest {
                 bin_path: body_path,
             },
             manifest_text,
-        )?;
+        )
+        .map_err(|error| error.to_string())?;
         Self::parse(&effective, root)
     }
 
