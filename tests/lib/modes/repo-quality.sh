@@ -43,6 +43,22 @@ check_store_families() {
     fi
 }
 
+# anyhow is banned outright: every failure class is a typed thiserror enum, because the loss of a
+# failure's identity is exactly what an unstructured error string costs a machine consumer. The
+# pattern matches uses, not the word: a lockfile fixture that merely names the crate is fine.
+check_no_anyhow() {
+    local bad
+    bad=$(
+        grep -rnE 'anyhow(::|[[:space:]]*=[[:space:]]*")' src build.rs --include='*.rs'
+        grep -nE '^anyhow[[:space:]]*=' Cargo.toml
+    )
+    if [ -n "$bad" ]; then
+        echo "anyhow is banned; declare a thiserror variant instead:" >&2
+        printf '%s\n' "$bad" >&2
+        return 1
+    fi
+}
+
 mode_run() {
     case_init --no-product
     run_check "cargo fmt" "${CARGO:-cargo}" fmt --all -- --check
@@ -50,5 +66,6 @@ mode_run() {
     run_check "cargo test" "${CARGO:-cargo}" test --locked --all-features
     run_check "options register" check_option_register
     run_check "store families" check_store_families
+    run_check "no anyhow" check_no_anyhow
     print_section_report
 }

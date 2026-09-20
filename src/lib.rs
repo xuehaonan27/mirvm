@@ -33,6 +33,7 @@ pub(crate) mod arch;
 pub mod cargo_shim;
 pub(crate) mod cargoless;
 pub mod cli;
+pub(crate) mod diag;
 pub mod image;
 pub mod inputs;
 pub mod lower;

@@ -535,7 +535,6 @@ dependencies = [
 name = "mirvm"
 version = "0.0.1"
 dependencies = [
- "anyhow",
  "blake3",
  "cranelift-codegen",
  "cranelift-frontend",
@@ -547,7 +546,6 @@ dependencies = [
  "libc",
  "libffi",
  "libmimalloc-sys",
- "log",
  "memmap2",
  "postcard",
  "pubgrub",
@@ -556,6 +554,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tar",
+ "thiserror",
  "toml",
  "ureq",
  "version-ranges",

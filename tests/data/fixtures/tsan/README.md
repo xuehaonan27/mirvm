@@ -44,11 +44,11 @@ tests/data/fixtures/tsan/
                          frame and memory helpers (originally spikes 3 and 4)
 ```
 
-Crate-root modules named `arch`, `native`, `options`, `os`, `store`, `telemetry`, `utils`, `vm`
-are **not** a style choice: `src/vm` is compiled verbatim and refers to exactly those paths.
-`crate::telemetry` is the source-shared adapter, `crate::native` carries only the pure-Rust
-symbol-table reader, and the rustc-dependent leaves (`lower`, and with them `sysroot`) are stubbed
-in `src/product_adapters.rs`.
+Crate-root modules named `arch`, `diag`, `native`, `options`, `os`, `store`, `telemetry`, `utils`,
+`vm` are **not** a style choice: `src/vm` is compiled verbatim and refers to exactly those paths.
+`crate::telemetry` is the source-shared adapter, `crate::diag` is the std-only diagnostic
+vocabulary, `crate::native` carries only the pure-Rust symbol-table reader, and the rustc-dependent
+leaves (`lower`, and with them `sysroot`) are stubbed in `src/product_adapters.rs`.
 
 ## Cases
 

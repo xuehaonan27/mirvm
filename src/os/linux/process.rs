@@ -9,8 +9,6 @@
 //! do so later.
 //! Address values are u64 encoded (leaf type discipline).
 
-use crate::mirvm_log;
-
 /// Safe wrapper of `getenv(3)`.
 /// `name_addr`: guest side NUL-terminated string's  true address.
 /// Returns true address, or 0 on failure.
@@ -91,9 +89,12 @@ pub fn memcmp_addr() -> *const u8 {
 pub extern "C" fn mirvm_syscall_dispatch(nr: i64, args: *const u64) -> i64 {
     let args: &[u64] = unsafe { std::slice::from_raw_parts(args, 6) };
     if crate::options::get().syscall_trace {
-        mirvm_log!(
-            stderr,
-            "mirvm-syscall: nr={nr} a1={:#x} a2={:#x} a3={:#x} a4={:#x} a5={:#x} a6={:#x}",
+        // Direct sink: this is an `extern "C"` entry on the guest syscall path, where taking the
+        // capture tee's lock is unsafe. The trace is a dev knob, so its absence from a capture's
+        // `diagnostics.log` is intentional.
+        crate::diag_direct!(
+            Syscall,
+            "nr={nr} a1={:#x} a2={:#x} a3={:#x} a4={:#x} a5={:#x} a6={:#x}",
             args[0],
             args[1],
             args[2],

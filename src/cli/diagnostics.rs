@@ -94,6 +94,9 @@ pub(crate) struct DiagnosticRouter {
 
 impl DiagnosticRouter {
     pub(crate) fn start(directory: Option<&Path>, allow_attach: bool) -> io::Result<Self> {
+        // The emitter routes through this module's appender from here on; installing it is
+        // idempotent, and with no router active the appender is a no-op.
+        crate::diag::install_tee(tee_control);
         let Some(directory) = directory else {
             return Ok(Self {
                 active: false,
@@ -283,10 +286,7 @@ pub(crate) fn control(arguments: fmt::Arguments<'_>) {
         .expect("formatting into a byte vector cannot fail");
     bytes.push(b'\n');
 
-    io::stderr()
-        .write_all(&bytes)
-        .expect("failed printing to stderr");
-    append(DiagnosticSource::Control, &bytes);
+    crate::diag::write(&bytes);
 }
 
 pub(crate) fn control_raw(arguments: fmt::Arguments<'_>) {
@@ -294,10 +294,13 @@ pub(crate) fn control_raw(arguments: fmt::Arguments<'_>) {
     bytes
         .write_fmt(arguments)
         .expect("formatting into a byte vector cannot fail");
-    io::stderr()
-        .write_all(&bytes)
-        .expect("failed printing to stderr");
-    append(DiagnosticSource::Control, &bytes);
+    crate::diag::write(&bytes);
+}
+
+/// The capture tee `diag` calls for every routed line: the byte-level entry the router owns, so the
+/// emitter itself never has to know a capture exists.
+fn tee_control(bytes: &[u8]) {
+    append(DiagnosticSource::Control, bytes);
 }
 
 fn append(source: DiagnosticSource, bytes: &[u8]) {

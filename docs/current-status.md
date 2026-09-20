@@ -186,7 +186,11 @@ product covering all of Rust.
 5. **Diagnostics.** The default `run` keeps compiler, frontend, lower, MIRVM control and guest stderr
    physically merged on fd2 in unchanged byte order; capture tees compiler/control byte-for-byte into
    `diagnostics.log` from the command boundary, and guest fd2 enters neither the router nor the event
-   ring. Perf capture reuses that boundary.
+   ring. Perf capture reuses that boundary. MIRVM-owned lines go through `src/diag`, which renders
+   `mirvm[component]: severity: message` (one JSON object per line under `MIRVM_OUTPUT=json`) and
+   owns the two sinks: routed (fd2 plus the capture tee) and direct (fd2 alone, for signal-adjacent
+   and teardown paths where the tee lock would deadlock). Guest fd1/fd2, the rustc emitter and the
+   cargo-compatibility lines never pass through it. Remaining conversions are T13.
 6. **Product capability.** Direct archive semantic verification needs a new offset-based read-only
    representation before a format freeze can be reviewed. OS-level sandboxing is deliberately paused.
    Remaining stage boundaries and acceptance criteria are in `open-issues.md`.
