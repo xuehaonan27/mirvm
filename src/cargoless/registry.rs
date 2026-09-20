@@ -113,7 +113,7 @@ impl Registry {
     pub fn open() -> Result<Self, RErr> {
         let current = std::env::current_dir().map_err(|error| error.to_string())?;
         Self::open_for_at(
-            crate::options::get().data_root().join("registry"),
+            crate::store::REGISTRY.dir(),
             crate::options::get().offline(),
             &current,
         )
@@ -121,7 +121,7 @@ impl Registry {
 
     pub fn open_for(project: &Path) -> Result<Self, RErr> {
         Self::open_for_at(
-            crate::options::get().data_root().join("registry"),
+            crate::store::REGISTRY.dir(),
             crate::options::get().offline(),
             project,
         )

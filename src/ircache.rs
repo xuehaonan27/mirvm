@@ -42,10 +42,7 @@ fn entry_path(rustc_args: &[String]) -> PathBuf {
     for arg in rustc_args {
         key.part(arg);
     }
-    crate::options::get()
-        .cache_root()
-        .join("ir")
-        .join(format!("{}.bin", key.digest()))
+    crate::store::IR.dir().join(format!("{}.bin", key.digest()))
 }
 
 /// Header triple equality: build id (stale across builds) + full args replay (hash-collision proof) +

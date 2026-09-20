@@ -162,7 +162,7 @@ fn cargo_accepts_lock(
     let toolchain_root = std::path::PathBuf::from(crate::options::build::DEFAULT_SYSROOT);
     let cargo = toolchain_root.join("bin/cargo");
     let rustc = toolchain_root.join("bin/rustc");
-    let target = crate::options::get().build_root().join("target/native");
+    let target = crate::store::TARGET.dir().join("native");
     let run = |extra: &[&str]| {
         let mut cmd = std::process::Command::new(&cargo);
         cmd.current_dir(&dir)

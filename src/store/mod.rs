@@ -27,7 +27,6 @@
 pub(crate) mod entry;
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The lifetime of a sub-root: what decides whether it may be deleted.
@@ -114,9 +113,15 @@ impl Family {
         )
     }
 
-    /// The family directory under the store root.
-    pub(crate) fn dir(&self, root: &Path) -> PathBuf {
+    /// The family directory in `root`.
+    pub(crate) fn dir_in(&self, root: &Path) -> PathBuf {
         root.join(self.path())
+    }
+
+    /// The family directory in this process's store: what every writer uses, so the path is spelled
+    /// in the register and nowhere else.
+    pub(crate) fn dir(&self) -> PathBuf {
+        self.dir_in(&crate::options::get().home)
     }
 }
 
@@ -146,62 +151,60 @@ macro_rules! flag_of {
 
 /// Declares the family register, one family per line:
 ///
-/// `Class "dir" shape[(ext)] [flag(Flag)];`
+/// `Class CONST "dir" shape[(ext)] [flag(Flag)];`
 ///
-/// The comment above a line names the module that writes the family and the key or contract that
-/// makes deleting it safe. `{host}` in a path is resolved by [`Family::name`].
+/// The line declares a [`Family`] const the writers name (`store::CONST.dir()`) and puts it in
+/// [`FAMILIES`], which `status` and `purge` walk. The comment above a line names the module that
+/// writes the family and the key or contract that makes deleting it safe; `{host}` in a directory
+/// name is resolved by [`Family::path`].
 macro_rules! families {
-    ( $( $class:ident $path:literal $shape:ident $(($ext:literal))? $( flag($flag:ident) )? ; )* ) => {
+    ( $( $class:ident $entry:ident $dir:literal $shape:ident $(($ext:literal))? $( flag($flag:ident) )? ; )* ) => {
+        $(
+            #[doc = concat!("`", $dir, "`: one family of the store, declared by the register below.")]
+            pub(crate) const $entry: Family = Family {
+                class: Class::$class,
+                dir_name: $dir,
+                shape: shape_of!($shape $(($ext))?),
+                flag: flag_of!($($flag)?),
+            };
+        )*
+
         /// The register: every family in the store, in the order `status` prints them.
-        pub(crate) fn families() -> &'static [Family] {
-            static REGISTER: OnceLock<Vec<Family>> = OnceLock::new();
-            REGISTER.get_or_init(|| {
-                vec![
-                    $(
-                        Family {
-                            class: Class::$class,
-                            dir_name: $path,
-                            shape: shape_of!($shape $(($ext))?),
-                            flag: flag_of!($($flag)?),
-                        },
-                    )*
-                ]
-            })
-        }
+        pub(crate) const FAMILIES: &[Family] = &[ $( $entry ),* ];
     };
 }
 
 families! {
     // `baseimage` — the MIR-rich std base; keyed by build id + sysroot stamp, `build_id` first.
-    Cache "base"            generation("img") flag(Base);
+    Cache BASE            "base"            generation("img") flag(Base);
     // `depsimage` — the lowered registry dependency closure; keyed by base key + `--extern` stamps.
-    Cache "deps"            generation("img") flag(Deps);
+    Cache DEPS            "deps"            generation("img") flag(Deps);
     // `ircache` — the post-mono engine IR; keyed by rustc args + input manifest, `build_id` first.
-    Cache "ir"              generation("bin") flag(Ir);
+    Cache IR              "ir"              generation("bin") flag(Ir);
     // `lower::asm` — materialized per-site asm stubs; keyed by the generated assembly's content.
-    Cache "asm-stubs"       keyed;
+    Cache ASM_STUBS       "asm-stubs"       keyed;
     // `lower::global_asm` — materialized `global_asm!`/naked-fn objects; keyed by the final text.
-    Cache "global-asm"      keyed;
+    Cache GLOBAL_ASM      "global-asm"      keyed;
     // `native_archive` — a PIC `.a` converted into a dlopen-able `.so`; keyed by archive + cc identity.
-    Cache "native-archives" keyed;
+    Cache NATIVE_ARCHIVES "native-archives" keyed;
     // `pack` — native libraries carried inside a `.mirvm`; keyed by their content hash.
-    Cache "package-native"  keyed;
+    Cache PACKAGE_NATIVE  "package-native"  keyed;
     // `vm::ir` — the function heat order learned from a package's first runs; keyed by its code.
-    Cache "package-heat"    keyed;
+    Cache PACKAGE_HEAT    "package-heat"    keyed;
     // `cargoless::registry` — crate and git sources, read through to `~/.cargo`; fetched, not derived.
-    Data  "registry"        unit;
+    Data  REGISTRY        "registry"        unit;
     // `sysroot::build_sysroot` — the MIR-rich std; keyed by the toolchain stat + build recipe.
-    Data  "sysroot-{host}"  unit;
+    Data  SYSROOT         "sysroot-{host}"  unit;
     // `cli::frontmatter::script_cache_dir` — materialized frontmatter projects; keyed by script path.
-    Build "scripts"         unit flag(Scripts);
+    Build SCRIPTS         "scripts"         unit flag(Scripts);
     // `sysroot::build_sysroot` staging; reused across rebuilds, so `--data` keeps it.
-    Build "sysroot-build"   unit;
+    Build SYSROOT_BUILD   "sysroot-build"   unit;
     // Cargo track, cargoless scheduler and native differential builds; rebuilt from the sources.
-    Build "target"          unit flag(Target);
+    Build TARGET          "target"          unit flag(Target);
     // `vm::native_instance` — per-Engine copies of required native libraries (glibc keys by path).
-    Run   "runtime-native"  unit;
+    Run   RUNTIME_NATIVE  "runtime-native"  unit;
     // `vm::native_instance` — private copies of self-produced objects while lowering opens them.
-    Run   "lower-native"    unit;
+    Run   LOWER_NATIVE    "lower-native"    unit;
 }
 /// The staging name for `target`.
 ///
@@ -379,7 +382,7 @@ mod tests {
     fn register_is_well_formed() {
         let mut names = Vec::new();
         let mut flags = Vec::new();
-        for family in families() {
+        for family in FAMILIES {
             let name = family.path();
             let prefix = format!("{}/", family.class.name());
             assert!(
