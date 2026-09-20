@@ -31,6 +31,89 @@ use crate::cargoless::schedule::Layout;
 use crate::cargoless::vendor::VendorDir;
 use crate::cargoless::{buildrs, resolve};
 
+/// Why the MIR-rich sysroot could not be produced.
+///
+/// The stages that still return `String` (the manifest reader, the resolver, the scheduler) are
+/// carried as `detail`: each becomes a `#[source]` when its own module is typed, and the rendered
+/// message stays what it is today in the meantime.
+#[derive(Debug, thiserror::Error, serde::Serialize)]
+pub enum Error {
+    /// A filesystem operation on the staging tree failed.
+    #[error("{source}")]
+    Io {
+        #[from]
+        #[serde(skip)]
+        source: std::io::Error,
+    },
+
+    /// The toolchain's own `library/Cargo.lock` could not be read.
+    #[error("failed to read {}: {source}", path.display())]
+    ReadLock {
+        path: PathBuf,
+        #[serde(skip)]
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The toolchain ships no rust-src, so no sysroot can be built from it.
+    #[error(
+        "rust-src is not present ({} lacks std/Cargo.toml) -- the MIR sysroot is built from \
+         rust-src, so the toolchain needs the rust-src component",
+        path.display()
+    )]
+    RustSrcMissing { path: PathBuf },
+
+    /// The synthetic root manifest the sysroot build resolves from did not parse.
+    #[error("failed to parse the pseudo-root manifest: {detail}")]
+    ParseManifest { detail: String },
+
+    /// The sysroot dependency graph could not be resolved.
+    #[error("sysroot dependency resolution failed: {detail}")]
+    Resolve { detail: String },
+
+    /// Two packages in the sysroot graph claim the same `links` key.
+    #[error("{detail}")]
+    Links { detail: String },
+
+    /// Compiling the sysroot crates failed.
+    #[error("sysroot compilation failed: {detail}")]
+    Compile { detail: String },
+
+    /// The content key could not be recomputed after a successful build, which leaves the published
+    /// sysroot unstamped and therefore rebuilt on every run.
+    #[error("stamp computation failed after the sysroot build (abnormal rust-src tree read)")]
+    StampUnavailable,
+
+    /// The cargo-track dependency cache could not be dropped after the sysroot was replaced. Its
+    /// stale rmeta would be treated as fresh and mixed into the new sysroot (E0463), so the failure
+    /// is named now rather than left to a later, more confusing compile error.
+    #[error(
+        "failed to purge the cargo-track dep cache {} after the sysroot was replaced \
+         (deleting it by hand is enough): {source}",
+        path.display()
+    )]
+    PurgeCargoDeps {
+        path: PathBuf,
+        #[serde(skip)]
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+crate::diag_codes! {
+    Error: Sysroot => {
+        Io => "sysroot.io",
+        ReadLock => "sysroot.read_lock",
+        RustSrcMissing => "sysroot.rust_src_missing",
+        ParseManifest => "sysroot.parse_manifest",
+        Resolve => "sysroot.resolve",
+        Links => "sysroot.links_conflict",
+        Compile => "sysroot.compile",
+        StampUnavailable => "sysroot.stamp_unavailable",
+        PurgeCargoDeps => "sysroot.purge_cargo_deps",
+    }
+}
+
 /// Toolchain sysroot baked at compile time (see build.rs); rustc takes it from here.
 fn toolchain_root() -> &'static Path {
     Path::new(crate::options::build::DEFAULT_SYSROOT)
@@ -56,7 +139,7 @@ fn stamp_file(sysroot_dir: &Path) -> PathBuf {
 /// staging + tmp directories and is published with an atomic rename, so the old sysroot
 /// stays usable until the moment it is swapped out. A crash mid-build leaves tmp/old
 /// directories behind, and the missing stamp self-heals on the next run.
-pub fn ensure_sysroot() -> anyhow::Result<PathBuf> {
+pub fn ensure_sysroot() -> Result<PathBuf, Error> {
     let sysroot_dir = crate::store::SYSROOT.dir();
     if let Some(want) = stamp_value()
         && std::fs::read_to_string(stamp_file(&sysroot_dir)).is_ok_and(|have| have == want)
@@ -95,7 +178,7 @@ pub(crate) fn current_stamp_value() -> Option<String> {
 fn stamp_value() -> Option<String> {
     let mut key = rustc_stat()?;
     key.push('\n');
-    key.push_str(&library_sentinel().ok()?);
+    key.push_str(&library_sentinel()?);
     key.push('\n');
     // Recipe serialization, from the same profile/rustflags build_sysroot uses
     let p = sysroot_profile();
@@ -149,12 +232,15 @@ fn sysroot_rustflags() -> Vec<String> {
 /// is the same content and needs no rebuild, which leaving the sentinel unchanged expresses.
 /// Hand-edited leaf files are not caught (see the protected-surface note and escape hatch on
 /// `stamp_value`).
-fn library_sentinel() -> Result<String, String> {
+///
+/// `None` when the sentinel cannot be read: the sysroot is then rebuilt, which fails loudly on the
+/// rust-src check. There is no separate report for an unreadable sentinel because nothing acts on
+/// one — the only two answers are "this content key" and "cannot say".
+fn library_sentinel() -> Option<String> {
     let root = library_dir();
     let mut rows: Vec<String> = Vec::new();
-    let mut put = |p: &Path, name: String| -> Result<(), String> {
-        let md = std::fs::metadata(p)
-            .map_err(|e| format!("rust-src sentinel stat failed {}: {e}", p.display()))?;
+    let mut put = |p: &Path, name: String| -> Option<()> {
+        let md = std::fs::metadata(p).ok()?;
         let mtime_ns = md
             .modified()
             .ok()
@@ -162,21 +248,15 @@ fn library_sentinel() -> Result<String, String> {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         rows.push(format!("{name}:{}:{}", md.len(), mtime_ns));
-        Ok(())
+        Some(())
     };
     put(&root, ".".to_string())?;
-    let rd = std::fs::read_dir(&root).map_err(|e| {
-        format!(
-            "failed to read the rust-src library directory {}: {e}",
-            root.display()
-        )
-    })?;
-    for ent in rd {
-        let ent = ent.map_err(|e| format!("failed to read a rust-src library entry: {e}"))?;
+    for ent in std::fs::read_dir(&root).ok()? {
+        let ent = ent.ok()?;
         put(&ent.path(), ent.file_name().to_string_lossy().into_owned())?;
     }
     rows.sort();
-    Ok(rows.join("\u{1e}"))
+    Some(rows.join("\u{1e}"))
 }
 
 /// The sysroot component of the fingerprint (the third input to schedule::fingerprints):
@@ -216,7 +296,7 @@ fn workspace_overrides(library: &Path) -> BTreeMap<String, PathBuf> {
 ///   the root would make the pseudo-root missing from the lock a loud failure, and the
 ///   toolchain directory is not writable, so the pseudo-root is materialized in our own
 ///   staging.)
-fn materialize_pseudo_root(library: &Path, root_dir: &Path) -> anyhow::Result<()> {
+fn materialize_pseudo_root(library: &Path, root_dir: &Path) -> Result<(), Error> {
     std::fs::create_dir_all(root_dir)?;
     let toml = format!(
         "[package]\nname = \"mirvm-mir-sysroot\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\
@@ -229,12 +309,11 @@ fn materialize_pseudo_root(library: &Path, root_dir: &Path) -> anyhow::Result<()
         library.join("proc_macro").display(),
     );
     write_if_changed(&root_dir.join("Cargo.toml"), toml.as_bytes())?;
-    let lock_src = std::fs::read_to_string(library.join("Cargo.lock")).map_err(|e| {
-        anyhow::anyhow!(
-            "failed to read {}: {e}",
-            library.join("Cargo.lock").display()
-        )
-    })?;
+    let lock_src =
+        std::fs::read_to_string(library.join("Cargo.lock")).map_err(|source| Error::ReadLock {
+            path: library.join("Cargo.lock"),
+            source,
+        })?;
     let lock = format!(
         "{lock_src}\n[[package]]\nname = \"mirvm-mir-sysroot\"\nversion = \"0.0.0\"\n\
          dependencies = [\n \"proc_macro\",\n \"std\",\n \"test\",\n]\n"
@@ -245,7 +324,7 @@ fn materialize_pseudo_root(library: &Path, root_dir: &Path) -> anyhow::Result<()
 
 /// Do not rewrite identical content (stable mtimes are a precondition for fingerprints and
 /// incremental builds).
-fn write_if_changed(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     if std::fs::read(path).ok().is_none_or(|old| old != bytes) {
         std::fs::write(path, bytes)?;
     }
@@ -255,30 +334,28 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 /// Full rebuild: pseudo-root -> resolve (supplied by VendorDir) -> compile_plan (using the
 /// toolchain as the compile base) -> write the stamp into tmp -> publish with an atomic
 /// rename.
-fn build_sysroot(sysroot_dir: &Path) -> anyhow::Result<()> {
+fn build_sysroot(sysroot_dir: &Path) -> Result<(), Error> {
     let target = crate::options::build::HOST;
     let library = library_dir();
     if !library.join("std/Cargo.toml").is_file() {
-        anyhow::bail!(
-            "rust-src is not present ({} lacks std/Cargo.toml) -- the MIR sysroot is \
-             built from rust-src, so the toolchain needs the rust-src component",
-            library.display()
-        );
+        return Err(Error::RustSrcMissing { path: library });
     }
-    eprintln!("mirvm: building the MIR-rich sysroot (one-time, takes a few minutes)...");
+    crate::diag_info!(
+        Sysroot,
+        "building the MIR-rich sysroot (one-time, takes a few minutes)..."
+    );
 
     // staging (persistent; reuses host artifacts / build-script cache across rebuilds) and
     // the pseudo-root
     let staging = crate::store::SYSROOT_BUILD.dir();
     let root_dir = staging.join("root");
     materialize_pseudo_root(&library, &root_dir)?;
-    let manifest = PackageManifest::read_dir(&root_dir)
-        .map_err(|e| anyhow::anyhow!("failed to parse the pseudo-root manifest: {e}"))?;
+    let manifest =
+        PackageManifest::read_dir(&root_dir).map_err(|detail| Error::ParseManifest { detail })?;
     let mut src = VendorDir::new(vec![library.join("vendor")], workspace_overrides(&library));
-    let plan = resolve::resolve(&manifest, &mut src)
-        .map_err(|e| anyhow::anyhow!("sysroot dependency resolution failed: {e}"))?;
+    let plan = resolve::resolve(&manifest, &mut src).map_err(|detail| Error::Resolve { detail })?;
     buildrs::check_links_unique(Some((&manifest.name, manifest.links.as_deref())), &plan)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(|detail| Error::Links { detail })?;
 
     // Artifacts are built in a staging directory next to the sysroot (same filesystem, so the
     // publish rename is atomic) and the old sysroot stays usable until then.
@@ -299,15 +376,11 @@ fn build_sysroot(sysroot_dir: &Path) -> anyhow::Result<()> {
         false,
         false,
     )
-    .map_err(|e| anyhow::anyhow!("sysroot compilation failed: {e}"))?;
+    .map_err(|detail| Error::Compile { detail })?;
 
     // Write the stamp inside tmp so it is published by the same rename; the content key is
     // recomputed here from the same source as the fast path
-    let want = stamp_value().ok_or_else(|| {
-        anyhow::anyhow!(
-            "stamp computation failed after the sysroot build (abnormal rust-src tree read)"
-        )
-    })?;
+    let want = stamp_value().ok_or(Error::StampUnavailable)?;
     let stamp_in_tmp = stamp_file(&tmp);
     std::fs::write(&stamp_in_tmp, &want)?;
 
@@ -323,15 +396,12 @@ fn build_sysroot(sysroot_dir: &Path) -> anyhow::Result<()> {
     // the cache is certain to break later compilations, so name it now.
     let cargo_deps = crate::store::TARGET.dir().join("mirvm");
     if cargo_deps.exists() {
-        std::fs::remove_dir_all(&cargo_deps).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to purge the cargo-track dep cache {} after the sysroot was \
-                 replaced (deleting it by hand is enough): {e}",
-                cargo_deps.display()
-            )
+        std::fs::remove_dir_all(&cargo_deps).map_err(|source| Error::PurgeCargoDeps {
+            path: cargo_deps.clone(),
+            source,
         })?;
     }
-    eprintln!("mirvm: sysroot build complete: {}", sysroot_dir.display());
+    crate::diag_info!(Sysroot, "sysroot build complete: {}", sysroot_dir.display());
     Ok(())
 }
 

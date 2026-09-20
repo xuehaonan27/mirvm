@@ -44,7 +44,9 @@ mod os; // os layer (engine touch points go through crate::os:: primitives)
 mod product_adapters; // stub for the one rustc-dependent leaf the engine still needs
 pub(crate) use product_adapters::lower;
 #[path = "../../../../../src/utils/mod.rs"]
-mod utils; // content hash + the mirvm_log! macro, pure Rust (source-shared)
+mod utils; // content hash, pure Rust (source-shared)
+#[path = "../../../../../src/diag/mod.rs"]
+mod diag; // the diagnostic vocabulary the engine emits through: std only, so it stays shareable
 mod native; // native layer: only symtab is pure Rust (see src/native.rs)
 #[path = "../../../../../src/store/mod.rs"]
 mod store; // the family register the engine reads its scratch dirs from (pure Rust, source-shared)

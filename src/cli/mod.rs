@@ -134,6 +134,9 @@ pub fn main() -> ExitCode {
         eprint!("{}", usage());
         return ExitCode::from(2);
     };
+    // One component per process, fixed at the dispatch boundary: every diagnostic emitted below —
+    // including the engine's — is attributed to the command the user actually ran.
+    crate::diag::enter(component_of(&first));
 
     // Two callback forms in a cargo session
     if first == "runner" {
@@ -177,15 +180,36 @@ pub fn main() -> ExitCode {
     }
 }
 
+/// The component a dispatch spelling speaks for, in the `diag` vocabulary. An unrecognized command
+/// is about to be rejected with the usage text, so its scope never reaches a diagnostic.
+fn component_of(command: &str) -> crate::diag::Component {
+    use crate::diag::Component;
+    match command {
+        "run" => Component::Run,
+        "capture" => Component::Capture,
+        "test" => Component::Test,
+        "pack" => Component::Pack,
+        "log" => Component::Log,
+        "cache" => Component::Cache,
+        "deps" => Component::Deps,
+        "options" => Component::Options,
+        "runner" => Component::Runner,
+        "__build-base-image" => Component::BaseImage,
+        "__cless-dep" | "__cless-run-root" => Component::Build,
+        _ => Component::Run,
+    }
+}
+
 /// `mirvm options [--json]`: print every external input mirvm defines, its current value and where
 /// that value came from. This is the executable form of `src/options.rs`.
 fn options_main(args: impl Iterator<Item = String>) -> ExitCode {
-    let mut json = false;
     for arg in args {
         match arg.as_str() {
             "--json" => {
-                json = true;
-                crate::options::note_cli("options_json");
+                crate::options::note_cli("output_format");
+                // Export so the value this process resolved is the one a child reads back, the same
+                // discipline as `--stack-size` and `--jit`.
+                crate::options::export_to_process("output_format", "json");
             }
             other => {
                 eprintln!("mirvm options: unknown argument `{other}`\n{}", usage());
@@ -193,7 +217,7 @@ fn options_main(args: impl Iterator<Item = String>) -> ExitCode {
             }
         }
     }
-    if json {
+    if crate::options::get().output_format() == Ok(crate::options::OutputFormat::Json) {
         println!("{}", crate::options::render_json());
     } else {
         println!("{}", crate::options::version());

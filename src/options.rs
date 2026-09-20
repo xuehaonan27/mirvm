@@ -295,8 +295,8 @@ entries! {
     user     log_kind                 cli("--kind", "Log") default("unset");
     /// `log export` filter: a sequence number or a START:END range.
     user     log_sequence             cli("--sequence", "Log") default("unset");
-    /// Emit the resolved input table as JSON.
-    user     options_json             cli("--json", "Options") default("off");
+    /// Machine output: reports as one JSON document, diagnostics as one JSON object per line.
+    user     output_format            env("MIRVM_OUTPUT") cli("--json", "Run Pack Capture Cache Deps Options Log") default("text");
     /// Internal: forwarded capture directory for the Cargo runner form.
     user     mirvm_capture_directory  cli("--mirvm-capture-directory", "Internal") default("unset");
 }
@@ -418,10 +418,19 @@ pub enum DepsTrack {
     Cargo,
 }
 
+/// The output mode `MIRVM_OUTPUT` / `--json` selects.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OutputFormat {
+    /// Human text: `mirvm[component]: severity: message`, and aligned report tables.
+    Text,
+    /// Machine output: JSONL diagnostics on fd 2 and one versioned JSON document per report.
+    Json,
+}
+
 /// Every external input mirvm defines, resolved from the environment.
 ///
-/// Everything here is fixed for the lifetime of the process except `jit`, `stack_size` and
-/// `offline`: the command line overrides those three by writing the very variable its child
+/// Everything here is fixed for the lifetime of the process except `jit`, `stack_size`, `offline`
+/// and `output_format`: the command line overrides those by writing the very variable its child
 /// processes inherit, so their accessors read it live instead of snapshotting it.
 pub struct Options {
     /// `MIRVM_HOME`: local store root.
@@ -551,6 +560,17 @@ impl Options {
             Some("cargo") => Ok(DepsTrack::Cargo),
             Some(other) => Err(format!(
                 "mirvm: MIRVM_DEPS only accepts `cargo` or `self` (got `{other}`)"
+            )),
+        }
+    }
+
+    /// `MIRVM_OUTPUT` / `--json`.
+    pub fn output_format(&self) -> Result<OutputFormat, String> {
+        match raw("output_format").as_deref() {
+            None | Some("") | Some("text") => Ok(OutputFormat::Text),
+            Some("json") => Ok(OutputFormat::Json),
+            Some(other) => Err(format!(
+                "mirvm: MIRVM_OUTPUT only accepts `text` or `json` (got `{other}`)"
             )),
         }
     }
