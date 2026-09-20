@@ -57,7 +57,7 @@ pub(super) fn materialize_script(script: &Path, manifest: &str, body: &str) -> P
     let mut hasher = std::hash::DefaultHasher::new();
     abs.hash(&mut hasher);
     let hash = format!("{:016x}", hasher.finish());
-    let dir = crate::sysroot::cache_dir().join("scripts").join(&hash);
+    let dir = crate::options::get().home.join("scripts").join(&hash);
     std::fs::create_dir_all(dir.join("src")).expect("failed to create the script cache directory");
     std::fs::create_dir_all(dir.join(".cargo"))
         .expect("failed to create the script .cargo directory");
@@ -97,7 +97,7 @@ pub(super) fn materialize_script(script: &Path, manifest: &str, body: &str) -> P
     // with an explicit --target-dir, while native cargo run uses the file config. The two families
     // get separate directories (their sysroots and rustflags differ, so fingerprints would not
     // collide anyway; separate directories only make purge semantics clearer).
-    let native_target = crate::sysroot::cache_dir().join("target/native");
+    let native_target = crate::options::get().home.join("target/native");
     write_if_changed(
         &dir.join(".cargo/config.toml"),
         &format!("[build]\ntarget-dir = \"{}\"\n", native_target.display()),

@@ -1207,7 +1207,7 @@ fn target_fingerprint(root_fp: &str, target: &Target) -> String {
         target.path.display(),
         target.harness as u8
     );
-    format!("{:016x}", crate::lower::asm::fnv1a(key.as_bytes()))
+    format!("{:016x}", crate::utils::content::fnv1a(key.as_bytes()))
 }
 
 fn root_target_env(

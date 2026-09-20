@@ -119,7 +119,7 @@ fn exec(mut cmd: Command) -> ! {
 fn cargo_target_dir() -> PathBuf {
     let mut target_dir = crate::options::get().target_dir.clone();
     if let Some(encoded) = crate::options::get().encoded_rustflags_append.as_deref() {
-        let hash = crate::lower::asm::fnv1a(encoded.as_bytes());
+        let hash = crate::utils::content::fnv1a(encoded.as_bytes());
         target_dir = target_dir
             .join("mirvm-append-rustflags")
             .join(format!("{hash:016x}"));

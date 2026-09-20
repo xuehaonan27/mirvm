@@ -113,7 +113,7 @@ impl Registry {
     pub fn open() -> Result<Self, RErr> {
         let current = std::env::current_dir().map_err(|error| error.to_string())?;
         Self::open_for_at(
-            crate::sysroot::cache_dir().join("registry"),
+            crate::options::get().home.join("registry"),
             crate::options::get().offline(),
             &current,
         )
@@ -121,7 +121,7 @@ impl Registry {
 
     pub fn open_for(project: &Path) -> Result<Self, RErr> {
         Self::open_for_at(
-            crate::sysroot::cache_dir().join("registry"),
+            crate::options::get().home.join("registry"),
             crate::options::get().offline(),
             project,
         )
@@ -649,7 +649,7 @@ fn lock_source(index: &str) -> String {
 }
 
 fn source_key(source: &str) -> String {
-    format!("{:016x}", crate::lower::asm::fnv1a(source.as_bytes()))
+    format!("{:016x}", crate::utils::content::fnv1a(source.as_bytes()))
 }
 
 fn ensure_trailing_slash(value: &str) -> String {

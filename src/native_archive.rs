@@ -265,7 +265,7 @@ pub(crate) fn materialize_static_libraries<'tcx>(
         .map(|path| path.dir.clone())
         .collect();
     let target = sess.opts.target_triple.tuple();
-    let cache = crate::sysroot::cache_dir().join("native-archives");
+    let cache = crate::options::get().home.join("native-archives");
     let mut shared_objects = Vec::<PathBuf>::new();
     // Crate-graph system dynamic libraries: when a static archive's C objects reference `-l`
     // library symbols propagated via metadata, the closure link line must include them; same list

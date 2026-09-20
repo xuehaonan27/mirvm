@@ -11,6 +11,19 @@ pub(crate) struct FileContentStamp {
     pub digest: [u8; 32],
 }
 
+/// FNV-1a 64-bit content hash.
+///
+/// Cache keys, cargoless unit fingerprints and the asm-stub/global-asm factory keys all use it, so
+/// it lives in the leaf utility module rather than in the lowering engine it was first written for.
+pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 fn mtime_ns(metadata: &std::fs::Metadata) -> io::Result<u128> {
     metadata
         .modified()?

@@ -75,7 +75,7 @@ fn disabled() -> bool {
 }
 
 fn base_dir() -> PathBuf {
-    crate::sysroot::cache_dir().join("base")
+    crate::options::get().home.join("base")
 }
 
 /// (base image path, sysroot stamp). `None` when the stamp is unavailable (sysroot not
@@ -85,7 +85,7 @@ fn locate() -> Option<(PathBuf, String)> {
     let mut key = String::from(crate::options::build::BUILD_ID);
     key.push('\u{1f}');
     key.push_str(&stamp);
-    let h = crate::lower::asm::fnv1a(key.as_bytes());
+    let h = crate::utils::content::fnv1a(key.as_bytes());
     Some((base_dir().join(format!("{h:016x}.img")), stamp))
 }
 

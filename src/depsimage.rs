@@ -68,7 +68,7 @@ pub fn bypassed() -> bool {
 }
 
 fn deps_dir() -> PathBuf {
-    crate::sysroot::cache_dir().join("deps")
+    crate::options::get().home.join("deps")
 }
 
 /// Pre-key material: the paths in `--extern name=path` (two-arg form) and `--extern=name=path` (single-arg
@@ -127,7 +127,7 @@ pub fn pre_key(rustc_args: &[String], base_key: &str) -> Option<(String, ExternS
         key.push('\u{1e}');
         key.push_str(&crate::utils::content::digest_hex(digest));
     }
-    let h = crate::lower::asm::fnv1a(key.as_bytes());
+    let h = crate::utils::content::fnv1a(key.as_bytes());
     if crate::options::get().a2_debug {
         eprintln!("[a2-debug] pre-key={h:016x} externs={paths:?}");
     }

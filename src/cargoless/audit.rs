@@ -162,7 +162,7 @@ fn cargo_accepts_lock(
     let toolchain_root = std::path::PathBuf::from(crate::options::build::DEFAULT_SYSROOT);
     let cargo = toolchain_root.join("bin/cargo");
     let rustc = toolchain_root.join("bin/rustc");
-    let target = crate::sysroot::cache_dir().join("target/native");
+    let target = crate::options::get().home.join("target/native");
     let run = |extra: &[&str]| {
         let mut cmd = std::process::Command::new(&cargo);
         cmd.current_dir(&dir)
@@ -223,7 +223,8 @@ pub(crate) fn script_cache_dir(script: &Path) -> PathBuf {
     let abs = std::path::absolute(script).unwrap_or_else(|_| script.to_path_buf());
     let mut hasher = std::hash::DefaultHasher::new();
     abs.hash(&mut hasher);
-    crate::sysroot::cache_dir()
+    crate::options::get()
+        .home
         .join("scripts")
         .join(format!("{:016x}", hasher.finish()))
 }

@@ -39,12 +39,12 @@
 
 #[path = "../../../../../src/arch/mod.rs"]
 mod arch; // arch layer (interp's x86 touch points go through crate::arch::)
-#[path = "../../../../../src/utils/logs.rs"]
-mod logs; // source-shared dependency of os::process's mirvm_log!
 #[path = "../../../../../src/os/mod.rs"]
 mod os; // os layer (engine touch points go through crate::os:: primitives)
-mod product_adapters; // stubs for the rustc-dependent leaves (lower::asm, sysroot)
-pub(crate) use product_adapters::{lower, sysroot};
+mod product_adapters; // stub for the one rustc-dependent leaf the engine still needs
+pub(crate) use product_adapters::lower;
+#[path = "../../../../../src/utils/mod.rs"]
+mod utils; // content hash + the mirvm_log! macro, pure Rust (source-shared)
 #[path = "../../../../../src/elfsym.rs"]
 mod elfsym; // archive .symtab fallback for ffi.rs (pure Rust, source-shared)
 #[path = "../../../../../src/options.rs"]
