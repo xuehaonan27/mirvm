@@ -531,6 +531,18 @@ version = "0.2.0"
                 ),
             ),
             (
+                "lock-shapes/git-source",
+                include_str!("../../tests/data/fixtures/lock-shapes/git-source/Cargo.lock"),
+            ),
+            (
+                "lock-shapes/patch-unused-git",
+                include_str!("../../tests/data/fixtures/lock-shapes/patch-unused-git/Cargo.lock"),
+            ),
+            (
+                "lock-shapes/patch-unused-path",
+                include_str!("../../tests/data/fixtures/lock-shapes/patch-unused-path/Cargo.lock"),
+            ),
+            (
                 "tsan",
                 include_str!("../../tests/data/fixtures/tsan/Cargo.lock"),
             ),
