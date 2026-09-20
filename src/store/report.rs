@@ -1,12 +1,17 @@
 //! Inventory and cleanup of the mirvm local store: `mirvm cache status` / `mirvm cache purge`.
 //!
 //! The store itself — its lifetime classes, its families and the publication rules — is
-//! `crate::store`. This module is the report over `store::FAMILIES`: it sizes each family, groups
-//! it by lifetime, and removes what the plan selects. No directory is named here, so a family added
-//! to the register is reported and cleanable without a second edit.
+//! `crate::store`. This module is the report over `store::FAMILIES`: it sizes each family, groups it
+//! by lifetime, and removes what the plan selects. No directory is named here, so a family added to
+//! the register is reported and cleanable without a second edit.
+//!
+//! Each report is data first: `text` and `json` are two renderings of one structure, so a field can
+//! neither exist in one and be missing from the other, nor be computed twice.
 
 use std::path::{Path, PathBuf};
 
+use crate::diag::json::{self, Writer};
+use crate::diag::table::{Cell, Table, human_bytes};
 use crate::store::{self, Class, Family, FamilyFlag, Shape};
 
 /// Cleanup plan (product of CLI flag parsing).
@@ -74,75 +79,217 @@ fn du(path: &Path) -> (u64, u64) {
     (bytes, files)
 }
 
-fn human(bytes: u64) -> String {
-    const U: [&str; 5] = ["B", "K", "M", "G", "T"];
-    let mut v = bytes as f64;
-    let mut i = 0;
-    while v >= 1024.0 && i < U.len() - 1 {
-        v /= 1024.0;
-        i += 1;
-    }
-    if i == 0 {
-        format!("{bytes}B")
-    } else {
-        format!("{v:.1}{}", U[i])
+// ===== `mirvm cache status` =====
+
+/// One family's size and item count.
+struct FamilyStatus {
+    path: String,
+    bytes: u64,
+    items: u64,
+    /// `Some((stale, garbage))` for a generational family: what `purge` can take back without
+    /// touching the current generation.
+    generations: Option<(u64, u64)>,
+    /// For the others, how the family is keyed — which is why it cannot be cleaned partially.
+    kind: &'static str,
+}
+
+impl FamilyStatus {
+    fn detail(&self) -> String {
+        match self.generations {
+            Some((stale, garbage)) => format!(
+                "({} items; stale {}, garbage {})",
+                self.items,
+                human_bytes(stale),
+                human_bytes(garbage)
+            ),
+            None => format!("({} items, {})", self.items, self.kind),
+        }
     }
 }
 
-fn size_of(paths: &[PathBuf]) -> u64 {
-    paths
-        .iter()
-        .map(|path| path.metadata().map(|m| m.len()).unwrap_or(0))
-        .sum()
+/// One lifetime class (`cache/`, `data/`, …).
+struct ClassStatus {
+    name: &'static str,
+    contract: &'static str,
+    families: Vec<FamilyStatus>,
 }
 
-/// Full text of `mirvm cache status`.
-pub fn status(root: &Path) -> String {
-    // The first line is parsed by the test harness for the build id; keep its shape.
-    let mut out = format!(
-        "mirvm local cache {} (build {})\n",
-        root.display(),
-        crate::options::build::BUILD_ID
-    );
-    let (mut total, mut total_stale) = (0u64, 0u64);
+/// A directory no family claims, at the store root or inside a class root.
+struct Unclaimed {
+    path: String,
+    bytes: u64,
+    items: u64,
+}
+
+/// The `mirvm cache status` report.
+pub struct Status {
+    pub root: PathBuf,
+    classes: Vec<ClassStatus>,
+    unclaimed: Vec<Unclaimed>,
+    total_bytes: u64,
+    /// What `mirvm cache purge` would reclaim: stale generations and garbage.
+    pub stale_bytes: u64,
+}
+
+impl Status {
+    /// Human text. The first line is parsed by the test harness for the build id; its shape is a
+    /// contract, so it is built here rather than by the table renderer.
+    pub fn text(&self) -> String {
+        let mut out = format!(
+            "mirvm local cache {} (build {})\n",
+            self.root.display(),
+            crate::options::build::BUILD_ID
+        );
+        for class in &self.classes {
+            out.push_str(&format!("  {}/  ({})\n", class.name, class.contract));
+            let mut table = Table::new(4);
+            for family in &class.families {
+                table.row(vec![
+                    Cell::left(&family.path),
+                    Cell::right(human_bytes(family.bytes)),
+                    Cell::left(family.detail()),
+                ]);
+            }
+            out.push_str(&table.render());
+        }
+        // Nothing in the store may be invisible: report what no family claims, both at the root
+        // (which is where a store written by an older layout shows up) and inside each class root.
+        if !self.unclaimed.is_empty() {
+            let mut table = Table::new(2);
+            for row in &self.unclaimed {
+                table.row(vec![
+                    Cell::left(&row.path),
+                    Cell::right(human_bytes(row.bytes)),
+                    Cell::left(format!("({} items, unclaimed)", row.items)),
+                ]);
+            }
+            out.push_str(&table.render());
+        }
+        let mut total = Table::new(2);
+        total.row(vec![
+            Cell::left("total"),
+            Cell::right(human_bytes(self.total_bytes)),
+        ]);
+        out.push_str(&total.render());
+        if self.stale_bytes > 0 {
+            out.push_str(&format!(
+                "stale and garbage could be cleared: {} (`mirvm cache purge`)\n",
+                human_bytes(self.stale_bytes)
+            ));
+        }
+        out
+    }
+
+    /// The same report as one versioned JSON document.
+    pub fn json(&self) -> String {
+        let classes: Vec<String> = self
+            .classes
+            .iter()
+            .map(|class| {
+                let families: Vec<String> = class
+                    .families
+                    .iter()
+                    .map(|family| {
+                        let mut out = Writer::new();
+                        out.string("path", &family.path);
+                        out.number("bytes", family.bytes);
+                        out.number("items", family.items);
+                        match family.generations {
+                            Some((stale, garbage)) => {
+                                out.number("stale_bytes", stale);
+                                out.number("garbage_bytes", garbage);
+                            }
+                            None => {
+                                out.string("kind", family.kind);
+                            }
+                        };
+                        out.finish()
+                    })
+                    .collect();
+                let mut out = Writer::new();
+                out.string("name", class.name);
+                out.string("contract", class.contract);
+                out.raw("families", &json::array(&families));
+                out.finish()
+            })
+            .collect();
+        let unclaimed: Vec<String> = self
+            .unclaimed
+            .iter()
+            .map(|row| {
+                let mut out = Writer::new();
+                out.string("path", &row.path);
+                out.number("bytes", row.bytes);
+                out.number("items", row.items);
+                out.finish()
+            })
+            .collect();
+        let mut out = Writer::document();
+        out.string("root", &self.root.display().to_string());
+        out.string("build_id", crate::options::build::BUILD_ID);
+        out.raw("classes", &json::array(&classes));
+        out.raw("unclaimed", &json::array(&unclaimed));
+        out.number("total_bytes", self.total_bytes);
+        out.number("stale_bytes", self.stale_bytes);
+        out.finish()
+    }
+}
+
+/// Size every family, group it by lifetime, and report what no family claims.
+pub fn status(root: &Path) -> Status {
+    let mut total = 0u64;
+    let mut total_stale = 0u64;
     let mut claimed: Vec<String> = Vec::new();
+    let mut classes: Vec<ClassStatus> = Vec::new();
     for class in Class::ALL {
-        out += &format!("  {}/  ({})\n", class.name(), class.contract());
+        let mut families: Vec<FamilyStatus> = Vec::new();
         for family in store::FAMILIES.iter().filter(|f| f.class == class) {
             let name = family.path();
             claimed.push(name.clone());
             let dir = family.dir_in(root);
-            if let Shape::Generation { ext } = family.shape {
-                let (current, stale, garbage) = store::split_generational(&dir, ext);
-                let (cs, ss, gs) = (size_of(&current), size_of(&stale), size_of(&garbage));
-                total += cs + ss + gs;
-                total_stale += ss + gs;
-                let count = current.len() + stale.len() + garbage.len();
-                out += &format!(
-                    "    {name:<36} {:>9}  ({count} items; stale {}, garbage {})\n",
-                    human(cs + ss + gs),
-                    human(ss),
-                    human(gs)
-                );
-            } else {
-                let (bytes, files) = du(&dir);
-                total += bytes;
+            let status = match family.shape {
+                Shape::Generation { ext } => {
+                    let (current, stale, garbage) = store::split_generational(&dir, ext);
+                    let (current_bytes, stale_bytes, garbage_bytes) =
+                        (size_of(&current), size_of(&stale), size_of(&garbage));
+                    let bytes = current_bytes + stale_bytes + garbage_bytes;
+                    total += bytes;
+                    total_stale += stale_bytes + garbage_bytes;
+                    FamilyStatus {
+                        path: name,
+                        bytes,
+                        items: (current.len() + stale.len() + garbage.len()) as u64,
+                        generations: Some((stale_bytes, garbage_bytes)),
+                        kind: "content-keyed",
+                    }
+                }
                 // A keyed family is cleaned exactly like a single artifact; naming the shape is what
                 // tells a reader why it cannot be cleaned partially.
-                let kind = match family.shape {
-                    Shape::Keyed => "content-keyed",
-                    _ => "one artifact",
-                };
-                out += &format!(
-                    "    {name:<36} {:>9}  ({files} items, {kind})\n",
-                    human(bytes)
-                );
-            }
+                _ => {
+                    let (bytes, files) = du(&dir);
+                    total += bytes;
+                    FamilyStatus {
+                        path: name,
+                        bytes,
+                        items: files,
+                        generations: None,
+                        kind: match family.shape {
+                            Shape::Keyed => "content-keyed",
+                            _ => "one artifact",
+                        },
+                    }
+                }
+            };
+            families.push(status);
         }
+        classes.push(ClassStatus {
+            name: class.name(),
+            contract: class.contract(),
+            families,
+        });
     }
-    // Nothing in the store may be invisible: report what no family claims, both at the root (which
-    // is where a store written by an older layout shows up) and inside each class root.
-    let mut unclaimed: Vec<PathBuf> = Vec::new();
+
+    let mut unclaimed: Vec<Unclaimed> = Vec::new();
     if let Ok(read) = std::fs::read_dir(root) {
         for entry in read.flatten() {
             let path = entry.path();
@@ -155,66 +302,134 @@ pub fn status(root: &Path) -> String {
                     for child in inner.flatten() {
                         let relative = format!("{name}/{}", child.file_name().to_string_lossy());
                         if !claimed.contains(&relative) {
-                            unclaimed.push(child.path());
+                            unclaimed.push(unclaimed_row(root, &child.path()));
                         }
                     }
                 }
             } else if !name.ends_with(".stamp") {
-                unclaimed.push(path);
+                unclaimed.push(unclaimed_row(root, &path));
             }
         }
     }
-    for path in &unclaimed {
-        let (bytes, files) = du(path);
-        total += bytes;
-        out += &format!(
-            "  {:<38} {:>9}  ({files} items, unclaimed)\n",
-            path.strip_prefix(root).unwrap_or(path).display(),
-            human(bytes)
-        );
+    for row in &unclaimed {
+        total += row.bytes;
     }
-    out += &format!("  {:<38} {:>9}\n", "total", human(total));
-    if total_stale > 0 {
-        out += &format!(
-            "stale and garbage could be cleared: {} (`mirvm cache purge`)\n",
-            human(total_stale)
-        );
+    Status {
+        root: root.to_path_buf(),
+        classes,
+        unclaimed,
+        total_bytes: total,
+        stale_bytes: total_stale,
     }
-    out
 }
 
-/// Execute cleanup, return full report. dry_run lists actions without touching anything.
-pub fn purge(root: &Path, plan: Purge) -> String {
-    let mut out = String::new();
-    let (mut freed, mut acted) = (0u64, 0u64);
-    let dry = plan.dry_run;
-    let rm_file = |path: &Path, why: &str, freed: &mut u64, acted: &mut u64, out: &mut String| {
-        let size = path.metadata().map(|m| m.len()).unwrap_or(0);
-        *out += &format!(
-            "  {} {} ({}, {why})\n",
-            if dry { "to be deleted" } else { "deleted" },
-            path.display(),
-            human(size)
-        );
-        if (!dry && std::fs::remove_file(path).is_ok()) || dry {
-            *freed += size;
-            *acted += 1;
-        }
-    };
-    let rm_dir = |dir: &Path, label: &str, dry: bool, out: &mut String| -> u64 {
-        let (bytes, _) = du(dir);
-        *out += &format!(
-            "  {} {} ({}, {label})\n",
-            if dry { "to be deleted" } else { "deleted" },
-            dir.display(),
-            human(bytes)
-        );
-        if !dry {
-            let _ = std::fs::remove_dir_all(dir);
-        }
-        bytes
-    };
+fn unclaimed_row(root: &Path, path: &Path) -> Unclaimed {
+    let (bytes, items) = du(path);
+    Unclaimed {
+        path: path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .display()
+            .to_string(),
+        bytes,
+        items,
+    }
+}
 
+fn size_of(paths: &[PathBuf]) -> u64 {
+    paths
+        .iter()
+        .map(|path| path.metadata().map(|m| m.len()).unwrap_or(0))
+        .sum()
+}
+
+// ===== `mirvm cache purge` =====
+
+/// One thing `cache purge` did, or would do under `--dry-run`.
+pub struct PurgeAction {
+    pub deleted: bool,
+    pub path: String,
+    pub bytes: u64,
+    /// Why this path is removable: the class contract, or `stale/garbage`.
+    pub reason: String,
+}
+
+/// The `mirvm cache purge` report.
+pub struct PurgeReport {
+    pub dry_run: bool,
+    pub actions: Vec<PurgeAction>,
+    pub freed_bytes: u64,
+}
+
+impl PurgeReport {
+    pub fn text(&self) -> String {
+        let verb = |deleted: bool| {
+            if self.dry_run {
+                "to be deleted"
+            } else if deleted {
+                "deleted"
+            } else {
+                "kept"
+            }
+        };
+        let mut out = String::new();
+        let mut table = Table::new(2);
+        for action in &self.actions {
+            table.row(vec![
+                Cell::left(verb(action.deleted)),
+                Cell::left(&action.path),
+                Cell::left(format!(
+                    "({}, {})",
+                    human_bytes(action.bytes),
+                    action.reason
+                )),
+            ]);
+        }
+        if self.actions.is_empty() {
+            table.row(vec![Cell::left("nothing to be cleared")]);
+        }
+        out.push_str(&table.render());
+        out.push_str(&format!(
+            "{}{}\n",
+            if self.dry_run {
+                "(dry-run) estimated release "
+            } else {
+                "release "
+            },
+            human_bytes(self.freed_bytes)
+        ));
+        out
+    }
+
+    pub fn json(&self) -> String {
+        let actions: Vec<String> = self
+            .actions
+            .iter()
+            .map(|action| {
+                let mut out = Writer::new();
+                out.boolean("deleted", action.deleted);
+                out.string("path", &action.path);
+                out.number("bytes", action.bytes);
+                out.string("reason", &action.reason);
+                out.finish()
+            })
+            .collect();
+        let mut out = Writer::document();
+        out.boolean("dry_run", self.dry_run);
+        out.raw("actions", &json::array(&actions));
+        out.number("freed_bytes", self.freed_bytes);
+        out.finish()
+    }
+}
+
+/// Execute cleanup and return the report. `dry_run` lists actions without touching anything.
+pub fn purge(root: &Path, plan: Purge) -> PurgeReport {
+    let dry = plan.dry_run;
+    let mut report = PurgeReport {
+        dry_run: dry,
+        actions: Vec::new(),
+        freed_bytes: 0,
+    };
     for family in store::FAMILIES {
         let dir = family.dir_in(root);
         match family.shape {
@@ -223,12 +438,11 @@ pub fn purge(root: &Path, plan: Purge) -> String {
             // keeps the current generation, which is what makes the next run fast.
             Shape::Generation { ext } => {
                 if plan.names(family) {
-                    freed += rm_dir(&dir, "all generations cleared", dry, &mut out);
-                    acted += 1;
+                    remove_dir(&mut report, &dir, "all generations cleared", dry);
                 } else if plan.stale || plan.all {
                     let (_, stale, garbage) = store::split_generational(&dir, ext);
                     for path in stale.iter().chain(&garbage) {
-                        rm_file(path, "stale/garbage", &mut freed, &mut acted, &mut out);
+                        remove_file(&mut report, path, "stale/garbage", dry);
                     }
                 }
             }
@@ -236,8 +450,8 @@ pub fn purge(root: &Path, plan: Purge) -> String {
             // reason it is deletable, and it is the label the report states.
             _ => {
                 if plan.takes(family) {
-                    freed += rm_dir(&dir, family.class.contract(), dry, &mut out);
-                    acted += 1;
+                    let reason = family.class.contract();
+                    remove_dir(&mut report, &dir, reason, dry);
                 }
             }
         }
@@ -258,15 +472,36 @@ pub fn purge(root: &Path, plan: Purge) -> String {
             }
         }
     }
-    if acted == 0 {
-        out += "  nothing to be cleared\n";
+    report
+}
+
+fn remove_file(report: &mut PurgeReport, path: &Path, reason: &str, dry: bool) {
+    let bytes = path.metadata().map(|m| m.len()).unwrap_or(0);
+    let deleted = dry || std::fs::remove_file(path).is_ok();
+    if deleted {
+        report.freed_bytes += bytes;
     }
-    out += &format!(
-        "{}release {}\n",
-        if dry { "(dry-run) estimated " } else { "" },
-        human(freed)
-    );
-    out
+    report.actions.push(PurgeAction {
+        deleted,
+        path: path.display().to_string(),
+        bytes,
+        reason: reason.to_string(),
+    });
+}
+
+fn remove_dir(report: &mut PurgeReport, dir: &Path, reason: &str, dry: bool) -> u64 {
+    let (bytes, _) = du(dir);
+    if !dry {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    report.freed_bytes += bytes;
+    report.actions.push(PurgeAction {
+        deleted: true,
+        path: dir.display().to_string(),
+        bytes,
+        reason: reason.to_string(),
+    });
+    bytes
 }
 
 #[cfg(test)]
@@ -312,8 +547,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(report.contains("to be deleted"));
-        assert!(!report.contains("build.log"));
+        let text = report.text();
+        assert!(text.contains("to be deleted"));
+        assert!(!text.contains("build.log"));
         assert!(old.exists() && current.exists());
         // real cleanup: stale goes, current stays, byproducts untouched
         let report = purge(
@@ -323,8 +559,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(report.contains("deleted") && !report.contains("to be deleted"));
+        let text = report.text();
+        assert!(text.contains("deleted") && !text.contains("to be deleted"));
         assert!(!old.exists() && current.exists() && log.exists());
+        assert_eq!(report.actions.len(), 1);
+        assert!(report.freed_bytes > 0);
+        assert!(report.json().contains("\"deleted\":true"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -401,8 +641,42 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(report.contains("all generations cleared"));
+        assert!(report.text().contains("all generations cleared"));
         assert!(!current.exists() && other.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    /// The status report's first line is a machine contract (the harness reads the build id from it),
+    /// and every family in the register appears in both renderings.
+    fn status_reports_every_family_and_the_build_id() {
+        let root = temp_root("status");
+        let report = status(&root);
+        let text = report.text();
+        let first = text.lines().next().unwrap();
+        assert!(
+            first.starts_with("mirvm local cache ") && first.ends_with(')'),
+            "{first}"
+        );
+        assert!(first.contains(crate::options::build::BUILD_ID));
+        for family in store::FAMILIES {
+            assert!(text.contains(&family.path()), "{} missing", family.path());
+            assert!(
+                report.json().contains(&family.path()),
+                "{} missing from json",
+                family.path()
+            );
+        }
+        // A store written by an older layout is visible rather than silently dropped.
+        std::fs::create_dir_all(root.join("base")).unwrap();
+        std::fs::write(root.join("base/stale.img"), b"old").unwrap();
+        let report = status(&root);
+        assert!(report.text().contains("base/stale.img") && report.text().contains("unclaimed"));
+        assert!(
+            report
+                .json()
+                .contains("\"unclaimed\":[{\"path\":\"base/stale.img\"")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

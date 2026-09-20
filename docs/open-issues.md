@@ -41,15 +41,16 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
   4→64 KiB auto-scaling and rule on batch/checksum. No pre-filled numbers.
 
 - **T13** `APPROVED`: one output grammar and one error vocabulary. `src/diag` is the vocabulary
-  (component, severity, `codes!` register, two sinks, `MIRVM_OUTPUT=text|json`), `src/error.rs` is the
-  failure root that composes module enums and turns one into the process status, `src/sysroot.rs` and
-  `src/options.rs` are typed, the CLI and entry layer speak the grammar with named exit codes, and the
-  `mirvm_log!` macro plus the `log` and `anyhow` dependencies are gone. Remaining: the `Result<_,
-  String>` tail per module tree (vm, lower, cargoless, pack, telemetry, native, cargo_shim, image) and
-  the raw print sites that go with it, the one report renderer in `src/diag/table.rs` with text/JSON
-  renderers for cache status, cache purge, deps audit and `--vm-stats`, rustc `--error-format=json`,
-  and the repo-quality gates (no `Result<_, String>`, no bare exit code, no raw print, unique codes,
-  no duplicated prose, diag purity). The `#![allow(dead_code)]` in `src/diag/mod.rs` is deleted by the
+  (component, severity, `codes!` register, two sinks, `src/diag/table.rs` as the one report renderer,
+  `MIRVM_OUTPUT=text|json`), `src/error.rs` is the failure root that composes module enums and turns
+  one into the process status, `src/sysroot.rs` and `src/options.rs` are typed, the CLI and entry
+  layer speak the grammar with named exit codes, and `cache status`/`cache purge` are data structures
+  with text and versioned JSON renderings. The `mirvm_log!` macro plus the `log` and `anyhow`
+  dependencies are gone. Remaining: the `Result<_, String>` tail per module tree (vm, lower,
+  cargoless, pack, telemetry, native, cargo_shim, image) and the raw print sites that go with it,
+  text/JSON renderings for `deps audit` and `--vm-stats`, rustc `--error-format=json`, and the
+  repo-quality gates (no `Result<_, String>`, no bare exit code, no raw print, unique codes, no
+  duplicated prose, diag purity). The `#![allow(dead_code)]` in `src/diag/mod.rs` is deleted by the
   last print conversion.
 
 ## C. Corpus-driven product debt

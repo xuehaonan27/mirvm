@@ -1,15 +1,16 @@
-//! Machine rendering: one JSON object per diagnostic line.
+//! Machine rendering: one JSON object per diagnostic line, and the report documents.
 //!
-//! The envelope is fixed and versioned. `details` is a pre-rendered object produced by the type that
-//! owns the fields, so this module never needs to know any error's shape — it splices the fragment
-//! verbatim. That keeps the diagnostic vocabulary free of serialization dependencies, which the TSan
-//! harness relies on.
+//! Every mirvm-authored JSON document is assembled by [`Writer`], so the escaping, the separator and
+//! the version field exist in one place. A report that builds its own braces and commas is how two
+//! documents end up with different ideas of what a string may contain.
+//!
+//! This module is compiled source-for-source into the TSan harness, so it must stay pure `std`.
 
 use std::fmt::Write as _;
 
 use super::Diagnostic;
 
-/// The envelope version. A consumer may reject a version it does not know before reading further.
+/// The document version. A consumer may reject a version it does not know before reading further.
 const VERSION: u8 = 1;
 
 /// Whether `MIRVM_OUTPUT` selects machine output.
@@ -22,54 +23,125 @@ pub(super) fn enabled() -> bool {
         .is_some_and(|value| value == "json")
 }
 
-/// One JSON line for a diagnostic, newline included.
-pub(super) fn line(diagnostic: &dyn Diagnostic) -> String {
-    let mut out = String::with_capacity(192);
-    let _ = write!(
-        out,
-        "{{\"v\":{VERSION},\"severity\":\"{}\",\"component\":",
-        diagnostic.severity().name()
-    );
-    match diagnostic.component() {
-        Some(component) => string(component.name(), &mut out),
-        None => out.push_str("null"),
+/// Assemble one JSON object.
+pub(crate) struct Writer {
+    out: String,
+}
+
+impl Writer {
+    /// A nested object: no version field, because the document that contains it carries one.
+    pub(crate) fn new() -> Self {
+        Self {
+            out: String::from("{"),
+        }
     }
-    out.push_str(",\"code\":");
-    match diagnostic.code() {
-        Some(code) => string(code, &mut out),
-        None => out.push_str("null"),
+
+    /// A top-level document: the version comes first, so a consumer can reject what it does not know.
+    pub(crate) fn document() -> Self {
+        Self {
+            out: format!("{{\"v\":{VERSION}"),
+        }
     }
-    out.push_str(",\"message\":");
-    string(&diagnostic.to_string(), &mut out);
-    out.push_str(",\"details\":");
-    match diagnostic.details() {
-        Some(details) => out.push_str(&details),
-        None => out.push_str("null"),
+
+    pub(crate) fn string(&mut self, name: &str, value: &str) -> &mut Self {
+        self.key(name);
+        escape(value, &mut self.out);
+        self
     }
-    out.push_str(",\"causes\":[");
-    for (index, cause) in diagnostic.causes().iter().enumerate() {
+
+    pub(crate) fn number(&mut self, name: &str, value: u64) -> &mut Self {
+        self.key(name);
+        let _ = write!(self.out, "{value}");
+        self
+    }
+
+    pub(crate) fn boolean(&mut self, name: &str, value: bool) -> &mut Self {
+        self.key(name);
+        self.out.push_str(if value { "true" } else { "false" });
+        self
+    }
+
+    pub(crate) fn null(&mut self, name: &str) -> &mut Self {
+        self.key(name);
+        self.out.push_str("null");
+        self
+    }
+
+    /// A value the caller already rendered: a nested object, or an array built by [`array`].
+    pub(crate) fn raw(&mut self, name: &str, value: &str) -> &mut Self {
+        self.key(name);
+        self.out.push_str(value);
+        self
+    }
+
+    pub(crate) fn finish(mut self) -> String {
+        self.out.push_str("}\n");
+        self.out
+    }
+
+    fn key(&mut self, name: &str) {
+        if self.out.len() > 1 {
+            self.out.push(',');
+        }
+        self.out.push('"');
+        self.out.push_str(name);
+        self.out.push_str("\":");
+    }
+}
+
+/// A JSON array of already-rendered values.
+pub(crate) fn array(items: &[String]) -> String {
+    let mut out = String::from("[");
+    for (index, item) in items.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
-        string(cause, &mut out);
+        out.push_str(item);
     }
     out.push(']');
-    out.push_str(",\"usage\":");
-    match diagnostic.usage() {
-        Some(usage) => string(usage, &mut out),
-        None => out.push_str("null"),
-    }
-    // Only a failure has an exit code; an event's `Kind` is meaningless and must not be reported as
-    // if the process were about to exit with it.
-    if diagnostic.severity() == super::Severity::Error {
-        let _ = write!(out, ",\"exit_code\":{}", diagnostic.kind().code());
-    }
-    out.push_str("}\n");
     out
 }
 
+/// One JSON string literal, for a value spliced into an array or a nested object.
+pub(crate) fn literal(value: &str) -> String {
+    let mut out = String::new();
+    escape(value, &mut out);
+    out
+}
+
+/// One JSON line for a diagnostic, newline included.
+pub(super) fn line(diagnostic: &dyn Diagnostic) -> String {
+    let mut out = Writer::document();
+    out.string("severity", diagnostic.severity().name());
+    match diagnostic.component() {
+        Some(component) => out.string("component", component.name()),
+        None => out.null("component"),
+    };
+    match diagnostic.code() {
+        Some(code) => out.string("code", code),
+        None => out.null("code"),
+    };
+    out.string("message", &diagnostic.to_string());
+    match diagnostic.details() {
+        Some(details) => out.raw("details", &details),
+        None => out.null("details"),
+    };
+    let causes: Vec<String> = diagnostic.causes().iter().map(|c| literal(c)).collect();
+    out.raw("causes", &array(&causes));
+    match diagnostic.usage() {
+        Some(usage) => out.string("usage", usage),
+        None => out.null("usage"),
+    };
+    // Only a failure has an exit code; an event's `Kind` is meaningless and must not be reported as
+    // if the process were about to exit with it.
+    if diagnostic.severity() == super::Severity::Error {
+        out.number("exit_code", diagnostic.kind().code().into());
+    }
+    out.finish()
+}
+
 /// Append one JSON string literal.
-fn string(value: &str, out: &mut String) {
+fn escape(value: &str, out: &mut String) {
     out.push('"');
     for c in value.chars() {
         match c {
