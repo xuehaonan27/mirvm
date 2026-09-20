@@ -178,6 +178,24 @@ impl From<crate::options::Error> for Error {
     }
 }
 
+impl From<crate::pack::Error> for Error {
+    fn from(error: crate::pack::Error) -> Self {
+        Error::Owned(Box::new(error))
+    }
+}
+
+impl From<crate::image::Error> for Error {
+    fn from(error: crate::image::Error) -> Self {
+        Error::Owned(Box::new(error))
+    }
+}
+
+impl From<crate::cargo_shim::Error> for Error {
+    fn from(error: crate::cargo_shim::Error) -> Self {
+        Error::Owned(Box::new(error))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

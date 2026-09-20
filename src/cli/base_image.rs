@@ -12,6 +12,7 @@ use rustc_driver::{Callbacks, Compilation};
 use rustc_interface::interface::Compiler;
 use rustc_middle::ty::TyCtxt;
 
+use crate::diag::Component;
 use crate::image::base;
 
 struct BaseBuildCallbacks {
@@ -30,7 +31,7 @@ impl Callbacks for BaseBuildCallbacks {
         );
         match base::store(&self.out, module, exports, fp) {
             Ok(()) => self.ok = true,
-            Err(reason) => eprintln!("base-image: {reason}, giving up"),
+            Err(error) => crate::diag::emit(&crate::error::Error::from(error)),
         }
         Compilation::Stop
     }
@@ -39,30 +40,40 @@ impl Callbacks for BaseBuildCallbacks {
 /// Subprocess entry point. argv = [<output path>].
 pub(super) fn build_main(mut argv: impl Iterator<Item = String>) -> ExitCode {
     let Some(out) = argv.next() else {
-        eprintln!("__build-base-image: missing output path");
-        return ExitCode::from(2);
+        return crate::error::Error::usage(Component::BaseImage, "missing output path").report();
     };
     let out = PathBuf::from(out);
     // The seed source is staged next to the image it produces, inside the family directory the
     // parent process already created.
     let Some(src_dir) = out.parent().map(|dir| dir.join("src")) else {
-        eprintln!("__build-base-image: output path has no parent directory");
-        return ExitCode::from(2);
+        return crate::error::Error::usage(
+            Component::BaseImage,
+            format!("output path has no parent directory: {}", out.display()),
+        )
+        .report();
     };
     let sysroot = match crate::sysroot::ensure_sysroot() {
         Ok(path) => path.display().to_string(),
-        Err(error) => {
-            eprintln!("__build-base-image: sysroot unavailable: {error}");
-            return ExitCode::from(1);
-        }
+        Err(error) => return crate::error::Error::from(error).report(),
     };
     // Synthetic empty main: the deterministic base-image seed
-    if std::fs::create_dir_all(&src_dir).is_err() {
-        return ExitCode::from(1);
+    if let Err(error) = std::fs::create_dir_all(&src_dir) {
+        return crate::error::Error::failure(
+            Component::BaseImage,
+            format!(
+                "cannot create the seed directory {}: {error}",
+                src_dir.display()
+            ),
+        )
+        .report();
     }
     let src = src_dir.join("empty_main.rs");
-    if std::fs::write(&src, "fn main() {}\n").is_err() {
-        return ExitCode::from(1);
+    if let Err(error) = std::fs::write(&src, "fn main() {}\n") {
+        return crate::error::Error::failure(
+            Component::BaseImage,
+            format!("cannot write the seed source {}: {error}", src.display()),
+        )
+        .report();
     }
 
     let mut rustc_args = vec![
