@@ -229,7 +229,7 @@ How `L3` works, and why it is far cheaper than Wasm:
   `EXPECTED` list must print `PASS` — `mixed-stack-fib`, `atomic-cross-tier`, `blocking-io-liveness`,
   `mixed-stack-unwind`, `engine-atomics-thunk-cache`, `capture-session-lifecycle`,
   `engine-close-race`, `guest-threads`, `signal-delivery`, `fork-guard`. One case runs outside the
-  bundled suite with `cd tests/tsan && MIRVM_BUILD_ID=0000000000000000 RUSTFLAGS="-Zsanitizer=thread"
+  bundled suite with `cd tests/data/fixtures/tsan && MIRVM_BUILD_ID=0000000000000000 RUSTFLAGS="-Zsanitizer=thread"
   cargo +nightly-2026-07-02 run -Zbuild-std --target x86_64-unknown-linux-gnu --release -- <case-id>`.
   TSan covers only the engine's own state (`VmShared`, caches, registry, arena and block pool, the
   publish protocol); guest races are explicitly out of contract, and cases keep guest memory race-free

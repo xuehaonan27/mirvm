@@ -1,7 +1,7 @@
 # Projects for testing
-[submodule "tests/projects/hexyl"]
+[submodule "tests/data/projects/hexyl"]
 	path = tests/data/projects/hexyl
 	url = https://github.com/sharkdp/hexyl
-[submodule "tests/projects/tokei"]
+[submodule "tests/data/projects/tokei"]
 	path = tests/data/projects/tokei
 	url = https://github.com/XAMPPRocky/tokei
