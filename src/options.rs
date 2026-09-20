@@ -873,49 +873,30 @@ pub fn render() -> String {
     out
 }
 
-/// `mirvm options --json`. Hand-rolled so this module keeps no dependency beyond `std`: the tsan
-/// harness compiles it source-for-source alongside `src/vm`.
+/// `mirvm options --json`: the register as one versioned document, so a consumer reads the same
+/// binary identity and the same rows that the text form prints. The writer comes from `diag::json`,
+/// which is `std`-only for the same reason this module is: the tsan harness compiles both
+/// source-for-source alongside `src/vm`.
 pub fn render_json() -> String {
-    let mut out = String::from("[");
-    for (index, row) in rows().iter().enumerate() {
-        if index > 0 {
-            out.push(',');
-        }
-        out.push('\n');
-        out.push_str(&format!(
-            "  {{\"field\": {}, \"identity\": {}, \"env\": {}, \"cli\": {}, \"value\": {}, \"source\": {}}}",
-            json_string(row.field),
-            json_string(row.identity),
-            json_string(&row.env),
-            json_string(&row.cli),
-            json_string(&row.value),
-            json_string(row.source),
-        ));
-    }
-    if !out.ends_with('[') {
-        out.push('\n');
-    }
-    out.push_str("]\n");
-    out
-}
-
-/// A JSON string literal: the two mandatory escapes plus the control range.
-fn json_string(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for c in value.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    let rows: Vec<String> = rows()
+        .iter()
+        .map(|row| {
+            let mut out = crate::diag::json::Writer::new();
+            out.string("field", row.field);
+            out.string("identity", row.identity);
+            out.string("env", &row.env);
+            out.string("cli", &row.cli);
+            out.string("value", &row.value);
+            out.string("source", row.source);
+            out.finish()
+        })
+        .collect();
+    let mut out = crate::diag::json::Writer::document();
+    out.string("version", env!("CARGO_PKG_VERSION"));
+    out.string("build_id", build::BUILD_ID);
+    out.string("host", build::HOST);
+    out.raw("options", &crate::diag::json::array(&rows));
+    out.finish()
 }
 
 /// Version stamp for `mirvm options`, so a report names the binary that produced it.
