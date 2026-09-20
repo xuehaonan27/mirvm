@@ -304,7 +304,7 @@ entries! {
     /// `log export` filter: a sequence number or a START:END range.
     user     log_sequence             cli("--sequence", "Log") default("unset");
     /// Machine output: reports as one JSON document, diagnostics as one JSON object per line.
-    user     output_format            env("MIRVM_OUTPUT") cli("--json", "Run Pack Capture Options") flag default("text");
+    user     output_format            env("MIRVM_OUTPUT") cli("--json", "Run Pack Capture Cache Options") flag default("text");
     /// Internal: forwarded capture directory for the Cargo runner form.
     user     mirvm_capture_directory  cli("--mirvm-capture-directory", "Internal") default("unset");
 }

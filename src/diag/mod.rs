@@ -24,9 +24,9 @@
 // The allow is deleted in the change that converts the last raw `eprintln!` call site.
 #![allow(dead_code)]
 
-mod json;
-
 pub mod exit;
+pub(crate) mod json;
+pub(crate) mod table;
 
 use std::fmt::{self, Write as _};
 use std::sync::OnceLock;

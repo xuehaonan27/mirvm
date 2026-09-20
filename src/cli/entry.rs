@@ -158,6 +158,7 @@ pub(super) fn cache_main(
             "--target" => plan.target = true,
             "--all" => plan.all = true,
             "--data" => plan.data = true,
+            "--json" => super::note_json_output(),
             _ => {
                 return Err(crate::error::Error::usage_with(
                     Component::Cache,
@@ -167,9 +168,11 @@ pub(super) fn cache_main(
             }
         }
     }
+    let json = crate::options::get().output_format()? == crate::options::OutputFormat::Json;
     match sub.as_deref() {
         Some("status") => {
-            print!("{}", crate::store::report::status(&root));
+            let report = crate::store::report::status(&root);
+            print!("{}", if json { report.json() } else { report.text() });
             Ok(ExitCode::SUCCESS)
         }
         Some("purge") => {
@@ -185,7 +188,8 @@ pub(super) fn cache_main(
             {
                 plan.stale = true;
             }
-            print!("{}", crate::store::report::purge(&root, plan));
+            let report = crate::store::report::purge(&root, plan);
+            print!("{}", if json { report.json() } else { report.text() });
             Ok(ExitCode::SUCCESS)
         }
         _ => Err(crate::error::Error::usage_with(
