@@ -10,6 +10,7 @@ use rustc_interface::interface::Compiler;
 use rustc_middle::ty::TyCtxt;
 
 use super::GuestProcessState;
+use super::diagnostics;
 use super::{
     CAPTURE_DIRECTORY, capture_directory, capture_directory_is_forwarded, compiler_session_guard,
 };
@@ -36,7 +37,7 @@ pub(crate) fn pack_driver(
         t_start,
         timing: PhaseTiming::default(),
         rustc_args: rustc_args.clone(),
-        stack: crate::lower::image::ImageStack::empty(),
+        stack: crate::image::ImageStack::empty(),
         split_image: None,
         session_fp: None,
         deps_image_loaded: false,
@@ -183,7 +184,7 @@ struct MirvmCallbacks {
     rustc_args: Vec<String>,
     /// Image stack: checked against the lowering fingerprint in `after_analysis`, then consulted
     /// by lower for the union; absorbed at the end of `run_driver`.
-    stack: crate::lower::image::ImageStack,
+    stack: crate::image::ImageStack,
     /// Split image produced by `lower_program` when the deps image is enabled and a base image is
     /// present; pushed onto the stack and absorbed at the end of `run_driver`.
     split_image: Option<crate::lower::SplitImage>,
@@ -240,7 +241,7 @@ fn print_phase_timing(
         line.push_str(&format!(" engine={:.1}ms", ms(d)));
     }
     line.push_str(&format!(" total={:.1}ms", ms(total)));
-    crate::diagnostics::control(format_args!("{line}"));
+    diagnostics::control(format_args!("{line}"));
 }
 
 impl Callbacks for MirvmCallbacks {
@@ -248,7 +249,7 @@ impl Callbacks for MirvmCallbacks {
         // Warning-counting hook (precondition for L2 entry): psess_created fires after the
         // interface overwrites TRACK_DIAGNOSTIC and before the first parse, so no session
         // diagnostic is missed.
-        let emitter = crate::diagnostics::CompilerEmitterSpec::for_capture(
+        let emitter = diagnostics::CompilerEmitterSpec::for_capture(
             &config.opts,
             self.route_compiler_diagnostics,
         );
@@ -263,14 +264,12 @@ impl Callbacks for MirvmCallbacks {
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         self.timing.frontend = Some(self.t_start.elapsed());
         let Some((def_id, entry_ty)) = tcx.entry_fn(()) else {
-            crate::diagnostics::control(format_args!(
-                "mirvm: entry fn not found (needs `fn main`)"
-            ));
+            diagnostics::control(format_args!("mirvm: entry fn not found (needs `fn main`)"));
             self.exit_code = Some(1);
             return Compilation::Stop;
         };
         if !matches!(entry_ty, rustc_session::config::EntryFnType::Main { .. }) {
-            crate::diagnostics::control(format_args!(
+            diagnostics::control(format_args!(
                 "mirvm: #![no_main]/start entry points are not supported yet"
             ));
             self.exit_code = Some(1);
@@ -297,7 +296,7 @@ impl Callbacks for MirvmCallbacks {
             );
             self.session_fp = Some(fp);
             if !self.stack.fp_matches(fp) {
-                self.stack = crate::lower::image::ImageStack::empty();
+                self.stack = crate::image::ImageStack::empty();
             }
             // The callback performs only the loading phase; execution must wait until tcx.finish,
             // diagnostic finalization and compiler drop have all completed.
@@ -310,13 +309,13 @@ impl Callbacks for MirvmCallbacks {
             // process placeholder), permanently breaking the L2 key chain. Lowering everything
             // into the delta keeps semantics unchanged (one id space, the classic non-split path)
             // and keeps L2 usable for pure-std programs.
-            let want_split = !crate::depsimage::bypassed()
+            let want_split = !crate::image::deps::bypassed()
                 && !self.deps_image_loaded
                 && !self.stack.is_empty()
                 && self
                     .stack
                     .key()
-                    .is_some_and(|bk| crate::depsimage::pre_key(&self.rustc_args, bk).is_some());
+                    .is_some_and(|bk| crate::image::deps::pre_key(&self.rustc_args, bk).is_some());
             let (module, split_image) = crate::lower::lower_program(tcx, &self.stack, want_split);
             self.module = Some(module);
             self.split_image = split_image;
@@ -331,15 +330,13 @@ impl Callbacks for MirvmCallbacks {
                     out,
                 ) {
                     Ok(()) => {
-                        crate::diagnostics::control(format_args!(
+                        diagnostics::control(format_args!(
                             "mirvm: package written to {}",
                             out.display()
                         ));
                     }
                     Err(reason) => {
-                        crate::diagnostics::control(format_args!(
-                            "mirvm: packing failed: {reason}"
-                        ));
+                        diagnostics::control(format_args!("mirvm: packing failed: {reason}"));
                         self.exit_code = Some(1);
                     }
                 }
@@ -354,7 +351,7 @@ impl Callbacks for MirvmCallbacks {
                     .key()
                     .expect("split implies a base image is present")
                     .to_string();
-                let bi = crate::depsimage::store_and_wrap(&self.rustc_args, &base_key, fp, img);
+                let bi = crate::image::deps::store_and_wrap(&self.rustc_args, &base_key, fp, img);
                 self.stack.push(bi);
             }
             // L2 entry: the clean snapshot before the guest runs (argv is not finalized yet). Any
@@ -364,7 +361,7 @@ impl Callbacks for MirvmCallbacks {
             let t_store = std::time::Instant::now();
             if session_diagnostics_clean()
                 && tcx.sess.dcx().has_errors().is_none()
-                && crate::ircache::store(
+                && crate::image::ir::store(
                     tcx,
                     &self.rustc_args,
                     self.module.as_ref().expect("just set"),
@@ -422,7 +419,7 @@ pub(super) fn run_vm_engine(
     already_verified: bool,
 ) -> i32 {
     if !already_verified && let Err(e) = crate::vm::verify::module(&module) {
-        crate::diagnostics::control(format_args!("mirvm: bytecode verification failed: {e}"));
+        diagnostics::control(format_args!("mirvm: bytecode verification failed: {e}"));
         return 70;
     }
     if vm_stats {
@@ -431,7 +428,7 @@ pub(super) fn run_vm_engine(
     }
     // Finalize argv: runtime input is placed after snapshot semantics; one path for cold and warm.
     if let Err(e) = module.finalize_entry_argv(program_argv) {
-        crate::diagnostics::control(format_args!("mirvm: {e}"));
+        diagnostics::control(format_args!("mirvm: {e}"));
         return 70;
     }
     let mut capture = if let Some(directory) = CAPTURE_DIRECTORY.get() {
@@ -447,7 +444,7 @@ pub(super) fn run_vm_engine(
         match crate::telemetry::CaptureSession::start(options) {
             Ok(session) => Some(session),
             Err(error) => {
-                crate::diagnostics::control(format_args!(
+                diagnostics::control(format_args!(
                     "mirvm capture: cannot start event writer: {error}"
                 ));
                 return 70;
@@ -461,13 +458,13 @@ pub(super) fn run_vm_engine(
         match session.finish(std::time::Duration::from_secs(30)) {
             Ok(crate::telemetry::CaptureFinish::Finished(_)) => {}
             Ok(crate::telemetry::CaptureFinish::InProgress) => {
-                crate::diagnostics::control(format_args!(
+                diagnostics::control(format_args!(
                     "mirvm capture: writer did not finish within 30 seconds"
                 ));
                 return 70;
             }
             Err(error) => {
-                crate::diagnostics::control(format_args!(
+                diagnostics::control(format_args!(
                     "mirvm capture: cannot finish event file: {error}"
                 ));
                 return 70;
@@ -484,7 +481,7 @@ fn run_vm_engine_loaded(module: crate::vm::ir::Module, vm_call: Option<&str>) ->
     let engine = match crate::vm::ctx::Engine::try_new(shared) {
         Ok(engine) => engine,
         Err(e) => {
-            crate::diagnostics::control(format_args!("mirvm: {e}"));
+            diagnostics::control(format_args!("mirvm: {e}"));
             return 70;
         }
     };
@@ -494,12 +491,12 @@ fn run_vm_engine_loaded(module: crate::vm::ir::Module, vm_call: Option<&str>) ->
         let result = match on_guest_stack(move || crate::vm::interp::run_main(&execution)) {
             Ok(result) => result,
             Err(error) => {
-                crate::diagnostics::control(format_args!("{}", error.message));
+                diagnostics::control(format_args!("{}", error.message));
                 return error.exit_code;
             }
         };
         if let Err(error) = engine.wait_closed() {
-            crate::diagnostics::control(format_args!(
+            diagnostics::control(format_args!(
                 "mirvm[m4-engine]: cannot wait for Engine teardown: {error:?}"
             ));
             return 70;
@@ -511,7 +508,7 @@ fn run_vm_engine_loaded(module: crate::vm::ir::Module, vm_call: Option<&str>) ->
             // exit status.
             Ok(crate::vm::interp::RunOutcome::GuestPanic) => 101,
             Err(e) => {
-                crate::diagnostics::control(format_args!("mirvm[m4-engine]: {e}"));
+                diagnostics::control(format_args!("mirvm[m4-engine]: {e}"));
                 e.exit_code
             }
         };
@@ -519,7 +516,7 @@ fn run_vm_engine_loaded(module: crate::vm::ir::Module, vm_call: Option<&str>) ->
     let (name, args) = match parse_vm_call(spec) {
         Ok(v) => v,
         Err(e) => {
-            crate::diagnostics::control(format_args!("mirvm: fail to resolve `--vm-call`: {e}"));
+            diagnostics::control(format_args!("mirvm: fail to resolve `--vm-call`: {e}"));
             return 2;
         }
     };
@@ -531,12 +528,12 @@ fn run_vm_engine_loaded(module: crate::vm::ir::Module, vm_call: Option<&str>) ->
     }) {
         Ok(result) => result,
         Err(error) => {
-            crate::diagnostics::control(format_args!("{}", error.message));
+            diagnostics::control(format_args!("{}", error.message));
             return error.exit_code;
         }
     };
     if let Err(error) = engine.wait_closed() {
-        crate::diagnostics::control(format_args!(
+        diagnostics::control(format_args!(
             "mirvm[m4-engine]: cannot wait for Engine teardown: {error:?}"
         ));
         return 70;
@@ -547,11 +544,11 @@ fn run_vm_engine_loaded(module: crate::vm::ir::Module, vm_call: Option<&str>) ->
             0
         }
         Ok(crate::vm::interp::RunOutcome::GuestPanic) => {
-            crate::diagnostics::control(format_args!("mirvm[m4-engine]: guest panic not caught"));
+            diagnostics::control(format_args!("mirvm[m4-engine]: guest panic not caught"));
             101
         }
         Err(e) => {
-            crate::diagnostics::control(format_args!("mirvm[m4-engine]: {e}"));
+            diagnostics::control(format_args!("mirvm[m4-engine]: {e}"));
             e.exit_code
         }
     }
@@ -634,13 +631,13 @@ pub(crate) fn run_driver(
     suppress_runner_warning_summary: bool,
     guest_process: Option<GuestProcessState>,
 ) -> ExitCode {
-    let mut diagnostic_router = match crate::diagnostics::DiagnosticRouter::start(
+    let mut diagnostic_router = match diagnostics::DiagnosticRouter::start(
         capture_directory(),
         capture_directory_is_forwarded(),
     ) {
         Ok(router) => router,
         Err(error) => {
-            crate::diagnostics::control(format_args!(
+            diagnostics::control(format_args!(
                 "mirvm capture: cannot start diagnostics stream: {error}"
             ));
             return ExitCode::from(70);
@@ -651,28 +648,28 @@ pub(crate) fn run_driver(
     // stack, which self-heals onto the full cold path). The lowering fingerprint
     // (ub/overflow/contract checks) can only be verified inside the session; after_analysis does.
     let mut stack = if dump_mir {
-        crate::lower::image::ImageStack::empty()
+        crate::image::ImageStack::empty()
     } else {
-        crate::baseimage::ensure()
+        crate::image::base::ensure()
     };
     // Deps-image load before the compiler runs: not bypassed + a base image is present. On a hit
     // it is pushed onto the stack, so the key chain then contains the image key and L2 delta
     // entries can be recorded again.
     let mut deps_image_loaded = false;
     if !dump_mir
-        && !crate::depsimage::bypassed()
+        && !crate::image::deps::bypassed()
         && let Some(base) = stack.base_image()
-        && let Some(bi) = crate::depsimage::try_load(&rustc_args, base)
+        && let Some(bi) = crate::image::deps::try_load(&rustc_args, base)
     {
         deps_image_loaded = true;
         stack.push(bi);
     }
     let base_key = stack.key().map(str::to_owned);
     // L2 warm path: a hit skips the entire rustc session (frontend + metadata + mono + lower).
-    // dump-mir needs the tcx and therefore forces the cold path. ircache verifies delta entries
+    // dump-mir needs the tcx and therefore forces the cold path. The L2 entry verifies its delta
     // against the key chain.
     if !dump_mir
-        && let Some(mut module) = crate::ircache::lookup(
+        && let Some(mut module) = crate::image::ir::lookup(
             &rustc_args,
             base_key.as_deref(),
             crate::vm::verify::Prefix {
@@ -699,9 +696,9 @@ pub(crate) fn run_driver(
         if let Some(guest) = &guest_process
             && let Err(message) = guest.enter()
         {
-            crate::diagnostics::control(format_args!("{message}"));
+            diagnostics::control(format_args!("{message}"));
             if let Err(error) = diagnostic_router.finish() {
-                crate::diagnostics::control(format_args!(
+                diagnostics::control(format_args!(
                     "mirvm capture: cannot finish diagnostics stream: {error}"
                 ));
                 exit(70);
@@ -713,7 +710,7 @@ pub(crate) fn run_driver(
         let engine = (!vm_stats).then(|| t_engine.elapsed());
         print_phase_timing(&timing, engine, t_start.elapsed(), vm_stats);
         if let Err(error) = diagnostic_router.finish() {
-            crate::diagnostics::control(format_args!(
+            diagnostics::control(format_args!(
                 "mirvm capture: cannot finish diagnostics stream: {error}"
             ));
             exit(70);
@@ -755,7 +752,7 @@ pub(crate) fn run_driver(
     diagnostic_router.seal_compiler();
     if compiler_code != ExitCode::SUCCESS {
         if let Err(error) = diagnostic_router.finish() {
-            crate::diagnostics::control(format_args!(
+            diagnostics::control(format_args!(
                 "mirvm capture: cannot finish diagnostics stream: {error}"
             ));
             return ExitCode::from(70);
@@ -764,7 +761,7 @@ pub(crate) fn run_driver(
     }
     if let Some(code) = callbacks.exit_code {
         if let Err(error) = diagnostic_router.finish() {
-            crate::diagnostics::control(format_args!(
+            diagnostics::control(format_args!(
                 "mirvm capture: cannot finish diagnostics stream: {error}"
             ));
             exit(70);
@@ -776,19 +773,16 @@ pub(crate) fn run_driver(
         // the merged module). An empty stack (no image) skips it: the module's asm_stub_addrs were
         // already materialized inside the lower session. The split artifact was written to disk and
         // pushed onto the stack in after_analysis, so it is absorbed here like any other layer.
-        let stack = std::mem::replace(
-            &mut callbacks.stack,
-            crate::lower::image::ImageStack::empty(),
-        );
+        let stack = std::mem::replace(&mut callbacks.stack, crate::image::ImageStack::empty());
         if !stack.is_empty() {
             stack.absorb_into(&mut module);
         }
         if let Some(guest) = &guest_process
             && let Err(message) = guest.enter()
         {
-            crate::diagnostics::control(format_args!("{message}"));
+            diagnostics::control(format_args!("{message}"));
             if let Err(error) = diagnostic_router.finish() {
-                crate::diagnostics::control(format_args!(
+                diagnostics::control(format_args!(
                     "mirvm capture: cannot finish diagnostics stream: {error}"
                 ));
                 exit(70);
@@ -813,7 +807,7 @@ pub(crate) fn run_driver(
             callbacks.vm_stats,
         );
         if let Err(error) = diagnostic_router.finish() {
-            crate::diagnostics::control(format_args!(
+            diagnostics::control(format_args!(
                 "mirvm capture: cannot finish diagnostics stream: {error}"
             ));
             exit(70);
@@ -821,7 +815,7 @@ pub(crate) fn run_driver(
         exit(code);
     }
     if let Err(error) = diagnostic_router.finish() {
-        crate::diagnostics::control(format_args!(
+        diagnostics::control(format_args!(
             "mirvm capture: cannot finish diagnostics stream: {error}"
         ));
         return ExitCode::from(70);

@@ -707,17 +707,21 @@ pub fn parse_runner_invocation(
     mut argv: impl Iterator<Item = String>,
 ) -> (Vec<String>, Vec<String>, Vec<(String, String)>) {
     let fake_bin = argv.next().unwrap_or_else(|| {
-        crate::diagnostics::control(format_args!("mirvm runner: missing binary path argument"));
+        crate::cli::diagnostics::control(format_args!(
+            "mirvm runner: missing binary path argument"
+        ));
         exit(2);
     });
     let program_args: Vec<String> = argv.collect();
 
     let data = read_fake_info(Path::new(&fake_bin)).unwrap_or_else(|e| {
-        crate::diagnostics::control(format_args!("mirvm runner: failed to read {fake_bin}: {e}"));
+        crate::cli::diagnostics::control(format_args!(
+            "mirvm runner: failed to read {fake_bin}: {e}"
+        ));
         exit(1);
     });
     let info: CrateRunInfo = serde_json::from_str(&data).unwrap_or_else(|_| {
-        crate::diagnostics::control(format_args!(
+        crate::cli::diagnostics::control(format_args!(
             "mirvm runner: {fake_bin} is not a mirvm fake binary (try deleting target/mirvm and rerunning)"
         ));
         exit(1);
@@ -740,7 +744,7 @@ pub fn parse_runner_invocation(
             })
         })
         .unwrap_or_else(|| {
-            crate::diagnostics::control(format_args!(
+            crate::cli::diagnostics::control(format_args!(
                 "mirvm runner: the launcher recipe lacks MIRVM_SYSROOT (clean the matching target and rebuild)"
             ));
             exit(1);

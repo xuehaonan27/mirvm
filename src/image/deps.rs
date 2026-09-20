@@ -139,8 +139,8 @@ fn file_path(key: &str) -> PathBuf {
 /// full lowering self-heals and the main path stays silent, because stderr participates in native diffs.
 pub fn try_load(
     rustc_args: &[String],
-    base: &crate::lower::image::BaseImage,
-) -> Option<crate::lower::image::BaseImage> {
+    base: &crate::image::BaseImage,
+) -> Option<crate::image::BaseImage> {
     let (key, stamps) = pre_key(rustc_args, &base.key)?;
     let data = std::fs::read(file_path(&key)).ok()?;
     let mut f: DepsFile = postcard::from_bytes(&data).ok()?;
@@ -171,7 +171,7 @@ pub fn try_load(
         return None;
     }
     let module = f.module;
-    Some(crate::lower::image::BaseImage {
+    Some(crate::image::BaseImage {
         fn_by_sym: module.exports.clone(),
         entry_by_sym: f.fn_entry_syms.into_iter().collect(),
         static_by_sym: f.static_syms.into_iter().collect(),
@@ -191,7 +191,7 @@ pub fn store_and_wrap(
     base_key: &str,
     fp: (bool, bool, bool),
     image: crate::lower::SplitImage,
-) -> crate::lower::image::BaseImage {
+) -> crate::image::BaseImage {
     let mut bi = image.into_base_image(fp);
     // Cacheability: the frozen area must sit in the fixed spline k=0 domain the layer below expects,
     // a prerequisite for the snapshot's embedded absolute addresses to stay stable across processes.
@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn pre_key_detects_same_length_content_change_with_restored_mtime() {
         let dir = std::env::temp_dir().join(format!(
-            "mirvm-depsimage-content-test-{}",
+            "mirvm-image-deps-content-test-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();

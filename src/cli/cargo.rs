@@ -9,6 +9,7 @@ use rustc_middle::ty::TyCtxt;
 
 use crate::cargo_shim;
 
+use super::diagnostics;
 use super::driver::{pack_driver, run_driver};
 use super::{
     capture_directory, capture_directory_is_forwarded, compiler_session_guard,
@@ -32,13 +33,13 @@ pub(super) fn runner_main(argv: impl Iterator<Item = String>) -> ExitCode {
         }
         Ok(None) => {}
     }
-    let _diagnostic_router = match crate::diagnostics::DiagnosticRouter::start(
+    let _diagnostic_router = match diagnostics::DiagnosticRouter::start(
         capture_directory(),
         capture_directory_is_forwarded(),
     ) {
         Ok(router) => router,
         Err(error) => {
-            crate::diagnostics::control(format_args!(
+            diagnostics::control(format_args!(
                 "mirvm capture: cannot start diagnostics stream: {error}"
             ));
             return ExitCode::from(70);

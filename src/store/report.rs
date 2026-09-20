@@ -275,7 +275,7 @@ mod tests {
 
     fn temp_root(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "mirvm-cachectl-test-{}-{}",
+            "mirvm-cache-report-test-{}-{}",
             tag,
             std::process::id()
         ));

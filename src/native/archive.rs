@@ -367,7 +367,7 @@ pub(crate) fn materialize_static_libraries<'tcx>(
 /// Hidden symbols that do not enter .dynsym (carried by the .symtab fallback table) deliberately
 /// skip all collision checks: in resolution order they always precede the global scope, so
 /// collisions already resolve to the archive, leaving no ambiguity to reject.
-fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), String> {
+pub(super) fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), String> {
     let mut owners = HashMap::<String, (PathBuf, bool)>::new();
     for shared_object in shared_objects {
         let output = Command::new("nm")
@@ -445,7 +445,7 @@ fn find_archive(filename: &str, search_dirs: &[PathBuf]) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-fn materialize_for_target_in(
+pub(super) fn materialize_for_target_in(
     archive: &Path,
     cache_dir: &Path,
     target: &str,
@@ -646,7 +646,7 @@ fn rescue_with_rlib_symbols(
     linker: &mut crate::lower::linker::Linker<'_>,
 ) -> Result<Option<PathBuf>, String> {
     use rustc_span::Symbol;
-    let undefs = crate::elfsym::archive_undefined_symbols(&archive.display().to_string())?;
+    let undefs = crate::native::symtab::archive_undefined_symbols(&archive.display().to_string())?;
     if undefs.is_empty() {
         return Ok(None);
     }
@@ -727,7 +727,7 @@ fn rescue_with_rlib_symbols(
     if so.exists() {
         return Ok(Some(so));
     }
-    // Assemble trampoline object (same cc path as native_archive conversion)
+    // Assemble trampoline object (same cc path as the archive conversion)
     let s_path = cache_dir.join(format!("{hash}.s"));
     std::fs::write(&s_path, &asm)
         .map_err(|e| format!("Writing rlib trampoline assembly `{s_path:?}` failed: {e}"))?;
@@ -878,6 +878,3 @@ fn content_hash<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> String {
     }
     format!("{left:016x}{right:016x}")
 }
-
-#[cfg(test)]
-mod tests;

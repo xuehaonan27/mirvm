@@ -351,11 +351,11 @@ pub fn target_units(plan: &ResolvePlan) -> BTreeSet<usize> {
 /// Per-unit content fingerprint (computed in topological order -- a dep's fp is produced
 /// before its dependents'). fp(unit) = fnv1a(BUILD_ID, package, version, edition, sorted
 /// features, the three profile flags, sysroot_stamp, each rustflag in order, source stamp,
-/// **each dep's fp, sorted**). The last component is required: the depsimage pre-key
+/// **each dep's fp, sorted**). The last component is required: the dependency-image pre-key
 /// invariant "a transitive closure change changes every direct dependency's artifact stamp"
 /// propagates through it -- a transitive dep's fp changes => the direct dep's fp changes =>
 /// its artifact file name changes => the bin's --extern stamp changes (same semantics as the
-/// depsimage.rs header note; pinned, do not delete). When no dep source changed but the locked
+/// the dependency-image header note; pinned, do not delete). When no dep source changed but the locked
 /// version set did, the version fields already cover it. rustflags enter every unit fp in
 /// order: the host side does not consume rustflags, and following a stale value is harmless;
 /// order is meaningful (later flags override earlier ones) so they are not sorted.

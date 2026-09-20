@@ -15,7 +15,6 @@ pub mod collect;
 pub mod frame;
 pub mod func;
 pub mod global_asm;
-pub mod image;
 
 use std::collections::VecDeque;
 
@@ -131,8 +130,8 @@ impl SplitImage {
     /// Wrap into a stack layer usable before the image is written to disk.
     /// `fp` is the build-session lowering fingerprint; a same-session build is always consistent
     /// with the stack it is about to join.
-    pub fn into_base_image(self, fp: (bool, bool, bool)) -> crate::lower::image::BaseImage {
-        crate::lower::image::BaseImage {
+    pub fn into_base_image(self, fp: (bool, bool, bool)) -> crate::image::BaseImage {
+        crate::image::BaseImage {
             fn_by_sym: self
                 .module
                 .exports
@@ -184,7 +183,7 @@ pub struct BaseExports {
 /// (`SplitImage`, spline k=0 domain) and the delta module keeps only the binary's own attachments.
 pub fn lower_program(
     tcx: TyCtxt<'_>,
-    stack: &crate::lower::image::ImageStack,
+    stack: &crate::image::ImageStack,
     split: bool,
 ) -> (ir::Module, Option<SplitImage>) {
     // The split decision (enabled, bypassed, already loaded this session, base present) is made by
@@ -199,7 +198,7 @@ pub fn lower_program(
 /// disambiguator in their symbol names, do not belong to the "sysroot face", and cannot collide
 /// with a real program.
 pub fn lower_for_base_build(tcx: TyCtxt<'_>) -> (ir::Module, BaseExports) {
-    let empty = crate::lower::image::ImageStack::empty();
+    let empty = crate::image::ImageStack::empty();
     let (module, exports, _) = lower_inner(
         tcx,
         &empty,
@@ -225,7 +224,7 @@ pub fn lower_for_base_build(tcx: TyCtxt<'_>) -> (ir::Module, BaseExports) {
 /// It is the reserved entry point for that line; do not delete it for lack of callers.
 pub fn lower_for_image_build(
     tcx: TyCtxt<'_>,
-    stack: &crate::lower::image::ImageStack,
+    stack: &crate::image::ImageStack,
     k: usize,
 ) -> (ir::Module, BaseExports) {
     let (module, exports, _) =
@@ -306,7 +305,7 @@ fn register_guest_panic_cleanup<'tcx>(
 
 fn lower_inner(
     tcx: TyCtxt<'_>,
-    stack: &crate::lower::image::ImageStack,
+    stack: &crate::image::ImageStack,
     frozen: FrozenArena,
     emit_exports: bool,
     exclude_local: bool,
@@ -336,7 +335,7 @@ fn lower_inner(
     // dlopen'd yet", so the whole module's libraries are materialized here and only here (later
     // assembly reuses the segment list without re-auditing). Failures are loud.
     let required_native_libs: Vec<Box<str>> = {
-        let mut v = crate::native_archive::materialize_static_libraries(tcx, &mut linker)
+        let mut v = crate::native::archive::materialize_static_libraries(tcx, &mut linker)
             .unwrap_or_else(|reason| panic!("Static native library loading failed: {reason}"));
         // global_asm manifests of dependency crates: `.mirasm.s` text extracted from HIR when the
         // dependency was compiled and stored beside its rlib. They are assembled and loaded through
@@ -407,7 +406,7 @@ fn lower_inner(
     // same source, since its `#[link]` attributes live in libstd.
     // Static libraries go through the archive path above; Framework/wasm kinds are not handled.
     // The collection scope is shared with the native archive link line.
-    let dylib_names = crate::native_archive::system_dylibs(tcx);
+    let dylib_names = crate::native::archive::system_dylibs(tcx);
     let dylib_candidates = soname_candidates(&dylib_names);
     // Best-effort preload: a missing library is left to the loud diagnostics at its real use site.
     // The handles live for the process lifetime.

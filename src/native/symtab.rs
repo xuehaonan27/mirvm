@@ -18,7 +18,7 @@
 //! materialization time, and dlsym semantics such as IFUNC only hold on the dynamic surface).
 //!
 //! Only used for archives mirvm materializes itself (required_native_libs): their format comes
-//! from native_archive's constrained link (ELF64 LE x86_64, not stripped). System libraries
+//! from `native::archive`'s constrained link (ELF64 LE x86_64, not stripped). System libraries
 //! always have a normal .dynsym and never take this path.
 //!
 //! The dlopen handle -> load base mapping (dlinfo) lives in `os::dll::load_bias`.
@@ -320,7 +320,7 @@ mod tests {
     /// are reported.
     #[test]
     fn archive_undefined_symbols_reports_global_and_weak_undef_only() {
-        let dir = std::env::temp_dir().join(format!("mirvm-elfsym-arundef-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("mirvm-symtab-arundef-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let (c1, o1, c2, o2, a) = (
@@ -393,12 +393,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Link an archive with -fvisibility=hidden using native_archive's parameters: its symbols
+    /// Link an archive with -fvisibility=hidden using `native::archive`'s parameters: its symbols
     /// do not enter .dynsym, but the .symtab fallback must resolve the same address that a
     /// direct dlsym returns.
     #[test]
     fn hidden_symbols_resolve_via_symtab_with_same_address_as_dlsym() {
-        let dir = std::env::temp_dir().join(format!("mirvm-elfsym-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("mirvm-symtab-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let (c, o, a, so) = (

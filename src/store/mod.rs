@@ -23,8 +23,12 @@
 //!   zero-decode peek — a full decode would restore the entry's frozen region and map memory. The
 //!   rest of what a generational entry needs — its key, and the guards a snapshot must pass before
 //!   it is published or used — is [`entry`].
+//!
+//! [`report`] is the inventory and cleanup over the register: `mirvm cache status` and
+//! `mirvm cache purge`.
 
 pub(crate) mod entry;
+pub(crate) mod report;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -175,17 +179,17 @@ macro_rules! families {
 }
 
 families! {
-    // `baseimage` — the MIR-rich std base; keyed by build id + sysroot stamp, `build_id` first.
+    // `image::base` — the MIR-rich std base; keyed by build id + sysroot stamp, `build_id` first.
     Cache BASE            "base"            generation("img") flag(Base);
-    // `depsimage` — the lowered registry dependency closure; keyed by base key + `--extern` stamps.
+    // `image::deps` — the lowered registry dependency closure; keyed by base key + `--extern` stamps.
     Cache DEPS            "deps"            generation("img") flag(Deps);
-    // `ircache` — the post-mono engine IR; keyed by rustc args + input manifest, `build_id` first.
+    // `image::ir` — the post-mono engine IR; keyed by rustc args + input manifest, `build_id` first.
     Cache IR              "ir"              generation("bin") flag(Ir);
     // `lower::asm` — materialized per-site asm stubs; keyed by the generated assembly's content.
     Cache ASM_STUBS       "asm-stubs"       keyed;
     // `lower::global_asm` — materialized `global_asm!`/naked-fn objects; keyed by the final text.
     Cache GLOBAL_ASM      "global-asm"      keyed;
-    // `native_archive` — a PIC `.a` converted into a dlopen-able `.so`; keyed by archive + cc identity.
+    // `native::archive` — a PIC `.a` converted into a dlopen-able `.so`; keyed by archive + cc identity.
     Cache NATIVE_ARCHIVES "native-archives" keyed;
     // `pack` — native libraries carried inside a `.mirvm`; keyed by their content hash.
     Cache PACKAGE_NATIVE  "package-native"  keyed;

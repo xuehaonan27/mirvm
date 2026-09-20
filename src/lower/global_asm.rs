@@ -465,7 +465,7 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, String> {
     strip_slash_comments(&mut asm);
     crate::lower::asm::rewrite_syscall_text(&mut asm);
     asm.push('\n');
-    asm.push_str(crate::native_archive::NATIVE_RUNTIME_BRIDGE_ASM);
+    asm.push_str(crate::native::archive::NATIVE_RUNTIME_BRIDGE_ASM);
     let mut hash_input = b"mirvm-global-asm-v3\0".to_vec();
     hash_input.extend_from_slice(asm.as_bytes());
     let hash = crate::utils::content::fnv1a(&hash_input);
@@ -483,7 +483,7 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, String> {
         .args(["-shared", "-fPIC", "-nostartfiles", "-Wl,-Bsymbolic", "-o"])
         .arg(&tmp)
         .arg(&s_path)
-        .args(crate::native_archive::NATIVE_RUNTIME_WRAP_FLAGS)
+        .args(crate::native::archive::NATIVE_RUNTIME_WRAP_FLAGS)
         .status()
         .map_err(|e| {
             format!("failed to invoke cc to assemble global-asm (is cc missing from PATH?): {e}")

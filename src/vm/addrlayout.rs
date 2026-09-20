@@ -2,7 +2,7 @@
 //! the foundational constant layer for engine cacheability — all fixed bases/spline
 //! parameters and whitelist criteria for the three frozen data regions and the three
 //! code-region families. Arena implementations in frozen.rs/codearena.rs use this as
-//! the source of truth; IR serialization whitelists, baseimage/depsimage load
+//! the source of truth; IR serialization whitelists, the image layers load
 //! validation, and lower assembly all share the same numeric values; no second literal
 //! is allowed.
 //!
