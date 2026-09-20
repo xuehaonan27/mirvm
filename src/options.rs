@@ -99,6 +99,10 @@ pub struct Entry {
     /// Human-readable default, used by `USAGE` and `mirvm options`. The authoritative default lives
     /// in the accessor, a few lines below.
     pub default: &'static str,
+    /// The command-line spelling is a presence flag and takes no value. Declared rather than
+    /// inferred from `default`, so a flag whose environment value is a word (`MIRVM_OUTPUT=text`)
+    /// still renders without a placeholder.
+    pub flag: bool,
     pub doc: &'static str,
 }
 
@@ -120,6 +124,9 @@ macro_rules! identity_of {
 /// Applies one register attribute. An unknown attribute name is a compile error, so the vocabulary
 /// cannot silently grow a spelling the rest of the module does not understand.
 macro_rules! attr_of {
+    ($entry:ident, flag) => {
+        $entry.flag = true;
+    };
     ($entry:ident, env, $arg:expr) => {
         $entry.env = Some($arg);
     };
@@ -146,9 +153,9 @@ macro_rules! attr_of {
 ///
 /// The identity is `user`, `dev`, `test` or `protocol`. A protocol entry names its variable through
 /// [`protocol`], so a parent-to-child variable is spelled once in the tree. Every entry carries a doc
-/// comment and a `default`.
+/// comment and a `default`; `flag` marks a command-line spelling that takes no value.
 macro_rules! entries {
-    ( $( #[doc = $doc:literal] $kind:ident $field:ident $( $attr:ident ( $($arg:expr),* ) )* ; )* ) => {
+    ( $( #[doc = $doc:literal] $kind:ident $field:ident $( $attr:ident $( ( $($arg:expr),* ) )? )* ; )* ) => {
         /// The register: every external input mirvm defines, in declaration order.
         pub fn entries() -> &'static [Entry] {
             static REGISTER: std::sync::OnceLock<Vec<Entry>> = std::sync::OnceLock::new();
@@ -163,10 +170,11 @@ macro_rules! entries {
                         aliases: Vec::new(),
                         scopes: Vec::new(),
                         default: "",
+                        flag: false,
                         doc: $doc.trim_start(),
                     });
                     let entry = out.last_mut().expect("the entry was just pushed");
-                    $( attr_of!(entry, $attr $(, $arg)*); )*
+                    $( attr_of!(entry, $attr $(, $($arg),* )?); )*
                 )*
                 out
             })
@@ -254,7 +262,7 @@ entries! {
     protocol doctest_run_dir          env(protocol::DOCTEST_RUN_DIR) default("unset");
 
     /// Print the entry function's MIR and exit.
-    user     dump_mir                 cli("--dump-mir", "Run") default("off");
+    user     dump_mir                 cli("--dump-mir", "Run") flag default("off");
     /// Edition for the single-file form.
     user     edition                  cli("--edition", "Run") default("2024");
     /// Compatibility spelling; `vm` is the only engine and is accepted silently.
@@ -262,29 +270,29 @@ entries! {
     /// Call an exported function directly, e.g. 'fib(25)', instead of the main startup chain.
     user     vm_call                  cli("--vm-call", "Run") default("unset");
     /// Print Trap-debt statistics and exit.
-    user     vm_stats                 cli("--vm-stats", "Run") default("off");
+    user     vm_stats                 cli("--vm-stats", "Run") flag default("off");
     /// Cargo `--bin` semantics; project form only.
     user     bin                      cli("--bin", "Run") default("unset");
     /// Ignore package.rust-version, with Cargo's semantics.
-    user     ignore_rust_version      cli("--ignore-rust-version", "Run") default("off");
+    user     ignore_rust_version      cli("--ignore-rust-version", "Run") flag default("off");
     /// Output path: the .mirvm package (`pack`) or the capture directory (`capture`).
     user     output                   cli("--output", "-o", "Pack Capture") default("unset");
     /// Report what `cache purge` would remove without removing it.
-    user     cache_dry_run            cli("--dry-run", "Cache") default("off");
+    user     cache_dry_run            cli("--dry-run", "Cache") flag default("off");
     /// Purge the whole dependency-image family.
-    user     cache_deps               cli("--deps", "Cache") default("off");
+    user     cache_deps               cli("--deps", "Cache") flag default("off");
     /// Purge the whole base-image family.
-    user     cache_base               cli("--base", "Cache") default("off");
+    user     cache_base               cli("--base", "Cache") flag default("off");
     /// Purge the whole L2 engine-IR family.
-    user     cache_ir                 cli("--ir", "Cache") default("off");
+    user     cache_ir                 cli("--ir", "Cache") flag default("off");
     /// Purge scripts/ (materialized frontmatter projects).
-    user     cache_scripts            cli("--scripts", "Cache") default("off");
+    user     cache_scripts            cli("--scripts", "Cache") flag default("off");
     /// Purge the unified target directory (the shared dependency store).
-    user     cache_target             cli("--target", "Cache") default("off");
+    user     cache_target             cli("--target", "Cache") flag default("off");
     /// Purge all of cache/, build/ and run/: everything that costs no network to rebuild.
-    user     cache_all                cli("--all", "Cache") default("off");
+    user     cache_all                cli("--all", "Cache") flag default("off");
     /// Also purge data/ (crate store and sysroot); with --all this is a full cold start.
-    user     cache_data               cli("--data", "Cache") default("off");
+    user     cache_data               cli("--data", "Cache") flag default("off");
     /// `log export` filter: engine id, or `unknown`.
     user     log_engine               cli("--engine", "Log") default("unset");
     /// `log export` filter: producer id.
@@ -296,7 +304,7 @@ entries! {
     /// `log export` filter: a sequence number or a START:END range.
     user     log_sequence             cli("--sequence", "Log") default("unset");
     /// Machine output: reports as one JSON document, diagnostics as one JSON object per line.
-    user     output_format            env("MIRVM_OUTPUT") cli("--json", "Run Pack Capture Cache Deps Options Log") default("text");
+    user     output_format            env("MIRVM_OUTPUT") cli("--json", "Run Pack Capture Options") flag default("text");
     /// Internal: forwarded capture directory for the Cargo runner form.
     user     mirvm_capture_directory  cli("--mirvm-capture-directory", "Internal") default("unset");
 }
@@ -408,6 +416,31 @@ pub fn export_os_to_process(field: &str, value: &std::ffi::OsStr) {
 }
 
 // ===== the resolved options of this process =====
+
+/// A rejected value of an environment-backed input.
+///
+/// The variable's name is carried as a field read from the register, never written into the message,
+/// because a second spelling of an `MIRVM_*` name is what `check_option_register` forbids.
+#[derive(Debug, thiserror::Error, serde::Serialize)]
+pub enum Error {
+    #[error("{env} only accepts `cargo` or `self` (got `{value}`)")]
+    DepsTrack { env: &'static str, value: String },
+    #[error("{env} only accepts `text` or `json` (got `{value}`)")]
+    OutputFormat { env: &'static str, value: String },
+    #[error("{env}={value} invalid (must be a positive integer)")]
+    ClessJobs { env: &'static str, value: String },
+    #[error("{env} only accepts `off`, `sync` or an integer in 0..=256 (got `{value}`)")]
+    Threads { env: &'static str, value: String },
+}
+
+crate::diag_codes! {
+    Error: Options => {
+        DepsTrack => "options.deps_track" Usage,
+        OutputFormat => "options.output_format" Usage,
+        ClessJobs => "options.cless_jobs" Usage,
+        Threads => "options.threads" Usage,
+    }
+}
 
 /// The dependency track `MIRVM_DEPS` selects.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -554,38 +587,41 @@ impl Options {
     }
 
     /// `MIRVM_DEPS`.
-    pub fn deps(&self) -> Result<DepsTrack, String> {
+    pub fn deps(&self) -> Result<DepsTrack, Error> {
         match raw("deps").as_deref() {
             None | Some("self") => Ok(DepsTrack::Own),
             Some("cargo") => Ok(DepsTrack::Cargo),
-            Some(other) => Err(format!(
-                "mirvm: MIRVM_DEPS only accepts `cargo` or `self` (got `{other}`)"
-            )),
+            Some(other) => Err(Error::DepsTrack {
+                env: env_var_name("deps"),
+                value: other.to_string(),
+            }),
         }
     }
 
     /// `MIRVM_OUTPUT` / `--json`.
-    pub fn output_format(&self) -> Result<OutputFormat, String> {
+    pub fn output_format(&self) -> Result<OutputFormat, Error> {
         match raw("output_format").as_deref() {
             None | Some("") | Some("text") => Ok(OutputFormat::Text),
             Some("json") => Ok(OutputFormat::Json),
-            Some(other) => Err(format!(
-                "mirvm: MIRVM_OUTPUT only accepts `text` or `json` (got `{other}`)"
-            )),
+            Some(other) => Err(Error::OutputFormat {
+                env: env_var_name("output_format"),
+                value: other.to_string(),
+            }),
         }
     }
 
     /// `MIRVM_CLESS_JOBS`, defaulting to the available parallelism.
-    pub fn cless_jobs(&self) -> Result<usize, String> {
+    pub fn cless_jobs(&self) -> Result<usize, Error> {
         match raw("cless_jobs") {
             None => Ok(std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(1)),
             Some(raw) => match raw.parse::<usize>() {
                 Ok(n) if n >= 1 => Ok(n),
-                _ => Err(format!(
-                    "mirvm: MIRVM_CLESS_JOBS={raw} invalid (must be a positive integer)"
-                )),
+                _ => Err(Error::ClessJobs {
+                    env: env_var_name("cless_jobs"),
+                    value: raw,
+                }),
             },
         }
     }
@@ -595,14 +631,14 @@ impl Options {
     /// `off`/unset maps to `-Zthreads=1`: on the pinned toolchain that parses back to "no thread
     /// pool", so it is a no-op today, but it fixes this session's thread count regardless of rustc's
     /// own default, which upstream is moving to two frontend threads.
-    pub fn threads_arg(&self) -> Result<String, String> {
+    pub fn threads_arg(&self) -> Result<String, Error> {
         threads_from(raw("threads").as_deref())
     }
 }
 
 /// The `MIRVM_THREADS` mapping, split out so the table can be exercised without touching the
 /// process environment.
-fn threads_from(raw: Option<&str>) -> Result<String, String> {
+fn threads_from(raw: Option<&str>) -> Result<String, Error> {
     const SEQUENTIAL: &str = "-Zthreads=1";
     match raw.map(str::trim) {
         None | Some("") | Some("off") => Ok(SEQUENTIAL.to_string()),
@@ -612,9 +648,10 @@ fn threads_from(raw: Option<&str>) -> Result<String, String> {
             // `0` keeps rustc's meaning (one thread per available core); 256 is rustc's ceiling,
             // and a larger value would be clamped there silently, so reject it here.
             Ok(n) if n <= 256 => Ok(format!("-Zthreads={n}")),
-            _ => Err(format!(
-                "mirvm: MIRVM_THREADS only accepts `off`, `sync` or an integer in 0..=256 (got `{value}`)"
-            )),
+            _ => Err(Error::Threads {
+                env: env_var_name("threads"),
+                value: value.to_string(),
+            }),
         },
     }
 }
@@ -757,7 +794,7 @@ pub fn usage_options_section(scope: Scope) -> String {
             spelling.push_str(", ");
             spelling.push_str(alias);
         }
-        if entry.default != "off" {
+        if !entry.flag {
             spelling.push_str(" <VALUE>");
         }
         out.push_str(&format!("    {spelling:<22}{}\n", entry.doc));

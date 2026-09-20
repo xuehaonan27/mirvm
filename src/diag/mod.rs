@@ -160,6 +160,11 @@ pub trait Diagnostic: fmt::Display {
     fn causes(&self) -> Vec<String> {
         Vec::new()
     }
+    /// The help block that goes with a rejected argument. Text mode prints it after the message;
+    /// machine mode carries it as a field instead, so a consumer never receives a mixed stream.
+    fn usage(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// One non-error line: severity, component and an already-formatted message.
@@ -234,6 +239,18 @@ pub fn write(bytes: &[u8]) {
 pub fn emit(diagnostic: &dyn Diagnostic) {
     let line = render(diagnostic);
     write(line.as_bytes());
+    write_usage(diagnostic);
+}
+
+/// The help block that belongs to a failure. Machine mode already carries it as a field, so writing
+/// it here as well would put prose in the middle of a JSONL stream.
+fn write_usage(diagnostic: &dyn Diagnostic) {
+    if json::enabled() {
+        return;
+    }
+    if let Some(usage) = diagnostic.usage() {
+        write(usage.as_bytes());
+    }
 }
 
 /// Report one diagnostic to fd 2 alone, taking no lock. See the module note for why some paths
@@ -242,6 +259,11 @@ pub fn emit_direct(diagnostic: &dyn Diagnostic) {
     use std::io::Write as _;
     let line = render(diagnostic);
     let _ = std::io::stderr().write_all(line.as_bytes());
+    if !json::enabled()
+        && let Some(usage) = diagnostic.usage()
+    {
+        let _ = std::io::stderr().write_all(usage.as_bytes());
+    }
 }
 
 /// Render one diagnostic in the mode `MIRVM_OUTPUT` selects.
@@ -251,6 +273,13 @@ fn render(diagnostic: &dyn Diagnostic) -> String {
     } else {
         text(diagnostic)
     }
+}
+
+/// The text rendering, for tests in other modules that pin a failure's line. Reading the mode from
+/// the environment would make such a test depend on `MIRVM_OUTPUT`, so this bypasses it.
+#[cfg(test)]
+pub(crate) fn render_for_test(diagnostic: &dyn Diagnostic) -> String {
+    text(diagnostic)
 }
 
 /// `mirvm[component]: severity: message`, or `mirvm: severity: message` with no component.
@@ -432,7 +461,7 @@ mod tests {
             json::line(&event),
             "{\"v\":1,\"severity\":\"error\",\"component\":\"run\",\"code\":null,\
              \"message\":\"a \\\"quoted\\\" line\",\"details\":null,\"causes\":[],\
-             \"exit_code\":1}\n"
+             \"usage\":null,\"exit_code\":1}\n"
         );
         // An event reports no exit code: the process is not about to exit with the class of a line
         // it merely printed.

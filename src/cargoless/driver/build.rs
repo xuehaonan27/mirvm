@@ -115,10 +115,9 @@ pub fn compile_plan(
 fn cless_jobs() -> usize {
     match crate::options::get().cless_jobs() {
         Ok(jobs) => jobs,
-        Err(message) => {
-            eprintln!("{message}");
-            std::process::exit(1);
-        }
+        // This phase cannot propagate a failure to the command boundary yet; the value is rejected
+        // loudly either way, and the error carries its own class and message.
+        Err(error) => crate::error::Error::from(error).report_and_exit(),
     }
 }
 

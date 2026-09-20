@@ -289,14 +289,6 @@ pub(crate) fn control(arguments: fmt::Arguments<'_>) {
     crate::diag::write(&bytes);
 }
 
-pub(crate) fn control_raw(arguments: fmt::Arguments<'_>) {
-    let mut bytes = Vec::new();
-    bytes
-        .write_fmt(arguments)
-        .expect("formatting into a byte vector cannot fail");
-    crate::diag::write(&bytes);
-}
-
 /// The capture tee `diag` calls for every routed line: the byte-level entry the router owns, so the
 /// emitter itself never has to know a capture exists.
 fn tee_control(bytes: &[u8]) {

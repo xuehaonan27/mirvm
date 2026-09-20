@@ -54,6 +54,11 @@ pub(super) fn line(diagnostic: &dyn Diagnostic) -> String {
         string(cause, &mut out);
     }
     out.push(']');
+    out.push_str(",\"usage\":");
+    match diagnostic.usage() {
+        Some(usage) => string(usage, &mut out),
+        None => out.push_str("null"),
+    }
     // Only a failure has an exit code; an event's `Kind` is meaningless and must not be reported as
     // if the process were about to exit with it.
     if diagnostic.severity() == super::Severity::Error {

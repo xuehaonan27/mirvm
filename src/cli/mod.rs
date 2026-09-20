@@ -62,7 +62,7 @@ static PARALLEL_FRONTEND_ARG: std::sync::OnceLock<String> = std::sync::OnceLock:
 /// caught here rather than at the injection sites: one of those is the `__build-base-image`
 /// subprocess, whose stderr is captured into `build.log` and whose failure the parent deliberately
 /// treats as "no base image, lower cold" — a rejection there would be silent.
-pub(crate) fn validate_parallel_frontend_arg() -> Result<(), String> {
+pub(crate) fn validate_parallel_frontend_arg() -> Result<(), crate::options::Error> {
     let arg = crate::options::get().threads_arg()?;
     let _ = PARALLEL_FRONTEND_ARG.set(arg);
     Ok(())
@@ -108,9 +108,13 @@ pub fn main() -> ExitCode {
     }
     // Rejected before any dispatch: the flag reaches every compiler session, and one injection
     // site (the base-image subprocess) has no way to report a rejection loudly.
-    if let Err(message) = validate_parallel_frontend_arg() {
-        eprintln!("{message}");
-        return ExitCode::from(2);
+    if let Err(error) = validate_parallel_frontend_arg() {
+        return crate::error::Error::from(error).report();
+    }
+    // Same place, same reason: the output mode is read by the emitter itself, so it is validated
+    // once here rather than silently falling back to text at every call site.
+    if let Err(error) = crate::options::get().output_format() {
+        return crate::error::Error::from(error).report();
     }
     let mut argv = std::env::args();
     let argv0 = argv.next().unwrap_or_default();
@@ -131,8 +135,8 @@ pub fn main() -> ExitCode {
         );
     }
     let Some(first) = argv.next() else {
-        eprint!("{}", usage());
-        return ExitCode::from(2);
+        crate::diag::write(usage().as_bytes());
+        return ExitCode::from(crate::diag::exit::USAGE);
     };
     // One component per process, fixed at the dispatch boundary: every diagnostic emitted below —
     // including the engine's — is attributed to the command the user actually ran.
@@ -164,20 +168,36 @@ pub fn main() -> ExitCode {
         cargo_shim::phase_wrapper(std::iter::once(first).chain(argv));
     }
 
-    match first.as_str() {
+    let command = match first.as_str() {
         "run" => entry::run_main(argv),
         "capture" => capture_main(argv),
         "test" => test_main(argv),
         "pack" => entry::pack_main(argv),
-        "log" => crate::telemetry::tool::main(argv),
         "cache" => entry::cache_main(argv),
         "deps" => entry::deps_main(argv),
         "options" => options_main(argv),
+        // `log` and the internal subcommands own their own statuses (libtest's, rustc's, the
+        // guest's) and never produce a mirvm-authored failure here.
+        "log" => return crate::telemetry::tool::main(argv),
         _ => {
-            eprint!("{}", usage());
-            ExitCode::from(2)
+            crate::diag::write(usage().as_bytes());
+            return ExitCode::from(crate::diag::exit::USAGE);
         }
+    };
+    match command {
+        Ok(code) => code,
+        // The router this failure must reach is still armed: every frame that finishes one has
+        // already returned by the time the status is built here.
+        Err(error) => error.report(),
     }
+}
+
+/// Record `--json` on the command line: it is the command line's spelling of `MIRVM_OUTPUT`, and the
+/// same discipline as `--stack-size` and `--jit` applies — the resolved value is exported so every
+/// child process reads back one decision.
+pub(crate) fn note_json_output() {
+    crate::options::note_cli("output_format");
+    crate::options::export_to_process("output_format", "json");
 }
 
 /// The component a dispatch spelling speaks for, in the `diag` vocabulary. An unrecognized command
@@ -202,28 +222,27 @@ fn component_of(command: &str) -> crate::diag::Component {
 
 /// `mirvm options [--json]`: print every external input mirvm defines, its current value and where
 /// that value came from. This is the executable form of `src/options.rs`.
-fn options_main(args: impl Iterator<Item = String>) -> ExitCode {
+fn options_main(args: impl Iterator<Item = String>) -> Result<ExitCode, crate::error::Error> {
+    use crate::diag::Component;
     for arg in args {
         match arg.as_str() {
-            "--json" => {
-                crate::options::note_cli("output_format");
-                // Export so the value this process resolved is the one a child reads back, the same
-                // discipline as `--stack-size` and `--jit`.
-                crate::options::export_to_process("output_format", "json");
-            }
+            "--json" => note_json_output(),
             other => {
-                eprintln!("mirvm options: unknown argument `{other}`\n{}", usage());
-                return ExitCode::from(2);
+                return Err(crate::error::Error::usage_with(
+                    Component::Options,
+                    format!("unknown argument `{other}`"),
+                    usage(),
+                ));
             }
         }
     }
-    if crate::options::get().output_format() == Ok(crate::options::OutputFormat::Json) {
+    if crate::options::get().output_format()? == crate::options::OutputFormat::Json {
         println!("{}", crate::options::render_json());
     } else {
         println!("{}", crate::options::version());
         print!("{}", crate::options::render());
     }
-    ExitCode::SUCCESS
+    Ok(ExitCode::SUCCESS)
 }
 
 pub(crate) const INTERNAL_CAPTURE_DIRECTORY_ARG: &str = "--mirvm-capture-directory";
@@ -264,37 +283,47 @@ where
     argv.next().map(PathBuf::from).map(Some).ok_or(())
 }
 
-fn capture_main(mut args: impl Iterator<Item = String>) -> ExitCode {
+fn capture_main(mut args: impl Iterator<Item = String>) -> Result<ExitCode, crate::error::Error> {
+    use crate::diag::Component;
     let mut output = None;
     let mut command = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-o" | "--output" => {
                 let Some(path) = args.next() else {
-                    eprintln!("mirvm capture: {arg} needs a directory");
-                    return ExitCode::from(2);
+                    return Err(crate::error::Error::usage_with(
+                        Component::Capture,
+                        format!("{arg} needs a directory"),
+                        usage(),
+                    ));
                 };
                 if output.replace(PathBuf::from(path)).is_some() {
-                    eprintln!("mirvm capture: output directory was specified more than once");
-                    return ExitCode::from(2);
+                    return Err(crate::error::Error::usage_with(
+                        Component::Capture,
+                        "output directory was specified more than once",
+                        usage(),
+                    ));
                 }
             }
             "--" => {
                 command.extend(args);
                 break;
             }
+            "--json" => note_json_output(),
             _ => {
-                eprintln!(
-                    "mirvm capture: expected `--` before the MIRVM command\n{}",
-                    usage()
-                );
-                return ExitCode::from(2);
+                return Err(crate::error::Error::usage_with(
+                    Component::Capture,
+                    "expected `--` before the MIRVM command",
+                    usage(),
+                ));
             }
         }
     }
     if command.first().map(String::as_str) != Some("run") {
-        eprintln!("mirvm capture: the first implementation accepts `-- run ...`");
-        return ExitCode::from(2);
+        return Err(crate::error::Error::usage(
+            Component::Capture,
+            "the first implementation accepts `-- run ...`",
+        ));
     }
 
     let output =
@@ -305,21 +334,27 @@ fn capture_main(mut args: impl Iterator<Item = String>) -> ExitCode {
         match std::env::current_dir() {
             Ok(cwd) => cwd.join(output),
             Err(error) => {
-                eprintln!("mirvm capture: cannot resolve the output directory: {error}");
-                return ExitCode::from(1);
+                return Err(crate::error::Error::failure(
+                    Component::Capture,
+                    format!("cannot resolve the output directory: {error}"),
+                ));
             }
         }
     };
     if let Err(error) = std::fs::create_dir_all(&output) {
-        eprintln!(
-            "mirvm capture: cannot create output directory {}: {error}",
-            output.display()
-        );
-        return ExitCode::from(1);
+        return Err(crate::error::Error::failure(
+            Component::Capture,
+            format!(
+                "cannot create output directory {}: {error}",
+                output.display()
+            ),
+        ));
     }
     if set_capture_directory(output).is_err() {
-        eprintln!("mirvm capture: a capture request is already configured in this process");
-        return ExitCode::from(2);
+        return Err(crate::error::Error::usage(
+            Component::Capture,
+            "a capture request is already configured in this process",
+        ));
     }
     let _diagnostic_router = match diagnostics::DiagnosticRouter::start(
         capture_directory(),
@@ -327,12 +362,14 @@ fn capture_main(mut args: impl Iterator<Item = String>) -> ExitCode {
     ) {
         Ok(router) => router,
         Err(error) => {
-            diagnostics::control(format_args!(
-                "mirvm capture: cannot start diagnostics stream: {error}"
+            return Err(crate::error::Error::software(
+                Component::Capture,
+                format!("cannot start diagnostics stream: {error}"),
             ));
-            return ExitCode::from(70);
         }
     };
+    // The router stays armed until the process-exit finalizer publishes it, so a failure returned
+    // from here is still inside its lifetime and reaches `diagnostics.log` byte-for-byte.
     entry::run_main(command.into_iter().skip(1))
 }
 
@@ -340,7 +377,7 @@ fn capture_main(mut args: impl Iterator<Item = String>) -> ExitCode {
 /// The project argument is recognized only in the first slot; defaults to the current directory.
 /// The Cargo compat track keeps original args interpreted verbatim; the self track resolves them
 /// inside cargoless::driver under the same contract.
-fn test_main(argv: impl Iterator<Item = String>) -> ExitCode {
+fn test_main(argv: impl Iterator<Item = String>) -> Result<ExitCode, crate::error::Error> {
     let mut before = Vec::new();
     let mut harness_args = Vec::new();
     let mut after_dash = false;
@@ -368,17 +405,16 @@ fn test_main(argv: impl Iterator<Item = String>) -> ExitCode {
         project.parent().unwrap_or(Path::new(".")).to_path_buf()
     };
 
-    match crate::options::get().deps() {
-        Ok(crate::options::DepsTrack::Cargo) => {
+    match crate::options::get().deps()? {
+        // Diverges: the Cargo track replaces this process with cargo's.
+        crate::options::DepsTrack::Cargo => {
             cargo_shim::phase_cargo_test(&dir, &before, &harness_args)
         }
-        Ok(crate::options::DepsTrack::Own) => {
-            crate::cargoless::driver::test_project(&dir, &before, &harness_args)
-        }
-        Err(message) => {
-            eprintln!("{message}");
-            ExitCode::from(2)
-        }
+        crate::options::DepsTrack::Own => Ok(crate::cargoless::driver::test_project(
+            &dir,
+            &before,
+            &harness_args,
+        )),
     }
 }
 #[cfg(test)]
