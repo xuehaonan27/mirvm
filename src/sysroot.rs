@@ -289,14 +289,9 @@ fn build_sysroot(sysroot_dir: &Path) -> anyhow::Result<()> {
     buildrs::check_links_unique(Some((&manifest.name, manifest.links.as_deref())), &plan)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // Artifacts go to a tmp directory (same filesystem, so the rename is atomic); the old
-    // sysroot stays usable until publication
-    let dir_name = format!("sysroot-{target}");
-    let tmp = sysroot_dir.with_file_name(format!("{dir_name}.tmp-{}", std::process::id()));
-    if tmp.exists() {
-        // Left over from a crashed build (tmp is never published, so deleting it is safe)
-        std::fs::remove_dir_all(&tmp)?;
-    }
+    // Artifacts are built in a staging directory next to the sysroot (same filesystem, so the
+    // publish rename is atomic) and the old sysroot stays usable until then.
+    let tmp = crate::store::staging_path(sysroot_dir);
     let layout = Layout::at(
         tmp.join("lib/rustlib").join(target).join("lib"),
         staging.join("host-deps"),
@@ -325,21 +320,10 @@ fn build_sysroot(sysroot_dir: &Path) -> anyhow::Result<()> {
     let stamp_in_tmp = stamp_file(&tmp);
     std::fs::write(&stamp_in_tmp, &want)?;
 
-    // Atomic publication: rename the old directory aside (rename(2) cannot replace a
-    // non-empty directory), move tmp into place, then remove the old one. The old directory
-    // is absent only between the two renames (a microsecond window); a crash leaves the
-    // stamp missing and the next run rebuilds.
-    let old = sysroot_dir.with_file_name(format!("{dir_name}.old-{}", std::process::id()));
-    if old.exists() {
-        std::fs::remove_dir_all(&old)?;
-    }
-    if sysroot_dir.exists() {
-        std::fs::rename(sysroot_dir, &old)?;
-    }
-    std::fs::rename(&tmp, sysroot_dir)?;
-    if old.exists() {
-        let _ = std::fs::remove_dir_all(&old);
-    }
+    // Publication is the store's directory publish: the old sysroot is renamed aside first, because
+    // rename(2) cannot replace a non-empty directory. The old directory is absent only between the
+    // two renames; a crash there leaves the stamp missing and the next run rebuilds.
+    crate::store::publish(sysroot_dir, &tmp)?;
     // Purge the cargo-track dep cache along with it: the sysroot contents changed, but
     // cargo's fingerprint cannot see that (the --sysroot path string is unchanged), so stale
     // rmeta would be treated as fresh and mixed into the new sysroot, producing E0463/E0460.

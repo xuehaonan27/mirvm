@@ -87,13 +87,28 @@ because that is what decides whether a tree may be deleted:
 | `cache/` | derived; safe to delete at any time | `base/`, `deps/`, `ir/` (generational: `build_id` is the first field of every entry), `asm-stubs/`, `global-asm/`, `native-archives/`, `package-native/`, `package-heat/` |
 | `data/` | fetched or built once; expensive to lose | `registry/` (crate and git sources, read-through to `~/.cargo`), `sysroot-<host>/` (MIR-rich std) |
 | `build/` | project and session space | `scripts/` (frontmatter materialization, keyed by path), `target/mirvm` (Cargo track), `target/cargoless/` (own scheduler), `target/native` (differential builds), `sysroot-build/` |
-| `run/` | process scratch | per-Engine isolated native copies and lowering-time mappings |
+| `run/` | process scratch | `runtime-native/` (per-Engine copies of required native libraries) and `lower-native/` (private copies of self-produced objects) |
 
-`mirvm cache status` groups by these four classes and reports anything no family claims, so a store
-written by an older layout is visible rather than silently ignored. `mirvm cache purge` defaults to
-stale generations of `cache/`; `--deps/--base/--ir` take one generational family, `--scripts` and
-`--target` one build family, `--all` everything that needs no network (all of `cache/`, `build/` and
-`run/`), and `--data` adds `data/` — `--all --data` is a full cold start.
+The layout is a register in `src/store.rs`, one line per family: a lifetime class, the directory, the
+shape of its entries, and — for a family that a flag names — that flag. `mirvm cache status` and
+`mirvm cache purge` iterate that register, so a family is reported and cleanable by construction, and
+a directory no family claims is reported rather than silently ignored (an older layout, or a leftover
+of an interrupted publish, both show up that way).
+
+Two rules belong to the register rather than to each writer, because every writer needs them:
+
+- **Publish atomically.** A producer fills a staging path next to the target (dot-prefixed, unique
+  per process and call) and renames it into place; `publish` moves an existing directory target aside
+  first, because `rename(2)` cannot replace a non-empty one. A reader therefore never sees a
+  half-written artifact, and a crash leaves one orphan.
+- **Record the generation.** A generational entry's first serialized field is the `build_id` that
+  wrote it, so a stale generation is recognisable with a zero-decode peek — a full decode would
+  restore the entry's frozen region and map memory.
+
+`mirvm cache purge` defaults to stale generations and those orphans; `--deps/--base/--ir` take one
+generational family whole, `--scripts` and `--target` one build family, `--all` every class but
+`data/` (which keeps the current generation, the part that makes the next run fast), and `--data`
+adds `data/` — `--all --data` is a full cold start.
 
 ### 2.5 Cache layers
 

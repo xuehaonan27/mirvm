@@ -26,10 +26,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::utils::content::{FileStamp, digest_hex};
 use crate::vm::ir;
-
-/// --extern artifact stamp list (path, size, mtime_ns, BLAKE3; sorted and deduped)
-type ExternStamps = Vec<(String, u64, u128, [u8; 32])>;
 
 /// deps-image file (v1 = the whole package as postcard). The module's exports and fn_addrs stay inside the
 /// module: this file has no byte-determinism contract, so it does not need BaseFile's sorted
@@ -41,7 +39,7 @@ struct DepsFile {
     base_key: String,
     lowering_fp: (bool, bool, bool),
     /// Pre-key material for comparison (hash-collision immune): sorted --extern artifact stamps
-    extern_stamps: ExternStamps,
+    extern_stamps: Vec<FileStamp>,
     module: ir::Module,
     fn_entry_syms: Vec<(Box<str>, u64)>,
     static_syms: Vec<(Box<str>, u64)>,
@@ -54,7 +52,7 @@ struct DepsFileRef<'a> {
     build_id: &'a str,
     base_key: &'a str,
     lowering_fp: (bool, bool, bool),
-    extern_stamps: &'a [(String, u64, u128, [u8; 32])],
+    extern_stamps: &'a [FileStamp],
     module: &'a ir::Module,
     fn_entry_syms: &'a [(Box<str>, u64)],
     static_syms: &'a [(Box<str>, u64)],
@@ -93,14 +91,10 @@ fn extern_paths(rustc_args: &[String]) -> Option<Vec<String>> {
 }
 
 /// Content stamping; a file that is not stably readable yields `None`, so no image is produced or used.
-fn stamp_externs(paths: &[String]) -> Option<ExternStamps> {
+fn stamp_externs(paths: &[String]) -> Option<Vec<FileStamp>> {
     paths
         .iter()
-        .map(|p| {
-            let stamped =
-                crate::utils::content::file_content_stamp(std::path::Path::new(p)).ok()?;
-            Some((p.clone(), stamped.size, stamped.mtime_ns, stamped.digest))
-        })
+        .map(|p| FileStamp::of(std::path::Path::new(p)).ok())
         .collect()
 }
 
@@ -108,7 +102,7 @@ fn stamp_externs(paths: &[String]) -> Option<ExternStamps> {
 /// that is unavailable yields `None`, which the caller treats as "no image"; full lowering then self-heals.
 /// An empty `--extern` also yields `None`: dependency-free pure-std programs are covered by the std base and
 /// get no shared image of their own.
-pub fn pre_key(rustc_args: &[String], base_key: &str) -> Option<(String, ExternStamps)> {
+pub(crate) fn pre_key(rustc_args: &[String], base_key: &str) -> Option<(String, Vec<FileStamp>)> {
     let paths = extern_paths(rustc_args)?;
     if paths.is_empty() {
         return None;
@@ -117,15 +111,15 @@ pub fn pre_key(rustc_args: &[String], base_key: &str) -> Option<(String, ExternS
     let mut key = String::from(crate::options::build::BUILD_ID);
     key.push('\u{1f}');
     key.push_str(base_key);
-    for (p, size, mt, digest) in &stamps {
+    for stamp in &stamps {
         key.push('\u{1f}');
-        key.push_str(p);
+        key.push_str(&stamp.path);
         key.push('\u{1e}');
-        key.push_str(&size.to_string());
+        key.push_str(&stamp.size.to_string());
         key.push('\u{1e}');
-        key.push_str(&mt.to_string());
+        key.push_str(&stamp.mtime_ns.to_string());
         key.push('\u{1e}');
-        key.push_str(&crate::utils::content::digest_hex(digest));
+        key.push_str(&digest_hex(&stamp.digest));
     }
     let h = crate::utils::content::fnv1a(key.as_bytes());
     if crate::options::get().a2_debug {
@@ -249,22 +243,10 @@ pub fn store_and_wrap(
         };
         if let Ok(bytes) = postcard::to_stdvec(&file) {
             let path = file_path(&key);
-            let written = path.parent().is_some_and(|dir| {
-                if std::fs::create_dir_all(dir).is_err() {
-                    return false;
-                }
-                let tmp = dir.join(format!(
-                    ".{}.tmp-{}",
-                    path.file_name().unwrap_or_default().to_string_lossy(),
-                    std::process::id()
-                ));
-                if std::fs::write(&tmp, &bytes).is_err() || std::fs::rename(&tmp, &path).is_err() {
-                    let _ = std::fs::remove_file(&tmp);
-                    return false;
-                }
-                true
-            });
-            if written {
+            let dir_exists = path
+                .parent()
+                .is_some_and(|dir| std::fs::create_dir_all(dir).is_ok());
+            if dir_exists && crate::store::publish_bytes(&path, &bytes).is_ok() {
                 bi.key = key;
                 return bi;
             }

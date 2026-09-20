@@ -478,7 +478,7 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, String> {
     }
     let s_path = dir.join(format!("{hash:016x}.s"));
     std::fs::write(&s_path, asm).map_err(|e| format!("failed to write the global-asm .s: {e}"))?;
-    let tmp = dir.join(format!("{hash:016x}.so.tmp{}", std::process::id()));
+    let tmp = crate::store::staging_path(&so);
     let status = std::process::Command::new("cc")
         .args(["-shared", "-fPIC", "-nostartfiles", "-Wl,-Bsymbolic", "-o"])
         .arg(&tmp)
@@ -507,7 +507,7 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, String> {
              an interpreted guest fn"
         ));
     }
-    std::fs::rename(&tmp, &so)
+    crate::store::publish(&so, &tmp)
         .map_err(|e| format!("failed to atomically publish the global-asm .so: {e}"))?;
     Ok(so.display().to_string().into())
 }

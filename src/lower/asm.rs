@@ -21,7 +21,6 @@
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use rustc_abi::{Align, Size};
 use rustc_ast::ast::InlineAsmTemplatePiece;
@@ -35,8 +34,6 @@ use rustc_target::asm::{
 
 use crate::utils::content::fnv1a;
 use crate::vm::ir;
-
-static NEXT_MATERIALIZE_TEMP: AtomicU64 = AtomicU64::new(0);
 
 // ===== syscall interception =====
 //
@@ -158,20 +155,20 @@ pub(crate) fn try_materialize(sites: &[ir::AsmSite]) -> Result<Vec<u64>, String>
     let so: PathBuf = dir.join(format!("{h:016x}.so"));
 
     if !so.exists() {
-        let serial = NEXT_MATERIALIZE_TEMP.fetch_add(1, Ordering::Relaxed);
-        let suffix = format!("{}.{}", std::process::id(), serial);
-        let s_path = dir.join(format!("{h:016x}.tmp.{suffix}.s"));
+        // -shared -fPIC keeps the wrapper self-contained with no external symbols, so dlsym
+        // yields each site's real address after dlopen. The assembly source takes the staging
+        // name of the product, so concurrent instantiation in one process cannot truncate
+        // another's file.
+        let tmp = crate::store::staging_path(&so);
+        let mut s_path = tmp.clone().into_os_string();
+        s_path.push(".s");
+        let s_path = PathBuf::from(s_path);
         std::fs::write(&s_path, &src).map_err(|e| {
             format!(
                 "failed to write the asm-stub temporary assembly `{}`: {e}",
                 s_path.display()
             )
         })?;
-        // -shared -fPIC keeps the wrapper self-contained with no external symbols, so dlsym
-        // yields each site's real address after dlopen. Both the source and the product use a
-        // process-and-serial unique temporary name, so concurrent instantiation in one process
-        // cannot truncate another's file.
-        let tmp = dir.join(format!("{h:016x}.so.tmp.{suffix}"));
         let output = std::process::Command::new("cc")
             .args(["-shared", "-fPIC", "-nostdlib", "-o"])
             .arg(&tmp)
@@ -192,7 +189,7 @@ pub(crate) fn try_materialize(sites: &[ir::AsmSite]) -> Result<Vec<u64>, String>
                 String::from_utf8_lossy(&output.stderr)
             ));
         }
-        std::fs::rename(&tmp, &so).map_err(|e| {
+        crate::store::publish(&so, &tmp).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
             format!(
                 "failed to atomically publish the asm-stub .so `{}`: {e}",

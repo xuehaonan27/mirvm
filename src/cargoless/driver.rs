@@ -217,10 +217,7 @@ pub fn run_doctest_builder(argv: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let tmp = recipe_path.with_extension(format!("tmp-{}", std::process::id()));
-    if let Err(error) =
-        std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, &recipe_path))
-    {
+    if let Err(error) = crate::store::publish_bytes(&recipe_path, &bytes) {
         eprintln!(
             "mirvm doctest builder: failed to publish recipe {}: {error}",
             recipe_path.display()

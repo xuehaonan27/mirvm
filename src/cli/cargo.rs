@@ -173,11 +173,7 @@ impl Callbacks for DepCallbacks {
         match crate::lower::global_asm::materialize_dep_text(tcx) {
             Ok(crate::lower::global_asm::DepAsmText::Text(text)) => {
                 let path = format!("{}/{}.mirasm.s", self.out_dir, self.rlib_stem);
-                // Atomic publish: write the temp name fully, then rename.
-                let tmp = format!("{path}.tmp{}", std::process::id());
-                std::fs::write(&tmp, text)
-                    .unwrap_or_else(|e| panic!("fail to write dep global_asm list: {e}"));
-                std::fs::rename(&tmp, &path)
+                crate::store::publish_bytes(std::path::Path::new(&path), text.as_bytes())
                     .unwrap_or_else(|e| panic!("fail to release dep global_asm list: {e}"));
             }
             // UnsupportedSym: skip the side file (see the DepAsmText docs in global_asm.rs) --

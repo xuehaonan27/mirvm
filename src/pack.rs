@@ -18,7 +18,6 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -514,8 +513,6 @@ fn parse_container(raw: &[u8]) -> Result<ParsedPackage<'_>, String> {
     Ok(ParsedPackage { sections })
 }
 
-static NEXT_NATIVE_TEMP: AtomicU64 = AtomicU64::new(0);
-
 fn materialize_native_blob_at(root: &Path, lib: &NativeLibEntry) -> Result<PathBuf, String> {
     if hash128(&lib.bytes) != lib.fnv {
         return Err(format!(
@@ -533,19 +530,8 @@ fn materialize_native_blob_at(root: &Path, lib: &NativeLibEntry) -> Result<PathB
     {
         return Ok(path);
     }
-
-    let serial = NEXT_NATIVE_TEMP.fetch_add(1, Ordering::Relaxed);
-    let tmp = dir.join(format!(
-        ".{:032x}.so.tmp-{}-{serial}",
-        lib.fnv,
-        std::process::id()
-    ));
-    std::fs::write(&tmp, &lib.bytes)
-        .map_err(|e| format!("fail to materialize package native library: {e}"))?;
-    if let Err(e) = std::fs::rename(&tmp, &path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("fail to publish package native library: {e}"));
-    }
+    crate::store::publish_bytes(&path, &lib.bytes)
+        .map_err(|e| format!("fail to publish package native library: {e}"))?;
     Ok(path)
 }
 
@@ -629,16 +615,11 @@ pub(crate) fn write_package(
 
     let buf = build_container(&sections)?;
 
-    // Atomic publish: write the temp name fully, then rename.
+    // Atomic publish: a reader sees either the previous package or this one, never a half-written
+    // file. The output path is the user's, so the staging file lands next to it.
     let dir = out.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).map_err(|e| format!("fail to create package directory: {e}"))?;
-    let tmp = dir.join(format!(
-        ".{}.tmp-{}",
-        out.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
-    ));
-    std::fs::write(&tmp, &buf).map_err(|e| format!("fail to write package: {e}"))?;
-    std::fs::rename(&tmp, out).map_err(|e| format!("fail to release package: {e}"))?;
+    crate::store::publish_bytes(out, &buf).map_err(|e| format!("fail to release package: {e}"))?;
     Ok(())
 }
 
@@ -756,8 +737,9 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, String> {
     if meta.base_key.is_some() || package.has_section(TAG_BASE) {
         return Err("package BASE/delta form is not supported by this mirvm".into());
     }
-    let _: Vec<crate::ircache::FileStamp> = postcard::from_bytes(package.section(TAG_STAMPS)?)
-        .map_err(|e| format!("failed to resolve STAMPS section: {e}"))?;
+    let _: Vec<crate::utils::content::FileStamp> =
+        postcard::from_bytes(package.section(TAG_STAMPS)?)
+            .map_err(|e| format!("failed to resolve STAMPS section: {e}"))?;
     let libs: Vec<NativeLibEntry> = postcard::from_bytes(package.section(TAG_NATIVELIBS)?)
         .map_err(|e| format!("failed to resolve NATIVELIBS section: {e}"))?;
     let mc_entries: Vec<McEntry> = if package.has_section(TAG_MC) {

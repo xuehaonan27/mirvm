@@ -62,25 +62,12 @@ pub(crate) fn ensure_self_symlink(self_exe: &Path, path: &Path) -> Result<(), St
                 parent.display()
             )
         })?;
-        let tmp = parent.join(format!(
-            ".mirvm-tool-{}-{}.tmp",
-            std::process::id(),
-            path.file_name().unwrap_or_default().to_string_lossy()
-        ));
-        match std::fs::remove_file(&tmp) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(format!(
-                    "failed to clean up internal tool {}: {error}",
-                    tmp.display()
-                ));
-            }
-        }
+        // A link is published the same way an artifact is: fill a staging name, then rename.
+        let tmp = crate::store::staging_path(path);
         symlink(self_exe, &tmp).map_err(|error| {
             format!("failed to create internal tool {}: {error}", tmp.display())
         })?;
-        std::fs::rename(&tmp, path).map_err(|error| {
+        crate::store::publish(path, &tmp).map_err(|error| {
             format!(
                 "failed to publish internal tool {}: {error}",
                 path.display()

@@ -23,15 +23,8 @@ use std::path::{Path, PathBuf};
 use rustc_middle::ty::TyCtxt;
 use serde::{Deserialize, Serialize};
 
+use crate::utils::content::FileStamp;
 use crate::vm::ir;
-
-#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
-pub(crate) struct FileStamp {
-    pub path: String,
-    pub size: u64,
-    pub mtime_ns: u128,
-    pub digest: [u8; 32],
-}
 
 #[derive(Serialize, Deserialize)]
 struct Header {
@@ -61,16 +54,6 @@ fn entry_path(rustc_args: &[String]) -> PathBuf {
         .cache_root()
         .join("ir")
         .join(format!("{h:016x}.bin"))
-}
-
-fn stamp(path: &str) -> Option<FileStamp> {
-    let stamped = crate::utils::content::file_content_stamp(Path::new(path)).ok()?;
-    Some(FileStamp {
-        path: path.to_string(),
-        size: stamped.size,
-        mtime_ns: stamped.mtime_ns,
-        digest: stamped.digest,
-    })
 }
 
 /// Header triple equality: build id (stale across builds) + full args replay (hash-collision proof) +
@@ -138,8 +121,9 @@ pub(crate) fn collect_input_stamps(tcx: TyCtxt<'_>) -> Option<InputStamps> {
         .collect();
     let stamps = files
         .iter()
-        .map(|p| stamp(p))
-        .collect::<Option<Vec<FileStamp>>>()?;
+        .map(|p| FileStamp::of(Path::new(p)))
+        .collect::<Result<Vec<FileStamp>, _>>()
+        .ok()?;
     let envs: Vec<(String, Option<String>)> = sess
         .env_depinfo
         .borrow()
@@ -152,7 +136,7 @@ pub(crate) fn collect_input_stamps(tcx: TyCtxt<'_>) -> Option<InputStamps> {
 /// Replay each stamp against the current local file state (shared by mode B package load validation
 /// and L2 lookup).
 pub(crate) fn stamps_current(files: &[FileStamp]) -> bool {
-    files.iter().all(|f| stamp(&f.path).as_ref() == Some(f))
+    files.iter().all(FileStamp::is_current)
 }
 
 /// Replay each env dependency against the current environment (shared as above).
@@ -251,8 +235,7 @@ pub fn store(
         Err(_) => return false,
     }
 
-    // Atomic publish (same as asm-stub factory: write full temp then rename, readers never see a
-    // half-finished file)
+    // Atomic publish: a reader sees either the previous entry or this one, never a half-written file.
     let path = entry_path(rustc_args);
     let Some(dir) = path.parent() else {
         return false;
@@ -260,75 +243,12 @@ pub fn store(
     if std::fs::create_dir_all(dir).is_err() {
         return false;
     }
-    let tmp = dir.join(format!(
-        ".{}.tmp-{}",
-        path.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
-    ));
-    if std::fs::write(&tmp, &buf).is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        return false;
-    }
-    std::fs::rename(&tmp, &path).is_ok()
+    crate::store::publish_bytes(&path, &buf).is_ok()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{FileStamp, env_matches, stamp};
-
-    #[test]
-    fn stamp_detects_content_length_and_mtime_change() {
-        let dir = std::env::temp_dir().join(format!("mirvm-ircache-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let f = dir.join("input.rs");
-        std::fs::write(&f, b"fn main() {}").unwrap();
-        let p = f.display().to_string();
-        let s0 = stamp(&p).expect("stampable");
-
-        // size change must mismatch
-        std::fs::write(&f, b"fn main() { let _ = 1; }").unwrap();
-        assert_ne!(stamp(&p).as_ref(), Some(&s0));
-
-        // same size but later mtime must also mismatch (rewrites of equal length are caught by mtime)
-        std::fs::write(&f, b"fn main() {}").unwrap();
-        let s1 = stamp(&p).unwrap();
-        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(7);
-        std::fs::File::options()
-            .write(true)
-            .open(&f)
-            .unwrap()
-            .set_modified(later)
-            .unwrap();
-        assert_ne!(stamp(&p).as_ref(), Some(&s1));
-
-        // missing = no stamp
-        std::fs::remove_file(&f).unwrap();
-        assert_eq!(stamp(&p), None);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn stamp_detects_same_length_content_change_with_restored_mtime() {
-        let dir =
-            std::env::temp_dir().join(format!("mirvm-ircache-content-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let f = dir.join("input.rs");
-        std::fs::write(&f, b"fn value() -> u8 { 1 }").unwrap();
-        let original_mtime = std::fs::metadata(&f).unwrap().modified().unwrap();
-        let p = f.display().to_string();
-        let before = stamp(&p).expect("stampable");
-
-        std::fs::write(&f, b"fn value() -> u8 { 2 }").unwrap();
-        std::fs::File::options()
-            .write(true)
-            .open(&f)
-            .unwrap()
-            .set_modified(original_mtime)
-            .unwrap();
-        assert_ne!(stamp(&p).as_ref(), Some(&before));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+    use super::env_matches;
 
     #[test]
     fn env_dep_matching_covers_set_unset_and_drift() {
@@ -342,25 +262,6 @@ mod tests {
         assert!(!env_matches(name, &Some("y".into())));
         assert!(!env_matches(name, &None));
         unsafe { std::env::remove_var(name) };
-    }
-
-    #[test]
-    fn stamps_compare_structurally() {
-        let a = FileStamp {
-            path: "a".into(),
-            size: 1,
-            mtime_ns: 2,
-            digest: [3; 32],
-        };
-        assert_eq!(
-            a,
-            FileStamp {
-                path: "a".into(),
-                size: 1,
-                mtime_ns: 2,
-                digest: [3; 32],
-            }
-        );
     }
 
     #[test]

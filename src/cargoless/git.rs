@@ -187,11 +187,7 @@ impl GitStore {
             .parent()
             .ok_or_else(|| "Git checkout path has no parent directory".to_string())?;
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        let temp = parent.join(format!(".tmp-{}-{}", std::process::id(), precise));
-        if temp.exists() {
-            std::fs::remove_dir_all(&temp)
-                .map_err(|error| format!("failed to clean up temporary Git checkout: {error}"))?;
-        }
+        let temp = crate::store::staging_path(&dir);
         let result = (|| {
             git_ok(
                 Command::new("git")
@@ -208,7 +204,9 @@ impl GitStore {
                 &format!("checkout Git commit {precise}"),
             )?;
             update_submodules(&temp, self.offline)?;
-            std::fs::rename(&temp, &dir).map_err(|error| {
+            // A populated checkout exists only once it is complete: publish it by rename, so a
+            // concurrent reader never sees a half-cloned tree at the final path.
+            crate::store::publish(&dir, &temp).map_err(|error| {
                 format!("failed to publish Git checkout {}: {error}", dir.display())
             })?;
             validate_checkout(&dir, precise)

@@ -845,10 +845,9 @@ fn write_heat_order(state: &DecodeState) {
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    let tmp = dir.join(format!(".heat-{}.tmp", std::process::id()));
-    if std::fs::write(&tmp, body).is_ok() {
-        let _ = std::fs::rename(tmp, &state.heat_path);
-    }
+    // Best effort: a heat file that cannot be published only costs the next run its learned
+    // order, so the failure is swallowed rather than reported.
+    let _ = crate::store::publish_bytes(&state.heat_path, body.as_bytes());
 }
 
 pub struct FuncIter<'a> {
