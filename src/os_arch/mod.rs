@@ -29,6 +29,21 @@
 //! Every pair provides the same subsystem names. A pair that has not implemented a subsystem
 //! yet carries its own `compile_error!` in place of the body, so a port's error list is its
 //! to-do list.
+//!
+//! # The Surface a Pair Provides
+//!
+//! This list is the interface: it is written once here, and each pair implements it rather than
+//! declaring it again.
+//!
+//! - `addrspace` — the fixed-address layout the engine's cacheability model asks for (three
+//!   frozen data regions and three code-region families), at the bases this pair's virtual
+//!   address space leaves free. Its own header carries the structure; the numbers are the
+//!   pair's.
+//! - `signal` — the kernel's signal ABI as this CPU encodes it: the restorer and its flag, the
+//!   raw action layout, the entry stub, and the register indices a debug dump reads.
+//! - `thread` — the thread primitives only the CPU can write: the raw futex wait/wake that must
+//!   not touch libc `errno`, and the user-address bound that makes glibc's "no stack set"
+//!   sentinel recognizable.
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod linux_x86_64;

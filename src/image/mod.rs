@@ -258,7 +258,7 @@ impl ImageStack {
                 let home = m
                     .frozen
                     .as_ref()
-                    .and_then(|f| crate::vm::addrlayout::code_home_for_frozen(f.home()))
+                    .and_then(|f| crate::os_arch::addrspace::code_home_for_frozen(f.home()))
                     .expect("image frozen region is invalid; stub code domain cannot be derived");
                 delta.image_entry_stubs.push((
                     home,

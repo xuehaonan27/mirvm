@@ -2,7 +2,7 @@
 //! (mmap/mprotect/munmap + preference for fixed base address)
 //! The engine's sole channel for all anonymous mappings, merging three mmap
 //! forms: frozen, codearena, and frame. Only `usize`/raw pointer/Prot appears.
-//! No guest concept is allowed. Capacity, base address value (addrlayout),
+//! No guest concept is allowed. Capacity, base address value (the pair's `addrspace`),
 //! and exhaustion message are all the caller's responsibility.
 //!
 //! Failure semantics (aligned verbatim with the three memory map forms, each

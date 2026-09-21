@@ -17,8 +17,10 @@ pub const STUB_STRIDE: u64 = 16;
 const CODE_CAP: usize = 64 << 20;
 
 /// Code-region base values, spline parameters, and whitelist criteria are centralized in
-/// `super::addrlayout` (the shared constant layer).
-use super::addrlayout::{BASE_CODE_ADDR, DELTA_CODE_ADDR, image_code_addr, is_valid_code_home};
+/// `crate::os_arch::addrspace` (this pair's fixed-address layout).
+use crate::os_arch::addrspace::{
+    BASE_CODE_ADDR, DELTA_CODE_ADDR, image_code_addr, is_valid_code_home,
+};
 
 /// Per-address-region stub area (one per module region; image regions are attached on absorb).
 pub struct StubArena {

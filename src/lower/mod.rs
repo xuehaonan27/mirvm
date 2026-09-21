@@ -389,7 +389,7 @@ fn lower_inner(
     // The stub code area shares its domain with the frozen area. `frozen.home()` records which
     // domain the frozen area was allocated in; the derived code domain stays consistent even when
     // the frozen area falls back to a dynamic base, because the two decisions are independent.
-    let code_home = crate::vm::addrlayout::code_home_for_frozen(frozen.home())
+    let code_home = crate::os_arch::addrspace::code_home_for_frozen(frozen.home())
         .expect("invalid frozen domain, cannot derive stub code domain");
     let mut linker = Linker::new(
         tcx,

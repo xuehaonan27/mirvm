@@ -79,7 +79,7 @@ fn load(path: &Path, want_stamp: &str) -> Option<crate::image::BaseImage> {
     // or a taken domain alike)
     if !entry::frozen_at(
         &f.module,
-        Some(crate::vm::addrlayout::BASE_IMAGE_FIXED_ADDR),
+        Some(crate::os_arch::addrspace::BASE_IMAGE_FIXED_ADDR),
     ) {
         return None;
     }
@@ -159,8 +159,10 @@ pub(crate) fn store(
 ) -> Result<(), crate::image::Error> {
     // A base image is shared across programs, so the fixed-domain contract is stricter than for a
     // delta: the layer above expects the base exactly where it says it is.
-    if !entry::snapshot_is_publishable(&module, Some(crate::vm::addrlayout::BASE_IMAGE_FIXED_ADDR))
-    {
+    if !entry::snapshot_is_publishable(
+        &module,
+        Some(crate::os_arch::addrspace::BASE_IMAGE_FIXED_ADDR),
+    ) {
         return Err(crate::image::Error::Contract {
             detail: "frozen region is not in the base-image fixed domain".to_string(),
         });

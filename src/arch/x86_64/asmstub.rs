@@ -2,7 +2,7 @@
 //!
 //! Holds the codearena entry-stub byte factory (`movabs rax, target; jmp rax`)
 //! and the interpreter's two `asm!` sites (int3 breakpoint, xgetbv). Emission
-//! and execution only: the stub's address-region semantics (addrlayout) and the
+//! and execution only: the stub's address-region semantics (the pair's `addrspace`) and the
 //! breakpoint's termination semantics (same as native) stay with the caller.
 //!
 //! `mirvm_syscall_trampoline` is where a `syscall` instruction inside an asm
