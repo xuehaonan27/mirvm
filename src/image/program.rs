@@ -1,12 +1,12 @@
-//! L2 post-mono engine-IR cache (M6 slice 2; distribution-design.md D9b/D9c, JVM AppCDS
-//! counterpart).
+//! The program layer: one program's post-mono engine IR, cached as the L2 entry keyed by the rustc
+//! arguments.
 //!
 //! Cold path (miss): rustc frontend → lower → **store** (clean snapshot before guest runs) → run.
 //! Hot path (hit): **lookup** → asm-stub rematerialization → argv finalization → run — the entire
 //! rustc session (frontend + metadata + mono + lower) is skipped.
 //!
 //! Key = digest(MIRVM_BUILD_ID, rustc_args); entry header = full args replay (hash-collision proof)
-//! + the input manifest ([`crate::inputs`]).
+//! + the input manifest ([`crate::depinfo`]).
 //!
 //! Guard against silent wrong values: any validation mismatch is a miss (cold path rebuilds and
 //! overwrites); frozen area not at fixed base is rejected for serialization/restore (see
@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use rustc_middle::ty::TyCtxt;
 use serde::{Deserialize, Serialize};
 
-use crate::inputs::InputManifest;
+use crate::depinfo::InputManifest;
 use crate::vm::ir;
 
 #[derive(Serialize, Deserialize)]
@@ -26,7 +26,7 @@ struct Header {
     build_id: String,
     args: Vec<String>,
     /// The compilation's input manifest (files + `env!` dependencies), replayed on lookup.
-    inputs: crate::inputs::InputManifest,
+    inputs: crate::depinfo::InputManifest,
     /// S4 layering: base key referenced by the delta module (None = full module with no base).
     /// Delta bytecode/frozen area embeds base absolutes (FuncId offset, base addresses) — a
     /// mismatched base load is globally wrong, so keys must match exactly.
@@ -151,7 +151,7 @@ mod tests {
         let mk = |base_key: Option<&str>| super::Header {
             build_id: crate::options::build::BUILD_ID.to_string(),
             args: args.clone(),
-            inputs: crate::inputs::InputManifest::default(),
+            inputs: crate::depinfo::InputManifest::default(),
             base_key: base_key.map(str::to_owned),
         };
         // same key ✓; replacement ✗; presence change (some→none / none→some) both ways ✗

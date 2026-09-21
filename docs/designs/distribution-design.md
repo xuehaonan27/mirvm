@@ -17,7 +17,7 @@
   (approximately rmeta already) and the monomorphic layer (post-mono engine IR). Build the L2
   monomorphic engine-IR cache first, for this machine; the mode B `.mirvm` package is then that cache
   made portable, with a version header, checksum and relocation section. Freezing the external format
-  waits until the IR stabilizes — no external promise is frozen while `ir.rs` is still gaining
+  waits until the IR stabilizes — no external promise is frozen while `program.rs` is still gaining
   statement kinds.
 - **Cache layering.** The L2 key is mirvm build id + sysroot hash + crate-graph content hash; a
   mismatch rebuilds the whole package with no partial reuse, in the AppCDS manner. Because the
@@ -120,8 +120,8 @@ adds `data/` — `--all --data` is a full cold start.
 - **L3** — the JIT code cache, forbidden until the CFI/PLT/relocation work lands.
 
 L2 and the two layers below it that mirror the runtime stack are one module tree: `src/image` holds
-the stack itself (`mod.rs`) beside the three persisted layers (`base.rs`, `deps.rs`, `ir.rs`), and the
-entry mechanism all three share — key, generation, fixed-domain guards — is `src/store/entry.rs`.
+the stack itself (`mod.rs`) beside the three persisted layers (`base.rs`, `deps.rs`, `program.rs`), and
+the entry mechanism all three share — key, generation, fixed-domain guards — is `src/store/entry.rs`.
 Everything else in the store belongs to `src/store`: the family register, publication, and the
 `cache status`/`purge` report.
 
@@ -184,7 +184,7 @@ design.
   → mode B package → release form, with cold-start leverage construction inserted once the first two
   finish.
 - The per-phase split inside the load phase is unmeasured, and it is the precondition for L2 design.
-- Reopens and their triggers: frequent `ir.rs` churn hurting the L2 hit rate (the key contains the
+- Reopens and their triggers: frequent `program.rs` churn hurting the L2 hit rate (the key contains the
   build id, so it stays correct; re-estimate the format freeze once the IR settles); Cargo not
   tolerating artifact-existence checks after emit trimming (establish empirically on landing, else
   keep the status quo); a dangling FnPtr or handle in the relink section yielding silent wrong values

@@ -183,7 +183,7 @@ families! {
     Cache BASE            "base"            generation("img") flag(Base);
     // `image::deps` — the lowered registry dependency closure; keyed by base key + `--extern` stamps.
     Cache DEPS            "deps"            generation("img") flag(Deps);
-    // `image::ir` — the post-mono engine IR; keyed by rustc args + input manifest, `build_id` first.
+    // `image::program` — one program's post-mono engine IR; keyed by rustc args + dep-info, `build_id` first.
     Cache IR              "ir"              generation("bin") flag(Ir);
     // `lower::asm` — materialized per-site asm stubs; keyed by the generated assembly's content.
     Cache ASM_STUBS       "asm-stubs"       keyed;

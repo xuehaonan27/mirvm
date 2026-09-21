@@ -361,7 +361,7 @@ impl Callbacks for MirvmCallbacks {
             let t_store = std::time::Instant::now();
             if session_diagnostics_clean()
                 && tcx.sess.dcx().has_errors().is_none()
-                && crate::image::ir::store(
+                && crate::image::program::store(
                     tcx,
                     &self.rustc_args,
                     self.module.as_ref().expect("just set"),
@@ -678,7 +678,7 @@ pub(crate) fn run_driver(
     // dump-mir needs the tcx and therefore forces the cold path. The L2 entry verifies its delta
     // against the key chain.
     if !dump_mir
-        && let Some(mut module) = crate::image::ir::lookup(
+        && let Some(mut module) = crate::image::program::lookup(
             &rustc_args,
             base_key.as_deref(),
             crate::vm::verify::Prefix {
