@@ -41,6 +41,8 @@
 mod arch; // arch layer (interp's x86 touch points go through crate::arch::)
 #[path = "../../../../../src/os/mod.rs"]
 mod os; // os layer (engine touch points go through crate::os:: primitives)
+#[path = "../../../../../src/os_arch/mod.rs"]
+mod os_arch; // the one (os, arch) pair this build is for: kernel ABI as the CPU encodes it
 mod product_adapters; // stub for the one rustc-dependent leaf the engine still needs
 pub(crate) use product_adapters::lower;
 #[path = "../../../../../src/utils/mod.rs"]
