@@ -6,6 +6,7 @@
 //! one name: `os::signal` and `os::thread` each forward their x86_64 half.
 
 pub mod dll;
+pub mod fs;
 pub mod mem;
 pub mod process;
 pub mod signal;

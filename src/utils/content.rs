@@ -1,10 +1,10 @@
 use std::io::{self, ErrorKind};
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
+
+use crate::os;
 
 /// Identity of one input file: the path it was read from, its cheap metadata for diagnostics, and
 /// the BLAKE3 digest that carries the content identity — size and mtime alone would miss a
@@ -38,7 +38,7 @@ impl FileStamp {
         let after = file.metadata()?;
         let path_after = std::fs::metadata(path)?;
         let after_mtime = mtime_ns(&after)?;
-        if !same_file_snapshot(&before, &after) || !same_file_snapshot(&after, &path_after) {
+        if !os::fs::same_file(&before, &after) || !os::fs::same_file(&after, &path_after) {
             return Err(io::Error::new(
                 ErrorKind::InvalidData,
                 "file changed while hashing",
@@ -77,22 +77,6 @@ fn mtime_ns(metadata: &std::fs::Metadata) -> io::Result<u128> {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
-}
-
-#[cfg(unix)]
-fn same_file_snapshot(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
-    left.dev() == right.dev()
-        && left.ino() == right.ino()
-        && left.len() == right.len()
-        && left.mtime() == right.mtime()
-        && left.mtime_nsec() == right.mtime_nsec()
-        && left.ctime() == right.ctime()
-        && left.ctime_nsec() == right.ctime_nsec()
-}
-
-#[cfg(not(unix))]
-fn same_file_snapshot(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
-    left.len() == right.len() && left.modified().ok() == right.modified().ok()
 }
 
 pub(crate) fn digest_hex(digest: &[u8; 32]) -> String {

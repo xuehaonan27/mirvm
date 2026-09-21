@@ -69,6 +69,16 @@ pub fn map_fixed_preferred(addr: usize, size: usize, prot: Prot) -> Option<*mut 
     Some(p as *mut u8)
 }
 
+/// An anonymous in-memory file this process can open again through `/proc/self/fd/<fd>`, or
+/// `None` when the kernel refuses to create one.
+///
+/// The descriptor belongs to the caller. It is how an image with no place on disk is handed to the
+/// loader, which only accepts a path.
+pub fn anonymous_file(name: &std::ffi::CStr) -> Option<i32> {
+    let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
+    (fd >= 0).then_some(fd)
+}
+
 /// Thin wrapper of `mprotect`.
 /// Codearena fills the W^X shape of the sealed RX.
 pub fn protect(addr: *mut u8, size: usize, prot: Prot) -> Result<(), crate::os::Error> {

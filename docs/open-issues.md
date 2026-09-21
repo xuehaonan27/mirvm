@@ -326,6 +326,16 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
   the cache-warm `capture` (503) — while the case still reports PASS, on `f2279f1` as well as on the
   platform-refactor tree. Wiring `case_summary` into each mode surfaces every such silent failure at
   once, which is why it is recorded rather than changed here.
+- **G12** `ACCEPTED`: the network-dependent cases need the dev container's HTTP proxy in the
+  environment, and mirvm's own registry client does not read Cargo's config, so an unexported proxy
+  makes them fail in a way that looks like a product defect. `~/.cargo/config.toml` carries the proxy
+  for Cargo; exporting `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY` (and the lowercase spellings) before
+  `tests/run.sh` is what makes them turn green. Without it, `telemetry` reports seven FAILs —
+  "parent produced no capture file", "fork child produced no capture file", the generation checks and
+  the three trace-domain checks — all downstream of one
+  `HTTP fetch failed https://index.crates.io/config.json: Network is unreachable`, and `pair` fails
+  the same way. With it, `telemetry` passes all fifteen. This is runner environment, not debt:
+  recorded so the next person does not read the cascade as a capture regression.
 
 ## F. Reopen triggers
 

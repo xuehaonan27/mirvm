@@ -530,7 +530,7 @@ pub fn set_fork_baseline(shared: &Shared) {
         .fork_baseline_threads
         .store(guest_thread_count(), std::sync::atomic::Ordering::SeqCst);
     shared.fork_baseline_pid.store(
-        unsafe { libc::getpid() },
+        crate::os::process::getpid(),
         std::sync::atomic::Ordering::SeqCst,
     );
 }
@@ -561,7 +561,7 @@ pub(super) fn guest_threads_from(raw: usize, service: usize) -> usize {
 pub(super) fn guest_thread_count_for(shared: &Shared) -> usize {
     let raw = crate::os::thread::os_thread_count();
     let service = crate::os::thread::service_thread_count();
-    let pid = unsafe { libc::getpid() };
+    let pid = crate::os::process::getpid();
     if shared
         .fork_baseline_pid
         .load(std::sync::atomic::Ordering::SeqCst)
