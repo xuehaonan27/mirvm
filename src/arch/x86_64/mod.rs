@@ -1,5 +1,6 @@
 //! x86_64 implementation summary
 
+pub mod asm_text;
 pub mod asmstub;
 pub mod intrinsics;
 

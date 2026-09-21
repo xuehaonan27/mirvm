@@ -66,7 +66,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
             .ok_or(Error::unsupported("target does not support asm"))?;
         if !matches!(arch, InlineAsmArch::X86_64) {
             return Err(Error::internal(format!(
-                "inline asm is not x86_64 (arch={arch:?})"
+                "inline asm is not {} (arch={arch:?})",
+                crate::arch::asm_text::NAME
             )));
         }
 

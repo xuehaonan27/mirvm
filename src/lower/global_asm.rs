@@ -64,7 +64,7 @@ pub(crate) fn materialize<'tcx>(
     // Executable trampolines all go up front. The bridge bakes in only a RIP-relative
     // hidden data slot, never a runtime P1 address; each Engine loads its own copy of the
     // machine-code image or shared library and then writes its closure address into the slot.
-    let mut head = String::from(".intel_syntax noprefix\n");
+    let mut head = String::from(crate::arch::asm_text::DIRECTIVE_INTEL);
     let mut dedup = std::collections::HashSet::new();
     let mut slots = std::collections::BTreeSet::new();
     for (name, addr) in abs_defs {
@@ -129,16 +129,6 @@ fn is_naked(tcx: TyCtxt<'_>, inst: Instance<'_>) -> bool {
     tcx.codegen_fn_attrs(inst.def_id())
         .flags
         .contains(CodegenFnAttrFlags::NAKED)
-}
-
-/// x86_64/Intel syntax header. Each asm site is independent and carries its own syntax
-/// directive, so sites cannot contaminate one another.
-fn syntax_prefix(att: bool) -> &'static str {
-    if att {
-        "\n.att_syntax\n"
-    } else {
-        "\n.intel_syntax noprefix\n"
-    }
 }
 
 // ===== Compile-time extraction of dependency-crate global_asm =====
@@ -231,7 +221,10 @@ pub(crate) fn materialize_dep_text(tcx: TyCtxt<'_>) -> Result<DepAsmText, Error>
     if asm.trim().is_empty() {
         return Ok(DepAsmText::None);
     }
-    Ok(DepAsmText::Text(format!(".intel_syntax noprefix\n{asm}")))
+    Ok(DepAsmText::Text(format!(
+        "{}{asm}",
+        crate::arch::asm_text::DIRECTIVE_INTEL
+    )))
 }
 
 fn ensure_x86(tcx: TyCtxt<'_>) -> Result<(), Error> {
@@ -239,7 +232,8 @@ fn ensure_x86(tcx: TyCtxt<'_>) -> Result<(), Error> {
     match tcx.sess.asm_arch {
         Some(InlineAsmArch::X86_64) => Ok(()),
         other => Err(Error::unsupported(format!(
-            "global_asm/naked support x86_64 only (arch={other:?})"
+            "global_asm/naked support {} only (arch={other:?})",
+            crate::arch::asm_text::NAME
         ))),
     }
 }
@@ -266,7 +260,7 @@ fn render_global_asm<'tcx>(
         return Err(Error::internal("GlobalAsm item has an unexpected shape"));
     };
     let att = asm.options.contains(InlineAsmOptions::ATT_SYNTAX);
-    out.push_str(syntax_prefix(att));
+    out.push_str(&crate::arch::asm_text::syntax_prefix(att));
     let owner = item_id.owner_id;
     for piece in asm.template {
         match piece {
@@ -354,7 +348,7 @@ fn render_naked<'tcx>(
     let att = options.contains(InlineAsmOptions::ATT_SYNTAX);
     let name = tcx.symbol_name(inst).name;
     // A trimmed cg_ssa prefix_and_suffix: an ELF/x86_64 raw machine-code function
-    out.push_str(syntax_prefix(att));
+    out.push_str(&crate::arch::asm_text::syntax_prefix(att));
     let _ = writeln!(out, ".pushsection .text.{name},\"ax\", @progbits");
     let _ = writeln!(out, ".balign 16");
     let _ = writeln!(out, ".globl {name}");

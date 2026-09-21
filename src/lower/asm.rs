@@ -52,20 +52,6 @@ use crate::vm::ir;
 // `int $0x80`, `.byte 0x0f,0x05` written to evade the rewrite, and multiple statements or
 // label prefixes on one line. Supporting them needs a concrete crate that hits them.
 
-/// Indirect slot definition, appended once to the `.s` when a rewrite hits. Addressing is
-/// `%rip`-relative, so the `.so` is self-contained and needs no external symbol.
-const SYSCALL_SLOT_DEF: &str =
-    ".data\n.globl mirvm_syscall_slot\n.p2align 3\nmirvm_syscall_slot: .quad 0\n.text\n";
-
-/// Replacement body for a `syscall` instruction: a RIP-relative indirect call. The asm-stub
-/// region is wrapped in `.intel_syntax noprefix`, so the Intel form is required; GAS rejects
-/// AT&T's `*(%rip)`. The two-level indirection follows PIC discipline: a GOT entry filled by
-/// the dynamic linker at load time, then the named `.data` slot that mirvm refills with the
-/// trampoline's real address after dlopen. r11 is exactly the scratch register the syscall
-/// contract allows to be clobbered, so using it as the springboard breaks nothing.
-const SYSCALL_CALL: &str =
-    "    mov r11, QWORD PTR [rip+mirvm_syscall_slot@GOTPCREL]\n    call [r11]\n";
-
 /// Line-level mnemonic match with leading whitespace already stripped: after `syscall` only
 /// end of line, whitespace or a comment (`#` or `;`) is allowed. Multi-statement lines and
 /// label prefixes are not covered.
@@ -88,7 +74,7 @@ pub(crate) fn rewrite_syscall_text(src: &mut String) -> bool {
     let mut out = String::with_capacity(src.len() + 64);
     for line in src.split_inclusive('\n') {
         if is_syscall_insn_line(line.trim_start()) {
-            out.push_str(SYSCALL_CALL);
+            out.push_str(crate::arch::asm_text::SYSCALL_CALL);
             hit = true;
         } else {
             out.push_str(line);
@@ -96,7 +82,7 @@ pub(crate) fn rewrite_syscall_text(src: &mut String) -> bool {
     }
     *src = out;
     if hit {
-        src.push_str(SYSCALL_SLOT_DEF);
+        src.push_str(crate::arch::asm_text::SYSCALL_SLOT_DEF);
     }
     hit
 }
@@ -548,7 +534,7 @@ impl<'tcx> Gen<'_, 'tcx> {
         writeln!(s, ".type {name},@function").unwrap();
         writeln!(s, ".section .text.{name},\"ax\",@progbits").unwrap();
         writeln!(s, "{name}:").unwrap();
-        s.push_str(".intel_syntax noprefix\n");
+        s.push_str(crate::arch::asm_text::DIRECTIVE_INTEL);
 
         Self::prologue(&mut s);
 
@@ -592,7 +578,7 @@ impl<'tcx> Gen<'_, 'tcx> {
         }
         Self::epilogue(&mut s);
 
-        s.push_str(".att_syntax\n");
+        s.push_str(crate::arch::asm_text::DIRECTIVE_ATT);
         writeln!(s, ".size {name}, .-{name}").unwrap();
         s.push_str(".text\n\n\n");
         s
