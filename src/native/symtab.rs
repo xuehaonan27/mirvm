@@ -66,8 +66,58 @@ impl Error {
 
 use std::collections::HashMap;
 
-const SHT_DYNSYM: u32 = 11;
-const SHT_SYMTAB: u32 = 2;
+use crate::os::obj::elf::{
+    self, SHN_RESERVED, SHN_UNDEF, SHT_DYNSYM, SHT_SYMTAB, STB_GLOBAL, STB_WEAK,
+};
+
+/// One `.symtab`/`.dynsym` entry, resolved against its string table.
+///
+/// `name_offset` is the raw `st_name` and travels with the entry because offset 0 is the string
+/// table's empty name: an entry pointing there names nothing and is not a symbol, which is a
+/// different question from whether the resolved string is empty.
+struct Symbol<'a> {
+    name: &'a str,
+    name_offset: u32,
+    value: u64,
+    section_index: u16,
+    binding: u8,
+}
+
+/// Read entry `index` of `table` (a symbol table section) against `strtab`.
+///
+/// `str_end` is the string table's end offset, computed once by the caller. `None` means the entry
+/// or the name it points at lies outside the image.
+fn symbol_at<'a>(
+    bytes: &'a [u8],
+    table: &elf::Section,
+    strtab: &elf::Section,
+    str_end: usize,
+    index: usize,
+) -> Option<Symbol<'a>> {
+    let base = usize::try_from(table.offset)
+        .ok()?
+        .checked_add(index.checked_mul(usize::try_from(table.entsize).ok()?)?)?;
+    let name_offset = elf::u32_at(bytes, base)?;
+    let binding = bytes.get(base + 4).copied()? >> 4;
+    let section_index = elf::u16_at(bytes, base + 6)?;
+    let value = elf::u64_at(bytes, base + 8)?;
+    let name_start = usize::try_from(strtab.offset)
+        .ok()?
+        .checked_add(usize::try_from(name_offset).ok()?)?;
+    let name_end = name_start
+        + bytes
+            .get(name_start..str_end.min(bytes.len()))?
+            .iter()
+            .position(|&b| b == 0)?;
+    let name = std::str::from_utf8(bytes.get(name_start..name_end)?).ok()?;
+    Some(Symbol {
+        name,
+        name_offset,
+        value,
+        section_index,
+        binding,
+    })
+}
 
 /// Resolve a `.so`'s `.symtab`: defined symbol name -> st_value (file virtual address,
 /// relative to the load base). Err means it is not the expected ELF64 LE or the structure is
@@ -98,91 +148,36 @@ pub fn hidden_symtab_values(so_path: &str) -> Result<HashMap<Box<str>, u64>, Err
 fn symbol_table_values(so_path: &str, want_sht: u32) -> Result<HashMap<Box<str>, u64>, Error> {
     let bytes = std::fs::read(so_path)
         .map_err(|e| Error::io(format!("cannot read the shared library `{so_path}`"), e))?;
-    let u16_at = |off: usize| -> Option<u16> {
-        Some(u16::from_le_bytes(
-            bytes.get(off..off + 2)?.try_into().ok()?,
-        ))
-    };
-    let u32_at = |off: usize| -> Option<u32> {
-        Some(u32::from_le_bytes(
-            bytes.get(off..off + 4)?.try_into().ok()?,
-        ))
-    };
-    let u64_at = |off: usize| -> Option<u64> {
-        Some(u64::from_le_bytes(
-            bytes.get(off..off + 8)?.try_into().ok()?,
-        ))
-    };
     let bad = || {
         Error::malformed(format!(
             "archive shared library `{so_path}` is not the expected ELF64 LE (or is corrupted)"
         ))
     };
-    if bytes.len() < 64 || bytes[0..4] != [0x7f, b'E', b'L', b'F'] {
-        return Err(bad());
-    }
-    if bytes[4] != 2 || bytes[5] != 1 {
-        // EI_CLASS=ELFCLASS64, EI_DATA=ELFDATA2LSB
-        return Err(bad());
-    }
-    let shoff = u64_at(0x28).ok_or_else(bad)? as usize;
-    let shentsize = u16_at(0x3a).ok_or_else(bad)? as usize;
-    let mut shnum = u16_at(0x3c).ok_or_else(bad)? as usize;
-    if shentsize < 64 {
-        return Err(bad());
-    }
-    let shdr = |i: usize| -> Option<(u32, u64, u64, u32, u64)> {
-        // (sh_type, sh_offset, sh_size, sh_link, sh_entsize)
-        let base = shoff.checked_add(i.checked_mul(shentsize)?)?;
-        Some((
-            u32_at(base + 4)?,
-            u64_at(base + 24)?,
-            u64_at(base + 32)?,
-            u32_at(base + 40)?,
-            u64_at(base + 56)?,
-        ))
-    };
-    if shnum == 0 {
-        // SHN_UNDEF extension: the real section count is in shdr[0].sh_size
-        let (_, _, size, _, _) = shdr(0).ok_or_else(bad)?;
-        shnum = usize::try_from(size).map_err(|_| bad())?;
-    }
-    for i in 0..shnum {
-        let (ty, sym_off, sym_size, link, entsize) = shdr(i).ok_or_else(bad)?;
-        if ty != want_sht {
+    let header = elf::FileHeader::parse(&bytes).ok_or_else(bad)?;
+    let sections = elf::sections(&bytes, &header).ok_or_else(bad)?;
+    for section in &sections {
+        if section.ty != want_sht {
             continue;
         }
-        if entsize < 24 {
+        if section.entsize < elf::SYM_ENTRY_SIZE as u64 {
             return Err(bad());
         }
-        let str_idx = usize::try_from(link).map_err(|_| bad())?;
-        let (_, str_off, str_size, _, _) = shdr(str_idx).ok_or_else(bad)?;
-        let str_end = usize::try_from(str_off + str_size).map_err(|_| bad())?;
+        let strtab = sections
+            .get(usize::try_from(section.link).map_err(|_| bad())?)
+            .ok_or_else(bad)?;
+        let str_end = usize::try_from(strtab.offset + strtab.size).map_err(|_| bad())?;
+        let count = usize::try_from(section.size / section.entsize.max(1)).map_err(|_| bad())?;
         let mut out = HashMap::new();
-        let count = usize::try_from(sym_size / entsize.max(1)).map_err(|_| bad())?;
-        for j in 0..count {
-            let base = usize::try_from(sym_off)
-                .ok()
-                .and_then(|o| o.checked_add(j.checked_mul(entsize as usize)?))
-                .ok_or_else(bad)?;
-            let st_name = u32_at(base).ok_or_else(bad)? as usize;
-            let st_shndx = u16_at(base + 6).ok_or_else(bad)?;
-            let st_value = u64_at(base + 8).ok_or_else(bad)?;
+        for index in 0..count {
+            let symbol = symbol_at(&bytes, section, strtab, str_end, index).ok_or_else(bad)?;
             // Skip SHN_UNDEF (0) and reserved section indices (0xff00+)
-            if st_name == 0 || st_shndx == 0 || st_shndx >= 0xff00 {
+            if symbol.name_offset == 0
+                || symbol.section_index == SHN_UNDEF
+                || symbol.section_index >= SHN_RESERVED
+            {
                 continue;
             }
-            let name_start = usize::try_from(str_off)
-                .ok()
-                .and_then(|o| o.checked_add(st_name))
-                .ok_or_else(bad)?;
-            let name_end = bytes[name_start..str_end.min(bytes.len())]
-                .iter()
-                .position(|&b| b == 0)
-                .map(|p| name_start + p)
-                .ok_or_else(bad)?;
-            let name = std::str::from_utf8(&bytes[name_start..name_end]).map_err(|_| bad())?;
-            out.insert(Box::from(name), st_value);
+            out.insert(Box::from(symbol.name), symbol.value);
         }
         return Ok(out);
     }
@@ -257,7 +252,7 @@ fn archive_undefined_symbols_in(bytes: &[u8]) -> Result<Vec<Box<str>>, Error> {
             {
                 body = &body[nlen.min(body.len())..];
             }
-            if body.starts_with(b"\x7fELF") {
+            if body.starts_with(&elf::IDENT) {
                 for sym in elf_undefined_symbols(body)? {
                     if !out.contains(&sym) {
                         out.push(sym);
@@ -274,84 +269,33 @@ fn archive_undefined_symbols_in(bytes: &[u8]) -> Result<Vec<Box<str>>, Error> {
 /// SHN_UNDEF enumeration over a single ELF64 LE byte slice (GLOBAL/WEAK bindings; the same
 /// structural walk as symbol_table_values, but selecting shndx == 0 with no filtering).
 fn elf_undefined_symbols(bytes: &[u8]) -> Result<Vec<Box<str>>, Error> {
-    let u16_at = |off: usize| -> Option<u16> {
-        Some(u16::from_le_bytes(
-            bytes.get(off..off + 2)?.try_into().ok()?,
-        ))
-    };
-    let u32_at = |off: usize| -> Option<u32> {
-        Some(u32::from_le_bytes(
-            bytes.get(off..off + 4)?.try_into().ok()?,
-        ))
-    };
-    let u64_at = |off: usize| -> Option<u64> {
-        Some(u64::from_le_bytes(
-            bytes.get(off..off + 8)?.try_into().ok()?,
-        ))
-    };
     let bad = || Error::malformed("not the expected ELF64 LE (or corrupted)");
-    if bytes.len() < 64 || bytes[0..4] != [0x7f, b'E', b'L', b'F'] || bytes[4] != 2 || bytes[5] != 1
-    {
-        return Err(bad());
-    }
-    let shoff = u64_at(0x28).ok_or_else(bad)? as usize;
-    let shentsize = u16_at(0x3a).ok_or_else(bad)? as usize;
-    let mut shnum = u16_at(0x3c).ok_or_else(bad)? as usize;
-    if shentsize < 64 {
-        return Err(bad());
-    }
-    let shdr = |i: usize| -> Option<(u32, u64, u64, u32, u64)> {
-        let base = shoff.checked_add(i.checked_mul(shentsize)?)?;
-        Some((
-            u32_at(base + 4)?,
-            u64_at(base + 24)?,
-            u64_at(base + 32)?,
-            u32_at(base + 40)?,
-            u64_at(base + 56)?,
-        ))
-    };
-    if shnum == 0 {
-        let (_, _, size, _, _) = shdr(0).ok_or_else(bad)?;
-        shnum = usize::try_from(size).map_err(|_| bad())?;
-    }
-    for i in 0..shnum {
-        let (ty, sym_off, sym_size, link, entsize) = shdr(i).ok_or_else(bad)?;
-        if ty != SHT_SYMTAB {
+    let header = elf::FileHeader::parse(bytes).ok_or_else(bad)?;
+    let sections = elf::sections(bytes, &header).ok_or_else(bad)?;
+    for section in &sections {
+        if section.ty != SHT_SYMTAB {
             continue;
         }
-        if entsize < 24 {
+        if section.entsize < elf::SYM_ENTRY_SIZE as u64 {
             return Err(bad());
         }
-        let str_idx = usize::try_from(link).map_err(|_| bad())?;
-        let (_, str_off, str_size, _, _) = shdr(str_idx).ok_or_else(bad)?;
-        let str_end = usize::try_from(str_off + str_size).map_err(|_| bad())?;
-        let count = usize::try_from(sym_size / entsize.max(1)).map_err(|_| bad())?;
+        let strtab = sections
+            .get(usize::try_from(section.link).map_err(|_| bad())?)
+            .ok_or_else(bad)?;
+        let str_end = usize::try_from(strtab.offset + strtab.size).map_err(|_| bad())?;
+        let count = usize::try_from(section.size / section.entsize.max(1)).map_err(|_| bad())?;
         let mut out = Vec::new();
-        for j in 0..count {
-            let base = usize::try_from(sym_off)
-                .ok()
-                .and_then(|o| o.checked_add(j.checked_mul(entsize as usize)?))
-                .ok_or_else(bad)?;
-            let st_name = u32_at(base).ok_or_else(bad)? as usize;
-            let st_info = bytes.get(base + 4).copied().ok_or_else(bad)?;
-            let st_shndx = u16_at(base + 6).ok_or_else(bad)?;
-            let bind = st_info >> 4;
+        for index in 0..count {
+            let symbol = symbol_at(bytes, section, strtab, str_end, index).ok_or_else(bad)?;
             // Take only undefined (SHN_UNDEF) global/weak bindings (LOCAL is the member's
             // internal business)
-            if st_name == 0 || st_shndx != 0 || (bind != 1 && bind != 2) {
+            if symbol.name_offset == 0
+                || symbol.section_index != SHN_UNDEF
+                || (symbol.binding != STB_GLOBAL && symbol.binding != STB_WEAK)
+            {
                 continue;
             }
-            let name_start = usize::try_from(str_off)
-                .ok()
-                .and_then(|o| o.checked_add(st_name))
-                .ok_or_else(bad)?;
-            let name_end = bytes[name_start..str_end.min(bytes.len())]
-                .iter()
-                .position(|&b| b == 0)
-                .map(|p| name_start + p)
-                .ok_or_else(bad)?;
-            let name = std::str::from_utf8(&bytes[name_start..name_end]).map_err(|_| bad())?;
-            out.push(Box::from(name));
+            out.push(Box::from(symbol.name));
         }
         return Ok(out);
     }

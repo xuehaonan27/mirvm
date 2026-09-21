@@ -27,6 +27,9 @@
 
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod x86_64;
+/// The architecture's ELF machine identity, named once for every caller: `arch::ELF_MACHINE`.
+#[cfg(target_arch = "x86_64")]
+pub(crate) use x86_64::ELF_MACHINE;
 
 #[cfg(not(target_arch = "x86_64"))]
 compile_error!(

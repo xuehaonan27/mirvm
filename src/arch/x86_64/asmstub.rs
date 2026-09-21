@@ -49,6 +49,10 @@ pub fn int3() {
     unsafe { std::arch::asm!("int3", options(nomem, nostack, preserves_flags)) };
 }
 
+/// The single-byte `ret`. This is what a `.text` slot that is never executed is filled with: an
+/// image whose only job is to name addresses has to have *something* decodable there.
+pub const RET: u8 = 0xc3;
+
 /// `xgetbv`: XCR(xcr) -> (edx:eax) assembled into a u64.
 pub fn xgetbv(xcr: u32) -> u64 {
     let (eax, edx): (u32, u32);

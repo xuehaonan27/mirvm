@@ -8,13 +8,15 @@
 //! Data source = the raw bytes of the package's MC-section `.so` (slice② NATIVELIBS
 //! fnv mutual verification); this loader has zero dependency on the system linker
 //! (kernel mmap/mprotect + self-parsing, no ld.so/ld.so.cache concepts). Boundaries
-//! (all rejected loudly): non-ET_DYN x86_64, PT_INTERP, TLS/COPY relocations,
-//! non-weak undefined external symbols, STT_GNU_IFUNC — these shapes do not belong to
-//! the self-produced global_asm family; encountering them means the .so is not our
-//! product.
+//! (all rejected loudly): non-ET_DYN, an image built for another machine, PT_INTERP,
+//! TLS/COPY relocations, non-weak undefined external symbols, STT_GNU_IFUNC — these
+//! shapes do not belong to the self-produced global_asm family; encountering them means
+//! the .so is not our product.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use crate::os::obj::elf;
 
 /// A loaded MC image. Symbols are visible only to the Module that holds it; mapping and
 /// unwind registration are not undone because external code pointers may still be alive.
@@ -46,84 +48,46 @@ pub fn resolve(images: &[McImage], name: &str) -> Option<usize> {
 
 // ===== ELF64 loading =====
 
-fn u16_at(b: &[u8], off: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(b.get(off..off + 2)?.try_into().ok()?))
-}
-fn u32_at(b: &[u8], off: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(b.get(off..off + 4)?.try_into().ok()?))
-}
-fn u64_at(b: &[u8], off: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(b.get(off..off + 8)?.try_into().ok()?))
-}
-
-#[derive(Clone, Copy)]
-struct Shdr {
-    name_off: u32,
-    ty: u32,
-    addr: u64,
-    off: u64,
-    size: u64,
-    link: u32,
-    entsize: u64,
-}
-
 /// Load an ELF64 DYN image (raw bytes of a self-produced global_asm/dep_asm family .so).
 pub fn load(bytes: &[u8]) -> Result<McImage, String> {
     let bad = || "MC image is not the expected ELF64 LE DYN (or is corrupt)".to_string();
-    if bytes.len() < 64 || bytes[0..4] != [0x7f, b'E', b'L', b'F'] {
-        return Err(bad());
-    }
-    if bytes[4] != 2 || bytes[5] != 1 {
-        return Err(bad());
-    }
-    if u16_at(bytes, 16) != Some(3) {
+    let header = elf::FileHeader::parse(bytes).ok_or_else(bad)?;
+    if header.kind != elf::ET_DYN {
         return Err(
             "MC image is not ET_DYN (self-produced family should be a shared object)".into(),
         );
     }
-    if u16_at(bytes, 18) != Some(62) {
-        return Err("MC image is not x86_64 (EM_X86_64)".into());
+    if header.machine != crate::arch::ELF_MACHINE {
+        return Err(format!(
+            "MC image was built for ELF machine {} but this host is {}",
+            header.machine,
+            crate::arch::ELF_MACHINE
+        ));
     }
-    let phoff = u64_at(bytes, 32).ok_or_else(bad)? as usize;
-    let phentsize = u16_at(bytes, 54).ok_or_else(bad)? as usize;
-    let phnum = u16_at(bytes, 56).ok_or_else(bad)? as usize;
-    let shoff = u64_at(bytes, 40).ok_or_else(bad)? as usize;
-    let shentsize = u16_at(bytes, 58).ok_or_else(bad)? as usize;
-    let shnum = u16_at(bytes, 60).ok_or_else(bad)? as usize;
-    let shstrndx = u16_at(bytes, 62).ok_or_else(bad)? as usize;
-    if phentsize < 56 || shentsize < 64 {
+    let phoff = usize::try_from(header.phoff).map_err(|_| bad())?;
+    let phentsize = usize::from(header.phentsize);
+    let phnum = usize::from(header.phnum);
+    let shstrndx = usize::from(header.shstrndx);
+    if phentsize < elf::PHDR_SIZE {
         return Err(bad());
     }
     let phdr = |i: usize| -> Option<(u32, u64, u64, u64, u64, u32, u64)> {
         // (type, off, vaddr, filesz, memsz, flags, align)
         let b = phoff.checked_add(i.checked_mul(phentsize)?)?;
         Some((
-            u32_at(bytes, b)?,
-            u64_at(bytes, b + 8)?,
-            u64_at(bytes, b + 16)?,
-            u64_at(bytes, b + 32)?,
-            u64_at(bytes, b + 40)?,
-            u32_at(bytes, b + 4)?,
-            u64_at(bytes, b + 48)?,
+            elf::u32_at(bytes, b)?,
+            elf::u64_at(bytes, b + 8)?,
+            elf::u64_at(bytes, b + 16)?,
+            elf::u64_at(bytes, b + 32)?,
+            elf::u64_at(bytes, b + 40)?,
+            elf::u32_at(bytes, b + 4)?,
+            elf::u64_at(bytes, b + 48)?,
         ))
     };
-    let shdr = |i: usize| -> Option<Shdr> {
-        let b = shoff.checked_add(i.checked_mul(shentsize)?)?;
-        Some(Shdr {
-            name_off: u32_at(bytes, b)?,
-            ty: u32_at(bytes, b + 4)?,
-            addr: u64_at(bytes, b + 16)?,
-            off: u64_at(bytes, b + 24)?,
-            size: u64_at(bytes, b + 32)?,
-            link: u32_at(bytes, b + 40)?,
-            entsize: u64_at(bytes, b + 56)?,
-        })
-    };
+    let sections = elf::sections(bytes, &header).ok_or_else(bad)?;
+    let shdr = |i: usize| -> Option<elf::Section> { sections.get(i).copied() };
 
     // PT_LOAD overview: span calculation + reject PT_INTERP (shared objects should not have it)
-    const PT_LOAD: u32 = 1;
-    const PT_DYNAMIC: u32 = 2;
-    const PT_INTERP: u32 = 3;
     let page = 4096usize;
     let mut lo = usize::MAX;
     let mut hi = 0usize;
@@ -132,7 +96,7 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
     for i in 0..phnum {
         let (ty, off, vaddr, filesz, memsz, _flags, _align) = phdr(i).ok_or_else(bad)?;
         match ty {
-            PT_LOAD => {
+            elf::PT_LOAD => {
                 let v = vaddr as usize;
                 let f = filesz as usize;
                 let m = memsz as usize;
@@ -143,8 +107,8 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
                 lo = lo.min(v & !(page - 1));
                 hi = hi.max((v + m + page - 1) & !(page - 1));
             }
-            PT_DYNAMIC => dynamic = Some((vaddr, memsz)),
-            PT_INTERP => {
+            elf::PT_DYNAMIC => dynamic = Some((vaddr, memsz)),
+            elf::PT_INTERP => {
                 return Err("MC image has PT_INTERP (not a self-produced shared object)".into());
             }
             _ => {}
@@ -233,8 +197,8 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
 
     // Section-header string table (used to find .symtab/.strtab/.eh_frame)
     let shstr = shdr(shstrndx).ok_or_else(bad)?;
-    let sec_name = |s: &Shdr| -> &str {
-        let start = (shstr.off + u64::from(s.name_off)) as usize;
+    let sec_name = |s: &elf::Section| -> &str {
+        let start = (shstr.offset + u64::from(s.name)) as usize;
         let end = bytes[start..]
             .iter()
             .position(|&c| c == 0)
@@ -296,11 +260,11 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
     }
 
     // Collect .symtab/.strtab/.eh_frame
-    let mut symtab: Option<Shdr> = None;
-    let mut strtab: Option<Shdr> = None;
-    let mut dynsym: Option<Shdr> = None;
-    let mut eh_frame: Option<Shdr> = None;
-    for i in 0..shnum {
+    let mut symtab: Option<elf::Section> = None;
+    let mut strtab: Option<elf::Section> = None;
+    let mut dynsym: Option<elf::Section> = None;
+    let mut eh_frame: Option<elf::Section> = None;
+    for i in 0..sections.len() {
         let s = shdr(i).ok_or_else(bad)?;
         match (s.ty, sec_name(&s)) {
             (2, _) => symtab = Some(s),         // SHT_SYMTAB
@@ -343,8 +307,8 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
         return Err("MC DT_JMPREL and DT_PLTRELSZ are incomplete".into());
     }
     let str_at = |off: u32| -> Result<String, String> {
-        let start = (str_s.off + u64::from(off)) as usize;
-        let limit = (str_s.off + str_s.size) as usize;
+        let start = (str_s.offset + u64::from(off)) as usize;
+        let limit = (str_s.offset + str_s.size) as usize;
         let end = bytes[start..limit.min(bytes.len())]
             .iter()
             .position(|&c| c == 0)
@@ -358,17 +322,17 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
     let symcount = (sym_s.size as usize) / syment;
     let sym_at = |j: usize| -> Option<(u32, u8, u16, u64)> {
         // (st_name, st_info, st_shndx, st_value)
-        let b = (sym_s.off as usize).checked_add(j.checked_mul(syment)?)?;
+        let b = (sym_s.offset as usize).checked_add(j.checked_mul(syment)?)?;
         Some((
-            u32_at(bytes, b)?,
+            elf::u32_at(bytes, b)?,
             bytes.get(b + 4).copied()?,
-            u16_at(bytes, b + 6)?,
-            u64_at(bytes, b + 8)?,
+            elf::u16_at(bytes, b + 6)?,
+            elf::u64_at(bytes, b + 8)?,
         ))
     };
     let dyn_str_at = |off: u32| -> Result<String, String> {
-        let start = (dyn_str_s.off + u64::from(off)) as usize;
-        let limit = (dyn_str_s.off + dyn_str_s.size) as usize;
+        let start = (dyn_str_s.offset + u64::from(off)) as usize;
+        let limit = (dyn_str_s.offset + dyn_str_s.size) as usize;
         let end = bytes
             .get(start..limit.min(bytes.len()))
             .ok_or("MC image dynstr is out of bounds")?
@@ -386,12 +350,12 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
         if j >= dyn_symcount {
             return None;
         }
-        let b = (dyn_s.off as usize).checked_add(j.checked_mul(dyn_syment)?)?;
+        let b = (dyn_s.offset as usize).checked_add(j.checked_mul(dyn_syment)?)?;
         Some((
-            u32_at(bytes, b)?,
+            elf::u32_at(bytes, b)?,
             bytes.get(b + 4).copied()?,
-            u16_at(bytes, b + 6)?,
-            u64_at(bytes, b + 8)?,
+            elf::u16_at(bytes, b + 6)?,
+            elf::u64_at(bytes, b + 8)?,
         ))
     };
 
