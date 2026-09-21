@@ -1,5 +1,5 @@
-//! What one compilation read: the files whose content its product depends on, and the `env!` values
-//! it was compiled against.
+//! The dep-info of one compilation: the files whose content its product depends on, and the `env!`
+//! values it was compiled against.
 //!
 //! The scope is isomorphic to rustc's own dep-info (`rustc_interface::passes`): local source files
 //! (`source_map` non-imported) + `include!` tracked files (`sess.file_depinfo`) + every upstream

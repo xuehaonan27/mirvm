@@ -14,12 +14,13 @@
 //! lowering.
 //!
 //! The three persisted layers a session can reuse live beside the stack: [`base`] (the pre-lowered
-//! std image), [`deps`] (a registry dependency closure) and [`ir`] (one program's post-mono engine
-//! IR). Each is a keyed file in the store; [`crate::store::entry`] owns the mechanism they share.
+//! std image), [`deps`] (a registry dependency closure) and [`program`] (one program's post-mono
+//! engine IR). Each is a keyed file in the store; [`crate::store::entry`] owns the mechanism they
+//! share.
 
 pub(crate) mod base;
 pub(crate) mod deps;
-pub(crate) mod ir;
+pub(crate) mod program;
 
 use crate::vm::ir::{FuncId, Module, TlsId};
 

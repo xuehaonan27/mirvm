@@ -684,7 +684,7 @@ pub(crate) fn write_package(
     // Input stamps and the env! list are provenance only. Executable semantics are already frozen
     // into the Module, so running a distributed package must not require the source at its original
     // path, nor a replica of the build environment on the target machine.
-    let inputs = crate::inputs::InputManifest::collect(tcx).unwrap_or_default();
+    let inputs = crate::depinfo::InputManifest::collect(tcx).unwrap_or_default();
     let meta = Meta {
         args: rustc_args.to_vec(),
         envs: inputs.envs,
