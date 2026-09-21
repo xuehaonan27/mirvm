@@ -66,6 +66,7 @@ impl Error {
 
 use std::collections::HashMap;
 
+use crate::os::obj::ar;
 use crate::os::obj::elf::{
     self, SHN_RESERVED, SHN_UNDEF, SHT_DYNSYM, SHT_SYMTAB, STB_GLOBAL, STB_WEAK,
 };
@@ -207,61 +208,21 @@ pub fn archive_undefined_symbols(archive_path: &str) -> Result<Vec<Box<str>>, Er
     })
 }
 
-/// Byte-level implementation (the member header chain is a fixed 60B record: name[16]
-/// date[12] uid[6] gid[6] mode[8] size[10] "`\n"; member bodies are aligned to 2 after size).
+/// Undefined-symbol enumeration over the archive's members. The container walk is
+/// [`ar::members`]; what is left here is the part that is about symbols: read each ELF member's
+/// `.symtab` and keep the GLOBAL/WEAK names with `SHN_UNDEF`.
 fn archive_undefined_symbols_in(bytes: &[u8]) -> Result<Vec<Box<str>>, Error> {
-    if !bytes.starts_with(b"!<arch>\n") {
-        return Err(Error::malformed("not a Unix ar archive"));
-    }
+    let members = ar::members(bytes).map_err(|why| Error::malformed(why.to_string()))?;
     let mut out: Vec<Box<str>> = Vec::new();
-    let mut pos = 8usize;
-    while pos + 60 <= bytes.len() {
-        let hdr = &bytes[pos..pos + 60];
-        if &hdr[58..60] != b"`\n" {
-            return Err(Error::malformed(format!(
-                "ar member header magic misplaced @{pos:#x}"
-            )));
-        }
-        let size_txt = std::str::from_utf8(&hdr[48..58])
-            .map_err(|_| Error::malformed("ar member size is not ASCII"))?;
-        let size: usize = size_txt
-            .trim()
-            .parse()
-            .map_err(|_| Error::malformed(format!("ar member size is unparsable `{size_txt}`")))?;
-        let body_end = pos + 60 + size;
-        if body_end > bytes.len() {
-            return Err(Error::malformed("ar member body out of bounds"));
-        }
-        // Classifying ar member metadata must be exact: GNU ar references names longer than 15
-        // characters through the string table as `/N` (e.g. `/0`), so a leading '/' does
-        // **not** imply metadata. The only metadata members are the symbol table (`/`,
-        // `__.SYMDEF`, `/SYM64/`) and the string table (`//`).
-        let name = String::from_utf8_lossy(&hdr[0..16]);
-        let name = name.trim();
-        let is_metadata = name == "/"
-            || name == "//"
-            || name == "__.SYMDEF"
-            || name == "__.SYMDEF SORTED"
-            || name == "/SYM64/";
-        if !is_metadata {
-            let mut body = &bytes[pos + 60..body_end];
-            // BSD-style `/#1/<len>`: the name is embedded at the start of the body, so strip
-            // its length before reading the content
-            if let Some(rest) = name.strip_prefix("/#1/")
-                && let Ok(nlen) = rest.trim().parse::<usize>()
-            {
-                body = &body[nlen.min(body.len())..];
-            }
-            if body.starts_with(&elf::IDENT) {
-                for sym in elf_undefined_symbols(body)? {
-                    if !out.contains(&sym) {
-                        out.push(sym);
-                    }
+    for member in members {
+        if member.starts_with(&elf::IDENT) {
+            for symbol in elf_undefined_symbols(member)? {
+                if !out.contains(&symbol) {
+                    out.push(symbol);
                 }
             }
-            // Non-ELF member (text listing, etc.): skip
         }
-        pos = body_end + (size & 1);
+        // A non-ELF member (a text listing, for example) carries no symbols to enumerate.
     }
     Ok(out)
 }

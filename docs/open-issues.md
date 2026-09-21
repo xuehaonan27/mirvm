@@ -305,8 +305,7 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
   `src/cargoless/{lockfile,manifest}.rs` may hide real dead code; `src/cargoless/resolver_config.rs` is
   entirely `#![cfg(test)]`, has no consumer and duplicates resolver policy from `config.rs`; the
   duplicated `(lo,hi)` out-store and the unread `trap_if` `_msg` in `src/vm/jit/helpers.rs`; a
-  single-use `addr_of_local` in `jit/translate.rs`; two nearly identical ELF64 traversals in
-  `src/native/symtab.rs`; a stale `#[allow(dead_code)]` in
+  single-use `addr_of_local` in `jit/translate.rs`; a stale `#[allow(dead_code)]` in
   `src/telemetry/capture/session.rs` and a duplicated `#[cfg(test)] #[cfg(test)]` in `thread_ctx.rs`.
   Each was left because reading without changing cannot prove it.
 - **G10** `UNSCHEDULED`: two TSan harness blind spots. (a) JIT is outside the net: `tests/data/fixtures/tsan/Cargo.toml`
