@@ -38,5 +38,7 @@ pub(crate) use x86_64::asm_text;
 
 #[cfg(not(target_arch = "x86_64"))]
 compile_error!(
-    "The `arch` module currently only implements x86_64 (with the same prerequisites as the global_asm/asm-stub hard gate)."
+    "No architecture is implemented for this target. The implemented one is x86_64; adding another \
+     means a directory under src/arch/ named after its `target_arch`, an arm in the ladder in this \
+     file, and implementations of `ELF_MACHINE`, `asm_text` and `intrinsics`."
 );

@@ -327,7 +327,7 @@ src/os_arch/           — 同时属于「某内核 + 某 CPU」的知识，Open
 ### 工程决策
 
 - **nightly 锁定 + 定期 bump**：rustc_private API 随 nightly 漂移；`rust-toolchain.toml` 锁日期版本（当前 nightly-2026-07-02 / rustc 1.98.0-nightly），每月 bump；rustc 交互隔离在少数模块。关注 Miri 同步提交作迁移指南。
-- **依赖以 `-Zalways-encode-mir` 构建**：rlib 携全部函数 MIR；内容寻址全局缓存（`$HOME/.mirvm`，`MIRVM_HOME` 改址）。
+- **依赖以 `-Zalways-encode-mir` 构建**：rlib 携全部函数 MIR；内容寻址全局缓存（`MIRVM_HOME` 下的 `cache/`，默认 `$HOME/.mirvm`）。
 - **engine 是 library，CLI 是薄壳**：公开的安全加载入口只有 `Package::load`；从可信包
   建 Engine 的 `Package::instantiate` 仍是 `unsafe`。既有 Engine 上的 `run_main`、状态、
   `close`/`wait_closed` 是 safe，执行出口用 `RunOutcome`/`RunErrorKind` 区分正常返回、guest

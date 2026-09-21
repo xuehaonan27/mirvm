@@ -44,8 +44,9 @@ tests/data/fixtures/tsan/
                          frame and memory helpers (originally spikes 3 and 4)
 ```
 
-Crate-root modules named `arch`, `diag`, `native`, `options`, `os`, `store`, `telemetry`, `utils`,
-`vm` are **not** a style choice: `src/vm` is compiled verbatim and refers to exactly those paths.
+Crate-root modules named `arch`, `diag`, `native`, `options`, `os`, `os_arch`, `store`, `telemetry`,
+`utils`, `vm` are **not** a style choice: `src/vm` is compiled verbatim and refers to exactly those
+paths.
 `crate::telemetry` is the source-shared adapter, `crate::diag` is the std-only diagnostic
 vocabulary, `crate::native` carries only the pure-Rust symbol-table reader, and the rustc-dependent
 leaves (`lower`, and with them `sysroot`) are stubbed in `src/product_adapters.rs`.
@@ -103,7 +104,8 @@ instead of quietly looking like a pass.
     is asserted.
 * **Guest races.** Cases must not create unsynchronized guest memory access; concurrency
   *through engine APIs* (close racing a call, cross-thread signal delivery) is the point.
-* **Platforms other than Linux/x86_64**, like the rest of the repository.
+* **Platforms other than Linux/x86_64**, like the rest of the repository. `src/os_arch` is the
+  pair this build is for, and the crate root declares it next to `os` for the same reason.
 * **Everything below the engine**: `src/os`, `src/arch` are compiled in (the engine calls
   through them) but the harness does not exercise their concurrency on its own.
 

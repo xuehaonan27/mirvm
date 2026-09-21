@@ -83,6 +83,17 @@ Hot spots are `src/lower/func/` (call and calling-convention lowering), `src/vm/
 Linux/ELF/x86_64 first — it depends on pthread, `dlopen`, GNU link behaviour and x86 asm wrappers —
 and that is the only platform baseline that may be claimed.
 
+That baseline is named in three layers, and nothing outside them names a platform item. `src/arch/`
+is the CPU: instruction encoding and execution, register and feature facts, the ELF machine identity
+and the assembly vocabulary. `src/os/` is the kernel: page size, mappings, `dlopen`, `/proc`, process
+and signal primitives, the object-file formats, the C library's math surface. `src/os_arch/<os>_<arch>/`
+is the intersection, which in practice means the kernel ABI as the CPU encodes it — signal frames and
+restorers, raw syscall sequences, the fixed-address layout, kernel TLS. Each axis declares its surface
+in its own `mod.rs` and dispatches through one `#[cfg]` ladder, so a call site names
+`crate::os::signal::…` or `crate::arch::asm_text::…` on every target. `repo-quality`'s
+`platform boundary` gate holds it: no `libc` constant or protocol function, no `asm!` site, no host
+`cfg` and no `std::os::unix` outside those three trees.
+
 ## 3. Verified boundaries
 
 Measured on the current tree; `tests/README.md` documents the suites.

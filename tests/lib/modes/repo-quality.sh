@@ -89,6 +89,35 @@ check_diag_purity() {
     fi
 }
 
+# The platform layers are the only place a platform item may be named. `src/arch` owns the CPU,
+# `src/os` owns the kernel, and `src/os_arch` owns the two together; anywhere else a raw name is
+# either a constant whose value belongs to the kernel, a function whose protocol one of those layers
+# already wraps, or an `asm!` site that a second architecture would have to find by search.
+#
+# Three limits, stated rather than implied. (1) The scan reads a file's product half: lines from the
+# top, stopping at an inline `#[cfg(test)]` or `#[cfg(all(test, …))]`, and skipping files under a `tests` directory or named
+# `tests.rs`/`test_driver.rs`, because a test that drives the raw ABI is evidence rather than debt.
+# (2) A `#[cfg(not(...))]` branch is not matched: it guards code for a host this crate refuses to
+# build on at all, so it cannot carry a live second spelling. (3) `std::os::fd` is not a platform
+# path — std exposes it on every host — so only `std::os::unix`/`windows` are listed.
+check_platform_boundary() {
+    local bad
+    bad=$(
+        for file in $(grep -rlE 'libc::|[[:space:]]asm!\(|global_asm!\(|std::os::(unix|windows)|#\[cfg\((all\()?(target_arch|target_os|unix|windows)' \
+            src --include='*.rs' \
+            | grep -v '^src/arch/' | grep -v '^src/os/' | grep -v '^src/os_arch/' \
+            | grep -vE '(^|/)tests?\.rs$|/tests/|/embed_tests/|/test_driver\.rs$'); do
+            awk '/^#\[cfg\((all\()?test/ { exit } { print FILENAME ":" FNR ":" $0 }' "$file"
+        done \
+        | grep -E 'libc::[A-Z][A-Z0-9_]*|libc::(pthread_|sig[a-z]|syscall|pwritev|memfd_create|_exit|atexit|getpid|gettid|getenv|kill|dl(open|sym|close|error|info)|mmap|mprotect|munmap|sysconf|raise|fork|write|strlen|memmove|memset|memcmp|process_vm_readv|__errno_location)\(|[[:space:]]asm!\(|global_asm!\(|std::os::(unix|windows)|#\[cfg\((all\()?(target_arch|target_os|unix|windows)'
+    )
+    if [ -n "$bad" ]; then
+        echo "platform items named outside src/{arch,os,os_arch}:" >&2
+        printf '%s\n' "$bad" >&2
+        return 1
+    fi
+}
+
 mode_run() {
     case_init --no-product
     run_check "cargo fmt" "${CARGO:-cargo}" fmt --all -- --check
@@ -99,5 +128,6 @@ mode_run() {
     run_check "no anyhow" check_no_anyhow
     run_check "error codes" check_error_codes
     run_check "diag purity" check_diag_purity
+    run_check "platform boundary" check_platform_boundary
     print_section_report
 }
