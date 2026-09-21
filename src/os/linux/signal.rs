@@ -57,23 +57,106 @@ pub fn is_realtime(signum: i32) -> bool {
     signum >= libc::SIGRTMIN() && signum <= libc::SIGRTMAX()
 }
 
+/// Whether a delivery came from a thread-directed kill (`tkill`/`tgkill`) rather than a
+/// process-directed `kill`.
+///
+/// The engine's mailbox merges deliveries by signal number, which is only sound for a delivery the
+/// kernel addressed to one thread, so it has to ask. The answer lives in `siginfo`, whose layout is
+/// the kernel's, which is why the question is asked here and not there.
+pub fn sent_by_thread_kill(info: *const std::ffi::c_void) -> bool {
+    if info.is_null() {
+        return false;
+    }
+    unsafe { (*info.cast::<libc::siginfo_t>()).si_code == libc::SI_TKILL }
+}
+
 /// A sigaction structure (layout knowledge encapsulated). The engine edits a
 /// copy's handler and writes it back to the kernel; the original guest structure
 /// stays untouched because the guest may reuse or read it back.
 #[derive(Clone, Copy)]
 pub struct Sigaction(libc::sigaction);
 
-/// Restores the calling host thread's real signal mask after a deferred
-/// handler has finished. Guest handlers run in ordinary VM state, but native
-/// dispositions on the same thread must still observe POSIX `sa_mask`.
+/// A thread's signal mask, as the kernel keeps it.
+///
+/// The engine orders its own deferred deliveries against this, so it has to be able to build one,
+/// hand it to the kernel, and put the previous one back.
+#[derive(Clone, Copy)]
+pub struct SignalMask(libc::sigset_t);
+
+impl SignalMask {
+    /// Nothing blocked.
+    pub fn empty() -> Self {
+        let mut mask: libc::sigset_t = unsafe { std::mem::zeroed() };
+        unsafe { libc::sigemptyset(&mut mask) };
+        SignalMask(mask)
+    }
+
+    /// Everything that can be blocked: every traditional signal except the two POSIX forbids.
+    pub fn all_blockable() -> Self {
+        let mut mask = Self::empty();
+        for signum in 1..=STANDARD_SIGNAL_MAX {
+            if matches!(signum, libc::SIGKILL | libc::SIGSTOP) {
+                continue;
+            }
+            unsafe { libc::sigaddset(&mut mask.0, signum) };
+        }
+        mask
+    }
+
+    /// The same mask plus one signal.
+    pub fn with(mut self, signum: i32) -> Self {
+        unsafe { libc::sigaddset(&mut self.0, signum) };
+        self
+    }
+}
+
+/// Which transition [`set_thread_mask`] performs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaskOp {
+    Block,
+    Unblock,
+    Set,
+}
+
+/// Apply `op` to the calling thread's signal mask, returning the mask it had.
+///
+/// `Err` is the raw `pthread_sigmask` return code, which is not `errno`; only the caller knows
+/// whether that is fatal.
+pub fn set_thread_mask(op: MaskOp, mask: &SignalMask) -> Result<SignalMask, i32> {
+    let how = match op {
+        MaskOp::Block => libc::SIG_BLOCK,
+        MaskOp::Unblock => libc::SIG_UNBLOCK,
+        MaskOp::Set => libc::SIG_SETMASK,
+    };
+    let mut previous: libc::sigset_t = unsafe { std::mem::zeroed() };
+    let result = unsafe { libc::pthread_sigmask(how, &mask.0, &mut previous) };
+    if result == 0 {
+        Ok(SignalMask(previous))
+    } else {
+        Err(result)
+    }
+}
+
+/// Puts a thread's mask back when the guard goes out of scope.
+///
+/// A failure here leaves the thread carrying a mask nobody asked for — a guest `sa_mask` silently
+/// ignored, or the close path's block-all mask still in place — so it aborts rather than
+/// continuing with a POSIX guarantee quietly broken.
 pub struct ThreadSignalMaskGuard {
-    previous: libc::sigset_t,
+    previous: SignalMask,
+}
+
+impl ThreadSignalMaskGuard {
+    /// Restore `previous` when the guard drops.
+    pub fn restore_on_drop(previous: SignalMask) -> Self {
+        ThreadSignalMaskGuard { previous }
+    }
 }
 
 impl Drop for ThreadSignalMaskGuard {
     fn drop(&mut self) {
         let result = unsafe {
-            libc::pthread_sigmask(libc::SIG_SETMASK, &self.previous, std::ptr::null_mut())
+            libc::pthread_sigmask(libc::SIG_SETMASK, &self.previous.0, std::ptr::null_mut())
         };
         if result != 0 {
             eprintln!("mirvm[m4-engine]: failed to restore host signal mask: {result}");
@@ -201,15 +284,8 @@ impl Sigaction {
     /// thread while a deferred handler runs. This prevents a genuine native
     /// disposition from interrupting the handler contrary to POSIX `sa_mask`.
     pub fn block_for_handler(&self, signum: i32) -> Result<ThreadSignalMaskGuard, i32> {
-        let mut blocked = self.0.sa_mask;
-        unsafe { libc::sigaddset(&mut blocked, signum) };
-        let mut previous: libc::sigset_t = unsafe { std::mem::zeroed() };
-        let result = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut previous) };
-        if result == 0 {
-            Ok(ThreadSignalMaskGuard { previous })
-        } else {
-            Err(result)
-        }
+        let mask = SignalMask(self.0.sa_mask).with(signum);
+        set_thread_mask(MaskOp::Block, &mask).map(ThreadSignalMaskGuard::restore_on_drop)
     }
 
     pub fn query(signum: i32) -> Result<Self, i32> {

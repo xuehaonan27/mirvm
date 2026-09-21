@@ -22,24 +22,75 @@ use std::ffi::c_void;
 /// recognizable.
 pub use crate::os_arch::thread::{futex_wait_raw, futex_wake_one_raw, stack_addr_is_unset};
 
+/// A host thread, as the C library names it.
+///
+/// Kept opaque: the engine keys its per-thread tables by thread identity and never inspects one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ThreadId(libc::pthread_t);
+
+/// The calling thread's identity.
+pub fn current_thread() -> ThreadId {
+    ThreadId(unsafe { libc::pthread_self() })
+}
+
+/// The library's `EINVAL`, which is what a thread-specific-data call returns for a key that is
+/// already gone: the state POSIX puts a destructor in, having cleared the thread's values before
+/// running them.
+pub const TLS_KEY_GONE: i32 = libc::EINVAL;
+
+/// The library's `EINVAL` as the create/spawn calls use it: an argument they refuse, which for an
+/// interposed call is a callback this process cannot wrap rather than anything the caller can fix.
+pub const INVALID_ARGUMENT: i32 = libc::EINVAL;
+
 /// pthread TLS key.
-/// Unique within the process after creation (`dtor` determined by the caller).
-#[derive(Clone, Copy)]
+///
+/// Unique within the process after creation (`dtor` determined by the caller). Ordered by the
+/// library's own key number, which is what the final pthread-destructor pass walks to visit the
+/// keys above the process-lifetime one in the order that pass uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TlsKey(libc::pthread_key_t);
 
 impl TlsKey {
+    /// The library's own key number. Only a test that drives the raw ABI needs it: product code
+    /// keeps the key opaque and asks [`TlsKey::from_raw`] when a library hands it one.
+    #[cfg(test)]
     pub fn as_raw(self) -> libc::pthread_key_t {
         self.0
     }
+
+    /// Wrap a key this process did not create, which is the shape an interposed
+    /// `pthread_setspecific`/`pthread_key_delete` receives from its caller.
+    pub fn from_raw(raw: libc::pthread_key_t) -> Self {
+        TlsKey(raw)
+    }
+}
+
+/// `pthread_key_create` into a caller-owned slot, returning the library's code.
+///
+/// The slot is raw because an interposed call writes the key into its caller's own storage;
+/// [`tls_key_create`] is the shape the engine uses for its own keys.
+///
+/// # Safety
+/// `out` must be valid for one `pthread_key_t`, and `dtor` a valid destructor.
+pub unsafe fn tls_key_create_raw(
+    out: *mut libc::pthread_key_t,
+    dtor: Option<unsafe extern "C" fn(*mut c_void)>,
+) -> i32 {
+    unsafe { libc::pthread_key_create(out, dtor) }
 }
 
 /// Thin wrapper of `pthread_key_create`.
 /// Panic on failure. The engine does not have a keyless downgrade path.
 pub fn tls_key_create(dtor: Option<unsafe extern "C" fn(*mut c_void)>) -> TlsKey {
     let mut k: libc::pthread_key_t = 0;
-    let rc = unsafe { libc::pthread_key_create(&mut k, dtor) };
+    let rc = unsafe { tls_key_create_raw(&mut k, dtor) };
     assert_eq!(rc, 0, "pthread_key_create failed: {rc}");
     TlsKey(k)
+}
+
+/// Thin wrapper of `pthread_key_delete`, returning the library's code.
+pub fn tls_key_delete(key: TlsKey) -> i32 {
+    unsafe { libc::pthread_key_delete(key.0) }
 }
 
 /// Thin wrapper of `pthread_getspecific`.
@@ -50,12 +101,28 @@ pub unsafe fn tls_get(key: TlsKey) -> *mut c_void {
     unsafe { libc::pthread_getspecific(key.0) }
 }
 
-/// Thin wrapper of `pthread_setspecific`
+/// Thin wrapper of `pthread_setspecific`.
+///
+/// The code comes back instead of being judged here: a caller clearing a managed key tolerates
+/// [`TLS_KEY_GONE`] and one installing a value does not, and only the caller knows which it is.
 ///
 /// # Safety
 /// Consistent with libc semantics.
-pub unsafe fn tls_set(key: TlsKey, p: *mut c_void) {
-    unsafe { libc::pthread_setspecific(key.0, p) };
+pub unsafe fn tls_set(key: TlsKey, p: *const c_void) -> i32 {
+    unsafe { libc::pthread_setspecific(key.0, p) }
+}
+
+/// `pthread_create` with the caller's own start routine, returning the library's code.
+///
+/// # Safety
+/// The pointers must satisfy `pthread_create`'s contract.
+pub unsafe fn spawn_raw(
+    thread: *mut libc::pthread_t,
+    attr: *const libc::pthread_attr_t,
+    start: extern "C" fn(*mut c_void) -> *mut c_void,
+    value: *mut c_void,
+) -> i32 {
+    unsafe { libc::pthread_create(thread, attr, start, value) }
 }
 
 /// This thread's stack [lo, lo+size) (pthread_getattr_np + getstack + destroy).

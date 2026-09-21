@@ -116,7 +116,7 @@ pub(crate) fn run_guest_threads() -> bool {
     let mut key: libc::pthread_key_t = 0;
     let created = unsafe { libc::pthread_key_create(&mut key, None) } == 0;
     if created {
-        registration.commit(key);
+        registration.commit(crate::os::thread::TlsKey::from_raw(key));
     }
 
     set_fork_baseline(&shared);

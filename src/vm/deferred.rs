@@ -11,6 +11,10 @@ use std::ffi::c_void;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use super::ctx::{DeferredHold, EngineClosed, EngineControl, ExecutionLease, Shared};
+use crate::os::thread::{
+    INVALID_ARGUMENT, TLS_KEY_GONE, ThreadId, TlsKey, current_thread, spawn_raw,
+    tls_key_create_raw, tls_key_delete, tls_set,
+};
 
 const TSD_DTOR_ROUNDS: usize = 4;
 
@@ -41,10 +45,10 @@ impl PthreadStart {
 }
 
 struct TsdState {
-    key: Option<libc::pthread_key_t>,
+    key: Option<TlsKey>,
     code: u64,
-    values: HashMap<libc::pthread_t, (u64, usize)>,
-    active_rounds: HashMap<libc::pthread_t, Vec<usize>>,
+    values: HashMap<ThreadId, (u64, usize)>,
+    active_rounds: HashMap<ThreadId, Vec<usize>>,
     callbacks: usize,
     operations: usize,
     deleting: bool,
@@ -58,7 +62,7 @@ pub(crate) struct TsdRegistration {
     state: Mutex<TsdState>,
 }
 
-type TsdKey = (u64, libc::pthread_key_t);
+type TsdKey = (u64, TlsKey);
 type TsdKeyRegistry = HashMap<TsdKey, Arc<TsdRegistration>>;
 
 static TSD_KEYS: LazyLock<Mutex<TsdKeyRegistry>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -88,7 +92,7 @@ impl TsdRegistration {
         state.code = code;
     }
 
-    pub(crate) fn commit(self: &Arc<Self>, key: libc::pthread_key_t) {
+    pub(crate) fn commit(self: &Arc<Self>, key: TlsKey) {
         let closing = {
             // Publishing a key and close's registry scan share this lock. If
             // close scanned first, the phase check makes this registration
@@ -125,7 +129,7 @@ impl TsdRegistration {
         self: &Arc<Self>,
     ) -> Result<(ExecutionLease, TsdCallback), EngineClosed> {
         let lease = ExecutionLease::for_registered_callback(&self.control)?;
-        let thread = unsafe { libc::pthread_self() };
+        let thread = current_thread();
         let (round, final_pthread_pass) = {
             let mut state = self.state.lock().unwrap();
             if state.deleted {
@@ -153,12 +157,7 @@ impl TsdRegistration {
         ))
     }
 
-    fn finish_callback(
-        self: &Arc<Self>,
-        thread: libc::pthread_t,
-        round: usize,
-        final_pthread_pass: bool,
-    ) {
+    fn finish_callback(self: &Arc<Self>, thread: ThreadId, round: usize, final_pthread_pass: bool) {
         let (clear_native, drain_after_return) = {
             let mut state = self.state.lock().unwrap();
             let rounds = state
@@ -191,7 +190,7 @@ impl TsdRegistration {
         if let Some(key) = clear_native {
             // POSIX abandons a destructor value that is reinstalled in every
             // one of the implementation's bounded rounds.
-            unsafe { libc::pthread_setspecific(key, std::ptr::null()) };
+            let _ = unsafe { tls_set(key, std::ptr::null()) };
         }
         if drain_after_return {
             // ActivationGuard could not drain while this destructor round was
@@ -207,8 +206,8 @@ impl TsdRegistration {
         self.state.lock().unwrap().closing = true;
     }
 
-    fn current_value(&self) -> Option<(libc::pthread_key_t, u64, u64)> {
-        let thread = unsafe { libc::pthread_self() };
+    fn current_value(&self) -> Option<(TlsKey, u64, u64)> {
+        let thread = current_thread();
         let state = self.state.lock().unwrap();
         if state.deleted
             || state.deleting
@@ -225,7 +224,7 @@ impl TsdRegistration {
     }
 
     fn abandon_current_value(&self) {
-        let thread = unsafe { libc::pthread_self() };
+        let thread = current_thread();
         let mut state = self.state.lock().unwrap();
         if state
             .active_rounds
@@ -239,8 +238,8 @@ impl TsdRegistration {
         self.cleanup_if_idle();
     }
 
-    fn abandon_current_value_for_exit(&self) -> Option<libc::pthread_key_t> {
-        let thread = unsafe { libc::pthread_self() };
+    fn abandon_current_value_for_exit(&self) -> Option<TlsKey> {
+        let thread = current_thread();
         let mut state = self.state.lock().unwrap();
         if state
             .active_rounds
@@ -276,7 +275,7 @@ impl TsdRegistration {
 
     fn finish_operation(&self, kind: TsdOperationKind, succeeded: bool) {
         let (remove_key, hold) = {
-            let thread = unsafe { libc::pthread_self() };
+            let thread = current_thread();
             let mut state = self.state.lock().unwrap();
             if succeeded {
                 match kind {
@@ -338,13 +337,13 @@ impl TsdRegistration {
         };
         if let Some(key) = cleanup.0 {
             remove_registration(self, key);
-            unsafe { libc::pthread_key_delete(key) };
+            tls_key_delete(key);
         }
         drop(cleanup.1);
     }
 }
 
-fn remove_registration(registration: &TsdRegistration, key: libc::pthread_key_t) {
+fn remove_registration(registration: &TsdRegistration, key: TlsKey) {
     let slot = (registration.control.id(), key);
     let mut keys = TSD_KEYS.lock().unwrap();
     if keys
@@ -357,7 +356,7 @@ fn remove_registration(registration: &TsdRegistration, key: libc::pthread_key_t)
 
 pub(crate) struct TsdCallback {
     registration: Arc<TsdRegistration>,
-    thread: libc::pthread_t,
+    thread: ThreadId,
     round: usize,
     final_pthread_pass: bool,
 }
@@ -403,22 +402,20 @@ pub(crate) fn prepare_pthread_operation(
 ) -> Option<TsdOperation> {
     let (key, kind) = match sym {
         "pthread_setspecific" if args.len() >= 2 => (
-            args[0] as libc::pthread_key_t,
+            TlsKey::from_raw(args[0] as libc::pthread_key_t),
             TsdOperationKind::Set(args[1]),
         ),
-        "pthread_key_delete" if !args.is_empty() => {
-            (args[0] as libc::pthread_key_t, TsdOperationKind::Delete)
-        }
+        "pthread_key_delete" if !args.is_empty() => (
+            TlsKey::from_raw(args[0] as libc::pthread_key_t),
+            TsdOperationKind::Delete,
+        ),
         _ => return None,
     };
     let registration = { TSD_KEYS.lock().unwrap().get(&(shared.id, key)).cloned() };
     registration.and_then(|registration| registration.begin_operation(kind))
 }
 
-fn registration_for_native_key(
-    owner: u64,
-    key: libc::pthread_key_t,
-) -> Option<Arc<TsdRegistration>> {
+fn registration_for_native_key(owner: u64, key: TlsKey) -> Option<Arc<TsdRegistration>> {
     TSD_KEYS.lock().unwrap().get(&(owner, key)).cloned()
 }
 
@@ -427,9 +424,10 @@ pub(crate) unsafe extern "C" fn native_pthread_setspecific(
     value: *const c_void,
     owner: u64,
 ) -> libc::c_int {
+    let key = TlsKey::from_raw(key);
     let operation = registration_for_native_key(owner, key)
         .and_then(|registration| registration.begin_operation(TsdOperationKind::Set(value as u64)));
-    let result = unsafe { libc::pthread_setspecific(key, value) };
+    let result = unsafe { tls_set(key, value) };
     if let Some(operation) = operation {
         operation.complete(result as u64);
     }
@@ -440,9 +438,10 @@ pub(crate) unsafe extern "C" fn native_pthread_key_delete(
     key: libc::pthread_key_t,
     owner: u64,
 ) -> libc::c_int {
+    let key = TlsKey::from_raw(key);
     let operation = registration_for_native_key(owner, key)
         .and_then(|registration| registration.begin_operation(TsdOperationKind::Delete));
-    let result = unsafe { libc::pthread_key_delete(key) };
+    let result = tls_key_delete(key);
     if let Some(operation) = operation {
         operation.complete(result as u64);
     }
@@ -455,17 +454,17 @@ pub(crate) unsafe extern "C" fn native_pthread_key_create(
     owner: u64,
 ) -> libc::c_int {
     let Some(destructor) = destructor else {
-        return unsafe { libc::pthread_key_create(key, None) };
+        return unsafe { tls_key_create_raw(key, None) };
     };
     let Some((registration, proxy)) =
         super::thunks::wrap_tsd_destructor(owner, destructor as usize as u64)
     else {
-        return libc::EINVAL;
+        return INVALID_ARGUMENT;
     };
     let proxy: unsafe extern "C" fn(*mut c_void) = unsafe { std::mem::transmute(proxy as usize) };
-    let result = unsafe { libc::pthread_key_create(key, Some(proxy)) };
+    let result = unsafe { tls_key_create_raw(key, Some(proxy)) };
     if result == 0 {
-        registration.commit(unsafe { key.read() });
+        registration.commit(TlsKey::from_raw(unsafe { key.read() }));
     } else {
         registration.cancel();
     }
@@ -482,11 +481,11 @@ pub(crate) unsafe extern "C" fn native_pthread_create(
     let Some((registration, proxy)) =
         super::thunks::wrap_pthread_start(owner, start as usize as u64)
     else {
-        return libc::EINVAL;
+        return INVALID_ARGUMENT;
     };
     let proxy: extern "C" fn(*mut c_void) -> *mut c_void =
         unsafe { std::mem::transmute(proxy as usize) };
-    let result = unsafe { libc::pthread_create(thread, attr, proxy, value) };
+    let result = unsafe { spawn_raw(thread, attr, proxy, value) };
     if result != 0 {
         registration.cancel();
     }
@@ -525,19 +524,19 @@ pub(crate) fn drain_current_thread(shared: &Shared) {
 
 pub(crate) struct ThreadExitTsdCallback {
     registration: Arc<TsdRegistration>,
-    key: libc::pthread_key_t,
+    key: TlsKey,
     value: u64,
     code: u64,
 }
 
 impl ThreadExitTsdCallback {
-    pub(crate) fn key(&self) -> libc::pthread_key_t {
+    pub(crate) fn key(&self) -> TlsKey {
         self.key
     }
 
     pub(crate) fn invoke(self) {
-        let error = unsafe { libc::pthread_setspecific(self.key, std::ptr::null()) };
-        if error != 0 && error != libc::EINVAL {
+        let error = unsafe { tls_set(self.key, std::ptr::null()) };
+        if error != 0 && error != TLS_KEY_GONE {
             eprintln!(
                 "mirvm[m4-engine]: failed to clear managed TSD before pthread exit callback: {error}"
             );
@@ -553,7 +552,7 @@ impl ThreadExitTsdCallback {
 /// Select the next managed TSD value that glibc has not yet visited in its
 /// fourth and final pthread-destructor pass.
 pub(crate) fn take_next_current_thread_tsd_for_exit(
-    cursor: libc::pthread_key_t,
+    cursor: TlsKey,
 ) -> Option<ThreadExitTsdCallback> {
     let registrations = TSD_KEYS
         .lock()
@@ -586,8 +585,8 @@ pub(crate) fn abandon_current_thread_tsd_for_exit() {
         .collect::<Vec<_>>();
     for registration in registrations {
         if let Some(key) = registration.abandon_current_value_for_exit() {
-            let error = unsafe { libc::pthread_setspecific(key, std::ptr::null()) };
-            if error != 0 && error != libc::EINVAL {
+            let error = unsafe { tls_set(key, std::ptr::null()) };
+            if error != 0 && error != TLS_KEY_GONE {
                 eprintln!(
                     "mirvm[m4-engine]: failed to abandon managed TSD at pthread exit: {error}"
                 );
@@ -615,7 +614,7 @@ fn drain_registrations_on_current_thread(registrations: Vec<Arc<TsdRegistration>
             };
             progressed = true;
             unsafe {
-                libc::pthread_setspecific(key, std::ptr::null());
+                let _ = tls_set(key, std::ptr::null());
                 let callback: unsafe extern "C" fn(*mut c_void) =
                     std::mem::transmute(code as usize);
                 callback(value as *mut c_void);
