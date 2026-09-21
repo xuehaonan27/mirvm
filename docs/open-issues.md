@@ -302,6 +302,17 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
   structurally untestable — TSan refuses to create a thread after a multithreaded fork (exit 66), and
   the only thread the engine creates in a child is the `rebuild_session_from_recipe` writer. Both are
   documented in `tests/data/fixtures/tsan/README.md`.
+- **G11** `UNSCHEDULED`: a mode's `bad()` does not fail its case, so some checks are reported and
+  then discarded. `tests/run.sh` runs a mode inside a subshell and judges it by that subshell's exit
+  status, and `harness.sh`'s `case_summary` — the only thing that turns the `fail` counter into a
+  non-zero status — is called by no mode: `framework-self-test.sh` ends with `[ "$fail" -eq 0 ]`,
+  every other `mode_run` ends on an `if`/`fi` and therefore returns 0. A check that is not the last
+  statement of its mode, and does not `return 1` itself, cannot fail the suite. The visible instance
+  is `cargo-runner default output drifted` in the `diagnostics` mode, which fails on every run —
+  the compiler's diagnostics reach physical stderr on the cold first `run` (1116 bytes) and not on
+  the cache-warm `capture` (503) — while the case still reports PASS, on `f2279f1` as well as on the
+  platform-refactor tree. Wiring `case_summary` into each mode surfaces every such silent failure at
+  once, which is why it is recorded rather than changed here.
 
 ## F. Reopen triggers
 
