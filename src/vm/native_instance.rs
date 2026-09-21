@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, RwLock};
 
 use super::ir::{Module, native_entry_slot_name};
+use crate::os::obj::elf;
 
 static NEXT_NATIVE_INSTANCE: AtomicU64 = AtomicU64::new(0);
 
@@ -472,31 +473,14 @@ fn suppress_lifecycle_tags(path: &Path) -> Result<DynamicLifecycle, String> {
     let mut bytes = std::fs::read(path)
         .map_err(|e| format!("fail to read private native `{}`: {e}", path.display()))?;
     let bad = || format!("native `{}` is not valid ELF64 LE", path.display());
-    if bytes.len() < 64 || bytes[0..6] != [0x7f, b'E', b'L', b'F', 2, 1] {
+    let header = elf::FileHeader::parse(&bytes).ok_or_else(bad)?;
+    if header.kind != elf::ET_DYN || header.machine != crate::arch::ELF_MACHINE {
         return Err(bad());
     }
-    let u16_at = |off: usize| -> Option<u16> {
-        Some(u16::from_le_bytes(
-            bytes.get(off..off + 2)?.try_into().ok()?,
-        ))
-    };
-    let u32_at = |off: usize| -> Option<u32> {
-        Some(u32::from_le_bytes(
-            bytes.get(off..off + 4)?.try_into().ok()?,
-        ))
-    };
-    let u64_at = |off: usize| -> Option<u64> {
-        Some(u64::from_le_bytes(
-            bytes.get(off..off + 8)?.try_into().ok()?,
-        ))
-    };
-    if u16_at(16) != Some(3) || u16_at(18) != Some(62) {
-        return Err(bad());
-    }
-    let phoff = usize::try_from(u64_at(32).ok_or_else(bad)?).map_err(|_| bad())?;
-    let phentsize = usize::from(u16_at(54).ok_or_else(bad)?);
-    let phnum = usize::from(u16_at(56).ok_or_else(bad)?);
-    if phentsize < 56 {
+    let phoff = usize::try_from(header.phoff).map_err(|_| bad())?;
+    let phentsize = usize::from(header.phentsize);
+    let phnum = usize::from(header.phnum);
+    if phentsize < elf::PHDR_SIZE {
         return Err(bad());
     }
     let mut dynamic = None;
@@ -505,12 +489,12 @@ fn suppress_lifecycle_tags(path: &Path) -> Result<DynamicLifecycle, String> {
         let base = phoff
             .checked_add(index.checked_mul(phentsize).ok_or_else(bad)?)
             .ok_or_else(bad)?;
-        let ty = u32_at(base).ok_or_else(bad)?;
-        let flags = u32_at(base + 4).ok_or_else(bad)?;
-        let off = u64_at(base + 8).ok_or_else(bad)?;
-        let vaddr = u64_at(base + 16).ok_or_else(bad)?;
-        let filesz = u64_at(base + 32).ok_or_else(bad)?;
-        let memsz = u64_at(base + 40).ok_or_else(bad)?;
+        let ty = elf::u32_at(&bytes, base).ok_or_else(bad)?;
+        let flags = elf::u32_at(&bytes, base + 4).ok_or_else(bad)?;
+        let off = elf::u64_at(&bytes, base + 8).ok_or_else(bad)?;
+        let vaddr = elf::u64_at(&bytes, base + 16).ok_or_else(bad)?;
+        let filesz = elf::u64_at(&bytes, base + 32).ok_or_else(bad)?;
+        let memsz = elf::u64_at(&bytes, base + 40).ok_or_else(bad)?;
         if ty == PT_LOAD {
             let end = vaddr
                 .checked_add(memsz)

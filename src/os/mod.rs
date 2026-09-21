@@ -39,6 +39,10 @@ pub(crate) mod linux;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::*;
 
+/// The object-file formats this platform's loader and linker read. Not behind the `linux/` ladder:
+/// a byte layout does not change with the kernel, only which image a kernel accepts does.
+pub(crate) mod obj;
+
 /// Why a host primitive did not do what it was asked.
 ///
 /// This layer only posts what the kernel or libc said, so the classes are the calls themselves: the
