@@ -19,6 +19,8 @@
 //! Only x86_64 is supported; the `func.rs` boundary already rejects non-x86_64, naked,
 //! may_unwind, sym, label and const operands.
 
+use crate::lower::Error;
+
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -129,7 +131,7 @@ pub(crate) fn materialize(sites: &[ir::AsmSite]) -> Vec<u64> {
 
 /// Fallible counterpart of [`materialize`]: reports an assembly, caching or symbol failure as
 /// an `Err` instead of panicking.
-pub(crate) fn try_materialize(sites: &[ir::AsmSite]) -> Result<Vec<u64>, String> {
+pub(crate) fn try_materialize(sites: &[ir::AsmSite]) -> Result<Vec<u64>, Error> {
     if sites.is_empty() {
         return Ok(Vec::new());
     }
@@ -147,9 +149,12 @@ pub(crate) fn try_materialize(sites: &[ir::AsmSite]) -> Result<Vec<u64>, String>
 
     let dir = crate::store::ASM_STUBS.dir();
     std::fs::create_dir_all(&dir).map_err(|e| {
-        format!(
-            "failed to create the asm-stub cache directory `{}`: {e}",
-            dir.display()
+        Error::io(
+            format!(
+                "failed to create the asm-stub cache directory `{}`",
+                dir.display()
+            ),
+            e,
         )
     })?;
     let so: PathBuf = dir.join(format!("{h:016x}.so"));
@@ -164,9 +169,12 @@ pub(crate) fn try_materialize(sites: &[ir::AsmSite]) -> Result<Vec<u64>, String>
         s_path.push(".s");
         let s_path = PathBuf::from(s_path);
         std::fs::write(&s_path, &src).map_err(|e| {
-            format!(
-                "failed to write the asm-stub temporary assembly `{}`: {e}",
-                s_path.display()
+            Error::io(
+                format!(
+                    "failed to write the asm-stub temporary assembly `{}`",
+                    s_path.display()
+                ),
+                e,
             )
         })?;
         let output = std::process::Command::new("cc")
@@ -175,52 +183,65 @@ pub(crate) fn try_materialize(sites: &[ir::AsmSite]) -> Result<Vec<u64>, String>
             .arg(&s_path)
             .output()
             .map_err(|e| {
-                format!(
+                Error::assemble(format!(
                     "failed to invoke cc to assemble the asm-stub (is cc missing from PATH?): {e}"
-                )
+                ))
             })?;
         let _ = std::fs::remove_file(&s_path);
         if !output.status.success() {
             let _ = std::fs::remove_file(&tmp);
-            return Err(format!(
+            return Err(Error::assemble(format!(
                 "cc failed to assemble the asm-stub (status={}):\n{}{}",
                 output.status,
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
-            ));
+            )));
         }
         crate::store::publish(&so, &tmp).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
-            format!(
-                "failed to atomically publish the asm-stub .so `{}`: {e}",
-                so.display()
+            Error::io(
+                format!(
+                    "failed to atomically publish the asm-stub .so `{}`",
+                    so.display()
+                ),
+                e,
             )
         })?;
     }
 
-    let c_so = std::ffi::CString::new(so.as_os_str().as_encoded_bytes())
-        .map_err(|_| format!("asm-stub path contains a NUL byte: {}", so.display()))?;
+    let c_so = std::ffi::CString::new(so.as_os_str().as_encoded_bytes()).map_err(|_| {
+        Error::internal(format!(
+            "asm-stub path contains a NUL byte: {}",
+            so.display()
+        ))
+    })?;
     let handle = crate::os::dll::open_with_flags(
         &c_so,
         crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL,
     )
-    .map_err(|detail| {
-        format!(
-            "failed to dlopen the asm-stub .so `{}`: {detail}",
+    .map_err(|error| {
+        Error::assemble(format!(
+            "cannot dlopen the asm-stub .so `{}`: {error}",
             so.display()
-        )
+        ))
     })?;
     refill_syscall_slot(handle);
 
     sites
         .iter()
-        .map(|site| -> Result<u64, String> {
+        .map(|site| -> Result<u64, Error> {
             let name = std::ffi::CString::new(&*site.name).map_err(|_| {
-                format!("asm-stub symbol name contains a NUL byte: {:?}", site.name)
+                Error::internal(format!(
+                    "asm-stub symbol name contains a NUL byte: {:?}",
+                    site.name
+                ))
             })?;
             let addr = crate::os::dll::sym(handle, &name);
             if addr == 0 {
-                return Err(format!("failed to dlsym asm-stub `{}`", site.name));
+                return Err(Error::assemble(format!(
+                    "failed to dlsym asm-stub `{}`",
+                    site.name
+                )));
             }
             Ok(addr as u64)
         })

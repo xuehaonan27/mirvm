@@ -2,6 +2,8 @@
 //! and element kind (LaneKind makes "forgot the kind" unrepresentable).
 //! Sole entry = the simd_* dispatch in intrinsic.rs.
 
+use crate::lower::Error;
+
 use super::*;
 
 impl<'tcx> LowerCx<'tcx, '_> {
@@ -13,7 +15,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
     pub(super) fn simd_geom(
         &mut self,
         ty: Ty<'tcx>,
-    ) -> Result<(u16, u8, ir::LaneKind, u64), String> {
+    ) -> Result<(u16, u8, ir::LaneKind, u64), Error> {
         self.simd_geom_ext(ty, false)
     }
 
@@ -24,10 +26,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
         &mut self,
         ty: Ty<'tcx>,
         allow_f16: bool,
-    ) -> Result<(u16, u8, ir::LaneKind, u64), String> {
+    ) -> Result<(u16, u8, ir::LaneKind, u64), Error> {
         let layout = self.layout_of(ty)?;
         let rustc_abi::BackendRepr::SimdVector { element, count } = layout.backend_repr else {
-            return Err(format!("simd intrinsic argument is not a vector ({ty})"));
+            return Err(Error::internal(format!(
+                "simd intrinsic argument is not a vector ({ty})"
+            )));
         };
         let dl = self.tcx.data_layout();
         let lane_bytes = element.size(dl).bytes() as u8;
@@ -37,7 +41,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let ok = matches!(f, rustc_abi::Float::F32 | rustc_abi::Float::F64)
                     || (allow_f16 && matches!(f, rustc_abi::Float::F16));
                 if !ok {
-                    return Err(format!("simd float lane {f:?} (f16/f128)"));
+                    return Err(Error::internal(format!("simd float lane {f:?} (f16/f128)")));
                 }
                 ir::LaneKind::Float
             }
@@ -55,13 +59,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
         inst: &Instance<'tcx>,
         args: &[rustc_span::Spanned<mir::Operand<'tcx>>],
         destination: &mir::Place<'tcx>,
-    ) -> Result<Vec<Stmt>, String> {
+    ) -> Result<Vec<Stmt>, Error> {
         use ir::{LaneKind, SimdBinOp as S, SimdReduceOp as R, SimdUnOp as U};
         // Vector operand -> place address expression (Bytes channel; constants are already materialized in the frozen region)
-        let vplace = |cx: &mut Self, op: &mir::Operand<'tcx>| -> Result<PlaceExpr, String> {
+        let vplace = |cx: &mut Self, op: &mir::Operand<'tcx>| -> Result<PlaceExpr, Error> {
             match cx.lower_operand(op)? {
                 LoweredOp::Bytes { place, .. } => Ok(place.expr()),
-                _ => Err("simd argument is not a vector".into()),
+                _ => Err(Error::internal("simd argument is not a vector")),
             }
         };
         // Special-shaped arm first: the first generic arg is not a vector (a scalar bitmask), so geometry comes from the data vector
@@ -86,7 +90,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         let f16_ok = matches!(name, "simd_shuffle" | "simd_cast" | "simd_as");
         let (lanes, lane_bytes, lane, vec_size) = self.simd_geom_ext(vec_ty, f16_ok)?;
         let count = lanes as u64;
-        let bin = |cx: &mut Self, op: S| -> Result<Vec<Stmt>, String> {
+        let bin = |cx: &mut Self, op: S| -> Result<Vec<Stmt>, Error> {
             let a = vplace(cx, &args[0].node)?;
             let b = vplace(cx, &args[1].node)?;
             let dst = cx.resolve_place(destination)?.expr();
@@ -101,14 +105,16 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }])
         };
         // Unary (the float/integer lane kind is validated here; the executor keeps only defensive asserts)
-        let un = |cx: &mut Self, op: U, need: Option<LaneKind>| -> Result<Vec<Stmt>, String> {
+        let un = |cx: &mut Self, op: U, need: Option<LaneKind>| -> Result<Vec<Stmt>, Error> {
             if let Some(need) = need {
                 let ok = match need {
                     LaneKind::Float => lane == LaneKind::Float,
                     LaneKind::Int { .. } => matches!(lane, LaneKind::Int { .. }),
                 };
                 if !ok {
-                    return Err(format!("{name} requires a {need:?} lane, found {lane:?}"));
+                    return Err(Error::internal(format!(
+                        "{name} requires a {need:?} lane, found {lane:?}"
+                    )));
                 }
             }
             let a = vplace(cx, &args[0].node)?;
@@ -122,7 +128,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 lane_bytes,
             }])
         };
-        let reduce = |cx: &mut Self, op: R| -> Result<Vec<Stmt>, String> {
+        let reduce = |cx: &mut Self, op: R| -> Result<Vec<Stmt>, Error> {
             let a = vplace(cx, &args[0].node)?;
             let (dst_p, w) = cx.place_scalar(destination)?;
             Ok(vec![Stmt::Assign {
@@ -157,7 +163,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
             "simd_saturating_sub" => bin(self, S::SatSub),
             "simd_minimum_number_nsz" | "simd_maximum_number_nsz" => {
                 if lane != LaneKind::Float {
-                    return Err(format!("{name} requires a float lane, found {lane:?}"));
+                    return Err(Error::internal(format!(
+                        "{name} requires a float lane, found {lane:?}"
+                    )));
                 }
                 bin(
                     self,
@@ -192,7 +200,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
             "simd_bitreverse" => un(self, U::Bitreverse, INT),
             "simd_fma" | "simd_relaxed_fma" => {
                 if lane != LaneKind::Float {
-                    return Err(format!("{name} requires a float lane, found {lane:?}"));
+                    return Err(Error::internal(format!(
+                        "{name} requires a float lane, found {lane:?}"
+                    )));
                 }
                 let a = vplace(self, &args[0].node)?;
                 let b = vplace(self, &args[1].node)?;
@@ -209,7 +219,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
             "simd_funnel_shl" | "simd_funnel_shr" => {
                 if !matches!(lane, LaneKind::Int { .. }) {
-                    return Err(format!("{name} requires an integer lane, found {lane:?}"));
+                    return Err(Error::internal(format!(
+                        "{name} requires an integer lane, found {lane:?}"
+                    )));
                 }
                 let a = vplace(self, &args[0].node)?;
                 let b = vplace(self, &args[1].node)?;
@@ -237,9 +249,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 // f16 lanes allowed (vector form: f16<->f32/f64 via exact host conversion)
                 let (dst_lanes, dst_bytes, dst_lane, _) = self.simd_geom_ext(dst_p.ty, true)?;
                 if dst_lanes != lanes {
-                    return Err(format!(
+                    return Err(Error::internal(format!(
                         "{name} lane counts differ ({lanes} vs {dst_lanes})"
-                    ));
+                    )));
                 }
                 let (src_lane, dst_lane) = if ptr_family {
                     let i = LaneKind::Int { signed: false };
@@ -262,7 +274,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 // <M, T>(mask: M, if_true: T, if_false: T): the geometry comes from the data vector
                 let (d_lanes, d_bytes, _, _) = self.simd_geom(inst.args.type_at(1))?;
                 if d_lanes != lanes {
-                    return Err("simd_select mask/data lane counts differ".into());
+                    return Err(Error::internal("simd_select mask/data lane counts differ"));
                 }
                 let mask = vplace(self, &args[0].node)?;
                 let a = vplace(self, &args[1].node)?;
@@ -284,9 +296,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let (p_lanes, p_bytes, _, _) = self.simd_geom(inst.args.type_at(1))?;
                 let (m_lanes, m_bytes, _, _) = self.simd_geom(inst.args.type_at(2))?;
                 if p_lanes != lanes || m_lanes != lanes || p_bytes != 8 {
-                    return Err(format!(
+                    return Err(Error::internal(format!(
                         "{name} geometry mismatch (data={lanes} ptr={p_lanes}x{p_bytes}B mask={m_lanes})"
-                    ));
+                    )));
                 }
                 let val = vplace(self, &args[0].node)?;
                 let ptrs = vplace(self, &args[1].node)?;
@@ -319,7 +331,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 // ALIGN only affects the guest's UB contract (engine accesses are already unaligned-safe per lane).
                 let (d_lanes, d_bytes, _, _) = self.simd_geom(inst.args.type_at(2))?;
                 if d_lanes != lanes {
-                    return Err(format!("{name} mask/data lane counts differ"));
+                    return Err(Error::internal(format!(
+                        "{name} mask/data lane counts differ"
+                    )));
                 }
                 let mask = vplace(self, &args[0].node)?;
                 let base = self.lower_operand_scalar(&args[1].node)?;
@@ -351,10 +365,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let idx = self.lower_operand_scalar(&args[1].node)?;
                 let (dst_p, w) = self.place_scalar(destination)?;
                 if w.bytes() as u8 != lane_bytes {
-                    return Err(format!(
+                    return Err(Error::internal(format!(
                         "simd_extract_dyn lane width mismatch (vector={lane_bytes}, result={})",
                         w.bytes()
-                    ));
+                    )));
                 }
                 Ok(vec![Stmt::SimdExtractDyn {
                     src,
@@ -369,10 +383,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let idx = self.lower_operand_scalar(&args[1].node)?;
                 let val = self.lower_operand_scalar(&args[2].node)?;
                 if val.width().bytes() as u8 != lane_bytes {
-                    return Err(format!(
+                    return Err(Error::internal(format!(
                         "simd_insert_dyn lane width mismatch (vector={lane_bytes}, value={})",
                         val.width().bytes()
-                    ));
+                    )));
                 }
                 let dst = self.resolve_place(destination)?.expr();
                 Ok(vec![Stmt::SimdInsertDyn {
@@ -388,7 +402,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 // <T, U>(ptr: T, offset: U): stride = the pointee size of the pointer lane
                 let (_, elem_ty) = vec_ty.simd_size_and_type(self.tcx);
                 let pointee = elem_ty.builtin_deref(true).ok_or_else(|| {
-                    format!("simd_arith_offset lane is not a pointer ({elem_ty})")
+                    Error::internal(format!(
+                        "simd_arith_offset lane is not a pointer ({elem_ty})"
+                    ))
                 })?;
                 let stride = self.layout_of(pointee)?.size.bytes();
                 let ptrs = vplace(self, &args[0].node)?;
@@ -444,41 +460,42 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         width: Width::W32,
                     } => bits,
                     Operand::Imm { width, .. } => {
-                        return Err(format!(
+                        return Err(Error::internal(format!(
                             "simd_insert index type width should be u32, found {} bytes",
                             width.bytes()
-                        ));
+                        )));
                     }
-                    _ => return Err("simd_insert index is not constant".into()),
+                    _ => return Err(Error::internal("simd_insert index is not constant")),
                 };
                 if idx >= count {
-                    return Err(format!(
+                    return Err(Error::internal(format!(
                         "simd_insert index {idx} out of bounds (lanes={count})"
-                    ));
+                    )));
                 }
                 let (_, lane_ty) = vec_ty.simd_size_and_type(self.tcx);
                 let val_ty = self.op_ty(&args[2].node)?;
                 if val_ty != lane_ty {
-                    return Err(format!(
+                    return Err(Error::internal(format!(
                         "simd_insert lane type mismatch (vector={lane_ty}, value={val_ty})"
-                    ));
+                    )));
                 }
-                let lane_width = Width::from_bytes(lane_bytes as u64)
-                    .ok_or_else(|| format!("simd_insert lane width {lane_bytes} unsupported"))?;
+                let lane_width = Width::from_bytes(lane_bytes as u64).ok_or_else(|| {
+                    Error::unsupported(format!("simd_insert lane width {lane_bytes} unsupported"))
+                })?;
                 let val = self.lower_operand_scalar(&args[2].node)?;
                 if val.width() != lane_width {
-                    return Err(format!(
+                    return Err(Error::internal(format!(
                         "simd_insert lane type width mismatch (vector={lane_bytes}, value={})",
                         val.width().bytes()
-                    ));
+                    )));
                 }
                 let dst = self.resolve_place(destination)?;
                 let size = u32::try_from(vec_size)
-                    .map_err(|_| "simd_insert vector size exceeds u32".to_string())?;
+                    .map_err(|_| Error::internal("simd_insert vector size exceeds u32"))?;
                 let lane_offset = idx
                     .checked_mul(u64::from(lane_bytes))
                     .and_then(|offset| i32::try_from(offset).ok())
-                    .ok_or_else(|| "simd_insert lane offset exceeds i32".to_string())?;
+                    .ok_or_else(|| Error::internal("simd_insert lane offset exceeds i32"))?;
                 Ok(vec![
                     Stmt::Copy {
                         dst: dst.expr(),
@@ -499,39 +516,40 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         width: Width::W32,
                     } => bits,
                     Operand::Imm { width, .. } => {
-                        return Err(format!(
+                        return Err(Error::internal(format!(
                             "simd_extract index type width should be u32, found {} bytes",
                             width.bytes()
-                        ));
+                        )));
                     }
-                    _ => return Err("simd_extract index is not constant".into()),
+                    _ => return Err(Error::internal("simd_extract index is not constant")),
                 };
                 if idx >= count {
-                    return Err(format!(
+                    return Err(Error::internal(format!(
                         "simd_extract index {idx} out of bounds (lanes={count})"
-                    ));
+                    )));
                 }
                 let (_, lane_ty) = vec_ty.simd_size_and_type(self.tcx);
-                let lane_width = Width::from_bytes(lane_bytes as u64)
-                    .ok_or_else(|| format!("simd_extract lane width {lane_bytes} unsupported"))?;
+                let lane_width = Width::from_bytes(lane_bytes as u64).ok_or_else(|| {
+                    Error::unsupported(format!("simd_extract lane width {lane_bytes} unsupported"))
+                })?;
                 let (dst, dst_width) = self.place_scalar(destination)?;
                 if dst.ty != lane_ty {
-                    return Err(format!(
+                    return Err(Error::internal(format!(
                         "simd_extract lane type mismatch (vector={lane_ty}, result={})",
                         dst.ty
-                    ));
+                    )));
                 }
                 if dst_width != lane_width {
-                    return Err(format!(
+                    return Err(Error::internal(format!(
                         "simd_extract lane type width mismatch (vector={lane_bytes}, result={})",
                         dst_width.bytes()
-                    ));
+                    )));
                 }
                 let mut lane = src;
                 let lane_offset = idx
                     .checked_mul(u64::from(lane_bytes))
                     .and_then(|offset| i32::try_from(offset).ok())
-                    .ok_or_else(|| "simd_extract lane offset exceeds i32".to_string())?;
+                    .ok_or_else(|| Error::internal("simd_extract lane offset exceeds i32"))?;
                 if lane_offset != 0 {
                     let mut steps = lane.steps.to_vec();
                     if let Some(PlaceStep::Offset(offset)) = steps.last_mut() {
@@ -552,14 +570,16 @@ impl<'tcx> LowerCx<'tcx, '_> {
             "simd_shuffle" => {
                 // (a, b, const idx array) -> shuffled vector: indices are known at lowering time, so expand into per-lane copies
                 let mir::Operand::Constant(c) = &args[2].node else {
-                    return Err("simd_shuffle index is not constant".into());
+                    return Err(Error::internal("simd_shuffle index is not constant"));
                 };
                 let val = c
                     .const_
                     .eval(self.tcx, self.typing_env, c.span)
-                    .map_err(|e| format!("shuffle index evaluation failed: {e:?}"))?;
+                    .map_err(|e| {
+                        Error::internal(format!("shuffle index evaluation failed: {e:?}"))
+                    })?;
                 let mir::ConstValue::Indirect { alloc_id, offset } = val else {
-                    return Err(format!("shuffle index shape {val:?}"));
+                    return Err(Error::internal(format!("shuffle index shape {val:?}")));
                 };
                 let alloc = self.tcx.global_alloc(alloc_id).unwrap_memory();
                 let ai = alloc.inner();
@@ -571,7 +591,8 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let pa = vplace(self, &args[0].node)?;
                 let pb = vplace(self, &args[1].node)?;
                 let dst = self.resolve_place(destination)?;
-                let lw = Width::from_bytes(lane_bytes as u64).ok_or("lane width")?;
+                let lw =
+                    Width::from_bytes(lane_bytes as u64).ok_or(Error::internal("lane width"))?;
                 let mut stmts = Vec::new();
                 for i in 0..n_out as usize {
                     let idx = u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
@@ -611,7 +632,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let dst_layout = self.layout_of(dst_p.ty)?;
                 let rustc_abi::BackendRepr::SimdVector { element, count } = dst_layout.backend_repr
                 else {
-                    return Err("simd_splat target is not a vector".into());
+                    return Err(Error::internal("simd_splat target is not a vector"));
                 };
                 let lb = element.size(self.tcx.data_layout()).bytes() as u8;
                 let val = self.lower_operand_scalar(&args[0].node)?;
@@ -622,7 +643,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     lane_bytes: lb,
                 }])
             }
-            other => Err(format!("intrinsic `{other}` (SIMD)")),
+            other => Err(Error::unsupported(format!("intrinsic `{other}` (SIMD)"))),
         }
     }
 }

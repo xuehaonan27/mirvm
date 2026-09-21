@@ -3,6 +3,8 @@
 //! caller_location/compare_bytes families) plus float routing / atomic_ord and
 //! free helpers (elem_of/float_w/LayoutCxAt etc., pub(super) for the whole tree).
 
+use crate::lower::Error;
+
 use super::*;
 
 impl<'tcx> LowerCx<'tcx, '_> {
@@ -11,7 +13,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         suffix: Option<FloatSuffix>,
         inst: &Instance<'tcx>,
         n: &str,
-    ) -> Result<FloatRoute, String> {
+    ) -> Result<FloatRoute, Error> {
         let suffix = match suffix {
             Some(sfx) => sfx,
             None => {
@@ -22,9 +24,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     ty::Float(ty::FloatTy::F64) => FloatSuffix::F64,
                     ty::Float(ty::FloatTy::F128) => FloatSuffix::F128,
                     _ => {
-                        return Err(format!(
+                        return Err(Error::internal(format!(
                             "intrinsic `{n}` generic argument is not a float ({t})"
-                        ));
+                        )));
                     }
                 }
             }
@@ -46,14 +48,18 @@ impl<'tcx> LowerCx<'tcx, '_> {
         &self,
         inst: &Instance<'tcx>,
         nth: usize,
-    ) -> Result<ir::MemOrd, String> {
+    ) -> Result<ir::MemOrd, Error> {
         use rustc_middle::ty::AtomicOrdering as A;
         let c = inst
             .args
             .iter()
             .filter_map(|a| a.as_const())
             .nth(nth)
-            .ok_or_else(|| format!("atomic intrinsic is missing const ordering arg #{nth}"))?;
+            .ok_or_else(|| {
+                Error::internal(format!(
+                    "atomic intrinsic is missing const ordering arg #{nth}"
+                ))
+            })?;
         let discr = c.to_value().to_branch()[0].to_leaf();
         Ok(match discr.to_atomic_ordering() {
             A::Relaxed => ir::MemOrd::Relaxed,
@@ -72,7 +78,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         target: Option<mir::BasicBlock>,
         unwind: mir::UnwindAction,
         span: rustc_span::Span,
-    ) -> Result<Option<(Vec<Stmt>, Terminator)>, String> {
+    ) -> Result<Option<(Vec<Stmt>, Terminator)>, Error> {
         let InstanceKind::Intrinsic(def_id) = inst.def else {
             return Ok(None);
         };
@@ -80,7 +86,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
         // Engine-level intrinsic (not a pure-value expansion): catch_unwind goes through the Builtin channel
         if name.as_str() == "catch_unwind" {
             let (dst_p, w) = self.place_scalar(destination)?;
-            let tgt = target.ok_or("catch_unwind diverges?")?.as_u32();
+            let tgt = target
+                .ok_or(Error::internal("catch_unwind diverges?"))?
+                .as_u32();
             let role = self
                 .linker
                 .main_catch_site
@@ -107,7 +115,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             )));
         }
         // Generic element size (T of copy/write_bytes/offset)
-        let elem_size = |cx: &Self| -> Result<u64, String> {
+        let elem_size = |cx: &Self| -> Result<u64, Error> {
             let t = inst.args.type_at(0);
             Ok(cx.layout_of(t)?.size.bytes())
         };
@@ -115,9 +123,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
             "offset" | "arith_offset" => {
                 // fn offset<Ptr, Delta>(ptr: Ptr, count: Delta) -> Ptr
                 let ptr_ty = self.op_ty(&args[0].node)?;
-                let pointee = ptr_ty
-                    .builtin_deref(true)
-                    .ok_or_else(|| format!("offset is not a pointer (ty={ptr_ty})"))?;
+                let pointee = ptr_ty.builtin_deref(true).ok_or_else(|| {
+                    Error::internal(format!("offset is not a pointer (ty={ptr_ty})"))
+                })?;
                 let stride = self.layout_of(pointee)?.size.bytes();
                 let (dst_p, w) = self.place_scalar(destination)?;
                 vec![Stmt::Assign {
@@ -160,7 +168,11 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                 dst: dst_p.scalar_place(w),
                             }]
                         },
-                        Terminator::Goto(target.ok_or("bit intrinsic diverges?")?.as_u32()),
+                        Terminator::Goto(
+                            target
+                                .ok_or(Error::internal("bit intrinsic diverges?"))?
+                                .as_u32(),
+                        ),
                     )));
                 }
                 let (dst_p, w) = self.place_scalar(destination)?;
@@ -188,7 +200,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
             "atomic_load" => {
                 let order = self.atomic_ord(inst, 0)?;
                 if matches!(order, ir::MemOrd::Release | ir::MemOrd::AcqRel) {
-                    return Err(format!("atomic_load has an invalid ordering {order:?}"));
+                    return Err(Error::internal(format!(
+                        "atomic_load has an invalid ordering {order:?}"
+                    )));
                 }
                 let (dst_p, w) = self.place_scalar(destination)?;
                 vec![Stmt::Assign {
@@ -203,7 +217,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
             "atomic_store" => {
                 let order = self.atomic_ord(inst, 0)?;
                 if matches!(order, ir::MemOrd::Acquire | ir::MemOrd::AcqRel) {
-                    return Err(format!("atomic_store has an invalid ordering {order:?}"));
+                    return Err(Error::internal(format!(
+                        "atomic_store has an invalid ordering {order:?}"
+                    )));
                 }
                 vec![Stmt::AtomicStore {
                     addr: self.lower_operand_scalar(&args[0].node)?,
@@ -215,12 +231,14 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 // (ptr, expected, new) -> (T, bool)
                 let dst_p = self.resolve_place(destination)?;
                 let ValKind::Pair((vo, vw), (fo, fw)) = self.classify(dst_p.ty)? else {
-                    return Err("cxchg target is not a pair".into());
+                    return Err(Error::internal("cxchg target is not a pair"));
                 };
                 let succ = self.atomic_ord(inst, 0)?;
                 let fail = self.atomic_ord(inst, 1)?;
                 if matches!(fail, ir::MemOrd::Release | ir::MemOrd::AcqRel) {
-                    return Err(format!("cxchg has an invalid failure ordering {fail:?}"));
+                    return Err(Error::internal(format!(
+                        "cxchg has an invalid failure ordering {fail:?}"
+                    )));
                 }
                 vec![Stmt::AtomicCxchg {
                     addr: self.lower_operand_scalar(&args[0].node)?,
@@ -278,7 +296,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             "volatile_load" | "unaligned_volatile_load" => {
                 let t = inst.args.type_at(0);
                 let size = u32::try_from(self.layout_of(t)?.size.bytes())
-                    .map_err(|_| format!("{name} type {t} size exceeds u32"))?;
+                    .map_err(|_| Error::internal(format!("{name} type {t} size exceeds u32")))?;
                 if size == 0 {
                     vec![Stmt::Nop]
                 } else {
@@ -292,7 +310,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             "volatile_store" | "unaligned_volatile_store" => {
                 let t = inst.args.type_at(0);
                 let size = u32::try_from(self.layout_of(t)?.size.bytes())
-                    .map_err(|_| format!("{name} type {t} size exceeds u32"))?;
+                    .map_err(|_| Error::internal(format!("{name} type {t} size exceeds u32")))?;
                 if size == 0 {
                     vec![Stmt::Nop]
                 } else {
@@ -351,7 +369,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             "nontemporal_store" => {
                 let t = inst.args.type_at(0);
                 let size = u32::try_from(self.layout_of(t)?.size.bytes())
-                    .map_err(|_| format!("{name} type {t} size exceeds u32"))?;
+                    .map_err(|_| Error::internal(format!("{name} type {t} size exceeds u32")))?;
                 if size == 0 {
                     vec![Stmt::Nop]
                 } else {
@@ -482,7 +500,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
             "breakpoint" => {
                 // Real int3: observably SIGTRAP as in native; normally continues to target
-                let tgt = target.ok_or("breakpoint diverges?")?.as_u32();
+                let tgt = target
+                    .ok_or(Error::internal("breakpoint diverges?"))?
+                    .as_u32();
                 return Ok(Some((
                     vec![],
                     Terminator::CallBuiltin {
@@ -504,7 +524,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let ok = self
                     .tcx
                     .check_validity_requirement((req, self.typing_env.as_query_input(t)))
-                    .map_err(|e| format!("validity check failed: {e}"))?;
+                    .map_err(|e| Error::internal(format!("validity check failed: {e}")))?;
                 if ok {
                     vec![Stmt::Nop]
                 } else {
@@ -773,7 +793,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let ptr_ty = self.op_ty(&args[0].node)?;
                 let pointee = ptr_ty
                     .builtin_deref(true)
-                    .ok_or("ptr_offset_from is not a pointer")?;
+                    .ok_or(Error::internal("ptr_offset_from is not a pointer"))?;
                 let stride = self.layout_of(pointee)?.size.bytes().max(1);
                 let (dst_p, w) = self.place_scalar(destination)?;
                 vec![Stmt::Assign {
@@ -809,7 +829,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                 // meta (element count) x elem size
                                 let LoweredOp::Pair(_, meta) = self.lower_operand(&args[0].node)?
                                 else {
-                                    return Err("size_of_val argument is not a fat pointer".into());
+                                    return Err(Error::internal(
+                                        "size_of_val argument is not a fat pointer",
+                                    ));
                                 };
                                 vec![Stmt::Assign {
                                     dst: dst_p.scalar_place(w),
@@ -837,7 +859,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             if is_size {
                                 let LoweredOp::Pair(_, meta) = self.lower_operand(&args[0].node)?
                                 else {
-                                    return Err("size_of_val argument is not a fat pointer".into());
+                                    return Err(Error::internal(
+                                        "size_of_val argument is not a fat pointer",
+                                    ));
                                 };
                                 vec![Stmt::Assign {
                                     dst: dst_p.scalar_place(w),
@@ -853,7 +877,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         ty::Dynamic(..) => {
                             // vtable layout: [drop, size, align, ...] (COMMON_VTABLE_ENTRIES)
                             let LoweredOp::Pair(_, vt) = self.lower_operand(&args[0].node)? else {
-                                return Err(format!("{name} argument is not a dyn fat pointer"));
+                                return Err(Error::internal(format!(
+                                    "{name} argument is not a dyn fat pointer"
+                                )));
                             };
                             let slot_off = if is_size { 8 } else { 16 };
                             vec![Stmt::Assign {
@@ -868,7 +894,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         ty::Adt(..) | ty::Tuple(..) => {
                             let LoweredOp::Pair(_, meta) = self.lower_operand(&args[0].node)?
                             else {
-                                return Err(format!("{name} argument is not a fat pointer"));
+                                return Err(Error::internal(format!(
+                                    "{name} argument is not a fat pointer"
+                                )));
                             };
                             let tail = self.tcx.struct_tail_for_codegen(t, self.typing_env);
                             let sized_size = t_layout.size.bytes();
@@ -988,18 +1016,20 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                     }
                                 }
                                 _ => {
-                                    return Err(format!("{name} tail type {tail} unsupported"));
+                                    return Err(Error::unsupported(format!(
+                                        "{name} tail type {tail} unsupported"
+                                    )));
                                 }
                             }
                         }
-                        _ => return Err(format!("{name} on unsized {t}")),
+                        _ => return Err(Error::internal(format!("{name} on unsized {t}"))),
                     }
                 }
             }
             _ => return Ok(None),
         };
         let tgt = target
-            .ok_or("intrinsic expansion: diverging intrinsic?")?
+            .ok_or(Error::internal("intrinsic expansion: diverging intrinsic?"))?
             .as_u32();
         Ok(Some((stmts, Terminator::Goto(tgt))))
     }
@@ -1012,8 +1042,8 @@ pub(super) fn elem_of(ty: Ty<'_>) -> Option<Ty<'_>> {
     }
 }
 
-pub(super) fn u128_to_u64(v: u128) -> Result<u64, String> {
-    u64::try_from(v).map_err(|_| "128-bit discriminant".to_string())
+pub(super) fn u128_to_u64(v: u128) -> Result<u64, Error> {
+    u64::try_from(v).map_err(|_| Error::internal("128-bit discriminant"))
 }
 
 /// Math intrinsic name -> (op, width). Width `Some(is64)` comes from the f32/f64
@@ -1081,12 +1111,12 @@ pub(super) enum FloatRoute {
 }
 
 /// Scalar float width (f128 is excluded: 16 bytes use the wide channel and the call site routes first).
-pub(super) fn float_w(t: Ty<'_>) -> Result<ir::FloatW, String> {
+pub(super) fn float_w(t: Ty<'_>) -> Result<ir::FloatW, Error> {
     match t.kind() {
         ty::Float(ty::FloatTy::F16) => Ok(ir::FloatW::F16),
         ty::Float(ty::FloatTy::F32) => Ok(ir::FloatW::F32),
         ty::Float(ty::FloatTy::F64) => Ok(ir::FloatW::F64),
-        _ => Err(format!("non-scalar float width {t}")),
+        _ => Err(Error::internal(format!("non-scalar float width {t}"))),
     }
 }
 
@@ -1106,7 +1136,7 @@ pub(super) fn split_float_suffix(n: &str) -> (&str, Option<FloatSuffix>) {
 }
 
 /// Add one more indirection on the operand's value (a pointer): *(op + off). Used to read vtable slots.
-pub(super) fn operand_deref_at(op: Operand, off: u32) -> Result<Operand, String> {
+pub(super) fn operand_deref_at(op: Operand, off: u32) -> Result<Operand, Error> {
     let deref_steps = |mut steps: Vec<PlaceStep>| {
         steps.push(PlaceStep::Deref);
         if off != 0 {
@@ -1145,7 +1175,7 @@ pub(super) fn operand_deref_at(op: Operand, off: u32) -> Result<Operand, String>
             width: Width::W64,
         },
         Operand::AddrOf(_) | Operand::SubImm { .. } => {
-            return Err("vtable operand has an unexpected shape".into());
+            return Err(Error::internal("vtable operand has an unexpected shape"));
         }
     })
 }

@@ -2,6 +2,8 @@
 //! PointerCoercion(Unsize/DynStar)/IntToFloat/FloatCast/Transmute etc.
 //! Sole entry = the Cast arm of mod.rs lower_assign; unsize navigation lives in unsize.rs.
 
+use crate::lower::Error;
+
 use super::*;
 
 impl<'tcx> LowerCx<'tcx, '_> {
@@ -12,7 +14,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         kind: mir::CastKind,
         a: &mir::Operand<'tcx>,
         to_ty: Ty<'tcx>,
-    ) -> Result<Vec<Stmt>, String> {
+    ) -> Result<Vec<Stmt>, Error> {
         use mir::CastKind as CK;
         match kind {
             CK::IntToInt => {
@@ -30,7 +32,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }]);
                     }
                     let from_w = frame::scalar_width(&a_layout)
-                        .ok_or("128-bit cast source is not a scalar")?;
+                        .ok_or(Error::internal("128-bit cast source is not a scalar"))?;
                     let ao = self.lower_operand_scalar(a)?;
                     let lo = Stmt::Assign {
                         dst: dst_p.half_place(0, Width::W64),
@@ -69,10 +71,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         mir::Operand::Copy(pl) | mir::Operand::Move(pl) => {
                             self.resolve_place(pl)?
                         }
-                        _ => return Err("128-bit constant cast".into()),
+                        _ => return Err(Error::internal("128-bit constant cast")),
                     };
                     let ValKind::Scalar(w) = dst_kind else {
-                        return Err("IntToInt target is not a scalar".into());
+                        return Err(Error::internal("IntToInt target is not a scalar"));
                     };
                     return Ok(vec![Stmt::Assign {
                         dst: dst_p.scalar_place(w),
@@ -83,11 +85,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         },
                     }]);
                 }
-                let from_w = frame::scalar_width(&a_layout).ok_or("cast source is not a scalar")?;
+                let from_w = frame::scalar_width(&a_layout)
+                    .ok_or(Error::internal("cast source is not a scalar"))?;
                 let to_layout = self.layout_of(to_ty)?;
-                let to_w = frame::scalar_width(&to_layout).ok_or("cast target is not a scalar")?;
+                let to_w = frame::scalar_width(&to_layout)
+                    .ok_or(Error::internal("cast target is not a scalar"))?;
                 let ValKind::Scalar(w) = dst_kind else {
-                    return Err("IntToInt target is not a scalar".into());
+                    return Err(Error::internal("IntToInt target is not a scalar"));
                 };
                 debug_assert_eq!(w.bytes(), to_w.bytes());
                 Ok(vec![Stmt::Assign {
@@ -145,7 +149,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         // reinterpretation, so a same-shape move suffices (&str -> &[u8] is an isomorphic pair).
                         let src = self.lower_operand(a)?;
                         self.assign_lowered(dst_p, dst_kind, src)
-                            .map_err(|e| format!("Transmute constant: {e}"))
+                            .map_err(|e| Error::internal(format!("Transmute constant: {e}")))
                     }
                 }
             }
@@ -183,12 +187,14 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             };
                             let byte_off = (slot_idx as u64 * 8) as i32;
                             let ValKind::Pair((ao, aw), (bo, bw)) = dst_kind else {
-                                return Err(format!("dyn upcast target is not a pair ({to_ty})"));
+                                return Err(Error::internal(format!(
+                                    "dyn upcast target is not a pair ({to_ty})"
+                                )));
                             };
                             let ValKind::Pair((sao, saw), (sbo, _)) = self.classify(a_ty)? else {
-                                return Err(format!(
+                                return Err(Error::internal(format!(
                                     "dyn upcast source is not a pair ({a_ty}; nested tail-pair wrapper not handled)"
-                                ));
+                                )));
                             };
                             // Chase the source meta half: <source meta half address> -> Deref -> +byte_off
                             // -> Mem read 8B = the target vtable pointer
@@ -223,14 +229,14 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             }
                             // Non-constant case (lower_operand's Slot meta half): same chase
                             let LoweredOp::Pair(l, h) = self.lower_operand(a)? else {
-                                return Err(format!(
+                                return Err(Error::internal(format!(
                                     "dyn upcast source is not a fat pointer ({a_ty}; constant fat-pointer upcast not handled)"
-                                ));
+                                )));
                             };
                             let ir::Operand::Slot(meta_slot) = h else {
-                                return Err(format!(
+                                return Err(Error::internal(format!(
                                     "dyn upcast source meta is not a slot ({a_ty}; non-constant form not handled)"
-                                ));
+                                )));
                             };
                             let mut steps = vec![];
                             let new_meta =
@@ -248,12 +254,14 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }
                         let meta = self.unsize_meta_of(a_ty, to_ty)?;
                         let ValKind::Pair((ao, aw), (bo, bw)) = dst_kind else {
-                            return Err(format!("Unsize target is not a pair ({to_ty})"));
+                            return Err(Error::internal(format!(
+                                "Unsize target is not a pair ({to_ty})"
+                            )));
                         };
                         let LoweredOp::Scalar(data) = self.lower_operand(a)? else {
-                            return Err(format!(
+                            return Err(Error::internal(format!(
                                 "Unsize source is not a thin scalar ({a_ty}); custom CoerceUnsized with multiple non-ZST fields?"
-                            ));
+                            )));
                         };
                         Ok(vec![
                             Stmt::Assign {
@@ -282,18 +290,20 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         // a Reify shim for it that takes ordinary fn-ptr ABI args and supplies caller location.
                         let a_ty = self.op_ty(a)?;
                         let ty::FnDef(def_id, gargs) = a_ty.kind() else {
-                            return Err(format!("ReifyFnPointer source is not a FnDef ({a_ty})"));
+                            return Err(Error::internal(format!(
+                                "ReifyFnPointer source is not a FnDef ({a_ty})"
+                            )));
                         };
                         let Some(inst) =
                             Instance::resolve_for_fn_ptr(self.tcx, self.typing_env, *def_id, gargs)
                         else {
-                            return Err(format!(
+                            return Err(Error::internal(format!(
                                 "ReifyFnPointer instance resolution failed ({a_ty})"
-                            ));
+                            )));
                         };
                         let addr = self.linker.fn_entry_addr(inst)?;
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("ReifyFnPointer target is not a scalar".into());
+                            return Err(Error::internal("ReifyFnPointer target is not a scalar"));
                         };
                         // extern fn's fn-ptr value = the GOT slot content (host code address refilled at startup)
                         let op = match self.linker.foreign_fn_slot(inst) {
@@ -315,9 +325,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         // Captureless closure -> fn ptr (isomorphic to cg_ssa: resolve_closure FnOnce)
                         let a_ty = self.op_ty(a)?;
                         let ty::Closure(def_id, cargs) = a_ty.kind() else {
-                            return Err(format!(
+                            return Err(Error::internal(format!(
                                 "ClosureFnPointer source is not a closure ({a_ty})"
-                            ));
+                            )));
                         };
                         let inst = Instance::resolve_closure(
                             self.tcx,
@@ -327,7 +337,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         );
                         let addr = self.linker.fn_entry_addr(inst)?;
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("ClosureFnPointer target is not a scalar".into());
+                            return Err(Error::internal("ClosureFnPointer target is not a scalar"));
                         };
                         // extern fn's fn-ptr value = the GOT slot content (host code address refilled at startup)
                         let op = match self.linker.foreign_fn_slot(inst) {
@@ -362,7 +372,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }]);
                     };
                     let ValKind::Scalar(w) = dst_kind else {
-                        return Err("FloatToInt target is not a scalar".into());
+                        return Err(Error::internal("FloatToInt target is not a scalar"));
                     };
                     return Ok(vec![Stmt::F128ToScalar {
                         src: pa,
@@ -382,7 +392,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }]);
                 };
                 let ValKind::Scalar(w) = dst_kind else {
-                    return Err("FloatToInt target is not a scalar".into());
+                    return Err(Error::internal("FloatToInt target is not a scalar"));
                 };
                 Ok(vec![Stmt::Assign {
                     dst: dst_p.scalar_place(w),
@@ -417,7 +427,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
                 let to = float_w(to_ty)?;
                 let ValKind::Scalar(w) = dst_kind else {
-                    return Err("IntToFloat target is not a scalar".into());
+                    return Err(Error::internal("IntToFloat target is not a scalar"));
                 };
                 // 128-bit source (u128/i128 as f): read 16 bytes and convert directly on the host
                 let Some(from_w) = frame::scalar_width(&a_layout) else {
@@ -453,7 +463,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }
                     (true, false) => {
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("FloatToFloat target is not a scalar".into());
+                            return Err(Error::internal("FloatToFloat target is not a scalar"));
                         };
                         Ok(vec![Stmt::F128ToScalar {
                             src: self.wide_place(a)?,
@@ -469,7 +479,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     }]),
                     (false, false) => {
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("FloatToFloat target is not a scalar".into());
+                            return Err(Error::internal("FloatToFloat target is not a scalar"));
                         };
                         Ok(vec![Stmt::Assign {
                             dst: dst_p.scalar_place(w),

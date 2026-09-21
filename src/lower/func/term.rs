@@ -2,6 +2,8 @@
 //! (Goto/SwitchInt/Assert->panic block synthesis/Call->call.rs/InlineAsm->asm.rs)
 //! + lower_unwind. Single entry point = mod.rs lower_instance.
 
+use crate::lower::Error;
+
 use super::*;
 
 impl<'tcx> LowerCx<'tcx, '_> {
@@ -20,7 +22,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
     pub(super) fn lower_terminator(
         &mut self,
         term: &mir::Terminator<'tcx>,
-    ) -> Result<(Vec<Stmt>, Terminator), String> {
+    ) -> Result<(Vec<Stmt>, Terminator), Error> {
         use mir::TerminatorKind as TK;
         Ok(match &term.kind {
             TK::Goto { target } => (vec![], Terminator::Goto(target.as_u32())),
@@ -36,10 +38,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         SwitchDiscr::Wide(place.expr())
                     }
                     _ => {
-                        return Err(format!(
+                        return Err(Error::internal(format!(
                             "SwitchInt discriminant is not an integer scalar (ty={})",
                             self.op_ty(discr)?
-                        ));
+                        )));
                     }
                 };
                 (
@@ -137,10 +139,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                 })
                             }
                             LoweredOp::Zst => {
-                                return Err("InvalidEnumConstruction arg is Zst".into());
+                                return Err(Error::internal("InvalidEnumConstruction arg is Zst"));
                             }
                             LoweredOp::Pair(..) => {
-                                return Err("InvalidEnumConstruction arg is pair".into());
+                                return Err(Error::internal("InvalidEnumConstruction arg is pair"));
                             }
                         };
                         pargs.push(v);
@@ -195,10 +197,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     // dyn place: virtual drop = indirect call via vtable slot 0 (isomorphic to cg_ssa;
                     // resolve_drop_glue would resolve back to itself -> infinite recursion)
                     if let ty::Dynamic(..) = p.ty.kind() {
-                        let meta = p
-                            .meta
-                            .clone()
-                            .ok_or_else(|| format!("dyn Drop has no vtable meta (ty={})", p.ty))?;
+                        let meta = p.meta.clone().ok_or_else(|| {
+                            Error::internal(format!("dyn Drop has no vtable meta (ty={})", p.ty))
+                        })?;
                         let callee = operand_deref_at(meta, 0)?;
                         return Ok((
                             vec![],
@@ -220,10 +221,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     let callee = self.linker.func_id(glue);
                     let mut glue_args = vec![Operand::AddrOf(p.expr())];
                     if self.layout_of(p.ty)?.is_unsized() {
-                        let meta = p
-                            .meta
-                            .clone()
-                            .ok_or_else(|| format!("unsized Drop has no meta (ty={})", p.ty))?;
+                        let meta = p.meta.clone().ok_or_else(|| {
+                            Error::internal(format!("unsized Drop has no meta (ty={})", p.ty))
+                        })?;
                         glue_args.push(meta);
                     }
                     return Ok((
@@ -271,7 +271,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             *unwind,
                         );
                     }
-                    return Err(format!("indirect call (ty={fn_ty})"));
+                    return Err(Error::internal(format!("indirect call (ty={fn_ty})")));
                 };
                 let mut inst = Instance::expect_resolve(
                     self.tcx,
@@ -319,10 +319,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         .intrinsic(idef)
                         .expect("an Intrinsic always has an IntrinsicDef");
                     if intrinsic.must_be_overridden {
-                        return Err(format!(
+                        return Err(Error::unsupported(format!(
                             "intrinsic `{}` has no fallback (engine builtin table)",
                             intrinsic.name
-                        ));
+                        )));
                     }
                     inst = Instance::new_raw(idef, inst.args);
                 }
@@ -355,7 +355,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             } => {
                 self.lower_inline_asm(*asm_macro, template, operands, *options, targets, *unwind)?
             }
-            other => return Err(format!("terminator {other:?}")),
+            other => return Err(Error::internal(format!("terminator {other:?}"))),
         })
     }
 }

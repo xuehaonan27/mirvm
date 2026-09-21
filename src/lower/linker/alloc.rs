@@ -3,6 +3,8 @@
 //! `record_addr` and `record_both` keep the dedup tables of the delta and image contexts.
 //! `impl Linker` sub-block.
 
+use crate::lower::Error;
+
 use super::*;
 use crate::lower::purity::arg_mentions_local;
 
@@ -33,7 +35,7 @@ impl<'tcx> Linker<'tcx> {
     ///   their region; in an image context, an allocation already present in the delta
     ///   region is **promoted** (materialized twice, which is safe because constants are
     ///   read-only).
-    pub(crate) fn ensure_alloc(&mut self, id: AllocId) -> Result<u64, String> {
+    pub(crate) fn ensure_alloc(&mut self, id: AllocId) -> Result<u64, Error> {
         let ctx_image = self.split.as_ref().is_some_and(|s| s.current_image);
         if ctx_image {
             if let Some(&a) = self
@@ -121,7 +123,7 @@ impl<'tcx> Linker<'tcx> {
                     // native link-time binding, where a definition inside an archive always
                     // beats a same-named global one.
                     let cname = std::ffi::CString::new(name)
-                        .map_err(|_| "symbol name contains a NUL byte".to_string())?;
+                        .map_err(|_| Error::internal("symbol name contains a NUL byte"))?;
                     let mut p = 0u64;
                     for (bias, syms) in &self.archive_fallbacks {
                         if let Some(&v) = syms.get(name) {
@@ -141,10 +143,10 @@ impl<'tcx> Linker<'tcx> {
                         p = crate::os::dll::sym(0, &cname) as u64;
                     }
                     if p == 0 {
-                        return Err(format!(
+                        return Err(Error::internal(format!(
                             "extern static `{name}` not found (neither the archive fallback \
                              table nor global dlsym has it)"
-                        ));
+                        )));
                     }
                     // The value is still initialized from this process's resolution, which
                     // keeps the cold path bit-for-bit unchanged, and the slot is additionally
@@ -188,10 +190,9 @@ impl<'tcx> Linker<'tcx> {
                 };
                 // A static's bytes come from evaluating its initializer and may be writable
                 // (`static mut`, interior mutability).
-                let alloc = self
-                    .tcx
-                    .eval_static_initializer(def_id)
-                    .map_err(|e| format!("static initializer evaluation failed: {e:?}"))?;
+                let alloc = self.tcx.eval_static_initializer(def_id).map_err(|e| {
+                    Error::internal(format!("static initializer evaluation failed: {e:?}"))
+                })?;
                 let addr = self.materialize_in(id, alloc, to_image)?;
                 if to_image {
                     self.record_both(id, addr);

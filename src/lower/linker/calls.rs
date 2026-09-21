@@ -3,6 +3,8 @@
 //! and `exported_defs` supplies the rlib symbol set for the native-archive rescue chain.
 //! `impl Linker` sub-block.
 
+use crate::lower::Error;
+
 use super::*;
 
 impl<'tcx> Linker<'tcx> {
@@ -53,7 +55,7 @@ impl<'tcx> Linker<'tcx> {
 
     /// Resolves the callee at a call site (for the `Call` terminator). An `Err` traps the
     /// block with a phrased diagnostic.
-    pub(crate) fn resolve_call(&mut self, inst: Instance<'tcx>) -> Result<Callee, String> {
+    pub(crate) fn resolve_call(&mut self, inst: Instance<'tcx>) -> Result<Callee, Error> {
         // An intrinsic with a fallback body is collected like an ordinary function: the
         // collector skips replaced_intrinsics, so the interpreted view must collect it
         // itself, constructing the instance the same way (Instance::new_raw). One that
@@ -64,16 +66,18 @@ impl<'tcx> Linker<'tcx> {
                 .intrinsic(def_id)
                 .expect("InstanceKind::Intrinsic always has an IntrinsicDef");
             if intrinsic.must_be_overridden {
-                return Err(format!(
+                return Err(Error::unsupported(format!(
                     "intrinsic `{}` has no fallback body (engine builtin table)",
                     intrinsic.name
-                ));
+                )));
             }
             let item = Instance::new_raw(def_id, inst.args);
             return Ok(Callee::Func(self.func_id(item)));
         }
         if let InstanceKind::Virtual(..) = inst.def {
-            return Err("dyn virtual call dispatch is not supported".into());
+            return Err(Error::unsupported(
+                "dyn virtual call dispatch is not supported",
+            ));
         }
         if self.tcx.is_foreign_item(inst.def_id()) {
             let link_name = Symbol::intern(canonical_link_name(self.tcx.symbol_name(inst).name));
@@ -108,14 +112,14 @@ impl<'tcx> Linker<'tcx> {
             // dlsym and libffi using the frozen signature.
             let name = link_name.as_str();
             if DENY_EXACT.contains(&name) || DENY_PREFIX.iter().any(|p| name.starts_with(p)) {
-                return Err(format!(
+                return Err(Error::unsupported(format!(
                     "foreign `{name}` (denylisted: thread and process model are not passed through)"
-                ));
+                )));
             }
             if name.starts_with("llvm.") {
-                return Err(format!(
+                return Err(Error::internal(format!(
                     "foreign `{name}` (LLVM-internal symbol, built in on demand)"
-                ));
+                )));
             }
             return self.freeze_foreign_sig(inst, name);
         }
@@ -145,28 +149,28 @@ impl<'tcx> Linker<'tcx> {
         &mut self,
         inst: Instance<'tcx>,
         name: &str,
-    ) -> Result<Callee, String> {
+    ) -> Result<Callee, Error> {
         let sig = self
             .tcx
             .fn_sig(inst.def_id())
             .instantiate(self.tcx, inst.args)
             .skip_binder();
         let unwind = crate::lower::ffi_sig::c_abi_unwind(sig.abi()).ok_or_else(|| {
-            format!(
+            Error::unsupported(format!(
                 "foreign `{name}` ABI {:?} is not supported for libffi passthrough (only C/System \
                  and their unwind forms)",
                 sig.abi()
-            )
+            ))
         })?;
         let env = TypingEnv::fully_monomorphized();
         let mut args = Vec::with_capacity(sig.inputs().len());
         let mut thunk_args = Vec::new();
         for (i, &t) in sig.inputs().iter().enumerate() {
             args.push(ffi_kind_of(self.tcx, env, t).map_err(|e| {
-                format!(
+                Error::internal(format!(
                     "foreign `{name}` argument {t}: {e} (libffi passthrough accepts only scalars \
                      and pointers)"
-                )
+                ))
             })?);
             // fn-pointer parameter slot: a bare fn pointer or `Option<fn>` (a nullable
             // callback such as pthread_key_create's dtor, where the niche layout makes None
@@ -188,37 +192,40 @@ impl<'tcx> Linker<'tcx> {
             if let Some(t) = fnptr_ty {
                 let inner = t.fn_sig(self.tcx).skip_binder();
                 if inner.c_variadic() {
-                    return Err(format!(
+                    return Err(Error::unsupported(format!(
                         "foreign `{name}` argument {t}: variadic callbacks do not support a thunk"
-                    ));
+                    )));
                 }
                 // The C-unwind callback's unwind property is preserved in the inner
                 // signature, so the thunk/P1 factory can pick an unwindable entry.
                 let inner_unwind =
                     crate::lower::ffi_sig::c_abi_unwind(inner.abi()).ok_or_else(|| {
-                        format!(
+                        Error::unsupported(format!(
                             "foreign `{name}` callback `{t}` ABI {:?} is not supported for a thunk \
                              (only C/System and their unwind forms)",
                             inner.abi()
-                        )
+                        ))
                     })?;
                 let mut in_args = Vec::with_capacity(inner.inputs().len());
                 for &it in inner.inputs() {
                     let k = ffi_kind_of(self.tcx, env, it).map_err(|e| {
-                        format!(
+                        Error::internal(format!(
                             "foreign `{name}` callback argument {it}: {e} (a thunk accepts only \
                              scalars and pointers)"
-                        )
+                        ))
                     })?;
                     if k == ir::FfiKind::Void {
-                        return Err(format!(
+                        return Err(Error::unsupported(format!(
                             "foreign `{name}` callback argument {it}: ZST cannot be a cif argument"
-                        ));
+                        )));
                     }
                     in_args.push(k);
                 }
                 let in_ret = ffi_kind_of(self.tcx, env, inner.output()).map_err(|e| {
-                    format!("foreign `{name}` callback return {}: {e}", inner.output())
+                    Error::internal(format!(
+                        "foreign `{name}` callback return {}: {e}",
+                        inner.output()
+                    ))
                 })?;
                 thunk_args.push((
                     i,
@@ -232,8 +239,9 @@ impl<'tcx> Linker<'tcx> {
                 ));
             }
         }
-        let ret = ffi_kind_of(self.tcx, env, sig.output())
-            .map_err(|e| format!("foreign `{name}` return {}: {e}", sig.output()))?;
+        let ret = ffi_kind_of(self.tcx, env, sig.output()).map_err(|e| {
+            Error::internal(format!("foreign `{name}` return {}: {e}", sig.output()))
+        })?;
         Ok(Callee::Foreign {
             sym: name.into(),
             args,

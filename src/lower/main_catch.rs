@@ -1,6 +1,8 @@
 //! MIR analysis of the pinned std main panic catch site: from the lang item `start`, locate the
 //! outer call wrapping the user `main` and the intrinsic call that performs the catch.
 
+use crate::lower::Error;
+
 use rustc_middle::ty::{self, Instance, TyCtxt, TypingEnv};
 
 /// From the real MIR call graph of the lang item `start`, find the outer call wrapping the user
@@ -19,7 +21,7 @@ pub(super) fn discover_main_catch_site<'tcx>(
         Instance<'tcx>,
         Instance<'tcx>,
     ),
-    String,
+    Error,
 > {
     fn body<'tcx>(
         tcx: TyCtxt<'tcx>,
@@ -83,7 +85,7 @@ pub(super) fn discover_main_catch_site<'tcx>(
         body: &rustc_middle::mir::Body<'tcx>,
         local: rustc_middle::mir::Local,
         use_loc: rustc_middle::mir::Location,
-    ) -> Result<Instance<'tcx>, String> {
+    ) -> Result<Instance<'tcx>, Error> {
         use rustc_middle::mir::visit::{PlaceContext, Visitor};
 
         struct Writes {
@@ -111,30 +113,32 @@ pub(super) fn discover_main_catch_site<'tcx>(
         };
         writes.visit_body(body);
         let [definition] = writes.locations.as_slice() else {
-            return Err(format!(
+            return Err(Error::internal(format!(
                 "local {local:?} expected exactly one write, found {}",
                 writes.locations.len()
-            ));
+            )));
         };
         if !definition.dominates(use_loc, body.basic_blocks.dominators()) {
-            return Err(format!(
+            return Err(Error::internal(format!(
                 "the only write to local {local:?} at {definition:?} does not dominate the catch call {use_loc:?}"
-            ));
+            )));
         }
         let block = &body.basic_blocks[definition.block];
         let Some(statement) = block.statements.get(definition.statement_index) else {
-            return Err(format!(
+            return Err(Error::internal(format!(
                 "the only write to local {local:?} occurs at a terminator, not a fn-ptr reify assignment"
-            ));
+            )));
         };
         let rustc_middle::mir::StatementKind::Assign(assign) = &statement.kind else {
-            return Err(format!("the only write to local {local:?} is not Assign"));
+            return Err(Error::internal(format!(
+                "the only write to local {local:?} is not Assign"
+            )));
         };
         let (destination, rvalue) = &**assign;
         if destination.local != local || !destination.projection.is_empty() {
-            return Err(format!(
+            return Err(Error::internal(format!(
                 "the only write to local {local:?} is not a whole-local assignment"
-            ));
+            )));
         }
         let rustc_middle::mir::Rvalue::Cast(
             rustc_middle::mir::CastKind::PointerCoercion(
@@ -145,30 +149,35 @@ pub(super) fn discover_main_catch_site<'tcx>(
             _,
         ) = rvalue
         else {
-            return Err(format!(
+            return Err(Error::internal(format!(
                 "the only write to local {local:?} is not a fn-ptr reify"
-            ));
+            )));
         };
         let ty::FnDef(def_id, args) = operand.ty(&body.local_decls, tcx).kind() else {
-            return Err(format!("the reify source for local {local:?} is not FnDef"));
+            return Err(Error::internal(format!(
+                "the reify source for local {local:?} is not FnDef"
+            )));
         };
-        Instance::resolve_for_fn_ptr(tcx, typing_env, *def_id, args)
-            .ok_or_else(|| format!("cannot resolve fn-ptr instance for local {local:?}"))
+        Instance::resolve_for_fn_ptr(tcx, typing_env, *def_id, args).ok_or_else(|| {
+            Error::internal(format!(
+                "cannot resolve fn-ptr instance for local {local:?}"
+            ))
+        })
     }
 
     let start_calls = direct_calls(tcx, typing_env, &body(tcx, typing_env, start));
     let [(lang_start_internal, _)] = start_calls.as_slice() else {
-        return Err(format!(
+        return Err(Error::internal(format!(
             "pinned toolchain start MIR expected exactly one direct call, found {}",
             start_calls.len()
-        ));
+        )));
     };
     let lang_start_path = tcx.def_path_str(lang_start_internal.def_id());
     if lang_start_path != "std::rt::lang_start_internal" {
-        return Err(format!(
+        return Err(Error::internal(format!(
             "pinned toolchain start direct call changed from std::rt::lang_start_internal to \
              {lang_start_path}"
-        ));
+        )));
     }
 
     let internal_calls = direct_calls(
@@ -187,17 +196,17 @@ pub(super) fn discover_main_catch_site<'tcx>(
         .collect();
     let [(outer_catch, runtime_closure_def, runtime_closure_args)] = outer_catches.as_slice()
     else {
-        return Err(format!(
+        return Err(Error::internal(format!(
             "pinned toolchain lang_start_internal MIR expected exactly one closure-typed direct call, found {}",
             outer_catches.len()
-        ));
+        )));
     };
     let outer_catch_path = tcx.def_path_str(outer_catch.def_id());
     if outer_catch_path != "std::panic::catch_unwind" {
-        return Err(format!(
+        return Err(Error::internal(format!(
             "pinned toolchain lang_start_internal closure call changed from std::panic::catch_unwind \
              to {outer_catch_path}"
-        ));
+        )));
     }
     let runtime_closure = Instance::resolve_closure(
         tcx,
@@ -211,37 +220,37 @@ pub(super) fn discover_main_catch_site<'tcx>(
             .filter(|(call, _)| call.def_id() == outer_catch.def_id())
             .collect();
     let [(main_catch, unwind)] = main_catches.as_slice() else {
-        return Err(format!(
+        return Err(Error::internal(format!(
             "pinned toolchain lang_start runtime closure expected exactly one main catch call, found {}",
             main_catches.len()
-        ));
+        )));
     };
     if !matches!(unwind, rustc_middle::mir::UnwindAction::Continue) {
-        return Err(format!(
+        return Err(Error::internal(format!(
             "pinned toolchain main catch call unwind changed from Continue to {unwind:?}"
-        ));
+        )));
     }
 
     let outer_body = body(tcx, typing_env, *main_catch);
     let internal_calls = direct_calls(tcx, typing_env, &outer_body);
     let [(internal_catch, internal_unwind)] = internal_calls.as_slice() else {
-        return Err(format!(
+        return Err(Error::internal(format!(
             "pinned toolchain std::panic::catch_unwind MIR expected exactly one direct call, found {}",
             internal_calls.len()
-        ));
+        )));
     };
     let internal_path = tcx.def_path_str(internal_catch.def_id());
     if internal_path != "std::panicking::catch_unwind" {
-        return Err(format!(
+        return Err(Error::internal(format!(
             "pinned toolchain std::panic::catch_unwind implementation call changed from \
              std::panicking::catch_unwind to {internal_path}"
-        ));
+        )));
     }
     if !matches!(internal_unwind, rustc_middle::mir::UnwindAction::Continue) {
-        return Err(format!(
+        return Err(Error::internal(format!(
             "pinned toolchain std::panicking::catch_unwind call unwind changed from Continue to \
              {internal_unwind:?}"
-        ));
+        )));
     }
 
     let internal_body = body(tcx, typing_env, *internal_catch);
@@ -273,56 +282,61 @@ pub(super) fn discover_main_catch_site<'tcx>(
     }
     let [(catch_intrinsic, args, intrinsic_unwind, intrinsic_loc)] = intrinsic_sites.as_slice()
     else {
-        return Err(format!(
+        return Err(Error::internal(format!(
             "pinned toolchain std::panicking::catch_unwind MIR expected exactly one std \
              catch_unwind intrinsic, found {}",
             intrinsic_sites.len()
-        ));
+        )));
     };
     let intrinsic_path = tcx.def_path_str(catch_intrinsic.def_id());
     if intrinsic_path != "std::intrinsics::catch_unwind" {
-        return Err(format!(
+        return Err(Error::internal(format!(
             "pinned toolchain catch intrinsic changed from std::intrinsics::catch_unwind to \
              {intrinsic_path}"
-        ));
+        )));
     }
     if args.len() != 3 {
-        return Err(format!(
+        return Err(Error::internal(format!(
             "pinned toolchain std catch_unwind intrinsic expected 3 arguments, found {}",
             args.len()
-        ));
+        )));
     }
     if !matches!(
         intrinsic_unwind,
         rustc_middle::mir::UnwindAction::Unreachable
     ) {
-        return Err(format!(
+        return Err(Error::internal(format!(
             "pinned toolchain std catch_unwind intrinsic unwind changed from Unreachable to \
              {intrinsic_unwind:?}"
-        ));
+        )));
     }
-    let try_local = operand_local(&args[0].node).ok_or(
+    let try_local = operand_local(&args[0].node).ok_or(Error::internal(
         "pinned toolchain std catch_unwind do_call argument no longer comes from a local fn-ptr",
-    )?;
-    let catch_local = operand_local(&args[2].node).ok_or(
+    ))?;
+    let catch_local = operand_local(&args[2].node).ok_or(Error::internal(
         "pinned toolchain std catch_unwind do_catch argument no longer comes from a local fn-ptr",
-    )?;
-    let do_call = reified_fn(tcx, typing_env, &internal_body, try_local, *intrinsic_loc).map_err(
-        |reason| format!("pinned toolchain std catch_unwind do_call fn-ptr source cannot be confirmed: {reason}"),
-    )?;
+    ))?;
+    let do_call = reified_fn(tcx, typing_env, &internal_body, try_local, *intrinsic_loc)
+        .map_err(|reason| {
+            Error::internal(format!(
+                "pinned toolchain std catch_unwind do_call fn-ptr source cannot be confirmed: {reason}"
+            ))
+        })?;
     let do_catch = reified_fn(tcx, typing_env, &internal_body, catch_local, *intrinsic_loc)
         .map_err(|reason| {
-            format!("pinned toolchain std catch_unwind do_catch fn-ptr source cannot be confirmed: {reason}")
+            Error::internal(format!(
+                "pinned toolchain std catch_unwind do_catch fn-ptr source cannot be confirmed: {reason}"
+            ))
         })?;
     let do_call_path = tcx.def_path_str(do_call.def_id());
     let do_catch_path = tcx.def_path_str(do_catch.def_id());
     if do_call_path != "std::panicking::catch_unwind::do_call"
         || do_catch_path != "std::panicking::catch_unwind::do_catch"
     {
-        return Err(format!(
+        return Err(Error::internal(format!(
             "pinned toolchain std catch_unwind callbacks changed: try={do_call_path}, \
              catch={do_catch_path}"
-        ));
+        )));
     }
 
     Ok((

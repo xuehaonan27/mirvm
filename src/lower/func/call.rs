@@ -2,6 +2,8 @@
 //! untuple_rust_call_arg/finish_call_inner — Callee three-form dispatch, FFI aggregate,
 //! sret, track_caller. Single entry point = the Call arm of term.rs.
 
+use crate::lower::Error;
+
 use super::*;
 
 impl<'tcx> LowerCx<'tcx, '_> {
@@ -18,7 +20,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         destination: &mir::Place<'tcx>,
         target: Option<mir::BasicBlock>,
         unwind: mir::UnwindAction,
-    ) -> Result<(Vec<Stmt>, Terminator), String> {
+    ) -> Result<(Vec<Stmt>, Terminator), Error> {
         let (data, vt) = match self.lower_operand(&args[0].node) {
             Ok(LoweredOp::Pair(data, vt)) => (data, vt),
             // by-value dyn dispatch (isomorphic to cg_ssa Ref(PlaceValue{llextra:Some(meta)}) arm):
@@ -28,16 +30,20 @@ impl<'tcx> LowerCx<'tcx, '_> {
             // this nightly instance.rs resolve_for_vtable). Same shape as dyn Drop.
             _ => {
                 let Some(pl) = args[0].node.place() else {
-                    return Err("dyn receiver is neither fat pointer nor place".into());
+                    return Err(Error::internal(
+                        "dyn receiver is neither fat pointer nor place",
+                    ));
                 };
                 let p = self.resolve_place(&pl)?;
                 if !matches!(p.ty.kind(), ty::Dynamic(..)) {
-                    return Err(format!("dyn receiver shape unknown (ty={})", p.ty));
+                    return Err(Error::internal(format!(
+                        "dyn receiver shape unknown (ty={})",
+                        p.ty
+                    )));
                 }
-                let meta = p
-                    .meta
-                    .clone()
-                    .ok_or_else(|| format!("by-value dyn receiver has no meta (ty={})", p.ty))?;
+                let meta = p.meta.clone().ok_or_else(|| {
+                    Error::internal(format!("by-value dyn receiver has no meta (ty={})", p.ty))
+                })?;
                 (Operand::AddrOf(p.expr()), meta)
             }
         };
@@ -64,7 +70,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         destination: &mir::Place<'tcx>,
         target: Option<mir::BasicBlock>,
         unwind: mir::UnwindAction,
-    ) -> Result<(Vec<Stmt>, Terminator), String> {
+    ) -> Result<(Vec<Stmt>, Terminator), Error> {
         self.finish_call_inner(
             ct,
             loc_arg,
@@ -83,10 +89,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
         &mut self,
         op: &mir::Operand<'tcx>,
         out: &mut Vec<Operand>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Error> {
         let ty = self.op_ty(op)?;
         let ty::Tuple(fields) = ty.kind() else {
-            return Err(format!("rust-call tail arg is not a tuple ({ty})"));
+            return Err(Error::internal(format!(
+                "rust-call tail arg is not a tuple ({ty})"
+            )));
         };
         let layout = self.layout_of(ty)?;
         // empty/all-ZST tuple (including const forms like `(fn_item,)`): no fields to pass
@@ -109,7 +117,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 // whole pair: both halves claimed by offset (tuple fields may be reordered), emitted in field order
                 LoweredOp::Pair(a, b) => {
                     let ValKind::Pair((ao, _), (bo, _)) = self.classify(ty)? else {
-                        return Err(format!("const tuple classification drift ({ty})"));
+                        return Err(Error::internal(format!(
+                            "const tuple classification drift ({ty})"
+                        )));
                     };
                     let (mut ha, mut hb) = (Some(a), Some(b));
                     for (i, fty) in fields.iter().enumerate() {
@@ -128,7 +138,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }
                     }
                     if ha.is_some() || hb.is_some() {
-                        return Err(format!("const pair tuple field claim failed ({ty})"));
+                        return Err(Error::internal(format!(
+                            "const pair tuple field claim failed ({ty})"
+                        )));
                     }
                     return Ok(());
                 }
@@ -163,7 +175,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         destination: &mir::Place<'tcx>,
         target: Option<mir::BasicBlock>,
         unwind: mir::UnwindAction,
-    ) -> Result<(Vec<Stmt>, Terminator), String> {
+    ) -> Result<(Vec<Stmt>, Terminator), Error> {
         // variadic foreign: tail FfiKind frozen by call-site actual args (tail position aggregate = C1 boundary, loud reject)
         let variadic_foreign = matches!(
             &ct,
@@ -206,11 +218,11 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     if variadic_foreign {
                         let t = self.op_ty(&a.node)?;
                         let k = crate::lower::ffi_kind_of(self.tcx, self.typing_env, t)
-                            .map_err(|e| format!("variadic arg {t}: {e}"))?;
+                            .map_err(|e| Error::internal(format!("variadic arg {t}: {e}")))?;
                         if matches!(k, ir::FfiKind::Agg(_)) {
-                            return Err(format!(
+                            return Err(Error::unsupported(format!(
                                 "variadic tail arg passed by-value aggregate ({t}, C1 boundary)"
-                            ));
+                            )));
                         }
                         tail_kinds.push(k);
                     }
