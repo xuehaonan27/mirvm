@@ -30,6 +30,11 @@ pub(crate) mod x86_64;
 /// The architecture's ELF machine identity, named once for every caller: `arch::ELF_MACHINE`.
 #[cfg(target_arch = "x86_64")]
 pub(crate) use x86_64::ELF_MACHINE;
+/// The architecture's assembly vocabulary, named once for every caller: `arch::asm_text::…`. The
+/// materializer in `src/lower/` asks for the syntax directive and the instruction forms through it
+/// and supplies no architecture-specific text itself.
+#[cfg(target_arch = "x86_64")]
+pub(crate) use x86_64::asm_text;
 
 #[cfg(not(target_arch = "x86_64"))]
 compile_error!(
