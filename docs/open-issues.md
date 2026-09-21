@@ -112,6 +112,13 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
   into `vm::stats::print` exits 101; `tests/run.sh case panic_exit` and `threads_panic` are the fast-tier
   canaries. The current shape is held by the comment on that branch; a real close needs the miscompiled
   construct identified (LLVM 22 / nightly-2026-07-02), not another layout coincidence.
+- **E36** `OPEN`: `jit_builtin_probe` hangs — the `native-diff` mode is RED at 53 passed, 1 failed, with
+  `mirvm=124` against `native=0`, and the hang is deterministic across runs. Not a regression of the
+  platform refactor: it reproduces identically on `c82a065` with that refactor reverted. It also has no
+  `xfail=` marker in `tests/manifest`, so unlike a known-RED it fails the mode instead of being counted
+  as expected. It went unnoticed because per-commit verification names a handful of modes rather than
+  the whole `fast` tier, and this is the first `native-diff` sweep in the platform refactor.
+  Needs a stack or a bisect from the JIT builtin path; a `timeout` kill leaves no diagnostic.
 
 ## D. Distribution and product
 
