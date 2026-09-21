@@ -1136,22 +1136,17 @@ fn set_errno(value: i32) {
 }
 
 fn materialize_signal_stub(registration: &'static SignalRegistration) -> Result<usize, String> {
-    // SysV x86_64 signal entry already has (signum, siginfo, ucontext) in
-    // rdi/rsi/rdx. Supply the fourth argument in rcx and tail-jump so the
-    // kernel/glibc restorer sees the original stack:
-    //   movabs rcx, registration; movabs rax, adapter; jmp rax
-    const STUB_SIZE: usize = 22;
+    // The entry stub's bytes are the pair's (the kernel's SA_SIGINFO entry contract as the CPU
+    // encodes it); where they go and that they must end up read-execute is the engine's.
     let page_size = crate::os::mem::page_size();
     let page = crate::os::mem::map_anon(page_size, crate::os::mem::Prot::RW, false);
     if page.is_null() {
         return Err("mmap for fixed signal stub failed".into());
     }
-    let mut code = [0u8; STUB_SIZE];
-    code[0..2].copy_from_slice(&[0x48, 0xb9]);
-    code[2..10].copy_from_slice(&(ptr::from_ref(registration) as usize as u64).to_le_bytes());
-    code[10..12].copy_from_slice(&[0x48, 0xb8]);
-    code[12..20].copy_from_slice(&(signal_adapter as *const () as usize as u64).to_le_bytes());
-    code[20..22].copy_from_slice(&[0xff, 0xe0]);
+    let code = crate::os_arch::signal::entry_stub_bytes(
+        ptr::from_ref(registration) as usize,
+        signal_adapter as *const () as usize,
+    );
     unsafe { ptr::copy_nonoverlapping(code.as_ptr(), page, code.len()) };
     if let Err(error) = crate::os::mem::protect(page, page_size, crate::os::mem::Prot::RX) {
         unsafe { crate::os::mem::unmap(page, page_size) };

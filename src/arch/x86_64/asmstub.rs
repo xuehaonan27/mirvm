@@ -23,6 +23,27 @@ pub fn emit_stub_bytes(target: u64) -> [u8; 12] {
     b
 }
 
+/// Stub bytes: `movabs rcx, argument; movabs rax, target; jmp rax`
+/// (48 B9 <imm64> 48 B8 <imm64> FF E0), 22B long.
+///
+/// The System V argument order leaves `rcx` as the fourth integer register, so this is the shape
+/// a tail jump takes when the entry must also carry one argument the kernel did not supply. Which
+/// entry needs that — a Linux SA_SIGINFO handler arrives with (signum, siginfo, ucontext) in
+/// rdi/rsi/rdx — is the kernel's contract and belongs to `os_arch`; this function only encodes the
+/// instruction.
+pub fn emit_arg_stub_bytes(argument: u64, target: u64) -> [u8; 22] {
+    let mut b = [0u8; 22];
+    b[0] = 0x48;
+    b[1] = 0xb9;
+    b[2..10].copy_from_slice(&argument.to_le_bytes());
+    b[10] = 0x48;
+    b[11] = 0xb8;
+    b[12..20].copy_from_slice(&target.to_le_bytes());
+    b[20] = 0xff;
+    b[21] = 0xe0;
+    b
+}
+
 /// A real `int3`: terminates with SIGTRAP when not being traced (same as native).
 pub fn int3() {
     unsafe { std::arch::asm!("int3", options(nomem, nostack, preserves_flags)) };

@@ -17,6 +17,16 @@
 /// this `0`, which makes the mask-off comparisons in `os/linux/signal.rs` no-ops.
 pub const RESTORER_FLAG: i32 = 0x0400_0000;
 
+/// Bytes a fixed signal-entry stub occupies on this pair.
+pub const ENTRY_STUB_SIZE: usize = 22;
+
+/// The bytes of a fixed SA_SIGINFO entry stub. The kernel enters the handler with
+/// (signum, siginfo, ucontext) in rdi/rsi/rdx, so the stub supplies the adapter's own argument as
+/// the fourth and tail-jumps: the kernel's stack stays exactly where the restorer expects it.
+pub fn entry_stub_bytes(argument: usize, adapter: usize) -> [u8; ENTRY_STUB_SIZE] {
+    crate::arch::x86_64::asmstub::emit_arg_stub_bytes(argument as u64, adapter as u64)
+}
+
 std::arch::global_asm!(
     ".globl mirvm_signal_restorer",
     ".hidden mirvm_signal_restorer",
