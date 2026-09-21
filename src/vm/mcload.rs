@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::obj::elf;
+use crate::native::elf;
 
 /// A loaded MC image. Symbols are visible only to the Module that holds it; mapping and
 /// unwind registration are not undone because external code pointers may still be alive.

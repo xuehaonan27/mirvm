@@ -130,10 +130,11 @@ modifications.
   `src/os/` is the platform outside mirvm, the C library and the kernel together (pthread, `dlopen`,
   `errno`; mappings, `/proc`, process and signal primitives);
   `src/os_arch/<os>_<arch>/` is the two at once (signal frames and restorers, raw syscall sequences,
-  the fixed-address layout, kernel TLS). `src/obj/` is none of them: an object-file byte layout does
-  not vary with either axis, so it is a format module, with `e_machine` in `arch` and the loader's
-  half in `os`. Each axis declares its surface in its own `mod.rs` and dispatches through one
-  `#[cfg]` ladder, so a call site names one path on every target. A new architecture or platform is a
+  the fixed-address layout, kernel TLS). An object-file byte layout is none of them — it does not vary
+  with either axis — so it belongs to the layer that produces and parses those objects
+  (`src/native/{elf,ar}.rs`), with `e_machine` in `arch` and the loader's half in `os`. Each axis
+  declares its surface in its own `mod.rs` and dispatches through one `#[cfg]` ladder, so a call
+  site names one path on every target. A new architecture or platform is a
   directory plus an arm in that ladder; the axis refusals name what a pair must implement.
   `repo-quality`'s `platform boundary` gate enforces the boundary.
 - A frozen surface stays byte-identical unless its own test changes: guest stdout/stderr, rustc

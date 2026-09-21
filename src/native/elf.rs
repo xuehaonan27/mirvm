@@ -3,7 +3,8 @@
 //! Every reader answers `None` for truncation or for a field that is not the one this format
 //! defines, and never decides what a failure means: a caller maps `None` to the error its own
 //! layer reports, which is why a malformed image produces the loader's sentence and not this
-//! module's.
+//! module's. Which machine an image is for is the CPU's (`arch::ELF_MACHINE`); which format a
+//! host's loader accepts, and everything the loader does with the bytes, is `os`'s.
 
 /// The four bytes every ELF image begins with.
 pub const IDENT: [u8; 4] = [0x7f, b'E', b'L', b'F'];

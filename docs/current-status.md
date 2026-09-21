@@ -88,9 +88,9 @@ is the CPU: instruction encoding and execution, register and feature facts, the 
 and the assembly vocabulary. `src/os/` is the platform outside mirvm, the C library and the kernel
 together: page size, mappings, `dlopen`, `/proc`, process and signal primitives, `errno`. `src/os_arch/<os>_<arch>/` is the two at once, which in practice means the kernel ABI as the
 CPU encodes it — signal frames and restorers, raw syscall sequences, the fixed-address layout, kernel
-TLS. `src/obj/` is deliberately none of the three: an object-file byte layout does not vary with the
-CPU or the kernel, so it is a format module, with `e_machine` on the CPU axis and everything the
-loader does with an image on the platform axis. Each axis declares its surface
+TLS. An object-file byte layout is deliberately none of the three: it does not vary with the CPU or the
+kernel, so it lives in the layer that produces and parses those objects (`src/native/{elf,ar}.rs`),
+with `e_machine` on the CPU axis and everything the loader does with an image on the platform axis. Each axis declares its surface
 in its own `mod.rs` and dispatches through one `#[cfg]` ladder, so a call site names
 `crate::os::signal::…` or `crate::arch::asm_text::…` on every target. `repo-quality`'s
 `platform boundary` gate holds it: no `libc` constant or protocol function, no `asm!` site, no host
