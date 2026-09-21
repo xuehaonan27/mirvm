@@ -7,4 +7,5 @@
 //! loader-bound half of using an image at all (`memfd_create`, `/proc/self/fd`, `dlopen`,
 //! self-mapping) is the kernel's and stays in `os/linux/` and in the engine that calls it.
 
+pub mod ar;
 pub mod elf;
