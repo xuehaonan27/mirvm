@@ -7,7 +7,10 @@
 //!
 //! - **Leaf**: This layer does not depend on engine/lower/rustc_private;
 //!   function signatures only include [`usize`]/[`u64`]/raw pointers/own small
-//!   enumerations. No guest concept allowed.
+//!   enumerations. No guest concept allowed. The platform's own ABI structures
+//!   (`libc::sigaction`, `libc::ucontext_t`) are the one exception, and only
+//!   across this boundary: they are what the kernel speaks, and the engine sees
+//!   wrapped types instead.
 //! - **Primitives**: Guest semantic adjudication, examples:
 //!   - single-threaded fork guards
 //!   - signal handler whitelists
@@ -26,6 +29,10 @@
 //! targets will fail to compile at compile time—honestly, portability is not
 //! implemented. Adding a new platform means parallel implementation directory,
 //! and cfg dispatch here.
+//!
+//! What is specific to one kernel *and* one CPU at once is not here: it is in
+//! [`crate::os_arch`], whose pair ladder this module reaches through an ordinary
+//! subsystem name, so a caller does not have to know the pair.
 
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;

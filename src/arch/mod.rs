@@ -20,6 +20,10 @@
 //! as os/linux, global_asm/asm-stub hardgate). Non-x86_64 targets fail to
 //! compile at compile time. New architecture implementation adds directory and
 //! cfg dispatch here (OpenJDK cpu/family model).
+//!
+//! Nothing here may depend on an OS: the kernel's own view of the CPU — signal frames, syscall
+//! sequences, address-space layout — belongs to the matching `crate::os_arch` pair, which is
+//! where a new CPU's Linux half is written.
 
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod x86_64;

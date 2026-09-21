@@ -10,39 +10,17 @@
 //! read/write.
 //! Type discipline: `attr` pointers are entered and exited as `c_void` (libc
 //!  pthread type signatures are not leaked).
+//!
+//! The raw futex wait/wake and the user-address-width test are x86_64's half of this file's
+//! knowledge and live in [`crate::os_arch::thread`]; they are re-exported below so a caller
+//! keeps one name on every Linux CPU.
 
 use std::ffi::c_void;
 
-#[cfg(target_arch = "x86_64")]
-std::arch::global_asm!(
-    ".globl mirvm_futex_wait_raw",
-    ".hidden mirvm_futex_wait_raw",
-    ".type mirvm_futex_wait_raw,@function",
-    "mirvm_futex_wait_raw:",
-    "mov edx, esi",
-    "mov eax, 202",
-    "mov esi, 128",
-    "mov r10d, 0",
-    "syscall",
-    "ret",
-    ".size mirvm_futex_wait_raw, .-mirvm_futex_wait_raw",
-    ".globl mirvm_futex_wake_one_raw",
-    ".hidden mirvm_futex_wake_one_raw",
-    ".type mirvm_futex_wake_one_raw,@function",
-    "mirvm_futex_wake_one_raw:",
-    "mov eax, 202",
-    "mov esi, 129",
-    "mov edx, 1",
-    "syscall",
-    "ret",
-    ".size mirvm_futex_wake_one_raw, .-mirvm_futex_wake_one_raw",
-);
-
-#[cfg(target_arch = "x86_64")]
-unsafe extern "C" {
-    fn mirvm_futex_wait_raw(addr: *const u32, expected: u32) -> i64;
-    fn mirvm_futex_wake_one_raw(addr: *const u32) -> i64;
-}
+/// The pair's half of this module: raw futex operations that must not touch libc `errno`, and
+/// the architecture's user-address bound that makes glibc's "no stack set" sentinel
+/// recognizable.
+pub use crate::os_arch::thread::{futex_wait_raw, futex_wake_one_raw, stack_addr_is_unset};
 
 /// pthread TLS key.
 /// Unique within the process after creation (`dtor` determined by the caller).
@@ -111,15 +89,6 @@ pub fn attr_stack_bounds(attr: *mut c_void) -> Option<(usize, usize)> {
     Some((lo as usize, size))
 }
 
-/// glibc detail: an attr that was never setstack'd holds stackaddr=NULL
-/// internally, so getstack returns `NULL - stacksize` (a bogus address near the
-/// top of u64) instead of NULL. x86_64 user addresses fit in 47 bits, so
-/// anything above that range means "unset"; a real user stack address (a
-/// guest-provided stack) falls inside it.
-pub fn stack_addr_is_unset(lo: usize) -> bool {
-    lo == 0 || lo >= 1 << 48
-}
-
 /// Thin wrapper of `pthread_attr_setstacksize`.
 /// Returns `true` on success.
 pub fn attr_set_stack_size(attr: *mut c_void, size: usize) -> bool {
@@ -180,38 +149,4 @@ pub fn service_thread_count() -> usize {
 /// from the post-fork child before it touches any inherited lock.
 pub fn reset_service_threads_after_fork() {
     SERVICE_THREADS.store(0, std::sync::atomic::Ordering::SeqCst);
-}
-
-/// Wait while `*addr == expected`, returning the kernel's raw result. This
-/// leaf never writes libc `errno`; callers use it for telemetry wakeups that
-/// must be invisible to the guest syscall contract.
-#[cfg(target_arch = "x86_64")]
-pub fn futex_wait_raw(addr: *const u32, expected: u32) -> i64 {
-    // SAFETY: the caller keeps the aligned atomic word alive for the wait.
-    unsafe { mirvm_futex_wait_raw(addr, expected) }
-}
-
-/// Wake at most one waiter, returning the kernel's raw result without touching
-/// libc `errno`.
-#[cfg(target_arch = "x86_64")]
-pub fn futex_wake_one_raw(addr: *const u32) -> i64 {
-    // SAFETY: the caller keeps the aligned atomic word alive for the syscall.
-    unsafe { mirvm_futex_wake_one_raw(addr) }
-}
-
-#[cfg(all(test, target_arch = "x86_64"))]
-mod tests {
-    use super::*;
-    use std::sync::atomic::AtomicU32;
-
-    #[test]
-    fn raw_futex_wait_passes_expected_without_touching_errno() {
-        let word = AtomicU32::new(1);
-        unsafe { *libc::__errno_location() = 73 };
-
-        let rc = futex_wait_raw(word.as_ptr(), 0);
-
-        assert_eq!(rc, -(libc::EAGAIN as i64));
-        assert_eq!(unsafe { *libc::__errno_location() }, 73);
-    }
 }
