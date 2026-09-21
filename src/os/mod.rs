@@ -71,5 +71,7 @@ crate::diag_codes! {
 
 #[cfg(not(target_os = "linux"))]
 compile_error!(
-    "The OS module currently only implements Linux (with the same prerequisites as the x86_64 hard gate of global_asm/asm-stub)."
+    "No platform is implemented for this target. The implemented one is Linux; adding another means \
+     a directory under src/os/ named after its `target_os`, an arm in the ladder in this file, and \
+     implementations of `dll`, `fs`, `libm`, `mem`, `process`, `signal`, `thread` and `unwind`."
 );

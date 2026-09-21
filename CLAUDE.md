@@ -125,7 +125,19 @@ modifications.
 
 ## Constraints to Preserve
 
-[TBD].
+- Platform knowledge has three homes and no others: `src/arch/` for the CPU (instruction encoding
+  and execution, registers and feature facts, the ELF machine identity, the assembly vocabulary),
+  `src/os/` for the kernel (mappings, `dlopen`, `/proc`, process and signal primitives, object-file
+  formats, the C library's math surface), and `src/os_arch/<os>_<arch>/` for the two together
+  (signal frames and restorers, raw syscall sequences, the fixed-address layout, kernel TLS). Each
+  axis declares its surface in its own `mod.rs` and dispatches through one `#[cfg]` ladder, so a call
+  site names one path on every target. A new architecture or platform is a directory plus an arm in
+  that ladder; the axis refusals name what a pair must implement. `repo-quality`'s
+  `platform boundary` gate enforces the boundary.
+- A frozen surface stays byte-identical unless its own test changes: guest stdout/stderr, rustc
+  diagnostics, cargo-mirror lines, and the first line of `cache status`. The lowering cache key is
+  the FNV of the final assembly text, so a whitespace change in emitted asm silently invalidates
+  every entry.
 
 ## Details by Topic
 
