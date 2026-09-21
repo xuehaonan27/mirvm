@@ -39,6 +39,9 @@ pub(crate) mod linux;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::*;
 
+/// The C library's math surface, as the symbol names the JIT imports.
+pub(crate) mod libm;
+
 /// The object-file formats this platform's loader and linker read. Not behind the `linux/` ladder:
 /// a byte layout does not change with the kernel, only which image a kernel accepts does.
 pub(crate) mod obj;

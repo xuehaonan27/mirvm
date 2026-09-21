@@ -214,7 +214,7 @@ fn cfi_single_frame() {
     }
     let mut eh = EhFrame(EndianVec::new(RunTimeEndian::Little));
     table.write_eh_frame(&mut eh).unwrap();
-    super::register_eh_frame_section(eh.0.into_vec());
+    crate::os::unwind::register_frame_section(eh.0.into_vec());
     let caller_fn: unsafe extern "C-unwind" fn() = unsafe { std::mem::transmute(caller_addr) };
     let result = std::panic::catch_unwind(|| unsafe { caller_fn() });
     let payload = result
@@ -301,7 +301,7 @@ fn cfi_only_passthrough() {
     }
     let mut eh = EhFrame(EndianVec::new(RunTimeEndian::Little));
     table.write_eh_frame(&mut eh).unwrap();
-    super::register_eh_frame_section(eh.0.into_vec());
+    crate::os::unwind::register_frame_section(eh.0.into_vec());
 
     let caller_fn: unsafe extern "C-unwind" fn() = unsafe { std::mem::transmute(caller_addr) };
     let result = std::panic::catch_unwind(|| unsafe { caller_fn() });
@@ -471,7 +471,7 @@ fn lsda_cleanup_pad_executes_and_resume_continues() {
     // One complete, zero-terminated eh_frame section registered from the FrameTable.
     let mut eh = EhFrame(EndianVec::new(RunTimeEndian::Little));
     table.write_eh_frame(&mut eh).unwrap();
-    super::register_eh_frame_section(eh.0.into_vec());
+    crate::os::unwind::register_frame_section(eh.0.into_vec());
 
     // Fire the whole chain: the host catch_unwind must receive 42, and the pad must have
     // run (mark = 1, not 2).
