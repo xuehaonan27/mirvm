@@ -74,49 +74,39 @@ fn toolchain_rustdoc() -> PathBuf {
 }
 
 pub(crate) fn ensure_self_symlink(self_exe: &Path, path: &Path) -> Result<(), Error> {
-    #[cfg(unix)]
+    if let (Ok(actual), Ok(expected)) =
+        (std::fs::canonicalize(path), std::fs::canonicalize(self_exe))
+        && actual == expected
     {
-        use std::os::unix::fs::symlink;
-
-        if let (Ok(actual), Ok(expected)) =
-            (std::fs::canonicalize(path), std::fs::canonicalize(self_exe))
-            && actual == expected
-        {
-            return Ok(());
-        }
-        let parent = path.parent().ok_or_else(|| Error::NoParent {
-            path: path.to_path_buf(),
-        })?;
-        std::fs::create_dir_all(parent).map_err(|error| {
-            Error::io(
-                format!(
-                    "cannot create the internal tool directory {}",
-                    parent.display()
-                ),
-                error,
-            )
-        })?;
-        // A link is published the same way an artifact is: fill a staging name, then rename.
-        let tmp = crate::store::staging_path(path);
-        symlink(self_exe, &tmp).map_err(|error| {
-            Error::io(
-                format!("cannot create the internal tool {}", tmp.display()),
-                error,
-            )
-        })?;
-        crate::store::publish(path, &tmp).map_err(|error| {
-            Error::io(
-                format!("cannot publish the internal tool {}", path.display()),
-                error,
-            )
-        })?;
-        Ok(())
+        return Ok(());
     }
-    #[cfg(not(unix))]
-    {
-        let _ = (self_exe, path);
-        Err("Cargo doctest currently supports Unix hosts only".into())
-    }
+    let parent = path.parent().ok_or_else(|| Error::NoParent {
+        path: path.to_path_buf(),
+    })?;
+    std::fs::create_dir_all(parent).map_err(|error| {
+        Error::io(
+            format!(
+                "cannot create the internal tool directory {}",
+                parent.display()
+            ),
+            error,
+        )
+    })?;
+    // A link is published the same way an artifact is: fill a staging name, then rename.
+    let tmp = crate::store::staging_path(path);
+    crate::os::fs::symlink(self_exe, &tmp).map_err(|error| {
+        Error::io(
+            format!("cannot create the internal tool {}", tmp.display()),
+            error,
+        )
+    })?;
+    crate::store::publish(path, &tmp).map_err(|error| {
+        Error::io(
+            format!("cannot publish the internal tool {}", path.display()),
+            error,
+        )
+    })?;
+    Ok(())
 }
 
 pub(super) fn arg_flag_value(args: &[String], flag: &str) -> Option<String> {

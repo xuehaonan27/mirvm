@@ -8,7 +8,6 @@ use std::ffi::CString;
 use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -450,17 +449,19 @@ impl Drop for BufferedStderrTee {
 }
 
 fn publish_without_replace(partial_path: &Path, final_path: &Path) -> io::Result<()> {
-    let partial = CString::new(partial_path.as_os_str().as_bytes()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "partial diagnostics path contains a NUL byte",
-        )
-    })?;
-    let final_path = CString::new(final_path.as_os_str().as_bytes()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "final diagnostics path contains a NUL byte",
-        )
-    })?;
+    let partial =
+        CString::new(crate::os::fs::raw_bytes(partial_path.as_os_str())).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "partial diagnostics path contains a NUL byte",
+            )
+        })?;
+    let final_path =
+        CString::new(crate::os::fs::raw_bytes(final_path.as_os_str())).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "final diagnostics path contains a NUL byte",
+            )
+        })?;
     crate::os::fs::rename_noreplace(&partial, &final_path)
 }

@@ -4,8 +4,35 @@
 //! without replacing what is already there, writing at an offset through a vector, or asking
 //! whether two metadata reads describe the same unchanged file.
 
-use std::ffi::CStr;
+use std::ffi::{CStr, OsStr};
 use std::io;
+use std::path::Path;
+
+/// Create a symbolic link at `link` pointing at `target`.
+///
+/// This is how the cargo mirror publishes itself under the tool name a guest build script looks
+/// for, and how a launcher is published for a test binary.
+pub fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+/// Give `path` the unix mode bits in `mode`, which is how a generated shell script becomes
+/// executable.
+pub fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+/// A path's bytes.
+///
+/// A unix path is a byte string that need not be UTF-8, so it reaches the kernel as bytes; a
+/// `String` in between would refuse paths the kernel accepts.
+pub fn raw_bytes(value: &OsStr) -> &[u8] {
+    use std::os::unix::ffi::OsStrExt;
+
+    value.as_bytes()
+}
 
 /// Rename `from` onto `to`, refusing to replace an existing `to`.
 ///

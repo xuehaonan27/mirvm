@@ -1391,33 +1391,24 @@ fn write_bin_launcher(
             .map_err(|e| format!("write bin recipe {} failed: {e}", recipe_path.display()))?;
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::symlink;
-        let correct = std::fs::read_link(&launcher)
-            .ok()
-            .is_some_and(|target| target == self_exe);
-        if !correct {
-            match std::fs::remove_file(&launcher) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    return Err(format!(
-                        "replace bin launcher {} failed: {e}",
-                        launcher.display()
-                    ));
-                }
+    let correct = std::fs::read_link(&launcher)
+        .ok()
+        .is_some_and(|target| target == self_exe);
+    if !correct {
+        match std::fs::remove_file(&launcher) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(format!(
+                    "replace bin launcher {} failed: {e}",
+                    launcher.display()
+                ));
             }
-            symlink(self_exe, &launcher)
-                .map_err(|e| format!("create bin launcher {} failed: {e}", launcher.display()))?;
         }
-        Ok(launcher)
+        crate::os::fs::symlink(self_exe, &launcher)
+            .map_err(|e| format!("create bin launcher {} failed: {e}", launcher.display()))?;
     }
-    #[cfg(not(unix))]
-    {
-        let _ = self_exe;
-        Err("CARGO_BIN_EXE launcher currently only supports Unix hosts".into())
-    }
+    Ok(launcher)
 }
 
 fn check_args(args: &[String], layout: &Layout, fp: &str) -> Vec<String> {
