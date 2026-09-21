@@ -119,6 +119,13 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
   as expected. It went unnoticed because per-commit verification names a handful of modes rather than
   the whole `fast` tier, and this is the first `native-diff` sweep in the platform refactor.
   Needs a stack or a bisect from the JIT builtin path; a `timeout` kill leaves no diagnostic.
+- **E37** `OPEN`: the `deps-image` case is RED — "L2 rerun did not hit (no cache-load)", with the
+  second run reporting `cache-store` and no `cache-load` in its `mirvm-timing` line, deterministically.
+  The mode is `gate` tier and carries no `xfail=`, so it fails. Found by the ELF-format sweep and not
+  caused by it: the same failure reproduces on `c82a065`, `77b8e7d` and the working tree. The open
+  question is whether the store half is writing a key the load half never asks for, or whether the two
+  bins in the fixture genuinely should not share an image; the mode's own message names the symptom and
+  not the key.
 
 ## D. Distribution and product
 
