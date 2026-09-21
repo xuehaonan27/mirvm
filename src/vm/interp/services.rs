@@ -4,6 +4,7 @@
 
 use super::call::call_fn_addr;
 use super::*;
+use crate::os::unwind;
 
 /// Resolves a guest signal-handler address to its AS-trampoline code address.
 ///
@@ -51,23 +52,11 @@ struct HostFrame {
     cfa: u64,
 }
 
-unsafe extern "C" {
-    #[link_name = "_Unwind_Backtrace"]
-    fn host_unwind_backtrace(
-        trace: extern "C" fn(*mut libc::c_void, *mut libc::c_void) -> i32,
-        arg: *mut libc::c_void,
-    ) -> i32;
-    #[link_name = "_Unwind_GetIP"]
-    fn host_unwind_get_ip(ctx: *mut libc::c_void) -> usize;
-    #[link_name = "_Unwind_GetCFA"]
-    fn host_unwind_get_cfa(ctx: *mut libc::c_void) -> usize;
-}
-
-extern "C" fn collect_host_frame(ctx: *mut libc::c_void, arg: *mut libc::c_void) -> i32 {
+extern "C" fn collect_host_frame(ctx: unwind::Context, arg: unwind::Context) -> i32 {
     let frames = unsafe { &mut *(arg as *mut Vec<HostFrame>) };
     frames.push(HostFrame {
-        ip: unsafe { host_unwind_get_ip(ctx) as u64 },
-        cfa: unsafe { host_unwind_get_cfa(ctx) as u64 },
+        ip: unsafe { unwind::frame_ip(ctx) } as u64,
+        cfa: unsafe { unwind::frame_cfa(ctx) } as u64,
     });
     0
 }
@@ -80,9 +69,9 @@ pub(super) fn unwind_backtrace(ctx: *mut Ctx, trace_fn: u64, arg: u64) -> u64 {
     let shared = unsafe { &*(*ctx).shared };
     let mut host: Vec<HostFrame> = Vec::new();
     unsafe {
-        host_unwind_backtrace(
+        unwind::backtrace(
             collect_host_frame,
-            &mut host as *mut Vec<HostFrame> as *mut libc::c_void,
+            &mut host as *mut Vec<HostFrame> as unwind::Context,
         );
     }
 
