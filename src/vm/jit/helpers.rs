@@ -1,14 +1,16 @@
 //! `mirvm_*` runtime helpers called by compiled code through import symbols: the c2i
 //! universal wrapper, the unreachable/trap/div_zero/volatile entries, host direct-eval of
-//! 128-bit/f128/f16 arithmetic, and the libm symbol table. `compiler.rs` registers them.
+//! 128-bit/f128/f16 arithmetic, and the standard C math symbols. `compiler.rs` registers them.
 
 use super::*;
 
 mod floats;
+mod libm;
 mod stats;
 /// Re-exported at the parent so `compiler.rs` keeps resolving these helper symbols
 /// through `helpers::*`, exactly as it did when they were defined here.
 pub(crate) use floats::*;
+pub(crate) use libm::*;
 pub(crate) use stats::*;
 
 fn active() -> (*mut crate::vm::ctx::Ctx, &'static Shared) {

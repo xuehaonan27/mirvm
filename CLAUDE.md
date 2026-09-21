@@ -128,7 +128,7 @@ modifications.
 - An axis holds only what varies along it. `src/arch/` is the CPU (instruction encoding and
   execution, registers and feature facts, the ELF machine identity, the assembly vocabulary);
   `src/os/` is the platform outside mirvm, the C library and the kernel together (pthread, `dlopen`,
-  the math symbols, `errno`; mappings, `/proc`, process and signal primitives);
+  `errno`; mappings, `/proc`, process and signal primitives);
   `src/os_arch/<os>_<arch>/` is the two at once (signal frames and restorers, raw syscall sequences,
   the fixed-address layout, kernel TLS). `src/obj/` is none of them: an object-file byte layout does
   not vary with either axis, so it is a format module, with `e_machine` in `arch` and the loader's

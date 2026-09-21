@@ -86,8 +86,7 @@ and that is the only platform baseline that may be claimed.
 That baseline is named in three layers, and nothing outside them names a platform item. `src/arch/`
 is the CPU: instruction encoding and execution, register and feature facts, the ELF machine identity
 and the assembly vocabulary. `src/os/` is the platform outside mirvm, the C library and the kernel
-together: page size, mappings, `dlopen`, `/proc`, process and signal primitives, the math symbols,
-`errno`. `src/os_arch/<os>_<arch>/` is the two at once, which in practice means the kernel ABI as the
+together: page size, mappings, `dlopen`, `/proc`, process and signal primitives, `errno`. `src/os_arch/<os>_<arch>/` is the two at once, which in practice means the kernel ABI as the
 CPU encodes it — signal frames and restorers, raw syscall sequences, the fixed-address layout, kernel
 TLS. `src/obj/` is deliberately none of the three: an object-file byte layout does not vary with the
 CPU or the kernel, so it is a format module, with `e_machine` on the CPU axis and everything the
