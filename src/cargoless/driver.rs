@@ -224,41 +224,32 @@ pub fn run_doctest_builder(argv: impl Iterator<Item = String>) -> ExitCode {
         );
         return ExitCode::from(1);
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::symlink;
-        match std::fs::remove_file(&output) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                eprintln!(
-                    "mirvm doctest builder: failed to replace output {}: {error}",
-                    output.display()
-                );
-                return ExitCode::from(1);
-            }
-        }
-        let self_exe = match std::env::current_exe() {
-            Ok(path) => path,
-            Err(error) => {
-                eprintln!("mirvm doctest builder: current_exe failed: {error}");
-                return ExitCode::from(1);
-            }
-        };
-        if let Err(error) = symlink(self_exe, &output) {
+    match std::fs::remove_file(&output) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
             eprintln!(
-                "mirvm doctest builder: failed to create launcher {}: {error}",
+                "mirvm doctest builder: failed to replace output {}: {error}",
                 output.display()
             );
             return ExitCode::from(1);
         }
-        ExitCode::SUCCESS
     }
-    #[cfg(not(unix))]
-    {
-        eprintln!("mirvm doctest builder: runner currently only supports Unix hosts");
-        ExitCode::from(1)
+    let self_exe = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("mirvm doctest builder: current_exe failed: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(error) = crate::os::fs::symlink(self_exe, &output) {
+        eprintln!(
+            "mirvm doctest builder: failed to create launcher {}: {error}",
+            output.display()
+        );
+        return ExitCode::from(1);
     }
+    ExitCode::SUCCESS
 }
 
 /// CLI startup uses argv[0] in the earliest phase to recognize `CARGO_BIN_EXE_*` launchers.

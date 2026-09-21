@@ -344,20 +344,21 @@ pub(super) fn partial_path(final_path: &Path) -> PathBuf {
 
 fn publish_without_replace(partial_path: &Path, final_path: &Path) -> io::Result<()> {
     use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
 
-    let partial = CString::new(partial_path.as_os_str().as_bytes()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "partial capture path contains a NUL byte",
-        )
-    })?;
-    let final_path = CString::new(final_path.as_os_str().as_bytes()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "final capture path contains a NUL byte",
-        )
-    })?;
+    let partial =
+        CString::new(crate::os::fs::raw_bytes(partial_path.as_os_str())).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "partial capture path contains a NUL byte",
+            )
+        })?;
+    let final_path =
+        CString::new(crate::os::fs::raw_bytes(final_path.as_os_str())).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "final capture path contains a NUL byte",
+            )
+        })?;
     crate::os::fs::rename_noreplace(&partial, &final_path)
 }
 

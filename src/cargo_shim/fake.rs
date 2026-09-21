@@ -136,39 +136,25 @@ pub(super) fn write_fake_outputs(rustc: &Path, args: &[String], info: &CrateRunI
             );
             exit(1);
         });
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let self_exe = std::env::current_exe().expect("current_exe failed");
-            let quote =
-                |value: &Path| format!("'{}'", value.display().to_string().replace('\'', "'\\''"));
-            let script = format!(
-                "#!/bin/sh\n# MIRVM_RUN_INFO {}\nexec {} runner {} \"$@\"\n",
-                serde_json::to_string(&info_path.display().to_string()).unwrap(),
-                quote(&self_exe),
-                quote(&f)
-            );
-            std::fs::write(&f, script).unwrap_or_else(|e| {
-                eprintln!(
-                    "mirvm: failed to write the fake binary launcher {}: {e}",
-                    f.display()
-                );
-                exit(1);
-            });
-            let mut permissions = std::fs::metadata(&f).unwrap().permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&f, permissions).unwrap_or_else(|e| {
-                eprintln!(
-                    "mirvm: failed to set fake binary permissions {}: {e}",
-                    f.display()
-                );
-                exit(1);
-            });
-        }
-        #[cfg(not(unix))]
-        std::fs::write(&f, &json).unwrap_or_else(|e| {
+        let self_exe = std::env::current_exe().expect("current_exe failed");
+        let quote =
+            |value: &Path| format!("'{}'", value.display().to_string().replace('\'', "'\\''"));
+        let script = format!(
+            "#!/bin/sh\n# MIRVM_RUN_INFO {}\nexec {} runner {} \"$@\"\n",
+            serde_json::to_string(&info_path.display().to_string()).unwrap(),
+            quote(&self_exe),
+            quote(&f)
+        );
+        std::fs::write(&f, script).unwrap_or_else(|e| {
             eprintln!(
-                "mirvm: failed to write the fake binary {}: {e}",
+                "mirvm: failed to write the fake binary launcher {}: {e}",
+                f.display()
+            );
+            exit(1);
+        });
+        crate::os::fs::set_mode(&f, 0o755).unwrap_or_else(|e| {
+            eprintln!(
+                "mirvm: failed to set fake binary permissions {}: {e}",
                 f.display()
             );
             exit(1);

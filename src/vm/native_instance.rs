@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::CString;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, RwLock};
@@ -94,15 +93,15 @@ impl InitializerArgs {
     fn capture() -> Result<Self, String> {
         let argv_storage = std::env::args_os()
             .map(|value| {
-                CString::new(value.as_os_str().as_bytes())
+                CString::new(crate::os::fs::raw_bytes(value.as_os_str()))
                     .map_err(|_| "process argument contains NUL".to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
         let env_storage = std::env::vars_os()
             .map(|(key, value)| {
-                let mut bytes = key.as_os_str().as_bytes().to_vec();
+                let mut bytes = crate::os::fs::raw_bytes(key.as_os_str()).to_vec();
                 bytes.push(b'=');
-                bytes.extend_from_slice(value.as_os_str().as_bytes());
+                bytes.extend_from_slice(crate::os::fs::raw_bytes(value.as_os_str()));
                 CString::new(bytes).map_err(|_| "process environment contains NUL".to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
