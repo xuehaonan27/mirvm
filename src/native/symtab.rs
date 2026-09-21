@@ -66,10 +66,8 @@ impl Error {
 
 use std::collections::HashMap;
 
-use crate::obj::ar;
-use crate::obj::elf::{
-    self, SHN_RESERVED, SHN_UNDEF, SHT_DYNSYM, SHT_SYMTAB, STB_GLOBAL, STB_WEAK,
-};
+use super::ar;
+use super::elf::{self, SHN_RESERVED, SHN_UNDEF, SHT_DYNSYM, SHT_SYMTAB, STB_GLOBAL, STB_WEAK};
 
 /// One `.symtab`/`.dynsym` entry, resolved against its string table.
 ///

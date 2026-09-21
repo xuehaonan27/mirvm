@@ -43,15 +43,13 @@ mod arch; // arch layer (interp's x86 touch points go through crate::arch::)
 mod os; // os layer (engine touch points go through crate::os:: primitives)
 #[path = "../../../../../src/os_arch/mod.rs"]
 mod os_arch; // the one (os, arch) pair this build is for: kernel ABI as the CPU encodes it
-#[path = "../../../../../src/obj/mod.rs"]
-mod obj; // the object-file formats, a data format rather than a platform axis
 mod product_adapters; // stub for the one rustc-dependent leaf the engine still needs
 pub(crate) use product_adapters::lower;
 #[path = "../../../../../src/utils/mod.rs"]
 mod utils; // content hash, pure Rust (source-shared)
 #[path = "../../../../../src/diag/mod.rs"]
 mod diag; // the diagnostic vocabulary the engine emits through: std only, so it stays shareable
-mod native; // native layer: only symtab is pure Rust (see src/native.rs)
+mod native; // native layer: the symbol reader and the byte layouts are pure Rust (see native.rs)
 #[path = "../../../../../src/store/mod.rs"]
 mod store; // the family register the engine reads its scratch dirs from (pure Rust, source-shared)
 #[path = "../../../../../src/options.rs"]

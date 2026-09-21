@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, RwLock};
 
 use super::ir::{Module, native_entry_slot_name};
-use crate::obj::elf;
+use crate::native::elf;
 
 static NEXT_NATIVE_INSTANCE: AtomicU64 = AtomicU64::new(0);
 
