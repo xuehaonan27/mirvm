@@ -281,7 +281,11 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
 - **G2** `ACCEPTED`: corpus and real-project evidence are Git-ignored and not a continuous gate. The
   deferred harness set is suite inventory, object GC/retention, cross-host cache, NFS/object-store
   durability and a remote gate. CheckIDs are a bounded closure, extended when Cargo fingerprints or a
-  full sysroot Merkle becomes the divergence source.
+  full sysroot Merkle becomes the divergence source. One symptom to know before reading a run: the
+  `cargo-diff` rows whose materialized project directory is absent report FAIL rather than SKIP,
+  because they carry a `stem=` but no `needs=`, so they redden on a checkout-free host instead of
+  announcing that the evidence is missing. On the dev container that is `ecosystem`, `ffi_zlib`,
+  `ripgrep_regex` and `warning_return`.
 - **G3** `UNSCHEDULED`: jieba_cut and opencc are fully green but not wired into an automatic gate —
   jieba runs in 77–89s, close to the timeout, and opencc needs a `/tmp/opencc-local` prefix.
 - **G5** `UNSCHEDULED`: three post-A2 evaluation triggers plus the purity-ledger re-review:
