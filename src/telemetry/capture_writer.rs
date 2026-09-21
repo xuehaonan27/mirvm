@@ -303,15 +303,11 @@ fn pwrite_chunk(
 fn pwritev_all(fd: i32, iov: &mut [libc::iovec], offset: &mut i64) -> io::Result<()> {
     let mut first = 0;
     while first < iov.len() {
-        let count = iov.len() - first;
-        let written = unsafe { libc::pwritev(fd, iov[first..].as_ptr(), count as i32, *offset) };
-        if written < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(error);
-        }
+        let written = match crate::os::fs::write_vectored_at(fd, &iov[first..], *offset) {
+            Ok(written) => written,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
         if written == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::WriteZero,
@@ -321,7 +317,7 @@ fn pwritev_all(fd: i32, iov: &mut [libc::iovec], offset: &mut i64) -> io::Result
         *offset = offset
             .checked_add(written as i64)
             .ok_or_else(|| io::Error::other("capture file offset overflow"))?;
-        let mut remaining = written as usize;
+        let mut remaining = written;
         while remaining != 0 {
             if remaining >= iov[first].iov_len {
                 remaining -= iov[first].iov_len;
@@ -362,26 +358,12 @@ fn publish_without_replace(partial_path: &Path, final_path: &Path) -> io::Result
             "final capture path contains a NUL byte",
         )
     })?;
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            libc::AT_FDCWD,
-            partial.as_ptr(),
-            libc::AT_FDCWD,
-            final_path.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    crate::os::fs::rename_noreplace(&partial, &final_path)
 }
 
 pub(super) fn write_file_header(
     file: &mut File,
-    pid: libc::pid_t,
+    pid: i32,
     process_generation: u64,
 ) -> io::Result<i64> {
     let sequence = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);

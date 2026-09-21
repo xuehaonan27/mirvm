@@ -59,7 +59,7 @@ pub(crate) enum FinishStatus {
 pub(crate) struct CaptureSession {
     pub(super) core: &'static SessionCore,
     writer: Option<JoinHandle<io::Result<CaptureSummary>>>,
-    owner_pid: libc::pid_t,
+    owner_pid: i32,
     /// A `fork` child's own session outlives every handle in its process. Its
     /// `Drop` only stops the session and hands the bounded drain to the exit
     /// hook; the creator's `Drop` would otherwise look like the owner taking the
@@ -105,13 +105,13 @@ impl CaptureSession {
         Ok(Self {
             core,
             writer: Some(writer),
-            owner_pid: unsafe { libc::getpid() },
+            owner_pid: crate::os::process::getpid(),
             lingering: false,
         })
     }
 
     pub(crate) fn request_stop(&self) {
-        if unsafe { libc::getpid() } != self.owner_pid {
+        if crate::os::process::getpid() != self.owner_pid {
             return;
         }
         // No new child should expect a rebuild once the owner has stopped.
@@ -126,7 +126,7 @@ impl CaptureSession {
     }
 
     pub(crate) fn finish(&mut self, timeout: Duration) -> io::Result<FinishStatus> {
-        if unsafe { libc::getpid() } != self.owner_pid {
+        if crate::os::process::getpid() != self.owner_pid {
             return Ok(FinishStatus::TimedOut);
         }
         self.request_stop();
@@ -209,8 +209,8 @@ extern "C" fn drain_lingering_writer() {
 /// Hand a lingering session to the process exit hook.
 fn arm_lingering_writer(core: &'static SessionCore) {
     static HOOK: std::sync::Once = std::sync::Once::new();
-    HOOK.call_once(|| unsafe {
-        libc::atexit(drain_lingering_writer);
+    HOOK.call_once(|| {
+        crate::os::process::atexit_native(drain_lingering_writer);
     });
     LINGERING_WRITER.store(core as *const SessionCore as usize, Ordering::Release);
 }
@@ -274,11 +274,10 @@ fn rebuild_session_from_recipe() -> bool {
         return true;
     }
     let process_generation = claim_process_generation();
-    let output = recipe
-        .directory
-        .join(format!("events-{}-{process_generation}.mlog", unsafe {
-            libc::getpid()
-        }));
+    let output = recipe.directory.join(format!(
+        "events-{}-{process_generation}.mlog",
+        crate::os::process::getpid()
+    ));
     let attempt = || -> io::Result<()> {
         if std::fs::symlink_metadata(&output).is_ok() {
             return Err(io::Error::new(
@@ -303,7 +302,7 @@ fn rebuild_session_from_recipe() -> bool {
         Box::leak(Box::new(CaptureSession {
             core,
             writer: Some(writer),
-            owner_pid: unsafe { libc::getpid() },
+            owner_pid: crate::os::process::getpid(),
             lingering: true,
         }));
         arm_lingering_writer(core);
@@ -332,8 +331,8 @@ fn build_session_core(
     page_budget_bytes: usize,
     process_generation: u64,
 ) -> io::Result<(&'static SessionCore, CaptureWriterHandle)> {
-    let owner_pid = unsafe { libc::getpid() };
-    let owner_tid = unsafe { libc::gettid() as u32 };
+    let owner_pid = crate::os::process::getpid();
+    let owner_tid = crate::os::process::gettid() as u32;
     let offset = write_file_header(&mut file, owner_pid, process_generation)?;
     let core = Box::leak(Box::new(SessionCore {
         phase: AtomicU8::new(PHASE_ARMED),
@@ -546,12 +545,12 @@ unsafe fn run_libc_syscall(
     // A real rt_sigreturn site belongs to the kernel signal frame and may not
     // touch the ordinary per-pthread page. The raw-site implementation enforces
     // the same bypass before it reaches this libc-oriented helper.
-    if nr == libc::SYS_rt_sigreturn {
+    if nr == crate::os::process::SYS_RT_SIGRETURN {
         return (crate::os::process::syscall(nr, args), producer);
     }
     if producer.is_null() {
         let result = crate::os::process::syscall(nr, args);
-        if nr == libc::SYS_fork && result == 0 {
+        if nr == crate::os::process::SYS_FORK && result == 0 {
             after_fork_child();
         }
         return (result, producer);
@@ -566,12 +565,12 @@ unsafe fn run_libc_syscall(
             },
         }
     };
-    if nr == libc::SYS_exit || nr == libc::SYS_exit_group {
+    if nr == crate::os::process::SYS_EXIT || nr == crate::os::process::SYS_EXIT_GROUP {
         unsafe { prepare_nonreturning_syscall(&*producer) };
         return (crate::os::process::syscall(nr, args), producer);
     }
     let result = crate::os::process::syscall(nr, args);
-    if nr == libc::SYS_fork && result == 0 {
+    if nr == crate::os::process::SYS_FORK && result == 0 {
         after_fork_child();
         return (result, producer);
     }
@@ -647,7 +646,7 @@ pub(crate) fn retire_current_thread() {
 /// and the interpreter's HostFork builtin both end up here, so capture coverage
 /// cannot depend on which spelling the guest used.
 pub(crate) fn fork_child_guard(nr: i64, result: i64) {
-    if nr == libc::SYS_fork && result == 0 {
+    if nr == crate::os::process::SYS_FORK && result == 0 {
         after_fork_child();
     }
 }
@@ -679,7 +678,7 @@ fn producer_for_session(core: *mut SessionCore, engine_id: u64) -> *mut Producer
         return cached;
     }
 
-    let errno_ptr = unsafe { libc::__errno_location() };
+    let errno_ptr = crate::os::process::errno_location();
     let saved_errno = unsafe { *errno_ptr };
     let core_ref = unsafe { &*core };
     let pages = core_ref.page_pool.take_starter();
@@ -687,7 +686,7 @@ fn producer_for_session(core: *mut SessionCore, engine_id: u64) -> *mut Producer
     let thread_generation = core_ref
         .next_thread_generation
         .fetch_add(1, Ordering::Relaxed);
-    let tid = unsafe { libc::gettid() as u32 };
+    let tid = crate::os::process::gettid() as u32;
     let producer = Box::into_raw(Box::new(Producer::new(
         core,
         pages,

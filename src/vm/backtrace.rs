@@ -206,13 +206,12 @@ pub fn materialize_symbols(module: &mut Module) -> Result<(), String> {
         return Ok(());
     }
     let (bytes, text_off) = build_elf(&module.function_names)?;
-    let fd = unsafe { libc::memfd_create(c"mirvm-guest-symbols".as_ptr(), libc::MFD_CLOEXEC) };
-    if fd < 0 {
+    let Some(fd) = crate::os::mem::anonymous_file(c"mirvm-guest-symbols") else {
         return Err(format!(
             "memfd_create failed: {}",
             std::io::Error::last_os_error()
         ));
-    }
+    };
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
     file.write_all(&bytes)
         .map_err(|error| format!("writing in-memory ELF failed: {error}"))?;

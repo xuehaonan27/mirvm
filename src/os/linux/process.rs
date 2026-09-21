@@ -9,6 +9,25 @@
 //! do so later.
 //! Address values are u64 encoded (leaf type discipline).
 
+/// This process's id.
+pub fn getpid() -> i32 {
+    unsafe { libc::getpid() }
+}
+
+/// The calling thread's id as the kernel numbers it, which is not the C library's `pthread_t`.
+pub fn gettid() -> i32 {
+    unsafe { libc::gettid() }
+}
+
+/// The syscall numbers the capture path recognises by number rather than by effect.
+///
+/// A number is the kernel's, so this is where they are named; a caller that must branch before the
+/// syscall can look at the effect instead.
+pub const SYS_FORK: i64 = libc::SYS_fork;
+pub const SYS_EXIT: i64 = libc::SYS_exit;
+pub const SYS_EXIT_GROUP: i64 = libc::SYS_exit_group;
+pub const SYS_RT_SIGRETURN: i64 = libc::SYS_rt_sigreturn;
+
 /// Safe wrapper of `getenv(3)`.
 /// `name_addr`: guest side NUL-terminated string's  true address.
 /// Returns true address, or 0 on failure.
@@ -41,15 +60,23 @@ pub fn raise(signum: i32) -> i32 {
     unsafe { libc::raise(signum) }
 }
 
-/// Read/write the calling pthread's libc `errno`. Callers must read it
-/// immediately after the failing libc operation, before formatting or any
-/// other library call can overwrite it.
+/// The calling pthread's `errno` slot.
+///
+/// The pointer is the primitive, not only the value: a caller that must run syscalls of its own
+/// without the guest observing a changed `errno` hands the slot to the code that saves and
+/// restores around them, and such a caller cannot re-fetch it later from another thread.
+pub fn errno_location() -> *mut i32 {
+    unsafe { libc::__errno_location() }
+}
+
+/// Read the calling pthread's libc `errno`. Callers must read it immediately after the failing
+/// libc operation, before formatting or any other library call can overwrite it.
 pub fn errno() -> i32 {
-    unsafe { *libc::__errno_location() }
+    unsafe { *errno_location() }
 }
 
 pub fn set_errno(value: i32) {
-    unsafe { *libc::__errno_location() = value };
+    unsafe { *errno_location() = value };
 }
 
 /// Terminate this process now, without running a Rust destructor, an `atexit` handler or a stdio

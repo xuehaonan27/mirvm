@@ -462,19 +462,5 @@ fn publish_without_replace(partial_path: &Path, final_path: &Path) -> io::Result
             "final diagnostics path contains a NUL byte",
         )
     })?;
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            libc::AT_FDCWD,
-            partial.as_ptr(),
-            libc::AT_FDCWD,
-            final_path.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    crate::os::fs::rename_noreplace(&partial, &final_path)
 }
