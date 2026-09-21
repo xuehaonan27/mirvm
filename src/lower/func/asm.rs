@@ -2,6 +2,8 @@
 //! offsets; register allocation and GAS generation are delegated to
 //! crate::lower::asm (isomorphic to cg_clif). Sole entry = term.rs's InlineAsm arm.
 
+use crate::lower::Error;
+
 use super::*;
 
 impl<'tcx> LowerCx<'tcx, '_> {
@@ -18,15 +20,15 @@ impl<'tcx> LowerCx<'tcx, '_> {
         options: rustc_ast::ast::InlineAsmOptions,
         targets: &[mir::BasicBlock],
         unwind: mir::UnwindAction,
-    ) -> Result<(Vec<Stmt>, Terminator), String> {
+    ) -> Result<(Vec<Stmt>, Terminator), Error> {
         use rustc_ast::ast::InlineAsmOptions as Opt;
         use rustc_target::asm::InlineAsmArch;
 
         if matches!(asm_macro, mir::InlineAsmMacro::NakedAsm) {
-            return Err("naked_asm!".into());
+            return Err(Error::internal("naked_asm!"));
         }
         if options.contains(Opt::MAY_UNWIND) {
-            return Err("inline asm may_unwind".into());
+            return Err(Error::internal("inline asm may_unwind"));
         }
         // noreturn has two faces. ud2/int3 terminate: fully supported (the asm body is
         // machine code, so the process dies on a host signal exactly as native does).
@@ -42,28 +44,30 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 .iter()
                 .any(|op| !matches!(op, mir::InlineAsmOperand::In { .. }))
         {
-            return Err(
-                "inline asm noreturn with a non-In operand (rustc invariant broken)".into(),
-            );
+            return Err(Error::internal(
+                "inline asm noreturn with a non-In operand (rustc invariant broken)",
+            ));
         }
         if options.contains(Opt::ATT_SYNTAX) {
             // Guard against silently wrong values: the wrapper forces intel syntax, so an
             // att-syntax template would be misassembled.
-            return Err("inline asm att_syntax".into());
+            return Err(Error::internal("inline asm att_syntax"));
         }
         if !matches!(
             unwind,
             mir::UnwindAction::Unreachable | mir::UnwindAction::Continue
         ) {
-            return Err("inline asm with cleanup unwind".into());
+            return Err(Error::internal("inline asm with cleanup unwind"));
         }
         let arch = self
             .tcx
             .sess
             .asm_arch
-            .ok_or("target does not support asm")?;
+            .ok_or(Error::unsupported("target does not support asm"))?;
         if !matches!(arch, InlineAsmArch::X86_64) {
-            return Err(format!("inline asm is not x86_64 (arch={arch:?})"));
+            return Err(Error::internal(format!(
+                "inline asm is not x86_64 (arch={arch:?})"
+            )));
         }
 
         // MIR operands -> wrapper constraints (super::asm; only the reg constraint and role are needed, not values/destinations).
@@ -95,7 +99,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 mir::InlineAsmOperand::SymFn { value } => {
                     let rustc_middle::ty::TyKind::FnDef(def_id, args) = value.const_.ty().kind()
                     else {
-                        return Err("inline asm sym fn is not a FnDef".into());
+                        return Err(Error::internal("inline asm sym fn is not a FnDef"));
                     };
                     let callee = Instance::expect_resolve(
                         self.tcx,
@@ -118,7 +122,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     });
                 }
                 mir::InlineAsmOperand::Label { .. } => {
-                    return Err("inline asm label (asm goto)".into());
+                    return Err(Error::internal("inline asm label (asm goto)"));
                 }
             }
         }
@@ -136,7 +140,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         let mut outs: Vec<(u32, ir::AsmIoDst)> = Vec::new();
         for (i, op) in operands.iter().enumerate() {
             let val_of =
-                |this: &mut Self, value: &mir::Operand<'tcx>| -> Result<ir::AsmIoVal, String> {
+                |this: &mut Self, value: &mir::Operand<'tcx>| -> Result<ir::AsmIoVal, Error> {
                     let ty = this.op_ty(value)?;
                     let layout = frame::layout_of(this.tcx, this.typing_env, ty)?;
                     let size = layout.layout.size().bytes() as u32;
@@ -150,12 +154,14 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             LoweredOp::Bytes { place, .. } => {
                                 Ok(ir::AsmIoVal::VecBytes(place.expr(), size))
                             }
-                            _ => Err(format!("asm vector input is not a place (ty={ty})")),
+                            _ => Err(Error::internal(format!(
+                                "asm vector input is not a place (ty={ty})"
+                            ))),
                         }
                     }
                 };
             let dst_of =
-                |this: &mut Self, place: &mir::Place<'tcx>| -> Result<ir::AsmIoDst, String> {
+                |this: &mut Self, place: &mir::Place<'tcx>| -> Result<ir::AsmIoDst, Error> {
                     let dp = this.resolve_place(place)?;
                     let layout = frame::layout_of(this.tcx, this.typing_env, dp.ty)?;
                     let size = layout.layout.size().bytes() as u32;
@@ -213,7 +219,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             targets
                 .first()
                 .map(|b| b.as_u32())
-                .ok_or("inline asm has no fallthrough target")?
+                .ok_or(Error::internal("inline asm has no fallthrough target"))?
         };
         Ok((
             vec![],
@@ -228,15 +234,15 @@ impl<'tcx> LowerCx<'tcx, '_> {
     }
 
     /// Inline asm const operand -> literal text (isomorphic to cg_ssa asm_const_to_str).
-    fn asm_const_text(&self, value: &mir::ConstOperand<'tcx>) -> Result<String, String> {
+    fn asm_const_text(&self, value: &mir::ConstOperand<'tcx>) -> Result<String, Error> {
         let cv = value
             .const_
             .eval(self.tcx, self.typing_env, value.span)
-            .map_err(|e| format!("inline asm const evaluation failed: {e:?}"))?;
+            .map_err(|e| Error::internal(format!("inline asm const evaluation failed: {e:?}")))?;
         let layout = self
             .tcx
             .layout_of(self.typing_env.as_query_input(value.const_.ty()))
-            .map_err(|e| format!("inline asm const layout: {e:?}"))?;
+            .map_err(|e| Error::internal(format!("inline asm const layout: {e:?}")))?;
         Ok(rustc_codegen_ssa::common::asm_const_to_str(
             self.tcx, value.span, cv, layout,
         ))

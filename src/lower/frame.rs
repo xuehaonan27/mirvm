@@ -5,6 +5,8 @@
 //! `ValKind` classifies a value for the call ABI and for place evaluation:
 //! Zst / scalar / scalar pair / aggregate.
 
+use crate::lower::Error;
+
 use rustc_abi::{BackendRepr, HasDataLayout};
 use rustc_middle::mir::Body;
 use rustc_middle::ty::{Ty, TyCtxt, TypingEnv};
@@ -57,9 +59,9 @@ pub fn layout_of<'tcx>(
     tcx: TyCtxt<'tcx>,
     typing_env: TypingEnv<'tcx>,
     ty: Ty<'tcx>,
-) -> Result<rustc_middle::ty::layout::TyAndLayout<'tcx>, String> {
+) -> Result<rustc_middle::ty::layout::TyAndLayout<'tcx>, Error> {
     tcx.layout_of(typing_env.as_query_input(ty))
-        .map_err(|e| format!("layout failed: {e}"))
+        .map_err(|e| Error::internal(format!("layout failed: {e}")))
 }
 
 /// Derive the value class from a layout. The scalar-pair half offset uses the same
@@ -114,7 +116,7 @@ pub fn freeze<'tcx>(
     tcx: TyCtxt<'tcx>,
     typing_env: TypingEnv<'tcx>,
     body: &Body<'tcx>,
-) -> Result<FrameLayout<'tcx>, String> {
+) -> Result<FrameLayout<'tcx>, Error> {
     let mut locals = Vec::with_capacity(body.local_decls.len());
     let mut off = 0u32;
     let mut max_align = 1u32;

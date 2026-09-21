@@ -2,6 +2,8 @@
 //! ffi_kind_of/scalar_ffi_kind/ffi_agg_of/push_agg_field/canonical_link_name
 //! (extern "C" family fn-ptr types → frozen ForeignSig; criteria for non-derivable = None).
 
+use crate::lower::Error;
+
 use super::*;
 
 /// Unwind bit of the C-family ABI. `None` means not a C/System ABI directly callable by libffi.
@@ -52,18 +54,20 @@ pub(crate) fn ffi_kind_of<'tcx>(
     tcx: TyCtxt<'tcx>,
     env: TypingEnv<'tcx>,
     ty: rustc_middle::ty::Ty<'tcx>,
-) -> Result<ir::FfiKind, String> {
+) -> Result<ir::FfiKind, Error> {
     use rustc_abi::BackendRepr;
     let layout = tcx
         .layout_of(env.as_query_input(ty))
-        .map_err(|e| format!("layout failed: {e}"))?;
+        .map_err(|e| Error::internal(format!("layout failed: {e}")))?;
     if layout.is_zst() {
         return Ok(ir::FfiKind::Void);
     }
     if let BackendRepr::Scalar(s) = layout.backend_repr {
         return match scalar_ffi_kind(s.primitive()) {
             Ok(k) => Ok(k),
-            Err(other) => Err(format!("scalar {other:?} not supported")),
+            Err(other) => Err(Error::unsupported(format!(
+                "scalar {other:?} not supported"
+            ))),
         };
     }
     Ok(ir::FfiKind::Agg(ffi_agg_of(tcx, layout)?))
@@ -94,14 +98,14 @@ fn scalar_ffi_kind(p: rustc_abi::Primitive) -> Result<ir::FfiKind, rustc_abi::Pr
 fn ffi_agg_of<'tcx>(
     tcx: TyCtxt<'tcx>,
     layout: rustc_middle::ty::layout::TyAndLayout<'tcx>,
-) -> Result<ir::FfiAgg, String> {
+) -> Result<ir::FfiAgg, Error> {
     use rustc_abi::BackendRepr;
     let size = layout.layout.size().bytes() as u32;
     let align = layout.layout.align().abi.bytes() as u32;
     if align > 8 {
-        return Err(format!(
+        return Err(Error::unsupported(format!(
             "by-value aggregate align={align} > 8 (C1 boundary)"
-        ));
+        )));
     }
     let mut fields = Vec::new();
     // ScalarPair ({ptr,len} / two-scalar-field shape): both leaves emitted directly by primitive
@@ -114,14 +118,14 @@ fn ffi_agg_of<'tcx>(
             off: ao,
             leaf: ir::FfiLeaf::Scalar(
                 scalar_ffi_kind(a.primitive())
-                    .map_err(|p| format!("scalar {p:?} not supported"))?,
+                    .map_err(|p| Error::unsupported(format!("scalar {p:?} not supported")))?,
             ),
         });
         fields.push(ir::FfiField {
             off: bo,
             leaf: ir::FfiLeaf::Scalar(
                 scalar_ffi_kind(b.primitive())
-                    .map_err(|p| format!("scalar {p:?} not supported"))?,
+                    .map_err(|p| Error::unsupported(format!("scalar {p:?} not supported")))?,
             ),
         });
         let agg = ir::FfiAgg {
@@ -135,29 +139,28 @@ fn ffi_agg_of<'tcx>(
     match layout.backend_repr {
         BackendRepr::Memory { .. } => {}
         _ => {
-            return Err(format!(
+            return Err(Error::unsupported(format!(
                 "by-value aggregate layout shape {:?} not supported (C1 boundary; SIMD separate axis)",
                 layout.backend_repr
-            ));
+            )));
         }
     }
     if layout.ty.is_union() {
-        return Err(
-            "by-value aggregate union (C1 boundary; SysV union classification separate rule)"
-                .into(),
-        );
+        return Err(Error::unsupported(
+            "by-value aggregate union (C1 boundary; SysV union classification separate rule)",
+        ));
     }
     // expand field by field (Memory-layout Adt/tuple/array; slice fat already hit in ScalarPair branch above)
     let env = rustc_middle::ty::TypingEnv::fully_monomorphized();
-    let layout_of_ty = |t: rustc_middle::ty::Ty<'tcx>| -> Result<_, String> {
+    let layout_of_ty = |t: rustc_middle::ty::Ty<'tcx>| -> Result<_, Error> {
         tcx.layout_of(env.as_query_input(t))
-            .map_err(|e| format!("by-value aggregate field layout: {e}"))
+            .map_err(|e| Error::internal(format!("by-value aggregate field layout: {e}")))
     };
     match layout.ty.kind() {
         rustc_middle::ty::TyKind::Array(elem_ty, n) => {
-            let n = n
-                .try_to_target_usize(tcx)
-                .ok_or("by-value aggregate array length not evaluable")?;
+            let n = n.try_to_target_usize(tcx).ok_or(Error::internal(
+                "by-value aggregate array length not evaluable",
+            ))?;
             let elem_layout = layout_of_ty(*elem_ty)?;
             let stride = elem_layout.layout.size().bytes() as u32;
             for i in 0..n {
@@ -173,10 +176,10 @@ fn ffi_agg_of<'tcx>(
         }
         rustc_middle::ty::TyKind::Adt(def, args) => {
             if !def.is_struct() {
-                return Err(format!(
+                return Err(Error::unsupported(format!(
                     "by-value aggregate {:?} (C1 boundary; Adt other than single-variant struct)",
                     def.adt_kind()
-                ));
+                )));
             }
             let var = def.variant(rustc_abi::VariantIdx::ZERO);
             for (i, f) in var.fields.iter().enumerate() {
@@ -190,9 +193,9 @@ fn ffi_agg_of<'tcx>(
             }
         }
         other => {
-            return Err(format!(
+            return Err(Error::unsupported(format!(
                 "by-value aggregate type shape {other:?} not supported"
-            ));
+            )));
         }
     }
     let agg = ir::FfiAgg {
@@ -210,13 +213,14 @@ fn push_agg_field<'tcx>(
     fields: &mut Vec<ir::FfiField>,
     off: u32,
     fl: rustc_middle::ty::layout::TyAndLayout<'tcx>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     if fl.layout.is_zst() {
         return Ok(());
     }
     let leaf = if let rustc_abi::BackendRepr::Scalar(s) = fl.backend_repr {
         ir::FfiLeaf::Scalar(
-            scalar_ffi_kind(s.primitive()).map_err(|p| format!("scalar {p:?} not supported"))?,
+            scalar_ffi_kind(s.primitive())
+                .map_err(|p| Error::unsupported(format!("scalar {p:?} not supported")))?,
         )
     } else {
         ir::FfiLeaf::Agg(ffi_agg_of(tcx, fl)?)
@@ -237,7 +241,7 @@ pub(crate) fn canonical_link_name(name: &str) -> &str {
 /// frozen off/size/align are not consumed; under non-natural shapes like packed/align(N), libffi
 /// computed layout ≠ real layout = silent ABI mis-call. Until full-padding expression is implemented, freeze-time
 /// loudly reject inexpressible shapes (recursive field-by-field offset comparison + tail-padding alignment recheck).
-fn validate_agg_natural(agg: &ir::FfiAgg) -> Result<(), String> {
+fn validate_agg_natural(agg: &ir::FfiAgg) -> Result<(), Error> {
     fn leaf_layout(l: &ir::FfiLeaf) -> Option<(u32, u32)> {
         match l {
             ir::FfiLeaf::Scalar(k) => {
@@ -268,9 +272,9 @@ fn validate_agg_natural(agg: &ir::FfiAgg) -> Result<(), String> {
         Some((off.next_multiple_of(mal), mal))
     }
     if natural_layout(agg) != Some((agg.size, agg.align)) {
-        return Err(
-            "by-value aggregate non-natural layout (packed/align(N) — inexpressible in libffi type system, F-06 boundary)".into(),
-        );
+        return Err(Error::unsupported(
+            "by-value aggregate non-natural layout (packed/align(N) — inexpressible in libffi type system, F-06 boundary)",
+        ));
     }
     Ok(())
 }

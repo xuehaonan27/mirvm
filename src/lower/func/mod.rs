@@ -9,6 +9,8 @@
 //! into four classes (Zst/Scalar/Pair/Bytes); calling convention v2 uses 2 slots for a
 //! pair and indirect/sret for aggregates.
 
+use crate::lower::Error;
+
 use rustc_abi::{HasDataLayout, TagEncoding, VariantIdx, Variants};
 use rustc_middle::mir::{self, Body};
 use rustc_middle::ty::{self, EarlyBinder, Instance, InstanceKind, Ty, TyCtxt, TypingEnv};
@@ -224,16 +226,16 @@ impl<'tcx> LowerCx<'tcx, '_> {
     fn layout_of(
         &self,
         ty: Ty<'tcx>,
-    ) -> Result<rustc_middle::ty::layout::TyAndLayout<'tcx>, String> {
+    ) -> Result<rustc_middle::ty::layout::TyAndLayout<'tcx>, Error> {
         frame::layout_of(self.tcx, self.typing_env, ty)
     }
 
-    fn classify(&self, ty: Ty<'tcx>) -> Result<ValKind, String> {
+    fn classify(&self, ty: Ty<'tcx>) -> Result<ValKind, Error> {
         Ok(frame::classify(self.tcx, &self.layout_of(ty)?))
     }
 
     /// Place compilation: projection chain -> address expression (Field/Downcast fold to offsets, Deref/Index stay as steps).
-    fn resolve_place(&self, place: &mir::Place<'tcx>) -> Result<PlaceLow<'tcx>, String> {
+    fn resolve_place(&self, place: &mir::Place<'tcx>) -> Result<PlaceLow<'tcx>, Error> {
         let info = &self.frame.locals[place.local.as_usize()];
         let mut p = PlaceLow {
             base: PlaceBase::Local(info.off),
@@ -266,7 +268,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     };
                     if needs_vtable_align {
                         let meta = p.meta.clone().ok_or_else(|| {
-                            format!("dyn tail field has no vtable meta (parent={parent_ty}, field={fty})")
+                            Error::internal(format!("dyn tail field has no vtable meta (parent={parent_ty}, field={fty})"))
                         })?;
                         let packed = match parent_ty.kind() {
                             ty::Adt(def, _) => def.repr().pack.map(|align| align.bytes()),
@@ -286,9 +288,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     variant = Some(v);
                 }
                 mir::ProjectionElem::Deref => {
-                    let pointee =
-                        p.ty.builtin_deref(true)
-                            .ok_or_else(|| format!("Deref of a non-pointer (ty={})", p.ty))?;
+                    let pointee = p.ty.builtin_deref(true).ok_or_else(|| {
+                        Error::internal(format!("Deref of a non-pointer (ty={})", p.ty))
+                    })?;
                     // Entering an unsized pointee: record where the fat pointer meta is read (body + 8)
                     let pointee_layout = self.layout_of(pointee);
                     let unsized_pointee = matches!(&pointee_layout, Ok(l) if l.is_unsized());
@@ -310,12 +312,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     p.ty = pointee;
                 }
                 mir::ProjectionElem::Index(idx_local) => {
-                    let elem_ty = elem_of(p.ty)
-                        .ok_or_else(|| format!("Index of a non-sequence (ty={})", p.ty))?;
+                    let elem_ty = elem_of(p.ty).ok_or_else(|| {
+                        Error::internal(format!("Index of a non-sequence (ty={})", p.ty))
+                    })?;
                     let stride = self.layout_of(elem_ty)?.size.bytes();
                     let idx_info = &self.frame.locals[idx_local.as_usize()];
                     let Some(w) = idx_info.kind.scalar() else {
-                        return Err("Index subscript is not a scalar".into());
+                        return Err(Error::internal("Index subscript is not a scalar"));
                     };
                     p.steps.push(PlaceStep::IndexScaled {
                         idx: Slot {
@@ -332,22 +335,23 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     min_length: _,
                     from_end,
                 } => {
-                    let elem_ty = elem_of(p.ty)
-                        .ok_or_else(|| format!("ConstantIndex of a non-sequence (ty={})", p.ty))?;
+                    let elem_ty = elem_of(p.ty).ok_or_else(|| {
+                        Error::internal(format!("ConstantIndex of a non-sequence (ty={})", p.ty))
+                    })?;
                     let stride = self.layout_of(elem_ty)?.size.bytes();
                     if from_end {
                         if let ty::Array(_, n) = p.ty.kind() {
                             // Array length is known: fold to a constant
                             let n = n
                                 .try_to_target_usize(self.tcx)
-                                .ok_or("array length is not constant")?;
+                                .ok_or(Error::internal("array length is not constant"))?;
                             p.push_offset(((n - offset) * stride) as i64);
                         } else {
                             // slice: addr += len x stride - offset x stride (len = the meta slot)
                             let Some(Operand::Slot(ms)) = p.meta else {
-                                return Err(
-                                    "ConstantIndex from_end: meta is not a frame slot".into()
-                                );
+                                return Err(Error::internal(
+                                    "ConstantIndex from_end: meta is not a frame slot",
+                                ));
                             };
                             p.steps.push(PlaceStep::IndexScaled { idx: ms, stride });
                             p.push_offset(-((offset * stride) as i64));
@@ -360,14 +364,15 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
                 mir::ProjectionElem::Subslice { from, to, from_end } => {
                     // `rest @ ..` slice pattern
-                    let elem_ty = elem_of(p.ty)
-                        .ok_or_else(|| format!("Subslice of a non-sequence (ty={})", p.ty))?;
+                    let elem_ty = elem_of(p.ty).ok_or_else(|| {
+                        Error::internal(format!("Subslice of a non-sequence (ty={})", p.ty))
+                    })?;
                     let stride = self.layout_of(elem_ty)?.size.bytes();
                     if let ty::Array(_, n) = p.ty.kind() {
                         // Array: fold to a constant -- [from..to] / [from..N-to] still yields a fixed-length array
                         let n = n
                             .try_to_target_usize(self.tcx)
-                            .ok_or("array length is not constant")?;
+                            .ok_or(Error::internal("array length is not constant"))?;
                         let new_len = if from_end { n - from - to } else { to - from };
                         p.push_offset((from * stride) as i64);
                         p.ty = Ty::new_array(self.tcx, elem_ty, new_len);
@@ -376,12 +381,15 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         // slice (from_end is always true; to counts from the tail): addr += from x stride;
                         // len' = len − (from + to) (subtract a constant from the meta value, Operand::SubImm)
                         if !from_end {
-                            return Err(
-                                "Subslice of a slice with from_end=false (MIR invariant)".into()
-                            );
+                            return Err(Error::internal(
+                                "Subslice of a slice with from_end=false (MIR invariant)",
+                            ));
                         }
                         let m = p.meta.clone().ok_or_else(|| {
-                            format!("Subslice of a slice has no meta (ty={})", p.ty)
+                            Error::internal(format!(
+                                "Subslice of a slice has no meta (ty={})",
+                                p.ty
+                            ))
                         })?;
                         p.push_offset((from * stride) as i64);
                         p.meta = Some(Operand::SubImm {
@@ -395,7 +403,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 }
                 // All current variants are covered; guard against new projections in a future nightly (Trap-stub protocol)
                 #[allow(unreachable_patterns)]
-                other => return Err(format!("projection {other:?}")),
+                other => return Err(Error::internal(format!("projection {other:?}"))),
             }
         }
         // A trailing Downcast (with no following Field) leaves the place type as the enum
@@ -404,16 +412,16 @@ impl<'tcx> LowerCx<'tcx, '_> {
     }
 
     /// Place -> scalar slot (the caller has established a scalar context).
-    fn place_scalar(&self, place: &mir::Place<'tcx>) -> Result<(PlaceLow<'tcx>, Width), String> {
+    fn place_scalar(&self, place: &mir::Place<'tcx>) -> Result<(PlaceLow<'tcx>, Width), Error> {
         let p = self.resolve_place(place)?;
         let ValKind::Scalar(w) = self.classify(p.ty)? else {
-            return Err(format!("non-scalar place (ty={})", p.ty));
+            return Err(Error::internal(format!("non-scalar place (ty={})", p.ty)));
         };
         Ok((p, w))
     }
 
     /// Generalized operand (four-way value classification).
-    fn lower_operand(&mut self, op: &mir::Operand<'tcx>) -> Result<LoweredOp<'tcx>, String> {
+    fn lower_operand(&mut self, op: &mir::Operand<'tcx>) -> Result<LoweredOp<'tcx>, Error> {
         match op {
             mir::Operand::Copy(pl) | mir::Operand::Move(pl) => {
                 let p = self.resolve_place(pl)?;
@@ -436,7 +444,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 let val = c
                     .const_
                     .eval(self.tcx, self.typing_env, c.span)
-                    .map_err(|e| format!("constant evaluation failed: {e:?}"))?;
+                    .map_err(|e| Error::internal(format!("constant evaluation failed: {e:?}")))?;
                 self.lower_const_value(val, ty, kind)
             }
             // Session flag query (UbChecks etc.): folded to a bool immediate at lowering time
@@ -461,7 +469,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         val: mir::ConstValue,
         ty: Ty<'tcx>,
         kind: ValKind,
-    ) -> Result<LoweredOp<'tcx>, String> {
+    ) -> Result<LoweredOp<'tcx>, Error> {
         use mir::interpret::Scalar as S;
         Ok(match val {
             mir::ConstValue::Scalar(S::Int(si)) => {
@@ -486,7 +494,11 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             size: 16,
                         }
                     }
-                    _ => return Err(format!("integer constant class drift (ty={ty})")),
+                    _ => {
+                        return Err(Error::internal(format!(
+                            "integer constant class drift (ty={ty})"
+                        )));
+                    }
                 }
             }
             mir::ConstValue::Scalar(S::Ptr(ptr, _)) => {
@@ -573,22 +585,27 @@ impl<'tcx> LowerCx<'tcx, '_> {
     /// Materialize a temporary place at the end of the frame, aligned to the guest
     /// layout. A constant / non-place operand of a volatile store is staged here as a
     /// full bit pattern so the executor can perform an opaque byte volatile write without interpreting padding as an integer.
-    fn scratch_place(&mut self, ty: Ty<'tcx>) -> Result<PlaceLow<'tcx>, String> {
+    fn scratch_place(&mut self, ty: Ty<'tcx>) -> Result<PlaceLow<'tcx>, Error> {
         let layout = self.layout_of(ty)?;
-        let size = u32::try_from(layout.size.bytes())
-            .map_err(|_| format!("temporary value {ty} size exceeds a u32 frame offset"))?;
+        let size = u32::try_from(layout.size.bytes()).map_err(|_| {
+            Error::internal(format!(
+                "temporary value {ty} size exceeds a u32 frame offset"
+            ))
+        })?;
         let align = u32::try_from(layout.align.abi.bytes())
-            .map_err(|_| format!("temporary value {ty} alignment exceeds u32"))?
+            .map_err(|_| Error::internal(format!("temporary value {ty} alignment exceeds u32")))?
             .max(1);
         let off = self
             .frame
             .size
             .checked_add(align - 1)
             .map(|n| n & !(align - 1))
-            .ok_or_else(|| format!("temporary value {ty} frame alignment overflow"))?;
+            .ok_or_else(|| {
+                Error::internal(format!("temporary value {ty} frame alignment overflow"))
+            })?;
         self.frame.size = off
             .checked_add(size)
-            .ok_or_else(|| format!("temporary value {ty} frame size overflow"))?;
+            .ok_or_else(|| Error::internal(format!("temporary value {ty} frame size overflow")))?;
         self.frame.align = self.frame.align.max(align);
         Ok(PlaceLow {
             base: PlaceBase::Local(off),
@@ -600,25 +617,25 @@ impl<'tcx> LowerCx<'tcx, '_> {
 
     /// Scalar operand (scalar context; any other class is a context error diagnostic).
     #[track_caller]
-    fn lower_operand_scalar(&mut self, op: &mir::Operand<'tcx>) -> Result<Operand, String> {
+    fn lower_operand_scalar(&mut self, op: &mir::Operand<'tcx>) -> Result<Operand, Error> {
         let loc = std::panic::Location::caller();
         match self.lower_operand(op)? {
             LoweredOp::Scalar(o) => Ok(o),
-            LoweredOp::Zst => Err("unexpected ZST operand".into()),
-            LoweredOp::Pair(..) => Err(format!(
+            LoweredOp::Zst => Err(Error::internal("unexpected ZST operand")),
+            LoweredOp::Pair(..) => Err(Error::internal(format!(
                 "non-scalar operand (pair, ty={}, @{}:{})",
                 self.op_ty_str(op),
                 loc.file(),
                 loc.line()
-            )),
-            LoweredOp::Bytes { .. } => Err(format!(
+            ))),
+            LoweredOp::Bytes { .. } => Err(Error::internal(format!(
                 "non-scalar operand (aggregate, ty={})",
                 self.op_ty_str(op)
-            )),
+            ))),
         }
     }
 
-    fn op_ty(&self, op: &mir::Operand<'tcx>) -> Result<Ty<'tcx>, String> {
+    fn op_ty(&self, op: &mir::Operand<'tcx>) -> Result<Ty<'tcx>, Error> {
         Ok(match op {
             mir::Operand::Copy(p) | mir::Operand::Move(p) => self.resolve_place(p)?.ty,
             mir::Operand::Constant(c) => c.const_.ty(),
@@ -634,10 +651,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
 
     /// span -> &'static Location constant (materialized into the frozen region), shared
     /// by Assert expansion, track_caller argument synthesis and the caller_location intrinsic.
-    fn caller_location_imm(&mut self, span: rustc_span::Span) -> Result<Operand, String> {
+    fn caller_location_imm(&mut self, span: rustc_span::Span) -> Result<Operand, Error> {
         let cv = self.tcx.span_as_caller_location(span);
         let mir::ConstValue::Scalar(mir::interpret::Scalar::Ptr(ptr, _)) = cv else {
-            return Err("caller_location constant has an unexpected shape".into());
+            return Err(Error::internal(
+                "caller_location constant has an unexpected shape",
+            ));
         };
         let (prov, off) = ptr.prov_and_relative_offset();
         let base = self.linker.ensure_alloc(prov.alloc_id())?;
@@ -651,7 +670,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         &mut self,
         callee: &Instance<'tcx>,
         span: rustc_span::Span,
-    ) -> Result<Option<Operand>, String> {
+    ) -> Result<Option<Operand>, Error> {
         if !callee.def.requires_caller_location(self.tcx) {
             return Ok(None);
         }
@@ -665,10 +684,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
     }
 
     /// 128-bit operand -> place expression (Bytes channel; scalar constants are materialized).
-    fn wide_place(&mut self, op: &mir::Operand<'tcx>) -> Result<PlaceExpr, String> {
+    fn wide_place(&mut self, op: &mir::Operand<'tcx>) -> Result<PlaceExpr, Error> {
         match self.lower_operand(op)? {
             LoweredOp::Bytes { place, .. } => Ok(place.expr()),
-            _ => Err("128-bit operand is not a place".into()),
+            _ => Err(Error::internal("128-bit operand is not a place")),
         }
     }
 
@@ -690,7 +709,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         b: &mir::Operand<'tcx>,
         dst_p: &PlaceLow<'tcx>,
         with_overflow: bool,
-    ) -> Result<Vec<Stmt>, String> {
+    ) -> Result<Vec<Stmt>, Error> {
         use ir::Bin128Rhs;
         let pa = self.wide_place(a)?;
         let b_ty = self.op_ty(b)?;
@@ -706,7 +725,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             // (u128, bool): the bool must be at +16 (hard-coded by the engine) -- layout verification
             let l = self.layout_of(dst_p.ty)?;
             if l.fields.offset(1).bytes() != 16 {
-                return Err("128-bit overflow pair layout drift".into());
+                return Err(Error::internal("128-bit overflow pair layout drift"));
             }
         }
         Ok(vec![Stmt::Bin128 {
@@ -720,7 +739,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
     }
 
     /// Freeze the enum tag encoding (shared by Discriminant reads and SetDiscriminant writes).
-    fn tag_info(&self, ty: Ty<'tcx>) -> Result<TagInfo, String> {
+    fn tag_info(&self, ty: Ty<'tcx>) -> Result<TagInfo, Error> {
         let layout = self.layout_of(ty)?;
         Ok(match &layout.variants {
             Variants::Empty => TagInfo::Single { discr: 0 }, // unreachable (reading it is guest UB)
@@ -748,7 +767,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 // bits of a Niche's niche_start are checked below) -- never truncate silently.
                 let tag_w = Width::from_bytes(tag_bytes)
                     .or_else(|| (tag_bytes == 16).then_some(Width::W64))
-                    .ok_or_else(|| format!("tag width {tag_bytes} bytes"))?;
+                    .ok_or_else(|| Error::internal(format!("tag width {tag_bytes} bytes")))?;
                 let tag_signed = matches!(tag.primitive(), rustc_abi::Primitive::Int(_, true));
                 match tag_encoding {
                     TagEncoding::Direct => TagInfo::Direct {
@@ -801,17 +820,19 @@ impl<'tcx> LowerCx<'tcx, '_> {
         dst_p: &PlaceLow<'tcx>,
         enum_ty: Ty<'tcx>,
         vidx: VariantIdx,
-    ) -> Result<Vec<Stmt>, String> {
+    ) -> Result<Vec<Stmt>, Error> {
         Ok(match self.tag_info(enum_ty)? {
             TagInfo::Single { .. } => vec![],
             TagInfo::Direct { tag_off, tag_w, .. } => {
                 let discr = enum_ty
                     .discriminant_for_variant(self.tcx, vidx)
                     .map(|d| d.val)
-                    .ok_or("Direct tag has no discr")?;
+                    .ok_or(Error::internal("Direct tag has no discr"))?;
                 // Value-range guard before narrowing a 128-bit tag (prevents silent truncation; a discr always fits when tag_w <= W64)
                 if tag_w == Width::W64 && discr > u64::MAX as u128 {
-                    return Err(format!("128-bit discriminant {discr} exceeds 64 bits"));
+                    return Err(Error::internal(format!(
+                        "128-bit discriminant {discr} exceeds 64 bits"
+                    )));
                 }
                 let bits = (discr as u64) & tag_w.mask();
                 vec![Stmt::Assign {
@@ -881,7 +902,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         dst_p: &PlaceLow<'tcx>,
         off: u32,
         op: &mir::Operand<'tcx>,
-    ) -> Result<Vec<Stmt>, String> {
+    ) -> Result<Vec<Stmt>, Error> {
         Ok(match self.lower_operand(op)? {
             LoweredOp::Zst => vec![],
             LoweredOp::Scalar(o) => {
@@ -893,7 +914,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
             LoweredOp::Pair(l, h) => {
                 let ValKind::Pair((ao, aw), (bo, bw)) = self.classify(self.op_ty(op)?)? else {
-                    return Err("pair operand class drift".into());
+                    return Err(Error::internal("pair operand class drift"));
                 };
                 vec![
                     Stmt::Assign {
@@ -922,7 +943,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         dst: &PlaceLow<'tcx>,
         dst_kind: ValKind,
         src: LoweredOp<'tcx>,
-    ) -> Result<Vec<Stmt>, String> {
+    ) -> Result<Vec<Stmt>, Error> {
         Ok(match (dst_kind, src) {
             (ValKind::Zst, _) => vec![Stmt::Nop],
             (ValKind::Scalar(w), LoweredOp::Scalar(o)) => {
@@ -972,10 +993,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 // scalars (offset 0 / after alignment). This shows up in Transmute; the half
                 // offsets cannot be derived from the src layout, and a compact 0/width-aligned
                 // approximation is unreliable, so diagnose.
-                return Err("Transmute pair -> aggregate".into());
+                return Err(Error::internal("Transmute pair -> aggregate"));
             }
             (k, s) => {
-                return Err(format!(
+                return Err(Error::internal(format!(
                     "assignment class mismatch (dst={k:?}, src={})",
                     match s {
                         LoweredOp::Zst => "zst",
@@ -983,7 +1004,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         LoweredOp::Pair(..) => "pair",
                         LoweredOp::Bytes { .. } => "bytes",
                     }
-                ));
+                )));
             }
         })
     }
@@ -993,7 +1014,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         &mut self,
         dst: &mir::Place<'tcx>,
         rv: &mir::Rvalue<'tcx>,
-    ) -> Result<Vec<Stmt>, String> {
+    ) -> Result<Vec<Stmt>, Error> {
         let dst_p = self.resolve_place(dst)?;
         let dst_kind = self.classify(dst_p.ty)?;
 
@@ -1020,7 +1041,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     return self.lower_bin128(bop, frame::ty_signed(a_ty), a, b, &dst_p, true);
                 }
                 let ValKind::Pair((vo, vw), (fo, fw)) = dst_kind else {
-                    return Err("overflow arithmetic target is not a pair".into());
+                    return Err(Error::internal("overflow arithmetic target is not a pair"));
                 };
                 let a_ty = self.op_ty(a)?;
                 return Ok(vec![Stmt::AssignOverflow {
@@ -1059,13 +1080,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 if pointee_layout.is_unsized() {
                     // Fat pointer: dst pair = (place address, meta)
                     let ValKind::Pair((ao, aw), (bo, bw)) = dst_kind else {
-                        return Err("unsized Ref target is not a pair".into());
+                        return Err(Error::internal("unsized Ref target is not a pair"));
                     };
                     // &[T;N] projected to [T] does not occur; meta comes from the deref chain.
-                    let meta = p
-                        .meta
-                        .clone()
-                        .ok_or_else(|| format!("unsized Ref has no meta source (ty={})", p.ty))?;
+                    let meta = p.meta.clone().ok_or_else(|| {
+                        Error::internal(format!("unsized Ref has no meta source (ty={})", p.ty))
+                    })?;
                     Ok(vec![
                         Stmt::Assign {
                             dst: dst_p.half_place(ao, aw),
@@ -1078,7 +1098,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     ])
                 } else {
                     let ValKind::Scalar(w) = dst_kind else {
-                        return Err("Ref target is not a scalar".into());
+                        return Err(Error::internal("Ref target is not a scalar"));
                     };
                     Ok(vec![Stmt::Assign {
                         dst: dst_p.scalar_place(w),
@@ -1090,12 +1110,12 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 // Pointer arithmetic
                 if let mir::BinOp::Offset = binop {
                     let ptr_ty = self.op_ty(a)?;
-                    let pointee = ptr_ty
-                        .builtin_deref(true)
-                        .ok_or_else(|| format!("Offset of a non-pointer (ty={ptr_ty})"))?;
+                    let pointee = ptr_ty.builtin_deref(true).ok_or_else(|| {
+                        Error::internal(format!("Offset of a non-pointer (ty={ptr_ty})"))
+                    })?;
                     let stride = self.layout_of(pointee)?.size.bytes();
                     let ValKind::Scalar(w) = dst_kind else {
-                        return Err("Offset target is not a scalar".into());
+                        return Err(Error::internal("Offset target is not a scalar"));
                     };
                     return Ok(vec![Stmt::Assign {
                         dst: dst_p.scalar_place(w),
@@ -1113,13 +1133,19 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 // Both half widths come from the operands (data pointer + usize/vtable meta, all W64).
                 if matches!(binop, Eq | Ne) && matches!(self.classify(a_ty)?, ValKind::Pair(..)) {
                     let LoweredOp::Pair(al, ah) = self.lower_operand(a)? else {
-                        return Err("fat-pointer comparison left side is not a pair".into());
+                        return Err(Error::internal(
+                            "fat-pointer comparison left side is not a pair",
+                        ));
                     };
                     let LoweredOp::Pair(bl, bh) = self.lower_operand(b)? else {
-                        return Err("fat-pointer comparison right side is not a pair".into());
+                        return Err(Error::internal(
+                            "fat-pointer comparison right side is not a pair",
+                        ));
                     };
                     let ValKind::Scalar(w) = dst_kind else {
-                        return Err("fat-pointer comparison target is not a scalar".into());
+                        return Err(Error::internal(
+                            "fat-pointer comparison target is not a scalar",
+                        ));
                     };
                     let (cc, comb) = if matches!(binop, Eq) {
                         (IntCc::Eq, IntBinOp::BitAnd)
@@ -1179,7 +1205,9 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         let pa = self.wide_place(a)?;
                         let pb = self.wide_place(b)?;
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("128-bit comparison target is not a scalar".into());
+                            return Err(Error::internal(
+                                "128-bit comparison target is not a scalar",
+                            ));
                         };
                         return Ok(vec![Stmt::Assign {
                             dst: dst_p.scalar_place(w),
@@ -1196,7 +1224,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         let pa = self.wide_place(a)?;
                         let pb = self.wide_place(b)?;
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("128-bit Cmp target is not a scalar".into());
+                            return Err(Error::internal("128-bit Cmp target is not a scalar"));
                         };
                         let gt = Slot {
                             width: Width::W8,
@@ -1247,7 +1275,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         BitXor => IntBinOp::BitXor,
                         Shl | ShlUnchecked => IntBinOp::Shl,
                         Shr | ShrUnchecked => IntBinOp::Shr,
-                        other => return Err(format!("128-bit BinOp {other:?}")),
+                        other => return Err(Error::internal(format!("128-bit BinOp {other:?}"))),
                     };
                     return self.lower_bin128(bop, signed, a, b, &dst_p, false);
                 }
@@ -1281,11 +1309,11 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             Gt => IntCc::Gt,
                             Ge => IntCc::Ge,
                             other => {
-                                return Err(format!("f128 BinOp {other:?}"));
+                                return Err(Error::internal(format!("f128 BinOp {other:?}")));
                             }
                         };
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("f128 comparison target is not a scalar".into());
+                            return Err(Error::internal("f128 comparison target is not a scalar"));
                         };
                         return Ok(vec![Stmt::Assign {
                             dst: dst_p.scalar_place(w),
@@ -1319,10 +1347,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         Le => fcmp(IntCc::Le),
                         Gt => fcmp(IntCc::Gt),
                         Ge => fcmp(IntCc::Ge),
-                        other => return Err(format!("float BinOp {other:?}")),
+                        other => return Err(Error::internal(format!("float BinOp {other:?}"))),
                     };
                     let ValKind::Scalar(w) = dst_kind else {
-                        return Err("float arithmetic target is not a scalar".into());
+                        return Err(Error::internal("float arithmetic target is not a scalar"));
                     };
                     return Ok(vec![Stmt::Assign {
                         dst: dst_p.scalar_place(w),
@@ -1366,10 +1394,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         a: ao.clone(),
                         b: bo.clone(),
                     },
-                    other => return Err(format!("BinOp {other:?}")),
+                    other => return Err(Error::internal(format!("BinOp {other:?}"))),
                 };
                 let ValKind::Scalar(w) = dst_kind else {
-                    return Err("integer arithmetic target is not a scalar".into());
+                    return Err(Error::internal("integer arithmetic target is not a scalar"));
                 };
                 Ok(vec![Stmt::Assign {
                     dst: dst_p.scalar_place(w),
@@ -1384,20 +1412,24 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         match self.lower_operand(a)? {
                             LoweredOp::Pair(_, h) => {
                                 let ValKind::Scalar(w) = dst_kind else {
-                                    return Err("PtrMetadata target is not a scalar".into());
+                                    return Err(Error::internal(
+                                        "PtrMetadata target is not a scalar",
+                                    ));
                                 };
                                 Ok(vec![Stmt::Assign {
                                     dst: dst_p.scalar_place(w),
                                     rv: Rvalue::Use(h),
                                 }])
                             }
-                            _ => Err(format!("PtrMetadata of a non-fat-pointer (ty={a_ty})")),
+                            _ => Err(Error::internal(format!(
+                                "PtrMetadata of a non-fat-pointer (ty={a_ty})"
+                            ))),
                         }
                     }
                     mir::UnOp::Not if a_ty.is_bool() => {
                         let ao = self.lower_operand_scalar(a)?;
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("Not target is not a scalar".into());
+                            return Err(Error::internal("Not target is not a scalar"));
                         };
                         Ok(vec![Stmt::Assign {
                             dst: dst_p.scalar_place(w),
@@ -1422,7 +1454,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }
                         let ao = self.lower_operand_scalar(a)?;
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("Not target is not a scalar".into());
+                            return Err(Error::internal("Not target is not a scalar"));
                         };
                         Ok(vec![Stmt::Assign {
                             dst: dst_p.scalar_place(w),
@@ -1455,7 +1487,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         }
                         let ao = self.lower_operand_scalar(a)?;
                         let ValKind::Scalar(w) = dst_kind else {
-                            return Err("Neg target is not a scalar".into());
+                            return Err(Error::internal("Neg target is not a scalar"));
                         };
                         let rv = if a_ty.is_floating_point() {
                             Rvalue::FloatNeg {
@@ -1478,7 +1510,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             mir::Rvalue::Repeat(op, n) => {
                 let count = n
                     .try_to_target_usize(self.tcx)
-                    .ok_or("Repeat length is not constant")?;
+                    .ok_or(Error::internal("Repeat length is not constant"))?;
                 match self.lower_operand(op)? {
                     LoweredOp::Scalar(val) => {
                         let elem_size = val.width().bytes();
@@ -1508,7 +1540,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             mir::Rvalue::Discriminant(pl) => {
                 let p = self.resolve_place(pl)?;
                 let ValKind::Scalar(dw) = dst_kind else {
-                    return Err("Discriminant target is not a scalar".into());
+                    return Err(Error::internal("Discriminant target is not a scalar"));
                 };
                 let rv = match self.tag_info(p.ty)? {
                     TagInfo::Single { discr } => Rvalue::Use(Operand::Imm {
@@ -1576,13 +1608,15 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         // (data, meta) -> fat pointer; a ZST meta -> thin pointer
                         let mut ops = operands.iter();
                         let (data, meta) = (
-                            ops.next().ok_or("RawPtr is missing data")?,
-                            ops.next().ok_or("RawPtr is missing meta")?,
+                            ops.next()
+                                .ok_or(Error::internal("RawPtr is missing data"))?,
+                            ops.next()
+                                .ok_or(Error::internal("RawPtr is missing meta"))?,
                         );
                         match dst_kind {
                             ValKind::Scalar(w) => {
                                 let LoweredOp::Scalar(d) = self.lower_operand(data)? else {
-                                    return Err("RawPtr data is not a scalar".into());
+                                    return Err(Error::internal("RawPtr data is not a scalar"));
                                 };
                                 Ok(vec![Stmt::Assign {
                                     dst: dst_p.scalar_place(w),
@@ -1591,10 +1625,10 @@ impl<'tcx> LowerCx<'tcx, '_> {
                             }
                             ValKind::Pair((ao, aw), (bo, bw)) => {
                                 let LoweredOp::Scalar(d) = self.lower_operand(data)? else {
-                                    return Err("RawPtr data is not a scalar".into());
+                                    return Err(Error::internal("RawPtr data is not a scalar"));
                                 };
                                 let LoweredOp::Scalar(m) = self.lower_operand(meta)? else {
-                                    return Err("RawPtr meta is not a scalar".into());
+                                    return Err(Error::internal("RawPtr meta is not a scalar"));
                                 };
                                 Ok(vec![
                                     Stmt::Assign {
@@ -1607,7 +1641,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                                     },
                                 ])
                             }
-                            _ => Err("RawPtr target has an unexpected class".into()),
+                            _ => Err(Error::internal("RawPtr target has an unexpected class")),
                         }
                     }
                     AK::Adt(..)
@@ -1649,7 +1683,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                 // execution time (heap allocation + a copy of the frozen template). Accounting note: the dtor does not run.
                 let id = self.linker.tls_id(*def_id)?;
                 let ValKind::Scalar(w) = dst_kind else {
-                    return Err("ThreadLocalRef target is not a scalar".into());
+                    return Err(Error::internal("ThreadLocalRef target is not a scalar"));
                 };
                 Ok(vec![Stmt::Assign {
                     dst: dst_p.scalar_place(w),
@@ -1668,7 +1702,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
 fn lower_stmt<'tcx>(
     cx: &mut LowerCx<'tcx, '_>,
     stmt: &mir::Statement<'tcx>,
-) -> Result<Vec<Stmt>, String> {
+) -> Result<Vec<Stmt>, Error> {
     use mir::StatementKind as SK;
     match &stmt.kind {
         SK::Assign(box (place, rv)) => cx.lower_assign(place, rv),
@@ -1681,9 +1715,9 @@ fn lower_stmt<'tcx>(
         SK::Intrinsic(box mir::NonDivergingIntrinsic::Assume(_)) => Ok(vec![]),
         SK::Intrinsic(box mir::NonDivergingIntrinsic::CopyNonOverlapping(cp)) => {
             let ptr_ty = cx.op_ty(&cp.src)?;
-            let pointee = ptr_ty
-                .builtin_deref(true)
-                .ok_or("CopyNonOverlapping source is not a pointer")?;
+            let pointee = ptr_ty.builtin_deref(true).ok_or(Error::internal(
+                "CopyNonOverlapping source is not a pointer",
+            ))?;
             let elem_size = cx.layout_of(pointee)?.size.bytes();
             Ok(vec![Stmt::MemCopy {
                 src: cx.lower_operand_scalar(&cp.src)?,
@@ -1701,7 +1735,7 @@ fn lower_stmt<'tcx>(
             let ty = p.ty;
             cx.set_discr_stmts(&p, ty, *variant_index)
         }
-        other => Err(format!("statement {other:?}")),
+        other => Err(Error::internal(format!("statement {other:?}"))),
     }
 }
 
@@ -1712,16 +1746,18 @@ pub(crate) fn lower_instance<'tcx>(
     typing_env: TypingEnv<'tcx>,
     instance: Instance<'tcx>,
     linker: &mut Linker<'tcx>,
-) -> Result<ir::FuncBody, String> {
+) -> Result<ir::FuncBody, Error> {
     // An intrinsic has no ordinary MIR (the fallback-body form is re-collected as an Item by the Linker via new_raw)
     if let InstanceKind::Intrinsic(..) = instance.def {
-        return Err("intrinsic instance (engine builtin)".into());
+        return Err(Error::internal("intrinsic instance (engine builtin)"));
     }
     // A foreign item has no MIR (instance_mir panics the rustc query): taking a fn-ptr
     // must go through Linker::foreign_fn_entry_addr. Reaching this queue means an
     // upstream registration path missed a case; Err becomes a Trap body instead of taking down the rustc process.
     if tcx.is_foreign_item(instance.def_id()) {
-        return Err("foreign instance has no MIR to lower (fn-ptr address-taking must go through foreign_fn_entry_addr)".into());
+        return Err(Error::internal(
+            "foreign instance has no MIR to lower (fn-ptr address-taking must go through foreign_fn_entry_addr)",
+        ));
     }
     let body_ref: &Body<'tcx> = tcx.instance_mir(instance.def);
     // Monomorphize the whole body at once (one clone + instantiate; Body: TypeFoldable)
@@ -1778,7 +1814,10 @@ pub(crate) fn lower_instance<'tcx>(
         let info = &frame.locals[local.as_usize()];
         if body.spread_arg == Some(local) {
             let rustc_middle::ty::TyKind::Tuple(fields) = info.ty.kind() else {
-                return Err(format!("spread_arg is not a tuple ({})", info.ty));
+                return Err(Error::internal(format!(
+                    "spread_arg is not a tuple ({})",
+                    info.ty
+                )));
             };
             let layout = frame::layout_of(tcx, typing_env, info.ty)?;
             for (i, fty) in fields.iter().enumerate() {
@@ -1858,8 +1897,8 @@ pub(crate) fn lower_instance<'tcx>(
     // The panic surface of the rustc API is not controllable (layout corner cases
     // etc.), so the Trap-stub protocol catches it as a placeholder instead of aborting the whole lowering (the diagnostic carries the panic message).
     fn catch_lower<T>(
-        f: impl FnOnce() -> Result<T, String> + std::panic::UnwindSafe,
-    ) -> Result<T, String> {
+        f: impl FnOnce() -> Result<T, Error> + std::panic::UnwindSafe,
+    ) -> Result<T, Error> {
         match std::panic::catch_unwind(f) {
             Ok(r) => r,
             Err(e) => {
@@ -1868,7 +1907,7 @@ pub(crate) fn lower_instance<'tcx>(
                     .map(|s| s.as_str())
                     .or_else(|| e.downcast_ref::<&str>().copied())
                     .unwrap_or("?");
-                Err(format!("lower panic: {msg}"))
+                Err(Error::internal(format!("lower panic: {msg}")))
             }
         }
     }
@@ -1882,7 +1921,7 @@ pub(crate) fn lower_instance<'tcx>(
                 Ok(mut s) => stmts.append(&mut s),
                 Err(reason) => {
                     // Statement-level Trap: execution stops with a diagnostic here; the terminator is still lowered (to preserve the Call edge)
-                    stmts.push(Stmt::Trap(reason.into_boxed_str()));
+                    stmts.push(Stmt::Trap(reason.to_string().into_boxed_str()));
                     break;
                 }
             }
@@ -1894,7 +1933,7 @@ pub(crate) fn lower_instance<'tcx>(
                 stmts.append(&mut extra);
                 t
             }
-            Err(reason) => Terminator::Trap(reason.into_boxed_str()),
+            Err(reason) => Terminator::Trap(reason.to_string().into_boxed_str()),
         };
         blocks.push(ir::Block { stmts, term });
     }

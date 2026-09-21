@@ -10,6 +10,8 @@
 //! (labels, operands other than const/sym, non-x86_64 targets, `link_section`) are
 //! rejected loudly.
 
+use crate::lower::Error;
+
 use std::fmt::Write as _;
 
 use rustc_ast::ast::InlineAsmTemplatePiece;
@@ -30,7 +32,7 @@ use rustc_middle::ty::{Instance, TyCtxt, TypingEnv};
 pub(crate) fn materialize<'tcx>(
     tcx: TyCtxt<'tcx>,
     linker: &mut super::Linker<'tcx>,
-) -> Result<Option<Box<str>>, String> {
+) -> Result<Option<Box<str>>, Error> {
     let mut asm = String::new();
     let mut abs_defs: Vec<(Box<str>, u64)> = Vec::new();
     let parts = tcx.collect_and_partition_mono_items(());
@@ -102,22 +104,22 @@ fn absorb_guest_symfn<'tcx>(
     linker: &mut super::Linker<'tcx>,
     inst: Instance<'tcx>,
     abs_defs: &mut Vec<(Box<str>, u64)>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     if tcx.is_foreign_item(inst.def_id()) || is_naked(tcx, inst) {
         return Ok(());
     }
     if linker.entry_ffi_sig(inst).is_none() {
-        return Err(format!(
+        return Err(Error::internal(format!(
             "global_asm/naked sym points at guest fn `{}` with an underivable signature \
              (aggregate/Rust ABI/variadic): machine code calling such a fn through a fn \
              pointer has no thunk ABI to speak of and is undefined behavior natively \
              anyway, so reject it loudly",
             tcx.symbol_name(inst).name
-        ));
+        )));
     }
-    let addr = linker
-        .fn_entry_addr(inst)
-        .map_err(|e| format!("global_asm sym guest fn entry budget failed: {e}"))?;
+    let addr = linker.fn_entry_addr(inst).map_err(|e| {
+        Error::unsupported(format!("global_asm sym guest fn entry budget failed: {e}"))
+    })?;
     abs_defs.push((tcx.symbol_name(inst).name.into(), addr));
     Ok(())
 }
@@ -141,11 +143,6 @@ fn syntax_prefix(att: bool) -> &'static str {
 
 // ===== Compile-time extraction of dependency-crate global_asm =====
 
-/// Shared prefix of the dependency-side sym rejection. `materialize_dep_text` uses it to
-/// tell a skipped manifest from a real failure, so its wording and that branch must stay
-/// in sync.
-const DEP_SYM_GUEST: &str = "dep global_asm/naked sym points at guest fn";
-
 /// Dependency-side sym fn handling. It shares `absorb_guest_symfn`'s early return for
 /// foreign and naked fns, which need no trampoline, and rejects everything else loudly: a
 /// cross-crate entry budget must run in the bin link context, which is not implemented
@@ -154,15 +151,16 @@ fn dep_absorb_symfn<'tcx>(
     tcx: TyCtxt<'tcx>,
     inst: Instance<'tcx>,
     _abs_defs: &mut Vec<(Box<str>, u64)>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     if tcx.is_foreign_item(inst.def_id()) || is_naked(tcx, inst) {
         return Ok(());
     }
-    Err(format!(
-        "{DEP_SYM_GUEST} `{}` (the aggregate budget belongs to the bin link context and is not \
-         implemented yet)",
-        tcx.symbol_name(inst).name
-    ))
+    Err(Error::DepGuestSym {
+        detail: format!(
+            "`{}` (the aggregate budget belongs to the bin link context and is not implemented yet)",
+            tcx.symbol_name(inst).name
+        ),
+    })
 }
 
 /// Outcome of dependency-manifest extraction:
@@ -184,7 +182,7 @@ pub(crate) enum DepAsmText {
 /// every global_asm/naked site as `.s` text. The caller writes the text to a manifest
 /// sidecar next to the rlib (`<rlib stem>.mirasm.s`); assembly is left to the same
 /// `assemble` channel used by the bin load phase, which makes cache self-healing free.
-pub(crate) fn materialize_dep_text(tcx: TyCtxt<'_>) -> Result<DepAsmText, String> {
+pub(crate) fn materialize_dep_text(tcx: TyCtxt<'_>) -> Result<DepAsmText, Error> {
     let mut asm = String::new();
     let mut abs_defs: Vec<(Box<str>, u64)> = Vec::new();
     let parts = tcx.collect_and_partition_mono_items(());
@@ -202,7 +200,7 @@ pub(crate) fn materialize_dep_text(tcx: TyCtxt<'_>) -> Result<DepAsmText, String
                             &mut abs_defs,
                         ) {
                             Ok(()) => {}
-                            Err(e) if e.starts_with(DEP_SYM_GUEST) => {
+                            Err(Error::DepGuestSym { .. }) => {
                                 return Ok(DepAsmText::UnsupportedSym);
                             }
                             Err(e) => return Err(e),
@@ -219,7 +217,7 @@ pub(crate) fn materialize_dep_text(tcx: TyCtxt<'_>) -> Result<DepAsmText, String
                             &mut abs_defs,
                         ) {
                             Ok(()) => {}
-                            Err(e) if e.starts_with(DEP_SYM_GUEST) => {
+                            Err(Error::DepGuestSym { .. }) => {
                                 return Ok(DepAsmText::UnsupportedSym);
                             }
                             Err(e) => return Err(e),
@@ -236,13 +234,13 @@ pub(crate) fn materialize_dep_text(tcx: TyCtxt<'_>) -> Result<DepAsmText, String
     Ok(DepAsmText::Text(format!(".intel_syntax noprefix\n{asm}")))
 }
 
-fn ensure_x86(tcx: TyCtxt<'_>) -> Result<(), String> {
+fn ensure_x86(tcx: TyCtxt<'_>) -> Result<(), Error> {
     use rustc_target::asm::InlineAsmArch;
     match tcx.sess.asm_arch {
         Some(InlineAsmArch::X86_64) => Ok(()),
-        other => Err(format!(
+        other => Err(Error::unsupported(format!(
             "global_asm/naked support x86_64 only (arch={other:?})"
-        )),
+        ))),
     }
 }
 
@@ -251,7 +249,7 @@ fn ensure_x86(tcx: TyCtxt<'_>) -> Result<(), String> {
 /// `dep_absorb_symfn` (cross-crate budget not wired up, so it rejects loudly). This arm is
 /// the only place either renderer couples to `Linker`.
 type SymFnAbsorb<'tcx, 'c> =
-    dyn FnMut(TyCtxt<'tcx>, Instance<'tcx>, &mut Vec<(Box<str>, u64)>) -> Result<(), String> + 'c;
+    dyn FnMut(TyCtxt<'tcx>, Instance<'tcx>, &mut Vec<(Box<str>, u64)>) -> Result<(), Error> + 'c;
 
 fn render_global_asm<'tcx>(
     tcx: TyCtxt<'tcx>,
@@ -259,13 +257,13 @@ fn render_global_asm<'tcx>(
     item_id: rustc_hir::ItemId,
     out: &mut String,
     abs_defs: &mut Vec<(Box<str>, u64)>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     use rustc_ast::InlineAsmOptions;
     use rustc_hir::{InlineAsmOperand, ItemKind};
     ensure_x86(tcx)?;
     let item = tcx.hir_item(item_id);
     let ItemKind::GlobalAsm { asm, .. } = item.kind else {
-        return Err("GlobalAsm item has an unexpected shape".into());
+        return Err(Error::internal("GlobalAsm item has an unexpected shape"));
     };
     let att = asm.options.contains(InlineAsmOptions::ATT_SYNTAX);
     out.push_str(syntax_prefix(att));
@@ -277,15 +275,21 @@ fn render_global_asm<'tcx>(
                 let (op, sp) = &asm.operands[*operand_idx];
                 match op {
                     InlineAsmOperand::Const { anon_const } => {
-                        let cv = tcx
-                            .const_eval_poly(anon_const.def_id.to_def_id())
-                            .map_err(|e| format!("global_asm const evaluation failed: {e:?}"))?;
+                        let cv =
+                            tcx.const_eval_poly(anon_const.def_id.to_def_id())
+                                .map_err(|e| {
+                                    Error::internal(format!(
+                                        "global_asm const evaluation failed: {e:?}"
+                                    ))
+                                })?;
                         let ty = tcx
                             .typeck_body(anon_const.body)
                             .node_type(anon_const.hir_id);
                         let layout = tcx
                             .layout_of(TypingEnv::fully_monomorphized().as_query_input(ty))
-                            .map_err(|e| format!("global_asm const layout: {e:?}"))?;
+                            .map_err(|e| {
+                                Error::internal(format!("global_asm const layout: {e:?}"))
+                            })?;
                         out.push_str(&rustc_codegen_ssa::common::asm_const_to_str(
                             tcx, *sp, cv, layout,
                         ));
@@ -293,7 +297,9 @@ fn render_global_asm<'tcx>(
                     InlineAsmOperand::SymFn { expr } => {
                         let ty = tcx.typeck(owner.def_id).expr_ty(expr);
                         let rustc_middle::ty::TyKind::FnDef(def_id, args) = ty.kind() else {
-                            return Err(format!("global_asm sym fn is not a FnDef ({ty})"));
+                            return Err(Error::internal(format!(
+                                "global_asm sym fn is not a FnDef ({ty})"
+                            )));
                         };
                         let inst = Instance::expect_resolve(
                             tcx,
@@ -308,7 +314,11 @@ fn render_global_asm<'tcx>(
                     InlineAsmOperand::SymStatic { path: _, def_id } => {
                         out.push_str(tcx.symbol_name(Instance::mono(tcx, *def_id)).name);
                     }
-                    _ => return Err("global_asm supports only const/sym operands".into()),
+                    _ => {
+                        return Err(Error::unsupported(
+                            "global_asm supports only const/sym operands",
+                        ));
+                    }
                 }
             }
         }
@@ -323,13 +333,13 @@ fn render_naked<'tcx>(
     inst: Instance<'tcx>,
     out: &mut String,
     abs_defs: &mut Vec<(Box<str>, u64)>,
-) -> Result<(), String> {
+) -> Result<(), Error> {
     use rustc_ast::InlineAsmOptions;
     use rustc_middle::mir::{InlineAsmOperand, START_BLOCK, TerminatorKind};
     ensure_x86(tcx)?;
     let attrs = tcx.codegen_fn_attrs(inst.def_id());
     if attrs.link_section.is_some() {
-        return Err("naked fn has a link_section".into());
+        return Err(Error::internal("naked fn has a link_section"));
     }
     let mir = tcx.instance_mir(inst.def);
     let TerminatorKind::InlineAsm {
@@ -339,7 +349,7 @@ fn render_naked<'tcx>(
         ..
     } = &mir.basic_blocks[START_BLOCK].terminator().kind
     else {
-        return Err("naked fn body is not a single InlineAsm".into());
+        return Err(Error::internal("naked fn body is not a single InlineAsm"));
     };
     let att = options.contains(InlineAsmOptions::ATT_SYNTAX);
     let name = tcx.symbol_name(inst).name;
@@ -360,12 +370,14 @@ fn render_naked<'tcx>(
                     let cv = value
                         .const_
                         .eval(tcx, TypingEnv::fully_monomorphized(), value.span)
-                        .map_err(|e| format!("naked const evaluation failed: {e:?}"))?;
+                        .map_err(|e| {
+                            Error::internal(format!("naked const evaluation failed: {e:?}"))
+                        })?;
                     let layout = tcx
                         .layout_of(
                             TypingEnv::fully_monomorphized().as_query_input(value.const_.ty()),
                         )
-                        .map_err(|e| format!("naked const layout: {e:?}"))?;
+                        .map_err(|e| Error::internal(format!("naked const layout: {e:?}")))?;
                     out.push_str(&rustc_codegen_ssa::common::asm_const_to_str(
                         tcx, *span, cv, layout,
                     ));
@@ -373,7 +385,7 @@ fn render_naked<'tcx>(
                 InlineAsmOperand::SymFn { value } => {
                     let rustc_middle::ty::TyKind::FnDef(def_id, args) = value.const_.ty().kind()
                     else {
-                        return Err("naked sym fn is not a FnDef".into());
+                        return Err(Error::internal("naked sym fn is not a FnDef"));
                     };
                     let callee = Instance::expect_resolve(
                         tcx,
@@ -388,7 +400,11 @@ fn render_naked<'tcx>(
                 InlineAsmOperand::SymStatic { def_id } => {
                     out.push_str(tcx.symbol_name(Instance::mono(tcx, *def_id)).name);
                 }
-                _ => return Err("naked asm supports only const/sym operands".into()),
+                _ => {
+                    return Err(Error::unsupported(
+                        "naked asm supports only const/sym operands",
+                    ));
+                }
             },
         }
     }
@@ -456,7 +472,7 @@ fn strip_slash_comments(asm: &mut String) {
 /// reference guest symbols, so `-nostdlib` is not usable; `-nostartfiles` keeps
 /// dynamic-linker resolution, and RTLD_GLOBAL resolves guest fns named by naked `sym`
 /// operands. Also used by the bin load phase to materialize dependency manifest text.
-pub(crate) fn assemble(asm: &str) -> Result<Box<str>, String> {
+pub(crate) fn assemble(asm: &str) -> Result<Box<str>, Error> {
     // Same channel as the asm-stub factory: a bare `syscall` instruction in
     // global_asm/naked asm becomes an indirect slot call. The rewrite runs before content
     // hashing, so the cache key matches the final bytes; the slot ships with the `.so` and
@@ -470,14 +486,18 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, String> {
     hash_input.extend_from_slice(asm.as_bytes());
     let hash = crate::utils::content::fnv1a(&hash_input);
     let dir = crate::store::GLOBAL_ASM.dir();
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("failed to create the global-asm cache directory: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        Error::io(
+            "failed to create the global-asm cache directory".to_string(),
+            e,
+        )
+    })?;
     let so = dir.join(format!("{hash:016x}.so"));
     if so.exists() {
         return Ok(so.display().to_string().into());
     }
     let s_path = dir.join(format!("{hash:016x}.s"));
-    std::fs::write(&s_path, asm).map_err(|e| format!("failed to write the global-asm .s: {e}"))?;
+    std::fs::write(&s_path, asm).map_err(|e| Error::io("failed to write the global-asm .s", e))?;
     let tmp = crate::store::staging_path(&so);
     let status = std::process::Command::new("cc")
         .args(["-shared", "-fPIC", "-nostartfiles", "-Wl,-Bsymbolic", "-o"])
@@ -486,12 +506,14 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, String> {
         .args(crate::native::archive::NATIVE_RUNTIME_WRAP_FLAGS)
         .status()
         .map_err(|e| {
-            format!("failed to invoke cc to assemble global-asm (is cc missing from PATH?): {e}")
+            Error::assemble(format!(
+                "failed to invoke cc to assemble global-asm (is cc missing from PATH?): {e}"
+            ))
         })?;
     if !status.success() {
-        return Err(format!(
+        return Err(Error::assemble(format!(
             "cc failed to assemble global-asm (status={status})"
-        ));
+        )));
     }
     // Undefined-symbol audit: a symbol referenced by a global_asm/naked `sym` operand must
     // itself be machine code: another naked/global_asm symbol, a dynamic-library export, or
@@ -501,13 +523,17 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, String> {
     let undef = undefined_nonlib_symbols(&tmp);
     if let Some(sym) = undef {
         let _ = std::fs::remove_file(&tmp);
-        return Err(format!(
+        return Err(Error::internal(format!(
             "global_asm/naked references undefined symbol `{sym}`: a sym operand may only \
              name a machine-code symbol (another naked/global_asm or a dynamic library), not \
              an interpreted guest fn"
-        ));
+        )));
     }
-    crate::store::publish(&so, &tmp)
-        .map_err(|e| format!("failed to atomically publish the global-asm .so: {e}"))?;
+    crate::store::publish(&so, &tmp).map_err(|e| {
+        Error::io(
+            "failed to atomically publish the global-asm .so".to_string(),
+            e,
+        )
+    })?;
     Ok(so.display().to_string().into())
 }

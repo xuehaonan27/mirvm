@@ -2,6 +2,8 @@
 //! the local stub code address), `entry_ffi_sig`, `alloc_entry_stub` and `foreign_fn_entry_addr`.
 //! An `impl Linker` sub-block; the fields are in the Linker struct in mod.rs.
 
+use crate::lower::Error;
+
 use super::*;
 
 impl<'tcx> Linker<'tcx> {
@@ -23,7 +25,7 @@ impl<'tcx> Linker<'tcx> {
     /// An extern fn — a kernel function declared in an extern block inside an fn body and used as an
     /// fn-ptr, i.e. the ring dispatch pattern — has no MIR to lower and goes through
     /// `foreign_fn_entry_addr`: its value is the real symbol address resolved by the native linker.
-    pub(crate) fn fn_entry_addr(&mut self, inst: Instance<'tcx>) -> Result<u64, String> {
+    pub(crate) fn fn_entry_addr(&mut self, inst: Instance<'tcx>) -> Result<u64, Error> {
         if let Some(&a) = self.fn_entries.get(&inst) {
             return Ok(a);
         }
@@ -150,7 +152,7 @@ impl<'tcx> Linker<'tcx> {
     /// The value starts as this process's real code address, but consumers read it through GOT slots. Slots
     /// are serialized with the module and refilled by name at startup, so the module is position-independent
     /// with respect to ASLR.
-    pub(super) fn foreign_fn_entry_addr(&mut self, inst: Instance<'tcx>) -> Result<u64, String> {
+    pub(super) fn foreign_fn_entry_addr(&mut self, inst: Instance<'tcx>) -> Result<u64, Error> {
         let name = canonical_link_name(self.tcx.symbol_name(inst).name);
         // An absent weak extern taken as an address is NULL, as in native code; the weak flag tells the GOT
         // startup phase to write 0 on a miss instead of aborting.
@@ -180,9 +182,9 @@ impl<'tcx> Linker<'tcx> {
                 b,
                 B::HostGetenv | B::HostWrite | B::HostStrlen | B::HostAbort
             ) {
-                return Err(format!(
+                return Err(Error::internal(format!(
                     "extern fn `{name}` taken as value address (fn-ptr), but it is an engine built-in semantic symbol with no address to materialize"
-                ));
+                )));
             }
         }
         let rust_internal =
@@ -194,7 +196,7 @@ impl<'tcx> Linker<'tcx> {
         if let Some((target, is_weak)) = exported {
             if is_weak && !rust_internal {
                 let cname = std::ffi::CString::new(name)
-                    .map_err(|_| "symbol name contains NUL".to_string())?;
+                    .map_err(|_| Error::internal("symbol name contains NUL"))?;
                 let strong = crate::os::dll::sym(0, &cname);
                 if strong != 0 {
                     return Ok(bake(self, strong as u64));
@@ -204,27 +206,27 @@ impl<'tcx> Linker<'tcx> {
         }
         // ③ Same non-passthrough list discipline as resolve_call
         if DENY_EXACT.contains(&name) || DENY_PREFIX.iter().any(|p| name.starts_with(p)) {
-            return Err(format!(
+            return Err(Error::unsupported(format!(
                 "foreign `{name}` taken as value address (denylist: thread M4.4 / process model non-passthrough)"
-            ));
+            )));
         }
         if name.starts_with("llvm.") {
-            return Err(format!(
+            return Err(Error::internal(format!(
                 "foreign `{name}` taken as value address (LLVM internal symbol, built-in on demand)"
-            ));
+            )));
         }
         if rust_internal {
-            return Err(format!(
+            return Err(Error::internal(format!(
                 "foreign `{name}` taken as value address (Rust internal ABI symbol, host process also exports it, cannot take directly)"
-            ));
+            )));
         }
         // ④ Resolution order: hidden fallback table → archive handles in link order → global dlsym.
         // Objects the guest links in always beat host-process libraries of the same name, whether they are
         // visible in .dynsym or only hidden. Archive `.so` files are loaded with RTLD_NOW|RTLD_GLOBAL at the
         // head of `lower_inner`, before the worklist is drained; their handles live in `self.archive_handles`.
         // Global dlsym is the last fallback to real system libraries.
-        let cname =
-            std::ffi::CString::new(name).map_err(|_| "symbol name contains NUL".to_string())?;
+        let cname = std::ffi::CString::new(name)
+            .map_err(|_| Error::internal("symbol name contains NUL"))?;
         let mut p = 0u64;
         for (bias, syms) in &self.archive_fallbacks {
             if let Some(&v) = syms.get(name) {
@@ -250,9 +252,9 @@ impl<'tcx> Linker<'tcx> {
             if weak {
                 return Ok(bake(self, 0));
             }
-            return Err(format!(
+            return Err(Error::internal(format!(
                 "extern fn `{name}` taken as value address, but symbol not found (neither archive fallback table nor global dlsym)"
-            ));
+            )));
         }
         Ok(bake(self, p))
     }

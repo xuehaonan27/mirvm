@@ -2,6 +2,8 @@
 //! fat-pointer meta and transform the vtable on dyn upcasting (isomorphic to
 //! cg_ssa unsized_info). Sole entry = cast.rs's CoerceUnsized arm.
 
+use crate::lower::Error;
+
 use super::*;
 
 /// Meta derivation for an unsizing coercion: recurse on types (isomorphic to
@@ -14,7 +16,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         &mut self,
         src: Ty<'tcx>,
         dst: Ty<'tcx>,
-    ) -> Result<Operand, String> {
+    ) -> Result<Operand, Error> {
         if let (Some(sp), Some(dp)) = (src.builtin_deref(true), dst.builtin_deref(true)) {
             return self.fresh_unsize_meta(sp, dp);
         }
@@ -40,18 +42,22 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     continue;
                 }
                 if found.is_some() {
-                    return Err(format!("CoerceUnsized has multiple non-ZST fields ({src})"));
+                    return Err(Error::internal(format!(
+                        "CoerceUnsized has multiple non-ZST fields ({src})"
+                    )));
                 }
                 found = Some((fa, fb));
             }
             let Some((fa, fb)) = found else {
-                return Err(format!(
+                return Err(Error::internal(format!(
                     "CoerceUnsized has no non-ZST field ({src} -> {dst})"
-                ));
+                )));
             };
             return self.unsize_meta_of(fa, fb);
         }
-        Err(format!("unknown Unsize shape ({src} -> {dst})"))
+        Err(Error::internal(format!(
+            "unknown Unsize shape ({src} -> {dst})"
+        )))
     }
 
     /// Unified recursive criterion for a dyn tail pair. Four routes per level: (1)
@@ -143,7 +149,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         &mut self,
         src_pointee: Ty<'tcx>,
         dst_pointee: Ty<'tcx>,
-    ) -> Result<Operand, String> {
+    ) -> Result<Operand, Error> {
         let (st, dt) =
             self.tcx
                 .struct_lockstep_tails_for_codegen(src_pointee, dst_pointee, self.typing_env);
@@ -151,7 +157,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             (ty::Array(_, n), ty::Slice(_)) => {
                 let n = n
                     .try_to_target_usize(self.tcx)
-                    .ok_or("array length is not constant")?;
+                    .ok_or(Error::internal("array length is not constant"))?;
                 Ok(Operand::Imm {
                     bits: n,
                     width: Width::W64,
@@ -159,7 +165,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
             }
             (_, ty::Dynamic(preds, _)) if !matches!(st.kind(), ty::Dynamic(..)) => {
                 if self.layout_of(st)?.is_unsized() {
-                    return Err(format!("unsized->dyn ({st} -> {dt})"));
+                    return Err(Error::internal(format!("unsized->dyn ({st} -> {dt})")));
                 }
                 let principal = preds
                     .principal()
@@ -169,7 +175,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
                     self.linker.ensure_alloc(vt_id)?,
                 )))
             }
-            _ => Err(format!("unsize tail pair {st} -> {dt}")),
+            _ => Err(Error::internal(format!("unsize tail pair {st} -> {dt}"))),
         }
     }
 }

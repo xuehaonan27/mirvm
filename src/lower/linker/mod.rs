@@ -4,6 +4,8 @@
 //! entries (fn entries + FFI signatures) / alloc (frozen-area materialization) /
 //! got (GOT/foreign slots) / calls (call resolution).
 
+use crate::lower::Error;
+
 mod alloc;
 mod calls;
 mod entries;
@@ -235,7 +237,7 @@ impl<'tcx> Linker<'tcx> {
     /// `#[thread_local]` static → dense TlsId. The template is the initializer evaluation result
     /// materialized into the frozen area via `ensure_alloc`, so relocations come for free; the runtime reads
     /// it only as a byte source and never writes it.
-    pub(crate) fn tls_id(&mut self, def_id: rustc_hir::def_id::DefId) -> Result<ir::TlsId, String> {
+    pub(crate) fn tls_id(&mut self, def_id: rustc_hir::def_id::DefId) -> Result<ir::TlsId, Error> {
         if let Some(&id) = self.tls_ids.get(&def_id) {
             return Ok(id);
         }
@@ -248,10 +250,9 @@ impl<'tcx> Linker<'tcx> {
                 return Ok(id);
             }
         }
-        let alloc = self
-            .tcx
-            .eval_static_initializer(def_id)
-            .map_err(|e| format!("TLS static initializer evaluation failed: {e:?}"))?;
+        let alloc = self.tcx.eval_static_initializer(def_id).map_err(|e| {
+            Error::internal(format!("TLS static initializer evaluation failed: {e:?}"))
+        })?;
         let (size, align) = (alloc.inner().size().bytes(), alloc.inner().align.bytes());
         let alloc_id = self.tcx.reserve_and_set_static_alloc(def_id);
         let template = self.ensure_alloc(alloc_id)?;

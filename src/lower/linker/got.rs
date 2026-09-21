@@ -142,7 +142,7 @@ impl<'tcx> Linker<'tcx> {
         id: AllocId,
         alloc: ConstAllocation<'tcx>,
         image: bool,
-    ) -> Result<u64, String> {
+    ) -> Result<u64, crate::lower::Error> {
         let a = alloc.inner();
         let size = a.size().bytes();
         let align = a.align.bytes();

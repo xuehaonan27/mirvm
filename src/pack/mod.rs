@@ -52,6 +52,10 @@ pub enum Error {
     #[error("{detail}")]
     Build { detail: String },
 
+    /// Lowering the package's contents failed.
+    #[error(transparent)]
+    Lower(#[from] crate::lower::Error),
+
     /// A filesystem operation on a package or one of its artifacts failed. `detail` names the
     /// operation, because the same `io::Error` kind means different things at each step.
     #[error("{detail}: {source}")]
@@ -70,6 +74,7 @@ crate::diag_codes! {
         Reject => "pack.reject",
         Incompatible => "pack.incompatible",
         Build => "pack.build",
+        Lower => "pack.lower",
         Io => "pack.io",
     }
 }
@@ -774,8 +779,7 @@ impl Package {
     /// the host process. The caller must trust those package inputs and ABI declarations.
     pub unsafe fn instantiate(&self) -> Result<crate::vm::Engine, Error> {
         let mut module = self.loaded.instantiate()?;
-        module.asm_stub_addrs =
-            crate::lower::asm::try_materialize(&module.asm_sites).map_err(Error::reject)?;
+        module.asm_stub_addrs = crate::lower::asm::try_materialize(&module.asm_sites)?;
         module.finalize_entry_argv(&[]).map_err(Error::reject)?;
         unsafe { crate::vm::Engine::from_module_unchecked(module) }.map_err(Error::reject)
     }
