@@ -1,7 +1,8 @@
 //! OS Module
-//! MirVM is the sole channel to the true OS. The business code of the engine
-//! (`src/vm/`) and the loading phase (src/lower/) only calls primitives here,
-//! and the `libc::` / `std::os::unix` touchpoints in engine should be banned.
+//! MirVM's sole channel to the platform outside itself: the C library (pthread, `dlopen`, the math
+//! symbols, `errno`) and the kernel (mappings, `/proc`, process and signal primitives). The engine
+//! (`src/vm/`) and the loading phase (`src/lower/`) call primitives here and name no platform item
+//! themselves; `repo-quality`'s platform-boundary check is what holds that.
 //!
 //! # Boundary Contract
 //!
@@ -41,10 +42,6 @@ pub(crate) use linux::*;
 
 /// The C library's math surface, as the symbol names the JIT imports.
 pub(crate) mod libm;
-
-/// The object-file formats this platform's loader and linker read. Not behind the `linux/` ladder:
-/// a byte layout does not change with the kernel, only which image a kernel accepts does.
-pub(crate) mod obj;
 
 /// Why a host primitive did not do what it was asked.
 ///

@@ -9,7 +9,7 @@ use std::io::{Seek, Write};
 use std::os::fd::FromRawFd;
 
 use super::ir::Module;
-use crate::os::obj::elf;
+use crate::obj::elf;
 
 #[derive(Debug)]
 pub struct SymbolImage {

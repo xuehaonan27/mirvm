@@ -39,6 +39,7 @@ pub mod image;
 pub mod inputs;
 pub mod lower;
 pub(crate) mod native;
+pub(crate) mod obj;
 pub mod options;
 pub(crate) mod os;
 pub(crate) mod os_arch;

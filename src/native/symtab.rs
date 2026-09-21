@@ -66,8 +66,8 @@ impl Error {
 
 use std::collections::HashMap;
 
-use crate::os::obj::ar;
-use crate::os::obj::elf::{
+use crate::obj::ar;
+use crate::obj::elf::{
     self, SHN_RESERVED, SHN_UNDEF, SHT_DYNSYM, SHT_SYMTAB, STB_GLOBAL, STB_WEAK,
 };
 
