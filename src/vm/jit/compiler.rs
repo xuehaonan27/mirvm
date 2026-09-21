@@ -245,7 +245,7 @@ impl<'a> Compiler<'a> {
         jb.symbol("memmove", crate::os::process::memmove_addr());
         jb.symbol("memset", crate::os::process::memset_addr());
         jb.symbol("memcmp", crate::os::process::memcmp_addr());
-        for (n, p) in crate::os::libm::symbols() {
+        for (n, p) in math_symbols() {
             jb.symbol(n, p as *const u8);
         }
         let mut module = JITModule::new(jb);

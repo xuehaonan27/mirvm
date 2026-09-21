@@ -40,9 +40,6 @@ pub(crate) mod linux;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::*;
 
-/// The C library's math surface, as the symbol names the JIT imports.
-pub(crate) mod libm;
-
 /// Why a host primitive did not do what it was asked.
 ///
 /// This layer only posts what the kernel or libc said, so the classes are the calls themselves: the
@@ -70,5 +67,5 @@ crate::diag_codes! {
 compile_error!(
     "No platform is implemented for this target. The implemented one is Linux; adding another means \
      a directory under src/os/ named after its `target_os`, an arm in the ladder in this file, and \
-     implementations of `dll`, `fs`, `libm`, `mem`, `process`, `signal`, `thread` and `unwind`."
+     implementations of `dll`, `fs`, `mem`, `process`, `signal`, `thread` and `unwind`."
 );

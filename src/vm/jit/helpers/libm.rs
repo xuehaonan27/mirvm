@@ -1,12 +1,16 @@
-//! The C library's math surface, as symbol names.
+//! The standard C math symbols compiled code imports.
 //!
-//! The interpreter calls these through the host linker and the JIT registers them as import
-//! symbols, so the names have to be the platform's: `sqrt`/`sqrtf` and their family. Taking an
-//! address is all mirvm needs, which is why they are declared rather than called from here.
+//! The names are the C standard's, and `translate/value.rs` spells the same ones when it declares an
+//! import: the width picks the `f` suffix. This module is the other half of that pair, the address
+//! each name resolves to, handed to the JITBuilder.
+//!
+//! The interpreter does not come through here. It calls the Rust methods (`x.sqrt()`) that rustc
+//! lowers to the same host symbols, which is why the differential suite — not this table — is what
+//! keeps the two channels agreeing. Taking an address is all mirvm needs, so the functions are
+//! declared rather than called from here.
 
-/// The symbol table the JITBuilder is given, holding the same symbols the interpreter's host
-/// calls use. The libc crate no longer binds the math functions, so they are declared to take
-/// their addresses; the process already links them.
+/// The libc crate no longer binds the math functions, so they are declared here to take their
+/// addresses; the process already links them.
 mod decls {
     unsafe extern "C" {
         pub fn sqrtf();
@@ -49,7 +53,8 @@ mod decls {
         pub fn fmod();
     }
 }
-pub fn symbols() -> Vec<(&'static str, usize)> {
+/// Every symbol the translator may name, as `(name, address)`.
+pub(crate) fn math_symbols() -> Vec<(&'static str, usize)> {
     vec![
         ("sqrtf", decls::sqrtf as *const () as usize),
         ("sqrt", decls::sqrt as *const () as usize),
