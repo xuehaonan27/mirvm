@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, LazyLock, Mutex};
 
 use super::{DeferredSignalCallback, SIGNAL_SLOTS};
-use crate::os::signal::Sigaction;
+use crate::os::process::exit_now;
+use crate::os::signal::{Sigaction, sent_by_thread_kill};
 use crate::vm::ctx::EngineControl;
 
 const DELIVERY_ACTIVE: usize = 1usize << (usize::BITS - 1);
@@ -94,7 +95,7 @@ impl SignalRegistration {
 
     pub(crate) fn defer(&self, signum: i32) {
         if signum <= 0 || signum as usize >= SIGNAL_SLOTS {
-            unsafe { libc::_exit(70) }
+            exit_now(i32::from(crate::diag::exit::SOFTWARE))
         }
         self.publish(signum);
     }
@@ -106,7 +107,7 @@ impl SignalRegistration {
                 return None;
             }
             if state & DELIVERY_COUNT == DELIVERY_COUNT {
-                unsafe { libc::_exit(70) }
+                exit_now(i32::from(crate::diag::exit::SOFTWARE))
             }
             match self.kernel_delivery.compare_exchange_weak(
                 state,
@@ -166,7 +167,7 @@ impl SignalRegistration {
     fn publish_thread_directed(&'static self, inbox: &'static ThreadSignalInbox, _signum: i32) {
         let registration = ptr::from_ref(self).cast_mut();
         let Some(cell) = inbox.cell_for(registration) else {
-            unsafe { libc::_exit(70) }
+            exit_now(i32::from(crate::diag::exit::SOFTWARE))
         };
         if cell
             .pending
@@ -174,7 +175,7 @@ impl SignalRegistration {
             .is_ok()
             && self.thread_pending.fetch_add(1, Ordering::Release) == usize::MAX
         {
-            unsafe { libc::_exit(70) }
+            exit_now(i32::from(crate::diag::exit::SOFTWARE))
         }
     }
 }
@@ -221,7 +222,7 @@ impl ThreadSignalInbox {
                 return None;
             }
             if state & DELIVERY_COUNT == DELIVERY_COUNT {
-                unsafe { libc::_exit(70) }
+                exit_now(i32::from(crate::diag::exit::SOFTWARE))
             }
             match self.delivery.compare_exchange_weak(
                 state,
@@ -654,35 +655,30 @@ pub(crate) unsafe fn record_async_signal(
     info: *mut libc::siginfo_t,
 ) {
     if registration.is_null() || signum <= 0 || signum as usize >= SIGNAL_SLOTS {
-        unsafe { libc::_exit(70) }
+        exit_now(i32::from(crate::diag::exit::SOFTWARE))
     }
     let registration = unsafe { &*registration };
     if registration.signum() != signum {
-        unsafe { libc::_exit(70) }
+        exit_now(i32::from(crate::diag::exit::SOFTWARE))
     }
     let Some(_delivery) = registration.try_kernel_delivery() else {
         if retry_current_host_raise(signum) {
             return;
         }
-        unsafe { libc::_exit(70) }
+        exit_now(i32::from(crate::diag::exit::SOFTWARE))
     };
-    let code = if info.is_null() {
-        0
-    } else {
-        unsafe { (*info).si_code }
-    };
-    if code == libc::SI_TKILL {
+    if sent_by_thread_kill(info.cast()) {
         let Some(inbox) = current_thread_inbox() else {
             if retry_current_host_raise(signum) {
                 return;
             }
-            unsafe { libc::_exit(70) }
+            exit_now(i32::from(crate::diag::exit::SOFTWARE))
         };
         let Some(_thread_delivery) = inbox.try_delivery() else {
             if retry_current_host_raise(signum) {
                 return;
             }
-            unsafe { libc::_exit(70) }
+            exit_now(i32::from(crate::diag::exit::SOFTWARE))
         };
         registration.publish_thread_directed(inbox, signum);
         #[cfg(test)]

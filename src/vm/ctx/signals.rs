@@ -3,6 +3,8 @@
 
 use std::sync::Arc;
 
+use crate::os::signal::{MaskOp, SignalMask, ThreadSignalMaskGuard, set_thread_mask};
+
 use super::activation::activate;
 use super::engine::{ExecutionLease, Shared};
 use super::thread_ctx::{
@@ -72,36 +74,14 @@ fn drain_pending_signals_with_mode(ctx: *mut Ctx, closing: bool) {
     }
 }
 
-struct CloseSignalUnblockGuard {
-    previous: libc::sigset_t,
-}
-
-impl Drop for CloseSignalUnblockGuard {
-    fn drop(&mut self) {
-        let error = unsafe {
-            libc::pthread_sigmask(libc::SIG_SETMASK, &self.previous, std::ptr::null_mut())
-        };
-        if error != 0 {
-            eprintln!("mirvm[m4-engine]: failed to restore close finalizer signal mask: {error}");
-            std::process::abort();
-        }
-    }
-}
-
 fn raise_from_close_drain(ctx: *mut Ctx, signum: i32) -> i32 {
-    let mut signal: libc::sigset_t = unsafe { std::mem::zeroed() };
-    unsafe {
-        libc::sigemptyset(&mut signal);
-        libc::sigaddset(&mut signal, signum);
-    }
-    let mut previous: libc::sigset_t = unsafe { std::mem::zeroed() };
-    let error = unsafe { libc::pthread_sigmask(libc::SIG_UNBLOCK, &signal, &mut previous) };
-    if error != 0 {
-        super::super::interp::engine_abort(&format!(
+    let previous = match set_thread_mask(MaskOp::Unblock, &SignalMask::empty().with(signum)) {
+        Ok(previous) => previous,
+        Err(error) => super::super::interp::engine_abort(&format!(
             "failed to unblock signal {signum} on the close finalizer thread: {error}"
-        ));
-    }
-    let _restore = CloseSignalUnblockGuard { previous };
+        )),
+    };
+    let _restore = ThreadSignalMaskGuard::restore_on_drop(previous);
     real_raise_and_drain(ctx, signum)
 }
 

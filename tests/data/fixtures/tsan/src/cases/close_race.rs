@@ -155,7 +155,7 @@ fn deferred_tsd_close_window() -> bool {
     if unsafe { libc::pthread_key_create(&mut key, None) } != 0 {
         return false;
     }
-    registration.commit(key);
+    registration.commit(crate::os::thread::TlsKey::from_raw(key));
 
     let value = 0x7a5d_u64;
     let Some(set) = prepare_pthread_operation(&shared, "pthread_setspecific", &[key as u64, value])

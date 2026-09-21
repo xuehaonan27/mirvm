@@ -12,6 +12,8 @@ use super::signals::{
     dispatch_signal_delivery, drain_current_thread_signal_deliveries, drain_pending_signals,
     start_pending_signal_finalizers,
 };
+use crate::os::signal::{MaskOp, SignalMask, set_thread_mask};
+use crate::os::thread::TlsKey;
 
 /// Per-thread execution state (vmctx): one per guest thread, with the lifetime of that host
 /// thread's thread-local storage.
@@ -389,7 +391,7 @@ pub(super) struct ThreadContexts {
     pub(super) in_flight_faults: Vec<EngineFaultToken>,
     pub(super) next_fault_nonce: u64,
     teardown_rounds: u8,
-    pub(super) final_tsd_cursor: Option<libc::pthread_key_t>,
+    pub(super) final_tsd_cursor: Option<TlsKey>,
     pub(super) final_tsd_active: bool,
     /// Avoid touching telemetry from final TSD on threads that never entered a
     /// capture-capable Engine.
@@ -470,7 +472,7 @@ pub(super) static CTX_KEY: OnceLock<crate::os::thread::TlsKey> = OnceLock::new()
 pub(super) static THREAD_CONTEXT_EXITING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-pub(crate) fn current_thread_is_in_final_tsd_pass(key: libc::pthread_key_t) -> bool {
+pub(crate) fn current_thread_is_in_final_tsd_pass(key: TlsKey) -> bool {
     let Some(ctx_key) = CTX_KEY.get().copied() else {
         return false;
     };
@@ -509,8 +511,8 @@ pub(crate) fn current_thread_final_tsd_pass_is_armed() -> bool {
 }
 
 #[cfg(test)]
-pub(crate) fn test_ctx_key() -> libc::pthread_key_t {
-    CTX_KEY.get().copied().unwrap().as_raw()
+pub(crate) fn test_ctx_key() -> TlsKey {
+    CTX_KEY.get().copied().unwrap()
 }
 
 /// Fork guard baseline: count of threads attributable to the guest when guest main
@@ -594,27 +596,18 @@ pub unsafe fn guest_spawned_threads(ctx: *mut Ctx) -> bool {
 /// Ctx teardown during the TSD phase: deferred for 3 rounds (re-hang → glibc appends rounds, max
 /// 4)—guest pthread-key dtors (std run_dtors thunk, key order uncontrollable) can always execute
 /// on a living Ctx; the final round actually destroys it (ByteRegion munmap, etc.).
-fn block_thread_signals_for_exit() -> libc::sigset_t {
-    let mut signals: libc::sigset_t = unsafe { std::mem::zeroed() };
-    unsafe { libc::sigemptyset(&mut signals) };
-    for signum in 1..super::super::signal::SIGNAL_SLOTS as i32 {
-        if matches!(signum, libc::SIGKILL | libc::SIGSTOP) {
-            continue;
+fn block_thread_signals_for_exit() -> SignalMask {
+    match set_thread_mask(MaskOp::Block, &SignalMask::all_blockable()) {
+        Ok(previous) => previous,
+        Err(error) => {
+            eprintln!("mirvm[m4-engine]: failed to block signals before pthread exit: {error}");
+            std::process::abort();
         }
-        unsafe { libc::sigaddset(&mut signals, signum) };
     }
-    let mut previous: libc::sigset_t = unsafe { std::mem::zeroed() };
-    let error = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &signals, &mut previous) };
-    if error != 0 {
-        eprintln!("mirvm[m4-engine]: failed to block signals before pthread exit: {error}");
-        std::process::abort();
-    }
-    previous
 }
 
-fn restore_thread_signal_mask_for_exit(mask: &libc::sigset_t) {
-    let error = unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, mask, std::ptr::null_mut()) };
-    if error != 0 {
+fn restore_thread_signal_mask_for_exit(mask: &SignalMask) {
+    if let Err(error) = set_thread_mask(MaskOp::Set, mask) {
         eprintln!(
             "mirvm[m4-engine]: failed to restore signals while draining pthread exit: {error}"
         );
@@ -672,7 +665,7 @@ pub(super) unsafe extern "C" fn ctx_key_dtor(p: *mut std::ffi::c_void) {
                 // The next libc pass is globally the last one. Managed keys
                 // below this raw slot will run before Ctx; keys above it are
                 // completed here after Ctx receives control.
-                (*contexts).final_tsd_cursor = Some(key.as_raw());
+                (*contexts).final_tsd_cursor = Some(key);
                 THREAD_CONTEXT_EXITING.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             crate::os::thread::tls_set(key, p);
@@ -686,7 +679,7 @@ pub(super) unsafe extern "C" fn ctx_key_dtor(p: *mut std::ffi::c_void) {
         }
         let key = *CTX_KEY.get().unwrap();
         (*contexts).final_tsd_active = true;
-        (*contexts).final_tsd_cursor = Some(key.as_raw());
+        (*contexts).final_tsd_cursor = Some(key);
         // pthread clears a key before invoking its destructor. Reinstall this
         // process-lifetime context only while target-thread callbacks drain so
         // their ordinary Engine activations reuse the valid final-round state.

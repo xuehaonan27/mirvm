@@ -52,6 +52,14 @@ pub fn set_errno(value: i32) {
     unsafe { *libc::__errno_location() = value };
 }
 
+/// Terminate this process now, without running a Rust destructor, an `atexit` handler or a stdio
+/// flush. Used from the signal mailbox, where the state that would run those is exactly what is
+/// already known to be broken; the status is the caller's, because only the caller knows which
+/// invariant failed.
+pub fn exit_now(status: i32) -> ! {
+    unsafe { libc::_exit(status) }
+}
+
 /// atexit(3): registers a native trampoline through the libc `atexit` the engine
 /// links, not a guest `dlsym`.
 pub fn atexit_native(cb: extern "C" fn()) -> i32 {

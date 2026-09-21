@@ -503,10 +503,9 @@ fn run_child(name: &str, env: &str) {
     );
 }
 
-fn raw_tsd_registration(engine: &Engine) -> (Arc<TsdRegistration>, libc::pthread_key_t) {
+fn raw_tsd_registration(engine: &Engine) -> (Arc<TsdRegistration>, crate::os::thread::TlsKey) {
     let registration = TsdRegistration::pending(engine.control()).unwrap();
-    let mut key = 0;
-    assert_eq!(unsafe { libc::pthread_key_create(&mut key, None) }, 0);
+    let key = crate::os::thread::tls_key_create(None);
     registration.commit(key);
     (registration, key)
 }
@@ -544,7 +543,7 @@ fn close_inside_reinstalling_tsd_dtor_runs_four_rounds() {
             TSD_KEYS
                 .lock()
                 .unwrap()
-                .get(&(engine.shared().id, key))
+                .get(&(engine.shared().id, crate::os::thread::TlsKey::from_raw(key)))
                 .cloned()
                 .unwrap()
         };
@@ -658,14 +657,14 @@ fn final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback() {
             let target = attached_rx.recv().unwrap() as libc::pthread_t;
             let mut filler_keys = Vec::new();
             if let Some(low_key) = low_key {
-                assert!(low_key < ctx_key);
+                assert!(low_key < ctx_key.as_raw());
                 assert_eq!(unsafe { libc::pthread_key_delete(low_key) }, 0);
             } else {
                 loop {
                     let mut key = 0;
                     assert_eq!(unsafe { libc::pthread_key_create(&mut key, None) }, 0);
                     filler_keys.push(key);
-                    if key > ctx_key {
+                    if key > ctx_key.as_raw() {
                         break;
                     }
                 }
@@ -675,7 +674,10 @@ fn final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback() {
             if let Some(low_key) = low_key {
                 assert_eq!(guest_key, low_key, "guest TSD did not reuse the low key");
             } else {
-                assert!(guest_key > ctx_key, "guest TSD did not use a high key");
+                assert!(
+                    guest_key > ctx_key.as_raw(),
+                    "guest TSD did not use a high key"
+                );
             }
             assert!(matches!(registered, Ok(RunOutcome::Returned(_))));
 
@@ -741,7 +743,7 @@ fn pthread_key_create_commit_linearizes_with_close() {
             gate.wait();
             Some(close)
         };
-        registration.commit(key);
+        registration.commit(crate::os::thread::TlsKey::from_raw(key));
         if let Some(close) = close {
             close.join().unwrap();
         }
@@ -750,7 +752,7 @@ fn pthread_key_create_commit_linearizes_with_close() {
             !TSD_KEYS
                 .lock()
                 .unwrap()
-                .contains_key(&(engine.shared().id, key))
+                .contains_key(&(engine.shared().id, crate::os::thread::TlsKey::from_raw(key)))
         );
     }
 }
@@ -765,7 +767,7 @@ fn pthread_setspecific_operation_blocks_close_revocation() {
         let operation = prepare_pthread_operation(
             engine.shared(),
             "pthread_setspecific",
-            &[key as u64, value as u64],
+            &[key.as_raw() as u64, value as u64],
         )
         .unwrap();
         if iteration % 2 == 0 {
@@ -782,14 +784,17 @@ fn pthread_setspecific_operation_blocks_close_revocation() {
             close.join().unwrap();
         }
         assert_eq!(engine.state(), super::super::ctx::EngineState::Closing);
-        let result = unsafe { libc::pthread_setspecific(key, value) };
+        let result = unsafe { libc::pthread_setspecific(key.as_raw(), value) };
         assert_eq!(result, 0, "close revoked a key during pthread_setspecific");
         operation.complete(result as u64);
 
-        let clear =
-            prepare_pthread_operation(engine.shared(), "pthread_setspecific", &[key as u64, 0])
-                .unwrap();
-        let result = unsafe { libc::pthread_setspecific(key, std::ptr::null()) };
+        let clear = prepare_pthread_operation(
+            engine.shared(),
+            "pthread_setspecific",
+            &[key.as_raw() as u64, 0],
+        )
+        .unwrap();
+        let result = unsafe { libc::pthread_setspecific(key.as_raw(), std::ptr::null()) };
         assert_eq!(result, 0, "tracked pthread key became invalid before clear");
         clear.complete(result as u64);
         drop(lease);
@@ -803,9 +808,12 @@ fn pthread_key_delete_operation_blocks_close_revocation() {
         let engine = engine(Module::default(), false);
         let (_registration, key) = raw_tsd_registration(&engine);
         let lease = engine.execution_lease().unwrap();
-        let operation =
-            prepare_pthread_operation(engine.shared(), "pthread_key_delete", &[key as u64])
-                .unwrap();
+        let operation = prepare_pthread_operation(
+            engine.shared(),
+            "pthread_key_delete",
+            &[key.as_raw() as u64],
+        )
+        .unwrap();
         if iteration % 2 == 0 {
             engine.close();
         } else {
@@ -820,7 +828,7 @@ fn pthread_key_delete_operation_blocks_close_revocation() {
             close.join().unwrap();
         }
         assert_eq!(engine.state(), super::super::ctx::EngineState::Closing);
-        let result = unsafe { libc::pthread_key_delete(key) };
+        let result = unsafe { libc::pthread_key_delete(key.as_raw()) };
         operation.complete(result as u64);
         drop(lease);
         engine.wait_closed().unwrap();
@@ -843,7 +851,7 @@ fn deleted_tsd_destructor_thunk_is_a_stable_noop() {
         let registration = TSD_KEYS
             .lock()
             .unwrap()
-            .get(&(engine.shared().id, key))
+            .get(&(engine.shared().id, crate::os::thread::TlsKey::from_raw(key)))
             .cloned()
             .unwrap();
         registration.state.lock().unwrap().code
@@ -879,7 +887,7 @@ fn native_archive_key_delete_revokes_tracked_registration() {
         !TSD_KEYS
             .lock()
             .unwrap()
-            .contains_key(&(engine.shared().id, key)),
+            .contains_key(&(engine.shared().id, crate::os::thread::TlsKey::from_raw(key))),
         "native pthread_key_delete left a stale MIRVM registration"
     );
     engine.close();
