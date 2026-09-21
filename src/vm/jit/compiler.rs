@@ -245,7 +245,7 @@ impl<'a> Compiler<'a> {
         jb.symbol("memmove", crate::os::process::memmove_addr());
         jb.symbol("memset", crate::os::process::memset_addr());
         jb.symbol("memcmp", crate::os::process::memcmp_addr());
-        for (n, p) in libm_syms() {
+        for (n, p) in crate::os::libm::symbols() {
             jb.symbol(n, p as *const u8);
         }
         let mut module = JITModule::new(jb);
@@ -1080,7 +1080,7 @@ impl<'a> Compiler<'a> {
         }
         let mut eh = EhFrame(EndianVec::new(RunTimeEndian::Little));
         table.write_eh_frame(&mut eh).unwrap();
-        super::register_eh_frame_section(eh.0.into_vec());
+        crate::os::unwind::register_frame_section(eh.0.into_vec());
     }
 
     fn finalized_symbol_ranges(&self, symbols: Vec<PendingJitSymbol>) -> Vec<JitSymbolRange> {

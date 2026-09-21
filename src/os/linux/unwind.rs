@@ -16,6 +16,21 @@ unsafe extern "C" {
     fn _Unwind_DeleteException(exception: *mut RawException);
 }
 
+/// Register one complete `.eh_frame` section with the process unwinder.
+///
+/// The CIE records at the start of the section are shared by its FDE records, so the registration
+/// unit has to be the complete section, not a single FDE. The unwinder retains the bytes for the
+/// process lifetime, which is why they are leaked rather than owned.
+pub fn register_frame_section(mut bytes: Vec<u8>) {
+    unsafe extern "C" {
+        fn __register_frame(begin: *const u8);
+    }
+
+    bytes.extend_from_slice(&[0, 0, 0, 0]);
+    let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+    unsafe { __register_frame(bytes.as_ptr()) };
+}
+
 /// One frame's context, as the unwinder hands it to a trace callback.
 pub type Context = *mut std::ffi::c_void;
 
