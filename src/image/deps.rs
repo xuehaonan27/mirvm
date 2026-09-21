@@ -154,7 +154,7 @@ pub fn try_load(
     }
     // The frozen area must actually land in the spline k=0 domain the layer below expects: this
     // rejects a swapped file and a stolen domain alike.
-    if !entry::frozen_at(&f.module, Some(crate::vm::addrlayout::image_addr(0))) {
+    if !entry::frozen_at(&f.module, Some(crate::os_arch::addrspace::image_addr(0))) {
         return None;
     }
     let prefix = crate::vm::verify::Prefix {
@@ -198,7 +198,7 @@ pub fn store_and_wrap(
     // Foreign symbols go through GOT slots: the image-side GOT table travels with the file and is
     // refilled with this process's real values at startup, so it does not block writing the file.
     let cacheable =
-        entry::snapshot_is_publishable(&bi.module, Some(crate::vm::addrlayout::image_addr(0)));
+        entry::snapshot_is_publishable(&bi.module, Some(crate::os_arch::addrspace::image_addr(0)));
     let keyed = pre_key(rustc_args, base_key);
     if let (true, Some((key, stamps))) = (cacheable, keyed) {
         let mut fn_entry_syms = bi

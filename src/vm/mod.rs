@@ -4,7 +4,6 @@
 //! Typed bytecode + byte-region frames + typed interp_frame. The load phase (lowering MIR to this
 //! IR) lives in `src/lower/` (rustc_private domain); its product is handed off via `ir::Module`.
 
-pub(crate) mod addrlayout;
 pub(crate) mod backtrace;
 pub(crate) mod codearena;
 pub(crate) mod ctx;

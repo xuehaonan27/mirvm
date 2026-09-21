@@ -17,8 +17,10 @@
 /// Frozen arena capacity (virtually reserved; physical pages are allocated on touch).
 const FROZEN_CAP: usize = 256 << 20;
 
-/// Fixed-base numeric values and whitelist criteria live in `super::addrlayout` (shared constant layer); see that module header for address-selection rationale and domain model.
-use super::addrlayout::{BASE_IMAGE_FIXED_ADDR, DELTA_FIXED_ADDR, image_addr, is_valid_home};
+/// Fixed-base numeric values and whitelist criteria live in `crate::os_arch::addrspace` (this pair's fixed-address layout); see that module header for the address-selection rationale and the domain model.
+use crate::os_arch::addrspace::{
+    BASE_IMAGE_FIXED_ADDR, DELTA_FIXED_ADDR, image_addr, is_valid_home,
+};
 
 pub struct FrozenArena {
     base: *mut u8,
@@ -300,11 +302,11 @@ unsafe impl Sync for FrozenArena {}
 mod tests {
     use std::sync::{LazyLock, Mutex};
 
-    use super::super::addrlayout::{
+    use super::FrozenArena;
+    use crate::os_arch::addrspace::{
         BASE_IMAGE_FIXED_ADDR, DELTA_FIXED_ADDR, IMAGE_SPLINE_BASE, IMAGE_SPLINE_COUNT,
         IMAGE_SPLINE_STEP, image_addr, is_valid_home,
     };
-    use super::FrozenArena;
 
     static FIXED_ADDRESS_TEST: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 

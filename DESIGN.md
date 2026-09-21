@@ -311,11 +311,18 @@ src/os/
     signal.rs   — signal/sigaction 原语、disposition 查询/安装与 SEGV dump
     dll.rs      — dlopen/dlsym/dlerror/dlinfo 装载基址（+ 测试档 open_with_flags/close）
     process.rs  — getenv/write/strlen/fork/atexit/syscall 变参单点 + JIT libcall 地址族
+
+src/os_arch/           — 同时属于「某内核 + 某 CPU」的知识，OpenJDK os_cpu 同款
+  mod.rs        — 边界契约 + pair 选定（目录名 <os>_<arch>）+ pair 必须提供的子系统清单
+  linux_x86_64/
+    addrspace.rs — 固定基址布局（cacheability 结构由引擎要求，数值取自本 pair 的地址空间）
+    signal.rs    — SA_RESTORER/restorer、裸 rt_sigaction 布局、信号入口 stub、ucontext 寄存器下标
+    thread.rs    — 裸 futex wait/wake、用户地址宽度
 ```
 
   guest 语义裁决（fork 守卫、信号白名单、sigaction 改拷贝文案）仍在引擎业务侧，
-  os:: 只供原语——OpenJDK `os::` 同款纪律。固定基址数值另提升为
-  `vm/addrlayout.rs` 共享常量层（frozen/codearena/ir 白名单三方共享）。
+  os:: 只供原语——OpenJDK `os::` 同款纪律；需要「一个内核与一个 CPU 同时成立」的知识时，
+  经 `os_arch::<子系统>` 这一条路径取，os:: 与 arch:: 都不重复声明它。
 
 ### 工程决策
 
