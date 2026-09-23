@@ -16,7 +16,6 @@
 //! foreign-owned panics, EngineFaults and host exceptions propagate unchanged.
 
 use std::cell::Cell;
-use std::sync::Mutex;
 
 use super::ctx::{Ctx, Engine, Shared};
 use super::dispatch::call_guest;
@@ -24,7 +23,7 @@ use super::frame::ByteRegion;
 use super::ir::{
     AsmIoDst, AsmIoVal, Bb, Block, FfiKind, FuncBody, IntBinOp, IntCc, Module, Operand, ParamAbi,
     PlaceBase, PlaceExpr, PlaceStep, RetAbi, RetDest, Rvalue, ScalarPlace, Slot, Stmt, SwitchDiscr,
-    Terminator, UnwindAction, Width,
+    Terminator, Width,
 };
 use super::unwind::engine_abort;
 
@@ -78,28 +77,10 @@ mod call;
 mod place;
 mod runblocks;
 mod rvalue;
-mod services;
 mod stmt;
 
-#[cfg(feature = "cranelift")]
-pub(crate) use call::exec_builtin;
 pub(crate) use call::interp_frame;
 pub(crate) use place::*;
-use services::run_atexit_callbacks;
-
-pub(crate) fn discard_engine_state(engine_id: u64) {
-    services::discard_atexit_callbacks(engine_id);
-}
-
-#[cfg(test)]
-pub(crate) fn seed_engine_state_for_test(engine_id: u64) {
-    services::seed_atexit_callback(engine_id);
-}
-
-#[cfg(test)]
-pub(crate) fn has_engine_state_for_test(engine_id: u64) -> bool {
-    services::has_atexit_callbacks(engine_id)
-}
 
 struct FrameGuard {
     ctx: *mut Ctx,
@@ -230,7 +211,7 @@ pub fn run_main(engine: &Engine) -> Result<RunOutcome<i32>, RunError> {
         RunOutcome::Returned(code) => code,
         RunOutcome::GuestPanic => 101,
     };
-    run_atexit_callbacks(ctx_ptr, exit_code);
+    crate::vm::atexit::run_callbacks(ctx_ptr, exit_code);
     Ok(outcome)
 }
 
@@ -274,7 +255,7 @@ pub unsafe fn run_export(
     super::ctx::set_fork_baseline(shared); // pin the fork guard baseline for a single-threaded guest
     match super::unwind::catch_raw(|| call_guest(ctx_ptr, id, args)) {
         Ok((lo, hi)) => {
-            run_atexit_callbacks(ctx_ptr, 0);
+            crate::vm::atexit::run_callbacks(ctx_ptr, 0);
             Ok(RunOutcome::Returned(RawReturn { lo, hi }))
         }
         Err(exception) => match exception.take_mirvm(shared) {

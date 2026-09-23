@@ -1,16 +1,16 @@
 //! The `run_blocks` execution loop, shared by normal execution and cleanup chains:
 //! Goto/SwitchInt/Call/CallForeign/CallIndirect/CallBuiltin/InlineAsm/Return/Resume/
-//! Terminate. CallBuiltin is a thin arm here; its semantics live in `call::exec_builtin`,
-//! which the JIT helpers share so the two backends cannot drift.
+//! Terminate. CallBuiltin is a thin arm here; its semantics live in
+//! `semantics::builtin::exec_builtin`, which the JIT helpers share so the two backends cannot
+//! drift.
 //!
 //! `edge` hands the current cleanup target to `interp_frame`'s raw catch boundary.
 
+use super::stmt::exec_stmt;
 use super::*;
-use super::{
-    call::{call_guarding_terminate, cleanup_edge, exec_builtin},
-    stmt::exec_stmt,
-};
 use crate::vm::ir::CallRole;
+use crate::vm::semantics::builtin::exec_builtin;
+use crate::vm::unwind::guarding_terminate;
 
 pub(super) fn run_blocks(
     ctx: *mut Ctx,
@@ -63,8 +63,8 @@ pub(super) fn run_blocks(
                 }
                 av.extend(aops.iter().map(|o| eval_operand(ctx, base, o).0));
                 // If the callee panics, this frame cleans up along this edge.
-                edge.set(cleanup_edge(unwind));
-                let call = || call_guarding_terminate(unwind, || call_guest(ctx, *callee, &av));
+                edge.set(unwind.cleanup_edge());
+                let call = || guarding_terminate(unwind, || call_guest(ctx, *callee, &av));
                 let (lo, hi) = match role {
                     CallRole::Normal => call(),
                     CallRole::MainPanicBoundary => {
@@ -94,7 +94,7 @@ pub(super) fn run_blocks(
                 let shared: &'static Shared = unsafe { &*(*ctx).shared };
                 let callbacks =
                     crate::vm::thunks::prepare_foreign_callbacks(shared, sym, sig, &mut av);
-                edge.set(cleanup_edge(unwind));
+                edge.set(unwind.cleanup_edge());
                 // C1: a by-value aggregate return uses the Indirect destination (enforced at
                 // the call site) and the FFI layer memcpys to that true address, while a
                 // scalar return keeps the u64 channel.
@@ -113,7 +113,7 @@ pub(super) fn run_blocks(
                 // Symbol resolution mutates the per-thread FFI cache, so this mutable borrow
                 // must end before entering native: native can synchronously call back into the
                 // guest, and that callback can call foreign again on the same Ctx.
-                let resolved = call_guarding_terminate(unwind, || {
+                let resolved = guarding_terminate(unwind, || {
                     let ffi = unsafe { &mut (*ctx).ffi };
                     ffi.resolve(
                         sym,
@@ -124,7 +124,7 @@ pub(super) fn run_blocks(
                     )
                 });
                 let r = match resolved {
-                    Ok(Some(fnptr)) => Ok(Some(call_guarding_terminate(unwind, || {
+                    Ok(Some(fnptr)) => Ok(Some(guarding_terminate(unwind, || {
                         crate::vm::ffi::call_addr(fnptr, sig, &av, ret_dst)
                     }))),
                     Ok(None) => Ok(None),
@@ -185,9 +185,9 @@ pub(super) fn run_blocks(
                     av.push(eval_place_addr(ctx, base, dst));
                 }
                 av.extend(aops.iter().map(|o| eval_operand(ctx, base, o).0));
-                edge.set(cleanup_edge(unwind));
+                edge.set(unwind.cleanup_edge());
                 let (lo, hi) = if let Some(&fid) = module.fn_addrs.get(&addr) {
-                    call_guarding_terminate(unwind, || call_guest(ctx, fid, &av))
+                    guarding_terminate(unwind, || call_guest(ctx, fid, &av))
                 } else if let Some(nsig) = native_sig {
                     // The reverse FFI direction: the guest holds a native fn pointer to real
                     // code (obtained at runtime through dlsym, e.g. __pthread_get_minstack), so
@@ -201,7 +201,7 @@ pub(super) fn run_blocks(
                         (None, &av[..])
                     };
                     (
-                        call_guarding_terminate(unwind, || {
+                        guarding_terminate(unwind, || {
                             crate::vm::ffi::call_addr(addr as usize, nsig, arg_slice, ret_dst)
                         }),
                         0,

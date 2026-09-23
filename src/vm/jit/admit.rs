@@ -343,7 +343,7 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
                     )
             }
             // CallBuiltin (mirvm_call_builtin/mirvm_alloc helper, same body as the interpreter's
-            // exec_builtin): all three unwind actions are admitted (same as Call); args are evaluable; the
+            // semantics::builtin): all three unwind actions are admitted (same as Call); args are evaluable; the
             // ret destination has the same full shape as the interpreter.
             Terminator::CallBuiltin {
                 args, ret, unwind, ..

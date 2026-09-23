@@ -71,7 +71,7 @@ struct Compiler<'a> {
     call_indirect: ClifFuncId,
     tls_ref: ClifFuncId,
     call_foreign: ClifFuncId,
-    /// CallBuiltin and the allocation fast path; same `exec_builtin` bodies as
+    /// CallBuiltin and the allocation fast path; same `semantics::builtin` bodies as
     /// `helpers.rs`.
     call_builtin: ClifFuncId,
     alloc: ClifFuncId,

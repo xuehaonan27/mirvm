@@ -192,12 +192,12 @@ fn engine_unregisters_and_releases_shared_state_on_drop() {
         let engine = Engine::new(shared);
         let id = engine.shared().id;
         assert!(super::engine(id).is_some());
-        super::super::interp::seed_engine_state_for_test(id);
-        assert!(super::super::interp::has_engine_state_for_test(id));
+        crate::vm::atexit::seed_callback(id);
+        assert!(crate::vm::atexit::has_callbacks(id));
         (id, Arc::downgrade(engine.shared()))
     };
     assert!(super::engine(id).is_none());
-    assert!(!super::super::interp::has_engine_state_for_test(id));
+    assert!(!crate::vm::atexit::has_callbacks(id));
     assert!(weak.upgrade().is_none());
 }
 

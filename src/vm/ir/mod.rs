@@ -706,6 +706,17 @@ pub enum UnwindAction {
     Terminate,
 }
 
+impl UnwindAction {
+    /// The cleanup target block of this edge, if it has one.
+    #[inline]
+    pub(crate) fn cleanup_edge(&self) -> Option<Bb> {
+        match self {
+            UnwindAction::Cleanup(b) => Some(*b),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::program::{
