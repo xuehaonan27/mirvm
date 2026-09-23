@@ -6,6 +6,7 @@
 
 pub mod dll;
 pub mod fs;
+pub mod linker;
 pub mod mem;
 pub mod process;
 pub mod thread;

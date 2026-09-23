@@ -494,7 +494,9 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, Error> {
     std::fs::write(&s_path, asm).map_err(|e| Error::io("failed to write the global-asm .s", e))?;
     let tmp = crate::store::staging_path(&so);
     let status = std::process::Command::new("cc")
-        .args(["-shared", "-fPIC", "-nostartfiles", "-Wl,-Bsymbolic", "-o"])
+        .args(crate::os::linker::COMMON)
+        .args(crate::os::linker::GLOBAL_ASM)
+        .arg("-o")
         .arg(&tmp)
         .arg(&s_path)
         .args(crate::native::archive::NATIVE_RUNTIME_WRAP_FLAGS)
