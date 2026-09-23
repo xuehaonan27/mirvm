@@ -96,10 +96,10 @@ fn symbol_at<'a>(
     let base = usize::try_from(table.offset)
         .ok()?
         .checked_add(index.checked_mul(usize::try_from(table.entsize).ok()?)?)?;
-    let name_offset = elf::u32_at(bytes, base)?;
-    let binding = bytes.get(base + 4).copied()? >> 4;
-    let section_index = elf::u16_at(bytes, base + 6)?;
-    let value = elf::u64_at(bytes, base + 8)?;
+    let name_offset = elf::u32_at(bytes, base + elf::sym::NAME)?;
+    let binding = bytes.get(base + elf::sym::INFO).copied()? >> 4;
+    let section_index = elf::u16_at(bytes, base + elf::sym::SHNDX)?;
+    let value = elf::u64_at(bytes, base + elf::sym::VALUE)?;
     let name_start = usize::try_from(strtab.offset)
         .ok()?
         .checked_add(usize::try_from(name_offset).ok()?)?;
