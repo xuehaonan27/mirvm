@@ -42,14 +42,15 @@ fn both_code_domains_compile_the_same_body() {
 }
 
 /// The trace domain is a separate ISA because pinning a register is an ISA-wide
-/// decision. Plain code must keep `r15` allocatable and carry no recorder state,
+/// decision. Plain code must keep the pinned register allocatable and carry no recorder state,
 /// so the two domains cannot share one `Flags`.
 #[test]
 fn trace_domain_enables_the_pinned_register_and_plain_does_not() {
     let trace = trace_domain_flags();
     assert!(
         trace.enable_pinned_reg(),
-        "trace domain must enable the pinned register (r15 on x86-64)"
+        "trace domain must enable the pinned register ({})",
+        crate::arch::PINNED_REG
     );
 
     // The plain domain must stay exactly as it is: no pinned register, so
@@ -66,13 +67,15 @@ fn trace_domain_enables_the_pinned_register_and_plain_does_not() {
         "plain domain must not reserve a register for collection"
     );
 
-    // The trace ISA must build on this host. On x86-64 Cranelift's pinned
-    // register is r15, the register trace code holds the current producer in.
+    // The trace ISA must build on this host with the reservation actually in
+    // place: which register it is belongs to the architecture, not to a target
+    // triple, so the invariant is the setting rather than the host's name.
     let isa = trace_domain_isa();
     assert!(
-        format!("{}", isa.triple()).contains("x86_64"),
-        "this slice's pinned-register story is x86-64 only, got {}",
-        isa.triple()
+        isa.flags().enable_pinned_reg(),
+        "the trace ISA on {} must reserve {} for the producer",
+        isa.triple(),
+        crate::arch::PINNED_REG
     );
 }
 

@@ -16,13 +16,14 @@ fn plain_domain_flags() -> settings::Flags {
 ///
 /// The trace domain is a separate Cranelift ISA/module from the plain domain:
 /// it enables the pinned register so trace code can hold the current thread's
-/// recorder state in `r15` and reach the inline syscall path without a TLS
-/// lookup or a global session check. On x86-64 Cranelift's pinned register is
-/// exactly `r15` (`isa/x64/inst/regs.rs`, documented there as matching
-/// Spidermonkey's HeapReg).
+/// recorder state in the register Cranelift reserves for it and reach the inline
+/// syscall path without a TLS lookup or a global session check. Which register
+/// that is belongs to the architecture ([`crate::arch::PINNED_REG`]); Cranelift
+/// documents the choice in its own register environment.
 ///
 /// The setting is ISA-wide, so the trace domain cannot be a flag on the plain
-/// ISA: plain code must keep `r15` allocatable and carry no collection state.
+/// ISA: plain code must keep that register allocatable and carry no collection
+/// state.
 /// This constructor is the single home for that separation.
 pub(crate) fn trace_domain_flags() -> settings::Flags {
     let mut fb = settings::builder();
@@ -45,7 +46,14 @@ pub(crate) fn domain_isa(domain: CodeDomain) -> cranelift_codegen::isa::OwnedTar
     cranelift_native::builder()
         .expect("native ISA builder")
         .finish(flags)
-        .expect("native ISA accepts the domain flags")
+        .unwrap_or_else(|error| {
+            // The flag this constructor adds is the one most likely to be refused, and it is
+            // about exactly one register, so the message names it.
+            panic!(
+                "native ISA rejects the domain flags (pinned register {}): {error}",
+                crate::arch::PINNED_REG
+            )
+        })
 }
 
 /// Build the trace domain's ISA. Only tests call this today, hence the `dead_code`
