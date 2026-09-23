@@ -84,12 +84,18 @@ pub enum Error {
 
     #[error("mprotect({addr:#x}, {size:#x}) failed rc={rc}")]
     Mprotect { addr: usize, size: usize, rc: i32 },
+
+    /// Publishing an object for this process's own loader failed at a step the caller cannot act on
+    /// differently: creating the file, writing it, or getting it past the platform's signer.
+    #[error("{detail}")]
+    PrivateImage { detail: String },
 }
 
 crate::diag_codes! {
     Error: Os => {
         Dlopen => "os.dlopen",
         Mprotect => "os.mprotect",
+        PrivateImage => "os.private_image",
     }
 }
 

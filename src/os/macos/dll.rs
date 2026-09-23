@@ -21,8 +21,88 @@
 //! is short by exactly that. That is read out of the loaded image's own load commands, which is the
 //! same object layout `reloc` and the loader read.
 
-use crate::os::dll::Mode;
+use crate::os::dll::{Mode, ObjectFormat, PrivateImage};
 use std::ffi::{CStr, CString};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
+
+/// The format this platform's loader accepts: an arm64 build loads dylibs, and this is that.
+pub const SYMBOL_IMAGE_FORMAT: ObjectFormat = ObjectFormat::MachO;
+
+/// Publishes `bytes` as an object this process's loader can load, and answers the handle, the base
+/// its contents were mapped at, and the file that keeps them readable.
+///
+/// Unlike the other platform, the bytes have to reach the loader through a *named* file, and twice
+/// over: this platform refuses to load an unsigned image at all, so its own signer has to see the
+/// file first, and a signer takes a path. The name then has to stay for as long as the image is
+/// loaded, because a symbolizer reads the symbols back out of the file rather than out of the
+/// mapping; the caller's [`PrivateImage`] removes it when the image is unloaded.
+pub fn load_private_image(bytes: &[u8], name: &CStr) -> Result<PrivateImage, crate::os::Error> {
+    let path = private_file(name).ok_or_else(|| crate::os::Error::PrivateImage {
+        detail: format!("mkstemp failed: {}", std::io::Error::last_os_error()),
+    })?;
+    match publish(bytes, &path) {
+        Ok(image) => Ok(image),
+        Err(error) => {
+            let _ = std::fs::remove_file(&path);
+            Err(error)
+        }
+    }
+}
+
+/// Writes `bytes` to `path`, has this platform's signer accept it, and loads it.
+fn publish(bytes: &[u8], path: &Path) -> Result<PrivateImage, crate::os::Error> {
+    let failure = |detail: String| crate::os::Error::PrivateImage { detail };
+    std::fs::write(path, bytes)
+        .map_err(|error| failure(format!("writing `{}` failed: {error}", path.display())))?;
+
+    let signed = std::process::Command::new("codesign")
+        .args(["-s", "-", "--force"])
+        .arg(path)
+        .output()
+        .map_err(|error| failure(format!("cannot launch codesign: {error}")))?;
+    if !signed.status.success() {
+        return Err(failure(format!(
+            "codesign refused `{}`: {}{}",
+            path.display(),
+            String::from_utf8_lossy(&signed.stdout),
+            String::from_utf8_lossy(&signed.stderr)
+        )));
+    }
+
+    let cpath = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| failure("the private object's path contains NUL".to_string()))?;
+    let handle = open_with_flags(&cpath, libc::RTLD_NOW | libc::RTLD_LOCAL)?;
+    let Some(bias) = load_bias(handle, &cpath) else {
+        unsafe { close(handle) };
+        return Err(failure(
+            "reading the private object's load base failed".to_string(),
+        ));
+    };
+    Ok(PrivateImage::new(
+        handle,
+        bias,
+        None,
+        Some(path.to_path_buf()),
+    ))
+}
+
+/// A file this process owns that keeps its name, which the signer and the loader both need. The
+/// descriptor `mkstemp` returned is only the constructor of the name.
+fn private_file(name: &CStr) -> Option<PathBuf> {
+    let stamp = name.to_string_lossy().replace('/', "_");
+    let template = std::env::temp_dir().join(format!("mirvm-{stamp}-XXXXXX"));
+    let mut bytes = template.into_os_string().into_vec();
+    bytes.push(0);
+    // SAFETY: the template is NUL-terminated and ends in the six characters `mkstemp` requires.
+    let fd = unsafe { libc::mkstemp(bytes.as_mut_ptr().cast()) };
+    if fd < 0 {
+        return None;
+    }
+    unsafe { libc::close(fd) };
+    bytes.pop();
+    Some(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+}
 
 /// `dlopen`.
 /// # Return value
