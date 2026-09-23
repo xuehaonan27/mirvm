@@ -1,11 +1,13 @@
-//! Activation boundary: the pinned code-domain entry into an Engine and the main-run panic
-//! boundary.
+//! Activation boundary: the pinned code-domain entry into an Engine.
 //!
 //! A trace body only runs behind the pinned-register boundary installed here, and a plain body
 //! never carries a recorder: the code domain is copied out of `Shared` into `ThreadContexts` for
 //! the duration of the activation, and only the trace domain opens a recorder. A nested
 //! activation saves and restores that value, so a guest -> native -> guest chain keeps the domain
 //! it entered from and never migrates mid-chain.
+//!
+//! The serial this boundary assigns is what [`super::main_run`] compares a main panic catch
+//! against, which keeps a signal handler or thunk re-entry from claiming the outer run's catch.
 
 use std::sync::Arc;
 
