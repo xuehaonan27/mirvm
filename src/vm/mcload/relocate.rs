@@ -10,6 +10,7 @@
 
 use crate::arch::reloc;
 use crate::native::elf;
+use crate::os_arch::reloc::classify;
 
 use super::bad;
 use super::dynamic::Dynamic;
@@ -90,7 +91,7 @@ fn apply_one(
 ) -> Result<(), String> {
     let ty = info as u32;
     let symbol_index = (info >> 32) as usize;
-    let kind = reloc::classify(ty);
+    let kind = classify(ty);
     let write_size = reloc::field_width(kind) as u64;
     if kind != reloc::Kind::None && !mapping.contains(offset, write_size) {
         return Err(format!(

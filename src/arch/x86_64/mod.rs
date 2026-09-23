@@ -6,7 +6,6 @@
 pub mod asm_text;
 pub mod asmstub;
 pub mod intrinsics;
-pub mod reloc;
 
 pub(crate) use intrinsics::*;
 

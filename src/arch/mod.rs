@@ -40,8 +40,9 @@
 //!   the pair's, because they name the object format as well as the instruction.
 //! - `asmstub` — machine-code byte emission (entry stubs), the single-issue instruction primitives
 //!   (`int3`, `xgetbv`), and the trampoline a rewritten `syscall` lands on.
-//! - `reloc` — the meanings a relocation can carry, which every psABI shares, and this
-//!   architecture's classification of its own type numbers onto them.
+//! - `reloc` — the meanings a relocation can carry, which every psABI and object format shares.
+//!   The classification of a format's own numbering onto them is the pair's
+//!   (`crate::os_arch::reloc`), because the numbering belongs to the format.
 //! - `x86_64` — the architecture's own instruction implementations, named directly only by guest
 //!   semantics that target this CPU: such a caller states that one guest operation *is* one host
 //!   instruction, which is a fact about a specific guest and host together.

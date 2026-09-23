@@ -2,9 +2,11 @@
 //!
 //! A relocation record patches one field of an image, and the *meaning* of that patch is one
 //! vocabulary on every psABI: an absolute value, a place-relative one, a slot the loader fills from
-//! a symbol, a thread-local one, or a copy. An architecture owns the numbers and the mapping from
-//! them ([`classify`] is each architecture's); a caller reads the meaning here without naming a
-//! CPU, which is what lets the loader in `crate::vm::mcload` stay architecture-neutral.
+//! a symbol, a thread-local one, or a copy. No architecture and no object format owns this
+//! vocabulary — each psABI and each format classifies its own numbering onto it — so a caller reads
+//! the meaning here without naming either, which is what lets the loader in `crate::vm::mcload` stay
+//! neutral. The *classification* is the pair's, in `crate::os_arch::reloc`, because the numbering it
+//! reads belongs to the object format.
 //!
 //! Applying a patch to a mapped image, and the failure wording for a meaning this engine does not
 //! apply, stay with that loader.
@@ -42,7 +44,3 @@ pub(crate) fn field_width(kind: Kind) -> usize {
         _ => 8,
     }
 }
-
-/// This architecture's mapping from its own relocation type numbers to a [`Kind`].
-#[cfg(target_arch = "x86_64")]
-pub(crate) use super::x86_64::reloc::classify;
