@@ -1,8 +1,12 @@
-//! The relocation type numbers an x86_64 object can carry.
+//! The relocation type numbers an ELF64 image on this pair can carry.
 //!
-//! The numbering is the architecture's own (the psABI's `R_X86_64_*`). What each number *means* is
-//! [`crate::arch::reloc::Kind`], because that vocabulary is the same on every psABI; this file owns
-//! only the numbers and the mapping onto those meanings.
+//! The numbering is the *object format's*, not the CPU's: these `R_X86_64_*` values are the ELF
+//! psABI's, and the same CPU carries a different set (`X86_64_RELOC_*`) in a Mach-O object. What
+//! each number *means* is [`crate::arch::reloc::Kind`], which every format classifies onto and
+//! which therefore stays in the architecture axis.
+//!
+//! Applying a relocation to a mapped image, and the failure wording for a meaning this engine does
+//! not apply, stay with the loader in `crate::vm::mcload`.
 
 use crate::arch::reloc::Kind;
 

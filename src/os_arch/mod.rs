@@ -52,12 +52,12 @@ pub(crate) mod addrspace;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod linux_x86_64;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub(crate) use linux_x86_64::{signal, syscall_asm, thread};
+pub(crate) use linux_x86_64::{reloc, signal, syscall_asm, thread};
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod macos_aarch64;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub(crate) use macos_aarch64::{syscall_asm, thread};
+pub(crate) use macos_aarch64::{reloc, syscall_asm, thread};
 
 #[cfg(not(any(
     all(target_os = "linux", target_arch = "x86_64"),
