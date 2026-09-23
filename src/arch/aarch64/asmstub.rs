@@ -94,52 +94,53 @@ pub const RET: u8 = 0xc0;
 // Frame: 160 bytes = x0..x15 (128) + nzcv (8) + the return address (8), a multiple of 16 so the
 // stack stays aligned for the call, which is the alignment both the ABI and `bl` require. x18 is
 // reserved by this platform and x19 upwards are callee-saved, so neither side needs saving here.
+//
+// A naked function rather than a block of module-level asm: this platform's assembler takes a
+// label written by hand exactly as written, while a Rust `extern "C"` name is spelled with the
+// prefix this object format puts on a C symbol, so a block and the reference to it would name two
+// different symbols. A naked function is one symbol, spelled once, on every platform.
 
-unsafe extern "C" {
-    fn mirvm_syscall_trampoline();
+#[unsafe(naked)]
+pub extern "C" fn mirvm_syscall_trampoline() {
+    core::arch::naked_asm!(
+        "sub sp, sp, #160",
+        "stp x0, x1, [sp, #0]",
+        "stp x2, x3, [sp, #16]",
+        "stp x4, x5, [sp, #32]",
+        "stp x6, x7, [sp, #48]",
+        "stp x8, x9, [sp, #64]",
+        "stp x10, x11, [sp, #80]",
+        "stp x12, x13, [sp, #96]",
+        "stp x14, x15, [sp, #112]",
+        "mrs x9, nzcv",
+        "str x9, [sp, #128]",
+        "str x30, [sp, #144]",
+        // The dispatch takes (call number, pointer to the six argument slots).
+        "mov x1, sp",
+        "mov x0, x16",
+        "bl mirvm_syscall_dispatch",
+        // x0 is the call's result and is deliberately left alone from here on.
+        "ldr x30, [sp, #144]",
+        "ldr x9, [sp, #128]",
+        "msr nzcv, x9",
+        "ldp x10, x11, [sp, #80]",
+        "ldp x12, x13, [sp, #96]",
+        "ldp x14, x15, [sp, #112]",
+        // x9 is restored last among these, so the flag value above survives until the write.
+        "ldp x8, x9, [sp, #64]",
+        "ldp x6, x7, [sp, #48]",
+        "ldp x4, x5, [sp, #32]",
+        "ldp x2, x3, [sp, #16]",
+        "ldr x1, [sp, #8]",
+        "add sp, sp, #160",
+        "ret",
+    );
 }
 
 /// Get trampoline address, which would be filled into asm-stub/global-asm
 pub fn syscall_trampoline_addr() -> u64 {
     mirvm_syscall_trampoline as *const () as u64
 }
-
-std::arch::global_asm!(
-    ".globl mirvm_syscall_trampoline",
-    ".p2align 4",
-    "mirvm_syscall_trampoline:",
-    "sub sp, sp, #160",
-    "stp x0, x1, [sp, #0]",
-    "stp x2, x3, [sp, #16]",
-    "stp x4, x5, [sp, #32]",
-    "stp x6, x7, [sp, #48]",
-    "stp x8, x9, [sp, #64]",
-    "stp x10, x11, [sp, #80]",
-    "stp x12, x13, [sp, #96]",
-    "stp x14, x15, [sp, #112]",
-    "mrs x9, nzcv",
-    "str x9, [sp, #128]",
-    "str x30, [sp, #144]",
-    // The dispatch takes (call number, pointer to the six argument slots).
-    "mov x1, sp",
-    "mov x0, x16",
-    "bl mirvm_syscall_dispatch",
-    // x0 is the call's result and is deliberately left alone from here on.
-    "ldr x30, [sp, #144]",
-    "ldr x9, [sp, #128]",
-    "msr nzcv, x9",
-    "ldp x10, x11, [sp, #80]",
-    "ldp x12, x13, [sp, #96]",
-    "ldp x14, x15, [sp, #112]",
-    // x9 is restored last among these, so the flag value above survives until the write.
-    "ldp x8, x9, [sp, #64]",
-    "ldp x6, x7, [sp, #48]",
-    "ldp x4, x5, [sp, #32]",
-    "ldp x2, x3, [sp, #16]",
-    "ldr x1, [sp, #8]",
-    "add sp, sp, #160",
-    "ret",
-);
 
 /// The contents of one inert symbol-image slot: `ret` followed by padding, so a slot start is
 /// always a decodable instruction and nothing after the return is ever reached.
