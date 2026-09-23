@@ -23,6 +23,9 @@ use super::thread_ctx::{CTX_KEY, CloseSignalDrainGuard, CtxSlot, ThreadContexts}
 pub struct Shared {
     pub id: u64,
     pub module: Module,
+    /// The Engine's symbol carriers, built from the artifact when it is loaded: process state
+    /// lives here rather than in the artifact, which stays a self-contained description.
+    pub symbols: super::super::backtrace::Symbols,
     pub thunks: super::super::thunks::ThunkCache,
     /// Code domain this Engine's activations use. Chosen once,
     /// when the Engine is created, and then held for every activation of this
@@ -66,12 +69,13 @@ impl Shared {
             super::super::jit::CodeDomain::Plain
         };
         module.ensure_function_names();
-        super::super::backtrace::materialize_symbols(&mut module)?;
+        let symbols = super::super::backtrace::Symbols::materialize(&module)?;
         let jit = super::super::jit::JitState::new(module.funcs.len());
         let id = NEXT_ENGINE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(Shared {
             id,
             module,
+            symbols,
             thunks: super::super::thunks::ThunkCache::default(),
             domain,
             jit,

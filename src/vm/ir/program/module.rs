@@ -115,13 +115,6 @@ pub struct Module {
     /// Symbol names in FuncId order. Even when function bodies are decoded lazily, backtrace can build
     /// a standard ELF symbol table from this without decoding every body.
     pub function_names: Vec<Box<str>>,
-    /// FuncId to address in this process's symbol ELF. Generated at load time; never cached or
-    /// packaged.
-    #[serde(skip)]
-    pub backtrace_ips: Vec<u64>,
-    /// Keeps the in-memory ELF file and dlopen object alive for the Engine lifetime.
-    #[serde(skip)]
-    pub backtrace_image: Option<crate::vm::backtrace::SymbolImage>,
     /// Exported `no_mangle` symbol name to FuncId, used by `--vm-call` lookup.
     pub exports: std::collections::HashMap<Box<str>, FuncId>,
     /// Frozen area holding statics, the constant pool and fn entries. Lower materializes it, and it is
