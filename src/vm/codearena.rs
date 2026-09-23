@@ -122,7 +122,7 @@ impl StubArena {
 
     /// Startup fill bytes: `movabs rax, target; jmp rax`. addr must come from alloc_stub in this region.
     pub fn write_stub(&self, addr: u64, target: u64) {
-        let bytes = crate::arch::x86_64::asmstub::emit_stub_bytes(target);
+        let bytes = crate::arch::asmstub::emit_stub_bytes(target);
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), addr as *mut u8, bytes.len()) };
     }
 

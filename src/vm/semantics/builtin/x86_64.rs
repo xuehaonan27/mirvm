@@ -411,10 +411,10 @@ pub(super) fn exec_scalar(builtin: &Builtin, av: &[u64]) -> u64 {
         Builtin::CpuHintNop => 0,
         Builtin::Breakpoint => {
             // Real int3: when not being traced this terminates with SIGTRAP (native semantics).
-            crate::arch::x86_64::asmstub::int3();
+            crate::arch::asmstub::int3();
             0
         }
-        Builtin::Xgetbv => crate::arch::x86_64::asmstub::xgetbv(a(0) as u32),
+        Builtin::Xgetbv => crate::arch::asmstub::xgetbv(a(0) as u32),
         Builtin::X86Crc32U8 => unsafe {
             u64::from(crate::arch::x86_64::crc32_u8(a(0) as u32, a(1) as u8))
         },

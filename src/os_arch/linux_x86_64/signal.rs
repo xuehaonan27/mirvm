@@ -24,7 +24,7 @@ pub const ENTRY_STUB_SIZE: usize = 22;
 /// (signum, siginfo, ucontext) in rdi/rsi/rdx, so the stub supplies the adapter's own argument as
 /// the fourth and tail-jumps: the kernel's stack stays exactly where the restorer expects it.
 pub fn entry_stub_bytes(argument: usize, adapter: usize) -> [u8; ENTRY_STUB_SIZE] {
-    crate::arch::x86_64::asmstub::emit_arg_stub_bytes(argument as u64, adapter as u64)
+    crate::arch::asmstub::emit_arg_stub_bytes(argument as u64, adapter as u64)
 }
 
 std::arch::global_asm!(

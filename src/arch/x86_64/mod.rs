@@ -1,4 +1,7 @@
 //! x86_64 implementation summary
+//!
+//! What a caller outside `src/arch/` may name is declared in `super`; the items here are this
+//! architecture's answer, plus the instruction implementations `super` names directly.
 
 pub mod asm_text;
 pub mod asmstub;

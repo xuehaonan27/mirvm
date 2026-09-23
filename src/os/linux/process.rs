@@ -160,7 +160,7 @@ pub fn memcmp_addr() -> *const u8 {
 }
 
 /// Dispatch entry for `syscall` instructions that asm stubs rewrote to call
-/// `mirvm_syscall_trampoline` through an indirect slot (arch::x86_64::asmstub;
+/// `mirvm_syscall_trampoline` through an indirect slot (arch::asmstub;
 /// integer/flags/xmm/mxcsr state is already preserved under the real syscall
 /// discipline).
 ///
