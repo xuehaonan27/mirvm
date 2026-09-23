@@ -21,7 +21,7 @@
 //! index, [`read`] and [`write`] the two directions, and [`native`] the store side of a package's
 //! libraries.
 
-mod bytes;
+mod fields;
 mod format;
 mod funcs;
 mod meta;

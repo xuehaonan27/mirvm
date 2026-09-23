@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use super::Error;
-use super::bytes::{Cursor, Writer};
+use super::fields;
 
 /// Container magic: eight bytes, and the sniffer's whole criterion.
 pub(super) const MAGIC: &[u8; 8] = b"MIRVMAR\0";
@@ -78,18 +78,18 @@ pub(super) fn build_container(sections: &[(u32, Vec<u8>)]) -> Result<Vec<u8>, Er
         .checked_mul(SECTION_ENTRY_LEN)
         .ok_or_else(|| Error::build("package section table is too large"))?;
 
-    let mut out = Writer::new();
-    out.bytes(MAGIC);
-    out.u32(FMT_VER);
-    out.u32(bid_len);
-    out.bytes(bid);
-    out.u32(section_count);
+    let mut buf = Vec::new();
+    buf.extend_from_slice(MAGIC);
+    buf.extend_from_slice(&FMT_VER.to_le_bytes());
+    buf.extend_from_slice(&bid_len.to_le_bytes());
+    buf.extend_from_slice(bid);
+    buf.extend_from_slice(&section_count.to_le_bytes());
 
     // The table precedes the payloads, so every offset is known before the first payload is
     // written: it begins where the table ends. The header's size is asked of the buffer rather than
     // recomputed, so a header field added above cannot leave the offsets describing a different
     // layout than the one written.
-    let data_start = out
+    let data_start = buf
         .len()
         .checked_add(table_len)
         .ok_or_else(|| Error::build("package size overflow"))?;
@@ -97,21 +97,20 @@ pub(super) fn build_container(sections: &[(u32, Vec<u8>)]) -> Result<Vec<u8>, Er
     for (tag, data) in sections {
         let len =
             u64::try_from(data.len()).map_err(|_| Error::build("package section is too large"))?;
-        out.u32(*tag);
-        out.u64(off);
-        out.u64(len);
-        out.u128(hash128(data));
+        buf.extend_from_slice(&tag.to_le_bytes());
+        buf.extend_from_slice(&off.to_le_bytes());
+        buf.extend_from_slice(&len.to_le_bytes());
+        buf.extend_from_slice(&hash128(data).to_le_bytes());
         off = off
             .checked_add(len)
             .ok_or_else(|| Error::build("package size overflow"))?;
     }
     for (_, data) in sections {
-        out.bytes(data);
+        buf.extend_from_slice(data);
     }
-    // The trailer covers everything before it, so it is taken before it is appended.
-    let whole = hash128(out.as_bytes());
-    out.u128(whole);
-    Ok(out.into_bytes())
+    let whole = hash128(&buf);
+    buf.extend_from_slice(&whole.to_le_bytes());
+    Ok(buf)
 }
 
 pub(super) fn parse_container(raw: &[u8]) -> Result<ParsedPackage<'_>, Error> {
@@ -133,16 +132,16 @@ pub(super) fn parse_container(raw: &[u8]) -> Result<ParsedPackage<'_>, Error> {
         "package content hash mismatched (broken or truncated)",
     )?;
 
-    let mut cur = Cursor::new(body, MAGIC.len());
-    let package_ver = cur.u32("format version")?;
+    let mut rest = &body[MAGIC.len()..];
+    let package_ver = fields::u32(&mut rest, "format version")?;
     if package_ver != FMT_VER {
         return Err(Error::incompatible(format!(
             "wrong package format version (package={package_ver}, mirvm={FMT_VER})"
         )));
     }
-    let bid_len = usize::try_from(cur.u32("build_id length")?)
+    let bid_len = usize::try_from(fields::u32(&mut rest, "build_id length")?)
         .map_err(|_| Error::corrupt("package build_id length does not fit this host"))?;
-    let bid = std::str::from_utf8(cur.take(bid_len, "build_id")?)
+    let bid = std::str::from_utf8(fields::take(&mut rest, bid_len, "build_id")?)
         .map_err(|e| Error::corrupt(format!("invalid package build_id: {e}")))?;
     if bid != crate::options::build::BUILD_ID {
         return Err(Error::incompatible(
@@ -150,16 +149,18 @@ pub(super) fn parse_container(raw: &[u8]) -> Result<ParsedPackage<'_>, Error> {
         ));
     }
 
-    let count = usize::try_from(cur.u32("section count")?)
+    let count = usize::try_from(fields::u32(&mut rest, "section count")?)
         .map_err(|_| Error::corrupt("package section count does not fit this host"))?;
     let table_len = count
         .checked_mul(SECTION_ENTRY_LEN)
         .ok_or_else(|| Error::corrupt("package section table length overflow"))?;
-    let data_start = cur
-        .pos()
-        .checked_add(table_len)
-        .filter(|end| *end <= body.len())
-        .ok_or_else(|| Error::corrupt("package section table is truncated or too large"))?;
+    // The table has to fit in what is left of the body; the payloads begin after it.
+    if table_len > rest.len() {
+        return Err(Error::corrupt(
+            "package section table is truncated or too large",
+        ));
+    }
+    let data_start = body.len() - rest.len() + table_len;
 
     let mut entries = Vec::new();
     entries
@@ -170,23 +171,23 @@ pub(super) fn parse_container(raw: &[u8]) -> Result<ParsedPackage<'_>, Error> {
         Error::corrupt("package section tag table is too large for available memory")
     })?;
     for index in 0..count {
-        let tag = cur.u32("section tag")?;
+        let tag = fields::u32(&mut rest, "section tag")?;
         if !tags.insert(tag) {
             return Err(Error::corrupt(format!(
                 "package has duplicate section tag={tag}"
             )));
         }
-        let off = usize::try_from(cur.u64("section offset")?).map_err(|_| {
+        let off = usize::try_from(fields::u64(&mut rest, "section offset")?).map_err(|_| {
             Error::corrupt(format!(
                 "package section {index} offset does not fit this host"
             ))
         })?;
-        let len = usize::try_from(cur.u64("section length")?).map_err(|_| {
+        let len = usize::try_from(fields::u64(&mut rest, "section length")?).map_err(|_| {
             Error::corrupt(format!(
                 "package section {index} length does not fit this host"
             ))
         })?;
-        let expected_hash = cur.u128("section hash")?;
+        let expected_hash = fields::u128(&mut rest, "section hash")?;
         let end = off.checked_add(len).ok_or_else(|| {
             Error::corrupt(format!("package section with tag={tag} range overflow"))
         })?;
