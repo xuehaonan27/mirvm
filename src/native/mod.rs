@@ -1,6 +1,7 @@
 //! Host native objects: turning a constrained static archive into a dlopen-able `.so`
-//! ([`archive`]), reading the symbol tables of the objects mirvm produces ([`symtab`]), and the two
-//! byte layouts both of them work on ([`elf`], [`ar`]).
+//! ([`archive`]), building the symbol-only object a backtrace is named by ([`symimage`]),
+//! reading the symbol tables of the objects mirvm produces ([`symtab`]), and the two byte layouts
+//! both of them work on ([`elf`], [`ar`]).
 //!
 //! The converter and the reader belong together because the converter is the only producer of the
 //! objects the reader parses: an archive built with `-fvisibility=hidden` is converted with
@@ -18,6 +19,7 @@
 pub(crate) mod ar;
 pub(crate) mod archive;
 pub(crate) mod elf;
+pub(crate) mod symimage;
 pub(crate) mod symtab;
 
 #[cfg(test)]
