@@ -1,4 +1,5 @@
-//! Engine-owned exception class and raw unwind classification.
+//! Engine-owned exception class, raw unwind classification, and returning an uncaught guest
+//! panic to the guest standard library.
 
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -501,6 +502,35 @@ impl Drop for GuestPanicPayload {
         eprintln!("mirvm[m4-engine]: guest panic payload was dropped without a disposition");
         std::process::abort()
     }
+}
+
+/// Return an uncaught guest panic to the guest standard library before the
+/// Engine reports it. `cleanup` lowers the guest panic counter and yields the
+/// opaque two-word panic Box; its own guest drop glue then runs the payload's
+/// destructor and allocator route. No host-side Rust layout is assumed here.
+pub(crate) fn dispose_uncaught_guest_panic(ctx: *mut super::ctx::Ctx, payload: GuestPanicPayload) {
+    payload.transfer(|shared, inner| {
+        let Some(plan) = shared.module.guest_panic_cleanup else {
+            eprintln!("mirvm[m4-engine]: executable Module has no guest panic cleanup plan");
+            std::process::abort()
+        };
+        match catch_raw(|| {
+            let (data, vtable) = super::dispatch::call_guest(ctx, plan.cleanup, &[inner]);
+            let mut opaque_box = [data, vtable];
+            super::dispatch::call_guest(ctx, plan.drop_payload, &[opaque_box.as_mut_ptr() as u64]);
+        }) {
+            Ok(()) => {}
+            Err(exception) => exception.abort_during_panic_cleanup(),
+        }
+    });
+}
+
+pub(crate) fn dispose_guest_panic_during_startup(
+    shared: &Arc<super::ctx::Shared>,
+    payload: GuestPanicPayload,
+) {
+    let activation = super::ctx::activate(shared);
+    dispose_uncaught_guest_panic(activation.ctx(), payload);
 }
 
 pub struct EngineFaultPayload {
