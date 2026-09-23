@@ -12,8 +12,10 @@
 //!
 //! The platform half must provide, under the same names a caller already uses:
 //! `Sigaction`, `SignalInfo`, `install_segv_dump`, `info_code`, `sent_by_thread_kill`,
-//! `is_realtime`, `realtime_min`, `STANDARD_SIGNAL_MAX`, `SI_TKILL`, `SA_EXPOSE_TAGBITS`,
-//! `all_blockable_mask`, the fault signal numbers, and the test-only signal and flag constants.
+//! `is_realtime`, `realtime_min`, `STANDARD_SIGNAL_MAX`, `all_blockable_mask`, the fault signal
+//! numbers, and the test-only signal and flag constants. What else a platform adds is its own: a
+//! kernel that reports a thread-directed delivery in `si_code` names that code (`SI_TKILL`), and
+//! one that carries a restorer in the action has the pair declare `RESTORER_FLAG` non-zero.
 
 /// The two dispositions the C library names with a sentinel rather than a handler.
 pub const SIG_DFL: usize = libc::SIG_DFL;
@@ -100,3 +102,5 @@ impl Drop for ThreadSignalMaskGuard {
 
 #[cfg(target_os = "linux")]
 pub(crate) use super::linux::signal::*;
+#[cfg(target_os = "macos")]
+pub(crate) use super::macos::signal::*;
