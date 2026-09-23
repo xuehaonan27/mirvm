@@ -66,9 +66,9 @@ pub(crate) mod unwind;
 
 /// Subsystems whose knowledge is entirely the platform's, dispatched here.
 #[cfg(target_os = "linux")]
-pub(crate) use linux::process;
+pub(crate) use linux::{linker, process};
 #[cfg(target_os = "macos")]
-pub(crate) use macos::process;
+pub(crate) use macos::{linker, process};
 
 /// Why a host primitive did not do what it was asked.
 ///

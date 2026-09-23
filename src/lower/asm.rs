@@ -164,7 +164,9 @@ pub(crate) fn try_materialize(sites: &[ir::AsmSite]) -> Result<Vec<u64>, Error> 
             )
         })?;
         let output = std::process::Command::new("cc")
-            .args(["-shared", "-fPIC", "-nostdlib", "-o"])
+            .args(crate::os::linker::COMMON)
+            .args(crate::os::linker::ASM_STUB)
+            .arg("-o")
             .arg(&tmp)
             .arg(&s_path)
             .output()
