@@ -123,6 +123,23 @@ pub(crate) fn raise_engine_fault(ctx: *mut super::ctx::Ctx, message: String, cod
     )
 }
 
+/// Aborts the running activation with a diagnostic: an unrecoverable violation of a MIRVM
+/// invariant (never a guest fault), raised as an EngineFault so it surfaces on the engine's own
+/// error path instead of as a bare host abort. Every layer that can detect such a violation --
+/// the interpreter, the JIT helpers, the signal path, the thunk factory -- calls this one.
+pub(crate) fn engine_abort(what: &str) -> ! {
+    let ctx = super::ctx::current();
+    raise_engine_fault(ctx, what.to_owned(), crate::diag::exit::SOFTWARE.into())
+}
+
+/// Raises a guest panic from the running activation: the inner pointer stays entirely owned by
+/// the guest standard library, while the outer wrapper only tags the MIRVM exception identity
+/// and the Engine whose `Ctx` is current.
+pub(crate) fn raise_guest_in_current_engine(inner: u64) -> ! {
+    let shared = unsafe { (*super::ctx::current()).shared_arc() };
+    raise_guest(shared, inner)
+}
+
 pub(crate) fn raise_engine_closed(control: Arc<super::ctx::EngineControl>) -> ! {
     // This exception is created precisely because no execution lease can be
     // acquired. It never returns to guest code and therefore owns no hold.

@@ -33,7 +33,7 @@ pub(crate) unsafe extern "C-unwind" fn native_signal(
             set_errno(errno);
             crate::os::signal::SIG_ERR
         }
-        Err(SignalError::Contract(message)) => super::super::interp::engine_abort(&message),
+        Err(SignalError::Contract(message)) => crate::vm::unwind::engine_abort(&message),
     }
 }
 
@@ -67,7 +67,7 @@ pub(crate) unsafe extern "C-unwind" fn native_sigaction(
             set_errno(errno);
             -1
         }
-        Err(SignalError::Contract(message)) => super::super::interp::engine_abort(&message),
+        Err(SignalError::Contract(message)) => crate::vm::unwind::engine_abort(&message),
     }
 }
 

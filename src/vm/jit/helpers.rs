@@ -1,6 +1,9 @@
 //! `mirvm_*` runtime helpers called by compiled code through import symbols: the c2i
 //! universal wrapper, the unreachable/trap/div_zero/volatile entries, host direct-eval of
 //! 128-bit/f128/f16 arithmetic, and the standard C math symbols. `compiler.rs` registers them.
+//!
+//! A body with a portable shape calls the matching [`crate::vm::semantics`] body rather than
+//! repeating it, so a guest value cannot differ between the two backends.
 
 use super::*;
 
@@ -50,7 +53,7 @@ pub extern "C-unwind" fn mirvm_jit_stack_guard(func: u64, frame_bytes: u64) {
             .get(func as usize)
             .map(|body| &*body.name)
             .unwrap_or("<unknown>");
-        crate::vm::interp::engine_abort(&format!(
+        crate::vm::unwind::engine_abort(&format!(
             "guest stack overflow (JIT compiled frame hit safety margin before entry; fn {name})"
         ));
     }
@@ -68,7 +71,7 @@ pub(super) extern "C-unwind" fn mirvm_c2i(func: u64, args: *const u64, n: u64, r
     stat(S_C2I);
     let (ctx, _shared) = active();
     let a = unsafe { std::slice::from_raw_parts(args, n as usize) };
-    let (lo, hi) = crate::vm::interp::call_guest(ctx, func as u32, a);
+    let (lo, hi) = crate::vm::dispatch::call_guest(ctx, func as u32, a);
     unsafe {
         *ret = lo;
         *ret.add(1) = hi;
@@ -88,7 +91,7 @@ pub(super) extern "C-unwind" fn mirvm_call_main_catch(
     let (ctx, _shared) = active();
     crate::vm::ctx::call_main_panic_boundary(ctx, || {
         let a = unsafe { std::slice::from_raw_parts(args, n as usize) };
-        let (lo, hi) = crate::vm::interp::call_guest(ctx, func as u32, a);
+        let (lo, hi) = crate::vm::dispatch::call_guest(ctx, func as u32, a);
         unsafe {
             *ret = lo;
             *ret.add(1) = hi;
@@ -118,7 +121,7 @@ pub(super) extern "C-unwind" fn mirvm_call_terminate(
     let (ctx, _shared) = active();
     let f = || {
         let a = unsafe { std::slice::from_raw_parts(args, n as usize) };
-        crate::vm::interp::call_guest(ctx, callee as u32, a)
+        crate::vm::dispatch::call_guest(ctx, callee as u32, a)
     };
     let (lo, hi) = crate::vm::unwind::guard_terminate(f);
     unsafe {
@@ -156,13 +159,13 @@ pub(super) extern "C-unwind" fn mirvm_call_indirect(
     }
     let caller_name = &module.funcs[caller as usize].name;
     if addr == 0 {
-        crate::vm::interp::engine_abort(&format!(
+        crate::vm::unwind::engine_abort(&format!(
             "indirect call through a null fn pointer (caller {caller_name})"
         ));
     }
     let av = unsafe { std::slice::from_raw_parts(args, n as usize) };
     let (lo, hi) = if let Some(&fid) = module.fn_addrs.get(&addr) {
-        crate::vm::interp::call_guest(ctx, fid, av)
+        crate::vm::dispatch::call_guest(ctx, fid, av)
     } else if native_sig != 0 {
         // The guest holds a native code pointer obtained from dlsym at run time: call it
         // directly through the frozen signature. For an Agg return the first slot is the
@@ -179,7 +182,7 @@ pub(super) extern "C-unwind" fn mirvm_call_indirect(
             0,
         )
     } else {
-        crate::vm::interp::engine_abort(&format!(
+        crate::vm::unwind::engine_abort(&format!(
             "indirect call target {addr:#x} is not a known fn entry (caller {caller_name})"
         ));
     };
@@ -190,11 +193,11 @@ pub(super) extern "C-unwind" fn mirvm_call_indirect(
 }
 
 /// TlsRef helper: lazily materializes the per-thread instance block through
-/// `interp::tls_addr`.
+/// [`crate::vm::semantics::tls::tls_addr`].
 pub(super) extern "C-unwind" fn mirvm_tls_ref(id: u64) -> u64 {
     stat(S_TLS);
     let (ctx, _shared) = active();
-    crate::vm::interp::tls_addr(ctx, id as u32)
+    crate::vm::semantics::tls::tls_addr(ctx, id as u32)
 }
 
 /// CallForeign helper: the same shape as the interpreter's `CallForeign` arm --
@@ -248,12 +251,12 @@ pub(super) extern "C-unwind" fn mirvm_call_foreign(
     }
     let caller_name = &module.funcs[caller as usize].name;
     let r = r.unwrap_or_else(|reason| {
-        crate::vm::interp::engine_abort(&format!(
+        crate::vm::unwind::engine_abort(&format!(
             "failed to load a required native library for foreign `{sym}` (fn {caller_name}): {reason}"
         ))
     });
     let Some(r) = r else {
-        crate::vm::interp::engine_abort(&format!(
+        crate::vm::unwind::engine_abort(&format!(
             "foreign `{sym}` symbol not found (neither the archive fallback table nor a full-domain dlsym matched; fn {caller_name})"
         ));
     };
@@ -295,7 +298,7 @@ pub(super) extern "C-unwind" fn mirvm_call_builtin(
         match role {
             0 => ir::BuiltinCallRole::Normal,
             1 => ir::BuiltinCallRole::MainPanicCatcher,
-            _ => crate::vm::interp::engine_abort("invalid JIT builtin call role encoding"),
+            _ => crate::vm::unwind::engine_abort("invalid JIT builtin call role encoding"),
         },
     );
     unsafe {
@@ -382,11 +385,11 @@ pub(super) extern "C-unwind" fn mirvm_jit_unreachable(func: u64) -> ! {
         .get(func as usize)
         .map(|f| &*f.name)
         .unwrap_or("?");
-    crate::vm::interp::engine_abort(&format!("reached Unreachable (fn {name})"));
+    crate::vm::unwind::engine_abort(&format!("reached Unreachable (fn {name})"));
 }
 
 /// Trap entry shared by statement-level traps and terminators: the diagnostic and exit
-/// code match the interpreter's `engine_abort` byte for byte -- `TRAP: {reason}` for the
+/// code match `unwind::engine_abort` byte for byte -- `TRAP: {reason}` for the
 /// statement form and `TRAP: {reason} (fn name)` for the terminator form, where
 /// `func == u64::MAX` marks the statement form. The engine fault returns to the execution
 /// boundary and the CLI maps it to 70; TerminateAbort still aborts as its semantics
@@ -399,7 +402,7 @@ pub(super) extern "C-unwind" fn mirvm_jit_trap(reason_ptr: u64, reason_len: u64,
         ))
     };
     if func == u64::MAX {
-        crate::vm::interp::engine_abort(&format!("TRAP: {reason}"));
+        crate::vm::unwind::engine_abort(&format!("TRAP: {reason}"));
     } else {
         let shared = active_shared();
         let name = shared
@@ -408,14 +411,14 @@ pub(super) extern "C-unwind" fn mirvm_jit_trap(reason_ptr: u64, reason_len: u64,
             .get(func as usize)
             .map(|f| &*f.name)
             .unwrap_or("?");
-        crate::vm::interp::engine_abort(&format!("TRAP: {reason} (fn {name})"));
+        crate::vm::unwind::engine_abort(&format!("TRAP: {reason} (fn {name})"));
     }
 }
 
 // ===== helpers sharing the interpreter's implementation bodies (no copied logic) =====
 
-/// Division-by-zero diagnostic exit: the same message text and exit code as the
-/// interpreter's `engine_abort`.
+/// Division-by-zero diagnostic exit: the same message text and exit code as
+/// `unwind::engine_abort`.
 pub(super) extern "C-unwind" fn mirvm_jit_div_zero(kind: u64) -> ! {
     let what = match kind {
         0 => "guest integer division by zero",
@@ -423,22 +426,22 @@ pub(super) extern "C-unwind" fn mirvm_jit_div_zero(kind: u64) -> ! {
         2 => "guest 128-bit integer division by zero",
         _ => "guest 128-bit integer remainder by zero",
     };
-    crate::vm::interp::engine_abort(what);
+    crate::vm::unwind::engine_abort(what);
 }
 
 /// Volatile read: the interpreter's opaque byte carrier plus chunk decomposition.
 pub(super) extern "C-unwind" fn mirvm_volatile_load(addr: u64, dst: u64, size: u64) {
     stat(S_VLOAD);
-    crate::vm::interp::mem_read_volatile(addr, dst, size as u32);
+    crate::vm::semantics::volatile::mem_read_volatile(addr, dst, size as u32);
 }
 
 /// Volatile write (same path).
 pub(super) extern "C-unwind" fn mirvm_volatile_store(addr: u64, src: u64, size: u64) {
     stat(S_VSTORE);
-    crate::vm::interp::mem_write_volatile(addr, src, size as u32);
+    crate::vm::semantics::volatile::mem_write_volatile(addr, src, size as u32);
 }
 
-// ===== SIMD/wide-value helpers over the interpreter's shared `simd_exec` bodies =====
+// ===== SIMD/wide-value helpers over the shared `semantics::simd` bodies =====
 
 /// SIMD/wide-statement helper: re-match the statement and call the interpreter's shared
 /// body, so no semantics are duplicated. Parameter order is (stmt, a, b, c, dst, v0, v1);
@@ -453,7 +456,7 @@ pub(super) extern "C-unwind" fn mirvm_simd_stmt(
     v1: u64,
 ) -> u64 {
     stat(S_SIMD_STMT);
-    use crate::vm::interp::simd_exec as x;
+    use crate::vm::semantics::simd as x;
     let st = unsafe { &*(stmt as *const ir::Stmt) };
     match st {
         ir::Stmt::SimdBin {
@@ -630,7 +633,7 @@ pub(super) extern "C-unwind" fn mirvm_simd_stmt(
 /// SIMD rvalue helper for Bitmask/Reduce/ReduceArith; `pa` is the vector place address.
 pub(super) extern "C-unwind" fn mirvm_simd_rv(rv: u64, pa: u64) -> u64 {
     stat(S_SIMD_RV);
-    use crate::vm::interp::simd_exec as x;
+    use crate::vm::semantics::simd as x;
     let r = unsafe { &*(rv as *const ir::Rvalue) };
     match r {
         ir::Rvalue::SimdBitmask {

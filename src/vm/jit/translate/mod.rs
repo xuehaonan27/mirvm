@@ -64,7 +64,7 @@ pub(super) struct Translator<'a, 'b> {
     /// Trap helper shared by statement-level traps and the terminator form.
     pub(super) trap: ClifFuncId,
     /// Helpers for SIMD/wide statements and the three SIMD rvalues; they share
-    /// their body with the interpreter's `simd_exec`.
+    /// their body with `semantics::simd`.
     pub(super) simd_stmt: ClifFuncId,
     pub(super) simd_rv: ClifFuncId,
     pub(super) poll_signals: ClifFuncId,

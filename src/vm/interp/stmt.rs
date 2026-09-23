@@ -1,12 +1,13 @@
 //! `exec_stmt`: the statement arms -- atomics, memcpy/memset, SIMD (delegated to
-//! `simd_exec`, which the JIT shares), 128-bit and f128 arithmetic, fences and
-//! RepeatBytes. Called from the `runblocks` main loop.
+//! [`crate::vm::semantics::simd`], which the JIT shares), 128-bit and f128 arithmetic, fences
+//! and RepeatBytes. Called from the `runblocks` main loop.
 
+use super::rvalue::eval_rvalue;
 use super::*;
-use super::{
-    rvalue::eval_rvalue,
-    volatile::{mem_read_volatile, mem_write_volatile},
-};
+use crate::vm::semantics::arith::{f128_read, f128_write, host_ord, int_ovf, sext};
+use crate::vm::semantics::memory::mem_write;
+use crate::vm::semantics::simd;
+use crate::vm::semantics::volatile::{mem_read_volatile, mem_write_volatile};
 
 pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
     match stmt {
@@ -193,7 +194,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let pd = eval_place_addr(ctx, base, dst);
             let pa = eval_place_addr(ctx, base, a);
             let pb = eval_place_addr(ctx, base, b);
-            simd_exec::simd_bin_body(
+            simd::simd_bin_body(
                 pd as *mut u8,
                 pa as *const u8,
                 pb as *const u8,
@@ -213,7 +214,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
         } => {
             let pd = eval_place_addr(ctx, base, dst);
             let pa = eval_place_addr(ctx, base, a);
-            simd_exec::simd_un_body(
+            simd::simd_un_body(
                 pd as *mut u8,
                 pa as *const u8,
                 *op,
@@ -234,7 +235,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let pa = eval_place_addr(ctx, base, a);
             let pb = eval_place_addr(ctx, base, b);
             let pc = eval_place_addr(ctx, base, c);
-            simd_exec::simd_fma_body(
+            simd::simd_fma_body(
                 pd as *mut u8,
                 pa as *const u8,
                 pb as *const u8,
@@ -256,7 +257,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let pa = eval_place_addr(ctx, base, a);
             let pb = eval_place_addr(ctx, base, b);
             let ps = eval_place_addr(ctx, base, shift);
-            simd_exec::simd_funnel_body(
+            simd::simd_funnel_body(
                 pd as *mut u8,
                 pa as *const u8,
                 pb as *const u8,
@@ -277,7 +278,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
         } => {
             let pd = eval_place_addr(ctx, base, dst);
             let ps = eval_place_addr(ctx, base, src);
-            simd_exec::simd_cast_body(
+            simd::simd_cast_body(
                 pd as *mut u8,
                 ps as *const u8,
                 *lanes,
@@ -300,7 +301,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let pa = eval_place_addr(ctx, base, a);
             let pb = eval_place_addr(ctx, base, b);
             let pd = eval_place_addr(ctx, base, dst);
-            simd_exec::simd_select_body(
+            simd::simd_select_body(
                 pd as *mut u8,
                 pm as *const u8,
                 *mask_bytes,
@@ -322,7 +323,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let pa = eval_place_addr(ctx, base, a);
             let pb = eval_place_addr(ctx, base, b);
             let pd = eval_place_addr(ctx, base, dst);
-            simd_exec::simd_select_bitmask_body(
+            simd::simd_select_bitmask_body(
                 pd as *mut u8,
                 m,
                 pa as *const u8,
@@ -344,7 +345,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let pp = eval_place_addr(ctx, base, ptrs);
             let pm = eval_place_addr(ctx, base, mask);
             let pd = eval_place_addr(ctx, base, dst);
-            simd_exec::simd_gather_body(
+            simd::simd_gather_body(
                 pd as *mut u8,
                 pv as *const u8,
                 pp as *const u8,
@@ -365,7 +366,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let pv = eval_place_addr(ctx, base, values);
             let pp = eval_place_addr(ctx, base, ptrs);
             let pm = eval_place_addr(ctx, base, mask);
-            simd_exec::simd_scatter_body(
+            simd::simd_scatter_body(
                 pv as *const u8,
                 pp as *const u8,
                 pm as *const u8,
@@ -387,7 +388,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let (pbase, _) = eval_operand(ctx, base, base_op);
             let pv = eval_place_addr(ctx, base, passthru);
             let pd = eval_place_addr(ctx, base, dst);
-            simd_exec::simd_masked_load_body(
+            simd::simd_masked_load_body(
                 pd as *mut u8,
                 pm as *const u8,
                 *mask_bytes,
@@ -408,7 +409,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let pm = eval_place_addr(ctx, base, mask);
             let (pbase, _) = eval_operand(ctx, base, base_op);
             let pv = eval_place_addr(ctx, base, values);
-            simd_exec::simd_masked_store_body(
+            simd::simd_masked_store_body(
                 pm as *const u8,
                 *mask_bytes,
                 pbase,
@@ -426,7 +427,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
         } => {
             let ps = eval_place_addr(ctx, base, src);
             let (i, _) = eval_operand(ctx, base, idx);
-            let r = simd_exec::simd_extract_dyn_body(ps as *const u8, i, *lanes, *lane_bytes);
+            let r = simd::simd_extract_dyn_body(ps as *const u8, i, *lanes, *lane_bytes);
             place_write(ctx, base, dst, r);
         }
         Stmt::SimdInsertDyn {
@@ -441,14 +442,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let pd = eval_place_addr(ctx, base, dst);
             let (i, _) = eval_operand(ctx, base, idx);
             let (v, _) = eval_operand(ctx, base, val);
-            simd_exec::simd_insert_dyn_body(
-                pd as *mut u8,
-                ps as *const u8,
-                i,
-                v,
-                *lanes,
-                *lane_bytes,
-            );
+            simd::simd_insert_dyn_body(pd as *mut u8, ps as *const u8, i, v, *lanes, *lane_bytes);
         }
         Stmt::SimdArithOffset {
             ptrs,
@@ -460,7 +454,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let pp = eval_place_addr(ctx, base, ptrs);
             let po = eval_place_addr(ctx, base, offsets);
             let pd = eval_place_addr(ctx, base, dst);
-            simd_exec::simd_arith_offset_body(
+            simd::simd_arith_offset_body(
                 pd as *mut u8,
                 pp as *const u8,
                 po as *const u8,
@@ -476,7 +470,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
         } => {
             let pd = eval_place_addr(ctx, base, dst);
             let (v, _) = eval_operand(ctx, base, val);
-            simd_exec::simd_splat_body(pd as *mut u8, v, *lanes, *lane_bytes);
+            simd::simd_splat_body(pd as *mut u8, v, *lanes, *lane_bytes);
         }
         Stmt::Bin128 {
             op,
@@ -562,7 +556,7 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
             let pa = eval_place_addr(ctx, base, a);
             let pb = eval_place_addr(ctx, base, b);
             let pd = eval_place_addr(ctx, base, dst);
-            simd_exec::sat128_body(
+            simd::sat128_body(
                 pa as *const u8,
                 pb as *const u8,
                 pd as *mut u8,

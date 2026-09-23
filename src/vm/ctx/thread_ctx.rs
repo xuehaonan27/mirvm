@@ -143,7 +143,7 @@ impl MainBoundaryGuard {
     fn finish(mut self) {
         let state = unsafe { &mut (&mut (*self.ctx).main_runs)[self.index] };
         if !state.catcher_claimed || state.catcher_active {
-            super::super::interp::engine_abort(
+            crate::vm::unwind::engine_abort(
                 "fixed std main panic catch call did not pass the expected catch_unwind intrinsic",
             );
         }
@@ -171,11 +171,11 @@ impl Drop for MainBoundaryGuard {
 pub(crate) fn call_main_panic_boundary<R>(ctx: *mut Ctx, f: impl FnOnce() -> R) -> R {
     let states = unsafe { &mut (*ctx).main_runs };
     let Some(index) = states.len().checked_sub(1) else {
-        super::super::interp::engine_abort("main panic catch call appeared outside run_main");
+        crate::vm::unwind::engine_abort("main panic catch call appeared outside run_main");
     };
     let state = &mut states[index];
     if state.boundary_activation.is_some() {
-        super::super::interp::engine_abort(
+        crate::vm::unwind::engine_abort(
             "duplicate entry into main panic catch boundary during the same main execution",
         );
     }
@@ -263,13 +263,13 @@ pub(super) struct SignalDrainGuard {
 
 pub(super) fn current_activation(ctx: *mut Ctx) -> u64 {
     let Some(key) = CTX_KEY.get().copied() else {
-        super::super::interp::engine_abort("main panic catch happened outside Engine activation");
+        crate::vm::unwind::engine_abort("main panic catch happened outside Engine activation");
     };
     let contexts = unsafe { crate::os::thread::tls_get(key) } as *mut ThreadContexts;
     if contexts.is_null()
         || unsafe { (*contexts).current != ctx || (*contexts).current_activation == 0 }
     {
-        super::super::interp::engine_abort(
+        crate::vm::unwind::engine_abort(
             "main panic catch does not belong to the current Engine activation",
         );
     }
@@ -335,11 +335,11 @@ impl Drop for CloseSignalDrainGuard {
 
 pub(super) fn current_thread_contexts(ctx: *mut Ctx) -> *mut ThreadContexts {
     let Some(key) = CTX_KEY.get().copied() else {
-        super::super::interp::engine_abort("signal delivery happened outside an Engine activation");
+        crate::vm::unwind::engine_abort("signal delivery happened outside an Engine activation");
     };
     let contexts = unsafe { crate::os::thread::tls_get(key) } as *mut ThreadContexts;
     if contexts.is_null() || unsafe { (*contexts).current != ctx } {
-        super::super::interp::engine_abort("signal delivery does not belong to the current Engine");
+        crate::vm::unwind::engine_abort("signal delivery does not belong to the current Engine");
     }
     contexts
 }

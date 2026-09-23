@@ -606,7 +606,7 @@ impl Translator<'_, '_> {
                 self.b.ins().uextend(types::I64, b1)
             }
             R::TlsRef(id) => {
-                // The mirvm_tls_ref helper shares its body with interp::tls_addr: the
+                // The mirvm_tls_ref helper shares its body with semantics::tls::tls_addr: the
                 // per-thread instance block is materialized lazily.
                 let fref = self.module.declare_func_in_func(self.tls_ref, self.b.func);
                 let i = self.b.ins().iconst(types::I64, i64::from(*id));
@@ -614,7 +614,7 @@ impl Translator<'_, '_> {
                 self.b.inst_results(call)[0]
             }
             // ===== The three SIMD rvalues, through the mirvm_simd_rv helper, which shares
-            // its body with the interpreter's simd_exec. It takes the rvalue's real address
+            // its body with semantics::simd. It takes the rvalue's real address
             // and the vector place's address. =====
             R::SimdBitmask { a, .. } => {
                 // Lane bitmask; at 64 bits or fewer no masking is needed, as in the interpreter

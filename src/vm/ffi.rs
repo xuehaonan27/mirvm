@@ -300,7 +300,7 @@ pub fn call_addr(fnptr: usize, sig: &ForeignSig, args: &[u64], ret_dst: Option<u
     // Args and signature must be the same length; zip silently truncating once hid the
     // types of a variadic call's real trailing arguments.
     if args.len() != sig.args.len() {
-        crate::vm::interp::engine_abort(&format!(
+        crate::vm::unwind::engine_abort(&format!(
             "FFI argument/signature length mismatch (args {} / signature {}; \
              signature drift or a variadic freeze gap)",
             args.len(),

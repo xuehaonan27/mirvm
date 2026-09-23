@@ -2,7 +2,8 @@
 //! saturating families, bit operations, the atomic ordering a guest memory order maps to, and the
 //! f128 read. The JIT's translator mirrors these bit for bit.
 
-use super::*;
+use crate::vm::ir::{BitUnOp, IntBinOp, IntCc, MemOrd, OvfOp, Width};
+use crate::vm::unwind::engine_abort;
 
 /// Sign-extends `bits` to i64 at its declared width.
 #[inline]
@@ -78,38 +79,37 @@ pub(crate) fn f128_write(p: u64, v: f128) {
 
 /// Frozen `MemOrd` to host `Ordering`: the guard order the guest asked for is the one
 /// executed.
-pub(crate) fn host_ord(o: super::super::ir::MemOrd) -> std::sync::atomic::Ordering {
+pub(crate) fn host_ord(o: MemOrd) -> std::sync::atomic::Ordering {
     use std::sync::atomic::Ordering as O;
     match o {
-        super::super::ir::MemOrd::Relaxed => O::Relaxed,
-        super::super::ir::MemOrd::Acquire => O::Acquire,
-        super::super::ir::MemOrd::Release => O::Release,
-        super::super::ir::MemOrd::AcqRel => O::AcqRel,
-        super::super::ir::MemOrd::SeqCst => O::SeqCst,
+        MemOrd::Relaxed => O::Relaxed,
+        MemOrd::Acquire => O::Acquire,
+        MemOrd::Release => O::Release,
+        MemOrd::AcqRel => O::AcqRel,
+        MemOrd::SeqCst => O::SeqCst,
     }
 }
 
 /// Bitwise unary ops, shared by the BitUn rvalue and SIMD lanes.
-pub(crate) fn bit_un(op: super::super::ir::BitUnOp, v: u64, w: Width) -> u64 {
-    use super::super::ir::BitUnOp as B;
+pub(crate) fn bit_un(op: BitUnOp, v: u64, w: Width) -> u64 {
     match (op, w) {
-        (B::Popcount, _) => (v & w.mask()).count_ones() as u64,
-        (B::Ctlz, Width::W8) => (v as u8).leading_zeros() as u64,
-        (B::Ctlz, Width::W16) => (v as u16).leading_zeros() as u64,
-        (B::Ctlz, Width::W32) => (v as u32).leading_zeros() as u64,
-        (B::Ctlz, Width::W64) => v.leading_zeros() as u64,
-        (B::Cttz, Width::W8) => (v as u8).trailing_zeros() as u64,
-        (B::Cttz, Width::W16) => (v as u16).trailing_zeros() as u64,
-        (B::Cttz, Width::W32) => (v as u32).trailing_zeros() as u64,
-        (B::Cttz, Width::W64) => v.trailing_zeros() as u64,
-        (B::Bswap, Width::W8) => v & 0xff,
-        (B::Bswap, Width::W16) => (v as u16).swap_bytes() as u64,
-        (B::Bswap, Width::W32) => (v as u32).swap_bytes() as u64,
-        (B::Bswap, Width::W64) => v.swap_bytes(),
-        (B::Bitreverse, Width::W8) => (v as u8).reverse_bits() as u64,
-        (B::Bitreverse, Width::W16) => (v as u16).reverse_bits() as u64,
-        (B::Bitreverse, Width::W32) => (v as u32).reverse_bits() as u64,
-        (B::Bitreverse, Width::W64) => v.reverse_bits(),
+        (BitUnOp::Popcount, _) => (v & w.mask()).count_ones() as u64,
+        (BitUnOp::Ctlz, Width::W8) => (v as u8).leading_zeros() as u64,
+        (BitUnOp::Ctlz, Width::W16) => (v as u16).leading_zeros() as u64,
+        (BitUnOp::Ctlz, Width::W32) => (v as u32).leading_zeros() as u64,
+        (BitUnOp::Ctlz, Width::W64) => v.leading_zeros() as u64,
+        (BitUnOp::Cttz, Width::W8) => (v as u8).trailing_zeros() as u64,
+        (BitUnOp::Cttz, Width::W16) => (v as u16).trailing_zeros() as u64,
+        (BitUnOp::Cttz, Width::W32) => (v as u32).trailing_zeros() as u64,
+        (BitUnOp::Cttz, Width::W64) => v.trailing_zeros() as u64,
+        (BitUnOp::Bswap, Width::W8) => v & 0xff,
+        (BitUnOp::Bswap, Width::W16) => (v as u16).swap_bytes() as u64,
+        (BitUnOp::Bswap, Width::W32) => (v as u32).swap_bytes() as u64,
+        (BitUnOp::Bswap, Width::W64) => v.swap_bytes(),
+        (BitUnOp::Bitreverse, Width::W8) => (v as u8).reverse_bits() as u64,
+        (BitUnOp::Bitreverse, Width::W16) => (v as u16).reverse_bits() as u64,
+        (BitUnOp::Bitreverse, Width::W32) => (v as u32).reverse_bits() as u64,
+        (BitUnOp::Bitreverse, Width::W64) => v.reverse_bits(),
     }
 }
 

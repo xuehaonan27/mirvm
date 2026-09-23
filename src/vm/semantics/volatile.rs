@@ -1,16 +1,16 @@
 //! Volatile access: an opaque byte carrier plus the chunked decomposition used by
 //! `mem_read_volatile`/`mem_write_volatile`, which respect `MaybeUninit<[u8; N]>`
-//! alignment discipline. The JIT helpers reuse the same implementation through the
-//! `pub(crate)` re-export in `mod.rs`.
+//! alignment discipline. Both backends issue the same accesses: the interpreter calls these,
+//! and the JIT helper entry points call the same pair.
 
-use super::*;
+use std::mem::MaybeUninit;
 
 /// Reads one whole guest value as an opaque bit pattern. `MaybeUninit<[u8; N]>` has
 /// alignment 1, so a low-alignment guest type such as `[u8; N]` is not wrongly
 /// strengthened to host integer alignment; `MaybeUninit` also permits an aggregate
 /// value with uninitialized padding.
 #[inline]
-pub(super) unsafe fn volatile_load_n<const N: usize>(src: *const u8, dst: *mut u8) {
+unsafe fn volatile_load_n<const N: usize>(src: *const u8, dst: *mut u8) {
     let value = unsafe { (src as *const MaybeUninit<[u8; N]>).read_volatile() };
     unsafe {
         std::ptr::copy_nonoverlapping((&value as *const MaybeUninit<[u8; N]>).cast::<u8>(), dst, N)
@@ -20,7 +20,7 @@ pub(super) unsafe fn volatile_load_n<const N: usize>(src: *const u8, dst: *mut u
 /// Copies the raw bytes (including possibly uninitialized padding) into the opaque
 /// carrier first, then issues one equally wide volatile store.
 #[inline]
-pub(super) unsafe fn volatile_store_n<const N: usize>(dst: *mut u8, src: *const u8) {
+unsafe fn volatile_store_n<const N: usize>(dst: *mut u8, src: *const u8) {
     let mut value = MaybeUninit::<[u8; N]>::uninit();
     unsafe { std::ptr::copy_nonoverlapping(src, value.as_mut_ptr().cast::<u8>(), N) };
     unsafe { (dst as *mut MaybeUninit<[u8; N]>).write_volatile(value) };
@@ -30,7 +30,7 @@ pub(super) unsafe fn volatile_store_n<const N: usize>(dst: *mut u8, src: *const 
 /// `MaybeUninit<[u8; N]>`, so padding stays opaque. The 16/8/4/2/1 chunking mirrors
 /// the machine accesses the target must ultimately perform and promises no atomicity.
 #[inline]
-pub(super) unsafe fn volatile_load_chunks(mut src: *const u8, mut dst: *mut u8, mut size: usize) {
+unsafe fn volatile_load_chunks(mut src: *const u8, mut dst: *mut u8, mut size: usize) {
     while size >= 16 {
         unsafe { volatile_load_n::<16>(src, dst) };
         src = src.wrapping_add(16);
@@ -61,7 +61,7 @@ pub(super) unsafe fn volatile_load_chunks(mut src: *const u8, mut dst: *mut u8, 
 }
 
 #[inline]
-pub(super) unsafe fn volatile_store_chunks(mut dst: *mut u8, mut src: *const u8, mut size: usize) {
+unsafe fn volatile_store_chunks(mut dst: *mut u8, mut src: *const u8, mut size: usize) {
     while size >= 16 {
         unsafe { volatile_store_n::<16>(dst, src) };
         dst = dst.wrapping_add(16);

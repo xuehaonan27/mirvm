@@ -77,7 +77,7 @@ fn drain_pending_signals_with_mode(ctx: *mut Ctx, closing: bool) {
 fn raise_from_close_drain(ctx: *mut Ctx, signum: i32) -> i32 {
     let previous = match set_thread_mask(MaskOp::Unblock, &SignalMask::empty().with(signum)) {
         Ok(previous) => previous,
-        Err(error) => super::super::interp::engine_abort(&format!(
+        Err(error) => crate::vm::unwind::engine_abort(&format!(
             "failed to unblock signal {signum} on the close finalizer thread: {error}"
         )),
     };
@@ -92,7 +92,7 @@ pub(super) fn dispatch_signal_delivery(
     let registration = delivery.registration();
     let lease =
         ExecutionLease::for_registered_callback(registration.control()).unwrap_or_else(|_| {
-            super::super::interp::engine_abort("signal handler belongs to a closed Engine")
+            crate::vm::unwind::engine_abort("signal handler belongs to a closed Engine")
         });
     let activation = activate(lease.shared());
     let handler_ctx = activation.ctx();
@@ -112,7 +112,7 @@ pub(super) fn dispatch_signal_delivery(
         .action()
         .block_for_handler(signum)
         .unwrap_or_else(|error| {
-            super::super::interp::engine_abort(&format!(
+            crate::vm::unwind::engine_abort(&format!(
                 "failed to apply signal {signum} handler mask to the host thread: {error}"
             ))
         });
@@ -127,7 +127,7 @@ pub(super) fn dispatch_signal_delivery(
     let callback = super::super::unwind::catch_raw(|| {
         crate::vm::unwind::guard_terminate(|| match registration.callback() {
             super::super::signal::DeferredSignalCallback::Guest(func) => {
-                super::super::interp::call_guest(handler_ctx, func, &[signum as u64]);
+                crate::vm::dispatch::call_guest(handler_ctx, func, &[signum as u64]);
             }
             super::super::signal::DeferredSignalCallback::ImageNative(address) => {
                 let callback: unsafe extern "C-unwind" fn(i32) =
@@ -259,7 +259,7 @@ fn current_thread_signal_mask(contexts: *mut ThreadContexts) -> u64 {
 
 fn current_physical_signal_mask() -> u64 {
     crate::os::signal::Sigaction::current_standard_mask_bits().unwrap_or_else(|error| {
-        super::super::interp::engine_abort(&format!(
+        crate::vm::unwind::engine_abort(&format!(
             "failed to query the host thread signal mask: {error}"
         ))
     })

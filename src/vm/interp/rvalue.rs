@@ -1,8 +1,16 @@
-//! eval_rvalue (moved whole from interp.rs I7): 30+ rvalue arms -- int/float/f128/
-//! math/atomic load/simd reduce/Cmp128 etc. Caller = Assign arm in stmt.rs;
-//! semantic mirror = jit/translate's big rvalue match (bit-identical contract).
+//! `eval_rvalue`: the rvalue arms -- int/float/f128/math/atomic load/SIMD reduce/Cmp128 and
+//! the rest. Caller = the Assign arms in `stmt`; the mirror the JIT must match bit for bit is
+//! `jit::translate::rvalue`.
+//!
+//! The identities and the SIMD bodies come from [`crate::vm::semantics`] and are the same ones
+//! the JIT helpers call, so only the dispatch is interpreter-specific.
 
 use super::*;
+use crate::vm::semantics::arith::{
+    bit_un, f128_read, host_ord, int_bin, int_cmp, int_saturating, sext,
+};
+use crate::vm::semantics::simd;
+use crate::vm::semantics::tls::tls_addr;
 
 pub(super) fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
     match rv {
@@ -314,7 +322,7 @@ pub(super) fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
             lane_bytes,
         } => {
             let pa = eval_place_addr(ctx, base, a);
-            simd_exec::simd_bitmask_body(pa as *const u8, *lanes, *lane_bytes)
+            simd::simd_bitmask_body(pa as *const u8, *lanes, *lane_bytes)
         }
         Rvalue::MemCmp { a, b, n } => {
             let (pa, _) = eval_operand(ctx, base, a);
@@ -336,7 +344,7 @@ pub(super) fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
             lane_bytes,
         } => {
             let pa = eval_place_addr(ctx, base, a);
-            simd_exec::simd_reduce_body(pa as *const u8, *all, *lanes, *lane_bytes)
+            simd::simd_reduce_body(pa as *const u8, *all, *lanes, *lane_bytes)
         }
         Rvalue::SimdReduceArith {
             op,
@@ -346,7 +354,7 @@ pub(super) fn eval_rvalue(ctx: *mut Ctx, base: usize, rv: &Rvalue) -> u64 {
             lane_bytes,
         } => {
             let pa = eval_place_addr(ctx, base, a);
-            simd_exec::simd_reduce_arith_body(pa as *const u8, *op, *lane, *lanes, *lane_bytes)
+            simd::simd_reduce_arith_body(pa as *const u8, *op, *lane, *lanes, *lane_bytes)
         }
         Rvalue::Cmp128 { cc, signed, a, b } => {
             let pa = eval_place_addr(ctx, base, a);

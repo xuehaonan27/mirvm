@@ -558,7 +558,7 @@ impl Translator<'_, '_> {
             }
             // ===== The 15 SIMD statements plus Sat128, all through the
             // mirvm_simd_stmt helper, which shares its body with the interpreter's
-            // simd_exec. Argument order is (stmt, a, b, c, dst, v0, v1) and unused
+            // semantics::simd. Argument order is (stmt, a, b, c, dst, v0, v1) and unused
             // operands are passed as 0. =====
             Stmt::SimdBin { dst, a, b, .. } => {
                 let pd = self.place_addr(dst);
@@ -816,7 +816,7 @@ impl Translator<'_, '_> {
                 self.b.ins().call(fref, &[sp, pa, pb, z, pd, z, z]);
             }
             // Trap/Nop. A statement-level Trap is the stmt form of mirvm_jit_trap,
-            // which exits with engine_abort's message and error code 70. The trailing
+            // which exits with `unwind::engine_abort`'s message and error code. The trailing
             // trap is a fallback, because the helper does not return.
             Stmt::Trap(reason) => {
                 let fref = self.module.declare_func_in_func(self.trap, self.b.func);

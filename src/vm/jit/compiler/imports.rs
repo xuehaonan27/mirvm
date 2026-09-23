@@ -202,7 +202,7 @@ impl<'a> Compiler<'a> {
             .unwrap();
         // Unified SIMD/wide statement helper (7 params, 1 return) and SIMD rvalue
         // helper (2 params, 1 return): thin shells that re-match and call interp's
-        // shared simd_exec body.
+        // shared semantics::simd body.
         let mut sig_ss = module.make_signature();
         for _ in 0..7 {
             sig_ss.params.push(AbiParam::new(types::I64));
