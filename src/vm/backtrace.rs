@@ -42,13 +42,11 @@ impl Drop for SymbolImage {
     }
 }
 
-/// Conservative fallback IP when no ELF symbol image is available: high above the user address
-/// space and not page-aligned, so it cannot collide with a real code or data address. A normally
-/// loaded Engine uses a symbolizable ELF address instead.
-const FUNC_IP_BASE: u64 = 0x5f5f_0000_0000_0000;
-
+/// Conservative fallback IP when no symbol image is available. The base comes from this pair's
+/// fixed-address layout, which guarantees the band is one no mapping can occupy; a normally loaded
+/// Engine publishes a symbolizable address instead.
 fn fallback_func_ip(func: u32) -> u64 {
-    FUNC_IP_BASE + (func as u64) * 64
+    crate::os_arch::addrspace::FUNC_IP_BASE + (func as u64) * 64
 }
 
 /// The instruction-pointer token for `func`: the address the symbol image published, when there
