@@ -19,11 +19,13 @@
 //!
 //! * [`engine`] -- `Shared`, `EngineControl`, `Engine` and close/finalize.
 //! * [`thread_ctx`] -- `Ctx`, the `ThreadContexts` registry and the per-thread teardown rounds.
-//! * [`activation`] -- the code-domain boundary and the main-run panic boundary.
+//! * [`main_run`] -- the nested `run_main` states and the main panic catch boundary.
+//! * [`activation`] -- the code-domain boundary installed on entry, and the activation serial.
 //! * [`signals`] -- deferred signal delivery.
 
 pub(crate) mod activation;
 pub(crate) mod engine;
+mod main_run;
 mod signals;
 mod thread_ctx;
 
@@ -43,6 +45,7 @@ pub(crate) use engine::{
 pub use engine::{Engine, EngineClosed, EngineState, Shared, WaitClosedError};
 #[cfg(test)]
 pub(crate) use engine::{PHASE_CLOSING, PHASE_FINALIZING};
+pub(crate) use main_run::{begin_main_run, call_main_panic_boundary, claim_main_panic_catch};
 pub(crate) use signals::drain_current_thread_signal_deliveries_after_fault;
 pub(crate) use signals::{drain_pending_signals, raise_signal};
 /// Attaches the current host thread and returns its `Ctx` -- the boundary every entry point
@@ -55,8 +58,7 @@ pub(crate) use thread_ctx::{
     EngineFaultToken, begin_engine_fault, current_code_domain, finish_engine_fault,
 };
 pub(crate) use thread_ctx::{
-    begin_main_run, call_main_panic_boundary, claim_main_panic_catch, current,
-    current_thread_final_tsd_pass_is_armed, current_thread_is_in_final_tsd_pass,
+    current, current_thread_final_tsd_pass_is_armed, current_thread_is_in_final_tsd_pass,
     guest_spawned_threads, set_fork_baseline,
 };
 #[cfg(test)]
