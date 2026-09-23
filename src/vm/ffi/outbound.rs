@@ -159,7 +159,10 @@ impl FfiState {
                     })?;
                 self.required_handles.push(h);
                 if let Some(bias) = crate::os::dll::load_bias(h, &cpath)
-                    && let Ok(syms) = crate::native::symtab::hidden_symtab_values(cand)
+                    && let Ok(syms) = crate::native::symtab::hidden_symtab_values(
+                        cand,
+                        crate::os::dll::OBJECT_FORMAT,
+                    )
                 {
                     self.archive_fallbacks.push((bias as u64, syms));
                 }
