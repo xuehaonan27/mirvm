@@ -1,6 +1,13 @@
 use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use super::format::{
+    FMT_VER, MAGIC, SECTION_ENTRY_LEN, TAG_FUNCS, TAG_META, TAG_MODULE, TAG_NATIVELIBS, TAG_RELOC,
+    TAG_STAMPS, WHOLE_HASH_LEN, build_container, hash128, parse_container,
+};
+use super::funcs::{build_function_section, parse_function_section};
+use super::meta::{Meta, ModuleMetaRef, Reloc, postcard_bytes};
+
 use crate::diag::Diagnostic as _;
 
 static NEXT_PACKAGE_TEST: AtomicU64 = AtomicU64::new(0);
