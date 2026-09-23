@@ -107,13 +107,13 @@ check_diag_purity() {
 check_platform_boundary() {
     local bad
     bad=$(
-        for file in $(grep -rlE 'libc::|[[:space:]]asm!\(|global_asm!\(|std::os::(unix|windows)|#\[cfg\((all\()?(target_arch|target_os|unix|windows)' \
+        for file in $(grep -rlE 'libc::|[[:space:]]asm!\(|global_asm!\(|std::os::(unix|windows)|#\[cfg\([^)]*(target_arch|target_os|unix|windows)|target_arch[[:space:]]*=|target_os[[:space:]]*=|:[0-9]+:[[:space:]]*(unix|windows)[[:space:],)]*$' \
             src --include='*.rs' \
             | grep -v '^src/arch/' | grep -v '^src/os/' | grep -v '^src/os_arch/' \
             | grep -vE '(^|/)tests?\.rs$|/tests/|/embed_tests/|/test_driver\.rs$'); do
             awk '/^#\[cfg\((all\()?test/ { getline following; if (following ~ /^[[:space:]]*(pub )?mod [A-Za-z_0-9]+[[:space:]]*\{/) exit; print FILENAME ":" FNR ":" following; next } { print FILENAME ":" FNR ":" $0 }' "$file"
         done \
-        | grep -E 'libc::|[[:space:]]asm!\(|global_asm!\(|std::os::(unix|windows)|#\[cfg\((all\()?(target_arch|target_os|unix|windows)'
+        | grep -E 'libc::|[[:space:]]asm!\(|global_asm!\(|std::os::(unix|windows)|#\[cfg\([^)]*(target_arch|target_os|unix|windows)|target_arch[[:space:]]*=|target_os[[:space:]]*=|:[0-9]+:[[:space:]]*(unix|windows)[[:space:],)]*$'
     )
     if [ -n "$bad" ]; then
         echo "platform items named outside src/{arch,os,os_arch}:" >&2

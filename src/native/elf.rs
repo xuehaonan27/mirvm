@@ -32,16 +32,69 @@ pub const PT_INTERP: u32 = 3;
 
 /// `sh_type` values the symbol readers act on.
 pub const SHT_SYMTAB: u32 = 2;
+pub const SHT_STRTAB: u32 = 3;
 pub const SHT_DYNSYM: u32 = 11;
+
+/// A `RELA` record is an offset, an `r_info` and an addend.
+pub const RELA_ENTRY_SIZE: usize = 24;
+
+/// A dynamic table entry is a tag and a value, 8 bytes each.
+pub const DYN_ENTRY_SIZE: usize = 16;
 
 /// `st_shndx`: the symbol is undefined in this image.
 pub const SHN_UNDEF: u16 = 0;
 /// `st_shndx`: the first reserved (processor- or OS-specific) index; below it is a real section.
 pub const SHN_RESERVED: u16 = 0xff00;
+/// `st_shndx`: the symbol's value is an absolute address, not an offset into a section.
+pub const SHN_ABS: u16 = 0xfff1;
 
 /// `st_info >> 4`: the bindings a static symbol enumeration considers.
 pub const STB_GLOBAL: u8 = 1;
 pub const STB_WEAK: u8 = 2;
+
+/// `st_info >> 4`: the binding of a symbol.
+pub const fn sym_bind(info: u8) -> u8 {
+    info >> 4
+}
+
+/// `st_info & 0xf`: the type of a symbol. `STT_GNU_IFUNC` resolves to a function the loader must
+/// call to get the real address, which the self-loader does not do.
+pub const fn sym_type(info: u8) -> u8 {
+    info & 0x0f
+}
+
+pub const STT_GNU_IFUNC: u8 = 10;
+
+/// The `d_tag` values a reader of a `PT_DYNAMIC` table acts on. A tag that is not named here is
+/// skipped, which is what makes a table with entries this loader ignores still loadable.
+pub const DT_NULL: i64 = 0;
+pub const DT_PLTRELSZ: i64 = 2;
+pub const DT_STRTAB: i64 = 5;
+pub const DT_SYMTAB: i64 = 6;
+pub const DT_RELA: i64 = 7;
+pub const DT_RELASZ: i64 = 8;
+pub const DT_RELAENT: i64 = 9;
+pub const DT_SYMENT: i64 = 11;
+pub const DT_INIT: i64 = 12;
+pub const DT_FINI: i64 = 13;
+pub const DT_PLTREL: i64 = 20;
+pub const DT_JMPREL: i64 = 23;
+pub const DT_BIND_NOW: i64 = 24;
+pub const DT_INIT_ARRAY: i64 = 25;
+pub const DT_FINI_ARRAY: i64 = 26;
+pub const DT_INIT_ARRAYSZ: i64 = 27;
+pub const DT_FINI_ARRAYSZ: i64 = 28;
+pub const DT_PREINIT_ARRAY: i64 = 32;
+pub const DT_PREINIT_ARRAYSZ: i64 = 33;
+
+/// The tags that ask for a thread-local storage model. They are named so a reader can refuse the
+/// image by tag rather than by number.
+pub const DT_DTPMOD64: i64 = 17;
+pub const DT_DTPOFF64: i64 = 18;
+pub const DT_TPOFF64: i64 = 19;
+pub const DT_DTPMOD32: i64 = 35;
+pub const DT_DTPOFF32: i64 = 36;
+pub const DT_TPOFF32: i64 = 37;
 
 /// File header field offsets, named for the writer that assembles a header field by field as well
 /// as for the reader below.
