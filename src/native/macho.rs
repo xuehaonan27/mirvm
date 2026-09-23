@@ -342,18 +342,19 @@ pub(crate) struct ImageSymbol {
     /// caller compares the same string it would use anywhere else.
     pub(crate) name: Box<str>,
     /// The address the symbol is defined at in the image, or zero for one the loader resolves.
-    ///
-    /// Only the test below reads it today; a caller resolving a symbol into running code is what
-    /// this is here for.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) value: u64,
     /// Whether the loader has to resolve it rather than the image defining it.
     pub(crate) undefined: bool,
+    /// Whether the image marks it private, which is how this format says the loader cannot reach
+    /// it by name even though the image defines it.
+    pub(crate) private_extern: bool,
 }
 
-/// `n_type`'s type field, and the value meaning "defined nowhere in this image".
+/// `n_type`'s type field, the value meaning "defined nowhere in this image", and the bit marking a
+/// symbol the image defines but does not export.
 const N_TYPE: u8 = 0x0e;
 const N_UNDF: u8 = 0x00;
+const N_PEXT: u8 = 0x10;
 
 /// The symbols of a Mach-O image, in the order its table lists them.
 pub(crate) fn symbols(bytes: &[u8]) -> Result<Vec<ImageSymbol>, String> {
@@ -378,6 +379,18 @@ pub(crate) fn undefined_symbols(bytes: &[u8]) -> Result<Vec<Box<str>>, String> {
         .into_iter()
         .filter(|symbol| symbol.undefined)
         .map(|symbol| symbol.name)
+        .collect())
+}
+
+/// The symbols the image defines but does not export, by name and address.
+///
+/// An image exports every external symbol it does not mark private, so this is the set a caller
+/// cannot reach by name through the loader however the image is loaded.
+pub(crate) fn hidden_symbols(bytes: &[u8]) -> Result<Vec<(Box<str>, u64)>, String> {
+    Ok(symbols(bytes)?
+        .into_iter()
+        .filter(|symbol| !symbol.undefined && symbol.private_extern)
+        .map(|symbol| (symbol.name, symbol.value))
         .collect())
 }
 
@@ -415,6 +428,7 @@ fn symbol_table(bytes: &[u8], fields: [usize; 4]) -> Result<Vec<ImageSymbol>, St
             name,
             value: read_u64(entry, 8).ok_or_else(|| "a symbol entry is truncated".to_string())?,
             undefined: entry[4] & N_TYPE == N_UNDF && entry[4] & N_EXT != 0,
+            private_extern: entry[4] & N_PEXT != 0,
         });
     }
     Ok(out)
@@ -497,20 +511,38 @@ mod tests {
     #[test]
     fn an_undefined_symbol_is_reported_without_the_formats_underscore() {
         let (mut bytes, _) = image();
-        let mut at = HEADER_SIZE;
-        let symoff = loop {
-            let (command, size) = load_command(&bytes, at).expect("a load command");
-            if command == LC_SYMTAB {
-                break symtab_at(&bytes, at).expect("symtab fields")[0];
-            }
-            at += size as usize;
-        };
         // Make the first entry external and sectionless, which is what "the loader resolves this"
         // is: the reader has to report it, and without the underscore the file spells it with.
+        let symoff = first_nlist(&bytes);
         bytes[symoff + 4] = N_EXT;
         bytes[symoff + 5] = 0;
         let undefined = undefined_symbols(&bytes).expect("an image");
         assert_eq!(undefined.len(), 1);
         assert_eq!(&*undefined[0], NAMES[0]);
+    }
+
+    /// A symbol the image defines but does not export is the one a caller cannot reach by name
+    /// through the loader, which is what the fallback table is for.
+    #[test]
+    fn a_private_symbol_is_reported_with_its_address() {
+        let (mut bytes, text_off) = image();
+        let symoff = first_nlist(&bytes);
+        bytes[symoff + 4] |= N_PEXT;
+        let hidden = hidden_symbols(&bytes).expect("an image");
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(&*hidden[0].0, NAMES[0]);
+        assert_eq!(hidden[0].1 as usize, text_off);
+    }
+
+    /// The file offset of the first `nlist_64`, for a test that rewrites one entry's `n_type`.
+    fn first_nlist(bytes: &[u8]) -> usize {
+        let mut at = HEADER_SIZE;
+        loop {
+            let (command, size) = load_command(bytes, at).expect("a load command");
+            if command == LC_SYMTAB {
+                return symtab_at(bytes, at).expect("symtab fields")[0];
+            }
+            at += size as usize;
+        }
     }
 }

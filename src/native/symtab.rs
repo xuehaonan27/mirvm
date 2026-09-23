@@ -128,18 +128,38 @@ pub(crate) fn symtab_values(so_path: &str) -> Result<HashMap<Box<str>, u64>, Err
     symbol_table_values(so_path, SHT_SYMTAB)
 }
 
-/// The hidden-symbol fallback table = `.symtab` defined minus `.dynsym` defined.
-/// dynsym-visible symbols keep their global dlsym resolution (`reject_symbol_ambiguity`
-/// already rejects their collision with RTLD_DEFAULT at materialization time); only hidden
-/// symbols, unreachable by dlsym, take the "archive before global" link-time binding semantics
-/// (see the module header). A parse failure is propagated as Err and every caller degrades to
-/// no table.
-pub fn hidden_symtab_values(so_path: &str) -> Result<HashMap<Box<str>, u64>, Error> {
-    let mut syms = symbol_table_values(so_path, SHT_SYMTAB)?;
-    for name in symbol_table_values(so_path, SHT_DYNSYM)?.keys() {
-        syms.remove(&**name);
+/// The hidden-symbol fallback table: the symbols an object defines that its loader cannot reach by
+/// name.
+///
+/// A symbol the loader can resolve keeps its global `dlsym` resolution (`reject_symbol_ambiguity`
+/// already rejects its collision with `RTLD_DEFAULT` at materialization time); only a symbol
+/// `dlsym` cannot reach takes the "archive before global" link-time binding semantics (see the
+/// module header).
+///
+/// Each format spells "the image defines it but nothing can look it up" its own way — an ELF
+/// symbol that is in `.symtab` and not in `.dynsym`, a Mach-O one the image marks private — so
+/// which format is being read is a parameter. A parse failure is propagated as Err and every
+/// caller degrades to no table.
+pub fn hidden_symtab_values(
+    so_path: &str,
+    format: crate::os::dll::ObjectFormat,
+) -> Result<HashMap<Box<str>, u64>, Error> {
+    match format {
+        crate::os::dll::ObjectFormat::Elf => {
+            let mut syms = symbol_table_values(so_path, SHT_SYMTAB)?;
+            for name in symbol_table_values(so_path, SHT_DYNSYM)?.keys() {
+                syms.remove(&**name);
+            }
+            Ok(syms)
+        }
+        crate::os::dll::ObjectFormat::MachO => {
+            let bytes = std::fs::read(so_path)
+                .map_err(|e| Error::io(format!("cannot read the shared library `{so_path}`"), e))?;
+            super::macho::hidden_symbols(&bytes)
+                .map(|symbols| symbols.into_iter().collect())
+                .map_err(|why| Error::malformed(format!("`{so_path}`: {why}")))
+        }
     }
-    Ok(syms)
 }
 
 /// Resolve the given symbol table section (SHT_SYMTAB / SHT_DYNSYM; entries have the same
@@ -441,7 +461,9 @@ mod tests {
         // The hidden fallback table = .symtab - .dynsym: hidden is in (carrying archive
         // priority), visible is out (keeping global dlsym resolution, paired with
         // reject_symbol_ambiguity)
-        let hidden_only = hidden_symtab_values(so.to_str().unwrap()).unwrap();
+        // The probe this test builds is an ELF object whatever the host is, so it asks as one.
+        let hidden_only =
+            hidden_symtab_values(so.to_str().unwrap(), crate::os::dll::ObjectFormat::Elf).unwrap();
         assert_eq!(
             hidden_only.get("mirvm_hidden_probe"),
             syms.get("mirvm_hidden_probe"),
