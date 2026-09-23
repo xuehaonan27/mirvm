@@ -207,7 +207,7 @@ pub(super) fn admit(shared: &Shared, body: &ir::FuncBody) -> bool {
                 Stmt::F128ToScalar { src, dst, .. } => place_ok(src) && mem_place_ok(dst),
                 Stmt::F128FromWideInt { src, dst, .. } => place_ok(src) && place_ok(dst),
                 Stmt::F128ToWideInt { src, dst, .. } => place_ok(src) && place_ok(dst),
-                // SIMD 15 items + Sat128. The interpreter's simd_exec shares the mirvm_simd_stmt helper
+                // SIMD 15 items + Sat128. The shared semantics::simd bodies back the mirvm_simd_stmt helper
                 // body. place fields use place_ok, Operand fields use operand_ok, and SimdExtractDyn's
                 // ScalarPlace dst uses mem_place_ok.
                 Stmt::SimdBin { dst, a, b, .. } => place_ok(dst) && place_ok(a) && place_ok(b),

@@ -61,8 +61,8 @@ struct Compiler<'a> {
     memset: ClifFuncId,
     /// MemCmp (the `compare_bytes` intrinsic).
     memcmp: ClifFuncId,
-    /// Divide-by-zero diagnostic exit; same message and exit code as interp's
-    /// `engine_abort`.
+    /// Divide-by-zero diagnostic exit; same message and exit code as
+    /// `unwind::engine_abort`.
     div_zero: ClifFuncId,
     /// Volatile read/write, sharing the interpreter's opaque-byte carrier.
     volatile_load: ClifFuncId,
@@ -83,10 +83,10 @@ struct Compiler<'a> {
     /// Lets a JIT cleanup pad tell an EngineFault from any other exception pointer it
     /// catches.
     exception_is_engine_fault: ClifFuncId,
-    /// Trap placeholder helper; same message and exit code as interp's `engine_abort`.
+    /// Trap placeholder helper; same message and exit code as `unwind::engine_abort`.
     trap: ClifFuncId,
     /// Unified SIMD/wide statement helper and the SIMD rvalue helper; thin shells that
-    /// re-match and call interp's shared `simd_exec` body.
+    /// re-match and call the shared `semantics::simd` body.
     simd_stmt: ClifFuncId,
     simd_rv: ClifFuncId,
     /// Checks stack headroom before a compiled body allocates its frame.

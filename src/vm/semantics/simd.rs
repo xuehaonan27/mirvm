@@ -7,8 +7,10 @@
 //! Address parameters are already-evaluated raw true addresses; each body converts them back
 //! to u64, matching the interpreter arms.
 
-use super::*;
-use crate::vm::ir::{LaneKind, SimdBinOp, SimdReduceOp, SimdUnOp};
+use super::arith::{bit_un, int_bin, int_cmp, int_saturating, sext};
+use super::memory::{mem_read, mem_write};
+use crate::vm::ir::{IntBinOp, IntCc, LaneKind, OvfOp, SimdBinOp, SimdReduceOp, SimdUnOp, Width};
+use crate::vm::unwind::engine_abort;
 
 /// Body of the SimdBin statement.
 pub(crate) fn simd_bin_body(

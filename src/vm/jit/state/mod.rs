@@ -3,7 +3,7 @@
 //! A function's state moves through Bytecode -> (counter crosses the threshold, compile)
 //! -> Machine: a slot value of 0 means "interpret", non-zero is the packed entry machine
 //! address called directly by i2c. Publication is a single atomic pointer swap: the
-//! compiler worker stores with Release, `interp::call_guest` loads with Acquire.
+//! compiler worker stores with Release, `dispatch::call_guest` loads with Acquire.
 //!
 //! This module does not depend on Cranelift: the guest call path only reads the atomic
 //! slots, and machine-code range registration plus perf-map locking and file writes happen

@@ -3,7 +3,7 @@
 //! - `state` (feature-free, so the TSan harness can compile it as well):
 //!   `JitState` holds the PLT slot table, the call counters and the
 //!   compile-request channel. The publication protocol is Release stores by the
-//!   compile thread and Acquire loads in `interp::call_guest`.
+//!   compile thread and Acquire loads in `dispatch::call_guest`.
 //! - The pipeline (`#[cfg(feature = "cranelift")]`; its semantic contract is
 //!   bit-for-bit agreement with the interpreter): `compiler` (per-Engine
 //!   start/stop/worker plus Compiler/JITModule and eh_frame registration),
@@ -13,7 +13,7 @@
 //!   (conservative whole-set address-taken analysis) and `lsda_probe` (a
 //!   cfg(test) check of the LSDA pipeline).
 //!
-//! The `state` publication protocol spans `interp::call_guest` (the read side)
+//! The `state` publication protocol spans `dispatch::call_guest` (the read side)
 //! and the compile workers here (the write side), so both sides must be read
 //! together when either changes.
 

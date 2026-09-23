@@ -63,7 +63,7 @@ enum ThunkKind {
 /// guarantee declared width is valid; engine value = width-masked bits, LE).
 /// C1: aggregate arg = closure avalue always points to aggregate bytes (same shape across classes)
 /// → pass the real byte address; callee-side ParamAbi expansion is mapped by
-/// interp::call_guest_ffi according to FfiAgg.
+/// `dispatch::call_guest_ffi` according to FfiAgg.
 unsafe fn marshal_args(kinds: &[FfiKind], args: *const *const c_void) -> Vec<u64> {
     let mut av: Vec<u64> = Vec::with_capacity(kinds.len());
     for (i, k) in kinds.iter().enumerate() {
@@ -98,12 +98,12 @@ unsafe fn repack_ret(result: *mut u8, agg: &super::ir::FfiAgg, lo: u64, hi: u64)
         let (v, leaf) = match i {
             0 => (lo, &f.leaf),
             1 => (hi, &f.leaf),
-            _ => super::interp::engine_abort(
+            _ => crate::vm::unwind::engine_abort(
                 "C1 repack: >2 top-level fields with Pair/Scalar return channel",
             ),
         };
         let super::ir::FfiLeaf::Scalar(k) = leaf else {
-            super::interp::engine_abort(
+            crate::vm::unwind::engine_abort(
                 "C1 repack: top-level nested leaf with Pair/Scalar return channel",
             );
         };
@@ -119,7 +119,7 @@ unsafe fn repack_ret(result: *mut u8, agg: &super::ir::FfiAgg, lo: u64, hi: u64)
                     (dst as *mut u64).write_unaligned(v)
                 }
                 FfiKind::Void | FfiKind::Agg(_) => {
-                    super::interp::engine_abort("C1 repack: illegal leaf kind")
+                    crate::vm::unwind::engine_abort("C1 repack: illegal leaf kind")
                 }
             }
         }
@@ -130,7 +130,7 @@ unsafe fn repack_ret(result: *mut u8, agg: &super::ir::FfiAgg, lo: u64, hi: u64)
 /// → interpret → write back return value. Return buffer always aligned (integers promoted to
 /// ffi_arg / F32 bits in low 32, LE).
 /// C1: when ret = Agg, branch — callee RetAbi::Indirect → result passed as hidden first arg
-/// through call_guest_ffi (sret passed directly, callee memcpy's to that address); others →
+/// through `dispatch::call_guest_ffi` (sret passed directly, callee memcpy's to that address); others →
 /// (lo,hi) then repack_ret to struct bytes. Whether the ABI boundary allows unwind is decided by
 /// the outer wrapper; the body does not duplicate two semantics.
 unsafe fn trampoline_body(
@@ -148,7 +148,7 @@ unsafe fn trampoline_body(
     let av = unsafe { marshal_args(&data.args, args) };
     match &data.ret {
         FfiKind::Agg(agg) => {
-            let (lo, hi) = super::interp::call_guest_ffi(
+            let (lo, hi) = crate::vm::dispatch::call_guest_ffi(
                 ctx,
                 data.func,
                 &data.args,
@@ -156,14 +156,15 @@ unsafe fn trampoline_body(
                 Some(result as *mut u64 as u64),
             );
             if !matches!(
-                super::interp::ret_abi_of(ctx, data.func),
+                crate::vm::dispatch::ret_abi_of(ctx, data.func),
                 super::ir::RetAbi::Indirect { .. }
             ) {
                 unsafe { repack_ret(result as *mut u64 as *mut u8, agg, lo, hi) };
             }
         }
         _ => {
-            let (lo, _hi) = super::interp::call_guest_ffi(ctx, data.func, &data.args, &av, None);
+            let (lo, _hi) =
+                crate::vm::dispatch::call_guest_ffi(ctx, data.func, &data.args, &av, None);
             if data.ret != FfiKind::Void {
                 *result = lo;
             }
@@ -612,7 +613,7 @@ pub(crate) fn prepare_foreign_callbacks(
             ("pthread_create", 2) => {
                 let start =
                     super::deferred::PthreadStart::new(shared.control()).unwrap_or_else(|_| {
-                        super::interp::engine_abort(
+                        crate::vm::unwind::engine_abort(
                             "pthread_create callback registered while Engine was finalizing",
                         )
                     });
@@ -627,7 +628,7 @@ pub(crate) fn prepare_foreign_callbacks(
             ("pthread_key_create", 1) => {
                 let registration = super::deferred::TsdRegistration::pending(shared.control())
                     .unwrap_or_else(|_| {
-                        super::interp::engine_abort(
+                        crate::vm::unwind::engine_abort(
                             "pthread TSD callback registered while Engine was finalizing",
                         )
                     });

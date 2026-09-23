@@ -114,7 +114,7 @@ impl Translator<'_, '_> {
                     // Interpreter identity: align = *(vtable + 16), `packed` takes the
                     // min, and a non-power-of-two or overflowing alignment aborts --
                     // on the JIT side through mirvm_jit_trap, the same diagnostic exit
-                    // the interpreter's engine_abort takes.
+                    // the interpreter arm takes through `unwind::engine_abort`.
                     let (vtable, _) = self.operand(meta);
                     let mut align =
                         self.b
@@ -147,7 +147,7 @@ impl Translator<'_, '_> {
         addr
     }
 
-    /// Trap when `cond` holds -- the JIT form of the interpreter's `engine_abort`.
+    /// Trap when `cond` holds -- the JIT form of `unwind::engine_abort`.
     fn trap_if(&mut self, cond: Value, _msg: &'static str) {
         let t_blk = self.b.create_block();
         let f_blk = self.b.create_block();

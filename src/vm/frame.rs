@@ -69,7 +69,7 @@ impl ByteRegion {
         let start = aligned - self.base as usize;
         let end = start + size as usize;
         if end > REGION_CAP {
-            crate::vm::interp::engine_abort(&format!(
+            crate::vm::unwind::engine_abort(&format!(
                 "guest stack overflow (operand area {} MiB exhausted)",
                 REGION_CAP >> 20
             ));

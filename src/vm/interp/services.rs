@@ -2,9 +2,9 @@
 //! merging with symbol IPs, and the atexit family (a per-Engine registry with LIFO
 //! callback execution).
 
-use super::call::call_fn_addr;
 use super::*;
 use crate::os::unwind;
+use crate::vm::dispatch::call_fn_addr;
 
 /// Resolves a guest signal-handler address to its AS-trampoline code address.
 ///

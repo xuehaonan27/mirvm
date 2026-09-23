@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::super::ctx::{Engine, Shared, activate};
-use super::super::interp::{RunOutcome, call_guest_ffi, run_export};
+use super::super::dispatch::call_guest_ffi;
+use super::super::interp::{RunOutcome, run_export};
 use super::super::ir::{
     Block, FfiKind, ForeignSig, FuncBody, MemOrd, Module, Operand, ParamAbi, PlaceBase, PlaceExpr,
     PlaceStep, RetAbi, RetDest, RmwOp, Rvalue, ScalarPlace, Slot, Stmt, Terminator, UnwindAction,
