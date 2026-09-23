@@ -7,12 +7,74 @@ use crate::os::signal::{MaskOp, SignalMask, ThreadSignalMaskGuard, set_thread_ma
 
 use super::activation::activate;
 use super::engine::{ExecutionLease, Shared};
-use super::thread_ctx::{
-    CTX_KEY, CloseSignalDrainGuard, Ctx, SignalDrainGuard, SignalMaskGuard, ThreadContexts,
-    current_thread_contexts,
-};
+use super::thread_ctx::{CTX_KEY, Ctx, ThreadContexts, current_thread_contexts};
 
 const SIGNAL_DRAIN_ROUNDS: usize = 8;
+
+/// While this is alive, one thread's registered signals are being delivered.
+pub(super) struct SignalDrainGuard {
+    pub(super) ctx: *mut Ctx,
+}
+
+/// Restores the thread's mimicked signal mask on every exit path, including an unwind.
+pub(super) struct SignalMaskGuard {
+    pub(super) contexts: *mut ThreadContexts,
+    pub(super) previous: u64,
+    pub(super) restored: bool,
+}
+
+impl SignalMaskGuard {
+    pub(super) fn restore(&mut self) {
+        if self.restored {
+            return;
+        }
+        unsafe { (*self.contexts).signal_mask = self.previous };
+        self.restored = true;
+    }
+
+    /// Restore the interrupted mask and deliver synchronous raises against
+    /// the disposition that is current now. This method is reached only after
+    /// the guest handler returned normally; `Drop` deliberately does not run
+    /// guest code while an EngineFault is unwinding.
+    pub(super) fn finish(
+        mut self,
+        ctx: *mut Ctx,
+        host_mask: crate::os::signal::ThreadSignalMaskGuard,
+    ) {
+        self.restore();
+        drop(host_mask);
+        start_pending_signal_finalizers(self.contexts);
+        drain_current_thread_signal_deliveries(ctx);
+        drain_pending_signals(ctx);
+    }
+}
+
+impl Drop for SignalMaskGuard {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
+/// While this is alive the thread accepts pending signal inbox events even with a closing
+/// Engine, which the ordinary drain refuses.
+pub(super) struct CloseSignalDrainGuard {
+    contexts: *mut ThreadContexts,
+    previous: bool,
+}
+
+impl CloseSignalDrainGuard {
+    pub(super) fn enter(contexts: *mut ThreadContexts, closing: bool) -> Self {
+        let previous = unsafe { (*contexts).close_signal_drain };
+        unsafe { (*contexts).close_signal_drain = previous || closing };
+        Self { contexts, previous }
+    }
+}
+
+impl Drop for CloseSignalDrainGuard {
+    fn drop(&mut self) {
+        unsafe { (*self.contexts).close_signal_drain = self.previous };
+    }
+}
 
 impl Drop for SignalDrainGuard {
     fn drop(&mut self) {
