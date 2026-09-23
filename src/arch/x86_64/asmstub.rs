@@ -49,6 +49,19 @@ pub fn int3() {
     unsafe { std::arch::asm!("int3", options(nomem, nostack, preserves_flags)) };
 }
 
+/// The assembly text of a jump through the hidden 8-byte slot `slot`, without a trailing newline.
+///
+/// This is the body of a P1 entry trampoline: the rlib-rescue path defines one such trampoline for
+/// each symbol a native archive left undefined and the crate graph exports, and the owning Engine
+/// writes the address the trampoline should reach into the slot. Which symbol needs one, and the
+/// directives naming it, belong to the object format; the instruction is the CPU's.
+///
+/// The caller must already have selected this architecture's syntax
+/// (`crate::arch::asm_text::DIRECTIVE_INTEL`).
+pub fn indirect_jump_asm(slot: &str) -> String {
+    format!("    jmp QWORD PTR [rip + {slot}]")
+}
+
 /// The single-byte `ret`. This is what a `.text` slot that is never executed is filled with: an
 /// image whose only job is to name addresses has to have *something* decodable there.
 pub const RET: u8 = 0xc3;
@@ -174,3 +187,141 @@ std::arch::global_asm!(
     "popfq",
     "ret",
 );
+
+/// The bridge entries for the calls `crate::vm::interpose` lists: this architecture's machine code,
+/// reached by name because the platform's linker was asked to redirect those calls.
+///
+/// Each entry loads the owning engine into the argument register the replacement's trailing `owner`
+/// parameter occupies -- the owner is always the last parameter, so its register is the count of the
+/// call's own arguments -- and jumps indirect through the slot
+/// `crate::vm::native_instance::wire` fills. A call's own arguments are never touched, and the jump
+/// leaves the return address the caller pushed in place, so the replacement returns to the caller.
+pub const NATIVE_RUNTIME_BRIDGE_ASM: &str = r#"
+.intel_syntax noprefix
+.text
+.p2align 4
+.globl __wrap_pthread_create
+.hidden __wrap_pthread_create
+.type __wrap_pthread_create,@function
+__wrap_pthread_create:
+    mov r8, QWORD PTR [rip + __mirvm_pthread_owner]
+    jmp QWORD PTR [rip + __mirvm_pthread_create_target]
+.size __wrap_pthread_create,.-__wrap_pthread_create
+
+.p2align 4
+.globl __wrap_pthread_key_create
+.hidden __wrap_pthread_key_create
+.type __wrap_pthread_key_create,@function
+__wrap_pthread_key_create:
+    mov rdx, QWORD PTR [rip + __mirvm_pthread_owner]
+    jmp QWORD PTR [rip + __mirvm_pthread_key_create_target]
+.size __wrap_pthread_key_create,.-__wrap_pthread_key_create
+
+.p2align 4
+.globl __wrap_pthread_setspecific
+.hidden __wrap_pthread_setspecific
+.type __wrap_pthread_setspecific,@function
+__wrap_pthread_setspecific:
+    mov rdx, QWORD PTR [rip + __mirvm_pthread_owner]
+    jmp QWORD PTR [rip + __mirvm_pthread_setspecific_target]
+.size __wrap_pthread_setspecific,.-__wrap_pthread_setspecific
+
+.p2align 4
+.globl __wrap_pthread_key_delete
+.hidden __wrap_pthread_key_delete
+.type __wrap_pthread_key_delete,@function
+__wrap_pthread_key_delete:
+    mov rsi, QWORD PTR [rip + __mirvm_pthread_owner]
+    jmp QWORD PTR [rip + __mirvm_pthread_key_delete_target]
+.size __wrap_pthread_key_delete,.-__wrap_pthread_key_delete
+
+.p2align 4
+.globl __wrap_signal
+.hidden __wrap_signal
+.type __wrap_signal,@function
+__wrap_signal:
+    mov rdx, QWORD PTR [rip + __mirvm_signal_owner]
+    jmp QWORD PTR [rip + __mirvm_signal_target]
+.size __wrap_signal,.-__wrap_signal
+
+.p2align 4
+.globl __wrap_sigaction
+.hidden __wrap_sigaction
+.type __wrap_sigaction,@function
+__wrap_sigaction:
+    mov rcx, QWORD PTR [rip + __mirvm_signal_owner]
+    jmp QWORD PTR [rip + __mirvm_sigaction_target]
+.size __wrap_sigaction,.-__wrap_sigaction
+
+.p2align 4
+.globl __wrap_raise
+.hidden __wrap_raise
+.type __wrap_raise,@function
+__wrap_raise:
+    mov rsi, QWORD PTR [rip + __mirvm_signal_owner]
+    jmp QWORD PTR [rip + __mirvm_raise_target]
+.size __wrap_raise,.-__wrap_raise
+
+.pushsection .data.mirvm_pthread,"aw",@progbits
+.p2align 3
+.globl __mirvm_pthread_owner
+.hidden __mirvm_pthread_owner
+.type __mirvm_pthread_owner,@object
+.size __mirvm_pthread_owner,8
+__mirvm_pthread_owner:
+    .quad 0
+.globl __mirvm_pthread_create_target
+.hidden __mirvm_pthread_create_target
+.type __mirvm_pthread_create_target,@object
+.size __mirvm_pthread_create_target,8
+__mirvm_pthread_create_target:
+    .quad 0
+.globl __mirvm_pthread_key_create_target
+.hidden __mirvm_pthread_key_create_target
+.type __mirvm_pthread_key_create_target,@object
+.size __mirvm_pthread_key_create_target,8
+__mirvm_pthread_key_create_target:
+    .quad 0
+.globl __mirvm_pthread_setspecific_target
+.hidden __mirvm_pthread_setspecific_target
+.type __mirvm_pthread_setspecific_target,@object
+.size __mirvm_pthread_setspecific_target,8
+__mirvm_pthread_setspecific_target:
+    .quad 0
+.globl __mirvm_pthread_key_delete_target
+.hidden __mirvm_pthread_key_delete_target
+.type __mirvm_pthread_key_delete_target,@object
+.size __mirvm_pthread_key_delete_target,8
+__mirvm_pthread_key_delete_target:
+    .quad 0
+.popsection
+
+.pushsection .data.mirvm_signal,"aw",@progbits
+.p2align 3
+.globl __mirvm_signal_owner
+.hidden __mirvm_signal_owner
+.type __mirvm_signal_owner,@object
+.size __mirvm_signal_owner,8
+__mirvm_signal_owner:
+    .quad 0
+.globl __mirvm_signal_target
+.hidden __mirvm_signal_target
+.type __mirvm_signal_target,@object
+.size __mirvm_signal_target,8
+__mirvm_signal_target:
+    .quad 0
+.globl __mirvm_sigaction_target
+.hidden __mirvm_sigaction_target
+.type __mirvm_sigaction_target,@object
+.size __mirvm_sigaction_target,8
+__mirvm_sigaction_target:
+    .quad 0
+.globl __mirvm_raise_target
+.hidden __mirvm_raise_target
+.type __mirvm_raise_target,@object
+.size __mirvm_raise_target,8
+__mirvm_raise_target:
+    .quad 0
+.popsection
+.section .note.GNU-stack,"",@progbits
+"#;

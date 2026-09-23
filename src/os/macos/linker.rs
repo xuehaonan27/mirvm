@@ -20,3 +20,18 @@ pub const ASM_STUB: &[&str] = &["-Wl,-undefined,dynamic_lookup", "-Wl,-no_fixup_
 /// Extra arguments for the global-asm image. The same as [`ASM_STUB`]: the two intentions that
 /// differ on the other platform are both spelled by the pair of flags above.
 pub const GLOBAL_ASM: &[&str] = &["-Wl,-undefined,dynamic_lookup", "-Wl,-no_fixup_chains"];
+
+/// `None`: this format has no flag that redirects the calls `calls` names.
+///
+/// GNU ld's `--wrap` works on symbol references as the linker resolves them, and Mach-O's two-level
+/// namespace has no counterpart. A call is redirected here by a dyld interposing table — an
+/// `__DATA,__interpose` section pairing each replacement with the symbol it replaces, which dyld
+/// applies to the image as it loads it — and this port does not emit one.
+///
+/// Answering with the arguments left out is the one answer that must not be given: the image would
+/// name no replacement, so its `pthread_create` would reach libSystem and the engine would lose a
+/// thread it never learned about, with no diagnostic anywhere. A caller that gets `None` fails the
+/// link instead.
+pub fn interpose_args(_calls: &[&str]) -> Option<Vec<String>> {
+    None
+}

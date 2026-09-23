@@ -124,159 +124,6 @@ const LINK_SUFFIX: &[&str] = &[
     "-lutil",
     "-lgcc_s",
 ];
-/// The runtime calls a mirvm image must not reach directly, asked of the linker by name.
-///
-/// NOTE: three facts wear this one name, and only the first is mirvm's.
-/// *Which* calls must be caught belongs with the guest model rather than with archive handling.
-/// *How* the linker is told belongs in `os::linker`, because it is the object format's: GNU ld has
-/// `--wrap`, while Mach-O has no such flag and needs dyld interposing (an `__DATA,__interpose`
-/// table) instead. And the bridge the flags name is machine code, which belongs to
-/// `arch::asmstub` beside the other stub generators. A platform whose linker cannot express this
-/// must refuse the image rather than link one whose calls would never be caught.
-pub(crate) const NATIVE_RUNTIME_WRAP_FLAGS: &[&str] = &[
-    "-Wl,--wrap=pthread_create",
-    "-Wl,--wrap=pthread_key_create",
-    "-Wl,--wrap=pthread_setspecific",
-    "-Wl,--wrap=pthread_key_delete",
-    "-Wl,--wrap=signal",
-    "-Wl,--wrap=sigaction",
-    "-Wl,--wrap=raise",
-];
-/// The replacement symbols [`NATIVE_RUNTIME_WRAP_FLAGS`] names, as hand-written x86_64.
-///
-/// NOTE: x86 machine code in a format-handling layer. It has the shape `arch::asmstub` already
-/// emits for the entry stubs — a PC-relative load of an indirect slot — so it should be generated
-/// by the architecture, which is what would give an aarch64 bridge somewhere to live.
-pub(crate) const NATIVE_RUNTIME_BRIDGE_ASM: &str = r#"
-.intel_syntax noprefix
-.text
-.p2align 4
-.globl __wrap_pthread_create
-.hidden __wrap_pthread_create
-.type __wrap_pthread_create,@function
-__wrap_pthread_create:
-    mov r8, QWORD PTR [rip + __mirvm_pthread_owner]
-    jmp QWORD PTR [rip + __mirvm_pthread_create_target]
-.size __wrap_pthread_create,.-__wrap_pthread_create
-
-.p2align 4
-.globl __wrap_pthread_key_create
-.hidden __wrap_pthread_key_create
-.type __wrap_pthread_key_create,@function
-__wrap_pthread_key_create:
-    mov rdx, QWORD PTR [rip + __mirvm_pthread_owner]
-    jmp QWORD PTR [rip + __mirvm_pthread_key_create_target]
-.size __wrap_pthread_key_create,.-__wrap_pthread_key_create
-
-.p2align 4
-.globl __wrap_pthread_setspecific
-.hidden __wrap_pthread_setspecific
-.type __wrap_pthread_setspecific,@function
-__wrap_pthread_setspecific:
-    mov rdx, QWORD PTR [rip + __mirvm_pthread_owner]
-    jmp QWORD PTR [rip + __mirvm_pthread_setspecific_target]
-.size __wrap_pthread_setspecific,.-__wrap_pthread_setspecific
-
-.p2align 4
-.globl __wrap_pthread_key_delete
-.hidden __wrap_pthread_key_delete
-.type __wrap_pthread_key_delete,@function
-__wrap_pthread_key_delete:
-    mov rsi, QWORD PTR [rip + __mirvm_pthread_owner]
-    jmp QWORD PTR [rip + __mirvm_pthread_key_delete_target]
-.size __wrap_pthread_key_delete,.-__wrap_pthread_key_delete
-
-.p2align 4
-.globl __wrap_signal
-.hidden __wrap_signal
-.type __wrap_signal,@function
-__wrap_signal:
-    mov rdx, QWORD PTR [rip + __mirvm_signal_owner]
-    jmp QWORD PTR [rip + __mirvm_signal_target]
-.size __wrap_signal,.-__wrap_signal
-
-.p2align 4
-.globl __wrap_sigaction
-.hidden __wrap_sigaction
-.type __wrap_sigaction,@function
-__wrap_sigaction:
-    mov rcx, QWORD PTR [rip + __mirvm_signal_owner]
-    jmp QWORD PTR [rip + __mirvm_sigaction_target]
-.size __wrap_sigaction,.-__wrap_sigaction
-
-.p2align 4
-.globl __wrap_raise
-.hidden __wrap_raise
-.type __wrap_raise,@function
-__wrap_raise:
-    mov rsi, QWORD PTR [rip + __mirvm_signal_owner]
-    jmp QWORD PTR [rip + __mirvm_raise_target]
-.size __wrap_raise,.-__wrap_raise
-
-.pushsection .data.mirvm_pthread,"aw",@progbits
-.p2align 3
-.globl __mirvm_pthread_owner
-.hidden __mirvm_pthread_owner
-.type __mirvm_pthread_owner,@object
-.size __mirvm_pthread_owner,8
-__mirvm_pthread_owner:
-    .quad 0
-.globl __mirvm_pthread_create_target
-.hidden __mirvm_pthread_create_target
-.type __mirvm_pthread_create_target,@object
-.size __mirvm_pthread_create_target,8
-__mirvm_pthread_create_target:
-    .quad 0
-.globl __mirvm_pthread_key_create_target
-.hidden __mirvm_pthread_key_create_target
-.type __mirvm_pthread_key_create_target,@object
-.size __mirvm_pthread_key_create_target,8
-__mirvm_pthread_key_create_target:
-    .quad 0
-.globl __mirvm_pthread_setspecific_target
-.hidden __mirvm_pthread_setspecific_target
-.type __mirvm_pthread_setspecific_target,@object
-.size __mirvm_pthread_setspecific_target,8
-__mirvm_pthread_setspecific_target:
-    .quad 0
-.globl __mirvm_pthread_key_delete_target
-.hidden __mirvm_pthread_key_delete_target
-.type __mirvm_pthread_key_delete_target,@object
-.size __mirvm_pthread_key_delete_target,8
-__mirvm_pthread_key_delete_target:
-    .quad 0
-.popsection
-
-.pushsection .data.mirvm_signal,"aw",@progbits
-.p2align 3
-.globl __mirvm_signal_owner
-.hidden __mirvm_signal_owner
-.type __mirvm_signal_owner,@object
-.size __mirvm_signal_owner,8
-__mirvm_signal_owner:
-    .quad 0
-.globl __mirvm_signal_target
-.hidden __mirvm_signal_target
-.type __mirvm_signal_target,@object
-.size __mirvm_signal_target,8
-__mirvm_signal_target:
-    .quad 0
-.globl __mirvm_sigaction_target
-.hidden __mirvm_sigaction_target
-.type __mirvm_sigaction_target,@object
-.size __mirvm_sigaction_target,8
-__mirvm_sigaction_target:
-    .quad 0
-.globl __mirvm_raise_target
-.hidden __mirvm_raise_target
-.type __mirvm_raise_target,@object
-.size __mirvm_raise_target,8
-__mirvm_raise_target:
-    .quad 0
-.popsection
-.section .note.GNU-stack,"",@progbits
-"#;
-
 /// Collect the system dynamic library names the crate graph propagates.
 /// A `-sys` crate's `cargo:rustc-link-lib` only writes rlib metadata: the native final link
 /// command line carries these `-l` entries, while the metadata driver (the bin command line) does
@@ -595,11 +442,22 @@ pub(super) fn materialize_for_target_in(
     // extra_libs (crate-graph system dynamic libraries `-l<name>`) enter both the cache key and the
     // cc link line: a changed list must change the cache slot, so an old closure cannot be reused.
     let extra_flags: Vec<String> = extra_libs.iter().map(|n| format!("-l{n}")).collect();
+    // Asked for before anything is written: a platform whose linker cannot redirect the calls an
+    // image must not reach directly has to fail here rather than after building an object the link
+    // cannot use.
+    let interpose = crate::os::linker::interpose_args(crate::vm::interpose::INTERPOSED_CALLS)
+        .ok_or_else(|| {
+            Error::unsupported(
+                "cannot link a native archive image: this platform's linker has no way to redirect \
+                 the runtime calls the image must not reach directly, so the image would silently \
+                 keep calls the engine has to own",
+            )
+        })?;
     let link_flags = LINK_PREFIX
         .iter()
         .chain(LINK_SUFFIX)
-        .chain(NATIVE_RUNTIME_WRAP_FLAGS)
         .copied()
+        .chain(interpose.iter().map(|s| s.as_str()))
         .chain(extra_flags.iter().map(|s| s.as_str()))
         .collect::<Vec<_>>()
         .join("\0");
@@ -608,7 +466,7 @@ pub(super) fn materialize_for_target_in(
         link_flags.as_bytes(),
         target.as_bytes(),
         &cc_identity,
-        NATIVE_RUNTIME_BRIDGE_ASM.as_bytes(),
+        crate::arch::asmstub::NATIVE_RUNTIME_BRIDGE_ASM.as_bytes(),
         &bytes,
     ]);
     std::fs::create_dir_all(cache_dir).map_err(|e| {
@@ -632,7 +490,7 @@ pub(super) fn materialize_for_target_in(
         .arg(archive)
         .arg(LINK_SUFFIX[0])
         .arg(&native_runtime_bridge)
-        .args(NATIVE_RUNTIME_WRAP_FLAGS)
+        .args(&interpose)
         .args(&LINK_SUFFIX[1..])
         .args(&extra_flags)
         .arg("-o")
@@ -660,6 +518,7 @@ pub(super) fn materialize_for_target_in(
                 &bytes,
                 &cc_identity,
                 &link_flags,
+                &interpose,
                 &native_runtime_bridge,
                 linker,
             )?
@@ -694,7 +553,7 @@ fn native_runtime_bridge_object(
         b"native-runtime-bridge",
         target.as_bytes(),
         cc_identity,
-        NATIVE_RUNTIME_BRIDGE_ASM.as_bytes(),
+        crate::arch::asmstub::NATIVE_RUNTIME_BRIDGE_ASM.as_bytes(),
     ]);
     let object = cache_dir.join(format!("{hash}.native-runtime.o"));
     if object.exists() {
@@ -705,7 +564,7 @@ fn native_runtime_bridge_object(
     let mut source = temporary.clone().into_os_string();
     source.push(".s");
     let source = PathBuf::from(source);
-    std::fs::write(&source, NATIVE_RUNTIME_BRIDGE_ASM).map_err(|e| {
+    std::fs::write(&source, crate::arch::asmstub::NATIVE_RUNTIME_BRIDGE_ASM).map_err(|e| {
         Error::io(
             format!(
                 "cannot write the native runtime bridge assembly `{}`",
@@ -761,6 +620,7 @@ fn rescue_with_rlib_symbols(
     archive_bytes: &[u8],
     cc_identity: &[u8],
     link_flags: &str,
+    interpose: &[String],
     native_runtime_bridge: &Path,
     linker: &mut crate::lower::linker::Linker<'_>,
 ) -> Result<Option<PathBuf>, Error> {
@@ -803,7 +663,7 @@ fn rescue_with_rlib_symbols(
     // Hidden trampoline assembly. The bridge only references hidden data slots; each Engine writes
     // its own P1 closure address into its copy of the .so, so the artifact does not bake in a fixed
     // runtime address.
-    let mut asm = String::from(".intel_syntax noprefix\n");
+    let mut asm = String::from(crate::arch::asm_text::DIRECTIVE_INTEL);
     let mut slots = std::collections::BTreeSet::new();
     for (name, addr) in &pairs {
         use std::fmt::Write as _;
@@ -812,7 +672,7 @@ fn rescue_with_rlib_symbols(
         let _ = writeln!(asm, ".hidden {name}");
         let _ = writeln!(asm, ".type {name},@function");
         let _ = writeln!(asm, "{name}:");
-        let _ = writeln!(asm, "    jmp QWORD PTR [rip + {slot}]");
+        let _ = writeln!(asm, "{}", crate::arch::asmstub::indirect_jump_asm(&slot));
         slots.insert(slot);
     }
     if !slots.is_empty() {
@@ -882,7 +742,7 @@ fn rescue_with_rlib_symbols(
         .arg(&o_path)
         .arg(LINK_SUFFIX[0])
         .arg(native_runtime_bridge)
-        .args(NATIVE_RUNTIME_WRAP_FLAGS)
+        .args(interpose)
         .args(&LINK_SUFFIX[1..])
         .args(extra_flags)
         .arg("-o")
