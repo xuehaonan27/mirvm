@@ -241,18 +241,18 @@ pub(crate) fn suppress_lifecycle_tags(path: &Path) -> Result<DynamicLifecycle, S
         let base = phoff
             .checked_add(index.checked_mul(phentsize).ok_or_else(bad)?)
             .ok_or_else(bad)?;
-        let ty = elf::u32_at(&bytes, base).ok_or_else(bad)?;
-        let flags = elf::u32_at(&bytes, base + 4).ok_or_else(bad)?;
-        let off = elf::u64_at(&bytes, base + 8).ok_or_else(bad)?;
-        let vaddr = elf::u64_at(&bytes, base + 16).ok_or_else(bad)?;
-        let filesz = elf::u64_at(&bytes, base + 32).ok_or_else(bad)?;
-        let memsz = elf::u64_at(&bytes, base + 40).ok_or_else(bad)?;
+        let ty = elf::u32_at(&bytes, base + elf::phdr::TYPE).ok_or_else(bad)?;
+        let flags = elf::u32_at(&bytes, base + elf::phdr::FLAGS).ok_or_else(bad)?;
+        let off = elf::u64_at(&bytes, base + elf::phdr::OFFSET).ok_or_else(bad)?;
+        let vaddr = elf::u64_at(&bytes, base + elf::phdr::VADDR).ok_or_else(bad)?;
+        let filesz = elf::u64_at(&bytes, base + elf::phdr::FILESZ).ok_or_else(bad)?;
+        let memsz = elf::u64_at(&bytes, base + elf::phdr::MEMSZ).ok_or_else(bad)?;
         if ty == elf::PT_LOAD {
             let end = vaddr
                 .checked_add(memsz)
                 .ok_or_else(|| format!("native `{}` load range overflow", path.display()))?;
             result.loads.push((vaddr, end));
-            if flags & 1 != 0 {
+            if flags & elf::PF_X != 0 {
                 result.executable_loads.push((vaddr, end));
             }
         } else if ty == elf::PT_DYNAMIC {

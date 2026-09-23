@@ -38,9 +38,13 @@ pub const SHT_HASH: u32 = 5;
 pub const SHT_DYNAMIC: u32 = 6;
 pub const SHT_DYNSYM: u32 = 11;
 
-/// `p_flags`: the segment is executable, and it is readable.
+/// `p_flags`: the segment holds instructions, and it is readable.
 pub const PF_X: u32 = 1;
 pub const PF_R: u32 = 4;
+
+/// `sh_flags`: the section occupies memory, and it holds instructions.
+pub const SHF_ALLOC: u64 = 0x2;
+pub const SHF_EXECINSTR: u64 = 0x4;
 
 /// A `RELA` record is an offset, an `r_info` and an addend.
 pub const RELA_ENTRY_SIZE: usize = 24;
@@ -70,6 +74,8 @@ pub const fn sym_type(info: u8) -> u8 {
     info & 0x0f
 }
 
+/// `st_info & 0xf`: the symbol is a function.
+pub const STT_FUNC: u8 = 2;
 pub const STT_GNU_IFUNC: u8 = 10;
 
 /// The `d_tag` values a reader of a `PT_DYNAMIC` table acts on. A tag that is not named here is
@@ -121,6 +127,47 @@ pub mod ehdr {
     pub const SHENTSIZE: usize = 58;
     pub const SHNUM: usize = 60;
     pub const SHSTRNDX: usize = 62;
+}
+
+/// Program header field offsets.
+pub mod phdr {
+    pub const TYPE: usize = 0;
+    pub const FLAGS: usize = 4;
+    pub const OFFSET: usize = 8;
+    pub const VADDR: usize = 16;
+    pub const PADDR: usize = 24;
+    pub const FILESZ: usize = 32;
+    pub const MEMSZ: usize = 40;
+    pub const ALIGN: usize = 48;
+}
+
+/// Section header field offsets.
+pub mod shdr {
+    pub const NAME: usize = 0;
+    pub const TYPE: usize = 4;
+    pub const FLAGS: usize = 8;
+    pub const ADDR: usize = 16;
+    pub const OFFSET: usize = 24;
+    pub const SIZE: usize = 32;
+    pub const LINK: usize = 40;
+    pub const INFO: usize = 44;
+    pub const ADDRALIGN: usize = 48;
+    pub const ENTSIZE: usize = 56;
+}
+
+/// Symbol table entry field offsets.
+pub mod sym {
+    pub const NAME: usize = 0;
+    pub const INFO: usize = 4;
+    pub const SHNDX: usize = 6;
+    pub const VALUE: usize = 8;
+    pub const SIZE: usize = 16;
+}
+
+/// Dynamic table entry field offsets.
+pub mod dynamic {
+    pub const TAG: usize = 0;
+    pub const VALUE: usize = 8;
 }
 
 /// Little-endian readers. `None` when the field runs past the end of `bytes`.
@@ -233,12 +280,12 @@ fn section_at(bytes: &[u8], header: &FileHeader, index: usize) -> Option<Section
         .ok()?
         .checked_add(index.checked_mul(usize::from(header.shentsize))?)?;
     Some(Section {
-        name: u32_at(bytes, base)?,
-        ty: u32_at(bytes, base + 4)?,
-        addr: u64_at(bytes, base + 16)?,
-        offset: u64_at(bytes, base + 24)?,
-        size: u64_at(bytes, base + 32)?,
-        link: u32_at(bytes, base + 40)?,
-        entsize: u64_at(bytes, base + 56)?,
+        name: u32_at(bytes, base + shdr::NAME)?,
+        ty: u32_at(bytes, base + shdr::TYPE)?,
+        addr: u64_at(bytes, base + shdr::ADDR)?,
+        offset: u64_at(bytes, base + shdr::OFFSET)?,
+        size: u64_at(bytes, base + shdr::SIZE)?,
+        link: u32_at(bytes, base + shdr::LINK)?,
+        entsize: u64_at(bytes, base + shdr::ENTSIZE)?,
     })
 }
