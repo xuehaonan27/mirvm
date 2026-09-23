@@ -30,10 +30,17 @@ pub const PT_LOAD: u32 = 1;
 pub const PT_DYNAMIC: u32 = 2;
 pub const PT_INTERP: u32 = 3;
 
-/// `sh_type` values the symbol readers act on.
+/// `sh_type` values the readers and the symbol-image writer act on.
+pub const SHT_PROGBITS: u32 = 1;
 pub const SHT_SYMTAB: u32 = 2;
 pub const SHT_STRTAB: u32 = 3;
+pub const SHT_HASH: u32 = 5;
+pub const SHT_DYNAMIC: u32 = 6;
 pub const SHT_DYNSYM: u32 = 11;
+
+/// `p_flags`: the segment is executable, and it is readable.
+pub const PF_X: u32 = 1;
+pub const PF_R: u32 = 4;
 
 /// A `RELA` record is an offset, an `r_info` and an addend.
 pub const RELA_ENTRY_SIZE: usize = 24;
@@ -69,11 +76,13 @@ pub const STT_GNU_IFUNC: u8 = 10;
 /// skipped, which is what makes a table with entries this loader ignores still loadable.
 pub const DT_NULL: i64 = 0;
 pub const DT_PLTRELSZ: i64 = 2;
+pub const DT_HASH: i64 = 4;
 pub const DT_STRTAB: i64 = 5;
 pub const DT_SYMTAB: i64 = 6;
 pub const DT_RELA: i64 = 7;
 pub const DT_RELASZ: i64 = 8;
 pub const DT_RELAENT: i64 = 9;
+pub const DT_STRSZ: i64 = 10;
 pub const DT_SYMENT: i64 = 11;
 pub const DT_INIT: i64 = 12;
 pub const DT_FINI: i64 = 13;
@@ -100,8 +109,12 @@ pub const DT_TPOFF32: i64 = 37;
 /// as for the reader below.
 pub mod ehdr {
     pub const TYPE: usize = 16;
+    /// `e_version`.
+    pub const VERSION: usize = 20;
     pub const MACHINE: usize = 18;
     pub const PHOFF: usize = 32;
+    /// `e_ehsize`.
+    pub const EHSIZE: usize = 52;
     pub const SHOFF: usize = 40;
     pub const PHENTSIZE: usize = 54;
     pub const PHNUM: usize = 56;
