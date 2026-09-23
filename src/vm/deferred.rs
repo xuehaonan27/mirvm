@@ -10,13 +10,41 @@ use std::collections::HashMap;
 use std::ffi::{c_int, c_void};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use super::ctx::{DeferredHold, EngineClosed, EngineControl, ExecutionLease, Shared};
+use super::ctx::{EngineClosed, EngineControl, ExecutionLease, Shared};
 use crate::os::thread::{
     INVALID_ARGUMENT, TLS_KEY_GONE, ThreadId, TlsKey, current_thread, spawn_raw,
     tls_key_create_raw, tls_key_delete, tls_set,
 };
 
 const TSD_DTOR_ROUNDS: usize = 4;
+
+/// A native subsystem has accepted a guest callback but has not yet either
+/// invoked or revoked it. It uses the same atomic count as executions so the
+/// Running -> Closing transition cannot race past the registration.
+pub(crate) struct DeferredHold {
+    control: Arc<EngineControl>,
+}
+
+impl DeferredHold {
+    pub(crate) fn acquire(
+        control: &Arc<EngineControl>,
+        allow_closing: bool,
+    ) -> Result<Self, EngineClosed> {
+        if control.begin_execution(allow_closing, false) {
+            Ok(Self {
+                control: Arc::clone(control),
+            })
+        } else {
+            Err(EngineClosed)
+        }
+    }
+}
+
+impl Drop for DeferredHold {
+    fn drop(&mut self) {
+        self.control.finish_execution();
+    }
+}
 
 pub(crate) struct PthreadStart {
     hold: Mutex<Option<DeferredHold>>,

@@ -146,14 +146,13 @@ pub(crate) fn install_sigaction_value(
                 }
             } else {
                 target_hold = Some(
-                    super::super::ctx::DeferredHold::acquire(&callback_control, false).map_err(
-                        |_| {
+                    super::super::deferred::DeferredHold::acquire(&callback_control, false)
+                        .map_err(|_| {
                             SignalError::contract(format!(
                                 "signal handler {:#x} belongs to a closing MIRVM Engine",
                                 guest_action.handler()
                             ))
-                        },
-                    )?,
+                        })?,
                 );
             }
             let registration =

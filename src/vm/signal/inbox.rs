@@ -130,7 +130,7 @@ impl SignalRegistration {
         if self.kernel_delivery.load(Ordering::Acquire) & DELIVERY_ACTIVE == 0 {
             return None;
         }
-        let hold = super::super::ctx::DeferredHold::acquire(&self.control, true).ok()?;
+        let hold = super::super::deferred::DeferredHold::acquire(&self.control, true).ok()?;
         if self.kernel_delivery.load(Ordering::Acquire) & DELIVERY_ACTIVE == 0 {
             drop(hold);
             return None;
@@ -451,7 +451,7 @@ pub(crate) fn take_current_thread_delivery(blocked: u64) -> Option<(SignalDelive
         let cell = unsafe { selected.as_ref()? };
         let registration = cell.registration.load(Ordering::Relaxed);
         let registration = unsafe { &*registration };
-        let Ok(hold) = super::super::ctx::DeferredHold::acquire(registration.control(), true)
+        let Ok(hold) = super::super::deferred::DeferredHold::acquire(registration.control(), true)
         else {
             if cell.pending.load(Ordering::Acquire) {
                 eprintln!("mirvm[m4-engine]: target-pthread signal outlived its Engine");
@@ -521,7 +521,7 @@ pub(crate) fn deactivate_current_thread_inbox() {
 /// ordinary-state registry/inbox lookup and the callback's execution lease.
 pub(crate) struct SignalDeliveryGuard {
     registration: &'static SignalRegistration,
-    _hold: super::super::ctx::DeferredHold,
+    _hold: super::super::deferred::DeferredHold,
 }
 
 impl SignalDeliveryGuard {
@@ -584,7 +584,8 @@ impl SignalInbox {
             }
             let registration = selected?;
             let pending = &registration.pending[signum];
-            let Ok(hold) = super::super::ctx::DeferredHold::acquire(&registration.control, true)
+            let Ok(hold) =
+                super::super::deferred::DeferredHold::acquire(&registration.control, true)
             else {
                 // Another consumer can clear the same coalesced bit and let
                 // close finish before this stale candidate acquires its hold.

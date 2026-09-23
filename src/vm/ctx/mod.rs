@@ -41,10 +41,10 @@ pub(crate) use activation::activate;
 pub(crate) use engine::engine;
 #[cfg(test)]
 pub(crate) use engine::set_wait_closed_check_hook;
-pub(crate) use engine::{
-    DeferredHold, EngineControl, ExecutionLease, control_for_engine, current_thread_has_engine,
-};
 pub use engine::{Engine, EngineClosed, EngineState, Shared, WaitClosedError};
+pub(crate) use engine::{
+    EngineControl, ExecutionLease, control_for_engine, current_thread_has_engine,
+};
 #[cfg(test)]
 pub(crate) use engine::{PHASE_CLOSING, PHASE_FINALIZING};
 pub(crate) use main_run::{begin_main_run, call_main_panic_boundary, claim_main_panic_catch};
