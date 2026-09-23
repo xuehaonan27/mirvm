@@ -37,31 +37,27 @@ pub fn map_fixed_preferred(addr: usize, size: usize, prot: Prot) -> Option<*mut 
 /// the kernel refuses to create one.
 ///
 /// The descriptor belongs to the caller. It is how an image with no place on disk is handed to the
-/// loader, which only accepts a path. This platform has no `memfd_create`; a POSIX shared-memory
-/// object unlinked immediately after creation is the same kind of handle — unnamed, unreachable by
-/// path, and released when the last descriptor closes.
+/// loader, which only accepts a path. This platform has no `memfd_create`; an unlinked temporary
+/// file is the same kind of handle — no path once it exists, released when the last descriptor
+/// closes, and writable immediately, which is what `MFD_CLOEXEC` gives Linux. A POSIX
+/// shared-memory object is not: this kernel creates one with no length, so a caller could not write
+/// to it without first sizing it, which this signature has no way to say.
 pub fn anonymous_file(name: &std::ffi::CStr) -> Option<i32> {
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::os::unix::ffi::OsStringExt;
 
-    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let stamp = name.to_string_lossy().replace('/', "_");
+    let template = std::env::temp_dir().join(format!("mirvm-{stamp}-XXXXXX"));
+    let mut bytes = template.into_os_string().into_vec();
+    bytes.push(0);
 
-    let unique = NEXT.fetch_add(1, Ordering::Relaxed);
-    let path = std::ffi::CString::new(format!(
-        "/mirvm-{}-{unique}-{}",
-        unsafe { libc::getpid() },
-        name.to_string_lossy()
-    ))
-    .ok()?;
-    let fd = unsafe {
-        libc::shm_open(
-            path.as_ptr(),
-            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-            0o600,
-        )
-    };
+    // SAFETY: the template is NUL-terminated and ends in the six characters `mkstemp` requires.
+    let fd = unsafe { libc::mkstemp(bytes.as_mut_ptr().cast()) };
     if fd < 0 {
         return None;
     }
-    unsafe { libc::shm_unlink(path.as_ptr()) };
+    // The name is dropped immediately, so the file has no path for the rest of its life.
+    unsafe { libc::unlink(bytes.as_ptr().cast()) };
+    // `mkstemp` does not set it on this platform, and the Linux path has it.
+    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     Some(fd)
 }
