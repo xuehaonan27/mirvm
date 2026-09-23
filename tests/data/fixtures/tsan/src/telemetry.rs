@@ -13,7 +13,7 @@ pub(crate) mod capture_session;
 pub(crate) mod capture_writer;
 // The reader side is only needed by capture's own tests, which are not compiled here.
 #[cfg(test)]
-#[path = "../../../../../src/telemetry/decode.rs"]
+#[path = "../../../../../src/telemetry/decode/mod.rs"]
 pub(crate) mod decode;
-#[path = "../../../../../src/telemetry/format.rs"]
+#[path = "../../../../../src/telemetry/format/mod.rs"]
 pub(crate) mod format;

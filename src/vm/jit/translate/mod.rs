@@ -7,7 +7,8 @@
 //! The `Translator` struct, `build` and the two free functions live here; the
 //! rest of the `impl` is split by concern: `place` (addressing + slots),
 //! `value` (float/wide channels), `call` (helper calls + unwinding),
-//! `numeric` (integer arithmetic) and `walk` (the three matches).
+//! `numeric` (integer arithmetic) and `stmt`/`rvalue`/`term` (the three
+//! exhaustive matches over one body's statements, rvalues and terminators).
 
 use super::admit::callee_abi;
 use super::frame::FrameMap;
@@ -16,8 +17,10 @@ use super::*;
 mod call;
 mod numeric;
 mod place;
+mod rvalue;
+mod stmt;
+mod term;
 mod value;
-mod walk;
 
 pub(super) struct Translator<'a, 'b> {
     pub(super) shared: &'a Shared,
