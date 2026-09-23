@@ -301,19 +301,14 @@ pub(crate) extern "C-unwind" fn mirvm_float_to_wide(
 
 /// i128/u128 -> f16, the f16 target of `Wide128ToFloat`.
 ///
-/// NOTE: the cast below is `__floattihf`/`__floatuntihf` from compiler-rt, which the
-/// aarch64-apple-darwin sysroot does not carry — a plain Rust program whose `u128 as f16`
-/// runs at runtime fails to link there for the same reason. So this and the interpreter's
-/// copy of the same cast are the last two symbols keeping the macOS build from linking, and
-/// the software model that replaces them needs a bit-for-bit differential test against this
-/// cast, which is available on the platform that has it.
+/// The conversion is the model in [`crate::vm::semantics::wide`] rather than the host's cast: the
+/// runtime symbol the cast would need is not present on every platform this build targets, so the
+/// answer would otherwise depend on which runtime the build linked.
 pub(crate) extern "C-unwind" fn mirvm_wide_to_f16(lo: u64, hi: u64, signed: bool) -> u64 {
-    let v = if signed {
-        (lo_hi(lo, hi) as i128) as f16
-    } else {
-        lo_hi(lo, hi) as f16
-    };
-    v.to_bits() as u64
+    u64::from(crate::vm::semantics::wide::wide_to_f16_bits(
+        lo_hi(lo, hi),
+        signed,
+    ))
 }
 
 /// i128/u128 -> f32/f64. Computed with a host `as` cast (round to nearest, the same

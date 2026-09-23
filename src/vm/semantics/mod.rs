@@ -2,7 +2,7 @@
 //!
 //! The interpreter and the JIT have to agree bit for bit, and they can only do so if the
 //! definition of an operation has one home. Where the operation is a loop or a piece of
-//! intricate bit handling, both backends call the body here ([`simd`], [`volatile`], the
+//! intricate bit handling, both backends call the body here ([`simd`], [`volatile`], [`wide`], the
 //! [`builtin`] families); where the host instruction is the answer, the translator emits it and
 //! the identity in [`arith`] is the specification it mirrors.
 //!
@@ -18,3 +18,7 @@ pub(crate) mod memory;
 pub(crate) mod simd;
 pub(crate) mod tls;
 pub(crate) mod volatile;
+pub(crate) mod wide;
+
+#[cfg(test)]
+mod tests;
