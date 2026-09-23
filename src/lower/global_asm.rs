@@ -467,6 +467,17 @@ fn strip_slash_comments(asm: &mut String) {
 /// dynamic-linker resolution, and RTLD_GLOBAL resolves guest fns named by naked `sym`
 /// operands. Also used by the bin load phase to materialize dependency manifest text.
 pub(crate) fn assemble(asm: &str) -> Result<Box<str>, Error> {
+    // The image is usable only if the calls `crate::vm::interpose` lists can be redirected, so ask
+    // the platform before building anything: one whose linker cannot express the redirection has
+    // nothing to link.
+    let interpose = crate::os::linker::interpose_args(crate::vm::interpose::INTERPOSED_CALLS)
+        .ok_or_else(|| {
+            Error::assemble(
+                "cannot assemble a global-asm image: this platform's linker has no way to redirect \
+                 the runtime calls the image must not reach directly"
+                    .to_string(),
+            )
+        })?;
     // Same channel as the asm-stub factory: a bare `syscall` instruction in
     // global_asm/naked asm becomes an indirect slot call. The rewrite runs before content
     // hashing, so the cache key matches the final bytes; the slot ships with the `.so` and
@@ -475,7 +486,7 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, Error> {
     strip_slash_comments(&mut asm);
     crate::lower::asm::rewrite_syscall_text(&mut asm);
     asm.push('\n');
-    asm.push_str(crate::native::archive::NATIVE_RUNTIME_BRIDGE_ASM);
+    asm.push_str(crate::arch::asmstub::NATIVE_RUNTIME_BRIDGE_ASM);
     let mut hash_input = b"mirvm-global-asm-v3\0".to_vec();
     hash_input.extend_from_slice(asm.as_bytes());
     let hash = crate::utils::content::fnv1a(&hash_input);
@@ -499,7 +510,7 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, Error> {
         .arg("-o")
         .arg(&tmp)
         .arg(&s_path)
-        .args(crate::native::archive::NATIVE_RUNTIME_WRAP_FLAGS)
+        .args(&interpose)
         .status()
         .map_err(|e| {
             Error::assemble(format!(

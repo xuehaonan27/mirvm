@@ -30,6 +30,7 @@ pub(crate) mod frozen;
 pub(crate) mod heap;
 pub(crate) mod instance;
 pub(crate) mod interp;
+pub(crate) mod interpose;
 pub(crate) mod ir;
 pub(crate) mod jit;
 pub(crate) mod mcload;
