@@ -175,8 +175,8 @@ pub fn memcmp_addr() -> *const u8 {
 /// integer/flags/vector state is already preserved under the real syscall
 /// discipline).
 ///
-/// Currently a passthrough plus the `MIRVM_SYSCALL_TRACE` knob. This is also the
-/// hook point for virtualization semantics: a unified fd space, a fake FS, or
+/// Currently the `MIRVM_SYSCALL_TRACE` knob plus whatever `syscall` below does — a passthrough on
+/// Linux, a refusal on macOS. This is also the hook point for virtualization semantics: a unified fd space, a fake FS, or
 /// accounting would triage here, with no change at the call sites.
 ///
 /// # Safety
@@ -208,30 +208,21 @@ pub extern "C" fn mirvm_syscall_dispatch(nr: i64, args: *const u64) -> i64 {
     result
 }
 
-unsafe extern "C" {
-    /// The C library's variadic entry point. It is bound under another name because this module's
-    /// own wrapper is what a caller should reach for.
-    #[link_name = "syscall"]
-    fn libc_syscall(num: libc::c_long, ...) -> libc::c_long;
-}
-
-/// syscall(2) varargs passthrough: the only channel for syscall families not
-/// listed above. Takes the first 6 args; the rest are ignored.
+/// The fallback for a syscall family this crate has no interposition for.
 ///
-/// This kernel discourages direct syscalls and the C library only forwards the
-/// call, so a family reached here behaves as the library's own wrapper would.
+/// It reports `ENOSYS` and does not execute anything, because this platform has no way to forward
+/// it: `syscall(2)` is documented as deprecated here and on arm64 it is not merely deprecated — the
+/// process is terminated with SIGSYS. Measured: `syscall(SYS_getpid)` dies with signal 12 rather
+/// than returning. Forwarding therefore costs the whole process, where refusing costs the guest one
+/// failed call, which is the errno a guest already handles for a kernel that lacks a call.
+///
+/// The parameter is the syscall number and the six argument slots, kept so callers and the
+/// trampoline above remain architecture-independent.
 pub fn syscall(n: i64, args: &[u64]) -> i64 {
-    let a = |i: usize| args.get(i).copied().unwrap_or(0);
-    let n = n as libc::c_long;
-    unsafe {
-        match args.len() {
-            0 => libc_syscall(n),
-            1 => libc_syscall(n, a(0)),
-            2 => libc_syscall(n, a(0), a(1)),
-            3 => libc_syscall(n, a(0), a(1), a(2)),
-            4 => libc_syscall(n, a(0), a(1), a(2), a(3)),
-            5 => libc_syscall(n, a(0), a(1), a(2), a(3), a(4)),
-            _ => libc_syscall(n, a(0), a(1), a(2), a(3), a(4), a(5)),
-        }
-    }
+    let _ = args;
+    crate::diag_direct!(
+        Syscall,
+        "nr={n} refused: this platform cannot forward a raw syscall"
+    );
+    -(libc::ENOSYS as i64)
 }
