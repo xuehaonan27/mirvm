@@ -20,7 +20,7 @@ struct MirvmException {
     /// A guest exception may be retained by a native catch after the thunk's
     /// execution lease has unwound. Keep teardown in Closing until the
     /// unwinder consumes or deletes that exception.
-    _hold: Option<super::ctx::DeferredHold>,
+    _hold: Option<super::deferred::DeferredHold>,
 }
 
 enum StoredPayload {
@@ -64,7 +64,7 @@ extern "C" fn cleanup(_: i32, exception: *mut RawException) {
 fn raise_payload(
     control: Arc<super::ctx::EngineControl>,
     payload: StoredPayload,
-    hold: Option<super::ctx::DeferredHold>,
+    hold: Option<super::deferred::DeferredHold>,
     description: &str,
 ) -> ! {
     let exception = Box::new(MirvmException {
@@ -91,7 +91,7 @@ pub fn raise_guest(shared: Arc<super::ctx::Shared>, inner: u64) -> ! {
         std::process::abort();
     }
     let control = Arc::clone(shared.control());
-    let hold = super::ctx::DeferredHold::acquire(&control, true).unwrap_or_else(|_| {
+    let hold = super::deferred::DeferredHold::acquire(&control, true).unwrap_or_else(|_| {
         eprintln!("mirvm[m4-engine]: guest panic was raised after its Engine began finalizing");
         std::process::abort()
     });
@@ -106,7 +106,7 @@ pub fn raise_guest(shared: Arc<super::ctx::Shared>, inner: u64) -> ! {
 pub(crate) fn raise_engine_fault(ctx: *mut super::ctx::Ctx, message: String, code: i32) -> ! {
     let (shared, token) = super::ctx::begin_engine_fault(ctx);
     let control = Arc::clone(shared.control());
-    let hold = super::ctx::DeferredHold::acquire(&control, true).unwrap_or_else(|_| {
+    let hold = super::deferred::DeferredHold::acquire(&control, true).unwrap_or_else(|_| {
         eprintln!("mirvm[m4-engine]: EngineFault was raised after its Engine began finalizing");
         std::process::abort()
     });

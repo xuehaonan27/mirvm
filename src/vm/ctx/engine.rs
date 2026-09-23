@@ -671,34 +671,6 @@ impl ExecutionLease {
     }
 }
 
-/// A native subsystem has accepted a guest callback but has not yet either
-/// invoked or revoked it. It uses the same atomic count as executions so the
-/// Running -> Closing transition cannot race past the registration.
-pub(crate) struct DeferredHold {
-    control: Arc<EngineControl>,
-}
-
-impl DeferredHold {
-    pub(crate) fn acquire(
-        control: &Arc<EngineControl>,
-        allow_closing: bool,
-    ) -> Result<Self, EngineClosed> {
-        if control.begin_execution(allow_closing, false) {
-            Ok(Self {
-                control: Arc::clone(control),
-            })
-        } else {
-            Err(EngineClosed)
-        }
-    }
-}
-
-impl Drop for DeferredHold {
-    fn drop(&mut self) {
-        self.control.finish_execution();
-    }
-}
-
 impl Drop for ExecutionLease {
     fn drop(&mut self) {
         let last = self
