@@ -118,7 +118,10 @@ pub extern "C" fn mirvm_syscall_trampoline() {
         // The dispatch takes (call number, pointer to the six argument slots).
         "mov x1, sp",
         "mov x0, x16",
-        "bl mirvm_syscall_dispatch",
+        // The dispatch is named by the compiler rather than written out: a hand-written name
+        // has to carry whatever prefix this object format puts on a C symbol, and only the
+        // compiler knows which that is.
+        "bl {dispatch}",
         // x0 is the call's result and is deliberately left alone from here on.
         "ldr x30, [sp, #144]",
         "ldr x9, [sp, #128]",
@@ -134,6 +137,8 @@ pub extern "C" fn mirvm_syscall_trampoline() {
         "ldr x1, [sp, #8]",
         "add sp, sp, #160",
         "ret",
+        // A named operand belongs after the body, so the dispatch is named here.
+        dispatch = sym crate::os::process::mirvm_syscall_dispatch,
     );
 }
 
@@ -335,35 +340,28 @@ mod tests {
     use super::*;
 
     // The same bytes, written as assembly rather than as constants: the assembler is the authority
-    // on the encoding, so the emitted patterns are compared against what it produces.
-    std::arch::global_asm!(
-        ".globl mirvm_test_plain_stub",
-        ".p2align 4",
-        "mirvm_test_plain_stub:",
-        "ldr x16, #8",
-        "br x16",
-        ".quad 0x1122334455667788",
-        ".globl mirvm_test_arg_stub",
-        ".p2align 4",
-        "mirvm_test_arg_stub:",
-        "ldr x3, #12",
-        "ldr x16, #16",
-        "br x16",
-        ".quad 0x99aabbccddeeff00",
-        ".quad 0x0102030405060708",
-        ".globl mirvm_test_ret",
-        ".p2align 4",
-        "mirvm_test_ret:",
-        "ret",
-        "nop",
-        "nop",
-        "nop",
-    );
+    // on the encoding, so the emitted patterns are compared against what it produces. Each fixture
+    // is a naked function for the same reason the trampoline is one: a label written by hand and a
+    // Rust `extern "C"` name are not the same symbol on every object format.
+    #[unsafe(naked)]
+    extern "C" fn mirvm_test_plain_stub() {
+        core::arch::naked_asm!("ldr x16, #8", "br x16", ".quad 0x1122334455667788");
+    }
 
-    unsafe extern "C" {
-        static mirvm_test_plain_stub: u8;
-        static mirvm_test_arg_stub: u8;
-        static mirvm_test_ret: u8;
+    #[unsafe(naked)]
+    extern "C" fn mirvm_test_arg_stub() {
+        core::arch::naked_asm!(
+            "ldr x3, #12",
+            "ldr x16, #16",
+            "br x16",
+            ".quad 0x99aabbccddeeff00",
+            ".quad 0x0102030405060708",
+        );
+    }
+
+    #[unsafe(naked)]
+    extern "C" fn mirvm_test_ret() {
+        core::arch::naked_asm!("ret", "nop", "nop", "nop");
     }
 
     fn assembled(at: *const u8, len: usize) -> Vec<u8> {
@@ -375,7 +373,7 @@ mod tests {
     #[test]
     fn entry_stub_bytes_match_the_assembler() {
         let emitted = emit_stub_bytes(0x1122_3344_5566_7788);
-        let expected = assembled(&raw const mirvm_test_plain_stub, emitted.len());
+        let expected = assembled(mirvm_test_plain_stub as *const u8, emitted.len());
         assert_eq!(emitted.as_slice(), expected.as_slice());
         assert_eq!(emitted.len(), STUB_STRIDE as usize);
     }
@@ -383,13 +381,13 @@ mod tests {
     #[test]
     fn arg_stub_bytes_match_the_assembler() {
         let emitted = emit_arg_stub_bytes(0x99aa_bbcc_ddee_ff00, 0x0102_0304_0506_0708);
-        let expected = assembled(&raw const mirvm_test_arg_stub, emitted.len());
+        let expected = assembled(mirvm_test_arg_stub as *const u8, emitted.len());
         assert_eq!(emitted.as_slice(), expected.as_slice());
     }
 
     #[test]
     fn inert_slot_holds_a_return_and_padding() {
-        let expected = assembled(&raw const mirvm_test_ret, INERT_SLOT.len());
+        let expected = assembled(mirvm_test_ret as *const u8, INERT_SLOT.len());
         assert_eq!(INERT_SLOT.as_slice(), expected.as_slice());
         assert_eq!(INERT_SLOT[0], RET);
     }
