@@ -64,11 +64,11 @@ impl ThreadId {
     /// Wrap a handle this process did not create, from the integer form the engine carries it in.
     ///
     /// This platform's `pthread_t` is a pointer while Linux's is an integer, so the parameter is
-    /// the integer both callers have — a thread identity that arrived through a signal payload —
-    /// rather than whichever type the library happens to use for it.
+    /// the integer both callers have — a thread identity taken out of a signal payload — rather
+    /// than whichever type the library happens to use for it.
     #[cfg(test)]
-    pub fn from_raw(raw: usize) -> Self {
-        ThreadId(raw as libc::pthread_t)
+    pub fn from_raw(raw: u64) -> Self {
+        ThreadId(raw as usize as libc::pthread_t)
     }
 }
 

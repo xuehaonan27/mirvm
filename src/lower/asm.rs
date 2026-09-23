@@ -74,7 +74,7 @@ pub(crate) fn rewrite_syscall_text(src: &mut String) -> bool {
     let mut out = String::with_capacity(src.len() + 64);
     for line in src.split_inclusive('\n') {
         if is_syscall_insn_line(line.trim_start()) {
-            out.push_str(crate::arch::asm_text::SYSCALL_CALL);
+            out.push_str(crate::os_arch::syscall_asm::CALL);
             hit = true;
         } else {
             out.push_str(line);
@@ -82,7 +82,7 @@ pub(crate) fn rewrite_syscall_text(src: &mut String) -> bool {
     }
     *src = out;
     if hit {
-        src.push_str(crate::arch::asm_text::SYSCALL_SLOT_DEF);
+        src.push_str(crate::os_arch::syscall_asm::SLOT_DEF);
     }
     hit
 }

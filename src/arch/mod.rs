@@ -36,7 +36,8 @@
 //! - `PINNED_REG` — the register Cranelift reserves when a module enables the pinned register,
 //!   which the trace domain does.
 //! - `asm_text` — the assembly vocabulary the materializer in `src/lower/` asks for: the
-//!   architecture's name, its syntax directives, and the instruction forms mirvm rewrites.
+//!   architecture's name and its syntax directives. The forms mirvm rewrites a `syscall` into are
+//!   the pair's, because they name the object format as well as the instruction.
 //! - `asmstub` — machine-code byte emission (entry stubs), the single-issue instruction primitives
 //!   (`int3`, `xgetbv`), and the trampoline a rewritten `syscall` lands on.
 //! - `reloc` — the meanings a relocation can carry, which every psABI shares, and this
@@ -56,7 +57,7 @@ pub(crate) use aarch64::ELF_MACHINE;
 #[cfg(target_arch = "aarch64")]
 pub(crate) use aarch64::PINNED_REG;
 #[cfg(target_arch = "aarch64")]
-pub(crate) use aarch64::asmstub;
+pub(crate) use aarch64::{asm_text, asmstub};
 /// The architecture's ELF machine identity, named once for every caller: `arch::ELF_MACHINE`.
 #[cfg(target_arch = "x86_64")]
 pub(crate) use x86_64::ELF_MACHINE;

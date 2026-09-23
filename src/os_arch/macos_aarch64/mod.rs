@@ -5,4 +5,5 @@
 //! `addrspace` is numbers only: the structure they describe is declared one level up.
 
 pub mod addrspace;
+pub mod syscall_asm;
 pub mod thread;

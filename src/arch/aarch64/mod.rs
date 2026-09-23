@@ -3,11 +3,12 @@
 //! What a caller outside `src/arch/` may name is declared in `super`; the items here are this
 //! architecture's answer.
 //!
-//! `asm_text` and `reloc` are not here yet, and neither is the `syscall` trampoline. All three name
-//! the object format rather than the CPU — the symbol-reference spelling of a rewritten `syscall`,
-//! and the relocation numbering a loader reads — so they can only be written once that fact has a
-//! home on the axes. Everything in `asmstub` below is instruction encoding and nothing else.
+//! `reloc` is not here yet: the relocation numbering a loader reads is the object format's, so it
+//! can only be written once that fact has a home on the axes. The `syscall` rewrite text is no
+//! longer part of this architecture either — it names the format as well as the instruction, and
+//! lives in `crate::os_arch::syscall_asm`.
 
+pub mod asm_text;
 pub mod asmstub;
 
 /// The architecture's ELF machine identity: EM_AARCH64 (`e_machine`). An `e_machine` value is
