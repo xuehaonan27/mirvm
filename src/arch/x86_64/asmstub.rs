@@ -53,6 +53,18 @@ pub fn int3() {
 /// image whose only job is to name addresses has to have *something* decodable there.
 pub const RET: u8 = 0xc3;
 
+/// Bytes a codearena entry-stub slot occupies: the 12-byte stub rounded up so that every slot start
+/// is aligned.
+pub const STUB_STRIDE: u64 = 16;
+
+/// The contents of one inert symbol-image slot: `ret` followed by `nop` padding, so a slot start is
+/// always a decodable instruction and nothing after the return is ever reached.
+pub const INERT_SLOT: [u8; STUB_STRIDE as usize] = {
+    let mut slot = [0x90u8; STUB_STRIDE as usize];
+    slot[0] = RET;
+    slot
+};
+
 /// `xgetbv`: XCR(xcr) -> (edx:eax) assembled into a u64.
 pub fn xgetbv(xcr: u32) -> u64 {
     let (eax, edx): (u32, u32);

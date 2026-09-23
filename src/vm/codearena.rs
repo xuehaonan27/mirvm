@@ -10,8 +10,9 @@
 //! dynamic fallback still works in this process but is not serializable (same rule as
 //! FrozenArena).
 
-/// Spacing between stubs (16 B: movabs rax 10 B + jmp rax 2 B = up to 12 B, aligned to 16).
-pub const STUB_STRIDE: u64 = 16;
+/// Spacing between stubs, which is the architecture's: the stub bytes plus whatever padding keeps
+/// slot starts aligned.
+pub const STUB_STRIDE: u64 = crate::arch::asmstub::STUB_STRIDE;
 
 /// Code-region capacity (virtually reserved; one stub entry per instance, 64 MiB >> any real workload).
 const CODE_CAP: usize = 64 << 20;

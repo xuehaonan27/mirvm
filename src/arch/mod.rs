@@ -43,8 +43,14 @@
 //!   semantics that target this CPU: such a caller states that one guest operation *is* one host
 //!   instruction, which is a fact about a specific guest and host together.
 
+#[cfg(target_arch = "aarch64")]
+pub(crate) mod aarch64;
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod x86_64;
+#[cfg(target_arch = "aarch64")]
+pub(crate) use aarch64::ELF_MACHINE;
+#[cfg(target_arch = "aarch64")]
+pub(crate) use aarch64::asmstub;
 /// The architecture's ELF machine identity, named once for every caller: `arch::ELF_MACHINE`.
 #[cfg(target_arch = "x86_64")]
 pub(crate) use x86_64::ELF_MACHINE;
@@ -59,5 +65,5 @@ pub(crate) use x86_64::{asm_text, asmstub};
 /// `arch::reloc::{Kind, field_width, classify}`.
 pub(crate) mod reloc;
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!("Not implemented for this architecture.");

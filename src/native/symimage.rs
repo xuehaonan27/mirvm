@@ -10,7 +10,7 @@
 //! [`build`] returns the bytes and the file offset the functions start at, which is what a caller
 //! adds to the load bias to get each token.
 
-use crate::arch::asmstub::RET;
+use crate::arch::asmstub::INERT_SLOT;
 use crate::native::elf;
 
 fn align(value: usize, alignment: usize) -> usize {
@@ -37,7 +37,10 @@ pub fn build(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
     const SHSTRTAB_INDEX: usize = 8;
     const PHNUM: usize = 2;
     const SHNUM: usize = 9;
-    const SLOT: usize = 16;
+    /// One symbol per slot, so an address is always a slot start. The slot is the architecture's
+    /// inert instruction plus its padding, because how long a decodable instruction is is the
+    /// CPU's to say.
+    const SLOT: usize = crate::arch::asmstub::INERT_SLOT.len();
     /// The one load segment is page-aligned, which is what a loader expects of a `PT_LOAD`.
     const PAGE: u64 = 0x1000;
 
@@ -117,8 +120,8 @@ pub fn build(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
     elf::put_u64(&mut out, dynamic_ph + elf::phdr::ALIGN, 8);
 
     for index in 0..names.len() {
-        out[text_off + index * SLOT] = RET; // never executed
-        out[text_off + index * SLOT + 1..text_off + (index + 1) * SLOT].fill(0x90);
+        let slot = text_off + index * SLOT;
+        out[slot..slot + SLOT].copy_from_slice(&INERT_SLOT);
     }
     out[dynstr_off..dynstr_off + dynstr.len()].copy_from_slice(&dynstr);
     out[strtab_off..strtab_off + strtab.len()].copy_from_slice(&strtab);
