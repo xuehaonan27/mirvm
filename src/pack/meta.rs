@@ -165,8 +165,6 @@ impl ModuleMeta {
             guest_panic_cleanup: self.guest_panic_cleanup,
             entry: self.entry,
             image_frozens: Vec::new(),
-            backtrace_ips: Vec::new(),
-            backtrace_image: None,
         };
         module.rebuild_load_map();
         module.load_map.require_mapped();
