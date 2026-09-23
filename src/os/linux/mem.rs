@@ -12,18 +12,7 @@
 //!   (caller decides dynamic rollback/loud error; MAP_FIXED_NOREPLACE never
 //!   overwrites existing mappings).
 
-/// Narrow enumeration of mmap protection flags.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Prot(std::os::raw::c_int);
-
-impl Prot {
-    /// No access. Used for guard pages around guest-owned mappings.
-    pub const NONE: Prot = Prot(libc::PROT_NONE);
-    /// PROT_READ | PROT_WRITE
-    pub const RW: Prot = Prot(libc::PROT_READ | libc::PROT_WRITE);
-    /// PROT_READ | PROT_EXEC
-    pub const RX: Prot = Prot(libc::PROT_READ | libc::PROT_EXEC);
-}
+use crate::os::mem::Prot;
 
 pub fn page_size() -> usize {
     let n = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
