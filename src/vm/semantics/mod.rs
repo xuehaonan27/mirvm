@@ -2,8 +2,8 @@
 //!
 //! The interpreter and the JIT have to agree bit for bit, and they can only do so if the
 //! definition of an operation has one home. Where the operation is a loop or a piece of
-//! intricate bit handling, both backends call the body here ([`simd`], [`volatile`], and the
-//! builtin families); where the host instruction is the answer, the translator emits it and
+//! intricate bit handling, both backends call the body here ([`simd`], [`volatile`], the
+//! [`builtin`] families); where the host instruction is the answer, the translator emits it and
 //! the identity in [`arith`] is the specification it mirrors.
 //!
 //! Nothing here chooses a backend or dispatches on one: these bodies are reached with raw
@@ -13,6 +13,7 @@
 //! (guest TLS, the unwinder); the pure operations take values and addresses.
 
 pub(crate) mod arith;
+pub(crate) mod builtin;
 pub(crate) mod memory;
 pub(crate) mod simd;
 pub(crate) mod tls;

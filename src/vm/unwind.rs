@@ -123,6 +123,16 @@ pub(crate) fn raise_engine_fault(ctx: *mut super::ctx::Ctx, message: String, cod
     )
 }
 
+/// Runs `f` under an unwind action: a panic escaping a `Terminate` edge aborts (a double panic,
+/// or a guest `extern "C"` boundary) instead of resuming.
+pub(crate) fn guarding_terminate<R>(unwind: &super::ir::UnwindAction, f: impl FnOnce() -> R) -> R {
+    if let super::ir::UnwindAction::Terminate = unwind {
+        guard_terminate(f)
+    } else {
+        f()
+    }
+}
+
 /// Aborts the running activation with a diagnostic: an unrecoverable violation of a MIRVM
 /// invariant (never a guest fault), raised as an EngineFault so it surfaces on the engine's own
 /// error path instead of as a bare host abort. Every layer that can detect such a violation --

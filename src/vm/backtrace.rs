@@ -1,15 +1,22 @@
-//! Guest backtrace symbol carrier for Linux/x86_64.
+//! The guest backtrace: the symbol carriers that make an interpreted frame resolvable, and the
+//! walk that merges interpreted and JIT frames into one sequence.
 //!
-//! The standard Rust symbolizer discovers loaded ELF objects with
-//! `dl_iterate_phdr` and reads their symbol tables itself. We therefore expose
-//! one inert byte per FuncId as an ordinary ELF function symbol. Nothing ever
-//! calls these bytes; their addresses are opaque instruction-pointer tokens.
+//! The standard Rust symbolizer discovers loaded ELF objects with `dl_iterate_phdr` and reads
+//! their symbol tables itself, so a symbol is exposed as an ordinary ELF function symbol: one
+//! inert byte per FuncId whose address is the opaque instruction-pointer token a frame reports.
+//! Nothing ever calls those bytes.
+//!
+//! A frame sequence is therefore two sources merged by host stack position: the interpreter's
+//! shadow frames and the JIT's real machine frames, which the system unwinder reads back.
 
 use std::io::{Seek, Write};
 use std::os::fd::FromRawFd;
 
+use super::ctx::Ctx;
+use super::dispatch::call_fn_addr;
 use super::ir::Module;
 use crate::native::elf;
+use crate::os::unwind;
 
 #[derive(Debug)]
 pub struct SymbolImage {
@@ -199,6 +206,96 @@ fn build_elf(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
     section(7, sh_name[6], 2, 0, symtab_off, sym_len, 6, 1, 8, 24);
     section(8, sh_name[7], 3, 0, shstr_off, shstr.len(), 0, 0, 1, 0);
     Ok((out, text_off))
+}
+
+/// Conservative fallback IP when no ELF symbol image is available: high above the user address
+/// space and not page-aligned, so it cannot collide with a real code or data address. A normally
+/// loaded Engine uses a symbolizable ELF address instead.
+const FUNC_IP_BASE: u64 = 0x5f5f_0000_0000_0000;
+
+fn fallback_func_ip(func: u32) -> u64 {
+    FUNC_IP_BASE + (func as u64) * 64
+}
+
+/// The instruction-pointer token for `func`: the symbol image's address when there is one.
+pub(crate) fn func_synth_ip(ctx: *mut Ctx, func: u32) -> u64 {
+    unsafe { &*(*ctx).shared }
+        .module
+        .backtrace_ips
+        .get(func as usize)
+        .copied()
+        .unwrap_or_else(|| fallback_func_ip(func))
+}
+
+#[repr(C)]
+struct GuestUnwindContext {
+    ip: u64,
+    cfa: u64,
+}
+
+#[repr(C)]
+struct HostFrame {
+    ip: u64,
+    cfa: u64,
+}
+
+extern "C" fn collect_host_frame(ctx: unwind::Context, arg: unwind::Context) -> i32 {
+    let frames = unsafe { &mut *(arg as *mut Vec<HostFrame>) };
+    frames.push(HostFrame {
+        ip: unsafe { unwind::frame_ip(ctx) } as u64,
+        cfa: unsafe { unwind::frame_cfa(ctx) } as u64,
+    });
+    0
+}
+
+/// `_Unwind_Backtrace(trace_fn, arg)`: the system unwinder reads the live JIT machine frames,
+/// which are then merged with the interpreter's shadow frames by host stack position. The
+/// callback only ever sees a controlled guest context, never engine host frames.
+pub(crate) fn unwind_backtrace(ctx: *mut Ctx, trace_fn: u64, arg: u64) -> u64 {
+    let shared = unsafe { &*(*ctx).shared };
+    let mut host: Vec<HostFrame> = Vec::new();
+    unsafe {
+        unwind::backtrace(
+            collect_host_frame,
+            &mut host as *mut Vec<HostFrame> as unwind::Context,
+        );
+    }
+
+    // The callback may re-enter the guest and change the live stack, so snapshot everything
+    // first. The x86_64 stack grows down, so a smaller CFA is an inner frame; a JIT guest call
+    // registers only its fast body, so wrapper frames never appear twice.
+    let mut frames: Vec<GuestUnwindContext> = unsafe {
+        (*ctx)
+            .shadow
+            .iter()
+            .map(|frame| GuestUnwindContext {
+                ip: frame.ip,
+                cfa: frame.cfa,
+            })
+            .collect()
+    };
+    frames.extend(host.into_iter().filter_map(|frame| {
+        shared
+            .jit
+            .guest_func_at(frame.ip.saturating_sub(1))
+            .map(|func| GuestUnwindContext {
+                ip: func_synth_ip(ctx, func),
+                cfa: frame.cfa,
+            })
+    }));
+    frames.sort_unstable_by_key(|frame| frame.cfa);
+
+    // The standard implementation trims the guest frame that is currently calling
+    // _Unwind_Backtrace. Our synthetic symbol address cannot be compared directly with its entry
+    // pointer, so skip the innermost guest frame here instead.
+    for frame in frames.into_iter().skip(1) {
+        let frame_ptr = &frame as *const GuestUnwindContext as u64;
+        let r = call_fn_addr(ctx, trace_fn, &[frame_ptr, arg], "_Unwind_Backtrace").0;
+        if r != 0 {
+            break; // _URC_FOREIGN_EXCEPTION_CAUGHT / _URC_FAILURE and friends: stop
+        }
+    }
+    5 // _URC_END_OF_STACK
 }
 
 pub fn materialize_symbols(module: &mut Module) -> Result<(), String> {

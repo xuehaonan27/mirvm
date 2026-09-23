@@ -264,7 +264,7 @@ pub(super) extern "C-unwind" fn mirvm_call_foreign(
     r
 }
 
-/// CallBuiltin helper: shares `interp::exec_builtin`'s body, which owns the x86 vector
+/// CallBuiltin helper: shares `semantics::builtin::exec_builtin`'s body, which owns the x86 vector
 /// sret / pair / main-scalar lanes and their diagnostics. A JIT frame has no edge
 /// semantics, so the edge cell is a dummy: with `unwind` set to `Continue` nothing reads
 /// it.
@@ -287,7 +287,7 @@ pub(super) extern "C-unwind" fn mirvm_call_builtin(
     }
     let (ctx, shared) = active();
     let av = unsafe { std::slice::from_raw_parts(args, n as usize) };
-    let (lo, hi) = crate::vm::interp::exec_builtin(
+    let (lo, hi) = crate::vm::semantics::builtin::exec_builtin(
         ctx,
         &shared.module.funcs[caller as usize],
         &Cell::new(None),
@@ -329,7 +329,7 @@ pub(super) extern "C-unwind" fn mirvm_alloc(
         _ => ir::Builtin::RustDealloc,
     };
     let av = [a0, a1, a2, a3];
-    let (lo, _) = crate::vm::interp::exec_builtin(
+    let (lo, _) = crate::vm::semantics::builtin::exec_builtin(
         ctx,
         &shared.module.funcs[caller as usize],
         &Cell::new(None),

@@ -838,7 +838,7 @@ fn finalize_shared(shared: &Shared) {
     shared.module.funcs.flush_heat_order();
     #[cfg(feature = "cranelift")]
     super::super::jit::stop(shared);
-    super::super::interp::discard_engine_state(shared.id);
+    crate::vm::atexit::discard(shared.id);
     ENGINES.write().unwrap().remove(&shared.id);
     shared.control.finish_close();
 }

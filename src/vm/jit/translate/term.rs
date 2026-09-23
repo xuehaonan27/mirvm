@@ -123,7 +123,7 @@ impl Translator<'_, '_> {
                     }
                     UnwindAction::Terminate => {
                         // The Terminate boundary is mirvm_call_terminate, a c2i-shaped wrapper with
-                        // the same semantics as the interpreter's call_guarding_terminate.
+                        // the same semantics as `unwind::guarding_terminate`.
                         let args_ss = self.b.create_sized_stack_slot(StackSlotData::new(
                             StackSlotKind::ExplicitSlot,
                             (av.len().max(1) * 8) as u32,
@@ -356,7 +356,7 @@ impl Translator<'_, '_> {
                 } else {
                     // Continue / Terminate are distinguished by a flag; the Terminate flag means
                     // the call is wrapped in catch_unwind + abort, the same semantics as
-                    // call_guarding_terminate.
+                    // `unwind::guarding_terminate`.
                     let term = self.b.ins().iconst(
                         types::I64,
                         i64::from(matches!(unwind, UnwindAction::Terminate)),
@@ -535,7 +535,7 @@ impl Translator<'_, '_> {
                 }
                 // The four allocation builtins take the mirvm_alloc fast path -- the engine
                 // heap's single entry point, dispatched by tag. Everything else goes through
-                // mirvm_call_builtin, which shares its body with exec_builtin.
+                // mirvm_call_builtin, which shares its body with semantics::builtin.
                 let alloc_tag = match builtin {
                     ir::Builtin::RustAlloc => Some(0i64),
                     ir::Builtin::RustAllocZeroed => Some(1),
@@ -601,7 +601,7 @@ impl Translator<'_, '_> {
                 {
                     // A fixed four-slot argument vector: realloc uses all four, while
                     // alloc/dealloc pad with 0 and the helper consumes them by tag, since
-                    // exec_builtin's body only reads the a(i) it needs.
+                    // semantics::builtin's body only reads the a(i) it needs.
                     let mut av: Vec<Value> = Vec::with_capacity(4);
                     for i in 0..4 {
                         av.push(match args.get(i) {
