@@ -33,6 +33,7 @@ pub(crate) mod ir;
 pub(crate) mod jit;
 pub(crate) mod mcload;
 pub(crate) mod native_instance;
+pub(crate) mod native_lifecycle;
 pub(crate) mod semantics;
 pub(crate) mod signal;
 pub(crate) mod stats;
