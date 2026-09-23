@@ -21,20 +21,18 @@
 //! index, [`read`] and [`write`] the two directions, and [`native`] the store side of a package's
 //! libraries.
 
+mod bytes;
 mod format;
 mod funcs;
 mod meta;
-mod native;
 mod read;
 #[cfg(test)]
 mod tests;
 mod write;
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use meta::{McEntry, ModuleMeta, NativeLibEntry};
-use native::materialize_native_blob_at;
 
 // The three free functions the CLI reaches as `crate::pack::…`, the paths its branch criteria and
 // pack step already name them by.
@@ -168,46 +166,5 @@ impl Package {
         module.asm_stub_addrs = crate::lower::asm::try_materialize(&module.asm_sites)?;
         module.finalize_entry_argv(&[]).map_err(Error::reject)?;
         unsafe { crate::vm::Engine::from_module_unchecked(module) }.map_err(Error::reject)
-    }
-}
-
-impl LoadedPackage {
-    pub(crate) fn instantiate(&self) -> Result<crate::vm::ir::Module, Error> {
-        let mut module = self.module_meta.instantiate()?;
-        let mut covered_hashes = HashSet::with_capacity(self.mc_entries.len());
-        let mut images = Vec::with_capacity(self.mc_entries.len());
-        for mc in &self.mc_entries {
-            covered_hashes.insert(mc.fnv);
-            let lib = meta::native_entry_for_mc(&self.libs, mc.fnv).ok_or_else(|| {
-                Error::corrupt(format!(
-                    "validated package lost the native entry for MC image {:032x}",
-                    mc.fnv
-                ))
-            })?;
-            let image = crate::vm::mcload::load(&mc.bytes).map_err(|e| {
-                Error::reject(format!("cannot load the MC image ({}): {e}", lib.path))
-            })?;
-            images.push(image);
-        }
-        module.mc_images = images;
-
-        let mut required_native_libs = Vec::with_capacity(self.libs.len());
-        let mut required_native_hashes = Vec::with_capacity(self.libs.len());
-        for lib in &self.libs {
-            if lib.role == 1 && covered_hashes.contains(&lib.fnv) {
-                continue;
-            }
-            let path = materialize_native_blob_at(&crate::store::PACKAGE_NATIVE.dir(), lib)?;
-            required_native_libs.push(path.to_string_lossy().into_owned().into_boxed_str());
-            required_native_hashes.push(lib.fnv);
-        }
-        module.required_native_libs = required_native_libs;
-        module.required_native_hashes = required_native_hashes;
-        module.funcs = crate::vm::ir::FuncTable::from_bytes(
-            self.raw.clone(),
-            self.function_blobs.clone(),
-            self.heat_path.clone(),
-        );
-        Ok(module)
     }
 }

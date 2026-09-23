@@ -7,6 +7,7 @@ use super::format::{
 };
 use super::funcs::{build_function_section, parse_function_section};
 use super::meta::{Meta, ModuleMetaRef, Reloc, postcard_bytes};
+use super::read::materialize_native_blob_at;
 
 use crate::diag::Diagnostic as _;
 

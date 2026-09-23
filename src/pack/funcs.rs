@@ -4,7 +4,8 @@
 use crate::vm::ir::{FuncBlob, FuncTable};
 
 use super::Error;
-use super::format::{Cursor, check_hash, hash128};
+use super::bytes::{Cursor, Writer};
+use super::format::{check_hash, hash128};
 use super::meta::postcard_bytes;
 
 /// One index entry: offset, length, digest.
@@ -28,25 +29,23 @@ pub(super) fn build_function_section(funcs: &FuncTable) -> Result<Vec<u8>, Error
         encoded.push((offset, bytes));
         offset = end;
     }
-    let mut out = Vec::with_capacity(offset);
-    out.extend_from_slice(&count.to_le_bytes());
+    let mut out = Writer::with_capacity(offset);
+    out.u32(count);
     for (offset, bytes) in &encoded {
-        out.extend_from_slice(
-            &u64::try_from(*offset)
-                .map_err(|_| Error::build("package function offset is too large"))?
-                .to_le_bytes(),
+        out.u64(
+            u64::try_from(*offset)
+                .map_err(|_| Error::build("package function offset is too large"))?,
         );
-        out.extend_from_slice(
-            &u64::try_from(bytes.len())
-                .map_err(|_| Error::build("package function is too large"))?
-                .to_le_bytes(),
+        out.u64(
+            u64::try_from(bytes.len())
+                .map_err(|_| Error::build("package function is too large"))?,
         );
-        out.extend_from_slice(&hash128(bytes).to_le_bytes());
+        out.u128(hash128(bytes));
     }
     for (_, bytes) in encoded {
-        out.extend_from_slice(&bytes);
+        out.bytes(&bytes);
     }
-    Ok(out)
+    Ok(out.into_bytes())
 }
 
 pub(super) fn parse_function_section(

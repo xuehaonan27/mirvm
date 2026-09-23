@@ -1,11 +1,13 @@
-//! Reading a package: the sniff `run` branches on, and the full refuse-loud load.
+//! The load side of a package: the sniff `run` branches on, the full refuse-loud load, and turning
+//! a loaded package into a `Module` — including putting its native libraries where the loader looks
+//! for them.
 //!
 //! The load copies the file once and validates exclusively from that immutable snapshot, so its
 //! result cannot retain a mutable inode; every function's bytecode is verified before any native
 //! image is created.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 
@@ -172,4 +174,68 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, Error> {
         mc_entries,
         heat_path,
     })
+}
+
+impl LoadedPackage {
+    pub(crate) fn instantiate(&self) -> Result<crate::vm::ir::Module, Error> {
+        let mut module = self.module_meta.instantiate()?;
+        let mut covered_hashes = HashSet::with_capacity(self.mc_entries.len());
+        let mut images = Vec::with_capacity(self.mc_entries.len());
+        for mc in &self.mc_entries {
+            covered_hashes.insert(mc.fnv);
+            let lib = native_entry_for_mc(&self.libs, mc.fnv).ok_or_else(|| {
+                Error::corrupt(format!(
+                    "validated package lost the native entry for MC image {:032x}",
+                    mc.fnv
+                ))
+            })?;
+            let image = crate::vm::mcload::load(&mc.bytes).map_err(|e| {
+                Error::reject(format!("cannot load the MC image ({}): {e}", lib.path))
+            })?;
+            images.push(image);
+        }
+        module.mc_images = images;
+
+        let mut required_native_libs = Vec::with_capacity(self.libs.len());
+        let mut required_native_hashes = Vec::with_capacity(self.libs.len());
+        for lib in &self.libs {
+            if lib.role == 1 && covered_hashes.contains(&lib.fnv) {
+                continue;
+            }
+            let path = materialize_native_blob_at(&crate::store::PACKAGE_NATIVE.dir(), lib)?;
+            required_native_libs.push(path.to_string_lossy().into_owned().into_boxed_str());
+            required_native_hashes.push(lib.fnv);
+        }
+        module.required_native_libs = required_native_libs;
+        module.required_native_hashes = required_native_hashes;
+        module.funcs = crate::vm::ir::FuncTable::from_bytes(
+            self.raw.clone(),
+            self.function_blobs.clone(),
+            self.heat_path.clone(),
+        );
+        Ok(module)
+    }
+}
+
+/// Put one recorded native library where the loader looks for it, keyed by content so two packages
+/// sharing a library share one file. Its digest is rechecked here: the load path validated the
+/// section, but this is the bytes that are about to become a file on disk.
+pub(super) fn materialize_native_blob_at(
+    dir: &Path,
+    lib: &NativeLibEntry,
+) -> Result<PathBuf, Error> {
+    check_lib_hash(lib)?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| Error::io("cannot create the package native directory", e))?;
+    let path = dir.join(format!("{:032x}.so", lib.fnv));
+    // Already published under this digest: republishing would only rewrite the same bytes.
+    if std::fs::read(&path)
+        .ok()
+        .is_some_and(|bytes| hash128(&bytes) == lib.fnv)
+    {
+        return Ok(path);
+    }
+    crate::store::publish_bytes(&path, &lib.bytes)
+        .map_err(|e| Error::io("cannot publish the package native library", e))?;
+    Ok(path)
 }

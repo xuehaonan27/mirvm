@@ -1,9 +1,10 @@
-//! The `.mirvm` container: its magic, version, section table and checksums, and the cursors both
-//! directions share. The layout is documented on the module above; this file owns its bytes.
+//! The `.mirvm` container: its magic, version, section table and checksums, in both directions.
+//! The layout is documented on the module above; this file owns the bytes that layout describes.
 
 use std::collections::HashSet;
 
 use super::Error;
+use super::bytes::{Cursor, Writer};
 
 /// Container magic: eight bytes, and the sniffer's whole criterion.
 pub(super) const MAGIC: &[u8; 8] = b"MIRVMAR\0";
@@ -49,49 +50,6 @@ pub(super) fn check_hash(
     }
 }
 
-/// A reader over a byte slice that never runs off the end; a failure names what was being read.
-pub(super) struct Cursor<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Cursor<'a> {
-    pub(super) fn new(data: &'a [u8], pos: usize) -> Self {
-        Cursor { data, pos }
-    }
-
-    fn take(&mut self, len: usize, what: &str) -> Result<&'a [u8], Error> {
-        let end = self
-            .pos
-            .checked_add(len)
-            .ok_or_else(|| Error::corrupt(format!("package {what} length overflow")))?;
-        let value = self
-            .data
-            .get(self.pos..end)
-            .ok_or_else(|| Error::corrupt(format!("package truncated while reading {what}")))?;
-        self.pos = end;
-        Ok(value)
-    }
-
-    pub(super) fn u32(&mut self, what: &str) -> Result<u32, Error> {
-        Ok(u32::from_le_bytes(
-            self.take(4, what)?.try_into().expect("four bytes"),
-        ))
-    }
-
-    pub(super) fn u64(&mut self, what: &str) -> Result<u64, Error> {
-        Ok(u64::from_le_bytes(
-            self.take(8, what)?.try_into().expect("eight bytes"),
-        ))
-    }
-
-    pub(super) fn u128(&mut self, what: &str) -> Result<u128, Error> {
-        Ok(u128::from_le_bytes(
-            self.take(16, what)?.try_into().expect("sixteen bytes"),
-        ))
-    }
-}
-
 pub(super) struct ParsedPackage<'a> {
     pub(super) sections: Vec<(u32, &'a [u8])>,
 }
@@ -119,39 +77,41 @@ pub(super) fn build_container(sections: &[(u32, Vec<u8>)]) -> Result<Vec<u8>, Er
         .len()
         .checked_mul(SECTION_ENTRY_LEN)
         .ok_or_else(|| Error::build("package section table is too large"))?;
-    let data_start = MAGIC
+
+    let mut out = Writer::new();
+    out.bytes(MAGIC);
+    out.u32(FMT_VER);
+    out.u32(bid_len);
+    out.bytes(bid);
+    out.u32(section_count);
+
+    // The table precedes the payloads, so every offset is known before the first payload is
+    // written: it begins where the table ends. The header's size is asked of the buffer rather than
+    // recomputed, so a header field added above cannot leave the offsets describing a different
+    // layout than the one written.
+    let data_start = out
         .len()
-        .checked_add(4 + 4)
-        .and_then(|n| n.checked_add(bid.len()))
-        .and_then(|n| n.checked_add(4))
-        .and_then(|n| n.checked_add(table_len))
+        .checked_add(table_len)
         .ok_or_else(|| Error::build("package size overflow"))?;
-
-    let mut buf = Vec::new();
-    buf.extend_from_slice(MAGIC);
-    buf.extend_from_slice(&FMT_VER.to_le_bytes());
-    buf.extend_from_slice(&bid_len.to_le_bytes());
-    buf.extend_from_slice(bid);
-    buf.extend_from_slice(&section_count.to_le_bytes());
-
     let mut off = u64::try_from(data_start).map_err(|_| Error::build("package offset overflow"))?;
     for (tag, data) in sections {
         let len =
             u64::try_from(data.len()).map_err(|_| Error::build("package section is too large"))?;
-        buf.extend_from_slice(&tag.to_le_bytes());
-        buf.extend_from_slice(&off.to_le_bytes());
-        buf.extend_from_slice(&len.to_le_bytes());
-        buf.extend_from_slice(&hash128(data).to_le_bytes());
+        out.u32(*tag);
+        out.u64(off);
+        out.u64(len);
+        out.u128(hash128(data));
         off = off
             .checked_add(len)
             .ok_or_else(|| Error::build("package size overflow"))?;
     }
     for (_, data) in sections {
-        buf.extend_from_slice(data);
+        out.bytes(data);
     }
-    let whole = hash128(&buf);
-    buf.extend_from_slice(&whole.to_le_bytes());
-    Ok(buf)
+    // The trailer covers everything before it, so it is taken before it is appended.
+    let whole = hash128(out.as_bytes());
+    out.u128(whole);
+    Ok(out.into_bytes())
 }
 
 pub(super) fn parse_container(raw: &[u8]) -> Result<ParsedPackage<'_>, Error> {
@@ -196,7 +156,7 @@ pub(super) fn parse_container(raw: &[u8]) -> Result<ParsedPackage<'_>, Error> {
         .checked_mul(SECTION_ENTRY_LEN)
         .ok_or_else(|| Error::corrupt("package section table length overflow"))?;
     let data_start = cur
-        .pos
+        .pos()
         .checked_add(table_len)
         .filter(|end| *end <= body.len())
         .ok_or_else(|| Error::corrupt("package section table is truncated or too large"))?;
