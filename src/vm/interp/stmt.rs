@@ -597,7 +597,9 @@ pub(super) fn exec_stmt(ctx: *mut Ctx, base: usize, stmt: &Stmt) {
                 };
             }
             let bits = match to {
-                FloatW::F16 => w2f!(f16),
+                // The f16 conversion is the shared model rather than a host cast, for the reason
+                // `crate::vm::semantics::wide` gives; the two narrower widths are instructions.
+                FloatW::F16 => u64::from(crate::vm::semantics::wide::wide_to_f16_bits(x, *signed)),
                 FloatW::F32 => w2f!(f32),
                 FloatW::F64 => w2f!(f64),
             };
