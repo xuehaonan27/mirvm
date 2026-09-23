@@ -35,15 +35,14 @@
 //! A subsystem whose knowledge is entirely the platform's is dispatched here. A subsystem that also
 //! carries vocabulary every platform shares — a mask, a protection, a load mode, a counter of
 //! mirvm's own threads — owns a file at this level instead, which holds the shared part and selects
-//! the platform's half through one `#[cfg]` ladder of its own. That is what keeps a second platform
-//! from restating what is not its own.
+//! the platform's half through one `#[cfg]` ladder of its own. A subsystem no platform answers
+//! differently at all owns a file here with no ladder and no platform half. That is what keeps a
+//! second platform from restating what is not its own.
 //!
 //! # Platform Selection
-//! Currently, the only implementation is `linux/` (same premise as the x86_64
-//! hard gate of `lower/global_asm.rs` and the asm-stub factory). Non-Linux
-//! targets will fail to compile at compile time—honestly, portability is not
-//! implemented. Adding a new platform means a parallel implementation directory
-//! and an arm in each ladder that names one.
+//! `linux/` and `macos/` are the implementations; a platform that is neither fails to compile at
+//! compile time. Adding one means a parallel implementation directory and an arm in each ladder
+//! that names a platform.
 //!
 //! What is specific to one kernel *and* one CPU at once is not here: it is in
 //! [`crate::os_arch`], whose pair ladder this module reaches through an ordinary
@@ -51,16 +50,25 @@
 
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos;
 
-/// Subsystems that carry vocabulary shared by every platform; each selects its own implementation.
+/// Subsystems carrying vocabulary or bodies every platform shares; each selects its own
+/// implementation through its own ladder.
 pub(crate) mod dll;
+pub(crate) mod fs;
 pub(crate) mod mem;
 pub(crate) mod signal;
 pub(crate) mod thread;
 
+/// The Itanium unwinder, which is the same library interface on every platform: no ladder.
+pub(crate) mod unwind;
+
 /// Subsystems whose knowledge is entirely the platform's, dispatched here.
 #[cfg(target_os = "linux")]
-pub(crate) use linux::{fs, process, unwind};
+pub(crate) use linux::process;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::process;
 
 /// Why a host primitive did not do what it was asked.
 ///
@@ -85,5 +93,5 @@ crate::diag_codes! {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("Not implemented for this target.");

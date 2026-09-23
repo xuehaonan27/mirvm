@@ -1,4 +1,10 @@
-//! Linux/x86_64 Itanium unwinder primitives.
+//! The Itanium C++ ABI unwinder.
+//!
+//! Mirvm raises and catches guest exceptions by speaking the ABI the C++ runtime above it already
+//! speaks, which makes the unwinder a library interface rather than a kernel one: `_Unwind_*` and
+//! `__register_frame` are the same entry points with the same meanings on every platform this build
+//! supports (libgcc_s on Linux, libSystem on macOS). Nothing here varies along either axis, so the
+//! whole subsystem is shared and has no platform half.
 
 #[repr(C)]
 pub struct RawException {
