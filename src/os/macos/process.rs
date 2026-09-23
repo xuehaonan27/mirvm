@@ -214,19 +214,26 @@ pub extern "C" fn mirvm_syscall_dispatch(nr: i64, args: *const u64) -> i64 {
 /// than returning. Forwarding therefore costs the whole process, where refusing costs the guest one
 /// failed call, which is the errno a guest already handles for a kernel that lacks a call.
 ///
-/// What is answered is what has an exact C library counterpart *and* no effect on the process: a
-/// query whose answer is this kernel's own. A call that does something — a fork, an exit — is one
-/// the engine owns a boundary for, and reaching it through a raw number would run it without the
-/// accounting that boundary does, so those stay refused with the diagnostic below.
+/// What is answered is what the C library has an exact counterpart for, called on the guest's
+/// behalf. A number this table does not name is refused rather than approximated, and the guest
+/// sees the refusal as a call this kernel does not have — the same thing it sees on the platform
+/// whose kernel is asked directly.
+///
+/// The engine's own accounting does not depend on which spelling arrived: the fork hook runs on
+/// this path for whatever number it recognises, so a guest that reached a fork through its own
+/// instruction and one that reached the builtin are treated the same.
 ///
 /// The parameter is the syscall number and the six argument slots, kept so callers and the
 /// trampoline above remain architecture-independent.
 pub fn syscall(n: i64, args: &[u64]) -> i64 {
-    let _ = args;
     match n {
-        // SAFETY: both read this process's own identity, take no argument and touch nothing.
+        // SAFETY: each of these is the C library's own call for the number, and it is what the
+        // guest asked this kernel for: two identity queries, a fork, and the exit that does not
+        // return.
         SYS_GETPID => i64::from(unsafe { libc::getpid() }),
         SYS_GETPPID => i64::from(unsafe { libc::getppid() }),
+        SYS_FORK => i64::from(unsafe { libc::fork() }),
+        SYS_EXIT | SYS_EXIT_GROUP => unsafe { libc::_exit(args[0] as libc::c_int) },
         _ => {
             crate::diag_direct!(
                 Syscall,
