@@ -222,19 +222,6 @@ fn read_function_array(
 /// Mapping, dependency resolution and relocations still use dlopen; the saved
 /// addresses are invoked explicitly only after the Engine patches P1 slots.
 pub(crate) fn suppress_lifecycle_tags(path: &Path) -> Result<DynamicLifecycle, String> {
-    const PT_LOAD: u32 = 1;
-    const PT_DYNAMIC: u32 = 2;
-    const DT_NULL: i64 = 0;
-    const DT_INIT: i64 = 12;
-    const DT_FINI: i64 = 13;
-    const DT_BIND_NOW: i64 = 24;
-    const DT_INIT_ARRAY: i64 = 25;
-    const DT_FINI_ARRAY: i64 = 26;
-    const DT_INIT_ARRAYSZ: i64 = 27;
-    const DT_FINI_ARRAYSZ: i64 = 28;
-    const DT_PREINIT_ARRAY: i64 = 32;
-    const DT_PREINIT_ARRAYSZ: i64 = 33;
-
     let mut bytes = std::fs::read(path)
         .map_err(|e| format!("fail to read private native `{}`: {e}", path.display()))?;
     let bad = || format!("native `{}` is not valid ELF64 LE", path.display());
@@ -260,7 +247,7 @@ pub(crate) fn suppress_lifecycle_tags(path: &Path) -> Result<DynamicLifecycle, S
         let vaddr = elf::u64_at(&bytes, base + 16).ok_or_else(bad)?;
         let filesz = elf::u64_at(&bytes, base + 32).ok_or_else(bad)?;
         let memsz = elf::u64_at(&bytes, base + 40).ok_or_else(bad)?;
-        if ty == PT_LOAD {
+        if ty == elf::PT_LOAD {
             let end = vaddr
                 .checked_add(memsz)
                 .ok_or_else(|| format!("native `{}` load range overflow", path.display()))?;
@@ -268,7 +255,7 @@ pub(crate) fn suppress_lifecycle_tags(path: &Path) -> Result<DynamicLifecycle, S
             if flags & 1 != 0 {
                 result.executable_loads.push((vaddr, end));
             }
-        } else if ty == PT_DYNAMIC {
+        } else if ty == elf::PT_DYNAMIC {
             dynamic = Some((off, filesz));
         }
     }
@@ -278,7 +265,7 @@ pub(crate) fn suppress_lifecycle_tags(path: &Path) -> Result<DynamicLifecycle, S
     let start = usize::try_from(dynamic_off).map_err(|_| bad())?;
     let size = usize::try_from(dynamic_size).map_err(|_| bad())?;
     let end = start.checked_add(size).ok_or_else(bad)?;
-    if end > bytes.len() || size % 16 != 0 {
+    if end > bytes.len() || !size.is_multiple_of(elf::DYN_ENTRY_SIZE) {
         return Err(bad());
     }
 
@@ -286,20 +273,20 @@ pub(crate) fn suppress_lifecycle_tags(path: &Path) -> Result<DynamicLifecycle, S
     let mut init_array_size = None;
     let mut fini_array_addr = None;
     let mut fini_array_size = None;
-    for entry in (start..end).step_by(16) {
+    for entry in (start..end).step_by(elf::DYN_ENTRY_SIZE) {
         let tag = i64::from_le_bytes(bytes[entry..entry + 8].try_into().map_err(|_| bad())?);
-        if tag == DT_NULL {
+        if tag == elf::DT_NULL {
             break;
         }
         let value = u64::from_le_bytes(bytes[entry + 8..entry + 16].try_into().map_err(|_| bad())?);
         match tag {
-            DT_INIT => result.init = Some(value),
-            DT_FINI => result.fini = Some(value),
-            DT_INIT_ARRAY => init_array_addr = Some(value),
-            DT_INIT_ARRAYSZ => init_array_size = Some(value),
-            DT_FINI_ARRAY => fini_array_addr = Some(value),
-            DT_FINI_ARRAYSZ => fini_array_size = Some(value),
-            DT_PREINIT_ARRAY | DT_PREINIT_ARRAYSZ => {
+            elf::DT_INIT => result.init = Some(value),
+            elf::DT_FINI => result.fini = Some(value),
+            elf::DT_INIT_ARRAY => init_array_addr = Some(value),
+            elf::DT_INIT_ARRAYSZ => init_array_size = Some(value),
+            elf::DT_FINI_ARRAY => fini_array_addr = Some(value),
+            elf::DT_FINI_ARRAYSZ => fini_array_size = Some(value),
+            elf::DT_PREINIT_ARRAY | elf::DT_PREINIT_ARRAYSZ => {
                 return Err(format!(
                     "native `{}` unexpectedly contains a preinit array",
                     path.display()
@@ -310,7 +297,7 @@ pub(crate) fn suppress_lifecycle_tags(path: &Path) -> Result<DynamicLifecycle, S
         // DT_BIND_NOW is a harmless boolean tag under the already requested
         // RTLD_NOW mode. Replacing lifecycle tags removes them from l_info
         // without terminating the dynamic table early or changing relocation.
-        bytes[entry..entry + 8].copy_from_slice(&DT_BIND_NOW.to_le_bytes());
+        bytes[entry..entry + 8].copy_from_slice(&elf::DT_BIND_NOW.to_le_bytes());
         bytes[entry + 8..entry + 16].fill(0);
     }
     result.init_array = pair_tags(init_array_addr, init_array_size, "DT_INIT_ARRAY")?;

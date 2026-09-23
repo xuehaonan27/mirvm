@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::arch::x86_64::reloc;
 use crate::native::elf;
 
 /// A loaded MC image. Symbols are visible only to the Module that holds it; mapping and
@@ -225,7 +226,9 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
     let mut dynamic_pltrel = None;
     let mut unsupported_dynamic_relocation = None;
     if let Some((dynamic_vaddr, dynamic_size)) = dynamic {
-        if dynamic_size % 16 != 0 || !range_in_load(dynamic_vaddr, dynamic_size) {
+        if !dynamic_size.is_multiple_of(elf::DYN_ENTRY_SIZE as u64)
+            || !range_in_load(dynamic_vaddr, dynamic_size)
+        {
             return Err("MC PT_DYNAMIC lies outside a loadable segment".into());
         }
         let mut d = loaded_address(dynamic_vaddr, "PT_DYNAMIC")?;
@@ -235,25 +238,30 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
         while d < dynamic_end {
             let tag = i64::from_le_bytes(unsafe { std::ptr::read(d as *const [u8; 8]) });
             let val = u64::from_le_bytes(unsafe { std::ptr::read((d + 8) as *const [u8; 8]) });
-            d += 16;
+            d += elf::DYN_ENTRY_SIZE;
             match tag {
-                0 => break,
-                7 => rela = Some(val),            // DT_RELA
-                8 => relasz = val,                // DT_RELASZ
-                9 => dynamic_relaent = Some(val), // DT_RELAENT
-                5 => dynamic_strtab = Some(val),  // DT_STRTAB
-                6 => dynamic_symtab = Some(val),  // DT_SYMTAB
-                11 => dynamic_syment = Some(val), // DT_SYMENT
-                20 => dynamic_pltrel = Some(val), // DT_PLTREL
-                23 => jmprel = Some(val),         // DT_JMPREL
-                2 => pltrelsz = val,              // DT_PLTRELSZ
-                12 => init = Some(val),           // DT_INIT
-                13 => fini = Some(val),           // DT_FINI
-                25 => init_array = Some(val),     // DT_INIT_ARRAY
-                26 => fini_array = Some(val),     // DT_FINI_ARRAY
-                27 => init_array_size = val,      // DT_INIT_ARRAYSZ
-                28 => fini_array_size = val,      // DT_FINI_ARRAYSZ
-                17 | 18 | 19 | 35 | 36 | 37 => unsupported_dynamic_relocation = Some(tag),
+                elf::DT_NULL => break,
+                elf::DT_RELA => rela = Some(val),
+                elf::DT_RELASZ => relasz = val,
+                elf::DT_RELAENT => dynamic_relaent = Some(val),
+                elf::DT_STRTAB => dynamic_strtab = Some(val),
+                elf::DT_SYMTAB => dynamic_symtab = Some(val),
+                elf::DT_SYMENT => dynamic_syment = Some(val),
+                elf::DT_PLTREL => dynamic_pltrel = Some(val),
+                elf::DT_JMPREL => jmprel = Some(val),
+                elf::DT_PLTRELSZ => pltrelsz = val,
+                elf::DT_INIT => init = Some(val),
+                elf::DT_FINI => fini = Some(val),
+                elf::DT_INIT_ARRAY => init_array = Some(val),
+                elf::DT_FINI_ARRAY => fini_array = Some(val),
+                elf::DT_INIT_ARRAYSZ => init_array_size = val,
+                elf::DT_FINI_ARRAYSZ => fini_array_size = val,
+                elf::DT_DTPMOD64
+                | elf::DT_DTPOFF64
+                | elf::DT_TPOFF64
+                | elf::DT_DTPMOD32
+                | elf::DT_DTPOFF32
+                | elf::DT_TPOFF32 => unsupported_dynamic_relocation = Some(tag),
                 _ => {}
             }
         }
@@ -267,9 +275,9 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
     for i in 0..sections.len() {
         let s = shdr(i).ok_or_else(bad)?;
         match (s.ty, sec_name(&s)) {
-            (2, _) => symtab = Some(s),         // SHT_SYMTAB
-            (11, _) => dynsym = Some(s),        // SHT_DYNSYM
-            (3, ".strtab") => strtab = Some(s), // SHT_STRTAB
+            (elf::SHT_SYMTAB, _) => symtab = Some(s),
+            (elf::SHT_DYNSYM, _) => dynsym = Some(s),
+            (elf::SHT_STRTAB, ".strtab") => strtab = Some(s),
             (_, ".eh_frame") => eh_frame = Some(s),
             _ => {}
         }
@@ -280,19 +288,22 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
     );
     let dyn_s = dynsym.ok_or("MC image lacks .dynsym")?;
     let dyn_str_s = shdr(dyn_s.link as usize).ok_or_else(bad)?;
-    if dyn_str_s.ty != 3 {
+    if dyn_str_s.ty != elf::SHT_STRTAB {
         return Err("MC .dynsym does not link to a string table".into());
     }
-    if dynamic_syment != Some(24) || dyn_s.entsize != 24 {
+    if dynamic_syment != Some(elf::SYM_ENTRY_SIZE as u64)
+        || dyn_s.entsize != elf::SYM_ENTRY_SIZE as u64
+    {
         return Err("MC DT_SYMENT/.dynsym entry size is not 24".into());
     }
     if dynamic_symtab != Some(dyn_s.addr) || dynamic_strtab != Some(dyn_str_s.addr) {
         return Err("MC dynamic symbol/string table tags disagree with section metadata".into());
     }
-    if (rela.is_some() || jmprel.is_some()) && dynamic_relaent != Some(24) {
+    if (rela.is_some() || jmprel.is_some()) && dynamic_relaent != Some(elf::RELA_ENTRY_SIZE as u64)
+    {
         return Err("MC DT_RELAENT is not 24".into());
     }
-    if jmprel.is_some() && dynamic_pltrel != Some(7) {
+    if jmprel.is_some() && dynamic_pltrel != Some(elf::DT_RELA as u64) {
         return Err("MC DT_PLTREL is not DT_RELA".into());
     }
     if let Some(tag) = unsupported_dynamic_relocation {
@@ -318,7 +329,7 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
             .map_err(|_| "MC image symbol name is not UTF-8")?
             .to_string())
     };
-    let syment = sym_s.entsize.max(24) as usize;
+    let syment = sym_s.entsize.max(elf::SYM_ENTRY_SIZE as u64) as usize;
     let symcount = (sym_s.size as usize) / syment;
     let sym_at = |j: usize| -> Option<(u32, u8, u16, u64)> {
         // (st_name, st_info, st_shndx, st_value)
@@ -364,13 +375,13 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
     let mut symbols: HashMap<Box<str>, u64> = HashMap::new();
     for j in 0..symcount {
         let (name_off, info, shndx, value) = sym_at(j).ok_or_else(bad)?;
-        let bind = info >> 4;
-        if name_off == 0 || shndx == 0 || shndx >= 0xff00 {
+        let bind = elf::sym_bind(info);
+        if name_off == 0 || shndx == elf::SHN_UNDEF || shndx >= elf::SHN_RESERVED {
             continue;
         }
         let name = str_at(name_off)?;
-        if bind != 1
-            && bind != 2
+        if bind != elf::STB_GLOBAL
+            && bind != elf::STB_WEAK
             && !name.starts_with("__mirvm_p1_target_")
             && !name.starts_with("__mirvm_pthread_")
             && !name.starts_with("__mirvm_signal_")
@@ -387,8 +398,9 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
     let apply = |off: u64, info: u64, addend: i64| -> Result<(), String> {
         let ty = info as u32;
         let sym_idx = (info >> 32) as usize;
-        let write_size = if ty == 2 { 4 } else { 8 };
-        if ty != 0 && !range_in_load(off, write_size) {
+        let kind = reloc::classify(ty);
+        let write_size = reloc::field_width(kind) as u64;
+        if kind != reloc::Kind::None && !range_in_load(off, write_size) {
             return Err(format!(
                 "MC relocation target {off:#x} is outside a loadable segment"
             ));
@@ -400,16 +412,16 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
                 return Ok(0);
             }
             let (name_off, info2, shndx, value) = dyn_sym_at(idx).ok_or_else(bad)?;
-            if info2 & 0x0f == 10 {
+            if elf::sym_type(info2) == elf::STT_GNU_IFUNC {
                 return Err("MC dynamic relocation references STT_GNU_IFUNC".into());
             }
-            if shndx != 0 && shndx < 0xff00 {
+            if shndx != elf::SHN_UNDEF && shndx < elf::SHN_RESERVED {
                 return Ok(loaded_address(value, "defined symbol")? as u64);
             }
-            if shndx == 0xfff1 {
-                return Ok(value); // SHN_ABS
+            if shndx == elf::SHN_ABS {
+                return Ok(value);
             }
-            if shndx >= 0xff00 && shndx != 0 {
+            if shndx >= elf::SHN_RESERVED && shndx != elf::SHN_UNDEF {
                 return Err(format!(
                     "MC dynamic symbol has unsupported reserved section index {shndx:#x}"
                 ));
@@ -421,17 +433,16 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
             if p != 0 {
                 return Ok(p as u64);
             }
-            if (info2 >> 4) == 2 {
+            if elf::sym_bind(info2) == elf::STB_WEAK {
                 return Ok(0); // WEAK missing = 0
             }
             Err(format!(
                 "MC relocation symbol `{name}` not found (neither archive fallback nor RTLD_DEFAULT)"
             ))
         };
-        match ty {
-            0 => Ok(()), // NONE
-            8 => {
-                // RELATIVE: *(place) = base + addend
+        match kind {
+            reloc::Kind::None => Ok(()),
+            reloc::Kind::Relative => {
                 unsafe {
                     std::ptr::write_unaligned(
                         place as *mut u64,
@@ -440,16 +451,14 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
                 };
                 Ok(())
             }
-            1 => {
-                // 64: *(place) = sym + addend
+            reloc::Kind::Abs64 => {
                 let s = sym_addr(sym_idx)?;
                 unsafe {
                     std::ptr::write_unaligned(place as *mut u64, s.wrapping_add(addend as u64))
                 };
                 Ok(())
             }
-            2 => {
-                // PC32: *(place) = sym + addend - place
+            reloc::Kind::Pc32 => {
                 let s = sym_addr(sym_idx)?;
                 let value = i128::from(s) + i128::from(addend) - place as i128;
                 let value = i32::try_from(value)
@@ -457,16 +466,17 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
                 unsafe { std::ptr::write_unaligned(place as *mut i32, value) };
                 Ok(())
             }
-            6 | 7 => {
-                // GLOB_DAT / JUMP_SLOT: *(place) = sym
+            reloc::Kind::Symbol => {
                 let s = sym_addr(sym_idx)?;
                 unsafe { std::ptr::write_unaligned(place as *mut u64, s) };
                 Ok(())
             }
-            16..=18 => Err("MC image contains TLS relocation (DTPMOD/DTPOFF not handled)".into()),
-            5 => Err("MC image contains COPY relocation (not handled)".into()),
-            other => Err(format!(
-                "MC image contains unsupported relocation type {other}"
+            reloc::Kind::Tls => {
+                Err("MC image contains TLS relocation (DTPMOD/DTPOFF not handled)".into())
+            }
+            reloc::Kind::Copy => Err("MC image contains COPY relocation (not handled)".into()),
+            reloc::Kind::Unsupported => Err(format!(
+                "MC image contains unsupported relocation type {ty}"
             )),
         }
     };
@@ -604,11 +614,8 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
         .collect::<Result<Vec<_>, String>>()?
         .into_boxed_slice();
 
-    unsafe extern "C" {
-        fn __register_frame(fde: *const u8);
-    }
     for &frame in &registered_frames {
-        unsafe { __register_frame(frame as *const u8) };
+        crate::os::unwind::register_frame(frame as *const u8);
     }
 
     mapping_guard.armed = false;
@@ -651,11 +658,8 @@ impl Drop for McImage {
         if self.committed.load(Ordering::Acquire) {
             return;
         }
-        unsafe extern "C" {
-            fn __deregister_frame(fde: *const u8);
-        }
         for &frame in self.registered_frames.iter().rev() {
-            unsafe { __deregister_frame(frame as *const u8) };
+            crate::os::unwind::deregister_frame(frame as *const u8);
         }
         unsafe { crate::os::mem::unmap(self.mapping as *mut u8, self.size) };
     }

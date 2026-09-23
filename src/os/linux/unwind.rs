@@ -14,6 +14,21 @@ unsafe extern "C-unwind" {
 
 unsafe extern "C" {
     fn _Unwind_DeleteException(exception: *mut RawException);
+    fn __register_frame(begin: *const u8);
+    fn __deregister_frame(begin: *const u8);
+}
+
+/// Register one frame description entry with the process unwinder.
+///
+/// A whole section goes through [`register_frame_section`]; this one takes a single record, which
+/// is what a loader that maps an image's `.eh_frame` itself has in hand.
+pub fn register_frame(fde: *const u8) {
+    unsafe { __register_frame(fde) };
+}
+
+/// Undo [`register_frame`] for an image that is about to be unmapped.
+pub fn deregister_frame(fde: *const u8) {
+    unsafe { __deregister_frame(fde) };
 }
 
 /// Register one complete `.eh_frame` section with the process unwinder.
@@ -22,10 +37,6 @@ unsafe extern "C" {
 /// unit has to be the complete section, not a single FDE. The unwinder retains the bytes for the
 /// process lifetime, which is why they are leaked rather than owned.
 pub fn register_frame_section(mut bytes: Vec<u8>) {
-    unsafe extern "C" {
-        fn __register_frame(begin: *const u8);
-    }
-
     bytes.extend_from_slice(&[0, 0, 0, 0]);
     let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
     unsafe { __register_frame(bytes.as_ptr()) };

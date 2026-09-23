@@ -28,12 +28,7 @@ mod compiler;
 mod frame;
 #[cfg(feature = "cranelift")]
 mod helpers;
-#[cfg(all(
-    test,
-    feature = "cranelift",
-    target_arch = "x86_64",
-    target_os = "linux"
-))]
+#[cfg(all(test, feature = "cranelift"))]
 mod lsda_probe;
 #[cfg(feature = "cranelift")]
 mod translate;
