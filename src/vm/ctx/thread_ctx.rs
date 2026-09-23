@@ -10,7 +10,7 @@ use super::super::frame::ByteRegion;
 use super::engine::Shared;
 use super::main_run::MainRunState;
 use super::signals::{dispatch_signal_delivery, start_pending_signal_finalizers};
-use crate::os::signal::{MaskOp, SignalMask, set_thread_mask};
+use crate::os::signal::{MaskOp, SignalMask, all_blockable_mask, set_thread_mask};
 use crate::os::thread::TlsKey;
 
 /// Per-thread execution state (vmctx): one per guest thread, with the lifetime of that host
@@ -365,7 +365,7 @@ pub unsafe fn guest_spawned_threads(ctx: *mut Ctx) -> bool {
 /// 4)—guest pthread-key dtors (std run_dtors thunk, key order uncontrollable) can always execute
 /// on a living Ctx; the final round actually destroys it (ByteRegion munmap, etc.).
 fn block_thread_signals_for_exit() -> SignalMask {
-    match set_thread_mask(MaskOp::Block, &SignalMask::all_blockable()) {
+    match set_thread_mask(MaskOp::Block, &all_blockable_mask()) {
         Ok(previous) => previous,
         Err(error) => {
             eprintln!("mirvm[m4-engine]: failed to block signals before pthread exit: {error}");

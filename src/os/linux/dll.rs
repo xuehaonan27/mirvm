@@ -4,15 +4,8 @@
 //! Business semantics like binding priority and symbol existence are left to
 //! the caller.
 
+use crate::os::dll::Mode;
 use std::ffi::CStr;
-
-/// The dlopen mode.
-/// All call points always carry RTLD_GLOBAL (fixed as an internal constant).
-#[derive(Clone, Copy)]
-pub enum Mode {
-    Now,
-    Lazy,
-}
 
 /// `dlopen`.
 /// # Return value

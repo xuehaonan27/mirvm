@@ -24,12 +24,26 @@
 //!   families are passed through single-point parameter variation via
 //!   `os::process::syscall6`, without creating a shell for each syscall.
 //!
+//! # The Surface a Platform Provides
+//!
+//! The seven subsystems are `dll` (the dynamic loader), `fs` (descriptors and paths), `mem`
+//! (anonymous mappings), `process` (the process and its exit), `signal` (dispositions and masks),
+//! `thread` (pthreads and mirvm's own thread accounting), and `unwind` (the Itanium unwinder).
+//! Every call site spells `os::<subsystem>::…`, so a port fills in a directory rather than teaching
+//! call sites a new name.
+//!
+//! A subsystem whose knowledge is entirely the platform's is dispatched here. A subsystem that also
+//! carries vocabulary every platform shares — a mask, a protection, a load mode, a counter of
+//! mirvm's own threads — owns a file at this level instead, which holds the shared part and selects
+//! the platform's half through one `#[cfg]` ladder of its own. That is what keeps a second platform
+//! from restating what is not its own.
+//!
 //! # Platform Selection
 //! Currently, the only implementation is `linux/` (same premise as the x86_64
 //! hard gate of `lower/global_asm.rs` and the asm-stub factory). Non-Linux
 //! targets will fail to compile at compile time—honestly, portability is not
-//! implemented. Adding a new platform means parallel implementation directory,
-//! and cfg dispatch here.
+//! implemented. Adding a new platform means a parallel implementation directory
+//! and an arm in each ladder that names one.
 //!
 //! What is specific to one kernel *and* one CPU at once is not here: it is in
 //! [`crate::os_arch`], whose pair ladder this module reaches through an ordinary
@@ -37,8 +51,16 @@
 
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
+
+/// Subsystems that carry vocabulary shared by every platform; each selects its own implementation.
+pub(crate) mod dll;
+pub(crate) mod mem;
+pub(crate) mod signal;
+pub(crate) mod thread;
+
+/// Subsystems whose knowledge is entirely the platform's, dispatched here.
 #[cfg(target_os = "linux")]
-pub(crate) use linux::*;
+pub(crate) use linux::{fs, process, unwind};
 
 /// Why a host primitive did not do what it was asked.
 ///
