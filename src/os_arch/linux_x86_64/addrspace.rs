@@ -37,3 +37,10 @@ pub const BASE_CODE_ADDR: usize = 0x6D00_0000_0000;
 pub const IMAGE_CODE_SPLINE: usize = 0x6E00_0000_0000;
 pub const IMAGE_CODE_STEP: usize = 1 << 34;
 pub const IMAGE_CODE_COUNT: usize = 1300;
+
+/// The shadow instruction-pointer base a frame falls back to when no symbol image names it.
+///
+/// A token address must be one no mapping can occupy, or a backtrace could present it as real code.
+/// This base is non-canonical on x86_64 — bits 63..47 are not the sign extension of bit 47 — so the
+/// kernel refuses to map it, and the band below it belongs to no region this layout places.
+pub const FUNC_IP_BASE: u64 = 0x5f5f_0000_0000_0000;

@@ -6,9 +6,11 @@
 //! (P1/P2/S3'/S4 address models, decision-history §7.5b/§7.6/§7.5c/§7.3). The shape, and every
 //! predicate over it, is the same on every pair, so it is declared here.
 //!
-//! The *numbers* are the pair's, because they are chosen against one kernel's address space: where
-//! this CPU running this kernel leaves a hole wide enough for the regions. They live in the pair
-//! directory and are re-exported below, so a caller reads a base and its whitelist from one name.
+//! The numbers are the pair's, because they are chosen against one kernel's address space: where
+//! this CPU running this kernel leaves a hole wide enough for the regions, and which band above the
+//! user address space is guaranteed unmappable for a frame's fallback instruction-pointer token.
+//! They live in the pair directory and are re-exported below, so a caller reads a base and its
+//! whitelist from one name.
 //!
 //! Arena implementations in `vm/frozen.rs` and `vm/codearena.rs` use this as the source of truth;
 //! the IR serialization whitelists, the image layers' load validation, and lower assembly all share
@@ -16,6 +18,8 @@
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) use super::linux_x86_64::addrspace::*;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use super::macos_aarch64::addrspace::*;
 
 /// Fixed-region base for the k-th dependency image.
 pub(crate) fn image_addr(k: usize) -> usize {
