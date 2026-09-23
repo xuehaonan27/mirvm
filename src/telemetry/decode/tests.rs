@@ -7,8 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::*;
 use crate::telemetry::format::{
     CLOCK_NONE, ChunkFooter, ChunkHeader, Control, EngineContext, FLAG_CONTEXT_CONTROL, FileHeader,
-    PAGE_BYTES_4K, PRODUCER_END_BYTES, PageHeader, ProducerEnd, SESSION_END_BYTES, SessionEnd,
-    SyscallEnter, SyscallExit,
+    PAGE_BYTES_4K, PAGE_HEADER_BYTES, PRODUCER_END_BYTES, PageHeader, ProducerEnd,
+    SESSION_END_BYTES, SYSCALL_ENTER_BYTES, SYSCALL_EXIT_BYTES, SessionEnd, SyscallEnter,
+    SyscallExit, SyscallSemantics,
 };
 
 static NEXT_TEST_FILE: AtomicU64 = AtomicU64::new(0);
