@@ -157,8 +157,7 @@ fn p1_identity_module(link_addr: LinkAddr, unwind: bool) -> Module {
         funcs: vec![body].into(),
         ..Module::default()
     };
-    module.fn_addrs.insert(link_addr.0, 0);
-    module.link_fn_addrs.insert(link_addr, 0);
+    module.fn_entry_links.push((link_addr, 0));
     module.entry_stub_sites.push(super::ir::EntryStubSite {
         link_addr,
         func: 0,
@@ -428,10 +427,8 @@ fn constructor_faulting_masked_reraise_module(
         required_native_libs: vec![library.to_string_lossy().into_owned().into_boxed_str()],
         ..Module::default()
     };
-    module.fn_addrs.insert(handler.0, 0);
-    module.fn_addrs.insert(constructor.0, 1);
-    module.link_fn_addrs.insert(handler, 0);
-    module.link_fn_addrs.insert(constructor, 1);
+    module.fn_entry_links.push((handler, 0));
+    module.fn_entry_links.push((constructor, 1));
     module.entry_stub_sites.extend([
         super::ir::EntryStubSite {
             link_addr: handler,
@@ -561,8 +558,8 @@ fn foreign_fault_traversal_module(owner_fault_thunk: u64) -> Module {
         ..Module::default()
     };
     module.exports.insert("probe".into(), 0);
-    module.fn_addrs.insert(try_addr, 1);
-    module.fn_addrs.insert(catch_addr, 2);
+    module.fn_entry_links.push((LinkAddr(try_addr), 1));
+    module.fn_entry_links.push((LinkAddr(catch_addr), 2));
     module
 }
 
@@ -678,8 +675,8 @@ fn caller_catches_owner_panic(thunk: u64) -> Module {
         ..Module::default()
     };
     module.exports.insert("probe".into(), 0);
-    module.fn_addrs.insert(try_addr, 1);
-    module.fn_addrs.insert(catch_addr, 2);
+    module.fn_entry_links.push((LinkAddr(try_addr), 1));
+    module.fn_entry_links.push((LinkAddr(catch_addr), 2));
     module
 }
 
@@ -1159,8 +1156,8 @@ fn p1_entries_are_per_engine_and_never_aba_after_close() {
     let first = engine(p1_identity_module(link_addr, true), false);
     let second = engine(p1_identity_module(link_addr, true), false);
     let first_control = std::sync::Arc::clone(first.control());
-    let first_addr = first.shared().module.resolve_link_addr(link_addr);
-    let second_addr = second.shared().module.resolve_link_addr(link_addr);
+    let first_addr = first.shared().instance.resolve_link_addr(link_addr);
+    let second_addr = second.shared().instance.resolve_link_addr(link_addr);
     assert_ne!(
         first_addr, second_addr,
         "each Engine must own a distinct P1 closure"
@@ -1181,7 +1178,7 @@ fn p1_entries_are_per_engine_and_never_aba_after_close() {
     assert_eq!(unsafe { second_call() }, 73, "closing A must not affect B");
 
     let third = engine(p1_identity_module(link_addr, true), false);
-    let third_addr = third.shared().module.resolve_link_addr(link_addr);
+    let third_addr = third.shared().instance.resolve_link_addr(link_addr);
     assert_ne!(
         third_addr, first_addr,
         "P1 closure addresses must never be reused"
@@ -1202,15 +1199,14 @@ fn constructor_guest_trap_returns_engine_initialization_error() {
         required_native_libs: vec![library.to_string_lossy().into_owned().into_boxed_str()],
         ..Module::default()
     };
-    module.fn_addrs.insert(link_addr.0, 0);
-    module.link_fn_addrs.insert(link_addr, 0);
+    module.fn_entry_links.push((link_addr, 0));
     module.entry_stub_sites.push(super::ir::EntryStubSite {
         link_addr,
         func: 0,
         sig: callback_sig(),
     });
 
-    let shared = Shared::try_from_module(module).unwrap();
+    let shared = Shared::new(module);
     let error = match Engine::try_new(shared) {
         Ok(_) => panic!("constructor guest Trap unexpectedly initialized an Engine"),
         Err(error) => error,
@@ -1332,15 +1328,14 @@ fn finalizer_engine_fault_aborts_inside_teardown_boundary() {
             required_native_libs: vec![library.to_string_lossy().into_owned().into_boxed_str()],
             ..Module::default()
         };
-        module.fn_addrs.insert(link_addr.0, 0);
-        module.link_fn_addrs.insert(link_addr, 0);
+        module.fn_entry_links.push((link_addr, 0));
         module.entry_stub_sites.push(super::ir::EntryStubSite {
             link_addr,
             func: 0,
             sig: callback_sig(),
         });
 
-        let engine = Engine::try_new(Shared::try_from_module(module).unwrap()).unwrap();
+        let engine = Engine::try_new(Shared::new(module)).unwrap();
         engine.wait_closed().unwrap();
         panic!("native finalizer EngineFault escaped teardown");
     }
@@ -1369,7 +1364,7 @@ fn closed_plain_c_p1_entry_aborts() {
     if std::env::var_os(CHILD).is_some() {
         let link_addr = LinkAddr(0x6b00_0000_0200);
         let engine = engine(p1_identity_module(link_addr, false), false);
-        let addr = engine.shared().module.resolve_link_addr(link_addr);
+        let addr = engine.shared().instance.resolve_link_addr(link_addr);
         engine.wait_closed().unwrap();
         let callback: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(addr as usize) };
         let _ = unsafe { callback() };

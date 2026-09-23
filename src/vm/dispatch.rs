@@ -16,6 +16,7 @@
 //! [`call_guest`]. Neither reaches any other part of the other.
 
 use crate::vm::ctx::{Ctx, current_code_domain};
+use crate::vm::instance::Instance;
 use crate::vm::ir::{Module, RetAbi};
 use crate::vm::jit::{CodeDomain, FAIL_SENTINEL, call_trace_body};
 use crate::vm::unwind::engine_abort;
@@ -130,8 +131,8 @@ pub(crate) fn call_guest(ctx: *mut Ctx, func: u32, args: &[u64]) -> (u64, u64) {
 /// Calls the guest function whose entry address is `addr`. A target that is not a known guest
 /// entry breaks an engine invariant, and `caller` names the site that asked.
 pub(crate) fn call_fn_addr(ctx: *mut Ctx, addr: u64, args: &[u64], caller: &str) -> (u64, u64) {
-    let module: &Module = unsafe { &(*(*ctx).shared).module };
-    let Some(&fid) = module.fn_addrs.get(&addr) else {
+    let instance: &Instance = unsafe { &(*(*ctx).shared).instance };
+    let Some(&fid) = instance.fn_addrs.get(&addr) else {
         engine_abort(&format!(
             "indirect call target {addr:#x} is not a known fn entry (caller {caller})"
         ));

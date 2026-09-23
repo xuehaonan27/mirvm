@@ -497,7 +497,7 @@ pub(super) fn run_main(
 
     // Sniff for a .mirvm package (before the text read -- a package is binary)
     if crate::pack::is_package(&input_path) {
-        let module = crate::pack::load_package(&input_path)
+        let (module, mut instance) = crate::pack::load_package(&input_path)
             .and_then(|package| package.instantiate())
             .map_err(|reason| {
                 crate::error::Error::software(
@@ -506,11 +506,17 @@ pub(super) fn run_main(
                 )
             })?;
         // warm second half mirrors run_driver hot path (empty image stack: asm recipes idempotently rematerialized)
-        let mut module = module;
-        module.asm_stub_addrs = crate::lower::asm::materialize(&module.asm_sites);
+        instance.asm_stub_addrs = crate::lower::asm::materialize(&module.asm_sites);
         let mut program_argv = vec![input];
         program_argv.extend(program_args);
-        let code = run_vm_engine(module, &program_argv, vm_call.as_deref(), vm_stats, true);
+        let code = run_vm_engine(
+            module,
+            instance,
+            &program_argv,
+            vm_call.as_deref(),
+            vm_stats,
+            true,
+        );
         // The guest's own status: not mirvm's to classify.
         return Ok(ExitCode::from(code as u8));
     }

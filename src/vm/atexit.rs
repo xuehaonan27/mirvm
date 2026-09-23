@@ -37,7 +37,7 @@ static REGISTRY: LazyLock<Mutex<HashMap<usize, Vec<Entry>>>> =
 /// non-guest callback is refused, not silently dropped.
 pub(crate) fn register(ctx: *mut Ctx, func: u64, kind: Kind, arg: u64) -> u64 {
     let shared = unsafe { &*(*ctx).shared };
-    if !shared.module.fn_addrs.contains_key(&func) {
+    if !shared.instance.fn_addrs.contains_key(&func) {
         engine_abort(&format!(
             "atexit callback {func:#x} is not a known guest fn entry"
         ));

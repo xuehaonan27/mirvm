@@ -3,8 +3,8 @@
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use mirvm::vm::raw::{
-    Block, Builtin, FfiKind, ForeignSig, FuncBody, Module, Operand, ParamAbi, RetAbi, RetDest,
-    ScalarPlace, Slot, Terminator, UnwindAction, Width, run_export_raw,
+    Block, Builtin, FfiKind, ForeignSig, FuncBody, LinkAddr, Module, Operand, ParamAbi, RetAbi,
+    RetDest, ScalarPlace, Slot, Terminator, UnwindAction, Width, run_export_raw,
 };
 use mirvm::vm::{Engine, RunOutcome};
 
@@ -146,8 +146,8 @@ fn guest_catch_module() -> Module {
         ..Module::default()
     };
     module.exports.insert("probe".into(), 0);
-    module.fn_addrs.insert(try_addr, 1);
-    module.fn_addrs.insert(catch_addr, 2);
+    module.fn_entry_links.push((LinkAddr(try_addr), 1));
+    module.fn_entry_links.push((LinkAddr(catch_addr), 2));
     module
 }
 

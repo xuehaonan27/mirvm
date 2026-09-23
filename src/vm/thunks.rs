@@ -313,7 +313,7 @@ fn has_signal_thunk_shape(data: &ThunkData) -> bool {
 /// process-lifetime thunk/P1 addresses. `Unknown` alone may be considered a
 /// genuine native address by the signal layer.
 pub(crate) fn resolve_signal_handler(shared: &Shared, code: u64) -> SignalHandlerResolution {
-    if let Some(&func) = shared.module.fn_addrs.get(&code) {
+    if let Some(&func) = shared.instance.fn_addrs.get(&code) {
         if !has_signal_body_shape(shared, func) {
             return SignalHandlerResolution::KnownInvalid;
         }
@@ -322,7 +322,7 @@ pub(crate) fn resolve_signal_handler(shared: &Shared, code: u64) -> SignalHandle
         // also match its preserved C ABI metadata. Hand-built Modules used by
         // focused tests have only a logical fn_addrs entry, so their strongest
         // available check is the FuncBody shape above.
-        if shared.module.is_executable_entry(code) {
+        if shared.instance.is_executable_entry(code) {
             let thunks = THUNK_DATA.lock().unwrap();
             let Some(data) = thunks.get(&code).copied() else {
                 return SignalHandlerResolution::KnownInvalid;
@@ -540,7 +540,7 @@ pub(crate) fn prepare_foreign_callbacks(
         if value == 0 {
             continue;
         }
-        let Some(&func) = shared.module.fn_addrs.get(&value) else {
+        let Some(&func) = shared.instance.fn_addrs.get(&value) else {
             continue;
         };
         match (sym, *pos) {
@@ -579,7 +579,7 @@ pub(crate) fn prepare_foreign_callbacks(
                     key_out: args[0],
                 });
             }
-            _ if !shared.module.is_executable_entry(value) => {
+            _ if !shared.instance.is_executable_entry(value) => {
                 args[*pos] = get_or_create(shared, value, func, inner);
             }
             _ => {}
@@ -598,7 +598,7 @@ pub(crate) fn prepare_foreign_callbacks(
 /// code is this Engine's runtime identity; closure and tombstone live for process lifetime, old
 /// addresses never reused, so after close it still stably belongs to the original Engine.
 fn materialize_domain(
-    module: &mut super::ir::Module,
+    instance: &mut super::instance::Instance,
     control: &Arc<super::ctx::EngineControl>,
     sites: &[super::ir::EntryStubSite],
     closures: &mut EntryClosures,
@@ -623,8 +623,8 @@ fn materialize_domain(
             data: std::ptr::from_ref(data).cast_mut(),
             code,
         });
-        module.load_map.add_exact(site.link_addr, code)?;
-        module.executable_entry_addrs.insert(code);
+        instance.load_map.add_exact(site.link_addr, code)?;
+        instance.executable_entry_addrs.insert(code);
     }
     Ok(())
 }
@@ -635,27 +635,28 @@ fn materialize_domain(
 /// and apply frozen pointer relocs.
 pub(crate) fn materialize_all_entry_stubs(
     module: &mut super::ir::Module,
+    instance: &mut super::instance::Instance,
     control: &Arc<super::ctx::EngineControl>,
 ) -> Result<EntryClosures, String> {
     let mut closures = EntryClosures {
         pending: Vec::new(),
     };
     let own_sites = std::mem::take(&mut module.entry_stub_sites);
-    materialize_domain(module, control, &own_sites, &mut closures)?;
+    materialize_domain(instance, control, &own_sites, &mut closures)?;
     module.entry_stub_sites = own_sites;
-    let image_stubs = std::mem::take(&mut module.image_entry_stubs);
+    let image_stubs = std::mem::take(&mut instance.image_entry_stubs);
     for (home, sites, arena) in image_stubs {
-        materialize_domain(module, control, &sites, &mut closures)?;
-        module.image_entry_stubs.push((home, sites, arena));
+        materialize_domain(instance, control, &sites, &mut closures)?;
+        instance.image_entry_stubs.push((home, sites, arena));
     }
     // The fixed arenas are link-time address allocators only. Runtime executes the direct
     // per-Engine closures above, so retaining those mappings would reintroduce conflicts.
-    module.entry_stubs = Default::default();
-    for (_, _, arena) in &mut module.image_entry_stubs {
+    instance.entry_stubs = Default::default();
+    for (_, _, arena) in &mut instance.image_entry_stubs {
         *arena = Default::default();
     }
-    module.rebuild_fn_addrs();
-    module.apply_frozen_relocs()?;
+    instance.rebuild_fn_addrs();
+    instance.apply_frozen_relocs(module)?;
     Ok(closures)
 }
 

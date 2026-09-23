@@ -117,21 +117,20 @@ pub struct Module {
     pub function_names: Vec<Box<str>>,
     /// Exported `no_mangle` symbol name to FuncId, used by `--vm-call` lookup.
     pub exports: std::collections::HashMap<Box<str>, FuncId>,
-    /// Frozen area holding statics, the constant pool and fn entries. Lower materializes it, and it is
-    /// read-only after publication except for `static mut` cells.
-    pub frozen: Option<crate::vm::frozen::FrozenArena>,
-    /// Link address to runtime address mapping for this Module instance. Built when a package or image
-    /// is instantiated; not part of the artifact.
-    #[serde(skip)]
-    pub load_map: LoadMap,
-    /// fn-ptr entry real address to FuncId, the reverse lookup indirect call dispatch uses.
-    pub fn_addrs: std::collections::HashMap<u64, FuncId>,
-    /// Artifact-address form of `fn_addrs`, rebuilt whenever instance or entry-closure addresses
-    /// change.
-    pub link_fn_addrs: std::collections::HashMap<LinkAddr, FuncId>,
-    /// Entry-closure addresses this Engine has materialized and native code can call directly.
-    #[serde(skip)]
-    pub executable_entry_addrs: std::collections::HashSet<u64>,
+    /// Frozen area holding statics, the constant pool and fn entries, in artifact form: the clean
+    /// bytes as lowered plus the domain they were linked against. It carries no mapping; the instance
+    /// that will run the module owns that.
+    #[serde(
+        default,
+        serialize_with = "crate::vm::frozen::serialize_module_frozen",
+        deserialize_with = "crate::vm::frozen::deserialize_module_frozen"
+    )]
+    pub frozen: Option<crate::vm::frozen::FrozenSnapshot>,
+    /// Link address of every function entry whose address is taken, in lowering order. It is the
+    /// artifact form of the reverse function-address table: the running instance translates each link
+    /// address to its own real address. Entries cover frozen data slots, executable entry stubs and
+    /// resolved foreign symbols alike.
+    pub fn_entry_links: Vec<(LinkAddr, FuncId)>,
     /// Candidate paths of shared libraries named by `-l` directives. They are optional: a candidate that
     /// does not exist is skipped in favour of the next.
     pub native_libs: Vec<Box<str>>,
@@ -144,24 +143,8 @@ pub struct Module {
     /// artifact hash; a Package always carries and verifies this list.
     #[serde(skip)]
     pub required_native_hashes: Vec<u128>,
-    /// Per-Engine shared library images the Engine produced itself. They have completed dependency
-    /// resolution and ELF relocation, but the Engine keeps managing them so it can run init and fini at
-    /// the right time. Never cached or packaged.
-    #[serde(skip)]
-    pub native_images: Vec<crate::vm::native_instance::NativeImage>,
-    /// This package's self-loaded machine-code image. It is visible only to this Module's foreign symbol
-    /// resolution, which keeps global_asm names from colliding across Engines. Not serialized; rebuilt
-    /// from the MC section when the package loads.
-    #[serde(skip)]
-    pub mc_images: Vec<crate::vm::mcload::McImage>,
     /// Guest TLS slot table, indexed by TlsId. The per-thread instances live in `Ctx.tls`.
     pub tls: Vec<TlsSlot>,
-    /// Real addresses of the asm-stub wrappers, indexed by AsmStubId. The load phase produced each one by
-    /// assembling it with cc, then dlopening and dlsym'ing it. Execution only reads a u64 and calls it
-    /// directly, which keeps it pure.
-    /// NOTE: not part of snapshot semantics; a warm load rematerializes these idempotently from
-    /// `asm_sites` and overwrites whatever the snapshot held.
-    pub asm_stub_addrs: Vec<u64>,
     /// asm-stub materialization recipe: the symbol name plus the full wrapper GAS text, ordered by
     /// AsmStubId, which is also the bit order. A warm load reruns `asm::materialize` over it, so a content
     /// hash hit in the `.so` cache costs only dlopen and dlsym, while a cleared cache re-runs cc.
@@ -175,22 +158,13 @@ pub struct Module {
     /// own table, merged by name during absorb.
     pub foreign_syms: Vec<GotSym>,
     /// Fixup points applied at startup: `*(addr) = resolve(foreign_syms[sym]) + addend`. `addr` is a
-    /// frozen-domain LinkAddr of this module; LoadMap turns it into the real slot after instantiation.
+    /// frozen-domain LinkAddr of this module; the instance's load map turns it into the real slot.
     pub got_fixups: Vec<GotFixup>,
     /// Object pointer relocations inside/between frozen domains, excluding foreign GOT fixup points.
     pub frozen_relocs: Vec<FrozenReloc>,
     /// Entry recipes for guest functions in this domain that have their address taken and can be exported
     /// with the C ABI. Each Engine builds its own closures and LinkAddr mappings from them.
     pub entry_stub_sites: Vec<EntryStubSite>,
-    /// Code-area handle lower used to allocate stable logical addresses. The mapping is released when the
-    /// Engine starts, since the runtime executes per-Engine libffi closures instead. Not part of the
-    /// artifact.
-    #[serde(skip)]
-    pub entry_stubs: crate::vm::codearena::StubArena,
-    /// Entry logical-address domains and recipes of the absorbed image and base, as
-    /// (link-address domain base, recipes, lower-time address allocation handle).
-    #[serde(skip)]
-    pub image_entry_stubs: Vec<(usize, Vec<EntryStubSite>, crate::vm::codearena::StubArena)>,
     /// Custom `__rust_*` shims of a `#[global_allocator]`; see the `AllocShims` note. A Global allocator is
     /// always registered on the delta side, and the interpreter's `CallBuiltin(Rust*)` arms route through
     /// it.
@@ -201,80 +175,9 @@ pub struct Module {
     pub guest_panic_cleanup: Option<GuestPanicCleanup>,
     /// Startup chain of `main`; None when running in `--vm-call` mode.
     pub entry: Option<EntryPlan>,
-    /// Frozen areas of the base image and every absorbed dependency image. Absorbing mounts them with the
-    /// same lifetime as this module, because the delta bytecode embeds absolute addresses in those domains
-    /// and they must stay mapped until guest exit.
-    /// NOTE: not part of snapshot semantics; image files have their own lifecycles, and delta entries refer
-    /// to them only through the key chain.
-    #[serde(skip)]
-    pub image_frozens: Vec<crate::vm::frozen::FrozenArena>,
 }
 
 impl Module {
-    /// Translate a link-time address to this Module instance's runtime address. A freshly lowered
-    /// module resolves to identity until a dynamic load mapping is attached.
-    pub fn resolve_link_addr(&self, addr: LinkAddr) -> u64 {
-        self.load_map
-            .resolve_or_identity(addr)
-            .unwrap_or_else(|| panic!("unmapped artifact address {:#x}", addr.0))
-    }
-
-    pub fn try_resolve_link_addr(&self, addr: LinkAddr) -> Result<u64, String> {
-        self.load_map
-            .resolve_or_identity(addr)
-            .ok_or_else(|| format!("unmapped artifact address {:#x}", addr.0))
-    }
-
-    pub fn is_executable_entry(&self, addr: u64) -> bool {
-        self.executable_entry_addrs.contains(&addr)
-    }
-
-    pub fn rebuild_load_map(&mut self) {
-        let mut map = LoadMap::default();
-        if let Some(frozen) = &self.frozen {
-            map.add_frozen(frozen);
-        }
-        for frozen in &self.image_frozens {
-            map.add_frozen(frozen);
-        }
-        self.load_map = map;
-    }
-
-    pub fn apply_frozen_relocs(&self) -> Result<(), String> {
-        for (index, reloc) in self.frozen_relocs.iter().enumerate() {
-            let at = self
-                .load_map
-                .resolve(reloc.at)
-                .ok_or_else(|| format!("frozen relocation {index} write address is unmapped"))?;
-            let target_link = match reloc.target {
-                FrozenRelocTarget::Frozen(addr) | FrozenRelocTarget::Entry(addr) => addr,
-            };
-            let target = self.load_map.resolve(target_link).ok_or_else(|| {
-                format!(
-                    "frozen relocation {index} target address {:#x} ({:?}) is unmapped",
-                    target_link.0, reloc.target
-                )
-            })?;
-            unsafe { (at as *mut u64).write_unaligned(target) };
-        }
-        Ok(())
-    }
-
-    pub fn rebuild_fn_addrs(&mut self) {
-        if self.link_fn_addrs.is_empty() {
-            self.link_fn_addrs = self
-                .fn_addrs
-                .iter()
-                .map(|(&addr, &func)| (LinkAddr(addr), func))
-                .collect();
-        }
-        self.fn_addrs = self
-            .link_fn_addrs
-            .iter()
-            .map(|(&addr, &func)| (self.resolve_link_addr(addr), func))
-            .collect();
-    }
-
     pub fn ensure_function_names(&mut self) {
         if self.function_names.len() != self.funcs.len() {
             self.function_names = self.funcs.iter().map(|body| body.name.clone()).collect();
@@ -296,37 +199,6 @@ impl Module {
                 }
             }
         }
-    }
-    /// Append argv to the frozen area as a NUL-terminated C string table and fill the entry plan's
-    /// `argc` and `argv_ptr`.
-    /// argv is a runtime input, so it must not enter the cache snapshot. Cold and warm paths both append
-    /// and backfill after the snapshot on every run, which keeps the two paths from drifting apart.
-    pub fn finalize_entry_argv(&mut self, argv: &[String]) -> Result<(), String> {
-        let Some(entry) = self.entry.as_mut() else {
-            return Ok(());
-        };
-        let frozen = self
-            .frozen
-            .as_mut()
-            .ok_or("executable module has no frozen memory for argv")?;
-        let mut ptrs: Vec<u64> = Vec::with_capacity(argv.len());
-        for a in argv {
-            let bytes = a.as_bytes();
-            let p = frozen.alloc(bytes.len() as u64 + 1, 1);
-            unsafe {
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, bytes.len());
-                *((p + bytes.len() as u64) as *mut u8) = 0;
-            }
-            ptrs.push(p);
-        }
-        let table = frozen.alloc((ptrs.len() as u64 + 1) * 8, 8);
-        for (i, &p) in ptrs.iter().enumerate() {
-            unsafe { *((table + i as u64 * 8) as *mut u64) = p };
-        }
-        // The trailing NULL is guaranteed because the frozen allocator zeroes new memory.
-        entry.argc = argv.len() as u64;
-        entry.argv_ptr = table;
-        Ok(())
     }
 
     /// Merge an image's GOT into this module: symbols are deduplicated by name and the fixups' symbol

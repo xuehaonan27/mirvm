@@ -404,7 +404,7 @@ impl Translator<'_, '_> {
                 }
                 let stub_addr = self.b.ins().iconst(
                     types::I64,
-                    self.shared.module.asm_stub_addrs[*stub as usize] as i64,
+                    self.shared.instance.asm_stub_addrs[*stub as usize] as i64,
                 );
                 let mut s = self.module.make_signature();
                 s.params.push(AbiParam::new(types::I64));

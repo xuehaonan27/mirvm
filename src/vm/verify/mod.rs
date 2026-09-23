@@ -10,6 +10,7 @@
 //! slots and ids those are written in. This file holds the entry points, the walk itself, and the
 //! header counts.
 
+use super::instance::Instance;
 use super::ir::*;
 
 const REGION_CAP: u64 = 1 << 30;
@@ -23,27 +24,36 @@ pub struct Prefix {
     pub asm: usize,
 }
 
-pub fn module(module: &Module) -> Result<(), String> {
-    module_with_prefix(module, Prefix::default())
+pub fn module(module: &Module, instance: &Instance) -> Result<(), String> {
+    module_with_prefix(module, instance, Prefix::default())
 }
 
-pub fn module_with_prefix(module: &Module, prefix: Prefix) -> Result<(), String> {
-    Verifier::new(module, prefix)?.run()
+pub fn module_with_prefix(
+    module: &Module,
+    instance: &Instance,
+    prefix: Prefix,
+) -> Result<(), String> {
+    Verifier::new(module, instance, prefix)?.run()
 }
 
 /// Indexed packages first verify module-level references; function bodies are decoded one by one
 /// by the caller from mmap slices via `function_with_count`, so the entire function set is not kept in memory.
-pub(crate) fn module_header_with_count(module: &Module, funcs: usize) -> Result<(), String> {
-    Verifier::new_with_count(module, Prefix::default(), funcs)?.run_header()
+pub(crate) fn module_header_with_count(
+    module: &Module,
+    instance: &Instance,
+    funcs: usize,
+) -> Result<(), String> {
+    Verifier::new_with_count(module, instance, Prefix::default(), funcs)?.run_header()
 }
 
 pub(crate) fn function_with_count(
     module: &Module,
+    instance: &Instance,
     funcs: usize,
     index: usize,
     body: &FuncBody,
 ) -> Result<(), String> {
-    let verifier = Verifier::new_with_count(module, Prefix::default(), funcs)?;
+    let verifier = Verifier::new_with_count(module, instance, Prefix::default(), funcs)?;
     verifier
         .body(body)
         .map_err(|error| format!("function {index} `{}`: {error}", body.name))
@@ -85,6 +95,7 @@ pub(crate) fn body_main_role_counts(body: &FuncBody) -> (usize, usize) {
 
 struct Verifier<'a> {
     module: &'a Module,
+    instance: &'a Instance,
     prefix: Prefix,
     funcs: usize,
     tls: usize,
@@ -96,12 +107,17 @@ mod ffi;
 mod vocab;
 
 impl<'a> Verifier<'a> {
-    pub(super) fn new(module: &'a Module, prefix: Prefix) -> Result<Self, String> {
-        Self::new_with_count(module, prefix, module.funcs.len())
+    pub(super) fn new(
+        module: &'a Module,
+        instance: &'a Instance,
+        prefix: Prefix,
+    ) -> Result<Self, String> {
+        Self::new_with_count(module, instance, prefix, module.funcs.len())
     }
 
     pub(super) fn new_with_count(
         module: &'a Module,
+        instance: &'a Instance,
         prefix: Prefix,
         local_funcs: usize,
     ) -> Result<Self, String> {
@@ -110,6 +126,7 @@ impl<'a> Verifier<'a> {
         let asm = total("inline-asm stub", prefix.asm, module.asm_sites.len())?;
         Ok(Self {
             module,
+            instance,
             prefix,
             funcs,
             tls,
@@ -137,16 +154,16 @@ impl<'a> Verifier<'a> {
     }
 
     pub(super) fn run_header(&self) -> Result<(), String> {
-        if self.module.entry.is_some() && self.module.frozen.is_none() {
+        if self.module.entry.is_some() && self.instance.frozen.is_none() {
             return Err("executable module has an entry plan but no frozen memory for argv".into());
         }
-        if !self.module.asm_stub_addrs.is_empty()
-            && self.module.asm_stub_addrs.len() != self.module.asm_sites.len()
-            && self.module.asm_stub_addrs.len() != self.asm
+        if !self.instance.asm_stub_addrs.is_empty()
+            && self.instance.asm_stub_addrs.len() != self.module.asm_sites.len()
+            && self.instance.asm_stub_addrs.len() != self.asm
         {
             return Err(format!(
                 "inline-asm address table has {} entries, expected {} local or {} merged entries",
-                self.module.asm_stub_addrs.len(),
+                self.instance.asm_stub_addrs.len(),
                 self.module.asm_sites.len(),
                 self.asm
             ));
@@ -155,14 +172,14 @@ impl<'a> Verifier<'a> {
         for (name, &id) in &self.module.exports {
             self.func(id).map_err(|e| format!("export `{name}`: {e}"))?;
         }
-        for (&addr, &id) in &self.module.fn_addrs {
+        for (&addr, &id) in &self.instance.fn_addrs {
             if addr == 0 {
                 return Err("function address table contains a null address".into());
             }
             self.func(id)
                 .map_err(|e| format!("function address {addr:#x}: {e}"))?;
         }
-        for (&addr, &id) in &self.module.link_fn_addrs {
+        for (&addr, &id) in &self.instance.link_fn_addrs {
             if addr.0 == 0 {
                 return Err("logical function address table contains a null address".into());
             }
@@ -177,7 +194,7 @@ impl<'a> Verifier<'a> {
                     slot.align
                 ));
             }
-            let template = self.module.try_resolve_link_addr(slot.template)?;
+            let template = self.instance.try_resolve_link_addr(slot.template)?;
             self.frozen_range(template, slot.size, false)
                 .map_err(|e| format!("TLS slot {} template: {e}", self.prefix.tls + i))?;
         }
@@ -189,22 +206,22 @@ impl<'a> Verifier<'a> {
                     self.module.foreign_syms.len()
                 ));
             }
-            let addr = self.module.try_resolve_link_addr(fixup.addr)?;
+            let addr = self.instance.try_resolve_link_addr(fixup.addr)?;
             self.frozen_range(addr, 8, false)
                 .map_err(|e| format!("GOT fixup {i}: {e}"))?;
         }
         for (i, reloc) in self.module.frozen_relocs.iter().enumerate() {
-            let at = self.module.try_resolve_link_addr(reloc.at)?;
+            let at = self.instance.try_resolve_link_addr(reloc.at)?;
             self.frozen_range(at, 8, false)
                 .map_err(|e| format!("frozen relocation {i} write address: {e}"))?;
             match reloc.target {
                 FrozenRelocTarget::Frozen(target) => {
-                    let target = self.module.try_resolve_link_addr(target)?;
+                    let target = self.instance.try_resolve_link_addr(target)?;
                     self.frozen_range(target, 0, true)
                         .map_err(|e| format!("frozen relocation {i} target: {e}"))?;
                 }
                 FrozenRelocTarget::Entry(target) => {
-                    if !self.module.link_fn_addrs.contains_key(&target) {
+                    if !self.instance.link_fn_addrs.contains_key(&target) {
                         return Err(format!(
                             "frozen relocation {i} refers to unknown entry {:#x}",
                             target.0
@@ -217,13 +234,13 @@ impl<'a> Verifier<'a> {
         {
             let mut verify_entry_site = |label: &str, site: &EntryStubSite| -> Result<(), String> {
                 self.func(site.func).map_err(|e| format!("{label}: {e}"))?;
-                if self.module.link_fn_addrs.get(&site.link_addr) != Some(&site.func) {
+                if self.instance.link_fn_addrs.get(&site.link_addr) != Some(&site.func) {
                     return Err(format!(
                         "{label} link address {:#x} is absent or names a different function",
                         site.link_addr.0
                     ));
                 }
-                if self.module.load_map.resolves_frozen(site.link_addr) {
+                if self.instance.load_map.resolves_frozen(site.link_addr) {
                     return Err(format!(
                         "{label} link address {:#x} overlaps frozen memory",
                         site.link_addr.0
@@ -242,15 +259,15 @@ impl<'a> Verifier<'a> {
             for (i, site) in self.module.entry_stub_sites.iter().enumerate() {
                 verify_entry_site(&format!("entry stub {i}"), site)?;
             }
-            for (arena_i, (_, sites, _)) in self.module.image_entry_stubs.iter().enumerate() {
+            for (arena_i, (_, sites, _)) in self.instance.image_entry_stubs.iter().enumerate() {
                 for (site_i, site) in sites.iter().enumerate() {
                     verify_entry_site(&format!("image entry stub {arena_i}:{site_i}"), site)?;
                 }
             }
         }
-        if self.module.load_map.is_strict() {
-            for (&addr, &func) in &self.module.link_fn_addrs {
-                if !self.module.load_map.resolves_frozen(addr)
+        if self.instance.load_map.is_strict() {
+            for (&addr, &func) in &self.instance.link_fn_addrs {
+                if !self.instance.load_map.resolves_frozen(addr)
                     && entry_sites.get(&addr) != Some(&func)
                 {
                     return Err(format!(
@@ -285,10 +302,10 @@ impl<'a> Verifier<'a> {
         if let Some(entry) = self.module.entry {
             self.func(entry.lang_start)
                 .map_err(|e| format!("entry lang_start: {e}"))?;
-            let known = if self.module.link_fn_addrs.is_empty() {
-                self.module.fn_addrs.contains_key(&entry.main_addr.0)
+            let known = if self.instance.link_fn_addrs.is_empty() {
+                self.instance.fn_addrs.contains_key(&entry.main_addr.0)
             } else {
-                self.module.link_fn_addrs.contains_key(&entry.main_addr)
+                self.instance.link_fn_addrs.contains_key(&entry.main_addr)
             };
             if !known {
                 return Err(format!(

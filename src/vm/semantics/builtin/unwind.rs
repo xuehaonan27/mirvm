@@ -7,13 +7,14 @@
 
 use crate::vm::ctx::Ctx;
 use crate::vm::dispatch::call_fn_addr;
-use crate::vm::ir::{Builtin, BuiltinCallRole, FfiKind, Module, Width};
+use crate::vm::instance::Instance;
+use crate::vm::ir::{Builtin, BuiltinCallRole, FfiKind, Width};
 use crate::vm::semantics::memory::{mem_read, mem_write};
 use crate::vm::unwind::raise_guest_in_current_engine;
 
 pub(super) fn exec(
     ctx: *mut Ctx,
-    module: &Module,
+    instance: &Instance,
     builtin: &Builtin,
     av: &[u64],
     role: BuiltinCallRole,
@@ -30,7 +31,7 @@ pub(super) fn exec(
             let cleanup = mem_read(exc + 8, Width::W64);
             if cleanup != 0 {
                 let cav = [1, exc]; // _URC_FOREIGN_EXCEPTION_CAUGHT
-                if module.fn_addrs.contains_key(&cleanup) {
+                if instance.fn_addrs.contains_key(&cleanup) {
                     call_fn_addr(ctx, cleanup, &cav, "_Unwind_DeleteException");
                 } else {
                     let sig = crate::vm::ir::ForeignSig {

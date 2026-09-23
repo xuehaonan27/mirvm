@@ -20,6 +20,7 @@ use std::cell::Cell;
 use super::ctx::{Ctx, Engine, Shared};
 use super::dispatch::call_guest;
 use super::frame::ByteRegion;
+use super::instance::Instance;
 use super::ir::{
     AsmIoDst, AsmIoVal, Bb, Block, FfiKind, FuncBody, IntBinOp, IntCc, Module, Operand, ParamAbi,
     PlaceBase, PlaceExpr, PlaceStep, RetAbi, RetDest, Rvalue, ScalarPlace, Slot, Stmt, SwitchDiscr,
@@ -167,7 +168,7 @@ pub fn run_main(engine: &Engine) -> Result<RunOutcome<i32>, RunError> {
     let main_run = super::ctx::begin_main_run(ctx_ptr);
     super::ctx::set_fork_baseline(shared); // pin the fork guard baseline for a single-threaded guest
     let args = [
-        shared.module.resolve_link_addr(entry.main_addr),
+        shared.instance.resolve_link_addr(entry.main_addr),
         entry.argc,
         entry.argv_ptr,
         entry.sigpipe as u64,

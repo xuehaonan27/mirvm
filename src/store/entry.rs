@@ -9,6 +9,7 @@
 
 use std::path::Path;
 
+use crate::vm::instance::Instance;
 use crate::vm::{ir, verify};
 
 /// Separator between key parts (ASCII unit separator). `cargoless` builds its own composite keys
@@ -58,22 +59,28 @@ pub(crate) fn is_current_generation(generation: &str) -> bool {
 /// area sits at a fixed base: for a delta at *any* fixed base (the file records its own domain), and
 /// for a base or dependency image at the fixed domain the layer below expects it in. An fn-ptr value
 /// is a stub code address, so a module that has entry stubs needs that area pinned too.
-pub(crate) fn snapshot_is_publishable(module: &ir::Module, domain: Option<usize>) -> bool {
-    frozen_at(module, domain) && entry_stubs_pinned(module)
+pub(crate) fn snapshot_is_publishable(
+    module: &ir::Module,
+    instance: &Instance,
+    domain: Option<usize>,
+) -> bool {
+    frozen_at(module, domain) && entry_stubs_pinned(module, instance)
 }
 
 /// The other half of the same rule, for a caller that wants to name which half failed: an fn-ptr
 /// value is a stub code address, so the stub area must be pinned when the module has one.
-pub(crate) fn entry_stubs_pinned(module: &ir::Module) -> bool {
-    module.entry_stub_sites.is_empty() || module.entry_stubs.at_fixed_base()
+pub(crate) fn entry_stubs_pinned(module: &ir::Module, instance: &Instance) -> bool {
+    module.entry_stub_sites.is_empty() || instance.entry_stubs.at_fixed_base()
 }
 
 /// The load side of the same rule: whether a loaded snapshot really landed in `domain` (`None`: any
-/// fixed base). A taken domain and a swapped file are rejected alike.
+/// fixed base). A taken domain and a swapped file are rejected alike. The artifact carries the bytes
+/// only when they were linked against a fixed base, so the recorded home is the whole answer.
 pub(crate) fn frozen_at(module: &ir::Module, domain: Option<usize>) -> bool {
-    module.frozen.as_ref().is_some_and(|frozen| {
-        frozen.at_fixed_base() && domain.is_none_or(|home| frozen.home() == home)
-    })
+    module
+        .frozen
+        .as_ref()
+        .is_some_and(|frozen| domain.is_none_or(|home| frozen.home() == home))
 }
 
 /// Whether the native modules a snapshot needs on disk are still there. A missing one is a miss,
@@ -85,13 +92,15 @@ pub(crate) fn native_libs_present(module: &ir::Module) -> bool {
         .all(|path| Path::new(&**path).is_file())
 }
 
-/// Bring a loaded snapshot back to life: rebuild the derived tables the file does not carry, then
-/// verify the module against the stack it is about to join (or against nothing, for the layer that
-/// starts the stack). `false` is a miss — an unverified module is never used.
-pub(crate) fn revive(module: &mut ir::Module, prefix: verify::Prefix) -> bool {
-    module.rebuild_load_map();
-    module.rebuild_fn_addrs();
-    verify::module_with_prefix(module, prefix).is_ok()
+/// Bring a loaded snapshot back to life: map the frozen bytes and derive the instance tables the
+/// file does not carry, then verify the module against the stack it is about to join (or against
+/// nothing, for the layer that starts the stack). `None` is a miss — an unverified module is never
+/// used.
+pub(crate) fn revive(module: &mut ir::Module, prefix: verify::Prefix) -> Option<Instance> {
+    let instance = Instance::materialize(module).ok()?;
+    verify::module_with_prefix(module, &instance, prefix)
+        .ok()
+        .map(|()| instance)
 }
 
 #[cfg(test)]

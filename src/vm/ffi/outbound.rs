@@ -185,7 +185,10 @@ impl FfiState {
 /// addresses with this process's real ones. A non-weak miss is an Err, and loudly so: a stale
 /// address is a silent source of SIGSEGV-level wrong values. A weak miss writes 0, matching
 /// the absent-`extern weak` semantics.
-pub(crate) fn resolve_got_fixups(module: &mut crate::vm::ir::Module) -> Result<(), String> {
+pub(crate) fn resolve_got_fixups(
+    module: &crate::vm::ir::Module,
+    instance: &crate::vm::instance::Instance,
+) -> Result<(), String> {
     if module.got_fixups.is_empty() {
         return Ok(());
     }
@@ -193,7 +196,7 @@ pub(crate) fn resolve_got_fixups(module: &mut crate::vm::ir::Module) -> Result<(
     ffi.ensure_libs(
         &module.native_libs,
         &module.required_native_libs,
-        &module.native_images,
+        &instance.native_images,
     )?;
     let mut resolved: Vec<u64> = Vec::with_capacity(module.foreign_syms.len());
     for s in &module.foreign_syms {
@@ -202,8 +205,8 @@ pub(crate) fn resolve_got_fixups(module: &mut crate::vm::ir::Module) -> Result<(
                 &s.name,
                 &module.native_libs,
                 &module.required_native_libs,
-                &module.native_images,
-                &module.mc_images,
+                &instance.native_images,
+                &instance.mc_images,
             )?,
             s.weak,
         ) {
@@ -221,7 +224,7 @@ pub(crate) fn resolve_got_fixups(module: &mut crate::vm::ir::Module) -> Result<(
     for f in &module.got_fixups {
         // A fixup addr always points at an 8-byte cell inside the frozen region (a lowering
         // registration rule); the frozen-region mapping is RW for its whole lifetime.
-        let addr = module.resolve_link_addr(f.addr);
+        let addr = instance.resolve_link_addr(f.addr);
         unsafe { *(addr as *mut u64) = resolved[f.sym as usize].wrapping_add(f.addend) };
     }
     Ok(())
@@ -461,9 +464,9 @@ mod tests {
     use crate::vm::ctx::{Engine, Shared};
     use crate::vm::interp::{RunOutcome, run_export};
     use crate::vm::ir::{
-        Block, FfiAgg, FfiField, FfiKind, FfiLeaf, ForeignSig, FuncBody, MemOrd, Module, Operand,
-        ParamAbi, RetAbi, RetDest, Rvalue, ScalarPlace, Slot, Stmt, Terminator, UnwindAction,
-        Width,
+        Block, FfiAgg, FfiField, FfiKind, FfiLeaf, ForeignSig, FuncBody, LinkAddr, MemOrd, Module,
+        Operand, ParamAbi, RetAbi, RetDest, Rvalue, ScalarPlace, Slot, Stmt, Terminator,
+        UnwindAction, Width,
     };
 
     static REENTRANT_FOREIGN_LEN: AtomicU64 = AtomicU64::new(0);
@@ -658,7 +661,7 @@ mod tests {
             ..Module::default()
         };
         module.exports.insert("probe".into(), 0);
-        module.fn_addrs.insert(CALLBACK_ADDR, 1);
+        module.fn_entry_links.push((LinkAddr(CALLBACK_ADDR), 1));
         module
     }
 
@@ -673,7 +676,8 @@ mod tests {
             REENTRANT_FOREIGN_LEN.store(0, Ordering::SeqCst);
             let mut data = [2_u64, 1];
             let module = reentrant_foreign_module(data.as_mut_ptr());
-            crate::vm::verify::module(&module)
+            let instance = crate::vm::instance::Instance::materialize(&module).unwrap();
+            crate::vm::verify::module(&module, &instance)
                 .unwrap_or_else(|error| panic!("{mode}: invalid reentry probe: {error}"));
             let mut shared = Shared::new(module);
             shared.jit.enabled = jit;

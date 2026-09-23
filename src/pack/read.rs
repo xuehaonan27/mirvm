@@ -1,5 +1,5 @@
 //! The load side of a package: the sniff `run` branches on, the full refuse-loud load, and turning
-//! a loaded package into a `Module` — including putting its native libraries where the loader looks
+//! a loaded package into a `Module` and its instance — including putting its native libraries where the loader looks
 //! for them.
 //!
 //! The load copies the file once and validates exclusively from that immutable snapshot, so its
@@ -88,7 +88,7 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, Error> {
         )));
     }
     let module_meta: ModuleMeta = section_of(&package, TAG_MODULE, "MODULE")?;
-    let module = module_meta.instantiate()?;
+    let (module, instance) = module_meta.instantiate()?;
     let function_section = package.section(TAG_FUNCS)?;
     let mapped_offset = function_section.as_ptr() as usize - raw.as_ptr() as usize;
     let function_blobs = parse_function_section(function_section, mapped_offset)?;
@@ -99,7 +99,7 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, Error> {
             function_blobs.len()
         )));
     }
-    crate::vm::verify::module_header_with_count(&module, function_blobs.len())
+    crate::vm::verify::module_header_with_count(&module, &instance, function_blobs.len())
         .map_err(|e| Error::reject(format!("{MODULE_VERIFY_FAILED}: {e}")))?;
     // Before any MC/native materialization, every function gets full semantic verification.
     // Temporary objects are dropped each round; the run phase still decodes on demand from the owned
@@ -113,8 +113,14 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, Error> {
                     "function {index} decode failed during verification: {e}"
                 ))
             })?;
-        crate::vm::verify::function_with_count(&module, function_blobs.len(), index, &body)
-            .map_err(|e| Error::reject(format!("{MODULE_VERIFY_FAILED}: {e}")))?;
+        crate::vm::verify::function_with_count(
+            &module,
+            &instance,
+            function_blobs.len(),
+            index,
+            &body,
+        )
+        .map_err(|e| Error::reject(format!("{MODULE_VERIFY_FAILED}: {e}")))?;
         let (boundaries, catchers) = crate::vm::verify::body_main_role_counts(&body);
         main_boundaries += boundaries;
         main_catchers += catchers;
@@ -166,6 +172,7 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, Error> {
         .dir()
         .join(format!("{heat_key}.order"));
     drop(module);
+    drop(instance);
     Ok(LoadedPackage {
         raw,
         module_meta,
@@ -177,8 +184,10 @@ pub(crate) fn load_package(path: &Path) -> Result<LoadedPackage, Error> {
 }
 
 impl LoadedPackage {
-    pub(crate) fn instantiate(&self) -> Result<crate::vm::ir::Module, Error> {
-        let mut module = self.module_meta.instantiate()?;
+    pub(crate) fn instantiate(
+        &self,
+    ) -> Result<(crate::vm::ir::Module, crate::vm::instance::Instance), Error> {
+        let (mut module, mut instance) = self.module_meta.instantiate()?;
         let mut covered_hashes = HashSet::with_capacity(self.mc_entries.len());
         let mut images = Vec::with_capacity(self.mc_entries.len());
         for mc in &self.mc_entries {
@@ -194,7 +203,7 @@ impl LoadedPackage {
             })?;
             images.push(image);
         }
-        module.mc_images = images;
+        instance.mc_images = images;
 
         let mut required_native_libs = Vec::with_capacity(self.libs.len());
         let mut required_native_hashes = Vec::with_capacity(self.libs.len());
@@ -213,7 +222,7 @@ impl LoadedPackage {
             self.function_blobs.clone(),
             self.heat_path.clone(),
         );
-        Ok(module)
+        Ok((module, instance))
     }
 }
 

@@ -54,7 +54,7 @@ pub(super) struct ModuleMetaRef<'a> {
     function_names: &'a [Box<str>],
     exports: &'a std::collections::HashMap<Box<str>, crate::vm::ir::FuncId>,
     frozen: Option<crate::vm::frozen::FrozenSnapshot>,
-    link_fn_addrs: &'a std::collections::HashMap<crate::vm::ir::LinkAddr, crate::vm::ir::FuncId>,
+    link_fn_addrs: std::collections::HashMap<crate::vm::ir::LinkAddr, crate::vm::ir::FuncId>,
     native_libs: &'a [Box<str>],
     required_native_libs: &'a [Box<str>],
     tls: &'a [crate::vm::ir::TlsSlot],
@@ -69,21 +69,21 @@ pub(super) struct ModuleMetaRef<'a> {
     entry: Option<crate::vm::ir::EntryPlan>,
 }
 
-impl<'a> From<&'a crate::vm::ir::Module> for ModuleMetaRef<'a> {
-    fn from(module: &'a crate::vm::ir::Module) -> Self {
+impl<'a> From<(&'a crate::vm::ir::Module, &'a crate::vm::instance::Instance)>
+    for ModuleMetaRef<'a>
+{
+    fn from(
+        (module, instance): (&'a crate::vm::ir::Module, &'a crate::vm::instance::Instance),
+    ) -> Self {
         Self {
             function_names: &module.function_names,
             exports: &module.exports,
-            frozen: module.frozen.as_ref().map(|frozen| {
-                frozen
-                    .to_snapshot()
-                    .expect("package preflight checked frozen base")
-            }),
-            link_fn_addrs: &module.link_fn_addrs,
+            frozen: module.frozen.clone(),
+            link_fn_addrs: module.fn_entry_links.iter().copied().collect(),
             native_libs: &module.native_libs,
             required_native_libs: &module.required_native_libs,
             tls: &module.tls,
-            asm_stub_addrs: &module.asm_stub_addrs,
+            asm_stub_addrs: &instance.asm_stub_addrs,
             asm_sites: &module.asm_sites,
             foreign_syms: &module.foreign_syms,
             got_fixups: &module.got_fixups,
@@ -92,7 +92,7 @@ impl<'a> From<&'a crate::vm::ir::Module> for ModuleMetaRef<'a> {
                 .entry_stub_sites
                 .iter()
                 .chain(
-                    module
+                    instance
                         .image_entry_stubs
                         .iter()
                         .flat_map(|(_, sites, _)| sites.iter()),
@@ -127,48 +127,38 @@ pub(super) struct ModuleMeta {
 }
 
 impl ModuleMeta {
-    pub(super) fn instantiate(&self) -> Result<crate::vm::ir::Module, Error> {
-        let frozen = self
-            .frozen
-            .as_ref()
-            .map(crate::vm::frozen::FrozenArena::restore_dynamic)
-            .transpose()
-            .map_err(Error::reject)?;
-        let mut module = crate::vm::ir::Module {
+    pub(super) fn instantiate(
+        &self,
+    ) -> Result<(crate::vm::ir::Module, crate::vm::instance::Instance), Error> {
+        let module = crate::vm::ir::Module {
             funcs: Default::default(),
             function_names: self.function_names.clone(),
             exports: self.exports.clone(),
-            frozen,
-            load_map: Default::default(),
-            fn_addrs: self
-                .link_fn_addrs
-                .iter()
-                .map(|(&addr, &func)| (addr.0, func))
-                .collect(),
-            link_fn_addrs: self.link_fn_addrs.clone(),
-            executable_entry_addrs: Default::default(),
+            frozen: self.frozen.clone(),
+            fn_entry_links: self.link_fn_addrs.iter().map(|(&a, &f)| (a, f)).collect(),
             native_libs: self.native_libs.clone(),
             required_native_libs: self.required_native_libs.clone(),
             required_native_hashes: Vec::new(),
-            native_images: Vec::new(),
-            mc_images: Vec::new(),
             tls: self.tls.clone(),
-            asm_stub_addrs: self.asm_stub_addrs.clone(),
             asm_sites: self.asm_sites.clone(),
             foreign_syms: self.foreign_syms.clone(),
             got_fixups: self.got_fixups.clone(),
             frozen_relocs: self.frozen_relocs.clone(),
             entry_stub_sites: self.entry_stub_sites.clone(),
-            entry_stubs: Default::default(),
-            image_entry_stubs: Vec::new(),
             custom_alloc_shims: self.custom_alloc_shims,
             guest_panic_cleanup: self.guest_panic_cleanup,
             entry: self.entry,
-            image_frozens: Vec::new(),
         };
-        module.rebuild_load_map();
-        module.load_map.require_mapped();
-        Ok(module)
+        // The function table arrives separately in the FUNCS section; the name table is copied from
+        // the package verbatim and must not be re-derived from the (still empty) function table.
+        // Each instantiation gets its own frozen mapping so several instances of one package can run
+        // at once; the embedded addresses are translated by the load map, which a packaged artifact
+        // always fully covers.
+        let mut instance =
+            crate::vm::instance::Instance::materialize_dynamic(&module).map_err(Error::reject)?;
+        instance.asm_stub_addrs = self.asm_stub_addrs.clone();
+        instance.load_map.require_mapped();
+        Ok((module, instance))
     }
 }
 

@@ -154,6 +154,7 @@ pub(super) extern "C-unwind" fn mirvm_call_indirect(
     }
     let (ctx, shared) = active();
     let module = &shared.module;
+    let instance = &shared.instance;
     if null_ok != 0 && addr == 0 {
         return; // empty slot for a dyn virtual drop: no-op (same as the interpreter)
     }
@@ -164,7 +165,7 @@ pub(super) extern "C-unwind" fn mirvm_call_indirect(
         ));
     }
     let av = unsafe { std::slice::from_raw_parts(args, n as usize) };
-    let (lo, hi) = if let Some(&fid) = module.fn_addrs.get(&addr) {
+    let (lo, hi) = if let Some(&fid) = instance.fn_addrs.get(&addr) {
         crate::vm::dispatch::call_guest(ctx, fid, av)
     } else if native_sig != 0 {
         // The guest holds a native code pointer obtained from dlsym at run time: call it
@@ -221,6 +222,7 @@ pub(super) extern "C-unwind" fn mirvm_call_foreign(
     }
     let (ctx, shared) = active();
     let module = &shared.module;
+    let instance = &shared.instance;
     let sym = unsafe {
         std::str::from_utf8_unchecked(std::slice::from_raw_parts(sym_ptr, sym_len as usize))
     };
@@ -240,8 +242,8 @@ pub(super) extern "C-unwind" fn mirvm_call_foreign(
             sym,
             &module.native_libs,
             &module.required_native_libs,
-            &module.native_images,
-            &module.mc_images,
+            &instance.native_images,
+            &instance.mc_images,
         )
     };
     let r = resolved

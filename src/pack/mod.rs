@@ -162,9 +162,12 @@ impl Package {
     /// embedded native libraries, foreign symbol declarations, and FFI signatures agree with
     /// the host process. The caller must trust those package inputs and ABI declarations.
     pub unsafe fn instantiate(&self) -> Result<crate::vm::Engine, Error> {
-        let mut module = self.loaded.instantiate()?;
-        module.asm_stub_addrs = crate::lower::asm::try_materialize(&module.asm_sites)?;
-        module.finalize_entry_argv(&[]).map_err(Error::reject)?;
-        unsafe { crate::vm::Engine::from_module_unchecked(module) }.map_err(Error::reject)
+        let (mut module, mut instance) = self.loaded.instantiate()?;
+        instance.asm_stub_addrs = crate::lower::asm::try_materialize(&module.asm_sites)?;
+        instance
+            .finalize_entry_argv(&mut module, &[])
+            .map_err(Error::reject)?;
+        unsafe { crate::vm::Engine::from_artifact_unchecked(module, instance) }
+            .map_err(Error::reject)
     }
 }

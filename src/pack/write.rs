@@ -19,18 +19,19 @@ pub(crate) fn write_package(
     tcx: rustc_middle::ty::TyCtxt<'_>,
     rustc_args: &[String],
     module: &crate::vm::ir::Module,
+    instance: &crate::vm::instance::Instance,
     out: &Path,
 ) -> Result<(), Error> {
-    crate::vm::verify::module(module)
+    crate::vm::verify::module(module, instance)
         .map_err(|e| Error::reject(format!("refusing to package invalid bytecode: {e}")))?;
     // Fixed-base requirement (same contract as L2): without a fixed base the snapshot's embedded
     // addresses are invalid across processes, so no package is produced.
-    if !module.frozen.as_ref().is_some_and(|f| f.at_fixed_base()) {
+    if !instance.frozen.as_ref().is_some_and(|f| f.at_fixed_base()) {
         return Err(Error::reject(
             "frozen region is not at a fixed base (concurrent claim/ASLR conflict); retry packing",
         ));
     }
-    if !module.entry_stub_sites.is_empty() && !module.entry_stubs.at_fixed_base() {
+    if !module.entry_stub_sites.is_empty() && !instance.entry_stubs.at_fixed_base() {
         return Err(Error::reject(
             "entry stub region is not at a fixed base; retry packing",
         ));
@@ -74,7 +75,7 @@ pub(crate) fn write_package(
             bytes: data,
         });
     }
-    let module_bytes = postcard_bytes(&ModuleMetaRef::from(module))
+    let module_bytes = postcard_bytes(&ModuleMetaRef::from((module, instance)))
         .map_err(|e| Error::build(format!("cannot serialize module metadata: {e}")))?;
     let function_bytes = build_function_section(&module.funcs)?;
 

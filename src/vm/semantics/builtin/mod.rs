@@ -14,6 +14,7 @@
 use std::cell::Cell;
 
 use crate::vm::ctx::Ctx;
+use crate::vm::instance::Instance;
 use crate::vm::ir::{Bb, Builtin, BuiltinCallRole, FuncBody, Module, UnwindAction};
 use crate::vm::unwind::engine_abort;
 
@@ -49,6 +50,7 @@ pub(crate) fn exec_builtin(
     // Reserved in the signature for call-site symmetry; the body reads the module from ctx.
     let _ = body;
     let module: &Module = unsafe { &(*(*ctx).shared).module };
+    let instance: &Instance = unsafe { &(*(*ctx).shared).instance };
     let a = |i: usize| av[i];
     // RaiseException starts its unwind through this edge.
     edge.set(unwind.cleanup_edge());
@@ -172,7 +174,7 @@ pub(crate) fn exec_builtin(
         | Builtin::UnwindGetIpInfo
         | Builtin::UnwindGetCfa
         | Builtin::UnwindFindEnclosing
-        | Builtin::CatchUnwind => unwind::exec(ctx, module, builtin, av, role),
+        | Builtin::CatchUnwind => unwind::exec(ctx, instance, builtin, av, role),
 
         // Handled by the pair lane above, which returns the ScalarPair form.
         Builtin::AddCarry64 | Builtin::SubBorrow64 => {

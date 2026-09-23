@@ -22,14 +22,14 @@ struct BaseBuildCallbacks {
 
 impl Callbacks for BaseBuildCallbacks {
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
-        let (module, exports) = crate::lower::lower_for_base_build(tcx);
+        let (module, instance, exports) = crate::lower::lower_for_base_build(tcx);
         let sess = tcx.sess;
         let fp = (
             sess.ub_checks(),
             sess.overflow_checks(),
             sess.contract_checks(),
         );
-        match base::store(&self.out, module, exports, fp) {
+        match base::store(&self.out, module, &instance, exports, fp) {
             Ok(()) => self.ok = true,
             Err(error) => crate::diag::emit(&crate::error::Error::from(error)),
         }

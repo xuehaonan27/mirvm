@@ -98,7 +98,9 @@ fn faulting_masked_reraise_module() -> Module {
         ..Module::default()
     };
     module.exports.insert("probe".into(), 1);
-    module.fn_addrs.insert(SIGNAL_OWNER_GUEST_ADDR, 0);
+    module
+        .fn_entry_links
+        .push((LinkAddr(SIGNAL_OWNER_GUEST_ADDR), 0));
     module
 }
 
@@ -162,7 +164,9 @@ fn mask_restored_faulting_signal_owner_module() -> Module {
         funcs: vec![handler].into(),
         ..Module::default()
     };
-    module.fn_addrs.insert(SIGNAL_OWNER_GUEST_ADDR, 0);
+    module
+        .fn_entry_links
+        .push((LinkAddr(SIGNAL_OWNER_GUEST_ADDR), 0));
     module
 }
 
@@ -307,7 +311,9 @@ fn signal_libc_error_module() -> Module {
     module.exports.insert("invalid_sigaction".into(), 1);
     module.exports.insert("sigkill".into(), 2);
     module.exports.insert("realtime".into(), 3);
-    module.fn_addrs.insert(SIGNAL_OWNER_GUEST_ADDR, 4);
+    module
+        .fn_entry_links
+        .push((LinkAddr(SIGNAL_OWNER_GUEST_ADDR), 4));
     module
 }
 
@@ -343,8 +349,7 @@ fn faulting_signal_p1_owner_module(link_addr: LinkAddr) -> Module {
         ..Module::default()
     };
     module.exports.insert("install".into(), 1);
-    module.fn_addrs.insert(link_addr.0, 0);
-    module.link_fn_addrs.insert(link_addr, 0);
+    module.fn_entry_links.push((link_addr, 0));
     module.entry_stub_sites.push(super::ir::EntryStubSite {
         link_addr,
         func: 0,
@@ -430,8 +435,7 @@ fn native_image_signal_module(library: &Path, link_addr: LinkAddr) -> Module {
     };
     module.exports.insert("install".into(), 1);
     module.exports.insert("safe".into(), 2);
-    module.fn_addrs.insert(link_addr.0, 0);
-    module.link_fn_addrs.insert(link_addr, 0);
+    module.fn_entry_links.push((link_addr, 0));
     module.entry_stub_sites.push(super::ir::EntryStubSite {
         link_addr,
         func: 0,
@@ -474,8 +478,7 @@ fn native_image_signal_fault_module(library: &Path, link_addr: LinkAddr) -> Modu
     };
     module.exports.insert("install".into(), 1);
     module.exports.insert("safe".into(), 2);
-    module.fn_addrs.insert(link_addr.0, 0);
-    module.link_fn_addrs.insert(link_addr, 0);
+    module.fn_entry_links.push((link_addr, 0));
     module.entry_stub_sites.push(super::ir::EntryStubSite {
         link_addr,
         func: 0,
@@ -601,8 +604,7 @@ fn native_image_signal_bridge_error_module(library: &Path, link_addr: LinkAddr) 
     ] {
         module.exports.insert(name.into(), func);
     }
-    module.fn_addrs.insert(link_addr.0, 0);
-    module.link_fn_addrs.insert(link_addr, 0);
+    module.fn_entry_links.push((link_addr, 0));
     module.entry_stub_sites.push(super::ir::EntryStubSite {
         link_addr,
         func: 0,
@@ -893,7 +895,7 @@ fn self_produced_native_signal_bridge_raises_contract_errors_at_its_engine_bound
             signal_p1_owner_module(link_addr, &SIGNAL_OWNER_HANDLER_RAN),
             jit,
         );
-        let closed_handler = owner.shared().module.resolve_link_addr(link_addr);
+        let closed_handler = owner.shared().instance.resolve_link_addr(link_addr);
         owner.wait_closed().unwrap();
         let engine = engine(
             native_image_closed_signal_handler_module(&library, closed_handler),
@@ -946,7 +948,7 @@ fn self_produced_native_signal_handler_runs_at_safe_point_and_can_raise_guest_ha
             jit,
         );
         let install = unsafe { run_export(&engine, "install", &[]) };
-        let image = &engine.shared().module.native_images[0];
+        let image = &engine.shared().instance.native_images[0];
         let trace_address = crate::os::dll::sym(image.handle(), c"read_image_signal_trace");
         assert_ne!(trace_address, 0, "native trace reader was not exported");
         let read_trace: unsafe extern "C" fn() -> u64 =
@@ -1011,7 +1013,7 @@ fn image_native_wrapped_raise_resumes_guest_engine_fault_to_its_owner_boundary()
             jit,
         );
         let install = unsafe { run_export(&engine, "install", &[]) };
-        let image = &engine.shared().module.native_images[0];
+        let image = &engine.shared().instance.native_images[0];
         let trace_address = crate::os::dll::sym(image.handle(), c"read_image_signal_trace");
         assert_ne!(trace_address, 0, "native trace reader was not exported");
         let read_trace: unsafe extern "C" fn() -> u64 =

@@ -14,9 +14,9 @@
 //! The remaining modules are the services execution needs. Guest-visible ones: [`atexit`] (the
 //! exit handlers), [`backtrace`] (the symbol carriers and the frame merge), [`ffi`] (foreign
 //! calls), [`heap`] (the managed heap), [`signal`] (guest signal installation). Storage the
-//! artifact occupies: [`codearena`], [`frame`], [`frozen`], [`mcload`], [`native_instance`].
-//! Engine substrate: [`deferred`], [`thunks`], [`unwind`]. [`stats`] reports on a loaded module
-//! for the CLI.
+//! artifact occupies: [`codearena`], [`frame`], [`frozen`], [`instance`], [`mcload`],
+//! [`native_instance`]. Engine substrate: [`deferred`], [`thunks`], [`unwind`]. [`stats`]
+//! reports on a loaded module for the CLI.
 
 pub(crate) mod atexit;
 pub(crate) mod backtrace;
@@ -28,6 +28,7 @@ pub(crate) mod ffi;
 pub(crate) mod frame;
 pub(crate) mod frozen;
 pub(crate) mod heap;
+pub(crate) mod instance;
 pub(crate) mod interp;
 pub(crate) mod ir;
 pub(crate) mod jit;

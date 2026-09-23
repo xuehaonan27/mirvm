@@ -136,7 +136,7 @@ impl Translator<'_, '_> {
                 (v, *width)
             }
             Operand::AddrImm(addr) => {
-                let runtime = self.shared.module.resolve_link_addr(*addr);
+                let runtime = self.shared.instance.resolve_link_addr(*addr);
                 (self.b.ins().iconst(types::I64, runtime as i64), Width::W64)
             }
             Operand::Mem { expr, width } => {

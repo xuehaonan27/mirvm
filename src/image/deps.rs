@@ -30,9 +30,9 @@ use crate::store::entry;
 use crate::utils::content::{FileStamp, digest_hex};
 use crate::vm::ir;
 
-/// deps-image file (v1 = the whole package as postcard). The module's exports and fn_addrs stay inside the
-/// module: this file has no byte-determinism contract, so it does not need BaseFile's sorted
-/// extraction/reconstruction.
+/// deps-image file (v1 = the whole package as postcard). The module's exports and function-entry
+/// links stay inside the module: this file has no byte-determinism contract, so it does not need
+/// BaseFile's sorted extraction/reconstruction.
 #[derive(Serialize, Deserialize)]
 struct DepsFile {
     build_id: String,
@@ -162,9 +162,7 @@ pub fn try_load(
         tls: base.module.tls.len(),
         asm: base.module.asm_sites.len(),
     };
-    if !entry::revive(&mut f.module, prefix) {
-        return None;
-    }
+    let instance = entry::revive(&mut f.module, prefix)?;
     // A removed required .so is a miss that falls back to the cold-path self-heal (same contract as
     // the L2 cache)
     if !entry::native_libs_present(&f.module) {
@@ -179,6 +177,7 @@ pub fn try_load(
         lowering_fp: f.lowering_fp,
         key,
         module,
+        instance,
     })
 }
 
@@ -197,8 +196,11 @@ pub fn store_and_wrap(
     // a prerequisite for the snapshot's embedded absolute addresses to stay stable across processes.
     // Foreign symbols go through GOT slots: the image-side GOT table travels with the file and is
     // refilled with this process's real values at startup, so it does not block writing the file.
-    let cacheable =
-        entry::snapshot_is_publishable(&bi.module, Some(crate::os_arch::addrspace::image_addr(0)));
+    let cacheable = entry::snapshot_is_publishable(
+        &bi.module,
+        &bi.instance,
+        Some(crate::os_arch::addrspace::image_addr(0)),
+    );
     let keyed = pre_key(rustc_args, base_key);
     if let (true, Some((key, stamps))) = (cacheable, keyed) {
         let mut fn_entry_syms = bi

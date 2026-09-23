@@ -365,7 +365,7 @@ pub enum Terminator {
         unwind: UnwindAction,
     },
     /// Indirect call, used for fn-ptrs and dyn virtual dispatch. The callee evaluates to a function
-    /// entry real address, which is reverse-looked up through `Module.fn_addrs` to a FuncId.
+    /// entry real address, which is reverse-looked up through the instance's fn-address table.
     /// `--vm-stats` reachability cannot follow this edge.
     /// `null_ok`: vtable slot 0 of a dyn virtual drop may be null for types without Drop, and a null
     /// target is then a no-op.
@@ -382,7 +382,7 @@ pub enum Terminator {
         null_ok: bool,
         native_sig: Option<ForeignSig>,
     },
-    /// Inline asm site. `stub` indexes `Module.asm_stub_addrs`, the real address of a `fn(*mut u8)`
+    /// Inline asm site. `stub` indexes the instance's asm-stub address table, the real address of a `fn(*mut u8)`
     /// slot-buffer wrapper that the load phase produced by assembling and dlopening it.
     /// Execution stack-allocates a `buf_size` buffer, writes a slot per `ins`, calls the real address,
     /// then reads a destination per `outs`.

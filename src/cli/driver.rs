@@ -31,6 +31,7 @@ pub(crate) fn pack_driver(
         vm_call: None,
         vm_stats: false,
         module: None,
+        instance: None,
         suppress_runner_warning_summary: true,
         runner_finalization_filter_installed: false,
         route_compiler_diagnostics: false,
@@ -174,6 +175,7 @@ struct MirvmCallbacks {
     vm_call: Option<String>,
     vm_stats: bool,
     module: Option<crate::vm::ir::Module>,
+    instance: Option<crate::vm::instance::Instance>,
     suppress_runner_warning_summary: bool,
     runner_finalization_filter_installed: bool,
     route_compiler_diagnostics: bool,
@@ -316,8 +318,10 @@ impl Callbacks for MirvmCallbacks {
                     .stack
                     .key()
                     .is_some_and(|bk| crate::image::deps::pre_key(&self.rustc_args, bk).is_some());
-            let (module, split_image) = crate::lower::lower_program(tcx, &self.stack, want_split);
+            let (module, instance, split_image) =
+                crate::lower::lower_program(tcx, &self.stack, want_split);
             self.module = Some(module);
+            self.instance = Some(instance);
             self.split_image = split_image;
             self.timing.lower = Some(t_lower.elapsed());
             // Pack fork: write the `.mirvm` package instead of executing, at the same clean
@@ -327,6 +331,7 @@ impl Callbacks for MirvmCallbacks {
                     tcx,
                     &self.rustc_args,
                     self.module.as_ref().expect("just set"),
+                    self.instance.as_ref().expect("just set"),
                     out,
                 ) {
                     Ok(()) => {
@@ -365,6 +370,7 @@ impl Callbacks for MirvmCallbacks {
                     tcx,
                     &self.rustc_args,
                     self.module.as_ref().expect("just set"),
+                    self.instance.as_ref().expect("just set"),
                     self.stack.key(),
                     crate::vm::verify::Prefix {
                         funcs: self.stack.total_fns(),
@@ -417,12 +423,13 @@ pub(super) fn parse_stack_size(s: &str) -> Result<usize, crate::error::Error> {
 
 pub(super) fn run_vm_engine(
     mut module: crate::vm::ir::Module,
+    mut instance: crate::vm::instance::Instance,
     program_argv: &[String],
     vm_call: Option<&str>,
     vm_stats: bool,
     already_verified: bool,
 ) -> i32 {
-    if !already_verified && let Err(e) = crate::vm::verify::module(&module) {
+    if !already_verified && let Err(e) = crate::vm::verify::module(&module, &instance) {
         diagnostics::control(format_args!("mirvm: bytecode verification failed: {e}"));
         return 70;
     }
@@ -436,7 +443,7 @@ pub(super) fn run_vm_engine(
         return 0;
     }
     // Finalize argv: runtime input is placed after snapshot semantics; one path for cold and warm.
-    if let Err(e) = module.finalize_entry_argv(program_argv) {
+    if let Err(e) = instance.finalize_entry_argv(&mut module, program_argv) {
         diagnostics::control(format_args!("mirvm: {e}"));
         return 70;
     }
@@ -462,7 +469,7 @@ pub(super) fn run_vm_engine(
     } else {
         None
     };
-    let code = run_vm_engine_loaded(module, vm_call);
+    let code = run_vm_engine_loaded(module, instance, vm_call);
     if let Some(session) = &mut capture {
         match session.finish(std::time::Duration::from_secs(30)) {
             Ok(crate::telemetry::CaptureFinish::Finished(_)) => {}
@@ -483,8 +490,12 @@ pub(super) fn run_vm_engine(
     code
 }
 
-fn run_vm_engine_loaded(module: crate::vm::ir::Module, vm_call: Option<&str>) -> i32 {
-    let shared = crate::vm::ctx::Shared::new(module);
+fn run_vm_engine_loaded(
+    module: crate::vm::ir::Module,
+    instance: crate::vm::instance::Instance,
+    vm_call: Option<&str>,
+) -> i32 {
+    let shared = crate::vm::ctx::Shared::new_loaded(module, instance);
     // Make entry stubs executable: recipe -> closure -> stub bytes -> whole-region RX (a
     // full-phase step alongside the two above; an occupied region means load failure).
     let engine = match crate::vm::ctx::Engine::try_new(shared) {
@@ -678,7 +689,7 @@ pub(crate) fn run_driver(
     // dump-mir needs the tcx and therefore forces the cold path. The L2 entry verifies its delta
     // against the key chain.
     if !dump_mir
-        && let Some(mut module) = crate::image::program::lookup(
+        && let Some((mut module, mut instance)) = crate::image::program::lookup(
             &rustc_args,
             base_key.as_deref(),
             crate::vm::verify::Prefix {
@@ -698,9 +709,9 @@ pub(crate) fn run_driver(
         if stack.is_empty() {
             // asm-stub real addresses are process-lifetime state: re-materialize idempotently from
             // the recipe to overwrite stale addresses.
-            module.asm_stub_addrs = crate::lower::asm::materialize(&module.asm_sites);
+            instance.asm_stub_addrs = crate::lower::asm::materialize(&module.asm_sites);
         } else {
-            stack.absorb_into(&mut module); // asm merged and re-materialized
+            stack.absorb_into(&mut module, &mut instance); // asm merged and re-materialized
         }
         if let Some(guest) = &guest_process
             && let Err(error) = guest.enter()
@@ -715,7 +726,14 @@ pub(crate) fn run_driver(
             exit(1);
         }
         let t_engine = std::time::Instant::now();
-        let code = run_vm_engine(module, &program_argv, vm_call.as_deref(), vm_stats, false);
+        let code = run_vm_engine(
+            module,
+            instance,
+            &program_argv,
+            vm_call.as_deref(),
+            vm_stats,
+            false,
+        );
         let engine = (!vm_stats).then(|| t_engine.elapsed());
         print_phase_timing(&timing, engine, t_start.elapsed(), vm_stats);
         if let Err(error) = diagnostic_router.finish() {
@@ -733,6 +751,7 @@ pub(crate) fn run_driver(
         vm_call,
         vm_stats,
         module: None,
+        instance: None,
         suppress_runner_warning_summary,
         runner_finalization_filter_installed: false,
         route_compiler_diagnostics: diagnostic_router.is_active(),
@@ -777,14 +796,19 @@ pub(crate) fn run_driver(
         }
         exit(code);
     }
-    if let Some(mut module) = callbacks.module.take() {
+    if let Some(module) = callbacks.module.take() {
+        let mut module = module;
+        let mut instance = callbacks
+            .instance
+            .take()
+            .expect("lower sets module and instance together");
         // Cold-path merge (the store already wrote the delta in after_analysis; the engine consumes
         // the merged module). An empty stack (no image) skips it: the module's asm_stub_addrs were
         // already materialized inside the lower session. The split artifact was written to disk and
         // pushed onto the stack in after_analysis, so it is absorbed here like any other layer.
         let stack = std::mem::replace(&mut callbacks.stack, crate::image::ImageStack::empty());
         if !stack.is_empty() {
-            stack.absorb_into(&mut module);
+            stack.absorb_into(&mut module, &mut instance);
         }
         if let Some(guest) = &guest_process
             && let Err(error) = guest.enter()
@@ -801,6 +825,7 @@ pub(crate) fn run_driver(
         let t_engine = std::time::Instant::now();
         let code = run_vm_engine(
             module,
+            instance,
             &callbacks.program_argv,
             callbacks.vm_call.as_deref(),
             callbacks.vm_stats,

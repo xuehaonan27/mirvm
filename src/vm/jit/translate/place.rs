@@ -90,7 +90,7 @@ impl Translator<'_, '_> {
             ir::PlaceBase::Static(a) => self
                 .b
                 .ins()
-                .iconst(types::I64, self.shared.module.resolve_link_addr(a) as i64),
+                .iconst(types::I64, self.shared.instance.resolve_link_addr(a) as i64),
         };
         for step in pe.steps.iter() {
             match step {
