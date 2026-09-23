@@ -66,6 +66,68 @@ pub fn int3() {
 /// byte can name is the low byte of that word.
 pub const RET: u8 = 0xc0;
 
+// ===== syscall interception trampoline =====
+//
+// Contract, which is the shape a real `svc` has on this platform:
+// - In: x16 = call number, x0..x5 = the six arguments; out: x0 = return value.
+// - A real syscall clobbers x0, x16, x17 and the flags and nothing else. `bl mirvm_syscall_dispatch`
+//   is an ordinary call that would clobber far more, so the trampoline preserves the argument
+//   registers and the condition flags around it, and restores x1 as well because this platform's
+//   syscalls put a second result there.
+// - Stack: the six argument slots double as the dispatch's argument array, and the trampoline's own
+//   return address has to be saved because the `bl` overwrites the link register the rewritten site
+//   left in it.
+//
+// Frame: 160 bytes = x0..x15 (128) + nzcv (8) + the return address (8), a multiple of 16 so the
+// stack stays aligned for the call, which is the alignment both the ABI and `bl` require. x18 is
+// reserved by this platform and x19 upwards are callee-saved, so neither side needs saving here.
+
+unsafe extern "C" {
+    fn mirvm_syscall_trampoline();
+}
+
+/// Get trampoline address, which would be filled into asm-stub/global-asm
+pub fn syscall_trampoline_addr() -> u64 {
+    mirvm_syscall_trampoline as *const () as u64
+}
+
+std::arch::global_asm!(
+    ".globl mirvm_syscall_trampoline",
+    ".p2align 4",
+    "mirvm_syscall_trampoline:",
+    "sub sp, sp, #160",
+    "stp x0, x1, [sp, #0]",
+    "stp x2, x3, [sp, #16]",
+    "stp x4, x5, [sp, #32]",
+    "stp x6, x7, [sp, #48]",
+    "stp x8, x9, [sp, #64]",
+    "stp x10, x11, [sp, #80]",
+    "stp x12, x13, [sp, #96]",
+    "stp x14, x15, [sp, #112]",
+    "mrs x9, nzcv",
+    "str x9, [sp, #128]",
+    "str x30, [sp, #144]",
+    // The dispatch takes (call number, pointer to the six argument slots).
+    "mov x1, sp",
+    "mov x0, x16",
+    "bl mirvm_syscall_dispatch",
+    // x0 is the call's result and is deliberately left alone from here on.
+    "ldr x30, [sp, #144]",
+    "ldr x9, [sp, #128]",
+    "msr nzcv, x9",
+    "ldp x10, x11, [sp, #80]",
+    "ldp x12, x13, [sp, #96]",
+    "ldp x14, x15, [sp, #112]",
+    // x9 is restored last among these, so the flag value above survives until the write.
+    "ldp x8, x9, [sp, #64]",
+    "ldp x6, x7, [sp, #48]",
+    "ldp x4, x5, [sp, #32]",
+    "ldp x2, x3, [sp, #16]",
+    "ldr x1, [sp, #8]",
+    "add sp, sp, #160",
+    "ret",
+);
+
 /// The contents of one inert symbol-image slot: `ret` followed by padding, so a slot start is
 /// always a decodable instruction and nothing after the return is ever reached.
 pub const INERT_SLOT: [u8; STUB_STRIDE as usize] = {

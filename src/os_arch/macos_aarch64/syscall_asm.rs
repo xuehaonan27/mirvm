@@ -11,6 +11,10 @@ pub const SLOT_DEF: &str =
 
 /// Replacement body for a `svc` instruction: load the slot's address, load the trampoline out of
 /// it, and branch. The two-level indirection keeps the property the x86 form has — nothing external
-/// is named, so the `.so` stays self-contained — and `x16` is the register this platform's own
-/// syscall ABI already uses as scratch, so a rewritten site is not relying on it.
-pub const CALL: &str = "    adrp x16, mirvm_syscall_slot@PAGE\n    ldr x16, [x16, mirvm_syscall_slot@PAGEOFF]\n    blr x16\n";
+/// is named, so the `.so` stays self-contained.
+///
+/// The springboard is `x17`, not `x16`: this platform's syscall ABI carries the call number in
+/// `x16`, so a rewrite that loaded through it would destroy the number before the trampoline could
+/// read it. `x17` is the other register that ABI already reserves for this kind of use, and no
+/// argument travels in it.
+pub const CALL: &str = "    adrp x17, mirvm_syscall_slot@PAGE\n    ldr x17, [x17, mirvm_syscall_slot@PAGEOFF]\n    blr x17\n";
