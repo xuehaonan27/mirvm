@@ -291,7 +291,7 @@ impl Producer {
     }
 }
 
-pub(super) struct SessionCore {
+pub(crate) struct SessionCore {
     pub(super) phase: AtomicU8,
     pub(super) active_roots: AtomicUsize,
     pub(super) writer_state: AtomicU32,
