@@ -33,6 +33,8 @@
 //! here rather than repeated in every architecture directory; what does vary is the architecture's.
 //!
 //! - `ELF_MACHINE` — the architecture's `e_machine`, which every ELF platform it runs on shares.
+//! - `PINNED_REG` — the register Cranelift reserves when a module enables the pinned register,
+//!   which the trace domain does.
 //! - `asm_text` — the assembly vocabulary the materializer in `src/lower/` asks for: the
 //!   architecture's name, its syntax directives, and the instruction forms mirvm rewrites.
 //! - `asmstub` — machine-code byte emission (entry stubs), the single-issue instruction primitives
@@ -49,11 +51,17 @@ pub(crate) mod aarch64;
 pub(crate) mod x86_64;
 #[cfg(target_arch = "aarch64")]
 pub(crate) use aarch64::ELF_MACHINE;
+/// The register the trace domain's pinned register is, named once for every caller:
+/// `arch::PINNED_REG`.
+#[cfg(target_arch = "aarch64")]
+pub(crate) use aarch64::PINNED_REG;
 #[cfg(target_arch = "aarch64")]
 pub(crate) use aarch64::asmstub;
 /// The architecture's ELF machine identity, named once for every caller: `arch::ELF_MACHINE`.
 #[cfg(target_arch = "x86_64")]
 pub(crate) use x86_64::ELF_MACHINE;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use x86_64::PINNED_REG;
 /// The architecture's assembly vocabulary and its machine-code emission, named once for every
 /// caller: `arch::asm_text::…` and `arch::asmstub::…`. The materializer in `src/lower/` asks for
 /// the syntax directive and the instruction forms through the first and supplies no

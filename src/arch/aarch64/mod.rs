@@ -14,3 +14,7 @@ pub mod asmstub;
 /// assigned to the CPU rather than to an operating system, so this is the same number on every ELF
 /// platform this architecture runs on.
 pub const ELF_MACHINE: u16 = 183;
+
+/// The register Cranelift reserves when a module enables the pinned register, as this architecture
+/// names it. Cranelift's own register environment documents the choice (`isa/aarch64/abi.rs`).
+pub const PINNED_REG: &str = "x21";

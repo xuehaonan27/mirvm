@@ -14,3 +14,8 @@ pub(crate) use intrinsics::*;
 /// assigned to the CPU rather than to an operating system, so this is the same number on every ELF
 /// platform this architecture runs on.
 pub const ELF_MACHINE: u16 = 62;
+
+/// The register Cranelift reserves when a module enables the pinned register, as this architecture
+/// names it. Cranelift's own register environment documents the choice (`isa/x64/inst/regs.rs`,
+/// there as matching Spidermonkey's `HeapReg`).
+pub const PINNED_REG: &str = "r15";
