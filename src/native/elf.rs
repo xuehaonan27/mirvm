@@ -38,8 +38,9 @@ pub const SHT_HASH: u32 = 5;
 pub const SHT_DYNAMIC: u32 = 6;
 pub const SHT_DYNSYM: u32 = 11;
 
-/// `p_flags`: the segment holds instructions, and it is readable.
+/// `p_flags`: the segment holds instructions, is writable, and is readable.
 pub const PF_X: u32 = 1;
+pub const PF_W: u32 = 2;
 pub const PF_R: u32 = 4;
 
 /// `sh_flags`: the section occupies memory, and it holds instructions.
@@ -168,6 +169,13 @@ pub mod sym {
 pub mod dynamic {
     pub const TAG: usize = 0;
     pub const VALUE: usize = 8;
+}
+
+/// `RELA` record field offsets.
+pub mod rela {
+    pub const OFFSET: usize = 0;
+    pub const INFO: usize = 8;
+    pub const ADDEND: usize = 16;
 }
 
 /// Little-endian readers. `None` when the field runs past the end of `bytes`.
