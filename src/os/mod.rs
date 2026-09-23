@@ -64,8 +64,4 @@ crate::diag_codes! {
 }
 
 #[cfg(not(target_os = "linux"))]
-compile_error!(
-    "No platform is implemented for this target. The implemented one is Linux; adding another means \
-     a directory under src/os/ named after its `target_os`, an arm in the ladder in this file, and \
-     implementations of `dll`, `fs`, `mem`, `process`, `signal`, `thread` and `unwind`."
-);
+compile_error!("Not implemented for this target.");

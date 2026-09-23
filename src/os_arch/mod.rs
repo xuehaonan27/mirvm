@@ -51,8 +51,4 @@ mod linux_x86_64;
 pub(crate) use linux_x86_64::*;
 
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-compile_error!(
-    "No os_arch pair is implemented for this target. The implemented pair is linux_x86_64; adding \
-     one means a directory under src/os_arch/ named <os>_<arch>, an arm in the ladder in this file, \
-     and implementations of `addrspace`, `signal` and `thread`."
-);
+compile_error!("Not implemented for this platform-target pair.");
