@@ -419,13 +419,15 @@ mod tests {
 
     #[test]
     fn stamp_file_lives_inside_sysroot_lib() {
+        // The triple the stamp is placed under is the host's rather than the one the sysroot
+        // directory happens to be named after, so the expectation names the host too.
         let f = stamp_file(Path::new("/x/sysroot-x86_64-unknown-linux-gnu"));
         assert_eq!(
             f,
-            Path::new(
-                "/x/sysroot-x86_64-unknown-linux-gnu/lib/rustlib/\
-                 x86_64-unknown-linux-gnu/.mirvm-sysroot-hash"
-            )
+            Path::new(&format!(
+                "/x/sysroot-x86_64-unknown-linux-gnu/lib/rustlib/{}/.mirvm-sysroot-hash",
+                crate::options::build::HOST
+            ))
         );
     }
 

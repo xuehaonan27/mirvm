@@ -38,11 +38,9 @@ pub const SYS_EXIT: i64 = 1;
 pub const SYS_EXIT_GROUP: i64 = SYS_EXIT;
 pub const SYS_RT_SIGRETURN: i64 = 184;
 
-// The numbers below are the platform's too, but no product path branches on them: they are here for
-// a caller that has to spell a number the kernel produced, which today are this crate's tests.
-#[cfg(test)]
+/// The query numbers [`syscall`] answers, from this kernel's `sys/syscall.h`; the C library
+/// exposes no `SYS_*` names for this platform.
 pub const SYS_GETPID: i64 = 20;
-#[cfg(test)]
 pub const SYS_GETPPID: i64 = 39;
 
 /// The C library's error numbers this crate has to compare against.
@@ -208,21 +206,36 @@ pub extern "C" fn mirvm_syscall_dispatch(nr: i64, args: *const u64) -> i64 {
     result
 }
 
-/// The fallback for a syscall family this crate has no interposition for.
+/// The syscall numbers this platform answers from the C library, and why the rest are refused.
 ///
-/// It reports `ENOSYS` and does not execute anything, because this platform has no way to forward
-/// it: `syscall(2)` is documented as deprecated here and on arm64 it is not merely deprecated — the
+/// This kernel has no generic entry point, so a number is either answered by name or not at all:
+/// `syscall(2)` is documented as deprecated here, and on arm64 it is not merely deprecated — the
 /// process is terminated with SIGSYS. Measured: `syscall(SYS_getpid)` dies with signal 12 rather
 /// than returning. Forwarding therefore costs the whole process, where refusing costs the guest one
 /// failed call, which is the errno a guest already handles for a kernel that lacks a call.
+///
+/// What is answered is what has an exact C library counterpart *and* no effect on the process: a
+/// query whose answer is this kernel's own. A call that does something — a fork, an exit — is one
+/// the engine owns a boundary for, and reaching it through a raw number would run it without the
+/// accounting that boundary does, so those stay refused with the diagnostic below.
 ///
 /// The parameter is the syscall number and the six argument slots, kept so callers and the
 /// trampoline above remain architecture-independent.
 pub fn syscall(n: i64, args: &[u64]) -> i64 {
     let _ = args;
-    crate::diag_direct!(
-        Syscall,
-        "nr={n} refused: this platform cannot forward a raw syscall"
-    );
-    -(libc::ENOSYS as i64)
+    match n {
+        // SAFETY: both read this process's own identity, take no argument and touch nothing.
+        SYS_GETPID => i64::from(unsafe { libc::getpid() }),
+        SYS_GETPPID => i64::from(unsafe { libc::getppid() }),
+        _ => {
+            crate::diag_direct!(
+                Syscall,
+                "nr={n} refused: this platform cannot forward a raw syscall"
+            );
+            // The C library's own convention for a call the kernel does not implement, which is
+            // what a guest reading the result expects: -1, with the reason in `errno`.
+            crate::os::process::set_errno(libc::ENOSYS);
+            -1
+        }
+    }
 }
