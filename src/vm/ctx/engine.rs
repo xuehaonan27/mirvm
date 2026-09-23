@@ -462,7 +462,7 @@ impl Engine {
                 Ok(Err(error)) => Some(StartupFailure::Error(error)),
                 Err(exception) => Some(match exception.take_mirvm(&shared) {
                     Ok(super::super::unwind::MirvmPayload::Guest(payload)) => {
-                        super::super::interp::dispose_guest_panic_during_startup(&shared, payload);
+                        super::super::unwind::dispose_guest_panic_during_startup(&shared, payload);
                         StartupFailure::Error("native constructor raised a guest panic".into())
                     }
                     Ok(super::super::unwind::MirvmPayload::EngineFault(fault)) => {

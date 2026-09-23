@@ -117,35 +117,6 @@ enum Exit {
     Resume,
 }
 
-/// Return an uncaught guest panic to the guest standard library before the
-/// Engine reports it. `cleanup` lowers the guest panic counter and yields the
-/// opaque two-word panic Box; its own guest drop glue then runs the payload's
-/// destructor and allocator route. No host-side Rust layout is assumed here.
-fn dispose_uncaught_guest_panic(ctx: *mut Ctx, payload: super::unwind::GuestPanicPayload) {
-    payload.transfer(|shared, inner| {
-        let Some(plan) = shared.module.guest_panic_cleanup else {
-            eprintln!("mirvm[m4-engine]: executable Module has no guest panic cleanup plan");
-            std::process::abort()
-        };
-        match super::unwind::catch_raw(|| {
-            let (data, vtable) = call_guest(ctx, plan.cleanup, &[inner]);
-            let mut opaque_box = [data, vtable];
-            call_guest(ctx, plan.drop_payload, &[opaque_box.as_mut_ptr() as u64]);
-        }) {
-            Ok(()) => {}
-            Err(exception) => exception.abort_during_panic_cleanup(),
-        }
-    });
-}
-
-pub(crate) fn dispose_guest_panic_during_startup(
-    shared: &std::sync::Arc<Shared>,
-    payload: super::unwind::GuestPanicPayload,
-) {
-    let activation = super::ctx::activate(shared);
-    dispose_uncaught_guest_panic(activation.ctx(), payload);
-}
-
 /// Runs the module's `main` through the `lang_start` entry: resolves the entry, executes it
 /// under a raw catch, disposes of an uncaught guest panic, and runs the atexit callbacks
 /// before reporting the outcome.
@@ -184,7 +155,7 @@ pub fn run_main(engine: &Engine) -> Result<RunOutcome<i32>, RunError> {
         }
         Err(exception) => match exception.take_mirvm(shared) {
             Ok(super::unwind::MirvmPayload::Guest(payload)) => {
-                dispose_uncaught_guest_panic(ctx_ptr, payload);
+                super::unwind::dispose_uncaught_guest_panic(ctx_ptr, payload);
                 RunOutcome::GuestPanic
             }
             Ok(super::unwind::MirvmPayload::EngineFault(fault)) => {
@@ -261,7 +232,7 @@ pub unsafe fn run_export(
         }
         Err(exception) => match exception.take_mirvm(shared) {
             Ok(super::unwind::MirvmPayload::Guest(payload)) => {
-                dispose_uncaught_guest_panic(ctx_ptr, payload);
+                super::unwind::dispose_uncaught_guest_panic(ctx_ptr, payload);
                 Ok(RunOutcome::GuestPanic)
             }
             Ok(super::unwind::MirvmPayload::EngineFault(fault)) => {
