@@ -6,4 +6,5 @@
 
 pub mod addrspace;
 pub mod signal;
+pub mod syscall_asm;
 pub mod thread;

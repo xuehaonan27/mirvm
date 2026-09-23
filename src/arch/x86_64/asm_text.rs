@@ -22,17 +22,3 @@ pub const DIRECTIVE_ATT: &str = ".att_syntax\n";
 pub fn syntax_prefix(att: bool) -> String {
     format!("\n{}", if att { DIRECTIVE_ATT } else { DIRECTIVE_INTEL })
 }
-
-/// Indirect slot definition, appended once to a `.s` when a `syscall` rewrite hits. Addressing is
-/// `%rip`-relative, so the `.so` is self-contained and needs no external symbol.
-pub const SYSCALL_SLOT_DEF: &str =
-    ".data\n.globl mirvm_syscall_slot\n.p2align 3\nmirvm_syscall_slot: .quad 0\n.text\n";
-
-/// Replacement body for a `syscall` instruction: a RIP-relative indirect call. The asm-stub region
-/// is wrapped in `.intel_syntax noprefix`, so the Intel form is required; GAS rejects AT&T's
-/// `*(%rip)`. The two-level indirection follows PIC discipline: a GOT entry filled by the dynamic
-/// linker at load time, then the named `.data` slot that mirvm refills with the trampoline's real
-/// address after dlopen. r11 is exactly the scratch register the syscall contract allows to be
-/// clobbered, so using it as the springboard breaks nothing.
-pub const SYSCALL_CALL: &str =
-    "    mov r11, QWORD PTR [rip+mirvm_syscall_slot@GOTPCREL]\n    call [r11]\n";
