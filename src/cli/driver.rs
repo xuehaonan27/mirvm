@@ -508,7 +508,7 @@ fn run_vm_engine_loaded(
     let Some(spec) = vm_call else {
         // main startup chain: interpret lang_start as usual; the exit code is Termination's product.
         let execution = engine.clone();
-        let result = match on_guest_stack(move || crate::vm::interp::run_main(&execution)) {
+        let result = match on_guest_stack(move || crate::vm::run_main(&execution)) {
             Ok(result) => result,
             Err(error) => {
                 diagnostics::control(format_args!("{}", error.message));
@@ -522,11 +522,11 @@ fn run_vm_engine_loaded(
             return 70;
         }
         return match result {
-            Ok(crate::vm::interp::RunOutcome::Returned(code)) => code,
+            Ok(crate::vm::RunOutcome::Returned(code)) => code,
             // `lang_start` has already run the guest panic hook. Match native
             // stderr here and only translate the structured outcome to its OS
             // exit status.
-            Ok(crate::vm::interp::RunOutcome::GuestPanic) => 101,
+            Ok(crate::vm::RunOutcome::GuestPanic) => 101,
             Err(e) => {
                 diagnostics::control(format_args!("mirvm[m4-engine]: {e}"));
                 e.exit_code
@@ -544,7 +544,7 @@ fn run_vm_engine_loaded(
     let result = match on_guest_stack(move || {
         // CLI arguments are scalar u64 slots parsed for the explicitly named
         // dev export; pointer-bearing embedding calls are not exposed here.
-        unsafe { crate::vm::interp::run_export(&execution, &name, &args) }
+        unsafe { crate::vm::raw::run_export_raw(&execution, &name, &args) }
     }) {
         Ok(result) => result,
         Err(error) => {
@@ -559,11 +559,11 @@ fn run_vm_engine_loaded(
         return 70;
     }
     match result {
-        Ok(crate::vm::interp::RunOutcome::Returned(r)) => {
+        Ok(crate::vm::RunOutcome::Returned(r)) => {
             println!("{}", r.lo);
             0
         }
-        Ok(crate::vm::interp::RunOutcome::GuestPanic) => {
+        Ok(crate::vm::RunOutcome::GuestPanic) => {
             diagnostics::control(format_args!("mirvm[m4-engine]: guest panic not caught"));
             101
         }
