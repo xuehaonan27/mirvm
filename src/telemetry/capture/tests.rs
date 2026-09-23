@@ -2,6 +2,7 @@
 //! paths, and the committed wire format as read back by the decoder.
 
 use super::*;
+use crate::os::process::{EDOM, ENOSYS, SYS_EXIT, SYS_FORK, SYS_GETPID, SYS_GETPPID};
 use crate::telemetry::capture_session::{
     REBUILD_RECIPE, RebuildRecipe, clear_rebuild_recipe, pending_rebuild_recipe,
     publish_rebuild_recipe,
@@ -42,6 +43,58 @@ fn rebuild_recipe_is_published_and_readable() {
     assert!(pending_rebuild_recipe().is_none(), "clear must unpublish");
 }
 
+/// Fork through the product path and hand the parent the `N` bytes the child reports.
+///
+/// `report` runs in the child between `fork` and `_exit`, where the allocator lock may be held by a
+/// thread the fork did not duplicate, so it may only read and compute.
+fn forked_report<const N: usize>(report: impl FnOnce() -> [u8; N]) -> [u8; N] {
+    let [read_end, write_end] = crate::os::fs::pipe().expect("pipe");
+    // The product fork path, so the child hook runs (a raw libc fork does not).
+    let pid = host_syscall(SYS_FORK, &[]);
+    assert!(pid >= 0, "fork failed");
+    if pid == 0 {
+        crate::os::fs::close_fd(read_end);
+        let payload = report();
+        let written = crate::os::fs::write_fd(write_end, payload.as_ptr() as u64, payload.len());
+        crate::os::process::exit_now(if written == payload.len() as i64 {
+            0
+        } else {
+            3
+        });
+    }
+    crate::os::fs::close_fd(write_end);
+    let mut payload = [0_u8; N];
+    let mut read = 0;
+    while read < N {
+        let got = crate::os::fs::read_fd(read_end, payload[read..].as_mut_ptr() as u64, N - read);
+        if got <= 0 {
+            break;
+        }
+        read += got as usize;
+    }
+    crate::os::fs::close_fd(read_end);
+    let status = crate::os::process::wait(pid as i32).expect("waitpid");
+    assert!(status.exited(), "child did not exit normally");
+    assert_eq!(status.code(), 0, "child failed to report");
+    assert_eq!(read, N, "short read from the child");
+    payload
+}
+
+/// Fork through the product path, run `child` in the child, and require a clean exit.
+///
+/// Same restriction as [`forked_report`]: `child` runs after `fork` and before `_exit`.
+fn fork_and_wait(child: impl FnOnce()) {
+    let pid = host_syscall(SYS_FORK, &[]);
+    assert!(pid >= 0, "fork failed");
+    if pid == 0 {
+        child();
+        crate::os::process::exit_now(0);
+    }
+    let status = crate::os::process::wait(pid as i32).expect("waitpid");
+    assert!(status.exited(), "child did not exit normally");
+    assert_eq!(status.code(), 0, "child failed to report");
+}
+
 /// L2: the published recipe's memory is inherited by `fork`, which is the
 /// whole point of publishing an address instead of storing the recipe in a
 /// session a child may not touch.
@@ -56,33 +109,11 @@ fn rebuild_recipe_memory_survives_fork() {
     let address = REBUILD_RECIPE.load(Ordering::Acquire);
     assert_ne!(address, 0, "recipe must be published before the fork");
 
-    let mut pipe_fds = [0_i32; 2];
-    assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
-    // Product fork path, so the child hook runs (a raw libc::fork does not).
-    let pid = host_syscall(libc::SYS_fork, &[]) as libc::pid_t;
-    assert!(pid >= 0, "fork failed");
-    if pid == 0 {
-        unsafe { libc::close(pipe_fds[0]) };
-        // SAFETY: the recipe is leaked for the process lifetime, and the
-        // child inherited the same address space.
-        let seen = unsafe { (*(address as *const RebuildRecipe)).page_budget_bytes };
-        let payload = seen.to_le_bytes();
-        let written = unsafe { libc::write(pipe_fds[1], payload.as_ptr().cast(), payload.len()) };
-        let code = if written == payload.len() as isize {
-            0
-        } else {
-            3
-        };
-        unsafe { libc::_exit(code) };
-    }
-    unsafe { libc::close(pipe_fds[1]) };
-    let mut payload = [0_u8; 8];
-    let got = unsafe { libc::read(pipe_fds[0], payload.as_mut_ptr().cast(), payload.len()) };
-    unsafe { libc::close(pipe_fds[0]) };
-    let mut status = 0;
-    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
-    assert!(libc::WIFEXITED(status), "child did not exit normally");
-    assert_eq!(got, 8, "child did not report");
+    // SAFETY: the recipe is leaked for the process lifetime, and the child
+    // inherited the same address space.
+    let payload = forked_report(|| {
+        unsafe { (*(address as *const RebuildRecipe)).page_budget_bytes }.to_le_bytes()
+    });
     assert_eq!(
         u64::from_le_bytes(payload),
         8192,
@@ -103,7 +134,7 @@ fn producer_with_open_page(id: u64) -> *mut Producer {
         next_thread_generation: AtomicU32::new(1),
         page_pool: PagePool::new(STARTER_BYTES * 2),
         sink_loss: AtomicU64::new(0),
-        owner_tid: unsafe { libc::gettid() as u32 },
+        owner_tid: crate::os::process::gettid() as u32,
     }));
     let producer = Box::leak(Box::new(Producer::new(
         core,
@@ -112,11 +143,11 @@ fn producer_with_open_page(id: u64) -> *mut Producer {
         id as u32,
         id as u32,
         id,
-        unsafe { libc::__errno_location() },
+        crate::os::process::errno_location(),
     )));
     let producer = producer as *mut Producer;
     // Attach through the cold path so the page and budget are real.
-    let disposition = unsafe { record_syscall_enter(&*producer, libc::SYS_getpid, &[]) };
+    let disposition = unsafe { record_syscall_enter(&*producer, SYS_GETPID, &[]) };
     assert!(matches!(disposition, EnterDisposition::Recorded));
     unsafe { record_syscall_exit(&*producer, disposition, 1, 0) };
     producer
@@ -138,10 +169,10 @@ fn pinned_entry_records_without_thread_local_state() {
         displaced.is_null(),
         "the test harness must not already be recording on this thread"
     );
-    let (result, used) = unsafe { host_syscall_pinned(pinned, libc::SYS_getpid, &args) };
+    let (result, used) = unsafe { host_syscall_pinned(pinned, SYS_GETPID, &args) };
     assert_eq!(
         result,
-        unsafe { libc::syscall(libc::SYS_getpid) } as i64,
+        crate::os::process::syscall(SYS_GETPID, &[]),
         "the pinned entry must still perform the syscall"
     );
     assert_eq!(
@@ -149,7 +180,7 @@ fn pinned_entry_records_without_thread_local_state() {
         "a pinned call with a usable recorder must report that same recorder back"
     );
 
-    let disposition = unsafe { record_syscall_enter(&*cold, libc::SYS_getpid, &args) };
+    let disposition = unsafe { record_syscall_enter(&*cold, SYS_GETPID, &args) };
     assert!(matches!(disposition, EnterDisposition::Recorded));
     unsafe { record_syscall_exit(&*cold, disposition, result, 0) };
 
@@ -180,10 +211,7 @@ fn inline_record_matches_legacy_bytes() {
     let args = [11_u64, 22, 33, 44, 55, 66];
 
     // One entry and one exit through each implementation.
-    for (index, syscall) in [libc::SYS_getpid, libc::SYS_getppid]
-        .into_iter()
-        .enumerate()
-    {
+    for (index, syscall) in [SYS_GETPID, SYS_GETPPID].into_iter().enumerate() {
         let disposition = unsafe { record_syscall_enter(legacy_ref, syscall, &args) };
         assert!(matches!(disposition, EnterDisposition::Recorded));
         unsafe { record_syscall_exit(legacy_ref, disposition, index as i64, 0) };
@@ -244,51 +272,15 @@ fn forked_child_advances_the_process_generation_once() {
     // here while parallel tests run capture sessions.
     let parent_generation = claim_process_generation();
 
-    let mut pipe_fds = [0_i32; 2];
-    assert_eq!(unsafe { libc::pipe(pipe_fds.as_mut_ptr()) }, 0);
-    // Use the product fork path (HostFork / generic SYS_fork both funnel
-    // through `host_syscall`), not a raw libc::fork, so the post-fork hook
-    // actually runs.
-    let pid = host_syscall(libc::SYS_fork, &[]) as libc::pid_t;
-    assert!(pid >= 0, "fork failed");
-    if pid == 0 {
-        unsafe { libc::close(pipe_fds[0]) };
-        // The child inherits the parent's generation plus the pending mark.
+    // The child inherits the parent's generation plus the pending mark.
+    let payload = forked_report(|| {
         let first = claim_process_generation();
         let second = claim_process_generation();
         let mut payload = [0_u8; 16];
         payload[..8].copy_from_slice(&first.to_le_bytes());
         payload[8..].copy_from_slice(&second.to_le_bytes());
-        let written = unsafe { libc::write(pipe_fds[1], payload.as_ptr().cast(), payload.len()) };
-        let code = if written == payload.len() as isize {
-            0
-        } else {
-            3
-        };
-        unsafe { libc::_exit(code) };
-    }
-    unsafe { libc::close(pipe_fds[1]) };
-    let mut payload = [0_u8; 16];
-    let mut read = 0_usize;
-    while read < payload.len() {
-        let got = unsafe {
-            libc::read(
-                pipe_fds[0],
-                payload[read..].as_mut_ptr().cast(),
-                payload.len() - read,
-            )
-        };
-        if got <= 0 {
-            break;
-        }
-        read += got as usize;
-    }
-    unsafe { libc::close(pipe_fds[0]) };
-    let mut status = 0;
-    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
-    assert!(libc::WIFEXITED(status), "child did not exit normally");
-    assert_eq!(libc::WEXITSTATUS(status), 0, "child failed to report");
-    assert_eq!(read, payload.len(), "short read from the child");
+        payload
+    });
 
     let child_first = u64::from_le_bytes(payload[..8].try_into().unwrap());
     let child_second = u64::from_le_bytes(payload[8..].try_into().unwrap());
@@ -349,7 +341,7 @@ fn final_capture_file_is_never_replaced() {
 
 extern "C" fn exit_through_captured_syscall(_: *mut c_void) -> *mut c_void {
     let token = activation_enter(0x51);
-    let _ = host_syscall(libc::SYS_exit, &[0]);
+    let _ = host_syscall(SYS_EXIT, &[0]);
     activation_exit(token, 0);
     std::process::abort();
 }
@@ -364,7 +356,7 @@ fn nonreturning_thread_syscall_releases_the_capture_root() {
         let mut thread = std::mem::MaybeUninit::uninit();
         assert_eq!(
             unsafe {
-                libc::pthread_create(
+                crate::os::thread::spawn_raw(
                     thread.as_mut_ptr(),
                     ptr::null(),
                     exit_through_captured_syscall,
@@ -374,7 +366,7 @@ fn nonreturning_thread_syscall_releases_the_capture_root() {
             0
         );
         assert_eq!(
-            unsafe { libc::pthread_join(thread.assume_init(), ptr::null_mut()) },
+            crate::os::thread::join_raw(unsafe { thread.assume_init() }),
             0
         );
         let FinishStatus::Finished(summary) = session.finish(Duration::from_secs(2)).unwrap()
@@ -455,7 +447,7 @@ fn session_publishes_drains_and_decodes_exact_file() {
                 ..
             },
             ..
-        } if errno == libc::ENOSYS as u32
+        } if errno == ENOSYS as u32
     ));
     assert!(matches!(events[4].kind, DecodedKind::SyscallEnter(_)));
     assert!(matches!(events[5].kind, DecodedKind::SyscallExit { .. }));
@@ -476,41 +468,29 @@ fn run_session_child(output: PathBuf) {
     assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
     assert!(!partial_path(&duplicate).exists());
 
-    crate::os::process::set_errno(libc::EDOM);
+    crate::os::process::set_errno(EDOM);
     let token = activation_enter(17);
-    assert_eq!(crate::os::process::errno(), libc::EDOM);
-    let result = host_syscall(libc::SYS_getpid, &[]);
-    assert_eq!(result, unsafe { libc::getpid() } as i64);
-    assert_eq!(crate::os::process::errno(), libc::EDOM);
+    assert_eq!(crate::os::process::errno(), EDOM);
+    let result = host_syscall(SYS_GETPID, &[]);
+    assert_eq!(result, crate::os::process::getpid() as i64);
+    assert_eq!(crate::os::process::errno(), EDOM);
     assert_eq!(host_syscall(-1, &[]), -1);
-    assert_eq!(crate::os::process::errno(), libc::ENOSYS);
+    assert_eq!(crate::os::process::errno(), ENOSYS);
 
     session.request_stop();
     assert!(!is_armed());
     // The old root keeps its producer until it returns even though new
     // roots are no longer admitted.
-    let child = host_syscall(libc::SYS_fork, &[]);
-    if child == 0 {
-        // The copied guard must observe the invalid generation and leave
-        // the copied parent page/active-root ledger untouched.
-        activation_exit(token, 0);
-        unsafe { libc::_exit(0) };
-    }
-    assert!(child > 0);
-    let mut wait_status = 0;
-    assert_eq!(
-        unsafe { libc::waitpid(child as i32, &mut wait_status, 0) },
-        child as i32
-    );
-    assert!(libc::WIFEXITED(wait_status));
-    assert_eq!(libc::WEXITSTATUS(wait_status), 0);
+    // The copied guard must observe the invalid generation and leave the
+    // copied parent page/active-root ledger untouched.
+    fork_and_wait(|| activation_exit(token, 0));
     activation_exit(token, 0);
 
     let stopped_token = activation_enter(17);
     assert!(stopped_token.session.is_null());
     assert_eq!(
-        host_syscall(libc::SYS_getpid, &[]),
-        unsafe { libc::getpid() } as i64
+        host_syscall(SYS_GETPID, &[]),
+        crate::os::process::getpid() as i64
     );
     activation_exit(stopped_token, 0);
 
@@ -523,14 +503,14 @@ fn run_session_child(output: PathBuf) {
 
     // A hard budget is a loss bound, never a guest correctness switch.
     let mut no_pages = CaptureSession::start(StartOptions::new(&duplicate, 0)).unwrap();
-    crate::os::process::set_errno(libc::EDOM);
+    crate::os::process::set_errno(EDOM);
     let token = activation_enter(29);
-    assert_eq!(crate::os::process::errno(), libc::EDOM);
+    assert_eq!(crate::os::process::errno(), EDOM);
     assert_eq!(
-        host_syscall(libc::SYS_getpid, &[]),
-        unsafe { libc::getpid() } as i64
+        host_syscall(SYS_GETPID, &[]),
+        crate::os::process::getpid() as i64
     );
-    assert_eq!(crate::os::process::errno(), libc::EDOM);
+    assert_eq!(crate::os::process::errno(), EDOM);
     activation_exit(token, 0);
     let FinishStatus::Finished(summary) = no_pages.finish(Duration::from_secs(2)).unwrap() else {
         panic!("page-less capture writer did not stop");
@@ -561,7 +541,7 @@ fn nested_engine_context_is_restored_in_order() {
         next_thread_generation: AtomicU32::new(2),
         page_pool: PagePool::new(STARTER_BYTES),
         sink_loss: AtomicU64::new(0),
-        owner_tid: unsafe { libc::gettid() as u32 },
+        owner_tid: crate::os::process::gettid() as u32,
     }));
     let pages = Box::into_raw(Box::new(PagePair::new()));
     let producer = Box::leak(Box::new(Producer::new(
@@ -569,9 +549,9 @@ fn nested_engine_context_is_restored_in_order() {
         pages,
         1,
         1,
-        unsafe { libc::gettid() as u32 },
+        crate::os::process::gettid() as u32,
         11,
-        unsafe { libc::__errno_location() },
+        crate::os::process::errno_location(),
     )));
 
     unsafe {
@@ -611,7 +591,7 @@ fn two_page_ring_drops_once_and_recovers_after_return() {
         next_thread_generation: AtomicU32::new(2),
         page_pool: PagePool::new(STARTER_BYTES),
         sink_loss: AtomicU64::new(0),
-        owner_tid: unsafe { libc::gettid() as u32 },
+        owner_tid: crate::os::process::gettid() as u32,
     }));
     let pages = Box::into_raw(Box::new(PagePair::new()));
     let producer = Box::leak(Box::new(Producer::new(
@@ -619,18 +599,18 @@ fn two_page_ring_drops_once_and_recovers_after_return() {
         pages,
         1,
         1,
-        unsafe { libc::gettid() as u32 },
+        crate::os::process::gettid() as u32,
         7,
-        unsafe { libc::__errno_location() },
+        crate::os::process::errno_location(),
     )));
-    crate::os::process::set_errno(libc::EDOM);
+    crate::os::process::set_errno(EDOM);
 
     for _ in 0..90 {
-        let disposition = unsafe { record_syscall_enter(producer, libc::SYS_getpid, &[]) };
+        let disposition = unsafe { record_syscall_enter(producer, SYS_GETPID, &[]) };
         assert!(matches!(disposition, EnterDisposition::Recorded));
         unsafe { record_syscall_exit(producer, disposition, 1, 0) };
     }
-    let dropped = unsafe { record_syscall_enter(producer, libc::SYS_getpid, &[]) };
+    let dropped = unsafe { record_syscall_enter(producer, SYS_GETPID, &[]) };
     assert!(matches!(dropped, EnterDisposition::DropCapacity));
     unsafe { record_syscall_exit(producer, dropped, 1, 0) };
     assert_eq!(producer.published.tail.load(Ordering::Acquire), 2);
@@ -646,10 +626,10 @@ fn two_page_ring_drops_once_and_recovers_after_return() {
     assert_eq!(cold.capacity_drops, 2);
 
     producer.returned.head.store(1, Ordering::Release);
-    let recovered = unsafe { record_syscall_enter(producer, libc::SYS_getpid, &[]) };
+    let recovered = unsafe { record_syscall_enter(producer, SYS_GETPID, &[]) };
     assert!(matches!(recovered, EnterDisposition::Recorded));
     unsafe { record_syscall_exit(producer, recovered, 1, 0) };
-    assert_eq!(crate::os::process::errno(), libc::EDOM);
+    assert_eq!(crate::os::process::errno(), EDOM);
 }
 
 #[test]
@@ -667,8 +647,8 @@ fn page_less_producer_recovers_after_retired_pages_return_to_pool() {
             let producer = TLS_ACTIVE_PRODUCER.load(Ordering::Relaxed);
             assert!(!producer.is_null());
             assert_eq!(
-                host_syscall(libc::SYS_getpid, &[]),
-                unsafe { libc::getpid() } as i64
+                host_syscall(SYS_GETPID, &[]),
+                crate::os::process::getpid() as i64
             );
             owner_ready_tx.send(producer as usize).unwrap();
             owner_seal_rx.recv().unwrap();
@@ -687,8 +667,8 @@ fn page_less_producer_recovers_after_retired_pages_return_to_pool() {
             assert!(!producer.is_null());
             assert!(unsafe { (*producer).pages.load(Ordering::Acquire).is_null() });
             assert_eq!(
-                host_syscall(libc::SYS_getpid, &[]),
-                unsafe { libc::getpid() } as i64
+                host_syscall(SYS_GETPID, &[]),
+                crate::os::process::getpid() as i64
             );
             let drops_after_first = unsafe { (*(*producer).cold_ptr()).capacity_drops };
             assert_eq!(drops_after_first, 2);
@@ -704,8 +684,8 @@ fn page_less_producer_recovers_after_retired_pages_return_to_pool() {
             let offered = unsafe { !(*producer).pages.load(Ordering::Acquire).is_null() };
             if offered {
                 assert_eq!(
-                    host_syscall(libc::SYS_getpid, &[]),
-                    unsafe { libc::getpid() } as i64
+                    host_syscall(SYS_GETPID, &[]),
+                    crate::os::process::getpid() as i64
                 );
             }
             let recovered =
@@ -810,8 +790,8 @@ fn retired_short_lived_threads_leave_the_writer_scan() {
             std::thread::spawn(|| {
                 let token = activation_enter(0x71);
                 assert_eq!(
-                    host_syscall(libc::SYS_getpid, &[]),
-                    unsafe { libc::getpid() } as i64
+                    host_syscall(SYS_GETPID, &[]),
+                    crate::os::process::getpid() as i64
                 );
                 activation_exit(token, 0);
                 retire_current_thread();
@@ -861,7 +841,7 @@ fn writer_takes_at_most_one_page_per_producer_per_round() {
         .create_new(true)
         .open(&partial)
         .unwrap();
-    let offset = write_file_header(&mut file, unsafe { libc::getpid() }, 0).unwrap();
+    let offset = write_file_header(&mut file, crate::os::process::getpid(), 0).unwrap();
     let core = Box::leak(Box::new(SessionCore {
         phase: AtomicU8::new(PHASE_STOPPING),
         active_roots: AtomicUsize::new(0),
@@ -873,7 +853,7 @@ fn writer_takes_at_most_one_page_per_producer_per_round() {
         next_thread_generation: AtomicU32::new(3),
         page_pool: PagePool::new(STARTER_BYTES * 2),
         sink_loss: AtomicU64::new(0),
-        owner_tid: unsafe { libc::gettid() as u32 },
+        owner_tid: crate::os::process::gettid() as u32,
     }));
     for producer_id in [1_u64, 2] {
         let pages = core.page_pool.take_starter();
@@ -885,10 +865,10 @@ fn writer_takes_at_most_one_page_per_producer_per_round() {
             producer_id as u32,
             producer_id as u32,
             producer_id,
-            unsafe { libc::__errno_location() },
+            crate::os::process::errno_location(),
         )));
         for _ in 0..90 {
-            let disposition = unsafe { record_syscall_enter(producer, libc::SYS_getpid, &[]) };
+            let disposition = unsafe { record_syscall_enter(producer, SYS_GETPID, &[]) };
             assert!(matches!(disposition, EnterDisposition::Recorded));
             unsafe { record_syscall_exit(producer, disposition, 1, 0) };
         }
@@ -934,16 +914,16 @@ fn writer_offer_and_retire_in_one_round_keep_one_page_owner() {
         next_thread_generation: AtomicU32::new(2),
         page_pool: PagePool::new(STARTER_BYTES),
         sink_loss: AtomicU64::new(0),
-        owner_tid: unsafe { libc::gettid() as u32 },
+        owner_tid: crate::os::process::gettid() as u32,
     }));
     let producer = Box::leak(Box::new(Producer::new(
         core,
         ptr::null_mut(),
         1,
         1,
-        unsafe { libc::gettid() as u32 },
+        crate::os::process::gettid() as u32,
         1,
-        unsafe { libc::__errno_location() },
+        crate::os::process::errno_location(),
     )));
     let addr = producer as *mut Producer as usize;
     core.producers
@@ -984,6 +964,6 @@ fn writer_active_scan_len(core: &SessionCore) -> usize {
 #[test]
 fn stopped_trace_path_falls_back_to_libc_syscall() {
     assert!(TLS_ACTIVE_PRODUCER.load(Ordering::Relaxed).is_null());
-    let result = host_syscall(libc::SYS_getpid, &[]);
-    assert_eq!(result, unsafe { libc::getpid() } as i64);
+    let result = host_syscall(SYS_GETPID, &[]);
+    assert_eq!(result, crate::os::process::getpid() as i64);
 }

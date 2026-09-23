@@ -7,7 +7,7 @@
 //! process-lifetime tombstone and never makes `wait_closed` wait forever.
 
 use std::collections::HashMap;
-use std::ffi::c_void;
+use std::ffi::{c_int, c_void};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use super::ctx::{DeferredHold, EngineClosed, EngineControl, ExecutionLease, Shared};
@@ -402,13 +402,12 @@ pub(crate) fn prepare_pthread_operation(
 ) -> Option<TsdOperation> {
     let (key, kind) = match sym {
         "pthread_setspecific" if args.len() >= 2 => (
-            TlsKey::from_raw(args[0] as libc::pthread_key_t),
+            TlsKey::from_raw(args[0] as _),
             TsdOperationKind::Set(args[1]),
         ),
-        "pthread_key_delete" if !args.is_empty() => (
-            TlsKey::from_raw(args[0] as libc::pthread_key_t),
-            TsdOperationKind::Delete,
-        ),
+        "pthread_key_delete" if !args.is_empty() => {
+            (TlsKey::from_raw(args[0] as _), TsdOperationKind::Delete)
+        }
         _ => return None,
     };
     let registration = { TSD_KEYS.lock().unwrap().get(&(shared.id, key)).cloned() };
@@ -420,11 +419,10 @@ fn registration_for_native_key(owner: u64, key: TlsKey) -> Option<Arc<TsdRegistr
 }
 
 pub(crate) unsafe extern "C" fn native_pthread_setspecific(
-    key: libc::pthread_key_t,
+    key: TlsKey,
     value: *const c_void,
     owner: u64,
-) -> libc::c_int {
-    let key = TlsKey::from_raw(key);
+) -> c_int {
     let operation = registration_for_native_key(owner, key)
         .and_then(|registration| registration.begin_operation(TsdOperationKind::Set(value as u64)));
     let result = unsafe { tls_set(key, value) };
@@ -434,11 +432,7 @@ pub(crate) unsafe extern "C" fn native_pthread_setspecific(
     result
 }
 
-pub(crate) unsafe extern "C" fn native_pthread_key_delete(
-    key: libc::pthread_key_t,
-    owner: u64,
-) -> libc::c_int {
-    let key = TlsKey::from_raw(key);
+pub(crate) unsafe extern "C" fn native_pthread_key_delete(key: TlsKey, owner: u64) -> c_int {
     let operation = registration_for_native_key(owner, key)
         .and_then(|registration| registration.begin_operation(TsdOperationKind::Delete));
     let result = tls_key_delete(key);
@@ -449,10 +443,10 @@ pub(crate) unsafe extern "C" fn native_pthread_key_delete(
 }
 
 pub(crate) unsafe extern "C" fn native_pthread_key_create(
-    key: *mut libc::pthread_key_t,
+    key: *mut TlsKey,
     destructor: Option<unsafe extern "C" fn(*mut c_void)>,
     owner: u64,
-) -> libc::c_int {
+) -> c_int {
     let Some(destructor) = destructor else {
         return unsafe { tls_key_create_raw(key, None) };
     };
@@ -464,7 +458,7 @@ pub(crate) unsafe extern "C" fn native_pthread_key_create(
     let proxy: unsafe extern "C" fn(*mut c_void) = unsafe { std::mem::transmute(proxy as usize) };
     let result = unsafe { tls_key_create_raw(key, Some(proxy)) };
     if result == 0 {
-        registration.commit(TlsKey::from_raw(unsafe { key.read() }));
+        registration.commit(unsafe { key.read() });
     } else {
         registration.cancel();
     }
@@ -472,12 +466,12 @@ pub(crate) unsafe extern "C" fn native_pthread_key_create(
 }
 
 pub(crate) unsafe extern "C" fn native_pthread_create(
-    thread: *mut libc::pthread_t,
-    attr: *const libc::pthread_attr_t,
+    thread: *mut ThreadId,
+    attr: *const c_void,
     start: extern "C" fn(*mut c_void) -> *mut c_void,
     value: *mut c_void,
     owner: u64,
-) -> libc::c_int {
+) -> c_int {
     let Some((registration, proxy)) =
         super::thunks::wrap_pthread_start(owner, start as usize as u64)
     else {

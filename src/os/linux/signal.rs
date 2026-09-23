@@ -23,7 +23,35 @@ pub const SIG_DFL: usize = libc::SIG_DFL;
 pub const SIG_IGN: usize = libc::SIG_IGN;
 pub const SIG_ERR: usize = usize::MAX;
 
-const SA_EXPOSE_TAGBITS: i32 = 0x0000_0800;
+/// The kernel's `siginfo_t` as an `SA_SIGINFO` handler receives it.
+///
+/// A handler's signature is the kernel's, so the argument cannot be made opaque; naming the pointer
+/// type here is what lets the engine's adapters stay free of the platform's type names.
+pub type SignalInfo = *mut libc::siginfo_t;
+
+/// The `si_code` Linux reports for a delivery one thread addressed to another (`tkill`/`tgkill`),
+/// which is what distinguishes it from a process-directed `kill`.
+pub const SI_TKILL: i32 = libc::SI_TKILL;
+
+/// The kernel's `si_code` for a delivery a handler received.
+///
+/// A null `info` is not an error: an action installed without `SA_SIGINFO` reaches its handler with
+/// no siginfo at all, and that is a fact about the delivery rather than a failure.
+pub fn info_code(info: SignalInfo) -> i32 {
+    if info.is_null() {
+        return 0;
+    }
+    unsafe { (*info).si_code }
+}
+
+/// The kernel flag asking whether the running kernel understands the tag-bit action bits. Linux
+/// clears it on the way back out, so it is never part of an installed disposition.
+pub const SA_EXPOSE_TAGBITS: i32 = 0x0000_0800;
+
+/// The kernel flag that reports which optional action bits the running kernel understands, and
+/// clears itself on the way back out. Never part of an installed disposition.
+#[cfg(test)]
+pub const SA_UNSUPPORTED: i32 = 0x0000_0400;
 
 /// The SEGV dump is installed and implemented by the pair: its handler reads the fault RIP and
 /// the fault address out of the architecture's own `ucontext_t`.
@@ -48,13 +76,68 @@ pub const SIGFPE: i32 = libc::SIGFPE;
 pub const SIGILL: i32 = libc::SIGILL;
 pub const SIGTRAP: i32 = libc::SIGTRAP;
 
+// The signals and action flags below are the platform's, but no product path names one: the engine
+// works from the number the guest passed. They are here for a caller that has to spell a signal or
+// a flag, which today are this crate's tests; the fault signals above are not, because delivery
+// branches on them.
+#[cfg(test)]
+pub const SIGHUP: i32 = libc::SIGHUP;
+#[cfg(test)]
+pub const SIGKILL: i32 = libc::SIGKILL;
+#[cfg(test)]
+pub const SIGSTOP: i32 = libc::SIGSTOP;
+#[cfg(test)]
+pub const SIGTERM: i32 = libc::SIGTERM;
+#[cfg(test)]
+pub const SIGUSR1: i32 = libc::SIGUSR1;
+#[cfg(test)]
+pub const SIGUSR2: i32 = libc::SIGUSR2;
+#[cfg(test)]
+pub const SIGURG: i32 = libc::SIGURG;
+#[cfg(test)]
+pub const SIGWINCH: i32 = libc::SIGWINCH;
+#[cfg(test)]
+pub const SA_NOCLDSTOP: i32 = libc::SA_NOCLDSTOP;
+#[cfg(test)]
+pub const SA_RESTART: i32 = libc::SA_RESTART;
+#[cfg(test)]
+pub const SA_SIGINFO: i32 = libc::SA_SIGINFO;
+
+/// The lowest realtime signal number, which varies with the C library's own reservations, so it is
+/// a call rather than a constant.
+pub fn realtime_min() -> i32 {
+    libc::SIGRTMIN()
+}
+
+/// `kill(2)`: deliver `signum` to the process `pid`, returning the library's code and leaving
+/// `errno` for the caller.
+#[cfg(test)]
+pub fn kill(pid: i32, signum: i32) -> i32 {
+    unsafe { libc::kill(pid, signum) }
+}
+
+/// `pthread_kill`: deliver `signum` to one host thread, returning the library's code.
+///
+/// Address a delivery to a thread rather than to the process whenever the intended recipient is
+/// known, because a process-directed delivery lands on whichever thread the kernel picks.
+#[cfg(test)]
+pub fn send_to_thread(thread: crate::os::thread::ThreadId, signum: i32) -> i32 {
+    unsafe { libc::pthread_kill(thread.raw(), signum) }
+}
+
+/// Deliver `signum` to the calling thread.
+#[cfg(test)]
+pub fn send_to_current_thread(signum: i32) -> i32 {
+    send_to_thread(crate::os::thread::current_thread(), signum)
+}
+
 /// Upper bound on Linux's traditional (non-realtime) signal numbers. Realtime
 /// signals carry queueing and siginfo semantics and cannot be folded into a VM
 /// mailbox that merges only by signal number.
 pub const STANDARD_SIGNAL_MAX: i32 = 31;
 
 pub fn is_realtime(signum: i32) -> bool {
-    signum >= libc::SIGRTMIN() && signum <= libc::SIGRTMAX()
+    signum >= realtime_min() && signum <= libc::SIGRTMAX()
 }
 
 /// Whether a delivery came from a thread-directed kill (`tkill`/`tgkill`) rather than a
@@ -63,16 +146,17 @@ pub fn is_realtime(signum: i32) -> bool {
 /// The engine's mailbox merges deliveries by signal number, which is only sound for a delivery the
 /// kernel addressed to one thread, so it has to ask. The answer lives in `siginfo`, whose layout is
 /// the kernel's, which is why the question is asked here and not there.
-pub fn sent_by_thread_kill(info: *const std::ffi::c_void) -> bool {
-    if info.is_null() {
-        return false;
-    }
-    unsafe { (*info.cast::<libc::siginfo_t>()).si_code == libc::SI_TKILL }
+pub fn sent_by_thread_kill(info: SignalInfo) -> bool {
+    info_code(info) == SI_TKILL
 }
 
 /// A sigaction structure (layout knowledge encapsulated). The engine edits a
 /// copy's handler and writes it back to the kernel; the original guest structure
 /// stays untouched because the guest may reuse or read it back.
+///
+/// `repr(transparent)`: an address of one of these is handed to the kernel's `rt_sigaction`, and
+/// an interposed `sigaction` receives its caller's own address for the same structure.
+#[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct Sigaction(libc::sigaction);
 
@@ -107,6 +191,54 @@ impl SignalMask {
     pub fn with(mut self, signum: i32) -> Self {
         unsafe { libc::sigaddset(&mut self.0, signum) };
         self
+    }
+}
+
+/// One delivery `rt_sigtimedwait` took out of the pending set.
+#[cfg(test)]
+pub struct PendingSignal {
+    signum: i32,
+    code: i32,
+}
+
+#[cfg(test)]
+impl PendingSignal {
+    /// The signal that was pending.
+    pub fn signum(&self) -> i32 {
+        self.signum
+    }
+
+    /// The kernel's `si_code`, comparable with [`SI_TKILL`].
+    pub fn code(&self) -> i32 {
+        self.code
+    }
+}
+
+/// `rt_sigtimedwait` with no timeout: take one signal pending in `mask`, blocking until one
+/// arrives.
+///
+/// This is the raw wait rather than a handler, because it is the only way to learn *which* signal
+/// the kernel had pending, and a caller that consumed a delivery this way has to know that a
+/// subsequent observation would see nothing. `mask` must be blocked on the calling thread.
+#[cfg(test)]
+pub fn wait_pending(mask: &SignalMask) -> Result<PendingSignal, i32> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_rt_sigtimedwait,
+            &mask.0,
+            &mut info,
+            std::ptr::null::<libc::timespec>(),
+            std::mem::size_of::<u64>(),
+        )
+    };
+    if result < 0 {
+        Err(crate::os::process::errno())
+    } else {
+        Ok(PendingSignal {
+            signum: result as i32,
+            code: info.si_code,
+        })
     }
 }
 
@@ -230,6 +362,52 @@ impl Sigaction {
 
     pub fn flags(&self) -> i32 {
         self.0.sa_flags
+    }
+
+    /// Add `flags` to the action. Used by a caller that edits an action the kernel
+    /// returned, where the kernel's own bits have to survive.
+    #[cfg(test)]
+    pub fn or_flags(&mut self, flags: i32) {
+        self.0.sa_flags |= flags;
+    }
+
+    /// Remove `flags` from the action, which is how a caller reproduces a kernel normalization.
+    #[cfg(test)]
+    pub fn clear_flags(&mut self, flags: i32) {
+        self.0.sa_flags &= !flags;
+    }
+
+    /// The restorer this action names, if any. `None` is what a caller-visible disposition shows
+    /// once the pair's adapter bits have been stripped.
+    #[cfg(test)]
+    pub fn restorer(&self) -> Option<extern "C" fn()> {
+        self.0.sa_restorer
+    }
+
+    /// Put `restorer` in the action's slot, which is how a snapshot read from the kernel is
+    /// reproduced exactly.
+    #[cfg(test)]
+    pub fn set_restorer(&mut self, restorer: extern "C" fn()) {
+        arch::set_restorer(&mut self.0, restorer);
+    }
+
+    /// Add `signum` to the mask this action installs while its handler runs.
+    #[cfg(test)]
+    pub fn add_to_mask(&mut self, signum: i32) {
+        unsafe { libc::sigaddset(&mut self.0.sa_mask, signum) };
+    }
+
+    /// Block every signal in the mask, which is what a set built for `rt_sigtimedwait` wants: the
+    /// two the kernel cannot block are dropped by the kernel, not by this call.
+    #[cfg(test)]
+    pub fn fill_mask(&mut self) {
+        unsafe { libc::sigfillset(&mut self.0.sa_mask) };
+    }
+
+    /// Whether the action's mask blocks `signum`.
+    #[cfg(test)]
+    pub fn mask_contains(&self, signum: i32) -> bool {
+        unsafe { libc::sigismember(&self.0.sa_mask, signum) == 1 }
     }
 
     pub fn empty(handler: usize, flags: i32) -> Self {

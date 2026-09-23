@@ -13,32 +13,34 @@ static SIGNAL_TARGET_WORKER_THREAD: AtomicU64 = AtomicU64::new(0);
 const SIGNAL_TARGET_GUEST_ADDR: u64 = 0xe23a;
 
 unsafe extern "C-unwind" fn signal_target_blocking_entry() {
-    SIGNAL_TARGET_WORKER_THREAD.store(unsafe { libc::pthread_self() } as u64, Ordering::SeqCst);
+    SIGNAL_TARGET_WORKER_THREAD.store(
+        crate::os::thread::current_thread().as_u64(),
+        Ordering::SeqCst,
+    );
     unsafe { lifecycle_blocking_entry() };
 }
 
 unsafe extern "C-unwind" fn record_signal_target_handler_thread() {
-    SIGNAL_TARGET_HANDLER_THREAD.store(unsafe { libc::pthread_self() } as u64, Ordering::SeqCst);
+    SIGNAL_TARGET_HANDLER_THREAD.store(
+        crate::os::thread::current_thread().as_u64(),
+        Ordering::SeqCst,
+    );
     SIGNAL_TARGET_HANDLER_RAN.fetch_add(1, Ordering::SeqCst);
 }
 
 unsafe extern "C" fn external_siginfo_signal(
     _signum: i32,
-    info: *mut libc::siginfo_t,
-    _context: *mut libc::c_void,
+    info: crate::os::signal::SignalInfo,
+    _context: *mut std::ffi::c_void,
 ) {
-    let code = if info.is_null() {
-        0
-    } else {
-        unsafe { (*info).si_code }
-    };
+    let code = crate::os::signal::info_code(info);
     SIGNAL_EXTERNAL_SIGINFO_CODE.store(code, Ordering::SeqCst);
 }
 
 unsafe extern "C" fn external_siginfo_wait_for_replacement(
     _signum: i32,
-    _info: *mut libc::siginfo_t,
-    _context: *mut libc::c_void,
+    _info: crate::os::signal::SignalInfo,
+    _context: *mut std::ffi::c_void,
 ) {
     SIGNAL_EXTERNAL_WAIT_ENTERED.store(1, Ordering::SeqCst);
     while SIGNAL_EXTERNAL_WAIT_RELEASED.load(Ordering::SeqCst) == 0 {
@@ -58,18 +60,6 @@ fn wait_for_external_siginfo_code() -> i32 {
             "external SA_SIGINFO handler did not observe the signal"
         );
         std::thread::yield_now();
-    }
-}
-
-unsafe fn raw_sigwaitinfo(set: &libc::sigset_t, info: &mut libc::siginfo_t) -> i32 {
-    unsafe {
-        libc::syscall(
-            libc::SYS_rt_sigtimedwait,
-            std::ptr::from_ref(set),
-            std::ptr::from_mut(info),
-            std::ptr::null::<libc::timespec>(),
-            std::mem::size_of::<u64>(),
-        ) as i32
     }
 }
 
@@ -104,7 +94,7 @@ fn target_thread_signal_module() -> Module {
         Terminator::CallBuiltin {
             builtin: Builtin::HostRaise,
             args: vec![Operand::Imm {
-                bits: libc::SIGUSR1 as u64,
+                bits: crate::os::signal::SIGUSR1 as u64,
                 width: Width::W32,
             }],
             ret: RetDest::Ignore,
@@ -143,7 +133,7 @@ fn native_image_finalizer_raise_module(library: &Path) -> Module {
                 unwind: false,
             },
             args: vec![Operand::Imm {
-                bits: libc::SIGUSR1 as u64,
+                bits: crate::os::signal::SIGUSR1 as u64,
                 width: Width::W32,
             }],
             ret: RetDest::Ignore,
@@ -170,7 +160,7 @@ fn native_oldact_reinstall_module() -> Module {
             builtin: Builtin::HostSignal,
             args: vec![
                 Operand::Imm {
-                    bits: libc::SIGUSR1 as u64,
+                    bits: crate::os::signal::SIGUSR1 as u64,
                     width: Width::W32,
                 },
                 Operand::Imm {
@@ -188,7 +178,7 @@ fn native_oldact_reinstall_module() -> Module {
         builtin: Builtin::HostSignal,
         args: vec![
             Operand::Imm {
-                bits: libc::SIGUSR1 as u64,
+                bits: crate::os::signal::SIGUSR1 as u64,
                 width: Width::W32,
             },
             Operand::Slot(old),
@@ -247,7 +237,7 @@ fn cross_engine_signal_reinstaller_module() -> Module {
                     builtin: Builtin::HostSignal,
                     args: vec![
                         Operand::Imm {
-                            bits: libc::SIGUSR1 as u64,
+                            bits: crate::os::signal::SIGUSR1 as u64,
                             width: Width::W32,
                         },
                         Operand::Imm {
@@ -267,7 +257,7 @@ fn cross_engine_signal_reinstaller_module() -> Module {
                     builtin: Builtin::HostSignal,
                     args: vec![
                         Operand::Imm {
-                            bits: libc::SIGUSR1 as u64,
+                            bits: crate::os::signal::SIGUSR1 as u64,
                             width: Width::W32,
                         },
                         Operand::Slot(old),
@@ -314,7 +304,7 @@ fn sigaction_mask_module() -> Module {
             builtin: Builtin::HostSigaction,
             args: vec![
                 Operand::Imm {
-                    bits: libc::SIGUSR1 as u64,
+                    bits: crate::os::signal::SIGUSR1 as u64,
                     width: Width::W32,
                 },
                 Operand::Imm {
@@ -356,7 +346,7 @@ fn sigaction_reinstall_module() -> Module {
             builtin: Builtin::HostSigaction,
             args: vec![
                 Operand::Imm {
-                    bits: libc::SIGUSR1 as u64,
+                    bits: crate::os::signal::SIGUSR1 as u64,
                     width: Width::W32,
                 },
                 Operand::Slot(word(8)),
@@ -384,19 +374,19 @@ fn physically_blocked_native_finalizer_raise_survives_close_worker_exit() {
         let _serial = SIGNAL_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let saved = crate::os::signal::Sigaction::query(libc::SIGUSR1)
+        let saved = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1)
             .expect("failed to save finalizer signal disposition");
         let _restore = SavedSignalDisposition {
-            signum: libc::SIGUSR1,
+            signum: crate::os::signal::SIGUSR1,
             action: saved,
         };
-        let external = unsafe {
+        let external = {
             let mut action = raw_sigaction(external_siginfo_signal as *const () as usize, &[]);
-            action.sa_flags = libc::SA_SIGINFO;
-            crate::os::signal::Sigaction::copy_from(std::ptr::from_ref(&action) as u64).unwrap()
+            action.or_flags(crate::os::signal::SA_SIGINFO);
+            action
         };
-        assert_eq!(external.install(libc::SIGUSR1), 0);
-        let baseline = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+        assert_eq!(external.install(crate::os::signal::SIGUSR1), 0);
+        let baseline = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
         let (_directory, library) = native_signal_handler_library();
         SIGNAL_EXTERNAL_SIGINFO_CODE.store(i32::MIN, Ordering::SeqCst);
         let engine = engine(native_image_finalizer_raise_module(&library), mode == "jit");
@@ -407,11 +397,13 @@ fn physically_blocked_native_finalizer_raise_survives_close_worker_exit() {
             unsafe { std::mem::transmute(trace_address) };
 
         let blocker = crate::os::signal::Sigaction::for_signal(crate::os::signal::SIG_DFL);
-        let mask_guard = blocker.block_for_handler(libc::SIGUSR1).unwrap();
+        let mask_guard = blocker
+            .block_for_handler(crate::os::signal::SIGUSR1)
+            .unwrap();
         let armed = unsafe { run_export(&engine, "arm", &[]) };
         engine.wait_closed().unwrap();
         let trace = unsafe { read_trace() };
-        let restored = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+        let restored = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
         drop(mask_guard);
         let native_code = wait_for_external_siginfo_code();
 
@@ -422,7 +414,7 @@ fn physically_blocked_native_finalizer_raise_survives_close_worker_exit() {
         );
         assert_eq!(
             native_code,
-            libc::SI_TKILL,
+            crate::os::signal::SI_TKILL,
             "native finalizer changed libc raise siginfo provenance"
         );
         assert!(restored.same_disposition(&baseline));
@@ -456,7 +448,8 @@ fn guest_can_reinstall_a_native_signal_oldact_and_real_kill_uses_it() {
     let _serial = SIGNAL_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (_restore, baseline) = SavedSignalDisposition::replace_with_native(libc::SIGUSR1);
+    let (_restore, baseline) =
+        SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR1);
     let mut failures = Vec::new();
 
     for (mode, jit) in modes() {
@@ -464,12 +457,15 @@ fn guest_can_reinstall_a_native_signal_oldact_and_real_kill_uses_it() {
         SIGNAL_OWNER_HANDLER_RAN.store(0, Ordering::SeqCst);
         let engine = engine(native_oldact_reinstall_module(), jit);
         let result = unsafe { run_export(&engine, "probe", &[]) };
-        assert_eq!(unsafe { libc::kill(libc::getpid(), libc::SIGUSR1) }, 0);
+        assert_eq!(
+            crate::os::signal::kill(crate::os::process::getpid(), crate::os::signal::SIGUSR1),
+            0
+        );
         wait_for_signal_marker(&SIGNAL_NATIVE_HANDLER_RAN);
         let native_ran = SIGNAL_NATIVE_HANDLER_RAN.load(Ordering::SeqCst);
         let guest_ran = SIGNAL_OWNER_HANDLER_RAN.load(Ordering::SeqCst);
         engine.wait_closed().unwrap();
-        let restored = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+        let restored = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
 
         if !matches!(result, Ok(RunOutcome::Returned(value)) if value.lo == baseline.handler() as u64)
             || native_ran != 1
@@ -494,7 +490,8 @@ fn another_engine_can_reinstall_guest_p1_oldact_without_stealing_ownership() {
     let _serial = SIGNAL_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (_restore, baseline) = SavedSignalDisposition::replace_with_native(libc::SIGUSR1);
+    let (_restore, baseline) =
+        SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR1);
     let mut failures = Vec::new();
 
     for (mode, jit) in modes() {
@@ -515,7 +512,10 @@ fn another_engine_can_reinstall_guest_p1_oldact_without_stealing_ownership() {
         let owner_install = unsafe { run_export(&owner, "install", &[]) };
 
         let installed = unsafe { run_export(&installer, "install", &[]) };
-        assert_eq!(unsafe { libc::kill(libc::getpid(), libc::SIGUSR1) }, 0);
+        assert_eq!(
+            crate::os::signal::kill(crate::os::process::getpid(), crate::os::signal::SIGUSR1),
+            0
+        );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while !super::signal::has_engine_pending(owner.control())
             && !super::signal::has_engine_pending(installer.control())
@@ -537,12 +537,16 @@ fn another_engine_can_reinstall_guest_p1_oldact_without_stealing_ownership() {
         // The surviving B disposition must become current, then B's close must
         // restore the native baseline.
         owner.wait_closed().unwrap();
-        assert_eq!(unsafe { libc::kill(libc::getpid(), libc::SIGUSR1) }, 0);
+        assert_eq!(
+            crate::os::signal::kill(crate::os::process::getpid(), crate::os::signal::SIGUSR1),
+            0
+        );
         wait_for_owner_signal_pending(&installer);
         let installer_after_owner_close = unsafe { run_export(&installer, "probe", &[]) };
         let override_after_safe_point = SIGNAL_OVERRIDE_HANDLER_RAN.load(Ordering::SeqCst);
         installer.wait_closed().unwrap();
-        let target_first_restored = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+        let target_first_restored =
+            crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
 
         // Now reverse the close order. B owns both dispositions it installed,
         // including the one whose callback targets A. Closing B must reveal
@@ -561,17 +565,23 @@ fn another_engine_can_reinstall_guest_p1_oldact_without_stealing_ownership() {
             .expect("second signal P1 entry was not materialized");
         let installer = engine(cross_engine_signal_reinstaller_module(), jit);
         let second_owner_install = unsafe { run_export(&owner, "install", &[]) };
-        let original_owner_kernel = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+        let original_owner_kernel =
+            crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
         let second_installed = unsafe { run_export(&installer, "install", &[]) };
-        let installer_kernel = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+        let installer_kernel =
+            crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
         installer.wait_closed().unwrap();
-        let after_installer_close = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
-        assert_eq!(unsafe { libc::kill(libc::getpid(), libc::SIGUSR1) }, 0);
+        let after_installer_close =
+            crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
+        assert_eq!(
+            crate::os::signal::kill(crate::os::process::getpid(), crate::os::signal::SIGUSR1),
+            0
+        );
         wait_for_owner_signal_pending(&owner);
         let second_owner_safe = unsafe { run_export(&owner, "probe", &[]) };
         let second_owner_ran = SIGNAL_OWNER_HANDLER_RAN.load(Ordering::SeqCst);
         owner.wait_closed().unwrap();
-        let restored = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+        let restored = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
 
         if !matches!(owner_install, Ok(RunOutcome::Returned(value)) if value.lo == baseline.handler() as u64)
             || !matches!(installed, Ok(RunOutcome::Returned(value)) if value.lo == first_p1)
@@ -613,33 +623,30 @@ fn wrapped_sigaction_strips_fixed_stub_internals_from_a_modified_raw_oldact() {
     let _serial = SIGNAL_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (_restore, baseline) = SavedSignalDisposition::replace_with_native(libc::SIGUSR1);
+    let (_restore, baseline) =
+        SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR1);
     let mut failures = Vec::new();
 
     for (mode, jit) in modes() {
         let engine = engine(sigaction_reinstall_module(), jit);
         super::signal::install_signal(
             engine.control(),
-            libc::SIGUSR1,
+            crate::os::signal::SIGUSR1,
             SIGNAL_OWNER_GUEST_ADDR as usize,
             Some((0, SIGNAL_OWNER_GUEST_ADDR)),
         )
         .unwrap();
 
         let fixed_stub = baseline
-            .replace(libc::SIGUSR1)
+            .replace(crate::os::signal::SIGUSR1)
             .expect("raw sigaction did not return MIRVM's fixed-stub oldact");
-        let mut modified: libc::sigaction = unsafe { std::mem::zeroed() };
-        fixed_stub.write_to(std::ptr::from_mut(&mut modified) as u64);
-        modified.sa_flags |= libc::SA_NOCLDSTOP;
-        assert_eq!(
-            unsafe { libc::sigaddset(&mut modified.sa_mask, libc::SIGUSR2) },
-            0
-        );
-        assert_ne!(modified.sa_flags & libc::SA_SIGINFO, 0);
-        assert!(modified.sa_restorer.is_some());
+        let mut modified = fixed_stub;
+        modified.or_flags(crate::os::signal::SA_NOCLDSTOP);
+        modified.add_to_mask(crate::os::signal::SIGUSR2);
+        assert_ne!(modified.flags() & crate::os::signal::SA_SIGINFO, 0);
+        assert!(modified.restorer().is_some());
 
-        let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+        let mut old = crate::os::signal::Sigaction::empty(crate::os::signal::SIG_DFL, 0);
         let installed = unsafe {
             run_export(
                 &engine,
@@ -650,7 +657,7 @@ fn wrapped_sigaction_strips_fixed_stub_internals_from_a_modified_raw_oldact() {
                 ],
             )
         };
-        let mut queried: libc::sigaction = unsafe { std::mem::zeroed() };
+        let mut queried = crate::os::signal::Sigaction::empty(crate::os::signal::SIG_DFL, 0);
         let query = unsafe {
             run_export(
                 &engine,
@@ -659,25 +666,25 @@ fn wrapped_sigaction_strips_fixed_stub_internals_from_a_modified_raw_oldact() {
             )
         };
         engine.wait_closed().unwrap();
-        let restored = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+        let restored = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
 
-        let usr2_masked = unsafe { libc::sigismember(&queried.sa_mask, libc::SIGUSR2) };
+        let usr2_masked = queried.mask_contains(crate::os::signal::SIGUSR2) as i32;
         if !matches!(installed, Ok(RunOutcome::Returned(value)) if value.lo == 0)
             || !matches!(query, Ok(RunOutcome::Returned(value)) if value.lo == 0)
-            || old.sa_sigaction != baseline.handler()
-            || queried.sa_sigaction != SIGNAL_OWNER_GUEST_ADDR as usize
-            || queried.sa_flags & libc::SA_SIGINFO != 0
-            || queried.sa_flags & libc::SA_NOCLDSTOP == 0
-            || queried.sa_restorer.is_some()
+            || old.handler() != baseline.handler()
+            || queried.handler() != SIGNAL_OWNER_GUEST_ADDR as usize
+            || queried.flags() & crate::os::signal::SA_SIGINFO != 0
+            || queried.flags() & crate::os::signal::SA_NOCLDSTOP == 0
+            || queried.restorer().is_some()
             || usr2_masked != 1
             || !restored.same_disposition(&baseline)
         {
             failures.push(format!(
                 "{mode}: install={installed:?}, query={query:?}, old={:#x}, handler={:#x}, flags={:#x}, restorer={}, usr2-mask={usr2_masked}, restored={}",
-                old.sa_sigaction,
-                queried.sa_sigaction,
-                queried.sa_flags,
-                queried.sa_restorer.is_some(),
+                old.handler(),
+                queried.handler(),
+                queried.flags(),
+                queried.restorer().is_some(),
                 restored.same_disposition(&baseline),
             ));
         }
@@ -694,41 +701,45 @@ fn sigaction_normalizes_uncatchable_mask_bits_and_close_restores_baseline() {
     let _serial = SIGNAL_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (_restore, baseline) = SavedSignalDisposition::replace_with_native(libc::SIGUSR1);
+    let (_restore, baseline) =
+        SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR1);
     let mut failures = Vec::new();
 
     for (mode, jit) in modes() {
         SIGNAL_OWNER_HANDLER_RAN.store(0, Ordering::SeqCst);
         let engine = engine(sigaction_mask_module(), jit);
         let mut action = raw_sigaction(SIGNAL_OWNER_GUEST_ADDR as usize, &[]);
-        assert_eq!(unsafe { libc::sigfillset(&mut action.sa_mask) }, 0);
-        let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.fill_mask();
+        let mut old = crate::os::signal::Sigaction::empty(crate::os::signal::SIG_DFL, 0);
         let install = unsafe {
             super::signal::native_sigaction(
-                libc::SIGUSR1,
+                crate::os::signal::SIGUSR1,
                 std::ptr::from_ref(&action),
                 std::ptr::from_mut(&mut old),
                 engine.control().id(),
             )
         };
-        let mut queried: libc::sigaction = unsafe { std::mem::zeroed() };
+        let mut queried = crate::os::signal::Sigaction::empty(crate::os::signal::SIG_DFL, 0);
         let query =
             unsafe { run_export(&engine, "query", &[std::ptr::from_mut(&mut queried) as u64]) };
-        assert_eq!(unsafe { libc::kill(libc::getpid(), libc::SIGUSR1) }, 0);
+        assert_eq!(
+            crate::os::signal::kill(crate::os::process::getpid(), crate::os::signal::SIGUSR1),
+            0
+        );
         wait_for_owner_signal_pending(&engine);
         let safe_point = unsafe { run_export(&engine, "query", &[0]) };
-        let kill_masked = unsafe { libc::sigismember(&queried.sa_mask, libc::SIGKILL) };
-        let stop_masked = unsafe { libc::sigismember(&queried.sa_mask, libc::SIGSTOP) };
-        let usr2_masked = unsafe { libc::sigismember(&queried.sa_mask, libc::SIGUSR2) };
+        let kill_masked = queried.mask_contains(crate::os::signal::SIGKILL) as i32;
+        let stop_masked = queried.mask_contains(crate::os::signal::SIGSTOP) as i32;
+        let usr2_masked = queried.mask_contains(crate::os::signal::SIGUSR2) as i32;
         let handler_ran = SIGNAL_OWNER_HANDLER_RAN.load(Ordering::SeqCst);
         engine.wait_closed().unwrap();
-        let restored = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+        let restored = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
 
         if install != 0
             || !matches!(query, Ok(RunOutcome::Returned(value)) if value.lo == 0)
             || !matches!(safe_point, Ok(RunOutcome::Returned(value)) if value.lo == 0)
-            || old.sa_sigaction != baseline.handler()
-            || queried.sa_sigaction != SIGNAL_OWNER_GUEST_ADDR as usize
+            || old.handler() != baseline.handler()
+            || queried.handler() != SIGNAL_OWNER_GUEST_ADDR as usize
             || kill_masked != 0
             || stop_masked != 0
             || usr2_masked != 1
@@ -753,36 +764,40 @@ fn blocked_external_native_raise_keeps_libc_si_tkill_provenance() {
     let _serial = SIGNAL_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let saved = crate::os::signal::Sigaction::query(libc::SIGUSR1)
+    let saved = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1)
         .expect("failed to save external SA_SIGINFO test disposition");
     let _restore = SavedSignalDisposition {
-        signum: libc::SIGUSR1,
+        signum: crate::os::signal::SIGUSR1,
         action: saved,
     };
-    let external = unsafe {
+    let external = {
         let mut action = raw_sigaction(external_siginfo_signal as *const () as usize, &[]);
-        action.sa_flags = libc::SA_SIGINFO;
-        crate::os::signal::Sigaction::copy_from(std::ptr::from_ref(&action) as u64).unwrap()
+        action.or_flags(crate::os::signal::SA_SIGINFO);
+        action
     };
-    assert_eq!(external.install(libc::SIGUSR1), 0);
+    assert_eq!(external.install(crate::os::signal::SIGUSR1), 0);
 
     let blocker = crate::os::signal::Sigaction::for_signal(crate::os::signal::SIG_DFL);
     SIGNAL_EXTERNAL_SIGINFO_CODE.store(i32::MIN, Ordering::SeqCst);
-    let native_guard = blocker.block_for_handler(libc::SIGUSR1).unwrap();
-    assert_eq!(unsafe { libc::raise(libc::SIGUSR1) }, 0);
+    let native_guard = blocker
+        .block_for_handler(crate::os::signal::SIGUSR1)
+        .unwrap();
+    assert_eq!(crate::os::process::raise(crate::os::signal::SIGUSR1), 0);
     assert_eq!(
         SIGNAL_EXTERNAL_SIGINFO_CODE.load(Ordering::SeqCst),
         i32::MIN
     );
     drop(native_guard);
     let native_code = wait_for_external_siginfo_code();
-    assert_eq!(native_code, libc::SI_TKILL);
+    assert_eq!(native_code, crate::os::signal::SI_TKILL);
 
     let mut failures = Vec::new();
     for (mode, jit) in modes() {
         SIGNAL_EXTERNAL_SIGINFO_CODE.store(i32::MIN, Ordering::SeqCst);
         let engine = engine(physically_masked_signal_module(), jit);
-        let wrapped_guard = blocker.block_for_handler(libc::SIGUSR1).unwrap();
+        let wrapped_guard = blocker
+            .block_for_handler(crate::os::signal::SIGUSR1)
+            .unwrap();
         let raised = unsafe { run_export(&engine, "raise", &[]) };
         let before_unblock = SIGNAL_EXTERNAL_SIGINFO_CODE.load(Ordering::SeqCst);
         drop(wrapped_guard);
@@ -813,53 +828,52 @@ fn sigwaitinfo_consumes_blocked_host_raise_without_leaving_thread_signal_state()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         for (_mode, jit) in modes() {
-            let (_restore, baseline) = SavedSignalDisposition::replace_with_native(libc::SIGUSR1);
+            let (_restore, baseline) =
+                SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR1);
             SIGNAL_OWNER_HANDLER_RAN.store(0, Ordering::SeqCst);
             let engine = engine(physically_masked_signal_module(), jit);
             super::signal::install_signal(
                 engine.control(),
-                libc::SIGUSR1,
+                crate::os::signal::SIGUSR1,
                 SIGNAL_OWNER_GUEST_ADDR as usize,
                 Some((0, SIGNAL_OWNER_GUEST_ADDR)),
             )
             .unwrap();
 
             let blocker = crate::os::signal::Sigaction::for_signal(crate::os::signal::SIG_DFL);
-            let mask_guard = blocker.block_for_handler(libc::SIGUSR1).unwrap();
+            let mask_guard = blocker
+                .block_for_handler(crate::os::signal::SIGUSR1)
+                .unwrap();
             let raised = unsafe { run_export(&engine, "raise", &[]) };
 
-            let mut waited_set: libc::sigset_t = unsafe { std::mem::zeroed() };
-            assert_eq!(unsafe { libc::sigemptyset(&mut waited_set) }, 0);
+            let waited_set =
+                crate::os::signal::SignalMask::empty().with(crate::os::signal::SIGUSR1);
+            let raised_pending = crate::os::signal::wait_pending(&waited_set);
             assert_eq!(
-                unsafe { libc::sigaddset(&mut waited_set, libc::SIGUSR1) },
-                0
+                raised_pending.as_ref().map(|pending| pending.signum()),
+                Ok(crate::os::signal::SIGUSR1)
             );
-            let mut raised_info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-            assert_eq!(
-                unsafe { raw_sigwaitinfo(&waited_set, &mut raised_info) },
-                libc::SIGUSR1
-            );
-            let raised_code = raised_info.si_code;
+            let raised_code = raised_pending.unwrap().code();
 
             assert_eq!(
-                unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGUSR1) },
+                crate::os::signal::send_to_current_thread(crate::os::signal::SIGUSR1),
                 0
             );
-            let mut killed_info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let killed_pending = crate::os::signal::wait_pending(&waited_set);
             assert_eq!(
-                unsafe { raw_sigwaitinfo(&waited_set, &mut killed_info) },
-                libc::SIGUSR1
+                killed_pending.as_ref().map(|pending| pending.signum()),
+                Ok(crate::os::signal::SIGUSR1)
             );
-            let killed_code = killed_info.si_code;
+            let killed_code = killed_pending.unwrap().code();
             let safe = unsafe { run_export(&engine, "probe", &[]) };
             let handler_ran = SIGNAL_OWNER_HANDLER_RAN.load(Ordering::SeqCst);
             engine.wait_closed().unwrap();
-            let restored = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+            let restored = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
             drop(mask_guard);
 
             assert!(matches!(raised, Ok(RunOutcome::Returned(value)) if value.lo == 0));
-            assert_eq!(raised_code, libc::SI_TKILL);
-            assert_eq!(killed_code, libc::SI_TKILL);
+            assert_eq!(raised_code, crate::os::signal::SI_TKILL);
+            assert_eq!(killed_code, crate::os::signal::SI_TKILL);
             assert!(matches!(safe, Ok(RunOutcome::Returned(value)) if value.lo == 0));
             assert_eq!(
                 handler_ran, 0,
@@ -915,7 +929,8 @@ fn blocked_host_raise_runs_once_at_the_target_pthreads_next_safe_point() {
     let _serial = SIGNAL_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (_restore, baseline) = SavedSignalDisposition::replace_with_native(libc::SIGUSR1);
+    let (_restore, baseline) =
+        SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR1);
     let mut failures = Vec::new();
 
     for (mode, jit) in modes() {
@@ -924,7 +939,7 @@ fn blocked_host_raise_runs_once_at_the_target_pthreads_next_safe_point() {
         let engine = engine(target_thread_signal_module(), jit);
         super::signal::install_signal(
             engine.control(),
-            libc::SIGUSR1,
+            crate::os::signal::SIGUSR1,
             SIGNAL_TARGET_GUEST_ADDR as usize,
             Some((0, SIGNAL_TARGET_GUEST_ADDR)),
         )
@@ -932,9 +947,11 @@ fn blocked_host_raise_runs_once_at_the_target_pthreads_next_safe_point() {
 
         let execution = engine.clone();
         let observed = std::thread::spawn(move || {
-            let target_thread = unsafe { libc::pthread_self() } as u64;
+            let target_thread = crate::os::thread::current_thread().as_u64();
             let blocker = crate::os::signal::Sigaction::for_signal(crate::os::signal::SIG_DFL);
-            let mask_guard = blocker.block_for_handler(libc::SIGUSR1).unwrap();
+            let mask_guard = blocker
+                .block_for_handler(crate::os::signal::SIGUSR1)
+                .unwrap();
             let raised = unsafe { run_export(&execution, "raise", &[]) };
             let while_masked = SIGNAL_TARGET_HANDLER_RAN.load(Ordering::SeqCst);
             drop(mask_guard);
@@ -958,7 +975,7 @@ fn blocked_host_raise_runs_once_at_the_target_pthreads_next_safe_point() {
         .expect("target pthread panicked");
         let handler_thread = SIGNAL_TARGET_HANDLER_THREAD.load(Ordering::SeqCst);
         engine.wait_closed().unwrap();
-        let restored = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+        let restored = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
 
         if !matches!(observed.1, Ok(RunOutcome::Returned(value)) if value.lo == 0)
             || observed.2 != 0
@@ -998,7 +1015,8 @@ fn raw_pthread_kill_runs_only_on_the_target_pthread_during_concurrent_close() {
         let _serial = SIGNAL_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (_restore, baseline) = SavedSignalDisposition::replace_with_native(libc::SIGUSR1);
+        let (_restore, baseline) =
+            SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR1);
         for (_mode, jit) in modes() {
             reset_lifecycle_gate();
             SIGNAL_TARGET_HANDLER_RAN.store(0, Ordering::SeqCst);
@@ -1007,7 +1025,7 @@ fn raw_pthread_kill_runs_only_on_the_target_pthread_during_concurrent_close() {
             let engine = engine(target_thread_signal_module(), jit);
             super::signal::install_signal(
                 engine.control(),
-                libc::SIGUSR1,
+                crate::os::signal::SIGUSR1,
                 SIGNAL_TARGET_GUEST_ADDR as usize,
                 Some((0, SIGNAL_TARGET_GUEST_ADDR)),
             )
@@ -1018,11 +1036,14 @@ fn raw_pthread_kill_runs_only_on_the_target_pthread_during_concurrent_close() {
                 std::thread::spawn(move || unsafe { run_export(&execution, "block", &[]) });
             wait_lifecycle_entry();
             let target_thread = SIGNAL_TARGET_WORKER_THREAD.load(Ordering::SeqCst);
-            let sender_thread = unsafe { libc::pthread_self() } as u64;
+            let sender_thread = crate::os::thread::current_thread().as_u64();
             assert_ne!(target_thread, 0);
             assert_ne!(target_thread, sender_thread);
             assert_eq!(
-                unsafe { libc::pthread_kill(target_thread as libc::pthread_t, libc::SIGUSR1) },
+                crate::os::signal::send_to_thread(
+                    crate::os::thread::ThreadId::from_raw(target_thread),
+                    crate::os::signal::SIGUSR1,
+                ),
                 0
             );
             wait_for_owner_signal_pending(&engine);
@@ -1034,7 +1055,7 @@ fn raw_pthread_kill_runs_only_on_the_target_pthread_during_concurrent_close() {
             let closed = closed.join().expect("close worker panicked");
             let handler_ran = SIGNAL_TARGET_HANDLER_RAN.load(Ordering::SeqCst);
             let handler_thread = SIGNAL_TARGET_HANDLER_THREAD.load(Ordering::SeqCst);
-            let restored = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+            let restored = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
 
             assert!(
                 matches!(completed, Ok(RunOutcome::Returned(value)) if value.lo == 0),
@@ -1096,7 +1117,8 @@ fn wait_closed_fails_fast_for_a_signal_pending_on_the_current_pthread() {
         let _serial = SIGNAL_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (_restore, baseline) = SavedSignalDisposition::replace_with_native(libc::SIGUSR1);
+        let (_restore, baseline) =
+            SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR1);
 
         for (_mode, jit) in modes() {
             reset_lifecycle_gate();
@@ -1105,7 +1127,7 @@ fn wait_closed_fails_fast_for_a_signal_pending_on_the_current_pthread() {
             let engine = engine(target_thread_signal_module(), jit);
             super::signal::install_signal(
                 engine.control(),
-                libc::SIGUSR1,
+                crate::os::signal::SIGUSR1,
                 SIGNAL_TARGET_GUEST_ADDR as usize,
                 Some((0, SIGNAL_TARGET_GUEST_ADDR)),
             )
@@ -1118,7 +1140,7 @@ fn wait_closed_fails_fast_for_a_signal_pending_on_the_current_pthread() {
             let target = std::thread::spawn(move || {
                 let attached = unsafe { run_export(&target_engine, "probe", &[]) };
                 ready_tx
-                    .send((unsafe { libc::pthread_self() } as u64, attached))
+                    .send((crate::os::thread::current_thread().as_u64(), attached))
                     .unwrap();
                 wait_rx.recv().unwrap();
                 result_tx.send(target_engine.wait_closed()).unwrap();
@@ -1140,7 +1162,10 @@ fn wait_closed_fails_fast_for_a_signal_pending_on_the_current_pthread() {
             wait_tx.send(()).unwrap();
             checked_rx.recv().unwrap();
             assert_eq!(
-                unsafe { libc::pthread_kill(target_pthread as libc::pthread_t, libc::SIGUSR1) },
+                crate::os::signal::send_to_thread(
+                    crate::os::thread::ThreadId::from_raw(target_pthread),
+                    crate::os::signal::SIGUSR1,
+                ),
                 0
             );
             wait_for_owner_signal_pending(&engine);
@@ -1165,7 +1190,7 @@ fn wait_closed_fails_fast_for_a_signal_pending_on_the_current_pthread() {
             assert!(matches!(active, Ok(RunOutcome::Returned(value)) if value.lo == 0));
             engine.wait_closed().unwrap();
             assert!(
-                crate::os::signal::Sigaction::query(libc::SIGUSR1)
+                crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1)
                     .unwrap()
                     .same_disposition(&baseline)
             );
@@ -1220,22 +1245,23 @@ fn external_siginfo_handler_can_wait_for_another_threads_host_signal() {
         let _serial = SIGNAL_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let saved = crate::os::signal::Sigaction::query(libc::SIGUSR1)
+        let saved = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1)
             .expect("failed to save waiting SA_SIGINFO disposition");
         let _restore = SavedSignalDisposition {
-            signum: libc::SIGUSR1,
+            signum: crate::os::signal::SIGUSR1,
             action: saved,
         };
-        let waiting = unsafe {
+        let waiting = {
             let mut action = raw_sigaction(
                 external_siginfo_wait_for_replacement as *const () as usize,
                 &[],
             );
-            action.sa_flags = libc::SA_SIGINFO;
-            crate::os::signal::Sigaction::copy_from(std::ptr::from_ref(&action) as u64).unwrap()
+            action.or_flags(crate::os::signal::SA_SIGINFO);
+            action
         };
-        assert_eq!(waiting.install(libc::SIGUSR1), 0);
-        let waiting_installed = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+        assert_eq!(waiting.install(crate::os::signal::SIGUSR1), 0);
+        let waiting_installed =
+            crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
 
         for (_mode, jit) in modes() {
             SIGNAL_EXTERNAL_WAIT_ENTERED.store(0, Ordering::SeqCst);
@@ -1263,7 +1289,7 @@ fn external_siginfo_handler_can_wait_for_another_threads_host_signal() {
                 .expect("HostSignal replacement thread panicked");
             installer.wait_closed().unwrap();
             raiser.wait_closed().unwrap();
-            let restored = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+            let restored = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
 
             assert!(matches!(raised, Ok(RunOutcome::Returned(value)) if value.lo == 0));
             assert!(
@@ -1322,31 +1348,32 @@ fn external_siginfo_handler_can_wait_for_another_threads_engine_close() {
         let _serial = SIGNAL_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let saved = crate::os::signal::Sigaction::query(libc::SIGUSR1)
+        let saved = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1)
             .expect("failed to save waiting SA_SIGINFO disposition");
         let _restore = SavedSignalDisposition {
-            signum: libc::SIGUSR1,
+            signum: crate::os::signal::SIGUSR1,
             action: saved,
         };
-        let waiting = unsafe {
+        let waiting = {
             let mut action = raw_sigaction(
                 external_siginfo_wait_for_replacement as *const () as usize,
                 &[],
             );
-            action.sa_flags = libc::SA_SIGINFO;
-            crate::os::signal::Sigaction::copy_from(std::ptr::from_ref(&action) as u64).unwrap()
+            action.or_flags(crate::os::signal::SA_SIGINFO);
+            action
         };
 
         for (_mode, jit) in modes() {
-            assert_eq!(waiting.install(libc::SIGUSR1), 0);
-            let waiting_installed = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+            assert_eq!(waiting.install(crate::os::signal::SIGUSR1), 0);
+            let waiting_installed =
+                crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
             let owner = engine(first_external_native_signal_module(), jit);
             let installed = unsafe { run_export(&owner, "install", &[]) };
             assert!(
                 matches!(installed, Ok(RunOutcome::Returned(value)) if value.lo == external_siginfo_wait_for_replacement as *const () as usize as u64),
                 "owner did not replace the waiting handler: {installed:?}"
             );
-            assert_eq!(waiting.install(libc::SIGUSR1), 0);
+            assert_eq!(waiting.install(crate::os::signal::SIGUSR1), 0);
 
             SIGNAL_EXTERNAL_WAIT_ENTERED.store(0, Ordering::SeqCst);
             SIGNAL_EXTERNAL_WAIT_RELEASED.store(0, Ordering::SeqCst);
@@ -1369,7 +1396,7 @@ fn external_siginfo_handler_can_wait_for_another_threads_engine_close() {
             let raised = unsafe { run_export(&raiser, "raise", &[]) };
             let closed = close.join().expect("Engine close thread panicked");
             raiser.wait_closed().unwrap();
-            let current = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+            let current = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
 
             assert!(matches!(raised, Ok(RunOutcome::Returned(value)) if value.lo == 0));
             assert!(closed.is_ok(), "owner Engine close failed: {closed:?}");

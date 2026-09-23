@@ -10,7 +10,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use super::ctx::EngineControl;
 use super::ir::FuncId;
-use crate::os::signal::Sigaction;
+use crate::os::process::ESRCH;
+use crate::os::signal::{Sigaction, SignalInfo};
 
 pub(crate) use inbox::{
     HostRaiseAttempt, SignalDeliveryGuard, SignalInbox, SignalRegistration, activate_owner,
@@ -1062,11 +1063,11 @@ pub(crate) unsafe extern "C-unwind" fn native_signal(
     owner: u64,
 ) -> usize {
     let Some(control) = super::ctx::control_for_engine(owner) else {
-        set_errno(libc::ESRCH);
+        set_errno(ESRCH);
         return crate::os::signal::SIG_ERR;
     };
     let Ok(lease) = super::ctx::ExecutionLease::for_thunk(&control) else {
-        set_errno(libc::ESRCH);
+        set_errno(ESRCH);
         return crate::os::signal::SIG_ERR;
     };
     let _activation = super::ctx::activate(lease.shared());
@@ -1086,22 +1087,24 @@ pub(crate) unsafe extern "C-unwind" fn native_signal(
     }
 }
 
+/// The interposed `sigaction`: `action` and `oldact` are the caller's own structures,
+/// which is why this entry point names them rather than a guest address.
 pub(crate) unsafe extern "C-unwind" fn native_sigaction(
     signum: i32,
-    action: *const libc::sigaction,
-    oldact: *mut libc::sigaction,
+    action: *const Sigaction,
+    oldact: *mut Sigaction,
     owner: u64,
 ) -> i32 {
     let Some(control) = super::ctx::control_for_engine(owner) else {
-        set_errno(libc::ESRCH);
+        set_errno(ESRCH);
         return -1;
     };
     let Ok(lease) = super::ctx::ExecutionLease::for_thunk(&control) else {
-        set_errno(libc::ESRCH);
+        set_errno(ESRCH);
         return -1;
     };
     let _activation = super::ctx::activate(lease.shared());
-    let action = unsafe { Sigaction::copy_from(action as u64) };
+    let action = unsafe { action.as_ref() }.copied();
     let resolution = action.as_ref().map(|action| {
         super::thunks::resolve_signal_handler(lease.shared(), action.handler() as u64)
     });
@@ -1120,11 +1123,11 @@ pub(crate) unsafe extern "C-unwind" fn native_sigaction(
 
 pub(crate) unsafe extern "C-unwind" fn native_raise(signum: i32, owner: u64) -> i32 {
     let Some(control) = super::ctx::control_for_engine(owner) else {
-        set_errno(libc::ESRCH);
+        set_errno(ESRCH);
         return -1;
     };
     let Ok(lease) = super::ctx::ExecutionLease::for_thunk(&control) else {
-        set_errno(libc::ESRCH);
+        set_errno(ESRCH);
         return -1;
     };
     let activation = super::ctx::activate(lease.shared());
@@ -1157,8 +1160,8 @@ fn materialize_signal_stub(registration: &'static SignalRegistration) -> Result<
 
 unsafe extern "C" fn signal_adapter(
     signum: i32,
-    info: *mut libc::siginfo_t,
-    _context: *mut libc::c_void,
+    info: SignalInfo,
+    _context: *mut std::ffi::c_void,
     registration: *mut SignalRegistration,
 ) {
     unsafe { record_async_signal(registration, signum, info) };

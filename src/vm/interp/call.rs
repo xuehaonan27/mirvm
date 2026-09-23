@@ -816,7 +816,7 @@ pub(crate) fn exec_builtin(
         Builtin::UnwindRaise => raise_guest(a(0)),
         // Minimal `os::` passthroughs: real addresses, no marshalling.
         Builtin::HostGetenv => crate::os::process::getenv(a(0)),
-        Builtin::HostWrite => crate::os::process::write_fd(a(0) as i32, a(1), a(2) as usize) as u64,
+        Builtin::HostWrite => crate::os::fs::write_fd(a(0) as i32, a(1), a(2) as usize) as u64,
         Builtin::HostStrlen => crate::os::process::c_strlen(a(0)),
         Builtin::HostAbort => std::process::abort(),
         // fork: allowed only when the guest is single-threaded (the child is a whole-process

@@ -1,5 +1,12 @@
 use super::inbox::current_thread_inbox;
 use super::*;
+use crate::os::process::{exit_now, getpid};
+use crate::os::signal::{
+    MaskOp, SA_EXPOSE_TAGBITS, SA_NOCLDSTOP, SA_RESTART, SA_SIGINFO, SA_UNSUPPORTED, SIGURG,
+    SIGUSR1, SIGUSR2, SIGWINCH, SignalMask, kill, send_to_thread, set_thread_mask,
+};
+use crate::os::thread::current_thread;
+use crate::os_arch::signal::RESTORER_FLAG;
 use crate::vm::ctx::Shared;
 use crate::vm::ir::Module;
 
@@ -24,12 +31,12 @@ unsafe extern "C" fn raise_external_handler(_signum: i32) {
     RAISE_EXTERNAL_RAN.fetch_add(1, Ordering::SeqCst);
     let control = REENTRANT_INSTALL_CONTROL.lock().unwrap().clone();
     if let Some(control) = control {
-        let installed = install_signal(&control, libc::SIGWINCH, 0x2_6000, Some((15, 0x2_6000)));
+        let installed = install_signal(&control, SIGWINCH, 0x2_6000, Some((15, 0x2_6000)));
         REENTRANT_INSTALL_RESULT.store(i32::from(installed.is_ok()), Ordering::SeqCst);
     }
 
-    if crate::os::process::raise(libc::SIGURG) != 0 {
-        unsafe { libc::_exit(72) }
+    if crate::os::process::raise(SIGURG) != 0 {
+        exit_now(72)
     }
 }
 
@@ -38,8 +45,7 @@ unsafe extern "C" fn reentrant_raise_handler(_signum: i32) {
 }
 
 unsafe extern "C-unwind" fn exit_signal_mask_handler(_signum: i32) {
-    let mask =
-        Sigaction::current_standard_mask_bits().unwrap_or_else(|_| unsafe { libc::_exit(73) });
+    let mask = Sigaction::current_standard_mask_bits().unwrap_or_else(|_| exit_now(73));
     EXIT_CALLBACK_MASK.store(mask, Ordering::Release);
     EXIT_CALLBACK_COUNT.fetch_add(1, Ordering::Release);
 }
@@ -139,7 +145,7 @@ fn node(
 fn ordinary_delivery_does_not_keep_a_kernel_adapter_frame_in_flight() {
     let control = control();
     let visible = Sigaction::for_signal(0x1000);
-    let registration = registration(&control, libc::SIGUSR1, 0, visible);
+    let registration = registration(&control, SIGUSR1, 0, visible);
     let delivery = registration.safe_point_delivery().unwrap();
 
     registration.deactivate();
@@ -152,7 +158,7 @@ fn ordinary_delivery_does_not_keep_a_kernel_adapter_frame_in_flight() {
 #[test]
 fn new_thread_does_not_allocate_a_cell_for_a_closed_registration() {
     let control = control();
-    let registration = registration(&control, libc::SIGWINCH, 0, Sigaction::for_signal(0x2_7000));
+    let registration = registration(&control, SIGWINCH, 0, Sigaction::for_signal(0x2_7000));
     registration.deactivate();
     registration.wait_for_kernel_deliveries();
 
@@ -174,7 +180,7 @@ fn new_thread_does_not_allocate_a_cell_for_a_closed_registration() {
 #[test]
 fn target_pthread_preserves_each_kernel_selected_registration_generation() {
     if std::env::var_os(THREAD_GENERATIONS_CHILD).is_some() {
-        let signum = libc::SIGWINCH;
+        let signum = SIGWINCH;
         let saved = kernel_current(signum).unwrap();
         let _restore = RestoreSignal {
             signum,
@@ -186,9 +192,7 @@ fn target_pthread_preserves_each_kernel_selected_registration_generation() {
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let target = std::thread::spawn(move || {
             initialize_current_thread_inbox();
-            ready_tx
-                .send(unsafe { libc::pthread_self() } as usize)
-                .unwrap();
+            ready_tx.send(current_thread()).unwrap();
             drain_rx.recv().unwrap();
             let mut generations = Vec::new();
             while let Some((delivery, delivered_signum)) = take_current_thread_delivery(0) {
@@ -199,7 +203,7 @@ fn target_pthread_preserves_each_kernel_selected_registration_generation() {
             deactivate_current_thread_inbox();
             result_tx.send(generations).unwrap();
         });
-        let target_pthread = ready_rx.recv().unwrap() as libc::pthread_t;
+        let target_pthread = ready_rx.recv().unwrap();
 
         let mut expected = Vec::new();
         for (func, handler) in [(21, 0x2_7100), (22, 0x2_7200), (23, 0x2_7300)] {
@@ -211,11 +215,11 @@ fn target_pthread_preserves_each_kernel_selected_registration_generation() {
                 .max_by_key(|registration| registration.generation())
                 .unwrap();
             expected.push(registration.generation());
-            assert_eq!(unsafe { libc::pthread_kill(target_pthread, signum) }, 0);
+            assert_eq!(send_to_thread(target_pthread, signum), 0);
             wait_for_test_kernel_frames(registration, 1);
             assert_eq!(registration.thread_pending.load(Ordering::Acquire), 1);
             if func == 23 {
-                assert_eq!(unsafe { libc::pthread_kill(target_pthread, signum) }, 0);
+                assert_eq!(send_to_thread(target_pthread, signum), 0);
                 wait_for_test_kernel_frames(registration, 2);
                 assert_eq!(
                     registration.thread_pending.load(Ordering::Acquire),
@@ -257,8 +261,8 @@ fn wait_for_test_kernel_frames(registration: &SignalRegistration, expected: usiz
 #[test]
 fn target_pthread_exit_callback_observes_the_pre_exit_signal_mask() {
     if std::env::var_os(THREAD_EXIT_MASK_CHILD).is_some() {
-        let signum = libc::SIGWINCH;
-        let unrelated = libc::SIGUSR2;
+        let signum = SIGWINCH;
+        let unrelated = SIGUSR2;
         let saved = kernel_current(signum).unwrap();
         let engine = super::super::ctx::Engine::new(Shared::new(Module::default()));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -273,23 +277,14 @@ fn target_pthread_exit_callback_observes_the_pre_exit_signal_mask() {
             publish_rx.recv().unwrap();
         }));
         let target = std::thread::spawn(move || {
-            let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
-            unsafe {
-                libc::sigemptyset(&mut set);
-                libc::sigaddset(&mut set, unrelated);
-            }
-            assert_eq!(
-                unsafe { libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, ptr::null_mut()) },
-                0
-            );
+            let mask = SignalMask::empty().with(unrelated);
+            assert!(set_thread_mask(MaskOp::Unblock, &mask).is_ok());
             let activation = super::super::ctx::activate(target_engine.shared());
-            ready_tx
-                .send(unsafe { libc::pthread_self() } as usize)
-                .unwrap();
+            ready_tx.send(current_thread()).unwrap();
             exit_rx.recv().unwrap();
             drop(activation);
         });
-        let target_pthread = ready_rx.recv().unwrap() as libc::pthread_t;
+        let target_pthread = ready_rx.recv().unwrap();
         let action = Sigaction::for_signal(exit_signal_mask_handler as *const () as usize);
         let registration = SignalRegistration::new(
             Arc::clone(engine.control()),
@@ -301,11 +296,11 @@ fn target_pthread_exit_callback_observes_the_pre_exit_signal_mask() {
         let stub = materialize_signal_stub(registration).unwrap();
         let kernel = action.for_kernel_stub(stub);
         kernel.replace(signum).unwrap();
-        assert_eq!(unsafe { libc::pthread_kill(target_pthread, signum) }, 0);
+        assert_eq!(send_to_thread(target_pthread, signum), 0);
         wait_for_test_kernel_frames(registration, 1);
         exit_tx.send(()).unwrap();
         empty_rx.recv().unwrap();
-        assert_eq!(unsafe { libc::pthread_kill(target_pthread, signum) }, 0);
+        assert_eq!(send_to_thread(target_pthread, signum), 0);
         wait_for_test_kernel_frames(registration, 2);
         publish_tx.send(()).unwrap();
         target.join().unwrap();
@@ -346,42 +341,29 @@ fn target_pthread_exit_callback_observes_the_pre_exit_signal_mask() {
 
 #[test]
 fn kernel_normalization_rejects_restorer_and_supported_flag_changes() {
-    const SA_RESTORER: i32 = 0x0400_0000;
-    const SA_UNSUPPORTED: i32 = 0x0000_0400;
-    const SA_EXPOSE_TAGBITS: i32 = 0x0000_0800;
-    let mut requested: libc::sigaction = unsafe { std::mem::zeroed() };
-    requested.sa_sigaction = 0x1_1000;
-    requested.sa_flags = libc::SA_RESTART | SA_RESTORER | SA_UNSUPPORTED | SA_EXPOSE_TAGBITS;
-    requested.sa_restorer = Some(first_test_restorer);
-    assert_eq!(unsafe { libc::sigemptyset(&mut requested.sa_mask) }, 0);
-    let requested = unsafe { Sigaction::copy_from(ptr::from_ref(&requested) as u64) }.unwrap();
+    let mut requested = Sigaction::empty(
+        0x1_1000,
+        SA_RESTART | RESTORER_FLAG | SA_UNSUPPORTED | SA_EXPOSE_TAGBITS,
+    );
+    requested.set_restorer(first_test_restorer);
 
-    let mut accepted: libc::sigaction = unsafe { std::mem::zeroed() };
-    requested.write_to(ptr::from_mut(&mut accepted) as u64);
-    accepted.sa_flags &= !SA_UNSUPPORTED;
-    let accepted = unsafe { Sigaction::copy_from(ptr::from_ref(&accepted) as u64) }.unwrap();
+    let mut accepted = requested;
+    accepted.clear_flags(SA_UNSUPPORTED);
     assert!(accepted.is_kernel_normalization_of(&requested));
 
-    let mut wrong_restorer: libc::sigaction = unsafe { std::mem::zeroed() };
-    accepted.write_to(ptr::from_mut(&mut wrong_restorer) as u64);
-    wrong_restorer.sa_restorer = Some(second_test_restorer);
-    let wrong_restorer =
-        unsafe { Sigaction::copy_from(ptr::from_ref(&wrong_restorer) as u64) }.unwrap();
+    let mut wrong_restorer = accepted;
+    wrong_restorer.set_restorer(second_test_restorer);
     assert!(!wrong_restorer.is_kernel_normalization_of(&requested));
 
-    let mut missing_supported: libc::sigaction = unsafe { std::mem::zeroed() };
-    accepted.write_to(ptr::from_mut(&mut missing_supported) as u64);
-    missing_supported.sa_flags &= !SA_EXPOSE_TAGBITS;
-    let missing_supported =
-        unsafe { Sigaction::copy_from(ptr::from_ref(&missing_supported) as u64) }.unwrap();
+    let mut missing_supported = accepted;
+    missing_supported.clear_flags(SA_EXPOSE_TAGBITS);
     assert!(!missing_supported.is_kernel_normalization_of(&requested));
 }
 
 #[test]
 fn rejected_request_only_candidate_rolls_back_its_normalized_kernel_action() {
     if std::env::var_os(REQUEST_ONLY_ROLLBACK_CHILD).is_some() {
-        const SA_UNSUPPORTED: i32 = 0x0000_0400;
-        let signum = libc::SIGWINCH;
+        let signum = SIGWINCH;
         let saved = kernel_current(signum).unwrap();
         let _restore = RestoreSignal {
             signum,
@@ -389,7 +371,7 @@ fn rejected_request_only_candidate_rolls_back_its_normalized_kernel_action() {
         };
         let requested = Sigaction::empty(
             detached_close_external_handler as *const () as usize,
-            libc::SA_RESTART | SA_UNSUPPORTED,
+            SA_RESTART | SA_UNSUPPORTED,
         );
         requested.replace(signum).unwrap();
         let normalized = kernel_current(signum).unwrap();
@@ -416,15 +398,14 @@ fn rejected_request_only_candidate_rolls_back_its_normalized_kernel_action() {
 #[test]
 fn reconcile_solidifies_a_request_only_node_with_the_exact_old_action() {
     if std::env::var_os(REQUEST_ONLY_RECONCILE_CHILD).is_some() {
-        const SA_UNSUPPORTED: i32 = 0x0000_0400;
-        let signum = libc::SIGWINCH;
+        let signum = SIGWINCH;
         let saved = kernel_current(signum).unwrap();
         let _restore = RestoreSignal {
             signum,
             action: saved,
         };
         let control = control();
-        let visible = Sigaction::empty(0x2_7200, libc::SA_RESTART | SA_UNSUPPORTED);
+        let visible = Sigaction::empty(0x2_7200, SA_RESTART | SA_UNSUPPORTED);
         let requested = visible
             .for_kernel_stub(detached_close_external_handler as *const () as usize)
             .with_runtime_restorer();
@@ -494,7 +475,7 @@ fn reconcile_solidifies_a_request_only_node_with_the_exact_old_action() {
 #[test]
 fn compensation_preserves_a_newer_normalized_writer_by_exact_identity() {
     if std::env::var_os(EXACT_COMPENSATION_CHILD).is_some() {
-        let signum = libc::SIGWINCH;
+        let signum = SIGWINCH;
         let saved = kernel_current(signum).unwrap();
         let _restore = RestoreSignal {
             signum,
@@ -534,7 +515,7 @@ fn compensation_preserves_a_newer_normalized_writer_by_exact_identity() {
 #[test]
 fn detached_successor_accepts_distinct_valid_snapshots_of_its_predecessor() {
     if std::env::var_os(DETACHED_SNAPSHOT_CHILD).is_some() {
-        let signum = libc::SIGWINCH;
+        let signum = SIGWINCH;
         let saved = kernel_current(signum).unwrap();
         let _restore = RestoreSignal {
             signum,
@@ -609,7 +590,7 @@ fn detached_successor_accepts_distinct_valid_snapshots_of_its_predecessor() {
 #[test]
 fn cleared_inbox_event_blocks_the_finalizing_seal_until_delivery_is_held() {
     let control = control();
-    let signum = libc::SIGUSR1 as usize;
+    let signum = SIGUSR1 as usize;
     let registration = registration(&control, signum as i32, 1, Sigaction::for_signal(0x1_0000));
     control.signal_inbox.register(registration);
     registration.publish(signum as i32);
@@ -649,13 +630,13 @@ fn cleared_inbox_event_blocks_the_finalizing_seal_until_delivery_is_held() {
 #[test]
 fn external_raise_handler_can_reenter_signal_install_and_raise() {
     if std::env::var_os(RAISE_INSTALL_RACE_CHILD).is_some() {
-        let signum = libc::SIGWINCH;
+        let signum = SIGWINCH;
         let saved = kernel_current(signum).unwrap();
         let _restore = RestoreSignal {
             signum,
             action: saved,
         };
-        let reentrant_signum = libc::SIGURG;
+        let reentrant_signum = SIGURG;
         let reentrant_saved = kernel_current(reentrant_signum).unwrap();
         let _reentrant_restore = RestoreSignal {
             signum: reentrant_signum,
@@ -694,7 +675,7 @@ fn external_raise_handler_can_reenter_signal_install_and_raise() {
 #[test]
 fn successful_install_commits_before_an_immediate_raw_overwrite() {
     if std::env::var_os(INSTALL_OVERWRITE_CHILD).is_some() {
-        let signum = libc::SIGWINCH;
+        let signum = SIGWINCH;
         let saved = kernel_current(signum).unwrap();
         let _restore = RestoreSignal {
             signum,
@@ -762,11 +743,9 @@ fn successful_install_commits_before_an_immediate_raw_overwrite() {
 #[test]
 fn installed_stub_tracks_the_exact_kernel_normalized_action() {
     if std::env::var_os(NORMALIZED_ACTION_CHILD).is_some() {
-        const SA_UNSUPPORTED: i32 = 0x0000_0400;
-        const SA_EXPOSE_TAGBITS: i32 = 0x0000_0800;
         const UNKNOWN_PROBE_FLAG: i32 = 0x0000_0200;
 
-        let signum = libc::SIGWINCH;
+        let signum = SIGWINCH;
         let original = kernel_current(signum).unwrap();
         let _restore = RestoreSignal {
             signum,
@@ -778,7 +757,7 @@ fn installed_stub_tracks_the_exact_kernel_normalized_action() {
         let control = control();
         let requested = Sigaction::empty(
             0x2_7000,
-            libc::SA_RESTART | SA_UNSUPPORTED | SA_EXPOSE_TAGBITS | UNKNOWN_PROBE_FLAG,
+            SA_RESTART | SA_UNSUPPORTED | SA_EXPOSE_TAGBITS | UNKNOWN_PROBE_FLAG,
         );
         let old = install_sigaction_value(
             &control,
@@ -828,14 +807,9 @@ fn installed_stub_tracks_the_exact_kernel_normalized_action() {
 
         // Editing a retained oldact must preserve ordinary mask/flag edits
         // while stripping MIRVM's SA_SIGINFO/restorer adapter details.
-        let mut edited: libc::sigaction = unsafe { std::mem::zeroed() };
-        fixed_oldact.write_to(ptr::from_mut(&mut edited) as u64);
-        edited.sa_flags |= libc::SA_NOCLDSTOP;
-        assert_eq!(
-            unsafe { libc::sigaddset(&mut edited.sa_mask, libc::SIGUSR2) },
-            0
-        );
-        let edited = unsafe { Sigaction::copy_from(ptr::from_ref(&edited) as u64) }.unwrap();
+        let mut edited = fixed_oldact;
+        edited.or_flags(SA_NOCLDSTOP);
+        edited.add_to_mask(SIGUSR2);
         let replaced = install_sigaction_value(
             &control,
             signum,
@@ -846,19 +820,14 @@ fn installed_stub_tracks_the_exact_kernel_normalized_action() {
         assert!(replaced.same_disposition(&visible));
         let edited_visible = install_sigaction_value(&control, signum, None, None).unwrap();
         assert_eq!(edited_visible.handler(), requested.handler());
-        assert_ne!(edited_visible.flags() & libc::SA_NOCLDSTOP, 0);
-        assert_eq!(edited_visible.flags() & libc::SA_SIGINFO, 0);
+        assert_ne!(edited_visible.flags() & SA_NOCLDSTOP, 0);
+        assert_eq!(edited_visible.flags() & SA_SIGINFO, 0);
         assert_eq!(
             edited_visible.flags() & (SA_UNSUPPORTED | UNKNOWN_PROBE_FLAG),
             0
         );
-        let mut edited_visible_raw: libc::sigaction = unsafe { std::mem::zeroed() };
-        edited_visible.write_to(ptr::from_mut(&mut edited_visible_raw) as u64);
-        assert!(edited_visible_raw.sa_restorer.is_none());
-        assert_eq!(
-            unsafe { libc::sigismember(&edited_visible_raw.sa_mask, libc::SIGUSR2) },
-            1
-        );
+        assert!(edited_visible.restorer().is_none());
+        assert!(edited_visible.mask_contains(SIGUSR2));
 
         deactivate_engine(&control).unwrap();
         assert!(kernel_current(signum).unwrap().same_disposition(&saved));
@@ -879,24 +848,19 @@ fn installed_stub_tracks_the_exact_kernel_normalized_action() {
 #[test]
 fn close_restores_an_exact_kernel_restorer_snapshot() {
     if std::env::var_os(EXACT_RESTORE_CHILD).is_some() {
-        const SA_RESTORER: i32 = 0x0400_0000;
-        let signum = libc::SIGWINCH;
+        let signum = SIGWINCH;
         let saved = kernel_current(signum).unwrap();
         let _restore = RestoreSignal {
             signum,
             action: saved,
         };
 
-        let mut raw: libc::sigaction = unsafe { std::mem::zeroed() };
-        raw.sa_sigaction = detached_close_external_handler as *const () as usize;
-        raw.sa_flags = libc::SA_RESTART | SA_RESTORER;
-        raw.sa_restorer = Some(first_test_restorer);
-        assert_eq!(unsafe { libc::sigemptyset(&mut raw.sa_mask) }, 0);
-        assert_eq!(
-            unsafe { libc::sigaddset(&mut raw.sa_mask, libc::SIGUSR2) },
-            0
+        let mut raw = Sigaction::empty(
+            detached_close_external_handler as *const () as usize,
+            SA_RESTART | RESTORER_FLAG,
         );
-        let raw = unsafe { Sigaction::copy_from(ptr::from_ref(&raw) as u64) }.unwrap();
+        raw.set_restorer(first_test_restorer);
+        raw.add_to_mask(SIGUSR2);
         raw.replace_exact(signum).unwrap();
         let baseline = kernel_current(signum).unwrap();
         assert!(baseline.same_disposition(&raw));
@@ -922,7 +886,7 @@ fn close_restores_an_exact_kernel_restorer_snapshot() {
 #[test]
 fn current_delivery_follows_live_lower_and_detached_fixed_stubs() {
     if std::env::var_os(CURRENT_DELIVERY_CHILD).is_some() {
-        let signum = libc::SIGWINCH;
+        let signum = SIGWINCH;
         let saved = kernel_current(signum).unwrap();
         let _restore = RestoreSignal {
             signum,
@@ -974,7 +938,7 @@ fn current_delivery_follows_live_lower_and_detached_fixed_stubs() {
 #[test]
 fn raw_restore_of_a_closed_fixed_stub_exits_seventy() {
     if std::env::var_os(INACTIVE_STUB_CHILD).is_some() {
-        let signum = libc::SIGWINCH;
+        let signum = SIGWINCH;
         let saved = kernel_current(signum).unwrap();
         let control = control();
         install_signal(&control, signum, 0x2_4000, Some((13, 0x2_4000))).unwrap();
@@ -986,7 +950,7 @@ fn raw_restore_of_a_closed_fixed_stub_exits_seventy() {
         // lifetime. The process must not continue after silently losing
         // the signal through that dangling callback address.
         assert_eq!(closed_stub.install(signum), 0);
-        assert_eq!(unsafe { libc::kill(libc::getpid(), signum) }, 0);
+        assert_eq!(kill(getpid(), signum), 0);
         let _ = saved;
         panic!("inactive fixed stub returned from its signal adapter");
     }
@@ -1008,10 +972,10 @@ fn wrapped_raise_of_a_raw_restored_closed_stub_faults_without_retrying_forever()
     if std::env::var_os(HOST_RAISE_INACTIVE_STUB_CHILD).is_some() {
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_secs(5));
-            unsafe { libc::_exit(124) }
+            exit_now(124)
         });
 
-        let signum = libc::SIGWINCH;
+        let signum = SIGWINCH;
         let saved = kernel_current(signum).unwrap();
         let _restore = RestoreSignal {
             signum,
@@ -1039,13 +1003,8 @@ fn wrapped_raise_of_a_raw_restored_closed_stub_faults_without_retrying_forever()
         // Changing the surrounding action cannot make the closed handler
         // address live again. In particular, a raw oldact editor must not
         // turn the prompt failure above into an endless retry loop.
-        let mut edited: libc::sigaction = unsafe { std::mem::zeroed() };
-        closed_stub.write_to(ptr::from_mut(&mut edited) as u64);
-        assert_eq!(
-            unsafe { libc::sigaddset(&mut edited.sa_mask, libc::SIGUSR2) },
-            0
-        );
-        let edited = unsafe { Sigaction::copy_from(ptr::from_ref(&edited) as u64) }.unwrap();
+        let mut edited = closed_stub;
+        edited.add_to_mask(SIGUSR2);
         assert_eq!(edited.install(signum), 0);
         let exception = super::super::unwind::catch_raw(|| {
             super::super::ctx::raise_signal(activation.ctx(), signum)
@@ -1078,7 +1037,7 @@ fn wrapped_raise_of_a_raw_restored_closed_stub_faults_without_retrying_forever()
 fn stale_chain_keeps_the_matching_lower_stub_and_its_accepted_event() {
     let first_control = control();
     let second_control = control();
-    let signum = libc::SIGUSR1;
+    let signum = SIGUSR1;
     let base = Sigaction::for_signal(0x2000);
     let first_visible = Sigaction::for_signal(0x3000);
     let second_visible = Sigaction::for_signal(0x4000);
@@ -1170,7 +1129,7 @@ fn stale_chain_keeps_the_matching_lower_stub_and_its_accepted_event() {
 fn detached_successor_folds_around_a_closed_predecessor_and_checks_full_action() {
     let first_control = control();
     let second_control = control();
-    let signum = libc::SIGUSR1;
+    let signum = SIGUSR1;
     let base = Sigaction::for_signal(0x7000);
     let first_visible = Sigaction::for_signal(0x8000);
     let second_visible = Sigaction::for_signal(0x9000);
@@ -1235,7 +1194,7 @@ fn detached_successor_folds_around_a_closed_predecessor_and_checks_full_action()
 fn detached_stub_snapshot_drops_a_closed_external_native_predecessor() {
     let native_control = control();
     let callback_control = control();
-    let signum = libc::SIGUSR1;
+    let signum = SIGUSR1;
     let base = Sigaction::for_signal(0xc000);
     let native = Sigaction::for_signal(0xd000);
     let visible = Sigaction::for_signal(0xe000);
@@ -1268,7 +1227,7 @@ fn detached_stub_snapshot_drops_a_closed_external_native_predecessor() {
 #[test]
 fn exposed_fixed_stub_is_canonicalized_before_becoming_guest_visible_again() {
     let control = control();
-    let signum = libc::SIGUSR1;
+    let signum = SIGUSR1;
     let base = Sigaction::for_signal(0x1_0000);
     let visible = Sigaction::for_signal(0x1_1000);
     let kernel = visible.for_kernel_stub(0x1_2000);
@@ -1293,12 +1252,12 @@ fn exposed_fixed_stub_is_canonicalized_before_becoming_guest_visible_again() {
 
     assert!(exact.same_disposition(&visible));
     assert_eq!(signal_style.handler(), visible.handler());
-    assert_eq!(signal_style.flags(), libc::SA_RESTART);
+    assert_eq!(signal_style.flags(), SA_RESTART);
 }
 
 #[test]
 fn close_restores_the_predecessor_of_a_detached_current_stub() {
-    let signum = libc::SIGURG;
+    let signum = SIGURG;
     let saved = kernel_current(signum).unwrap();
     let _restore = RestoreSignal {
         signum,
@@ -1317,7 +1276,7 @@ fn close_restores_the_predecessor_of_a_detached_current_stub() {
     install_signal(&second_control, signum, 0x1_4000, Some((8, 0x1_4000))).unwrap();
     assert_eq!(first_stub.install(signum), 0);
 
-    assert_eq!(unsafe { libc::kill(libc::getpid(), signum) }, 0);
+    assert_eq!(kill(getpid(), signum), 0);
     for _ in 0..10_000 {
         if first_control.signal_inbox.has_pending() {
             break;
@@ -1339,7 +1298,7 @@ fn close_restores_the_predecessor_of_a_detached_current_stub() {
     deactivate_engine(&first_control).unwrap();
     let after_first_close = kernel_current(signum).unwrap();
     DETACHED_CLOSE_NATIVE_RAN.store(0, Ordering::SeqCst);
-    assert_eq!(unsafe { libc::kill(libc::getpid(), signum) }, 0);
+    assert_eq!(kill(getpid(), signum), 0);
     for _ in 0..10_000 {
         if DETACHED_CLOSE_NATIVE_RAN.load(Ordering::SeqCst) != 0 {
             break;

@@ -28,17 +28,32 @@ pub const SYS_EXIT: i64 = libc::SYS_exit;
 pub const SYS_EXIT_GROUP: i64 = libc::SYS_exit_group;
 pub const SYS_RT_SIGRETURN: i64 = libc::SYS_rt_sigreturn;
 
+// The numbers below are the platform's too, but no product path branches on them: they are here for
+// a caller that has to spell a number the kernel produced, which today are this crate's tests.
+#[cfg(test)]
+pub const SYS_GETPID: i64 = libc::SYS_getpid;
+#[cfg(test)]
+pub const SYS_GETPPID: i64 = libc::SYS_getppid;
+
+/// The C library's error numbers this crate has to compare against.
+///
+/// The rest reach a caller as the raw value [`errno`] returns; a number is named here only when a
+/// caller branches on it, and naming it here is what keeps `libc` out of the layers above.
+pub const ESRCH: i32 = libc::ESRCH;
+
+// The same argument, for the numbers only a test compares against.
+#[cfg(test)]
+pub const EDOM: i32 = libc::EDOM;
+#[cfg(test)]
+pub const EINVAL: i32 = libc::EINVAL;
+#[cfg(test)]
+pub const ENOSYS: i32 = libc::ENOSYS;
+
 /// Safe wrapper of `getenv(3)`.
 /// `name_addr`: guest side NUL-terminated string's  true address.
 /// Returns true address, or 0 on failure.
 pub fn getenv(name_addr: u64) -> u64 {
     unsafe { libc::getenv(name_addr as *const libc::c_char) as u64 }
-}
-
-/// write(2): returns the byte count written or -1 (errno semantics stay with the
-/// caller).
-pub fn write_fd(fd: i32, buf_addr: u64, len: usize) -> i64 {
-    unsafe { libc::write(fd, buf_addr as *const libc::c_void, len) as i64 }
 }
 
 /// strlen(3) on a guest-side NUL-terminated string's true address.
@@ -91,6 +106,42 @@ pub fn exit_now(status: i32) -> ! {
 /// links, not a guest `dlsym`.
 pub fn atexit_native(cb: extern "C" fn()) -> i32 {
     unsafe { libc::atexit(cb) }
+}
+
+/// A child's termination, decoded from the kernel's wait status.
+///
+/// The status word is the kernel's encoding, so this is where it is decoded; a caller that reaped
+/// a child asks a question instead of masking bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(test)]
+pub struct ExitStatus(i32);
+
+#[cfg(test)]
+impl ExitStatus {
+    /// Whether the child terminated normally, which is what makes [`ExitStatus::code`] meaningful.
+    pub fn exited(self) -> bool {
+        libc::WIFEXITED(self.0)
+    }
+
+    /// The child's exit code, meaningful only when [`ExitStatus::exited`].
+    pub fn code(self) -> i32 {
+        libc::WEXITSTATUS(self.0)
+    }
+}
+
+/// `waitpid(2)` for one child: block until `pid` terminates.
+///
+/// `Err` is the library's `errno`, because the caller that asked for this child is the only one
+/// that can say what a missing one means.
+#[cfg(test)]
+pub fn wait(pid: i32) -> Result<ExitStatus, i32> {
+    let mut status: i32 = 0;
+    let result = unsafe { libc::waitpid(pid, &mut status, 0) };
+    if result < 0 {
+        Err(errno())
+    } else {
+        Ok(ExitStatus(status))
+    }
 }
 
 /// libcall symbol address for JIT-compiled code (registered with cranelift

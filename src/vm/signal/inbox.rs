@@ -6,7 +6,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use super::{DeferredSignalCallback, SIGNAL_SLOTS};
 use crate::os::process::exit_now;
-use crate::os::signal::{Sigaction, sent_by_thread_kill};
+use crate::os::signal::{Sigaction, SignalInfo, sent_by_thread_kill};
 use crate::vm::ctx::EngineControl;
 
 const DELIVERY_ACTIVE: usize = 1usize << (usize::BITS - 1);
@@ -652,7 +652,7 @@ pub(crate) fn restore_owner(_owner: u64) {}
 pub(crate) unsafe fn record_async_signal(
     registration: *mut SignalRegistration,
     signum: i32,
-    info: *mut libc::siginfo_t,
+    info: SignalInfo,
 ) {
     if registration.is_null() || signum <= 0 || signum as usize >= SIGNAL_SLOTS {
         exit_now(i32::from(crate::diag::exit::SOFTWARE))
@@ -667,7 +667,7 @@ pub(crate) unsafe fn record_async_signal(
         }
         exit_now(i32::from(crate::diag::exit::SOFTWARE))
     };
-    if sent_by_thread_kill(info.cast()) {
+    if sent_by_thread_kill(info) {
         let Some(inbox) = current_thread_inbox() else {
             if retry_current_host_raise(signum) {
                 return;

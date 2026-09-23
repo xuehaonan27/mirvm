@@ -16,6 +16,7 @@ use super::capture::{
     SessionCore, WRITER_AWAKE, WRITER_SLEEPING,
 };
 use super::capture_session::NEXT_SESSION_ID;
+use crate::os::fs::Buffer;
 use crate::telemetry::format::{
     CHUNK_FOOTER_BYTES, CHUNK_HEADER_BYTES, CLOCK_NONE, ChunkFooter, ChunkHeader, FileHeader,
     PAGE_HEADER_BYTES, PRODUCER_END_BYTES, ProducerEnd, SESSION_END_BYTES, SessionEnd, WireError,
@@ -280,30 +281,21 @@ fn pwrite_chunk(
 ) -> io::Result<()> {
     let header = ChunkHeader::new(chunk_ordinal, payload.len() as u64, block_count, page_count)
         .map_err(wire_io)?;
-    let mut encoded_header = header.to_le_bytes();
+    let encoded_header = header.to_le_bytes();
     let footer = ChunkFooter::for_slices(&header, &encoded_header, [payload]).map_err(wire_io)?;
-    let mut encoded_footer = footer.to_le_bytes();
-    let mut iov = [
-        libc::iovec {
-            iov_base: encoded_header.as_mut_ptr().cast(),
-            iov_len: CHUNK_HEADER_BYTES,
-        },
-        libc::iovec {
-            iov_base: payload.as_ptr() as *mut libc::c_void,
-            iov_len: payload.len(),
-        },
-        libc::iovec {
-            iov_base: encoded_footer.as_mut_ptr().cast(),
-            iov_len: CHUNK_FOOTER_BYTES,
-        },
+    let encoded_footer = footer.to_le_bytes();
+    let mut buffers = [
+        Buffer::new(&encoded_header),
+        Buffer::new(payload),
+        Buffer::new(&encoded_footer),
     ];
-    pwritev_all(fd, &mut iov, offset)
+    pwritev_all(fd, &mut buffers, offset)
 }
 
-fn pwritev_all(fd: i32, iov: &mut [libc::iovec], offset: &mut i64) -> io::Result<()> {
+fn pwritev_all(fd: i32, buffers: &mut [Buffer<'_>], offset: &mut i64) -> io::Result<()> {
     let mut first = 0;
-    while first < iov.len() {
-        let written = match crate::os::fs::write_vectored_at(fd, &iov[first..], *offset) {
+    while first < buffers.len() {
+        let written = match crate::os::fs::write_vectored_at(fd, &buffers[first..], *offset) {
             Ok(written) => written,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
@@ -319,16 +311,11 @@ fn pwritev_all(fd: i32, iov: &mut [libc::iovec], offset: &mut i64) -> io::Result
             .ok_or_else(|| io::Error::other("capture file offset overflow"))?;
         let mut remaining = written;
         while remaining != 0 {
-            if remaining >= iov[first].iov_len {
-                remaining -= iov[first].iov_len;
+            if remaining >= buffers[first].len() {
+                remaining -= buffers[first].len();
                 first += 1;
             } else {
-                iov[first].iov_base = unsafe {
-                    (iov[first].iov_base as *mut u8)
-                        .add(remaining)
-                        .cast::<libc::c_void>()
-                };
-                iov[first].iov_len -= remaining;
+                buffers[first] = buffers[first].advance(remaining);
                 remaining = 0;
             }
         }
