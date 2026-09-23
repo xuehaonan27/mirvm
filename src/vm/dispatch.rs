@@ -8,16 +8,15 @@
 //! count only moves the compilation trigger, while the slot load uses Acquire against the
 //! compiler thread's Release.
 //!
-//! Inbound FFI marshalling lives here too: a native caller's arguments arrive in the C shape
-//! (scalars as-is, aggregates as the true address of their bytes) and are expanded to ABI
-//! argument slots before the same entry point is used.
+//! A native caller's arguments arrive in the C shape, so they are converted before the same
+//! entry point is used; that conversion is [`crate::vm::ffi::inbound`]'s, not this module's.
 //!
 //! The mutual reference with `interp` is deliberate and this narrow: the interpreted fallback
 //! is `interp::interp_frame`, and the interpreter performs its own calls through
 //! [`call_guest`]. Neither reaches any other part of the other.
 
 use crate::vm::ctx::{Ctx, current_code_domain};
-use crate::vm::ir::{FfiAgg, FfiKind, FfiLeaf, FuncBody, Module, ParamAbi, RetAbi};
+use crate::vm::ir::{Module, RetAbi};
 use crate::vm::jit::{CodeDomain, FAIL_SENTINEL, call_trace_body};
 use crate::vm::unwind::engine_abort;
 
@@ -145,101 +144,4 @@ pub(crate) fn call_fn_addr(ctx: *mut Ctx, addr: u64, args: &[u64], caller: &str)
 pub(crate) fn ret_abi_of(ctx: *mut Ctx, func: u32) -> RetAbi {
     let module: &Module = unsafe { &(*(*ctx).shared).module };
     module.funcs[func as usize].ret
-}
-
-/// C1 inbound FFI marshalling: expands the C-side arguments that `marshal_args` produced
-/// (scalars as-is, aggregates as the true address of their bytes) into ABI argument slots
-/// according to the callee's `ParamAbi`, then calls `call_guest`. Shared by the thunk factory
-/// and the P1 entry trampoline. `ret_addr` is libffi's result buffer for a by-value aggregate
-/// return; it becomes the hidden first argument slot only when the callee returns
-/// `RetAbi::Indirect` (sret passed through), while small forms are re-packed into `FfiAgg`
-/// from `(lo, hi)` by the caller.
-pub(crate) fn call_guest_ffi(
-    ctx: *mut Ctx,
-    func: u32,
-    kinds: &[FfiKind],
-    vals: &[u64],
-    ret_addr: Option<u64>,
-) -> (u64, u64) {
-    let module: &Module = unsafe { &(*(*ctx).shared).module };
-    let body: &FuncBody = &module.funcs[func as usize];
-    let mut av: Vec<u64> = Vec::with_capacity(vals.len() + body.params.len() + 1);
-    if let RetAbi::Indirect { .. } = body.ret {
-        av.push(ret_addr.expect(
-            "C1: callee returns an aggregate by value (RetAbi::Indirect) but has no result address",
-        ));
-    }
-    let mut ki = 0usize;
-    for p in &body.params {
-        match p {
-            ParamAbi::Zst => {}
-            ParamAbi::Scalar(_) => match kinds.get(ki) {
-                Some(FfiKind::Agg(agg)) => {
-                    av.push(unsafe { agg_leaf_at(*vals.get_unchecked(ki), agg, 0) });
-                    ki += 1;
-                }
-                Some(_) => {
-                    av.push(vals[ki]);
-                    ki += 1;
-                }
-                None => engine_abort(&format!(
-                    "C1 marshalling is missing an argument (callee fn {} params {:?})",
-                    body.name, body.params
-                )),
-            },
-            ParamAbi::Pair(_, _) => match kinds.get(ki) {
-                Some(FfiKind::Agg(agg)) => {
-                    av.push(unsafe { agg_leaf_at(*vals.get_unchecked(ki), agg, 0) });
-                    av.push(unsafe { agg_leaf_at(*vals.get_unchecked(ki), agg, 1) });
-                    ki += 1;
-                }
-                _ => engine_abort(&format!(
-                    "C1 marshalling mismatch: a `Pair` callee parameter met a non-scalar C argument (fn {} params {:?} kinds {:?})",
-                    body.name, body.params, kinds
-                )),
-            },
-            ParamAbi::Indirect { .. } => match kinds.get(ki) {
-                Some(FfiKind::Agg(_)) => {
-                    av.push(vals[ki]);
-                    ki += 1;
-                }
-                _ => engine_abort(&format!(
-                    "C1 marshalling mismatch: a by-address callee parameter met a non-scalar C argument (fn {} params {:?} kinds {:?})",
-                    body.name, body.params, kinds
-                )),
-            },
-        }
-    }
-    if ki != vals.len() {
-        engine_abort(&format!(
-            "C1 marshalling slot count mismatch: callee fn {} consumes {ki}, marshal supplies {}",
-            body.name,
-            vals.len()
-        ));
-    }
-    call_guest(ctx, func, &av)
-}
-
-/// Reads field `idx` of `agg`, in declaration order, at its declared width for a scalar leaf.
-/// A top-level nested leaf is structurally exclusive with the Pair/Scalar parameter forms by
-/// the same rustc layout derivation, so encountering one breaks an engine invariant.
-unsafe fn agg_leaf_at(addr: u64, agg: &FfiAgg, idx: usize) -> u64 {
-    let Some(f) = agg.fields.get(idx) else {
-        engine_abort("C1 marshalling: a Pair parameter met a single-field aggregate");
-    };
-    let FfiLeaf::Scalar(k) = &f.leaf else {
-        engine_abort("C1 marshalling: a top-level nested leaf met a Pair parameter");
-    };
-    let p = addr.wrapping_add(f.off as u64) as *const u8;
-    unsafe {
-        match k {
-            FfiKind::I8 | FfiKind::U8 => p.read() as u64,
-            FfiKind::I16 | FfiKind::U16 => (p as *const u16).read_unaligned() as u64,
-            FfiKind::I32 | FfiKind::U32 | FfiKind::F32 => (p as *const u32).read_unaligned() as u64,
-            FfiKind::I64 | FfiKind::U64 | FfiKind::F64 | FfiKind::Ptr => {
-                (p as *const u64).read_unaligned()
-            }
-            FfiKind::Void | FfiKind::Agg(_) => engine_abort("C1 marshalling: illegal leaf kind"),
-        }
-    }
 }
