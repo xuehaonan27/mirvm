@@ -43,7 +43,7 @@ use crate::vm::ir;
 // level, since mirvm already holds all the GAS text at its generation point and never has to
 // scan a binary. The rewrite turns `syscall` into an indirect-slot
 // `call QWORD PTR [rip+mirvm_syscall_slot]`. The slot ships with the `.so` and is refilled
-// after dlopen with the real address of the `arch::x86_64::asmstub` trampoline, under the
+// after dlopen with the real address of the `arch::asmstub` trampoline, under the
 // same discipline as the startup-phase refill. The trampoline preserves the full syscall
 // contract (integer, flags, xmm, mxcsr) and lands in `os::process::mirvm_syscall_dispatch`,
 // which passes through and traces.
@@ -93,7 +93,7 @@ pub(crate) fn refill_syscall_slot(handle: usize) {
     let slot = crate::os::dll::sym(handle, c"mirvm_syscall_slot");
     if slot != 0 {
         unsafe {
-            *(slot as *mut u64) = crate::arch::x86_64::asmstub::syscall_trampoline_addr();
+            *(slot as *mut u64) = crate::arch::asmstub::syscall_trampoline_addr();
         }
     }
 }

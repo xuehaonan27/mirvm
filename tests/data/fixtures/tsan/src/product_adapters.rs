@@ -6,7 +6,7 @@ pub(crate) mod lower {
             let slot = crate::os::dll::sym(handle, c"mirvm_syscall_slot");
             if slot != 0 {
                 unsafe {
-                    *(slot as *mut u64) = crate::arch::x86_64::asmstub::syscall_trampoline_addr();
+                    *(slot as *mut u64) = crate::arch::asmstub::syscall_trampoline_addr();
                 }
             }
         }

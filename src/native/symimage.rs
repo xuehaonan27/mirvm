@@ -10,7 +10,7 @@
 //! [`build`] returns the bytes and the file offset the functions start at, which is what a caller
 //! adds to the load bias to get each token.
 
-use crate::arch::x86_64::asmstub::RET;
+use crate::arch::asmstub::RET;
 use crate::native::elf;
 
 fn align(value: usize, alignment: usize) -> usize {

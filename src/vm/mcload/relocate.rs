@@ -8,7 +8,7 @@
 //! first, then the host through `RTLD_DEFAULT`, then zero for a weak symbol the host does not
 //! define.
 
-use crate::arch::x86_64::reloc;
+use crate::arch::reloc;
 use crate::native::elf;
 
 use super::bad;
