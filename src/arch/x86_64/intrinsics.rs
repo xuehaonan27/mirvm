@@ -18,6 +18,24 @@ use std::arch::x86_64::{
     _mm256_permutevar8x32_epi32, _mm256_sad_epu8, _mm256_shuffle_epi8, _mm256_storeu_si256,
 };
 
+/// `xgetbv`: XCR(xcr) -> (edx:eax) assembled into a u64.
+///
+/// A single instruction rather than a family: the guest asks for the extended control register
+/// itself, and there is nothing to model.
+pub(crate) unsafe fn xgetbv(xcr: u32) -> u64 {
+    let (eax, edx): (u32, u32);
+    unsafe {
+        std::arch::asm!(
+            "xgetbv",
+            in("ecx") xcr,
+            out("eax") eax,
+            out("edx") edx,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    (u64::from(edx) << 32) | u64::from(eax)
+}
+
 /// SSSE3 `pshufb`, 128-bit form.
 #[target_feature(enable = "ssse3")]
 pub(crate) unsafe fn pshufb128(dst: *mut u8, a: *const u8, control: *const u8) {
