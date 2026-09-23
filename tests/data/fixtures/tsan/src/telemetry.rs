@@ -7,7 +7,7 @@
 
 #[path = "../../../../../src/telemetry/capture.rs"]
 pub(crate) mod capture;
-#[path = "../../../../../src/telemetry/capture_session.rs"]
+#[path = "../../../../../src/telemetry/capture_session/mod.rs"]
 pub(crate) mod capture_session;
 #[path = "../../../../../src/telemetry/capture_writer.rs"]
 pub(crate) mod capture_writer;
