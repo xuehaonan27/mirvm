@@ -333,3 +333,184 @@ pub fn build(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
     debug_assert_eq!(out.out.len(), file_len, "the string table ends the file");
     Ok((out.out, text_off))
 }
+
+// ===== reading an image back =====
+
+/// One symbol of an image's table.
+pub(crate) struct ImageSymbol {
+    /// The name as the rest of mirvm spells it: this format's leading underscore is dropped, so a
+    /// caller compares the same string it would use anywhere else.
+    pub(crate) name: Box<str>,
+    /// The address the symbol is defined at in the image, or zero for one the loader resolves.
+    ///
+    /// Only the test below reads it today; a caller resolving a symbol into running code is what
+    /// this is here for.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) value: u64,
+    /// Whether the loader has to resolve it rather than the image defining it.
+    pub(crate) undefined: bool,
+}
+
+/// `n_type`'s type field, and the value meaning "defined nowhere in this image".
+const N_TYPE: u8 = 0x0e;
+const N_UNDF: u8 = 0x00;
+
+/// The symbols of a Mach-O image, in the order its table lists them.
+pub(crate) fn symbols(bytes: &[u8]) -> Result<Vec<ImageSymbol>, String> {
+    let (commands, _) = header(bytes)?;
+    let mut cursor = HEADER_SIZE;
+    for _ in 0..commands {
+        let (command, size) = load_command(bytes, cursor)?;
+        if command == LC_SYMTAB {
+            return symbol_table(bytes, symtab_at(bytes, cursor)?);
+        }
+        cursor = cursor
+            .checked_add(size as usize)
+            .ok_or_else(|| "the load commands overrun the image".to_string())?;
+    }
+    Err("the image carries no symbol table".to_string())
+}
+
+/// The names of the symbols the loader has to resolve, which is what an image's own undefined
+/// range is: the external symbols its table defines nowhere.
+pub(crate) fn undefined_symbols(bytes: &[u8]) -> Result<Vec<Box<str>>, String> {
+    Ok(symbols(bytes)?
+        .into_iter()
+        .filter(|symbol| symbol.undefined)
+        .map(|symbol| symbol.name)
+        .collect())
+}
+
+/// The `LC_SYMTAB` fields at `cursor`: `symoff`, `nsyms`, `stroff` and `strsize`.
+fn symtab_at(bytes: &[u8], cursor: usize) -> Result<[usize; 4], String> {
+    let short = || "the image ends inside a load command".to_string();
+    let mut fields = [0_usize; 4];
+    for (index, field) in fields.iter_mut().enumerate() {
+        let at = cursor + 8 + index * 4;
+        *field = read_u32(bytes, at).ok_or_else(short)? as usize;
+    }
+    Ok(fields)
+}
+
+/// Walks `[symoff, nsyms, stroff, strsize]` into the symbols they name.
+fn symbol_table(bytes: &[u8], fields: [usize; 4]) -> Result<Vec<ImageSymbol>, String> {
+    let [symoff, nsyms, stroff, strsize] = fields;
+    let strings = bytes
+        .get(stroff..stroff + strsize)
+        .ok_or_else(|| "the string table lies outside the image".to_string())?;
+    let mut out = Vec::with_capacity(nsyms);
+    for index in 0..nsyms {
+        let at = symoff + index * NLIST_SIZE;
+        let entry = bytes
+            .get(at..at + NLIST_SIZE)
+            .ok_or_else(|| "the symbol table lies outside the image".to_string())?;
+        // `nlist_64` is `n_strx`, `n_type`, `n_sect`, `n_desc`, `n_value`.
+        let name = name_of(
+            strings,
+            read_u32(bytes, at)
+                .ok_or_else(|| "the symbol table lies outside the image".to_string())?
+                as usize,
+        )?;
+        out.push(ImageSymbol {
+            name,
+            value: read_u64(entry, 8).ok_or_else(|| "a symbol entry is truncated".to_string())?,
+            undefined: entry[4] & N_TYPE == N_UNDF && entry[4] & N_EXT != 0,
+        });
+    }
+    Ok(out)
+}
+
+/// The symbol name at `offset` in the string table, without this format's leading underscore.
+fn name_of(strings: &[u8], offset: usize) -> Result<Box<str>, String> {
+    let tail = strings
+        .get(offset..)
+        .ok_or_else(|| "a symbol name lies outside the string table".to_string())?;
+    let end = tail
+        .iter()
+        .position(|&byte| byte == 0)
+        .ok_or_else(|| "a symbol name is not terminated".to_string())?;
+    let name =
+        std::str::from_utf8(&tail[..end]).map_err(|_| "a symbol name is not UTF-8".to_string())?;
+    Ok(Box::from(name.strip_prefix('_').unwrap_or(name)))
+}
+
+/// The image's `ncmds` and `sizeofcmds`.
+fn header(bytes: &[u8]) -> Result<(u32, u32), String> {
+    match read_u32(bytes, 0) {
+        Some(MH_MAGIC_64) => {}
+        _ => return Err("not a 64-bit Mach-O image".to_string()),
+    }
+    let short = || "the image ends inside its header".to_string();
+    Ok((
+        read_u32(bytes, 16).ok_or_else(short)?,
+        read_u32(bytes, 20).ok_or_else(short)?,
+    ))
+}
+
+/// A load command's `cmd` and `cmdsize`.
+fn load_command(bytes: &[u8], cursor: usize) -> Result<(u32, u32), String> {
+    let short = || "the image ends inside a load command".to_string();
+    Ok((
+        read_u32(bytes, cursor).ok_or_else(short)?,
+        read_u32(bytes, cursor + 4).ok_or_else(short)?,
+    ))
+}
+
+fn read_u32(bytes: &[u8], at: usize) -> Option<u32> {
+    let slice = bytes.get(at..at + 4)?;
+    Some(u32::from_le_bytes(slice.try_into().ok()?))
+}
+
+fn read_u64(bytes: &[u8], at: usize) -> Option<u64> {
+    let slice = bytes.get(at..at + 8)?;
+    Some(u64::from_le_bytes(slice.try_into().ok()?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NAMES: [&str; 3] = ["mirvm_probe_a", "mirvm_probe_b", "mirvm_probe_c"];
+
+    fn image() -> (Vec<u8>, usize) {
+        let names: Vec<Box<str>> = NAMES.iter().map(|name| Box::from(*name)).collect();
+        build(&names).expect("a symbol image")
+    }
+
+    /// The writer and the reader are the two halves of one layout: what the first lays down, the
+    /// second has to find, at the addresses the first promised.
+    #[test]
+    fn the_reader_finds_what_the_writer_wrote() {
+        let (bytes, text_off) = image();
+        let symbols = symbols(&bytes).expect("an image this module wrote");
+        assert_eq!(symbols.len(), NAMES.len());
+        for (index, symbol) in symbols.iter().enumerate() {
+            assert_eq!(&*symbol.name, NAMES[index]);
+            assert_eq!(symbol.value as usize, text_off + index * SLOT);
+            assert!(!symbol.undefined);
+        }
+        assert!(undefined_symbols(&bytes).expect("an image").is_empty());
+    }
+
+    /// An undefined symbol is one the loader resolves: `N_EXT` with no section. Turning the
+    /// writer's first entry into one is what a caller of `undefined_symbols` is looking for.
+    #[test]
+    fn an_undefined_symbol_is_reported_without_the_formats_underscore() {
+        let (mut bytes, _) = image();
+        let mut at = HEADER_SIZE;
+        let symoff = loop {
+            let (command, size) = load_command(&bytes, at).expect("a load command");
+            if command == LC_SYMTAB {
+                break symtab_at(&bytes, at).expect("symtab fields")[0];
+            }
+            at += size as usize;
+        };
+        // Make the first entry external and sectionless, which is what "the loader resolves this"
+        // is: the reader has to report it, and without the underscore the file spells it with.
+        bytes[symoff + 4] = N_EXT;
+        bytes[symoff + 5] = 0;
+        let undefined = undefined_symbols(&bytes).expect("an image");
+        assert_eq!(undefined.len(), 1);
+        assert_eq!(&*undefined[0], NAMES[0]);
+    }
+}

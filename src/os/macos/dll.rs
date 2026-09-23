@@ -26,8 +26,9 @@ use std::ffi::{CStr, CString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
-/// The format this platform's loader accepts: an arm64 build loads dylibs, and this is that.
-pub const SYMBOL_IMAGE_FORMAT: ObjectFormat = ObjectFormat::MachO;
+/// The format this platform's toolchain writes and its loader accepts: an arm64 build links and
+/// loads dylibs, and this is that.
+pub const OBJECT_FORMAT: ObjectFormat = ObjectFormat::MachO;
 
 /// Publishes `bytes` as an object this process's loader can load, and answers the handle, the base
 /// its contents were mapped at, and the file that keeps them readable.

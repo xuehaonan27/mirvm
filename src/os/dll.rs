@@ -13,11 +13,10 @@
 //! can read the base out of the handle needs only the first: the one that keys its loader's image
 //! list by name needs only the second, and a call site names one function on every target.
 //!
-//! Two more items are the platform's because they are what a platform's loader *accepts*, and a
-//! caller that has to publish an object for the loader cannot know either of them: the format the
-//! object has to be written in (`SYMBOL_IMAGE_FORMAT`) and the sequence that gets bytes to the
-//! loader at all (`load_private_image`). The bytes themselves come from `crate::native`, which
-//! writes a layout without knowing which platform is asking.
+//! Two more items are the platform's, and neither is knowable from here: which object format this
+//! platform's toolchain writes and its loader accepts (`OBJECT_FORMAT`), and the sequence that gets
+//! bytes to the loader at all (`load_private_image`). The bytes and their layout are
+//! `crate::native`'s, which writes one without knowing which platform is asking.
 
 /// The dlopen mode.
 /// All call points always carry RTLD_GLOBAL (fixed as an internal constant).
@@ -27,11 +26,12 @@ pub enum Mode {
     Lazy,
 }
 
-/// The object format a platform's loader accepts.
+/// An object format. Which one a build meets is the platform's answer either way round: it is what
+/// its toolchain writes and what its loader reads back.
 ///
-/// A byte layout does not vary with the platform, which is why the writers for both of these live
-/// in `crate::native`; what varies is which of them this platform's loader will load at all, and
-/// that is one `SYMBOL_IMAGE_FORMAT` per platform.
+/// A byte layout does not vary with the platform, which is why the readers and writers for both of
+/// these live in `crate::native`; what varies is which one this platform deals in, and that is one
+/// `OBJECT_FORMAT` per platform.
 ///
 /// Both variants therefore exist in every build. The one this platform does not name is still what
 /// the shared dispatch matches on, so it is unreachable by construction rather than unused.
