@@ -406,7 +406,7 @@ mod tests {
         assert!(pvis != 0);
         // .symtab fallback: the hidden symbol resolves and the call returns the right value
         let syms = symtab_values(so.to_str().unwrap()).unwrap();
-        let bias = crate::os::dll::load_bias(handle).expect("load_bias") as u64;
+        let bias = crate::os::dll::load_bias(handle, &c_so).expect("load_bias") as u64;
         let hidden_addr = *syms
             .get("mirvm_hidden_probe")
             .expect("symtab contains the hidden symbol")

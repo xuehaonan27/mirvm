@@ -153,8 +153,8 @@ impl Symbols {
             crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL,
         )
         .map_err(|error| format!("dlopen of in-memory ELF failed: {error}"))?;
-        let bias =
-            crate::os::dll::load_bias(handle).ok_or("reading in-memory ELF load base failed")?;
+        let bias = crate::os::dll::load_bias(handle, &path)
+            .ok_or("reading in-memory ELF load base failed")?;
         let ips = (0..module.function_names.len())
             .map(|index| (bias + text_off + index * 16) as u64)
             .collect();

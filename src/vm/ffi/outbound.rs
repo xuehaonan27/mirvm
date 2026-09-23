@@ -158,7 +158,7 @@ impl FfiState {
                         format!("[dlopen needs native library] `{cand}` failure: {detail}")
                     })?;
                 self.required_handles.push(h);
-                if let Some(bias) = crate::os::dll::load_bias(h)
+                if let Some(bias) = crate::os::dll::load_bias(h, &cpath)
                     && let Ok(syms) = crate::native::symtab::hidden_symtab_values(cand)
                 {
                     self.archive_fallbacks.push((bias as u64, syms));

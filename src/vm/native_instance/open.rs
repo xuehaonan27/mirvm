@@ -76,7 +76,7 @@ fn open_deferred(path: &Path, remove_private_file: bool) -> Result<NativeImage, 
     }
     let mut handle_guard = HandleGuard(Some(handle));
     crate::lower::asm::refill_syscall_slot(handle);
-    let bias = crate::os::dll::load_bias(handle)
+    let bias = crate::os::dll::load_bias(handle, &cpath)
         .ok_or_else(|| format!("fail to find load base for `{}`", path.display()))?;
     let hidden_symbols = crate::native::symtab::hidden_symtab_values(&path.to_string_lossy())
         .map_err(|error| error.to_string())?;

@@ -88,7 +88,11 @@ struct LinkMap {
 /// If returns [`None`], it means [`dlinfo`] fails, and that usually means an
 /// invalid handle is passed to [`load_bias`].
 /// A handle just opened by [`dlopen`] should not be invalid.
-pub fn load_bias(handle: usize) -> Option<usize> {
+///
+/// `path` is the name the library was opened under. This platform answers from the handle alone, so
+/// it is not consulted here; it is part of the signature because the platform on the other side of
+/// the ladder has nowhere else to get it, and a call site must be able to name one function.
+pub fn load_bias(handle: usize, _path: &CStr) -> Option<usize> {
     let mut lm: *mut LinkMap = std::ptr::null_mut();
     let r = unsafe {
         libc::dlinfo(
