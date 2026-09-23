@@ -4,13 +4,26 @@
 //! supports: handles and return values travel as [`usize`] (leaf type discipline), and business
 //! semantics like binding priority and symbol existence stay with the caller.
 //!
-//! One surface item is deliberately absent: `load_bias`. Linux reads a handle's load base out of
-//! the loader's own link map; this platform has no such call, and its `dlopen` returns an opaque
-//! handle rather than the image header, so `dladdr(handle)` answers nothing — measured, for both a
-//! shared-cache library and one built locally. The base is reachable only from an address *inside*
-//! the image (`dladdr(dlsym(handle, name))` gives it), which the current signature has no way to
-//! supply. Until that surface question is settled, a caller that needs the base gets the
-//! unresolved name rather than a wrong number.
+//! One surface item is deliberately absent: `load_bias`, because three measurements say what it has
+//! to be and none of them is the obvious guess.
+//!
+//! `dlopen` returns an opaque handle here rather than the image header, so `dladdr(handle)` answers
+//! nothing — measured for both a shared-cache library and one built locally — which rules out
+//! translating Linux's link-map read directly. An address *inside* the image does work
+//! (`dladdr(dlsym(handle, name))`), but the product caller that needs the base has no symbol at
+//! that point: it reads its symbol table from the file afterwards. What every caller does have is
+//! the path it just opened, and the path is what the loader itself keys its image list by — with
+//! the trap that it reports the *resolved* path (`/private/tmp/…` for `/tmp/…`), so a comparison
+//! against the caller's spelling misses silently and always.
+//!
+//! The base is then `slide + __TEXT.vmaddr`, not the slide: a locally built image has
+//! `vmaddr == 0`, where the slide alone looks right, while a system library does not and the slide
+//! is short by exactly that. Reading it means reading this platform's object layout, so this is
+//! one piece of the same question that `reloc` and the loader face.
+//!
+//! Until that is settled a caller gets an unresolved name rather than a wrong number: the base
+//! feeds both the executable ranges and the lifecycle materialization, so a base short by a
+//! preferred address would corrupt native-instance addressing quietly.
 
 use crate::os::dll::Mode;
 use std::ffi::CStr;
