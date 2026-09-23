@@ -4,7 +4,7 @@
 use crate::vm::ir::{FuncBlob, FuncTable};
 
 use super::Error;
-use super::bytes::{Cursor, Writer};
+use super::fields;
 use super::format::{check_hash, hash128};
 use super::meta::postcard_bytes;
 
@@ -29,31 +29,33 @@ pub(super) fn build_function_section(funcs: &FuncTable) -> Result<Vec<u8>, Error
         encoded.push((offset, bytes));
         offset = end;
     }
-    let mut out = Writer::with_capacity(offset);
-    out.u32(count);
+    let mut out = Vec::with_capacity(offset);
+    out.extend_from_slice(&count.to_le_bytes());
     for (offset, bytes) in &encoded {
-        out.u64(
-            u64::try_from(*offset)
-                .map_err(|_| Error::build("package function offset is too large"))?,
+        out.extend_from_slice(
+            &u64::try_from(*offset)
+                .map_err(|_| Error::build("package function offset is too large"))?
+                .to_le_bytes(),
         );
-        out.u64(
-            u64::try_from(bytes.len())
-                .map_err(|_| Error::build("package function is too large"))?,
+        out.extend_from_slice(
+            &u64::try_from(bytes.len())
+                .map_err(|_| Error::build("package function is too large"))?
+                .to_le_bytes(),
         );
-        out.u128(hash128(bytes));
+        out.extend_from_slice(&hash128(bytes).to_le_bytes());
     }
     for (_, bytes) in encoded {
-        out.bytes(&bytes);
+        out.extend_from_slice(&bytes);
     }
-    Ok(out.into_bytes())
+    Ok(out)
 }
 
 pub(super) fn parse_function_section(
     section: &[u8],
     mapped_offset: usize,
 ) -> Result<Vec<FuncBlob>, Error> {
-    let mut cursor = Cursor::new(section, 0);
-    let count = usize::try_from(cursor.u32("function count")?)
+    let mut rest = section;
+    let count = usize::try_from(fields::u32(&mut rest, "function count")?)
         .map_err(|_| Error::corrupt("package function count does not fit this host"))?;
     let table_end = count
         .checked_mul(FUNC_ENTRY_LEN)
@@ -69,13 +71,13 @@ pub(super) fn parse_function_section(
         .try_reserve_exact(count)
         .map_err(|_| Error::corrupt("package function index is too large for available memory"))?;
     for index in 0..count {
-        let start = usize::try_from(cursor.u64("function offset")?).map_err(|_| {
+        let start = usize::try_from(fields::u64(&mut rest, "function offset")?).map_err(|_| {
             Error::corrupt(format!("function {index} offset does not fit this host"))
         })?;
-        let len = usize::try_from(cursor.u64("function length")?).map_err(|_| {
+        let len = usize::try_from(fields::u64(&mut rest, "function length")?).map_err(|_| {
             Error::corrupt(format!("function {index} length does not fit this host"))
         })?;
-        let expected_hash = cursor.u128("function hash")?;
+        let expected_hash = fields::u128(&mut rest, "function hash")?;
         let end = start
             .checked_add(len)
             .ok_or_else(|| Error::corrupt(format!("function {index} range overflow")))?;
