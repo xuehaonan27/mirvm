@@ -18,6 +18,7 @@
 //! Split by concern; every item stays reachable at its `crate::vm::ctx::` path:
 //!
 //! * [`engine`] -- `Shared`, `EngineControl`, `Engine` and close/finalize.
+//! * [`load`] -- the one-time assembly of a `Module` and its instance into `Shared`.
 //! * [`thread_ctx`] -- `Ctx`, the `ThreadContexts` registry and the per-thread teardown rounds.
 //! * [`main_run`] -- the nested `run_main` states and the main panic catch boundary.
 //! * [`activation`] -- the code-domain boundary installed on entry, and the activation serial.
@@ -25,6 +26,7 @@
 
 pub(crate) mod activation;
 pub(crate) mod engine;
+mod load;
 mod main_run;
 mod signals;
 mod thread_ctx;
