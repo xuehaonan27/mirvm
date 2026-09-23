@@ -49,6 +49,10 @@ extern "C" fn exit_through_captured_syscall(_: *mut c_void) -> *mut c_void {
     std::process::abort();
 }
 
+// The number this test exits a thread through is Linux's thread exit, which ends that thread
+// alone. This platform has one exit number and it ends the whole process, so there is no
+// thread left to release the capture root from.
+#[cfg(target_os = "linux")]
 #[test]
 fn nonreturning_thread_syscall_releases_the_capture_root() {
     const CHILD_ENV: &str = "MIRVM_CAPTURE_SYS_EXIT_CHILD";
