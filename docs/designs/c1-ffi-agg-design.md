@@ -53,7 +53,7 @@ interpreter.
 Work split as landed: **A** — the IR variant and flattener, freeze opening, `ffi::call`/`call_addr`
 parameter-buffer dispatch by kind, the aggregate return buffer and destination memcpy, and call-site
 `RetDest` forcing, with every existing all-scalar path byte-for-byte unchanged. **B** — thunk
-`marshal_args` aggregate semantics, `interp::call_guest_ffi` expanding avalues by callee `ParamAbi`,
+`marshal_args` aggregate semantics, `dispatch::call_guest_ffi` expanding avalues by callee `ParamAbi`,
 and trampoline returns in the two classes. **C** — acceptance: the synthetic matrix probe,
 `c_tree_sitter` green, and the full gate.
 
