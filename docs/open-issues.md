@@ -329,7 +329,13 @@ Design references: [ram-spec.md](designs/ram-spec.md), [concurrency-arch.md](des
   the compiler's diagnostics reach physical stderr on the cold first `run` (1116 bytes) and not on
   the cache-warm `capture` (503) — while the case still reports PASS, on `f2279f1` as well as on the
   platform-refactor tree. Wiring `case_summary` into each mode surfaces every such silent failure at
-  once, which is why it is recorded rather than changed here.
+  once, which is why it is recorded rather than changed here. The severity is higher than the one
+  instance suggested: `repo-quality` owns every source check — fmt, clippy, the test suite, and the
+  five register/purity/boundary gates — and its `run_check` reports each with `bad` while `mode_run`
+  still ends on `print_section_report`, so **the case reports PASS while all nine fail**. Observed
+  directly during the pack split: `cargo clippy` and `cargo test` both failed on a visibility error
+  with a broken build, and `case quality` printed `1 passed, 0 failed`. Every verdict this repository
+  has reported for that gate is therefore the reader's, not the runner's.
 - **G12** `ACCEPTED`: the network-dependent cases need the dev container's HTTP proxy in the
   environment, and mirvm's own registry client does not read Cargo's config, so an unexported proxy
   makes them fail in a way that looks like a product defect. `~/.cargo/config.toml` carries the proxy
