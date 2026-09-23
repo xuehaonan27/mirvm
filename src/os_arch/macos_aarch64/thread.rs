@@ -46,11 +46,11 @@ pub fn futex_wake_one_raw(addr: *const u32) -> i64 {
 }
 
 /// arm64 macOS gives user space 47 bits — an address with bit 47 set is refused, bit 46 still maps
-/// — so anything above that range is not a user address. This is the width test, not a claim about
-/// any particular caller: a real user stack address, including a guest-provided one, falls inside
-/// the range.
+/// — so anything at or above that width is not a user address. This is the width test, not a claim
+/// about any particular caller: a real user stack address, including a guest-provided one, falls
+/// inside the range.
 pub fn stack_addr_is_unset(lo: usize) -> bool {
-    lo == 0 || lo >= 1 << 48
+    lo == 0 || lo >= 1 << 47
 }
 
 #[cfg(test)]
