@@ -144,11 +144,26 @@ std::arch::global_asm!(
 /// The contents of one inert symbol-image slot: `ret` followed by padding, so a slot start is
 /// always a decodable instruction and nothing after the return is ever reached.
 pub const INERT_SLOT: [u8; STUB_STRIDE as usize] = {
-    let ret = 0xd65f_03c0_u32.to_le_bytes();
+    /// `ret`, four bytes in the order they are laid down, whose low byte is [`RET`].
+    const RET_WORD: [u8; 4] = [RET, 0x03, 0x5f, 0xd6];
     let nop = 0xd503_201f_u32.to_le_bytes();
     [
-        ret[0], ret[1], ret[2], ret[3], nop[0], nop[1], nop[2], nop[3], nop[0], nop[1], nop[2],
-        nop[3], nop[0], nop[1], nop[2], nop[3],
+        RET_WORD[0],
+        RET_WORD[1],
+        RET_WORD[2],
+        RET_WORD[3],
+        nop[0],
+        nop[1],
+        nop[2],
+        nop[3],
+        nop[0],
+        nop[1],
+        nop[2],
+        nop[3],
+        nop[0],
+        nop[1],
+        nop[2],
+        nop[3],
     ]
 };
 
