@@ -19,7 +19,7 @@ use std::mem::MaybeUninit;
 
 use libffi::middle::{Arg, Cif, CodePtr, Ret, Type as FfiType};
 
-use super::ir::{FfiKind, ForeignSig};
+use crate::vm::ir::{FfiKind, ForeignSig};
 
 // libffi-sys declares ffi_call as plain C, so Rust does not allow an exception to cross that
 // call. The same native symbol is declared again as C-unwind, used only when
@@ -69,8 +69,8 @@ impl FfiState {
         name: &str,
         optional_libs: &[Box<str>],
         required_libs: &[Box<str>],
-        native_images: &[super::native_instance::NativeImage],
-        mc_images: &[super::mcload::McImage],
+        native_images: &[crate::vm::native_instance::NativeImage],
+        mc_images: &[crate::vm::mcload::McImage],
     ) -> Result<Option<usize>, String> {
         if let Some(&p) = self.syms.get(name) {
             return Ok((p != 0).then_some(p));
@@ -93,7 +93,7 @@ impl FfiState {
         // ①' MC images (self-loaded, guest-produced global_asm/dep_asm from the package; same
         // semantic slot as ② -- a guest-produced object beats a same-named host library)
         if p == 0
-            && let Some(addr) = super::mcload::resolve(mc_images, name)
+            && let Some(addr) = crate::vm::mcload::resolve(mc_images, name)
         {
             p = addr;
         }
@@ -132,7 +132,7 @@ impl FfiState {
         &mut self,
         optional_libs: &[Box<str>],
         required_libs: &[Box<str>],
-        native_images: &[super::native_instance::NativeImage],
+        native_images: &[crate::vm::native_instance::NativeImage],
     ) -> Result<(), String> {
         if self.libs_loaded {
             return Ok(());
@@ -185,7 +185,7 @@ impl FfiState {
 /// addresses with this process's real ones. A non-weak miss is an Err, and loudly so: a stale
 /// address is a silent source of SIGSEGV-level wrong values. A weak miss writes 0, matching
 /// the absent-`extern weak` semantics.
-pub(crate) fn resolve_got_fixups(module: &mut super::ir::Module) -> Result<(), String> {
+pub(crate) fn resolve_got_fixups(module: &mut crate::vm::ir::Module) -> Result<(), String> {
     if module.got_fixups.is_empty() {
         return Ok(());
     }
@@ -227,7 +227,7 @@ pub(crate) fn resolve_got_fixups(module: &mut super::ir::Module) -> Result<(), S
     Ok(())
 }
 
-pub(super) fn ffi_type(k: &FfiKind) -> FfiType {
+pub(crate) fn ffi_type(k: &FfiKind) -> FfiType {
     match k {
         FfiKind::I8 => FfiType::i8(),
         FfiKind::I16 => FfiType::i16(),
@@ -247,13 +247,13 @@ pub(super) fn ffi_type(k: &FfiKind) -> FfiType {
 
 /// Frozen aggregate -> libffi struct type (recursively nested; libffi computes size/align
 /// from the fields).
-fn ffi_type_agg(agg: &super::ir::FfiAgg) -> FfiType {
+fn ffi_type_agg(agg: &crate::vm::ir::FfiAgg) -> FfiType {
     let fields: Vec<FfiType> = agg
         .fields
         .iter()
         .map(|f| match &f.leaf {
-            super::ir::FfiLeaf::Scalar(k) => ffi_type(k),
-            super::ir::FfiLeaf::Agg(inner) => ffi_type_agg(inner),
+            crate::vm::ir::FfiLeaf::Scalar(k) => ffi_type(k),
+            crate::vm::ir::FfiLeaf::Agg(inner) => ffi_type_agg(inner),
         })
         .collect();
     FfiType::structure(fields)

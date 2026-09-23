@@ -21,6 +21,7 @@ use libffi::low::ffi_cif;
 use libffi::middle::{Cif, Closure};
 
 use super::ctx::Shared;
+use super::ffi::inbound::{marshal_args, repack_ret};
 use super::ir::{FfiKind, ForeignSig, FuncId};
 
 /// (fn entry address, escaped-bit signature) → thunk real code address. Mutex = "explicit
@@ -59,78 +60,11 @@ enum ThunkKind {
     },
 }
 
-/// Move args by declared width (shared by trampoline / entry_trampoline; closure arg slots only
-/// guarantee declared width is valid; engine value = width-masked bits, LE).
-/// C1: aggregate arg = closure avalue always points to aggregate bytes (same shape across classes)
-/// → pass the real byte address; callee-side ParamAbi expansion is mapped by
-/// `dispatch::call_guest_ffi` according to FfiAgg.
-unsafe fn marshal_args(kinds: &[FfiKind], args: *const *const c_void) -> Vec<u64> {
-    let mut av: Vec<u64> = Vec::with_capacity(kinds.len());
-    for (i, k) in kinds.iter().enumerate() {
-        let p = unsafe { *args.add(i) } as *const u8;
-        let v = unsafe {
-            match k {
-                FfiKind::Agg(_) => p as u64,
-                FfiKind::I8 | FfiKind::U8 => p.read() as u64,
-                FfiKind::I16 | FfiKind::U16 => (p as *const u16).read_unaligned() as u64,
-                FfiKind::I32 | FfiKind::U32 | FfiKind::F32 => {
-                    (p as *const u32).read_unaligned() as u64
-                }
-                FfiKind::I64 | FfiKind::U64 | FfiKind::F64 | FfiKind::Ptr => {
-                    (p as *const u64).read_unaligned()
-                }
-                FfiKind::Void => 0, // lower already rejects ZST callback args (unreachable)
-            }
-        };
-        av.push(v);
-    }
-    av
-}
-
-/// C1: aggregate return by value (ret = Agg, callee RetAbi non-Indirect small class) repacking —
-/// (lo,hi) writes FfiAgg field bytes back in declared order (zero whole surface first to preserve
-/// padding, then overwrite field bits; bit-identical to libffi rvalue's SysV byte image). Top-level
-/// nested leaf and Pair/Scalar return channels are structurally mutually exclusive (same rustc
-/// layout inference — occurrence means engine invariant violation).
-unsafe fn repack_ret(result: *mut u8, agg: &super::ir::FfiAgg, lo: u64, hi: u64) {
-    unsafe { std::ptr::write_bytes(result, 0, agg.size as usize) };
-    for (i, f) in agg.fields.iter().enumerate() {
-        let (v, leaf) = match i {
-            0 => (lo, &f.leaf),
-            1 => (hi, &f.leaf),
-            _ => crate::vm::unwind::engine_abort(
-                "C1 repack: >2 top-level fields with Pair/Scalar return channel",
-            ),
-        };
-        let super::ir::FfiLeaf::Scalar(k) = leaf else {
-            crate::vm::unwind::engine_abort(
-                "C1 repack: top-level nested leaf with Pair/Scalar return channel",
-            );
-        };
-        let dst = unsafe { result.add(f.off as usize) };
-        unsafe {
-            match k {
-                FfiKind::I8 | FfiKind::U8 => dst.write(v as u8),
-                FfiKind::I16 | FfiKind::U16 => (dst as *mut u16).write_unaligned(v as u16),
-                FfiKind::I32 | FfiKind::U32 | FfiKind::F32 => {
-                    (dst as *mut u32).write_unaligned(v as u32)
-                }
-                FfiKind::I64 | FfiKind::U64 | FfiKind::F64 | FfiKind::Ptr => {
-                    (dst as *mut u64).write_unaligned(v)
-                }
-                FfiKind::Void | FfiKind::Agg(_) => {
-                    crate::vm::unwind::engine_abort("C1 repack: illegal leaf kind")
-                }
-            }
-        }
-    }
-}
-
 /// Common execution body shared by trampoline and P1 entry stub: attach → move args by signature
 /// → interpret → write back return value. Return buffer always aligned (integers promoted to
 /// ffi_arg / F32 bits in low 32, LE).
 /// C1: when ret = Agg, branch — callee RetAbi::Indirect → result passed as hidden first arg
-/// through `dispatch::call_guest_ffi` (sret passed directly, callee memcpy's to that address); others →
+/// through `ffi::inbound::call_guest_ffi` (sret passed directly, callee memcpy's to that address); others →
 /// (lo,hi) then repack_ret to struct bytes. Whether the ABI boundary allows unwind is decided by
 /// the outer wrapper; the body does not duplicate two semantics.
 unsafe fn trampoline_body(
@@ -148,7 +82,7 @@ unsafe fn trampoline_body(
     let av = unsafe { marshal_args(&data.args, args) };
     match &data.ret {
         FfiKind::Agg(agg) => {
-            let (lo, hi) = crate::vm::dispatch::call_guest_ffi(
+            let (lo, hi) = crate::vm::ffi::inbound::call_guest_ffi(
                 ctx,
                 data.func,
                 &data.args,
@@ -164,7 +98,7 @@ unsafe fn trampoline_body(
         }
         _ => {
             let (lo, _hi) =
-                crate::vm::dispatch::call_guest_ffi(ctx, data.func, &data.args, &av, None);
+                crate::vm::ffi::inbound::call_guest_ffi(ctx, data.func, &data.args, &av, None);
             if data.ret != FfiKind::Void {
                 *result = lo;
             }
@@ -327,8 +261,8 @@ pub(crate) fn get_or_create(shared: &Shared, entry: u64, func: FuncId, sig: &For
         return code;
     }
     let cif = Cif::new(
-        sig.args.iter().map(super::ffi::ffi_type),
-        super::ffi::ffi_type(&sig.ret),
+        sig.args.iter().map(crate::vm::ffi::ffi_type),
+        crate::vm::ffi::ffi_type(&sig.ret),
     );
     let data: &'static ThunkData = Box::leak(Box::new(ThunkData {
         control: Arc::clone(shared.control()),
@@ -443,8 +377,8 @@ fn create_registered_data(
     kind: ThunkKind,
 ) -> u64 {
     let cif = Cif::new(
-        args.iter().map(super::ffi::ffi_type),
-        super::ffi::ffi_type(&ret),
+        args.iter().map(crate::vm::ffi::ffi_type),
+        crate::vm::ffi::ffi_type(&ret),
     );
     let data: &'static ThunkData = Box::leak(Box::new(ThunkData {
         control,
@@ -671,8 +605,8 @@ fn materialize_domain(
 ) -> Result<(), String> {
     for site in sites {
         let cif = Cif::new(
-            site.sig.args.iter().map(super::ffi::ffi_type),
-            super::ffi::ffi_type(&site.sig.ret),
+            site.sig.args.iter().map(crate::vm::ffi::ffi_type),
+            crate::vm::ffi::ffi_type(&site.sig.ret),
         );
         let data: &'static ThunkData = Box::leak(Box::new(ThunkData {
             control: Arc::clone(control),
