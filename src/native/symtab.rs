@@ -23,7 +23,7 @@
 //!
 //! The dlopen handle -> load base mapping (dlinfo) lives in `os::dll::load_bias`.
 
-/// Why an ELF symbol table could not be read.
+/// Why an object's symbol table could not be read.
 ///
 /// The enum lives in this file rather than in the tree root because this is the one file of the
 /// native layer the TSan harness compiles: the rest of the tree needs the lowering layer, which the
@@ -259,6 +259,25 @@ fn elf_undefined_symbols(bytes: &[u8]) -> Result<Vec<Box<str>>, Error> {
         return Ok(out);
     }
     Ok(Vec::new())
+}
+
+/// The names a shared object leaves to its loader, in the format its platform's toolchain writes.
+///
+/// Which names matter is the caller's question — it compares them against the symbols the guest
+/// itself defines — so this only answers what the object says. The format is a parameter because
+/// it is the platform's: the linker that produced the object is what decided it.
+pub(crate) fn object_undefined_symbols(
+    path: &str,
+    format: crate::os::dll::ObjectFormat,
+) -> Result<Vec<Box<str>>, Error> {
+    let bytes =
+        std::fs::read(path).map_err(|error| Error::io(format!("cannot read `{path}`"), error))?;
+    match format {
+        crate::os::dll::ObjectFormat::Elf => elf_undefined_symbols(&bytes),
+        crate::os::dll::ObjectFormat::MachO => {
+            super::macho::undefined_symbols(&bytes).map_err(Error::malformed)
+        }
+    }
 }
 
 #[cfg(test)]

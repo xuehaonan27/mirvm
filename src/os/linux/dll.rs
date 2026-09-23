@@ -7,9 +7,9 @@
 use crate::os::dll::{Mode, ObjectFormat, PrivateImage};
 use std::ffi::CStr;
 
-/// The format this platform's loader accepts, which is what a caller that has to publish an object
-/// for it has to write.
-pub const SYMBOL_IMAGE_FORMAT: ObjectFormat = ObjectFormat::Elf;
+/// The format this platform's toolchain writes and its loader accepts, which is what a caller that
+/// has to publish an object, or read one back, has to know.
+pub const OBJECT_FORMAT: ObjectFormat = ObjectFormat::Elf;
 
 /// Publishes `bytes` as an object this process's loader can load, and answers the handle, the base
 /// its contents were mapped at, and the file that keeps them alive.

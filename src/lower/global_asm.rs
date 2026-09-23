@@ -408,22 +408,22 @@ fn render_naked<'tcx>(
     Ok(())
 }
 
-/// First undefined symbol in the `.so` whose name looks like a Rust mangled name
+/// First undefined symbol in the image whose name looks like a Rust mangled name
 /// (`_R`/`_ZN`), which is the signal of a guest fn reference. libc and system symbols,
-/// which the dynamic linker resolves, do not count. Uses `nm -D -u`.
+/// which the dynamic linker resolves, do not count.
+///
+/// The object is read here rather than by a tool: the tool's name, its flags and the spelling it
+/// prints a symbol under are each the object format's, and this build writes two of those.
 fn undefined_nonlib_symbols(so: &std::path::Path) -> Option<String> {
-    let out = std::process::Command::new("nm")
-        .args(["-D", "-u"])
-        .arg(so)
-        .output()
-        .ok()?;
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let sym = line.rsplit(char::is_whitespace).next().unwrap_or("");
-        if sym.starts_with("_R") || sym.starts_with("_ZN") {
-            return Some(sym.to_owned());
-        }
-    }
-    None
+    let symbols = crate::native::symtab::object_undefined_symbols(
+        so.to_str()?,
+        crate::os::dll::OBJECT_FORMAT,
+    )
+    .ok()?;
+    symbols
+        .into_iter()
+        .find(|symbol| symbol.starts_with("_R") || symbol.starts_with("_ZN"))
+        .map(String::from)
 }
 
 /// Strips `//` line comments. rustc's target assembler, LLVM MC, treats `//` as a line
