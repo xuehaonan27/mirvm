@@ -12,10 +12,10 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use super::super::ir::Module;
 use super::activation::activate;
 use super::signals::{
-    defer_finalizer_while_signal_masked, drain_current_thread_signal_deliveries_after_fault,
-    drain_pending_signals_for_close,
+    CloseSignalDrainGuard, defer_finalizer_while_signal_masked,
+    drain_current_thread_signal_deliveries_after_fault, drain_pending_signals_for_close,
 };
-use super::thread_ctx::{CTX_KEY, CloseSignalDrainGuard, CtxSlot, ThreadContexts};
+use super::thread_ctx::{CTX_KEY, CtxSlot, ThreadContexts};
 
 /// Read-only after publication: built during the load phase, then read lock-free by every thread
 /// during execution. `thunks` is the one exception -- its entries are materialized on demand

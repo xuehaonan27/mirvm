@@ -8,10 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use super::super::ffi::FfiState;
 use super::super::frame::ByteRegion;
 use super::engine::Shared;
-use super::signals::{
-    dispatch_signal_delivery, drain_current_thread_signal_deliveries, drain_pending_signals,
-    start_pending_signal_finalizers,
-};
+use super::signals::{dispatch_signal_delivery, start_pending_signal_finalizers};
 use crate::os::signal::{MaskOp, SignalMask, set_thread_mask};
 use crate::os::thread::TlsKey;
 
@@ -257,10 +254,6 @@ impl Ctx {
     }
 }
 
-pub(super) struct SignalDrainGuard {
-    pub(super) ctx: *mut Ctx,
-}
-
 pub(super) fn current_activation(ctx: *mut Ctx) -> u64 {
     let Some(key) = CTX_KEY.get().copied() else {
         crate::vm::unwind::engine_abort("main panic catch happened outside Engine activation");
@@ -274,63 +267,6 @@ pub(super) fn current_activation(ctx: *mut Ctx) -> u64 {
         );
     }
     unsafe { (*contexts).current_activation }
-}
-
-pub(super) struct SignalMaskGuard {
-    pub(super) contexts: *mut ThreadContexts,
-    pub(super) previous: u64,
-    pub(super) restored: bool,
-}
-
-impl SignalMaskGuard {
-    pub(super) fn restore(&mut self) {
-        if self.restored {
-            return;
-        }
-        unsafe { (*self.contexts).signal_mask = self.previous };
-        self.restored = true;
-    }
-
-    /// Restore the interrupted mask and deliver synchronous raises against
-    /// the disposition that is current now. This method is reached only after
-    /// the guest handler returned normally; `Drop` deliberately does not run
-    /// guest code while an EngineFault is unwinding.
-    pub(super) fn finish(
-        mut self,
-        ctx: *mut Ctx,
-        host_mask: crate::os::signal::ThreadSignalMaskGuard,
-    ) {
-        self.restore();
-        drop(host_mask);
-        start_pending_signal_finalizers(self.contexts);
-        drain_current_thread_signal_deliveries(ctx);
-        drain_pending_signals(ctx);
-    }
-}
-
-impl Drop for SignalMaskGuard {
-    fn drop(&mut self) {
-        self.restore();
-    }
-}
-
-pub(super) struct CloseSignalDrainGuard {
-    contexts: *mut ThreadContexts,
-    previous: bool,
-}
-
-impl CloseSignalDrainGuard {
-    pub(super) fn enter(contexts: *mut ThreadContexts, closing: bool) -> Self {
-        let previous = unsafe { (*contexts).close_signal_drain };
-        unsafe { (*contexts).close_signal_drain = previous || closing };
-        Self { contexts, previous }
-    }
-}
-
-impl Drop for CloseSignalDrainGuard {
-    fn drop(&mut self) {
-        unsafe { (*self.contexts).close_signal_drain = self.previous };
-    }
 }
 
 pub(super) fn current_thread_contexts(ctx: *mut Ctx) -> *mut ThreadContexts {
