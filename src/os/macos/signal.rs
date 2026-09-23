@@ -34,6 +34,15 @@ pub type SignalInfo = *mut libc::siginfo_t;
 /// zero and the kernel's own `siginfo.h` agrees.
 const SI_USER: i32 = 0;
 
+/// The `si_code` this kernel stamps on a delivery the C library's `raise` produced.
+///
+/// It is the generic code, which this kernel reports for every delivery a process sends itself, so
+/// it does not separate a `raise` from a process-directed `kill`; what does that here is the
+/// sender, as [`sent_by_thread_kill`] explains. A caller that asserts which delivery happened
+/// therefore takes each platform's own answer.
+#[cfg(test)]
+pub const RAISE_DELIVERY_CODE: i32 = SI_USER;
+
 /// The kernel's `si_code` for a delivery a handler received.
 ///
 /// A null `info` is not an error: an action installed without `SA_SIGINFO` reaches its handler with
@@ -308,12 +317,6 @@ impl Sigaction {
     #[cfg(test)]
     pub fn or_flags(&mut self, flags: i32) {
         self.0.sa_flags |= flags;
-    }
-
-    /// Remove `flags` from the action, which is how a caller reproduces a kernel normalization.
-    #[cfg(test)]
-    pub fn clear_flags(&mut self, flags: i32) {
-        self.0.sa_flags &= !flags;
     }
 
     /// The restorer this action names. None: this kernel's actions carry none, so a caller-visible

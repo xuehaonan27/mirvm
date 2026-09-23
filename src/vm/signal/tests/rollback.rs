@@ -32,12 +32,18 @@ const INSTALL_OVERWRITE_CHILD: &str = "MIRVM_SIGNAL_INSTALL_OVERWRITE_CHILD";
 
 const RAISE_INSTALL_RACE_CHILD: &str = "MIRVM_SIGNAL_RAISE_INSTALL_RACE_CHILD";
 
+#[cfg(target_os = "linux")]
 const NORMALIZED_ACTION_CHILD: &str = "MIRVM_SIGNAL_NORMALIZED_ACTION_CHILD";
 
+#[cfg(target_os = "linux")]
 const REQUEST_ONLY_ROLLBACK_CHILD: &str = "MIRVM_SIGNAL_REQUEST_ONLY_ROLLBACK_CHILD";
 
+#[cfg(target_os = "linux")]
 const REQUEST_ONLY_RECONCILE_CHILD: &str = "MIRVM_SIGNAL_REQUEST_ONLY_RECONCILE_CHILD";
 
+// The flags this test drives are the Linux kernel's: it is the one that clears a probing bit
+// on the way back out, and the only one whose action carries a restorer to change.
+#[cfg(target_os = "linux")]
 #[test]
 fn rejected_request_only_candidate_rolls_back_its_normalized_kernel_action() {
     if std::env::var_os(REQUEST_ONLY_ROLLBACK_CHILD).is_some() {
@@ -73,6 +79,9 @@ fn rejected_request_only_candidate_rolls_back_its_normalized_kernel_action() {
     );
 }
 
+// The flags this test drives are the Linux kernel's: it is the one that clears a probing bit
+// on the way back out, and the only one whose action carries a restorer to change.
+#[cfg(target_os = "linux")]
 #[test]
 fn reconcile_solidifies_a_request_only_node_with_the_exact_old_action() {
     if std::env::var_os(REQUEST_ONLY_RECONCILE_CHILD).is_some() {
@@ -265,6 +274,9 @@ fn successful_install_commits_before_an_immediate_raw_overwrite() {
     );
 }
 
+// The flags this test drives are the Linux kernel's: it is the one that clears a probing bit
+// on the way back out, and the only one whose action carries a restorer to change.
+#[cfg(target_os = "linux")]
 #[test]
 fn installed_stub_tracks_the_exact_kernel_normalized_action() {
     if std::env::var_os(NORMALIZED_ACTION_CHILD).is_some() {
