@@ -133,10 +133,14 @@ modifications.
   the fixed-address layout, kernel TLS). An object-file byte layout is none of them — it does not vary
   with either axis — so it belongs to the layer that produces and parses those objects
   (`src/native/{elf,ar}.rs`), with `e_machine` in `arch` and the loader's half in `os`. Each axis
-  declares its surface in its own `mod.rs` and dispatches through one `#[cfg]` ladder, so a call
-  site names one path on every target. A new architecture or platform is a
-  directory plus an arm in that ladder; the axis refusals name what a pair must implement.
-  `repo-quality`'s `platform boundary` gate enforces the boundary.
+  declares its surface and dispatches through `#[cfg]` ladders, so a call site names one path on
+  every target: `mod.rs` names the subsystems and dispatches the ones that are wholly one
+  platform's, and a subsystem carrying vocabulary every platform shares — a relocation meaning, a
+  protection, a signal mask, a load mode, mirvm's own thread count — has a file at the axis root
+  holding the shared part and the ladder between it and the platform's half. `os_arch` splits the
+  same way: the fixed-address structure is the axis's, its numbers are the pair's. A new architecture
+  or platform is a directory plus an arm in that ladder; the axis refusals name what a pair must
+  implement. `repo-quality`'s `platform boundary` gate enforces the boundary.
 - A frozen surface stays byte-identical unless its own test changes: guest stdout/stderr, rustc
   diagnostics, cargo-mirror lines, and the first line of `cache status`. The lowering cache key is
   the FNV of the final assembly text, so a whitespace change in emitted asm silently invalidates
