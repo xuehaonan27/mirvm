@@ -10,6 +10,11 @@ use super::super::ir::{
     Width,
 };
 use super::{TSD_DTOR_ROUNDS, TSD_KEYS, TsdRegistration, prepare_pthread_operation};
+use crate::os::signal::{SIGWINCH, send_to_thread};
+use crate::os::thread::{
+    TLS_KEY_GONE, ThreadId, TlsKey, current_thread, join_raw, tls_get, tls_key_create_raw,
+    tls_key_delete, tls_set,
+};
 
 const TSD_CHILD: &str = "MIRVM_TEST_TSD_DEFERRED_CHILD";
 const START_CHILD: &str = "MIRVM_TEST_PTHREAD_START_CHILD";
@@ -31,7 +36,7 @@ static EXIT_SIGNAL_TSD_SET_RESULT: AtomicU64 = AtomicU64::new(u64::MAX);
 unsafe extern "C-unwind" fn set_tsd_from_exit_signal() {
     let result = unsafe {
         super::native_pthread_setspecific(
-            EXIT_SIGNAL_TSD_KEY.load(Ordering::SeqCst) as libc::pthread_key_t,
+            TlsKey::from_raw(EXIT_SIGNAL_TSD_KEY.load(Ordering::SeqCst) as _),
             std::ptr::dangling::<c_void>(),
             EXIT_SIGNAL_TSD_OWNER.load(Ordering::SeqCst),
         )
@@ -324,7 +329,7 @@ fn native_create_key_module(marker: &AtomicU64, library: &std::path::Path) -> Mo
 }
 
 fn native_start_module(
-    thread: *mut libc::pthread_t,
+    thread: *mut ThreadId,
     marker: &AtomicU64,
     release: &AtomicU64,
     library: &std::path::Path,
@@ -389,7 +394,7 @@ fn build_native_key_delete_archive() -> (std::path::PathBuf, std::path::PathBuf)
     (dir, library)
 }
 
-fn start_module(thread: *mut libc::pthread_t, marker: &AtomicU64) -> Module {
+fn start_module(thread: *mut ThreadId, marker: &AtomicU64) -> Module {
     let status = Slot {
         off: 0,
         width: Width::W32,
@@ -519,7 +524,7 @@ fn wait_closed_drains_current_thread_tsd_dtor() {
     }
     for jit in jit_modes() {
         let marker = AtomicU64::new(0);
-        let mut key = 0;
+        let mut key = TlsKey::from_raw(0);
         let engine = engine(tsd_module(&marker, false), jit);
         let outcome =
             unsafe { run_export(&engine, "probe", &[(&mut key as *mut _) as u64]) }.unwrap();
@@ -533,7 +538,7 @@ fn wait_closed_drains_current_thread_tsd_dtor() {
 fn close_inside_reinstalling_tsd_dtor_runs_four_rounds() {
     for jit in jit_modes() {
         let marker = AtomicU64::new(0);
-        let mut key = 0;
+        let mut key = TlsKey::from_raw(0);
         let engine = engine(tsd_module(&marker, true), jit);
         let outcome =
             unsafe { run_export(&engine, "probe", &[(&mut key as *mut _) as u64]) }.unwrap();
@@ -543,11 +548,11 @@ fn close_inside_reinstalling_tsd_dtor_runs_four_rounds() {
             TSD_KEYS
                 .lock()
                 .unwrap()
-                .get(&(engine.shared().id, crate::os::thread::TlsKey::from_raw(key)))
+                .get(&(engine.shared().id, key))
                 .cloned()
                 .unwrap()
         };
-        unsafe { libc::pthread_setspecific(key, std::ptr::null()) };
+        unsafe { tls_set(key, std::ptr::null()) };
         let (lease, callback) = registration.enter_callback().unwrap();
         let activation = activate(lease.shared());
         call_guest_ffi(
@@ -601,13 +606,13 @@ fn final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback() {
         return;
     }
 
-    let signum = libc::SIGWINCH;
+    let signum = SIGWINCH;
     let baseline = crate::os::signal::Sigaction::query(signum).unwrap();
     for jit in jit_modes() {
         for low_slot in [true, false] {
             let low_key = if low_slot {
-                let mut key = 0;
-                assert_eq!(unsafe { libc::pthread_key_create(&mut key, None) }, 0);
+                let mut key = TlsKey::from_raw(0);
+                assert_eq!(unsafe { tls_key_create_raw(&mut key, None) }, 0);
                 Some(key)
             } else {
                 None
@@ -633,14 +638,12 @@ fn final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback() {
             let (exit_tx, exit_rx) = std::sync::mpsc::channel();
             let worker_engine = engine.clone();
             let worker = std::thread::spawn(move || {
-                let mut key = libc::pthread_key_t::MAX;
+                let mut key = TlsKey::from_raw(u32::MAX as _);
                 assert!(matches!(
                     unsafe { run_export(&worker_engine, "attach", &[]) },
                     Ok(RunOutcome::Returned(_))
                 ));
-                attached_tx
-                    .send(unsafe { libc::pthread_self() } as usize)
-                    .unwrap();
+                attached_tx.send(current_thread()).unwrap();
                 reuse_rx.recv().unwrap();
                 let result = unsafe {
                     run_export(
@@ -649,22 +652,22 @@ fn final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback() {
                         &[std::ptr::from_mut(&mut key) as u64],
                     )
                 };
-                EXIT_SIGNAL_TSD_KEY.store(key as u64, Ordering::SeqCst);
+                EXIT_SIGNAL_TSD_KEY.store(key.as_raw() as u64, Ordering::SeqCst);
                 registered_tx.send((key, result)).unwrap();
                 exit_rx.recv().unwrap();
             });
 
-            let target = attached_rx.recv().unwrap() as libc::pthread_t;
+            let target = attached_rx.recv().unwrap();
             let mut filler_keys = Vec::new();
             if let Some(low_key) = low_key {
-                assert!(low_key < ctx_key.as_raw());
-                assert_eq!(unsafe { libc::pthread_key_delete(low_key) }, 0);
+                assert!(low_key.as_raw() < ctx_key.as_raw());
+                assert_eq!(tls_key_delete(low_key), 0);
             } else {
                 loop {
-                    let mut key = 0;
-                    assert_eq!(unsafe { libc::pthread_key_create(&mut key, None) }, 0);
+                    let mut key = TlsKey::from_raw(0);
+                    assert_eq!(unsafe { tls_key_create_raw(&mut key, None) }, 0);
                     filler_keys.push(key);
-                    if key > ctx_key.as_raw() {
+                    if key.as_raw() > ctx_key.as_raw() {
                         break;
                     }
                 }
@@ -675,7 +678,7 @@ fn final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback() {
                 assert_eq!(guest_key, low_key, "guest TSD did not reuse the low key");
             } else {
                 assert!(
-                    guest_key > ctx_key.as_raw(),
+                    guest_key.as_raw() > ctx_key.as_raw(),
                     "guest TSD did not use a high key"
                 );
             }
@@ -697,7 +700,7 @@ fn final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback() {
             }));
             exit_tx.send(()).unwrap();
             empty_rx.recv().unwrap();
-            assert_eq!(unsafe { libc::pthread_kill(target, signum) }, 0);
+            assert_eq!(send_to_thread(target, signum), 0);
             publish_tx.send(()).unwrap();
             worker.join().unwrap();
 
@@ -714,7 +717,7 @@ fn final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback() {
                     .same_disposition(&baseline)
             );
             for key in filler_keys {
-                assert_eq!(unsafe { libc::pthread_key_delete(key) }, 0);
+                assert_eq!(tls_key_delete(key), 0);
             }
         }
     }
@@ -725,8 +728,8 @@ fn pthread_key_create_commit_linearizes_with_close() {
     for iteration in 0..128 {
         let engine = engine(Module::default(), false);
         let registration = TsdRegistration::pending(engine.control()).unwrap();
-        let mut key = 0;
-        assert_eq!(unsafe { libc::pthread_key_create(&mut key, None) }, 0);
+        let mut key = TlsKey::from_raw(0);
+        assert_eq!(unsafe { tls_key_create_raw(&mut key, None) }, 0);
         let close = if iteration % 2 == 0 {
             // Deterministically cover close scanning an empty registry
             // before pthread_key_create publishes its successful result.
@@ -743,7 +746,7 @@ fn pthread_key_create_commit_linearizes_with_close() {
             gate.wait();
             Some(close)
         };
-        registration.commit(crate::os::thread::TlsKey::from_raw(key));
+        registration.commit(key);
         if let Some(close) = close {
             close.join().unwrap();
         }
@@ -752,7 +755,7 @@ fn pthread_key_create_commit_linearizes_with_close() {
             !TSD_KEYS
                 .lock()
                 .unwrap()
-                .contains_key(&(engine.shared().id, crate::os::thread::TlsKey::from_raw(key)))
+                .contains_key(&(engine.shared().id, key))
         );
     }
 }
@@ -784,7 +787,7 @@ fn pthread_setspecific_operation_blocks_close_revocation() {
             close.join().unwrap();
         }
         assert_eq!(engine.state(), super::super::ctx::EngineState::Closing);
-        let result = unsafe { libc::pthread_setspecific(key.as_raw(), value) };
+        let result = unsafe { tls_set(key, value) };
         assert_eq!(result, 0, "close revoked a key during pthread_setspecific");
         operation.complete(result as u64);
 
@@ -794,7 +797,7 @@ fn pthread_setspecific_operation_blocks_close_revocation() {
             &[key.as_raw() as u64, 0],
         )
         .unwrap();
-        let result = unsafe { libc::pthread_setspecific(key.as_raw(), std::ptr::null()) };
+        let result = unsafe { tls_set(key, std::ptr::null()) };
         assert_eq!(result, 0, "tracked pthread key became invalid before clear");
         clear.complete(result as u64);
         drop(lease);
@@ -828,7 +831,7 @@ fn pthread_key_delete_operation_blocks_close_revocation() {
             close.join().unwrap();
         }
         assert_eq!(engine.state(), super::super::ctx::EngineState::Closing);
-        let result = unsafe { libc::pthread_key_delete(key.as_raw()) };
+        let result = tls_key_delete(key);
         operation.complete(result as u64);
         drop(lease);
         engine.wait_closed().unwrap();
@@ -843,7 +846,7 @@ fn deleted_tsd_destructor_thunk_is_a_stable_noop() {
         return;
     }
     let marker = AtomicU64::new(0);
-    let mut key = 0;
+    let mut key = TlsKey::from_raw(0);
     let engine = engine(tsd_module(&marker, false), false);
     let outcome = unsafe { run_export(&engine, "probe", &[(&mut key as *mut _) as u64]) }.unwrap();
     assert_eq!(outcome, RunOutcome::Returned(Default::default()));
@@ -851,7 +854,7 @@ fn deleted_tsd_destructor_thunk_is_a_stable_noop() {
         let registration = TSD_KEYS
             .lock()
             .unwrap()
-            .get(&(engine.shared().id, crate::os::thread::TlsKey::from_raw(key)))
+            .get(&(engine.shared().id, key))
             .cloned()
             .unwrap();
         registration.state.lock().unwrap().code
@@ -860,7 +863,7 @@ fn deleted_tsd_destructor_thunk_is_a_stable_noop() {
     engine.wait_closed().unwrap();
     assert_eq!(marker.load(Ordering::SeqCst), 1);
     let callback: unsafe extern "C" fn(*mut c_void) = unsafe { std::mem::transmute(code as usize) };
-    unsafe { callback((&mut key as *mut libc::pthread_key_t).cast()) };
+    unsafe { callback((&mut key as *mut TlsKey).cast()) };
     assert_eq!(marker.load(Ordering::SeqCst), 1);
 }
 
@@ -874,20 +877,20 @@ fn native_archive_key_delete_revokes_tracked_registration() {
     }
     let (dir, library) = build_native_key_delete_archive();
     let marker = AtomicU64::new(0);
-    let mut key = 0;
+    let mut key = TlsKey::from_raw(0);
     let engine = engine(native_delete_module(&marker, &library), false);
     let outcome = unsafe { run_export(&engine, "probe", &[(&mut key as *mut _) as u64]) }.unwrap();
     assert_eq!(outcome, RunOutcome::Returned(Default::default()));
     assert_eq!(
-        unsafe { libc::pthread_setspecific(key, std::ptr::dangling_mut()) },
-        libc::EINVAL,
+        unsafe { tls_set(key, std::ptr::dangling_mut()) },
+        TLS_KEY_GONE,
         "the native archive wrapper did not actually delete the libc key"
     );
     assert!(
         !TSD_KEYS
             .lock()
             .unwrap()
-            .contains_key(&(engine.shared().id, crate::os::thread::TlsKey::from_raw(key))),
+            .contains_key(&(engine.shared().id, key)),
         "native pthread_key_delete left a stale MIRVM registration"
     );
     engine.close();
@@ -920,11 +923,11 @@ fn native_archive_setspecific_is_tracked() {
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
-        let mut key = 0;
+        let mut key = TlsKey::from_raw(0);
         let outcome =
             unsafe { run_export(&worker_engine, "probe", &[(&mut key as *mut _) as u64]) }.unwrap();
         assert_eq!(outcome, RunOutcome::Returned(Default::default()));
-        assert!(!unsafe { libc::pthread_getspecific(key) }.is_null());
+        assert!(!unsafe { tls_get(key) }.is_null());
         ready_tx.send(()).unwrap();
         release_rx.recv().unwrap();
     });
@@ -953,7 +956,7 @@ fn native_archive_key_create_registers_guest_destructor() {
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
-        let mut key = 0;
+        let mut key = TlsKey::from_raw(0);
         let outcome =
             unsafe { run_export(&worker_engine, "probe", &[(&mut key as *mut _) as u64]) }.unwrap();
         assert_eq!(outcome, RunOutcome::Returned(Default::default()));
@@ -982,7 +985,7 @@ fn native_archive_pthread_create_holds_until_delayed_start() {
     let (dir, library) = build_native_key_delete_archive();
     let marker = AtomicU64::new(0);
     let release = AtomicU64::new(0);
-    let mut thread = 0;
+    let mut thread = ThreadId::from_raw(0);
     let engine = engine(
         native_start_module(&mut thread, &marker, &release, &library),
         false,
@@ -993,7 +996,7 @@ fn native_archive_pthread_create_holds_until_delayed_start() {
     assert_eq!(engine.state(), super::super::ctx::EngineState::Closing);
     assert_eq!(marker.load(Ordering::SeqCst), 0);
     release.store(1, Ordering::Release);
-    unsafe { libc::pthread_join(thread, std::ptr::null_mut()) };
+    join_raw(thread);
     engine.wait_closed().unwrap();
     assert_eq!(marker.load(Ordering::SeqCst), 1);
     let _ = std::fs::remove_dir_all(dir);
@@ -1014,7 +1017,7 @@ fn remote_tsd_value_keeps_engine_closing_until_thread_exit() {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let mut key = 0;
+            let mut key = TlsKey::from_raw(0);
             let outcome =
                 unsafe { run_export(&worker_engine, "probe", &[(&mut key as *mut _) as u64]) }
                     .unwrap();
@@ -1044,12 +1047,12 @@ fn pthread_create_start_hold_closes_the_start_window() {
     for jit in jit_modes() {
         for _ in 0..64 {
             let marker = AtomicU64::new(0);
-            let mut thread = 0;
+            let mut thread = ThreadId::from_raw(0);
             let engine = engine(start_module(&mut thread, &marker), jit);
             let outcome = unsafe { run_export(&engine, "probe", &[]) }.unwrap();
             assert_eq!(outcome, RunOutcome::Returned(Default::default()));
             engine.wait_closed().unwrap();
-            unsafe { libc::pthread_join(thread, std::ptr::null_mut()) };
+            join_raw(thread);
             assert_eq!(marker.load(Ordering::SeqCst), 1);
         }
     }

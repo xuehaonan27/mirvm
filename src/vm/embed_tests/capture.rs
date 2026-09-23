@@ -86,7 +86,7 @@ fn host_syscall_variants_preserve_libc_result_and_errno() {
     ] {
         for (mode, jit) in modes() {
             let success_engine = engine(
-                host_syscall_module(builtin.clone(), libc::SYS_getpid, &[]),
+                host_syscall_module(builtin.clone(), crate::os::process::SYS_GETPID, &[]),
                 jit,
             );
             let success = unsafe { run_export(&success_engine, "probe", &[]) };
@@ -97,8 +97,8 @@ fn host_syscall_variants_preserve_libc_result_and_errno() {
             if !matches!(
                 success,
                 Ok(RunOutcome::Returned(value))
-                    if value.lo == unsafe { libc::getpid() } as u64
-                        && value.hi == libc::ENOSYS as u64
+                    if value.lo == crate::os::process::getpid() as u64
+                        && value.hi == crate::os::process::ENOSYS as u64
             ) {
                 failures.push(format!("{path}/{mode}/success: result={success:?}"));
             }
@@ -112,7 +112,7 @@ fn host_syscall_variants_preserve_libc_result_and_errno() {
             if !matches!(
                 failure,
                 Ok(RunOutcome::Returned(value))
-                    if value.lo == u64::MAX && value.hi == libc::ENOSYS as u64
+                    if value.lo == u64::MAX && value.hi == crate::os::process::ENOSYS as u64
             ) {
                 failures.push(format!("{path}/{mode}/failure: result={failure:?}"));
             }
@@ -136,7 +136,7 @@ fn capture_session_records_automatic_host_syscall_rewrite() {
         let mut engine_ids = Vec::new();
         for (mode, jit) in modes() {
             let engine = engine(
-                host_syscall_module(Builtin::HostSyscall, libc::SYS_getpid, &[]),
+                host_syscall_module(Builtin::HostSyscall, crate::os::process::SYS_GETPID, &[]),
                 jit,
             );
             assert_eq!(
@@ -150,8 +150,8 @@ fn capture_session_records_automatic_host_syscall_rewrite() {
                 matches!(
                     result,
                     Ok(RunOutcome::Returned(value))
-                        if value.lo == unsafe { libc::getpid() } as u64
-                            && value.hi == libc::ENOSYS as u64
+                        if value.lo == crate::os::process::getpid() as u64
+                            && value.hi == crate::os::process::ENOSYS as u64
                 ),
                 "{mode} result changed under capture: {result:?}"
             );

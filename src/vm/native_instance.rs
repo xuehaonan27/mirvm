@@ -1,7 +1,7 @@
 //! Per-Engine native images and their explicit constructor/destructor lifecycle.
 
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::CString;
+use std::ffi::{CString, c_char, c_int};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, RwLock};
@@ -85,8 +85,8 @@ const LIFECYCLE_FINALIZED: u8 = 3;
 pub(crate) struct InitializerArgs {
     _argv_storage: Vec<CString>,
     _env_storage: Vec<CString>,
-    argv: Vec<*mut libc::c_char>,
-    envp: Vec<*mut libc::c_char>,
+    argv: Vec<*mut c_char>,
+    envp: Vec<*mut c_char>,
 }
 
 impl InitializerArgs {
@@ -147,14 +147,11 @@ impl NativeLifecycle {
             return;
         }
         for &address in &self.initializers {
-            let init: unsafe extern "C-unwind" fn(
-                libc::c_int,
-                *mut *mut libc::c_char,
-                *mut *mut libc::c_char,
-            ) = unsafe { std::mem::transmute(address) };
+            let init: unsafe extern "C-unwind" fn(c_int, *mut *mut c_char, *mut *mut c_char) =
+                unsafe { std::mem::transmute(address) };
             unsafe {
                 init(
-                    (args.argv.len() - 1) as libc::c_int,
+                    (args.argv.len() - 1) as c_int,
                     args.argv.as_mut_ptr(),
                     args.envp.as_mut_ptr(),
                 )
@@ -751,6 +748,7 @@ pub(crate) fn run_finalizers(module: &Module) {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::{c_char, c_int};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{InitializerArgs, NativeLifecycle};
@@ -761,9 +759,9 @@ mod tests {
     static BAD_FINI: AtomicU64 = AtomicU64::new(0);
 
     unsafe extern "C-unwind" fn good_init(
-        argc: libc::c_int,
-        argv: *mut *mut libc::c_char,
-        envp: *mut *mut libc::c_char,
+        argc: c_int,
+        argv: *mut *mut c_char,
+        envp: *mut *mut c_char,
     ) {
         assert!(argc > 0);
         assert!(!argv.is_null());
@@ -771,11 +769,7 @@ mod tests {
         GOOD_INIT.fetch_add(1, Ordering::SeqCst);
     }
 
-    unsafe extern "C-unwind" fn bad_init(
-        _: libc::c_int,
-        _: *mut *mut libc::c_char,
-        _: *mut *mut libc::c_char,
-    ) {
+    unsafe extern "C-unwind" fn bad_init(_: c_int, _: *mut *mut c_char, _: *mut *mut c_char) {
         BAD_INIT.fetch_add(1, Ordering::SeqCst);
         panic!("constructor failed after starting");
     }

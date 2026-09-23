@@ -1,9 +1,9 @@
 //! Managed Rust heap: mimalloc backend behind a thin real-address wrapper.
 //!
 //! Implements the `__rust_alloc` family of engine primitives; lowering rewrites the
-//! std-declared extern boundary into a CallBuiltin, while `libc::malloc` passes straight
-//! through. Real addresses are handed out directly: a guest pointer *is* the host address
-//! mimalloc returned, so FFI needs zero marshalling.
+//! std-declared extern boundary into a CallBuiltin, while the C library's own `malloc`
+//! passes straight through. Real addresses are handed out directly: a guest pointer *is* the
+//! host address mimalloc returned, so FFI needs zero marshalling.
 //! A hand-rolled TLAB is deferred -- mimalloc already has a per-thread heap.
 
 use libmimalloc_sys as mi;

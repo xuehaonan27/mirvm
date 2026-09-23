@@ -26,6 +26,7 @@ use super::ir::{
 use super::signal;
 use super::thunks;
 use super::unwind;
+use crate::os::signal::{MaskOp, SIGUSR1, SignalMask, set_thread_mask};
 
 static SIGNAL_OWNER_HANDLER_RAN: AtomicU64 = AtomicU64::new(0);
 static SIGNAL_NATIVE_HANDLER_RAN: AtomicU64 = AtomicU64::new(0);
@@ -83,19 +84,12 @@ unsafe extern "C" fn first_external_native_signal(_signum: i32) {
 }
 
 unsafe extern "C-unwind" fn read_current_errno() -> u64 {
-    unsafe { *libc::__errno_location() as u64 }
+    unsafe { *crate::os::process::errno_location() as u64 }
 }
 
 unsafe extern "C-unwind" fn unblock_usr1_inside_signal_handler() {
-    let mut signal: libc::sigset_t = unsafe { std::mem::zeroed() };
-    unsafe {
-        libc::sigemptyset(&mut signal);
-        libc::sigaddset(&mut signal, libc::SIGUSR1);
-    }
-    assert_eq!(
-        unsafe { libc::pthread_sigmask(libc::SIG_UNBLOCK, &signal, std::ptr::null_mut()) },
-        0
-    );
+    let mask = SignalMask::empty().with(SIGUSR1);
+    assert!(set_thread_mask(MaskOp::Unblock, &mask).is_ok());
 }
 
 struct SavedSignalDisposition {
@@ -514,7 +508,7 @@ fn physically_masked_signal_module() -> Module {
         Terminator::CallBuiltin {
             builtin: Builtin::HostRaise,
             args: vec![Operand::Imm {
-                bits: libc::SIGUSR1 as u64,
+                bits: SIGUSR1 as u64,
                 width: Width::W32,
             }],
             ret: RetDest::Ignore,
@@ -539,7 +533,7 @@ fn first_external_native_signal_module() -> Module {
             builtin: Builtin::HostSignal,
             args: vec![
                 Operand::Imm {
-                    bits: libc::SIGUSR1 as u64,
+                    bits: SIGUSR1 as u64,
                     width: Width::W32,
                 },
                 Operand::Imm {
@@ -572,7 +566,7 @@ fn signal_p1_owner_module(link_addr: LinkAddr, marker: &'static AtomicU64) -> Mo
             builtin: Builtin::HostSignal,
             args: vec![
                 Operand::Imm {
-                    bits: libc::SIGUSR1 as u64,
+                    bits: SIGUSR1 as u64,
                     width: Width::W32,
                 },
                 Operand::AddrImm(link_addr),
@@ -594,12 +588,12 @@ fn signal_p1_owner_module(link_addr: LinkAddr, marker: &'static AtomicU64) -> Mo
     module
 }
 
-fn raw_sigaction(handler: usize, mask: &[i32]) -> libc::sigaction {
-    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
-    action.sa_sigaction = handler;
-    unsafe { libc::sigemptyset(&mut action.sa_mask) };
+/// An action a test drives the kernel ABI with: a handler, the given mask, and no flags, which
+/// the test then adds through the accessors.
+fn raw_sigaction(handler: usize, mask: &[i32]) -> crate::os::signal::Sigaction {
+    let mut action = crate::os::signal::Sigaction::empty(handler, 0);
     for &signum in mask {
-        assert_eq!(unsafe { libc::sigaddset(&mut action.sa_mask, signum) }, 0);
+        action.add_to_mask(signum);
     }
     action
 }

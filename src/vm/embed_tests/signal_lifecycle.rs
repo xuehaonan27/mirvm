@@ -55,7 +55,7 @@ fn faulting_masked_reraise_module() -> Module {
                 term: Terminator::CallBuiltin {
                     builtin: Builtin::HostRaise,
                     args: vec![Operand::Imm {
-                        bits: libc::SIGUSR1 as u64,
+                        bits: crate::os::signal::SIGUSR1 as u64,
                         width: Width::W32,
                     }],
                     ret: RetDest::Ignore,
@@ -84,7 +84,7 @@ fn faulting_masked_reraise_module() -> Module {
         Terminator::CallBuiltin {
             builtin: Builtin::HostRaise,
             args: vec![Operand::Imm {
-                bits: libc::SIGUSR1 as u64,
+                bits: crate::os::signal::SIGUSR1 as u64,
                 width: Width::W32,
             }],
             ret: RetDest::Ignore,
@@ -136,7 +136,7 @@ fn mask_restored_faulting_signal_owner_module() -> Module {
                 term: Terminator::CallBuiltin {
                     builtin: Builtin::HostRaise,
                     args: vec![Operand::Imm {
-                        bits: libc::SIGUSR1 as u64,
+                        bits: crate::os::signal::SIGUSR1 as u64,
                         width: Width::W32,
                     }],
                     ret: RetDest::Ignore,
@@ -255,7 +255,7 @@ fn signal_libc_error_module() -> Module {
         Builtin::HostSignal,
         vec![
             Operand::Imm {
-                bits: libc::SIGKILL as u64,
+                bits: crate::os::signal::SIGKILL as u64,
                 width: Width::W32,
             },
             Operand::Imm {
@@ -272,7 +272,7 @@ fn signal_libc_error_module() -> Module {
             builtin: Builtin::HostSignal,
             args: vec![
                 Operand::Imm {
-                    bits: libc::SIGRTMIN() as u64,
+                    bits: crate::os::signal::realtime_min() as u64,
                     width: Width::W32,
                 },
                 Operand::Imm {
@@ -327,7 +327,7 @@ fn faulting_signal_p1_owner_module(link_addr: LinkAddr) -> Module {
             builtin: Builtin::HostSignal,
             args: vec![
                 Operand::Imm {
-                    bits: libc::SIGUSR1 as u64,
+                    bits: crate::os::signal::SIGUSR1 as u64,
                     width: Width::W32,
                 },
                 Operand::AddrImm(link_addr),
@@ -361,7 +361,7 @@ fn cross_engine_signal_raiser_module() -> Module {
         Terminator::CallBuiltin {
             builtin: Builtin::HostRaise,
             args: vec![Operand::Imm {
-                bits: libc::SIGUSR1 as u64,
+                bits: crate::os::signal::SIGUSR1 as u64,
                 width: Width::W32,
             }],
             ret: RetDest::Ignore,
@@ -648,7 +648,8 @@ fn signal_oldact_stays_guest_visible_and_non_lifo_close_restores_native_action()
     let _serial = SIGNAL_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (_restore, baseline) = SavedSignalDisposition::replace_with_native(libc::SIGUSR1);
+    let (_restore, baseline) =
+        SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR1);
     let mut failures = Vec::new();
 
     for (mode, jit) in modes() {
@@ -663,15 +664,15 @@ fn signal_oldact_stays_guest_visible_and_non_lifo_close_restores_native_action()
 
         let owner_old = super::signal::install_signal(
             owner.control(),
-            libc::SIGUSR1,
+            crate::os::signal::SIGUSR1,
             SIGNAL_OWNER_GUEST_ADDR as usize,
             Some((0, SIGNAL_OWNER_GUEST_ADDR)),
         )
         .unwrap();
-        let mut owner_query: libc::sigaction = unsafe { std::mem::zeroed() };
+        let mut owner_query = crate::os::signal::Sigaction::empty(crate::os::signal::SIG_DFL, 0);
         super::signal::install_sigaction(
             owner.control(),
-            libc::SIGUSR1,
+            crate::os::signal::SIGUSR1,
             None,
             None,
             std::ptr::from_mut(&mut owner_query) as u64,
@@ -680,35 +681,35 @@ fn signal_oldact_stays_guest_visible_and_non_lifo_close_restores_native_action()
 
         let override_old = super::signal::install_signal(
             override_engine.control(),
-            libc::SIGUSR1,
+            crate::os::signal::SIGUSR1,
             SIGNAL_OVERRIDE_GUEST_ADDR as usize,
             Some((0, SIGNAL_OVERRIDE_GUEST_ADDR)),
         )
         .unwrap();
         owner.wait_closed().unwrap();
 
-        let mut override_query: libc::sigaction = unsafe { std::mem::zeroed() };
+        let mut override_query = crate::os::signal::Sigaction::empty(crate::os::signal::SIG_DFL, 0);
         super::signal::install_sigaction(
             override_engine.control(),
-            libc::SIGUSR1,
+            crate::os::signal::SIGUSR1,
             None,
             None,
             std::ptr::from_mut(&mut override_query) as u64,
         )
         .unwrap();
         override_engine.wait_closed().unwrap();
-        let restored = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+        let restored = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
 
         if owner_old != baseline.handler()
-            || owner_query.sa_sigaction != SIGNAL_OWNER_GUEST_ADDR as usize
+            || owner_query.handler() != SIGNAL_OWNER_GUEST_ADDR as usize
             || override_old != SIGNAL_OWNER_GUEST_ADDR as usize
-            || override_query.sa_sigaction != SIGNAL_OVERRIDE_GUEST_ADDR as usize
+            || override_query.handler() != SIGNAL_OVERRIDE_GUEST_ADDR as usize
             || !restored.same_disposition(&baseline)
         {
             failures.push(format!(
                 "{mode}: owner-old={owner_old:#x}, owner-query={:#x}, override-old={override_old:#x}, override-query={:#x}, restored={}",
-                owner_query.sa_sigaction,
-                override_query.sa_sigaction,
+                owner_query.handler(),
+                override_query.handler(),
                 restored.same_disposition(&baseline),
             ));
         }
@@ -725,7 +726,8 @@ fn guest_signal_accepts_a_first_seen_external_native_handler() {
     let _serial = SIGNAL_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (_restore, baseline) = SavedSignalDisposition::replace_with_native(libc::SIGUSR1);
+    let (_restore, baseline) =
+        SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR1);
     let mut failures = Vec::new();
 
     for (mode, jit) in modes() {
@@ -733,13 +735,16 @@ fn guest_signal_accepts_a_first_seen_external_native_handler() {
         SIGNAL_FIRST_EXTERNAL_HANDLER_RAN.store(0, Ordering::SeqCst);
         let engine = engine(first_external_native_signal_module(), jit);
         let installed = unsafe { run_export(&engine, "install", &[]) };
-        let current = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
-        assert_eq!(unsafe { libc::kill(libc::getpid(), libc::SIGUSR1) }, 0);
+        let current = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
+        assert_eq!(
+            crate::os::signal::kill(crate::os::process::getpid(), crate::os::signal::SIGUSR1),
+            0
+        );
         wait_for_signal_marker(&SIGNAL_FIRST_EXTERNAL_HANDLER_RAN);
         let external_ran = SIGNAL_FIRST_EXTERNAL_HANDLER_RAN.load(Ordering::SeqCst);
         let baseline_ran = SIGNAL_NATIVE_HANDLER_RAN.load(Ordering::SeqCst);
         engine.wait_closed().unwrap();
-        let restored = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+        let restored = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
 
         if !matches!(installed, Ok(RunOutcome::Returned(value)) if value.lo == baseline.handler() as u64)
             || current.handler() != first_external_native_signal as *const () as usize
@@ -770,14 +775,14 @@ fn guest_signal_libc_errors_return_sentinels_and_errno() {
 
     for (mode, jit) in modes() {
         for export in ["invalid_signal", "invalid_sigaction", "sigkill"] {
-            unsafe { *libc::__errno_location() = 0 };
+            unsafe { *crate::os::process::errno_location() = 0 };
             let engine = engine(signal_libc_error_module(), jit);
             let result = unsafe { run_export(&engine, export, &[]) };
             engine.wait_closed().unwrap();
             if !matches!(
                 result,
                 Ok(RunOutcome::Returned(value))
-                    if value.lo == u64::MAX && value.hi == libc::EINVAL as u64
+                    if value.lo == u64::MAX && value.hi == crate::os::process::EINVAL as u64
             ) {
                 failures.push(format!("{mode}/{export}: {result:?}"));
             }
@@ -818,7 +823,7 @@ fn self_produced_native_signal_bridge_preserves_libc_sentinels_and_errno() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (_directory, library) = native_signal_handler_library();
-    let expected = ((libc::EINVAL as u64) << 32) | 1;
+    let expected = ((crate::os::process::EINVAL as u64) << 32) | 1;
     let mut failures = Vec::new();
 
     for (mode, jit) in modes() {
@@ -854,9 +859,11 @@ fn self_produced_native_signal_bridge_raises_contract_errors_at_its_engine_bound
     let _serial = SIGNAL_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (_restore, baseline_usr1) = SavedSignalDisposition::replace_with_native(libc::SIGUSR1);
-    let baseline_segv = crate::os::signal::Sigaction::query(libc::SIGSEGV).unwrap();
-    let baseline_realtime = crate::os::signal::Sigaction::query(libc::SIGRTMIN()).unwrap();
+    let (_restore, baseline_usr1) =
+        SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR1);
+    let baseline_segv = crate::os::signal::Sigaction::query(crate::os::signal::SIGSEGV).unwrap();
+    let baseline_realtime =
+        crate::os::signal::Sigaction::query(crate::os::signal::realtime_min()).unwrap();
     let (_directory, library) = native_signal_handler_library();
     let mut failures = Vec::new();
 
@@ -904,9 +911,10 @@ fn self_produced_native_signal_bridge_raises_contract_errors_at_its_engine_bound
         }
     }
 
-    let restored_usr1 = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
-    let restored_segv = crate::os::signal::Sigaction::query(libc::SIGSEGV).unwrap();
-    let restored_realtime = crate::os::signal::Sigaction::query(libc::SIGRTMIN()).unwrap();
+    let restored_usr1 = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
+    let restored_segv = crate::os::signal::Sigaction::query(crate::os::signal::SIGSEGV).unwrap();
+    let restored_realtime =
+        crate::os::signal::Sigaction::query(crate::os::signal::realtime_min()).unwrap();
     assert!(restored_usr1.same_disposition(&baseline_usr1));
     assert!(restored_segv.same_disposition(&baseline_segv));
     assert!(restored_realtime.same_disposition(&baseline_realtime));
@@ -921,18 +929,18 @@ fn self_produced_native_signal_handler_runs_at_safe_point_and_can_raise_guest_ha
     let _serial = SIGNAL_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (_restore_usr1, baseline_usr1) = SavedSignalDisposition::replace_with_native(libc::SIGUSR1);
-    let (_restore_usr2, baseline_usr2) = SavedSignalDisposition::replace_with_native(libc::SIGUSR2);
+    let (_restore_usr1, baseline_usr1) =
+        SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR1);
+    let (_restore_usr2, baseline_usr2) =
+        SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR2);
     let (_directory, library) = native_signal_handler_library();
     let mut failures = Vec::new();
 
     for (mode, jit) in modes() {
-        let preexisting_raw = raw_sigaction(crate::os::signal::SIG_DFL, &[libc::SIGHUP]);
-        let preexisting = unsafe {
-            crate::os::signal::Sigaction::copy_from(std::ptr::from_ref(&preexisting_raw) as u64)
-                .unwrap()
-        };
-        let preexisting_guard = preexisting.block_for_handler(libc::SIGWINCH).unwrap();
+        let preexisting = raw_sigaction(crate::os::signal::SIG_DFL, &[crate::os::signal::SIGHUP]);
+        let preexisting_guard = preexisting
+            .block_for_handler(crate::os::signal::SIGWINCH)
+            .unwrap();
         let engine = engine(
             native_image_signal_module(&library, LinkAddr(SIGNAL_IMAGE_NESTED_GUEST_ADDR)),
             jit,
@@ -944,19 +952,24 @@ fn self_produced_native_signal_handler_runs_at_safe_point_and_can_raise_guest_ha
         let read_trace: unsafe extern "C" fn() -> u64 =
             unsafe { std::mem::transmute(trace_address) };
 
-        assert_eq!(unsafe { libc::kill(libc::getpid(), libc::SIGUSR1) }, 0);
+        assert_eq!(
+            crate::os::signal::kill(crate::os::process::getpid(), crate::os::signal::SIGUSR1),
+            0
+        );
         wait_for_owner_signal_pending(&engine);
         let before_safe_point = unsafe { read_trace() };
         let safe = unsafe { run_export(&engine, "safe", &[]) };
         let after_safe_point = unsafe { read_trace() };
         let preserved_preexisting_mask = crate::os::signal::Sigaction::current_standard_mask_bits()
             .unwrap()
-            & (1u64 << libc::SIGHUP)
+            & (1u64 << crate::os::signal::SIGHUP)
             != 0;
         drop(preexisting_guard);
         engine.wait_closed().unwrap();
-        let restored_usr1 = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
-        let restored_usr2 = crate::os::signal::Sigaction::query(libc::SIGUSR2).unwrap();
+        let restored_usr1 =
+            crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
+        let restored_usr2 =
+            crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR2).unwrap();
 
         if !matches!(install, Ok(RunOutcome::Returned(value)) if value.lo == 0)
             || before_safe_point != 0
@@ -985,8 +998,10 @@ fn image_native_wrapped_raise_resumes_guest_engine_fault_to_its_owner_boundary()
     let _serial = SIGNAL_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (_restore_usr1, baseline_usr1) = SavedSignalDisposition::replace_with_native(libc::SIGUSR1);
-    let (_restore_usr2, baseline_usr2) = SavedSignalDisposition::replace_with_native(libc::SIGUSR2);
+    let (_restore_usr1, baseline_usr1) =
+        SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR1);
+    let (_restore_usr2, baseline_usr2) =
+        SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR2);
     let (_directory, library) = native_signal_handler_library();
     let mut failures = Vec::new();
 
@@ -1002,14 +1017,19 @@ fn image_native_wrapped_raise_resumes_guest_engine_fault_to_its_owner_boundary()
         let read_trace: unsafe extern "C" fn() -> u64 =
             unsafe { std::mem::transmute(trace_address) };
 
-        assert_eq!(unsafe { libc::kill(libc::getpid(), libc::SIGUSR1) }, 0);
+        assert_eq!(
+            crate::os::signal::kill(crate::os::process::getpid(), crate::os::signal::SIGUSR1),
+            0
+        );
         wait_for_owner_signal_pending(&engine);
         let before_safe_point = unsafe { read_trace() };
         let safe = unsafe { run_export(&engine, "safe", &[]) };
         let after_fault = unsafe { read_trace() };
         engine.wait_closed().unwrap();
-        let restored_usr1 = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
-        let restored_usr2 = crate::os::signal::Sigaction::query(libc::SIGUSR2).unwrap();
+        let restored_usr1 =
+            crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
+        let restored_usr2 =
+            crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR2).unwrap();
 
         if !matches!(install, Ok(RunOutcome::Returned(value)) if value.lo == 0)
             || before_safe_point != 0
@@ -1044,7 +1064,8 @@ fn cross_engine_synchronous_signal_fault_returns_to_the_raising_boundary() {
         let _serial = SIGNAL_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (_restore, baseline) = SavedSignalDisposition::replace_with_native(libc::SIGUSR1);
+        let (_restore, baseline) =
+            SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR1);
         let jit = mode == "jit";
         let owner = engine(
             faulting_signal_p1_owner_module(LinkAddr(SIGNAL_FAULTING_P1_GUEST_ADDR)),
@@ -1056,7 +1077,7 @@ fn cross_engine_synchronous_signal_fault_returns_to_the_raising_boundary() {
         let raised = unsafe { run_export(&raiser, "raise", &[]) };
         let raiser_closed = raiser.wait_closed();
         let owner_closed = owner.wait_closed();
-        let restored = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+        let restored = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
 
         assert!(
             matches!(installed, Ok(RunOutcome::Returned(value)) if value.lo == baseline.handler() as u64),
@@ -1116,14 +1137,15 @@ fn cross_engine_mask_restored_signal_fault_returns_to_the_raising_boundary() {
         let _serial = SIGNAL_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (_restore, baseline) = SavedSignalDisposition::replace_with_native(libc::SIGUSR1);
+        let (_restore, baseline) =
+            SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR1);
         SIGNAL_OWNER_HANDLER_RAN.store(0, Ordering::SeqCst);
         let jit = mode == "jit";
         let owner = engine(mask_restored_faulting_signal_owner_module(), jit);
         let raiser = engine(cross_engine_signal_raiser_module(), jit);
         super::signal::install_signal(
             owner.control(),
-            libc::SIGUSR1,
+            crate::os::signal::SIGUSR1,
             SIGNAL_OWNER_GUEST_ADDR as usize,
             Some((0, SIGNAL_OWNER_GUEST_ADDR)),
         )
@@ -1133,7 +1155,7 @@ fn cross_engine_mask_restored_signal_fault_returns_to_the_raising_boundary() {
         let delivered = SIGNAL_OWNER_HANDLER_RAN.load(Ordering::SeqCst);
         let raiser_closed = raiser.wait_closed();
         let owner_closed = owner.wait_closed();
-        let restored = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+        let restored = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
 
         assert!(
             matches!(
@@ -1192,14 +1214,15 @@ fn faulting_handler_same_signal_raise_survives_cross_thread_close() {
         let _serial = SIGNAL_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (_restore, baseline) = SavedSignalDisposition::replace_with_native(libc::SIGUSR1);
+        let (_restore, baseline) =
+            SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR1);
         SIGNAL_OWNER_HANDLER_RAN.store(0, Ordering::SeqCst);
         SIGNAL_NATIVE_HANDLER_RAN.store(0, Ordering::SeqCst);
         let jit = mode == "jit";
         let engine = engine(faulting_masked_reraise_module(), jit);
         super::signal::install_signal(
             engine.control(),
-            libc::SIGUSR1,
+            crate::os::signal::SIGUSR1,
             SIGNAL_OWNER_GUEST_ADDR as usize,
             Some((0, SIGNAL_OWNER_GUEST_ADDR)),
         )
@@ -1213,7 +1236,7 @@ fn faulting_handler_same_signal_raise_survives_cross_thread_close() {
             .expect("cross-thread close panicked");
         let after_close = SIGNAL_OWNER_HANDLER_RAN.load(Ordering::SeqCst);
         let native_after_close = SIGNAL_NATIVE_HANDLER_RAN.load(Ordering::SeqCst);
-        let restored = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+        let restored = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
 
         assert!(
             matches!(result, Err(ref error) if error.kind == RunErrorKind::EngineFault),

@@ -25,8 +25,36 @@ pub use crate::os_arch::thread::{futex_wait_raw, futex_wake_one_raw, stack_addr_
 /// A host thread, as the C library names it.
 ///
 /// Kept opaque: the engine keys its per-thread tables by thread identity and never inspects one.
+/// `repr(transparent)` because an interposed `pthread_create` hands the caller's own
+/// `pthread_t *` straight through, so the wrapper has to be the library's type.
+#[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ThreadId(libc::pthread_t);
+
+impl ThreadId {
+    /// The library's own handle, for a call inside this layer that has to forward it.
+    #[cfg(test)]
+    pub(crate) fn raw(self) -> libc::pthread_t {
+        self.0
+    }
+
+    /// The identity as a plain integer, which is the form a test keeps in an atomic or sends
+    /// through a channel.
+    ///
+    /// `pthread_t` is the library's own opaque integer type, so flattening it is this file's
+    /// business and not a caller's.
+    #[cfg(test)]
+    pub fn as_u64(self) -> u64 {
+        self.0 as usize as u64
+    }
+
+    /// Wrap a handle this process did not create, which is the shape an interposed
+    /// `pthread_join` receives from its caller.
+    #[cfg(test)]
+    pub fn from_raw(raw: libc::pthread_t) -> Self {
+        ThreadId(raw)
+    }
+}
 
 /// The calling thread's identity.
 pub fn current_thread() -> ThreadId {
@@ -46,7 +74,9 @@ pub const INVALID_ARGUMENT: i32 = libc::EINVAL;
 ///
 /// Unique within the process after creation (`dtor` determined by the caller). Ordered by the
 /// library's own key number, which is what the final pthread-destructor pass walks to visit the
-/// keys above the process-lifetime one in the order that pass uses.
+/// keys above the process-lifetime one in the order that pass uses. `repr(transparent)` for the
+/// same reason as [`ThreadId`]: an interposed call passes the caller's own `pthread_key_t *`.
+#[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TlsKey(libc::pthread_key_t);
 
@@ -71,21 +101,22 @@ impl TlsKey {
 /// [`tls_key_create`] is the shape the engine uses for its own keys.
 ///
 /// # Safety
-/// `out` must be valid for one `pthread_key_t`, and `dtor` a valid destructor.
+/// `out` must be valid for one [`TlsKey`] (the library's `pthread_key_t`), and `dtor` a valid
+/// destructor.
 pub unsafe fn tls_key_create_raw(
-    out: *mut libc::pthread_key_t,
+    out: *mut TlsKey,
     dtor: Option<unsafe extern "C" fn(*mut c_void)>,
 ) -> i32 {
-    unsafe { libc::pthread_key_create(out, dtor) }
+    unsafe { libc::pthread_key_create(out.cast(), dtor) }
 }
 
 /// Thin wrapper of `pthread_key_create`.
 /// Panic on failure. The engine does not have a keyless downgrade path.
 pub fn tls_key_create(dtor: Option<unsafe extern "C" fn(*mut c_void)>) -> TlsKey {
-    let mut k: libc::pthread_key_t = 0;
-    let rc = unsafe { tls_key_create_raw(&mut k, dtor) };
+    let mut key = TlsKey(0);
+    let rc = unsafe { tls_key_create_raw(&mut key, dtor) };
     assert_eq!(rc, 0, "pthread_key_create failed: {rc}");
-    TlsKey(k)
+    key
 }
 
 /// Thin wrapper of `pthread_key_delete`, returning the library's code.
@@ -114,15 +145,27 @@ pub unsafe fn tls_set(key: TlsKey, p: *const c_void) -> i32 {
 
 /// `pthread_create` with the caller's own start routine, returning the library's code.
 ///
+/// `attr` is entered as [`c_void`] like every other use of an attribute in this file: the attribute
+/// is the caller's, and only [`attr_stack_bounds`]/[`attr_set_stack_size`] look inside it.
+///
 /// # Safety
 /// The pointers must satisfy `pthread_create`'s contract.
 pub unsafe fn spawn_raw(
-    thread: *mut libc::pthread_t,
-    attr: *const libc::pthread_attr_t,
+    thread: *mut ThreadId,
+    attr: *const c_void,
     start: extern "C" fn(*mut c_void) -> *mut c_void,
     value: *mut c_void,
 ) -> i32 {
-    unsafe { libc::pthread_create(thread, attr, start, value) }
+    unsafe { libc::pthread_create(thread.cast(), attr.cast(), start, value) }
+}
+
+/// `pthread_join`: wait for `thread` and return the library's code.
+///
+/// The return value the thread produced is discarded: the only callers are this crate's tests
+/// draining a thread they started, and none of them carries a result out.
+#[cfg(test)]
+pub fn join_raw(thread: ThreadId) -> i32 {
+    unsafe { libc::pthread_join(thread.0, std::ptr::null_mut()) }
 }
 
 /// This thread's stack [lo, lo+size) (pthread_getattr_np + getstack + destroy).

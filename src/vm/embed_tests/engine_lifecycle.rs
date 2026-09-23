@@ -356,7 +356,7 @@ fn constructor_faulting_masked_reraise_module(
                 term: Terminator::CallBuiltin {
                     builtin: Builtin::HostRaise,
                     args: vec![Operand::Imm {
-                        bits: libc::SIGUSR1 as u64,
+                        bits: crate::os::signal::SIGUSR1 as u64,
                         width: Width::W32,
                     }],
                     ret: RetDest::Ignore,
@@ -391,7 +391,7 @@ fn constructor_faulting_masked_reraise_module(
                     builtin: Builtin::HostSignal,
                     args: vec![
                         Operand::Imm {
-                            bits: libc::SIGUSR1 as u64,
+                            bits: crate::os::signal::SIGUSR1 as u64,
                             width: Width::W32,
                         },
                         Operand::AddrImm(handler),
@@ -407,7 +407,7 @@ fn constructor_faulting_masked_reraise_module(
                 term: Terminator::CallBuiltin {
                     builtin: Builtin::HostRaise,
                     args: vec![Operand::Imm {
-                        bits: libc::SIGUSR1 as u64,
+                        bits: crate::os::signal::SIGUSR1 as u64,
                         width: Width::W32,
                     }],
                     ret: RetDest::Ignore,
@@ -1229,13 +1229,16 @@ fn constructor_signal_fault_drains_masked_reraise_before_failed_engine_closes() 
         let _serial = SIGNAL_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (_restore, baseline) = SavedSignalDisposition::replace_with_native(libc::SIGUSR1);
+        let (_restore, baseline) =
+            SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR1);
         SIGNAL_OWNER_HANDLER_RAN.store(0, Ordering::SeqCst);
         // A host embedding thread may already block an unrelated signal. That
         // makes failed startup close on its worker rather than inline, so only
         // the constructor pthread can consume its target-thread SIGUSR1 cell.
         let unrelated_mask = crate::os::signal::Sigaction::for_signal(crate::os::signal::SIG_DFL);
-        let _unrelated_mask = unrelated_mask.block_for_handler(libc::SIGTERM).unwrap();
+        let _unrelated_mask = unrelated_mask
+            .block_for_handler(crate::os::signal::SIGTERM)
+            .unwrap();
         let constructor = LinkAddr(0x6b00_0000_0310);
         let handler = LinkAddr(0x6b00_0000_0320);
         let (_directory, library) = constructor_signal_fault_archive(constructor);
@@ -1251,7 +1254,7 @@ fn constructor_signal_fault_drains_masked_reraise_before_failed_engine_closes() 
             Ok(_) => panic!("faulting constructor signal handler initialized an Engine"),
             Err(error) => error,
         };
-        let restored = crate::os::signal::Sigaction::query(libc::SIGUSR1).unwrap();
+        let restored = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
         assert!(
             error.contains("native constructor hit an Engine fault")
                 && error.contains("constructor signal handler trapped"),

@@ -95,11 +95,15 @@ check_diag_purity() {
 # already wraps, or an `asm!` site that a second architecture would have to find by search.
 #
 # Three limits, stated rather than implied. (1) The scan reads a file's product half: lines from the
-# top, stopping at an inline `#[cfg(test)]` or `#[cfg(all(test, …))]`, and skipping files under a `tests` directory or named
-# `tests.rs`/`test_driver.rs`, because a test that drives the raw ABI is evidence rather than debt.
-# (2) A `#[cfg(not(...))]` branch is not matched: it guards code for a host this crate refuses to
-# build on at all, so it cannot carry a live second spelling. (3) `std::os::fd` is not a platform
-# path — std exposes it on every host — so only `std::os::unix`/`windows` are listed.
+# top, stopping where an inline `#[cfg(test)]` module begins — a `#[cfg(test)] mod tests;`
+# declaration only points at a sibling file, so the product half continues past it — and skipping
+# files under a `tests` directory or named `tests.rs`/`test_driver.rs`, because a test that drives
+# the raw ABI is evidence rather than debt. (2) A `#[cfg(not(...))]` branch is not matched: it
+# guards code for a host this crate refuses to build on at all, so it cannot carry a live second
+# spelling. (3) `std::os::fd` is not a platform path — std exposes it on every host — so only
+# `std::os::unix`/`windows` are listed. Every platform name counts, including a type alias such as
+# `libc::c_int` and a mention inside a doc comment: both are second spellings of what the axis
+# modules exist to spell once.
 check_platform_boundary() {
     local bad
     bad=$(
@@ -107,9 +111,9 @@ check_platform_boundary() {
             src --include='*.rs' \
             | grep -v '^src/arch/' | grep -v '^src/os/' | grep -v '^src/os_arch/' \
             | grep -vE '(^|/)tests?\.rs$|/tests/|/embed_tests/|/test_driver\.rs$'); do
-            awk '/^#\[cfg\((all\()?test/ { exit } { print FILENAME ":" FNR ":" $0 }' "$file"
+            awk '/^#\[cfg\((all\()?test/ { getline following; if (following ~ /^[[:space:]]*(pub )?mod [A-Za-z_0-9]+[[:space:]]*\{/) exit; print FILENAME ":" FNR ":" following; next } { print FILENAME ":" FNR ":" $0 }' "$file"
         done \
-        | grep -E 'libc::[A-Z][A-Z0-9_]*|libc::(pthread_|sig[a-z]|syscall|pwritev|memfd_create|_exit|atexit|getpid|gettid|getenv|kill|dl(open|sym|close|error|info)|mmap|mprotect|munmap|sysconf|raise|fork|write|strlen|memmove|memset|memcmp|process_vm_readv|__errno_location)\(|[[:space:]]asm!\(|global_asm!\(|std::os::(unix|windows)|#\[cfg\((all\()?(target_arch|target_os|unix|windows)'
+        | grep -E 'libc::|[[:space:]]asm!\(|global_asm!\(|std::os::(unix|windows)|#\[cfg\((all\()?(target_arch|target_os|unix|windows)'
     )
     if [ -n "$bad" ]; then
         echo "platform items named outside src/{arch,os,os_arch}:" >&2

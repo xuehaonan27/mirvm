@@ -562,9 +562,9 @@ impl ForeignCallbacks {
                     key_out,
                 } => {
                     if succeeded {
-                        let key = crate::os::thread::TlsKey::from_raw(unsafe {
-                            (*key_out as *const libc::pthread_key_t).read_unaligned()
-                        });
+                        let key = unsafe {
+                            (*key_out as *const crate::os::thread::TlsKey).read_unaligned()
+                        };
                         registration.commit(key);
                     } else {
                         registration.cancel();

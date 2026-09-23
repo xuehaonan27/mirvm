@@ -53,6 +53,14 @@ struct KernelSigaction {
     mask: u64,
 }
 
+/// Put `restorer` in the action's restorer slot.
+///
+/// The slot is the pair's, so filling it is too: a snapshot read from the kernel carries a
+/// restorer here and restoring that snapshot means putting the same pointer back.
+pub fn set_restorer(action: &mut libc::sigaction, restorer: extern "C" fn()) {
+    action.sa_restorer = Some(restorer);
+}
+
 /// Point an internal fixed-stub action at MIRVM's own restorer, so the kernel frame returns
 /// through code this process owns rather than through a libc restorer whose flags it would have
 /// to negotiate. Caller-visible dispositions never take this path.
@@ -61,9 +69,10 @@ pub fn set_runtime_restorer(action: &mut libc::sigaction) {
         return;
     }
     action.sa_flags |= RESTORER_FLAG;
-    action.sa_restorer = Some(unsafe {
+    let restorer = unsafe {
         std::mem::transmute::<unsafe extern "C" fn(), extern "C" fn()>(mirvm_signal_restorer)
-    });
+    };
+    set_restorer(action, restorer);
 }
 
 /// Whether a snapshot already carries MIRVM's restorer, which is what decides between the raw
