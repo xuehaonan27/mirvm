@@ -103,10 +103,15 @@ pub const STANDARD_SIGNAL_MAX: i32 = 31;
 /// The first number past the traditional range, which is where this kernel's signal space ends.
 ///
 /// It is not a "minimum realtime signal" the way the other platform's is, because there is no
-/// realtime range here; it is the first number the kernel refuses.
+/// The first number past the traditional range, which is where this kernel's signal space ends.
+///
+/// It is not a "minimum realtime signal" the way the other platform's is, because there is no
+/// realtime range here; it is the first number the kernel refuses. The mask builders below use it
+/// as the exclusive upper bound of the traditional range, which is the same role the other
+/// platform's answer plays there.
 ///
 /// NOTE: a caller that wants a number this kernel accepts for an ordinary signal has to name one,
-/// and the two tests that reach for this as "a real signal to query" will not get one here.
+/// and the tests that reach for this as "a real signal to query" will not get one here.
 pub fn realtime_min() -> i32 {
     STANDARD_SIGNAL_MAX + 1
 }
@@ -138,8 +143,10 @@ pub fn sent_by_thread_kill(info: SignalInfo) -> bool {
     if info.is_null() {
         return false;
     }
-    let info = unsafe { &*info };
-    info.si_code == SI_USER && info.si_pid == unsafe { libc::getpid() }
+    // `info_code` is the same read the delivery path makes; the direction is not in it here, so
+    // the sender is what separates a delivery this process addressed to a thread from one another
+    // process sent.
+    info_code(info) == SI_USER && unsafe { (*info).si_pid } == unsafe { libc::getpid() }
 }
 
 /// `kill(2)`: deliver `signum` to the process `pid`, returning the library's code and leaving
@@ -180,7 +187,7 @@ pub struct Sigaction(libc::sigaction);
 /// is a function here and not a method on the mask.
 pub fn all_blockable_mask() -> SignalMask {
     let mut mask = SignalMask::empty();
-    for signum in 1..=STANDARD_SIGNAL_MAX {
+    for signum in 1..realtime_min() {
         if matches!(signum, libc::SIGKILL | libc::SIGSTOP) {
             continue;
         }
@@ -231,7 +238,7 @@ pub fn wait_pending(mask: &SignalMask) -> Result<PendingSignal, i32> {
 
 impl Sigaction {
     fn same_mask(&self, other: &Self) -> bool {
-        (1..=STANDARD_SIGNAL_MAX)
+        (1..realtime_min())
             .filter(|&signum| signum != libc::SIGKILL && signum != libc::SIGSTOP)
             .all(|signum| unsafe {
                 libc::sigismember(&self.0.sa_mask, signum)
@@ -267,7 +274,7 @@ impl Sigaction {
             return Err(result);
         }
         let mut bits = 0u64;
-        for signum in 1..=STANDARD_SIGNAL_MAX {
+        for signum in 1..realtime_min() {
             if unsafe { libc::sigismember(&current, signum) } == 1 {
                 bits |= 1u64 << signum;
             }
@@ -316,11 +323,10 @@ impl Sigaction {
         None
     }
 
-    /// No-op: this kernel's `libc::sigaction` has no restorer field to put one in.
+    /// No-op: this kernel's `libc::sigaction` has no restorer field to put one in, which is also why
+    /// the pair beside this file provides no writer for one.
     #[cfg(test)]
-    pub fn set_restorer(&mut self, restorer: extern "C" fn()) {
-        arch::set_restorer(&mut self.0, restorer);
-    }
+    pub fn set_restorer(&mut self, _restorer: extern "C" fn()) {}
 
     /// Add `signum` to the mask this action installs while its handler runs.
     #[cfg(test)]
@@ -381,7 +387,7 @@ impl Sigaction {
 
     pub fn standard_mask_bits(&self) -> u64 {
         let mut bits = 0u64;
-        for signum in 1..=STANDARD_SIGNAL_MAX {
+        for signum in 1..realtime_min() {
             if unsafe { libc::sigismember(&self.0.sa_mask, signum) } == 1 {
                 bits |= 1u64 << signum;
             }

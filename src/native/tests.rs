@@ -198,7 +198,7 @@ fn native_signal_calls_receive_the_engine_owner() {
         crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL,
     )
     .unwrap_or_else(|e| panic!("dlopen {} failed: {e}", so.display()));
-    let bias = crate::os::dll::load_bias(handle).expect("native bridge load bias") as u64;
+    let bias = crate::os::dll::load_bias(handle, &c_so).expect("native bridge load bias") as u64;
     let hidden = crate::native::symtab::hidden_symtab_values(so.to_str().unwrap()).unwrap();
     let patch = |name: &str, value: u64| {
         let offset = hidden
