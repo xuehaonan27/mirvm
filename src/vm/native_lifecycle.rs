@@ -322,3 +322,73 @@ fn pair_tags(
         _ => Err(format!("native has incomplete {what} metadata")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::{c_char, c_int};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::{InitializerArgs, NativeLifecycle};
+
+    static GOOD_INIT: AtomicU64 = AtomicU64::new(0);
+    static BAD_INIT: AtomicU64 = AtomicU64::new(0);
+    static GOOD_FINI: AtomicU64 = AtomicU64::new(0);
+    static BAD_FINI: AtomicU64 = AtomicU64::new(0);
+
+    unsafe extern "C-unwind" fn good_init(
+        argc: c_int,
+        argv: *mut *mut c_char,
+        envp: *mut *mut c_char,
+    ) {
+        assert!(argc > 0);
+        assert!(!argv.is_null());
+        assert!(!envp.is_null());
+        GOOD_INIT.fetch_add(1, Ordering::SeqCst);
+    }
+
+    unsafe extern "C-unwind" fn bad_init(_: c_int, _: *mut *mut c_char, _: *mut *mut c_char) {
+        BAD_INIT.fetch_add(1, Ordering::SeqCst);
+        panic!("constructor failed after starting");
+    }
+
+    unsafe extern "C-unwind" fn good_fini() {
+        GOOD_FINI.fetch_add(1, Ordering::SeqCst);
+    }
+
+    unsafe extern "C-unwind" fn bad_fini() {
+        BAD_FINI.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn only_fully_initialized_images_are_finalized() {
+        GOOD_INIT.store(0, Ordering::SeqCst);
+        BAD_INIT.store(0, Ordering::SeqCst);
+        GOOD_FINI.store(0, Ordering::SeqCst);
+        BAD_FINI.store(0, Ordering::SeqCst);
+        let good = NativeLifecycle::new(
+            vec![good_init as *const () as usize],
+            vec![good_fini as *const () as usize],
+        );
+        let bad = NativeLifecycle::new(
+            vec![bad_init as *const () as usize],
+            vec![bad_fini as *const () as usize],
+        );
+        let mut args = InitializerArgs::capture().unwrap();
+
+        good.run_initializers(&mut args);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                bad.run_initializers(&mut args)
+            }))
+            .is_err()
+        );
+        bad.run_finalizers();
+        good.run_finalizers();
+        good.run_finalizers();
+
+        assert_eq!(GOOD_INIT.load(Ordering::SeqCst), 1);
+        assert_eq!(BAD_INIT.load(Ordering::SeqCst), 1);
+        assert_eq!(GOOD_FINI.load(Ordering::SeqCst), 1);
+        assert_eq!(BAD_FINI.load(Ordering::SeqCst), 0);
+    }
+}
