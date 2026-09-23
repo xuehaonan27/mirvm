@@ -29,10 +29,7 @@ pub fn entry_stub_bytes(argument: usize, adapter: usize) -> [u8; ENTRY_STUB_SIZE
     crate::arch::asmstub::emit_arg_stub_bytes(argument as u64, adapter as u64)
 }
 
-/// Nothing to fill: this kernel's `libc::sigaction` has no restorer field.
-pub fn set_restorer(_action: &mut libc::sigaction, _restorer: extern "C" fn()) {}
-
-/// Nothing to point anywhere, for the same reason as [`set_restorer`].
+/// Nothing to point anywhere, for the same reason as the restorer slot's absence.
 pub fn set_runtime_restorer(_action: &mut libc::sigaction) {}
 
 /// Never: no action this kernel returns can carry MIRVM's restorer.
