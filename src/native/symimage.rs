@@ -27,7 +27,23 @@ fn push_cstr(table: &mut Vec<u8>, value: &[u8]) -> Result<u32, String> {
     Ok(offset)
 }
 
-pub fn build(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
+/// The object a process symbolizer is named by, in the format `format` names.
+///
+/// Which format is worth writing is the platform's answer, because it is the platform's loader
+/// that has to accept the result; the bytes are this layer's either way, and the two writers below
+/// agree on the one thing a caller depends on, which is what the returned offset means.
+pub fn build(
+    format: crate::os::dll::ObjectFormat,
+    names: &[Box<str>],
+) -> Result<(Vec<u8>, usize), String> {
+    match format {
+        crate::os::dll::ObjectFormat::Elf => build_elf(names),
+        crate::os::dll::ObjectFormat::MachO => crate::native::macho::build(names),
+    }
+}
+
+/// The ELF layout: one dynamic symbol per function, in one load segment.
+fn build_elf(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
     /// The section index of `.text`, which every synthetic symbol is defined in.
     const TEXT_SECTION_INDEX: u16 = 1;
     const EHDR: usize = elf::EHDR_SIZE;

@@ -19,6 +19,7 @@
 pub(crate) mod ar;
 pub(crate) mod archive;
 pub(crate) mod elf;
+pub(crate) mod macho;
 pub(crate) mod symimage;
 pub(crate) mod symtab;
 

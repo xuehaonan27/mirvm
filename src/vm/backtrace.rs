@@ -9,15 +9,12 @@
 //! A frame sequence is therefore two sources merged by host stack position: the interpreter's
 //! shadow frames and the JIT's real machine frames, which the system unwinder reads back.
 
-use std::io::{Seek, Write};
-use std::os::fd::FromRawFd;
-
 use super::ctx::Ctx;
 use super::dispatch::call_fn_addr;
 use super::ir::Module;
 use crate::os::unwind;
 
-/// The symbol carriers of one Engine: the in-memory ELF the process symbolizer reads, plus the
+/// The symbol carriers of one Engine: the object the process symbolizer reads, plus the
 /// instruction-pointer token it published for each FuncId.
 ///
 /// This is process state, so it belongs to the Engine that loaded the artifact and not to the
@@ -27,20 +24,12 @@ pub struct Symbols {
     ips: Vec<u64>,
     /// Owned for its `Drop`: the published tokens stay resolvable only while the object is loaded.
     #[allow(dead_code)]
-    image: Option<SymbolImage>,
+    image: Option<crate::os::dll::PrivateImage>,
 }
 
-#[derive(Debug)]
-struct SymbolImage {
-    _file: std::fs::File,
-    handle: usize,
-}
-
-impl Drop for SymbolImage {
-    fn drop(&mut self) {
-        unsafe { crate::os::dll::close(self.handle) };
-    }
-}
+/// The stride between published tokens: the writers in `src/native/` lay one slot per function, so
+/// an index times this is what follows the offset they return.
+const SLOT: usize = crate::arch::asmstub::INERT_SLOT.len();
 
 /// Conservative fallback IP when no symbol image is available. The base comes from this pair's
 /// fixed-address layout, which guarantees the band is one no mapping can occupy; a normally loaded
@@ -134,36 +123,19 @@ impl Symbols {
         if module.function_names.is_empty() {
             return Ok(Self::default());
         }
-        let (bytes, text_off) = crate::native::symimage::build(&module.function_names)?;
-        let Some(fd) = crate::os::mem::anonymous_file(c"mirvm-guest-symbols") else {
-            return Err(format!(
-                "memfd_create failed: {}",
-                std::io::Error::last_os_error()
-            ));
-        };
-        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-        file.write_all(&bytes)
-            .map_err(|error| format!("writing in-memory ELF failed: {error}"))?;
-        file.rewind()
-            .map_err(|error| format!("rewinding in-memory ELF failed: {error}"))?;
-        let path = std::ffi::CString::new(format!("/proc/self/fd/{fd}"))
-            .map_err(|_| "in-memory ELF fd path unexpectedly contains NUL".to_string())?;
-        let handle = crate::os::dll::open_with_flags(
-            &path,
-            crate::os::dll::RTLD_NOW | crate::os::dll::RTLD_LOCAL,
-        )
-        .map_err(|error| format!("dlopen of in-memory ELF failed: {error}"))?;
-        let bias = crate::os::dll::load_bias(handle, &path)
-            .ok_or("reading in-memory ELF load base failed")?;
+        let (bytes, text_off) = crate::native::symimage::build(
+            crate::os::dll::SYMBOL_IMAGE_FORMAT,
+            &module.function_names,
+        )?;
+        let image = crate::os::dll::load_private_image(&bytes, c"mirvm-guest-symbols")
+            .map_err(|error| format!("publishing the guest symbol object failed: {error}"))?;
+        let bias = image.bias();
         let ips = (0..module.function_names.len())
-            .map(|index| (bias + text_off + index * 16) as u64)
+            .map(|index| (bias + text_off + index * SLOT) as u64)
             .collect();
         Ok(Self {
             ips,
-            image: Some(SymbolImage {
-                _file: file,
-                handle,
-            }),
+            image: Some(image),
         })
     }
 
@@ -177,7 +149,7 @@ impl Symbols {
 
     #[cfg(test)]
     fn image_handle(&self) -> usize {
-        self.image.as_ref().unwrap().handle
+        self.image.as_ref().unwrap().handle()
     }
 }
 

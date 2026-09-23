@@ -79,17 +79,9 @@ const INSTALL_NAME: &str = "/usr/lib/libmirvm_syms.dylib";
 /// page size so that `codesign` can cover the segments and dyld can map them.
 const PAGE: usize = 0x4000;
 
-/// One function's slot: the aarch64 encoding of `ret` followed by `nop` padding, so a slot start is
-/// a decodable instruction and nothing after the return is ever reached.
-const SLOT: usize = 16;
-const SLOT_BYTES: [u8; SLOT] = {
-    let ret = 0xd65f_03c0_u32.to_le_bytes();
-    let nop = 0xd503_201f_u32.to_le_bytes();
-    [
-        ret[0], ret[1], ret[2], ret[3], nop[0], nop[1], nop[2], nop[3], nop[0], nop[1], nop[2],
-        nop[3], nop[0], nop[1], nop[2], nop[3],
-    ]
-};
+/// One function's slot, which is this architecture's inert slot: a decodable instruction followed
+/// by padding, so no address is ever mid-instruction and nothing after the return is reached.
+const SLOT: usize = crate::arch::asmstub::INERT_SLOT.len();
 
 fn align(value: usize, alignment: usize) -> usize {
     value.div_ceil(alignment) * alignment
@@ -135,7 +127,7 @@ impl Writer {
     fn string(&mut self, string: &str) {
         self.out.extend_from_slice(string.as_bytes());
         self.out.push(0);
-        while self.out.len() % 8 != 0 {
+        while !self.out.len().is_multiple_of(8) {
             self.out.push(0);
         }
     }
@@ -319,7 +311,7 @@ pub fn build(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
         .extend(std::iter::repeat_n(0u8, text_off - out.out.len()));
 
     for _ in &name_offsets {
-        out.out.extend_from_slice(&SLOT_BYTES);
+        out.out.extend_from_slice(&crate::arch::asmstub::INERT_SLOT);
     }
 
     debug_assert_eq!(out.out.len(), text_end, "the slots end the text segment");

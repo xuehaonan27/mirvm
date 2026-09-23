@@ -4,8 +4,47 @@
 //! Business semantics like binding priority and symbol existence are left to
 //! the caller.
 
-use crate::os::dll::Mode;
+use crate::os::dll::{Mode, ObjectFormat, PrivateImage};
 use std::ffi::CStr;
+
+/// The format this platform's loader accepts, which is what a caller that has to publish an object
+/// for it has to write.
+pub const SYMBOL_IMAGE_FORMAT: ObjectFormat = ObjectFormat::Elf;
+
+/// Publishes `bytes` as an object this process's loader can load, and answers the handle, the base
+/// its contents were mapped at, and the file that keeps them alive.
+///
+/// The bytes reach the loader through an unnamed file: this kernel's `memfd_create` gives a
+/// descriptor with no directory entry at all, and the loader reads it back through
+/// `/proc/self/fd`, so nothing is written to a filesystem and nothing has to be cleaned up
+/// afterwards. The descriptor stays open for as long as the image is loaded.
+pub fn load_private_image(bytes: &[u8], name: &CStr) -> Result<PrivateImage, crate::os::Error> {
+    use std::io::{Seek, Write};
+
+    let failure = |detail: String| crate::os::Error::PrivateImage { detail };
+    let fd = crate::os::mem::anonymous_file(name).ok_or_else(|| {
+        failure(format!(
+            "memfd_create failed: {}",
+            std::io::Error::last_os_error()
+        ))
+    })?;
+    // SAFETY: `fd` is a fresh descriptor this call owns, and nothing else closes it.
+    let mut file = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd) };
+    file.write_all(bytes)
+        .map_err(|error| failure(format!("writing the private object failed: {error}")))?;
+    file.rewind()
+        .map_err(|error| failure(format!("rewinding the private object failed: {error}")))?;
+    let path = std::ffi::CString::new(format!("/proc/self/fd/{fd}"))
+        .map_err(|_| failure("the descriptor path unexpectedly contains NUL".to_string()))?;
+    let handle = open_with_flags(&path, libc::RTLD_NOW | libc::RTLD_LOCAL)?;
+    let Some(bias) = load_bias(handle, &path) else {
+        unsafe { close(handle) };
+        return Err(failure(
+            "reading the private object's load base failed".to_string(),
+        ));
+    };
+    Ok(PrivateImage::new(handle, bias, Some(file), None))
+}
 
 /// `dlopen`.
 /// # Return value

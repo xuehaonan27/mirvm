@@ -1,4 +1,4 @@
-//! The two mapping calls macOS answers in its own way.
+//! The one mapping call macOS answers in its own way.
 //!
 //! Everything else of [`crate::os::mem`] is the C library's on this platform too.
 
@@ -31,33 +31,4 @@ pub fn map_fixed_preferred(addr: usize, size: usize, prot: Prot) -> Option<*mut 
         return None;
     }
     Some(placed as *mut u8)
-}
-
-/// An anonymous in-memory file this process can open again through `/dev/fd/<fd>`, or `None` when
-/// the kernel refuses to create one.
-///
-/// The descriptor belongs to the caller. It is how an image with no place on disk is handed to the
-/// loader, which only accepts a path. This platform has no `memfd_create`; an unlinked temporary
-/// file is the same kind of handle — no path once it exists, released when the last descriptor
-/// closes, and writable immediately, which is what `MFD_CLOEXEC` gives Linux. A POSIX
-/// shared-memory object is not: this kernel creates one with no length, so a caller could not write
-/// to it without first sizing it, which this signature has no way to say.
-pub fn anonymous_file(name: &std::ffi::CStr) -> Option<i32> {
-    use std::os::unix::ffi::OsStringExt;
-
-    let stamp = name.to_string_lossy().replace('/', "_");
-    let template = std::env::temp_dir().join(format!("mirvm-{stamp}-XXXXXX"));
-    let mut bytes = template.into_os_string().into_vec();
-    bytes.push(0);
-
-    // SAFETY: the template is NUL-terminated and ends in the six characters `mkstemp` requires.
-    let fd = unsafe { libc::mkstemp(bytes.as_mut_ptr().cast()) };
-    if fd < 0 {
-        return None;
-    }
-    // The name is dropped immediately, so the file has no path for the rest of its life.
-    unsafe { libc::unlink(bytes.as_ptr().cast()) };
-    // `mkstemp` does not set it on this platform, and the Linux path has it.
-    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
-    Some(fd)
 }

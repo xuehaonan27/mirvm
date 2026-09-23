@@ -4,14 +4,25 @@
 //! values are the C library's and the same on every platform, so the type is declared here.
 //!
 //! `page_size`, `map_anon`, `protect` and `unmap` are the same C library calls with the same flags
-//! on every platform this build supports, so they are here too. What is the platform's is the two
-//! places where the kernels genuinely differ: asking for a *preferred fixed* base without being
-//! allowed to replace what is already there, and creating an anonymous file that has no name.
+//! on every platform this build supports, so they are here too. What is the platform's is the
+//! place where the kernels genuinely differ: asking for a *preferred fixed* base without being
+//! allowed to replace what is already there.
+//!
+//! A file with no name belongs to one platform alone. Its kernel can make one directly, which is
+//! how bytes reach something that reads them back through a descriptor; the other has no such call,
+//! and where it needs the same thing — an object for its own loader, which its signer has to see by
+//! name first — it creates a named file instead, as a step of `dll`'s publication.
 
+/// Asking for a *preferred fixed* base: the address if the kernel grants it, and nothing if it does
+/// not, rather than replacing whatever is mapped there.
 #[cfg(target_os = "linux")]
-pub(crate) use super::linux::mem::{anonymous_file, map_fixed_preferred};
+pub(crate) use super::linux::mem::map_fixed_preferred;
 #[cfg(target_os = "macos")]
-pub(crate) use super::macos::mem::{anonymous_file, map_fixed_preferred};
+pub(crate) use super::macos::mem::map_fixed_preferred;
+
+/// A file with no name, for bytes that are only ever read back through the descriptor.
+#[cfg(target_os = "linux")]
+pub(crate) use super::linux::mem::anonymous_file;
 
 /// Narrow enumeration of mmap protection flags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
