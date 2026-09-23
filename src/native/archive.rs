@@ -124,6 +124,15 @@ const LINK_SUFFIX: &[&str] = &[
     "-lutil",
     "-lgcc_s",
 ];
+/// The runtime calls a mirvm image must not reach directly, asked of the linker by name.
+///
+/// NOTE: three facts wear this one name, and only the first is mirvm's.
+/// *Which* calls must be caught belongs with the guest model rather than with archive handling.
+/// *How* the linker is told belongs in `os::linker`, because it is the object format's: GNU ld has
+/// `--wrap`, while Mach-O has no such flag and needs dyld interposing (an `__DATA,__interpose`
+/// table) instead. And the bridge the flags name is machine code, which belongs to
+/// `arch::asmstub` beside the other stub generators. A platform whose linker cannot express this
+/// must refuse the image rather than link one whose calls would never be caught.
 pub(crate) const NATIVE_RUNTIME_WRAP_FLAGS: &[&str] = &[
     "-Wl,--wrap=pthread_create",
     "-Wl,--wrap=pthread_key_create",
@@ -133,6 +142,11 @@ pub(crate) const NATIVE_RUNTIME_WRAP_FLAGS: &[&str] = &[
     "-Wl,--wrap=sigaction",
     "-Wl,--wrap=raise",
 ];
+/// The replacement symbols [`NATIVE_RUNTIME_WRAP_FLAGS`] names, as hand-written x86_64.
+///
+/// NOTE: x86 machine code in a format-handling layer. It has the shape `arch::asmstub` already
+/// emits for the entry stubs — a PC-relative load of an indirect slot — so it should be generated
+/// by the architecture, which is what would give an aarch64 bridge somewhere to live.
 pub(crate) const NATIVE_RUNTIME_BRIDGE_ASM: &str = r#"
 .intel_syntax noprefix
 .text
