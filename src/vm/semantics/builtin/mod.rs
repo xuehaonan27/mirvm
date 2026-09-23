@@ -140,9 +140,17 @@ pub(crate) fn exec_builtin(
         | Builtin::X86Crc32U8
         | Builtin::X86Crc32U16
         | Builtin::X86Crc32U32
-        | Builtin::X86Crc32U64
-        | Builtin::CpuHintNop
-        | Builtin::Breakpoint => x86_64::exec_scalar(builtin, av),
+        | Builtin::X86Crc32U64 => x86_64::exec_scalar(builtin, av),
+
+        // Neither of these is one CPU's: every architecture has a hint form that changes nothing
+        // and a breakpoint instruction, so the body names whichever this build's CPU is.
+        Builtin::CpuHintNop => 0,
+        Builtin::Breakpoint => {
+            // A real breakpoint instruction: when not being traced this terminates with SIGTRAP,
+            // which is what a natively compiled guest does.
+            crate::arch::asmstub::int3();
+            0
+        }
 
         // The managed heap, and the guest shim that takes it over when one is registered.
         Builtin::NoAllocShim

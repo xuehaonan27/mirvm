@@ -290,9 +290,7 @@ pub(crate) fn simd_cast_body(
                 // out-of-range simd_cast is guest UB, and a saturated value stays inside the
                 // allowed set).
                 let x = match sw {
-                    Width::W16 => {
-                        f64::from(f32::from_bits(crate::arch::x86_64::f16_to_f32_sw(v as u16)))
-                    }
+                    Width::W16 => f64::from(f32::from_bits(crate::arch::f16::to_f32(v as u16))),
                     Width::W32 => f32::from_bits(v as u32) as f64,
                     Width::W64 => f64::from_bits(v),
                     _ => engine_abort("simd_cast float lane width is not 2/4/8"),
@@ -317,19 +315,15 @@ pub(crate) fn simd_cast_body(
             (L::Float, L::Float) => match (sw, dw) {
                 (Width::W32, Width::W64) => (f32::from_bits(v as u32) as f64).to_bits(),
                 (Width::W64, Width::W32) => (f64::from_bits(v) as f32).to_bits() as u64,
-                // f16 lanes use a deterministic software model: native executes hardware
-                // semantics (VCVTPH2PS/VCVTPS2PH, including forcing the sNaN quiet bit)
-                // inside a target_feature(f16c) function, while a host libcall's NaN bit
-                // behavior drifts with the build target and cannot be relied on.
-                (Width::W16, Width::W32) => u64::from(crate::arch::x86_64::f16_to_f32_sw(v as u16)),
+                // The f16 lanes convert through the architecture's own answer rather than a host
+                // `as` cast: a guest build converts with the instruction its own CPU has
+                // (VCVTPH2PS/VCVTPS2PH, or `fcvt`), and a libcall's NaN bit behaviour drifts with
+                // the build target in a way neither instruction's does.
+                (Width::W16, Width::W32) => u64::from(crate::arch::f16::to_f32(v as u16)),
                 (Width::W16, Width::W64) => {
-                    f64::from(f32::from_bits(crate::arch::x86_64::f16_to_f32_sw(v as u16)))
-                        .to_bits()
+                    f64::from(f32::from_bits(crate::arch::f16::to_f32(v as u16))).to_bits()
                 }
-                (Width::W32, Width::W16) => u64::from(crate::arch::x86_64::f32_to_f16_sw(
-                    v as u32,
-                    crate::arch::x86_64::HalfRound::Rne,
-                )),
+                (Width::W32, Width::W16) => u64::from(crate::arch::f16::to_f16(v as u32)),
                 (Width::W64, Width::W16) => (f64::from_bits(v) as f16).to_bits() as u64,
                 _ => v, // same width: bitwise passthrough
             },

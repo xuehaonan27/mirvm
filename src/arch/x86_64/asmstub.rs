@@ -1,7 +1,7 @@
 //! x86_64 machine-code byte emission and single-instruction primitives.
 //!
 //! Holds the codearena entry-stub byte factory (`movabs rax, target; jmp rax`)
-//! and the interpreter's two `asm!` sites (int3 breakpoint, xgetbv). Emission
+//! and the interpreter's `asm!` site (the int3 breakpoint). Emission
 //! and execution only: the stub's address-region semantics (the pair's `addrspace`) and the
 //! breakpoint's termination semantics (same as native) stay with the caller.
 //!
@@ -77,21 +77,6 @@ pub const INERT_SLOT: [u8; STUB_STRIDE as usize] = {
     slot[0] = RET;
     slot
 };
-
-/// `xgetbv`: XCR(xcr) -> (edx:eax) assembled into a u64.
-pub fn xgetbv(xcr: u32) -> u64 {
-    let (eax, edx): (u32, u32);
-    unsafe {
-        std::arch::asm!(
-            "xgetbv",
-            in("ecx") xcr,
-            out("eax") eax,
-            out("edx") edx,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    (u64::from(edx) << 32) | u64::from(eax)
-}
 
 // ===== syscall interception trampoline =====
 //

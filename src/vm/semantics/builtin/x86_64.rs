@@ -1,7 +1,7 @@
 //! This architecture's own builtin lane.
 //!
 //! The guest's `core::arch::x86_64` intrinsics arrive as one builtin variant each. The
-//! instruction bodies are `crate::arch::x86_64`'s; what is decided here is which builtin is
+//! instruction bodies are `crate::arch::intrinsics`'s; what is decided here is which builtin is
 //! which and how its arguments map onto the ABI slots.
 //!
 //! Two shapes, which is why the routing match in the parent names them as two families: an
@@ -20,7 +20,9 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
                 engine_abort("pshufb128 return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
-            unsafe { crate::arch::x86_64::pshufb128(dst, a(0) as *const u8, a(1) as *const u8) };
+            unsafe {
+                crate::arch::intrinsics::pshufb128(dst, a(0) as *const u8, a(1) as *const u8)
+            };
             0
         }
         Builtin::X86Pshufb256 => {
@@ -28,7 +30,9 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
                 engine_abort("pshufb256 return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
-            unsafe { crate::arch::x86_64::pshufb256(dst, a(0) as *const u8, a(1) as *const u8) };
+            unsafe {
+                crate::arch::intrinsics::pshufb256(dst, a(0) as *const u8, a(1) as *const u8)
+            };
             0
         }
         Builtin::X86Sha256Msg1 | Builtin::X86Sha256Msg2 => {
@@ -38,9 +42,9 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             let dst = dst as *mut u8;
             unsafe {
                 if matches!(builtin, Builtin::X86Sha256Msg1) {
-                    crate::arch::x86_64::sha256msg1(dst, a(0) as *const u8, a(1) as *const u8);
+                    crate::arch::intrinsics::sha256msg1(dst, a(0) as *const u8, a(1) as *const u8);
                 } else {
-                    crate::arch::x86_64::sha256msg2(dst, a(0) as *const u8, a(1) as *const u8);
+                    crate::arch::intrinsics::sha256msg2(dst, a(0) as *const u8, a(1) as *const u8);
                 }
             }
             0
@@ -51,7 +55,7 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             };
             let dst = dst as *mut u8;
             unsafe {
-                crate::arch::x86_64::sha256rnds2(
+                crate::arch::intrinsics::sha256rnds2(
                     dst,
                     a(0) as *const u8,
                     a(1) as *const u8,
@@ -67,9 +71,9 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             let dst = dst as *mut u8;
             unsafe {
                 if matches!(builtin, Builtin::X86PsadBw128) {
-                    crate::arch::x86_64::psad_bw128(dst, a(0) as *const u8, a(1) as *const u8);
+                    crate::arch::intrinsics::psad_bw128(dst, a(0) as *const u8, a(1) as *const u8);
                 } else {
-                    crate::arch::x86_64::psad_bw256(dst, a(0) as *const u8, a(1) as *const u8);
+                    crate::arch::intrinsics::psad_bw256(dst, a(0) as *const u8, a(1) as *const u8);
                 }
             }
             0
@@ -80,7 +84,7 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             };
             let dst = dst as *mut u8;
             unsafe {
-                crate::arch::x86_64::pclmulqdq(dst, a(0) as *const u8, a(1) as *const u8, a(2))
+                crate::arch::intrinsics::pclmulqdq(dst, a(0) as *const u8, a(1) as *const u8, a(2))
             };
             0
         }
@@ -95,10 +99,10 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             let (x, k) = (a(0) as *const u8, a(1) as *const u8);
             unsafe {
                 match builtin {
-                    Builtin::X86AesEnc => crate::arch::x86_64::aesenc(dst, x, k),
-                    Builtin::X86AesEncLast => crate::arch::x86_64::aesenclast(dst, x, k),
-                    Builtin::X86AesDec => crate::arch::x86_64::aesdec(dst, x, k),
-                    _ => crate::arch::x86_64::aesdeclast(dst, x, k),
+                    Builtin::X86AesEnc => crate::arch::intrinsics::aesenc(dst, x, k),
+                    Builtin::X86AesEncLast => crate::arch::intrinsics::aesenclast(dst, x, k),
+                    Builtin::X86AesDec => crate::arch::intrinsics::aesdec(dst, x, k),
+                    _ => crate::arch::intrinsics::aesdeclast(dst, x, k),
                 }
             }
             0
@@ -108,7 +112,7 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
                 engine_abort("aesimc return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
-            unsafe { crate::arch::x86_64::aesimc(dst, a(0) as *const u8) };
+            unsafe { crate::arch::intrinsics::aesimc(dst, a(0) as *const u8) };
             0
         }
         Builtin::X86AesKeygenAssist => {
@@ -116,7 +120,7 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
                 engine_abort("aeskeygenassist return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
-            unsafe { crate::arch::x86_64::aeskeygenassist(dst, a(0) as *const u8, a(1)) };
+            unsafe { crate::arch::intrinsics::aeskeygenassist(dst, a(0) as *const u8, a(1)) };
             0
         }
         Builtin::X86Permd256 => {
@@ -124,7 +128,7 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
                 engine_abort("permd return form is not an indirect vector");
             };
             let dst = dst as *mut u8;
-            unsafe { crate::arch::x86_64::permd256(dst, a(0) as *const u8, a(1) as *const u8) };
+            unsafe { crate::arch::intrinsics::permd256(dst, a(0) as *const u8, a(1) as *const u8) };
             0
         }
         Builtin::X86PmaddUbSw128
@@ -138,10 +142,10 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             let (x, y) = (a(0) as *const u8, a(1) as *const u8);
             unsafe {
                 match builtin {
-                    Builtin::X86PmaddUbSw128 => crate::arch::x86_64::pmaddubsw128(dst, x, y),
-                    Builtin::X86PmaddUbSw256 => crate::arch::x86_64::pmaddubsw256(dst, x, y),
-                    Builtin::X86PmaddWd128 => crate::arch::x86_64::pmaddwd128(dst, x, y),
-                    _ => crate::arch::x86_64::pmaddwd256(dst, x, y),
+                    Builtin::X86PmaddUbSw128 => crate::arch::intrinsics::pmaddubsw128(dst, x, y),
+                    Builtin::X86PmaddUbSw256 => crate::arch::intrinsics::pmaddubsw256(dst, x, y),
+                    Builtin::X86PmaddWd128 => crate::arch::intrinsics::pmaddwd128(dst, x, y),
+                    _ => crate::arch::intrinsics::pmaddwd256(dst, x, y),
                 }
             }
             0
@@ -154,7 +158,7 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             // (src vec, base scalar pointer, vindex vec, mask vec, scale imm)
             unsafe {
                 if matches!(builtin, Builtin::X86GatherQPd256) {
-                    crate::arch::x86_64::gather_q_pd_256(
+                    crate::arch::intrinsics::gather_q_pd_256(
                         dst,
                         a(0) as *const u8,
                         a(1),
@@ -163,7 +167,7 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
                         a(4),
                     );
                 } else {
-                    crate::arch::x86_64::gather_d_pd_256(
+                    crate::arch::intrinsics::gather_d_pd_256(
                         dst,
                         a(0) as *const u8,
                         a(1),
@@ -189,21 +193,21 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             unsafe {
                 match builtin {
                     Builtin::X86Pmadd52Lo128 => {
-                        crate::arch::x86_64::vpmadd52::<2, false>(dst, x, y, z)
+                        crate::arch::intrinsics::vpmadd52::<2, false>(dst, x, y, z)
                     }
                     Builtin::X86Pmadd52Hi128 => {
-                        crate::arch::x86_64::vpmadd52::<2, true>(dst, x, y, z)
+                        crate::arch::intrinsics::vpmadd52::<2, true>(dst, x, y, z)
                     }
                     Builtin::X86Pmadd52Lo256 => {
-                        crate::arch::x86_64::vpmadd52::<4, false>(dst, x, y, z)
+                        crate::arch::intrinsics::vpmadd52::<4, false>(dst, x, y, z)
                     }
                     Builtin::X86Pmadd52Hi256 => {
-                        crate::arch::x86_64::vpmadd52::<4, true>(dst, x, y, z)
+                        crate::arch::intrinsics::vpmadd52::<4, true>(dst, x, y, z)
                     }
                     Builtin::X86Pmadd52Lo512 => {
-                        crate::arch::x86_64::vpmadd52::<8, false>(dst, x, y, z)
+                        crate::arch::intrinsics::vpmadd52::<8, false>(dst, x, y, z)
                     }
-                    _ => crate::arch::x86_64::vpmadd52::<8, true>(dst, x, y, z),
+                    _ => crate::arch::intrinsics::vpmadd52::<8, true>(dst, x, y, z),
                 }
             }
             0
@@ -219,10 +223,16 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             let (x, y) = (a(0) as *const u8, a(1) as *const u8);
             unsafe {
                 match builtin {
-                    Builtin::X86MaxPs128 => crate::arch::x86_64::maxmin_ps::<4, true>(dst, x, y),
-                    Builtin::X86MinPs128 => crate::arch::x86_64::maxmin_ps::<4, false>(dst, x, y),
-                    Builtin::X86MaxPs256 => crate::arch::x86_64::maxmin_ps::<8, true>(dst, x, y),
-                    _ => crate::arch::x86_64::maxmin_ps::<8, false>(dst, x, y),
+                    Builtin::X86MaxPs128 => {
+                        crate::arch::intrinsics::maxmin_ps::<4, true>(dst, x, y)
+                    }
+                    Builtin::X86MinPs128 => {
+                        crate::arch::intrinsics::maxmin_ps::<4, false>(dst, x, y)
+                    }
+                    Builtin::X86MaxPs256 => {
+                        crate::arch::intrinsics::maxmin_ps::<8, true>(dst, x, y)
+                    }
+                    _ => crate::arch::intrinsics::maxmin_ps::<8, false>(dst, x, y),
                 }
             }
             0
@@ -235,9 +245,9 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             let (x, y) = (a(0) as *const u8, a(1) as *const u8);
             unsafe {
                 if matches!(builtin, Builtin::X86MaxSd) {
-                    crate::arch::x86_64::maxmin_pd::<1, true>(dst, x, y)
+                    crate::arch::intrinsics::maxmin_pd::<1, true>(dst, x, y)
                 } else {
-                    crate::arch::x86_64::maxmin_pd::<1, false>(dst, x, y)
+                    crate::arch::intrinsics::maxmin_pd::<1, false>(dst, x, y)
                 }
             }
             0
@@ -253,10 +263,16 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             let (x, y) = (a(0) as *const u8, a(1) as *const u8);
             unsafe {
                 match builtin {
-                    Builtin::X86MaxPd128 => crate::arch::x86_64::maxmin_pd::<2, true>(dst, x, y),
-                    Builtin::X86MinPd128 => crate::arch::x86_64::maxmin_pd::<2, false>(dst, x, y),
-                    Builtin::X86MaxPd256 => crate::arch::x86_64::maxmin_pd::<4, true>(dst, x, y),
-                    _ => crate::arch::x86_64::maxmin_pd::<4, false>(dst, x, y),
+                    Builtin::X86MaxPd128 => {
+                        crate::arch::intrinsics::maxmin_pd::<2, true>(dst, x, y)
+                    }
+                    Builtin::X86MinPd128 => {
+                        crate::arch::intrinsics::maxmin_pd::<2, false>(dst, x, y)
+                    }
+                    Builtin::X86MaxPd256 => {
+                        crate::arch::intrinsics::maxmin_pd::<4, true>(dst, x, y)
+                    }
+                    _ => crate::arch::intrinsics::maxmin_pd::<4, false>(dst, x, y),
                 }
             }
             0
@@ -269,9 +285,9 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             let (x, y, imm) = (a(0) as *const u8, a(1) as *const u8, a(2));
             unsafe {
                 if matches!(builtin, Builtin::X86CmpPs128) {
-                    crate::arch::x86_64::cmp_ps::<4>(dst, x, y, imm)
+                    crate::arch::intrinsics::cmp_ps::<4>(dst, x, y, imm)
                 } else {
-                    crate::arch::x86_64::cmp_ps::<8>(dst, x, y, imm)
+                    crate::arch::intrinsics::cmp_ps::<8>(dst, x, y, imm)
                 }
             }
             0
@@ -284,9 +300,9 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             let (x, y, imm) = (a(0) as *const u8, a(1) as *const u8, a(2));
             unsafe {
                 if matches!(builtin, Builtin::X86CmpPd128) {
-                    crate::arch::x86_64::cmp_pd::<2>(dst, x, y, imm)
+                    crate::arch::intrinsics::cmp_pd::<2>(dst, x, y, imm)
                 } else {
-                    crate::arch::x86_64::cmp_pd::<4>(dst, x, y, imm)
+                    crate::arch::intrinsics::cmp_pd::<4>(dst, x, y, imm)
                 }
             }
             0
@@ -299,9 +315,9 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             let (x, imm) = (a(0) as *const u8, a(1));
             unsafe {
                 if matches!(builtin, Builtin::X86RoundPs128) {
-                    crate::arch::x86_64::round_ps::<4>(dst, x, imm)
+                    crate::arch::intrinsics::round_ps::<4>(dst, x, imm)
                 } else {
-                    crate::arch::x86_64::round_ps::<8>(dst, x, imm)
+                    crate::arch::intrinsics::round_ps::<8>(dst, x, imm)
                 }
             }
             0
@@ -317,10 +333,16 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             let x = a(0) as *const u8;
             unsafe {
                 match builtin {
-                    Builtin::X86CvtPs2dq128 => crate::arch::x86_64::cvt_ps2dq::<4, false>(dst, x),
-                    Builtin::X86CvttPs2dq128 => crate::arch::x86_64::cvt_ps2dq::<4, true>(dst, x),
-                    Builtin::X86CvtPs2dq256 => crate::arch::x86_64::cvt_ps2dq::<8, false>(dst, x),
-                    _ => crate::arch::x86_64::cvt_ps2dq::<8, true>(dst, x),
+                    Builtin::X86CvtPs2dq128 => {
+                        crate::arch::intrinsics::cvt_ps2dq::<4, false>(dst, x)
+                    }
+                    Builtin::X86CvttPs2dq128 => {
+                        crate::arch::intrinsics::cvt_ps2dq::<4, true>(dst, x)
+                    }
+                    Builtin::X86CvtPs2dq256 => {
+                        crate::arch::intrinsics::cvt_ps2dq::<8, false>(dst, x)
+                    }
+                    _ => crate::arch::intrinsics::cvt_ps2dq::<8, true>(dst, x),
                 }
             }
             0
@@ -333,9 +355,9 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             let (x, y, m) = (a(0) as *const u8, a(1) as *const u8, a(2) as *const u8);
             unsafe {
                 if matches!(builtin, Builtin::X86BlendvPs128) {
-                    crate::arch::x86_64::blendv_ps::<4>(dst, x, y, m)
+                    crate::arch::intrinsics::blendv_ps::<4>(dst, x, y, m)
                 } else {
-                    crate::arch::x86_64::blendv_ps::<8>(dst, x, y, m)
+                    crate::arch::intrinsics::blendv_ps::<8>(dst, x, y, m)
                 }
             }
             0
@@ -348,9 +370,9 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             let src = a(0) as *const u8;
             unsafe {
                 if matches!(builtin, Builtin::X86Lddqu128) {
-                    crate::arch::x86_64::lddqu::<16>(dst, src)
+                    crate::arch::intrinsics::lddqu::<16>(dst, src)
                 } else {
-                    crate::arch::x86_64::lddqu::<32>(dst, src)
+                    crate::arch::intrinsics::lddqu::<32>(dst, src)
                 }
             }
             0
@@ -363,9 +385,9 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             let (x, imm) = (a(0) as *const u8, a(1));
             unsafe {
                 if matches!(builtin, Builtin::X86Cvtps2ph128) {
-                    crate::arch::x86_64::cvtps2ph::<4>(dst, x, imm)
+                    crate::arch::intrinsics::cvtps2ph::<4>(dst, x, imm)
                 } else {
-                    crate::arch::x86_64::cvtps2ph::<8>(dst, x, imm)
+                    crate::arch::intrinsics::cvtps2ph::<8>(dst, x, imm)
                 }
             }
             0
@@ -378,9 +400,9 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             let x = a(0) as *const u8;
             unsafe {
                 if matches!(builtin, Builtin::X86Cvtph2ps128) {
-                    crate::arch::x86_64::cvtph2ps::<4>(dst, x)
+                    crate::arch::intrinsics::cvtph2ps::<4>(dst, x)
                 } else {
-                    crate::arch::x86_64::cvtph2ps::<8>(dst, x)
+                    crate::arch::intrinsics::cvtph2ps::<8>(dst, x)
                 }
             }
             0
@@ -393,9 +415,9 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
             let (x, c) = (a(0) as *const u8, a(1) as *const u8);
             unsafe {
                 if matches!(builtin, Builtin::X86PsllD128) {
-                    crate::arch::x86_64::pshift32::<4, true>(dst, x, c)
+                    crate::arch::intrinsics::pshift32::<4, true>(dst, x, c)
                 } else {
-                    crate::arch::x86_64::pshift32::<4, false>(dst, x, c)
+                    crate::arch::intrinsics::pshift32::<4, false>(dst, x, c)
                 }
             }
             0
@@ -408,23 +430,17 @@ pub(super) fn exec_indirect_vector(builtin: &Builtin, av: &[u64], ret_dst: Optio
 pub(super) fn exec_scalar(builtin: &Builtin, av: &[u64]) -> u64 {
     let a = |i: usize| av[i];
     match builtin {
-        Builtin::CpuHintNop => 0,
-        Builtin::Breakpoint => {
-            // Real int3: when not being traced this terminates with SIGTRAP (native semantics).
-            crate::arch::asmstub::int3();
-            0
-        }
-        Builtin::Xgetbv => crate::arch::asmstub::xgetbv(a(0) as u32),
+        Builtin::Xgetbv => unsafe { crate::arch::intrinsics::xgetbv(a(0) as u32) },
         Builtin::X86Crc32U8 => unsafe {
-            u64::from(crate::arch::x86_64::crc32_u8(a(0) as u32, a(1) as u8))
+            u64::from(crate::arch::intrinsics::crc32_u8(a(0) as u32, a(1) as u8))
         },
         Builtin::X86Crc32U16 => unsafe {
-            u64::from(crate::arch::x86_64::crc32_u16(a(0) as u32, a(1) as u16))
+            u64::from(crate::arch::intrinsics::crc32_u16(a(0) as u32, a(1) as u16))
         },
         Builtin::X86Crc32U32 => unsafe {
-            u64::from(crate::arch::x86_64::crc32_u32(a(0) as u32, a(1) as u32))
+            u64::from(crate::arch::intrinsics::crc32_u32(a(0) as u32, a(1) as u32))
         },
-        Builtin::X86Crc32U64 => unsafe { crate::arch::x86_64::crc32_u64(a(0), a(1)) },
+        Builtin::X86Crc32U64 => unsafe { crate::arch::intrinsics::crc32_u64(a(0), a(1)) },
         _ => engine_abort("non-scalar builtin reached the x86_64 scalar lane"),
     }
 }
