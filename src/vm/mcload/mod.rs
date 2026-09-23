@@ -124,6 +124,7 @@ impl Drop for McImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native::elf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -219,6 +220,65 @@ target_value:
         );
         let bytes = std::fs::read(library).unwrap();
         (directory, bytes)
+    }
+
+    /// The name of section `index`, read straight out of the section-header string table so the
+    /// test does not depend on the loader it is testing.
+    fn section_name_at(
+        bytes: &[u8],
+        header: &elf::FileHeader,
+        sections: &[elf::Section],
+        index: usize,
+    ) -> String {
+        let names = sections[header.shstrndx as usize];
+        let start = names.offset as usize + sections[index].name as usize;
+        let tail = &bytes[start..];
+        let end = tail.iter().position(|&byte| byte == 0).unwrap_or(0);
+        String::from_utf8_lossy(&tail[..end]).into_owned()
+    }
+
+    /// Writes `value` over the 8-byte field `offset` of the section header `index`.
+    fn corrupt_section_field(bytes: &mut [u8], index: usize, offset: usize, value: u64) {
+        let header = elf::FileHeader::parse(bytes).unwrap();
+        let base = header.shoff as usize + index * header.shentsize as usize + offset;
+        bytes[base..base + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    /// A string-table offset past the end of the image is a corrupt image, and the loader says so
+    /// rather than slicing out of bounds. Both name readers are reached: the section-header one
+    /// through the table search, the symbol one through the first symbol's name.
+    #[test]
+    fn corrupt_string_table_offsets_are_reported_not_panicked_on() {
+        let (_directory, bytes) = relocation_fixture();
+        let header = elf::FileHeader::parse(&bytes).unwrap();
+        let sections = elf::sections(&bytes, &header).unwrap();
+        assert!(!sections.is_empty());
+
+        let mut no_section_names = bytes.clone();
+        corrupt_section_field(
+            &mut no_section_names,
+            header.shstrndx as usize,
+            elf::shdr::OFFSET,
+            u64::MAX / 2,
+        );
+        let error = load(&no_section_names).unwrap_err();
+        assert!(
+            error.starts_with("MC image lacks "),
+            "a nameless section table must fail as an unsupported image, got: {error}"
+        );
+
+        let strtab = (0..sections.len())
+            .find(|&index| section_name_at(&bytes, &header, &sections, index) == ".strtab")
+            .expect("fixture has a .strtab");
+        let mut bad_symbol_names = bytes;
+        corrupt_section_field(
+            &mut bad_symbol_names,
+            strtab,
+            elf::shdr::OFFSET,
+            u64::MAX / 2,
+        );
+        let error = load(&bad_symbol_names).unwrap_err();
+        assert_eq!(error, "MC image strtab out of bounds");
     }
 
     #[test]

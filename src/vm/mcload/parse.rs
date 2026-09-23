@@ -107,9 +107,16 @@ impl<'a> Image<'a> {
 
     /// The NUL-terminated name `section` carries in the section-header string table. A section
     /// whose name is not UTF-8 is unnamed, which no lookup here matches.
+    ///
+    /// A name whose offset falls outside the image is unnamed for the same reason: the section
+    /// simply never matches, and the phase that required it reports an unsupported image instead
+    /// of reading past the bytes.
     fn section_name<'s>(&'s self, names: &elf::Section, section: &elf::Section) -> &'s str {
         let start = (names.offset + u64::from(section.name)) as usize;
-        let end = self.bytes[start..]
+        let Some(tail) = self.bytes.get(start..) else {
+            return "";
+        };
+        let end = tail
             .iter()
             .position(|&c| c == 0)
             .map(|position| start + position)

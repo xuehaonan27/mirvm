@@ -152,7 +152,10 @@ impl<'a> Symbols<'a> {
     fn static_name(&self, offset: u32) -> Result<String, String> {
         let start = (self.strtab.offset + u64::from(offset)) as usize;
         let limit = (self.strtab.offset + self.strtab.size) as usize;
-        let end = self.bytes[start..limit.min(self.bytes.len())]
+        let end = self
+            .bytes
+            .get(start..limit.min(self.bytes.len()))
+            .ok_or("MC image strtab out of bounds")?
             .iter()
             .position(|&c| c == 0)
             .map(|position| start + position)
