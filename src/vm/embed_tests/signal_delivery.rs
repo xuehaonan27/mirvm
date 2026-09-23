@@ -114,7 +114,9 @@ fn target_thread_signal_module() -> Module {
     module.exports.insert("probe".into(), 1);
     module.exports.insert("raise".into(), 2);
     module.exports.insert("block".into(), 3);
-    module.fn_addrs.insert(SIGNAL_TARGET_GUEST_ADDR, 0);
+    module
+        .fn_entry_links
+        .push((LinkAddr(SIGNAL_TARGET_GUEST_ADDR), 0));
     module
 }
 
@@ -207,7 +209,9 @@ fn native_oldact_reinstall_module() -> Module {
         ..Module::default()
     };
     module.exports.insert("probe".into(), 0);
-    module.fn_addrs.insert(SIGNAL_OWNER_GUEST_ADDR, 1);
+    module
+        .fn_entry_links
+        .push((LinkAddr(SIGNAL_OWNER_GUEST_ADDR), 1));
     module
 }
 
@@ -287,7 +291,9 @@ fn cross_engine_signal_reinstaller_module() -> Module {
     };
     module.exports.insert("install".into(), 1);
     module.exports.insert("probe".into(), 2);
-    module.fn_addrs.insert(SIGNAL_OVERRIDE_GUEST_ADDR, 0);
+    module
+        .fn_entry_links
+        .push((LinkAddr(SIGNAL_OVERRIDE_GUEST_ADDR), 0));
     module
 }
 
@@ -324,7 +330,9 @@ fn sigaction_mask_module() -> Module {
         ..Module::default()
     };
     module.exports.insert("query".into(), 1);
-    module.fn_addrs.insert(SIGNAL_OWNER_GUEST_ADDR, 0);
+    module
+        .fn_entry_links
+        .push((LinkAddr(SIGNAL_OWNER_GUEST_ADDR), 0));
     module
 }
 
@@ -363,7 +371,9 @@ fn sigaction_reinstall_module() -> Module {
         ..Module::default()
     };
     module.exports.insert("sigaction".into(), 1);
-    module.fn_addrs.insert(SIGNAL_OWNER_GUEST_ADDR, 0);
+    module
+        .fn_entry_links
+        .push((LinkAddr(SIGNAL_OWNER_GUEST_ADDR), 0));
     module
 }
 
@@ -390,7 +400,7 @@ fn physically_blocked_native_finalizer_raise_survives_close_worker_exit() {
         let (_directory, library) = native_signal_handler_library();
         SIGNAL_EXTERNAL_SIGINFO_CODE.store(i32::MIN, Ordering::SeqCst);
         let engine = engine(native_image_finalizer_raise_module(&library), mode == "jit");
-        let image = &engine.shared().module.native_images[0];
+        let image = &engine.shared().instance.native_images[0];
         let trace_address = crate::os::dll::sym(image.handle(), c"read_image_signal_trace");
         assert_ne!(trace_address, 0, "native trace reader was not exported");
         let read_trace: unsafe extern "C" fn() -> u64 =
@@ -504,7 +514,7 @@ fn another_engine_can_reinstall_guest_p1_oldact_without_stealing_ownership() {
         );
         let first_p1 = owner
             .shared()
-            .module
+            .instance
             .load_map
             .resolve(link_addr)
             .expect("signal P1 entry was not materialized");
@@ -559,7 +569,7 @@ fn another_engine_can_reinstall_guest_p1_oldact_without_stealing_ownership() {
         );
         let p1 = owner
             .shared()
-            .module
+            .instance
             .load_map
             .resolve(link_addr)
             .expect("second signal P1 entry was not materialized");

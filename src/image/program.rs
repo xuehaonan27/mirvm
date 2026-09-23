@@ -19,6 +19,7 @@ use rustc_middle::ty::TyCtxt;
 use serde::{Deserialize, Serialize};
 
 use crate::depinfo::InputManifest;
+use crate::vm::instance::Instance;
 use crate::vm::ir;
 
 #[derive(Serialize, Deserialize)]
@@ -55,14 +56,14 @@ fn header_matches(header: &Header, rustc_args: &[String], base_key: Option<&str>
         && header.base_key.as_deref() == base_key
 }
 
-/// Hot-path lookup. The returned Module already has its frozen area restored to a fixed base;
+/// Hot-path lookup. The returned module and instance: the frozen area is restored to a fixed base,
 /// asm_stub_addrs are stale addresses from serialization, the caller **must** rematerialize and
 /// overwrite via asm_sites before executing.
 pub fn lookup(
     rustc_args: &[String],
     base_key: Option<&str>,
     prefix: crate::vm::verify::Prefix,
-) -> Option<ir::Module> {
+) -> Option<(ir::Module, Instance)> {
     if disabled() {
         return None;
     }
@@ -75,19 +76,17 @@ pub fn lookup(
     if !header.inputs.is_current() {
         return None;
     }
-    // Module deserialization includes frozen-area fixed-base restoration; failure (base occupied
+    // Module deserialization; the frozen image is mapped by `revive`, and failure (base occupied
     // etc.) → miss
     let mut module: ir::Module = postcard::from_bytes(module_bytes).ok()?;
     // Correct shape does not guarantee index and frame range safety, so a bad cache is a miss that
     // the cold path self-heals. Materialized .so files (native archive / global_asm) that were
     // removed are a miss for the same reason.
-    if !crate::store::entry::revive(&mut module, prefix) {
-        return None;
-    }
+    let instance = crate::store::entry::revive(&mut module, prefix)?;
     if !crate::store::entry::native_libs_present(&module) {
         return None;
     }
-    Some(module)
+    Some((module, instance))
 }
 
 /// Cold-path store (clean state right after lower finishes and before guest runs). Returns whether
@@ -96,13 +95,14 @@ pub fn store(
     tcx: TyCtxt<'_>,
     rustc_args: &[String],
     module: &ir::Module,
+    instance: &Instance,
     base_key: Option<&str>,
     prefix: crate::vm::verify::Prefix,
 ) -> bool {
     if disabled() {
         return false;
     }
-    if crate::vm::verify::module_with_prefix(module, prefix).is_err() {
+    if crate::vm::verify::module_with_prefix(module, instance, prefix).is_err() {
         return false;
     }
     // The frozen area must be at a fixed base (a concurrent preempt or an ASLR conflict leaves
@@ -111,7 +111,7 @@ pub fn store(
     // Foreign symbols (environ-like extern static / extern fn address-taking) are indirected
     // through GOT slots since P2 (decision-history §7.5c): the GOT table travels with the snapshot
     // and is refilled with this process's real values at startup, so it is not a cache blocker.
-    if !crate::store::entry::snapshot_is_publishable(module, None) {
+    if !crate::store::entry::snapshot_is_publishable(module, instance, None) {
         return false;
     }
     let Some(inputs) = InputManifest::collect(tcx) else {

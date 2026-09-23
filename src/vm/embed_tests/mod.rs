@@ -495,7 +495,7 @@ fn signal_owner_module(handler_addr: u64, marker: &'static AtomicU64) -> Module 
         ..Module::default()
     };
     module.exports.insert("probe".into(), 1);
-    module.fn_addrs.insert(handler_addr, 0);
+    module.fn_entry_links.push((LinkAddr(handler_addr), 0));
     module
 }
 
@@ -579,7 +579,6 @@ fn signal_p1_owner_module(link_addr: LinkAddr, marker: &'static AtomicU64) -> Mo
     );
     module.funcs.push(installer);
     module.exports.insert("install".into(), 2);
-    module.link_fn_addrs.insert(link_addr, 0);
     module.entry_stub_sites.push(super::ir::EntryStubSite {
         link_addr,
         func: 0,

@@ -6,9 +6,9 @@ use super::super::ctx::{Engine, Shared, activate};
 use super::super::ffi::inbound::call_guest_ffi;
 use super::super::interp::{RunOutcome, run_export};
 use super::super::ir::{
-    Block, FfiKind, ForeignSig, FuncBody, MemOrd, Module, Operand, ParamAbi, PlaceBase, PlaceExpr,
-    PlaceStep, RetAbi, RetDest, RmwOp, Rvalue, ScalarPlace, Slot, Stmt, Terminator, UnwindAction,
-    Width,
+    Block, FfiKind, ForeignSig, FuncBody, LinkAddr, MemOrd, Module, Operand, ParamAbi, PlaceBase,
+    PlaceExpr, PlaceStep, RetAbi, RetDest, RmwOp, Rvalue, ScalarPlace, Slot, Stmt, Terminator,
+    UnwindAction, Width,
 };
 use super::{TSD_DTOR_ROUNDS, TSD_KEYS, TsdRegistration, prepare_pthread_operation};
 use crate::os::signal::{SIGWINCH, send_to_thread};
@@ -210,7 +210,7 @@ fn tsd_module(marker: &AtomicU64, reinstall: bool) -> Module {
         ..Module::default()
     };
     module.exports.insert("probe".into(), 0);
-    module.fn_addrs.insert(TSD_ENTRY, 1);
+    module.fn_entry_links.push((LinkAddr(TSD_ENTRY), 1));
     module
 }
 
@@ -265,7 +265,9 @@ fn exit_signal_tsd_module(marker: &AtomicU64) -> Module {
     let handler_id = module.funcs.len() as u32;
     module.funcs.push(handler);
     module.exports.insert("attach".into(), attach_id);
-    module.fn_addrs.insert(EXIT_SIGNAL_ENTRY, handler_id);
+    module
+        .fn_entry_links
+        .push((LinkAddr(EXIT_SIGNAL_ENTRY), handler_id));
     module
 }
 
@@ -490,7 +492,7 @@ fn start_module(thread: *mut ThreadId, marker: &AtomicU64) -> Module {
         ..Module::default()
     };
     module.exports.insert("probe".into(), 0);
-    module.fn_addrs.insert(START_ENTRY, 1);
+    module.fn_entry_links.push((LinkAddr(START_ENTRY), 1));
     module
 }
 

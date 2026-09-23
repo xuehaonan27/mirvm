@@ -10,8 +10,8 @@
 //! lazy decode, and [`module`] is the artifact those are assembled into.
 
 use super::{
-    AsmIoDst, AsmIoVal, AsmSite, AsmStubId, Bb, FuncId, LinkAddr, LoadMap, Operand, PlaceExpr,
-    ScalarPlace, Slot, Stmt, UnwindAction,
+    AsmIoDst, AsmIoVal, AsmSite, AsmStubId, Bb, FuncId, LinkAddr, Operand, PlaceExpr, ScalarPlace,
+    Slot, Stmt, UnwindAction,
 };
 
 pub use ffi::*;

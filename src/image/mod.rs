@@ -22,6 +22,7 @@ pub(crate) mod base;
 pub(crate) mod deps;
 pub(crate) mod program;
 
+use crate::vm::instance::Instance;
 use crate::vm::ir::{FuncId, Module, TlsId};
 
 /// Why a persisted image layer could not be produced.
@@ -65,6 +66,8 @@ crate::diag_codes! {
 /// A loaded layer, ready for a program session to use.
 pub struct BaseImage {
     pub module: Module,
+    /// The layer's own loaded instance: its frozen mapping and address tables.
+    pub instance: Instance,
     pub fn_by_sym: std::collections::HashMap<Box<str>, FuncId>,
     pub entry_by_sym: std::collections::HashMap<Box<str>, u64>,
     pub static_by_sym: std::collections::HashMap<Box<str>, u64>,
@@ -216,8 +219,9 @@ impl ImageStack {
     /// sequential concatenation position equals absolute id). After the merge, asm stubs are
     /// re-materialized: the stub addresses in an image file are live only in the build process, so
     /// they must be idempotently re-materialized here from the recipe (the same contract as a warm L2
-    /// load). Each image's frozen region moves into `delta.image_frozens` to keep it alive.
-    pub fn absorb_into(self, delta: &mut Module) {
+    /// load). Each image's frozen region moves into the delta instance's mounted arenas to keep it
+    /// alive.
+    pub fn absorb_into(self, delta: &mut Module, delta_instance: &mut Instance) {
         let mut funcs = Vec::with_capacity(self.total_fns);
         let mut function_names = Vec::with_capacity(self.total_fns + delta.funcs.len());
         let mut tls = Vec::with_capacity(self.total_tls);
@@ -225,15 +229,16 @@ impl ImageStack {
         let mut frozens = Vec::with_capacity(self.images.len());
         for img in self.images {
             let mut m = img.module;
+            let mut i = img.instance;
             function_names.append(&mut m.function_names);
             m.funcs.drain_into(&mut funcs);
             tls.append(&mut m.tls);
             sites.append(&mut m.asm_sites);
-            for (a, f) in m.fn_addrs {
-                delta.fn_addrs.entry(a).or_insert(f);
+            for (a, f) in i.fn_addrs {
+                delta_instance.fn_addrs.entry(a).or_insert(f);
             }
-            for (a, f) in m.link_fn_addrs {
-                delta.link_fn_addrs.entry(a).or_insert(f);
+            for (a, f) in i.link_fn_addrs {
+                delta_instance.link_fn_addrs.entry(a).or_insert(f);
             }
             for (s, f) in m.exports {
                 delta.exports.entry(s).or_insert(f);
@@ -255,19 +260,19 @@ impl ImageStack {
             delta.frozen_relocs.append(&mut m.frozen_relocs);
             // Entry stubs merge with the image: the recipe is attached per code domain and
             // rebuilt per domain at startup.
-            if !m.entry_stub_sites.is_empty() || m.entry_stubs.is_mapped() {
-                let home = m
+            if !m.entry_stub_sites.is_empty() || i.entry_stubs.is_mapped() {
+                let home = i
                     .frozen
                     .as_ref()
                     .and_then(|f| crate::os_arch::addrspace::code_home_for_frozen(f.home()))
                     .expect("image frozen region is invalid; stub code domain cannot be derived");
-                delta.image_entry_stubs.push((
+                delta_instance.image_entry_stubs.push((
                     home,
                     std::mem::take(&mut m.entry_stub_sites),
-                    std::mem::take(&mut m.entry_stubs),
+                    std::mem::take(&mut i.entry_stubs),
                 ));
             }
-            if let Some(fr) = m.frozen {
+            if let Some(fr) = i.frozen {
                 frozens.push(fr);
             }
         }
@@ -280,10 +285,10 @@ impl ImageStack {
         delta.tls = tls;
         sites.append(&mut delta.asm_sites);
         delta.asm_sites = sites;
-        delta.asm_stub_addrs = crate::lower::asm::materialize(&delta.asm_sites);
+        delta_instance.asm_stub_addrs = crate::lower::asm::materialize(&delta.asm_sites);
         // entry: delta is authoritative
-        delta.image_frozens = frozens;
-        delta.rebuild_load_map();
-        delta.rebuild_fn_addrs();
+        delta_instance.image_frozens = frozens;
+        delta_instance.rebuild_load_map();
+        delta_instance.rebuild_fn_addrs();
     }
 }

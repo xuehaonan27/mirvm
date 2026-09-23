@@ -23,6 +23,10 @@ use super::thread_ctx::{CTX_KEY, CtxSlot, ThreadContexts};
 pub struct Shared {
     pub id: u64,
     pub module: Module,
+    /// The Engine's loaded instance: the frozen mapping, the address tables, the stub arenas and the
+    /// native images. Process state lives here rather than in the artifact, which stays a
+    /// self-contained description.
+    pub instance: super::super::instance::Instance,
     /// The Engine's symbol carriers, built from the artifact when it is loaded: process state
     /// lives here rather than in the artifact, which stays a self-contained description.
     pub symbols: super::super::backtrace::Symbols,
@@ -51,12 +55,26 @@ pub struct Shared {
 }
 
 impl Shared {
+    /// Build the instance an artifact supports and publish both. Raw and test callers use this; the
+    /// command-line load phase has state an artifact cannot describe and calls [`Shared::new_loaded`].
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new(module: Module) -> Self {
-        Self::try_from_module(module)
+        let instance = super::super::instance::Instance::materialize(&module)
+            .unwrap_or_else(|error| panic!("Engine Shared initialization failed: {error}"));
+        Self::try_new(module, instance)
             .unwrap_or_else(|error| panic!("Engine Shared initialization failed: {error}"))
     }
 
-    pub(crate) fn try_from_module(mut module: Module) -> Result<Self, String> {
+    /// Publish a Module together with the instance the load phase built for it.
+    pub(crate) fn new_loaded(module: Module, instance: super::super::instance::Instance) -> Self {
+        Self::try_new(module, instance)
+            .unwrap_or_else(|error| panic!("Engine Shared initialization failed: {error}"))
+    }
+
+    pub(crate) fn try_new(
+        mut module: Module,
+        instance: super::super::instance::Instance,
+    ) -> Result<Self, String> {
         static NEXT_ENGINE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         // One fact, decided once: whether a session is armed now fixes this
         // Engine's code domain for its whole lifetime.
@@ -75,6 +93,7 @@ impl Shared {
         Ok(Shared {
             id,
             module,
+            instance,
             symbols,
             thunks: super::super::thunks::ThunkCache::default(),
             domain,
@@ -448,14 +467,23 @@ impl Engine {
         super::super::native_instance::isolate_required_libraries(&mut shared.module, shared.id)?;
         let mut shared = Arc::new(shared);
         let control = Arc::clone(shared.control());
-        let module = &mut Arc::get_mut(&mut shared)
-            .ok_or("new Engine Shared unexpectedly aliased")?
-            .module;
-        let entry_closures = super::super::thunks::materialize_all_entry_stubs(module, &control)?;
-        super::super::native_instance::prepare_required_libraries(module)?;
-        super::super::native_instance::patch_entry_slots(module)?;
-        super::super::native_instance::patch_pthread_slots(module, control.id())?;
-        super::super::ffi::resolve_got_fixups(module)?;
+        let entry_closures = {
+            let shared =
+                Arc::get_mut(&mut shared).ok_or("new Engine Shared unexpectedly aliased")?;
+            let closures = super::super::thunks::materialize_all_entry_stubs(
+                &mut shared.module,
+                &mut shared.instance,
+                &control,
+            )?;
+            super::super::native_instance::prepare_required_libraries(
+                &shared.module,
+                &mut shared.instance,
+            )?;
+            super::super::native_instance::patch_entry_slots(&shared.module, &shared.instance)?;
+            super::super::native_instance::patch_pthread_slots(&shared.instance, control.id())?;
+            super::super::ffi::resolve_got_fixups(&shared.module, &shared.instance)?;
+            closures
+        };
         ENGINES
             .write()
             .unwrap()
@@ -463,7 +491,7 @@ impl Engine {
         control.install_owner(Arc::clone(&shared));
         #[cfg(feature = "cranelift")]
         super::super::jit::start(&shared);
-        super::super::native_instance::commit_images(&shared.module, &control);
+        super::super::native_instance::commit_images(&shared.instance, &control);
         entry_closures.commit();
 
         enum StartupFailure {
@@ -475,7 +503,7 @@ impl Engine {
         let startup_failure = {
             let activation = activate(startup.shared());
             let failure = match super::super::unwind::catch_raw(|| {
-                super::super::native_instance::run_initializers(&shared.module)
+                super::super::native_instance::run_initializers(&shared.instance)
             }) {
                 Ok(Ok(())) if shared.control.is_running() => None,
                 Ok(Ok(())) => Some(StartupFailure::Error(
@@ -537,11 +565,25 @@ impl Engine {
     /// operand and ABI description is valid for this process. Bytecode shape
     /// verification alone cannot prove those host-pointer obligations.
     pub unsafe fn from_module_unchecked(module: Module) -> Result<Self, String> {
+        let instance = super::super::instance::Instance::materialize(&module)?;
+        unsafe { Self::from_artifact_unchecked(module, instance) }
+    }
+
+    /// Construct an Engine from a Module and the instance the load phase built for it.
+    ///
+    /// # Safety
+    ///
+    /// The same obligation as [`Engine::from_module_unchecked`]: every embedded native address,
+    /// memory operand and ABI description must be valid for this process.
+    pub(crate) unsafe fn from_artifact_unchecked(
+        module: Module,
+        instance: super::super::instance::Instance,
+    ) -> Result<Self, String> {
         // Structural verification is still mandatory. `unsafe` covers only
         // facts it cannot prove: validity/lifetime of embedded host pointers
         // and agreement of native ABI descriptions with their real callees.
-        super::super::verify::module(&module)?;
-        Self::try_new(Shared::try_from_module(module)?)
+        super::super::verify::module(&module, &instance)?;
+        Self::try_new(Shared::try_new(module, instance)?)
     }
 
     pub(crate) fn shared(&self) -> &Arc<Shared> {
@@ -788,7 +830,7 @@ fn finalize_shared(shared: &Shared) {
     // owned by ordinary VM pending state and cannot die with this pthread.
     let _close_signal_drain = CloseSignalDrainGuard::enter(activation.contexts, true);
     super::super::unwind::guard_native_teardown(|| {
-        super::super::native_instance::run_finalizers(&shared.module)
+        super::super::native_instance::run_finalizers(&shared.instance)
     });
     drop(activation);
     drop(finalizer);

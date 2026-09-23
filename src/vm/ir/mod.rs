@@ -25,7 +25,7 @@ pub use program::*;
 
 pub type Bb = u32;
 pub type FuncId = u32;
-/// Inline asm site id: index into `Module.asm_stub_addrs`.
+/// Inline asm site id: index into the instance's asm-stub address table.
 pub type AsmStubId = u32;
 
 /// One asm-stub materialization recipe. Symbol names are decoupled from bit order; see

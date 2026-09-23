@@ -49,6 +49,16 @@ fn table_start() -> usize {
     MAGIC.len() + 4 + 4 + crate::options::build::BUILD_ID.len() + 4
 }
 
+fn module_meta_bytes(module: &crate::vm::ir::Module) -> Vec<u8> {
+    // The hand-built modules here seed no instance state, so an empty instance is the artifact's
+    // full load record.
+    postcard_bytes(&ModuleMetaRef::from((
+        module,
+        &crate::vm::instance::Instance::default(),
+    )))
+    .unwrap()
+}
+
 fn package_bytes_for_module(module: &crate::vm::ir::Module) -> Vec<u8> {
     build_container(&[
         (
@@ -65,10 +75,7 @@ fn package_bytes_for_module(module: &crate::vm::ir::Module) -> Vec<u8> {
             TAG_STAMPS,
             postcard_bytes(&Vec::<crate::utils::content::FileStamp>::new()).unwrap(),
         ),
-        (
-            TAG_MODULE,
-            postcard_bytes(&ModuleMetaRef::from(module)).unwrap(),
-        ),
+        (TAG_MODULE, module_meta_bytes(module)),
         (
             TAG_NATIVELIBS,
             postcard_bytes(&Vec::<NativeLibEntry>::new()).unwrap(),
@@ -115,12 +122,10 @@ fn module_section_preserves_guest_panic_cleanup_plan() {
     };
     module.guest_panic_cleanup = Some(plan);
 
-    let encoded = postcard_bytes(&ModuleMetaRef::from(&module)).unwrap();
+    let encoded = module_meta_bytes(&module);
     let decoded: ModuleMeta = postcard::from_bytes(&encoded).unwrap();
-    assert_eq!(
-        decoded.instantiate().unwrap().guest_panic_cleanup,
-        Some(plan)
-    );
+    let (decoded_module, _instance) = decoded.instantiate().unwrap();
+    assert_eq!(decoded_module.guest_panic_cleanup, Some(plan));
 }
 
 #[test]
@@ -226,7 +231,7 @@ fn malformed_p1_tables_are_rejected_by_safe_load_without_panicking() {
     let mut missing = crate::vm::ir::Module::default();
     missing.funcs.push(test_body("callback"));
     missing.ensure_function_names();
-    missing.link_fn_addrs.insert(addr, 0);
+    missing.fn_entry_links.push((addr, 0));
     let missing_bytes = package_bytes_for_module(&missing);
     let result = std::panic::catch_unwind(|| load_test_package(&missing_bytes));
     let error = result
@@ -325,7 +330,12 @@ fn one_loaded_package_instantiates_isolated_frozen_memory_twice() {
     unsafe { (link_cell as *mut u64).write(41) };
     let link_pointer = frozen.alloc(8, 8);
     unsafe { (link_pointer as *mut u64).write(link_cell) };
-    module.frozen = Some(frozen);
+    module.frozen = Some(
+        frozen
+            .to_snapshot()
+            .expect("frozen arena is at its fixed base"),
+    );
+    drop(frozen);
     module.frozen_relocs.push(crate::vm::ir::FrozenReloc {
         at: LinkAddr(link_pointer),
         target: crate::vm::ir::FrozenRelocTarget::Frozen(LinkAddr(link_cell)),
@@ -444,10 +454,7 @@ fn one_loaded_package_instantiates_isolated_frozen_memory_twice() {
             TAG_STAMPS,
             postcard_bytes(&Vec::<crate::utils::content::FileStamp>::new()).unwrap(),
         ),
-        (
-            TAG_MODULE,
-            postcard_bytes(&ModuleMetaRef::from(&module)).unwrap(),
-        ),
+        (TAG_MODULE, module_meta_bytes(&module)),
         (
             TAG_NATIVELIBS,
             postcard_bytes(&Vec::<NativeLibEntry>::new()).unwrap(),
@@ -476,24 +483,29 @@ fn one_loaded_package_instantiates_isolated_frozen_memory_twice() {
     // inode after load must not affect later lazy decoding or instantiation.
     std::fs::write(&path, b"replaced after Package::load").unwrap();
     std::fs::remove_file(&path).unwrap();
-    let first = unsafe { crate::vm::Engine::from_module_unchecked(package.instantiate().unwrap()) }
+    let (first_module, first_instance) = package.instantiate().unwrap();
+    let first = unsafe { crate::vm::Engine::from_artifact_unchecked(first_module, first_instance) }
         .unwrap();
+    let (second_module, second_instance) = package.instantiate().unwrap();
     let second =
-        unsafe { crate::vm::Engine::from_module_unchecked(package.instantiate().unwrap()) }
+        unsafe { crate::vm::Engine::from_artifact_unchecked(second_module, second_instance) }
             .unwrap();
 
-    let first_cell = first.shared().module.resolve_link_addr(LinkAddr(link_cell));
+    let first_cell = first
+        .shared()
+        .instance
+        .resolve_link_addr(LinkAddr(link_cell));
     let second_cell = second
         .shared()
-        .module
+        .instance
         .resolve_link_addr(LinkAddr(link_cell));
     let first_pointer = first
         .shared()
-        .module
+        .instance
         .resolve_link_addr(LinkAddr(link_pointer));
     let second_pointer = second
         .shared()
-        .module
+        .instance
         .resolve_link_addr(LinkAddr(link_pointer));
     assert_ne!(first_cell, second_cell);
     assert_eq!(

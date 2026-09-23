@@ -12,7 +12,7 @@
 //! occupied, it falls back loudly to a dynamic base: the process still runs, it is just not cacheable.
 //! A snapshot is the used-prefix bytes; restoring remaps at the fixed base and memcpys. Restore must happen
 //! before the guest runs, and the snapshot is the clean state right after lowering -- runtime inputs such
-//! as argv are not in it (see `Module::finalize_entry_argv`).
+//! as argv are not in it (see `Instance::finalize_entry_argv`).
 
 /// Frozen arena capacity (virtually reserved; physical pages are allocated on touch).
 const FROZEN_CAP: usize = 256 << 20;
@@ -38,6 +38,64 @@ pub struct FrozenSnapshot {
     home: usize,
     link_base: usize,
     bytes: Vec<u8>,
+}
+
+impl FrozenSnapshot {
+    pub fn home(&self) -> usize {
+        self.home
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Build a snapshot from the two fields its artifact wire form carries. `link_base` is left equal
+    /// to `home`: only an arena at its fixed base can be snapshotted, so the link base equals the home
+    /// domain by construction, and a snapshot that claimed otherwise would embed addresses that are
+    /// wrong after re-mapping.
+    fn from_home_and_bytes(home: usize, bytes: Vec<u8>) -> Result<Self, String> {
+        if !is_valid_home(home) {
+            return Err(format!("invalid frozen snapshot domain: {home:#x}"));
+        }
+        if bytes.len() > FROZEN_CAP {
+            return Err("frozen snapshot exceeds arena capacity".into());
+        }
+        Ok(Self {
+            home,
+            link_base: home,
+            bytes,
+        })
+    }
+}
+
+/// `Module.frozen` wire form: the `(home, bytes)` 2-tuple a mapped `FrozenArena` serialized as, so a
+/// cached artifact keeps its layout. `FrozenSnapshot`'s own serde carries `link_base` for the package
+/// document; here it is always `home`, and writing a field that cannot vary would only invalidate
+/// existing entries.
+pub(crate) fn serialize_module_frozen<S: serde::Serializer>(
+    frozen: &Option<FrozenSnapshot>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match frozen {
+        None => serializer.serialize_none(),
+        Some(snapshot) => serializer.serialize_some(&(
+            snapshot.home as u64,
+            serde_bytes_shim::Bytes(&snapshot.bytes),
+        )),
+    }
+}
+
+pub(crate) fn deserialize_module_frozen<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<FrozenSnapshot>, D::Error> {
+    let wire: Option<(u64, Vec<u8>)> = serde::Deserialize::deserialize(deserializer)?;
+    wire.map(|(home, bytes)| {
+        let home = usize::try_from(home)
+            .map_err(|_| format!("frozen snapshot domain {home:#x} does not fit this host"))?;
+        FrozenSnapshot::from_home_and_bytes(home, bytes)
+    })
+    .transpose()
+    .map_err(serde::de::Error::custom)
 }
 
 impl Default for FrozenArena {

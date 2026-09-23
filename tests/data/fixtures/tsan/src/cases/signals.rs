@@ -22,12 +22,12 @@ use std::thread;
 use crate::os::signal::Sigaction;
 use crate::vm::ctx::{Engine, Shared, attach, drain_pending_signals};
 use crate::vm::ir::{
-    Block, FfiKind, ForeignSig, FuncBody, Module, Operand, ParamAbi, RetAbi, RetDest, Slot,
-    Terminator, UnwindAction, Width,
+    Block, FfiKind, ForeignSig, FuncBody, LinkAddr, Module, Operand, ParamAbi, RetAbi, RetDest,
+    Slot, Terminator, UnwindAction, Width,
 };
 use crate::vm::{signal, thunks};
 
-/// Guest-visible handler address; the engine resolves it through `Module.fn_addrs`.
+/// Guest-visible handler address; the engine resolves it through the instance's function address table.
 const HANDLER_ADDR: u64 = 0xe2b1;
 const TEST_SIGNAL: i32 = libc::SIGUSR1;
 
@@ -89,7 +89,7 @@ fn handler_module() -> Module {
         funcs: vec![handler].into(),
         ..Default::default()
     };
-    module.fn_addrs.insert(HANDLER_ADDR, 0);
+    module.fn_entry_links.push((LinkAddr(HANDLER_ADDR), 0));
     module
 }
 

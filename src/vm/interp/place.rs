@@ -33,7 +33,7 @@ pub(crate) fn slot_write(ctx: *mut Ctx, base: usize, s: Slot, v: u64) {
 pub(crate) fn eval_place_addr(ctx: *mut Ctx, base: usize, expr: &PlaceExpr) -> u64 {
     let mut addr = match expr.base {
         PlaceBase::Local(off) => base as u64 + off as u64,
-        PlaceBase::Static(a) => unsafe { &(*(*ctx).shared).module }.resolve_link_addr(a),
+        PlaceBase::Static(a) => unsafe { &(*(*ctx).shared).instance }.resolve_link_addr(a),
     };
     for step in &expr.steps {
         match step {
@@ -79,7 +79,7 @@ pub(crate) fn eval_operand(ctx: *mut Ctx, base: usize, op: &Operand) -> (u64, Wi
         }
         Operand::Imm { bits, width } => (*bits, *width),
         Operand::AddrImm(addr) => (
-            unsafe { &(*(*ctx).shared).module }.resolve_link_addr(*addr),
+            unsafe { &(*(*ctx).shared).instance }.resolve_link_addr(*addr),
             Width::W64,
         ),
         Operand::AddrOf(expr) => (eval_place_addr(ctx, base, expr), Width::W64),

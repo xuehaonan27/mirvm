@@ -9,9 +9,9 @@ impl<'a> Verifier<'a> {
             Operand::Slot(slot) => self.slot(body, *slot),
             Operand::Mem { expr, .. } | Operand::AddrOf(expr) => self.place(body, expr),
             Operand::Imm { .. } => Ok(()),
-            Operand::AddrImm(addr) => match self.module.try_resolve_link_addr(*addr) {
+            Operand::AddrImm(addr) => match self.instance.try_resolve_link_addr(*addr) {
                 Ok(runtime) => self.frozen_range(runtime, 0, true),
-                Err(_) if self.module.link_fn_addrs.contains_key(addr) => Ok(()),
+                Err(_) if self.instance.link_fn_addrs.contains_key(addr) => Ok(()),
                 Err(error) => Err(error),
             },
             Operand::SubImm { base, .. } => self.operand(body, base),
@@ -29,7 +29,7 @@ impl<'a> Verifier<'a> {
                 }
             }
             PlaceBase::Static(addr) => {
-                let runtime = self.module.try_resolve_link_addr(addr)?;
+                let runtime = self.instance.try_resolve_link_addr(addr)?;
                 self.frozen_range(
                     runtime,
                     0,
@@ -192,10 +192,10 @@ impl<'a> Verifier<'a> {
             .checked_add(size)
             .ok_or("frozen address range overflows")?;
         let contains = self
-            .module
+            .instance
             .frozen
             .iter()
-            .chain(self.module.image_frozens.iter())
+            .chain(self.instance.image_frozens.iter())
             .any(|arena| {
                 let bytes = arena.snapshot();
                 let start = bytes.as_ptr() as u64;

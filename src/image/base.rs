@@ -24,11 +24,10 @@ use crate::vm::ir;
 /// Base image file (v1: one postcard blob).
 ///
 /// **Byte-determinism contract** (two consecutive builds must compare equal): `Module`'s
-/// exports/fn_addrs/link_fn_addrs are std HashMaps, whose RandomState seed makes iteration order
-/// per-process random, so they cannot be written to disk inside the module -- they are
-/// extracted into **sorted Vec** fields (and cleared inside the module) and rebuilt by the
-/// loader. The remaining fields (funcs/tls/asm_sites/frozen region bytes) are determined
-/// by lowering order.
+/// exports and function-entry links are HashMaps/Vecs built from unordered lowering state, so they
+/// cannot be written to disk inside the module -- they are extracted into **sorted Vec** fields (and
+/// cleared inside the module) and rebuilt by the loader. The remaining fields
+/// (funcs/tls/asm_sites/frozen region bytes) are determined by lowering order.
 #[derive(Serialize, Deserialize)]
 struct BaseFile {
     build_id: String,
@@ -36,16 +35,13 @@ struct BaseFile {
     sysroot_stamp: String,
     /// (ub_checks, overflow_checks, contract_checks): the only session booleans lower bakes in
     lowering_fp: (bool, bool, bool),
-    /// exports/fn_addrs/link_fn_addrs are cleared and asm_stub_addrs emptied (see above); rebuilt
-    /// from the sorted tables below and rematerialized by the loader
+    /// exports/function-entry links are cleared (see above); rebuilt from the sorted tables below
     module: ir::Module,
     /// sym -> FuncId (the sorted form of module.exports)
     export_syms: Vec<(Box<str>, ir::FuncId)>,
-    /// fn entry real address -> FuncId (the sorted form of module.fn_addrs)
-    fn_addr_pairs: Vec<(u64, ir::FuncId)>,
-    /// LinkAddr -> FuncId (the sorted form of module.link_fn_addrs). Sorted by the address: the
+    /// LinkAddr -> FuncId (the sorted form of module.fn_entry_links). Sorted by the address: the
     /// keys are unique, so this is a total order and the table is reproducible.
-    link_fn_addr_pairs: Vec<(ir::LinkAddr, ir::FuncId)>,
+    fn_entry_links: Vec<(ir::LinkAddr, ir::FuncId)>,
     /// sym -> fn entry real address (only functions whose address was taken have an entry)
     fn_entry_syms: Vec<(Box<str>, u64)>,
     static_syms: Vec<(Box<str>, u64)>,
@@ -89,14 +85,12 @@ fn load(path: &Path, want_stamp: &str) -> Option<crate::image::BaseImage> {
     key.part(want_stamp)
         .part(&format!("fp{}{}{}", fp.0 as u8, fp.1 as u8, fp.2 as u8));
     let key = key.as_str().to_string();
-    // Rebuild exports/fn_addrs from the sorted tables (byte-determinism contract, see BaseFile)
+    // Rebuild the exports and the function-entry link table from the sorted tables (byte-determinism
+    // contract, see BaseFile)
     let mut module = f.module;
     module.exports = f.export_syms.iter().cloned().collect();
-    module.fn_addrs = f.fn_addr_pairs.iter().copied().collect();
-    module.link_fn_addrs = f.link_fn_addr_pairs.iter().copied().collect();
-    if !entry::revive(&mut module, crate::vm::verify::Prefix::default()) {
-        return None;
-    }
+    module.fn_entry_links = f.fn_entry_links;
+    let instance = entry::revive(&mut module, crate::vm::verify::Prefix::default())?;
     Some(crate::image::BaseImage {
         fn_by_sym: f.export_syms.into_iter().collect(),
         entry_by_sym: f.fn_entry_syms.into_iter().collect(),
@@ -105,6 +99,7 @@ fn load(path: &Path, want_stamp: &str) -> Option<crate::image::BaseImage> {
         lowering_fp: fp,
         key,
         module,
+        instance,
     })
 }
 
@@ -154,6 +149,7 @@ pub fn ensure() -> crate::image::ImageStack {
 pub(crate) fn store(
     out: &Path,
     mut module: ir::Module,
+    instance: &crate::vm::instance::Instance,
     exports: crate::lower::BaseExports,
     fp: (bool, bool, bool),
 ) -> Result<(), crate::image::Error> {
@@ -161,6 +157,7 @@ pub(crate) fn store(
     // delta: the layer above expects the base exactly where it says it is.
     if !entry::snapshot_is_publishable(
         &module,
+        instance,
         Some(crate::os_arch::addrspace::BASE_IMAGE_FIXED_ADDR),
     ) {
         return Err(crate::image::Error::Contract {
@@ -174,20 +171,12 @@ pub(crate) fn store(
         crate::sysroot::current_stamp_value().ok_or_else(|| crate::image::Error::Unavailable {
             detail: "sysroot stamp unavailable".to_string(),
         })?;
-    // Byte determinism: extract the HashMaps (RandomState gives a random iteration order) into
-    // sorted Vecs for disk, and drop the derived address table.
-    //
-    // `asm_stub_addrs` holds this process's dlopen addresses for the stub .so, so it is stale in a
-    // file by construction; every consumer rematerializes it from `asm_sites` (the cold lowering
-    // path, `ImageStack::absorb_into`, the L2-hit path, package load).
-    module.asm_stub_addrs.clear();
+    // Byte determinism: extract the unordered tables into sorted Vecs for disk.
     let mut export_syms: Vec<(Box<str>, ir::FuncId)> = module.exports.drain().collect();
     export_syms.sort_unstable();
-    let mut fn_addr_pairs: Vec<(u64, ir::FuncId)> = module.fn_addrs.drain().collect();
-    fn_addr_pairs.sort_unstable();
-    let mut link_fn_addr_pairs: Vec<(ir::LinkAddr, ir::FuncId)> =
-        module.link_fn_addrs.drain().collect();
-    link_fn_addr_pairs.sort_unstable_by_key(|(addr, _)| addr.0);
+    let mut fn_entry_links: Vec<(ir::LinkAddr, ir::FuncId)> =
+        std::mem::take(&mut module.fn_entry_links);
+    fn_entry_links.sort_unstable_by_key(|(addr, _)| addr.0);
     let mut fn_entry_syms = exports.fn_entry_syms;
     fn_entry_syms.sort_unstable();
     let mut static_syms = exports.static_syms;
@@ -200,8 +189,7 @@ pub(crate) fn store(
         lowering_fp: fp,
         module,
         export_syms,
-        fn_addr_pairs,
-        link_fn_addr_pairs,
+        fn_entry_links,
         fn_entry_syms,
         static_syms,
         tls_syms,

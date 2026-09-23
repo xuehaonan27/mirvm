@@ -20,6 +20,7 @@ pub(super) fn run_blocks(
     entry: Bb,
 ) -> Exit {
     let module: &Module = unsafe { &(*(*ctx).shared).module };
+    let instance: &Instance = unsafe { &(*(*ctx).shared).instance };
     let body: &FuncBody = &module.funcs[func as usize];
 
     let mut blk = entry as usize;
@@ -119,8 +120,8 @@ pub(super) fn run_blocks(
                         sym,
                         &module.native_libs,
                         &module.required_native_libs,
-                        &module.native_images,
-                        &module.mc_images,
+                        &instance.native_images,
+                        &instance.mc_images,
                     )
                 });
                 let r = match resolved {
@@ -186,7 +187,7 @@ pub(super) fn run_blocks(
                 }
                 av.extend(aops.iter().map(|o| eval_operand(ctx, base, o).0));
                 edge.set(unwind.cleanup_edge());
-                let (lo, hi) = if let Some(&fid) = module.fn_addrs.get(&addr) {
+                let (lo, hi) = if let Some(&fid) = instance.fn_addrs.get(&addr) {
                     guarding_terminate(unwind, || call_guest(ctx, fid, &av))
                 } else if let Some(nsig) = native_sig {
                     // The reverse FFI direction: the guest holds a native fn pointer to real
@@ -295,7 +296,7 @@ pub(super) fn run_blocks(
                         }
                     }
                 }
-                let addr = module.asm_stub_addrs[*stub as usize];
+                let addr = instance.asm_stub_addrs[*stub as usize];
                 let f: unsafe extern "C" fn(*mut u8) =
                     unsafe { std::mem::transmute::<u64, unsafe extern "C" fn(*mut u8)>(addr) };
                 unsafe { f(bufp) };

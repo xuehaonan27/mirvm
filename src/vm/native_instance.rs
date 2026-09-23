@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, RwLock};
 
+use super::instance::Instance;
 use super::ir::{Module, native_entry_slot_name};
 use super::native_lifecycle::{InitializerArgs, NativeLifecycle, suppress_lifecycle_tags};
 
@@ -182,7 +183,10 @@ pub(crate) fn open_for_lower(path: &Path) -> Result<NativeImage, String> {
 
 /// Map and relocate every per-Engine object while constructors are suppressed.
 /// This must run after P1 closures exist and before slots/GOT are patched.
-pub(crate) fn prepare_required_libraries(module: &mut Module) -> Result<(), String> {
+pub(crate) fn prepare_required_libraries(
+    module: &Module,
+    instance: &mut Instance,
+) -> Result<(), String> {
     let mut images = Vec::with_capacity(module.required_native_libs.len());
     for path in &module.required_native_libs {
         match open_deferred(Path::new(&**path), true) {
@@ -195,7 +199,7 @@ pub(crate) fn prepare_required_libraries(module: &mut Module) -> Result<(), Stri
             }
         }
     }
-    module.native_images = images;
+    instance.native_images = images;
     Ok(())
 }
 
@@ -249,22 +253,22 @@ fn open_deferred(path: &Path, remove_private_file: bool) -> Result<NativeImage, 
 }
 
 /// Fill every native bridge slot after all per-Engine P1 closures exist.
-pub(crate) fn patch_entry_slots(module: &Module) -> Result<(), String> {
+pub(crate) fn patch_entry_slots(module: &Module, instance: &Instance) -> Result<(), String> {
     let mut slots = BTreeMap::<String, u64>::new();
     for site in module.entry_stub_sites.iter().chain(
-        module
+        instance
             .image_entry_stubs
             .iter()
             .flat_map(|(_, sites, _)| sites.iter()),
     ) {
-        let target = module.try_resolve_link_addr(site.link_addr)?;
+        let target = instance.try_resolve_link_addr(site.link_addr)?;
         slots.insert(native_entry_slot_name(site.link_addr), target);
     }
     if slots.is_empty() {
         return Ok(());
     }
 
-    for image in &module.mc_images {
+    for image in &instance.mc_images {
         for (name, &value) in image
             .symbols
             .iter()
@@ -279,10 +283,10 @@ pub(crate) fn patch_entry_slots(module: &Module) -> Result<(), String> {
             unsafe { (slot as *mut u64).write(*target) };
         }
     }
-    if module.native_images.len() != module.required_native_libs.len() {
+    if instance.native_images.len() != module.required_native_libs.len() {
         return Err("native image/path count mismatch".into());
     }
-    for image in &module.native_images {
+    for image in &instance.native_images {
         for (name, &value) in image
             .hidden_symbol_values()
             .iter()
@@ -304,7 +308,7 @@ pub(crate) fn patch_entry_slots(module: &Module) -> Result<(), String> {
 /// Fill the private runtime interposition slots injected into every
 /// self-produced machine-code image. Images are already relocated but no
 /// constructor has run yet.
-pub(crate) fn patch_pthread_slots(module: &Module, engine_id: u64) -> Result<(), String> {
+pub(crate) fn patch_pthread_slots(instance: &Instance, engine_id: u64) -> Result<(), String> {
     let targets = [
         (
             "__mirvm_pthread_create_target",
@@ -371,29 +375,29 @@ pub(crate) fn patch_pthread_slots(module: &Module, engine_id: u64) -> Result<(),
         }
         Ok(())
     };
-    for image in &module.native_images {
+    for image in &instance.native_images {
         patch(image.hidden_symbol_values(), image.bias())?;
     }
-    for image in &module.mc_images {
+    for image in &instance.mc_images {
         patch(&image.symbols, image.load_bias() as u64)?;
     }
     Ok(())
 }
 
-pub(crate) fn commit_images(module: &Module, control: &Arc<super::ctx::EngineControl>) {
-    for image in &module.native_images {
+pub(crate) fn commit_images(instance: &Instance, control: &Arc<super::ctx::EngineControl>) {
+    for image in &instance.native_images {
         image.committed.store(true, Ordering::Release);
     }
-    for image in &module.mc_images {
+    for image in &instance.mc_images {
         image.commit();
     }
     let mut owned = OWNED_NATIVE_CODE.write().unwrap();
-    for &(start, end) in module
+    for &(start, end) in instance
         .native_images
         .iter()
         .flat_map(NativeImage::executable_ranges)
         .chain(
-            module
+            instance
                 .mc_images
                 .iter()
                 .flat_map(super::mcload::McImage::executable_ranges),
@@ -407,22 +411,22 @@ pub(crate) fn commit_images(module: &Module, control: &Arc<super::ctx::EngineCon
     }
 }
 
-pub(crate) fn run_initializers(module: &Module) -> Result<(), String> {
+pub(crate) fn run_initializers(instance: &Instance) -> Result<(), String> {
     let mut args = InitializerArgs::capture()?;
-    for image in &module.native_images {
+    for image in &instance.native_images {
         image.lifecycle.run_initializers(&mut args);
     }
-    for image in &module.mc_images {
+    for image in &instance.mc_images {
         image.run_initializers(&mut args);
     }
     Ok(())
 }
 
-pub(crate) fn run_finalizers(module: &Module) {
-    for image in module.mc_images.iter().rev() {
+pub(crate) fn run_finalizers(instance: &Instance) {
+    for image in instance.mc_images.iter().rev() {
         image.run_finalizers();
     }
-    for image in module.native_images.iter().rev() {
+    for image in instance.native_images.iter().rev() {
         image.lifecycle.run_finalizers();
     }
 }

@@ -164,7 +164,9 @@ fn signal_nested_module() -> Module {
         ..Module::default()
     };
     module.exports.insert("probe".into(), 0);
-    module.fn_addrs.insert(LIFECYCLE_SIGNAL_GUEST_ADDR, 1);
+    module
+        .fn_entry_links
+        .push((LinkAddr(LIFECYCLE_SIGNAL_GUEST_ADDR), 1));
     module
 }
 
@@ -192,7 +194,9 @@ fn physically_masked_reraising_signal_module() -> Module {
         funcs: vec![handler].into(),
         ..Module::default()
     };
-    module.fn_addrs.insert(SIGNAL_OWNER_GUEST_ADDR, 0);
+    module
+        .fn_entry_links
+        .push((LinkAddr(SIGNAL_OWNER_GUEST_ADDR), 0));
     module
 }
 
@@ -217,7 +221,9 @@ fn close_signal_source_module() -> Module {
         funcs: vec![handler].into(),
         ..Module::default()
     };
-    module.fn_addrs.insert(SIGNAL_CLOSE_SOURCE_GUEST_ADDR, 0);
+    module
+        .fn_entry_links
+        .push((LinkAddr(SIGNAL_CLOSE_SOURCE_GUEST_ADDR), 0));
     module
 }
 
@@ -265,7 +271,9 @@ fn close_signal_nine_delivery_module() -> Module {
         funcs: vec![handler].into(),
         ..Module::default()
     };
-    module.fn_addrs.insert(SIGNAL_CLOSE_CHAIN_GUEST_ADDR, 0);
+    module
+        .fn_entry_links
+        .push((LinkAddr(SIGNAL_CLOSE_CHAIN_GUEST_ADDR), 0));
     module
 }
 
@@ -308,7 +316,9 @@ fn signal_handler_waits_for_mask_deferred_engine_close_module() -> Module {
         ..Module::default()
     };
     module.exports.insert("probe".into(), 1);
-    module.fn_addrs.insert(SIGNAL_CLOSE_SOURCE_GUEST_ADDR, 0);
+    module
+        .fn_entry_links
+        .push((LinkAddr(SIGNAL_CLOSE_SOURCE_GUEST_ADDR), 0));
     module
 }
 
@@ -355,7 +365,9 @@ fn masking_close_module(fault_after_close: bool) -> Module {
         ..Module::default()
     };
     module.exports.insert("probe".into(), 1);
-    module.fn_addrs.insert(SIGNAL_MASKING_CLOSE_GUEST_ADDR, 0);
+    module
+        .fn_entry_links
+        .push((LinkAddr(SIGNAL_MASKING_CLOSE_GUEST_ADDR), 0));
     module
 }
 
@@ -445,8 +457,12 @@ fn masked_raise_replacement_module() -> Module {
         ..Module::default()
     };
     module.exports.insert("probe".into(), 2);
-    module.fn_addrs.insert(SIGNAL_MASKED_OLD_GUEST_ADDR, 0);
-    module.fn_addrs.insert(SIGNAL_MASKED_NEW_GUEST_ADDR, 1);
+    module
+        .fn_entry_links
+        .push((LinkAddr(SIGNAL_MASKED_OLD_GUEST_ADDR), 0));
+    module
+        .fn_entry_links
+        .push((LinkAddr(SIGNAL_MASKED_NEW_GUEST_ADDR), 1));
     module
 }
 

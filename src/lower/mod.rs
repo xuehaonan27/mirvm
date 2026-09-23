@@ -195,6 +195,7 @@ pub(crate) struct Split<'tcx> {
 /// the export tables have already been rebased to absolute ids.
 pub struct SplitImage {
     pub module: ir::Module,
+    pub instance: crate::vm::instance::Instance,
     pub fn_entry_syms: Vec<(Box<str>, u64)>,
     pub static_syms: Vec<(Box<str>, u64)>,
     pub tls_syms: Vec<(Box<str>, ir::TlsId)>,
@@ -218,6 +219,7 @@ impl SplitImage {
             lowering_fp: fp,
             key: "a2-inmem".into(),
             module: self.module,
+            instance: self.instance,
         }
     }
 }
@@ -259,11 +261,16 @@ pub fn lower_program(
     tcx: TyCtxt<'_>,
     stack: &crate::image::ImageStack,
     split: bool,
-) -> (ir::Module, Option<SplitImage>) {
+) -> (
+    ir::Module,
+    crate::vm::instance::Instance,
+    Option<SplitImage>,
+) {
     // The split decision (enabled, bypassed, already loaded this session, base present) is made by
     // the caller in cli.
-    let (module, _, split_image) = lower_inner(tcx, stack, FrozenArena::new(), false, false, split);
-    (module, split_image)
+    let (module, instance, _, split_image) =
+        lower_inner(tcx, stack, FrozenArena::new(), false, false, split);
+    (module, instance, split_image)
 }
 
 /// Base-image build lowering (synthetic empty main): empty stack, frozen area in the base domain,
@@ -271,9 +278,11 @@ pub fn lower_program(
 /// LOCAL_CRATE is excluded: the synthetic crate's items (empty main and its shim) carry a local
 /// disambiguator in their symbol names, do not belong to the "sysroot face", and cannot collide
 /// with a real program.
-pub fn lower_for_base_build(tcx: TyCtxt<'_>) -> (ir::Module, BaseExports) {
+pub fn lower_for_base_build(
+    tcx: TyCtxt<'_>,
+) -> (ir::Module, crate::vm::instance::Instance, BaseExports) {
     let empty = crate::image::ImageStack::empty();
-    let (module, exports, _) = lower_inner(
+    let (module, instance, exports, _) = lower_inner(
         tcx,
         &empty,
         FrozenArena::new_base_image(),
@@ -283,6 +292,7 @@ pub fn lower_for_base_build(tcx: TyCtxt<'_>) -> (ir::Module, BaseExports) {
     );
     (
         module,
+        instance,
         exports.expect("image build mode must produce export material"),
     )
 }
@@ -300,11 +310,12 @@ pub fn lower_for_image_build(
     tcx: TyCtxt<'_>,
     stack: &crate::image::ImageStack,
     k: usize,
-) -> (ir::Module, BaseExports) {
-    let (module, exports, _) =
+) -> (ir::Module, crate::vm::instance::Instance, BaseExports) {
+    let (module, instance, exports, _) =
         lower_inner(tcx, stack, FrozenArena::new_image(k), true, false, false);
     (
         module,
+        instance,
         exports.expect("image build mode must produce export material"),
     )
 }
@@ -384,7 +395,12 @@ fn lower_inner(
     emit_exports: bool,
     exclude_local: bool,
     split: bool,
-) -> (ir::Module, Option<BaseExports>, Option<SplitImage>) {
+) -> (
+    ir::Module,
+    crate::vm::instance::Instance,
+    Option<BaseExports>,
+    Option<SplitImage>,
+) {
     let typing_env = TypingEnv::fully_monomorphized();
     // The stub code area shares its domain with the frozen area. `frozen.home()` records which
     // domain the frozen area was allocated in; the derived code domain stays consistent even when
@@ -599,6 +615,7 @@ fn lower_inner(
     });
 
     let mut module = ir::Module::default();
+    let mut instance = crate::vm::instance::Instance::default();
     let mut funcs: Vec<Option<ir::FuncBody>> = Vec::new();
     // Delta-module bodies are stored by local ordinal; after the base and delta vectors are
     // concatenated during absorb, position `delta_first_fn + ordinal` is the absolute FuncId.
@@ -748,15 +765,18 @@ fn lower_inner(
             .filter(|(a, _)| image_entry_addrs.contains(a))
             .map(|(a, id)| (*a, *id))
             .collect();
-        module.fn_addrs = linker
+        module.fn_entry_links = linker
             .fn_addrs
             .iter()
             .filter(|(a, _)| !image_entry_addrs.contains(a))
-            .map(|(a, id)| (*a, *id))
+            .map(|(&a, &id)| (ir::LinkAddr(a), id))
             .collect();
         let image_module = ir::Module {
             exports: image_exports,
-            fn_addrs: image_fn_addrs,
+            fn_entry_links: image_fn_addrs
+                .iter()
+                .map(|(&a, &id)| (ir::LinkAddr(a), id))
+                .collect(),
             funcs: s
                 .image_funcs
                 .into_iter()
@@ -764,7 +784,7 @@ fn lower_inner(
                 .collect(),
             tls: s.image_tls_slots,
             asm_sites: s.image_asm_sites,
-            frozen: Some(s.image_frozen),
+            frozen: s.image_frozen.to_snapshot().ok(),
             // GOT tables travel with the image module; load/absorb merges them into the delta module
             // by name and renumbers the symbol indices.
             foreign_syms: s.image_got_syms,
@@ -773,13 +793,20 @@ fn lower_inner(
             // Entry-stub recipes travel with the image file; code-area handles are rebuilt per domain
             // at runtime.
             entry_stub_sites: s.image_stub_sites,
-            entry_stubs: s.image_code_arena,
             ..Default::default()
         };
         let mut image_module = image_module;
         image_module.ensure_function_names();
-        image_module.rebuild_load_map();
-        image_module.rebuild_fn_addrs();
+        // The image keeps its frozen mapping and code-area handle in its own instance; the module
+        // carries the bytes for the deps-image file.
+        let mut image_instance = crate::vm::instance::Instance {
+            entry_stubs: s.image_code_arena,
+            ..Default::default()
+        };
+        image_instance.frozen = Some(s.image_frozen);
+        image_instance.link_fn_addrs = image_module.fn_entry_links.iter().copied().collect();
+        image_instance.rebuild_load_map();
+        image_instance.rebuild_fn_addrs();
         // Image export material, shaped like `BaseExports` and free of any `tcx` dependency on the
         // loader side. The fn-entry, static and TLS indexes contain image-class items only. Fn
         // entries use the image-area entry table as their authority, which includes entries that are
@@ -811,6 +838,7 @@ fn lower_inner(
             .collect();
         split_image = Some(SplitImage {
             module: image_module,
+            instance: image_instance,
             fn_entry_syms,
             static_syms,
             tls_syms,
@@ -861,7 +889,7 @@ fn lower_inner(
     // In split mode the image sites went with SplitImage; absorb merges and rematerializes them
     // under the same contract as a warm load.
     module.asm_sites = std::mem::take(&mut linker.asm_sites);
-    module.asm_stub_addrs = asm::materialize(&module.asm_sites);
+    instance.asm_stub_addrs = asm::materialize(&module.asm_sites);
     // Base export material, computed once in build mode and free of any `tcx` dependency on the
     // loader side.
     // The synthetic crate's own items (empty main and its shim) stay out of the index: their symbol
@@ -898,10 +926,21 @@ fn lower_inner(
         }
     });
 
-    // Hand the frozen area and the fn-entry reverse lookup table to the execution phase.
-    module.frozen = Some(linker.frozen);
+    // Hand the frozen area and the fn-entry reverse lookup table to the execution phase. The module
+    // keeps the bytes in their artifact form; the instance owns the mapping. A frozen area that fell
+    // back to a dynamic base has no artifact form -- its bytes are linked against the lowering-time
+    // domain -- so the module carries none and only the instance can run it.
+    instance.frozen = Some(linker.frozen);
+    module.frozen = instance
+        .frozen
+        .as_ref()
+        .and_then(|arena| arena.to_snapshot().ok());
     if split_image.is_none() {
-        module.fn_addrs = linker.fn_addrs.into_iter().collect();
+        module.fn_entry_links = linker
+            .fn_addrs
+            .into_iter()
+            .map(|(addr, func)| (ir::LinkAddr(addr), func))
+            .collect();
     }
     module.tls = linker.tls_slots;
     // Delta side of the GOT; the image side already left with `split_image`.
@@ -911,7 +950,7 @@ fn lower_inner(
     // This domain's entry-stub recipes and code-area handle; the image side already left with
     // `split_image`.
     module.entry_stub_sites = linker.entry_stub_sites;
-    module.entry_stubs = linker.code_arena;
+    instance.entry_stubs = linker.code_arena;
     // The custom-allocator shim is program-level and always lives on the delta side (the shim is
     // always LOCAL_CRATE, wherever the split falls). Bytecode baked by a Default-session base or
     // dependency image routes through it at runtime.
@@ -920,9 +959,10 @@ fn lower_inner(
     if split_image.is_none() {
         module.entry = entry;
     }
-    module.rebuild_load_map();
-    module.rebuild_fn_addrs();
-    (module, base_exports, split_image)
+    instance.link_fn_addrs = module.fn_entry_links.iter().copied().collect();
+    instance.rebuild_load_map();
+    instance.rebuild_fn_addrs();
+    (module, instance, base_exports, split_image)
 }
 
 /// dylib dlopen candidate list, deduplicated in order: the development symlink `lib{name}.so`
