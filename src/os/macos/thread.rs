@@ -11,10 +11,9 @@
 //! Type discipline: `attr` pointers are entered and exited as `c_void` (libc
 //!  pthread type signatures are not leaked).
 //!
-//! The user-address width test is this pair's and lives in [`crate::os_arch::thread`], re-exported
-//! below so a caller keeps one name. The raw wait/wake that pair also owns is not written yet: the
-//! kernel's `__ulock_wait` refuses a word in a static, so the surface this module forwards is only
-//! as complete as that pair's.
+//! The raw wait/wake and the user-address width test are this pair's and live in
+//! [`crate::os_arch::thread`]; they are re-exported below so a caller keeps one name on this
+//! platform.
 //!
 //! The service-thread accounting is not this platform's at all and lives in [`crate::os::thread`].
 
@@ -34,7 +33,7 @@ unsafe extern "C" {
 /// The pair's half of this module: raw futex operations that must not touch libc `errno`, and
 /// the architecture's user-address bound that makes glibc's "no stack set" sentinel
 /// recognizable.
-pub use crate::os_arch::thread::stack_addr_is_unset;
+pub use crate::os_arch::thread::{futex_wait_raw, futex_wake_one_raw, stack_addr_is_unset};
 
 /// A host thread, as the C library names it.
 ///
@@ -62,11 +61,14 @@ impl ThreadId {
         self.0 as usize as u64
     }
 
-    /// Wrap a handle this process did not create, which is the shape an interposed
-    /// `pthread_join` receives from its caller.
+    /// Wrap a handle this process did not create, from the integer form the engine carries it in.
+    ///
+    /// This platform's `pthread_t` is a pointer while Linux's is an integer, so the parameter is
+    /// the integer both callers have — a thread identity that arrived through a signal payload —
+    /// rather than whichever type the library happens to use for it.
     #[cfg(test)]
-    pub fn from_raw(raw: libc::pthread_t) -> Self {
-        ThreadId(raw)
+    pub fn from_raw(raw: usize) -> Self {
+        ThreadId(raw as libc::pthread_t)
     }
 }
 
