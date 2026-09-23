@@ -11,8 +11,10 @@
 //! dereferences an invalid pointer — and `dladdr(handle)` answers nothing either, so Linux's
 //! link-map read has no counterpart. What every caller does have is the path it just opened, and
 //! the path is what the loader keys its own image list by, so the base is found by looking the
-//! image up in that list. The loader reports the *resolved* path (`/private/tmp/…` for `/tmp/…`),
-//! which is why the comparison goes through `realpath`.
+//! image up in that list. The loader reports the *resolved* path (`/private/tmp/…` for `/tmp/…`)
+//! where there is a file to resolve and the plain name where there is not — a library the shared
+//! cache holds, like `/usr/lib/libSystem.B.dylib`, is not on disk — so the comparison uses
+//! whichever of the two answers `realpath` is able to give.
 //!
 //! The base is then `slide + __TEXT.vmaddr`, not the slide: a locally built image has
 //! `vmaddr == 0`, where the slide alone looks right, while a system library does not and the slide
@@ -130,11 +132,15 @@ struct SegmentCommand64 {
     flags: u32,
 }
 
+// `mach-o/dyld.h` spells these with a leading underscore already — `_dyld_image_count`, whose
+// Mach-O symbol is `__dyld_image_count` — so the names below carry it too. That is the spelling
+// Rust's own Mach-O prefix then completes; a declaration without it is an unresolved symbol at
+// link time, which a `cargo check` does not reach.
 unsafe extern "C" {
-    fn dyld_image_count() -> u32;
-    fn dyld_get_image_header(index: u32) -> *const MachHeader64;
-    fn dyld_get_image_name(index: u32) -> *const libc::c_char;
-    fn dyld_get_image_vmaddr_slide(index: u32) -> libc::intptr_t;
+    fn _dyld_image_count() -> u32;
+    fn _dyld_get_image_header(index: u32) -> *const MachHeader64;
+    fn _dyld_get_image_name(index: u32) -> *const libc::c_char;
+    fn _dyld_get_image_vmaddr_slide(index: u32) -> libc::intptr_t;
 }
 
 /// The load base of a handle: the address the image's `__TEXT` segment was mapped at.
@@ -143,25 +149,30 @@ unsafe extern "C" {
 /// by the path it was opened under, resolved the way the loader resolves it.
 pub fn load_bias(_handle: usize, path: &CStr) -> Option<usize> {
     let resolved = resolve(path)?;
-    let index = (0..unsafe { dyld_image_count() }).find(|&index| {
-        let name = unsafe { dyld_get_image_name(index) };
+    let index = (0..unsafe { _dyld_image_count() }).find(|&index| {
+        let name = unsafe { _dyld_get_image_name(index) };
         !name.is_null() && unsafe { CStr::from_ptr(name) } == resolved.as_c_str()
     })?;
-    let header = unsafe { dyld_get_image_header(index) };
+    let header = unsafe { _dyld_get_image_header(index) };
     if header.is_null() {
         return None;
     }
     let text = text_segment_vmaddr(header)?;
-    let slide = unsafe { dyld_get_image_vmaddr_slide(index) } as usize;
+    let slide = unsafe { _dyld_get_image_vmaddr_slide(index) } as usize;
     slide.checked_add(text)
 }
 
 /// The path the loader would report for `path`, which is what its image list is keyed by.
+///
+/// The answer is the resolved path where there is a file to resolve — the loader reports
+/// `/private/tmp/…` for `/tmp/…` — and the caller's own spelling where there is not, which is the
+/// case for a library the shared cache holds: `/usr/lib/libSystem.B.dylib` is in the cache and not
+/// on disk, so `realpath` fails on it while the loader still reports exactly that name.
 fn resolve(path: &CStr) -> Option<CString> {
     let mut buffer = [0 as libc::c_char; libc::PATH_MAX as usize];
     let result = unsafe { libc::realpath(path.as_ptr(), buffer.as_mut_ptr()) };
     if result.is_null() {
-        return None;
+        return Some(path.to_owned());
     }
     Some(unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_owned())
 }
