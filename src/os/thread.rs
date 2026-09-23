@@ -55,3 +55,5 @@ pub fn reset_service_threads_after_fork() {
 
 #[cfg(target_os = "linux")]
 pub(crate) use super::linux::thread::*;
+#[cfg(target_os = "macos")]
+pub(crate) use super::macos::thread::*;

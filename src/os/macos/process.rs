@@ -209,7 +209,10 @@ pub extern "C" fn mirvm_syscall_dispatch(nr: i64, args: *const u64) -> i64 {
 }
 
 unsafe extern "C" {
-    fn syscall(num: libc::c_long, ...) -> libc::c_long;
+    /// The C library's variadic entry point. It is bound under another name because this module's
+    /// own wrapper is what a caller should reach for.
+    #[link_name = "syscall"]
+    fn libc_syscall(num: libc::c_long, ...) -> libc::c_long;
 }
 
 /// syscall(2) varargs passthrough: the only channel for syscall families not
@@ -222,13 +225,13 @@ pub fn syscall(n: i64, args: &[u64]) -> i64 {
     let n = n as libc::c_long;
     unsafe {
         match args.len() {
-            0 => syscall(n),
-            1 => syscall(n, a(0)),
-            2 => syscall(n, a(0), a(1)),
-            3 => syscall(n, a(0), a(1), a(2)),
-            4 => syscall(n, a(0), a(1), a(2), a(3)),
-            5 => syscall(n, a(0), a(1), a(2), a(3), a(4)),
-            _ => syscall(n, a(0), a(1), a(2), a(3), a(4), a(5)),
+            0 => libc_syscall(n),
+            1 => libc_syscall(n, a(0)),
+            2 => libc_syscall(n, a(0), a(1)),
+            3 => libc_syscall(n, a(0), a(1), a(2)),
+            4 => libc_syscall(n, a(0), a(1), a(2), a(3)),
+            5 => libc_syscall(n, a(0), a(1), a(2), a(3), a(4)),
+            _ => libc_syscall(n, a(0), a(1), a(2), a(3), a(4), a(5)),
         }
     }
 }
