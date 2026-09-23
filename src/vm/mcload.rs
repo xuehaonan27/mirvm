@@ -29,7 +29,7 @@ pub struct McImage {
     /// symbol -> real in-image address (STB_GLOBAL/WEAK and defined; union of hidden and dynsym families)
     pub symbols: HashMap<Box<str>, u64>,
     executable_ranges: Box<[(usize, usize)]>,
-    lifecycle: super::native_instance::NativeLifecycle,
+    lifecycle: super::native_lifecycle::NativeLifecycle,
     registered_frames: Box<[usize]>,
     committed: AtomicBool,
 }
@@ -618,7 +618,7 @@ pub fn load(bytes: &[u8]) -> Result<McImage, String> {
         size,
         symbols,
         executable_ranges,
-        lifecycle: super::native_instance::NativeLifecycle::new(initializers, finalizers),
+        lifecycle: super::native_lifecycle::NativeLifecycle::new(initializers, finalizers),
         registered_frames: registered_frames.into_boxed_slice(),
         committed: AtomicBool::new(false),
     })
@@ -637,7 +637,7 @@ impl McImage {
         self.committed.store(true, Ordering::Release);
     }
 
-    pub(crate) fn run_initializers(&self, args: &mut super::native_instance::InitializerArgs) {
+    pub(crate) fn run_initializers(&self, args: &mut super::native_lifecycle::InitializerArgs) {
         self.lifecycle.run_initializers(args);
     }
 
