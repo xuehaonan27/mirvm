@@ -69,8 +69,8 @@ fn sigwaitinfo_consumes_blocked_host_raise_without_leaving_thread_signal_state()
             drop(mask_guard);
 
             assert!(matches!(raised, Ok(RunOutcome::Returned(value)) if value.lo == 0));
-            assert_eq!(raised_code, crate::os::signal::SI_TKILL);
-            assert_eq!(killed_code, crate::os::signal::SI_TKILL);
+            assert_eq!(raised_code, crate::os::signal::RAISE_DELIVERY_CODE);
+            assert_eq!(killed_code, crate::os::signal::RAISE_DELIVERY_CODE);
             assert!(matches!(safe, Ok(RunOutcome::Returned(value)) if value.lo == 0));
             assert_eq!(
                 handler_ran, 0,

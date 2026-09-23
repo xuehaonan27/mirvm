@@ -192,6 +192,14 @@ fn trace_entry_pins_the_recorder_and_restores_it_even_when_it_unwinds() {
     );
 }
 
+/// The syscall number the probe body carries.
+///
+/// The value is never used: the body is compiled and never run, and what is under test is that the
+/// trace domain accepts a `HostSyscallTrace` call site at all. It is therefore spelled once here
+/// rather than taken from the platform, whose numbering is its own and whose C library bindings do
+/// not name one for every platform this build supports.
+const HOST_GETPID_SYSCALL: u64 = 0;
+
 /// The trace domain's own syscall site must actually compile. If the pinned
 /// lowering were rejected, the body would silently stay interpreted
 /// and the differential gates would still pass while the feature did
@@ -203,7 +211,7 @@ fn trace_domain_compiles_a_pinned_syscall_body() {
         Terminator::CallBuiltin {
             builtin: ir::Builtin::HostSyscallTrace,
             args: vec![Operand::Imm {
-                bits: libc::SYS_getpid as u64,
+                bits: HOST_GETPID_SYSCALL,
                 width: Width::W64,
             }],
             ret: RetDest::Ignore,

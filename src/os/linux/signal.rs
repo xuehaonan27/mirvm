@@ -30,6 +30,14 @@ pub type SignalInfo = *mut libc::siginfo_t;
 /// which is what distinguishes it from a process-directed `kill`.
 pub const SI_TKILL: i32 = libc::SI_TKILL;
 
+/// The `si_code` this kernel stamps on a delivery the C library's `raise` produced.
+///
+/// Here `raise` addresses the signal to the calling thread, so the code is the thread-directed one.
+/// The other platform reports the generic code for every delivery a process sends itself, and a
+/// caller that asserts *which* delivery happened has to take each platform's own answer.
+#[cfg(test)]
+pub const RAISE_DELIVERY_CODE: i32 = libc::SI_TKILL;
+
 /// The kernel's `si_code` for a delivery a handler received.
 ///
 /// A null `info` is not an error: an action installed without `SA_SIGINFO` reaches its handler with

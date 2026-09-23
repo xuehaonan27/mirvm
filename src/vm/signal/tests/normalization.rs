@@ -4,6 +4,9 @@ use super::*;
 
 extern "C" fn second_test_restorer() {}
 
+// The flags this test drives are the Linux kernel's: it is the one that clears a probing bit
+// on the way back out, and the only one whose action carries a restorer to change.
+#[cfg(target_os = "linux")]
 #[test]
 fn kernel_normalization_rejects_restorer_and_supported_flag_changes() {
     let mut requested = Sigaction::empty(

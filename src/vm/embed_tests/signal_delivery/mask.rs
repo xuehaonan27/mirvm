@@ -146,7 +146,7 @@ fn physically_blocked_native_finalizer_raise_survives_close_worker_exit() {
         );
         assert_eq!(
             native_code,
-            crate::os::signal::SI_TKILL,
+            crate::os::signal::RAISE_DELIVERY_CODE,
             "native finalizer changed libc raise siginfo provenance"
         );
         assert!(restored.same_disposition(&baseline));
@@ -268,7 +268,7 @@ fn blocked_external_native_raise_keeps_libc_si_tkill_provenance() {
     );
     drop(native_guard);
     let native_code = wait_for_external_siginfo_code();
-    assert_eq!(native_code, crate::os::signal::SI_TKILL);
+    assert_eq!(native_code, crate::os::signal::RAISE_DELIVERY_CODE);
 
     let mut failures = Vec::new();
     for (mode, jit) in modes() {
