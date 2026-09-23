@@ -12,3 +12,5 @@ pub(crate) mod elf;
 pub(crate) mod ar;
 #[path = "../../../../../src/native/symimage.rs"]
 pub(crate) mod symimage;
+#[path = "../../../../../src/native/macho.rs"]
+pub(crate) mod macho;
