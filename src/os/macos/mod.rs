@@ -4,6 +4,7 @@
 //! answers the same way as the other one lives one level up, in the file named after the
 //! subsystem; what is here is only the difference.
 
+pub mod dll;
 pub mod fs;
 pub mod mem;
 pub mod process;

@@ -19,3 +19,5 @@ pub enum Mode {
 
 #[cfg(target_os = "linux")]
 pub(crate) use super::linux::dll::*;
+#[cfg(target_os = "macos")]
+pub(crate) use super::macos::dll::*;
