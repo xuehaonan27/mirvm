@@ -233,7 +233,8 @@ pub fn syscall(n: i64, args: &[u64]) -> i64 {
         SYS_GETPID => i64::from(unsafe { libc::getpid() }),
         SYS_GETPPID => i64::from(unsafe { libc::getppid() }),
         SYS_FORK => i64::from(unsafe { libc::fork() }),
-        SYS_EXIT | SYS_EXIT_GROUP => unsafe { libc::_exit(args[0] as libc::c_int) },
+        // [`SYS_EXIT_GROUP`] is the same number, so this arm is the one both names take.
+        SYS_EXIT => unsafe { libc::_exit(args[0] as libc::c_int) },
         _ => {
             crate::diag_direct!(
                 Syscall,

@@ -1,13 +1,18 @@
 //! The `syscall` rewrite this pair's kernel and CPU agree on.
 //!
-//! See the x86_64 pair's file for why this text is the pair's rather than the architecture's. The
-//! slot definition is the same text as there — `.data` and `.quad` are what both object formats
-//! call them — and only the call body differs, because a PC-relative load to a symbol is spelled
-//! with this format's page/offset relocations.
+//! See the x86_64 pair's file for why this text is the pair's rather than the architecture's. Only
+//! the call body differs between the two, because a PC-relative load to a symbol is spelled with
+//! this format's page/offset relocations.
+//!
+//! Both constants name the slot with the leading underscore this format's assembler source requires
+//! and its symbol table then carries. `crate::os::dll::sym` looks the slot up as
+//! `mirvm_syscall_slot`, and `dlsym` compares against the export name, which is the source name
+//! minus that underscore — so the two spellings are one name, and writing the slot without the
+//! prefix defines a symbol nothing can find.
 
 /// The indirect slot definition, appended once to a `.s` when a `syscall` rewrite hits.
 pub const SLOT_DEF: &str =
-    ".data\n.globl mirvm_syscall_slot\n.p2align 3\nmirvm_syscall_slot: .quad 0\n.text\n";
+    ".data\n.globl _mirvm_syscall_slot\n.p2align 3\n_mirvm_syscall_slot: .quad 0\n.text\n";
 
 /// Replacement body for a `svc` instruction: load the slot's address, load the trampoline out of
 /// it, and branch. The two-level indirection keeps the property the x86 form has — nothing external
@@ -17,4 +22,4 @@ pub const SLOT_DEF: &str =
 /// `x16`, so a rewrite that loaded through it would destroy the number before the trampoline could
 /// read it. `x17` is the other register that ABI already reserves for this kind of use, and no
 /// argument travels in it.
-pub const CALL: &str = "    adrp x17, mirvm_syscall_slot@PAGE\n    ldr x17, [x17, mirvm_syscall_slot@PAGEOFF]\n    blr x17\n";
+pub const CALL: &str = "    adrp x17, _mirvm_syscall_slot@PAGE\n    ldr x17, [x17, _mirvm_syscall_slot@PAGEOFF]\n    blr x17\n";
