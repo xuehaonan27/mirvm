@@ -72,6 +72,7 @@ impl<'tcx> LowerCx<'tcx, '_> {
         }
 
         // MIR operands -> wrapper constraints (super::asm; only the reg constraint and role are needed, not values/destinations).
+        let fmt = crate::native::asmtext::Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
         let mut gen_ops: Vec<crate::lower::asm::AsmOperand> = Vec::with_capacity(operands.len());
         for op in operands {
             match op {
@@ -110,16 +111,13 @@ impl<'tcx> LowerCx<'tcx, '_> {
                         rustc_span::DUMMY_SP,
                     );
                     gen_ops.push(crate::lower::asm::AsmOperand::Inline {
-                        text: self.tcx.symbol_name(callee).name.to_owned(),
+                        text: fmt.symbol(self.tcx.symbol_name(callee).name),
                     });
                 }
                 mir::InlineAsmOperand::SymStatic { def_id } => {
                     gen_ops.push(crate::lower::asm::AsmOperand::Inline {
-                        text: self
-                            .tcx
-                            .symbol_name(Instance::mono(self.tcx, *def_id))
-                            .name
-                            .to_owned(),
+                        text: fmt
+                            .symbol(self.tcx.symbol_name(Instance::mono(self.tcx, *def_id)).name),
                     });
                 }
                 mir::InlineAsmOperand::Label { .. } => {

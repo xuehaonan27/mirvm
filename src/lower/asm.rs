@@ -529,13 +529,12 @@ impl<'tcx> Gen<'_, 'tcx> {
         self.slot_size = slot_size;
     }
 
-    /// Follows cg_clif's `generate_asm_wrapper`: the ELF/x86_64 branch with Intel syntax.
+    /// Follows cg_clif's `generate_asm_wrapper`: the x86_64 branch with Intel syntax.
     fn generate_asm_wrapper(&self, name: &str) -> String {
+        let fmt = crate::native::asmtext::Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
         let mut s = String::new();
-        writeln!(s, ".globl {name}").unwrap();
-        writeln!(s, ".type {name},@function").unwrap();
-        writeln!(s, ".section .text.{name},\"ax\",@progbits").unwrap();
-        writeln!(s, "{name}:").unwrap();
+        fmt.open(&mut s, crate::native::asmtext::Region::Text { name });
+        fmt.define_fn(&mut s, name, crate::native::asmtext::Visibility::Exported);
         s.push_str(crate::arch::asm_text::DIRECTIVE_INTEL);
 
         Self::prologue(&mut s);
@@ -581,8 +580,9 @@ impl<'tcx> Gen<'_, 'tcx> {
         Self::epilogue(&mut s);
 
         s.push_str(crate::arch::asm_text::DIRECTIVE_ATT);
-        writeln!(s, ".size {name}, .-{name}").unwrap();
-        s.push_str(".text\n\n\n");
+        fmt.end_fn(&mut s, name);
+        fmt.close(&mut s);
+        s.push_str("\n\n");
         s
     }
 

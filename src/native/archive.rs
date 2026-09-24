@@ -663,30 +663,23 @@ fn rescue_with_rlib_symbols(
     // Hidden trampoline assembly. The bridge only references hidden data slots; each Engine writes
     // its own P1 closure address into its copy of the .so, so the artifact does not bake in a fixed
     // runtime address.
+    let fmt = super::asmtext::Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
     let mut asm = String::from(crate::arch::asm_text::DIRECTIVE_INTEL);
     let mut slots = std::collections::BTreeSet::new();
     for (name, addr) in &pairs {
-        use std::fmt::Write as _;
         let slot = crate::vm::ir::native_entry_slot_name(crate::vm::ir::LinkAddr(*addr));
-        let _ = writeln!(asm, ".globl {name}");
-        let _ = writeln!(asm, ".hidden {name}");
-        let _ = writeln!(asm, ".type {name},@function");
-        let _ = writeln!(asm, "{name}:");
-        let _ = writeln!(asm, "{}", crate::arch::asmstub::indirect_jump_asm(&slot));
+        fmt.define_fn(&mut asm, name, super::asmtext::Visibility::Private);
+        asm.push_str(&crate::arch::asmstub::indirect_jump_asm(&fmt.symbol(&slot)));
+        asm.push('\n');
         slots.insert(slot);
     }
     if !slots.is_empty() {
-        asm.push_str(".pushsection .data.mirvm_p1,\"aw\",@progbits\n.balign 8\n");
+        fmt.open(&mut asm, super::asmtext::Region::Slots { name: "mirvm_p1" });
+        asm.push_str(".balign 8\n");
         for slot in slots {
-            use std::fmt::Write as _;
-            let _ = writeln!(asm, ".globl {slot}");
-            let _ = writeln!(asm, ".hidden {slot}");
-            let _ = writeln!(asm, ".type {slot},@object");
-            let _ = writeln!(asm, ".size {slot},8");
-            let _ = writeln!(asm, "{slot}:");
-            let _ = writeln!(asm, "    .quad 0");
+            fmt.define_slot(&mut asm, &slot);
         }
-        asm.push_str(".popsection\n");
+        fmt.close(&mut asm);
     }
     // Cache key = first-link key fields + inject pairs (module-specific; P1 code addresses are stable across processes, so same module always hits)
     let mut inject_key: Vec<u8> = Vec::new();
