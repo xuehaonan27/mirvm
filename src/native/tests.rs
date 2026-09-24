@@ -199,7 +199,9 @@ fn native_signal_calls_receive_the_engine_owner() {
     )
     .unwrap_or_else(|e| panic!("dlopen {} failed: {e}", so.display()));
     let bias = crate::os::dll::load_bias(handle, &c_so).expect("native bridge load bias") as u64;
-    // The probe this test builds is an ELF object whatever the host is, so it asks as one.
+    // The probe this test builds is an ELF object whatever the host is, so it asks as one, and on
+    // that platform the bridge's slots are private and reached through the image's own table. Which
+    // of the two routes a platform needs is `os::linker`'s answer; `wire` is what takes both.
     let hidden = crate::native::symtab::hidden_symtab_values(
         so.to_str().unwrap(),
         crate::os::dll::ObjectFormat::Elf,

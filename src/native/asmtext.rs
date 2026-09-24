@@ -112,18 +112,21 @@ impl Vocabulary {
     }
 
     /// Declare `name` an 8-byte object of this image, zero, and emit its label.
-    pub(crate) fn define_slot(&self, out: &mut String, name: &str) {
+    pub(crate) fn define_slot(&self, out: &mut String, name: &str, visibility: Visibility) {
         let name = self.symbol(name);
         let _ = writeln!(out, ".globl {name}");
-        match self.format {
-            ObjectFormat::Elf => {
+        match (self.format, visibility) {
+            (ObjectFormat::Elf, Visibility::Private) => {
                 let _ = writeln!(out, ".hidden {name}");
-                let _ = writeln!(out, ".type {name},@object");
-                let _ = writeln!(out, ".size {name},8");
             }
-            ObjectFormat::MachO => {
+            (ObjectFormat::MachO, Visibility::Private) => {
                 let _ = writeln!(out, ".private_extern {name}");
             }
+            (_, Visibility::Exported) => {}
+        }
+        if self.format == ObjectFormat::Elf {
+            let _ = writeln!(out, ".type {name},@object");
+            let _ = writeln!(out, ".size {name},8");
         }
         let _ = writeln!(out, "{name}:");
         let _ = writeln!(out, "    .quad 0");

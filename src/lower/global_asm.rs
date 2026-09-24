@@ -81,7 +81,7 @@ pub(crate) fn materialize<'tcx>(
         fmt.open(&mut head, Region::Slots { name: "mirvm_p1" });
         head.push_str(".balign 8\n");
         for slot in slots {
-            fmt.define_slot(&mut head, &slot);
+            fmt.define_slot(&mut head, &slot, Visibility::Private);
         }
         fmt.close(&mut head);
     }
@@ -490,11 +490,6 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, Error> {
     let mut asm = asm.to_string();
     strip_slash_comments(&mut asm);
     crate::lower::asm::rewrite_syscall_text(&mut asm);
-    asm.push('\n');
-    asm.push_str(crate::arch::asmstub::NATIVE_RUNTIME_BRIDGE_ASM);
-    let mut hash_input = b"mirvm-global-asm-v3\0".to_vec();
-    hash_input.extend_from_slice(asm.as_bytes());
-    let hash = crate::utils::content::fnv1a(&hash_input);
     let dir = crate::store::GLOBAL_ASM.dir();
     std::fs::create_dir_all(&dir).map_err(|e| {
         Error::io(
@@ -502,6 +497,23 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, Error> {
             e,
         )
     })?;
+    // The bridge is an input of this link rather than text of this image. On a platform whose link
+    // binds a call to the first library that defines it the bridge has to be an image of its own,
+    // or the calls in this one would keep their binding; on the other the object works either way,
+    // and one shape for both keeps the two call sites from having to know which platform they are
+    // on. Its name is the hash of its content, so it stands in for that content in this key.
+    let bridge = crate::native::bridge::artifact(&dir, std::path::Path::new("cc"), b"")
+        .map_err(Error::assemble)?;
+    let bridge_name = bridge
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let mut hash_input = b"mirvm-global-asm-v4\0".to_vec();
+    hash_input.extend_from_slice(asm.as_bytes());
+    hash_input.push(0);
+    hash_input.extend_from_slice(bridge_name.as_bytes());
+    let hash = crate::utils::content::fnv1a(&hash_input);
     let so = dir.join(format!("{hash:016x}.so"));
     if so.exists() {
         return Ok(so.display().to_string().into());
@@ -515,6 +527,7 @@ pub(crate) fn assemble(asm: &str) -> Result<Box<str>, Error> {
         .arg("-o")
         .arg(&tmp)
         .arg(&s_path)
+        .arg(&bridge)
         .args(&interpose)
         .status()
         .map_err(|e| {

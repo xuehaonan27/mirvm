@@ -10,6 +10,9 @@
 //!   namespace already binds a symbol to the library that defines it.
 //! - `-Wl,-no_fixup_chains` keeps relocations in the traditional rebase/bind encoding that
 //!   `vm/mcload` can read, instead of the chained fixups this linker emits by default.
+//! - the runtime-interposition bridge is an image of its own rather than an object of the image it
+//!   serves, which is what makes this format's link-time binding route the calls to it; see
+//!   [`interpose_args`].
 
 /// Arguments every image link carries, before the output path.
 pub const COMMON: &[&str] = &["-shared", "-fPIC"];
@@ -21,17 +24,67 @@ pub const ASM_STUB: &[&str] = &["-Wl,-undefined,dynamic_lookup", "-Wl,-no_fixup_
 /// differ on the other platform are both spelled by the pair of flags above.
 pub const GLOBAL_ASM: &[&str] = &["-Wl,-undefined,dynamic_lookup", "-Wl,-no_fixup_chains"];
 
-/// `None`: this format has no flag that redirects the calls `calls` names.
+/// Nothing, and that is the whole answer: this platform expresses the redirection by *what the
+/// bridge is* rather than by a flag.
 ///
-/// GNU ld's `--wrap` works on symbol references as the linker resolves them, and Mach-O's two-level
-/// namespace has no counterpart. A call is redirected here by a dyld interposing table — an
-/// `__DATA,__interpose` section pairing each replacement with the symbol it replaces, which dyld
-/// applies to the image as it loads it — and this port does not emit one.
+/// A call is bound here to the first library in the link that defines it, and the two-level
+/// namespace records that choice in the calling image rather than looking it up at run time. So an
+/// image that links against a bridge defining `pthread_create` reaches the bridge, while every
+/// other image keeps its own binding to the same-named libSystem symbol. Measured, both orders of
+/// the two inputs do this, and it holds for symbols libSystem really defines (`getpid`, `signal`)
+/// and not only for a probe's.
+///
+/// The mechanism this format *does* have for it, a `__DATA,__interpose` table, is not one mirvm can
+/// use, which is why the bridge is an image of its own here: dyld ignores that section for an image
+/// loaded with `dlopen` at all, and even for one in the launch closure its own trace shows the
+/// interposing image keeping its binding to the symbol it interposes. The calls to redirect are in
+/// the image the bridge is linked into, so that would redirect nothing.
 ///
 /// Answering with the arguments left out is the one answer that must not be given: the image would
 /// name no replacement, so its `pthread_create` would reach libSystem and the engine would lose a
 /// thread it never learned about, with no diagnostic anywhere. A caller that gets `None` fails the
 /// link instead.
 pub fn interpose_args(_calls: &[&str]) -> Option<Vec<String>> {
-    None
+    Some(Vec::new())
 }
+
+/// The name the bridge entry for `call` must be defined under for the image to reach it.
+///
+/// Nothing here renames anything, so the entry carries the call's own name: it is the *definition*
+/// the binding has to find.
+pub fn bridge_entry_name(call: &str) -> String {
+    call.to_string()
+}
+
+/// The `cc` arguments that turn the bridge's assembly into the artifact an image is linked with,
+/// and what that artifact is called.
+///
+/// A dylib, and that is the mechanism rather than a packaging choice: an image binds a call to the
+/// first library that defines it, so the bridge has to be a library of its own for the image's
+/// references to land on it. As an object of the image it would define the call without redirecting
+/// anything, because an image's own definition does not displace the binding it recorded.
+pub const BRIDGE_ARTIFACT: &[&str] = &["-x", "assembler", "-fPIC", "-dynamiclib"];
+pub const BRIDGE_ARTIFACT_EXTENSION: &str = "dylib";
+
+/// `-install_name`, because this format records the library's name *in the image that links
+/// against it* and the loader looks the library up by that name.
+///
+/// Without it the name defaults to the path the library was built at, which for a content-addressed
+/// artifact is a staging name that is renamed away before anything can load it: measured, an image
+/// built against a bridge produced this way fails at `dlopen` naming the temporary.
+pub const BRIDGE_INSTALL_NAME: Option<&str> = Some("-install_name");
+
+/// Whether a bridge entry has to be reachable from outside the object it is built into.
+///
+/// Here it does, and this is the difference the separate library exists for: the calling image binds
+/// `pthread_create` to the definition in *another* image, and a loader only offers the definitions
+/// an image exports. Measured the other way round, a private entry leaves the caller bound to
+/// libSystem and the bridge receives nothing.
+pub const BRIDGE_ENTRY_IS_EXPORTED: bool = true;
+
+/// Whether a bridge slot has to be reachable by name through the loader.
+///
+/// Here it does: the slots live in the bridge library rather than in the image that uses them, so
+/// the image's own symbol table does not have them and the loader's search of the load closure is
+/// the only way to reach them.
+pub const BRIDGE_SLOT_IS_EXPORTED: bool = true;
