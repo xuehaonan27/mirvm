@@ -11,7 +11,7 @@ use std::sync::atomic::AtomicBool;
 
 use super::super::instance::Instance;
 use super::super::ir::Module;
-use super::super::native_lifecycle::suppress_lifecycle_tags;
+use super::super::native_lifecycle::{executable_ranges, materialize};
 use super::NativeImage;
 use super::identity::copy_unique;
 
@@ -58,7 +58,11 @@ fn open_deferred(path: &Path, remove_private_file: bool) -> Result<NativeImage, 
         }
     }
     let file_guard = FileGuard(remove_private_file.then(|| path.to_path_buf()));
-    let tags = suppress_lifecycle_tags(path)?;
+    // Read the lifecycle addresses out, and take the loader's hands off them, before anything is
+    // mapped: the rewrite invalidates the image's signature, so the platform's signer has to see
+    // the file again before its loader will.
+    let tags = crate::native::lifecycle::read_and_suppress(path, crate::os::dll::OBJECT_FORMAT)?;
+    crate::os::dll::reseal(path).map_err(|error| error.to_string())?;
     let cpath = CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| format!("per-Engine native path contains NUL: {}", path.display()))?;
     let handle = crate::os::dll::open_with_flags(
@@ -83,8 +87,8 @@ fn open_deferred(path: &Path, remove_private_file: bool) -> Result<NativeImage, 
         crate::os::dll::OBJECT_FORMAT,
     )
     .map_err(|error| error.to_string())?;
-    let executable_ranges = tags.executable_ranges(bias)?;
-    let lifecycle = tags.materialize(bias)?;
+    let executable_ranges = executable_ranges(&tags, bias)?;
+    let lifecycle = materialize(tags, bias)?;
     handle_guard.0 = None;
     // The mapped object and its handle no longer need the directory entry.
     // Unlink before publishing the image so both successful and failed

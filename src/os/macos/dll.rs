@@ -56,20 +56,7 @@ fn publish(bytes: &[u8], path: &Path) -> Result<PrivateImage, crate::os::Error> 
     let failure = |detail: String| crate::os::Error::PrivateImage { detail };
     std::fs::write(path, bytes)
         .map_err(|error| failure(format!("writing `{}` failed: {error}", path.display())))?;
-
-    let signed = std::process::Command::new("codesign")
-        .args(["-s", "-", "--force"])
-        .arg(path)
-        .output()
-        .map_err(|error| failure(format!("cannot launch codesign: {error}")))?;
-    if !signed.status.success() {
-        return Err(failure(format!(
-            "codesign refused `{}`: {}{}",
-            path.display(),
-            String::from_utf8_lossy(&signed.stdout),
-            String::from_utf8_lossy(&signed.stderr)
-        )));
-    }
+    reseal(path)?;
 
     let cpath = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| failure("the private object's path contains NUL".to_string()))?;
@@ -103,6 +90,31 @@ fn private_file(name: &CStr) -> Option<PathBuf> {
     unsafe { libc::close(fd) };
     bytes.pop();
     Some(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+}
+
+/// Have this platform's signer accept `path` as it now stands.
+///
+/// The signature covers the bytes, so anything that rewrites a private copy — suppressing a
+/// constructor array is the one such rewrite — invalidates it, and this loader refuses an image
+/// whose signature does not match. Measured, the refusal is not a diagnostic: the process is killed
+/// when the image is loaded. Signing is ad-hoc, so an image this process published can be signed
+/// again the same way.
+pub fn reseal(path: &Path) -> Result<(), crate::os::Error> {
+    let failure = |detail: String| crate::os::Error::PrivateImage { detail };
+    let signed = std::process::Command::new("codesign")
+        .args(["-s", "-", "--force"])
+        .arg(path)
+        .output()
+        .map_err(|error| failure(format!("cannot launch codesign: {error}")))?;
+    if !signed.status.success() {
+        return Err(failure(format!(
+            "codesign refused `{}`: {}{}",
+            path.display(),
+            String::from_utf8_lossy(&signed.stdout),
+            String::from_utf8_lossy(&signed.stderr)
+        )));
+    }
+    Ok(())
 }
 
 /// `dlopen`.
