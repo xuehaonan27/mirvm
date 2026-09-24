@@ -150,6 +150,13 @@ fn close_inside_reinstalling_tsd_dtor_runs_four_rounds() {
     }
 }
 
+/// The scenario needs a signal to reach a thread that is *already inside* its final Ctx
+/// destructor round, and this platform's `pthread_kill` refuses it: measured, it answers ESRCH for
+/// a thread that has begun its TSD teardown, where the other platform's queues the signal and the
+/// engine's next observation drains it. So the interleaving cannot be produced here, and with no
+/// signal able to arrive in that window there is none to lose. Everything the round does with what
+/// did arrive is covered by the tests that do not need the signal.
+#[cfg(target_os = "linux")]
 #[test]
 fn final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback() {
     const NAME: &str = "vm::deferred::tests::tsd::final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback";
