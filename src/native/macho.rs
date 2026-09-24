@@ -12,6 +12,10 @@
 //! and its virtual address the same number; `build` returns the slot region's file offset, so a
 //! caller turns index `i` into a runtime address as `load_bias + text_off + i * SLOT`, where
 //! `load_bias` is dyld's slide plus `__TEXT`'s vmaddr.
+//!
+//! Two tables carry the names, and both spell them the way this format spells a C symbol — with a
+//! leading underscore, because a loader looks a C name up with one applied: the symbol table, which
+//! `nm` and `dladdr` read, and the export trie, which is the only one `dlsym` consults.
 
 /// The 64-bit Mach-O magic, little-endian on disk.
 const MH_MAGIC_64: u32 = 0xfeed_facf;
@@ -37,6 +41,11 @@ const UUID_COMMAND_SIZE: usize = 24;
 const SYMTAB_COMMAND_SIZE: usize = 24;
 /// `dysymtab_command`.
 const DYSYMTAB_COMMAND_SIZE: usize = 80;
+/// `dyld_info_command`, which carries the export trie's offset and size.
+const DYLD_INFO_COMMAND_SIZE: usize = 48;
+/// Every run of `__LINKEDIT` starts on this boundary. A loader and the tools that read an image
+/// reject a blob that does not: `dyld_info` calls a trie that starts anywhere else mis-aligned.
+const LINKEDIT_ALIGN: usize = 8;
 /// `dylib_command` without its name.
 const DYLIB_COMMAND_SIZE: usize = 24;
 /// One `nlist_64`.
@@ -47,9 +56,13 @@ const LC_SEGMENT_64: u32 = 0x19;
 /// The load command naming this image, and the one dyld needs to tell two loads of it apart.
 const LC_ID_DYLIB: u32 = 0x0d;
 const LC_UUID: u32 = 0x1b;
-/// The two symbol-table commands.
+/// The two symbol-table commands, and the one that carries the export trie.
 const LC_SYMTAB: u32 = 0x02;
 const LC_DYSYMTAB: u32 = 0x0b;
+const LC_DYLD_INFO_ONLY: u32 = 0x8000_0022;
+
+/// The flags word of an export trie terminal: no flags, which is how an ordinary name is marked.
+const EXPORT_SYMBOL_FLAGS_REGULAR: u64 = 0;
 
 /// `__TEXT`'s permissions (read and execute) and `__LINKEDIT`'s (read only).
 const PROT_READ: u32 = 1;
@@ -82,6 +95,183 @@ const PAGE: usize = 0x4000;
 /// One function's slot, which is this architecture's inert slot: a decodable instruction followed
 /// by padding, so no address is ever mid-instruction and nothing after the return is reached.
 const SLOT: usize = crate::arch::asmstub::INERT_SLOT.len();
+
+/// One node of the export trie: where a name ends, and what continues from here.
+#[derive(Default)]
+struct Trie {
+    /// The address of the symbol whose name ends exactly at this node.
+    terminal: Option<u64>,
+    /// What continues from this node, by the next byte of those names. Sorted, because a loader
+    /// walks a node's edges in order.
+    children: std::collections::BTreeMap<u8, Trie>,
+}
+
+/// A node of the trie as the layout sees it: its own bytes, and the children it points at by index
+/// into the emit order.
+struct TrieNode {
+    terminal: Option<u64>,
+    /// [`Self::terminal`]'s encoding plus the child-count byte plus one edge and terminator per
+    /// child — everything whose length does not depend on where a child lands.
+    own_len: usize,
+    /// Each child's edge byte and its index, in the order it is emitted.
+    children: Vec<(u8, usize)>,
+}
+
+/// The export trie that names every symbol of the image.
+///
+/// A loader resolves an exported name by walking this rather than by reading the symbol table, so
+/// an image that carries symbols and no trie is one whose names nothing can look up — `dlsym` and
+/// `dladdr` included.
+///
+/// Every node is emitted after its parent, in the byte order of the edges, and the offsets between
+/// nodes are ULEB128, so a node's length depends on where its children land. The widths are settled
+/// by starting from the widest encoding and narrowing until they stop changing: narrowing only ever
+/// moves a child earlier, which can only narrow a width further, so the loop settles on widths that
+/// agree with the offsets they encode.
+fn export_trie(symbols: &[Vec<u8>], text_off: usize) -> Result<Vec<u8>, String> {
+    let mut root = Trie::default();
+    for (index, symbol) in symbols.iter().enumerate() {
+        let mut node = &mut root;
+        for byte in symbol {
+            node = node.children.entry(*byte).or_default();
+        }
+        node.terminal = Some((text_off + index * SLOT) as u64);
+    }
+
+    // The emit order: a node, then its whole subtree, in edge order. Interning in that order makes
+    // every child's index greater than its parent's, which is what lets the layout below walk the
+    // arena once.
+    fn intern(node: &Trie, arena: &mut Vec<TrieNode>) -> usize {
+        let index = arena.len();
+        arena.push(TrieNode {
+            terminal: node.terminal,
+            own_len: 0,
+            children: Vec::new(),
+        });
+        let mut children = Vec::with_capacity(node.children.len());
+        for (byte, child) in &node.children {
+            children.push((*byte, intern(child, arena)));
+        }
+        // A terminal is `flags` then `address`, both ULEB128; a node without one writes a size of
+        // zero and nothing after it. The size field is itself a ULEB128, which is why the length of
+        // the field is counted rather than assumed to be one byte.
+        let terminal_len = node
+            .terminal
+            .map(|address| uleb_len(EXPORT_SYMBOL_FLAGS_REGULAR) + uleb_len(address));
+        let own_len = match terminal_len {
+            Some(len) => uleb_len(len as u64) + len,
+            None => 1,
+        };
+        // Then the child count, and one edge byte plus its terminator per child.
+        arena[index] = TrieNode {
+            terminal: node.terminal,
+            own_len: own_len + 1 + children.len() * 2,
+            children,
+        };
+        index
+    }
+    let mut arena = Vec::new();
+    let root_index = intern(&root, &mut arena);
+    debug_assert_eq!(root_index, 0, "the root is emitted first");
+
+    let mut widths: Vec<Vec<usize>> = arena
+        .iter()
+        .map(|node| vec![ULEB_MAX; node.children.len()])
+        .collect();
+    let mut offsets = vec![0usize; arena.len()];
+    loop {
+        let mut at = 0;
+        for (index, node) in arena.iter().enumerate() {
+            offsets[index] = at;
+            at += node.own_len + widths[index].iter().sum::<usize>();
+        }
+        let mut narrowed = widths.clone();
+        for (index, node) in arena.iter().enumerate() {
+            for (slot, &(_, child)) in node.children.iter().enumerate() {
+                narrowed[index][slot] = uleb_len(offsets[child] as u64);
+            }
+        }
+        if narrowed == widths {
+            break;
+        }
+        widths = narrowed;
+    }
+
+    let mut out = Vec::with_capacity(offsets[0] + arena[0].own_len);
+    for (index, node) in arena.iter().enumerate() {
+        debug_assert_eq!(
+            out.len(),
+            offsets[index],
+            "a node is emitted where it was laid out"
+        );
+        match node.terminal {
+            Some(address) => {
+                // The terminal is `flags` then `address`, and its size field says how many bytes
+                // those are.
+                uleb(
+                    &mut out,
+                    (uleb_len(EXPORT_SYMBOL_FLAGS_REGULAR) + uleb_len(address)) as u64,
+                );
+                uleb(&mut out, EXPORT_SYMBOL_FLAGS_REGULAR);
+                uleb(&mut out, address);
+            }
+            None => uleb(&mut out, 0),
+        }
+        out.push(node.children.len() as u8);
+        for (slot, &(byte, child)) in node.children.iter().enumerate() {
+            out.push(byte);
+            out.push(0);
+            uleb_width(&mut out, offsets[child] as u64, widths[index][slot]);
+        }
+    }
+    Ok(out)
+}
+
+/// The bytes a ULEB128 of `value` takes.
+fn uleb_len(value: u64) -> usize {
+    let mut shifts = 0;
+    let mut rest = value;
+    while rest >= 0x80 {
+        rest >>= 7;
+        shifts += 1;
+    }
+    shifts + 1
+}
+
+/// The widest ULEB128 this writes: enough for any offset an image of this size can hold.
+const ULEB_MAX: usize = 5;
+
+/// Appends `value` as a ULEB128.
+fn uleb(out: &mut Vec<u8>, value: u64) {
+    let mut rest = value;
+    loop {
+        let byte = (rest & 0x7f) as u8;
+        rest >>= 7;
+        if rest == 0 {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+/// Appends `value` as a ULEB128 in exactly `width` bytes.
+///
+/// The layout above settles the width it laid a node out with, and this writes that many bytes
+/// rather than the shortest encoding of the value: the two agree at the layout's fixpoint, and
+/// writing any other length would move every node after it.
+fn uleb_width(out: &mut Vec<u8>, value: u64, width: usize) {
+    debug_assert!(
+        uleb_len(value) <= width,
+        "the layout reserved too few bytes"
+    );
+    let mut rest = value;
+    for slot in 0..width {
+        let byte = (rest & 0x7f) as u8;
+        rest >>= 7;
+        out.push(if slot + 1 == width { byte } else { byte | 0x80 });
+    }
+}
 
 fn align(value: usize, alignment: usize) -> usize {
     value.div_ceil(alignment) * alignment
@@ -157,24 +347,38 @@ fn uuid(text_off: usize, slot_count: usize) -> [u8; 16] {
 /// Builds the unsigned dylib and returns its bytes together with the file offset the slots start
 /// at. The caller signs the bytes before loading them.
 pub fn build(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
+    // A symbol in this format carries a leading underscore, and a loader looks a C name up with it
+    // applied: `dlsym` asking for `x` searches for `_x`. The symbol table and the export trie
+    // therefore both spell every name this way, which is also what `nm` and `dyld_info` print.
+    let symbols: Vec<Vec<u8>> = names
+        .iter()
+        .map(|name| {
+            let mut symbol = Vec::with_capacity(name.len() + 1);
+            symbol.push(b'_');
+            symbol.extend_from_slice(name.as_bytes());
+            symbol
+        })
+        .collect();
     let mut strtab = vec![0];
-    let mut name_offsets = Vec::with_capacity(names.len());
-    for name in names {
-        name_offsets.push(push_cstr(&mut strtab, name.as_bytes())?);
+    let mut name_offsets = Vec::with_capacity(symbols.len());
+    for symbol in &symbols {
+        name_offsets.push(push_cstr(&mut strtab, symbol)?);
     }
 
     let id_dylib_len = align(DYLIB_COMMAND_SIZE + INSTALL_NAME.len() + 1, 8);
     let segment_len = SEGMENT_COMMAND_SIZE + SECTION_SIZE;
     // Header, then `LC_ID_DYLIB`, `LC_SEGMENT_64` for `__TEXT`, `LC_SEGMENT_64` for `__LINKEDIT`,
-    // `LC_UUID`, `LC_SYMTAB` and `LC_DYSYMTAB`, in that order. `LC_CODE_SIGNATURE` is deliberately
-    // absent: `codesign` appends the command with the signature, while an image that carries the
-    // command and no signature is one `codesign` rejects as malformed instead of signing.
+    // `LC_UUID`, `LC_SYMTAB`, `LC_DYSYMTAB` and `LC_DYLD_INFO_ONLY`, in that order.
+    // `LC_CODE_SIGNATURE` is deliberately absent: `codesign` appends the command with the
+    // signature, while an image that carries the command and no signature is one `codesign` rejects
+    // as malformed instead of signing.
     let commands_len = id_dylib_len
         + segment_len
         + SEGMENT_COMMAND_SIZE
         + UUID_COMMAND_SIZE
         + SYMTAB_COMMAND_SIZE
-        + DYSYMTAB_COMMAND_SIZE;
+        + DYSYMTAB_COMMAND_SIZE
+        + DYLD_INFO_COMMAND_SIZE;
     // The slot region starts sixteen bytes past the first 16-byte boundary at or after the load
     // commands. The zero bytes between the two lie outside `sizeofcmds` and outside every load
     // command: they are the room `codesign` inserts `LC_CODE_SIGNATURE` into. They also make the
@@ -195,10 +399,13 @@ pub fn build(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
         .checked_mul(NLIST_SIZE)
         .ok_or("Mach-O symbol table too large")?;
     let str_off = sym_off + sym_len;
-    // The string table ends the file, and its length is not padded: dyld reads entries by offset,
-    // and the next thing on disk is the signature `codesign` appends, which it aligns itself. The
-    // symbol table is linkedit data, so `__LINKEDIT` covers the run between the two offsets.
-    let file_len = str_off + strtab.len();
+    // The export trie follows the string table, and it ends the file. Neither is padded: a loader
+    // reads both by offset, and the next thing on disk is the signature `codesign` appends, which
+    // it aligns itself. All three are linkedit data, so `__LINKEDIT` covers the run from the first
+    // of them to the end.
+    let exports = export_trie(&symbols, text_off)?;
+    let export_off = align(str_off + strtab.len(), LINKEDIT_ALIGN);
+    let file_len = export_off + exports.len();
     let linkedit_len = file_len - sym_off;
     let linkedit_vmsize = align(linkedit_len, PAGE);
     // `__TEXT` carries the header, the commands and the slots, and its file and virtual sizes are
@@ -211,7 +418,7 @@ pub fn build(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
         out: Vec::with_capacity(file_len),
     };
 
-    let command_count = 6u32;
+    let command_count = 7u32;
     // mach_header_64
     out.u32(MH_MAGIC_64);
     out.u32(CPU_TYPE_ARM64);
@@ -303,6 +510,22 @@ pub fn build(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
         out.u32(0);
     }
 
+    // LC_DYLD_INFO_ONLY. The image has no rebases, binds or lazy binds: it references nothing
+    // outside itself, and every address it carries is relative to its own sections. What it does
+    // carry is the export trie, which is where a loader looks an exported name up.
+    out.u32(LC_DYLD_INFO_ONLY);
+    out.u32(DYLD_INFO_COMMAND_SIZE as u32);
+    out.u32(0); // rebase_off
+    out.u32(0); // rebase_size
+    out.u32(0); // bind_off
+    out.u32(0); // bind_size
+    out.u32(0); // weak_bind_off
+    out.u32(0); // weak_bind_size
+    out.u32(0); // lazy_bind_off
+    out.u32(0); // lazy_bind_size
+    out.u32(export_off as u32);
+    out.u32(exports.len() as u32);
+
     debug_assert!(
         out.out.len() <= text_off,
         "load commands fit before the slots"
@@ -330,7 +553,11 @@ pub fn build(names: &[Box<str>]) -> Result<(Vec<u8>, usize), String> {
     }
 
     out.out.extend_from_slice(&strtab);
-    debug_assert_eq!(out.out.len(), file_len, "the string table ends the file");
+    // The padding that puts the trie on a `__LINKEDIT` boundary is part of the segment.
+    out.out
+        .extend(std::iter::repeat_n(0u8, export_off - out.out.len()));
+    out.out.extend_from_slice(&exports);
+    debug_assert_eq!(out.out.len(), file_len, "the export trie ends the file");
     Ok((out.out, text_off))
 }
 
@@ -544,5 +771,102 @@ mod tests {
             }
             at += size as usize;
         }
+    }
+
+    /// The image's export trie, found the way a loader finds it.
+    fn trie_of(bytes: &[u8]) -> &[u8] {
+        let (commands, _) = header(bytes).expect("a header");
+        let mut at = HEADER_SIZE;
+        for _ in 0..commands {
+            let (command, size) = load_command(bytes, at).expect("a load command");
+            if command == LC_DYLD_INFO_ONLY {
+                // `dyld_info_command` is the command and its size, then ten 32-bit fields, of which
+                // the export pair is the ninth and tenth.
+                let off = read_u32(bytes, at + 8 + 8 * 4).expect("export_off") as usize;
+                let len = read_u32(bytes, at + 8 + 9 * 4).expect("export_size") as usize;
+                return &bytes[off..off + len];
+            }
+            at += size as usize;
+        }
+        panic!("the image carries no export trie");
+    }
+
+    fn read_uleb(bytes: &[u8], cursor: &mut usize) -> u64 {
+        let mut value = 0u64;
+        let mut shift = 0;
+        loop {
+            let byte = bytes[*cursor];
+            *cursor += 1;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return value;
+            }
+            shift += 7;
+        }
+    }
+
+    /// Walks the trie the way a loader does: a node's terminal is the name that ends there, and its
+    /// children extend that name by their edge.
+    fn walk(bytes: &[u8], at: usize, name: &mut String, out: &mut Vec<(String, u64)>) {
+        let mut cursor = at;
+        let terminal = read_uleb(bytes, &mut cursor) as usize;
+        let table = cursor;
+        if terminal != 0 {
+            let _flags = read_uleb(bytes, &mut cursor);
+            out.push((name.clone(), read_uleb(bytes, &mut cursor)));
+        }
+        cursor = table + terminal;
+        let children = bytes[cursor] as usize;
+        cursor += 1;
+        for _ in 0..children {
+            let end = cursor
+                + bytes[cursor..]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .expect("a terminator");
+            let edge = std::str::from_utf8(&bytes[cursor..end]).expect("an edge");
+            cursor = end + 1;
+            let offset = read_uleb(bytes, &mut cursor) as usize;
+            let len = name.len();
+            name.push_str(edge);
+            walk(bytes, offset, name, out);
+            name.truncate(len);
+        }
+    }
+
+    /// The trie is what a loader walks to resolve a name, so the test walks it the same way and
+    /// checks that every symbol comes back at the address the symbol table gives it.
+    #[test]
+    fn the_export_trie_carries_every_symbol_at_its_address() {
+        let (bytes, text_off) = image();
+        let mut entries = Vec::new();
+        walk(trie_of(&bytes), 0, &mut String::new(), &mut entries);
+        let mut expected: Vec<(String, u64)> = NAMES
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (format!("_{name}"), (text_off + index * SLOT) as u64))
+            .collect();
+        entries.sort();
+        expected.sort();
+        assert_eq!(entries, expected);
+    }
+
+    /// A name that is a prefix of another is where a trie is not a list: the shorter name's own
+    /// terminal sits at the node the longer one passes through, and a loader has to reach both.
+    #[test]
+    fn a_name_that_is_a_prefix_of_another_is_still_reached() {
+        let names: Vec<Box<str>> = ["probe", "probe_long"]
+            .iter()
+            .map(|name| Box::from(*name))
+            .collect();
+        let (bytes, text_off) = build(&names).expect("an image");
+        let mut entries = Vec::new();
+        walk(trie_of(&bytes), 0, &mut String::new(), &mut entries);
+        entries.sort();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(&*entries[0].0, "_probe");
+        assert_eq!(entries[0].1 as usize, text_off);
+        assert_eq!(&*entries[1].0, "_probe_long");
+        assert_eq!(entries[1].1 as usize, text_off + SLOT);
     }
 }
