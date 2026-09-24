@@ -89,6 +89,7 @@ fn make_archive(dir: &Path, source: &str) -> PathBuf {
     archive_path
 }
 
+#[cfg(target_os = "linux")]
 fn make_thin_archive(dir: &Path, source: &str) -> PathBuf {
     let source_path = dir.join("thin_probe.c");
     let object_path = dir.join("thin_probe.o");
