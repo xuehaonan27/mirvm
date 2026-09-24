@@ -377,7 +377,7 @@ uint64_t image_sigaction_sigkill(void (*guest_handler)(int)) {
 }
 
 void image_signal_realtime(void (*guest_handler)(int)) {
-    (void)signal(SIGRTMIN, guest_handler);
+    (void)signal(MIRVM_REALTIME_SIGNAL, guest_handler);
 }
 
 void image_signal_sync_fault(void (*guest_handler)(int)) {
@@ -402,6 +402,10 @@ uint64_t read_image_signal_trace(void) { return trace; }
     .unwrap();
     let cc = Command::new("cc")
         .args(["-fPIC", "-c"])
+        .arg(format!(
+            "-DMIRVM_REALTIME_SIGNAL={}",
+            crate::os::signal::realtime_min()
+        ))
         .arg(&source)
         .arg("-o")
         .arg(&object)
