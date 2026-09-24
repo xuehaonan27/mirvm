@@ -14,10 +14,11 @@ mod rollback;
 use super::inbox::current_thread_inbox;
 use super::*;
 use crate::os::process::{exit_now, getpid};
-use crate::os::signal::{
-    MaskOp, SA_RESTART, SIGURG, SIGUSR1, SIGUSR2, SIGWINCH, SignalMask, kill, send_to_thread,
-    set_thread_mask,
-};
+use crate::os::signal::{SA_RESTART, SIGURG, SIGUSR1, SIGUSR2, SIGWINCH, kill, send_to_thread};
+// The mask primitives are for the exit-mask test, which needs a signal to reach a thread inside its
+// TSD phase; a platform that cannot deliver one there does not run it.
+#[cfg(target_os = "linux")]
+use crate::os::signal::{MaskOp, SignalMask, set_thread_mask};
 // The probing bits a kernel clears before returning an action are this kernel's own, and the tests
 // that drive them say so rather than asking a platform for a bit it does not have.
 #[cfg(target_os = "linux")]
@@ -27,7 +28,9 @@ use crate::os_arch::signal::RESTORER_FLAG;
 use crate::vm::ctx::Shared;
 use crate::vm::ir::Module;
 
-use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 static DETACHED_CLOSE_NATIVE_RAN: AtomicUsize = AtomicUsize::new(0);
 

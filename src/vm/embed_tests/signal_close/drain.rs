@@ -174,7 +174,7 @@ fn close_drain_does_not_lose_a_handler_reraise_on_its_temporary_thread() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("failed to start close-drain reraised-signal subprocess");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + CHILD_HANG_TIMEOUT;
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
@@ -279,7 +279,7 @@ fn close_drain_exhausts_cross_engine_synchronous_raises_before_sealing() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("failed to start ninth close-drain raise subprocess");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + CHILD_HANG_TIMEOUT;
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;

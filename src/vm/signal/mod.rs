@@ -19,10 +19,10 @@ use crate::os::process::ESRCH;
 use crate::os::signal::{Sigaction, SignalInfo};
 
 pub(crate) use inbox::{
-    HostRaiseAttempt, SignalDeliveryGuard, SignalInbox, SignalRegistration, activate_owner,
-    current_thread_has_pending, current_thread_has_pending_for_engine,
-    deactivate_current_thread_inbox, initialize_current_thread_inbox, record_async_signal,
-    restore_owner, take_current_thread_delivery,
+    HostRaiseAttempt, SignalDeliveryGuard, SignalInbox, SignalRegistration, ThreadInboxHandle,
+    activate_owner, current_thread_has_pending_for_engine, current_thread_inbox_handle,
+    initialize_current_thread_inbox, record_async_signal, restore_owner,
+    take_current_thread_delivery,
 };
 
 mod engine;

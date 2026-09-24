@@ -9,36 +9,52 @@
 //! Two formats say the same two things differently, and the difference is a layout one, which is
 //! why it is here rather than on an axis. ELF names a singular `DT_INIT`/`DT_FINI` and two arrays in
 //! the dynamic table, and the loader is told to forget them by rewriting those tags. Mach-O has no
-//! such table: the arrays are sections whose *type* is what makes them arrays, and the loader is
-//! told to forget them by taking that type away.
+//! such table: the lists are sections whose *type* is what makes them lists, and the loader is told
+//! to forget them by taking that type away. Mach-O also writes the initializer list in either of
+//! two forms — the pointer array an old linker emitted and the section of 32-bit offsets a modern
+//! one emits instead — which is [`CallableList`] rather than two more fields.
 //!
-//! What the addresses mean once read — that a pointer array becomes a list of callables after the
-//! image is mapped and slid — is not a layout question and stays with the caller. So does the
-//! platform's signer: rewriting these bytes invalidates an image's signature, and putting the file
-//! back in front of the signer is `crate::os::dll::reseal`'s job rather than this module's.
+//! What the addresses mean once read — that a list becomes callables after the image is mapped and
+//! slid — is not a layout question and stays with the caller. So does the platform's signer:
+//! rewriting these bytes invalidates an image's signature, and putting the file back in front of
+//! the signer is `crate::os::dll::reseal`'s job rather than this module's.
 //!
-//! Measured on the macos aarch64 host, because both Mach-O points are easy to get wrong: a
-//! constructor is a pointer array that dyld *rebases*, so zeroing its contents yields the slide
-//! rather than null and the process dies on the first "constructor"; and a rewritten image that is
-//! not signed again is killed outright. Clearing the section's type is what leaves the array in
-//! place and unreachable.
+//! Measured on the macos aarch64 host, because the Mach-O points here are easy to get wrong: a
+//! pointer list is one dyld *rebases*, so zeroing its contents yields the slide rather than null
+//! and the process dies on the first "constructor"; a rewritten image that is not signed again is
+//! killed outright; and this toolchain emits no pointer array for a constructor at all, so a port
+//! that read only that form ran every constructor at `dlopen`, before anything could be wired.
 
 use std::path::Path;
 
 use super::{elf, macho};
 use crate::os::dll::ObjectFormat;
 
+/// How a list of callables is written down in an object.
+///
+/// ELF has one form, an array of pointers the loader relocates. Mach-O has two, because a modern
+/// ld64 emits no pointer array for the initializers: it emits a section of 32-bit offsets from the
+/// image's base, which the loader turns into an address by adding the load address rather than by
+/// rebasing the entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CallableList {
+    /// Pointers the loader rebases, one per callable.
+    Pointers,
+    /// 32-bit offsets from the image's base, one per callable.
+    Offsets,
+}
+
 /// One image's lifecycle metadata, in the virtual addresses it is linked at.
 ///
-/// The two arrays are `(address, size)` of a function-pointer array, which only becomes a list of
-/// callables after the image is mapped; the singular addresses are single functions. Both are the
-/// object's own linked addresses, so a caller adds the load bias.
+/// Each list is `(address, size)` of a callable list, which only becomes a list of callables after
+/// the image is mapped; the singular addresses are single functions. Both are the object's own
+/// linked addresses, so a caller adds the load bias.
 #[derive(Default)]
 pub(crate) struct Layout {
     pub(crate) init: Option<u64>,
-    pub(crate) init_array: Option<(u64, u64)>,
+    pub(crate) init_array: Option<(u64, u64, CallableList)>,
     pub(crate) fini: Option<u64>,
-    pub(crate) fini_array: Option<(u64, u64)>,
+    pub(crate) fini_array: Option<(u64, u64, CallableList)>,
     pub(crate) loads: Vec<(u64, u64)>,
     pub(crate) executable_loads: Vec<(u64, u64)>,
 }
@@ -142,12 +158,14 @@ fn elf_layout(bytes: &mut [u8], path: &Path) -> Result<Layout, String> {
         bytes[entry..entry + 8].copy_from_slice(&elf::DT_BIND_NOW.to_le_bytes());
         bytes[entry + 8..entry + 16].fill(0);
     }
-    result.init_array = pair_tags(init_array_addr, init_array_size, "DT_INIT_ARRAY")?;
-    result.fini_array = pair_tags(fini_array_addr, fini_array_size, "DT_FINI_ARRAY")?;
+    result.init_array = pair_tags(init_array_addr, init_array_size, "DT_INIT_ARRAY")?
+        .map(|(address, size)| (address, size, CallableList::Pointers));
+    result.fini_array = pair_tags(fini_array_addr, fini_array_size, "DT_FINI_ARRAY")?
+        .map(|(address, size)| (address, size, CallableList::Pointers));
     Ok(result)
 }
 
-/// The Mach-O half: the arrays are sections the loader runs because of their type, so the read is a
+/// The Mach-O half: the lists are sections the loader runs because of their type, so the read is a
 /// section walk and the suppression is that type ceasing to say so.
 fn macho_layout(bytes: &mut [u8], path: &Path) -> Result<Layout, String> {
     let bad = |detail: String| format!("native `{}`: {detail}", path.display());
@@ -169,23 +187,24 @@ fn macho_layout(bytes: &mut [u8], path: &Path) -> Result<Layout, String> {
     result.init = image.routines_init;
     for segment in &image.segments {
         for section in &segment.sections {
-            if !section.is_function_pointer_array() {
+            let Some(form) = section.callable_list() else {
                 continue;
-            }
-            let pair = (section.addr, section.size);
-            let array = if section.sectname == "__mod_init_func" {
+            };
+            // The offsets form exists for the initializers alone; a name is what separates the two
+            // pointer lists from each other.
+            let array = if form == CallableList::Offsets || section.sectname == "__mod_init_func" {
                 &mut result.init_array
             } else if section.sectname == "__mod_term_func" {
                 &mut result.fini_array
             } else {
-                // A typed array under no name this format uses is one whose destructors or
+                // A typed list under no name this format uses is one whose destructors or
                 // constructors mirvm would otherwise leave to the loader after patching nothing.
                 return Err(bad(format!(
-                    "section `{},{}` is a function pointer array this port does not recognise",
+                    "section `{},{}` is a callable list this port does not recognise",
                     section.segname, section.sectname
                 )));
             };
-            if array.replace(pair).is_some() {
+            if array.replace((section.addr, section.size, form)).is_some() {
                 return Err(bad(format!("two `{}` sections", section.sectname)));
             }
             section.detach(bytes)?;
@@ -216,7 +235,7 @@ fn pair_tags(
 mod tests {
     use std::path::Path;
 
-    use super::{ObjectFormat, read_and_suppress};
+    use super::{CallableList, ObjectFormat, read_and_suppress};
     use crate::native::macho;
 
     /// A constructor that appends to the file `PROBE_MARKER` names, an exported function, and a
@@ -244,9 +263,13 @@ int probe_export(int x) { return x + 1; }
     }
 
     /// Links `SOURCE` into a dylib carrying a constructor that reports itself through `marker`.
-    /// The archive step is not decoration: it is the shape `native::archive` builds, and it is what
-    /// makes the constructor a pointer array rather than a call the linker inlined.
-    fn linked(dir: &Path, marker: &Path) -> std::path::PathBuf {
+    /// The archive step is not decoration: it is the shape `native::archive` builds.
+    ///
+    /// `classic` picks which of the two initializer forms this loader will see: a linker run
+    /// without fixup chains writes the pointer array, and the default one writes the offset list
+    /// instead. Both are real images this platform runs, so both are what the suppression must
+    /// reach.
+    fn linked(dir: &Path, marker: &Path, classic: bool) -> std::path::PathBuf {
         let source = dir.join("probe.c");
         std::fs::write(&source, SOURCE).expect("writing the probe source");
         let object = dir.join("probe.o");
@@ -261,15 +284,19 @@ int probe_export(int x) { return x + 1; }
             .arg("crs")
             .arg(&archive)
             .arg(&object));
-        let library = dir.join("libprobe.so");
-        run(std::process::Command::new("cc")
-            .args([
-                "-shared",
-                "-fPIC",
-                "-Wl,-no_fixup_chains",
-                "-Wl,-all_load",
-                "-o",
-            ])
+        let library = if classic {
+            dir.join("classic.so")
+        } else {
+            dir.join("offsets.so")
+        };
+        let mut command = std::process::Command::new("cc");
+        command.args(["-shared", "-fPIC"]);
+        if classic {
+            command.arg("-Wl,-no_fixup_chains");
+        }
+        run(command
+            .arg("-Wl,-all_load")
+            .arg("-o")
             .arg(&library)
             .arg(&archive));
         library
@@ -288,14 +315,19 @@ int probe_export(int x) { return x + 1; }
         std::fs::read_to_string(path).unwrap_or_default()
     }
 
-    #[test]
-    fn a_suppressed_constructor_is_one_the_loader_no_longer_runs() {
-        let dir =
-            std::env::temp_dir().join(format!("mirvm-macho-lifecycle-{}", std::process::id()));
+    /// Builds the control image, suppresses a private copy of it, and reports what the copy's
+    /// initializer list was read as. The two runs of the same image are the whole point: the
+    /// unsuppressed copy proves the constructor is one this loader would have run, so the
+    /// suppressed copy staying silent is the suppression and not an image that never had one.
+    fn suppression_probe(classic: bool, expected: CallableList) {
+        let dir = std::env::temp_dir().join(format!(
+            "mirvm-macho-lifecycle-{}-{classic}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a temporary directory");
         let control_marker = dir.join("control.marker");
-        let control = linked(&dir, &control_marker);
+        let control = linked(&dir, &control_marker, classic);
         load(&control);
         assert_eq!(
             marker(&control_marker),
@@ -309,8 +341,12 @@ int probe_export(int x) { return x + 1; }
         let layout = read_and_suppress(&suppressed, ObjectFormat::MachO).expect("a dylib");
         crate::os::dll::reseal(&suppressed).expect("the signer accepting the rewritten copy");
 
-        let (address, size) = layout.init_array.expect("the constructor array");
-        assert_eq!(size, 8);
+        let (address, size, form) = layout.init_array.expect("the initializer list");
+        assert_eq!(
+            form, expected,
+            "the linker wrote the other initializer form"
+        );
+        assert_eq!(size, if classic { 8 } else { 4 });
         assert!(address != 0);
         assert!(!layout.executable_loads.is_empty());
         let bytes = std::fs::read(&suppressed).expect("the rewritten copy");
@@ -320,8 +356,8 @@ int probe_export(int x) { return x + 1; }
                 .segments
                 .iter()
                 .flat_map(|segment| &segment.sections)
-                .any(|section| section.is_function_pointer_array()),
-            "the array must no longer be typed as one the loader runs"
+                .any(|section| section.callable_list().is_some()),
+            "the list must no longer be typed as one the loader runs"
         );
 
         load(&suppressed);
@@ -332,5 +368,17 @@ int probe_export(int x) { return x + 1; }
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_suppressed_pointer_constructor_is_one_the_loader_no_longer_runs() {
+        suppression_probe(true, CallableList::Pointers);
+    }
+
+    /// The default this platform's toolchain links with, and the form that made a real fixture run
+    /// its constructor at `dlopen` before mirvm could wire the slot the constructor calls.
+    #[test]
+    fn a_suppressed_offset_constructor_is_one_the_loader_no_longer_runs() {
+        suppression_probe(false, CallableList::Offsets);
     }
 }

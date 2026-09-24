@@ -106,6 +106,9 @@ pub fn activate(shared: &Arc<Shared>) -> ActivationGuard {
             eprintln!("mirvm[m4-engine]: failed to grow the Engine activation stack");
             std::process::abort();
         }
+        // The handle is set once per pthread, from the inbox the line above made current: the
+        // exit drain reads it from here because thread-local storage is already gone by then.
+        (*contexts).thread_inbox = super::super::signal::current_thread_inbox_handle();
         let previous = (*contexts).current;
         let previous_activation = (*contexts).current_activation;
         let previous_domain = (*contexts).domain;

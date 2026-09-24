@@ -282,7 +282,7 @@ fn final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback() {
                 empty_tx.send(()).unwrap();
                 publish_rx.recv().unwrap();
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-                while !super::super::super::signal::current_thread_has_pending() {
+                while !super::super::super::signal::current_thread_inbox_handle().has_pending() {
                     assert!(
                         std::time::Instant::now() < deadline,
                         "target signal did not reach the final Ctx destructor round"

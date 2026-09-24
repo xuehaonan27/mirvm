@@ -18,7 +18,7 @@
 use std::ffi::{CString, c_char, c_int};
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use crate::native::lifecycle::Layout;
+use crate::native::lifecycle::{CallableList, Layout};
 
 /// Constructor and destructor addresses after relocation. Images deliberately
 /// remain mapped for the process, but their language lifecycle still runs once
@@ -159,22 +159,29 @@ pub(crate) fn materialize(layout: Layout, bias: usize) -> Result<NativeLifecycle
     if let Some(init) = layout.init {
         initializers.push(add_bias(bias, init, "the singular constructor")?);
     }
-    if let Some((address, size)) = layout.init_array {
-        initializers.extend(read_function_array(
+    if let Some((address, size, form)) = layout.init_array {
+        initializers.extend(read_callable_list(
             bias,
             address,
             size,
+            form,
             &layout.loads,
-            "the constructor array",
+            "the constructor list",
         )?);
     }
 
     let mut finalizers = Vec::new();
-    if let Some((address, size)) = layout.fini_array {
-        let mut array =
-            read_function_array(bias, address, size, &layout.loads, "the destructor array")?;
-        array.reverse();
-        finalizers.extend(array);
+    if let Some((address, size, form)) = layout.fini_array {
+        let mut list = read_callable_list(
+            bias,
+            address,
+            size,
+            form,
+            &layout.loads,
+            "the destructor list",
+        )?;
+        list.reverse();
+        finalizers.extend(list);
     }
     if let Some(fini) = layout.fini {
         finalizers.push(add_bias(bias, fini, "the singular destructor")?);
@@ -189,14 +196,24 @@ fn add_bias(bias: usize, value: u64, what: &str) -> Result<usize, String> {
     .ok_or_else(|| format!("{what} address overflow"))
 }
 
-fn read_function_array(
+/// The callables a list holds, in the order the image declares them.
+///
+/// A pointer list holds addresses the loader has already slid, so each entry is the callable. An
+/// offset list holds 32-bit distances from the image's base, so each entry becomes a callable by
+/// adding the same bias the base was mapped at.
+fn read_callable_list(
     bias: usize,
     address: u64,
     size: u64,
+    form: CallableList,
     loads: &[(u64, u64)],
     what: &str,
 ) -> Result<Vec<usize>, String> {
-    if !size.is_multiple_of(8) || size > 1 << 20 {
+    let stride: u64 = match form {
+        CallableList::Pointers => 8,
+        CallableList::Offsets => 4,
+    };
+    if !size.is_multiple_of(stride) || size > 1 << 20 {
         return Err(format!("{what} has invalid size {size}"));
     }
     let end = address
@@ -209,9 +226,17 @@ fn read_function_array(
         return Err(format!("{what} lies outside a loadable segment"));
     }
     let start = add_bias(bias, address, what)?;
-    let mut functions = Vec::with_capacity((size / 8) as usize);
-    for index in 0..(size / 8) as usize {
-        let value = unsafe { (start as *const usize).add(index).read_unaligned() };
+    let mut functions = Vec::with_capacity((size / stride) as usize);
+    for index in 0..(size / stride) as usize {
+        let value = match form {
+            CallableList::Pointers => unsafe {
+                (start as *const usize).add(index).read_unaligned()
+            },
+            CallableList::Offsets => {
+                let offset = unsafe { (start as *const u32).add(index).read_unaligned() as usize };
+                add_bias(bias, offset as u64, what)?
+            }
+        };
         if value != 0 && value != usize::MAX {
             functions.push(value);
         }

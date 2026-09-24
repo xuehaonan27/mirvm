@@ -6,7 +6,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use super::{DeferredSignalCallback, SIGNAL_SLOTS};
 use crate::os::process::exit_now;
-use crate::os::signal::{Sigaction, SignalInfo, sent_by_thread_kill};
+use crate::os::signal::{DeliveryDirection, Sigaction, SignalInfo};
 use crate::vm::ctx::EngineControl;
 
 const DELIVERY_ACTIVE: usize = 1usize << (usize::BITS - 1);
@@ -417,10 +417,63 @@ pub(super) fn current_thread_inbox() -> Option<&'static ThreadSignalInbox> {
     unsafe { THREAD_SIGNAL_INBOX.load(Ordering::Acquire).as_ref() }
 }
 
+/// A handle to a pthread's inbox that outlives thread-local storage.
+///
+/// The exit drain runs from the TSD phase, and measured on the macos aarch64 host, this platform
+/// has already zeroed a thread's `#[thread_local]` variables by then. The drain therefore cannot
+/// ask TLS which inbox is its own, and the handle is that same pointer remembered beside the TSD
+/// argument, which is still valid there. A thread that never entered MIRVM holds the null handle,
+/// and every method on one answers the way an absent inbox would.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ThreadInboxHandle(*mut ());
+
+impl ThreadInboxHandle {
+    fn inbox(self) -> Option<&'static ThreadSignalInbox> {
+        unsafe { self.0.cast::<ThreadSignalInbox>().as_ref() }
+    }
+
+    /// Whether any slot of this inbox holds an accepted delivery.
+    pub(crate) fn has_pending(self) -> bool {
+        self.inbox().is_some_and(ThreadSignalInbox::has_pending)
+    }
+
+    /// Take one target-pthread event without exposing a clear-before-hold window to
+    /// Engine close. This must be called only by the pthread the inbox belongs to.
+    pub(crate) fn take_delivery(self, blocked: u64) -> Option<(SignalDeliveryGuard, i32)> {
+        take_delivery_from(self.inbox()?, blocked)
+    }
+
+    /// Close this inbox to new kernel deliveries once its pthread has taken its last one, and wait
+    /// out the deliveries already inside a stub. A pending slot here is a lost callback, because
+    /// nothing will drain this inbox again.
+    pub(crate) fn deactivate(self) {
+        let Some(inbox) = self.inbox() else {
+            return;
+        };
+        inbox.deactivate();
+        inbox.wait_for_deliveries();
+        if inbox.has_pending() {
+            eprintln!("mirvm[m4-engine]: target pthread exited with a pending signal");
+            std::process::abort();
+        }
+    }
+}
+
+/// The calling pthread's inbox, for the paths that run while its thread-local storage is valid.
+pub(crate) fn current_thread_inbox_handle() -> ThreadInboxHandle {
+    ThreadInboxHandle(THREAD_SIGNAL_INBOX.load(Ordering::Acquire).cast())
+}
+
 /// Take one target-pthread event without exposing a clear-before-hold window to
 /// Engine close. This function must be called only by the target pthread.
 pub(crate) fn take_current_thread_delivery(blocked: u64) -> Option<(SignalDeliveryGuard, i32)> {
-    let inbox = current_thread_inbox()?;
+    current_thread_inbox_handle().take_delivery(blocked)
+}
+
+fn take_delivery_from(
+    inbox: &'static ThreadSignalInbox,
+    blocked: u64,
+) -> Option<(SignalDeliveryGuard, i32)> {
     loop {
         let mut selected: *mut ThreadSignalCell = ptr::null_mut();
         let mut cell = inbox.cells.load(Ordering::Acquire);
@@ -478,10 +531,6 @@ pub(crate) fn take_current_thread_delivery(blocked: u64) -> Option<(SignalDelive
     }
 }
 
-pub(crate) fn current_thread_has_pending() -> bool {
-    current_thread_inbox().is_some_and(ThreadSignalInbox::has_pending)
-}
-
 pub(crate) fn current_thread_has_pending_for_engine(owner: u64) -> bool {
     let Some(inbox) = current_thread_inbox() else {
         return false;
@@ -502,19 +551,6 @@ pub(crate) fn current_thread_has_pending_for_engine(owner: u64) -> bool {
         cell = current.next.load(Ordering::Acquire);
     }
     false
-}
-
-/// Called after the target pthread drained every slot in its final TSD round.
-pub(crate) fn deactivate_current_thread_inbox() {
-    let Some(inbox) = current_thread_inbox() else {
-        return;
-    };
-    inbox.deactivate();
-    inbox.wait_for_deliveries();
-    if inbox.has_pending() {
-        eprintln!("mirvm[m4-engine]: target pthread exited with a pending signal");
-        std::process::abort();
-    }
 }
 
 /// Keeps the callback Engine in Closing (rather than Finalizing) between an
@@ -662,18 +698,33 @@ pub(crate) unsafe fn record_async_signal(
     if registration.signum() != signum {
         exit_now(i32::from(crate::diag::exit::SOFTWARE))
     }
+    let direction = crate::os::signal::delivery_direction(info);
     let Some(_delivery) = registration.try_kernel_delivery() else {
         if retry_current_host_raise(signum) {
             return;
         }
         exit_now(i32::from(crate::diag::exit::SOFTWARE))
     };
-    if sent_by_thread_kill(info) {
+    if direction != DeliveryDirection::Process {
         let Some(inbox) = current_thread_inbox() else {
-            if retry_current_host_raise(signum) {
-                return;
+            if direction == DeliveryDirection::Thread {
+                // A pthread-directed delivery runs on the pthread it names, so the only carrier is
+                // that pthread's own inbox, and every pthread MIRVM entered has one. Reaching the
+                // stub without one means the signal was addressed to a pthread MIRVM never
+                // entered: it cannot be delivered as asked.
+                if retry_current_host_raise(signum) {
+                    return;
+                }
+                exit_now(i32::from(crate::diag::exit::SOFTWARE))
             }
-            exit_now(i32::from(crate::diag::exit::SOFTWARE))
+            // This platform cannot separate a `pthread_kill` from a `kill` to its own process, so
+            // the ambiguity is settled by the receiving pthread: one MIRVM never entered is not a
+            // target MIRVM can have registered, and the delivery is recorded for the owner Engine
+            // the way a process-directed one is.
+            registration.publish(signum);
+            #[cfg(test)]
+            registration.kernel_frames.fetch_add(1, Ordering::Release);
+            return;
         };
         let Some(_thread_delivery) = inbox.try_delivery() else {
             if retry_current_host_raise(signum) {

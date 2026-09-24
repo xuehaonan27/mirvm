@@ -9,11 +9,10 @@
 
 use cranelift_codegen::ir::{
     AbiParam, BlockArg, BlockCall, ExceptionTableData, ExceptionTableItem, ExceptionTag,
-    InstBuilder, Signature, types,
+    InstBuilder, types,
 };
+use cranelift_codegen::isa::TargetIsa;
 use cranelift_codegen::isa::unwind::UnwindInfo;
-use cranelift_codegen::isa::{CallConv, TargetIsa};
-use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module as ClifModule};
@@ -115,12 +114,7 @@ fn host_baseline_catch() {
 #[test]
 fn import_call_works() {
     PAD_MARK.store(0, Ordering::SeqCst);
-    let mut fb = settings::builder();
-    fb.set("opt_level", "speed").unwrap();
-    let isa = cranelift_native::builder()
-        .unwrap()
-        .finish(settings::Flags::new(fb))
-        .unwrap();
+    let isa = super::compiler::domain_isa(super::CodeDomain::Plain);
     let mut jb = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     jb.symbol("probe_mark", probe_mark as *const u8);
     let mut module = JITModule::new(jb);
@@ -167,14 +161,7 @@ fn import_call_works() {
 /// frame.
 #[test]
 fn cfi_single_frame() {
-    let mut fb = settings::builder();
-    fb.set("opt_level", "speed").unwrap();
-    fb.set("unwind_info", "true").unwrap();
-    fb.set("preserve_frame_pointers", "true").unwrap();
-    let isa = cranelift_native::builder()
-        .unwrap()
-        .finish(settings::Flags::new(fb))
-        .unwrap();
+    let isa = super::compiler::domain_isa(super::CodeDomain::Plain);
     let mut jb = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     jb.symbol("probe_raise", probe_raise as *const u8);
     let mut module = JITModule::new(jb);
@@ -229,14 +216,7 @@ fn cfi_single_frame() {
 /// broken; if it passes, the problem lies in the LSDA/personality/pad half.
 #[test]
 fn cfi_only_passthrough() {
-    let mut fb = settings::builder();
-    fb.set("opt_level", "speed").unwrap();
-    fb.set("unwind_info", "true").unwrap();
-    fb.set("preserve_frame_pointers", "true").unwrap();
-    let isa = cranelift_native::builder()
-        .unwrap()
-        .finish(settings::Flags::new(fb))
-        .unwrap();
+    let isa = super::compiler::domain_isa(super::CodeDomain::Plain);
     let mut jb = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     jb.symbol("probe_raise", probe_raise as *const u8);
     let mut module = JITModule::new(jb);
@@ -316,14 +296,7 @@ fn cfi_only_passthrough() {
 fn lsda_cleanup_pad_executes_and_resume_continues() {
     PAD_MARK.store(0, Ordering::SeqCst);
 
-    let mut fb = settings::builder();
-    fb.set("opt_level", "speed").unwrap();
-    fb.set("unwind_info", "true").unwrap();
-    fb.set("preserve_frame_pointers", "true").unwrap();
-    let isa = cranelift_native::builder()
-        .unwrap()
-        .finish(settings::Flags::new(fb))
-        .unwrap();
+    let isa = super::compiler::domain_isa(super::CodeDomain::Plain);
     let mut jb = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     jb.symbol("probe_raise", probe_raise as *const u8);
     jb.symbol("probe_mark", probe_mark as *const u8);
@@ -390,7 +363,10 @@ fn lsda_cleanup_pad_executes_and_resume_continues() {
         b.switch_to_block(entry);
 
         let rref = module.declare_func_in_func(raiser_id, b.func);
-        let sig0 = b.func.import_signature(Signature::new(CallConv::SystemV));
+        // The exception table's signature is the *callee's*, so it is the signature the callee was
+        // declared with rather than one built to look like it: this platform's default convention
+        // is the CPU's own, and a table naming another one is a verifier error.
+        let sig0 = b.func.import_signature(empty_sig.clone());
         let normal = BlockCall::new(ok, [], &mut b.func.dfg.value_lists);
         let pad_call = b.func.dfg.block_call(pad, &[BlockArg::TryCallExn(0)]);
         let et = b.func.dfg.exception_tables.push(ExceptionTableData::new(
@@ -435,9 +411,8 @@ fn lsda_cleanup_pad_executes_and_resume_continues() {
 
     // eh_frame: CIE0 has no personality (raiser); CIE1 is rust_eh_personality plus the LSDA
     // (caller). The personality goes through DW.ref indirection, as in cg_clif: the CIE
-    // personality pointer targets a static u64 holding the real address. Embedding the
-    // address directly as absptr was disproved in this environment -- even an empty LSDA
-    // aborted.
+    // personality pointer targets a static u64 holding the real address. Both this probe and
+    // the compiler's own eh_frame writer use that form.
     static PERS_REF: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     PERS_REF.store(rust_eh_personality as *const u8 as u64, Ordering::SeqCst);
     let mut table = FrameTable::default();

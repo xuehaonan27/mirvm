@@ -123,15 +123,26 @@ impl Drop for McImage {
 
 #[cfg(test)]
 mod tests {
+    // This loader reads ELF64 images, and the half that would read this platform's own object
+    // format is not written (`crate::os_arch::reloc`'s module doc names the gap). The two fixtures
+    // below are therefore an x86_64 ELF built with the ELF toolchain, and the tests that need one
+    // run where such an image can be produced; the rest of the module is platform-neutral.
     use super::*;
+    #[cfg(target_os = "linux")]
     use crate::native::elf;
+    #[cfg(target_os = "linux")]
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    #[cfg(target_os = "linux")]
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+    #[cfg(target_os = "linux")]
     static SIGNAL_NUMBER: AtomicU64 = AtomicU64::new(0);
+    #[cfg(target_os = "linux")]
     static SIGNAL_HANDLER: AtomicU64 = AtomicU64::new(0);
+    #[cfg(target_os = "linux")]
     static SIGNAL_OWNER: AtomicU64 = AtomicU64::new(0);
 
+    #[cfg(target_os = "linux")]
     extern "C" fn capture_signal(signum: i32, handler: usize, owner: u64) -> usize {
         SIGNAL_NUMBER.store(signum as u64, Ordering::Relaxed);
         SIGNAL_HANDLER.store(handler as u64, Ordering::Relaxed);
@@ -139,8 +150,10 @@ mod tests {
         handler
     }
 
+    #[cfg(target_os = "linux")]
     struct FixtureDir(std::path::PathBuf);
 
+    #[cfg(target_os = "linux")]
     impl FixtureDir {
         fn new() -> Self {
             let serial = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
@@ -154,12 +167,14 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     impl Drop for FixtureDir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn relocation_fixture() -> (FixtureDir, Vec<u8>) {
         let directory = FixtureDir::new();
         let source = directory.0.join("probe.S");
@@ -224,6 +239,7 @@ target_value:
 
     /// The name of section `index`, read straight out of the section-header string table so the
     /// test does not depend on the loader it is testing.
+    #[cfg(target_os = "linux")]
     fn section_name_at(
         bytes: &[u8],
         header: &elf::FileHeader,
@@ -238,6 +254,7 @@ target_value:
     }
 
     /// Writes `value` over the 8-byte field `offset` of the section header `index`.
+    #[cfg(target_os = "linux")]
     fn corrupt_section_field(bytes: &mut [u8], index: usize, offset: usize, value: u64) {
         let header = elf::FileHeader::parse(bytes).unwrap();
         let base = header.shoff as usize + index * header.shentsize as usize + offset;
@@ -247,6 +264,7 @@ target_value:
     /// A string-table offset past the end of the image is a corrupt image, and the loader says so
     /// rather than slicing out of bounds. Both name readers are reached: the section-header one
     /// through the table search, the symbol one through the first symbol's name.
+    #[cfg(target_os = "linux")]
     #[test]
     fn corrupt_string_table_offsets_are_reported_not_panicked_on() {
         let (_directory, bytes) = relocation_fixture();
@@ -307,6 +325,7 @@ target_value:
         assert_eq!(resolve(&[], "same_symbol"), None);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn global_asm_signal_call_uses_the_owned_runtime_bridge() {
         const OWNER: u64 = 0x1020_3040_5060_7080;
@@ -356,6 +375,7 @@ mirvm_mc_signal_bridge_probe:
         assert_eq!(SIGNAL_OWNER.load(Ordering::Relaxed), OWNER);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn dynamic_relocations_use_dynsym_and_run_before_segment_protection() {
         let (_directory, bytes) = relocation_fixture();
