@@ -1,17 +1,25 @@
 //! Handing the unwinder a frame description that was not in the image at load time.
 //!
-//! See the subsystem file one level up for what this is for, and for why this half exists at all:
-//! the `libgcc`-compatible entry point the other platform uses is present here too, but it does not
-//! put a frame in front of this platform's unwinder.
+//! See the subsystem file one level up for what this is for, and for why this half exists at all.
 //!
-//! What does is this platform's own registration, and it takes one FDE at a time, so a record list
-//! has to be walked and its FDEs handed over individually. Each names the CIE it shares by address,
-//! which is why the bytes have to stay where the section put them: a caller that hands over a
-//! section keeps it alive for the process, and nothing here copies anything.
+//! The difference from the other platform is the *unit*, and it is the whole of it: the
+//! `libgcc`-compatible entry point is here too, but it takes **one FDE**, where the other platform's
+//! reads a whole record list from wherever it is pointed. So handing it a section -- which starts
+//! with a CIE -- registers a record that describes nothing, and the frame stays invisible.
 //!
-//! Measured, because the difference is invisible otherwise: a hand-built CIE and FDE registered
-//! through `__register_frame` leaves `_Unwind_Backtrace` stopping at the frame, while the same
-//! bytes registered through `__unw_add_dynamic_fde` walk straight out of it.
+//! Measured on a hand-built CIE and FDE, four registrations of the same bytes and the frames
+//! `_Unwind_Backtrace` collected from a function reached through them:
+//!
+//! | call                             | frames |
+//! |----------------------------------|--------|
+//! | `__register_frame(section start)` | 1      |
+//! | `__register_frame(fde)`           | 4      |
+//! | `__unw_add_dynamic_fde(fde)`      | 4      |
+//!
+//! So this half walks the list and hands over its FDEs, through this platform's own entry point
+//! because that one says what it takes. Each FDE names the CIE it shares by address, which is why
+//! the bytes have to stay where the section put them: a caller that hands over a section keeps it
+//! alive for the process, and nothing here copies anything.
 
 unsafe extern "C" {
     fn __unw_add_dynamic_fde(fde: *const u8) -> bool;
@@ -26,7 +34,8 @@ pub(crate) fn deregister_frame(fde: *const u8) {
     unsafe { __unw_remove_dynamic_fde(fde) };
 }
 
-/// One record list, CIE and its FDEs together, terminated by a zero-length record.
+/// One record list, CIE and its FDEs together, terminated by a zero-length record. What is handed
+/// over is the FDEs: this platform's registration takes one, and the list's first record is a CIE.
 pub(crate) fn register_section(section: *const u8) {
     for fde in record_list(section) {
         register_frame(fde);
