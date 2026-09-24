@@ -5,10 +5,9 @@
 //!
 //! This follows cg_clif's `global_asm.rs` and cg_ssa's `naked_asm.rs`, using the same
 //! external-assembler route. A naked fn is wrapped in its mangled symbol name with
-//! `.globl`/`.type`/`.size`, a trimmed cg_ssa `prefix_and_suffix` that only handles
-//! ELF/x86_64 raw machine-code functions with the Rust ABI or extern C. Exotic inputs
-//! (labels, operands other than const/sym, non-x86_64 targets, `link_section`) are
-//! rejected loudly.
+//! `.globl`/`.type`/`.size`, a trimmed cg_ssa `prefix_and_suffix` that only handles raw
+//! machine-code functions with the Rust ABI or extern C. Exotic inputs (labels, operands other
+//! than const/sym, another target than this build's, `link_section`) are rejected loudly.
 
 use crate::lower::Error;
 
@@ -227,15 +226,27 @@ pub(crate) fn materialize_dep_text(tcx: TyCtxt<'_>) -> Result<DepAsmText, Error>
     )))
 }
 
-fn ensure_x86(tcx: TyCtxt<'_>) -> Result<(), Error> {
-    use rustc_target::asm::InlineAsmArch;
-    match tcx.sess.asm_arch {
-        Some(InlineAsmArch::X86_64) => Ok(()),
-        other => Err(Error::unsupported(format!(
-            "global_asm/naked support {} only (arch={other:?})",
-            crate::arch::asm_text::NAME
-        ))),
+/// Whether the compiler is emitting asm for the CPU this build is for.
+///
+/// A guest is compiled for this host, so the only architecture that can arrive here is the one
+/// `src/arch/` implements. That architecture names itself, and rustc's `InlineAsmArch` is its
+/// spelling of the same fact — the comparison is here rather than there because the vocabulary is
+/// rustc's, which `src/arch/` does not name. A rustc that spells its own architecture differently
+/// is refused loudly rather than passed through.
+fn ensure_host_arch(tcx: TyCtxt<'_>) -> Result<(), Error> {
+    let host = crate::arch::asm_text::NAME;
+    let emitted = tcx
+        .sess
+        .asm_arch
+        .map(|arch| format!("{arch:?}").to_lowercase());
+    if emitted.as_deref() == Some(host) {
+        return Ok(());
     }
+    Err(Error::unsupported(format!(
+        "global_asm/naked supports the CPU this build is ({host}) only, and the compiler is \
+         emitting asm for {:?}",
+        tcx.sess.asm_arch
+    )))
 }
 
 /// Handler for a `sym fn` operand, parameterized per side: the bin side uses
@@ -254,7 +265,7 @@ fn render_global_asm<'tcx>(
 ) -> Result<(), Error> {
     use rustc_ast::InlineAsmOptions;
     use rustc_hir::{InlineAsmOperand, ItemKind};
-    ensure_x86(tcx)?;
+    ensure_host_arch(tcx)?;
     let item = tcx.hir_item(item_id);
     let ItemKind::GlobalAsm { asm, .. } = item.kind else {
         return Err(Error::internal("GlobalAsm item has an unexpected shape"));
@@ -330,7 +341,7 @@ fn render_naked<'tcx>(
 ) -> Result<(), Error> {
     use rustc_ast::InlineAsmOptions;
     use rustc_middle::mir::{InlineAsmOperand, START_BLOCK, TerminatorKind};
-    ensure_x86(tcx)?;
+    ensure_host_arch(tcx)?;
     let attrs = tcx.codegen_fn_attrs(inst.def_id());
     if attrs.link_section.is_some() {
         return Err(Error::internal("naked fn has a link_section"));
@@ -347,7 +358,7 @@ fn render_naked<'tcx>(
     };
     let att = options.contains(InlineAsmOptions::ATT_SYNTAX);
     let name = tcx.symbol_name(inst).name;
-    // A trimmed cg_ssa prefix_and_suffix: an ELF/x86_64 raw machine-code function
+    // A trimmed cg_ssa prefix_and_suffix: a raw machine-code function
     out.push_str(&crate::arch::asm_text::syntax_prefix(att));
     let _ = writeln!(out, ".pushsection .text.{name},\"ax\", @progbits");
     let _ = writeln!(out, ".balign 16");
