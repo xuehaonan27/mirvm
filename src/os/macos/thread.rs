@@ -58,14 +58,14 @@ impl ThreadId {
     /// business and not a caller's.
     #[cfg(test)]
     pub fn as_u64(self) -> u64 {
-        self.0 as usize as u64
+        self.0 as u64
     }
 
     /// Wrap a handle this process did not create, from the integer form the engine carries it in.
     ///
-    /// This platform's `pthread_t` is a pointer while Linux's is an integer, so the parameter is
-    /// the integer both callers have — a thread identity taken out of a signal payload — rather
-    /// than whichever type the library happens to use for it.
+    /// The engine carries a thread identity as the `u64` a caller hands around, while each
+    /// platform's `pthread_t` is an integer of its own width (`uintptr_t` here, `c_ulong` on
+    /// Linux), so neither width is the parameter's type.
     #[cfg(test)]
     pub fn from_raw(raw: u64) -> Self {
         ThreadId(raw as usize as libc::pthread_t)
@@ -97,10 +97,9 @@ pub const INVALID_ARGUMENT: i32 = libc::EINVAL;
 pub struct TlsKey(libc::pthread_key_t);
 
 impl TlsKey {
-    /// The library's own key number. Only a test that drives the raw ABI needs it: product code
-    /// keeps the key opaque and asks [`TlsKey::from_raw`] when a library hands it one.
+    /// The key as the plain integer a test drives the raw ABI with.
     #[cfg(test)]
-    pub fn as_raw(self) -> libc::pthread_key_t {
+    pub fn as_u64(self) -> u64 {
         self.0
     }
 

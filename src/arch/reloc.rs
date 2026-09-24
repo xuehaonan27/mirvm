@@ -12,6 +12,12 @@
 //! apply, stay with that loader.
 
 /// What a relocation type asks for.
+///
+/// Only the in-process loader reads this, and on this platform that loader reads ELF64 images
+/// today: the half that would read its own object format is not written
+/// (`crate::os_arch::reloc`'s module doc names the gap), so nothing here constructs a variant and
+/// the vocabulary is declared for the loader that does.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Kind {
     /// Nothing to patch.
