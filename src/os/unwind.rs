@@ -1,10 +1,15 @@
 //! The Itanium C++ ABI unwinder.
 //!
 //! Mirvm raises and catches guest exceptions by speaking the ABI the C++ runtime above it already
-//! speaks, which makes the unwinder a library interface rather than a kernel one: `_Unwind_*` and
-//! `__register_frame` are the same entry points with the same meanings on every platform this build
-//! supports (libgcc_s on Linux, libSystem on macOS). Nothing here varies along either axis, so the
-//! whole subsystem is shared and has no platform half.
+//! speaks, which makes the unwinder a library interface rather than a kernel one: `_Unwind_*` are
+//! the same entry points with the same meanings on every platform this build supports (libgcc_s on
+//! Linux, libSystem on macOS). Raising, resuming, deleting and walking are all shared, and so is the
+//! record layout a section of frame descriptions uses.
+//!
+//! Handing the unwinder a frame description that was *not* in the image at load time is not shared,
+//! because the entry point that does it is not the same one everywhere: the `libgcc`-compatible
+//! `__register_frame` exists on both platforms but only one of them acts on it. Each platform's half
+//! is in its own directory and is reached through the pair of names below.
 
 #[repr(C)]
 pub struct RawException {
@@ -20,32 +25,30 @@ unsafe extern "C-unwind" {
 
 unsafe extern "C" {
     fn _Unwind_DeleteException(exception: *mut RawException);
-    fn __register_frame(begin: *const u8);
-    fn __deregister_frame(begin: *const u8);
 }
 
-/// Register one frame description entry with the process unwinder.
-///
-/// A whole section goes through [`register_frame_section`]; this one takes a single record, which
-/// is what a loader that maps an image's `.eh_frame` itself has in hand.
-pub fn register_frame(fde: *const u8) {
-    unsafe { __register_frame(fde) };
-}
-
-/// Undo [`register_frame`] for an image that is about to be unmapped.
-pub fn deregister_frame(fde: *const u8) {
-    unsafe { __deregister_frame(fde) };
-}
+#[cfg(target_os = "linux")]
+use super::linux::unwind::register_section;
+/// One frame description entry, and the way to take it back: what a loader that maps an image's
+/// `.eh_frame` itself has in hand. Each platform's half decides how that is spelled, and a caller
+/// names one pair of names either way.
+#[cfg(target_os = "linux")]
+pub(crate) use super::linux::unwind::{deregister_frame, register_frame};
+#[cfg(target_os = "macos")]
+use super::macos::unwind::register_section;
+#[cfg(target_os = "macos")]
+pub(crate) use super::macos::unwind::{deregister_frame, register_frame};
 
 /// Register one complete `.eh_frame` section with the process unwinder.
 ///
-/// The CIE records at the start of the section are shared by its FDE records, so the registration
-/// unit has to be the complete section, not a single FDE. The unwinder retains the bytes for the
-/// process lifetime, which is why they are leaked rather than owned.
+/// The CIE records at the start of the section are shared by its FDE records, so the section is the
+/// unit a caller has in hand; what the platform does with it -- one call, or one per FDE -- is its
+/// own half's business. The unwinder retains the bytes for the process lifetime, which is why they
+/// are leaked rather than owned.
 pub fn register_frame_section(mut bytes: Vec<u8>) {
     bytes.extend_from_slice(&[0, 0, 0, 0]);
     let bytes: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-    unsafe { __register_frame(bytes.as_ptr()) };
+    register_section(bytes.as_ptr());
 }
 
 /// One frame's context, as the unwinder hands it to a trace callback.
