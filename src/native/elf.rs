@@ -269,6 +269,25 @@ pub struct Section {
     pub entsize: u64,
 }
 
+/// The name of every section, in header order, read through the section header string table.
+///
+/// `None` when that table or an entry's name offset is unreadable, which is what a caller deciding
+/// something from the names needs to know rather than an empty list.
+pub fn section_names(bytes: &[u8], header: &FileHeader) -> Option<Vec<String>> {
+    let table = section_at(bytes, header, usize::from(header.shstrndx))?;
+    let start = usize::try_from(table.offset).ok()?;
+    let end = start.checked_add(usize::try_from(table.size).ok()?)?;
+    let strings = bytes.get(start..end)?;
+    sections(bytes, header)?
+        .into_iter()
+        .map(|section| {
+            let tail = strings.get(usize::try_from(section.name).ok()?..)?;
+            let end = tail.iter().position(|&byte| byte == 0)?;
+            Some(String::from_utf8_lossy(&tail[..end]).into_owned())
+        })
+        .collect()
+}
+
 /// The section header table. `e_shnum == 0` is the SHN_UNDEF extension: the real count moved into
 /// section 0's `size`, because a count above 0xff00 no longer fits `e_shnum`. `None` when the entry
 /// size is not a section header or any entry lies past the end.

@@ -56,6 +56,45 @@ pub fn bridge_entry_name(call: &str) -> String {
     call.to_string()
 }
 
+/// The arguments a native-archive image's link starts with, and the system libraries it ends with.
+///
+/// The two intentions the other platform's line states with `-z defs` and `-Bsymbolic` have no
+/// counterpart here, and one of them is a real loss rather than a different spelling:
+///
+/// - "take an undefined reference to be resolved from the host at load time" is
+///   `-undefined,dynamic_lookup`, which is the opposite of `-z defs`: nothing here refuses an
+///   undefined reference outside the libraries below, so an archive whose closure is incomplete
+///   links, and the missing symbol surfaces at `dlopen` instead.
+/// - "bind a definition this image carries to itself" needs no flag: this format's two-level
+///   namespace already binds a symbol to the library that defines it.
+///
+/// `-no_fixup_chains` is here for `vm/mcload`, which reads the traditional rebase/bind encoding.
+///
+/// The suffix is empty, and that is measured rather than assumed: libSystem carries every library
+/// the other platform's line names, so an image referencing `log`, `pthread_create` or `dlopen`
+/// needs no `-l` of its own.
+pub const NATIVE_ARCHIVE_PREFIX: &[&str] = &[
+    "-shared",
+    "-fPIC",
+    "-Wl,-no_fixup_chains",
+    "-Wl,-undefined,dynamic_lookup",
+];
+
+/// Nothing: every library the other platform's line names is in libSystem here.
+pub const NATIVE_ARCHIVE_SUFFIX: &[&str] = &[];
+
+/// How this linker is told to take every member of `archive` rather than only the ones something
+/// references.
+///
+/// The whole archive has to go in: the symbols mirvm resolves out of it are reached by name at run
+/// time, so nothing references them at link time. `-force_load` names the archive it applies to, so
+/// unlike the other platform's mode there is nothing to turn off afterwards.
+pub fn whole_archive(archive: &std::path::Path) -> Vec<std::ffi::OsString> {
+    let mut argument = std::ffi::OsString::from("-Wl,-force_load,");
+    argument.push(archive);
+    vec![argument]
+}
+
 /// The `cc` arguments that turn the bridge's assembly into the artifact an image is linked with,
 /// and what that artifact is called.
 ///

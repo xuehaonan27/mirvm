@@ -1,4 +1,8 @@
-//! Linux/ELF static native archive loader: materialize a constraint-checked PIC `.a` into a dlopen-able `.so`.
+//! Static native archive loader: materialize a constraint-checked PIC `.a` into a dlopen-able image.
+//!
+//! What the archive has to satisfy, and what each link line looks like, is read out of the bytes and
+//! asked of the platform rather than of a tool: `nm`, `readelf` and the linker flags all spell
+//! things the object format and the toolchain do, and this build meets two of each.
 
 /// Why a native archive could not be turned into something the engine can load.
 ///
@@ -6,9 +10,9 @@
 /// path), `Malformed` (the bytes are not the shape, or the symbol names are unusable),
 /// `Unsupported` (well formed but outside what mirvm handles: another host's slice, a thin archive,
 /// an `+/-export-symbols` modifier, a non-PIC member, legacy `.init`/`.fini`), `Tool` (an external
-/// `cc`/`nm`/`readelf` ran and failed, with its output as the detail), `Ambiguous` (two strong
-/// definitions of one symbol, where resolution would depend on native link order and mirvm refuses
-/// to guess), and `Io` (a filesystem or exec step failed, carrying the `io::Error` as its source).
+/// `cc` ran and failed, with its output as the detail), `Ambiguous` (two strong definitions of one
+/// symbol, where resolution would depend on native link order and mirvm refuses to guess), and `Io`
+/// (a filesystem or exec step failed, carrying the `io::Error` as its source).
 #[derive(Debug, thiserror::Error, serde::Serialize)]
 pub(crate) enum Error {
     #[error("{detail}")]
@@ -101,29 +105,12 @@ use rustc_session::search_paths::PathKind;
 use rustc_target::spec::{BinaryFormat, Os};
 
 const CACHE_FORMAT_VERSION: &[u8] = b"mirvm-native-archive-v4";
-const LINK_PREFIX: &[&str] = &[
-    "-shared",
-    "-Wl,-z,defs",
-    "-Wl,-z,text",
-    "-Wl,-Bsymbolic",
-    "-Wl,--whole-archive",
-];
-/// Closure baseline: the system libraries that std contributes to the guest's final link via
-/// `#[link]` (glibc: m/dl/pthread/rt/util/gcc_s). They are always present in native semantics, so a
-/// C static archive may reference their symbols directly -- libsqlite3's FTS5 references libm `log`
-/// and the pthread family, for instance.
-/// They become DT_NEEDED entries of the produced .so and are resolved by the host environment at
-/// dlopen time; `-z defs` still loudly rejects undefined references outside this set (cross-archive
-/// and guest symbols), so the closure requirement is not relaxed.
-const LINK_SUFFIX: &[&str] = &[
-    "-Wl,--no-whole-archive",
-    "-lm",
-    "-ldl",
-    "-lpthread",
-    "-lrt",
-    "-lutil",
-    "-lgcc_s",
-];
+/// Closure baseline: the system libraries std contributes to the guest's final link via `#[link]`,
+/// which a C static archive may therefore reference directly -- libsqlite3's FTS5 references libm
+/// `log` and the pthread family, for instance. They become the image's `DT_NEEDED` entries and are
+/// resolved by the host environment at `dlopen` time. Which libraries those are, and whether this
+/// platform can refuse an undefined reference outside them at all, is `crate::os::linker`'s: the
+/// two platforms answer both differently, and only one of them can refuse.
 /// Collect the system dynamic library names the crate graph propagates.
 /// A `-sys` crate's `cargo:rustc-link-lib` only writes rlib metadata: the native final link
 /// command line carries these `-l` entries, while the metadata driver (the bin command line) does
@@ -453,14 +440,6 @@ pub(super) fn materialize_for_target_in(
                  keep calls the engine has to own",
             )
         })?;
-    let link_flags = LINK_PREFIX
-        .iter()
-        .chain(LINK_SUFFIX)
-        .copied()
-        .chain(interpose.iter().map(|s| s.as_str()))
-        .chain(extra_flags.iter().map(|s| s.as_str()))
-        .collect::<Vec<_>>()
-        .join("\0");
     std::fs::create_dir_all(cache_dir).map_err(|e| {
         Error::io(
             format!(
@@ -479,9 +458,30 @@ pub(super) fn materialize_for_target_in(
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
+    let link = native_archive_link(
+        archive,
+        &[],
+        &native_runtime_bridge,
+        &interpose,
+        &extra_flags,
+    );
+    // The key is the line's *shape*: the two paths in it are already in the key as content -- the
+    // archive's bytes and the bridge's name -- and a placeholder keeps a path from splitting a slot
+    // the content says is the same.
+    let shape = native_archive_link(
+        Path::new("<archive>"),
+        &[],
+        Path::new("<bridge>"),
+        &interpose,
+        &extra_flags,
+    )
+    .iter()
+    .map(|argument| argument.to_string_lossy().into_owned())
+    .collect::<Vec<_>>()
+    .join("\0");
     let hash = content_hash([
         CACHE_FORMAT_VERSION,
-        link_flags.as_bytes(),
+        shape.as_bytes(),
         target.as_bytes(),
         &cc_identity,
         bridge_name.as_bytes(),
@@ -494,13 +494,7 @@ pub(super) fn materialize_for_target_in(
 
     let tmp = crate::store::staging_path(&so);
     let output = Command::new(cc)
-        .args(LINK_PREFIX)
-        .arg(archive)
-        .arg(LINK_SUFFIX[0])
-        .arg(&native_runtime_bridge)
-        .args(&interpose)
-        .args(&LINK_SUFFIX[1..])
-        .args(&extra_flags)
+        .args(&link)
         .arg("-o")
         .arg(&tmp)
         .output()
@@ -525,7 +519,7 @@ pub(super) fn materialize_for_target_in(
                 &extra_flags,
                 &bytes,
                 &cc_identity,
-                &link_flags,
+                &shape,
                 &interpose,
                 &native_runtime_bridge,
                 linker,
@@ -678,14 +672,13 @@ fn rescue_with_rlib_symbols(
     // Relink: trampoline object placed after archive so its defined symbols bind unresolved references inside the archive
     let tmp = crate::store::staging_path(&so);
     let output = Command::new(cc)
-        .args(LINK_PREFIX)
-        .arg(archive)
-        .arg(&o_path)
-        .arg(LINK_SUFFIX[0])
-        .arg(native_runtime_bridge)
-        .args(interpose)
-        .args(&LINK_SUFFIX[1..])
-        .args(extra_flags)
+        .args(native_archive_link(
+            archive,
+            &[&o_path],
+            native_runtime_bridge,
+            interpose,
+            extra_flags,
+        ))
         .arg("-o")
         .arg(&tmp)
         .output()
@@ -707,6 +700,39 @@ fn rescue_with_rlib_symbols(
         )
     })?;
     Ok(Some(so))
+}
+
+/// The link line every image this module produces is built from.
+///
+/// The order is load-bearing twice over. Every member of `archive` goes in, because the symbols
+/// mirvm resolves out of it are reached by name at run time. And the bridge comes after the
+/// archive, so the definitions it carries win over the host libraries' -- on a platform that binds
+/// a call to the first library defining it, that position *is* the redirection.
+///
+/// `extra_objects` are the objects this module generates for a link that needs them, placed after
+/// the archive so their definitions bind references the archive left unresolved.
+fn native_archive_link(
+    archive: &Path,
+    extra_objects: &[&Path],
+    bridge: &Path,
+    interpose: &[String],
+    extra_flags: &[String],
+) -> Vec<std::ffi::OsString> {
+    let mut line: Vec<std::ffi::OsString> = crate::os::linker::NATIVE_ARCHIVE_PREFIX
+        .iter()
+        .map(std::ffi::OsString::from)
+        .collect();
+    line.extend(crate::os::linker::whole_archive(archive));
+    line.extend(extra_objects.iter().map(|object| (*object).into()));
+    line.push(bridge.into());
+    line.extend(interpose.iter().map(std::ffi::OsString::from));
+    line.extend(
+        crate::os::linker::NATIVE_ARCHIVE_SUFFIX
+            .iter()
+            .map(std::ffi::OsString::from),
+    );
+    line.extend(extra_flags.iter().map(std::ffi::OsString::from));
+    line
 }
 
 fn compiler_identity(cc: &Path) -> Result<Vec<u8>, Error> {
@@ -753,54 +779,63 @@ fn compiler_identity(cc: &Path) -> Result<Vec<u8>, Error> {
     Ok(identity)
 }
 
-fn reject_legacy_init_sections(archive: &Path) -> Result<(), Error> {
-    let output = Command::new("readelf")
-        .args(["--section-headers", "--wide"])
-        .arg(archive)
-        .output()
-        .map_err(|e| {
-            Error::io(
-                format!(
-                    "cannot run readelf for the static native archive `{}`",
-                    archive.display()
-                ),
-                e,
-            )
-        })?;
-    if !output.status.success() {
-        return Err(Error::tool(format!(
-            "Cannot inspect legacy init sections of static native archive `{}` (readelf failed):\n{}{}",
-            archive.display(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    let sections = String::from_utf8_lossy(&output.stdout);
-    let has_legacy = sections.lines().filter_map(readelf_section_name).any(|n| {
-        n == ".init"
-            || n == ".fini"
-            || n.strip_prefix(".init.")
-                .is_some_and(|s| s.chars().next().is_some_and(|c| c.is_ascii_digit()))
-            || n.strip_prefix(".fini.")
-                .is_some_and(|s| s.chars().next().is_some_and(|c| c.is_ascii_digit()))
-    });
-    if has_legacy {
-        return Err(Error::unsupported(format!(
-            "Rejecting static native archive `{}` with legacy `.init`/`.fini` sections: \
-             the old gcc trick of injecting bare function bodies has unreliable execution semantics (.init_array family is allowed)",
-            archive.display()
-        )));
-    }
-    Ok(())
+/// Whether `name` is one of the sections the old gcc trick put bare function bodies in.
+fn is_legacy_init(name: &str) -> bool {
+    let numbered = |prefix: &str| {
+        name.strip_prefix(prefix)
+            .is_some_and(|rest| rest.chars().next().is_some_and(|c| c.is_ascii_digit()))
+    };
+    name == ".init" || name == ".fini" || numbered(".init.") || numbered(".fini.")
 }
 
-fn readelf_section_name(line: &str) -> Option<&str> {
-    let line = line.trim_start();
-    if !line.starts_with('[') {
-        return None;
+/// Reject a static archive whose members carry the legacy `.init`/`.fini` sections.
+///
+/// The sections are read here rather than by a tool, because the tool's name, its flags and the
+/// spelling it prints a section under are each the object format's, and this build meets two of
+/// those. Only one of the two has the sections at all: `.init`/`.fini` are an ELF practice, and a
+/// Mach-O object's constructors are the pointer arrays `crate::native::lifecycle` reads and
+/// suppresses, so there is nothing of this kind to reject there.
+fn reject_legacy_init_sections(archive: &Path) -> Result<(), Error> {
+    if crate::os::dll::OBJECT_FORMAT != crate::os::dll::ObjectFormat::Elf {
+        return Ok(());
     }
-    let close = line.find(']')?;
-    line[close + 1..].split_ascii_whitespace().next()
+    let bytes = std::fs::read(archive).map_err(|e| {
+        Error::io(
+            format!(
+                "cannot read the static native archive `{}`",
+                archive.display()
+            ),
+            e,
+        )
+    })?;
+    let members = crate::native::ar::members(&bytes).map_err(|error| {
+        Error::malformed(format!(
+            "cannot read the members of static native archive `{}`: {error:?}",
+            archive.display()
+        ))
+    })?;
+    for member in members {
+        let Some(header) = crate::native::elf::FileHeader::parse(member) else {
+            // The archive's own symbol index is not an object; a member that is not ELF has no
+            // section of this kind either.
+            continue;
+        };
+        let Some(names) = crate::native::elf::section_names(member, &header) else {
+            return Err(Error::malformed(format!(
+                "Cannot read the section names of a member of static native archive `{}`",
+                archive.display()
+            )));
+        };
+        if let Some(name) = names.iter().find(|name| is_legacy_init(name)) {
+            return Err(Error::unsupported(format!(
+                "Rejecting static native archive `{}` with a legacy `{name}` section: \
+                 the old gcc trick of injecting bare function bodies into the `.init`/`.fini` \
+                 frame has unreliable execution semantics (.init_array family is allowed)",
+                archive.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn content_hash<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> String {
