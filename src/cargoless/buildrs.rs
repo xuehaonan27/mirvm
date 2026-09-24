@@ -783,10 +783,11 @@ mod tests {
     fn cargo_cfg_env_maps_atoms() {
         let feats: BTreeSet<String> = ["derive", "std"].iter().map(|s| s.to_string()).collect();
         let env = cargo_cfg_env(&feats, &ProfileFlags::default());
-        // Real x86_64-linux nightly atoms: multiple values comma-joined, bare flags empty strings.
+        // Real nightly atoms for the host this built for: multiple values comma-joined, bare flags
+        // empty strings. Which host that is is the build's answer, so the expectation is too.
         assert_eq!(
             env.get("CARGO_CFG_TARGET_ARCH").map(String::as_str),
-            Some("x86_64")
+            Some(std::env::consts::ARCH)
         );
         assert_eq!(
             env.get("CARGO_CFG_UNIX").map(String::as_str),
