@@ -244,7 +244,7 @@ fn final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback() {
                         &[std::ptr::from_mut(&mut key) as u64],
                     )
                 };
-                EXIT_SIGNAL_TSD_KEY.store(key.as_raw() as u64, Ordering::SeqCst);
+                EXIT_SIGNAL_TSD_KEY.store(key.as_u64(), Ordering::SeqCst);
                 registered_tx.send((key, result)).unwrap();
                 exit_rx.recv().unwrap();
             });
@@ -252,14 +252,14 @@ fn final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback() {
             let target = attached_rx.recv().unwrap();
             let mut filler_keys = Vec::new();
             if let Some(low_key) = low_key {
-                assert!(low_key.as_raw() < ctx_key.as_raw());
+                assert!(low_key.as_u64() < ctx_key.as_u64());
                 assert_eq!(tls_key_delete(low_key), 0);
             } else {
                 loop {
                     let mut key = TlsKey::from_raw(0);
                     assert_eq!(unsafe { tls_key_create_raw(&mut key, None) }, 0);
                     filler_keys.push(key);
-                    if key.as_raw() > ctx_key.as_raw() {
+                    if key.as_u64() > ctx_key.as_u64() {
                         break;
                     }
                 }
@@ -270,7 +270,7 @@ fn final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback() {
                 assert_eq!(guest_key, low_key, "guest TSD did not reuse the low key");
             } else {
                 assert!(
-                    guest_key.as_raw() > ctx_key.as_raw(),
+                    guest_key.as_u64() > ctx_key.as_u64(),
                     "guest TSD did not use a high key"
                 );
             }
@@ -362,7 +362,7 @@ fn pthread_setspecific_operation_blocks_close_revocation() {
         let operation = prepare_pthread_operation(
             engine.shared(),
             "pthread_setspecific",
-            &[key.as_raw() as u64, value as u64],
+            &[key.as_u64(), value as u64],
         )
         .unwrap();
         if iteration % 2 == 0 {
@@ -386,12 +386,9 @@ fn pthread_setspecific_operation_blocks_close_revocation() {
         assert_eq!(result, 0, "close revoked a key during pthread_setspecific");
         operation.complete(result as u64);
 
-        let clear = prepare_pthread_operation(
-            engine.shared(),
-            "pthread_setspecific",
-            &[key.as_raw() as u64, 0],
-        )
-        .unwrap();
+        let clear =
+            prepare_pthread_operation(engine.shared(), "pthread_setspecific", &[key.as_u64(), 0])
+                .unwrap();
         let result = unsafe { tls_set(key, std::ptr::null()) };
         assert_eq!(result, 0, "tracked pthread key became invalid before clear");
         clear.complete(result as u64);
@@ -406,12 +403,9 @@ fn pthread_key_delete_operation_blocks_close_revocation() {
         let engine = engine(Module::default(), false);
         let (_registration, key) = raw_tsd_registration(&engine);
         let lease = engine.execution_lease().unwrap();
-        let operation = prepare_pthread_operation(
-            engine.shared(),
-            "pthread_key_delete",
-            &[key.as_raw() as u64],
-        )
-        .unwrap();
+        let operation =
+            prepare_pthread_operation(engine.shared(), "pthread_key_delete", &[key.as_u64()])
+                .unwrap();
         if iteration % 2 == 0 {
             engine.close();
         } else {

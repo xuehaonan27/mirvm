@@ -42,6 +42,7 @@ fn final_capture_file_is_never_replaced() {
     assert!(status.success());
 }
 
+#[cfg(target_os = "linux")]
 extern "C" fn exit_through_captured_syscall(_: *mut c_void) -> *mut c_void {
     let token = activation_enter(0x51);
     let _ = host_syscall(SYS_EXIT, &[0]);

@@ -6,7 +6,11 @@
 //! `--exact`, so the module a group lives in is part of that test's contract.
 
 use super::*;
-use crate::os::process::{EDOM, ENOSYS, SYS_EXIT, SYS_FORK, SYS_GETPID, SYS_GETPPID};
+use crate::os::process::{EDOM, ENOSYS, SYS_FORK, SYS_GETPID, SYS_GETPPID};
+// The thread-exit number and the C signature that drives it belong to the one test that exits a
+// *thread* through a syscall, which a platform with a single process-wide exit number cannot run.
+#[cfg(target_os = "linux")]
+use crate::os::process::SYS_EXIT;
 use crate::telemetry::capture_session::{
     REBUILD_RECIPE, RebuildRecipe, clear_rebuild_recipe, pending_rebuild_recipe,
     publish_rebuild_recipe,
@@ -17,6 +21,7 @@ use crate::telemetry::capture_writer::{
 };
 use crate::telemetry::decode::{DecodedKind, Health, decode_file};
 use crate::telemetry::format::{EngineContext, PageHeader};
+#[cfg(target_os = "linux")]
 use std::ffi::c_void;
 use std::fs::OpenOptions;
 use std::io;

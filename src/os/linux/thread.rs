@@ -83,11 +83,10 @@ pub const INVALID_ARGUMENT: i32 = libc::EINVAL;
 pub struct TlsKey(libc::pthread_key_t);
 
 impl TlsKey {
-    /// The library's own key number. Only a test that drives the raw ABI needs it: product code
-    /// keeps the key opaque and asks [`TlsKey::from_raw`] when a library hands it one.
+    /// The key as the plain integer a test drives the raw ABI with.
     #[cfg(test)]
-    pub fn as_raw(self) -> libc::pthread_key_t {
-        self.0
+    pub fn as_u64(self) -> u64 {
+        self.0 as u64
     }
 
     /// Wrap a key this process did not create, which is the shape an interposed
