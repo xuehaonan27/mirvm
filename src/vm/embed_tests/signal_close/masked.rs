@@ -385,7 +385,7 @@ fn physically_masked_inbox_event_does_not_deadlock_engine_close() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("failed to start physically masked signal close subprocess");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + CHILD_HANG_TIMEOUT;
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
@@ -470,7 +470,7 @@ fn wait_closed_fails_fast_for_a_finalizer_deferred_by_the_current_signal_mask() 
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("failed to start mask-deferred wait_closed subprocess");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + CHILD_HANG_TIMEOUT;
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;

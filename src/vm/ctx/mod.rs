@@ -55,6 +55,8 @@ pub(crate) use signals::{drain_pending_signals, raise_signal};
 /// visible from here are the TSan harness cases (`tests/data/fixtures/tsan/src/cases`), which compile this tree.
 #[allow(unused_imports)]
 pub(crate) use thread_ctx::attach;
+#[cfg(test)]
+pub(crate) use thread_ctx::engine_fault_in_flight;
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use thread_ctx::test_ctx_key;
 pub use thread_ctx::{Ctx, ShadowFrame};
@@ -65,5 +67,8 @@ pub(crate) use thread_ctx::{
     current, current_thread_final_tsd_pass_is_armed, current_thread_is_in_final_tsd_pass,
     guest_spawned_threads, set_fork_baseline,
 };
+// Only one platform's exit-drain test registers a hook, so where that test does not run this
+// re-export has no user.
 #[cfg(test)]
-pub(crate) use thread_ctx::{engine_fault_in_flight, set_thread_exit_inbox_empty_hook};
+#[allow(unused_imports)]
+pub(crate) use thread_ctx::set_thread_exit_inbox_empty_hook;

@@ -164,6 +164,12 @@ pub(super) struct ThreadContexts {
     /// Avoid touching telemetry from final TSD on threads that never entered a
     /// capture-capable Engine.
     pub(super) telemetry_touched: bool,
+    /// This pthread's signal inbox, remembered here because the thread-local that also names it is
+    /// gone by the time the exit drain needs it: measured, this platform zeroes a thread's
+    /// `#[thread_local]` variables before running its TSD destructors. The final round would
+    /// otherwise strand the delivery the pthread is exiting with, and a `/`raise` the kernel
+    /// accepted would lose its callback.
+    pub(super) thread_inbox: super::super::signal::ThreadInboxHandle,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -193,6 +199,7 @@ impl ThreadContexts {
             final_tsd_cursor: None,
             final_tsd_active: false,
             telemetry_touched: false,
+            thread_inbox: super::super::signal::ThreadInboxHandle::default(),
         }
     }
 
@@ -385,8 +392,8 @@ fn restore_thread_signal_mask_for_exit(mask: &SignalMask) {
     }
 }
 
-fn drain_thread_signal_inbox_for_exit() {
-    while let Some((delivery, signum)) = super::super::signal::take_current_thread_delivery(0) {
+fn drain_thread_signal_inbox_for_exit(inbox: super::super::signal::ThreadInboxHandle) {
+    while let Some((delivery, signum)) = inbox.take_delivery(0) {
         if let Err(fault) = dispatch_signal_delivery(delivery, signum) {
             eprintln!(
                 "mirvm[m4-engine]: target pthread signal handler faulted during thread exit: {}",
@@ -397,14 +404,20 @@ fn drain_thread_signal_inbox_for_exit() {
     }
 }
 
+/// The hook exists for the exit-drain test, which a platform that cannot deliver a signal into a
+/// thread's TSD phase does not run; it stays compiled there rather than carrying that platform's
+/// name into this file.
 #[cfg(test)]
+#[allow(dead_code)]
 type ThreadExitInboxEmptyHook = Box<dyn FnOnce() + Send + 'static>;
 
 #[cfg(test)]
+#[allow(dead_code)]
 static THREAD_EXIT_INBOX_EMPTY_HOOK: OnceLock<Mutex<Option<ThreadExitInboxEmptyHook>>> =
     OnceLock::new();
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn set_thread_exit_inbox_empty_hook(hook: ThreadExitInboxEmptyHook) {
     *THREAD_EXIT_INBOX_EMPTY_HOOK
         .get_or_init(|| Mutex::new(None))
@@ -443,6 +456,7 @@ pub(super) unsafe extern "C" fn ctx_key_dtor(p: *mut std::ffi::c_void) {
         }
         // `current` also remembers an attach-only context. An active call is
         // represented by the activation id and stack, which the guard clears.
+        let thread_inbox = (*contexts).thread_inbox;
         if (*contexts).current_activation != 0 || !(*contexts).active_engines.is_empty() {
             eprintln!("mirvm[m4-engine]: pthread exited inside an active Engine call");
             std::process::abort();
@@ -460,7 +474,9 @@ pub(super) unsafe extern "C" fn ctx_key_dtor(p: *mut std::ffi::c_void) {
         let mut original_mask = block_thread_signals_for_exit();
         loop {
             restore_thread_signal_mask_for_exit(&original_mask);
-            super::super::unwind::guard_native_teardown(drain_thread_signal_inbox_for_exit);
+            super::super::unwind::guard_native_teardown(|| {
+                drain_thread_signal_inbox_for_exit(thread_inbox)
+            });
             #[cfg(test)]
             run_thread_exit_inbox_empty_hook();
             let cursor = (*contexts)
@@ -474,8 +490,8 @@ pub(super) unsafe extern "C" fn ctx_key_dtor(p: *mut std::ffi::c_void) {
                 continue;
             }
             original_mask = block_thread_signals_for_exit();
-            if !super::super::signal::current_thread_has_pending() {
-                super::super::signal::deactivate_current_thread_inbox();
+            if !thread_inbox.has_pending() {
+                thread_inbox.deactivate();
                 break;
             }
         }
@@ -524,6 +540,7 @@ pub fn attach(shared: &Arc<Shared>) -> *mut Ctx {
         } else {
             p as *mut ThreadContexts
         };
+        (*contexts).thread_inbox = super::super::signal::current_thread_inbox_handle();
         (*contexts).attach(shared)
     }
 }

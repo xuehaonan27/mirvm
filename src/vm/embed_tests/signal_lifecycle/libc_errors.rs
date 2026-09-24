@@ -178,6 +178,12 @@ fn guest_signal_libc_errors_return_sentinels_and_errno() {
     );
 }
 
+/// This platform numbers no realtime signals: [`crate::os::signal::realtime_min`] names one past
+/// its last traditional signal, so a `sigaction` for it is refused by the kernel with `EINVAL` and
+/// mirvm answers the guest the way libc does, with a sentinel and `errno`, rather than as an Engine
+/// fault. What this checks — that a guest request mirvm will not honour fails loudly — is covered
+/// here by the synchronous-fault case, whose number *is* valid on both platforms.
+#[cfg(target_os = "linux")]
 #[test]
 fn unsupported_realtime_guest_signal_remains_an_engine_fault() {
     let _serial = SIGNAL_TEST_LOCK

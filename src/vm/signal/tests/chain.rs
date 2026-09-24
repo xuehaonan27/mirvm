@@ -2,10 +2,16 @@
 
 use super::*;
 
+#[cfg(target_os = "linux")]
 const EXACT_COMPENSATION_CHILD: &str = "MIRVM_SIGNAL_EXACT_COMPENSATION_CHILD";
 
+#[cfg(target_os = "linux")]
 const DETACHED_SNAPSHOT_CHILD: &str = "MIRVM_SIGNAL_DETACHED_SNAPSHOT_CHILD";
 
+/// Both halves of this need the restorer slot a `sigaction` has on Linux: the newer writer's
+/// snapshot differs from MIRVM's only in that slot, and a platform whose action has no such slot
+/// installs the same action twice.
+#[cfg(target_os = "linux")]
 #[test]
 fn compensation_preserves_a_newer_normalized_writer_by_exact_identity() {
     if std::env::var_os(EXACT_COMPENSATION_CHILD).is_some() {
@@ -46,6 +52,10 @@ fn compensation_preserves_a_newer_normalized_writer_by_exact_identity() {
     );
 }
 
+/// A detached successor keeping its predecessor's *earlier* accepted snapshot is about the two
+/// snapshots differing, and on Linux they differ in the restorer slot libc replaces; without such
+/// a slot the two are the same action and there is no earlier one to prefer.
+#[cfg(target_os = "linux")]
 #[test]
 fn detached_successor_accepts_distinct_valid_snapshots_of_its_predecessor() {
     if std::env::var_os(DETACHED_SNAPSHOT_CHILD).is_some() {

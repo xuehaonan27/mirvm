@@ -317,6 +317,11 @@ fn self_produced_native_signal_bridge_raises_contract_errors_at_its_engine_bound
     let (_restore, baseline_usr1) =
         SavedSignalDisposition::replace_with_native(crate::os::signal::SIGUSR1);
     let baseline_segv = crate::os::signal::Sigaction::query(crate::os::signal::SIGSEGV).unwrap();
+    // A platform that numbers no realtime signals refuses a `sigaction` for the number
+    // [`realtime_min`] names with `EINVAL`, so there is no disposition to save and no guest request
+    // for one to answer with an Engine fault; that platform's check that a *valid* number is
+    // refused for a semantic reason is the synchronous-fault case below, which both platforms run.
+    #[cfg(target_os = "linux")]
     let baseline_realtime =
         crate::os::signal::Sigaction::query(crate::os::signal::realtime_min()).unwrap();
     let (_directory, library) = native_signal_handler_library();
@@ -324,6 +329,7 @@ fn self_produced_native_signal_bridge_raises_contract_errors_at_its_engine_bound
 
     for (mode, jit) in modes() {
         for (export, message) in [
+            #[cfg(target_os = "linux")]
             ("realtime", "outside the supported traditional signal range"),
             ("sync_fault", "synchronous fault signal"),
             ("siginfo", "uses unsupported SA_SIGINFO"),
@@ -368,11 +374,14 @@ fn self_produced_native_signal_bridge_raises_contract_errors_at_its_engine_bound
 
     let restored_usr1 = crate::os::signal::Sigaction::query(crate::os::signal::SIGUSR1).unwrap();
     let restored_segv = crate::os::signal::Sigaction::query(crate::os::signal::SIGSEGV).unwrap();
-    let restored_realtime =
-        crate::os::signal::Sigaction::query(crate::os::signal::realtime_min()).unwrap();
     assert!(restored_usr1.same_disposition(&baseline_usr1));
     assert!(restored_segv.same_disposition(&baseline_segv));
-    assert!(restored_realtime.same_disposition(&baseline_realtime));
+    #[cfg(target_os = "linux")]
+    {
+        let restored_realtime =
+            crate::os::signal::Sigaction::query(crate::os::signal::realtime_min()).unwrap();
+        assert!(restored_realtime.same_disposition(&baseline_realtime));
+    }
     assert!(
         failures.is_empty(),
         "self-produced native signal bridge flattened contract errors: {failures:#?}"

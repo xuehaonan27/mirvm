@@ -53,6 +53,16 @@ unsafe extern "C-unwind" fn lifecycle_blocking_entry() {
     }
 }
 
+/// How long a child-process signal test may take before its parent calls it a hang.
+///
+/// A child builds one Engine per scenario, and building one publishes a private code image through
+/// this platform's loader: measured on the macos aarch64 host, each new image costs 0.2-0.5 s to
+/// load, because the kernel validates it through the security daemon, against well under a
+/// millisecond for the same load on Linux. A child that runs four Engines therefore takes seconds
+/// here, and in a parallel suite it competes with the tests around it. This bounds a hang, not a
+/// latency, so it is sized past the slow platform's cost for work that finished.
+const CHILD_HANG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 fn wait_for_owner_signal_pending(engine: &Engine) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while !super::signal::has_engine_pending(engine.control()) {
@@ -292,7 +302,13 @@ fn native_signal_handler_library() -> (NativeFixtureDir, PathBuf) {
 static volatile uint64_t trace;
 static volatile sig_atomic_t finalizer_signal;
 
-__attribute__((destructor)) static void image_finalizer_raise(void) {
+/* On a platform whose toolchain emits this attribute as an `__cxa_atexit` registration rather
+   than a terminator section the engine can read, the fixture declares that section itself, so the
+   builder leaves the declaration here to the assembler. */
+#ifndef MIRVM_FINALIZER
+#define MIRVM_FINALIZER __attribute__((destructor)) static
+#endif
+MIRVM_FINALIZER void image_finalizer_raise(void) {
     int signum = finalizer_signal;
     if (signum != 0) {
         trace = trace * 10 + 7;
@@ -400,12 +416,35 @@ uint64_t read_image_signal_trace(void) { return trace; }
 "#,
     )
     .unwrap();
-    let cc = Command::new("cc")
-        .args(["-fPIC", "-c"])
-        .arg(format!(
-            "-DMIRVM_REALTIME_SIGNAL={}",
-            crate::os::signal::realtime_min()
-        ))
+    // A platform that emits a terminator section for the attribute needs the C member's own; one
+    // that does not needs the section spelled out beside it, in the one form per format that types
+    // it as a list the loader runs.
+    let assembler_terminator = cfg!(target_os = "macos");
+    let finalizer = directory.path().join("finalizer.S");
+    let finalizer_object = directory.path().join("finalizer.o");
+    if assembler_terminator {
+        use crate::native::asmtext::Vocabulary;
+        let format = Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
+        let mut asm = String::from(crate::arch::asm_text::DIRECTIVE_INTEL);
+        asm.push_str(terminator_section(crate::os::dll::OBJECT_FORMAT));
+        asm.push_str(".balign 8\n");
+        asm.push_str(&format!(
+            ".quad {}\n",
+            format.symbol("image_finalizer_raise")
+        ));
+        asm.push_str(".popsection\n");
+        format.no_executable_stack(&mut asm);
+        std::fs::write(&finalizer, asm).unwrap();
+    }
+    let mut compile = Command::new("cc");
+    compile.args(["-fPIC", "-c"]).arg(format!(
+        "-DMIRVM_REALTIME_SIGNAL={}",
+        crate::os::signal::realtime_min()
+    ));
+    if assembler_terminator {
+        compile.arg("-DMIRVM_FINALIZER=");
+    }
+    let cc = compile
         .arg(&source)
         .arg("-o")
         .arg(&object)
@@ -417,12 +456,27 @@ uint64_t read_image_signal_trace(void) { return trace; }
         String::from_utf8_lossy(&cc.stdout),
         String::from_utf8_lossy(&cc.stderr)
     );
-    let ar = Command::new("ar")
-        .arg("crs")
-        .arg(&archive)
-        .arg(&object)
-        .output()
-        .unwrap();
+    if assembler_terminator {
+        let assembled = Command::new("cc")
+            .args(["-fPIC", "-c"])
+            .arg(&finalizer)
+            .arg("-o")
+            .arg(&finalizer_object)
+            .output()
+            .unwrap();
+        assert!(
+            assembled.status.success(),
+            "failed to assemble native signal handler finalizer list:\n{}{}",
+            String::from_utf8_lossy(&assembled.stdout),
+            String::from_utf8_lossy(&assembled.stderr)
+        );
+    }
+    let mut archive_members = Command::new("ar");
+    archive_members.arg("crs").arg(&archive).arg(&object);
+    if assembler_terminator {
+        archive_members.arg(&finalizer_object);
+    }
+    let ar = archive_members.output().unwrap();
     assert!(
         ar.status.success(),
         "failed to archive native signal handler fixture:\n{}{}",
@@ -433,6 +487,23 @@ uint64_t read_image_signal_trace(void) { return trace; }
         crate::native::archive::materialize_in(&archive, &directory.path().join("materialized"))
             .unwrap();
     (directory, library)
+}
+
+/// The opening directive of a destructor list, in the spelling that types the section as one the
+/// loader runs: a section whose type stops saying so is one the loader leaves alone, which is what
+/// the engine needs before it runs the list itself.
+///
+/// A fixture needs this because a toolchain-emitted destructor is not such a list on every
+/// platform: measured on the macos aarch64 host, `__attribute__((destructor))` is not emitted as a
+/// `__mod_term_func` section at all but as an `__cxa_atexit` registration from a generated
+/// initializer, which is the *process's* list rather than the image's.
+fn terminator_section(format: crate::os::dll::ObjectFormat) -> &'static str {
+    match format {
+        crate::os::dll::ObjectFormat::Elf => ".pushsection .fini_array,\"aw\",@progbits\n",
+        crate::os::dll::ObjectFormat::MachO => {
+            ".pushsection __DATA,__mod_term_func,mod_term_funcs\n"
+        }
+    }
 }
 
 fn modes() -> Vec<(&'static str, bool)> {

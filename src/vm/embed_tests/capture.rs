@@ -223,7 +223,7 @@ fn capture_session_records_automatic_host_syscall_rewrite() {
         .env(crate::options::env_var_name("jit_stats"), "1")
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + CHILD_HANG_TIMEOUT;
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;

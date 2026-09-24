@@ -17,6 +17,8 @@
 //! leading underscore, because a loader looks a C name up with one applied: the symbol table, which
 //! `nm` and `dladdr` read, and the export trie, which is the only one `dlsym` consults.
 
+use super::lifecycle::CallableList;
+
 /// The 64-bit Mach-O magic, little-endian on disk.
 const MH_MAGIC_64: u32 = 0xfeed_facf;
 /// `cputype` for arm64, and the subtype meaning "all arm64".
@@ -77,11 +79,13 @@ const N_EXT: u8 = 0x01;
 const N_WEAK_DEF: u16 = 0x0080;
 
 /// The low byte of `section_64.flags`, which is the section's type. The two types a pointer array
-/// of functions can have, and the plain type that is not one: a loader runs the arrays it sees
-/// typed, so a section whose type stops saying "function pointer array" is one it leaves alone.
+/// of functions can have, the type a modern ld64 gives the initializer list instead of one of
+/// those, and the plain type that is none of them: a loader runs the lists it sees typed, so a
+/// section whose type stops saying "a list of initializers" is one it leaves alone.
 const SECTION_TYPE_MASK: u32 = 0xff;
 const S_MOD_INIT_FUNC_POINTERS: u32 = 0x9;
 const S_MOD_TERM_FUNC_POINTERS: u32 = 0xa;
+const S_INIT_FUNC_OFFSETS: u32 = 0x16;
 const S_REGULAR: u32 = 0x0;
 
 /// `VM_PROT_EXECUTE`, as `segment_command_64.initprot` reports it.
@@ -661,16 +665,21 @@ pub(crate) struct Section {
 }
 
 impl Section {
-    /// Whether this section is one a loader runs as an array of function pointers.
-    pub(crate) fn is_function_pointer_array(&self) -> bool {
-        matches!(
-            self.section_type,
-            S_MOD_INIT_FUNC_POINTERS | S_MOD_TERM_FUNC_POINTERS
-        )
+    /// The kind of callable list this section is, when it is one a loader runs.
+    ///
+    /// The pointer form is the one an old linker wrote for both lists; a modern one writes the
+    /// initializer list as 32-bit offsets instead, which is why the offsets type answers for
+    /// initializers alone.
+    pub(crate) fn callable_list(&self) -> Option<CallableList> {
+        match self.section_type {
+            S_MOD_INIT_FUNC_POINTERS | S_MOD_TERM_FUNC_POINTERS => Some(CallableList::Pointers),
+            S_INIT_FUNC_OFFSETS => Some(CallableList::Offsets),
+            _ => None,
+        }
     }
 
-    /// Stop the loader running this section as an array of function pointers, leaving the array and
-    /// everything else about the image where they are.
+    /// Stop the loader running this section as a list of callables, leaving the list and everything
+    /// else about the image where they are.
     ///
     /// Clearing the type rather than the contents is what the two measured hazards force: a loader
     /// rebases these slots, so a zeroed one arrives as the slide and is called, and pointing the
@@ -1069,7 +1078,7 @@ mod tests {
         assert_eq!(section.segname, "__TEXT");
         assert_eq!(section.addr as usize, text_off);
         assert_eq!(section.size as usize, SLOT * NAMES.len());
-        assert!(!section.is_function_pointer_array());
+        assert_eq!(section.callable_list(), None);
         assert_eq!(image.routines_init, None);
     }
 }

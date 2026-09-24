@@ -272,6 +272,23 @@ fn blocked_external_native_raise_keeps_libc_si_tkill_provenance() {
 
     let mut failures = Vec::new();
     for (mode, jit) in modes() {
+        // Which `si_code` this kernel puts on a raise that waited behind a blocked mask depends on
+        // process history and not only on the sender: measured on the macos aarch64 host, the first
+        // such raise after this process spawned a child arrives with code 1 and the sending pid,
+        // and every later one with code 0 and no sender. Building an Engine runs this platform's
+        // signer, which is a child process. The libc baseline is therefore taken right after a
+        // build of its own, so that both raises below are the first after one, and the wrapped
+        // raise happens in the Engine built after the baseline rather than the one that timed it.
+        let baseline_engine = engine(physically_masked_signal_module(), jit);
+        SIGNAL_EXTERNAL_SIGINFO_CODE.store(i32::MIN, Ordering::SeqCst);
+        let baseline_guard = blocker
+            .block_for_handler(crate::os::signal::SIGUSR1)
+            .unwrap();
+        assert_eq!(crate::os::process::raise(crate::os::signal::SIGUSR1), 0);
+        drop(baseline_guard);
+        let libc_code = wait_for_external_siginfo_code();
+        baseline_engine.wait_closed().unwrap();
+
         SIGNAL_EXTERNAL_SIGINFO_CODE.store(i32::MIN, Ordering::SeqCst);
         let engine = engine(physically_masked_signal_module(), jit);
         let wrapped_guard = blocker
@@ -285,10 +302,10 @@ fn blocked_external_native_raise_keeps_libc_si_tkill_provenance() {
 
         if !matches!(raised, Ok(RunOutcome::Returned(value)) if value.lo == 0)
             || before_unblock != i32::MIN
-            || wrapped_code != native_code
+            || wrapped_code != libc_code
         {
             failures.push(format!(
-                "{mode}: raise={raised:?}, before-unblock={before_unblock}, libc-code={native_code}, wrapped-code={wrapped_code}"
+                "{mode}: raise={raised:?}, before-unblock={before_unblock}, libc-code={libc_code}, wrapped-code={wrapped_code}"
             ));
         }
     }

@@ -156,7 +156,7 @@ fn raw_pthread_kill_runs_only_on_the_target_pthread_during_concurrent_close() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("failed to start raw pthread_kill subprocess");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + CHILD_HANG_TIMEOUT;
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;

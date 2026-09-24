@@ -8,17 +8,23 @@ fn lifecycle_callback_library(link_addr: LinkAddr, attribute: &str) -> (NativeFi
     let lifecycle = directory.path().join("lifecycle.c");
     let bridge = directory.path().join("bridge.S");
     let library = directory.path().join("lifecycle.so");
-    std::fs::write(
-        &lifecycle,
+    // Measured on the macos aarch64 toolchain: `__attribute__((destructor))` is not emitted as a
+    // `__mod_term_func` section at all. The compiler generates an initializer that hands the
+    // function to `__cxa_atexit`, which is the *process's* list rather than the image's, so a
+    // destructor fixture declares the terminator section itself (see `bridge_asm`) and keeps only
+    // the callback the assembler half reaches. A constructor needs no such help: that attribute
+    // does become a list this loader runs, in one form or the other.
+    let assembler_terminator = cfg!(target_os = "macos") && attribute == "destructor";
+    let source = if assembler_terminator {
+        "extern void callback(void);\n".to_string()
+    } else {
         format!(
-            r#"
-extern void callback(void);
-__attribute__(({attribute})) static void lifecycle(void) {{ callback(); }}
-"#
-        ),
-    )
-    .unwrap();
-    std::fs::write(&bridge, bridge_asm(link_addr)).unwrap();
+            "extern void callback(void);\n\
+             __attribute__(({attribute})) static void lifecycle(void) {{ callback(); }}\n"
+        )
+    };
+    std::fs::write(&lifecycle, source).unwrap();
+    std::fs::write(&bridge, bridge_asm(link_addr, assembler_terminator)).unwrap();
     let output = Command::new("cc")
         .args(crate::os::linker::COMMON)
         .arg(&lifecycle)
@@ -39,7 +45,11 @@ __attribute__(({attribute})) static void lifecycle(void) {{ callback(); }}
 /// The machine-code side of this fixture: a function that reaches the engine's budgeted entry
 /// through a hidden slot, in whatever object format this platform's toolchain writes. The shape is
 /// the same one the rlib rescue emits, which is the point -- the fixture exercises that path.
-fn bridge_asm(link_addr: LinkAddr) -> String {
+///
+/// `terminator` adds the destructor list the fixture's own toolchain will not write, spelled the
+/// one way per format that types the section as a list the loader runs, because that type is what
+/// the engine reads and then takes away.
+fn bridge_asm(link_addr: LinkAddr, terminator: bool) -> String {
     use crate::native::asmtext::{Region, Visibility, Vocabulary};
     let format = Vocabulary::of(crate::os::dll::OBJECT_FORMAT);
     let slot = super::super::ir::native_entry_slot_name(link_addr);
@@ -54,6 +64,14 @@ fn bridge_asm(link_addr: LinkAddr) -> String {
     asm.push_str(".balign 8\n");
     format.define_slot(&mut asm, &slot, Visibility::Private);
     format.close(&mut asm);
+    if terminator {
+        asm.push_str(super::super::terminator_section(
+            crate::os::dll::OBJECT_FORMAT,
+        ));
+        asm.push_str(".balign 8\n");
+        asm.push_str(&format!(".quad {}\n", format.symbol("callback")));
+        asm.push_str(".popsection\n");
+    }
     format.no_executable_stack(&mut asm);
     asm
 }
@@ -73,7 +91,7 @@ __attribute__((constructor)) static void lifecycle(void) { callback(); }
 "#,
     )
     .unwrap();
-    std::fs::write(&bridge, bridge_asm(link_addr)).unwrap();
+    std::fs::write(&bridge, bridge_asm(link_addr, false)).unwrap();
     for (source, object) in [(&lifecycle, &lifecycle_object), (&bridge, &bridge_object)] {
         let output = Command::new("cc")
             .args(["-fPIC", "-c"])
@@ -337,7 +355,7 @@ fn constructor_signal_fault_drains_masked_reraise_before_failed_engine_closes() 
             .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("failed to start constructor signal-fault subprocess");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + CHILD_HANG_TIMEOUT;
         let status = loop {
             if let Some(status) = child.try_wait().unwrap() {
                 break Some(status);

@@ -89,7 +89,7 @@ fn sigwaitinfo_consumes_blocked_host_raise_without_leaving_thread_signal_state()
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("failed to start sigwaitinfo HostRaise subprocess");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + CHILD_HANG_TIMEOUT;
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
@@ -192,7 +192,7 @@ fn external_siginfo_handler_can_wait_for_another_threads_host_signal() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("failed to start external-handler HostSignal subprocess");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + CHILD_HANG_TIMEOUT;
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
@@ -299,7 +299,7 @@ fn external_siginfo_handler_can_wait_for_another_threads_engine_close() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("failed to start external-handler close subprocess");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + CHILD_HANG_TIMEOUT;
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;

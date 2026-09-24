@@ -9,7 +9,8 @@
 //! - There is no realtime signal range. The traditional numbering is the whole space, so
 //!   [`is_realtime`] answers `false` for every number rather than for a suffix of them.
 //! - `si_code` carries `SI_USER` for a `kill`, a `raise` and a `pthread_kill` alike, so
-//!   [`sent_by_thread_kill`] cannot read the direction out of it and reads `si_pid` instead.
+//!   [`delivery_direction`] cannot read the direction out of it and reports a self-sent delivery
+//!   as ambiguous instead.
 //! - The kernel strips the two unmaskable signals out of `sa_mask` exactly as the other one does
 //!   (measured), so the guest-visible copy is normalized the same way.
 //!
@@ -18,7 +19,9 @@
 //! because the kernel defines the interface and the CPU encodes it. This file stays CPU-neutral and
 //! reaches it through that name.
 
-use crate::os::signal::{MaskOp, SignalMask, ThreadSignalMaskGuard, set_thread_mask};
+use crate::os::signal::{
+    DeliveryDirection, MaskOp, SignalMask, ThreadSignalMaskGuard, set_thread_mask,
+};
 use crate::os_arch::signal as arch;
 
 /// The kernel's `siginfo_t` as an `SA_SIGINFO` handler receives it.
@@ -38,10 +41,17 @@ const SI_USER: i32 = 0;
 ///
 /// It is the generic code, which this kernel reports for every delivery a process sends itself, so
 /// it does not separate a `raise` from a process-directed `kill`; what does that here is the
-/// sender, as [`sent_by_thread_kill`] explains. A caller that asserts which delivery happened
+/// sender, as [`delivery_direction`] explains. A caller that asserts which delivery happened
 /// therefore takes each platform's own answer.
 #[cfg(test)]
 pub const RAISE_DELIVERY_CODE: i32 = SI_USER;
+
+/// The flags this kernel accepts but reports back cleared, so a comparison that cannot see which
+/// signal an action belongs to has to tolerate their absence.
+///
+/// Measured: `SA_RESETHAND` comes back cleared for every signal, and `SA_NOCLDSTOP` survives only
+/// for `SIGCHLD`, the one signal it is about.
+const DROPPED_KERNEL_FLAGS: i32 = libc::SA_NOCLDSTOP | libc::SA_RESETHAND;
 
 /// The kernel's `si_code` for a delivery a handler received.
 ///
@@ -58,9 +68,11 @@ pub fn info_code(info: SignalInfo) -> i32 {
 /// and the fault address out of the architecture's own `ucontext_t`.
 pub use crate::os_arch::signal::install_segv_dump;
 
-// This kernel promises that these long-established flags survive `sigaction`. There is no
+// The long-established flags that survive `sigaction` on this kernel. There is no
 // `SA_EXPOSE_TAGBITS` here, and the flag the other platform carries for probing which optional bits
 // a kernel understands has no counterpart either.
+//
+// Two of them do not survive for every signal, which is [`DROPPED_KERNEL_FLAGS`].
 const STABLE_KERNEL_FLAGS: i32 = libc::SA_NOCLDSTOP
     | libc::SA_NOCLDWAIT
     | libc::SA_SIGINFO
@@ -134,7 +146,7 @@ pub fn is_realtime(_signum: i32) -> bool {
     false
 }
 
-/// Whether a delivery reaches the thread it was addressed to.
+/// What a delivery's `siginfo` says about who it was addressed to.
 ///
 /// This is the one place the two platforms disagree about a *fact* rather than about a spelling.
 /// Linux reports `SI_TKILL` for a `tkill`/`tgkill` and `SI_USER` for a process-directed `kill`, so
@@ -142,20 +154,22 @@ pub fn is_realtime(_signum: i32) -> bool {
 /// `pthread_kill` alike, with the sender's pid in `si_pid` (measured), so `si_code` carries no
 /// direction at all.
 ///
-/// What separates the two cases here is the sender: a delivery this process sent itself is one it
-/// addressed to a thread of its own, and a delivery from another process is process-directed.
-///
-/// NOTE: a guest `kill(getpid(), signum)` is process-directed and is reported here as
-/// thread-directed. The two readings differ in which registry the engine credits, and the thread
-/// the kernel chose is this one either way.
-pub fn sent_by_thread_kill(info: SignalInfo) -> bool {
+/// What this does separate is a delivery from another process (process-directed, and the only case
+/// whose `si_pid` is not this process) from one this process sent itself, which is reported as
+/// [`DeliveryDirection::Ambiguous`] rather than guessed at: a `pthread_kill` to one of its own
+/// pthreads and a `kill(getpid(), signum)` are byte-identical here, and the delivery path decides
+/// between them from the receiving pthread instead.
+pub fn delivery_direction(info: SignalInfo) -> DeliveryDirection {
     if info.is_null() {
-        return false;
+        return DeliveryDirection::Process;
     }
     // `info_code` is the same read the delivery path makes; the direction is not in it here, so
-    // the sender is what separates a delivery this process addressed to a thread from one another
-    // process sent.
-    info_code(info) == SI_USER && unsafe { (*info).si_pid } == unsafe { libc::getpid() }
+    // the sender is what separates a delivery this process sent from one another process sent.
+    if info_code(info) == SI_USER && unsafe { (*info).si_pid } == unsafe { libc::getpid() } {
+        DeliveryDirection::Ambiguous
+    } else {
+        DeliveryDirection::Process
+    }
 }
 
 /// `kill(2)`: deliver `signum` to the process `pid`, returning the library's code and leaving
@@ -385,6 +399,10 @@ impl Sigaction {
     /// adapter ABI bits that were not in `visible`.
     pub fn canonicalized_from_kernel_stub(mut self, kernel: &Self, visible: &Self) -> Self {
         arch::canonicalize_from_kernel_stub(&mut self.0, &kernel.0, &visible.0);
+        // What this kernel drops from the stored action is not an adapter ABI bit: a flag the
+        // caller asked for is the caller's to see back, so the visible form carries the ones
+        // [`DROPPED_KERNEL_FLAGS`] names.
+        self.0.sa_flags |= visible.0.sa_flags & DROPPED_KERNEL_FLAGS;
         self
     }
 
@@ -480,6 +498,7 @@ impl Sigaction {
             && self.same_mask(requested)
             && arch::restorer_matches(&self.0, &requested.0)
             && actual_flags & !requested_flags == 0
-            && actual_flags & STABLE_KERNEL_FLAGS == requested_flags & STABLE_KERNEL_FLAGS
+            && actual_flags & STABLE_KERNEL_FLAGS
+                == requested_flags & STABLE_KERNEL_FLAGS & !DROPPED_KERNEL_FLAGS
     }
 }

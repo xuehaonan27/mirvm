@@ -391,6 +391,10 @@ fn wrapped_sigaction_strips_fixed_stub_internals_from_a_modified_raw_oldact() {
         modified.or_flags(crate::os::signal::SA_NOCLDSTOP);
         modified.add_to_mask(crate::os::signal::SIGUSR2);
         assert_ne!(modified.flags() & crate::os::signal::SA_SIGINFO, 0);
+        // The restorer is one of the internals this must strip, and the only one whose slot this
+        // kernel's action may not have at all: where there is no slot, the modification carries no
+        // restorer and there is nothing for this run to check it against.
+        #[cfg(target_os = "linux")]
         assert!(modified.restorer().is_some());
 
         let mut old = crate::os::signal::Sigaction::empty(crate::os::signal::SIG_DFL, 0);

@@ -2,10 +2,13 @@
 
 use super::*;
 
+#[cfg(target_os = "linux")]
 static EXIT_CALLBACK_MASK: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(target_os = "linux")]
 static EXIT_CALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(target_os = "linux")]
 unsafe extern "C-unwind" fn exit_signal_mask_handler(_signum: i32) {
     let mask = Sigaction::current_standard_mask_bits().unwrap_or_else(|_| exit_now(73));
     EXIT_CALLBACK_MASK.store(mask, Ordering::Release);
@@ -16,6 +19,7 @@ const CURRENT_DELIVERY_CHILD: &str = "MIRVM_SIGNAL_CURRENT_DELIVERY_CHILD";
 
 const THREAD_GENERATIONS_CHILD: &str = "MIRVM_SIGNAL_THREAD_GENERATIONS_CHILD";
 
+#[cfg(target_os = "linux")]
 const THREAD_EXIT_MASK_CHILD: &str = "MIRVM_SIGNAL_THREAD_EXIT_MASK_CHILD";
 
 #[test]
@@ -45,7 +49,7 @@ fn new_thread_does_not_allocate_a_cell_for_a_closed_registration() {
         let has_cell = inbox
             .cell_for(ptr::from_ref(registration).cast_mut())
             .is_some();
-        deactivate_current_thread_inbox();
+        current_thread_inbox_handle().deactivate();
         has_cell
     })
     .join()
@@ -77,7 +81,7 @@ fn target_pthread_preserves_each_kernel_selected_registration_generation() {
                 generations.push(delivery.registration().generation());
                 drop(delivery);
             }
-            deactivate_current_thread_inbox();
+            current_thread_inbox_handle().deactivate();
             result_tx.send(generations).unwrap();
         });
         let target_pthread = ready_rx.recv().unwrap();
@@ -135,6 +139,11 @@ fn wait_for_test_kernel_frames(registration: &SignalRegistration, expected: usiz
     }
 }
 
+/// The scenario needs a signal to reach a thread that is already inside its final TSD round, and
+/// this platform cannot deliver one there at all: measured, `pthread_kill` answers `ESRCH` for a
+/// thread in that window. The same measurement is why `crate::vm::deferred::tests::tsd` scopes its
+/// thread-exit case the same way.
+#[cfg(target_os = "linux")]
 #[test]
 fn target_pthread_exit_callback_observes_the_pre_exit_signal_mask() {
     if std::env::var_os(THREAD_EXIT_MASK_CHILD).is_some() {

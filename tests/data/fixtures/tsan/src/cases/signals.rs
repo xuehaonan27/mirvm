@@ -133,7 +133,7 @@ fn recv<T>(rx: &mpsc::Receiver<T>) -> T {
 /// this same pthread, so the signal frame interrupts this loop and the flag becomes visible
 /// without any sleep.
 fn wait_for_inbox_delivery() {
-    while !signal::current_thread_has_pending() {
+    while !signal::current_thread_inbox_handle().has_pending() {
         thread::yield_now();
     }
 }
@@ -195,7 +195,7 @@ pub(crate) fn run_signal_delivery() -> bool {
         a_ack_tx
             .send(Ack::Drained {
                 runs: run_count(),
-                pending: signal::current_thread_has_pending(),
+                pending: signal::current_thread_inbox_handle().has_pending(),
             })
             .unwrap();
 
@@ -222,7 +222,7 @@ pub(crate) fn run_signal_delivery() -> bool {
         a_ack_tx
             .send(Ack::Drained {
                 runs: run_count(),
-                pending: signal::current_thread_has_pending(),
+                pending: signal::current_thread_inbox_handle().has_pending(),
             })
             .unwrap();
 
@@ -239,7 +239,7 @@ pub(crate) fn run_signal_delivery() -> bool {
         a_ack_tx
             .send(Ack::Drained {
                 runs: run_count(),
-                pending: signal::current_thread_has_pending(),
+                pending: signal::current_thread_inbox_handle().has_pending(),
             })
             .unwrap();
 
@@ -248,7 +248,7 @@ pub(crate) fn run_signal_delivery() -> bool {
             _ => return,
         }
         drain_pending_signals(ctx);
-        signal::deactivate_current_thread_inbox();
+        signal::current_thread_inbox_handle().deactivate();
         a_ack_tx.send(Ack::Done).unwrap();
     });
 
@@ -265,7 +265,7 @@ pub(crate) fn run_signal_delivery() -> bool {
             Cmd::Probe => {}
             _ => return,
         }
-        let pending = signal::current_thread_has_pending();
+        let pending = signal::current_thread_inbox_handle().has_pending();
         let taken_none = signal::take_current_thread_delivery(0).is_none();
         b_ack_tx
             .send(Ack::Isolated {
@@ -279,7 +279,7 @@ pub(crate) fn run_signal_delivery() -> bool {
             _ => return,
         }
         drain_pending_signals(ctx);
-        signal::deactivate_current_thread_inbox();
+        signal::current_thread_inbox_handle().deactivate();
         b_ack_tx.send(Ack::Done).unwrap();
     });
 

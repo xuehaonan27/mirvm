@@ -890,15 +890,14 @@ mod tests {
                 .unwrap()
                 .success()
         );
+        // The archive is linked whole, which each platform's linker spells its own way; the object
+        // defines everything it uses, so no unresolved-symbol policy is exercised here.
+        let mut link = Command::new("cc");
+        link.args(crate::os::linker::COMMON);
+        link.args(crate::os::linker::whole_archive(&a));
         assert!(
-            Command::new("cc")
-                .args(["-shared", "-Wl,-z,defs", "-Wl,--whole-archive"])
-                .arg(&a)
-                .args(["-Wl,--no-whole-archive", "-o"])
-                .arg(&so)
-                .status()
-                .unwrap()
-                .success()
+            link.arg("-o").arg(&so).status().unwrap().success(),
+            "linking the hidden-symbol fixture failed"
         );
         // Precondition: hidden malloc is not in .dynsym, so the process global scope only has
         // libc's.

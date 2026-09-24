@@ -17,7 +17,9 @@
 //! [`crate::os_arch::signal`], because Linux defines the interface and the CPU encodes it. This
 //! file stays CPU-neutral and reaches it through that name.
 
-use crate::os::signal::{MaskOp, SignalMask, ThreadSignalMaskGuard, set_thread_mask};
+use crate::os::signal::{
+    DeliveryDirection, MaskOp, SignalMask, ThreadSignalMaskGuard, set_thread_mask,
+};
 use crate::os_arch::signal as arch;
 
 /// The kernel's `siginfo_t` as an `SA_SIGINFO` handler receives it.
@@ -150,9 +152,14 @@ pub fn is_realtime(signum: i32) -> bool {
 ///
 /// The engine's mailbox merges deliveries by signal number, which is only sound for a delivery the
 /// kernel addressed to one thread, so it has to ask. The answer lives in `siginfo`, whose layout is
-/// the kernel's, which is why the question is asked here and not there.
-pub fn sent_by_thread_kill(info: SignalInfo) -> bool {
-    info_code(info) == SI_TKILL
+/// the kernel's, which is why the question is asked here and not there. This kernel names the
+/// thread-directed case in `si_code`, so it never reports an ambiguous delivery.
+pub fn delivery_direction(info: SignalInfo) -> DeliveryDirection {
+    if info_code(info) == SI_TKILL {
+        DeliveryDirection::Thread
+    } else {
+        DeliveryDirection::Process
+    }
 }
 
 /// A sigaction structure (layout knowledge encapsulated). The engine edits a
