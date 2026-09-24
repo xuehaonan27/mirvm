@@ -900,6 +900,9 @@ mod tests {
         ));
         let member = root.join("member");
         std::fs::create_dir_all(&member).unwrap();
+        // The reader identifies a member by its canonical path, and a temporary directory is
+        // reached through a link on some platforms, so the test compares the same form.
+        let member = std::fs::canonicalize(&member).unwrap();
         std::fs::write(
             root.join("Cargo.toml"),
             "[workspace]\nresolver='1'\nmembers=['member']\n",
