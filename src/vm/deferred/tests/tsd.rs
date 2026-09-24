@@ -8,16 +8,22 @@ const TSD_REMOTE_CHILD: &str = "MIRVM_TEST_TSD_REMOTE_CHILD";
 
 const TSD_TOMBSTONE_CHILD: &str = "MIRVM_TEST_TSD_TOMBSTONE_CHILD";
 
+#[cfg(target_os = "linux")]
 const EXIT_SIGNAL_TSD_CHILD: &str = "MIRVM_TEST_EXIT_SIGNAL_TSD_CHILD";
 
+#[cfg(target_os = "linux")]
 const EXIT_SIGNAL_ENTRY: u64 = 0xde33_7200;
 
+#[cfg(target_os = "linux")]
 static EXIT_SIGNAL_TSD_KEY: AtomicU64 = AtomicU64::new(u64::MAX);
 
+#[cfg(target_os = "linux")]
 static EXIT_SIGNAL_TSD_OWNER: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(target_os = "linux")]
 static EXIT_SIGNAL_TSD_SET_RESULT: AtomicU64 = AtomicU64::new(u64::MAX);
 
+#[cfg(target_os = "linux")]
 unsafe extern "C-unwind" fn set_tsd_from_exit_signal() {
     let result = unsafe {
         super::super::native_pthread_setspecific(
@@ -29,6 +35,7 @@ unsafe extern "C-unwind" fn set_tsd_from_exit_signal() {
     EXIT_SIGNAL_TSD_SET_RESULT.store(result as u64, Ordering::SeqCst);
 }
 
+#[cfg(target_os = "linux")]
 fn exit_signal_tsd_module(marker: &AtomicU64) -> Module {
     let mut module = tsd_module(marker, false);
     let attach = FuncBody {
@@ -150,13 +157,13 @@ fn close_inside_reinstalling_tsd_dtor_runs_four_rounds() {
     }
 }
 
-/// The scenario needs a signal to reach a thread that is *already inside* its final Ctx
-/// destructor round, and this platform's `pthread_kill` refuses it: measured, it answers ESRCH for
-/// a thread that has begun its TSD teardown, where the other platform's queues the signal and the
-/// engine's next observation drains it. So the interleaving cannot be produced here, and with no
-/// signal able to arrive in that window there is none to lose. Everything the round does with what
-/// did arrive is covered by the tests that do not need the signal.
-#[cfg(target_os = "linux")]
+/// The scenario needs a signal to reach a thread that is already inside its final Ctx destructor
+/// round, and this platform cannot deliver one there at all: measured, `pthread_kill` answers
+/// ESRCH both for another thread's attempt on it and for its own, because this kernel retires a
+/// thread's identity before running its TSD destructors. So the interleaving cannot be produced,
+/// and a signal that cannot arrive in that window is not one there is anything to lose.
+/// Everything the round does with a signal that did arrive is the rest of this module's coverage.
+#[cfg(all(test, target_os = "linux"))]
 #[test]
 fn final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback() {
     const NAME: &str = "vm::deferred::tests::tsd::final_ctx_destructor_round_drains_tsd_reset_by_target_signal_callback";
