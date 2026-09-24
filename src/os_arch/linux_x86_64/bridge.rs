@@ -17,3 +17,14 @@ pub fn entry_asm(owner_register: &str, owner_slot: &str, target_slot: &str) -> S
          jmp QWORD PTR [rip + {target_slot}]"
     )
 }
+
+/// The body of a trampoline that reaches a native entry through the hidden 8-byte slot `slot`: one
+/// RIP-relative load and a jump through it.
+///
+/// This is what the rlib rescue defines one of per symbol a native archive left undefined, and the
+/// owning Engine writes the address the trampoline should reach into the slot. The slot is hidden,
+/// so its address is a link-time constant and nothing here needs a relocation the object format
+/// would have to spell.
+pub fn slot_jump_asm(slot: &str) -> String {
+    format!("    jmp QWORD PTR [rip + {slot}]")
+}

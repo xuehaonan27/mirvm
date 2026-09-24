@@ -49,19 +49,6 @@ pub fn int3() {
     unsafe { std::arch::asm!("int3", options(nomem, nostack, preserves_flags)) };
 }
 
-/// The assembly text of a jump through the hidden 8-byte slot `slot`, without a trailing newline.
-///
-/// This is the body of a P1 entry trampoline: the rlib-rescue path defines one such trampoline for
-/// each symbol a native archive left undefined and the crate graph exports, and the owning Engine
-/// writes the address the trampoline should reach into the slot. Which symbol needs one, and the
-/// directives naming it, belong to the object format; the instruction is the CPU's.
-///
-/// The caller must already have selected this architecture's syntax
-/// (`crate::arch::asm_text::DIRECTIVE_INTEL`).
-pub fn indirect_jump_asm(slot: &str) -> String {
-    format!("    jmp QWORD PTR [rip + {slot}]")
-}
-
 /// The register the bridge entry for `call` loads its engine into: the register the replacement's
 /// trailing `owner` parameter arrives in, which the System V argument order puts after the call's
 /// own arguments.

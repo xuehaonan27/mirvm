@@ -580,7 +580,7 @@ fn rescue_with_rlib_symbols(
     for (name, addr) in &pairs {
         let slot = crate::vm::ir::native_entry_slot_name(crate::vm::ir::LinkAddr(*addr));
         fmt.define_fn(&mut asm, name, super::asmtext::Visibility::Private);
-        asm.push_str(&crate::arch::asmstub::indirect_jump_asm(&fmt.symbol(&slot)));
+        asm.push_str(&crate::os_arch::bridge::slot_jump_asm(&fmt.symbol(&slot)));
         asm.push('\n');
         slots.insert(slot);
     }

@@ -39,9 +39,10 @@
 //!   architecture's name and its syntax directives. The forms mirvm rewrites a `syscall` into are
 //!   the pair's, because they name the object format as well as the instruction.
 //! - `asmstub` — machine-code byte emission (entry stubs), the single-issue instruction primitive
-//!   a breakpoint is (`int3`), the trampoline a rewritten `syscall` lands on, and the assembly text
-//!   the two call-redirection shapes need: the runtime-interposition bridge the platform's linker
-//!   was asked for, and the indirect jump a P1 entry trampoline takes.
+//!   a breakpoint is (`int3`), the trampoline a rewritten `syscall` lands on, and the registers the
+//!   runtime-interposition bridge's entries load their engine into. The bridge's own text is the
+//!   pair's, because it names the object format as well as the instructions: the same is true of
+//!   the jump a P1 entry trampoline takes and of the form a `syscall` is rewritten into.
 //! - `reloc` — the meanings a relocation can carry, which every psABI and object format shares.
 //!   The classification of a format's own numbering onto them is the pair's
 //!   (`crate::os_arch::reloc`), because the numbering belongs to the format.

@@ -21,9 +21,9 @@ use crate::os::linker;
 use crate::vm::interpose::{INTERPOSED_CALLS, owner_slot, target_slot};
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub(crate) use super::linux_x86_64::bridge::entry_asm;
+pub(crate) use super::linux_x86_64::bridge::{entry_asm, slot_jump_asm};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub(crate) use super::macos_aarch64::bridge::entry_asm;
+pub(crate) use super::macos_aarch64::bridge::{entry_asm, slot_jump_asm};
 
 /// The bridge's assembly text: one entry per interposed call, then the slots the entries read.
 ///
