@@ -278,7 +278,9 @@ pub(crate) fn current_thread_final_tsd_pass_is_armed() -> bool {
     !contexts.is_null() && unsafe { (*contexts).final_tsd_cursor.is_some() }
 }
 
-#[cfg(test)]
+/// Only the thread-exit TSD round's test reads this, and that test is the one scenario this
+/// platform cannot build; the other platforms read it to compare a guest key against the engine's.
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) fn test_ctx_key() -> TlsKey {
     CTX_KEY.get().copied().unwrap()
 }

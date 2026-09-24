@@ -21,10 +21,12 @@ use super::super::ir::{
     UnwindAction, Width,
 };
 use super::{TSD_DTOR_ROUNDS, TSD_KEYS, TsdRegistration, prepare_pthread_operation};
+#[cfg(target_os = "linux")]
 use crate::os::signal::{SIGWINCH, send_to_thread};
+#[cfg(target_os = "linux")]
+use crate::os::thread::current_thread;
 use crate::os::thread::{
-    TLS_KEY_GONE, ThreadId, TlsKey, current_thread, join_raw, tls_get, tls_key_create_raw,
-    tls_key_delete, tls_set,
+    TLS_KEY_GONE, ThreadId, TlsKey, join_raw, tls_get, tls_key_create_raw, tls_key_delete, tls_set,
 };
 
 const TSD_ENTRY: u64 = 0xde33_7000;

@@ -55,6 +55,8 @@ pub(crate) use signals::{drain_pending_signals, raise_signal};
 /// visible from here are the TSan harness cases (`tests/data/fixtures/tsan/src/cases`), which compile this tree.
 #[allow(unused_imports)]
 pub(crate) use thread_ctx::attach;
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use thread_ctx::test_ctx_key;
 pub use thread_ctx::{Ctx, ShadowFrame};
 pub(crate) use thread_ctx::{
     EngineFaultToken, begin_engine_fault, current_code_domain, finish_engine_fault,
@@ -64,6 +66,4 @@ pub(crate) use thread_ctx::{
     guest_spawned_threads, set_fork_baseline,
 };
 #[cfg(test)]
-pub(crate) use thread_ctx::{
-    engine_fault_in_flight, set_thread_exit_inbox_empty_hook, test_ctx_key,
-};
+pub(crate) use thread_ctx::{engine_fault_in_flight, set_thread_exit_inbox_empty_hook};
