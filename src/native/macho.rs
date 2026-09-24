@@ -73,6 +73,8 @@ const PROT_EXECUTE: u32 = 4;
 /// `n_type` for a symbol defined at a section offset and visible to other images.
 const N_SECT: u8 = 0x0e;
 const N_EXT: u8 = 0x01;
+/// `n_desc`'s bit for a weak definition.
+const N_WEAK_DEF: u16 = 0x0080;
 
 /// The low byte of `section_64.flags`, which is the section's type. The two types a pointer array
 /// of functions can have, and the plain type that is not one: a loader runs the arrays it sees
@@ -588,6 +590,11 @@ pub(crate) struct ImageSymbol {
     /// Whether the image marks it private, which is how this format says the loader cannot reach
     /// it by name even though the image defines it.
     pub(crate) private_extern: bool,
+    /// Whether the image defines it and offers it to other images.
+    pub(crate) exported: bool,
+    /// Whether the image marks it a weak definition, which is how this format says two images may
+    /// define one name and the linker picks either.
+    pub(crate) weak: bool,
 }
 
 /// `n_type`'s type field, the value meaning "defined nowhere in this image", and the bit marking a
@@ -817,6 +824,10 @@ fn symbol_table(bytes: &[u8], fields: [usize; 4]) -> Result<Vec<ImageSymbol>, St
             value: read_u64(entry, 8).ok_or_else(|| "a symbol entry is truncated".to_string())?,
             undefined: entry[4] & N_TYPE == N_UNDF && entry[4] & N_EXT != 0,
             private_extern: entry[4] & N_PEXT != 0,
+            exported: entry[4] & N_TYPE != N_UNDF
+                && entry[4] & N_EXT != 0
+                && entry[4] & N_PEXT == 0,
+            weak: u16::from_le_bytes([entry[6], entry[7]]) & N_WEAK_DEF != 0,
         });
     }
     Ok(out)

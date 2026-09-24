@@ -300,6 +300,82 @@ pub(crate) fn object_undefined_symbols(
     }
 }
 
+/// One name an image offers to other images, and whether the format marks the definition weak.
+///
+/// Weakness is what decides whether two images defining one name is a conflict: two strong
+/// definitions leave the choice to load order, while one strong definition wins outright, which is
+/// the resolution native static linking would have made.
+pub(crate) struct Export {
+    pub(crate) name: Box<str>,
+    pub(crate) weak: bool,
+}
+
+/// The names `path` offers to other images, by the format `format` names.
+///
+/// Only the offered ones. A symbol the image keeps to itself cannot collide with another image's,
+/// because resolution order puts the image's own definition first whatever else the process holds.
+pub(crate) fn object_exports(
+    path: &str,
+    format: crate::os::dll::ObjectFormat,
+) -> Result<Vec<Export>, Error> {
+    let bytes =
+        std::fs::read(path).map_err(|error| Error::io(format!("cannot read `{path}`"), error))?;
+    match format {
+        crate::os::dll::ObjectFormat::Elf => elf_exports(&bytes, path),
+        crate::os::dll::ObjectFormat::MachO => Ok(super::macho::symbols(&bytes)
+            .map_err(Error::malformed)?
+            .into_iter()
+            .filter(|symbol| symbol.exported)
+            .map(|symbol| Export {
+                name: symbol.name,
+                weak: symbol.weak,
+            })
+            .collect()),
+    }
+}
+
+/// The dynamic table's defined entries: `.dynsym`, which is the surface other images bind to.
+fn elf_exports(bytes: &[u8], path: &str) -> Result<Vec<Export>, Error> {
+    let bad = || {
+        Error::malformed(format!(
+            "archive shared library `{path}` is not the expected ELF64 LE (or is corrupted)"
+        ))
+    };
+    let header = elf::FileHeader::parse(bytes).ok_or_else(bad)?;
+    let sections = elf::sections(bytes, &header).ok_or_else(bad)?;
+    for section in &sections {
+        if section.ty != SHT_DYNSYM {
+            continue;
+        }
+        if section.entsize < elf::SYM_ENTRY_SIZE as u64 {
+            return Err(bad());
+        }
+        let strtab = sections
+            .get(usize::try_from(section.link).map_err(|_| bad())?)
+            .ok_or_else(bad)?;
+        let str_end = usize::try_from(strtab.offset + strtab.size).map_err(|_| bad())?;
+        let count = usize::try_from(section.size / section.entsize.max(1)).map_err(|_| bad())?;
+        let mut out = Vec::new();
+        for index in 0..count {
+            let symbol = symbol_at(bytes, section, strtab, str_end, index).ok_or_else(bad)?;
+            if symbol.name_offset == 0
+                || symbol.section_index == SHN_UNDEF
+                || symbol.section_index >= SHN_RESERVED
+            {
+                continue;
+            }
+            out.push(Export {
+                name: Box::from(symbol.name),
+                // A unique is merged by the loader rather than chosen between, so it is not a
+                // definition two images can conflict over.
+                weak: symbol.binding == STB_WEAK || symbol.binding == elf::STB_GNU_UNIQUE,
+            });
+        }
+        return Ok(out);
+    }
+    Ok(Vec::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{archive_undefined_symbols, hidden_symtab_values, symtab_values};

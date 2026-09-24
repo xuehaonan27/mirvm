@@ -308,69 +308,35 @@ pub(crate) fn materialize_static_libraries<'tcx>(
 pub(super) fn reject_symbol_ambiguity(shared_objects: &[PathBuf]) -> Result<(), Error> {
     let mut owners = HashMap::<String, (PathBuf, bool)>::new();
     for shared_object in shared_objects {
-        let output = Command::new("nm")
-            .args(["--dynamic", "--defined-only", "--format=posix"])
-            .arg(shared_object)
-            .output()
-            .map_err(|e| {
-                Error::io(
-                    format!(
-                        "cannot run nm for the shared library `{}`",
-                        shared_object.display()
-                    ),
-                    e,
-                )
-            })?;
-        if !output.status.success() {
-            return Err(Error::tool(format!(
-                "Cannot inspect exported symbols of archive shared library `{}` (nm failed):\n{}{}",
-                shared_object.display(),
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-        let symbols = String::from_utf8(output.stdout).map_err(|e| {
-            Error::tool(format!(
-                "nm output for archive shared library `{}` is not UTF-8: {e}",
-                shared_object.display()
-            ))
-        })?;
-        for line in symbols.lines() {
-            let mut it = line.split_ascii_whitespace();
-            let Some(symbol) = it.next() else { continue };
-            // POSIX format second field = type letter (W/w = weak function, V/v = weak object,
-            // u = GNU unique (inline variables/local statics intended as COMDAT; merged by native
-            // static linking, always RTLD_LOCAL in glibc dynamic linking—no cross-archive ambiguity);
-            // everything else counts as strong)
-            let weak = it
-                .next()
-                .is_some_and(|t| t.starts_with(['W', 'w', 'V', 'v', 'u']));
-            std::ffi::CString::new(symbol).map_err(|_| {
-                Error::malformed(format!(
-                    "Archive shared library `{}` exports an illegal symbol name containing NUL",
-                    shared_object.display()
-                ))
-            })?;
-            match owners.entry(symbol.to_owned()) {
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert((shared_object.clone(), weak));
+        // Read here rather than by `nm`: the tool's name, its flags and the type letters it prints
+        // are each the object format's, and this build meets two of those.
+        for export in crate::native::symtab::object_exports(
+            &shared_object.to_string_lossy(),
+            crate::os::dll::OBJECT_FORMAT,
+        )? {
+            let weak = export.weak;
+            match owners.entry(export.name.into_string()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert((shared_object.clone(), weak));
                 }
-                std::collections::hash_map::Entry::Occupied(mut e) => {
-                    let (prev_path, prev_weak) = e.get().clone();
-                    let strongs = usize::from(!prev_weak) + usize::from(!weak);
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let (previous, previous_weak) = entry.get().clone();
+                    let strongs = usize::from(!previous_weak) + usize::from(!weak);
                     if strongs >= 2 {
+                        let symbol = entry.key().clone();
                         return Err(Error::ambiguous(format!(
                             "Static archive exported symbol `{symbol}` is defined by both `{}` and `{}` \
                              (two strong definitions); runtime dlsym resolution would depend on load order; \
                              M5.1 refuses to guess native linker order",
-                            prev_path.display(),
+                            previous.display(),
                             shared_object.display()
                         )));
                     }
-                    // All-weak (first wins) or exactly one strong (strong wins over weak): native
-                    // link semantics silently resolve the same way—the strong definition enters the owner table
-                    if prev_weak && !weak {
-                        e.insert((shared_object.clone(), weak));
+                    // All-weak (the first wins) or exactly one strong (the strong definition wins
+                    // over the weak one): native link semantics resolve both the same way, so the
+                    // owner becomes whichever definition would have won.
+                    if previous_weak && !weak {
+                        entry.insert((shared_object.clone(), weak));
                     }
                 }
             }
