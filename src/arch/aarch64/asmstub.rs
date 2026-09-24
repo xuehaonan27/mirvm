@@ -75,6 +75,19 @@ pub fn indirect_jump_asm(slot: &str) -> String {
     format!("    adrp x16, {slot}\n    ldr x16, [x16, :lo12:{slot}]\n    br x16")
 }
 
+/// The register the bridge entry for `call` loads its engine into: the register the replacement's
+/// trailing `owner` parameter arrives in, which the procedure call standard puts after the call's
+/// own arguments in `x0..x7`.
+pub fn bridge_owner_register(call: &str) -> Option<&'static str> {
+    match call {
+        "pthread_create" => Some("x4"),
+        "pthread_key_create" | "pthread_setspecific" | "signal" => Some("x2"),
+        "sigaction" => Some("x3"),
+        "pthread_key_delete" | "raise" => Some("x1"),
+        _ => None,
+    }
+}
+
 /// The single-byte counterpart is aarch64's four-byte `ret`, so what a consumer that only has a
 /// byte can name is the low byte of that word.
 pub const RET: u8 = 0xc0;
@@ -172,168 +185,6 @@ pub const INERT_SLOT: [u8; STUB_STRIDE as usize] = {
         nop[3],
     ]
 };
-
-/// The bridge entries for the calls `crate::vm::interpose` lists: this architecture's machine code,
-/// reached by name because the platform's linker was asked to redirect those calls.
-///
-/// Each entry loads the owning engine into the argument register the replacement's trailing `owner`
-/// parameter occupies -- the owner is always the last parameter, so its register is the count of the
-/// call's own arguments -- and jumps indirect through the slot
-/// `crate::vm::native_instance::wire` fills. A call's own arguments are never touched, and the
-/// branch leaves the return address in `x30` in place, so the replacement returns to the caller.
-///
-/// The slots are hidden globals, so `adrp` plus `:lo12:` reaches each without a GOT. `x16` and `x17`
-/// are the procedure call standard's intra-procedure scratch registers, which is why the entry may
-/// use them without saving anything: they hold no argument and no result.
-pub const NATIVE_RUNTIME_BRIDGE_ASM: &str = r#"
-.text
-.p2align 4
-.globl __wrap_pthread_create
-.hidden __wrap_pthread_create
-.type __wrap_pthread_create,@function
-__wrap_pthread_create:
-    adrp x16, __mirvm_pthread_owner
-    ldr x4, [x16, :lo12:__mirvm_pthread_owner]
-    adrp x17, __mirvm_pthread_create_target
-    ldr x17, [x17, :lo12:__mirvm_pthread_create_target]
-    br x17
-.size __wrap_pthread_create,.-__wrap_pthread_create
-
-.p2align 4
-.globl __wrap_pthread_key_create
-.hidden __wrap_pthread_key_create
-.type __wrap_pthread_key_create,@function
-__wrap_pthread_key_create:
-    adrp x16, __mirvm_pthread_owner
-    ldr x2, [x16, :lo12:__mirvm_pthread_owner]
-    adrp x17, __mirvm_pthread_key_create_target
-    ldr x17, [x17, :lo12:__mirvm_pthread_key_create_target]
-    br x17
-.size __wrap_pthread_key_create,.-__wrap_pthread_key_create
-
-.p2align 4
-.globl __wrap_pthread_setspecific
-.hidden __wrap_pthread_setspecific
-.type __wrap_pthread_setspecific,@function
-__wrap_pthread_setspecific:
-    adrp x16, __mirvm_pthread_owner
-    ldr x2, [x16, :lo12:__mirvm_pthread_owner]
-    adrp x17, __mirvm_pthread_setspecific_target
-    ldr x17, [x17, :lo12:__mirvm_pthread_setspecific_target]
-    br x17
-.size __wrap_pthread_setspecific,.-__wrap_pthread_setspecific
-
-.p2align 4
-.globl __wrap_pthread_key_delete
-.hidden __wrap_pthread_key_delete
-.type __wrap_pthread_key_delete,@function
-__wrap_pthread_key_delete:
-    adrp x16, __mirvm_pthread_owner
-    ldr x1, [x16, :lo12:__mirvm_pthread_owner]
-    adrp x17, __mirvm_pthread_key_delete_target
-    ldr x17, [x17, :lo12:__mirvm_pthread_key_delete_target]
-    br x17
-.size __wrap_pthread_key_delete,.-__wrap_pthread_key_delete
-
-.p2align 4
-.globl __wrap_signal
-.hidden __wrap_signal
-.type __wrap_signal,@function
-__wrap_signal:
-    adrp x16, __mirvm_signal_owner
-    ldr x2, [x16, :lo12:__mirvm_signal_owner]
-    adrp x17, __mirvm_signal_target
-    ldr x17, [x17, :lo12:__mirvm_signal_target]
-    br x17
-.size __wrap_signal,.-__wrap_signal
-
-.p2align 4
-.globl __wrap_sigaction
-.hidden __wrap_sigaction
-.type __wrap_sigaction,@function
-__wrap_sigaction:
-    adrp x16, __mirvm_signal_owner
-    ldr x3, [x16, :lo12:__mirvm_signal_owner]
-    adrp x17, __mirvm_sigaction_target
-    ldr x17, [x17, :lo12:__mirvm_sigaction_target]
-    br x17
-.size __wrap_sigaction,.-__wrap_sigaction
-
-.p2align 4
-.globl __wrap_raise
-.hidden __wrap_raise
-.type __wrap_raise,@function
-__wrap_raise:
-    adrp x16, __mirvm_signal_owner
-    ldr x1, [x16, :lo12:__mirvm_signal_owner]
-    adrp x17, __mirvm_raise_target
-    ldr x17, [x17, :lo12:__mirvm_raise_target]
-    br x17
-.size __wrap_raise,.-__wrap_raise
-
-.pushsection .data.mirvm_pthread,"aw",@progbits
-.p2align 3
-.globl __mirvm_pthread_owner
-.hidden __mirvm_pthread_owner
-.type __mirvm_pthread_owner,@object
-.size __mirvm_pthread_owner,8
-__mirvm_pthread_owner:
-    .quad 0
-.globl __mirvm_pthread_create_target
-.hidden __mirvm_pthread_create_target
-.type __mirvm_pthread_create_target,@object
-.size __mirvm_pthread_create_target,8
-__mirvm_pthread_create_target:
-    .quad 0
-.globl __mirvm_pthread_key_create_target
-.hidden __mirvm_pthread_key_create_target
-.type __mirvm_pthread_key_create_target,@object
-.size __mirvm_pthread_key_create_target,8
-__mirvm_pthread_key_create_target:
-    .quad 0
-.globl __mirvm_pthread_setspecific_target
-.hidden __mirvm_pthread_setspecific_target
-.type __mirvm_pthread_setspecific_target,@object
-.size __mirvm_pthread_setspecific_target,8
-__mirvm_pthread_setspecific_target:
-    .quad 0
-.globl __mirvm_pthread_key_delete_target
-.hidden __mirvm_pthread_key_delete_target
-.type __mirvm_pthread_key_delete_target,@object
-.size __mirvm_pthread_key_delete_target,8
-__mirvm_pthread_key_delete_target:
-    .quad 0
-.popsection
-
-.pushsection .data.mirvm_signal,"aw",@progbits
-.p2align 3
-.globl __mirvm_signal_owner
-.hidden __mirvm_signal_owner
-.type __mirvm_signal_owner,@object
-.size __mirvm_signal_owner,8
-__mirvm_signal_owner:
-    .quad 0
-.globl __mirvm_signal_target
-.hidden __mirvm_signal_target
-.type __mirvm_signal_target,@object
-.size __mirvm_signal_target,8
-__mirvm_signal_target:
-    .quad 0
-.globl __mirvm_sigaction_target
-.hidden __mirvm_sigaction_target
-.type __mirvm_sigaction_target,@object
-.size __mirvm_sigaction_target,8
-__mirvm_sigaction_target:
-    .quad 0
-.globl __mirvm_raise_target
-.hidden __mirvm_raise_target
-.type __mirvm_raise_target,@object
-.size __mirvm_raise_target,8
-__mirvm_raise_target:
-    .quad 0
-.popsection
-.section .note.GNU-stack,"",@progbits
-"#;
 
 #[cfg(test)]
 mod tests {

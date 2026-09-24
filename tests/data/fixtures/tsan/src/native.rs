@@ -17,3 +17,5 @@ pub(crate) mod symimage;
 pub(crate) mod macho;
 #[path = "../../../../../src/native/lifecycle.rs"]
 pub(crate) mod lifecycle;
+#[path = "../../../../../src/native/asmtext.rs"]
+pub(crate) mod asmtext;

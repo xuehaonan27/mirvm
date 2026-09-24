@@ -20,6 +20,7 @@
 pub(crate) mod ar;
 pub(crate) mod archive;
 pub(crate) mod asmtext;
+pub(crate) mod bridge;
 pub(crate) mod elf;
 pub(crate) mod lifecycle;
 pub(crate) mod macho;

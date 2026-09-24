@@ -461,14 +461,6 @@ pub(super) fn materialize_for_target_in(
         .chain(extra_flags.iter().map(|s| s.as_str()))
         .collect::<Vec<_>>()
         .join("\0");
-    let hash = content_hash([
-        CACHE_FORMAT_VERSION,
-        link_flags.as_bytes(),
-        target.as_bytes(),
-        &cc_identity,
-        crate::arch::asmstub::NATIVE_RUNTIME_BRIDGE_ASM.as_bytes(),
-        &bytes,
-    ]);
     std::fs::create_dir_all(cache_dir).map_err(|e| {
         Error::io(
             format!(
@@ -478,11 +470,27 @@ pub(super) fn materialize_for_target_in(
             e,
         )
     })?;
+    // The bridge is an input of this link like any other, so its content belongs in the cache key.
+    // Its name *is* that content: the artifact is addressed by the hash of what it was built from.
+    let native_runtime_bridge =
+        crate::native::bridge::artifact(cache_dir, cc, &cc_identity).map_err(Error::tool)?;
+    let bridge_name = native_runtime_bridge
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let hash = content_hash([
+        CACHE_FORMAT_VERSION,
+        link_flags.as_bytes(),
+        target.as_bytes(),
+        &cc_identity,
+        bridge_name.as_bytes(),
+        &bytes,
+    ]);
     let so = cache_dir.join(format!("{hash}.so"));
     if so.exists() {
         return Ok(so);
     }
-    let native_runtime_bridge = native_runtime_bridge_object(cache_dir, target, cc, &cc_identity)?;
 
     let tmp = crate::store::staging_path(&so);
     let output = Command::new(cc)
@@ -540,66 +548,6 @@ pub(super) fn materialize_for_target_in(
         )
     })?;
     Ok(so)
-}
-
-fn native_runtime_bridge_object(
-    cache_dir: &Path,
-    target: &str,
-    cc: &Path,
-    cc_identity: &[u8],
-) -> Result<PathBuf, Error> {
-    let hash = content_hash([
-        CACHE_FORMAT_VERSION,
-        b"native-runtime-bridge",
-        target.as_bytes(),
-        cc_identity,
-        crate::arch::asmstub::NATIVE_RUNTIME_BRIDGE_ASM.as_bytes(),
-    ]);
-    let object = cache_dir.join(format!("{hash}.native-runtime.o"));
-    if object.exists() {
-        return Ok(object);
-    }
-
-    let temporary = crate::store::staging_path(&object);
-    let mut source = temporary.clone().into_os_string();
-    source.push(".s");
-    let source = PathBuf::from(source);
-    std::fs::write(&source, crate::arch::asmstub::NATIVE_RUNTIME_BRIDGE_ASM).map_err(|e| {
-        Error::io(
-            format!(
-                "cannot write the native runtime bridge assembly `{}`",
-                source.display()
-            ),
-            e,
-        )
-    })?;
-    let output = Command::new(cc)
-        .args(["-x", "assembler", "-fPIC", "-c"])
-        .arg(&source)
-        .arg("-o")
-        .arg(&temporary)
-        .output()
-        .map_err(|e| Error::io("cannot launch cc to assemble the native runtime bridge", e))?;
-    let _ = std::fs::remove_file(&source);
-    if !output.status.success() {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(Error::tool(format!(
-            "cc assembly of native runtime bridge failed:\n{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    crate::store::publish(&object, &temporary).map_err(|e| {
-        let _ = std::fs::remove_file(&temporary);
-        Error::io(
-            format!(
-                "cannot publish the native runtime bridge `{}`",
-                object.display()
-            ),
-            e,
-        )
-    })?;
-    Ok(object)
 }
 
 /// "Symbols in rlib" rescue chain for a first link that failed on undefined symbols:
@@ -677,7 +625,7 @@ fn rescue_with_rlib_symbols(
         fmt.open(&mut asm, super::asmtext::Region::Slots { name: "mirvm_p1" });
         asm.push_str(".balign 8\n");
         for slot in slots {
-            fmt.define_slot(&mut asm, &slot);
+            fmt.define_slot(&mut asm, &slot, super::asmtext::Visibility::Private);
         }
         fmt.close(&mut asm);
     }

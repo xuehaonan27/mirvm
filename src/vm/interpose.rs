@@ -10,13 +10,12 @@
 //!
 //! Two layers below turn this list into a link, and neither is this one: `crate::os::linker` says
 //! how a platform's linker is told to redirect a call, and `crate::arch::asmstub` holds the machine
-//! code that receives it.
+//! code that receives it. What a bridge entry is *named*, which slot carries the engine and which
+//! carries the replacement are all mirvm's own vocabulary rather than the platform's, which is why
+//! they are derived here once instead of being written out in the bridge text and again in
+//! `crate::vm::native_instance::wire`, which fills the slots.
 
 /// The C symbols an image must not reach directly, by the name it would call them by.
-///
-/// A platform's linker redirects each `<name>` to a bridge entry `__wrap_<name>`, which passes the
-/// owning engine on to the replacement through the slot `__mirvm_<name>_target`;
-/// `crate::vm::native_instance::wire` fills those slots before any constructor runs.
 pub(crate) const INTERPOSED_CALLS: &[&str] = &[
     "pthread_create",
     "pthread_key_create",
@@ -26,3 +25,43 @@ pub(crate) const INTERPOSED_CALLS: &[&str] = &[
     "sigaction",
     "raise",
 ];
+
+/// The slot holding the engine that owns `call`, or `None` when `call` is not one a bridge entry
+/// routes through an engine-wide owner.
+///
+/// The engine is one value per family rather than one per call, because the replacements of a
+/// family are all reached with the same Engine: a thread the guest creates and a thread-local key
+/// it destroys belong to the same one.
+pub(crate) fn owner_slot(call: &str) -> Option<&'static str> {
+    match call {
+        "pthread_create" | "pthread_key_create" | "pthread_setspecific" | "pthread_key_delete" => {
+            Some("__mirvm_pthread_owner")
+        }
+        "signal" | "sigaction" | "raise" => Some("__mirvm_signal_owner"),
+        _ => None,
+    }
+}
+
+/// The slot holding the replacement `call` is routed to, which a bridge entry branches through and
+/// `crate::vm::native_instance::wire` fills.
+pub(crate) fn target_slot(call: &str) -> String {
+    format!("__mirvm_{call}_target")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{INTERPOSED_CALLS, owner_slot, target_slot};
+
+    /// The bridge and the code that fills its slots have to agree on every name, and they agree by
+    /// both asking these functions: a call with no owner slot would be one the bridge could not
+    /// route, and a typo here would be a slot wired to nothing.
+    #[test]
+    fn every_interposed_call_has_an_owner_and_a_target() {
+        for call in INTERPOSED_CALLS {
+            assert!(owner_slot(call).is_some(), "`{call}` has no owner slot");
+            assert!(target_slot(call).starts_with("__mirvm_"));
+            assert!(target_slot(call).ends_with("_target"));
+        }
+        assert_eq!(owner_slot("not_a_call"), None);
+    }
+}

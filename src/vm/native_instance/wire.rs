@@ -7,7 +7,7 @@
 //! committed -- it will never be unmapped, and its executable ranges stay attributable for the
 //! process -- and its constructors run; [`run_finalizers`] is the reverse at Engine teardown.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::super::instance::Instance;
@@ -47,6 +47,7 @@ pub(crate) fn patch_entry_slots(module: &Module, instance: &Instance) -> Result<
             unsafe { (slot as *mut u64).write(*target) };
         }
     }
+
     if instance.native_images.len() != module.required_native_libs.len() {
         return Err("native image/path count mismatch".into());
     }
@@ -73,6 +74,7 @@ pub(crate) fn patch_entry_slots(module: &Module, instance: &Instance) -> Result<
 /// self-produced machine-code image. Images are already relocated but no
 /// constructor has run yet.
 pub(crate) fn patch_pthread_slots(instance: &Instance, engine_id: u64) -> Result<(), String> {
+    use super::super::interpose::{INTERPOSED_CALLS, owner_slot};
     let targets = [
         (
             "__mirvm_pthread_create_target",
@@ -103,47 +105,89 @@ pub(crate) fn patch_pthread_slots(instance: &Instance, engine_id: u64) -> Result
             super::super::signal::native_raise as *const () as usize as u64,
         ),
     ];
-    const OWNERS: [&str; 2] = ["__mirvm_pthread_owner", "__mirvm_signal_owner"];
-    let patch = |symbols: &HashMap<Box<str>, u64>, bias: u64| -> Result<(), String> {
+    // The owner slots the bridge defines, named by the one function that also names them in the
+    // bridge text: a name written twice is a slot wired to nothing when the two spellings drift.
+    let owners: Vec<&str> = INTERPOSED_CALLS
+        .iter()
+        .filter_map(|call| owner_slot(call))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    debug_assert!(targets.iter().all(|(name, _)| {
+        INTERPOSED_CALLS
+            .iter()
+            .any(|call| super::super::interpose::target_slot(call) == *name)
+    }));
+    let total = targets.len() + owners.len();
+
+    for image in &instance.native_images {
+        // Two ways, because the platform decides whether the slots are exported: a loader only
+        // offers what an image exports, and where the bridge is an object of this image the entries
+        // reach their slots PC-relative, which forbids exporting them. So the loader is asked first
+        // -- it is the only way to reach a slot that belongs to the library the image links against
+        // -- and the image's own symbol table is the answer where it is not.
+        let address = |name: &str| -> usize {
+            let cname = std::ffi::CString::new(name).expect("a slot name contains no NUL");
+            let exported = crate::os::dll::sym(image.handle(), &cname);
+            if exported != 0 {
+                return exported;
+            }
+            image
+                .hidden_symbol_values()
+                .get(name)
+                .and_then(|value| image.bias().checked_add(*value))
+                .map_or(0, |address| address as usize)
+        };
+        let present = targets
+            .iter()
+            .map(|(name, _)| *name)
+            .chain(owners.iter().copied())
+            .filter(|name| address(name) != 0)
+            .count();
+        if present == 0 {
+            continue;
+        }
+        if present != total {
+            return Err("self-produced native image has an incomplete runtime bridge".into());
+        }
+        for &(name, target) in &targets {
+            unsafe { (address(name) as *mut u64).write(target) };
+        }
+        for name in &owners {
+            unsafe { (address(name) as *mut u64).write(engine_id) };
+        }
+    }
+    // A self-mapped image was never handed to a loader, so there is none to ask and the offsets the
+    // image carries are the only way to reach it.
+    for image in &instance.mc_images {
+        let bias = image.load_bias() as u64;
+        let symbols = &image.symbols;
         let present = targets
             .iter()
             .filter(|(name, _)| symbols.contains_key(*name))
             .count()
-            + OWNERS
+            + owners
                 .iter()
                 .filter(|name| symbols.contains_key(**name))
                 .count();
         if present == 0 {
-            return Ok(());
+            continue;
         }
-        if present != targets.len() + OWNERS.len() {
+        if present != total {
             return Err("self-produced native image has an incomplete runtime bridge".into());
         }
         for &(name, target) in &targets {
-            let value = symbols.get(name).ok_or_else(|| {
-                format!("self-produced native image has no runtime bridge slot `{name}`")
-            })?;
             let slot = bias
-                .checked_add(*value)
+                .checked_add(symbols[name])
                 .ok_or_else(|| format!("runtime bridge slot `{name}` address overflow"))?;
             unsafe { (slot as *mut u64).write(target) };
         }
-        for name in OWNERS {
-            let owner = symbols.get(name).ok_or_else(|| {
-                format!("self-produced native image has no runtime owner slot `{name}`")
-            })?;
+        for name in &owners {
             let slot = bias
-                .checked_add(*owner)
+                .checked_add(symbols[*name])
                 .ok_or_else(|| format!("runtime owner slot `{name}` address overflow"))?;
             unsafe { (slot as *mut u64).write(engine_id) };
         }
-        Ok(())
-    };
-    for image in &instance.native_images {
-        patch(image.hidden_symbol_values(), image.bias())?;
-    }
-    for image in &instance.mc_images {
-        patch(&image.symbols, image.load_bias() as u64)?;
     }
     Ok(())
 }
