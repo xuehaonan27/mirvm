@@ -48,7 +48,7 @@ impl fmt::Display for Malformed {
 impl std::error::Error for Malformed {}
 
 /// The payload of every real member, in file order, with the metadata members left out and the
-/// BSD `/#1/<len>` embedded name already stripped.
+/// embedded long name already stripped.
 ///
 /// A trailing run shorter than a header record is ignored, which is what makes a truncated
 /// archive's last partial member invisible rather than fatal; any *declared* body that runs past
@@ -76,17 +76,28 @@ pub fn members(bytes: &[u8]) -> Result<Vec<&[u8]>, Malformed> {
         if body_end > bytes.len() {
             return Err(Malformed::BodyOutOfBounds);
         }
-        let name = String::from_utf8_lossy(&header[0..16]);
-        let name = name.trim();
-        if !is_metadata(name) {
-            let mut body = &bytes[position + HEADER_SIZE..body_end];
-            // BSD-style `/#1/<len>`: the name is embedded at the start of the body, so its length
-            // has to come off before the content.
-            if let Some(rest) = name.strip_prefix("/#1/")
-                && let Ok(name_length) = rest.trim().parse::<usize>()
-            {
-                body = &body[name_length.min(body.len())..];
+        let raw_name = String::from_utf8_lossy(&header[0..16]).trim().to_string();
+        let mut body = &bytes[position + HEADER_SIZE..body_end];
+        // The `#1/<len>` form: the name is embedded at the start of the body, so its length comes
+        // off before the content, and the name it hides is the one that says whether this is a
+        // member at all. GNU writes `/#1/<len>` and the other `ar` writes `#1/<len>`, so the
+        // leading slash is optional rather than part of the form.
+        let embedded = raw_name
+            .strip_prefix('/')
+            .unwrap_or(&raw_name)
+            .strip_prefix("#1/")
+            .and_then(|rest| rest.trim().parse::<usize>().ok());
+        let name = match embedded {
+            Some(length) => {
+                let (name, content) = body.split_at(length.min(body.len()));
+                body = content;
+                String::from_utf8_lossy(name)
+                    .trim_matches(|character| character == '\0' || character == ' ')
+                    .to_string()
             }
+            None => raw_name,
+        };
+        if !is_metadata(&name) {
             out.push(body);
         }
         // Member bodies are aligned to 2, so an odd size is followed by one pad byte.
