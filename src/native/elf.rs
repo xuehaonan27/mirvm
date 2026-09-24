@@ -63,6 +63,9 @@ pub const SHN_ABS: u16 = 0xfff1;
 /// `st_info >> 4`: the bindings a static symbol enumeration considers.
 pub const STB_GLOBAL: u8 = 1;
 pub const STB_WEAK: u8 = 2;
+/// A binding whose definitions the C++ ABI asks the loader to merge into one. Two images defining
+/// one such name is not a conflict, which is why a caller that rejects collisions has to know it.
+pub const STB_GNU_UNIQUE: u8 = 10;
 
 /// `st_info >> 4`: the binding of a symbol.
 pub const fn sym_bind(info: u8) -> u8 {

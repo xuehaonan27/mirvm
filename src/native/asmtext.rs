@@ -111,6 +111,18 @@ impl Vocabulary {
         }
     }
 
+    /// Mark that nothing in this object needs an executable stack.
+    ///
+    /// ELF records the promise as an empty `.note.GNU-stack`, and a loader reads its *absence* as
+    /// "this object may execute the stack", which is a property of the whole process the object is
+    /// linked into rather than of the object. Mach-O has no such note, because its stack is never
+    /// executable.
+    pub(crate) fn no_executable_stack(&self, out: &mut String) {
+        if self.format == ObjectFormat::Elf {
+            out.push_str(".section .note.GNU-stack,\"\",@progbits\n");
+        }
+    }
+
     /// Declare `name` an 8-byte object of this image, zero, and emit its label.
     pub(crate) fn define_slot(&self, out: &mut String, name: &str, visibility: Visibility) {
         let name = self.symbol(name);

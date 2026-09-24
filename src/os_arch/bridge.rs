@@ -51,6 +51,9 @@ pub(crate) fn bridge_asm() -> Result<String, String> {
         let register = crate::arch::asmstub::bridge_owner_register(call)
             .ok_or_else(|| format!("interposed call `{call}` has no owner register"))?;
         let entry = linker::bridge_entry_name(call);
+        // Aligned, because an entry is branched to directly and the platform's own linker would
+        // have aligned a function of its own making.
+        out.push_str(".balign 16\n");
         format.define_fn(&mut out, &entry, entry_visibility);
         out.push_str(&entry_asm(
             register,
@@ -74,6 +77,7 @@ pub(crate) fn bridge_asm() -> Result<String, String> {
         }
         format.close(&mut out);
     }
+    format.no_executable_stack(&mut out);
     Ok(out)
 }
 
